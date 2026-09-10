@@ -1048,3 +1048,57 @@ func (p *Pool) stateOverviewLocked() stateFile {
 	}
 	return sf
 }
+
+// ---------------------------------------------------------------------------
+// 人工干预（管理台用）：以下方法都只动池内运行态，不碰磁盘凭证文件；
+// 凭证文件的增删由调用方（admin handler）负责，避免 pool 反向依赖 auths 目录布局。
+// ---------------------------------------------------------------------------
+
+// Enable 解除 Disable 造成的永久禁用，并清掉禁用原因；返回账号是否存在。
+// 刻意不清冷却/熔断：禁用期间累积的冷却语义与「人工放行」是两件事，
+// 想一并清掉请再调 ClearCooldown。
+func (p *Pool) Enable(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.disabled = false
+	e.reason = ""
+	p.dirty.Store(true)
+	return true
+}
+
+// ClearCooldown 人工重置：清软/硬冷却与熔断运行态（fails/retryCount/breakerUntil），
+// 让账号立刻重新参与选号。credits 不动——积分只能由上游查询结果覆盖。
+func (p *Pool) ClearCooldown(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.until = time.Time{}
+	e.coolKind = 0
+	e.reason = ""
+	e.fails = 0
+	e.retryCount = 0
+	e.breakerUntil = time.Time{}
+	p.dirty.Store(true)
+	return true
+}
+
+// Remove 把账号移出池并立即落盘（避免 state.json 里的残留让它在重启后复活）。
+// 返回账号是否存在。调用方若要同时删凭证文件，请自行删除后再调用本方法。
+func (p *Pool) Remove(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.byUID[uid]; !ok {
+		return false
+	}
+	delete(p.byUID, uid)
+	p.dirty.Store(true)
+	p.saveLocked() // 立即落盘：删除是低频人工操作，不能等 5s 定时 flush
+	return true
+}

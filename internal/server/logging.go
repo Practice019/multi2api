@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"workbuddy2api/internal/logbuf"
 )
 
 // chatSeq 进程级请求序号。
@@ -160,6 +162,18 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 		return
 	}
 	seq := chatSeq.Add(1)
+	// 同时进环形缓冲（/admin/logs 的数据源）。这里用完整 model/uid，
+	// 截断只影响 stdout 表格的排版，不应污染可供追溯的结构化数据。
+	chatLogRing.Push(logbuf.Entry{
+		At:      time.Now(),
+		Model:   model,
+		Mode:    mode,
+		Status:  status,
+		UID:     uid,
+		TTFBMS:  ttfb.Milliseconds(),
+		Tokens:  toks,
+		TotalMS: total.Milliseconds(),
+	})
 	if len(model) > 11 {
 		model = model[:11]
 	}

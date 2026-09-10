@@ -75,12 +75,25 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// Admin 管理台（/admin/*，仅本机可访问）相关配置。
+	Admin struct {
+		// CheckinLogPath 签到/保活/旅行历史落盘路径，默认 "./data/checkin-log.json"。
+		CheckinLogPath string `json:"checkin_log_path"`
+		// CheckinLogKeepDays 历史保留天数，默认 30。
+		CheckinLogKeepDays int `json:"checkin_log_keep_days"`
+		// OAuthBaseURL 设备授权上游站点，默认 https://copilot.tencent.com（CN）。
+		OAuthBaseURL string `json:"oauth_base_url"`
+	} `json:"admin"`
+
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
+	CheckinLogPath      string        `json:"-"`
+	CheckinLogKeepDays  int           `json:"-"`
+	OAuthBaseURL        string        `json:"-"`
 }
 
 // Default 默认配置。
@@ -112,6 +125,9 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	c.Admin.CheckinLogPath = "./data/checkin-log.json"
+	c.Admin.CheckinLogKeepDays = 30
+	c.Admin.OAuthBaseURL = "https://copilot.tencent.com"
 	return c
 }
 
@@ -222,6 +238,19 @@ func (c *Config) normalize() error {
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
+	}
+	// admin：解析后字段（供 main 直接取用），同时做保守兜底。
+	c.CheckinLogPath = c.Admin.CheckinLogPath
+	if c.CheckinLogPath == "" {
+		c.CheckinLogPath = "./data/checkin-log.json"
+	}
+	c.CheckinLogKeepDays = c.Admin.CheckinLogKeepDays
+	if c.CheckinLogKeepDays <= 0 {
+		c.CheckinLogKeepDays = 30
+	}
+	c.OAuthBaseURL = c.Admin.OAuthBaseURL
+	if c.OAuthBaseURL == "" {
+		c.OAuthBaseURL = "https://copilot.tencent.com"
 	}
 	return nil
 }

@@ -1,0 +1,935 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WorkBuddy2API · 网关控制台</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<script>window.__WB2API_KEY__ = "__WB2API_KEY__";</script>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel2:#171d2b; --line:#232b3d;
+    --fg:#e6ebf5; --dim:#8b96ad; --acc:#4f8cff; --ok:#2ecc8f; --warn:#f5a623; --err:#ff5c5c;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.55 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;
+    padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);
+    position:sticky;top:0;z-index:9}
+  h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
+  h1 small{color:var(--dim);font-weight:400;margin-left:8px;font-size:12px}
+  .spacer{flex:1}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
+  .dot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.bad{background:var(--err);box-shadow:0 0 8px var(--err)}
+  input,select,textarea,button{font:inherit;color:var(--fg);background:var(--panel2);
+    border:1px solid var(--line);border-radius:8px;padding:7px 10px;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--acc)}
+  button{cursor:pointer;transition:.15s}
+  button:hover{border-color:var(--acc)}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+  button.primary:hover{filter:brightness(1.1)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  main{padding:20px;display:grid;gap:18px;max-width:1280px;margin:0 auto}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  section>h2{margin:0;padding:11px 16px;font-size:12px;font-weight:650;letter-spacing:.6px;
+    text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:10px}
+  .body{padding:16px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:10px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
+  .card .v{font-size:22px;font-weight:650;font-family:var(--mono);margin-top:2px}
+  .v.ok{color:var(--ok)} .v.warn{color:var(--warn)} .v.err{color:var(--err)} .v.dim{color:var(--dim)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--dim);font-weight:500;font-size:11px;letter-spacing:.4px;text-transform:uppercase}
+  tr:last-child td{border-bottom:0}
+  td.mono{font-family:var(--mono);font-size:12px}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600}
+  .pill.ok{background:rgba(46,204,143,.15);color:var(--ok)}
+  .pill.warn{background:rgba(245,166,35,.15);color:var(--warn)}
+  .pill.err{background:rgba(255,92,92,.15);color:var(--err)}
+  .pill.dim{background:rgba(139,150,173,.15);color:var(--dim)}
+  .chips{display:flex;flex-wrap:wrap;gap:7px}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:999px;
+    padding:3px 11px;font-family:var(--mono);font-size:12px;cursor:pointer}
+  .chip:hover{border-color:var(--acc);color:var(--acc)}
+  .chip span{color:var(--dim);font-size:11px;margin-left:5px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  textarea{width:100%;min-height:74px;resize:vertical;font-family:var(--mono);font-size:13px}
+  .key{flex:1;min-width:230px;font-family:var(--mono);font-size:12px}
+  pre{background:#0a0d13;border:1px solid var(--line);border-radius:10px;padding:13px;
+    margin:12px 0 0;white-space:pre-wrap;word-break:break-word;
+    font-family:var(--mono);font-size:12.5px;max-height:340px;overflow:auto}
+  .err{color:var(--err)} .dim{color:var(--dim)}
+  .tog{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;user-select:none}
+  .tog input{width:auto;padding:0}
+  /* 可点击复制的内容块：整块可点，鼠标悬停给明确反馈 */
+  .copyable{cursor:pointer;position:relative;transition:.15s}
+  .copyable:hover{border-color:var(--acc);background:#1b2333}
+  .copyable:hover .copyhint{opacity:1}
+  .copyhint{float:right;font-size:10px;color:var(--acc);opacity:0;transition:.15s;letter-spacing:.3px}
+  pre.copyable:hover{border-color:var(--acc)}
+  .minibtn{font-size:11px;padding:1px 7px;border-radius:6px;margin-left:6px;vertical-align:middle}
+</style>
+</head>
+<body>
+<header>
+  <img src="/favicon.svg" alt="" width="26" height="26" style="border-radius:7px;display:block">
+  <h1>WorkBuddy2API <small>本地网关控制台</small></h1>
+  <span id="hdot" class="dot"></span>
+  <span id="htxt" class="dim" style="font-size:12px">未连接</span>
+  <div class="spacer"></div>
+  <!-- 非本机访问（服务端未注入 Key）时才出现的兜底入口；本机访问这里完全为空。
+       API Key 的查看与复制统一在「API 接入信息」面板里，顶栏不再重复。 -->
+  <span id="keyFallback" style="display:none;align-items:center;gap:8px">
+    <input id="key" class="key" type="password" placeholder="API Key（非本机访问需手填）" autocomplete="off">
+    <label class="tog"><input id="remember" type="checkbox" checked> 记住</label>
+    <button id="conn" class="primary">连接</button>
+  </span>
+</header>
+
+<main>
+  <section>
+    <h2>API 接入信息 <span class="dim" style="font-weight:400;text-transform:none">只读 · 本机自动注入</span>
+      <span class="spacer"></span>
+      <button id="btnCopyCurl" style="padding:3px 10px;font-size:12px">复制 curl 示例</button>
+    </h2>
+    <div class="body">
+      <div class="cards" id="apiCards"></div>
+      <table style="margin-top:14px"><thead><tr>
+        <th>端点</th><th>用途</th><th>鉴权</th></tr></thead>
+        <tbody id="epRows"></tbody></table>
+      <pre id="curlSample" style="max-height:210px"></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span></h2>
+    <div class="body">
+      <div class="cards" id="statsCards"></div>
+      <div style="margin-top:14px" class="chips" id="statsModels"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>网关状态 <span class="spacer"></span>
+      <label class="tog"><input id="auto" type="checkbox" checked> 每 5s 刷新</label>
+      <button id="refresh" style="padding:3px 10px;font-size:12px">立即刷新</button>
+    </h2>
+    <div class="body">
+      <div class="cards" id="cards"></div>
+      <pre id="rawstatus" class="dim" style="display:none"></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>账号池
+      <span class="spacer"></span>
+      <button id="btnAdd" style="padding:3px 10px;font-size:12px">＋ 添加账号</button>
+      <button id="btnReload" style="padding:3px 10px;font-size:12px">重载 auths 目录</button>
+      <button id="btnAllCheckin" style="padding:3px 10px;font-size:12px">全部签到</button>
+      <button id="btnAllCredits" style="padding:3px 10px;font-size:12px">刷新全部积分</button>
+      <button id="btnAllKeepalive" style="padding:3px 10px;font-size:12px">全部保活</button>
+    </h2>
+    <div class="body" style="padding:0">
+      <div id="taskbar" class="dim" style="display:none;padding:9px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
+      <table><thead><tr>
+        <th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>Token</th>
+        <th>今日签到</th><th>成功</th><th>熔断</th><th>在途</th><th>操作</th></tr></thead>
+        <tbody id="accts"><tr><td colspan="10" class="dim">未连接</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>调度 <span class="spacer"></span>
+      <label class="tog"><input id="schCheckin" type="checkbox"> 签到</label>
+      <label class="tog"><input id="schKeepalive" type="checkbox"> 保活</label>
+    </h2>
+    <div class="body"><div id="schInfo" class="dim">未连接</div></div>
+  </section>
+
+  <section>
+    <h2>猫猫旅行 <span class="spacer"></span>
+      <select id="travelUid" style="padding:3px 8px;font-size:12px;min-width:200px"><option value="">— 选择账号 —</option></select>
+      <button id="btnTravelStatus" style="padding:3px 10px;font-size:12px">查状态</button>
+      <button id="btnTravelDepart" style="padding:3px 10px;font-size:12px">派猫</button>
+      <button id="btnTravelClaim" style="padding:3px 10px;font-size:12px">领奖</button>
+    </h2>
+    <div class="body"><pre id="travelOut" class="dim">未查询</pre></div>
+  </section>
+
+  <section>
+    <h2>请求日志 <span id="logMeta" class="dim" style="font-weight:400;text-transform:none"></span>
+      <span class="spacer"></span>
+      <button id="btnLogClear" style="padding:3px 10px;font-size:12px">清屏</button>
+    </h2>
+    <div class="body" style="padding:0">
+      <table><thead><tr>
+        <th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th>
+        <th>UID</th><th>TTFB</th><th>tok</th><th>耗时</th></tr></thead>
+        <tbody id="logrows"><tr><td colspan="9" class="dim">暂无请求</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>任务历史 <span class="spacer"></span>
+      <select id="histKind" style="padding:3px 8px;font-size:12px">
+        <option value="">全部</option>
+        <option value="checkin">签到</option>
+        <option value="keepalive">保活</option>
+        <option value="travel">旅行</option>
+        <option value="credits">积分</option>
+      </select>
+    </h2>
+    <div class="body" style="padding:0">
+      <table><thead><tr>
+        <th>时间</th><th>昵称</th><th>类型</th><th>结果</th><th>积分</th><th>触发</th><th>详情</th></tr></thead>
+        <tbody id="histrows"><tr><td colspan="7" class="dim">暂无记录</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>可用模型 <span id="mcount" class="dim" style="font-weight:400;text-transform:none"></span>
+      <span class="spacer"></span>
+      <button id="btnModelRefresh" style="padding:3px 10px;font-size:12px">强制刷新目录</button>
+    </h2>
+    <div class="body"><div class="chips" id="models"><span class="dim">未连接</span></div></div>
+  </section>
+
+  <section>
+    <h2>对话测试</h2>
+    <div class="body">
+      <div class="row" style="margin-bottom:10px">
+        <select id="model" style="min-width:240px"><option value="">— 先连接 —</option></select>
+        <label class="tog"><input id="stream" type="checkbox" checked> 流式</label>
+        <div class="spacer"></div>
+        <button id="send" class="primary">发送</button>
+      </div>
+      <textarea id="prompt" placeholder="输入内容，Enter 发送 / Shift+Enter 换行">只回复四个字：网关打通</textarea>
+      <pre id="out" class="dim">等待发送…</pre>
+    </div>
+  </section>
+</main>
+
+<div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:99;align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:560px;width:calc(100% - 40px)">
+    <h3 style="margin:0 0 4px;font-size:15px">添加 WorkBuddy 账号</h3>
+    <p class="dim" style="margin:0 0 14px;font-size:12px">
+      点下面的链接在浏览器完成登录（本机已是登录态的话通常一键确认），网关会自动轮询并落盘凭证。
+    </p>
+    <div id="loginBody"></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button id="btnLoginClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const LS = 'wb2api.key';
+  // 网关在 /ui 响应里注入本机 api_key；仍是哨兵则说明网关未启用鉴权。
+  const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY__')
+    ? window.__WB2API_KEY__ : '';
+  let KEY = '';
+  let timer = null;
+  let models = [];
+  // 管理台状态
+  let share = [];          // 最近一次 /admin/accounts 的账号视图（操作按钮按 uid 回查）
+  let taskTimer = null;    // 全量任务轮询
+  let logCursor = 0;       // /admin/logs 增量游标
+  let loginPoll = null;    // 添加账号的轮询句柄
+  let loginDeadline = 0;
+  let keyRevealed = false; // API 面板里 Key 是否明文显示
+
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const fmtTime = t => {
+    if (!t || t.startsWith('0001-')) return '—';
+    const d = new Date(t);
+    if (isNaN(d)) return '—';
+    const s = Math.floor((Date.now() - d) / 1000);
+    if (s < 60) return s + 's 前';
+    if (s < 3600) return Math.floor(s / 60) + 'm 前';
+    if (s < 86400) return Math.floor(s / 3600) + 'h 前';
+    return d.toLocaleString('zh-CN', {hour12:false});
+  };
+
+  const hdr = () => KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
+
+  function setDot(cls, txt) {
+    $('hdot').className = 'dot ' + cls;
+    $('htxt').textContent = txt;
+  }
+
+  async function api(path, opt = {}) {
+    const r = await fetch(path, Object.assign({}, opt, { headers: Object.assign(hdr(), opt.headers || {}) }));
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+    return r.json();
+  }
+
+  function renderCards(h, s) {
+    const cards = [
+      ['账号总数', s.total, ''],
+      ['健康', s.healthy, s.healthy > 0 ? 'ok' : 'err'],
+      ['冷却中', s.cooling, s.cooling > 0 ? 'warn' : 'dim'],
+      ['已禁用', s.disabled, s.disabled > 0 ? 'err' : 'dim'],
+      ['在途占满', s.in_flight_full, s.in_flight_full > 0 ? 'warn' : 'dim'],
+      ['粘性会话', s.sticky_sessions, ''],
+      ['Redis', s.redis_mode, s.redis_mode === 'upstash' ? 'ok' : 'dim'],
+      ['/healthz', h.healthy > 0 ? '200' : '503', h.healthy > 0 ? 'ok' : 'err'],
+    ];
+    $('cards').innerHTML = cards.map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+  }
+
+  function renderAccounts(list) {
+    share = list || [];
+    const sel = $('travelUid'), keepSel = sel.value;
+    sel.innerHTML = '<option value="">— 选择账号 —</option>' +
+      share.map(a => `<option value="${esc(a.uid)}">${esc(a.nickname || a.uid.slice(0, 8))}</option>`).join('');
+    if (share.some(a => a.uid === keepSel)) sel.value = keepSel;
+
+    if (!share.length) {
+      $('accts').innerHTML = '<tr><td colspan="10" class="dim">账号池为空 —— 点上方「＋ 添加账号」</td></tr>';
+      return;
+    }
+    $('accts').innerHTML = share.map(a => {
+      let st = '<span class="pill ok">正常</span>';
+      if (a.disabled) st = '<span class="pill err">已禁用</span>';
+      else if (a.cooling) st = `<span class="pill warn">冷却 ${esc(a.cool_kind || '')} ${a.cool_remaining_sec ? a.cool_remaining_sec + 's' : ''}</span>`;
+      else if (a.breaker_fails > 0) st = '<span class="pill warn">熔断 ' + a.breaker_fails + '</span>';
+
+      let tok = '<span class="dim">—</span>';
+      if (a.has_token) {
+        const d = a.token_expire_sec || 0;
+        const cls = d < 0 ? 'err' : d < 86400 ? 'warn' : 'ok';
+        tok = `<span class="pill ${cls}">${d < 0 ? '已过期' : Math.floor(d / 86400) + 'd'}</span>`;
+      }
+      let ck = '<span class="dim">—</span>';
+      if (a.today_checkin === 'ok') ck = '<span class="pill ok">已签到</span>';
+      else if (a.today_checkin === 'already') ck = '<span class="pill dim">今日已签</span>';
+      else if (a.today_checkin === 'fail') ck = '<span class="pill err">失败</span>';
+
+      const U = a.uid;
+      const act = [
+        `<button data-act="checkin"  data-uid="${esc(U)}" title="单账号签到">签到</button>`,
+        `<button data-act="credits"  data-uid="${esc(U)}" title="刷新积分">积分</button>`,
+        `<button data-act="keepalive" data-uid="${esc(U)}" title="刷新 token">保活</button>`,
+        a.disabled
+          ? `<button data-act="enable" data-uid="${esc(U)}">启用</button>`
+          : `<button data-act="disable" data-uid="${esc(U)}">禁用</button>`,
+        a.cooling || a.breaker_fails > 0
+          ? `<button data-act="cooldown" data-uid="${esc(U)}">清冷却</button>` : '',
+        `<button data-act="remove" data-uid="${esc(U)}" style="color:var(--err)">移除</button>`,
+      ].filter(Boolean).join(' ');
+
+      return `<tr>
+        <td>${esc(a.nickname || '—')}</td>
+        <td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>
+        <td class="mono">${esc(a.credits)}</td>
+        <td>${st}</td>
+        <td>${tok}</td>
+        <td>${ck}</td>
+        <td class="mono">${esc(a.success_count)}</td>
+        <td class="mono">${esc(a.breaker_fails)}</td>
+        <td class="mono">${esc(a.in_flight)}</td>
+        <td style="white-space:nowrap">${act}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ---------------------------------------------------------------- 管理台调用
+  async function admin(path, opts = {}) {
+    const r = await fetch(path, Object.assign({}, opts, {
+      headers: Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}),
+    }));
+    const txt = await r.text();
+    let j = null;
+    try { j = txt ? JSON.parse(txt) : null; } catch { /* 非 JSON */ }
+    if (!r.ok) throw new Error((j && j.error) || txt.slice(0, 200) || ('HTTP ' + r.status));
+    return j;
+  }
+
+  function toast(msg, bad) {
+    const el = $('taskbar');
+    el.style.display = 'block';
+    el.innerHTML = `<span style="color:${bad ? 'var(--err)' : 'var(--ok)'}">${esc(msg)}</span>`;
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
+  }
+
+  async function act(uid, action) {
+    try {
+      if (action === 'remove') {
+        const a = share.find(x => x.uid === uid) || {};
+        if (!confirm(`确认把账号「${a.nickname || uid.slice(0, 8)}」移出账号池？\n\n默认仅出池，auths 里的凭证文件保留（下次重载还会回来）。`)) return;
+        const purge = confirm('是否连 auths 目录里的凭证文件一起删除？\n\n确定 = 删文件（不可恢复）\n取消 = 只出池、保留文件');
+        await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=${purge ? 1 : 0}`, { method: 'DELETE' });
+        toast(`已移除 ${a.nickname || uid.slice(0, 8)}${purge ? '（凭证文件已删）' : '（文件保留）'}`);
+      } else {
+        const paths = {
+          checkin: '/admin/checkin', credits: '/admin/credits/refresh', keepalive: '/admin/keepalive',
+        };
+        if (paths[action]) {
+          const r = await admin(paths[action], { method: 'POST', body: JSON.stringify({ uid }) });
+          const res = r && r.result;
+          toast(`${action} ${uid.slice(0, 8)}: ${res ? res.status + (res.detail ? ' · ' + res.detail : '') : '已提交'}`,
+            res && res.status === 'fail');
+        } else if (action === 'enable' || action === 'disable') {
+          await admin(`/admin/accounts/${encodeURIComponent(uid)}/${action}`, { method: 'POST', body: '{}' });
+          toast(`${action} ${uid.slice(0, 8)} 完成`);
+        } else if (action === 'cooldown') {
+          await admin(`/admin/accounts/${encodeURIComponent(uid)}/cooldown/clear`, { method: 'POST', body: '{}' });
+          toast(`${uid.slice(0, 8)} 冷却/熔断已清`);
+        }
+      }
+    } catch (e) {
+      toast(`${action} 失败：${e.message}`, true);
+    }
+    refresh();
+    loadHistory();
+  }
+
+  async function startAll(kind) {
+    const paths = { checkin: '/admin/checkin', keepalive: '/admin/keepalive', credits: '/admin/credits/refresh' };
+    try {
+      const r = await admin(paths[kind], { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全量 ${kind} 已启动，后台执行中…`); watchTask(); }
+      else if (r && r.results) {
+        const ok = r.results.filter(x => x.status === 'ok').length;
+        toast(`全部积分刷新完成：成功 ${ok}/${r.results.length}`);
+        refresh(); loadHistory();
+      }
+    } catch (e) { toast(`${kind} 失败：${e.message}`, true); }
+  }
+
+  // ---------------------------------------------------------------- 全量任务进度
+  function watchTask() {
+    if (taskTimer) clearInterval(taskTimer);
+    const tick = async () => {
+      let t;
+      try { t = await admin('/admin/task'); } catch { return; }
+      const el = $('taskbar');
+      el.style.display = 'block';
+      if (t.running) {
+        el.innerHTML = `⏳ <b>${esc(t.kind)}</b> 执行中… 已用 ${t.elapsed_sec || 0}s`;
+        refresh(); // 过程中也刷新表格，能实时看到积分/状态变化
+        return;
+      }
+      if (t.kind) {
+        el.innerHTML = `✅ <b>${esc(t.kind)}</b> 完成：成功 ${t.ok || 0} · 已签到 ${t.already || 0} · 失败 ${t.fail || 0}`
+          + ` · 耗时 ${t.duration_sec || 0}s${t.error ? ' · <span class="err">' + esc(t.error) + '</span>' : ''}`;
+      }
+      clearInterval(taskTimer); taskTimer = null;
+      refresh(); loadHistory();
+    };
+    tick();
+    taskTimer = setInterval(tick, 2000);
+  }
+
+  // ---------------------------------------------------------------- 添加账号
+  function openModal() { $('modal').style.display = 'flex'; }
+  function closeModal() {
+    $('modal').style.display = 'none';
+    if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
+    refresh();
+  }
+
+  async function addAccount() {
+    openModal();
+    $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
+    let r;
+    try { r = await admin('/admin/login/start', { method: 'POST', body: '{}' }); }
+    catch (e) { $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`; return; }
+
+    const state = r.state;
+    loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
+    $('loginBody').innerHTML = `
+      <div class="row" style="margin-bottom:10px">
+        <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer" class="primary"
+           style="text-decoration:none;padding:8px 16px;border-radius:8px;background:var(--acc);color:#fff;font-weight:600">
+         打开授权页面 ↗
+        </a>
+        <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
+      </div>
+      <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
+
+    if (loginPoll) clearInterval(loginPoll);
+    loginPoll = setInterval(async () => {
+      if (Date.now() > loginDeadline) {
+        clearInterval(loginPoll); loginPoll = null;
+        $('loginState').innerHTML = '<span class="err">授权已超时，请关闭后重试</span>';
+        return;
+      }
+      let p;
+      try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state }) }); }
+      catch (e) {
+        // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
+        clearInterval(loginPoll); loginPoll = null;
+        $('loginState').innerHTML = `<span class="err">${esc(e.message)}</span>`;
+        return;
+      }
+      if (p && p.status === 'pending') {
+        $('loginOut').textContent = '仍在等待浏览器完成登录…';
+        return;
+      }
+      clearInterval(loginPoll); loginPoll = null;
+      if (p && p.status === 'ok') {
+        $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
+        $('loginOut').textContent = `uid      : ${p.uid}\n昵称     : ${p.nickname}\n域       : ${p.domain}\n有效期   : ${Math.floor((p.expires_in || 0) / 86400)} 天\n凭证文件 : auths/${p.file}`;
+        toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
+        refresh(); loadHistory();
+      }
+    }, 2500);
+  }
+
+  // ---------------------------------------------------------------- 调度
+  async function loadSchedule() {
+    let s;
+    try { s = await admin('/admin/schedule'); } catch { $('schInfo').textContent = '读取失败'; return; }
+    $('schCheckin').checked = !!s.checkin_enabled;
+    $('schKeepalive').checked = !!s.keepalive_enabled;
+    const cd = s.next_in_sec > 0 ? `${Math.floor(s.next_in_sec / 3600)}h${Math.floor((s.next_in_sec % 3600) / 60)}m 后` : '—';
+    $('schInfo').innerHTML =
+      `下次任务：<b>${esc((s.next_tasks || []).join(' + ') || '无（均已关闭）')}</b> · ${cd}`
+      + `（${s.next_at ? new Date(s.next_at).toLocaleString('zh-CN', { hour12: false }) : '—'}）`
+      + `　签到时点 <span class="mono">[${(s.checkin_hours || []).join(', ')}]</span>`
+      + `　保活时点 <span class="mono">[${(s.keepalive_hours || []).join(', ')}]</span>`;
+  }
+
+  async function toggleSchedule() {
+    try {
+      await admin('/admin/schedule/toggle', {
+        method: 'POST',
+        body: JSON.stringify({ checkin: $('schCheckin').checked, keepalive: $('schKeepalive').checked }),
+      });
+      toast('调度开关已生效（立即影响下次唤醒，无需重启）');
+    } catch (e) { toast('开关失败：' + e.message, true); }
+    loadSchedule();
+  }
+
+  // ---------------------------------------------------------------- 日志
+  function renderLogs(items) {
+    if (!items || !items.length) return;
+    const tb = $('logrows');
+    if (tb.querySelector('.dim')) tb.innerHTML = '';
+    const rows = items.slice(-200).map(e => {
+      const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
+      return `<tr>
+        <td class="mono dim">${e.seq}</td>
+        <td class="dim">${new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false })}</td>
+        <td class="mono">${esc(e.model)}</td>
+        <td>${esc(e.mode)}</td>
+        <td><span class="pill ${st}">${e.status}</span></td>
+        <td class="mono dim">${esc((e.uid || '').slice(0, 8) || '-')}</td>
+        <td class="mono">${e.ttfb_ms ? e.ttfb_ms + 'ms' : '-'}</td>
+        <td class="mono">${e.tokens >= 0 ? e.tokens : '-'}</td>
+        <td class="mono">${e.total_ms}ms</td>
+      </tr>`;
+    }).join('');
+    tb.insertAdjacentHTML('afterbegin', rows);
+    // 只保留最近 300 行，避免长时间挂页面把 DOM 拖垮
+    while (tb.children.length > 300) tb.removeChild(tb.lastChild);
+  }
+
+  async function loadLogs() {
+    let r;
+    try { r = await admin(`/admin/logs?since=${logCursor}`); } catch { return; }
+    logCursor = r.cursor || logCursor;
+    $('logMeta').textContent = `（缓冲 ${r.held || 0}/${r.capacity || 0} 条）`;
+    renderLogs(r.items);
+  }
+
+  // ---------------------------------------------------------------- 历史
+  async function loadHistory() {
+    const kind = $('histKind').value;
+    let r;
+    try { r = await admin('/admin/checkin/history?limit=80' + (kind ? '&kind=' + kind : '')); } catch { return; }
+    const items = r.items || [];
+    if (!items.length) { $('histrows').innerHTML = '<tr><td colspan="7" class="dim">暂无记录</td></tr>'; return; }
+    $('histrows').innerHTML = items.map(x => {
+      const cls = x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'err' : 'dim';
+      const label = { ok: '成功', already: '今日已签', fail: '失败', skip: '跳过' }[x.status] || x.status;
+      return `<tr>
+        <td class="dim">${new Date(x.at).toLocaleString('zh-CN', { hour12: false })}</td>
+        <td>${esc(x.nickname || (x.uid || '').slice(0, 8))}</td>
+        <td>${esc(x.kind)}</td>
+        <td><span class="pill ${cls}">${esc(label)}</span></td>
+        <td class="mono">${x.credits || ''}</td>
+        <td class="dim">${x.trigger === 'manual' ? '手动' : '定时'}</td>
+        <td class="dim" title="${esc(x.detail || '')}">${esc((x.detail || '').slice(0, 40))}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ---------------------------------------------------------------- API 接入信息
+  const BASE_URL = location.origin + '/v1';
+
+  const ENDPOINTS = [
+    ['POST /v1/chat/completions', 'OpenAI 兼容对话（流式/非流式）', 'Bearer'],
+    ['GET  /v1/models', '模型目录（上游实时，缓存 1h）', 'Bearer'],
+    ['GET  /v1/model', '同上，单数别名', 'Bearer'],
+    ['GET  /status', '账号池状态', 'Bearer'],
+    ['GET  /healthz', '探活（无账号时 503）', '无'],
+    ['GET  /ui', '本控制台', '仅本机'],
+    ['*    /admin/*', '本控制台后端', '仅本机'],
+  ];
+
+  function renderApi() {
+    // API Key 卡片：显示脱敏值，卡片点击复制的是完整值（data-copy 里放真值，展示层放掩码）。
+    const masked = KEY ? KEY.slice(0, 4) + '****' + KEY.slice(-4) : '（未启用鉴权）';
+    const keyShown = keyRevealed ? (KEY || masked) : masked;
+
+    const card = (label, copyValue, display, extra) => `
+      <div class="card copyable" data-copy="${esc(copyValue || '')}" data-label="${esc(label)}" title="点击复制">
+        <div class="k">${esc(label)}<span class="copyhint">点击复制</span></div>
+        <div class="v" style="font-size:13px;font-weight:500;word-break:break-all;margin-top:4px">${esc(display)}${extra || ''}</div>
+      </div>`;
+
+    $('apiCards').innerHTML =
+      card('接入地址', BASE_URL, BASE_URL) +
+      card('API Key', KEY || '', keyShown,
+        KEY ? '<button class="minibtn" data-reveal="1">' + (keyRevealed ? '隐藏' : '显示') + '</button>' : '') +
+      card('鉴权头', KEY ? 'Authorization: Bearer ' + KEY : '',
+        KEY ? 'Authorization: Bearer ' + (keyRevealed ? KEY : masked) : '（无需鉴权）') +
+      card('服务名', 'workbuddy2api', 'workbuddy2api');
+
+    $('epRows').innerHTML = ENDPOINTS.map(([ep, use, auth]) =>
+      `<tr><td class="mono">${esc(ep)}</td><td>${esc(use)}</td><td class="dim">${esc(auth)}</td></tr>`
+    ).join('');
+
+    const m = ($('model') && $('model').value) || 'deepseek-v4-flash';
+    $('curlSample').textContent =
+      `curl ${BASE_URL}/chat/completions \\\n` +
+      `  -H "Authorization: Bearer ${KEY || '<API_KEY>'}" \\\n` +
+      `  -H "Content-Type: application/json" \\\n` +
+      `  -d '{"model":"${m}","messages":[{"role":"user","content":"你好"}]}'`;
+  }
+
+  // ---------------------------------------------------------------- 复制
+  function copyText(value, label) {
+    if (!value) { toast('这里没有可复制的内容', true); return; }
+    const done = () => toast(`${label || '内容'} 已复制到剪贴板`);
+    const fail = () => toast('复制失败：浏览器不允许访问剪贴板，请手动选中文本', true);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, fail);
+      return;
+    }
+    // 兜底：非安全上下文（http + 非 localhost）下 clipboard API 不可用
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy') ? done() : fail(); } catch { fail(); }
+    document.body.removeChild(ta);
+  }
+
+  function renderStats(s) {
+    if (!s) return;
+    const win = s.window_from
+      ? `（进程内窗口 ${new Date(s.window_from).toLocaleTimeString('zh-CN', { hour12: false })} → ${new Date(s.window_to).toLocaleTimeString('zh-CN', { hour12: false })}，上限 ${s.capacity} 条）`
+      : '（暂无请求）';
+    $('statsWindow').textContent = win;
+    const rate = s.total ? Math.round((s.ok / s.total) * 100) : 0;
+    $('statsCards').innerHTML = [
+      ['总请求', s.total, ''],
+      ['成功', s.ok, s.ok ? 'ok' : 'dim'],
+      ['失败', s.fail, s.fail ? 'err' : 'dim'],
+      ['成功率', s.total ? rate + '%' : '—', rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
+      ['平均 TTFB', s.avg_ttfb_ms ? s.avg_ttfb_ms + 'ms' : '—', ''],
+      ['平均总耗时', s.avg_total_ms ? s.avg_total_ms + 'ms' : '—', ''],
+      ['输出 token', s.tokens || 0, ''],
+      ['缓冲占用', (s.held || 0) + '/' + (s.capacity || 0), 'dim'],
+    ].map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`
+    ).join('');
+
+    const bm = Object.entries(s.by_model || {}).sort((a, b) => b[1] - a[1]);
+    $('statsModels').innerHTML = bm.length
+      ? bm.map(([k, v]) => `<span class="chip" data-id="${esc(k)}">${esc(k)}<span>${v} 次</span></span>`).join('')
+      : '<span class="dim">暂无调用</span>';
+  }
+
+  // ---------------------------------------------------------------- 旅行（中文渲染）
+  const TRAVEL_STATE = {
+    idle: '空闲（可以派猫出门）',
+    traveling: '旅行中（猫还在路上）',
+    arrived: '已到站（可以领奖）',
+  };
+
+  function renderTravel(r) {
+    if (!r) return '(空响应)';
+    const L = [];
+    if (!r.has_buddy) {
+      L.push('还没有猫');
+      L.push('需要先在 WorkBuddy 里积累足够的对话，才能领取第一只猫（领养后送 300 积分）。');
+      return L.join('\n');
+    }
+    L.push(`猫名：${r.buddy?.name || '（未命名）'}`);
+    const t = r.travel;
+    if (!t) {
+      L.push('旅行状态：查询失败');
+      if (r.travel_error) L.push(`原因：${r.travel_error}`);
+      return L.join('\n');
+    }
+    L.push(`状态：${TRAVEL_STATE[t.state] || t.state}`);
+    L.push(`今日已派出：${t.daily_limit_reached ? '是（每日 1 次，CST 00:00 重置）' : '否'}`);
+    if (t.record_id) L.push(`在途记录：${t.record_id}`);
+    if (t.reward_credit) L.push(`到站可领：${t.reward_credit} 积分`);
+    if (t.state === 'traveling') L.push('提示：猫到站后 state 会变成 arrived，那时点「领奖」即可。');
+    return L.join('\n');
+  }
+  async function travel(kind) {
+    const uid = $('travelUid').value;
+    const out = $('travelOut');
+    if (!uid) { out.classList.add('err'); out.textContent = '请先在上方选择账号'; return; }
+    out.classList.remove('err');
+    out.textContent = '查询中…';
+    try {
+      if (kind === 'status') {
+        out.textContent = renderTravel(await admin(`/admin/travel/status?uid=${encodeURIComponent(uid)}`));
+        return;
+      }
+      const r = await admin(`/admin/travel/${kind}`, { method: 'POST', body: JSON.stringify({ uid }) });
+      if (kind === 'depart') {
+        out.textContent = `派猫成功\n地点：${r.location_id} 号（四个地点收益与时长相同）\n\n等它到站后回来点「领奖」。`;
+      } else {
+        out.textContent = `领奖成功\n本次获得：${r.reward_credit || 0} 积分`;
+      }
+      toast(kind === 'depart' ? '已派出' : `已领奖 ${r.reward_credit || 0} 积分`);
+      loadHistory();
+      refresh();
+    } catch (e) {
+      // 409 是「现在不该做」而非「做失败了」，用中性提示而不是红色报错
+      out.textContent = (e.message || '').includes('还没到站') || (e.message || '').includes('已经派过') || (e.message || '').includes('还在路上')
+        ? `暂时不用操作：${e.message}`
+        : '失败：' + e.message;
+    }
+  }
+
+  function renderModels(list) {
+    models = list || [];
+    $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
+    if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
+    $('models').innerHTML = models.map(m =>
+      `<span class="chip" data-id="${esc(m.id)}">${esc(m.id)}<span>${esc(m.context_length || '')}</span></span>`).join('');
+    const sel = $('model'), keep = sel.value;
+    sel.innerHTML = models.map(m =>
+      `<option value="${esc(m.id)}">${esc(m.id)} · ${esc(m.context_length || '?')} ctx</option>`).join('');
+    sel.value = models.some(m => m.id === keep) ? keep : (models.find(m => m.id === 'auto') || models[0]).id;
+  }
+
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    $('auto').checked = false;
+  }
+
+  async function refresh() {
+    if (!KEY && $('key').value.trim()) KEY = $('key').value.trim();
+    let h, s;
+    try {
+      h = await (await fetch('/healthz')).json();       // healthz 恒无鉴权
+      s = await api('/status');
+    } catch (e) {
+      if (e.message.startsWith('HTTP 401')) {
+        // 401 会被 5s 轮询无限复现，先把轮询停掉再提示，别刷控制台。
+        stopAuto();
+        setDot('bad', '鉴权失败 · 需要 API Key');
+        $('cards').innerHTML =
+          '<div class="card" style="grid-column:1/-1">' +
+          '<div class="k">401 Unauthorized</div>' +
+          '<div class="v" style="font-size:13px;font-weight:400">' +
+          '本机打开 <code>/ui</code> 时网关会自动注入 Key，出现此提示说明要么是从非本机地址访问，' +
+          '要么网关重启换了新 Key。在顶部填入 API Key 后点「连接」即可（已暂停自动刷新）。' +
+          '</div></div>';
+        $('accts').innerHTML = '<tr><td colspan="8" class="err">未授权 —— 已暂停自动刷新</td></tr>';
+        $('models').innerHTML = '<span class="dim">未授权</span>';
+        return;
+      }
+      setDot('bad', '请求失败');
+      $('accts').innerHTML = `<tr><td colspan="8" class="err">${esc(e.message)}</td></tr>`;
+      return;
+    }
+    setDot(h.healthy > 0 ? 'ok' : 'bad',
+      (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
+    renderCards(h, s);
+    // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
+    try { renderAccounts((await admin('/admin/accounts')).accounts); }
+    catch { renderAccounts(s.accounts); }
+    try { renderModels((await api('/v1/models')).data); }
+    catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    loadSchedule();
+    try { renderStats(await admin('/admin/stats')); } catch { /* 统计非关键 */ }
+    renderApi();
+  }
+
+  async function send() {
+    const btn = $('send'), out = $('out');
+    const body = {
+      model: $('model').value,
+      stream: $('stream').checked,
+      messages: [{ role: 'user', content: $('prompt').value }],
+    };
+    btn.disabled = true; out.classList.remove('err');
+    out.textContent = '请求中…';
+    const t0 = performance.now();
+    try {
+      if (!body.stream) {
+        const r = await api('/v1/chat/completions', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const ms = Math.round(performance.now() - t0);
+        out.textContent = r.choices[0].message.content +
+          `\n\n— ${r.model} · ${ms}ms · prompt ${r.usage?.prompt_tokens} / completion ${r.usage?.completion_tokens}`;
+      } else {
+        const r = await fetch('/v1/chat/completions', {
+          method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, hdr()),
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+        const rd = r.body.getReader(), dec = new TextDecoder();
+        let buf = '', txt = '', usage = null, model = '';
+        out.textContent = '';
+        for (;;) {
+          const { value, done } = await rd.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split('\n'); buf = lines.pop();
+          for (const ln of lines) {
+            if (!ln.startsWith('data:')) continue;
+            const p = ln.slice(5).trim();
+            if (p === '[DONE]') continue;
+            let j; try { j = JSON.parse(p); } catch { continue; }
+            const d = j.choices?.[0]?.delta?.content;
+            if (d) { txt += d; out.textContent = txt; out.scrollTop = out.scrollHeight; }
+            if (j.model) model = j.model;
+            if (j.usage) usage = j.usage;
+          }
+        }
+        const ms = Math.round(performance.now() - t0);
+        out.textContent = txt + `\n\n— ${model} · ${ms}ms · 流式` +
+          (usage ? ` · prompt ${usage.prompt_tokens} / completion ${usage.completion_tokens}` : '');
+      }
+    } catch (e) {
+      out.classList.add('err');
+      out.textContent = '失败：' + e.message;
+    } finally { btn.disabled = false; }
+  }
+
+  function boot() {
+    // 本机访问：服务端已注入 Key，直接跑起来。顶栏不显示任何 API 信息，
+    // 查看/复制统一在「API 接入信息」面板里完成。
+    if (INJECTED) {
+      KEY = INJECTED;
+      $('auto').checked = true;
+      if (timer) clearInterval(timer);
+      timer = setInterval(refresh, 5000);
+      refresh();
+    } else {
+      $('keyFallback').style.display = 'inline-flex';
+      const saved = localStorage.getItem(LS);
+      if (saved) { $('key').value = saved; KEY = saved; }
+      $('conn').onclick = () => {
+        KEY = $('key').value.trim();
+        if ($('remember').checked) localStorage.setItem(LS, KEY); else localStorage.removeItem(LS);
+        $('auto').checked = true;
+        if (timer) clearInterval(timer);
+        timer = setInterval(refresh, 5000);
+        refresh();
+      };
+      $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('conn').click(); });
+    }
+
+    // 点击任意可复制块 → 复制；块内的「显示/隐藏」按钮不触发复制。
+    $('apiCards').addEventListener('click', ev => {
+      const rev = ev.target.closest('[data-reveal]');
+      if (rev) {
+        ev.stopPropagation();
+        keyRevealed = !keyRevealed;
+        renderApi();
+        return;
+      }
+      const c = ev.target.closest('[data-copy]');
+      if (c) copyText(c.dataset.copy, c.dataset.label);
+    });
+    $('curlSample').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
+    $('btnCopyCurl').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
+
+    $('refresh').onclick = refresh;
+    $('send').onclick = send;
+    $('prompt').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    $('models').addEventListener('click', e => {
+      const c = e.target.closest('.chip'); if (c) $('model').value = c.dataset.id;
+    });
+    $('auto').onchange = () => {
+      if (timer) { clearInterval(timer); timer = null; }
+      if ($('auto').checked) timer = setInterval(refresh, 5000);
+    };
+    // 注意：不在这里无条件 setInterval —— 上面的 INJECTED 分支已经拉开轮询，
+    // 这里再来一次会形成两个并行定时器（重复请求 + 清不干净）。
+
+    // 账号操作：事件委托，避免每行都绑 handler
+    $('accts').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-act]');
+      if (b) act(b.dataset.uid, b.dataset.act);
+    });
+
+    $('btnAdd').onclick = addAccount;
+    $('btnLoginClose').onclick = closeModal;
+    $('modal').addEventListener('click', ev => { if (ev.target === $('modal')) closeModal(); });
+    $('btnReload').onclick = async () => {
+      try {
+        const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
+        toast(`已重载 auths：扫描 ${r.scanned} 个文件，池 ${r.before} → ${r.after}`);
+      } catch (e) { toast('重载失败：' + e.message, true); }
+      refresh();
+    };
+    $('btnAllCheckin').onclick = () => startAll('checkin');
+    $('btnAllCredits').onclick = () => startAll('credits');
+    $('btnAllKeepalive').onclick = () => startAll('keepalive');
+
+    $('schCheckin').onchange = toggleSchedule;
+    $('schKeepalive').onchange = toggleSchedule;
+
+    $('btnTravelStatus').onclick = () => travel('status');
+    $('btnTravelDepart').onclick = () => travel('depart');
+    $('btnTravelClaim').onclick = () => travel('claim');
+
+    $('btnModelRefresh').onclick = async () => {
+      try {
+        await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
+        renderModels((await api('/v1/models')).data);
+        toast('模型目录已强制回源刷新');
+      } catch (e) { toast('刷新失败：' + e.message, true); }
+    };
+
+    $('btnLogClear').onclick = () => { $('logrows').innerHTML = '<tr><td colspan="9" class="dim">已清屏（服务端缓冲仍在，下拉会重新显示增量）</td></tr>'; };
+    $('histKind').onchange = loadHistory;
+
+    // 日志 2s 增量拉取；历史 10s 一次。与账号表 5s 分开，互不拖累。
+    setInterval(loadLogs, 2000);
+    setInterval(loadHistory, 10000);
+    loadLogs();
+    loadHistory();
+
+    // 页面加载时若已有全量任务在跑（比如刚在别处点过），接着显示进度
+    admin('/admin/task').then(t => { if (t && t.running) watchTask(); }).catch(() => {});
+
+    refresh();
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>

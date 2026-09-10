@@ -11,7 +11,10 @@ import (
 	"syscall"
 	"time"
 
+	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
@@ -92,6 +95,8 @@ func main() {
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
 
+	checkinLog := checkinlog.New(cfg.CheckinLogPath, cfg.CheckinLogKeepDays)
+
 	sch := scheduler.New(scheduler.Config{
 		Pool:              p,
 		Upstream:          up,
@@ -99,6 +104,7 @@ func main() {
 		KeepaliveHours:    cfg.Schedule.KeepaliveHours,
 		CheckinDisabled:   !cfg.Schedule.CheckinEnabled,
 		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
+		Log:               checkinLog,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -120,6 +126,17 @@ func main() {
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
+		Admin: admin.New(admin.Config{
+			Pool:             p,
+			Upstream:         up,
+			Scheduler:        sch,
+			OAuth:            oauth.New(cfg.OAuthBaseURL),
+			Log:              checkinLog,
+			Ring:             server.ChatLogRing(),
+			AuthDir:          cfg.AuthDir,
+			ResetModelsCache: server.ResetModelsCache,
+			StartedAt:        time.Now(),
+		}),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
