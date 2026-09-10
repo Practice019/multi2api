@@ -395,6 +395,75 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 - 出站请求强制 `stream:true`；SSE 帧按 OpenAI 规范**白名单重建**（`reasoning_content` 保留、工具调用按 index 合并、未知字段剥离）
 - 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`；`error` 帧原样透传
 
+## 🖥️ 管理控制台（本仓库扩展）
+
+> 本节所述内容为本仓库在原始上游版本之上的扩展，上游 `Sliverkiss/workbuddy2api` 不包含这些能力。
+
+浏览器打开 **`http://127.0.0.1:7863/ui`** 即可使用。单文件控制台，`//go:embed` 打进二进制，**零外部依赖、零 CDN**，断网可用。
+
+### 页面构成
+
+| 面板 | 内容 |
+|---|---|
+| **API 接入信息** | 接入地址 / API Key / 鉴权头 / 服务名，四张卡片**点击即复制**；端点清单表；可复制的 curl 示例 |
+| **调用统计** | 进程内请求总数、成功/失败、成功率、平均 TTFB、平均总耗时、输出 token、按模型调用次数 |
+| **网关状态** | 账号总数 / 健康 / 冷却 / 禁用 / 在途占满 / 粘性会话 / Redis 模式 / healthz 码 |
+| **账号池** | 每账号昵称、积分、状态徽章、**token 剩余有效期**、**今日签到结果**、成功次数、熔断、在途 + 行内操作按钮 |
+| **调度** | 下次任务名与倒计时、签到时点/保活时点、**运行时开关签到与保活**（无需改 config 重启） |
+| **猫猫旅行** | 选账号后查状态 / 派猫 / 领奖，结果以中文呈现（猫名、状态、今日是否已派出、到站可领积分） |
+| **请求日志** | 每请求一行（时间/模型/模式/状态/uid/TTFB/token/耗时），2s 增量刷新，缓冲 2000 条 |
+| **任务历史** | 签到/保活/旅行/积分结果，保留 30 天，可按类型筛选，区分手动与定时触发 |
+| **对话测试** | 选模型、流式/非流式、Enter 发送，显示耗时与 token 用量 |
+
+### 账号操作
+
+- **＋ 添加账号**：页面内走完整 OAuth 设备授权流程——弹出授权链接 → 每 2.5s 轮询 → 成功后自动写 `auths/workbuddy-<uid>.json` 并**热加载进池，无需重启**
+- **重载 auths 目录**：手工拷入的凭证即时生效
+- 行内操作：签到 / 刷新积分 / 保活 / 启用·禁用 / 清冷却 / 移除
+- **移除采用两段确认**：第一次问是否移出池（默认**只出池、保留凭证文件**），第二次才问是否连文件一起删；删除路径强制校验必须落在 `auths/` 目录内
+
+### 安全模型
+
+`/admin/*` 与 `/ui` 的密钥注入**只接受本机直连**（loopback），非本机访问一律 403 / 401。
+理由：这些接口能改账号池、触发上游请求、读到账号昵称与积分。需要远程操作请走 SSH 隧道。
+
+API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶栏不显示任何 API 信息**，查看与复制统一在「API 接入信息」面板。
+
+### 管理台 API
+
+| 端点 | 说明 |
+|---|---|
+| `GET /admin/accounts` | 账号视图（含 token 有效期、今日签到、凭证文件名） |
+| `POST /admin/accounts/reload` | 重扫 `auths/` 并对齐账号池 |
+| `POST /admin/accounts/{uid}/enable` · `/disable` | 启用 / 禁用（禁用不动磁盘文件） |
+| `POST /admin/accounts/{uid}/cooldown/clear` | 清冷却与熔断运行态 |
+| `DELETE /admin/accounts/{uid}?purge_file=0\|1` | 移出池；`purge_file=1` 才删凭证文件 |
+| `POST /admin/login/start` · `/login/poll` | OAuth 设备授权（state 内存保存，TTL 15 分钟） |
+| `POST /admin/checkin` · `/keepalive` · `/credits/refresh` | 可用 `{"uid":"..."}` 定向单账号；不传则全量（后台任务，`GET /admin/task` 查进度） |
+| `GET /admin/travel/status?uid=` · `POST /admin/travel/depart` · `/claim` | 猫猫旅行；派猫/领奖会先查状态，不满足条件返回 409 并记为「跳过」而非失败 |
+| `GET /admin/schedule` · `POST /admin/schedule/toggle` | 查询下次唤醒；运行时开关签到/保活 |
+| `POST /admin/models/refresh` | 清空模型目录缓存（1h 正缓存 + 5min 负缓存）强制回源 |
+| `GET /admin/logs?since=N` | 请求日志增量拉取（环形缓冲 2000 条） |
+| `GET /admin/stats` | 调用统计聚合 |
+| `GET /admin/checkin/history?limit=N&kind=` | 任务历史（保留 30 天） |
+
+### 新增配置项（`config.json` 的 `admin` 段，均可省略）
+
+```json
+{
+  "admin": {
+    "checkin_log_path": "./data/checkin-log.json",
+    "checkin_log_keep_days": 30,
+    "oauth_base_url": "https://copilot.tencent.com"
+  }
+}
+```
+
+### 站点图标
+
+`internal/server/favicon.svg` 自绘 SVG（蓝紫渐变圆角底板 + 对话气泡 + 四角星），`//go:embed` 内嵌，无外部请求。
+`/favicon.svg` 直接返回；`/favicon.ico` 302 到前者以兼容旧浏览器与抓取器。
+
 ## 📋 请求级日志
 
 每个 `/v1/chat/completions` 请求结束时输出一行表格日志（stdout）：
@@ -501,10 +570,14 @@ cmd/
   credit/    # 积分查询工具
   signin/    # 批量签到工具
 internal/
+  admin/     # 管理台 /admin/*（仅本机）+ 后台任务槽          [本仓库扩展]
   auth/      # 凭证解析 + token 刷新 + 原子写回
+  checkinlog/# 签到/保活/旅行历史持久化（30 天）              [本仓库扩展]
+  logbuf/    # 请求日志环形缓冲（2000 条）                    [本仓库扩展]
+  oauth/     # OAuth 设备授权流程（服务端侧，state 存内存）    [本仓库扩展]
   pool/      # 账号池（状态机/熔断/租约/加权/持久化）
   scheduler/ # 定时签到 + 保活 + 猫猫旅行巡检
-  server/    # HTTP handler + 鉴权 + 请求日志
+  server/    # HTTP handler + 鉴权 + 请求日志 + 内嵌控制台（/ui、favicon）
   session/   # 会话粘性路由
   upstream/  # 上游封装（chat/billing/auth/headers/sse/payload/sanitize/idle）
   redisstore/# Upstash 持久化 + Noop 降级
@@ -521,3 +594,7 @@ internal/
 - 允许任意使用、复制、修改、合并、发布、分发、再授权及销售
 - 再分发（源码或二进制形式，包括内嵌编译产物的整合项目）时，请保留原仓库的 MIT 版权声明与许可声明（如在 NOTICE 或 README 中注明原始出处 `https://github.com/Sliverkiss/workbuddy2api`，我们将不胜感激）
 - 本项目不授予任何上游（CodeBuddy / 腾讯）接口或服务的权利；使用者仍需自行遵守上游服务条款（见上方免责声明）
+
+> **本仓库说明**：本仓库是 `https://github.com/Sliverkiss/workbuddy2api` 的**私有衍生版本**，
+> 在 MIT 许可下保留上游版权声明（见 `LICENSE` 首行），并追加了本地管理控制台、
+> 请求日志缓冲、签到历史等扩展（详见「管理控制台」一节）。上游更新请从原仓库获取。

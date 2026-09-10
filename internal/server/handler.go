@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
@@ -31,6 +32,8 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429 冷却，默认 60s
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// Admin 管理台子树（挂在 /admin/，由 internal/admin 提供）。nil = 不注册该子树。
+	Admin http.Handler
 }
 
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
@@ -58,23 +61,59 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// 单数别名：部分客户端/探针按 /v1/model 探测，与 /v1/models 同源同响应。
+	h.mux.HandleFunc("GET /v1/model", h.withAuth(h.models))
+	// 内嵌本地控制台（同源，无需 CORS）。
+	h.mux.HandleFunc("GET /ui", h.ui)
+	h.mux.HandleFunc("GET /favicon.ico", h.favicon)
+	h.mux.HandleFunc("GET /favicon.svg", h.favicon)
+	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui", http.StatusFound)
+	})
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 管理台子树：自身做本机校验与鉴权，这里只做挂载（不带 withAuth，否则浏览器拿不到）。
+	if cfg.Admin != nil {
+		h.mux.Handle("/admin/", cfg.Admin)
+	}
 	return h
 }
+
+// ResetModelsCache 清空动态模型缓存，让下一次 /v1/models 强制回源上游。
+// 正缓存 1h / 负缓存 5min 都清掉——用户点「刷新模型」的意图是立刻看到最新目录。
+func ResetModelsCache() {
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+}
+
+// ChatLogRing 返回请求日志环形缓冲（/admin/logs 的数据源）。
+func ChatLogRing() *logbuf.Ring { return chatLogRing }
+
+// chatLogRing 进程内请求日志缓冲：与 stdout 表格日志同源，容量 2000 条。
+var chatLogRing = logbuf.New(logbuf.DefaultCapacity)
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// validBearer 报告请求是否携带正确凭据；未配置 APIKey 时恒真。
+// 抽成独立方法供 /ui 的非本机分支复用（那里要出 401 + 纯文本，而不是 OpenAI 错误信封）。
+func (h *Handler) validBearer(r *http.Request) bool {
+	if h.cfg.APIKey == "" {
+		return true
+	}
+	authz := r.Header.Get("Authorization")
+	return strings.HasPrefix(authz, "Bearer ") && strings.TrimPrefix(authz, "Bearer ") == h.cfg.APIKey
+}
+
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey != "" {
-			authz := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authz, "Bearer ") || strings.TrimPrefix(authz, "Bearer ") != h.cfg.APIKey {
-				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-				return
-			}
+		if !h.validBearer(r) {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
 		}
 		next(w, r)
 	}
