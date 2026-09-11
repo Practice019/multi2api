@@ -33,11 +33,19 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 ## 👀 预览
 
-| 仪表盘 | 账号池 | 请求日志 | 设置 |
-|:---:|:---:|:---:|:---:|
-| ![仪表盘](assets/screenshot-dashboard.png) | ![账号池](assets/screenshot-accounts.png) | ![请求日志](assets/screenshot-logs.png) | ![设置](assets/screenshot-settings.png) |
+| 仪表盘 | 账号池 |
+|:---:|:---:|
+| ![仪表盘](assets/screenshot-dashboard.png) | ![账号池](assets/screenshot-accounts.png) |
 
-> 截图均来自运行真实网关的 `/ui`，所有可识别个人信息（API Key、账号昵称、UID 缩写）已替换为占位符。
+| 成长计划 | 请求日志 |
+|:---:|:---:|
+| ![成长计划](assets/screenshot-growth.png) | ![请求日志](assets/screenshot-logs.png) |
+
+| 设置 | |
+|:---:|:---:|
+| ![设置](assets/screenshot-settings.png) | |
+
+> 截图均来自运行中的真实网关（`/ui`），**所有可识别信息已脱敏**：API Key → `YOUR_API_KEY`，账号昵称 → `账号 A` / `账号 B`，账号 UID 缩写 → `a1b2c3d4` / `e5f6g7h8`。脱敏在 **API 响应层**完成（截图前拦截 fetch 改写 JSON），因此表格、下拉框、状态行里都不会残留真实值。
 
 ## 🗺️ 架构总览
 
