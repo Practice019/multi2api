@@ -1432,9 +1432,12 @@
       }
       // 刷新放在同一个 busyRun 内：这样"写完了但界面还在读"也是可见的，
       // 而不是写完后按钮就恢复、界面却还是旧数据。
-      // 用 loadGrowth(true) 强制回源是**刻意的**：写操作不会更新服务端快照
-      // （只有守卫轮会），不强制回源就会显示旧状态。见 tasks/plan.md Task 3。
-      await Promise.all([loadGrowth(true), refresh(), loadHistory()]);
+      //
+      // 用 loadGrowth(**false**) 读缓存，不再强制回源 —— 后端在写操作成功后
+      // 已经就地刷新了该账号的快照（scheduler.refreshOwnSnapshot），
+      // 所以缓存就是最新的。实测：强制回源 3 账号 7.2s，读缓存 ~1ms。
+      // 这是"点了要等 7 秒"的根治：把"N 个账号全探一遍"换成"只探被改的那一个"。
+      await Promise.all([loadGrowth(false), refresh(), loadHistory()]);
       return wrote ? true : undefined;
     }, { label, busyText: label + '中…' });
   }
@@ -2001,6 +2004,11 @@
       } catch (e) {
         toast(label + '：' + e.message, true);
       }
+      // 旅行仍走强制回源：它的写操作（派猫/领奖）在后端**没有**就地刷新快照，
+      // 读缓存会拿到旧状态。好在它比成长轻得多（实测 1.3s vs 7.2s），
+      // 且 busyRun 已经给了可见进度，用户不会以为没反应。
+      // 若要一并优化，把 scheduler 里 travel 的三个写操作也做成 refreshOwnSnapshot 即可
+      // —— 见 tasks/plan.md 的待决问题 4。
       await Promise.all([loadTravel(true), refresh(), loadHistory()]);
       return wrote ? true : undefined;
     }, { label, busyText: label + '中…' });

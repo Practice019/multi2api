@@ -407,6 +407,10 @@ func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionRe
 			res.Detail = "任务「" + taskCode + "」当前不可领取"
 		}
 		s.recordGrowth(uid, res, trigger)
+		// 提前返回也要刷新：用户点了「领取」却没领到，往往正是因为快照旧了
+		// （守卫轮刚替我们领过、或任务刚被别人领走）。刷一次能让界面立刻
+		// 反映真实状态，而不是让用户对着"待领取"反复点。
+		s.refreshOwnSnapshot(uid, res.Status)
 		return res
 	}
 
@@ -455,6 +459,7 @@ func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionRe
 		res.Detail = "奖励此前已领取"
 	}
 	s.recordGrowth(uid, res, trigger)
+	s.refreshOwnSnapshot(uid, res.Status)
 	return res
 }
 
@@ -498,6 +503,8 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 			res.Detail = "任务「" + taskCode + "」当前不可接单"
 		}
 		s.recordGrowth(uid, res, trigger)
+		// 同 claim：快照可能已过期（守卫轮刚接过），刷一次让界面与现实一致。
+		s.refreshOwnSnapshot(uid, res.Status)
 		return res
 	}
 
@@ -564,8 +571,30 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 		}
 	}
 	s.recordGrowth(uid, res, trigger)
+	s.refreshOwnSnapshot(uid, res.Status)
 	s.scheduleGrowthNext(uid)
 	return res
+}
+
+// refreshOwnSnapshot 写操作成功后**就地刷新该账号**的快照。
+//
+// 为什么必须做：写操作只改上游状态，服务端的 GrowthSnapshot 仍是旧的。
+// 前端为了让界面反映新状态，只能用 /admin/growth?refresh=1 **全量**重探 ——
+// 为了更新 1 个账号把 N 个账号全探一遍（实测 3 账号 7.2s、1 账号 2.3s）。
+// 就地刷新后前端读缓存即可（~1ms），这正是"点了要等 7 秒"的根治办法。
+//
+// 为什么只在非 fail 时刷：
+//   - StatusSkip 表示"确实没做事"（没有可领/被前置挡住），但状态可能已被
+//     上游改变（例如守卫轮刚替我们领过），所以仍值得刷一次保持一致；
+//   - StatusFail 说明请求本身就没成功，重探只是白打一次上游，且会把
+//     上一次的错误信息覆盖掉。
+//
+// 只探 uid 自己 —— 调用方传进来的就是目标账号，绝不顺带扫全量。
+func (s *Scheduler) refreshOwnSnapshot(uid, status string) {
+	if status == checkinlog.StatusFail {
+		return
+	}
+	s.probeGrowth(uid)
 }
 
 // acceptRejectionReason 判定上游的接单拒绝是否属于**预期内**（应记为跳过而非失败）。
@@ -656,6 +685,7 @@ func (s *Scheduler) GrowthMakeupFor(uid, date, trigger string) GrowthActionResul
 	}
 	res.Status, res.Detail, res.Count = checkinlog.StatusOK, "已补签 "+date, 1
 	s.recordGrowth(uid, res, trigger)
+	s.refreshOwnSnapshot(uid, res.Status)
 	s.scheduleGrowthNext(uid)
 	return res
 }
@@ -708,6 +738,7 @@ func (s *Scheduler) GrowthRedeemFor(uid, tier, trigger string) GrowthActionResul
 		}
 	}
 	s.recordGrowth(uid, res, trigger)
+	s.refreshOwnSnapshot(uid, res.Status)
 	s.scheduleGrowthNext(uid)
 	return res
 }
@@ -762,6 +793,7 @@ func (s *Scheduler) GrowthOpenFor(uid string, count int, trigger string) GrowthA
 	res.Status, res.Detail, res.Count = checkinlog.StatusOK, fmt.Sprintf("开盲盒 %d 次", count), count
 	res.Energy = -int64(count) * q.CostPerOpen
 	s.recordGrowth(uid, res, trigger)
+	s.refreshOwnSnapshot(uid, res.Status)
 	s.scheduleGrowthNext(uid)
 	return res
 }
@@ -792,6 +824,7 @@ func (s *Scheduler) GrowthDrawFor(uid, trigger string) GrowthActionResult {
 	}
 	res.Status, res.Detail, res.Count = checkinlog.StatusOK, "抽奖 1 次", 1
 	s.recordGrowth(uid, res, trigger)
+	s.refreshOwnSnapshot(uid, res.Status)
 	s.scheduleGrowthNext(uid)
 	return res
 }

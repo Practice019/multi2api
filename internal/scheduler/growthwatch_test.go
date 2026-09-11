@@ -26,6 +26,13 @@ type growthStub struct {
 	lotteryJSON string
 
 	acceptCalls, redeemCalls, makeupCalls, openCalls, drawCalls, claimCalls atomic.Int32
+	// tasksCalls 统计 /tasks 被调用次数 —— 每次 probeGrowth 必调它一次，
+	// 因此可以用它数「探针跑了几次」（用于验证写操作后是否就地刷新）。
+	tasksCalls atomic.Int32
+	// tasksJSONAfterClaim 非空时：一旦发生过领奖调用，/tasks 改回这个 JSON。
+	// 用于模拟上游真实行为 —— 领奖后任务状态从 completed 变 claimed，
+	// 从而可以验证「写操作后快照是否被就地刷新」。
+	tasksJSONAfterClaim atomic.Value
 	lastCodes                                                               atomic.Value // []string
 	lastTier, lastDate                                                      atomic.Value
 	lastOpenCount                                                           atomic.Int32
@@ -51,6 +58,12 @@ func (g *growthStub) handler() http.Handler {
 		ok := func(body string) { fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, body) }
 		switch {
 		case r.URL.Path == base+"/tasks":
+			g.tasksCalls.Add(1)
+			// 领奖发生过后，任务状态演进（completed → claimed）
+			if body, _ := g.tasksJSONAfterClaim.Load().(string); body != "" && g.claimCalls.Load() > 0 {
+				ok(body)
+				return
+			}
 			ok(g.tasksJSON)
 		case r.URL.Path == base+"/streak":
 			ok(g.streakJSON)
@@ -150,6 +163,20 @@ func newGrowthHarness(t *testing.T, g *growthStub) (*Scheduler, *checkinlog.Log)
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
 	log := checkinlog.New(filepath.Join(t.TempDir(), "checkin-log.json"), 30)
 	return New(Config{Pool: p, Upstream: up, Log: log}), log
+}
+
+// newGrowthHarness2 池里放两个账号，用于验证「写操作只重探自己那个账号」。
+func newGrowthHarness2(t *testing.T, g *growthStub, uid1, uid2 string) *Scheduler {
+	t.Helper()
+	srv := httptest.NewServer(g.handler())
+	t.Cleanup(srv.Close)
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: uid1, AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Nickname: "甲"})
+	p.Add(&auth.Auth{UID: uid2, AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Nickname: "乙"})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	log := checkinlog.New(filepath.Join(t.TempDir(), "checkin-log.json"), 30)
+	return New(Config{Pool: p, Upstream: up, Log: log})
 }
 
 func defaultGrowthStub() *growthStub {
