@@ -636,31 +636,70 @@
     return j;
   }
 
-  // withBusy 给刷新类按钮加上「进行中 → 完成」的可见状态。
+  // ---------------------------------------------------------------- 操作后刷新
   //
-  // 为什么需要它：刷新是异步的，此前点击后既不 await、也不禁用按钮、也不在结束时补提示，
-  // 用户看到的是「正在刷新…」之后没有下文，而且能连点。这里把这三件事一次做掉。
+  // 统一编排「点按钮 → 跑写操作 → 刷新界面」这段时间的**可见反馈**。
   //
-  // 用 try/finally 而不是在成功分支里恢复：请求抛异常时按钮必须照样恢复可用，
-  // 否则一次网络抖动就会把按钮永久禁用在这一页上。
-  async function withBusy(btn, busyText, fn) {
-    if (!btn) return undefined;
-    if (btn.disabled) return undefined;           // 连点保护：进行中就直接忽略
-    const text0 = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = busyText;
+  // 为什么需要它（实测教训）：以前 growthAct / travelAct / act 末尾是裸调用
+  //     loadGrowth(true); refresh(); loadHistory();
+  // 既不 await、也不禁用按钮、也不给全局提示。用 CDP 实测点「刷新」按钮后
+  // **6.9 秒内 DOM 完全没有变化**（因为 loadGrowth(true) 是全量强制回源，
+  // 3 账号要 7.2s）。用户的结论自然是"点了没反应/不会自动刷新"。
+  //
+  // 正确的做法不是"让它变快"（那是后端的事），而是**让等待可见**：
+  //   1. 按钮立刻禁用 + 文案变成进行中（防连点，且给出即时反馈）
+  //   2. 全局通知区显示在做咩（#gtask，与后台任务的进度条同一位置，风格一致）
+  //   3. 超过 SLOW_HINT_MS 未完成时补一句「上游较慢」+ 递增秒数
+  //   4. 无论成功、返回 false、还是抛异常，都必须在 finally 里收尾
+  //
+  // 返回 true/false 表示成败，undefined 表示「调用方已自行提示」—— 与 busyRun 同义。
+  const SLOW_HINT_MS = 2000;
+
+  async function busyRun(btn, fn, opts) {
+    const o = opts || {};
+    // 连点保护：进行中就忽略。这比 disabled 属性更可靠 ——
+    // 事件委托场景下按钮是重建出来的，disabled 可能还没来得及生效。
+    if (btn && btn._busy) return undefined;
+    if (btn) {
+      btn._busy = true;
+      btn.disabled = true;
+    }
+    const text0 = btn ? btn.textContent : '';
+    // 按钮文案一定要变：只置 disabled 在视觉上几乎看不出来（尤其是深色主题下
+    // 只是稍微变淡），用户仍会觉得"点了没反应"。
+    // 未显式给 busyText 时按原标题推导一个 —— '领取' → '领取中…'。
+    if (btn) btn.textContent = o.busyText || (text0 ? text0 + '中…' : '处理中…');
+
+    const g = $('gtask');
+    const label = o.label || text0 || '操作';
+    const t0 = Date.now();
+    const render = () => {
+      const sec = Math.floor((Date.now() - t0) / 1000);
+      g.textContent = sec >= 2
+        ? `${label}：正在刷新界面…（上游较慢，已等 ${sec}s）`
+        : `${label}：正在刷新界面…`;
+    };
+    render();
+    g.hidden = false;
+    // 每 500ms 刷新一次秒数；快请求会在第一次 tick 前就被清掉，因此不会有噪音。
+    const tick = setInterval(render, 500);
+    const slowHint = setTimeout(render, SLOW_HINT_MS);
+
     try {
-      const ok = await fn();
-      // fn 返回 true/false 表示成败；返回 undefined 视为「已自行提示」，这里不重复提示。
-      if (ok === true) toast(`${text0}完成`);
-      else if (ok === false) toast(`${text0}失败，详见面板内提示`, true);
-      return ok;
+      return await fn();
     } catch (e) {
-      toast(`${text0}失败：${e.message}`, true);
+      toast(`${label}失败：${(e && e.message) || e}`, true);
       return false;
     } finally {
-      btn.disabled = false;
-      btn.textContent = text0;
+      clearInterval(tick);
+      clearTimeout(slowHint);
+      g.hidden = true;
+      g.textContent = '';
+      if (btn) {
+        btn._busy = false;
+        btn.disabled = false;
+        btn.textContent = text0;   // 总是恢复：上面总是改过
+      }
     }
   }
 
@@ -697,36 +736,57 @@
     if (btn) btn.onclick = () => { el.hidden = true; };
   }
 
-  async function act(uid, action) {
-    try {
-      if (action === 'remove') {
-        const a = share.find(x => x.uid === uid) || {};
-        if (!confirm(`确认把账号「${a.nickname || uid.slice(0, 8)}」移出账号池？\n\n默认仅出池，auths 里的凭证文件保留（下次重载还会回来）。`)) return;
-        const purge = confirm('是否连 auths 目录里的凭证文件一起删除？\n\n确定 = 删文件（不可恢复）\n取消 = 只出池、保留文件');
+  // ACT_LABEL 把动作名翻成中文，用于 busyRun 的进度文案
+  //（以前只在提示里零散出现，容易各写各的）。
+  const ACT_LABEL = {
+    checkin: '签到', credits: '刷新积分', keepalive: '保活',
+    enable: '启用', disable: '禁用', cooldown: '清冷却', remove: '移除',
+  };
+
+  async function act(uid, action, btn) {
+    // 移除要弹两次确认，确认过程不该被 busy 态包住（否则按钮在用户还在看弹窗时就禁用了，
+    // 取消后又要恢复，反而闪）。
+    if (action === 'remove') {
+      const a = share.find(x => x.uid === uid) || {};
+      if (!confirm(`确认把账号「${a.nickname || uid.slice(0, 8)}」移出账号池？\n\n默认仅出池，auths 里的凭证文件保留（下次重载还会回来）。`)) return;
+      const purge = confirm('是否连 auths 目录里的凭证文件一起删除？\n\n确定 = 删文件（不可恢复）\n取消 = 只出池、保留文件');
+      await busyRun(btn, async () => {
         await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=${purge ? 1 : 0}`, { method: 'DELETE' });
         toast(`已移除 ${a.nickname || uid.slice(0, 8)}${purge ? '（凭证文件已删）' : '（文件保留）'}`);
-      } else {
+        await Promise.all([refresh(), loadHistory()]);
+        return undefined;
+      }, { label: '移除账号', busyText: '移除中…' });
+      return;
+    }
+
+    const label = ACT_LABEL[action] || action;
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
         const paths = {
           checkin: '/admin/checkin', credits: '/admin/credits/refresh', keepalive: '/admin/keepalive',
         };
         if (paths[action]) {
           const r = await admin(paths[action], { method: 'POST', body: JSON.stringify({ uid }) });
           const res = r && r.result;
-          toast(`${action} ${uid.slice(0, 8)}: ${res ? res.status + (res.detail ? ' · ' + res.detail : '') : '已提交'}`,
+          toast(`${label} ${uid.slice(0, 8)}: ${res ? res.status + (res.detail ? ' · ' + res.detail : '') : '已提交'}`,
             res && res.status === 'fail');
+          wrote = true;
         } else if (action === 'enable' || action === 'disable') {
           await admin(`/admin/accounts/${encodeURIComponent(uid)}/${action}`, { method: 'POST', body: '{}' });
-          toast(`${action} ${uid.slice(0, 8)} 完成`);
+          toast(`${label} ${uid.slice(0, 8)} 完成`);
+          wrote = true;
         } else if (action === 'cooldown') {
           await admin(`/admin/accounts/${encodeURIComponent(uid)}/cooldown/clear`, { method: 'POST', body: '{}' });
           toast(`${uid.slice(0, 8)} 冷却/熔断已清`);
+          wrote = true;
         }
+      } catch (e) {
+        toast(`${label}失败：${e.message}`, true);
       }
-    } catch (e) {
-      toast(`${action} 失败：${e.message}`, true);
-    }
-    refresh();
-    loadHistory();
+      await Promise.all([refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
   }
 
   async function startAll(kind) {
@@ -1329,7 +1389,7 @@
     </div>`;
   }
 
-  // 返回 true/false 而不是吞掉异常：调用方（withBusy）要靠它给出准确的完成提示。
+  // 返回 true/false 而不是吞掉异常：调用方（busyRun）靠它决定是否再给提示。
   async function loadGrowth(refresh) {
     let r;
     try { r = await admin('/admin/growth' + (refresh ? '?refresh=1' : '')); }
@@ -1351,20 +1411,32 @@
   // 纯收益、不消耗任何资源的动作，执行前不必再问一遍。
   const GROWTH_HARMLESS = new Set(['claim', 'accept']);
 
-  async function growthAct(uid, act, taskCode) {
+  // growthAct 执行一个成长动作，然后刷新界面。
+  //
+  // btn 可选：行内按钮传进来就能得到「禁用 + 文案变化」的即时反馈。
+  // 整段包在 busyRun 里，所以「写 → 刷新」期间页面始终有可见的进行中提示 ——
+  // 以前裸调 loadGrowth(true) 会让页面静止 7 秒（实测），用户以为没反应。
+  async function growthAct(uid, act, taskCode, btn) {
     const body = { uid };
     if (taskCode) body.task_code = taskCode;
     const label = GROWTH_LABEL[act] || act;
-    try {
-      const r = await admin('/admin/growth/' + act, { method: 'POST', body: JSON.stringify(body) });
-      const extra = r.credits ? `，+${r.credits} 信用分` : '';
-      toast(`${label}成功：${r.detail || ''}${extra}`);
-    } catch (e) {
-      growthError(e, label);
-    }
-    loadGrowth(true);
-    refresh();
-    loadHistory();
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        const r = await admin('/admin/growth/' + act, { method: 'POST', body: JSON.stringify(body) });
+        const extra = r.credits ? `，+${r.credits} 信用分` : '';
+        toast(`${label}成功：${r.detail || ''}${extra}`);
+        wrote = true;
+      } catch (e) {
+        growthError(e, label);
+      }
+      // 刷新放在同一个 busyRun 内：这样"写完了但界面还在读"也是可见的，
+      // 而不是写完后按钮就恢复、界面却还是旧数据。
+      // 用 loadGrowth(true) 强制回源是**刻意的**：写操作不会更新服务端快照
+      // （只有守卫轮会），不强制回源就会显示旧状态。见 tasks/plan.md Task 3。
+      await Promise.all([loadGrowth(true), refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
   }
 
   // growthError 统一处理成长动作的失败提示（单账号与「全部」两条路径共用）。
@@ -1890,9 +1962,10 @@
     return true;
   }
 
-  async function travelAct(uid, act) {
-    try {
-      if (act === 'detail') {
+  async function travelAct(uid, act, btn) {
+    // 「详情」是只读的，不刷新页面，也就不需要 busy 编排。
+    if (act === 'detail') {
+      try {
         const r = await admin(`/admin/travel/status?uid=${encodeURIComponent(uid)}`);
         const t = r.travel || {};
         const lines = [
@@ -1912,16 +1985,25 @@
           r.travel_error ? `错误：${r.travel_error}` : '',
         ].filter(Boolean);
         alert(lines.join('\n'));
-        return;
+      } catch (e) {
+        toast('查询旅行状态失败：' + e.message, true);
       }
-      const r = await admin('/admin/travel/' + act, { method: 'POST', body: JSON.stringify({ uid }) });
-      toast(act === 'depart' ? `已派猫出门${r.arrive_at ? '，预计 ' + new Date(r.arrive_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) + ' 到站' : ''}` : `已领奖 ${r.credits || 0} 积分`);
-    } catch (e) {
-      toast((act === 'depart' ? '派猫' : '领奖') + '：' + e.message, true);
+      return;
     }
-    loadTravel(true);
-    refresh();
-    loadHistory();
+
+    const label = act === 'depart' ? '派猫' : '领奖';
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        const r = await admin('/admin/travel/' + act, { method: 'POST', body: JSON.stringify({ uid }) });
+        toast(act === 'depart' ? `已派猫出门${r.arrive_at ? '，预计 ' + new Date(r.arrive_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) + ' 到站' : ''}` : `已领奖 ${r.credits || 0} 积分`);
+        wrote = true;
+      } catch (e) {
+        toast(label + '：' + e.message, true);
+      }
+      await Promise.all([loadTravel(true), refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
   }
 
   async function travelAll(act) {
@@ -2182,13 +2264,13 @@
     $('btnCopyCurl').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
 
     // 「立即刷新」：手动点要有明确回执（自动轮询不提示，否则每 5 秒弹一条）。
-    // withBusy 只看 fn 的返回值，这里把刷新摘要包进 toast 文案里一起给出。
-    $('refresh').onclick = () => withBusy($('refresh'), '刷新中…', async () => {
+    // busyRun 只看 fn 的返回值，这里把刷新摘要包进 toast 文案里一起给出。
+    $('refresh').onclick = () => busyRun($('refresh'), async () => {
       const ok = await refresh();
       const m = refresh._last;
       if (ok && m) toast(`刷新完成：健康 ${m.healthy}/${m.total} 个账号`);
       return ok === true ? undefined : false;   // 成功时上面已自行提示，避免又追一条「立即刷新完成」
-    });
+    }, { label: '立即刷新' });
     $('send').onclick = send;
     $('prompt').addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
@@ -2203,21 +2285,22 @@
     // 注意：不在这里无条件 setInterval —— 上面的 INJECTED 分支已经拉开轮询，
     // 这里再来一次会形成两个并行定时器（重复请求 + 清不干净）。
 
-    // 账号操作：事件委托，避免每行都绑 handler
+    // 账号操作：事件委托，避免每行都绑 handler。
+    // 把按钮自身传进去，让它能在「写 + 刷新」期间禁用并显示进行中文案。
     $('accts').addEventListener('click', ev => {
       const b = ev.target.closest('button[data-act]');
-      if (b) act(b.dataset.uid, b.dataset.act);
+      if (b) act(b.dataset.uid, b.dataset.act, b);
     });
 
     $('btnAdd').onclick = addAccount;
     $('btnLoginClose').onclick = closeModal;
     $('modal').addEventListener('click', ev => { if (ev.target === $('modal')) closeModal(); });
-    $('btnReload').onclick = () => withBusy($('btnReload'), '重载中…', async () => {
+    $('btnReload').onclick = () => busyRun($('btnReload'), async () => {
       const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
       toast(`已重载 auths：扫描 ${r.scanned} 个文件，池内账号 ${r.before} 个变为 ${r.after} 个`);
-      refresh();
-      return undefined;   // 上面已给出更具体的回执
-    });
+      await refresh();     // 必须 await：否则 busy 态先于数据更新结束，界面看起来"没变"
+      return undefined;    // 上面已给出更具体的回执
+    }, { label: '重载 auths', busyText: '重载中…' });
     $('btnAllCheckin').onclick = () => startAll('checkin');
     $('btnAllCredits').onclick = () => startAll('credits');
     $('btnAllKeepalive').onclick = () => startAll('keepalive');
@@ -2225,9 +2308,9 @@
     // 猫猫旅行：只保留「动作」按钮（派猫/领奖/刷新），开关类一律归「设置」
     $('travelRows').addEventListener('click', ev => {
       const b = ev.target.closest('button[data-tact]');
-      if (b && !b.disabled) travelAct(b.dataset.uid, b.dataset.tact);
+      if (b && !b.disabled) travelAct(b.dataset.uid, b.dataset.tact, b);
     });
-    $('btnTravelRefresh').onclick = () => withBusy($('btnTravelRefresh'), '刷新中…', () => loadTravel(true));
+    $('btnTravelRefresh').onclick = () => busyRun($('btnTravelRefresh'), () => loadTravel(true), { label: '猫猫旅行' });
     $('btnTravelDepartAll').onclick = () => {
       if (confirm('对全部可用账号派猫？\n（今日已派出的会自动跳过，不会重复派）')) travelAll('depart');
     };
@@ -2236,14 +2319,15 @@
     // 成长计划：行内动作走事件委托（明细区里的按钮在下面另有一处委托）
     $('growthRows').addEventListener('click', ev => {
       const b = ev.target.closest('button[data-gact]');
-      if (b && !b.disabled) growthAct(b.dataset.uid, b.dataset.gact, '');
+      if (b && !b.disabled) growthAct(b.dataset.uid, b.dataset.gact, '', b);
     });
     // 账号下拉框：只切本地显示，不重新拉数据（快照里已含全部账号的任务）。
     $('growthAccount').onchange = () => {
       growthUID = $('growthAccount').value;
       renderGrowthGroups();
     };
-    $('btnGrowthRefresh').onclick = () => withBusy($('btnGrowthRefresh'), '刷新中…', () => loadGrowth(true));
+    // 成长计划「刷新」走全量强制回源，3 个账号实测 7.2s —— 正是最需要进度提示的那个。
+    $('btnGrowthRefresh').onclick = () => busyRun($('btnGrowthRefresh'), () => loadGrowth(true), { label: '成长计划' });
     // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
     $('growthViews').addEventListener('click', ev => {
       const b = ev.target.closest('button[data-gview]');
@@ -2268,20 +2352,20 @@
       if (ev.target.closest('button[data-clrestore]')) { clientRestore(); return; }
       // 行内「领取 N 分」：领这一个任务的奖励
       const rw = ev.target.closest('button[data-gclaimreward]');
-      if (rw) { growthAct(rw.dataset.uid, 'claim', rw.dataset.gclaimreward); return; }
+      if (rw) { growthAct(rw.dataset.uid, 'claim', rw.dataset.gclaimreward, rw); return; }
       // 行内「接单」：把未接单的任务接进列表
       const ac = ev.target.closest('button[data-gaccept]');
-      if (ac) { growthAct(ac.dataset.uid, 'accept', ac.dataset.gaccept); return; }
+      if (ac) { growthAct(ac.dataset.uid, 'accept', ac.dataset.gaccept, ac); return; }
       // 节头「全部领取」：领这个账号所有可领任务（不传 task_code 即全部）
       const all = ev.target.closest('button[data-gclaimall]');
-      if (all) { growthAct(all.dataset.gclaimall, 'claim', ''); return; }
+      if (all) { growthAct(all.dataset.gclaimall, 'claim', '', all); return; }
     });
 
-    $('btnModelRefresh').onclick = () => withBusy($('btnModelRefresh'), '刷新中…', async () => {
+    $('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
       await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
       renderModels((await api('/v1/models')).data);
       return true;
-    });
+    }, { label: '模型目录' });
 
     // 注意：histKind 的 onchange 在下面统一绑定（需要带页码重置），此处不再重复绑定。
 
