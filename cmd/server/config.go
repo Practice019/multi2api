@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/clientlogin"
 )
 
 // Config 顶层配置。
@@ -83,7 +85,52 @@ type Config struct {
 		CheckinLogKeepDays int `json:"checkin_log_keep_days"`
 		// OAuthBaseURL 设备授权上游站点，默认 https://copilot.tencent.com（CN）。
 		OAuthBaseURL string `json:"oauth_base_url"`
+		// TravelAutoClaim 猫到站后自动领奖（默认 true）。关闭后只能手动点「领奖」。
+		TravelAutoClaim *bool `json:"travel_auto_claim"`
+		// TravelWatchIntervalSeconds 旅行守卫轮间隔，默认 60；同时是上游未给
+		// arrive_at 时的兜底轮询周期。
+		TravelWatchIntervalSeconds int `json:"travel_watch_interval_seconds"`
+
+		// ---- 成长中心（/v2/activity/growth/*）----
+		// GrowthWatchIntervalSeconds 成长中心扫描间隔，默认 600。
+		GrowthWatchIntervalSeconds int `json:"growth_watch_interval_seconds"`
+		// GrowthAutoClaim 自动领奖（默认 true）。这是唯一真正让信用分到账的动作：
+		// completed 只代表任务条件达成，不调 claim 奖励不会发放。
+		GrowthAutoClaim *bool `json:"growth_auto_claim"`
+		// GrowthAutoClaimAlias 是 growth_auto_claim_tasks 的兼容别名。
+		// 起因：accept 那个开关叫 growth_auto_accept_tasks（带 _tasks 后缀），
+		// 而 claim 最初只认 growth_auto_claim，于是按一致性手写的
+		// growth_auto_claim_tasks 会被静默忽略、只看默认值——配置改了等于没改。
+		// 两个键都接受：GrowthAutoClaim 优先，本字段作回退。
+		GrowthAutoClaimAlias *bool `json:"growth_auto_claim_tasks"`
+		// GrowthAutoAcceptTasks 自动接单（默认 false）。
+		// 注意语义：接单只把任务接进列表开始计进度，**不发放奖励**；
+		// 默认关是因为它是状态变更且不直接产出收益。
+		GrowthAutoAcceptTasks *bool `json:"growth_auto_accept_tasks"`
+		// GrowthAutoMakeup 自动补签（默认 true，只消耗补签卡且卡本身无其他用途）。
+		GrowthAutoMakeup *bool `json:"growth_auto_makeup"`
+		// GrowthAutoRedeem 自动连登兑换（默认 false，会消耗连登天数，属用户资产）。
+		GrowthAutoRedeem *bool `json:"growth_auto_redeem"`
+		// GrowthAutoOpen 自动开盲盒（默认 false，每次消耗能量）。
+		GrowthAutoOpen *bool `json:"growth_auto_open"`
+		// GrowthAutoDraw 自动抽奖（默认 false，消耗抽奖次数）。
+		GrowthAutoDraw *bool `json:"growth_auto_draw"`
+
+		// ---- 本机客户端登录态（「本地登录」面板）----
+		// ClientAuthDir 客户端凭证目录。留空则自动探测
+		// %LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth；探测不到即关闭该面板。
+		ClientAuthDir string `json:"client_auth_dir"`
+		// ClientArchiveDir 凭证存档目录，默认 "./data/client-login"。
+		// 既存「客户端曾登录过的账号」的原生凭证，也存上次切换前的备份（一键回滚）。
+		ClientArchiveDir string `json:"client_archive_dir"`
+		// ClientEnabled 总开关，默认 true。关掉后 /admin/client-login/* 直接 503。
+		ClientEnabled *bool `json:"client_login_enabled"`
 	} `json:"admin"`
+
+	// RequestLogPath / RequestLogKeepDays 请求日志落盘（JSON Lines）。
+	// 与顶部 CheckinLogPath 等一样走平铺键，避免再嵌一层。
+	RequestLogPath     string `json:"request_log_path"`
+	RequestLogKeepDays int    `json:"request_log_keep_days"`
 
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
@@ -94,6 +141,18 @@ type Config struct {
 	CheckinLogPath      string        `json:"-"`
 	CheckinLogKeepDays  int           `json:"-"`
 	OAuthBaseURL        string        `json:"-"`
+	TravelAutoClaim     bool          `json:"-"`
+	TravelWatchInterval time.Duration `json:"-"`
+	GrowthWatchInterval time.Duration `json:"-"`
+	GrowthAutoClaim     bool          `json:"-"`
+	GrowthAutoAccept    bool          `json:"-"`
+	GrowthAutoMakeup    bool          `json:"-"`
+	GrowthAutoRedeem    bool          `json:"-"`
+	GrowthAutoOpen      bool          `json:"-"`
+	GrowthAutoDraw      bool          `json:"-"`
+	ClientAuthDir       string        `json:"-"`
+	ClientArchiveDir    string        `json:"-"`
+	ClientEnabled       bool          `json:"-"`
 }
 
 // Default 默认配置。
@@ -128,6 +187,9 @@ func Default() *Config {
 	c.Admin.CheckinLogPath = "./data/checkin-log.json"
 	c.Admin.CheckinLogKeepDays = 30
 	c.Admin.OAuthBaseURL = "https://copilot.tencent.com"
+	c.Admin.ClientArchiveDir = "./data/client-login"
+	c.RequestLogPath = "./data/request-log.jsonl"
+	c.RequestLogKeepDays = 7
 	return c
 }
 
@@ -252,7 +314,68 @@ func (c *Config) normalize() error {
 	if c.OAuthBaseURL == "" {
 		c.OAuthBaseURL = "https://copilot.tencent.com"
 	}
+	// 旅行自动领奖默认开启：用 *bool 而不是 bool，才能真正区分「没配」与「显式 false」。
+	c.TravelAutoClaim = true
+	if c.Admin.TravelAutoClaim != nil {
+		c.TravelAutoClaim = *c.Admin.TravelAutoClaim
+	}
+	interval := c.Admin.TravelWatchIntervalSeconds
+	if interval <= 0 {
+		interval = 60
+	}
+	c.TravelWatchInterval = time.Duration(interval) * time.Second
+
+	// 成长中心：扫描间隔 + 五个自动动作开关。
+	//
+	// 实测修正：/tasks/accept 是**接单**而非领奖 —— 它只把任务接进列表开始计进度，
+	// 不发任何信用分（completed 的任务奖励早已发放）。既然它不直接产出收益、又是
+	// 一次状态变更，默认关闭，由用户在「设置」里自行开启。
+	// 只有补签默认开：那是纯收益（用本来只能补签的卡换回连登天数）。
+	// 后三个默认关：兑换花连登天数、开盲盒花能量、抽奖花抽奖次数。
+	gi := c.Admin.GrowthWatchIntervalSeconds
+	if gi <= 0 {
+		gi = 600
+	}
+	c.GrowthWatchInterval = time.Duration(gi) * time.Second
+	// 领奖开关有两个可接受的键名，主键优先、别名回退（原因见 Admin.GrowthAutoClaimAlias）。
+	claimFlag := c.Admin.GrowthAutoClaim
+	if claimFlag == nil {
+		claimFlag = c.Admin.GrowthAutoClaimAlias
+	}
+	c.GrowthAutoClaim = boolOr(claimFlag, true)
+	c.GrowthAutoAccept = boolOr(c.Admin.GrowthAutoAcceptTasks, false)
+	c.GrowthAutoMakeup = boolOr(c.Admin.GrowthAutoMakeup, true)
+	c.GrowthAutoRedeem = boolOr(c.Admin.GrowthAutoRedeem, false)
+	c.GrowthAutoOpen = boolOr(c.Admin.GrowthAutoOpen, false)
+	c.GrowthAutoDraw = boolOr(c.Admin.GrowthAutoDraw, false)
+
+	// 请求日志落盘默认值
+	if c.RequestLogPath == "" {
+		c.RequestLogPath = "./data/request-log.jsonl"
+	}
+	if c.RequestLogKeepDays <= 0 {
+		c.RequestLogKeepDays = 7
+	}
+
+	// 本机客户端登录态。目录探测失败不算配置错误——该面板整体降级为不可用，
+	// 其余功能不受影响（与 redis 未配置时降级成 Noop 同一思路）。
+	c.ClientEnabled = boolOr(c.Admin.ClientEnabled, true)
+	if c.ClientArchiveDir == "" {
+		c.ClientArchiveDir = "./data/client-login"
+	}
+	if c.ClientAuthDir == "" {
+		c.ClientAuthDir = clientlogin.DefaultClientDir()
+	}
 	return nil
+}
+
+// boolOr 取 *bool 的值，nil 时返回默认值。
+// 用于把「没配」与「显式 false」区分开——这是所有新开关统一的做法。
+func boolOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
 }
 
 // validateScheduleHours 校验排程小时落在 0-23。

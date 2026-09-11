@@ -14,6 +14,8 @@ import (
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/clientlogin"
+	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
@@ -97,14 +99,35 @@ func main() {
 
 	checkinLog := checkinlog.New(cfg.CheckinLogPath, cfg.CheckinLogKeepDays)
 
+	// 请求日志落盘：挂到 server 包的环形缓冲上，实时视图走内存、历史视图走文件。
+	logRing := server.ChatLogRing()
+	if sink, err := logbuf.OpenSink(cfg.RequestLogPath, cfg.RequestLogKeepDays, 0); err != nil {
+		log.Printf("请求日志落盘不可用（仅内存模式）: %v", err)
+	} else {
+		logRing.SetSink(sink)
+		defer sink.Close()
+		log.Printf("请求日志落盘: %s（保留 %d 天）", cfg.RequestLogPath, cfg.RequestLogKeepDays)
+	}
+
 	sch := scheduler.New(scheduler.Config{
-		Pool:              p,
-		Upstream:          up,
-		CheckinHours:      cfg.Schedule.CheckinHours,
-		KeepaliveHours:    cfg.Schedule.KeepaliveHours,
-		CheckinDisabled:   !cfg.Schedule.CheckinEnabled,
-		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
-		Log:               checkinLog,
+		Pool:                    p,
+		Upstream:                up,
+		CheckinHours:            cfg.Schedule.CheckinHours,
+		KeepaliveHours:          cfg.Schedule.KeepaliveHours,
+		CheckinDisabled:         !cfg.Schedule.CheckinEnabled,
+		KeepaliveDisabled:       !cfg.Schedule.KeepaliveEnabled,
+		Log:                     checkinLog,
+		TravelAutoClaimDisabled: !cfg.TravelAutoClaim,
+		TravelWatchInterval:     cfg.TravelWatchInterval,
+
+		GrowthWatchInterval: cfg.GrowthWatchInterval,
+		// 传指针：nil 表示「未设置」，由 scheduler.New 决定默认（领奖开、补签开、其余关）。
+		GrowthAutoClaim:  &cfg.GrowthAutoClaim,
+		GrowthAutoAccept: &cfg.GrowthAutoAccept,
+		GrowthAutoMakeup: &cfg.GrowthAutoMakeup,
+		GrowthAutoRedeem: &cfg.GrowthAutoRedeem,
+		GrowthAutoOpen:   &cfg.GrowthAutoOpen,
+		GrowthAutoDraw:   &cfg.GrowthAutoDraw,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -116,6 +139,18 @@ func main() {
 	}
 	if !cfg.Schedule.KeepaliveEnabled {
 		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
+	}
+
+	// 本机客户端登录态管理：能读就开面板，读不到就置 nil（该面板降级为 503），
+	// 禁止因为客户端没装/路径变了就让整个网关起不来。
+	var clientLogin *clientlogin.Manager
+	if cfg.ClientEnabled && cfg.ClientAuthDir != "" {
+		clientLogin = clientlogin.New(cfg.ClientAuthDir, cfg.AuthDir, cfg.ClientArchiveDir)
+		log.Printf("本地登录面板已启用：客户端凭证 %s，存档 %s", cfg.ClientAuthDir, cfg.ClientArchiveDir)
+	} else if !cfg.ClientEnabled {
+		log.Printf("本地登录面板已关闭（admin.client_login_enabled=false）")
+	} else {
+		log.Printf("本地登录面板不可用：未探测到客户端凭证目录（可用 admin.client_auth_dir 指定）")
 	}
 
 	h := server.NewHandler(server.Config{
@@ -132,16 +167,31 @@ func main() {
 			Scheduler:        sch,
 			OAuth:            oauth.New(cfg.OAuthBaseURL),
 			Log:              checkinLog,
-			Ring:             server.ChatLogRing(),
+			Ring:             logRing,
 			AuthDir:          cfg.AuthDir,
+			ClientLogin:      clientLogin,
 			ResetModelsCache: server.ResetModelsCache,
-			StartedAt:        time.Now(),
+			Settings: newSettingsStore(*cfgPath, cfg, sch, checkinLog, func(days int) {
+				if s := logRing.Sink(); s != nil {
+					s.SetKeepDays(days)
+				}
+			}),
+			StartedAt: time.Now(),
 		}),
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	// 猫猫旅行自动领奖守卫：按 arrive_at 错峰检查，到站即领（可用 admin.travel_auto_claim 关掉）。
+	go sch.RunTravelWatcher(ctx, cfg.TravelWatchInterval)
+	// 成长中心守卫：领任务奖励 / 补签 / 连登兑换 / 开盲盒 / 抽奖（后三个默认关，见 config）。
+	go sch.RunGrowthWatcher(ctx, cfg.GrowthWatchInterval)
+	if cfg.TravelAutoClaim {
+		log.Printf("猫猫旅行自动领奖已开启（守卫轮 %s；按 arrive_at 错峰，到站即领）", cfg.TravelWatchInterval)
+	} else {
+		log.Printf("猫猫旅行自动领奖已关闭（admin.travel_auto_claim=false），仅手动领奖")
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

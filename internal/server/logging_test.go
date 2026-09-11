@@ -38,7 +38,11 @@ func withChatLog(t *testing.T) {
 }
 
 func TestChatStatsReaderTokensFromUsage(t *testing.T) {
-	r := newChatStatsReaderSince(strings.NewReader(sseOK), time.Now())
+	// 起点显式回拨 1 秒：io.Copy 会瞬间读完整个字符串，若起点取 time.Now()，
+	// 在时钟粒度较粗的平台（Windows 可达 ~15ms）time.Since 会取到 0，TTFB 就成了 0
+	// 导致断言 flaky。newChatStatsReaderSince 的 since 参数本就是为注入起点而设，
+	// 回拨后既确定，又仍然验证「首帧记录时间差」这一行为。
+	r := newChatStatsReaderSince(strings.NewReader(sseOK), time.Now().Add(-time.Second))
 	if _, err := io.Copy(io.Discard, r); err != nil {
 		t.Fatalf("copy: %v", err)
 	}

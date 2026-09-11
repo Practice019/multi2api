@@ -33,7 +33,47 @@
   button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
   button.primary:hover{filter:brightness(1.1)}
   button:disabled{opacity:.45;cursor:not-allowed}
-  main{padding:20px;display:grid;gap:18px;max-width:1280px;margin:0 auto}
+  main{padding:0;display:block}
+  /* 左侧导航 + 内容区 */
+  .layout{display:grid;grid-template-columns:186px minmax(0,1fr);gap:18px;
+    max-width:1400px;margin:0 auto;padding:20px}
+  .sidebar{position:sticky;top:66px;align-self:start;display:flex;flex-direction:column;gap:2px;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px}
+  .sidebar button{text-align:left;background:transparent;border:0;border-radius:8px;
+    padding:9px 11px 9px 15px;font-size:13px;color:var(--dim);cursor:pointer;transition:.12s;
+    position:relative}
+  .sidebar button:hover{background:var(--panel2);color:var(--fg)}
+  .sidebar button.active{background:var(--acc);color:#fff;font-weight:600}
+  /* 选中指示条：纯 CSS 画，不引入任何图标字体或 emoji */
+  .sidebar button.active::before{content:'';position:absolute;left:5px;top:50%;transform:translateY(-50%);
+    width:3px;height:15px;border-radius:2px;background:#fff;opacity:.9}
+  .sidebar .badge{margin-left:8px;font-size:10px;background:var(--panel2);
+    border-radius:999px;padding:1px 6px;color:var(--dim)}
+  .sidebar button.active .badge{background:rgba(255,255,255,.22);color:#fff}
+  .content{display:grid;gap:18px;min-width:0}
+  .content > section{display:none}
+  .content > section.active{display:block}
+  @media (max-width:820px){
+    .layout{grid-template-columns:1fr;padding:12px}
+    .sidebar{position:static;flex-direction:row;overflow-x:auto;gap:6px}
+    .sidebar button{white-space:nowrap;padding:7px 10px;font-size:12px}
+    .sidebar button.active::before{display:none}
+    .sidebar .badge{display:none}
+  }
+  /* 设置表单 */
+  .formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+  .field{display:flex;flex-direction:column;gap:5px}
+  .field label{font-size:11px;color:var(--dim);letter-spacing:.3px}
+  .field .hint{font-size:11px;color:var(--dim)}
+  .field input[type=text],.field input[type=number],.field select{width:100%}
+  .field.chk{flex-direction:row;align-items:center;gap:8px}
+  .field.chk input{width:auto}
+  .field.chk label{font-size:13px;color:var(--fg)}
+  fieldset{border:1px solid var(--line);border-radius:10px;padding:14px;margin:0 0 16px}
+  legend{font-size:12px;color:var(--dim);padding:0 8px;letter-spacing:.4px}
+  .readonly dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:13px}
+  .readonly dt{color:var(--dim);font-size:12px}
+  .readonly dd{margin:0;font-family:var(--mono);font-size:12px;word-break:break-all}
   section{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
   section>h2{margin:0;padding:11px 16px;font-size:12px;font-weight:650;letter-spacing:.6px;
     text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
@@ -54,6 +94,18 @@
   .pill.warn{background:rgba(245,166,35,.15);color:var(--warn)}
   .pill.err{background:rgba(255,92,92,.15);color:var(--err)}
   .pill.dim{background:rgba(139,150,173,.15);color:var(--dim)}
+  /* 按账号分组的任务明细：每组一个小节，节头常驻，切视图时不丢账号上下文 */
+  .ggroup{border-bottom:1px solid var(--line)}
+  .ggroup:last-child{border-bottom:0}
+  .ghead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:9px 16px;background:var(--panel2);border-bottom:1px solid var(--line)}
+  .ghead .gname{font-weight:600;font-size:13px}
+  .ggroup table{width:100%}
+  /* 说明列会很长（最长约 50 个汉字），必须解除全局 nowrap 并限宽换行，
+     否则整张表被撑开、右侧的「操作」按钮要横向滚动才看得到。 */
+  .ggroup td.gtask{white-space:normal;max-width:230px;line-height:1.5}
+  .ggroup td.gdesc{white-space:normal;max-width:440px;line-height:1.6;font-size:12px}
+  .ggroup td.gdesc .howto{color:var(--dim);font-size:11px;margin-top:5px}
   .chips{display:flex;flex-wrap:wrap;gap:7px}
   .chip{background:var(--panel2);border:1px solid var(--line);border-radius:999px;
     padding:3px 11px;font-family:var(--mono);font-size:12px;cursor:pointer}
@@ -67,6 +119,9 @@
     font-family:var(--mono);font-size:12.5px;max-height:340px;overflow:auto}
   .err{color:var(--err)} .dim{color:var(--dim)}
   .tog{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;user-select:none}
+  /* 分段按钮的选中态。历史代码用内联 style 切换，这里补一条 class 规则，
+     供新增的视图切换使用，避免再堆内联样式。 */
+  .tog button.on{background:var(--acc);color:#fff;font-weight:600}
   .tog input{width:auto;padding:0}
   /* 可点击复制的内容块：整块可点，鼠标悬停给明确反馈 */
   .copyable{cursor:pointer;position:relative;transition:.15s}
@@ -94,6 +149,9 @@
 </header>
 
 <main>
+ <div class="layout">
+  <nav class="sidebar" id="nav"><!-- 导航项由脚本按 .content > section 的 DOM 顺序生成 --></nav>
+  <div class="content" id="content">
   <section>
     <h2>API 接入信息 <span class="dim" style="font-weight:400;text-transform:none">只读 · 本机自动注入</span>
       <span class="spacer"></span>
@@ -146,29 +204,82 @@
   </section>
 
   <section>
-    <h2>调度 <span class="spacer"></span>
-      <label class="tog"><input id="schCheckin" type="checkbox"> 签到</label>
-      <label class="tog"><input id="schKeepalive" type="checkbox"> 保活</label>
-    </h2>
+    <h2>调度 <span class="dim" style="font-weight:400;text-transform:none">只读 · 修改请到「设置」</span></h2>
     <div class="body"><div id="schInfo" class="dim">未连接</div></div>
   </section>
 
   <section>
-    <h2>猫猫旅行 <span class="spacer"></span>
-      <select id="travelUid" style="padding:3px 8px;font-size:12px;min-width:200px"><option value="">— 选择账号 —</option></select>
-      <button id="btnTravelStatus" style="padding:3px 10px;font-size:12px">查状态</button>
-      <button id="btnTravelDepart" style="padding:3px 10px;font-size:12px">派猫</button>
-      <button id="btnTravelClaim" style="padding:3px 10px;font-size:12px">领奖</button>
+    <h2>猫猫旅行 <span id="travelAutoHint" class="dim" style="font-weight:400;text-transform:none"></span>
+      <span class="spacer"></span>
+      <button id="btnTravelRefresh" style="padding:3px 10px;font-size:12px">刷新</button>
+      <button id="btnTravelDepartAll" style="padding:3px 10px;font-size:12px">全部派猫</button>
+      <button id="btnTravelClaimAll" style="padding:3px 10px;font-size:12px">全部领奖</button>
     </h2>
-    <div class="body"><pre id="travelOut" class="dim">未查询</pre></div>
+    <div class="body" style="padding:0">
+      <table><thead><tr>
+        <th>昵称</th><th>猫</th><th>状态</th><th>出发</th><th>到站</th><th>可领</th><th>操作</th>
+      </tr></thead>
+      <tbody id="travelRows"><tr><td colspan="7" class="dim">加载中…</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <h2>成长计划 <span id="growthHint" class="dim" style="font-weight:400;text-transform:none"></span>
+      <span class="spacer"></span>
+      <button id="btnGrowthRefresh" style="padding:3px 10px;font-size:12px">刷新</button>
+      <button id="btnGrowthClaimAll" style="padding:3px 10px;font-size:12px">全部领取奖励</button>
+      <button id="btnGrowthAcceptAll" style="padding:3px 10px;font-size:12px">全部接单</button>
+      <button id="btnGrowthRedeemAll" style="padding:3px 10px;font-size:12px">全部兑换</button>
+      <button id="btnGrowthMakeupAll" style="padding:3px 10px;font-size:12px">全部补签</button>
+      <button id="btnGrowthOpenAll" style="padding:3px 10px;font-size:12px">全部开盲盒</button>
+      <button id="btnGrowthDrawAll" style="padding:3px 10px;font-size:12px">全部抽奖</button>
+    </h2>
+    <div class="body">
+      <div class="cards" id="growthCards"></div>
+      <div class="dim" style="margin-top:12px;font-size:12px">
+        自动动作开关在「设置」里；本页按钮是手动执行一次。
+      </div>
+    </div>
+    <div class="body" style="padding:0">
+      <table><thead><tr>
+        <th>昵称</th><th>连登</th><th>补签卡</th><th>能量</th><th>盲盒可开</th><th>抽奖</th>
+        <th>待领取</th><th>现在可领</th><th>待接单</th><th>接单后可得</th><th>操作</th>
+      </tr></thead>
+      <tbody id="growthRows"><tr><td colspan="11" class="dim">加载中…</td></tr></tbody></table>
+    </div>
+    <div class="body" style="padding:0;border-top:1px solid var(--line)">
+      <div style="padding:9px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);flex-wrap:wrap">
+        <span class="dim" style="font-size:12px">任务明细</span>
+        <select id="growthAccount" style="padding:3px 8px;font-size:12px;max-width:280px"></select>
+        <span class="tog" id="growthViews" style="gap:0">
+          <button data-gview="acceptable" class="on" style="padding:3px 10px;font-size:12px;border-radius:8px 0 0 8px">待接单</button>
+          <button data-gview="running" style="padding:3px 10px;font-size:12px;border-left:0">进行中</button>
+          <button data-gview="done" style="padding:3px 10px;font-size:12px;border-left:0">已完成</button>
+          <button data-gview="all" style="padding:3px 10px;font-size:12px;border-radius:0 8px 8px 0;border-left:0">全部</button>
+        </span>
+        <span id="growthTaskMeta" class="dim" style="font-size:12px"></span>
+      </div>
+      <div id="growthGroups"><div class="dim" style="padding:14px 16px;font-size:12px">加载中…</div></div>
+    </div>
   </section>
 
   <section>
     <h2>请求日志 <span id="logMeta" class="dim" style="font-weight:400;text-transform:none"></span>
       <span class="spacer"></span>
+      <span class="tog" style="gap:0">
+        <button id="logTabLive" style="padding:3px 10px;font-size:12px;border-radius:8px 0 0 8px">实时</button>
+        <button id="logTabHist" style="padding:3px 10px;font-size:12px;border-radius:0 8px 8px 0;border-left:0">历史（落盘）</button>
+      </span>
+      <select id="logHistLimit" style="padding:3px 8px;font-size:12px;display:none">
+        <option value="100">最近 100</option>
+        <option value="300" selected>最近 300</option>
+        <option value="1000">最近 1000</option>
+        <option value="0">全部</option>
+      </select>
       <button id="btnLogClear" style="padding:3px 10px;font-size:12px">清屏</button>
     </h2>
     <div class="body" style="padding:0">
+      <div id="logFileInfo" class="dim" style="display:none;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
       <table><thead><tr>
         <th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th>
         <th>UID</th><th>TTFB</th><th>tok</th><th>耗时</th></tr></thead>
@@ -214,6 +325,84 @@
       <pre id="out" class="dim">等待发送…</pre>
     </div>
   </section>
+
+  <section>
+    <h2>设置 <span id="settingsDirty" class="dim" style="font-weight:400;text-transform:none"></span>
+      <span class="spacer"></span>
+      <button id="btnSettingsReload" style="padding:3px 10px;font-size:12px">放弃修改</button>
+      <button id="btnSettingsSave" class="primary" style="padding:3px 12px;font-size:12px">保存设置</button>
+    </h2>
+    <div class="body">
+      <fieldset>
+        <legend>调度（保存后立即生效）</legend>
+        <div class="formgrid">
+          <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
+          <div class="field chk"><input type="checkbox" id="setKeepaliveEnabled"><label for="setKeepaliveEnabled">启用 token 保活</label></div>
+          <div class="field"><label>签到时点（小时，逗号分隔）</label>
+            <input type="text" id="setCheckinHours" placeholder="9,21"><span class="hint">0-23，本地时区</span></div>
+          <div class="field"><label>保活时点（小时，逗号分隔）</label>
+            <input type="text" id="setKeepaliveHours" placeholder="22"><span class="hint">0-23，本地时区</span></div>
+          <div class="field chk"><input type="checkbox" id="setTravelAuto"><label for="setTravelAuto">猫到站自动领奖</label></div>
+          <div class="field"><label>旅行守卫间隔（秒）</label>
+            <input type="number" id="setTravelInterval" min="10" max="3600"><span class="hint">同时是上游未给到站时间时的兜底轮询周期</span></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>成长中心自动动作（保存后立即生效）</legend>
+        <div class="formgrid">
+          <div class="field chk"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）</label></div>
+        <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthDraw"><label for="setGrowthDraw">自动抽奖</label></div>
+        </div>
+        <div class="dim" style="margin-top:10px;font-size:12px">
+          前两项是纯收益（领已达成的奖励、用补签卡补回断登），默认开启。
+          后三项会消耗资源 —— 兑换花连登天数、开盲盒花能量、抽奖花抽奖次数，默认关闭。
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>历史与日志（保存后立即生效）</legend>
+        <div class="formgrid">
+          <div class="field"><label>签到历史保留天数</label>
+            <input type="number" id="setCheckinLogDays" min="1" max="3650"></div>
+          <div class="field"><label>请求日志保留天数</label>
+            <input type="number" id="setReqLogDays" min="1" max="3650"><span class="hint">超过窗口的旧记录在下次裁剪时清除</span></div>
+        </div>
+        <div id="setLogFileInfo" class="dim" style="margin-top:12px;font-size:12px"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>需要重启才生效（仍会写入 config.json）</legend>
+        <div class="formgrid">
+          <div class="field"><label>429 软冷却时长</label><input type="text" id="setSoftRate" placeholder="60s"></div>
+          <div class="field"><label>上游短 RPC 超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
+          <div class="field"><label>SSE 首字节超时（秒）</label><input type="number" id="setUpHeaderTimeout" min="1"></div>
+          <div class="field"><label>SSE 流中空闲超时（秒）</label><input type="number" id="setUpIdleTimeout" min="1"></div>
+          <div class="field"><label>单账号最大在途</label><input type="number" id="setMaxInFlight" min="0"><span class="hint">0 = 不限</span></div>
+          <div class="field"><label>熔断阈值（连续失败次数）</label><input type="number" id="setBreakerThreshold" min="1"></div>
+          <div class="field"><label>熔断基础时长</label><input type="text" id="setBreakerCooldown" placeholder="30m"></div>
+          <div class="field"><label>熔断退避封顶</label><input type="text" id="setBreakerCooldownMax" placeholder="6h"></div>
+          <div class="field chk"><input type="checkbox" id="setSanitize"><label for="setSanitize">出站请求体指纹脱敏</label></div>
+          <div class="field"><label>Upstash Redis 地址（可空）</label><input type="text" id="setUpstashURL" placeholder="留空 = 纯内存模式"></div>
+          <div class="field chk"><input type="checkbox" id="setStickyEnabled"><label for="setStickyEnabled">会话粘性</label></div>
+          <div class="field"><label>会话粘性 TTL</label><input type="text" id="setStickyTTL" placeholder="30m"></div>
+          <div class="field"><label>成长中心扫描间隔（秒）</label>
+            <input type="number" id="setGrowthInterval" min="60" max="86400"><span class="hint">守卫轮 ticker 在启动时创建，改动需重启</span></div>
+        </div>
+      </fieldset>
+
+      <fieldset class="readonly">
+        <legend>只读</legend>
+        <dl id="setReadonly"></dl>
+      </fieldset>
+    </div>
+  </section>
+  </div>
+ </div>
 </main>
 
 <div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:99;align-items:center;justify-content:center">
@@ -291,11 +480,7 @@
 
   function renderAccounts(list) {
     share = list || [];
-    const sel = $('travelUid'), keepSel = sel.value;
-    sel.innerHTML = '<option value="">— 选择账号 —</option>' +
-      share.map(a => `<option value="${esc(a.uid)}">${esc(a.nickname || a.uid.slice(0, 8))}</option>`).join('');
-    if (share.some(a => a.uid === keepSel)) sel.value = keepSel;
-
+    updateNavBadges();
     if (!share.length) {
       $('accts').innerHTML = '<tr><td colspan="10" class="dim">账号池为空 —— 点上方「＋ 添加账号」</td></tr>';
       return;
@@ -419,12 +604,12 @@
       const el = $('taskbar');
       el.style.display = 'block';
       if (t.running) {
-        el.innerHTML = `⏳ <b>${esc(t.kind)}</b> 执行中… 已用 ${t.elapsed_sec || 0}s`;
+        el.innerHTML = `<b>${esc(t.kind)}</b> 执行中… 已用 ${t.elapsed_sec || 0}s`;
         refresh(); // 过程中也刷新表格，能实时看到积分/状态变化
         return;
       }
       if (t.kind) {
-        el.innerHTML = `✅ <b>${esc(t.kind)}</b> 完成：成功 ${t.ok || 0} · 已签到 ${t.already || 0} · 失败 ${t.fail || 0}`
+        el.innerHTML = `<b>${esc(t.kind)}</b> 完成：成功 ${t.ok || 0} · 已签到 ${t.already || 0} · 失败 ${t.fail || 0}`
           + ` · 耗时 ${t.duration_sec || 0}s${t.error ? ' · <span class="err">' + esc(t.error) + '</span>' : ''}`;
       }
       clearInterval(taskTimer); taskTimer = null;
@@ -455,7 +640,7 @@
       <div class="row" style="margin-bottom:10px">
         <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer" class="primary"
            style="text-decoration:none;padding:8px 16px;border-radius:8px;background:var(--acc);color:#fff;font-weight:600">
-         打开授权页面 ↗
+         打开授权页面
         </a>
         <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
       </div>
@@ -490,29 +675,521 @@
     }, 2500);
   }
 
-  // ---------------------------------------------------------------- 调度
+  // ---------------------------------------------------------------- 调度（只读）
+  // 本面板刻意不含任何开关控件：签到/保活的启停只能从「设置」改，
+  // 避免出现「这里点一下只改内存、那里保存改 config.json」两条写路径互相覆盖。
   async function loadSchedule() {
     let s;
     try { s = await admin('/admin/schedule'); } catch { $('schInfo').textContent = '读取失败'; return; }
-    $('schCheckin').checked = !!s.checkin_enabled;
-    $('schKeepalive').checked = !!s.keepalive_enabled;
     const cd = s.next_in_sec > 0 ? `${Math.floor(s.next_in_sec / 3600)}h${Math.floor((s.next_in_sec % 3600) / 60)}m 后` : '—';
+    const on = v => v ? '<span class="pill ok">已启用</span>' : '<span class="pill dim">已关闭</span>';
     $('schInfo').innerHTML =
-      `下次任务：<b>${esc((s.next_tasks || []).join(' + ') || '无（均已关闭）')}</b> · ${cd}`
+      `签到 ${on(s.checkin_enabled)}　保活 ${on(s.keepalive_enabled)}`
+      + `<br>下次任务：<b>${esc((s.next_tasks || []).join(' + ') || '无（均已关闭）')}</b> · ${cd}`
       + `（${s.next_at ? new Date(s.next_at).toLocaleString('zh-CN', { hour12: false }) : '—'}）`
-      + `　签到时点 <span class="mono">[${(s.checkin_hours || []).join(', ')}]</span>`
+      + `<br>签到时点 <span class="mono">[${(s.checkin_hours || []).join(', ')}]</span>`
       + `　保活时点 <span class="mono">[${(s.keepalive_hours || []).join(', ')}]</span>`;
   }
 
-  async function toggleSchedule() {
+  // ---------------------------------------------------------------- 左侧导航
+  // 导航项不写死在 HTML 里：按 .content 下 section 的 DOM 顺序生成，
+  // 以后加一个 section 就自动多一个导航项，不会出现「加了面板忘了加导航」。
+  // 纯文字 + CSS 选中指示条，不使用任何图标字体或 emoji。
+  let navSections = [];
+
+  function buildNav() {
+    navSections = Array.from(document.querySelectorAll('#content > section'));
+    $('nav').innerHTML = navSections.map((sec, i) => {
+      const label = (sec.querySelector('h2')?.childNodes[0]?.textContent || ('面板 ' + (i + 1))).trim();
+      // 账号池带一个计数徽章：初值留空，由 updateNavBadges() 按真实数据填。
+      const badge = label === '账号池' ? '<span class="badge" data-nav-badge></span>' : '';
+      return `<button data-nav="${i}" title="${esc(label)}">${esc(label)}${badge}</button>`;
+    }).join('');
+    let start = 0;
     try {
-      await admin('/admin/schedule/toggle', {
-        method: 'POST',
-        body: JSON.stringify({ checkin: $('schCheckin').checked, keepalive: $('schKeepalive').checked }),
-      });
-      toast('调度开关已生效（立即影响下次唤醒，无需重启）');
-    } catch (e) { toast('开关失败：' + e.message, true); }
-    loadSchedule();
+      const saved = parseInt(localStorage.getItem('wb2api.panel') || '0', 10);
+      if (!isNaN(saved) && saved >= 0 && saved < navSections.length) start = saved;
+    } catch { /* 隐私模式 */ }
+    showPanel(start);
+    updateNavBadges(); // 关键：buildNav 在 refresh() 之后才跑，这里补一次，否则徽章会一直空着
+  }
+
+  // updateNavBadges 把账号总数写进导航徽章。
+  // 由 renderAccounts() 与 buildNav() 双向调用：两者谁先跑都不会漏。
+  function updateNavBadges() {
+    const el = document.querySelector('[data-nav-badge]');
+    if (!el) return;
+    const n = share.length;
+    el.textContent = n ? String(n) : '';
+    el.style.display = n ? '' : 'none';
+  }
+
+  function showPanel(idx) {
+    navSections.forEach((sec, i) => sec.classList.toggle('active', i === idx));
+    $('nav').querySelectorAll('button').forEach(b =>
+      b.classList.toggle('active', Number(b.dataset.nav) === idx));
+    try { localStorage.setItem('wb2api.panel', String(idx)); } catch { /* 隐私模式 */ }
+    // 切到某些面板时按需拉一次数据，避免首次进入是空的
+    const label = (navSections[idx]?.querySelector('h2')?.childNodes[0]?.textContent || '').trim();
+    if (label === '请求日志') { if (logMode === 'live') loadLogs(); else loadLogHistory(); }
+    if (label === '设置') loadSettings();
+    if (label === '猫猫旅行') loadTravel(false);
+    if (label === '成长计划') loadGrowth(false);
+  }
+
+  // ---------------------------------------------------------------- 设置
+  const SET_FIELDS = [
+    ['setCheckinEnabled', 'checkin_enabled', 'bool'],
+    ['setKeepaliveEnabled', 'keepalive_enabled', 'bool'],
+    ['setCheckinHours', 'checkin_hours', 'hours'],
+    ['setKeepaliveHours', 'keepalive_hours', 'hours'],
+    ['setTravelAuto', 'travel_auto_claim', 'bool'],
+    ['setTravelInterval', 'travel_watch_interval_seconds', 'int'],
+    ['setGrowthClaim', 'growth_auto_claim', 'bool'],
+    ['setGrowthAccept', 'growth_auto_accept_tasks', 'bool'],
+    ['setGrowthMakeup', 'growth_auto_makeup', 'bool'],
+    ['setGrowthRedeem', 'growth_auto_redeem', 'bool'],
+    ['setGrowthOpen', 'growth_auto_open', 'bool'],
+    ['setGrowthDraw', 'growth_auto_draw', 'bool'],
+    ['setGrowthInterval', 'growth_watch_interval_seconds', 'int'],
+    ['setCheckinLogDays', 'checkin_log_keep_days', 'int'],
+    ['setReqLogDays', 'request_log_keep_days', 'int'],
+    ['setSoftRate', 'cooldown_soft_rate', 'str'],
+    ['setUpTimeout', 'upstream_timeout_seconds', 'int'],
+    ['setUpHeaderTimeout', 'upstream_header_timeout_seconds', 'int'],
+    ['setUpIdleTimeout', 'upstream_idle_timeout_seconds', 'int'],
+    ['setMaxInFlight', 'pool_max_in_flight', 'int'],
+    ['setBreakerThreshold', 'pool_breaker_threshold', 'int'],
+    ['setBreakerCooldown', 'pool_breaker_cooldown', 'str'],
+    ['setBreakerCooldownMax', 'pool_breaker_cooldown_max', 'str'],
+    ['setSanitize', 'sanitize_blacklist_fingerprints', 'bool'],
+    ['setUpstashURL', 'upstash_url', 'str'],
+    ['setStickyEnabled', 'session_sticky_enabled', 'bool'],
+    ['setStickyTTL', 'session_sticky_ttl', 'str'],
+  ];
+  let savedSettings = null;
+
+  const parseHours = s => String(s || '').split(/[,，\s]+/).filter(Boolean)
+    .map(x => parseInt(x, 10)).filter(n => !isNaN(n));
+
+  function fillSettings(s, extra) {
+    savedSettings = s;
+    for (const [id, key, kind] of SET_FIELDS) {
+      const el = $(id);
+      if (!el || s[key] === undefined || s[key] === null) continue;
+      if (kind === 'bool') el.checked = !!s[key];
+      else if (kind === 'hours') el.value = (s[key] || []).join(',');
+      else el.value = s[key];
+    }
+    const ro = [
+      ['监听地址', s.listen],
+      ['凭证目录', s.auth_dir],
+      ['配置文件', s.config_path],
+      ['API Key', s.api_key_set ? '已配置' : '未配置（不鉴权）'],
+      ['Redis', s.redis_mode || (s.upstash_url ? 'upstash' : 'noop（纯内存）')],
+    ];
+    $('setReadonly').innerHTML = ro.map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    if (extra && extra.request_log) renderLogFileInfo(extra.request_log);
+    markDirty(false);
+  }
+
+  function renderLogFileInfo(f) {
+    const fmt = b => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round((b || 0) / 1024) + ' KB';
+    const html = !f || !f.enabled
+      ? '请求日志落盘：<span class="err">未启用</span>（仅内存，重启即丢）'
+      : `请求日志落盘：<code class="mono">${esc(f.path)}</code> · ${f.count} 条 · ${fmt(f.size)} · 保留 ${f.keep_days} 天`
+        + (f.from ? ` · 覆盖 ${new Date(f.from).toLocaleString('zh-CN', { hour12: false })} 至 ${new Date(f.to).toLocaleString('zh-CN', { hour12: false })}` : '');
+    $('setLogFileInfo').innerHTML = html;
+    $('logFileInfo').innerHTML = html;
+    $('logFileInfo').style.display = 'block';
+  }
+
+  function collectSettings() {
+    const out = Object.assign({}, savedSettings);
+    for (const [id, key, kind] of SET_FIELDS) {
+      const el = $(id);
+      if (!el) continue;
+      if (kind === 'bool') out[key] = el.checked;
+      else if (kind === 'hours') out[key] = parseHours(el.value);
+      else if (kind === 'int') out[key] = parseInt(el.value, 10) || 0;
+      else out[key] = el.value.trim();
+    }
+    return out;
+  }
+
+  function markDirty(on) {
+    $('settingsDirty').textContent = on ? '（有未保存的修改）' : '';
+    $('settingsDirty').style.color = on ? 'var(--warn)' : '';
+  }
+
+  async function loadSettings() {
+    try {
+      const r = await admin('/admin/settings');
+      fillSettings(r.settings, r);
+    } catch (e) {
+      $('setReadonly').innerHTML = `<dt>错误</dt><dd class="err">${esc(e.message)}</dd>`;
+    }
+  }
+
+  async function saveSettings() {
+    const body = collectSettings();
+    if (!body.checkin_hours || !body.checkin_hours.length) { toast('签到时点不能为空', true); return; }
+    if (!body.keepalive_hours || !body.keepalive_hours.length) { toast('保活时点不能为空', true); return; }
+    const btn = $('btnSettingsSave');
+    btn.disabled = true;
+    try {
+      const r = await admin('/admin/settings', { method: 'PUT', body: JSON.stringify(body) });
+      fillSettings(r.settings, r);
+      const nr = (r.need_restart || []).length;
+      toast(`设置已保存并写入 config.json：${(r.applied || []).length} 项立即生效`
+        + (nr ? `，另有 ${nr} 项需重启网关才生效` : ''), false);
+    } catch (e) {
+      toast('保存失败：' + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- 成长计划
+  let growthSnaps = [];
+  let lastGrowthAuto = null; // 筛选切换时重渲染用，不必重新拉数据
+
+  function renderGrowth(list, auto) {
+    growthSnaps = list || [];
+    lastGrowthAuto = auto || lastGrowthAuto;
+    const on = v => v ? '已开' : '关';
+    $('growthHint').textContent = auto
+      ? `· 自动：领奖 ${on(auto.claim)} / 接单 ${on(auto.accept)} / 补签 ${on(auto.makeup)} / 兑换 ${on(auto.redeem)} / 开盒 ${on(auto.open)} / 抽奖 ${on(auto.draw)}（在「设置」里改）`
+      : '';
+
+    const sum = growthSnaps.reduce((a, g) => {
+      a.claim += g.acceptable_count || 0;
+      a.credit += g.acceptable_credit || 0;
+      a.streak = Math.max(a.streak, g.streak_days || 0);
+      a.energy += g.energy || 0;
+      // 可领奖：已完成但奖励还没到手的部分，这才是「现在能拿到的分」。
+      a.right_now += g.claimable_credit || 0;
+      a.right_now_n += g.claimable_count || 0;
+      return a;
+    }, { claim: 0, credit: 0, streak: 0, energy: 0, right_now: 0, right_now_n: 0 });
+
+    $('growthCards').innerHTML = [
+      ['账号数', growthSnaps.length, ''],
+      ['现在可领信用分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
+      ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
+      ['待接单任务', sum.claim, sum.claim ? 'ok' : 'dim'],
+      ['接单后可得信用分', sum.credit, sum.credit ? 'ok' : 'dim'],
+      ['最长连登', sum.streak + ' 天', ''],
+      ['能量合计', sum.energy, ''],
+    ].map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+
+    if (!growthSnaps.length) {
+      $('growthRows').innerHTML = '<tr><td colspan="11" class="dim">账号池为空</td></tr>';
+      renderGrowthGroups();
+      return;
+    }
+
+    $('growthRows').innerHTML = growthSnaps.map(g => {
+      // 只有「压根没数据」才整行报错。刷新失败但有上次数据时（stale=true）
+      // 继续正常渲染，只在账号名旁挂一个过期标记 —— 不能让一次上游抖动抹白整张表。
+      const stale = g.stale
+        ? ` <span class="pill warn" title="本次刷新失败，展示的是 ${new Date(g.observed_at).toLocaleTimeString('zh-CN', { hour12: false })} 的数据：${esc(g.error || '')}">可能过期</span>`
+        : '';
+      const name = esc(g.nickname || (g.uid || '').slice(0, 8)) + stale;
+      const U = esc(g.uid);
+      if (g.error && !g.tasks_total) {
+        return `<tr><td>${name}</td><td colspan="10" class="err" title="${esc(g.error)}">${esc(g.error.slice(0, 70))}</td></tr>`;
+      }
+      const streak = g.streak_days
+        ? `${g.streak_days} 天${g.next_tier ? `<br><span class="dim" style="font-size:11px">距 ${esc(g.next_tier)} 还差 ${g.next_tier_remaining}</span>` : ''}`
+        : '<span class="dim">—</span>';
+      const cards = g.makeup_cards
+        ? `${g.makeup_cards}${g.makeup_dates && g.makeup_dates.length ? ` <span class="pill warn">可补${g.makeup_dates.length}</span>` : ''}`
+        : '<span class="dim">—</span>';
+      const claim = g.acceptable_count
+        ? `<span class="pill ok">${g.acceptable_count}</span>`
+        : '<span class="dim">—</span>';
+      const credit = g.acceptable_credit
+        ? `<span class="pill ok">${g.acceptable_credit}</span>`
+        : '<span class="dim">—</span>';
+      // 待领取 / 现在可领：来自 completed 的任务，领了就到账。
+      const pendingN = g.claimable_count
+        ? `<span class="pill warn">${g.claimable_count}</span>`
+        : '<span class="dim">—</span>';
+      const pendingC = g.claimable_credit
+        ? `<span class="pill warn">${g.claimable_credit}</span>`
+        : '<span class="dim">—</span>';
+      const box = g.blind_box_affordable
+        ? `<span class="pill ok">${g.blind_box_affordable}</span>`
+        : '<span class="dim">—</span>';
+      const draw = g.lottery_chances
+        ? `<span class="pill ok">${g.lottery_chances}</span>`
+        : '<span class="dim">—</span>';
+
+      const act = [
+        // 领奖放最前：这是唯一真正加分的动作，有可领的就一定是当前最该点的。
+        `<button data-gact="claim"   data-uid="${U}"${g.claimable_count ? '' : ' disabled'} title="领取已完成任务的奖励${g.claimable_credit ? `（共 ${g.claimable_credit} 分）` : ''}">领取</button>`,
+        `<button data-gact="accept"  data-uid="${U}"${g.acceptable_count ? '' : ' disabled'}>接单</button>`,
+        `<button data-gact="redeem" data-uid="${U}">兑换</button>`,
+        `<button data-gact="makeup" data-uid="${U}"${g.makeup_dates && g.makeup_dates.length ? '' : ' disabled'}>补签</button>`,
+        `<button data-gact="open"   data-uid="${U}"${g.blind_box_affordable ? '' : ' disabled'}>开盒</button>`,
+        `<button data-gact="draw"   data-uid="${U}"${g.lottery_chances ? '' : ' disabled'}>抽奖</button>`,
+      ].join(' ');
+
+      return `<tr>
+        <td>${name}</td>
+        <td>${streak}</td>
+        <td class="mono">${cards}</td>
+        <td class="mono">${esc(g.energy)}</td>
+        <td>${box}</td>
+        <td>${draw}</td>
+        <td>${pendingN}</td>
+        <td>${pendingC}</td>
+        <td>${claim}</td>
+        <td>${credit}</td>
+        <td style="white-space:nowrap">${act}</td>
+      </tr>`;
+    }).join('');
+
+    renderGrowthGroups();
+  }
+
+  // 四个视图的判定。状态取值与官方前端枚举一致：
+  // not_accepted | accepted | in_progress | completed | claimed
+  // 语义要点：completed = 任务条件已达成但**奖励还没领**；claimed = 奖励已领取。
+  // 两者都归入「已完成」（从用户视角看这类任务都不需要再做动作了），
+  // 区别在于 completed 那一行会多出一个「领取」按钮。
+  const GROWTH_VIEWS = {
+    acceptable: { label: '待接单', test: t => t.status === 'not_accepted' && !t.locked },
+    running:    { label: '进行中', test: t => t.status === 'accepted' || t.status === 'in_progress' },
+    done:       { label: '已完成', test: t => t.status === 'completed' || t.status === 'claimed' },
+    all:        { label: '全部',   test: () => true },
+  };
+  let growthView = 'acceptable';
+  // 用户是否手动点过视图按钮。没点过时首次加载会自动落到第一个非空视图 ——
+  // 否则「任务都已接单」的账号一进来就是空表，看起来像功能坏了。
+  let growthViewPicked = false;
+  // 任务明细一次只显示一个账号，由 growthAccount 下拉框决定。
+  let growthUID = '';
+
+  const GROWTH_STATUS_TEXT = {
+    not_accepted: ['待接单', 'dim'],
+    accepted: ['进行中', ''],
+    in_progress: ['进行中', ''],
+    // completed 与 claimed 分开显示：前者奖励还没领（行内给「领取」按钮），后者已到账。
+    completed: ['待领取', 'warn'],
+    claimed: ['已领取', 'ok'],
+  };
+
+  // 把当前 growthView 同步到按钮选中态。自动选视图与手动点击都走这里，
+  // 避免两处各自改 class 导致显示与实际视图不一致。
+  function syncGrowthViewButtons() {
+    const box = $('growthViews');
+    if (!box) return;
+    for (const b of box.querySelectorAll('button[data-gview]')) {
+      b.classList.toggle('on', b.dataset.gview === growthView);
+    }
+  }
+
+  // 统计单个账号在四个视图下各有多少条任务。
+  function growthCounts(g) {
+    const c = { acceptable: 0, running: 0, done: 0, all: 0 };
+    for (const t of ((g && g.tasks) || [])) {
+      for (const k of Object.keys(GROWTH_VIEWS)) {
+        if (GROWTH_VIEWS[k].test(t)) c[k]++;
+      }
+    }
+    return c;
+  }
+
+  // 账号下拉框：选项文字带上待接单/进行中条数，
+  // 这样不用逐个点开也能看出哪个账号还有活干。
+  function buildGrowthAccountSelect() {
+    const sel = $('growthAccount');
+    if (!sel) return;
+    const prev = growthUID;
+    const opts = growthSnaps.map(g => {
+      const c = growthCounts(g);
+      const name = g.nickname || (g.uid || '').slice(0, 8);
+      const hint = g.tasks_total
+        ? `（待接单 ${c.acceptable} · 进行中 ${c.running}）`
+        : '（未探测）';
+      return `<option value="${esc(g.uid)}">${esc(name + hint)}</option>`;
+    }).join('');
+    sel.innerHTML = opts;
+
+    // 保持原选择；账号被删掉时回落到第一个。
+    const exists = growthSnaps.some(g => g.uid === prev);
+    growthUID = exists ? prev : ((growthSnaps[0] || {}).uid || '');
+    sel.value = growthUID;
+  }
+
+  // 渲染所选账号在所选视图下的任务表。一次只画一个账号 ——
+  // 账号多的时候把所有账号铺出来会把页面拉得很长，先选再看更实用。
+  function renderGrowthGroups() {
+    const host = $('growthGroups');
+    if (!host) return;
+    if (!growthSnaps.length) {
+      host.innerHTML = '<div class="dim" style="padding:14px 16px;font-size:12px">账号池为空。</div>';
+      $('growthTaskMeta').textContent = '';
+      return;
+    }
+
+    buildGrowthAccountSelect();
+    const g = growthSnaps.find(x => x.uid === growthUID) || growthSnaps[0];
+    const c = growthCounts(g);
+
+    // 首次加载且用户没手动选过视图时，落到第一个非空视图。
+    // 只做一次：之后用户点哪个就是哪个，刷新数据也不会把视图抢回去。
+    // 必须在下面读 test 之前完成，否则这次渲染用的还是旧视图。
+    if (!growthViewPicked) {
+      for (const k of ['acceptable', 'running', 'done', 'all']) {
+        if (c[k] > 0) { growthView = k; break; }
+      }
+      syncGrowthViewButtons();
+    }
+
+    const view = GROWTH_VIEWS[growthView] ? growthView : 'acceptable';
+    const test = GROWTH_VIEWS[view].test;
+
+    $('growthTaskMeta').textContent =
+      `待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done} · 共 ${c.all}`;
+
+    const name = esc(g.nickname || (g.uid || '').slice(0, 8));
+    if (g.error && !g.tasks_total) {
+      host.innerHTML = `<div class="ggroup">
+        <div class="ghead"><span class="gname">${name}</span>
+          <span class="err" style="font-size:12px">${esc(g.error.slice(0, 120))}</span></div>
+      </div>`;
+      return;
+    }
+
+    const tasks = (g.tasks || []).filter(test);
+    const rows = tasks.map(t => {
+      const [label, cls] = GROWTH_STATUS_TEXT[t.status] || [t.status, 'dim'];
+      const prog = t.target ? `${t.current || 0}/${t.target}` : '<span class="dim">—</span>';
+      const reward = [
+        t.reward_credit ? `${t.reward_credit} 分` : '',
+        t.reward_energy ? `+${t.reward_energy} 能量` : '',
+      ].filter(Boolean).join(' ') || '<span class="dim">—</span>';
+      const locked = t.locked ? ' <span class="pill warn">未解锁</span>' : '';
+      // 领取优先于接单：completed 的任务已经做完了，唯一可做的就是领奖。
+      const btn = t.claimable
+        ? `<button data-gclaimreward="${esc(t.task_code)}" data-uid="${esc(g.uid)}">领取 ${t.reward_credit || 0} 分</button>`
+        : (t.status === 'not_accepted' && !t.locked)
+          ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}">接单</button>`
+          : '<span class="dim">—</span>';
+      const tag = t.tag ? ` <span class="pill">${esc(t.tag)}</span>` : '';
+
+      return `<tr>
+        <td class="gtask">${esc(t.title || t.task_code)}${tag}<br>
+          <span class="dim mono" style="font-size:11px">${esc(t.task_code)}</span></td>
+        <td class="gdesc">
+          <div title="${esc(t.description || '')}">${t.description ? esc(t.description) : '<span class="dim">—</span>'}</div>
+          ${t.how_to ? `<div class="howto" title="${esc(t.how_to)}">怎么做：${esc(t.how_to)}</div>` : ''}
+        </td>
+        <td><span class="pill ${cls}">${esc(label)}</span>${locked}</td>
+        <td class="mono">${prog}</td>
+        <td class="mono">${reward}</td>
+        <td style="white-space:nowrap">${btn}</td>
+      </tr>`;
+    }).join('');
+
+    host.innerHTML = `<div class="ggroup">
+      <div class="ghead">
+        <span class="gname">${name}</span>
+        <span class="dim mono" style="font-size:11px">${esc((g.uid || '').slice(0, 8))}</span>
+        <span class="dim" style="font-size:12px">待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done}</span>
+        ${g.claimable_count
+          ? `<span class="pill warn">${g.claimable_count} 个待领取 · ${g.claimable_credit} 分</span>
+             <button data-gclaimall="${esc(g.uid)}">全部领取</button>`
+          : '<span class="pill ok">奖励已领完</span>'}
+        <span class="spacer"></span>
+        <span class="tog">${clientLoginHTML(g.uid)}</span>
+      </div>
+      ${tasks.length ? `<table><thead><tr>
+        <th>任务</th><th>说明</th><th>状态</th><th>进度</th><th>奖励</th><th>操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>`
+      : `<div class="dim" style="padding:10px 16px;font-size:12px">该账号在「${esc(GROWTH_VIEWS[view].label)}」下没有任务。换个视图或换个账号看看。</div>`}
+    </div>`;
+  }
+
+  async function loadGrowth(refresh) {
+    let r;
+    try { r = await admin('/admin/growth' + (refresh ? '?refresh=1' : '')); }
+    catch (e) { $('growthRows').innerHTML = `<tr><td colspan="11" class="err">${esc(e.message)}</td></tr>`; return; }
+    renderGrowth(r.accounts, r.auto);
+  }
+
+  // claim = 领奖（把已达成任务的奖励领回来，唯一让积分到账的动作）
+  // accept = 接单（把任务接进列表开始计进度，不发奖励）
+  const GROWTH_LABEL = { claim: '领取奖励', accept: '接单', redeem: '兑换', makeup: '补签', open: '开盲盒', draw: '抽奖' };
+  // 纯收益、不消耗任何资源的动作，执行前不必再问一遍。
+  const GROWTH_HARMLESS = new Set(['claim', 'accept']);
+
+  async function growthAct(uid, act, taskCode) {
+    const body = { uid };
+    if (taskCode) body.task_code = taskCode;
+    const label = GROWTH_LABEL[act] || act;
+    try {
+      const r = await admin('/admin/growth/' + act, { method: 'POST', body: JSON.stringify(body) });
+      const extra = r.credits ? `，+${r.credits} 信用分` : '';
+      toast(`${label}成功：${r.detail || ''}${extra}`);
+    } catch (e) {
+      // 409 是「现在不该做」，用中性提示而不是红色报错
+      const skip = /没有|不足|不可领取|没有可|已领取/.test(e.message || '');
+      toast(`${label}：${e.message}`, !skip);
+    }
+    loadGrowth(true);
+    refresh();
+    loadHistory();
+  }
+
+  async function growthAll(act) {
+    const label = GROWTH_LABEL[act] || act;
+    if (!GROWTH_HARMLESS.has(act) && !confirm(`对全部账号${label}？\n（会消耗各自的资源；不满足条件的会自动跳过）`)) return;
+    try {
+      const r = await admin('/admin/growth/' + act, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
+    } catch (e) { toast(`全部${label}失败：` + e.message, true); }
+  }
+
+  // ---------------------------------------------------------------- 请求日志：实时 / 历史
+  let logMode = 'live';
+
+  function setLogMode(mode) {
+    logMode = mode;
+    const live = mode === 'live';
+    $('logTabLive').style.background = live ? 'var(--acc)' : '';
+    $('logTabLive').style.color = live ? '#fff' : '';
+    $('logTabLive').style.fontWeight = live ? '600' : '';
+    $('logTabHist').style.background = live ? '' : 'var(--acc)';
+    $('logTabHist').style.color = live ? '' : '#fff';
+    $('logTabHist').style.fontWeight = live ? '' : '600';
+    $('logHistLimit').style.display = live ? 'none' : '';
+    $('logrows').innerHTML = `<tr><td colspan="9" class="dim">${live ? '实时视图中…' : '正在读取落盘日志…'}</td></tr>`;
+    if (live) loadLogs(); else loadLogHistory();
+  }
+
+  async function loadLogHistory() {
+    const limit = $('logHistLimit').value;
+    let r;
+    try { r = await admin('/admin/logs/history?limit=' + limit); }
+    catch (e) { $('logrows').innerHTML = `<tr><td colspan="9" class="err">${esc(e.message)}</td></tr>`; return; }
+    renderLogFileInfo(r.file);
+    if (!r.enabled) {
+      $('logrows').innerHTML = '<tr><td colspan="9" class="dim">未启用落盘（只有内存实时视图）</td></tr>';
+      return;
+    }
+    if (!r.items || !r.items.length) {
+      $('logrows').innerHTML = '<tr><td colspan="9" class="dim">落盘日志为空</td></tr>';
+      return;
+    }
+    $('logMeta').textContent = `（历史 ${r.total} 条）`;
+    $('logrows').innerHTML = '';
+    renderLogs(r.items.slice().reverse());
   }
 
   // ---------------------------------------------------------------- 日志
@@ -540,6 +1217,8 @@
   }
 
   async function loadLogs() {
+    // 历史视图打开时不要被实时轮询覆盖（否则用户刚点的历史表会被 2s 后冲掉）。
+    if (logMode !== 'live') return;
     let r;
     try { r = await admin(`/admin/logs?since=${logCursor}`); } catch { return; }
     logCursor = r.cursor || logCursor;
@@ -635,7 +1314,7 @@
   function renderStats(s) {
     if (!s) return;
     const win = s.window_from
-      ? `（进程内窗口 ${new Date(s.window_from).toLocaleTimeString('zh-CN', { hour12: false })} → ${new Date(s.window_to).toLocaleTimeString('zh-CN', { hour12: false })}，上限 ${s.capacity} 条）`
+      ? `（进程内窗口 ${new Date(s.window_from).toLocaleTimeString('zh-CN', { hour12: false })} 至 ${new Date(s.window_to).toLocaleTimeString('zh-CN', { hour12: false })}，上限 ${s.capacity} 条）`
       : '（暂无请求）';
     $('statsWindow').textContent = win;
     const rate = s.total ? Math.round((s.ok / s.total) * 100) : 0;
@@ -658,61 +1337,126 @@
       : '<span class="dim">暂无调用</span>';
   }
 
-  // ---------------------------------------------------------------- 旅行（中文渲染）
+  // ---------------------------------------------------------------- 猫猫旅行（账号池式列表）
   const TRAVEL_STATE = {
-    idle: '空闲（可以派猫出门）',
-    traveling: '旅行中（猫还在路上）',
-    arrived: '已到站（可以领奖）',
+    idle: '空闲',
+    traveling: '旅行中',
+    arrived: '已到站',
   };
 
-  function renderTravel(r) {
-    if (!r) return '(空响应)';
-    const L = [];
-    if (!r.has_buddy) {
-      L.push('还没有猫');
-      L.push('需要先在 WorkBuddy 里积累足够的对话，才能领取第一只猫（领养后送 300 积分）。');
-      return L.join('\n');
-    }
-    L.push(`猫名：${r.buddy?.name || '（未命名）'}`);
-    const t = r.travel;
-    if (!t) {
-      L.push('旅行状态：查询失败');
-      if (r.travel_error) L.push(`原因：${r.travel_error}`);
-      return L.join('\n');
-    }
-    L.push(`状态：${TRAVEL_STATE[t.state] || t.state}`);
-    L.push(`今日已派出：${t.daily_limit_reached ? '是（每日 1 次，CST 00:00 重置）' : '否'}`);
-    if (t.record_id) L.push(`在途记录：${t.record_id}`);
-    if (t.reward_credit) L.push(`到站可领：${t.reward_credit} 积分`);
-    if (t.state === 'traveling') L.push('提示：猫到站后 state 会变成 arrived，那时点「领奖」即可。');
-    return L.join('\n');
+  const fmtClock = ts => ts ? new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+
+  // 把一个绝对时刻渲染成「剩余多久」，越近越醒目。
+  function fmtCountdown(sec) {
+    if (sec === undefined || sec === null) return '';
+    if (sec <= 0) return '已到站';
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm';
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    return h + 'h' + (m ? m + 'm' : '');
   }
-  async function travel(kind) {
-    const uid = $('travelUid').value;
-    const out = $('travelOut');
-    if (!uid) { out.classList.add('err'); out.textContent = '请先在上方选择账号'; return; }
-    out.classList.remove('err');
-    out.textContent = '查询中…';
+
+  function renderTravel(list, autoClaim) {
+    // 自动领奖只做状态展示：开/关在「设置」里改（单一写入口，避免两处打架）。
+    $('travelAutoHint').textContent = autoClaim
+      ? '· 自动领奖已开启（到站自动领取；可在「设置」里关闭）'
+      : '· 自动领奖已关闭（需手动领奖；可在「设置」里开启）';
+
+    if (!list || !list.length) {
+      $('travelRows').innerHTML = '<tr><td colspan="7" class="dim">账号池为空</td></tr>';
+      return;
+    }
+    $('travelRows').innerHTML = list.map(t => {
+      const name = esc(t.nickname || (t.uid || '').slice(0, 8));
+      const buddy = t.has_buddy
+        ? `${esc(t.buddy_name || '未命名')}${t.buddy_rarity ? ` <span class="dim">${esc(t.buddy_rarity)}</span>` : ''}`
+        : '<span class="dim">还没有猫</span>';
+
+      let st = '<span class="dim">未知</span>';
+      if (t.error) st = `<span class="pill err" title="${esc(t.error)}">查询失败</span>`;
+      else if (!t.has_buddy) st = '<span class="pill dim">待领养</span>';
+      else if (t.state === 'arrived') st = '<span class="pill warn">已到站</span>';
+      else if (t.state === 'traveling') st = '<span class="pill ok">旅行中</span>';
+      else if (t.state === 'idle') st = '<span class="pill dim">空闲</span>';
+
+      const arrive = t.arrive_at
+        ? `${fmtClock(t.arrive_at)}<br><span class="dim" style="font-size:11px">${esc(fmtCountdown(t.remaining_sec))}</span>`
+        : '<span class="dim">—</span>';
+      const reward = t.state === 'arrived' && t.reward_credit
+        ? `<span class="pill warn">${esc(t.reward_credit)} 分</span>`
+        : '<span class="dim">—</span>';
+
+      const U = t.uid;
+      const canDepart = !t.error && t.has_buddy && t.state === 'idle' && !t.daily_limit_reached;
+      const canClaim = !t.error && t.state === 'arrived';
+      const act = [
+        `<button data-tact="depart" data-uid="${esc(U)}"${canDepart ? '' : ' disabled'} title="${canDepart ? '派猫出门' : '当前不可派出'}">派猫</button>`,
+        `<button data-tact="claim"  data-uid="${esc(U)}"${canClaim ? '' : ' disabled'} title="${canClaim ? '领取到站奖励' : '猫未到站'}">领奖</button>`,
+        `<button data-tact="detail" data-uid="${esc(U)}" title="查看完整状态">详情</button>`,
+      ].join(' ');
+
+      return `<tr>
+        <td>${name}</td>
+        <td>${buddy}</td>
+        <td>${st}</td>
+        <td class="dim">${esc(fmtClock(t.depart_at))}</td>
+        <td>${arrive}</td>
+        <td>${reward}</td>
+        <td style="white-space:nowrap">${act}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function loadTravel(refresh) {
+    let r;
     try {
-      if (kind === 'status') {
-        out.textContent = renderTravel(await admin(`/admin/travel/status?uid=${encodeURIComponent(uid)}`));
+      r = await admin('/admin/travel' + (refresh ? '?refresh=1' : ''));
+    } catch (e) {
+      $('travelRows').innerHTML = `<tr><td colspan="7" class="err">${esc(e.message)}</td></tr>`;
+      return;
+    }
+    renderTravel(r.accounts, r.auto_claim);
+  }
+
+  async function travelAct(uid, act) {
+    try {
+      if (act === 'detail') {
+        const r = await admin(`/admin/travel/status?uid=${encodeURIComponent(uid)}`);
+        const t = r.travel || {};
+        const lines = [
+          `猫名：${r.buddy?.name || '（无猫）'}`,
+          r.buddy?.rarity ? `稀有度：${r.buddy.rarity}` : '',
+          r.buddy?.personality ? `性格：${r.buddy.personality}` : '',
+          `状态：${TRAVEL_STATE[t.state] || t.state || '未知'}`,
+          t.location?.name ? `目的地：${t.location.name}` : '',
+          t.duration_hours ? `行程：${t.duration_hours} 小时` : '',
+          t.depart_at ? `出发：${new Date(t.depart_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : '',
+          t.arrive_at ? `到站：${new Date(t.arrive_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : '',
+          r.remaining_sec !== undefined ? `距离到站：${fmtCountdown(r.remaining_sec)}` : '',
+          r.clock_skew_sec ? `本机与上游时钟偏差：${r.clock_skew_sec}s（已自动校正）` : '',
+          t.reward_credit ? `到站可领：${t.reward_credit} 积分` : '',
+          `今日已派出：${t.daily_limit_reached ? '是' : '否'}`,
+          t.record_id ? `在途记录：${t.record_id}` : '',
+          r.travel_error ? `错误：${r.travel_error}` : '',
+        ].filter(Boolean);
+        alert(lines.join('\n'));
         return;
       }
-      const r = await admin(`/admin/travel/${kind}`, { method: 'POST', body: JSON.stringify({ uid }) });
-      if (kind === 'depart') {
-        out.textContent = `派猫成功\n地点：${r.location_id} 号（四个地点收益与时长相同）\n\n等它到站后回来点「领奖」。`;
-      } else {
-        out.textContent = `领奖成功\n本次获得：${r.reward_credit || 0} 积分`;
-      }
-      toast(kind === 'depart' ? '已派出' : `已领奖 ${r.reward_credit || 0} 积分`);
-      loadHistory();
-      refresh();
+      const r = await admin('/admin/travel/' + act, { method: 'POST', body: JSON.stringify({ uid }) });
+      toast(act === 'depart' ? `已派猫出门${r.arrive_at ? '，预计 ' + new Date(r.arrive_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) + ' 到站' : ''}` : `已领奖 ${r.credits || 0} 积分`);
     } catch (e) {
-      // 409 是「现在不该做」而非「做失败了」，用中性提示而不是红色报错
-      out.textContent = (e.message || '').includes('还没到站') || (e.message || '').includes('已经派过') || (e.message || '').includes('还在路上')
-        ? `暂时不用操作：${e.message}`
-        : '失败：' + e.message;
+      toast((act === 'depart' ? '派猫' : '领奖') + '：' + e.message, true);
     }
+    loadTravel(true);
+    refresh();
+    loadHistory();
+  }
+
+  async function travelAll(act) {
+    try {
+      const r = await admin('/admin/travel/' + act, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${act === 'depart' ? '派猫' : '领奖'}已启动，后台执行中…`); watchTask(); }
+    } catch (e) { toast('操作失败：' + e.message, true); }
   }
 
   function renderModels(list) {
@@ -730,6 +1474,101 @@
   function stopAuto() {
     if (timer) { clearInterval(timer); timer = null; }
     $('auto').checked = false;
+  }
+
+  // ------------------------------------------------------- 本地登录（客户端账号切换）
+  // 本面板是唯一会改写客户端本机状态的入口，所以每个动作都要二次确认；
+  // 后端也会再验一次 confirm=true，前端弹窗不是唯一防线。
+  let clientStatus = null;
+
+  // clientLoginHTML 返回明细节头里的本机登录控制条。
+  // 参数 uid 是当前明细正在展示的账号 —— 切换目标就是它，
+  // 保证「正在看的账号」和「切过去的账号」永远是同一个。
+  function clientLoginHTML(uid) {
+    if (!clientStatus) {
+      return '<span class="dim" style="font-size:11px">本机登录：读取中…</span>';
+    }
+    if (!clientStatus.enabled) {
+      return `<span class="dim" style="font-size:11px" title="${esc(clientStatus.error || '')}">本机登录：不可用</span>`;
+    }
+    const cur = clientStatus.current;
+    const curTxt = cur
+      ? `本机登录：${esc(cur.nickname || cur.uid)}`
+      : '本机登录：未登录';
+    // 客户端在跑时改盘会被它按内存会话原地覆盖，所以按钮置灰并说明原因，
+    // 而不是让用户点了再收到一句拒绝。
+    const running = !!clientStatus.client_running;
+    const runTip = 'WorkBuddy 客户端正在运行，它会把内存里的旧登录态写回磁盘、覆盖本次切换。请先完全退出客户端（含托盘图标）。';
+    const cand = (clientStatus.candidates || []).find(c => c.uid === uid);
+    let act;
+    if (!cand) {
+      act = '<span class="dim" style="font-size:11px">无可用凭证</span>';
+    } else if (!cand.valid) {
+      act = '<span class="pill err">凭证已过期</span>';
+    } else if (cand.current) {
+      act = '<span class="pill ok">已是本机登录</span>';
+    } else {
+      const nm = cand.nickname || cand.uid;
+      act = running
+        ? `<button disabled title="${esc(runTip)}">切换本机登录</button>`
+        : `<button data-clswitch="${esc(uid)}" data-clname="${esc(nm)}" `
+          + `title="把本机 WorkBuddy 客户端切换到 ${esc(nm)}（改写客户端登录态，需重启客户端）">切换本机登录</button>`;
+    }
+    const rb = clientStatus.has_backup
+      ? (running
+        ? `<button disabled title="${esc(runTip)}">回滚</button>`
+        : `<button data-clrestore="1" title="回滚到 ${esc(clientStatus.backup_nick || clientStatus.backup_uid)}`
+          + `（备份于 ${esc(clientStatus.backup_at || '未知时间')}）">回滚</button>`)
+      : '';
+    const runPill = running
+      ? ` <span class="pill warn" title="${esc(runTip)}">客户端运行中</span>`
+      : '';
+    return `<span class="dim" style="font-size:11px">${curTxt}</span>${runPill}${act}${rb}`;
+  }
+
+  // 只取数据不渲染：真正的呈现发生在 renderGrowthGroups 的节头里。
+  async function loadClientLogin() {
+    try {
+      clientStatus = await admin('/admin/client-login');
+    } catch (e) {
+      // 客户端没装或未启用时接口会失败，不该连带影响成长计划本身，
+      // 只把控制条降级成「不可用」。
+      clientStatus = { enabled: false, error: e.message };
+    }
+    // 本机登录与成长计划是两条独立的加载时序（前者在 refresh 里、后者可能已先渲染过），
+    // 拿不到这里补一次渲染，节头就会一直停在「读取中…」直到下一次 30s 轮询。
+    // 快照还没到时不要抢渲染，免得把「加载中」覆盖成「账号池为空」。
+    if (growthSnaps.length) renderGrowthGroups();
+    return clientStatus;
+  }
+
+  async function clientSwitch(uid, name) {
+    if (!confirm(`把本机 WorkBuddy 客户端切换到「${name}」？\n\n` +
+      `· 会改写客户端凭证文件与账号指针\n` +
+      `· 需要完全退出并重新启动客户端才生效\n` +
+      `· 切换前会自动备份当前登录态，可随时回滚\n\n确认切换到 ${name}？`)) return;
+    try {
+      const r = await admin('/admin/client-login/switch', {
+        method: 'POST', body: JSON.stringify({ uid, confirm: true }),
+      });
+      toast(r.message || '已切换');
+      await loadClientLogin();
+      renderGrowthGroups();
+    } catch (e) { toast('切换失败：' + e.message, true); }
+  }
+
+  async function clientRestore() {
+    const st = clientStatus || {};
+    if (!confirm(`回滚本机客户端登录态到「${st.backup_nick || st.backup_uid || '上一次'}」？\n\n` +
+      `· 会覆盖当前客户端凭证\n· 需要完全退出并重新启动客户端才生效\n\n确认回滚？`)) return;
+    try {
+      const r = await admin('/admin/client-login/restore', {
+        method: 'POST', body: JSON.stringify({ confirm: true }),
+      });
+      toast(r.message || '已回滚');
+      await loadClientLogin();
+      renderGrowthGroups();
+    } catch (e) { toast('回滚失败：' + e.message, true); }
   }
 
   async function refresh() {
@@ -768,6 +1607,8 @@
     catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     loadSchedule();
     try { renderStats(await admin('/admin/stats')); } catch { /* 统计非关键 */ }
+    // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
+    try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();
   }
 
@@ -848,7 +1689,7 @@
       $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('conn').click(); });
     }
 
-    // 点击任意可复制块 → 复制；块内的「显示/隐藏」按钮不触发复制。
+    // 点击任意可复制块即复制；块内的「显示/隐藏」按钮不触发复制。
     $('apiCards').addEventListener('click', ev => {
       const rev = ev.target.closest('[data-reveal]');
       if (rev) {
@@ -890,7 +1731,7 @@
     $('btnReload').onclick = async () => {
       try {
         const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
-        toast(`已重载 auths：扫描 ${r.scanned} 个文件，池 ${r.before} → ${r.after}`);
+        toast(`已重载 auths：扫描 ${r.scanned} 个文件，池内账号 ${r.before} 个变为 ${r.after} 个`);
       } catch (e) { toast('重载失败：' + e.message, true); }
       refresh();
     };
@@ -898,12 +1739,60 @@
     $('btnAllCredits').onclick = () => startAll('credits');
     $('btnAllKeepalive').onclick = () => startAll('keepalive');
 
-    $('schCheckin').onchange = toggleSchedule;
-    $('schKeepalive').onchange = toggleSchedule;
+    // 猫猫旅行：只保留「动作」按钮（派猫/领奖/刷新），开关类一律归「设置」
+    $('travelRows').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-tact]');
+      if (b && !b.disabled) travelAct(b.dataset.uid, b.dataset.tact);
+    });
+    $('btnTravelRefresh').onclick = () => { toast('正在回源刷新旅行状态…'); loadTravel(true); };
+    $('btnTravelDepartAll').onclick = () => {
+      if (confirm('对全部可用账号派猫？\n（今日已派出的会自动跳过，不会重复派）')) travelAll('depart');
+    };
+    $('btnTravelClaimAll').onclick = () => travelAll('claim');
 
-    $('btnTravelStatus').onclick = () => travel('status');
-    $('btnTravelDepart').onclick = () => travel('depart');
-    $('btnTravelClaim').onclick = () => travel('claim');
+    // 成长计划：行内动作走事件委托（明细区里的按钮在下面另有一处委托）
+    $('growthRows').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gact]');
+      if (b && !b.disabled) growthAct(b.dataset.uid, b.dataset.gact, '');
+    });
+    // 账号下拉框：只切本地显示，不重新拉数据（快照里已含全部账号的任务）。
+    $('growthAccount').onchange = () => {
+      growthUID = $('growthAccount').value;
+      renderGrowthGroups();
+    };
+    $('btnGrowthRefresh').onclick = () => { toast('正在回源刷新成长计划…'); loadGrowth(true); };
+    // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
+    $('growthViews').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gview]');
+      if (!b) return;
+      growthView = b.dataset.gview;
+      growthViewPicked = true; // 用户已表态，之后刷新不再自动抢视图
+      syncGrowthViewButtons();
+      renderGrowthGroups();
+    });
+    $('btnGrowthClaimAll').onclick = () => growthAll('claim');
+    $('btnGrowthAcceptAll').onclick = () => growthAll('accept');
+    $('btnGrowthRedeemAll').onclick = () => growthAll('redeem');
+    $('btnGrowthMakeupAll').onclick = () => growthAll('makeup');
+    $('btnGrowthOpenAll').onclick = () => growthAll('open');
+    $('btnGrowthDrawAll').onclick = () => growthAll('draw');
+
+    // 本机登录的按钮长在明细节头里（随 renderGrowthGroups 重建），
+    // 所以走 growthGroups 上的事件委托，而不是给按钮本身挂 onclick。
+    $('growthGroups').addEventListener('click', ev => {
+      const sw = ev.target.closest('button[data-clswitch]');
+      if (sw && !sw.disabled) { clientSwitch(sw.dataset.clswitch, sw.dataset.clname); return; }
+      if (ev.target.closest('button[data-clrestore]')) { clientRestore(); return; }
+      // 行内「领取 N 分」：领这一个任务的奖励
+      const rw = ev.target.closest('button[data-gclaimreward]');
+      if (rw) { growthAct(rw.dataset.uid, 'claim', rw.dataset.gclaimreward); return; }
+      // 行内「接单」：把未接单的任务接进列表
+      const ac = ev.target.closest('button[data-gaccept]');
+      if (ac) { growthAct(ac.dataset.uid, 'accept', ac.dataset.gaccept); return; }
+      // 节头「全部领取」：领这个账号所有可领任务（不传 task_code 即全部）
+      const all = ev.target.closest('button[data-gclaimall]');
+      if (all) { growthAct(all.dataset.gclaimall, 'claim', ''); return; }
+    });
 
     $('btnModelRefresh').onclick = async () => {
       try {
@@ -913,14 +1802,35 @@
       } catch (e) { toast('刷新失败：' + e.message, true); }
     };
 
-    $('btnLogClear').onclick = () => { $('logrows').innerHTML = '<tr><td colspan="9" class="dim">已清屏（服务端缓冲仍在，下拉会重新显示增量）</td></tr>'; };
+    $('btnLogClear').onclick = () => { $('logrows').innerHTML = '<tr><td colspan="9" class="dim">已清屏（服务端缓冲与落盘文件仍在，切换视图会重新显示）</td></tr>'; };
     $('histKind').onchange = loadHistory;
 
-    // 日志 2s 增量拉取；历史 10s 一次。与账号表 5s 分开，互不拖累。
+    // 导航 + 设置 + 日志视图
+    $('nav').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-nav]');
+      if (b) showPanel(Number(b.dataset.nav));
+    });
+    $('btnSettingsSave').onclick = saveSettings;
+    $('btnSettingsReload').onclick = () => { loadSettings(); toast('已放弃未保存的修改'); };
+    $('content').addEventListener('input', () => markDirty(true));
+    $('content').addEventListener('change', () => markDirty(true));
+    $('logTabLive').onclick = () => setLogMode('live');
+    $('logTabHist').onclick = () => setLogMode('hist');
+    $('logHistLimit').onchange = loadLogHistory;
+
+    // 日志 2s 增量拉取；历史 10s；旅行走服务端缓存所以 15s 一次也不会打上游。
     setInterval(loadLogs, 2000);
     setInterval(loadHistory, 10000);
+    setInterval(() => loadTravel(false), 15000);
+    setInterval(() => loadGrowth(false), 30000); // 成长计划走服务端快照缓存，不会打上游
     loadLogs();
     loadHistory();
+    loadTravel(false);
+    loadGrowth(false);
+    loadSettings();   // 设置页数据先备好，顺便拿到落盘日志概况（顶部日志面板要显示）
+
+    // 导航最后构建：此时所有 section 都已在 DOM 里
+    buildNav();
 
     // 页面加载时若已有全量任务在跑（比如刚在别处点过），接着显示进度
     admin('/admin/task').then(t => { if (t && t.running) watchTask(); }).catch(() => {});

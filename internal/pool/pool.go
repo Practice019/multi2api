@@ -77,6 +77,13 @@ type entry struct {
 	disabled     bool
 	reason       string
 	lastUsed     time.Time // 最近被选中时刻（防并发撞号）
+	// lastPickSeq 最近被选中时的单调序号，只用于 lastUsed 相等时的破平。
+	//
+	// 为什么需要它：Windows 的 time.Now() 粒度可粗到 ~15ms，若 top5 全部落在同一个
+	// tick 内，五条 lastUsed 完全相同，LRU 兜底里 `c.lastUsed.Before(e.lastUsed)` 永不成立
+	// → 每次都返回 cands[0]，选号退化成「只打字母序第一个账号」。序号来自进程内单调
+	// 计数器，不受时钟粒度影响，能把这种退化掰回真正的轮转。
+	lastPickSeq int64
 
 	// breakerUntil / fails / retryCount 为熔断器运行态（不持久化）。
 	// fails 是唯一的"连续失败"计数器：任何错误喂入，达到 breakerThreshold 触发熔断（指数退避），
@@ -171,6 +178,10 @@ type Pool struct {
 	byUID   map[string]*entry
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
+
+	// pickSeq 选号单调序号（每次成功 Pick 自增，仅在持有 mu 时写）。
+	// 给 entry.lastPickSeq 分配值，用于 lastUsed 撞平时的确定性破平。
+	pickSeq int64
 
 	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
 	// SaveState/LoadState 经它接线，与本地 state.json 并存作启动恢复备份。
@@ -512,9 +523,15 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 	var e *entry
 	if len(eligible) == 0 {
 		// top5 全部刚被用过：LRU 兜底，维持发散且不 starve 任一候选。
+		// 主判据仍是 lastUsed；lastUsed 完全相等时（时钟粒度粗导致同 tick 撞平）
+		// 用单调序号 lastPickSeq 破平，否则会退化成每次都选 cands[0]。
 		e = cands[0]
 		for _, c := range cands[1:] {
 			if c.lastUsed.Before(e.lastUsed) {
+				e = c
+				continue
+			}
+			if c.lastUsed.Equal(e.lastUsed) && c.lastPickSeq < e.lastPickSeq {
 				e = c
 			}
 		}
@@ -522,6 +539,8 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
 	}
 	e.lastUsed = time.Now()
+	p.pickSeq++
+	e.lastPickSeq = p.pickSeq
 	return e.a
 }
 
