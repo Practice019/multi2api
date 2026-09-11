@@ -1326,7 +1326,7 @@
   }
 
   // 请求日志「历史（落盘）」的分页状态。与任务历史共用 renderPager。
-  const logPage = { offset: 0, limit: 30, total: 0, container: 'logPager', onGo: () => loadLogHistory() };
+  const logPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'logPager', onGo: () => loadLogHistory() };
 
   async function loadLogHistory() {
     // 每次拉取前先给一句「正在读取」，避免翻页时旧内容一直挂着让人以为没反应。
@@ -1375,6 +1375,32 @@
   // 下限 1。越界只在本函数里夹紧，不改变 state 的语义。
   const PAGE_SIZE_MIN = 1;
   const PAGE_SIZE_MAX = 300;
+  // DefaultPageSize 与后端 logbuf.DefaultPageSize / checkinlog.DefaultPageSize 同为 30。
+  // 这里只作为「从未设置过」时的初值；一旦用户改过就以 localStorage 里存的为准。
+  const DefaultPageSize = 30;
+
+  // 每页条数持久化到 localStorage，两个列表**共用同一个键**。
+  //
+  // 为什么共用一个键而不是各存一份：这是同一个用户偏好（「我习惯一次看多少条」），
+  // 不是两个独立设置。分两个键的话，在任务历史调成 100、切到请求日志还是 30，
+  // 用户会以为是 bug。之前这个值写死在 state 定义里，刷新页面就回到 30 —— 即
+  // 「不持久化」的问题，本条修复的就是它。
+  //
+  // 复用 buildNav 已有的读写范式（'wb2api.panel'）：try/catch 包住，
+  // 隐私模式下 localStorage 抛异常时静默回落默认值，不影响功能。
+  const LS_PAGESIZE = 'wb2api.pagesize';
+
+  function loadPageSize() {
+    try {
+      const raw = localStorage.getItem(LS_PAGESIZE);
+      if (raw == null) return DefaultPageSize;      // 从未设置过
+      return clampPageSize(raw);
+    } catch { return DefaultPageSize; }             // 隐私模式 / 值损坏
+  }
+
+  function savePageSize(n) {
+    try { localStorage.setItem(LS_PAGESIZE, String(n)); } catch { /* 隐私模式 */ }
+  }
 
   // clampPageSize 把任意输入（含空、小数、超界、NaN）收敛为合法整数。
   function clampPageSize(v) {
@@ -1433,6 +1459,7 @@
         box.value = String(next);
         if (next === state.limit) return;   // 没变就不重查
         state.limit = next;
+        savePageSize(next);                 // 持久化：刷新页面后仍是这个值
         state.offset = 0;   // 改变每页条数属于主动改变查询范围 → 回第 1 页
         state.onGo();
       };
@@ -1518,7 +1545,7 @@
 
   // ---------------------------------------------------------------- 历史
   // 任务历史分页状态。与请求日志共用 renderPager（同一套语义：offset/limit/total）。
-  const histPage = { offset: 0, limit: 30, total: 0, container: 'histPager', onGo: () => loadHistory() };
+  const histPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'histPager', onGo: () => loadHistory() };
 
   async function loadHistory() {
     const kind = $('histKind').value;
