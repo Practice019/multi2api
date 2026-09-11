@@ -1,0 +1,135 @@
+name: Release
+
+# 打 v* tag 时自动构建多平台二进制并挂到 GitHub Release。
+#
+# 为什么在 CI 里构建而不是本机编译后上传：
+#   1. 干净环境 —— 构建产物不含作者本机的路径 / 用户名 / go module 缓存路径
+#      （实测：不加 -trimpath 时二进制里会有 C:/Users/<name>/go/pkg/mod/...）
+#   2. 可复现 —— 任何人 fork 后打 tag 都能得到同构产物
+#   3. 交叉编译 —— 一台机器出三平台产物，无需本地装多套工具链
+#
+# 产物：
+#   wb2api-server-windows-amd64.zip   <- 含 exe + config.example.json + start.bat
+#   wb2api-server-linux-amd64.tar.gz  <- 含可执行文件 + config.example.json
+#   附 SHA256SUMS.txt 供校验
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:      # 允许手动触发（用于测试 workflow 本身）
+
+permissions:
+  contents: write         # 需要写 Release
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+            archive: zip
+          - goos: linux
+            goarch: amd64
+            ext: ''
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      # 发布前先过一遍质量门禁：坏的代码不该被做成 Release 产物。
+      # 与 ci.yml 保持一致的三件套，但这里不跑 -race（该步骤是 advisory）。
+      - name: Verify before packaging
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'          # 纯静态，产物可丢到任意同级 Linux 上跑
+        run: |
+          # -trimpath 必须保留：去掉本机绝对路径与 module 缓存路径
+          # -s -w 去掉符号表与 DWARF，体积约减小 30%
+          go build -trimpath -ldflags="-s -w" \
+            -o "dist/wb2api-server${{ matrix.ext }}" ./cmd/server
+
+      - name: Assemble package
+        run: |
+          set -e
+          PKG="wb2api-server-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "pkg/$PKG"
+          cp "dist/wb2api-server${{ matrix.ext }}" "pkg/$PKG/"
+          cp config.example.json "pkg/$PKG/"
+          # Windows 包额外带上 start.bat（双击即用）
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp start.bat "pkg/$PKG/"
+          fi
+          cd pkg
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            zip -r "../$PKG.zip" "$PKG"
+          else
+            tar czf "../$PKG.tar.gz" "$PKG"
+          fi
+          cd ..
+          ls -la *.zip *.tar.gz 2>/dev/null || true
+
+      - name: Checksums
+        run: |
+          sha256sum *.zip *.tar.gz > SHA256SUMS-${{ matrix.goos }}-${{ matrix.goarch }}.txt
+          cat SHA256SUMS-${{ matrix.goos }}-${{ matrix.goarch }}.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            *.zip
+            *.tar.gz
+            SHA256SUMS-*.txt
+
+  release:
+    name: publish release assets
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Merge checksums
+        run: |
+          cd artifacts
+          cat SHA256SUMS-*.txt | sort -k2 > SHA256SUMS.txt
+          rm -f SHA256SUMS-windows-amd64.txt SHA256SUMS-linux-amd64.txt
+          ls -la
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Release 可能已被人工创建（本仓库习惯：先建带说明的 Release，
+          # 再补资产）。存在就 upload --clobber，不存在就 create。
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，上传资产（覆盖同名）"
+            gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "Release $TAG 不存在，创建"
+            gh release create "$TAG" artifacts/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "WorkBuddy2API $TAG" \
+              --notes "自动构建产物（Windows / Linux amd64）。详见仓库 README。"
+          fi
