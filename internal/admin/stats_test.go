@@ -101,6 +101,64 @@ func TestStatsNotLimitedByRingCapacity(t *testing.T) {
 	}
 }
 
+// 统计必须覆盖**超过分页上界**的历史，而不是被 Page 的 MaxPageSize 截断。
+//
+// 为什么单独加这条：上面的 TestStatsNotLimitedByRingCapacity 恰好用了 300 条，
+// 而 300 正是后来给「每页条数」加的服务端上界（logbuf.MaxPageSize）。
+// 于是它同时满足「> ring.Cap()」和「<= MaxPageSize」，两种情况都通过 ——
+// 完全掩盖了「统计被静默截断到 300」这个 bug（线上实测 1855 行只统计了 300）。
+//
+// 教训：边界测试要**跨过**被怀疑的那个边界值，而不是落在它上面。
+func TestStatsCoversHistoryBeyondPageSizeCap(t *testing.T) {
+	const n = logbuf.MaxPageSize + 250
+	h, _ := newStatsHandler(t, persistedEntries(n))
+
+	out := doStats(t, h)
+	if got := out["total"].(float64); got != float64(n) {
+		t.Errorf("total=%v，期望 %d —— 说明统计仍被分页上界(%d)截断",
+			got, n, logbuf.MaxPageSize)
+	}
+	// tokens 也必须基于全量（fixture 每条 +10）；截断会让它正比于 300 而非 n
+	if got := out["tokens"].(float64); got != float64(n*10) {
+		t.Errorf("tokens=%v，期望 %d —— 聚合窗口不完整（被截断到 %d 条时会得到 %d）",
+			got, n*10, logbuf.MaxPageSize, logbuf.MaxPageSize*10)
+	}
+	// 全 200 ⇒ 成功率 100% 且 fail=0；这两条在截断时也会"恰好"成立，
+	// 所以不作为截断判据，只是顺带确认口径没被改坏。
+	if got := out["fail"].(float64); got != 0 {
+		t.Errorf("fail=%v，期望 0（fixture 全为 200）", got)
+	}
+}
+
+// aggregated 字段：显式暴露「实际参与聚合的条数」，与 file.count 对不上时报警。
+//
+// 这是防回归的第二道锁：即便将来又有人把取数路径改成有上界的分页，
+// 响应里也会带上 truncated=true 与一句说明，而不是像上次那样静默少统计。
+func TestStatsExposesAggregatedAndFlagsTruncation(t *testing.T) {
+	const n = logbuf.MaxPageSize + 100
+	h, _ := newStatsHandler(t, persistedEntries(n))
+
+	out := doStats(t, h)
+
+	agg, ok := out["aggregated"].(float64)
+	if !ok {
+		t.Fatal("缺少 aggregated 字段")
+	}
+	if agg != float64(n) {
+		t.Errorf("aggregated=%v，期望 %d", agg, n)
+	}
+	// 正常情况不该带 truncated
+	if v, exists := out["truncated"]; exists && v == true {
+		t.Errorf("未截断却标了 truncated=true；error=%v", out["error"])
+	}
+	// file.count 应与 aggregated 一致（同为全量）
+	if f, ok := out["file"].(map[string]any); ok {
+		if c, ok := f["count"].(float64); ok && c != agg {
+			t.Errorf("file.count=%v 与 aggregated=%v 不一致，应触发 truncated 标注", c, agg)
+		}
+	}
+}
+
 // 窗口时间应覆盖落盘首末条，而不是「进程启动至今」。
 func TestStatsWindowFromPersistedRange(t *testing.T) {
 	entries := persistedEntries(3)

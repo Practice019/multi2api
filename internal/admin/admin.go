@@ -66,11 +66,6 @@ type Handler struct {
 	statsAt     time.Time
 }
 
-// sinkCountAll 是「取全量」的分页上限。
-// 落盘文件的规模已由 maxBytes(8MiB) 与 keepDays 双重约束，
-// 单行约 150B 时 8MiB 约 5 万条，这个上限足够覆盖，同时避免传入 0 被当成默认页大小。
-const sinkCountAll = 1 << 20
-
 // New 构建管理台 handler。
 func New(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), task: &taskSlot{}}
@@ -773,12 +768,25 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	resp["source"] = source
 	resp["capacity"] = h.cfg.Ring.Cap()
 	resp["held"] = h.cfg.Ring.Len()
+	// aggregated 显式说明「本次聚合了多少条」，与 total 语义不同：
+	//   total      窗口内命中某种条件的条数（aggregateChatLog 里就是 len(items)）
+	//   aggregated 实际参与聚合的条数
+	// 正常情况两者相等。分开暴露是为了让「显示的窗口 ≠ 实际聚合窗口」这类
+	// 静默偏差可见 —— 曾经 statsItems 用 Page(0,1<<20) 想取全量却被分页上界
+	// 夹到 300，界面仍显示「全部落盘历史，共 300 条」，看不出是截断。
+	resp["aggregated"] = len(items)
 	if err != nil {
 		// 读盘失败时把原因带上，避免用户对着「总数变小」猜原因。
 		resp["error"] = "读取落盘日志失败，已回落到内存缓冲: " + err.Error()
 	}
 	if f := h.requestLogStats(); f != nil {
 		resp["file"] = f
+		// 自检：聚合条数与文件总条数不一致时明确标注，不静默。
+		if n, ok := f["count"].(int); ok && source == "file" && n != len(items) {
+			resp["truncated"] = true
+			resp["error"] = fmt.Sprintf(
+				"聚合窗口不完整：文件 %d 条，本次只聚合了 %d 条", n, len(items))
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -803,10 +811,14 @@ func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
 		err    error
 	)
 	if sink := h.cfg.Ring.Sink(); sink != nil {
-		// offset=0 且 limit 取足够大：统计需要全量，不是一页。
-		if all, total, e := sink.Page(0, sinkCountAll); e != nil {
+		// 用 LoadAll 而不是 Page(0, sinkCountAll)：
+		// Page 会按 MaxPageSize 夹紧 limit，而它分页上界是给 HTTP 调用方设的。
+		// 曾经这里传 1<<20 想取全量，被静默夹到 300 —— 一份 1855 行的日志
+		// 只聚合了最近 300 条，界面上的成功率/平均 TTFB 全是那 300 条的。
+		// 内部聚合走旁路，不受分页上界约束（见 logbuf.Sink.LoadAll 的注释）。
+		if all, e := sink.LoadAll(); e != nil {
 			err = e
-		} else if total > 0 {
+		} else if len(all) > 0 {
 			items, source = all, "file"
 		} else {
 			source = "file" // 文件存在但为空：如实说是文件来源，而不是内存

@@ -264,10 +264,47 @@ func (s *Sink) Page(offset, limit int) ([]Entry, int, error) {
 	return out, total, nil
 }
 
+// LoadAll 返回文件里的**全部**条目（时间倒序，最新在前），供内部聚合使用。
+//
+// 与 Page 的分工（这条边界很重要，别混用）：
+//
+//	Page    对外（HTTP 分页）—— **必须有上界**，防止一次请求把整个文件拉走
+//	LoadAll 对内（统计/聚合）—— 不受分页上界约束
+//
+// 为什么内部聚合需要旁路：调用统计曾用 Page(0, 1<<20) 想取全量，
+// 结果被 Page 里的 MaxPageSize 夹到 300 —— 一份 1855 行的日志只聚合了最近
+// 300 条，界面上的「共 N 条 / 成功率 / 平均 TTFB」全部只覆盖一小段，
+// 而且**静默无报错**。分页上界是给不可信的远程调用方设的，内部聚合不该受它约束。
+//
+// 规模可控性：文件本身已由 maxBytes（默认 8 MiB）+ keepDays（默认 7 天）
+// 双重约束 —— 这也是 Page 注释里已经写明的假设。若将来放宽上界，
+// 这里要改成流式聚合，而不是整份读进内存。
+//
+// 与 LoadRecent(n<=0) 的区别：后者语义是「最近 N 条」，传 0 才等于全部，
+// 聚合方得知道这个约定；LoadAll 恒为全部，意图直接。
+func (s *Sink) LoadAll() ([]Entry, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	all, err := s.readAllLocked()
+	if err != nil {
+		return nil, err
+	}
+	// readAllLocked 是追加顺序（时间正序）；倒过来即「最新在前」，
+	// 与 Page / LoadRecent 的顺序契约保持一致。
+	out := make([]Entry, 0, len(all))
+	for i := len(all) - 1; i >= 0; i-- {
+		out = append(out, all[i])
+	}
+	return out, nil
+}
+
 // LoadRecent 返回最近 n 条（时间倒序，最新在前）。
 // n<=0 时返回全部。用于「历史」视图。
-func (s *Sink) LoadRecent(n int) ([]Entry, error) {
-	if s == nil {
+func (s *Sink) LoadRecent(n int) ([]Entry, error) {	if s == nil {
 		return nil, nil
 	}
 	s.mu.Lock()
