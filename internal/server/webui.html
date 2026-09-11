@@ -83,6 +83,13 @@
   .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
   .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
   .card .v{font-size:22px;font-weight:650;font-family:var(--mono);margin-top:2px}
+  /* 仪表盘内的子段落：一块一个 h3，块间用分隔线切开。
+     每个子段自己的 .body 有内边距，这里不再重复 padding。 */
+  .boardsec + .boardsec{border-top:1px solid var(--line)}
+  .boardsec h3{margin:0;padding:11px 16px 0;font-size:13px;font-weight:600;
+    letter-spacing:.3px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .boardsec h3 .spacer{flex:1}
+  .boardsec h3 button{font-weight:400}
   .v.ok{color:var(--ok)} .v.warn{color:var(--warn)} .v.err{color:var(--err)} .v.dim{color:var(--dim)}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -170,7 +177,7 @@
   <span id="htxt" class="dim" style="font-size:12px">未连接</span>
   <div class="spacer"></div>
   <!-- 非本机访问（服务端未注入 Key）时才出现的兜底入口；本机访问这里完全为空。
-       API Key 的查看与复制统一在「API 接入信息」面板里，顶栏不再重复。 -->
+       API Key 的查看与复制统一在「仪表盘 → API 接入信息」里，顶栏不再重复。 -->
   <span id="keyFallback" style="display:none;align-items:center;gap:8px">
     <input id="key" class="key" type="password" placeholder="API Key（非本机访问需手填）" autocomplete="off">
     <label class="tog"><input id="remember" type="checkbox" checked> 记住</label>
@@ -182,36 +189,48 @@
  <div class="layout">
   <nav class="sidebar" id="nav"><!-- 导航项由脚本按 .content > section 的 DOM 顺序生成 --></nav>
   <div class="content" id="content">
+  <!-- 仪表盘：网关状态 / 调用统计 / API 接入信息 三段合成一页。
+       三段各有独立标题（h3.boardsec）与独立控制区，但共用同一个「每 5s 刷新」开关 ——
+       原先三页各有一套刷新语义，既重复又容易只刷一半，这里收敛成一处。
+       导航标签取 h2 的首个文本节点，即「仪表盘」。 -->
   <section>
-    <h2>API 接入信息 <span class="dim" style="font-weight:400;text-transform:none">只读 · 本机自动注入</span>
+    <h2>仪表盘
       <span class="spacer"></span>
-      <button id="btnCopyCurl" style="padding:3px 10px;font-size:12px">复制 curl 示例</button>
-    </h2>
-    <div class="body">
-      <div class="cards" id="apiCards"></div>
-      <table style="margin-top:14px"><thead><tr>
-        <th>端点</th><th>用途</th><th>鉴权</th></tr></thead>
-        <tbody id="epRows"></tbody></table>
-      <pre id="curlSample" style="max-height:210px"></pre>
-    </div>
-  </section>
-
-  <section>
-    <h2>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span></h2>
-    <div class="body">
-      <div class="cards" id="statsCards"></div>
-      <div style="margin-top:14px" class="chips" id="statsModels"></div>
-    </div>
-  </section>
-
-  <section>
-    <h2>网关状态 <span class="spacer"></span>
       <label class="tog"><input id="auto" type="checkbox" checked> 每 5s 刷新</label>
       <button id="refresh" style="padding:3px 10px;font-size:12px">立即刷新</button>
     </h2>
-    <div class="body">
-      <div class="cards" id="cards"></div>
-      <pre id="rawstatus" class="dim" style="display:none"></pre>
+
+    <!-- 1) 网关状态 -->
+    <div class="boardsec">
+      <h3>网关状态 <span class="dim" id="gwHint" style="font-weight:400;text-transform:none"></span></h3>
+      <div class="body">
+        <div class="cards" id="cards"></div>
+        <pre id="rawstatus" class="dim" style="display:none"></pre>
+      </div>
+    </div>
+
+    <!-- 2) 调用统计 -->
+    <div class="boardsec">
+      <h3>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span></h3>
+      <div class="body">
+        <div class="cards" id="statsCards"></div>
+        <div style="margin-top:14px" class="chips" id="statsModels"></div>
+      </div>
+    </div>
+
+    <!-- 3) API 接入信息 -->
+    <div class="boardsec">
+      <h3>API 接入信息 <span class="dim" style="font-weight:400;text-transform:none">只读 · 本机自动注入</span>
+        <span class="spacer"></span>
+        <button id="btnCopyCurl" style="padding:3px 10px;font-size:12px">复制 curl 示例</button>
+      </h3>
+      <div class="body">
+        <div class="cards" id="apiCards"></div>
+        <table style="margin-top:14px"><thead><tr>
+          <th>端点</th><th>用途</th><th>鉴权</th></tr></thead>
+          <tbody id="epRows"></tbody></table>
+        <pre id="curlSample" style="max-height:210px"></pre>
+      </div>
     </div>
   </section>
 
@@ -501,6 +520,11 @@
     ];
     $('cards').innerHTML = cards.map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+    // 子标题里的判读文案：把「顶栏那个点是绿是红」换算成一句明确的结论，
+    // 免得读者要自己把 healthy>0 与 /healthz 状态码对起来看。
+    $('gwHint').textContent = h.healthy > 0
+      ? '正在服务 · ' + h.healthy + '/' + (h.total || 0) + ' 个账号可用'
+      : (h.total > 0 ? '无可用账号 · 请求会返回 503' : '账号池为空');
   }
 
   function renderAccounts(list) {
@@ -1931,7 +1955,7 @@
 
   function boot() {
     // 本机访问：服务端已注入 Key，直接跑起来。顶栏不显示任何 API 信息，
-    // 查看/复制统一在「API 接入信息」面板里完成。
+    // 查看/复制统一在「仪表盘 → API 接入信息」里完成。
     if (INJECTED) {
       KEY = INJECTED;
       $('auto').checked = true;
