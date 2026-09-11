@@ -144,7 +144,7 @@ start.bat -config other.json
 等价的命令行启动方式（等价于双击 `start.bat`）：
 
 ```powershell
-cd D:\project_GIT\workbuddy2api
+cd path\to\workbuddy2api
 .\bin\wb2api-server.exe -config config.json
 ```
 
@@ -488,7 +488,7 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 | `completed` | **条件已达成，奖励尚未发放** | **领取奖励** |
 | `claimed` | 奖励已领取 | 无 |
 
-- **`completed` 不代表奖励已到账**。实测：妖精七七有 10 个 `completed` 任务（面值 1350 分），
+- **`completed` 不代表奖励已到账**。实测：某账号有 10 个 `completed` 任务（面值 1350 分），
   调 `POST /v2/activity/growth/tasks/{task_code}/claim` 后状态变 `claimed`、积分 +1350。
   所以「做完任务积分不涨」不是没做到，而是少了一次领取。
 - 领取是**逐个任务**的（上游没有批量接口），已领过的返回 `already_claimed=true` 且 `credit=0`，
