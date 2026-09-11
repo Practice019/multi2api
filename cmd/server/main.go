@@ -165,24 +165,41 @@ func main() {
 		log.Printf("本地登录面板不可用：未探测到客户端凭证目录（可用 admin.client_auth_dir 指定）")
 	}
 
+	// 目录状态在 server 与 admin 里各有一个结构完全相同的类型（两个包互不 import，
+	// 所以没法共用一个定义）。转换只在这一个地方做，两边各自保持零依赖。
+	modelCatalogState := func() admin.ModelCatalogState {
+		st := server.ModelCatalogState()
+		return admin.ModelCatalogState{
+			State:     st.State,
+			Models:    st.Models,
+			Stale:     st.Stale,
+			Cooldown:  st.Cooldown,
+			FetchedAt: st.FetchedAt.Format(time.RFC3339),
+		}
+	}
+
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
+		Pool:              p,
+		Upstream:          up,
+		APIKey:            cfg.APIKey,
+		Session:           sessRouter,
+		StickyCount:       sessCount,
+		RedisMode:         redisMode,
+		SoftCooldown:      cfg.SoftRateDur,
+		ModelCatalog:      server.ModelCatalog,
+		ModelCatalogState: server.ModelCatalogState,
 		Admin: admin.New(admin.Config{
-			Pool:             p,
-			Upstream:         up,
-			Scheduler:        sch,
-			OAuth:            oauth.New(cfg.OAuthBaseURL),
-			Log:              checkinLog,
-			Ring:             logRing,
-			AuthDir:          cfg.AuthDir,
-			ClientLogin:      clientLogin,
-			ResetModelsCache: server.ResetModelsCache,
+			Pool:              p,
+			Upstream:          up,
+			Scheduler:         sch,
+			OAuth:             oauth.New(cfg.OAuthBaseURL),
+			Log:               checkinLog,
+			Ring:              logRing,
+			AuthDir:           cfg.AuthDir,
+			ClientLogin:       clientLogin,
+			ResetModelsCache:  server.ResetModelsCache,
+			ModelCatalog:      server.ModelCatalog,
+			ModelCatalogState: modelCatalogState,
 			Settings: newSettingsStore(*cfgPath, cfg, sch, checkinLog, func(days int) {
 				if s := logRing.Sink(); s != nil {
 					s.SetKeepDays(days)

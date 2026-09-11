@@ -253,7 +253,15 @@
       <h3>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span></h3>
       <div class="body">
         <div class="cards" id="statsCards"></div>
-        <div style="margin-top:14px" class="chips" id="statsModels"></div>
+        <!-- 模型维度：每行一个模型，列 = 调用次数 / 成本系数。
+             系数来自上游 /v3/config（1h 缓存），拿不到时整块降级成一句说明 —— 
+             不显示 「0 次调用」这种会被误读成真实数据的空表格。 -->
+        <div id="statsModelsWrap" style="margin-top:14px;display:none">
+          <div class="dim" style="font-size:11px;letter-spacing:.4px;margin-bottom:6px">
+            模型明细 <span id="statsCatalogHint" style="text-transform:none"></span>
+          </div>
+          <div class="chips" id="statsModels"></div>
+        </div>
       </div>
     </div>
 
@@ -1829,6 +1837,73 @@
     document.body.removeChild(ta);
   }
 
+  // ---------------------------------------------------------------- 数值格式化
+  //
+  // 这一组函数存在的唯一理由：后端聚合字段有「缺失」和「真的是 0」两种情况，
+  // 而 JS 里的 `undefined + '%'` 会渲染成 "undefined%"、`NaN` 会渲染成 "NaN%"。
+  // 显示层必须自己兜底 —— 宁可显示「—」，也不要让用户看到 undefined/NaN。
+  //
+  // 注意「缺失」的判定用的是**类型**（typeof number && isFinite），而不是真值判断：
+  // 0 是合法数值（例如今日确实一次缓存都没命中），不能被当成缺数据。
+
+  // num 把任意输入转成有限的 number；不是有限数就返回 null（= 缺数据）。
+  function num(v) {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+
+  // numNonNeg 同 num，但把负数也归成「缺数据」。
+  //
+  // 计数类字段（token 数、credit、缓存命中）在语义上不可能为负，
+  // 出现负数只可能来自上游异常或被污染的日志。直接渲染负数会让用户
+  // 以为「消耗是负的/系统在退钱」，比显示占位符更糟。
+  // 注意这里是**显示层**的兜底：后端的 `> 0` 过滤已经在源头挡住，
+  // 但前端不假设后端一定正确（历史上就有旧字段 -1 表示缺失的约定）。
+  function numNonNeg(v) {
+    const n = num(v);
+    return n === null || n < 0 ? null : n;
+  }
+
+  // fmtCount 整数计数：缺失 → null（调用方显示占位符），0 → '0'（真实值）。
+  function fmtCount(v) {
+    const n = numNonNeg(v);
+    return n === null ? null : String(Math.round(n));
+  }
+
+  // fmtCredit 额度/消耗：小数最多 4 位，去掉尾随 0；缺失 → null。
+  // 保留 4 位是因为单次请求的 credit 常在 0.0x 量级，取整会全变成 0。
+  function fmtCredit(v) {
+    const n = numNonNeg(v);
+    if (n === null) return null;
+    if (n === 0) return '0';
+    return String(Number(n.toFixed(4)));
+  }
+
+  // fmtTokens 大数缩写：12.3k / 1.2M。缺失 → null。
+  function fmtTokens(v) {
+    const n = numNonNeg(v);
+    if (n === null) return null;
+    if (n < 1000) return String(Math.round(n));
+    if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+    return (n / 1000000).toFixed(1) + 'M';
+  }
+
+  // fmtRate 比率 → 百分比字符串。入参是 0..1 的小数。
+  // 缺失（含后端因分母为 0 而不输出该字段）→ null，而不是 '0%'。
+  // 越界的比率按缺数据算：>1 或 <0 说明口径已经错了，显示出来只会误导。
+  function fmtRate(v) {
+    const n = num(v);
+    if (n === null || n < 0 || n > 1) return null;
+    return (n * 100).toFixed(1) + '%';
+  }
+
+  // PLACEHOLDER 无数据时统一用「—」，全站一致，也便于用户理解成「没有这个值」。
+  const NODATA = '—';
+
   function renderStats(s) {
     if (!s) return;
     // 窗口文案必须如实说明数据来源：统计改为聚合落盘历史后，
@@ -1847,15 +1922,50 @@
     }
     if (s.error) win += ' · ' + s.error;
     $('statsWindow').textContent = win;
-    const rate = s.total ? Math.round((s.ok / s.total) * 100) : 0;
+
+    // 成功率：total 缺失或为 0 时不给数字（会得到 0/0 → NaN）。
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
+
+    // 新维度：累计消耗 / 缓存命中率 / 推理 token。
+    // 每个都先算出「字符串或 null」，再由 card() 统一决定颜色与占位符。
+    const credit = fmtCredit(s.credit_total);
+    const hitRate = fmtRate(s.cache_hit_rate);
+    const think = fmtTokens(s.think_tokens);
+    // 缓存 token 明细：命中 + 未命中都要有数才显示「x / y」，
+    // 只有一边有数时显示那一边（避免出现 "undefined / 120"）。
+    const ch = fmtTokens(s.cache_hit_tokens);
+    const cm = fmtTokens(s.cache_miss_tokens);
+    let cacheDetail = NODATA;
+    if (ch !== null && cm !== null) cacheDetail = ch + ' / ' + cm;
+    else if (ch !== null) cacheDetail = ch;
+    else if (cm !== null) cacheDetail = cm;
+
+    // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
+    // 颜色判据也用数值（不是真值），否则「命中率 0%」会因为 0 是 falsy 而被涂成 dim。
+    const card = (k, v, cls) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
+
+    const hitRateNum = num(s.cache_hit_rate);
+    const hitRateCls = hitRateNum === null ? 'dim' : hitRateNum >= 0.5 ? 'ok' : hitRateNum >= 0.2 ? 'warn' : 'err';
+    const creditNum = num(s.credit_total);
+    const thinkNum = num(s.think_tokens);
+
     $('statsCards').innerHTML = [
-      ['总请求', s.total, ''],
-      ['成功', s.ok, s.ok ? 'ok' : 'dim'],
-      ['失败', s.fail, s.fail ? 'err' : 'dim'],
-      ['成功率', s.total ? rate + '%' : '—', rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
-      ['平均 TTFB', s.avg_ttfb_ms ? s.avg_ttfb_ms + 'ms' : '—', ''],
-      ['平均总耗时', s.avg_total_ms ? s.avg_total_ms + 'ms' : '—', ''],
-      ['输出 token', s.tokens || 0, ''],
+      ['总请求', fmtCount(s.total), ''],
+      ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
+      ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
+      ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
+      // 累计消耗：上游 usage 里的 credit 求和。旧格式日志行该字段恒为 0，
+      // 此时显示 0 是**正确**的（确实没有额度数据被记录），所以不特殊处理。
+      ['累计消耗', credit, creditNum ? '' : 'dim'],
+      ['缓存命中率', hitRate, hitRateCls],
+      ['缓存 token', cacheDetail, ch !== null || cm !== null ? '' : 'dim'],
+      ['推理 token', think, thinkNum ? '' : 'dim'],
+      ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
+      ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
+      ['输出 token', fmtTokens(s.tokens), ''],
       // 缓冲占用只在内存来源时才有意义；落盘来源改写为文件占用，避免两个概念混淆。
       // 落盘只显示当前占用量：上限是配置里的固定值（默认 8 MiB），放在卡片里
       // 既不随数据变化、又让人误以为是一根进度条，去掉更清楚。
@@ -1864,14 +1974,58 @@
           ? fmtBytes(s.file.size)
           : ((s.held || 0) + '/' + (s.capacity || 0)),
         'dim'],
-    ].map(([k, v, c]) =>
-      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`
-    ).join('');
+    ].map(([k, v, c]) => card(k, v, c)).join('');
 
-    const bm = Object.entries(s.by_model || {}).sort((a, b) => b[1] - a[1]);
-    $('statsModels').innerHTML = bm.length
-      ? bm.map(([k, v]) => `<span class="chip" data-id="${esc(k)}">${esc(k)}<span>${v} 次</span></span>`).join('')
-      : '<span class="dim">暂无调用</span>';
+    renderStatsModels(s);
+  }
+
+  // renderStatsModels 模型明细：一行一个模型，同时给出调用次数与成本系数。
+  //
+  // 两个数据源各自可能缺失，必须分别降级：
+  //   - by_model 为空 → 整块隐藏（而不是显示一句「暂无调用」占着版面）；
+  //   - 系数表为空（目录没拉到 / 窗口里没有可归因模型）→ 仍然显示调用次数，
+  //     只是不带「x 倍」后缀，并在提示里说明系数不可用。
+  function renderStatsModels(s) {
+    const wrap = $('statsModelsWrap');
+    if (!wrap) return;
+    // 非数值 / 负数计数一律当 0（不能让 NaN 参与排序，那会让顺序随机；
+    // 负数排序更会让「最多的排最后」，与用户预期相反）。
+    const bm = Object.entries(s.by_model || {})
+      .map(([k, v]) => { const n = numNonNeg(v); return [k, n === null ? 0 : Math.round(n)]; })
+      .sort((a, b) => b[1] - a[1]);
+    if (!bm.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+
+    // 系数索引：后端只回「窗口里调用过且有系数」的模型，这里做成 map 方便按名字取。
+    const mult = {};
+    (Array.isArray(s.model_multipliers) ? s.model_multipliers : []).forEach(m => {
+      if (!m) return;
+      const v = num(m.multiplier);
+      if (v !== null && v > 0) mult[m.model] = v;
+    });
+
+    // 目录状态提示：把「有 / 已过期 / 拿不到」讲清楚，
+    // 因为用户看到一排没有系数的 chip 时唯一能做的就是去点「刷新模型」。
+    const cat = (s.model_catalog && typeof s.model_catalog === 'object') ? s.model_catalog : {};
+    const catModels = fmtCount(cat.models);
+    let hint;
+    if (cat.state === 'ok') {
+      hint = '· 成本系数来自 /v3/config' + (catModels === null ? '' : `（缓存 ${catModels} 个模型）`);
+    } else if (cat.state === 'stale') {
+      hint = '· 成本系数为过期缓存，可信度降低（点「刷新模型」重新拉取）';
+    } else {
+      hint = '· 成本系数不可用（上游 /v3/config 未取到），仅显示调用次数';
+    }
+    $('statsCatalogHint').textContent = hint;
+
+    $('statsModels').innerHTML = bm.map(([name, calls]) => {
+      const m = mult[name];
+      // 系数后缀：有才加；没有就只显示次数，不显示「x0 倍」这种会被读成免费的说法。
+      const suffix = m === undefined
+        ? `<span title="未取到该模型的成本系数">${calls} 次</span>`
+        : `<span title="每次调用消耗 ${m} 倍基础额度">${calls} 次 · x${m}</span>`;
+      return `<span class="chip" data-id="${esc(name)}">${esc(name)}${suffix}</span>`;
+    }).join('');
   }
 
   // fmtBytes 人类可读字节数（用于日志保留策略展示）。

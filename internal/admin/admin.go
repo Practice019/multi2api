@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,15 @@ type Config struct {
 
 	// ResetModelsCache 清空模型目录缓存（由 server 包注入，避免 admin 反向依赖 server）。
 	ResetModelsCache func()
+	// ModelCatalog 取模型目录快照（成本系数来源）。nil = 未接线，统计里报 unavailable。
+	//
+	// 由 cmd/server 注入 server.(*Handler).ModelCatalog —— 它内部按 1h TTL / 5min 失败
+	// 负缓存惰性回源上游。这里只当「取数函数」用，缓存与重试策略全部留在 server 包。
+	ModelCatalog func() *upstream.ModelCatalog
+	// ModelCatalogState 只读的目录缓存状态（ok/stale/unavailable）。nil = 未接线。
+	// 与 ModelCatalog 分开注入是刻意的：状态查询**绝不能**触发上游请求，
+	// 而取目录会。把两者混成一个函数，就没法在 /admin/stats 里安全地只要状态。
+	ModelCatalogState func() ModelCatalogState
 	// Settings 设置页的读写契约（由 cmd/server 实现并注入；nil = 关闭设置页）。
 	Settings SettingsStore
 	// ClientLogin 本机客户端登录态管理（nil = 关闭「本地登录」面板）。
@@ -152,6 +162,29 @@ func isLoopback(remoteAddr string) bool {
 // ---------------------------------------------------------------------------
 // 账号视图
 // ---------------------------------------------------------------------------
+
+// AccountView 是 pool.Status 的管理台增强视图（补 token 有效期、凭证文件、今日签到）。
+// ModelCatalogState 模型目录缓存的只读状态视图（由 server 包注入的实现填充）。
+//
+// 三态语义（ok / stale / unavailable）刻意不做成 bool：
+// 「有目录但已过 TTL」和「压根没拿到目录」对读报表的人是两件事 ——
+// 前者可以继续用（数值可能不准），后者必须显示成缺数据。
+type ModelCatalogState struct {
+	State     string `json:"state"`      // ok | stale | unavailable
+	Models    int    `json:"models"`     // 目录内模型数
+	Stale     bool   `json:"stale"`      // 数据存在但已超出 TTL
+	Cooldown  bool   `json:"cooldown"`   // 正处于失败负缓存冷却期
+	FetchedAt string `json:"fetched_at"` // 最近一次成功拉取时间（RFC3339；无则空）
+}
+
+// ModelMultiplier 单模型的成本系数视图（credit 的放大倍数，来自 /v3/config）。
+type ModelMultiplier struct {
+	Model      string  `json:"model"`
+	Multiplier float64 `json:"multiplier"`
+	// Calls 该模型在本次聚合窗口内的调用次数（来自 by_model），
+	// 让前端能在同一条 chip 上同时说清「调了多少次」和「每次贵多少倍」。
+	Calls int `json:"calls"`
+}
 
 // AccountView 是 pool.Status 的管理台增强视图（补 token 有效期、凭证文件、今日签到）。
 type AccountView struct {
@@ -788,7 +821,83 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 				"聚合窗口不完整：文件 %d 条，本次只聚合了 %d 条", n, len(items))
 		}
 	}
+	// 成本系数与目录状态（B1.2）：放在同一个响应里而不是新开端点。
+	//
+	// 为什么不新开 /admin/models/catalog：
+	//   - 前端渲染「调用统计」时**同时**需要 by_model（调用次数）与 multiplier（每次多贵），
+	//     拆成两个端点会让同一次渲染出现「系数到了但次数还没到」的中间态，
+	//     还会多一次轮询往返（仪表盘本来就是 5s 轮询）；
+	//   - 两个数据源的生命周期不同（日志聚合 5s 缓存 vs 目录 1h TTL），
+	//     但**读口径统一**：都是「展示现状」，没有写语义，合并不引入权限/一致性问题；
+	//   - 失败降级是局部的：目录拿不到只让 model_catalog.state=unavailable，
+	//     其余统计字段照常返回（不会被 5xx 连坐）。
+	// 真正需要独立端点的是「刷新目录」这种**写**动作 —— 那已经由 /admin/models/refresh 承担。
+	state := h.modelCatalogState()
+	resp["model_catalog"] = state
+	resp["model_multipliers"] = h.modelMultipliers(resp, state)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// modelCatalogState 取目录缓存状态；未接线或实现返回零值时统一归到 unavailable。
+//
+// 与 modelMultipliers 分开是因为调用时机不同：状态每次统计都要报（哪怕系数表没取到），
+// 而系数表要按 by_model 过滤，且允许整体缺失。
+func (h *Handler) modelCatalogState() ModelCatalogState {
+	if h.cfg.ModelCatalogState == nil {
+		return ModelCatalogState{State: "unavailable"}
+	}
+	st := h.cfg.ModelCatalogState()
+	if st.State == "" {
+		// 实现方漏填状态：按最保守的语义处理，不假装有数据。
+		st.State = "unavailable"
+	}
+	return st
+}
+
+// modelMultipliers 返回**在本次统计窗口里真的被调用过**的模型的成本系数。
+//
+// 为什么要按 by_model 过滤，而不是把整个目录倒出来：
+// 目录有 30 个模型，而一个网关上通常只跑其中几个；把没调用过的模型也塞进响应，
+// 前端就得自己判断「哪些 chip 该显示」——而那正是这份数据存在的理由。
+// 过滤后「有 chip = 有调用」，前端不需要第二套判断。
+//
+// 取数的副作用边界：h.cfg.ModelCatalog 内部按 1h TTL 惰性回源，**首次调用会发一次上游请求**。
+// 这被刻意接受（成本系数不主动拉取就永远是空的），但有三重保护：
+//
+//  1. 目录不可用时（state=unavailable）直接跳过，不触发；
+//  2. 窗口里没有任何 by_model 时直接跳过，不触发；
+//  3. 单测/未接线（nil）时直接返回空切片。
+//
+// 统计接口本身不会因为这次拉取失败而报错 —— 拿不到就是空表。
+func (h *Handler) modelMultipliers(resp map[string]any, state ModelCatalogState) []ModelMultiplier {
+	out := []ModelMultiplier{}
+	byModel, ok := resp["by_model"].(map[string]int)
+	if !ok || len(byModel) == 0 || h.cfg.ModelCatalog == nil {
+		return out
+	}
+	if state.State == "unavailable" {
+		return out
+	}
+	cat := h.cfg.ModelCatalog()
+	if cat == nil {
+		return out
+	}
+	// 按模型名排序输出：map 遍历顺序随机，固定顺序让响应可 diff（与目录排序同一动机）。
+	names := make([]string, 0, len(byModel))
+	for id := range byModel {
+		names = append(names, id)
+	}
+	sort.Strings(names)
+	for _, id := range names {
+		m, ok := cat.Multiplier(id)
+		if !ok {
+			// 目录里没有这个模型（或系数为 0）：不输出条目，而不是输出 0 ——
+			// 0 系数在前端会显示成「免费」，而真相是「不知道」。
+			continue
+		}
+		out = append(out, ModelMultiplier{Model: id, Multiplier: m, Calls: byModel[id]})
+	}
+	return out
 }
 
 // statsItems 取出用于聚合的条目及其来源标识。
@@ -834,7 +943,29 @@ func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
 	return items, source, err
 }
 
+// cacheHitRate 缓存命中率 = 命中 / (命中 + 未命中)。
+//
+// 分母为 0 时返回 (0, false)：调用方据此决定「输出 0」还是「不输出该字段」。
+// 之所以必须显式挡掉 0/0，是因为 IEEE-754 下 float64(0)/float64(0) = NaN，
+// NaN 经 encoding/json 序列化成 JSON 字面量 `null`（Marshal 对 NaN/Inf 返回
+// 不支持值错误，writeJSON 里 `raw, _ :=` 把错误吞掉后会写出一个空 body）——
+// 前端拿到 null 再做算术就是 NaN，页面上会出现 "NaN%"。
+// 宁可少一个字段，也不要让「没有缓存数据」伪装成一个数值。
+func cacheHitRate(hit, miss int64) (float64, bool) {
+	den := hit + miss
+	if den <= 0 {
+		return 0, false
+	}
+	return float64(hit) / float64(den), true
+}
+
 // aggregateChatLog 对条目做纯聚合（无 IO），便于单测直接覆盖算术。
+//
+// 新增的 usage 派生字段（Credit/ThinkTokens/CacheHitTokens/CacheMissTokens）
+// 一律只在 >0 时累加：旧格式行没有这些 JSON 键，反序列化后是 Go 零值，
+// 天然贡献 0；-0.0 / 负数这类病态值（理论上解析层已挡掉）也和 0 等价，
+// 不会污染其它聚合量（它们各走各的累加器，唯一的交汇点是 cache_hit_rate 的分母，
+// 而那里对 <=0 有显式兜底）。
 func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	byModel := map[string]int{}
 	byStatus := map[string]int{}
@@ -842,6 +973,8 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	var okN, failN, tokens int64
 	var ttfbSum, totalSum int64
 	var ttfbN int64
+	var credit float64
+	var thinkTokens, cacheHitTokens, cacheMissTokens int64
 	var oldest, newest time.Time
 
 	for _, e := range items {
@@ -859,6 +992,20 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		if e.Tokens > 0 {
 			tokens += int64(e.Tokens)
 		}
+		// Credit 用 >0 而不是 !=0：负数/负零属于上游异常数据，
+		// 让它进入累加会把「累计消耗」变成负值，比丢弃它更难解释。
+		if e.Credit > 0 {
+			credit += e.Credit
+		}
+		if e.ThinkTokens > 0 {
+			thinkTokens += int64(e.ThinkTokens)
+		}
+		if e.CacheHitTokens > 0 {
+			cacheHitTokens += int64(e.CacheHitTokens)
+		}
+		if e.CacheMissTokens > 0 {
+			cacheMissTokens += int64(e.CacheMissTokens)
+		}
 		totalSum += e.TotalMS
 		if e.TTFBMS > 0 {
 			ttfbSum += e.TTFBMS
@@ -873,13 +1020,22 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	}
 
 	resp := map[string]any{
-		"total":     len(items),
-		"ok":        okN,
-		"fail":      failN,
-		"by_model":  byModel,
-		"by_status": byStatus,
-		"by_uid":    byUID,
-		"tokens":    tokens,
+		"total":             len(items),
+		"ok":                okN,
+		"fail":              failN,
+		"by_model":          byModel,
+		"by_status":         byStatus,
+		"by_uid":            byUID,
+		"tokens":            tokens,
+		"credit_total":      credit,
+		"think_tokens":      thinkTokens,
+		"cache_hit_tokens":  cacheHitTokens,
+		"cache_miss_tokens": cacheMissTokens,
+	}
+	// cache_hit_rate 只在分母 >0 时输出（空集、全为旧格式行、或只有 miss 也为 0 时都不输出）：
+	// 前端据此显示「—」而不是一个 0%，避免把「没有数据」读成「命中率真的是 0」。
+	if r, ok := cacheHitRate(cacheHitTokens, cacheMissTokens); ok {
+		resp["cache_hit_rate"] = r
 	}
 	if len(items) > 0 {
 		resp["avg_total_ms"] = totalSum / int64(len(items))

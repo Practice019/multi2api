@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -34,6 +35,16 @@ type Config struct {
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 	// Admin 管理台子树（挂在 /admin/，由 internal/admin 提供）。nil = 不注册该子树。
 	Admin http.Handler
+	// ModelCatalog 供管理台取模型目录快照（成本系数用）。nil = 本实例不提供该能力。
+	//
+	// 为什么是函数而不是把 *Handler 传过去：admin 已经在用 `ResetModelsCache func()`
+	// 这种「由 server 注入闭包」的方向；反向传 *Handler 会让 admin → server 形成
+	// 编译期依赖，而 server 反过来 import admin 是为了挂 /admin/ 子树 —— 一反向就是
+	// import cycle。传函数既避开环，也让 admin 不必知道缓存住在哪个包。
+	ModelCatalog func() *upstream.ModelCatalog
+	// ModelCatalogState 只读地报告模型目录缓存状态（ok/stale/unavailable）。
+	// 语义见包级 ModelCatalogState —— 它绝不触发上游请求。nil = 未接线。
+	ModelCatalogState func() CatalogState
 }
 
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
@@ -59,6 +70,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	registerCatalogHost(h) // 让包级 ModelCatalog/ModelCatalogState 能找到本实例的缓存
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// 单数别名：部分客户端/探针按 /v1/model 探测，与 /v1/models 同源同响应。
@@ -81,12 +93,21 @@ func NewHandler(cfg Config) *Handler {
 
 // ResetModelsCache 清空动态模型缓存，让下一次 /v1/models 强制回源上游。
 // 正缓存 1h / 负缓存 5min 都清掉——用户点「刷新模型」的意图是立刻看到最新目录。
+//
+// 模型目录（成本系数）缓存一并清空：两者是同一个上游账号在同一次「刷新」里的期望产物，
+// 只清一个会出现「模型列表变了但系数还是旧的」这种半刷新状态。
 func ResetModelsCache() {
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.ids = nil
 	dynamicModelsCache.fetched = time.Time{}
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
+
+	modelCatalogCache.Lock()
+	modelCatalogCache.cat = nil
+	modelCatalogCache.fetched = time.Time{}
+	modelCatalogCache.lastFail = time.Time{}
+	modelCatalogCache.Unlock()
 }
 
 // ChatLogRing 返回请求日志环形缓冲（/admin/logs 的数据源）。
@@ -251,6 +272,166 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	dynamicModelsCache.lastFail = time.Time{} // 成功则清空负缓存
 	dynamicModelsCache.Unlock()
 	return infos
+}
+
+// modelCatalogCache 模型目录（GET /v3/config，成本系数）缓存。
+//
+// 与 dynamicModelsCache 是**两份**缓存而不是合并成一份，理由与两个端点不能互相替代同源：
+//   - 数据源不同：/console/enterprises/personal/models（模型可用性）vs /v3/config（成本系数）；
+//   - 失败模式不同：系数拿不到只是少一个观测维度，不该把 /v1/models 的模型列表也拖下水。
+//
+// 生命周期策略刻意与 dynamicModelsCache 完全一致（1h 正缓存 + 5min 失败负缓存、
+// 惰性拉取、不加 ticker/goroutine），这样「什么时候会打上游」在代码里只有一套心智模型。
+// cat 存 *upstream.ModelCatalog：nil 表示尚无有效目录。
+var modelCatalogCache struct {
+	sync.RWMutex
+	cat      *upstream.ModelCatalog
+	fetched  time.Time // 最近一次成功拉取时间
+	lastFail time.Time // 最近一次拉取失败时间（负缓存）
+}
+
+// ModelCatalog 返回缓存的模型目录；缓存失效时惰性回源一次，失败返回 nil。
+//
+// 这是 FetchModelCatalog 的生产调用点。三条硬约束体现在实现里：
+//
+//  1. **失败永不向上传播**：签名没有 error，拿不到就返回 nil，调用方（/admin/stats）
+//     降级成「unavailable」而不是把统计接口打成 500。
+//  2. **不加 ticker/goroutine**：与 fetchDynamicModels 一样纯惰性 —— 只有被问到时才可能拉，
+//     没人查询就一次上游请求都不发。
+//  3. **失败惩罚账号**：与动态模型列表一致走 Pool.NoteError + 全局 5min 负缓存，
+//     否则一个坏号会被反复 Pick 到并反复打上游（这里不主动刷新 token，
+//     与 fetchDynamicModels 的取舍保持一致：系数是锦上添花，不值得为它触发一次 refresh）。
+//
+// 取号策略：**失败换号**。fetchDynamicModels 每次只 Pick 一个号，多账号下
+// 「pick 到坏号 → 整个实例 5min 没有目录」的概率不低；系数归因只读多花至多 MaxRotate 次
+// 请求即可显著提高成功率，且总次数有硬上限，不会形成风暴。
+//
+// 为什么是包级函数而不是 (*Handler) 方法：admin 需要这两个能力，而
+// `server.NewHandler(Config{Admin: admin.New(...)})` 是一层自引用 ——
+// 在构造 h 时 h 还不存在，没法把 h.modelCatalog 作为方法值传进 Config。
+// 缓存本身也是包级变量（与 dynamicModelsCache 同款），所以不持有 Handler 也不丢东西。
+// ModelCatalog 与 ModelCatalogState 通过 Config 的两个同名字段注入，
+// 测试可覆盖成桩函数，生产由 cmd/server 直接传这两个包级函数。
+func ModelCatalog() *upstream.ModelCatalog {
+	if h := catalogHost.Load(); h != nil {
+		return h.modelCatalog()
+	}
+	return nil
+}
+
+// ModelCatalogState 报告模型目录缓存状态并返回快照。**只读，绝不触发拉取**：
+// 它会被 /admin/stats 调用，而统计是轮询接口，让它触发上游请求会把「看报表」
+// 变成「打上游」。真正的回源只发生在 modelCatalog() 里。
+//
+// 返回 CatalogState（本包类型）而不是上游类型：状态描述是「缓存这件事」的属性，
+// 与上游响应结构无关，放在本包才不需要让 admin 认识 upstream 的字段。
+func ModelCatalogState() CatalogState {
+	if h := catalogHost.Load(); h != nil {
+		return h.modelCatalogState()
+	}
+	return CatalogState{State: "unavailable"}
+}
+
+// catalogHost 保存「目录缓存归属的 Handler」。
+//
+// 存在的唯一理由：admin 需要在 handler 构造前就拿到这两个取值函数（见 ModelCatalog 的注释）。
+// 用 atomic.Pointer 而不是普通变量，是因为它会被 HTTP 处理路径读取，
+// 而写入发生在 NewHandler（可能与其他初始化并发）。
+//
+// ⚠ 这是一个**隐式全局**：后构造的 Handler 会覆盖先前的，因此"谁拥有目录缓存"
+// 在进程内只能有一个答案。当前唯一的生产构造点是 cmd/server（单实例），
+// 测试也各自串行，所以实际成立；但引入第二个并存的 Handler 时这里会静默错位。
+// 之所以接受它：缓存本身（modelCatalogCache）已经是包级变量，语义上就只有一个，
+// 这里只是补一个"用谁的 Upstream/Pool 去回源"的答案。若将来真的需要多实例并存，
+// 正确做法是把 modelCatalogCache 一并收进 Handler，而不是在这里加锁。
+var catalogHost atomic.Pointer[Handler]
+
+// registerCatalogHost 由 NewHandler 调用，登记目录缓存归属。
+//
+// 抽成函数而不是在 NewHandler 里裸写一行，是为了让"写入这个全局"这件事
+// 在 grep 时可见（避免将来有人以为它是只读的）。
+func registerCatalogHost(h *Handler) { catalogHost.Store(h) }
+
+// CatalogState 模型目录缓存状态（供管理台区分「有数据 / 数据已过期 / 拿不到」）。
+//
+// 三态而不是「有没有目录」两态：stale 时目录内容仍然可用（只是可能已过期），
+// 前端必须能把它和 ok 区分开，否则用户会拿一份过期系数当实时值读。
+type CatalogState struct {
+	State     string    `json:"state"` // ok | stale | unavailable
+	FetchedAt time.Time `json:"fetched_at,omitempty"`
+	Models    int       `json:"models"`
+	Stale     bool      `json:"stale"`
+	Cooldown  bool      `json:"cooldown,omitempty"` // 是否处于失败负缓存冷却期
+}
+
+func (h *Handler) modelCatalogState() CatalogState {
+	modelCatalogCache.RLock()
+	defer modelCatalogCache.RUnlock()
+	st := CatalogState{State: "unavailable"}
+	if cool := !modelCatalogCache.lastFail.IsZero() &&
+		time.Since(modelCatalogCache.lastFail) < modelsFetchFailCooldown; cool {
+		st.Cooldown = true
+	}
+	if modelCatalogCache.cat == nil {
+		return st
+	}
+	st.Models = len(modelCatalogCache.cat.Models)
+	st.FetchedAt = modelCatalogCache.fetched
+	if !modelCatalogCache.fetched.IsZero() && time.Since(modelCatalogCache.fetched) >= dynamicModelsTTL {
+		st.State, st.Stale = "stale", true
+		return st
+	}
+	st.State = "ok"
+	return st
+}
+
+// modelCatalog 是 (*Handler) 上的实现体，语义见包级 ModelCatalog。
+func (h *Handler) modelCatalog() *upstream.ModelCatalog {
+	if h.cfg.Upstream == nil || h.cfg.Pool == nil {
+		return nil
+	}
+	modelCatalogCache.RLock()
+	if modelCatalogCache.cat != nil && time.Since(modelCatalogCache.fetched) < dynamicModelsTTL {
+		cat := modelCatalogCache.cat
+		modelCatalogCache.RUnlock()
+		return cat
+	}
+	// 失败负缓存：冷却期内不再请求上游（与 dynamicModelsCache 同一套语义）。
+	if !modelCatalogCache.lastFail.IsZero() && time.Since(modelCatalogCache.lastFail) < modelsFetchFailCooldown {
+		modelCatalogCache.RUnlock()
+		return nil
+	}
+	// 内有未过期目录但已超 TTL：先取出来，全部重取失败时回吐旧目录。
+	stale := modelCatalogCache.cat
+	modelCatalogCache.RUnlock()
+
+	tried := map[string]bool{}
+	for i := 0; i < h.cfg.MaxRotate; i++ {
+		acct := h.cfg.Pool.PickExcluding(tried)
+		if acct == nil {
+			break
+		}
+		tried[acct.UID] = true
+		cat, err := h.cfg.Upstream.FetchModelCatalog(acct)
+		if err != nil || cat == nil || len(cat.Models) == 0 {
+			// 与 fetchDynamicModels 同口径：惩罚该账号，避免下次 Pick 又选中同一个反复失败的号。
+			h.cfg.Pool.NoteError(acct.UID)
+			continue
+		}
+		modelCatalogCache.Lock()
+		modelCatalogCache.cat = cat
+		modelCatalogCache.fetched = time.Now()
+		modelCatalogCache.lastFail = time.Time{} // 成功则清空负缓存
+		modelCatalogCache.Unlock()
+		return cat
+	}
+
+	// 全部尝试失败：进负缓存。已有旧目录时**保留它并返回** ——
+	// 成本系数是观测维度，过期的系数比没有系数有用得多（前端会标 stale 提示其不可信）。
+	modelCatalogCache.Lock()
+	modelCatalogCache.lastFail = time.Now()
+	modelCatalogCache.Unlock()
+	return stale
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
