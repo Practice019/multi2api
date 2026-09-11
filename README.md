@@ -133,14 +133,17 @@ flowchart LR
 
 ```
 D:\wb2api\
+├── start.bat
 ├── wb2api-server.exe
-├── config.json          <- 由 config.example.json 复制并改名而来
 ├── config.example.json
-└── start.bat
+└── config.json          <- 由 config.example.json 复制并改名而来
 ```
 
 首次启动会自动创建 `auths\`（账号凭证）与 `data\`（池状态、日志、历史）两个目录。
 浏览器打开 **http://127.0.0.1:7863/ui** 即进入本地控制台，在「账号池 → ＋ 添加账号」里完成 OAuth 登录。
+
+> `start.bat` 会自动在**两个位置**找可执行文件，所以 Release 包（exe 与 bat 同级）和
+> 源码检出（exe 在 `bin\`）两种布局都能直接双击运行，不必手动调整目录结构。
 
 **Linux：**
 
@@ -195,7 +198,7 @@ go build -trimpath -ldflags="-s -w" -o bin\wb2api-server.exe .\cmd\server
 > `-trimpath` **不要省**：不加它，二进制里会写进你本机的绝对路径与 Go module 缓存路径
 > （如 `C:/Users/<你的用户名>/go/pkg/mod/...`）。自己用无所谓，但若要把产物分享给别人就该去掉。
 
-构建完成后同样可以双击 `start.bat`（它会用 `bin\wb2api-server.exe`）。
+构建完成后同样可以双击 `start.bat`（它会在 `bin\` 与同级目录两处自动查找可执行文件）。
 
 ### 2. 登录添加账号
 
