@@ -8,6 +8,7 @@
 package logbuf
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -61,6 +62,30 @@ func (r *Ring) Sink() *Sink {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.sink
+}
+
+// SeedSeq 用落盘日志里的最大 seq 播种计数器，让序号跨重启继续增长。
+//
+// 为什么需要它：Push 会用 Ring 自己的 total 覆盖 Entry.Seq，而 total 是进程级的、
+// 重启归零。不播种的话，同一个落盘文件里会出现重复 seq ——
+// 「序号依次变大」就只在单次进程生命周期内成立。
+//
+// 语义约束：
+//   - n<=0 视为「无历史」，保持从 1 开始（首次启动的常见情形）；
+//   - n 小于当前计数时不回退（取较大者），否则会与已有记录重号；
+//   - 负数一律拒绝。
+//
+// 必须在开始 Push 之前调用；运行中调用只会把计数往前推，不会重排已有条目。
+func (r *Ring) SeedSeq(n int64) error {
+	if n < 0 {
+		return fmt.Errorf("logbuf: SeedSeq 不接受负数（%d）", n)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n > r.total {
+		r.total = n
+	}
+	return nil
 }
 
 // Push 写入一条；返回分配的递增序列号。

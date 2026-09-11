@@ -233,6 +233,33 @@ func (s *Sink) LoadRecent(n int) ([]Entry, error) {
 	return out, nil
 }
 
+// MaxSeq 返回落盘日志中的最大序号（文件为空或不存在时返回 0）。
+//
+// 用途：请求序号计数器是进程级的，重启会从 1 重来，于是同一个落盘文件里会出现
+// 重复 seq，「序号依次变大」只在单次进程生命周期内成立。启动时用它播种计数器，
+// 就能让序号跨重启继续增长。
+//
+// 取「最大」而不是「最后一条」：文件可能被外部追加过或存在乱序，
+// 扫一遍求最大值更稳，代价也只是启动时一次顺序读（受 maxBytes 上界约束）。
+func (s *Sink) MaxSeq() (int64, error) {
+	if s == nil {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all, err := s.readAllLocked()
+	if err != nil {
+		return 0, err
+	}
+	var max int64
+	for _, e := range all {
+		if e.Seq > max {
+			max = e.Seq
+		}
+	}
+	return max, nil
+}
+
 // Stats 返回落盘日志的概况（条数、字节、时间范围），供设置页展示。
 func (s *Sink) Stats() map[string]any {
 	if s == nil {

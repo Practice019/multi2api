@@ -106,6 +106,18 @@ func main() {
 	} else {
 		logRing.SetSink(sink)
 		defer sink.Close()
+		// 用落盘日志里的最大 seq 播种两个序号计数器（Ring 的与 stdout 的），
+		// 否则重启后序号从 1 重来，落盘文件里会出现重复 seq。
+		// 读失败只影响序号连续性，不该拦住启动，因此仅记日志后继续。
+		if maxSeq, err := sink.MaxSeq(); err != nil {
+			log.Printf("读取历史日志序号失败（本次从 1 重新计数）: %v", err)
+		} else if maxSeq > 0 {
+			if err := logRing.SeedSeq(maxSeq); err != nil {
+				log.Printf("播种请求序号失败: %v", err)
+			}
+			server.SeedChatSeq(maxSeq)
+			log.Printf("请求日志续接历史序号：从 #%d 之后继续", maxSeq)
+		}
 		log.Printf("请求日志落盘: %s（保留 %d 天）", cfg.RequestLogPath, cfg.RequestLogKeepDays)
 	}
 
