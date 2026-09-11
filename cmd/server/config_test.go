@@ -355,3 +355,58 @@ func TestBadSessionTTL(t *testing.T) {
 		t.Fatal("want error for bad session_sticky.ttl")
 	}
 }
+
+// TestGrowthAutoClaimKeyAlias 领奖开关接受两个键名。
+//
+// 背景：accept 那个开关叫 growth_auto_accept_tasks（带 _tasks 后缀），
+// 而领奖最初只认 growth_auto_claim。于是按一致性手写 growth_auto_claim_tasks
+// 的人会被静默忽略——配置改了等于没改，而且因为默认值是 true，
+// 表面上看不出任何异常（这正是线上发现的问题）。
+// 两个键都必须生效，且显式 false 要能真的关掉它。
+func TestGrowthAutoClaimKeyAlias(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"主键 true", `{"admin":{"growth_auto_claim":true}}`, true},
+		{"主键 false", `{"admin":{"growth_auto_claim":false}}`, false},
+		{"别名 true", `{"admin":{"growth_auto_claim_tasks":true}}`, true},
+		{"别名 false", `{"admin":{"growth_auto_claim_tasks":false}}`, false},
+		{"都没配时默认开", `{}`, true},
+		// 主键优先：两个都写且冲突时，以规范键为准，不被别名悄悄翻掉。
+		{"主键优先", `{"admin":{"growth_auto_claim":false,"growth_auto_claim_tasks":true}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "c.json")
+			os.WriteFile(fp, []byte(tc.body), 0o600)
+			c, err := Load(fp)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if c.GrowthAutoClaim != tc.want {
+				t.Errorf("GrowthAutoClaim=%v want %v (body=%s)", c.GrowthAutoClaim, tc.want, tc.body)
+			}
+		})
+	}
+}
+
+// TestGrowthAutoClaimAliasIsNotSilentlyLost 反证：别名键必须被结构体真的解析到，
+// 不能只是「不报错」。若哪天有人把别名字段删掉，这个测试会立刻红。
+func TestGrowthAutoClaimAliasIsNotSilentlyLost(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"admin":{"growth_auto_claim_tasks":false}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Admin.GrowthAutoClaimAlias == nil {
+		t.Fatal("别名字段未被解析（growth_auto_claim_tasks 又被静默忽略了）")
+	}
+	if *c.Admin.GrowthAutoClaimAlias != false {
+		t.Errorf("别名值解析错误: %v", *c.Admin.GrowthAutoClaimAlias)
+	}
+}

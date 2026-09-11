@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"workbuddy2api/internal/auth"
 )
@@ -27,17 +28,81 @@ const (
 const buddyTaskIncompleteMarker = "first_buddy task not completed yet"
 
 // Buddy 账号当前猫档案；nil（data.buddy 为 null）表示无猫。
+//
+// 字段名注意：上游实际用的是 instance_id，但历史夹具（travel_test.go）写的是 id，
+// 两个都保留：Instance() 负责给出可用的那个，避免为了改 tag 而改既有测试。
 type Buddy struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID           int64  `json:"id"`          // 兼容字段（旧夹具/旧上游）
+	InstanceID   int64  `json:"instance_id"` // 上游实际字段
+	Name         string `json:"name"`
+	Personality  string `json:"personality"`
+	Rarity       string `json:"rarity"`
+	SoulDesc     string `json:"soul_desc"`
+	ThumbnailURL string `json:"thumbnail_url"`
+}
+
+// Instance 返回可用的实例 ID（优先真实字段 instance_id，回落兼容字段 id）。
+func (b *Buddy) Instance() int64 {
+	if b == nil {
+		return 0
+	}
+	if b.InstanceID != 0 {
+		return b.InstanceID
+	}
+	return b.ID
+}
+
+// TravelLocation 目的地（四个地点收益/时长区间相同）。
+type TravelLocation struct {
+	ID            int    `json:"id"`
+	Code          string `json:"code"`
+	Name          string `json:"name"`
+	DurationHours int    `json:"duration_hours"`
 }
 
 // TravelState 猫猫旅行状态。
+//
+// DepartAt/ArriveAt/ServerNow 是上游实测返回的 Unix 秒时间戳：
+//   - ArriveAt 让「到点自动领奖」不必盲轮询，可以直接睡到到站时刻；
+//   - ServerNow 让本机时钟偏差可被校正，否则本机时间不准会提前/延后领奖。
 type TravelState struct {
-	State             string `json:"state"`               // idle / traveling / arrived
-	DailyLimitReached bool   `json:"daily_limit_reached"` // 今日已派出过（自然日 00:00 CST 重置）
-	RecordID          int64  `json:"record_id"`           // 在途/到站记录 id，claim 必带
-	RewardCredit      int64  `json:"reward_credit"`       // 到站可领奖励积分
+	State             string          `json:"state"` // idle / traveling / arrived
+	BuddyID           int64           `json:"buddy_id"`
+	RecordID          int64           `json:"record_id"` // 在途/到站记录 id，claim 必带
+	Location          *TravelLocation `json:"location"`
+	DepartAt          int64           `json:"depart_at"`  // Unix 秒
+	ArriveAt          int64           `json:"arrive_at"`  // Unix 秒，到站时刻
+	ServerNow         int64           `json:"server_now"` // 上游当前时间，用于校正本机时钟
+	DurationHours     int             `json:"duration_hours"`
+	DailyLimitReached bool            `json:"daily_limit_reached"` // 今日已派出过（自然日 00:00 CST 重置）
+	RewardCredit      int64           `json:"reward_credit"`       // 到站可领奖励积分
+}
+
+// ClockSkew 返回「本机 now 相对上游 server_now」的偏差（本机快则返回正）。
+// 上游未返回 server_now 时返回 0（视为无偏差，退化为直接用本机时间）。
+func (t *TravelState) ClockSkew(now time.Time) time.Duration {
+	if t == nil || t.ServerNow <= 0 {
+		return 0
+	}
+	return now.Sub(time.Unix(t.ServerNow, 0))
+}
+
+// ArriveAtTime 把 arrive_at 换算成本机时区的绝对时刻（已扣掉时钟偏差）。
+// 无 arrive_at（未在途/上游未给）时返回零值。
+func (t *TravelState) ArriveAtTime(now time.Time) time.Time {
+	if t == nil || t.ArriveAt <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(t.ArriveAt, 0).Add(-t.ClockSkew(now))
+}
+
+// RemainingUntilArrive 距到站还有多久；已到站返回负值，不可知返回 0 且 ok=false。
+func (t *TravelState) RemainingUntilArrive(now time.Time) (time.Duration, bool) {
+	at := t.ArriveAtTime(now)
+	if at.IsZero() {
+		return 0, false
+	}
+	return at.Sub(now), true
 }
 
 // growthJSON 发 growth 域请求并解信封；body 为 nil 时不带请求体。

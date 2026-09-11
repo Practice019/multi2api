@@ -409,11 +409,14 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 | **调用统计** | 进程内请求总数、成功/失败、成功率、平均 TTFB、平均总耗时、输出 token、按模型调用次数 |
 | **网关状态** | 账号总数 / 健康 / 冷却 / 禁用 / 在途占满 / 粘性会话 / Redis 模式 / healthz 码 |
 | **账号池** | 每账号昵称、积分、状态徽章、**token 剩余有效期**、**今日签到结果**、成功次数、熔断、在途 + 行内操作按钮 |
-| **调度** | 下次任务名与倒计时、签到时点/保活时点、**运行时开关签到与保活**（无需改 config 重启） |
+| **调度** | 下次任务名与倒计时、签到时点/保活时点（只读，开关统一在「设置」） |
 | **猫猫旅行** | 选账号后查状态 / 派猫 / 领奖，结果以中文呈现（猫名、状态、今日是否已派出、到站可领积分） |
-| **请求日志** | 每请求一行（时间/模型/模式/状态/uid/TTFB/token/耗时），2s 增量刷新，缓冲 2000 条 |
-| **任务历史** | 签到/保活/旅行/积分结果，保留 30 天，可按类型筛选，区分手动与定时触发 |
+| **成长计划** | 账号汇总表 + **账号下拉框**选一个账号看任务明细；四个视图（待接单 / 进行中 / 已完成 / 全部）；每条任务带**达成条件**与**怎么做**两段说明；行内**领取奖励** / 接单 / 兑换 / 补签 / 开盲盒 / 抽奖，节头可「全部领取」 |
+| **请求日志** | 每请求一行（时间/模型/模式/状态/uid/TTFB/token/耗时），2s 增量刷新，缓冲 2000 条；可切「历史（落盘）」视图 |
+| **任务历史** | 签到/保活/旅行/积分/成长结果，保留 30 天，可按类型筛选，区分手动与定时触发 |
+| **可用模型** | 上游模型目录（1h 正缓存 / 5min 负缓存），可强制回源刷新 |
 | **对话测试** | 选模型、流式/非流式、Enter 发送，显示耗时与 token 用量 |
+| **设置** | 唯一可写配置的入口：调度时点、自动动作开关、各类间隔、日志保留天数，保存即持久化 |
 
 ### 账号操作
 
@@ -421,6 +424,47 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 - **重载 auths 目录**：手工拷入的凭证即时生效
 - 行内操作：签到 / 刷新积分 / 保活 / 启用·禁用 / 清冷却 / 移除
 - **移除采用两段确认**：第一次问是否移出池（默认**只出池、保留凭证文件**），第二次才问是否连文件一起删；删除路径强制校验必须落在 `auths/` 目录内
+
+### 成长计划：任务状态与「奖励到账」是两件事
+
+上游把「任务达成」和「发放奖励」拆成了两步，这是最容易误判的地方（我一开始就判错了）：
+
+| 状态 | 含义 | 可做的动作 |
+|---|---|---|
+| `not_accepted` | 未接单 | **接单**（接进列表开始计进度，**不发奖励**） |
+| `accepted` | 已接单，进度未达标 | 无 |
+| `in_progress` | 已接单且进度已推进但未达标 | 无 |
+| `completed` | **条件已达成，奖励尚未发放** | **领取奖励** |
+| `claimed` | 奖励已领取 | 无 |
+
+- **`completed` 不代表奖励已到账**。实测：妖精七七有 10 个 `completed` 任务（面值 1350 分），
+  调 `POST /v2/activity/growth/tasks/{task_code}/claim` 后状态变 `claimed`、积分 +1350。
+  所以「做完任务积分不涨」不是没做到，而是少了一次领取。
+- 领取是**逐个任务**的（上游没有批量接口），已领过的返回 `already_claimed=true` 且 `credit=0`，
+  这是幂等成功、不是错误。
+- **自动领奖默认开启**（`admin.growth_auto_claim`，也可写 `growth_auto_claim_tasks`）。
+  它在成长守卫每轮先于其它动作执行，并在领取成功后就地刷新账号积分，
+  否则界面上的积分要等下一次定时刷新才对得上。
+- 界面把 `completed` 显示成「待领取」（黄色）并给出「领取 N 分」按钮，`claimed` 显示成「已领取」。
+  账号汇总表有「待领取 / 现在可领」两列，能直接看出还有多少分没拿。
+
+### 切换本机客户端登录
+
+在「成长计划」的任务明细节头里，对**当前正在查看的那个账号**提供「切换本机登录」——把本机 WorkBuddy 桌面客户端登录态改成该账号，省去手动退出重登。
+
+- 客户端凭证库是明文 JSON：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info`；账号指针在 `~/.workbuddy/storage/skeleton/account-snapshot.json`
+- 客户端自己切换账号时会把旧文件轮转成 `workbuddy-desktop.<时间戳>.<pid>.<guid>.info`，本仓库把这些轮转备份**按 uid 归档**到 `data/client-login/`，因此客户端登录过的账号都有原生凭证可复用
+- 客户端 token 与管理台 token **同源**（同一 Keycloak realm、`azp=console`、`app_type=codebuddy`），JWT 的 `sub` 即 uid，所以账号池里的 token 可直接充当客户端凭证，切换**不需要重新走登录流程**
+- **破坏性操作的两道约束**：① 必须显式传 `confirm=true`（界面有二次确认，后端再验一次）；② 切换前强制备份、备份失败即中止
+- 目标是先解析完再备份——失败的切换不会污染上一次的有效备份（否则回滚目标会被静默换掉）
+- 「回滚」把客户端还原到上一次切换前的登录态；备份与当前账号相同时按钮不出现（那只会是空操作）
+- 切换后**必须完全退出并重启客户端**才生效
+- **客户端运行中一律拒绝切换/回滚**（接口返回 409，界面上按钮置灰并标注「客户端运行中」）。
+  原因：登录态活在客户端内存里，我们换掉磁盘文件后它不会察觉，下一次刷 token 会把内存里的
+  旧会话写回磁盘 —— 表现就是「切了但过一会儿自己变回去」。实测踩过：08:30 切过去，
+  09:40 客户端刷新时又变回来了（写回的 `sessionState` 与它 09-10 持有的那份完全相同）。
+  所以检测到 `WorkBuddy.exe` 进程在跑就直接拒绝，而不是让用户白切一次。
+  检测通过 `tasklist` 完成，结果有 3 秒缓存，避免高频轮询反复拉进程列表。
 
 ### 安全模型
 
@@ -440,12 +484,20 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 | `DELETE /admin/accounts/{uid}?purge_file=0\|1` | 移出池；`purge_file=1` 才删凭证文件 |
 | `POST /admin/login/start` · `/login/poll` | OAuth 设备授权（state 内存保存，TTL 15 分钟） |
 | `POST /admin/checkin` · `/keepalive` · `/credits/refresh` | 可用 `{"uid":"..."}` 定向单账号；不传则全量（后台任务，`GET /admin/task` 查进度） |
-| `GET /admin/travel/status?uid=` · `POST /admin/travel/depart` · `/claim` | 猫猫旅行；派猫/领奖会先查状态，不满足条件返回 409 并记为「跳过」而非失败 |
-| `GET /admin/schedule` · `POST /admin/schedule/toggle` | 查询下次唤醒；运行时开关签到/保活 |
+| `GET /admin/travel` · `GET /admin/travel/status?uid=` · `POST /admin/travel/depart` · `/claim` | 猫猫旅行；派猫/领奖会先查状态，不满足条件返回 409 并记为「跳过」而非失败 |
+| `GET /admin/growth` | 成长计划快照（`?refresh=1` 强制回源）。任务明细含 `description`（达成条件）与 `how_to`（怎么做）两段说明 |
+| `POST /admin/growth/claim` | **领取奖励**（唯一让积分到账的动作）。`{"uid":"...","task_code":"..."}`；`task_code` 省略则领该账号全部可领任务；`uid` 省略则全量（后台任务）。已领过的记为「跳过」而非失败 |
+| `POST /admin/growth/accept` · `/redeem` · `/makeup` · `/open` · `/draw` | 成长动作。不传 `uid` 即全量（后台任务）；`accept` 语义是**接单**（开始计进度），**不发奖励**，领奖走 `/claim` |
+| `GET /admin/growth/tasks?uid=` · `GET /admin/growth/travel/config?uid=` | 原始任务清单（含未达成）/ 旅行地点完整配置 |
+| `GET /admin/schedule` | 查询下次唤醒与签到时点（只读；开关走 `/admin/settings`） |
 | `POST /admin/models/refresh` | 清空模型目录缓存（1h 正缓存 + 5min 负缓存）强制回源 |
-| `GET /admin/logs?since=N` | 请求日志增量拉取（环形缓冲 2000 条） |
+| `GET /admin/logs?since=N` · `GET /admin/logs/history?limit=N` | 请求日志：内存环形缓冲 / 落盘 JSON Lines 历史 |
 | `GET /admin/stats` | 调用统计聚合 |
 | `GET /admin/checkin/history?limit=N&kind=` | 任务历史（保留 30 天） |
+| `GET /admin/settings` · `PUT /admin/settings` | **唯一写配置入口**：读当前设置；保存即持久化（保留 config 里未知键，原子写） |
+| `GET /admin/client-login` | 本机客户端登录态 + 可切换账号（凭证来源、到期时间、是否可回滚、`client_running`） |
+| `POST /admin/client-login/switch` | 切换客户端登录态，body `{"uid":"...","confirm":true}`；未确认返回 428，客户端在跑返回 409 |
+| `POST /admin/client-login/restore` | 回滚到上一次切换前的登录态，body `{"confirm":true}`；客户端在跑返回 409 |
 
 ### 新增配置项（`config.json` 的 `admin` 段，均可省略）
 
@@ -454,10 +506,31 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
   "admin": {
     "checkin_log_path": "./data/checkin-log.json",
     "checkin_log_keep_days": 30,
-    "oauth_base_url": "https://copilot.tencent.com"
-  }
+    "oauth_base_url": "https://copilot.tencent.com",
+
+    "travel_auto_claim": true,
+    "travel_watch_interval_seconds": 60,
+
+    "growth_watch_interval_seconds": 600,
+    "growth_auto_claim": true,
+    "growth_auto_accept_tasks": false,
+    "growth_auto_makeup": true,
+    "growth_auto_redeem": false,
+    "growth_auto_open": false,
+    "growth_auto_draw": false,
+
+    "client_auth_dir": "",
+    "client_archive_dir": "./data/client-login",
+    "client_login_enabled": true
+  },
+  "request_log_path": "./data/request-log.jsonl",
+  "request_log_keep_days": 7
 }
 ```
+
+`growth_auto_claim` 也接受别名 **`growth_auto_claim_tasks`**（为兼容按 `growth_auto_accept_tasks`
+的命名习惯手写的配置）。主键优先，两者都写且冲突时以主键为准；保存设置时会把别名键收敛掉，
+避免文件里同时存在两个意思相同、值可能相反的键。
 
 ### 站点图标
 

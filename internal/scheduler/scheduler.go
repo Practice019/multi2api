@@ -34,6 +34,29 @@ type Config struct {
 
 	// Log 任务结果历史（可选；nil = 不记录）。管理台的「今日签到了吗」也读它。
 	Log *checkinlog.Log
+
+	// TravelAutoClaimDisabled 显式关闭「猫到站自动领奖」。
+	// 与 CheckinDisabled 同一命名法：零值 Config = 自动领奖开启。
+	TravelAutoClaimDisabled bool
+	// TravelWatchInterval 守卫轮间隔（同时是上游未给 arrive_at 时的兜底轮询周期）。<=0 回落 1 分钟。
+	TravelWatchInterval time.Duration
+
+	// ---- 成长中心（/v2/activity/growth/*）----
+	// GrowthWatchInterval 成长中心扫描间隔。<=0 回落 10 分钟。
+	GrowthWatchInterval time.Duration
+	// 六个自动动作的初始开关。用 *bool 区分「未设置」与「显式 false」，
+	// 默认值在 New 里给出：领奖 true、补签 true，其余四个 false。
+	// 这里刻意不用 Disabled/Enabled 命名：各开关默认值不一致，
+	// 「零值即某一边」的约定必然让其中几个名字读起来是反的。
+	//
+	// GrowthAutoClaim 默认开：completed 只代表任务条件达成，不调 claim 奖励永远不到账
+	// （实测对 completed 的 chat_5 调 claim 后积分 +100 且状态变 claimed）。
+	GrowthAutoClaim  *bool
+	GrowthAutoAccept *bool
+	GrowthAutoMakeup *bool
+	GrowthAutoRedeem *bool
+	GrowthAutoOpen   *bool
+	GrowthAutoDraw   *bool
 }
 
 // Scheduler 调度器。
@@ -50,6 +73,18 @@ type Scheduler struct {
 	// 这样直接构造 &Scheduler{cfg: ...}（既有测试的写法）行为完全不变。
 	checkinOverride   *bool
 	keepaliveOverride *bool
+
+	// checkinHoursOverride/keepaliveHoursOverride 运行时时点覆盖（设置页用）。
+	// 与布尔开关同理用指针：nil = 未覆盖，回落到 cfg 初值，既有测试行为不变。
+	checkinHoursOverride   *[]int
+	keepaliveHoursOverride *[]int
+
+	// travel 猫猫旅行守卫状态（快照缓存 + 到期表 + 自动领奖开关）。
+	// 直接构造 &Scheduler{...} 时为 nil，所有相关方法都做了 nil 保护。
+	travel *travelWatchState
+
+	// growth 成长中心守卫状态（快照缓存 + 到期表 + 五个自动动作开关）。
+	growth *growthWatchState
 }
 
 // New 构建。
@@ -60,7 +95,27 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
 	}
-	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string)}
+	return &Scheduler{
+		cfg:        cfg,
+		adoptTried: make(map[string]string),
+		travel:     newTravelWatchState(!cfg.TravelAutoClaimDisabled),
+		growth: newGrowthWatchState(
+			boolOrPtr(cfg.GrowthAutoAccept, false),
+			boolOrPtr(cfg.GrowthAutoMakeup, true),
+			boolOrPtr(cfg.GrowthAutoRedeem, false),
+			boolOrPtr(cfg.GrowthAutoOpen, false),
+			boolOrPtr(cfg.GrowthAutoDraw, false),
+			boolOrPtr(cfg.GrowthAutoClaim, true),
+		),
+	}
+}
+
+// boolOrPtr 取 *bool 的值，nil（未设置）时返回默认值。
+func boolOrPtr(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
 }
 
 // CheckinEnabled 报告签到排程当前是否生效（未覆盖时取 cfg 初值）。
@@ -101,9 +156,64 @@ func (s *Scheduler) SetKeepaliveEnabled(on bool) {
 
 // Hours 返回两类任务的时点配置（只读拷贝）。
 func (s *Scheduler) Hours() (checkin, keepalive []int) {
-	c := append([]int(nil), s.cfg.CheckinHours...)
-	k := append([]int(nil), s.cfg.KeepaliveHours...)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := append([]int(nil), s.effectiveHoursLocked(hoursCheckin)...)
+	k := append([]int(nil), s.effectiveHoursLocked(hoursKeepalive)...)
 	return c, k
+}
+
+type hourKind int
+
+const (
+	hoursCheckin hourKind = iota
+	hoursKeepalive
+)
+
+// effectiveHours 取覆盖值（若有）否则取 cfg 初值。
+func (s *Scheduler) effectiveHours(k hourKind) []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.effectiveHoursLocked(k)
+}
+
+// effectiveHoursLocked 同上，调用方需已持有 s.mu。
+func (s *Scheduler) effectiveHoursLocked(k hourKind) []int {
+	if k == hoursCheckin && s.checkinHoursOverride != nil {
+		return *s.checkinHoursOverride
+	}
+	if k == hoursKeepalive && s.keepaliveHoursOverride != nil {
+		return *s.keepaliveHoursOverride
+	}
+	if k == hoursCheckin {
+		return s.cfg.CheckinHours
+	}
+	return s.cfg.KeepaliveHours
+}
+
+// SetHours 运行时修改签到时点。空切片视为「不改」；非法小时返回错误且不生效。
+func (s *Scheduler) SetHours(checkin, keepalive []int) error {
+	for _, h := range checkin {
+		if h < 0 || h > 23 {
+			return fmt.Errorf("签到时点 %d 非法（0-23）", h)
+		}
+	}
+	for _, h := range keepalive {
+		if h < 0 || h > 23 {
+			return fmt.Errorf("保活时点 %d 非法（0-23）", h)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(checkin) > 0 {
+		v := append([]int(nil), checkin...)
+		s.checkinHoursOverride = &v
+	}
+	if len(keepalive) > 0 {
+		v := append([]int(nil), keepalive...)
+		s.keepaliveHoursOverride = &v
+	}
+	return nil
 }
 
 // nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
@@ -139,10 +249,10 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	var slots []slot
 	if s.CheckinEnabled() {
-		slots = append(slots, slot{nextFire(now, s.cfg.CheckinHours), taskCheckin})
+		slots = append(slots, slot{nextFire(now, s.effectiveHours(hoursCheckin)), taskCheckin})
 	}
 	if s.KeepaliveEnabled() {
-		slots = append(slots, slot{nextFire(now, s.cfg.KeepaliveHours), taskKeepalive})
+		slots = append(slots, slot{nextFire(now, s.effectiveHours(hoursKeepalive)), taskKeepalive})
 	}
 	var earliest time.Time
 	for _, sl := range slots {

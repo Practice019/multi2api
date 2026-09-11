@@ -35,6 +35,10 @@ type Ring struct {
 	next  int
 	full  bool
 	total int64 // 累计写入条数，同时充当递增序列号
+
+	// sink 可选的落盘目标（nil = 只留在内存）。写盘刻意放在锁外：
+	// 文件 IO 不能拖着所有请求一起等。
+	sink *Sink
 }
 
 // New 构造容量为 capacity 的环形缓冲；capacity<=0 时取 DefaultCapacity。
@@ -45,16 +49,35 @@ func New(capacity int) *Ring {
 	return &Ring{buf: make([]Entry, capacity)}
 }
 
+// SetSink 挂上落盘目标（可在启动后调用）。
+func (r *Ring) SetSink(s *Sink) {
+	r.mu.Lock()
+	r.sink = s
+	r.mu.Unlock()
+}
+
+// Sink 返回当前落盘目标（可能为 nil）。
+func (r *Ring) Sink() *Sink {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sink
+}
+
 // Push 写入一条；返回分配的递增序列号。
 func (r *Ring) Push(e Entry) int64 {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.total++
 	e.Seq = r.total
 	r.buf[r.next] = e
 	r.next = (r.next + 1) % len(r.buf)
 	if r.next == 0 {
 		r.full = true
+	}
+	sink := r.sink
+	r.mu.Unlock()
+
+	if sink != nil {
+		sink.Append(e)
 	}
 	return e.Seq
 }

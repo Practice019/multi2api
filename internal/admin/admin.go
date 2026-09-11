@@ -23,6 +23,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/clientlogin"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
@@ -42,6 +43,10 @@ type Config struct {
 
 	// ResetModelsCache 清空模型目录缓存（由 server 包注入，避免 admin 反向依赖 server）。
 	ResetModelsCache func()
+	// Settings 设置页的读写契约（由 cmd/server 实现并注入；nil = 关闭设置页）。
+	Settings SettingsStore
+	// ClientLogin 本机客户端登录态管理（nil = 关闭「本地登录」面板）。
+	ClientLogin *clientlogin.Manager
 	// BuildTime 进程启动时间，UI 用来算运行时长。
 	StartedAt time.Time
 }
@@ -71,19 +76,38 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/keepalive", h.keepalive)
 	h.mux.HandleFunc("POST /admin/credits/refresh", h.creditsRefresh)
 
+	h.mux.HandleFunc("GET /admin/travel", h.travelList)
 	h.mux.HandleFunc("GET /admin/travel/status", h.travelStatus)
 	h.mux.HandleFunc("POST /admin/travel/depart", h.travelDepart)
 	h.mux.HandleFunc("POST /admin/travel/claim", h.travelClaim)
 
+	h.mux.HandleFunc("GET /admin/growth", h.growthList)
+	h.mux.HandleFunc("POST /admin/growth/claim", h.growthClaim)
+	h.mux.HandleFunc("POST /admin/growth/accept", h.growthAccept)
+	h.mux.HandleFunc("POST /admin/growth/redeem", h.growthRedeem)
+	h.mux.HandleFunc("POST /admin/growth/makeup", h.growthMakeup)
+	h.mux.HandleFunc("POST /admin/growth/open", h.growthOpen)
+	h.mux.HandleFunc("POST /admin/growth/draw", h.growthDraw)
+	h.mux.HandleFunc("GET /admin/growth/tasks", h.growthTasks)
+	h.mux.HandleFunc("GET /admin/growth/travel/config", h.growthTravelConfig)
+
 	h.mux.HandleFunc("GET /admin/schedule", h.schedule)
-	h.mux.HandleFunc("POST /admin/schedule/toggle", h.scheduleToggle)
 
 	h.mux.HandleFunc("POST /admin/models/refresh", h.modelsRefresh)
 
 	h.mux.HandleFunc("GET /admin/logs", h.logs)
+	h.mux.HandleFunc("GET /admin/logs/history", h.logsHistory)
 	h.mux.HandleFunc("GET /admin/stats", h.stats)
 	h.mux.HandleFunc("GET /admin/checkin/history", h.history)
 	h.mux.HandleFunc("GET /admin/task", h.taskStatus)
+
+	h.mux.HandleFunc("GET /admin/settings", h.settings)
+	h.mux.HandleFunc("PUT /admin/settings", h.settingsUpdate)
+
+	// 本地客户端登录态：唯一会改写客户端本机状态的接口，全部要求显式 confirm。
+	h.mux.HandleFunc("GET /admin/client-login", h.clientLoginStatus)
+	h.mux.HandleFunc("POST /admin/client-login/switch", h.clientLoginSwitch)
+	h.mux.HandleFunc("POST /admin/client-login/restore", h.clientLoginRestore)
 
 	return h
 }
@@ -438,6 +462,38 @@ func (h *Handler) travelAuth(uid string) (*auth.Auth, bool) {
 	return a, a != nil && a.RefreshToken != ""
 }
 
+// travelList 账号级旅行列表：直接读守卫维护的内存快照，不发上游请求。
+// refresh=1 时强制全量回源一次（对应界面上的「刷新」按钮）。
+func (h *Handler) travelList(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("refresh") == "1" {
+		h.cfg.Scheduler.RefreshTravel(true, false)
+	}
+	snaps := h.cfg.Scheduler.TravelSnapshots()
+	// 池里有、但快照还没建起来的账号补一个空行，避免界面缺行让人以为是 bug。
+	seen := map[string]bool{}
+	for _, s := range snaps {
+		seen[s.UID] = true
+	}
+	for _, st := range h.cfg.Pool.List() {
+		if seen[st.UID] {
+			continue
+		}
+		snaps = append(snaps, scheduler.TravelSnapshot{
+			UID: st.UID, Nickname: st.Nickname, Error: "尚未探测（点「刷新」）",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accounts":         snaps,
+		"auto_claim":       h.cfg.Scheduler.TravelAutoClaimEnabled(),
+		"location_id":      4,
+		"watch_interval_s": int64(h.cfg.Scheduler.WatchInterval().Seconds()),
+	})
+}
+
+// 刻意没有 POST /admin/travel/auto：自动领奖的开/关同样只经 PUT /admin/settings，
+// 理由与上面的 schedule/toggle 一致。
+
+// travelStatus 单账号详细状态（含猫档案全字段），供界面展开查看。
 func (h *Handler) travelStatus(w http.ResponseWriter, r *http.Request) {
 	uid := r.URL.Query().Get("uid")
 	a, ok := h.travelAuth(uid)
@@ -461,6 +517,14 @@ func (h *Handler) travelStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp["travel"] = ts
+	// 顺带把换算后的到站时刻给出去，省得每个调用方各算一遍时钟偏差。
+	if at := ts.ArriveAtTime(time.Now()); !at.IsZero() {
+		resp["arrive_at_local"] = at
+		resp["clock_skew_sec"] = int64(ts.ClockSkew(time.Now()).Seconds())
+		if rem, ok := ts.RemainingUntilArrive(time.Now()); ok {
+			resp["remaining_sec"] = int64(rem.Seconds())
+		}
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -486,81 +550,92 @@ func (h *Handler) record(uid, kind, status, detail string, credits int64) {
 	})
 }
 
+// travelDepart 派猫。uid 为空 = 全部账号（后台任务，含账号间限速）。
 func (h *Handler) travelDepart(w http.ResponseWriter, r *http.Request) {
 	body := decodeBody(r)
-	a, ok := h.travelAuth(body.UID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "账号不存在或无可用凭证: "+body.UID)
-		return
-	}
-	// 先查状态再动手：当日已派出 / 猫在途时上游会回 400，
-	// 那是「按规则不该派」而不是「派失败」，必须区分开——否则历史表里全是假失败。
-	if ts, err := h.cfg.Upstream.TravelStatus(a); err == nil {
-		switch {
-		case ts.DailyLimitReached:
-			h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusSkip, "今日已派出（每日 1 次）", 0)
-			writeError(w, http.StatusConflict, "今天已经派过了（每日 1 次，CST 00:00 重置）")
-			return
-		case ts.State == "traveling":
-			h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusSkip, "猫还在路上", 0)
-			writeError(w, http.StatusConflict, fmt.Sprintf("猫还在路上（record=%d），等它到站再操作", ts.RecordID))
-			return
-		case ts.State == "arrived":
-			h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusSkip, "猫已到站，先去领奖", 0)
-			writeError(w, http.StatusConflict, "猫已到站，请先「领奖」再派出")
+
+	if body.UID != "" {
+		res := h.cfg.Scheduler.TravelDepartFor(body.UID, "manual")
+		if res.Status == checkinlog.StatusFail && strings.Contains(res.Detail, "账号不存在") {
+			writeError(w, http.StatusNotFound, res.Detail)
 			return
 		}
-	}
-
-	loc := body.LocationID
-	if loc <= 0 {
-		loc = 4 // 四个地点收益/时长相同，默认古镇客栈
-	}
-	if err := h.cfg.Upstream.TravelDepart(a, loc); err != nil {
-		h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusFail, "派出失败: "+short(err.Error()), 0)
-		writeError(w, http.StatusBadGateway, "派出失败: "+err.Error())
+		if res.Status == checkinlog.StatusSkip {
+			writeError(w, http.StatusConflict, res.Detail)
+			return
+		}
+		if res.Status == checkinlog.StatusFail {
+			writeError(w, http.StatusBadGateway, res.Detail)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
-	h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusOK, fmt.Sprintf("已派出（地点 %d）", loc), 0)
-	writeJSON(w, http.StatusOK, map[string]any{"uid": body.UID, "departed": true, "location_id": loc})
+
+	if !h.task.start("travel-depart", func() []scheduler.CheckinResult {
+		return h.travelAll(func(uid string) scheduler.TravelActionResult {
+			return h.cfg.Scheduler.TravelDepartFor(uid, "manual")
+		})
+	}) {
+		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"mode": "all", "started": true})
 }
 
+// travelClaim 领奖。uid 为空 = 全部账号（后台任务）。
 func (h *Handler) travelClaim(w http.ResponseWriter, r *http.Request) {
 	body := decodeBody(r)
-	a, ok := h.travelAuth(body.UID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "账号不存在或无可用凭证: "+body.UID)
-		return
-	}
-	// record_id 必须来自上游实时状态：调用方未给就现查一次，避免让 UI 维护这个值。
-	recordID := body.RecordID
-	if recordID == 0 {
-		ts, err := h.cfg.Upstream.TravelStatus(a)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "查询旅行状态失败: "+err.Error())
+
+	if body.UID != "" {
+		res := h.cfg.Scheduler.TravelClaimFor(body.UID, "manual")
+		if res.Status == checkinlog.StatusFail && strings.Contains(res.Detail, "账号不存在") {
+			writeError(w, http.StatusNotFound, res.Detail)
 			return
 		}
-		if ts.State != "arrived" {
-			// 没到站不是失败，是「现在没奖可领」。
-			h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusSkip,
-				fmt.Sprintf("猫未到站（%s），无奖可领", ts.State), 0)
-			writeError(w, http.StatusConflict, "猫还没到站（当前状态 "+ts.State+"），无奖可领")
+		if res.Status == checkinlog.StatusSkip {
+			writeError(w, http.StatusConflict, res.Detail)
 			return
 		}
-		recordID = ts.RecordID
-	}
-	if recordID == 0 {
-		writeError(w, http.StatusConflict, "上游未返回 record_id，无法领奖")
+		if res.Status == checkinlog.StatusFail {
+			writeError(w, http.StatusBadGateway, res.Detail)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 		return
 	}
-	reward, err := h.cfg.Upstream.TravelClaim(a, recordID)
-	if err != nil {
-		h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusFail, "领奖失败: "+short(err.Error()), 0)
-		writeError(w, http.StatusBadGateway, "领奖失败: "+err.Error())
+
+	if !h.task.start("travel-claim", func() []scheduler.CheckinResult {
+		return h.travelAll(func(uid string) scheduler.TravelActionResult {
+			return h.cfg.Scheduler.TravelClaimFor(uid, "manual")
+		})
+	}) {
+		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
 		return
 	}
-	h.record(body.UID, checkinlog.KindTravel, checkinlog.StatusOK, "已领奖", reward)
-	writeJSON(w, http.StatusOK, map[string]any{"uid": body.UID, "claimed": true, "reward_credit": reward})
+	writeJSON(w, http.StatusAccepted, map[string]any{"mode": "all", "started": true})
+}
+
+// travelAll 对全部非禁用账号跑同一旅行动作，转成 CheckinResult 供任务槽统一呈现。
+// 跳过不写入结果列表（否则「全部派猫」会返回一堆 no-op 行），但已经由 scheduler 记进历史。
+func (h *Handler) travelAll(fn func(uid string) scheduler.TravelActionResult) []scheduler.CheckinResult {
+	out := []scheduler.CheckinResult{}
+	for _, st := range h.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		res := fn(st.UID)
+		if res.Status == checkinlog.StatusSkip {
+			continue
+		}
+		out = append(out, scheduler.CheckinResult{
+			UID:     res.UID,
+			Status:  res.Status,
+			Detail:  res.Detail,
+			Credits: res.Credits,
+		})
+	}
+	return out
 }
 
 // short 把上游错误压成一行短文本（历史表里只放这个，完整原文留给进程日志）。
@@ -593,25 +668,9 @@ func (h *Handler) schedule(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (h *Handler) scheduleToggle(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Checkin   *bool `json:"checkin"`
-		Keepalive *bool `json:"keepalive"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
-		return
-	}
-	if body.Checkin != nil {
-		h.cfg.Scheduler.SetCheckinEnabled(*body.Checkin)
-		log.Printf("admin: 签到排程 -> %v", *body.Checkin)
-	}
-	if body.Keepalive != nil {
-		h.cfg.Scheduler.SetKeepaliveEnabled(*body.Keepalive)
-		log.Printf("admin: 保活排程 -> %v", *body.Keepalive)
-	}
-	h.schedule(w, r)
-}
+// 刻意没有 POST /admin/schedule/toggle：签到/保活的启停只能经 PUT /admin/settings，
+// 那条路径会同时写 config.json 并应用运行时值。若另开一个只改内存的开关接口，
+// 会出现「开关改了但重启后被 config 覆盖」的两条写路径冲突。
 
 // ---------------------------------------------------------------------------
 // 模型目录 / 日志 / 历史
@@ -639,6 +698,29 @@ func (h *Handler) logs(w http.ResponseWriter, r *http.Request) {
 		"cursor":   cursor,
 		"capacity": h.cfg.Ring.Cap(),
 		"held":     h.cfg.Ring.Len(),
+	})
+}
+
+// logsHistory 从落盘文件读历史请求日志（进程重启后仍可回溯）。
+func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Ring == nil || h.cfg.Ring.Sink() == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "enabled": false})
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 300
+	}
+	items, err := h.cfg.Ring.Sink().LoadRecent(limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取日志文件失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":   items,
+		"total":   len(items),
+		"enabled": true,
+		"file":    h.requestLogStats(),
 	})
 }
 

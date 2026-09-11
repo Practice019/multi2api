@@ -23,6 +23,9 @@ const (
 	KindKeepalive = "keepalive"
 	KindTravel    = "travel"
 	KindCredits   = "credits"
+	// KindGrowth 成长中心动作（领任务奖励 / 连登兑换 / 补签 / 开盲盒 / 抽奖）。
+	// 与 KindTravel 分开记：两者奖励来源与频率完全不同，混在一起没法按类型统计。
+	KindGrowth = "growth"
 )
 
 // Status 结果状态。
@@ -126,6 +129,26 @@ func (l *Log) saveLocked() {
 		return
 	}
 	l.dirty = false
+}
+
+// SetKeepDays 运行时调整保留天数（<=0 忽略）；立即按新窗口裁剪一次。
+func (l *Log) SetKeepDays(days int) {
+	if days <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.keepDays = days
+	l.records = l.pruneLocked(l.records)
+	l.dirty = true
+	l.saveLocked()
+}
+
+// KeepDays 返回当前保留天数。
+func (l *Log) KeepDays() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.keepDays
 }
 
 // Recent 返回最近 n 条（时间倒序，最新在前）；n<=0 返回全部。
