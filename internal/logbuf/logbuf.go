@@ -37,10 +37,10 @@ type Entry struct {
 	Tokens  int       `json:"tokens"` // -1 表示 usage 缺失
 	TotalMS int64     `json:"total_ms"`
 
-	Credit          float64 `json:"credit"`             // 本次请求实际消耗的额度
-	ThinkTokens     int     `json:"think_tokens"`       // 推理（思维链）token 数
-	CacheHitTokens  int     `json:"cache_hit_tokens"`   // 命中缓存的 prompt token
-	CacheMissTokens int     `json:"cache_miss_tokens"`  // 未命中缓存的 prompt token
+	Credit          float64 `json:"credit"`            // 本次请求实际消耗的额度
+	ThinkTokens     int     `json:"think_tokens"`      // 推理（思维链）token 数
+	CacheHitTokens  int     `json:"cache_hit_tokens"`  // 命中缓存的 prompt token
+	CacheMissTokens int     `json:"cache_miss_tokens"` // 未命中缓存的 prompt token
 }
 
 // Ring 定长环形缓冲。零值不可用，必须经 New 构造。

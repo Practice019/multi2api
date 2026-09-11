@@ -123,7 +123,7 @@ func TestParseUsageExtrasRejectsNonDecimalStrings(t *testing.T) {
 	}
 	for _, s := range bad {
 		got := ParseUsageExtras(map[string]any{
-			"prompt_cache_hit_tokens": s,
+			"prompt_cache_hit_tokens":  s,
 			"prompt_cache_miss_tokens": s,
 			"credit":                   s,
 		})
@@ -190,10 +190,10 @@ func TestParseUsageExtrasGarbageAndMissing(t *testing.T) {
 	}
 	for i, v := range junk {
 		got := ParseUsageExtras(map[string]any{
-			"credit":                   v,
+			"credit":                     v,
 			"completion_thinking_tokens": v,
-			"prompt_cache_hit_tokens":  v,
-			"prompt_cache_miss_tokens": v,
+			"prompt_cache_hit_tokens":    v,
+			"prompt_cache_miss_tokens":   v,
 		})
 		if got.Credit != 0 || got.ThinkTokens != 0 || got.CacheHitTokens != 0 || got.CacheMissTokens != 0 {
 			t.Errorf("junk[%d]=%#v: want all zero, got %+v", i, v, got)

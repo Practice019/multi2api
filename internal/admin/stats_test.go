@@ -563,17 +563,36 @@ func TestStatsWithoutCatalogWiring(t *testing.T) {
 	}
 }
 
-// 目录不可用时**不得**触发回源：这是「统计轮询不能变成打上游」的守门测试。
-func TestStatsDoesNotFetchCatalogWhenUnavailable(t *testing.T) {
+// 目录状态为 unavailable 时**仍然要尝试**取一次 —— 这是自举的必要条件。
+//
+// 本测试替代了原来的 TestStatsDoesNotFetchCatalogWhenUnavailable。
+// 那条测试把「unavailable 就提前返回」当作正确行为来断言，实际上**固化了缺陷**：
+//
+//	state 在缓存为空时返回 unavailable → 提前返回、从不调 ModelCatalog()
+//	→ 缓存永远为空 → 永远 unavailable（自锁死循环）
+//
+// 正确契约：状态只用于**展示**，不用于决定要不要回源。
+// 「要不要回源」由 ModelCatalog 自己按 TTL/负缓存决定（它才掌握那些信息）。
+// 冷启动自举的端到端回归见 catalog_bootstrap_test.go。
+func TestStatsStillTriesCatalogWhenStateUnavailable(t *testing.T) {
 	var calls int
 	h, _ := newStatsHandler(t, persistedEntries(2))
 	h.cfg.ModelCatalog = func() *upstream.ModelCatalog { calls++; return nil }
 	h.cfg.ModelCatalogState = func() ModelCatalogState {
 		return ModelCatalogState{State: "unavailable"}
 	}
-	doStats(t, h)
-	if calls != 0 {
-		t.Errorf("目录不可用时仍调用了 ModelCatalog %d 次（会打上游）", calls)
+	out := doStats(t, h)
+
+	if calls == 0 {
+		t.Fatal("unavailable 时也应尝试取一次，否则目录永远无法自举（冷启动死锁）")
+	}
+	// 拿不到目录时仍要给出干净的降级结果，不能报错也不能有脏数据
+	order, _ := statsModels(t, out["model_multipliers"])
+	if len(order) != 0 {
+		t.Errorf("拿不到目录时应为空表, got %v", order)
+	}
+	if st, _ := out["model_catalog"].(map[string]any); st["state"] != "unavailable" {
+		t.Errorf("拿不到目录时 state 应如实报 unavailable, got %v", st["state"])
 	}
 }
 

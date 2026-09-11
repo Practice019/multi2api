@@ -91,7 +91,7 @@ func TestCheckAccountAliveBusinessError(t *testing.T) {
 // 这是"探测成功且结论是不健康"，与"探测失败"是两回事。
 func TestCheckAccountAliveEmptyAccounts(t *testing.T) {
 	for name, body := range map[string]string{
-		"空数组":  `{"code":0,"msg":"OK","data":{"accounts":[]}}`,
+		"空数组":    `{"code":0,"msg":"OK","data":{"accounts":[]}}`,
 		"缺 data": `{"code":0,"msg":"OK"}`,
 	} {
 		c := testClient(func(r *http.Request) (*http.Response, error) {
