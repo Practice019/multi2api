@@ -1562,9 +1562,9 @@
     // 不再是「进程内窗口」，而落盘不可用时会回落到内存 —— 两种情况不能混为一谈。
     let win;
     if (s.source === 'file') {
-      win = s.window_from
-        ? `（全部落盘历史 ${new Date(s.window_from).toLocaleString('zh-CN', { hour12: false })} 起，共 ${s.total} 条）`
-        : '（落盘日志为空）';
+      // 只报总数，不再回显「从某时刻起」—— 那个起点是文件里最早一条的时间，
+      // 随轮转/清理不断变化，写在这里既不稳定也没人据此判断什么。
+      win = s.total ? `（全部落盘历史，共 ${s.total} 条）` : '（落盘日志为空）';
     } else if (s.source === 'memory') {
       win = s.window_from
         ? `（仅内存缓冲，进程启动至今，上限 ${s.capacity} 条）`
@@ -1584,9 +1584,11 @@
       ['平均总耗时', s.avg_total_ms ? s.avg_total_ms + 'ms' : '—', ''],
       ['输出 token', s.tokens || 0, ''],
       // 缓冲占用只在内存来源时才有意义；落盘来源改写为文件占用，避免两个概念混淆。
+      // 落盘只显示当前占用量：上限是配置里的固定值（默认 8 MiB），放在卡片里
+      // 既不随数据变化、又让人误以为是一根进度条，去掉更清楚。
       [s.source === 'file' ? '落盘占用' : '缓冲占用',
         s.source === 'file' && s.file
-          ? fmtBytes(s.file.size) + ' / ' + fmtBytes(s.file.max_bytes)
+          ? fmtBytes(s.file.size)
           : ((s.held || 0) + '/' + (s.capacity || 0)),
         'dim'],
     ].map(([k, v, c]) =>
