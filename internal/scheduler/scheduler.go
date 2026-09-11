@@ -435,6 +435,15 @@ func (s *Scheduler) RefreshCredits(uid, trigger string) (CheckinResult, bool) {
 	remain, err := s.cfg.Upstream.UserResource(a)
 	if err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, shortErr(err)
+		// 余额查询失败时补一句「上游怎么解释」。
+		//
+		// 为什么挂在这里而不是做成定时任务：实测该端点正常时**完全静默**
+		// （三个账号都是 notifyCode=0、文案为空），平时查它只是多打一次上游。
+		// 它唯一的价值是"出故障时给一句人话" —— 于是就该只在故障路径上查。
+		// 失败不影响主流程：拿不到解释只是少一句话。
+		if w := s.dosageHint(uid); w != "" {
+			res.Detail += "；上游提示：" + w
+		}
 		s.record(uid, checkinlog.KindCredits, res.Status, res.Detail, 0, trigger)
 		return res, true
 	}
@@ -443,6 +452,35 @@ func (s *Scheduler) RefreshCredits(uid, trigger string) (CheckinResult, bool) {
 	s.cfg.Pool.ReenableIfCredits(uid, remain)
 	s.record(uid, checkinlog.KindCredits, res.Status, "", remain, trigger)
 	return res, true
+}
+
+// dosageHint 查询上游的额度告警文案，拿不到或没有告警时返回空串。
+//
+// 刻意返回 string 而不是 (*DosageWarning, error)：调用方只想要"一句话"，
+// 而这里所有失败分支的正确行为都一样 —— 静默跳过。让调用方去判断
+// nil/err/nil-err 三种情况只会把一条提示变成三个分支。
+//
+// 入参是 uid 而不是 *auth.Auth：这样不必在本文件 import auth 包，
+// 且凭证在探测时刻从池里现取（余额查询刚失败，池里可能已标记该号状态）。
+//
+// defer recover 的考量：这是诊断路径，任何意外都不该把一次本该只是
+// "余额查询失败"的操作升级成 panic。
+func (s *Scheduler) dosageHint(uid string) (msg string) {
+	defer func() {
+		if r := recover(); r != nil {
+			msg = ""
+		}
+	}()
+	a := s.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		return ""
+	}
+	w, err := s.cfg.Upstream.DosageNotify(a)
+	if err != nil || w == nil {
+		return ""
+	}
+	// 走 shortErr 压行：这个文案要进历史文件，不能让上游的长文本撑爆一行。
+	return shortErr(fmt.Errorf("%s", w.Message()))
 }
 
 // RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。
