@@ -216,6 +216,13 @@ func (s *Sink) readAllLocked() ([]Entry, error) {
 // 但值必须相同，否则「统一的每页条数」就名不副实。
 const DefaultPageSize = 30
 
+// MaxPageSize 单页条数上限，与 checkinlog.MaxPageSize 保持一致。
+//
+// 为什么需要它：Page 的实现是「整体读出文件再切片」，limit 会直接决定这次读的规模。
+// 前端虽然是数字框且有 300 的夹紧，但 HTTP 接口对谁都开放（curl 一个 limit=1e9 就来），
+// 所以上界必须由服务端自己兜住，不能只靠前端。
+const MaxPageSize = 300
+
 // Page 按 offset/limit 返回一页记录（时间倒序，最新在前），并返回文件内总条数。
 //
 // 与 checkinlog.Log.Page 同一套契约，便于前端用同一个分页组件接两个数据源。
@@ -227,6 +234,9 @@ func (s *Sink) Page(offset, limit int) ([]Entry, int, error) {
 	}
 	if limit <= 0 {
 		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
 	}
 	if offset < 0 {
 		offset = 0

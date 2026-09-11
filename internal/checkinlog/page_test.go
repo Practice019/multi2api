@@ -128,6 +128,48 @@ func TestPageDefaultLimitWhenNonPositive(t *testing.T) {
 	}
 }
 
+// 与 logbuf.MaxPageSize 对应：上界由服务端兜住，不依赖前端的数字框自觉。
+func TestPageClampsLimitToMax(t *testing.T) {
+	l := newPagedLog(t, MaxPageSize+50)
+	for _, limit := range []int{MaxPageSize + 1, 1000, 1 << 20} {
+		items, total := l.Page(0, limit, "")
+		if len(items) != MaxPageSize {
+			t.Errorf("limit=%d 本页=%d，期望夹到 %d", limit, len(items), MaxPageSize)
+		}
+		if total != MaxPageSize+50 {
+			t.Errorf("limit=%d total=%d，期望 %d（total 是全量）", limit, total, MaxPageSize+50)
+		}
+	}
+}
+
+func TestPageLimitExactlyMax(t *testing.T) {
+	l := newPagedLog(t, MaxPageSize+10)
+	items, _ := l.Page(0, MaxPageSize, "")
+	if len(items) != MaxPageSize {
+		t.Errorf("limit=MaxPageSize 本页=%d，期望 %d（边界值不应被夹紧）", len(items), MaxPageSize)
+	}
+}
+
+func TestPageClampedLimitKeepsOffsetAndFilter(t *testing.T) {
+	const n = MaxPageSize + 50
+	l := newPagedLog(t, n)
+	// 夹紧 limit 后，offset 仍按原语义生效。
+	// newPagedLog 写入的 UID 是 u0..u(n-1)，倒序后第 k 条对应 u(n-1-k)。
+	items, _ := l.Page(5, 1<<20, "")
+	if len(items) != MaxPageSize {
+		t.Fatalf("本页=%d，期望 %d", len(items), MaxPageSize)
+	}
+	want := fmt.Sprintf("u%d", n-1-5)
+	if items[0].UID != want {
+		t.Errorf("offset=5 时首条=%s，期望 %s", items[0].UID, want)
+	}
+	// 本页最后一条 = u(n-1-5-(MaxPageSize-1))
+	wantLast := fmt.Sprintf("u%d", n-1-5-(MaxPageSize-1))
+	if items[len(items)-1].UID != wantLast {
+		t.Errorf("本页末条=%s，期望 %s", items[len(items)-1].UID, wantLast)
+	}
+}
+
 func TestPageNegativeOffsetTreatedAsZero(t *testing.T) {
 	l := newPagedLog(t, 5)
 	items, _ := l.Page(-10, 2, "")
