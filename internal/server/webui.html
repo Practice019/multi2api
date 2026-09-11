@@ -61,7 +61,17 @@
     .sidebar .badge{display:none}
   }
   /* 设置表单 */
+  /* .formgrid 是组内**同一类控件**的网格（复选框组 / 输入框组各自一份）。
+     它与 .fieldgroup 的分工：.fieldgroup 表示「这一堆是同类控件」（纵向堆叠的语义），
+     .formgrid 负责内部的 auto-fit 多列排布。两者分开是为了让「不交叉」由结构保证，
+     而不是靠 DOM 书写顺序碰巧排对 —— 列数随视口在 2-4 之间流动，靠顺序排必然错位。 */
   .formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+  /* 复选框组：文本短，不需要 250px 那么宽，用更小的最小列宽避免大片空白。
+     210px 是「自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）」这类
+     长标签在 13px 字号下不至于折成三行的经验下界。 */
+  .fieldgroup{display:flex;flex-direction:column;gap:10px}
+  .fieldgroup + .fieldgroup{margin-top:4px}
+  .fieldgroup.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 14px}
   .field{display:flex;flex-direction:column;gap:5px}
   .field label{font-size:11px;color:var(--dim);letter-spacing:.3px}
   .field .hint{font-size:11px;color:var(--dim)}
@@ -389,24 +399,30 @@
       <div id="schInfo" class="dim" style="margin-bottom:14px;line-height:1.7">未连接</div>
       <fieldset>
         <legend>调度（保存后立即生效）</legend>
-        <div class="formgrid">
+        <!-- 开关与参数分成两个 .fieldgroup：复选框归复选框、输入框归输入框，
+             组内不再交叉（详见 .fieldgroup 的样式注释）。 -->
+        <div class="fieldgroup checks">
           <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
           <div class="field chk"><input type="checkbox" id="setKeepaliveEnabled"><label for="setKeepaliveEnabled">启用 token 保活</label></div>
-          <div class="field"><label>签到时点（小时，逗号分隔）</label>
-            <input type="text" id="setCheckinHours" placeholder="9,21"><span class="hint">0-23，本地时区</span></div>
-          <div class="field"><label>保活时点（小时，逗号分隔）</label>
-            <input type="text" id="setKeepaliveHours" placeholder="22"><span class="hint">0-23，本地时区</span></div>
           <div class="field chk"><input type="checkbox" id="setTravelAuto"><label for="setTravelAuto">猫到站自动领奖</label></div>
-          <div class="field"><label>旅行守卫间隔（秒）</label>
-            <input type="number" id="setTravelInterval" min="10" max="3600"><span class="hint">同时是上游未给到站时间时的兜底轮询周期</span></div>
+        </div>
+        <div class="fieldgroup">
+          <div class="formgrid">
+            <div class="field"><label>签到时点（小时，逗号分隔）</label>
+              <input type="text" id="setCheckinHours" placeholder="9,21"><span class="hint">0-23，本地时区</span></div>
+            <div class="field"><label>保活时点（小时，逗号分隔）</label>
+              <input type="text" id="setKeepaliveHours" placeholder="22"><span class="hint">0-23，本地时区</span></div>
+            <div class="field"><label>旅行守卫间隔（秒）</label>
+              <input type="number" id="setTravelInterval" min="10" max="3600"><span class="hint">同时是上游未给到站时间时的兜底轮询周期</span></div>
+          </div>
         </div>
       </fieldset>
 
       <fieldset>
         <legend>成长中心自动动作（保存后立即生效）</legend>
-        <div class="formgrid">
+        <div class="fieldgroup checks">
           <div class="field chk"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）</label></div>
-        <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label></div>
           <div class="field chk"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
           <div class="field chk"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
           <div class="field chk"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
@@ -420,32 +436,38 @@
 
       <fieldset>
         <legend>历史与日志（保存后立即生效）</legend>
-        <div class="formgrid">
-          <div class="field"><label>签到历史保留天数</label>
-            <input type="number" id="setCheckinLogDays" min="1" max="3650"></div>
-          <div class="field"><label>请求日志保留天数</label>
-            <input type="number" id="setReqLogDays" min="1" max="3650"><span class="hint">超过窗口的旧记录在下次裁剪时清除</span></div>
+        <div class="fieldgroup">
+          <div class="formgrid">
+            <div class="field"><label>签到历史保留天数</label>
+              <input type="number" id="setCheckinLogDays" min="1" max="3650"></div>
+            <div class="field"><label>请求日志保留天数</label>
+              <input type="number" id="setReqLogDays" min="1" max="3650"><span class="hint">超过窗口的旧记录在下次裁剪时清除</span></div>
+          </div>
         </div>
         <div id="setLogFileInfo" class="dim" style="margin-top:12px;font-size:12px"></div>
       </fieldset>
 
       <fieldset>
         <legend>需要重启才生效（仍会写入 config.json）</legend>
-        <div class="formgrid">
-          <div class="field"><label>429 软冷却时长</label><input type="text" id="setSoftRate" placeholder="60s"></div>
-          <div class="field"><label>上游短 RPC 超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
-          <div class="field"><label>SSE 首字节超时（秒）</label><input type="number" id="setUpHeaderTimeout" min="1"></div>
-          <div class="field"><label>SSE 流中空闲超时（秒）</label><input type="number" id="setUpIdleTimeout" min="1"></div>
-          <div class="field"><label>单账号最大在途</label><input type="number" id="setMaxInFlight" min="0"><span class="hint">0 = 不限</span></div>
-          <div class="field"><label>熔断阈值（连续失败次数）</label><input type="number" id="setBreakerThreshold" min="1"></div>
-          <div class="field"><label>熔断基础时长</label><input type="text" id="setBreakerCooldown" placeholder="30m"></div>
-          <div class="field"><label>熔断退避封顶</label><input type="text" id="setBreakerCooldownMax" placeholder="6h"></div>
+        <div class="fieldgroup">
+          <div class="formgrid">
+            <div class="field"><label>429 软冷却时长</label><input type="text" id="setSoftRate" placeholder="60s"></div>
+            <div class="field"><label>上游短 RPC 超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
+            <div class="field"><label>SSE 首字节超时（秒）</label><input type="number" id="setUpHeaderTimeout" min="1"></div>
+            <div class="field"><label>SSE 流中空闲超时（秒）</label><input type="number" id="setUpIdleTimeout" min="1"></div>
+            <div class="field"><label>单账号最大在途</label><input type="number" id="setMaxInFlight" min="0"><span class="hint">0 = 不限</span></div>
+            <div class="field"><label>熔断阈值（连续失败次数）</label><input type="number" id="setBreakerThreshold" min="1"></div>
+            <div class="field"><label>熔断基础时长</label><input type="text" id="setBreakerCooldown" placeholder="30m"></div>
+            <div class="field"><label>熔断退避封顶</label><input type="text" id="setBreakerCooldownMax" placeholder="6h"></div>
+            <div class="field"><label>Upstash Redis 地址（可空）</label><input type="text" id="setUpstashURL" placeholder="留空 = 纯内存模式"></div>
+            <div class="field"><label>会话粘性 TTL</label><input type="text" id="setStickyTTL" placeholder="30m"></div>
+            <div class="field"><label>成长中心扫描间隔（秒）</label>
+              <input type="number" id="setGrowthInterval" min="60" max="86400"><span class="hint">守卫轮 ticker 在启动时创建，改动需重启</span></div>
+          </div>
+        </div>
+        <div class="fieldgroup checks">
           <div class="field chk"><input type="checkbox" id="setSanitize"><label for="setSanitize">出站请求体指纹脱敏</label></div>
-          <div class="field"><label>Upstash Redis 地址（可空）</label><input type="text" id="setUpstashURL" placeholder="留空 = 纯内存模式"></div>
           <div class="field chk"><input type="checkbox" id="setStickyEnabled"><label for="setStickyEnabled">会话粘性</label></div>
-          <div class="field"><label>会话粘性 TTL</label><input type="text" id="setStickyTTL" placeholder="30m"></div>
-          <div class="field"><label>成长中心扫描间隔（秒）</label>
-            <input type="number" id="setGrowthInterval" min="60" max="86400"><span class="hint">守卫轮 ticker 在启动时创建，改动需重启</span></div>
         </div>
       </fieldset>
 
