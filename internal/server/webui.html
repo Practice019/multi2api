@@ -1908,19 +1908,31 @@
     if (!s) return;
     // 窗口文案必须如实说明数据来源：统计改为聚合落盘历史后，
     // 不再是「进程内窗口」，而落盘不可用时会回落到内存 —— 两种情况不能混为一谈。
+    //
+    // 三个数字都先过 fmtCount 再插值：直接写 `${s.total}` 时，若上游/后端给了
+    // 非数值（对象、数组、垃圾字符串），非空值会被模板原样串成 `[object Object]`
+    // 显示给用户。这里与卡片区用同一套格式化，保证「同一个数在哪都长一样」。
+    //
+    // 判空用 `!totalText || totalText === '0'`：既要挡住 null（无数据），
+    // 也要保留「0 条 = 日志为空」这个既有文案 —— 光判 null 会把
+    // 「（落盘日志为空）」变成「（全部落盘历史，共 0 条）」，是措辞退化。
+    const totalText = fmtCount(s.total);
     let win;
     if (s.source === 'file') {
       // 只报总数，不再回显「从某时刻起」—— 那个起点是文件里最早一条的时间，
       // 随轮转/清理不断变化，写在这里既不稳定也没人据此判断什么。
-      win = s.total ? `（全部落盘历史，共 ${s.total} 条）` : '（落盘日志为空）';
+      win = (!totalText || totalText === '0')
+        ? '（落盘日志为空）'
+        : `（全部落盘历史，共 ${totalText} 条）`;
     } else if (s.source === 'memory') {
+      const capText = fmtCount(s.capacity);
       win = s.window_from
-        ? `（仅内存缓冲，进程启动至今，上限 ${s.capacity} 条）`
+        ? `（仅内存缓冲，进程启动至今，上限 ${capText === null ? NODATA : capText} 条）`
         : '（暂无请求）';
     } else {
       win = '（未启用日志）';
     }
-    if (s.error) win += ' · ' + s.error;
+    if (s.error) win += ' · ' + esc(String(s.error));
     $('statsWindow').textContent = win;
 
     // 成功率：total 缺失或为 0 时不给数字（会得到 0/0 → NaN）。
