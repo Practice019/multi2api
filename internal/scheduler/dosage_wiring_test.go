@@ -1,11 +1,14 @@
 package scheduler
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
@@ -150,8 +153,13 @@ func TestRefreshCreditsNoDosageOnSuccess(t *testing.T) {
 }
 
 // TestRefreshCreditsDosageHintIsTruncated 超长文案要被压行 —— 它进历史文件。
+//
+// 除了长度，还必须断言**截断后仍是合法 UTF-8**。
+// 原实现 `s[:120]` 按字节切，中文 3 字节/字符极易切在中间，
+// 产生非法 UTF-8，落进历史后再序列化就变成 \ufffd（"�"）。
+// 当初这条测试只查长度、不查编码，所以缺陷溜过去了 —— 由独立评审复现（6 组样本 3 组中招）。
 func TestRefreshCreditsDosageHintIsTruncated(t *testing.T) {
-	long := strings.Repeat("额度异常", 200) // 800 字
+	long := strings.Repeat("额度异常", 200) // 2400 字节
 	s := stubScheduler(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
@@ -166,6 +174,49 @@ func TestRefreshCreditsDosageHintIsTruncated(t *testing.T) {
 
 	res, _ := s.RefreshCredits("u1", triggerManual)
 	if len(res.Detail) > 400 {
-		t.Errorf("Detail 过长（%d 字符），应被 shortErr 压行", len(res.Detail))
+		t.Errorf("Detail 过长（%d 字节），应被 shortErr 压行", len(res.Detail))
+	}
+	if !utf8.ValidString(res.Detail) {
+		t.Errorf("Detail 不是合法 UTF-8（截断切在字符中间）: %q", res.Detail)
+	}
+	// 落盘要经 JSON 序列化，那里最能暴露非法编码
+	b, err := json.Marshal(map[string]string{"detail": res.Detail})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), `\ufffd`) {
+		t.Errorf("序列化后出现替换字符（非法 UTF-8 的典型症状）: %s", string(b))
+	}
+}
+
+// shortErr 直接覆盖：各种字节对齐下的中文截断都必须产出合法 UTF-8。
+//
+// 这是上面那条的"纯函数版"，覆盖 120 字节边界上的所有偏移（UTF-8 单字符最多 3 字节，
+// 所以偏移 0/1/2 三种对齐都要试）。
+func TestShortErrTruncatesOnRuneBoundary(t *testing.T) {
+	for pad := 0; pad < 4; pad++ {
+		// 用 ASCII 前缀把中文推到不同的字节对齐位置
+		s := strings.Repeat("a", pad) + strings.Repeat("额度异常", 100)
+		got := shortErr(fmt.Errorf("%s", s))
+		if !utf8.ValidString(got) {
+			t.Errorf("pad=%d: 截断结果非法 UTF-8: %q", pad, got)
+		}
+		if len(got) > 120 {
+			t.Errorf("pad=%d: 长度 %d 超过上限 120", pad, len(got))
+		}
+		if len(got) < 100 {
+			t.Errorf("pad=%d: 只保留 %d 字节，退让过多（应尽量接近 120）", pad, len(got))
+		}
+	}
+	// 换行仍要被压平
+	if got := shortErr(fmt.Errorf("a\nb\r\nc")); strings.ContainsAny(got, "\n\r") {
+		t.Errorf("换行应被替换为空格: %q", got)
+	}
+	// nil 与短串
+	if got := shortErr(nil); got != "" {
+		t.Errorf("nil 应返回空串，得到 %q", got)
+	}
+	if got := shortErr(fmt.Errorf("short")); got != "short" {
+		t.Errorf("短串不该被改: %q", got)
 	}
 }

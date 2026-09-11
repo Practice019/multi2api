@@ -1949,7 +1949,10 @@
     // 只有一边有数时显示那一边（避免出现 "undefined / 120"）。
     const ch = fmtTokens(s.cache_hit_tokens);
     const cm = fmtTokens(s.cache_miss_tokens);
-    let cacheDetail = NODATA;
+    // 初值用 null 而不是 NODATA：card() 只在 `v === null` 时把值换成占位符
+    // **并加 dim 类**。直接赋字符串会让它走"有值"分支 —— 显示同样是「—」，
+    // 但少了 dim 样式，与其它"无数据"卡片看起来不一致。
+    let cacheDetail = null;
     if (ch !== null && cm !== null) cacheDetail = ch + ' / ' + cm;
     else if (ch !== null) cacheDetail = ch;
     else if (cm !== null) cacheDetail = cm;

@@ -528,7 +528,7 @@ func TestMultiplierTableEmptyContractIsNil(t *testing.T) {
 		"nil 接收者":    nil,
 		"空切片":        {Models: []ModelCatalogEntry{}},
 		"系数全为 0":     {Models: []ModelCatalogEntry{{ID: "a"}, {ID: "b"}}},
-		"id 为空":       {Models: []ModelCatalogEntry{{ID: "", Multiplier: 3}}},
+		"id 为空":      {Models: []ModelCatalogEntry{{ID: "", Multiplier: 3}}},
 		"系数为负（异常输入）": {Models: []ModelCatalogEntry{{ID: "a", Multiplier: -1}}},
 	}
 	for name, mc := range cases {
@@ -594,13 +594,13 @@ func ids(mc *ModelCatalog) []string {
 // 这里把它们**明确钉成支持**（而不是"意外通过"），并补上文档。
 func TestParseCreditsMultiplierAcceptedForms(t *testing.T) {
 	cases := map[string]float64{
-		"x0.51 credits":  0.51,
-		"x0.51":          0.51,
-		"X0.51 CREDITS":  0.51, // 大小写不敏感
+		"x0.51 credits":   0.51,
+		"x0.51":           0.51,
+		"X0.51 CREDITS":   0.51, // 大小写不敏感
 		"  x0.51 credits": 0.51, // 前后空白
-		"x 0.51":         0.51, // 名字与数字之间有空白（评审指出未声明）
-		"x.5":            0.5,
-		"x5.":            5,
+		"x 0.51":          0.51, // 名字与数字之间有空白（评审指出未声明）
+		"x.5":             0.5,
+		"x5.":             5,
 	}
 	for in, want := range cases {
 		if got := ParseCreditsMultiplier(in); got != want {

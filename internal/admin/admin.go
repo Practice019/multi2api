@@ -832,9 +832,15 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	//   - 失败降级是局部的：目录拿不到只让 model_catalog.state=unavailable，
 	//     其余统计字段照常返回（不会被 5xx 连坐）。
 	// 真正需要独立端点的是「刷新目录」这种**写**动作 —— 那已经由 /admin/models/refresh 承担。
-	state := h.modelCatalogState()
-	resp["model_catalog"] = state
-	resp["model_multipliers"] = h.modelMultipliers(resp, state)
+	// 顺序很重要：**先**取倍率（可能触发一次惰性回源），**再**读状态。
+	// 反过来会让首次响应自相矛盾 —— 倍率已经拿到了，state 却还报 unavailable。
+	//
+	// ⚠ 已知代价（评审指出，见代码注释中的 HIGH-2）：ModelCatalog() 可能同步阻塞
+	// 至多 MaxRotate 次上游请求。若不接受，正确做法是把回源挪到后台 goroutine、
+	// 本接口只读缓存 —— 那会改变「首次点击需要等一次拉取」的现行行为，
+	// 是产品取舍而非 bug 修复，故留待专门决定（详见 tasks/board.md）。
+	resp["model_multipliers"] = h.modelMultipliers(resp)
+	resp["model_catalog"] = h.modelCatalogState()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -861,21 +867,33 @@ func (h *Handler) modelCatalogState() ModelCatalogState {
 // 前端就得自己判断「哪些 chip 该显示」——而那正是这份数据存在的理由。
 // 过滤后「有 chip = 有调用」，前端不需要第二套判断。
 //
-// 取数的副作用边界：h.cfg.ModelCatalog 内部按 1h TTL 惰性回源，**首次调用会发一次上游请求**。
-// 这被刻意接受（成本系数不主动拉取就永远是空的），但有三重保护：
+// 只输出**窗口里出现过**且**目录里有系数**的模型：报表要回答的是"钱花在哪"，
+// 不是"目录里有什么"。
 //
-//  1. 目录不可用时（state=unavailable）直接跳过，不触发；
-//  2. 窗口里没有任何 by_model 时直接跳过，不触发；
-//  3. 单测/未接线（nil）时直接返回空切片。
+// 触发上游的边界（三条），都在 ModelCatalog 内部自限：
 //
-// 统计接口本身不会因为这次拉取失败而报错 —— 拿不到就是空表。
-func (h *Handler) modelMultipliers(resp map[string]any, state ModelCatalogState) []ModelMultiplier {
+//  1. 窗口里没有任何 by_model 时直接跳过 —— 没调过模型就没什么可归因的；
+//  2. 单测/未接线（nil）时直接返回空切片；
+//  3. 其余情况交给 ModelCatalog()，它自带 1h TTL + 5min 失败负缓存，
+//     自己决定要不要真的回源。
+//
+// ⚠ **不要**在这里按 state.State == "unavailable" 提前返回。
+// 曾经这么写过，导致功能无法自举 —— 自锁死循环：
+//
+//	state 在缓存为空时返回 "unavailable"
+//	→ 这里提前返回，从不调用 ModelCatalog()
+//	→ 缓存永远为空 → state 永远 unavailable
+//
+// 冷启动时目录**永远不会**被拉取。而当时的测试全把 state 桩成 "ok"，
+// 唯一直接调 ModelCatalog() 的 e2e 又绕开了 /admin/stats，所以全绿但功能是死的
+// （由独立评审发现，回归测试见 catalog_bootstrap_test.go）。
+//
+// 正确做法：把"要不要回源"的决策权交给 ModelCatalog 自己 ——
+// 它才知道自己是不是在冷却期、缓存是否过期。状态只用于**展示**，不用于决策。
+func (h *Handler) modelMultipliers(resp map[string]any) []ModelMultiplier {
 	out := []ModelMultiplier{}
 	byModel, ok := resp["by_model"].(map[string]int)
 	if !ok || len(byModel) == 0 || h.cfg.ModelCatalog == nil {
-		return out
-	}
-	if state.State == "unavailable" {
 		return out
 	}
 	cat := h.cfg.ModelCatalog()
