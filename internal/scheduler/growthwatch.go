@@ -73,6 +73,21 @@ type GrowthSnapshot struct {
 	AcceptableEnergy int64            `json:"acceptable_energy"`
 	Tasks            []GrowthTaskView `json:"tasks,omitempty"` // 全部任务（含各状态）
 
+	// PendingCount/…… 指「还没做完」的任务数，即 not_accepted + accepted + in_progress。
+	//
+	// 为什么需要它：AcceptableCount 只数 not_accepted（未接单），
+	// 于是已接单/进行中的任务在「待接单」与「待领取」两列里都不出现 ——
+	// 用户看到「待完成 0」，实际还有 5 个任务要去做。
+	// 界面上的「待完成 / 完成后可得」用这一对，语义是「还有多少任务没做完、做完能拿多少分」。
+	//
+	// 与另两组的关系（互斥且覆盖全部任务）：
+	//   Pending*   还没做成的（含未接单、已接单、进行中）
+	//   Claimable* 已做成、只等领奖（completed）
+	//   claimed    已领完，三组都不含
+	PendingCount  int   `json:"pending_count"`
+	PendingCredit int64 `json:"pending_credit"`
+	PendingEnergy int64 `json:"pending_energy"`
+
 	// ClaimableCount/…… 指「条件已达成、奖励还没领」的任务数，也就是**现在就能领到的**。
 	// 上游把「达成」和「发奖」拆成两步：completed 只是达成，必须调 claim 才真的到账，
 	// 领完状态变 claimed。所以这个数才是用户关心的「还有多少分能拿」。
@@ -123,10 +138,11 @@ type growthWatchState struct {
 
 	// 六个独立开关。
 	// autoClaim 默认开：completed 只代表条件达成，不 claim 就永远拿不到分。
-	// autoAccept 默认关：它是状态变更且不直接产出收益。
+	// autoAccept 默认开：not_accepted 只在「还没领到第一只 Buddy」的窄窗口出现，
+	// 官方前端连接单按钮都不给；默认开才能让那批任务自动进入可追踪状态。
 	// 后面三个会花资源（连登天数/能量/抽奖次数），默认关。
 	autoClaim  bool // 自动领奖
-	autoAccept bool // 自动接单
+	autoAccept bool // 自动接单（默认开，纯登记、不消耗资源）
 	autoMakeup bool // 补签（默认开，只花补签卡）
 	autoRedeem bool // 连登兑换
 	autoOpen   bool // 开盲盒
@@ -248,6 +264,13 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 			snap.ClaimableCount++
 			snap.ClaimableCredit += t.RewardCredit
 			snap.ClaimableEnergy += t.RewardEnergy
+		}
+		// 待完成：还没做成的（未接单 / 已接单 / 进行中）。
+		// 与 Claimable 互斥：completed 归可领，不在这里重复计数。
+		if t.Pending() {
+			snap.PendingCount++
+			snap.PendingCredit += t.RewardCredit
+			snap.PendingEnergy += t.RewardEnergy
 		}
 		if !t.Acceptable() {
 			continue
@@ -518,7 +541,8 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 	}
 	res.Detail = strings.Join(parts, "（") + strings.Repeat("）", len(parts)-1)
 	if blockedBy != "" {
-		res.Detail += "；被前置任务 " + blockedBy + " 挡住"
+		// 把「被谁挡住」翻译成「去做什么」——光报任务码 first_buddy 用户看不懂。
+		res.Detail += "；需要先完成前置任务：" + prerequisiteHint(blockedBy)
 	}
 	if lastErr != "" {
 		res.Detail += "；最后错误 " + trunc(lastErr)
@@ -574,6 +598,28 @@ func acceptRejectionReason(msg string) (string, bool) {
 		return "", true
 	}
 	return "", false
+}
+
+// prerequisiteHints 把上游的前置任务码翻译成用户能照做的中文指引。
+//
+// 为什么需要翻译：上游只回 "prerequisite not met: first_buddy"，
+// 用户看到的是个内部任务码，不知道要去客户端点哪里。
+// first_buddy 尤其反直觉 —— 它在任务列表里显示为「领取一只 Buddy」，
+// 但不能（也不需要）在网页上接单，必须去 WorkBuddy 客户端里真正领一只。
+var prerequisiteHints = map[string]string{
+	"first_buddy": "「领取一只 Buddy」—— 需在 WorkBuddy 客户端内完成（本网页无法代做），完成后其余任务才能接单",
+}
+
+// prerequisiteHint 返回可读指引。
+//
+// 输出形如 "first_buddy（「领取一只 Buddy」—— 需在 WorkBuddy 客户端内完成…）"：
+// **任务码保留在前**，便于对着上游日志与任务列表里的 black-cat 样式 code 核对；
+// 括号里是给人看的中文动作指引。未登记的码只回 code，至少不丢信息。
+func prerequisiteHint(code string) string {
+	if h, ok := prerequisiteHints[code]; ok {
+		return code + "（" + h + "）"
+	}
+	return code
 }
 
 // GrowthMakeupFor 补签。date 为空时取上游给出的可补签日期列表里的第一个。

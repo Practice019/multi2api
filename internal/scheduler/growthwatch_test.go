@@ -298,18 +298,23 @@ func TestGrowthAcceptPerTaskError(t *testing.T) {
 	}
 }
 
-// TestGrowthTogglesDefaults 默认领奖与补签开，其余四个关（接单也是）。
+// TestGrowthTogglesDefaults 默认领奖、接单、补签开；三个花资源的关。
+//
+// 接单从「默认关」改成「默认开」的理由：实测 not_accepted 只在
+// 「还没领到第一只 Buddy」的窄窗口存在，官方前端连按钮都不给。
+// 默认关的实际后果是新账号那批任务连进度都不显示（用户不知道该做什么），
+// 而接单本身是纯登记动作、不消耗任何资源，默认开的代价为零。
 func TestGrowthTogglesDefaults(t *testing.T) {
 	g := defaultGrowthStub()
 	s, _ := newGrowthHarness(t, g)
 	accept, makeup, redeem, open, draw, claim := s.GrowthToggles()
-	if accept || !makeup || redeem || open || draw || !claim {
+	if !accept || !makeup || redeem || open || draw || !claim {
 		t.Fatalf("默认开关不符: claim=%v accept=%v makeup=%v redeem=%v open=%v draw=%v",
 			claim, accept, makeup, redeem, open, draw)
 	}
 }
 
-// TestGrowthAutoActionsRespectToggles 默认只执行补签；四个关闭的动作一次都不能发生。
+// TestGrowthAutoActionsRespectToggles 默认执行接单与补签；三个花资源的一次都不能发生。
 func TestGrowthAutoActionsRespectToggles(t *testing.T) {
 	g := defaultGrowthStub()
 	g.tasksJSON = `{"tasks":[{"task_code":"a","accept_status":"not_accepted","reward_credit":100}]}`
@@ -328,8 +333,11 @@ func TestGrowthAutoActionsRespectToggles(t *testing.T) {
 	if got := g.lastDate.Load(); got != "2026-09-01" {
 		t.Errorf("补签日期=%v，期望取第一个可补签日期", got)
 	}
+	// 接单默认开：没有可接任务时才不会调用，本用例有 1 个 not_accepted，应当被接单。
+	if g.acceptCalls.Load() == 0 {
+		t.Error("接单默认开，却一次都没调用")
+	}
 	for name, n := range map[string]int32{
-		"接单":  g.acceptCalls.Load(),
 		"兑换":  g.redeemCalls.Load(),
 		"开盲盒": g.openCalls.Load(),
 		"抽奖":  g.drawCalls.Load(),
@@ -822,11 +830,28 @@ func TestGrowthAcceptAllBlockedByPrerequisiteIsSkip(t *testing.T) {
 	if res.Status != checkinlog.StatusSkip {
 		t.Errorf("全部被前置挡住应为 skip，得到 %s（Detail=%s）", res.Status, res.Detail)
 	}
+	// Detail 必须给出**可照做的**指引，而不是只丢一个内部任务码。
 	if !strings.Contains(res.Detail, "first_buddy") {
 		t.Errorf("Detail 应点明被哪个前置任务挡住，得到 %q", res.Detail)
 	}
+	if !strings.Contains(res.Detail, "领取一只 Buddy") {
+		t.Errorf("Detail 应把 first_buddy 翻译成可读指引，得到 %q", res.Detail)
+	}
+	if !strings.Contains(res.Detail, "WorkBuddy 客户端") {
+		t.Errorf("Detail 应说明要去哪里做，得到 %q", res.Detail)
+	}
 	if strings.Contains(res.Detail, "失败") {
 		t.Errorf("不该出现「失败」字样，得到 %q", res.Detail)
+	}
+}
+
+// 未登记的前置任务码原样带出，不丢信息。
+func TestPrerequisiteHintFallsBackToCode(t *testing.T) {
+	if got := prerequisiteHint("first_buddy"); !strings.Contains(got, "领取一只 Buddy") {
+		t.Errorf("first_buddy 应有中文指引，得到 %q", got)
+	}
+	if got := prerequisiteHint("some_future_task"); got != "some_future_task" {
+		t.Errorf("未登记的码应原样返回，得到 %q", got)
 	}
 }
 

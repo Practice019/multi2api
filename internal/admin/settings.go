@@ -32,7 +32,9 @@ type Settings struct {
 	// GrowthAutoClaim 领奖：把条件已达成但未领的任务奖励领回来，是唯一让积分到账的动作。
 	// 纯收益，默认开。
 	GrowthAutoClaim bool `json:"growth_auto_claim"`
-	// GrowthAutoAccept 接单：只是把任务接进列表开始计进度，**不发奖励**，默认关。
+	// GrowthAutoAccept 接单：只是把任务接进列表开始计进度，**不发奖励**，默认开。
+	// 默认开的原因见 cmd/server/config.go 里同名字段的注释：
+	// not_accepted 只在「还没领到第一只 Buddy」的窄窗口存在，官方前端连按钮都不给。
 	GrowthAutoAccept bool `json:"growth_auto_accept_tasks"`
 	// 补签是纯收益（只花补签卡）；下面三个会消耗能量/连登天数/抽奖次数，默认关。
 	GrowthAutoMakeup bool `json:"growth_auto_makeup"`

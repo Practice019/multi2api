@@ -124,7 +124,15 @@
   .ggroup td.gdesc{white-space:normal;max-width:440px;line-height:1.6;font-size:12px}
   .ggroup td.gdesc .howto{color:var(--dim);font-size:11px;margin-top:5px}
   .chips{display:flex;flex-wrap:wrap;gap:7px}
-  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:999px;
+  /* 任务进度条：细、无圆角感、与数值同列。
+     光看 "4/5" 不如一眼看出还剩多少，尤其是在一屏十几行任务时。 */
+  .pbar{height:4px;background:var(--panel2);border-radius:2px;margin-top:4px;
+    min-width:52px;max-width:96px;overflow:hidden}
+  .pbar i{display:block;height:100%;background:var(--acc);border-radius:2px;
+    transition:width .2s}
+  /* 次要按钮：接单是登记动作、不产生收益，视觉上不应与「领取 N 分」争注意力。 */
+  .ghost{background:transparent;border-color:var(--line);color:var(--dim)}
+  .ghost:hover{border-color:var(--acc);color:var(--acc)}  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:999px;
     padding:3px 11px;font-family:var(--mono);font-size:12px;cursor:pointer}
   .chip:hover{border-color:var(--acc);color:var(--acc)}
   .chip span{color:var(--dim);font-size:11px;margin-left:5px}
@@ -163,6 +171,9 @@
   .notice.progress{border-left:3px solid var(--acc)}
   .notice.ok{color:var(--ok)}
   .notice.bad{color:var(--err)}
+  /* 需要用户照做的指引：左侧黄条 + 稍宽，与瞬时 toast 在视觉上区分开 */
+  .notice.warn{border-left:3px solid var(--warn);color:var(--fg);
+    max-width:min(520px,52vw)}
   /* 统一分页条：任务历史与请求日志共用同一套控件与语义（见 renderPager）。 */
   .pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
     padding:9px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)}
@@ -184,9 +195,12 @@
 </head>
 <body>
 <!-- 全局通知区：必须挂在 body 下（不在 .content 内），否则会被面板显隐规则连带隐藏。
-     #toast 放瞬时消息，#gtask 放后台任务进度与完成摘要，两者职责不同、分开显示。 -->
+     #toast 放瞬时消息，#gtask 放后台任务进度与完成摘要，两者职责不同、分开显示。
+     #notice 是需要用户照着做的持久指引（不自动消失，带「知道了」），
+     与 #toast 的区别：它承载的是「你现在该去做什么」，一闪而过会让人反复重试。 -->
 <div class="notices">
   <div id="gtask" class="notice progress" hidden></div>
+  <div id="notice" class="notice warn" hidden></div>
   <div id="toast" class="notice" hidden></div>
 </div>
 <header>
@@ -422,7 +436,7 @@
         <legend>成长中心自动动作（保存后立即生效）</legend>
         <div class="fieldgroup checks">
           <div class="field chk"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）</label></div>
-          <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label><span class="hint">只在新账号「还没领到第一只 Buddy」时有实际作用；官方前端没有接单按钮</span></div>
           <div class="field chk"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
           <div class="field chk"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
           <div class="field chk"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
@@ -660,6 +674,27 @@
     el.hidden = false;
     clearTimeout(toast._t);
     toast._t = setTimeout(() => { el.hidden = true; }, 5000);
+  }
+
+  // notice 写「需要用户照着做」的持久提示：不自动消失，带标题与关闭按钮。
+  //
+  // 与 toast 的分工：
+  //   toast  一次性结果播报（"签到成功"），5 秒后自己消失，错过就算了
+  //   notice 可操作的指引（"要先完成 XX 才能接单"），必须让用户看清并点掉 ——
+  //          它往往意味着"你现在什么都不用再点，先去客户端做件事"，
+  //          一闪而过的 toast 会让人以为是自己操作错了、反复重试。
+  function notice(title, body) {
+    const el = $('notice');
+    el.innerHTML =
+      '<div style="display:flex;align-items:baseline;gap:8px">' +
+        '<b style="color:var(--warn)">' + esc(title) + '</b>' +
+        '<span class="spacer" style="flex:1"></span>' +
+        '<button id="noticeClose" style="font-size:11px;padding:1px 8px">知道了</button>' +
+      '</div>' +
+      '<div style="margin-top:6px;line-height:1.7;white-space:pre-wrap">' + esc(body) + '</div>';
+    el.hidden = false;
+    const btn = $('noticeClose');
+    if (btn) btn.onclick = () => { el.hidden = true; };
   }
 
   async function act(uid, action) {
@@ -1002,8 +1037,12 @@
     growthSnaps = list || [];
 
     const sum = growthSnaps.reduce((a, g) => {
-      a.claim += g.acceptable_count || 0;
-      a.credit += g.acceptable_credit || 0;
+      // 「待完成」用 pending_*（未接单 + 已接单 + 进行中），不是 acceptable_*。
+      // acceptable 只数未接单的，会让已接单/进行中的任务从统计里消失 ——
+      // 那样账号明明还有 5 个任务要做，卡片却显示 0。
+      // 兼容：旧快照没有 pending_* 字段时回落到 acceptable_*，避免显示成 0。
+      a.claim += (g.pending_count != null ? g.pending_count : (g.acceptable_count || 0));
+      a.credit += (g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0));
       a.streak = Math.max(a.streak, g.streak_days || 0);
       a.energy += g.energy || 0;
       // 可领奖：已完成但奖励还没到手的部分，这才是「现在能拿到的分」。
@@ -1021,9 +1060,10 @@
       ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
       ['现在可领信用分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
       ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
-      // 「待接单/接单后可得」改成「待完成/完成后可获得」：
-      // 这些任务需要先接单、再去 WorkBuddy 里把动作做掉，最终还要领奖才到账。
-      // 原措辞只说到"接单"，会让人以为接完就有分 —— 实际接单不发任何奖励。
+      // 「待完成 / 完成后可获得」的口径是**还没做完的任务**：
+      // 未接单 + 已接单 + 进行中三种状态都算（见后端 GrowthTask.Pending）。
+      // 不含 completed（那属于「待领取」，领奖是另一步）。
+      // 措辞强调"完成"而不是"接单"：接单只是开始计进度，不发任何奖励。
       ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
       ['完成后可获得的信用分', sum.credit, sum.credit ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
@@ -1058,11 +1098,15 @@
       const cards = g.makeup_cards
         ? `${g.makeup_cards}${g.makeup_dates && g.makeup_dates.length ? ` <span class="pill warn">可补${g.makeup_dates.length}</span>` : ''}`
         : '<span class="dim">—</span>';
-      const claim = g.acceptable_count
-        ? `<span class="pill ok">${g.acceptable_count}</span>`
+      // 待完成 / 完成后可得：口径是"还没做完"（未接单+已接单+进行中），
+      // 与「接单」按钮的可用性（acceptable_count，只数未接单）是两件事。
+      const pendN = g.pending_count != null ? g.pending_count : (g.acceptable_count || 0);
+      const pendC = g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0);
+      const claim = pendN
+        ? `<span class="pill ok">${pendN}</span>`
         : '<span class="dim">—</span>';
-      const credit = g.acceptable_credit
-        ? `<span class="pill ok">${g.acceptable_credit}</span>`
+      const credit = pendC
+        ? `<span class="pill ok">${pendC}</span>`
         : '<span class="dim">—</span>';
       // 待领取 / 现在可领：来自 completed 的任务，领了就到账。
       const pendingN = g.claimable_count
@@ -1126,8 +1170,13 @@
   let growthUID = '';
 
   const GROWTH_STATUS_TEXT = {
+    // 「未接单」只在「还没领到第一只 Buddy」时出现，且官方前端没有这个状态。
+    // 保留它是因为那种账号确实需要先接单，否则连进度都不显示。
     not_accepted: ['待接单', 'dim'],
-    accepted: ['进行中', ''],
+    // accepted = 已接单但进度还是 0 —— 用户要做的是「去客户端完成」，
+    // 所以文案直接写成「待完成」而不是「进行中」，与卡片的「待完成任务」对齐。
+    accepted: ['待完成', ''],
+    // in_progress = 已经做了一部分（有 current/target），才叫「进行中」。
     in_progress: ['进行中', ''],
     // completed 与 claimed 分开显示：前者奖励还没领（行内给「领取」按钮），后者已到账。
     completed: ['待领取', 'warn'],
@@ -1220,18 +1269,31 @@
     const tasks = (g.tasks || []).filter(test);
     const rows = tasks.map(t => {
       const [label, cls] = GROWTH_STATUS_TEXT[t.status] || [t.status, 'dim'];
-      const prog = t.target ? `${t.current || 0}/${t.target}` : '<span class="dim">—</span>';
+      // 进度做成「数值 + 细进度条」：光看 4/5 不如一眼看出还剩多少。
+      // target=0 或缺失时（如 black_cat 这类活动任务）不画条，避免 0/0 的假进度。
+      let prog = '<span class="dim">—</span>';
+      if (t.target > 0) {
+        const cur = Math.max(0, Math.min(t.current || 0, t.target));
+        const pct = Math.round((cur / t.target) * 100);
+        prog = `<span class="mono" title="${cur}/${t.target}">${cur}/${t.target}</span>` +
+               `<div class="pbar" title="${pct}%"><i style="width:${pct}%"></i></div>`;
+      }
       const reward = [
         t.reward_credit ? `${t.reward_credit} 分` : '',
         t.reward_energy ? `+${t.reward_energy} 能量` : '',
       ].filter(Boolean).join(' ') || '<span class="dim">—</span>';
       const locked = t.locked ? ' <span class="pill warn">未解锁</span>' : '';
       // 领取优先于接单：completed 的任务已经做完了，唯一可做的就是领奖。
+      //
+      // accepted / in_progress 给的不是按钮而是说明 —— 这两类任务**本网页无法代做**，
+      // 必须去 WorkBuddy 客户端里真正把动作做掉。留一个禁用按钮只会让人反复点。
       const btn = t.claimable
         ? `<button data-gclaimreward="${esc(t.task_code)}" data-uid="${esc(g.uid)}">领取 ${t.reward_credit || 0} 分</button>`
         : (t.status === 'not_accepted' && !t.locked)
-          ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}">接单</button>`
-          : '<span class="dim">—</span>';
+          ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost">接单</button>`
+          : (t.status === 'accepted' || t.status === 'in_progress')
+            ? '<span class="dim" style="font-size:11px">去客户端做</span>'
+            : '<span class="dim">—</span>';
       const tag = t.tag ? ` <span class="pill">${esc(t.tag)}</span>` : '';
 
       return `<tr>
@@ -1298,19 +1360,31 @@
       const extra = r.credits ? `，+${r.credits} 信用分` : '';
       toast(`${label}成功：${r.detail || ''}${extra}`);
     } catch (e) {
-      // 中性提示（非红色）用于「现在不该做」这类**预期内**的结果，而不是故障。
-      // 判定关键词要与后端 Detail 文案对齐：
-      //   跳过 N            —— 任务不需要接单 / 重复接单 / 无可领
-      //   被前置任务 X 挡住  —— 上游 prerequisite not met，用户去做掉前置任务即可
-      //   没有/不足/已领取等 —— 原有的一批「无操作成功」措辞
-      // 不匹配则按真失败显示红色，避免把故障说成正常。
-      const msg = e.message || '';
-      const benign = /跳过|被前置任务|没有|不足|不可领取|不可接单|没有可|已领取/.test(msg);
-      toast(`${label}：${msg}`, !benign);
+      growthError(e, label);
     }
     loadGrowth(true);
     refresh();
     loadHistory();
+  }
+
+  // growthError 统一处理成长动作的失败提示（单账号与「全部」两条路径共用）。
+  //
+  // 分层：
+  //   预期内（跳过/被前置挡住/无可领）→ 中性 toast，不打红
+  //   被前置任务挡住                  → 额外弹**持久面板**，告诉用户去做什么
+  //   其余                            → 红色 toast（真故障）
+  //
+  // 为什么要弹面板：被前置挡住时用户接下来什么都不用点，而是要去 WorkBuddy 客户端
+  // 把前置任务做掉。只给一闪而过的 toast，用户会以为是自己操作错了并反复重试。
+  function growthError(e, label) {
+    const msg = (e && e.message) || String(e);
+    const benign = /跳过|被前置任务|需要先完成前置任务|不可领取|不可接单|没有可|没有待|不足|已领取/.test(msg);
+    toast(`${label}：${msg}`, !benign);
+    const blocked = /需要先完成前置任务[：:]\s*(.+)$/.exec(msg);
+    if (blocked) {
+      notice('接单被前置任务挡住',
+        blocked[1].trim() + '\n\n这一步只能在 WorkBuddy 客户端里做，本网页无法代做。完成后回到这里再点「接单」即可。');
+    }
   }
 
   async function growthAll(act) {
@@ -1319,7 +1393,7 @@
     try {
       const r = await admin('/admin/growth/' + act, { method: 'POST', body: '{}' });
       if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
-    } catch (e) { toast(`全部${label}失败：` + e.message, true); }
+    } catch (e) { growthError(e, `全部${label}`); }
   }
 
   // ---------------------------------------------------------------- 请求日志（落盘历史）

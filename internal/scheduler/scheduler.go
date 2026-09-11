@@ -100,7 +100,8 @@ func New(cfg Config) *Scheduler {
 		adoptTried: make(map[string]string),
 		travel:     newTravelWatchState(!cfg.TravelAutoClaimDisabled),
 		growth: newGrowthWatchState(
-			boolOrPtr(cfg.GrowthAutoAccept, false),
+			// accept 默认 true：见 growthWatchState.autoAccept 的注释。
+			boolOrPtr(cfg.GrowthAutoAccept, true),
 			boolOrPtr(cfg.GrowthAutoMakeup, true),
 			boolOrPtr(cfg.GrowthAutoRedeem, false),
 			boolOrPtr(cfg.GrowthAutoOpen, false),

@@ -410,3 +410,57 @@ func TestGrowthAutoClaimAliasIsNotSilentlyLost(t *testing.T) {
 		t.Errorf("别名值解析错误: %v", *c.Admin.GrowthAutoClaimAlias)
 	}
 }
+
+// TestGrowthAutoDefaults 钉死成长中心各自动动作的默认值。
+//
+// 为什么要单独守一条：默认值是"配置里不写"时的行为，最容易在改动中被悄悄翻掉，
+// 而用户不会立刻察觉（不写配置的人占多数）。
+//
+// 接单的默认值尤其值得守：它从 false 改成 true 是因为实测发现
+// not_accepted 只在「还没领到第一只 Buddy」的窄窗口存在，官方前端连接单按钮都不给；
+// 默认关的实际后果是新账号那批任务连进度都不显示。
+//
+// 三个会消耗用户资产的动作（连登天数 / 能量 / 抽奖次数）必须保持默认关 ——
+// 那是用户的东西，不该由默认值替他决定。
+func TestGrowthAutoDefaults(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	// 空配置：全部走默认
+	os.WriteFile(fp, []byte(`{}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wantOn := map[string]bool{
+		"领奖 GrowthAutoClaim":  c.GrowthAutoClaim,
+		"接单 GrowthAutoAccept": c.GrowthAutoAccept,
+		"补签 GrowthAutoMakeup": c.GrowthAutoMakeup,
+	}
+	for name, got := range wantOn {
+		if !got {
+			t.Errorf("%s 应为默认开，得到 false", name)
+		}
+	}
+	wantOff := map[string]bool{
+		"兑换 GrowthAutoRedeem": c.GrowthAutoRedeem,
+		"开盲盒 GrowthAutoOpen":  c.GrowthAutoOpen,
+		"抽奖 GrowthAutoDraw":   c.GrowthAutoDraw,
+	}
+	for name, got := range wantOff {
+		if got {
+			t.Errorf("%s 会消耗用户资产，应保持默认关，得到 true", name)
+		}
+	}
+
+	// 显式关掉接单必须生效（默认开了，用户仍要能关）。
+	fp2 := filepath.Join(dir, "c2.json")
+	os.WriteFile(fp2, []byte(`{"admin":{"growth_auto_accept_tasks":false}}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.GrowthAutoAccept {
+		t.Error("显式 growth_auto_accept_tasks=false 未生效")
+	}
+}

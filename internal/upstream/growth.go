@@ -96,6 +96,35 @@ func (t *GrowthTask) Claimable() bool {
 	return t != nil && t.AcceptStatus == GrowthStatusCompleted
 }
 
+// Pending 报告任务是否「还没做完」（界面上叫「待完成」）。
+//
+// 口径是「尚未达成条件」的三种状态：
+//
+//	not_accepted  还没接单 —— 更没开始做
+//	accepted      已接单，进度为 0 或尚未推进
+//	in_progress   已接单且已推进，但未达标
+//
+// 排除两种：
+//
+//	completed  条件已达成，只剩领奖 —— 归入「待领取」，不能在这里重复计数
+//	claimed    已领完，彻底结束
+//
+// 为什么单独抽这个方法而不是在聚合处写 if：
+// 之前界面的「待接单」只统计 Acceptable()（= not_accepted），
+// 于是 accepted/in_progress 的任务在「待接单」和「待领取」两列里都不出现，
+// 用户看到「待完成 0」但实际上还有 5 个任务要去做。
+func (t *GrowthTask) Pending() bool {
+	if t == nil {
+		return false
+	}
+	switch t.AcceptStatus {
+	case GrowthStatusNotAccepted, GrowthStatusAccepted, GrowthStatusInProgress:
+		return true
+	default:
+		return false
+	}
+}
+
 // GrowthAcceptResult 单个任务的接单结果。
 type GrowthAcceptResult struct {
 	TaskCode string `json:"task_code"`

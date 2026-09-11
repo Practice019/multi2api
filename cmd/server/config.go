@@ -103,9 +103,20 @@ type Config struct {
 		// growth_auto_claim_tasks 会被静默忽略、只看默认值——配置改了等于没改。
 		// 两个键都接受：GrowthAutoClaim 优先，本字段作回退。
 		GrowthAutoClaimAlias *bool `json:"growth_auto_claim_tasks"`
-		// GrowthAutoAcceptTasks 自动接单（默认 false）。
-		// 注意语义：接单只把任务接进列表开始计进度，**不发放奖励**；
-		// 默认关是因为它是状态变更且不直接产出收益。
+		// GrowthAutoAcceptTasks 自动接单（默认 **true**）。
+		//
+		// 语义：接单只把任务接进列表开始计进度，**不发放奖励**。
+		//
+		// 为什么从 false 改成 true：实测 `not_accepted` 只在「账号还没领到第一只
+		// Buddy（first_buddy）」这个窄窗口里存在 —— 官方前端干脆没有接单按钮，
+		// 因为它认为那是用户不需要关心的瞬时中间态。过了这个窗口，上游会自动
+		// 把其余任务接单，接单能力就再没有用武之地。
+		//
+		// 于是保留「默认关」的实际后果是：新账号的那 17 个任务在窗口期内连进度都不显示，
+		// 用户看着一片「未接单」却不知道该做什么。默认开启后，守卫轮会顺手把它们接进来，
+		// 用户只需要「去做 + 领奖」两件事 —— 正好对应官方前端的心智模型。
+		//
+		// 仍然是纯登记动作、无资源消耗（不像兑换/开盲盒会花资产），因此默认开的代价为零。
 		GrowthAutoAcceptTasks *bool `json:"growth_auto_accept_tasks"`
 		// GrowthAutoMakeup 自动补签（默认 true，只消耗补签卡且卡本身无其他用途）。
 		GrowthAutoMakeup *bool `json:"growth_auto_makeup"`
@@ -343,7 +354,9 @@ func (c *Config) normalize() error {
 		claimFlag = c.Admin.GrowthAutoClaimAlias
 	}
 	c.GrowthAutoClaim = boolOr(claimFlag, true)
-	c.GrowthAutoAccept = boolOr(c.Admin.GrowthAutoAcceptTasks, false)
+	// 自动接单默认开：见 Admin.GrowthAutoAcceptTasks 的注释（not_accepted 只是
+	// 「还没领第一只 Buddy」的窄窗口，官方前端连按钮都不给）。
+	c.GrowthAutoAccept = boolOr(c.Admin.GrowthAutoAcceptTasks, true)
 	c.GrowthAutoMakeup = boolOr(c.Admin.GrowthAutoMakeup, true)
 	c.GrowthAutoRedeem = boolOr(c.Admin.GrowthAutoRedeem, false)
 	c.GrowthAutoOpen = boolOr(c.Admin.GrowthAutoOpen, false)
