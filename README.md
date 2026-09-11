@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
+  <img src="assets/logo.svg" alt="WorkBuddy2API" width="120" height="120">
 </p>
 
 <h1 align="center">WorkBuddy2API</h1>
@@ -10,10 +10,11 @@
 </p>
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.22.5-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
-  <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Local__%2F__Self--hosted-blueviolet?style=flat-square">
 </p>
 
 ---
@@ -26,24 +27,24 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却/熔断防止雪崩、会话粘性保证多轮上下文不跳号；
 - 对客户端只暴露 OpenAI 兼容接口，现有 SDK / 前端 / 工具 **零改造接入**。
 
-> ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机/私有环境测试**。详细边界见 [安全与合规](#-安全与合规)。
+> ⚠️ **合规须知**：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机/私有环境测试**。详细边界见 [安全与合规](#-安全与合规) 与 [SECURITY.md](SECURITY.md)。
 
-## ✨ 核心能力
+> 📦 **本仓库定位**：`Sliverkiss/workbuddy2api` 的**私有衍生版本**。在 MIT 许可下保留上游版权声明，并追加了本地管理控制台、请求日志缓冲、签到历史等扩展（详见 [本仓库扩展](#-本仓库扩展自上游的增量)）。上游更新请从原仓库获取。
 
-| 能力 | 说明 |
-|---|---|
-| 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程（无 PKCE），自动落盘凭证并重启容器 |
-| 🔄 **多账号池** | 三因子加权随机选号（积分比例 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群 |
-| 🛡️ **熔断与冷却** | 429/404 软冷却、402/余额不足硬冷却至次日 04:00、连续失败指数退避熔断、在途租约限流 |
-| 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑 |
-| ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻 + 猫猫旅行（派猫/领奖）；22:00 全账号 token 刷新保活 |
-| ⚡ **流式 + 非流式** | 上游 SSE 逐帧规范化透传；出站强制 `stream:true`，非流式由本地聚合为单响应 |
-| 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
-| 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 带 `service` 身份标识可接负载均衡/宿主探活 |
-| 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
-| 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭） |
+## 👀 预览
+
+| 仪表盘 | 账号池 | 请求日志 | 设置 |
+|:---:|:---:|:---:|:---:|
+| ![仪表盘](assets/screenshot-dashboard.png) | ![账号池](assets/screenshot-accounts.png) | ![请求日志](assets/screenshot-logs.png) | ![设置](assets/screenshot-settings.png) |
+
+> 截图均来自运行真实网关的 `/ui`，所有可识别个人信息（API Key、账号昵称、UID 缩写）已替换为占位符。
 
 ## 🗺️ 架构总览
+
+![架构图](assets/architecture.svg)
+
+<details>
+<summary>等价的 Mermaid 版本（便于在源码里修改）</summary>
 
 ```mermaid
 flowchart LR
@@ -64,18 +65,36 @@ flowchart LR
     U -->|"billing / auth / models"| CB
 ```
 
+</details>
+
+## ✨ 核心能力
+
+| 能力 | 说明 |
+|---|---|
+| 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程（无 PKCE），自动落盘凭证并重启容器 |
+| 🔄 **多账号池** | 三因子加权随机选号（积分比例 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群 |
+| 🛡️ **熔断与冷却** | 429/404 软冷却、402/余额不足硬冷却至次日 04:00、连续失败指数退避熔断、在途租约限流 |
+| 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑 |
+| ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻 + 猫猫旅行（派猫/领奖）；22:00 全账号 token 刷新保活 |
+| ⚡ **流式 + 非流式** | 上游 SSE 逐帧规范化透传；出站强制 `stream:true`，非流式由本地聚合为单响应 |
+| 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
+| 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 带 `service` 身份标识可接负载均衡/宿主探活 |
+| 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
+| 🖥️ **本地管理控制台** | `/ui` 单页 WebUI（本仓库扩展）：仪表盘 / 账号池 / 猫猫旅行 / 成长计划 / 请求日志 / 任务历史 / 设置 |
+| 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭） |
+
 ## 🚀 快速开始
 
 ### 环境要求
 
-- **Docker + Docker Compose**（推荐部署方式，镜像内已含 `app` 低权限用户）
+- **Go 1.22+**（本地直接编译时）或 **Docker + Docker Compose**（推荐）
 - 一个（或多个）已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.22（仅本地直接编译时需要）
+- 宿主机 7863 端口空闲
 
 ### 1. 克隆并配置
 
 ```bash
-git clone https://github.com/Sliverkiss/workbuddy2api.git
+git clone https://github.com/Practice019/workbuddy2api.git
 cd workbuddy2api
 cp config.example.json config.json
 ```
@@ -84,6 +103,7 @@ cp config.example.json config.json
 
 ```bash
 # 用编辑器把 "api_key" 改成你自己的强随机串
+# 生成示例：openssl rand -hex 32
 ```
 
 ### 2. 登录添加账号
@@ -99,11 +119,13 @@ cp config.example.json config.json
 
 ### 3. 启动服务
 
+**Docker Compose**（推荐）：
+
 ```bash
 docker compose up -d --build
 ```
 
-### 3b. Windows 本机直接运行（不走 Docker）
+**Windows 本机直接运行**（不走 Docker）：
 
 仓库根目录有一个 `start.bat`，**双击即可启动**：
 
@@ -117,16 +139,7 @@ start.bat
 start.bat -config other.json
 ```
 
-**为什么需要这个 bat，而不是直接双击 `bin\wb2api-server.exe`？**
-
-双击 exe 时，Windows 把「工作目录」设成 exe 所在的 `bin\`，而不是仓库根目录。于是：
-
-1. 程序按相对路径找 `config.json` → 找不到 → 直接退出（`open config.json: The system cannot find the file specified.`）
-2. 即使把 `config.json` 复制进 `bin\`，配置里的 `"./auths"`、`"./data"` 也会指向 `bin\auths`、`bin\data` —— **这不会报错**，而是以空账号池静默启动，比直接失败更难排查
-
-`start.bat` 第一件事就是 `cd /d "%~dp0"`（切到 bat 自身所在目录），因此无论从哪个目录双击，工作目录都稳定落在仓库根。脚本还会在启动前自检 `config.json` 与 `bin\wb2api-server.exe` 是否存在，缺失时给出明确提示而不是闪退。
-
-> **维护注意**：`start.bat` 必须保持**纯 ASCII**。`cmd.exe` 按系统 OEM 代码页（中文 Windows 为 936/GBK）解析 `.bat` 内容，UTF-8 的中文字节会被误解码并破坏语法（实测会报 `'json' is not recognized as an internal or external command`）。中文说明因此写在本文件里，不写进 bat。
+> `start.bat` 必须保持**纯 ASCII**。`cmd.exe` 按系统 OEM 代码页（中文 Windows 为 936/GBK）解析 `.bat` 内容，UTF-8 的中文字节会被误解码并破坏语法。中文说明在 README，不写进 bat。详细见 bat 内的注释。
 
 等价的命令行启动方式（等价于双击 `start.bat`）：
 
@@ -166,6 +179,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 ```
 
 ## ⚙️ 配置说明
+
+`config.json` 是网关的单一写入口。`config.example.json` 是仓库随附的最小可工作模板；启动时若该文件不存在则用纯默认 + 环境变量。
+
+完整的字段表见下表，**所有字段均可省略**（省略则用默认值）；环境变量优先级最高，可用于临时覆盖（见后文）。
 
 完整字段以 [`config.example.json`](config.example.json) 为样例（下表为各字段含义）。
 
@@ -648,6 +665,22 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 - 遵守 CodeBuddy 平台服务条款与所在地法律
 - 妥善保管 `auths/`（明文凭证）与网关端口
 
+## 🧰 本仓库扩展（自上游的增量）
+
+`Sliverkiss/workbuddy2api` 的 MIT 上游版本以网关 + 脚本为主。本仓库在保留所有上游能力的基础上追加了以下能力（详见顶部「预览」配图）：
+
+| 增量 | 入口 | 价值 |
+|---|---|---|
+| 🖥️ **本地 WebUI 控制台** | `/ui`（仅本机） | 账号池 / 成长 / 旅行 / 请求日志 / 任务历史 / 设置 一站式面板 |
+| 🔐 **管理台后端** | `/admin/*`（仅本机） | 改账号池、触发上游请求、读取积分 |
+| 💾 **请求日志缓冲** | `data/request-log.jsonl` | 落盘可保留 7 天；每条带 TTFB / token / tok/s |
+| 📅 **签到/保活/旅行历史** | `data/checkin-history.json` | 30 天保留，与请求日志共用统一分页组件 |
+| 🖼️ **可嵌入 favicon** | `internal/server/favicon.svg` | 仓库自带的渐变对话气泡 + AI 火花图标 |
+| 🛠️ **Windows 双击启动** | `start.bat` | 修正 Windows 双击 exe 时工作目录错位的问题 |
+| 🛡️ **CI 质量门禁** | `.github/workflows/ci.yml` | PR 自动跑 go build / vet / test |
+
+代码上对应 `internal/admin/`、`internal/checkinlog/`、`internal/logbuf/`、`internal/oauth/`、`internal/server/webui.html`、`start.bat`、`.github/`、`assets/`。与上游同步时可只把这些目录单独合并，其余由上游更新覆盖。
+
 ## 🧰 工具脚本
 
 | 脚本 | 用途 |
@@ -681,7 +714,7 @@ internal/
   admin/     # 管理台 /admin/*（仅本机）+ 后台任务槽          [本仓库扩展]
   auth/      # 凭证解析 + token 刷新 + 原子写回
   checkinlog/# 签到/保活/旅行历史持久化（30 天）              [本仓库扩展]
-  logbuf/    # 请求日志环形缓冲（2000 条）                    [本仓库扩展]
+  logbuf/    # 请求日志环形缓冲 + 落盘                        [本仓库扩展]
   oauth/     # OAuth 设备授权流程（服务端侧，state 存内存）    [本仓库扩展]
   pool/      # 账号池（状态机/熔断/租约/加权/持久化）
   scheduler/ # 定时签到 + 保活 + 猫猫旅行巡检
@@ -689,7 +722,19 @@ internal/
   session/   # 会话粘性路由
   upstream/  # 上游封装（chat/billing/auth/headers/sse/payload/sanitize/idle）
   redisstore/# Upstash 持久化 + Noop 降级
+assets/      # README 配图（logo.svg / architecture.svg / *.png）  [本仓库扩展]
+.github/     # CI 工作流（build / vet / test）                     [本仓库扩展]
 ```
+
+### 持续集成
+
+`.github/workflows/ci.yml` 在 push / pull_request 时自动跑：
+
+1. `go mod tidy` 后与工作区对比 —— 防止「CI 跑得过、别人 tidy 一下就改」的隐性漂移
+2. `go build ./...` / `go vet ./...`
+3. `gofmt -l .` —— 检查未格式化文件
+4. `go test ./... -count=1`
+5. `go test ./... -race -count=1`（advisory，见 CI 注释）
 
 ## 免责声明
 

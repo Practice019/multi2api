@@ -1,0 +1,71 @@
+name: CI
+
+# 质量门禁：别人提 PR 时自动验证「能否构建、能否过静态检查、测试是否全绿」。
+# 三件套与 README「本地构建与测试」一节列出的命令完全一致 ——
+# CI 跑的就是本地那三条，避免出现「本地过、CI 挂」的第二套标准。
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:   # 允许手动触发，便于在改动 CI 本身时验证
+
+# 同一分支的连续推送只保留最后一次，避免排队堆积浪费额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build / vet / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 与 go.mod 里声明的 go 1.22.5 对齐；只写次版本号，
+          # 让 setup-go 取最新的 1.22.x 补丁版，避免固定补丁号导致缓存失效。
+          go-version: '1.22'
+          cache: true
+
+      - name: Verify go.mod is tidy
+        # 依赖清单未同步时直接失败：否则别人 go mod tidy 会得到一份
+        # 与提交内容不同的 go.mod，属于会污染工作区的隐性差异。
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        # gofmt 不应有输出；有输出说明有文件未格式化。
+        # ⚠️ 本仓库在 Windows 上签出时 CRLF 会触发 gofmt 误报，
+        # 但 CI 跑在 Linux（LF），因此这里可用标准检查。
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^$' || true)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Test (race detector, advisory)
+        # 本项目有后台 goroutine（账号池 flush、调度器、旅行/成长守卫），
+        # 竞态检测单独跑一轮。
+        #
+        # 为什么是 advisory（continue-on-error）而不是必过门槛：
+        # 作者本机为 Windows 且无 gcc，-race 需要 cgo 工具链，无法在本地复现验证。
+        # 与其把一个未经验证的步骤设为必过、让贡献者莫名吃红叉，不如先让它变蓝可见：
+        # 真出现 DATA RACE 会在日志里明确标出，但不会阻断 PR。
+        # 待有人在有 gcc 的环境跑通并确认全绿后，可去掉 continue-on-error 升级为门禁。
+        continue-on-error: true
+        run: go test ./... -count=1 -race

@@ -29,6 +29,16 @@ PLAN.md
 SPEC.md
 docs/
 
+# 运行期产物
+# logs/ 是 start.bat 与网关控制台写出的日志（含本机绝对路径、账号昵称、
+# 启动时间等），tasks/ 是本地计划与过程快照 —— 两者都不该进版本库。
+# 注意：这两条必须写在这里，否则 `git add -A` 会把它们一起提交
+# （实测：本仓库确实漏了这两条，曾出现 add 'logs/server-console.err.log'）。
+logs/
+tasks/
+
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
 !README.md
+!SECURITY.md
+!CHANGELOG.md
