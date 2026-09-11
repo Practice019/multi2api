@@ -233,9 +233,18 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 
 	// 每次上游调用都经过共享信号量 —— 这样「账号并发 × 账号内并发」的总量
 	// 始终被 growthProbeConcurrency 夹住，不会因为层层相乘冲破风控上限。
-	s.probeSem.acquire()
-	tasks, err := s.cfg.Upstream.GrowthTasks(a)
-	s.probeSem.release()
+	//
+	// 用闭包 + defer 而不是裸 acquire/release：后者在 GrowthTasks panic 时
+	// 会漏掉 release，令牌永久丢失，最终把**所有**刷新卡死在 acquire 上。
+	// 同一文件下面 4 个并发调用用的是 defer，这里保持一致 ——
+	// 同一个资源不能有两套释放纪律。
+	var tasks []upstream.GrowthTask
+	var err error
+	func() {
+		s.probeSem.acquire()
+		defer s.probeSem.release()
+		tasks, err = s.cfg.Upstream.GrowthTasks(a)
+	}()
 	if err != nil {
 		return s.failGrowthSnapshot(uid, snap, "任务列表: "+err.Error())
 	}

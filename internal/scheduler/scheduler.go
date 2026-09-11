@@ -88,6 +88,10 @@ type Scheduler struct {
 
 	// probeSem 是成长中心探测的**共享并发预算**：账号之间、以及单个账号内的
 	// 多个上游调用，都从这里取令牌。见 growthProbeConcurrency 的注释。
+	//
+	// 同样是 nil 安全（acquire/release 都对 nil 直接返回）—— 与 travel/growth
+	// 一致，这样 &Scheduler{cfg: ...} 这种直接构造（既有测试的写法）不会崩，
+	// 只是失去限流：无限流时并发不受约束，仅影响测试，不影响生产（New() 总会建）。
 	probeSem *growthProbeSem
 }
 
