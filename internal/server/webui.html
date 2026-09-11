@@ -195,11 +195,17 @@
 </head>
 <body>
 <!-- 全局通知区：必须挂在 body 下（不在 .content 内），否则会被面板显隐规则连带隐藏。
-     #toast 放瞬时消息，#gtask 放后台任务进度与完成摘要，两者职责不同、分开显示。
-     #notice 是需要用户照着做的持久指引（不自动消失，带「知道了」），
-     与 #toast 的区别：它承载的是「你现在该去做什么」，一闪而过会让人反复重试。 -->
+     #toast  瞬时消息（5s 自消）
+     #gtask  后台全量任务的进度与完成摘要
+     #busy   前台「点按钮 → 写 → 刷新」这段的进度
+     三者职责不同、必须分开显示：
+       #gtask 与 #busy 都会在一段时间内持续占用同一块屏幕区域，若共用一个元素，
+       后结束的那个会把先结束/仍在进行的内容擦掉 —— 例如点了「全部签到」之后
+       再点任一账号的「签到」，busy 的收尾就会把全量任务的进度条隐藏掉。
+     #notice 是需要用户照着做的持久指引（不自动消失，带「知道了」）。 -->
 <div class="notices">
   <div id="gtask" class="notice progress" hidden></div>
+  <div id="busy" class="notice progress" hidden></div>
   <div id="notice" class="notice warn" hidden></div>
   <div id="toast" class="notice" hidden></div>
 </div>
@@ -670,12 +676,17 @@
     // 未显式给 busyText 时按原标题推导一个 —— '领取' → '领取中…'。
     if (btn) btn.textContent = o.busyText || (text0 ? text0 + '中…' : '处理中…');
 
-    const g = $('gtask');
+    // 用专用的 #busy，**不共用 #gtask** —— 后者是后台全量任务的进度，
+    // 两者可能同时存在（点了「全部签到」之后再点任一账号的「签到」）。
+    // 共用一个元素时，busy 的收尾会把全量任务的进度条一起隐藏掉。
+    const g = $('busy');
     const label = o.label || text0 || '操作';
     const t0 = Date.now();
+    // 阈值从 SLOW_HINT_MS 推导，不写字面量 2 —— 否则改常量时这里会悄悄漂移。
+    const slowSec = Math.ceil(SLOW_HINT_MS / 1000);
     const render = () => {
       const sec = Math.floor((Date.now() - t0) / 1000);
-      g.textContent = sec >= 2
+      g.textContent = sec >= slowSec
         ? `${label}：正在刷新界面…（上游较慢，已等 ${sec}s）`
         : `${label}：正在刷新界面…`;
     };
