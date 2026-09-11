@@ -151,6 +151,48 @@ func (l *Log) KeepDays() int {
 	return l.keepDays
 }
 
+// DefaultPageSize 是任务历史等列表的默认每页条数。
+// 放在后端而不是前端常量：分页语义（offset/limit/total）由后端定义，
+// 默认值跟着语义走，避免前后端各写一个 30 慢慢漂移。
+const DefaultPageSize = 30
+
+// Page 按 offset/limit 返回一页记录（时间倒序，最新在前），并给出过滤后的总数。
+//
+// 与 Recent 的区别：Recent 只回答「最近 n 条」，没有 offset，因而无法翻页。
+// 历史保留 30 天、条数可能上千，必须由后端分页，而不是把全量发给前端再切。
+//
+// 边界：offset<0 视为 0；limit<=0 用 DefaultPageSize；offset 越界返回空页不报错。
+func (l *Log) Page(offset, limit int, kind string) ([]Record, int) {
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// l.records 是按追加顺序（时间正序）存的，倒着走就是最新在前。
+	filtered := make([]Record, 0, len(l.records))
+	for i := len(l.records) - 1; i >= 0; i-- {
+		if kind != "" && l.records[i].Kind != kind {
+			continue
+		}
+		filtered = append(filtered, l.records[i])
+	}
+	total := len(filtered)
+	if offset >= total {
+		return []Record{}, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	out := make([]Record, end-offset)
+	copy(out, filtered[offset:end])
+	return out, total
+}
+
 // Recent 返回最近 n 条（时间倒序，最新在前）；n<=0 返回全部。
 func (l *Log) Recent(n int) []Record {
 	l.mu.Lock()

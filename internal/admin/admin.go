@@ -702,6 +702,9 @@ func (h *Handler) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 // logsHistory 从落盘文件读历史请求日志（进程重启后仍可回溯）。
+//
+// 支持 offset/limit 分页，契约与 /admin/checkin/history 一致：
+// 时间倒序（最新在前），返回过滤后总数，前端用同一个分页组件接两个数据源。
 func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Ring == nil || h.cfg.Ring.Sink() == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "enabled": false})
@@ -709,16 +712,22 @@ func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
-		limit = 300
+		limit = logbuf.DefaultPageSize
 	}
-	items, err := h.cfg.Ring.Sink().LoadRecent(limit)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	items, total, err := h.cfg.Ring.Sink().Page(offset, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取日志文件失败: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":   items,
-		"total":   len(items),
+		"total":   total,
+		"offset":  offset,
+		"limit":   limit,
 		"enabled": true,
 		"file":    h.requestLogStats(),
 	})
@@ -793,30 +802,30 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// history 任务历史（签到/保活/旅行/积分/成长）。
+//
+// 支持 offset/limit 分页，契约与 /admin/logs/history 一致：
+// 时间倒序（最新在前），total 是**过滤后**总数，前端据此算总页数。
 func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Log == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "total": 0})
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
-		limit = 100
+		limit = checkinlog.DefaultPageSize
 	}
-	kind := r.URL.Query().Get("kind")
-	items := h.cfg.Log.Recent(0)
-	if kind != "" {
-		filtered := make([]checkinlog.Record, 0, len(items))
-		for _, rec := range items {
-			if rec.Kind == kind {
-				filtered = append(filtered, rec)
-			}
-		}
-		items = filtered
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
 	}
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+	items, total := h.cfg.Log.Page(offset, limit, r.URL.Query().Get("kind"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":  items,
+		"total":  total,
+		"offset": offset,
+		"limit":  limit,
+	})
 }
 
 func (h *Handler) taskStatus(w http.ResponseWriter, r *http.Request) {
