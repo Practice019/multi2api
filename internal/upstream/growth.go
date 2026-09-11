@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
+	"time"
 
 	"workbuddy2api/internal/auth"
 )
@@ -74,6 +76,67 @@ type GrowthTask struct {
 	Locked            bool            `json:"locked"`
 	HasReward         bool            `json:"has_reward"`
 	ClaimedButtonText string          `json:"claimed_button_text"`
+
+	// ValidStart / ValidEnd 任务的**有效期窗口**。
+	//
+	// 实测（18 个任务里 4 个带期限）：上游回的是 RFC3339 带时区的字符串
+	// （如 "2026-09-30T23:59:00+08:00"），**其余任务是 null**。
+	//
+	// 用 *time.Time 而不是 time.Time 是本字段最容易做错的地方：
+	// 零值 time.Time 的 IsZero() 为真、Format 出来是 "0001-01-01"，
+	// 一旦用它表示"没有期限"，界面上就会出现「1970 年到期」这类假信息，
+	// 而且无法与"解析失败"区分。指针让"没有"这件事明确可判（== nil）。
+	ValidStart *time.Time `json:"valid_start"`
+	ValidEnd   *time.Time `json:"valid_end"`
+}
+
+// UnmarshalJSON 自定义反序列化：valid_start/valid_end 用**宽容**解析。
+//
+// 为什么不能直接用 encoding/json 解 *time.Time：
+// time.Time 的 UnmarshalJSON 遇到非法格式会**返回错误**，而错误会导致
+// 整个 tasks 列表解析失败 —— 一个任务的坏时间戳就能让整块成长计划消失。
+// 期限只是附加信息（用于提示"快到期了"），不是关键字段，
+// 因此这里退化为「解析不了就当没有」，保住其余任务的可用性。
+func (t *GrowthTask) UnmarshalJSON(data []byte) error {
+	// 别名避免递归调用自己
+	type alias GrowthTask
+	aux := struct {
+		*alias
+		ValidStart *string `json:"valid_start"`
+		ValidEnd   *string `json:"valid_end"`
+	}{alias: (*alias)(t)}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	t.ValidStart = parseLooseTime(aux.ValidStart)
+	t.ValidEnd = parseLooseTime(aux.ValidEnd)
+	return nil
+}
+
+// parseLooseTime 解析上游的时间字符串；空/非法一律返回 nil（视为"没有期限"）。
+//
+// 容忍的形态：RFC3339 带时区（实测形态）、ISO8601 不带秒、纯日期。
+// 上游改了格式也只是退化成"不显示期限"，不会让任务列表出错。
+func parseLooseTime(s *string) *time.Time {
+	if s == nil {
+		return nil
+	}
+	v := strings.TrimSpace(*s)
+	if v == "" {
+		return nil
+	}
+	for _, layout := range []string{
+		time.RFC3339,          // 2026-09-30T23:59:00+08:00（实测形态）
+		"2006-01-02T15:04:05", // 无时区
+		"2006-01-02 15:04:05", // 空格分隔
+		"2006-01-02",          // 纯日期
+	} {
+		if ts, err := time.Parse(layout, v); err == nil {
+			return &ts
+		}
+	}
+	return nil
 }
 
 // Acceptable 报告任务是否可以「接单」。
