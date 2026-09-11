@@ -56,7 +56,20 @@ type Handler struct {
 	cfg  Config
 	mux  *http.ServeMux
 	task *taskSlot
+
+	// 统计聚合的短缓存：聚合要扫整个落盘文件，而前端按轮询节奏调用，
+	// 缓存让「扫盘频率」与「轮询频率」解耦（见 statsCacheTTL）。
+	statsMu     sync.Mutex
+	statsCache  []logbuf.Entry
+	statsSource string
+	statsErr    error
+	statsAt     time.Time
 }
+
+// sinkCountAll 是「取全量」的分页上限。
+// 落盘文件的规模已由 maxBytes(8MiB) 与 keepDays 双重约束，
+// 单行约 150B 时 8MiB 约 5 万条，这个上限足够覆盖，同时避免传入 0 被当成默认页大小。
+const sinkCountAll = 1 << 20
 
 // New 构建管理台 handler。
 func New(cfg Config) *Handler {
@@ -733,15 +746,79 @@ func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// stats 汇总环形缓冲，给出「这个网关到底跑了多少、跑得怎么样」的只读视图。
-// 数据窗口 = 进程启动至今（缓冲上限 2000 条），并在响应里显式说明，避免被误读成全量历史。
+// statsCacheTTL 统计聚合结果的缓存时长。
+// 聚合要扫整个落盘文件，而前端是轮询调用；缓存让「扫描频率」与「轮询频率」解耦。
+const statsCacheTTL = 5 * time.Second
+
+// stats 汇总请求日志，给出「这个网关到底跑了多少、跑得怎么样」的只读视图。
+//
+// 数据源优先级：**落盘日志** > 内存环形缓冲。
+// 历史实现只读内存缓冲（上限 2000 条），于是重启后立刻显示「暂无请求」，
+// 且窗口被限制在「进程启动至今」——那既不是全部历史，也不是用户以为的统计范围。
+// 现在改为聚合落盘文件，重启后依然覆盖全部保留期内的历史；
+// 落盘不可用（未启用/读失败）时回落到内存缓冲，并在响应里说明当前范围。
 func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Ring == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"total": 0})
+		writeJSON(w, http.StatusOK, map[string]any{"total": 0, "source": "none"})
 		return
 	}
-	items, _ := h.cfg.Ring.Snapshot(0)
 
+	items, source, err := h.statsItems()
+	resp := aggregateChatLog(items)
+	resp["source"] = source
+	resp["capacity"] = h.cfg.Ring.Cap()
+	resp["held"] = h.cfg.Ring.Len()
+	if err != nil {
+		// 读盘失败时把原因带上，避免用户对着「总数变小」猜原因。
+		resp["error"] = "读取落盘日志失败，已回落到内存缓冲: " + err.Error()
+	}
+	if f := h.requestLogStats(); f != nil {
+		resp["file"] = f
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// statsItems 取出用于聚合的条目及其来源标识。
+// 带 TTL 缓存：聚合是 O(文件行数)，而调用方是轮询。
+func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
+	h.statsMu.Lock()
+	if !h.statsAt.IsZero() && time.Since(h.statsAt) < statsCacheTTL {
+		items, err := h.statsCache, h.statsErr
+		h.statsMu.Unlock()
+		if err != nil {
+			return items, "memory", err
+		}
+		return items, h.statsSource, nil
+	}
+	h.statsMu.Unlock()
+
+	var (
+		items  []logbuf.Entry
+		source = "memory"
+		err    error
+	)
+	if sink := h.cfg.Ring.Sink(); sink != nil {
+		// offset=0 且 limit 取足够大：统计需要全量，不是一页。
+		if all, total, e := sink.Page(0, sinkCountAll); e != nil {
+			err = e
+		} else if total > 0 {
+			items, source = all, "file"
+		} else {
+			source = "file" // 文件存在但为空：如实说是文件来源，而不是内存
+		}
+	}
+	if source == "memory" {
+		items, _ = h.cfg.Ring.Snapshot(0)
+	}
+
+	h.statsMu.Lock()
+	h.statsCache, h.statsSource, h.statsErr, h.statsAt = items, source, err, time.Now()
+	h.statsMu.Unlock()
+	return items, source, err
+}
+
+// aggregateChatLog 对条目做纯聚合（无 IO），便于单测直接覆盖算术。
+func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	byModel := map[string]int{}
 	byStatus := map[string]int{}
 	byUID := map[string]int{}
@@ -785,8 +862,6 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		"by_model":  byModel,
 		"by_status": byStatus,
 		"by_uid":    byUID,
-		"capacity":  h.cfg.Ring.Cap(),
-		"held":      h.cfg.Ring.Len(),
 		"tokens":    tokens,
 	}
 	if len(items) > 0 {
@@ -799,7 +874,7 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		resp["window_from"] = oldest
 		resp["window_to"] = newest
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp
 }
 
 // history 任务历史（签到/保活/旅行/积分/成长）。

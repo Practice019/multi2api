@@ -130,9 +130,39 @@
   .copyhint{float:right;font-size:10px;color:var(--acc);opacity:0;transition:.15s;letter-spacing:.3px}
   pre.copyable:hover{border-color:var(--acc)}
   .minibtn{font-size:11px;padding:1px 7px;border-radius:6px;margin-left:6px;vertical-align:middle}
+  /* 全局通知区：固定在右上角、挂在 body 下（不在 .content 里），
+     因此不受「面板 section 显隐」影响 —— 这是修复「刷新按钮没提示」的关键。
+     历史实现把提示写进 #taskbar，而 #taskbar 在账号池 section 内，
+     一旦切到别的面板它就落在 display:none 的子树里，提示看不见。 */
+  .notices{position:fixed;top:14px;right:16px;z-index:50;
+    display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+    max-width:min(420px,42vw);pointer-events:none}
+  .notice{pointer-events:auto;background:var(--panel2);border:1px solid var(--line);
+    border-radius:10px;padding:9px 13px;font-size:12.5px;line-height:1.6;
+    box-shadow:0 6px 22px rgba(0,0,0,.42);max-height:40vh;overflow:auto;
+    word-break:break-word;white-space:normal}
+  .notice[hidden]{display:none}
+  /* 进度用左边框与提示区分开，一眼能看出「还在跑」和「一条消息」 */
+  .notice.progress{border-left:3px solid var(--acc)}
+  .notice.ok{color:var(--ok)}
+  .notice.bad{color:var(--err)}
+  /* 统一分页条：任务历史与请求日志共用同一套控件与语义（见 renderPager）。 */
+  .pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    padding:9px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)}
+  .pager button{font-size:12px;padding:3px 10px}
+  .pager button:disabled{opacity:.45;cursor:not-allowed}
+  .pager .pageno{font-family:var(--mono);color:var(--fg)}
+  .pager select{font-size:12px;padding:3px 8px}
+  .pager .spacer{flex:1}
 </style>
 </head>
 <body>
+<!-- 全局通知区：必须挂在 body 下（不在 .content 内），否则会被面板显隐规则连带隐藏。
+     #toast 放瞬时消息，#gtask 放后台任务进度与完成摘要，两者职责不同、分开显示。 -->
+<div class="notices">
+  <div id="gtask" class="notice progress" hidden></div>
+  <div id="toast" class="notice" hidden></div>
+</div>
 <header>
   <img src="/favicon.svg" alt="" width="26" height="26" style="border-radius:7px;display:block">
   <h1>WorkBuddy2API <small>本地网关控制台</small></h1>
@@ -195,17 +225,11 @@
       <button id="btnAllKeepalive" style="padding:3px 10px;font-size:12px">全部保活</button>
     </h2>
     <div class="body" style="padding:0">
-      <div id="taskbar" class="dim" style="display:none;padding:9px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
       <table><thead><tr>
         <th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>Token</th>
         <th>今日签到</th><th>成功</th><th>熔断</th><th>在途</th><th>操作</th></tr></thead>
         <tbody id="accts"><tr><td colspan="10" class="dim">未连接</td></tr></tbody></table>
     </div>
-  </section>
-
-  <section>
-    <h2>调度 <span class="dim" style="font-weight:400;text-transform:none">只读 · 修改请到「设置」</span></h2>
-    <div class="body"><div id="schInfo" class="dim">未连接</div></div>
   </section>
 
   <section>
@@ -217,14 +241,14 @@
     </h2>
     <div class="body" style="padding:0">
       <table><thead><tr>
-        <th>昵称</th><th>猫</th><th>状态</th><th>出发</th><th>到站</th><th>可领</th><th>操作</th>
+        <th>昵称</th><th>猫</th><th>状态</th><th>今日派送</th><th>出发</th><th>到站</th><th>可领</th><th>操作</th>
       </tr></thead>
-      <tbody id="travelRows"><tr><td colspan="7" class="dim">加载中…</td></tr></tbody></table>
+      <tbody id="travelRows"><tr><td colspan="8" class="dim">加载中…</td></tr></tbody></table>
     </div>
   </section>
 
   <section>
-    <h2>成长计划 <span id="growthHint" class="dim" style="font-weight:400;text-transform:none"></span>
+    <h2>成长计划
       <span class="spacer"></span>
       <button id="btnGrowthRefresh" style="padding:3px 10px;font-size:12px">刷新</button>
       <button id="btnGrowthClaimAll" style="padding:3px 10px;font-size:12px">全部领取奖励</button>
@@ -242,10 +266,10 @@
     </div>
     <div class="body" style="padding:0">
       <table><thead><tr>
-        <th>昵称</th><th>连登</th><th>补签卡</th><th>能量</th><th>盲盒可开</th><th>抽奖</th>
+        <th>昵称</th><th>额度</th><th>连登</th><th>补签卡</th><th>能量</th><th>盲盒可开</th><th>抽奖</th>
         <th>待领取</th><th>现在可领</th><th>待接单</th><th>接单后可得</th><th>操作</th>
       </tr></thead>
-      <tbody id="growthRows"><tr><td colspan="11" class="dim">加载中…</td></tr></tbody></table>
+      <tbody id="growthRows"><tr><td colspan="12" class="dim">加载中…</td></tr></tbody></table>
     </div>
     <div class="body" style="padding:0;border-top:1px solid var(--line)">
       <div style="padding:9px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);flex-wrap:wrap">
@@ -270,12 +294,6 @@
         <button id="logTabLive" style="padding:3px 10px;font-size:12px;border-radius:8px 0 0 8px">实时</button>
         <button id="logTabHist" style="padding:3px 10px;font-size:12px;border-radius:0 8px 8px 0;border-left:0">历史（落盘）</button>
       </span>
-      <select id="logHistLimit" style="padding:3px 8px;font-size:12px;display:none">
-        <option value="100">最近 100</option>
-        <option value="300" selected>最近 300</option>
-        <option value="1000">最近 1000</option>
-        <option value="0">全部</option>
-      </select>
       <button id="btnLogClear" style="padding:3px 10px;font-size:12px">清屏</button>
     </h2>
     <div class="body" style="padding:0">
@@ -284,6 +302,7 @@
         <th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th>
         <th>UID</th><th>TTFB</th><th>tok</th><th>耗时</th></tr></thead>
         <tbody id="logrows"><tr><td colspan="9" class="dim">暂无请求</td></tr></tbody></table>
+      <div class="pager" id="logPager"></div>
     </div>
   </section>
 
@@ -298,9 +317,11 @@
       </select>
     </h2>
     <div class="body" style="padding:0">
+      <div id="histRetention" class="dim" style="padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
       <table><thead><tr>
         <th>时间</th><th>昵称</th><th>类型</th><th>结果</th><th>积分</th><th>触发</th><th>详情</th></tr></thead>
         <tbody id="histrows"><tr><td colspan="7" class="dim">暂无记录</td></tr></tbody></table>
+      <div class="pager" id="histPager"></div>
     </div>
   </section>
 
@@ -333,6 +354,9 @@
       <button id="btnSettingsSave" class="primary" style="padding:3px 12px;font-size:12px">保存设置</button>
     </h2>
     <div class="body">
+      <!-- 下次唤醒状态：原先在独立的「调度」面板，但那面板只有这一条只读信息，
+           与设置里的调度开关重复。并入这里后既保留信息，又少一个标签页。 -->
+      <div id="schInfo" class="dim" style="margin-bottom:14px;line-height:1.7">未连接</div>
       <fieldset>
         <legend>调度（保存后立即生效）</legend>
         <div class="formgrid">
@@ -542,12 +566,44 @@
     return j;
   }
 
+  // withBusy 给刷新类按钮加上「进行中 → 完成」的可见状态。
+  //
+  // 为什么需要它：刷新是异步的，此前点击后既不 await、也不禁用按钮、也不在结束时补提示，
+  // 用户看到的是「正在刷新…」之后没有下文，而且能连点。这里把这三件事一次做掉。
+  //
+  // 用 try/finally 而不是在成功分支里恢复：请求抛异常时按钮必须照样恢复可用，
+  // 否则一次网络抖动就会把按钮永久禁用在这一页上。
+  async function withBusy(btn, busyText, fn) {
+    if (!btn) return undefined;
+    if (btn.disabled) return undefined;           // 连点保护：进行中就直接忽略
+    const text0 = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = busyText;
+    try {
+      const ok = await fn();
+      // fn 返回 true/false 表示成败；返回 undefined 视为「已自行提示」，这里不重复提示。
+      if (ok === true) toast(`${text0}完成`);
+      else if (ok === false) toast(`${text0}失败，详见面板内提示`, true);
+      return ok;
+    } catch (e) {
+      toast(`${text0}失败：${e.message}`, true);
+      return false;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = text0;
+    }
+  }
+
+  // toast 写全局通知区（右上角，5 秒后消失）。
+  // 注意目标元素必须是 body 下的 #toast，不能是某个面板里的节点 ——
+  // 否则在别的面板触发时提示会被 section 显隐规则连隐藏（历史 bug 的成因）。
   function toast(msg, bad) {
-    const el = $('taskbar');
-    el.style.display = 'block';
-    el.innerHTML = `<span style="color:${bad ? 'var(--err)' : 'var(--ok)'}">${esc(msg)}</span>`;
+    const el = $('toast');
+    el.className = 'notice ' + (bad ? 'bad' : 'ok');
+    el.textContent = msg;
+    el.hidden = false;
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => { el.style.display = 'none'; }, 6000);
+    toast._t = setTimeout(() => { el.hidden = true; }, 5000);
   }
 
   async function act(uid, action) {
@@ -596,21 +652,29 @@
   }
 
   // ---------------------------------------------------------------- 全量任务进度
+  // 进度写全局 #gtask（不是面板里的节点）：后台任务可能在任意面板被触发，
+  // 写进面板节点就会在别的面板里看不见 —— 与 toast 是同一个坑。
   function watchTask() {
     if (taskTimer) clearInterval(taskTimer);
+    clearTimeout(watchTask._hide);
+    const el = $('gtask');
     const tick = async () => {
       let t;
       try { t = await admin('/admin/task'); } catch { return; }
-      const el = $('taskbar');
-      el.style.display = 'block';
+      el.hidden = false;
+      el.className = 'notice progress';
       if (t.running) {
-        el.innerHTML = `<b>${esc(t.kind)}</b> 执行中… 已用 ${t.elapsed_sec || 0}s`;
+        el.textContent = `${t.kind} 执行中… 已用 ${t.elapsed_sec || 0}s`;
         refresh(); // 过程中也刷新表格，能实时看到积分/状态变化
         return;
       }
       if (t.kind) {
-        el.innerHTML = `<b>${esc(t.kind)}</b> 完成：成功 ${t.ok || 0} · 已签到 ${t.already || 0} · 失败 ${t.fail || 0}`
-          + ` · 耗时 ${t.duration_sec || 0}s${t.error ? ' · <span class="err">' + esc(t.error) + '</span>' : ''}`;
+        el.textContent = `${t.kind} 完成：成功 ${t.ok || 0} · 已签到 ${t.already || 0} · 失败 ${t.fail || 0}`
+          + ` · 耗时 ${t.duration_sec || 0}s` + (t.error ? ' · ' + t.error : '');
+        el.className = 'notice ' + (t.fail || t.error ? 'bad' : 'ok');
+        // 完成摘要留一会儿再收，给用户看完的时间；期间再触发任务会被上面的
+        // clearTimeout 取消，不会把新任务的进度提前关掉。
+        watchTask._hide = setTimeout(() => { el.hidden = true; }, 5000);
       }
       clearInterval(taskTimer); taskTimer = null;
       refresh(); loadHistory();
@@ -796,13 +860,25 @@
 
   function renderLogFileInfo(f) {
     const fmt = b => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round((b || 0) / 1024) + ' KB';
+    // 上限也要显示：只写「保留 7 天」会让人以为记录能留满 7 天，
+    // 实际上字节数先到上限就会裁剪旧记录 —— 不说明这点，
+    // 用户看到「记录没了」会分不清是被裁了还是本来没产生。
     const html = !f || !f.enabled
       ? '请求日志落盘：<span class="err">未启用</span>（仅内存，重启即丢）'
-      : `请求日志落盘：<code class="mono">${esc(f.path)}</code> · ${f.count} 条 · ${fmt(f.size)} · 保留 ${f.keep_days} 天`
+      : `请求日志落盘：<code class="mono">${esc(f.path)}</code> · ${f.count} 条 · ${fmt(f.size)}`
+        + (f.max_bytes ? ` / 上限 ${fmt(f.max_bytes)}` : '')
+        + ` · 保留 ${f.keep_days} 天`
         + (f.from ? ` · 覆盖 ${new Date(f.from).toLocaleString('zh-CN', { hour12: false })} 至 ${new Date(f.to).toLocaleString('zh-CN', { hour12: false })}` : '');
     $('setLogFileInfo').innerHTML = html;
     $('logFileInfo').innerHTML = html;
     $('logFileInfo').style.display = 'block';
+  }
+
+  // 任务历史的保留策略也显式写出来（后端固定保留 30 天，见 checkinlog.New）。
+  function renderHistRetention(total) {
+    const el = $('histRetention');
+    if (!el) return;
+    el.textContent = `共 ${total || 0} 条 · 保留 30 天（超期自动裁剪）`;
   }
 
   function collectSettings() {
@@ -853,15 +929,21 @@
 
   // ---------------------------------------------------------------- 成长计划
   let growthSnaps = [];
-  let lastGrowthAuto = null; // 筛选切换时重渲染用，不必重新拉数据
 
-  function renderGrowth(list, auto) {
+  // 按 uid 取账号信用分余额（「额度」）。
+  // 数据来自 share（最近一次 /admin/accounts 的结果），不进成长快照 ——
+  // 快照来自上游探测、会因抖动而 stale，而额度来自网关本地状态，
+  // 两者失败语义不同；在前端 join 可让「取不到额度」只影响那一格，
+  // 不会污染已经做好的「快照失败保留上次数据」这条降级路径。
+  // 返回 null 表示该账号不在账号池视图里（与「额度为 0」区分开）。
+  function creditsOf(uid) {
+    const a = share.find(x => x.uid === uid);
+    if (!a || typeof a.credits !== 'number') return null;
+    return a.credits;
+  }
+
+  function renderGrowth(list) {
     growthSnaps = list || [];
-    lastGrowthAuto = auto || lastGrowthAuto;
-    const on = v => v ? '已开' : '关';
-    $('growthHint').textContent = auto
-      ? `· 自动：领奖 ${on(auto.claim)} / 接单 ${on(auto.accept)} / 补签 ${on(auto.makeup)} / 兑换 ${on(auto.redeem)} / 开盒 ${on(auto.open)} / 抽奖 ${on(auto.draw)}（在「设置」里改）`
-      : '';
 
     const sum = growthSnaps.reduce((a, g) => {
       a.claim += g.acceptable_count || 0;
@@ -871,11 +953,16 @@
       // 可领奖：已完成但奖励还没到手的部分，这才是「现在能拿到的分」。
       a.right_now += g.claimable_credit || 0;
       a.right_now_n += g.claimable_count || 0;
+      // 额度：账号当前信用分余额合计，只累加拿得到的那些账号。
+      const c = creditsOf(g.uid);
+      if (c !== null) { a.credits += c; a.credits_n++; }
       return a;
-    }, { claim: 0, credit: 0, streak: 0, energy: 0, right_now: 0, right_now_n: 0 });
+    }, { claim: 0, credit: 0, streak: 0, energy: 0, right_now: 0, right_now_n: 0, credits: 0, credits_n: 0 });
 
     $('growthCards').innerHTML = [
       ['账号数', growthSnaps.length, ''],
+      // 额度排在「现在可领」前面：先看家底，再看还能拿多少。
+      ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
       ['现在可领信用分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
       ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
       ['待接单任务', sum.claim, sum.claim ? 'ok' : 'dim'],
@@ -886,7 +973,7 @@
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
 
     if (!growthSnaps.length) {
-      $('growthRows').innerHTML = '<tr><td colspan="11" class="dim">账号池为空</td></tr>';
+      $('growthRows').innerHTML = '<tr><td colspan="12" class="dim">账号池为空</td></tr>';
       renderGrowthGroups();
       return;
     }
@@ -900,8 +987,13 @@
       const name = esc(g.nickname || (g.uid || '').slice(0, 8)) + stale;
       const U = esc(g.uid);
       if (g.error && !g.tasks_total) {
-        return `<tr><td>${name}</td><td colspan="10" class="err" title="${esc(g.error)}">${esc(g.error.slice(0, 70))}</td></tr>`;
+        return `<tr><td>${name}</td><td colspan="11" class="err" title="${esc(g.error)}">${esc(g.error.slice(0, 70))}</td></tr>`;
       }
+      // 额度取不到时显示 —（而不是 0）：账号可能已不在池里，这与「余额为零」是两回事。
+      const cr = creditsOf(g.uid);
+      const quota = cr === null
+        ? '<span class="dim" title="该账号不在账号池视图里，取不到额度">—</span>'
+        : `<span class="mono">${cr}</span>`;
       const streak = g.streak_days
         ? `${g.streak_days} 天${g.next_tier ? `<br><span class="dim" style="font-size:11px">距 ${esc(g.next_tier)} 还差 ${g.next_tier_remaining}</span>` : ''}`
         : '<span class="dim">—</span>';
@@ -940,6 +1032,7 @@
 
       return `<tr>
         <td>${name}</td>
+        <td>${quota}</td>
         <td>${streak}</td>
         <td class="mono">${cards}</td>
         <td class="mono">${esc(g.energy)}</td>
@@ -1116,11 +1209,13 @@
     </div>`;
   }
 
+  // 返回 true/false 而不是吞掉异常：调用方（withBusy）要靠它给出准确的完成提示。
   async function loadGrowth(refresh) {
     let r;
     try { r = await admin('/admin/growth' + (refresh ? '?refresh=1' : '')); }
-    catch (e) { $('growthRows').innerHTML = `<tr><td colspan="11" class="err">${esc(e.message)}</td></tr>`; return; }
-    renderGrowth(r.accounts, r.auto);
+    catch (e) { $('growthRows').innerHTML = `<tr><td colspan="12" class="err">${esc(e.message)}</td></tr>`; return false; }
+    renderGrowth(r.accounts);
+    return true;
   }
 
   // claim = 领奖（把已达成任务的奖励领回来，唯一让积分到账的动作）
@@ -1168,36 +1263,140 @@
     $('logTabHist').style.background = live ? '' : 'var(--acc)';
     $('logTabHist').style.color = live ? '' : '#fff';
     $('logTabHist').style.fontWeight = live ? '' : '600';
-    $('logHistLimit').style.display = live ? 'none' : '';
+    // 分页条只属于历史视图（实时视图是增量流，没有「第几页」的概念）。
+    $('logPager').style.display = live ? 'none' : '';
     $('logrows').innerHTML = `<tr><td colspan="9" class="dim">${live ? '实时视图中…' : '正在读取落盘日志…'}</td></tr>`;
     if (live) loadLogs(); else loadLogHistory();
   }
 
+  // 请求日志「历史（落盘）」的分页状态。与任务历史共用 renderPager。
+  const logPage = { offset: 0, limit: 30, total: 0, container: 'logPager', onGo: () => loadLogHistory() };
+
   async function loadLogHistory() {
-    const limit = $('logHistLimit').value;
     let r;
-    try { r = await admin('/admin/logs/history?limit=' + limit); }
+    try { r = await admin(`/admin/logs/history?limit=${logPage.limit}&offset=${logPage.offset}`); }
     catch (e) { $('logrows').innerHTML = `<tr><td colspan="9" class="err">${esc(e.message)}</td></tr>`; return; }
     renderLogFileInfo(r.file);
     if (!r.enabled) {
       $('logrows').innerHTML = '<tr><td colspan="9" class="dim">未启用落盘（只有内存实时视图）</td></tr>';
+      $('logPager').innerHTML = '';
       return;
+    }
+    logPage.total = r.total || 0;
+    // 越界自愈：总数变少（例如文件被裁剪）导致当前页不存在时，回退到最后一页重取。
+    const maxOffset = Math.max(0, (pageCount(logPage) - 1) * logPage.limit);
+    if (logPage.offset > maxOffset) {
+      logPage.offset = maxOffset;
+      renderPager(logPage);
+      return loadLogHistory();
     }
     if (!r.items || !r.items.length) {
       $('logrows').innerHTML = '<tr><td colspan="9" class="dim">落盘日志为空</td></tr>';
+      $('logMeta').textContent = '';
+      renderPager(logPage);
       return;
     }
     $('logMeta').textContent = `（历史 ${r.total} 条）`;
-    $('logrows').innerHTML = '';
-    renderLogs(r.items.slice().reverse());
+    // 历史视图用自己的快照替换本地缓冲：它已覆盖完整落盘范围，
+    // 再与实时缓冲合并会混入「文件里还没落盘的进程内条目」，反而不一致。
+    logEntries = normalizeDesc(r.items);
+    renderLogs(logEntries);
+    renderPager(logPage);
+  }
+
+  // ---------------------------------------------------------------- 统一分页组件
+  //
+  // 任务历史与请求日志共用这一个组件、同一套语义：
+  //   state = { offset, limit, total, container, onGo }
+  // 这样做是为了消灭「一个写死 limit、一个用下拉选条数」的两套做法。
+  //
+  // 页码只在「总数变化导致当前页越界」时才回退，不主动重置：
+  // 用户翻到第 3 页时，后台轮询刷新数据不应把他踢回第 1 页
+  // （只有切换筛选/每页条数这类**用户主动**改变查询范围的操作才回第 1 页）。
+  const PAGE_SIZES = [30, 100, 300];
+
+  function pageCount(state) {
+    return Math.max(1, Math.ceil((state.total || 0) / (state.limit || 30)));
+  }
+  function pageIndex(state) {
+    return Math.floor((state.offset || 0) / (state.limit || 30)) + 1;
+  }
+
+  function renderPager(state) {
+    const el = $(state.container);
+    if (!el) return;
+    const pages = pageCount(state);
+    const cur = pageIndex(state);
+    const total = state.total || 0;
+    const from = total === 0 ? 0 : state.offset + 1;
+    const to = Math.min(state.offset + state.limit, total);
+
+    el.innerHTML = `
+      <button data-page="prev"${cur <= 1 ? ' disabled' : ''}>上一页</button>
+      <span class="pageno">第 ${cur} / ${pages} 页</span>
+      <button data-page="next"${cur >= pages ? ' disabled' : ''}>下一页</button>
+      <span>共 ${total} 条${total ? `，本页 ${from}-${to}` : ''}</span>
+      <span class="spacer"></span>
+      <span>每页</span>
+      <select data-page="size">
+        ${PAGE_SIZES.map(n => `<option value="${n}"${n === state.limit ? ' selected' : ''}>${n}</option>`).join('')}
+      </select>`;
+
+    el.querySelectorAll('button[data-page]').forEach(btn => {
+      btn.onclick = () => {
+        if (btn.disabled) return;
+        const next = btn.dataset.page === 'prev' ? cur - 1 : cur + 1;
+        if (next < 1 || next > pages) return;
+        state.offset = (next - 1) * state.limit;
+        state.onGo();
+      };
+    });
+    const sel = el.querySelector('select[data-page="size"]');
+    if (sel) sel.onchange = () => {
+      state.limit = Number(sel.value) || 30;
+      state.offset = 0;   // 改变每页条数属于主动改变查询范围 → 回第 1 页
+      state.onGo();
+    };
   }
 
   // ---------------------------------------------------------------- 日志
+  //
+  // 统一排序契约（本文件所有日志类列表都遵守）：
+  //   **展示顺序 = 时间倒序，最上面是最新**；同一时刻按 seq 倒序稳定排列。
+  //
+  // 为什么要有这条契约：两个数据源的物理顺序本来就不一样 ——
+  //   Ring.Snapshot 是**正序**（它是按 seq 递增的增量游标接口，改成倒序会破坏游标语义）；
+  //   Sink.LoadRecent 是**倒序**（最新在前）。
+  // 历史实现让调用方各自记住该不该 reverse、以及该用 append 还是 prepend，
+  // 于是实时视图的「最新」会沉在自己这批的底部、历史视图整体是旧在上新在下。
+  //
+  // 现在改为：无论从哪个源来，先并入本地缓冲，再由 renderLogs 统一按倒序整体重绘。
+  // 调用方不再需要关心顺序，也不需要知道用 append 还是 prepend。
+  let logEntries = [];   // 本地日志缓冲（按 seq 去重）
+
+  // 归一化：时间倒序；时间相同按 seq 倒序，保证顺序稳定可复现。
+  function normalizeDesc(items) {
+    return (items || []).slice().sort((a, b) => {
+      const ta = new Date(a.at).getTime(), tb = new Date(b.at).getTime();
+      if (ta !== tb) return tb - ta;
+      return (b.seq || 0) - (a.seq || 0);
+    });
+  }
+
+  // 把新条目并入缓冲，按 seq 去重（增量轮询会重复送达同一条）。
+  function mergeLogEntries(incoming, cap) {
+    const bySeq = new Map();
+    for (const e of logEntries) bySeq.set(e.seq, e);
+    for (const e of (incoming || [])) bySeq.set(e.seq, e);
+    logEntries = normalizeDesc(Array.from(bySeq.values())).slice(0, cap);
+  }
+
+  // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
   function renderLogs(items) {
-    if (!items || !items.length) return;
     const tb = $('logrows');
-    if (tb.querySelector('.dim')) tb.innerHTML = '';
-    const rows = items.slice(-200).map(e => {
+    const list = normalizeDesc(items).slice(0, 300);
+    if (!list.length) return;
+    tb.innerHTML = list.map(e => {
       const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
       return `<tr>
         <td class="mono dim">${e.seq}</td>
@@ -1211,9 +1410,6 @@
         <td class="mono">${e.total_ms}ms</td>
       </tr>`;
     }).join('');
-    tb.insertAdjacentHTML('afterbegin', rows);
-    // 只保留最近 300 行，避免长时间挂页面把 DOM 拖垮
-    while (tb.children.length > 300) tb.removeChild(tb.lastChild);
   }
 
   async function loadLogs() {
@@ -1221,18 +1417,41 @@
     if (logMode !== 'live') return;
     let r;
     try { r = await admin(`/admin/logs?since=${logCursor}`); } catch { return; }
-    logCursor = r.cursor || logCursor;
+    // 游标只在成功取到响应后推进；失败时保持原值，下次重试同一区间。
+    if (typeof r.cursor === 'number') logCursor = r.cursor;
     $('logMeta').textContent = `（缓冲 ${r.held || 0}/${r.capacity || 0} 条）`;
-    renderLogs(r.items);
+    // 增量并入本地缓冲后整体重绘 —— 顺序由 renderLogs 统一负责，
+    // 这里不再需要关心 Snapshot 返回的是正序还是倒序。
+    mergeLogEntries(r.items, 300);
+    renderLogs(logEntries);
   }
 
   // ---------------------------------------------------------------- 历史
+  // 任务历史分页状态。与请求日志共用 renderPager（同一套语义：offset/limit/total）。
+  const histPage = { offset: 0, limit: 30, total: 0, container: 'histPager', onGo: () => loadHistory() };
+
   async function loadHistory() {
     const kind = $('histKind').value;
     let r;
-    try { r = await admin('/admin/checkin/history?limit=80' + (kind ? '&kind=' + kind : '')); } catch { return; }
+    try {
+      r = await admin(`/admin/checkin/history?limit=${histPage.limit}&offset=${histPage.offset}`
+        + (kind ? '&kind=' + kind : ''));
+    } catch { return; }
+    histPage.total = r.total || 0;
+    renderHistRetention(histPage.total);
+    // 越界自愈：切筛选或数据被裁剪后当前页可能已不存在，回退到最后一页。
+    const maxOffset = Math.max(0, (pageCount(histPage) - 1) * histPage.limit);
+    if (histPage.offset > maxOffset) {
+      histPage.offset = maxOffset;
+      renderPager(histPage);
+      return loadHistory();
+    }
     const items = r.items || [];
-    if (!items.length) { $('histrows').innerHTML = '<tr><td colspan="7" class="dim">暂无记录</td></tr>'; return; }
+    if (!items.length) {
+      $('histrows').innerHTML = '<tr><td colspan="7" class="dim">暂无记录</td></tr>';
+      renderPager(histPage);
+      return;
+    }
     $('histrows').innerHTML = items.map(x => {
       const cls = x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'err' : 'dim';
       const label = { ok: '成功', already: '今日已签', fail: '失败', skip: '跳过' }[x.status] || x.status;
@@ -1246,6 +1465,7 @@
         <td class="dim" title="${esc(x.detail || '')}">${esc((x.detail || '').slice(0, 40))}</td>
       </tr>`;
     }).join('');
+    renderPager(histPage);
   }
 
   // ---------------------------------------------------------------- API 接入信息
@@ -1313,9 +1533,21 @@
 
   function renderStats(s) {
     if (!s) return;
-    const win = s.window_from
-      ? `（进程内窗口 ${new Date(s.window_from).toLocaleTimeString('zh-CN', { hour12: false })} 至 ${new Date(s.window_to).toLocaleTimeString('zh-CN', { hour12: false })}，上限 ${s.capacity} 条）`
-      : '（暂无请求）';
+    // 窗口文案必须如实说明数据来源：统计改为聚合落盘历史后，
+    // 不再是「进程内窗口」，而落盘不可用时会回落到内存 —— 两种情况不能混为一谈。
+    let win;
+    if (s.source === 'file') {
+      win = s.window_from
+        ? `（全部落盘历史 ${new Date(s.window_from).toLocaleString('zh-CN', { hour12: false })} 起，共 ${s.total} 条）`
+        : '（落盘日志为空）';
+    } else if (s.source === 'memory') {
+      win = s.window_from
+        ? `（仅内存缓冲，进程启动至今，上限 ${s.capacity} 条）`
+        : '（暂无请求）';
+    } else {
+      win = '（未启用日志）';
+    }
+    if (s.error) win += ' · ' + s.error;
     $('statsWindow').textContent = win;
     const rate = s.total ? Math.round((s.ok / s.total) * 100) : 0;
     $('statsCards').innerHTML = [
@@ -1326,7 +1558,12 @@
       ['平均 TTFB', s.avg_ttfb_ms ? s.avg_ttfb_ms + 'ms' : '—', ''],
       ['平均总耗时', s.avg_total_ms ? s.avg_total_ms + 'ms' : '—', ''],
       ['输出 token', s.tokens || 0, ''],
-      ['缓冲占用', (s.held || 0) + '/' + (s.capacity || 0), 'dim'],
+      // 缓冲占用只在内存来源时才有意义；落盘来源改写为文件占用，避免两个概念混淆。
+      [s.source === 'file' ? '落盘占用' : '缓冲占用',
+        s.source === 'file' && s.file
+          ? fmtBytes(s.file.size) + ' / ' + fmtBytes(s.file.max_bytes)
+          : ((s.held || 0) + '/' + (s.capacity || 0)),
+        'dim'],
     ].map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`
     ).join('');
@@ -1335,6 +1572,14 @@
     $('statsModels').innerHTML = bm.length
       ? bm.map(([k, v]) => `<span class="chip" data-id="${esc(k)}">${esc(k)}<span>${v} 次</span></span>`).join('')
       : '<span class="dim">暂无调用</span>';
+  }
+
+  // fmtBytes 人类可读字节数（用于日志保留策略展示）。
+  function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MiB';
   }
 
   // ---------------------------------------------------------------- 猫猫旅行（账号池式列表）
@@ -1363,7 +1608,7 @@
       : '· 自动领奖已关闭（需手动领奖；可在「设置」里开启）';
 
     if (!list || !list.length) {
-      $('travelRows').innerHTML = '<tr><td colspan="7" class="dim">账号池为空</td></tr>';
+      $('travelRows').innerHTML = '<tr><td colspan="8" class="dim">账号池为空</td></tr>';
       return;
     }
     $('travelRows').innerHTML = list.map(t => {
@@ -1378,6 +1623,13 @@
       else if (t.state === 'arrived') st = '<span class="pill warn">已到站</span>';
       else if (t.state === 'traveling') st = '<span class="pill ok">旅行中</span>';
       else if (t.state === 'idle') st = '<span class="pill dim">空闲</span>';
+
+      // 「今日已派送」是独立于当前状态的一个事实：猫可能还在路上（traveling）、
+      // 也可能已经回来（idle），两种情况今日都不能再派。因此单独一列显示，
+      // 而不是挤进状态列 —— 否则会把「猫现在在哪」和「今天派过没」混成一个概念。
+      const dispatched = t.daily_limit_reached
+        ? '<span class="pill warn" title="今日的派猫次数已用完，明日恢复">已派送</span>'
+        : '<span class="dim">未派送</span>';
 
       const arrive = t.arrive_at
         ? `${fmtClock(t.arrive_at)}<br><span class="dim" style="font-size:11px">${esc(fmtCountdown(t.remaining_sec))}</span>`
@@ -1399,6 +1651,7 @@
         <td>${name}</td>
         <td>${buddy}</td>
         <td>${st}</td>
+        <td>${dispatched}</td>
         <td class="dim">${esc(fmtClock(t.depart_at))}</td>
         <td>${arrive}</td>
         <td>${reward}</td>
@@ -1412,10 +1665,11 @@
     try {
       r = await admin('/admin/travel' + (refresh ? '?refresh=1' : ''));
     } catch (e) {
-      $('travelRows').innerHTML = `<tr><td colspan="7" class="err">${esc(e.message)}</td></tr>`;
-      return;
+      $('travelRows').innerHTML = `<tr><td colspan="8" class="err">${esc(e.message)}</td></tr>`;
+      return false;
     }
     renderTravel(r.accounts, r.auto_claim);
+    return true;
   }
 
   async function travelAct(uid, act) {
@@ -1591,11 +1845,13 @@
           '</div></div>';
         $('accts').innerHTML = '<tr><td colspan="8" class="err">未授权 —— 已暂停自动刷新</td></tr>';
         $('models').innerHTML = '<span class="dim">未授权</span>';
-        return;
+        refresh._last = null;
+        return false;
       }
       setDot('bad', '请求失败');
       $('accts').innerHTML = `<tr><td colspan="8" class="err">${esc(e.message)}</td></tr>`;
-      return;
+      refresh._last = null;
+      return false;
     }
     setDot(h.healthy > 0 ? 'ok' : 'bad',
       (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
@@ -1610,6 +1866,9 @@
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
     try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();
+    // 记下摘要供调用方（顶部「立即刷新」）提示用；轮询调用方不看这个字段。
+    refresh._last = { healthy: h.healthy || 0, total: h.total || 0 };
+    return true;
   }
 
   async function send() {
@@ -1704,7 +1963,14 @@
     $('curlSample').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
     $('btnCopyCurl').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
 
-    $('refresh').onclick = refresh;
+    // 「立即刷新」：手动点要有明确回执（自动轮询不提示，否则每 5 秒弹一条）。
+    // withBusy 只看 fn 的返回值，这里把刷新摘要包进 toast 文案里一起给出。
+    $('refresh').onclick = () => withBusy($('refresh'), '刷新中…', async () => {
+      const ok = await refresh();
+      const m = refresh._last;
+      if (ok && m) toast(`刷新完成：健康 ${m.healthy}/${m.total} 个账号`);
+      return ok === true ? undefined : false;   // 成功时上面已自行提示，避免又追一条「立即刷新完成」
+    });
     $('send').onclick = send;
     $('prompt').addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
@@ -1728,13 +1994,12 @@
     $('btnAdd').onclick = addAccount;
     $('btnLoginClose').onclick = closeModal;
     $('modal').addEventListener('click', ev => { if (ev.target === $('modal')) closeModal(); });
-    $('btnReload').onclick = async () => {
-      try {
-        const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
-        toast(`已重载 auths：扫描 ${r.scanned} 个文件，池内账号 ${r.before} 个变为 ${r.after} 个`);
-      } catch (e) { toast('重载失败：' + e.message, true); }
+    $('btnReload').onclick = () => withBusy($('btnReload'), '重载中…', async () => {
+      const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
+      toast(`已重载 auths：扫描 ${r.scanned} 个文件，池内账号 ${r.before} 个变为 ${r.after} 个`);
       refresh();
-    };
+      return undefined;   // 上面已给出更具体的回执
+    });
     $('btnAllCheckin').onclick = () => startAll('checkin');
     $('btnAllCredits').onclick = () => startAll('credits');
     $('btnAllKeepalive').onclick = () => startAll('keepalive');
@@ -1744,7 +2009,7 @@
       const b = ev.target.closest('button[data-tact]');
       if (b && !b.disabled) travelAct(b.dataset.uid, b.dataset.tact);
     });
-    $('btnTravelRefresh').onclick = () => { toast('正在回源刷新旅行状态…'); loadTravel(true); };
+    $('btnTravelRefresh').onclick = () => withBusy($('btnTravelRefresh'), '刷新中…', () => loadTravel(true));
     $('btnTravelDepartAll').onclick = () => {
       if (confirm('对全部可用账号派猫？\n（今日已派出的会自动跳过，不会重复派）')) travelAll('depart');
     };
@@ -1760,7 +2025,7 @@
       growthUID = $('growthAccount').value;
       renderGrowthGroups();
     };
-    $('btnGrowthRefresh').onclick = () => { toast('正在回源刷新成长计划…'); loadGrowth(true); };
+    $('btnGrowthRefresh').onclick = () => withBusy($('btnGrowthRefresh'), '刷新中…', () => loadGrowth(true));
     // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
     $('growthViews').addEventListener('click', ev => {
       const b = ev.target.closest('button[data-gview]');
@@ -1794,16 +2059,13 @@
       if (all) { growthAct(all.dataset.gclaimall, 'claim', ''); return; }
     });
 
-    $('btnModelRefresh').onclick = async () => {
-      try {
-        await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
-        renderModels((await api('/v1/models')).data);
-        toast('模型目录已强制回源刷新');
-      } catch (e) { toast('刷新失败：' + e.message, true); }
-    };
+    $('btnModelRefresh').onclick = () => withBusy($('btnModelRefresh'), '刷新中…', async () => {
+      await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
+      renderModels((await api('/v1/models')).data);
+      return true;
+    });
 
-    $('btnLogClear').onclick = () => { $('logrows').innerHTML = '<tr><td colspan="9" class="dim">已清屏（服务端缓冲与落盘文件仍在，切换视图会重新显示）</td></tr>'; };
-    $('histKind').onchange = loadHistory;
+    // 注意：histKind 的 onchange 在下面统一绑定（需要带页码重置），此处不再重复绑定。
 
     // 导航 + 设置 + 日志视图
     $('nav').addEventListener('click', ev => {
@@ -1816,10 +2078,27 @@
     $('content').addEventListener('change', () => markDirty(true));
     $('logTabLive').onclick = () => setLogMode('live');
     $('logTabHist').onclick = () => setLogMode('hist');
-    $('logHistLimit').onchange = loadLogHistory;
+
+    // 切换任务类型筛选属于「主动改变查询范围」→ 必须回第 1 页。
+    // 否则用户在第 3 页切到只有 1 页的类型时，会停在一个不存在的页上。
+    $('histKind').onchange = () => { histPage.offset = 0; loadHistory(); };
+
+    // 清屏：除了清表格，还要让增量游标归零并清空本地缓冲。
+    // 否则下次增量拉取会从旧游标继续、跳号；本地缓冲不清则重绘又把旧行带回来。
+    $('btnLogClear').onclick = () => {
+      logEntries = [];
+      logCursor = 0;
+      const tb = $('logrows');
+      tb.innerHTML = '<tr><td colspan="9" class="dim">已清屏（服务端缓冲与落盘文件仍在，切换视图会重新显示）</td></tr>';
+    };
 
     // 日志 2s 增量拉取；历史 10s；旅行走服务端缓存所以 15s 一次也不会打上游。
     setInterval(loadLogs, 2000);
+    setInterval(() => {
+      // 历史视图停留时按固定间隔刷新，保证屏幕上始终是最新落盘记录。
+      // 实时视图由 loadLogs 自己管，这里不重复拉。
+      if (logMode === 'hist') loadLogHistory();
+    }, 10000);
     setInterval(loadHistory, 10000);
     setInterval(() => loadTravel(false), 15000);
     setInterval(() => loadGrowth(false), 30000); // 成长计划走服务端快照缓存，不会打上游
