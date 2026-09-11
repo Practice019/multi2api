@@ -13,7 +13,8 @@
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square">
-  <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
+  <a href="https://github.com/Practice019/workbuddy2api/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Practice019/workbuddy2api?style=flat-square&color=2496ED"></a>
+  <a href="https://github.com/Practice019/workbuddy2api/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Practice019/workbuddy2api/ci.yml?style=flat-square&label=CI"></a>
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Local__%2F__Self--hosted-blueviolet?style=flat-square">
 </p>
 
@@ -95,24 +96,106 @@ flowchart LR
 
 ### 环境要求
 
-- **Go 1.22+**（本地直接编译时）或 **Docker + Docker Compose**（推荐）
-- 一个（或多个）已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 7863 端口空闲
+- **一个（或多个）已注册的 CodeBuddy 账号**，用于 OAuth 登录
+- **宿主机 7863 端口空闲**
 
-### 1. 克隆并配置
+运行方式三选一，**按上手难度排序**：
+
+| 方式 | 需要什么 | 适合谁 |
+|---|---|---|
+| **[A. 下载预编译包](#a-下载预编译二进制推荐)** | 什么都不装，解压双击 | Windows 用户 / 想最快跑起来 |
+| **[B. 从源码构建](#b-从源码构建)** | Go 1.22+ | 想改代码 / 非 amd64 架构 |
+| **[C. Docker Compose](#c-docker-compose)** | Docker | 服务器部署 / 想要容器隔离 |
+
+> 预编译包由 GitHub Actions 在干净环境里构建（`-trimpath`，不含作者机器路径），每次打 tag 自动更新。见 [Release 页](https://github.com/Practice019/workbuddy2api/releases/latest)。
+
+---
+
+### A. 下载预编译二进制（推荐）
+
+到 [Releases](https://github.com/Practice019/workbuddy2api/releases/latest) 下载对应平台的包：
+
+| 平台 | 文件 |
+|---|---|
+| Windows (x64) | `wb2api-server-windows-amd64.zip` |
+| Linux (x64) | `wb2api-server-linux-amd64.tar.gz` |
+
+**Windows：**
+
+```text
+1. 解压到一个固定目录，例如 D:\wb2api\
+2. 把 config.example.json 复制为 config.json
+3. 用编辑器改 config.json 里的 "api_key"（改成你自己的强随机串）
+4. 双击 start.bat
+```
+
+解压后的目录应该长这样：
+
+```
+D:\wb2api\
+├── wb2api-server.exe
+├── config.json          <- 由 config.example.json 复制并改名而来
+├── config.example.json
+└── start.bat
+```
+
+首次启动会自动创建 `auths\`（账号凭证）与 `data\`（池状态、日志、历史）两个目录。
+浏览器打开 **http://127.0.0.1:7863/ui** 即进入本地控制台，在「账号池 → ＋ 添加账号」里完成 OAuth 登录。
+
+**Linux：**
+
+```bash
+tar xzf wb2api-server-linux-amd64.tar.gz
+cd wb2api-server-linux-amd64
+cp config.example.json config.json
+# 编辑 config.json 设置 api_key
+chmod +x wb2api-server
+./wb2api-server -config config.json
+```
+
+> **校验下载完整性**（可选）：Release 附带 `SHA256SUMS.txt`
+>
+> ```powershell
+> # Windows
+> Get-FileHash .\wb2api-server-windows-amd64.zip -Algorithm SHA256
+> ```
+>
+> ```bash
+> # Linux
+> sha256sum -c SHA256SUMS.txt --ignore-missing
+> ```
+>
+> ⚠️ 本仓库的二进制**未经代码签名**。Windows SmartScreen 可能提示"未知发布者"，Linux 无
+> 包管理器集成。介意的话请用方式 B 自己编译 —— 那也是本项目最推荐的验证方式。
+
+---
+
+### B. 从源码构建
+
+需要 **Go 1.22+**。
 
 ```bash
 git clone https://github.com/Practice019/workbuddy2api.git
 cd workbuddy2api
 cp config.example.json config.json
+# 编辑 config.json 设置 api_key
+
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/wb2api-server ./cmd/server
+./bin/wb2api-server -config config.json
 ```
 
-编辑 `config.json`，**至少设置 `api_key`**（`留空 = 不鉴权`，公网部署务必设置）：
+Windows 上把最后两行换成：
 
-```bash
-# 用编辑器把 "api_key" 改成你自己的强随机串
-# 生成示例：openssl rand -hex 32
+```powershell
+$env:CGO_ENABLED = '0'
+go build -trimpath -ldflags="-s -w" -o bin\wb2api-server.exe .\cmd\server
+.\bin\wb2api-server.exe -config config.json
 ```
+
+> `-trimpath` **不要省**：不加它，二进制里会写进你本机的绝对路径与 Go module 缓存路径
+> （如 `C:/Users/<你的用户名>/go/pkg/mod/...`）。自己用无所谓，但若要把产物分享给别人就该去掉。
+
+构建完成后同样可以双击 `start.bat`（它会用 `bin\wb2api-server.exe`）。
 
 ### 2. 登录添加账号
 
@@ -125,9 +208,10 @@ cp config.example.json config.json
 
 多账号只需重复执行；账号池自动发现 `auths/` 下新增凭证文件（容器启动时 `SyncToDir` 对齐）。
 
-### 3. 启动服务
+> 也可以完全在网页里添加：打开 `/ui` → 「账号池」→ 「＋ 添加账号」，
+> 走同样的 OAuth 流程且**热加载进池，无需重启**。
 
-**Docker Compose**（推荐）：
+### C. Docker Compose
 
 ```bash
 docker compose up -d --build
@@ -660,10 +744,13 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 
 ### 4. 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建
+- **预编译产物**：Release 页提供 Windows / Linux amd64 二进制包，由 GitHub Actions 在
+  `ubuntu-latest` 干净环境中用 `-trimpath` 构建（不含作者机器路径），并附 `SHA256SUMS.txt`
+- **未经代码签名**：Windows 无 Authenticode 签名（SmartScreen 会提示未知发布者），
+  Linux 无包管理器集成。**可用 Release 附带的 SHA256 自行校验**，或按 README 方式 B 自行编译
 - 构建命令：`CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server`（Dockerfile 多阶段：`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）
 - 登录/签到/积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`（缺失时自动编译对应 `cmd/*`）
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **无产物校验和**（指 Docker 镜像）：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 5. 授权使用边界
@@ -686,6 +773,7 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 | 🖼️ **可嵌入 favicon** | `internal/server/favicon.svg` | 仓库自带的渐变对话气泡 + AI 火花图标 |
 | 🛠️ **Windows 双击启动** | `start.bat` | 修正 Windows 双击 exe 时工作目录错位的问题 |
 | 🛡️ **CI 质量门禁** | `.github/workflows/ci.yml` | PR 自动跑 go build / vet / test |
+| 📦 **预编译 Release 产物** | `.github/workflows/release.yml` | 打 tag 自动构建 Win/Linux 二进制包并附校验和 |
 
 代码上对应 `internal/admin/`、`internal/checkinlog/`、`internal/logbuf/`、`internal/oauth/`、`internal/server/webui.html`、`start.bat`、`.github/`、`assets/`。与上游同步时可只把这些目录单独合并，其余由上游更新覆盖。
 
@@ -731,7 +819,7 @@ internal/
   upstream/  # 上游封装（chat/billing/auth/headers/sse/payload/sanitize/idle）
   redisstore/# Upstash 持久化 + Noop 降级
 assets/      # README 配图（logo.svg / architecture.svg / *.png）  [本仓库扩展]
-.github/     # CI 工作流（build / vet / test）                     [本仓库扩展]
+.github/     # CI 工作流（build / vet / test + 打 tag 自动出多平台产物）  [本仓库扩展]
 ```
 
 ### 持续集成
@@ -743,6 +831,25 @@ assets/      # README 配图（logo.svg / architecture.svg / *.png）  [本仓�
 3. `gofmt -l .` —— 检查未格式化文件
 4. `go test ./... -count=1`
 5. `go test ./... -race -count=1`（advisory，见 CI 注释）
+
+### 发布流程
+
+`.github/workflows/release.yml` 在打 `v*` tag 时自动：
+
+1. 先跑一遍 `build` / `vet` / `test` —— 坏代码不该被做成产物
+2. 交叉编译 Windows amd64 与 Linux amd64（`CGO_ENABLED=0` 静态链接）
+3. 打包：Windows 用 `.zip`（含 `start.bat`）、Linux 用 `.tar.gz`
+4. 生成 `SHA256SUMS.txt`
+5. 上传到对应 tag 的 GitHub Release（已存在则 `--clobber` 覆盖）
+
+发新版只需：
+
+```bash
+git tag -a v1.0.1 -m "v1.0.1"
+git push origin v1.0.1
+```
+
+几十秒后 Release 页就会出现可下载的二进制包。
 
 ## 免责声明
 
