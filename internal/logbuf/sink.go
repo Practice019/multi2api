@@ -211,6 +211,49 @@ func (s *Sink) readAllLocked() ([]Entry, error) {
 	return out, nil
 }
 
+// DefaultPageSize 与 checkinlog.DefaultPageSize 保持一致：日志类列表统一每页 30 条。
+// 两处各定义一份是刻意的 —— logbuf 不应反向依赖 checkinlog（那是业务历史包），
+// 但值必须相同，否则「统一的每页条数」就名不副实。
+const DefaultPageSize = 30
+
+// Page 按 offset/limit 返回一页记录（时间倒序，最新在前），并返回文件内总条数。
+//
+// 与 checkinlog.Log.Page 同一套契约，便于前端用同一个分页组件接两个数据源。
+// 实现上先整体读出再切片：文件已由 maxBytes(8MiB) + keepDays(7) 双重约束，
+// 规模可控；若将来上界大幅放宽，这里需要改成倒序游标读取。
+func (s *Sink) Page(offset, limit int) ([]Entry, int, error) {
+	if s == nil {
+		return nil, 0, nil
+	}
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	all, err := s.readAllLocked()
+	if err != nil {
+		return nil, 0, err
+	}
+	total := len(all)
+	if offset >= total {
+		return []Entry{}, total, nil
+	}
+	// all 是追加顺序（时间正序），从尾部往前取即「最新在前」。
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	out := make([]Entry, 0, end-offset)
+	for i := offset; i < end; i++ {
+		out = append(out, all[total-1-i])
+	}
+	return out, total, nil
+}
+
 // LoadRecent 返回最近 n 条（时间倒序，最新在前）。
 // n<=0 时返回全部。用于「历史」视图。
 func (s *Sink) LoadRecent(n int) ([]Entry, error) {
