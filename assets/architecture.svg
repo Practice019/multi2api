@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WorkBuddy2API 架构图（静态 SVG）
+
+  为什么用 SVG 而不是只放 Mermaid：
+  Mermaid 依赖 GitHub 端渲染且不便嵌入到站外文章/文档；SVG 在任何平台上
+  都能直接显示，也可被引用为图片。README 中两者并存 —— Mermaid 便于读者
+  在源码里修改，SVG 保证任何环境都看得到。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 470" width="980" height="470"
+     role="img" aria-label="WorkBuddy2API 架构图：客户端 → 网关（鉴权/账号池/熔断/粘性/调度）→ 上游 CodeBuddy">
+  <defs>
+    <linearGradient id="gw" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f8cff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#8b5cf6" stop-opacity="0.16"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7d8899"/>
+    </marker>
+    <marker id="arrowDash" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5b6675"/>
+    </marker>
+    <style>
+      .t   { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+      .h   { font-size: 14px; font-weight: 600; fill: #e6edf3; }
+      .s   { font-size: 11px; fill: #9aa4b2; }
+      .lbl { font-size: 11px; fill: #7d8899; }
+      .box { fill: #161b22; stroke: #30363d; stroke-width: 1.2; rx: 10; }
+      .accent { fill: #1b2333; stroke: #4f8cff; stroke-width: 1.4; rx: 10; }
+      .store { fill: #10151c; stroke: #30363d; stroke-width: 1.2; stroke-dasharray: 5 3; rx: 9; }
+    </style>
+  </defs>
+
+  <rect width="980" height="470" fill="#0d1117"/>
+
+  <!-- 客户端 -->
+  <rect class="box" x="18" y="184" width="150" height="86"/>
+  <text class="t h"   x="93" y="213" text-anchor="middle">客户端 / SDK</text>
+  <text class="t s"   x="93" y="234" text-anchor="middle">OpenAI 兼容请求</text>
+  <text class="t s"   x="93" y="252" text-anchor="middle">零改造接入</text>
+
+  <!-- 网关大框（留出顶部 title 区域） -->
+  <rect x="205" y="56" width="560" height="346" fill="url(#gw)" stroke="#4f8cff" stroke-width="1.4" rx="14"/>
+  <text class="t h" x="485" y="78" text-anchor="middle">WorkBuddy2API 网关　:7863</text>
+
+  <!-- HTTP Handler -->
+  <rect class="accent" x="228" y="88" width="230" height="64"/>
+  <text class="t h" x="343" y="112" text-anchor="middle">HTTP Handler</text>
+  <text class="t s" x="343" y="132" text-anchor="middle">鉴权 · 日志 · 换号轮转</text>
+
+  <!-- 账号池 -->
+  <rect class="accent" x="228" y="176" width="230" height="86"/>
+  <text class="t h" x="343" y="200" text-anchor="middle">账号池</text>
+  <text class="t s" x="343" y="220" text-anchor="middle">三因子加权选号 · 熔断</text>
+  <text class="t s" x="343" y="238" text-anchor="middle">冷却 · 在途租约限流</text>
+
+  <!-- 会话粘性 -->
+  <rect class="box" x="512" y="88" width="228" height="64"/>
+  <text class="t h" x="626" y="112" text-anchor="middle">会话粘性路由</text>
+  <text class="t s" x="626" y="132" text-anchor="middle">conversation_id → 同账号</text>
+
+  <!-- 定时调度 -->
+  <rect class="box" x="512" y="176" width="228" height="86"/>
+  <text class="t h" x="626" y="200" text-anchor="middle">定时调度</text>
+  <text class="t s" x="626" y="220" text-anchor="middle">签到 09/21 · 保活 22</text>
+  <text class="t s" x="626" y="238" text-anchor="middle">猫猫旅行 · 成长中心守卫</text>
+
+  <!-- 上游 Client -->
+  <rect class="accent" x="228" y="290" width="512" height="68"/>
+  <text class="t h" x="484" y="315" text-anchor="middle">上游 Client</text>
+  <text class="t s" x="484" y="336" text-anchor="middle">ChatHTTP 流式（SSE）· 短 RPC（billing / auth / models）</text>
+
+  <!-- 上游服务 -->
+  <rect class="accent" x="818" y="176" width="145" height="86"/>
+  <text class="t h" x="890" y="200" text-anchor="middle">CodeBuddy</text>
+  <text class="t s" x="890" y="220" text-anchor="middle">copilot.tencent.com</text>
+  <text class="t s" x="890" y="238" text-anchor="middle">非公开接口</text>
+
+  <!-- 存储 -->
+  <rect class="store" x="228" y="386" width="200" height="54"/>
+  <text class="t h" x="328" y="408" text-anchor="middle">auths/*.json</text>
+  <text class="t s" x="328" y="426" text-anchor="middle">账号凭证（0600，不进版本库）</text>
+
+  <rect class="store" x="452" y="386" width="200" height="54"/>
+  <text class="t h" x="552" y="408" text-anchor="middle">data/ 本地落盘</text>
+  <text class="t s" x="552" y="426" text-anchor="middle">池状态 · 请求日志 · 签到历史</text>
+
+  <rect class="store" x="676" y="386" width="176" height="54"/>
+  <text class="t h" x="764" y="408" text-anchor="middle">Upstash Redis</text>
+  <text class="t s" x="764" y="426" text-anchor="middle">可选 · 状态镜像</text>
+
+  <!-- 连线 -->
+  <line x1="168" y1="221" x2="222" y2="221" stroke="#7d8899" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="t lbl" x="195" y="212" text-anchor="middle">HTTP</text>
+
+  <line x1="343" y1="152" x2="343" y2="172" stroke="#7d8899" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="458" y1="120" x2="508" y2="120" stroke="#7d8899" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="458" y1="219" x2="508" y2="219" stroke="#5b6675" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrowDash)"/>
+  <line x1="343" y1="262" x2="343" y2="286" stroke="#7d8899" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="626" y1="262" x2="626" y2="286" stroke="#7d8899" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="740" y1="324" x2="816" y2="248" stroke="#7d8899" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <text class="t lbl" x="800" y="300">SSE / JSON</text>
+
+  <line x1="280" y1="358" x2="300" y2="382" stroke="#5b6675" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrowDash)"/>
+  <line x1="380" y1="358" x2="500" y2="382" stroke="#5b6675" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrowDash)"/>
+  <line x1="640" y1="324" x2="740" y2="382" stroke="#5b6675" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrowDash)"/>
+  <line x1="700" y1="219" x2="740" y2="382" stroke="#5b6675" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrowDash)"/>
+
+  <!-- 图例 -->
+  <text class="t lbl" x="18" y="300">— 请求路径</text>
+  <text class="t lbl" x="18" y="322">┄ 状态读写</text>
+  <text class="t lbl" x="18" y="352">虚线存储均为本地/可选，</text>
+  <text class="t lbl" x="18" y="370">凭据不写入版本库</text>
+</svg>
