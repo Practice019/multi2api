@@ -51,6 +51,41 @@ type GrowthTaskView struct {
 	// Claimable 为真表示这个任务的奖励现在可以领（即 status == completed）。
 	// 把语义算在服务端，界面只负责显示「领取」按钮，不必各自理解状态含义。
 	Claimable bool `json:"claimable,omitempty"`
+
+	// ExpiresAt / ExpiresInDays / Expired / ExpiringSoon 任务有效期。
+	//
+	// 上游只有部分任务带期限（实测 18 个里 4 个），其余为空 ——
+	// 所以这些字段全部 omitempty，没有期限的任务不会在 JSON 里多出噪音。
+	//
+	// 为什么把「还剩几天」算在服务端：界面只需显示，不该各自做日期减法 ——
+	// 时区、跨天舍入、负值处理每处都重写一遍必然漂移。
+	ExpiresAt string `json:"expires_at,omitempty"`
+	// ExpiresInDays 距到期的整天数；已过期为负数（界面据此显示"已过期 N 天"）。
+	ExpiresInDays int `json:"expires_in_days,omitempty"`
+	// Expired 已过期。上游仍会返回这些任务，但做完也拿不到奖励。
+	Expired bool `json:"expired,omitempty"`
+	// ExpiringSoon 即将到期（阈值见 expiringSoonDays），供界面高亮提醒。
+	ExpiringSoon bool `json:"expiring_soon,omitempty"`
+}
+
+// expiringSoonDays 是「即将到期」的阈值（天）。
+//
+// 取 7 天：既早于多数人会主动查看的周期，又不会让"还有 60 天"的任务也来抢注意力 ——
+// 实测四个带期限的任务剩余 18~62 天，7 天能准确圈出真正紧迫的那一个。
+const expiringSoonDays = 7
+
+// daysUntil 返回从 now 到 end 的整天数（向上取整到"还剩几天可用"的直觉口径）。
+//
+// 口径说明：采用**自然日**而非 24 小时块。用户看到「9-30 23:59 到期」时，
+// 9-30 当天是可以用的一天，所以按日期差算更符合直觉；
+// 用 24 小时块会出现"还剩 0 天但今天明明还能做"的矛盾。
+func daysUntil(end, now time.Time) int {
+	// 归一到各自时区的当天零点再做差，避开跨时区与夏令时的偏差。
+	ey, em, ed := end.Date()
+	ny, nm, nd := now.Date()
+	e := time.Date(ey, em, ed, 0, 0, 0, 0, time.UTC)
+	n := time.Date(ny, nm, nd, 0, 0, 0, 0, time.UTC)
+	return int(e.Sub(n).Hours() / 24)
 }
 
 // GrowthSnapshot 单账号成长计划快照。
@@ -269,6 +304,19 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 		}
 		if t.Progress != nil {
 			v.Current, v.Target = t.Progress.Current, t.Progress.Target
+		}
+		// 有效期：只在**未了结**的任务上带出去。
+		//
+		// 为什么过滤掉已领取：claimed 的任务再显示"还剩 N 天到期"是噪音 ——
+		// 期限的意义是"再不做过期就没了"，奖励已到手的任务没有这个压力。
+		// completed（条件达成、待领奖）**仍然显示**：奖励还没到手，期限依然相关。
+		if t.ValidEnd != nil && t.AcceptStatus != upstream.GrowthStatusClaimed {
+			end := *t.ValidEnd
+			v.ExpiresAt = end.UTC().Format(time.RFC3339)
+			v.ExpiresInDays = daysUntil(end, time.Now())
+			v.Expired = v.ExpiresInDays < 0
+			// 已过期且未领取 = 这个任务已经作废，界面该说清楚而不是让人去点。
+			v.ExpiringSoon = !v.Expired && v.ExpiresInDays <= expiringSoonDays
 		}
 		snap.Tasks = append(snap.Tasks, v)
 

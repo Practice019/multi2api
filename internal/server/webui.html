@@ -121,6 +121,9 @@
   /* 说明列会很长（最长约 50 个汉字），必须解除全局 nowrap 并限宽换行，
      否则整张表被撑开、右侧的「操作」按钮要横向滚动才看得到。 */
   .ggroup td.gtask{white-space:normal;max-width:230px;line-height:1.5}
+  /* 到期列：内容短（"剩 18 天"/"9-30（剩 19 天）"），不换行以免行高被撑开。
+     颜色语义由内层 span 的 warn/err 类负责，这里只管排版。 */
+  .ggroup td.exp{white-space:nowrap;font-size:12px}
   .ggroup td.gdesc{white-space:normal;max-width:440px;line-height:1.6;font-size:12px}
   .ggroup td.gdesc .howto{color:var(--dim);font-size:11px;margin-top:5px}
   .chips{display:flex;flex-wrap:wrap;gap:7px}
@@ -1269,6 +1272,31 @@
     claimed: ['已领取', 'ok'],
   };
 
+  // 任务到期时间的展示文本。返回 {text, cls}；没有期限返回 null。
+  //
+  // 为什么用服务端算好的 expires_in_days 而不是自己 parse expires_at：
+  // 时区、跨天舍入、"当天算不算可用"这些口径每处各写一遍必然不一致。
+  // 服务端已按自然日算好（见 scheduler.daysUntil），界面只管显示。
+  //
+  // 三档语义（与服务端的 Expired / ExpiringSoon 对齐）：
+  //   已过期   → 红字「已过期 N 天」，提示这个任务已经作废
+  //   7 天内   → 黄字「剩 N 天」，值得优先做
+  //   其余     → 灰字日期，只是信息
+  function fmtTaskExpiry(t) {
+    if (!t || t.expires_at === undefined || t.expires_in_days === undefined) return null;
+    // 服务端对已领取的任务不带这两个字段，这里再兜一层（旧数据可能没有 expired 标记）
+    const d = t.expires_in_days;
+    if (t.expired || d < 0) {
+      return { text: '已过期 ' + Math.abs(d) + ' 天', cls: 'err' };
+    }
+    if (t.expiring_soon || d <= 7) {
+      return { text: '剩 ' + d + ' 天', cls: 'warn' };
+    }
+    // 日期只显示到「月-日」，年份对 1~2 个月的期限没有信息量
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t.expires_at);
+    return { text: m ? `${Number(m[2])}-${Number(m[3])}（剩 ${d} 天）` : '剩 ' + d + ' 天', cls: '' };
+  }
+
   // 把当前 growthView 同步到按钮选中态。自动选视图与手动点击都走这里，
   // 避免两处各自改 class 导致显示与实际视图不一致。
   function syncGrowthViewButtons() {
@@ -1381,6 +1409,12 @@
             ? '<span class="dim" style="font-size:11px">去客户端做</span>'
             : '<span class="dim">—</span>';
       const tag = t.tag ? ` <span class="pill">${esc(t.tag)}</span>` : '';
+      // 到期列：只有部分任务有期限（上游 18 个里 4 个），其余显示占位。
+      // 已过期时即使有「领取」按钮也要同时给出提示 —— 那种情况下按钮点了会失败。
+      const exp = fmtTaskExpiry(t);
+      const expiry = exp
+        ? `<span class="${exp.cls}" title="${esc(t.expires_at)}">${esc(exp.text)}</span>`
+        : '<span class="dim">—</span>';
 
       return `<tr>
         <td class="gtask">${esc(t.title || t.task_code)}${tag}<br>
@@ -1392,6 +1426,7 @@
         <td><span class="pill ${cls}">${esc(label)}</span>${locked}</td>
         <td class="mono">${prog}</td>
         <td class="mono">${reward}</td>
+        <td class="mono exp">${expiry}</td>
         <td style="white-space:nowrap">${btn}</td>
       </tr>`;
     }).join('');
@@ -1409,7 +1444,7 @@
         <span class="tog">${clientLoginHTML(g.uid)}</span>
       </div>
       ${tasks.length ? `<table><thead><tr>
-        <th>任务</th><th>说明</th><th>状态</th><th>进度</th><th>奖励</th><th>操作</th>
+        <th>任务</th><th>说明</th><th>状态</th><th>进度</th><th>奖励</th><th title="仅部分任务有期限（上游 18 个里 4 个带），已领取的不显示">到期</th><th>操作</th>
       </tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="dim" style="padding:10px 16px;font-size:12px">该账号在「${esc(GROWTH_VIEWS[view].label)}」下没有任务。换个视图或换个账号看看。</div>`}
     </div>`;
