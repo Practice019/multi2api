@@ -14,8 +14,30 @@ import (
 	"workbuddy2api/internal/logbuf"
 )
 
-// chatSeq 进程级请求序号。
+// chatSeq 进程级请求序号（只用于 stdout 表格的 #%03d 显示）。
+//
+// 注意：落盘与 /admin/logs 的 seq 列来自 logbuf.Ring 自己的计数（Push 会覆盖 Entry.Seq），
+// 这两个计数器互不相干但都从 1 起。启动时用同一个落盘最大值播种两者，
+// 才能保证「序号依次变大」跨重启成立（见 SeedChatSeq 与 logbuf.Ring.SeedSeq）。
 var chatSeq atomic.Int64
+
+// SeedChatSeq 用落盘日志里的最大 seq 播种 stdout 序号计数器。
+// n<=0 视为无历史，保持从 1 开始。
+func SeedChatSeq(n int64) {
+	if n <= 0 {
+		return
+	}
+	// 只前进不后退：避免并发或重复调用把已经用掉的号段退回去。
+	for {
+		cur := chatSeq.Load()
+		if n <= cur {
+			return
+		}
+		if chatSeq.CompareAndSwap(cur, n) {
+			return
+		}
+	}
+}
 
 // chatLogEnabled 聊天表格日志总开关。生产恒 true；
 // 测试包经 TestMain 置 false 关闭 stdout 噪音，需要断言行输出的测试用 withChatLog 临时开启（R5）。
