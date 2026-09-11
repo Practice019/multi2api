@@ -81,12 +81,17 @@ jobs:
             tar czf "../$PKG.tar.gz" "$PKG"
           fi
           cd ..
-          ls -la *.zip *.tar.gz 2>/dev/null || true
+          ls -la
 
       - name: Checksums
         run: |
-          sha256sum *.zip *.tar.gz > SHA256SUMS-${{ matrix.goos }}-${{ matrix.goarch }}.txt
-          cat SHA256SUMS-${{ matrix.goos }}-${{ matrix.goarch }}.txt
+          # 每个 matrix job 只产出自己那一种归档（windows→zip / linux→tar.gz），
+          # 所以这里不能同时 glob 两种扩展名 —— 缺的那种会被 bash 当成
+          # "No such file or directory" 直接失败。
+          # 改用 find 只收集实际存在的文件。
+          find . -maxdepth 1 \( -name '*.zip' -o -name '*.tar.gz' \) -printf '%f\n' \
+            | sort | xargs sha256sum > "SHA256SUMS-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
+          cat "SHA256SUMS-${{ matrix.goos }}-${{ matrix.goarch }}.txt"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -112,9 +117,13 @@ jobs:
       - name: Merge checksums
         run: |
           cd artifacts
-          cat SHA256SUMS-*.txt | sort -k2 > SHA256SUMS.txt
-          rm -f SHA256SUMS-windows-amd64.txt SHA256SUMS-linux-amd64.txt
+          # 把各 matrix 的校验和合成一份；文件名不写死，避免加平台时漏改
+          grep -h . SHA256SUMS-*.txt | sort -k2 > SHA256SUMS.txt
+          rm -f SHA256SUMS-*.txt
+          echo "--- artifacts 内容 ---"
           ls -la
+          echo "--- SHA256SUMS.txt ---"
+          cat SHA256SUMS.txt
 
       - name: Upload to Release
         env:
@@ -122,13 +131,19 @@ jobs:
         run: |
           # Release 可能已被人工创建（本仓库习惯：先建带说明的 Release，
           # 再补资产）。存在就 upload --clobber，不存在就 create。
+          #
+          # 只上传归档与合并后的校验和 —— 列目录避免把多余文件带上去。
+          cd artifacts
+          ASSETS=$(find . -maxdepth 1 \( -name '*.zip' -o -name '*.tar.gz' -o -name 'SHA256SUMS.txt' \) -printf '%f\n' | sort)
+          echo "将上传："
+          echo "$ASSETS"
           TAG="${GITHUB_REF_NAME}"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG 已存在，上传资产（覆盖同名）"
-            gh release upload "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --clobber
+            echo "$ASSETS" | xargs gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber
           else
             echo "Release $TAG 不存在，创建"
-            gh release create "$TAG" artifacts/* \
+            echo "$ASSETS" | xargs gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "WorkBuddy2API $TAG" \
               --notes "自动构建产物（Windows / Linux amd64）。详见仓库 README。"
