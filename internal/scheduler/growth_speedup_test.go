@@ -37,7 +37,7 @@ func TestGrowthRefreshSpeedupMeasured(t *testing.T) {
 	s.RefreshGrowth(true, false)
 	elapsed := time.Since(t0)
 
-	serial := 3 * (tasksDelay + 4*otherDelay)   // 6900ms
+	serial := 3 * (tasksDelay + 4*otherDelay) // 6900ms
 	t.Logf("3 账号刷新耗时 %v（串行理论值 %v，提速 %.1fx）",
 		elapsed.Round(time.Millisecond), serial,
 		float64(serial)/float64(elapsed))

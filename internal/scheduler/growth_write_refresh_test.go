@@ -62,7 +62,7 @@ func TestGrowthWriteRefreshesOnlyTargetAccount(t *testing.T) {
 	g.tasksJSON = `{"tasks":[{"task_code":"done","accept_status":"completed","reward_credit":300}]}`
 	s := newGrowthHarness2(t, g, "u1", "u2")
 
-	s.RefreshGrowth(true, false)   // 全量建快照：2 个账号 → 2 次
+	s.RefreshGrowth(true, false) // 全量建快照：2 个账号 → 2 次
 	before := probeCount(g)
 
 	res := s.GrowthClaimFor("u1", "", triggerManual)
@@ -125,7 +125,7 @@ func TestGrowthSkipRefreshesOwnSnapshot(t *testing.T) {
 func TestGrowthFailDoesNotProbe(t *testing.T) {
 	g := defaultGrowthStub()
 	g.tasksJSON = `{"tasks":[{"task_code":"a","accept_status":"completed","reward_credit":100}]}`
-	g.claimFail.Store(true)   // 领奖接口返回 400
+	g.claimFail.Store(true) // 领奖接口返回 400
 	s, _ := newGrowthHarness(t, g)
 	s.RefreshGrowth(true, false)
 	before := probeCount(g)

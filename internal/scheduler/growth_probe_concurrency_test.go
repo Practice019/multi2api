@@ -1,16 +1,19 @@
 // RED 测试：probeGrowth 内部的 5 个上游调用应当并发。
 //
 // 实测（单账号实例）：
-//   完整探针 2402ms（5 个串行调用）
-//   最慢单调用 1590ms（/tasks）
-//   并发化后理论上限 = 最慢那一个 ≈ 1590ms，可拿回 812ms（34%）
+//
+//	完整探针 2402ms（5 个串行调用）
+//	最慢单调用 1590ms（/tasks）
+//	并发化后理论上限 = 最慢那一个 ≈ 1590ms，可拿回 812ms（34%）
 //
 // 这 812ms 是**每次刷新的地板耗时**（Task 5 之后账号已并发，所以它不再被摊薄），
 // 因此值得单独优化。
 //
 // 判定方式：用可控延迟的 stub —— /tasks 睡 150ms、其余各睡 150ms。
-//  串行 = 5 × 150 = 750ms
-//  并发 = 约 150ms（受最慢支配）
+//
+//	串行 = 5 × 150 = 750ms
+//	并发 = 约 150ms（受最慢支配）
+//
 // 用「显著小于串行」来判定，并断言 5 个端点都被调用过（不能为了快而漏调）。
 package scheduler
 
@@ -103,7 +106,7 @@ func TestProbeGrowthCallsAreConcurrent(t *testing.T) {
 	s.RefreshGrowth(true, false)
 	elapsed := time.Since(t0)
 
-	serial := 5 * delay   // 750ms
+	serial := 5 * delay // 750ms
 	if elapsed > serial/2 {
 		t.Errorf("单账号探针耗时 %v，5 个串行调用需 %v；"+
 			"超过一半说明调用之间仍是串行", elapsed, serial)

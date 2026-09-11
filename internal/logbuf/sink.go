@@ -304,7 +304,8 @@ func (s *Sink) LoadAll() ([]Entry, error) {
 
 // LoadRecent 返回最近 n 条（时间倒序，最新在前）。
 // n<=0 时返回全部。用于「历史」视图。
-func (s *Sink) LoadRecent(n int) ([]Entry, error) {	if s == nil {
+func (s *Sink) LoadRecent(n int) ([]Entry, error) {
+	if s == nil {
 		return nil, nil
 	}
 	s.mu.Lock()
