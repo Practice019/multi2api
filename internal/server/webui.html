@@ -239,6 +239,12 @@
       <button id="btnTravelDepartAll" style="padding:3px 10px;font-size:12px">全部派猫</button>
       <button id="btnTravelClaimAll" style="padding:3px 10px;font-size:12px">全部领奖</button>
     </h2>
+    <div class="body dim" style="font-size:12px;line-height:1.8;padding-bottom:0">
+      <b>自动派送</b>：与「签到」共用时点，<b>没有独立开关</b> —— 每次签到任务执行时，
+      空闲且当日未派出的猫会自动派出，同时到站的猫会自动领奖；每日每账号仅 1 次（自然日 00:00 重置）。
+      改时点请到「设置 → 调度 → 签到时点」；<b>关闭每日签到会连带停掉自动派送</b>。
+      下表「今日派送」列可确认今天是否已派出。
+    </div>
     <div class="body" style="padding:0">
       <table><thead><tr>
         <th>昵称</th><th>猫</th><th>状态</th><th>今日派送</th><th>出发</th><th>到站</th><th>可领</th><th>操作</th>
@@ -300,8 +306,8 @@
       <div id="logFileInfo" class="dim" style="display:none;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
       <table><thead><tr>
         <th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th>
-        <th>UID</th><th>TTFB</th><th>tok</th><th>耗时</th></tr></thead>
-        <tbody id="logrows"><tr><td colspan="9" class="dim">暂无请求</td></tr></tbody></table>
+        <th>UID</th><th>TTFB</th><th>tok</th><th>tok/s</th><th>耗时</th></tr></thead>
+        <tbody id="logrows"><tr><td colspan="10" class="dim">暂无请求</td></tr></tbody></table>
       <div class="pager" id="logPager"></div>
     </div>
   </section>
@@ -1265,7 +1271,7 @@
     $('logTabHist').style.fontWeight = live ? '' : '600';
     // 分页条只属于历史视图（实时视图是增量流，没有「第几页」的概念）。
     $('logPager').style.display = live ? 'none' : '';
-    $('logrows').innerHTML = `<tr><td colspan="9" class="dim">${live ? '实时视图中…' : '正在读取落盘日志…'}</td></tr>`;
+    $('logrows').innerHTML = `<tr><td colspan="10" class="dim">${live ? '实时视图中…' : '正在读取落盘日志…'}</td></tr>`;
     if (live) loadLogs(); else loadLogHistory();
   }
 
@@ -1275,10 +1281,10 @@
   async function loadLogHistory() {
     let r;
     try { r = await admin(`/admin/logs/history?limit=${logPage.limit}&offset=${logPage.offset}`); }
-    catch (e) { $('logrows').innerHTML = `<tr><td colspan="9" class="err">${esc(e.message)}</td></tr>`; return; }
+    catch (e) { $('logrows').innerHTML = `<tr><td colspan="10" class="err">${esc(e.message)}</td></tr>`; return; }
     renderLogFileInfo(r.file);
     if (!r.enabled) {
-      $('logrows').innerHTML = '<tr><td colspan="9" class="dim">未启用落盘（只有内存实时视图）</td></tr>';
+      $('logrows').innerHTML = '<tr><td colspan="10" class="dim">未启用落盘（只有内存实时视图）</td></tr>';
       $('logPager').innerHTML = '';
       return;
     }
@@ -1291,7 +1297,7 @@
       return loadLogHistory();
     }
     if (!r.items || !r.items.length) {
-      $('logrows').innerHTML = '<tr><td colspan="9" class="dim">落盘日志为空</td></tr>';
+      $('logrows').innerHTML = '<tr><td colspan="10" class="dim">落盘日志为空</td></tr>';
       $('logMeta').textContent = '';
       renderPager(logPage);
       return;
@@ -1391,6 +1397,16 @@
     logEntries = normalizeDesc(Array.from(bySeq.values())).slice(0, cap);
   }
 
+  // tokPerSec 输出速率，算法与 stdout 表格（logging.go 的 tokpsField）保持一致 ——
+  // 同一条请求在终端与网页上必须是同一个数，否则排障时会互相矛盾。
+  //   tokens < 0 表示上游 usage 缺失 → 显示 -，绝不能拿 -1 去除时间；
+  //   total_ms <= 0（时钟粒度内完成）→ 返回 0.0，避免除零得到 Inf/NaN。
+  function tokPerSec(tokens, totalMs) {
+    if (tokens < 0) return '-';
+    if (!totalMs || totalMs <= 0) return '0.0';
+    return (tokens / (totalMs / 1000)).toFixed(1);
+  }
+
   // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
   function renderLogs(items) {
     const tb = $('logrows');
@@ -1407,6 +1423,7 @@
         <td class="mono dim">${esc((e.uid || '').slice(0, 8) || '-')}</td>
         <td class="mono">${e.ttfb_ms ? e.ttfb_ms + 'ms' : '-'}</td>
         <td class="mono">${e.tokens >= 0 ? e.tokens : '-'}</td>
+        <td class="mono">${tokPerSec(e.tokens, e.total_ms)}</td>
         <td class="mono">${e.total_ms}ms</td>
       </tr>`;
     }).join('');
@@ -1601,11 +1618,15 @@
     return h + 'h' + (m ? m + 'm' : '');
   }
 
-  function renderTravel(list, autoClaim) {
-    // 自动领奖只做状态展示：开/关在「设置」里改（单一写入口，避免两处打架）。
-    $('travelAutoHint').textContent = autoClaim
-      ? '· 自动领奖已开启（到站自动领取；可在「设置」里关闭）'
-      : '· 自动领奖已关闭（需手动领奖；可在「设置」里开启）';
+  function renderTravel(list, autoClaim, autoDepart, checkinHours) {
+    // 自动派送没有独立开关：它跟着签到任务走，所以提示里必须把绑定关系和真实时点讲清楚，
+    // 否则用户会去找一个不存在的「自动派送」开关（这正是提出该需求的原因）。
+    const hrs = (checkinHours || []).map(h => h + ':00').join(' / ');
+    const dep = autoDepart
+      ? `· 自动派送随签到（${hrs || '未设置时点'}）：空闲且当日未派出的猫会自动派出，每日 1 次`
+      : '· 自动派送已停（每日签到被关闭，派猫随之停摆）';
+    $('travelAutoHint').textContent = dep
+      + (autoClaim ? '· 到站自动领奖已开启' : '· 到站自动领奖已关闭（需手动领奖）');
 
     if (!list || !list.length) {
       $('travelRows').innerHTML = '<tr><td colspan="8" class="dim">账号池为空</td></tr>';
@@ -1668,7 +1689,7 @@
       $('travelRows').innerHTML = `<tr><td colspan="8" class="err">${esc(e.message)}</td></tr>`;
       return false;
     }
-    renderTravel(r.accounts, r.auto_claim);
+    renderTravel(r.accounts, r.auto_claim, r.auto_depart, r.checkin_hours);
     return true;
   }
 
@@ -2089,7 +2110,7 @@
       logEntries = [];
       logCursor = 0;
       const tb = $('logrows');
-      tb.innerHTML = '<tr><td colspan="9" class="dim">已清屏（服务端缓冲与落盘文件仍在，切换视图会重新显示）</td></tr>';
+      tb.innerHTML = '<tr><td colspan="10" class="dim">已清屏（服务端缓冲与落盘文件仍在，切换视图会重新显示）</td></tr>';
     };
 
     // 日志 2s 增量拉取；历史 10s；旅行走服务端缓存所以 15s 一次也不会打上游。
