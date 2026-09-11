@@ -495,9 +495,14 @@ func (h *Handler) travelList(w http.ResponseWriter, r *http.Request) {
 			UID: st.UID, Nickname: st.Nickname, Error: "尚未探测（点「刷新」）",
 		})
 	}
+	// 把「自动派送挂在签到时点上」这件事所需的事实一并返回，让界面能显示真实时点
+	// 而不是写死一句说明：签到时点可被设置页改，写死就会与实际不一致。
+	checkinHours, _ := h.cfg.Scheduler.Hours()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":         snaps,
 		"auto_claim":       h.cfg.Scheduler.TravelAutoClaimEnabled(),
+		"auto_depart":      h.cfg.Scheduler.CheckinEnabled(),
+		"checkin_hours":    checkinHours,
 		"location_id":      4,
 		"watch_interval_s": int64(h.cfg.Scheduler.WatchInterval().Seconds()),
 	})
