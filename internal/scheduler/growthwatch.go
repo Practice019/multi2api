@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -483,11 +484,20 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 		s.recordGrowth(uid, res, trigger)
 		return res
 	}
-	okN, failN := 0, 0
-	var lastErr string
+	okN, skipN, failN := 0, 0, 0
+	var lastErr, blockedBy string
 	for _, r := range results {
 		if r.Status == "accepted" {
 			okN++
+			continue
+		}
+		// 上游的拒绝分两类，必须区分开 —— 混在一起会把"只差一个前置任务"
+		// 报成"接单失败"，用户完全看不出该做什么。
+		if reason, skipped := acceptRejectionReason(r.Message); skipped {
+			skipN++
+			if reason != "" && blockedBy == "" {
+				blockedBy = reason
+			}
 			continue
 		}
 		failN++
@@ -496,19 +506,74 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 	res.Count = okN
 	res.Credits = potentialCredit
 	res.Energy = potentialEnergy
-	res.Detail = fmt.Sprintf("接单 %d 个（失败 %d）", okN, failN)
+
+	// 文案按实际发生的组合拼，不出现"跳过 N（失败 0）"这种噪音。
+	var parts []string
+	parts = append(parts, fmt.Sprintf("接单 %d 个", okN))
+	if skipN > 0 {
+		parts = append(parts, fmt.Sprintf("跳过 %d", skipN))
+	}
 	if failN > 0 {
+		parts = append(parts, fmt.Sprintf("失败 %d", failN))
+	}
+	res.Detail = strings.Join(parts, "（") + strings.Repeat("）", len(parts)-1)
+	if blockedBy != "" {
+		res.Detail += "；被前置任务 " + blockedBy + " 挡住"
+	}
+	if lastErr != "" {
 		res.Detail += "；最后错误 " + trunc(lastErr)
 	}
-	// 一个都没成功才算失败；部分成功记 ok 但带失败数，避免「全成功」的错觉。
-	if okN == 0 {
+	// 判定：
+	//   有真失败 → fail（哪怕也接过一些，避免"全成功"错觉）
+	//   没真失败、接过一些 → ok
+	//   没真失败、一个没接但确有跳过 → skip（这是"被前置挡住"，不是故障）
+	//   什么都没发生（上游返回空 results）→ skip
+	switch {
+	case failN > 0:
 		res.Status = checkinlog.StatusFail
-	} else {
+	case okN > 0:
 		res.Status = checkinlog.StatusOK
+	default:
+		res.Status = checkinlog.StatusSkip
+		if res.Detail == "" || okN == 0 && skipN == 0 {
+			res.Detail = "没有可接单的任务"
+		}
 	}
 	s.recordGrowth(uid, res, trigger)
 	s.scheduleGrowthNext(uid)
 	return res
+}
+
+// acceptRejectionReason 判定上游的接单拒绝是否属于**预期内**（应记为跳过而非失败）。
+//
+// 返回 (前置任务名, 是否跳过)。前置任务名仅对 prerequisite 类拒绝非空。
+//
+// 三种预期拒绝（均由线上实测归纳，见对应测试）：
+//
+//	prerequisite not met: first_buddy
+//	    前置任务未完成。典型场景：成长中心要求先完成 first_buddy（领取一只 Buddy），
+//	    其余任务才允许接单。这不是故障，用户去把前置任务做掉即可。
+//	    注意 first_buddy 自身会回 "task does not require acceptance" —— 它由
+//	    上游自动派生，不需要也不能手动接单。
+//	task does not require acceptance
+//	    该任务本来就不需要接单（上游已自动纳入，或属于活动类任务）。
+//	message 为空
+//	    任务已经是 accepted 状态，重复接单。上游对重复接单返回空 message 的 error，
+//	    语义上等价于"无操作成功"，不该报错。
+func acceptRejectionReason(msg string) (string, bool) {
+	m := strings.TrimSpace(msg)
+	if m == "" {
+		return "", true
+	}
+	lower := strings.ToLower(m)
+	if idx := strings.Index(lower, "prerequisite not met:"); idx >= 0 {
+		code := strings.TrimSpace(m[idx+len("prerequisite not met:"):])
+		return code, true
+	}
+	if strings.Contains(lower, "does not require acceptance") {
+		return "", true
+	}
+	return "", false
 }
 
 // GrowthMakeupFor 补签。date 为空时取上游给出的可补签日期列表里的第一个。

@@ -311,7 +311,7 @@
     <div class="body" style="padding:0">
       <table><thead><tr>
         <th>昵称</th><th title="账号信用分余额，取自网关本地缓存（点上方「刷新」会一并更新）">额度</th><th>连登</th><th>补签卡</th><th>能量</th><th>盲盒可开</th><th>抽奖</th>
-        <th>待领取</th><th>现在可领</th><th>待接单</th><th>接单后可得</th><th>操作</th>
+        <th>待领取</th><th>现在可领</th><th>待完成</th><th>完成后可得</th><th>操作</th>
       </tr></thead>
       <tbody id="growthRows"><tr><td colspan="12" class="dim">加载中…</td></tr></tbody></table>
     </div>
@@ -1021,13 +1021,15 @@
       ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
       ['现在可领信用分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
       ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
-      ['待接单任务', sum.claim, sum.claim ? 'ok' : 'dim'],
-      ['接单后可得信用分', sum.credit, sum.credit ? 'ok' : 'dim'],
+      // 「待接单/接单后可得」改成「待完成/完成后可获得」：
+      // 这些任务需要先接单、再去 WorkBuddy 里把动作做掉，最终还要领奖才到账。
+      // 原措辞只说到"接单"，会让人以为接完就有分 —— 实际接单不发任何奖励。
+      ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
+      ['完成后可获得的信用分', sum.credit, sum.credit ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
       ['能量合计', sum.energy, ''],
     ].map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
-
     if (!growthSnaps.length) {
       $('growthRows').innerHTML = '<tr><td colspan="12" class="dim">账号池为空</td></tr>';
       renderGrowthGroups();
@@ -1079,7 +1081,7 @@
       const act = [
         // 领奖放最前：这是唯一真正加分的动作，有可领的就一定是当前最该点的。
         `<button data-gact="claim"   data-uid="${U}"${g.claimable_count ? '' : ' disabled'} title="领取已完成任务的奖励${g.claimable_credit ? `（共 ${g.claimable_credit} 分）` : ''}">领取</button>`,
-        `<button data-gact="accept"  data-uid="${U}"${g.acceptable_count ? '' : ' disabled'}>接单</button>`,
+        `<button data-gact="accept"  data-uid="${U}"${g.acceptable_count ? '' : ' disabled'} title="把未接单的任务接进列表开始计进度。接单不发奖励，奖励要走「领取」">接单</button>`,
         `<button data-gact="redeem" data-uid="${U}">兑换</button>`,
         `<button data-gact="makeup" data-uid="${U}"${g.makeup_dates && g.makeup_dates.length ? '' : ' disabled'}>补签</button>`,
         `<button data-gact="open"   data-uid="${U}"${g.blind_box_affordable ? '' : ' disabled'}>开盒</button>`,
@@ -1296,9 +1298,15 @@
       const extra = r.credits ? `，+${r.credits} 信用分` : '';
       toast(`${label}成功：${r.detail || ''}${extra}`);
     } catch (e) {
-      // 409 是「现在不该做」，用中性提示而不是红色报错
-      const skip = /没有|不足|不可领取|没有可|已领取/.test(e.message || '');
-      toast(`${label}：${e.message}`, !skip);
+      // 中性提示（非红色）用于「现在不该做」这类**预期内**的结果，而不是故障。
+      // 判定关键词要与后端 Detail 文案对齐：
+      //   跳过 N            —— 任务不需要接单 / 重复接单 / 无可领
+      //   被前置任务 X 挡住  —— 上游 prerequisite not met，用户去做掉前置任务即可
+      //   没有/不足/已领取等 —— 原有的一批「无操作成功」措辞
+      // 不匹配则按真失败显示红色，避免把故障说成正常。
+      const msg = e.message || '';
+      const benign = /跳过|被前置任务|没有|不足|不可领取|不可接单|没有可|已领取/.test(msg);
+      toast(`${label}：${msg}`, !benign);
     }
     loadGrowth(true);
     refresh();

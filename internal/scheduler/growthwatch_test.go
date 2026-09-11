@@ -40,6 +40,9 @@ type growthStub struct {
 	// acceptStatus/acceptMessage 控制接单接口逐条返回的 status/message。
 	acceptStatus  atomic.Value
 	acceptMessage atomic.Value
+	// acceptPerCode 按 task_code 给不同的 result 对象（用于验证"预期拒绝"的分类）。
+	// map[string]string: task_code -> 完整 result JSON。
+	acceptPerCode atomic.Value
 }
 
 func (g *growthStub) handler() http.Handler {
@@ -700,5 +703,163 @@ func TestGrowthAutoClaimRespectsToggle(t *testing.T) {
 	s.RefreshGrowth(true, true)
 	if g.claimCalls.Load() != 0 {
 		t.Errorf("关闭自动领奖后仍调用了 %d 次", g.claimCalls.Load())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 接单的「预期拒绝」不应被当成失败
+//
+// 现场（用户实测）：某账号有 17 个可接任务、合计 2150 分，点「全部接单」后
+// 结果是「接单 0 个（失败 1）；最后错误 create_canvas: prerequisite not met: first_buddy」。
+// 逐任务试下来，上游其实会回三种**预期内**的拒绝，而它们都不是"出错"：
+//
+//	① prerequisite not met: first_buddy  —— 前置任务 first_buddy 未完成
+//	② task does not require acceptance    —— 该任务本来就不需要接单
+//	③ message 为空（任务已经是 accepted） —— 重复接单
+//
+// 原实现把「status != accepted」一律计入 failN，于是 17 个任务全被判失败、
+// HTTP 502、前端一片红；用户完全看不出「其实只是差一个前置任务」。
+// 正确的做法是把这三种归为**跳过**，只在真的出现未知错误时报失败。
+
+// growthStub 目前只支持给所有 task_code 返回同一个 status/message。
+// 这三种拒绝是按任务区分，所以这里需要逐 code 控制。
+func (g *growthStub) handlerPerCode() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const base = "/v2/activity/growth"
+		switch {
+		case r.URL.Path == base+"/tasks":
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, g.tasksJSON)
+		case r.URL.Path == base+"/streak":
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, g.streakJSON)
+		case r.URL.Path == base+"/energy":
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, g.energyJSON)
+		case r.URL.Path == base+"/buddy/quota":
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, g.quotaJSON)
+		case r.URL.Path == base+"/lottery/chances":
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, g.lotteryJSON)
+		case r.URL.Path == base+"/tasks/accept":
+			var b struct {
+				TaskCodes []string `json:"task_codes"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			perCode, _ := g.acceptPerCode.Load().(map[string]string)
+			rs := make([]string, 0, len(b.TaskCodes))
+			for _, c := range b.TaskCodes {
+				raw, ok := perCode[c]
+				if !ok {
+					rs = append(rs, fmt.Sprintf(`{"task_code":%q,"status":"accepted","message":""}`, c))
+					continue
+				}
+				// raw 是完整的 result 对象（由测试直接给出）
+				rs = append(rs, raw)
+			}
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":{"results":[%s]}}`, strings.Join(rs, ","))
+		default:
+			http.Error(w, "not found", 404)
+		}
+	})
+}
+
+func newGrowthHarnessPerCode(t *testing.T, g *growthStub) *Scheduler {
+	t.Helper()
+	srv := httptest.NewServer(g.handlerPerCode())
+	t.Cleanup(srv.Close)
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Nickname: "测试号"})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	log := checkinlog.New(filepath.Join(t.TempDir(), "checkin-log.json"), 30)
+	return New(Config{Pool: p, Upstream: up, Log: log})
+}
+
+// 三种预期拒绝全部归为「跳过」，不报失败。
+func TestGrowthAcceptExpectedRejectionsAreSkipped(t *testing.T) {
+	g := defaultGrowthStub()
+	g.tasksJSON = `{"tasks":[
+      {"task_code":"create_canvas","accept_status":"not_accepted","reward_credit":300},
+      {"task_code":"first_buddy","accept_status":"not_accepted","reward_credit":300},
+      {"task_code":"black_cat","accept_status":"not_accepted","reward_credit":0}
+    ]}`
+	// create_canvas 被 first_buddy 前置挡住；first_buddy 自身不需要接单。
+	g.acceptPerCode.Store(map[string]string{
+		"create_canvas": `{"task_code":"create_canvas","status":"error","message":"prerequisite not met: first_buddy"}`,
+		"first_buddy":   `{"task_code":"first_buddy","status":"error","message":"task does not require acceptance"}`,
+		"black_cat":     `{"task_code":"black_cat","status":"accepted","message":""}`,
+	})
+	s := newGrowthHarnessPerCode(t, g)
+
+	res := s.GrowthAcceptFor("u1", "", "manual")
+
+	if res.Status == checkinlog.StatusFail {
+		t.Errorf("预期拒绝被当成了失败：Status=%s Detail=%s", res.Status, res.Detail)
+	}
+	if res.Count != 1 {
+		t.Errorf("成功接单数应为 1（只有 black_cat），得到 %d", res.Count)
+	}
+	if !strings.Contains(res.Detail, "跳过 2") {
+		t.Errorf("Detail 应说明跳过了 2 个，得到 %q", res.Detail)
+	}
+	if strings.Contains(res.Detail, "失败") {
+		t.Errorf("不该出现「失败」字样，得到 %q", res.Detail)
+	}
+}
+
+// 全被前置挡住时：状态是「跳过」而不是「失败」，且说明里点出前置任务名。
+// 这就是用户遇到的那个账号（17 个任务全被 first_buddy 挡住）。
+func TestGrowthAcceptAllBlockedByPrerequisiteIsSkip(t *testing.T) {
+	g := defaultGrowthStub()
+	g.tasksJSON = `{"tasks":[
+      {"task_code":"create_canvas","accept_status":"not_accepted","reward_credit":300},
+      {"task_code":"chat_5","accept_status":"not_accepted","reward_credit":100}
+    ]}`
+	g.acceptPerCode.Store(map[string]string{
+		"create_canvas": `{"task_code":"create_canvas","status":"error","message":"prerequisite not met: first_buddy"}`,
+		"chat_5":        `{"task_code":"chat_5","status":"error","message":"prerequisite not met: first_buddy"}`,
+	})
+	s := newGrowthHarnessPerCode(t, g)
+
+	res := s.GrowthAcceptFor("u1", "", "manual")
+
+	if res.Status != checkinlog.StatusSkip {
+		t.Errorf("全部被前置挡住应为 skip，得到 %s（Detail=%s）", res.Status, res.Detail)
+	}
+	if !strings.Contains(res.Detail, "first_buddy") {
+		t.Errorf("Detail 应点明被哪个前置任务挡住，得到 %q", res.Detail)
+	}
+	if strings.Contains(res.Detail, "失败") {
+		t.Errorf("不该出现「失败」字样，得到 %q", res.Detail)
+	}
+}
+
+// 真正的未知错误仍需报失败 —— 不能把分类做成"什么都跳过"。
+func TestGrowthAcceptUnknownErrorStillFails(t *testing.T) {
+	g := defaultGrowthStub()
+	g.tasksJSON = `{"tasks":[{"task_code":"weird","accept_status":"not_accepted","reward_credit":100}]}`
+	g.acceptPerCode.Store(map[string]string{
+		"weird": `{"task_code":"weird","status":"error","message":"internal server error"}`,
+	})
+	s := newGrowthHarnessPerCode(t, g)
+
+	res := s.GrowthAcceptFor("u1", "", "manual")
+
+	if res.Status != checkinlog.StatusFail {
+		t.Errorf("未知错误应为 fail，得到 %s（Detail=%s）", res.Status, res.Detail)
+	}
+	if !strings.Contains(res.Detail, "internal server error") {
+		t.Errorf("Detail 应带出原始错误，得到 %q", res.Detail)
+	}
+}
+
+// 空 message（任务已 accepted）也算跳过，不是失败。
+func TestGrowthAcceptAlreadyAcceptedIsSkip(t *testing.T) {
+	g := defaultGrowthStub()
+	g.tasksJSON = `{"tasks":[{"task_code":"x","accept_status":"not_accepted","reward_credit":100}]}`
+	g.acceptPerCode.Store(map[string]string{
+		"x": `{"task_code":"x","status":"error","message":""}`,
+	})
+	s := newGrowthHarnessPerCode(t, g)
+
+	res := s.GrowthAcceptFor("u1", "", "manual")
+	if res.Status == checkinlog.StatusFail {
+		t.Errorf("空 message 的拒绝应为跳过，得到 %s（Detail=%s）", res.Status, res.Detail)
 	}
 }
