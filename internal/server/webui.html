@@ -136,6 +136,13 @@
     padding:3px 11px;font-family:var(--mono);font-size:12px;cursor:pointer}
   .chip:hover{border-color:var(--acc);color:var(--acc)}
   .chip span{color:var(--dim);font-size:11px;margin-left:5px}
+  /* 成本倍率标记：x0 免费 / 低倍率中性 / 高倍率醒目。
+     倍率是"选哪个模型"的决策依据，所以给个比 ctx 更强的视觉权重 ——
+     同时用颜色区分"免费"与"贵"，但**不只靠颜色**（各自带 x 前缀的数字，色盲也可读）。 */
+  .chip .mult{margin-left:6px;padding:1px 6px;border-radius:999px;
+    background:rgba(127,127,127,.12);color:var(--dim);font-size:11px}
+  .chip .mult.free{color:var(--ok);background:rgba(80,200,120,.14)}
+  .chip .mult.hi{color:var(--warn);background:rgba(230,170,60,.16)}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
   textarea{width:100%;min-height:74px;resize:vertical;font-family:var(--mono);font-size:13px}
   .key{flex:1;min-width:230px;font-family:var(--mono);font-size:12px}
@@ -2201,16 +2208,73 @@
     } catch (e) { toast('操作失败：' + e.message, true); }
   }
 
+  // 模型倍率索引：id → 成本倍率（来自 GET /admin/models/preview）。
+  //
+  // 为什么要单独取一次：/v1/models 是**对外**的 OpenAI 兼容端点，
+  // 往里塞自定义字段会污染公共契约；倍率只对本管理界面有意义，走 admin 面。
+  // 取不到时索引为空 —— 模型列表照常显示，只是没有倍率标记（不能整块失败）。
+  let modelMultipliers = {};
+
+  async function loadModelMultipliers() {
+    try {
+      const r = await admin('/admin/models/preview');
+      const next = {};
+      for (const m of (r && r.models) || []) {
+        // 保留 0：x0.00 是「免费」这个有意义的事实，不能用真值判断把它丢掉。
+        if (m && m.model) next[m.model] = Number(m.multiplier) || 0;
+      }
+      modelMultipliers = next;
+    } catch {
+      modelMultipliers = {};   // 拿不到就退化为"不显示倍率"
+    }
+  }
+
+  // 把倍率数值格式化成展示文本；非法值返回 null（调用方据此不加标记）。
+  //
+  // 为什么单独抽出来：HTML 版与 <option> 版要显示同一个数，
+  // 各自实现一遍必然漂移（曾经就是两处各写各的格式化）。
+  //
+  // 拒绝非有限值：NaN/Infinity 经 toFixed 会串成 "NaN"/"Infinity" 直接显示给用户。
+  // 上游理论上不会给，但倍率是外部数据，展示层不该假设它干净。
+  function multText(v) {
+    if (!Number.isFinite(v) || v < 0) return null;
+    // 0 → "0"；0.51 → "0.51"；2 → "2"。两位小数足够（上游最细到 x0.01）。
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
+  }
+
+  // 倍率标记：有系数才加，且 0 也要显示（免费是有效信息）。
+  // 系数未知（目录里没这个模型）时不加后缀，避免用「x0」把"不知道"说成"免费"。
+  function multTag(id) {
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
+    const txt = multText(modelMultipliers[id]);
+    if (txt === null) return '';   // 脏数据 → 当作没有系数，而不是显示 xNaN
+    const v = modelMultipliers[id];
+    // 免费（0）与高倍率（>=1）各给一个样式类，便于一眼扫出成本档位。
+    // 注意：不发散到"低/中/高"多档 —— 倍率分布随上游调整，硬编码分档很快会失真。
+    const cls = v === 0 ? ' free' : (v >= 1 ? ' hi' : '');
+    return `<span class="mult${cls}" title="每次调用消耗 ${txt} 倍基础额度">x${esc(txt)}</span>`;
+  }
+
   function renderModels(list) {
     models = list || [];
     $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
     if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
+    // 只显示模型名 + 倍率，不再显示 context_length ——
+    // ctx 数字对"选哪个模型"没有帮助，反而把名字挤得难读；倍率才是决策依据。
     $('models').innerHTML = models.map(m =>
-      `<span class="chip" data-id="${esc(m.id)}">${esc(m.id)}<span>${esc(m.context_length || '')}</span></span>`).join('');
+      `<span class="chip" data-id="${esc(m.id)}">${esc(m.id)}${multTag(m.id)}</span>`).join('');
     const sel = $('model'), keep = sel.value;
     sel.innerHTML = models.map(m =>
-      `<option value="${esc(m.id)}">${esc(m.id)} · ${esc(m.context_length || '?')} ctx</option>`).join('');
+      `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
     sel.value = models.some(m => m.id === keep) ? keep : (models.find(m => m.id === 'auto') || models[0]).id;
+  }
+
+  // <option> 只能放纯文本，不能放 HTML 标签 —— 倍率用括号包起来。
+  // 与 multTag 共用 multText，保证同一个数在两处长得一样。
+  function multTagPlain(id) {
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
+    const txt = multText(modelMultipliers[id]);
+    return txt === null ? '' : ` (x${txt})`;
   }
 
   function stopAuto() {
@@ -2347,6 +2411,9 @@
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
     try { renderAccounts((await admin('/admin/accounts')).accounts); }
     catch { renderAccounts(s.accounts); }
+    // 倍率要先取：renderModels 依赖它给每个模型加标记。
+    // 单独 await 且自带 try —— 倍率拿不到不该让模型列表也显示不出来。
+    await loadModelMultipliers();
     try { renderModels((await api('/v1/models')).data); }
     catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     loadSchedule();
@@ -2550,7 +2617,10 @@
     });
 
     $('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
+      // 刷新按钮同时清掉两张缓存：模型列表（/v1/models）和倍率目录（/v3/config）。
+      // 只清前者会让倍率停留在旧值，看起来像"刷新没生效"。
       await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
+      await loadModelMultipliers();
       renderModels((await api('/v1/models')).data);
       return true;
     }, { label: '模型目录' });

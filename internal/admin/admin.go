@@ -112,6 +112,7 @@ func New(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/schedule", h.schedule)
 
 	h.mux.HandleFunc("POST /admin/models/refresh", h.modelsRefresh)
+	h.mux.HandleFunc("GET /admin/models/preview", h.modelsPreview)
 
 	h.mux.HandleFunc("GET /admin/logs", h.logs)
 	h.mux.HandleFunc("GET /admin/logs/history", h.logsHistory)
@@ -730,6 +731,36 @@ func (h *Handler) modelsRefresh(w http.ResponseWriter, r *http.Request) {
 	h.cfg.ResetModelsCache()
 	log.Printf("admin: 模型目录缓存已清空")
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
+}
+
+// modelsPreview 返回**全部目录模型**的 id 与成本倍率，供前端在模型名称旁标注倍率。
+//
+// 为什么不把倍率塞进 /v1/models：
+//   - 那是**对外**的 OpenAI 兼容端点。客户端按规范解析 `data[]`，
+//     塞自定义字段属于污染公共契约（部分客户端会对未知字段告警，甚至有严格模式直接报错）。
+//   - 倍率是网关自己的观测信息，只对本地管理界面有意义 —— 该走 admin 面。
+//
+// 与 /admin/stats 里的 model_multipliers 的分工（两者都保留）：
+//   - stats 那份只含**窗口内被调用过**的模型 —— 报表口径，回答"钱花在哪"
+//   - 这份是**全部目录模型** —— 选择口径，回答"这个模型多贵"，下拉框需要给所有选项标注
+//
+// 降级：未接线或目录拿不到时返回**空数组**而不是报错 ——
+// 前端拿不到倍率就只显示模型名，不该让整个模型列表渲染失败。
+func (h *Handler) modelsPreview(w http.ResponseWriter, r *http.Request) {
+	out := []ModelMultiplier{}
+	if h.cfg.ModelCatalog != nil {
+		if cat := h.cfg.ModelCatalog(); cat != nil {
+			for _, m := range cat.Models {
+				if m.ID == "" {
+					continue
+				}
+				// 与 stats 那份不同：这里**保留 0 倍率**。
+				// x0.00 是"免费"这个有意义的事实，不是"没有数据"。
+				out = append(out, ModelMultiplier{Model: m.ID, Multiplier: m.Multiplier})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": out})
 }
 
 func (h *Handler) logs(w http.ResponseWriter, r *http.Request) {
