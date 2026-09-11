@@ -109,7 +109,7 @@ func (h *Handler) growthTargets(uid string) ([]string, bool) {
 }
 
 // growthClaim 领取**奖励**：把条件已达成（completed）但还没领的任务奖励领回来。
-// 这是唯一真正让信用分到账的动作。uid 为空 = 全部账号（后台任务）；
+// 这是唯一真正让积分到账的动作。uid 为空 = 全部账号（后台任务）；
 // task_code 为空 = 该账号全部可领任务。
 func (h *Handler) growthClaim(w http.ResponseWriter, r *http.Request) {
 	body := decodeGrowthAct(r)

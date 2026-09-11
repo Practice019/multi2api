@@ -29,7 +29,7 @@ const growthBase = "/v2/activity/growth"
 //   - completed = 任务条件已达成，但**奖励尚未发放**；
 //   - claimed   = 奖励**已领取**。
 //
-// 所以 completed 的任务必须再调一次 POST /tasks/{code}/claim 才真正拿到信用分：
+// 所以 completed 的任务必须再调一次 POST /tasks/{code}/claim 才真正拿到积分：
 // 实测对 completed 的 chat_5 调 claim 后，状态变 claimed、积分 +100。
 const (
 	// GrowthStatusNotAccepted 未接单：可以 POST /tasks/accept 把它接进来。

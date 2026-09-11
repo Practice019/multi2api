@@ -122,7 +122,7 @@ type GrowthActionResult struct {
 	Action string `json:"action"` // accept | claim | redeem | makeup | open | draw
 	Status string `json:"status"` // ok | skip | fail
 	Detail string `json:"detail,omitempty"`
-	// Credits 是本次**实际到账**的信用分。领奖时用上游的 already_claimed 区分：
+	// Credits 是本次**实际到账**的积分。领奖时用上游的 already_claimed 区分：
 	// 早已领过的任务返回 0，不计入。
 	Credits int64 `json:"credits,omitempty"`
 	Energy  int64 `json:"energy,omitempty"`
@@ -409,7 +409,7 @@ func (s *Scheduler) scheduleGrowthNext(uid string) {
 // GrowthClaimFor 领奖：把**条件已达成但奖励未领**的任务奖励领回来
 // （taskCode 非空时只领指定任务，为空则领该账号全部可领任务）。
 //
-// 这是唯一真正让信用分到账的动作。上游把「达成」与「发奖」拆成两步：
+// 这是唯一真正让积分到账的动作。上游把「达成」与「发奖」拆成两步：
 // completed = 已达成待领取，claim 成功后状态变 claimed。已领过的任务返回
 // already_claimed=true（幂等），此时 Credits 记 0，不算收益也不算失败。
 func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionResult {
@@ -478,7 +478,7 @@ func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionRe
 	switch {
 	case okN > 0:
 		res.Status = checkinlog.StatusOK
-		res.Detail = fmt.Sprintf("领取 %d 个任务奖励，到账 %d 信用分", okN, credit)
+		res.Detail = fmt.Sprintf("领取 %d 个任务奖励，到账 %d 积分", okN, credit)
 		if energy > 0 {
 			res.Detail += fmt.Sprintf(" +%d 能量", energy)
 		}
@@ -990,7 +990,7 @@ func (s *Scheduler) runGrowthAutoActions(snap *GrowthSnapshot) {
 	if claim && snap.ClaimableCount > 0 {
 		res := s.GrowthClaimFor(snap.UID, "", triggerAuto)
 		if res.Status == checkinlog.StatusOK {
-			// 领奖改变了账号的信用分，池里缓存的是旧值，刷新一下，
+			// 领奖改变了账号的积分，池里缓存的是旧值，刷新一下，
 			// 否则界面上的积分要等下一次定时刷新才对得上。
 			s.RefreshCredits(snap.UID, triggerAuto)
 			s.probeGrowth(snap.UID)
