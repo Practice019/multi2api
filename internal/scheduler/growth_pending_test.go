@@ -1,6 +1,6 @@
 // RED 测试：验证「待完成」应包含进行中的任务。
 //
-// 用户报告：妖精七七 的实际状态是 claimed=13 / accepted=4 / in_progress=1，
+// 用户报告：一个真实账号的状态是 claimed=13 / accepted=4 / in_progress=1，
 // 界面上「待完成」却显示 0 —— 因为只统计了 not_accepted。
 // 正确的「待完成」= not_accepted + accepted + in_progress（不论是否已接单，
 // 只要还没做成都算待完成），「完成后可得」= 这些任务的 reward_credit 之和。
