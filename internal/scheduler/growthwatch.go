@@ -231,7 +231,11 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 	snap.ObservedAt = time.Now()
 	snap.Nickname = a.Nickname
 
+	// 每次上游调用都经过共享信号量 —— 这样「账号并发 × 账号内并发」的总量
+	// 始终被 growthProbeConcurrency 夹住，不会因为层层相乘冲破风控上限。
+	s.probeSem.acquire()
 	tasks, err := s.cfg.Upstream.GrowthTasks(a)
+	s.probeSem.release()
 	if err != nil {
 		return s.failGrowthSnapshot(uid, snap, "任务列表: "+err.Error())
 	}
@@ -280,25 +284,49 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 		snap.AcceptableEnergy += t.RewardEnergy
 	}
 
-	if st, err := s.cfg.Upstream.GrowthStreak(a); err == nil && st != nil {
+	// 剩余 4 个调用并发发起。
+	//
+	// 为什么：实测单账号探针 2402ms，其中 /tasks 一个就占 1590ms（66%）。
+	// 这 4 个加起来约 800ms，串行发等于白等。它们**互不依赖**（各返回一个
+	// 独立字段），所以可以并发 —— 单账号耗时降到接近 /tasks 的 1590ms。
+	//
+	// 每个 goroutine 只写自己的局部变量，最后统一合并进 snap，
+	// 因此不需要锁（snap 在本函数内独占，不与其它 goroutine 共享）。
+	var (
+		st  *upstream.StreakState
+		stErr error
+		e   *upstream.GrowthEnergy
+		q   *upstream.GrowthBuddyQuota
+		l   *upstream.GrowthLottery
+	)
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); st, stErr = s.cfg.Upstream.GrowthStreak(a) }()
+	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); e, _ = s.cfg.Upstream.GrowthEnergy(a) }()
+	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); q, _ = s.cfg.Upstream.GrowthBuddyQuota(a) }()
+	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); l, _ = s.cfg.Upstream.GrowthLotteryChances(a) }()
+	wg.Wait()
+
+	// 合并（顺序无关，各写各的字段）。
+	// 单个失败只影响它那一个字段 —— 不能让 /energy 挂掉就把整份快照抹掉。
+	if stErr == nil && st != nil {
 		snap.StreakDays = st.Streak.Days
 		snap.NextTier = st.Streak.NextTier
 		snap.NextTierRemaining = st.Streak.NextTierRemaining
 		snap.MakeupCards = st.MakeupCards.Balance
 		snap.MakeupDates = st.Streak.MakeupDates
 		snap.RemainingDays = st.RedemptionStatus.RemainingDays
-	} else if err != nil {
-		snap.Error = trunc("连登: " + err.Error())
+	} else if stErr != nil {
+		snap.Error = trunc("连登: " + stErr.Error())
 	}
-
-	if e, err := s.cfg.Upstream.GrowthEnergy(a); err == nil && e != nil {
+	if e != nil {
 		snap.Energy = e.Balance
 	}
-	if q, err := s.cfg.Upstream.GrowthBuddyQuota(a); err == nil && q != nil {
+	if q != nil {
 		snap.BlindBoxAffordable = q.Affordable
 		snap.BlindBoxCost = q.CostPerOpen
 	}
-	if l, err := s.cfg.Upstream.GrowthLotteryChances(a); err == nil && l != nil {
+	if l != nil {
 		snap.LotteryChances = l.Balance
 	}
 
@@ -841,22 +869,54 @@ func (s *Scheduler) recordGrowth(uid string, res GrowthActionResult, trigger str
 // 全量扫描 / 守卫轮
 // ---------------------------------------------------------------------------
 
-// growthProbeConcurrency 是账号间探测的并发上限。
+// growthProbeConcurrency 是**对上游同时在途请求数**的总上限。
 //
-// 为什么是 5 而不是「无脑全开」：上游是同一个腾讯服务，账号多时同时打过去
-// 有触发风控的风险（旅行模块已有「账号间间隔 800ms 避免触发上游风控」的先例）。
-// 固定上限能在「快」与「稳」之间取平衡：10 个账号从串行 ~23s 降到 ~2.5s
-// （5 个一批，每批约 2.3s）。
+// ⚠ 这个数约束的是「同时在飞的 HTTP 请求」，不是「同时处理的账号」。
+// 两层并发共享同一个信号量：
 //
-// 数值依据：单账号实测约 2.3s（5 个串行上游调用），batch=5 时 3 个账号
-// 一批跑完（实测从 7157ms 降到接近单账号耗时），10 个账号两批。取 5 而不取
-// 更大的值，是因为再大对本机常见账号数（个位数）已无增益，却线性增加风控面。
+//	账号层（RefreshGrowth）：一批最多处理 N 个账号
+//	调用层（probeGrowth）  ：每个账号内的 4 个独立 GET 并发
+//
+// 若两层各限各的，实际上游峰值 = 5 账号 × 4 调用 = 20 —— 那就等于没限流。
+// 实测踩过：Task 6 加进来后峰值从 5 涨到 20，被 TestRefreshGrowthConcurrencyCap
+// 抓出来。所以两层必须共用同一预算。
+//
+// 为什么是 5：上游是同一个腾讯服务，账号多时同时打过去有触发风控的风险
+// （旅行模块已有「账号间间隔 800ms 避免触发上游风控」的先例）。实测 3 账号
+// 并发化后 7157ms → 2512ms 已经够用，再放宽只增风控面、对个位数账号无增益。
 const growthProbeConcurrency = 5
+
+// growthProbeSem 是跨两层共享的并发预算。
+//
+// 为什么做成字段而不是包级变量：多个 Scheduler 实例（测试里很常见）应当
+// 各自独立，共用包级信号量会造成测试之间互相阻塞。
+type growthProbeSem struct {
+	ch chan struct{}
+}
+
+func newGrowthProbeSem(n int) *growthProbeSem {
+	return &growthProbeSem{ch: make(chan struct{}, n)}
+}
+
+func (g *growthProbeSem) acquire() {
+	if g == nil || g.ch == nil {
+		return
+	}
+	g.ch <- struct{}{}
+}
+
+func (g *growthProbeSem) release() {
+	if g == nil || g.ch == nil {
+		return
+	}
+	<-g.ch
+}
 
 // RefreshGrowth 扫描账号并刷新快照，按开关执行自动动作。
 // force=false 时只查「到期」的账号。autoActions 表示是否执行自动动作。
 //
-// 账号之间**并发**执行（上限 growthProbeConcurrency），账号内部仍是串行。
+// 账号之间**并发**执行，但所有账号、所有子调用共享同一个并发预算
+// （growthProbeConcurrency）—— 见该常量的注释。
 //
 // 为什么必须并发：实测 1 账号 2331ms / 3 账号 7157ms（比值 3.07，精确线性），
 // 10 个账号就是 ~23 秒。串行 for 循环在账号数一多就会让「点刷新」变成
@@ -883,22 +943,19 @@ func (s *Scheduler) RefreshGrowth(force bool, autoActions bool) []GrowthSnapshot
 		return s.GrowthSnapshots()
 	}
 
-	// 固定上限的 worker pool。用 channel 令牌而不是 errgroup.SetLimit，
-	// 是为了不引入新依赖（本项目至今只用标准库 + go-redis）。
+	// 用共享信号量控制「对上游同时在途的请求数」，不是「同时处理的账号数」。
 	//
-	// 令牌数取 min(上限, 账号数)：账号少于上限时不必白开那么多 goroutine。
-	limit := growthProbeConcurrency
-	if len(uids) < limit {
-		limit = len(uids)
-	}
-	sem := make(chan struct{}, limit)
+	// 账号层只负责启动 goroutine；真正的限流发生在 probeGrowth 内部 ——
+	// 每次上游调用前都 acquire 一次。这样两层共用一个预算，
+	// 无论账号多少、每账号几个并发调用，总在途数都 <= growthProbeConcurrency。
+	//
+	// 为什么不在这里按账号数切片：那样只能限住账号数，限不住"每账号内部又开几个并发"
+	// —— 实测过，两层各限各的会让峰值从 5 涨到 20。
 	var wg sync.WaitGroup
 	for _, uid := range uids {
 		wg.Add(1)
-		sem <- struct{}{}   // 取令牌（满了就在这里等，天然形成背压）
 		go func(uid string) {
 			defer wg.Done()
-			defer func() { <-sem }()   // 还令牌
 			snap := s.probeGrowth(uid)
 			if autoActions {
 				s.runGrowthAutoActions(snap)

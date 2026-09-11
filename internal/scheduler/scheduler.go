@@ -85,6 +85,10 @@ type Scheduler struct {
 
 	// growth 成长中心守卫状态（快照缓存 + 到期表 + 五个自动动作开关）。
 	growth *growthWatchState
+
+	// probeSem 是成长中心探测的**共享并发预算**：账号之间、以及单个账号内的
+	// 多个上游调用，都从这里取令牌。见 growthProbeConcurrency 的注释。
+	probeSem *growthProbeSem
 }
 
 // New 构建。
@@ -99,6 +103,9 @@ func New(cfg Config) *Scheduler {
 		cfg:        cfg,
 		adoptTried: make(map[string]string),
 		travel:     newTravelWatchState(!cfg.TravelAutoClaimDisabled),
+		// 每个 Scheduler 一份独立预算：测试里会起多个实例，
+		// 共用包级信号量会让它们互相阻塞。
+		probeSem: newGrowthProbeSem(growthProbeConcurrency),
 		growth: newGrowthWatchState(
 			// accept 默认 true：见 growthWatchState.autoAccept 的注释。
 			boolOrPtr(cfg.GrowthAutoAccept, true),
