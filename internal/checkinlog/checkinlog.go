@@ -156,15 +156,23 @@ func (l *Log) KeepDays() int {
 // 默认值跟着语义走，避免前后端各写一个 30 慢慢漂移。
 const DefaultPageSize = 30
 
+// MaxPageSize 单页条数上限，与 logbuf.MaxPageSize 保持一致。
+// 前端的每页条数是可输入的数字框，但接口不能依赖前端自觉 —— 上界在服务端兜住。
+const MaxPageSize = 300
+
 // Page 按 offset/limit 返回一页记录（时间倒序，最新在前），并给出过滤后的总数。
 //
 // 与 Recent 的区别：Recent 只回答「最近 n 条」，没有 offset，因而无法翻页。
 // 历史保留 30 天、条数可能上千，必须由后端分页，而不是把全量发给前端再切。
 //
-// 边界：offset<0 视为 0；limit<=0 用 DefaultPageSize；offset 越界返回空页不报错。
+// 边界：offset<0 视为 0；limit<=0 用 DefaultPageSize；limit>MaxPageSize 夹到上限；
+// offset 越界返回空页不报错。
 func (l *Log) Page(offset, limit int, kind string) ([]Record, int) {
 	if limit <= 0 {
 		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
 	}
 	if offset < 0 {
 		offset = 0

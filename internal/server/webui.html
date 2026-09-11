@@ -160,6 +160,15 @@
   .pager button:disabled{opacity:.45;cursor:not-allowed}
   .pager .pageno{font-family:var(--mono);color:var(--fg)}
   .pager select{font-size:12px;padding:3px 8px}
+  /* 每页条数改为可输入的数字框：宽度只够放 3 位数字，避免撑开分页条。
+     去掉原生上下箭头，改用键盘上下键 + 直接输入（箭头在小宽度下会挤掉数字位）。 */
+  .pager .pagesize{width:62px;font-size:12px;padding:3px 6px;font-family:var(--mono);
+    text-align:center;background:var(--panel2);color:var(--fg);
+    border:1px solid var(--line);border-radius:8px}
+  .pager .pagesize:focus{outline:none;border-color:var(--acc)}
+  .pager .pagesize::-webkit-outer-spin-button,
+  .pager .pagesize::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  .pager .pagesize{-moz-appearance:textfield;appearance:textfield}
   .pager .spacer{flex:1}
 </style>
 </head>
@@ -1339,7 +1348,18 @@
   // 页码只在「总数变化导致当前页越界」时才回退，不主动重置：
   // 用户翻到第 3 页时，后台轮询刷新数据不应把他踢回第 1 页
   // （只有切换筛选/每页条数这类**用户主动**改变查询范围的操作才回第 1 页）。
-  const PAGE_SIZES = [30, 100, 300];
+  // 每页条数：可手动输入，不再限定几个固定档位。
+  // 上限 300 与 /admin/logs/history、/admin/checkin/history 服务端的单页上限一致；
+  // 下限 1。越界只在本函数里夹紧，不改变 state 的语义。
+  const PAGE_SIZE_MIN = 1;
+  const PAGE_SIZE_MAX = 300;
+
+  // clampPageSize 把任意输入（含空、小数、超界、NaN）收敛为合法整数。
+  function clampPageSize(v) {
+    const n = Math.floor(Number(v));
+    if (!isFinite(n) || n < PAGE_SIZE_MIN) return PAGE_SIZE_MIN;
+    return n > PAGE_SIZE_MAX ? PAGE_SIZE_MAX : n;
+  }
 
   function pageCount(state) {
     return Math.max(1, Math.ceil((state.total || 0) / (state.limit || 30)));
@@ -1364,9 +1384,11 @@
       <span>共 ${total} 条${total ? `，本页 ${from}-${to}` : ''}</span>
       <span class="spacer"></span>
       <span>每页</span>
-      <select data-page="size">
-        ${PAGE_SIZES.map(n => `<option value="${n}"${n === state.limit ? ' selected' : ''}>${n}</option>`).join('')}
-      </select>`;
+      <input data-page="size" type="number" class="pagesize"
+             value="${state.limit}" min="${PAGE_SIZE_MIN}" max="${PAGE_SIZE_MAX}"
+             step="1" inputmode="numeric"
+             title="可直接输入 ${PAGE_SIZE_MIN}-${PAGE_SIZE_MAX} 之间的任意整数">
+      <span>条</span>`;
 
     el.querySelectorAll('button[data-page]').forEach(btn => {
       btn.onclick = () => {
@@ -1377,12 +1399,33 @@
         state.onGo();
       };
     });
-    const sel = el.querySelector('select[data-page="size"]');
-    if (sel) sel.onchange = () => {
-      state.limit = Number(sel.value) || 30;
-      state.offset = 0;   // 改变每页条数属于主动改变查询范围 → 回第 1 页
-      state.onGo();
-    };
+
+    // 每页条数：输入框提交时生效。
+    // 用 change（失焦或回车才触发）而不是 input（每敲一个键触发）——
+    // 否则想输入「120」时，敲到「1」就已经按每页 1 条重查了一次，白白多打两次请求。
+    const box = el.querySelector('input[data-page="size"]');
+    if (box) {
+      const apply = () => {
+        const next = clampPageSize(box.value);
+        // 把夹紧后的值写回输入框，让用户看到自己输的 999 实际按 300 生效
+        box.value = String(next);
+        if (next === state.limit) return;   // 没变就不重查
+        state.limit = next;
+        state.offset = 0;   // 改变每页条数属于主动改变查询范围 → 回第 1 页
+        state.onGo();
+      };
+      box.onchange = apply;
+      box.onkeydown = ev => {
+        if (ev.key === 'Enter') { ev.preventDefault(); apply(); box.blur(); return; }
+        // 上下方向键增减一页条数：与原生 number 行为一致，但走同一条夹紧路径。
+        // 基准取**输入框当前值**而不是 state.limit —— state.limit 只在提交时更新，
+        // 若以它为基准，连按上键后按下键会从旧值回退（上到 31、再按下变成 29）。
+        if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+          ev.preventDefault();
+          box.value = String(clampPageSize(clampPageSize(box.value) + (ev.key === 'ArrowUp' ? 1 : -1)));
+        }
+      };
+    }
   }
 
   // ---------------------------------------------------------------- 日志

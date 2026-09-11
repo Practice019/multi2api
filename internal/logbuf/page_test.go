@@ -102,6 +102,53 @@ func TestSinkPageDefaultLimit(t *testing.T) {
 	}
 }
 
+// Page 的实现是「整体读出文件再切片」，limit 直接决定这次读的规模，
+// 因此上界必须在服务端兜住 —— 前端是数字框，但 curl 一个 limit=1e9 就能打进来。
+func TestSinkPageClampsLimitToMax(t *testing.T) {
+	s := newPagedSink(t, MaxPageSize+50) // 比上限多 50 条，确保「被夹紧」与「数据不够」可区分
+	for _, limit := range []int{MaxPageSize + 1, 1000, 1 << 20} {
+		items, total, err := s.Page(0, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(items) != MaxPageSize {
+			t.Errorf("limit=%d 本页=%d，期望夹到 %d", limit, len(items), MaxPageSize)
+		}
+		if total != MaxPageSize+50 {
+			t.Errorf("limit=%d total=%d，期望 %d（total 应报全量而非本页）", limit, total, MaxPageSize+50)
+		}
+	}
+}
+
+func TestSinkPageLimitExactlyMax(t *testing.T) {
+	s := newPagedSink(t, MaxPageSize+10)
+	items, _, err := s.Page(0, MaxPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 边界值本身合法，不应被夹紧成别的数（比如误写成 >= 导致减一）
+	if len(items) != MaxPageSize {
+		t.Errorf("limit=MaxPageSize 本页=%d，期望 %d", len(items), MaxPageSize)
+	}
+}
+
+func TestSinkPageClampedLimitStillPaginates(t *testing.T) {
+	s := newPagedSink(t, MaxPageSize+50)
+	// 即便 limit 被夹到上限，offset 仍应按原语义生效
+	items, _, err := s.Page(10, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != MaxPageSize {
+		t.Fatalf("本页=%d，期望 %d", len(items), MaxPageSize)
+	}
+	// 时间倒序、最新在前：第 1 条应是 seq 最大的那条
+	wantSeq := int64(MaxPageSize + 50 - 10)
+	if items[0].Seq != wantSeq {
+		t.Errorf("offset=10 时首条 seq=%d，期望 %d", items[0].Seq, wantSeq)
+	}
+}
+
 func TestSinkPageEmptyFile(t *testing.T) {
 	s, err := OpenSink(filepath.Join(t.TempDir(), "empty.jsonl"), 7, 0)
 	if err != nil {
