@@ -37,11 +37,22 @@ cd /d "%~dp0"
 REM Fail loudly if the expected files are missing, instead of letting
 REM the program print one easily-missed line and disappear.
 if not exist "config.json" goto no_config
-if not exist "bin\wb2api-server.exe" goto no_exe
+
+REM Locate the executable. Two layouts must both work:
+REM   A) Release package: wb2api-server.exe sits next to this file
+REM      (what users get from the GitHub Release zip - extract and run)
+REM   B) Source checkout: the binary is built into bin\ per the README
+REM Without this check the release package would tell downloaders to
+REM "go build it first", which is exactly what they cannot do.
+set "EXE="
+if exist "wb2api-server.exe" set "EXE=wb2api-server.exe"
+if not defined EXE if exist "bin\wb2api-server.exe" set "EXE=bin\wb2api-server.exe"
+if not defined EXE goto no_exe
 
 echo Starting workbuddy2api...
 echo   working directory: %CD%
 echo   config file:       %CD%\config.json
+echo   executable:        %CD%\%EXE%
 echo.
 echo   Close this window or press Ctrl+C to stop the gateway.
 echo.
@@ -49,7 +60,7 @@ echo.
 REM Pass arguments through unchanged. With no arguments this is
 REM equivalent to "-config config.json", which is already the
 REM program's own flag default.
-bin\wb2api-server.exe %*
+"%EXE%" %*
 
 REM Reaching here means the gateway exited. Keep the window open so
 REM the reason is readable - a double-clicked window would otherwise
@@ -72,10 +83,17 @@ exit /b 1
 
 :no_exe
 echo.
-echo [ERROR] bin\wb2api-server.exe not found.
+echo [ERROR] wb2api-server.exe not found.
 echo         working directory: %CD%
 echo.
-echo         Build it first from the repository root:
+echo         Looked in:
+echo           %CD%\wb2api-server.exe       (Release package layout)
+echo           %CD%\bin\wb2api-server.exe   (source checkout layout)
+echo.
+echo         If you downloaded a Release package, the .exe should sit
+echo         next to this file - re-extract the zip and keep them together.
+echo.
+echo         If you are running from a source checkout, build it first:
 echo           go build -o bin\wb2api-server.exe .\cmd\server
 echo.
 pause
