@@ -103,6 +103,40 @@ cp config.example.json config.json
 docker compose up -d --build
 ```
 
+### 3b. Windows 本机直接运行（不走 Docker）
+
+仓库根目录有一个 `start.bat`，**双击即可启动**：
+
+```bat
+start.bat
+```
+
+需要额外参数时（比如换一份配置）：
+
+```bat
+start.bat -config other.json
+```
+
+**为什么需要这个 bat，而不是直接双击 `bin\wb2api-server.exe`？**
+
+双击 exe 时，Windows 把「工作目录」设成 exe 所在的 `bin\`，而不是仓库根目录。于是：
+
+1. 程序按相对路径找 `config.json` → 找不到 → 直接退出（`open config.json: The system cannot find the file specified.`）
+2. 即使把 `config.json` 复制进 `bin\`，配置里的 `"./auths"`、`"./data"` 也会指向 `bin\auths`、`bin\data` —— **这不会报错**，而是以空账号池静默启动，比直接失败更难排查
+
+`start.bat` 第一件事就是 `cd /d "%~dp0"`（切到 bat 自身所在目录），因此无论从哪个目录双击，工作目录都稳定落在仓库根。脚本还会在启动前自检 `config.json` 与 `bin\wb2api-server.exe` 是否存在，缺失时给出明确提示而不是闪退。
+
+> **维护注意**：`start.bat` 必须保持**纯 ASCII**。`cmd.exe` 按系统 OEM 代码页（中文 Windows 为 936/GBK）解析 `.bat` 内容，UTF-8 的中文字节会被误解码并破坏语法（实测会报 `'json' is not recognized as an internal or external command`）。中文说明因此写在本文件里，不写进 bat。
+
+等价的命令行启动方式（等价于双击 `start.bat`）：
+
+```powershell
+cd D:\project_GIT\workbuddy2api
+.\bin\wb2api-server.exe -config config.json
+```
+
+其中 `-config config.json` 可以省略 —— 它本就是程序自身的 flag 默认值（见 `cmd/server/main.go`）；真正决定成败的是前面那句 `cd`。
+
 ### 4. 验证
 
 ```bash
@@ -618,6 +652,7 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 
 | 脚本 | 用途 |
 |---|---|
+| `./start.bat` | Windows：双击启动本机网关（修正工作目录，见「3b」） |
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
 | `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
