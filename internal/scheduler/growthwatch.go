@@ -350,18 +350,38 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 	// 每个 goroutine 只写自己的局部变量，最后统一合并进 snap，
 	// 因此不需要锁（snap 在本函数内独占，不与其它 goroutine 共享）。
 	var (
-		st  *upstream.StreakState
+		st    *upstream.StreakState
 		stErr error
-		e   *upstream.GrowthEnergy
-		q   *upstream.GrowthBuddyQuota
-		l   *upstream.GrowthLottery
+		e     *upstream.GrowthEnergy
+		q     *upstream.GrowthBuddyQuota
+		l     *upstream.GrowthLottery
 	)
 	var wg sync.WaitGroup
 	wg.Add(4)
-	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); st, stErr = s.cfg.Upstream.GrowthStreak(a) }()
-	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); e, _ = s.cfg.Upstream.GrowthEnergy(a) }()
-	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); q, _ = s.cfg.Upstream.GrowthBuddyQuota(a) }()
-	go func() { defer wg.Done(); s.probeSem.acquire(); defer s.probeSem.release(); l, _ = s.cfg.Upstream.GrowthLotteryChances(a) }()
+	go func() {
+		defer wg.Done()
+		s.probeSem.acquire()
+		defer s.probeSem.release()
+		st, stErr = s.cfg.Upstream.GrowthStreak(a)
+	}()
+	go func() {
+		defer wg.Done()
+		s.probeSem.acquire()
+		defer s.probeSem.release()
+		e, _ = s.cfg.Upstream.GrowthEnergy(a)
+	}()
+	go func() {
+		defer wg.Done()
+		s.probeSem.acquire()
+		defer s.probeSem.release()
+		q, _ = s.cfg.Upstream.GrowthBuddyQuota(a)
+	}()
+	go func() {
+		defer wg.Done()
+		s.probeSem.acquire()
+		defer s.probeSem.release()
+		l, _ = s.cfg.Upstream.GrowthLotteryChances(a)
+	}()
 	wg.Wait()
 
 	// 合并（顺序无关，各写各的字段）。

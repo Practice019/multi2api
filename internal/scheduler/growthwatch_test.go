@@ -33,9 +33,9 @@ type growthStub struct {
 	// 用于模拟上游真实行为 —— 领奖后任务状态从 completed 变 claimed，
 	// 从而可以验证「写操作后快照是否被就地刷新」。
 	tasksJSONAfterClaim atomic.Value
-	lastCodes                                                               atomic.Value // []string
-	lastTier, lastDate                                                      atomic.Value
-	lastOpenCount                                                           atomic.Int32
+	lastCodes           atomic.Value // []string
+	lastTier, lastDate  atomic.Value
+	lastOpenCount       atomic.Int32
 	// lastClaimCode 记录最后一次领奖请求里的 task_code（从 URL 路径解析）。
 	lastClaimCode atomic.Value
 

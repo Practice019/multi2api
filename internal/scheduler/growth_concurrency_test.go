@@ -24,10 +24,10 @@ import (
 
 // slowStub 每个请求睡 delay，并记录并发峰值。
 type slowStub struct {
-	delay   time.Duration
-	cur     atomic.Int32
-	peak    atomic.Int32
-	tasksN  atomic.Int32
+	delay  time.Duration
+	cur    atomic.Int32
+	peak   atomic.Int32
+	tasksN atomic.Int32
 }
 
 func (s *slowStub) handler() http.Handler {
@@ -72,9 +72,9 @@ func newSlowHarness(t *testing.T, n int, delay time.Duration) (*Scheduler, *slow
 	p := pool.New("")
 	for i := 0; i < n; i++ {
 		p.Add(&auth.Auth{
-			UID:          string(rune('a'+i)) + "-uid",
-			AccessToken:  "at", RefreshToken: "rt",
-			ExpiresAt:    9999999999, Nickname: "账号",
+			UID:         string(rune('a'+i)) + "-uid",
+			AccessToken: "at", RefreshToken: "rt",
+			ExpiresAt: 9999999999, Nickname: "账号",
 		})
 	}
 	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
@@ -83,8 +83,9 @@ func newSlowHarness(t *testing.T, n int, delay time.Duration) (*Scheduler, *slow
 }
 
 // TestRefreshGrowthIsConcurrent 4 个账号、每账号 5 个请求、每个 100ms：
-//   串行 = 4×5×100 = 2000ms
-//   并发 = 上限 5 时约 5×100×(4/5) ≈ 400ms（数量级差异足够判定）
+//
+//	串行 = 4×5×100 = 2000ms
+//	并发 = 上限 5 时约 5×100×(4/5) ≈ 400ms（数量级差异足够判定）
 func TestRefreshGrowthIsConcurrent(t *testing.T) {
 	const accounts = 4
 	const delay = 100 * time.Millisecond
@@ -94,7 +95,7 @@ func TestRefreshGrowthIsConcurrent(t *testing.T) {
 	s.RefreshGrowth(true, false)
 	elapsed := time.Since(t0)
 
-	serial := time.Duration(accounts*5) * delay   // 2000ms
+	serial := time.Duration(accounts*5) * delay // 2000ms
 	// 只要显著快于串行即可判定并发；给足余量避免 CI 抖动误报。
 	if elapsed > serial/2 {
 		t.Errorf("RefreshGrowth 耗时 %v，串行理论上限 %v；"+
