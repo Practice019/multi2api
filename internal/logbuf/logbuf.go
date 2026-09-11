@@ -17,6 +17,15 @@ import (
 const DefaultCapacity = 2000
 
 // Entry 一条请求日志（字段刻意扁平，便于直接 JSON 出去）。
+//
+// 关于 usage 派生字段（Credit/ThinkTokens/CacheHitTokens/CacheMissTokens）：
+//   - 它们全部来自上游 usage 对象，缺失/不可解析时一律写 0，**不使用 -1 哨兵**。
+//     只有 Tokens 保留 -1=「usage 缺失」的语义，新字段靠「Tokens<0 ⇒ 全为 0」
+//     间接表达缺失，避免每个字段各自引入一套哨兵值。
+//   - 历史行（写入本结构体新字段之前落盘的 ~1900 行）没有这些 JSON 键，
+//     反序列化后即为 Go 零值 0，读侧聚合无需做兼容分支。
+//   - 这些字段是按请求累加的量（credit 是消费额度、其余是 token 计数），
+//     永远不会是负数；解析层已保证非负。
 type Entry struct {
 	Seq     int64     `json:"seq"`
 	At      time.Time `json:"at"`
@@ -27,6 +36,11 @@ type Entry struct {
 	TTFBMS  int64     `json:"ttfb_ms"`
 	Tokens  int       `json:"tokens"` // -1 表示 usage 缺失
 	TotalMS int64     `json:"total_ms"`
+
+	Credit          float64 `json:"credit"`             // 本次请求实际消耗的额度
+	ThinkTokens     int     `json:"think_tokens"`       // 推理（思维链）token 数
+	CacheHitTokens  int     `json:"cache_hit_tokens"`   // 命中缓存的 prompt token
+	CacheMissTokens int     `json:"cache_miss_tokens"`  // 未命中缓存的 prompt token
 }
 
 // Ring 定长环形缓冲。零值不可用，必须经 New 构造。

@@ -387,6 +387,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			_ = upstream.Stream(w, stats)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
+			st.usage = stats.Usage()
 			rc.Close()
 			return
 		}
@@ -401,6 +402,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp)
+		st.usage = usageOf(resp)
 		return
 	}
 	msg := "all accounts unavailable (cooling/disabled)"

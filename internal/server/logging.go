@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/upstream"
 )
 
 // chatSeq 进程级请求序号（只用于 stdout 表格的 #%03d 显示）。
@@ -53,6 +54,11 @@ type chatStat struct {
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
 	status int
 
+	// usage 上游 usage 对象的原样引用（流式来自末帧，同步来自聚合响应）；
+	// nil 表示上游没给 usage。扩展字段（credit/推理/缓存）在落盘时现场解析，
+	// 刻意不在此处缓存解析结果：usage 只被引用、不复制，落盘是一次性的。
+	usage map[string]any
+
 	logged bool
 }
 
@@ -71,11 +77,11 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.status, s.toks)
+	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.status, s.toks, s.usage)
 }
 
-// chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
-// 并记录首个 data 帧的 TTFB；原始字节原样返回给下游透传。
+// chatStatsReader 在流式透传时抓取 SSE 末帧的 usage 精确值（completion_tokens
+// 及各扩展字段），并记录首个 data 帧的 TTFB；原始字节原样返回给下游透传。
 // 注意：不做 rune 估算，token 数一律采信上游 usage。
 type chatStatsReader struct {
 	br       *bufio.Reader
@@ -84,7 +90,8 @@ type chatStatsReader struct {
 	seen     bool // 已见过首个 data 帧（TTFB 只记一次）
 	hasUsage bool // 末帧是否带 usage
 	tokens   int
-	pend     []byte // 已读未返回的行缓存
+	usage    map[string]any // 末帧 usage 原样保留，供扩展字段解析
+	pend     []byte         // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -97,6 +104,10 @@ func (s *chatStatsReader) TTFB() time.Duration { return s.ttfb }
 
 // Tokens 返回末帧 usage.completion_tokens 与是否缺失；无 usage 时 ok=false。
 func (s *chatStatsReader) Tokens() (int, bool) { return s.tokens, s.hasUsage }
+
+// Usage 返回末帧 usage 对象的原样引用（无 usage 时为 nil）。
+// 返回的是 map 引用而非副本：调用方只读，且请求结束后该对象不再被写入。
+func (s *chatStatsReader) Usage() map[string]any { return s.usage }
 
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
 func (s *chatStatsReader) parseSSELine(line string) {
@@ -113,15 +124,17 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		s.ttfb = time.Since(s.start)
 	}
 	var chunk struct {
-		Usage *struct {
-			CompletionTokens int `json:"completion_tokens"`
-		} `json:"usage"`
+		Usage map[string]any `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
 		return
 	}
 	s.hasUsage = true
-	s.tokens = chunk.Usage.CompletionTokens
+	s.usage = chunk.Usage
+	// completion_tokens 缺失时保持 0（与原有「末帧 usage 覆盖前值」的行为一致）。
+	// 用 upstream.UsageInt 而不是裸 float64 断言：与 completionTokens 同因 ——
+	// 该值门控着扩展字段，不该因为"数字被字符串化"就把 credit 一起丢掉。
+	s.tokens = upstream.UsageInt(chunk.Usage["completion_tokens"])
 }
 
 // Read 返回原始数据，同时解析统计 TTFB/token。
@@ -154,16 +167,28 @@ func parseModelFromBody(body []byte) string {
 }
 
 // completionTokens 从 Aggregate 返回的响应中提取 usage.completion_tokens；缺失返回 -1。
+//
+// 用 upstream.UsageInt 而不是直接断言 float64：这个返回值是**哨兵**（-1 表示
+// usage 缺失），而它同时**门控**着 credit/推理/缓存三个新字段的落盘
+// （见 logChatRow）。若只认 float64，上游一旦把 completion_tokens 字符串化，
+// 就会连"能读的 credit"一起被丢掉 —— 解析器比它旁边的提取器宽容，这里对齐。
+// 真正的"缺 usage"仍返回 -1，哨兵语义不变。
 func completionTokens(resp map[string]any) int {
 	u, ok := resp["usage"].(map[string]any)
 	if !ok {
 		return -1
 	}
-	v, ok := u["completion_tokens"].(float64)
+	v, ok := u["completion_tokens"]
 	if !ok {
 		return -1
 	}
-	return int(v)
+	return upstream.UsageInt(v)
+}
+
+// usageOf 从 Aggregate 返回的响应中取 usage 对象；缺失返回 nil。
+func usageOf(resp map[string]any) map[string]any {
+	u, _ := resp["usage"].(map[string]any)
+	return u
 }
 
 // uidPrefix 只显示 uid 前 8 位；空 uid 显示 "-"。
@@ -179,14 +204,18 @@ func uidPrefix(uid string) string {
 
 // logChatRow 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
 // toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int) {
+//
+// usage 为上游 usage 对象（nil = 缺失）。扩展字段（credit/推理 token/缓存命中未命中）
+// 由此处解析并写入环形缓冲：**只有 toks>=0（usage 存在）时才填**，
+// usage 缺失时保持 0 而不是 -1 —— 新字段没有哨兵语义，-1 会污染后续求和聚合。
+func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int, usage map[string]any) {
 	if !chatLogEnabled {
 		return
 	}
 	seq := chatSeq.Add(1)
 	// 同时进环形缓冲（/admin/logs 的数据源）。这里用完整 model/uid，
 	// 截断只影响 stdout 表格的排版，不应污染可供追溯的结构化数据。
-	chatLogRing.Push(logbuf.Entry{
+	entry := logbuf.Entry{
 		At:      time.Now(),
 		Model:   model,
 		Mode:    mode,
@@ -195,7 +224,17 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 		TTFBMS:  ttfb.Milliseconds(),
 		Tokens:  toks,
 		TotalMS: total.Milliseconds(),
-	})
+	}
+	// tokens<0 是「usage 缺失」的哨兵；此时 usage 对象即使非 nil 也不可信
+	// （例如上游给了半截 usage），扩展字段一律留 0。
+	if toks >= 0 {
+		x := upstream.ParseUsageExtras(usage)
+		entry.Credit = x.Credit
+		entry.ThinkTokens = x.ThinkTokens
+		entry.CacheHitTokens = x.CacheHitTokens
+		entry.CacheMissTokens = x.CacheMissTokens
+	}
+	chatLogRing.Push(entry)
 	if len(model) > 11 {
 		model = model[:11]
 	}
