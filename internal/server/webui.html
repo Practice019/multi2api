@@ -299,6 +299,30 @@
     background:color-mix(in srgb,var(--dim) 14%,transparent);color:var(--dim);font-size:11px}
   .chip .mult.free{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
   .chip .mult.hi{color:var(--warn);background:color-mix(in srgb,var(--warn) 17%,transparent)}
+  /* 「上游未提供倍率」：用虚线边框而不是实底 —— 它是"信息缺失"，
+     不该与「免费」（有意义的事实）长得一样。 */
+  .chip .mult.unknown{border:1px dashed var(--line);background:transparent;color:var(--dim)}
+
+  /* ---- 模型面板的上游分组（T5）----
+     视觉语言与导航分组（.navgrouphd）保持一致：同一个控制台里
+     "可折叠的分组头"应该只有一种样子。 */
+  .mgroup{margin-bottom:14px}
+  .mgroup:last-child{margin-bottom:0}
+  .mgrouphead{display:flex;align-items:center;gap:7px;width:100%;
+    padding:5px 8px;background:transparent;border:0;border-radius:6px;
+    font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--dim);
+    text-transform:uppercase;cursor:pointer;font-family:inherit;text-align:left}
+  .mgrouphead:hover{color:var(--fg);background:var(--panel2)}
+  /* 折叠三角：与 .navgrouphd::before 同一套画法（border 画三角） */
+  .mcaret{width:0;height:0;flex:none;
+    border-left:4px solid currentColor;border-top:3.5px solid transparent;
+    border-bottom:3.5px solid transparent;transition:transform .15s}
+  .mgroup.collapsed .mcaret{transform:rotate(-90deg)}
+  /* 折叠时隐藏 chip 区。用 display:none 而不是 height:0 —— 
+     不需要动画，且避免 height 过渡在长列表上的重排开销。 */
+  .mgroup.collapsed .chips{display:none}
+  .mowner{color:var(--fg);text-transform:none;letter-spacing:0}
+  .mcount2{font-weight:400;font-size:10.5px;text-transform:none;letter-spacing:0}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
   textarea{width:100%;min-height:74px;resize:vertical;font-family:var(--mono);font-size:13px}
   .key{flex:1;min-width:230px;font-family:var(--mono);font-size:12px}
@@ -3234,6 +3258,9 @@ let loginProvider = '';
   // 复用 buildNav 已有的读写范式（'wb2api.panel'）：try/catch 包住，
   // 隐私模式下 localStorage 抛异常时静默回落默认值，不影响功能。
   const LS_PAGESIZE = 'wb2api.pagesize';
+  // 模型分组折叠状态（T5）。每个上游一个键，值是 '1'/'0'。
+  // 与 pagesize 同一个模式：这是用户偏好，刷新与切面板都该保持。
+  const LS_MODELGROUP = 'wb2api.modelgroup';
 
   function loadPageSize() {
     try {
@@ -3946,6 +3973,11 @@ let loginProvider = '';
   // 往里塞自定义字段会污染公共契约；倍率只对本管理界面有意义，走 admin 面。
   // 取不到时索引为空 —— 模型列表照常显示，只是没有倍率标记（不能整块失败）。
   let modelMultipliers = {};
+// multCatalogFailed：倍率目录**整体**没拿到。
+// 必须与「这个模型没倍率」区分 —— 否则用户看到满屏"无"会以为
+// 上游真的没配倍率，而真相是目录接口挂了（静默失败）。
+// 见 multTag 与 renderModelCatalogWarning 的注释。
+let multCatalogFailed = false;
 
   async function loadModelMultipliers() {
     try {
@@ -3956,9 +3988,27 @@ let loginProvider = '';
         if (m && m.model) next[m.model] = Number(m.multiplier) || 0;
       }
       modelMultipliers = next;
+      multCatalogFailed = false;
     } catch {
-      modelMultipliers = {};   // 拿不到就退化为"不显示倍率"
+      // ⚠ 失败与"这个模型没倍率"必须可区分（否则是静默失败）。
+      // 空表 + 标记 → 面板顶部给提示，chip 上**不**逐个写 x无。
+      modelMultipliers = {};
+      multCatalogFailed = true;
+      renderModelCatalogWarning();
     }
+  }
+
+  // renderModelCatalogWarning 倍率目录整体拿不到时的面板级提示。
+  //
+  // 为什么要单独提示：`modelMultipliers` 失败后是空表，若不提示，
+  // 界面上"所有模型都没倍率"看起来就像上游真的没配倍率 ——
+  // 用户不会想到是目录接口挂了。这是本项目反复出现的"静默失败"形态。
+  function renderModelCatalogWarning() {
+    const host = $('mcount');
+    if (!host) return;
+    if (!multCatalogFailed) return;
+    host.innerHTML = '<span class="err" title="GET /admin/models/preview 请求失败，'
+      + '所以看不到任何倍率 —— 不是上游没配">倍率目录未加载（点「强制刷新目录」重试）</span>';
   }
 
   // 把倍率数值格式化成展示文本；非法值返回 null（调用方据此不加标记）。
@@ -3977,7 +4027,25 @@ let loginProvider = '';
   // 倍率标记：有系数才加，且 0 也要显示（免费是有效信息）。
   // 系数未知（目录里没这个模型）时不加后缀，避免用「x0」把"不知道"说成"免费"。
   function multTag(id) {
-    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
+    // 用户要求：倍率表里没有的模型显示 `x无`。
+    //
+    // ⚠ 但要区分**三种"没有"**，它们不该长一样：
+    //
+    //   1. 倍率表里有            → `x0.29`
+    //   2. 表里没有这个模型       → `x无`      （本分支，用户要求）
+    //   3. **倍率表整体没加载**   → 不显示 `x无`，改为面板级提示
+    //
+    // 第 3 种是"静默失败"的典型场景：`loadModelMultipliers` 失败时把
+    // `modelMultipliers` 清空，若不区分，用户会以为**所有**模型都没有倍率，
+    // 而真相是目录挂了。这种情况由 multCatalogFailed 标记，在面板顶部提示。
+    //
+    // 用"无"而不是留空：留空与"倍率恰好是 0 但没渲染"无法区分；
+    // 显式写"无"是把不确定性**显示出来**，而不是藏起来。
+    // 渲染成 `x无`（小写 x）与其它 15 个同形 —— 视觉一致比照搬输入字符重要。
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) {
+      if (multCatalogFailed) return '';   // 目录整体失败 → 不给每个 chip 都挂"无"
+      return '<span class="mult unknown" title="上游未提供该模型的倍率">x无</span>';
+    }
     const txt = multText(modelMultipliers[id]);
     if (txt === null) return '';   // 脏数据 → 当作没有系数，而不是显示 xNaN
     const v = modelMultipliers[id];
@@ -3991,14 +4059,93 @@ let loginProvider = '';
     models = list || [];
     $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
     if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
-    // 只显示模型名 + 倍率，不再显示 context_length ——
-    // ctx 数字对"选哪个模型"没有帮助，反而把名字挤得难读；倍率才是决策依据。
-    $('models').innerHTML = models.map(m =>
-      `<span class="chip" data-id="${esc(m.id)}">${esc(m.id)}${multTag(m.id)}</span>`).join('');
+
+    // 按上游分组渲染（T5）。三件事一起做：
+    //   1. **去重**：`/v1/models` 同时给裸名与 `provider/name` 两种写法，
+    //      同一个模型会出现两次（实测 32 条 = 16 个模型 × 2 种写法）。
+    //      对外 API 两种都要保留（`provider/model` 是显式指定上游用的），
+    //      但**界面上不该重复展示**。
+    //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
+    //   3. **可折叠**：状态存 localStorage，刷新后保持。
+    const groups = groupModelsByOwner(models);
+    $('models').innerHTML = groups.map(renderModelGroup).join('');
+
     const sel = $('model'), keep = sel.value;
     sel.innerHTML = models.map(m =>
       `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
     sel.value = models.some(m => m.id === keep) ? keep : (models.find(m => m.id === 'auto') || models[0]).id;
+  }
+
+  // groupModelsByOwner 把模型列表按上游归组并去重。
+  //
+  // 规则（去重与分组是同一个动作）：
+  //   · `provider/name` 里的 provider 就是归属；**显示时去掉前缀**
+  //   · 裸名用 `owned_by` 作归属
+  //   · 同一组内按**去前缀后的名字**去重
+  //
+  // 这样 `auto` 与 `workbuddy/auto` 合成一条；将来两个上游各有
+  // `xxx/glm-5.2` 时，它们分别在各自组里各留一条（不会互相吃掉）。
+  //
+  // 为什么不用 `owned_by` 直接分组了事：`owned_by` 对带前缀的条目
+  // 也是同一个值，但**id 不同**（`glm-5.2` vs `workbuddy/glm-5.2`），
+  // 不去前缀就还是会显示两条。
+  function groupModelsByOwner(list) {
+    const byOwner = new Map();
+    for (const m of list) {
+      if (!m || !m.id) continue;
+      const slash = m.id.indexOf('/');
+      const prefix = slash > 0 ? m.id.slice(0, slash) : '';
+      const bare = slash > 0 ? m.id.slice(slash + 1) : m.id;
+      // 归属：前缀优先（它就是显式指定的上游），否则用 owned_by。
+      const owner = prefix || m.owned_by || '（未标注）';
+      if (!byOwner.has(owner)) byOwner.set(owner, { owner: owner, items: [], seen: new Set() });
+      const g = byOwner.get(owner);
+      if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
+      g.seen.add(bare);
+      // 展示用 id 取**裸名**；multTag 查表也用裸名（倍率表的键是裸名）。
+      g.items.push({ id: bare, fullId: m.id, owner: owner });
+    }
+    // 组间按上游名排序；组内按名字排序（顺序稳定，便于扫读）。
+    const out = Array.from(byOwner.values());
+    out.sort((a, b) => (a.owner < b.owner ? -1 : a.owner > b.owner ? 1 : 0));
+    out.forEach(g => g.items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
+    return out;
+  }
+
+  // renderModelGroup 一个上游分组的可折叠块。
+  //
+  // 折叠状态存 localStorage（键含上游名）—— 与 pagesize 同一个模式：
+  // 这是用户偏好，刷新与切面板都该保持。
+  function renderModelGroup(g) {
+    const open = modelGroupOpen(g.owner);
+    // 分组标题带**模型数**（不是账号数）—— 与导航里的 navgcount 区分开：
+    // 那个是账号数。这里写清楚"个模型"，避免两个数字被当成同一件事。
+    return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
+      <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
+              aria-expanded="${open ? 'true' : 'false'}"
+              title="${esc(g.owner)} · ${g.items.length} 个模型（点标题折叠/展开）">
+        <span class="mcaret"></span>
+        <span class="mowner">${esc(g.owner)}</span>
+        <span class="mcount2">${g.items.length} 个模型</span>
+      </button>
+      <div class="chips">${g.items.map(m =>
+        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
+        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>
+    </div>`;
+  }
+
+  // modelGroupOpen 读折叠状态。未知时**默认展开** ——
+  // 首次打开就全部收起会让"这个面板有什么"看不见，比展开更糟。
+  function modelGroupOpen(owner) {
+    const key = LS_MODELGROUP + '.' + owner;
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? true : v === '1';
+    } catch { return true; }   // 隐私模式：默认展开
+  }
+
+  function setModelGroupOpen(owner, open) {
+    try { localStorage.setItem(LS_MODELGROUP + '.' + owner, open ? '1' : '0'); } catch { /* 隐私模式 */ }
   }
 
   // <option> 只能放纯文本，不能放 HTML 标签 —— 倍率用括号包起来。
@@ -4286,6 +4433,21 @@ let loginProvider = '';
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
     $('models').addEventListener('click', e => {
+      // 分组头（T5）：切换折叠，**不**选中模型。
+      // 必须放在 chip 判断之前 —— 分组头与 chip 是兄弟节点，
+      // 但分组头自身也可能被 closest('.chip') 误命中（若将来嵌套）。
+      const hd = e.target.closest('button[data-mtoggle]');
+      if (hd) {
+        const owner = hd.dataset.mtoggle;
+        const next = !modelGroupOpen(owner);
+        setModelGroupOpen(owner, next);
+        // 只切这一个分组的 class，不整块重绘 ——
+        // 重绘会丢失当前滚动位置与已选中的 chip 高亮。
+        const box = hd.closest('.mgroup');
+        if (box) box.classList.toggle('collapsed', !next);
+        hd.setAttribute('aria-expanded', next ? 'true' : 'false');
+        return;
+      }
       const c = e.target.closest('.chip'); if (c) $('model').value = c.dataset.id;
     });
     $('auto').onchange = () => {

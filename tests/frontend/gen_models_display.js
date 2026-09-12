@@ -34,6 +34,12 @@ const pieces = [
   grab('function multText('),
   grab('function multTag('),
   grab('function multTagPlain('),
+  // T5 新增的三个：renderModels 现在按上游分组渲染，依赖它们。
+  // 漏一个就会在产物里报 `xxx is not defined` —— 抽取是**按名字**取的，
+  // 新增被 renderModels 调用的函数时必须同步加进来。
+  grab('function groupModelsByOwner('),
+  grab('function renderModelGroup('),
+  grab('function modelGroupOpen('),
   grab('function renderModels('),
 ];
 
@@ -47,6 +53,25 @@ const $ = id => els[id] || (els[id] = mkEl(id));
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let modelMultipliers = {};
 let models = [];
+
+// ---- T5 依赖：折叠状态与目录失败标记 ----
+//
+// 这几个都**从源码实读**，不硬编码 —— 本文件的教训：
+// 装置抄了被测对象的常量就等于没测它（原 PAGE_SIZE 就是这么被抄坏的）。
+// LS_MODELGROUP 用正则从 webui.html 取；取不到就抛错（抽取失败必须响亮）。
+const lsKeyMatch = /const\\s+LS_MODELGROUP\\s*=\\s*'([^']+)'/.exec(html);
+if (!lsKeyMatch) throw new Error('源码里找不到 LS_MODELGROUP —— 抽取失败，测试装置失效');
+const LS_MODELGROUP = lsKeyMatch[1];
+let multCatalogFailed = false;
+
+// localStorage 假实现（内存 Map）—— 折叠状态要走真实的读写往返，
+// 用打桩常量验证不了"存进去再读回来还是同一个值"。
+const __lsMap = new Map();
+const localStorage = {
+  getItem: k => (__lsMap.has(k) ? __lsMap.get(k) : null),
+  setItem: (k, v) => { __lsMap.set(k, String(v)); },
+  removeItem: k => { __lsMap.delete(k); },
+};
 `;
 
 const tail = String.raw`
@@ -94,24 +119,45 @@ ok(/class="mult hi"[^>]*>x1\.62</.test(c2), '高倍率（>=1）带 hi 类');
 ok(/class="mult"[^>]*>x0\.51</.test(c2), '中间倍率用中性样式');
 ok(c2.includes('每次调用消耗'), '带 title 说明，不靠颜色单独表意');
 
-// ---------- 4. 未知系数不伪装成免费 ----------
-console.log('\n[4] 系数未知时不加后缀');
+// ---------- 4. 未知系数显示「无」，而不是伪装成免费 ----------
+//
+// ⚠ 这一节的判据在 T6 变了，但**原始意图没变** ——
+// 原来写的是"没系数就不加后缀"，理由是"别把不知道说成 x0（免费）"。
+// 用户要求改为显式显示 x无 —— 那比"留空"**更贴合原意图**：
+//   · 留空     → 用户分不清"这个模型没倍率"与"倍率没渲染出来"
+//   · x无    → 明确说"上游没给"
+// 所以这里断言 x无，并且仍然断言**不出现 x0**（那才是"伪装成免费"）。
+console.log('\n[4] 系数未知时显示「无」（不伪装成免费）');
 modelMultipliers = { 'deepseek-v4-pro': 0.51 };   // 其余没有系数
 renderModels(LIST.map(x => ({ ...x })));
 const c4 = $('models').innerHTML;
-const chips4 = c4.split('</span>').filter(x => x.includes('chip'));
-ok(!/\bauto\b[^<]*x0\b/.test(c4), 'auto 无系数时不该显示 x0（会把"不知道"说成"免费"）');
-ok(c4.includes('deepseek-v4-pro') && c4.includes('x0.51'), '有系数的仍显示');
-ok((c4.match(/class="mult/g) || []).length === 1, '只有 1 个模型带倍率标记');
+ok(!/\bauto\b[^<]*x0(?!\.)|\bauto[^<]*>x0</.test(c4), 'auto 无系数时不该显示 x0（会把"不知道"说成"免费"）');
+ok(c4.includes('deepseek-v4-pro') && c4.includes('x0.51'), '有系数的仍显示真实倍率');
+ok(/x无/.test(c4), '没有系数的显示 x无（用户要求：显式说出"未知"）');
+ok(/class="mult unknown"/.test(c4), 'x无 用 unknown 样式类（虚线边框，与 free 的实底可区分）');
+ok((c4.match(/x无/g) || []).length > 1, '不止一个模型拿到 x无（说明是普遍回落，不是特例）');
 
 // ---------- 5. 倍率整体取不到时列表照常渲染 ----------
-console.log('\n[5] 倍率取不到时降级');
+//
+// ⚠ 与第 4 节的**关键区别**：这里是"目录接口失败"（multCatalogFailed=true），
+// 那时**不该**给每个 chip 都挂 x无 —— 否则用户会以为上游真的没配倍率。
+// 这是本项目的"静默失败"形态：两种情况必须可区分。
+console.log('\n[5] 倍率**整体**取不到时降级（与"单个模型没倍率"区分）');
 modelMultipliers = {};
+multCatalogFailed = true;        // 目录接口失败
 renderModels(LIST.map(x => ({ ...x })));
 const c5 = $('models').innerHTML;
-ok(LIST.every(m => c5.includes('esc')===false && c5.includes(m.id)), '所有模型名照常显示');
-ok(!/x\d/.test(c5), '没有任何倍率标记');
+ok(LIST.every(m => c5.includes(m.id)), '所有模型名照常显示');
+ok(!/x无/.test(c5), '**不**给每个 chip 都挂 x无（那会让人以为上游真没配倍率）');
+ok(!/x\d/.test(c5), '没有任何倍率数字');
 ok(!/undefined|NaN/.test(c5), '不出现 undefined/NaN');
+
+// 目录恢复后，未知系数重新显示 x无
+console.log('\n[5b] 目录恢复后回到 x无');
+multCatalogFailed = false;
+modelMultipliers = {};
+renderModels(LIST.map(x => ({ ...x })));
+ok(/x无/.test($('models').innerHTML), '目录正常但该模型没系数 → 显示 x无');
 
 // ---------- 6. 边界：空列表 / 缺字段 ----------
 console.log('\n[6] 边界');
