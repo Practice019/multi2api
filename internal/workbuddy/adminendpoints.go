@@ -78,12 +78,29 @@ const statusOK = checkinlog.StatusOK
 // 账号池 / 凭证
 // ---------------------------------------------------------------------------
 
-// accountList 账号池的账号列表（池未接线时为空）。
+// accountList 本上游的账号列表（池未接线时为空）。
+//
+// # 这个函数曾经返回整个账号池，那是个真 bug
+//
+// 原先写的是 `return h.p.cfg.Pool.List()`。单上游时代它与"本上游的账号"
+// 是同一批，看不出问题；账号池变成多上游共用之后，它把 codearts 的账号
+// 也一并交了出去（实测：/admin/travel 与 /admin/growth 各多出一行
+// 01a08fe0，而 /admin/accounts 里只有 3 个 workbuddy 账号）。
+//
+// 为什么不能靠"调用方自己再过滤一遍"来修：本函数有 7 个调用点
+// （签到/保活/额度刷新/旅行列表/全量派猫/全量领奖/成长列表/全量成长动作），
+// 靠每个调用点各自记得过滤，就是把这个不变式复制 7 份 —— 早晚漏一份，
+// 而且漏了不会报错，只会安静地多跑几个别家的账号。
+// 过滤收敛在这一处，才只需要正确一次。
+//
+// 「归本上游」的判据收敛在 Provider.ownAccounts 一处（见那里的注释）：
+// 调度器的 6 个全量路径与这里用的是**同一份**判据，
+// 不会出现"面板修好了、后台还在跑别人的账号"这种半修状态。
 func (h *AdminHandler) accountList() []Account {
-	if h.p == nil || h.p.cfg.Pool == nil {
+	if h.p == nil {
 		return nil
 	}
-	return h.p.cfg.Pool.List()
+	return h.p.ownAccounts()
 }
 
 // authOf 取账号凭证（池未接线时返回 nil）。

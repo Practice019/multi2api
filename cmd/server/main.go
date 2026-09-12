@@ -138,9 +138,12 @@ func main() {
 	registry := gateway.NewRegistry()
 	wb := workbuddy.NewWithConfig(workbuddy.Config{
 		// 账号池经适配器传入：上游包不得依赖 internal/pool（架构约束），
-		// 它只声明自己需要的六个方法。
+		// 它只声明自己需要的几个方法。
 		Pool: poolAdapter{p: p},
-		Log:  checkinLog,
+		// 本上游在池里的归属标识：管理端点据此只列自己的账号
+		// （见 workbuddy.accountList）。与 ID() 同源，避免两处漂移。
+		Provider: workbuddy.ProviderID,
+		Log:      checkinLog,
 
 		TravelAutoClaimDisabled: !cfg.TravelAutoClaim,
 		TravelWatchInterval:     cfg.TravelWatchInterval,

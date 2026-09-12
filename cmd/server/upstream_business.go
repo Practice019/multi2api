@@ -327,12 +327,33 @@ var _ workbuddy.ClientLoginManager = clientLoginAdapter{}
 
 // poolAdapter 把 *pool.Pool 适配成 workbuddy.AccountPool。
 //
-// 只有 List 需要转换（pool.Status → workbuddy.Account）；其余方法签名完全一致，
-// 直接转发。放在 cmd/server 是因为这里是唯一同时认识两侧的地方。
+// 只有两个 List 需要转换（pool.Status → workbuddy.Account）；其余方法签名
+// 完全一致，直接转发。放在 cmd/server 是因为这里是唯一同时认识两侧的地方。
 type poolAdapter struct{ p *pool.Pool }
 
+// List 全池账号。
+//
+// ⚠ 上游的业务端点不得用它遍历"本上游的账号" —— 它含别家上游的号。
+// workbuddy 侧已把归属过滤收敛在 accountList() 一处（见那里的注释），
+// 这里保留全池语义是为了不改变这个方法的既有含义。
 func (a poolAdapter) List() []workbuddy.Account {
-	src := a.p.List()
+	return toWorkbuddyAccounts(a.p.List())
+}
+
+// ListFor 指定上游的账号。
+//
+// 直接转发 pool.ListFor：**归一规则留在池内**（未打标签的账号按默认上游
+// 解释）。适配器若自己做字符串比较，就得在装配层再复刻一遍那条规则，
+// 两处不一致时表现为"某个上游的面板整片空白"，且不报错。
+func (a poolAdapter) ListFor(provider string) []workbuddy.Account {
+	return toWorkbuddyAccounts(a.p.ListFor(provider))
+}
+
+// toWorkbuddyAccounts 把 pool.Status 逐字段投影成上游认识的窄视图。
+//
+// 投影刻意只带本包真正读的四个字段（见 workbuddy.Account）：
+// 上游包不依赖 pool，核心的凭证/配额细节也不该泄漏过去。
+func toWorkbuddyAccounts(src []pool.Status) []workbuddy.Account {
 	out := make([]workbuddy.Account, 0, len(src))
 	for _, st := range src {
 		out = append(out, workbuddy.Account{

@@ -114,14 +114,31 @@ func (p *Provider) SetTravelAutoClaim(on bool) {
 }
 
 // TravelSnapshots 返回当前缓存快照（按 uid 排序）；不触发任何上游请求。
+//
+// # 为什么这里也要按归属过滤（而不是只靠 RefreshTravel 不产生脏快照）
+//
+// 快照 map 是**只写不删**的（全文件没有一处 delete），而 probeTravel
+// 可以由**任意 uid** 经单账号端点直接进入（TravelDepartFor / TravelClaimFor
+// 都只校验"池里有凭证"，不校验归属）。于是只要别家上游的 uid 曾经进来过一次，
+// 它就会**永久**留在这个 map 里 —— 刷新界面对它无效，因为补空行那条路径
+// （accountList）已经修好了，脏数据是从**快照**里出来的。
+//
+// 判据与 accountList 一致：出口处收口。快照留在 map 里无害，
+// 只要它不再出去（也不再驱动 anyDue 的控制流，见那里的注释）。
 func (p *Provider) TravelSnapshots() []TravelSnapshot {
 	if p.travel == nil {
 		return nil
 	}
+	// 归属判据来自账号池。池未接线时（ownAccounts 返回 nil）不过滤 ——
+	// 那对应"没有池"的部署，快照本来也不可能存在。
+	own := p.ownUIDs()
 	p.travel.mu.Lock()
 	defer p.travel.mu.Unlock()
 	out := make([]TravelSnapshot, 0, len(p.travel.snapshots))
 	for _, v := range p.travel.snapshots {
+		if own != nil && !own[v.UID] {
+			continue
+		}
 		// 冷却剩余时间随时间变化，读取时重算，避免展示滞后的秒数。
 		if v.State == travelStateTraveling && v.ArriveAt > 0 {
 			at := time.Unix(v.ArriveAt, 0)
@@ -244,25 +261,36 @@ func (p *Provider) IsDue(uid string, now time.Time) bool {
 // 被反复打扰（实测这会明显抬高上游请求量）。所以把判断交给上游自己。
 //
 // 无快照（首次）视为到期：启动时要先全量扫一趟把缓存填满。
+//
+// # 为什么遍历 ownAccounts() 而不是 snapshots map
+//
+// 原先遍历 snapshots。那让"快照里恰好有什么"变成了**控制流判据**：
+// 快照 map 只写不删，而探测可由任意 uid 经单账号端点进入，于是
+// 一个别家上游的 uid 一旦留下快照，就会让守卫轮**永久**认为"有账号到期"
+// 而被反复唤醒（空转上游请求）。把判据换回"本上游的账号"之后，
+// 快照重新只是**数据**，不再能驱动调度。
+//
+// 首扫语义保持不变：本上游**有账号但无快照**时走到 !ok 分支仍返回 true，
+// 与原先"两 map 皆空则 true"的效果一致（有测试钉住）。
 func (p *Provider) anyDue(now time.Time) bool {
 	if p.travel == nil {
 		return false
 	}
-	p.travel.mu.Lock()
-	if len(p.travel.due) == 0 && len(p.travel.snapshots) == 0 {
-		p.travel.mu.Unlock()
-		return true
+	// 先取本上游账号（在锁外调用 ownAccounts，避免持 travel 锁去读账号池）。
+	accs := p.ownAccounts()
+	if len(accs) == 0 {
+		// 没有本上游的账号：无守卫轮可言。与"池未接线"一致。
+		return false
 	}
-	due := false
-	for uid := range p.travel.snapshots {
-		at, ok := p.travel.due[uid]
+	p.travel.mu.Lock()
+	defer p.travel.mu.Unlock()
+	for _, a := range accs {
+		at, ok := p.travel.due[a.UID]
 		if !ok || !now.Before(at) {
-			due = true
-			break
+			return true
 		}
 	}
-	p.travel.mu.Unlock()
-	return due
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +393,9 @@ func (p *Provider) recordTravel(uid string, res TravelActionResult, trigger stri
 // autoClaim 为真且发现已到站时立即领奖。返回扫描后的全量快照。
 func (p *Provider) RefreshTravel(force, autoClaim bool) []TravelSnapshot {
 	now := time.Now()
-	for _, st := range p.cfg.Pool.List() {
+	// 只扫本上游的号：给别家上游的账号建快照毫无意义（它的凭证打不通
+	// workbuddy 的旅行接口），还会把那些号塞进本上游的面板。
+	for _, st := range p.ownAccounts() {
 		if st.Disabled {
 			continue
 		}

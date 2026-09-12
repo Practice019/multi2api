@@ -132,11 +132,12 @@ func (p *Provider) RunSlotFor(name, uid, trigger string) (CheckinOutcome, bool) 
 // 搭车的旅行守卫需要看到本轮刚被解冻的账号，晚跑才能覆盖到它们。
 // 钩子的触发由核心负责（scheduler.RunSlot 在本方法之后统一喊），
 // 所以这里只管账号本身。
+//
+// ⚠ 账号集必须来自 ownAccounts（本上游）而不是 Pool.List（全池）：
+// 这里正是"自动调度给别家上游账号跑签到"的那条路径 ——
+// 池是全上游共用的，遍历全池会让本上游的任务作用在 codearts 的号上。
 func (p *Provider) RunCheckinAll(trigger string) {
-	if p.cfg.Pool == nil {
-		return
-	}
-	for _, st := range p.cfg.Pool.List() {
+	for _, st := range p.ownAccounts() {
 		if st.Disabled {
 			continue
 		}
@@ -229,11 +230,11 @@ func isAlreadyCheckin(msg string) bool {
 // ---------------------------------------------------------------------------
 
 // RunKeepaliveAll 全量 token 保活；trigger 为 "schedule" 或 "manual"。
+//
+// ⚠ 同 RunCheckinAll：账号集必须按上游取。这里也是调度路径 ——
+// 实测那批"别家上游账号被 schedule 触发"的记录里，保活占 110 条。
 func (p *Provider) RunKeepaliveAll(trigger string) {
-	if p.cfg.Pool == nil {
-		return
-	}
-	for _, st := range p.cfg.Pool.List() {
+	for _, st := range p.ownAccounts() {
 		if st.Disabled {
 			continue
 		}

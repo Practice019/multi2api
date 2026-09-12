@@ -238,14 +238,21 @@ func (p *Provider) GrowthWatchInterval() time.Duration {
 }
 
 // GrowthSnapshots 返回缓存快照（按 uid 排序），不发上游请求。
+//
+// 与 TravelSnapshots 同理：快照 map 只写不删，而探测可由任意 uid 经
+// 单账号端点进入，所以必须在**出口**按归属过滤，否则一条脏快照永久可见。
 func (p *Provider) GrowthSnapshots() []GrowthSnapshot {
 	if p.growth == nil {
 		return nil
 	}
+	own := p.ownUIDs()
 	p.growth.mu.Lock()
 	defer p.growth.mu.Unlock()
 	out := make([]GrowthSnapshot, 0, len(p.growth.snapshots))
 	for _, v := range p.growth.snapshots {
+		if own != nil && !own[v.UID] {
+			continue
+		}
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
@@ -1013,8 +1020,10 @@ func (p *Provider) RefreshGrowth(force bool, autoActions bool) []GrowthSnapshot 
 	now := time.Now()
 
 	// 先挑出本轮要处理的账号（纯读 + 只读 growthDue，不涉及网络）。
+	// 只挑本上游的号：成长中心是 workbuddy 专属能力，别家上游的账号
+	// 既没有对应接口，探测也只会产出一行错误快照污染面板。
 	var uids []string
-	for _, st := range p.cfg.Pool.List() {
+	for _, st := range p.ownAccounts() {
 		if st.Disabled {
 			continue
 		}

@@ -149,7 +149,9 @@ func (p *Provider) growthDueJob(now time.Time) bool {
 	if empty {
 		return true
 	}
-	for _, st := range p.cfg.Pool.List() {
+	// 只按本上游的号判到期：拿别家上游的账号当判据会让守卫轮
+	// 被"别人的号到期了"错误地唤醒（空转上游请求）。
+	for _, st := range p.ownAccounts() {
 		if st.Disabled {
 			continue
 		}
