@@ -302,9 +302,9 @@
     </h2>
     <div class="body" style="padding:0">
       <table><thead><tr>
-        <th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>Token</th>
+        <th>上游</th><th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>Token</th>
         <th>今日签到</th><th>成功</th><th>熔断</th><th>在途</th><th>操作</th></tr></thead>
-        <tbody id="accts"><tr><td colspan="10" class="dim">未连接</td></tr></tbody></table>
+        <tbody id="accts"><tr><td colspan="11" class="dim">未连接</td></tr></tbody></table>
     </div>
   </section>
 
@@ -596,11 +596,63 @@
       : (h.total > 0 ? '无可用账号 · 请求会返回 503' : '账号池为空');
   }
 
+  // ---------------------------------------------------------------- 多上游
+  //
+  // 后端 /admin/providers 下发已注册上游与它们的能力位。前端**必须从数据里读**：
+  // 硬编码能力表的话，加第三个上游还要改前端 —— 那正是"加新上游核心零改动"
+  // 要避免的事。
+  let PROVIDERS = [];         // [{id, capabilities, default, account_count}]
+  let DEFAULT_PROVIDER = '';  // 裸模型名走谁
+
+  // providerOf 一个账号属于哪个上游。
+  //
+  // 无 provider 字段的多为历史账号（该字段是后加的），归到默认上游 ——
+  // 与后端 pool 对"未打标签账号"的解释保持一致，否则前后端会显示成两个地方。
+  function providerOf(a) {
+    if (!a || typeof a !== 'object') return '';
+    return a.provider || DEFAULT_PROVIDER;
+  }
+
+  // providersWithCap 返回声明了某能力的所有上游 id。
+  //
+  // 用途：决定"成长计划""猫猫旅行"这类入口是否显示 —— 有该能力的上游存在才显示。
+  function providersWithCap(cap) {
+    const out = [];
+    for (const p of (PROVIDERS || [])) {
+      if (p && Array.isArray(p.capabilities) && p.capabilities.indexOf(cap) >= 0) {
+        out.push(p.id);
+      }
+    }
+    return out;
+  }
+
+  // groupByProvider 把账号列表按上游分组。
+  //
+  // 排序规则：默认上游在最前（那是用户主要的号），其余按 id 字典序 ——
+  // 顺序必须**稳定**，不能依赖对象遍历顺序（否则每次刷新行序都会跳）。
+  function groupByProvider(list) {
+    const groups = new Map();
+    for (const a of (list || [])) {
+      const id = providerOf(a);
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(a);
+    }
+    const out = [];
+    for (const [id, accounts] of groups) {
+      out.push({ provider: id, accounts: accounts, isDefault: id === DEFAULT_PROVIDER });
+    }
+    out.sort((x, y) => {
+      if (x.isDefault !== y.isDefault) return x.isDefault ? -1 : 1;
+      return x.provider < y.provider ? -1 : x.provider > y.provider ? 1 : 0;
+    });
+    return out;
+  }
+
   function renderAccounts(list) {
     share = list || [];
     updateNavBadges();
     if (!share.length) {
-      $('accts').innerHTML = '<tr><td colspan="10" class="dim">账号池为空 —— 点上方「＋ 添加账号」</td></tr>';
+      $('accts').innerHTML = '<tr><td colspan="11" class="dim">账号池为空 —— 点上方「＋ 添加账号」</td></tr>';
       return;
     }
     $('accts').innerHTML = share.map(a => {
@@ -634,6 +686,7 @@
       ].filter(Boolean).join(' ');
 
       return `<tr>
+        <td><span class="pill dim" title="${esc(providerOf(a))}">${esc(providerOf(a) || '—')}</span></td>
         <td>${esc(a.nickname || '—')}</td>
         <td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>
         <td class="mono">${esc(a.credits)}</td>
@@ -2443,6 +2496,13 @@
     setDot(h.healthy > 0 ? 'ok' : 'bad',
       (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
     renderCards(h, s);
+    // 上游清单（能力位 + 默认上游）要先取：renderAccounts 依赖它把账号归到上游。
+    // 单独 try —— 拿不到上游清单不该让账号表显示不出来（退化为全部归默认上游）。
+    try {
+      const pv = await admin('/admin/providers');
+      PROVIDERS = pv.providers || [];
+      DEFAULT_PROVIDER = pv.default || '';
+    } catch { /* 降级：PROVIDERS 保持空，providerOf 全部回落默认 */ }
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
     try { renderAccounts((await admin('/admin/accounts')).accounts); }
     catch { renderAccounts(s.accounts); }
