@@ -1,4 +1,16 @@
-// Package admin 管理台后端：账号增删、签到/保活/旅行触发、调度开关、日志与历史。
+// Package admin 管理台后端：账号增删、模型目录、日志与统计。
+//
+// # Task 3c 之后的职责边界
+//
+// 本包只剩**上游无关**的通用端点：
+//
+//	/admin/accounts*   /admin/login/*   /admin/logs*   /admin/settings
+//	/admin/stats       /admin/models/*  /healthz       /ui
+//
+// 平台特殊端点（workbuddy 的签到/成长/旅行/本机登录 22 条）**不在本包**：
+// 它们由上游通过 gateway.AdminExt.AdminRoutes() 自注册，
+// 本包在 New 里遍历已注册 Provider 挂载（见 mountUpstreamRoutes）。
+// **加新上游时本文件零改动。**
 //
 // 安全模型（方案①）：整个 /admin/* 子树只接受 loopback 直连，非本机一律 403。
 // 理由：这些接口能改账号池、能触发上游请求、能读到账号昵称与积分，
@@ -24,30 +36,43 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
-	"workbuddy2api/internal/clientlogin"
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/upstream"
 )
 
 // Config 管理台依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	Scheduler *scheduler.Scheduler
-	OAuth     *oauth.Client
-	Log       *checkinlog.Log
-	Ring      *logbuf.Ring
-	AuthDir   string
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	OAuth    *oauth.Client
+	Log      *checkinlog.Log
+	Ring     *logbuf.Ring
+	AuthDir  string
 
-	// Business 上游的账号级业务能力（成长/旅行/额度刷新）。
-	// nil = 该上游没有这些能力，相关面板降级为报错而非崩。
+	// Registry 已注册的上游。本包遍历它，把每个上游通过 AdminExt
+	// 声明的管理端点挂上来，并把通过 SettingsExt 声明的设置项合并进设置页。
+	// nil = 不挂任何上游端点（测试路径）。
 	//
-	// 用消费方接口而不是具体类型：admin **不认识** workbuddy，
-	// 加第二个上游时本包零改动（见 upstream_jobs.go）。
-	Business UpstreamBusiness
+	// 用 *gateway.Registry 而不是 []gateway.Provider：注册表是所有核心包
+	// 共用的同一份事实来源，传列表会让"谁注册了什么"出现第二个来源。
+	Registry *gateway.Registry
+
+	// SettingsExts 上游设置扩展的**适配器**（由 cmd/server 注入）。
+	//
+	// # 为什么不直接从 Registry 里断言 SettingsExt
+	//
+	// 因为 workbuddy 的设置项用的是它自己的 SettingField 类型
+	// （上游包不得 import admin，所以类型必须各声明一份），
+	// 而 Go 的方法集是精确匹配的：[]workbuddy.SettingField ≠ []admin.SettingField，
+	// 断言必然失败 —— 而且是**静默**失败（设置页少几个键，没有任何报错）。
+	//
+	// 所以这条线显式走适配器：cmd/server 把上游的 Fields() 逐字段转换后传进来。
+	// AdminExt / JobExt / LoginFlow 不需要这一层，因为它们的接口全部定义在
+	// gateway 里（只有一种类型，上游直接实现即可）。
+	SettingsExts []SettingsExt
 
 	// ResetModelsCache 清空模型目录缓存（由 server 包注入，避免 admin 反向依赖 server）。
 	ResetModelsCache func()
@@ -62,17 +87,22 @@ type Config struct {
 	ModelCatalogState func() ModelCatalogState
 	// Settings 设置页的读写契约（由 cmd/server 实现并注入；nil = 关闭设置页）。
 	Settings SettingsStore
-	// ClientLogin 本机客户端登录态管理（nil = 关闭「本地登录」面板）。
-	ClientLogin *clientlogin.Manager
 	// BuildTime 进程启动时间，UI 用来算运行时长。
 	StartedAt time.Time
 }
 
 // Handler 管理台路由（/admin/ 子树）。
 type Handler struct {
-	cfg  Config
-	mux  *http.ServeMux
-	task *taskSlot
+	cfg Config
+	mux *http.ServeMux
+
+	// patterns 已注册的通用端点 pattern（"METHOD /path" 形式）。
+	//
+	// 为什么必须单独记一份而不是问 mux：Go 1.22 的 ServeMux 没有"列出已注册
+	// pattern"的接口，也没有注册失败回滚。上游端点挂载前要判断冲突，
+	// 就得有一个可枚举的来源 —— 而它必须由 register 统一维护，
+	// 漏记一条就等于那条可以被上游静默覆盖。
+	patterns []string
 
 	// 统计聚合的短缓存：聚合要扫整个落盘文件，而前端按轮询节奏调用，
 	// 缓存让「扫盘频率」与「轮询频率」解耦（见 statsCacheTTL）。
@@ -85,57 +115,113 @@ type Handler struct {
 
 // New 构建管理台 handler。
 func New(cfg Config) *Handler {
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), task: &taskSlot{}}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 
-	h.mux.HandleFunc("GET /admin/accounts", h.accounts)
-	h.mux.HandleFunc("POST /admin/accounts/reload", h.accountsReload)
-	h.mux.HandleFunc("POST /admin/accounts/{uid}/enable", h.accountEnable)
-	h.mux.HandleFunc("POST /admin/accounts/{uid}/disable", h.accountDisable)
-	h.mux.HandleFunc("POST /admin/accounts/{uid}/cooldown/clear", h.accountClearCooldown)
-	h.mux.HandleFunc("DELETE /admin/accounts/{uid}", h.accountDelete)
+	h.register("GET /admin/accounts", h.accounts)
+	h.register("POST /admin/accounts/reload", h.accountsReload)
+	h.register("POST /admin/accounts/{uid}/enable", h.accountEnable)
+	h.register("POST /admin/accounts/{uid}/disable", h.accountDisable)
+	h.register("POST /admin/accounts/{uid}/cooldown/clear", h.accountClearCooldown)
+	h.register("DELETE /admin/accounts/{uid}", h.accountDelete)
 
-	h.mux.HandleFunc("POST /admin/login/start", h.loginStart)
-	h.mux.HandleFunc("POST /admin/login/poll", h.loginPoll)
+	h.register("POST /admin/login/start", h.loginStart)
+	h.register("POST /admin/login/poll", h.loginPoll)
 
-	h.mux.HandleFunc("POST /admin/checkin", h.checkin)
-	h.mux.HandleFunc("POST /admin/keepalive", h.keepalive)
-	h.mux.HandleFunc("POST /admin/credits/refresh", h.creditsRefresh)
+	h.register("POST /admin/models/refresh", h.modelsRefresh)
+	h.register("GET /admin/models/preview", h.modelsPreview)
 
-	h.mux.HandleFunc("GET /admin/travel", h.travelList)
-	h.mux.HandleFunc("GET /admin/travel/status", h.travelStatus)
-	h.mux.HandleFunc("POST /admin/travel/depart", h.travelDepart)
-	h.mux.HandleFunc("POST /admin/travel/claim", h.travelClaim)
+	h.register("GET /admin/logs", h.logs)
+	h.register("GET /admin/logs/history", h.logsHistory)
+	h.register("GET /admin/stats", h.stats)
 
-	h.mux.HandleFunc("GET /admin/growth", h.growthList)
-	h.mux.HandleFunc("POST /admin/growth/claim", h.growthClaim)
-	h.mux.HandleFunc("POST /admin/growth/accept", h.growthAccept)
-	h.mux.HandleFunc("POST /admin/growth/redeem", h.growthRedeem)
-	h.mux.HandleFunc("POST /admin/growth/makeup", h.growthMakeup)
-	h.mux.HandleFunc("POST /admin/growth/open", h.growthOpen)
-	h.mux.HandleFunc("POST /admin/growth/draw", h.growthDraw)
-	h.mux.HandleFunc("GET /admin/growth/tasks", h.growthTasks)
-	h.mux.HandleFunc("GET /admin/growth/travel/config", h.growthTravelConfig)
+	h.register("GET /admin/settings", h.settings)
+	h.register("PUT /admin/settings", h.settingsUpdate)
 
-	h.mux.HandleFunc("GET /admin/schedule", h.schedule)
-
-	h.mux.HandleFunc("POST /admin/models/refresh", h.modelsRefresh)
-	h.mux.HandleFunc("GET /admin/models/preview", h.modelsPreview)
-
-	h.mux.HandleFunc("GET /admin/logs", h.logs)
-	h.mux.HandleFunc("GET /admin/logs/history", h.logsHistory)
-	h.mux.HandleFunc("GET /admin/stats", h.stats)
-	h.mux.HandleFunc("GET /admin/checkin/history", h.history)
-	h.mux.HandleFunc("GET /admin/task", h.taskStatus)
-
-	h.mux.HandleFunc("GET /admin/settings", h.settings)
-	h.mux.HandleFunc("PUT /admin/settings", h.settingsUpdate)
-
-	// 本地客户端登录态：唯一会改写客户端本机状态的接口，全部要求显式 confirm。
-	h.mux.HandleFunc("GET /admin/client-login", h.clientLoginStatus)
-	h.mux.HandleFunc("POST /admin/client-login/switch", h.clientLoginSwitch)
-	h.mux.HandleFunc("POST /admin/client-login/restore", h.clientLoginRestore)
+	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
+	// 所以冲突时以先注册的为准（见 mountUpstreamRoutes）。
+	h.mountUpstreamRoutes()
 
 	return h
+}
+
+// mountUpstreamRoutes 遍历已注册上游，挂载它们声明的管理端点。
+//
+// # 为什么冲突时保留**先注册的**（通用端点）
+//
+// 通用端点在前，上游端点在后。若某个上游声明了一条与通用端点同名的路由，
+// 保留通用端点并记日志 —— 静默覆盖会让"某个面板突然变成另一个上游的实现"，
+// 那是最难查的一类故障。宁可少挂一条并让日志说话。
+//
+// 实现上必须**先探测再注册**：Go 的 ServeMux 在重复注册时会 panic，
+// 而 panic 发生在注册过程中，届时已经注册的 pattern 无法回滚。
+// 探测的代价是注册两次同一 pattern —— 由 muxConflict 里的 recover 兜住，
+// 它自己不会真的占用路由（用 HandleFunc 注册后再注册会 panic，
+// 所以探测走的是一个**独立的一次性 mux**，见下）。
+func (h *Handler) mountUpstreamRoutes() {
+	if h.cfg.Registry == nil {
+		return
+	}
+	// taken 记录已占用的 pattern（含探测失败的）。
+	// 用独立集合判断而不是靠 mux 的 panic 回滚：mux 是 append-only 的。
+	taken := map[string]bool{}
+	for _, p := range h.cfg.Registry.All() {
+		ext, ok := gateway.ExtOf[gateway.AdminExt](p)
+		if !ok {
+			continue
+		}
+		for _, r := range ext.AdminRoutes() {
+			if r.Path == "" || r.Handler == nil {
+				log.Printf("admin: 上游 %s 声明了一条不完整的管理端点（path=%q method=%q），已跳过",
+					p.ID(), r.Path, r.Method)
+				continue
+			}
+			pattern := r.Path
+			if r.Method != "" {
+				pattern = r.Method + " " + r.Path
+			}
+			if taken[pattern] || h.routeConflict(pattern) {
+				log.Printf("admin: 上游 %s 的管理端点 %s 与已有端点冲突，保留已有端点", p.ID(), pattern)
+				continue
+			}
+			// 先试注册：若与**已有** pattern 冲突，ServeMux 会 panic。
+			// 这里用一个独立的一次性 mux 做同样的注册来判定，
+			// 避免把半注册的状态留在真正的 mux 上。
+			h.mux.HandleFunc(pattern, r.Handler)
+			taken[pattern] = true
+		}
+	}
+}
+
+// routeConflict 报告 pattern 是否与已注册的某条路由冲突。
+//
+// 手法：在一个独立的一次性 ServeMux 上同时注册**全部既有 pattern** 与该
+// pattern。既有 pattern 不可能互相冲突（它们已经成功注册过），
+// 所以唯一的 panic 来源就是新来的这一条 —— 正是我们要判定的东西。
+func (h *Handler) routeConflict(pattern string) (conflict bool) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			conflict = true
+		}
+	}()
+	probe := http.NewServeMux()
+	for _, existing := range h.patterns {
+		probe.HandleFunc(existing, h.conflictProbe)
+	}
+	probe.HandleFunc(pattern, h.conflictProbe)
+	return false
+}
+
+// conflictProbe 只在冲突探测里被临时注册，永远不会被真正调用。
+func (h *Handler) conflictProbe(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "占位路由")
+}
+
+// register 注册一条通用端点，同时记录 pattern 供冲突探测使用。
+//
+// 所有通用端点都经它注册 —— 少记一条就会让那条被上游静默覆盖。
+func (h *Handler) register(pattern string, fn http.HandlerFunc) {
+	h.mux.HandleFunc(pattern, fn)
+	h.patterns = append(h.patterns, pattern)
 }
 
 // ServeHTTP 先做本机校验，再进路由。
@@ -402,366 +488,7 @@ func (h *Handler) loginPoll(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// 签到 / 保活 / 积分
-// ---------------------------------------------------------------------------
-
-// CheckinBody 全量与单账号共用请求体。
-type CheckinBody struct {
-	UID string `json:"uid"`
-}
-
-func (h *Handler) checkin(w http.ResponseWriter, r *http.Request) {
-	body := decodeBody(r)
-
-	// 单账号：直接同步返回结果（一次上游往返，够快）。
-	if body.UID != "" {
-		res, ok := h.cfg.Scheduler.RunCheckinFor(body.UID, "manual")
-		if !ok {
-			writeError(w, http.StatusNotFound, "账号不存在: "+body.UID)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"mode": "single", "result": res})
-		return
-	}
-
-	// 全量：含旅行巡检（账号间 800ms 限速），同步会阻塞浏览器，改后台任务。
-	if !h.task.start("checkin", func() []scheduler.CheckinResult {
-		return h.runCheckinAll()
-	}) {
-		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"mode": "all", "started": true})
-}
-
-// runCheckinAll 全量签到：逐账号收集结果（旅行不并入结果列表，只进历史）。
-func (h *Handler) runCheckinAll() []scheduler.CheckinResult {
-	list := h.cfg.Pool.List()
-	out := make([]scheduler.CheckinResult, 0, len(list))
-	for _, st := range list {
-		if st.Disabled {
-			continue
-		}
-		if res, ok := h.cfg.Scheduler.RunCheckinFor(st.UID, "manual"); ok {
-			out = append(out, res)
-		}
-	}
-	if h.cfg.Business != nil {
-		h.cfg.Business.RunTravelManual()
-	}
-	return out
-}
-
-func (h *Handler) keepalive(w http.ResponseWriter, r *http.Request) {
-	body := decodeBody(r)
-	if body.UID != "" {
-		res, ok := h.cfg.Scheduler.RunKeepaliveFor(body.UID, "manual")
-		if !ok {
-			writeError(w, http.StatusNotFound, "账号不存在: "+body.UID)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"mode": "single", "result": res})
-		return
-	}
-	if !h.task.start("keepalive", func() []scheduler.CheckinResult {
-		out := []scheduler.CheckinResult{}
-		for _, st := range h.cfg.Pool.List() {
-			if st.Disabled {
-				continue
-			}
-			if res, ok := h.cfg.Scheduler.RunKeepaliveFor(st.UID, "manual"); ok {
-				out = append(out, res)
-			}
-		}
-		return out
-	}) {
-		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"mode": "all", "started": true})
-}
-
-func (h *Handler) creditsRefresh(w http.ResponseWriter, r *http.Request) {
-	body := decodeBody(r)
-	if h.cfg.Business == nil {
-		writeError(w, http.StatusNotImplemented, "当前上游无额度刷新能力")
-		return
-	}
-	if body.UID != "" {
-		res, ok := h.cfg.Business.RefreshCredits(body.UID, "manual")
-		if !ok {
-			writeError(w, http.StatusNotFound, "账号不存在: "+body.UID)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"mode": "single", "result": toCheckinResult(res)})
-		return
-	}
-	out := []scheduler.CheckinResult{}
-	for _, st := range h.cfg.Pool.List() {
-		if res, ok := h.cfg.Business.RefreshCredits(st.UID, "manual"); ok {
-			out = append(out, toCheckinResult(res))
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"mode": "all", "results": out})
-}
-
-// toCheckinResult 把上游的额度刷新结果转成调度器通用结果类型。
-//
-// 转换只在这一处做：上游不必 import scheduler，admin 也不必认识上游的类型。
-func toCheckinResult(res CheckinView) scheduler.CheckinResult {
-	return scheduler.CheckinResult{
-		UID:      res.UID,
-		Status:   res.Status,
-		Detail:   res.Detail,
-		Credits:  res.Credits,
-		HasQuota: res.HasQuota,
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 猫猫旅行
-// ---------------------------------------------------------------------------
-
-func (h *Handler) travelAuth(uid string) (*auth.Auth, bool) {
-	if uid == "" {
-		return nil, false
-	}
-	a := h.cfg.Pool.AuthByUID(uid)
-	return a, a != nil && a.RefreshToken != ""
-}
-
-// travelList 账号级旅行列表：直接读守卫维护的内存快照，不发上游请求。
-// refresh=1 时强制全量回源一次（对应界面上的「刷新」按钮）。
-func (h *Handler) travelList(w http.ResponseWriter, r *http.Request) {
-	b := h.cfg.Business
-	if b == nil {
-		writeError(w, http.StatusNotImplemented, "当前上游无旅行能力")
-		return
-	}
-	if r.URL.Query().Get("refresh") == "1" {
-		b.RefreshTravel(true, false)
-	}
-	snaps := b.TravelSnapshots()
-	// 池里有、但快照还没建起来的账号补一个空行，避免界面缺行让人以为是 bug。
-	seen := map[string]bool{}
-	for _, s := range snaps {
-		seen[s.UID] = true
-	}
-	for _, st := range h.cfg.Pool.List() {
-		if seen[st.UID] {
-			continue
-		}
-		snaps = append(snaps, TravelSnapshot{
-			UID: st.UID, Nickname: st.Nickname, Error: "尚未探测（点「刷新」）",
-		})
-	}
-	// 把「自动派送挂在签到时点上」这件事所需的事实一并返回，让界面能显示真实时点
-	// 而不是写死一句说明：签到时点可被设置页改，写死就会与实际不一致。
-	checkinHours, _ := h.cfg.Scheduler.Hours()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accounts":         snaps,
-		"auto_claim":       b.TravelAutoClaimEnabled(),
-		"auto_depart":      h.cfg.Scheduler.CheckinEnabled(),
-		"checkin_hours":    checkinHours,
-		"location_id":      4,
-		"watch_interval_s": int64(b.WatchInterval().Seconds()),
-	})
-}
-
-// 刻意没有 POST /admin/travel/auto：自动领奖的开/关同样只经 PUT /admin/settings，
-// 理由与上面的 schedule/toggle 一致。
-
-// travelStatus 单账号详细状态（含猫档案全字段），供界面展开查看。
-func (h *Handler) travelStatus(w http.ResponseWriter, r *http.Request) {
-	uid := r.URL.Query().Get("uid")
-	a, ok := h.travelAuth(uid)
-	if !ok {
-		writeError(w, http.StatusNotFound, "账号不存在或无可用凭证: "+uid)
-		return
-	}
-	buddy, err := h.cfg.Upstream.BuddyInfo(a)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "查询猫档案失败: "+err.Error())
-		return
-	}
-	resp := map[string]any{"uid": uid, "has_buddy": buddy != nil}
-	if buddy != nil {
-		resp["buddy"] = buddy
-	}
-	ts, err := h.cfg.Upstream.TravelStatus(a)
-	if err != nil {
-		resp["travel_error"] = err.Error()
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	resp["travel"] = ts
-	// 顺带把换算后的到站时刻给出去，省得每个调用方各算一遍时钟偏差。
-	if at := ts.ArriveAtTime(time.Now()); !at.IsZero() {
-		resp["arrive_at_local"] = at
-		resp["clock_skew_sec"] = int64(ts.ClockSkew(time.Now()).Seconds())
-		if rem, ok := ts.RemainingUntilArrive(time.Now()); ok {
-			resp["remaining_sec"] = int64(rem.Seconds())
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// record 统一写一条手动任务历史。
-// 关键：Nickname 必须由这里补上——直接把 Record 丢给 Log.Append 会漏掉昵称，
-// 历史表里就会退化成显示 uid 前缀（同一张表出现两种显示形态）。
-func (h *Handler) record(uid, kind, status, detail string, credits int64) {
-	if h.cfg.Log == nil {
-		return
-	}
-	nick := ""
-	if a := h.cfg.Pool.AuthByUID(uid); a != nil {
-		nick = a.Nickname
-	}
-	h.cfg.Log.Append(checkinlog.Record{
-		UID:      checkinlog.NormalizeUID(uid),
-		Nickname: nick,
-		Kind:     kind,
-		Status:   status,
-		Detail:   detail,
-		Credits:  credits,
-		Trigger:  "manual",
-	})
-}
-
-// travelDepart 派猫。uid 为空 = 全部账号（后台任务，含账号间限速）。
-func (h *Handler) travelDepart(w http.ResponseWriter, r *http.Request) {
-	b := h.cfg.Business
-	if b == nil {
-		writeError(w, http.StatusNotImplemented, "当前上游无旅行能力")
-		return
-	}
-	body := decodeBody(r)
-
-	if body.UID != "" {
-		res := b.TravelDepartFor(body.UID, "manual")
-		if res.Status == checkinlog.StatusFail && strings.Contains(res.Detail, "账号不存在") {
-			writeError(w, http.StatusNotFound, res.Detail)
-			return
-		}
-		if res.Status == checkinlog.StatusSkip {
-			writeError(w, http.StatusConflict, res.Detail)
-			return
-		}
-		if res.Status == checkinlog.StatusFail {
-			writeError(w, http.StatusBadGateway, res.Detail)
-			return
-		}
-		writeJSON(w, http.StatusOK, res)
-		return
-	}
-
-	if !h.task.start("travel-depart", func() []scheduler.CheckinResult {
-		return h.travelAll(func(uid string) TravelActionResult {
-			return b.TravelDepartFor(uid, "manual")
-		})
-	}) {
-		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"mode": "all", "started": true})
-}
-
-// travelClaim 领奖。uid 为空 = 全部账号（后台任务）。
-func (h *Handler) travelClaim(w http.ResponseWriter, r *http.Request) {
-	b := h.cfg.Business
-	if b == nil {
-		writeError(w, http.StatusNotImplemented, "当前上游无旅行能力")
-		return
-	}
-	body := decodeBody(r)
-
-	if body.UID != "" {
-		res := b.TravelClaimFor(body.UID, "manual")
-		if res.Status == checkinlog.StatusFail && strings.Contains(res.Detail, "账号不存在") {
-			writeError(w, http.StatusNotFound, res.Detail)
-			return
-		}
-		if res.Status == checkinlog.StatusSkip {
-			writeError(w, http.StatusConflict, res.Detail)
-			return
-		}
-		if res.Status == checkinlog.StatusFail {
-			writeError(w, http.StatusBadGateway, res.Detail)
-			return
-		}
-		writeJSON(w, http.StatusOK, res)
-		return
-	}
-
-	if !h.task.start("travel-claim", func() []scheduler.CheckinResult {
-		return h.travelAll(func(uid string) TravelActionResult {
-			return b.TravelClaimFor(uid, "manual")
-		})
-	}) {
-		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"mode": "all", "started": true})
-}
-
-// travelAll 对全部非禁用账号跑同一旅行动作，转成 CheckinResult 供任务槽统一呈现。
-// 跳过不写入结果列表（否则「全部派猫」会返回一堆 no-op 行），但已经由上游记进历史。
-func (h *Handler) travelAll(fn func(uid string) TravelActionResult) []scheduler.CheckinResult {
-	out := []scheduler.CheckinResult{}
-	for _, st := range h.cfg.Pool.List() {
-		if st.Disabled {
-			continue
-		}
-		res := fn(st.UID)
-		if res.Status == checkinlog.StatusSkip {
-			continue
-		}
-		out = append(out, scheduler.CheckinResult{
-			UID:     res.UID,
-			Status:  res.Status,
-			Detail:  res.Detail,
-			Credits: res.Credits,
-		})
-	}
-	return out
-}
-
-// short 把上游错误压成一行短文本（历史表里只放这个，完整原文留给进程日志）。
-func short(s string) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) > 80 {
-		return s[:80]
-	}
-	return s
-}
-
-// ---------------------------------------------------------------------------
-// 调度
-// ---------------------------------------------------------------------------
-
-func (h *Handler) schedule(w http.ResponseWriter, r *http.Request) {
-	at, names := h.cfg.Scheduler.NextWake()
-	checkinH, keepaliveH := h.cfg.Scheduler.Hours()
-	resp := map[string]any{
-		"checkin_enabled":   h.cfg.Scheduler.CheckinEnabled(),
-		"keepalive_enabled": h.cfg.Scheduler.KeepaliveEnabled(),
-		"checkin_hours":     checkinH,
-		"keepalive_hours":   keepaliveH,
-	}
-	if !at.IsZero() {
-		resp["next_at"] = at
-		resp["next_in_sec"] = int64(time.Until(at).Seconds())
-		resp["next_tasks"] = names
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// 刻意没有 POST /admin/schedule/toggle：签到/保活的启停只能经 PUT /admin/settings，
-// 那条路径会同时写 config.json 并应用运行时值。若另开一个只改内存的开关接口，
-// 会出现「开关改了但重启后被 config 覆盖」的两条写路径冲突。
-
-// ---------------------------------------------------------------------------
-// 模型目录 / 日志 / 历史
+// 模型目录 / 日志 / 统计
 // ---------------------------------------------------------------------------
 
 func (h *Handler) modelsRefresh(w http.ResponseWriter, r *http.Request) {
@@ -1140,151 +867,9 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	return resp
 }
 
-// history 任务历史（签到/保活/旅行/积分/成长）。
-//
-// 支持 offset/limit 分页，契约与 /admin/logs/history 一致：
-// 时间倒序（最新在前），total 是**过滤后**总数，前端据此算总页数。
-func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.Log == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "total": 0})
-		return
-	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
-		limit = checkinlog.DefaultPageSize
-	}
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	if offset < 0 {
-		offset = 0
-	}
-	items, total := h.cfg.Log.Page(offset, limit, r.URL.Query().Get("kind"))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"items":  items,
-		"total":  total,
-		"offset": offset,
-		"limit":  limit,
-	})
-}
-
-func (h *Handler) taskStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.task.snapshot())
-}
-
-// ---------------------------------------------------------------------------
-// 后台任务槽（同一时刻只允许一个全量任务）
-// ---------------------------------------------------------------------------
-
-type taskSlot struct {
-	mu       sync.Mutex
-	running  bool
-	kind     string
-	started  time.Time
-	finished time.Time
-	results  []scheduler.CheckinResult
-	errMsg   string
-}
-
-// start 尝试占用任务槽并同步执行 fn（在调用方 goroutine 外另起一个）。
-// 已有任务在跑时返回 false，调用方应回 409 而不是排队——排队会让界面误以为立刻执行了。
-func (t *taskSlot) start(kind string, fn func() []scheduler.CheckinResult) bool {
-	t.mu.Lock()
-	if t.running {
-		t.mu.Unlock()
-		return false
-	}
-	t.running = true
-	t.kind = kind
-	t.started = time.Now()
-	t.finished = time.Time{}
-	t.results = nil
-	t.errMsg = ""
-	t.mu.Unlock()
-
-	go func() {
-		var results []scheduler.CheckinResult
-		var errMsg string
-		func() {
-			defer func() {
-				if rec := recover(); rec != nil {
-					errMsg = fmt.Sprintf("panic: %v", rec)
-				}
-			}()
-			results = fn()
-		}()
-		t.mu.Lock()
-		t.running = false
-		t.finished = time.Now()
-		t.results = results
-		t.errMsg = errMsg
-		t.mu.Unlock()
-	}()
-	return true
-}
-
-func (t *taskSlot) snapshot() map[string]any {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	out := map[string]any{
-		"running": t.running,
-		"kind":    t.kind,
-		"results": t.results,
-	}
-	if !t.started.IsZero() {
-		out["started_at"] = t.started
-	}
-	if t.running {
-		out["elapsed_sec"] = int64(time.Since(t.started).Seconds())
-	} else if !t.finished.IsZero() {
-		out["finished_at"] = t.finished
-		out["duration_sec"] = int64(t.finished.Sub(t.started).Seconds())
-		out["ok"] = sumOK(t.results)
-		out["fail"] = sumStatus(t.results, checkinlog.StatusFail)
-		out["already"] = sumStatus(t.results, checkinlog.StatusAlready)
-		if t.errMsg != "" {
-			out["error"] = t.errMsg
-		}
-	}
-	return out
-}
-
-func sumOK(rs []scheduler.CheckinResult) int {
-	n := 0
-	for _, r := range rs {
-		if r.Status == checkinlog.StatusOK {
-			n++
-		}
-	}
-	return n
-}
-
-func sumStatus(rs []scheduler.CheckinResult, want string) int {
-	n := 0
-	for _, r := range rs {
-		if r.Status == want {
-			n++
-		}
-	}
-	return n
-}
-
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
-
-// ReqBody 通用请求体：uid 用于单账号定向，其余字段各接口自取。
-type ReqBody struct {
-	UID        string `json:"uid"`
-	LocationID int    `json:"location_id"`
-	RecordID   int64  `json:"record_id"`
-}
-
-func decodeBody(r *http.Request) ReqBody {
-	var b ReqBody
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&b)
-	}
-	return b
-}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	raw, _ := json.Marshal(v)

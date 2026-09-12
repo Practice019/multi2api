@@ -28,9 +28,14 @@ import (
 // CoolKind 冷却类型。
 type CoolKind int
 
+// 冷却种类。**故意只表达"冷却多久"这个通用维度**，
+// 不掺入任何上游的业务原因（谁因为什么被冷却由调用方自己记）。
 const (
-	CoolHard CoolKind = iota // 余额不足 → 冷却到次日 04:00（等签到恢复）
-	CoolSoft                 // 429 → 短冷却
+	// CoolHard 长冷却：直到调用方指定的重置时刻（额度耗尽/配额用尽等）。
+	// 时长由调用方通过 CooldownUntilNextReset 给出 —— pool 不知道"消耗完"的语义。
+	CoolHard CoolKind = iota
+	// CoolSoft 短冷却：限流类（如 429），通常几分钟。
+	CoolSoft
 )
 
 func (k CoolKind) String() string {
@@ -577,7 +582,12 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *a
 			continue // 禁用的账号永不参与兜底
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
-			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
+			// 处于**有效期内的长冷却** → 不参与兜底。
+			//
+			// 这是通用判据：长冷却意味着"调用方明确知道这个号暂时不可用"，
+			// 拿它兜底只会再失败一次。至于"为什么不可用"
+			// （余额耗尽/配额用尽/账号被封）由上游自己定义，pool 不解释。
+			continue
 		}
 		if p.inFlightFull(e) {
 			continue
@@ -776,23 +786,29 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.breakerUntil = time.Now().Add(d)
 }
 
-// CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。
-// 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
-func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
+// CooldownUntilNextReset 冷却到调用方给出的"下次重置时刻"。
+//
+// # 为什么改成通用形式（Task 3c 的解耦收尾）
+//
+// 早先这里叫 `CooldownUntilTomorrow4AM`，内部写死次日 04:00 ——
+// 而 **04:00 是 workbuddy 的签到恢复时刻**（它自己的签到时点是 09:00/21:00，
+// 硬冷却等到次日 04:00 才解除）。codearts 没有签到，次日 4 点对它毫无意义。
+//
+// 现在由**调用方（上游）**算好目标时刻传进来：
+//
+//	workbuddy  → cmd/server 注入 NextResetAt = workbuddy.NextResetAt
+//	codearts   → 自己算一个（如 now.Add(90*time.Minute)）
+//
+// pool 只负责"冷却到某个时刻"，不再知道那个时刻是怎么来的。
+// 原先那个 Deprecated 的 4 点薄封装与 nextDay4AM 已随 Task 3c 迁入
+// internal/workbuddy（见 reset.go 的 NextCheckinReset）。
+func (p *Pool) CooldownUntilNextReset(uid string, until time.Time, reason string) {
 	now := time.Now()
-	p.Cooldown(uid, CoolHard, nextDay4AM(now).Sub(now), reason)
-}
-
-// nextDay4AM 返回 now 之后最近的一个 04:00（与 now 同一时区）。
-// now 在当天 04:00 之前（凌晨 00:00~04:00）时返回当天 04:00——此时签到尚未执行，
-// 该窗内触发的硬冷却等当天签到即可恢复；返回次日会白冷约一天。
-// 04:00 整及之后返回次日 04:00。
-// time.Date 对日溢出自动进位（月末→下月 1 号、年末→下年 1 号），天然覆盖跨日/跨月/跨年。
-func nextDay4AM(now time.Time) time.Time {
-	if now.Hour() < 4 {
-		return time.Date(now.Year(), now.Month(), now.Day(), 4, 0, 0, 0, now.Location())
+	d := until.Sub(now)
+	if d < 0 {
+		d = 0 // 目标时刻已过 → 不冷却（而不是负时长导致未定义行为）
 	}
-	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
+	p.Cooldown(uid, CoolHard, d, reason)
 }
 
 // Disable 永久禁用（session 死亡），需人工重登后手工恢复或文件替换。

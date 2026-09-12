@@ -14,13 +14,196 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"time"
 
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/clientlogin"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/workbuddy"
 )
+
+// ---------------------------------------------------------------------------
+// 调度器适配器（Task 3c）
+// ---------------------------------------------------------------------------
+
+// schedulerAdapter 把 *scheduler.Scheduler 适配成 workbuddy 的三条消费方接口：
+//
+//	workbuddy.CheckinRunner   签到/保活（/admin/checkin, /admin/keepalive）
+//	workbuddy.SchedulerView   时点与启停（/admin/schedule）
+//
+// # 为什么需要转换
+//
+// 两边的语义一一对应，但**类型不能共用**：workbuddy 不得 import scheduler
+// （架构约束）。RunCheckinFor 的返回类型在 scheduler 里是 CheckinResult、
+// 在 workbuddy 里是 CheckinOutcome —— 结构相同、定义各自独立，
+// 转换只在这一个地方做（与 modelCatalogState、businessAdapter 同一模式）。
+//
+// 其余方法签名完全一致，直接转发。
+type schedulerAdapter struct{ sch *scheduler.Scheduler }
+
+// ---- workbuddy.CheckinRunner ----
+
+func (a schedulerAdapter) RunCheckinFor(uid, trigger string) (workbuddy.CheckinOutcome, bool) {
+	res, ok := a.sch.RunCheckinFor(uid, trigger)
+	return toCheckinOutcome(res), ok
+}
+
+func (a schedulerAdapter) RunKeepaliveFor(uid, trigger string) (workbuddy.CheckinOutcome, bool) {
+	res, ok := a.sch.RunKeepaliveFor(uid, trigger)
+	return toCheckinOutcome(res), ok
+}
+
+// ---- workbuddy.SchedulerView ----
+
+func (a schedulerAdapter) NextWake() (time.Time, []string) { return a.sch.NextWake() }
+func (a schedulerAdapter) Hours() ([]int, []int)           { return a.sch.Hours() }
+func (a schedulerAdapter) CheckinEnabled() bool            { return a.sch.CheckinEnabled() }
+func (a schedulerAdapter) KeepaliveEnabled() bool          { return a.sch.KeepaliveEnabled() }
+
+// toCheckinOutcome 逐字段转换（含 HasQuota —— 它是 /admin/checkin 单账号
+// 响应体的一部分，漏掉会改变对外 JSON）。
+func toCheckinOutcome(r scheduler.CheckinResult) workbuddy.CheckinOutcome {
+	return workbuddy.CheckinOutcome{
+		UID: r.UID, Status: r.Status, Detail: r.Detail,
+		Credits: r.Credits, HasQuota: r.HasQuota,
+	}
+}
+
+var (
+	_ workbuddy.CheckinRunner = schedulerAdapter{}
+	_ workbuddy.SchedulerView = schedulerAdapter{}
+	_ workbuddy.AdminEnv      = workbuddy.AdminEnv{}
+)
+
+// ---------------------------------------------------------------------------
+// 任务槽适配器（Task 3c）
+// ---------------------------------------------------------------------------
+
+// 进程内唯一的生产任务槽。
+//
+// # 为什么是包级变量而不是调度器上的字段
+//
+// 改造前这个"同一时刻只允许一个全量任务"的槽长在 internal/admin 的
+// Handler 上（h.task），而签到/保活/旅行/成长四条全量端点全部住在同一个
+// admin 包里，天然共享它。搬进 workbuddy 之后仍然要共享同一个槽 ——
+// 但它现在必须同时能被**签到/保活**（也在 workbuddy，走同一个 h.task）
+// 以及**将来的第三个上游**看见。
+//
+// 用包级单例最简单且语义准确：这个槽约束的是"本进程同一时刻只跑一个
+// 全量维护任务"，本来就该是进程级的，而不是每个上游一份。
+var sharedTaskSlot = workbuddy.NewTaskSlot()
+
+// newTaskSlotAdapter 返回注入给上游的任务槽。
+func newTaskSlotAdapter(sch *scheduler.Scheduler) workbuddy.TaskSlot {
+	// sch 目前不承担任务槽（核心调度器的整点任务没有"已在执行中就 409"的语义，
+	// 它由循环自己串行）。保留参数是为了让将来"核心也想暴露在途状态"时
+	// 不必再改调用点。
+	_ = sch
+	return sharedTaskSlot
+}
+
+// ---------------------------------------------------------------------------
+// 客户端登录态适配器（Task 3c）
+// ---------------------------------------------------------------------------
+
+// clientLoginAdapter 把 *clientlogin.Manager 适配成 workbuddy.ClientLoginManager。
+//
+// 三个方法直接转发，但两个返回结构要**逐字段**搬运：它们的 json tag 是对外契约，
+// 上游包各自声明了一份同形结构（它不得 import clientlogin）。
+type clientLoginAdapter struct{ m *clientlogin.Manager }
+
+func (a clientLoginAdapter) Status() (*workbuddy.ClientLoginStatus, error) {
+	st, err := a.m.Status()
+	if err != nil {
+		return nil, err
+	}
+	out := &workbuddy.ClientLoginStatus{
+		Enabled:       st.Enabled,
+		ClientDir:     st.ClientDir,
+		ArchiveDir:    st.ArchiveDir,
+		ClientFile:    st.ClientFile,
+		SnapshotFile:  st.SnapshotFile,
+		ClientRunning: st.ClientRunning,
+		HasBackup:     st.HasBackup,
+		BackupUID:     st.BackupUID,
+		BackupNick:    st.BackupNick,
+		BackupAt:      st.BackupAt,
+		Error:         st.Error,
+	}
+	if st.Current != nil {
+		c := toClientLoginCandidate(*st.Current)
+		out.Current = &c
+	}
+	if len(st.Candidates) > 0 {
+		out.Candidates = make([]workbuddy.ClientLoginCandidate, 0, len(st.Candidates))
+		for _, c := range st.Candidates {
+			out.Candidates = append(out.Candidates, toClientLoginCandidate(c))
+		}
+	}
+	return out, nil
+}
+
+func toClientLoginCandidate(c clientlogin.Candidate) workbuddy.ClientLoginCandidate {
+	return workbuddy.ClientLoginCandidate{
+		UID: c.UID, Nickname: c.Nickname, Source: c.Source,
+		ExpiresAt: c.ExpiresAt, ExpiresAtText: c.ExpiresAtText,
+		Valid: c.Valid, Current: c.Current, Restorable: c.Restorable,
+		TokenHint: c.TokenHint,
+	}
+}
+
+func (a clientLoginAdapter) Switch(uid string) (*workbuddy.ClientLoginSwitchResult, error) {
+	res, err := a.m.Switch(uid)
+	if err != nil {
+		return nil, translateClientLoginErr(err)
+	}
+	return toClientLoginResult(res), nil
+}
+
+func (a clientLoginAdapter) Restore() (*workbuddy.ClientLoginSwitchResult, error) {
+	res, err := a.m.Restore()
+	if err != nil {
+		return nil, translateClientLoginErr(err)
+	}
+	return toClientLoginResult(res), nil
+}
+
+// translateClientLoginErr 把 clientlogin 的哨兵错误映射成 workbuddy 的同义错误。
+//
+// 为什么必须映射而不是直接返回：上游包用 errors.Is 判定这三类"预期失败"
+// （同号 / 无意义回滚 / 客户端在跑），而两边是**各自声明**的哨兵值 ——
+// 直接透传会让 errors.Is 失配，三种情况全部落到 default 分支，
+// 变成"切换失败: ..."的 409，错误文案就与改造前不一致了。
+func translateClientLoginErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, clientlogin.ErrSameAccount):
+		return workbuddy.ErrSameAccount
+	case errors.Is(err, clientlogin.ErrAlreadyBackedUp):
+		return workbuddy.ErrAlreadyBackedUp
+	case errors.Is(err, clientlogin.ErrClientRunning):
+		return workbuddy.ErrClientRunning
+	default:
+		return err
+	}
+}
+
+func toClientLoginResult(r *clientlogin.SwitchResult) *workbuddy.ClientLoginSwitchResult {
+	if r == nil {
+		return nil
+	}
+	return &workbuddy.ClientLoginSwitchResult{
+		UID: r.UID, Nickname: r.Nickname, Source: r.Source,
+		Changed: r.Changed, Message: r.Message, BackupPath: r.BackupPath,
+	}
+}
+
+var _ workbuddy.ClientLoginManager = clientLoginAdapter{}
 
 // ---------------------------------------------------------------------------
 // 账号池适配器
@@ -63,172 +246,118 @@ func (a poolAdapter) Disable(uid, reason string) { a.p.Disable(uid, reason) }
 
 var _ workbuddy.AccountPool = poolAdapter{}
 
-// businessAdapter 实现 admin.UpstreamBusiness。
-type businessAdapter struct {
-	p *workbuddy.Provider
+// ---------------------------------------------------------------------------
+// 上游设置适配器（Task 3c）
+// ---------------------------------------------------------------------------
+
+// upstreamSettingsAdapter 把 workbuddy 的设置项接进 admin 的设置页与宿主持久化。
+//
+// # 它同时满足两个接口
+//
+//	admin.SettingsExt      Fields() / ApplySettings()   —— 让设置页显示与写入
+//	main.UpstreamSettings  Apply()  / Values()          —— 让宿主落盘
+//
+// 两个接口的形状不同是刻意的：admin 要的是"键 + 值 + 是否需重启"（渲染需要分类），
+// 宿主落盘要的是"键 → 当前值"的 map（写配置只要值）。
+// 让一个适配器同时满足两者，比在上游包里实现两套更省 —— 上游只提供一份 Fields()。
+//
+// # 为什么要 applyToMemory
+//
+// 宿主在保存后会调 applyToMemory 把新值同步进内存 cfg，供下一轮 Snapshot 回显。
+// 那段代码原本在 settings_store.go 里，逐行写着 "growth_auto_open" 之类的键名 ——
+// 那是核心认识上游字段的最后一处。现在改由本适配器按自己的键表同步。
+type upstreamSettingsAdapter struct {
+	p   *workbuddy.Provider
+	cfg *Config
 }
 
-// newBusinessAdapter 包装一个上游 Provider。
-func newBusinessAdapter(p *workbuddy.Provider) admin.UpstreamBusiness {
-	return &businessAdapter{p: p}
+func newUpstreamSettingsAdapter(p *workbuddy.Provider, cfg *Config) *upstreamSettingsAdapter {
+	return &upstreamSettingsAdapter{p: p, cfg: cfg}
 }
 
-// ---- 成长中心 ----
+// ---- admin.SettingsExt ----
 
-func (a *businessAdapter) RefreshGrowth(force, autoActions bool) []admin.GrowthSnapshot {
-	src := a.p.RefreshGrowth(force, autoActions)
-	out := make([]admin.GrowthSnapshot, 0, len(src))
-	for _, s := range src {
-		out = append(out, toAdminGrowthSnapshot(s))
+func (a *upstreamSettingsAdapter) Fields() []admin.SettingField {
+	src := a.p.SettingsFields()
+	out := make([]admin.SettingField, 0, len(src))
+	for _, f := range src {
+		out = append(out, admin.SettingField{
+			Key: f.Key, Value: f.Value, RestartRequired: f.RestartRequired,
+		})
 	}
 	return out
 }
 
-func (a *businessAdapter) GrowthSnapshots() []admin.GrowthSnapshot {
-	src := a.p.GrowthSnapshots()
-	out := make([]admin.GrowthSnapshot, 0, len(src))
-	for _, s := range src {
-		out = append(out, toAdminGrowthSnapshot(s))
+func (a *upstreamSettingsAdapter) ApplySettings(patch json.RawMessage) ([]string, error) {
+	return a.p.ApplySettings(patch)
+}
+
+// ---- main.UpstreamSettings ----
+
+func (a *upstreamSettingsAdapter) Apply(patch json.RawMessage) ([]string, error) {
+	return a.p.ApplySettings(patch)
+}
+
+func (a *upstreamSettingsAdapter) Values() map[string]any {
+	out := map[string]any{}
+	for _, f := range a.p.SettingsFields() {
+		out[f.Key] = f.Value
 	}
 	return out
 }
 
-func (a *businessAdapter) GrowthToggles() (accept, makeup, redeem, open, draw, claim bool) {
-	return a.p.GrowthToggles()
-}
-
-func (a *businessAdapter) GrowthWatchInterval() time.Duration {
-	return a.p.GrowthWatchInterval()
-}
-
-func (a *businessAdapter) SetGrowthToggles(accept, makeup, redeem, open, draw, claim bool) {
-	a.p.SetGrowthToggles(accept, makeup, redeem, open, draw, claim)
-}
-
-func (a *businessAdapter) GrowthClaimFor(uid, taskCode, trigger string) admin.GrowthActionResult {
-	return toAdminGrowthResult(a.p.GrowthClaimFor(uid, taskCode, trigger))
-}
-
-func (a *businessAdapter) GrowthAcceptFor(uid, taskCode, trigger string) admin.GrowthActionResult {
-	return toAdminGrowthResult(a.p.GrowthAcceptFor(uid, taskCode, trigger))
-}
-
-func (a *businessAdapter) GrowthRedeemFor(uid, tier, trigger string) admin.GrowthActionResult {
-	return toAdminGrowthResult(a.p.GrowthRedeemFor(uid, tier, trigger))
-}
-
-func (a *businessAdapter) GrowthMakeupFor(uid, date, trigger string) admin.GrowthActionResult {
-	return toAdminGrowthResult(a.p.GrowthMakeupFor(uid, date, trigger))
-}
-
-func (a *businessAdapter) GrowthOpenFor(uid string, count int, trigger string) admin.GrowthActionResult {
-	return toAdminGrowthResult(a.p.GrowthOpenFor(uid, count, trigger))
-}
-
-func (a *businessAdapter) GrowthDrawFor(uid, trigger string) admin.GrowthActionResult {
-	return toAdminGrowthResult(a.p.GrowthDrawFor(uid, trigger))
-}
-
-// ---- 猫猫旅行 ----
-
-func (a *businessAdapter) RefreshTravel(force, autoClaim bool) []admin.TravelSnapshot {
-	src := a.p.RefreshTravel(force, autoClaim)
-	out := make([]admin.TravelSnapshot, 0, len(src))
-	for _, s := range src {
-		out = append(out, toAdminTravelSnapshot(s))
+// applyToMemory 把刚保存的上游设置同步进内存 cfg（供 Snapshot 回显）。
+//
+// 与 settings_store.go 里通用段的同名方法分工：那里管签到/超时/限流，
+// 这里管 workbuddy 的成长/旅行开关。核心不认识下面这些键名 ——
+// 它们只在**上游适配器**这一层出现，而上游包自己才知道它们的含义。
+func (a *upstreamSettingsAdapter) applyToMemory(values map[string]any) {
+	c := a.cfg
+	if v, ok := values["travel_auto_claim"].(bool); ok {
+		travelAuto := v
+		c.Admin.TravelAutoClaim = &travelAuto
 	}
-	return out
-}
-
-func (a *businessAdapter) TravelSnapshots() []admin.TravelSnapshot {
-	src := a.p.TravelSnapshots()
-	out := make([]admin.TravelSnapshot, 0, len(src))
-	for _, s := range src {
-		out = append(out, toAdminTravelSnapshot(s))
+	if v, ok := intValue(values["travel_watch_interval_seconds"]); ok {
+		c.Admin.TravelWatchIntervalSeconds = v
 	}
-	return out
-}
-
-func (a *businessAdapter) TravelAutoClaimEnabled() bool { return a.p.TravelAutoClaimEnabled() }
-func (a *businessAdapter) SetTravelAutoClaim(on bool)   { a.p.SetTravelAutoClaim(on) }
-func (a *businessAdapter) WatchInterval() time.Duration { return a.p.WatchInterval() }
-func (a *businessAdapter) RunTravelManual()             { a.p.RunTravelManual() }
-
-func (a *businessAdapter) TravelDepartFor(uid, trigger string) admin.TravelActionResult {
-	return toAdminTravelResult(a.p.TravelDepartFor(uid, trigger))
-}
-
-func (a *businessAdapter) TravelClaimFor(uid, trigger string) admin.TravelActionResult {
-	return toAdminTravelResult(a.p.TravelClaimFor(uid, trigger))
-}
-
-// ---- 额度 ----
-
-func (a *businessAdapter) RefreshCredits(uid, trigger string) (admin.CheckinView, bool) {
-	res, ok := a.p.RefreshCredits(uid, trigger)
-	return admin.CheckinView{
-		UID: res.UID, Status: res.Status, Detail: res.Detail,
-		Credits: res.Credits, HasQuota: res.HasQuota,
-	}, ok
-}
-
-// ---- 逐字段转换 ----
-
-func toAdminGrowthSnapshot(s workbuddy.GrowthSnapshot) admin.GrowthSnapshot {
-	out := admin.GrowthSnapshot{
-		UID: s.UID, Nickname: s.Nickname,
-		TasksTotal: s.TasksTotal, TasksCompleted: s.TasksCompleted, TasksAccepted: s.TasksAccepted,
-		AcceptableCount: s.AcceptableCount, AcceptableCredit: s.AcceptableCredit,
-		AcceptableEnergy: s.AcceptableEnergy,
-		PendingCount:     s.PendingCount, PendingCredit: s.PendingCredit, PendingEnergy: s.PendingEnergy,
-		ClaimableCount: s.ClaimableCount, ClaimableCredit: s.ClaimableCredit,
-		ClaimableEnergy: s.ClaimableEnergy,
-		StreakDays:      s.StreakDays, NextTier: s.NextTier, NextTierRemaining: s.NextTierRemaining,
-		MakeupCards: s.MakeupCards, MakeupDates: s.MakeupDates, RemainingDays: s.RemainingDays,
-		Energy: s.Energy, BlindBoxAffordable: s.BlindBoxAffordable, BlindBoxCost: s.BlindBoxCost,
-		LotteryChances: s.LotteryChances,
-		ObservedAt:     s.ObservedAt, Error: s.Error, Stale: s.Stale,
+	if v, ok := values["growth_auto_claim"].(bool); ok {
+		c.GrowthAutoClaim = v
 	}
-	if len(s.Tasks) > 0 {
-		out.Tasks = make([]admin.GrowthTaskView, 0, len(s.Tasks))
-		for _, t := range s.Tasks {
-			out.Tasks = append(out.Tasks, admin.GrowthTaskView{
-				TaskCode: t.TaskCode, Title: t.Title,
-				Description: t.Description, HowTo: t.HowTo, Status: t.Status,
-				Current: t.Current, Target: t.Target,
-				RewardCredit: t.RewardCredit, RewardEnergy: t.RewardEnergy,
-				Tag: t.Tag, Locked: t.Locked, Claimable: t.Claimable,
-				ExpiresAt: t.ExpiresAt, ExpiresInDays: t.ExpiresInDays,
-				Expired: t.Expired, ExpiringSoon: t.ExpiringSoon,
-			})
-		}
+	if v, ok := values["growth_auto_accept_tasks"].(bool); ok {
+		c.GrowthAutoAccept = v
 	}
-	return out
-}
-
-func toAdminGrowthResult(r workbuddy.GrowthActionResult) admin.GrowthActionResult {
-	return admin.GrowthActionResult{
-		UID: r.UID, Action: r.Action, Status: r.Status, Detail: r.Detail,
-		Credits: r.Credits, Energy: r.Energy, Count: r.Count,
-		AlreadyClaimed: r.AlreadyClaimed,
+	if v, ok := values["growth_auto_makeup"].(bool); ok {
+		c.GrowthAutoMakeup = v
+	}
+	if v, ok := values["growth_auto_redeem"].(bool); ok {
+		c.GrowthAutoRedeem = v
+	}
+	if v, ok := values["growth_auto_open"].(bool); ok {
+		c.GrowthAutoOpen = v
+	}
+	if v, ok := values["growth_auto_draw"].(bool); ok {
+		c.GrowthAutoDraw = v
+	}
+	if v, ok := intValue(values["growth_watch_interval_seconds"]); ok && v > 0 {
+		c.Admin.GrowthWatchIntervalSeconds = v
 	}
 }
 
-func toAdminTravelSnapshot(s workbuddy.TravelSnapshot) admin.TravelSnapshot {
-	return admin.TravelSnapshot{
-		UID: s.UID, Nickname: s.Nickname,
-		HasBuddy: s.HasBuddy, BuddyName: s.BuddyName, BuddyRarity: s.BuddyRarity,
-		State: s.State, LocationName: s.LocationName,
-		RecordID: s.RecordID, DepartAt: s.DepartAt, ArriveAt: s.ArriveAt,
-		RemainingSec: s.RemainingSec, DurationHours: s.DurationHours,
-		RewardCredit: s.RewardCredit, DailyLimitReached: s.DailyLimitReached,
-		ObservedAt: s.ObservedAt, Error: s.Error,
+// intValue 把 any 收成 int（JSON 反序列化给的是 float64，我们写的是 int）。
+func intValue(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
 	}
 }
 
-func toAdminTravelResult(r workbuddy.TravelActionResult) admin.TravelActionResult {
-	return admin.TravelActionResult{
-		UID: r.UID, Action: r.Action, Status: r.Status, Detail: r.Detail,
-		Credits: r.Credits, State: r.State, ArriveAt: r.ArriveAt,
-	}
-}
+var (
+	_ admin.SettingsExt = (*upstreamSettingsAdapter)(nil)
+	_ UpstreamSettings  = (*upstreamSettingsAdapter)(nil)
+)

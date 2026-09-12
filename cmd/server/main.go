@@ -167,6 +167,17 @@ func main() {
 		// 注册表交给调度器：它自己发现各上游的 JobExt 任务（成长/旅行守卫轮）。
 		Registry: registry,
 	})
+	// 签到/保活的动作实现留在核心调度器（它们不是上游业务），
+	// 但 workbuddy 的 /admin/checkin 与 /admin/keepalive 要能调到它们 ——
+	// 经调度器适配器注入，方向是"上游读接口"，不是"上游认核心"。
+	wb.SetCheckinRunner(schedulerAdapter{sch: sch})
+	// 管理端点的核心依赖（/admin/schedule 的时点 + 与签到/保活共用的任务槽）。
+	// 后注入的理由就在这里：调度器在 Provider 之后构造。
+	wb.SetAdminEnv(workbuddy.AdminEnv{
+		Schedule: schedulerAdapter{sch: sch},
+		TaskSlot: newTaskSlotAdapter(sch),
+	})
+	// 本机客户端登录态管理（见下）。
 	// 签到收尾的搭车任务（旅行状态机）由上游提供，核心只负责在正确的时机喊一声。
 	sch.AddCheckinHook(wb)
 	switch {
@@ -183,9 +194,13 @@ func main() {
 
 	// 本机客户端登录态管理：能读就开面板，读不到就置 nil（该面板降级为 503），
 	// 禁止因为客户端没装/路径变了就让整个网关起不来。
+	//
+	// Task 3c 起，这个面板的端点由 workbuddy 自注册，所以管理器要交给上游：
+	// 核心的 admin 不再认识它。
 	var clientLogin *clientlogin.Manager
 	if cfg.ClientEnabled && cfg.ClientAuthDir != "" {
 		clientLogin = clientlogin.New(cfg.ClientAuthDir, cfg.AuthDir, cfg.ClientArchiveDir)
+		wb.SetClientLogin(clientLoginAdapter{m: clientLogin})
 		log.Printf("本地登录面板已启用：客户端凭证 %s，存档 %s", cfg.ClientAuthDir, cfg.ClientArchiveDir)
 	} else if !cfg.ClientEnabled {
 		log.Printf("本地登录面板已关闭（admin.client_login_enabled=false）")
@@ -206,9 +221,11 @@ func main() {
 		}
 	}
 
-	// 上游业务能力的适配器：把 workbuddy 的类型转成 admin 的消费方接口类型
-	// （两侧类型结构相同但定义必须各自独立，见 upstream_business.go 的注释）。
-	biz := newBusinessAdapter(wb)
+	// 上游设置的适配器：把 workbuddy 的设置项接进设置页与宿主持久化。
+	//
+	// Task 3c 之后它只剩**设置项**一条线：账号级业务（成长/旅行/额度）的
+	// 22 个管理端点已经由 workbuddy 自己通过 AdminExt 注册，不再经核心转发。
+	upSettings := newUpstreamSettingsAdapter(wb, cfg)
 
 	h := server.NewHandler(server.Config{
 		Pool:              p,
@@ -220,23 +237,32 @@ func main() {
 		SoftCooldown:      cfg.SoftRateDur,
 		ModelCatalog:      server.ModelCatalog,
 		ModelCatalogState: server.ModelCatalogState,
+		// 额度恢复策略由上游回答：workbuddy 给"次日 04:00"（等签到恢复），
+		// 核心不再内置任何具体时点。缺失时 handler 回落到 now+1h。
+		NextResetAt: wb.NextResetAt,
+		// /v1/models 的 owned_by 由装配层注入（核心不再硬编码上游名）。
+		// 多上游落地后这里要改成按 provider 合并各自的目录。
+		OwnedBy: wb.ID(),
 		Admin: admin.New(admin.Config{
-			Pool:      p,
-			Upstream:  up,
-			Scheduler: sch,
-			// 上游的账号级业务能力（成长/旅行/额度刷新）。admin 通过接口调用，
-			// **不认识 workbuddy** —— 加第二个上游时 admin 零改动。
-			// 类型转换由 upstream_business.go 的薄适配器承担。
-			Business:          biz,
-			OAuth:             oauth.New(cfg.OAuthBaseURL),
-			Log:               checkinLog,
-			Ring:              logRing,
-			AuthDir:           cfg.AuthDir,
-			ClientLogin:       clientLogin,
+			Pool:     p,
+			Upstream: up,
+			OAuth:    oauth.New(cfg.OAuthBaseURL),
+			Log:      checkinLog,
+			Ring:     logRing,
+			AuthDir:  cfg.AuthDir,
+			// 注册表：admin 遍历它，把每个上游通过 AdminExt 声明的管理端点挂上来。
+			// Task 3c 之后 22 个 workbuddy 端点就是这样挂的 ——
+			// 加新上游时 admin 包零改动（判据 1）。
+			Registry: registry,
+			// 上游设置项必须以**适配器**形式显式注入，不能靠从 Registry 里
+			// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
+			// （各自声明，互不 import），方法集精确匹配会静默失败
+			// —— 表现成设置页少几个键且没有任何报错。
+			SettingsExts:      []admin.SettingsExt{upSettings},
 			ResetModelsCache:  server.ResetModelsCache,
 			ModelCatalog:      server.ModelCatalog,
 			ModelCatalogState: modelCatalogState,
-			Settings: newSettingsStore(*cfgPath, cfg, sch, biz, checkinLog, func(days int) {
+			Settings: newSettingsStore(*cfgPath, cfg, sch, upSettings, checkinLog, func(days int) {
 				if s := logRing.Sink(); s != nil {
 					s.SetKeepDays(days)
 				}
