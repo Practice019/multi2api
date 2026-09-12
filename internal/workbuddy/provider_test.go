@@ -2,10 +2,8 @@ package workbuddy
 
 import (
 	"context"
-	"os"
 	"testing"
 
-	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -20,63 +18,19 @@ import (
 // 现在发现比搬完 350 处业务后再发现便宜得多。
 // 这就是 plan 里说的"抽的过程本身就是对接口的第一次检验"。
 
-// TestContract 接入契约测试 —— 判据 2 的落地方式。
+// ⚠ 契约测试已移到 `contract_hermetic_test.go`。
 //
-// # 分成两段，而不是"无凭证就整体跳过"
+// 这里原有两个测试：
 //
-// 契约里有一部分检查**不需要凭证**（ID 合法且稳定、Caps 含 CapChat、
-// 不 panic、流能 Close、ctx 取消能返回）。无条件跳过会把这些也丢掉，
-// 让 CI 在无凭证环境下"看起来很绿"却什么都没验。
+//	TestContractNoCredential   手写了一个"契约子集"，**不调用** RunProviderContract
+//	TestContractWithCredential 调了它，但无 token 时 t.Skip
 //
-// 所以：
-//   - 无凭证 → 跑 TestContractNoCredential（能验的那部分 + 明确记录未验证项）
-//   - 有凭证 → 跑 TestContractWithCredential（完整行为验证）
-func TestContractNoCredential(t *testing.T) {
-	p := New()
-
-	// ID 合法且稳定
-	id1, id2 := p.ID(), p.ID()
-	if id1 != providerID || id2 != id1 {
-		t.Errorf("ID 应稳定为 %q，得到 %q / %q", providerID, id1, id2)
-	}
-	// Caps 含 CapChat
-	if !p.Caps().Has(gateway.CapChat) {
-		t.Error("必须声明 CapChat")
-	}
-	// Secret 类型不对时返回错误而非 panic（不需要凭证）
-	if _, err := p.Models(context.Background(), gateway.Credential{Secret: 42}); err == nil {
-		t.Error("凭证类型不对应返回错误")
-	}
-	// Chat 传无效凭证不得 panic
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Errorf("Chat 不该 panic: %v", r)
-			}
-		}()
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // 已取消 → 应立刻返回
-		_, _ = p.Chat(ctx, gateway.Credential{}, []byte(`{}`))
-	}()
-
-	// 明确记录：哪些契约项**没有**被验证
-	t.Log("未验证（需凭证）：Models 非空、Chat 流可 Close、" +
-		"Chat 成功时响应非空。设 WORKBUDDY_TEST_TOKEN 可完整验证。")
-}
-
-// TestContractWithCredential 完整契约（需要真实凭证）。
-func TestContractWithCredential(t *testing.T) {
-	tok := os.Getenv("WORKBUDDY_TEST_TOKEN")
-	if tok == "" {
-		t.Skip("无 WORKBUDDY_TEST_TOKEN —— 跳过需要凭证的完整契约。" +
-			"注意：跳过 ≠ 通过。TestContractNoCredential 已覆盖不需要凭证的部分。")
-	}
-	gateway.RunProviderContract(t, New, gateway.WithCredential(gateway.Credential{
-		Provider: providerID,
-		UID:      "contract-test",
-		Secret:   &auth.Auth{AccessToken: tok},
-	}))
-}
+// 阶段 0 评审的 F4 指出这构成判据 2 最实质的漏洞：
+// CI（`go test ./...`，无 token）里 **RunProviderContract 从未被执行**，
+// "必须通过契约"实际由手写的重复断言保证 —— 而手写断言会与契约各自漂移。
+//
+// 现在统一到 `contract_hermetic_test.go` 的 `TestContract`：用 httptest 假上游，
+// 无需真实凭证即可让契约**完整执行**，因此 CI 里不会跳过。
 
 // TestProviderIdentity 身份与能力声明。
 func TestProviderIdentity(t *testing.T) {
