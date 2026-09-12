@@ -115,26 +115,53 @@ func TestRenderUIReplacesEveryPlaceholder(t *testing.T) {
 	}
 }
 
-// TestRenderUIKeyInjection 密钥注入只在明确要求时发生，且不动 JS 守卫里的哨兵。
+// TestRenderUIKeyInjection 密钥注入的**精确**语义。
 //
 // # 为什么单独测这条
 //
-// 上一轮后端评审怀疑过"注入是死代码"。实测**注入正常**，但它猜错的理由
-// 是对的担忧：Go 只替换**带双引号**的那一处（赋值语句），
-// 而 JS 守卫里 `!== '__WB2API_KEY__'`（单引号）必须**保持原样** ——
-// 它正是用来判断"是否已注入"的比对基准。替换了它反而会让 INJECTED 失真。
+// 这是一个真实的、差点成真的失效模式：
+//
+// 页面上 `__WB2API_KEY__` 出现在三类位置：
+//
+//  1. 赋值语句的**值**：`window.__WB2API_KEY__ = "__WB2API_KEY__"`
+//     —— 这一处**要**被替换
+//  2. JS 属性名：`window.__WB2API_KEY__`
+//     —— 替换会直接把代码改坏（`window."SECRET"` 是语法错误）
+//  3. 注释文字
+//     —— 替换会污染说明
+//
+// 再叠加一个隐患：判断"是否已注入"需要对比基准。旧实现让基准与赋值
+// 用**同一个**字面量，于是正确性依赖于 `Replace(..., 1)` 只改第一处这个
+// **看不出来的巧合** —— 谁把它改成"替换全部"，自动连接就静默死掉。
+//
+// 现在基准改为独立哨兵 `__WB2API_KEY_SENTINEL__`，本测试把这三类位置
+// 与两个开关状态全部钉住。
 func TestRenderUIKeyInjection(t *testing.T) {
-	// 注入开启：赋值处变成真 key
 	out := string(renderUI([]byte(webuiHTML), "SECRET-AAA", true))
+
+	// (1) 值被替换
 	if !strings.Contains(out, `window.__WB2API_KEY__ = "SECRET-AAA"`) {
-		t.Error("开启注入时，赋值语句没有被换成真实密钥")
+		t.Error("开启注入时，赋值语句的值没有被换成真实密钥")
 	}
-	// 守卫里的单引号哨兵必须保留（它是对比基准，不是待替换值）
-	if !strings.Contains(out, `!== '__WB2API_KEY__'`) {
-		t.Error("JS 守卫里的单引号哨兵被替换了 —— 那会让 INJECTED 判断失真")
+	// (2) JS 属性名必须原样保留 —— 否则代码直接坏掉
+	if !strings.Contains(out, `window.__WB2API_KEY__`) {
+		t.Error("JS 属性名 window.__WB2API_KEY__ 被替换了 —— 这会让页面脚本变成语法错误")
+	}
+	// (3) 不能把裸哨兵替换进属性名位置
+	if strings.Contains(out, `window."SECRET-AAA"`) || strings.Contains(out, `window.SECRET-AAA`) {
+		t.Error("属性名位置被注入了密钥 —— window.\"SECRET-AAA\" 是非法 JS")
+	}
+	// (4) 守卫基准是独立哨兵，且未被替换
+	if !strings.Contains(out, `!== '__WB2API_KEY_SENTINEL__'`) {
+		t.Error("JS 守卫的哨兵不是独立 token —— 与赋值同名时会被一并替换，" +
+			"INJECTED 恒为空，自动连接静默失效")
+	}
+	// (5) 密钥只出现在赋值那一处，不得泄漏到别处
+	if n := strings.Count(out, "SECRET-AAA"); n != 1 {
+		t.Errorf("密钥在页面里出现 %d 次，期望恰好 1 次（赋值处）", n)
 	}
 
-	// 注入关闭（非本机访问）：哨兵保持原样，页面按"需手输 Key"处理
+	// 注入关闭（非本机访问）：页面按"需手输 Key"处理，且不得出现明文
 	off := string(renderUI([]byte(webuiHTML), "SECRET-AAA", false))
 	if !strings.Contains(off, `window.__WB2API_KEY__ = "__WB2API_KEY__"`) {
 		t.Error("关闭注入时，赋值语句不应被替换")

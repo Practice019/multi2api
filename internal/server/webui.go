@@ -49,28 +49,28 @@ var colPlaceholders = []struct{ token, value string }{
 func renderUI(page []byte, apiKey string, injectKey bool) []byte {
 	out := page
 	if injectKey && apiKey != "" {
-		// ⚠ 这里**故意**只替换「带双引号的那一处」，不能用 ReplaceAll。
+		// 只替换「带双引号的字面量」`"__WB2API_KEY__"` —— 也就是赋值语句的**值**。
 		//
-		// # 为什么（一次险些成真的回归）
+		// # 为什么不是 ReplaceAll（试过，是错的）
 		//
-		// 页面上 `__WB2API_KEY__` 共出现 6 次，其中 5 次是**裸哨兵**，
-		// 最关键的一处在 JS 守卫里：
+		// 裸的 `__WB2API_KEY__` 在页面上还出现在两个**不该被替换**的位置：
+		//   1. JS 属性名：`window.__WB2API_KEY__` —— 替换会直接把代码改坏
+		//   2. 注释与文档字符串 —— 替换会污染说明文字
+		// 所以必须限定成"带引号的那个字面量"，而不是"所有出现"。
 		//
-		//	window.__WB2API_KEY__ !== '__WB2API_KEY__'
+		// # 守卫为什么用独立哨兵
 		//
-		// 那个单引号哨兵是**判断"是否已注入"的对比基准**，不是待替换值。
-		// 自动连接能工作，恰恰因为这一处没被替换。
+		// 判断"是否已注入"需要一个对比基准。旧实现让它和赋值用**同一个**
+		// 字面量 `'__WB2API_KEY__'`，于是正确性依赖于"那一处恰好没被替换"
+		//（`Replace(..., 1)` 只改第一处）—— 一个看不出来的巧合。
+		// 现在基准改为独立的 `__WB2API_KEY_SENTINEL__`，两处职责互不串扰：
+		// 就算有人日后把这里改成 ReplaceAll，也只能改到属性名与注释，
+		// 不会再出现"静默杀死自动连接"这种看不见的失效。
 		//
-		// 维护者如果看到"服务端下发了 5 处未替换的哨兵"就把这里改成
-		// `bytes.ReplaceAll`，会**静默杀死自动连接**：INJECTED 恒为空、
-		// 控制台永远要求手输 Key，且不报错、无提示。
-		//
-		// 本条语义由 TestRenderUIKeyInjection 守住
-		//（它同时断言"赋值被替换"与"守卫哨兵保持原样"）。
-		//
+		// 语义由 TestRenderUIKeyInjection 守住。
 		// json.Marshal 负责转义：密钥含引号/反斜杠/换行时也不会破坏内联脚本。
 		if quoted, err := json.Marshal(apiKey); err == nil {
-			out = bytes.Replace(out, []byte(`"`+keyPlaceholder+`"`), quoted, 1)
+			out = bytes.ReplaceAll(out, []byte(`"`+keyPlaceholder+`"`), quoted)
 		}
 	}
 	for _, p := range colPlaceholders {
