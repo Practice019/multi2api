@@ -23,6 +23,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
+	"time"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
@@ -39,15 +41,91 @@ import (
 // 格式受 gateway 约束（^[a-z][a-z0-9-]*$），有契约测试守着。
 const providerID = "workbuddy"
 
-// Provider 实现 gateway.Provider。
+// Provider 实现 gateway.Provider（以及 AdminExt / JobExt 两个扩展点）。
+//
+// # 它同时是 workbuddy 业务的宿主
+//
+// Task 3b 把原先长在 internal/scheduler 里的成长/旅行业务搬进了本包，
+// 那些业务的可变状态（快照缓存、到期表、自动动作开关）就挂在下面这些字段上。
+// 核心调度器通过 gateway.JobExt 拿到任务，**不认识它们具体是什么**。
 type Provider struct {
 	client *upstream.Client
+
+	// cfg 业务配置与依赖（账号池、历史日志、守卫间隔、六个自动开关）。
+	cfg Config
+
+	// mu/adoptTried 领养当日失败记录：uid → 自然日（CST）。门槛未达的账号当日
+	// 不再重试，避免同日多趟对上游重试轰炸；进程重启即清零（无需持久化）。
+	mu         sync.Mutex
+	adoptTried map[string]string
+
+	// travel 猫猫旅行守卫状态（快照缓存 + 到期表 + 自动领奖开关）。
+	travel *travelWatchState
+
+	// growth 成长中心守卫状态（快照缓存 + 到期表 + 六个自动动作开关）。
+	growth *growthWatchState
+
+	// travelLastRun/growthLastRun 各自上次守卫轮的执行时刻。
+	//
+	// 为什么本包要自己记：Due 里除了"有账号到期"还要叠加"不早于配置的守卫间隔"
+	// （核心的轮询粒度是 30 秒，而生产配置的守卫间隔是 1 分钟/10 分钟）。
+	// 没有它，守卫轮会被抬到 30 秒一轮，空转频率翻倍。
+	// 与 mu 共用同一把锁。
+	travelLastRun time.Time
+	growthLastRun time.Time
+
+	// probeSem 成长中心探测的**共享并发预算**：账号之间、以及单个账号内的
+	// 多个上游调用，都从这里取令牌。见 GrowthProbeConcurrency 的注释。
+	//
+	// 同样是 nil 安全（acquire/release 都对 nil 直接返回）—— 与 travel/growth
+	// 一致，这样测试里手搓 &Provider{} 不会崩，只是失去限流。
+	probeSem *growthProbeSem
 }
 
-// New 建一个 workbuddy Provider。
+// New 建一个 workbuddy Provider（契约测试用的无依赖构造）。
 //
 // 只构造，不做网络请求 —— 契约测试会多次调用 factory，不能有副作用。
-func New() gateway.Provider { return &Provider{client: upstream.New()} }
+func New() gateway.Provider { return NewWithConfig(Config{}) }
+
+// NewWithConfig 按配置建一个 workbuddy Provider。
+//
+// 与 New 的区别：New 给的是"只有对话能力"的最小实例（契约测试用），
+// 本函数给的是接了账号池与历史日志的完整实例（cmd/server 用）。
+// 池为 nil 时所有需要账号的操作都是空操作 —— 不会 panic。
+func NewWithConfig(cfg Config) *Provider {
+	if cfg.Client == nil {
+		cfg.Client = upstream.New()
+	}
+	return &Provider{
+		client:     cfg.Client,
+		cfg:        cfg,
+		adoptTried: make(map[string]string),
+		travel:     newTravelWatchState(!cfg.TravelAutoClaimDisabled),
+		// 每个 Provider 一份独立预算：测试里会起多个实例，
+		// 共用包级信号量会让它们互相阻塞。
+		probeSem: newGrowthProbeSem(GrowthProbeConcurrency),
+		growth: newGrowthWatchState(
+			// accept 默认 true：见 growthWatchState.autoAccept 的注释。
+			boolOrPtr(cfg.GrowthAutoAccept, true),
+			boolOrPtr(cfg.GrowthAutoMakeup, true),
+			boolOrPtr(cfg.GrowthAutoRedeem, false),
+			boolOrPtr(cfg.GrowthAutoOpen, false),
+			boolOrPtr(cfg.GrowthAutoDraw, false),
+			boolOrPtr(cfg.GrowthAutoClaim, true),
+		),
+	}
+}
+
+// SetClient 替换上游 HTTP 客户端。
+//
+// cmd/server 需要在构造之后再注入它：客户端上挂着 config 里的超时
+// （普通 RPC / 首字节 / 流中空闲），而那些值只有在配置加载完才知道。
+// 非线程安全 —— 只在启动期调用一次。
+func (p *Provider) SetClient(c *upstream.Client) {
+	if c != nil {
+		p.client = c
+	}
+}
 
 // ID 上游标识。
 func (p *Provider) ID() string { return providerID }

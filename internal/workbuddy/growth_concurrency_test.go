@@ -6,20 +6,15 @@
 //
 // 本测试用"可控延迟的 stub"来验证并发：让每个 /tasks 各自睡 100ms，
 // 串行 4 个账号要 ~400ms+，并发（上限 5）应显著更短。
-package scheduler
+package workbuddy
 
 import (
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/checkinlog"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
 )
 
 // slowStub 每个请求睡 delay，并记录并发峰值。
@@ -63,23 +58,17 @@ func (s *slowStub) handler() http.Handler {
 	})
 }
 
-func newSlowHarness(t *testing.T, n int, delay time.Duration) (*Scheduler, *slowStub) {
+func newSlowHarness(t *testing.T, n int, delay time.Duration) (*Provider, *slowStub) {
 	t.Helper()
 	sb := &slowStub{delay: delay}
-	srv := httptest.NewServer(sb.handler())
-	t.Cleanup(srv.Close)
+	srv := stubServer(t, sb.handler())
 
-	p := pool.New("")
+	accounts := make([]*auth.Auth, 0, n)
 	for i := 0; i < n; i++ {
-		p.Add(&auth.Auth{
-			UID:         string(rune('a'+i)) + "-uid",
-			AccessToken: "at", RefreshToken: "rt",
-			ExpiresAt: 9999999999, Nickname: "账号",
-		})
+		accounts = append(accounts, testAuthNamed(string(rune('a'+i))+"-uid", "账号"))
 	}
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	log := checkinlog.New(filepath.Join(t.TempDir(), "c.json"), 30)
-	return New(Config{Pool: p, Upstream: up, Log: log}), sb
+	s, _ := newTestProvider(t, srv, accounts...)
+	return s, sb
 }
 
 // TestRefreshGrowthIsConcurrent 4 个账号、每账号 5 个请求、每个 100ms：

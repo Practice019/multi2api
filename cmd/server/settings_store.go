@@ -24,7 +24,10 @@ type settingsStore struct {
 	path string
 	cfg  *Config
 	sch  *scheduler.Scheduler
-	log  *checkinlog.Log
+	// biz 上游的账号级业务能力（成长/旅行的开关读写）。
+	// 与 sch 分开持有：调度框架与上游业务是两条线，加新上游时这里零改动。
+	biz admin.UpstreamBusiness
+	log *checkinlog.Log
 	// setLogKeepDays 调整落盘请求日志的保留天数（由 main 注入，避免这里依赖 logbuf）。
 	setLogKeepDays func(int)
 }
@@ -32,14 +35,14 @@ type settingsStore struct {
 func (s *settingsStore) Snapshot() admin.Settings {
 	c := s.cfg
 	checkinH, keepaliveH := s.sch.Hours()
-	gAccept, gMakeup, gRedeem, gOpen, gDraw, gClaim := s.sch.GrowthToggles()
+	gAccept, gMakeup, gRedeem, gOpen, gDraw, gClaim := s.biz.GrowthToggles()
 	return admin.Settings{
 		CheckinEnabled:     s.sch.CheckinEnabled(),
 		KeepaliveEnabled:   s.sch.KeepaliveEnabled(),
 		CheckinHours:       checkinH,
 		KeepaliveHours:     keepaliveH,
-		TravelAutoClaim:    s.sch.TravelAutoClaimEnabled(),
-		TravelWatchSeconds: int(s.sch.WatchInterval().Seconds()),
+		TravelAutoClaim:    s.biz.TravelAutoClaimEnabled(),
+		TravelWatchSeconds: int(s.biz.WatchInterval().Seconds()),
 
 		GrowthAutoClaim:  gClaim,
 		GrowthAutoAccept: gAccept,
@@ -64,7 +67,7 @@ func (s *settingsStore) Snapshot() admin.Settings {
 		SessionStickyEnabled:  c.SessionSticky.Enabled,
 		SessionStickyTTL:      c.SessionSticky.TTL,
 
-		GrowthWatchSeconds: int(s.sch.GrowthWatchInterval().Seconds()),
+		GrowthWatchSeconds: int(s.biz.GrowthWatchInterval().Seconds()),
 
 		Listen:     c.Listen,
 		AuthDir:    c.AuthDir,
@@ -91,8 +94,8 @@ func (s *settingsStore) Apply(p admin.Settings) (applied, needRestart []string, 
 	if err := s.sch.SetHours(p.CheckinHours, p.KeepaliveHours); err != nil {
 		return nil, nil, err
 	}
-	s.sch.SetTravelAutoClaim(p.TravelAutoClaim)
-	s.sch.SetGrowthToggles(p.GrowthAutoAccept, p.GrowthAutoMakeup,
+	s.biz.SetTravelAutoClaim(p.TravelAutoClaim)
+	s.biz.SetGrowthToggles(p.GrowthAutoAccept, p.GrowthAutoMakeup,
 		p.GrowthAutoRedeem, p.GrowthAutoOpen, p.GrowthAutoDraw, p.GrowthAutoClaim)
 	if p.CheckinLogKeepDays > 0 {
 		s.log.SetKeepDays(p.CheckinLogKeepDays)
@@ -289,12 +292,13 @@ func (s *settingsStore) persist(p admin.Settings) error {
 }
 
 // newSettingsStore 组装宿主实现。
-func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler,
+func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler, biz admin.UpstreamBusiness,
 	log *checkinlog.Log, setLogKeepDays func(int)) admin.SettingsStore {
 	return &settingsStore{
 		path:           path,
 		cfg:            cfg,
 		sch:            sch,
+		biz:            biz,
 		log:            log,
 		setLogKeepDays: setLogKeepDays,
 	}

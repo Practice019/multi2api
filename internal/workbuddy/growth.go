@@ -1,6 +1,6 @@
-// growthwatch.go 成长中心守卫：状态快照缓存 + 自动领取/兑换/补签/开盲盒。
+// growth.go 成长中心守卫：状态快照缓存 + 自动领取/兑换/补签/开盲盒。
 //
-// 与 travelwatch.go 同构（快照缓存 + 到期门控 + 单一扫描入口），但成长中心的
+// 与 travel.go 同构（快照缓存 + 到期门控 + 单一扫描入口），但成长中心的
 // 动作比旅行多且**会消耗资源**，因此这里把每个动作拆成独立开关：
 //
 //	默认开启（纯收益，无机会成本）：领任务奖励、补签
@@ -8,7 +8,13 @@
 //
 // 之所以把「会花资源的」默认关掉：自动开盲盒会消耗能量、自动兑换会消耗连登天数，
 // 这些是用户的资产，不该由一次「保存设置」之外的默认值替他决定。
-package scheduler
+//
+// # 搬运说明（Task 3b）
+//
+// 本文件原先在 internal/scheduler/growthwatch.go。成长中心是 CodeBuddy 专属业务
+// （codearts 没有任务体系），放在核心调度器里等于让核心理解某个上游的领域概念。
+// 现在它作为 workbuddy 包自己的状态，通过 gateway.JobExt 向核心注册守卫轮。
+package workbuddy
 
 import (
 	"context"
@@ -23,8 +29,8 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// GrowthStatusReason 快照里的错误原因上限，避免把上游长文本灌进快照。
-const growthErrMax = 160
+// GrowthErrMax 快照里的错误原因上限，避免把上游长文本灌进快照。
+const GrowthErrMax = 160
 
 // GrowthTaskView 界面用的任务视图。
 //
@@ -166,6 +172,7 @@ type GrowthActionResult struct {
 	AlreadyClaimed bool `json:"already_claimed,omitempty"`
 }
 
+// growthWatchState 成长守卫的可变状态。
 type growthWatchState struct {
 	mu        sync.Mutex
 	snapshots map[string]GrowthSnapshot
@@ -198,76 +205,76 @@ func newGrowthWatchState(accept, makeup, redeem, open, draw, claim bool) *growth
 }
 
 // GrowthToggles 返回六个自动动作的开关状态。
-func (s *Scheduler) GrowthToggles() (accept, makeup, redeem, open, draw, claim bool) {
-	if s.growth == nil {
+func (p *Provider) GrowthToggles() (accept, makeup, redeem, open, draw, claim bool) {
+	if p.growth == nil {
 		return
 	}
-	s.growth.mu.Lock()
-	defer s.growth.mu.Unlock()
-	return s.growth.autoAccept, s.growth.autoMakeup, s.growth.autoRedeem,
-		s.growth.autoOpen, s.growth.autoDraw, s.growth.autoClaim
+	p.growth.mu.Lock()
+	defer p.growth.mu.Unlock()
+	return p.growth.autoAccept, p.growth.autoMakeup, p.growth.autoRedeem,
+		p.growth.autoOpen, p.growth.autoDraw, p.growth.autoClaim
 }
 
 // SetGrowthToggles 运行时设置六个自动动作开关。
-func (s *Scheduler) SetGrowthToggles(accept, makeup, redeem, open, draw, claim bool) {
-	if s.growth == nil {
+func (p *Provider) SetGrowthToggles(accept, makeup, redeem, open, draw, claim bool) {
+	if p.growth == nil {
 		return
 	}
-	s.growth.mu.Lock()
-	s.growth.autoAccept, s.growth.autoMakeup = accept, makeup
-	s.growth.autoRedeem, s.growth.autoOpen, s.growth.autoDraw = redeem, open, draw
-	s.growth.autoClaim = claim
-	s.growth.mu.Unlock()
+	p.growth.mu.Lock()
+	p.growth.autoAccept, p.growth.autoMakeup = accept, makeup
+	p.growth.autoRedeem, p.growth.autoOpen, p.growth.autoDraw = redeem, open, draw
+	p.growth.autoClaim = claim
+	p.growth.mu.Unlock()
 	log.Printf("scheduler: 成长中心自动动作 -> 领奖=%v 接单=%v 补签=%v 兑换=%v 开盲盒=%v 抽奖=%v",
 		claim, accept, makeup, redeem, open, draw)
 }
 
 // GrowthWatchInterval 返回扫描间隔（供管理台展示）。
-func (s *Scheduler) GrowthWatchInterval() time.Duration {
-	if s.cfg.GrowthWatchInterval > 0 {
-		return s.cfg.GrowthWatchInterval
+func (p *Provider) GrowthWatchInterval() time.Duration {
+	if p.cfg.GrowthWatchInterval > 0 {
+		return p.cfg.GrowthWatchInterval
 	}
 	return 10 * time.Minute
 }
 
 // GrowthSnapshots 返回缓存快照（按 uid 排序），不发上游请求。
-func (s *Scheduler) GrowthSnapshots() []GrowthSnapshot {
-	if s.growth == nil {
+func (p *Provider) GrowthSnapshots() []GrowthSnapshot {
+	if p.growth == nil {
 		return nil
 	}
-	s.growth.mu.Lock()
-	defer s.growth.mu.Unlock()
-	out := make([]GrowthSnapshot, 0, len(s.growth.snapshots))
-	for _, v := range s.growth.snapshots {
+	p.growth.mu.Lock()
+	defer p.growth.mu.Unlock()
+	out := make([]GrowthSnapshot, 0, len(p.growth.snapshots))
+	for _, v := range p.growth.snapshots {
 		out = append(out, v)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
 	return out
 }
 
-func (s *Scheduler) storeGrowthSnapshot(uid string, snap GrowthSnapshot) {
-	if s.growth == nil {
+func (p *Provider) storeGrowthSnapshot(uid string, snap GrowthSnapshot) {
+	if p.growth == nil {
 		return
 	}
-	s.growth.mu.Lock()
-	s.growth.snapshots[uid] = snap
-	s.growth.mu.Unlock()
+	p.growth.mu.Lock()
+	p.growth.snapshots[uid] = snap
+	p.growth.mu.Unlock()
 }
 
 // probeGrowth 拉一次成长中心全量状态（5 个 GET），组装快照。
 // 任一子项失败只记录 error，不阻断其它子项——部分数据也比整行空白有用。
-func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
+func (p *Provider) probeGrowth(uid string) *GrowthSnapshot {
 	snap := GrowthSnapshot{UID: uid}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		snap.Error = "无可用凭证"
-		return s.failGrowthSnapshot(uid, snap, "无可用凭证")
+		return p.failGrowthSnapshot(uid, snap, "无可用凭证")
 	}
 	snap.ObservedAt = time.Now()
 	snap.Nickname = a.Nickname
 
 	// 每次上游调用都经过共享信号量 —— 这样「账号并发 × 账号内并发」的总量
-	// 始终被 growthProbeConcurrency 夹住，不会因为层层相乘冲破风控上限。
+	// 始终被 GrowthProbeConcurrency 夹住，不会因为层层相乘冲破风控上限。
 	//
 	// 用闭包 + defer 而不是裸 acquire/release：后者在 GrowthTasks panic 时
 	// 会漏掉 release，令牌永久丢失，最终把**所有**刷新卡死在 acquire 上。
@@ -276,12 +283,12 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 	var tasks []upstream.GrowthTask
 	var err error
 	func() {
-		s.probeSem.acquire()
-		defer s.probeSem.release()
-		tasks, err = s.cfg.Upstream.GrowthTasks(a)
+		p.probeSem.acquire()
+		defer p.probeSem.release()
+		tasks, err = p.client.GrowthTasks(a)
 	}()
 	if err != nil {
-		return s.failGrowthSnapshot(uid, snap, "任务列表: "+err.Error())
+		return p.failGrowthSnapshot(uid, snap, "任务列表: "+err.Error())
 	}
 	snap.TasksTotal = len(tasks)
 	snap.Tasks = make([]GrowthTaskView, 0, len(tasks))
@@ -360,27 +367,27 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 	wg.Add(4)
 	go func() {
 		defer wg.Done()
-		s.probeSem.acquire()
-		defer s.probeSem.release()
-		st, stErr = s.cfg.Upstream.GrowthStreak(a)
+		p.probeSem.acquire()
+		defer p.probeSem.release()
+		st, stErr = p.client.GrowthStreak(a)
 	}()
 	go func() {
 		defer wg.Done()
-		s.probeSem.acquire()
-		defer s.probeSem.release()
-		e, _ = s.cfg.Upstream.GrowthEnergy(a)
+		p.probeSem.acquire()
+		defer p.probeSem.release()
+		e, _ = p.client.GrowthEnergy(a)
 	}()
 	go func() {
 		defer wg.Done()
-		s.probeSem.acquire()
-		defer s.probeSem.release()
-		q, _ = s.cfg.Upstream.GrowthBuddyQuota(a)
+		p.probeSem.acquire()
+		defer p.probeSem.release()
+		q, _ = p.client.GrowthBuddyQuota(a)
 	}()
 	go func() {
 		defer wg.Done()
-		s.probeSem.acquire()
-		defer s.probeSem.release()
-		l, _ = s.cfg.Upstream.GrowthLotteryChances(a)
+		p.probeSem.acquire()
+		defer p.probeSem.release()
+		l, _ = p.client.GrowthLotteryChances(a)
 	}()
 	wg.Wait()
 
@@ -408,7 +415,7 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 	}
 
 	snap.Stale = false
-	s.storeGrowthSnapshot(uid, snap)
+	p.storeGrowthSnapshot(uid, snap)
 	return &snap
 }
 
@@ -417,57 +424,57 @@ func (s *Scheduler) probeGrowth(uid string) *GrowthSnapshot {
 // 为什么不能直接覆盖成一份只有 error 的快照：上游抖一下就会把整个面板抹白，
 // 而守卫在 due 窗口（默认 10 分钟）内不会重试，用户会长时间盯着空表，
 // 且完全无从判断是「本来就没有」还是「这次没查到」。
-func (s *Scheduler) failGrowthSnapshot(uid string, fresh GrowthSnapshot, msg string) *GrowthSnapshot {
+func (p *Provider) failGrowthSnapshot(uid string, fresh GrowthSnapshot, msg string) *GrowthSnapshot {
 	msg = trunc(msg)
-	if prev, ok := s.growthSnapshot(uid); ok && prev.TasksTotal > 0 {
+	if prev, ok := p.growthSnapshot(uid); ok && prev.TasksTotal > 0 {
 		prev.Error = msg
 		prev.Stale = true
 		// ObservedAt 保持为「数据实际观测时刻」，前端据此显示数据有多旧。
-		s.storeGrowthSnapshot(uid, prev)
+		p.storeGrowthSnapshot(uid, prev)
 		return &prev
 	}
 	fresh.Error = msg
 	fresh.Stale = false
-	s.storeGrowthSnapshot(uid, fresh)
+	p.storeGrowthSnapshot(uid, fresh)
 	return &fresh
 }
 
 // growthSnapshot 读取单个账号的缓存快照。
-func (s *Scheduler) growthSnapshot(uid string) (GrowthSnapshot, bool) {
-	if s.growth == nil {
+func (p *Provider) growthSnapshot(uid string) (GrowthSnapshot, bool) {
+	if p.growth == nil {
 		return GrowthSnapshot{}, false
 	}
-	s.growth.mu.Lock()
-	defer s.growth.mu.Unlock()
-	v, ok := s.growth.snapshots[uid]
+	p.growth.mu.Lock()
+	defer p.growth.mu.Unlock()
+	v, ok := p.growth.snapshots[uid]
 	return v, ok
 }
 
 func trunc(s string) string {
-	if len(s) > growthErrMax {
-		return s[:growthErrMax]
+	if len(s) > GrowthErrMax {
+		return s[:GrowthErrMax]
 	}
 	return s
 }
 
 // growthDue / scheduleGrowthNext 与旅行守卫同构：决定何时再查这个账号。
-func (s *Scheduler) growthDue(uid string, now time.Time) bool {
-	if s.growth == nil {
+func (p *Provider) growthDue(uid string, now time.Time) bool {
+	if p.growth == nil {
 		return true
 	}
-	s.growth.mu.Lock()
-	defer s.growth.mu.Unlock()
-	at, ok := s.growth.due[uid]
+	p.growth.mu.Lock()
+	defer p.growth.mu.Unlock()
+	at, ok := p.growth.due[uid]
 	return !ok || !now.Before(at)
 }
 
-func (s *Scheduler) scheduleGrowthNext(uid string) {
-	if s.growth == nil {
+func (p *Provider) scheduleGrowthNext(uid string) {
+	if p.growth == nil {
 		return
 	}
-	s.growth.mu.Lock()
-	s.growth.due[uid] = time.Now().Add(s.GrowthWatchInterval())
-	s.growth.mu.Unlock()
+	p.growth.mu.Lock()
+	p.growth.due[uid] = time.Now().Add(p.GrowthWatchInterval())
+	p.growth.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -480,17 +487,17 @@ func (s *Scheduler) scheduleGrowthNext(uid string) {
 // 这是唯一真正让积分到账的动作。上游把「达成」与「发奖」拆成两步：
 // completed = 已达成待领取，claim 成功后状态变 claimed。已领过的任务返回
 // already_claimed=true（幂等），此时 Credits 记 0，不算收益也不算失败。
-func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionResult {
+func (p *Provider) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionResult {
 	res := GrowthActionResult{UID: uid, Action: "claim"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
-	tasks, err := s.cfg.Upstream.GrowthTasks(a)
+	tasks, err := p.client.GrowthTasks(a)
 	if err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "拉取任务失败: "+err.Error()
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 
@@ -511,11 +518,11 @@ func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionRe
 		if taskCode != "" {
 			res.Detail = "任务「" + taskCode + "」当前不可领取"
 		}
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		// 提前返回也要刷新：用户点了「领取」却没领到，往往正是因为快照旧了
 		// （守卫轮刚替我们领过、或任务刚被别人领走）。刷一次能让界面立刻
 		// 反映真实状态，而不是让用户对着"待领取"反复点。
-		s.refreshOwnSnapshot(uid, res.Status)
+		p.refreshOwnSnapshot(uid, res.Status)
 		return res
 	}
 
@@ -524,7 +531,7 @@ func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionRe
 	okN, failN, alreadyN := 0, 0, 0
 	var lastErr string
 	for _, code := range codes {
-		r, err := s.cfg.Upstream.GrowthClaim(a, code)
+		r, err := p.client.GrowthClaim(a, code)
 		if err != nil {
 			failN++
 			lastErr = code + ": " + shortErr(err)
@@ -563,8 +570,8 @@ func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionRe
 		res.Status = checkinlog.StatusSkip
 		res.Detail = "奖励此前已领取"
 	}
-	s.recordGrowth(uid, res, trigger)
-	s.refreshOwnSnapshot(uid, res.Status)
+	p.recordGrowth(uid, res, trigger)
+	p.refreshOwnSnapshot(uid, res.Status)
 	return res
 }
 
@@ -573,17 +580,17 @@ func (s *Scheduler) GrowthClaimFor(uid, taskCode, trigger string) GrowthActionRe
 // 语义提醒（实测）：接单**不发奖励**，只让任务开始计进度。
 // 因此返回值里的 Credits/Energy 只是「这些任务完成后可得」，不代表本次到账，
 // 记账时不要把它算成收益。真正到账的是 GrowthClaimFor。
-func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionResult {
+func (p *Provider) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionResult {
 	res := GrowthActionResult{UID: uid, Action: "accept"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
-	tasks, err := s.cfg.Upstream.GrowthTasks(a)
+	tasks, err := p.client.GrowthTasks(a)
 	if err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "拉取任务失败: "+err.Error()
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 
@@ -607,16 +614,16 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 		if taskCode != "" {
 			res.Detail = "任务「" + taskCode + "」当前不可接单"
 		}
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		// 同 claim：快照可能已过期（守卫轮刚接过），刷一次让界面与现实一致。
-		s.refreshOwnSnapshot(uid, res.Status)
+		p.refreshOwnSnapshot(uid, res.Status)
 		return res
 	}
 
-	results, err := s.cfg.Upstream.GrowthAcceptTasks(a, codes)
+	results, err := p.client.GrowthAcceptTasks(a, codes)
 	if err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "接单请求失败: "+err.Error()
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	okN, skipN, failN := 0, 0, 0
@@ -675,9 +682,9 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 			res.Detail = "没有可接单的任务"
 		}
 	}
-	s.recordGrowth(uid, res, trigger)
-	s.refreshOwnSnapshot(uid, res.Status)
-	s.scheduleGrowthNext(uid)
+	p.recordGrowth(uid, res, trigger)
+	p.refreshOwnSnapshot(uid, res.Status)
+	p.scheduleGrowthNext(uid)
 	return res
 }
 
@@ -695,11 +702,11 @@ func (s *Scheduler) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionR
 //     上一次的错误信息覆盖掉。
 //
 // 只探 uid 自己 —— 调用方传进来的就是目标账号，绝不顺带扫全量。
-func (s *Scheduler) refreshOwnSnapshot(uid, status string) {
+func (p *Provider) refreshOwnSnapshot(uid, status string) {
 	if status == checkinlog.StatusFail {
 		return
 	}
-	s.probeGrowth(uid)
+	p.probeGrowth(uid)
 }
 
 // acceptRejectionReason 判定上游的接单拒绝是否属于**预期内**（应记为跳过而非失败）。
@@ -757,59 +764,59 @@ func prerequisiteHint(code string) string {
 }
 
 // GrowthMakeupFor 补签。date 为空时取上游给出的可补签日期列表里的第一个。
-func (s *Scheduler) GrowthMakeupFor(uid, date, trigger string) GrowthActionResult {
+func (p *Provider) GrowthMakeupFor(uid, date, trigger string) GrowthActionResult {
 	res := GrowthActionResult{UID: uid, Action: "makeup"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
 	if date == "" {
-		st, err := s.cfg.Upstream.GrowthStreak(a)
+		st, err := p.client.GrowthStreak(a)
 		if err != nil {
 			res.Status, res.Detail = checkinlog.StatusFail, "查询连登失败: "+err.Error()
-			s.recordGrowth(uid, res, trigger)
+			p.recordGrowth(uid, res, trigger)
 			return res
 		}
 		if st.MakeupCards.Balance <= 0 {
 			res.Status, res.Detail = checkinlog.StatusSkip, "没有补签卡"
-			s.recordGrowth(uid, res, trigger)
+			p.recordGrowth(uid, res, trigger)
 			return res
 		}
 		if len(st.Streak.MakeupDates) == 0 {
 			res.Status, res.Detail = checkinlog.StatusSkip, "没有可补签的日期"
-			s.recordGrowth(uid, res, trigger)
+			p.recordGrowth(uid, res, trigger)
 			return res
 		}
 		date = st.Streak.MakeupDates[0]
 	}
-	if err := s.cfg.Upstream.GrowthMakeup(a, date); err != nil {
+	if err := p.client.GrowthMakeup(a, date); err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "补签 "+date+" 失败: "+err.Error()
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	res.Status, res.Detail, res.Count = checkinlog.StatusOK, "已补签 "+date, 1
-	s.recordGrowth(uid, res, trigger)
-	s.refreshOwnSnapshot(uid, res.Status)
-	s.scheduleGrowthNext(uid)
+	p.recordGrowth(uid, res, trigger)
+	p.refreshOwnSnapshot(uid, res.Status)
+	p.scheduleGrowthNext(uid)
 	return res
 }
 
 // GrowthRedeemFor 连登兑换。tier 为空时自动挑「剩余天数够、且未领过」的最高档。
-func (s *Scheduler) GrowthRedeemFor(uid, tier, trigger string) GrowthActionResult {
+func (p *Provider) GrowthRedeemFor(uid, tier, trigger string) GrowthActionResult {
 	res := GrowthActionResult{UID: uid, Action: "redeem"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
-	st, err := s.cfg.Upstream.GrowthStreak(a)
+	st, err := p.client.GrowthStreak(a)
 	if err != nil || st == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "查询连登失败"
 		if err != nil {
 			res.Detail = "查询连登失败: " + err.Error()
 		}
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	remaining := st.RedemptionStatus.RemainingDays
@@ -826,13 +833,13 @@ func (s *Scheduler) GrowthRedeemFor(uid, tier, trigger string) GrowthActionResul
 		if tier == "" {
 			res.Status, res.Detail = checkinlog.StatusSkip,
 				fmt.Sprintf("可兑换天数 %d 天，不足以兑换任何档位", remaining)
-			s.recordGrowth(uid, res, trigger)
+			p.recordGrowth(uid, res, trigger)
 			return res
 		}
 	}
-	if err := s.cfg.Upstream.GrowthRedeem(a, tier); err != nil {
+	if err := p.client.GrowthRedeem(a, tier); err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "兑换 "+tier+" 失败: "+err.Error()
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	res.Status, res.Detail, res.Count = checkinlog.StatusOK, "连登兑换 "+tier, 1
@@ -842,9 +849,9 @@ func (s *Scheduler) GrowthRedeemFor(uid, tier, trigger string) GrowthActionResul
 			break
 		}
 	}
-	s.recordGrowth(uid, res, trigger)
-	s.refreshOwnSnapshot(uid, res.Status)
-	s.scheduleGrowthNext(uid)
+	p.recordGrowth(uid, res, trigger)
+	p.refreshOwnSnapshot(uid, res.Status)
+	p.scheduleGrowthNext(uid)
 	return res
 }
 
@@ -865,17 +872,17 @@ func redeemTierClaimed(st *upstream.StreakState, tier string) bool {
 }
 
 // GrowthOpenFor 开盲盒 count 次。count<=0 时按 quota.affordable 与单次上限取小值。
-func (s *Scheduler) GrowthOpenFor(uid string, count int, trigger string) GrowthActionResult {
+func (p *Provider) GrowthOpenFor(uid string, count int, trigger string) GrowthActionResult {
 	res := GrowthActionResult{UID: uid, Action: "open"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
-	q, err := s.cfg.Upstream.GrowthBuddyQuota(a)
+	q, err := p.client.GrowthBuddyQuota(a)
 	if err != nil || q == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "查询盲盒额度失败"
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	if count <= 0 {
@@ -887,58 +894,58 @@ func (s *Scheduler) GrowthOpenFor(uid string, count int, trigger string) GrowthA
 	if count <= 0 {
 		res.Status, res.Detail = checkinlog.StatusSkip,
 			fmt.Sprintf("能量不足（余额 %d，单次消耗 %d）", q.Balance, q.CostPerOpen)
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
-	if err := s.cfg.Upstream.GrowthOpenBuddy(a, count); err != nil {
+	if err := p.client.GrowthOpenBuddy(a, count); err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, fmt.Sprintf("开盲盒 %d 次失败: %v", count, err)
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	res.Status, res.Detail, res.Count = checkinlog.StatusOK, fmt.Sprintf("开盲盒 %d 次", count), count
 	res.Energy = -int64(count) * q.CostPerOpen
-	s.recordGrowth(uid, res, trigger)
-	s.refreshOwnSnapshot(uid, res.Status)
-	s.scheduleGrowthNext(uid)
+	p.recordGrowth(uid, res, trigger)
+	p.refreshOwnSnapshot(uid, res.Status)
+	p.scheduleGrowthNext(uid)
 	return res
 }
 
 // GrowthDrawFor 抽奖一次。
-func (s *Scheduler) GrowthDrawFor(uid, trigger string) GrowthActionResult {
+func (p *Provider) GrowthDrawFor(uid, trigger string) GrowthActionResult {
 	res := GrowthActionResult{UID: uid, Action: "draw"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
-	l, err := s.cfg.Upstream.GrowthLotteryChances(a)
+	l, err := p.client.GrowthLotteryChances(a)
 	if err != nil || l == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "查询抽奖次数失败"
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	if l.Balance <= 0 {
 		res.Status, res.Detail = checkinlog.StatusSkip, "没有抽奖次数"
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
-	if err := s.cfg.Upstream.GrowthLotteryDraw(a); err != nil {
+	if err := p.client.GrowthLotteryDraw(a); err != nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "抽奖失败: "+err.Error()
-		s.recordGrowth(uid, res, trigger)
+		p.recordGrowth(uid, res, trigger)
 		return res
 	}
 	res.Status, res.Detail, res.Count = checkinlog.StatusOK, "抽奖 1 次", 1
-	s.recordGrowth(uid, res, trigger)
-	s.refreshOwnSnapshot(uid, res.Status)
-	s.scheduleGrowthNext(uid)
+	p.recordGrowth(uid, res, trigger)
+	p.refreshOwnSnapshot(uid, res.Status)
+	p.scheduleGrowthNext(uid)
 	return res
 }
 
-func (s *Scheduler) recordGrowth(uid string, res GrowthActionResult, trigger string) {
-	if s.cfg.Log == nil {
+func (p *Provider) recordGrowth(uid string, res GrowthActionResult, trigger string) {
+	if p.cfg.Log == nil {
 		return
 	}
-	s.record(uid, checkinlog.KindGrowth, res.Status,
+	p.record(uid, checkinlog.KindGrowth, res.Status,
 		fmt.Sprintf("[%s] %s", res.Action, res.Detail), res.Credits, trigger)
 }
 
@@ -946,7 +953,7 @@ func (s *Scheduler) recordGrowth(uid string, res GrowthActionResult, trigger str
 // 全量扫描 / 守卫轮
 // ---------------------------------------------------------------------------
 
-// growthProbeConcurrency 是**对上游同时在途请求数**的总上限。
+// GrowthProbeConcurrency 是**对上游同时在途请求数**的总上限。
 //
 // ⚠ 这个数约束的是「同时在飞的 HTTP 请求」，不是「同时处理的账号」。
 // 两层并发共享同一个信号量：
@@ -955,17 +962,17 @@ func (s *Scheduler) recordGrowth(uid string, res GrowthActionResult, trigger str
 //	调用层（probeGrowth）  ：每个账号内的 4 个独立 GET 并发
 //
 // 若两层各限各的，实际上游峰值 = 5 账号 × 4 调用 = 20 —— 那就等于没限流。
-// 实测踩过：Task 6 加进来后峰值从 5 涨到 20，被 TestRefreshGrowthConcurrencyCap
+// 实测踩过：加进来后峰值从 5 涨到 20，被 TestRefreshGrowthConcurrencyCap
 // 抓出来。所以两层必须共用同一预算。
 //
 // 为什么是 5：上游是同一个腾讯服务，账号多时同时打过去有触发风控的风险
 // （旅行模块已有「账号间间隔 800ms 避免触发上游风控」的先例）。实测 3 账号
 // 并发化后 7157ms → 2512ms 已经够用，再放宽只增风控面、对个位数账号无增益。
-const growthProbeConcurrency = 5
+const GrowthProbeConcurrency = 5
 
 // growthProbeSem 是跨两层共享的并发预算。
 //
-// 为什么做成字段而不是包级变量：多个 Scheduler 实例（测试里很常见）应当
+// 为什么做成字段而不是包级变量：多个 Provider 实例（测试里很常见）应当
 // 各自独立，共用包级信号量会造成测试之间互相阻塞。
 type growthProbeSem struct {
 	ch chan struct{}
@@ -993,7 +1000,7 @@ func (g *growthProbeSem) release() {
 // force=false 时只查「到期」的账号。autoActions 表示是否执行自动动作。
 //
 // 账号之间**并发**执行，但所有账号、所有子调用共享同一个并发预算
-// （growthProbeConcurrency）—— 见该常量的注释。
+// （GrowthProbeConcurrency）—— 见该常量的注释。
 //
 // 为什么必须并发：实测 1 账号 2331ms / 3 账号 7157ms（比值 3.07，精确线性），
 // 10 个账号就是 ~23 秒。串行 for 循环在账号数一多就会让「点刷新」变成
@@ -1001,30 +1008,30 @@ func (g *growthProbeSem) release() {
 //
 // 并发安全性：probeGrowth 只通过 storeGrowthSnapshot（持锁）与
 // runGrowthAutoActions 内部的状态访问器（均持锁）触碰共享状态，
-// 不直接写 s.growth.* —— 已逐个确认（见 growthwatch.go 里各访问器的 mu）。
-func (s *Scheduler) RefreshGrowth(force bool, autoActions bool) []GrowthSnapshot {
+// 不直接写 p.growth.* —— 已逐个确认。
+func (p *Provider) RefreshGrowth(force bool, autoActions bool) []GrowthSnapshot {
 	now := time.Now()
 
 	// 先挑出本轮要处理的账号（纯读 + 只读 growthDue，不涉及网络）。
 	var uids []string
-	for _, st := range s.cfg.Pool.List() {
+	for _, st := range p.cfg.Pool.List() {
 		if st.Disabled {
 			continue
 		}
-		if !force && !s.growthDue(st.UID, now) {
+		if !force && !p.growthDue(st.UID, now) {
 			continue
 		}
 		uids = append(uids, st.UID)
 	}
 	if len(uids) == 0 {
-		return s.GrowthSnapshots()
+		return p.GrowthSnapshots()
 	}
 
 	// 用共享信号量控制「对上游同时在途的请求数」，不是「同时处理的账号数」。
 	//
 	// 账号层只负责启动 goroutine；真正的限流发生在 probeGrowth 内部 ——
 	// 每次上游调用前都 acquire 一次。这样两层共用一个预算，
-	// 无论账号多少、每账号几个并发调用，总在途数都 <= growthProbeConcurrency。
+	// 无论账号多少、每账号几个并发调用，总在途数都 <= GrowthProbeConcurrency。
 	//
 	// 为什么不在这里按账号数切片：那样只能限住账号数，限不住"每账号内部又开几个并发"
 	// —— 实测过，两层各限各的会让峰值从 5 涨到 20。
@@ -1033,64 +1040,68 @@ func (s *Scheduler) RefreshGrowth(force bool, autoActions bool) []GrowthSnapshot
 		wg.Add(1)
 		go func(uid string) {
 			defer wg.Done()
-			snap := s.probeGrowth(uid)
+			snap := p.probeGrowth(uid)
 			if autoActions {
-				s.runGrowthAutoActions(snap)
+				p.runGrowthAutoActions(snap)
 			}
-			s.scheduleGrowthNext(uid)
+			p.scheduleGrowthNext(uid)
 		}(uid)
 	}
 	wg.Wait()
 
-	return s.GrowthSnapshots()
+	return p.GrowthSnapshots()
 }
 
 // runGrowthAutoActions 依据快照与开关执行自动动作。
 // 顺序有意为之：先接单/补签（纯状态与收益）→ 再开销类动作，
 // 这样同一轮里刚领到的能量能立刻用于开盲盒，不必等下一轮。
-func (s *Scheduler) runGrowthAutoActions(snap *GrowthSnapshot) {
+func (p *Provider) runGrowthAutoActions(snap *GrowthSnapshot) {
 	if snap == nil || snap.Error != "" {
 		return
 	}
-	accept, makeup, redeem, open, draw, claim := s.GrowthToggles()
+	accept, makeup, redeem, open, draw, claim := p.GrowthToggles()
 	// 先领奖再去忙别的：这是唯一真正让分数到账的动作，
 	// 而且领完会刷新快照，后面的判断用的是最新状态。
 	if claim && snap.ClaimableCount > 0 {
-		res := s.GrowthClaimFor(snap.UID, "", triggerAuto)
+		res := p.GrowthClaimFor(snap.UID, "", triggerAuto)
 		if res.Status == checkinlog.StatusOK {
 			// 领奖改变了账号的积分，池里缓存的是旧值，刷新一下，
 			// 否则界面上的积分要等下一次定时刷新才对得上。
-			s.RefreshCredits(snap.UID, triggerAuto)
-			s.probeGrowth(snap.UID)
+			p.RefreshCredits(snap.UID, triggerAuto)
+			p.probeGrowth(snap.UID)
 		}
 	}
 	if accept && snap.AcceptableCount > 0 {
-		s.GrowthAcceptFor(snap.UID, "", triggerAuto)
-		s.probeGrowth(snap.UID) // 接完刷新快照，供后续动作判断
+		p.GrowthAcceptFor(snap.UID, "", triggerAuto)
+		p.probeGrowth(snap.UID) // 接完刷新快照，供后续动作判断
 	}
 	if makeup && snap.MakeupCards > 0 && len(snap.MakeupDates) > 0 {
-		s.GrowthMakeupFor(snap.UID, "", triggerAuto)
+		p.GrowthMakeupFor(snap.UID, "", triggerAuto)
 	}
 	if redeem {
-		s.GrowthRedeemFor(snap.UID, "", triggerAuto)
+		p.GrowthRedeemFor(snap.UID, "", triggerAuto)
 	}
 	if open && snap.BlindBoxAffordable > 0 {
-		s.GrowthOpenFor(snap.UID, 0, triggerAuto)
+		p.GrowthOpenFor(snap.UID, 0, triggerAuto)
 	}
 	if draw && snap.LotteryChances > 0 {
-		s.GrowthDrawFor(snap.UID, triggerAuto)
+		p.GrowthDrawFor(snap.UID, triggerAuto)
 	}
 }
 
 // RunGrowthWatcher 常驻守卫：启动即全量扫一次填满缓存，之后按间隔复查。
-func (s *Scheduler) RunGrowthWatcher(ctx context.Context, interval time.Duration) {
-	if s.growth == nil {
+//
+// 注意：生产路径**不再**由 cmd/server 直接调用它 —— 它现在通过 Provider.Jobs()
+// 注册给核心调度器，由调度器按 Due 判断错峰执行。保留这个方法是为了让
+// 既有调用点（以及"立即跑一轮"的语义）零改动。
+func (p *Provider) RunGrowthWatcher(ctx context.Context, interval time.Duration) {
+	if p.growth == nil {
 		return
 	}
 	if interval <= 0 {
 		interval = 10 * time.Minute
 	}
-	s.RefreshGrowth(true, true)
+	p.RefreshGrowth(true, true)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -1099,7 +1110,7 @@ func (s *Scheduler) RunGrowthWatcher(ctx context.Context, interval time.Duration
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.RefreshGrowth(false, true)
+			p.RefreshGrowth(false, true)
 		}
 	}
 }

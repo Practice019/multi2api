@@ -1,5 +1,15 @@
-// Package scheduler 定时任务：每日签到（09/21点，末尾顺带派猫/领奖）+ token keepalive（22点）。
-// 签到成功后重新查余额，余额 > 0 的冷却账号自动解冻。
+// Package scheduler 定时任务**框架**：按整点执行签到/保活，并按到期判断执行
+// 各上游通过 gateway.JobExt 注册的守卫任务（见 job.go）。
+//
+// # 本包不认识任何具体上游
+//
+// 改造前这里还装着「成长中心守卫」「猫猫旅行守卫」这些 CodeBuddy 专属业务
+// （审计 354 处上游概念）。它们已搬进 internal/workbuddy，本包只留框架：
+// 注册 Job、判到期、错峰执行、记日志。
+//
+// **本包不得 import 任何 internal/<上游> 包**（由 gateway 的架构约束测试强制）。
+// 接线发生在 cmd/server：调度器通过 gateway.ExtOf[gateway.JobExt](provider)
+// 发现任务。
 package scheduler
 
 import (
@@ -13,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -22,13 +33,14 @@ import (
 // 任务开关用「禁用」命名而非「启用」：零值 Config 即两类任务都启用，
 // 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
 type Config struct {
-	Pool           *pool.Pool
-	Upstream       *upstream.Client
-	CheckinHours   []int // 默认 [9, 21]
-	KeepaliveHours []int // 默认 [22]
+	Pool         *pool.Pool
+	Upstream     *upstream.Client
+	CheckinHours []int // 默认 [9, 21]
+
+	// KeepaliveHours 默认 [22]。
+	KeepaliveHours []int
 
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
-	// 禁用后不再有任何签到时点，搭签到便车的猫猫旅行也随之停摆。
 	CheckinDisabled bool
 	// KeepaliveDisabled 显式关闭 token 保活排程（schedule.keepalive_enabled=false）。
 	KeepaliveDisabled bool
@@ -36,38 +48,20 @@ type Config struct {
 	// Log 任务结果历史（可选；nil = 不记录）。管理台的「今日签到了吗」也读它。
 	Log *checkinlog.Log
 
-	// TravelAutoClaimDisabled 显式关闭「猫到站自动领奖」。
-	// 与 CheckinDisabled 同一命名法：零值 Config = 自动领奖开启。
-	TravelAutoClaimDisabled bool
-	// TravelWatchInterval 守卫轮间隔（同时是上游未给 arrive_at 时的兜底轮询周期）。<=0 回落 1 分钟。
-	TravelWatchInterval time.Duration
-
-	// ---- 成长中心（/v2/activity/growth/*）----
-	// GrowthWatchInterval 成长中心扫描间隔。<=0 回落 10 分钟。
-	GrowthWatchInterval time.Duration
-	// 六个自动动作的初始开关。用 *bool 区分「未设置」与「显式 false」，
-	// 默认值在 New 里给出：领奖 true、补签 true，其余四个 false。
-	// 这里刻意不用 Disabled/Enabled 命名：各开关默认值不一致，
-	// 「零值即某一边」的约定必然让其中几个名字读起来是反的。
+	// Registry 上游注册表。非 nil 时 New 会自动发现各上游的 JobExt 任务
+	// （见 job.go 的 Jobs.Discover）—— 这是"加新上游时核心零改动"的接线点。
 	//
-	// GrowthAutoClaim 默认开：completed 只代表任务条件达成，不调 claim 奖励永远不到账
-	// （实测对 completed 的 chat_5 调 claim 后积分 +100 且状态变 claimed）。
-	GrowthAutoClaim  *bool
-	GrowthAutoAccept *bool
-	GrowthAutoMakeup *bool
-	GrowthAutoRedeem *bool
-	GrowthAutoOpen   *bool
-	GrowthAutoDraw   *bool
+	// 为 nil 时调度器只有签到/保活两类内置任务，行为与改造前一致
+	// （既有测试全部走这条路径，无需改动）。
+	Registry *gateway.Registry
 }
 
 // Scheduler 调度器。
 type Scheduler struct {
 	cfg Config
 
-	// mu/adoptTried 领养当日失败记录：uid → 自然日（CST）。门槛未达的账号当日不再重试，
-	// 避免同日多趟对上游重试轰炸；进程重启即清零（无需持久化）。
-	mu         sync.Mutex
-	adoptTried map[string]string
+	// mu 保护下面四个运行时覆盖指针（管理台/设置页在请求路径上改它们）。
+	mu sync.Mutex
 
 	// checkinOverride/keepaliveOverride 运行时开关（管理台用）。
 	// 用 *bool 而非 bool：零值表示「未覆盖」，此时回落到 cfg 的初始值——
@@ -80,20 +74,15 @@ type Scheduler struct {
 	checkinHoursOverride   *[]int
 	keepaliveHoursOverride *[]int
 
-	// travel 猫猫旅行守卫状态（快照缓存 + 到期表 + 自动领奖开关）。
-	// 直接构造 &Scheduler{...} 时为 nil，所有相关方法都做了 nil 保护。
-	travel *travelWatchState
-
-	// growth 成长中心守卫状态（快照缓存 + 到期表 + 五个自动动作开关）。
-	growth *growthWatchState
-
-	// probeSem 是成长中心探测的**共享并发预算**：账号之间、以及单个账号内的
-	// 多个上游调用，都从这里取令牌。见 growthProbeConcurrency 的注释。
+	// jobs 上游注册的守卫任务集合（成长/旅行/…）。
 	//
-	// 同样是 nil 安全（acquire/release 都对 nil 直接返回）—— 与 travel/growth
-	// 一致，这样 &Scheduler{cfg: ...} 这种直接构造（既有测试的写法）不会崩，
-	// 只是失去限流：无限流时并发不受约束，仅影响测试，不影响生产（New() 总会建）。
-	probeSem *growthProbeSem
+	// 为 nil 时（直接构造 &Scheduler{cfg: ...} 的既有测试）所有相关方法
+	// 都做了 nil 保护，行为退化为"没有上游任务"，其余不受影响。
+	jobs *Jobs
+
+	// hooks 签到收尾时顺带推进的上游任务（见 CheckinHook 的注释）。
+	// 在 cmd/server 的接线处注册；构造期之后不再改动，无需加锁。
+	hooks []CheckinHook
 }
 
 // New 构建。
@@ -104,31 +93,14 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
 	}
-	return &Scheduler{
-		cfg:        cfg,
-		adoptTried: make(map[string]string),
-		travel:     newTravelWatchState(!cfg.TravelAutoClaimDisabled),
-		// 每个 Scheduler 一份独立预算：测试里会起多个实例，
-		// 共用包级信号量会让它们互相阻塞。
-		probeSem: newGrowthProbeSem(growthProbeConcurrency),
-		growth: newGrowthWatchState(
-			// accept 默认 true：见 growthWatchState.autoAccept 的注释。
-			boolOrPtr(cfg.GrowthAutoAccept, true),
-			boolOrPtr(cfg.GrowthAutoMakeup, true),
-			boolOrPtr(cfg.GrowthAutoRedeem, false),
-			boolOrPtr(cfg.GrowthAutoOpen, false),
-			boolOrPtr(cfg.GrowthAutoDraw, false),
-			boolOrPtr(cfg.GrowthAutoClaim, true),
-		),
+	s := &Scheduler{
+		cfg:  cfg,
+		jobs: NewJobs(),
 	}
-}
-
-// boolOrPtr 取 *bool 的值，nil（未设置）时返回默认值。
-func boolOrPtr(p *bool, def bool) bool {
-	if p == nil {
-		return def
-	}
-	return *p
+	// 从注册表发现各上游的 JobExt 任务。放在构造期而不是 Run 里：
+	// 管理台的"调度状态"要能立刻看到任务清单。
+	s.jobs.Discover(cfg.Registry)
+	return s
 }
 
 // CheckinEnabled 报告签到排程当前是否生效（未覆盖时取 cfg 初值）。
@@ -312,26 +284,46 @@ func (k taskKind) String() string {
 }
 
 // Run 主循环，阻塞直到 ctx 取消。
+//
+// 两条时间线并行推进：
+//   - **整点线**：签到/保活按配置的时点唤醒（下一时点由 nextWake 算出）
+//   - **守卫线**：各上游注册的 Job 按各自的 Due/Interval 判到期
+//
+// 为什么合成一个循环而不是各起一个 goroutine：日志顺序、退出纪律、
+// "错峰"这件事都只有一处实现。守卫线每 jobTickInterval 醒一次问一句
+// "有活干吗"，空转成本是一次 map/O(1) 判断，远低于再多一条 goroutine 的维护成本。
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		next, kinds := s.nextWake(time.Now())
+		// 守卫线本轮是否该跑。两类整点任务都禁用时 next 为零值 ——
+		// 此时仍要继续推守卫线，不能整条循环停摆。
+		s.runJobsOnce(time.Now())
+
 		if next.IsZero() {
 			// 两类任务全部禁用：不空转，但也不能永久阻塞——否则管理台在运行时
 			// 重新打开开关后，没有任何东西能唤醒这个循环。改为低频复查。
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(disabledPollInterval):
+			case <-time.After(pollInterval(s.jobs, next)):
 				continue
 			}
 		}
-		timer := time.NewTimer(time.Until(next))
+
+		// 睡到「下一个整点时点」与「下一条守卫线轮询」中更早的那个。
+		wake := next
+		if tick := time.Now().Add(jobTickInterval); tick.Before(wake) && s.jobs.Len() > 0 {
+			wake = tick
+		}
+		timer := time.NewTimer(time.Until(wake))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		case <-timer.C:
 			// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
+			// 本次是守卫线轮询（而非整点）时 kinds 为空，什么都不做，
+			// 回到循环顶部再判一次即可。
 			for _, k := range kinds {
 				switch k {
 				case taskCheckin:
@@ -344,10 +336,30 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
+// runJobsOnce 按到期判断推一轮上游注册的守卫任务。
+func (s *Scheduler) runJobsOnce(now time.Time) {
+	if s.jobs == nil || s.jobs.Len() == 0 {
+		return
+	}
+	s.jobs.RunOnce(now)
+}
+
+// pollInterval 两类整点任务都禁用时的复查间隔。
+//
+// 有上游任务时用 jobTickInterval：否则「没有整点任务但注册了守卫任务」
+// 的场景会把守卫轮的粒度也拖成 disabledPollInterval。
+func pollInterval(jobs *Jobs, next time.Time) time.Duration {
+	if jobs != nil && jobs.Len() > 0 {
+		return jobTickInterval
+	}
+	return disabledPollInterval
+}
+
 // disabledPollInterval 两类任务全禁用时的复查间隔。
 const disabledPollInterval = 30 * time.Second
 
-// RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻，末尾顺带跑一趟猫猫旅行。
+// RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻，末尾顺带跑一趟
+// 各上游注册的「签到搭车」钩子（需要与签到时点成对执行的任务走这里）。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用的跳过。
 //
 // 旅行搭签到便车而非独立排程：每日上限按「派出」计 1 次/天且在派出时锁定奖励，
@@ -365,8 +377,8 @@ func (s *Scheduler) RunCheckin(trigger string) {
 		}
 		s.checkinOne(st.UID, trigger)
 	}
-	// 签到收尾（09/21 点）：顺带推进一趟旅行状态机（领养 / 派出 / 领奖）。
-	s.RunTravelNow()
+	// 签到收尾（09/21 点）：顺带推进一趟各上游的「搭车任务」（旅行状态机）。
+	s.runCheckinHooks()
 }
 
 // CheckinResult 单账号签到结果，供管理台回显。

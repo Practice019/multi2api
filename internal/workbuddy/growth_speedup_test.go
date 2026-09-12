@@ -1,16 +1,16 @@
-// Task 6 的效果验证（不启进程版）：
+// 效果验证（不启进程版）：
 // 用 httptest 起一个"可控延迟"的假上游，直接调 RefreshGrowth 测耗时。
 //
 // 为什么不用真机实例：用户明确要求不要动项目进程。
 // httptest 是进程内的假服务器，不占端口、不影响任何在跑的东西。
-package scheduler
+package workbuddy
 
 import (
 	"testing"
 	"time"
 )
 
-// TestProbeGrowthSpeedupMeasured 量化 Task 5 + Task 6 的叠加效果。
+// TestGrowthRefreshSpeedupMeasured 量化「账号并发 + 调用并发 + 共享预算」的叠加效果。
 //
 // 用「与真实上游同量级的延迟」建模：
 //
@@ -53,7 +53,7 @@ func TestGrowthRefreshSpeedupMeasured(t *testing.T) {
 
 // TestGrowthRefreshSharedBudgetAcrossBothLevels 钉死「两层共用一个预算」。
 //
-// 这是 Task 6 引入的真回归：账号层限 5、调用层又各开 4 个并发，
+// 这是引入账号层并发时引入的真回归：账号层限 5、调用层又各开 4 个并发，
 // 若不共享预算，峰值会变成 5×4=20（实测就是这么被 TestRefreshGrowthConcurrencyCap
 // 抓出来的）。这里用 8 个账号放大观察，断言峰值恒 <= 5。
 func TestGrowthRefreshSharedBudgetAcrossBothLevels(t *testing.T) {
