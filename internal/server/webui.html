@@ -81,6 +81,26 @@
     padding:7px 12px;font-weight:600;font-size:12px;letter-spacing:.2px}
   tr.grouprow:first-child > td{border-top:0}
   tr.grouprow .gname{margin-right:8px}
+  /* 通用上游面板（列表 + 领取）的样式。
+     刻意朴素：它要能渲染**任意**上游的任意列表形状，
+     所以不做花哨卡片，只保证"看着整齐、信息不丢"。 */
+  .ghead2{font-size:12px;font-weight:600;color:var(--dim);margin:0 0 8px;
+    letter-spacing:.3px}
+  .ghead2 + .ghead2{margin-top:14px}
+  .glist{display:flex;flex-direction:column;gap:6px}
+  .gitem{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:8px 11px;background:var(--panel2);border-radius:9px;font-size:13px}
+  .gitem .gname{font-weight:600}
+  .gitem .gqty{font-size:12px;color:var(--acc);font-weight:600}
+  .gitem .gmeta{flex-basis:100%;font-size:11px;color:var(--dim);
+    font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+  .gbad{padding:8px 11px;border-radius:9px;font-size:12px;color:var(--err);
+    border:1px solid var(--err);background:transparent}
+  .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px 14px}
+  .kvs .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;
+    padding:5px 0;border-bottom:1px solid var(--line)}
+  .kvs .k{color:var(--dim)}
+  .kvs .v{font-weight:600;word-break:break-all;text-align:right}
   .content > section{display:none}
   .content > section.active{display:block}
   @media (max-width:820px){
@@ -349,7 +369,11 @@
     </div>
   </section>
 
-  <section>
+  <!-- 上游专属面板：data-provider / data-cap / data-key 三个属性把它"
+       归属"到某个上游的某个能力位，导航据此分组、showPanel 据此拉数据。
+       这两个面板由 buildProviderPanels() 在 manifest 到达后**按能力位显隐** ——
+       没有声明 travel 的上游不会看到这一块。 -->
+  <section data-provider="workbuddy" data-cap="travel" data-key="workbuddy:travel">
     <h2>猫猫旅行 <span id="travelAutoHint" class="dim" style="font-weight:400;text-transform:none"></span>
       <span class="spacer"></span>
       <button id="btnTravelRefresh" style="padding:3px 10px;font-size:12px">刷新</button>
@@ -370,7 +394,7 @@
     </div>
   </section>
 
-  <section>
+  <section data-provider="workbuddy" data-cap="growth" data-key="workbuddy:growth">
     <h2>成长计划
       <span class="spacer"></span>
       <button id="btnGrowthRefresh" style="padding:3px 10px;font-size:12px">刷新</button>
@@ -556,6 +580,20 @@
       </fieldset>
     </div>
   </section>
+
+  <!-- 动态上游面板宿主。
+       这里**没有**任何写死的面板 —— 每个已在 manifest 里声明了能力位、
+       且该能力位有 GET 端点的上游，会由 buildProviderPanels() 在此生成
+       一个 <section data-provider data-cap>。
+
+       加第 3 个上游时：它若声明了能力位，这里自动多出一块，前端 0 改动。
+       这正是判据 1「加新上游核心零改动」在前端的落点。
+
+       ⚠ 生成时用 insertAdjacentHTML 插到**宿主之前**（而不是宿主内部），
+       这样生成出来的 <section> 是 #content 的直接子节点 ——
+       选择器 `#content > section` 才找得到它们。
+       （最初把 section 插进宿主内部，表现为"面板生成了但导航里没有"。） -->
+  <div id="providerPanels" style="display:none"></div>
   </div>
  </div>
 </main>
@@ -1324,19 +1362,26 @@
   // 每个上游专属面板在 T6 会按 capability 建出对应的 section，
   // 这里先把入口渲染出来并指向那个 section id。
   function buildNav() {
-    navSections = Array.from(document.querySelectorAll('#content > section'));
+    refreshNavSections();
+    // 先把"归属的上游不存在 / 没有该能力位"的静态面板隐藏掉（B7），
+    // 再做分组 —— 否则导航里会出现指向隐藏面板的入口。
+    const hiddenCount = hideOrphanPanels();
+    // 隐藏的面板也不进导航：过滤掉它们，用户看到的与能点的始终一致。
+    const visible = navSections.filter(sec => !sec.hidden);
 
     // 通用组：所有非上游 section（仪表盘/账号池/日志/设置…）。
-    // 判定方式是该 section 没有 data-provider 属性 —— 上游面板在 T6 会带上它。
-    const generic = navSections.filter(sec => !sec.dataset.provider);
+    const generic = visible.filter(sec => !sec.dataset.provider);
     const parts = [navGroupHTML('通用', '', generic, false)];
 
     // 上游组：每个 manifest 里的上游一组。
     for (const p of upstreamGroups()) {
-      const secs = navSections.filter(sec => sec.dataset.provider === p.id);
-      if (!secs.length) continue;   // 还没有面板的上游不占位置（T6 后才有）
+      const secs = visible.filter(sec => sec.dataset.provider === p.id);
+      if (!secs.length) continue;   // 该上游当前没有可见面板就不占位置
       const hd = navGroupHeaderHTML(p);
-      parts.push(navGroupHTML('', hd, secs, p.id === DEFAULT_PROVIDER));
+      // 第三个参数必须是**上游 id**（用于 data-pid 与折叠持久化）。
+      // 曾经误传 p.id === DEFAULT_PROVIDER（布尔值），于是渲染出
+      // data-pid="true"，折叠状态按 "true" 存 —— 加第二个上游时会串味。
+      parts.push(navGroupHTML('', hd, secs, p.id));
     }
 
     // 契约降级提示（评审 F4）。
@@ -1358,11 +1403,18 @@
 
     // 恢复上次选中的面板。用 section 的 key（data-key 或 index）而不是纯下标 ——
     // 分组后下标会随上游数量变化，用下标恢复会跳到别的面板。
+    //
+    // 注意候选只在**可见** section 里选：隐藏的上游面板（其上游没声明该能力位）
+    // 不能被选中，否则用户会落到一个 hidden 的 section 上、看到空白内容区。
     let start = -1;
     try {
       const saved = localStorage.getItem('wb2api.panelkey') || '';
-      start = navSections.findIndex(sec => navKey(sec) === saved);
+      start = navSections.findIndex(sec => !sec.hidden && navKey(sec) === saved);
     } catch { /* 隐私模式 */ }
+    if (start < 0) {
+      // 回落：第一个可见 section（通常就是仪表盘）
+      start = navSections.findIndex(sec => !sec.hidden);
+    }
     if (start < 0) start = 0;
     showPanel(start);
 
@@ -1414,7 +1466,9 @@
   // navGroupHTML 一个导航分组。
   //
   // headerHTML 为空时按 title 生成一个纯文字组头（通用组用）。
-  function navGroupHTML(title, headerHTML, secs, isUpstream) {
+  // 参数 upstreamId 是**上游 id**（不是布尔），
+  // 它同时用于 data-pid 与折叠状态的持久化键。
+  function navGroupHTML(title, headerHTML, secs, upstreamId) {
     const hd = headerHTML || `<span class="navgrouphd" style="cursor:default">${esc(title)}</span>`;
     const items = secs.map(sec => {
       const idx = navSections.indexOf(sec);
@@ -1423,7 +1477,8 @@
       const badge = label === '账号池' ? '<span class="badge" data-nav-badge></span>' : '';
       return `<button data-nav="${idx}" title="${esc(label)}">${esc(label)}${badge}</button>`;
     }).join('');
-    const pid = isUpstream ? ` data-pid="${esc(isUpstream)}"` : '';
+    // 只接受字符串形式的上游 id（防住"误传布尔"这类回归）
+    const pid = (typeof upstreamId === 'string' && upstreamId) ? ` data-pid="${esc(upstreamId)}"` : '';
     return `<div class="navgroup"${pid}>${hd}<div class="navitems">${items}</div></div>`;
   }
 
@@ -1480,12 +1535,276 @@
 
   // loadProviderPanel 按能力位给上游面板拉数据。
   //
-  // T6 会把 workbuddy 的成长/旅行接进来；在那之前这里只处理已知能力位，
-  // 未知能力位调用通用的拉取逻辑（T6 实现）。
+  // 分派方式：能力位 → 渲染函数。**没有 if (provider === 'xxx') 这种分支** ——
+  // 一个上游叫什么都不影响这里走哪条路，只影响 manifest 里它的能力位。
   function loadProviderPanel(providerId, cap) {
-    if (typeof loadProviderPanelData === 'function') {
-      loadProviderPanelData(providerId, cap);
+    const fn = PROVIDER_PANEL_RENDERERS[cap];
+    if (typeof fn !== 'function') return;
+    fn(providerId, cap);
+  }
+
+  // PROVIDER_PANEL_RENDERERS 能力位 → 渲染函数。
+  //
+  // 加一个新能力位 = 在这里加一行（或什么都不加，让它走通用列表渲染）。
+  // 注意这里**不认识上游名字**：键是能力位，由后端 manifest 下发的名字。
+  //
+  // # 关于 growth / travel 这两个键
+  //
+  // 它们指向 workbuddy 既有面板的加载函数 —— 那是**历史实现**，
+  // 数据形状与通用列表差异极大（成长有 12 列任务进度、旅行有猫的状态机），
+  // 强行抽象成一个通用渲染会让两边都别扭。
+  //
+  // 关键点：这里绑的是**能力位**，不是上游。任何上游只要声明 growth
+  // 且提供对应 GET 端点，都会走这条渲染；它不会因为"名字不是 workbuddy"
+  // 而被挡在外面。是否显示由 manifest 的能力位决定（见 hideOrphanPanels），
+  // 与上游叫什么无关。
+  const PROVIDER_PANEL_RENDERERS = {
+    growth: () => loadGrowth(false),
+    travel: () => loadTravel(false),
+    // 其余能力位走**通用列表 + 领取**渲染。
+    // 用户决策：codearts 的福利中心做到"上游给什么就渲染什么"即可，
+    // 不为它写专属字段逻辑。
+    welfare: (pid) => loadGenericList(pid, 'welfare'),
+    'quota-probe': (pid) => loadGenericList(pid, 'quota-probe'),
+    core: (pid) => loadGenericList(pid, CORE_CAP),
+  };
+
+  // buildProviderPanels 按 manifest 为每个上游生成能力面板容器。
+  //
+  // # 它做什么
+  //
+  // 遍历 manifest 的每个上游 × 每个有 GET 入口的能力位，若该组合还没有
+  // section，就生成一个。已有 section（如 workbuddy 的成长/旅行，
+  // 它们带着复杂表格结构写在 HTML 里）不重复生成。
+  //
+  // # 为什么已有面板留在 HTML 里而不是也动态生成
+  //
+  // 成长/旅行面板有十几列复杂表格与大量交互，把它们改写成 JS 拼字符串
+  // 只会让代码更难读，且没有任何解耦收益 —— 它们的**归属与显隐**已经由
+  // data-provider/data-cap 驱动了。真正要动态化的，是"未来第三个上游
+  // 该不该出现、出现在哪"，那由本函数负责。
+  function buildProviderPanels() {
+    const host = $('providerPanels');
+    if (!host) return;
+    // 先清掉上一次生成的面板（宿主之前的那些兄弟 section）。
+    // 只删**本函数生成的**（都带 data-generated），不碰 HTML 里写死的面板。
+    let prev = host.previousElementSibling;
+    while (prev && prev.hasAttribute && prev.hasAttribute('data-generated')) {
+      const older = prev.previousElementSibling;
+      prev.remove();
+      prev = older;
     }
+    for (const p of upstreamGroups()) {
+      for (const cap of panelCapsOf(p.id)) {
+        const key = p.id + ':' + cap;
+        // 已经有同 key 的静态面板 → 不重复生成
+        if (document.querySelector(`#content > section[data-key="${cssEsc(key)}"]`)) continue;
+        // 插到宿主**之前**：这样它是 #content 的直接子节点，`#content > section` 找得到。
+        host.insertAdjacentHTML('beforebegin', providerPanelHTML(p, cap));
+      }
+    }
+    // 生成后必须重扫 section 列表，否则导航看不到新面板。
+    refreshNavSections();
+  }
+
+  // providerPanelHTML 一个通用上游面板的骨架（列表 + 领取/动作）。
+  //
+  // 内容由 loadGenericList() 填充。骨架只包含：标题、动作按钮、
+  // 一个列表容器、一个提示区 —— 不假设任何上游特有的字段。
+  function providerPanelHTML(p, cap) {
+    const title = capTitle(cap);
+    const safeKey = p.id + ':' + cap;
+    return `<section data-provider="${esc(p.id)}" data-cap="${esc(cap)}" data-key="${esc(safeKey)}" data-generated="1">
+      <h2>${esc(title)}
+        <span class="dim" style="font-weight:400;text-transform:none">${esc(providerTitle(p.id))}</span>
+        <span class="spacer"></span>
+        <button data-plist="${esc(p.id)}" data-pcap="${esc(cap)}" style="padding:3px 10px;font-size:12px">刷新</button>
+      </h2>
+      <div class="body" id="pbody-${esc(p.id)}-${esc(cap)}">
+        <div class="dim" style="font-size:12px">加载中…</div>
+      </div>
+    </section>`;
+  }
+
+  // refreshNavSections 重扫 section 列表（动态生成面板后必须调用）。
+  function refreshNavSections() {
+    navSections = Array.from(document.querySelectorAll('#content > section'));
+  }
+
+  // syncProviderPanels 生成上游面板并按需触发它们的首次加载。
+  //
+  // # 它同时修掉 bug B7
+  //
+  // 原先 boot() 无条件调用 loadTravel(false) / loadGrowth(false)，
+  // 于是**没有 workbuddy 的部署**里这两个面板照样发请求、照样报错。
+  // 现在数据加载只在这里发生，而这里只对"manifest 里真的有这个能力位"
+  // 的上游说话 —— 没有该能力位的上游根本不会走到加载那一步。
+  //
+  // # 幂等
+  //
+  // 每次 refresh() 都会调用它（因为 manifest 可能变化，比如热重载了账号）。
+  // providerPanelHTML 只对**尚不存在**的 key 生成，所以重复调用不会重复建。
+  function syncProviderPanels() {
+    buildProviderPanels();
+    refreshNavSections();
+    // 先把不该出现的面板隐藏掉，再决定给谁加载数据 ——
+    // 否则会给一个已经隐藏的面板发请求（那正是 B7）。
+    hideOrphanPanels();
+
+    // 为每个**可见**的上游面板加载一次数据。
+    //
+    // # 为什么在 init 阶段就加载，而不是等用户点开
+    //
+    // 面板内容为空时用户根本不知道里面有没有东西；
+    // 而且上游面板通常只有一两条端点，提前拉取的代价很小。
+    // 真正重的是 workbuddy 的成长（全量回源 7s），它走服务端快照缓存，
+    // 由 loadProviderPanel 内部的实现决定用不用 force。
+    for (const sec of navSections) {
+      if (sec.hidden) continue;
+      const pid = sec.dataset.provider;
+      if (!pid || !sec.dataset.cap) continue;
+      loadProviderPanel(pid, sec.dataset.cap);
+    }
+  }
+
+  // hideOrphanPanels 隐藏那些"归属的上游不存在 / 没有该能力位"的静态面板。
+  //
+  // 这是 B7 的另一半：**光不加载数据还不够**，面板本身也必须从界面上消失，
+  // 否则用户会看到一个永远空着的「猫猫旅行」。
+  function hideOrphanPanels() {
+    let hidden = 0;
+    for (const sec of navSections) {
+      const pid = sec.dataset.provider;
+      if (!pid) continue;   // 通用面板不动
+      const cap = sec.dataset.cap;
+      // 上游不存在，或该上游没声明这个能力位 → 隐藏
+      const p = providerInfo(pid);
+      const alive = !!p && capNamesOf(pid).indexOf(cap) >= 0;
+      sec.hidden = !alive;
+      if (!alive) hidden++;
+    }
+    return hidden;
+  }
+
+  // loadGenericList 通用的"上游列表"渲染。
+  //
+  // # 设计原则（对应用户决策）
+  //
+  // 「看上游有哪些服务，通用列表 + 领取渲染就行」—— 所以这里**不猜字段名**：
+  // 它把上游返回的 JSON 当成"一组条目"，每条渲染成一行，
+  // 能识别的字段（标题、数量、是否可领）用语义化展示，
+  // 认不出来的原样列出。这样新增上游不需要改前端。
+  async function loadGenericList(providerId, cap) {
+    const host = document.getElementById(`pbody-${providerId}-${cap}`);
+    if (!host) return;
+    // 面板入口可能有多条 GET 路由（如 codearts 的 welfare 有
+    // /admin/welfare 与 /admin/subscription）。全部拉取并依序渲染。
+    const routes = routesFor(providerId, cap);
+    if (!routes.length) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该能力没有可读端点。</div>';
+      return;
+    }
+    const blocks = [];
+    for (const r of routes) {
+      try {
+        const data = await admin(r.path);
+        blocks.push(renderGenericBlock(r, data, providerId));
+      } catch (e) {
+        blocks.push(`<div class="gbad">${esc(r.title || r.path)}：${esc(e.message)}</div>`);
+      }
+    }
+    host.innerHTML = blocks.join('');
+    bindGenericActions(host, providerId);
+  }
+
+  // renderGenericBlock 渲染一条上游端点的响应。
+  //
+  // 识别三种常见形状：
+  //   1. {items:[...]} 或 [...]  → 条目列表
+  //   2. {key: scalar, ...}      → 键值对
+  //   3. 未知                    → 原样 JSON（不隐藏信息）
+  function renderGenericBlock(route, data, providerId) {
+    const head = `<div class="ghead2">${esc(route.title || route.path)}</div>`;
+    if (data == null) return head + '<div class="dim" style="font-size:12px">无数据</div>';
+
+    const list = Array.isArray(data) ? data
+      : (Array.isArray(data.items) ? data.items
+        : (Array.isArray(data.list) ? data.list : null));
+    if (list) {
+      if (!list.length) return head + '<div class="dim" style="font-size:12px">暂无条目</div>';
+      return head + `<div class="glist">` + list.map(it => genericItemHTML(it, providerId)).join('') + '</div>';
+    }
+
+    // 纯对象 → 键值对。把嵌套的对象/数组展开成一行 JSON，
+    // 而不是丢掉 —— 丢信息会让"上游有新字段"这件事永远看不见。
+    if (typeof data === 'object') {
+      const kv = Object.entries(data).map(([k, v]) => {
+        let val;
+        if (v === null || v === undefined) val = '<span class="dim">—</span>';
+        else if (typeof v === 'object') val = `<code>${esc(JSON.stringify(v))}</code>`;
+        else val = esc(String(v));
+        return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${val}</span></div>`;
+      }).join('');
+      return head + `<div class="kvs">${kv}</div>`;
+    }
+    return head + `<div class="mono">${esc(String(data))}</div>`;
+  }
+
+  // genericItemHTML 渲染一个列表条目。
+  //
+  // 优先用语义字段（title/name 当标题，benefitAmount+benefitUnit 当数量），
+  // 认不出来的键值对原样附在下面。**不假设上游一定是"福利"** ——
+  // 换个上游返回别的字段名，这里只是显示得朴素一点，不会崩也不会空白。
+  function genericItemHTML(it, providerId) {
+    if (it === null || typeof it !== 'object') {
+      return `<div class="gitem"><span class="gname">${esc(String(it))}</span></div>`;
+    }
+    const title = it.title || it.name || it.nickname || it.package_name_cn || it.id || '(未命名)';
+    // 数量：识别常见的几种"额度"字段名，找不到就不显示数量。
+    const amount = it.benefitAmount !== undefined ? it.benefitAmount
+      : (it.amount !== undefined ? it.amount
+        : (it.CreditRemain !== undefined ? it.CreditRemain : undefined));
+    const unit = it.benefitUnit || '';
+    const qty = amount !== undefined
+      ? `<span class="gqty">${esc(String(amount))}${unit ? ' ' + esc(String(unit)) : ''}</span>` : '';
+    // claimable === false 时按钮置灰并说明原因，而不是让用户点了再收到拒绝。
+    const claimable = it.claimable;
+    let act = '';
+    if (it.campaignId !== undefined) {
+      act = claimable === false
+        ? `<button disabled title="该活动当前不可领取（可能已领过或未达成条件）">不可领取</button>`
+        : `<button data-gclaim="${esc(providerId)}" data-gcampaign="${esc(it.campaignId)}" data-gpath="/admin/welfare/claim">领取</button>`;
+    }
+    // 其余字段（排除已用于标题/数量的）折叠成一行说明。
+    const used = ['title', 'name', 'nickname', 'package_name_cn', 'id', 'benefitAmount', 'amount', 'CreditRemain', 'benefitUnit', 'claimable', 'campaignId'];
+    const rest = Object.entries(it).filter(([k]) => used.indexOf(k) < 0)
+      .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ');
+    return `<div class="gitem">
+      <span class="gname">${esc(String(title))}</span>${qty}
+      ${act}
+      ${rest ? `<div class="gmeta">${esc(rest)}</div>` : ''}
+    </div>`;
+  }
+
+  // bindGenericActions 给通用面板里的动作按钮挂事件。
+  //
+  // 走**显式确认 + busyRun**：写操作一律二次确认并给出等待反馈，
+  // 不允许出现"点一下就生效且没有任何提示"的按钮（曾经的实测教训）。
+  function bindGenericActions(host, providerId) {
+    host.addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gclaim]');
+      if (!b || b.disabled) return;
+      const cid = b.dataset.gcampaign;
+      if (!confirm(`确认为 ${b.dataset.gclaim} 领取该福利？`)) return;
+      busyRun(b, async () => {
+        const r = await admin(b.dataset.gpath, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: Number(cid) }),
+        });
+        toast(r && r.credits ? `领取成功，+${r.credits} 积分` : '领取成功');
+        await loadGenericList(providerId, host.dataset.cap || 'welfare');
+      }, { label: '领取福利' });
+    });
   }
 
   // toggleNavGroup 折叠/展开一个上游分组。
@@ -2978,7 +3297,15 @@
     // 上游契约要**最先**取：renderAccounts 依赖它把账号归到上游，
     // 导航分组也依赖它。单独 try —— 拿不到 manifest 不该让账号表显示不出来
     //（降级为"没有上游面板"，通用面板照常）。
-    await loadManifest();
+    //
+    // 取到之后必须重建上游面板与导航：面板是**按能力位动态生成**的，
+    // 而能力位只有 manifest 到了才知道。这一步也是"加新上游前端 0 改动"
+    // 真正生效的地方 —— 新上游的能力位一到，这里自动为它建出面板。
+    const manifestOK = await loadManifest();
+    if (manifestOK) {
+      syncProviderPanels();
+      buildNav();
+    }
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
     try { renderAccounts((await admin('/admin/accounts')).accounts); }
     catch { renderAccounts(s.accounts); }
@@ -3223,18 +3550,18 @@
     };
 
     // 请求日志按 10s 刷新落盘视图（屏幕上始终是最新落盘记录）；
-    // 任务历史 10s；旅行走服务端缓存所以 15s 一次也不会打上游。
+    // 任务历史 10s。
     setInterval(loadLogHistory, 10000);
     setInterval(loadHistory, 10000);
-    setInterval(() => loadTravel(false), 15000);
-    setInterval(() => loadGrowth(false), 30000); // 成长计划走服务端快照缓存，不会打上游
     loadLogHistory();
     loadHistory();
-    loadTravel(false);
-    loadGrowth(false);
     loadSettings();   // 设置页数据先备好，顺便拿到落盘日志概况（顶部日志面板要显示）
 
-    // 导航最后构建：此时所有 section 都已在 DOM 里
+    // 导航最后构建：此时所有 section 都已在 DOM 里。
+    //
+    // 但**上游面板要等 manifest 到达才能生成** —— 所以导航实际由
+    // refresh() → loadManifest() → buildProviderPanels() → buildNav()
+    // 这条链触发。这里先建一次，让通用面板立即可用（不依赖网络）。
     buildNav();
 
     // 页面加载时若已有全量任务在跑（比如刚在别处点过），接着显示进度
@@ -3244,6 +3571,31 @@
   }
 
   boot();
+
+  // ---------------------------------------------------------------- 测试钩子
+  //
+  // # 为什么需要它
+  //
+  // 整页包在 IIFE 里，浏览器测试无法触达 MANIFEST / applyManifest 等内部状态。
+  // 而没有它们就没法验证**最关键的那条判据**：
+  // "给一个前端从未见过的上游，导航会不会自动多一组"。
+  //
+  // 只暴露只读快照与两个纯函数（applyManifest / syncProviderPanels），
+  // 不暴露任何写操作或凭据 —— 它们本来就在页面里可达，
+  // 这里的意义是让测试能驱动，不是放权。
+  window.__wb2api__ = {
+    manifest: () => JSON.parse(JSON.stringify(MANIFEST)),
+    applyManifest: applyManifest,
+    syncProviderPanels: syncProviderPanels,
+    buildNav: buildNav,
+    upstreamGroups: upstreamGroups,
+    panelCapsOf: panelCapsOf,
+    routesFor: routesFor,
+    capTitle: capTitle,
+    providersWithCap: providersWithCap,
+    hasAnyPanel: hasAnyPanel,
+    CORE_CAP: CORE_CAP,
+  };
 })();
 </script>
 </body>
