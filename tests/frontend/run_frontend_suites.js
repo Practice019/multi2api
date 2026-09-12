@@ -53,6 +53,7 @@ const PROBES = [
   'gen_tdz_guard.js',      // 真实 Chrome 里跑 TDZ 探针
   'gen_ui_manifest.js',    // 零硬编码 / 死代码 / colspan 漂移 守卫
   'test_chrome_resolver.js', // 浏览器解析器：覆盖生效 + 找不到时明确报错
+  'verify_sign_against_spec.js', // 华为云签名实现逐条对照官方文档
 ];
 
 function run(file) {
