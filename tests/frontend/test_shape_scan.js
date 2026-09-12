@@ -46,7 +46,15 @@ const SAMPLES = [
   ['const ROOT = process.env.WB2API_REPO || __dirname', false, '普通代码'],
   ['"a".repeat(40)', false, '不含引号长字面量'],
   ['access_token = "abcdefghijklmnopqrstuvwxyz0123456789ABCD"', true, '40 位混合大小写 token'],
-  ['const KEY = "__REDACTED_LEAKED_KEY__";', true, '真实形态的密钥'],
+  // ⚠ 样本里**不能放真实密钥**。
+  //
+  // 我第一版这里写的是网关的真实 api_key —— 那让这个"密钥扫描器"自身
+  // 成了泄漏源（它随 5b03b4e 提交进了版本库）。
+  // 讽刺的是那一轮我正在修同类泄漏。
+  //
+  // 判据是**形状**（引号内 ≥32 位、含大小写与数字），不依赖具体值，
+  // 所以换成合成样本即可，扫描能力不受影响。
+  ['const KEY = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk1Ll2Mm3";', true, '真实形态的密钥（合成样本）'],
   // 以下三条是我第一版（只判长度）的误报，现在必须被排除
   ['"01a08fe00b8b7c21bd95e11109692b80"', false, '测试 UID（34 位纯小写 hex）'],
   ['"a8bcb36232554267a5142361cc25a393"', false, '模型 ID（34 位纯小写 hex）'],
@@ -71,9 +79,12 @@ for (const f of tracked) {
 ok(hits.length === 0, tracked.length + ' 个被跟踪文件，0 命中' + (hits.length ? ': ' + hits.slice(0, 5).join(', ') : ''));
 
 // 3) 反向验证：把密钥塞进一个临时文件，扫描器必须抓到
+//
+// 这条是**反向验证** —— 没有它，"0 命中"无法区分
+// "仓库真干净"与"扫描器坏了"。用合成样本，不用真实密钥。
 console.log('\n反向验证（扫描器真的能抓）：');
 const tmpf = path.join(require('os').tmpdir(), 'shape-scan-probe.txt');
-fs.writeFileSync(tmpf, 'const KEY = "__REDACTED_LEAKED_KEY__";');
+fs.writeFileSync(tmpf, 'const KEY = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk1Ll2Mm3";');
 const c = fs.readFileSync(tmpf, 'utf8');
 ok(looksLikeSecret(c), '故意写入的密钥被命中');
 fs.unlinkSync(tmpf);
