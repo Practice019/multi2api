@@ -119,7 +119,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const maskBoth = s => s
       .replace(/\r\n/g, '\n')                            // 仓库开了 autocrlf，先归一化
       .replace(/"__WB2API_KEY__"/g, '"K"')               // HEAD 的密钥哨兵
-      .replace(/"5fkVadO2[A-Za-z0-9]{28}"/g, '"K"')      // 运行时注入的真实 key
+      .replace(/"[A-Za-z0-9]{32,}"/g, '"K"')           // 运行时注入的密钥（按形状，不认前缀）
       .replace(/"[A-Za-z0-9_-]{40}"/g, '"K"')            // 兜底：任何 40 位字面量
       .replace(/__COLS_[A-Z]+__/g, 'N')                  // HEAD 的列数占位符
       .replace(/colspan="\d+"/g, 'colspan="N"');         // served 里替换后的数字
@@ -168,13 +168,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   record('E', '未 push（本地提交 ' + commits + ' 个）', true, 'origin/master 保持 ' +
     sh('git', ['rev-parse', '--short', 'origin/master']).out.trim());
 
+  // looksLikeSecret：按**形状**判密钥，不认前缀（换密钥后依然有效）。
+  // 必须同时含大写/小写/数字，且不含连字符 —— 后者能排除测试 UID、
+  // 模型 ID、UUID 这三类纯小写 hex 的误报（第一版只判长度，误报 3 个）。
+  const looksLikeSecret = s => {
+    const m = /"([A-Za-z0-9]{32,})"/.exec(s);
+    if (!m) return false;
+    const v = m[1];
+    if (/__WB2API_KEY__|__COLS_/.test(s)) return false;
+    return /[A-Z]/.test(v) && /[a-z]/.test(v) && /[0-9]/.test(v);
+  };
   // 全仓扫密钥：真实的 40 位 key 不应出现在任何被跟踪文件里
   const tracked = sh('git', ['ls-files']);
   let leaked = [];
   for (const f of tracked.out.split('\n').filter(Boolean)) {
     try {
       const c = fs.readFileSync(path.join(REPO, f), 'utf8');
-      if (/5fkVadO2[A-Za-z0-9]{20,}/.test(c)) leaked.push(f);
+      if (looksLikeSecret(c)) leaked.push(f);
     } catch { /* 二进制/不可读，跳过 */ }
   }
   record('E', '被跟踪文件里无真实 api_key', leaked.length === 0,
