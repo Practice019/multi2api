@@ -56,6 +56,7 @@ const PROBES = [
   'verify_sign_against_spec.js', // 华为云签名实现逐条对照官方文档
   'test_shape_scan.js',        // 密钥形状扫描器：不漏报、不误报
   'audit_tracked_content.js',  // 被跟踪内容审计：密钥/绝对路径/内网/手机/邮箱
+  'audit_dead_buttons.js',      // 静态死按钮扫描：id 是否有事件绑定
 ];
 
 function run(file) {
