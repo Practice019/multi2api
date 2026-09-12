@@ -1879,7 +1879,17 @@
     // 有浏览器测试用数据对照（不硬编码数字）。
     const n = Number(p.account_count) || 0;
     const cnt = `<span class="navgcount${n ? '' : ' zero'}" title="${n} 个账号">${n}</span>`;
-    const def = p.default ? '<span class="navgdef">默认</span>' : '';
+    // 分组标题里**不再显示「默认」徽章**（用户要求）。
+    //
+    // 为什么去掉：分组头的信息职责是"这个上游有什么"，而"是否默认路由"
+    // 是配置细节，不构成用户的决策依据 —— 它只影响 `provider/model`
+    // 这种不带前缀的模型 id 落到哪个上游，属于"知道就行、不用看"的事。
+    // 摆在那里反而让标题变长（"workbuddy 默认 3"），两个徽章挤在一起。
+    //
+    // ⚠ 注意：`p.default` **仍然参与排序**（默认上游排第一，见下面的
+    // sort 处）。这里只删**渲染**，不动排序 —— 删错了会让分组顺序变。
+    // 有浏览器测试断言"workbuddy 仍在第一组"，删错会红。
+    const def = '';
     // 列出该上游**有面板入口**的能力位（中文名来自 manifest.capabilities）。
     //
     // # "无面板" 的判据必须是 hasAnyPanel，不是"有没有非 chat/models 能力"

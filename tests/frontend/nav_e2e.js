@@ -157,6 +157,40 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ok(badTitles.length === 0, '没有"有面板却说无可打开的面板"的矛盾组头' +
       (badTitles.length ? ' —— ' + JSON.stringify(badTitles) : ''));
 
+    // ---------------------------------------------------------------- 「默认」徽章已移除，但排序仍在
+    //
+    // # 为什么这两条必须**一起**断言
+    //
+    // 用户要求去掉组头的「默认」二字。但 `p.default` 同时被**排序**用
+    //（默认上游排第一，见 renderNav 里的 `xd = !!x.default`）。
+    // 如果为了删徽章而顺手把排序也去掉，界面会变成按 id 排
+    // —— 那是**另一个**回归，而且不容易一眼看出来。
+    //
+    // 所以：一条断言"徽章没了"，一条断言"默认上游仍在第一组"。
+    // 只写前者的话，把排序一起删掉也能全绿。
+    console.log('\n[2c] 组头不再显示「默认」，但排序仍按 default 优先');
+    const defBadge = await evalJs(`(() => {
+      const out = { badges: [], firstUpstream: null, manifestDefault: null };
+      document.querySelectorAll('#nav .navgroup').forEach(g => {
+        const hd = g.querySelector('.navgrouphd');
+        if (!hd) return;
+        if (hd.querySelector('.navgdef')) out.badges.push(g.dataset.pid || '(通用)');
+      });
+      const ups = Array.from(document.querySelectorAll('#nav .navgroup[data-pid]'));
+      out.firstUpstream = ups.length ? ups[0].dataset.pid : null;
+      const m = window.__wb2api__.manifest();
+      const d = (m.providers || []).find(p => p && p.default);
+      out.manifestDefault = d ? d.id : null;
+      return JSON.stringify(out);
+    })()`);
+    const db = JSON.parse(defBadge);
+    ok(db.badges.length === 0, '组头里没有「默认」徽章' +
+      (db.badges.length ? ' —— 仍在: ' + JSON.stringify(db.badges) : ''));
+    ok(db.firstUpstream !== null, '有上游分组（第一组是 ' + db.firstUpstream + '）');
+    ok(db.firstUpstream === db.manifestDefault,
+      '默认上游仍排第一（' + db.firstUpstream + ' == manifest.default ' + db.manifestDefault + '）' +
+      ' —— 防的是"删徽章时把排序一起删了"');
+
     // ---------------------------------------------------------------- 通用项都在
     console.log('\n[3] 通用面板入口完整');
     const labels = JSON.parse(await evalJs(`JSON.stringify(Array.from(document.querySelectorAll('#nav button[data-nav]')).map(b=>b.textContent.replace(/\\s+/g,' ').trim()))`));
