@@ -141,6 +141,13 @@
     padding:7px 12px;font-weight:600;font-size:12px;letter-spacing:.2px}
   tr.grouprow:first-child > td{border-top:0}
   tr.grouprow .gname{margin-right:8px}
+  /* 分组行右侧的动作区（T10：添加账号 / 重载 auths）。
+     为什么用 float 而不是 flex：这一格是 <td>，里面已有两个 inline 元素
+     （.gname / .dim），改成 flex 会同时改掉它们的排版。
+     float:right 只把动作区推到右边，其余不受影响。 */
+  tr.grouprow .gacts{float:right;display:inline-flex;align-items:center;gap:6px;font-weight:400}
+  /* 分组行内的小按钮：比面板标题上的按钮更小，因为它在表格行里 */
+  tr.grouprow .gact{padding:2px 8px;font-size:11px;font-weight:400}
   /* 有最近错误的任务行整行标红：扫一眼就知道哪个任务出问题了 */
   tr.errrow > td{background:color-mix(in srgb, var(--err) 10%, transparent)}
   /* 通用上游面板（列表 + 领取）的样式。
@@ -453,8 +460,10 @@
   <section data-key="accounts">
     <h2>账号池
       <span class="spacer"></span>
-      <button id="btnAdd" style="padding:3px 10px;font-size:12px">＋ 添加账号</button>
-      <button id="btnReload" style="padding:3px 10px;font-size:12px">重载 auths 目录</button>
+      <!-- 「＋ 添加账号」与「重载 auths」已移入**各上游分组行**（T10）——
+           它们都是上游专属动作（登录流程各不同；重载的后端语义是
+           "对齐 ReloadProvider 指定的那一个上游"）。点哪个上游就往哪个上游加。
+           这里只留"对整池生效"的两个。 -->
       <button id="btnAllCheckin" style="padding:3px 10px;font-size:12px">全部签到</button>
       <button id="btnAllCredits" style="padding:3px 10px;font-size:12px">刷新全部积分</button>
       <!--
@@ -769,7 +778,7 @@
 
 <div id="modal" style="display:none;position:fixed;inset:0;background:var(--overlay);z-index:99;align-items:center;justify-content:center">
   <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:560px;width:calc(100% - 40px)">
-    <h3 style="margin:0 0 4px;font-size:15px">添加 WorkBuddy 账号</h3>
+    <h3 id="loginTitle" style="margin:0 0 4px;font-size:15px">添加账号</h3>
     <p class="dim" style="margin:0 0 14px;font-size:12px">
       点下面的链接在浏览器完成登录（本机已是登录态的话通常一键确认），网关会自动轮询并落盘凭证。
     </p>
@@ -818,6 +827,9 @@
   let taskTimer = null;    // 全量任务轮询
   let loginPoll = null;    // 添加账号的轮询句柄
   let loginDeadline = 0;
+// loginProvider 本次登录针对哪个上游（T10）。用于弹窗文案与结果提示 ——
+// 后端目前只认默认上游，回传 provider 时以它为准。
+let loginProvider = '';
   let keyRevealed = false; // API 面板里 Key 是否明文显示
 
   const esc = s => String(s == null ? '' : s)
@@ -1522,6 +1534,64 @@
   //
   // 用 <tr class="grouprow"> 而不是额外的表格：保持单一 table，
   // 让列宽与主体一致，也不会引入嵌套表格的样式麻烦。
+  //
+  // # 「添加账号」「重载 auths」为什么挂在这里（T10）
+  //
+  // 这两个动作**都是上游专属的**：
+  //   · 添加账号走该上游自己的登录流程（workbuddy 是 OAuth 设备码，
+  //     codearts 是 OAuth + DPoP，步骤数都不同 —— 见 gateway.LoginFlow）
+  //   · 重载 auths 的后端语义是"对齐 ReloadProvider 指定的**那一个**上游"
+  //     （`SyncToDirFor(reloadProvider(), auths)`）
+  //
+  // 原先它们挂在面板标题（h2）上，语义是"对整池生效" —— 那是错的，
+  // 会让人以为添加账号能选上游。放到分组行后，点哪个上游就是往哪个上游加。
+  //
+  // # 按 manifest 决定渲染什么，不写死上游名
+  //
+  // 判据是 `manifest.providers[].login`（该上游有没有页内登录流程）。
+  // 有 → 渲染「＋ 添加账号」；没有 → 渲染一句说明，讲清**为什么**与**怎么做**。
+  // 这样加第三个上游时前端 0 改动。
+  //
+  // 「全部签到 / 刷新全部积分」留在 h2（它们确实是"对整池生效"的语义）。
+  function accountGroupActions(providerId) {
+    const info = providerInfo(providerId);
+    if (!info) {
+      // 未在 manifest 里注册的上游：不渲染任何动作。
+      // 它多半是历史账号或回落路径，往里加账号没有意义（登录流程未知）。
+      return '';
+    }
+    const login = info.login;
+    if (login && login.kind) {
+      // 有页内登录流程 → 给按钮。label 由后端下发（不同上游措辞可能不同）。
+      return `<button class="gact" data-gadd="${esc(providerId)}"`
+        + ` title="${esc(login.label || '添加账号')}（走 ${esc(providerId)} 自己的登录流程）">`
+        + `＋ ${esc(login.label || '添加账号')}</button>`
+        + `<button class="gact" data-greload="${esc(providerId)}"`
+        + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}；手工拷入/删除凭证文件后用它。走页内添加的不需要点">`
+        + `重载 auths</button>`;
+    }
+    // 没有页内登录流程 → 不放假按钮，但仍给「重载 auths」。
+    //
+    // ⚠ 措辞**不能一律说"需手工放置凭证"** —— 那对 workbuddy 是**错的**：
+    // 它的页内 OAuth 流程一直是通的（`POST /admin/login/start` 打的就是
+    // copilot.tencent.com），只是后端还没有在 manifest 里声明 `login`。
+    //
+    // 实测（2026-09-13）：两个上游的 manifest 都还没有 login 字段。
+    // 若按"没声明 = 不支持"渲染，会在 workbuddy 那行写出与事实相反的话 ——
+    // 用户明明能用按钮添加，界面却说"无法在页面内完成"。
+    //
+    // 所以这里只说**能确定的事**：manifest 里没声明这个字段。
+    // 不推断"支持"也不断言"不支持"。
+    //
+    // 等后端补上按 provider 分派（gateway.LoginFlow 那个接缝）并下发
+    // login 字段后，workbuddy 会自动走上面的分支，这里无需再改。
+    return `<span class="dim" style="font-size:11px"`
+      + ` title="该上游未在 manifest 的 login 字段里声明页内登录流程">`
+      + `未声明页内登录流程；已有凭证文件时可点右侧加载</span>`
+      + `<button class="gact" data-greload="${esc(providerId)}"`
+      + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}">重载 auths</button>`;
+  }
+
   function accountGroupRow(g) {
     const info = providerInfo(g.provider);
     const def = g.isDefault ? ' · 默认' : '';
@@ -1535,6 +1605,7 @@
     return `<tr class="grouprow"><td colspan="${ACCT_COLS}">
       <span class="gname">${esc(providerTitle(g.provider) || '（未标注）')}</span>
       <span class="dim" style="font-weight:400;font-size:11px">${esc(g.accounts.length + ' 个账号 · ' + meta + def + known)}</span>
+      <span class="gacts">${accountGroupActions(g.provider)}</span>
     </td></tr>`;
   }
 
@@ -1824,12 +1895,34 @@
   }
   function closeInfo() { $('infoModal').style.display = 'none'; }
 
-  async function addAccount() {
+  // addAccount 走某个上游的登录流程添加账号。
+  //
+  // providerId 来自分组行按钮的 data-gadd（T10）。
+  //
+  // ⚠ 后端目前**只接受默认上游** —— `POST /admin/login/start` 用的是装配时
+  // 注入的那个 OAuth 客户端（`h.cfg.OAuth`，指向 copilot.tencent.com）。
+  // 所以这里如实把 provider 放进请求体，但**不假装它一定生效**：
+  // 响应里若带回 `provider`，用它显示（说明后端认了）；
+  // 没带回就用点进来的那个并标注"（按默认上游）"。
+  //
+  // 这样做的理由：分组行现在每个上游都有「＋ 添加账号」按钮，
+  // 若文案永远写"添加 WorkBuddy 账号"，在 codearts 那行点开就是**骗人**的。
+  // 后端补上按 provider 分派（gateway.LoginFlow 那个接缝）之后，
+  // 这里无需再改。
+  async function addAccount(providerId, btn) {
     openModal();
+    const want = providerId || '';
+    $('loginTitle').textContent = want ? ('添加 ' + providerTitle(want) + ' 账号') : '添加账号';
     $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
     let r;
-    try { r = await admin('/admin/login/start', { method: 'POST', body: '{}' }); }
-    catch (e) { $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`; return; }
+    try {
+      r = await admin('/admin/login/start', { method: 'POST', body: JSON.stringify({ provider: want }) });
+    } catch (e) {
+      $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
+      return;
+    }
+    // 后端认了哪个上游：优先用它回传的，否则用点进来的那个。
+    loginProvider = r.provider || want;
 
     const state = r.state;
     loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
@@ -4209,7 +4302,31 @@
       if (b) act(b.dataset.uid, b.dataset.act, b);
     });
 
-    $('btnAdd').onclick = addAccount;
+    // 分组行内的动作（T10）：一次委托，不随行数增长。
+    //
+    // 为什么用委托而不是每行绑：`renderAccounts` 每次刷新都重建整个表格，
+    // 逐行绑会随刷新次数累积监听器（本项目改过的那个 bug —— 见
+    // loadGenericList 的注释）。委托绑在 #accts 上只做一次。
+    $('accts').addEventListener('click', ev => {
+      const add = ev.target.closest('button[data-gadd]');
+      if (add) { addAccount(add.dataset.gadd, add); return; }
+      const rl = ev.target.closest('button[data-greload]');
+      if (rl) {
+        // ⚠ 重载的后端语义是"对齐 ReloadProvider 指定的那一个上游"，
+        // 而那个值由服务端配置决定，**不接受前端传参**。
+        // 所以这里只把按钮的 provider 用于**提示文案**，不传给后端 ——
+        // 传了也不会被采纳，反而会让人以为可以按上游重载。
+        // 见 internal/admin/admin.go 的 reloadProvider()。
+        const pid = rl.dataset.greload;
+        busyRun(rl, async () => {
+          const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
+          toast(`已重载 auths（对齐 ${pid}）：扫描 ${r.scanned} 个文件，`
+            + `池内账号 ${r.before} 个变为 ${r.after} 个`);
+          await refresh();     // 必须 await：否则 busy 态先于数据更新结束，界面看起来"没变"
+          return undefined;    // 上面已给出更具体的回执
+        }, { label: '重载 auths', busyText: '重载中…' });
+      }
+    });
     $('btnLoginClose').onclick = closeModal;
     $('modal').addEventListener('click', ev => { if (ev.target === $('modal')) closeModal(); });
     // 只读信息弹窗：关闭 / 点遮罩关闭 / 复制内容 / Esc 关闭。
@@ -4224,12 +4341,6 @@
       if ($('infoModal').style.display === 'flex') closeInfo();
       else if ($('modal').style.display === 'flex') closeModal();
     });
-    $('btnReload').onclick = () => busyRun($('btnReload'), async () => {
-      const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
-      toast(`已重载 auths：扫描 ${r.scanned} 个文件，池内账号 ${r.before} 个变为 ${r.after} 个`);
-      await refresh();     // 必须 await：否则 busy 态先于数据更新结束，界面看起来"没变"
-      return undefined;    // 上面已给出更具体的回执
-    }, { label: '重载 auths', busyText: '重载中…' });
     $('btnAllCheckin').onclick = () => startAll('checkin');
     $('btnAllCredits').onclick = () => startAll('credits');
     // 「全部保活」按钮已删除（用户决定）—— 理由见 HTML 里那段注释：
