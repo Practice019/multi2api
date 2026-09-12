@@ -40,8 +40,21 @@ function sh(cmd, args, opts) {
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
 function get(url) {
+  // ⚠ 必须收 **Buffer 再整体解码**，不能在 data 回调里逐块转字符串。
+  //
+  // http.get 的 data 事件按任意边界切分 chunk；一个多字节 UTF-8 字符被切开时，
+  // `Buffer.toString()` 在每个半截上都会产出替换字符 U+FFFD。
+  // 实测后果：中文注释里的「无家可归」被读成「无家可��」，
+  // 于是"线上与 HEAD 一致"这条断言报了 **1 字节差异的假失败**。
+  //
+  // 已用原字节核对服务端发的是合法 UTF-8（e58fafe5bd92 = 可归），
+  // 所以那是我的读取方式错，不是产品缺陷。
   return new Promise((res, rej) => {
-    http.get(url, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res({ status: r.statusCode, body: d })); }).on('error', rej);
+    http.get(url, r => {
+      const chunks = [];
+      r.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      r.on('end', () => res({ status: r.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+    }).on('error', rej);
   });
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
