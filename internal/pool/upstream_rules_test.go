@@ -3,11 +3,11 @@
 // # 评审的原话（决定性反例）
 //
 // "两条真实的上游规则仍硬编码在 internal/pool 且被脚本评为 0：
-//   1. nextDay4AM / CooldownUntilTomorrow4AM —— workbuddy 的签到恢复策略
-//      （04:00 冷却、'等签到恢复'、09:00/21:00 签到时点）。
-//      codearts 没有签到，账号冷却多久恢复纯属上游策略。
-//   2. CoolHard 排除在 fallback 之外，理由是'余额耗尽 → 调了必 402'
-//      —— workbuddy 的计费规则被写进了核心。"
+//  1. nextDay4AM / CooldownUntilTomorrow4AM —— workbuddy 的签到恢复策略
+//     （04:00 冷却、'等签到恢复'、09:00/21:00 签到时点）。
+//     codearts 没有签到，账号冷却多久恢复纯属上游策略。
+//  2. CoolHard 排除在 fallback 之外，理由是'余额耗尽 → 调了必 402'
+//     —— workbuddy 的计费规则被写进了核心。"
 //
 // 这条指控成立：`nextDay4AM` 把"4 点"这个 **workbuddy 的签到时刻**写死在核心里。
 // codearts 的上游没有签到，次日 4 点对它没有任何意义。

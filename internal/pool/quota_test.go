@@ -60,8 +60,9 @@ func TestQuotaViewSingleValue(t *testing.T) {
 
 // TestQuotaViewPerModel 按模型额度（codearts）。
 //
-// Effective() 取**最大值**而不是求和：因为一次调用只用一个模型，
-// 求和会把"10 个模型各 100"算成 1000，夸大该账号的实际可用量。
+// Effective() 取**最大值**而不是求和：它表达"这个账号最多还能跑多少"，
+// 用于展示是合理的。**但选号必须用 EffectiveFor(模型)** ——
+// 取最大值会让"对请求的模型零额度、但别的模型额度很高"的账号被优先选中。
 func TestQuotaViewPerModel(t *testing.T) {
 	q := QuotaView{
 		Kind:    QuotaKindPerModel,
@@ -70,6 +71,13 @@ func TestQuotaViewPerModel(t *testing.T) {
 	}
 	if got := q.Effective(); got != 300 {
 		t.Errorf("Effective()=%d want 300（取最大值，不求和）", got)
+	}
+	// 选号用的口径：按请求的模型取值
+	if got := q.EffectiveFor("gpt-5.5"); got != 100 {
+		t.Errorf("EffectiveFor(gpt-5.5)=%d want 100", got)
+	}
+	if got := q.EffectiveFor("不存在的模型"); got != 0 {
+		t.Errorf("EffectiveFor(未列出的模型)=%d want 0", got)
 	}
 }
 
@@ -245,7 +253,6 @@ func TestLegacyCreditsFieldStillExposed(t *testing.T) {
 		t.Errorf("per_model 形态下 Status.Credits 应给 Effective()，得到 %d", st2.Credits)
 	}
 }
-
 
 // poolWithU1 建一个只含 u1 的池（本文件用）。
 func poolWithU1(t *testing.T) *Pool {
