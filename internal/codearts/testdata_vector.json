@@ -1,0 +1,29 @@
+{
+  "accessKey": "HSTASWBBW9K9XP5ZC26X",
+  "cases": [
+    {
+      "name": "POST 带 body",
+      "method": "POST",
+      "url": "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions",
+      "body": "{\"model\":\"GLM-5.2\"}",
+      "date": "20260101T000000Z",
+      "wantAuth": "SDK-HMAC-SHA256 Access=HSTASWBBW9K9XP5ZC26X, SignedHeaders=content-type;x-sdk-date;x-security-token, Signature=73cbf5d9dabffe43557deb1ed27831c37c94ea565d854be5959380adc1b73cdf"
+    },
+    {
+      "name": "GET 无 body 带 query",
+      "method": "GET",
+      "url": "https://snap-access.cn-north-4.myhuaweicloud.com/v1/agent-center/agents/useragents?offset=0&limit=100",
+      "body": "",
+      "date": "20260101T000000Z",
+      "wantAuth": "SDK-HMAC-SHA256 Access=HSTASWBBW9K9XP5ZC26X, SignedHeaders=x-sdk-date;x-security-token, Signature=b97c652c6009ef964cadc526d78eff952193623c3cb2889090b878b0c5151d04"
+    },
+    {
+      "name": "POST 表单",
+      "method": "POST",
+      "url": "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens",
+      "body": "grant_type=refresh_token&client_id=vscode-codebot",
+      "date": "20260101T000000Z",
+      "wantAuth": "SDK-HMAC-SHA256 Access=HSTASWBBW9K9XP5ZC26X, SignedHeaders=content-type;x-sdk-date;x-security-token, Signature=57c41d2c21c893f2392f55a53c64eec6240b31dbd86782593736122fe9c6c0d5"
+    }
+  ]
+}

@@ -464,3 +464,116 @@ func TestGrowthAutoDefaults(t *testing.T) {
 		t.Error("显式 growth_auto_accept_tasks=false 未生效")
 	}
 }
+
+// ---------------------------------------------------------------- codearts 段
+
+// TestCodeartsAbsentSectionIsDisabled 守住**向后兼容**：老 config 里没有
+// codearts 段时，行为必须与改造前逐字节一致 —— 不启用上游。
+//
+// 这是本次接入最容易踩的坑：如果"段缺席"被当成"用默认值启用"，
+// 所有现有部署会在升级后突然多出一个上游（并可能因为扫不到凭证而报错）。
+func TestCodeartsAbsentSectionIsDisabled(t *testing.T) {
+	dir := t.TempDir()
+
+	// 老 config 的真实形态：完全没有 codearts 键
+	fp := filepath.Join(dir, "legacy.json")
+	os.WriteFile(fp, []byte(`{"listen":":7863","auth_dir":"./auths"}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CodeartsEnabled {
+		t.Error("老配置（无 codearts 段）不应启用 CodeArts 上游")
+	}
+
+	// 空配置同理
+	fp2 := filepath.Join(dir, "empty.json")
+	os.WriteFile(fp2, []byte(`{}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.CodeartsEnabled {
+		t.Error("空配置不应启用 CodeArts 上游")
+	}
+	// Default() 也不得默认开启
+	if d := Default(); d.Codearts.Enabled {
+		t.Error("Default() 不应默认启用 CodeArts 上游")
+	}
+}
+
+// TestCodeartsAuthDirFallsBackToTopLevel 凭证目录缺省复用顶层 auth_dir。
+//
+// 理由：codearts.LoadDir 按 `codearts*.json` 通配，workbuddy 的是
+// `workbuddy-*.json`，前缀不同可以安全共存 —— 用户不必为了启用第二个上游
+// 就重新摆一遍凭证文件。
+func TestCodeartsAuthDirFallsBackToTopLevel(t *testing.T) {
+	dir := t.TempDir()
+
+	// 只开 enabled，不配 auth_dir → 应复用顶层
+	fp := filepath.Join(dir, "a.json")
+	os.WriteFile(fp, []byte(`{"auth_dir":"./myauths","codearts":{"enabled":true}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.CodeartsEnabled {
+		t.Fatal("显式 enabled=true 未生效")
+	}
+	if c.CodeartsAuthDir != "./myauths" {
+		t.Errorf("auth_dir 应回落到顶层 ./myauths，得到 %q", c.CodeartsAuthDir)
+	}
+
+	// 显式配了就用自己的
+	fp2 := filepath.Join(dir, "b.json")
+	os.WriteFile(fp2, []byte(`{"auth_dir":"./myauths","codearts":{"enabled":true,"auth_dir":"./ca"}}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.CodeartsAuthDir != "./ca" {
+		t.Errorf("显式 codearts.auth_dir 未生效，得到 %q", c2.CodeartsAuthDir)
+	}
+}
+
+// TestCodeartsRefreshIntervalDefaults 后台续期间隔的"未配置"与"显式关闭"必须分开。
+//
+// 混为一谈的后果：把"没配这一项"读成 0，再读成"关闭"，
+// 于是用户明明没动过这一项，后台续期却悄悄不跑 —— 而 CodeArts 的 STS
+// 只有约 30 分钟寿命，表现是"空闲后第一个请求莫名慢几秒"。
+func TestCodeartsRefreshIntervalDefaults(t *testing.T) {
+	dir := t.TempDir()
+
+	// 启用但未配间隔 → 默认 60s
+	fp := filepath.Join(dir, "a.json")
+	os.WriteFile(fp, []byte(`{"codearts":{"enabled":true}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CodeartsRefreshInterval.Seconds() != 60 {
+		t.Errorf("未配间隔应默认 60s，得到 %v", c.CodeartsRefreshInterval)
+	}
+
+	// 显式配 → 用配置值
+	fp2 := filepath.Join(dir, "b.json")
+	os.WriteFile(fp2, []byte(`{"codearts":{"enabled":true,"refresh_interval_seconds":15}}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.CodeartsRefreshInterval.Seconds() != 15 {
+		t.Errorf("显式间隔未生效，得到 %v", c2.CodeartsRefreshInterval)
+	}
+
+	// 未启用 → 即使配了间隔也不注册（不启动无用的后台任务）
+	fp3 := filepath.Join(dir, "c.json")
+	os.WriteFile(fp3, []byte(`{"codearts":{"enabled":false,"refresh_interval_seconds":15}}`), 0o600)
+	c3, err := Load(fp3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.CodeartsRefreshInterval != 0 {
+		t.Errorf("未启用时不应解析出间隔，得到 %v", c3.CodeartsRefreshInterval)
+	}
+}
