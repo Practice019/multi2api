@@ -165,8 +165,32 @@ func (s *settingsStore) Apply(patch json.RawMessage) (applied, needRestart []str
 //
 // 不认识的键被 encoding/json 静默忽略 —— 那正是"核心不认识上游字段"的实现方式：
 // 它不必拒绝它们，只是不解释它们。
+//
+// # ⚠ 关键：先播当前值，再让补丁覆盖
+//
+// 早先的实现是 `var p admin.Settings; json.Unmarshal(patch, &p)` ——
+// 补丁里**没出现的键**保持零值，而调用方随后把这个 p 整个写回 config.json。
+// 于是前端只改一个开关（`{"checkin_enabled":false}`）就会把
+// upstream.timeout_seconds / pool.max_in_flight / cooldown.soft_rate /
+// session_sticky 等**未提交的配置全部清零**。
+//
+// 这是阶段 0 评审复现的 F1（真实存在，改造前就有）：
+//
+//	PUT {"checkin_enabled":false}  →
+//	  upstream.timeout_seconds: 120 → 0
+//	  pool.max_in_flight:         8 → 0
+//	  cooldown.soft_rate:     "60s" → ""
+//	  session_sticky.enabled:  true → false
+//
+// 修法：把**当前内存里的值**作为基底先填进 p，再让补丁覆盖它。
+// 这样"补丁里没有的键"保持原值，语义从"整体替换"变成真正的"局部更新"。
+//
+// 为什么用"先播值再 Unmarshal"而不是 map[string]json.RawMessage 探测键存在性：
+// 后者需要为每个字段写一遍存在性判断（20+ 个字段，且加字段必忘），
+// 而"先播值"对**所有**字段自动正确，加字段零成本。
 func (s *settingsStore) parse(patch json.RawMessage) (admin.Settings, error) {
-	var p admin.Settings
+	// 基底 = 当前生效值（含启动时从 config.json 读到的、以及上次保存的）
+	p := s.currentSettings()
 	if len(patch) == 0 {
 		return p, nil
 	}
@@ -174,6 +198,41 @@ func (s *settingsStore) parse(patch json.RawMessage) (admin.Settings, error) {
 		return p, fmt.Errorf("设置解析失败: %w", err)
 	}
 	return p, nil
+}
+
+// currentSettings 把当前生效的通用段汇成一个 admin.Settings。
+//
+// 用途：作为 parse 的基底，保证"补丁里没提到的键"不被动过。
+// 必须与 applyToMemory 的字段清单**一一对应**（一个是读、一个是写），
+// 缺字段会导致该字段每次保存都被清零 —— 有测试守着这个对称性。
+func (s *settingsStore) currentSettings() admin.Settings {
+	c := s.cfg
+	// log 在部分装配路径（测试、或未启用签到日志的部署）可能为 nil。
+	// 不判空会 panic —— 这是我在写这条修复时实测踩到的。
+	var checkinLogKeepDays int
+	if s.log != nil {
+		checkinLogKeepDays = s.log.KeepDays()
+	}
+	return admin.Settings{
+		SoftRate:              c.Cooldown.SoftRate,
+		UpstreamTimeoutSec:    c.Upstream.TimeoutSeconds,
+		UpstreamHeaderTimeout: c.Upstream.HeaderTimeoutSeconds,
+		UpstreamIdleTimeout:   c.Upstream.IdleTimeoutSeconds,
+		PoolMaxInFlight:       c.Pool.MaxInFlight,
+		BreakerThreshold:      c.Pool.BreakerThreshold,
+		BreakerCooldown:       c.Pool.BreakerCooldown,
+		BreakerCooldownMax:    c.Pool.BreakerCooldownMax,
+		SanitizeFingerprints:  c.Features.SanitizeBlacklistFingerprints,
+		UpstashURL:            c.Upstash.URL,
+		SessionStickyEnabled:  c.SessionSticky.Enabled,
+		SessionStickyTTL:      c.SessionSticky.TTL,
+		CheckinEnabled:        c.Schedule.CheckinEnabled,
+		KeepaliveEnabled:      c.Schedule.KeepaliveEnabled,
+		CheckinHours:          c.Schedule.CheckinHours,
+		KeepaliveHours:        c.Schedule.KeepaliveHours,
+		CheckinLogKeepDays:    checkinLogKeepDays,
+		RequestLogKeepDays:    c.RequestLogKeepDays,
+	}
 }
 
 // applyToMemory 把刚保存的通用段同步进内存 cfg，让 Snapshot 显示的就是新值。
