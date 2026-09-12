@@ -838,10 +838,36 @@ func cacheHitRate(hit, miss int64) (float64, bool) {
 // 天然贡献 0；-0.0 / 负数这类病态值（理论上解析层已挡掉）也和 0 等价，
 // 不会污染其它聚合量（它们各走各的累加器，唯一的交汇点是 cache_hit_rate 的分母，
 // 而那里对 <=0 有显式兜底）。
+// providerStat 单个上游在聚合窗口内的表现。
+//
+// # 为什么要按上游分组（Task 7）
+//
+// one-api 社区的实证教训："先把观测建好"。多上游之后，若统计不带 provider 维度，
+// 两个上游的调用次数与消耗混在一个数里，面板**无法归因** ——
+// 看不出成本花在哪个上游、哪个上游在报错。
+//
+// 字段刻意保持最小：调用次数 / 成功 / 失败 / 累计消耗。
+// 各自的模型分布已经由 by_model 覆盖（模型名本身带前缀即可区分上游）。
+type providerStat struct {
+	Calls  int64   `json:"calls"`
+	OK     int64   `json:"ok"`
+	Fail   int64   `json:"fail"`
+	Credit float64 `json:"credit"`
+}
+
+// unlabeledProvider 无 provider 标记的行（历史日志）归入这一桶。
+//
+// 为什么不丢弃它们：旧日志文件里的行没有 provider 键，反序列化得空串。
+// 丢弃会让"历史调用了多少次"这个数**变小**，是数据失真；
+// 归到一个明确的桶里既保住了总数，又如实说明"这些行不知道是哪个上游"。
+const unlabeledProvider = "(未标注)"
+
+// aggregateChatLog 把日志行聚合成 /admin/stats 的响应。
 func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	byModel := map[string]int{}
 	byStatus := map[string]int{}
 	byUID := map[string]int{}
+	byProvider := map[string]*providerStat{}
 	var okN, failN, tokens int64
 	var ttfbSum, totalSum int64
 	var ttfbN int64
@@ -855,11 +881,26 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		if e.UID != "" {
 			byUID[e.UID]++
 		}
+
+		// 按上游累计。空 provider = 历史行 → 归入"未标注"桶（不丢弃）。
+		pk := e.Provider
+		if pk == "" {
+			pk = unlabeledProvider
+		}
+		ps, exists := byProvider[pk]
+		if !exists {
+			ps = &providerStat{}
+			byProvider[pk] = ps
+		}
+		ps.Calls++
+
 		switch {
 		case e.Status >= 200 && e.Status < 300:
 			okN++
+			ps.OK++
 		case e.Status >= 400:
 			failN++
+			ps.Fail++
 		}
 		if e.Tokens > 0 {
 			tokens += int64(e.Tokens)
@@ -868,6 +909,7 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		// 让它进入累加会把「累计消耗」变成负值，比丢弃它更难解释。
 		if e.Credit > 0 {
 			credit += e.Credit
+			ps.Credit += e.Credit
 		}
 		if e.ThinkTokens > 0 {
 			thinkTokens += int64(e.ThinkTokens)
@@ -908,6 +950,16 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	// 前端据此显示「—」而不是一个 0%，避免把「没有数据」读成「命中率真的是 0」。
 	if r, ok := cacheHitRate(cacheHitTokens, cacheMissTokens); ok {
 		resp["cache_hit_rate"] = r
+	}
+	// by_provider 同样只在有数据时输出（与 cache_hit_rate 一致的约定）：
+	// 空集时给一个空对象会让前端把"没有数据"渲染成"所有上游都是 0"。
+	// 单上游部署下它仍会有一个桶 —— 那样前端不必分两种形态渲染。
+	if len(byProvider) > 0 {
+		out := make(map[string]providerStat, len(byProvider))
+		for k, v := range byProvider {
+			out[k] = *v
+		}
+		resp["by_provider"] = out
 	}
 	if len(items) > 0 {
 		resp["avg_total_ms"] = totalSum / int64(len(items))

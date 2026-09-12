@@ -44,32 +44,61 @@ var corePackages = []string{
 // internal/<名字>/ 是否在此列。
 var upstreamPrefix = "workbuddy2api/internal/workbuddy"
 
-// discoverUpstreams 从磁盘推导上游包名 —— **不靠任何人工白名单**。
+// gatewayContractMarkers 已废弃 —— 见 discoverUpstreams 的说明。
 //
-// # 为什么不能有白名单（两轮评审各证明了一次绕过）
+// 保留这个变量会让后来者以为"加个 marker 就能被认成上游"，
+// 而那正是被绕过两次的机制。所以显式删除它，并在下方说明为什么。
 //
-// 第一版用人工维护的 `knownUpstreams`：忘了登记就完全失效。
-// 第二版改成"从磁盘推导 + 非上游白名单"，评审仍然绕过了：
-// 白名单里写着 `codearts`（当时还不存在），于是把**真实的上游实现**
-// 放进 `internal/oauth/`（也在白名单里）→ **整套架构约束测试全绿**。
+// （历史上它曾是 `[]string{"gateway.Provider =", "Caps() gateway.Capability"}`。）
+
+// discoveryExemptPackages 明确**不是上游**的包。
 //
-// 结论：**任何"人说是或不是上游"的列表都会被绕过**，
-// 因为它把判定权交给了一个需要人来维护的地方。
+// # 为什么这个列表可以存在，而白名单不行（关键区别）
 //
-// # 现在的判据：用客观标记，不靠人声明
+// 之前的白名单是"声称某包**不是**上游" → 把真上游放进白名单目录即可绕过。
 //
-// 一个包是"上游实现"当且仅当它**实现了 gateway 契约**。
-// 这是可从代码本身判定的客观事实：
+// 这里的列表语义相反：它是"这个包**不可能是**上游实现"的**证明义务**，
+// 而且由 TestDiscoveryExemptionsAreJustified 强制：
+// 每个列出的包都必须**不依赖** internal/gateway。
+// 一旦某个包开始 import gateway，它就不再满足豁免条件，测试会红。
 //
-//	internal/<x>/*.go 里出现 `gateway.Provider` 或 `gateway.AdminExt`
-//	或 `gateway.JobExt` 或 `gateway.LoginFlow`（即 import 了 gateway 并使用契约）
+// 换句话说：豁免不是声明出来的，是**被验证的**。
+var discoveryExemptPackages = []string{
+	// 通用基础设施：它们不依赖 gateway（有测试断言）
+	"auth", "checkinlog", "clientlogin", "logbuf", "oauth", "redisstore", "session", "upstream",
+}
+
+// discoverUpstreams 从磁盘推导上游包名 —— **不靠字符串匹配，靠类型系统**。
 //
-// 于是：
-//   - 新上游一落地就被自动纳入约束（不需要改任何列表）
-//   - 把上游藏进白名单目录也会被抓到（因为它 import 了 gateway）
-//   - 通用包（auth/logbuf/...）不 import gateway，自然不是上游
+// # 为什么必须改成这样（两次绕过教训）
 //
-// 唯一剩余假设：上游必须通过 gateway 契约接入 —— 这正是本设计的强制要求。
+// 第一版：人工维护 `knownUpstreams` → 忘登记即失效。
+// 第二版：磁盘推导 + 非上游白名单 → 把上游放进白名单目录即绕过。
+// 第三版：靠源码里的字面串（`gateway.Provider =` / `Caps() gateway.Capability`）
+//
+//	       → **用 import 别名即可绕过**：
+//
+//		var _ gw.Provider = (*Provider)(nil)
+//		func (p *Provider) Caps() gw.Capability { ... }
+//
+// 两个标记串都不匹配，于是这个包**完全不可见** —— 它依赖 pool 也不会被拦。
+// 评审用这个手法把整套架构约束测试跑成了全绿。
+//
+// 教训：**只要判据是"源码文本"，就一定能被改写成等价但不同文本的代码绕过。**
+// 文本匹配还会自命中（我自己的探测包因为**注释里写了那两个标记串**而被误判为上游）。
+//
+// # 现在的判据：包级依赖图，由 Go 工具链给出
+//
+// 一个包是"上游实现" ⟺ 它的**非测试**依赖里含 `internal/gateway`
+// （即它消费契约），且不在 corePackages / discoveryExemptPackages 里。
+//
+// 这条判据：
+//   - 与标识符拼写无关（别名、点导入、重新导出都拦得住）
+//   - 与注释无关（自命中消失）
+//   - 由 `go list -deps` 给出，是编译器眼中的事实，不是我们眼里的文本
+//
+// 唯一假设：上游必须 import gateway 才能实现契约 —— 这正是本设计的强制要求，
+// 且有 TestUpstreamsActuallyDependOnGateway 反向断言（见下）。
 func discoverUpstreams(t *testing.T, root string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(root, "internal"))
@@ -80,6 +109,10 @@ func discoverUpstreams(t *testing.T, root string) []string {
 	coreNames := map[string]bool{}
 	for _, p := range corePackages {
 		coreNames[strings.TrimPrefix(p, "workbuddy2api/internal/")] = true
+	}
+	exempt := map[string]bool{}
+	for _, p := range discoveryExemptPackages {
+		exempt[p] = true
 	}
 
 	var out []string
@@ -92,73 +125,81 @@ func discoverUpstreams(t *testing.T, root string) []string {
 		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
 			continue
 		}
-		if coreNames[name] {
+		if coreNames[name] || exempt[name] {
 			continue
 		}
-		if implementsGatewayContract(t, root, name) {
+		if dependsOnGateway(t, root, name) {
 			out = append(out, name)
 		}
 	}
 	return out
 }
 
-// gatewayContractMarkers 判定"这个包**实现了**契约"的标识。
+// dependsOnGateway 报告 internal/<pkg> 的**非测试**依赖里是否含 internal/gateway。
 //
-// ⚠ 不能用 "import 了 gateway" 或 "提到 gateway.Provider" 作判据 ——
-// admin/scheduler/gateway 自己也会提到这些类型（它们**消费**契约，
-// 不是**实现**契约）。用"提到"会把它们误判成上游，
-// 于是约束反向失效（核心包被当成上游，谁都不许依赖它）。
+// 用 `go list -deps` 而不是 `go list -deps -test`：测试里提到契约不代表
+// 该包是上游实现（例如 gateway 自己的测试）。
 //
-// 真正区分"实现"与"消费"的是：实现者会写编译期断言
-//
-//	var _ gateway.Provider = (*X)(nil)
-//
-// 或定义 Provider 的方法（`Caps() gateway.Capability` 这种）。
-// 这里用**最能代表实现者**的两个标记：
-//   - 编译期断言 `gateway.Provider =`
-//   - `Caps() gateway.Capability`（只有实现者才定义 Caps）
-var gatewayContractMarkers = []string{
-	"gateway.Provider =",
-	"Caps() gateway.Capability",
-}
-
-// implementsGatewayContract 该目录下是否有文件**实现**了 gateway 契约。
-func implementsGatewayContract(t *testing.T, root, pkg string) bool {
+// 失败即返回 false —— 调用方（TestDiscoveryHasNoBlindSpot）会从另一个方向
+// 交叉验证，不会因为一次命令失败就静默放行。
+func dependsOnGateway(t *testing.T, root, pkg string) bool {
 	t.Helper()
-	dir := filepath.Join(root, "internal", pkg)
-	files, err := os.ReadDir(dir)
+	deps, err := listDeps(root, "workbuddy2api/internal/"+pkg)
 	if err != nil {
 		return false
 	}
-	for _, f := range files {
-		if f.IsDir() || !strings.HasSuffix(f.Name(), ".go") {
-			continue
-		}
-		// 只看**非测试**文件：测试里提到契约不代表该包是上游实现
-		if strings.HasSuffix(f.Name(), "_test.go") {
-			continue
-		}
-		b, err := os.ReadFile(filepath.Join(dir, f.Name()))
-		if err != nil {
-			continue
-		}
-		src := string(b)
-		for _, m := range gatewayContractMarkers {
-			if strings.Contains(src, m) {
-				return true
-			}
+	for _, d := range deps {
+		if d == "workbuddy2api/internal/gateway" {
+			return true
 		}
 	}
 	return false
+}
+
+// TestDiscoveryExemptionsAreJustified 豁免名单必须**自证**。
+//
+// 每个被豁免的包都必须不依赖 gateway —— 否则它其实可能是上游，
+// 豁免就成了白名单（而那正是被绕过过的机制）。
+//
+// 这条把"豁免"从"声明"变成"义务"：一旦某个被豁免的包开始 import gateway，
+// 测试立刻红，逼着人重新判断它是不是上游。
+func TestDiscoveryExemptionsAreJustified(t *testing.T) {
+	root := moduleRoot(t)
+	for _, pkg := range discoveryExemptPackages {
+		if _, err := os.Stat(filepath.Join(root, "internal", pkg)); err != nil {
+			continue // 包不存在，豁免无意义也无害
+		}
+		if dependsOnGateway(t, root, pkg) {
+			t.Errorf("internal/%s 被列为「不可能是上游」，但它依赖 internal/gateway —— "+
+				"豁免不成立。要么把它从豁免名单移除（让它受架构约束），"+
+				"要么说明它为什么不该被当作上游。", pkg)
+		}
+	}
+}
+
+// TestUpstreamsActuallyDependOnGateway 反向断言：被发现的上游必须真的依赖 gateway。
+//
+// 防止"依赖图判据"退化成"随便什么都算上游"（那样会让核心包被误判，
+// 约束反向失效）。这条与 TestDiscoveryHasNoBlindSpot 一起构成双向验证。
+func TestUpstreamsActuallyDependOnGateway(t *testing.T) {
+	root := moduleRoot(t)
+	ups := discoverUpstreams(t, root)
+	t.Logf("发现的上游: %v", ups)
+	for _, u := range ups {
+		if !dependsOnGateway(t, root, u) {
+			t.Errorf("internal/%s 被发现为上游，但它不依赖 internal/gateway —— "+
+				"判据不一致", u)
+		}
+	}
+	if len(ups) == 0 {
+		t.Fatal("一个上游都没发现 —— 判据或路径有问题，本测试自身失效")
+	}
 }
 
 // TestDiscoveryFindsKnownUpstreams 确认推导**真的推出了当前已知的上游**。
 //
 // 没有这条，discoverUpstreams 一旦因为路径/判据错误返回空列表，
 // 下面几条约束测试就会"零上游 → 零违规 → 绿灯"，形成 fail-open。
-//
-// ⚠ 这里的 `want` 是**断言用**的期望值（"这些目录确实实现了契约"），
-// 不是发现逻辑的输入 —— 发现逻辑只看代码标记。
 func TestDiscoveryFindsKnownUpstreams(t *testing.T) {
 	root := moduleRoot(t)
 	ups := discoverUpstreams(t, root)
@@ -169,10 +210,18 @@ func TestDiscoveryFindsKnownUpstreams(t *testing.T) {
 		found[u] = true
 	}
 
-	// 遍历 internal/ 下每个目录：若它**实现了契约**却没被发现 → 判据有洞
+	// 遍历 internal/ 下每个目录：若它依赖 gateway 却没被发现 → 判据有洞
 	entries, err := os.ReadDir(filepath.Join(root, "internal"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	coreNames := map[string]bool{}
+	for _, p := range corePackages {
+		coreNames[strings.TrimPrefix(p, "workbuddy2api/internal/")] = true
+	}
+	exempt := map[string]bool{}
+	for _, p := range discoveryExemptPackages {
+		exempt[p] = true
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -182,32 +231,45 @@ func TestDiscoveryFindsKnownUpstreams(t *testing.T) {
 		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
 			continue
 		}
-		if implementsGatewayContract(t, root, name) && !found[name] {
-			t.Errorf("internal/%s 实现了 gateway 契约，却没被 discoverUpstreams 发现 —— "+
-				"它绕过了架构约束（fail-open）", name)
+		if coreNames[name] || exempt[name] {
+			continue
+		}
+		if dependsOnGateway(t, root, name) && !found[name] {
+			t.Errorf("internal/%s 依赖 internal/gateway（= 消费契约），却没被发现为上游 "+
+				"—— 判据有洞（fail-open）", name)
 		}
 	}
 
-	// 反向：当前确实存在若干上游实现（workbuddy 一定在）
+	// 反向：当前确实存在若干上游实现
 	if !found["workbuddy"] {
-		t.Error("internal/workbuddy 实现了 gateway 契约，必须被推导出来")
+		t.Error("internal/workbuddy 必须被推导出来")
+	}
+	if !found["codearts"] {
+		t.Error("internal/codearts 必须被推导出来")
 	}
 }
 
-// TestNoHandMaintainedUpstreamWhitelist 防止白名单被重新引入。
+// ── 已废弃：基于源码字面串的上游判定 ──────────────────────────────
 //
-// 两轮评审都证明：任何"人工声明谁是上游"的列表都能被绕过
-// （忘登记 / 或把上游放进被声明为"非上游"的目录）。
-// TestDiscoveryHasNoBlindSpot 上游发现**不得有盲区**。
+// 历史上有过三个实现，都被证明可绕过或自命中：
 //
-// # 为什么不用"扫自己的源码找白名单变量"（第一版就是这么写的，已废弃）
+//   1. 人工维护的 knownUpstreams 列表 —— 忘登记即完全失效
+//   2. 磁盘推导 + 非上游白名单 —— 把上游放进白名单目录即绕过
+//   3. 源码字面串（gateway.Provider = / Caps() gateway.Capability）——
+//      用 import 别名即可绕过：
 //
-// 评审指出那种 meta-test 本质脆弱：它 grep 自己的源文件、靠字符串偏移排除自身，
-// 单独跑通过、整套跑失败。更重要的是它**测的不是真正要保证的东西** ——
-// 要保证的是"没有任何实现契约的包能逃过发现"，而不是"源码里没有某个变量名"。
+//          var _ gw.Provider = (*Provider)(nil)
+//          func (p *Provider) Caps() gw.Capability { ... }
 //
-// 所以改为**行为断言**，直接复现评审的绕过手法（把上游放进 internal/oauth/）：
-// 只要一个包实现了契约，**无论放在哪个目录**都必须被发现。
+//      两个标记串都不匹配 → 该包完全不可见，连它依赖 pool 都不会被拦。
+//      评审用这个手法把整套约束测试跑成了全绿。
+//      而且文本匹配会**自命中**：一个只在注释里写了那两个串的探测包
+//      会被误判为上游（我自己就踩过）。
+//
+// 现在改为**包级依赖图**判据（dependsOnGateway，由 go list -deps 给出）。
+// 见 discoverUpstreams 上方的完整说明。
+// ────────────────────────────────────────────────────────────────
+
 func TestDiscoveryHasNoBlindSpot(t *testing.T) {
 	root := moduleRoot(t)
 
@@ -220,6 +282,21 @@ func TestDiscoveryHasNoBlindSpot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 独立枚举：internal/ 下**每一个**依赖 gateway 且不在核心/豁免名单里的包。
+	//
+	// ⚠ 必须排除 corePackages 与 discoveryExemptPackages —— 否则会把
+	// admin/scheduler/server/gateway 自己（它们**消费**契约）算成"实现者"，
+	// 于是这条测试永远红。这正是我第一版写成这样时的报错：
+	// "internal/admin 依赖 internal/gateway 却没被发现"。
+	// admin 依赖 gateway 是**正常的**（它遍历 Registry 挂载上游端点）。
+	coreNames := map[string]bool{}
+	for _, p := range corePackages {
+		coreNames[strings.TrimPrefix(p, "workbuddy2api/internal/")] = true
+	}
+	exempt := map[string]bool{}
+	for _, p := range discoveryExemptPackages {
+		exempt[p] = true
+	}
 	var implementers []string
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -229,36 +306,44 @@ func TestDiscoveryHasNoBlindSpot(t *testing.T) {
 		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
 			continue
 		}
-		if implementsGatewayContract(t, root, name) {
+		if coreNames[name] || exempt[name] {
+			continue
+		}
+		if dependsOnGateway(t, root, name) {
 			implementers = append(implementers, name)
 		}
 	}
 
-	// 正向：实现了就必须被发现（任何"藏起来"的目录都逃不掉）
+	// 正向：依赖 gateway 的包必须被发现
+	//
+	// ⚠ 这里的"独立枚举"用的是**同一个** dependsOnGateway ——
+	// 所以它只能验证"过滤条件（core/exempt 名单）没把谁漏掉"，
+	// 不能验证 dependsOnGateway 本身是否正确。
+	// 后者由 TestUpstreamsActuallyDependOnGateway 从反方向守住。
 	blind := 0
 	for _, name := range implementers {
 		if !discovered[name] {
 			blind++
-			t.Errorf("internal/%s 实现了 gateway 契约却没被 discoverUpstreams 发现 "+
+			t.Errorf("internal/%s 依赖 internal/gateway 却没被 discoverUpstreams 发现 "+
 				"—— 它绕过了架构约束（fail-open）。\n"+
-				"  这正是评审证明过的绕过：把上游放进一个'看起来不是上游'的目录。", name)
+				"  常见原因：它在 corePackages 或 discoveryExemptPackages 里，但其实是上游。", name)
 		}
 	}
 
 	// 反向：发现的不许误判（把核心包当成上游会让约束反向失效）
 	for name := range discovered {
-		if !implementsGatewayContract(t, root, name) {
-			t.Errorf("discoverUpstreams 把 internal/%s 当成上游，但它并未实现契约 "+
+		if !dependsOnGateway(t, root, name) {
+			t.Errorf("discoverUpstreams 把 internal/%s 当成上游，但它并不依赖 gateway "+
 				"—— 误判会让核心包被当作上游，依赖约束反向失效", name)
 		}
 	}
 
 	if len(implementers) == 0 {
-		t.Fatal("一个实现契约的包都没有 —— 路径或判据有问题，本测试自身失效")
+		t.Fatal("一个依赖 gateway 的包都没有 —— 路径或判据有问题，本测试自身失效")
 	}
-	t.Logf("实现契约的包: %v；被发现: %v", implementers, keysOf(discovered))
+	t.Logf("依赖 gateway 的包: %v；被发现: %v", implementers, keysOf(discovered))
 	if blind == 0 {
-		t.Log("✓ 无盲区：所有实现契约的包都被发现")
+		t.Log("✓ 无盲区：所有依赖 gateway 的包都被发现")
 	}
 }
 
