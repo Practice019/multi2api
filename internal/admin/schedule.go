@@ -58,3 +58,47 @@ func (h *Handler) taskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, h.cfg.TaskSlot.Snapshot())
 }
+
+// providerInfo 一个已注册上游的对外描述（Task 8）。
+//
+// 前端用它做两件事：
+//  1. 账号池按其 ID 分组渲染（uid 归属哪个上游一眼可见）
+//  2. 按 Capabilities 决定显示哪些入口 —— workbuddy 显示成长/旅行，
+//     codearts 显示福利/配额，互不干扰
+//
+// Capabilities 用**字符串名**（gateway.Capability.Names 的输出）而不是位掩码：
+// 位掩码的数值是内部表示，前端不该依赖它；名字是稳定契约。
+type providerInfo struct {
+	ID           string   `json:"id"`
+	Capabilities []string `json:"capabilities"`
+	// Default 该上游是缺省上游（裸模型名走它）。
+	Default bool `json:"default"`
+	// AccountCount 该上游当前有多少账号（前端分组标题显示数量）。
+	AccountCount int `json:"account_count"`
+}
+
+// providers GET /admin/providers —— 已注册上游清单 + 能力位。
+//
+// 空注册表返回空列表而不是报错：前端要能在"未配置任何上游"的部署下
+// 正常渲染空态，而不是拿到 500 后整页崩。
+func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
+	infos := []providerInfo{}
+	if h.cfg.Registry != nil {
+		for _, p := range h.cfg.Registry.All() {
+			info := providerInfo{
+				ID:           p.ID(),
+				Capabilities: p.Caps().Names(),
+				Default:      p.ID() == h.cfg.DefaultProvider,
+			}
+			// 账号数：按 provider 过滤统计（pool 的 ListFor 已支持）。
+			if h.cfg.Pool != nil {
+				info.AccountCount = len(h.cfg.Pool.ListFor(p.ID()))
+			}
+			infos = append(infos, info)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers": infos,
+		"default":   h.cfg.DefaultProvider,
+	})
+}
