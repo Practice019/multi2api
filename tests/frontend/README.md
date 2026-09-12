@@ -60,5 +60,14 @@ node mutation_sweep.js e2e           # E2E 组（需要 Chrome + 可访问的实
 - `go test -race` 在本机跑不了（无 C 编译器）。并发正确性由
   `internal/pool/concurrency_norace_test.go` 的不变式断言部分覆盖。
 - 需要真实凭证的用例（codearts 的 `*Live`）会自动 skip。
-- E2E 需要 Chrome 位于 `C:\Program Files\Google\Chrome\Application\chrome.exe`
-  （各套件顶部的 `CHROME` 常量；换机器需按实际路径调整）。
+
+**浏览器路径不再是限制**：各套件通过 `chrome_path.js` 解析，
+顺序为 `CHROME_PATH` → 常见安装位置（Chrome/Edge，含 macOS/Linux）→ `PATH`。
+找不到时会**明确报错并列出试过的位置**。若 Chrome 装在非标准位置：
+
+```bash
+CHROME_PATH=/path/to/chrome node run_e2e.js http://127.0.0.1:18080/ui
+```
+
+该解析器自身有测试（`test_chrome_resolver.js`，静态套件的一部分），
+断言覆盖链真的生效、且找不到时不会静默返回空串。
