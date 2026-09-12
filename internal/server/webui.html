@@ -159,6 +159,8 @@
   .gbad{padding:8px 11px;border-radius:9px;font-size:12px;color:var(--err);
     border:1px solid var(--err);background:transparent}
   .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px 14px}
+  /* 嵌套对象（U2 的关键）：缩进 + 弱化标签，区分顶层与子项 */
+  .kvs.nested{display:grid;grid-template-columns:1fr;padding:6px 10px;background:rgba(0,0,0,.04);border-radius:6px;margin-top:4px}
   .kvs .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;
     padding:5px 0;border-bottom:1px solid var(--line)}
   .kvs .k{color:var(--dim)}
@@ -192,6 +194,19 @@
   /* 复选框组：文本短，不需要 250px 那么宽，用更小的最小列宽避免大片空白。
      210px 是「自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）」这类
      长标签在 13px 字号下不至于折成三行的经验下界。 */
+  /* 成长中心自动动作的复选框（U5）
+     ─────────────────────────────────────────────────────────────────
+     原本沿用全局的 `.fieldgroup.checks` 网格（minmax 210px 1fr），
+     但有些 label 文案超过 210px（"自动领取奖励（把已完成任务的奖励领回来，
+     唯一让积分到账的动作）"），导致列间挤压、hint 文字溢出到邻列。
+
+     改：1 行 1 个复选框（grid-template-columns: 1fr），把单行 label 限在
+     一列宽度，hint 与正文独立成行。
+     同时给一个 `.field.chk.stack` 修饰类，限定适用范围，不污染其他
+     复选框组（如「签到 / 保活 / 猫到站领奖」这些 label 短的，不需要单行）。 */
+  .field.chk.stack{display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:2px;align-items:start;padding:4px 0}
+  .field.chk.stack .hint{grid-column:2;font-size:11px;color:var(--dim);margin-top:1px;line-height:1.4}
+  .field.chk.stack label{line-height:1.5;align-self:start}
   .fieldgroup{display:flex;flex-direction:column;gap:10px}
   .fieldgroup + .fieldgroup{margin-top:4px}
   .fieldgroup.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 14px}
@@ -629,13 +644,13 @@
 
       <fieldset>
         <legend>成长中心自动动作（保存后立即生效）</legend>
-        <div class="fieldgroup checks">
-          <div class="field chk"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）</label></div>
-          <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label><span class="hint">只在新账号「还没领到第一只 Buddy」时有实际作用；官方前端没有接单按钮</span></div>
-          <div class="field chk"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
-          <div class="field chk"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
-          <div class="field chk"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
-          <div class="field chk"><input type="checkbox" id="setGrowthDraw"><label for="setGrowthDraw">自动抽奖</label></div>
+        <div class="fieldgroup">
+          <div class="field chk stack"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）</label></div>
+          <div class="field chk stack"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label><span class="hint">只在新账号「还没领到第一只 Buddy」时有实际作用；官方前端没有接单按钮</span></div>
+          <div class="field chk stack"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
+          <div class="field chk stack"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
+          <div class="field chk stack"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
+          <div class="field chk stack"><input type="checkbox" id="setGrowthDraw"><label for="setGrowthDraw">自动抽奖</label></div>
         </div>
         <div class="dim" style="margin-top:10px;font-size:12px">
           前两项是纯收益（领已达成的奖励、用补签卡补回断登），默认开启。
@@ -892,13 +907,18 @@
         + '">上游 <b>—</b></span>');
     }
 
-    // 4) 上次刷新时刻：让"自动刷新到底有没有在跑"肉眼可见。
+    // 4) 加载时刻：让"自动刷新到底有没有在跑"肉眼可见。
     //    用 HH:MM:SS 而不是"x 秒前"——后者需要自己再刷新才能变，
     //    反而让人怀疑是不是卡住了。
+    //
+    //    ⚠ "刷新"会暗示"这是上次成功刷新的时刻"，但实际值是当前
+    //    `new Date()`，只是这次渲染时的时刻（refresh 失败时也会更新）。
+    //    **字段名要诚实**：改用"加载"——表示这是页面加载/重载的快照。
+    //    真正的"上次成功刷新"需要另外追踪（不在本轮范围）。
     const now = new Date();
     const hhmmss = [now.getHours(), now.getMinutes(), now.getSeconds()]
       .map(n => String(n).padStart(2, '0')).join(':');
-    parts.push(`<span class="ts">刷新 <b>${hhmmss}</b></span>`);
+    parts.push(`<span class="ts">加载 <b>${hhmmss}</b></span>`);
 
     el.innerHTML = parts.join('');
   }
@@ -1941,10 +1961,25 @@
   //
   // 分派方式：能力位 → 渲染函数。**没有 if (provider === 'xxx') 这种分支** ——
   // 一个上游叫什么都不影响这里走哪条路，只影响 manifest 里它的能力位。
+  //
+  // # 没有专属渲染器时走通用列表（U1 的修复）
+  //
+  // 原先这里是 `if (typeof fn !== 'function') return;` —— **静默返回**。
+  // 后果：任何"有 GET 端点但没写专属渲染器"的能力位，面板会被
+  // buildProviderPanels 正常创建出来，却**永远停在「加载中…」**。
+  // 实测 workbuddy 的 checkin 就是这样：`/admin/checkin` 是 GET，
+  // 于是导航里出现「签到与保活」，点进去一片空白。
+  //
+  // 那是最难查的一类缺陷：面板存在、导航可点、没有报错、只是不出内容。
+  // 所以现在**不再静默返回**，而是回落到通用列表渲染 ——
+  // 通用渲染对任意 JSON 形状都能给出可读结果（见 renderGenericBlock），
+  // 于是"忘了写渲染器"最坏也只是排版朴素，不会是一片空白。
   function loadProviderPanel(providerId, cap) {
     const fn = PROVIDER_PANEL_RENDERERS[cap];
-    if (typeof fn !== 'function') return;
-    fn(providerId, cap);
+    if (typeof fn === 'function') { fn(providerId, cap); return; }
+    // 回落到通用列表渲染。它按 routesFor(provider, cap) 取该能力位的 GET 端点，
+    // 逐个拉取并渲染 —— 与 welfare 走的是同一条路径。
+    loadGenericList(providerId, cap);
   }
 
   // PROVIDER_PANEL_RENDERERS 能力位 → 渲染函数。
@@ -2129,6 +2164,71 @@
   //   1. {items:[...]} 或 [...]  → 条目列表
   //   2. {key: scalar, ...}      → 键值对
   //   3. 未知                    → 原样 JSON（不隐藏信息）
+  // 中文字段名映射（U2）。
+  //
+  // # 原则：查得到就给中文，查不到**保留原 key**
+  //
+  // 凭空意译比显示英文更糟 —— 用户看到"积分余量"却不知道对应上游哪个字段时，
+  // 排障会变难。所以这是一张**只增不改**的对照表，未命中一律原样显示。
+  const KV_LABELS = {
+    package_name_cn: '套餐',
+    spec_code: '规格代码',
+    is_credit_package: '积分套餐',
+    is_token_package: 'Token 套餐',
+    status: '状态',
+    start_date: '开始日期',
+    end_date: '结束日期',
+    CreditTotal: '积分总额',
+    CreditRemain: '积分余额',
+    CreditUsed: '已用积分',
+    CreditExpiring: '即将过期积分',
+    TokenUsed: '已用 Token',
+    uid: '账号',
+    campaignId: '活动 ID',
+    benefitAmount: '数量',
+    benefitUnit: '单位',
+    claimable: '可领取',
+    type: '类型',
+  };
+
+  // kvLabel 取字段的中文名；查不到返回原 key。
+  function kvLabel(k) {
+    return Object.prototype.hasOwnProperty.call(KV_LABELS, k) ? KV_LABELS[k] : k;
+  }
+
+  // kvValueHTML 渲染一个字段值。
+  //
+  // # 为什么要把「嵌套对象」单独处理（U2 的直接原因）
+  //
+  // `/admin/subscription` 返回 `{subscription: {...}, uid: "..."}`——
+  // 顶层只有两个键，而 `subscription` 的值是一整个套餐对象。
+  // 上一版把这种嵌套值 `JSON.stringify` 成一行 <code>，
+  // 于是用户看到的是一大坨 `{"package_name_cn":"体验版",...}`。
+  // 现在把嵌套对象**递归**成一层缩进的 key-value，人眼可读。
+  function kvValueHTML(k, v, depth) {
+    if (v === null || v === undefined) return '<span class="dim">—</span>';
+    if (typeof v === 'boolean') {
+      return v ? '<span class="pill ok">是</span>' : '<span class="pill dim">否</span>';
+    }
+    if (Array.isArray(v)) {
+      if (!v.length) return '<span class="dim">—</span>';
+      // 数组元素若是标量就顿号连起来；若是对象就交给 items 渲染
+      if (v.every(x => x === null || typeof x !== 'object')) {
+        return esc(v.map(x => String(x)).join('、'));
+      }
+      return v.map(x => genericItemHTML(x, '')).join('');
+    }
+    if (typeof v === 'object') {
+      // 嵌套对象：递归成子级 key-value（最多两层，避免极端数据把界面撑爆）
+      if (depth >= 2) return `<code>${esc(JSON.stringify(v))}</code>`;
+      const inner = Object.entries(v).map(([k2, v2]) =>
+        `<div class="kv"><span class="k">${esc(kvLabel(k2))}</span><span class="v">${kvValueHTML(k2, v2, depth + 1)}</span></div>`
+      ).join('');
+      return `<div class="kvs nested">${inner}</div>`;
+    }
+    return esc(String(v));
+  }
+
   function renderGenericBlock(route, data, providerId) {
     const head = `<div class="ghead2">${esc(route.title || route.path)}</div>`;
     if (data == null) return head + '<div class="dim" style="font-size:12px">无数据</div>';
@@ -2141,16 +2241,12 @@
       return head + `<div class="glist">` + list.map(it => genericItemHTML(it, providerId)).join('') + '</div>';
     }
 
-    // 纯对象 → 键值对。把嵌套的对象/数组展开成一行 JSON，
-    // 而不是丢掉 —— 丢信息会让"上游有新字段"这件事永远看不见。
+    // 纯对象 → 键值对。嵌套对象递归展开（见 kvValueHTML），
+    // 不再把整块 JSON 塞成一行代码 —— 那对用户等于没排版。
     if (typeof data === 'object') {
-      const kv = Object.entries(data).map(([k, v]) => {
-        let val;
-        if (v === null || v === undefined) val = '<span class="dim">—</span>';
-        else if (typeof v === 'object') val = `<code>${esc(JSON.stringify(v))}</code>`;
-        else val = esc(String(v));
-        return `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${val}</span></div>`;
-      }).join('');
+      const kv = Object.entries(data).map(([k, v]) =>
+        `<div class="kv"><span class="k">${esc(kvLabel(k))}</span><span class="v">${kvValueHTML(k, v, 0)}</span></div>`
+      ).join('');
       return head + `<div class="kvs">${kv}</div>`;
     }
     return head + `<div class="mono">${esc(String(data))}</div>`;
