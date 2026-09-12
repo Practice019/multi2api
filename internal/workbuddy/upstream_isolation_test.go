@@ -128,6 +128,7 @@ func (p *Provider) foreignRequestCount(uid string) int {
 	}
 	return tu.countForToken(trackingToken(uid))
 }
+
 // ---------------------------------------------------------------------------
 // 根因：ownAccounts —— 所有路径共用的唯一取号入口
 // ---------------------------------------------------------------------------
@@ -487,6 +488,7 @@ func newTrackingProvider(t *testing.T, p *pool.Pool) (*Provider, *trackingUpstre
 	})
 	return prov, tu
 }
+
 // ---------------------------------------------------------------------------
 // 快照出口：脏快照不得出去，也不得驱动调度
 // ---------------------------------------------------------------------------
@@ -580,5 +582,55 @@ func TestAnyDueTrueOnFirstRunForOwnAccount(t *testing.T) {
 
 	if !prov.anyDue(timeNowForTest()) {
 		t.Error("本上游有账号但没有快照时应视为到期（首扫填缓存），实际 false")
+	}
+}
+
+// TestAnyDueFalseWhenNoOwnAccounts 钉住"本上游 0 账号 → 不空转"。
+//
+// # 为什么必须单独有一条
+//
+// 这是改造**新引入**的行为，且它与旧行为**不等价**（详见下方对照），
+// 但此前没有任何测试锁住它 —— 评审实测：
+//
+//	把 travelwatch.go 的 `len(accs) == 0 { return false }` 改成 `return true`，
+//	`go test ./...` **全绿**。
+//
+// 根因：seedMultiProviderPool 的 14 个调用点**全部**至少传 1 个本上游账号，
+// 于是 `len(accs) == 0` 这条分支**从未被执行过**。
+// 测试装置覆盖不到的状态 = 没有测试。
+//
+// # 新旧行为对照（不是"效果一致"）
+//
+//	旧（遍历快照 map）：两 map 皆空 → true（**哪怕本上游 0 账号**、只有别家脏快照）
+//	新（遍历账号池）  ：本上游 0 账号 → false
+//
+// 新行为更好（没有本上游的号就没有守卫轮可言，不该空转上游请求），
+// 但它是**行为变更**。注释声称"效果一致"是不准确的 ——
+// 用这条测试把它钉住，而不是靠注释断言。
+func TestAnyDueFalseWhenNoOwnAccounts(t *testing.T) {
+	// 不传 own：池里只有 1 个别家上游账号。
+	p, foreign := seedMultiProviderPool(t)
+
+	// 装置自检：确认"本上游 0 账号"这个状态真的构造出来了。
+	// 没有这一步，若 seedMultiProviderPool 将来改成必传 own，
+	// 本用例会退化成"本上游有账号"从而假绿。
+	if got := len(p.ListFor(defaultProviderForTest)); got != 0 {
+		t.Fatalf("测试装置失效：本上游账号=%d，期望 0 —— 本用例的前提没成立", got)
+	}
+	if got := len(p.ListFor(otherProvider)); got != 1 {
+		t.Fatalf("测试装置失效：别家上游账号=%d，期望 1", got)
+	}
+
+	prov := newIsolationProvider(t, p)
+
+	// 再加一条别家脏快照：确保 false 不是因为"池空"这种平凡原因。
+	prov.travel.mu.Lock()
+	prov.travel.snapshots[foreign.UID] = TravelSnapshot{UID: foreign.UID}
+	prov.travel.mu.Unlock()
+
+	if prov.anyDue(timeNowForTest()) {
+		t.Errorf("本上游 0 账号时 anyDue 应返回 false（无守卫轮可言），"+
+			"实际 true —— 它在为一个没有本上游账号的池空转上游请求"+
+			"（池里只有别家账号 %s）", foreign.UID)
 	}
 }
