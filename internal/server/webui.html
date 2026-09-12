@@ -98,11 +98,15 @@
     width:3px;height:15px;border-radius:2px;background:#fff;opacity:.9}
   .sidebar .badge{margin-left:8px;font-size:10px;background:var(--panel2);
     border-radius:999px;padding:1px 6px;color:var(--dim)}
-  /* 选中项的徽章：底色用 currentColor 混合，跟随主题，而不是写死白色半透明。
-     写死的 rgba(255,255,255,.22) 是当初把深色配色硬抄进 CSS 的遗留 ——
-     它在浅色主题下语义是错的（"白底"在浅色系里不再表示"更亮"）。
-     currentColor 让底色自动跟随该按钮的前景色（也就是主题的 --acc 侧）。 */
-  .sidebar button.active .badge{background:color-mix(in srgb, currentColor 22%, transparent);color:#fff}
+  /* 选中项的徽章：底色跟随主题的强调色，而不是写死白色半透明。
+     写死的 rgba(255,255,255,.22) 是当初把深色配色硬抄进 CSS 的遗留。
+
+     ⚠ 必须写 `var(--acc)`，**不能**写 `currentColor`（CP3b 评审 F1）：
+     本条声明自己带 `color:#fff`，而 currentColor 取的就是**本元素的 color** ——
+     所以 currentColor 在这里解析成白色，`color-mix(currentColor 22%)`
+     与旧的 rgba(255,255,255,.22) **渲染上完全等价**，等于没改。
+     （我自己先写成 currentColor，评审实测三态底色全等、指出这是空操作。） */
+  .sidebar button.active .badge{background:color-mix(in srgb, var(--acc) 22%, transparent);color:#fff}
   /* 导航分组：通用 + 每个上游一组。
      组标题是可点击的折叠开关（纯 CSS 三角形，不用图标字体）。 */
   .navgroup{display:flex;flex-direction:column;gap:2px}
@@ -807,14 +811,28 @@
   // 这是**唯一**写 MANIFEST 的地方 —— 所有渲染函数都只读它。
   // 集中写入的理由：manifest 里 providers 与 default 必须同时生效，
   // 分开写会让中途状态（新 providers + 旧 default）被某次渲染看见。
+  //
+  // # 归一化到**元素层**，不只到数组层（CP3 评审 F1）
+  //
+  // 原先只做 `Array.isArray(x) ? x : []`，于是 `providers:[null]`
+  // 这种形状会一路流到渲染层，让 `!!x.default` / `a.provider` 抛 TypeError。
+  // 后果不是崩溃，而是"页面莫名停止刷新"，且 window.__errs 也抓不到 ——
+  // 极难定位。而同一份代码里 `p && p.default` 是有守卫的，
+  // 防御不一致本身就是缺陷。
+  //
+  // 所以在这里一次性把四个数组都过滤干净：**唯一写入口 = 唯一归一化点**，
+  // 下游任何消费者都不必再各自防一遍（那才是真正的"防御不一致"来源）。
   function applyManifest(m) {
     m = m && typeof m === 'object' ? m : {};
+    // 只保留「非 null 的对象」。数字/字符串/true 都当无效元素丢掉 ——
+    // 它们同样会让下游的属性访问出问题，且没有任何合理语义。
+    const objs = (v) => (Array.isArray(v) ? v : []).filter(x => x && typeof x === 'object');
     MANIFEST = {
       service: typeof m.service === 'string' && m.service ? m.service : 'gateway',
-      providers: Array.isArray(m.providers) ? m.providers : [],
-      capabilities: Array.isArray(m.capabilities) ? m.capabilities : [],
-      admin_routes: Array.isArray(m.admin_routes) ? m.admin_routes : [],
-      jobs: Array.isArray(m.jobs) ? m.jobs : [],
+      providers: objs(m.providers),
+      capabilities: objs(m.capabilities),
+      admin_routes: objs(m.admin_routes),
+      jobs: objs(m.jobs),
       loaded: true,
     };
     PROVIDERS = MANIFEST.providers;
@@ -1046,7 +1064,18 @@
   // 后端 manifest 已经排过一次（按 provider 字典序），这里再按"默认优先"重排，
   // 保证默认上游始终在第一组。
   function upstreamGroups() {
-    const out = (PROVIDERS || []).slice();
+    // 过滤掉 null / 非对象元素（CP3 评审 F1）。
+    //
+    // # 为什么值得加（当前后端确实产不出 null）
+    //
+    // applyManifest 对四个数组做了 Array.isArray 归一，但**只到数组层、
+    // 不到元素层**：providers:[null] 会一路流到这里，让下面
+    // `!!x.default` 抛 TypeError。而同一份代码里 applyManifest 的
+    // `p && p.default` 是有守卫的 —— 防御不一致本身就是缺陷：
+    // 一旦触发，表现为"页面莫名停止刷新"，且 window.__errs 也抓不到。
+    //
+    // 2 行的成本换掉一类"不可达但真发生时极难查"的故障，值得。
+    const out = (PROVIDERS || []).filter(p => p && typeof p === 'object');
     out.sort((x, y) => {
       const xd = !!x.default, yd = !!y.default;
       if (xd !== yd) return xd ? -1 : 1;
@@ -1250,7 +1279,8 @@
       return;
     }
     // 稳定排序：先按上游，再按任务名。不排序会让行序随后端 map 遍历跳动。
-    const sorted = jobs.slice().sort((a, b) => {
+    // 同样先滤掉 null / 非对象元素（CP3 评审 F1：a.provider 在 null 上会抛）。
+    const sorted = jobs.filter(j => j && typeof j === 'object').sort((a, b) => {
       const pa = a.provider || '', pb = b.provider || '';
       if (pa !== pb) return pa < pb ? -1 : 1;
       const na = a.name || '', nb = b.name || '';
