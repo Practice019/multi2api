@@ -21,6 +21,45 @@ var faviconSVG []byte
 // 未被替换时说明网关未配置 api_key，页面按「无需鉴权」处理。
 const keyPlaceholder = "__WB2API_KEY__"
 
+// colPlaceholders 把 HTML 静态部分的表格列数占位符替换成真实数字。
+//
+// # 为什么需要它
+//
+// webui.html 的静态 <tbody> 里写了 colspan="__COLS_LOGS__" 这类占位符，
+// 本意是复用 JS 里那份 COLS 常量、避免列数写两遍。
+//
+// **但 JS 的 `${COLS.logs}` 在静态 HTML 里不会被求值** —— 浏览器把它们
+// 当成普通文本，于是 `colspan="${COLS.logs}"` 变成一个非法属性值，
+// 空态行的跨列失效（真实缺陷，浏览器实测 colspan 属性值就是那串字面量）。
+//
+// 所以这里在服务端把占位符替换成真实数字。数字与 webui.html 里 `COLS`
+// 常量保持一致，由 internal/server 的测试守住（见 webui_cols_test.go）——
+// 那是唯一能防住"两边漂移"的位置：JS 常量与 Go 侧的替换表必须相等。
+var colPlaceholders = []struct{ token, value string }{
+	{"__COLS_TRAVEL__", "8"},
+	{"__COLS_GROWTH__", "12"},
+	{"__COLS_LOGS__", "10"},
+	{"__COLS_HIST__", "7"},
+	{"__COLS_JOBS__", "6"},
+}
+
+// renderUI 把页面里的占位符替换成运行时值。
+//
+// 纯函数（不碰 w/r），便于测试直接断言输出。
+func renderUI(page []byte, apiKey string, injectKey bool) []byte {
+	out := page
+	if injectKey && apiKey != "" {
+		// json.Marshal 负责转义：密钥含引号/反斜杠/换行时也不会破坏内联脚本。
+		if quoted, err := json.Marshal(apiKey); err == nil {
+			out = bytes.Replace(out, []byte(`"`+keyPlaceholder+`"`), quoted, 1)
+		}
+	}
+	for _, p := range colPlaceholders {
+		out = bytes.ReplaceAll(out, []byte(p.token), []byte(p.value))
+	}
+	return out
+}
+
 // isLoopback 判断请求是否来自本机（127.0.0.0/8 或 ::1）。
 func isLoopback(remoteAddr string) bool {
 	host, _, err := net.SplitHostPort(remoteAddr)
@@ -44,13 +83,7 @@ func (h *Handler) ui(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	page := webuiHTML
-	if local && h.cfg.APIKey != "" {
-		// json.Marshal 负责转义：密钥含引号/反斜杠/换行时也不会破坏内联脚本。
-		if quoted, err := json.Marshal(h.cfg.APIKey); err == nil {
-			page = bytes.Replace(page, []byte(`"`+keyPlaceholder+`"`), quoted, 1)
-		}
-	}
+	page := renderUI(webuiHTML, h.cfg.APIKey, local)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
