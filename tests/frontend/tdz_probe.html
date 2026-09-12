@@ -1,0 +1,3486 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body>
+<div id="host"></div>
+<script>
+window.__err = null;
+window.addEventListener('error', e => { window.__err = String(e.message || e.error); });
+</script>
+<script>
+// 最小 DOM 桩：脚本会 querySelector / getElementById 一批元素
+(function(){
+  const mk = (id) => {
+    const el = { id, hidden:false, className:'', textContent:'', innerHTML:'', value:'',
+                 checked:false, disabled:false, style:{}, dataset:{}, childNodes:[{textContent:'面板'}],
+                 classList:{ add(){}, remove(){}, toggle(){}, contains(){return false} },
+                 addEventListener(){}, removeEventListener(){}, appendChild(){}, removeChild(){},
+                 querySelector(){return null}, querySelectorAll(){return []},
+                 closest(){return null}, getBoundingClientRect(){return {x:0,y:0,width:0,height:0,right:0,bottom:0}},
+                 setAttribute(){}, getAttribute(){return null}, focus(){}, blur(){}, select(){} };
+    return el;
+  };
+  const cache = new Map();
+  document.getElementById = id => { if(!cache.has(id)) cache.set(id, mk(id)); return cache.get(id); };
+  document.querySelector = () => null;
+  document.querySelectorAll = () => [];
+  document.createElement = () => mk('tmp');
+  document.addEventListener = () => {};
+  window.addEventListener = () => {};
+  window.__WB2API_KEY__ = '__WB2API_KEY__';
+  try { Object.defineProperty(localStorage, 'clear', { value(){}, configurable:true }); } catch(e){}
+})();
+</script>
+<!--REAL-->
+<script>
+try {
+  
+(() => {
+  const $ = id => document.getElementById(id);
+  const LS = 'wb2api.key';
+  // 网关在 /ui 响应里注入本机 api_key；仍是哨兵则说明网关未启用鉴权。
+  //
+  // 守卫用的哨兵是**独立**的 __WB2API_KEY_SENTINEL__（不是 __WB2API_KEY__），
+  // 这样 Go 侧就可以把 __WB2API_KEY__ "全部替换"（ReplaceAll），而不会误伤
+  // 守卫里的对比基准——两层职责互不串扰。
+  // 旧的实现是 `Replace(..., 1)` 只替换 1 处，靠**漏改 5 处**侥幸正确，
+  // 是定时炸弹：哪天有人"顺手优化"成 ReplaceAll 就静默杀死自动连接。
+  const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY_SENTINEL__')
+    ? window.__WB2API_KEY__ : '';
+  let KEY = '';
+  let timer = null;
+  let models = [];
+  // 管理台状态
+  let share = [];          // 最近一次 /admin/accounts 的账号视图（操作按钮按 uid 回查）
+  let taskTimer = null;    // 全量任务轮询
+  let loginPoll = null;    // 添加账号的轮询句柄
+  let loginDeadline = 0;
+  let keyRevealed = false; // API 面板里 Key 是否明文显示
+
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const fmtTime = t => {
+    if (!t || t.startsWith('0001-')) return '—';
+    const d = new Date(t);
+    if (isNaN(d)) return '—';
+    const s = Math.floor((Date.now() - d) / 1000);
+    if (s < 60) return s + 's 前';
+    if (s < 3600) return Math.floor(s / 60) + 'm 前';
+    if (s < 86400) return Math.floor(s / 3600) + 'h 前';
+    return d.toLocaleString('zh-CN', {hour12:false});
+  };
+
+  const hdr = () => KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
+
+  function setDot(cls, txt) {
+    $('hdot').className = 'dot ' + cls;
+    $('htxt').textContent = txt;
+  }
+
+  async function api(path, opt = {}) {
+    const r = await fetch(path, Object.assign({}, opt, { headers: Object.assign(hdr(), opt.headers || {}) }));
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+    return r.json();
+  }
+
+  function renderCards(h, s) {
+    const cards = [
+      ['账号总数', s.total, ''],
+      ['健康', s.healthy, s.healthy > 0 ? 'ok' : 'err'],
+      ['冷却中', s.cooling, s.cooling > 0 ? 'warn' : 'dim'],
+      ['已禁用', s.disabled, s.disabled > 0 ? 'err' : 'dim'],
+      ['在途占满', s.in_flight_full, s.in_flight_full > 0 ? 'warn' : 'dim'],
+      ['粘性会话', s.sticky_sessions, ''],
+      ['Redis', s.redis_mode, s.redis_mode === 'upstash' ? 'ok' : 'dim'],
+      ['/healthz', h.healthy > 0 ? '200' : '503', h.healthy > 0 ? 'ok' : 'err'],
+    ];
+    $('cards').innerHTML = cards.map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+    // 子标题里的判读文案：把「顶栏那个点是绿是红」换算成一句明确的结论，
+    // 免得读者要自己把 healthy>0 与 /healthz 状态码对起来看。
+    $('gwHint').textContent = h.healthy > 0
+      ? '正在服务 · ' + h.healthy + '/' + (h.total || 0) + ' 个账号可用'
+      : (h.total > 0 ? '无可用账号 · 请求会返回 503' : '账号池为空');
+  }
+
+  // ---------------------------------------------------------------- 多上游契约层
+  //
+  // 所有上游信息都来自后端 `/admin/ui/manifest`（见 internal/admin/uimanifest.go）。
+  // 前端**只认识槽位与契约形状**，不认识任何上游名字 ——
+  // 硬编码的话，加第三个上游还要改前端，那正是"加新上游核心零改动"要避免的事。
+  //
+  // # 这一层存在的原因（历史教训）
+  //
+  // 上一版曾经定义了 providersWithCap / groupByProvider 两个函数，
+  // 但**从未被调用** —— 数据取回来了却没人用，11 个面板依然写死在 HTML 里。
+  // 所以本层的每个函数都必须有真实调用点，由 T11 的回归套件守住。
+  let MANIFEST = {
+    service: 'gateway',
+    providers: [],
+    capabilities: [],
+    admin_routes: [],
+    jobs: [],
+    loaded: false,   // 是否成功取到过 manifest
+  };
+  let PROVIDERS = [];         // MANIFEST.providers 的快捷引用（按上游分组用）
+  let DEFAULT_PROVIDER = '';  // 裸模型名走谁
+
+  // CORE_CAP 后端保留的能力名：声明了管理端点但**没有**对应能力位的路由归到它。
+  //
+  // 它必须与 internal/admin 的 CoreCapability 常量保持一致。
+  // 这个字符串是**协议的一部分**（后端 routeCapName 产出、前端按它路由），
+  // 不是"前端硬编码的能力表" —— 后者才是要避免的。有 T11 套件守住两边一致。
+  const CORE_CAP = 'core';
+
+  // manifest 拉取失败的**可读原因**，供页面顶部与降级提示使用。
+  // 空串表示没有错误。不叫 error 是为了避开与 Error 对象的混淆。
+  let manifestError = '';
+
+  // applyManifest 把后端下发的契约存起来并刷新派生状态。
+  //
+  // 这是**唯一**写 MANIFEST 的地方 —— 所有渲染函数都只读它。
+  // 集中写入的理由：manifest 里 providers 与 default 必须同时生效，
+  // 分开写会让中途状态（新 providers + 旧 default）被某次渲染看见。
+  //
+  // # 归一化到**元素层**，不只到数组层（CP3 评审 F1）
+  //
+  // 原先只做 `Array.isArray(x) ? x : []`，于是 `providers:[null]`
+  // 这种形状会一路流到渲染层，让 `!!x.default` / `a.provider` 抛 TypeError。
+  // 后果不是崩溃，而是"页面莫名停止刷新"，且 window.__errs 也抓不到 ——
+  // 极难定位。而同一份代码里 `p && p.default` 是有守卫的，
+  // 防御不一致本身就是缺陷。
+  //
+  // 所以在这里一次性把四个数组都过滤干净：**唯一写入口 = 唯一归一化点**，
+  // 下游任何消费者都不必再各自防一遍（那才是真正的"防御不一致"来源）。
+  function applyManifest(m) {
+    m = m && typeof m === 'object' ? m : {};
+    // 只保留「非 null 的对象」。数字/字符串/true 都当无效元素丢掉 ——
+    // 它们同样会让下游的属性访问出问题，且没有任何合理语义。
+    const objs = (v) => (Array.isArray(v) ? v : []).filter(x => x && typeof x === 'object');
+    MANIFEST = {
+      service: typeof m.service === 'string' && m.service ? m.service : 'gateway',
+      providers: objs(m.providers),
+      capabilities: objs(m.capabilities),
+      admin_routes: objs(m.admin_routes),
+      jobs: objs(m.jobs),
+      loaded: true,
+    };
+    PROVIDERS = MANIFEST.providers;
+    // 默认上游从 providers 里找（manifest 顶层没有单独的 default 字段，
+    // 上游的 providerInfo.default 才是权威）。找不到就回落第一个。
+    const def = PROVIDERS.find(p => p && p.default) || PROVIDERS[0];
+    DEFAULT_PROVIDER = def ? def.id : '';
+    manifestError = '';
+    return MANIFEST;
+  }
+
+  // renderTopStats 刷新顶栏状态条。
+  //
+  // # 数据来源
+  //
+  // h/s 是 refresh() 已经拿到的 /healthz 与 /status 结果，
+  // 上游数来自已加载的 MANIFEST —— **全部复用已有数据，不额外发请求**。
+  // 额外请求会让顶栏成为第二份事实来源，两边数字不一致时无法判断谁对。
+  //
+  // 传 null 表示"这一项本次拿不到"，此时显示「—」而不是沿用旧值 ——
+  // 沿用旧值会让用户看到一个已经过期的绿点。
+  function renderTopStats(h, s) {
+    const el = $('topstats');
+    if (!el) return;
+    const parts = [];
+
+    // 1) 健康：/healthz 的口径（有账号且未被在途占满）
+    if (h && typeof h.healthy === 'number') {
+      const cls = h.healthy > 0 ? 'ok' : 'err';
+      parts.push(`<span class="ts ${cls}">账号健康 <b>${h.healthy}/${h.total || 0}</b></span>`);
+    } else {
+      parts.push('<span class="ts">账号健康 <b>—</b></span>');
+    }
+
+    // 2) 账号总数（池视角，与健康数不同：这里含冷却/禁用）
+    if (s && typeof s.total === 'number') {
+      const bad = (s.cooling || 0) + (s.disabled || 0);
+      const cls = bad > 0 ? 'warn' : '';
+      parts.push(`<span class="ts ${cls}">账号 <b>${s.total}</b>${bad ? '（异常 ' + bad + '）' : ''}</span>`);
+    } else {
+      parts.push('<span class="ts">账号 <b>—</b></span>');
+    }
+
+    // 3) 已注册上游数（来自 manifest）
+    if (MANIFEST.loaded) {
+      parts.push(`<span class="ts">上游 <b>${MANIFEST.providers.length}</b></span>`);
+    } else {
+      parts.push('<span class="ts warn" title="' + esc(manifestError || 'manifest 未加载')
+        + '">上游 <b>—</b></span>');
+    }
+
+    // 4) 加载时刻：让"自动刷新到底有没有在跑"肉眼可见。
+    //    用 HH:MM:SS 而不是"x 秒前"——后者需要自己再刷新才能变，
+    //    反而让人怀疑是不是卡住了。
+    //
+    //    ⚠ "刷新"会暗示"这是上次成功刷新的时刻"，但实际值是当前
+    //    `new Date()`，只是这次渲染时的时刻（refresh 失败时也会更新）。
+    //    **字段名要诚实**：改用"加载"——表示这是页面加载/重载的快照。
+    //    真正的"上次成功刷新"需要另外追踪（不在本轮范围）。
+    const now = new Date();
+    const hhmmss = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map(n => String(n).padStart(2, '0')).join(':');
+    parts.push(`<span class="ts">加载 <b>${hhmmss}</b></span>`);
+
+    el.innerHTML = parts.join('');
+  }
+
+  // serviceName 本实例的身份标识。
+  //
+  // # 为什么从 manifest 读（B8）
+  //
+  // 原先前端在 3 处硬编码了 'workbuddy2api'（标题、顶栏 h1、API 面板卡片）。
+  // 后端改名或一个部署里跑两个实例时，界面显示的名字与实际不符 ——
+  // 而"这个页面管的是哪一个实例"恰恰是靠名字区分的。
+  //
+  // 现在只从 manifest.service 读，拿不到时显示 'gateway'（中性词），
+  // 让"没拿到"与"拿到了某个具体名字"在观感上不同。
+  function serviceName() {
+    return MANIFEST.service || 'gateway';
+  }
+
+  // renderIdentity 把服务名写进页面标题与主标题。
+  //
+  // 单独抽出来是因为它有 3 个落点（<title> / h1 / API 卡片），
+  // 散落各写就会漏掉一处 —— B8 当初正是漏掉了全部 3 处。
+  function renderIdentity() {
+    const name = serviceName();
+    document.title = name + ' · 网关控制台';
+    const h1 = $('appTitle');
+    if (h1) {
+      // h1 的第一个文本节点是名字本身（<small> 是副标题），
+      // 所以只替换节点而不是整个 innerHTML，免得把副标题也冲掉。
+      if (h1.childNodes.length && h1.childNodes[0].nodeType === 3) {
+        h1.childNodes[0].textContent = name + ' ';
+      } else {
+        h1.insertBefore(document.createTextNode(name + ' '), h1.firstChild);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- 主题（三态）
+  //
+  // 偏好有**三个**取值，而不是一个布尔：
+  //   'system' 跟随系统（默认）
+  //   'dark' / 'light' 用户显式选择
+  //
+  // # 为什么必须区分 system 与 dark
+  //
+  // 若只存布尔，用户一旦点过任何一次，就**永久失去"跟随系统"**——
+  // 而那是大多数人的期望默认值（白天用浅色、晚上用深色是系统的事）。
+  //
+  // 实际写 data-theme 的时机有两处：
+  //   1. <head> 里的同步脚本（防首屏闪白）
+  //   2. 这里（用户点击切换时）
+  // 两处都必须把 'system' 解析成具体的 dark/light，因为 CSS 只认这两个值。
+  const LS_THEME = 'wb2api.theme';
+
+  function systemPrefersDark() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+
+  // resolveTheme 把偏好解析成真正生效的主题名。
+  function resolveTheme(pref) {
+    if (pref === 'dark' || pref === 'light') return pref;
+    return systemPrefersDark() ? 'dark' : 'light';
+  }
+
+  // applyTheme 写入 data-theme 并同步按钮选中态。
+  function applyTheme(pref) {
+    const theme = resolveTheme(pref);
+    document.documentElement.setAttribute('data-theme', theme);
+    const box = $('themeSwitch');
+    if (box) {
+      box.querySelectorAll('button[data-theme-mode]').forEach(b =>
+        b.classList.toggle('on', b.dataset.themeMode === pref));
+    }
+    return theme;
+  }
+
+  // setThemePref 用户显式选择。
+  function setThemePref(pref) {
+    try { localStorage.setItem(LS_THEME, pref); } catch { /* 隐私模式 */ }
+    applyTheme(pref);
+  }
+
+  // initTheme 读持久化偏好并绑定按钮 + 跟随系统变化。
+  function initTheme() {
+    let pref = 'system';
+    try { pref = localStorage.getItem(LS_THEME) || 'system'; } catch { /* 隐私模式 */ }
+    if (['system', 'dark', 'light'].indexOf(pref) < 0) pref = 'system';
+    applyTheme(pref);
+
+    const box = $('themeSwitch');
+    if (box) {
+      box.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-theme-mode]');
+        if (b) setThemePref(b.dataset.themeMode);
+      });
+    }
+
+    // 系统主题变化时，**只有**在"跟随系统"模式下才跟着变。
+    // 用户显式选过 dark/light 之后再跟随系统变化就是擅自改他的选择。
+    if (window.matchMedia) {
+      try {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+          let cur = 'system';
+          try { cur = localStorage.getItem(LS_THEME) || 'system'; } catch { /* 隐私模式 */ }
+          if (cur === 'system') applyTheme('system');
+        });
+      } catch { /* 老浏览器没有 addEventListener 版本 */ }
+    }
+  }
+
+  // providerOf 一个账号属于哪个上游。
+  //
+  // 无 provider 字段的多为历史账号（该字段是后加的），归到默认上游 ——
+  // 与后端 pool 对"未打标签账号"的解释保持一致，否则前后端会显示成两个地方。
+  function providerOf(a) {
+    if (!a || typeof a !== 'object') return '';
+    return a.provider || DEFAULT_PROVIDER;
+  }
+
+  // providersWithCap 返回声明了某能力的所有上游 id。
+  //
+  // 用途：决定上游分组里显示哪些面板 —— 有该能力的上游才显示对应入口。
+  function providersWithCap(cap) {
+    const out = [];
+    for (const p of (PROVIDERS || [])) {
+      if (p && Array.isArray(p.capabilities) && p.capabilities.indexOf(cap) >= 0) {
+        out.push(p.id);
+      }
+    }
+    return out;
+  }
+
+  // capTitle 把能力位翻译成中文标题（如 growth → 成长计划）。
+  //
+  // 标题由后端下发而不是前端硬编码：能力是**后端的概念**，
+  // 前端硬编码一份就会与后端漂移（加了新能力位，前端显示英文 id）。
+  function capTitle(cap) {
+    for (const c of (MANIFEST.capabilities || [])) {
+      if (c && c.id === cap) return c.title || c.id;
+    }
+    return cap; // 未登记的退回 id 本身，至少还能看出是什么
+  }
+
+  // providerTitle 取上游的展示名。目前就是 id，留成函数是为了将来
+  // 后端能给上游下发中文名时只改这一处。
+  function providerTitle(id) {
+    return id || '（未标注）';
+  }
+
+  // providerInfo 取某上游的 manifest 描述。
+  function providerInfo(id) {
+    return (PROVIDERS || []).find(p => p && p.id === id) || null;
+  }
+
+  // routesFor 取某上游（可选按能力位过滤）声明的管理端点。
+  //
+  // 只返回 **GET** 端点作为"面板入口"的判定依据 —— 写端点（POST/DELETE）
+  // 是动作不是面板，把它们也当成入口会让导航里出现一堆"点一下就生效"的项。
+  function routesFor(providerId, cap) {
+    return (MANIFEST.admin_routes || []).filter(r =>
+      r && r.provider === providerId &&
+      (cap === undefined || r.capability === cap) &&
+      String(r.method || '').toUpperCase() === 'GET');
+  }
+
+  // upstreamGroups 返回导航用的上游分组（默认上游在最前，其余字典序）。
+  //
+  // # 为什么排序必须显式做
+  //
+  // 顺序必须**稳定**，不能依赖对象/数组遍历顺序，否则每次刷新导航都会跳位。
+  // 后端 manifest 已经排过一次（按 provider 字典序），这里再按"默认优先"重排，
+  // 保证默认上游始终在第一组。
+  function upstreamGroups() {
+    // 过滤掉 null / 非对象元素（CP3 评审 F1）。
+    //
+    // # 为什么值得加（当前后端确实产不出 null）
+    //
+    // applyManifest 对四个数组做了 Array.isArray 归一，但**只到数组层、
+    // 不到元素层**：providers:[null] 会一路流到这里，让下面
+    // `!!x.default` 抛 TypeError。而同一份代码里 applyManifest 的
+    // `p && p.default` 是有守卫的 —— 防御不一致本身就是缺陷：
+    // 一旦触发，表现为"页面莫名停止刷新"，且 window.__errs 也抓不到。
+    //
+    // 2 行的成本换掉一类"不可达但真发生时极难查"的故障，值得。
+    const out = (PROVIDERS || []).filter(p => p && typeof p === 'object');
+    out.sort((x, y) => {
+      const xd = !!x.default, yd = !!y.default;
+      if (xd !== yd) return xd ? -1 : 1;
+      return x.id < y.id ? -1 : x.id > y.id ? 1 : 0;
+    });
+    // 没有任何能力面板且账号数为 0 的上游不占导航位置（见计划的"显示门槛"决策）。
+    return out.filter(p => p.account_count > 0 || hasAnyPanel(p.id));
+  }
+
+  // hasAnyPanel 该上游是否有任何可渲染的能力面板。
+  //
+  // # 为什么不再排除 chat/models（评审 F2）
+  //
+  // 上一版排除 chat/models，理由是"每个上游都有那两个能力，列出来等于没差别"。
+  // 那是**把判据建立在前端硬编码的能力名白名单上** —— 一个上游若把它的
+  // 专属面板挂在 chat 上（workbuddy 的 client-login 正是如此），它的面板
+  // 就永远不显示，而"加新上游前端 0 改动"这条判据随之失效。
+  //
+  // 现在改由后端负责语义：声明了端点却没声明能力位的路由，后端归到保留名
+  // "core"（见 admin.CoreCapability）。前端只按数据判断，不认识任何能力名。
+  function hasAnyPanel(providerId) {
+    const p = providerInfo(providerId);
+    if (!p || !Array.isArray(p.capabilities)) return false;
+    return p.capabilities.some(c => routesFor(providerId, c).length > 0);
+  }
+
+  // panelCapsOf 取某上游**有面板入口**的能力位列表（含保留名 core）。
+  //
+  // 与 capNamesOf 的区别：这个只列"真的有 GET 入口"的能力，
+  // 用于建面板；capNamesOf 列的是声明了的能力，用于写标题提示。
+  function panelCapsOf(providerId) {
+    const out = [];
+    const p = providerInfo(providerId);
+    if (p && Array.isArray(p.capabilities)) {
+      for (const c of p.capabilities) {
+        if (routesFor(providerId, c).length > 0 && out.indexOf(c) < 0) out.push(c);
+      }
+    }
+    // 保留名 core：无能力位但声明了端点的路由归在这里。
+    // 它不在 providers[].capabilities 里（那是"声明了能力位"的列表），
+    // 所以必须单独查一次 —— 漏掉它会让 client-login 这类端点无家可归。
+    if (routesFor(providerId, CORE_CAP).length > 0 && out.indexOf(CORE_CAP) < 0) {
+      out.push(CORE_CAP);
+    }
+    return out;
+  }
+
+  // loadManifest 拉取渲染契约。
+  //
+  // # 失败时的行为（评审 F3）
+  //
+  // 拿不到 manifest 不该让整页白屏，只是退化成"没有上游面板"
+  //（通用面板仍然全部可用）。
+  //
+  // 但**"拿不到"的判定不能只看有没有抛异常**：admin() 对
+  // "HTTP 200 + 非 JSON 响应体"（代理返回的 HTML 错误页、空体、被截断的 JSON）
+  // **不抛异常**，而是返回 null。上一版把这个 null 直接喂给 applyManifest，
+  // 于是：
+  //   - 已加载好的 MANIFEST 被**静默清空**（providers 归零、service 退回默认）
+  //   - loadManifest 仍然返回 true，调用方以为成功了
+  //   - manifestError 不记录任何东西
+  // 结果是"一次网络抖动把已经渲染好的上游全抹掉，而且没有任何痕迹"。
+  //
+  // 所以这里必须**校验形状**：只有确认是对象且 providers 是数组才算成功。
+  async function loadManifest() {
+    try {
+      const m = await admin('/admin/ui/manifest');
+      if (!m || typeof m !== 'object' || !Array.isArray(m.providers)) {
+        // 形状不对 = 失败。保留上一份好数据，并记下原因。
+        manifestError = '响应格式异常（缺少 providers 数组）';
+        return false;
+      }
+      applyManifest(m);
+      return true;
+    } catch (e) {
+      manifestError = e && e.message ? e.message : '未知错误';
+      return false;
+    }
+  }
+
+  // ACCT_COLS 账号表的列数。**所有 colspan 都必须由它推导**，不许写数字。
+  //
+  // # 为什么（bug B1 的根因）
+  //
+  // 账号表从 8 列加到 11 列时（多了「上游」「今日签到」「在途」），
+  // 表格里的 colspan 没跟着改，于是鉴权失败时的整行提示只占 8 格，
+  // 后面 3 格露出表头底色。那种错不会报错、只有肉眼能看出来，
+  // 而且**每加一列就会重犯一次**。
+  //
+  // 与 <thead> 里的 <th> 数量必须一致，有 T11 套件守住。
+  const ACCT_COLS = 11;
+
+  // 其余表格的列数。同样必须与各自 <thead> 的 <th> 数量一致。
+  //
+  // # 为什么全部集中在这里
+  //
+  // 上一版每个表格的空态/错误态各自写死数字，散落在十几处。
+  // 加一列时要记得改十几处，漏一处就是"提示行只占一半"的视觉 bug。
+  // 集中定义后，加列只改一行，且有 T11 套件核对它和真实表头是否一致。
+  const COLS = {
+    travel: 8,   // 猫猫旅行
+    growth: 12,  // 成长计划
+    logs: 10,    // 请求日志
+    hist: 7,     // 任务历史
+    jobs: 6,     // 任务调度
+  };
+
+  // rowPlaceholder 生成占满整行的提示行。
+  //
+  // 所有表格的空态/加载态/错误态都必须走它 —— 这是消灭
+  // "colspan 与真实列数不一致"这类漂移的唯一可靠办法。
+  function rowPlaceholder(cols, text, cls) {
+    return `<tr><td colspan="${cols}" class="${cls || 'dim'}">${esc(text)}</td></tr>`;
+  }
+
+  // 表格三态的统一入口。
+  //
+  // # 为什么要把它做成枚举而不是各自写文案
+  //
+  // 三态的**语义**必须一致：加载态是"正在等"（中性）、空态是"确实没有"
+  //（中性偏淡）、错误态是"出错了"（红，且必须带原因）。
+  // 各自写文案时最容易出的错是**把错误显示成空态** ——
+  // 用户看到"暂无数据"会以为系统正常，实际是接口挂了。
+  //
+  // 所以这里强制区分，并且错误态**必须**带 message。
+  const TableState = {
+    loading: (cols, what) => rowPlaceholder(cols, (what || '') + '加载中…'),
+    empty: (cols, what) => rowPlaceholder(cols, (what || '') + '暂无数据'),
+    error: (cols, msg) => rowPlaceholder(cols, msg || '加载失败', 'err'),
+  };
+
+  // normalizeAccount 把一个账号视图归一成渲染需要的形状。
+  //
+  // # 修正后的描述（评审 CP2 F3）
+  //
+  // 计划里我写的 B5 是「/status 没有 provider 字段 → 账号全被归到默认上游」。
+  // **实测不成立**：/status 与 /admin/accounts **都带** provider
+  //（评审在强制回落路径下实测 inferred=0）。所以那条描述是错的，已改正。
+  //
+  // 那么这段代码的价值是什么？**防御形状契约的漂移**，而不是修一个现存 bug：
+  //
+  //   两个端点的账号形状并不相同 ——
+  //     /admin/accounts  带 today_checkin、token_expire_sec
+  //     /status          带 quota、err_total、last_err
+  //   回落路径**静默依赖**"两边都有 provider"。哪天某个端点少一个字段，
+  //   界面会把号归错上游且**不报任何错**（正是最难查的一类故障）。
+  //
+  // 所以这里做两件事：
+  //   1. 缺 provider 时显式打标记（provider_inferred），界面提示"这是推断值"
+  //   2. 畸形输入返回 null 由调用方滤掉，不让半个对象流进渲染
+  //
+  // 注意：在当前后端下 provider_inferred **不会真的出现**（实测为 0）。
+  // 它是形状契约的守卫，不是"已修复的 bug"。评审 F3 说得对 ——
+  // 把它记作"修好了 B5"是夸大；诚实的说法是"B5 的原始描述有误，
+  // 这里补的是契约守卫"。
+  function normalizeAccount(a) {
+    if (!a || typeof a !== 'object') return null;
+    const out = Object.assign({}, a);
+    // 缺 provider：交给 providerOf 走默认上游，但记下"这是推断来的"，
+    // 供表格显示「上游?」并在分组标题里说明。
+    if (!out.provider) out.provider_inferred = true;
+    return out;
+  }
+
+  function renderAccounts(list) {
+    share = (list || []).map(normalizeAccount).filter(Boolean);
+    updateNavBadges();
+    if (!share.length) {
+      $('accts').innerHTML = accountPlaceholder('账号池为空 —— 点上方「＋ 添加账号」');
+      return;
+    }
+    // 按上游分组：组标题行 + 该组的账号行。
+    //
+    // 分组不是为了好看 —— 它让"这个号属于哪个上游"从一列小标签
+    // 变成一眼可见的结构，号一多时这是最快的定位方式。
+    const groups = groupAccountsByProvider(share);
+    const rows = [];
+    for (const g of groups) {
+      rows.push(accountGroupRow(g));
+      for (const a of g.accounts) rows.push(accountRow(a));
+    }
+    $('accts').innerHTML = rows.join('');
+  }
+
+  // renderJobs 渲染任务调度面板（T9）。
+  //
+  // 数据来自 manifest.jobs。**不额外发请求** —— 与顶栏状态条同一个理由：
+  // 第二份事实来源会让两份数字不一致时无法判断谁对。
+  function renderJobs() {
+    const tb = $('jobrows');
+    if (!tb) return;
+    if (!MANIFEST.loaded) {
+      tb.innerHTML = TableState.error(COLS.jobs, '渲染契约未加载：' + (manifestError || '未知原因'));
+      $('jobMeta').textContent = '';
+      return;
+    }
+    const jobs = MANIFEST.jobs || [];
+    $('jobMeta').textContent = jobs.length ? `（${jobs.length} 个已注册任务）` : '';
+    if (!jobs.length) {
+      tb.innerHTML = TableState.empty(COLS.jobs, '没有上游注册定时任务');
+      return;
+    }
+    // 稳定排序：先按上游，再按任务名。不排序会让行序随后端 map 遍历跳动。
+    // 同样先滤掉 null / 非对象元素（CP3 评审 F1：a.provider 在 null 上会抛）。
+    const sorted = jobs.filter(j => j && typeof j === 'object').sort((a, b) => {
+      const pa = a.provider || '', pb = b.provider || '';
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      const na = a.name || '', nb = b.name || '';
+      return na < nb ? -1 : na > nb ? 1 : 0;
+    });
+    tb.innerHTML = sorted.map(j => {
+      // 间隔：毫秒转可读。小于 1 分钟显示秒，否则显示分钟。
+      const ms = j.interval_ms || 0;
+      const itv = ms <= 0 ? '<span class="dim">—</span>'
+        : (ms < 60000 ? (ms / 1000) + ' 秒' : (ms / 60000) + ' 分');
+      // 上次执行：两列各有分工 ——
+      //  ·「上次执行」给**绝对时间**（排障时要跟日志对时刻）
+      //  ·「距今」给**相对时间**（判断这个任务还活着吗）
+      // 两者都需要，所以不合并成一列。
+      //
+      // 从未执行时显示「未执行」而不是 —：那个字面量会骗人 ——
+      // growth-watch 一直没跑过，显示 — 会被当成"正常但无关的信息"。
+      let last = '<span class="pill warn" title="该任务自进程启动以来尚未执行过">未执行</span>';
+      let ago = '<span class="dim">—</span>';
+      if (j.last_run) {
+        const t = new Date(j.last_run);
+        last = `<span class="mono">${esc(isNaN(t) ? j.last_run : t.toLocaleTimeString('zh-CN', { hour12: false }))}</span>`;
+        ago = esc(fmtTime(j.last_run));
+      }
+      const err = j.last_error
+        ? `<span class="err" title="${esc(j.last_error)}">${esc(j.last_error.slice(0, 50))}</span>`
+        : '<span class="dim">—</span>';
+      // 有错误的行整行标红：扫一眼就知道哪个任务出问题了。
+      const rowCls = j.last_error ? ' class="errrow"' : '';
+      return `<tr${rowCls}>
+        <td class="mono">${esc(j.name || '—')}</td>
+        <td><span class="pill dim">${esc(j.provider || '—')}</span></td>
+        <td>${itv}</td>
+        <td>${last}</td>
+        <td>${ago}</td>
+        <td>${err}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // renderAccounts 渲染账号表。
+  function accountPlaceholder(text, cls) {
+    return rowPlaceholder(ACCT_COLS, text, cls);
+  }
+
+  // groupAccountsByProvider 把账号按上游分组，默认上游在最前。
+  //
+  // 排序必须**稳定**：默认上游优先，其余按 id 字典序。
+  // 不依赖 Map 遍历顺序，否则每次刷新行序都会跳。
+  function groupAccountsByProvider(list) {
+    const byId = new Map();
+    for (const a of list) {
+      const id = providerOf(a);
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(a);
+    }
+    const out = [];
+    for (const [id, accounts] of byId) {
+      out.push({ provider: id, accounts: accounts, isDefault: id === DEFAULT_PROVIDER });
+    }
+    out.sort((x, y) => {
+      if (x.isDefault !== y.isDefault) return x.isDefault ? -1 : 1;
+      return x.provider < y.provider ? -1 : x.provider > y.provider ? 1 : 0;
+    });
+    return out;
+  }
+
+  // accountGroupRow 一个上游分组的标题行。
+  //
+  // 用 <tr class="grouprow"> 而不是额外的表格：保持单一 table，
+  // 让列宽与主体一致，也不会引入嵌套表格的样式麻烦。
+  function accountGroupRow(g) {
+    const info = providerInfo(g.provider);
+    const def = g.isDefault ? ' · 默认' : '';
+    // 清单里没有这个上游时明说 —— 通常是历史账号或回落路径，
+    // 显示成"未注册"比让它看起来像一个正常上游更有用。
+    const known = info ? '' : '（未在 manifest 里注册）';
+    const caps = info && Array.isArray(info.capabilities) ? info.capabilities.length : 0;
+    const meta = info
+      ? `${caps} 项能力`
+      : '按默认上游推断';
+    return `<tr class="grouprow"><td colspan="${ACCT_COLS}">
+      <span class="gname">${esc(providerTitle(g.provider) || '（未标注）')}</span>
+      <span class="dim" style="font-weight:400;font-size:11px">${esc(g.accounts.length + ' 个账号 · ' + meta + def + known)}</span>
+    </td></tr>`;
+  }
+
+  // accountRow 一个账号行。
+  function accountRow(a) {
+    let st = '<span class="pill ok">正常</span>';
+    if (a.disabled) st = '<span class="pill err">已禁用</span>';
+    else if (a.cooling) st = `<span class="pill warn">冷却 ${esc(a.cool_kind || '')} ${a.cool_remaining_sec ? a.cool_remaining_sec + 's' : ''}</span>`;
+    else if (a.breaker_fails > 0) st = '<span class="pill warn">熔断 ' + a.breaker_fails + '</span>';
+
+    let tok = '<span class="dim">—</span>';
+    if (a.has_token) {
+      const d = a.token_expire_sec || 0;
+      const cls = d < 0 ? 'err' : d < 86400 ? 'warn' : 'ok';
+      tok = `<span class="pill ${cls}">${d < 0 ? '已过期' : Math.floor(d / 86400) + 'd'}</span>`;
+    }
+    let ck = '<span class="dim">—</span>';
+    if (a.today_checkin === 'ok') ck = '<span class="pill ok">已签到</span>';
+    else if (a.today_checkin === 'already') ck = '<span class="pill dim">今日已签</span>';
+    else if (a.today_checkin === 'fail') ck = '<span class="pill err">失败</span>';
+
+    const U = a.uid;
+    const act = [
+      `<button data-act="checkin"  data-uid="${esc(U)}" title="单账号签到">签到</button>`,
+      `<button data-act="credits"  data-uid="${esc(U)}" title="刷新积分">积分</button>`,
+      `<button data-act="keepalive" data-uid="${esc(U)}" title="刷新 token">保活</button>`,
+      a.disabled
+        ? `<button data-act="enable" data-uid="${esc(U)}">启用</button>`
+        : `<button data-act="disable" data-uid="${esc(U)}">禁用</button>`,
+      a.cooling || a.breaker_fails > 0
+        ? `<button data-act="cooldown" data-uid="${esc(U)}">清冷却</button>` : '',
+      `<button data-act="remove" data-uid="${esc(U)}" style="color:var(--err)">移除</button>`,
+    ].filter(Boolean).join(' ');
+
+    // 「上游」列在分组后仍然保留：分组标题给的是整体结构，
+    // 这一列让单行在筛选/复制时也能自证归属。
+    const pinfo = a.provider_inferred
+      ? `<span class="pill dim" title="该数据来自 /status 回落路径，没有 provider 字段，按默认上游推断">${esc(providerOf(a) || '—')}?</span>`
+      : `<span class="pill dim">${esc(providerOf(a) || '—')}</span>`;
+
+    return `<tr>
+      <td>${pinfo}</td>
+      <td>${esc(a.nickname || '—')}</td>
+      <td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>
+      <td class="mono">${esc(a.credits)}</td>
+      <td>${st}</td>
+      <td>${tok}</td>
+      <td>${ck}</td>
+      <td class="mono">${esc(a.success_count)}</td>
+      <td class="mono">${esc(a.breaker_fails)}</td>
+      <td class="mono">${esc(a.in_flight)}</td>
+      <td style="white-space:nowrap">${act}</td>
+    </tr>`;
+  }
+
+  // ---------------------------------------------------------------- 管理台调用
+  async function admin(path, opts = {}) {
+    const r = await fetch(path, Object.assign({}, opts, {
+      headers: Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}),
+    }));
+    const txt = await r.text();
+    let j = null;
+    try { j = txt ? JSON.parse(txt) : null; } catch { /* 非 JSON */ }
+    if (!r.ok) throw new Error((j && j.error) || txt.slice(0, 200) || ('HTTP ' + r.status));
+    return j;
+  }
+
+  // ---------------------------------------------------------------- 操作后刷新
+  //
+  // 统一编排「点按钮 → 跑写操作 → 刷新界面」这段时间的**可见反馈**。
+  //
+  // 为什么需要它（实测教训）：以前 growthAct / travelAct / act 末尾是裸调用
+  //     loadGrowth(true); refresh(); loadHistory();
+  // 既不 await、也不禁用按钮、也不给全局提示。用 CDP 实测点「刷新」按钮后
+  // **6.9 秒内 DOM 完全没有变化**（因为 loadGrowth(true) 是全量强制回源，
+  // 3 账号要 7.2s）。用户的结论自然是"点了没反应/不会自动刷新"。
+  //
+  // 正确的做法不是"让它变快"（那是后端的事），而是**让等待可见**：
+  //   1. 按钮立刻禁用 + 文案变成进行中（防连点，且给出即时反馈）
+  //   2. 全局通知区显示在做咩（#gtask，与后台任务的进度条同一位置，风格一致）
+  //   3. 超过 SLOW_HINT_MS 未完成时补一句「上游较慢」+ 递增秒数
+  //   4. 无论成功、返回 false、还是抛异常，都必须在 finally 里收尾
+  //
+  // 返回 true/false 表示成败，undefined 表示「调用方已自行提示」—— 与 busyRun 同义。
+  const SLOW_HINT_MS = 2000;
+
+  async function busyRun(btn, fn, opts) {
+    const o = opts || {};
+    // 连点保护：进行中就忽略。这比 disabled 属性更可靠 ——
+    // 事件委托场景下按钮是重建出来的，disabled 可能还没来得及生效。
+    if (btn && btn._busy) return undefined;
+    if (btn) {
+      btn._busy = true;
+      btn.disabled = true;
+    }
+    const text0 = btn ? btn.textContent : '';
+    // 按钮文案一定要变：只置 disabled 在视觉上几乎看不出来（尤其是深色主题下
+    // 只是稍微变淡），用户仍会觉得"点了没反应"。
+    // 未显式给 busyText 时按原标题推导一个 —— '领取' → '领取中…'。
+    if (btn) btn.textContent = o.busyText || (text0 ? text0 + '中…' : '处理中…');
+
+    // 用专用的 #busy，**不共用 #gtask** —— 后者是后台全量任务的进度，
+    // 两者可能同时存在（点了「全部签到」之后再点任一账号的「签到」）。
+    // 共用一个元素时，busy 的收尾会把全量任务的进度条一起隐藏掉。
+    const g = $('busy');
+    const label = o.label || text0 || '操作';
+    const t0 = Date.now();
+    // 阈值从 SLOW_HINT_MS 推导，不写字面量 2 —— 否则改常量时这里会悄悄漂移。
+    const slowSec = Math.ceil(SLOW_HINT_MS / 1000);
+    const render = () => {
+      const sec = Math.floor((Date.now() - t0) / 1000);
+      g.textContent = sec >= slowSec
+        ? `${label}：正在刷新界面…（上游较慢，已等 ${sec}s）`
+        : `${label}：正在刷新界面…`;
+    };
+    render();
+    g.hidden = false;
+    // 每 500ms 刷新一次秒数；快请求会在第一次 tick 前就被清掉，因此不会有噪音。
+    const tick = setInterval(render, 500);
+    const slowHint = setTimeout(render, SLOW_HINT_MS);
+
+    try {
+      return await fn();
+    } catch (e) {
+      toast(`${label}失败：${(e && e.message) || e}`, true);
+      return false;
+    } finally {
+      clearInterval(tick);
+      clearTimeout(slowHint);
+      g.hidden = true;
+      g.textContent = '';
+      if (btn) {
+        btn._busy = false;
+        btn.disabled = false;
+        btn.textContent = text0;   // 总是恢复：上面总是改过
+      }
+    }
+  }
+
+  // toast 写全局通知区（右上角，5 秒后消失）。
+  // 注意目标元素必须是 body 下的 #toast，不能是某个面板里的节点 ——
+  // 否则在别的面板触发时提示会被 section 显隐规则连隐藏（历史 bug 的成因）。
+  function toast(msg, bad) {
+    const el = $('toast');
+    el.className = 'notice ' + (bad ? 'bad' : 'ok');
+    el.textContent = msg;
+    el.hidden = false;
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { el.hidden = true; }, 5000);
+  }
+
+  // notice 写「需要用户照着做」的持久提示：不自动消失，带标题与关闭按钮。
+  //
+  // 与 toast 的分工：
+  //   toast  一次性结果播报（"签到成功"），5 秒后自己消失，错过就算了
+  //   notice 可操作的指引（"要先完成 XX 才能接单"），必须让用户看清并点掉 ——
+  //          它往往意味着"你现在什么都不用再点，先去客户端做件事"，
+  //          一闪而过的 toast 会让人以为是自己操作错了、反复重试。
+  function notice(title, body) {
+    const el = $('notice');
+    el.innerHTML =
+      '<div style="display:flex;align-items:baseline;gap:8px">' +
+        '<b style="color:var(--warn)">' + esc(title) + '</b>' +
+        '<span class="spacer" style="flex:1"></span>' +
+        '<button id="noticeClose" style="font-size:11px;padding:1px 8px">知道了</button>' +
+      '</div>' +
+      '<div style="margin-top:6px;line-height:1.7;white-space:pre-wrap">' + esc(body) + '</div>';
+    el.hidden = false;
+    const btn = $('noticeClose');
+    if (btn) btn.onclick = () => { el.hidden = true; };
+  }
+
+  // ACT_LABEL 把动作名翻成中文，用于 busyRun 的进度文案
+  //（以前只在提示里零散出现，容易各写各的）。
+  const ACT_LABEL = {
+    checkin: '签到', credits: '刷新积分', keepalive: '保活',
+    enable: '启用', disable: '禁用', cooldown: '清冷却', remove: '移除',
+  };
+
+  async function act(uid, action, btn) {
+    // 移除要弹两次确认，确认过程不该被 busy 态包住（否则按钮在用户还在看弹窗时就禁用了，
+    // 取消后又要恢复，反而闪）。
+    if (action === 'remove') {
+      const a = share.find(x => x.uid === uid) || {};
+      if (!confirm(`确认把账号「${a.nickname || uid.slice(0, 8)}」移出账号池？\n\n默认仅出池，auths 里的凭证文件保留（下次重载还会回来）。`)) return;
+      const purge = confirm('是否连 auths 目录里的凭证文件一起删除？\n\n确定 = 删文件（不可恢复）\n取消 = 只出池、保留文件');
+      await busyRun(btn, async () => {
+        await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=${purge ? 1 : 0}`, { method: 'DELETE' });
+        toast(`已移除 ${a.nickname || uid.slice(0, 8)}${purge ? '（凭证文件已删）' : '（文件保留）'}`);
+        await Promise.all([refresh(), loadHistory()]);
+        return undefined;
+      }, { label: '移除账号', busyText: '移除中…' });
+      return;
+    }
+
+    const label = ACT_LABEL[action] || action;
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        const paths = {
+          checkin: '/admin/checkin', credits: '/admin/credits/refresh', keepalive: '/admin/keepalive',
+        };
+        if (paths[action]) {
+          const r = await admin(paths[action], { method: 'POST', body: JSON.stringify({ uid }) });
+          const res = r && r.result;
+          toast(`${label} ${uid.slice(0, 8)}: ${res ? res.status + (res.detail ? ' · ' + res.detail : '') : '已提交'}`,
+            res && res.status === 'fail');
+          wrote = true;
+        } else if (action === 'enable' || action === 'disable') {
+          await admin(`/admin/accounts/${encodeURIComponent(uid)}/${action}`, { method: 'POST', body: '{}' });
+          toast(`${label} ${uid.slice(0, 8)} 完成`);
+          wrote = true;
+        } else if (action === 'cooldown') {
+          await admin(`/admin/accounts/${encodeURIComponent(uid)}/cooldown/clear`, { method: 'POST', body: '{}' });
+          toast(`${uid.slice(0, 8)} 冷却/熔断已清`);
+          wrote = true;
+        }
+      } catch (e) {
+        toast(`${label}失败：${e.message}`, true);
+      }
+      await Promise.all([refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
+  }
+
+  async function startAll(kind) {
+    const paths = { checkin: '/admin/checkin', keepalive: '/admin/keepalive', credits: '/admin/credits/refresh' };
+    try {
+      const r = await admin(paths[kind], { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全量 ${kind} 已启动，后台执行中…`); watchTask(); }
+      else if (r && r.results) {
+        const ok = r.results.filter(x => x.status === 'ok').length;
+        toast(`全部积分刷新完成：成功 ${ok}/${r.results.length}`);
+        refresh(); loadHistory();
+      }
+    } catch (e) { toast(`${kind} 失败：${e.message}`, true); }
+  }
+
+  // ---------------------------------------------------------------- 全量任务进度
+  // 进度写全局 #gtask（不是面板里的节点）：后台任务可能在任意面板被触发，
+  // 写进面板节点就会在别的面板里看不见 —— 与 toast 是同一个坑。
+  function watchTask() {
+    if (taskTimer) clearInterval(taskTimer);
+    clearTimeout(watchTask._hide);
+    const el = $('gtask');
+    const tick = async () => {
+      let t;
+      try { t = await admin('/admin/task'); } catch { return; }
+      el.hidden = false;
+      el.className = 'notice progress';
+      if (t.running) {
+        el.textContent = `${t.kind} 执行中… 已用 ${t.elapsed_sec || 0}s`;
+        refresh(); // 过程中也刷新表格，能实时看到积分/状态变化
+        return;
+      }
+      if (t.kind) {
+        el.textContent = `${t.kind} 完成：成功 ${t.ok || 0} · 已签到 ${t.already || 0} · 失败 ${t.fail || 0}`
+          + ` · 耗时 ${t.duration_sec || 0}s` + (t.error ? ' · ' + t.error : '');
+        el.className = 'notice ' + (t.fail || t.error ? 'bad' : 'ok');
+        // 完成摘要留一会儿再收，给用户看完的时间；期间再触发任务会被上面的
+        // clearTimeout 取消，不会把新任务的进度提前关掉。
+        watchTask._hide = setTimeout(() => { el.hidden = true; }, 5000);
+      }
+      clearInterval(taskTimer); taskTimer = null;
+      refresh(); loadHistory();
+    };
+    tick();
+    taskTimer = setInterval(tick, 2000);
+  }
+
+  // ---------------------------------------------------------------- 添加账号
+  function openModal() { $('modal').style.display = 'flex'; }
+  function closeModal() {
+    $('modal').style.display = 'none';
+    if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
+    refresh();
+  }
+
+  async function addAccount() {
+    openModal();
+    $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
+    let r;
+    try { r = await admin('/admin/login/start', { method: 'POST', body: '{}' }); }
+    catch (e) { $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`; return; }
+
+    const state = r.state;
+    loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
+    $('loginBody').innerHTML = `
+      <div class="row" style="margin-bottom:10px">
+        <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer" class="primary"
+           style="text-decoration:none;padding:8px 16px;border-radius:8px;background:var(--acc);color:#fff;font-weight:600">
+         打开授权页面
+        </a>
+        <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
+      </div>
+      <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
+
+    if (loginPoll) clearInterval(loginPoll);
+    loginPoll = setInterval(async () => {
+      if (Date.now() > loginDeadline) {
+        clearInterval(loginPoll); loginPoll = null;
+        $('loginState').innerHTML = '<span class="err">授权已超时，请关闭后重试</span>';
+        return;
+      }
+      let p;
+      try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state }) }); }
+      catch (e) {
+        // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
+        clearInterval(loginPoll); loginPoll = null;
+        $('loginState').innerHTML = `<span class="err">${esc(e.message)}</span>`;
+        return;
+      }
+      if (p && p.status === 'pending') {
+        $('loginOut').textContent = '仍在等待浏览器完成登录…';
+        return;
+      }
+      clearInterval(loginPoll); loginPoll = null;
+      if (p && p.status === 'ok') {
+        $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
+        $('loginOut').textContent = `uid      : ${p.uid}\n昵称     : ${p.nickname}\n域       : ${p.domain}\n有效期   : ${Math.floor((p.expires_in || 0) / 86400)} 天\n凭证文件 : auths/${p.file}`;
+        toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
+        refresh(); loadHistory();
+      }
+    }, 2500);
+  }
+
+  // ---------------------------------------------------------------- 调度（只读）
+  // 本面板刻意不含任何开关控件：签到/保活的启停只能从「设置」改，
+  // 避免出现「这里点一下只改内存、那里保存改 config.json」两条写路径互相覆盖。
+  async function loadSchedule() {
+    let s;
+    try { s = await admin('/admin/schedule'); } catch { $('schInfo').textContent = '读取失败'; return; }
+    const cd = s.next_in_sec > 0 ? `${Math.floor(s.next_in_sec / 3600)}h${Math.floor((s.next_in_sec % 3600) / 60)}m 后` : '—';
+    const on = v => v ? '<span class="pill ok">已启用</span>' : '<span class="pill dim">已关闭</span>';
+    $('schInfo').innerHTML =
+      `签到 ${on(s.checkin_enabled)}　保活 ${on(s.keepalive_enabled)}`
+      + `<br>下次任务：<b>${esc((s.next_tasks || []).join(' + ') || '无（均已关闭）')}</b> · ${cd}`
+      + `（${s.next_at ? new Date(s.next_at).toLocaleString('zh-CN', { hour12: false }) : '—'}）`
+      + `<br>签到时点 <span class="mono">[${(s.checkin_hours || []).join(', ')}]</span>`
+      + `　保活时点 <span class="mono">[${(s.keepalive_hours || []).join(', ')}]</span>`;
+  }
+
+  // ---------------------------------------------------------------- 左侧导航
+  // 导航项不写死在 HTML 里：按 .content 下 section 的 DOM 顺序生成，
+  // 以后加一个 section 就自动多一个导航项，不会出现「加了面板忘了加导航」。
+  // 纯文字 + CSS 选中指示条，不使用任何图标字体或 emoji。
+  let navSections = [];
+
+  // buildNav 渲染导航，分两组：「通用」+ 每个上游一组。
+  //
+  // # 为什么是"每上游一组"而不是"按能力分组"
+  //
+  // 上游之间功能几乎零重叠（实测管理端点零重叠、能力位除 chat/models 外全不同），
+  // 而能力位是**稀疏**的（growth 只有 workbuddy、welfare 只有 codearts）。
+  // 按能力分组会产生一堆"只有一个上游"的单例组 —— 那是伪装的每上游分组，
+  // 还多一层间接。分组轴直接用上游，但**分组内容仍由 manifest 驱动**：
+  // 加第 3 个上游时这里会自动多一组，前端 0 改动。
+  //
+  // # 上游组内的项从哪来
+  //
+  // 来自 manifest.admin_routes 里该上游的 **GET** 端点（routesFor 已过滤方法）。
+  // 每个上游专属面板在 T6 会按 capability 建出对应的 section，
+  // 这里先把入口渲染出来并指向那个 section id。
+  function buildNav() {
+    refreshNavSections();
+    // 先把"归属的上游不存在 / 没有该能力位"的静态面板隐藏掉（B7），
+    // 再做分组 —— 否则导航里会出现指向隐藏面板的入口。
+    const hiddenCount = hideOrphanPanels();
+    // 隐藏的面板也不进导航：过滤掉它们，用户看到的与能点的始终一致。
+    const visible = navSections.filter(sec => !sec.hidden);
+
+    // 通用组：所有非上游 section（仪表盘/账号池/日志/设置…）。
+    const generic = visible.filter(sec => !sec.dataset.provider);
+    const parts = [navGroupHTML('通用', '', generic, false)];
+
+    // 上游组：每个 manifest 里的上游一组。
+    for (const p of upstreamGroups()) {
+      const secs = visible.filter(sec => sec.dataset.provider === p.id);
+      if (!secs.length) continue;   // 该上游当前没有可见面板就不占位置
+      const hd = navGroupHeaderHTML(p);
+      // 第三个参数必须是**上游 id**（用于 data-pid 与折叠持久化）。
+      // 曾经误传 p.id === DEFAULT_PROVIDER（布尔值），于是渲染出
+      // data-pid="true"，折叠状态按 "true" 存 —— 加第二个上游时会串味。
+      parts.push(navGroupHTML('', hd, secs, p.id));
+    }
+
+    // 契约降级提示（评审 F4）。
+    //
+    // # 为什么必须把它渲染出来
+    //
+    // manifestError 与 MANIFEST.loaded 原先只写不读 —— 拉取失败时页面
+    // 看不出任何区别，用户只会觉得"上游面板怎么没了"。而失败原因
+    //（404 / 500 / 响应格式异常）恰恰是排查的唯一线索。
+    //
+    // 这里把两者变成可见状态：失败时在导航里插一条明确的降级说明。
+    if (!MANIFEST.loaded) {
+      parts.push('<div class="navgroup"><div class="navdegraded" title="'
+        + esc(manifestError || '未取得渲染契约')
+        + '">上游面板不可用<br><span style="font-size:10px">' + esc(manifestError || 'manifest 未加载') + '</span></div></div>');
+    }
+
+    $('nav').innerHTML = parts.join('');
+
+    // 恢复上次选中的面板。用 section 的 key（data-key 或 index）而不是纯下标 ——
+    // 分组后下标会随上游数量变化，用下标恢复会跳到别的面板。
+    //
+    // 注意候选只在**可见** section 里选：隐藏的上游面板（其上游没声明该能力位）
+    // 不能被选中，否则用户会落到一个 hidden 的 section 上、看到空白内容区。
+    let start = -1;
+    try {
+      const saved = localStorage.getItem('wb2api.panelkey') || '';
+      start = navSections.findIndex(sec => !sec.hidden && navKey(sec) === saved);
+    } catch { /* 隐私模式 */ }
+    if (start < 0) {
+      // 回落：第一个可见 section（通常就是仪表盘）
+      start = navSections.findIndex(sec => !sec.hidden);
+    }
+    if (start < 0) start = 0;
+    showPanel(start);
+
+    // 恢复折叠状态（按上游 id 记，加/删上游不会串味）
+    try {
+      const cols = JSON.parse(localStorage.getItem('wb2api.navcollapsed') || '[]');
+      for (const id of cols) {
+        const g = $('nav').querySelector(`.navgroup[data-pid="${cssEsc(id)}"]`);
+        if (g) g.classList.add('collapsed');
+      }
+    } catch { /* 隐私模式 */ }
+
+    updateNavBadges(); // 关键：buildNav 在 refresh() 之后才跑，这里补一次，否则徽章会一直空着
+  }
+
+  // navGroupHeaderHTML 上游分组的标题：上游名 + 账号数 + 默认标记。
+  //
+  // title 里列出该上游声明的能力位（中文名来自 manifest.capabilities）——
+  // 这样鼠标悬停就能看出"这个上游到底能做什么"，而不必逐个点开面板。
+  // 这也是 capTitle 与 providersWithCap 的**真实消费点**：
+  // 没有它，那两个函数又会变成"定义了没人用"的死代码。
+  function navGroupHeaderHTML(p) {
+    // 徽章**始终渲染**，包括 0。
+    //
+    // # 为什么 0 也要显示（评审 CP2 F4 的附带发现）
+    //
+    // 上一版是 `p.account_count ? ... : ''` —— 0 时整块消失。
+    // 那会让"这个上游一个号都没有"与"这个上游的徽章坏了/没渲染"
+    // 在界面上长得一模一样，而前者恰恰是需要用户注意的状态
+    //（配了上游却没有可用账号）。显示一个 0 是更诚实的信息。
+    //
+    // 顺带：徽章内容必须与 manifest.account_count 一致，
+    // 有浏览器测试用数据对照（不硬编码数字）。
+    const n = Number(p.account_count) || 0;
+    const cnt = `<span class="navgcount${n ? '' : ' zero'}" title="${n} 个账号">${n}</span>`;
+    const def = p.default ? '<span class="navgdef">默认</span>' : '';
+    // 列出该上游**有面板入口**的能力位（中文名来自 manifest.capabilities）。
+    //
+    // # "无面板" 的判据必须是 hasAnyPanel，不是"有没有非 chat/models 能力"
+    //（评审 CP2 F1）
+    //
+    // 上一版把 chat/models 从列表里过滤掉，并在过滤后为空时写
+    // 「无专属能力面板」。那句话在**只声明 chat 的上游**上是假的：
+    // 它确实会生成一个「对话」面板（因为它有 chat 的 GET 端点），
+    // 而悬停提示却说它没有面板 —— 界面与说明直接矛盾。
+    //
+    // 过滤 chat/models 的**动机**仍然成立（它们是每个上游都有的基础能力，
+    // 列出来每行都长一样、看不出差异），但那是"列表里显示什么"的问题，
+    // 不是"有没有面板"的问题。两者必须分开判断。
+    const panelCaps = panelCapsOf(p.id);
+    // 过滤三类不写进提示词的能力：
+    //  - chat / models：每个上游都有的基础能力，列出来每行都一样
+    //  - core：后端保留名（"有端点但没声明能力位"），它是**路由分类**，
+    //    不是"能力"，直接显示给用户只会让人困惑「core 是什么」
+    const shown = panelCaps.filter(c => c !== 'chat' && c !== 'models' && c !== CORE_CAP);
+    const capText = shown.map(c => capTitle(c)).join('、');
+    // 有面板但全被过滤掉了（只声明基础能力）→ 说清"有面板"，
+    // 而不是错误地宣称"没有"。
+    const extra = (panelCaps.length && !shown.length) ? '基础端点' : '';
+    const listText = capText || extra;
+    const tip = p.id + (listText ? ' · 能力：' + listText : ' · 无可打开的面板');
+    return `<button class="navgrouphd" data-pid="${esc(p.id)}" title="${esc(tip)}">`
+      + `${esc(providerTitle(p.id))}${def}${cnt}</button>`;
+  }
+
+  // capNamesOf 取某上游声明的能力位名列表（来自 manifest，不硬编码）。
+  //
+  // providersWithCap 是"按能力反查上游"，这里是"按上游取能力" ——
+  // 两者都走 MANIFEST.providers，保证与后端下发的是一份事实。
+  function capNamesOf(providerId) {
+    const p = providerInfo(providerId);
+    if (!p || !Array.isArray(p.capabilities)) return [];
+    // 用 providersWithCap 反查一次，确保两个方向的解读完全一致 ——
+    // 如果各写一套过滤逻辑，迟早会出现"导航说有、面板却没有"的分歧。
+    return p.capabilities.filter(c => providersWithCap(c).indexOf(providerId) >= 0);
+  }
+
+  // navGroupHTML 一个导航分组。
+  //
+  // headerHTML 为空时按 title 生成一个纯文字组头（通用组用）。
+  // 参数 upstreamId 是**上游 id**（不是布尔），
+  // 它同时用于 data-pid 与折叠状态的持久化键。
+  function navGroupHTML(title, headerHTML, secs, upstreamId) {
+    const hd = headerHTML || `<span class="navgrouphd" style="cursor:default">${esc(title)}</span>`;
+    const items = secs.map(sec => {
+      const idx = navSections.indexOf(sec);
+      const label = navLabel(sec, idx);
+      // 账号池带一个计数徽章：初值留空，由 updateNavBadges() 按真实数据填。
+      const badge = label === '账号池' ? '<span class="badge" data-nav-badge></span>' : '';
+      return `<button data-nav="${idx}" title="${esc(label)}">${esc(label)}${badge}</button>`;
+    }).join('');
+    // 只接受字符串形式的上游 id（防住"误传布尔"这类回归）
+    const pid = (typeof upstreamId === 'string' && upstreamId) ? ` data-pid="${esc(upstreamId)}"` : '';
+    return `<div class="navgroup"${pid}>${hd}<div class="navitems">${items}</div></div>`;
+  }
+
+  // navLabel 取 section 的导航标签（h2 的首个文本节点）。
+  function navLabel(sec, idx) {
+    const t = sec.querySelector('h2');
+    return ((t && t.childNodes[0] && t.childNodes[0].textContent) || ('面板 ' + (idx + 1))).trim();
+  }
+
+  // navKey section 的稳定标识，用于恢复上次选中的面板。
+  //
+  // 优先用显式 data-key；上游面板用 "provider:能力位"，通用面板用标签。
+  // 不用下标：分组后下标随上游数量变化，用下标恢复会跳到别的面板。
+  function navKey(sec) {
+    if (sec.dataset.key) return sec.dataset.key;
+    if (sec.dataset.provider) return sec.dataset.provider + ':' + (sec.dataset.cap || '');
+    return 'g:' + navLabel(sec, 0);
+  }
+
+  // cssEsc 把值转义成可安全放进属性选择器的形式。
+  // 上游 id 已被后端约束为 ^[a-z][a-z0-9-]*$，理论上是安全的；
+  // 这里仍做一次转义，因为选择器注入失败会抛异常并中断整个 buildNav。
+  function cssEsc(s) {
+    return String(s).replace(/["\\]/g, '\\__REAL_SCRIPT__');
+  }
+
+  // updateNavBadges 把账号总数写进导航徽章。
+  // 由 renderAccounts() 与 buildNav() 双向调用：两者谁先跑都不会漏。
+  function updateNavBadges() {
+    const el = document.querySelector('[data-nav-badge]');
+    if (!el) return;
+    const n = share.length;
+    el.textContent = n ? String(n) : '';
+    el.style.display = n ? '' : 'none';
+  }
+
+  function showPanel(idx) {
+    navSections.forEach((sec, i) => sec.classList.toggle('active', i === idx));
+    $('nav').querySelectorAll('button[data-nav]').forEach(b =>
+      b.classList.toggle('active', Number(b.dataset.nav) === idx));
+    try { localStorage.setItem('wb2api.panelkey', navKey(navSections[idx] || {})); } catch { /* 隐私模式 */ }
+    // 切到某些面板时按需拉一次数据，避免首次进入是空的。
+    //
+    // 用 data-key 判定而不是标签文字：上游面板的标题会随能力位与上游名变化，
+    // 按文字匹配会在显示名一改时就静默失效（面板点开是空的）。
+    const sec = navSections[idx];
+    if (!sec) return;
+    const key = sec.dataset.key || '';
+    if (key === 'logs') loadLogHistory();
+    if (key === 'settings') loadSettings();
+    // 上游专属面板：按能力位决定拉什么数据。
+    if (sec.dataset.provider) loadProviderPanel(sec.dataset.provider, sec.dataset.cap);
+  }
+
+  // loadProviderPanel 按能力位给上游面板拉数据。
+  //
+  // 分派方式：能力位 → 渲染函数。**没有 if (provider === 'xxx') 这种分支** ——
+  // 一个上游叫什么都不影响这里走哪条路，只影响 manifest 里它的能力位。
+  //
+  // # 没有专属渲染器时走通用列表（U1 的修复）
+  //
+  // 原先这里是 `if (typeof fn !== 'function') return;` —— **静默返回**。
+  // 后果：任何"有 GET 端点但没写专属渲染器"的能力位，面板会被
+  // buildProviderPanels 正常创建出来，却**永远停在「加载中…」**。
+  // 实测 workbuddy 的 checkin 就是这样：`/admin/checkin` 是 GET，
+  // 于是导航里出现「签到与保活」，点进去一片空白。
+  //
+  // 那是最难查的一类缺陷：面板存在、导航可点、没有报错、只是不出内容。
+  // 所以现在**不再静默返回**，而是回落到通用列表渲染 ——
+  // 通用渲染对任意 JSON 形状都能给出可读结果（见 renderGenericBlock），
+  // 于是"忘了写渲染器"最坏也只是排版朴素，不会是一片空白。
+  function loadProviderPanel(providerId, cap) {
+    const fn = PROVIDER_PANEL_RENDERERS[cap];
+    if (typeof fn === 'function') { fn(providerId, cap); return; }
+    // 回落到通用列表渲染。它按 routesFor(provider, cap) 取该能力位的 GET 端点，
+    // 逐个拉取并渲染 —— 与 welfare 走的是同一条路径。
+    loadGenericList(providerId, cap);
+  }
+
+  // PROVIDER_PANEL_RENDERERS 能力位 → 渲染函数。
+  //
+  // 加一个新能力位 = 在这里加一行（或什么都不加，让它走通用列表渲染）。
+  // 注意这里**不认识上游名字**：键是能力位，由后端 manifest 下发的名字。
+  //
+  // # 关于 growth / travel 这两个键
+  //
+  // 它们指向 workbuddy 既有面板的加载函数 —— 那是**历史实现**，
+  // 数据形状与通用列表差异极大（成长有 12 列任务进度、旅行有猫的状态机），
+  // 强行抽象成一个通用渲染会让两边都别扭。
+  //
+  // 关键点：这里绑的是**能力位**，不是上游。任何上游只要声明 growth
+  // 且提供对应 GET 端点，都会走这条渲染；它不会因为"名字不是 workbuddy"
+  // 而被挡在外面。是否显示由 manifest 的能力位决定（见 hideOrphanPanels），
+  // 与上游叫什么无关。
+  const PROVIDER_PANEL_RENDERERS = {
+    growth: () => loadGrowth(false),
+    travel: () => loadTravel(false),
+    // 其余能力位走**通用列表 + 领取**渲染。
+    // 用户决策：codearts 的福利中心做到"上游给什么就渲染什么"即可，
+    // 不为它写专属字段逻辑。
+    welfare: (pid) => loadGenericList(pid, 'welfare'),
+    'quota-probe': (pid) => loadGenericList(pid, 'quota-probe'),
+    core: (pid) => loadGenericList(pid, CORE_CAP),
+  };
+
+  // buildProviderPanels 按 manifest 为每个上游生成能力面板容器。
+  //
+  // # 它做什么
+  //
+  // 遍历 manifest 的每个上游 × 每个有 GET 入口的能力位，若该组合还没有
+  // section，就生成一个。已有 section（如 workbuddy 的成长/旅行，
+  // 它们带着复杂表格结构写在 HTML 里）不重复生成。
+  //
+  // # 为什么已有面板留在 HTML 里而不是也动态生成
+  //
+  // 成长/旅行面板有十几列复杂表格与大量交互，把它们改写成 JS 拼字符串
+  // 只会让代码更难读，且没有任何解耦收益 —— 它们的**归属与显隐**已经由
+  // data-provider/data-cap 驱动了。真正要动态化的，是"未来第三个上游
+  // 该不该出现、出现在哪"，那由本函数负责。
+  function buildProviderPanels() {
+    const host = $('providerPanels');
+    if (!host) return;
+    // 先清掉上一次生成的面板（宿主之前的那些兄弟 section）。
+    // 只删**本函数生成的**（都带 data-generated），不碰 HTML 里写死的面板。
+    let prev = host.previousElementSibling;
+    while (prev && prev.hasAttribute && prev.hasAttribute('data-generated')) {
+      const older = prev.previousElementSibling;
+      prev.remove();
+      prev = older;
+    }
+    for (const p of upstreamGroups()) {
+      for (const cap of panelCapsOf(p.id)) {
+        const key = p.id + ':' + cap;
+        // 已经有同 key 的静态面板 → 不重复生成
+        if (document.querySelector(`#content > section[data-key="${cssEsc(key)}"]`)) continue;
+        // 插到宿主**之前**：这样它是 #content 的直接子节点，`#content > section` 找得到。
+        host.insertAdjacentHTML('beforebegin', providerPanelHTML(p, cap));
+      }
+    }
+    // 生成后必须重扫 section 列表，否则导航看不到新面板。
+    refreshNavSections();
+  }
+
+  // providerPanelHTML 一个通用上游面板的骨架（列表 + 领取/动作）。
+  //
+  // 内容由 loadGenericList() 填充。骨架只包含：标题、动作按钮、
+  // 一个列表容器、一个提示区 —— 不假设任何上游特有的字段。
+  function providerPanelHTML(p, cap) {
+    const title = capTitle(cap);
+    const safeKey = p.id + ':' + cap;
+    return `<section data-provider="${esc(p.id)}" data-cap="${esc(cap)}" data-key="${esc(safeKey)}" data-generated="1">
+      <h2>${esc(title)}
+        <span class="dim" style="font-weight:400;text-transform:none">${esc(providerTitle(p.id))}</span>
+        <span class="spacer"></span>
+        <button data-plist="${esc(p.id)}" data-pcap="${esc(cap)}" style="padding:3px 10px;font-size:12px">刷新</button>
+      </h2>
+      <div class="body" id="pbody-${esc(p.id)}-${esc(cap)}">
+        <div class="dim" style="font-size:12px">加载中…</div>
+      </div>
+    </section>`;
+  }
+
+  // refreshNavSections 重扫 section 列表（动态生成面板后必须调用）。
+  function refreshNavSections() {
+    navSections = Array.from(document.querySelectorAll('#content > section'));
+  }
+
+  // syncProviderPanels 生成上游面板并按需触发它们的首次加载。
+  //
+  // # 它同时修掉 bug B7
+  //
+  // 原先 boot() 无条件调用 loadTravel(false) / loadGrowth(false)，
+  // 于是**没有 workbuddy 的部署**里这两个面板照样发请求、照样报错。
+  // 现在数据加载只在这里发生，而这里只对"manifest 里真的有这个能力位"
+  // 的上游说话 —— 没有该能力位的上游根本不会走到加载那一步。
+  //
+  // # 幂等
+  //
+  // 每次 refresh() 都会调用它（因为 manifest 可能变化，比如热重载了账号）。
+  // providerPanelHTML 只对**尚不存在**的 key 生成，所以重复调用不会重复建。
+  function syncProviderPanels() {
+    buildProviderPanels();
+    refreshNavSections();
+    // 先把不该出现的面板隐藏掉，再决定给谁加载数据 ——
+    // 否则会给一个已经隐藏的面板发请求（那正是 B7）。
+    hideOrphanPanels();
+
+    // 为每个**可见**的上游面板加载一次数据。
+    //
+    // # 为什么在 init 阶段就加载，而不是等用户点开
+    //
+    // 面板内容为空时用户根本不知道里面有没有东西；
+    // 而且上游面板通常只有一两条端点，提前拉取的代价很小。
+    // 真正重的是 workbuddy 的成长（全量回源 7s），它走服务端快照缓存，
+    // 由 loadProviderPanel 内部的实现决定用不用 force。
+    for (const sec of navSections) {
+      if (sec.hidden) continue;
+      const pid = sec.dataset.provider;
+      if (!pid || !sec.dataset.cap) continue;
+      loadProviderPanel(pid, sec.dataset.cap);
+    }
+  }
+
+  // hideOrphanPanels 隐藏那些"归属的上游不存在 / 没有该能力位"的静态面板。
+  //
+  // 这是 B7 的另一半：**光不加载数据还不够**，面板本身也必须从界面上消失，
+  // 否则用户会看到一个永远空着的「猫猫旅行」。
+  function hideOrphanPanels() {
+    let hidden = 0;
+    for (const sec of navSections) {
+      const pid = sec.dataset.provider;
+      if (!pid) continue;   // 通用面板不动
+      const cap = sec.dataset.cap;
+      // 上游不存在，或该上游没声明这个能力位 → 隐藏
+      const p = providerInfo(pid);
+      const alive = !!p && capNamesOf(pid).indexOf(cap) >= 0;
+      sec.hidden = !alive;
+      if (!alive) hidden++;
+    }
+    return hidden;
+  }
+
+  // loadGenericList 通用的"上游列表"渲染。
+  //
+  // # 设计原则（对应用户决策）
+  //
+  // 「看上游有哪些服务，通用列表 + 领取渲染就行」—— 所以这里**不猜字段名**：
+  // 它把上游返回的 JSON 当成"一组条目"，每条渲染成一行，
+  // 能识别的字段（标题、数量、是否可领）用语义化展示，
+  // 认不出来的原样列出。这样新增上游不需要改前端。
+  async function loadGenericList(providerId, cap) {
+    const host = document.getElementById(`pbody-${providerId}-${cap}`);
+    if (!host) return;
+    // 面板入口可能有多条 GET 路由（如 codearts 的 welfare 有
+    // /admin/welfare 与 /admin/subscription）。全部拉取并依序渲染。
+    const routes = routesFor(providerId, cap);
+    if (!routes.length) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该能力没有可读端点。</div>';
+      return;
+    }
+    const blocks = [];
+    for (const r of routes) {
+      try {
+        const data = await admin(r.path);
+        blocks.push(renderGenericBlock(r, data, providerId));
+      } catch (e) {
+        blocks.push(`<div class="gbad">${esc(r.title || r.path)}：${esc(e.message)}</div>`);
+      }
+    }
+    host.innerHTML = blocks.join('');
+    // 不再在这里绑事件（评审 F2：那会导致监听器随刷新线性增长）。
+    // 通用面板的动作委托在 installGenericActions() 里绑到 #content 上，
+    // 全生命周期只绑一次 —— 见那里的注释。
+  }
+
+  // renderGenericBlock 渲染一条上游端点的响应。
+  //
+  // 识别三种常见形状：
+  //   1. {items:[...]} 或 [...]  → 条目列表
+  //   2. {key: scalar, ...}      → 键值对
+  //   3. 未知                    → 原样 JSON（不隐藏信息）
+  // 中文字段名映射（U2）。
+  //
+  // # 原则：查得到就给中文，查不到**保留原 key**
+  //
+  // 凭空意译比显示英文更糟 —— 用户看到"积分余量"却不知道对应上游哪个字段时，
+  // 排障会变难。所以这是一张**只增不改**的对照表，未命中一律原样显示。
+  const KV_LABELS = {
+    package_name_cn: '套餐',
+    spec_code: '规格代码',
+    is_credit_package: '积分套餐',
+    is_token_package: 'Token 套餐',
+    status: '状态',
+    start_date: '开始日期',
+    end_date: '结束日期',
+    CreditTotal: '积分总额',
+    CreditRemain: '积分余额',
+    CreditUsed: '已用积分',
+    CreditExpiring: '即将过期积分',
+    TokenUsed: '已用 Token',
+    uid: '账号',
+    campaignId: '活动 ID',
+    benefitAmount: '数量',
+    benefitUnit: '单位',
+    claimable: '可领取',
+    type: '类型',
+  };
+
+  // kvLabel 取字段的中文名；查不到返回原 key。
+  function kvLabel(k) {
+    return Object.prototype.hasOwnProperty.call(KV_LABELS, k) ? KV_LABELS[k] : k;
+  }
+
+  // kvValueHTML 渲染一个字段值。
+  //
+  // # 为什么要把「嵌套对象」单独处理（U2 的直接原因）
+  //
+  // `/admin/subscription` 返回 `{subscription: {...}, uid: "..."}`——
+  // 顶层只有两个键，而 `subscription` 的值是一整个套餐对象。
+  // 上一版把这种嵌套值 `JSON.stringify` 成一行 <code>，
+  // 于是用户看到的是一大坨 `{"package_name_cn":"体验版",...}`。
+  // 现在把嵌套对象**递归**成一层缩进的 key-value，人眼可读。
+  function kvValueHTML(k, v, depth) {
+    if (v === null || v === undefined) return '<span class="dim">—</span>';
+    if (typeof v === 'boolean') {
+      return v ? '<span class="pill ok">是</span>' : '<span class="pill dim">否</span>';
+    }
+    if (Array.isArray(v)) {
+      if (!v.length) return '<span class="dim">—</span>';
+      // 数组元素若是标量就顿号连起来；若是对象就交给 items 渲染
+      if (v.every(x => x === null || typeof x !== 'object')) {
+        return esc(v.map(x => String(x)).join('、'));
+      }
+      return v.map(x => genericItemHTML(x, '')).join('');
+    }
+    if (typeof v === 'object') {
+      // 嵌套对象：递归成子级 key-value（最多两层，避免极端数据把界面撑爆）
+      if (depth >= 2) return `<code>${esc(JSON.stringify(v))}</code>`;
+      const inner = Object.entries(v).map(([k2, v2]) =>
+        `<div class="kv"><span class="k">${esc(kvLabel(k2))}</span><span class="v">${kvValueHTML(k2, v2, depth + 1)}</span></div>`
+      ).join('');
+      return `<div class="kvs nested">${inner}</div>`;
+    }
+    return esc(String(v));
+  }
+
+  function renderGenericBlock(route, data, providerId) {
+    const head = `<div class="ghead2">${esc(route.title || route.path)}</div>`;
+    if (data == null) return head + '<div class="dim" style="font-size:12px">无数据</div>';
+
+    const list = Array.isArray(data) ? data
+      : (Array.isArray(data.items) ? data.items
+        : (Array.isArray(data.list) ? data.list : null));
+    if (list) {
+      if (!list.length) return head + '<div class="dim" style="font-size:12px">暂无条目</div>';
+      return head + `<div class="glist">` + list.map(it => genericItemHTML(it, providerId)).join('') + '</div>';
+    }
+
+    // 纯对象 → 键值对。嵌套对象递归展开（见 kvValueHTML），
+    // 不再把整块 JSON 塞成一行代码 —— 那对用户等于没排版。
+    if (typeof data === 'object') {
+      const kv = Object.entries(data).map(([k, v]) =>
+        `<div class="kv"><span class="k">${esc(kvLabel(k))}</span><span class="v">${kvValueHTML(k, v, 0)}</span></div>`
+      ).join('');
+      return head + `<div class="kvs">${kv}</div>`;
+    }
+    return head + `<div class="mono">${esc(String(data))}</div>`;
+  }
+
+  // genericItemHTML 渲染一个列表条目。
+  //
+  // 优先用语义字段（title/name 当标题，benefitAmount+benefitUnit 当数量），
+  // 认不出来的键值对原样附在下面。**不假设上游一定是"福利"** ——
+  // 换个上游返回别的字段名，这里只是显示得朴素一点，不会崩也不会空白。
+  function genericItemHTML(it, providerId) {
+    if (it === null || typeof it !== 'object') {
+      return `<div class="gitem"><span class="gname">${esc(String(it))}</span></div>`;
+    }
+    const title = it.title || it.name || it.nickname || it.package_name_cn || it.id || '(未命名)';
+    // 数量：识别常见的几种"额度"字段名，找不到就不显示数量。
+    const amount = it.benefitAmount !== undefined ? it.benefitAmount
+      : (it.amount !== undefined ? it.amount
+        : (it.CreditRemain !== undefined ? it.CreditRemain : undefined));
+    const unit = it.benefitUnit || '';
+    const qty = amount !== undefined
+      ? `<span class="gqty">${esc(String(amount))}${unit ? ' ' + esc(String(unit)) : ''}</span>` : '';
+    // claimable === false 时按钮置灰并说明原因，而不是让用户点了再收到拒绝。
+    const claimable = it.claimable;
+    let act = '';
+    if (it.campaignId !== undefined) {
+      act = claimable === false
+        ? `<button disabled title="该活动当前不可领取（可能已领过或未达成条件）">不可领取</button>`
+        : `<button data-gclaim="${esc(providerId)}" data-gcampaign="${esc(it.campaignId)}" data-gpath="/admin/welfare/claim">领取</button>`;
+    }
+    // 其余字段（排除已用于标题/数量的）折叠成一行说明。
+    const used = ['title', 'name', 'nickname', 'package_name_cn', 'id', 'benefitAmount', 'amount', 'CreditRemain', 'benefitUnit', 'claimable', 'campaignId'];
+    const rest = Object.entries(it).filter(([k]) => used.indexOf(k) < 0)
+      .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ');
+    return `<div class="gitem">
+      <span class="gname">${esc(String(title))}</span>${qty}
+      ${act}
+      ${rest ? `<div class="gmeta">${esc(rest)}</div>` : ''}
+    </div>`;
+  }
+
+  // bindGenericActions 已废弃 —— 见 installGenericActions。
+  //
+  // # 为什么删掉它（评审 CP2 F2，HIGH）
+  //
+  // 它往 host（即 #pbody-<上游>-<能力位>，一个**长期存在**的元素）
+  // 上 addEventListener，而 syncProviderPanels() 每 5 秒被 refresh() 调一次。
+  // 于是每轮刷新都多挂一个 click 监听器，且从不移除：
+  //
+  //   5s → 3 个、10s → 4 个、15s → 5 个（实测线性增长，无上限）
+  //   60 次 sync 后，**一次点击产生 13 个 /admin/welfare 请求**
+  //
+  // 危害不只是内存泄漏：handler 里有 confirm() + POST 写操作（领取福利）。
+  // 今天 codearts 返回的条目都是 claimable:false（按钮禁用），所以还没真的
+  // 重复领取；一旦上游返回可领条目，一次点击就是 N 个确认框 + N 次领取 POST。
+  //
+  // 修法见 installGenericActions：改成**在稳定的祖先上只绑一次**的事件委托。
+
+  // installGenericActions 在 #content 上**只绑一次**通用面板的动作委托。
+  //
+  // # 为什么绑 #content 而不是每个面板
+  //
+  // 面板容器会被 buildProviderPanels() 反复重建（manifest 变化时），
+  // 绑在它们身上就必然要处理"何时解绑"。而 #content 从页面加载到关闭
+  // 都不会被替换 —— 绑一次，永远有效，天然幂等。
+  //
+  // 这正是评审 F2 的正解：把"绑定次数"与"刷新次数"彻底解耦。
+  //
+  // 幂等由 installed 标志保证：即使调用方每次 refresh 都调它也无副作用。
+  let genericActionsInstalled = false;
+
+  function installGenericActions() {
+    if (genericActionsInstalled) return;
+    genericActionsInstalled = true;
+    $('content').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gclaim]');
+      if (!b || b.disabled) return;
+      const cid = b.dataset.gcampaign;
+      const pid = b.dataset.gclaim;
+      // 从按钮自身反查它属于哪个面板（而不是从闭包变量拿 ——
+      // 委托模式下没有"当前面板"这个闭包上下文）。
+      const sec = b.closest('section[data-provider]');
+      const cap = sec ? sec.dataset.cap : 'welfare';
+      if (!confirm(`确认为 ${pid} 领取该福利？`)) return;
+      busyRun(b, async () => {
+        const r = await admin(b.dataset.gpath || '/admin/welfare/claim', {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: Number(cid) }),
+        });
+        toast(r && r.credits ? `领取成功，+${r.credits} 积分` : '领取成功');
+        // 只刷新**自己那块**面板，不刷新整页。
+        await loadGenericList(pid, cap);
+      }, { label: '领取福利' });
+    });
+  }
+
+  // toggleNavGroup 折叠/展开一个上游分组。
+  //
+  // 折叠状态按上游 id 持久化（不是下标）：加/删上游后下标会整体位移，
+  // 用下标存会让"折叠了 codearts"变成"折叠了别的上游"。
+  function toggleNavGroup(pid) {
+    const g = $('nav').querySelector(`.navgroup[data-pid="${cssEsc(pid)}"]`);
+    if (!g) return;
+    g.classList.toggle('collapsed');
+    const collapsed = [];
+    $('nav').querySelectorAll('.navgroup[data-pid]').forEach(el => {
+      if (el.classList.contains('collapsed')) collapsed.push(el.dataset.pid);
+    });
+    try { localStorage.setItem('wb2api.navcollapsed', JSON.stringify(collapsed)); } catch { /* 隐私模式 */ }
+  }
+
+  // ---------------------------------------------------------------- 设置
+  const SET_FIELDS = [
+    ['setCheckinEnabled', 'checkin_enabled', 'bool'],
+    ['setKeepaliveEnabled', 'keepalive_enabled', 'bool'],
+    ['setCheckinHours', 'checkin_hours', 'hours'],
+    ['setKeepaliveHours', 'keepalive_hours', 'hours'],
+    ['setTravelAuto', 'travel_auto_claim', 'bool'],
+    ['setTravelInterval', 'travel_watch_interval_seconds', 'int'],
+    ['setGrowthClaim', 'growth_auto_claim', 'bool'],
+    ['setGrowthAccept', 'growth_auto_accept_tasks', 'bool'],
+    ['setGrowthMakeup', 'growth_auto_makeup', 'bool'],
+    ['setGrowthRedeem', 'growth_auto_redeem', 'bool'],
+    ['setGrowthOpen', 'growth_auto_open', 'bool'],
+    ['setGrowthDraw', 'growth_auto_draw', 'bool'],
+    ['setGrowthInterval', 'growth_watch_interval_seconds', 'int'],
+    ['setCheckinLogDays', 'checkin_log_keep_days', 'int'],
+    ['setReqLogDays', 'request_log_keep_days', 'int'],
+    ['setSoftRate', 'cooldown_soft_rate', 'str'],
+    ['setUpTimeout', 'upstream_timeout_seconds', 'int'],
+    ['setUpHeaderTimeout', 'upstream_header_timeout_seconds', 'int'],
+    ['setUpIdleTimeout', 'upstream_idle_timeout_seconds', 'int'],
+    ['setMaxInFlight', 'pool_max_in_flight', 'int'],
+    ['setBreakerThreshold', 'pool_breaker_threshold', 'int'],
+    ['setBreakerCooldown', 'pool_breaker_cooldown', 'str'],
+    ['setBreakerCooldownMax', 'pool_breaker_cooldown_max', 'str'],
+    ['setSanitize', 'sanitize_blacklist_fingerprints', 'bool'],
+    ['setUpstashURL', 'upstash_url', 'str'],
+    ['setStickyEnabled', 'session_sticky_enabled', 'bool'],
+    ['setStickyTTL', 'session_sticky_ttl', 'str'],
+  ];
+  let savedSettings = null;
+
+  const parseHours = s => String(s || '').split(/[,，\s]+/).filter(Boolean)
+    .map(x => parseInt(x, 10)).filter(n => !isNaN(n));
+
+  function fillSettings(s, extra) {
+    savedSettings = s;
+    for (const [id, key, kind] of SET_FIELDS) {
+      const el = $(id);
+      if (!el || s[key] === undefined || s[key] === null) continue;
+      if (kind === 'bool') el.checked = !!s[key];
+      else if (kind === 'hours') el.value = (s[key] || []).join(',');
+      else el.value = s[key];
+    }
+    const ro = [
+      ['监听地址', s.listen],
+      ['凭证目录', s.auth_dir],
+      ['配置文件', s.config_path],
+      ['API Key', s.api_key_set ? '已配置' : '未配置（不鉴权）'],
+      ['Redis', s.redis_mode || (s.upstash_url ? 'upstash' : 'noop（纯内存）')],
+    ];
+    $('setReadonly').innerHTML = ro.map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    if (extra && extra.request_log) renderLogFileInfo(extra.request_log);
+    markDirty(false);
+  }
+
+  function renderLogFileInfo(f) {
+    const fmt = b => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round((b || 0) / 1024) + ' KB';
+    // 上限也要显示：只写「保留 7 天」会让人以为记录能留满 7 天，
+    // 实际上字节数先到上限就会裁剪旧记录 —— 不说明这点，
+    // 用户看到「记录没了」会分不清是被裁了还是本来没产生。
+    const html = !f || !f.enabled
+      ? '请求日志落盘：<span class="err">未启用</span>（仅内存，重启即丢）'
+      : `请求日志落盘：<code class="mono">${esc(f.path)}</code> · ${f.count} 条 · ${fmt(f.size)}`
+        + (f.max_bytes ? ` / 上限 ${fmt(f.max_bytes)}` : '')
+        + ` · 保留 ${f.keep_days} 天`
+        + (f.from ? ` · 覆盖 ${new Date(f.from).toLocaleString('zh-CN', { hour12: false })} 至 ${new Date(f.to).toLocaleString('zh-CN', { hour12: false })}` : '');
+    $('setLogFileInfo').innerHTML = html;
+    $('logFileInfo').innerHTML = html;
+    $('logFileInfo').style.display = 'block';
+  }
+
+  // 任务历史的保留策略也显式写出来（后端固定保留 30 天，见 checkinlog.New）。
+  function renderHistRetention(total) {
+    const el = $('histRetention');
+    if (!el) return;
+    el.textContent = `共 ${total || 0} 条 · 保留 30 天（超期自动裁剪）`;
+  }
+
+  function collectSettings() {
+    const out = Object.assign({}, savedSettings);
+    for (const [id, key, kind] of SET_FIELDS) {
+      const el = $(id);
+      if (!el) continue;
+      if (kind === 'bool') out[key] = el.checked;
+      else if (kind === 'hours') out[key] = parseHours(el.value);
+      else if (kind === 'int') out[key] = parseInt(el.value, 10) || 0;
+      else out[key] = el.value.trim();
+    }
+    return out;
+  }
+
+  function markDirty(on) {
+    $('settingsDirty').textContent = on ? '（有未保存的修改）' : '';
+    $('settingsDirty').style.color = on ? 'var(--warn)' : '';
+  }
+
+  async function loadSettings() {
+    try {
+      const r = await admin('/admin/settings');
+      fillSettings(r.settings, r);
+    } catch (e) {
+      $('setReadonly').innerHTML = `<dt>错误</dt><dd class="err">${esc(e.message)}</dd>`;
+    }
+  }
+
+  async function saveSettings() {
+    const body = collectSettings();
+    if (!body.checkin_hours || !body.checkin_hours.length) { toast('签到时点不能为空', true); return; }
+    if (!body.keepalive_hours || !body.keepalive_hours.length) { toast('保活时点不能为空', true); return; }
+    const btn = $('btnSettingsSave');
+    btn.disabled = true;
+    try {
+      const r = await admin('/admin/settings', { method: 'PUT', body: JSON.stringify(body) });
+      fillSettings(r.settings, r);
+      const nr = (r.need_restart || []).length;
+      toast(`设置已保存并写入 config.json：${(r.applied || []).length} 项立即生效`
+        + (nr ? `，另有 ${nr} 项需重启网关才生效` : ''), false);
+    } catch (e) {
+      toast('保存失败：' + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- 成长计划
+  let growthSnaps = [];
+
+  // 按 uid 取账号积分余额（「额度」）。
+  // 数据来自 share（最近一次 /admin/accounts 的结果），不进成长快照 ——
+  // 快照来自上游探测、会因抖动而 stale，而额度来自网关本地状态，
+  // 两者失败语义不同；在前端 join 可让「取不到额度」只影响那一格，
+  // 不会污染已经做好的「快照失败保留上次数据」这条降级路径。
+  // 返回 null 表示该账号不在账号池视图里（与「额度为 0」区分开）。
+  function creditsOf(uid) {
+    const a = share.find(x => x.uid === uid);
+    if (!a || typeof a.credits !== 'number') return null;
+    return a.credits;
+  }
+
+  function renderGrowth(list) {
+    growthSnaps = list || [];
+
+    const sum = growthSnaps.reduce((a, g) => {
+      // 「待完成」用 pending_*（未接单 + 已接单 + 进行中），不是 acceptable_*。
+      // acceptable 只数未接单的，会让已接单/进行中的任务从统计里消失 ——
+      // 那样账号明明还有 5 个任务要做，卡片却显示 0。
+      // 兼容：旧快照没有 pending_* 字段时回落到 acceptable_*，避免显示成 0。
+      a.claim += (g.pending_count != null ? g.pending_count : (g.acceptable_count || 0));
+      a.credit += (g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0));
+      a.streak = Math.max(a.streak, g.streak_days || 0);
+      a.energy += g.energy || 0;
+      // 可领奖：已完成但奖励还没到手的部分，这才是「现在能拿到的分」。
+      a.right_now += g.claimable_credit || 0;
+      a.right_now_n += g.claimable_count || 0;
+      // 额度：账号当前积分余额合计，只累加拿得到的那些账号。
+      const c = creditsOf(g.uid);
+      if (c !== null) { a.credits += c; a.credits_n++; }
+      return a;
+    }, { claim: 0, credit: 0, streak: 0, energy: 0, right_now: 0, right_now_n: 0, credits: 0, credits_n: 0 });
+
+    $('growthCards').innerHTML = [
+      ['账号数', growthSnaps.length, ''],
+      // 额度排在「现在可领」前面：先看家底，再看还能拿多少。
+      ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
+      ['现在可领积分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
+      ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
+      // 「待完成 / 完成后可获得」的口径是**还没做完的任务**：
+      // 未接单 + 已接单 + 进行中三种状态都算（见后端 GrowthTask.Pending）。
+      // 不含 completed（那属于「待领取」，领奖是另一步）。
+      // 措辞强调"完成"而不是"接单"：接单只是开始计进度，不发任何奖励。
+      ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
+      ['完成后可获得的积分', sum.credit, sum.credit ? 'ok' : 'dim'],
+      ['最长连登', sum.streak + ' 天', ''],
+      ['能量合计', sum.energy, ''],
+    ].map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+    if (!growthSnaps.length) {
+      $('growthRows').innerHTML = rowPlaceholder(COLS.growth, '账号池为空');
+      renderGrowthGroups();
+      return;
+    }
+
+    $('growthRows').innerHTML = growthSnaps.map(g => {
+      // 只有「压根没数据」才整行报错。刷新失败但有上次数据时（stale=true）
+      // 继续正常渲染，只在账号名旁挂一个过期标记 —— 不能让一次上游抖动抹白整张表。
+      const stale = g.stale
+        ? ` <span class="pill warn" title="本次刷新失败，展示的是 ${new Date(g.observed_at).toLocaleTimeString('zh-CN', { hour12: false })} 的数据：${esc(g.error || '')}">可能过期</span>`
+        : '';
+      const name = esc(g.nickname || (g.uid || '').slice(0, 8)) + stale;
+      const U = esc(g.uid);
+      if (g.error && !g.tasks_total) {
+        // 「昵称」列已占 1 格，余下 COLS.growth - 1 格由错误信息占满。
+        //
+        // # 这是 bug B2
+        //
+        // 原先写死 colspan="11"，而那行只有 1 个前置 <td> + 11 = 12 格，
+        // 表面上"刚好等于 12 列"。但「昵称」那一格已经占掉 1 列，
+        // 所以正确值是 COLS.growth - 1 = 11 —— 数值碰巧对了，
+        // **含义却是错的**：它把"整行跨列"当成了"剩余列"。
+        // 一旦成长表加列，这个 11 不会跟着变，错误行就会少占一格。
+        // 写成减法后，加列自动跟随。
+        return `<tr><td>${name}</td><td colspan="${COLS.growth - 1}" class="err" title="${esc(g.error)}">${esc(g.error.slice(0, 70))}</td></tr>`;
+      }
+      // 额度取不到时显示 —（而不是 0）：账号可能已不在池里，这与「余额为零」是两回事。
+      const cr = creditsOf(g.uid);
+      const quota = cr === null
+        ? '<span class="dim" title="该账号不在账号池视图里，取不到额度">—</span>'
+        : `<span class="mono">${cr}</span>`;
+      const streak = g.streak_days
+        ? `${g.streak_days} 天${g.next_tier ? `<br><span class="dim" style="font-size:11px">距 ${esc(g.next_tier)} 还差 ${g.next_tier_remaining}</span>` : ''}`
+        : '<span class="dim">—</span>';
+      const cards = g.makeup_cards
+        ? `${g.makeup_cards}${g.makeup_dates && g.makeup_dates.length ? ` <span class="pill warn">可补${g.makeup_dates.length}</span>` : ''}`
+        : '<span class="dim">—</span>';
+      // 待完成 / 完成后可得：口径是"还没做完"（未接单+已接单+进行中），
+      // 与「接单」按钮的可用性（acceptable_count，只数未接单）是两件事。
+      const pendN = g.pending_count != null ? g.pending_count : (g.acceptable_count || 0);
+      const pendC = g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0);
+      const claim = pendN
+        ? `<span class="pill ok">${pendN}</span>`
+        : '<span class="dim">—</span>';
+      const credit = pendC
+        ? `<span class="pill ok">${pendC}</span>`
+        : '<span class="dim">—</span>';
+      // 待领取 / 现在可领：来自 completed 的任务，领了就到账。
+      const pendingN = g.claimable_count
+        ? `<span class="pill warn">${g.claimable_count}</span>`
+        : '<span class="dim">—</span>';
+      const pendingC = g.claimable_credit
+        ? `<span class="pill warn">${g.claimable_credit}</span>`
+        : '<span class="dim">—</span>';
+      const box = g.blind_box_affordable
+        ? `<span class="pill ok">${g.blind_box_affordable}</span>`
+        : '<span class="dim">—</span>';
+      const draw = g.lottery_chances
+        ? `<span class="pill ok">${g.lottery_chances}</span>`
+        : '<span class="dim">—</span>';
+
+      const act = [
+        // 领奖放最前：这是唯一真正加分的动作，有可领的就一定是当前最该点的。
+        `<button data-gact="claim"   data-uid="${U}"${g.claimable_count ? '' : ' disabled'} title="领取已完成任务的奖励${g.claimable_credit ? `（共 ${g.claimable_credit} 分）` : ''}">领取</button>`,
+        `<button data-gact="accept"  data-uid="${U}"${g.acceptable_count ? '' : ' disabled'} title="把未接单的任务接进列表开始计进度。接单不发奖励，奖励要走「领取」">接单</button>`,
+        `<button data-gact="redeem" data-uid="${U}">兑换</button>`,
+        `<button data-gact="makeup" data-uid="${U}"${g.makeup_dates && g.makeup_dates.length ? '' : ' disabled'}>补签</button>`,
+        `<button data-gact="open"   data-uid="${U}"${g.blind_box_affordable ? '' : ' disabled'}>开盒</button>`,
+        `<button data-gact="draw"   data-uid="${U}"${g.lottery_chances ? '' : ' disabled'}>抽奖</button>`,
+      ].join(' ');
+
+      return `<tr>
+        <td>${name}</td>
+        <td>${quota}</td>
+        <td>${streak}</td>
+        <td class="mono">${cards}</td>
+        <td class="mono">${esc(g.energy)}</td>
+        <td>${box}</td>
+        <td>${draw}</td>
+        <td>${pendingN}</td>
+        <td>${pendingC}</td>
+        <td>${claim}</td>
+        <td>${credit}</td>
+        <td style="white-space:nowrap">${act}</td>
+      </tr>`;
+    }).join('');
+
+    renderGrowthGroups();
+  }
+
+  // 四个视图的判定。状态取值与官方前端枚举一致：
+  // not_accepted | accepted | in_progress | completed | claimed
+  // 语义要点：completed = 任务条件已达成但**奖励还没领**；claimed = 奖励已领取。
+  // 两者都归入「已完成」（从用户视角看这类任务都不需要再做动作了），
+  // 区别在于 completed 那一行会多出一个「领取」按钮。
+  const GROWTH_VIEWS = {
+    acceptable: { label: '待接单', test: t => t.status === 'not_accepted' && !t.locked },
+    running:    { label: '进行中', test: t => t.status === 'accepted' || t.status === 'in_progress' },
+    done:       { label: '已完成', test: t => t.status === 'completed' || t.status === 'claimed' },
+    all:        { label: '全部',   test: () => true },
+  };
+  let growthView = 'acceptable';
+  // 用户是否手动点过视图按钮。没点过时首次加载会自动落到第一个非空视图 ——
+  // 否则「任务都已接单」的账号一进来就是空表，看起来像功能坏了。
+  let growthViewPicked = false;
+  // 任务明细一次只显示一个账号，由 growthAccount 下拉框决定。
+  let growthUID = '';
+
+  const GROWTH_STATUS_TEXT = {
+    // 「未接单」只在「还没领到第一只 Buddy」时出现，且官方前端没有这个状态。
+    // 保留它是因为那种账号确实需要先接单，否则连进度都不显示。
+    not_accepted: ['待接单', 'dim'],
+    // accepted = 已接单但进度还是 0 —— 用户要做的是「去客户端完成」，
+    // 所以文案直接写成「待完成」而不是「进行中」，与卡片的「待完成任务」对齐。
+    accepted: ['待完成', ''],
+    // in_progress = 已经做了一部分（有 current/target），才叫「进行中」。
+    in_progress: ['进行中', ''],
+    // completed 与 claimed 分开显示：前者奖励还没领（行内给「领取」按钮），后者已到账。
+    completed: ['待领取', 'warn'],
+    claimed: ['已领取', 'ok'],
+  };
+
+  // 任务到期时间的展示文本。返回 {text, cls}；没有期限返回 null。
+  //
+  // 为什么用服务端算好的 expires_in_days 而不是自己 parse expires_at：
+  // 时区、跨天舍入、"当天算不算可用"这些口径每处各写一遍必然不一致。
+  // 服务端已按自然日算好（见 scheduler.daysUntil），界面只管显示。
+  //
+  // 三档语义（与服务端的 Expired / ExpiringSoon 对齐）：
+  //   已过期   → 红字「已过期 N 天」，提示这个任务已经作废
+  //   7 天内   → 黄字「剩 N 天」，值得优先做
+  //   其余     → 灰字日期，只是信息
+  function fmtTaskExpiry(t) {
+    if (!t || t.expires_at === undefined || t.expires_in_days === undefined) return null;
+    // 服务端对已领取的任务不带这两个字段，这里再兜一层（旧数据可能没有 expired 标记）
+    const d = t.expires_in_days;
+    if (t.expired || d < 0) {
+      return { text: '已过期 ' + Math.abs(d) + ' 天', cls: 'err' };
+    }
+    if (t.expiring_soon || d <= 7) {
+      return { text: '剩 ' + d + ' 天', cls: 'warn' };
+    }
+    // 日期只显示到「月-日」，年份对 1~2 个月的期限没有信息量
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t.expires_at);
+    return { text: m ? `${Number(m[2])}-${Number(m[3])}（剩 ${d} 天）` : '剩 ' + d + ' 天', cls: '' };
+  }
+
+  // 把当前 growthView 同步到按钮选中态。自动选视图与手动点击都走这里，
+  // 避免两处各自改 class 导致显示与实际视图不一致。
+  function syncGrowthViewButtons() {
+    const box = $('growthViews');
+    if (!box) return;
+    for (const b of box.querySelectorAll('button[data-gview]')) {
+      b.classList.toggle('on', b.dataset.gview === growthView);
+    }
+  }
+
+  // 统计单个账号在四个视图下各有多少条任务。
+  function growthCounts(g) {
+    const c = { acceptable: 0, running: 0, done: 0, all: 0 };
+    for (const t of ((g && g.tasks) || [])) {
+      for (const k of Object.keys(GROWTH_VIEWS)) {
+        if (GROWTH_VIEWS[k].test(t)) c[k]++;
+      }
+    }
+    return c;
+  }
+
+  // 账号下拉框：选项文字带上待接单/进行中条数，
+  // 这样不用逐个点开也能看出哪个账号还有活干。
+  function buildGrowthAccountSelect() {
+    const sel = $('growthAccount');
+    if (!sel) return;
+    const prev = growthUID;
+    const opts = growthSnaps.map(g => {
+      const c = growthCounts(g);
+      const name = g.nickname || (g.uid || '').slice(0, 8);
+      const hint = g.tasks_total
+        ? `（待接单 ${c.acceptable} · 进行中 ${c.running}）`
+        : '（未探测）';
+      return `<option value="${esc(g.uid)}">${esc(name + hint)}</option>`;
+    }).join('');
+    sel.innerHTML = opts;
+
+    // 保持原选择；账号被删掉时回落到第一个。
+    const exists = growthSnaps.some(g => g.uid === prev);
+    growthUID = exists ? prev : ((growthSnaps[0] || {}).uid || '');
+    sel.value = growthUID;
+  }
+
+  // 渲染所选账号在所选视图下的任务表。一次只画一个账号 ——
+  // 账号多的时候把所有账号铺出来会把页面拉得很长，先选再看更实用。
+  function renderGrowthGroups() {
+    const host = $('growthGroups');
+    if (!host) return;
+    if (!growthSnaps.length) {
+      host.innerHTML = '<div class="dim" style="padding:14px 16px;font-size:12px">账号池为空。</div>';
+      $('growthTaskMeta').textContent = '';
+      return;
+    }
+
+    buildGrowthAccountSelect();
+    const g = growthSnaps.find(x => x.uid === growthUID) || growthSnaps[0];
+    const c = growthCounts(g);
+
+    // 首次加载且用户没手动选过视图时，落到第一个非空视图。
+    // 只做一次：之后用户点哪个就是哪个，刷新数据也不会把视图抢回去。
+    // 必须在下面读 test 之前完成，否则这次渲染用的还是旧视图。
+    if (!growthViewPicked) {
+      for (const k of ['acceptable', 'running', 'done', 'all']) {
+        if (c[k] > 0) { growthView = k; break; }
+      }
+      syncGrowthViewButtons();
+    }
+
+    const view = GROWTH_VIEWS[growthView] ? growthView : 'acceptable';
+    const test = GROWTH_VIEWS[view].test;
+
+    $('growthTaskMeta').textContent =
+      `待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done} · 共 ${c.all}`;
+
+    const name = esc(g.nickname || (g.uid || '').slice(0, 8));
+    if (g.error && !g.tasks_total) {
+      host.innerHTML = `<div class="ggroup">
+        <div class="ghead"><span class="gname">${name}</span>
+          <span class="err" style="font-size:12px">${esc(g.error.slice(0, 120))}</span></div>
+      </div>`;
+      return;
+    }
+
+    const tasks = (g.tasks || []).filter(test);
+    const rows = tasks.map(t => {
+      const [label, cls] = GROWTH_STATUS_TEXT[t.status] || [t.status, 'dim'];
+      // 进度做成「数值 + 细进度条」：光看 4/5 不如一眼看出还剩多少。
+      // target=0 或缺失时（如 black_cat 这类活动任务）不画条，避免 0/0 的假进度。
+      let prog = '<span class="dim">—</span>';
+      if (t.target > 0) {
+        const cur = Math.max(0, Math.min(t.current || 0, t.target));
+        const pct = Math.round((cur / t.target) * 100);
+        prog = `<span class="mono" title="${cur}/${t.target}">${cur}/${t.target}</span>` +
+               `<div class="pbar" title="${pct}%"><i style="width:${pct}%"></i></div>`;
+      }
+      const reward = [
+        t.reward_credit ? `${t.reward_credit} 分` : '',
+        t.reward_energy ? `+${t.reward_energy} 能量` : '',
+      ].filter(Boolean).join(' ') || '<span class="dim">—</span>';
+      const locked = t.locked ? ' <span class="pill warn">未解锁</span>' : '';
+      // 领取优先于接单：completed 的任务已经做完了，唯一可做的就是领奖。
+      //
+      // accepted / in_progress 给的不是按钮而是说明 —— 这两类任务**本网页无法代做**，
+      // 必须去 WorkBuddy 客户端里真正把动作做掉。留一个禁用按钮只会让人反复点。
+      const btn = t.claimable
+        ? `<button data-gclaimreward="${esc(t.task_code)}" data-uid="${esc(g.uid)}">领取 ${t.reward_credit || 0} 分</button>`
+        : (t.status === 'not_accepted' && !t.locked)
+          ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost">接单</button>`
+          : (t.status === 'accepted' || t.status === 'in_progress')
+            ? '<span class="dim" style="font-size:11px">去客户端做</span>'
+            : '<span class="dim">—</span>';
+      const tag = t.tag ? ` <span class="pill">${esc(t.tag)}</span>` : '';
+      // 到期列：只有部分任务有期限（上游 18 个里 4 个），其余显示占位。
+      // 已过期时即使有「领取」按钮也要同时给出提示 —— 那种情况下按钮点了会失败。
+      const exp = fmtTaskExpiry(t);
+      const expiry = exp
+        ? `<span class="${exp.cls}" title="${esc(t.expires_at)}">${esc(exp.text)}</span>`
+        : '<span class="dim">—</span>';
+
+      return `<tr>
+        <td class="gtask">${esc(t.title || t.task_code)}${tag}<br>
+          <span class="dim mono" style="font-size:11px">${esc(t.task_code)}</span></td>
+        <td class="gdesc">
+          <div title="${esc(t.description || '')}">${t.description ? esc(t.description) : '<span class="dim">—</span>'}</div>
+          ${t.how_to ? `<div class="howto" title="${esc(t.how_to)}">怎么做：${esc(t.how_to)}</div>` : ''}
+        </td>
+        <td><span class="pill ${cls}">${esc(label)}</span>${locked}</td>
+        <td class="mono">${prog}</td>
+        <td class="mono">${reward}</td>
+        <td class="mono exp">${expiry}</td>
+        <td style="white-space:nowrap">${btn}</td>
+      </tr>`;
+    }).join('');
+
+    host.innerHTML = `<div class="ggroup">
+      <div class="ghead">
+        <span class="gname">${name}</span>
+        <span class="dim mono" style="font-size:11px">${esc((g.uid || '').slice(0, 8))}</span>
+        <span class="dim" style="font-size:12px">待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done}</span>
+        ${g.claimable_count
+          ? `<span class="pill warn">${g.claimable_count} 个待领取 · ${g.claimable_credit} 分</span>
+             <button data-gclaimall="${esc(g.uid)}">全部领取</button>`
+          : '<span class="pill ok">奖励已领完</span>'}
+        <span class="spacer"></span>
+        <span class="tog">${clientLoginHTML(g.uid)}</span>
+      </div>
+      ${tasks.length ? `<table><thead><tr>
+        <th>任务</th><th>说明</th><th>状态</th><th>进度</th><th>奖励</th><th title="仅部分任务有期限（上游 18 个里 4 个带），已领取的不显示">到期</th><th>操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>`
+      : `<div class="dim" style="padding:10px 16px;font-size:12px">该账号在「${esc(GROWTH_VIEWS[view].label)}」下没有任务。换个视图或换个账号看看。</div>`}
+    </div>`;
+  }
+
+  // 返回 true/false 而不是吞掉异常：调用方（busyRun）靠它决定是否再给提示。
+  async function loadGrowth(refresh) {
+    let r;
+    try { r = await admin('/admin/growth' + (refresh ? '?refresh=1' : '')); }
+    catch (e) { $('growthRows').innerHTML = rowPlaceholder(COLS.growth, e.message, 'err'); return false; }
+    renderGrowth(r.accounts);
+    // 额度列取自 share（/admin/accounts 的本地缓存积分，只有 RefreshCredits 会更新它）。
+    // 手动「刷新」意味着「我怀疑数据旧了」，所以顺手把账号视图也拉一次；
+    // 否则领完奖再点刷新，额度列还是旧值 —— 实测同一账号刷新前后能差 252 分。
+    // 失败不影响成长数据展示，所以单独 try 且不改变返回值。
+    if (refresh) {
+      try { renderAccounts((await admin('/admin/accounts')).accounts); } catch { /* 额度刷新失败不阻塞 */ }
+    }
+    return true;
+  }
+
+  // claim = 领奖（把已达成任务的奖励领回来，唯一让积分到账的动作）
+  // accept = 接单（把任务接进列表开始计进度，不发奖励）
+  const GROWTH_LABEL = { claim: '领取奖励', accept: '接单', redeem: '兑换', makeup: '补签', open: '开盲盒', draw: '抽奖' };
+  // 纯收益、不消耗任何资源的动作，执行前不必再问一遍。
+  const GROWTH_HARMLESS = new Set(['claim', 'accept']);
+
+  // growthAct 执行一个成长动作，然后刷新界面。
+  //
+  // btn 可选：行内按钮传进来就能得到「禁用 + 文案变化」的即时反馈。
+  // 整段包在 busyRun 里，所以「写 → 刷新」期间页面始终有可见的进行中提示 ——
+  // 以前裸调 loadGrowth(true) 会让页面静止 7 秒（实测），用户以为没反应。
+  async function growthAct(uid, act, taskCode, btn) {
+    const body = { uid };
+    if (taskCode) body.task_code = taskCode;
+    const label = GROWTH_LABEL[act] || act;
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        const r = await admin('/admin/growth/' + act, { method: 'POST', body: JSON.stringify(body) });
+        const extra = r.credits ? `，+${r.credits} 积分` : '';
+        toast(`${label}成功：${r.detail || ''}${extra}`);
+        wrote = true;
+      } catch (e) {
+        growthError(e, label);
+      }
+      // 刷新放在同一个 busyRun 内：这样"写完了但界面还在读"也是可见的，
+      // 而不是写完后按钮就恢复、界面却还是旧数据。
+      //
+      // 用 loadGrowth(**false**) 读缓存，不再强制回源 —— 后端在写操作成功后
+      // 已经就地刷新了该账号的快照（scheduler.refreshOwnSnapshot），
+      // 所以缓存就是最新的。实测：强制回源 3 账号 7.2s，读缓存 ~1ms。
+      // 这是"点了要等 7 秒"的根治：把"N 个账号全探一遍"换成"只探被改的那一个"。
+      await Promise.all([loadGrowth(false), refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
+  }
+
+  // growthError 统一处理成长动作的失败提示（单账号与「全部」两条路径共用）。
+  //
+  // 分层：
+  //   预期内（跳过/被前置挡住/无可领）→ 中性 toast，不打红
+  //   被前置任务挡住                  → 额外弹**持久面板**，告诉用户去做什么
+  //   其余                            → 红色 toast（真故障）
+  //
+  // 为什么要弹面板：被前置挡住时用户接下来什么都不用点，而是要去 WorkBuddy 客户端
+  // 把前置任务做掉。只给一闪而过的 toast，用户会以为是自己操作错了并反复重试。
+  function growthError(e, label) {
+    const msg = (e && e.message) || String(e);
+    const benign = /跳过|被前置任务|需要先完成前置任务|不可领取|不可接单|没有可|没有待|不足|已领取/.test(msg);
+    toast(`${label}：${msg}`, !benign);
+    const blocked = /需要先完成前置任务[：:]\s*(.+)$/.exec(msg);
+    if (blocked) {
+      notice('接单被前置任务挡住',
+        blocked[1].trim() + '\n\n这一步只能在 WorkBuddy 客户端里做，本网页无法代做。完成后回到这里再点「接单」即可。');
+    }
+  }
+
+  async function growthAll(act) {
+    const label = GROWTH_LABEL[act] || act;
+    if (!GROWTH_HARMLESS.has(act) && !confirm(`对全部账号${label}？\n（会消耗各自的资源；不满足条件的会自动跳过）`)) return;
+    try {
+      const r = await admin('/admin/growth/' + act, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
+    } catch (e) { growthError(e, `全部${label}`); }
+  }
+
+  // ---------------------------------------------------------------- 请求日志（落盘历史）
+  //
+  // 只有落盘历史一个视图：原先还有个「实时」视图读内存环形缓冲（2000 条、重启即丢），
+  // 但它与历史视图展示同一批请求、只是数据源不同，反而让人以为是两份数据。
+  // 落盘历史已经覆盖「全部保留期内的请求」，实时视图没有独立价值，故移除。
+
+  // 日志区通用的占位行（colspan 与表头列数保持一致，改列数时只需改这里）。
+  function logPlaceholder(text, cls) {
+    return rowPlaceholder(COLS.logs, text, cls);
+  }
+
+  // ---------------------------------------------------------------- 每页条数（含持久化）
+  //
+  // ⚠ 本段必须声明在 logPage / histPage 之前。
+  // 它们用 `limit: loadPageSize()` 初始化，而 loadPageSize 读 DefaultPageSize；
+  // const 声明有暂时性死区（TDZ）——**不像 function 那样整体提升**。
+  // 曾因此报 "Cannot access 'DefaultPageSize' before initialization"：
+  // 当时这段放在 logPage 之后，logPage 求值时 DefaultPageSize 还在 TDZ 里。
+  // 后续若要挪动这段代码，务必保持它在第一个 loadPageSize() 调用点之前。
+
+  // 上限 300 与 /admin/logs/history、/admin/checkin/history 服务端的单页上限一致；
+  // 下限 1。越界只在本函数里夹紧，不改变 state 的语义。
+  const PAGE_SIZE_MIN = 1;
+  const PAGE_SIZE_MAX = 300;
+  // DefaultPageSize 与后端 logbuf.DefaultPageSize / checkinlog.DefaultPageSize 同为 30。
+  // 这里只作为「从未设置过」时的初值；一旦用户改过就以 localStorage 里存的为准。
+  const DefaultPageSize = 30;
+
+  // 每页条数持久化到 localStorage，两个列表**共用同一个键**。
+  //
+  // 为什么共用一个键而不是各存一份：这是同一个用户偏好（「我习惯一次看多少条」），
+  // 不是两个独立设置。分两个键的话，在任务历史调成 100、切到请求日志还是 30，
+  // 用户会以为是 bug。之前这个值写死在 state 定义里，刷新页面就回到 30 —— 即
+  // 「不持久化」的问题，本条修复的就是它。
+  //
+  // 复用 buildNav 已有的读写范式（'wb2api.panel'）：try/catch 包住，
+  // 隐私模式下 localStorage 抛异常时静默回落默认值，不影响功能。
+  const LS_PAGESIZE = 'wb2api.pagesize';
+
+  function loadPageSize() {
+    try {
+      const raw = localStorage.getItem(LS_PAGESIZE);
+      if (raw == null) return DefaultPageSize;      // 从未设置过
+      return clampPageSize(raw);
+    } catch { return DefaultPageSize; }             // 隐私模式 / 值损坏
+  }
+
+  function savePageSize(n) {
+    try { localStorage.setItem(LS_PAGESIZE, String(n)); } catch { /* 隐私模式 */ }
+  }
+
+  // clampPageSize 把任意输入（含空、小数、超界、NaN）收敛为合法整数。
+  function clampPageSize(v) {
+    const n = Math.floor(Number(v));
+    if (!isFinite(n) || n < PAGE_SIZE_MIN) return PAGE_SIZE_MIN;
+    return n > PAGE_SIZE_MAX ? PAGE_SIZE_MAX : n;
+  }
+
+  // 请求日志「历史（落盘）」的分页状态。与任务历史共用 renderPager。
+  const logPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'logPager', onGo: () => loadLogHistory() };
+
+  async function loadLogHistory() {
+    // 每次拉取前先给一句「正在读取」，避免翻页时旧内容一直挂着让人以为没反应。
+    $('logrows').innerHTML = logPlaceholder('正在读取落盘日志…');
+    let r;
+    try { r = await admin(`/admin/logs/history?limit=${logPage.limit}&offset=${logPage.offset}`); }
+    catch (e) { $('logrows').innerHTML = logPlaceholder(e.message, 'err'); return; }
+    renderLogFileInfo(r.file);
+    if (!r.enabled) {
+      $('logrows').innerHTML = logPlaceholder('未启用落盘（日志只进 stdout，重启后不可回溯）');
+      $('logPager').innerHTML = '';
+      return;
+    }
+    logPage.total = r.total || 0;
+    // 越界自愈：总数变少（例如文件被裁剪）导致当前页不存在时，回退到最后一页重取。
+    const maxOffset = Math.max(0, (pageCount(logPage) - 1) * logPage.limit);
+    if (logPage.offset > maxOffset) {
+      logPage.offset = maxOffset;
+      renderPager(logPage);
+      return loadLogHistory();
+    }
+    if (!r.items || !r.items.length) {
+      $('logrows').innerHTML = logPlaceholder('落盘日志为空');
+      $('logMeta').textContent = '';
+      renderPager(logPage);
+      return;
+    }
+    $('logMeta').textContent = `（历史 ${r.total} 条）`;
+    // 历史视图直接用自己的快照渲染：它已覆盖完整落盘范围。
+    logEntries = normalizeDesc(r.items);
+    renderLogs(logEntries);
+    renderPager(logPage);
+  }
+
+  // ---------------------------------------------------------------- 统一分页组件
+  //
+  // 任务历史与请求日志共用这一个组件、同一套语义：
+  //   state = { offset, limit, total, container, onGo }
+  // 这样做是为了消灭「一个写死 limit、一个用下拉选条数」的两套做法。
+  //
+  // 页码只在「总数变化导致当前页越界」时才回退，不主动重置：
+  // 用户翻到第 3 页时，后台轮询刷新数据不应把他踢回第 1 页
+  // （只有切换筛选/每页条数这类**用户主动**改变查询范围的操作才回第 1 页）。
+  //
+  // 每页条数的常量、夹紧函数与 localStorage 持久化统一放在本文件上方
+  // 「每页条数（含持久化）」一节 —— 那里声明得比 logPage / histPage 早，
+  // 避免 const 的暂时性死区问题。此处不再重复定义。
+
+  function pageCount(state) {
+    return Math.max(1, Math.ceil((state.total || 0) / (state.limit || 30)));
+  }
+  function pageIndex(state) {
+    return Math.floor((state.offset || 0) / (state.limit || 30)) + 1;
+  }
+
+  function renderPager(state) {
+    const el = $(state.container);
+    if (!el) return;
+    const pages = pageCount(state);
+    const cur = pageIndex(state);
+    const total = state.total || 0;
+    const from = total === 0 ? 0 : state.offset + 1;
+    const to = Math.min(state.offset + state.limit, total);
+
+    el.innerHTML = `
+      <button data-page="prev"${cur <= 1 ? ' disabled' : ''}>上一页</button>
+      <span class="pageno">第 ${cur} / ${pages} 页</span>
+      <button data-page="next"${cur >= pages ? ' disabled' : ''}>下一页</button>
+      <span>共 ${total} 条${total ? `，本页 ${from}-${to}` : ''}</span>
+      <span class="spacer"></span>
+      <span>每页</span>
+      <input data-page="size" type="number" class="pagesize"
+             value="${state.limit}" min="${PAGE_SIZE_MIN}" max="${PAGE_SIZE_MAX}"
+             step="1" inputmode="numeric"
+             title="可直接输入 ${PAGE_SIZE_MIN}-${PAGE_SIZE_MAX} 之间的任意整数">
+      <span>条</span>`;
+
+    el.querySelectorAll('button[data-page]').forEach(btn => {
+      btn.onclick = () => {
+        if (btn.disabled) return;
+        const next = btn.dataset.page === 'prev' ? cur - 1 : cur + 1;
+        if (next < 1 || next > pages) return;
+        state.offset = (next - 1) * state.limit;
+        state.onGo();
+      };
+    });
+
+    // 每页条数：输入框提交时生效。
+    // 用 change（失焦或回车才触发）而不是 input（每敲一个键触发）——
+    // 否则想输入「120」时，敲到「1」就已经按每页 1 条重查了一次，白白多打两次请求。
+    const box = el.querySelector('input[data-page="size"]');
+    if (box) {
+      const apply = () => {
+        const next = clampPageSize(box.value);
+        // 把夹紧后的值写回输入框，让用户看到自己输的 999 实际按 300 生效
+        box.value = String(next);
+        if (next === state.limit) return;   // 没变就不重查
+        state.limit = next;
+        savePageSize(next);                 // 持久化：刷新页面后仍是这个值
+        state.offset = 0;   // 改变每页条数属于主动改变查询范围 → 回第 1 页
+        state.onGo();
+      };
+      box.onchange = apply;
+      box.onkeydown = ev => {
+        if (ev.key === 'Enter') { ev.preventDefault(); apply(); box.blur(); return; }
+        // 上下方向键增减一页条数：与原生 number 行为一致，但走同一条夹紧路径。
+        // 基准取**输入框当前值**而不是 state.limit —— state.limit 只在提交时更新，
+        // 若以它为基准，连按上键后按下键会从旧值回退（上到 31、再按下变成 29）。
+        if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+          ev.preventDefault();
+          box.value = String(clampPageSize(clampPageSize(box.value) + (ev.key === 'ArrowUp' ? 1 : -1)));
+        }
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------- 日志
+  //
+  // 统一排序契约（本文件所有日志类列表都遵守）：
+  //   **展示顺序 = 时间倒序，最上面是最新**；同一时刻按 seq 倒序稳定排列。
+  //
+  // 为什么要有这条契约：两个数据源的物理顺序本来就不一样 ——
+  //   Ring.Snapshot 是**正序**（它是按 seq 递增的增量游标接口，改成倒序会破坏游标语义）；
+  //   Sink.LoadRecent 是**倒序**（最新在前）。
+  // 历史实现让调用方各自记住该不该 reverse、以及该用 append 还是 prepend，
+  // 于是实时视图的「最新」会沉在自己这批的底部、历史视图整体是旧在上新在下。
+  //
+  // 现在改为：无论从哪个源来，先并入本地缓冲，再由 renderLogs 统一按倒序整体重绘。
+  // 调用方不再需要关心顺序，也不需要知道用 append 还是 prepend。
+  let logEntries = [];   // 本地日志缓冲（按 seq 去重）
+
+  // 归一化：时间倒序；时间相同按 seq 倒序，保证顺序稳定可复现。
+  function normalizeDesc(items) {
+    return (items || []).slice().sort((a, b) => {
+      const ta = new Date(a.at).getTime(), tb = new Date(b.at).getTime();
+      if (ta !== tb) return tb - ta;
+      return (b.seq || 0) - (a.seq || 0);
+    });
+  }
+
+  // 把新条目并入缓冲，按 seq 去重（增量轮询会重复送达同一条）。
+  // 当前只有落盘历史一个视图（每次整页拉取），保留它是为了将来若再加增量数据源时
+  // 仍走同一条合并路径，避免又出现「各自 reverse」的分叉。
+  function mergeLogEntries(incoming, cap) {
+    const bySeq = new Map();
+    for (const e of logEntries) bySeq.set(e.seq, e);
+    for (const e of (incoming || [])) bySeq.set(e.seq, e);
+    logEntries = normalizeDesc(Array.from(bySeq.values())).slice(0, cap);
+  }
+
+  // tokPerSec 输出速率，算法与 stdout 表格（logging.go 的 tokpsField）保持一致 ——
+  // 同一条请求在终端与网页上必须是同一个数，否则排障时会互相矛盾。
+  //   tokens < 0 表示上游 usage 缺失 → 显示 -，绝不能拿 -1 去除时间；
+  //   total_ms <= 0（时钟粒度内完成）→ 返回 0.0，避免除零得到 Inf/NaN。
+  function tokPerSec(tokens, totalMs) {
+    if (tokens < 0) return '-';
+    if (!totalMs || totalMs <= 0) return '0.0';
+    return (tokens / (totalMs / 1000)).toFixed(1);
+  }
+
+  // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
+  function renderLogs(items) {
+    const tb = $('logrows');
+    const list = normalizeDesc(items).slice(0, 300);
+    if (!list.length) return;
+    tb.innerHTML = list.map(e => {
+      const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
+      return `<tr>
+        <td class="mono dim">${e.seq}</td>
+        <td class="dim">${new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false })}</td>
+        <td class="mono">${esc(e.model)}</td>
+        <td>${esc(e.mode)}</td>
+        <td><span class="pill ${st}">${e.status}</span></td>
+        <td class="mono dim">${esc((e.uid || '').slice(0, 8) || '-')}</td>
+        <td class="mono">${e.ttfb_ms ? e.ttfb_ms + 'ms' : '-'}</td>
+        <td class="mono">${e.tokens >= 0 ? e.tokens : '-'}</td>
+        <td class="mono">${tokPerSec(e.tokens, e.total_ms)}</td>
+        <td class="mono">${e.total_ms}ms</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ---------------------------------------------------------------- 历史
+  // 任务历史分页状态。与请求日志共用 renderPager（同一套语义：offset/limit/total）。
+  const histPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'histPager', onGo: () => loadHistory() };
+
+  async function loadHistory() {
+    const kind = $('histKind').value;
+    let r;
+    try {
+      r = await admin(`/admin/checkin/history?limit=${histPage.limit}&offset=${histPage.offset}`
+        + (kind ? '&kind=' + kind : ''));
+    } catch { return; }
+    histPage.total = r.total || 0;
+    renderHistRetention(histPage.total);
+    // 越界自愈：切筛选或数据被裁剪后当前页可能已不存在，回退到最后一页。
+    const maxOffset = Math.max(0, (pageCount(histPage) - 1) * histPage.limit);
+    if (histPage.offset > maxOffset) {
+      histPage.offset = maxOffset;
+      renderPager(histPage);
+      return loadHistory();
+    }
+    const items = r.items || [];
+    if (!items.length) {
+      // ⚠ 这里必须走 TableState（反引号模板），**不能**用单引号字符串 ——
+      // 单引号里的 ${COLS.hist} 不会被插值，会在页面上原样显示出
+      // `${COLS.hist}` 这串字面量（真实发生过的缺陷，浏览器实测确认）。
+      // 用 TableState.empty 既拿到正确列数，也统一了空态样式。
+      $('histrows').innerHTML = TableState.empty(COLS.hist, '暂无记录');
+      renderPager(histPage);
+      return;
+    }
+    $('histrows').innerHTML = items.map(x => {
+      const cls = x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'err' : 'dim';
+      const label = { ok: '成功', already: '今日已签', fail: '失败', skip: '跳过' }[x.status] || x.status;
+      // 积分：**没拿到就用「—」占位**，不要留空白单元格。
+      //
+      // 空白单元格的歧义：是"这次没有积分"还是"数据没加载出来"？
+      // 表格里一列全是空白时尤其明显（实测 30 行 skip 记录整列空），
+      // 用户会以为面板坏了。`x.credits || ''` 在 credits=0 时也会落进这个坑
+      // ——0 是**真实值**，不该被当假值吃掉。
+      const hasCredits = typeof x.credits === 'number';
+      const creditsCell = hasCredits
+        ? `<span class="mono${x.credits > 0 ? ' ok' : ''}">${x.credits > 0 ? '+' : ''}${x.credits}</span>`
+        : '<span class="dim">—</span>';
+      return `<tr>
+        <td class="dim">${new Date(x.at).toLocaleString('zh-CN', { hour12: false })}</td>
+        <td>${esc(x.nickname || (x.uid || '').slice(0, 8))}</td>
+        <td>${esc(x.kind)}</td>
+        <td><span class="pill ${cls}">${esc(label)}</span></td>
+        <td>${creditsCell}</td>
+        <td class="dim">${x.trigger === 'manual' ? '手动' : '定时'}</td>
+        <td class="dim" title="${esc(x.detail || '')}">${esc((x.detail || '').slice(0, 40))}</td>
+      </tr>`;
+    }).join('');
+    renderPager(histPage);
+  }
+
+  // ---------------------------------------------------------------- API 接入信息
+  const BASE_URL = location.origin + '/v1';
+
+  const ENDPOINTS = [
+    ['POST /v1/chat/completions', 'OpenAI 兼容对话（流式/非流式）', 'Bearer'],
+    ['GET  /v1/models', '模型目录（上游实时，缓存 1h）', 'Bearer'],
+    ['GET  /v1/model', '同上，单数别名', 'Bearer'],
+    ['GET  /status', '账号池状态', 'Bearer'],
+    ['GET  /healthz', '探活（无账号时 503）', '无'],
+    ['GET  /ui', '本控制台', '仅本机'],
+    ['*    /admin/*', '本控制台后端', '仅本机'],
+  ];
+
+  function renderApi() {
+    // API Key 卡片：显示脱敏值，卡片点击复制的是完整值（data-copy 里放真值，展示层放掩码）。
+    const masked = KEY ? KEY.slice(0, 4) + '****' + KEY.slice(-4) : '（未启用鉴权）';
+    const keyShown = keyRevealed ? (KEY || masked) : masked;
+
+    const card = (label, copyValue, display, extra) => `
+      <div class="card copyable" data-copy="${esc(copyValue || '')}" data-label="${esc(label)}" title="点击复制">
+        <div class="k">${esc(label)}<span class="copyhint">点击复制</span></div>
+        <div class="v" style="font-size:13px;font-weight:500;word-break:break-all;margin-top:4px">${esc(display)}${extra || ''}</div>
+      </div>`;
+
+    $('apiCards').innerHTML =
+      card('接入地址', BASE_URL, BASE_URL) +
+      card('API Key', KEY || '', keyShown,
+        KEY ? '<button class="minibtn" data-reveal="1">' + (keyRevealed ? '隐藏' : '显示') + '</button>' : '') +
+      card('鉴权头', KEY ? 'Authorization: Bearer ' + KEY : '',
+        KEY ? 'Authorization: Bearer ' + (keyRevealed ? KEY : masked) : '（无需鉴权）') +
+      card('服务名', serviceName(), serviceName());
+
+    $('epRows').innerHTML = ENDPOINTS.map(([ep, use, auth]) =>
+      `<tr><td class="mono">${esc(ep)}</td><td>${esc(use)}</td><td class="dim">${esc(auth)}</td></tr>`
+    ).join('');
+
+    const m = ($('model') && $('model').value) || 'deepseek-v4-flash';
+    $('curlSample').textContent =
+      `curl ${BASE_URL}/chat/completions \\\n` +
+      `  -H "Authorization: Bearer ${KEY || '<API_KEY>'}" \\\n` +
+      `  -H "Content-Type: application/json" \\\n` +
+      `  -d '{"model":"${m}","messages":[{"role":"user","content":"你好"}]}'`;
+  }
+
+  // ---------------------------------------------------------------- 复制
+  function copyText(value, label) {
+    if (!value) { toast('这里没有可复制的内容', true); return; }
+    const done = () => toast(`${label || '内容'} 已复制到剪贴板`);
+    const fail = () => toast('复制失败：浏览器不允许访问剪贴板，请手动选中文本', true);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, fail);
+      return;
+    }
+    // 兜底：非安全上下文（http + 非 localhost）下 clipboard API 不可用
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy') ? done() : fail(); } catch { fail(); }
+    document.body.removeChild(ta);
+  }
+
+  // ---------------------------------------------------------------- 数值格式化
+  //
+  // 这一组函数存在的唯一理由：后端聚合字段有「缺失」和「真的是 0」两种情况，
+  // 而 JS 里的 `undefined + '%'` 会渲染成 "undefined%"、`NaN` 会渲染成 "NaN%"。
+  // 显示层必须自己兜底 —— 宁可显示「—」，也不要让用户看到 undefined/NaN。
+  //
+  // 注意「缺失」的判定用的是**类型**（typeof number && isFinite），而不是真值判断：
+  // 0 是合法数值（例如今日确实一次缓存都没命中），不能被当成缺数据。
+
+  // num 把任意输入转成有限的 number；不是有限数就返回 null（= 缺数据）。
+  function num(v) {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+
+  // numNonNeg 同 num，但把负数也归成「缺数据」。
+  //
+  // 计数类字段（token 数、credit、缓存命中）在语义上不可能为负，
+  // 出现负数只可能来自上游异常或被污染的日志。直接渲染负数会让用户
+  // 以为「消耗是负的/系统在退钱」，比显示占位符更糟。
+  // 注意这里是**显示层**的兜底：后端的 `> 0` 过滤已经在源头挡住，
+  // 但前端不假设后端一定正确（历史上就有旧字段 -1 表示缺失的约定）。
+  function numNonNeg(v) {
+    const n = num(v);
+    return n === null || n < 0 ? null : n;
+  }
+
+  // fmtCount 整数计数：缺失 → null（调用方显示占位符），0 → '0'（真实值）。
+  function fmtCount(v) {
+    const n = numNonNeg(v);
+    return n === null ? null : String(Math.round(n));
+  }
+
+  // fmtCredit 额度/消耗：小数最多 4 位，去掉尾随 0；缺失 → null。
+  // 保留 4 位是因为单次请求的 credit 常在 0.0x 量级，取整会全变成 0。
+  function fmtCredit(v) {
+    const n = numNonNeg(v);
+    if (n === null) return null;
+    if (n === 0) return '0';
+    return String(Number(n.toFixed(4)));
+  }
+
+  // fmtTokens 大数缩写：12.3k / 1.2M。缺失 → null。
+  function fmtTokens(v) {
+    const n = numNonNeg(v);
+    if (n === null) return null;
+    if (n < 1000) return String(Math.round(n));
+    if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+    return (n / 1000000).toFixed(1) + 'M';
+  }
+
+  // fmtRate 比率 → 百分比字符串。入参是 0..1 的小数。
+  // 缺失（含后端因分母为 0 而不输出该字段）→ null，而不是 '0%'。
+  // 越界的比率按缺数据算：>1 或 <0 说明口径已经错了，显示出来只会误导。
+  function fmtRate(v) {
+    const n = num(v);
+    if (n === null || n < 0 || n > 1) return null;
+    return (n * 100).toFixed(1) + '%';
+  }
+
+  // PLACEHOLDER 无数据时统一用「—」，全站一致，也便于用户理解成「没有这个值」。
+  const NODATA = '—';
+
+  function renderStats(s) {
+    if (!s) return;
+    // 窗口文案必须如实说明数据来源：统计改为聚合落盘历史后，
+    // 不再是「进程内窗口」，而落盘不可用时会回落到内存 —— 两种情况不能混为一谈。
+    //
+    // 三个数字都先过 fmtCount 再插值：直接写 `${s.total}` 时，若上游/后端给了
+    // 非数值（对象、数组、垃圾字符串），非空值会被模板原样串成 `[object Object]`
+    // 显示给用户。这里与卡片区用同一套格式化，保证「同一个数在哪都长一样」。
+    //
+    // 判空用 `!totalText || totalText === '0'`：既要挡住 null（无数据），
+    // 也要保留「0 条 = 日志为空」这个既有文案 —— 光判 null 会把
+    // 「（落盘日志为空）」变成「（全部落盘历史，共 0 条）」，是措辞退化。
+    const totalText = fmtCount(s.total);
+    let win;
+    if (s.source === 'file') {
+      // 只报总数，不再回显「从某时刻起」—— 那个起点是文件里最早一条的时间，
+      // 随轮转/清理不断变化，写在这里既不稳定也没人据此判断什么。
+      win = (!totalText || totalText === '0')
+        ? '（落盘日志为空）'
+        : `（全部落盘历史，共 ${totalText} 条）`;
+    } else if (s.source === 'memory') {
+      const capText = fmtCount(s.capacity);
+      win = s.window_from
+        ? `（仅内存缓冲，进程启动至今，上限 ${capText === null ? NODATA : capText} 条）`
+        : '（暂无请求）';
+    } else {
+      win = '（未启用日志）';
+    }
+    if (s.error) win += ' · ' + esc(String(s.error));
+    $('statsWindow').textContent = win;
+
+    // 成功率：total 缺失或为 0 时不给数字（会得到 0/0 → NaN）。
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
+
+    // 新维度：累计消耗 / 缓存命中率 / 推理 token。
+    // 每个都先算出「字符串或 null」，再由 card() 统一决定颜色与占位符。
+    const credit = fmtCredit(s.credit_total);
+    const hitRate = fmtRate(s.cache_hit_rate);
+    const think = fmtTokens(s.think_tokens);
+    // 缓存 token 明细：命中 + 未命中都要有数才显示「x / y」，
+    // 只有一边有数时显示那一边（避免出现 "undefined / 120"）。
+    const ch = fmtTokens(s.cache_hit_tokens);
+    const cm = fmtTokens(s.cache_miss_tokens);
+    // 初值用 null 而不是 NODATA：card() 只在 `v === null` 时把值换成占位符
+    // **并加 dim 类**。直接赋字符串会让它走"有值"分支 —— 显示同样是「—」，
+    // 但少了 dim 样式，与其它"无数据"卡片看起来不一致。
+    let cacheDetail = null;
+    if (ch !== null && cm !== null) cacheDetail = ch + ' / ' + cm;
+    else if (ch !== null) cacheDetail = ch;
+    else if (cm !== null) cacheDetail = cm;
+
+    // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
+    // 颜色判据也用数值（不是真值），否则「命中率 0%」会因为 0 是 falsy 而被涂成 dim。
+    const card = (k, v, cls) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
+
+    const hitRateNum = num(s.cache_hit_rate);
+    const hitRateCls = hitRateNum === null ? 'dim' : hitRateNum >= 0.5 ? 'ok' : hitRateNum >= 0.2 ? 'warn' : 'err';
+    const creditNum = num(s.credit_total);
+    const thinkNum = num(s.think_tokens);
+
+    $('statsCards').innerHTML = [
+      ['总请求', fmtCount(s.total), ''],
+      ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
+      ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
+      ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
+      // 累计消耗：上游 usage 里的 credit 求和。旧格式日志行该字段恒为 0，
+      // 此时显示 0 是**正确**的（确实没有额度数据被记录），所以不特殊处理。
+      ['累计消耗', credit, creditNum ? '' : 'dim'],
+      ['缓存命中率', hitRate, hitRateCls],
+      ['缓存 token', cacheDetail, ch !== null || cm !== null ? '' : 'dim'],
+      ['推理 token', think, thinkNum ? '' : 'dim'],
+      ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
+      ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
+      ['输出 token', fmtTokens(s.tokens), ''],
+      // 缓冲占用只在内存来源时才有意义；落盘来源改写为文件占用，避免两个概念混淆。
+      // 落盘只显示当前占用量：上限是配置里的固定值（默认 8 MiB），放在卡片里
+      // 既不随数据变化、又让人误以为是一根进度条，去掉更清楚。
+      [s.source === 'file' ? '落盘占用' : '缓冲占用',
+        s.source === 'file' && s.file
+          ? fmtBytes(s.file.size)
+          : ((s.held || 0) + '/' + (s.capacity || 0)),
+        'dim'],
+    ].map(([k, v, c]) => card(k, v, c)).join('');
+
+    renderStatsModels(s);
+  }
+
+  // renderStatsModels 模型明细：一行一个模型，同时给出调用次数与成本系数。
+  //
+  // 两个数据源各自可能缺失，必须分别降级：
+  //   - by_model 为空 → 整块隐藏（而不是显示一句「暂无调用」占着版面）；
+  //   - 系数表为空（目录没拉到 / 窗口里没有可归因模型）→ 仍然显示调用次数，
+  //     只是不带「x 倍」后缀，并在提示里说明系数不可用。
+  function renderStatsModels(s) {
+    const wrap = $('statsModelsWrap');
+    if (!wrap) return;
+    // 非数值 / 负数计数一律当 0（不能让 NaN 参与排序，那会让顺序随机；
+    // 负数排序更会让「最多的排最后」，与用户预期相反）。
+    const bm = Object.entries(s.by_model || {})
+      .map(([k, v]) => { const n = numNonNeg(v); return [k, n === null ? 0 : Math.round(n)]; })
+      .sort((a, b) => b[1] - a[1]);
+    if (!bm.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+
+    // 系数索引：后端只回「窗口里调用过且有系数」的模型，这里做成 map 方便按名字取。
+    const mult = {};
+    (Array.isArray(s.model_multipliers) ? s.model_multipliers : []).forEach(m => {
+      if (!m) return;
+      const v = num(m.multiplier);
+      if (v !== null && v > 0) mult[m.model] = v;
+    });
+
+    // 目录状态提示：把「有 / 已过期 / 拿不到」讲清楚，
+    // 因为用户看到一排没有系数的 chip 时唯一能做的就是去点「刷新模型」。
+    const cat = (s.model_catalog && typeof s.model_catalog === 'object') ? s.model_catalog : {};
+    const catModels = fmtCount(cat.models);
+    let hint;
+    if (cat.state === 'ok') {
+      hint = '· 成本系数来自 /v3/config' + (catModels === null ? '' : `（缓存 ${catModels} 个模型）`);
+    } else if (cat.state === 'stale') {
+      hint = '· 成本系数为过期缓存，可信度降低（点「刷新模型」重新拉取）';
+    } else {
+      hint = '· 成本系数不可用（上游 /v3/config 未取到），仅显示调用次数';
+    }
+    $('statsCatalogHint').textContent = hint;
+
+    $('statsModels').innerHTML = bm.map(([name, calls]) => {
+      const m = mult[name];
+      // 系数后缀：有才加；没有就只显示次数，不显示「x0 倍」这种会被读成免费的说法。
+      const suffix = m === undefined
+        ? `<span title="未取到该模型的成本系数">${calls} 次</span>`
+        : `<span title="每次调用消耗 ${m} 倍基础额度">${calls} 次 · x${m}</span>`;
+      return `<span class="chip" data-id="${esc(name)}">${esc(name)}${suffix}</span>`;
+    }).join('');
+  }
+
+  // fmtBytes 人类可读字节数（用于日志保留策略展示）。
+  function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MiB';
+  }
+
+  // ---------------------------------------------------------------- 猫猫旅行（账号池式列表）
+  const TRAVEL_STATE = {
+    idle: '空闲',
+    traveling: '旅行中',
+    arrived: '已到站',
+  };
+
+  const fmtClock = ts => ts ? new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+
+  // 把一个绝对时刻渲染成「剩余多久」，越近越醒目。
+  function fmtCountdown(sec) {
+    if (sec === undefined || sec === null) return '';
+    if (sec <= 0) return '已到站';
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm';
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    return h + 'h' + (m ? m + 'm' : '');
+  }
+
+  function renderTravel(list, autoClaim, autoDepart, checkinHours) {
+    // 自动派送没有独立开关：它跟着签到任务走，所以提示里必须把绑定关系和真实时点讲清楚，
+    // 否则用户会去找一个不存在的「自动派送」开关（这正是提出该需求的原因）。
+    const hrs = (checkinHours || []).map(h => h + ':00').join(' / ');
+    const dep = autoDepart
+      ? `· 自动派送随签到（${hrs || '未设置时点'}）：空闲且当日未派出的猫会自动派出，每日 1 次`
+      : '· 自动派送已停（每日签到被关闭，派猫随之停摆）';
+    $('travelAutoHint').textContent = dep
+      + (autoClaim ? '· 到站自动领奖已开启' : '· 到站自动领奖已关闭（需手动领奖）');
+
+    if (!list || !list.length) {
+      $('travelRows').innerHTML = rowPlaceholder(COLS.travel, '账号池为空');
+      return;
+    }
+    $('travelRows').innerHTML = list.map(t => {
+      const name = esc(t.nickname || (t.uid || '').slice(0, 8));
+      const buddy = t.has_buddy
+        ? `${esc(t.buddy_name || '未命名')}${t.buddy_rarity ? ` <span class="dim">${esc(t.buddy_rarity)}</span>` : ''}`
+        : '<span class="dim">还没有猫</span>';
+
+      let st = '<span class="dim">未知</span>';
+      if (t.error) st = `<span class="pill err" title="${esc(t.error)}">查询失败</span>`;
+      else if (!t.has_buddy) st = '<span class="pill dim">待领养</span>';
+      else if (t.state === 'arrived') st = '<span class="pill warn">已到站</span>';
+      else if (t.state === 'traveling') st = '<span class="pill ok">旅行中</span>';
+      else if (t.state === 'idle') st = '<span class="pill dim">空闲</span>';
+
+      // 「今日已派送」是独立于当前状态的一个事实：猫可能还在路上（traveling）、
+      // 也可能已经回来（idle），两种情况今日都不能再派。因此单独一列显示，
+      // 而不是挤进状态列 —— 否则会把「猫现在在哪」和「今天派过没」混成一个概念。
+      const dispatched = t.daily_limit_reached
+        ? '<span class="pill warn" title="今日的派猫次数已用完，明日恢复">已派送</span>'
+        : '<span class="dim">未派送</span>';
+
+      const arrive = t.arrive_at
+        ? `${fmtClock(t.arrive_at)}<br><span class="dim" style="font-size:11px">${esc(fmtCountdown(t.remaining_sec))}</span>`
+        : '<span class="dim">—</span>';
+      const reward = t.state === 'arrived' && t.reward_credit
+        ? `<span class="pill warn">${esc(t.reward_credit)} 分</span>`
+        : '<span class="dim">—</span>';
+
+      const U = t.uid;
+      const canDepart = !t.error && t.has_buddy && t.state === 'idle' && !t.daily_limit_reached;
+      const canClaim = !t.error && t.state === 'arrived';
+      const act = [
+        `<button data-tact="depart" data-uid="${esc(U)}"${canDepart ? '' : ' disabled'} title="${canDepart ? '派猫出门' : '当前不可派出'}">派猫</button>`,
+        `<button data-tact="claim"  data-uid="${esc(U)}"${canClaim ? '' : ' disabled'} title="${canClaim ? '领取到站奖励' : '猫未到站'}">领奖</button>`,
+        `<button data-tact="detail" data-uid="${esc(U)}" title="查看完整状态">详情</button>`,
+      ].join(' ');
+
+      return `<tr>
+        <td>${name}</td>
+        <td>${buddy}</td>
+        <td>${st}</td>
+        <td>${dispatched}</td>
+        <td class="dim">${esc(fmtClock(t.depart_at))}</td>
+        <td>${arrive}</td>
+        <td>${reward}</td>
+        <td style="white-space:nowrap">${act}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function loadTravel(refresh) {
+    let r;
+    try {
+      r = await admin('/admin/travel' + (refresh ? '?refresh=1' : ''));
+    } catch (e) {
+      $('travelRows').innerHTML = rowPlaceholder(COLS.travel, e.message, 'err');
+      return false;
+    }
+    renderTravel(r.accounts, r.auto_claim, r.auto_depart, r.checkin_hours);
+    return true;
+  }
+
+  async function travelAct(uid, act, btn) {
+    // 「详情」是只读的，不刷新页面，也就不需要 busy 编排。
+    if (act === 'detail') {
+      try {
+        const r = await admin(`/admin/travel/status?uid=${encodeURIComponent(uid)}`);
+        const t = r.travel || {};
+        const lines = [
+          `猫名：${r.buddy?.name || '（无猫）'}`,
+          r.buddy?.rarity ? `稀有度：${r.buddy.rarity}` : '',
+          r.buddy?.personality ? `性格：${r.buddy.personality}` : '',
+          `状态：${TRAVEL_STATE[t.state] || t.state || '未知'}`,
+          t.location?.name ? `目的地：${t.location.name}` : '',
+          t.duration_hours ? `行程：${t.duration_hours} 小时` : '',
+          t.depart_at ? `出发：${new Date(t.depart_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : '',
+          t.arrive_at ? `到站：${new Date(t.arrive_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : '',
+          r.remaining_sec !== undefined ? `距离到站：${fmtCountdown(r.remaining_sec)}` : '',
+          r.clock_skew_sec ? `本机与上游时钟偏差：${r.clock_skew_sec}s（已自动校正）` : '',
+          t.reward_credit ? `到站可领：${t.reward_credit} 积分` : '',
+          `今日已派出：${t.daily_limit_reached ? '是' : '否'}`,
+          t.record_id ? `在途记录：${t.record_id}` : '',
+          r.travel_error ? `错误：${r.travel_error}` : '',
+        ].filter(Boolean);
+        alert(lines.join('\n'));
+      } catch (e) {
+        toast('查询旅行状态失败：' + e.message, true);
+      }
+      return;
+    }
+
+    const label = act === 'depart' ? '派猫' : '领奖';
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        const r = await admin('/admin/travel/' + act, { method: 'POST', body: JSON.stringify({ uid }) });
+        toast(act === 'depart' ? `已派猫出门${r.arrive_at ? '，预计 ' + new Date(r.arrive_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) + ' 到站' : ''}` : `已领奖 ${r.credits || 0} 积分`);
+        wrote = true;
+      } catch (e) {
+        toast(label + '：' + e.message, true);
+      }
+      // 旅行仍走强制回源：它的写操作（派猫/领奖）在后端**没有**就地刷新快照，
+      // 读缓存会拿到旧状态。好在它比成长轻得多（实测 1.3s vs 7.2s），
+      // 且 busyRun 已经给了可见进度，用户不会以为没反应。
+      // 若要一并优化，把 scheduler 里 travel 的三个写操作也做成 refreshOwnSnapshot 即可
+      // —— 见 tasks/plan.md 的待决问题 4。
+      await Promise.all([loadTravel(true), refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
+  }
+
+  async function travelAll(act) {
+    try {
+      const r = await admin('/admin/travel/' + act, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${act === 'depart' ? '派猫' : '领奖'}已启动，后台执行中…`); watchTask(); }
+    } catch (e) { toast('操作失败：' + e.message, true); }
+  }
+
+  // 模型倍率索引：id → 成本倍率（来自 GET /admin/models/preview）。
+  //
+  // 为什么要单独取一次：/v1/models 是**对外**的 OpenAI 兼容端点，
+  // 往里塞自定义字段会污染公共契约；倍率只对本管理界面有意义，走 admin 面。
+  // 取不到时索引为空 —— 模型列表照常显示，只是没有倍率标记（不能整块失败）。
+  let modelMultipliers = {};
+
+  async function loadModelMultipliers() {
+    try {
+      const r = await admin('/admin/models/preview');
+      const next = {};
+      for (const m of (r && r.models) || []) {
+        // 保留 0：x0.00 是「免费」这个有意义的事实，不能用真值判断把它丢掉。
+        if (m && m.model) next[m.model] = Number(m.multiplier) || 0;
+      }
+      modelMultipliers = next;
+    } catch {
+      modelMultipliers = {};   // 拿不到就退化为"不显示倍率"
+    }
+  }
+
+  // 把倍率数值格式化成展示文本；非法值返回 null（调用方据此不加标记）。
+  //
+  // 为什么单独抽出来：HTML 版与 <option> 版要显示同一个数，
+  // 各自实现一遍必然漂移（曾经就是两处各写各的格式化）。
+  //
+  // 拒绝非有限值：NaN/Infinity 经 toFixed 会串成 "NaN"/"Infinity" 直接显示给用户。
+  // 上游理论上不会给，但倍率是外部数据，展示层不该假设它干净。
+  function multText(v) {
+    if (!Number.isFinite(v) || v < 0) return null;
+    // 0 → "0"；0.51 → "0.51"；2 → "2"。两位小数足够（上游最细到 x0.01）。
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
+  }
+
+  // 倍率标记：有系数才加，且 0 也要显示（免费是有效信息）。
+  // 系数未知（目录里没这个模型）时不加后缀，避免用「x0」把"不知道"说成"免费"。
+  function multTag(id) {
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
+    const txt = multText(modelMultipliers[id]);
+    if (txt === null) return '';   // 脏数据 → 当作没有系数，而不是显示 xNaN
+    const v = modelMultipliers[id];
+    // 免费（0）与高倍率（>=1）各给一个样式类，便于一眼扫出成本档位。
+    // 注意：不发散到"低/中/高"多档 —— 倍率分布随上游调整，硬编码分档很快会失真。
+    const cls = v === 0 ? ' free' : (v >= 1 ? ' hi' : '');
+    return `<span class="mult${cls}" title="每次调用消耗 ${txt} 倍基础额度">x${esc(txt)}</span>`;
+  }
+
+  function renderModels(list) {
+    models = list || [];
+    $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
+    if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
+    // 只显示模型名 + 倍率，不再显示 context_length ——
+    // ctx 数字对"选哪个模型"没有帮助，反而把名字挤得难读；倍率才是决策依据。
+    $('models').innerHTML = models.map(m =>
+      `<span class="chip" data-id="${esc(m.id)}">${esc(m.id)}${multTag(m.id)}</span>`).join('');
+    const sel = $('model'), keep = sel.value;
+    sel.innerHTML = models.map(m =>
+      `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+    sel.value = models.some(m => m.id === keep) ? keep : (models.find(m => m.id === 'auto') || models[0]).id;
+  }
+
+  // <option> 只能放纯文本，不能放 HTML 标签 —— 倍率用括号包起来。
+  // 与 multTag 共用 multText，保证同一个数在两处长得一样。
+  function multTagPlain(id) {
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
+    const txt = multText(modelMultipliers[id]);
+    return txt === null ? '' : ` (x${txt})`;
+  }
+
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    $('auto').checked = false;
+  }
+
+  // ------------------------------------------------------- 本地登录（客户端账号切换）
+  // 本面板是唯一会改写客户端本机状态的入口，所以每个动作都要二次确认；
+  // 后端也会再验一次 confirm=true，前端弹窗不是唯一防线。
+  let clientStatus = null;
+
+  // clientLoginHTML 返回明细节头里的本机登录控制条。
+  // 参数 uid 是当前明细正在展示的账号 —— 切换目标就是它，
+  // 保证「正在看的账号」和「切过去的账号」永远是同一个。
+  function clientLoginHTML(uid) {
+    if (!clientStatus) {
+      return '<span class="dim" style="font-size:11px">本机登录：读取中…</span>';
+    }
+    if (!clientStatus.enabled) {
+      return `<span class="dim" style="font-size:11px" title="${esc(clientStatus.error || '')}">本机登录：不可用</span>`;
+    }
+    const cur = clientStatus.current;
+    const curTxt = cur
+      ? `本机登录：${esc(cur.nickname || cur.uid)}`
+      : '本机登录：未登录';
+    // 客户端在跑时改盘会被它按内存会话原地覆盖，所以按钮置灰并说明原因，
+    // 而不是让用户点了再收到一句拒绝。
+    const running = !!clientStatus.client_running;
+    const runTip = 'WorkBuddy 客户端正在运行，它会把内存里的旧登录态写回磁盘、覆盖本次切换。请先完全退出客户端（含托盘图标）。';
+    const cand = (clientStatus.candidates || []).find(c => c.uid === uid);
+    let act;
+    if (!cand) {
+      act = '<span class="dim" style="font-size:11px">无可用凭证</span>';
+    } else if (!cand.valid) {
+      act = '<span class="pill err">凭证已过期</span>';
+    } else if (cand.current) {
+      act = '<span class="pill ok">已是本机登录</span>';
+    } else {
+      const nm = cand.nickname || cand.uid;
+      act = running
+        ? `<button disabled title="${esc(runTip)}">切换本机登录</button>`
+        : `<button data-clswitch="${esc(uid)}" data-clname="${esc(nm)}" `
+          + `title="把本机 WorkBuddy 客户端切换到 ${esc(nm)}（改写客户端登录态，需重启客户端）">切换本机登录</button>`;
+    }
+    const rb = clientStatus.has_backup
+      ? (running
+        ? `<button disabled title="${esc(runTip)}">回滚</button>`
+        : `<button data-clrestore="1" title="回滚到 ${esc(clientStatus.backup_nick || clientStatus.backup_uid)}`
+          + `（备份于 ${esc(clientStatus.backup_at || '未知时间')}）">回滚</button>`)
+      : '';
+    const runPill = running
+      ? ` <span class="pill warn" title="${esc(runTip)}">客户端运行中</span>`
+      : '';
+    return `<span class="dim" style="font-size:11px">${curTxt}</span>${runPill}${act}${rb}`;
+  }
+
+  // 只取数据不渲染：真正的呈现发生在 renderGrowthGroups 的节头里。
+  async function loadClientLogin() {
+    try {
+      clientStatus = await admin('/admin/client-login');
+    } catch (e) {
+      // 客户端没装或未启用时接口会失败，不该连带影响成长计划本身，
+      // 只把控制条降级成「不可用」。
+      clientStatus = { enabled: false, error: e.message };
+    }
+    // 本机登录与成长计划是两条独立的加载时序（前者在 refresh 里、后者可能已先渲染过），
+    // 拿不到这里补一次渲染，节头就会一直停在「读取中…」直到下一次 30s 轮询。
+    // 快照还没到时不要抢渲染，免得把「加载中」覆盖成「账号池为空」。
+    if (growthSnaps.length) renderGrowthGroups();
+    return clientStatus;
+  }
+
+  async function clientSwitch(uid, name) {
+    if (!confirm(`把本机 WorkBuddy 客户端切换到「${name}」？\n\n` +
+      `· 会改写客户端凭证文件与账号指针\n` +
+      `· 需要完全退出并重新启动客户端才生效\n` +
+      `· 切换前会自动备份当前登录态，可随时回滚\n\n确认切换到 ${name}？`)) return;
+    try {
+      const r = await admin('/admin/client-login/switch', {
+        method: 'POST', body: JSON.stringify({ uid, confirm: true }),
+      });
+      toast(r.message || '已切换');
+      await loadClientLogin();
+      renderGrowthGroups();
+    } catch (e) { toast('切换失败：' + e.message, true); }
+  }
+
+  async function clientRestore() {
+    const st = clientStatus || {};
+    if (!confirm(`回滚本机客户端登录态到「${st.backup_nick || st.backup_uid || '上一次'}」？\n\n` +
+      `· 会覆盖当前客户端凭证\n· 需要完全退出并重新启动客户端才生效\n\n确认回滚？`)) return;
+    try {
+      const r = await admin('/admin/client-login/restore', {
+        method: 'POST', body: JSON.stringify({ confirm: true }),
+      });
+      toast(r.message || '已回滚');
+      await loadClientLogin();
+      renderGrowthGroups();
+    } catch (e) { toast('回滚失败：' + e.message, true); }
+  }
+
+  async function refresh() {
+    if (!KEY && $('key').value.trim()) KEY = $('key').value.trim();
+    let h, s;
+    try {
+      h = await (await fetch('/healthz')).json();       // healthz 恒无鉴权
+      s = await api('/status');
+    } catch (e) {
+      if (e.message.startsWith('HTTP 401')) {
+        // 401 会被 5s 轮询无限复现，先把轮询停掉再提示，别刷控制台。
+        stopAuto();
+        setDot('bad', '鉴权失败 · 需要 API Key');
+        $('cards').innerHTML =
+          '<div class="card" style="grid-column:1/-1">' +
+          '<div class="k">401 Unauthorized</div>' +
+          '<div class="v" style="font-size:13px;font-weight:400">' +
+          '本机打开 <code>/ui</code> 时网关会自动注入 Key，出现此提示说明要么是从非本机地址访问，' +
+          '要么网关重启换了新 Key。在顶部填入 API Key 后点「连接」即可（已暂停自动刷新）。' +
+          '</div></div>';
+        $('accts').innerHTML = accountPlaceholder('未授权 —— 已暂停自动刷新', 'err');
+        $('models').innerHTML = '<span class="dim">未授权</span>';
+        refresh._last = null;
+        return false;
+      }
+      setDot('bad', '请求失败');
+      $('accts').innerHTML = accountPlaceholder(e.message, 'err');
+      refresh._last = null;
+      return false;
+    }
+    setDot(h.healthy > 0 ? 'ok' : 'bad',
+      (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
+    renderCards(h, s);
+    // 上游契约要**最先**取：renderAccounts 依赖它把账号归到上游，
+    // 导航分组也依赖它。单独 try —— 拿不到 manifest 不该让账号表显示不出来
+    //（降级为"没有上游面板"，通用面板照常）。
+    //
+    // 取到之后必须重建上游面板与导航：面板是**按能力位动态生成**的，
+    // 而能力位只有 manifest 到了才知道。这一步也是"加新上游前端 0 改动"
+    // 真正生效的地方 —— 新上游的能力位一到，这里自动为它建出面板。
+    const manifestOK = await loadManifest();
+    if (manifestOK) {
+      syncProviderPanels();
+      buildNav();
+    }
+    // 顶栏状态条：复用本次已拿到的 h/s 与 manifest，不额外发请求。
+    // 放在 manifest 加载之后，这样"上游 N"才是本次的真实值。
+    renderTopStats(h, s);
+    // 任务调度面板同样复用 manifest.jobs，不额外发请求。
+    renderJobs();
+    // 服务名同样来自 manifest（B8）：清掉前端硬编码后，
+    // 改名只需改后端配置，界面自动跟随。
+    renderIdentity();
+    // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
+    try { renderAccounts((await admin('/admin/accounts')).accounts); }
+    catch { renderAccounts(s.accounts); }
+    // 倍率要先取：renderModels 依赖它给每个模型加标记。
+    // 单独 await 且自带 try —— 倍率拿不到不该让模型列表也显示不出来。
+    await loadModelMultipliers();
+    try { renderModels((await api('/v1/models')).data); }
+    catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    loadSchedule();
+    try { renderStats(await admin('/admin/stats')); } catch { /* 统计非关键 */ }
+    // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
+    try { await loadClientLogin(); } catch { /* 非关键 */ }
+    renderApi();
+    // 记下摘要供调用方（顶部「立即刷新」）提示用；轮询调用方不看这个字段。
+    refresh._last = { healthy: h.healthy || 0, total: h.total || 0 };
+    return true;
+  }
+
+  async function send() {
+    const btn = $('send'), out = $('out');
+    const body = {
+      model: $('model').value,
+      stream: $('stream').checked,
+      messages: [{ role: 'user', content: $('prompt').value }],
+    };
+    btn.disabled = true; out.classList.remove('err');
+    out.textContent = '请求中…';
+    const t0 = performance.now();
+    try {
+      if (!body.stream) {
+        const r = await api('/v1/chat/completions', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const ms = Math.round(performance.now() - t0);
+        out.textContent = r.choices[0].message.content +
+          `\n\n— ${r.model} · ${ms}ms · prompt ${r.usage?.prompt_tokens} / completion ${r.usage?.completion_tokens}`;
+      } else {
+        const r = await fetch('/v1/chat/completions', {
+          method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, hdr()),
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+        const rd = r.body.getReader(), dec = new TextDecoder();
+        let buf = '', txt = '', usage = null, model = '';
+        out.textContent = '';
+        for (;;) {
+          const { value, done } = await rd.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split('\n'); buf = lines.pop();
+          for (const ln of lines) {
+            if (!ln.startsWith('data:')) continue;
+            const p = ln.slice(5).trim();
+            if (p === '[DONE]') continue;
+            let j; try { j = JSON.parse(p); } catch { continue; }
+            const d = j.choices?.[0]?.delta?.content;
+            if (d) { txt += d; out.textContent = txt; out.scrollTop = out.scrollHeight; }
+            if (j.model) model = j.model;
+            if (j.usage) usage = j.usage;
+          }
+        }
+        const ms = Math.round(performance.now() - t0);
+        out.textContent = txt + `\n\n— ${model} · ${ms}ms · 流式` +
+          (usage ? ` · prompt ${usage.prompt_tokens} / completion ${usage.completion_tokens}` : '');
+      }
+    } catch (e) {
+      out.classList.add('err');
+      out.textContent = '失败：' + e.message;
+    } finally { btn.disabled = false; }
+  }
+
+  function boot() {
+    // 主题最先初始化：它决定第一帧的配色。
+    initTheme();
+
+    // 本机访问：服务端已注入 Key，直接跑起来。顶栏不显示任何 API 信息，
+    // 查看/复制统一在「仪表盘 → API 接入信息」里完成。
+    if (INJECTED) {
+      KEY = INJECTED;
+      $('auto').checked = true;
+      if (timer) clearInterval(timer);
+      timer = setInterval(refresh, 5000);
+      refresh();
+    } else {
+      $('keyFallback').style.display = 'inline-flex';
+      const saved = localStorage.getItem(LS);
+      if (saved) { $('key').value = saved; KEY = saved; }
+      $('conn').onclick = () => {
+        KEY = $('key').value.trim();
+        if ($('remember').checked) localStorage.setItem(LS, KEY); else localStorage.removeItem(LS);
+        $('auto').checked = true;
+        if (timer) clearInterval(timer);
+        timer = setInterval(refresh, 5000);
+        refresh();
+      };
+      $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('conn').click(); });
+    }
+
+    // 点击任意可复制块即复制；块内的「显示/隐藏」按钮不触发复制。
+    $('apiCards').addEventListener('click', ev => {
+      const rev = ev.target.closest('[data-reveal]');
+      if (rev) {
+        ev.stopPropagation();
+        keyRevealed = !keyRevealed;
+        renderApi();
+        return;
+      }
+      const c = ev.target.closest('[data-copy]');
+      if (c) copyText(c.dataset.copy, c.dataset.label);
+    });
+    $('curlSample').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
+    $('btnCopyCurl').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
+
+    // 「立即刷新」：手动点要有明确回执（自动轮询不提示，否则每 5 秒弹一条）。
+    // busyRun 只看 fn 的返回值，这里把刷新摘要包进 toast 文案里一起给出。
+    $('refresh').onclick = () => busyRun($('refresh'), async () => {
+      const ok = await refresh();
+      const m = refresh._last;
+      if (ok && m) toast(`刷新完成：健康 ${m.healthy}/${m.total} 个账号`);
+      return ok === true ? undefined : false;   // 成功时上面已自行提示，避免又追一条「立即刷新完成」
+    }, { label: '立即刷新' });
+    $('send').onclick = send;
+    $('prompt').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    $('models').addEventListener('click', e => {
+      const c = e.target.closest('.chip'); if (c) $('model').value = c.dataset.id;
+    });
+    $('auto').onchange = () => {
+      if (timer) { clearInterval(timer); timer = null; }
+      if ($('auto').checked) timer = setInterval(refresh, 5000);
+    };
+    // 注意：不在这里无条件 setInterval —— 上面的 INJECTED 分支已经拉开轮询，
+    // 这里再来一次会形成两个并行定时器（重复请求 + 清不干净）。
+
+    // 账号操作：事件委托，避免每行都绑 handler。
+    // 把按钮自身传进去，让它能在「写 + 刷新」期间禁用并显示进行中文案。
+    $('accts').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-act]');
+      if (b) act(b.dataset.uid, b.dataset.act, b);
+    });
+
+    $('btnAdd').onclick = addAccount;
+    $('btnLoginClose').onclick = closeModal;
+    $('modal').addEventListener('click', ev => { if (ev.target === $('modal')) closeModal(); });
+    $('btnReload').onclick = () => busyRun($('btnReload'), async () => {
+      const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
+      toast(`已重载 auths：扫描 ${r.scanned} 个文件，池内账号 ${r.before} 个变为 ${r.after} 个`);
+      await refresh();     // 必须 await：否则 busy 态先于数据更新结束，界面看起来"没变"
+      return undefined;    // 上面已给出更具体的回执
+    }, { label: '重载 auths', busyText: '重载中…' });
+    $('btnAllCheckin').onclick = () => startAll('checkin');
+    $('btnAllCredits').onclick = () => startAll('credits');
+    $('btnAllKeepalive').onclick = () => startAll('keepalive');
+
+    // 猫猫旅行：只保留「动作」按钮（派猫/领奖/刷新），开关类一律归「设置」
+    $('travelRows').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-tact]');
+      if (b && !b.disabled) travelAct(b.dataset.uid, b.dataset.tact, b);
+    });
+    $('btnTravelRefresh').onclick = () => busyRun($('btnTravelRefresh'), () => loadTravel(true), { label: '猫猫旅行' });
+    $('btnTravelDepartAll').onclick = () => {
+      if (confirm('对全部可用账号派猫？\n（今日已派出的会自动跳过，不会重复派）')) travelAll('depart');
+    };
+    $('btnTravelClaimAll').onclick = () => travelAll('claim');
+
+    // 成长计划：行内动作走事件委托（明细区里的按钮在下面另有一处委托）
+    $('growthRows').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gact]');
+      if (b && !b.disabled) growthAct(b.dataset.uid, b.dataset.gact, '', b);
+    });
+    // 账号下拉框：只切本地显示，不重新拉数据（快照里已含全部账号的任务）。
+    $('growthAccount').onchange = () => {
+      growthUID = $('growthAccount').value;
+      renderGrowthGroups();
+    };
+    // 成长计划「刷新」走全量强制回源，3 个账号实测 7.2s —— 正是最需要进度提示的那个。
+    $('btnGrowthRefresh').onclick = () => busyRun($('btnGrowthRefresh'), () => loadGrowth(true), { label: '成长计划' });
+    // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
+    $('growthViews').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gview]');
+      if (!b) return;
+      growthView = b.dataset.gview;
+      growthViewPicked = true; // 用户已表态，之后刷新不再自动抢视图
+      syncGrowthViewButtons();
+      renderGrowthGroups();
+    });
+    $('btnGrowthClaimAll').onclick = () => growthAll('claim');
+    $('btnGrowthAcceptAll').onclick = () => growthAll('accept');
+    $('btnGrowthRedeemAll').onclick = () => growthAll('redeem');
+    $('btnGrowthMakeupAll').onclick = () => growthAll('makeup');
+    $('btnGrowthOpenAll').onclick = () => growthAll('open');
+    $('btnGrowthDrawAll').onclick = () => growthAll('draw');
+
+    // 本机登录的按钮长在明细节头里（随 renderGrowthGroups 重建），
+    // 所以走 growthGroups 上的事件委托，而不是给按钮本身挂 onclick。
+    $('growthGroups').addEventListener('click', ev => {
+      const sw = ev.target.closest('button[data-clswitch]');
+      if (sw && !sw.disabled) { clientSwitch(sw.dataset.clswitch, sw.dataset.clname); return; }
+      if (ev.target.closest('button[data-clrestore]')) { clientRestore(); return; }
+      // 行内「领取 N 分」：领这一个任务的奖励
+      const rw = ev.target.closest('button[data-gclaimreward]');
+      if (rw) { growthAct(rw.dataset.uid, 'claim', rw.dataset.gclaimreward, rw); return; }
+      // 行内「接单」：把未接单的任务接进列表
+      const ac = ev.target.closest('button[data-gaccept]');
+      if (ac) { growthAct(ac.dataset.uid, 'accept', ac.dataset.gaccept, ac); return; }
+      // 节头「全部领取」：领这个账号所有可领任务（不传 task_code 即全部）
+      const all = ev.target.closest('button[data-gclaimall]');
+      if (all) { growthAct(all.dataset.gclaimall, 'claim', '', all); return; }
+    });
+
+    $('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
+      // 刷新按钮同时清掉两张缓存：模型列表（/v1/models）和倍率目录（/v3/config）。
+      // 只清前者会让倍率停留在旧值，看起来像"刷新没生效"。
+      await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
+      await loadModelMultipliers();
+      renderModels((await api('/v1/models')).data);
+      return true;
+    }, { label: '模型目录' });
+
+    // 注意：histKind 的 onchange 在下面统一绑定（需要带页码重置），此处不再重复绑定。
+
+    // 导航 + 设置 + 日志视图
+    $('nav').addEventListener('click', ev => {
+      // 组头：折叠/展开（不切面板）
+      const hd = ev.target.closest('button.navgrouphd[data-pid]');
+      if (hd) { toggleNavGroup(hd.dataset.pid); return; }
+      const b = ev.target.closest('button[data-nav]');
+      if (b) showPanel(Number(b.dataset.nav));
+    });
+    $('btnSettingsSave').onclick = saveSettings;
+    $('btnSettingsReload').onclick = () => { loadSettings(); toast('已放弃未保存的修改'); };
+    $('content').addEventListener('input', () => markDirty(true));
+    $('content').addEventListener('change', () => markDirty(true));
+    // 通用上游面板的写操作委托：在 #content 上**只绑一次**（评审 F2）。
+    // 放在 boot 里而不是 loadGenericList 里 —— 后者每 5 秒都会跑一次，
+    // 在里面绑就退回了原来那个"监听器随刷新增长"的 bug。
+    installGenericActions();
+    // 切换任务类型筛选属于「主动改变查询范围」→ 必须回第 1 页。
+    // 否则用户在第 3 页切到只有 1 页的类型时，会停在一个不存在的页上。
+    $('histKind').onchange = () => { histPage.offset = 0; loadHistory(); };
+
+    // 清屏：先清本地高亮，再重新拉一次当前页。
+    // 不再需要重置增量游标（实时视图已移除，落盘视图每次都是整页拉取）。
+    $('btnLogClear').onclick = () => {
+      logEntries = [];
+      $('logrows').innerHTML = logPlaceholder('已清屏（正在重新读取落盘日志…）');
+      loadLogHistory();
+    };
+
+    // 请求日志按 10s 刷新落盘视图（屏幕上始终是最新落盘记录）；
+    // 任务历史 10s。
+    setInterval(loadLogHistory, 10000);
+    setInterval(loadHistory, 10000);
+    loadLogHistory();
+    loadHistory();
+    loadSettings();   // 设置页数据先备好，顺便拿到落盘日志概况（顶部日志面板要显示）
+
+    // 导航最后构建：此时所有 section 都已在 DOM 里。
+    //
+    // 但**上游面板要等 manifest 到达才能生成** —— 所以导航实际由
+    // refresh() → loadManifest() → buildProviderPanels() → buildNav()
+    // 这条链触发。这里先建一次，让通用面板立即可用（不依赖网络）。
+    buildNav();
+
+    // 页面加载时若已有全量任务在跑（比如刚在别处点过），接着显示进度
+    admin('/admin/task').then(t => { if (t && t.running) watchTask(); }).catch(() => {});
+
+    refresh();
+  }
+
+  boot();
+
+  // ---------------------------------------------------------------- 测试钩子
+  //
+  // # 为什么需要它
+  //
+  // 整页包在 IIFE 里，浏览器测试无法触达 MANIFEST / applyManifest 等内部状态。
+  // 而没有它们就没法验证**最关键的那条判据**：
+  // "给一个前端从未见过的上游，导航会不会自动多一组"。
+  //
+  // 只暴露只读快照与两个纯函数（applyManifest / syncProviderPanels），
+  // 不暴露任何写操作或凭据 —— 它们本来就在页面里可达，
+  // 这里的意义是让测试能驱动，不是放权。
+  window.__wb2api__ = {
+    manifest: () => JSON.parse(JSON.stringify(MANIFEST)),
+    applyManifest: applyManifest,
+    syncProviderPanels: syncProviderPanels,
+    buildNav: buildNav,
+    upstreamGroups: upstreamGroups,
+    panelCapsOf: panelCapsOf,
+    routesFor: routesFor,
+    capTitle: capTitle,
+    providersWithCap: providersWithCap,
+    hasAnyPanel: hasAnyPanel,
+    CORE_CAP: CORE_CAP,
+    ACCT_COLS: ACCT_COLS,
+    COLS: COLS,
+    rowPlaceholder: rowPlaceholder,
+    TableState: TableState,
+    accountPlaceholder: accountPlaceholder,
+    renderTopStats: renderTopStats,
+    renderJobs: renderJobs,
+    applyTheme: applyTheme,
+    setThemePref: setThemePref,
+    resolveTheme: resolveTheme,
+  };
+})();
+
+  document.title = 'SCRIPT_OK';
+} catch (e) {
+  document.title = 'SCRIPT_ERR:' + (e && e.message ? e.message : String(e));
+}
+</script>
+</body></html>
