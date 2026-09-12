@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>WorkBuddy2API · 网关控制台</title>
+<title>网关控制台</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
 <script>window.__WB2API_KEY__ = "__WB2API_KEY__";</script>
@@ -292,7 +292,7 @@
 </div>
 <header>
   <img src="/favicon.svg" alt="" width="26" height="26" style="border-radius:7px;display:block">
-  <h1>WorkBuddy2API <small>本地网关控制台</small></h1>
+  <h1 id="appTitle">网关 <small>本地控制台</small></h1>
   <span id="hdot" class="dot"></span>
   <span id="htxt" class="dim" style="font-size:12px">未连接</span>
   <div class="spacer"></div>
@@ -797,6 +797,39 @@
     parts.push(`<span class="ts">刷新 <b>${hhmmss}</b></span>`);
 
     el.innerHTML = parts.join('');
+  }
+
+  // serviceName 本实例的身份标识。
+  //
+  // # 为什么从 manifest 读（B8）
+  //
+  // 原先前端在 3 处硬编码了 'workbuddy2api'（标题、顶栏 h1、API 面板卡片）。
+  // 后端改名或一个部署里跑两个实例时，界面显示的名字与实际不符 ——
+  // 而"这个页面管的是哪一个实例"恰恰是靠名字区分的。
+  //
+  // 现在只从 manifest.service 读，拿不到时显示 'gateway'（中性词），
+  // 让"没拿到"与"拿到了某个具体名字"在观感上不同。
+  function serviceName() {
+    return MANIFEST.service || 'gateway';
+  }
+
+  // renderIdentity 把服务名写进页面标题与主标题。
+  //
+  // 单独抽出来是因为它有 3 个落点（<title> / h1 / API 卡片），
+  // 散落各写就会漏掉一处 —— B8 当初正是漏掉了全部 3 处。
+  function renderIdentity() {
+    const name = serviceName();
+    document.title = name + ' · 网关控制台';
+    const h1 = $('appTitle');
+    if (h1) {
+      // h1 的第一个文本节点是名字本身（<small> 是副标题），
+      // 所以只替换节点而不是整个 innerHTML，免得把副标题也冲掉。
+      if (h1.childNodes.length && h1.childNodes[0].nodeType === 3) {
+        h1.childNodes[0].textContent = name + ' ';
+      } else {
+        h1.insertBefore(document.createTextNode(name + ' '), h1.firstChild);
+      }
+    }
   }
 
   // providerOf 一个账号属于哪个上游。
@@ -2780,7 +2813,7 @@
         KEY ? '<button class="minibtn" data-reveal="1">' + (keyRevealed ? '隐藏' : '显示') + '</button>' : '') +
       card('鉴权头', KEY ? 'Authorization: Bearer ' + KEY : '',
         KEY ? 'Authorization: Bearer ' + (keyRevealed ? KEY : masked) : '（无需鉴权）') +
-      card('服务名', 'workbuddy2api', 'workbuddy2api');
+      card('服务名', serviceName(), serviceName());
 
     $('epRows').innerHTML = ENDPOINTS.map(([ep, use, auth]) =>
       `<tr><td class="mono">${esc(ep)}</td><td>${esc(use)}</td><td class="dim">${esc(auth)}</td></tr>`
@@ -3392,6 +3425,9 @@
     // 顶栏状态条：复用本次已拿到的 h/s 与 manifest，不额外发请求。
     // 放在 manifest 加载之后，这样"上游 N"才是本次的真实值。
     renderTopStats(h, s);
+    // 服务名同样来自 manifest（B8）：清掉前端硬编码后，
+    // 改名只需改后端配置，界面自动跟随。
+    renderIdentity();
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
     try { renderAccounts((await admin('/admin/accounts')).accounts); }
     catch { renderAccounts(s.accounts); }

@@ -362,6 +362,9 @@ func main() {
 		SoftCooldown:      cfg.SoftRateDur,
 		ModelCatalog:      server.ModelCatalog,
 		ModelCatalogState: server.ModelCatalogState,
+		// 实例身份：配置里给了就用配置的，否则用编译期默认值。
+		// 控制台顶栏与 /healthz 的 service 字段共用它 —— 前端不再硬编码服务名。
+		ServiceName: cfg.ServiceName,
 		// 额度恢复策略由上游回答：workbuddy 给"次日 04:00"（等签到恢复），
 		// 核心不再内置任何具体时点。缺失时 handler 回落到 now+1h。
 		NextResetAt: wb.NextResetAt,
@@ -405,8 +408,10 @@ func main() {
 			// 控制台渲染契约里的服务名，与 /healthz 的 service 字段同源。
 			//
 			// admin 不得 import server（server 依赖 admin，反向会成环），
-			// 所以这个常量必须在这里显式传进去。
-			ServiceName: server.ServiceName,
+			// 所以这个值必须在这里显式传进去。
+			// 用 cfg.ServiceName（可为空）→ server 内部再回落默认常量，
+			// 保证"配置没写"与"配置写了空串"行为一致。
+			ServiceName: firstNonEmpty(cfg.ServiceName, server.ServiceName),
 			// 上游设置项必须以**适配器**形式显式注入，不能靠从 Registry 里
 			// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
 			// （各自声明，互不 import），方法集精确匹配会静默失败
