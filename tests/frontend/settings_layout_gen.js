@@ -1,7 +1,7 @@
 
 const fs = require('fs');
-const BASELINE = "D:\\project_GIT\\workbuddy2api实验版本/tests/frontend/settings-baseline-ids.txt";
-const WEBUI = "D:\\project_GIT\\workbuddy2api实验版本/internal/server/webui.html";
+const BASELINE = (process.env.WB2API_REPO || __dirname + '/../..') + '/tests/frontend/settings-baseline-ids.txt';
+const WEBUI = (process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html';
 const html = fs.readFileSync(WEBUI, 'utf8');
 
 // 只截设置面板那一段：从 <h2>设置 到这个 section 的结束标签。
