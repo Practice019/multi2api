@@ -2286,6 +2286,13 @@ try {
   const logPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'logPager', onGo: () => loadLogHistory() };
 
   async function loadLogHistory() {
+    // 清屏挂起期间不刷新落盘视图。
+    //
+    // 必须在这里挡，而不是只把 setInterval 停掉：翻页、切面板、恢复显示
+    // 都会直接调用本函数。只挡定时器的话，用户翻一页就把"已清屏"覆盖掉了。
+    // 恢复由「恢复显示」按钮负责（它先把标志置回 false 再调用本函数）。
+    if (logViewSuspended) return;
+
     // 每次拉取前先给一句「正在读取」，避免翻页时旧内容一直挂着让人以为没反应。
     $('logrows').innerHTML = logPlaceholder('正在读取落盘日志…');
     let r;
@@ -2414,6 +2421,14 @@ try {
   // 现在改为：无论从哪个源来，先并入本地缓冲，再由 renderLogs 统一按倒序整体重绘。
   // 调用方不再需要关心顺序，也不需要知道用 append 还是 prepend。
   let logEntries = [];   // 本地日志缓冲（按 seq 去重）
+
+  // logViewSuspended：清屏后挂起落盘视图的刷新。
+  //
+  // 声明必须放在这里（与 logEntries 一起、在 loadLogHistory 之前）——
+  // 放到清屏按钮的绑定处（原第 4145 行）会造成 TDZ：
+  // loadLogHistory 在首次调用时就读它，而那时声明还没执行到。
+  // 本包有 TDZ 守卫（gen_tdz_guard.js）专门防这类问题。
+  let logViewSuspended = false;
 
   // 归一化：时间倒序；时间相同按 seq 倒序，保证顺序稳定可复现。
   function normalizeDesc(items) {
@@ -3411,13 +3426,62 @@ try {
     // 否则用户在第 3 页切到只有 1 页的类型时，会停在一个不存在的页上。
     $('histKind').onchange = () => { histPage.offset = 0; loadHistory(); };
 
-    // 清屏：先清本地高亮，再重新拉一次当前页。
-    // 不再需要重置增量游标（实时视图已移除，落盘视图每次都是整页拉取）。
+    // 清屏。
+    //
+    // # 原实现是无效的（实测确认，非推测）
+    //
+    // 旧代码：
+    //     logEntries = [];                      // 只清内存缓冲
+    //     $('logrows').innerHTML = logPlaceholder('已清屏（正在重新读取落盘日志…）');
+    //     loadLogHistory();                     // 立刻从磁盘读回同一页
+    //
+    // 但本面板展示的是**落盘日志**（`/admin/logs/history`），
+    // 清内存缓冲对它毫无影响；紧接着的 loadLogHistory() 又把同样 30 行读回来。
+    //
+    // 逐帧实测（MutationObserver，见 tests/frontend/diag_clearscreen_ux.js）：
+    //     + 2ms   行数=1   "正在读取落盘日志…"
+    //     +64ms   行数=30  原样回来
+    // 「已清屏」那句**从未渲染到屏幕上**。用户点下去看到的是一次闪烁，
+    // 内容分毫未变 —— 按钮看起来坏了。
+    //
+    // # 现在改成：清屏 = 挂起落盘视图的刷新，直到用户明确要求恢复
+    //
+    // 这是"清屏"在同类工具里的常规语义：把屏幕腾空，便于观察**后续**新日志，
+    // 而不是把磁盘上的历史删掉（我们也不该删 —— 那是审计数据）。
+    // 挂起期间 10s 轮询不动它（拦截在 loadLogHistory 开头）。
+    //
+    // logViewSuspended 的声明在上方（与 logEntries 一起），不在这里 ——
+    // 放这里会造成 TDZ（loadLogHistory 定义在前、首次调用更早）。
+
+    // 初始绑定：按钮此时是"清屏"形态
     $('btnLogClear').onclick = () => {
       logEntries = [];
-      $('logrows').innerHTML = logPlaceholder('已清屏（正在重新读取落盘日志…）');
-      loadLogHistory();
+      logViewSuspended = true;
+      $('logrows').innerHTML = logPlaceholder(
+        '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
+      $('logPager').innerHTML = '';
+      // 把清屏按钮换成"恢复显示"，让用户有明确的回头路
+      setLogClearButton(true);
     };
+
+    // setLogClearButton 切换清屏/恢复两种形态。
+    //
+    // 不用两套按钮来回换 DOM，而是改同一个按钮的文字与行为 ——
+    // 位置不变，用户不需要重新找按钮在哪。
+    function setLogClearButton(suspended) {
+      const b = $('btnLogClear');
+      if (!b) return;
+      b.textContent = suspended ? '恢复显示' : '清屏';
+      b.onclick = suspended ? () => { logViewSuspended = false; loadLogHistory(); setLogClearButton(false); }
+                            : () => {
+                                logEntries = [];
+                                logViewSuspended = true;
+                                $('logrows').innerHTML = logPlaceholder(
+                                  '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
+                                $('logPager').innerHTML = '';
+                                setLogClearButton(true);
+                              };
+    }
 
     // 请求日志按 10s 刷新落盘视图（屏幕上始终是最新落盘记录）；
     // 任务历史 10s。
