@@ -107,6 +107,42 @@ func newTaskSlotAdapter(sch *scheduler.Scheduler) workbuddy.TaskSlot {
 }
 
 // ---------------------------------------------------------------------------
+// 核心调度视图适配器（阶段 0 评审 F5：/admin/schedule 与 /admin/task 移回核心）
+// ---------------------------------------------------------------------------
+
+// 这两条端点读的是核心自己排的班，不表达任何上游身份。
+// Task 3c 曾把它们放进 workbuddy（写方签到/保活在那边）；
+// 阶段 0 评审指出第二个上游若不声明 CapCheckin 就**没人服务**它们，
+// 而它们本该对所有上游可见 —— 故移回 internal/admin。
+//
+// 这里把 *scheduler.Scheduler 与共享任务槽适配成 admin 的消费方接口。
+// 与 workbuddy.SchedulerView 是同一份能力，但**类型必须各声明一份**：
+// admin 与 workbuddy 互不 import（架构约束），Go 方法集精确匹配，
+// 一个实现满足两个同名接口没有问题（方法签名完全一致）。
+
+// adminSchedulerAdapter 把 *scheduler.Scheduler 适配成 admin.SchedulerView。
+type adminSchedulerAdapter struct{ s *scheduler.Scheduler }
+
+func (a adminSchedulerAdapter) NextWake() (time.Time, []string) { return a.s.NextWake() }
+func (a adminSchedulerAdapter) Hours() ([]int, []int)           { return a.s.Hours() }
+func (a adminSchedulerAdapter) CheckinEnabled() bool            { return a.s.CheckinEnabled() }
+func (a adminSchedulerAdapter) KeepaliveEnabled() bool          { return a.s.KeepaliveEnabled() }
+
+// adminTaskSlotAdapter 把共享任务槽适配成 admin.TaskSlot。
+//
+// 与 workbuddy.TaskSlot 指向**同一个** sharedTaskSlot ——
+// 这正是要保证的："同一时刻只允许一个全量任务"是进程级语义，
+// 不论触发方是签到/保活（workbuddy）还是别的上游，都走同一个槽。
+type adminTaskSlotAdapter struct{ s workbuddy.TaskSlot }
+
+func (a adminTaskSlotAdapter) Snapshot() map[string]any { return a.s.Snapshot() }
+
+var (
+	_ admin.SchedulerView = adminSchedulerAdapter{}
+	_ admin.TaskSlot      = adminTaskSlotAdapter{}
+)
+
+// ---------------------------------------------------------------------------
 // 客户端登录态适配器（Task 3c）
 // ---------------------------------------------------------------------------
 

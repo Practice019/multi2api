@@ -407,38 +407,6 @@ func (h *AdminHandler) travelAll(fn func(uid string) TravelActionResult) []map[s
 	return out
 }
 
-// ---------------------------------------------------------------------------
-// 调度（两条端点读的是核心调度器，依赖经 AdminEnv 注入）
-// ---------------------------------------------------------------------------
-
-// Schedule GET /admin/schedule —— 下一次唤醒时刻与当前时点设置。
-func (h *AdminHandler) Schedule(w http.ResponseWriter, r *http.Request) {
-	sv := h.env.Schedule
-	if sv == nil {
-		writeError(w, http.StatusNotImplemented, "调度器未接线")
-		return
-	}
-	at, names := sv.NextWake()
-	checkinH, keepaliveH := sv.Hours()
-	resp := map[string]any{
-		"checkin_enabled":   sv.CheckinEnabled(),
-		"keepalive_enabled": sv.KeepaliveEnabled(),
-		"checkin_hours":     checkinH,
-		"keepalive_hours":   keepaliveH,
-	}
-	if !at.IsZero() {
-		resp["next_at"] = at
-		resp["next_in_sec"] = int64(time.Until(at).Seconds())
-		resp["next_tasks"] = names
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// TaskStatus GET /admin/task —— 全量任务槽状态。
-func (h *AdminHandler) TaskStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.task.Snapshot())
-}
-
 // scheduleHours 取签到时点；调度器未接线时返回 nil（与"未接线"降级一致）。
 func (h *AdminHandler) scheduleHours() ([]int, []int) {
 	if h.env.Schedule == nil {

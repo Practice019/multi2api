@@ -214,14 +214,15 @@ var wantAdminRoutes = []struct{ method, path string }{
 	{"GET", "/admin/travel/status"},
 	{"POST", "/admin/travel/depart"},
 	{"POST", "/admin/travel/claim"},
-	{"GET", "/admin/schedule"},
-	{"GET", "/admin/task"},
+	// /admin/schedule 与 /admin/task **不在此列表**：它们读核心自己排的班，
+	// 已移回 internal/admin 作为通用端点（阶段 0 评审 F5）。
+	// 见 admin.go 顶部注释。
 	{"GET", "/admin/client-login"},
 	{"POST", "/admin/client-login/switch"},
 	{"POST", "/admin/client-login/restore"},
 }
 
-func TestAdminRoutesCoverAll22Endpoints(t *testing.T) {
+func TestAdminRoutesCoverAll20Endpoints(t *testing.T) {
 	p := NewWithConfig(Config{})
 	routes := p.AdminRoutes()
 
