@@ -7,11 +7,50 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
 <script>window.__WB2API_KEY__ = "__WB2API_KEY__";</script>
+<script>
+// 主题防闪白：必须在 <style> 之前、同步执行。
+//
+// # 为什么不能用页面底部的脚本
+//
+// 页面主体是按 CSS 变量渲染的。若等 DOM 解析完再设 data-theme，
+// 浅色用户会先看到一帧深色再跳成浅色（深色用户相反）—— 那一下闪烁
+// 比"首屏没有样式"更刺眼，因为它是**有内容的闪烁**。
+//
+// 所以这里只做一件事：读偏好、尽快把 data-theme 写到 <html> 上。
+// 逻辑刻意保持极短且不依赖任何外部函数（此时它们都还不存在）。
+(function () {
+  try {
+    var saved = localStorage.getItem('wb2api.theme') || 'system';
+    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var theme = saved === 'system' ? (dark ? 'dark' : 'light') : saved;
+    if (theme !== 'dark' && theme !== 'light') theme = dark ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', theme);
+  } catch (e) {
+    // 隐私模式下 localStorage 会抛；此时按深色渲染（原行为），不影响可用性。
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+})();
+</script>
 <style>
-  :root{
+  /* 深色主题（默认）。所有颜色都必须走变量 ——
+     渲染函数里写死颜色会让切换主题时出现"局部还是旧配色"的花脸。 */
+  :root, :root[data-theme="dark"]{
     --bg:#0b0e14; --panel:#121722; --panel2:#171d2b; --line:#232b3d;
     --fg:#e6ebf5; --dim:#8b96ad; --acc:#4f8cff; --ok:#2ecc8f; --warn:#f5a623; --err:#ff5c5c;
+    /* 代码块底色 / 遮罩 / 阴影也必须走变量 ——
+       否则浅色主题下 <pre> 会是深色块、模态遮罩会过重、阴影会显成脏边。 */
+    --code-bg:#0a0d13; --overlay:rgba(0,0,0,.62); --shadow:rgba(0,0,0,.42);
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
+  }
+  /* 浅色主题。**不是把深色取反**：深色那套强调色在浅底上对比度不足，
+     所以这里单独挑了一组更深的色值，正文对比度按 WCAG AA（>= 4.5:1）取值。
+     实算值：#1c2333 on #f6f7fa ≈ 14:1；--dim #5a6478 ≈ 6:1；
+     --acc #1d5fd0 ≈ 5.6:1；--ok #0f7a54 ≈ 4.9:1；--err #c02626 ≈ 5.7:1。 */
+  :root[data-theme="light"]{
+    --bg:#f6f7fa; --panel:#ffffff; --panel2:#eef0f6; --line:#d7dbe5;
+    --fg:#1c2333; --dim:#5a6478; --acc:#1d5fd0; --ok:#0f7a54; --warn:#a35b00; --err:#c02626;
+    /* 浅色下代码块用略深的底、遮罩更淡、阴影更轻 */
+    --code-bg:#f0f2f7; --overlay:rgba(28,35,51,.42); --shadow:rgba(28,35,51,.16);
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);
@@ -183,10 +222,10 @@
   tr:last-child td{border-bottom:0}
   td.mono{font-family:var(--mono);font-size:12px}
   .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600}
-  .pill.ok{background:rgba(46,204,143,.15);color:var(--ok)}
-  .pill.warn{background:rgba(245,166,35,.15);color:var(--warn)}
-  .pill.err{background:rgba(255,92,92,.15);color:var(--err)}
-  .pill.dim{background:rgba(139,150,173,.15);color:var(--dim)}
+  .pill.ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+  .pill.warn{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
+  .pill.err{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
+  .pill.dim{background:color-mix(in srgb,var(--dim) 16%,transparent);color:var(--dim)}
   /* 按账号分组的任务明细：每组一个小节，节头常驻，切视图时不丢账号上下文 */
   .ggroup{border-bottom:1px solid var(--line)}
   .ggroup:last-child{border-bottom:0}
@@ -219,13 +258,13 @@
      倍率是"选哪个模型"的决策依据，所以给个比 ctx 更强的视觉权重 ——
      同时用颜色区分"免费"与"贵"，但**不只靠颜色**（各自带 x 前缀的数字，色盲也可读）。 */
   .chip .mult{margin-left:6px;padding:1px 6px;border-radius:999px;
-    background:rgba(127,127,127,.12);color:var(--dim);font-size:11px}
-  .chip .mult.free{color:var(--ok);background:rgba(80,200,120,.14)}
-  .chip .mult.hi{color:var(--warn);background:rgba(230,170,60,.16)}
+    background:color-mix(in srgb,var(--dim) 14%,transparent);color:var(--dim);font-size:11px}
+  .chip .mult.free{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
+  .chip .mult.hi{color:var(--warn);background:color-mix(in srgb,var(--warn) 17%,transparent)}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
   textarea{width:100%;min-height:74px;resize:vertical;font-family:var(--mono);font-size:13px}
   .key{flex:1;min-width:230px;font-family:var(--mono);font-size:12px}
-  pre{background:#0a0d13;border:1px solid var(--line);border-radius:10px;padding:13px;
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:13px;
     margin:12px 0 0;white-space:pre-wrap;word-break:break-word;
     font-family:var(--mono);font-size:12.5px;max-height:340px;overflow:auto}
   .err{color:var(--err)} .dim{color:var(--dim)}
@@ -236,7 +275,7 @@
   .tog input{width:auto;padding:0}
   /* 可点击复制的内容块：整块可点，鼠标悬停给明确反馈 */
   .copyable{cursor:pointer;position:relative;transition:.15s}
-  .copyable:hover{border-color:var(--acc);background:#1b2333}
+  .copyable:hover{border-color:var(--acc);background:var(--panel2)}
   .copyable:hover .copyhint{opacity:1}
   .copyhint{float:right;font-size:10px;color:var(--acc);opacity:0;transition:.15s;letter-spacing:.3px}
   pre.copyable:hover{border-color:var(--acc)}
@@ -250,7 +289,7 @@
     max-width:min(420px,42vw);pointer-events:none}
   .notice{pointer-events:auto;background:var(--panel2);border:1px solid var(--line);
     border-radius:10px;padding:9px 13px;font-size:12.5px;line-height:1.6;
-    box-shadow:0 6px 22px rgba(0,0,0,.42);max-height:40vh;overflow:auto;
+    box-shadow:0 6px 22px var(--shadow);max-height:40vh;overflow:auto;
     word-break:break-word;white-space:normal}
   .notice[hidden]{display:none}
   /* 进度用左边框与提示区分开，一眼能看出「还在跑」和「一条消息」 */
@@ -307,6 +346,13 @@
        这几个值由 renderTopStats() 从与仪表盘同一份数据里填，
        **不额外发请求**（否则就成了第二份事实来源）。 -->
   <span id="topstats" class="topstats"></span>
+  <!-- 主题切换：跟随系统 / 深色 / 浅色 三态。
+       用 data-theme 驱动，实际生效的是 <head> 里那段同步脚本（防首屏闪）。 -->
+  <span class="tog" id="themeSwitch" style="gap:0">
+    <button data-theme-mode="system" style="padding:4px 9px;font-size:11px;border-radius:8px 0 0 8px">跟随系统</button>
+    <button data-theme-mode="light" style="padding:4px 9px;font-size:11px;border-left:0">浅色</button>
+    <button data-theme-mode="dark" style="padding:4px 9px;font-size:11px;border-radius:0 8px 8px 0;border-left:0">深色</button>
+  </span>
   <!-- 非本机访问（服务端未注入 Key）时才出现的兜底入口；本机访问这里完全为空。
        API Key 的查看与复制统一在「仪表盘 → API 接入信息」里，顶栏不再重复。 -->
   <span id="keyFallback" style="display:none;align-items:center;gap:8px">
@@ -642,7 +688,7 @@
  </div>
 </main>
 
-<div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:99;align-items:center;justify-content:center">
+<div id="modal" style="display:none;position:fixed;inset:0;background:var(--overlay);z-index:99;align-items:center;justify-content:center">
   <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:560px;width:calc(100% - 40px)">
     <h3 style="margin:0 0 4px;font-size:15px">添加 WorkBuddy 账号</h3>
     <p class="dim" style="margin:0 0 14px;font-size:12px">
@@ -857,6 +903,79 @@
       } else {
         h1.insertBefore(document.createTextNode(name + ' '), h1.firstChild);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------- 主题（三态）
+  //
+  // 偏好有**三个**取值，而不是一个布尔：
+  //   'system' 跟随系统（默认）
+  //   'dark' / 'light' 用户显式选择
+  //
+  // # 为什么必须区分 system 与 dark
+  //
+  // 若只存布尔，用户一旦点过任何一次，就**永久失去"跟随系统"**——
+  // 而那是大多数人的期望默认值（白天用浅色、晚上用深色是系统的事）。
+  //
+  // 实际写 data-theme 的时机有两处：
+  //   1. <head> 里的同步脚本（防首屏闪白）
+  //   2. 这里（用户点击切换时）
+  // 两处都必须把 'system' 解析成具体的 dark/light，因为 CSS 只认这两个值。
+  const LS_THEME = 'wb2api.theme';
+
+  function systemPrefersDark() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+
+  // resolveTheme 把偏好解析成真正生效的主题名。
+  function resolveTheme(pref) {
+    if (pref === 'dark' || pref === 'light') return pref;
+    return systemPrefersDark() ? 'dark' : 'light';
+  }
+
+  // applyTheme 写入 data-theme 并同步按钮选中态。
+  function applyTheme(pref) {
+    const theme = resolveTheme(pref);
+    document.documentElement.setAttribute('data-theme', theme);
+    const box = $('themeSwitch');
+    if (box) {
+      box.querySelectorAll('button[data-theme-mode]').forEach(b =>
+        b.classList.toggle('on', b.dataset.themeMode === pref));
+    }
+    return theme;
+  }
+
+  // setThemePref 用户显式选择。
+  function setThemePref(pref) {
+    try { localStorage.setItem(LS_THEME, pref); } catch { /* 隐私模式 */ }
+    applyTheme(pref);
+  }
+
+  // initTheme 读持久化偏好并绑定按钮 + 跟随系统变化。
+  function initTheme() {
+    let pref = 'system';
+    try { pref = localStorage.getItem(LS_THEME) || 'system'; } catch { /* 隐私模式 */ }
+    if (['system', 'dark', 'light'].indexOf(pref) < 0) pref = 'system';
+    applyTheme(pref);
+
+    const box = $('themeSwitch');
+    if (box) {
+      box.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-theme-mode]');
+        if (b) setThemePref(b.dataset.themeMode);
+      });
+    }
+
+    // 系统主题变化时，**只有**在"跟随系统"模式下才跟着变。
+    // 用户显式选过 dark/light 之后再跟随系统变化就是擅自改他的选择。
+    if (window.matchMedia) {
+      try {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+          let cur = 'system';
+          try { cur = localStorage.getItem(LS_THEME) || 'system'; } catch { /* 隐私模式 */ }
+          if (cur === 'system') applyTheme('system');
+        });
+      } catch { /* 老浏览器没有 addEventListener 版本 */ }
     }
   }
 
@@ -3665,6 +3784,9 @@
   }
 
   function boot() {
+    // 主题最先初始化：它决定第一帧的配色。
+    initTheme();
+
     // 本机访问：服务端已注入 Key，直接跑起来。顶栏不显示任何 API 信息，
     // 查看/复制统一在「仪表盘 → API 接入信息」里完成。
     if (INJECTED) {
@@ -3893,6 +4015,9 @@
     accountPlaceholder: accountPlaceholder,
     renderTopStats: renderTopStats,
     renderJobs: renderJobs,
+    applyTheme: applyTheme,
+    setThemePref: setThemePref,
+    resolveTheme: resolveTheme,
   };
 })();
 </script>
