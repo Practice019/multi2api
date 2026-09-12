@@ -4063,6 +4063,24 @@
     };
     // 成长计划「刷新」走全量强制回源，3 个账号实测 7.2s —— 正是最需要进度提示的那个。
     $('btnGrowthRefresh').onclick = () => busyRun($('btnGrowthRefresh'), () => loadGrowth(true), { label: '成长计划' });
+
+    // 任务调度「刷新」。
+    //
+    // # 这个按钮此前**完全没有绑定**（点了没反应）
+    //
+    // 由 tests/frontend/audit_buttons.js 逐按钮点击发现：
+    // HTML 里有 `<button id="btnJobRefresh">刷新</button>`，
+    // 但全文件搜 `btnJobRefresh` 只有那一处 —— 没有任何 onclick/addEventListener。
+    // 对比其它刷新按钮（btnTravelRefresh/btnGrowthRefresh/btnModelRefresh）
+    // 都绑了 handler，只有它漏了。
+    //
+    // 本面板的数据来自 `manifest.jobs`（不额外发请求，避免第二份事实来源），
+    // 所以"刷新"的正确语义就是**重新拉一次 manifest** 并重绘。
+    // 这里复用 loadManifest()，与顶栏状态条走同一条路径。
+    $('btnJobRefresh').onclick = () => busyRun($('btnJobRefresh'), async () => {
+      await loadManifest();
+      renderJobs();
+    }, { label: '任务调度' });
     // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
     $('growthViews').addEventListener('click', ev => {
       const b = ev.target.closest('button[data-gview]');
