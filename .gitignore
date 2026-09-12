@@ -18,6 +18,13 @@ config.json
 *.tmp
 __pycache__/
 
+# 编译产物：实测根目录的 server.exe（12.5 MB）曾被提交进版本库
+#（commit b9f8763），导致 .git 体积几乎全部来自这一个文件。
+# 用 "/server.exe" 锚定根目录，避免误伤与目录同名的源文件；
+# "*.exe" 是兜底 —— 二进制不该进版本库。
+/server.exe
+*.exe
+
 # Backups (contains auth tokens)
 backups/
 
