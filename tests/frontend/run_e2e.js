@@ -41,6 +41,7 @@ const TESTS = [
   ['verify_info_modal.js','INFO_URL'],   // 只读信息弹窗（替代 alert）
   ['verify_t3_t4.js','T34_URL'],       // T3+T4：面板归位与删除的用户可见结果
   ['verify_account_buttons.js','ACC_URL'], // 账号池按钮清单（防增防删）
+  ['verify_models_grouped.js','MODELS_URL'], // T5+T6：模型去重/分组/可折叠/倍率
   ['verify_cp2_f1.js',  'F1_TEST_URL'],
   ['verify_cp2_f2.js',  'F2_TEST_URL'],
   ['final_visual.js',   'VISUAL_URL'],
@@ -48,7 +49,7 @@ const TESTS = [
 
 // 各脚本内部使用的调试端口（与脚本里的常量对应）。
 // 这里只用于"等它释放"，不修改脚本本身。
-const DEBUG_PORTS = [9222, 9224, 9225, 9226, 9227, 9228, 9229, 9230, 9231, 9232, 9240, 9241, 9251, 9252, 9258, 9260, 9290, 9293, 9295, 9296, 9302, 9304];
+const DEBUG_PORTS = [9222, 9224, 9225, 9226, 9227, 9228, 9229, 9230, 9231, 9232, 9240, 9241, 9251, 9252, 9258, 9260, 9290, 9293, 9295, 9296, 9302, 9304, 9306];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
