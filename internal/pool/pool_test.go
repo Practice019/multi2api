@@ -1019,7 +1019,8 @@ func (p *Pool) entryWeight(uid string) float64 {
 			maxCredits = x.credits
 		}
 	}
-	return p.weightOf(e, maxCredits, time.Now())
+	// 这些权重测试没有模型上下文 → model 传空串（走标量 Effective 口径）
+	return p.weightOf(e, maxCredits, time.Now(), "")
 }
 
 func TestWeightHighCreditsDominates(t *testing.T) {

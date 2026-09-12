@@ -27,14 +27,14 @@ type TB interface {
 //
 // # 检查项（每一条都有对应的反向验证用例）
 //
-//	1. ID() 合法（^[a-z][a-z0-9-]*$）**且稳定**（多次调用结果一致）
-//	2. Caps() 必须声明 CapChat
-//	3. 任何方法都不得 panic
-//	4. 声明 CapModels ⇒ Models() 必须真的返回非空目录
-//	5. 声明任何能力位 ⇒ 必须能被行为验证或显式豁免（见 capabilityProbes）
-//	6. Chat 返回的流必须能被完整读完并 Close，且 Close 不得报错
-//	7. Chat 成功返回（err==nil）时，Status 或 Body 至少要有一个非零
-//	8. ctx 取消时 Chat 必须尽快返回
+//  1. ID() 合法（^[a-z][a-z0-9-]*$）**且稳定**（多次调用结果一致）
+//  2. Caps() 必须声明 CapChat
+//  3. 任何方法都不得 panic
+//  4. 声明 CapModels ⇒ Models() 必须真的返回非空目录
+//  5. 声明任何能力位 ⇒ 必须能被行为验证或显式豁免（见 capabilityProbes）
+//  6. Chat 返回的流必须能被完整读完并 Close，且 Close 不得报错
+//  7. Chat 成功返回（err==nil）时，Status 或 Body 至少要有一个非零
+//  8. ctx 取消时 Chat 必须尽快返回
 //
 // # 关于凭证（Option）
 //
@@ -155,8 +155,11 @@ func probeCapabilities(t TB, p Provider, caps Capability, id string, cfg contrac
 	// 避免"声明了却不实现"完全无声通过。
 	//
 	// 判据：声明 CapGrowth/CapTravel/CapWelfare/CapQuotaProbe 的上游，
-	// 必须实现 AdminExt（因为这些能力都通过管理端点暴露）。
-	// 这不能证明功能正确，但能挡住"声明了却什么都没写"。
+	// 必须实现 AdminExt **且提供非空、结构完整的路由**。
+	//
+	// ⚠ 只检查"AdminExt 存在"是不够的 —— 评审证明：
+	// 声明全部 7 个能力位、`AdminRoutes()` 返回 nil 的实现**零报错通过**。
+	// 那正是"假声明"最省事的写法（实现空方法比不实现还容易）。
 	needsAdmin := false
 	for _, c := range unverifiableCaps {
 		if caps.Has(c) {
@@ -165,11 +168,52 @@ func probeCapabilities(t TB, p Provider, caps Capability, id string, cfg contrac
 		}
 	}
 	if needsAdmin {
-		if _, ok := ExtOf[AdminExt](p); !ok {
-			t.Errorf("声明了 %v 中的能力（完整能力集: %v），但没实现 gateway.AdminExt —— "+
+		ax, ok := ExtOf[AdminExt](p)
+		if !ok {
+			t.Errorf("声明了 %v 中的能力，但没实现 gateway.AdminExt —— "+
 				"这些能力都通过管理端点暴露，没有 AdminRoutes 说明没实现",
-				caps.Names(), caps.Names())
+				caps.Names())
+		} else {
+			verifyAdminRoutes(t, ax, caps)
 		}
+	}
+}
+
+// verifyAdminRoutes 检查 AdminExt 的实现不是空壳。
+//
+// 评审的绕过手法：`func (p *X) AdminRoutes() []AdminRoute { return nil }`
+// 配上声明全部能力位 → 契约零报错。空实现比不实现更省事，必须挡住。
+func verifyAdminRoutes(t TB, ax AdminExt, caps Capability) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("AdminRoutes() panic: %v", r)
+		}
+	}()
+	routes := ax.AdminRoutes()
+	if len(routes) == 0 {
+		t.Errorf("声明了 %v 中的能力，AdminRoutes() 却返回空 —— "+
+			"这些能力必须有对应的管理端点，空列表说明只是声明了没实现",
+			caps.Names())
+		return
+	}
+	// 每条路由必须结构完整 —— 缺 Handler 的路由挂上去就是 404
+	seen := map[string]bool{}
+	for i, r := range routes {
+		if r.Method == "" {
+			t.Errorf("AdminRoutes()[%d] 缺 Method: %+v", i, r)
+		}
+		if r.Path == "" || r.Path[0] != '/' {
+			t.Errorf("AdminRoutes()[%d] 的 Path 必须以 / 开头，得到 %q", i, r.Path)
+		}
+		if r.Handler == nil {
+			t.Errorf("AdminRoutes()[%d] (%s %s) 缺 Handler —— 挂上去会是 404",
+				i, r.Method, r.Path)
+		}
+		key := r.Method + " " + r.Path
+		if seen[key] {
+			t.Errorf("AdminRoutes() 里有重复路由 %s —— 挂载时会 panic（重复 pattern）", key)
+		}
+		seen[key] = true
 	}
 }
 
@@ -233,7 +277,7 @@ func verifyModelsNonEmpty(t TB, p Provider, id string, cfg contractConfig) (ok b
 		return false
 	}
 	if len(ms) == 0 {
-		t.Errorf("声明了 CapModels 但 Models() 返回空列表 —— "+
+		t.Errorf("声明了 CapModels 但 Models() 返回空列表 —— " +
 			"等于没实现（会让 /v1/models 静默变空）")
 		return false
 	}

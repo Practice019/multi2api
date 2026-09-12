@@ -465,7 +465,11 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 	p.byUID[a.UID] = &entry{a: a}
 }
 
-// Pick 返回 healthy 中积分最高的账号；无可用返回 nil。
+// Pick 返回 healthy 中额度最高的账号；无可用返回 nil。
+//
+// 不区分模型 —— 保留给"没有具体模型上下文"的调用点（如探活、刷新额度）。
+// **发请求选号请用 PickForModel**，否则按模型额度的账号（codearts）
+// 会被按"所有模型的最大值"排序，可能选到对本次请求模型零额度的号。
 func (p *Pool) Pick() *auth.Auth {
 	return p.PickExcluding(nil)
 }
@@ -474,16 +478,37 @@ func (p *Pool) Pick() *auth.Auth {
 // 挑选策略：healthy 账号中按三因子权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pick(tried)
+	return p.pick(tried, "")
+}
+
+// PickForModel 按**针对该模型**的可用额度选号。
+//
+// # 为什么需要它（这是 QuotaView 存在的理由）
+//
+// 按模型额度的上游（codearts）里，一个账号可能对 gpt-5.5 零额度、
+// 对别的模型额度很高。若按"所有模型的最大值"排序：
+//
+//	账号 X = {gpt-5.5: 1000}            → 标量 1000
+//	账号 Y = {other: 999999}            → 标量 999999  ← 被优先选中
+//
+// 请求 gpt-5.5 时就会选到 Y —— 一个**跑不了的账号**。
+// 用 model 取 EffectiveFor 才能排对。
+//
+// model 为空时退化为 PickExcluding（无模型上下文，无从按模型过滤）。
+func (p *Pool) PickForModel(model string, tried map[string]bool) *auth.Auth {
+	return p.pick(tried, model)
 }
 
 // pick 在 healthy 候选集中按三因子权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
-// 候选集是 top5 近似：先按三因子权重（weightOf）降序取前 5（credits 只是权重的一个因子，
+// 候选集是 top5 近似：先按三因子权重（weightOf）降序取前 5（额度只是权重的一个因子，
 // 闲置补偿与成功率同样决定谁进短名单），再在 top5 内做防撞号过滤。
 // 并发防雪崩：跳过 lastUsed 距今 < minPickGap 的账号（除非 top5 全部刚被用过，
 // 此时退回最近最少使用 LRU 账号），迫使高并发请求发散，而不是全部撞同一高分账号。
 // minPickGap=0（测试用）时过滤恒通过，退化为纯加权随机。
-func (p *Pool) pick(tried map[string]bool) *auth.Auth {
+//
+// model 非空时，额度因子取该账号**针对该模型**的可用量（EffectiveFor）；
+// 为空时取标量 Effective()。见 PickForModel 的说明。
+func (p *Pool) pick(tried map[string]bool, model string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -506,12 +531,15 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now)
 	}
-	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿 + 成功率
-	// 根本进不了短名单决策，低 credits 但高成功率/久置的账号会永远排不进 top5。
+	// top5 短名单按三因子权重降序截断（而非额度单纯降序）：否则闲置补偿 + 成功率
+	// 根本进不了短名单决策，低额度但高成功率/久置的账号会永远排不进 top5。
+	//
+	// 额度口径随 model 变：有模型上下文时取该模型的可用量（EffectiveFor），
+	// 否则取标量 Effective()。见 PickForModel。
 	var maxCredits int64
 	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
+		if q := e.quotaFor(model); q > maxCredits {
+			maxCredits = q
 		}
 	}
 	// 权重只算一次：顶 5 截断要排序，若在 sort 比较器里现算 weightOf 会翻成 O(n log n) 次
@@ -522,9 +550,19 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 	}
 	ws := make([]weighted, len(cands))
 	for i, e := range cands {
-		ws[i] = weighted{e: e, w: p.weightOf(e, maxCredits, now)}
+		ws[i] = weighted{e: e, w: p.weightOf(e, maxCredits, now, model)}
 	}
 	sort.Slice(ws, func(i, j int) bool {
+		// 第一优先级：**对该模型明确不可用**的账号排到最后。
+		//
+		// 这一条是"按模型选号"真正生效的地方 —— 只靠权重不够：
+		// 一个 gpt-5.5 额度为 0 的账号仍能靠闲置+成功率拿到约 4 分，
+		// 而可用账号若额度项优势不大时会被它抽中（实测约 18%）。
+		// 排序而非剔除：见 usableForModel 的注释（避免误杀"未探测"的账号）。
+		ui, uj := ws[i].e.usableForModel(model), ws[j].e.usableForModel(model)
+		if ui != uj {
+			return ui // 可用的排前面
+		}
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
 		}
@@ -544,6 +582,27 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 			eligible = append(eligible, e)
 		}
 	}
+
+	// 抽签范围进一步收窄到"对该模型可用"的账号（若存在）。
+	//
+	// 为什么排序不够：top5 短名单通常装得下所有候选，所以"不可用"的账号
+	// 仍在加权抽签池里；它拿不到额度项（10 分）但能靠闲置+成功率拿到约 4 分，
+	// 实测仍会被抽中约 17%。把抽签池收窄到可用账号，才真正让按模型选号生效。
+	//
+	// 收窄**只在有可用账号时**发生：若全部不可用（例如请求了一个所有账号
+	// 都没探测过的模型），仍从完整候选里抽 —— 不能因为"不可用"就返回 nil。
+	if len(eligible) > 0 {
+		usable := make([]*entry, 0, len(eligible))
+		for _, e := range eligible {
+			if e.usableForModel(model) {
+				usable = append(usable, e)
+			}
+		}
+		if len(usable) > 0 {
+			eligible = usable
+		}
+	}
+
 	var e *entry
 	if len(eligible) == 0 {
 		// top5 全部刚被用过：LRU 兜底，维持发散且不 starve 任一候选。
@@ -560,12 +619,50 @@ func (p *Pool) pick(tried map[string]bool) *auth.Auth {
 			}
 		}
 	} else {
-		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
+		e = p.pickWeighted(eligible, model) // eligible 保序 = top5 降序子集
 	}
 	e.lastUsed = time.Now()
 	p.pickSeq++
 	e.lastPickSeq = p.pickSeq
 	return e.a
+}
+
+// quotaFor 该账号在给定模型下的可用额度（选号权重用）。
+//
+// model 为空 → 标量 Effective()（无模型上下文，只能看整体）。
+// model 非空 → EffectiveFor(model)（按模型额度）。
+//
+// 为什么单独抽一个方法：选号路径上有**两处**必须用同一口径 ——
+// maxCredits 归一化基线与 weightOf 的额度项。口径不一致会让归一化失真
+// （除以"别的模型"的最大值，权重就失去意义）。
+func (e *entry) quotaFor(model string) int64 {
+	if model == "" {
+		return e.quota.Effective()
+	}
+	return e.quota.EffectiveFor(model)
+}
+
+// usableForModel 该账号对指定模型是否**明确不可用**（按模型额度为 0 且确实探测过）。
+//
+// # 为什么需要这个判据，而不是"额度 0 就从候选里剔除"
+//
+// `per_model` 形态下，账号表里没有某个模型的条目有两种含义：
+//  1. 该账号确实对这个模型没额度（codearts 的常见情况）
+//  2. 只是还没探测过那个模型（HasData 但该键缺失）
+//
+// 两者用 EffectiveFor 都得到 0，但语义不同。直接剔除会把第 2 种情况误杀
+// （多模型上游上，新账号会永远选不中）。
+//
+// 所以做法是：**不剔除，而是让它在 weighted 抽签里拿不到额度项的分**
+// （额度项占 10 分，是权重的主导项），于是它只是"很少被选中"而不是"永不"。
+// 这既避开了误杀，又让"确有别的账号可用"时不会白跑一次。
+//
+// credits / unlimited 形态不分模型，永远可用 → 返回 false。
+func (e *entry) usableForModel(model string) bool {
+	if model == "" || e.quota.Kind != QuotaKindPerModel {
+		return true
+	}
+	return e.quota.EffectiveFor(model) > 0
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
@@ -632,12 +729,12 @@ var minPickGap = 100 * time.Millisecond
 // credits 全 0 时仍按 idle+successRate 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
-func (p *Pool) pickWeighted(cands []*entry) *entry {
+func (p *Pool) pickWeighted(cands []*entry, model string) *entry {
 	now := time.Now()
 	var maxCredits int64
 	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
+		if q := e.quotaFor(model); q > maxCredits {
+			maxCredits = q
 		}
 	}
 
@@ -645,7 +742,7 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	weights := make([]int64, len(cands))
 	var total int64
 	for i, e := range cands {
-		w := p.weightOf(e, maxCredits, now)
+		w := p.weightOf(e, maxCredits, now, model)
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}
@@ -669,12 +766,14 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 }
 
 // weightOf 计算单个账号的三因子权重。
-func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
+//
+// model 非空时额度项取该模型的可用量（EffectiveFor），与 maxCredits 的口径保持一致。
+func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time, model string) float64 {
 	w := 1.0
 
-	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
+	// 1. 额度比例 ×10（会计入 mid-credit 锚点，避免全员 0 时该项为 0）。
 	if maxCredits > 0 {
-		w += float64(e.credits) / float64(maxCredits) * 10
+		w += float64(e.quotaFor(model)) / float64(maxCredits) * 10
 	}
 
 	// 2. 闲置补偿。
