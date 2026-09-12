@@ -1,26 +1,24 @@
-package scheduler
+package workbuddy
 
 import (
+	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
 )
 
 // watchHarness 旅行守卫用例的公共装置。
 type watchHarness struct {
 	stub *travelStub
-	s    *Scheduler
+	s    *Provider
 	p    *pool.Pool
 	log  *checkinlog.Log
 }
 
-// newWatchHarness 起一个同时模拟 growth + billing 的桩，构造带历史记录的调度器。
+// newWatchHarness 起一个同时模拟 growth + billing 的桩，构造带历史记录的 Provider。
 // statusJSON 是 travel/status 的 data 原文。
 func newWatchHarness(t *testing.T, statusJSON string) *watchHarness {
 	t.Helper()
@@ -32,17 +30,8 @@ func newWatchHarness(t *testing.T, statusJSON string) *watchHarness {
 	srv := billingAndGrowthServer(stub)
 	t.Cleanup(srv.Close)
 
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	log := checkinlog.New(filepath.Join(t.TempDir(), "checkin-log.json"), 30)
-
-	return &watchHarness{
-		stub: stub,
-		s:    New(Config{Pool: p, Upstream: up, Log: log}),
-		p:    p,
-		log:  log,
-	}
+	s, p, log := newTestProviderWithLog(t, srv, testAuth("u1"))
+	return &watchHarness{stub: stub, s: s, p: p, log: log}
 }
 
 // travelStateJSON 拼 travel/status 的 data 原文。arriveIn<=0 表示已到站。
@@ -119,10 +108,10 @@ func TestTravelWatchSchedulesNextCheckAtArrival(t *testing.T) {
 	if n := h.stub.claimCalls.Load(); n != 0 {
 		t.Fatalf("在途不该领奖，claim 调用 %d 次", n)
 	}
-	if h.s.isDue("u1", time.Now()) {
+	if h.s.IsDue("u1", time.Now()) {
 		t.Error("刚排完计划，此刻不应到期")
 	}
-	if !h.s.isDue("u1", time.Now().Add(time.Hour+time.Minute)) {
+	if !h.s.IsDue("u1", time.Now().Add(time.Hour+time.Minute)) {
 		t.Error("到站时刻之后应到期")
 	}
 
@@ -205,5 +194,91 @@ func TestTravelSnapshotFillsRowWithoutBuddy(t *testing.T) {
 	snaps := h.s.TravelSnapshots()
 	if len(snaps) != 1 || snaps[0].HasBuddy {
 		t.Fatalf("无猫快照不符: %+v", snaps)
+	}
+}
+
+// TestTravelJobDueIsFalseRightAfterRun 守卫轮的 Due 在刚跑完一轮后必须为假。
+//
+// 这条守住"不盲轮询"：核心的轮询粒度是 30 秒，而守卫间隔是 1 分钟起。
+// 若 Due 不考虑间隔下限，把缓存填满之后的每一轮都会立刻返回真，
+// 于是守卫轮被抬到 30 秒一轮 —— 空转频率翻倍。
+func TestTravelJobDueIsFalseRightAfterRun(t *testing.T) {
+	h := newWatchHarness(t, travelStateJSON("traveling", 4373480, 6, time.Hour))
+	h.s.cfg.TravelWatchInterval = time.Minute
+
+	// 首轮：无快照 → 到期，跑一趟填满缓存。
+	if !h.s.travelDue(time.Now()) {
+		t.Fatal("首轮（无快照）应到期，等价于改造前的启动首扫")
+	}
+	if err := h.s.runTravelJob(context.Background()); err != nil {
+		t.Fatalf("runTravelJob: %v", err)
+	}
+	// 刚跑完：既受间隔下限约束，账号也都没到期。
+	if h.s.travelDue(time.Now()) {
+		t.Error("刚跑完一轮后 Due 应为假（否则守卫轮被抬到核心的 30 秒粒度）")
+	}
+	// 过了守卫间隔、且账号到期（在途账号的 next 排在 arrive_at+20s，这里给足时间）。
+	h.s.travelLastRun = time.Now().Add(-2 * time.Minute)
+	h.s.travel.mu.Lock()
+	h.s.travel.due["u1"] = time.Now().Add(-time.Second)
+	h.s.travel.mu.Unlock()
+	if !h.s.travelDue(time.Now()) {
+		t.Error("过了守卫间隔且账号到期时 Due 应为真")
+	}
+}
+
+// TestGrowthJobDueGatesOnEmptySnapshots 成长守卫轮的 Due：无快照时到期（启动首扫），
+// 刚跑完且账号都未到期时为假。
+func TestGrowthJobDueGatesOnEmptySnapshots(t *testing.T) {
+	g := defaultGrowthStub()
+	srv := stubServer(t, g.handler())
+	s, _ := newTestProvider(t, srv, testAuth("u1"))
+
+	if !s.growthDueJob(time.Now()) {
+		t.Fatal("无快照时应到期（启动首扫）")
+	}
+	if err := s.runGrowthJob(context.Background()); err != nil {
+		t.Fatalf("runGrowthJob: %v", err)
+	}
+	if s.growthDueJob(time.Now()) {
+		t.Error("刚跑完一轮后 Due 应为假")
+	}
+	s.growthLastRun = time.Now().Add(-time.Hour)
+	// 把账号的下次检查时刻推到过去，否则 scheduleGrowthNext 刚把它排到 10 分钟后。
+	s.growth.mu.Lock()
+	s.growth.due["u1"] = time.Now().Add(-time.Second)
+	s.growth.mu.Unlock()
+	if !s.growthDueJob(time.Now()) {
+		t.Error("过了守卫间隔且账号到期时 Due 应为真")
+	}
+}
+
+// TestJobsReturnsBothWatchTasks Provider 必须把两个守卫轮都注册出去。
+func TestJobsReturnsBothWatchTasks(t *testing.T) {
+	s, _ := newTestProvider(t, stubServer(t, defaultGrowthStub().handler()), testAuth("u1"))
+	jobs := s.Jobs()
+	if len(jobs) != 2 {
+		t.Fatalf("应注册 2 个任务，得到 %d", len(jobs))
+	}
+	names := map[string]bool{}
+	for _, j := range jobs {
+		if j.Name == "" {
+			t.Error("任务名不能为空（调度器用它做去重与日志）")
+		}
+		if j.Run == nil {
+			t.Errorf("任务 %s 缺 Run", j.Name)
+		}
+		if j.Due == nil {
+			t.Errorf("任务 %s 缺 Due —— 两个守卫轮都是按账号到期错峰的，不是固定间隔", j.Name)
+		}
+		if j.Interval <= 0 {
+			t.Errorf("任务 %s 的 Interval 应 > 0（作为轮询下限）", j.Name)
+		}
+		names[j.Name] = true
+	}
+	for _, want := range []string{JobTravelWatch, JobGrowthWatch} {
+		if !names[want] {
+			t.Errorf("缺少任务 %s", want)
+		}
 	}
 }

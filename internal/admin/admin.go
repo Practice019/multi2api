@@ -42,6 +42,13 @@ type Config struct {
 	Ring      *logbuf.Ring
 	AuthDir   string
 
+	// Business 上游的账号级业务能力（成长/旅行/额度刷新）。
+	// nil = 该上游没有这些能力，相关面板降级为报错而非崩。
+	//
+	// 用消费方接口而不是具体类型：admin **不认识** workbuddy，
+	// 加第二个上游时本包零改动（见 upstream_jobs.go）。
+	Business UpstreamBusiness
+
 	// ResetModelsCache 清空模型目录缓存（由 server 包注入，避免 admin 反向依赖 server）。
 	ResetModelsCache func()
 	// ModelCatalog 取模型目录快照（成本系数来源）。nil = 未接线，统计里报 unavailable。
@@ -439,7 +446,9 @@ func (h *Handler) runCheckinAll() []scheduler.CheckinResult {
 			out = append(out, res)
 		}
 	}
-	h.cfg.Scheduler.RunTravelManual()
+	if h.cfg.Business != nil {
+		h.cfg.Business.RunTravelManual()
+	}
 	return out
 }
 
@@ -474,22 +483,39 @@ func (h *Handler) keepalive(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) creditsRefresh(w http.ResponseWriter, r *http.Request) {
 	body := decodeBody(r)
+	if h.cfg.Business == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无额度刷新能力")
+		return
+	}
 	if body.UID != "" {
-		res, ok := h.cfg.Scheduler.RefreshCredits(body.UID, "manual")
+		res, ok := h.cfg.Business.RefreshCredits(body.UID, "manual")
 		if !ok {
 			writeError(w, http.StatusNotFound, "账号不存在: "+body.UID)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"mode": "single", "result": res})
+		writeJSON(w, http.StatusOK, map[string]any{"mode": "single", "result": toCheckinResult(res)})
 		return
 	}
 	out := []scheduler.CheckinResult{}
 	for _, st := range h.cfg.Pool.List() {
-		if res, ok := h.cfg.Scheduler.RefreshCredits(st.UID, "manual"); ok {
-			out = append(out, res)
+		if res, ok := h.cfg.Business.RefreshCredits(st.UID, "manual"); ok {
+			out = append(out, toCheckinResult(res))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"mode": "all", "results": out})
+}
+
+// toCheckinResult 把上游的额度刷新结果转成调度器通用结果类型。
+//
+// 转换只在这一处做：上游不必 import scheduler，admin 也不必认识上游的类型。
+func toCheckinResult(res CheckinView) scheduler.CheckinResult {
+	return scheduler.CheckinResult{
+		UID:      res.UID,
+		Status:   res.Status,
+		Detail:   res.Detail,
+		Credits:  res.Credits,
+		HasQuota: res.HasQuota,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -507,10 +533,15 @@ func (h *Handler) travelAuth(uid string) (*auth.Auth, bool) {
 // travelList 账号级旅行列表：直接读守卫维护的内存快照，不发上游请求。
 // refresh=1 时强制全量回源一次（对应界面上的「刷新」按钮）。
 func (h *Handler) travelList(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("refresh") == "1" {
-		h.cfg.Scheduler.RefreshTravel(true, false)
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无旅行能力")
+		return
 	}
-	snaps := h.cfg.Scheduler.TravelSnapshots()
+	if r.URL.Query().Get("refresh") == "1" {
+		b.RefreshTravel(true, false)
+	}
+	snaps := b.TravelSnapshots()
 	// 池里有、但快照还没建起来的账号补一个空行，避免界面缺行让人以为是 bug。
 	seen := map[string]bool{}
 	for _, s := range snaps {
@@ -520,7 +551,7 @@ func (h *Handler) travelList(w http.ResponseWriter, r *http.Request) {
 		if seen[st.UID] {
 			continue
 		}
-		snaps = append(snaps, scheduler.TravelSnapshot{
+		snaps = append(snaps, TravelSnapshot{
 			UID: st.UID, Nickname: st.Nickname, Error: "尚未探测（点「刷新」）",
 		})
 	}
@@ -529,11 +560,11 @@ func (h *Handler) travelList(w http.ResponseWriter, r *http.Request) {
 	checkinHours, _ := h.cfg.Scheduler.Hours()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":         snaps,
-		"auto_claim":       h.cfg.Scheduler.TravelAutoClaimEnabled(),
+		"auto_claim":       b.TravelAutoClaimEnabled(),
 		"auto_depart":      h.cfg.Scheduler.CheckinEnabled(),
 		"checkin_hours":    checkinHours,
 		"location_id":      4,
-		"watch_interval_s": int64(h.cfg.Scheduler.WatchInterval().Seconds()),
+		"watch_interval_s": int64(b.WatchInterval().Seconds()),
 	})
 }
 
@@ -599,10 +630,15 @@ func (h *Handler) record(uid, kind, status, detail string, credits int64) {
 
 // travelDepart 派猫。uid 为空 = 全部账号（后台任务，含账号间限速）。
 func (h *Handler) travelDepart(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无旅行能力")
+		return
+	}
 	body := decodeBody(r)
 
 	if body.UID != "" {
-		res := h.cfg.Scheduler.TravelDepartFor(body.UID, "manual")
+		res := b.TravelDepartFor(body.UID, "manual")
 		if res.Status == checkinlog.StatusFail && strings.Contains(res.Detail, "账号不存在") {
 			writeError(w, http.StatusNotFound, res.Detail)
 			return
@@ -620,8 +656,8 @@ func (h *Handler) travelDepart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !h.task.start("travel-depart", func() []scheduler.CheckinResult {
-		return h.travelAll(func(uid string) scheduler.TravelActionResult {
-			return h.cfg.Scheduler.TravelDepartFor(uid, "manual")
+		return h.travelAll(func(uid string) TravelActionResult {
+			return b.TravelDepartFor(uid, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -632,10 +668,15 @@ func (h *Handler) travelDepart(w http.ResponseWriter, r *http.Request) {
 
 // travelClaim 领奖。uid 为空 = 全部账号（后台任务）。
 func (h *Handler) travelClaim(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无旅行能力")
+		return
+	}
 	body := decodeBody(r)
 
 	if body.UID != "" {
-		res := h.cfg.Scheduler.TravelClaimFor(body.UID, "manual")
+		res := b.TravelClaimFor(body.UID, "manual")
 		if res.Status == checkinlog.StatusFail && strings.Contains(res.Detail, "账号不存在") {
 			writeError(w, http.StatusNotFound, res.Detail)
 			return
@@ -653,8 +694,8 @@ func (h *Handler) travelClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !h.task.start("travel-claim", func() []scheduler.CheckinResult {
-		return h.travelAll(func(uid string) scheduler.TravelActionResult {
-			return h.cfg.Scheduler.TravelClaimFor(uid, "manual")
+		return h.travelAll(func(uid string) TravelActionResult {
+			return b.TravelClaimFor(uid, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -664,8 +705,8 @@ func (h *Handler) travelClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 // travelAll 对全部非禁用账号跑同一旅行动作，转成 CheckinResult 供任务槽统一呈现。
-// 跳过不写入结果列表（否则「全部派猫」会返回一堆 no-op 行），但已经由 scheduler 记进历史。
-func (h *Handler) travelAll(fn func(uid string) scheduler.TravelActionResult) []scheduler.CheckinResult {
+// 跳过不写入结果列表（否则「全部派猫」会返回一堆 no-op 行），但已经由上游记进历史。
+func (h *Handler) travelAll(fn func(uid string) TravelActionResult) []scheduler.CheckinResult {
 	out := []scheduler.CheckinResult{}
 	for _, st := range h.cfg.Pool.List() {
 		if st.Disabled {

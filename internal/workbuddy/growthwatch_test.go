@@ -1,19 +1,15 @@
-package scheduler
+package workbuddy
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
-	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -153,30 +149,19 @@ func (g *growthStub) handler() http.Handler {
 	})
 }
 
-func newGrowthHarness(t *testing.T, g *growthStub) (*Scheduler, *checkinlog.Log) {
+func newGrowthHarness(t *testing.T, g *growthStub) (*Provider, *checkinlog.Log) {
 	t.Helper()
-	srv := httptest.NewServer(g.handler())
-	t.Cleanup(srv.Close)
-
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Nickname: "测试号"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	log := checkinlog.New(filepath.Join(t.TempDir(), "checkin-log.json"), 30)
-	return New(Config{Pool: p, Upstream: up, Log: log}), log
+	srv := stubServer(t, g.handler())
+	s, _, log := newTestProviderWithLog(t, srv, testAuthNamed("u1", "测试号"))
+	return s, log
 }
 
 // newGrowthHarness2 池里放两个账号，用于验证「写操作只重探自己那个账号」。
-func newGrowthHarness2(t *testing.T, g *growthStub, uid1, uid2 string) *Scheduler {
+func newGrowthHarness2(t *testing.T, g *growthStub, uid1, uid2 string) *Provider {
 	t.Helper()
-	srv := httptest.NewServer(g.handler())
-	t.Cleanup(srv.Close)
-
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: uid1, AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Nickname: "甲"})
-	p.Add(&auth.Auth{UID: uid2, AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Nickname: "乙"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	log := checkinlog.New(filepath.Join(t.TempDir(), "checkin-log.json"), 30)
-	return New(Config{Pool: p, Upstream: up, Log: log})
+	srv := stubServer(t, g.handler())
+	s, _ := newTestProvider(t, srv, testAuthNamed(uid1, "甲"), testAuthNamed(uid2, "乙"))
+	return s
 }
 
 func defaultGrowthStub() *growthStub {
@@ -795,15 +780,11 @@ func (g *growthStub) handlerPerCode() http.Handler {
 	})
 }
 
-func newGrowthHarnessPerCode(t *testing.T, g *growthStub) *Scheduler {
+func newGrowthHarnessPerCode(t *testing.T, g *growthStub) *Provider {
 	t.Helper()
-	srv := httptest.NewServer(g.handlerPerCode())
-	t.Cleanup(srv.Close)
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999, Nickname: "测试号"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	log := checkinlog.New(filepath.Join(t.TempDir(), "checkin-log.json"), 30)
-	return New(Config{Pool: p, Upstream: up, Log: log})
+	srv := stubServer(t, g.handlerPerCode())
+	s, _ := newTestProvider(t, srv, testAuthNamed("u1", "测试号"))
+	return s
 }
 
 // 三种预期拒绝全部归为「跳过」，不报失败。

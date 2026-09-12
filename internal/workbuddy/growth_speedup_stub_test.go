@@ -1,19 +1,14 @@
 // mixedStub：/tasks 慢、其余快 —— 模拟真实上游的延迟分布。
 // 单独一个文件是因为它和 probeStub 的延迟模型不同（后者所有端点同延迟）。
-package scheduler
+package workbuddy
 
 import (
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/checkinlog"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
 )
 
 type mixedStub struct {
@@ -61,20 +56,14 @@ func (s *mixedStub) handler() http.Handler {
 	})
 }
 
-func newMixedHarness(t *testing.T, sb *mixedStub, accounts int) *Scheduler {
+func newMixedHarness(t *testing.T, sb *mixedStub, accounts int) *Provider {
 	t.Helper()
-	srv := httptest.NewServer(sb.handler())
-	t.Cleanup(srv.Close)
+	srv := stubServer(t, sb.handler())
 
-	p := pool.New("")
+	as := make([]*auth.Auth, 0, accounts)
 	for i := 0; i < accounts; i++ {
-		p.Add(&auth.Auth{
-			UID:         string(rune('a'+i)) + "-uid",
-			AccessToken: "at", RefreshToken: "rt",
-			ExpiresAt: 9999999999, Nickname: "账号",
-		})
+		as = append(as, testAuthNamed(string(rune('a'+i))+"-uid", "账号"))
 	}
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	log := checkinlog.New(filepath.Join(t.TempDir(), "c.json"), 30)
-	return New(Config{Pool: p, Upstream: up, Log: log})
+	s, _ := newTestProvider(t, srv, as...)
+	return s
 }

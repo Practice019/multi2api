@@ -6,7 +6,7 @@
 //	最慢单调用 1590ms（/tasks）
 //	并发化后理论上限 = 最慢那一个 ≈ 1590ms，可拿回 812ms（34%）
 //
-// 这 812ms 是**每次刷新的地板耗时**（Task 5 之后账号已并发，所以它不再被摊薄），
+// 这 812ms 是**每次刷新的地板耗时**（账号已并发，所以它不再被摊薄），
 // 因此值得单独优化。
 //
 // 判定方式：用可控延迟的 stub —— /tasks 睡 150ms、其余各睡 150ms。
@@ -15,20 +15,13 @@
 //	并发 = 约 150ms（受最慢支配）
 //
 // 用「显著小于串行」来判定，并断言 5 个端点都被调用过（不能为了快而漏调）。
-package scheduler
+package workbuddy
 
 import (
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/checkinlog"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
 )
 
 // probeStub 记录每个 growth 端点被调用的次数，并各自睡固定时长。
@@ -83,18 +76,12 @@ func (s *probeStub) handler() http.Handler {
 	})
 }
 
-func newProbeHarness(t *testing.T, delay time.Duration) (*Scheduler, *probeStub) {
+func newProbeHarness(t *testing.T, delay time.Duration) (*Provider, *probeStub) {
 	t.Helper()
 	pb := &probeStub{delay: delay}
-	srv := httptest.NewServer(pb.handler())
-	t.Cleanup(srv.Close)
-
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt",
-		ExpiresAt: 9999999999, Nickname: "测试号"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	log := checkinlog.New(filepath.Join(t.TempDir(), "c.json"), 30)
-	return New(Config{Pool: p, Upstream: up, Log: log}), pb
+	srv := stubServer(t, pb.handler())
+	s, _ := newTestProvider(t, srv, testAuthNamed("u1", "测试号"))
+	return s, pb
 }
 
 // TestProbeGrowthCallsAreConcurrent 5 个调用并发发起。

@@ -15,6 +15,7 @@ import (
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/clientlogin"
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
@@ -23,6 +24,7 @@ import (
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/workbuddy"
 )
 
 func main() {
@@ -121,19 +123,25 @@ func main() {
 		log.Printf("请求日志落盘: %s（保留 %d 天）", cfg.RequestLogPath, cfg.RequestLogKeepDays)
 	}
 
-	sch := scheduler.New(scheduler.Config{
-		Pool:                    p,
-		Upstream:                up,
-		CheckinHours:            cfg.Schedule.CheckinHours,
-		KeepaliveHours:          cfg.Schedule.KeepaliveHours,
-		CheckinDisabled:         !cfg.Schedule.CheckinEnabled,
-		KeepaliveDisabled:       !cfg.Schedule.KeepaliveEnabled,
-		Log:                     checkinLog,
+	// ---- 上游注册 ----
+	//
+	// 加新上游时**只在这里加一行** registry.Register(...)：核心包
+	// （gateway/pool/logbuf/admin/server/scheduler）一行都不用改。
+	//
+	// scheduler 不 import workbuddy —— 它通过 gateway.ExtOf[gateway.JobExt]
+	// 发现任务，方向是"核心读接口"，不是"核心认上游"。
+	registry := gateway.NewRegistry()
+	wb := workbuddy.NewWithConfig(workbuddy.Config{
+		// 账号池经适配器传入：上游包不得依赖 internal/pool（架构约束），
+		// 它只声明自己需要的六个方法。
+		Pool: poolAdapter{p: p},
+		Log:  checkinLog,
+
 		TravelAutoClaimDisabled: !cfg.TravelAutoClaim,
 		TravelWatchInterval:     cfg.TravelWatchInterval,
 
 		GrowthWatchInterval: cfg.GrowthWatchInterval,
-		// 传指针：nil 表示「未设置」，由 scheduler.New 决定默认（领奖开、补签开、其余关）。
+		// 传指针：nil 表示「未设置」，由 workbuddy 决定默认（领奖开、接单开、补签开、其余关）。
 		GrowthAutoClaim:  &cfg.GrowthAutoClaim,
 		GrowthAutoAccept: &cfg.GrowthAutoAccept,
 		GrowthAutoMakeup: &cfg.GrowthAutoMakeup,
@@ -141,6 +149,26 @@ func main() {
 		GrowthAutoOpen:   &cfg.GrowthAutoOpen,
 		GrowthAutoDraw:   &cfg.GrowthAutoDraw,
 	})
+	// 上游的 HTTP 客户端跟着 config 的超时一起装配（与改造前 upstream.New() 同一份配置）。
+	wb.SetClient(up)
+	if err := registry.Register(wb); err != nil {
+		log.Fatalf("注册上游失败: %v", err)
+	}
+	log.Printf("已注册上游: %v", registry.IDs())
+
+	sch := scheduler.New(scheduler.Config{
+		Pool:              p,
+		Upstream:          up,
+		CheckinHours:      cfg.Schedule.CheckinHours,
+		KeepaliveHours:    cfg.Schedule.KeepaliveHours,
+		CheckinDisabled:   !cfg.Schedule.CheckinEnabled,
+		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
+		Log:               checkinLog,
+		// 注册表交给调度器：它自己发现各上游的 JobExt 任务（成长/旅行守卫轮）。
+		Registry: registry,
+	})
+	// 签到收尾的搭车任务（旅行状态机）由上游提供，核心只负责在正确的时机喊一声。
+	sch.AddCheckinHook(wb)
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）：猫猫旅行同时停摆（搭签到便车）")
@@ -178,6 +206,10 @@ func main() {
 		}
 	}
 
+	// 上游业务能力的适配器：把 workbuddy 的类型转成 admin 的消费方接口类型
+	// （两侧类型结构相同但定义必须各自独立，见 upstream_business.go 的注释）。
+	biz := newBusinessAdapter(wb)
+
 	h := server.NewHandler(server.Config{
 		Pool:              p,
 		Upstream:          up,
@@ -189,9 +221,13 @@ func main() {
 		ModelCatalog:      server.ModelCatalog,
 		ModelCatalogState: server.ModelCatalogState,
 		Admin: admin.New(admin.Config{
-			Pool:              p,
-			Upstream:          up,
-			Scheduler:         sch,
+			Pool:      p,
+			Upstream:  up,
+			Scheduler: sch,
+			// 上游的账号级业务能力（成长/旅行/额度刷新）。admin 通过接口调用，
+			// **不认识 workbuddy** —— 加第二个上游时 admin 零改动。
+			// 类型转换由 upstream_business.go 的薄适配器承担。
+			Business:          biz,
 			OAuth:             oauth.New(cfg.OAuthBaseURL),
 			Log:               checkinLog,
 			Ring:              logRing,
@@ -200,7 +236,7 @@ func main() {
 			ResetModelsCache:  server.ResetModelsCache,
 			ModelCatalog:      server.ModelCatalog,
 			ModelCatalogState: modelCatalogState,
-			Settings: newSettingsStore(*cfgPath, cfg, sch, checkinLog, func(days int) {
+			Settings: newSettingsStore(*cfgPath, cfg, sch, biz, checkinLog, func(days int) {
 				if s := logRing.Sink(); s != nil {
 					s.SetKeepDays(days)
 				}
@@ -211,11 +247,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 核心调度循环：整点签到/保活 + 各上游通过 gateway.JobExt 注册的守卫任务
+	// （workbuddy 的成长/旅行守卫轮就在其中）。核心**不认识**具体任务名。
 	go sch.Run(ctx)
-	// 猫猫旅行自动领奖守卫：按 arrive_at 错峰检查，到站即领（可用 admin.travel_auto_claim 关掉）。
-	go sch.RunTravelWatcher(ctx, cfg.TravelWatchInterval)
-	// 成长中心守卫：领任务奖励 / 补签 / 连登兑换 / 开盲盒 / 抽奖（后三个默认关，见 config）。
-	go sch.RunGrowthWatcher(ctx, cfg.GrowthWatchInterval)
 	if cfg.TravelAutoClaim {
 		log.Printf("猫猫旅行自动领奖已开启（守卫轮 %s；按 arrive_at 错峰，到站即领）", cfg.TravelWatchInterval)
 	} else {

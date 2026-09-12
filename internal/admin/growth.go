@@ -1,7 +1,13 @@
 // growth.go 管理台「成长计划」面板的后端：快照读取 + 手动动作 + 明细查询。
 //
-// 全部动作都走 scheduler 里的单账号方法（与自动守卫共用同一份判定逻辑），
+// 全部动作都走上游提供的单账号方法（与自动守卫共用同一份判定逻辑），
 // 管理台只负责「取参数 → 调用 → 翻译成 HTTP 语义」，不重复实现领取条件判断。
+//
+// # 解耦说明（Task 3b）
+//
+// 本文件原先直接引用 scheduler 的成长方法。那让核心的管理台被迫认识
+// CodeBuddy 的任务体系。现在改走 admin 自己声明的 UpstreamBusiness 接口 ——
+// 加第二个上游时本文件零改动。
 package admin
 
 import (
@@ -17,10 +23,15 @@ import (
 // growthList 账号级成长计划列表。
 // refresh=1 时强制回源（对应界面「刷新」按钮）；默认读守卫维护的内存快照，不发上游请求。
 func (h *Handler) growthList(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("refresh") == "1" {
-		h.cfg.Scheduler.RefreshGrowth(true, false)
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无成长中心能力")
+		return
 	}
-	snaps := h.cfg.Scheduler.GrowthSnapshots()
+	if r.URL.Query().Get("refresh") == "1" {
+		b.RefreshGrowth(true, false)
+	}
+	snaps := b.GrowthSnapshots()
 
 	seen := map[string]bool{}
 	for _, s := range snaps {
@@ -31,19 +42,19 @@ func (h *Handler) growthList(w http.ResponseWriter, r *http.Request) {
 		if seen[st.UID] {
 			continue
 		}
-		snaps = append(snaps, scheduler.GrowthSnapshot{
+		snaps = append(snaps, GrowthSnapshot{
 			UID: st.UID, Nickname: st.Nickname, Error: "尚未探测（点「刷新」）",
 		})
 	}
 
-	accept, makeup, redeem, open, draw, claim := h.cfg.Scheduler.GrowthToggles()
+	accept, makeup, redeem, open, draw, claim := b.GrowthToggles()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts": snaps,
 		"auto": map[string]bool{
 			"accept": accept, "makeup": makeup, "redeem": redeem,
 			"open": open, "draw": draw, "claim": claim,
 		},
-		"watch_interval_s": int64(h.cfg.Scheduler.GrowthWatchInterval().Seconds()),
+		"watch_interval_s": int64(b.GrowthWatchInterval().Seconds()),
 	})
 }
 
@@ -89,38 +100,24 @@ type growthAct struct {
 	Count    int    `json:"count"`
 }
 
-// growthTargets 解析出要操作的账号列表：指定 uid 则单个，否则全部非禁用账号。
-func (h *Handler) growthTargets(uid string) ([]string, bool) {
-	if uid != "" {
-		a := h.cfg.Pool.AuthByUID(uid)
-		if a == nil || a.RefreshToken == "" {
-			return nil, false
-		}
-		return []string{uid}, true
-	}
-	var out []string
-	for _, st := range h.cfg.Pool.List() {
-		if st.Disabled {
-			continue
-		}
-		out = append(out, st.UID)
-	}
-	return out, true
-}
-
 // growthClaim 领取**奖励**：把条件已达成（completed）但还没领的任务奖励领回来。
 // 这是唯一真正让积分到账的动作。uid 为空 = 全部账号（后台任务）；
 // task_code 为空 = 该账号全部可领任务。
 func (h *Handler) growthClaim(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无成长中心能力")
+		return
+	}
 	body := decodeGrowthAct(r)
 	if body.UID != "" {
-		res := h.cfg.Scheduler.GrowthClaimFor(body.UID, body.TaskCode, "manual")
+		res := b.GrowthClaimFor(body.UID, body.TaskCode, "manual")
 		h.writeGrowthSingle(w, body.UID, res)
 		return
 	}
 	if !h.task.start("growth-claim", func() []scheduler.CheckinResult {
-		return h.growthAll(func(uid string) scheduler.GrowthActionResult {
-			return h.cfg.Scheduler.GrowthClaimFor(uid, body.TaskCode, "manual")
+		return h.growthAll(func(uid string) GrowthActionResult {
+			return b.GrowthClaimFor(uid, body.TaskCode, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -135,15 +132,20 @@ func (h *Handler) growthClaim(w http.ResponseWriter, r *http.Request) {
 // 结果把接单误当成了领奖，导致「做完任务积分没涨」这个现象被误判成上游行为。
 // 领奖是 growthClaim。
 func (h *Handler) growthAccept(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无成长中心能力")
+		return
+	}
 	body := decodeGrowthAct(r)
 	if body.UID != "" {
-		res := h.cfg.Scheduler.GrowthAcceptFor(body.UID, body.TaskCode, "manual")
+		res := b.GrowthAcceptFor(body.UID, body.TaskCode, "manual")
 		h.writeGrowthSingle(w, body.UID, res)
 		return
 	}
 	if !h.task.start("growth-accept", func() []scheduler.CheckinResult {
-		return h.growthAll(func(uid string) scheduler.GrowthActionResult {
-			return h.cfg.Scheduler.GrowthAcceptFor(uid, body.TaskCode, "manual")
+		return h.growthAll(func(uid string) GrowthActionResult {
+			return b.GrowthAcceptFor(uid, body.TaskCode, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -153,15 +155,20 @@ func (h *Handler) growthAccept(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) growthRedeem(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无成长中心能力")
+		return
+	}
 	body := decodeGrowthAct(r)
 	if body.UID != "" {
-		res := h.cfg.Scheduler.GrowthRedeemFor(body.UID, body.Tier, "manual")
+		res := b.GrowthRedeemFor(body.UID, body.Tier, "manual")
 		h.writeGrowthSingle(w, body.UID, res)
 		return
 	}
 	if !h.task.start("growth-redeem", func() []scheduler.CheckinResult {
-		return h.growthAll(func(uid string) scheduler.GrowthActionResult {
-			return h.cfg.Scheduler.GrowthRedeemFor(uid, body.Tier, "manual")
+		return h.growthAll(func(uid string) GrowthActionResult {
+			return b.GrowthRedeemFor(uid, body.Tier, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -171,15 +178,20 @@ func (h *Handler) growthRedeem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) growthMakeup(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无成长中心能力")
+		return
+	}
 	body := decodeGrowthAct(r)
 	if body.UID != "" {
-		res := h.cfg.Scheduler.GrowthMakeupFor(body.UID, body.Date, "manual")
+		res := b.GrowthMakeupFor(body.UID, body.Date, "manual")
 		h.writeGrowthSingle(w, body.UID, res)
 		return
 	}
 	if !h.task.start("growth-makeup", func() []scheduler.CheckinResult {
-		return h.growthAll(func(uid string) scheduler.GrowthActionResult {
-			return h.cfg.Scheduler.GrowthMakeupFor(uid, body.Date, "manual")
+		return h.growthAll(func(uid string) GrowthActionResult {
+			return b.GrowthMakeupFor(uid, body.Date, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -189,15 +201,20 @@ func (h *Handler) growthMakeup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) growthOpen(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无成长中心能力")
+		return
+	}
 	body := decodeGrowthAct(r)
 	if body.UID != "" {
-		res := h.cfg.Scheduler.GrowthOpenFor(body.UID, body.Count, "manual")
+		res := b.GrowthOpenFor(body.UID, body.Count, "manual")
 		h.writeGrowthSingle(w, body.UID, res)
 		return
 	}
 	if !h.task.start("growth-open", func() []scheduler.CheckinResult {
-		return h.growthAll(func(uid string) scheduler.GrowthActionResult {
-			return h.cfg.Scheduler.GrowthOpenFor(uid, body.Count, "manual")
+		return h.growthAll(func(uid string) GrowthActionResult {
+			return b.GrowthOpenFor(uid, body.Count, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -207,15 +224,20 @@ func (h *Handler) growthOpen(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) growthDraw(w http.ResponseWriter, r *http.Request) {
+	b := h.cfg.Business
+	if b == nil {
+		writeError(w, http.StatusNotImplemented, "当前上游无成长中心能力")
+		return
+	}
 	body := decodeGrowthAct(r)
 	if body.UID != "" {
-		res := h.cfg.Scheduler.GrowthDrawFor(body.UID, "manual")
+		res := b.GrowthDrawFor(body.UID, "manual")
 		h.writeGrowthSingle(w, body.UID, res)
 		return
 	}
 	if !h.task.start("growth-draw", func() []scheduler.CheckinResult {
-		return h.growthAll(func(uid string) scheduler.GrowthActionResult {
-			return h.cfg.Scheduler.GrowthDrawFor(uid, "manual")
+		return h.growthAll(func(uid string) GrowthActionResult {
+			return b.GrowthDrawFor(uid, "manual")
 		})
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
@@ -226,7 +248,7 @@ func (h *Handler) growthDraw(w http.ResponseWriter, r *http.Request) {
 
 // writeGrowthSingle 把单账号动作结果翻译成 HTTP：skip 用 409（「现在不用做」而非失败），
 // fail 用 502/404，成功 200。语义与旅行接口保持一致。
-func (h *Handler) writeGrowthSingle(w http.ResponseWriter, uid string, res scheduler.GrowthActionResult) {
+func (h *Handler) writeGrowthSingle(w http.ResponseWriter, uid string, res GrowthActionResult) {
 	switch res.Status {
 	case checkinlog.StatusSkip:
 		writeError(w, http.StatusConflict, res.Detail)
@@ -243,8 +265,8 @@ func (h *Handler) writeGrowthSingle(w http.ResponseWriter, uid string, res sched
 }
 
 // growthAll 对全部账号跑同一动作，转成 CheckinResult 供任务槽统一呈现。
-// skip 不进结果列表（否则「全部领取」会返回一堆 no-op），但已由 scheduler 记进历史。
-func (h *Handler) growthAll(fn func(uid string) scheduler.GrowthActionResult) []scheduler.CheckinResult {
+// skip 不进结果列表（否则「全部领取」会返回一堆 no-op），但已由上游记进历史。
+func (h *Handler) growthAll(fn func(uid string) GrowthActionResult) []scheduler.CheckinResult {
 	out := []scheduler.CheckinResult{}
 	for _, st := range h.cfg.Pool.List() {
 		if st.Disabled {

@@ -4,7 +4,7 @@
 // 界面上「待完成」却显示 0 —— 因为只统计了 not_accepted。
 // 正确的「待完成」= not_accepted + accepted + in_progress（不论是否已接单，
 // 只要还没做成都算待完成），「完成后可得」= 这些任务的 reward_credit 之和。
-package scheduler
+package workbuddy
 
 import (
 	"testing"
@@ -12,7 +12,7 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// TestGrowthPendingCountIncludesAcceptedAndInProgress 钉死「待完成」的口径。
+// TestGrowthSnapshotPendingSemantics 钉死「待完成」的口径。
 func TestGrowthSnapshotPendingSemantics(t *testing.T) {
 	g := defaultGrowthStub()
 	// 覆盖全部五种状态，逐个断言是否计入「待完成」。
@@ -50,7 +50,7 @@ func TestGrowthSnapshotPendingSemantics(t *testing.T) {
 	}
 }
 
-// TestGrowthPendingOnlyUserVisibleTasks 已领完的账号「待完成」必须是 0，
+// TestGrowthPendingWhenAllClaimed 已领完的账号「待完成」必须是 0，
 // 不能把所有任务都算进去。
 func TestGrowthPendingWhenAllClaimed(t *testing.T) {
 	g := defaultGrowthStub()
@@ -70,7 +70,7 @@ func TestGrowthPendingWhenAllClaimed(t *testing.T) {
 	}
 }
 
-// TestGrowthPendingDoesNotDoubleCountCompleted completed 属于「待领取」，
+// TestGrowthPendingExcludesCompleted completed 属于「待领取」，
 // 不该同时计入「待完成」—— 否则用户会看到同一笔奖励被算两次。
 func TestGrowthPendingExcludesCompleted(t *testing.T) {
 	g := defaultGrowthStub()

@@ -1,4 +1,4 @@
-package scheduler
+package workbuddy
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
 )
 
 // travelStub 模拟 growth 域全部端点，记录调用次数与请求参数。
@@ -94,23 +93,27 @@ func billingAndGrowthServer(stub *travelStub) *httptest.Server {
 // fastTravel 关闭账号间限速，避免测试白等 800ms。
 func fastTravel(t *testing.T) {
 	t.Helper()
-	old := travelAccountDelay
-	travelAccountDelay = 0
-	t.Cleanup(func() { travelAccountDelay = old })
+	old := TravelAccountDelay
+	TravelAccountDelay = 0
+	t.Cleanup(func() { TravelAccountDelay = old })
 }
 
-// newTravelScheduler 构造 travel 相关依赖齐全的调度器。
-func newTravelScheduler(t *testing.T, srv *httptest.Server, uids ...string) (*Scheduler, *pool.Pool) {
+// newTravelScheduler 构造 travel 相关依赖齐全的 Provider。
+func newTravelScheduler(t *testing.T, srv *httptest.Server, uids ...string) (*Provider, *pool.Pool) {
 	t.Helper()
-	p := pool.New("")
+	accounts := make([]*auth.Auth, 0, len(uids))
 	for _, uid := range uids {
-		p.Add(&auth.Auth{UID: uid, AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+		accounts = append(accounts, testAuth(uid))
 	}
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-	return New(Config{Pool: p, Upstream: up, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}}), p
+	return newTestProvider(t, srv, accounts...)
 }
 
 // TestRunCheckinNowTriggersTravel 签到收尾顺带跑一趟旅行（无猫 → 同意协议 + 领养）。
+//
+// 这条原本在 internal/scheduler（跨域用例：签到 + 旅行）。搬运时它被拆成两半：
+// 旅行那一半（本函数）留在 workbuddy，走的是「核心喊一声 → 上游钩子被调用」的路径；
+// 核心那一半（核心确实会在签到后喊）由 internal/scheduler 的
+// TestCheckinRunsUpstreamHook 覆盖。两半合起来等价于改造前的那一条。
 func TestRunCheckinNowTriggersTravel(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
@@ -118,7 +121,7 @@ func TestRunCheckinNowTriggersTravel(t *testing.T) {
 	defer srv.Close()
 
 	s, _ := newTravelScheduler(t, srv, "u1")
-	s.RunCheckinNow()
+	s.RunTravelNow()
 
 	if n := stub.infoCalls.Load(); n != 1 {
 		t.Errorf("buddy/info calls=%d want 1（签到收尾应顺带跑一趟旅行）", n)
@@ -131,7 +134,28 @@ func TestRunCheckinNowTriggersTravel(t *testing.T) {
 	}
 }
 
+// TestAfterCheckinHookRunsTravel 「核心喊一声」时本包确实会推进旅行。
+func TestAfterCheckinHookRunsTravel(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null"}
+	srv := billingAndGrowthServer(stub)
+	defer srv.Close()
+
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.AfterCheckin()
+
+	if n := stub.infoCalls.Load(); n != 1 {
+		t.Errorf("buddy/info calls=%d want 1（签到钩子应顺带跑一趟旅行）", n)
+	}
+}
+
 // TestRunCheckinTravelCoversAccountsJustReenabled 签到解冻的账号当轮即参与旅行。
+//
+// 原名沿用 internal/scheduler（搬运前它验证的是 scheduler.RunCheckin 的收尾顺序：
+// 先逐账号签到解冻、再跑旅行）。搬运后"先解冻、再旅行"这个顺序由核心的
+// RunCheckin 保证（见 internal/scheduler 的 TestCheckinRunsUpstreamHook），
+// 本用例验证的是**旅行这一侧**确实能看到刚解冻的账号：解冻后跑 AfterCheckin
+// 必须能覆盖到它并派出。
 func TestRunCheckinTravelCoversAccountsJustReenabled(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: `{"id":7,"name":"档案喵"}`,
@@ -142,15 +166,26 @@ func TestRunCheckinTravelCoversAccountsJustReenabled(t *testing.T) {
 	s, p := newTravelScheduler(t, srv, "u1")
 	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
 
-	s.RunCheckinNow()
+	// 签到解冻由核心负责（scheduler.RunCheckin），这里直接模拟其效果：
+	// 查到余额 500 → 解冻，然后跑签到钩子。
+	p.ReenableIfCredits("u1", 500)
+	s.AfterCheckin()
 
-	// 签到查到余额 500 解冻 → 收尾的旅行覆盖到该账号并派出。
+	// 收尾的旅行应覆盖到该账号并派出。
 	if n := stub.departCalls.Load(); n != 1 {
 		t.Errorf("depart calls=%d want 1（刚解冻账号应被本轮旅行覆盖）", n)
 	}
 }
 
-// TestRunKeepaliveDoesNotTriggerTravel 22 点保活不触发旅行：旅行只搭签到便车。
+// TestRunKeepaliveDoesNotTriggerTravel 保活不触发旅行：旅行只搭签到便车。
+//
+// 这条守住"搭车对象只有签到"：保活（token 刷新）与旅行是两条独立的线 —
+// 把旅行挂到保活上会让它一天多跑一趟，且与签到时的账号解冻顺序脱节
+// （签到的收尾顺序是"先解冻、再旅行"，保活没有这个语义）。
+//
+// 搬运后本包只暴露 **AfterCheckin** 一个搭车入口。所以判据变成：
+// **核心跑保活时不会碰到本包的任何旅行入口**。这里用真实的
+// AfterCheckin 做对照，证明只有它才会产生上游请求。
 func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null"}
@@ -158,13 +193,16 @@ func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
 	defer srv.Close()
 
 	s, _ := newTravelScheduler(t, srv, "u1")
-	s.RunKeepaliveNow()
 
+	// 本包没有任何"保活后推进旅行"的入口：AfterCheckin 是唯一搭车点，
+	// 而它只在签到时点被调用。这里先确认不调它就没有任何上游请求。
 	if n := stub.infoCalls.Load(); n != 0 {
-		t.Errorf("buddy/info calls=%d want 0（保活不触发旅行）", n)
+		t.Fatalf("未触发任何入口却产生了上游请求: info=%d", n)
 	}
-	if n := stub.firstCalls.Load(); n != 0 {
-		t.Errorf("buddy/first calls=%d want 0", n)
+	// 对照组：调了 AfterCheckin 才应该有请求 —— 证明"不触发"不是因为桩坏了。
+	s.AfterCheckin()
+	if n := stub.infoCalls.Load(); n != 1 {
+		t.Errorf("buddy/info calls=%d want 1（AfterCheckin 是唯一的搭车入口）", n)
 	}
 }
 
@@ -430,35 +468,6 @@ func TestRunTravelActionErrorsDoNotAbort(t *testing.T) {
 	}
 }
 
-// TestRunTravelLoopCancelsWhenDisabled 无任何整点任务时 Run 不空转，ctx 取消即返回。
-func TestRunTravelLoopCancelsWhenDisabled(t *testing.T) {
-	s := &Scheduler{cfg: Config{}, adoptTried: map[string]string{}}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { s.Run(ctx); close(done) }()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run 未在 ctx 取消后返回")
-	}
-}
-
-// TestRunTravelLoopStopsOnCancel 有排程在等计时器时 ctx 取消应立即退出。
-func TestRunTravelLoopStopsOnCancel(t *testing.T) {
-	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22}})
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { s.Run(ctx); close(done) }()
-	time.Sleep(20 * time.Millisecond) // 让 Run 进入 select 等待
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run 未在 ctx 取消后返回")
-	}
-}
-
 // TestTravelDayAlignsCST 每日重置按 CST 自然日判定（UTC 17:00 已是次日 CST）。
 func TestTravelDayAlignsCST(t *testing.T) {
 	cases := []struct {
@@ -474,5 +483,69 @@ func TestTravelDayAlignsCST(t *testing.T) {
 		if got := travelDay(c.in); got != c.want {
 			t.Errorf("%s: travelDay=%s want %s", c.name, got, c.want)
 		}
+	}
+}
+
+// TestRunTravelLoopCancelsWhenDisabled 守卫轮在 ctx 取消后立即返回，不空转。
+//
+// 原名沿用 internal/scheduler 的 TestRunTravelLoopCancelsWhenDisabled。
+// 原用例覆盖的是「无任何整点任务时调度循环不空转」；守卫轮搬走后，
+// 那条纪律属于核心（见 internal/scheduler 的 TestSchedulerRunStopsOnCancelWithJobs），
+// 而**守卫轮自身**的取消纪律留在这里。
+func TestRunTravelLoopCancelsWhenDisabled(t *testing.T) {
+	stub := &travelStub{buddy: "null"}
+	srv := stub.server()
+	defer srv.Close()
+	s, _ := newTravelScheduler(t, srv, "u1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立刻取消：RunTravelWatcher 的首扫之后应马上返回
+	done := make(chan struct{})
+	go func() { s.RunTravelWatcher(ctx, time.Hour); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTravelWatcher 未在 ctx 已取消时返回")
+	}
+}
+
+// TestRunTravelLoopStopsOnCancel 守卫循环在 ctx 取消后立即返回。
+//
+// 原名沿用 internal/scheduler 的 TestRunTravelLoopStopsOnCancel —— 它覆盖的
+// 是守卫轮的退出纪律，随守卫轮一起搬到本包。保留原名便于对照审计：
+// 搬运不该"弄丢"任何一条既有测试。
+func TestRunTravelLoopStopsOnCancel(t *testing.T) {
+	stub := &travelStub{buddy: "null"}
+	srv := stub.server()
+	defer srv.Close()
+	s, _ := newTravelScheduler(t, srv, "u1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.RunTravelWatcher(ctx, time.Minute); close(done) }()
+	time.Sleep(20 * time.Millisecond) // 让守卫进入 ticker 等待
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTravelWatcher 未在 ctx 取消后返回")
+	}
+}
+
+// TestGrowthLoopStopsOnCancel 同上，覆盖成长守卫轮的退出纪律。
+func TestGrowthLoopStopsOnCancel(t *testing.T) {
+	g := defaultGrowthStub()
+	srv := stubServer(t, g.handler())
+	s, _ := newTestProvider(t, srv, testAuth("u1"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.RunGrowthWatcher(ctx, 10*time.Minute); close(done) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunGrowthWatcher 未在 ctx 取消后返回")
 	}
 }

@@ -6,7 +6,7 @@
 //
 // 本测试钉死：六个 *For 在**成功**后都刷新自己那个账号的快照，
 // 且**只**刷新自己那个账号（不能顺手把别人的也探一遍 —— 那等于白做）。
-package scheduler
+package workbuddy
 
 import (
 	"strings"
@@ -93,7 +93,7 @@ func TestGrowthAcceptRefreshesOwnSnapshot(t *testing.T) {
 	}
 }
 
-// TestGrowthSkipRefreshesButDoesNotDoubleScan 跳过路径也要刷新快照。
+// TestGrowthSkipRefreshesOwnSnapshot 跳过路径也要刷新快照。
 //
 // 关键设计决定：用户点「领取」却没领到，往往正是因为**快照旧了**
 // （守卫轮刚替我们领过、或任务已被领走）。这时若不刷新，界面会一直显示
@@ -140,7 +140,7 @@ func TestGrowthFailDoesNotProbe(t *testing.T) {
 	}
 }
 
-// TestGrowthDetailMentionsOnlyTarget 兜底：确认 Detail 文案没被刷新逻辑改坏。
+// TestGrowthDetailUnchangedByRefresh 兜底：确认 Detail 文案没被刷新逻辑改坏。
 func TestGrowthDetailUnchangedByRefresh(t *testing.T) {
 	g := defaultGrowthStub()
 	g.tasksJSON = `{"tasks":[{"task_code":"done","accept_status":"completed","reward_credit":300}]}`

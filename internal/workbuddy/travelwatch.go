@@ -9,7 +9,11 @@
 // 同一份快照同时供管理台读取：UI 每次刷新读内存缓存，不发上游请求；
 // 只有用户显式点「刷新」或 ?refresh=1 才强制全量回源。这样 N 个账号的
 // 上游开销固定为「每个到站时刻一次」，与页面刷新频率无关。
-package scheduler
+//
+// # 搬运说明（Task 3b）
+//
+// 本文件原先在 internal/scheduler/travelwatch.go。
+package workbuddy
 
 import (
 	"context"
@@ -22,9 +26,6 @@ import (
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/upstream"
 )
-
-// 触发来源：自动（守卫领奖）。
-const triggerAuto = "auto"
 
 // travelIdleRecheck 空闲账号的复查间隔（无猫或已领完时的兜底）。
 const travelIdleRecheck = 30 * time.Minute
@@ -84,43 +85,43 @@ func newTravelWatchState(autoClaim bool) *travelWatchState {
 }
 
 // TravelAutoClaimEnabled 报告自动领奖是否开启。
-func (s *Scheduler) TravelAutoClaimEnabled() bool {
-	if s.travel == nil {
+func (p *Provider) TravelAutoClaimEnabled() bool {
+	if p.travel == nil {
 		return false
 	}
-	s.travel.mu.Lock()
-	defer s.travel.mu.Unlock()
-	return s.travel.autoClaim
+	p.travel.mu.Lock()
+	defer p.travel.mu.Unlock()
+	return p.travel.autoClaim
 }
 
 // WatchInterval 返回守卫轮间隔（供管理台展示；<=0 表示回落默认）。
-func (s *Scheduler) WatchInterval() time.Duration {
-	if s.cfg.TravelWatchInterval > 0 {
-		return s.cfg.TravelWatchInterval
+func (p *Provider) WatchInterval() time.Duration {
+	if p.cfg.TravelWatchInterval > 0 {
+		return p.cfg.TravelWatchInterval
 	}
 	return time.Minute
 }
 
 // SetTravelAutoClaim 运行时开关自动领奖。
-func (s *Scheduler) SetTravelAutoClaim(on bool) {
-	if s.travel == nil {
+func (p *Provider) SetTravelAutoClaim(on bool) {
+	if p.travel == nil {
 		return
 	}
-	s.travel.mu.Lock()
-	s.travel.autoClaim = on
-	s.travel.mu.Unlock()
+	p.travel.mu.Lock()
+	p.travel.autoClaim = on
+	p.travel.mu.Unlock()
 	log.Printf("scheduler: 猫猫旅行自动领奖 -> %v", on)
 }
 
 // TravelSnapshots 返回当前缓存快照（按 uid 排序）；不触发任何上游请求。
-func (s *Scheduler) TravelSnapshots() []TravelSnapshot {
-	if s.travel == nil {
+func (p *Provider) TravelSnapshots() []TravelSnapshot {
+	if p.travel == nil {
 		return nil
 	}
-	s.travel.mu.Lock()
-	defer s.travel.mu.Unlock()
-	out := make([]TravelSnapshot, 0, len(s.travel.snapshots))
-	for _, v := range s.travel.snapshots {
+	p.travel.mu.Lock()
+	defer p.travel.mu.Unlock()
+	out := make([]TravelSnapshot, 0, len(p.travel.snapshots))
+	for _, v := range p.travel.snapshots {
 		// 冷却剩余时间随时间变化，读取时重算，避免展示滞后的秒数。
 		if v.State == travelStateTraveling && v.ArriveAt > 0 {
 			at := time.Unix(v.ArriveAt, 0)
@@ -132,9 +133,9 @@ func (s *Scheduler) TravelSnapshots() []TravelSnapshot {
 	return out
 }
 
-// travelFirstCreds 取账号凭证；无凭证返回 nil。
-func (s *Scheduler) travelFirstCreds(uid string) *auth.Auth {
-	a := s.cfg.Pool.AuthByUID(uid)
+// creds 取账号凭证；无凭证返回 nil。
+func (p *Provider) creds(uid string) *auth.Auth {
+	a := p.cfg.Pool.AuthByUID(uid)
 	if a == nil || a.RefreshToken == "" {
 		return nil
 	}
@@ -143,35 +144,35 @@ func (s *Scheduler) travelFirstCreds(uid string) *auth.Auth {
 
 // probeTravel 查一次猫档案 + 旅行状态，写缓存，返回状态。
 // buddyErr/stateErr 都只记录不中断：猫档案查不到不该让整行消失。
-func (s *Scheduler) probeTravel(uid string) (*upstream.TravelState, *TravelSnapshot) {
-	a := s.travelFirstCreds(uid)
+func (p *Provider) probeTravel(uid string) (*upstream.TravelState, *TravelSnapshot) {
+	a := p.creds(uid)
 	snap := TravelSnapshot{UID: uid, ObservedAt: time.Now()}
 	if a == nil {
 		snap.Error = "无可用凭证"
-		s.storeSnapshot(uid, snap)
+		p.storeSnapshot(uid, snap)
 		return nil, &snap
 	}
 	snap.Nickname = a.Nickname
 
-	buddy, err := s.cfg.Upstream.BuddyInfo(a)
+	buddy, err := p.client.BuddyInfo(a)
 	if err != nil {
 		snap.Error = "猫档案查询失败: " + shortErr(err)
-		s.storeSnapshot(uid, snap)
+		p.storeSnapshot(uid, snap)
 		return nil, &snap
 	}
 	if buddy == nil {
 		snap.HasBuddy = false
-		s.storeSnapshot(uid, snap)
+		p.storeSnapshot(uid, snap)
 		return nil, &snap
 	}
 	snap.HasBuddy = true
 	snap.BuddyName = buddy.Name
 	snap.BuddyRarity = buddy.Rarity
 
-	ts, err := s.cfg.Upstream.TravelStatus(a)
+	ts, err := p.client.TravelStatus(a)
 	if err != nil {
 		snap.Error = "旅行状态查询失败: " + shortErr(err)
-		s.storeSnapshot(uid, snap)
+		p.storeSnapshot(uid, snap)
 		return nil, &snap
 	}
 
@@ -188,22 +189,22 @@ func (s *Scheduler) probeTravel(uid string) (*upstream.TravelState, *TravelSnaps
 	if rem, ok := ts.RemainingUntilArrive(time.Now()); ok {
 		snap.RemainingSec = int64(rem.Seconds())
 	}
-	s.storeSnapshot(uid, snap)
+	p.storeSnapshot(uid, snap)
 	return ts, &snap
 }
 
-func (s *Scheduler) storeSnapshot(uid string, snap TravelSnapshot) {
-	if s.travel == nil {
+func (p *Provider) storeSnapshot(uid string, snap TravelSnapshot) {
+	if p.travel == nil {
 		return
 	}
-	s.travel.mu.Lock()
-	s.travel.snapshots[uid] = snap
-	s.travel.mu.Unlock()
+	p.travel.mu.Lock()
+	p.travel.snapshots[uid] = snap
+	p.travel.mu.Unlock()
 }
 
 // scheduleNextCheck 按刚查到的状态排下次检查时刻。
-func (s *Scheduler) scheduleNextCheck(uid string, ts *upstream.TravelState, claimed bool) {
-	if s.travel == nil {
+func (p *Provider) scheduleNextCheck(uid string, ts *upstream.TravelState, claimed bool) {
+	if p.travel == nil {
 		return
 	}
 	now := time.Now()
@@ -220,20 +221,48 @@ func (s *Scheduler) scheduleNextCheck(uid string, ts *upstream.TravelState, clai
 	default:
 		next = now.Add(travelIdleRecheck)
 	}
-	s.travel.mu.Lock()
-	s.travel.due[uid] = next
-	s.travel.mu.Unlock()
+	p.travel.mu.Lock()
+	p.travel.due[uid] = next
+	p.travel.mu.Unlock()
 }
 
-// isDue 报告某账号是否到检查时刻（无记录视为立即到期）。
-func (s *Scheduler) isDue(uid string, now time.Time) bool {
-	if s.travel == nil {
+// IsDue 报告某账号是否到检查时刻（无记录视为立即到期）。
+func (p *Provider) IsDue(uid string, now time.Time) bool {
+	if p.travel == nil {
 		return true
 	}
-	s.travel.mu.Lock()
-	defer s.travel.mu.Unlock()
-	at, ok := s.travel.due[uid]
+	p.travel.mu.Lock()
+	defer p.travel.mu.Unlock()
+	at, ok := p.travel.due[uid]
 	return !ok || !now.Before(at)
+}
+
+// anyDue 报告是否有任一账号到期（守卫轮的 Due 判据）。
+//
+// 为什么需要它：守卫轮不是固定间隔任务 —— 每轮该不该打上游，取决于
+// 「有没有账号到了它的下次检查时刻」。用一个全局固定间隔会让在途账号
+// 被反复打扰（实测这会明显抬高上游请求量）。所以把判断交给上游自己。
+//
+// 无快照（首次）视为到期：启动时要先全量扫一趟把缓存填满。
+func (p *Provider) anyDue(now time.Time) bool {
+	if p.travel == nil {
+		return false
+	}
+	p.travel.mu.Lock()
+	if len(p.travel.due) == 0 && len(p.travel.snapshots) == 0 {
+		p.travel.mu.Unlock()
+		return true
+	}
+	due := false
+	for uid := range p.travel.snapshots {
+		at, ok := p.travel.due[uid]
+		if !ok || !now.Before(at) {
+			due = true
+			break
+		}
+	}
+	p.travel.mu.Unlock()
+	return due
 }
 
 // ---------------------------------------------------------------------------
@@ -241,14 +270,14 @@ func (s *Scheduler) isDue(uid string, now time.Time) bool {
 // ---------------------------------------------------------------------------
 
 // TravelDepartFor 单账号派猫：先查状态，不满足条件记 skip 并返回原因。
-func (s *Scheduler) TravelDepartFor(uid, trigger string) TravelActionResult {
+func (p *Provider) TravelDepartFor(uid, trigger string) TravelActionResult {
 	res := TravelActionResult{UID: uid, Action: "depart"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
-	ts, _ := s.probeTravel(uid)
+	ts, _ := p.probeTravel(uid)
 	if ts == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "旅行状态查询失败"
 		return res
@@ -262,32 +291,32 @@ func (s *Scheduler) TravelDepartFor(uid, trigger string) TravelActionResult {
 	case ts.State == travelStateArrived:
 		res.Status, res.Detail = checkinlog.StatusSkip, "猫已到站，先领奖再派"
 	default:
-		if err := s.cfg.Upstream.TravelDepart(a, travelLocationID); err != nil {
+		if err := p.client.TravelDepart(a, TravelLocationID); err != nil {
 			res.Status, res.Detail = checkinlog.StatusFail, "派出失败: "+shortErr(err)
 		} else {
 			res.Status, res.Detail = checkinlog.StatusOK, "已派出"
 			// 派出成功：立刻重新排下次检查到到站时刻，自动领奖才能踩点。
-			if st, _ := s.probeTravel(uid); st != nil {
+			if st, _ := p.probeTravel(uid); st != nil {
 				res.ArriveAt = st.ArriveAt
-				s.scheduleNextCheck(uid, st, false)
+				p.scheduleNextCheck(uid, st, false)
 			} else {
-				s.scheduleNextCheck(uid, nil, false)
+				p.scheduleNextCheck(uid, nil, false)
 			}
 		}
 	}
-	s.recordTravel(uid, res, trigger)
+	p.recordTravel(uid, res, trigger)
 	return res
 }
 
 // TravelClaimFor 单账号领奖：先查状态，未到站记 skip。
-func (s *Scheduler) TravelClaimFor(uid, trigger string) TravelActionResult {
+func (p *Provider) TravelClaimFor(uid, trigger string) TravelActionResult {
 	res := TravelActionResult{UID: uid, Action: "claim"}
-	a := s.travelFirstCreds(uid)
+	a := p.creds(uid)
 	if a == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "账号不存在或无可用凭证"
 		return res
 	}
-	ts, _ := s.probeTravel(uid)
+	ts, _ := p.probeTravel(uid)
 	if ts == nil {
 		res.Status, res.Detail = checkinlog.StatusFail, "旅行状态查询失败"
 		return res
@@ -299,33 +328,33 @@ func (s *Scheduler) TravelClaimFor(uid, trigger string) TravelActionResult {
 	case ts.RecordID == 0:
 		res.Status, res.Detail = checkinlog.StatusSkip, "上游未返回 record_id，无法领奖"
 	default:
-		reward, err := s.cfg.Upstream.TravelClaim(a, ts.RecordID)
+		reward, err := p.client.TravelClaim(a, ts.RecordID)
 		if err != nil {
 			res.Status, res.Detail = checkinlog.StatusFail, "领奖失败: "+shortErr(err)
 		} else {
 			res.Status, res.Detail, res.Credits = checkinlog.StatusOK, "已领奖", reward
 			// 领完立刻把余额同步进池，界面马上能看到积分变化。
-			if remain, qerr := s.cfg.Upstream.UserResource(a); qerr == nil {
-				s.cfg.Pool.SetCredits(uid, remain)
+			if remain, qerr := p.client.UserResource(a); qerr == nil {
+				p.cfg.Pool.SetCredits(uid, remain)
 			}
-			s.scheduleNextCheck(uid, nil, true)
+			p.scheduleNextCheck(uid, nil, true)
 		}
 	}
-	s.recordTravel(uid, res, trigger)
+	p.recordTravel(uid, res, trigger)
 	return res
 }
 
-func (s *Scheduler) recordTravel(uid string, res TravelActionResult, trigger string) {
-	if s.cfg.Log == nil {
+func (p *Provider) recordTravel(uid string, res TravelActionResult, trigger string) {
+	if p.cfg.Log == nil {
 		return
 	}
 	kind := checkinlog.KindTravel
 	if res.Status == checkinlog.StatusSkip {
 		// 跳过也记：否则界面上「点了没反应」无从解释。
-		s.record(uid, kind, res.Status, res.Detail, 0, trigger)
+		p.record(uid, kind, res.Status, res.Detail, 0, trigger)
 		return
 	}
-	s.record(uid, kind, res.Status, res.Detail, res.Credits, trigger)
+	p.record(uid, kind, res.Status, res.Detail, res.Credits, trigger)
 }
 
 // ---------------------------------------------------------------------------
@@ -334,41 +363,45 @@ func (s *Scheduler) recordTravel(uid string, res TravelActionResult, trigger str
 
 // RefreshTravel 扫描账号并刷新快照。force=false 时只查「到期」的账号。
 // autoClaim 为真且发现已到站时立即领奖。返回扫描后的全量快照。
-func (s *Scheduler) RefreshTravel(force, autoClaim bool) []TravelSnapshot {
+func (p *Provider) RefreshTravel(force, autoClaim bool) []TravelSnapshot {
 	now := time.Now()
-	for _, st := range s.cfg.Pool.List() {
+	for _, st := range p.cfg.Pool.List() {
 		if st.Disabled {
 			continue
 		}
-		if !force && !s.isDue(st.UID, now) {
+		if !force && !p.IsDue(st.UID, now) {
 			continue
 		}
-		ts, _ := s.probeTravel(st.UID)
+		ts, _ := p.probeTravel(st.UID)
 		claimed := false
 		if autoClaim && ts != nil && ts.State == travelStateArrived && ts.RecordID != 0 {
-			res := s.TravelClaimFor(st.UID, triggerAuto)
+			res := p.TravelClaimFor(st.UID, triggerAuto)
 			claimed = res.Status == checkinlog.StatusOK
 			if res.Status == checkinlog.StatusSkip {
 				// 到站却领不到（比如 record_id 缺失）：退化为半小时后再试，不空转。
-				s.scheduleNextCheck(st.UID, nil, false)
+				p.scheduleNextCheck(st.UID, nil, false)
 				continue
 			}
 		}
-		s.scheduleNextCheck(st.UID, ts, claimed)
+		p.scheduleNextCheck(st.UID, ts, claimed)
 	}
-	return s.TravelSnapshots()
+	return p.TravelSnapshots()
 }
 
 // RunTravelWatcher 常驻守卫：启动即全量扫一次填满缓存，之后按每个账号的
 // 到站时刻错峰检查。ctx 取消即退出。
-func (s *Scheduler) RunTravelWatcher(ctx context.Context, interval time.Duration) {
-	if s.travel == nil {
+//
+// 注意：生产路径**不再**由 cmd/server 直接调用它 —— 它现在通过 Provider.Jobs()
+// 注册给核心调度器，由调度器按 Due 判断错峰执行。保留这个方法是为了让
+// 既有调用点（以及"立即跑一轮"的语义）零改动。
+func (p *Provider) RunTravelWatcher(ctx context.Context, interval time.Duration) {
+	if p.travel == nil {
 		return
 	}
 	if interval <= 0 {
 		interval = time.Minute
 	}
-	s.RefreshTravel(true, s.TravelAutoClaimEnabled())
+	p.RefreshTravel(true, p.TravelAutoClaimEnabled())
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -377,7 +410,7 @@ func (s *Scheduler) RunTravelWatcher(ctx context.Context, interval time.Duration
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.RefreshTravel(false, s.TravelAutoClaimEnabled())
+			p.RefreshTravel(false, p.TravelAutoClaimEnabled())
 		}
 	}
 }
