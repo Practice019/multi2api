@@ -737,7 +737,13 @@
   const $ = id => document.getElementById(id);
   const LS = 'wb2api.key';
   // 网关在 /ui 响应里注入本机 api_key；仍是哨兵则说明网关未启用鉴权。
-  const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY__')
+  //
+  // 守卫用的哨兵是**独立**的 __WB2API_KEY_SENTINEL__（不是 __WB2API_KEY__），
+  // 这样 Go 侧就可以把 __WB2API_KEY__ "全部替换"（ReplaceAll），而不会误伤
+  // 守卫里的对比基准——两层职责互不串扰。
+  // 旧的实现是 `Replace(..., 1)` 只替换 1 处，靠**漏改 5 处**侥幸正确，
+  // 是定时炸弹：哪天有人"顺手优化"成 ReplaceAll 就静默杀死自动连接。
+  const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY_SENTINEL__')
     ? window.__WB2API_KEY__ : '';
   let KEY = '';
   let timer = null;
