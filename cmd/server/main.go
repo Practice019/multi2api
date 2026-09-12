@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/clientlogin"
+	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/oauth"
@@ -154,6 +156,73 @@ func main() {
 	if err := registry.Register(wb); err != nil {
 		log.Fatalf("注册上游失败: %v", err)
 	}
+
+	// ---- 第二个上游：CodeArts（判据 1 的实测对象）----
+	//
+	// 全部装配逻辑只有这一段，核心包一行都不用改 —— 这正是判据 1 要证明的。
+	//
+	// 注意 **注册顺序**：workbuddy 先注册，所以 registry.First() 仍是 workbuddy，
+	// default_provider 缺省时"裸模型名走谁"的行为与改造前完全一致（向后兼容）。
+	// codearts 只在显式配置或 "codearts/model" 前缀时才被用到。
+	var cb *codearts.Provider
+	if cfg.CodeartsEnabled {
+		cb = codearts.NewWithConfig(codearts.Config{
+			AuthDir: cfg.CodeartsAuthDir,
+		})
+		// 凭证访问器：核心把"现在有哪些账号"喂给上游（上游不得依赖 internal/pool）。
+		//
+		// 这里用**惰性**闭包而不是启动时快照：用户跑完 cmd/login 后点一下
+		// 管理台的"刷新账号"，新的 codearts*.json 应当立即生效。
+		cb.SetAccounts(func() []*codearts.Auth {
+			list, err := codearts.LoadDir(cfg.CodeartsAuthDir)
+			if err != nil {
+				log.Printf("codearts: 读取凭证目录失败: %v", err)
+				return nil
+			}
+			return list
+		})
+		// 管理端点的核心依赖：只暴露 uid 列表与按 uid 解析，核心不需要理解 CodeArts 凭证结构。
+		cb.SetAdminEnv(codearts.AdminEnv{
+			Accounts: func() []string {
+				list, _ := codearts.LoadDir(cfg.CodeartsAuthDir)
+				out := make([]string, 0, len(list))
+				for _, a := range list {
+					out = append(out, a.UID)
+				}
+				return out
+			},
+			Resolve: func(uid string) (*codearts.Auth, error) {
+				list, err := codearts.LoadDir(cfg.CodeartsAuthDir)
+				if err != nil {
+					return nil, err
+				}
+				for _, a := range list {
+					if a.UID == uid || a.AccessKey == uid {
+						return a, nil
+					}
+				}
+				return nil, fmt.Errorf("codearts: 账号不存在: %s", uid)
+			},
+		})
+		if err := registry.Register(cb); err != nil {
+			log.Fatalf("注册 CodeArts 上游失败: %v", err)
+		}
+		// 残留的续期备份 = 上次续期没善终（refresh_token 是消费型的，
+		// 请求可能已消费但它没落盘）。这里只提示，不阻断启动。
+		if stale, err := codearts.FindStaleBackups(cfg.CodeartsAuthDir); err == nil && len(stale) > 0 {
+			log.Printf("codearts: 发现 %d 个残留的续期备份（上次续期可能未完成）: %v", len(stale), stale)
+		}
+		// 后台主动续期：STS 只有约 30 分钟寿命，预热能消掉"空闲后首个请求"
+		// 多付的那次续期往返。可用 refresh_interval_seconds<=0 关闭。
+		if cfg.CodeartsRefreshInterval > 0 {
+			cb.SetRefreshInterval(cfg.CodeartsRefreshInterval)
+			log.Printf("codearts: 后台续期已开启（每 %s 扫描一次）", cfg.CodeartsRefreshInterval)
+		}
+		log.Printf("codearts: 已启用（凭证目录 %s）", cfg.CodeartsAuthDir)
+	} else {
+		log.Printf("codearts: 未启用（config 里 codearts.enabled 缺省为 false）")
+	}
+
 	log.Printf("已注册上游: %v", registry.IDs())
 
 	// 槽位定义在这里给出：核心只认识"有个叫 X 的槽位、配在 Y 点"，

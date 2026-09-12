@@ -143,6 +143,38 @@ type Config struct {
 	RequestLogPath     string `json:"request_log_path"`
 	RequestLogKeepDays int    `json:"request_log_keep_days"`
 
+	// Codearts 第二个上游（华为云 CodeArts）的配置。
+	//
+	// # 向后兼容（硬要求，有测试守着）
+	//
+	// 本段**整个缺席**时行为与改造前**逐字节一致**：不注册 codearts Provider、
+	// 不加载任何 CodeArts 凭证、默认上游仍是 workbuddy。
+	// 理由：现有部署的 config.json 里没有这一段，若缺省即启用会让它们
+	// 突然多出一个上游（并可能因为扫不到凭证而报错）。
+	//
+	// 因此启用条件是**显式**的：codearts.enabled = true。
+	Codearts struct {
+		// Enabled 是否启用 CodeArts 上游。**缺省 false**（与"段缺席"等价）。
+		Enabled bool `json:"enabled"`
+		// AuthDir CodeArts 凭证目录。
+		//
+		// 留空则**复用顶层 auth_dir**：codearts.LoadDir 按 `codearts*.json` 通配，
+		// workbuddy 的凭证是 `workbuddy-*.json`，两者前缀不同可以安全共存
+		// （这也是 codearts 侧原始设计的意图，见其余 credential.go 的注释）。
+		//
+		// 需要物理隔离时再显式配一个目录（例如 codearts_auth_dir）。
+		AuthDir string `json:"auth_dir"`
+		// RefreshIntervalSeconds 后台主动续期的扫描周期，默认 60。
+		//
+		// 为什么需要后台续期：CodeArts 的 STS 凭证只有约 30 分钟寿命，
+		// 纯靠请求路径惰性续期会让"空闲半小时后的第一个请求"多付一次
+		// 续期往返（实测 1-3 秒）。后台预热把这个代价挪到空闲时间。
+		//
+		// <=0 或未配置一律取 60；本字段**没有**"关闭"语义 ——
+		// 要关就整段 enabled=false（少一个三态就少一类误配）。
+		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
+	} `json:"codearts"`
+
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
@@ -164,6 +196,13 @@ type Config struct {
 	ClientAuthDir       string        `json:"-"`
 	ClientArchiveDir    string        `json:"-"`
 	ClientEnabled       bool          `json:"-"`
+
+	// Codearts 解析后（供 main 直接取用）。
+	//
+	// CodeartsEnabled 为 false 时下面两个字段无意义：不注册上游、不加载凭证。
+	CodeartsEnabled         bool          `json:"-"`
+	CodeartsAuthDir         string        `json:"-"`
+	CodeartsRefreshInterval time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -378,6 +417,30 @@ func (c *Config) normalize() error {
 	}
 	if c.ClientAuthDir == "" {
 		c.ClientAuthDir = clientlogin.DefaultClientDir()
+	}
+
+	// CodeArts 第二上游。
+	//
+	// 三条规则，都是为了"老配置零影响"：
+	//  1. enabled 缺省 false —— 段缺席与显式 false 等价，都**不注册**上游
+	//  2. auth_dir 缺省复用顶层 auth_dir —— codearts*.json 与 workbuddy-*.json
+	//     前缀不同，共处一个目录互不干扰；要隔离再显式配
+	//  3. refresh_interval_seconds 缺省 60；显式 <=0 表示关闭后台续期
+	//     （不能把"未配置"与"关闭"混为一谈，否则老配置会被无意间开启后台任务）
+	c.CodeartsEnabled = c.Codearts.Enabled
+	c.CodeartsAuthDir = c.Codearts.AuthDir
+	if c.CodeartsAuthDir == "" {
+		c.CodeartsAuthDir = c.AuthDir
+	}
+	// 未启用时不解析间隔 —— 避免"上游没启用却注册了后台任务"这类状态。
+	// 显式 0 与未配置在**已启用**时都落到默认 60s：这个字段没有"关闭"语义
+	// （关闭就是整个上游 enabled=false），因此不需要三态。
+	if c.CodeartsEnabled {
+		iv := c.Codearts.RefreshIntervalSeconds
+		if iv <= 0 {
+			iv = 60
+		}
+		c.CodeartsRefreshInterval = time.Duration(iv) * time.Second
 	}
 	return nil
 }

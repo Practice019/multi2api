@@ -1,0 +1,315 @@
+// credential.go CodeArts 凭证的磁盘形态与读写。
+//
+// 与 workbuddy2api 的 auth.Auth 的差异：
+//   - CodeBuddy: accessToken + refreshToken（Bearer）
+//   - CodeArts : accessKey + secretKey + securityToken（SDK-HMAC-SHA256）+ refreshToken（DPoP 续期）
+//
+// 落盘格式设计为**与 workbuddy 的 auths/ 目录共存**：
+// 文件名前缀不同（workbuddy-*.json / codearts-*.json），互不干扰。
+package codearts
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Auth 是 CodeArts 账号凭证（归一化后）。
+type Auth struct {
+	mu sync.Mutex // 串行化 refresh 写回，防止并发写半更新
+
+	// refreshMu 串行化**整个续期过程**（请求 + 落盘）。
+	//
+	// 为什么需要它而不是复用 mu：mu 只保护字段读写，
+	// 挡不住"两个 goroutine 同时拿同一个 refresh_token 去换"。
+	// 而 refresh_token 是**消费型**的 —— 用一次即作废（实测 STS5.1806
+	// 'the refresh token has been used'）。两个并发续期必然一个成功一个失败，
+	// 更糟的是失败方可能把已作废的旧值写回，覆盖掉成功方拿到的新 token。
+	//
+	// 后台调度器（RefreshScheduler）与请求路径（ChatStream 的惰性续期）
+	// 是两条会同时触发续期的路径，这个锁就是它们之间的闸门。
+	refreshMu sync.Mutex
+
+	AccessKey     string `json:"accessKeyId"`
+	SecretKey     string `json:"secretAccessKey"`
+	SecurityToken string `json:"securityToken"`
+	ExpiresAt     int64  `json:"expiresAt"` // Unix 秒
+
+	RefreshToken string `json:"refresh_token"`
+	// DPoPPrivateKeyJWK 是续期必需的 ES256 私钥（JWK JSON）。
+	// 没有它就无法调 refresh_token grant —— 这是与 CodeBuddy 最大的不同：
+	// 续期凭证不是一个 token，而是一对密钥 + refresh_token。
+	DPoPPrivateKeyJWK json.RawMessage `json:"dpopPrivateKeyJwk"`
+
+	ClientID string `json:"clientId"`
+
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname"`
+
+	FilePath string `json:"-"`
+}
+
+// Lock / Unlock 供其他包在改写字段期间加锁。
+func (a *Auth) Lock()   { a.mu.Lock() }
+func (a *Auth) Unlock() { a.mu.Unlock() }
+
+// LockRefresh / UnlockRefresh 串行化续期全过程。
+//
+// 调用方（Client.RefreshToken）必须在**读取 refresh_token 之前**加锁，
+// 并在写盘完成后才释放 —— 只保护写回是不够的，
+// 因为真正会被重复消费的是"发出去的那个 refresh_token"。
+func (a *Auth) LockRefresh()   { a.refreshMu.Lock() }
+func (a *Auth) UnlockRefresh() { a.refreshMu.Unlock() }
+
+// NeedsRefresh 报告凭证是否将在 within 内过期。
+// 注意：CodeArts 的 STS 凭证有效期**只有约 30 分钟**，
+// 因此 within 必须显著小于该值（推荐 5 分钟），否则会出现
+// 「刚判定为新鲜，发出去已过期」的窗口。
+func (a *Auth) NeedsRefresh(within time.Duration) bool {
+	if a.ExpiresAt <= 0 {
+		return true
+	}
+	return time.Now().Add(within).Unix() >= a.ExpiresAt
+}
+
+// Cred 转成签名所需的凭证三元组。
+func (a *Auth) Cred() Credential {
+	return Credential{
+		AccessKey:     a.AccessKey,
+		SecretKey:     a.SecretKey,
+		SecurityToken: a.SecurityToken,
+	}
+}
+
+// credFile 是磁盘格式：outer 包一层，与 OAuth 登录产物对齐。
+//
+// 注意：这里**不能**直接嵌入 Auth —— Auth 内含 sync.Mutex，
+// 按值复制会触发 go vet 的 copylocks 告警，且可能复制出已加锁的互斥量。
+// 因此磁盘结构用独立的 credBody 描述字段（无锁、无 FilePath）。
+type credFile struct {
+	Auth     credBody     `json:"auth"`
+	Account  accountBlock `json:"account"`
+	DPoP     dpopBlock    `json:"dpop"`
+	ClientID string       `json:"clientId"`
+}
+
+// credBody 是 Auth 的磁盘投影。
+type credBody struct {
+	AccessKey     string `json:"accessKeyId"`
+	SecretKey     string `json:"secretAccessKey"`
+	SecurityToken string `json:"securityToken"`
+	ExpiresAt     int64  `json:"expiresAt"`
+	RefreshToken  string `json:"refresh_token,omitempty"`
+	ClientID      string `json:"clientId,omitempty"`
+}
+
+type accountBlock struct {
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname"`
+}
+
+type dpopBlock struct {
+	PrivateKeyJWK json.RawMessage `json:"privateKeyJwk"`
+}
+
+// ParseCredential 解析磁盘凭证（支持两种形态）：
+//
+//	嵌套形（OAuth 登录产物）: {"auth":{...},"account":{...},"dpop":{...}}
+//	扁平形（手写）:          {"accessKeyId":...,"secretAccessKey":...}
+func ParseCredential(raw []byte) (*Auth, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty credential file")
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("storage_parse_error: %w", err)
+	}
+
+	var a Auth
+	if _, nested := probe["auth"]; nested {
+		var n credFile
+		if err := json.Unmarshal(raw, &n); err != nil {
+			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+		a.AccessKey = n.Auth.AccessKey
+		a.SecretKey = n.Auth.SecretKey
+		a.SecurityToken = n.Auth.SecurityToken
+		a.ExpiresAt = n.Auth.ExpiresAt
+		a.RefreshToken = n.Auth.RefreshToken
+		a.ClientID = n.Auth.ClientID
+		a.UID = n.Account.UID
+		a.Nickname = n.Account.Nickname
+		a.DPoPPrivateKeyJWK = n.DPoP.PrivateKeyJWK
+		if a.ClientID == "" {
+			a.ClientID = n.ClientID
+		}
+	} else {
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+	}
+
+	if strings.TrimSpace(a.AccessKey) == "" || strings.TrimSpace(a.SecretKey) == "" {
+		return nil, fmt.Errorf("parse_error: missing accessKeyId/secretAccessKey")
+	}
+
+	// UID 三级回落：JWT → account.uid → AK。
+	//
+	// 为什么需要回落链：uid 是账号池的主键 —— 空串会让所有账号塌成同一个键，
+	// 在途计数（Acquire/Release）互相干扰，表现为
+	// "连续 N 次成功后 in_flight 卡住，之后恒 503 no_healthy_account"。
+	//
+	// 优先级说明：
+	//  1. refresh_token 的 JWT 里带权威 account_id（服务端给的，与华为云控制台一致）
+	//  2. account.uid：旧版 cmd/login 可能没写，或与 JWT 不一致时以其为准会误导
+	//  3. AK：一定存在且同账号内唯一，是最后的兜底键
+	if info, jerr := ParseRefreshToken(a.RefreshToken); jerr == nil && info.ID != "" {
+		a.UID = info.ID
+		if info.Name != "" {
+			a.Nickname = info.Name
+		}
+	}
+	if strings.TrimSpace(a.UID) == "" {
+		a.UID = a.AccessKey
+	}
+	return &a, nil
+}
+
+// BackupDir 返回凭证目录下存放续期备份的子目录。
+//
+// 用点开头的隐藏目录：它跟在 auths/ 旁边便于一起备份/迁移，
+// 又不会被 LoadDir 的 `codearts*.json` 通配匹配到（避免把备份当账号加载）。
+func BackupDir(authDir string) string {
+	return filepath.Join(authDir, ".bak")
+}
+
+// BackupTo 把当前凭证整份备份到 bakDir/<原文件名>.json。
+//
+// 为什么需要"续期前备份"：refresh_token 是**消费型**的 ——
+// 服务端把用过的 token 立即作废（实测报 STS5.1806 'the refresh token has been used'）。
+// 如果续期请求成功但写盘失败，本地就只剩一个已作废的旧 token，
+// 该凭证**永久报废**，只能重新走浏览器登录。
+//
+// 备份不能"救回"凭证（服务端已消费），它的价值是**诊断**：
+// 启动时发现残留备份 = 明确告知用户"上次续期在写盘这一步失败了"，
+// 而不是让用户对着一个静默失效的凭证猜原因。
+func (a *Auth) BackupTo(bakDir string) error {
+	if a.FilePath == "" {
+		return fmt.Errorf("backup: FilePath 为空")
+	}
+	raw, err := os.ReadFile(a.FilePath)
+	if err != nil {
+		return fmt.Errorf("backup: 读原凭证: %w", err)
+	}
+	if err := os.MkdirAll(bakDir, 0o700); err != nil {
+		return fmt.Errorf("backup: 建目录: %w", err)
+	}
+	dst := filepath.Join(bakDir, filepath.Base(a.FilePath))
+	// 先写临时文件再 rename，保证备份本身也是原子的
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return fmt.Errorf("backup: 写备份: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return fmt.Errorf("backup: 落定备份: %w", err)
+	}
+	return nil
+}
+
+// ClearBackup 删除本账号的备份（续期成功落盘后调用）。
+func (a *Auth) ClearBackup(bakDir string) error {
+	if a.FilePath == "" {
+		return nil
+	}
+	dst := filepath.Join(bakDir, filepath.Base(a.FilePath))
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear backup: %w", err)
+	}
+	return nil
+}
+
+// FindStaleBackups 返回残留的续期备份（启动时调用）。
+//
+// 非空意味着**上一次续期没能善终**：请求可能已消费掉 refresh_token，
+// 但新凭证没落盘。调用方应打 WARN 并提示用户重新登录，
+// 而不是拿一个可能已作废的 token 反复重试（浪费配额、刷屏日志）。
+func FindStaleBackups(authDir string) ([]string, error) {
+	bakDir := BackupDir(authDir)
+	entries, err := os.ReadDir(bakDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取备份目录: %w", err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		out = append(out, filepath.Join(bakDir, e.Name()))
+	}
+	return out, nil
+}
+
+// SaveAtomic 原子写回 FilePath（tmp + rename），保持嵌套形。
+// 全程持锁：防止与 Refresh 并发写出半更新凭证。
+func (a *Auth) SaveAtomic() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if strings.TrimSpace(a.AccessKey) == "" || strings.TrimSpace(a.SecretKey) == "" {
+		return fmt.Errorf("save refused: empty accessKey/secretKey (uid=%s)", a.UID)
+	}
+	if a.FilePath == "" {
+		return fmt.Errorf("no FilePath set")
+	}
+	doc := credFile{
+		Auth: credBody{
+			AccessKey:     a.AccessKey,
+			SecretKey:     a.SecretKey,
+			SecurityToken: a.SecurityToken,
+			ExpiresAt:     a.ExpiresAt,
+			RefreshToken:  a.RefreshToken,
+			ClientID:      a.ClientID,
+		},
+		Account:  accountBlock{UID: a.UID, Nickname: a.Nickname},
+		DPoP:     dpopBlock{PrivateKeyJWK: a.DPoPPrivateKeyJWK},
+		ClientID: a.ClientID,
+	}
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := a.FilePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.FilePath)
+}
+
+// LoadDir 扫描 dir 下 codearts*.json。
+// 解析失败的文件静默跳过（与 auth.LoadDir 的行为一致）。
+func LoadDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "codearts*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := ParseCredential(raw)
+		if err != nil {
+			continue
+		}
+		a.FilePath = f
+		out = append(out, a)
+	}
+	return out, nil
+}

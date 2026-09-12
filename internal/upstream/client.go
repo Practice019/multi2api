@@ -480,3 +480,23 @@ func truncate(s string, n int) string {
 	}
 	return s
 }
+
+// ModelQuota 是单个模型的额度状态。
+//
+// 定义在 upstream 而非 server：本包是"对外词汇表"，
+// server 与各上游都依赖它。若定义在 server，各上游就得 import server
+// 才能实现 Backend.QuotaStates —— 那会成环。
+//
+// 语义：Exhausted=true 表示**已确认**该模型当前因额度不足不可用。
+// 未确认的模型不应出现在结果里（宁可不标记，也不要让客户端
+// 因为"可能不可用"而避开一个实际能用的模型）。
+//
+// 为什么这个类型是**上游无关**的（因此放在共用层而非某个上游包里）：
+// "某模型当前额度耗尽"是跨上游都成立的展示语义，与哪家上游无关。
+// CodeBuddy 恒返回空表（它没有"按模型独立耗尽"这个机制），
+// CodeArts 按模型探测后填充 —— 两者共用同一个类型，消费方无需分辨来源。
+type ModelQuota struct {
+	Exhausted bool      `json:"exhausted"`
+	Reason    string    `json:"reason,omitempty"`
+	CheckedAt time.Time `json:"checked_at"`
+}
