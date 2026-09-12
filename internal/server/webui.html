@@ -50,6 +50,30 @@
   .sidebar .badge{margin-left:8px;font-size:10px;background:var(--panel2);
     border-radius:999px;padding:1px 6px;color:var(--dim)}
   .sidebar button.active .badge{background:rgba(255,255,255,.22);color:#fff}
+  /* 导航分组：通用 + 每个上游一组。
+     组标题是可点击的折叠开关（纯 CSS 三角形，不用图标字体）。 */
+  .navgroup{display:flex;flex-direction:column;gap:2px}
+  .navgroup + .navgroup{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
+  .navgrouphd{display:flex;align-items:center;gap:6px;background:transparent;border:0;
+    padding:5px 8px 5px 10px;font-size:10.5px;letter-spacing:.5px;color:var(--dim);
+    text-transform:uppercase;cursor:pointer;font-weight:600}
+  .navgrouphd:hover{color:var(--fg)}
+  /* 折叠三角：用 border 画，旋转表示展开/收起 */
+  .navgrouphd::before{content:'';width:0;height:0;flex:none;
+    border-left:4px solid currentColor;border-top:3.5px solid transparent;
+    border-bottom:3.5px solid transparent;transform:rotate(90deg);transition:.15s}
+  .navgroup.collapsed .navgrouphd::before{transform:rotate(0deg)}
+  .navgroup.collapsed .navitems{display:none}
+  .navgrouphd .navgcount{margin-left:auto;font-size:10px;background:var(--panel2);
+    border-radius:999px;padding:1px 6px;letter-spacing:0}
+  .navgroup.collapsed .navgrouphd .navgcount{opacity:.6}
+  /* 默认上游标记 */
+  .navgrouphd .navgdef{font-size:9px;border:1px solid var(--line);border-radius:999px;
+    padding:0 5px;letter-spacing:0;text-transform:none}
+  .navitems{display:flex;flex-direction:column;gap:2px}
+  /* 契约降级提示：manifest 拉不到时在导航里显示原因，而不是静默少几个面板 */
+  .navdegraded{font-size:11px;line-height:1.5;color:var(--warn);
+    border:1px dashed var(--line);border-radius:8px;padding:7px 9px}
   .content{display:grid;gap:18px;min-width:0}
   .content > section{display:none}
   .content > section.active{display:block}
@@ -59,6 +83,17 @@
     .sidebar button{white-space:nowrap;padding:7px 10px;font-size:12px}
     .sidebar button.active::before{display:none}
     .sidebar .badge{display:none}
+    /* 窄屏导航变成横向滚动条：分组折叠在横排里会把入口藏得找不着，
+       所以窄屏**强制展开**，组标题收成一个小标签。 */
+    .sidebar{flex-direction:row;align-items:center}
+    .navgroup{flex-direction:row;align-items:center;gap:2px}
+    .navgroup + .navgroup{margin-top:0;padding-top:0;border-top:0;margin-left:6px;padding-left:6px;
+      border-left:1px solid var(--line)}
+    .navgroup.collapsed .navitems{display:flex}
+    .navgrouphd{cursor:default;padding:7px 6px}
+    .navgrouphd::before{display:none}
+    .navgrouphd .navgcount{display:none}
+    .navitems{flex-direction:row;gap:2px}
   }
   /* 设置表单 */
   /* .formgrid 是组内**同一类控件**的网格（复选框组 / 输入框组各自一份）。
@@ -242,7 +277,7 @@
        三段各有独立标题（h3.boardsec）与独立控制区，但共用同一个「每 5s 刷新」开关 ——
        原先三页各有一套刷新语义，既重复又容易只刷一半，这里收敛成一处。
        导航标签取 h2 的首个文本节点，即「仪表盘」。 -->
-  <section>
+  <section data-key="dashboard">
     <h2>仪表盘
       <span class="spacer"></span>
       <label class="tog"><input id="auto" type="checkbox" checked> 每 5s 刷新</label>
@@ -291,7 +326,7 @@
     </div>
   </section>
 
-  <section>
+  <section data-key="accounts">
     <h2>账号池
       <span class="spacer"></span>
       <button id="btnAdd" style="padding:3px 10px;font-size:12px">＋ 添加账号</button>
@@ -369,7 +404,7 @@
     </div>
   </section>
 
-  <section>
+  <section data-key="logs">
     <h2>请求日志 <span id="logMeta" class="dim" style="font-weight:400;text-transform:none"></span>
       <span class="spacer"></span>
       <button id="btnLogClear" style="padding:3px 10px;font-size:12px">清屏</button>
@@ -384,7 +419,7 @@
     </div>
   </section>
 
-  <section>
+  <section data-key="history">
     <h2>任务历史 <span class="spacer"></span>
       <select id="histKind" style="padding:3px 8px;font-size:12px">
         <option value="">全部</option>
@@ -403,7 +438,7 @@
     </div>
   </section>
 
-  <section>
+  <section data-key="models">
     <h2>可用模型 <span id="mcount" class="dim" style="font-weight:400;text-transform:none"></span>
       <span class="spacer"></span>
       <button id="btnModelRefresh" style="padding:3px 10px;font-size:12px">强制刷新目录</button>
@@ -411,7 +446,7 @@
     <div class="body"><div class="chips" id="models"><span class="dim">未连接</span></div></div>
   </section>
 
-  <section>
+  <section data-key="chat">
     <h2>对话测试</h2>
     <div class="body">
       <div class="row" style="margin-bottom:10px">
@@ -425,7 +460,7 @@
     </div>
   </section>
 
-  <section>
+  <section data-key="settings">
     <h2>设置 <span id="settingsDirty" class="dim" style="font-weight:400;text-transform:none"></span>
       <span class="spacer"></span>
       <button id="btnSettingsReload" style="padding:3px 10px;font-size:12px">放弃修改</button>
@@ -618,6 +653,13 @@
   let PROVIDERS = [];         // MANIFEST.providers 的快捷引用（按上游分组用）
   let DEFAULT_PROVIDER = '';  // 裸模型名走谁
 
+  // CORE_CAP 后端保留的能力名：声明了管理端点但**没有**对应能力位的路由归到它。
+  //
+  // 它必须与 internal/admin 的 CoreCapability 常量保持一致。
+  // 这个字符串是**协议的一部分**（后端 routeCapName 产出、前端按它路由），
+  // 不是"前端硬编码的能力表" —— 后者才是要避免的。有 T11 套件守住两边一致。
+  const CORE_CAP = 'core';
+
   // manifest 拉取失败的**可读原因**，供页面顶部与降级提示使用。
   // 空串表示没有错误。不叫 error 是为了避开与 Error 对象的混淆。
   let manifestError = '';
@@ -720,26 +762,72 @@
   }
 
   // hasAnyPanel 该上游是否有任何可渲染的能力面板。
+  //
+  // # 为什么不再排除 chat/models（评审 F2）
+  //
+  // 上一版排除 chat/models，理由是"每个上游都有那两个能力，列出来等于没差别"。
+  // 那是**把判据建立在前端硬编码的能力名白名单上** —— 一个上游若把它的
+  // 专属面板挂在 chat 上（workbuddy 的 client-login 正是如此），它的面板
+  // 就永远不显示，而"加新上游前端 0 改动"这条判据随之失效。
+  //
+  // 现在改由后端负责语义：声明了端点却没声明能力位的路由，后端归到保留名
+  // "core"（见 admin.CoreCapability）。前端只按数据判断，不认识任何能力名。
   function hasAnyPanel(providerId) {
     const p = providerInfo(providerId);
     if (!p || !Array.isArray(p.capabilities)) return false;
-    // 排除 chat/models —— 它们是**每个**上游都有的基础能力，
-    // 不构成"专属面板"，否则每个上游都会因为 chat 而永远有面板。
-    return p.capabilities.some(c => c !== 'chat' && c !== 'models' && routesFor(providerId, c).length > 0);
+    return p.capabilities.some(c => routesFor(providerId, c).length > 0);
+  }
+
+  // panelCapsOf 取某上游**有面板入口**的能力位列表（含保留名 core）。
+  //
+  // 与 capNamesOf 的区别：这个只列"真的有 GET 入口"的能力，
+  // 用于建面板；capNamesOf 列的是声明了的能力，用于写标题提示。
+  function panelCapsOf(providerId) {
+    const out = [];
+    const p = providerInfo(providerId);
+    if (p && Array.isArray(p.capabilities)) {
+      for (const c of p.capabilities) {
+        if (routesFor(providerId, c).length > 0 && out.indexOf(c) < 0) out.push(c);
+      }
+    }
+    // 保留名 core：无能力位但声明了端点的路由归在这里。
+    // 它不在 providers[].capabilities 里（那是"声明了能力位"的列表），
+    // 所以必须单独查一次 —— 漏掉它会让 client-login 这类端点无家可归。
+    if (routesFor(providerId, CORE_CAP).length > 0 && out.indexOf(CORE_CAP) < 0) {
+      out.push(CORE_CAP);
+    }
+    return out;
   }
 
   // loadManifest 拉取渲染契约。
   //
-  // 失败时**不抛异常**：拿不到 manifest 不该让整页白屏，
-  // 只是退化成"没有上游面板"（通用面板仍然全部可用）。
-  // 这与 refresh() 里 /admin/providers 的降级策略一致。
+  // # 失败时的行为（评审 F3）
+  //
+  // 拿不到 manifest 不该让整页白屏，只是退化成"没有上游面板"
+  //（通用面板仍然全部可用）。
+  //
+  // 但**"拿不到"的判定不能只看有没有抛异常**：admin() 对
+  // "HTTP 200 + 非 JSON 响应体"（代理返回的 HTML 错误页、空体、被截断的 JSON）
+  // **不抛异常**，而是返回 null。上一版把这个 null 直接喂给 applyManifest，
+  // 于是：
+  //   - 已加载好的 MANIFEST 被**静默清空**（providers 归零、service 退回默认）
+  //   - loadManifest 仍然返回 true，调用方以为成功了
+  //   - manifestError 不记录任何东西
+  // 结果是"一次网络抖动把已经渲染好的上游全抹掉，而且没有任何痕迹"。
+  //
+  // 所以这里必须**校验形状**：只有确认是对象且 providers 是数组才算成功。
   async function loadManifest() {
     try {
-      applyManifest(await admin('/admin/ui/manifest'));
+      const m = await admin('/admin/ui/manifest');
+      if (!m || typeof m !== 'object' || !Array.isArray(m.providers)) {
+        // 形状不对 = 失败。保留上一份好数据，并记下原因。
+        manifestError = '响应格式异常（缺少 providers 数组）';
+        return false;
+      }
+      applyManifest(m);
       return true;
     } catch (e) {
       manifestError = e && e.message ? e.message : '未知错误';
-      MANIFEST.loaded = false;
       return false;
     }
   }
@@ -1090,21 +1178,146 @@
   // 纯文字 + CSS 选中指示条，不使用任何图标字体或 emoji。
   let navSections = [];
 
+  // buildNav 渲染导航，分两组：「通用」+ 每个上游一组。
+  //
+  // # 为什么是"每上游一组"而不是"按能力分组"
+  //
+  // 上游之间功能几乎零重叠（实测管理端点零重叠、能力位除 chat/models 外全不同），
+  // 而能力位是**稀疏**的（growth 只有 workbuddy、welfare 只有 codearts）。
+  // 按能力分组会产生一堆"只有一个上游"的单例组 —— 那是伪装的每上游分组，
+  // 还多一层间接。分组轴直接用上游，但**分组内容仍由 manifest 驱动**：
+  // 加第 3 个上游时这里会自动多一组，前端 0 改动。
+  //
+  // # 上游组内的项从哪来
+  //
+  // 来自 manifest.admin_routes 里该上游的 **GET** 端点（routesFor 已过滤方法）。
+  // 每个上游专属面板在 T6 会按 capability 建出对应的 section，
+  // 这里先把入口渲染出来并指向那个 section id。
   function buildNav() {
     navSections = Array.from(document.querySelectorAll('#content > section'));
-    $('nav').innerHTML = navSections.map((sec, i) => {
-      const label = (sec.querySelector('h2')?.childNodes[0]?.textContent || ('面板 ' + (i + 1))).trim();
+
+    // 通用组：所有非上游 section（仪表盘/账号池/日志/设置…）。
+    // 判定方式是该 section 没有 data-provider 属性 —— 上游面板在 T6 会带上它。
+    const generic = navSections.filter(sec => !sec.dataset.provider);
+    const parts = [navGroupHTML('通用', '', generic, false)];
+
+    // 上游组：每个 manifest 里的上游一组。
+    for (const p of upstreamGroups()) {
+      const secs = navSections.filter(sec => sec.dataset.provider === p.id);
+      if (!secs.length) continue;   // 还没有面板的上游不占位置（T6 后才有）
+      const hd = navGroupHeaderHTML(p);
+      parts.push(navGroupHTML('', hd, secs, p.id === DEFAULT_PROVIDER));
+    }
+
+    // 契约降级提示（评审 F4）。
+    //
+    // # 为什么必须把它渲染出来
+    //
+    // manifestError 与 MANIFEST.loaded 原先只写不读 —— 拉取失败时页面
+    // 看不出任何区别，用户只会觉得"上游面板怎么没了"。而失败原因
+    //（404 / 500 / 响应格式异常）恰恰是排查的唯一线索。
+    //
+    // 这里把两者变成可见状态：失败时在导航里插一条明确的降级说明。
+    if (!MANIFEST.loaded) {
+      parts.push('<div class="navgroup"><div class="navdegraded" title="'
+        + esc(manifestError || '未取得渲染契约')
+        + '">上游面板不可用<br><span style="font-size:10px">' + esc(manifestError || 'manifest 未加载') + '</span></div></div>');
+    }
+
+    $('nav').innerHTML = parts.join('');
+
+    // 恢复上次选中的面板。用 section 的 key（data-key 或 index）而不是纯下标 ——
+    // 分组后下标会随上游数量变化，用下标恢复会跳到别的面板。
+    let start = -1;
+    try {
+      const saved = localStorage.getItem('wb2api.panelkey') || '';
+      start = navSections.findIndex(sec => navKey(sec) === saved);
+    } catch { /* 隐私模式 */ }
+    if (start < 0) start = 0;
+    showPanel(start);
+
+    // 恢复折叠状态（按上游 id 记，加/删上游不会串味）
+    try {
+      const cols = JSON.parse(localStorage.getItem('wb2api.navcollapsed') || '[]');
+      for (const id of cols) {
+        const g = $('nav').querySelector(`.navgroup[data-pid="${cssEsc(id)}"]`);
+        if (g) g.classList.add('collapsed');
+      }
+    } catch { /* 隐私模式 */ }
+
+    updateNavBadges(); // 关键：buildNav 在 refresh() 之后才跑，这里补一次，否则徽章会一直空着
+  }
+
+  // navGroupHeaderHTML 上游分组的标题：上游名 + 账号数 + 默认标记。
+  //
+  // title 里列出该上游声明的能力位（中文名来自 manifest.capabilities）——
+  // 这样鼠标悬停就能看出"这个上游到底能做什么"，而不必逐个点开面板。
+  // 这也是 capTitle 与 providersWithCap 的**真实消费点**：
+  // 没有它，那两个函数又会变成"定义了没人用"的死代码。
+  function navGroupHeaderHTML(p) {
+    const cnt = p.account_count ? `<span class="navgcount">${esc(p.account_count)}</span>` : '';
+    const def = p.default ? '<span class="navgdef">默认</span>' : '';
+    // 只列专属能力：chat/models 是每个上游都有的基础能力，
+    // 列出来只会让每行都长得一样，反而看不出差异。
+    const caps = capNamesOf(p.id).filter(c => c !== 'chat' && c !== 'models');
+    // 用显式箭头而不是 .map(capTitle) —— 后者会把 (value, index, array)
+    // 三个参数都传给 capTitle，capTitle 只声明了一个参数所以目前无害，
+    // 但这是个隐患：哪天给它加第二个参数（比如"取不到时用什么兜底"），
+    // index 会被静默当成那个参数传进去。
+    const tip = p.id + (caps.length ? ' · 能力：' + caps.map(c => capTitle(c)).join('、') : ' · 无专属能力面板');
+    return `<button class="navgrouphd" data-pid="${esc(p.id)}" title="${esc(tip)}">`
+      + `${esc(providerTitle(p.id))}${def}${cnt}</button>`;
+  }
+
+  // capNamesOf 取某上游声明的能力位名列表（来自 manifest，不硬编码）。
+  //
+  // providersWithCap 是"按能力反查上游"，这里是"按上游取能力" ——
+  // 两者都走 MANIFEST.providers，保证与后端下发的是一份事实。
+  function capNamesOf(providerId) {
+    const p = providerInfo(providerId);
+    if (!p || !Array.isArray(p.capabilities)) return [];
+    // 用 providersWithCap 反查一次，确保两个方向的解读完全一致 ——
+    // 如果各写一套过滤逻辑，迟早会出现"导航说有、面板却没有"的分歧。
+    return p.capabilities.filter(c => providersWithCap(c).indexOf(providerId) >= 0);
+  }
+
+  // navGroupHTML 一个导航分组。
+  //
+  // headerHTML 为空时按 title 生成一个纯文字组头（通用组用）。
+  function navGroupHTML(title, headerHTML, secs, isUpstream) {
+    const hd = headerHTML || `<span class="navgrouphd" style="cursor:default">${esc(title)}</span>`;
+    const items = secs.map(sec => {
+      const idx = navSections.indexOf(sec);
+      const label = navLabel(sec, idx);
       // 账号池带一个计数徽章：初值留空，由 updateNavBadges() 按真实数据填。
       const badge = label === '账号池' ? '<span class="badge" data-nav-badge></span>' : '';
-      return `<button data-nav="${i}" title="${esc(label)}">${esc(label)}${badge}</button>`;
+      return `<button data-nav="${idx}" title="${esc(label)}">${esc(label)}${badge}</button>`;
     }).join('');
-    let start = 0;
-    try {
-      const saved = parseInt(localStorage.getItem('wb2api.panel') || '0', 10);
-      if (!isNaN(saved) && saved >= 0 && saved < navSections.length) start = saved;
-    } catch { /* 隐私模式 */ }
-    showPanel(start);
-    updateNavBadges(); // 关键：buildNav 在 refresh() 之后才跑，这里补一次，否则徽章会一直空着
+    const pid = isUpstream ? ` data-pid="${esc(isUpstream)}"` : '';
+    return `<div class="navgroup"${pid}>${hd}<div class="navitems">${items}</div></div>`;
+  }
+
+  // navLabel 取 section 的导航标签（h2 的首个文本节点）。
+  function navLabel(sec, idx) {
+    const t = sec.querySelector('h2');
+    return ((t && t.childNodes[0] && t.childNodes[0].textContent) || ('面板 ' + (idx + 1))).trim();
+  }
+
+  // navKey section 的稳定标识，用于恢复上次选中的面板。
+  //
+  // 优先用显式 data-key；上游面板用 "provider:能力位"，通用面板用标签。
+  // 不用下标：分组后下标随上游数量变化，用下标恢复会跳到别的面板。
+  function navKey(sec) {
+    if (sec.dataset.key) return sec.dataset.key;
+    if (sec.dataset.provider) return sec.dataset.provider + ':' + (sec.dataset.cap || '');
+    return 'g:' + navLabel(sec, 0);
+  }
+
+  // cssEsc 把值转义成可安全放进属性选择器的形式。
+  // 上游 id 已被后端约束为 ^[a-z][a-z0-9-]*$，理论上是安全的；
+  // 这里仍做一次转义，因为选择器注入失败会抛异常并中断整个 buildNav。
+  function cssEsc(s) {
+    return String(s).replace(/["\\]/g, '\\$&');
   }
 
   // updateNavBadges 把账号总数写进导航徽章。
@@ -1119,15 +1332,45 @@
 
   function showPanel(idx) {
     navSections.forEach((sec, i) => sec.classList.toggle('active', i === idx));
-    $('nav').querySelectorAll('button').forEach(b =>
+    $('nav').querySelectorAll('button[data-nav]').forEach(b =>
       b.classList.toggle('active', Number(b.dataset.nav) === idx));
-    try { localStorage.setItem('wb2api.panel', String(idx)); } catch { /* 隐私模式 */ }
-    // 切到某些面板时按需拉一次数据，避免首次进入是空的
-    const label = (navSections[idx]?.querySelector('h2')?.childNodes[0]?.textContent || '').trim();
-    if (label === '请求日志') loadLogHistory();
-    if (label === '设置') loadSettings();
-    if (label === '猫猫旅行') loadTravel(false);
-    if (label === '成长计划') loadGrowth(false);
+    try { localStorage.setItem('wb2api.panelkey', navKey(navSections[idx] || {})); } catch { /* 隐私模式 */ }
+    // 切到某些面板时按需拉一次数据，避免首次进入是空的。
+    //
+    // 用 data-key 判定而不是标签文字：上游面板的标题会随能力位与上游名变化，
+    // 按文字匹配会在显示名一改时就静默失效（面板点开是空的）。
+    const sec = navSections[idx];
+    if (!sec) return;
+    const key = sec.dataset.key || '';
+    if (key === 'logs') loadLogHistory();
+    if (key === 'settings') loadSettings();
+    // 上游专属面板：按能力位决定拉什么数据。
+    if (sec.dataset.provider) loadProviderPanel(sec.dataset.provider, sec.dataset.cap);
+  }
+
+  // loadProviderPanel 按能力位给上游面板拉数据。
+  //
+  // T6 会把 workbuddy 的成长/旅行接进来；在那之前这里只处理已知能力位，
+  // 未知能力位调用通用的拉取逻辑（T6 实现）。
+  function loadProviderPanel(providerId, cap) {
+    if (typeof loadProviderPanelData === 'function') {
+      loadProviderPanelData(providerId, cap);
+    }
+  }
+
+  // toggleNavGroup 折叠/展开一个上游分组。
+  //
+  // 折叠状态按上游 id 持久化（不是下标）：加/删上游后下标会整体位移，
+  // 用下标存会让"折叠了 codearts"变成"折叠了别的上游"。
+  function toggleNavGroup(pid) {
+    const g = $('nav').querySelector(`.navgroup[data-pid="${cssEsc(pid)}"]`);
+    if (!g) return;
+    g.classList.toggle('collapsed');
+    const collapsed = [];
+    $('nav').querySelectorAll('.navgroup[data-pid]').forEach(el => {
+      if (el.classList.contains('collapsed')) collapsed.push(el.dataset.pid);
+    });
+    try { localStorage.setItem('wb2api.navcollapsed', JSON.stringify(collapsed)); } catch { /* 隐私模式 */ }
   }
 
   // ---------------------------------------------------------------- 设置
@@ -2817,6 +3060,9 @@
 
     // 导航 + 设置 + 日志视图
     $('nav').addEventListener('click', ev => {
+      // 组头：折叠/展开（不切面板）
+      const hd = ev.target.closest('button.navgrouphd[data-pid]');
+      if (hd) { toggleNavGroup(hd.dataset.pid); return; }
       const b = ev.target.closest('button[data-nav]');
       if (b) showPanel(Number(b.dataset.nav));
     });
