@@ -49,6 +49,25 @@ var colPlaceholders = []struct{ token, value string }{
 func renderUI(page []byte, apiKey string, injectKey bool) []byte {
 	out := page
 	if injectKey && apiKey != "" {
+		// ⚠ 这里**故意**只替换「带双引号的那一处」，不能用 ReplaceAll。
+		//
+		// # 为什么（一次险些成真的回归）
+		//
+		// 页面上 `__WB2API_KEY__` 共出现 6 次，其中 5 次是**裸哨兵**，
+		// 最关键的一处在 JS 守卫里：
+		//
+		//	window.__WB2API_KEY__ !== '__WB2API_KEY__'
+		//
+		// 那个单引号哨兵是**判断"是否已注入"的对比基准**，不是待替换值。
+		// 自动连接能工作，恰恰因为这一处没被替换。
+		//
+		// 维护者如果看到"服务端下发了 5 处未替换的哨兵"就把这里改成
+		// `bytes.ReplaceAll`，会**静默杀死自动连接**：INJECTED 恒为空、
+		// 控制台永远要求手输 Key，且不报错、无提示。
+		//
+		// 本条语义由 TestRenderUIKeyInjection 守住
+		//（它同时断言"赋值被替换"与"守卫哨兵保持原样"）。
+		//
 		// json.Marshal 负责转义：密钥含引号/反斜杠/换行时也不会破坏内联脚本。
 		if quoted, err := json.Marshal(apiKey); err == nil {
 			out = bytes.Replace(out, []byte(`"`+keyPlaceholder+`"`), quoted, 1)
