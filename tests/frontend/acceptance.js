@@ -108,19 +108,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   try { served = await get(BASE); } catch (e) { /* 实例不可达 */ }
 
   if (served && served.status === 200) {
-    // ⚠ 掩码必须在**归一化之后**做，且两边用同一套规则：
-    //   HEAD 侧是哨兵 `"__WB2API_KEY__"`，served 侧是运行时注入的真实密钥。
-    // 我第一版把 `"__WB2API_KEY__"` 和 `"[A-Za-z0-9]{40}"` 分别替换成
-    // 同一占位符，但**顺序**不对（先掩哨兵再掩 key，而后者的正则匹配不到
-    // 已被替换的哨兵），于是长度差 36 字节报"不一致" —— 那是我的校验写错，
-    // 不是产品不一致。
+    // ⚠ 这个比对要掩掉**两类**运行时注入，否则会假红：
+    //   1. API key（HEAD 是哨兵 `"__WB2API_KEY__"`，served 是真实密钥）
+    //   2. COLS 占位符（HEAD 是 `__COLS_XXX__`，served 是数字）——
+    //      这是 commit 86fda95 特意加的**服务端替换**：静态 HTML 里的
+    //      `${COLS.x}` 不会被 JS 求值，改由 Go 侧替换成真实列数。
+    //
+    // 我前两版都只掩了密钥，于是每次都在这 5 行上报"不一致" ——
+    // **两次都是我的校验写错，不是产品不一致**。
     const maskBoth = s => s
-      .replace(/\r\n/g, '\n')                          // 仓库开了 autocrlf，先归一化
-      .replace(/"__WB2API_KEY__"/g, '"K"')             // HEAD 的哨兵
-      .replace(/"5fkVadO2[A-Za-z0-9]{28}"/g, '"K"')    // 运行时注入的真实 key
-      .replace(/"[A-Za-z0-9_-]{40}"/g, '"K"');         // 兜底：任何 40 位字面量
+      .replace(/\r\n/g, '\n')                            // 仓库开了 autocrlf，先归一化
+      .replace(/"__WB2API_KEY__"/g, '"K"')               // HEAD 的密钥哨兵
+      .replace(/"5fkVadO2[A-Za-z0-9]{28}"/g, '"K"')      // 运行时注入的真实 key
+      .replace(/"[A-Za-z0-9_-]{40}"/g, '"K"')            // 兜底：任何 40 位字面量
+      .replace(/__COLS_[A-Z]+__/g, 'N')                  // HEAD 的列数占位符
+      .replace(/colspan="\d+"/g, 'colspan="N"');         // served 里替换后的数字
     const a = maskBoth(headSrc.out), b = maskBoth(served.body);
-    record('C', '线上 /ui 与 HEAD 的 webui.html 一致（掩掉密钥注入后）', a === b,
+    record('C', '线上 /ui 与 HEAD 的 webui.html 一致（掩掉两处运行时注入）', a === b,
       a === b ? (b.length + ' 字节相同') : ('长度 ' + a.length + ' vs ' + b.length));
 
     // 初始化注入：真 key 在内联脚本里
