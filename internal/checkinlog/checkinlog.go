@@ -167,6 +167,17 @@ const MaxPageSize = 300
 //
 // 边界：offset<0 视为 0；limit<=0 用 DefaultPageSize；limit>MaxPageSize 夹到上限；
 // offset 越界返回空页不报错。
+//
+// # 为什么不带"上游归属过滤"参数（T4 的决定）
+//
+// 本包是历史文件的读写层，**不认识上游** —— 它不持有账号池，也没有 provider 字段。
+// 若在这里加 `uids []string`（或 provider 名 + 反查池子），这个纯存储包就要
+// 反向依赖账号池，而"一条记录归谁"的判据会分裂成两份（池子一份、这里一份）。
+// 判据分散正是本项目反复出问题的地方（见 workbuddy.ownAccounts 的注释）。
+//
+// 所以出口过滤放在**端点层**（workbuddy.AdminHandler.History）：
+// 那里本来就持有 Provider，能拿到与本上游其它路径**同一份**归属判据。
+// 分页语义为它保留的接口就是 PageAll —— 见那个函数的注释。
 func (l *Log) Page(offset, limit int, kind string) ([]Record, int) {
 	if limit <= 0 {
 		limit = DefaultPageSize
@@ -199,6 +210,33 @@ func (l *Log) Page(offset, limit int, kind string) ([]Record, int) {
 	out := make([]Record, end-offset)
 	copy(out, filtered[offset:end])
 	return out, total
+}
+
+// PageAll 返回**全部**记录（时间倒序，最新在前）的一个快照。
+//
+// # 为什么需要它（而不是让调用方自己拼 limit=MaxPageSize 翻页）
+//
+// 出口过滤必须在**过滤之后**分页，否则 total 会算成"过滤前"的数，
+// 前端据此算出的页数会指向不存在的页（最后一页空、页码跳）。
+// 而 Page 的过滤（kind）发生在它内部，外部拿不到"过滤后的全集"。
+//
+// 于是端点层的正确顺序是：
+//
+//	PageAll() → 按上游归属过滤 → kind 过滤 → 切 offset/limit
+//
+// 中间两步都在内存里做。为什么会这么设计而不是给 Page 加参数：
+// 归属判据属于 workbuddy（只有它知道"本上游是谁"），不属于这个存储包 ——
+// 见 Page 的注释。数据量上界是本包自己的 limit（5000），
+// 复制一次切片完全可接受；相比把判据搬进来，这个代价更小。
+//
+// 返回的是**拷贝**：调用方在锁外过滤时，Append 可能正在往 l.records 追加
+//（append 在容量够时原地写底层数组），直接返回内部切片会读到写一半的状态。
+func (l *Log) PageAll() []Record {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]Record, len(l.records))
+	copy(out, l.records)
+	return out
 }
 
 // Recent 返回最近 n 条（时间倒序，最新在前）；n<=0 返回全部。

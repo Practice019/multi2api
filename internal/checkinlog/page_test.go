@@ -18,8 +18,7 @@ import (
 //   - offset 超出范围返回空页而不是报错；
 //   - limit<=0 时用默认页大小。
 
-func newPagedLog(t *testing.T, n int) *Log {
-	t.Helper()
+func newPagedLog(t *testing.T, n int) *Log {	t.Helper()
 	l := New(filepath.Join(t.TempDir(), "h.json"), 30)
 	base := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
 	for i := 0; i < n; i++ {
@@ -178,5 +177,62 @@ func TestPageNegativeOffsetTreatedAsZero(t *testing.T) {
 	}
 	if items[0].UID != "u4" {
 		t.Errorf("负 offset 未从最新开始：首条=%s", items[0].UID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PageAll：给"出口过滤"用的全量快照（T4）
+// ---------------------------------------------------------------------------
+
+// TestPageAllReturnsEverythingNewestFirst 钉住 PageAll 的契约。
+//
+// # 它为什么会存在
+//
+// 出口过滤必须发生在**分页之前**（否则 total 会算成过滤前的数，
+// 前端据此算出的页数指向不存在的页）。而 Page 的过滤（kind）在它内部做，
+// 外部拿不到"过滤后的全集"，所以需要 PageAll。
+//
+// # 为什么它必须返回**时间正序**
+//
+// 端点层的过滤保持顺序不变，末了再倒着切页（与 Page 的倒序遍历一致）。
+// 若 PageAll 按倒序返回，端点层就会再倒一次 —— 两边各以为对方负责顺序，
+// 表现是"历史面板的时间顺序反了"，而这不会报任何错。
+// l.records 本身是正序，PageAll 就是它的拷贝，所以这里直接断言正序。
+func TestPageAllReturnsEverythingNewestFirst(t *testing.T) {
+	l := newPagedLog(t, 7)
+	all := l.PageAll()
+	if len(all) != 7 {
+		t.Fatalf("PageAll 返回 %d 条，期望 7（全部）", len(all))
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i].At.Before(all[i-1].At) {
+			t.Errorf("PageAll 第 %d 条比第 %d 条更旧 —— 期望时间正序"+
+				"（端点层负责倒序切页，两边都倒会让顺序反掉）", i, i-1)
+		}
+	}
+	if all[0].UID != "u0" || all[len(all)-1].UID != "u6" {
+		t.Errorf("首尾=%s..%s，期望 u0..u6", all[0].UID, all[len(all)-1].UID)
+	}
+}
+
+// TestPageAllIsACopy 钉住"PageAll 返回拷贝"。
+//
+// # 为什么这条不是形式主义
+//
+// 端点层在**锁外**过滤（拿 ownUIDs() 要问账号池，不能在 checkinlog 的锁里做）。
+// 若 PageAll 返回内部切片，并发的 Append 会在容量足够时**原地改写底层数组** ——
+// 过滤读到的是写了一半的状态，表现为"偶尔少一条/多一条记录"，无法复现。
+//
+// 判据不靠"读代码看有没有 copy"：直接改返回值，再确认内部状态没被改。
+func TestPageAllIsACopy(t *testing.T) {
+	l := newPagedLog(t, 3)
+	all := l.PageAll()
+	all[0].UID = "被篡改"
+	all[0].Kind = "被篡改"
+
+	again := l.PageAll()
+	if again[0].UID == "被篡改" || again[0].Kind == "被篡改" {
+		t.Errorf("改 PageAll 的返回值影响到了内部状态 —— 返回的是内部切片而不是拷贝"+
+			"（端点层在锁外过滤时会读到写一半的数据）实际: %+v", again[0])
 	}
 }

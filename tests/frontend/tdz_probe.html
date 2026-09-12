@@ -435,10 +435,51 @@ try {
     return p.capabilities.some(c => routesFor(providerId, c).length > 0);
   }
 
-  // panelCapsOf 取某上游**有面板入口**的能力位列表（含保留名 core）。
+  // hasSPECIALPanelExcluded 判断某能力位是否**已经被专属面板承担**。
   //
-  // 与 capNamesOf 的区别：这个只列"真的有 GET 入口"的能力，
+  // # 这张表为什么必要，以及为什么**不是**在 panelCapsOf 里写死 `!== 'checkin'`
+  //
+  // 「签到与保活」原先会由 buildProviderPanels() 生成一个通用列表面板，
+  // 但实测它是「任务历史」的劣化重复品：只有 1 个「刷新」按钮、无输入控件，
+  // 内容是**同一份**只读签到流水（同一个端点 /admin/checkin/history，
+  // 字段与任务历史完全相同，任务历史还多一个 kind 筛选）。
+  // 签到/保活的开关与时点全在「设置」里（setCheckinEnabled 等 5 个控件）。
+  // 结论：它是重复品，用户已确认删掉。
+  //
+  // # 为什么不能直接在 panelCapsOf 里排除 'checkin'
+  //
+  // panelCapsOf 同时被两处用：
+  //   1. buildProviderPanels —— 决定"要不要生成一个通用面板"
+  //   2. navGroupHeaderHTML  —— 决定"组头提示里列哪些能力"
+  // 在它内部写死 `c !== 'checkin'`，会让 **checkin 这个能力位整个消失**。
+  // 而「任务历史」正挂在 checkin 能力位上（data-cap="checkin"）——
+  // 它要的正是"能力位还在、但不生成通用面板"。抹掉能力位会连带把它一起打坏。
+  //
+  // 所以要区分两件事：
+  //   · 能力位**存在**（由 manifest 决定，前端不许说谎）
+  //   · 能力位**不需要通用面板**（由"已由专属面板承担"这张表决定）
+  // 本函数只回答后者，且只影响 buildProviderPanels 一处。
+  //
+  // # 为什么不按"这个能力位有没有静态 section"自动判断
+  //
+  // 那样看似更"数据驱动"，但静态面板是**编译期内嵌**在 HTML 里的，
+  // 前端在生成阶段就已经能看到它 —— 自动判断会在某人把静态面板删掉时
+  // 悄悄让通用面板回来（一个安静的重复品复现），而不是报错。
+  // 显式表 + 理由，是这里更安全的形态。
+  const SPECIAL_PANEL_CAPS = ['checkin', CORE_CAP];
+
+  // hasSPECIALPanelExcluded 判断某能力位是否**已经被专属面板承担**（见 SPECIAL_PANEL_CAPS）。
+  function hasSPECIALPanelExcluded(cap) {
+    return SPECIAL_PANEL_CAPS.indexOf(cap) >= 0;
+  }
+
+  // panelCapsOf 取某上游**需要生成通用面板**的能力位列表（含保留名 core）。
+  //
+  // 与 capNamesOf 的区别：这个只列"真的有 GET 入口、且没有被专属面板承担"的能力，
   // 用于建面板；capNamesOf 列的是声明了的能力，用于写标题提示。
+  //
+  // 被排除的能力位**仍然存在于 manifest 与 capNamesOf 里** ——
+  // 排除的只是"再生成一个通用列表面板"这一个动作（见上面那张表的注释）。
   function panelCapsOf(providerId) {
     const out = [];
     const p = providerInfo(providerId);
@@ -450,10 +491,40 @@ try {
     // 保留名 core：无能力位但声明了端点的路由归在这里。
     // 它不在 providers[].capabilities 里（那是"声明了能力位"的列表），
     // 所以必须单独查一次 —— 漏掉它会让 client-login 这类端点无家可归。
+    //
+    // # 为什么 core 现在也被排除（原 R2：workbuddy:core 孤儿面板）
+    //
+    // 实测：workbuddy 的 core 只有 3 条端点，其中**只有 GET /admin/client-login**
+    // 会走到这里（其余两条是 POST，routesFor 已按方法过滤）。
+    // 而 buildProviderPanels 为它生成的 section 会被 hideOrphanPanels()
+    // 立刻隐藏 —— 判据是 `capNamesOf(pid).indexOf('core') >= 0`，
+    // 而 capNamesOf 走 providers[].capabilities，**core 永远不在里面**
+    //（它是"有端点但没声明能力位"的保留名，不是真实能力位）。
+    //
+    // 所以"生成再隐藏"是一个恒真流程：每次 sync 都插一段 HTML、再把它 hidden。
+    // 界面上看不到，但它是**代码上的死路径**：将来任何人给 core 加能力名，
+    // 这个面板会毫无预兆地冒出来。R2 的要求正是"让它干脆不生成"。
+    //
+    // R2 同时问到"core 有没有真实价值（如 client-login 的 GET）"——
+    // 结论是**价值已经由别的界面承担了**：本机登录的状态与切换/回滚控件
+    // 就在「账号池」的账号行内（见 renderAccounts），core 面板的那一份
+    // 是同样的劣化重复品。GET 端点本身**不受影响**（路由照挂，
+    // 只是不再有一个空壳面板去拉它）。
+    //
+    // 实现上不在这个 if 里单独判断：core 走下面同一条出口，
+    // 由 SPECIAL_PANEL_CAPS 统一排除（见那里的注释）。
     if (routesFor(providerId, CORE_CAP).length > 0 && out.indexOf(CORE_CAP) < 0) {
       out.push(CORE_CAP);
     }
-    return out;
+    // 统一在出口处排一次"专属面板已承担"的能力位。
+    //
+    // # 为什么放在这里而不是分别在两个 push 处判断
+    //
+    // 上游 capabilities 里可能**同时**声明了 core 之外的能力与 core 通道，
+    // 两个 push 点各写一遍判据，就是同一个不变式存两份 —— 加第三个入口时
+    // 必定漏一个，而漏了的表现是"某个上游多出一个重复面板"，不报错。
+    // 收敛到一处，只需要正确一次。
+    return out.filter(c => !hasSPECIALPanelExcluded(c));
   }
 
   // loadManifest 拉取渲染契约。
@@ -1326,11 +1397,24 @@ try {
   const PROVIDER_PANEL_RENDERERS = {
     growth: () => loadGrowth(false),
     travel: () => loadTravel(false),
+    // 任务历史（T4 归位到 workbuddy 的 checkin 能力位）。
+    //
+    // # 为什么这里要显式列一条，而不是让它走通用列表
+    //
+    // 通用列表会把 /admin/checkin/history 的 {items,total} 原样铺成一堆行，
+    // 而「任务历史」是**已经存在**的静态面板（有 kind 筛选、分页、保留期提示）。
+    // 不列这一条的话，切到该面板会走 loadGenericList 并被塞进
+    // `#pbody-workbuddy-checkin` —— 而那个容器根本不存在（R1 已让 checkin
+    // 不再生成通用面板），于是面板点开是空的。
+    // 这正是本函数注释里说的"面板存在、导航可点、没有报错、只是不出内容"。
+    checkin: () => loadHistory(),
     // 其余能力位走**通用列表 + 领取**渲染。
     // 用户决策：codearts 的福利中心做到"上游给什么就渲染什么"即可，
     // 不为它写专属字段逻辑。
     welfare: (pid) => loadGenericList(pid, 'welfare'),
     'quota-probe': (pid) => loadGenericList(pid, 'quota-probe'),
+    // core 保留在这里只作为"若将来有人给 core 放开通用面板"的兜底：
+    // 当前 SPECIAL_PANEL_CAPS 已把 core 排除在生成之外，所以它不会被触发。
     core: (pid) => loadGenericList(pid, CORE_CAP),
   };
 
@@ -2269,9 +2353,17 @@ try {
   // 下限 1。越界只在本函数里夹紧，不改变 state 的语义。
   const PAGE_SIZE_MIN = 1;
   const PAGE_SIZE_MAX = 300;
-  // DefaultPageSize 与后端 logbuf.DefaultPageSize / checkinlog.DefaultPageSize 同为 30。
-  // 这里只作为「从未设置过」时的初值；一旦用户改过就以 localStorage 里存的为准。
-  const DefaultPageSize = 30;
+  // DefaultPageSize 是「从未设置过」时的初值；一旦用户改过就以 localStorage 里存的为准。
+  //
+  // ⚠ 与后端 logbuf.DefaultPageSize / checkinlog.DefaultPageSize **不再是同一个数**：
+  // 后端那两个仍是 30。它们不是"界面偏好"，而是**服务端单页上限的默认值** ——
+  // 被 API 直接调用（不带 limit）时应保持稳定，不该跟着界面偏好变。
+  // 这里只决定**前端首次展示**给多少条。
+  //
+  // 改成 15 的理由（用户要求）：请求日志与任务历史一屏能看全，
+  // 不用先滚动才知道下面有什么；想看更多可在面板上自己调（1–300，
+  // 改过之后就按用户的选择走，不受这里影响）。
+  const DefaultPageSize = 15;
 
   // 每页条数持久化到 localStorage，两个列表**共用同一个键**。
   //

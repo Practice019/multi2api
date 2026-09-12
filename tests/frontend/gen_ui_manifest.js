@@ -97,7 +97,49 @@ console.log('\n[3] 能力位清单不硬编码在前端');
 // 前端只允许出现**正在消费**的能力名（如 showPanel 里按 cap 分派），
 // 不允许出现一份自己的"能力位全表"。
 const capTableRe = /(?:const|let|var)\s+\w*(?:CAPS|capabilities)\w*\s*=\s*\[/i;
-ok(!capTableRe.test(jsNoComments), '前端没有自己的能力位数组常量');
+
+// # 例外：SPECIAL_PANEL_CAPS（T3/T4）
+//
+// # 为什么这条断言原先会假红，以及为什么不能用"改名字躲过去"
+//
+// T3 引入了一张 `const SPECIAL_PANEL_CAPS = ['checkin', CORE_CAP]`，
+// 上面那条正则立刻命中。但两者的性质完全不同：
+//
+//   · 被禁止的：前端自己列一遍 `['chat','checkin','growth','travel',…]`，
+//     当作"能力位全集"来读 —— 那样加第 3 个能力位时前端就得改，
+//     而且 manifest 说了不算（判据 1 在前端被打破）。
+//   · SPECIAL_PANEL_CAPS 是**排他表**：它列的是"这个能力位**不需要**
+//     buildProviderPanels 再生成一个通用面板"（因为已有专属面板承担）。
+//     它不认识任何上游，也不声称这是全集 —— 表外的能力位一律照常处理。
+//     manifest 里没声明 checkin 的上游，这张表对它毫无影响。
+//
+// 把变量改个不含 CAPS 的名字（比如 SUPPRESS）能让这条断言变绿，
+// 但那是**用改名躲过检查**：守卫仍然抓不出真正的"能力位全表"复发。
+// 所以正确做法是让守卫精确 —— 用显式豁免表，并把豁免理由写在这里。
+//
+// 防的是"悄悄给自己开豁免"：豁免项必须真的存在于源码中（下面检查），
+// 改名/删除会让这条断言变红，而不是静默放行。
+const CAP_TABLE_EXEMPTIONS = [
+  { name: 'SPECIAL_PANEL_CAPS', why: '排他表（专属面板已承担），不是能力位全集 —— 见 T3/T4' },
+];
+let capTables = [];
+{
+  const re = /(?:const|let|var)\s+(\w*(?:CAPS|capabilities)\w*)\s*=\s*\[/gi;
+  let m;
+  while ((m = re.exec(jsNoComments))) capTables.push(m[1]);
+}
+const offending = capTables.filter(n => !CAP_TABLE_EXEMPTIONS.some(e => e.name === n));
+ok(offending.length === 0, '前端没有自己的能力位数组常量' +
+  (offending.length ? ' —— 命中 ' + JSON.stringify(offending) : ''));
+// 豁免项必须真实存在：避免豁免表变成"永久放行"（被豁免的代码删了却没人发现）
+for (const e of CAP_TABLE_EXEMPTIONS) {
+  ok(capTables.indexOf(e.name) >= 0,
+    `豁免项 ${e.name} 仍存在于源码（理由：${e.why}）`);
+}
+if (capTables.length) {
+  console.log('    检测到的能力位数组常量: ' + JSON.stringify(capTables) +
+    '（豁免 ' + CAP_TABLE_EXEMPTIONS.length + ' 项）');
+}
 
 // ---------------------------------------------------------------- 4. colspan 不写死
 console.log('\n[4] 表格 colspan 不出现在渲染函数里的裸数字（防 B1/B2 漂移）');
