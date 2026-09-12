@@ -20,36 +20,58 @@ import (
 )
 
 // settingsStore 实现 admin.SettingsStore。
+// settingsStore 实现 admin.SettingsStore。
+//
+// # Task 3c 之后的形状
+//
+// 补丁是**原始 JSON**，因为里面混着两类键：
+//
+//	通用段   由本文件解释（签到/保活时点、上游超时、账号池限流…）
+//	上游段   由上游自己解释（workbuddy 的成长/旅行开关，见 internal/workbuddy/settings.go）
+//
+// 核心不再认识 "growth_auto_open" 这类名字 —— 那 19 处上游概念
+// （9 个字段 + 两张写死的清单）已随设置项一起搬进上游包。
+//
+// 上游段的落盘也在这里做（而不是让上游写 config.json）：
+// 上游包不得碰配置文件格式，那是宿主的职责。
 type settingsStore struct {
 	path string
 	cfg  *Config
 	sch  *scheduler.Scheduler
-	// biz 上游的账号级业务能力（成长/旅行的开关读写）。
-	// 与 sch 分开持有：调度框架与上游业务是两条线，加新上游时这里零改动。
-	biz admin.UpstreamBusiness
+	// up 上游的设置扩展（workbuddy 的成长/旅行开关）。
+	// 为 nil 时上游段全为空 —— 与"该上游没有专属设置"一致。
+	up  UpstreamSettings
 	log *checkinlog.Log
 	// setLogKeepDays 调整落盘请求日志的保留天数（由 main 注入，避免这里依赖 logbuf）。
 	setLogKeepDays func(int)
 }
 
+// UpstreamSettings 上游专属设置在**宿主**这一侧需要的形状。
+//
+// 只有一个方法：给出要落盘的键值。
+//
+// # 为什么没有 Apply
+//
+// 写入点只有一个 —— admin 的 handler 调 `SettingsExt.ApplySettings`。
+// 宿主在这里再写一遍不仅冗余，还会让 applied 里出现重复键
+// （前端会把它读成一件说不清的事）。
+// 宿主在这一侧只做两件事：落盘（读当前值）与回显（Snapshot 读 config）。
+type UpstreamSettings interface {
+	// Values 本上游全部设置项的当前值（用于持久化与回显）。
+	//
+	// 必须是**全量**而不是补丁里那几个键：补丁是稀疏的，
+	// 只写补丁里的键会把其它开关从 config.json 里抹掉。
+	Values() map[string]any
+}
+
 func (s *settingsStore) Snapshot() admin.Settings {
 	c := s.cfg
 	checkinH, keepaliveH := s.sch.Hours()
-	gAccept, gMakeup, gRedeem, gOpen, gDraw, gClaim := s.biz.GrowthToggles()
 	return admin.Settings{
-		CheckinEnabled:     s.sch.CheckinEnabled(),
-		KeepaliveEnabled:   s.sch.KeepaliveEnabled(),
-		CheckinHours:       checkinH,
-		KeepaliveHours:     keepaliveH,
-		TravelAutoClaim:    s.biz.TravelAutoClaimEnabled(),
-		TravelWatchSeconds: int(s.biz.WatchInterval().Seconds()),
-
-		GrowthAutoClaim:  gClaim,
-		GrowthAutoAccept: gAccept,
-		GrowthAutoMakeup: gMakeup,
-		GrowthAutoRedeem: gRedeem,
-		GrowthAutoOpen:   gOpen,
-		GrowthAutoDraw:   gDraw,
+		CheckinEnabled:   s.sch.CheckinEnabled(),
+		KeepaliveEnabled: s.sch.KeepaliveEnabled(),
+		CheckinHours:     checkinH,
+		KeepaliveHours:   keepaliveH,
 
 		CheckinLogKeepDays: s.log.KeepDays(),
 		RequestLogKeepDays: c.RequestLogKeepDays,
@@ -67,8 +89,6 @@ func (s *settingsStore) Snapshot() admin.Settings {
 		SessionStickyEnabled:  c.SessionSticky.Enabled,
 		SessionStickyTTL:      c.SessionSticky.TTL,
 
-		GrowthWatchSeconds: int(s.biz.GrowthWatchInterval().Seconds()),
-
 		Listen:     c.Listen,
 		AuthDir:    c.AuthDir,
 		ConfigPath: s.path,
@@ -77,26 +97,44 @@ func (s *settingsStore) Snapshot() admin.Settings {
 }
 
 // Apply 校验 → 写盘 → 应用运行时字段。
+//
 // 校验失败在写盘之前返回，磁盘保持原样。
-func (s *settingsStore) Apply(p admin.Settings) (applied, needRestart []string, err error) {
+//
+// # 补丁的分发顺序
+//
+//  1. 解析出通用段（不认识的键被 encoding/json 静默忽略 —— 正是我们要的）；
+//  2. 校验通用段 —— 失败即返回，**不写盘、不改内存**；
+//  3. 落盘（通用段 + 上游段的当前值）；
+//  4. 应用通用段的运行时值。
+//
+// 顺序的关键在第 2 步：校验必须在任何副作用之前。
+//
+// # 上游段的运行时不在这里应用
+//
+// 上游的设置值由 admin 的 handler 调 `SettingsExt.ApplySettings` 应用
+// （那是唯一的写入点）。这里**只负责落盘**，因为它要读上游应用**之后**的当前值。
+// 两边都写一次不仅冗余，还会让 applied 里出现重复键 ——
+// 而前端会把重复的"已生效"读成一件说不清的事。
+func (s *settingsStore) Apply(patch json.RawMessage) (applied, needRestart []string, err error) {
+	p, err := s.parse(patch)
+	if err != nil {
+		return nil, nil, err
+	}
 	if err := validateSettings(p); err != nil {
 		return nil, nil, err
 	}
 
-	// 1) 写盘（合并进现有 JSON，保留未知键）
+	// 落盘：通用段（本文件负责）+ 上游段的当前值。
 	if err := s.persist(p); err != nil {
 		return nil, nil, fmt.Errorf("写入 %s 失败: %w", s.path, err)
 	}
 
-	// 2) 运行时生效
+	// 运行时生效（通用段）
 	s.sch.SetCheckinEnabled(p.CheckinEnabled)
 	s.sch.SetKeepaliveEnabled(p.KeepaliveEnabled)
 	if err := s.sch.SetHours(p.CheckinHours, p.KeepaliveHours); err != nil {
 		return nil, nil, err
 	}
-	s.biz.SetTravelAutoClaim(p.TravelAutoClaim)
-	s.biz.SetGrowthToggles(p.GrowthAutoAccept, p.GrowthAutoMakeup,
-		p.GrowthAutoRedeem, p.GrowthAutoOpen, p.GrowthAutoDraw, p.GrowthAutoClaim)
 	if p.CheckinLogKeepDays > 0 {
 		s.log.SetKeepDays(p.CheckinLogKeepDays)
 	}
@@ -105,27 +143,43 @@ func (s *settingsStore) Apply(p admin.Settings) (applied, needRestart []string, 
 	}
 	applied = []string{
 		"checkin_enabled", "keepalive_enabled", "checkin_hours", "keepalive_hours",
-		"travel_auto_claim", "checkin_log_keep_days", "request_log_keep_days",
-		"growth_auto_claim", "growth_auto_accept_tasks", "growth_auto_makeup",
-		"growth_auto_redeem", "growth_auto_open", "growth_auto_draw",
+		"checkin_log_keep_days", "request_log_keep_days",
 	}
 
-	// 3) 只写盘、需重启才生效（守卫轮 ticker 的创建时机、上游 client 的超时、
-	//    账号池限流器、Redis 连接都是在启动时一次性装配的，运行中改不了）。
+	// 只写盘、需重启才生效（上游 client 的超时、账号池限流器、Redis 连接
+	// 都是在启动时一次性装配的，运行中改不了；守卫轮间隔同理，
+	// 由上游在 SettingField.RestartRequired 里声明）。
 	needRestart = []string{
 		"cooldown_soft_rate",
 		"upstream_timeout_seconds", "upstream_header_timeout_seconds", "upstream_idle_timeout_seconds",
 		"pool_max_in_flight", "pool_breaker_threshold", "pool_breaker_cooldown", "pool_breaker_cooldown_max",
 		"sanitize_blacklist_fingerprints", "upstash_url",
 		"session_sticky_enabled", "session_sticky_ttl",
-		"travel_watch_interval_seconds",
-		"growth_watch_interval_seconds",
 	}
 	// 把新值同步进内存 cfg，让 Snapshot 显示的就是刚保存的值。
 	s.applyToMemory(p)
 	return applied, needRestart, nil
 }
 
+// parse 从原始补丁里取出**通用段**。
+//
+// 不认识的键被 encoding/json 静默忽略 —— 那正是"核心不认识上游字段"的实现方式：
+// 它不必拒绝它们，只是不解释它们。
+func (s *settingsStore) parse(patch json.RawMessage) (admin.Settings, error) {
+	var p admin.Settings
+	if len(patch) == 0 {
+		return p, nil
+	}
+	if err := json.Unmarshal(patch, &p); err != nil {
+		return p, fmt.Errorf("设置解析失败: %w", err)
+	}
+	return p, nil
+}
+
+// applyToMemory 把刚保存的通用段同步进内存 cfg，让 Snapshot 显示的就是新值。
+//
+// 上游段的对应字段由 upstreamSettingsAdapter.applyToMemory 负责 ——
+// 那份清单属于上游，核心不认识它们（这正是 Task 3c 解耦掉的东西）。
 func (s *settingsStore) applyToMemory(p admin.Settings) {
 	c := s.cfg
 	c.Cooldown.SoftRate = p.SoftRate
@@ -144,20 +198,13 @@ func (s *settingsStore) applyToMemory(p admin.Settings) {
 	c.Schedule.KeepaliveEnabled = p.KeepaliveEnabled
 	c.Schedule.CheckinHours = p.CheckinHours
 	c.Schedule.KeepaliveHours = p.KeepaliveHours
-	c.Admin.TravelWatchIntervalSeconds = p.TravelWatchSeconds
-	travelAuto := p.TravelAutoClaim
-	c.Admin.TravelAutoClaim = &travelAuto
 	c.Admin.CheckinLogKeepDays = p.CheckinLogKeepDays
 	c.RequestLogKeepDays = p.RequestLogKeepDays
-	// 成长中心自动动作开关
-	c.GrowthAutoClaim = p.GrowthAutoClaim
-	c.GrowthAutoAccept = p.GrowthAutoAccept
-	c.GrowthAutoMakeup = p.GrowthAutoMakeup
-	c.GrowthAutoRedeem = p.GrowthAutoRedeem
-	c.GrowthAutoOpen = p.GrowthAutoOpen
-	c.GrowthAutoDraw = p.GrowthAutoDraw
-	if p.GrowthWatchSeconds > 0 {
-		c.Admin.GrowthWatchIntervalSeconds = p.GrowthWatchSeconds
+	// 上游段：由适配器按自己的键表同步（见 upstreamSettingsAdapter）。
+	if s.up != nil {
+		if a, ok := s.up.(interface{ applyToMemory(map[string]any) }); ok {
+			a.applyToMemory(s.up.Values())
+		}
 	}
 }
 
@@ -198,9 +245,6 @@ func validateSettings(p admin.Settings) error {
 	}
 	if p.PoolMaxInFlight < 0 || p.BreakerThreshold < 0 {
 		return fmt.Errorf("账号池参数不能为负")
-	}
-	if p.TravelWatchSeconds < 0 {
-		return fmt.Errorf("旅行守卫间隔不能为负")
 	}
 	if p.CheckinLogKeepDays < 0 || p.RequestLogKeepDays < 0 {
 		return fmt.Errorf("日志保留天数不能为负")
@@ -259,18 +303,14 @@ func (s *settingsStore) persist(p admin.Settings) error {
 		"ttl":     p.SessionStickyTTL,
 	})
 	set("admin", map[string]any{
-		"travel_auto_claim":             p.TravelAutoClaim,
-		"travel_watch_interval_seconds": p.TravelWatchSeconds,
-		"checkin_log_keep_days":         p.CheckinLogKeepDays,
-
-		"growth_auto_claim":             p.GrowthAutoClaim,
-		"growth_auto_accept_tasks":      p.GrowthAutoAccept,
-		"growth_auto_makeup":            p.GrowthAutoMakeup,
-		"growth_auto_redeem":            p.GrowthAutoRedeem,
-		"growth_auto_open":              p.GrowthAutoOpen,
-		"growth_auto_draw":              p.GrowthAutoDraw,
-		"growth_watch_interval_seconds": p.GrowthWatchSeconds,
+		"checkin_log_keep_days": p.CheckinLogKeepDays,
 	})
+	// 上游段：由适配器给出它自己的键值（核心不认识这些键名，也不再列它们）。
+	// 这里用 set 合并而不是整体替换 —— 与上面各段同一语义，
+	// 保留用户手工写在该段里的其它键。
+	if s.up != nil {
+		set("admin", s.up.Values())
+	}
 	// 别名键收敛：写入规范键 growth_auto_claim 后，删掉曾用过（且曾被静默忽略）的
 	// growth_auto_claim_tasks，避免两个键并存给出互相矛盾的信号。
 	unset("admin", "growth_auto_claim_tasks")
@@ -292,13 +332,15 @@ func (s *settingsStore) persist(p admin.Settings) error {
 }
 
 // newSettingsStore 组装宿主实现。
-func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler, biz admin.UpstreamBusiness,
+//
+// up 是上游的设置扩展适配器（可为 nil —— 该上游没有专属设置）。
+func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler, up UpstreamSettings,
 	log *checkinlog.Log, setLogKeepDays func(int)) admin.SettingsStore {
 	return &settingsStore{
 		path:           path,
 		cfg:            cfg,
 		sch:            sch,
-		biz:            biz,
+		up:             up,
 		log:            log,
 		setLogKeepDays: setLogKeepDays,
 	}

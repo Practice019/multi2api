@@ -99,8 +99,16 @@ func TestProviderIdentity(t *testing.T) {
 			t.Errorf("workbuddy 具备该能力但未声明: %v", gateway.String(c))
 		}
 	}
+	// CapQuotaProbe：Task 3c 修正 —— workbuddy 有**主动**额度探测
+	// （RefreshCredits 直接调上游 get-user-resource，不依赖对话响应推断），
+	// 而 /admin/credits/refresh 端点在 3a 的清单里就已标成 CapQuotaProbe。
+	// 两边必须一致，否则前端按能力位渲染时那个入口会静默消失。
+	if !caps.Has(gateway.CapQuotaProbe) {
+		t.Error("workbuddy 有主动额度探测（RefreshCredits），且 /admin/credits/refresh " +
+			"已声明 CapQuotaProbe，应一并声明该能力位")
+	}
 	// 不该声明没有的
-	for _, c := range []gateway.Capability{gateway.CapWelfare, gateway.CapQuotaProbe} {
+	for _, c := range []gateway.Capability{gateway.CapWelfare} {
 		if caps.Has(c) {
 			t.Errorf("workbuddy 不具备该能力，不该声明: %v", gateway.String(c))
 		}

@@ -297,7 +297,19 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	p.Release("bad")
 }
 
-func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
+// TestChatHardCreditCooldownUsesUpstreamReset 额度耗尽 → 冷却到**上游给出的**重置时刻。
+//
+// # 这个测试改造前叫 TestChatHardCreditCooldownUntilNextDay4AM
+//
+// 它当时断言 `st.Until.Hour() == 4` —— 把 workbuddy 的「次日 04:00」策略
+// 写进了**核心出口层**的测试里。那就是耦合：codearts 的配额窗口不是 4 点。
+//
+// 现在核心只断言**通用契约**：
+//   - 402 额度耗尽 → 进入 CoolHard 冷却
+//   - 冷却截止时刻 = 注入的 NextResetAt() 的返回值
+//
+// 「次日 04:00」这条 workbuddy 策略由 internal/workbuddy 自己的测试守着。
+func TestChatHardCreditCooldownUsesUpstreamReset(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {
 			return 402, `{"code":1,"msg":"余额不足"}`, false
@@ -310,7 +322,11 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	)
 	p.SetCredits("bad", 2000) // bad 积分高，确定性源 → 先被选中
 	p.SetCredits("good", 1000)
-	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	// 注入一个**与 04:00 无关**的重置时刻 —— 证明核心不再写死任何时点
+	want := time.Now().Add(37 * time.Minute).Truncate(time.Second)
+	h := NewHandler(Config{Pool: p, Upstream: up, NextResetAt: func() time.Time { return want }})
+
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -319,23 +335,42 @@ func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	}
 	st, ok := p.Status("bad")
 	if !ok || !st.Cooling {
-		t.Fatalf("bad should be cooling: %+v ok=%v", st, ok)
+		t.Fatalf("bad 应进入冷却: %+v ok=%v", st, ok)
 	}
-	if st.Reason != "余额不足" {
-		t.Errorf("reason=%q", st.Reason)
+	if st.CoolKind != pool.CoolHard.String() {
+		t.Errorf("应为 hard 冷却，得到 %q", st.CoolKind)
 	}
-	// 硬信贷冷却必须是次日 04:00，而不是固定 12h/配置时长。
-	if st.Until.Hour() != 4 {
-		t.Errorf("until hour=%d want 4 (next-day 04:00)", st.Until.Hour())
-	}
-	// 距次日 04:00 最长 28h（凌晨 00:00~04:00 间运行时 now→次日 04:00 跨度 > 24h，属正常）。
-	if d := time.Until(st.Until); d <= 0 || d > 28*time.Hour {
-		t.Errorf("until %v not within (0,28h]: %v", st.Until, d)
+	// 冷却截止应贴近注入值（容忍秒级误差）
+	if d := st.Until.Sub(want); d > 2*time.Second || d < -2*time.Second {
+		t.Errorf("冷却截止 %v 与注入的重置时刻 %v 相差 %v", st.Until, want, d)
 	}
 	// 立即换号成功：good 被选中。
 	stGood, _ := p.Status("good")
 	if stGood.Cooling || stGood.Disabled {
-		t.Errorf("good should stay healthy: %+v", stGood)
+		t.Errorf("good 应保持健康: %+v", stGood)
+	}
+}
+
+// TestChatHardCreditCooldownDefaultReset 未注入 NextResetAt 时的通用回落。
+//
+// 回落值是 now+1h —— 一个**不假装知道任何上游策略**的保守值。
+func TestChatHardCreditCooldownDefaultReset(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 402, `{"code":1,"msg":"余额不足"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up}) // 刻意不设 NextResetAt
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	st, ok := p.Status("bad")
+	if !ok || !st.Cooling {
+		t.Fatalf("应进入冷却: %+v ok=%v", st, ok)
+	}
+	if d := time.Until(st.Until); d < 50*time.Minute || d > 70*time.Minute {
+		t.Errorf("默认回落应约为 1 小时，实际 %v", d)
 	}
 }
 

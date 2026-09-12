@@ -33,6 +33,25 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429 冷却，默认 60s
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+
+	// NextResetAt 返回"额度耗尽的账号下次可用的时刻"。
+	//
+	// # 为什么做成可注入的回调（而不是出口层自己算）
+	//
+	// 早先出口层直接调 pool.CooldownUntilTomorrow4AM —— 那是把
+	// **workbuddy 的策略**（次日 04:00，等 09:00/21:00 的签到恢复）
+	// 写死在核心。codearts 没有签到，次日 4 点对它毫无意义。
+	//
+	// 现在由上游提供：workbuddy 给"次日 04:00"，codearts 给"配额窗口重置时刻"。
+	// nil 时回落到一个通用的保守值（1 小时），保证没有 Provider 也能跑。
+	NextResetAt func() time.Time
+
+	// OwnedBy 填进 /v1/models 的 `owned_by` 字段。
+	//
+	// 早先这里硬编码 "workbuddy" —— 上游名字写死在核心出口层。
+	// 现在由 cmd/server 注入（单上游时就是该上游的 ID）。
+	// 空值时回落到 "local"，**不假装知道**是哪个上游。
+	OwnedBy string
 	// Admin 管理台子树（挂在 /admin/，由 internal/admin 提供）。nil = 不注册该子树。
 	Admin http.Handler
 	// ModelCatalog 供管理台取模型目录快照（成本系数用）。nil = 本实例不提供该能力。
@@ -179,18 +198,29 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// 静态 CN 模型表（api-reference §5，动态接口失败时的回退）。
+// staticModels 动态接口失败时的**回退模型表**。
+//
+// # 为什么留在这里而不是搬走
+//
+// 这张表是 workbuddy 的模型清单（`owned_by: "workbuddy"`），
+// 严格说是上游数据。但它的作用是"上游拉不到时的兜底展示" ——
+// 一个纯静态、无副作用的常量，且 /v1/models 是出口层职责。
+//
+// 多上游落地后这里要改成**按 provider 合并**（Task 6/8）：
+// 每个 Provider 通过 Models() 给出自己的目录，出口层合并并加前缀。
+// 本任务（阶段 0）只做解耦，不改行为 —— 所以暂时保留原表，
+// 但把它与 owned_by 抽成可注入字段，避免核心继续**硬编码**上游名字。
 var staticModels = []map[string]any{
-	{"id": "glm-5.2", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "glm-5.1", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "glm-5v-turbo", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "kimi-k2.7", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "minimax-m3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "hy3", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "hy3-preview", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "hy3-preview-agent", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "deepseek-v4-pro", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
+	{"id": "glm-5.2", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "glm-5.1", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "glm-5v-turbo", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "kimi-k2.7", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "minimax-m3", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "hy3", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "hy3-preview", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "hy3-preview-agent", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "deepseek-v4-pro", "object": "model", "created": 1753600000, "context_length": 131072},
+	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "context_length": 131072},
 }
 
 // dynamicModelsCache 动态模型缓存。
@@ -216,6 +246,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
 func (h *Handler) modelList() []map[string]any {
+	owned := h.ownedBy()
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
 		out := make([]map[string]any, 0, len(infos))
 		for _, mi := range infos {
@@ -223,7 +254,7 @@ func (h *Handler) modelList() []map[string]any {
 				"id":                mi.ID,
 				"object":            "model",
 				"created":           1753600000,
-				"owned_by":          "workbuddy",
+				"owned_by":          owned,
 				"context_length":    mi.ContextWindow,
 				"max_output_tokens": mi.MaxTokens,
 			}
@@ -234,7 +265,27 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		return out
 	}
-	return staticModels
+	// 静态回退表：补上 owned_by（表里不再硬编码上游名）
+	out := make([]map[string]any, 0, len(staticModels))
+	for _, m := range staticModels {
+		e := make(map[string]any, len(m)+1)
+		for k, v := range m {
+			e[k] = v
+		}
+		e["owned_by"] = owned
+		out = append(out, e)
+	}
+	return out
+}
+
+// ownedBy 返回 /v1/models 的 owned_by 值。
+//
+// 未注入时给 "local" —— 一个**不假装知道**是哪个上游的中性值。
+func (h *Handler) ownedBy() string {
+	if h.cfg.OwnedBy != "" {
+		return h.cfg.OwnedBy
+	}
+	return "local"
 }
 
 // fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
@@ -599,7 +650,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
 //
 // 五条路径，各司其职：
-//   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
+//   - ErrHardCredit → CooldownUntilNextReset：即时硬冷却到**上游给出的**下次重置时刻
+//     （workbuddy 是次日 04:00 等签到恢复；其它上游可能是配额窗口重置）。
 //   - ErrSoftRate / ErrNotFound → Cooldown(CoolSoft)：即时软冷却（429/404）。
 //   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
@@ -608,12 +660,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 //
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
+// nextResetAt 问上游"额度耗尽的号什么时候能再用"。
+//
+// 没有配置 NextResetAt（单上游未注入、或测试）时回落到 now+1h。
+// 选 1 小时而不是"次日某点"：那是个**通用**的保守值，
+// 不假装知道任何上游的具体重置策略。配置了上游就以它为准。
+func (h *Handler) nextResetAt() time.Time {
+	if h.cfg.NextResetAt != nil {
+		return h.cfg.NextResetAt()
+	}
+	return time.Now().Add(time.Hour)
+}
+
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind) {
 	switch kind {
 	case upstream.ErrHardCredit:
-		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
-		// 不需要异步核查（冗余）。立即换号。
-		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
+		// 402 + 额度耗尽关键词：冷却到**上游给出的下次重置时刻**，立即换号。
+		//
+		// 早先这里直接调 pool.CooldownUntilTomorrow4AM —— 把 workbuddy 的
+		// 「次日 04:00 等签到恢复」写进了出口层。现在改为向 Provider 要时刻：
+		// 出口层只问"这个号什么时候能再用"，具体策略由上游定义
+		// （见 Config.NextResetAt）。
+		h.cfg.Pool.CooldownUntilNextReset(uid, h.nextResetAt(), "额度不足")
 	case upstream.ErrSoftRate:
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
 	case upstream.ErrSessionDead:

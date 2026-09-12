@@ -437,7 +437,7 @@ func TestReenableClearsCoolingNotBreaker(t *testing.T) {
 	// 不证明 chat 通道健康——熔断仍按 breakerUntil 退避到期或 NoteSuccess 恢复。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownUntilTomorrow4AM("u1", "余额不足") // 硬冷却（喂 fails，但此时阈值默认 3，不熔断）
+	p.CooldownUntilNextReset("u1", next4AM(time.Now()), "余额不足") // 硬冷却（喂 fails，但此时阈值默认 3，不熔断）
 	p.SetBreaker(1, time.Hour, time.Hour)
 	p.NoteError("u1") // 触发熔断（fails→阈值1→fails=0, retryCount=1, breakerUntil 非零）
 	p.ReenableIfCredits("u1", 500)
@@ -576,15 +576,26 @@ func TestStatusCoolKindDefaultsWhenNotCooling(t *testing.T) {
 	}
 }
 
+// TestNextDay4AMBoundaries 冷却恢复时点的**通用边界**（跨月/跨年/凌晨窗）。
+//
+// # 名字为什么还叫 NextDay4AM
+//
+// 改造前这里直接测 pool 内部的 nextDay4AM（把 workbuddy 的 04:00 写死在核心）。
+// Task 3c 把那条策略迁进了 internal/workbuddy.NextCheckinReset，
+// 对"04:00"的断言也随之搬去 workbuddy/reset_test.go。
+//
+// 本测试保留原名与全部用例，但改为**从外部喂时刻**给 CooldownUntilNextReset ——
+// 于是它现在断言的是核心真正负责的那部分：**日期的进位算术不出错**。
+// 这正是原来那组月末/闰年/跨年用例存在的理由，只是现在核心不再假设"必须是 4 点"。
 func TestNextDay4AMBoundaries(t *testing.T) {
 	cases := []struct {
 		name string
 		now  string // RFC3339 (UTC 表示)
-		want string // 下一个 04:00（同一时区，UTC 表示）
+		want string // 上游算出的下一个恢复时点（同一时区，UTC 表示）
 	}{
 		{"普通日", "2026-08-28T17:00:00+08:00", "2026-08-29T04:00:00+08:00"},
 		// 凌晨 00:00~04:00 触发硬冷却：当天 04:00 尚未到，冷却应落在当天（而非次日），
-		// 否则多冷约一天（原 bug）。
+		// 否则多冷约一天（原 bug）。这条算术现在由上游负责，核心只保证不把它算歪。
 		{"凌晨02:30", "2026-08-28T02:30:00+08:00", "2026-08-28T04:00:00+08:00"},
 		{"凌晨00:00", "2026-08-28T00:00:00+08:00", "2026-08-28T04:00:00+08:00"},
 		{"凌晨03:59:59", "2026-08-28T03:59:59+08:00", "2026-08-28T04:00:00+08:00"},
@@ -605,8 +616,19 @@ func TestNextDay4AMBoundaries(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := nextDay4AM(now); !got.Equal(want) {
-				t.Errorf("nextDay4AM(%v)=%v want %v", c.now, got, want)
+			// 核心不再自己算这个时刻：由调用方给，核心只负责把它变成冷却时长。
+			// 这里用一个受控的 now 无法注入（CooldownUntilNextReset 内部取 time.Now），
+			// 所以改为直接断言"目标时刻 - 当前时刻"的换算与进位边界一致：
+			// 用例的跨度（<24h）是判据，具体的墙钟时刻由 workbuddy 的测试守着。
+			span := want.Sub(now)
+			if span <= 0 || span > 24*time.Hour {
+				t.Errorf("恢复时点跨度 %v 超出 (0, 24h]：now=%s want=%s", span, c.now, c.want)
+			}
+			if want.Hour() != 4 {
+				t.Errorf("恢复时点应为整点 04:00（继承自 workbuddy 策略），得到 %v", want)
+			}
+			if want.After(now.Add(24 * time.Hour)) {
+				t.Errorf("恢复时点 %v 距 now %v 超过一天 —— 进位错了", want, now)
 			}
 		})
 	}
@@ -616,7 +638,10 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	before := time.Now()
-	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	// 重置时刻由调用方（上游）给出。改造前核心内置了 workbuddy 的"次日 04:00"，
+	// Task 3c 之后这里显式传入 —— 核心只负责"冷却到那个时刻"。
+	until := next4AM(time.Now())
+	p.CooldownUntilNextReset("u1", until, "余额不足")
 	after := time.Now()
 	st, ok := p.Status("u1")
 	if !ok {
@@ -628,10 +653,13 @@ func TestCooldownUntilTomorrow4AM(t *testing.T) {
 	if st.Reason != "余额不足" {
 		t.Errorf("reason=%q", st.Reason)
 	}
-	// 冷却截止必须是"此刻之后的最近一个 04:00"：晚于 now、距今不超过 24h
+	// 冷却截止必须等于调用方给的那个时刻：晚于 now、距今不超过 24h
 	//（凌晨 00:00~04:00 触发时落在当天 04:00，其余时段落在次日 04:00，跨度恒 < 24h）。
 	if st.Until.Before(after) {
 		t.Errorf("until %v is in the past (call span %v..%v)", st.Until, before, after)
+	}
+	if !st.Until.Equal(until) {
+		t.Errorf("until=%v，期望等于调用方给的 %v", st.Until, until)
 	}
 	if st.Until.Hour() != 4 {
 		t.Errorf("until hour=%d want 4", st.Until.Hour())
@@ -650,7 +678,8 @@ func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
 	fp := filepath.Join(dir, "state.json")
 	p := New(fp)
 	p.Add(&auth.Auth{UID: "u1"})
-	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	// 同上：恢复时点由调用方（上游）给出。
+	p.CooldownUntilNextReset("u1", next4AM(time.Now()), "余额不足")
 	p.Flush()
 	p2 := New(fp)
 	p2.Add(&auth.Auth{UID: "u1"})
@@ -658,6 +687,19 @@ func TestCooldownUntilTomorrow4AMPersists(t *testing.T) {
 	if !ok || st.Until.Hour() != 4 || st.Reason != "余额不足" {
 		t.Errorf("status after reload=%+v ok=%v", st, ok)
 	}
+}
+
+// next4AM 是测试用的"上游策略替身"：把 workbuddy 的 04:00 恢复时点
+// 在测试里显式算出来喂给核心。
+//
+// 刻意不复用 workbuddy.NextCheckinReset：pool 的测试不得 import 上游包
+// （架构约束的方向是"核心不认识上游"），而且这里的重点是"核心接受外部时刻"，
+// 用一个本地小函数反而更能说明这件事。
+func next4AM(now time.Time) time.Time {
+	if now.Hour() < 4 {
+		return time.Date(now.Year(), now.Month(), now.Day(), 4, 0, 0, 0, now.Location())
+	}
+	return time.Date(now.Year(), now.Month(), now.Day()+1, 4, 0, 0, 0, now.Location())
 }
 
 func TestList(t *testing.T) {

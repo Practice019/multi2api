@@ -80,6 +80,16 @@ type Provider struct {
 	// 同样是 nil 安全（acquire/release 都对 nil 直接返回）—— 与 travel/growth
 	// 一致，这样测试里手搓 &Provider{} 不会崩，只是失去限流。
 	probeSem *growthProbeSem
+
+	// adminEnv 管理端点宿主的核心依赖（调度器视图 + 共享任务槽）。
+	//
+	// 为什么放在 Provider 而不是只放在 AdminHandler：AdminRoutes() 是
+	// gateway.AdminExt 的接口方法，核心只拿得到 *Provider，拿不到 Handler。
+	// 所以依赖必须能从 Provider 上读出来。用 SetAdminEnv 延迟注入
+	// （调度器在 Provider 之后构造）。
+	//
+	// 与 mu 共用同一把锁。
+	adminEnv AdminEnv
 }
 
 // New 建一个 workbuddy Provider（契约测试用的无依赖构造）。
@@ -99,6 +109,7 @@ func NewWithConfig(cfg Config) *Provider {
 	return &Provider{
 		client:     cfg.Client,
 		cfg:        cfg,
+		adminEnv:   cfg.Admin,
 		adoptTried: make(map[string]string),
 		travel:     newTravelWatchState(!cfg.TravelAutoClaimDisabled),
 		// 每个 Provider 一份独立预算：测试里会起多个实例，
@@ -127,20 +138,73 @@ func (p *Provider) SetClient(c *upstream.Client) {
 	}
 }
 
+// SetAdminEnv 注入管理端点宿主需要的核心依赖（调度器视图 + 共享任务槽）。
+//
+// 同样是启动期一次性注入：调度器在 Provider 之后构造，所以只能后补。
+// 后补的意义在于 /admin/task 与签到/保活共用**同一个任务槽** ——
+// 否则管理端点各自持有槽，"已有任务在执行中"的判断就会失效。
+func (p *Provider) SetAdminEnv(env AdminEnv) {
+	p.mu.Lock()
+	p.adminEnv = env
+	p.mu.Unlock()
+}
+
+// SetCheckinRunner 注入核心调度器的账号级动作（签到/保活）。
+//
+// 与 SetAdminEnv 一样后注入：调度器在 Provider 之后构造。
+// 分成两个 setter 而不是一个：Checkin 是"业务动作"（会被 /admin/checkin 调用），
+// AdminEnv 是"展示与任务槽"，两者虽然当前都由调度器满足，但语义不同 ——
+// 合并会让将来出现"只有任务槽、没有调度器"的接线无处安放。
+func (p *Provider) SetCheckinRunner(r CheckinRunner) {
+	p.cfg.Checkin = r
+}
+
+// SetClientLogin 注入本机客户端登录态管理器（未配置时为 nil，面板降级 503）。
+func (p *Provider) SetClientLogin(m ClientLoginManager) {
+	p.cfg.ClientLogin = m
+}
+
+// clientLogin 取本机客户端登录态管理器（未接线返回 nil）。
+//
+// 返回的是消费方接口（见 clientlogin.go）：本包不 import internal/clientlogin 的
+// 具体类型也可以调用，转换由 cmd/server 的适配器完成。
+func (p *Provider) clientLogin() ClientLoginManager {
+	if p == nil {
+		return nil
+	}
+	return p.cfg.ClientLogin
+}
+
 // ID 上游标识。
 func (p *Provider) ID() string { return providerID }
 
 // Caps 能力声明。
 //
 // ⚠ **声明了就必须实现**（契约测试会查）。
-// workbuddy 实际具备：对话、动态模型目录、签到、成长中心、猫猫旅行。
-// 不具备：福利领取（codearts 专属）、主动额度探测（workbuddy 是被动从响应推断的）。
+// workbuddy 实际具备：对话、动态模型目录、签到、成长中心、猫猫旅行、主动额度探测。
+// 不具备：福利领取（codearts 专属）。
+//
+// # CapQuotaProbe 的判据（Task 3c 修正）
+//
+// 原先这里**没有**声明 CapQuotaProbe，但 AdminRoutes 已经把
+// POST /admin/credits/refresh 标成了 CapQuotaProbe —— 两边矛盾：
+// 前端据此渲染入口时，能力位为 0，那个入口会静默消失。
+//
+// 实测 workbuddy **确实**有主动探测：Provider.RefreshCredits 直接调上游
+// /v2/billing/meter/get-user-resource 查余额并写回池，不依赖任何一次对话的
+// 响应体推断。所以正确做法是把它声明出来，而不是把端点的能力位改掉
+// （后者等于把已有功能从界面上藏起来）。
+//
+// 统一到 CapCheckin 曾经是一个诱人的选项，但它会让
+// /admin/credits/refresh 在"签到能力被关闭"的部署里一起消失 —— 而刷新额度
+// 与签到是两件事（前者只查询，后者会上报签到）。
 func (p *Provider) Caps() gateway.Capability {
 	return gateway.CapChat |
 		gateway.CapModels |
 		gateway.CapCheckin |
 		gateway.CapGrowth |
-		gateway.CapTravel
+		gateway.CapTravel |
+		gateway.CapQuotaProbe
 }
 
 // Chat 转发一次对话请求。

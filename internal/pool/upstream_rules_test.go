@@ -66,6 +66,77 @@ func assertCoolingUntil(t *testing.T, st Status, want time.Duration) {
 	}
 }
 
+// TestCooldownUntilNextReset 通用冷却入口：重置时刻由调用方给。
+//
+// 解耦后的核心不再知道"次日 4 点" —— 04:00 是 workbuddy 的签到恢复时刻，
+// codearts 没有签到。核心只接受一个目标时刻。
+func TestCooldownUntilNextReset(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+
+	target := time.Now().Add(45 * time.Minute)
+	p.CooldownUntilNextReset("u1", target, "配额用尽（由上游判定）")
+
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatal("应处于冷却")
+	}
+	if st.CoolKind != CoolHard.String() {
+		t.Errorf("应为 hard 冷却，得到 %q", st.CoolKind)
+	}
+	assertCoolingUntil(t, st, 45*time.Minute)
+}
+
+// TestCooldownUntilNextResetPastTime 目标时刻已过 → 不产生负时长。
+//
+// 上游算出的重置时刻可能因时钟漂移/传参错误而落在过去。
+// 若不处理，until.Sub(now) 为负，冷却截止落到过去 ——
+// 表现为"该号立刻可用"，但 coolKind 已被设成 CoolHard，
+// 让兜底逻辑在语义矛盾的状态下做判断。显式夹到 0 更安全。
+func TestCooldownUntilNextResetPastTime(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+
+	p.CooldownUntilNextReset("u1", time.Now().Add(-time.Hour), "过期目标")
+
+	st, _ := p.Status("u1")
+	if st.Cooling {
+		t.Errorf("目标时刻已过时不该处于冷却（until=%v）", st.Until)
+	}
+}
+
+// TestHardCoolRecoveryPolicyLivesUpstream 确认核心**不再内置任何**签到恢复时点。
+//
+// # 这条测试是 Task 3c 的守卫
+//
+// 改造前 core 有 `nextDay4AM` 与它的薄封装 `CooldownUntilTomorrow4AM` ——
+// 把 workbuddy 的"次日 04:00"写死在账号池里。评审（F6）指出这正是
+// "上游规则硬编码在核心"的实例，而当时的审计脚本把它评成了 0。
+//
+// 策略现在住在 internal/workbuddy（NextCheckinReset / Provider.NextResetAt），
+// 核心只接受一个**时刻**。本测试用"给一个与 04:00 毫无关系的时刻"来证明这一点：
+// 核心必须老实按它冷却，而不是偷偷纠正成某个它自己认为对的时点。
+func TestHardCoolRecoveryPolicyLivesUpstream(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+
+	// 一个刻意与"次日 4 点"无关的恢复时点（模拟 codearts 的按小时配额）。
+	until := time.Now().Add(17 * time.Minute).Truncate(time.Second)
+	p.CooldownUntilNextReset("u1", until, "配额用尽")
+
+	st, _ := p.Status("u1")
+	if !st.Cooling {
+		t.Fatal("应处于冷却")
+	}
+	if !st.Until.Equal(until) {
+		t.Errorf("核心改写了调用方给的恢复时刻：得到 %v，期望 %v。"+
+			"核心不该知道任何上游的恢复策略", st.Until, until)
+	}
+	if st.Until.Hour() == 4 && st.Until.Minute() == 0 {
+		t.Error("核心把恢复时刻对齐到了 04:00 —— 上游策略又漏回核心了")
+	}
+}
+
 // TestHardCoolKindIsGeneric 确认 CoolHard 的**语义是通用的**。
 //
 // CoolKind 本身是通用概念：
