@@ -707,10 +707,37 @@ func (p *Pool) SetQuota(uid string, q QuotaView) {
 
 // SetCredits 更新账号余额（单值形态）。
 //
-// 保留为薄封装：**55 处既有调用点**依赖它。全部改名会让本次提交淹没在噪音里，
-// 且增加回归风险。新代码请直接用 SetQuota（要表达按模型额度时必须用它）。
+// # ⚠ 它不会把已有的"按模型额度"降级成单值
+//
+// 早先的实现是 `SetQuota(FromCredits(v))` —— 那会让任何一次旧路径调用
+// （scheduler 的「刷新积分」、旅行领奖后同步）**冲掉** `per_model`/`unlimited`
+// 的额度形态，ByModel 被清空。两条都是常规生产路径，一跑就中。
+//
+// 现在的规则：
+//   - 账号本来是 credits / 未知形态 → 正常转成 credits 单值（原行为）
+//   - 账号本来是 per_model / unlimited → **只更新派生标量，不动额度视图**
+//
+// 理由：旧调用点想表达的是"刷新一下余额数字"，而不是"把额度模型改成单值"。
+// 它没有能力表达后者，所以不该有后者的副作用。
 func (p *Pool) SetCredits(uid string, credits int64) {
-	p.SetQuota(uid, FromCredits(credits))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	switch e.quota.Kind {
+	case QuotaKindPerModel, QuotaKindUnlimited:
+		// 保留额度形态，只更新派生标量。
+		// 注意这里 credits 可能与该形态的 Effective() 不一致 ——
+		// 因为旧调用方给的是一个"总余额"含义的数，与按模型的语义不同量纲。
+		// 保持视觉一致：让 Status.Credits 反映 Effective()，避免两个数打架。
+		e.credits = e.quota.Effective()
+	default:
+		e.quota = FromCredits(credits)
+		e.credits = credits
+	}
+	p.dirty.Store(true)
 }
 
 // Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。
@@ -975,9 +1002,13 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	st := Status{
 		UID:      uid,
 		Nickname: e.a.Nickname,
-		Quota:    e.quota,
-		// Credits 是派生标量：真相在 e.quota，这里给 Effective() 保持旧消费者可用。
-		Credits:         e.credits,
+		// Clone 深拷贝：否则调用方改 Status 返回值会改到池内状态（绕过锁）。
+		Quota: e.quota.Clone(),
+		// Credits 是真正的**派生值**：从额度视图现算，不再读缓存的 e.credits。
+		//
+		// 评审指出早先的写法（直接返回 e.credits）只是"靠成对写入维持一致"，
+		// 属于约定而非构造。现算之后，任何漏改一处的路径都不会造成两个数打架。
+		Credits:         e.quota.Effective(),
 		Cooling:         now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:          e.reason,
 		Disabled:        e.disabled,
@@ -1107,6 +1138,11 @@ func (p *Pool) stateOverviewLocked() stateFile {
 	sf := stateFile{Accounts: map[string]stateAccount{}}
 	for uid, e := range p.byUID {
 		sf.Accounts[uid] = stateAccount{
+			// ⚠ Quota 是真相来源，**必须落盘**。
+			// 早先漏了这一行：每次 flush 都会把按模型额度写成空对象，
+			// 重载后退化成 credits —— 正是 QuotaView 要防止的 int64 坍缩。
+			// 有回归测试守着（TestReviewerF1_PerModelQuotaSurvivesFlush）。
+			Quota:        e.quota,
 			Credits:      e.credits,
 			Disabled:     e.disabled,
 			Reason:       e.reason,

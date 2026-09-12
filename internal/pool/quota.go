@@ -58,18 +58,20 @@ const (
 // 参与的是 float64 归一化（除以候选集最大值），过大的绝对值没有意义。
 const unlimitedWeight int64 = 1 << 40
 
-// Effective 把额度折算成**一个标量**，仅供选号权重使用。
+// Effective 把额度折算成**一个标量**。
+//
+// ⚠ 对 `per_model` 而言这个标量是**近似值**，只适合"该账号整体还有多少量"的
+// 展示与粗粒度选号。真正的选号应当用 `EffectiveFor(请求的模型)`。
 //
 // 折算规则（都有测试）：
 //
-//	未探测（HasData=false）→ 0        （不假装有额度，也不假装没有）
-//	unlimited             → 很大值    （排最前）
+//	未探测（HasData=false）→ 0
+//	unlimited             → 很大值（排最前）
 //	credits               → Remaining
-//	per_model             → **最大值**，不是求和
+//	per_model             → 各模型额度的**最大值**
 //
-// 为什么 per_model 取最大值而不是求和：一次调用只用一个模型，
-// 求和会把"10 个模型各 100"算成 1000，夸大实际可用量，
-// 让这类账号在选号时被不合理地偏袒。
+// 为什么 per_model 用最大值：它是"这个账号最多还能跑多少"的上界，
+// 用于展示是合理的。**但它对选号是错的** —— 见 EffectiveFor 的说明。
 func (q QuotaView) Effective() int64 {
 	if !q.HasData {
 		return 0
@@ -90,8 +92,60 @@ func (q QuotaView) Effective() int64 {
 	}
 }
 
+// EffectiveFor 返回该账号**针对某个模型**的可用额度。
+//
+// # 为什么必须有这个（评审指出的一个真实缺陷）
+//
+// 用 Effective()（取所有模型的最大值）来选号是**反的**：
+//
+//	账号 X = {gpt-5.5: 1000, other: 0}      → Effective = 1000
+//	账号 Y = {gpt-5.5: 0,    other: 999999} → Effective = 999999
+//
+// 请求 gpt-5.5 时，Y 对**该模型**零额度，却因为 other 的高额度而排在 X 前面。
+// 结果是选到一个跑不了的账号。
+//
+// 原注释里写的"一次调用只用一个模型"恰恰**支持**按模型取值，
+// 而不是取最大值 —— 那是自相矛盾的，已纠正。
+//
+// 语义：
+//   - credits / unlimited → 与 Effective() 相同（它们不分模型）
+//   - per_model           → 该模型的值；该模型不在表里视为 0（不是"未知"）
+//   - 未探测              → 0
+func (q QuotaView) EffectiveFor(model string) int64 {
+	if !q.HasData {
+		return 0
+	}
+	switch q.Kind {
+	case QuotaKindPerModel:
+		return q.ByModel[model]
+	default:
+		return q.Effective()
+	}
+}
+
 // IsUnknown 尚未探测过额度。
 func (q QuotaView) IsUnknown() bool { return !q.HasData }
+
+// Clone 深拷贝额度视图。
+//
+// # 为什么必须深拷贝（评审指出的一个真实缺陷）
+//
+// `ByModel` 是 map（引用类型）。若 `Status()`/`List()` 直接把内部 map 递出去，
+// 调用方改一下返回值就**改到了池子的内部状态**，而且绕过了锁。
+// 实测：`sts[0].Quota.ByModel["m"] = 424242` 能改到池内。
+//
+// 有回归测试守着（TestReviewerF7_QuotaMapMustBeCopied）。
+func (q QuotaView) Clone() QuotaView {
+	out := q
+	if len(q.ByModel) > 0 {
+		m := make(map[string]int64, len(q.ByModel))
+		for k, v := range q.ByModel {
+			m[k] = v
+		}
+		out.ByModel = m
+	}
+	return out
+}
 
 // FromCredits 从单值构造（workbuddy 的调用方用这个，最省事）。
 func FromCredits(remaining int64) QuotaView {
@@ -111,11 +165,41 @@ func FromPerModel(byModel map[string]int64) QuotaView {
 // 因此回落到 Credits。
 //
 // 为什么不写迁移脚本：这个回落本身就是迁移，且不需要停机。
-// 一旦任何一次 SetQuota/SetCredits 被调用，状态就自然升级成新格式。
+//
+// # 评审指出的一个次生缺陷（已修）
+//
+// 早先的实现是 `if saved.HasData || saved.Kind != "" { return saved }` ——
+// 于是 `{"kind":"per_model","has_data":true}`（ByModel 为空）会被原样采用，
+// 得到一个 **Effective=0 但 IsUnknown()=false** 的"可信的零"，
+// 即使落盘同时有 credits=5000 可用。账号被静默降权。
+//
+// 现在：额度视图**内容为空**时一律回落到 Credits，
+// 不管它自称什么 Kind。
 func restoreQuota(saved QuotaView, legacyCredits int64) QuotaView {
-	if saved.HasData || saved.Kind != "" {
-		return saved // 新格式，直接采用
+	if saved.hasContent() {
+		return saved // 有内容，直接采用
 	}
-	// 旧格式：用 Credits 造一个单值视图
+	// 旧格式，或"自称 per_model 但表是空的" —— 都用 Credits 兜底
 	return QuotaView{Kind: QuotaKindCredits, Remaining: legacyCredits, HasData: true}
+}
+
+// hasContent 报告这个额度视图是否真的带了数据。
+//
+// 用来把"自称有数据"与"真的有数据"区分开：
+// `{Kind: per_model, HasData: true, ByModel: nil}` 是前者。
+func (q QuotaView) hasContent() bool {
+	if !q.HasData {
+		return false
+	}
+	switch q.Kind {
+	case QuotaKindPerModel:
+		return len(q.ByModel) > 0
+	case QuotaKindUnlimited:
+		return true
+	case QuotaKindCredits:
+		return true // Remaining 可能是合法的 0
+	default:
+		// 未知 Kind：只有在真带了数的情况下才算有内容
+		return q.Remaining != 0 || len(q.ByModel) > 0
+	}
 }

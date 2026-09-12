@@ -727,20 +727,28 @@ func TestAutoFlush(t *testing.T) {
 	p.SetCredits("u1", 77)
 
 	deadline := time.Now().Add(2 * time.Second)
+	// 轮询**内容**而不是"文件是否存在"。
+	//
+	// 为什么：Add() 与 SetCredits() 都会置 dirty。若一个 flush tick 恰好落在
+	// 两者之间，就会写出一个 credits=0 的快照 —— 而那个快照已经让"文件存在"
+	// 这个条件成立，于是测试立刻 break 并断言 Credits==77，随机失败。
+	//
+	// 这是真实存在的时序 flake（偶发，重跑就过）。根因是等待条件太弱：
+	// "文件已写出"不等于"想要的内容已写出"。改为等待内容正确后，
+	// 就与 flush 落在哪一拍无关了。
 	for {
-		if _, err := os.Stat(fp); err == nil {
-			break
+		p2 := New(fp)
+		p2.Add(&auth.Auth{UID: "u1"})
+		if st, ok := p2.Status("u1"); ok && st.Credits == 77 {
+			return // 内容已正确落盘
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("state.json not written by background flusher")
+			p3 := New(fp)
+			p3.Add(&auth.Auth{UID: "u1"})
+			st, ok := p3.Status("u1")
+			t.Fatalf("auto flush 未在 2s 内持久化 credits=77: %+v ok=%v", st, ok)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	p2 := New(fp)
-	p2.Add(&auth.Auth{UID: "u1"})
-	st, ok := p2.Status("u1")
-	if !ok || st.Credits != 77 {
-		t.Fatalf("auto flush not persisted: %+v ok=%v", st, ok)
 	}
 }
 
