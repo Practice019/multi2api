@@ -402,6 +402,11 @@ func main() {
 			// Task 3c 之后 22 个 workbuddy 端点就是这样挂的 ——
 			// 加新上游时 admin 包零改动（判据 1）。
 			Registry: registry,
+			// 控制台渲染契约里的服务名，与 /healthz 的 service 字段同源。
+			//
+			// admin 不得 import server（server 依赖 admin，反向会成环），
+			// 所以这个常量必须在这里显式传进去。
+			ServiceName: server.ServiceName,
 			// 上游设置项必须以**适配器**形式显式注入，不能靠从 Registry 里
 			// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
 			// （各自声明，互不 import），方法集精确匹配会静默失败
