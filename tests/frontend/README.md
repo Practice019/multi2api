@@ -57,9 +57,36 @@ node mutation_sweep.js e2e           # E2E 组（需要 Chrome + 可访问的实
 
 ## 已知的环境限制
 
-- `go test -race` 在本机跑不了（无 C 编译器）。并发正确性由
-  `internal/pool/concurrency_norace_test.go` 的不变式断言部分覆盖。
+### `go test -race` —— 上游缺陷，换编译器也解决不了
+
+我此前记录为"因无 C 编译器"，**联网查证后发现那个归因是错的**。
+真实原因是 Go 运行时在 Windows 上的 TSan 缺陷：它算出的影子内存基址
+**超出内核允许的用户态虚拟地址上限**。实测：
+
+```
+ThreadSanitizer failed to allocate 0x000004200000 (69206016) bytes
+at 0x100ec90b50000 (error code: 87)
+```
+
+上游同形态报告（均未修复）：
+
+- [golang/go#46099](https://github.com/golang/go/issues/46099) —— 同样 `error code: 87`，
+  状态 closed 但标签为 `FrozenDueToAge`（长期无进展被冻结，**非修复**）
+- [golang/go#28497](https://github.com/golang/go/issues/28497) —— **仍 open**
+- [golang/go#22553](https://github.com/golang/go/issues/22553) —— **仍 open**
+- [tailscale/tailscale#4926](https://github.com/tailscale/tailscale/issues/4926)
+  给出了准确诊断：TSan 要用的基址"higher than the maximum virtual address
+  permitted by the kernel for user-mode VM allocation requests"
+
+**所以装 MinGW 不能解决**（问题在 TSan 的地址计算，不在 C 编译器）。
+并发正确性由 `internal/pool/concurrency_norace_test.go` 的不变式断言部分覆盖 ——
+它能抓到竞争导致的**可见后果**，但**不等价于 race detector**。
+
+### 其它
+
 - 需要真实凭证的用例（codearts 的 `*Live`）会自动 skip。
+  签名**实现与官方文档的一致性**已由 `verify_sign_against_spec.js` 覆盖，
+  但那不能替代真实凭证的端到端验证。
 
 **浏览器路径不再是限制**：各套件通过 `chrome_path.js` 解析，
 顺序为 `CHROME_PATH` → 常见安装位置（Chrome/Edge，含 macOS/Linux）→ `PATH`。
