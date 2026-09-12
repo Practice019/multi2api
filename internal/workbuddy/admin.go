@@ -29,16 +29,19 @@ import (
 //	成长      /admin/growth, /claim, /accept, /redeem, /makeup, /open, /draw,
 //	          /tasks, /travel/config              （9 个）
 //	旅行      /admin/travel, /status, /depart, /claim  （4 个）
-//	调度      /admin/schedule, /admin/task          （2 个）
 //	本机登录  /admin/client-login, /switch, /restore  （3 个）
-//	                                              合计 22 个
+//	                                              合计 20 个
 //
-// # 一处刻意的例外：/admin/schedule 与 /admin/task
+// # 曾经有 22 个：/admin/schedule 与 /admin/task 已移回核心
 //
-// 这两个端点读的是**核心调度器**的时点与任务槽状态，不是 workbuddy 业务。
-// 它们在此注册只是为了"路由由上游自注册"这条结构不被破坏 ——
-// 依赖通过 AdminEnv 的消费方接口注入（见 adminenv.go），本包不 import scheduler。
-// 若将来出现第二个上游，把这两条移回 core 是更干净的做法（详见 adminenv.go 的注释）。
+// 这两条读的是**核心调度器**的时点与任务槽状态，不表达任何上游身份。
+// Task 3c 曾把它们放这里（理由：写方 checkin/keepalive 在本包，读写不宜分家），
+// 但阶段 0 评审指出这会**真出问题**：
+//
+//	第二个上游若不声明 CapCheckin → 这两条路由**没人服务**，
+//	且前端按能力位把它们隐藏 —— 而它们本该对所有上游可见。
+//
+// 已移回 `internal/admin` 作为通用端点（见那里的注册处）。
 
 // AdminEnv 核心为上游管理端点提供的只读依赖（账号池之外的通用设施）。
 //
@@ -136,10 +139,6 @@ func (h *AdminHandler) Routes() []gateway.AdminRoute {
 		{Method: "GET", Path: "/admin/travel/status", Handler: h.TravelStatus, Capability: gateway.CapTravel, Title: "旅行状态"},
 		{Method: "POST", Path: "/admin/travel/depart", Handler: h.TravelDepart, Capability: gateway.CapTravel, Title: "派猫出行"},
 		{Method: "POST", Path: "/admin/travel/claim", Handler: h.TravelClaim, Capability: gateway.CapTravel, Title: "领取旅行奖励"},
-
-		// ---- 调度（workbuddy 的守时任务）----
-		{Method: "GET", Path: "/admin/schedule", Handler: h.Schedule, Capability: gateway.CapCheckin, Title: "调度状态"},
-		{Method: "GET", Path: "/admin/task", Handler: h.TaskStatus, Capability: gateway.CapCheckin, Title: "任务状态"},
 
 		// ---- 本机客户端登录（workbuddy 专属）----
 		{Method: "GET", Path: "/admin/client-login", Handler: h.ClientLoginStatus, Capability: gateway.CapChat, Title: "本机登录状态"},

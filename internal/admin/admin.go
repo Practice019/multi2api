@@ -89,6 +89,45 @@ type Config struct {
 	Settings SettingsStore
 	// BuildTime 进程启动时间，UI 用来算运行时长。
 	StartedAt time.Time
+
+	// Scheduler 核心调度器的只读视图，供 /admin/schedule 使用。
+	//
+	// # 为什么这两条端点属于核心（而不是某个上游）
+	//
+	// `/admin/schedule`（签到/保活的启停、时点、下次唤醒）与
+	// `/admin/task`（全量任务槽状态）**不表达任何上游身份** ——
+	// 它们读的是核心自己排的班。
+	//
+	// Task 3c 曾把它们随其它 20 条一起放进 workbuddy（理由：写方
+	// checkin/keepalive 在那，读写不宜分家）。阶段 0 评审指出这会**真出问题**：
+	// 第二个上游若不声明 CapCheckin，这两条路由就**没人服务**，
+	// 而它们本是全上游通用的。所以移回核心。
+	//
+	// nil = 未接线（测试路径），返回"未接线"降级。
+	Scheduler SchedulerView
+	// TaskSlot 全量任务槽，供 /admin/task 使用。nil = 返回空快照。
+	TaskSlot TaskSlot
+}
+
+// SchedulerView 核心调度器在本包看来是什么样（只保留 /admin/schedule 读的字段）。
+type SchedulerView interface {
+	// NextWake 下一次唤醒时刻与将要执行的任务名。
+	NextWake() (time.Time, []string)
+	// Hours 签到时点与保活时点。
+	Hours() (checkinHours, keepaliveHours []int)
+	// CheckinEnabled 签到是否启用。
+	CheckinEnabled() bool
+	// KeepaliveEnabled 保活是否启用。
+	KeepaliveEnabled() bool
+}
+
+// TaskSlot 全量任务槽：同一时刻只允许一个全量任务。
+//
+// 与改造前 h.task 的行为逐字一致 —— 只是改由 cmd/server 注入，
+// 因为任务槽的生命周期归属核心调度器，不属于某个上游。
+type TaskSlot interface {
+	// Snapshot 当前任务槽状态（与改造前 /admin/task 的响应体一致）。
+	Snapshot() map[string]any
 }
 
 // Handler 管理台路由（/admin/ 子树）。
@@ -136,6 +175,22 @@ func New(cfg Config) *Handler {
 
 	h.register("GET /admin/settings", h.settings)
 	h.register("PUT /admin/settings", h.settingsUpdate)
+
+	// 核心调度相关的两条只读端点。
+	//
+	// # 为什么它们在通用段（而不是由上游自注册）
+	//
+	// 它们读的是**核心自己排的班**（签到/保活时点、下次唤醒、全量任务槽），
+	// 不表达任何上游身份 —— 任何上游都该有这两条。
+	//
+	// Task 3c 曾把它们随另外 20 条搬进 workbuddy；阶段 0 评审指出
+	// 第二个上游若不声明 CapCheckin 就**没人服务**这两条路由，
+	// 而它们本该对所有上游可见。移回核心。
+	//
+	// 放在 mountUpstreamRoutes 之前是刻意的：通用端点优先，
+	// 上游即便声明同名路由也无法覆盖（见 mountUpstreamRoutes 的冲突规则）。
+	h.register("GET /admin/schedule", h.schedule)
+	h.register("GET /admin/task", h.taskStatus)
 
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
 	// 所以冲突时以先注册的为准（见 mountUpstreamRoutes）。

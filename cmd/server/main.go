@@ -250,6 +250,16 @@ func main() {
 			Log:      checkinLog,
 			Ring:     logRing,
 			AuthDir:  cfg.AuthDir,
+			// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。
+			//
+			// 这两条端点读的是核心自己排的班，不表达任何上游身份 ——
+			// Task 3c 曾把它们放进 workbuddy，阶段 0 评审指出
+			// 第二个上游若不声明 CapCheckin 就没人服务它们。已移回核心。
+			//
+			// 任务槽与 workbuddy 指向**同一个** sharedTaskSlot：
+			// "同一时刻只允许一个全量任务"是进程级语义，不分上游。
+			Scheduler: adminSchedulerAdapter{sch},
+			TaskSlot:  adminTaskSlotAdapter{sharedTaskSlot},
 			// 注册表：admin 遍历它，把每个上游通过 AdminExt 声明的管理端点挂上来。
 			// Task 3c 之后 22 个 workbuddy 端点就是这样挂的 ——
 			// 加新上游时 admin 包零改动（判据 1）。
