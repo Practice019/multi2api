@@ -15,7 +15,7 @@
 // # 为什么这套用例必须往池里塞一个**别家**账号
 //
 // 与 upstream_isolation_test.go 同一个理由：既有的历史测试
-//（admin_routes_test.go 的 newHistoryProvider）只造了一个上游，
+// （admin_routes_test.go 的 newHistoryProvider）只造了一个上游，
 // "过滤"与"不过滤"的结果完全相同 —— 过滤写错在那里**不可见**。
 // 本文件每条用例都先塞别家账号，再断言它不出现在响应里。
 package workbuddy
@@ -30,7 +30,7 @@ import (
 // seedHistoryWithForeign 造一个双上游池 + 一份**混着两家 uid**的历史。
 //
 // own 个本上游记录 + foreign 个别家上游记录，交替写入以确保排序交错
-//（过滤若写成"只取前 N 条"或"按位置切"就会露馅）。
+// （过滤若写成"只取前 N 条"或"按位置切"就会露馅）。
 func seedHistoryWithForeign(t *testing.T, ownN, foreignN int) (*Provider, string) {
 	t.Helper()
 	p, foreign := seedMultiProviderPool(t, testAuthNamed("wb1", "甲"), testAuthNamed("wb2", "乙"))
@@ -135,7 +135,7 @@ func TestHistoryTotalIsPostFilter(t *testing.T) {
 // # 为什么这条能抓到"过滤与分页顺序颠倒"
 //
 // 若先切页再过滤，第一页可能整页都是别家记录 → 过滤后变成空页
-//（"翻页翻着翻着没了"）；且取到的总条数会少于 total。
+// （"翻页翻着翻着没了"）；且取到的总条数会少于 total。
 func TestHistoryPaginationOverFilteredSet(t *testing.T) {
 	prov, foreignUID := seedHistoryWithForeign(t, 5, 9)
 	srv := newAdminTestServer(t, prov)

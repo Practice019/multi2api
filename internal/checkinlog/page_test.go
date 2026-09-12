@@ -18,7 +18,8 @@ import (
 //   - offset 超出范围返回空页而不是报错；
 //   - limit<=0 时用默认页大小。
 
-func newPagedLog(t *testing.T, n int) *Log {	t.Helper()
+func newPagedLog(t *testing.T, n int) *Log {
+	t.Helper()
 	l := New(filepath.Join(t.TempDir(), "h.json"), 30)
 	base := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
 	for i := 0; i < n; i++ {

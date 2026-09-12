@@ -230,7 +230,7 @@ func (l *Log) Page(offset, limit int, kind string) ([]Record, int) {
 // 复制一次切片完全可接受；相比把判据搬进来，这个代价更小。
 //
 // 返回的是**拷贝**：调用方在锁外过滤时，Append 可能正在往 l.records 追加
-//（append 在容量够时原地写底层数组），直接返回内部切片会读到写一半的状态。
+// （append 在容量够时原地写底层数组），直接返回内部切片会读到写一半的状态。
 func (l *Log) PageAll() []Record {
 	l.mu.Lock()
 	defer l.mu.Unlock()
