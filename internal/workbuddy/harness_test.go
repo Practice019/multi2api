@@ -30,7 +30,16 @@ import (
 type testPoolAdapter struct{ p *pool.Pool }
 
 func (a testPoolAdapter) List() []Account {
-	src := a.p.List()
+	return toTestAccounts(a.p.List())
+}
+
+// ListFor 指定上游的账号。与生产适配器（cmd/server/upstream_business.go）
+// 走同一条池方法，保证测试与生产不会在过滤口径上分叉。
+func (a testPoolAdapter) ListFor(provider string) []Account {
+	return toTestAccounts(a.p.ListFor(provider))
+}
+
+func toTestAccounts(src []pool.Status) []Account {
 	out := make([]Account, 0, len(src))
 	for _, st := range src {
 		out = append(out, Account{

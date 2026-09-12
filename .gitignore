@@ -43,6 +43,11 @@ docs/
 # （实测：本仓库确实漏了这两条，曾出现 add 'logs/server-console.err.log'）。
 logs/
 tasks/
+# .task/ 是多 agent 团队的工作区（规格/交接/评审/决策）。
+# 它和 tasks/ 同类：过程产物，不是交付物，不入库。
+# 实测：本轮起用 agent 团队后才发现这条漏了 —— 加它之前
+# `git add -A` 会把整个团队工作区吞进提交。
+.task/
 
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md

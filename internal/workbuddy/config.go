@@ -24,9 +24,25 @@ type Config struct {
 	// Pool 账号池的消费方视图（见 accounts.go）。
 	//
 	// 刻意不是 *pool.Pool：上游包不得依赖 pool（架构约束），
-	// 且本包对池的全部需求就是 AccountPool 里那六个方法。
+	// 且本包对池的全部需求就是 AccountPool 里那几个方法。
 	// nil 时所有需要账号的操作都不做任何事（构造期可选）。
 	Pool AccountPool
+
+	// Provider 本上游在账号池里的归属标识（= ID()，装配层填 workbuddy.ProviderID）。
+	//
+	// # 为什么要有它，而不是直接用包内的 providerID 常量
+	//
+	// 因为"本包注册成哪个 ID"是**装配层的事实**：账号池按这个标签分域，
+	// 装配层也可能用别的标识注册同一个实现（多实例场景）。
+	// 本包读自己的常量就等于假定两者永远一致 —— 一旦不一致，
+	// 按上游取号会取到空集，界面整片空白，且不会有任何报错。
+	//
+	// # 零值 = "" 时的行为
+	//
+	// 空串交给池子（ListFor("")）按"未打标签 = 默认上游"解释，
+	// 与改造前"只有一个上游"的行为逐字一致 —— 既有测试与
+	// NewWithConfig(Config{...}) 的手工构造都不需要改。
+	Provider string
 	// Client 上游 HTTP 客户端。nil 时退回 upstream.New()。
 	Client *upstream.Client
 	// Log 任务结果历史（可选；nil = 不记录）。管理台的「今日签到了吗」也读它。

@@ -58,7 +58,9 @@ func (p *Provider) RunTravelManual() { p.runTravel(triggerManual) }
 
 func (p *Provider) runTravel(trigger string) {
 	first := true
-	for _, st := range p.cfg.Pool.List() {
+	// 按上游取号：本上游的旅行接口不认别家上游的凭证，
+	// 遍历全池只会对 codearts 的号发一串注定失败的请求。
+	for _, st := range p.ownAccounts() {
 		if st.Disabled {
 			continue
 		}
