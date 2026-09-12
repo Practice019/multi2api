@@ -12,7 +12,9 @@ import (
 // 复现评审 F1（CRITICAL）：stateOverviewLocked 从不写 Quota。
 //
 // 指控：SetQuota(per_model{...}) + Flush() 之后，state.json 里是
-//   "quota": {},  "credits": 300
+//
+//	"quota": {},  "credits": 300
+//
 // 重载后 Kind 变回 "credits" —— **按模型额度在每次落盘时被销毁**。
 //
 // 这正是这个提交本该防止的"退化成 int64"。
