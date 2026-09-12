@@ -1,0 +1,30 @@
+# 设置面板字段基线（改动前快照，用于验证结构调整零漂移）
+# 格式: <chk|in> <id>；来源: internal/server/webui.html 的 <h2>设置 段落
+# 期望总数: 27
+chk setCheckinEnabled
+chk setKeepaliveEnabled
+in  setCheckinHours
+in  setKeepaliveHours
+chk setTravelAuto
+in  setTravelInterval
+chk setGrowthClaim
+chk setGrowthAccept
+chk setGrowthMakeup
+chk setGrowthRedeem
+chk setGrowthOpen
+chk setGrowthDraw
+in  setCheckinLogDays
+in  setReqLogDays
+in  setSoftRate
+in  setUpTimeout
+in  setUpHeaderTimeout
+in  setUpIdleTimeout
+in  setMaxInFlight
+in  setBreakerThreshold
+in  setBreakerCooldown
+in  setBreakerCooldownMax
+chk setSanitize
+in  setUpstashURL
+chk setStickyEnabled
+in  setStickyTTL
+in  setGrowthInterval

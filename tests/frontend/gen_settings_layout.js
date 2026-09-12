@@ -16,7 +16,12 @@ const fs = require('fs');
 // WB2API_REPO 可覆盖（变异扫描用它指向一次性副本）。
 
 const path = require('path');
-const BASELINE = 'D:/project_GIT/workbuddy2api/tasks/settings-baseline-ids.txt';
+// 基线文件**随测试一起入库**（tests/frontend/settings-baseline-ids.txt）。
+// 此前它指向 D:/project_GIT/workbuddy2api/tasks/... —— **另一个仓库**的
+// 绝对路径，且无兜底：换机器立刻抛 ENOENT。这正是"测试只在开发机可跑"
+// 的典型形态，与上一轮修掉的 7863 依赖同类。
+const BASELINE = (process.env.WB2API_REPO || __dirname + '/../..') +
+  '/tests/frontend/settings-baseline-ids.txt';
 const WEBUI = (process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html';
 
 const header = `

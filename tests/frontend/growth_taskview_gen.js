@@ -1,6 +1,6 @@
 
 const fs = require('fs');
-const html = fs.readFileSync("D:\\project_GIT\\workbuddy2api实验版本\\tests\\frontend/../../internal/server/webui.html", 'utf8');
+const html = fs.readFileSync("D:\\project_GIT\\workbuddy2api实验版本/internal/server/webui.html", 'utf8');
 const els = {};
 function mkEl(id) { return { id, hidden: true, className: '', textContent: '', innerHTML: '', disabled: false, title: '' }; }
 for (const id of ['growthGroups','growthAccount','growthViews','growthTaskMeta','growthCards','growthRows']) els[id] = mkEl(id);

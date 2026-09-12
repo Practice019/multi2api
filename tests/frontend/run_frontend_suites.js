@@ -55,6 +55,7 @@ const PROBES = [
   'test_chrome_resolver.js', // 浏览器解析器：覆盖生效 + 找不到时明确报错
   'verify_sign_against_spec.js', // 华为云签名实现逐条对照官方文档
   'test_shape_scan.js',        // 密钥形状扫描器：不漏报、不误报
+  'audit_tracked_content.js',  // 被跟踪内容审计：密钥/绝对路径/内网/手机/邮箱
 ];
 
 function run(file) {
