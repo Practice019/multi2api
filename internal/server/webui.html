@@ -76,6 +76,9 @@
   .navgroup.collapsed .navitems{display:none}
   .navgrouphd .navgcount{margin-left:auto;font-size:10px;background:var(--panel2);
     border-radius:999px;padding:1px 6px;letter-spacing:0}
+  /* 账号数为 0 时把徽章标红：那是"配了上游却没有可用账号"，需要被看见 */
+  .navgrouphd .navgcount.zero{background:transparent;color:var(--warn);
+    border:1px solid var(--warn)}
   .navgroup.collapsed .navgrouphd .navgcount{opacity:.6}
   /* 默认上游标记 */
   .navgrouphd .navgdef{font-size:9px;border:1px solid var(--line);border-radius:999px;
@@ -91,6 +94,8 @@
     padding:7px 12px;font-weight:600;font-size:12px;letter-spacing:.2px}
   tr.grouprow:first-child > td{border-top:0}
   tr.grouprow .gname{margin-right:8px}
+  /* 有最近错误的任务行整行标红：扫一眼就知道哪个任务出问题了 */
+  tr.errrow > td{background:color-mix(in srgb, var(--err) 10%, transparent)}
   /* 通用上游面板（列表 + 领取）的样式。
      刻意朴素：它要能渲染**任意**上游的任意列表形状，
      所以不做花哨卡片，只保证"看着整齐、信息不丢"。 */
@@ -447,6 +452,29 @@
         <span id="growthTaskMeta" class="dim" style="font-size:12px"></span>
       </div>
       <div id="growthGroups"><div class="dim" style="padding:14px 16px;font-size:12px">加载中…</div></div>
+    </div>
+  </section>
+
+  <!-- 任务调度：已注册定时任务的运行状态。
+       数据来自 manifest.jobs（后端 scheduler.Jobs.Statuses()），
+       只读展示 —— **不提供"手动触发一次"按钮**：Job.Run 与调度器可能
+       并发跑同一个任务，重入风险不值得为省一次等待去承担。
+       这块面板让"守卫轮到底有没有在跑、上次什么时候跑的、有没有报错"
+       从只能翻日志变成一眼可见。 -->
+  <section data-key="jobs">
+    <h2>任务调度 <span id="jobMeta" class="dim" style="font-weight:400;text-transform:none"></span>
+      <span class="spacer"></span>
+      <button id="btnJobRefresh" style="padding:3px 10px;font-size:12px">刷新</button>
+    </h2>
+    <div class="body dim" style="font-size:12px;line-height:1.8;padding-bottom:0">
+      后台定时任务由各上游通过 <span class="mono">JobExt</span> 注册，核心调度器按间隔错峰执行。
+      本页只读 —— 手动触发会与调度器并发跑同一任务，故不提供。
+    </div>
+    <div class="body" style="padding:0">
+      <table><thead><tr>
+        <th>任务</th><th>上游</th><th>间隔</th><th>上次执行</th><th>距今</th><th>最近错误</th>
+      </tr></thead>
+      <tbody id="jobrows"><tr><td colspan="${COLS.jobs}" class="dim">加载中…</td></tr></tbody></table>
     </div>
   </section>
 
@@ -1000,6 +1028,7 @@
     growth: 12,  // 成长计划
     logs: 10,    // 请求日志
     hist: 7,     // 任务历史
+    jobs: 6,     // 任务调度
   };
 
   // rowPlaceholder 生成占满整行的提示行。
@@ -1028,24 +1057,33 @@
 
   // normalizeAccount 把一个账号视图归一成渲染需要的形状。
   //
-  // # 为什么需要它（bug B5 的根因）
+  // # 修正后的描述（评审 CP2 F3）
   //
-  // 两个端点返回的账号形状不同：
-  //   GET /admin/accounts  带 provider / today_checkin / token_expire_sec
-  //   GET /status          只有基础字段，**没有 provider**
+  // 计划里我写的 B5 是「/status 没有 provider 字段 → 账号全被归到默认上游」。
+  // **实测不成立**：/status 与 /admin/accounts **都带** provider
+  //（评审在强制回落路径下实测 inferred=0）。所以那条描述是错的，已改正。
   //
-  // refresh() 在 /admin/accounts 失败时会回落到 /status。上一版直接渲染回落
-  // 结果，于是所有账号的 providerOf() 都返回空串 → 全被归到默认上游，
-  // 界面上表现为"codearts 的号突然跑到 workbuddy 组里"。
+  // 那么这段代码的价值是什么？**防御形状契约的漂移**，而不是修一个现存 bug：
   //
-  // 这里统一补默认值，并**显式标记**数据来自回落路径 ——
-  // 缺字段时用 providerOf 的默认上游是对的（与后端 pool 对未打标签账号的
-  // 解释一致），但让用户知道"这次是按默认推断的"比默默猜更诚实。
+  //   两个端点的账号形状并不相同 ——
+  //     /admin/accounts  带 today_checkin、token_expire_sec
+  //     /status          带 quota、err_total、last_err
+  //   回落路径**静默依赖**"两边都有 provider"。哪天某个端点少一个字段，
+  //   界面会把号归错上游且**不报任何错**（正是最难查的一类故障）。
+  //
+  // 所以这里做两件事：
+  //   1. 缺 provider 时显式打标记（provider_inferred），界面提示"这是推断值"
+  //   2. 畸形输入返回 null 由调用方滤掉，不让半个对象流进渲染
+  //
+  // 注意：在当前后端下 provider_inferred **不会真的出现**（实测为 0）。
+  // 它是形状契约的守卫，不是"已修复的 bug"。评审 F3 说得对 ——
+  // 把它记作"修好了 B5"是夸大；诚实的说法是"B5 的原始描述有误，
+  // 这里补的是契约守卫"。
   function normalizeAccount(a) {
     if (!a || typeof a !== 'object') return null;
     const out = Object.assign({}, a);
-    // 回落路径没有 provider 字段：交给 providerOf 走默认上游，
-    // 但记下"这是推断来的"，供表格加一个提示。
+    // 缺 provider：交给 providerOf 走默认上游，但记下"这是推断来的"，
+    // 供表格显示「上游?」并在分组标题里说明。
     if (!out.provider) out.provider_inferred = true;
     return out;
   }
@@ -1070,7 +1108,67 @@
     $('accts').innerHTML = rows.join('');
   }
 
-  // accountPlaceholder 生成占满整行的提示行（列数由 ACCT_COLS 推导）。
+  // renderJobs 渲染任务调度面板（T9）。
+  //
+  // 数据来自 manifest.jobs。**不额外发请求** —— 与顶栏状态条同一个理由：
+  // 第二份事实来源会让两份数字不一致时无法判断谁对。
+  function renderJobs() {
+    const tb = $('jobrows');
+    if (!tb) return;
+    if (!MANIFEST.loaded) {
+      tb.innerHTML = TableState.error(COLS.jobs, '渲染契约未加载：' + (manifestError || '未知原因'));
+      $('jobMeta').textContent = '';
+      return;
+    }
+    const jobs = MANIFEST.jobs || [];
+    $('jobMeta').textContent = jobs.length ? `（${jobs.length} 个已注册任务）` : '';
+    if (!jobs.length) {
+      tb.innerHTML = TableState.empty(COLS.jobs, '没有上游注册定时任务');
+      return;
+    }
+    // 稳定排序：先按上游，再按任务名。不排序会让行序随后端 map 遍历跳动。
+    const sorted = jobs.slice().sort((a, b) => {
+      const pa = a.provider || '', pb = b.provider || '';
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      const na = a.name || '', nb = b.name || '';
+      return na < nb ? -1 : na > nb ? 1 : 0;
+    });
+    tb.innerHTML = sorted.map(j => {
+      // 间隔：毫秒转可读。小于 1 分钟显示秒，否则显示分钟。
+      const ms = j.interval_ms || 0;
+      const itv = ms <= 0 ? '<span class="dim">—</span>'
+        : (ms < 60000 ? (ms / 1000) + ' 秒' : (ms / 60000) + ' 分');
+      // 上次执行：两列各有分工 ——
+      //  ·「上次执行」给**绝对时间**（排障时要跟日志对时刻）
+      //  ·「距今」给**相对时间**（判断这个任务还活着吗）
+      // 两者都需要，所以不合并成一列。
+      //
+      // 从未执行时显示「未执行」而不是 —：那个字面量会骗人 ——
+      // growth-watch 一直没跑过，显示 — 会被当成"正常但无关的信息"。
+      let last = '<span class="pill warn" title="该任务自进程启动以来尚未执行过">未执行</span>';
+      let ago = '<span class="dim">—</span>';
+      if (j.last_run) {
+        const t = new Date(j.last_run);
+        last = `<span class="mono">${esc(isNaN(t) ? j.last_run : t.toLocaleTimeString('zh-CN', { hour12: false }))}</span>`;
+        ago = esc(fmtTime(j.last_run));
+      }
+      const err = j.last_error
+        ? `<span class="err" title="${esc(j.last_error)}">${esc(j.last_error.slice(0, 50))}</span>`
+        : '<span class="dim">—</span>';
+      // 有错误的行整行标红：扫一眼就知道哪个任务出问题了。
+      const rowCls = j.last_error ? ' class="errrow"' : '';
+      return `<tr${rowCls}>
+        <td class="mono">${esc(j.name || '—')}</td>
+        <td><span class="pill dim">${esc(j.provider || '—')}</span></td>
+        <td>${itv}</td>
+        <td>${last}</td>
+        <td>${ago}</td>
+        <td>${err}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // renderAccounts 渲染账号表。
   function accountPlaceholder(text, cls) {
     return rowPlaceholder(ACCT_COLS, text, cls);
   }
@@ -1553,16 +1651,45 @@
   // 这也是 capTitle 与 providersWithCap 的**真实消费点**：
   // 没有它，那两个函数又会变成"定义了没人用"的死代码。
   function navGroupHeaderHTML(p) {
-    const cnt = p.account_count ? `<span class="navgcount">${esc(p.account_count)}</span>` : '';
+    // 徽章**始终渲染**，包括 0。
+    //
+    // # 为什么 0 也要显示（评审 CP2 F4 的附带发现）
+    //
+    // 上一版是 `p.account_count ? ... : ''` —— 0 时整块消失。
+    // 那会让"这个上游一个号都没有"与"这个上游的徽章坏了/没渲染"
+    // 在界面上长得一模一样，而前者恰恰是需要用户注意的状态
+    //（配了上游却没有可用账号）。显示一个 0 是更诚实的信息。
+    //
+    // 顺带：徽章内容必须与 manifest.account_count 一致，
+    // 有浏览器测试用数据对照（不硬编码数字）。
+    const n = Number(p.account_count) || 0;
+    const cnt = `<span class="navgcount${n ? '' : ' zero'}" title="${n} 个账号">${n}</span>`;
     const def = p.default ? '<span class="navgdef">默认</span>' : '';
-    // 只列专属能力：chat/models 是每个上游都有的基础能力，
-    // 列出来只会让每行都长得一样，反而看不出差异。
-    const caps = capNamesOf(p.id).filter(c => c !== 'chat' && c !== 'models');
-    // 用显式箭头而不是 .map(capTitle) —— 后者会把 (value, index, array)
-    // 三个参数都传给 capTitle，capTitle 只声明了一个参数所以目前无害，
-    // 但这是个隐患：哪天给它加第二个参数（比如"取不到时用什么兜底"），
-    // index 会被静默当成那个参数传进去。
-    const tip = p.id + (caps.length ? ' · 能力：' + caps.map(c => capTitle(c)).join('、') : ' · 无专属能力面板');
+    // 列出该上游**有面板入口**的能力位（中文名来自 manifest.capabilities）。
+    //
+    // # "无面板" 的判据必须是 hasAnyPanel，不是"有没有非 chat/models 能力"
+    //（评审 CP2 F1）
+    //
+    // 上一版把 chat/models 从列表里过滤掉，并在过滤后为空时写
+    // 「无专属能力面板」。那句话在**只声明 chat 的上游**上是假的：
+    // 它确实会生成一个「对话」面板（因为它有 chat 的 GET 端点），
+    // 而悬停提示却说它没有面板 —— 界面与说明直接矛盾。
+    //
+    // 过滤 chat/models 的**动机**仍然成立（它们是每个上游都有的基础能力，
+    // 列出来每行都长一样、看不出差异），但那是"列表里显示什么"的问题，
+    // 不是"有没有面板"的问题。两者必须分开判断。
+    const panelCaps = panelCapsOf(p.id);
+    // 过滤三类不写进提示词的能力：
+    //  - chat / models：每个上游都有的基础能力，列出来每行都一样
+    //  - core：后端保留名（"有端点但没声明能力位"），它是**路由分类**，
+    //    不是"能力"，直接显示给用户只会让人困惑「core 是什么」
+    const shown = panelCaps.filter(c => c !== 'chat' && c !== 'models' && c !== CORE_CAP);
+    const capText = shown.map(c => capTitle(c)).join('、');
+    // 有面板但全被过滤掉了（只声明基础能力）→ 说清"有面板"，
+    // 而不是错误地宣称"没有"。
+    const extra = (panelCaps.length && !shown.length) ? '基础端点' : '';
+    const listText = capText || extra;
+    const tip = p.id + (listText ? ' · 能力：' + listText : ' · 无可打开的面板');
     return `<button class="navgrouphd" data-pid="${esc(p.id)}" title="${esc(tip)}">`
       + `${esc(providerTitle(p.id))}${def}${cnt}</button>`;
   }
@@ -1830,7 +1957,9 @@
       }
     }
     host.innerHTML = blocks.join('');
-    bindGenericActions(host, providerId);
+    // 不再在这里绑事件（评审 F2：那会导致监听器随刷新线性增长）。
+    // 通用面板的动作委托在 installGenericActions() 里绑到 #content 上，
+    // 全生命周期只绑一次 —— 见那里的注释。
   }
 
   // renderGenericBlock 渲染一条上游端点的响应。
@@ -1902,23 +2031,57 @@
     </div>`;
   }
 
-  // bindGenericActions 给通用面板里的动作按钮挂事件。
+  // bindGenericActions 已废弃 —— 见 installGenericActions。
   //
-  // 走**显式确认 + busyRun**：写操作一律二次确认并给出等待反馈，
-  // 不允许出现"点一下就生效且没有任何提示"的按钮（曾经的实测教训）。
-  function bindGenericActions(host, providerId) {
-    host.addEventListener('click', ev => {
+  // # 为什么删掉它（评审 CP2 F2，HIGH）
+  //
+  // 它往 host（即 #pbody-<上游>-<能力位>，一个**长期存在**的元素）
+  // 上 addEventListener，而 syncProviderPanels() 每 5 秒被 refresh() 调一次。
+  // 于是每轮刷新都多挂一个 click 监听器，且从不移除：
+  //
+  //   5s → 3 个、10s → 4 个、15s → 5 个（实测线性增长，无上限）
+  //   60 次 sync 后，**一次点击产生 13 个 /admin/welfare 请求**
+  //
+  // 危害不只是内存泄漏：handler 里有 confirm() + POST 写操作（领取福利）。
+  // 今天 codearts 返回的条目都是 claimable:false（按钮禁用），所以还没真的
+  // 重复领取；一旦上游返回可领条目，一次点击就是 N 个确认框 + N 次领取 POST。
+  //
+  // 修法见 installGenericActions：改成**在稳定的祖先上只绑一次**的事件委托。
+
+  // installGenericActions 在 #content 上**只绑一次**通用面板的动作委托。
+  //
+  // # 为什么绑 #content 而不是每个面板
+  //
+  // 面板容器会被 buildProviderPanels() 反复重建（manifest 变化时），
+  // 绑在它们身上就必然要处理"何时解绑"。而 #content 从页面加载到关闭
+  // 都不会被替换 —— 绑一次，永远有效，天然幂等。
+  //
+  // 这正是评审 F2 的正解：把"绑定次数"与"刷新次数"彻底解耦。
+  //
+  // 幂等由 installed 标志保证：即使调用方每次 refresh 都调它也无副作用。
+  let genericActionsInstalled = false;
+
+  function installGenericActions() {
+    if (genericActionsInstalled) return;
+    genericActionsInstalled = true;
+    $('content').addEventListener('click', ev => {
       const b = ev.target.closest('button[data-gclaim]');
       if (!b || b.disabled) return;
       const cid = b.dataset.gcampaign;
-      if (!confirm(`确认为 ${b.dataset.gclaim} 领取该福利？`)) return;
+      const pid = b.dataset.gclaim;
+      // 从按钮自身反查它属于哪个面板（而不是从闭包变量拿 ——
+      // 委托模式下没有"当前面板"这个闭包上下文）。
+      const sec = b.closest('section[data-provider]');
+      const cap = sec ? sec.dataset.cap : 'welfare';
+      if (!confirm(`确认为 ${pid} 领取该福利？`)) return;
       busyRun(b, async () => {
-        const r = await admin(b.dataset.gpath, {
+        const r = await admin(b.dataset.gpath || '/admin/welfare/claim', {
           method: 'POST',
           body: JSON.stringify({ campaign_id: Number(cid) }),
         });
         toast(r && r.credits ? `领取成功，+${r.credits} 积分` : '领取成功');
-        await loadGenericList(providerId, host.dataset.cap || 'welfare');
+        // 只刷新**自己那块**面板，不刷新整页。
+        await loadGenericList(pid, cap);
       }, { label: '领取福利' });
     });
   }
@@ -3425,6 +3588,8 @@
     // 顶栏状态条：复用本次已拿到的 h/s 与 manifest，不额外发请求。
     // 放在 manifest 加载之后，这样"上游 N"才是本次的真实值。
     renderTopStats(h, s);
+    // 任务调度面板同样复用 manifest.jobs，不额外发请求。
+    renderJobs();
     // 服务名同样来自 manifest（B8）：清掉前端硬编码后，
     // 改名只需改后端配置，界面自动跟随。
     renderIdentity();
@@ -3659,6 +3824,10 @@
     $('btnSettingsReload').onclick = () => { loadSettings(); toast('已放弃未保存的修改'); };
     $('content').addEventListener('input', () => markDirty(true));
     $('content').addEventListener('change', () => markDirty(true));
+    // 通用上游面板的写操作委托：在 #content 上**只绑一次**（评审 F2）。
+    // 放在 boot 里而不是 loadGenericList 里 —— 后者每 5 秒都会跑一次，
+    // 在里面绑就退回了原来那个"监听器随刷新增长"的 bug。
+    installGenericActions();
     // 切换任务类型筛选属于「主动改变查询范围」→ 必须回第 1 页。
     // 否则用户在第 3 页切到只有 1 页的类型时，会停在一个不存在的页上。
     $('histKind').onchange = () => { histPage.offset = 0; loadHistory(); };
@@ -3723,6 +3892,7 @@
     TableState: TableState,
     accountPlaceholder: accountPlaceholder,
     renderTopStats: renderTopStats,
+    renderJobs: renderJobs,
   };
 })();
 </script>
