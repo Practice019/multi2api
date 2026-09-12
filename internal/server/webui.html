@@ -98,7 +98,11 @@
     width:3px;height:15px;border-radius:2px;background:#fff;opacity:.9}
   .sidebar .badge{margin-left:8px;font-size:10px;background:var(--panel2);
     border-radius:999px;padding:1px 6px;color:var(--dim)}
-  .sidebar button.active .badge{background:rgba(255,255,255,.22);color:#fff}
+  /* 选中项的徽章：底色用 currentColor 混合，跟随主题，而不是写死白色半透明。
+     写死的 rgba(255,255,255,.22) 是当初把深色配色硬抄进 CSS 的遗留 ——
+     它在浅色主题下语义是错的（"白底"在浅色系里不再表示"更亮"）。
+     currentColor 让底色自动跟随该按钮的前景色（也就是主题的 --acc 侧）。 */
+  .sidebar button.active .badge{background:color-mix(in srgb, currentColor 22%, transparent);color:#fff}
   /* 导航分组：通用 + 每个上游一组。
      组标题是可点击的折叠开关（纯 CSS 三角形，不用图标字体）。 */
   .navgroup{display:flex;flex-direction:column;gap:2px}
