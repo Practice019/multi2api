@@ -25,6 +25,16 @@
   .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
   .dot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .dot.bad{background:var(--err);box-shadow:0 0 8px var(--err)}
+  /* 顶栏状态条：一排常驻读数（健康 / 账号 / 上游 / 刷新时刻）。
+     用较窄的等宽字体与细分隔线，避免与主标题抢注意力。 */
+  .topstats{display:flex;align-items:center;gap:0;font-size:12px;color:var(--dim)}
+  .topstats .ts{padding:0 10px;border-left:1px solid var(--line);white-space:nowrap}
+  .topstats .ts:first-child{border-left:0}
+  .topstats .ts b{color:var(--fg);font-weight:600;font-family:ui-monospace,Consolas,monospace}
+  .topstats .ts.ok b{color:var(--ok)}
+  .topstats .ts.warn b{color:var(--warn)}
+  .topstats .ts.err b{color:var(--err)}
+  @media (max-width:820px){ .topstats{display:none} }
   input,select,textarea,button{font:inherit;color:var(--fg);background:var(--panel2);
     border:1px solid var(--line);border-radius:8px;padding:7px 10px;outline:none}
   input:focus,select:focus,textarea:focus{border-color:var(--acc)}
@@ -286,6 +296,12 @@
   <span id="hdot" class="dot"></span>
   <span id="htxt" class="dim" style="font-size:12px">未连接</span>
   <div class="spacer"></div>
+  <!-- 顶栏右侧的状态条：健康 / 账号数 / 上游数 / 每次刷新的时刻。
+       借鉴 one-api 控制台的信息架构 —— 把"我现在处于什么状态"压缩成
+       一排常驻读数，用户不必切到仪表盘才能确认网关还活着。
+       这几个值由 renderTopStats() 从与仪表盘同一份数据里填，
+       **不额外发请求**（否则就成了第二份事实来源）。 -->
+  <span id="topstats" class="topstats"></span>
   <!-- 非本机访问（服务端未注入 Key）时才出现的兜底入口；本机访问这里完全为空。
        API Key 的查看与复制统一在「仪表盘 → API 接入信息」里，顶栏不再重复。 -->
   <span id="keyFallback" style="display:none;align-items:center;gap:8px">
@@ -732,6 +748,57 @@
     return MANIFEST;
   }
 
+  // renderTopStats 刷新顶栏状态条。
+  //
+  // # 数据来源
+  //
+  // h/s 是 refresh() 已经拿到的 /healthz 与 /status 结果，
+  // 上游数来自已加载的 MANIFEST —— **全部复用已有数据，不额外发请求**。
+  // 额外请求会让顶栏成为第二份事实来源，两边数字不一致时无法判断谁对。
+  //
+  // 传 null 表示"这一项本次拿不到"，此时显示「—」而不是沿用旧值 ——
+  // 沿用旧值会让用户看到一个已经过期的绿点。
+  function renderTopStats(h, s) {
+    const el = $('topstats');
+    if (!el) return;
+    const parts = [];
+
+    // 1) 健康：/healthz 的口径（有账号且未被在途占满）
+    if (h && typeof h.healthy === 'number') {
+      const cls = h.healthy > 0 ? 'ok' : 'err';
+      parts.push(`<span class="ts ${cls}">账号健康 <b>${h.healthy}/${h.total || 0}</b></span>`);
+    } else {
+      parts.push('<span class="ts">账号健康 <b>—</b></span>');
+    }
+
+    // 2) 账号总数（池视角，与健康数不同：这里含冷却/禁用）
+    if (s && typeof s.total === 'number') {
+      const bad = (s.cooling || 0) + (s.disabled || 0);
+      const cls = bad > 0 ? 'warn' : '';
+      parts.push(`<span class="ts ${cls}">账号 <b>${s.total}</b>${bad ? '（异常 ' + bad + '）' : ''}</span>`);
+    } else {
+      parts.push('<span class="ts">账号 <b>—</b></span>');
+    }
+
+    // 3) 已注册上游数（来自 manifest）
+    if (MANIFEST.loaded) {
+      parts.push(`<span class="ts">上游 <b>${MANIFEST.providers.length}</b></span>`);
+    } else {
+      parts.push('<span class="ts warn" title="' + esc(manifestError || 'manifest 未加载')
+        + '">上游 <b>—</b></span>');
+    }
+
+    // 4) 上次刷新时刻：让"自动刷新到底有没有在跑"肉眼可见。
+    //    用 HH:MM:SS 而不是"x 秒前"——后者需要自己再刷新才能变，
+    //    反而让人怀疑是不是卡住了。
+    const now = new Date();
+    const hhmmss = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map(n => String(n).padStart(2, '0')).join(':');
+    parts.push(`<span class="ts">刷新 <b>${hhmmss}</b></span>`);
+
+    el.innerHTML = parts.join('');
+  }
+
   // providerOf 一个账号属于哪个上游。
   //
   // 无 provider 字段的多为历史账号（该字段是后加的），归到默认上游 ——
@@ -909,6 +976,22 @@
   function rowPlaceholder(cols, text, cls) {
     return `<tr><td colspan="${cols}" class="${cls || 'dim'}">${esc(text)}</td></tr>`;
   }
+
+  // 表格三态的统一入口。
+  //
+  // # 为什么要把它做成枚举而不是各自写文案
+  //
+  // 三态的**语义**必须一致：加载态是"正在等"（中性）、空态是"确实没有"
+  //（中性偏淡）、错误态是"出错了"（红，且必须带原因）。
+  // 各自写文案时最容易出的错是**把错误显示成空态** ——
+  // 用户看到"暂无数据"会以为系统正常，实际是接口挂了。
+  //
+  // 所以这里强制区分，并且错误态**必须**带 message。
+  const TableState = {
+    loading: (cols, what) => rowPlaceholder(cols, (what || '') + '加载中…'),
+    empty: (cols, what) => rowPlaceholder(cols, (what || '') + '暂无数据'),
+    error: (cols, msg) => rowPlaceholder(cols, msg || '加载失败', 'err'),
+  };
 
   // normalizeAccount 把一个账号视图归一成渲染需要的形状。
   //
@@ -3306,6 +3389,9 @@
       syncProviderPanels();
       buildNav();
     }
+    // 顶栏状态条：复用本次已拿到的 h/s 与 manifest，不额外发请求。
+    // 放在 manifest 加载之后，这样"上游 N"才是本次的真实值。
+    renderTopStats(h, s);
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
     try { renderAccounts((await admin('/admin/accounts')).accounts); }
     catch { renderAccounts(s.accounts); }
@@ -3595,6 +3681,12 @@
     providersWithCap: providersWithCap,
     hasAnyPanel: hasAnyPanel,
     CORE_CAP: CORE_CAP,
+    ACCT_COLS: ACCT_COLS,
+    COLS: COLS,
+    rowPlaceholder: rowPlaceholder,
+    TableState: TableState,
+    accountPlaceholder: accountPlaceholder,
+    renderTopStats: renderTopStats,
   };
 })();
 </script>
