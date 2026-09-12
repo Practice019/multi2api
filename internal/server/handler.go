@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/session"
@@ -52,7 +52,30 @@ type Config struct {
 	// 早先这里硬编码 "workbuddy" —— 上游名字写死在核心出口层。
 	// 现在由 cmd/server 注入（单上游时就是该上游的 ID）。
 	// 空值时回落到 "local"，**不假装知道**是哪个上游。
+	//
+	// 多上游之后它是**默认上游**的 owned_by；其余上游按各自的 Provider.ID()
+	// 填（见 Provider 字段与 modelEntries）。
 	OwnedBy string
+
+	// Provider 多上游路由的接缝（可选；nil = 单上游模式，行为与改造前一致）。
+	//
+	// # 为什么做成接口而不是直接持有 gateway.Registry
+	//
+	// server 已经 import gateway（用 SplitModel），再持有 Registry 也不成环。
+	// 但这里只声明**它实际需要的四个动作**，原因是：
+	//   - 上游目录是**可能失败**的（无凭证/无账号），而 Registry 只有 Get，
+	//     拿不到"这个上游现在能不能出目录"的答案；
+	//   - 全部可缺省：nil 时整条路径退化成改造前的单上游行为（本字段是
+	//     向后兼容的关键 —— 既有测试与既有部署都不注入它）。
+	//
+	// 装配层（cmd/server）用 gateway.Registry + 各 Provider 实现它。
+	Provider ProviderRouter
+
+	// DefaultProvider 默认上游标识：裸模型名（"auto"）与无前缀请求走它。
+	//
+	// 空串与 Provider 为 nil 两种情形下的语义都是"没有多上游概念"，
+	// 此时 /v1/models 与选号都保持单上游行为。
+	DefaultProvider string
 	// Admin 管理台子树（挂在 /admin/，由 internal/admin 提供）。nil = 不注册该子树。
 	Admin http.Handler
 	// ModelCatalog 供管理台取模型目录快照（成本系数用）。nil = 本实例不提供该能力。
@@ -246,23 +269,65 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 }
 
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
+//
+// # 多上游下的形状（Task 6）
+//
+// 每个上游的模型以 "provider/model" 列出，**默认上游的模型同时以裸名再列一次**。
+// 于是同一个上游会贡献两组记录：
+//
+//	{"id":"glm-5.2",              "owned_by":"workbuddy"}   ← 裸名，向后兼容
+//	{"id":"workbuddy/glm-5.2",    "owned_by":"workbuddy"}
+//	{"id":"codearts/GLM-5.2",     "owned_by":"codearts"}
+//
+// # 为什么裸名必须保留（硬要求）
+//
+// 既有客户端把 "glm-5.2" 直接填进 model 就打 —— 它们是按改造前的
+// /v1/models 响应写的。去掉裸名等于让所有既有客户端一夜之间全挂。
+// 所以 DefaultProvider 的模型一律**双份**列出，其余上游只有带前缀的一份。
+//
+// # 未注入路由时（Provider == nil）
+//
+// 完全退化成改造前的单上游行为：**只有裸名，没有任何前缀记录**。
+// 这是既有测试与既有部署的路径，字节级不变。
 func (h *Handler) modelList() []map[string]any {
-	owned := h.ownedBy()
+	// 单上游模式：与改造前逐字节一致。
+	if h.cfg.Provider == nil {
+		return h.singleProviderModelList(h.ownedBy())
+	}
+
+	def := h.defaultProvider()
+	out := make([]map[string]any, 0, 32)
+
+	// 1. 默认上游：裸名 + 带前缀，两份。
+	//    裸名走既有路径（动态列表 + 静态回退），保证形状完全不变。
+	for _, e := range h.singleProviderModelList(h.ownedByFor(def)) {
+		out = append(out, e)
+		if def != "" {
+			out = append(out, prefixed(e, def))
+		}
+	}
+
+	// 2. 其余上游：只有带前缀的一份。
+	//    顺序上排在默认上游之后 —— 既有客户端取 data[0] 时拿到的仍是它熟悉的那个。
+	for _, id := range h.otherProviders(def) {
+		infos, ok := h.cfg.Provider.Models(context.Background(), id)
+		if !ok || len(infos) == 0 {
+			continue // 该上游暂时给不出目录：跳过，不拖垮整个 /v1/models
+		}
+		for _, mi := range infos {
+			out = append(out, prefixed(h.entryOf(mi.ID, int64(mi.ContextWindow), int64(mi.MaxOutputTokens), h.ownedByFor(id)), id))
+		}
+	}
+	return out
+}
+
+// singleProviderModelList 单上游路径：动态列表优先，失败回退静态表。
+// owned 是填进 owned_by 的值。
+func (h *Handler) singleProviderModelList(owned string) []map[string]any {
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
 		out := make([]map[string]any, 0, len(infos))
 		for _, mi := range infos {
-			entry := map[string]any{
-				"id":                mi.ID,
-				"object":            "model",
-				"created":           1753600000,
-				"owned_by":          owned,
-				"context_length":    mi.ContextWindow,
-				"max_output_tokens": mi.MaxTokens,
-			}
-			if mi.ContextWindow == 0 {
-				entry["context_length"] = 131072 // 兜底
-			}
-			out = append(out, entry)
+			out = append(out, h.entryOf(mi.ID, mi.ContextWindow, mi.MaxTokens, owned))
 		}
 		return out
 	}
@@ -279,14 +344,83 @@ func (h *Handler) modelList() []map[string]any {
 	return out
 }
 
-// ownedBy 返回 /v1/models 的 owned_by 值。
+// entryOf 把模型元信息编成 OpenAI 形状的一条记录。
+//
+// 刻意收**三个标量**而不是收一个结构体：两个来源（upstream.ModelInfo 与
+// gateway.ModelInfo）是两个包的具名类型，收结构体会逼本函数选边站，
+// 从而让 server 依赖其中一个的具体类型。收标量则两边都能用。
+//
+// 窗口/token 参数是 int64 —— upstream.ModelInfo 用 int64、gateway.ModelInfo
+// 用 int，int64 是两者的公共超集，调用处各自隐式提升即可。
+func (h *Handler) entryOf(id string, ctxWindow, maxTokens int64, owned string) map[string]any {
+	entry := map[string]any{
+		"id":                id,
+		"object":            "model",
+		"created":           1753600000,
+		"owned_by":          owned,
+		"context_length":    ctxWindow,
+		"max_output_tokens": maxTokens,
+	}
+	if ctxWindow == 0 {
+		entry["context_length"] = 131072 // 兜底
+	}
+	return entry
+}
+
+// otherProviders 返回除默认上游外的已注册上游（按字典序，稳定输出）。
+//
+// 返回空切片时 modelList 退化成"只有默认上游" ——
+// 这正是"codearts 未启用"时应当发生的事。
+func (h *Handler) otherProviders(def string) []string {
+	all := h.providerIDs()
+	out := make([]string, 0, len(all))
+	for _, id := range all {
+		if id == def {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// providerIDs 返回已知的全部上游 ID。
+//
+// 优先问路由（它是唯一的权威）；路由没提供枚举能力时回落成"只有默认上游"，
+// 因为一个不枚举的上游集合无法安全地猜测。
+func (h *Handler) providerIDs() []string {
+	if h.cfg.Provider == nil {
+		return nil
+	}
+	if l, ok := h.cfg.Provider.(interface{ IDs() []string }); ok {
+		return l.IDs()
+	}
+	return nil
+}
+
+// ownedBy 返回默认上游在 /v1/models 里的 owned_by 值。
 //
 // 未注入时给 "local" —— 一个**不假装知道**是哪个上游的中性值。
 func (h *Handler) ownedBy() string {
-	if h.cfg.OwnedBy != "" {
+	return h.ownedByFor(h.defaultProvider())
+}
+
+// ownedByFor 返回指定上游的 owned_by：用它自己的 ID ——
+// 每条模型的 `owned_by` 反映**实际上游**，而不是全局一个值。
+//
+// 默认上游且装配层显式给了 OwnedBy 时以 OwnedBy 为准
+// （那是改造前就存在的注入点，行为要保持）。
+// 没有上游上下文时回落 "local"。
+func (h *Handler) ownedByFor(id string) string {
+	if id == "" {
+		if h.cfg.OwnedBy != "" {
+			return h.cfg.OwnedBy
+		}
+		return "local"
+	}
+	if id == h.defaultProvider() && h.cfg.OwnedBy != "" {
 		return h.cfg.OwnedBy
 	}
-	return "local"
+	return id
 }
 
 // fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
@@ -498,7 +632,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
-	// 选号要按**请求的模型**取额度（见 pool.PickForModel）。
+	// 选号要按**请求的模型**取额度（见 pool.PickForModel），
+	// 并按 **provider 前缀**限定上游（见 pool.PickFor）。
 	//
 	// 为什么在这里做而不是只在池内：只有出口层知道客户端要哪个模型。
 	// 按模型额度的上游（codearts）里，一个账号可能对 gpt-5.5 零额度、
@@ -506,13 +641,33 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//
 	// 剥掉 provider 前缀（"workbuddy/auto" → "auto"）：额度表按上游模型名建，
 	// 前缀是网关的路由记号，不属于上游模型名。
-	reqModel := peek.Model
-	if _, m, hasPrefix := gateway.SplitModel(reqModel); hasPrefix {
-		reqModel = m
+	//
+	// 未知前缀立刻回 400：那是客户端写错了，让它马上知道，
+	// 而不是把 "codearts/GLM-5.2" 当模型名发给默认上游再收一个莫名的 400。
+	reqProvider, reqModel, perr := h.providerFor(peek.Model)
+	if perr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "unknown_provider", perr.Error())
+		return
+	}
+	// 出站请求体里必须写回**剥掉前缀**的模型名：前缀是网关的路由记号，
+	// 上游不认识 "workbuddy/auto"（实测：带着前缀发过去，上游按未知模型拒绝，
+	// 表现为一次白跑的 503 + 换号）。这一条与"按前缀选号"是一体两面 ——
+	// 选号看前缀，发出去看裸名。
+	//
+	// 只在模型名真的变了时才重新编码：不带前缀的请求（既有客户端）
+	// 保持**原始字节原样转发**，行为与改造前逐字节一致。
+	outBody := body
+	if hasPrefixIn(peek.Model) && reqModel != peek.Model {
+		if rewritten, ok := rewriteModel(body, reqModel); ok {
+			outBody = rewritten
+		}
+		// 重写失败（应当不可能：body 刚被 JSON 解析过）时保留原始 body ——
+		// 宁可让上游按原样拒绝并给出它的错误，也不要在这里造一个假错误。
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	st.provider = reqProvider
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -564,7 +719,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if acct == nil {
-			acct = h.cfg.Pool.PickForModel(reqModel, tried)
+			// 按 (上游, 模型) 选号：只在该上游的账号里挑，
+			// 绝不让 codearts 的请求落到 workbuddy 的账号上。
+			// reqProvider 为空（单上游模式 / 裸模型名）时池子按默认上游解释。
+			acct = h.cfg.Pool.PickFor(reqProvider, reqModel, tried)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -604,7 +762,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, outBody)
 		if terr != nil {
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。

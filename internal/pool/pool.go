@@ -48,10 +48,34 @@ func (k CoolKind) String() string {
 	return "unknown"
 }
 
+// DefaultProvider 未打标签的账号归属的默认上游标识。
+//
+// # 为什么是空串而不是某个具体名字
+//
+// pool 是**上游无关**的核心包（判据 3 由 arch_test.go 强制）：它不得出现
+// "workbuddy"/"codearts" 这类具体上游词汇。所以这里只表达"默认"这个**通用**
+// 概念 —— 空串即默认。具体哪个上游是默认，由装配层（cmd/server）通过
+// SetDefaultProvider 注入。
+//
+// 默认上游的取值同时决定了选号时的**向后兼容**行为：未打标签的账号
+// （即改造前就读进来的那批凭证）全部落在默认上游下，行为与改造前逐字节一致。
+const DefaultProvider = ""
+
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
 	UID      string `json:"uid"`
 	Nickname string `json:"nickname,omitempty"`
+
+	// Provider 该账号属于哪个上游（与 gateway.Provider.ID() 对应）。
+	//
+	// 刻意是**通用 string**而不是枚举：加第 N 个上游时本文件一行都不用改
+	// （判据 1）。空串表示"未打标签"，按 DefaultProvider 解释 ——
+	// 旧 state.json 与旧调用方因此不需要任何迁移。
+	//
+	// 为什么每个账号都要带它：账号池是多上游共用的，
+	// /admin/accounts 要能按上游分组展示，选号要能按上游过滤。
+	// 没有这个标签，两个上游的账号在同一张表里无法区分。
+	Provider string `json:"provider,omitempty"`
 
 	// Quota 额度视图。支持单值（workbuddy 积分）与按模型（codearts）两种形态。
 	//
@@ -83,6 +107,23 @@ type Status struct {
 
 type entry struct {
 	a *auth.Auth
+
+	// provider 该账号归属的上游标识（通用 string，见 Status.Provider）。
+	// 空串 = 未打标签 = 默认上游。
+	provider string
+
+	// secret 该账号的**上游私有凭证**（codearts 的 AK/SK/DPoP 等）。
+	//
+	// # 为什么用 any 而不是给每个上游加字段
+	//
+	// pool 不得 import 任何上游包（判据 3），所以它无法声明上游的凭证类型。
+	// 用 any 承载、由上游自己断言取回（gateway.Credential.Secret 是同一手法），
+	// 是"核心不认识上游凭证结构"的唯一可行解。
+	//
+	// 默认上游（workbuddy）的凭证就是 a 本身，secret 保持 nil ——
+	// 它的消费方读 *auth.Auth，读不到 secret 也不受影响。
+	secret any
+
 	// quota 是额度的**真相来源**（支持单值与按模型两种形态）。
 	// credits 保留为派生标量，供既有消费者与选号权重使用。
 	quota        QuotaView
@@ -162,8 +203,16 @@ type stateAccount struct {
 	//
 	// 旧状态文件没有这个字段 → 反序列化得到零值 → restoreQuota 会回落到 Credits。
 	// 这样升级不需要迁移脚本。
-	Quota        QuotaView `json:"quota,omitempty"`
-	Credits      int64     `json:"credits"`
+	Quota   QuotaView `json:"quota,omitempty"`
+	Credits int64     `json:"credits"`
+	// Provider 账号归属的上游标识。
+	//
+	// 旧状态文件没有这个字段 → 反序列化得空串 → 按默认上游解释，
+	// 与"改造前只可能有一个上游"的事实一致，因此升级不需要迁移脚本。
+	//
+	// ⚠ 必须落盘：否则重启后 codearts 账号会被当成默认上游的账号，
+	// 选号时被派给 workbuddy 的 Provider（凭空多出一批必然失败的号）。
+	Provider     string    `json:"provider,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`
@@ -222,6 +271,13 @@ type Pool struct {
 
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
+
+	// defaultProvider 默认上游标识（由装配层注入，见 SetDefaultProvider）。
+	//
+	// 含义：未打标签（provider == ""）的账号按它解释。
+	// 空串表示"没有默认上游概念的纯单上游部署" —— 此时
+	// providerOf(e) 对未打标签账号返回 ""，与改造前的行为完全一致。
+	defaultProvider string
 
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
@@ -306,8 +362,40 @@ func (p *Pool) SetMaxInFlight(n int) {
 	}
 }
 
-// SetStore 注入池状态快照镜像（redisstore.Store）。nil 表示不镜像（纯本地恢复）。
-// 必须在 SyncToDir 之前调用，使"择新恢复"发生在账号对齐之前。
+// SetDefaultProvider 注入默认上游标识。
+//
+// 必须在 SyncToDir 之前调用：对齐时要用它判断"未打标签的账号算谁"。
+//
+// 为什么要显式注入而不是在 pool 里写死：pool 不得知道任何具体上游名
+// （判据 3）。默认上游是**装配层的事实**（谁先注册谁就是默认），
+// 由 cmd/server 告诉池子。
+//
+// 向后兼容：不调用本方法时 defaultProvider 保持 ""，
+// 未打标签的账号仍全部落在 "" 这一个"上游"下 —— 与改造前完全一致。
+func (p *Pool) SetDefaultProvider(id string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.defaultProvider = id
+}
+
+// providerOf 返回账号的**生效**上游标识：打了标签用它，没打标签用默认。
+// 调用方必须已持有 p.mu（只读 p.defaultProvider）。
+func (p *Pool) providerOf(e *entry) string {
+	if e.provider != "" {
+		return e.provider
+	}
+	return p.defaultProvider
+}
+
+// normalizeProvider 把"未指定上游"归一成默认上游标识。
+// 空入参表示调用方没有上游上下文（如探活、刷新额度），走默认。
+func (p *Pool) normalizeProvider(provider string) string {
+	if provider != "" {
+		return provider
+	}
+	return p.defaultProvider
+}
+
 func (p *Pool) SetStore(s StoreSnapshotter) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -435,16 +523,66 @@ func (p *Pool) Add(a *auth.Auth) {
 
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。
 // 剔除结果持久化回 state.json，避免已删账号在下次启动时被 load() 复活。
+//
+// # ⚠ 这是"单上游对齐"，只能剔除**默认上游**的账号
+//
+// 多上游部署下必须用 SyncToDirFor。原因（这是本方法最容易踩的坑）：
+// 本方法的语义是"扫描结果的**全集**就是池中应有的全集"，于是它会剔除
+// 所有不在 auths 里的账号。若拿它同步某一个上游的目录，
+// 另一个上游的账号（不在这次扫描结果里）会被**整体误删**。
+//
+// 实测场景：workbuddy 与 codearts 的凭证都放在 auths/ 下，
+// cmd/server 用 auth.LoadDir 扫 workbuddy*.json。若在加载 codearts 之后
+// 再调一次 SynctoDir(workbuddyAuths)，codearts 账号会被全部剔除 ——
+// 且剔除会落盘，重启也回不来。
+//
+// 因此保留本方法是为了**向后兼容**（既有调用方与 55 处测试零改动），
+// 它等价于 SyncToDirFor(DefaultProvider, auths)：只在一个上游存在时，
+// "只删默认上游"与"删全部"是同一件事，行为与改造前逐字节一致。
 func (p *Pool) SyncToDir(auths []*auth.Auth) {
+	p.SyncToDirFor(DefaultProvider, auths)
+}
+
+// SyncToDirFor 按上游维度对齐账号：只增删**该上游**的账号，别家的一律不动。
+//
+// provider 为空串时归一成默认上游（见 normalizeProvider），
+// 所以 SyncToDir 与 SyncToDirFor("", ...) 等价。
+//
+// # 剔除范围如何被限制在本上游内（本方法的正确性核心）
+//
+// 剔除判据是"该账号属于本次同步的上游 **且** 不在 seen 里"：
+//
+//	belongs := p.providerOf(e) == want
+//	if belongs && !seen[uid] { 剔除 }
+//
+// 两个上游若出现同名 uid（理论上可以：不同上游的 uid 空间独立），
+// 也不会互相误删 —— 因为只有一个上游的账号会满足 belongs。
+//
+// # 文件名冲突
+//
+// 池不关心文件名，只关心 uid。两个上游的凭证文件放在同一目录
+// （auths/workbuddy-*.json 与 auths/codearts-*.json）时，
+// 各自的 LoadDir 用不同前缀通配，扫出来的集合天然不相交；
+// 池按 provider 分域存放，因此即使**同名**也不冲突：
+// 真正的冲突只在"同一上游内两个文件给出同一个 uid"时发生，
+// 那时后写入者通过 upsert 覆盖前者（与改造前同一语义）。
+func (p *Pool) SyncToDirFor(provider string, auths []*auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	want := p.normalizeProvider(provider)
 	seen := make(map[string]bool, len(auths))
+	added := false
 	for _, a := range auths {
 		seen[a.UID] = true
-		p.upsertLocked(a)
+		if p.upsertLockedFor(want, a) {
+			added = true
+		}
 	}
-	changed := false
-	for uid := range p.byUID {
+	changed := added
+	for uid, e := range p.byUID {
+		if p.providerOf(e) != want {
+			continue // 别的上游的账号：本次同步**不碰**
+		}
 		if !seen[uid] {
 			delete(p.byUID, uid)
 			changed = true
@@ -455,14 +593,124 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	}
 }
 
-// upsertLocked 更新或插入单个账号；已存在则只换凭证、保留 credits/cooling 状态。
+// upsertLocked 更新或插入单个**默认上游**的账号；已存在则只换凭证、保留状态。
 // 调用方必须已持有 p.mu；Add 与 SyncToDir 共用此 upsert 逻辑。
 func (p *Pool) upsertLocked(a *auth.Auth) {
+	p.upsertLockedFor(p.defaultProvider, a)
+}
+
+// upsertLockedFor 更新或插入指定上游的账号；**返回是否是新插入**。
+//
+// provider 标签只在**首次插入**时写入；账号已存在时不改标签 ——
+// 标签是账号的归属事实，不该被一次"顺手同步"改写。
+// （若真需要改归属，那是账号迁移，应当显式删了再加。）
+//
+// # 为什么返回 added
+//
+// 调用方据此决定要不要落盘。早先只有"剔除过账号"才落盘，
+// 于是**新账号的归属标签不会被写入 state.json** ——
+// 单上游时代这无害（账号身份就是文件本身），多上游之后它是致命的：
+// 重启后 codearts 的账号会因为状态文件里没有标签而被当成默认上游的号，
+// 凭空多出一批必然失败的账号（且它们还会参与选号）。
+//
+// 落盘走 saveLocked 而不是置 dirty 标志：调用方已经持锁，
+// 且对齐目录是启动/人工刷新时的低频动作，即时落盘比等 5s 定时更稳。
+func (p *Pool) upsertLockedFor(provider string, a *auth.Auth) (added bool) {
 	if e, ok := p.byUID[a.UID]; ok {
 		e.a = a // 保留 credits/cooling 状态
-		return
+		return false
 	}
-	p.byUID[a.UID] = &entry{a: a}
+	p.byUID[a.UID] = &entry{a: a, provider: provider}
+	return true
+}
+
+// AddFor 加入一个**指定上游**的账号（含上游私有凭证 secret）。
+//
+// # 为什么需要带 secret 的版本
+//
+// 默认上游（workbuddy）的凭证就是 *auth.Auth 本身，池子能直接持有。
+// 但别的上游（codearts）的凭证是各不相同的结构，而池子不得 import 它们
+// （判据 3）。于是由装配层把上游凭证作为**不透明的 any** 一起交进来，
+// 取号方用 SecretOf 取回后还给对应的 Provider。
+//
+// secret 为 nil 时账号照常可用，只是取号方拿不到上游私有凭证。
+func (p *Pool) AddFor(provider string, a *auth.Auth, secret any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.upsertSecretLocked(p.normalizeProvider(provider), a, secret)
+}
+
+// upsertSecretLocked 与 upsertLockedFor 同理，但同时装载/更新上游私有凭证。
+//
+// 与凭证标签不同，secret **每次同步都刷新**：它是会过期的运行态
+// （codearts 的 STS 只有 30 分钟寿命，刷新后要立刻让池子看到新值），
+// 不刷新会让取号方一直拿着过期凭证。
+// 调用方必须已持有 p.mu。
+func (p *Pool) upsertSecretLocked(provider string, a *auth.Auth, secret any) (added bool) {
+	if e, ok := p.byUID[a.UID]; ok {
+		e.a = a
+		if secret != nil {
+			e.secret = secret
+		}
+		return false
+	}
+	p.byUID[a.UID] = &entry{a: a, provider: provider, secret: secret}
+	return true
+}
+
+// SyncToDirWithSecrets 按上游维度对齐账号，并为每个账号绑定上游私有凭证。
+//
+// 与 SyncToDirFor 的差别只有"顺带装载 secret"（见 AddFor 的理由）。
+// secrets 为 nil 表示该上游的凭证就是 *auth.Auth 本身（默认上游的形态）。
+//
+// 剔除范围与 SyncToDirFor 完全一致：只删本次同步的上游。
+// 新增账号同样即时落盘（理由见 upsertLockedFor 的注释）。
+func (p *Pool) SyncToDirWithSecrets(provider string, auths []*auth.Auth, secrets map[string]any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	want := p.normalizeProvider(provider)
+	seen := make(map[string]bool, len(auths))
+	added := false
+	for _, a := range auths {
+		seen[a.UID] = true
+		var secret any
+		if secrets != nil {
+			secret = secrets[a.UID]
+		}
+		if p.upsertSecretLocked(want, a, secret) {
+			added = true
+		}
+	}
+	changed := added
+	for uid, e := range p.byUID {
+		if p.providerOf(e) != want {
+			continue // 别的上游的账号：不碰
+		}
+		if !seen[uid] {
+			delete(p.byUID, uid)
+			changed = true
+		}
+	}
+	if changed {
+		p.saveLocked()
+	}
+}
+
+// SecretOf 返回账号的上游私有凭证（AddFor/SyncToDirWithSecrets 装载的那个）。
+//
+// 取到的是**不透明值**：调用方（装配层的适配器）知道它是哪个上游的类型，
+// 自行断言。池子只负责保管，不解释它。
+//
+// 第二个返回值报告账号是否存在；凭证未装载时返回 (nil, true) ——
+// "账号在但没私有凭证"与"账号不存在"是两件事，调用方需要能区分。
+func (p *Pool) SecretOf(uid string) (any, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return nil, false
+	}
+	return e.secret, true
 }
 
 // Pick 返回 healthy 中额度最高的账号；无可用返回 nil。
@@ -499,6 +747,26 @@ func (p *Pool) PickForModel(model string, tried map[string]bool) *auth.Auth {
 	return p.pick(tried, model)
 }
 
+// PickFor 按上游 + 模型选号。provider 为空走默认上游（向后兼容）。
+//
+// # 为什么选号必须带上游维度
+//
+// 多上游共用一个池：账号池里同时躺着 workbuddy 与 codearts 的账号。
+// 若不按上游过滤，"codearts/GLM-5.2" 这个请求会被派到 workbuddy 账号上 ——
+// workbuddy 的 Provider 拿到的是它不认识的凭证，必然失败；
+// 更糟的是它会失败得很晚（一次完整的上游往返），把轮换额度白烧掉。
+//
+// 上游的账号是**凭证结构都不同**的两批：只有对应的 Provider 能用。
+// 所以"选号"这件事在池子里就必须按上游分域。
+func (p *Pool) PickFor(provider, model string, tried map[string]bool) *auth.Auth {
+	return p.pickFor(provider, tried, model)
+}
+
+// PickForExcluding 按上游选号（无模型上下文）。见 PickFor。
+func (p *Pool) PickForExcluding(provider string, tried map[string]bool) *auth.Auth {
+	return p.pickFor(provider, tried, "")
+}
+
 // pick 在 healthy 候选集中按三因子权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // 候选集是 top5 近似：先按三因子权重（weightOf）降序取前 5（额度只是权重的一个因子，
 // 闲置补偿与成功率同样决定谁进短名单），再在 top5 内做防撞号过滤。
@@ -509,12 +777,24 @@ func (p *Pool) PickForModel(model string, tried map[string]bool) *auth.Auth {
 // model 非空时，额度因子取该账号**针对该模型**的可用量（EffectiveFor）；
 // 为空时取标量 Effective()。见 PickForModel 的说明。
 func (p *Pool) pick(tried map[string]bool, model string) *auth.Auth {
+	return p.pickFor(DefaultProvider, tried, model)
+}
+
+// pickFor 是 pick 的上游维度版本：候选集先按上游过滤，其余逻辑完全一致。
+//
+// provider 为空 → 归一成默认上游。这样"未打标签的账号"与
+// "显式指定默认上游"落到同一个候选集，向后兼容由此成立。
+func (p *Pool) pickFor(provider string, tried map[string]bool, model string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+	want := p.normalizeProvider(provider)
 
 	var cands []*entry
 	for uid, e := range p.byUID {
+		if p.providerOf(e) != want {
+			continue // 别的上游的账号：本请求用不上
+		}
 		if tried != nil && tried[uid] {
 			continue
 		}
@@ -529,7 +809,7 @@ func (p *Pool) pick(tried map[string]bool, model string) *auth.Auth {
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now)
+		return p.pickEarliestExpiryLocked(want, tried, now)
 	}
 	// top5 短名单按三因子权重降序截断（而非额度单纯降序）：否则闲置补偿 + 成功率
 	// 根本进不了短名单决策，低额度但高成功率/久置的账号会永远排不进 top5。
@@ -669,9 +949,15 @@ func (e *entry) usableForModel(model string) bool {
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time) *auth.Auth {
+//
+// provider 是**已归一**的上游标识：兜底同样不得跨上游 ——
+// 拿一个别的上游的账号去兜底，除了必然失败之外没有任何意义。
+func (p *Pool) pickEarliestExpiryLocked(provider string, tried map[string]bool, now time.Time) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
+		if p.providerOf(e) != provider {
+			continue // 别的上游的账号：不参与本次兜底
+		}
 		if tried != nil && tried[uid] {
 			continue
 		}
@@ -1016,12 +1302,25 @@ func (p *Pool) AuthByUID(uid string) *auth.Auth {
 
 // AvailableUIDs 返回当前 healthy 且未占满在途名额的账号 UID 列表（按 UID 排序，稳定输出）。
 // 供会话粘性路由（internal/session）做快路径命中校验 + 双段分配；无可用返回空切片。
+//
+// 范围是**默认上游**：粘性路由是单上游时代的机制，调用方（session.Router）
+// 拿到的 Available 回调没有上游上下文，按默认上游给是唯一向后兼容的选择。
+// 需要按上游列可用号请用 AvailableUIDsFor。
 func (p *Pool) AvailableUIDs() []string {
+	return p.AvailableUIDsFor(DefaultProvider)
+}
+
+// AvailableUIDsFor 返回指定上游里 healthy 且未占满在途名额的账号 UID 列表（按 UID 排序）。
+func (p *Pool) AvailableUIDsFor(provider string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
+	want := p.normalizeProvider(provider)
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
+		if p.providerOf(e) != want {
+			continue
+		}
 		if !e.healthy(now) {
 			continue
 		}
@@ -1112,11 +1411,55 @@ func (p *Pool) List() []Status {
 	return out
 }
 
+// ListFor 返回指定上游的账号状态（按 UID 排序，稳定输出）。
+// provider 为空时归一成默认上游 —— 与 List 的区别仅在于是否按上游过滤。
+func (p *Pool) ListFor(provider string) []Status {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	want := p.normalizeProvider(provider)
+	uids := make([]string, 0, len(p.byUID))
+	for uid, e := range p.byUID {
+		if p.providerOf(e) != want {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	out := make([]Status, 0, len(uids))
+	for _, uid := range uids {
+		out = append(out, p.statusOf(uid, p.byUID[uid]))
+	}
+	return out
+}
+
+// Providers 返回池中实际存在账号的上游标识（按字典序，稳定输出）。
+//
+// 用途：管理台据此做分组展示，不必事先知道有哪些上游 ——
+// 加第 N 个上游时核心仍然零改动（判据 1）。
+func (p *Pool) Providers() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	set := map[string]bool{}
+	for _, e := range p.byUID {
+		set[p.providerOf(e)] = true
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// statusOf 组装单账号对外状态。调用方必须已持有 p.mu（读锁即可）。
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	st := Status{
 		UID:      uid,
 		Nickname: e.a.Nickname,
+		// Provider 是**生效**的上游标识（未打标签的账号回落成默认上游），
+		// 而不是 entry.provider 的原始值 —— 管理台要看到"这个号实际上归谁"。
+		Provider: p.providerOf(e),
 		// Clone 深拷贝：否则调用方改 Status 返回值会改到池内状态（绕过锁）。
 		Quota: e.quota.Clone(),
 		// Credits 是真正的**派生值**：从额度视图现算，不再读缓存的 e.credits。
@@ -1175,6 +1518,8 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		}
 		p.byUID[uid] = &entry{
 			a: &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			// 归属标签从落盘状态恢复（旧文件无此字段 → 空串 → 默认上游）。
+			provider: s.Provider,
 			// 从落盘状态恢复额度。旧状态文件没有 quota 字段（零值），
 			// 此时回落到 Credits 以保持向后兼容。
 			quota:        restoreQuota(s.Quota, s.Credits),
@@ -1257,8 +1602,10 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			// 早先漏了这一行：每次 flush 都会把按模型额度写成空对象，
 			// 重载后退化成 credits —— 正是 QuotaView 要防止的 int64 坍缩。
 			// 有回归测试守着（TestReviewerF1_PerModelQuotaSurvivesFlush）。
-			Quota:        e.quota,
-			Credits:      e.credits,
+			Quota:   e.quota,
+			Credits: e.credits,
+			// 归属标签必须落盘（理由见 stateAccount.Provider）。
+			Provider:     e.provider,
 			Disabled:     e.disabled,
 			Reason:       e.reason,
 			Until:        e.until,

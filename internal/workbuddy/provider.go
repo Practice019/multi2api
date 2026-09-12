@@ -41,6 +41,16 @@ import (
 // 格式受 gateway 约束（^[a-z][a-z0-9-]*$），有契约测试守着。
 const providerID = "workbuddy"
 
+// ProviderID 导出上游标识，供**装配层**（cmd/server）使用。
+//
+// 为什么需要导出：装配层要在 SyncToDir 之前告诉账号池"默认上游是谁"
+// （pool.SetDefaultProvider）。那个调用发生在 Provider 实例构造之前，
+// 拿不到 p.ID()，所以需要一个包级的标识常量。
+//
+// 只导出这一个访问器而不是把 providerID 改成大写：标识的唯一权威
+// 仍是 providerID（ID() 返回它），导出面越小越好。
+const ProviderID = providerID
+
 // Provider 实现 gateway.Provider（以及 AdminExt / JobExt 两个扩展点）。
 //
 // # 它同时是 workbuddy 业务的宿主

@@ -49,6 +49,13 @@ import (
 // 格式受 gateway 约束（^[a-z][a-z0-9-]*$），有契约测试守着。
 const providerID = "codearts"
 
+// ProviderID 导出上游标识，供**装配层**（cmd/server）使用。
+//
+// 装配层要在把 codearts 账号并入核心账号池时给出这个标识
+// （pool.SyncToDirWithSecrets 的 provider 参数）。与 workbuddy 的同名常量
+// 同一理由：标识的唯一权威仍是 providerID（ID() 返回它），导出面越小越好。
+const ProviderID = providerID
+
 // refreshSkew 提前续期窗口。
 //
 // 为什么是 3 分钟：CodeArts 的 STS 凭证寿命只有约 30 分钟，

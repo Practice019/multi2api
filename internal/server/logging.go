@@ -46,13 +46,16 @@ var chatLogEnabled = true
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
-	start  time.Time
-	model  string
-	mode   string // "stream" | "sync"
-	uid    string // 完整 uid，展示时只取前 8 位
-	ttfb   time.Duration
-	toks   int // <0 表示 usage 缺失 → 显示 "-"
-	status int
+	start time.Time
+	model string
+	mode  string // "stream" | "sync"
+	uid   string // 完整 uid，展示时只取前 8 位
+	// provider 本次请求最终走的上游标识。空串 = 未标注（历史/无上下文）。
+	// 它由选号结果决定，因此只在真正选中账号后才被填上 —— 请求失败在选号前时保持空。
+	provider string
+	ttfb     time.Duration
+	toks     int // <0 表示 usage 缺失 → 显示 "-"
+	status   int
 
 	// usage 上游 usage 对象的原样引用（流式来自末帧，同步来自聚合响应）；
 	// nil 表示上游没给 usage。扩展字段（credit/推理/缓存）在落盘时现场解析，
@@ -77,7 +80,7 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.status, s.toks, s.usage)
+	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage 精确值（completion_tokens
@@ -202,13 +205,21 @@ func uidPrefix(uid string) string {
 	return uid
 }
 
-// logChatRow 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
-// toks<0 表示 usage 缺失，显示 "-"。
+// logChatRow 打印一行请求级表格日志（单上游形态，provider 留空）。
+//
+// 保留这个 8 参数签名是为了**向后兼容**：既有测试直接调它，
+// 且单上游部署下确实没有 provider 可标。多上游路径用 logChatRowProvider。
+func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int, usage map[string]any) {
+	logChatRowProvider(ttfb, total, model, mode, uid, "", status, toks, usage)
+}
+
+// logChatRowProvider 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
+// toks<0 表示 usage 缺失，显示 "-"。provider 为空表示未标注。
 //
 // usage 为上游 usage 对象（nil = 缺失）。扩展字段（credit/推理 token/缓存命中未命中）
 // 由此处解析并写入环形缓冲：**只有 toks>=0（usage 存在）时才填**，
 // usage 缺失时保持 0 而不是 -1 —— 新字段没有哨兵语义，-1 会污染后续求和聚合。
-func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int, usage map[string]any) {
+func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any) {
 	if !chatLogEnabled {
 		return
 	}
@@ -216,14 +227,15 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 	// 同时进环形缓冲（/admin/logs 的数据源）。这里用完整 model/uid，
 	// 截断只影响 stdout 表格的排版，不应污染可供追溯的结构化数据。
 	entry := logbuf.Entry{
-		At:      time.Now(),
-		Model:   model,
-		Mode:    mode,
-		Status:  status,
-		UID:     uid,
-		TTFBMS:  ttfb.Milliseconds(),
-		Tokens:  toks,
-		TotalMS: total.Milliseconds(),
+		At:       time.Now(),
+		Model:    model,
+		Mode:     mode,
+		Status:   status,
+		UID:      uid,
+		Provider: provider,
+		TTFBMS:   ttfb.Milliseconds(),
+		Tokens:   toks,
+		TotalMS:  total.Milliseconds(),
 	}
 	// tokens<0 是「usage 缺失」的哨兵；此时 usage 对象即使非 nil 也不可信
 	// （例如上游给了半截 usage），扩展字段一律留 0。

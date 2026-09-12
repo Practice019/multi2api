@@ -173,6 +173,27 @@ type Config struct {
 		// <=0 或未配置一律取 60；本字段**没有**"关闭"语义 ——
 		// 要关就整段 enabled=false（少一个三态就少一类误配）。
 		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
+
+		// PoolAccounts 是否把 CodeArts 账号**并入核心账号池**（默认 true）。
+		//
+		// # 为什么需要这个开关
+		//
+		// 并入池子是 Task 6 的核心：只有并进去，请求才可能被路由到
+		// codearts 的账号（改造前 codearts 的账号只存在它自己的目录里，
+		// 池子一无所知，于是"永远选不到 codearts 账号"）。
+		//
+		// 但并入会让**默认上游之外**多出一批账号，属于可观测的行为变化，
+		// 因此保留一个显式退出口：置 false 即回到"codearts 只用自己的
+		// 管理端点、不参与选号"的旧形态。
+		//
+		// 默认 true：已经显式开了 codearts.enabled=true 的部署，
+		// 意图就是"用起来"；再要求它们多配一个键才能生效是没必要的摩擦。
+		// 注意这与"段缺席即全关"不冲突 —— 段缺席时 Enabled=false，
+		// 整个 codearts 都不注册，本字段根本不会被读到。
+		//
+		// 用 *bool 以便区分「没配」与「显式 false」：
+		// 键缺席时保持默认 true（nil → 默认）。
+		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"codearts"`
 
 	// 解析后
@@ -203,6 +224,9 @@ type Config struct {
 	CodeartsEnabled         bool          `json:"-"`
 	CodeartsAuthDir         string        `json:"-"`
 	CodeartsRefreshInterval time.Duration `json:"-"`
+	// CodeartsPoolAccounts 是否把 codearts 账号并入核心账号池（见 Codearts.PoolAccounts）。
+	// CodeartsEnabled 为 false 时无意义。
+	CodeartsPoolAccounts bool `json:"-"`
 }
 
 // Default 默认配置。
@@ -442,6 +466,9 @@ func (c *Config) normalize() error {
 		}
 		c.CodeartsRefreshInterval = time.Duration(iv) * time.Second
 	}
+	// 并入账号池默认开（理由见 Codearts.PoolAccounts）。
+	// 未启用时恒 false —— 不注册的上游不该在池子里留下任何痕迹。
+	c.CodeartsPoolAccounts = c.CodeartsEnabled && boolOr(c.Codearts.PoolAccounts, true)
 	return nil
 }
 

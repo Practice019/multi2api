@@ -58,7 +58,10 @@ func main() {
 	defer p.Flush() // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
 	p.SetStore(store)
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
-	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
+	// 默认上游必须在 SyncToDir 之前注入：对齐时要用它判断"未打标签的账号算谁"。
+	// 这里先用 workbuddy（注册顺序上的第一个），注册表建好后再用 registry.First() 校正。
+	p.SetDefaultProvider(workbuddy.ProviderID)
+	p.SyncToDir(auths) // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
 	// 熔断器 + 在途上限 + 三因子加权调优（从 config 注入，非正值回退默认）。
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
@@ -225,6 +228,45 @@ func main() {
 
 	log.Printf("已注册上游: %v", registry.IDs())
 
+	// ---- 把 codearts 的账号并入核心账号池（Task 6）----
+	//
+	// # 为什么必须做这件事
+	//
+	// 改造前 codearts 的凭证只存在它自己的目录里，池子一无所知。
+	// 后果是**请求永远不可能被路由到 codearts 账号** —— 无论客户端
+	// 写 "codearts/xxx" 还是别的什么，出口层选号时池里只有 workbuddy 的号。
+	//
+	// # 为什么不是把两个目录合并后一次 SyncToDir
+	//
+	// 那样会**误删**：SyncToDir 的语义是"扫描结果的全集就是池中应有的全集"，
+	// 而两个上游的 LoadDir 各自只扫自己前缀的文件。把某一次的扫描结果
+	// 当成全集，会把另一个上游的账号整体剔除。
+	//
+	// 所以两条同步**各管各的域**（SyncToDir / SyncToDirWithSecrets 的
+	// provider 参数），谁都不会动别家的账号。
+	//
+	// # 顺序
+	//
+	// 先 workbuddy（默认上游，它在 SyncToDir 里已随启动完成），
+	// 再 codearts。注册顺序也保持 workbuddy 在前 —— registry.First()
+	// 因此仍是 workbuddy，"裸模型名走谁"与改造前一致。
+	if cb != nil && cfg.CodeartsPoolAccounts {
+		if n := syncCodeartsAccounts(p, cfg.CodeartsAuthDir); n > 0 {
+			log.Printf("codearts: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("codearts: 账号池中暂无账号（凭证目录 %s 里没有可用的 codearts*.json）", cfg.CodeartsAuthDir)
+		}
+	} else if cb != nil {
+		log.Printf("codearts: 未并入账号池（codearts.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// 注册表建好后校正默认上游：它必须与"裸模型名走谁"的唯一权威一致。
+	// 正常情况下就是 workbuddy（先注册），这里取 First() 是为了让
+	// "谁先注册谁当默认"这条规则在装配层只有一处定义。
+	if def, ok := registry.First(); ok {
+		p.SetDefaultProvider(def)
+	}
+
 	// 槽位定义在这里给出：核心只认识"有个叫 X 的槽位、配在 Y 点"，
 	// 不认识 checkin/keepalive 是什么业务 —— 那是 workbuddy 的事。
 	// 装配处（本文件）是唯一同时认识核心与上游的地方，翻译在这里发生。
@@ -320,8 +362,12 @@ func main() {
 		// 核心不再内置任何具体时点。缺失时 handler 回落到 now+1h。
 		NextResetAt: wb.NextResetAt,
 		// /v1/models 的 owned_by 由装配层注入（核心不再硬编码上游名）。
-		// 多上游落地后这里要改成按 provider 合并各自的目录。
+		// 多上游之后它是**默认上游**的 owned_by，其余上游按各自 ID 填。
 		OwnedBy: wb.ID(),
+		// 多上游路由：出口层只按 ID 问，不认识任何具体上游。
+		// 注册表 + 账号池在这一层合并成出口层要的那个小接口。
+		Provider:        registryRouter{reg: registry, p: p},
+		DefaultProvider: func() string { id, _ := registry.First(); return id }(),
 		Admin: admin.New(admin.Config{
 			Pool:     p,
 			Upstream: up,
