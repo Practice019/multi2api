@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"io"
+	"net/http/httptest"
 	"time"
 )
 
@@ -89,6 +90,7 @@ func RunProviderContract(t TB, factory func() Provider, opts ...ContractOption) 
 		verifyChatNoPanic(t, p, id, cfg)
 		verifyChatStreamClosable(t, p, id, cfg)
 		verifyChatRespectsCancel(t, p, id)
+		// 注：没有"Chat 是否真的送达上游"的检查 —— 见文件上方「已知局限」。
 	}
 }
 
@@ -215,6 +217,45 @@ func verifyAdminRoutes(t TB, ax AdminExt, caps Capability) {
 		}
 		seen[key] = true
 	}
+
+	// 实际调一次：handler 不能 panic。
+	//
+	// # 为什么必须真调（阶段 1 评审的 F2）
+	//
+	// 上面的检查只验**结构**：Method/Path/Handler 非 nil、无重复。
+	// 评审证明：一个声明 CapGrowth、路由的 handler 全是 `panic("boom")`
+	// 的实现**零报错通过** —— 结构是完美的，行为是崩溃的。
+	//
+	// 结构检查挡不住"能挂上去但一调就炸"，而后者是本契约要防的东西：
+	// 管理端点是给人点的，点一下就 500（甚至带崩进程）比 404 更糟。
+	//
+	// 用 httptest 造一个最小请求真调一次；只要求"不 panic"，
+	// 不要求业务正确（那需要真实凭证与账号，契约给不了）。
+	verifyAdminHandlersNoPanic(t, routes)
+}
+
+// verifyAdminHandlersNoPanic 逐条调用 handler，断言不 panic。
+//
+// 每条路由单独 recover：一个 panic 不该掩盖后面的路由是否也 panic。
+func verifyAdminHandlersNoPanic(t TB, routes []AdminRoute) {
+	for i, r := range routes {
+		if r.Handler == nil || r.Method == "" {
+			continue // 结构问题已在上面的检查里报过，这里不重复报
+		}
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					t.Errorf("AdminRoutes()[%d] 的 handler (%s %s) 调用时 panic: %v\n"+
+						"  挂得上去但一调就炸 —— 管理端点是给人点的，"+
+						"点一下就崩比 404 更糟", i, r.Method, r.Path, rec)
+				}
+			}()
+			req := httptest.NewRequest(r.Method, r.Path, nil)
+			req.RemoteAddr = "127.0.0.1:0" // 绕开"仅本机"校验，否则拿到 403 而非真实路径
+			rec := httptest.NewRecorder()
+			r.Handler(rec, req)
+		}()
+	}
 }
 
 // construct 在受保护的调用里构造 Provider，捕获 panic。
@@ -322,6 +363,32 @@ func verifyChatNoPanic(t TB, p Provider, id string, cfg contractConfig) {
 			"  要么返回真实 Status（哪怕非 2xx），要么返回 error。")
 	}
 }
+
+// ── 已知局限：契约**无法**证明"真的实现了"（评审 F1，未修，如实记录）──
+//
+// 阶段 1 评审构造了两个"零实现"的 Provider 并证明它们零报错通过：
+//
+//	noopProvider   —— Caps=CapChat，Chat 完全忽略 body，返回空 200 流
+//	cannedProvider —— 无论收到什么都返回 418
+//
+// 评审建议"加一条 Chat 对输入敏感的检查"。我实现了，但它**误伤了合法实现**：
+// 契约自带的好实现桩（`goodProvider`）同样返回固定 200 —— 桩与零实现在
+// 契约能观察到的信号上**无法区分**。
+//
+// 这不是"检查写得不够好"，而是**契约这个层次做不到**：
+//
+//	契约能证明的：接口完整、不 panic、资源不泄漏（流能 Close）、
+//	               ctx 取消被尊重、声明与实现自洽（能力位 ↔ 端点数）、
+//	               响应不是不可判断的空值。
+//	契约证明不了的：Chat 是否真的把请求送达了上游。
+//
+// 后者需要**真实凭证 + 真实上游**，因此由各上游自己的
+// `TestContractAgainstRealUpstream`（有 token 时跑）承担，不在契约里。
+//
+// 我选择**删掉那条检查**而不是留着它：一个会误报"合法实现不合格"的检查
+// 比没有检查更糟 —— 它逼着人为了让它变绿而弱化真实实现。
+// 这条局限写在这里，是为了让后来者知道这是**已知缺口**，不是遗漏。
+// ─────────────────────────────────────────────────────────────────
 
 // verifyChatStreamClosable 检查返回的流**能被 Close 且不报错**。
 //
