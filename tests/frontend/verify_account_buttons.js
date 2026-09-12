@@ -33,9 +33,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(d)); }).on('error', rej); }); }
 
 // 应当存在的（顺序也断言 —— 按钮顺序是设计决策）
-const EXPECTED = ['＋ 添加账号', '重载 auths 目录', '全部签到', '刷新全部积分'];
-// 应当**不存在**的（已删除，防回归）
-const FORBIDDEN = ['全部保活'];
+//
+// T10 之后：h2 上只剩"对整池生效"的两个。
+// 「＋ 添加账号」与「重载 auths」已移入**各上游分组行**（见下方分组断言）。
+const EXPECTED = ['全部签到', '刷新全部积分'];
+// 应当**不存在**的（已删除 / 已移走，防回归）
+const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
 
 (async () => {
   let fail = 0;
@@ -92,6 +95,41 @@ const FORBIDDEN = ['全部保活'];
     })()`);
     console.log('  账号行内「保活」按钮数: ' + inlineKeepalive);
     ok(inlineKeepalive > 0, '账号**行内**的「保活」仍在（' + inlineKeepalive + ' 个）—— 删的是顶部那个，不是这个');
+
+    // ---------------------------------------------------------------- T10：分组行动作
+    //
+    // 每个上游分组行都应带自己的动作按钮。判据：
+    //   · 有 data-greload 的按钮数 == 分组数（每个上游都能重载它的目录）
+    //   · 有 data-gadd 的上游 == manifest 里 login 非空的那些
+    //     （没有页内登录流程的上游**不该**有添加按钮 —— 那是个假按钮）
+    const grp = JSON.parse(await ev(`JSON.stringify((function(){
+      var out = { groups: 0, reload: 0, add: [], addProviders: [], groupsWithAdd: [] };
+      document.querySelectorAll('#accts tr.grouprow').forEach(function(tr){
+        out.groups++;
+        if (tr.querySelector('button[data-greload]')) out.reload++;
+        var a = tr.querySelector('button[data-gadd]');
+        if (a) { out.groupsWithAdd.push(a.dataset.gadd); out.addProviders.push(a.dataset.gadd); }
+      });
+      out.add = Array.from(document.querySelectorAll('#accts button[data-gadd]')).map(function(b){ return b.dataset.gadd; });
+      return out;
+    })())`));
+    console.log('  分组行: ' + grp.groups + ' 个；带重载按钮: ' + grp.reload + '；带添加按钮: ' + JSON.stringify(grp.add));
+
+    ok(grp.groups > 0, '账号池里有上游分组行（' + grp.groups + ' 个）');
+    ok(grp.reload === grp.groups,
+      '每个分组行都有「重载 auths」（' + grp.reload + '/' + grp.groups + '）');
+
+    // 有页内登录流程的上游才该有「＋ 添加账号」
+    const withLogin = JSON.parse(await ev(`JSON.stringify(
+      (window.__wb2api__.manifest().providers || [])
+        .filter(function(p){ return p && p.login && p.login.kind; })
+        .map(function(p){ return p.id; })
+    )`));
+    console.log('  manifest 里支持页内登录的上游: ' + JSON.stringify(withLogin));
+    const sameSet = JSON.stringify(grp.add.slice().sort()) === JSON.stringify(withLogin.slice().sort());
+    ok(sameSet,
+      '「＋ 添加账号」只出现在支持页内登录的上游上\n      界面: ' + JSON.stringify(grp.add) +
+      '\n      manifest: ' + JSON.stringify(withLogin));
 
     ws.close();
   } catch (e) { console.log('EXCEPTION: ' + e.message); fail++; }
