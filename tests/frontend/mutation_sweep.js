@@ -38,7 +38,7 @@ const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const HERE = __dirname;
 const REPO = path.resolve(HERE, '..', '..');
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = require('./chrome_path.js').resolveChrome();
 
 // 工作目录放系统临时目录（可移植）；可用 MUT_WORK 覆盖
 const WORK = process.env.MUT_WORK || path.join(os.tmpdir(), 'wb2api-mutsweep');

@@ -16,7 +16,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = require('./chrome_path.js').resolveChrome();
 const PORT = 9222;
 const URL_UNDER_TEST = process.env.NAV_TEST_URL || 'http://127.0.0.1:18099/ui';
 const DEBUG_DIR = require('os').tmpdir() + '/chrome-navprofile';  // 绝对路径（原为相对 cwd）

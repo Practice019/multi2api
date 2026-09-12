@@ -135,7 +135,7 @@ fs.writeFileSync(PROBE, page);
 //      同样按原顺序求值，TDZ / ReferenceError 一样会抛出来。
 // 两者都不可用才算失败，并把原因写清楚，避免"没跑却报通过"的假绿。
 // ---------------------------------------------------------------------------
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = require('./chrome_path.js').resolveChrome();
 
 // 先声明（runInNode 会引用它，const 有 TDZ —— 这里自己就不能踩同一个坑）
 const DOM_STUB = `

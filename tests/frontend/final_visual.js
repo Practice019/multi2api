@@ -12,7 +12,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = require('./chrome_path.js').resolveChrome();
 const PORT = 9240;
 const URL_UT = process.env.VISUAL_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = require('os').tmpdir() + '/chrome-finalvisual';  // 绝对路径（原为相对 cwd，跨目录执行会串台）
