@@ -448,27 +448,95 @@ func (h *AdminHandler) checkinEnabled() bool {
 //
 // 支持 offset/limit 分页，契约与 /admin/logs/history 一致：
 // 时间倒序（最新在前），total 是**过滤后**总数，前端据此算总页数。
+//
+// # 这是 T4 的「出口」收口点
+//
+// 历史文件是全进程共用的（`data/checkin-log.json`），条目里**只有 uid、没有 provider**，
+// 而这条端点的 manifest 归属是 `provider=workbuddy / capability=checkin` ——
+// 也就是说它的契约是"workbuddy 的签到历史"，返回别家上游的记录是**它自己违约**。
+//
+// 实测（2026-09-13，18080 实例）：全量 5000 条里有 769 条 uid 是 `01a08fe0`
+// （codearts 账号），kind 分布 checkin 658 / keepalive 110 / credits 1。
+// 成因是 T1 修好的那个 bug —— 调度器原先按**全池**取号（`Pool.List()`），
+// 把别家上游的账号也跑了签到。T1 修掉的是**入口**（不再产生新的），
+// 但历史文件里的旧记录仍在，所以必须在**出口**再收一次口。
+//
+// # 为什么判据是"是否属于本上游"，以及为什么它等价于"在不在账号池里"
+//
+// 归属判据只有一份 —— `ownUIDs()`（→ `Pool.ListFor(Provider)`），
+// 与签到/保活/旅行/成长的所有路径用的是同一个。**不在池里**与**属于别家**
+// 在这里是同一件事的两种说法：池子只装已配置的账号，一个 uid 不在其中，
+// 就说明它不属于本上游（可能属于别家上游，也可能已被移出池子）——
+// 两种情况都不该出现在本上游的历史面板里。
+//
+// 这是一个**决定**，不是副作用：它会让"账号被移出池子后，它的历史也一并不可见"。
+// 那样是对的 —— 面板要回答的是"我这些账号干了什么"，不是"这个进程见过什么"。
+//
+// 池未接线时 ownUIDs() 返回 nil（语义是"不过滤"），与本文件 accountList()
+// 的降级一致：那种部署下本来就取不到任何账号。
 func (h *AdminHandler) History(w http.ResponseWriter, r *http.Request) {
-	lg := h.log()
-	if lg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "total": 0})
-		return
-	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
 		limit = checkinlog.DefaultPageSize
+	}
+	if limit > checkinlog.MaxPageSize {
+		limit = checkinlog.MaxPageSize
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if offset < 0 {
 		offset = 0
 	}
-	items, total := lg.Page(offset, limit, r.URL.Query().Get("kind"))
+	kind := r.URL.Query().Get("kind")
+
+	lg := h.log()
+	if lg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items": []any{}, "total": 0, "offset": offset, "limit": limit,
+		})
+		return
+	}
+
+	// 过滤必须在**分页之前**做：先切页再过滤会让 total 算成过滤前的数，
+	// 前端据此算出的页数指向不存在的页（末页空、页码跳）。
+	recs := lg.PageAll()
+	own := h.ownUIDs()
+	filtered := make([]checkinlog.Record, 0, len(recs))
+	for _, rec := range recs {
+		if own != nil && !own[rec.UID] {
+			continue
+		}
+		if kind != "" && rec.Kind != kind {
+			continue
+		}
+		filtered = append(filtered, rec)
+	}
+	// filtered 是时间正序（PageAll 保序 + 上面的遍历不改顺序），倒序即最新在前。
+	// 倒数第 offset+k 条落在下标 `len(filtered)-1-offset-k`，越界即该页已到尾。
+	//
+	// 用下标算而不是 `continue` 跳过：后者在 offset 很大时要空转整个切片，
+	// 而且"跳过的条件"写反了不会报错，只会安静地返回错位的一页。
+	total := len(filtered)
+	items := make([]checkinlog.Record, 0, limit)
+	for i := total - 1 - offset; i >= 0 && len(items) < limit; i-- {
+		items = append(items, filtered[i])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":  items,
 		"total":  total,
 		"offset": offset,
 		"limit":  limit,
 	})
+}
+
+// ownUIDs 本上游账号的 uid 集合；池未接线时返回 nil（语义是"不过滤"）。
+//
+// 转发到 Provider.ownUIDs() 而不是在这里重新问池：归属判据只有一处定义，
+// 复制一份就会漂移（见 Provider.ownAccounts 的注释）。
+func (h *AdminHandler) ownUIDs() map[string]bool {
+	if h.p == nil {
+		return nil
+	}
+	return h.p.ownUIDs()
 }
 
 // log 取历史日志（未接线时返回 nil）。

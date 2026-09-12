@@ -58,6 +58,7 @@ const PROBES = [
   'audit_tracked_content.js',  // 被跟踪内容审计：密钥/绝对路径/内网/手机/邮箱
   'audit_dead_buttons.js',      // 静态死按钮扫描：id 是否有事件绑定
   'audit_crlf_sensitivity.js',   // CRLF 敏感写法：只报真危险，附安全理由
+  'verify_t3_t4_static.js',      // T3+T4 的静态守卫：面板归属属性 / 能力位未被抹掉
 ];
 
 function run(file) {
