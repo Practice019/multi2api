@@ -35,8 +35,30 @@ node tests/frontend/run_e2e.js http://127.0.0.1:18080/ui
 3. **测量工具本身必须先被验证** —— 变异测试是标准做法：
    把已知会破坏功能的改动注入副本，确认对应套件**真的会红**
 
+## 变异扫描（验证"守卫是否真的有效"）
+
+```bash
+node mutation_sweep.js --self-test   # 只自检扫描器本身
+node mutation_sweep.js static        # 静态组（快，不需要浏览器）
+node mutation_sweep.js e2e           # E2E 组（需要 Chrome + 可访问的实例）
+```
+
+当前状态：**15 个变异全部被抓住，0 存活**。
+
+判读结果时注意——**"存活"有三种含义，必须人工区分**：
+
+| 含义 | 处置 |
+|---|---|
+| A. 测试真的有洞 | 补断言 |
+| B. 变异无效（改了但行为没变） | 换一个真正影响行为的注入 |
+| C. 环境不可观测（如新实例日志为空） | **不能算缺陷** |
+
+三种都真实发生过，混为一谈会得出错误结论。
+
 ## 已知的环境限制
 
 - `go test -race` 在本机跑不了（无 C 编译器）。并发正确性由
   `internal/pool/concurrency_norace_test.go` 的不变式断言部分覆盖。
 - 需要真实凭证的用例（codearts 的 `*Live`）会自动 skip。
+- E2E 需要 Chrome 位于 `C:\Program Files\Google\Chrome\Application\chrome.exe`
+  （各套件顶部的 `CHROME` 常量；换机器需按实际路径调整）。
