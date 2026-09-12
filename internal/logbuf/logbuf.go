@@ -27,15 +27,24 @@ const DefaultCapacity = 2000
 //   - 这些字段是按请求累加的量（credit 是消费额度、其余是 token 计数），
 //     永远不会是负数；解析层已保证非负。
 type Entry struct {
-	Seq     int64     `json:"seq"`
-	At      time.Time `json:"at"`
-	Model   string    `json:"model"`
-	Mode    string    `json:"mode"`   // stream | sync
-	Status  int       `json:"status"` // 对客户端返回的状态码
-	UID     string    `json:"uid"`    // 完整 uid，展示层自行截断
-	TTFBMS  int64     `json:"ttfb_ms"`
-	Tokens  int       `json:"tokens"` // -1 表示 usage 缺失
-	TotalMS int64     `json:"total_ms"`
+	Seq    int64     `json:"seq"`
+	At     time.Time `json:"at"`
+	Model  string    `json:"model"`
+	Mode   string    `json:"mode"`   // stream | sync
+	Status int       `json:"status"` // 对客户端返回的状态码
+	UID    string    `json:"uid"`    // 完整 uid，展示层自行截断
+	// Provider 本次请求走的上游标识（与 gateway.Provider.ID() 对应）。
+	//
+	// 加它只花一个字段：统计按上游分组（/admin/stats 的 by_provider）是
+	// one-api 社区的实证教训（"先把观测建好"）。不带这一维时，
+	// 两个上游的调用次数与消耗混在一个数里，面板无法归因。
+	//
+	// 向后兼容：历史日志行没有这个键，反序列化得空串，
+	// 读侧按"未标注"处理即可，不需要兼容分支。
+	Provider string `json:"provider,omitempty"`
+	TTFBMS   int64  `json:"ttfb_ms"`
+	Tokens   int    `json:"tokens"` // -1 表示 usage 缺失
+	TotalMS  int64  `json:"total_ms"`
 
 	Credit          float64 `json:"credit"`            // 本次请求实际消耗的额度
 	ThinkTokens     int     `json:"think_tokens"`      // 推理（思维链）token 数
