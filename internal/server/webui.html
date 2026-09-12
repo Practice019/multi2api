@@ -457,7 +457,36 @@
       <button id="btnReload" style="padding:3px 10px;font-size:12px">重载 auths 目录</button>
       <button id="btnAllCheckin" style="padding:3px 10px;font-size:12px">全部签到</button>
       <button id="btnAllCredits" style="padding:3px 10px;font-size:12px">刷新全部积分</button>
-      <button id="btnAllKeepalive" style="padding:3px 10px;font-size:12px">全部保活</button>
+      <!--
+        原先这里还有一个「全部保活」按钮，已删除（用户决定）。
+
+        # 为什么删：它与自动调度做的是**同一件事**
+
+        `POST /admin/keepalive`（不带 uid）内部就是遍历账号逐个
+        `RunKeepaliveFor(uid, "manual")`；而自动保活槽走的是同一个函数，
+        唯一差别是标签（"manual" vs "auto"）。自动保活**默认开启**
+        （`schedule.keepalive_enabled` 缺省 true），到 `keepalive_hours`
+        （默认 22 点）就会对每个账号跑一遍。
+
+        所以点「全部保活」= 让它们**提前**跑一遍。而 token 保活刷的是
+        有有效期的凭证，**提前几小时刷没有收益** —— 不是"越刷越安全"。
+
+        # 它唯一真实的用途已经被更好的东西覆盖了
+
+        "刚加完账号想确认 token 有效" —— 账号行的 TOKEN 胶囊
+        （`59d` 那种）直接显示剩余有效期，比事后点一次更有信息量。
+
+        # 行内的「保活」为什么保留
+
+        行内那个是**排障动作**：某个号的 TOKEN 显示 `—` 或快过期时，
+        点一下能**同步**拿到这个账号的结果（成功/失败 + 原因），
+        不用等定时任务。而「全部保活」走后台任务，只回"已启动"。
+
+        # 后端接口没删
+
+        `POST /admin/keepalive`（不带 uid）的能力保留 —— 只移除界面入口。
+        将来可能有别的调用方（脚本、其它界面）。
+      -->
     </h2>
     <div class="body" style="padding:0">
       <table><thead><tr>
@@ -4203,7 +4232,9 @@
     }, { label: '重载 auths', busyText: '重载中…' });
     $('btnAllCheckin').onclick = () => startAll('checkin');
     $('btnAllCredits').onclick = () => startAll('credits');
-    $('btnAllKeepalive').onclick = () => startAll('keepalive');
+    // 「全部保活」按钮已删除（用户决定）—— 理由见 HTML 里那段注释：
+    // 它与自动保活槽调用**同一个函数**，提前跑没有收益；
+    // 行内的「保活」保留（那是同步返回结果、可定位问题的排障动作）。
 
     // 猫猫旅行：只保留「动作」按钮（派猫/领奖/刷新），开关类一律归「设置」
     $('travelRows').addEventListener('click', ev => {
