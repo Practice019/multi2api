@@ -19,6 +19,21 @@ type Config struct {
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 
+	// ServiceName 网关身份标识（顶栏标题、/healthz 的 service 字段与
+	// X-Service 头都用它）。空 = 用 server.ServiceName 的编译期默认值。
+	//
+	// # 为什么改成可配置（T8 / 评审 F5）
+	//
+	// 原先它是编译期常量。那有两个问题：
+	//  1. 控制台里显示的"服务名"是**前端硬编码**的字符串（3 处），
+	//     后端改了名前端不会跟着变 —— 那就是 B8；
+	//  2. 部署多个实例（如本机同时跑实验版与原版）时，
+	//     宿主靠 X-Service 区分"是不是同一个服务"的能力失效 ——
+	//     两个实例报同一个名字，探活认不出谁是谁。
+	//
+	// 由配置给出后，顶栏从 /admin/ui/manifest 读它，前端不再硬编码。
+	ServiceName string `json:"service_name"`
+
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
 		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
@@ -479,6 +494,20 @@ func boolOr(p *bool, def bool) bool {
 		return def
 	}
 	return *p
+}
+
+// firstNonEmpty 返回第一个非空字符串；全空时返回空串。
+//
+// 用于"配置可覆盖、缺省回落编译期常量"这类场景 ——
+// 关键是把它写成显式的一次调用，而不是在各处散落 `if x != ""`，
+// 否则迟早有一处忘了判空，表现为界面上出现一个空白的服务名。
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // validateScheduleHours 校验排程小时落在 0-23。

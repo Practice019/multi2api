@@ -33,7 +33,17 @@ type Config struct {
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
 	RedisMode    string
 	SoftCooldown time.Duration // 429 冷却，默认 60s
-	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// RefreshSkew token 提前刷新窗口，默认 10m
+	RefreshSkew time.Duration
+
+	// ServiceName 本实例的身份标识；空 = 回落包级默认常量 ServiceName。
+	//
+	// # 为什么要可配置（T8 / 评审 F5）
+	//
+	// 原先它是编译期常量，于是控制台顶栏那个"服务名"是**前端硬编码**的
+	// （3 处），后端改名前端不跟随 —— 那就是 B8。
+	// 多实例部署时同名的另一个后果是宿主认不出"这是不是我管的那一个"。
+	ServiceName string
 
 	// NextResetAt 返回"额度耗尽的账号下次可用的时刻"。
 	//
@@ -192,12 +202,24 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusServiceUnavailable
 	}
 	// 恒无鉴权（负载均衡/编排探活只需 2xx/503 语义），身份靠 service 字段 + X-Service 头双保险。
-	w.Header().Set("X-Service", ServiceName)
+	svc := h.serviceName()
+	w.Header().Set("X-Service", svc)
 	writeJSON(w, status, map[string]any{
 		"healthy": healthy,
 		"total":   total,
-		"service": ServiceName,
+		"service": svc,
 	})
+}
+
+// serviceName 返回本实例的身份标识。
+//
+// 优先用配置里显式给的值（见 cmd/server.Config.ServiceName），
+// 空则回落编译期默认值 —— 老配置无需任何改动即可继续工作。
+func (h *Handler) serviceName() string {
+	if h.cfg.ServiceName != "" {
+		return h.cfg.ServiceName
+	}
+	return ServiceName
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
