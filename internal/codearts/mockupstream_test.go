@@ -2,6 +2,7 @@ package codearts
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,33 +40,32 @@ func newMockClient(t *testing.T, engineH, stsH http.HandlerFunc) (*Client, func(
 
 // TestVerifyMapsUpstreamErrors 上游各种状态码必须映射成**可区分**的错误。
 //
-// 如果所有失败都变成同一个 err，运维就无法判断
-// "是凭证过期要重新登录"还是"上游挂了要等"——那两种应对完全不同。
+// # 断言的是 ErrKind，不是错误字符串
 //
-// # 关于 200 的语义（我先写错过一次）
+// 我先只断言"错误信息里含 401"这类字符串。**那挡不住真正的回归**：
+// 变异测试（把 `Classify(resp.StatusCode, ...)` 改成 `Classify(500, ...)`，
+// 即丢掉分类能力）之后，字符串里照样有 "http 401"（因为 Msg 里带了原文），
+// 测试**全绿** —— 又是一次"验证书写形式而非本体"。
 //
-// 我最初还断言"200 + 非法 JSON / 空 body 应当失败"。实测 `Verify` 只看状态码，
-// 不解析 body。查完全仓调用方后确认这是**合理契约**：
-// `Verify` 在生产代码里**没有任何调用方**（只有测试与 live_check 用），
-// 它的定位是"凭证是否被上游接受"的探活 —— 200 即代表接受。
-// 所以本测试不对 200 的 body 形态提要求：那是把"我以为的契约"
-// 当成"实际契约"，属于假阳性（本项目已多次栽在这上面）。
+// 改成断言 `*Error.Kind` 这个**枚举**，因为上层正是靠它决定
+// "换号重试"（ErrAuth/ErrSoftRate）还是"等上游恢复"（ErrServer）
+// 还是"换号也没用"（ErrClient/ErrHardCredit）。
 func TestVerifyMapsUpstreamErrors(t *testing.T) {
 	cases := []struct {
-		name       string
-		status     int
-		body       string
-		wantSubstr string
-		wantErr    bool
+		name     string
+		status   int
+		body     string
+		wantKind ErrKind
+		wantErr  bool
 	}{
-		{"401 凭证失效", http.StatusUnauthorized, `{"error_msg":"token expired"}`, "401", true},
-		{"403 无权限", http.StatusForbidden, `{"error_msg":"forbidden"}`, "403", true},
-		{"429 限流", http.StatusTooManyRequests, `{"error_msg":"rate limited"}`, "429", true},
-		{"500 上游错误", http.StatusInternalServerError, `oops`, "500", true},
-		{"502 网关错误", http.StatusBadGateway, `<html>bad gateway</html>`, "502", true},
+		{"401 凭证失效", http.StatusUnauthorized, `{"error_msg":"token expired"}`, ErrAuth, true},
+		{"403 无权限", http.StatusForbidden, `{"error_msg":"forbidden"}`, ErrAuth, true},
+		{"429 限流", http.StatusTooManyRequests, `{"error_msg":"rate limited"}`, ErrSoftRate, true},
+		{"500 上游错误", http.StatusInternalServerError, `oops`, ErrServer, true},
+		{"502 网关错误", http.StatusBadGateway, `<html>bad gateway</html>`, ErrServer, true},
 		// 200 一律视为"上游接受了凭证"，不论 body 是什么（见上方说明）
-		{"200 非法 JSON（仍视为接受）", http.StatusOK, `not-json`, "", false},
-		{"200 空 body（仍视为接受）", http.StatusOK, ``, "", false},
+		{"200 非法 JSON（仍视为接受）", http.StatusOK, `not-json`, ErrNone, false},
+		{"200 空 body（仍视为接受）", http.StatusOK, ``, ErrNone, false},
 	}
 
 	for _, tc := range cases {
@@ -85,13 +85,26 @@ func TestVerifyMapsUpstreamErrors(t *testing.T) {
 			if tc.wantErr && err == nil {
 				t.Fatalf("上游返回 %d，Verify 却成功了 —— 调用方会误以为凭证有效", tc.status)
 			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("上游返回 %d，Verify 却失败: %v", tc.status, err)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("上游返回 %d，Verify 却失败: %v", tc.status, err)
+				}
+				return
 			}
-			if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-				t.Errorf("错误信息应含 %q（便于运维区分），实际: %v", tc.wantSubstr, err)
+
+			// 必须是带 Kind 的类型化错误（调用方靠 Kind 分流）
+			var ce *Error
+			if !errors.As(err, &ce) {
+				t.Fatalf("错误不是 *Error 类型，调用方无法按 Kind 分流: %T %v", err, err)
 			}
-			t.Logf("  %d → err=%v", tc.status, err)
+			if ce.Kind != tc.wantKind {
+				t.Errorf("ErrKind 不符：http %d 应分类为 %v，实际 %v（分类错误会让上层选错处置策略）",
+					tc.status, tc.wantKind, ce.Kind)
+			}
+			if ce.Status != tc.status {
+				t.Errorf("Status 未原样带出：上游 %d，实际 %d", tc.status, ce.Status)
+			}
+			t.Logf("  %d → Kind=%v Status=%d", tc.status, ce.Kind, ce.Status)
 		})
 	}
 }
