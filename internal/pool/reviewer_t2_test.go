@@ -231,6 +231,98 @@ func TestReviewerF4_UnknownQuotaIsSelectable(t *testing.T) {
 	}
 }
 
+// TestReviewerCP0_F6_PickForModelAvoidsWrongAccount 选号必须按**请求的模型**取额度。
+//
+// 阶段 0 评审的 F6：`EffectiveFor` 当时**零生产调用方** ——
+// 按模型额度被存下来却从不参与路由，于是 Task 2 的核心收益是空的。
+//
+// 评审给的反例（这里固化为测试）：
+//
+//	账号 X = {gpt-5.5: 1000}      标量 Effective = 1000
+//	账号 Y = {other: 999999}      标量 Effective = 999999
+//
+// 请求 gpt-5.5 时旧口径会优先选 Y —— 一个对该模型**零额度**的账号。
+func TestReviewerCP0_F6_PickForModelAvoidsWrongAccount(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "X"})
+	p.Add(&auth.Auth{UID: "Y"})
+	p.SetQuota("X", QuotaView{
+		Kind:    QuotaKindPerModel,
+		ByModel: map[string]int64{"gpt-5.5": 1000},
+		HasData: true,
+	})
+	p.SetQuota("Y", QuotaView{
+		Kind:    QuotaKindPerModel,
+		ByModel: map[string]int64{"other": 999999},
+		HasData: true,
+	})
+
+	// 旧口径（无模型上下文）：Y 标量大得多 → 被偏爱（这就是缺陷）
+	oldPick := map[string]int{}
+	for i := 0; i < 300; i++ {
+		if a := p.Pick(); a != nil {
+			oldPick[a.UID]++
+		}
+	}
+	if oldPick["Y"] <= oldPick["X"] {
+		t.Fatalf("前置不成立：无模型上下文时 Y 应因标量大而被偏爱（X=%d Y=%d）",
+			oldPick["X"], oldPick["Y"])
+	}
+	t.Logf("无模型上下文: X=%d Y=%d（Y 被偏爱 —— 这正是缺陷）", oldPick["X"], oldPick["Y"])
+
+	// 新口径：按请求的模型取额度 → gpt-5.5 只有 X 可用，必须全选 X
+	newPick := map[string]int{}
+	for i := 0; i < 300; i++ {
+		if a := p.PickForModel("gpt-5.5", nil); a != nil {
+			newPick[a.UID]++
+		}
+	}
+	if newPick["Y"] != 0 {
+		t.Errorf("请求 gpt-5.5 时不该选中 Y（它对 gpt-5.5 零额度），Y 被选了 %d 次", newPick["Y"])
+	}
+	if newPick["X"] != 300 {
+		t.Errorf("请求 gpt-5.5 时应全部选 X，实际 X=%d Y=%d", newPick["X"], newPick["Y"])
+	}
+}
+
+// TestPickForModelFallsBackWhenModelUnknown 未知模型不该把所有人排除掉。
+func TestPickForModelFallsBackWhenModelUnknown(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "A"})
+	p.SetQuota("A", QuotaView{
+		Kind:    QuotaKindPerModel,
+		ByModel: map[string]int64{"known": 100},
+		HasData: true,
+	})
+	for i := 0; i < 20; i++ {
+		if a := p.PickForModel("unknown-model", nil); a == nil {
+			t.Fatal("未知模型时不该返回 nil —— 会让请求直接失败")
+		}
+	}
+}
+
+// credits 形态（workbuddy）下 PickForModel 与 Pick 行为一致（不分模型）。
+func TestPickForModelCreditsSameAsPick(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "hi"})
+	p.Add(&auth.Auth{UID: "lo"})
+	p.SetCredits("hi", 1000)
+	p.SetCredits("lo", 10)
+
+	byModel := map[string]int{}
+	for i := 0; i < 200; i++ {
+		if a := p.PickForModel("任意模型", nil); a != nil {
+			byModel[a.UID]++
+		}
+	}
+	if byModel["hi"] <= byModel["lo"] {
+		t.Errorf("credits 形态下高额度账号应更常被选: hi=%d lo=%d", byModel["hi"], byModel["lo"])
+	}
+}
+
 // 复现评审 F7（新增 nit）：Status.Quota 把内部 map 直接递出去。
 func TestReviewerF7_QuotaMapMustBeCopied(t *testing.T) {
 	p := New("")

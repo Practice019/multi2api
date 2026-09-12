@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/session"
@@ -492,9 +493,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var peek struct {
-		Stream bool `json:"stream"`
+		Stream bool   `json:"stream"`
+		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// 选号要按**请求的模型**取额度（见 pool.PickForModel）。
+	//
+	// 为什么在这里做而不是只在池内：只有出口层知道客户端要哪个模型。
+	// 按模型额度的上游（codearts）里，一个账号可能对 gpt-5.5 零额度、
+	// 对别的模型额度很高 —— 用标量选号会优先选中它，然后白跑一次。
+	//
+	// 剥掉 provider 前缀（"workbuddy/auto" → "auto"）：额度表按上游模型名建，
+	// 前缀是网关的路由记号，不属于上游模型名。
+	reqModel := peek.Model
+	if _, m, hasPrefix := gateway.SplitModel(reqModel); hasPrefix {
+		reqModel = m
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
@@ -549,7 +564,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if acct == nil {
-			acct = h.cfg.Pool.PickExcluding(tried)
+			acct = h.cfg.Pool.PickForModel(reqModel, tried)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
