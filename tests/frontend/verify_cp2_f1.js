@@ -9,7 +9,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = require('./chrome_path.js').resolveChrome();
 const PORT = 9229;
 const URL_UNDER_TEST = process.env.F1_TEST_URL || 'http://127.0.0.1:18099/ui';
 const PROFILE = require('os').tmpdir() + '/chrome-f1profile';  // 绝对路径（原为相对 cwd，跨目录执行会串台）

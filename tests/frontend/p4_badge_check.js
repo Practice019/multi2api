@@ -17,7 +17,7 @@ const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
 
-const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const CHROME = require('./chrome_path.js').resolveChrome();
 const PORT = 9251;
 const URL_UT = process.env.P4_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = require('os').tmpdir() + '/chrome-p4';  // 绝对路径（原为相对 cwd，跨目录执行会串台）
