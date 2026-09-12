@@ -107,6 +107,25 @@ type Config struct {
 	Scheduler SchedulerView
 	// TaskSlot 全量任务槽，供 /admin/task 使用。nil = 返回空快照。
 	TaskSlot TaskSlot
+
+	// DefaultProvider 缺省上游标识（裸模型名走它）。
+	//
+	// 用于 /admin/providers 标出哪个是默认 —— 前端据此把它的模型
+	// 以**裸名**展示（其余上游带前缀）。空串 = 没有默认。
+	DefaultProvider string
+
+	// ReloadProvider `AuthDir` 里的凭证**属于哪个上游**。
+	//
+	// # 为什么必须显式配置（评审 F3）
+	//
+	// 早先 reload 调裸 `SyncToDir`，它归一成"当前默认上游"。那在本部署里
+	// 碰巧正确 —— AuthDir 只装 workbuddy 凭证，而 workbuddy 恰好是第一个注册的。
+	// 评审证明：一旦默认上游不是 workbuddy，同一个 reload 会
+	// **扫描 workbuddy 文件却按别的域剔除**，把那个上游的账号全删掉并落盘。
+	//
+	// 所以域由配置给出。空串时回落 DefaultProvider（兼容旧装配），但会记日志 ——
+	// **静默回落正是这个 bug 当初能藏住的原因**。
+	ReloadProvider string
 }
 
 // SchedulerView 核心调度器在本包看来是什么样（只保留 /admin/schedule 读的字段）。
@@ -191,6 +210,13 @@ func New(cfg Config) *Handler {
 	// 上游即便声明同名路由也无法覆盖（见 mountUpstreamRoutes 的冲突规则）。
 	h.register("GET /admin/schedule", h.schedule)
 	h.register("GET /admin/task", h.taskStatus)
+
+	// 已注册上游清单 + 能力位（Task 8）。
+	//
+	// 前端按它渲染：账号池按上游分组、入口按**能力位**显隐。
+	// 能力位由后端下发而不是前端硬编码 —— 否则加第三个上游还要改前端，
+	// 那正是判据 1（加新上游核心零改动）要避免的。
+	h.register("GET /admin/providers", h.providers)
 
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
 	// 所以冲突时以先注册的为准（见 mountUpstreamRoutes）。
@@ -389,19 +415,52 @@ func (h *Handler) accounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// reloadProvider `AuthDir` 所属的上游标识。
+//
+// 配置了就用配置的；没配置回落默认上游，但**记一条日志** ——
+// 静默回落正是"reload 按错误域剔除账号"这个 bug 当初能藏住的原因。
+func (h *Handler) reloadProvider() string {
+	if h.cfg.ReloadProvider != "" {
+		return h.cfg.ReloadProvider
+	}
+	log.Printf("admin: 未配置 ReloadProvider，回落到默认上游 %q —— "+
+		"多上游部署下应显式配置，否则可能按错误的域剔除账号", h.cfg.DefaultProvider)
+	return h.cfg.DefaultProvider
+}
+
 // accountsReload 重新扫描 auths 目录并对齐池（手工拷入凭证后无需重启网关）。
+//
+// # ⚠ 必须显式指定**这个目录属于哪个上游**
+//
+// 早先这里调的是裸 `SyncToDir(auths)`，它归一成"**当前默认上游**"。
+// 那个语义在本部署里"碰巧"正确 —— 因为 `h.cfg.AuthDir` 只装 workbuddy 凭证，
+// 而 workbuddy 恰好是第一个注册的（于是也是默认）。
+//
+// 评审证明了这是个**潜在 bug**：一旦默认上游变成 codearts（改注册顺序、
+// 或将来有第三个上游先注册），同一个 reload 调用会：
+//
+//	扫描的是 workbuddy 文件（`auth.LoadDir` 只 glob workbuddy*.json）
+//	却按 codearts 的域去剔除 → **把 codearts 账号全部删掉并落盘**。
+//
+// 所以域必须由配置显式给出，不能依赖"谁是默认"。
+// 缺省回落到 DefaultProvider 只为兼容旧装配（并会在日志里留痕）。
 func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 	auths, err := auth.LoadDir(h.cfg.AuthDir)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取 auths 目录失败: "+err.Error())
 		return
 	}
+	// ReloadProvider 是本目录所属的上游；空则回落默认上游，并明确记日志 ——
+	// 静默回落正是这个 bug 当初能藏住的原因。
+	provider := h.reloadProvider()
+
 	before := len(h.cfg.Pool.List())
-	h.cfg.Pool.SyncToDir(auths)
+	h.cfg.Pool.SyncToDirFor(provider, auths)
 	after := len(h.cfg.Pool.List())
-	log.Printf("admin: reload auths dir=%s scanned=%d pool %d -> %d", h.cfg.AuthDir, len(auths), before, after)
+	log.Printf("admin: reload auths dir=%s provider=%s scanned=%d pool %d -> %d",
+		h.cfg.AuthDir, provider, len(auths), before, after)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"scanned": len(auths), "before": before, "after": after,
+		"scanned": len(auths), "before": before, "after": after, "provider": provider,
 	})
 }
 
@@ -524,12 +583,16 @@ func (h *Handler) loginPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 落盘后重扫目录对齐池：新账号立即参与选号，无需重启。
+	//
+	// ⚠ 与 accountsReload 同一个坑：必须显式指定域。
+	// 这里落盘的凭证进的是 `h.cfg.AuthDir`，那属于 ReloadProvider ——
+	// 用裸 SyncToDir（=当前默认上游）在默认上游不是它时会**误删**。
 	auths, lerr := auth.LoadDir(h.cfg.AuthDir)
 	if lerr != nil {
 		writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+lerr.Error())
 		return
 	}
-	h.cfg.Pool.SyncToDir(auths)
+	h.cfg.Pool.SyncToDirFor(h.reloadProvider(), auths)
 	log.Printf("admin: oauth 成功 uid=%s nick=%s file=%s", cred.UID, cred.Nickname, filepath.Base(path))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":        "ok",

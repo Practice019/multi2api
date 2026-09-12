@@ -263,8 +263,12 @@ func main() {
 	// 注册表建好后校正默认上游：它必须与"裸模型名走谁"的唯一权威一致。
 	// 正常情况下就是 workbuddy（先注册），这里取 First() 是为了让
 	// "谁先注册谁当默认"这条规则在装配层只有一处定义。
-	if def, ok := registry.First(); ok {
-		p.SetDefaultProvider(def)
+	//
+	// 记进 defProvider 而不是只在 if 里用：/admin/providers 也要标出默认上游，
+	// 两处必须取**同一个值**，否则前端显示的默认与实际的默认会不一致。
+	defProvider, _ := registry.First()
+	if defProvider != "" {
+		p.SetDefaultProvider(defProvider)
 	}
 
 	// 槽位定义在这里给出：核心只认识"有个叫 X 的槽位、配在 Y 点"，
@@ -385,6 +389,15 @@ func main() {
 			// "同一时刻只允许一个全量任务"是进程级语义，不分上游。
 			Scheduler: adminSchedulerAdapter{sch},
 			TaskSlot:  adminTaskSlotAdapter{sharedTaskSlot},
+			// 缺省上游：/admin/providers 标出它，前端据此把它的模型按**裸名**展示
+			//（其余上游带前缀）。裸名向后兼容是硬要求，所以这个值必须与
+			// 出口层实际用的缺省上游一致。
+			DefaultProvider: defProvider,
+			// `AuthDir` 里的凭证属于 workbuddy（`auth.LoadDir` 只 glob
+			// `workbuddy*.json`）—— 必须**显式**声明，不能让 reload 靠
+			// "谁是默认上游"去猜。评审 F3：那在本部署里碰巧正确
+			//（workbuddy 恰好第一个注册），但默认上游一变就会误删别的上游账号。
+			ReloadProvider: workbuddy.ProviderID,
 			// 注册表：admin 遍历它，把每个上游通过 AdminExt 声明的管理端点挂上来。
 			// Task 3c 之后 22 个 workbuddy 端点就是这样挂的 ——
 			// 加新上游时 admin 包零改动（判据 1）。
