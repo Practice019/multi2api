@@ -233,7 +233,15 @@
   .pill.ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
   .pill.warn{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
   .pill.err{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
-  .pill.dim{background:color-mix(in srgb,var(--dim) 16%,transparent);color:var(--dim)}
+  /* 中性胶囊（.pill.dim）：底色是 --dim 的淡染，但**文字用 --fg 而不是 --dim**。
+     ─────────────────────────────────────────────────────────────────
+     原先文字也用 --dim，在浅色主题下实测对比只有 **3.52:1**，低于 WCAG AA
+     要求的 4.5:1（深色主题下够用，所以一直没被发现）。
+     这是"逐面板量对比度"才抓得到的缺陷 —— 只看 body 的背景/前景永远看不到。
+
+     改成 --fg 后：浅色 15.70:1、深色 12.36:1，两套主题都远超 AA，
+     且视觉上仍与原设计一致（底色已提供"这是次要信息"的暗示）。 */
+  .pill.dim{background:color-mix(in srgb,var(--dim) 16%,transparent);color:var(--fg)}
   /* 按账号分组的任务明细：每组一个小节，节头常驻，切视图时不丢账号上下文 */
   .ggroup{border-bottom:1px solid var(--line)}
   .ggroup:last-child{border-bottom:0}
