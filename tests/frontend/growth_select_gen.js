@@ -1,6 +1,10 @@
 
 const fs = require('fs');
-const KEY = '__REDACTED_LEAKED_KEY__';
+// ⚠ 密钥**绝不**写进源码。此前这份文件里直接写了一串真实 api_key，
+// 随测试套件一起提交进了版本库（被 acceptance.js 的密钥扫描抓到）。
+// 现在从环境变量取；未设置时用一个明显无效的占位值 ——
+// 断言不依赖密钥的真实性（它只测渲染逻辑）。
+const KEY = process.env.WB2API_KEY || 'test-key-not-real';
 let growthSnaps = [], growthUID = '', growthView = 'acceptable', growthViewPicked = false;
 let clientStatus = null;
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -13,10 +17,25 @@ function resetEls() {
 }
 resetEls();
 const $ = id => elements[id];
-// 本机登录状态由测试按需注入（见各断言），这里不真连后端。
+// 本机登录状态由**合成夹具**提供，不请求任何在跑的实例。
+//
+// 原实现是 fetch('http://127.0.0.1:7863/admin/client-login') —— 7863 是
+// 用户的生产网关：测试会在别人机器上失败，并把真实账号名带进断言输出。
+//
+// 字段形状按 clientLoginHTML 的真实契约：
+//   enabled / current{uid,nickname} / client_running / candidates[]{uid,valid,current}
 async function fetchClientStatus() {
-  const r = await fetch('http://127.0.0.1:7863/admin/client-login', { headers: { Authorization: 'Bearer ' + KEY } });
-  return r.json();
+  return {
+    enabled: true,
+    current: { uid: 'test-uid-0002', nickname: '测试账号乙' },
+    client_running: false,
+    has_backup: false,
+    candidates: [
+      { uid: 'test-uid-0001', nickname: '测试账号甲', valid: true, current: false },
+      { uid: 'test-uid-0002', nickname: '测试账号乙', valid: true, current: true },
+      { uid: 'test-uid-0003', nickname: '测试账号丙', valid: true, current: false },
+    ],
+  };
 }
 
 const GROWTH_VIEWS = {
@@ -243,10 +262,71 @@ function renderGrowthGroups() {
     </div>`;
   }
 
+// ---------------------------------------------------------------------------
+// 合成夹具（**不再请求** 127.0.0.1:7863）。
+//
+// 原写法是 fetch('http://127.0.0.1:7863/admin/growth') —— 7863 是
+// **用户的生产网关**。那让测试依赖"本机恰好在跑那个实例"（别人机器上必然
+// 失败），并把真实账号 UID/昵称带进了断言输出。
+//
+// 本套件要验的是**渲染规则**（选项数、默认选中、刷新后保持、回落到第一个、
+// 三视图之和），与数据来源无关；换成合成夹具不影响它证明的东西。
+const FIXTURE_ACCOUNTS = [
+  {
+    uid: 'test-uid-0001', nickname: '测试账号甲',
+    tasks_total: 3, tasks_completed: 1, tasks_accepted: 1,
+    acceptable_count: 1, acceptable_credit: 10, acceptable_energy: 1,
+    pending_count: 1, pending_credit: 20, pending_energy: 1,
+    claimable_count: 1, claimable_credit: 30, claimable_energy: 1,
+    streak_days: 5, next_tier_remaining: 3, makeup_cards: 1,
+    remaining_days: 20, energy: 12,
+    blind_box_affordable: true, blind_box_cost: 10, lottery_chances: 2,
+    observed_at: '2026-01-01T00:00:00Z', error: '',
+    // tasks 供 growthCounts() 统计三视图，并给「说明」列提供 description/how_to。
+    // create_canvas 是断言点名的任务码，必须存在。
+    tasks: [
+      { task_code: 'create_canvas', status: 'not_accepted', locked: false, reward_credit: 10,
+        description: '达成条件：完成一次画布创建',
+        how_to: '操作指引：在工作台新建画布即可' },
+      { task_code: 'test-task-b', status: 'accepted', locked: false, reward_credit: 20,
+        description: '达成条件：进行中的任务', how_to: '' },
+      { task_code: 'test-task-c', status: 'completed', locked: false, reward_credit: 30,
+        description: '达成条件：已完成的任务', how_to: '' },
+    ],
+  },
+  {
+    uid: 'test-uid-0002', nickname: '测试账号乙',
+    tasks_total: 2, tasks_completed: 0, tasks_accepted: 2,
+    acceptable_count: 0, acceptable_credit: 0, acceptable_energy: 0,
+    pending_count: 2, pending_credit: 10, pending_energy: 2,
+    claimable_count: 0, claimable_credit: 0, claimable_energy: 0,
+    streak_days: 1, next_tier_remaining: 7, makeup_cards: 0,
+    remaining_days: 30, energy: 3,
+    blind_box_affordable: false, blind_box_cost: 10, lottery_chances: 0,
+    observed_at: '2026-01-01T00:00:00Z', error: '',
+    tasks: [
+      { task_code: 'test-task-d', status: 'in_progress', locked: false, reward_credit: 5,
+        description: '达成条件：进行中', how_to: '' },
+      { task_code: 'test-task-e', status: 'in_progress', locked: false, reward_credit: 5,
+        description: '达成条件：进行中', how_to: '' },
+    ],
+  },
+  {
+    uid: 'test-uid-0003', nickname: '测试账号丙',
+    tasks_total: 0, tasks_completed: 0, tasks_accepted: 0,
+    acceptable_count: 0, acceptable_credit: 0, acceptable_energy: 0,
+    pending_count: 0, pending_credit: 0, pending_energy: 0,
+    claimable_count: 0, claimable_credit: 0, claimable_energy: 0,
+    streak_days: 0, next_tier_remaining: 0, makeup_cards: 0,
+    remaining_days: 0, energy: 0,
+    blind_box_affordable: false, blind_box_cost: 0, lottery_chances: 0,
+    observed_at: '2026-01-01T00:00:00Z', error: '',
+    tasks: [],
+  },
+];
+
 (async () => {
-  const r = await fetch('http://127.0.0.1:7863/admin/growth', { headers: { Authorization: 'Bearer ' + KEY } });
-  const data = await r.json();
-  growthSnaps = data.accounts;
+  growthSnaps = FIXTURE_ACCOUNTS;
 
   let fail = 0;
   const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
