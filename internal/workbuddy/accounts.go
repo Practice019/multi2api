@@ -35,6 +35,33 @@ type Account struct {
 	Cooling  bool
 }
 
+// QuotaView 额度视图在本包看来是什么样。
+//
+// # 为什么要在这里再声明一份
+//
+// 参数位置写 pool.QuotaView 会让本包 import pool，直接违反
+// TestUpstreamsDoNotDependOnCore。所以照 Account / CheckinOutcome 的同一做法：
+// **两侧各自声明同形结构，转换由 cmd/server 的适配器做**。
+//
+// 字段与 pool.QuotaView 逐一对应（含 json tag —— 它会经 Status 出去给前端看）。
+type QuotaView struct {
+	Kind      string           `json:"kind,omitempty"`
+	Remaining int64            `json:"remaining,omitempty"`
+	ByModel   map[string]int64 `json:"by_model,omitempty"`
+	HasData   bool             `json:"has_data"`
+}
+
+// QuotaKindCredits 单值额度（workbuddy 的积分）。与 pool.QuotaKindCredits 同值。
+const QuotaKindCredits = "credits"
+
+// FromCredits 造一个"单值额度"视图。
+//
+// 与 pool.FromCredits 逐字段一致 —— 本包在解冻账号时要告诉池子
+// "它现在有多少额度"，这个形状就是那个答案。
+func FromCredits(remaining int64) QuotaView {
+	return QuotaView{Kind: QuotaKindCredits, Remaining: remaining, HasData: true}
+}
+
 // AccountPool 账号池在本包看来提供哪些能力。
 //
 // cmd/server 用一个薄适配器把 *pool.Pool 包装成它。
@@ -47,8 +74,15 @@ type AccountPool interface {
 	Has(uid string) bool
 	// SetCredits 更新账号余额（单值形态）。
 	SetCredits(uid string, credits int64)
-	// ReenableIfCredits 签到/领奖后按"余额 > 0 即可用"解冻账号。
-	ReenableIfCredits(uid string, remain int64)
+	// ReenableIfUsable 按"这个账号现在能不能用"解冻。
+	//
+	// ⚠ 判据由**调用方（本上游）**给出：传进来的 usable 是本包对
+	// "余额查到了且 > 0"的判断结果，池子只负责执行"解冻"这个动作。
+	// 改造前用的是 ReenableIfCredits(uid, remain)，池子里写着 `remain > 0` ——
+	// 那是把某个上游的可用性规则写死在核心。
+	//
+	// q 是额度视图：池子需要它来决定解冻后暴露什么额度。
+	ReenableIfUsable(uid string, usable bool, q QuotaView)
 	// Disable 永久禁用账号（session 死亡）。
 	Disable(uid, reason string)
 }

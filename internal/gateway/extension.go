@@ -46,8 +46,8 @@ type AdminExt interface {
 
 // AdminRoute 一条管理端点。
 type AdminRoute struct {
-	Method string // GET / POST / PUT / DELETE
-	Path   string // 完整路径，如 "/admin/growth"
+	Method  string // GET / POST / PUT / DELETE
+	Path    string // 完整路径，如 "/admin/growth"
 	Handler http.HandlerFunc
 	// Capability 该端点对应的能力位（0 表示通用端点）。
 	// 前端据此决定是否显示入口 —— 能力由**后端下发**，前端不硬编码。

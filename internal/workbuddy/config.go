@@ -34,16 +34,15 @@ type Config struct {
 
 	// ---- 以下供管理端点使用（Task 3c）----
 
-	// Checkin 核心调度器的账号级动作（签到/保活）。
+	// Core 核心服务（历史落库）。nil 时退回本包自己的 record。
 	//
-	// nil 时 /admin/checkin 与 /admin/keepalive 降级（单账号 404、全量任务记 fail）。
-	// 接口由本包声明（见 checkin.go），*scheduler.Scheduler 已满足它，
-	// 核心无需为它做任何改动。
-	Checkin CheckinRunner
+	// 签到/保活的历史由核心统一落库（跨上游同一格式），本包把
+	// "这一条是什么"交给它，Nickname 由核心补（它在账号池里）。
+	Core coreService
 	// Admin 管理端点宿主的依赖（调度器视图 + 共享任务槽）。
 	//
-	// 与 Checkin 分开而不是合并：Checkin 是"业务动作"，Admin 是"展示与任务槽"，
-	// 两者的接线时机不同（前者构造期给，后者要等调度器建好）。
+	// 与 Core 分开：Core 是"业务动作的结果往哪写"，Admin 是"展示与任务槽"，
+	// 两者的接线时机不同（后者要等调度器建好）。
 	Admin AdminEnv
 	// ClientLogin 本机客户端登录态管理（可选；nil = 关闭「本地登录」面板，
 	// 相关端点降级为 503，与改造前一致）。

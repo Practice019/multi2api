@@ -156,21 +156,31 @@ func main() {
 	}
 	log.Printf("已注册上游: %v", registry.IDs())
 
+	// 槽位定义在这里给出：核心只认识"有个叫 X 的槽位、配在 Y 点"，
+	// 不认识 checkin/keepalive 是什么业务 —— 那是 workbuddy 的事。
+	// 装配处（本文件）是唯一同时认识核心与上游的地方，翻译在这里发生。
 	sch := scheduler.New(scheduler.Config{
-		Pool:              p,
-		Upstream:          up,
-		CheckinHours:      cfg.Schedule.CheckinHours,
-		KeepaliveHours:    cfg.Schedule.KeepaliveHours,
-		CheckinDisabled:   !cfg.Schedule.CheckinEnabled,
-		KeepaliveDisabled: !cfg.Schedule.KeepaliveEnabled,
-		Log:               checkinLog,
+		Slots: []scheduler.Slot{
+			{
+				Name:     workbuddy.SlotCheckin,
+				Hours:    cfg.Schedule.CheckinHours,
+				Disabled: !cfg.Schedule.CheckinEnabled,
+			},
+			{
+				Name:     workbuddy.SlotKeepalive,
+				Hours:    cfg.Schedule.KeepaliveHours,
+				Disabled: !cfg.Schedule.KeepaliveEnabled,
+			},
+		},
+		// 到点喊谁：上游实现 scheduler.SlotRunner（RunSlot/RunSlotFor），
+		// 适配器只做一次返回类型的逐字段转换（两侧各自声明的类型不得共用）。
+		Runner: slotRunnerAdapter{p: wb},
+		Log:    checkinLog,
 		// 注册表交给调度器：它自己发现各上游的 JobExt 任务（成长/旅行守卫轮）。
 		Registry: registry,
 	})
-	// 签到/保活的动作实现留在核心调度器（它们不是上游业务），
-	// 但 workbuddy 的 /admin/checkin 与 /admin/keepalive 要能调到它们 ——
-	// 经调度器适配器注入，方向是"上游读接口"，不是"上游认核心"。
-	wb.SetCheckinRunner(schedulerAdapter{sch: sch})
+	// 历史落库经核心：格式跨上游统一，Nickname 由核心从账号池补。
+	wb.SetCore(schedulerAdapter{sch: sch})
 	// 管理端点的核心依赖（/admin/schedule 的时点 + 与签到/保活共用的任务槽）。
 	// 后注入的理由就在这里：调度器在 Provider 之后构造。
 	wb.SetAdminEnv(workbuddy.AdminEnv{
@@ -178,8 +188,8 @@ func main() {
 		TaskSlot: newTaskSlotAdapter(sch),
 	})
 	// 本机客户端登录态管理（见下）。
-	// 签到收尾的搭车任务（旅行状态机）由上游提供，核心只负责在正确的时机喊一声。
-	sch.AddCheckinHook(wb)
+	// 槽位收尾的搭车任务（旅行状态机）由上游提供，核心只负责在正确的时机喊一声。
+	sch.AddSlotHook(wb)
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）：猫猫旅行同时停摆（搭签到便车）")

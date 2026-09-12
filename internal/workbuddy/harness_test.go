@@ -44,8 +44,10 @@ func (a testPoolAdapter) List() []Account {
 func (a testPoolAdapter) AuthByUID(uid string) *auth.Auth { return a.p.AuthByUID(uid) }
 func (a testPoolAdapter) Has(uid string) bool             { _, ok := a.p.Status(uid); return ok }
 func (a testPoolAdapter) SetCredits(uid string, c int64)  { a.p.SetCredits(uid, c) }
-func (a testPoolAdapter) ReenableIfCredits(uid string, remain int64) {
-	a.p.ReenableIfCredits(uid, remain)
+func (a testPoolAdapter) ReenableIfUsable(uid string, usable bool, q QuotaView) {
+	a.p.ReenableIfUsable(uid, usable, pool.QuotaView{
+		Kind: q.Kind, Remaining: q.Remaining, ByModel: q.ByModel, HasData: q.HasData,
+	})
 }
 func (a testPoolAdapter) Disable(uid, reason string) { a.p.Disable(uid, reason) }
 

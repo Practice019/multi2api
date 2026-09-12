@@ -14,10 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
-	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/upstream"
 )
 
 // stubProvider 实现 gateway.Provider + JobExt —— 模拟一个注册了任务的上游。
@@ -218,7 +215,8 @@ func TestSchedulerRunStopsOnCancelWithJobs(t *testing.T) {
 		Name: "always", Interval: time.Millisecond,
 		Run: func(context.Context) error { return nil },
 	}}})
-	s := New(Config{Registry: reg, CheckinDisabled: true, KeepaliveDisabled: true})
+	// 无整点槽位（改造前是"签到/保活都禁用"）：只推守卫线，Run 仍要能被取消。
+	s := New(Config{Registry: reg})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -232,95 +230,6 @@ func TestSchedulerRunStopsOnCancelWithJobs(t *testing.T) {
 	}
 }
 
-// ---- 签到搭车钩子 ----
-
-// stubHook 记录被调用的次数。
-type stubHook struct {
-	name string
-	n    atomic.Int32
-	// panicOn 为真时 AfterCheckin panic。
-	panicOn bool
-}
-
-func (h *stubHook) AfterCheckin() {
-	h.n.Add(1)
-	if h.panicOn {
-		panic("钩子炸了")
-	}
-}
-func (h *stubHook) HookName() string { return h.name }
-
-// TestCheckinRunsUpstreamHook 核心跑完签到后必须喊一次钩子。
-//
-// 这条覆盖「签到搭车」这半条链路：核心确实会在签到收尾时通知上游。
-// 另外半条（上游收到通知确实推进了旅行）在 internal/workbuddy 的
-// TestAfterCheckinHookRunsTravel 里。两半合起来等价于改造前的
-// TestRunCheckinNowTriggersTravel。
-func TestCheckinRunsUpstreamHook(t *testing.T) {
-	f := &fakeUpstream{resourceRemain: 100}
-	srv := f.server()
-	defer srv.Close()
-
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-
-	s := New(Config{Pool: p, Upstream: up})
-	h := &stubHook{name: "travel"}
-	s.AddCheckinHook(h)
-
-	s.RunCheckinNow()
-
-	if h.n.Load() != 1 {
-		t.Errorf("签到收尾应恰好喊一次钩子，实际 %d 次", h.n.Load())
-	}
-	if f.checkinCalls.Load() != 1 {
-		t.Errorf("签到本身仍要执行，实际 %d 次", f.checkinCalls.Load())
-	}
-}
-
-// TestCheckinHookPanicDoesNotAbort 钩子 panic 不影响签到主流程，也不影响其它钩子。
-func TestCheckinHookPanicDoesNotAbort(t *testing.T) {
-	f := &fakeUpstream{resourceRemain: 100}
-	srv := f.server()
-	defer srv.Close()
-
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-
-	s := New(Config{Pool: p, Upstream: up})
-	bad := &stubHook{name: "bad", panicOn: true}
-	good := &stubHook{name: "good"}
-	s.AddCheckinHook(bad)
-	s.AddCheckinHook(good)
-
-	s.RunCheckinNow() // 不应 panic
-
-	if good.n.Load() != 1 {
-		t.Errorf("前一个钩子 panic 不该阻止后续钩子，实际 %d 次", good.n.Load())
-	}
-	// 签到本身照常完成：余额已同步进池。
-	if st, _ := p.Status("u1"); st.Credits != 100 {
-		t.Errorf("钩子 panic 不该影响签到结果，credits=%d want 100", st.Credits)
-	}
-}
-
-// TestAddCheckinHookIgnoresNil nil 钩子被静默忽略（不会在收尾时 panic）。
-func TestAddCheckinHookIgnoresNil(t *testing.T) {
-	f := &fakeUpstream{resourceRemain: 100}
-	srv := f.server()
-	defer srv.Close()
-
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
-
-	s := New(Config{Pool: p, Upstream: up})
-	s.AddCheckinHook(nil)
-	s.RunCheckinNow() // 不应 panic
-
-	if len(s.hooks) != 0 {
-		t.Errorf("nil 钩子不该被登记，实际 %d 个", len(s.hooks))
-	}
-}
+// 钩子的测试已随框架一起改写：见 slots_test.go 的
+// TestSlotRunsUpstreamHook / TestSlotHookPanicDoesNotAbort / TestAddSlotHookIgnoresNil。
+// 改造前它们在这里（签到专用），现在钩子对**任意槽位**生效，判据也相应变宽。

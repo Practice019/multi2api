@@ -70,7 +70,8 @@ func (p *Provider) RefreshCredits(uid, trigger string) (CreditsResult, bool) {
 	}
 	res.Credits, res.HasQuota = remain, true
 	p.cfg.Pool.SetCredits(uid, remain)
-	p.cfg.Pool.ReenableIfCredits(uid, remain)
+	// 「能不能用」由本包判断（余额查到了且 > 0），池子只执行解冻动作。
+	p.cfg.Pool.ReenableIfUsable(uid, remain > 0, FromCredits(remain))
 	p.record(uid, checkinlog.KindCredits, res.Status, "", remain, trigger)
 	return res, true
 }
