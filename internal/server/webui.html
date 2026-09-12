@@ -732,6 +732,23 @@
   </div>
 </div>
 
+<!-- 只读信息弹窗（旅行「详情」等）。
+     为什么不用 alert()：原生弹窗**阻塞页面**、无法选中复制、
+     样式不可控，且在每套主题下都与控制台风格割裂。
+     iOS 里还会把来源域名一起显示出来，看起来像外部站点弹的。
+     本弹窗复用 modal 的视觉语言（同一套变量），内容用等宽字体，
+     因为旅行状态是多行 k:v 文本，等宽更易读。 -->
+<div id="infoModal" style="display:none;position:fixed;inset:0;background:var(--overlay);z-index:100;align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:560px;width:calc(100% - 40px)">
+    <h3 id="infoTitle" style="margin:0 0 10px;font-size:15px">详情</h3>
+    <pre id="infoBody" class="mono" style="margin:0;font-size:12px;line-height:1.7;white-space:pre-wrap;word-break:break-word;max-height:60vh;overflow:auto"></pre>
+    <div class="row" style="margin-top:16px;justify-content:flex-end;gap:8px">
+      <button id="infoCopy" style="padding:3px 10px;font-size:12px">复制</button>
+      <button id="infoClose" style="padding:3px 10px;font-size:12px">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (() => {
   const $ = id => document.getElementById(id);
@@ -1676,6 +1693,17 @@
     if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
     refresh();
   }
+
+  // ---------------------------------------------------------------- 只读信息弹窗
+  //
+  // 替代 alert()：原生弹窗阻塞页面、无法复制、样式不可控，
+  // 且在多行 k:v 文本上可读性差。
+  function showInfo(title, text) {
+    $('infoTitle').textContent = title;
+    $('infoBody').textContent = text;
+    $('infoModal').style.display = 'flex';
+  }
+  function closeInfo() { $('infoModal').style.display = 'none'; }
 
   async function addAccount() {
     openModal();
@@ -3631,7 +3659,11 @@
           t.record_id ? `在途记录：${t.record_id}` : '',
           r.travel_error ? `错误：${r.travel_error}` : '',
         ].filter(Boolean);
-        alert(lines.join('\n'));
+        // 用只读信息弹窗而不是 alert()：
+        // 这是多行 k:v 文本（猫名/稀有度/状态/目的地/在途记录…），
+        // 用户经常要复制「在途记录」去排查，而 alert 里选不中文字。
+        // 原生弹窗还会阻塞页面、在多主题下风格割裂。
+        showInfo('旅行详情', lines.join('\n'));
       } catch (e) {
         toast('查询旅行状态失败：' + e.message, true);
       }
@@ -4030,6 +4062,18 @@
     $('btnAdd').onclick = addAccount;
     $('btnLoginClose').onclick = closeModal;
     $('modal').addEventListener('click', ev => { if (ev.target === $('modal')) closeModal(); });
+    // 只读信息弹窗：关闭 / 点遮罩关闭 / 复制内容 / Esc 关闭。
+    // 「复制」是加这个弹窗的主要动机 —— alert() 里的文字选不中，
+    // 而旅行详情里的「在途记录」正是用户要拿去排查的东西。
+    $('infoClose').onclick = closeInfo;
+    $('infoModal').addEventListener('click', ev => { if (ev.target === $('infoModal')) closeInfo(); });
+    $('infoCopy').onclick = () => copyText($('infoBody').textContent, '详情内容');
+    document.addEventListener('keydown', e => {
+      // Esc 关闭：两个弹窗都支持，符合直觉
+      if (e.key !== 'Escape') return;
+      if ($('infoModal').style.display === 'flex') closeInfo();
+      else if ($('modal').style.display === 'flex') closeModal();
+    });
     $('btnReload').onclick = () => busyRun($('btnReload'), async () => {
       const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
       toast(`已重载 auths：扫描 ${r.scanned} 个文件，池内账号 ${r.before} 个变为 ${r.after} 个`);

@@ -37,6 +37,8 @@ const TESTS = [
   ['panel_content_e2e.js', 'PANEL_URL'],
   ['user_session_e2e.js',  'USER_URL'],   // 真的按按钮：刷新/清屏/翻页/放弃修改/切主题
   ['verify_clearscreen.js','CLEAR_URL'],  // 清屏行为契约：含轮询与切面板
+  ['verify_dynamic_actions.js','DYN_URL'], // 动态行按钮/下拉/视图切换真的有效
+  ['verify_info_modal.js','INFO_URL'],   // 只读信息弹窗（替代 alert）
   ['verify_cp2_f1.js',  'F1_TEST_URL'],
   ['verify_cp2_f2.js',  'F2_TEST_URL'],
   ['final_visual.js',   'VISUAL_URL'],
@@ -44,7 +46,7 @@ const TESTS = [
 
 // 各脚本内部使用的调试端口（与脚本里的常量对应）。
 // 这里只用于"等它释放"，不修改脚本本身。
-const DEBUG_PORTS = [9222, 9224, 9225, 9226, 9227, 9228, 9229, 9230, 9231, 9232, 9240, 9241, 9251, 9252, 9258, 9260, 9290, 9293];
+const DEBUG_PORTS = [9222, 9224, 9225, 9226, 9227, 9228, 9229, 9230, 9231, 9232, 9240, 9241, 9251, 9252, 9258, 9260, 9290, 9293, 9295, 9296];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
