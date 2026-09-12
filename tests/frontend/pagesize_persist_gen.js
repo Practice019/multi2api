@@ -4,7 +4,24 @@ const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') +
 const els = {};
 function mkEl(id) { return { id, hidden: true, className: '', textContent: '', innerHTML: '', disabled: false }; }
 const $ = id => els[id] || (els[id] = mkEl(id));
-const PAGE_SIZE_MIN = 1, PAGE_SIZE_MAX = 300, DefaultPageSize = 30;
+
+// ⚠ 这三个常量**从 webui.html 实读**，不硬编码。
+//
+// 原先这里把三个常量抄进了测试装置（PAGE_SIZE_MIN/MAX 与 DefaultPageSize
+// 各写死一个数）。后果：源码里把它改成 15，这套测试**照样全绿**
+//（它验的是自己抄的那份），而断言文案还写着"与后端一致"，
+// 会误导人以为源码也是 30。
+//
+// 这与本项目反复出现的"测量方式测不到那一份"是同一类错误：
+// **测试装置抄了被测对象的常量，就等于没有测它。**
+const pickConst = (name) => {
+  const m = new RegExp('const\\s+' + name + '\\s*=\\s*(\\d+)').exec(html);
+  if (!m) throw new Error('源码里找不到常量 ' + name + ' —— 抽取失败，测试装置失效');
+  return Number(m[1]);
+};
+const PAGE_SIZE_MIN = pickConst('PAGE_SIZE_MIN');
+const PAGE_SIZE_MAX = pickConst('PAGE_SIZE_MAX');
+const DefaultPageSize = pickConst('DefaultPageSize');
 const LS_PAGESIZE = 'wb2api.pagesize';
 
 // 真实的 localStorage 假实现（内存 Map），不是打桩常量 —— 要能验证读写往返。
@@ -110,10 +127,24 @@ let fail = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
 
 // ---------- 1. 默认值 ----------
-console.log('\n[1] 从未设置过时用默认 30');
+console.log('\n[1] 从未设置过时用默认 ' + DefaultPageSize);
 localStorage = makeStorage();
-ok(loadPageSize() === 30, 'localStorage 为空 → 默认 30（实际 ' + loadPageSize() + '）');
-ok(DefaultPageSize === 30, 'DefaultPageSize 常量为 30（与后端一致）');
+ok(loadPageSize() === DefaultPageSize,
+  'localStorage 为空 → 默认 ' + DefaultPageSize + '（实际 ' + loadPageSize() + '）');
+// ⚠ 这条断言的含义已修正。
+//
+// 原先断言的是"DefaultPageSize 常量恰好等于 30"，文案是"（与后端一致）" ——
+// 两句都过时了：
+//   · 数值：前端默认已按用户要求改成 15
+//   · 文案："与后端一致"不再是要求（后端 DefaultPageSize 是**服务端单页上限**，
+//     前端这个是**界面首屏偏好**，两者语义不同，不该绑定）
+//
+// 现在改为断言"抽取成功且在合法区间" —— 真正的判据是上面那条
+// loadPageSize() === DefaultPageSize（行为一致），
+// 而不是"某个魔数等于多少"。数值本身不该被测试钉死：
+// 它是产品决策，改它不该让测试红。
+ok(DefaultPageSize > 0 && DefaultPageSize <= PAGE_SIZE_MAX,
+  'DefaultPageSize 在合法区间内（实读自源码，实际 ' + DefaultPageSize + '）');
 
 // ---------- 2. 持久化往返（本次修复的核心） ----------
 console.log('\n[2] 改值 → 写入 → 读回（持久化的本质）');
@@ -152,7 +183,8 @@ ok(loadPageSize() === 1, '存 "NaN" → 读回 1（不产生 NaN 请求参数）
 // ---------- 5. localStorage 不可用（隐私模式） ----------
 console.log('\n[5] localStorage 抛异常时静默回落');
 localStorage = makeStorage({ throwOnRead: true });
-ok(loadPageSize() === 30, '读抛异常 → 回落默认 30');
+ok(loadPageSize() === DefaultPageSize,
+  '读抛异常 → 回落默认 ' + DefaultPageSize + '（实际 ' + loadPageSize() + '）');
 localStorage = makeStorage({ throwOnWrite: true });
 let threw = false;
 try { savePageSize(120); } catch { threw = true; }
