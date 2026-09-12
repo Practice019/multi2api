@@ -30,7 +30,7 @@ type Auth struct {
 	// 'the refresh token has been used'）。两个并发续期必然一个成功一个失败，
 	// 更糟的是失败方可能把已作废的旧值写回，覆盖掉成功方拿到的新 token。
 	//
-	// 后台调度器（RefreshScheduler）与请求路径（ChatStream 的惰性续期）
+	// 后台续期任务（jobs.go 注册的 Job）与请求路径（ChatStream 的惰性续期）
 	// 是两条会同时触发续期的路径，这个锁就是它们之间的闸门。
 	refreshMu sync.Mutex
 
