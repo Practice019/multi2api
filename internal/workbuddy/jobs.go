@@ -180,20 +180,33 @@ var (
 )
 
 // ---------------------------------------------------------------------------
-// 签到搭车（scheduler.CheckinHook）
+// 槽位搭车（scheduler.SlotHook）
 // ---------------------------------------------------------------------------
 
-// AfterCheckin 在核心跑完一轮全量签到后被调用一次：推进一趟旅行状态机。
+// AfterSlot 在核心跑完一轮整点槽位后被调用一次。
 //
 // # 为什么旅行不做成独立排程
 //
 // 旅行每日上限按「派出」计 1 次且在派出时锁定奖励，晚领不丢分；
-// 分钟级巡检相对签到时点（09/21 点）没有增益，只会多打上游。
-// 所以它搭签到的便车 —— 而且必须在**签到之后**跑：签到会解冻刚充值的账号，
-// 晚跑一趟才能把本轮刚恢复的账号一起覆盖到。
+// 分钟级巡检相对整点时点没有增益，只会多打上游。
+// 所以它搭便车 —— 而且必须**在那一轮账号动作之后**跑：签到会解冻刚充值的
+// 账号，晚跑一趟才能把本轮刚恢复的账号一起覆盖到。
 //
-// 顺序由核心保证：scheduler.RunCheckin 先逐账号签到，最后统一喊钩子。
-func (p *Provider) AfterCheckin() { p.RunTravelNow() }
+// 顺序由核心保证：scheduler.RunSlot 先调 RunSlot，最后统一喊钩子。
+//
+// # 为什么只有签到槽位才推进旅行
+//
+// 核心会为**每一个**整点槽位喊钩子（它不认识槽位名）。"只在签到后跑"
+// 这条判断属于本包 —— 它认识自己的槽位名。
+//
+// 挂到保活上会让旅行一天多跑一趟，且与签到时的账号解冻顺序脱节：
+// 签到的收尾顺序是"先解冻、再旅行"，保活没有这个语义。
+func (p *Provider) AfterSlot(slot string) {
+	if slot != SlotCheckin {
+		return
+	}
+	p.RunTravelNow()
+}
 
 // HookName 钩子的可读名（日志用）。
-func (p *Provider) HookName() string { return "workbuddy-travel-after-checkin" }
+func (p *Provider) HookName() string { return "workbuddy-travel-after-slot" }

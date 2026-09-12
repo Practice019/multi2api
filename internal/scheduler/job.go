@@ -274,48 +274,55 @@ func (j *Jobs) Statuses() []Status {
 }
 
 // ---------------------------------------------------------------------------
-// 签到搭车钩子
+// 槽位搭车钩子
 // ---------------------------------------------------------------------------
 
-// CheckinHook 上游想在「签到收尾」时顺带推进的任务。
+// SlotHook 上游想在「整点槽位收尾」时顺带推进的任务。
 //
 // # 为什么需要它（以及为什么不是第三种扩展点）
 //
 // 有些上游任务**刻意不独立排程**：例如"每日一次、晚做不丢分"的巡检 ——
-// 分钟级轮询相对签到时点没有增益，只会多打上游。这类任务与签到时点合并执行即可。
+// 分钟级轮询相对整点时点没有增益，只会多打上游。这类任务与整点时点合并执行即可。
 //
-// 但"搭签到便车"这件事不能由核心写死 —— 核心不知道谁有这类任务。
+// 但"搭车"这件事不能由核心写死 —— 核心不知道谁有这类任务。
 // 所以反过来说明：**核心定义钩子的形状，上游实现它**。
 //
-// 为什么不做成 gateway 的第四个扩展点：那个接口面向的是"上游对上"，而
+// # 为什么钩子的触发点是「任意槽位收尾」而不是某个具体槽位
+//
+// 改造前这里叫 CheckinHook，只在签到收尾时喊 —— 于是核心被迫知道
+// "签到"是什么。现在改成"任何一个整点槽位跑完都喊一遍"，钩子由上游
+// 自己判断这次该不该干活（它拿得到槽位名）。核心的语义因此退化成
+// 「有整点任务跑完了」，与具体业务无关。
+//
+// 为什么不做成 gateway 的扩展点：那个接口面向的是"上游对上"，而
 // 钩子的语义是"核心在某个时机喊一声"，方向相反。放在 scheduler 里，
-// 由上游 import scheduler 注册即可 —— 但上游不得依赖核心业务包
-// （架构测试禁止 import scheduler），所以改由 cmd/server 在接线处桥接。
-type CheckinHook interface {
-	// AfterCheckin 在签到全量跑完后调用一次。
-	AfterCheckin()
+// 由 cmd/server 在接线处桥接（上游不得 import scheduler）。
+type SlotHook interface {
+	// AfterSlot 在某个整点槽位跑完一轮后被调用一次；slot 是槽位名。
+	AfterSlot(slot string)
 	// HookName 钩子的可读名（只用于日志）。
 	HookName() string
 }
 
-// AddCheckinHook 注册一个签到搭车钩子。非线程安全，只在构造期调用。
-func (s *Scheduler) AddCheckinHook(h CheckinHook) {
+// AddSlotHook 注册一个槽位搭车钩子。非线程安全，只在构造期调用。
+func (s *Scheduler) AddSlotHook(h SlotHook) {
 	if h == nil {
 		return
 	}
 	s.hooks = append(s.hooks, h)
 }
 
-// runCheckinHooks 依次跑所有已注册的搭车钩子（panic 收敛，互不影响）。
-func (s *Scheduler) runCheckinHooks() {
+// runSlotHooks 依次跑所有已注册的搭车钩子（panic 收敛，互不影响）。
+// slot 是刚刚跑完的槽位名，原样透传给钩子。
+func (s *Scheduler) runSlotHooks(slot string) {
 	for _, h := range s.hooks {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("scheduler: 签到钩子 %s panic: %v", h.HookName(), r)
+					log.Printf("scheduler: 槽位钩子 %s panic: %v", h.HookName(), r)
 				}
 			}()
-			h.AfterCheckin()
+			h.AfterSlot(slot)
 		}()
 	}
 }

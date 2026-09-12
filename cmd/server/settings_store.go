@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/scheduler"
+	"workbuddy2api/internal/workbuddy"
 )
 
 // settingsStore 实现 admin.SettingsStore。
@@ -66,10 +68,11 @@ type UpstreamSettings interface {
 
 func (s *settingsStore) Snapshot() admin.Settings {
 	c := s.cfg
-	checkinH, keepaliveH := s.sch.Hours()
+	checkinH := s.sch.SlotHours(workbuddy.SlotCheckin)
+	keepaliveH := s.sch.SlotHours(workbuddy.SlotKeepalive)
 	return admin.Settings{
-		CheckinEnabled:   s.sch.CheckinEnabled(),
-		KeepaliveEnabled: s.sch.KeepaliveEnabled(),
+		CheckinEnabled:   s.sch.SlotEnabled(workbuddy.SlotCheckin),
+		KeepaliveEnabled: s.sch.SlotEnabled(workbuddy.SlotKeepalive),
 		CheckinHours:     checkinH,
 		KeepaliveHours:   keepaliveH,
 
@@ -130,10 +133,17 @@ func (s *settingsStore) Apply(patch json.RawMessage) (applied, needRestart []str
 	}
 
 	// 运行时生效（通用段）
-	s.sch.SetCheckinEnabled(p.CheckinEnabled)
-	s.sch.SetKeepaliveEnabled(p.KeepaliveEnabled)
-	if err := s.sch.SetHours(p.CheckinHours, p.KeepaliveHours); err != nil {
-		return nil, nil, err
+	//
+	// 槽位名在这里出现是**装配处**的职责：本文件是唯一同时认识"设置页的
+	// 签到/保活字段"与"核心的槽位"的地方。核心只认识槽位，设置页只认识中文，
+	// 翻译就发生在这一层。
+	s.sch.SetSlotEnabled(workbuddy.SlotCheckin, p.CheckinEnabled)
+	s.sch.SetSlotEnabled(workbuddy.SlotKeepalive, p.KeepaliveEnabled)
+	if err := s.sch.SetSlotHours(workbuddy.SlotCheckin, p.CheckinHours); err != nil {
+		return nil, nil, errors.New("签到时点超出范围（0-23）")
+	}
+	if err := s.sch.SetSlotHours(workbuddy.SlotKeepalive, p.KeepaliveHours); err != nil {
+		return nil, nil, errors.New("保活时点超出范围（0-23）")
 	}
 	if p.CheckinLogKeepDays > 0 {
 		s.log.SetKeepDays(p.CheckinLogKeepDays)

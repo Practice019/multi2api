@@ -142,7 +142,7 @@ func TestAfterCheckinHookRunsTravel(t *testing.T) {
 	defer srv.Close()
 
 	s, _ := newTravelScheduler(t, srv, "u1")
-	s.AfterCheckin()
+	s.AfterSlot(SlotCheckin)
 
 	if n := stub.infoCalls.Load(); n != 1 {
 		t.Errorf("buddy/info calls=%d want 1（签到钩子应顺带跑一趟旅行）", n)
@@ -168,8 +168,8 @@ func TestRunCheckinTravelCoversAccountsJustReenabled(t *testing.T) {
 
 	// 签到解冻由核心负责（scheduler.RunCheckin），这里直接模拟其效果：
 	// 查到余额 500 → 解冻，然后跑签到钩子。
-	p.ReenableIfCredits("u1", 500)
-	s.AfterCheckin()
+	p.ReenableIfUsable("u1", true, pool.FromCredits(500))
+	s.AfterSlot(SlotCheckin)
 
 	// 收尾的旅行应覆盖到该账号并派出。
 	if n := stub.departCalls.Load(); n != 1 {
@@ -200,7 +200,7 @@ func TestRunKeepaliveDoesNotTriggerTravel(t *testing.T) {
 		t.Fatalf("未触发任何入口却产生了上游请求: info=%d", n)
 	}
 	// 对照组：调了 AfterCheckin 才应该有请求 —— 证明"不触发"不是因为桩坏了。
-	s.AfterCheckin()
+	s.AfterSlot(SlotCheckin)
 	if n := stub.infoCalls.Load(); n != 1 {
 		t.Errorf("buddy/info calls=%d want 1（AfterCheckin 是唯一的搭车入口）", n)
 	}

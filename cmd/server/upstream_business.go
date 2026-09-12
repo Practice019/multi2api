@@ -30,53 +30,115 @@ import (
 // 调度器适配器（Task 3c）
 // ---------------------------------------------------------------------------
 
-// schedulerAdapter 把 *scheduler.Scheduler 适配成 workbuddy 的三条消费方接口：
+// schedulerAdapter 把 *scheduler.Scheduler 适配成 workbuddy 的消费方接口：
 //
-//	workbuddy.CheckinRunner   签到/保活（/admin/checkin, /admin/keepalive）
 //	workbuddy.SchedulerView   时点与启停（/admin/schedule）
+//	workbuddy.coreService     历史落库（Record）
 //
 // # 为什么需要转换
 //
 // 两边的语义一一对应，但**类型不能共用**：workbuddy 不得 import scheduler
-// （架构约束）。RunCheckinFor 的返回类型在 scheduler 里是 CheckinResult、
-// 在 workbuddy 里是 CheckinOutcome —— 结构相同、定义各自独立，
-// 转换只在这一个地方做（与 modelCatalogState、businessAdapter 同一模式）。
+// （架构约束）。槽位名在核心是字符串、在 workbuddy 是常量 ——
+// 取值相同，定义各自独立，转换只在这一个地方做
+// （与 modelCatalogState、businessAdapter 同一模式）。
 //
-// 其余方法签名完全一致，直接转发。
+// # 方向说明
+//
+// 改造后签到/保活的**业务**在 workbuddy，核心只有排程与落库。
+// 所以这一层现在主要不是"把核心的能力借给上游"，而是给上游
+// 提供两条核心设施：调度视图（读）与历史落库（写）。
 type schedulerAdapter struct{ sch *scheduler.Scheduler }
 
-// ---- workbuddy.CheckinRunner ----
+// ---- workbuddy.coreService ----
 
-func (a schedulerAdapter) RunCheckinFor(uid, trigger string) (workbuddy.CheckinOutcome, bool) {
-	res, ok := a.sch.RunCheckinFor(uid, trigger)
-	return toCheckinOutcome(res), ok
-}
-
-func (a schedulerAdapter) RunKeepaliveFor(uid, trigger string) (workbuddy.CheckinOutcome, bool) {
-	res, ok := a.sch.RunKeepaliveFor(uid, trigger)
-	return toCheckinOutcome(res), ok
+func (a schedulerAdapter) Record(uid, kind, status, detail string, credits int64, trigger string) {
+	a.sch.Record(uid, kind, status, detail, credits, trigger)
 }
 
 // ---- workbuddy.SchedulerView ----
 
 func (a schedulerAdapter) NextWake() (time.Time, []string) { return a.sch.NextWake() }
-func (a schedulerAdapter) Hours() ([]int, []int)           { return a.sch.Hours() }
-func (a schedulerAdapter) CheckinEnabled() bool            { return a.sch.CheckinEnabled() }
-func (a schedulerAdapter) KeepaliveEnabled() bool          { return a.sch.KeepaliveEnabled() }
+func (a schedulerAdapter) Hours() ([]int, []int) {
+	return a.sch.SlotHours(workbuddy.SlotCheckin), a.sch.SlotHours(workbuddy.SlotKeepalive)
+}
+func (a schedulerAdapter) CheckinEnabled() bool {
+	return a.sch.SlotEnabled(workbuddy.SlotCheckin)
+}
+func (a schedulerAdapter) KeepaliveEnabled() bool {
+	return a.sch.SlotEnabled(workbuddy.SlotKeepalive)
+}
+
+// ---- workbuddy 侧槽位写入口（设置页改时点/开关） ----
+
+// SetCheckinHours 改签到时点；非法小时返回错误（文案由本函数拼，
+// 因为"签到时点 25 非法"这句话要带业务名，而核心只给得出槽位名）。
+func (a schedulerAdapter) SetCheckinHours(hours []int) error {
+	if err := a.sch.SetSlotHours(workbuddy.SlotCheckin, hours); err != nil {
+		return errors.New("签到时点超出范围（0-23）")
+	}
+	return nil
+}
+
+// SetKeepaliveHours 改保活时点。
+func (a schedulerAdapter) SetKeepaliveHours(hours []int) error {
+	if err := a.sch.SetSlotHours(workbuddy.SlotKeepalive, hours); err != nil {
+		return errors.New("保活时点超出范围（0-23）")
+	}
+	return nil
+}
+
+// SetCheckinEnabled 运行时开关签到槽位。
+func (a schedulerAdapter) SetCheckinEnabled(on bool) {
+	a.sch.SetSlotEnabled(workbuddy.SlotCheckin, on)
+}
+
+// SetKeepaliveEnabled 运行时开关保活槽位。
+func (a schedulerAdapter) SetKeepaliveEnabled(on bool) {
+	a.sch.SetSlotEnabled(workbuddy.SlotKeepalive, on)
+}
 
 // toCheckinOutcome 逐字段转换（含 HasQuota —— 它是 /admin/checkin 单账号
 // 响应体的一部分，漏掉会改变对外 JSON）。
-func toCheckinOutcome(r scheduler.CheckinResult) workbuddy.CheckinOutcome {
+func toCheckinOutcome(r scheduler.TaskResult) workbuddy.CheckinOutcome {
 	return workbuddy.CheckinOutcome{
 		UID: r.UID, Status: r.Status, Detail: r.Detail,
 		Credits: r.Credits, HasQuota: r.HasQuota,
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 槽位执行体适配器：把 workbuddy 适配成 scheduler.SlotRunner
+// ---------------------------------------------------------------------------
+
+// slotRunnerAdapter 把 *workbuddy.Provider 适配成 scheduler.SlotRunner。
+//
+// 这是**与我们其余适配器反向**的一条：其余都是"核心适配给上游消费"，
+// 这一条是"上游适配给核心调用"。方向反过来是因为到点之后干活的是上游 ——
+// 核心只负责"到点喊一声"，喊的对象由装配处接上。
+//
+// 依然需要适配器：scheduler.SlotRunner 用 scheduler.TaskResult，
+// workbuddy 用 CheckinOutcome（两侧各自声明，不得共用）。
+type slotRunnerAdapter struct{ p *workbuddy.Provider }
+
+func (a slotRunnerAdapter) RunSlot(name, trigger string) { a.p.RunSlot(name, trigger) }
+
+func (a slotRunnerAdapter) RunSlotFor(name, uid, trigger string) (scheduler.TaskResult, bool) {
+	res, ok := a.p.RunSlotFor(name, uid, trigger)
+	return toTaskResult(res), ok
+}
+
+// toTaskResult 逐字段转换（与 toCheckinOutcome 反向）。
+func toTaskResult(r workbuddy.CheckinOutcome) scheduler.TaskResult {
+	return scheduler.TaskResult{
+		UID: r.UID, Status: r.Status, Detail: r.Detail,
+		Credits: r.Credits, HasQuota: r.HasQuota,
+	}
+}
+
 var (
-	_ workbuddy.CheckinRunner = schedulerAdapter{}
 	_ workbuddy.SchedulerView = schedulerAdapter{}
 	_ workbuddy.AdminEnv      = workbuddy.AdminEnv{}
+	_ scheduler.SlotRunner    = slotRunnerAdapter{}
 )
 
 // ---------------------------------------------------------------------------
@@ -124,9 +186,15 @@ func newTaskSlotAdapter(sch *scheduler.Scheduler) workbuddy.TaskSlot {
 type adminSchedulerAdapter struct{ s *scheduler.Scheduler }
 
 func (a adminSchedulerAdapter) NextWake() (time.Time, []string) { return a.s.NextWake() }
-func (a adminSchedulerAdapter) Hours() ([]int, []int)           { return a.s.Hours() }
-func (a adminSchedulerAdapter) CheckinEnabled() bool            { return a.s.CheckinEnabled() }
-func (a adminSchedulerAdapter) KeepaliveEnabled() bool          { return a.s.KeepaliveEnabled() }
+func (a adminSchedulerAdapter) Hours() ([]int, []int) {
+	return a.s.SlotHours(workbuddy.SlotCheckin), a.s.SlotHours(workbuddy.SlotKeepalive)
+}
+func (a adminSchedulerAdapter) CheckinEnabled() bool {
+	return a.s.SlotEnabled(workbuddy.SlotCheckin)
+}
+func (a adminSchedulerAdapter) KeepaliveEnabled() bool {
+	return a.s.SlotEnabled(workbuddy.SlotKeepalive)
+}
 
 // adminTaskSlotAdapter 把共享任务槽适配成 admin.TaskSlot。
 //
@@ -274,8 +342,15 @@ func (a poolAdapter) Has(uid string) bool {
 
 func (a poolAdapter) SetCredits(uid string, credits int64) { a.p.SetCredits(uid, credits) }
 
-func (a poolAdapter) ReenableIfCredits(uid string, remain int64) {
-	a.p.ReenableIfCredits(uid, remain)
+// ReenableIfUsable 由上游给出"能不能用"，池子只执行解冻动作。
+// 两个 QuotaView 类型各自声明，逐字段转换（与其余适配器同一模式）。
+func (a poolAdapter) ReenableIfUsable(uid string, usable bool, q workbuddy.QuotaView) {
+	a.p.ReenableIfUsable(uid, usable, pool.QuotaView{
+		Kind:      q.Kind,
+		Remaining: q.Remaining,
+		ByModel:   q.ByModel,
+		HasData:   q.HasData,
+	})
 }
 
 func (a poolAdapter) Disable(uid, reason string) { a.p.Disable(uid, reason) }

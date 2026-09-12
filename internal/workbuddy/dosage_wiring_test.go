@@ -1,4 +1,14 @@
-package scheduler
+// dosage_wiring_test.go 余额刷新与额度告警的接线测试。
+//
+// # 搬运说明
+//
+// 这些用例原先在 internal/scheduler 的 dosage_wiring_test.go。
+// RefreshCredits 的业务（打哪个端点、告警文案怎么写进 Detail）属于本包，
+// 测试跟着搬 —— **用例名与断言逐字保留**。
+//
+// 改动仅限构造方式：原先 stubScheduler 造 *scheduler.Scheduler，
+// 现在 newCreditsProvider 造 *Provider（同一个假上游、同一个账号）。
+package workbuddy
 
 import (
 	"encoding/json"
@@ -15,9 +25,9 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// stubScheduler 起一个假上游（按 handler 分流）与只含 u1 的调度器。
-// 与本包既有测试（scheduler_test.go / growthwatch_test.go）同一套构造方式。
-func stubScheduler(t *testing.T, h http.HandlerFunc) *Scheduler {
+// newCreditsProvider 起一个假上游（按 handler 分流）与只含 u1 的 Provider。
+// 与本包既有测试（checkin_test.go / travel_test.go）同一套构造方式。
+func newCreditsProvider(t *testing.T, h http.HandlerFunc) *Provider {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
@@ -30,7 +40,7 @@ func stubScheduler(t *testing.T, h http.HandlerFunc) *Scheduler {
 		ChatBaseCN:    srv.URL,
 		BillingBaseCN: srv.URL,
 	}
-	return New(Config{Pool: p, Upstream: up})
+	return NewWithConfig(Config{Pool: testPoolAdapter{p: p}, Client: up})
 }
 
 // TestRefreshCreditsIncludesDosageHint 余额查询失败时，必须把上游的额度告警
@@ -40,7 +50,7 @@ func stubScheduler(t *testing.T, h http.HandlerFunc) *Scheduler {
 // 所以它只在**故障路径**上被调用。这条测试钉住"故障时确实会去问、且答案进了历史"。
 func TestRefreshCreditsIncludesDosageHint(t *testing.T) {
 	var dosageCalls atomic.Int32
-	s := stubScheduler(t, func(w http.ResponseWriter, r *http.Request) {
+	s := newCreditsProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
 			http.Error(w, `{"code":500,"msg":"resource unavailable"}`, 500)
@@ -74,7 +84,7 @@ func TestRefreshCreditsIncludesDosageHint(t *testing.T) {
 // 正常情况（实测）：dosageNotifyCode=0 且文案为空。此时不该追加
 // "上游提示：（空）"这种空话。
 func TestRefreshCreditsNoHintWhenDosageSilent(t *testing.T) {
-	s := stubScheduler(t, func(w http.ResponseWriter, r *http.Request) {
+	s := newCreditsProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
 			http.Error(w, `{"code":500,"msg":"boom"}`, 500)
@@ -99,7 +109,7 @@ func TestRefreshCreditsNoHintWhenDosageSilent(t *testing.T) {
 //
 // 这是"诊断路径"的基本要求：它只是锦上添花，任何失败都必须静默降级。
 func TestRefreshCreditsSurvivesDosageFailure(t *testing.T) {
-	s := stubScheduler(t, func(w http.ResponseWriter, r *http.Request) {
+	s := newCreditsProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
 			http.Error(w, `{"code":500,"msg":"boom"}`, 500)
@@ -128,7 +138,7 @@ func TestRefreshCreditsSurvivesDosageFailure(t *testing.T) {
 // 实测该端点比余额查询还慢（约 690ms vs 290ms），成功时去问纯属浪费。
 func TestRefreshCreditsNoDosageOnSuccess(t *testing.T) {
 	var dosageCalls atomic.Int32
-	s := stubScheduler(t, func(w http.ResponseWriter, r *http.Request) {
+	s := newCreditsProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
 			w.Header().Set("Content-Type", "application/json")
@@ -156,11 +166,11 @@ func TestRefreshCreditsNoDosageOnSuccess(t *testing.T) {
 //
 // 除了长度，还必须断言**截断后仍是合法 UTF-8**。
 // 原实现 `s[:120]` 按字节切，中文 3 字节/字符极易切在中间，
-// 产生非法 UTF-8，落进历史后再序列化就变成 \ufffd（"�"）。
+// 产生非法 UTF-8，落进历史后再序列化就变成 \ufffd。
 // 当初这条测试只查长度、不查编码，所以缺陷溜过去了 —— 由独立评审复现（6 组样本 3 组中招）。
 func TestRefreshCreditsDosageHintIsTruncated(t *testing.T) {
 	long := strings.Repeat("额度异常", 200) // 2400 字节
-	s := stubScheduler(t, func(w http.ResponseWriter, r *http.Request) {
+	s := newCreditsProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
 			http.Error(w, `{"code":500,"msg":"boom"}`, 500)
@@ -218,5 +228,15 @@ func TestShortErrTruncatesOnRuneBoundary(t *testing.T) {
 	}
 	if got := shortErr(fmt.Errorf("short")); got != "short" {
 		t.Errorf("短串不该被改: %q", got)
+	}
+}
+
+// TestRefreshCreditsMissingAccount 账号不存在时 ok=false（管理台据此回 404）。
+func TestRefreshCreditsMissingAccount(t *testing.T) {
+	s := newCreditsProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	if _, ok := s.RefreshCredits("missing", triggerManual); ok {
+		t.Error("账号不存在应 ok=false")
 	}
 }

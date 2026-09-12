@@ -39,10 +39,10 @@ func TestContractGenuinelyDetectsViolations(t *testing.T) {
 		make func() Provider
 		want string // 期望报错信息里出现的关键词（证明抓到的是**这一条**而不是别的）
 	}{
-		{"空ID", func() Provider { return &goodProvider{id: "" } }, "ID"},
-		{"非法ID", func() Provider { return &goodProvider{id: "Bad_ID" } }, "ID"},
-		{"大写ID", func() Provider { return &goodProvider{id: "Alpha" } }, "ID"},
-		{"含斜杠ID", func() Provider { return &goodProvider{id: "a/b" } }, "ID"},
+		{"空ID", func() Provider { return &goodProvider{id: ""} }, "ID"},
+		{"非法ID", func() Provider { return &goodProvider{id: "Bad_ID"} }, "ID"},
+		{"大写ID", func() Provider { return &goodProvider{id: "Alpha"} }, "ID"},
+		{"含斜杠ID", func() Provider { return &goodProvider{id: "a/b"} }, "ID"},
 		{"缺CapChat", func() Provider { return &noChatCaps{} }, "CapChat"},
 		{"Chat-panic", func() Provider { return &panicProvider{} }, "panic"},
 		{"流不Close", func() Provider { return &leakyProvider{} }, "Close"},
@@ -79,8 +79,8 @@ func firstLine(s string) string {
 // noChatCaps 声明了别的能力但没有 CapChat。
 type noChatCaps struct{}
 
-func (n *noChatCaps) ID() string        { return "nocap" }
-func (n *noChatCaps) Caps() Capability  { return CapModels }
+func (n *noChatCaps) ID() string       { return "nocap" }
+func (n *noChatCaps) Caps() Capability { return CapModels }
 func (n *noChatCaps) Chat(ctx context.Context, c Credential, b []byte) (ChatStream, error) {
 	return ChatStream{}, nil
 }
@@ -103,18 +103,18 @@ func TestContractAcceptsRealGoodProvider(t *testing.T) {
 // TestSplitModel 模型名解析的边界（前缀路由的基础）。
 func TestSplitModel(t *testing.T) {
 	cases := []struct {
-		in       string
-		wantP    string
-		wantM    string
-		wantHas  bool
+		in      string
+		wantP   string
+		wantM   string
+		wantHas bool
 	}{
 		{"", "", "", false},
 		{"auto", "", "auto", false},
 		{"workbuddy/auto", "workbuddy", "auto", true},
 		{"codearts/gpt-5.5", "codearts", "gpt-5.5", true},
 		{"workbuddy/", "workbuddy", "", true},
-		{"/auto", "", "/auto", false},          // 空前缀 → 不认，原样当裸名
-		{"a/b/c", "a", "b/c", true},            // 只切第一个 /
+		{"/auto", "", "/auto", false}, // 空前缀 → 不认，原样当裸名
+		{"a/b/c", "a", "b/c", true},   // 只切第一个 /
 		{"deepseek-v4-pro", "", "deepseek-v4-pro", false},
 	}
 	for _, c := range cases {

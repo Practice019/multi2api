@@ -149,14 +149,13 @@ func (p *Provider) SetAdminEnv(env AdminEnv) {
 	p.mu.Unlock()
 }
 
-// SetCheckinRunner 注入核心调度器的账号级动作（签到/保活）。
+// SetCore 注入核心服务（历史落库）。
 //
 // 与 SetAdminEnv 一样后注入：调度器在 Provider 之后构造。
-// 分成两个 setter 而不是一个：Checkin 是"业务动作"（会被 /admin/checkin 调用），
-// AdminEnv 是"展示与任务槽"，两者虽然当前都由调度器满足，但语义不同 ——
-// 合并会让将来出现"只有任务槽、没有调度器"的接线无处安放。
-func (p *Provider) SetCheckinRunner(r CheckinRunner) {
-	p.cfg.Checkin = r
+// 未注入时本包用自己的 record 落库（测试路径），行为等价 ——
+// 生产路径注入核心是为了让历史格式统一（Nickname 由核心从账号池补）。
+func (p *Provider) SetCore(c coreService) {
+	p.cfg.Core = c
 }
 
 // SetClientLogin 注入本机客户端登录态管理器（未配置时为 nil，面板降级 503）。

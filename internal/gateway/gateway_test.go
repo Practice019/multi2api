@@ -33,7 +33,7 @@ func (f *fakeStream) Close() error { f.closed = true; return nil }
 // goodProvider 一个完全合规的实现，用来验证"合规的能通过"。
 type goodProvider struct{ id string }
 
-func (p *goodProvider) ID() string    { return p.id }
+func (p *goodProvider) ID() string       { return p.id }
 func (p *goodProvider) Caps() Capability { return CapChat | CapModels }
 func (p *goodProvider) Chat(ctx context.Context, c Credential, body []byte) (ChatStream, error) {
 	return ChatStream{Status: 200, Body: &fakeStream{body: "data: {}\n\n"}}, nil
@@ -211,12 +211,12 @@ func (s *spyT) Run(name string, f func(t TB)) bool {
 	}
 	return !sub.failed
 }
-func (s *spyT) Logf(string, ...any)   {}
-func (s *spyT) Log(...any)            {}
-func (s *spyT) Skip(...any)           {}
-func (s *spyT) Skipf(string, ...any)  {}
-func (s *spyT) Name() string          { return "spy" }
-func (s *spyT) Cleanup(func())        {}
+func (s *spyT) Logf(string, ...any)  {}
+func (s *spyT) Log(...any)           {}
+func (s *spyT) Skip(...any)          {}
+func (s *spyT) Skipf(string, ...any) {}
+func (s *spyT) Name() string         { return "spy" }
+func (s *spyT) Cleanup(func())       {}
 
 type fatalSentinel struct{}
 
