@@ -1,0 +1,63 @@
+{
+  "admin": {
+    "checkin_log_keep_days": 30,
+    "checkin_log_path": "./data/checkin-log.json",
+    "growth_auto_accept_tasks": true,
+    "growth_auto_claim": true,
+    "growth_auto_draw": false,
+    "growth_auto_makeup": true,
+    "growth_auto_open": false,
+    "growth_auto_redeem": false,
+    "growth_watch_interval_seconds": 600,
+    "travel_auto_claim": true,
+    "travel_watch_interval_seconds": 60
+  },
+  "api_key": "",
+  "auth_dir": "./auths",
+  "cooldown": {
+    "soft_rate": "60s"
+  },
+  "features": {
+    "sanitize_blacklist_fingerprints": true
+  },
+  "listen": "127.0.0.1:18080",
+  "pool": {
+    "breaker_cooldown": "30m",
+    "breaker_cooldown_max": "6h",
+    "breaker_threshold": 3,
+    "idle_weight_max": 5,
+    "idle_weight_per_hour": 0.5,
+    "max_in_flight": 3
+  },
+  "request_log_keep_days": 7,
+  "schedule": {
+    "checkin_enabled": true,
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "keepalive_enabled": true,
+    "keepalive_hours": [
+      22
+    ]
+  },
+  "session_sticky": {
+    "enabled": true,
+    "gc_interval": "5m",
+    "ttl": "30m"
+  },
+  "state_file": "./data/state.json",
+  "upstash": {
+    "token": "",
+    "url": ""
+  },
+  "upstream": {
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300,
+    "timeout_seconds": 120
+  },
+  "codearts": {
+    "enabled": true,
+    "auth_dir": "./auths"
+  }
+}
