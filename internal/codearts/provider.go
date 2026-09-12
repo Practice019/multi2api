@@ -66,12 +66,15 @@ const refreshSkew = 3 * time.Minute
 
 // Provider 实现 gateway.Provider（以及 AdminExt 扩展点）。
 //
-// # 为什么不直接暴露 *Backend
+// # 与改造前那层 Backend 投影的关系
 //
-// Backend 是"适配到旧 server.Backend 接口"的产物（凭证双向投影那套），
-// 它服务于改造前的单上游世界。Provider 是新的、更窄的契约。
-// 两者共存：本文件是 Provider 侧，backend.go 保留其词汇与辅助逻辑，
-// 由 Provider 复用而不是被核心调用。
+// 改造前有一层"适配到旧 server.Backend 接口"的产物（凭证双向投影那套），
+// 服务于单上游世界。Provider 是新的、更窄的契约。
+//
+// 阶段 1 评审发现那层**完全无引用**，已连同它的续期调度器一起删除
+// （backend.go + scheduler.go，共 490 行；删除前用"删掉后 go build + go test
+// 仍通过"证明是死代码）。保留它是有害的：一个后来者会把它接上，
+// 从而绕过 Provider 契约。
 type Provider struct {
 	client *Client
 

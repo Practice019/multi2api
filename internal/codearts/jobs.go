@@ -9,18 +9,18 @@
 //
 // 加第二个上游时，核心的 scheduler 一行都不用改。
 //
-// # 为什么这里自己写循环而不是复用 RefreshScheduler
+// # 为什么这里是一个自己写的薄循环
 //
-// 原有的 `RefreshScheduler`（scheduler.go）绑死在 `*Backend` 上，而 `*Backend`
-// 是改造前"适配旧 server.Backend 接口"的产物（凭证双向投影那套）。
-// 新的 Provider 路径不需要投影 —— 它直接持有 `*Auth`。
+// 改造前有一层「适配旧 server.Backend 接口」的投影（凭证双向转换那套），
+// 续期调度绑死在那层上。新的 Provider 路径不需要投影 —— 它直接持有 `*Auth`。
 //
-// 两者共用同一份**并发约束**（refresh_token 一次性），而这个约束由
+// 阶段 1 评审发现那层已经**完全无引用**，连同它的调度器一起删掉了
+// （backend.go + scheduler.go，共 490 行）。删除前用
+// "删掉后 go build + go test 仍通过"证明了它确实是死代码。
+//
+// 续期的**并发约束**（refresh_token 是一次性的，用一次即作废）由
 // `Auth.refreshMu` 保证（见 client.RefreshToken），不在调度器里。
-// 所以这里是一个更薄的循环：扫凭证 → 挑将过期的 → 串行续期。
-//
-// 不复用 RefreshScheduler 而是重写这 30 行，是为了不把 Provider 拖回
-// 旧的 Backend 投影模型（那会让"第二上游接入"顺带把旧包袱也搬过来）。
+// 所以这里只需要一个薄循环：扫凭证 → 挑将过期的 → 串行续期。
 package codearts
 
 import (
