@@ -40,6 +40,7 @@ import (
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -114,6 +115,18 @@ type Config struct {
 	// 以**裸名**展示（其余上游带前缀）。空串 = 没有默认。
 	DefaultProvider string
 
+	// ServiceName 网关身份标识，经 /admin/ui/manifest 下发给控制台。
+	//
+	// # 为什么要注入而不是在这里定义
+	//
+	// 真实来源是 server.ServiceName（/healthz 的 service 字段与 X-Service 头
+	// 用的同一个常量）。admin 不得 import server（架构约束：server 依赖 admin，
+	// 反向依赖会成环），所以由 cmd/server 把值传进来。
+	//
+	// 空串时 manifest 里 service 为空，前端退回显示 "gateway" ——
+	// **不在这里兜默认值**：那样会让"忘了注入"这个装配错误永远无法被发现。
+	ServiceName string
+
 	// ReloadProvider `AuthDir` 里的凭证**属于哪个上游**。
 	//
 	// # 为什么必须显式配置（评审 F3）
@@ -138,6 +151,21 @@ type SchedulerView interface {
 	CheckinEnabled() bool
 	// KeepaliveEnabled 保活是否启用。
 	KeepaliveEnabled() bool
+}
+
+// JobStatusView 调度器的**可选**扩展：暴露已注册任务的运行状态。
+//
+// # 为什么是可选接口而不是塞进 SchedulerView
+//
+// SchedulerView 是 /admin/schedule 的契约，那边只读"排的什么班"。
+// 把任务状态塞进去会让所有实现 SchedulerView 的测试替身都必须实现它，
+// 而绝大多数测试根本不关心任务状态。
+//
+// 可选接口 + 类型断言是**本仓库既有的模式**（见 gateway.ExtOf 的注释）：
+// 核心按需发现能力，不强迫每个实现都写空方法。
+type JobStatusView interface {
+	// JobStatuses 各已注册任务的运行状态（按任务名稳定排序）。
+	JobStatuses() []scheduler.Status
 }
 
 // TaskSlot 全量任务槽：同一时刻只允许一个全量任务。
@@ -217,6 +245,13 @@ func New(cfg Config) *Handler {
 	// 能力位由后端下发而不是前端硬编码 —— 否则加第三个上游还要改前端，
 	// 那正是判据 1（加新上游核心零改动）要避免的。
 	h.register("GET /admin/providers", h.providers)
+
+	// 控制台渲染契约（Task 1）。
+	//
+	// 它把「有哪些上游、各自有什么能力、各自声明了哪些管理端点、有哪些定时任务」
+	// 一次下发 —— 前端据此渲染导航与面板，**不认识任何上游名字**。
+	// 放在 mountUpstreamRoutes 之前：通用端点优先，上游不得覆盖它。
+	h.register("GET /admin/ui/manifest", h.uiManifest)
 
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
 	// 所以冲突时以先注册的为准（见 mountUpstreamRoutes）。

@@ -247,3 +247,22 @@ type SlotInfo struct {
 	Enabled bool   `json:"enabled"`
 	Hours   []int  `json:"hours"`
 }
+
+// JobStatuses 各已注册任务的运行状态（只读快照，按任务名稳定排序）。
+//
+// # 为什么需要它
+//
+// 在这之前，`JobExt` 注册的定时任务对使用者是**完全不可见**的：
+// 守卫轮有没有在跑、上次跑是什么时候、有没有报错，只有翻日志才知道。
+// `/admin/ui/manifest` 要把这份状态下发给控制台，所以在这里开一个只读口子。
+//
+// # 为什么复用 Jobs.Statuses 而不是自己遍历
+//
+// 状态（lastRun / lastErr）只存在于 Jobs 内部，Scheduler 只持有它的指针。
+// 自己再遍历一遍等于维护第二份事实来源，迟早与真实运行状态不一致。
+func (s *Scheduler) JobStatuses() []Status {
+	if s == nil || s.jobs == nil {
+		return nil
+	}
+	return s.jobs.Statuses()
+}

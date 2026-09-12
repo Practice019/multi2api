@@ -196,6 +196,17 @@ func (a adminSchedulerAdapter) KeepaliveEnabled() bool {
 	return a.s.SlotEnabled(workbuddy.SlotKeepalive)
 }
 
+// JobStatuses 把已注册任务的运行状态透给控制台（admin.JobStatusView）。
+//
+// 这是**可选**扩展：/admin/schedule 不需要它，只有 /admin/ui/manifest 用它
+// 渲染任务调度面板。所以 admin 侧走类型断言发现，而不是塞进 SchedulerView。
+func (a adminSchedulerAdapter) JobStatuses() []scheduler.Status {
+	if a.s == nil {
+		return nil
+	}
+	return a.s.JobStatuses()
+}
+
 // adminTaskSlotAdapter 把共享任务槽适配成 admin.TaskSlot。
 //
 // 与 workbuddy.TaskSlot 指向**同一个** sharedTaskSlot ——
@@ -207,6 +218,7 @@ func (a adminTaskSlotAdapter) Snapshot() map[string]any { return a.s.Snapshot() 
 
 var (
 	_ admin.SchedulerView = adminSchedulerAdapter{}
+	_ admin.JobStatusView = adminSchedulerAdapter{}
 	_ admin.TaskSlot      = adminTaskSlotAdapter{}
 )
 
