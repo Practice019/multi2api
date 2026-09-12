@@ -250,23 +250,83 @@ func TestAdminRoutesCoverAll20Endpoints(t *testing.T) {
 	}
 }
 
-// TestAdminRoutesCapabilities 每条端点必须声明能力位，且只能是上游真有的那几种。
+// TestAdminRoutesCapabilities 端点声明的能力位必须**自洽**。
 //
-// 能力位由**后端下发**驱动前端显隐，声明错了界面就会显示不存在的入口。
+// # 规则（评审 F2 修正后）
+//
+// 一条路由的能力位有两种合法取值：
+//
+//	0（未声明）  该端点不归属于任何能力位 —— 它是"通用端点"，
+//	             manifest 会把它归到保留名 "core"
+//	C != 0      该端点归属能力位 C，且 **C 必须在上游的 Caps() 里**
+//
+// 不合法的是第三种：**声明的能力位并不描述这个端点**。
+// 最典型的反例（本测试就是为了防它复发）：
+//
+//	/admin/client-login 声明 CapChat
+//
+// 它错在两层：
+//  1. CapChat 说的是"这个上游能对话"，而这条端点是本地客户端登录态管理 ——
+//     两者毫无关系，用 CapChat 当占位符把"基础能力"与"专属面板"混为一谈
+//  2. 前端的 hasAnyPanel 按能力位判定"这个上游有没有专属面板"，
+//     而 chat/models 是每个上游都有的基础能力、不构成专属面板判据。
+//     声明 CapChat 的路由因此在导航里永远不会成为入口 —— 声明与效果自相矛盾。
+//
+// 所以现在要求：**声明了能力位的端点，其能力位必须是该上游的"专属"能力**
+// （即不是 CapChat / CapModels 这类基础能力）。基础能力只用来描述 Provider
+// 本身能做什么，不用来给管理端点归类。
 func TestAdminRoutesCapabilities(t *testing.T) {
 	p := NewWithConfig(Config{})
 	caps := p.Caps()
+
+	// 基础能力：描述 Provider 本身，不用于给管理端点归类。
+	base := gateway.CapChat | gateway.CapModels
+
 	for _, r := range p.AdminRoutes() {
+		if r.Title == "" {
+			t.Errorf("端点 %s %s 缺少面板标题", r.Method, r.Path)
+		}
 		if r.Capability == 0 {
-			t.Errorf("端点 %s %s 未声明能力位（前端无法据此显隐）", r.Method, r.Path)
+			// 合法：通用端点，归 manifest 的 "core"。
 			continue
+		}
+		if r.Capability&base != 0 {
+			t.Errorf("端点 %s %s 声明了基础能力 %v —— "+
+				"基础能力描述的是 Provider 本身，不能拿来给管理端点归类；"+
+				"该端点若没有对应能力位，应当留 0（归 core）",
+				r.Method, r.Path, r.Capability)
 		}
 		if !caps.Has(r.Capability) {
 			t.Errorf("端点 %s %s 声明了 %v，但 Provider.Caps() 未包含它 —— "+
 				"声明了能力却没有对应实现属于契约违规", r.Method, r.Path, r.Capability)
 		}
-		if r.Title == "" {
-			t.Errorf("端点 %s %s 缺少面板标题", r.Method, r.Path)
+	}
+}
+
+// TestAdminRoutesCoreEndpointsAreDeclared 钉住"哪些端点走 core"这个事实。
+//
+// 这不是为了限制实现，而是防止**悄悄回流**：client-login 这三条曾经声明
+// CapChat（见上），修好之后若有人又把它们改回基础能力，这里会红。
+func TestAdminRoutesCoreEndpointsAreDeclared(t *testing.T) {
+	p := NewWithConfig(Config{})
+	wantCore := map[string]bool{
+		"GET /admin/client-login":          true,
+		"POST /admin/client-login/switch":  true,
+		"POST /admin/client-login/restore": true,
+	}
+	seen := map[string]bool{}
+	for _, r := range p.AdminRoutes() {
+		key := r.Method + " " + r.Path
+		if wantCore[key] {
+			seen[key] = true
+			if r.Capability != 0 {
+				t.Errorf("%s 应当归 core（能力位 0），实际声明了 %v", key, r.Capability)
+			}
+		}
+	}
+	for k := range wantCore {
+		if !seen[k] {
+			t.Errorf("找不到端点 %s（清单被改动了？）", k)
 		}
 	}
 }
