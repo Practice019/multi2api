@@ -45,8 +45,19 @@ func (k CoolKind) String() string {
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	UID             string    `json:"uid"`
-	Nickname        string    `json:"nickname,omitempty"`
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+
+	// Quota 额度视图。支持单值（workbuddy 积分）与按模型（codearts）两种形态。
+	//
+	// 取代了原来作为**真相来源**的 Credits int64 —— 单个整数装不下按模型配额。
+	// pool 只存不算，语义由上游解释（见 quota.go）。
+	Quota QuotaView `json:"quota"`
+
+	// Credits 是 Quota 的**派生标量**，保留是为了向后兼容：
+	// 前端、统计、以及 55 处既有测试都在用它。
+	//
+	// ⚠ 它不再是真相来源。新代码请用 Quota。
 	Credits         int64     `json:"credits"`
 	Cooling         bool      `json:"cooling"`
 	CoolKind        string    `json:"cool_kind,omitempty"`
@@ -66,7 +77,10 @@ type Status struct {
 }
 
 type entry struct {
-	a            *auth.Auth
+	a *auth.Auth
+	// quota 是额度的**真相来源**（支持单值与按模型两种形态）。
+	// credits 保留为派生标量，供既有消费者与选号权重使用。
+	quota        QuotaView
 	credits      int64
 	successCount int64     // 累计成功
 	errTotal     int64     // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
@@ -139,6 +153,11 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
+	// Quota 额度视图（支持单值与按模型两种形态）。
+	//
+	// 旧状态文件没有这个字段 → 反序列化得到零值 → restoreQuota 会回落到 Credits。
+	// 这样升级不需要迁移脚本。
+	Quota        QuotaView `json:"quota,omitempty"`
 	Credits      int64     `json:"credits"`
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`
@@ -673,14 +692,25 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	return w
 }
 
-// SetCredits 更新账号余额。
-func (p *Pool) SetCredits(uid string, credits int64) {
+// SetQuota 更新账号额度视图（真相来源）。
+//
+// 同一条路径同时维护派生标量 credits，保证旧消费者（前端/统计/既有测试）继续工作。
+func (p *Pool) SetQuota(uid string, q QuotaView) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		e.credits = credits
+		e.quota = q
+		e.credits = q.Effective()
 		p.dirty.Store(true)
 	}
+}
+
+// SetCredits 更新账号余额（单值形态）。
+//
+// 保留为薄封装：**55 处既有调用点**依赖它。全部改名会让本次提交淹没在噪音里，
+// 且增加回归风险。新代码请直接用 SetQuota（要表达按模型额度时必须用它）。
+func (p *Pool) SetCredits(uid string, credits int64) {
+	p.SetQuota(uid, FromCredits(credits))
 }
 
 // Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。
@@ -753,26 +783,44 @@ func (p *Pool) Disable(uid, reason string) {
 // （fails/retryCount/breakerUntil）。签到解冻走这里：签到成功只证明余额恢复与
 // billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx 信号）不应被签到覆盖。
 // 调用方必须已持有 p.mu。
-func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
-	e.credits = credits
+func (p *Pool) reviveCoolingLocked(e *entry, q QuotaView) {
+	e.quota = q
+	e.credits = q.Effective()
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
 }
 
-// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却（余额恢复）。
-// 注意：不碰熔断器——熔断到期（breakerUntil 过期）或下次 chat 成功（NoteSuccess）才恢复。
-func (p *Pool) ReenableIfCredits(uid string, remain int64) {
+// ReenableIfUsable 签到后解冻：由**调用方（上游）**判断这个账号是否已可用。
+//
+// 为什么要传入 usable 而不是让 pool 判断"余额 > 0"：
+// 改造前是 ReenableIfCredits(uid, remain)，里面写着 if remain > 0 ——
+// 那是**上游专属规则**（workbuddy 的"有积分就能用"）。
+// codearts 的账号可能某个模型配额用尽但整体仍可用，
+// 也可能有余额却因凭证过期而不可用 —— pool 无从判断。
+//
+// 所以把判断权交给上游，pool 只执行"解冻或不解冻"。
+// 注意：不碰熔断器 —— 熔断到期或下次 chat 成功（NoteSuccess）才恢复。
+func (p *Pool) ReenableIfUsable(uid string, usable bool, q QuotaView) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		if remain > 0 && !e.disabled {
-			p.reviveCoolingLocked(e, remain)
+		if usable && !e.disabled {
+			p.reviveCoolingLocked(e, q)
 		} else {
-			e.credits = remain
+			e.quota = q
+			e.credits = q.Effective()
 		}
 		p.dirty.Store(true)
 	}
+}
+
+// ReenableIfCredits 旧 API 的薄封装：把"remain > 0 即可用"这条上游规则
+// 留在**调用方**语义里，pool 不再内置它。
+//
+// 保留是为了 55 处既有调用点零改动（见 SetCredits 的注释）。
+func (p *Pool) ReenableIfCredits(uid string, remain int64) {
+	p.ReenableIfUsable(uid, remain > 0, FromCredits(remain))
 }
 
 // NoteError 记录一次错误：喂入唯一的连续失败计数器 fails + 累计错误 errTotal。
@@ -925,8 +973,10 @@ func (p *Pool) List() []Status {
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	st := Status{
-		UID:             uid,
-		Nickname:        e.a.Nickname,
+		UID:      uid,
+		Nickname: e.a.Nickname,
+		Quota:    e.quota,
+		// Credits 是派生标量：真相在 e.quota，这里给 Effective() 保持旧消费者可用。
 		Credits:         e.credits,
 		Cooling:         now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:          e.reason,
@@ -978,7 +1028,10 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			errTotal = int64(s.ErrCount)
 		}
 		p.byUID[uid] = &entry{
-			a:            &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			a: &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
+			// 从落盘状态恢复额度。旧状态文件没有 quota 字段（零值），
+			// 此时回落到 Credits 以保持向后兼容。
+			quota:        restoreQuota(s.Quota, s.Credits),
 			credits:      s.Credits,
 			disabled:     s.Disabled,
 			reason:       s.Reason,
