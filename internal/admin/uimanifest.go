@@ -96,15 +96,29 @@ type uiJob struct {
 //
 // 必须同时往这里加一行，否则 manifest 里该能力的 Title 会退回 id。
 // 有测试守住这一点（见 uimanifest_test.go）。
+//
+// CoreCapability（"core"）不是真实能力位，而是 routeCapName 给
+// "声明了端点但没声明能力位"的路由的保留名。也给它一个标题，
+// 前端就能把它当普通条目渲染，不必特判空串。
 var capTitles = map[string]string{
-	"chat":        "对话",
-	"models":      "模型目录",
-	"checkin":     "签到与保活",
-	"growth":      "成长计划",
-	"travel":      "猫猫旅行",
-	"welfare":     "福利中心",
-	"quota-probe": "额度探测",
+	CoreCapability: "通用端点",
+	"chat":         "对话",
+	"models":       "模型目录",
+	"checkin":      "签到与保活",
+	"growth":       "成长计划",
+	"travel":       "猫猫旅行",
+	"welfare":      "福利中心",
+	"quota-probe":  "额度探测",
 }
+
+// CoreCapability 保留名：声明了管理端点但**没有**对应能力位的路由归到它。
+//
+// # 为什么用保留名而不是空串（评审 F2 相关）
+//
+// 空串在"该键存在但值为空"与"该键缺失"之间无法区分，而前端要按它做路由。
+// 保留名的另一个好处是它**不可能是真实能力位**（gateway.capNames 里没有），
+// 所以前端可以安全地拿它当"归通用区"的判据。
+const CoreCapability = "core"
 
 // capTitle 取能力位的中文标题；未登记时**退回 id 本身**而不是空串 ——
 // 空串会让前端渲染出一个没有名字的导航项，比显示英文更难排查。
@@ -201,13 +215,10 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, m)
 }
 
-// routeCapName 把能力位翻译成名字；未命名位返回 "core"。
-//
-// "core" 是**保留字**，不可能是真实能力位名（capNames 里没有它），
-// 所以前端可以安全地用它表示"归通用组"。
+// routeCapName 把能力位翻译成名字；未命名位返回 CoreCapability。
 func routeCapName(c gateway.Capability) string {
 	if c == 0 {
-		return "core"
+		return CoreCapability
 	}
 	return gateway.String(c)
 }

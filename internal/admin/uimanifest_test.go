@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"workbuddy2api/internal/auth"
@@ -66,6 +67,74 @@ func TestUIManifestEmpty(t *testing.T) {
 	if len(m.Capabilities) != len(gateway.AllCapabilities()) {
 		t.Errorf("能力位字典=%d 项，want %d（应与 AllCapabilities 同步）",
 			len(m.Capabilities), len(gateway.AllCapabilities()))
+	}
+}
+
+// TestUIManifestAggregatesEveryProvider 主聚合循环的**完备性**断言。
+//
+// # 为什么必须单独有这一条（评审 F1 的落点）
+//
+// 下面所有测试都只注册**一个**上游并断言"它出现了"。那种断言只能证明
+// "至少聚合了一个"，**证明不了"每个都被聚合了"** —— 循环里写一个
+// `if i > 0 { continue }` 就能让第 2..N 个上游整体消失，而全部测试仍绿。
+//
+// 这不是理论担忧：评审在整树副本上实测过，注入该 bug 后
+// `go test ./internal/admin/` 全部 PASS，而 manifest 真的少了一个上游
+// （生产语义：codearts 的 4 条端点消失，24 → 20，codearts 组与福利面板整体不见）。
+//
+// 所以这里断言的是**集合相等**，不是"存在"。
+func TestUIManifestAggregatesEveryProvider(t *testing.T) {
+	reg := gateway.NewRegistry()
+	want := []struct {
+		id string
+		n  int
+	}{{"alpha", 2}, {"beta", 1}, {"gamma", 3}}
+
+	for _, spec := range want {
+		routes := make([]gateway.AdminRoute, 0, spec.n)
+		for i := 0; i < spec.n; i++ {
+			routes = append(routes, gateway.AdminRoute{
+				Method:     "GET",
+				Path:       spec.id + "-" + strconv.Itoa(i),
+				Capability: gateway.CapChat,
+				Title:      spec.id,
+			})
+		}
+		if err := reg.Register(&fakeUpstream{id: spec.id, routes: routes}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := manifestFor(t, New(Config{Registry: reg}))
+
+	// 1) providers 数必须等于注册数
+	if len(m.Providers) != len(want) {
+		t.Fatalf("providers=%d，want %d —— 主聚合循环漏了上游", len(m.Providers), len(want))
+	}
+
+	// 2) 每个上游的路由条数都要对上（防"上游在但端点少")
+	got := map[string]int{}
+	for _, p := range m.Providers {
+		got[p.ID] = 0
+	}
+	for _, rt := range m.AdminRoutes {
+		got[rt.Provider]++
+	}
+	total := 0
+	for _, spec := range want {
+		total += spec.n
+		c, ok := got[spec.id]
+		if !ok {
+			t.Errorf("上游 %q 整体消失在 manifest 里", spec.id)
+			continue
+		}
+		if c != spec.n {
+			t.Errorf("上游 %q 的路由=%d 条，want %d", spec.id, c, spec.n)
+		}
+	}
+
+	// 3) 总数也要对上（防"分组数对但总数少"）
+	if len(m.AdminRoutes) != total {
+		t.Errorf("admin_routes 总数=%d，want %d", len(m.AdminRoutes), total)
 	}
 }
 
@@ -148,12 +217,45 @@ func TestUIManifestCapabilityTitles(t *testing.T) {
 
 	// 已登记的能力位必须给出**中文**标题，而不是退回 id。
 	// 这条是真正的守门：capTitle 的退回行为让"漏登记"不会自我暴露。
+	//
+	// 例外：CoreCapability（"core"）**不是真实能力位**，它不出现在
+	// manifest.capabilities 里（那份列表来自 gateway.AllCapabilities），
+	// 只在 admin_routes[].capability 上出现。所以这里跳过它。
 	for id := range capTitles {
+		if id == CoreCapability {
+			if capTitle(id) == id {
+				t.Errorf("保留名 %q 必须有中文标题（如「通用端点」），否则前端显示英文", id)
+			}
+			continue
+		}
 		if got := byID[id]; got == "" {
 			t.Errorf("capTitles 里有 %q 但 manifest 没带出", id)
 		} else if got == id {
 			t.Errorf("能力位 %q 的标题就是它自己的 id —— capTitle 退回了兜底值", id)
 		}
+	}
+}
+
+// TestUIManifestCorRoutesUseReservedName 未声明能力位的路由必须用保留名 core，
+// 且该名字**不能**与任何真实能力位重名。
+//
+// # 为什么这条重要（评审 F2 的收口）
+//
+// 前端靠 "core" 把这类端点归入通用区；一旦它与某个真实能力位重名，
+// 那些端点会被错误地当成"某个能力的面板"，而不会报任何错。
+func TestUIManifestCorRoutesUseReservedName(t *testing.T) {
+	for _, c := range gateway.AllCapabilities() {
+		if gateway.String(c) == CoreCapability {
+			t.Fatalf("保留名 %q 与真实能力位重名了 —— 前端将无法区分两者", CoreCapability)
+		}
+	}
+	// routeCapName(0) 必须是保留名本身
+	if got := routeCapName(0); got != CoreCapability {
+		t.Errorf("routeCapName(0)=%q，want %q", got, CoreCapability)
+	}
+	// 保留名必须能翻译出标题（前端会渲染它）
+	if capTitle(CoreCapability) == CoreCapability {
+		t.Errorf("保留名 %q 没有中文标题", CoreCapability)
 	}
 }
 

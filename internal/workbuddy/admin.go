@@ -141,9 +141,26 @@ func (h *AdminHandler) Routes() []gateway.AdminRoute {
 		{Method: "POST", Path: "/admin/travel/claim", Handler: h.TravelClaim, Capability: gateway.CapTravel, Title: "领取旅行奖励"},
 
 		// ---- 本机客户端登录（workbuddy 专属）----
-		{Method: "GET", Path: "/admin/client-login", Handler: h.ClientLoginStatus, Capability: gateway.CapChat, Title: "本机登录状态"},
-		{Method: "POST", Path: "/admin/client-login/switch", Handler: h.ClientLoginSwitch, Capability: gateway.CapChat, Title: "切换本机登录"},
-		{Method: "POST", Path: "/admin/client-login/restore", Handler: h.ClientLoginRestore, Capability: gateway.CapChat, Title: "回滚本机登录"},
+		//
+		// # 为什么 Capability 是 0（归 "core"）而不是 CapChat（评审 F2）
+		//
+		// 这三条路由原先声明 CapChat。那是错的，有两条独立理由：
+		//
+		//  1. **CapChat 描述的是"这个上游能不能对话"，不是"它有没有本机登录面板"。**
+		//     这三条与对话能力毫无关系 —— 它们是本地客户端的登录态管理。
+		//     用 CapChat 当占位符等于把"基础能力"和"专属面板"两个概念混在一起。
+		//
+		//  2. 前端的 hasAnyPanel 明确**排除** chat/models（理由是那两个能力
+		//     每个上游都有，不构成"专属面板"判据）。所以声明 CapChat 的路由
+		//     在导航里永远不会被当成面板入口 —— 声明与实际效果自相矛盾。
+		//
+		// 归 0 之后它们走 manifest 里已有的保留字 "core" 通道（见
+		// uimanifest.go 的 routeCapName）。语义是"有端点，但没有对应能力位"，
+		// 这正是事实。将来若真有人需要本机登录面板，正确做法是新增一个
+		// 专属能力位，而不是借用 CapChat。
+		{Method: "GET", Path: "/admin/client-login", Handler: h.ClientLoginStatus, Title: "本机登录状态"},
+		{Method: "POST", Path: "/admin/client-login/switch", Handler: h.ClientLoginSwitch, Title: "切换本机登录"},
+		{Method: "POST", Path: "/admin/client-login/restore", Handler: h.ClientLoginRestore, Title: "回滚本机登录"},
 	}
 }
 
