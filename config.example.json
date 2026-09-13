@@ -17,6 +17,10 @@
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300
   },
+  "codearts": {
+    "enabled": true,
+    "refresh_interval_seconds": 60
+  },
   "features": {
     "sanitize_blacklist_fingerprints": true
   },

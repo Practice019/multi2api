@@ -2081,13 +2081,44 @@ let loginProvider = '';
     // ⚠ `g.isDefault` 本身**仍然保留**（它决定账号池的排序与缺省路由提示），
     // 这里只删**渲染**，不动数据。
     const def = '';
-    // 清单里没有这个上游时明说 —— 通常是历史账号或回落路径，
-    // 显示成"未注册"比让它看起来像一个正常上游更有用。
-    const known = info ? '' : '（未在 manifest 里注册）';
+    // # 两种"上游未知"必须分开说 —— 本次实测事故（用户报的 bug）
+    //
+    // providerInfo(g.provider) 返回空有**两个完全不同的原因**，混成一句话说
+    // 就会撒谎：
+    //
+    //   ① 这个分组是兜底组（g.provider === UNLABELED_PROVIDER）：账号连
+    //      provider 字段都没有，registryAccounts 只能把 providerOf(a) 落空的号
+    //      归到这里。它确实**没有归属**，"按默认上游推断"是如实的。
+    //   ② 账号有**明确** provider、但本次启动没启用这个上游：manifest.providers
+    //      里没有它，所以查不到 providerInfo。此时说"推断"是**假话** ——
+    //      后端 /admin/accounts 对这类号给的 provider_inferred 是 false
+    //      （只有**没有** provider 字段的号才会是 true），账号行那一列正显示着
+    //      它的真实 provider。
+    //
+    // 实测（127.0.0.1:7863）：config 未启用 codearts，账号池是持久化的、里面还
+    // 留着 2 个 provider="codearts"（provider_inferred=false）的号，而
+    // /admin/ui/manifest 的 providers 只有 workbuddy。于是组标题渲染成
+    // 「codearts — 2 个账号 · 按默认上游推断（未在 manifest 里注册）」，
+    // 而**同一张表**里这两行的「上游」列明明写着 codearts（没有 `?` 角标）——
+    // 组标题说"按默认上游推断"、行内说"codearts"，两处渲染点自相矛盾。
+    // 这正是本文件反复警告的漂移形态：同一件事有两个渲染点，改一处就露馅。
+    //
+    // ∴ 判据**复用账号行那条**，不另造：是不是兜底组，看
+    //   g.provider === UNLABELED_PROVIDER（兜底组名的定义见 UNLABELED_PROVIDER
+    //   与 registryAccounts）。
+    //
+    // ⚠ 同时删掉这里原先拼的 known（「（未在 manifest 里注册）」）：
+    //   · 情形 ② 下它与 meta 说同一件事（"未注册"），一行里重复两遍；
+    //   · 情形 ① 下这句话**没有意义** —— 兜底组本来就不属于任何上游，
+    //     "没在 manifest 里注册"会被读成"它本该注册而漏了"。
+    //   于是关于"这个上游注册了没有"只剩 meta 一处措辞，不会再出现标题与
+    //   行内各说一套的局面。
     const caps = info && Array.isArray(info.capabilities) ? info.capabilities.length : 0;
     const meta = info
       ? `${caps} 项能力`
-      : '按默认上游推断';
+      : (g.provider === UNLABELED_PROVIDER
+        ? '按默认上游推断'
+        : '本次启动未注册该上游（config 未启用，账号来自持久化池）');
     const n = g.accounts.length;
 
     // ---- R3：折叠 ----
@@ -2132,7 +2163,7 @@ let loginProvider = '';
       + ` title="${esc(g.provider)} · ${n} 个账号（点标题折叠/展开）">`
       + `<span class="acaret"></span>`
       + `<span class="gname">${esc(providerTitle(g.provider) || UNLABELED_PROVIDER)}</span>`
-      + `<span class="dim" style="font-weight:400;font-size:11px">${esc(n + ' 个账号 · ' + meta + def + known)}</span>`
+      + `<span class="dim" style="font-weight:400;font-size:11px">${esc(n + ' 个账号 · ' + meta + def)}</span>`
       + `</button>`
       // 折叠时另起一句：组标题里的"0 个账号 · 4 项能力"回答不了
       // "为什么没有" —— 那是用户下一步要的动作。
