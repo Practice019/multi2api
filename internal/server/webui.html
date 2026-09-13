@@ -148,6 +148,34 @@
   tr.grouprow .gacts{float:right;display:inline-flex;align-items:center;gap:6px;font-weight:400}
   /* 分组行内的小按钮：比面板标题上的按钮更小，因为它在表格行里 */
   tr.grouprow .gact{padding:2px 8px;font-size:11px;font-weight:400}
+  /* 折叠三角（R3）。与模型面板的 .mcaret **同一套画法**（border 画三角），
+     这样"可折叠"在一处学会、处处认得出。
+     ⚠ 这里刻意**不**复用 .mcaret 这个类名 —— 见 accountGroupRow 的注释：
+     那条"隐藏这一组"的规则是按模型面板的 DOM 形状写的，账号表里没有那些
+     节点，套上去会产出一个"看着折叠了、其实什么都没隐藏"的假折叠。 */
+  .acaret{width:0;height:0;flex:none;
+    border-left:4px solid currentColor;border-top:3.5px solid transparent;
+    border-bottom:3.5px solid transparent;transition:transform .15s}
+  tr.grouprow.collapsed .acaret{transform:rotate(-90deg)}
+  /* 折叠后"这一组藏了几个号"必须仍然看得见 ——
+     否则收起就等于把信息删掉，用户只能靠记忆。 */
+  tr.grouprow .gfolded{display:none;margin-right:8px}
+  tr.grouprow.collapsed .gfolded{display:inline}
+  /* 收起该组的账号行（R3）。
+     ⚠ 这是**持久**规则（没有 .collapsed 祖先限定），所以 accountRow 渲染时
+     就必须知道它所在组的开合状态。这一条是折叠唯一真正隐藏东西的地方 ——
+     把它删掉，"折叠"就退化成只转三角、什么也不隐藏的假动作。 */
+  tr.acctrow.collapsed{display:none}
+  /* 分组标题做成按钮（R3）：原来的 <span> 是**不可聚焦**的，键盘用户
+     和读屏器完全够不着它，折叠写完也只有鼠标能用。
+     ⚠ font-family:inherit 与 font:inherit 的区别不是风格问题：
+     `<button>` 有 UA 默认字体（约为等宽），而 button 的简写 font 会**重置**
+     这些图标性属性，把分组标题变成等宽字。必须按属性逐个继承。 */
+  .ghead-btn{display:inline-flex;align-items:center;gap:6px;
+    background:transparent;border:0;padding:0;color:inherit;
+    font:inherit;font-weight:inherit;letter-spacing:inherit;
+    font-family:inherit;cursor:pointer;text-align:left}
+  .ghead-btn:hover{color:var(--acc)}
   /* 有最近错误的任务行整行标红：扫一眼就知道哪个任务出问题了 */
   tr.errrow > td{background:color-mix(in srgb, var(--err) 10%, transparent)}
   /* 通用上游面板（列表 + 领取）的样式。
@@ -299,9 +327,20 @@
     background:color-mix(in srgb,var(--dim) 14%,transparent);color:var(--dim);font-size:11px}
   .chip .mult.free{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
   .chip .mult.hi{color:var(--warn);background:color-mix(in srgb,var(--warn) 17%,transparent)}
-  /* 「上游未提供倍率」：用虚线边框而不是实底 —— 它是"信息缺失"，
-     不该与「免费」（有意义的事实）长得一样。 */
-  .chip .mult.unknown{border:1px dashed var(--line);background:transparent;color:var(--dim)}
+  /* 「上游未提供倍率」（x无）**没有**自己的样式规则（R4）。
+
+     # 原来有一条 .chip .mult.unknown{border:1px dashed…;background:transparent}
+     #
+     # 它当时的理由是"信息缺失不该与「免费」长得一样"。用户要求统一外观后，
+     # 理由本身仍然成立，但**手段换掉了**：区分改由文字承担 ——
+     # 缺失显示 `x无`，免费显示 `x0`。字面量不同，色盲、深浅主题、
+     # 截图、复制粘贴都读得出，比一条虚线边框更可靠。
+     #
+     # 所以这里**故意不留空的 `.chip .mult.unknown{}` 规则**：
+     # 空规则会让"这里是不是本来有个特例"的疑问一直悬着，下次有人
+     # 顺手往里填东西，就等于把用户否掉的方案又装回来。
+     # `unknown` 作为类名仍由 multTag 输出（它是"这个数是未知的"这个
+     # 事实的载体，styled 与否是另一回事），验计算值的断言也依赖它选取元素。 */
 
   /* ---- 模型面板的上游分组（T5）----
      视觉语言与导航分组（.navgrouphd）保持一致：同一个控制台里
@@ -1158,14 +1197,42 @@ let loginProvider = '';
     return a.provider || DEFAULT_PROVIDER;
   }
 
+  // providerRegistryIds 返回 manifest 登记的全部上游 id，**按 id 字典序**。
+  //
+  // # 为什么要有这个函数（R2 决策 1）
+  //
+  // "manifest 里有哪些上游"是全前端唯一的一条判据，被两处消费：
+  //   · 账号池 —— 每个上游都要有账号分组（R2）
+  //   · 模型面板 —— 声明了 models 能力的上游要有模型分组（T5）
+  // 各写一遍是漂移的起点（本项目反复的教训）。这里把它收敛成一个枚举点，
+  // 两处都从它出发，只是**再各自套自己的过滤条件**。
+  //
+  // # 为什么排序在这里做（而不是让调用方排）
+  //
+  // PROVIDERS 的顺序来自后端 JSON，是个不该被依赖的实现细节。
+  // 两处消费方都要求"稳定顺序"，在这里排一次，两边就都稳了 ——
+  // 也避免"账号池排了、模型面板没排"这种半截一致。
+  //
+  // 过滤掉畸形元素：applyManifest 对数组做了归一但**只到数组层、不到元素层**
+  // （providers:[null] 会流到这里），与 upstreamGroups 同一条防御。
+  function providerRegistryIds() {
+    const ids = [];
+    for (const p of (PROVIDERS || [])) {
+      if (p && typeof p === 'object' && p.id) ids.push(String(p.id));
+    }
+    ids.sort();
+    return ids;
+  }
+
   // providersWithCap 返回声明了某能力的所有上游 id。
   //
   // 用途：决定上游分组里显示哪些面板 —— 有该能力的上游才显示对应入口。
   function providersWithCap(cap) {
     const out = [];
-    for (const p of (PROVIDERS || [])) {
+    for (const id of providerRegistryIds()) {
+      const p = providerInfo(id);
       if (p && Array.isArray(p.capabilities) && p.capabilities.indexOf(cap) >= 0) {
-        out.push(p.id);
+        out.push(id);
       }
     }
     return out;
@@ -1462,19 +1529,39 @@ let loginProvider = '';
   function renderAccounts(list) {
     share = (list || []).map(normalizeAccount).filter(Boolean);
     updateNavBadges();
-    if (!share.length) {
-      $('accts').innerHTML = accountPlaceholder('账号池为空 —— 点上方「＋ 添加账号」');
-      return;
-    }
     // 按上游分组：组标题行 + 该组的账号行。
     //
     // 分组不是为了好看 —— 它让"这个号属于哪个上游"从一列小标签
     // 变成一眼可见的结构，号一多时这是最快的定位方式。
+    //
+    // ⚠ 这里**没有** `if (!share.length) return ...` 的提前返回（R2 删掉的）。
+    //
+    // # 为什么原来那条提前返回是个缺陷
+    //
+    // 它把"池子里一个号都没有"直接渲染成一句「账号池为空」，于是
+    // **整池空 = 一个上游都不显示**。用户看到的是"这功能没了"，
+    // 而不是"哪个上游还没加号" —— 而后者才是他下一步要做的动作。
+    //
+    // 判据与模型面板的空态（emptyModelGroups）是同一条：
+    // **manifest 里有的上游，界面上都要有。** 池子空只是"每个上游各 0 个号"，
+    // 是同一件事的一个特例，不该有单独一条出口。所以入口、出口、判据三层
+    // 统一走 registryAccounts() 一份枚举。
     const groups = groupAccountsByProvider(share);
+    // 一个上游都没登记（manifest 没到）时，上一条说明仍然有用：
+    // 那时连分组行都渲染不出来，界面会是一片空白。
+    if (!groups.length) {
+      $('accts').innerHTML = accountPlaceholder('暂无上游 —— 渲染契约未加载，稍后自动重试');
+      return;
+    }
     const rows = [];
     for (const g of groups) {
+      // 开合状态在**每次重绘时重新读一遍** —— 不缓存。
+      // 缓存它就得保证"点一下也更新缓存"，而每次刷新都重建表格
+      // （renderAccounts 直接写 innerHTML），任何缓存都会在下一次刷新时
+      // 与 DOM 不一致。localStorage 才是唯一事实来源。
+      const open = accountGroupOpen(g.provider);
       rows.push(accountGroupRow(g));
-      for (const a of g.accounts) rows.push(accountRow(a));
+      for (const a of g.accounts) rows.push(accountRow(a, open));
     }
     $('accts').innerHTML = rows.join('');
   }
@@ -1545,26 +1632,109 @@ let loginProvider = '';
     return rowPlaceholder(ACCT_COLS, text, cls);
   }
 
-  // groupAccountsByProvider 把账号按上游分组，默认上游在最前。
+  // registryAccounts 把账号并进 **manifest.providers 全集**，缺号的建空组。
   //
-  // 排序必须**稳定**：默认上游优先，其余按 id 字典序。
-  // 不依赖 Map 遍历顺序，否则每次刷新行序都会跳。
-  function groupAccountsByProvider(list) {
-    const byId = new Map();
-    for (const a of list) {
-      const id = providerOf(a);
-      if (!byId.has(id)) byId.set(id, []);
-      byId.get(id).push(a);
-    }
+  // # 判据（与模型面板的 emptyModelGroups 是**同一条**）
+  //
+  // > 存在于 manifest 的上游，界面上都必须出现，哪怕它当前一个号都没有。
+  //
+  // 判据的形状是一条，**枚举点也只有一处**（providerRegistryIds）——
+  // 模型面板与账号池都读它。这是本项目的教训："判据分散就会漂移"：
+  // 两处各写一遍"manifest 里有哪些上游"，早晚会有一处开始漏上游。
+  //
+  // # 为什么独立成函数，而不是塞进 groupAccountsByProvider
+  //
+  // 那个函数是**纯函数**（只做分组排序，不读全局），所以能在 Node 里脱开
+  // 浏览器直接跑。把读全局的枚举混进去，测它就得先造一个假 PROVIDERS ——
+  // 那正是"装置抄了被测对象的常量"那类事故的温床（本项目的 PAGE_SIZE 就这么坏过）。
+  //
+  // 分成"读全局的枚举" + "纯分组"两层后：
+  //   · 枚举层可以在真浏览器里和 manifest 逐字对照
+  //   · 分组层可以在 Node 里灌任意数据（含上游带 / 与 . 的名字）
+  // 两层各自可测，也不用为了测试把任何东西挂到 window 上。
+  function registryAccounts(list) {
+    // 先把每个上游建好空壳 —— 顺序就是最终渲染顺序，下面只往壳里塞号。
     const out = [];
-    for (const [id, accounts] of byId) {
-      out.push({ provider: id, accounts: accounts, isDefault: id === DEFAULT_PROVIDER });
+    const idx = new Map();
+    for (const id of providerRegistryIds()) {
+      if (idx.has(id)) continue;               // 同一个上游登记两次也只出现一组
+      idx.set(id, out.length);
+      out.push({ provider: id, accounts: [] });
     }
+    // 再把号塞进去。两种"未知上游"必须区分对待（与 accountGroupRow 的
+    // 「（未在 manifest 里注册）」措辞是同一条规则）：
+    //   · providerOf 回落出的 id —— 账号**确实属于**某个上游，只是没登记，
+    //     显式建组让用户看得见"这几个号挂在谁名下"
+    //   · list 里有畸形元素（normalizeAccount 已经滤过一层）—— 归入一个
+    //     明确标注的兜底组，而不是硬塞进某个真实上游冒充它的号
+    for (const a of list) {
+      if (!a || typeof a !== 'object') continue;
+      const id = providerOf(a) || UNLABELED_PROVIDER;
+      if (!idx.has(id)) {
+        idx.set(id, out.length);
+        out.push({ provider: id, accounts: [] });
+      }
+      // ⚠ 用 out[idx.get(id)]，不是 out.get(id) —— out 是**数组**，
+      // `idx` 才是那个 Map（id → 下标）。第一版写成了 out.get(id)，
+      // 报 TypeError: out.get is not a function。
+      // 它被 renderAccounts 的调用方 try/catch 吞掉，表现为"账号表一直停在
+      // 『未连接』"——**界面全空、但没有任何可见报错**，正是本项目最难查的一类。
+      out[idx.get(id)].accounts.push(a);
+    }
+    return out;
+  }
+
+  // 上游未知时的兜底分组名。用一个**不可能与真实上游撞名**的串：
+  // 它若与某个真实上游同名，兜底组会显示成那个上游、并谎报账号数。
+  const UNLABELED_PROVIDER = '（未标注）';
+
+  // groupAccountsByProvider 把账号按上游分组。
+  //
+  // 排序必须**稳定**：默认上游优先；其余**有账号的在前、0 账号的在后**，
+  // 组内按 id 字典序。不依赖 Map 遍历顺序，否则每次刷新行序都会跳。
+  //
+  // # 为什么空组要排在后面（用户确认的排序）
+  //
+  // 账号池的第一眼用途是"我的号在哪"。空组是**待办**，不是内容 ——
+  // 排在前面会把每个上游都变成一行噪声，把真实账号挤到屏幕外。
+  // 本函数只负责排序；空组由 registryAccounts 建出来。
+  function groupAccountsByProvider(list) {
+    const out = registryAccounts(list);
+    for (const g of out) g.isDefault = g.provider === DEFAULT_PROVIDER;
     out.sort((x, y) => {
+      // 有号的优先。这是主序 —— 「默认上游」只在**同级之间**才起作用，
+      // 否则默认上游恰好没号时，它会被顶到有号的上游前面。
+      const xe = x.accounts.length === 0, ye = y.accounts.length === 0;
+      if (xe !== ye) return xe ? 1 : -1;
       if (x.isDefault !== y.isDefault) return x.isDefault ? -1 : 1;
       return x.provider < y.provider ? -1 : x.provider > y.provider ? 1 : 0;
     });
     return out;
+  }
+
+  // accountEmptyNote 0 账号分组的说明。
+  //
+  // # 为什么必须是一句话而不是留空
+  //
+  // 空组是这次改动的**新面孔** —— 用户以前从没见过"有标题但没有行"的分组，
+  // 空着会被读成"渲染坏了"，而不是"这个上游还没加号"。
+  // 所以它要讲清两件事：**为什么是空的**、**怎么让它不空**。
+  // 与模型面板的空态注释同一条规则：空白必须能自我解释。
+  //
+  // 措辞按"有没有页内添加账号的入口"分两种 —— 判据仍取自 manifest，
+  // 不硬编码上游名：有 login 的上游点了就能加，没有的只能等后端补流程。
+  function accountEmptyNote(providerId) {
+    const info = providerInfo(providerId);
+    if (!info) {
+      // 连 manifest 都没登记（历史号、回落路径）：不能说"去加一个"，
+      // 因为该往哪个上游加根本无法确定。
+      return '该上游未在 manifest 里注册；已录入的账号会在上面按它的 provider 分组';
+    }
+    const login = info.login;
+    if (login && login.kind) {
+      return '该上游暂无账号 —— 点右侧「＋ ' + (login.label || '添加账号') + '」添加';
+    }
+    return '该上游暂无账号 —— 凭证目录里没有它的凭证文件；该上游未声明页内登录流程';
   }
 
   // accountGroupRow 一个上游分组的标题行。
@@ -1645,15 +1815,94 @@ let loginProvider = '';
     const meta = info
       ? `${caps} 项能力`
       : '按默认上游推断';
-    return `<tr class="grouprow"><td colspan="${ACCT_COLS}">
-      <span class="gname">${esc(providerTitle(g.provider) || '（未标注）')}</span>
-      <span class="dim" style="font-weight:400;font-size:11px">${esc(g.accounts.length + ' 个账号 · ' + meta + def + known)}</span>
-      <span class="gacts">${accountGroupActions(g.provider)}</span>
-    </td></tr>`;
+    const n = g.accounts.length;
+
+    // ---- R3：折叠 ----
+    //
+    // 复用的是模型面板那套**视觉语言**（三角 + 点标题开合 + localStorage），
+    // 但**不是同一份 DOM 形状** —— 分工要写清楚，否则下次改动会踩：
+    //
+    //   共享的：.mgrouphead / .mcaret 的观感、"点整行标题开合"的行为、
+    //           "未知状态默认展开"的默认值、localStorage 的读写范式
+    //   各自的：**靠什么隐藏内容**。模型面板是 CSS（`.mgroup.collapsed .chips`），
+    //           账号池是内联样式（见 accountRow）
+    //
+    // # 为什么账号池这边不能用 CSS 那把"隐藏的钥匙"
+    //
+    // 那把钥匙是 `.mgroup.collapsed .chips{display:none}` —— 它按**类名**选择器
+    // 隐藏，所以要隐藏的东西必须挂在同一个 `.mgroup` 容器里。而账号表是
+    // **一个** <table>，不能嵌套 div（见下），也没有任何祖先可以充当那个容器。
+    //
+    // # 那 `tr.grouprow.collapsed ~ tr.accountrow`（同级选择器）呢
+    //
+    // **它能用，但过宽 —— 所以这个方向根本走不通。**
+    // 兄弟选择器的语义是"**同一父节点下、位于它之后的所有** acctrow"，
+    // 而扁平表里**没有任何结构能界定分组边界**：折叠第 1 组会连第 2 组的
+    // 账号一起隐藏。
+    //
+    // ⚠ 这里必须区分两种失败（我第一版注释写成"活不到运行期"，是**不实的**）：
+    //   · "**失效**" → 读的人会去加 !important / 换个写法试试，白费功夫
+    //   · "**过宽**" → 说明 CSS 无法表达这个约束，**必须把状态流进渲染管线**
+    // 可复现证据：tests/frontend/foster_parenting_probe.js（真 Chrome 实测两件事）
+    //
+    // ⇒ 结论：把每行的显隐直接写在行上（accountRow 的 groupOpen 参数）。
+    //   代价是折叠状态必须经过渲染管线，新增的断言专门盯住这一点。
+    //
+    // ⚠ 类名刻意**不叫** .mgroup / .mcaret，也不给本行加 .mgroup。
+    //   一旦加上，`.mgroup.collapsed .chips{display:none}` 会跟着命中 ——
+    //   而账号表里根本没有 .chips，于是"折叠"变成一个什么都不隐藏的空动作，
+    //   且**不会报任何错**。这正是变异验证 1 要钉住的形态。
+    const open = accountGroupOpen(g.provider);
+    return `<tr class="grouprow${open ? '' : ' collapsed'}" data-acctgroup="${esc(g.provider)}"><td colspan="${ACCT_COLS}">`
+      + `<button class="ghead-btn" data-atoggle="${esc(g.provider)}"`
+      + ` aria-expanded="${open ? 'true' : 'false'}"`
+      + ` title="${esc(g.provider)} · ${n} 个账号（点标题折叠/展开）">`
+      + `<span class="acaret"></span>`
+      + `<span class="gname">${esc(providerTitle(g.provider) || UNLABELED_PROVIDER)}</span>`
+      + `<span class="dim" style="font-weight:400;font-size:11px">${esc(n + ' 个账号 · ' + meta + def + known)}</span>`
+      + `</button>`
+      // 折叠时另起一句：组标题里的"0 个账号 · 4 项能力"回答不了
+      // "为什么没有" —— 那是用户下一步要的动作。
+      + `<span class="gfolded dim" style="font-weight:400;font-size:11px">${esc(n ? '' : accountEmptyNote(g.provider))}</span>`
+      + `<span class="gacts">${accountGroupActions(g.provider)}</span>`
+      + `</td></tr>`;
+  }
+
+  // accountGroupOpen 读账号分组的折叠状态。未知时**默认展开** ——
+  // 与 modelGroupOpen 同一个默认值，理由也一样：首次打开就全部收起，
+  // 会让"这个面板有什么"看不见，比展开更糟。
+  function accountGroupOpen(providerId) {
+    try {
+      const v = localStorage.getItem(LS_ACCTGROUP + '.' + providerId);
+      return v === null ? true : v === '1';
+    } catch { return true; }   // 隐私模式：默认展开
+  }
+
+  function setAccountGroupOpen(providerId, open) {
+    try { localStorage.setItem(LS_ACCTGROUP + '.' + providerId, open ? '1' : '0'); } catch { /* 隐私模式 */ }
   }
 
   // accountRow 一个账号行。
-  function accountRow(a) {
+  //
+  // 参数 groupOpen：它所属的分组当前是不是展开的。
+  //
+  // # 为什么折叠状态要"流进"每一行，而不是靠 CSS
+  //
+  // 模型面板那边是一条 CSS 规则（`.mgroup.collapsed .chips{display:none}`），
+  // 因为它的 chips 区有独立容器。账号表**做不到**，三条路都堵死：
+  //   · 不能给这些行套 <div> —— 表里放非 <tr> 会被 HTML 解析器做
+  //     foster parenting 搬到表外，DOM 结构与写的不一样（实测见
+  //     tests/frontend/foster_parenting_probe.js）
+  //   · `tr.grouprow.collapsed ~ tr.acctrow` **能用但过宽** —— 它选中
+  //     "同一父节点下位于其后**所有**的 acctrow"，跨过分组边界，
+  //     折叠第 1 组会把第 2 组的号也藏掉。扁平表里没有结构能界定边界
+  //   · 干脆不用 `hidden` 的 UA 规则，用 display:none 显式写死：
+  //     `[hidden]` 的 UA 规则是 display:none，**任何** display 声明都能盖过它，
+  //     于是"折叠失效"会变成一条取决于层叠顺序的隐式行为
+  //
+  // ⇒ 显隐只能写在行上。所以渲染每一行时**必须**知道它所在组的开合状态。
+  //   变异验证 1 就是把这个参数拿掉，看断言会不会红。
+  function accountRow(a, groupOpen) {
     let st = '<span class="pill ok">正常</span>';
     if (a.disabled) st = '<span class="pill err">已禁用</span>';
     else if (a.cooling) st = `<span class="pill warn">冷却 ${esc(a.cool_kind || '')} ${a.cool_remaining_sec ? a.cool_remaining_sec + 's' : ''}</span>`;
@@ -1689,7 +1938,10 @@ let loginProvider = '';
       ? `<span class="pill dim" title="该数据来自 /status 回落路径，没有 provider 字段，按默认上游推断">${esc(providerOf(a) || '—')}?</span>`
       : `<span class="pill dim">${esc(providerOf(a) || '—')}</span>`;
 
-    return `<tr>
+    // 折叠状态由调用方传入（见函数头注释）。类名与分组行上的 **同一个**，
+    // 这样"这一行属于被收起的组"是 DOM 里可查询的事实，而不是靠内联样式猜。
+    const rowCls = groupOpen === false ? ' class="acctrow collapsed"' : ' class="acctrow"';
+    return `<tr${rowCls} data-acctof="${esc(providerOf(a))}">
       <td>${pinfo}</td>
       <td>${esc(a.nickname || '—')}</td>
       <td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>
@@ -3292,6 +3544,18 @@ let loginProvider = '';
   // 模型分组折叠状态（T5）。每个上游一个键，值是 '1'/'0'。
   // 与 pagesize 同一个模式：这是用户偏好，刷新与切面板都该保持。
   const LS_MODELGROUP = 'wb2api.modelgroup';
+  // 账号池分组折叠状态（R3）。**独立前缀**，绝不复用 LS_MODELGROUP。
+  //
+  // # 为什么必须是两个键
+  //
+  // 两边都按上游名做键（workbuddy / codearts）。若共用 wb2api.modelgroup，
+  // 两个面板会互相覆盖同一个格子：
+  //   用户在模型面板收起 codearts → 账号池的 codearts 也**被动**折叠；
+  //   再在账号池展开它 → 模型面板又被撑开。
+  // 而且**没有任何报错**，只表现为"折叠状态自己会变"。
+  //
+  // 同一个上游在两个面板里是两种不同的视图，偏好就必须是两份。
+  const LS_ACCTGROUP = 'wb2api.acctgroup';
   // 对话测试的「上游筛选」（T7）。与 pagesize / modelgroup 同一个模式。
   const LS_MODELPROVIDER = 'wb2api.modelprovider';
   // modelProviderWanted：用户想要的上游筛选值。
@@ -4228,13 +4492,18 @@ let multCatalogFailed = false;
   // 上游**声明了 `models` 能力**（说明它本该有模型目录），
   // 却没有出现在 `/v1/models` 里。最常见原因是它没有可用账号 ——
   // 但那句话由渲染层按 `account_count` 决定，这里只负责"让它出现"。
+  //
+  // ⚠ 注意这一条与账号池的 registryAccounts **不是同一条过滤**，别合并：
+  //   · 这里要的是"能列模型的上游" → 额外要求 models 能力位
+  //   · 账号池要的是"每个上游" → 不做能力过滤
+  // 共用的是上游**全集**（providerRegistryIds），过滤各自加。
   function emptyModelGroups() {
     const out = [];
-    const provs = (typeof PROVIDERS !== 'undefined' && PROVIDERS) || [];
-    for (const p of provs) {
-      if (!p || !p.id) continue;
+    for (const id of providerRegistryIds()) {
+      const p = providerInfo(id);
+      if (!p) continue;
       if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
-      out.push({ owner: p.id, accountCount: Number(p.account_count) || 0 });
+      out.push({ owner: id, accountCount: Number(p.account_count) || 0 });
     }
     return out;
   }
@@ -4662,6 +4931,39 @@ let multCatalogFailed = false;
     // 逐行绑会随刷新次数累积监听器（本项目改过的那个 bug —— 见
     // loadGenericList 的注释）。委托绑在 #accts 上只做一次。
     $('accts').addEventListener('click', ev => {
+      // 分组标题 = 折叠开关（R3）。必须排在 gadd / greload 之前判断：
+      // 「＋ 添加账号」「重载 auths」这两个按钮**就在折叠按钮里面**
+      //（.gacts 在 .ghead-btn 内），不先拦下来，点它们会连带把分组收起来。
+      //
+      // 而且这两个动作都是**异步 + 会重绘**的：重绘会把分组按 localStorage
+      // 重新渲染，于是"点添加账号顺手把面板收了"这种副作用很难归因。
+      const hd = ev.target.closest('button[data-atoggle]');
+      if (hd) {
+        const pid = hd.dataset.atoggle;
+        const next = !accountGroupOpen(pid);
+        setAccountGroupOpen(pid, next);
+        // 只改 DOM，不重绘 —— 与模型面板同一处理。
+        // 重绘会丢失当前滚动位置，也会把刚点过的按钮换成一个新节点。
+        //
+        // # 为什么这里能做"纯 DOM 切换"，而渲染时不行
+        //
+        // 渲染时表格整块是新的，行的类只能由渲染代码写；
+        // 这里是**用户当场点的这一组**，把同一个类切到它自己和它的行上即可，
+        // 结果与"重绘一遍"完全一致（localStorage 已同步写好）。
+        const box = hd.closest('tr.grouprow');
+        if (box) {
+          box.classList.toggle('collapsed', !next);
+          // 兄弟行：下一个分组行之前的那些账号行。
+          // 用循环而不是 querySelectorAll 一次性抓 —— 分组行是**逐个**出现的，
+          // 只有"从本行往后、遇到下一个分组行就停"这个范围是这一组的行。
+          for (let n = box.nextElementSibling; n; n = n.nextElementSibling) {
+            if (n.classList.contains('grouprow')) break;
+            if (n.classList.contains('acctrow')) n.classList.toggle('collapsed', !next);
+          }
+        }
+        hd.setAttribute('aria-expanded', next ? 'true' : 'false');
+        return;
+      }
       const add = ev.target.closest('button[data-gadd]');
       if (add) { addAccount(add.dataset.gadd, add); return; }
       const rl = ev.target.closest('button[data-greload]');
@@ -4908,6 +5210,43 @@ let multCatalogFailed = false;
     capTitle: capTitle,
     providersWithCap: providersWithCap,
     hasAnyPanel: hasAnyPanel,
+    // R2/R3：账号池的"manifest 全集"判据与折叠状态。
+    //
+    // 为什么必须暴露：这两条都是**读页面内部状态**才能验的判据 ——
+    //   · "账号池里的上游集合 == manifest 的上游集合"要同时读 DOM 与 manifest
+    //   · "折叠状态存的是哪个 localStorage 键"要能直接读写那个键，
+    //     而不是靠"点一下再刷新看看"这种间接推断（那种测法在改动换实现后
+    //     仍会绿，抓不出"键名漂移"）
+    // 只暴露读函数与一个语义明确的写函数，与上面那块同一性质：
+    // 让测试能驱动，不是放权。
+    providerRegistryIds: providerRegistryIds,
+    accountGroupOpen: accountGroupOpen,
+    setAccountGroupOpen: setAccountGroupOpen,
+    LS_ACCTGROUP: LS_ACCTGROUP,
+    // renderAccounts 暴露**只为了能灌一个空池**进去。
+    //
+    // R2 删掉的那条提前返回只在"池子里一个号都没有"时显形 ——
+    // 而真机上永远至少有 1 个号（测试实例也是），那条路径**没有任何自然入口**。
+    // 不把它变成可驱动的，就等于"修了一条谁也测不到的出口"。
+    // 传空数组是**读**操作（只重绘，不写任何持久状态），与上面那几个同性质。
+    renderAccounts: renderAccounts,
+    // showPanel 按 **data-key** 切面板。
+    //
+    // 暴露它是因为浏览器测试必须能切到被测面板：同一时刻只有一个
+    // section 是 .active，其余 display:none —— 在隐藏的面板里量任何
+    // 尺寸（offsetHeight / getBoundingClientRect）**恒为 0**，
+    // 断言会得到"看起来合理但什么都没测到"的结果。
+    //
+    // ⚠ 这是我实际踩到的：R3 的第一版探针在没有切面板的情况下量
+    // offsetHeight，全部拿到 0，差点据此写出一个恒真的断言。
+    // 故这里只暴露"按 key 切"这一种语义 —— 不暴露下标，
+    // 因为下标依赖 navSections 的构建顺序，会随 manifest 变化而漂移。
+    showPanelByKey: function (key) {
+      const i = navSections.findIndex(s => s && s.dataset && s.dataset.key === key);
+      if (i < 0) return false;
+      showPanel(i);
+      return true;
+    },
     CORE_CAP: CORE_CAP,
     ACCT_COLS: ACCT_COLS,
     COLS: COLS,

@@ -31,6 +31,25 @@ function setModelProviderFilter(v) {
 }
 let multCatalogFailed = false;
 
+// ---- R2 依赖：manifest 的上游目录 ----
+//
+// providerRegistryIds() 读的是模块级 PROVIDERS，而 emptyModelGroups 现在经它
+// 枚举 —— 不在这里声明，产物会报 PROVIDERS is not defined。
+// （反引号在本 String.raw 模板里是**终止符**，所以上面那句不写引号 ——
+//  这是本文件已经踩过两次的坑，见 run_frontend_suites.js 的门禁 0。）
+//
+// 值由**测试自己**通过 setProviders() 灌入（默认空）—— 不抄真 manifest，
+// 否则就成了"装置抄了被测对象的常量"（本文件的 PAGE_SIZE 就这么坏过）。
+let PROVIDERS = [];
+function setProviders(list) { PROVIDERS = list || []; }
+// providerInfo 读的也是 PROVIDERS（emptyModelGroups 用它取 capabilities）。
+// 这里**内联而不是从源码抓**：它是 4 行直读，抓过来只多一个断裂点，
+// 没有额外保真度收益；而 providerRegistryIds 是真判据，必须从源码抓
+//（见下面 pieces 的注释）。
+function providerInfo(id) {
+  return PROVIDERS.find(p => p && p.id === id) || null;
+}
+
 // localStorage 假实现（内存 Map）—— 折叠状态要走真实的读写往返，
 // 用打桩常量验证不了"存进去再读回来还是同一个值"。
 const __lsMap = new Map();
@@ -179,11 +198,11 @@ function syncModelProviderOptions(list) {
 
 function emptyModelGroups() {
     const out = [];
-    const provs = (typeof PROVIDERS !== 'undefined' && PROVIDERS) || [];
-    for (const p of provs) {
-      if (!p || !p.id) continue;
+    for (const id of providerRegistryIds()) {
+      const p = providerInfo(id);
+      if (!p) continue;
       if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
-      out.push({ owner: p.id, accountCount: Number(p.account_count) || 0 });
+      out.push({ owner: id, accountCount: Number(p.account_count) || 0 });
     }
     return out;
   }
@@ -221,6 +240,15 @@ function renderModels(list) {
     // 保持原选择：若它不在筛选后的列表里，回落到第一个（或 auto）。
     sel.value = shown.some(m => m.id === keep) ? keep
       : ((shown.find(m => m.id === 'auto') || shown[0] || {}).id || '');
+  }
+
+function providerRegistryIds() {
+    const ids = [];
+    for (const p of (PROVIDERS || [])) {
+      if (p && typeof p === 'object' && p.id) ids.push(String(p.id));
+    }
+    ids.sort();
+    return ids;
   }
 
 let fail = 0;

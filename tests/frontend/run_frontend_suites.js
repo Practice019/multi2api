@@ -59,6 +59,14 @@ const PROBES = [
   'audit_dead_buttons.js',      // 静态死按钮扫描：id 是否有事件绑定
   'audit_crlf_sensitivity.js',   // CRLF 敏感写法：只报真危险，附安全理由
   'verify_t3_t4_static.js',      // T3+T4 的静态守卫：面板归属属性 / 能力位未被抹掉
+  // R3：账号池的委托是否随刷新累积监听器。
+  //
+  // ⚠ 它**需要**一个跑着的实例（默认 18080，用 ACC_URL 覆盖），
+  // 与上面那些纯静态探针不同 —— 但它的判据（DOMDebugger 数监听器）
+  // 没有静态替代品：`renderAccounts` 每次重建 tbody，
+  // "绑了几次"只有运行期数得出来。
+  // 实例不在时会明确失败而不是静默跳过 —— 静默跳过等于没有守卫。
+  'verify_accts_delegation.js',
 ];
 
 function run(file) {
