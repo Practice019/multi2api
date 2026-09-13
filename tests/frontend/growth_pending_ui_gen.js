@@ -75,14 +75,14 @@ function renderGrowth(list) {
       ['账号数', growthSnaps.length, ''],
       // 额度排在「现在可领」前面：先看家底，再看还能拿多少。
       ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
-      ['现在可领积分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
+      ['现在可领额度', sum.right_now, sum.right_now ? 'ok' : 'dim'],
       ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
       // 「待完成 / 完成后可获得」的口径是**还没做完的任务**：
       // 未接单 + 已接单 + 进行中三种状态都算（见后端 GrowthTask.Pending）。
       // 不含 completed（那属于「待领取」，领奖是另一步）。
       // 措辞强调"完成"而不是"接单"：接单只是开始计进度，不发任何奖励。
       ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
-      ['完成后可获得的积分', sum.credit, sum.credit ? 'ok' : 'dim'],
+      ['完成后可获得的额度', sum.credit, sum.credit ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
       ['能量合计', sum.energy, ''],
     ].map(([k, v, c]) =>
@@ -201,7 +201,7 @@ ok(cards.includes('>5<'), '待完成用 pending_count=5（不是 acceptable 的 
 ok(cards.includes('>600<'), '完成后可得用 pending_credit=600（不是 2150）');
 ok(!cards.includes('>17<'), '不显示 acceptable_count=17');
 ok(!cards.includes('>2150<'), '不显示 acceptable_credit=2150');
-ok(cards.includes('待完成任务') && cards.includes('完成后可获得的积分'), '标签文案正确');
+ok(cards.includes('待完成任务') && cards.includes('完成后可获得的额度'), '标签文案正确（T4：已统一为「额度」）');
 
 // 兼容旧快照：没有 pending_* 时回落到 acceptable_*
 console.log('\n[1b] 旧快照回落');

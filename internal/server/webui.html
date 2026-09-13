@@ -539,11 +539,11 @@
            的动作才在这里出现一个「全部 X」，X 是上游给的名字。
            codearts 报的「领取福利」Batch=false（它没有全量端点）→ 不出现。
 
-           「全部积分」不进这个槽位：额度刷新不是"每日动作"（可以随时点），
+           「全部额度」不进这个槽位：额度刷新不是"每日动作"（可以随时点），
            它是核心对 **CapQuotaProbe** 能力位的统合入口，与上游身份无关，
            所以仍然单独一个按钮。 -->
       <span id="allDailyActs"></span>
-      <button id="btnAllCredits" style="padding:3px 10px;font-size:12px">刷新全部积分</button>
+      <button id="btnAllCredits" style="padding:3px 10px;font-size:12px" title="重新探测所有账号的剩余额度">刷新全部额度</button>
       <!--
         原先这里还有一个「全部保活」按钮，已删除（用户决定）。
 
@@ -577,7 +577,7 @@
     </h2>
     <div class="body" style="padding:0">
       <table><thead><tr>
-        <th>上游</th><th>昵称</th><th>UID</th><th>积分</th><th>状态</th><th>Token</th>
+        <th>上游</th><th>昵称</th><th>UID</th><th title="账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）">额度</th><th>状态</th><th>Token</th>
         <th>今日签到</th><th>成功</th><th>熔断</th><th>在途</th><th>操作</th></tr></thead>
         <tbody id="accts"><tr><td colspan="11" class="dim">未连接</td></tr></tbody></table>
     </div>
@@ -627,7 +627,7 @@
     </div>
     <div class="body" style="padding:0">
       <table><thead><tr>
-        <th>昵称</th><th title="账号积分余额，取自网关本地缓存（点上方「刷新」会一并更新）">额度</th><th>连登</th><th>补签卡</th><th>能量</th><th>盲盒可开</th><th>抽奖</th>
+        <th>昵称</th><th title="账号剩余额度，取自网关本地缓存（点上方「刷新」会一并更新）">额度</th><th>连登</th><th>补签卡</th><th>能量</th><th>盲盒可开</th><th>抽奖</th>
         <th>待领取</th><th>现在可领</th><th>待完成</th><th>完成后可得</th><th>操作</th>
       </tr></thead>
       <tbody id="growthRows"><tr><td colspan="__COLS_GROWTH__" class="dim">加载中…</td></tr></tbody></table>
@@ -712,13 +712,16 @@
         <option value="checkin">签到</option>
         <option value="keepalive">保活</option>
         <option value="travel">旅行</option>
-        <option value="credits">积分</option>
+        <!-- value 是**协议标识**（checkinlog.Kind），不是文案：
+             后端按 'credits' 这个字符串过滤记录。
+             只有显示给用户的那两个字跟着 T4 统一成「额度」。 -->
+        <option value="credits">额度</option>
       </select>
     </h2>
     <div class="body" style="padding:0">
       <div id="histRetention" class="dim" style="padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
       <table><thead><tr>
-        <th>时间</th><th>昵称</th><th>类型</th><th>结果</th><th>积分</th><th>触发</th><th>详情</th></tr></thead>
+        <th>时间</th><th>昵称</th><th>类型</th><th>结果</th><th>额度</th><th>触发</th><th>详情</th></tr></thead>
         <tbody id="histrows"><tr><td colspan="__COLS_HIST__" class="dim">暂无记录</td></tr></tbody></table>
       <div class="pager" id="histPager"></div>
     </div>
@@ -793,7 +796,7 @@
       <fieldset>
         <legend>成长中心自动动作（保存后立即生效）</legend>
         <div class="fieldgroup">
-          <div class="field chk stack"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）</label></div>
+          <div class="field chk stack"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让额度到账的动作）</label></div>
           <div class="field chk stack"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label><span class="hint">只在新账号「还没领到第一只 Buddy」时有实际作用；官方前端没有接单按钮</span></div>
           <div class="field chk stack"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
           <div class="field chk stack"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
@@ -946,6 +949,133 @@ let loginProvider = '';
     if (s < 86400) return Math.floor(s / 3600) + 'h 前';
     return d.toLocaleString('zh-CN', {hour12:false});
   };
+
+  // ---------------------------------------------------------------- T5：Token 剩余时间
+  //
+  // # 唯一的 Token 时长渲染器（所有上游共用）
+  //
+  // 用户的要求（原话）：
+  //
+  //   token 有效时间用什么方式显示，**统一剩余多久、剩余时间吧，都统一一下**
+  //   所有的上游都统一一下，统一显示统一的格式
+  //
+  // 改造前 `accountRow` 里那行是：
+  //
+  //   const d = a.token_expire_sec || 0;
+  //   tok = `<span class="pill ${cls}">${d < 0 ? '已过期' : Math.floor(d / 86400) + 'd'}</span>`
+  //
+  // 三个缺陷，每一个都真实发生过：
+  //
+  //  1. `|| 0` 把**未知**（字段不存在）与 **0 秒** 合并成同一个值。
+  //     后端 `omitempty` 曾让"没有过期时间"的账号整个字段消失（T5 根因），
+  //     于是 codearts 那格渲染成 `0d` —— 一个"还剩 0 天、马上过期"的惊悚读数，
+  //     而真相是**根本不知道**。`—` 与 `0d` 是两件事。
+  //
+  //  2. 只按"天"取整。一天以内**全部**落到 `0d`，而 codearts 的 STS
+  //     寿命约 30 分钟 —— 它的 token 在有效期内的每一分钟都显示 `0d`，
+  //     看不出"还有 28 分钟"和"还有 3 秒"的区别。
+  //
+  //  3. 分段只在 `< 1 天` 与 `< 0` 处切，中间没有 `< 1 小时` 这一档。
+  //
+  // # 统一格式（本函数的契约，也是断言的对象）
+  //
+  //   >= 1 天    → `3 天`
+  //   >= 1 小时  → `5 小时`
+  //   >= 0 秒    → `28 分钟`
+  //   < 0        → `已过期`
+  //   未知       → `—`
+  //
+  // # 为什么"未知"用 undefined/null 判定而不是 falsy
+  //
+  // `0` 是一个**合法且有意义**的读数（正好此刻过期），
+  // 它必须走 `< 0` 之外的那条路 —— 即 `0 分钟`。用 `!sec` 判未知会把
+  // 合法的 0 吞成"未知"，方向正好反了（把确定的零伪装成不知道）。
+  // 这与 pool.QuotaView.HasData 的注释讲的是同一条原则：
+  // **"没查过"和"查到 0"必须能区分。**
+  //
+  // # 为什么不用 Math.round
+  //
+  // 剩余时间是**倒计时**，向上取整会让"还剩 30 秒"显示成 `1 分钟`
+  // （用户会以为还有整整一分钟）。一律向下取整：宁可少报，不可多报。
+  // 这与 fmtCountdown（旅行倒计时）的口径一致。
+  //   · 2 天零 23 小时 → `2 天`（不是 3 天）
+  //   · 59 分 59 秒    → `59 分钟`
+  function fmtTokenRemain(sec) {
+    // 未知：字段没下发（后端 omitempty 吃掉 = 上游没给过期时间），
+    // 或显式 null。一律 `—`，**绝不**退化成 0d / undefined。
+    if (sec === undefined || sec === null) return '—';
+    const n = Number(sec);
+    // 非数值（后端改了字段类型 / 传了字符串）：同样按未知处理。
+    // 不抛异常 —— 一格渲染失败不该让整张表白屏。
+    if (!Number.isFinite(n)) return '—';
+    if (n < 0) return '已过期';
+    if (n >= 86400) return Math.floor(n / 86400) + ' 天';
+    if (n >= 3600) return Math.floor(n / 3600) + ' 小时';
+    // 包含 n === 0：0 秒是"正好到期"，不是未知 —— 它落在这一档，
+    // 显示 `0 分钟`，与 `已过期`（负值）语义上区分得开。
+    return Math.floor(n / 60) + ' 分钟';
+  }
+
+  // 胶囊配色：颜色表达**紧迫度**，与文字是同一份判据派生出来的。
+  //
+  // 注意此处判据必须与 fmtTokenRemain 的档位对齐（天/小时/分钟），
+  // 否则会出现"文字写 5 小时、颜色却是安全的绿"这种自相矛盾的胶囊。
+  function tokenPillClass(sec) {
+    if (sec === undefined || sec === null || !Number.isFinite(Number(sec))) return 'dim';
+    const n = Number(sec);
+    if (n < 0) return 'err';        // 已过期
+    if (n < 3600) return 'err';     // 一小时内：最紧迫（含 codearts 的 STS）
+    if (n < 86400) return 'warn';   // 一天内
+    return 'ok';
+  }
+
+  // ---------------------------------------------------------------- T4：额度单元格
+  //
+  // # 为什么不能直接渲染 `a.credits`
+  //
+  // `/admin/accounts` 的 `credits` 是一个**派生标量**
+  //（`pool.QuotaView.Effective()` 的结果），而 `Effective()` 对
+  // "未探测"（`HasData=false`）返回 **0**。于是：
+  //
+  //     没查过  → credits=0  → 界面显示 `0`   ← 用户读成"这个号没额度了"，去删号
+  //     查到 0  → credits=0  → 界面显示 `0`   ← 这才是真的没额度
+  //
+  // 两种**语义完全不同**的状态在前端长得一模一样。这正是 T2 在后端修的那个坑
+  // （pool.quota.go 的 restoreQuota），但**后端修好了、界面还是显示 0** ——
+  // 因为前端压根不看 `has_data`（改造前全文 `has_data` 出现 0 次）。
+  //
+  // # 判据是 `quota.has_data`，不是 `credits` 的真假
+  //
+  // 权威字段是 `a.quota.has_data`：
+  //
+  //     has_data=false → 还没查过 → `—`
+  //     has_data=true  → 查过了   → 渲染 credits（**0 也照渲染**）
+  //
+  // ⚠ 这里刻意**不做** `credits || '—'` —— 那会把合法的 0 当成缺数据，
+  // 是同一个 bug 的镜像版本（把确定的零伪装成不知道）。
+  //
+  // # 为什么用 `=== false` 而不是 `!hasData`
+  //
+  // 老后端（或 `/status` 回落路径）可能**没有** `quota` 字段。
+  // 那时 `a.quota` 是 undefined，取属性会抛错。所以先判 `quota` 是否是个对象：
+  //   · 没有 quota 字段 → **回落到 credits**（保持改造前的行为，不做无根据的断言）
+  //   · 有 quota 但 has_data 明确为 false → `—`
+  // 即"只有在后端**明确说**没查过时才显示 `—`"，不靠缺失推断。
+  function quotaCellHTML(a) {
+    const q = a && a.quota;
+    // quota 缺失 / 形状不对（老后端）：退回派生的 credits 标量。
+    // ⚠ 这条回落**不**能反过来把真实的 has_data=false 也吃掉 ——
+    // 所以判据是"quota 是不是对象"，而不是"has_data 是不是真"。
+    if (!q || typeof q !== 'object') return `<span class="mono">${esc(a && a.credits)}</span>`;
+    if (q.has_data !== true) return '<span class="dim">—</span>';
+    // 真的查过了 —— 有值就渲染值，0 也照渲染。
+    // 后端的 `remaining` 带 omitempty（0 时不出现），所以这里以 `credits`
+    // 为主、`remaining` 为辅：两者在 has_data=true 时应当一致，
+    // 但不一致时以**界面原本就在用的那个字段**为准，避免出现新的第二份事实。
+    const n = typeof a.credits === 'number' ? a.credits : q.remaining;
+    if (typeof n !== 'number') return '<span class="dim">—</span>';
+    return `<span class="mono">${esc(n)}</span>`;
+  }
 
   const hdr = () => KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
 
@@ -2051,11 +2181,30 @@ let loginProvider = '';
     else if (a.cooling) st = `<span class="pill warn">冷却 ${esc(a.cool_kind || '')} ${a.cool_remaining_sec ? a.cool_remaining_sec + 's' : ''}</span>`;
     else if (a.breaker_fails > 0) st = '<span class="pill warn">熔断 ' + a.breaker_fails + '</span>';
 
+    // Token 列（T5）：**未知**（字段不存在）与 **0 秒** 必须长得不一样。
+    //
+    // 改造前是 `a.token_expire_sec || 0` —— `|| 0` 把未知吞成 0，
+    // 于是"不知道"渲染成 `0d`（假的紧迫读数）。现在：
+    //
+    //   没有 token        → `—`（dim）
+    //   有 token，没 expiry → `—`（未知，与上一行**刻意**同形：都是"没有可读信息"）
+    //   有 token，有 expiry → fmtTokenRemain 的统一格式
+    //
+    // 第三态"有 token 但无 expiry"确实存在：codearts 的 STS 走另一套字段，
+    // `/admin/accounts` 对它不下发 token_expire_sec（实测确认）。
     let tok = '<span class="dim">—</span>';
     if (a.has_token) {
-      const d = a.token_expire_sec || 0;
-      const cls = d < 0 ? 'err' : d < 86400 ? 'warn' : 'ok';
-      tok = `<span class="pill ${cls}">${d < 0 ? '已过期' : Math.floor(d / 86400) + 'd'}</span>`;
+      // ⚠ 传原始值（可能是 undefined），**不要**在这里 `|| 0` ——
+      // fmtTokenRemain 靠"是不是 undefined"区分未知与 0。
+      const d = a.token_expire_sec;
+      if (d !== undefined && d !== null) {
+        tok = `<span class="pill ${tokenPillClass(d)}">${esc(fmtTokenRemain(d))}</span>`;
+      }
+      // else：保持 `—`（未知）。用 title 讲清为什么是 `—` ——
+      // 用户看到"有 token 却没时间"时，第一个疑问就是"是不是坏了"。
+      else {
+        tok = '<span class="dim" title="该凭证没有可读的过期时间（上游未提供 exp）">—</span>';
+      }
     }
     let ck = '<span class="dim">—</span>';
     if (a.today_checkin === 'ok') ck = '<span class="pill ok">已签到</span>';
@@ -2126,7 +2275,7 @@ let loginProvider = '';
       + ` title="${esc(d.title || d.label)}">${esc(d.label)}</button>`);
 
     const quotaBtn = hasCap(pid, 'quota-probe')
-      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/credits/refresh" title="刷新积分">积分</button>`
+      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/credits/refresh" title="重新探测该账号的剩余额度">额度</button>`
       : '';
 
     const act = [
@@ -2157,7 +2306,7 @@ let loginProvider = '';
       <td>${pinfo}</td>
       <td>${esc(a.nickname || '—')}</td>
       <td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>
-      <td class="mono">${esc(a.credits)}</td>
+      <td>${quotaCellHTML(a)}</td>
       <td>${st}</td>
       <td>${tok}</td>
       <td>${ck}</td>
@@ -2415,7 +2564,7 @@ let loginProvider = '';
       el.className = 'notice progress';
       if (t.running) {
         el.textContent = `${t.kind} 执行中… 已用 ${t.elapsed_sec || 0}s`;
-        refresh(); // 过程中也刷新表格，能实时看到积分/状态变化
+        refresh(); // 过程中也刷新表格，能实时看到额度/状态变化
         return;
       }
       if (t.kind) {
@@ -3086,18 +3235,43 @@ let loginProvider = '';
   //
   // 凭空意译比显示英文更糟 —— 用户看到"积分余量"却不知道对应上游哪个字段时，
   // 排障会变难。所以这是一张**只增不改**的对照表，未命中一律原样显示。
+  //
+  // # ⚠ T4 的判断：「积分」在这里**不改成「额度」**（与界面文案的处理不同）
+  //
+  // 这一组 `CreditTotal / CreditRemain / CreditUsed / CreditExpiring /
+  // is_credit_package` 的左边是 **codearts API 的真实字段名**，右边是它的中文注释。
+  // 它不是界面用语，是一张**字段对照表**。
+  //
+  // 判据（三条，缺一不可）：
+  //   1. **右边对着左边**：`CreditRemain` → 「积分余额」是"这个字段叫什么"的翻译。
+  //      `Credit` 在华为云 CodeArts 的契约里就是积分（Credit），不是我们的额度概念。
+  //   2. **左边是上游契约**：`CreditTotal` 等是 `/admin/subscription` 回执里
+  //      真实存在的 key（实测 2026-09-13：`"CreditRemain": 7474.04`）。
+  //      改了右边而不改左边，这张表就从"字段对照"退化成"半截翻译"——
+  //      用户拿 `CreditRemain` 去对上游文档会对不上。
+  //   3. **它与「额度」不是同一个量**：这一栏显示的是**套餐级**的
+  //      总额/余额/已用/即将过期四个数（一个套餐对象的展开），
+  //      而 T4 统一的「额度」是账号池那一列的**单值**（`quota.remaining`）。
+  //      把它们用同一个词会**制造**混乱：用户会以为"额度 7474"和
+  //      「积分余额 7474.04」是两笔钱（其实同一个数，但口径一个是整数一个是小数）。
+  //
+  // 所以：**界面用语统一成「额度」，字段对照表保持「积分」** ——
+  // 这两件事的读者不同（前者是用户，后者是排障时对着上游文档看的人）。
+  // 加 `（上游字段）` 后缀是为了让用户一眼看出"这不是我们的叫法"。
   const KV_LABELS = {
     package_name_cn: '套餐',
     spec_code: '规格代码',
-    is_credit_package: '积分套餐',
+    // 后缀「（上游字段）」把"这是上游的措辞"讲在明面上，
+    // 避免用户把它当成界面用语、进而以为"额度"和"积分"是两种东西。
+    is_credit_package: '积分套餐（上游字段）',
     is_token_package: 'Token 套餐',
     status: '状态',
     start_date: '开始日期',
     end_date: '结束日期',
-    CreditTotal: '积分总额',
-    CreditRemain: '积分余额',
-    CreditUsed: '已用积分',
-    CreditExpiring: '即将过期积分',
+    CreditTotal: '积分总额（上游字段）',
+    CreditRemain: '积分余额（上游字段）',
+    CreditUsed: '已用积分（上游字段）',
+    CreditExpiring: '即将过期积分（上游字段）',
     TokenUsed: '已用 Token',
     uid: '账号',
     campaignId: '活动 ID',
@@ -3173,6 +3347,27 @@ let loginProvider = '';
   // 优先用语义字段（title/name 当标题，benefitAmount+benefitUnit 当数量），
   // 认不出来的键值对原样附在下面。**不假设上游一定是"福利"** ——
   // 换个上游返回别的字段名，这里只是显示得朴素一点，不会崩也不会空白。
+  //
+  // # ⚠ T4 的判断：`title` 是**上游数据**，原样显示，不做用词替换
+  //
+  // 页面上仍会出现含「积分」的文字，来源是这一行 —— 它渲染的是上游
+  // `/admin/welfare` 回执里 title 字段的**原文**。实测（2026-09-13）：
+  //
+  //     "title": "每日签到领1000 积分"
+  //     "title": "学生认证领4000 积分"
+  //     "title": "新用户注册送 4000 积分"
+  //
+  // 这些**不是**我们的界面用语，是上游活动的名字。所以：
+  //
+  //   · 改它 = 篡改上游数据。用户拿着界面上的"每日签到领1000 额度"
+  //     去对上游客服/文档时，两边对不上（上游那份写的是"积分"）。
+  //   · 这与 T4 要统一的东西是**两件事**：T4 统一的是**我们自己写的文案**
+  //     （列头、按钮、toast、筛选下拉）。上游发什么就显示什么，
+  //     与"有什么显示什么，没有的话就不显示"是同一条原则。
+  //
+  // 所以 `title` 走 `esc()` 原样输出。静态守卫
+  // （verify_t4_t5_static.js）也因此只检查**源码**里的文案，
+  // 不检查运行期数据 —— 否则会把上游的活动名当成我们的 bug。
   function genericItemHTML(it, providerId) {
     if (it === null || typeof it !== 'object') {
       return `<div class="gitem"><span class="gname">${esc(String(it))}</span></div>`;
@@ -3252,7 +3447,7 @@ let loginProvider = '';
           method: 'POST',
           body: JSON.stringify({ campaign_id: Number(cid) }),
         });
-        toast(r && r.credits ? `领取成功，+${r.credits} 积分` : '领取成功');
+        toast(r && r.credits ? `领取成功，+${r.credits} 额度` : '领取成功');
         // 只刷新**自己那块**面板，不刷新整页。
         await loadGenericList(pid, cap);
       }, { label: '领取福利' });
@@ -3440,14 +3635,14 @@ let loginProvider = '';
       ['账号数', growthSnaps.length, ''],
       // 额度排在「现在可领」前面：先看家底，再看还能拿多少。
       ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
-      ['现在可领积分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
+      ['现在可领额度', sum.right_now, sum.right_now ? 'ok' : 'dim'],
       ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
       // 「待完成 / 完成后可获得」的口径是**还没做完的任务**：
       // 未接单 + 已接单 + 进行中三种状态都算（见后端 GrowthTask.Pending）。
       // 不含 completed（那属于「待领取」，领奖是另一步）。
       // 措辞强调"完成"而不是"接单"：接单只是开始计进度，不发任何奖励。
       ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
-      ['完成后可获得的积分', sum.credit, sum.credit ? 'ok' : 'dim'],
+      ['完成后可获得的额度', sum.credit, sum.credit ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
       ['能量合计', sum.energy, ''],
     ].map(([k, v, c]) =>
@@ -3788,7 +3983,7 @@ let loginProvider = '';
       let wrote = false;
       try {
         const r = await admin('/admin/growth/' + act, { method: 'POST', body: JSON.stringify(body) });
-        const extra = r.credits ? `，+${r.credits} 积分` : '';
+        const extra = r.credits ? `，+${r.credits} 额度` : '';
         toast(`${label}成功：${r.detail || ''}${extra}`);
         wrote = true;
       } catch (e) {
@@ -4577,7 +4772,7 @@ let loginProvider = '';
           t.arrive_at ? `到站：${new Date(t.arrive_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : '',
           r.remaining_sec !== undefined ? `距离到站：${fmtCountdown(r.remaining_sec)}` : '',
           r.clock_skew_sec ? `本机与上游时钟偏差：${r.clock_skew_sec}s（已自动校正）` : '',
-          t.reward_credit ? `到站可领：${t.reward_credit} 积分` : '',
+          t.reward_credit ? `到站可领：${t.reward_credit} 额度` : '',
           `今日已派出：${t.daily_limit_reached ? '是' : '否'}`,
           t.record_id ? `在途记录：${t.record_id}` : '',
           r.travel_error ? `错误：${r.travel_error}` : '',
@@ -4598,7 +4793,7 @@ let loginProvider = '';
       let wrote = false;
       try {
         const r = await admin('/admin/travel/' + act, { method: 'POST', body: JSON.stringify({ uid }) });
-        toast(act === 'depart' ? `已派猫出门${r.arrive_at ? '，预计 ' + new Date(r.arrive_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) + ' 到站' : ''}` : `已领奖 ${r.credits || 0} 积分`);
+        toast(act === 'depart' ? `已派猫出门${r.arrive_at ? '，预计 ' + new Date(r.arrive_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) + ' 到站' : ''}` : `已领奖 ${r.credits || 0} 额度`);
         wrote = true;
       } catch (e) {
         toast(label + '：' + e.message, true);
@@ -5368,10 +5563,15 @@ let multCatalogFailed = false;
     // 顶部的「全部 X」按钮由 manifest.daily_actions 驱动（T3），
     // 走事件委托（容器会被 renderAllDailyButtons 重建）。
     installAllDailyActions();
-    // 「刷新全部积分」不进每日动作槽位：额度刷新不是"每天一次"的动作，
+    // 「刷新全部额度」不进每日动作槽位：额度刷新不是"每天一次"的动作，
     // 它是核心对 CapQuotaProbe 能力位的统合入口，与上游身份无关。
+    //
+    // ⚠ label 用「额度」，与列头、行内按钮**同一份文案**（T4）：
+    // 这三个地方描述的是同一个动作，措辞不同会让用户以为是三件事。
+    // id 仍是 'credits' —— 那是**协议标识**（对应 /admin/credits/refresh），
+    // 不是文案，不随界面用词改名。
     $('btnAllCredits').onclick = () => startAll({
-      id: 'credits', label: '积分', all_url: '/admin/credits/refresh',
+      id: 'credits', label: '额度', all_url: '/admin/credits/refresh',
     });
     // 「全部签到」不再有静态 id —— 它现在由 workbuddy 自报的
     // daily_actions（id=checkin, batch=true）生成。
@@ -5616,6 +5816,25 @@ let multCatalogFailed = false;
     // 不把它变成可驱动的，就等于"修了一条谁也测不到的出口"。
     // 传空数组是**读**操作（只重绘，不写任何持久状态），与上面那几个同性质。
     renderAccounts: renderAccounts,
+    // fmtTokenRemain —— T5 的统一 Token 时长渲染器。
+    //
+    // 为什么必须暴露：它是**纯函数**（输入秒数 → 输出字符串），
+    // 而它的五档分界（1 天 / 1 小时 / 1 分钟 / 已过期 / 未知）在真机上
+    // **不可能同时出现** —— 一个账号的 token 只可能落在其中一档里。
+    // 也就是说，"分界对不对"这条判据在没有钩子的情况下**完全测不到**：
+    // 只能看当前活着的那几档，而边界（恰好 86400、恰好 0、恰好 undefined）
+    // 恰恰是最容易写错、也是改造前真的写错了的地方
+    //（`|| 0` 把 undefined 与 0 合并 = 边界错误）。
+    //
+    // 与上面同一性质：暴露的是**纯函数**，不写任何状态、不碰凭据。
+    fmtTokenRemain: fmtTokenRemain,
+    // quotaCellHTML —— T4 的额度单元格渲染器（同上：纯函数）。
+    //
+    // 暴露它是为了让"has_data=false 必须显示 —"这条能在**不构造假实例**的前提下验证：
+    // 测试可以喂一个 has_data 明确为 false 的账号视图进来，看它返回什么。
+    // 这比"改后端数据再重启实例"诚实得多 —— 后者会污染被测对象，
+    // 而且需要把实例置于一个非真实状态。
+    quotaCellHTML: quotaCellHTML,
     // renderLoginLocalHint —— 本机提示的渲染函数。
     //
     // 为什么要暴露：提示的显隐**只取决于地址栏的 hostname**，

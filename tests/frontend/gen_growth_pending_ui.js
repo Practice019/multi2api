@@ -69,7 +69,7 @@ ok(cards.includes('>5<'), '待完成用 pending_count=5（不是 acceptable 的 
 ok(cards.includes('>600<'), '完成后可得用 pending_credit=600（不是 2150）');
 ok(!cards.includes('>17<'), '不显示 acceptable_count=17');
 ok(!cards.includes('>2150<'), '不显示 acceptable_credit=2150');
-ok(cards.includes('待完成任务') && cards.includes('完成后可获得的积分'), '标签文案正确');
+ok(cards.includes('待完成任务') && cards.includes('完成后可获得的额度'), '标签文案正确（T4：已统一为「额度」）');
 
 // 兼容旧快照：没有 pending_* 时回落到 acceptable_*
 console.log('\n[1b] 旧快照回落');

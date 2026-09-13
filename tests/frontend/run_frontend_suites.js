@@ -59,6 +59,15 @@ const PROBES = [
   'audit_dead_buttons.js',      // 静态死按钮扫描：id 是否有事件绑定
   'audit_crlf_sensitivity.js',   // CRLF 敏感写法：只报真危险，附安全理由
   'verify_t3_t4_static.js',      // T3+T4 的静态守卫：面板归属属性 / 能力位未被抹掉
+  // T4+T5 的静态守卫：额度列的 has_data 判据 / Token 统一渲染器 / 后端指针化。
+  // 自带变异验证（在临时副本上做，不动原仓库），所以它会**自己证明**
+  // "删掉那一行会红"，而不只是声称如此。
+  'verify_t4_t5_static.js',
+  // 截图工具（**不是断言套件**：它只拍图，不做判据）。
+  //
+  // 为什么不放进本脚本：它需要跑着的实例 + Chrome，且产物是 PNG ——
+  // 放进"全绿/全红"的列表里会让它看起来像一条守卫，而它证明不了行为。
+  // 手动跑：node shot_accounts.js（产物在 .task/ui-convergence/shared/shots/）。
   // R3：账号池的委托是否随刷新累积监听器。
   //
   // ⚠ 它**需要**一个跑着的实例（默认 18080，用 ACC_URL 覆盖），
