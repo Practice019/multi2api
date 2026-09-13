@@ -106,6 +106,28 @@ type loginFlow struct {
 // 编译期断言：本类型必须满足核心认的形状。
 var _ gateway.LoginFlow = (*loginFlow)(nil)
 
+// ⚠ LoginFlow() 必须**缓存**实例 —— 这是端到端实测抓到的 bug。
+//
+// 第一版写成每次调用都 `return &loginFlow{...}` 新建，于是
+// `sessions` map 每次都是空的：
+//
+//	/admin/login/start → 实例 A 存下会话
+//	/admin/login/poll  → 实例 B（sessions 空）→ "授权会话不存在或已结束"
+//
+// **后果：codearts 的页内添加账号永远不可能成功。**
+//
+// # 为什么单测没抓到
+//
+// `newTestFlow` 是**直接构造一个 loginFlow 再连续调 Poll** ——
+// 全程同一个实例，所以"每次调用都换实例"这件事**根本不会发生**。
+// 单元测试测的是"一个 flow 内部的逻辑"，而 bug 在"flow 的获取方式"上。
+//
+// 抓到它的是**端到端**：`start` 之后我直打回调地址，
+// 回调服务器**真能打通**（说明流程活着），但 `poll` 说会话不存在 ——
+// 两个观察互相矛盾，唯一解释就是 poll 拿到的不是同一个 flow。
+//
+// 教训：**单测覆盖单元内部逻辑，覆盖不了"对象的生命周期"。**
+// 这类 bug 只能靠端到端或"跨调用"的测试暴露。
 // LoginFlow 返回本上游的登录流程；未配置时返回 false。
 //
 // ⚠ 这里同时是**两个用途的入口**：
@@ -120,11 +142,16 @@ func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
 	if p == nil || p.login == nil {
 		return nil, false
 	}
-	return &loginFlow{
-		mgr:        p.login,
-		providerID: p.ID(),
-		sessions:   make(map[string]*loginSession),
-	}, true
+	// ⚠ 缓存，不每次新建 —— 见上面那段注释（端到端实测抓到的 bug）：
+	// start 与 poll 必须拿到**同一个**实例，否则 sessions 各是一份空 map。
+	p.loginFlowOnce.Do(func() {
+		p.loginFlowCached = &loginFlow{
+			mgr:        p.login,
+			providerID: p.ID(),
+			sessions:   make(map[string]*loginSession),
+		}
+	})
+	return p.loginFlowCached, true
 }
 
 // Start 让 *Provider 满足 gateway.LoginFlow。
