@@ -16,6 +16,7 @@
 package admin
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -91,6 +92,45 @@ type providerInfo struct {
 	// 与 AdminExt / JobExt 同一个模式 —— 前端不写死上游名，
 	// 加第三个上游时前端 0 改动。
 	Login *providerLogin `json:"login"`
+
+	// AccountColumns 该上游自报的**账号池列集**（有序的列 id）。
+	//
+	// # 空（字段不出现）= "用核心默认列"
+	//
+	// 这与"实现了扩展点但返回空数组"是两件不同的事（见
+	// gateway.AccountColumnsExt 的注释）：前者是 workbuddy 的形态
+	//（用户要求复用现在的表头，所以它后端零改动），后者是明确说"一列都不要"。
+	// `omitempty` 让前者不出现在 JSON 里，前端把它读成 `undefined`
+	// → 回落默认列。**前端不需要认识任何上游名**。
+	AccountColumns []string `json:"accounts_columns,omitempty"`
+}
+
+// accountColumnsOf 问上游「账号池里你要哪些列」。
+//
+// 未实现扩展点 → 返回 nil（= 用默认列，字段不下发）。
+//
+// # 为什么要把"未知列 id"记成日志
+//
+// 列 id 是前后端之间的**字符串契约**。拼错一个字母不会编译失败、不会报错，
+// 前端查不到那个 id 就**跳过** → 那一列静默消失。用户看到的只是"少了一列"，
+// 分不清是漏了还是本来没有 —— 这与本项目反复吃过的"静默失效"是同一形态。
+//
+// 所以这里主动校验一次并留痕：日志里出现这行，说明**上游报错了列名**。
+// 校验失败**不阻断**（照常下发，前端照样跳过）—— 账号列表不该因为
+// 一个列名拼错就整片打不出来。
+func accountColumnsOf(p gateway.Provider) []string {
+	ext, ok := gateway.ExtOf[gateway.AccountColumnsExt](p)
+	if !ok {
+		return nil
+	}
+	cols := ext.AccountColumns()
+	for _, c := range cols {
+		if !gateway.IsKnownAccountColumn(c) {
+			log.Printf("admin: 上游 %s 自报的账号列 id %q 不在规范词汇表里 —— "+
+				"前端会跳过它（该列不会显示）。检查 gateway 的列 id 常量。", p.ID(), c)
+		}
+	}
+	return cols
 }
 
 // providerLogin 登录能力的**声明**（不含任何实现细节）。
@@ -133,6 +173,8 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
 				info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
 			}
+			// 账号池列集：上游自报（未实现 = nil = 用默认 11 列）。
+			info.AccountColumns = accountColumnsOf(p)
 			infos = append(infos, info)
 		}
 	}

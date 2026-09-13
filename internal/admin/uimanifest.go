@@ -239,6 +239,12 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 		if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
 			info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
 		}
+		// ⚠ 账号池列集**也必须在这里填一次** —— 与上面 login 完全同一个坑：
+		// 前端真正读的是 manifest，而 providerInfo 有两个构造点
+		//（本文件 + schedule.go 的 /admin/providers）。只改一处的结果是
+		// "/admin/providers 有、前端读到的 manifest 没有" → 列集永远用不上，
+		// 而接口调试看起来一切正常。
+		info.AccountColumns = accountColumnsOf(p)
 		m.Providers = append(m.Providers, info)
 
 		ext, ok := gateway.ExtOf[gateway.AdminExt](p)
