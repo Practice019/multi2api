@@ -16,7 +16,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"time"
 
 	"workbuddy2api/internal/admin"
@@ -76,7 +75,6 @@ func (w workbuddyOAuthClient) Poll(state string) (any, error) {
 // `LoginFlow()` 返回 false，manifest 的 `login` 置空，
 // 前端不渲染「＋ 添加账号」—— 部署方没配就不给按钮。
 func workbuddyLogin(baseURL string) workbuddy.OAuthFlow {
-	log.Printf("DEBUG workbuddyLogin baseURL=%q", baseURL)
 	if baseURL == "" {
 		return nil
 	}
