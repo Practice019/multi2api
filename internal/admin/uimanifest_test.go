@@ -186,6 +186,61 @@ func TestUIManifestFakeUpstream(t *testing.T) {
 	}
 }
 
+// TestUIManifestHiddenRoutePropagates 上游声明的 Hidden 必须原样下发给前端。
+//
+// # 这条守住什么
+//
+// `AdminRoute.Hidden` 是"这条 GET 路由不是面板入口"的**唯一**判据，
+// 前端（panelRoutesFor）只看这个标志位，不认识任何上游名。
+// 投影时漏拷一个字段（比如只补了结构体没改投影循环）不会报任何错 ——
+// manifest 看起来正常，只是 hidden 全是 false，于是被隐藏的面板**照样出现**。
+// 那正是"字段加了但没生效"的静默失效，必须由本测试挡住。
+//
+// # 为什么两个方向都断言
+//
+// 只断言"hidden 的那条是 true"证明不了没漏拷贝：把整个字段写成常量 true
+// 也能通过。所以要有一条 hidden=false 的对照路由，且它必须**没有**被标成 true ——
+// 否则前端会把动作类端点也排除出面板入口。
+func TestUIManifestHiddenRoutePropagates(t *testing.T) {
+	reg := gateway.NewRegistry()
+	up := &fakeUpstream{
+		id: "hid",
+		routes: []gateway.AdminRoute{
+			// 存在但不是面板入口（对应 codearts 的两条 welfare GET）
+			{Method: "GET", Path: "/admin/hidden-list", Capability: gateway.CapWelfare, Title: "隐福利", Hidden: true},
+			// 正常面板入口（同能力位）—— 对照，必须 hidden=false
+			{Method: "GET", Path: "/admin/visible-list", Capability: gateway.CapWelfare, Title: "显福利"},
+		},
+	}
+	if err := reg.Register(up); err != nil {
+		t.Fatal(err)
+	}
+	m := manifestFor(t, New(Config{Registry: reg}))
+
+	got := map[string]uiAdminRoute{}
+	for _, rt := range m.AdminRoutes {
+		got[rt.Path] = rt
+	}
+	if len(got) != 2 {
+		t.Fatalf("路由=%d 条，want 2: %+v", len(got), got)
+	}
+	if r := got["/admin/hidden-list"]; !r.Hidden {
+		t.Errorf("/admin/hidden-list 的 hidden=%v，want true —— 投影循环漏拷了 Hidden，"+
+			"前端会为一个本该隐藏的能力位生成面板", r.Hidden)
+	}
+	if r := got["/admin/visible-list"]; r.Hidden {
+		t.Errorf("/admin/visible-list 的 hidden=true，want false —— "+
+			"标志位不能是常量（同能力位的正常入口也进了面板）")
+	}
+	// 能力位不受 Hidden 影响：两条都是 welfare。
+	// 这是"隐藏面板 ≠ 抹掉能力位"的契约落点（账号行的每日动作仍依赖它）。
+	for _, p := range []string{"/admin/hidden-list", "/admin/visible-list"} {
+		if r := got[p]; r.Capability != "welfare" {
+			t.Errorf("%s 的 capability=%q，want welfare（Hidden 不得改动能力位归属）", p, r.Capability)
+		}
+	}
+}
+
 // TestUIManifestCapabilityTitles 每个已定义能力位都必须在 manifest 里翻译出名字。
 //
 // # 反向验证

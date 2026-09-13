@@ -55,11 +55,31 @@ type AdminEnv struct {
 //
 // 每条路由都标了 Capability —— 前端据此决定是否显示入口，
 // 能力由**后端下发**，前端不硬编码（见 gateway.AdminRoute 的注释）。
+//
+// # Hidden：两条 welfare 的 GET 路由不是面板入口
+//
+// 用户要求删除左侧导航里 CodeArts 组下的「福利中心」标签页。
+// 做法**不是**删端点、也不是动前端（前端不许认识上游名），而是由本包声明
+// "这两条 GET 路由存在、但不是面板入口"：
+//
+//	GET /admin/welfare      福利活动列表  → Hidden
+//	GET /admin/subscription 套餐与额度    → Hidden
+//
+// 后果是 panelCapsOf 对 codearts 的 welfare 返回空 → 不生成该面板 →
+// buildNav 里该上游一个可见面板都没有 → **整个 codearts 分组从左侧导航消失**
+//（该分组下原本只有 welfare 这一个面板）。这是**预期行为**，不是漏了分组头。
+//
+// 保留的部分（用户明确要求不动）：
+//   - 三条端点本身照挂（HTTP 语义不变，curl 仍可用）
+//   - CapWelfare 能力位照留（Caps() 不动）
+//   - POST /admin/welfare/claim **不标** Hidden —— 它是动作不是面板，
+//     账号池行里的「领取福利」按钮依赖它（来自 daily_actions）。
 func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 	return []gateway.AdminRoute{
 		{
 			Method: "GET", Path: "/admin/welfare",
 			Handler: p.handleWelfareList, Capability: gateway.CapWelfare, Title: "福利中心",
+			Hidden: true,
 		},
 		{
 			Method: "POST", Path: "/admin/welfare/claim",
@@ -68,6 +88,7 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 		{
 			Method: "GET", Path: "/admin/subscription",
 			Handler: p.handleSubscription, Capability: gateway.CapWelfare, Title: "套餐与额度",
+			Hidden: true,
 		},
 		{
 			Method: "POST", Path: "/admin/models/quota-probe",
