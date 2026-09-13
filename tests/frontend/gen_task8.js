@@ -46,6 +46,13 @@ function grab(marker) {
 const pieces = [
   grab('function applyManifest('),
   grab('function providerOf('),
+  // R2 把"manifest 里有哪些上游"收敛成 providerRegistryIds()，
+  // 现在 providersWithCap / upstreamGroups 都经它枚举 —— 不一起抠出来，
+  // 产物会报 `providerRegistryIds is not defined`。
+  //
+  // ⚠ 与 gen_models_display.js 同一个坑：抽取是**按名字**取的。
+  // 顺序放在使用者之前（这里是函数声明，靠提升也能活，但显式一点更好排障）。
+  grab('function providerRegistryIds('),
   grab('function providersWithCap('),
   grab('function capTitle('),
   grab('function providerInfo('),

@@ -332,7 +332,85 @@ if (jobMap) {
   ok(/<tr/.test(seg), '任务行的 map 回调里真的产出 <tr>');
 }
 
-// ---------------------------------------------------------------- 9. 主题（T10）
+// ---------------------------------------------------------------- 9. 账号池折叠（R3）的结构守卫
+//
+// # 为什么要在**静态层**再加一条（E2E 已经量了真实几何）
+//
+// E2E 覆盖的是"行为对不对"。这一条覆盖的是**形状**——两者防的不是同一类回归：
+//   · E2E 会红：隐藏规则被删、委托改成逐行绑、折叠不持久化
+//   · 静态会红：有人"顺手"给分组行加上 .mgroup 类名（复用模型面板的观感），
+//     于是 `.mgroup.collapsed .chips{display:none}` 命中一个**没有 .chips 的**
+//     行 —— 折叠变成只转三角、什么都不隐藏的空动作，且不报任何错。
+//     那种改动在 E2E 上**也是红的**，但报错信息指向 display 而不是根因；
+//     静态这条能直接说出"别把 .mgroup 用在这里"。
+console.log('\n[9] 账号池折叠的形状（R3）');
+
+// 隐藏规则必须是**持久**选择器（不带 .collapsed 祖先限定）。
+// 它一旦被删，"折叠"就退化成一个空动作。
+ok(/tr\.acctrow\.collapsed\s*\{\s*display\s*:\s*none/.test(html),
+  '有 tr.acctrow.collapsed{display:none} —— 折叠真正隐藏东西的地方就这一条');
+
+// 分组行**不能**带 .mgroup：那会让模型面板的 `.mgroup.collapsed .chips` 命中它，
+// 而账号表里没有 .chips —— 结果是"看着折叠了、其实什么都没隐藏"。
+ok(!/class="grouprow[^"]*\bmgroup\b/.test(js) && !/'mgroup'/.test(js.split('function accountGroupRow')[1] || ''),
+  '账号池分组行不借用 .mgroup 类名（借了会命中 .chips 规则 → 假折叠）');
+
+// 折叠状态键必须是独立前缀
+const acctKeyMatch = /const\s+LS_ACCTGROUP\s*=\s*'([^']+)'/.exec(js);
+ok(!!acctKeyMatch, '源码里有 LS_ACCTGROUP 常量（折叠状态的键前缀）');
+if (acctKeyMatch) {
+  ok(acctKeyMatch[1] !== 'wb2api.modelgroup',
+    '账号池折叠键前缀与模型面板不同（' + acctKeyMatch[1] + ' ≠ wb2api.modelgroup）—— ' +
+    '共用会互相覆盖且不报错');
+  // 必须与模型面板的键**字面不同**：两边都按上游名做键，共用即冲突
+  const modelKeyMatch = /const\s+LS_MODELGROUP\s*=\s*'([^']+)'/.exec(js);
+  ok(modelKeyMatch && modelKeyMatch[1] !== acctKeyMatch[1],
+    '两个前缀确实不同（modelgroup=' + (modelKeyMatch ? modelKeyMatch[1] : '?') +
+    ' / acctgroup=' + acctKeyMatch[1] + '）');
+}
+
+// 折叠委托必须绑在 #accts 上，且**只有**一处 —— 逐行绑会随刷新累积。
+//
+// ⚠ 这里数的是 `$('accts').addEventListener` 的出现次数。第一版写了个
+// 带转义的 `\\\$` 正则，在非 String.raw 的普通字符串里匹配不到任何东西，
+// 于是假红了一条本来正确的断言 —— 又是一次"测量工具出错"。
+const acctsHandlers = (js.match(/\$\('accts'\)\.addEventListener\s*\(/g) || []).length;
+ok(acctsHandlers >= 1 && acctsHandlers <= 3,
+  '#accts 上有 ' + acctsHandlers + ' 处委托（1 处起步；不随行数/刷新增长 —— 逐行绑会红）');
+
+// R2：枚举点必须唯一 —— providerRegistryIds 是"manifest 里有哪些上游"的收敛处
+const regIdsDefs = (js.match(/function\s+providerRegistryIds\s*\(/g) || []).length;
+const regIdsAll = (js.match(/\bproviderRegistryIds\s*\(/g) || []).length;
+ok(regIdsDefs === 1, 'providerRegistryIds 只定义一次（判据收敛）');
+ok(regIdsAll - regIdsDefs >= 2,
+  'providerRegistryIds 被**两处以上**消费（账号池 + 模型面板共用同一条判据）—— ' +
+  '实际调用 ' + (regIdsAll - regIdsDefs) + ' 次');
+
+// R2：提前返回必须不在 —— 它是"整池空 = 一个上游都不显示"的那个出口
+const raStart = js.indexOf('function renderAccounts(');
+if (raStart >= 0) {
+  // 窗口取到下一个函数定义为止，避免把别处的代码算进来
+  const raEnd = js.indexOf('\n  function ', raStart + 10);
+  const raBody = js.slice(raStart, raEnd > raStart ? raEnd : raStart + 3000);
+  ok(!/if\s*\(\s*!share\.length\s*\)\s*\{?\s*\$\(/.test(raBody),
+    'renderAccounts 里没有 "if (!share.length) 显示账号池为空" 的提前返回（R2 删掉的出口）');
+  ok(/groupAccountsByProvider\(\s*share\s*\)/.test(raBody),
+    'renderAccounts 仍然经 groupAccountsByProvider(share) 分组');
+}
+
+// R4：.chip .mult.unknown 不能再有**样式规则**，也不能留空壳。
+//
+// ⚠ 必须先把 CSS 注释剥掉再找 —— 这段解释"为什么不再用虚线"的注释里
+// 必然出现 `.chip .mult.unknown{...}` 这个字样，直接扫原文会假红。
+// 扫注释就等于把文档当成代码（本项目踩过：注释被当成代码 → 抓不出真缺陷）。
+const htmlNoCssComments = html.replace(/\/\*[\s\S]*?\*\//g, '');
+ok(!/\.chip\s+\.mult\.unknown\s*\{/.test(htmlNoCssComments),
+  '没有 .chip .mult.unknown{...} 规则（既不能有特例，也不能留空壳）');
+// 但类名必须仍然被输出 —— 否则上面那条会因为"根本没这个类"而空过
+ok(/class="mult unknown"/.test(js),
+  'unknown 类名仍由 multTag 输出（x无 仍是可选取的样式锚点）');
+
+// ---------------------------------------------------------------- 10. 主题（T10）
 console.log('\n[9] 主题系统');
 ok(/data-theme=/.test(js) || /setAttribute\('data-theme'/.test(html), '有 data-theme 机制');
 ok(!/:root\[data-theme="light"\]\{[\s\S]{0,400}?--bg:#0b0e14/.test(html),
