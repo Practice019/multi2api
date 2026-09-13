@@ -44,6 +44,7 @@ const TESTS = [
   ['verify_models_grouped.js','MODELS_URL'], // T5+T6：模型去重/分组/可折叠/倍率
   ['verify_model_provider_filter.js','CHAT_URL'], // T7：对话测试的上游筛选（不去重）
   ['verify_codearts_login.js','LOGIN_URL'], // R1：codearts 页内添加账号端到端（跨请求状态）
+  ['verify_credential_hygiene.js','HYGIENE_URL'], // 凭证卫生：日志数字==界面数字、跳过/冲突有日志
   ['verify_login_local_hint.js','HINT_URL'], // 添加账号弹窗的本机提示（按 hostname 显隐）
   ['verify_cp2_f1.js',  'F1_TEST_URL'],
   ['verify_cp2_f2.js',  'F2_TEST_URL'],
