@@ -2288,7 +2288,19 @@ let loginProvider = '';
         return;
       }
       let p;
-      try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state }) }); }
+      // ⚠ 必须带上 provider —— 与 start 用**同一条**分派规则。
+      //
+      // 这里曾经只传 `{ state }`，于是后端按"不带 provider"处理，
+      // 走了**默认上游（workbuddy）**的 OAuth 去认 codearts 的 state。
+      //
+      // 表现极具误导性：弹窗标题对（start 带了 provider）、
+      // 跳转的授权页也对（CodeArts 站点），**只有轮询走错了上游** ——
+      // 于是界面报 `oauth: state 不存在或已超期，请重新发起授权`。
+      //
+      // 那句文案是 **workbuddy 的 OAuth** 定义的（internal/oauth/oauth.go），
+      // codearts 根本不会有它 —— 这就是"用 A 的 state 去问 B"的典型症状。
+      // 后端 loginPoll 的注释里正好写了要避免这件事，但**前端漏了**。
+      try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state, provider: loginProvider }) }); }
       catch (e) {
         // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
         clearInterval(loginPoll); loginPoll = null;
