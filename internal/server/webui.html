@@ -2274,8 +2274,23 @@ let loginProvider = '';
       + ` data-dayurl="${esc(d.one_url)}"`
       + ` title="${esc(d.title || d.label)}">${esc(d.label)}</button>`);
 
+    // # 为什么这个按钮打的是**核心通用端点**，而不是上游私有端点
+    //
+    // 改造前它写死 `data-dayurl="/admin/credits/refresh"` —— 那是 workbuddy
+    // 挂的私有路由。后果是**本按钮的作用域被一个上游偷偷定义**：
+    //   · 只有 workbuddy 有这个能力位 → 看起来"没问题"
+    //   · 但 codearts 也声明了 quota-probe，而它的额度在 core 的
+    //     /admin/accounts/quota/refresh 上才会被刷到 —— 于是 codearts
+    //     那一整片账号的额度**从来没有被这个按钮碰到过**，而且界面完全沉默。
+    // 现在统一走 core 的 `/admin/accounts/quota/refresh`：它按每个账号**自己**
+    // 的 provider 分派到各自的 gateway.QuotaExt，两个上游一次刷完。
+    //
+    // ⚠ 语义变化（必须写在 title 里，不许让用户自己发现）：
+    //   旧文案说"重新探测**该账号**的剩余额度"，而 core 的通用端点**不收 uid**
+    //   （它恒为全池刷新）。所以点了本行却整表刷新 —— 不明说就是界面撒谎。
+    //   这里如实写成"（刷新全部账号）"，与顶部按钮同一句话。
     const quotaBtn = hasCap(pid, 'quota-probe')
-      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/credits/refresh" title="重新探测该账号的剩余额度">额度</button>`
+      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/accounts/quota/refresh" title="通过核心通用端点重新探测全部账号的剩余额度（该端点按每个账号自己的上游分派，不限于本行；行内按钮与顶部「刷新全部额度」是同一个动作）">额度</button>`
       : '';
 
     const act = [
@@ -2487,13 +2502,27 @@ let loginProvider = '';
         const dayUrl = btn && btn.dataset ? btn.dataset.dayurl : '';
         if (dayUrl) {
           const r = await admin(dayUrl, { method: 'POST', body: JSON.stringify({ uid }) });
-          // 回执形状有两类，都要认（否则会显示成"已提交"，看不见真实结果）：
-          //   · {result:{status,detail}}  —— workbuddy 的签到/保活
-          //   · {claimed:N, results:[…]}  —— codearts 的福利领取
+          // 回执形状有三类，都要认（否则会显示成"已提交"，看不见真实结果）：
+          //   · {result:{status,detail}}                     —— workbuddy 的签到/保活
+          //   · {updated,unknown,failed,skipped,providers}   —— core 的额度刷新
+          //     （行内「额度」按钮走这条：它打的是 /admin/accounts/quota/refresh，
+          //      该端点**不收 uid**，恒为全池刷新 —— 所以这里用 quotaToast
+          //      渲染的是"全部账号"的结果，与顶部按钮同一种文案。）
+          //   · {claimed:N, results:[…]}                     —— codearts 的福利领取
+          //
+          // ⚠ 分支次序：额度那条必须排在 claimed 之前。新回执里没有 `claimed`，
+          // 今天次序无所谓 —— 但**将来 core 若给额度回执补上 results/claimed**，
+          // 排在后面的新分支就永远走不到，本 bug 会以"分支选错 → 静默走 else"
+          // 的同款形态复发。判据用 `typeof r.updated === 'number'`，
+          // 它是额度回执的**特征字段**，不与其它两种形状重叠。
           const res = r && r.result;
           if (res) {
             toast(`${label} ${uid.slice(0, 8)}: ${res.status}${res.detail ? ' · ' + res.detail : ''}`,
               res.status === 'fail');
+          } else if (r && typeof r.updated === 'number') {
+            // 行内按钮打的是**全池**端点 → 文案不能说"该账号"，如实说"全部"。
+            const t = quotaToast(r);
+            toast(t.msg, t.bad);
           } else if (r && typeof r.claimed === 'number') {
             const total = Array.isArray(r.results) ? r.results.length : 0;
             toast(`${label} ${uid.slice(0, 8)}：本次领到 ${r.claimed}/${total}`);
@@ -2540,6 +2569,21 @@ let loginProvider = '';
     try {
       const r = await admin(dact.all_url, { method: 'POST', body: '{}' });
       if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
+      // ⚠ 这一条**必须排在 `r.results` 之前**（本 bug 的同款形态：分支选错
+      // → 静默走 else → 按钮点了、有 toast、用户却看不到任何真实结果）。
+      //
+      // 背景：顶部「刷新全部额度」改成打 core 的 /admin/accounts/quota/refresh
+      // 之后，回执变成 {updated,unknown,failed,skipped,providers,accounts} ——
+      // **没有 results**。旧代码只有 `r.results` 与兜底 else 两支，于是新回执
+      // 落进 else，toast 说"全部额度已提交"，四个计数一个都没显示。
+      // 判据用 typeof r.updated === 'number'（额度回执的特征字段）；
+      // 放在 results 之前，是为了将来 core 若也给额度回执补上个 results 时，
+      // 这条仍然先命中 —— 顺序反了就等于给未来埋一颗同形的雷。
+      else if (r && typeof r.updated === 'number') {
+        const t = quotaToast(r);
+        toast(t.msg, t.bad);
+        refresh(); loadHistory();
+      }
       else if (r && r.results) {
         const ok = r.results.filter(x => x.status === 'ok').length;
         toast(`全部${label}完成：成功 ${ok}/${r.results.length}`);
@@ -2548,6 +2592,35 @@ let loginProvider = '';
         toast(`全部${label}已提交`);
       }
     } catch (e) { toast(`全部${label}失败：${e.message}`, true); }
+  }
+
+  // quotaToast 把 core 额度刷新回执渲染成一句话。
+  //
+  // # 为什么必须分四段（updated / unknown / failed / skipped）
+  //
+  // 回执把结果分成**四类，其中三类都不是错误**：
+  //   updated  拿到数据并写回池            —— 成功
+  //   unknown  问了，上游如实回答"不知道"   —— **正常**，界面显示 `—`，不该标红
+  //   failed   上游返回 nil 或刷新出错      —— 真错误
+  //   skipped  上游压根没实现 QuotaExt      —— **最需要说出来的一类**
+  //
+  // 只报"已更新 N"会让另外三类全部隐形，而 skipped 尤其危险：
+  // 它意味着**某个上游整片账号没被刷到**，旧的 /admin/credits/refresh
+  // 对这种情况是完全沉默的（那正是本 bug 能一直藏着的原因）。
+  // 所以 skipped 非 0 时**必须显式出现在文案里**，不能只当计数。
+  //
+  // bad 只由 failed 决定：把 unknown/skipped 也标红会让"上游不报额度"
+  // 看起来像故障，从而被误修（与后端 refreshQuotas 的分开计数同一条理由）。
+  function quotaToast(r) {
+    const bad = (r.failed || 0) > 0;
+    const parts = [`已更新 ${r.updated || 0}`];
+    if (r.unknown) parts.push(`未知 ${r.unknown}`);
+    if (r.failed)  parts.push(`失败 ${r.failed}`);
+    if (r.skipped) parts.push(`跳过 ${r.skipped}`);
+    const prov = Array.isArray(r.providers) && r.providers.length ? `（${r.providers.join('、')}）` : '';
+    const tail = r.skipped ? `；跳过 ${r.skipped} 个账号的上游未接入额度`
+               : (r.unknown ? '；未知表示上游未报额度，不是错误' : '');
+    return { msg: `全部额度完成：${parts.join(' · ')}${prov}${tail}`, bad };
   }
 
   // ---------------------------------------------------------------- 全量任务进度
@@ -5568,10 +5641,24 @@ let multCatalogFailed = false;
     //
     // ⚠ label 用「额度」，与列头、行内按钮**同一份文案**（T4）：
     // 这三个地方描述的是同一个动作，措辞不同会让用户以为是三件事。
-    // id 仍是 'credits' —— 那是**协议标识**（对应 /admin/credits/refresh），
-    // 不是文案，不随界面用词改名。
+    // id 仍是 'credits' —— 那是**协议标识**，不是文案，不随界面用词改名。
+    //
+    // # all_url 为什么是 core 的通用端点（本 bug 的第二形态）
+    //
+    // 原先是 `/admin/credits/refresh` —— workbuddy 的**私有**路由。
+    // 把它当成"全部额度"的入口有两层错：
+    //   1. 作用域错：它只刷 workbuddy 一个上游，codearts 的额度刷不到
+    //      （codearts 声明了 quota-probe，界面上有额度胶囊，但它恒为 `—`）。
+    //   2. 回执形状错：它回 `{mode:"all", results:[…]}`（**没有 updated 字段**），
+    //      而 startAll 当时的判据是 `r.results` —— 改成通用端点后新回执没有
+    //      results，于是落进最后的 else，toast 说"已提交"而**用户看不到任何真实结果**。
+    //      这就是本条改动必须同时改 startAll 的原因（见那里的新分支）。
+    //
+    // Core 的 `/admin/accounts/quota/refresh` 才是"全部额度"的正确入口：
+    // 它遍历全池、按每个账号**自己**的 provider 找 gateway.QuotaExt，
+    // 回 `{updated, unknown, failed, skipped, providers, accounts}`。
     $('btnAllCredits').onclick = () => startAll({
-      id: 'credits', label: '额度', all_url: '/admin/credits/refresh',
+      id: 'credits', label: '额度', all_url: '/admin/accounts/quota/refresh',
     });
     // 「全部签到」不再有静态 id —— 它现在由 workbuddy 自报的
     // daily_actions（id=checkin, batch=true）生成。
