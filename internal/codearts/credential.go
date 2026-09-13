@@ -11,6 +11,7 @@ package codearts
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,7 +293,17 @@ func (a *Auth) SaveAtomic() error {
 }
 
 // LoadDir 扫描 dir 下 codearts*.json。
-// 解析失败的文件静默跳过（与 auth.LoadDir 的行为一致）。
+//
+// 解析失败的文件**跳过但记日志**（早期版本是静默 continue）。
+//
+// 为什么必须打日志：用户往 auths/ 放了 3 个文件，只有 2 个进了账号池，
+// 界面上没有任何提示 —— 这是"我入库了但不知道入哪里去了"的另一面：
+// 文件没进池，也没人告诉他为什么。日志给出**文件名 + 原因**，
+// 让"少了一个号"从猜测变成可查证的事实。
+//
+// 只打一层 Base：auths/ 目录的完整路径在日志里已经够长，
+// 重复几十行会把真正的原因挤到看不见。
+// 注意**解析成功的文件不产生任何日志** —— 否则账号多起来就是刷屏。
 func LoadDir(dir string) ([]*Auth, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "codearts*.json"))
 	if err != nil {
@@ -302,10 +313,12 @@ func LoadDir(dir string) ([]*Auth, error) {
 	for _, f := range files {
 		raw, err := os.ReadFile(f)
 		if err != nil {
+			log.Printf("codearts: 跳过 %s: %v", filepath.Base(f), err)
 			continue
 		}
 		a, err := ParseCredential(raw)
 		if err != nil {
+			log.Printf("codearts: 跳过 %s: %v", filepath.Base(f), err)
 			continue
 		}
 		a.FilePath = f
