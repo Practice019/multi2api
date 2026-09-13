@@ -65,13 +65,60 @@ import (
 type authDirProvider struct {
 	stubProvider
 	dir string
+	// creds 是本桩"自己读出来"的凭证。
+	//
+	// ⚠ 以前这里是靠**真实扫描器**（`auth.LoadDir` 只 glob `workbuddy*.json`）
+	// 去读 `t.TempDir()` 里的文件，于是 fixture 必须把文件命名成
+	// `workbuddy-*.json` 才扫得到 —— 那是**测试依赖产品实现细节**。
+	//
+	// 现在核心改走 `gateway.CredentialLoader`（凭证格式由上游自报），
+	// 桩直接给出凭证，**不再依赖任何 Glob 前缀**。fixture 也随之简化：
+	// "两目录文件数不同"这件事改由 `creds` 的长度表达，比数文件更直接。
+	creds []gateway.Credential
 }
 
 func (p *authDirProvider) AuthDir() string { return p.dir }
 
+// LoadCredentials 让桩满足 `gateway.CredentialLoader`。
+//
+// 这是本次修复的核心：**核心不再写死任何一个上游的凭证解析器**。
+// 桩自己说"我读出来的是这些"，于是"扫错解析器"这类缺陷在测试里
+// 也能被表达（以前做不到 —— 测试用的就是那个写死的扫描器）。
+func (p *authDirProvider) LoadCredentials(dir string) ([]gateway.Credential, error) {
+	out := make([]gateway.Credential, 0, len(p.creds))
+	for _, c := range p.creds {
+		c.Provider = p.ID()
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // 编译期断言：桩必须被核心当成"凭证目录自报者"认出来。
 // 少了它，ExtOf 断言失配会**静默**退化成空串回落，测试会红得莫名其妙。
 var _ gateway.AuthDirExt = (*authDirProvider)(nil)
+
+// 同理：桩必须满足 CredentialLoader，否则核心会返 501。
+var _ gateway.CredentialLoader = (*authDirProvider)(nil)
+
+// credOnlyProvider **只**实现 CredentialLoader，不实现 AuthDirExt。
+//
+// 用来验"上游没自报目录时，核心回落到命名约定 `auths/<provider>/`"。
+// 两个扩展点是独立的 —— 上游可以只答出其中一个。
+type credOnlyProvider struct {
+	stubProvider
+	creds []gateway.Credential
+}
+
+func (p *credOnlyProvider) LoadCredentials(dir string) ([]gateway.Credential, error) {
+	out := make([]gateway.Credential, 0, len(p.creds))
+	for _, c := range p.creds {
+		c.Provider = p.ID()
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+var _ gateway.CredentialLoader = (*credOnlyProvider)(nil)
 
 // seedWorkbuddyFiles 在 dir 下落 n 个能被 `auth.LoadDir` 扫到的凭证文件。
 //
@@ -97,14 +144,25 @@ func seedWorkbuddyFiles(t *testing.T, dir string, uids ...string) {
 	}
 }
 
-// countCredFiles 数一遍目录里真实存在的凭证文件数 —— 用例自己复核前提用。
-func countCredFiles(t *testing.T, dir string) int {
+// credentialCount 数一个上游"会读出来几个凭证" —— 用例自己复核前提用。
+//
+// ⚠ 这里原来叫 `countCredFiles`，是去**磁盘上 Glob 文件**的。
+// 改成走 `CredentialLoader` 之后，凭证由桩自己给出（不再落盘），
+// 所以判据要跟着改 —— 否则它永远返回 0，前提检查天天报警（本次实测）。
+//
+// **判据要跟着被测对象走**：被测的是"上游报了几个凭证"，
+// 那就不该用"磁盘上有几个文件"去量它。
+func credentialCount(t *testing.T, p gateway.Provider) int {
 	t.Helper()
-	m, err := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
+	ext, ok := gateway.ExtOf[gateway.CredentialLoader](p)
+	if !ok {
+		t.Fatal("桩没实现 CredentialLoader")
+	}
+	list, err := ext.LoadCredentials("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(m)
+	return len(list)
 }
 
 // reloadFixture 一次把"两个上游 + 两个目录"的完整场景搭好。
@@ -129,23 +187,27 @@ func newReloadFixture(t *testing.T) *reloadFixture {
 	caDir := filepath.Join(base, "codearts")
 
 	// ⚠ 数量刻意不同：2 vs 3。两者相同会让 scanned 断言恒真、变异蒙对。
-	seedWorkbuddyFiles(t, wbDir, "wb-a", "wb-b")
-	seedWorkbuddyFiles(t, caDir, "ca-1", "ca-2", "ca-3")
-	// base 根**故意不放**任何凭证：保证可见的差异只来自两个子目录。
-	// （若根里也有文件，LoadDirCompat 会把它们并进来，两个上游的
-	// scanned 都会被抬高同样的数量，从而**掩盖**真正的目录分派错误。）
+	//
+	// 现在凭证由桩**自己给出**（`CredentialLoader`），不再靠真实 Glob 扫盘 ——
+	// "几个凭证"这件事直接由切片的长度表达，比数文件更直接、也更不容易写错。
+	wbCreds := []gateway.Credential{{UID: "wb-a"}, {UID: "wb-b"}}
+	caCreds := []gateway.Credential{{UID: "ca-1"}, {UID: "ca-2"}, {UID: "ca-3"}}
 
 	reg := gateway.NewRegistry()
-	if err := reg.Register(&authDirProvider{
+	wbProv := &authDirProvider{
 		stubProvider: stubProvider{id: "workbuddy", caps: gateway.CapChat},
 		dir:          wbDir,
-	}); err != nil {
+		creds:        wbCreds,
+	}
+	if err := reg.Register(wbProv); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Register(&authDirProvider{
+	caProv := &authDirProvider{
 		stubProvider: stubProvider{id: "codearts", caps: gateway.CapChat},
 		dir:          caDir,
-	}); err != nil {
+		creds:        caCreds,
+	}
+	if err := reg.Register(caProv); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,7 +229,7 @@ func newReloadFixture(t *testing.T) *reloadFixture {
 
 	return &reloadFixture{
 		h: h, p: p, base: base, wbDir: wbDir, caDir: caDir,
-		wbFileN: countCredFiles(t, wbDir), caFileN: countCredFiles(t, caDir),
+		wbFileN: credentialCount(t, wbProv), caFileN: credentialCount(t, caProv),
 		reloadProv: "workbuddy",
 	}
 }
@@ -404,12 +466,13 @@ func TestReloadMalformedBodyNotFatal(t *testing.T) {
 func TestReloadNilPoolDoesNotPanic(t *testing.T) {
 	base := t.TempDir()
 	caDir := filepath.Join(base, "codearts")
-	seedWorkbuddyFiles(t, caDir, "ca-1", "ca-2", "ca-3")
+	caCreds := []gateway.Credential{{UID: "ca-1"}, {UID: "ca-2"}, {UID: "ca-3"}}
 
 	reg := gateway.NewRegistry()
 	if err := reg.Register(&authDirProvider{
 		stubProvider: stubProvider{id: "codearts", caps: gateway.CapChat},
 		dir:          caDir,
+		creds:        caCreds,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -442,15 +505,27 @@ func TestReloadNilPoolDoesNotPanic(t *testing.T) {
 func TestReloadFallsBackToUpstreamDirWhenNoAuthDirExt(t *testing.T) {
 	base := t.TempDir()
 	caDir := filepath.Join(base, "codearts")
-	seedWorkbuddyFiles(t, caDir, "ca-1", "ca-2", "ca-3")
+	caCreds := []gateway.Credential{{UID: "ca-1"}, {UID: "ca-2"}, {UID: "ca-3"}}
 
-	// ⚠ 用纯 stubProvider：它**没有** AuthDir()，所以 ExtOf 会失配。
+	// ⚠ 用**只实现 CredentialLoader、不实现 AuthDirExt** 的桩：
+	// 这样才验得到"目录由命名约定回落"这条路径。
+	//
+	// 注意这两个扩展点是**独立的** —— 上游可以只答出其中一个。
+	// 这也正是把它们拆开的意义：以前 `AuthDir` 挂在 `LoginFlow` 上时，
+	// 不实现登录流程的上游连目录都答不出来。
 	reg := gateway.NewRegistry()
-	if err := reg.Register(&stubProvider{id: "codearts", caps: gateway.CapChat}); err != nil {
+	noDirProv := &credOnlyProvider{
+		stubProvider: stubProvider{id: "codearts", caps: gateway.CapChat},
+		creds:        caCreds,
+	}
+	if err := reg.Register(noDirProv); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := gateway.ExtOf[gateway.AuthDirExt]((*stubProvider)(nil)); ok {
-		t.Fatal("前提不满足：stubProvider 不该实现 AuthDirExt")
+	if _, ok := gateway.ExtOf[gateway.AuthDirExt](noDirProv); ok {
+		t.Fatal("前提不满足：本桩不该实现 AuthDirExt（那会走自报目录分支，验不到回落）")
+	}
+	if _, ok := gateway.ExtOf[gateway.CredentialLoader](noDirProv); !ok {
+		t.Fatal("前提不满足：本桩必须实现 CredentialLoader")
 	}
 
 	h := New(Config{Registry: reg, AuthDir: base, AuthsBase: base, DefaultProvider: "codearts"})

@@ -2314,7 +2314,46 @@ let loginProvider = '';
       clearInterval(loginPoll); loginPoll = null;
       if (p && p.status === 'ok') {
         $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
-        $('loginOut').textContent = `uid      : ${p.uid}\n昵称     : ${p.nickname}\n域       : ${p.domain}\n有效期   : ${Math.floor((p.expires_in || 0) / 86400)} 天\n凭证文件 : auths/${p.file}`;
+        // ⚠ 三处都用**后端回执**，并且**缺失字段显示 `—` 而不是 `undefined`**。
+        //
+        // 这三行曾经是：
+        //   `域: ${p.domain}` / `有效期: ${Math.floor((p.expires_in||0)/86400)} 天`
+        //   / `凭证文件 : auths/${p.file}`
+        //
+        // 三个问题（用户实测报的）：
+        //
+        //  1. **`凭证文件` 路径是错的** —— 硬编码 `auths/`，而 `p.file` 只有 basename。
+        //     按上游分子目录之后实际是 `auths/codearts/codearts-xxx.json`，
+        //     界面显示成 `auths/codearts-xxx.json` —— **少了一整个上游目录**。
+        //     用户会照着这句去找文件、往那儿放，**那是错的地方**。
+        //     现在用回执的 `dir`（后端实际落盘目录）。
+        //
+        //  2. **`域` 显示 `undefined`** —— codearts 走的 flow 回执**根本不返回** domain
+        //    （`gateway.Credential` 没有这个字段：各上游凭证结构不同）。
+        //     显示 `undefined` 会让人以为拿到了数据。
+        //
+        //  3. **`有效期` 显示 `0 天`** —— 同源：flow 回执原来不返回有效期。
+        //     现在回执带 `expires_at`；上游不提供时它是零值 → 显示 `—`。
+        //
+        // **缺失就显示 `—`**：`undefined` / `0 天` 都是"没处理缺失"的信号，
+        // 而且会伪装成有效数据（`0 天` 看起来像一个真实的过期天数）。
+        const dash = '—';
+        const dirTxt = p.dir ? p.dir.replace(/\\/g, '/') : dash;
+        const fileTxt = p.file ? `${dirTxt}/${p.file}` : dash;
+        const expTxt = (() => {
+          if (!p.expires_at) return dash;
+          const t = Date.parse(p.expires_at);
+          if (!t) return dash;                       // 零值/坏值一律 `—`
+          const days = (t - Date.now()) / 86400000;
+          if (days <= 0) return '已过期';
+          return days < 1 ? `${Math.floor(days * 24)} 小时` : `${Math.floor(days)} 天`;
+        })();
+        $('loginOut').textContent =
+          `uid      : ${p.uid}\n` +
+          `昵称     : ${p.nickname || dash}\n` +
+          `域       : ${p.domain || dash}\n` +
+          `有效期   : ${expTxt}\n` +
+          `凭证文件 : ${fileTxt}`;
         toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
         refresh(); loadHistory();
       }

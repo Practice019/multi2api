@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/pool"
 )
 
@@ -41,6 +42,50 @@ func seedWorkbuddyFile(t *testing.T, dir, uid string) {
 	}
 }
 
+// realScannerProvider 让本文件的回归测试走**真实的** workbuddy 扫描器。
+//
+// ⚠ 本文件测的是"reload 必须显式指定域"（评审 F3 的回归），
+// 与"用哪个扫描器"无关 —— 所以这里刻意用**真扫描器**
+// （`auth.LoadDirCompat`，前缀 `workbuddy*.json`），把 fixture 的文件落盘、真的扫一遍。
+// 这样这条回归测试**不随扫描器抽象化而失去意义**。
+//
+// 对照：`reload_by_provider_test.go` 用的是"桩自己给凭证"的桩，
+// 因为它测的正是"按 provider 选扫描器"那件事 —— 必须能表达"扫错解析器"。
+type realScannerProvider struct {
+	stubProvider
+	authDir string
+}
+
+func (p *realScannerProvider) AuthDir() string { return p.authDir }
+
+func (p *realScannerProvider) LoadCredentials(dir string) ([]gateway.Credential, error) {
+	if dir == "" {
+		dir = p.authDir
+	}
+	// ⚠ 传进来的 `dir` **就是要扫的那个目录** —— 不要再回退到父目录。
+	//
+	// 我第一版在这里算了一次父目录（想"兼容读根"），结果本文件的 fixture
+	// 用 `t.TempDir()` 本身当凭证目录，父目录里没有凭证 → 扫出 0 个，
+	// 两条回归测试红得莫名其妙。
+	//
+	// "要不要连根一起扫"是**核心的选择**（它决定传哪个 dir 进来），
+	// 不是扫描器该自作主张的事。
+	list, err := auth.LoadDirCompat(dir, p.ID())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gateway.Credential, 0, len(list))
+	for _, a := range list {
+		out = append(out, gateway.Credential{Provider: p.ID(), UID: a.UID, Nickname: a.Nickname})
+	}
+	return out, nil
+}
+
+var (
+	_ gateway.AuthDirExt       = (*realScannerProvider)(nil)
+	_ gateway.CredentialLoader = (*realScannerProvider)(nil)
+)
+
 // TestReloadScopesToConfiguredProvider 默认上游是 codearts 时，
 // reload 仍必须只动 workbuddy 的账号。
 //
@@ -66,9 +111,21 @@ func TestReloadScopesToConfiguredProvider(t *testing.T) {
 		t.Fatalf("前置：应扫到 2 个 workbuddy 文件，得到 %d", len(auths))
 	}
 
+	// 注册一个用**真扫描器**的 workbuddy 桩 ——
+	// 核心现在按 ExtOf[CredentialLoader] 分派，不再写死解析器。
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&realScannerProvider{
+		stubProvider: stubProvider{id: "workbuddy", caps: gateway.CapChat},
+		authDir:      dir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
 	h := New(Config{
+		Registry:        reg,
 		Pool:            p,
 		AuthDir:         dir,
+		AuthsBase:       dir,
 		DefaultProvider: "codearts",  // 默认不是 workbuddy
 		ReloadProvider:  "workbuddy", // 本目录属于 workbuddy
 	})
@@ -110,7 +167,15 @@ func TestReloadFallsBackButWorks(t *testing.T) {
 	p.SetDefaultProvider("workbuddy")
 	p.SyncToDirFor("workbuddy", []*auth.Auth{{UID: "u1"}})
 
-	h := New(Config{Pool: p, AuthDir: dir, DefaultProvider: "workbuddy"}) // 无 ReloadProvider
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&realScannerProvider{
+		stubProvider: stubProvider{id: "workbuddy", caps: gateway.CapChat},
+		authDir:      dir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := New(Config{Registry: reg, Pool: p, AuthDir: dir, AuthsBase: dir, DefaultProvider: "workbuddy"}) // 无 ReloadProvider
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localPost("/admin/accounts/reload"))
 

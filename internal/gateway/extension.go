@@ -126,7 +126,6 @@ type LoginFlow interface {
 //
 // 挂在 `LoginFlow` 上就等于说：不实现登录流程的上游，
 // **连"我的凭证在哪"都答不出来**，于是按上游重载 auths 对它不成立。
-//
 // 拆出来之后，两件事各自独立：
 //
 //	只实现 AuthDirExt          → 可被按上游重载（哪怕没有任何登录交互）
@@ -160,6 +159,51 @@ type AuthDirExt interface {
 	// 必须问同一个目录，否则会出现"写成功但池子里没有"，
 	// 或者"重载扫不到刚写进去的凭证"。
 	AuthDir() string
+}
+
+// CredentialLoader 上游自报"怎么把我的凭证文件读出来"。
+//
+// # 为什么必须有这个扩展点（这是实测踩出来的真 bug）
+//
+// 按上游重载 auths 时，核心原来用 **`auth.LoadDirCompat`** 去扫
+// —— 那是 **workbuddy 的解析器**，它的 Glob 前缀写死成 `workbuddy*.json`：
+//
+//	func LoadDir(dir string) ([]*Auth, error) {
+//	    files, _ := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
+//
+// 拿它去扫 codearts 目录，**一个 codearts 凭证都读不到**；
+// 反而把 `auths/` 根下遗留的 workbuddy 旧文件当成了结果。
+//
+// 实测后果（用户报的"添加了账号但重载扫不到"）：
+//
+//	LoadDirCompat("auths", "codearts") 返回 3 条 —— 全是 workbuddy 的
+//	    file=workbuddy-2e37e4f4-....json
+//	    file=workbuddy-4e0fe0e9-....json
+//	    file=workbuddy-ca19abfd-....json
+//	而 auths/codearts/ 里那 1 个 codearts 凭证被完全忽略
+//
+// 更糟的是它随后对 **codearts 域**调用 `SyncToDirFor("codearts", […3 个 workbuddy 账号])`
+// —— 把 workbuddy 的凭证塞进了 codearts 的域。
+//
+// # 为什么不做成"按 provider ID 硬编码分派"
+//
+// 那会让**核心知道每个上游的凭证格式**，等于把"加新上游核心零改动"
+// 这条判据打破 —— 而这正是本项目一直在守的东西。
+// 凭证格式是**上游的事实**，与凭证目录同理：由上游自报。
+//
+// 传进来的 `dir` 是 `AuthDirExt.AuthDir()` 报的那个目录
+//（上游返回空串时核心会回落到默认 AuthDir）。
+//
+// 返回的凭证只被核心用来取 **uid / nickname**（账号池的主键与展示名），
+// **核心不解释凭证内容**（那是上游的事）。所以返回 `[]Credential` 而不是
+// 各上游自己的结构体：核心要的只是投影后的两个字段。
+type CredentialLoader interface {
+	// LoadCredentials 读取 `dir` 下本上游的全部凭证。
+	//
+	// 读不到任何凭证**不是错误**（目录为空/还没添加过账号），返回空切片即可。
+	// 单个文件解析失败应跳过而非整体失败 —— 但**必须记日志**
+	//（静默跳过会让"少了一个号"变成无法排查的事，见 S1 的修复）。
+	LoadCredentials(dir string) ([]Credential, error)
 }
 
 // ErrLoginPending 表示登录授权尚未完成（用户在浏览器里还没点确认）。
