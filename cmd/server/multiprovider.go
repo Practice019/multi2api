@@ -23,44 +23,12 @@ import (
 	"workbuddy2api/internal/pool"
 )
 
-// syncCodeartsAccounts 把 codearts 凭证目录里的账号并入核心账号池。
+// syncCodeartsAccounts 已迁到 codeartscreds.go。
 //
-// # 为什么需要 secret 通道
-//
-// 池子存的是 *auth.Auth（workbuddy 的凭证类型）—— 那是核心唯一认识的凭证。
-// codearts 的凭证是 *codearts.Auth（AK/SK/DPoP 私钥），核心**不得**认识它
-// （判据 3：pool 不得依赖任何上游包）。
-//
-// 于是走 pool 提供的**不透明 any 通道**：
-//
-//	池子保管：SyncToDirWithSecrets 的 secrets 参数
-//	取回使用：pool.SecretOf(uid) → 调用方断言回 *codearts.Auth
-//
-// 池子全程只搬不读，因此它对 codearts 一无所知，耦合为零。
-//
-// # 投影规则
-//
-// 核心只需要 uid（主键）与 nickname（展示），其余字段一律留在 secret 里。
-// 这就是"核心不解释上游凭证"的具体体现。
-//
-// 返回值是**实际生效的账号数**（按 uid 去重后），见 syncCodeartsAccounts 注释 S3。
-func syncCodeartsAccounts(p *pool.Pool, authDir string) int {
-	list, err := codearts.LoadDir(authDir)
-	if err != nil {
-		log.Printf("codearts: 读取凭证目录失败（账号池未并入）: %v", err)
-		return 0
-	}
-	if len(list) == 0 {
-		// 目录里没有可用凭证不是错误：用户可能刚起网关、还没跑 cmd/login。
-		// 这里仍然对齐一次（把已删除的账号剔掉），但不报错、不刷日志。
-		p.SyncToDirWithSecrets(codearts.ProviderID, nil, nil)
-		return 0
-	}
-
-	auths, secrets := dedupeCodeartsByUID(list)
-	p.SyncToDirWithSecrets(codearts.ProviderID, auths, secrets)
-	return len(auths)
-}
+// 它现在从 **codeartsCredStore** 取对象（而不是自己 LoadDir），
+// 因为池 secret 必须与后台续期任务、管理端点共享**同一个** *codearts.Auth：
+// 否则对象级 refreshMu 跨对象失效，续期写回打不到池子，503 必然复发。
+// 详见 codeartscreds.go 的文件头。
 
 // dedupeCodeartsByUID 把 LoadDir 的原始凭证列表按 uid 聚合，每个 uid 选**一份**凭证。
 //
@@ -99,16 +67,39 @@ func syncCodeartsAccounts(p *pool.Pool, authDir string) int {
 // 返回的 auths 与 secrets 的 **uid 集合严格一致**（secrets 的每个键都在 auths 里出现一次，
 // 且 auths 无重复 uid）—— 这是池子能正确 upsert 的前提。
 func dedupeCodeartsByUID(list []*codearts.Auth) ([]*auth.Auth, map[string]any) {
-	auths := make([]*auth.Auth, 0, len(list))
-	secrets := make(map[string]any, len(list))
+	picked, uids := codeartsWinners(list)
+	auths := make([]*auth.Auth, 0, len(picked))
+	secrets := make(map[string]any, len(picked))
 
+	for i, ca := range picked {
+		// 上游凭证本身作为 secret 交给池子保管（不透明，池子不读它的字段）。
+		secrets[uids[i]] = ca
+		// 核心只需要 uid（主键）与 nickname（展示），其余字段一律留在 secret 里。
+		auths = append(auths, &auth.Auth{UID: uids[i], Nickname: ca.Nickname})
+	}
+	return auths, secrets
+}
+
+// codeartsWinners 按 uid 聚合**一次目录扫描**的结果，每个 uid 选一份胜出凭证。
+//
+// 返回的 picked 与 uids 一一对应，顺序 = uid 在 list 里**首次出现**的顺序
+// （不直接遍历 winner map —— map 遍历顺序随机，会让池子内容与日志不可复现）。
+//
+// # 为什么要从 dedupeCodeartsByUID 里抽出来
+//
+// 因为**胜出判据只允许有一份实现**。codeartsCredStore 也必须按 uid 裁决
+// "哪份凭证胜出"（同一 uid 可能有多份文件），若它另写一套判据，
+// store 里的对象与并池时选中的 secret 迟早分叉 —— 那是同一类 bug 的另一个入口。
+//
+// 这里只负责遍历、计数与记日志；"哪份胜出"的全部规则就是 betterCodeartsCred。
+func codeartsWinners(list []*codearts.Auth) (picked []*codearts.Auth, uids []string) {
 	// winner 记录每个 uid 当前胜出的那份凭证，供后续同 uid 的候选比较。
 	winner := make(map[string]*codearts.Auth, len(list))
 	// 各 uid 的候选文件数，用于冲突日志里说明"有 N 份"。
 	count := make(map[string]int, len(list))
-	// winners 按 uid **首次出现**的顺序保存，保证输出顺序与输入顺序一致
+	// uids 按 uid **首次出现**的顺序保存，保证输出顺序与输入顺序一致
 	// （不直接遍历 winner map —— map 遍历顺序随机，会让日志和池子内容不可复现）。
-	order := make([]string, 0, len(list))
+	uids = make([]string, 0, len(list))
 
 	for _, ca := range list {
 		if ca == nil || ca.UID == "" {
@@ -118,7 +109,7 @@ func dedupeCodeartsByUID(list []*codearts.Auth) ([]*auth.Auth, map[string]any) {
 		cur, exists := winner[ca.UID]
 		if !exists {
 			winner[ca.UID] = ca
-			order = append(order, ca.UID)
+			uids = append(uids, ca.UID)
 			continue
 		}
 		if betterCodeartsCred(ca, cur) {
@@ -133,14 +124,11 @@ func dedupeCodeartsByUID(list []*codearts.Auth) ([]*auth.Auth, map[string]any) {
 		}
 	}
 
-	for _, uid := range order {
-		ca := winner[uid]
-		// 上游凭证本身作为 secret 交给池子保管（不透明，池子不读它的字段）。
-		secrets[uid] = ca
-		// 核心只需要 uid（主键）与 nickname（展示），其余字段一律留在 secret 里。
-		auths = append(auths, &auth.Auth{UID: uid, Nickname: ca.Nickname})
+	picked = make([]*codearts.Auth, 0, len(uids))
+	for _, uid := range uids {
+		picked = append(picked, winner[uid])
 	}
-	return auths, secrets
+	return picked, uids
 }
 
 // betterCodeartsCred 报告 cand 是否**优于** cur（按上面的四级判据）。
