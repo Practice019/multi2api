@@ -26,6 +26,22 @@ const (
 	// KindGrowth 成长中心动作（领任务奖励 / 连登兑换 / 补签 / 开盲盒 / 抽奖）。
 	// 与 KindTravel 分开记：两者奖励来源与频率完全不同，混在一起没法按类型统计。
 	KindGrowth = "growth"
+	// KindWelfare 福利领取（codearts 的每日动作）。
+	//
+	// # 为什么要单独一个 Kind（而不是并进 KindCheckin）
+	//
+	// 用户对 codearts 的问法是「**领取福利是否领取**」—— 他要看的是
+	// "今天领过没有"，而 `checkinlog` 正是唯一能回答它的地方。
+	//
+	// 并进 KindCheckin 会让两件事都算不准：
+	//   · 按 kind 统计时，codearts 的领取会被算成"签到"
+	//     （而 codearts **没有**签到端点，Caps 里都不声明 CapCheckin）
+	//   · `/admin/accounts` 的 `today_checkin` 列会对着 codearts 渲染出
+	//     「已签到」—— 一个它根本没有的动作
+	//
+	// 语义上它们是**同一个槽位**（每天一次、点一下领东西），但**归属不同上游**，
+	// 与 KindTravel / KindGrowth 分开记是同一条理由。
+	KindWelfare = "welfare"
 )
 
 // Status 结果状态。

@@ -579,7 +579,9 @@ func TestBackgroundRefreshLandsOnPoolObject(t *testing.T) {
 	cb.SetRefreshInterval(time.Minute)
 
 	// ①+② 走真实装配
-	creds := wireCodeartsCreds(cb, dir)
+	// hist 传 nil：本用例只验"续期打回池子里那个对象"，不碰福利历史。
+	// nil 是**合法值**（上游必须判空）—— 这里顺带把它当默认路径跑一遍。
+	creds := wireCodeartsCreds(cb, dir, nil)
 	p := newTestPool(t)
 	syncCodeartsAccounts(p, creds)
 

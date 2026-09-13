@@ -45,6 +45,7 @@ import (
 	"log"
 	"sync"
 
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/pool"
 )
@@ -299,12 +300,16 @@ func caCredFieldsDiffer(a, b *codearts.Auth) bool {
 //	SetAccounts —— 后台续期任务（jobs.go → localAccounts）
 //	AdminEnv.Accounts / Resolve —— 管理端点
 //	（第三条是池 secret，由 syncCodeartsAccounts 用同一个 store 装载）
-func wireCodeartsCreds(cb *codearts.Provider, dir string) *codeartsCredStore {
+func wireCodeartsCreds(cb *codearts.Provider, dir string, hist *checkinlog.Log) *codeartsCredStore {
 	creds := newCodeartsCredStore(dir)
 	cb.SetAccounts(creds.List)
 	cb.SetAdminEnv(codearts.AdminEnv{
 		Accounts: creds.UIDs,
 		Resolve:  creds.Resolve,
+		// 福利领取的历史记录（账号池的「福利」列据此回答"今天领过没有"）。
+		// 与 workbuddy 拿的是**同一个** checkinLog 实例 —— 两个上游的任务历史
+		// 必须落在同一份日志里，否则「任务历史」面板只看得到一半。
+		Log: hist,
 	})
 	return creds
 }

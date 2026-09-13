@@ -32,9 +32,12 @@ package codearts
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"time"
 
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -49,6 +52,21 @@ type AdminEnv struct {
 	Accounts func() []string
 	// Resolve 按 uid 取凭证（核心注入；nil 时本包按 AuthDir 现场扫描）。
 	Resolve func(uid string) (*Auth, error)
+
+	// Log 任务历史（核心注入，nil = 不记录）。
+	//
+	// # 为什么 codearts 需要它
+	//
+	// 账号池的「福利」列要回答"**今天领过没有**"，而 `/admin/welfare` 只回
+	// `claimable` 布尔、没有"已领"标志。唯一可靠的事实来源是**我们自己**的
+	// 领取动作 —— 记进这里，`/admin/accounts` 就能从历史里查出来。
+	//
+	// 与 workbuddy 的 `cfg.Log` 同一个模式（见 internal/workbuddy/adminendpoints.go）：
+	// 上游包只依赖 `*checkinlog.Log` 这个叶子包，不认识核心。
+	//
+	// nil 是合法值（测试、以及"没配历史落盘"的部署）—— 调用方必须判空，
+	// 不判空会在没配历史的部署上 panic（整条领取端点挂掉）。
+	Log *checkinlog.Log
 }
 
 // AdminRoutes 返回 CodeArts 专属的管理端点（gateway.AdminExt）。
@@ -132,6 +150,19 @@ func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	results, err := p.client.ClaimAllWelfare(a)
 	if err != nil {
+		// 失败也要留痕（理由见下面成功分支的注释）：
+		// 不记的话账号池那一列会停在「—」，用户分不清"没领过"与"领失败了"。
+		if p.adminEnv.Log != nil {
+			p.adminEnv.Log.Append(checkinlog.Record{
+				At:       time.Now(),
+				UID:      a.UID,
+				Nickname: a.Nickname,
+				Kind:     checkinlog.KindWelfare,
+				Status:   checkinlog.StatusFail,
+				Detail:   truncate(err.Error(), 200),
+				Trigger:  "manual",
+			})
+		}
 		writeError(w, http.StatusBadGateway, "领取失败: "+err.Error())
 		return
 	}
@@ -142,6 +173,45 @@ func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	log.Printf("codearts: 福利领取 uid=%s 本次领到 %d/%d", a.UID, claimed, len(results))
+
+	// 记一条本地历史 —— 账号池的「福利」列据此回答"今天领过没有"。
+	//
+	// # 为什么它必须是**本地**记录
+	//
+	// `/admin/welfare` 只回 `claimable` 布尔，**没有独立的"已领"标志**；
+	// 而 `claimable=false` 既可能是"今日已领"，也可能是"资格不符"——
+	// 界面无法区分（见 internal/codearts/welfare.go 的实测注释）。
+	//
+	// 但"**我们**今天领过没有"是我们自己知道的事实：领取动作就是经这条端点发的。
+	// 所以如实记下**我们这次动作的结果**，不去猜上游状态：
+	//
+	//	领到 ≥1 项   → StatusOK     （界面上说「已领取」）
+	//	一项都没领到 → StatusSkip   （界面上说「无可领」—— 不说"已领"，
+	//	                             因为我们无法区分"今天领完了"与"没资格"）
+	//	请求报错     → StatusFail   （界面上说「失败」，并带原因）
+	//
+	// ⚠ 报错分支也要记：不记的话界面会永远停在「—」，
+	// 用户分不清"没领过"与"领过但失败了"。
+	if p.adminEnv.Log != nil {
+		rec := checkinlog.Record{
+			At:       time.Now(),
+			UID:      a.UID,
+			Nickname: a.Nickname,
+			Kind:     checkinlog.KindWelfare,
+			Trigger:  "manual",
+			Credits:  int64(claimed),
+		}
+		switch {
+		case claimed > 0:
+			rec.Status = checkinlog.StatusOK
+			rec.Detail = fmt.Sprintf("领到 %d/%d 项", claimed, len(results))
+		default:
+			rec.Status = checkinlog.StatusSkip
+			rec.Detail = fmt.Sprintf("%d 项均不可领", len(results))
+		}
+		p.adminEnv.Log.Append(rec)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uid": a.UID, "results": results, "claimed": claimed,
 	})
