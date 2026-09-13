@@ -5029,15 +5029,31 @@ let multCatalogFailed = false;
       if (add) { addAccount(add.dataset.gadd, add); return; }
       const rl = ev.target.closest('button[data-greload]');
       if (rl) {
-        // ⚠ 重载的后端语义是"对齐 ReloadProvider 指定的那一个上游"，
-        // 而那个值由服务端配置决定，**不接受前端传参**。
-        // 所以这里只把按钮的 provider 用于**提示文案**，不传给后端 ——
-        // 传了也不会被采纳，反而会让人以为可以按上游重载。
-        // 见 internal/admin/admin.go 的 reloadProvider()。
+        // 点的是**哪一个上游**的那行按钮，就把那个上游**传进请求体**。
+        //
+        // 这条按钮的用途是"往 `auths/<provider>/` 手工拷入凭证后不用重启网关"，
+        // 所以它必须能指定上游 —— 否则 codearts 那行点了也会去扫 workbuddy 的
+        // 目录（后端过去只认配置里的 ReloadProvider），界面还报成功。
+        //
+        // ⚠ 后端对**显式传了却查不到**的 provider 返回 404，
+        // 这里不预先校验、也不 catch —— 让 admin() 抛出去、
+        // 由 busyRun 的 catch 统一提示（见 busyRun 的 toast(`${label}失败：…`)）。
+        // **宁可失败得刺眼，也不要成功得可疑**：吞掉这个 404 就等于
+        // 把"上游不存在"伪装成"重载成功"，正是上面那个 bug 的形态。
         const pid = rl.dataset.greload;
         busyRun(rl, async () => {
-          const r = await admin('/admin/accounts/reload', { method: 'POST', body: '{}' });
-          toast(`已重载 auths（对齐 ${pid}）：扫描 ${r.scanned} 个文件，`
+          const r = await admin('/admin/accounts/reload',
+            { method: 'POST', body: JSON.stringify({ provider: pid }) });
+          // ⚠ 文案里的上游用**回执**的 `r.provider`，不用上面那个 `pid`。
+          //
+          // 与 loginPoll 同一条原则：**用后端说的，不用前端猜的**。
+          // 前端猜的值只在"请求确实按它执行了"时才等于事实 ——
+          // 而后端的回落路径（不带 provider 时用配置值）说明它**可以**不等于。
+          // 拿前端变量写文案，一旦某次请求走了别的上游（回落、参数被改写、
+          // 将来再加一层代理），界面就会替后端撒谎，且**没有任何迹象**
+          // —— 用户看到的是"成功"，排障时查日志才发现动的是别人的池子。
+          // 回执的 provider 是后端**实际使用**的那个值，写它才是复述事实。
+          toast(`已重载 ${r.provider} 的 auths：扫描 ${r.scanned} 个文件，`
             + `池内账号 ${r.before} 个变为 ${r.after} 个`);
           await refresh();     // 必须 await：否则 busy 态先于数据更新结束，界面看起来"没变"
           return undefined;    // 上面已给出更具体的回执
