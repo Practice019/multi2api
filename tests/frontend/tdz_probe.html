@@ -1202,13 +1202,44 @@ let loginProvider = '';
     // ⚠ `g.isDefault` 本身**仍然保留**（它决定账号池的排序与缺省路由提示），
     // 这里只删**渲染**，不动数据。
     const def = '';
-    // 清单里没有这个上游时明说 —— 通常是历史账号或回落路径，
-    // 显示成"未注册"比让它看起来像一个正常上游更有用。
-    const known = info ? '' : '（未在 manifest 里注册）';
+    // # 两种"上游未知"必须分开说 —— 本次实测事故（用户报的 bug）
+    //
+    // providerInfo(g.provider) 返回空有**两个完全不同的原因**，混成一句话说
+    // 就会撒谎：
+    //
+    //   ① 这个分组是兜底组（g.provider === UNLABELED_PROVIDER）：账号连
+    //      provider 字段都没有，registryAccounts 只能把 providerOf(a) 落空的号
+    //      归到这里。它确实**没有归属**，"按默认上游推断"是如实的。
+    //   ② 账号有**明确** provider、但本次启动没启用这个上游：manifest.providers
+    //      里没有它，所以查不到 providerInfo。此时说"推断"是**假话** ——
+    //      后端 /admin/accounts 对这类号给的 provider_inferred 是 false
+    //      （只有**没有** provider 字段的号才会是 true），账号行那一列正显示着
+    //      它的真实 provider。
+    //
+    // 实测（127.0.0.1:7863）：config 未启用 codearts，账号池是持久化的、里面还
+    // 留着 2 个 provider="codearts"（provider_inferred=false）的号，而
+    // /admin/ui/manifest 的 providers 只有 workbuddy。于是组标题渲染成
+    // 「codearts — 2 个账号 · 按默认上游推断（未在 manifest 里注册）」，
+    // 而**同一张表**里这两行的「上游」列明明写着 codearts（没有 `?` 角标）——
+    // 组标题说"按默认上游推断"、行内说"codearts"，两处渲染点自相矛盾。
+    // 这正是本文件反复警告的漂移形态：同一件事有两个渲染点，改一处就露馅。
+    //
+    // ∴ 判据**复用账号行那条**，不另造：是不是兜底组，看
+    //   g.provider === UNLABELED_PROVIDER（兜底组名的定义见 UNLABELED_PROVIDER
+    //   与 registryAccounts）。
+    //
+    // ⚠ 同时删掉这里原先拼的 known（「（未在 manifest 里注册）」）：
+    //   · 情形 ② 下它与 meta 说同一件事（"未注册"），一行里重复两遍；
+    //   · 情形 ① 下这句话**没有意义** —— 兜底组本来就不属于任何上游，
+    //     "没在 manifest 里注册"会被读成"它本该注册而漏了"。
+    //   于是关于"这个上游注册了没有"只剩 meta 一处措辞，不会再出现标题与
+    //   行内各说一套的局面。
     const caps = info && Array.isArray(info.capabilities) ? info.capabilities.length : 0;
     const meta = info
       ? `${caps} 项能力`
-      : '按默认上游推断';
+      : (g.provider === UNLABELED_PROVIDER
+        ? '按默认上游推断'
+        : '本次启动未注册该上游（config 未启用，账号来自持久化池）');
     const n = g.accounts.length;
 
     // ---- R3：折叠 ----
@@ -1253,7 +1284,7 @@ let loginProvider = '';
       + ` title="${esc(g.provider)} · ${n} 个账号（点标题折叠/展开）">`
       + `<span class="acaret"></span>`
       + `<span class="gname">${esc(providerTitle(g.provider) || UNLABELED_PROVIDER)}</span>`
-      + `<span class="dim" style="font-weight:400;font-size:11px">${esc(n + ' 个账号 · ' + meta + def + known)}</span>`
+      + `<span class="dim" style="font-weight:400;font-size:11px">${esc(n + ' 个账号 · ' + meta + def)}</span>`
       + `</button>`
       // 折叠时另起一句：组标题里的"0 个账号 · 4 项能力"回答不了
       // "为什么没有" —— 那是用户下一步要的动作。
@@ -1395,8 +1426,23 @@ let loginProvider = '';
       + ` data-dayurl="${esc(d.one_url)}"`
       + ` title="${esc(d.title || d.label)}">${esc(d.label)}</button>`);
 
+    // # 为什么这个按钮打的是**核心通用端点**，而不是上游私有端点
+    //
+    // 改造前它写死 `data-dayurl="/admin/credits/refresh"` —— 那是 workbuddy
+    // 挂的私有路由。后果是**本按钮的作用域被一个上游偷偷定义**：
+    //   · 只有 workbuddy 有这个能力位 → 看起来"没问题"
+    //   · 但 codearts 也声明了 quota-probe，而它的额度在 core 的
+    //     /admin/accounts/quota/refresh 上才会被刷到 —— 于是 codearts
+    //     那一整片账号的额度**从来没有被这个按钮碰到过**，而且界面完全沉默。
+    // 现在统一走 core 的 `/admin/accounts/quota/refresh`：它按每个账号**自己**
+    // 的 provider 分派到各自的 gateway.QuotaExt，两个上游一次刷完。
+    //
+    // ⚠ 语义变化（必须写在 title 里，不许让用户自己发现）：
+    //   旧文案说"重新探测**该账号**的剩余额度"，而 core 的通用端点**不收 uid**
+    //   （它恒为全池刷新）。所以点了本行却整表刷新 —— 不明说就是界面撒谎。
+    //   这里如实写成"（刷新全部账号）"，与顶部按钮同一句话。
     const quotaBtn = hasCap(pid, 'quota-probe')
-      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/credits/refresh" title="重新探测该账号的剩余额度">额度</button>`
+      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/accounts/quota/refresh" title="通过核心通用端点重新探测全部账号的剩余额度（该端点按每个账号自己的上游分派，不限于本行；行内按钮与顶部「刷新全部额度」是同一个动作）">额度</button>`
       : '';
 
     const act = [
@@ -1608,13 +1654,27 @@ let loginProvider = '';
         const dayUrl = btn && btn.dataset ? btn.dataset.dayurl : '';
         if (dayUrl) {
           const r = await admin(dayUrl, { method: 'POST', body: JSON.stringify({ uid }) });
-          // 回执形状有两类，都要认（否则会显示成"已提交"，看不见真实结果）：
-          //   · {result:{status,detail}}  —— workbuddy 的签到/保活
-          //   · {claimed:N, results:[…]}  —— codearts 的福利领取
+          // 回执形状有三类，都要认（否则会显示成"已提交"，看不见真实结果）：
+          //   · {result:{status,detail}}                     —— workbuddy 的签到/保活
+          //   · {updated,unknown,failed,skipped,providers}   —— core 的额度刷新
+          //     （行内「额度」按钮走这条：它打的是 /admin/accounts/quota/refresh，
+          //      该端点**不收 uid**，恒为全池刷新 —— 所以这里用 quotaToast
+          //      渲染的是"全部账号"的结果，与顶部按钮同一种文案。）
+          //   · {claimed:N, results:[…]}                     —— codearts 的福利领取
+          //
+          // ⚠ 分支次序：额度那条必须排在 claimed 之前。新回执里没有 `claimed`，
+          // 今天次序无所谓 —— 但**将来 core 若给额度回执补上 results/claimed**，
+          // 排在后面的新分支就永远走不到，本 bug 会以"分支选错 → 静默走 else"
+          // 的同款形态复发。判据用 `typeof r.updated === 'number'`，
+          // 它是额度回执的**特征字段**，不与其它两种形状重叠。
           const res = r && r.result;
           if (res) {
             toast(`${label} ${uid.slice(0, 8)}: ${res.status}${res.detail ? ' · ' + res.detail : ''}`,
               res.status === 'fail');
+          } else if (r && typeof r.updated === 'number') {
+            // 行内按钮打的是**全池**端点 → 文案不能说"该账号"，如实说"全部"。
+            const t = quotaToast(r);
+            toast(t.msg, t.bad);
           } else if (r && typeof r.claimed === 'number') {
             const total = Array.isArray(r.results) ? r.results.length : 0;
             toast(`${label} ${uid.slice(0, 8)}：本次领到 ${r.claimed}/${total}`);
@@ -1661,6 +1721,21 @@ let loginProvider = '';
     try {
       const r = await admin(dact.all_url, { method: 'POST', body: '{}' });
       if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
+      // ⚠ 这一条**必须排在 `r.results` 之前**（本 bug 的同款形态：分支选错
+      // → 静默走 else → 按钮点了、有 toast、用户却看不到任何真实结果）。
+      //
+      // 背景：顶部「刷新全部额度」改成打 core 的 /admin/accounts/quota/refresh
+      // 之后，回执变成 {updated,unknown,failed,skipped,providers,accounts} ——
+      // **没有 results**。旧代码只有 `r.results` 与兜底 else 两支，于是新回执
+      // 落进 else，toast 说"全部额度已提交"，四个计数一个都没显示。
+      // 判据用 typeof r.updated === 'number'（额度回执的特征字段）；
+      // 放在 results 之前，是为了将来 core 若也给额度回执补上个 results 时，
+      // 这条仍然先命中 —— 顺序反了就等于给未来埋一颗同形的雷。
+      else if (r && typeof r.updated === 'number') {
+        const t = quotaToast(r);
+        toast(t.msg, t.bad);
+        refresh(); loadHistory();
+      }
       else if (r && r.results) {
         const ok = r.results.filter(x => x.status === 'ok').length;
         toast(`全部${label}完成：成功 ${ok}/${r.results.length}`);
@@ -1669,6 +1744,35 @@ let loginProvider = '';
         toast(`全部${label}已提交`);
       }
     } catch (e) { toast(`全部${label}失败：${e.message}`, true); }
+  }
+
+  // quotaToast 把 core 额度刷新回执渲染成一句话。
+  //
+  // # 为什么必须分四段（updated / unknown / failed / skipped）
+  //
+  // 回执把结果分成**四类，其中三类都不是错误**：
+  //   updated  拿到数据并写回池            —— 成功
+  //   unknown  问了，上游如实回答"不知道"   —— **正常**，界面显示 `—`，不该标红
+  //   failed   上游返回 nil 或刷新出错      —— 真错误
+  //   skipped  上游压根没实现 QuotaExt      —— **最需要说出来的一类**
+  //
+  // 只报"已更新 N"会让另外三类全部隐形，而 skipped 尤其危险：
+  // 它意味着**某个上游整片账号没被刷到**，旧的 /admin/credits/refresh
+  // 对这种情况是完全沉默的（那正是本 bug 能一直藏着的原因）。
+  // 所以 skipped 非 0 时**必须显式出现在文案里**，不能只当计数。
+  //
+  // bad 只由 failed 决定：把 unknown/skipped 也标红会让"上游不报额度"
+  // 看起来像故障，从而被误修（与后端 refreshQuotas 的分开计数同一条理由）。
+  function quotaToast(r) {
+    const bad = (r.failed || 0) > 0;
+    const parts = [`已更新 ${r.updated || 0}`];
+    if (r.unknown) parts.push(`未知 ${r.unknown}`);
+    if (r.failed)  parts.push(`失败 ${r.failed}`);
+    if (r.skipped) parts.push(`跳过 ${r.skipped}`);
+    const prov = Array.isArray(r.providers) && r.providers.length ? `（${r.providers.join('、')}）` : '';
+    const tail = r.skipped ? `；跳过 ${r.skipped} 个账号的上游未接入额度`
+               : (r.unknown ? '；未知表示上游未报额度，不是错误' : '');
+    return { msg: `全部额度完成：${parts.join(' · ')}${prov}${tail}`, bad };
   }
 
   // ---------------------------------------------------------------- 全量任务进度
@@ -3993,16 +4097,80 @@ let multCatalogFailed = false;
     return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
   }
 
+  // multKeyOf 把**展示 id** 归一成**倍率表的键**：去掉 `provider/` 前缀。
+  //
+  // 为什么需要它：面板现在统一显示完整 id（`workbuddy/glm-5.2` 这种，
+  // 用户要求"workbuddy/xxx 或 codearts/xxx，统一、不要重复"），
+  // 而 /admin/models/preview 下发的 modelMultipliers **键是上游目录里的裸 id**
+  //（如 `glm-5.2`）—— 那是后端契约，前端不改它。
+  // 拿完整 id 直接查表必然全部落空，界面上就是满屏 `x无`
+  //（tests/frontend/diag_multiplier_mismatch.js 早就实测出这条错位：
+  // "倍率表用的是裸名，而面板显示 provider/model 形态 → id 对不上"）。
+  //
+  // ⚠ 归一逻辑**只此一处**：multTag 与 multTagPlain 都经由 multTableKey 调它取键
+  //（multTableKey 只额外判"这张表到底覆不覆盖这个上游"，不做第二份去前缀）。
+  // 各写一份必然会漂 —— 而漂的表现是"某处又变回 x无"，很难一眼看出。
+  function multKeyOf(id) {
+    const s = String(id || '').indexOf('/');
+    // 没有前缀（单上游的裸名，如 `glm-5.2`）→ 原样返回：它本来就是表的键。
+    return s > 0 ? String(id).slice(s + 1) : String(id || '');
+  }
+
+  // multTableKey 解析**这个展示 id 能不能查倍率表**：能查则给出键，不能查返回 null。
+  //
+  // # 为什么不能"去前缀就直接查"（这条是有真浏览器实测证据的缺陷）
+  //
+  // `modelMultipliers` 来自 `/admin/models/preview` → 后端 `h.cfg.ModelCatalog()`，
+  // 而那份目录**只由默认上游的客户端构建**（装配层的 catalogHost 只喂默认上游），
+  // 键是那份目录里的**裸名**（如 `glm-5.3-flash`）。于是别家上游的
+  // `codearts/glm-5.3-flash` 去掉前缀后，正好撞上**默认上游的同名条目**。
+  //
+  // 真 Chrome 实测（改造前）：
+  //
+  //   workbuddy 组 16 个：`workbuddy/glm-5.2` x0.79 …            ← 正确
+  //   codearts  组  7 个：`codearts/glm-5.3-flash` **x0.06**，
+  //                       同组另外 6 个 x无
+  //   /admin/models/preview 的返回里只有一条裸名 `glm-5.3-flash`:0.06，
+  //   **没有任何 codearts 条目** —— 那个 0.06 是 workbuddy 目录里的系数。
+  //
+  // ∴ **显示一个错的数字，比显示 x无 有害得多**：用户按它算成本会算错账，
+  // 而且完全看不出哪里不对（同一组里"只有一个模型有倍率"，看着还挺正常）。
+  //
+  // # 判据
+  //
+  //   · **裸名**（无 `provider/` 前缀）→ 原样去查，行为与加这个函数之前**完全一致**
+  //     （单上游部署、或后端没给前缀的条目都走这一支）。
+  //   · **带前缀** → 只有**前缀就是默认上游**时才去前缀查表；别家上游**不查**。
+  //
+  // ⚠ 判据只此一处：multTag 与 multTagPlain 都调它，各自不写第二份判断
+  //（与 multKeyOf 同一个风格：一个函数、两个调用点）。
+  //
+  // ⚠ DEFAULT_PROVIDER 的赋值时机：它**只**在 applyManifest 里、manifest 到达后
+  // 才被赋值（见它的定义处），在那之前一直是空串 `''`。而真实上游名不可能是空串，
+  // 于是**归属未知时所有带前缀的 id 都落进"不查表"这一支**，显示 x无。
+  // 这是唯一可接受的失败方向：宁可显示 x无，也不要在归属未知时错显别家的数字。
+  function multTableKey(id) {
+    const slash = String(id || '').indexOf('/');
+    // 无前缀 → 它本来就是倍率表的键（查不到就是"上游没配"，由调用方处理）。
+    if (!(slash > 0)) return multKeyOf(id);
+    const prefix = String(id).slice(0, slash);
+    // 前缀不是默认上游 → 这张表根本不覆盖它，**不查**（别家不继承默认上游的系数）。
+    if (prefix !== DEFAULT_PROVIDER) return null;
+    return multKeyOf(id);
+  }
+
   // 倍率标记：有系数才加，且 0 也要显示（免费是有效信息）。
   // 系数未知（目录里没这个模型）时不加后缀，避免用「x0」把"不知道"说成"免费"。
   function multTag(id) {
     // 用户要求：倍率表里没有的模型显示 `x无`。
     //
-    // ⚠ 但要区分**三种"没有"**，它们不该长一样：
+    // ⚠ 但要区分**四种"没有"**，它们不该长一样：
     //
     //   1. 倍率表里有            → `x0.29`
-    //   2. 表里没有这个模型       → `x无`      （本分支，用户要求）
+    //   2. 表里没有这个模型       → `x无`      （用户要求；title=上游未提供）
     //   3. **倍率表整体没加载**   → 不显示 `x无`，改为面板级提示
+    //   4. **别家上游**（表只覆盖默认上游）→ 也 `x无`，但 title 说明"这张表不覆盖它"——
+    //      与第 2 种必须可区分：一个该去问上游，一个只是本界面拿不到别家的目录。
     //
     // 第 3 种是"静默失败"的典型场景：`loadModelMultipliers` 失败时把
     // `modelMultipliers` 清空，若不区分，用户会以为**所有**模型都没有倍率，
@@ -4011,13 +4179,25 @@ let multCatalogFailed = false;
     // 用"无"而不是留空：留空与"倍率恰好是 0 但没渲染"无法区分；
     // 显式写"无"是把不确定性**显示出来**，而不是藏起来。
     // 渲染成 `x无`（小写 x）与其它 15 个同形 —— 视觉一致比照搬输入字符重要。
-    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) {
+    // 经 multTableKey 归一**并判归属**：这里拿到的是展示 id（`provider/xxx`），
+    // 而倍率表的键是**默认上游目录**里的裸名。别家上游的表根本不存在，
+    // 所以它返回 null —— 那时**不查表**，显示 x无（见 multTableKey 的注释）。
+    const key = multTableKey(id);
+    if (key === null) {
+      // ⚠ 这一支不是"上游没配倍率"，而是"这张表压根不覆盖这个上游"，
+      // 两种"没有"的 title 必须不同，否则用户会去怀疑上游配错了。
+      // 目录整体失败时不逐个挂"无"（由面板顶部提示），与下面分支同一口径。
+      if (multCatalogFailed) return '';
+      return '<span class="mult unknown" title="倍率表只覆盖默认上游 '
+        + esc(DEFAULT_PROVIDER || '（未知）') + ' 的目录，该模型属于别家上游，不显示可能属于别人的数字">x无</span>';
+    }
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, key)) {
       if (multCatalogFailed) return '';   // 目录整体失败 → 不给每个 chip 都挂"无"
       return '<span class="mult unknown" title="上游未提供该模型的倍率">x无</span>';
     }
-    const txt = multText(modelMultipliers[id]);
+    const txt = multText(modelMultipliers[key]);
     if (txt === null) return '';   // 脏数据 → 当作没有系数，而不是显示 xNaN
-    const v = modelMultipliers[id];
+    const v = modelMultipliers[key];
     // 免费（0）与高倍率（>=1）各给一个样式类，便于一眼扫出成本档位。
     // 注意：不发散到"低/中/高"多档 —— 倍率分布随上游调整，硬编码分档很快会失真。
     const cls = v === 0 ? ' free' : (v >= 1 ? ' hi' : '');
@@ -4030,33 +4210,54 @@ let multCatalogFailed = false;
     if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
 
     // 按上游分组渲染（T5）。三件事一起做：
-    //   1. **去重**：`/v1/models` 同时给裸名与 `provider/name` 两种写法，
-    //      同一个模型会出现两次（实测 32 条 = 16 个模型 × 2 种写法）。
-    //      对外 API 两种都要保留（`provider/model` 是显式指定上游用的），
-    //      但**界面上不该重复展示**。
+    //   1. **去重**：按去掉前缀后的**裸名**去重（见 groupModelsByOwner），
+    //      同一个模型只留一条。对外 API 两种写法都要保留
+    //      （`provider/model` 是显式指定上游用的），但**界面上不该重复展示**。
+    //      ⚠ 主修在**后端**：`/v1/models` 已改成只发 `provider/model` 一种写法，
+    //      正常情况下列表本来就没有重复项。这里与下拉里那处去重都是
+    //      **防御性冗余** —— 后端若再退化回"裸名 + provider/裸名 双发"
+    //      （改造前实测过 32 条 = 16 个模型 × 2 种写法），界面也不会重复。
     //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
     //   3. **可折叠**：状态存 localStorage，刷新后保持。
     const groups = groupModelsByOwner(models, emptyModelGroups());
     $('models').innerHTML = groups.map(renderModelGroup).join('');
     const sel = $('model'), keep = sel.value;
-    // T7：模型下拉按上游筛选，**不去重**。
+    // T7：模型下拉按上游筛选，并按 id **去重**。
     //
-    // 与上面的 chip 区是**两套**逻辑，故意不一致：
-    //   · chip 区（可用模型面板）：去重 + 按上游分组，便于"看有哪些模型"
-    //   · 这里（对话测试下拉）：按上游**筛选**，不去重 —— 用户要求保留
-    //     `provider/xxx` 形态，因为那是"显式指定上游"的手段，测试时要用
+    // ⚠ 主修在**后端**：/v1/models 改成只发 `provider/model` 一种写法
+    //（不再发默认上游的裸名副本），正常情况下列表本来就不会重复。
+    // 这里的去重是**防御性冗余** —— 后端若再退化回"裸名 + provider/裸名 双发"，
+    // 界面也不会出现两条一模一样的选项（用户报的正是"可用模型重复了，很多"）。
+    //
+    // 与上面的 chip 区仍是两套渲染，但 id 口径已经统一：
+    //   · chip 区（可用模型面板）：按上游分组 + 可折叠，便于"看有哪些模型"
+    //   · 这里（对话测试下拉）：按上游**筛选**成一条平铺列表，便于"选一个测试"
+    // 两边都显示**完整 id**，两边都去重（chip 区按裸名去重、这里按 id 去重）。
     //
     // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
     syncModelProviderOptions(models);
     const wantP = modelProviderFilter();
-    const shown = wantP
+    const filtered = wantP
       ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
       : models;
+    // 去重：同一个 id 只留第一条（保留上游返回的原始顺序，选择行为可预期）。
+    const seen = new Set();
+    const shown = [];
+    for (const m of filtered) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      shown.push(m);
+    }
     sel.innerHTML = shown.map(m =>
       `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
-    // 保持原选择：若它不在筛选后的列表里，回落到第一个（或 auto）。
+    // 保持原选择：若它不在筛选后的列表里，回落到 `auto`，再回落到第一个。
+    //
+    // ⚠ 比 `auto` 必须按**去前缀后的裸名**：目录收窄后这里只有 `workbuddy/auto`，
+    // 按完整 id 比会永远匹配不到 —— 于是每次刷新都把用户的选择悄悄换成列表第一项，
+    // 而 `auto` 恰好是"不指定模型"的那个默认项（最该被保持的就是它）。
+    const isAuto = m => multKeyOf(m.id) === 'auto';
     sel.value = shown.some(m => m.id === keep) ? keep
-      : ((shown.find(m => m.id === 'auto') || shown[0] || {}).id || '');
+      : ((shown.find(isAuto) || shown[0] || {}).id || '');
   }
 
   // modelOwnerOf 从模型 id 推断上游归属（T7）。
@@ -4189,15 +4390,28 @@ let multCatalogFailed = false;
       if (!m || !m.id) continue;
       const slash = m.id.indexOf('/');
       const prefix = slash > 0 ? m.id.slice(0, slash) : '';
-      const bare = slash > 0 ? m.id.slice(slash + 1) : m.id;
+      // 去前缀的裸名复用 multKeyOf：**归一只有一处**。
+      // 组内去重的键与倍率表的键是同一个变换，各写一份迟早会漂 ——
+      // 漂的表现是"界面看起来不重复，但倍率整列 x无"，很难一眼定位。
+      const bare = multKeyOf(m.id);
       // 归属：前缀优先（它就是显式指定的上游），否则用 owned_by。
       const owner = prefix || m.owned_by || '（未标注）';
       if (!byOwner.has(owner)) byOwner.set(owner, { owner: owner, items: [], seen: new Set() });
       const g = byOwner.get(owner);
       if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
       g.seen.add(bare);
-      // 展示用 id 取**裸名**；multTag 查表也用裸名（倍率表的键是裸名）。
-      g.items.push({ id: bare, fullId: m.id, owner: owner });
+      // 展示用 id 取**完整 id**（`provider/xxx` 形态）—— 用户要求统一成
+      // `workbuddy/xxx` / `codearts/xxx`，不要让裸名与带前缀名并存造成"重复"。
+      // `data-id` / `title` 也一并取完整 id（见 renderModelGroup），三处口径一致。
+      //
+      // ⚠ 去重仍按**裸名**（上面的 g.seen 用的就是 bare）：`auto` 与
+      // `workbuddy/auto` 指的是同一个模型，只按完整 id 去重会让它们在同一组里
+      // 各占一条 —— 名字看起来一模一样，用户看到的仍然是"重复"。
+      // 按裸名去重才是他要的"不要重复"。
+      //
+      // 倍率查表不受影响：multTag 内部经 multTableKey 归一后再查
+      //（倍率表的键是上游目录里的裸名，且只覆盖默认上游，见 multTableKey 的注释）。
+      g.items.push({ id: m.id, fullId: m.id, owner: owner });
     }
     // 组间按上游名排序；组内按名字排序（顺序稳定，便于扫读）。
     const out = Array.from(byOwner.values());
@@ -4258,8 +4472,14 @@ let multCatalogFailed = false;
   // <option> 只能放纯文本，不能放 HTML 标签 —— 倍率用括号包起来。
   // 与 multTag 共用 multText，保证同一个数在两处长得一样。
   function multTagPlain(id) {
-    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
-    const txt = multText(modelMultipliers[id]);
+    // 与 multTag 同一口径：经 multTableKey 归一**并判归属**后查表。
+    // 下拉里给的是完整 id（与 chip 区一致），不归一会整列都拿不到倍率。
+    // 别家上游返回 null → 这里什么也不加：`<option>` 只能放纯文本，
+    // 挂不下 chips 那条 title 说明，所以与 multTag 的 x无 不同，这里**不写字**。
+    const key = multTableKey(id);
+    if (key === null) return '';
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, key)) return '';
+    const txt = multText(modelMultipliers[key]);
     return txt === null ? '' : ` (x${txt})`;
   }
 
@@ -4689,10 +4909,24 @@ let multCatalogFailed = false;
     //
     // ⚠ label 用「额度」，与列头、行内按钮**同一份文案**（T4）：
     // 这三个地方描述的是同一个动作，措辞不同会让用户以为是三件事。
-    // id 仍是 'credits' —— 那是**协议标识**（对应 /admin/credits/refresh），
-    // 不是文案，不随界面用词改名。
+    // id 仍是 'credits' —— 那是**协议标识**，不是文案，不随界面用词改名。
+    //
+    // # all_url 为什么是 core 的通用端点（本 bug 的第二形态）
+    //
+    // 原先是 `/admin/credits/refresh` —— workbuddy 的**私有**路由。
+    // 把它当成"全部额度"的入口有两层错：
+    //   1. 作用域错：它只刷 workbuddy 一个上游，codearts 的额度刷不到
+    //      （codearts 声明了 quota-probe，界面上有额度胶囊，但它恒为 `—`）。
+    //   2. 回执形状错：它回 `{mode:"all", results:[…]}`（**没有 updated 字段**），
+    //      而 startAll 当时的判据是 `r.results` —— 改成通用端点后新回执没有
+    //      results，于是落进最后的 else，toast 说"已提交"而**用户看不到任何真实结果**。
+    //      这就是本条改动必须同时改 startAll 的原因（见那里的新分支）。
+    //
+    // Core 的 `/admin/accounts/quota/refresh` 才是"全部额度"的正确入口：
+    // 它遍历全池、按每个账号**自己**的 provider 找 gateway.QuotaExt，
+    // 回 `{updated, unknown, failed, skipped, providers, accounts}`。
     $('btnAllCredits').onclick = () => startAll({
-      id: 'credits', label: '额度', all_url: '/admin/credits/refresh',
+      id: 'credits', label: '额度', all_url: '/admin/accounts/quota/refresh',
     });
     // 「全部签到」不再有静态 id —— 它现在由 workbuddy 自报的
     // daily_actions（id=checkin, batch=true）生成。

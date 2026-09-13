@@ -1,57 +1,142 @@
-
+// ============================================================================
+// models_display_gen.js —— 模型列表显示（ctx / 倍率 / 分组 / 上游筛选）的纯 JS 套件。
+//
+// ⚠ 本文件是 **tests/frontend/gen_models_display.js 的产物**，形态是「**运行期实读**」：
+//   运行时 readFileSync(webui.html) → grab() 逐字抠出函数体 → eval 进本模块作用域，
+//   断言直接打在当前源码上。**被抽取的函数体一个字节都不在本文件里**（清单见 SRC_FUNCS）。
+//
+// # 为什么必须这样（两种形态都实测过）
+//
+//   · 旧形态是「生成时内联快照」：generator 在生成那一刻 grab() 出函数体，再**字面写死**
+//     进本文件。于是运行期测的是"生成那一刻的源码快照"：源码改了、产物没重新生成，
+//     断言照样全绿。实测（在 %TEMP% 里做，没碰仓库）：用旧 generator 对**改造前**的源码
+//     副本生成一份内联产物，它 "全部通过"；随后把那份源码逐字换成现在的新口径
+//     （id: m.id, fullId: m.id；真源码里 id: bare 已 0 次），**不重新生成**、直接再跑
+//     同一个产物 —— 仍然 "全部通过"。它看的是自己那份快照。**这就是假绿。**
+//   · 现在这条失效模式**在结构上不存在**：产物里没有源码副本，只有读源码的装置。
+//     抽不到（函数被改名/删掉）就直接抛错 —— 响亮失败，不静默跳过。
+//   · generator 只产出这个结构（见 gen_models_display.js 的 READER / STUBS / ASSERTS
+//     三段），所以「重新生成」与「实读」不再矛盾：重新生成只是把同一个实读装置再写一遍。
+//     gen_models_display.js 里还带一条**结构守卫**，明着拒绝退回内联快照形态。
+//
+// ⚠ 本文件是生成物：改断言请改 gen_models_display.js（run_frontend_suites.js 每次都会
+//   重新生成并覆盖本文件；只改本文件会被下一次运行冲掉）。
+//
+// 口径现状（用户要求「统一成 workbuddy/xxx 或 codearts/xxx，不要重复」）：
+//   · 后端 /v1/models 多上游模式只发 provider/model（39 条 → 23 条）；
+//   · chip 与下拉都显示**完整 id**；倍率表的键仍是**裸名**，靠 multKeyOf 归一；
+//   · 倍率表**只覆盖默认上游**的目录 —— 查表统一走 multTableKey：
+//     带前缀的 id 只有前缀 == DEFAULT_PROVIDER 时才查，别家上游一律显示 x无。
+//     （真 Chrome 实测过反例：codearts/glm-5.3-flash 曾继承 workbuddy 的 x0.06。）
+// ============================================================================
 const fs = require('fs');
 const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+
+// ---- 源码实读装置：按名字抠出函数体（花括号配对），eval 进本模块作用域 ----
+//
+// 非严格模式下 direct eval 里的 function 声明会落进调用者的变量环境，
+// 因此下面这些函数在 eval 之后可以直接按名字调用。抽不到就抛错。
+function grab(marker) {
+  const start = html.indexOf(marker);
+  if (start < 0) throw new Error('源码里找不到 ' + marker + ' —— 抽取失败，测试装置失效');
+  let i = html.indexOf('{', start), d = 0;
+  for (; i < html.length; i++) {
+    if (html[i] === '{') d++;
+    else if (html[i] === '}') { d--; if (d === 0) return html.slice(start, i + 1); }
+  }
+  throw new Error('括号不闭合: ' + marker);
+}
+
+const SRC_FUNCS = [
+  'function multText(',
+  // 新口径的**唯一归一函数**：展示 id（「provider/xxx」）→ 倍率表的键（裸名）。
+  // 漏了它，multTag / multTagPlain / groupModelsByOwner 会一起炸。
+  'function multKeyOf(',
+  // 倍率查表的**唯一入口**：在归一之上再判"这张表覆不覆盖这个上游"。
+  // 漏了它，multTag / multTagPlain 会一起炸（它们已经不再直接调 multKeyOf）。
+  'function multTableKey(',
+  'function multTag(',
+  'function multTagPlain(',
+  'function groupModelsByOwner(',
+  'function renderModelGroup(',
+  'function modelGroupOpen(',
+  'function modelOwnerOf(',
+  'function modelProviderFilter(',
+  'function setModelProviderFilter(',
+  'function syncModelProviderOptions(',
+  'function providerInfo(',
+  'function providerRegistryIds(',
+  'function emptyModelGroups(',
+  'function renderModels(',
+];
+
+// esc 也是被测渲染的一部分（chip 的 data-id/title 走它），所以一起从源码取。
+// 它是 「const esc = ...」 箭头函数，且**跨两行**、正文里还有带分号的字符串
+// （'&amp;'）—— 所以不能用 「/...;/」 非贪婪正则（会在字符串里的分号处截断）。
+// 这里用一个带引号状态机的小扫描器取到「深度 0 且引号外的第一个分号」。
+function grabStatement(marker) {
+  const start = html.indexOf(marker);
+  if (start < 0) throw new Error('源码里找不到 ' + marker + ' —— 抽取失败，测试装置失效');
+  let depth = 0, q = null;
+  for (let i = start; i < html.length; i++) {
+    const c = html[i];
+    if (q) { if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '\u0060') { q = c; continue; }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ';' && depth === 0) return html.slice(start, i + 1);
+  }
+  throw new Error('语句未闭合: ' + marker);
+}
+let esc;
+eval(grabStatement('const esc =').replace(/^\s*const\s+esc\s*=/, 'esc ='));
+if (typeof esc !== 'function') throw new Error('源码实读失败：esc 未生效');
+
+eval(SRC_FUNCS.map(grab).join('\n\n'));
+// 实读必须响亮：eval 没生效（例如被包进严格模式）时不要静默降级成"没测到"。
+// 用 typeof（对未声明标识符也不抛）而不是 eval(n)，后者会抛 ReferenceError 盖掉原因。
+for (const n of ['multText', 'multKeyOf', 'multTableKey', 'multTag', 'multTagPlain', 'groupModelsByOwner',
+  'renderModelGroup', 'modelGroupOpen', 'modelOwnerOf', 'modelProviderFilter',
+  'setModelProviderFilter', 'syncModelProviderOptions', 'providerInfo', 'providerRegistryIds',
+  'emptyModelGroups', 'renderModels']) {
+  if (eval('typeof ' + n) !== 'function') {
+    throw new Error('源码实读失败：' + n + ' 未生效（eval 没把声明泄漏出来？被包进严格模式了？）');
+  }
+}
+
+// ---- DOM / 状态桩 ----
 const els = {};
 function mkEl(id) { return { id, hidden: true, className: '', textContent: '', innerHTML: '', style: {}, value: '' }; }
-for (const id of ['mcount','models','model','modelProvider']) els[id] = mkEl(id);
+for (const id of ['mcount', 'models', 'model', 'modelProvider']) els[id] = mkEl(id);
 const $ = id => els[id] || (els[id] = mkEl(id));
-const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let modelMultipliers = {};
 let models = [];
 
-// ---- T5 依赖：折叠状态与目录失败标记 ----
-//
-// 这几个都**从源码实读**，不硬编码 —— 本文件的教训：
-// 装置抄了被测对象的常量就等于没测它（原 PAGE_SIZE 就是这么被抄坏的）。
-// LS_MODELGROUP 用正则从 webui.html 取；取不到就抛错（抽取失败必须响亮）。
+// LS_MODELGROUP / LS_MODELPROVIDER 从源码取，不硬编码 —— 抄常量等于没测它。
 const lsKeyMatch = /const\s+LS_MODELGROUP\s*=\s*'([^']+)'/.exec(html);
 if (!lsKeyMatch) throw new Error('源码里找不到 LS_MODELGROUP —— 抽取失败，测试装置失效');
 const LS_MODELGROUP = lsKeyMatch[1];
-// T7 的筛选键同理：从源码取，不硬编码。
 const lsProvMatch = /const\s+LS_MODELPROVIDER\s*=\s*'([^']+)'/.exec(html);
 if (!lsProvMatch) throw new Error('源码里找不到 LS_MODELPROVIDER —— 抽取失败，测试装置失效');
 const LS_MODELPROVIDER = lsProvMatch[1];
-// T7 的筛选值用**模块变量**存（源码里也是这么存的 —— 因为 <select> 会把
-// 不在 option 里的值归一成空串，见 modelProviderFilter 的注释）。
+
+// 筛选值用模块变量存（源码里也是这么存的 —— <select> 会把不在 option 里的
+// 值归一成空串，见 modelProviderFilter 的注释）。
 let modelProviderWanted = '';
-function setModelProviderFilter(v) {
-  modelProviderWanted = v || '';
-  const el = $('modelProvider');
-  if (el && el.value !== modelProviderWanted) el.value = modelProviderWanted;
-}
 let multCatalogFailed = false;
 
-// ---- R2 依赖：manifest 的上游目录 ----
-//
-// providerRegistryIds() 读的是模块级 PROVIDERS，而 emptyModelGroups 现在经它
-// 枚举 —— 不在这里声明，产物会报 PROVIDERS is not defined。
-// （反引号在本 String.raw 模板里是**终止符**，所以上面那句不写引号 ——
-//  这是本文件已经踩过两次的坑，见 run_frontend_suites.js 的门禁 0。）
-//
-// 值由**测试自己**通过 setProviders() 灌入（默认空）—— 不抄真 manifest，
-// 否则就成了"装置抄了被测对象的常量"（本文件的 PAGE_SIZE 就这么坏过）。
+// PROVIDERS 由测试自己通过 setProviders() 灌入（默认空）—— 不抄真 manifest。
 let PROVIDERS = [];
 function setProviders(list) { PROVIDERS = list || []; }
-// providerInfo 读的也是 PROVIDERS（emptyModelGroups 用它取 capabilities）。
-// 这里**内联而不是从源码抓**：它是 4 行直读，抓过来只多一个断裂点，
-// 没有额外保真度收益；而 providerRegistryIds 是真判据，必须从源码抓
-//（见下面 pieces 的注释）。
-function providerInfo(id) {
-  return PROVIDERS.find(p => p && p.id === id) || null;
-}
 
-// localStorage 假实现（内存 Map）—— 折叠状态要走真实的读写往返，
-// 用打桩常量验证不了"存进去再读回来还是同一个值"。
+// DEFAULT_PROVIDER 是**模块级变量**（webui.html 里 「let DEFAULT_PROVIDER = '';」，
+// 只在 applyManifest 里、manifest 到达后才被赋值）。这里给一个桩：
+// 它决定"带前缀的 id 能不能查倍率表" —— 不是 workbuddy 的就一律不查。
+// 桩的初值刻意选 workbuddy（真部署里的默认上游），下面第 [10] 节还会临时
+// 改成 '' 来复现"manifest 尚未到达"的时机。
+let DEFAULT_PROVIDER = 'workbuddy';
+
+// localStorage 假实现（内存 Map）：折叠状态要走真实读写往返。
 const __lsMap = new Map();
 const localStorage = {
   getItem: k => (__lsMap.has(k) ? __lsMap.get(k) : null),
@@ -59,197 +144,30 @@ const localStorage = {
   removeItem: k => { __lsMap.delete(k); },
 };
 
-function multText(v) {
-    if (!Number.isFinite(v) || v < 0) return null;
-    // 0 → "0"；0.51 → "0.51"；2 → "2"。两位小数足够（上游最细到 x0.01）。
-    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
-  }
-
-function multTag(id) {
-    // 用户要求：倍率表里没有的模型显示 `x无`。
-    //
-    // ⚠ 但要区分**三种"没有"**，它们不该长一样：
-    //
-    //   1. 倍率表里有            → `x0.29`
-    //   2. 表里没有这个模型       → `x无`      （本分支，用户要求）
-    //   3. **倍率表整体没加载**   → 不显示 `x无`，改为面板级提示
-    //
-    // 第 3 种是"静默失败"的典型场景：`loadModelMultipliers` 失败时把
-    // `modelMultipliers` 清空，若不区分，用户会以为**所有**模型都没有倍率，
-    // 而真相是目录挂了。这种情况由 multCatalogFailed 标记，在面板顶部提示。
-    //
-    // 用"无"而不是留空：留空与"倍率恰好是 0 但没渲染"无法区分；
-    // 显式写"无"是把不确定性**显示出来**，而不是藏起来。
-    // 渲染成 `x无`（小写 x）与其它 15 个同形 —— 视觉一致比照搬输入字符重要。
-    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) {
-      if (multCatalogFailed) return '';   // 目录整体失败 → 不给每个 chip 都挂"无"
-      return '<span class="mult unknown" title="上游未提供该模型的倍率">x无</span>';
-    }
-    const txt = multText(modelMultipliers[id]);
-    if (txt === null) return '';   // 脏数据 → 当作没有系数，而不是显示 xNaN
-    const v = modelMultipliers[id];
-    // 免费（0）与高倍率（>=1）各给一个样式类，便于一眼扫出成本档位。
-    // 注意：不发散到"低/中/高"多档 —— 倍率分布随上游调整，硬编码分档很快会失真。
-    const cls = v === 0 ? ' free' : (v >= 1 ? ' hi' : '');
-    return `<span class="mult${cls}" title="每次调用消耗 ${txt} 倍基础额度">x${esc(txt)}</span>`;
-  }
-
-function multTagPlain(id) {
-    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
-    const txt = multText(modelMultipliers[id]);
-    return txt === null ? '' : ` (x${txt})`;
-  }
-
-function groupModelsByOwner(list, empties) {
-    const byOwner = new Map();
-    // 先把"声明了 models 能力"的上游都建好空组，
-    // 这样没有模型的上游也会出现在界面上（见 emptyModelGroups 的注释）。
-    for (const e of (empties || [])) {
-      if (!byOwner.has(e.owner)) {
-        byOwner.set(e.owner, { owner: e.owner, items: [], seen: new Set(), accountCount: e.accountCount });
-      }
-    }
-    for (const m of list) {
-      if (!m || !m.id) continue;
-      const slash = m.id.indexOf('/');
-      const prefix = slash > 0 ? m.id.slice(0, slash) : '';
-      const bare = slash > 0 ? m.id.slice(slash + 1) : m.id;
-      // 归属：前缀优先（它就是显式指定的上游），否则用 owned_by。
-      const owner = prefix || m.owned_by || '（未标注）';
-      if (!byOwner.has(owner)) byOwner.set(owner, { owner: owner, items: [], seen: new Set() });
-      const g = byOwner.get(owner);
-      if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
-      g.seen.add(bare);
-      // 展示用 id 取**裸名**；multTag 查表也用裸名（倍率表的键是裸名）。
-      g.items.push({ id: bare, fullId: m.id, owner: owner });
-    }
-    // 组间按上游名排序；组内按名字排序（顺序稳定，便于扫读）。
-    const out = Array.from(byOwner.values());
-    out.sort((a, b) => (a.owner < b.owner ? -1 : a.owner > b.owner ? 1 : 0));
-    out.forEach(g => g.items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
-    return out;
-  }
-
-function renderModelGroup(g) {
-    const open = modelGroupOpen(g.owner);
-    // 分组标题带**模型数**（不是账号数）—— 与导航里的 navgcount 区分开：
-    // 那个是账号数。这里写清楚"个模型"，避免两个数字被当成同一件事。
-    //
-    // 空组（该上游声明了 models 能力、但当前一个模型都没有）不渲染 chips 区，
-    // 改为一句能自我解释的说明 —— 见 emptyModelGroups 的注释：
-    // **空白必须能自我解释**，否则用户只会以为功能坏了。
-    let body;
-    if (!g.items.length) {
-      const why = (g.accountCount === 0)
-        ? '没有可用账号，无法获取模型目录。先在「账号池」添加账号。'
-        : '上游没有返回模型目录（账号可用但目录为空）。可用「强制刷新目录」重试。';
-      body = `<div class="chips"><span class="dim" style="font-size:12px">${esc(why)}</span></div>`;
-    } else {
-      body = `<div class="chips">${g.items.map(m =>
-        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
-        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>`;
-    }
-    return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
-      <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
-              aria-expanded="${open ? 'true' : 'false'}"
-              title="${esc(g.owner)} · ${g.items.length} 个模型（点标题折叠/展开）">
-        <span class="mcaret"></span>
-        <span class="mowner">${esc(g.owner)}</span>
-        <span class="mcount2">${g.items.length} 个模型</span>
-      </button>
-      ${body}
-    </div>`;
-  }
-
-function modelGroupOpen(owner) {
-    const key = LS_MODELGROUP + '.' + owner;
-    try {
-      const v = localStorage.getItem(key);
-      return v === null ? true : v === '1';
-    } catch { return true; }   // 隐私模式：默认展开
-  }
-
-function modelOwnerOf(id, ownedBy) {
-    const s = String(id || '').indexOf('/');
-    return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
-  }
-
-function modelProviderFilter() {
-    return modelProviderWanted;
-  }
-
-function syncModelProviderOptions(list) {
-    const el = $('modelProvider');
-    if (!el) return;
-    const owners = [];
-    for (const m of list) {
-      const o = modelOwnerOf(m.id, m.owned_by);
-      if (o && owners.indexOf(o) < 0) owners.push(o);
-    }
-    owners.sort();
-    const keep = modelProviderWanted;
-    el.innerHTML = '<option value="">全部上游</option>'
-      + owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
-    // 选项就绪后把「想要的」写回 DOM。
-    // 不在列表里（上游被移除）则回落「全部」——
-    // 留着一个不存在的值会让 select 显示空、而内层 value 还是旧的。
-    setModelProviderFilter(owners.indexOf(keep) >= 0 ? keep : '');
-  }
-
-function emptyModelGroups() {
-    const out = [];
-    for (const id of providerRegistryIds()) {
-      const p = providerInfo(id);
-      if (!p) continue;
-      if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
-      out.push({ owner: id, accountCount: Number(p.account_count) || 0 });
-    }
-    return out;
-  }
-
-function renderModels(list) {
-    models = list || [];
-    $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
-    if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
-
-    // 按上游分组渲染（T5）。三件事一起做：
-    //   1. **去重**：`/v1/models` 同时给裸名与 `provider/name` 两种写法，
-    //      同一个模型会出现两次（实测 32 条 = 16 个模型 × 2 种写法）。
-    //      对外 API 两种都要保留（`provider/model` 是显式指定上游用的），
-    //      但**界面上不该重复展示**。
-    //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
-    //   3. **可折叠**：状态存 localStorage，刷新后保持。
-    const groups = groupModelsByOwner(models, emptyModelGroups());
-    $('models').innerHTML = groups.map(renderModelGroup).join('');
-    const sel = $('model'), keep = sel.value;
-    // T7：模型下拉按上游筛选，**不去重**。
-    //
-    // 与上面的 chip 区是**两套**逻辑，故意不一致：
-    //   · chip 区（可用模型面板）：去重 + 按上游分组，便于"看有哪些模型"
-    //   · 这里（对话测试下拉）：按上游**筛选**，不去重 —— 用户要求保留
-    //     `provider/xxx` 形态，因为那是"显式指定上游"的手段，测试时要用
-    //
-    // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
-    syncModelProviderOptions(models);
-    const wantP = modelProviderFilter();
-    const shown = wantP
-      ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
-      : models;
-    sel.innerHTML = shown.map(m =>
-      `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
-    // 保持原选择：若它不在筛选后的列表里，回落到第一个（或 auto）。
-    sel.value = shown.some(m => m.id === keep) ? keep
-      : ((shown.find(m => m.id === 'auto') || shown[0] || {}).id || '');
-  }
-
-function providerRegistryIds() {
-    const ids = [];
-    for (const p of (PROVIDERS || [])) {
-      if (p && typeof p === 'object' && p.id) ids.push(String(p.id));
-    }
-    ids.sort();
-    return ids;
-  }
+// ---- chips 解析（渲染结果 → 判据）----
+// chip 结构：<span class="chip" data-id="ID" title="ID">ID<span class="mult…">…</span></span>
+// 可见名字取到第一个 '<' 为止（后面跟着的 multTag 片段都是标签）。
+function chipTexts(htmlStr) {
+  const out = [];
+  const re = /<span class="chip"[^>]*>([^<]*)/g;
+  let m;
+  while ((m = re.exec(htmlStr))) out.push(m[1]);
+  return out;
+}
+function chipDataIds(htmlStr) {
+  const out = [];
+  const re = /<span class="chip" data-id="([^"]*)"/g;
+  let m;
+  while ((m = re.exec(htmlStr))) out.push(m[1]);
+  return out;
+}
+function optionValues(htmlStr) {
+  const out = [];
+  const re = /<option value="([^"]*)"/g;
+  let m;
+  while ((m = re.exec(htmlStr))) out.push(m[1]);
+  return out;
+}
 
 let fail = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
@@ -296,13 +214,6 @@ ok(/class="mult"[^>]*>x0\.51</.test(c2), '中间倍率用中性样式');
 ok(c2.includes('每次调用消耗'), '带 title 说明，不靠颜色单独表意');
 
 // ---------- 4. 未知系数显示「无」，而不是伪装成免费 ----------
-//
-// ⚠ 这一节的判据在 T6 变了，但**原始意图没变** ——
-// 原来写的是"没系数就不加后缀"，理由是"别把不知道说成 x0（免费）"。
-// 用户要求改为显式显示 x无 —— 那比"留空"**更贴合原意图**：
-//   · 留空     → 用户分不清"这个模型没倍率"与"倍率没渲染出来"
-//   · x无    → 明确说"上游没给"
-// 所以这里断言 x无，并且仍然断言**不出现 x0**（那才是"伪装成免费"）。
 console.log('\n[4] 系数未知时显示「无」（不伪装成免费）');
 modelMultipliers = { 'deepseek-v4-pro': 0.51 };   // 其余没有系数
 renderModels(LIST.map(x => ({ ...x })));
@@ -314,10 +225,6 @@ ok(/class="mult unknown"/.test(c4), 'x无 用 unknown 样式类（虚线边框�
 ok((c4.match(/x无/g) || []).length > 1, '不止一个模型拿到 x无（说明是普遍回落，不是特例）');
 
 // ---------- 5. 倍率整体取不到时列表照常渲染 ----------
-//
-// ⚠ 与第 4 节的**关键区别**：这里是"目录接口失败"（multCatalogFailed=true），
-// 那时**不该**给每个 chip 都挂 x无 —— 否则用户会以为上游真的没配倍率。
-// 这是本项目的"静默失败"形态：两种情况必须可区分。
 console.log('\n[5] 倍率**整体**取不到时降级（与"单个模型没倍率"区分）');
 modelMultipliers = {};
 multCatalogFailed = true;        // 目录接口失败
@@ -328,7 +235,6 @@ ok(!/x无/.test(c5), '**不**给每个 chip 都挂 x无（那会让人以为上�
 ok(!/x\d/.test(c5), '没有任何倍率数字');
 ok(!/undefined|NaN/.test(c5), '不出现 undefined/NaN');
 
-// 目录恢复后，未知系数重新显示 x无
 console.log('\n[5b] 目录恢复后回到 x无');
 multCatalogFailed = false;
 modelMultipliers = {};
@@ -347,24 +253,37 @@ modelMultipliers = { 'y': 0.005 };
 renderModels([{ id: 'y' }]);
 ok(!/x0\.005/.test($('models').innerHTML), '过小倍率被规整为 x0.01 或 x0，不出现 x0.005');
 
-// ---------- 7. T7：对话测试的「上游筛选」（不去重）----------
+// ---------- 7. T7：对话测试的「上游筛选」——按 **id** 去重 ----------
 //
-// 与 chip 区**故意不同**：chip 区去重，这里保留 provider/xxx 形态 ——
-// 那是"显式指定上游"的手段，测试时要用。
-console.log('\n[7] 上游筛选（不去重）');
+// 新一轮口径：下拉与 chip 区都显示**完整 id**。去重键两处不同，这是源码里
+// 写明的口径（见 renderModels 的注释）：
+//   · chip 区：按**去前缀后的裸名**去重（同一个模型只留一条）
+//   · 这里：按 **id** 去重（完全相同的 id 只留一条），保留上游返回的顺序
+console.log('\n[7] 上游筛选（按 id 去重，报完整 id）');
 modelMultipliers = {};
 const MIXED = [
-  { id: 'auto', owned_by: 'workbuddy' },
   { id: 'workbuddy/auto', owned_by: 'workbuddy' },
-  { id: 'glm-5.2', owned_by: 'workbuddy' },
   { id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' },
+  { id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' },   // 完全重复的 id（后端退化形态）
+  { id: 'workbuddy/kimi-k3', owned_by: 'workbuddy' },
   { id: 'codearts/deepseek', owned_by: 'codearts' },
+  { id: 'codearts/glm-5.2', owned_by: 'codearts' },
 ];
-// 7a) 「全部」时下拉**不去重**：5 项全在
+const distinctIds = Array.from(new Set(MIXED.map(m => m.id)));
+
+// 7a) 「全部」时下拉按 id 去重：6 条输入 → 5 个不同 id → 5 项
 $('modelProvider').value = '';
 renderModels(MIXED.map(x => ({ ...x })));
-const optsAll = ($('model').innerHTML.match(/<option /g) || []).length;
-ok(optsAll === 5, '选「全部」时下拉有 5 项，**不去重**（实际 ' + optsAll + '）');
+const valsAll = optionValues($('model').innerHTML);
+ok(valsAll.length === distinctIds.length,
+  '选「全部」时下拉项数（' + valsAll.length + '）== 不同 id 数（' + distinctIds.length + '）'
+  + ' —— 6 条输入里的那条完全重复被去掉了');
+ok(new Set(valsAll).size === valsAll.length,
+  '下拉里每个 id 只出现一次（实际 ' + JSON.stringify(valsAll) + '）');
+ok(valsAll.every(v => v.indexOf('/') > 0),
+  '下拉里的 id 全部形如 provider/xxx（实际 ' + JSON.stringify(valsAll) + '）');
+ok(valsAll.indexOf('workbuddy/glm-5.2') >= 0 && valsAll.indexOf('codearts/glm-5.2') >= 0,
+  '不同上游的同名模型是两条不同的 id，都保留（不会被按裸名吃掉）');
 
 // 7b) 上游下拉的选项来自模型列表，且带「全部上游」
 const provOpts = $('modelProvider').innerHTML;
@@ -373,16 +292,22 @@ ok(provOpts.includes('workbuddy') && provOpts.includes('codearts'),
   '上游下拉列出了数据里出现过的上游');
 
 // 7c) 选某个上游 → 只列它的
-$('modelProvider').value = 'workbuddy';
-const shown = MIXED.filter(m => modelOwnerOf(m.id, m.owned_by) === 'workbuddy');
-$('model').innerHTML = shown.map(m => '<option value="' + esc(m.id) + '">' + esc(m.id) + '</option>').join('');
-// ⚠ 期望值**从数据算**，不写字面量 —— 我第一版写了 3，而 workbuddy 实际有 4 项
-// （auto / workbuddy/auto / glm-5.2 / workbuddy/glm-5.2），于是报了个假失败。
-// 数出来的期望比手写的可靠：数据改了断言自动跟上，而不是靠人记得改。
-const wantCount = MIXED.filter(m => modelOwnerOf(m.id, m.owned_by) === 'workbuddy').length;
-ok((($('model').innerHTML.match(/<option /g) || []).length) === wantCount,
-  '选 workbuddy 时只列它的 ' + wantCount + ' 项（实际 '
-  + (($('model').innerHTML.match(/<option /g) || []).length) + '）');
+//
+// ⚠ 驱动方式必须走 setModelProviderFilter（源码实读的那份）而不是只改 DOM 的
+// 「.value」：真实筛选值存在**模块变量** modelProviderWanted 里（「<select>」 会把
+// 不在 option 里的值归一成空串，见源码注释）。只改 DOM 的话 renderModels
+// 读到的仍是"全部"—— 这正是本文件旧版绕开 renderModels 手工拼 option 的原因，
+// 但也因此**没测到**真实筛选路径。
+setModelProviderFilter('workbuddy');
+renderModels(MIXED.map(x => ({ ...x })));
+const wbIds = Array.from(new Set(
+  MIXED.filter(m => modelOwnerOf(m.id, m.owned_by) === 'workbuddy').map(m => m.id)));
+const valsWb = optionValues($('model').innerHTML);
+// ⚠ 期望值**从数据算**，不写字面量 —— 手写数字在数据变化时会变成假失败。
+ok(valsWb.length === wbIds.length,
+  '选 workbuddy 时只列它的 ' + wbIds.length + ' 项（实际 ' + valsWb.length + '）');
+ok(valsWb.every(v => modelOwnerOf(v, '') === 'workbuddy'),
+  '筛出来的每一项都属于 workbuddy（实际 ' + JSON.stringify(valsWb) + '）');
 ok($('model').innerHTML.indexOf('codearts/deepseek') < 0,
   '别家上游的模型**不**出现在 workbuddy 的列表里');
 
@@ -392,9 +317,191 @@ ok(modelOwnerOf('auto', 'workbuddy') === 'workbuddy', 'modelOwnerOf：无前缀�
 ok(modelOwnerOf('', 'workbuddy') === 'workbuddy', 'modelOwnerOf：空 id 不崩');
 
 // 7e) 上游从列表消失时回落「全部」（而不是留一个不存在的选择）
-$('modelProvider').value = 'gone-upstream';
+//
+// 灌一个**不在列表里的**想要值，再看它是否被清掉 —— 变量与 DOM 都要回落，
+// 只清 DOM 会让下一次 renderModels 又把不存在的上游当筛选条件。
+setModelProviderFilter('gone-upstream');
 syncModelProviderOptions(MIXED.map(x => ({ ...x })));
-ok($('modelProvider').value === '', '已选上游不在列表里时回落「全部」（实际 ' + JSON.stringify($('modelProvider').value) + '）');
+ok($('modelProvider').value === '' && modelProviderWanted === '',
+  '已选上游不在列表里时回落「全部」（DOM=' + JSON.stringify($('modelProvider').value)
+  + '，变量=' + JSON.stringify(modelProviderWanted) + '）');
+
+// 7f) 两处去重键**故意不同**：退化形态（裸名 + 前缀名并存）下
+//     chip 区按裸名去重（1 条，保留**先出现**的那条），下拉按 id 去重（2 条）。
+//     这是源码里写明的口径；若哪天被"统一"成一种，下面几条会立刻报红。
+//     ⚠ 真实数据不该出现这个形态（后端多上游只发 「provider/model」），
+//     这里测的是"后端若退化，界面不会重复展示"这条防御性冗余。
+console.log('\n[7f] 退化形态：chip 按裸名去重、下拉按 id 去重');
+$('modelProvider').value = '';
+setModelProviderFilter('');
+const DEGENERATE = [
+  { id: 'glm-5.2', owned_by: 'workbuddy' },
+  { id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' },
+];
+renderModels(DEGENERATE.map(x => ({ ...x })));
+const degChips = chipTexts($('models').innerHTML);
+const degOpts = optionValues($('model').innerHTML);
+ok(degChips.length === 1,
+  'chip 区按裸名去重 → 「glm-5.2」 与 「workbuddy/glm-5.2」 合成 1 条（实际 ' + JSON.stringify(degChips) + '）');
+ok(degChips[0] === 'glm-5.2',
+  '保留的是**先出现**的那条（裸名在前 → 显示裸名；顺序反转时显示完整 id，见下一条）');
+renderModels(DEGENERATE.slice().reverse().map(x => ({ ...x })));
+const degChipsRev = chipTexts($('models').innerHTML);
+ok(degChipsRev.length === 1 && degChipsRev[0] === 'workbuddy/glm-5.2',
+  '顺序反转（前缀名在前）→ 仍 1 条，显示完整 id（实际 ' + JSON.stringify(degChipsRev) + '）');
+ok(degOpts.length === 2,
+  '下拉按 id 去重 → 两条 id 不同都保留（实际 ' + JSON.stringify(degOpts) + '）'
+  + ' —— 这是"按 id 去重"的口径，不是按裸名');
+
+// ---------- 8. 新口径：chips 显示完整 「provider/xxx」，组内 id 唯一 ----------
+console.log('\n[8] 新口径：chip 文本是完整 id，且组内 id 唯一');
+setProviders([]);                 // 不引入空态分组，专心看 chips
+setModelProviderFilter('');       // 不带上游筛选，看全量
+modelMultipliers = {};
+const PREFIXED = [
+  { id: 'workbuddy/auto', owned_by: 'workbuddy' },
+  { id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' },
+  { id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' },   // 完全重复的 id
+  { id: 'workbuddy/kimi-k3', owned_by: 'workbuddy' },
+  { id: 'codearts/glm-5.2', owned_by: 'codearts' },     // 与 workbuddy 同名、不同上游
+  { id: 'codearts/deepseek-v4', owned_by: 'codearts' },
+];
+renderModels(PREFIXED.map(x => ({ ...x })));
+const c8 = $('models').innerHTML;
+const texts8 = chipTexts(c8);
+const dataIds8 = chipDataIds(c8);
+
+// ① chip 文本是**完整 id**（含 「/」）
+ok(texts8.length > 0 && texts8.every(t => t.indexOf('/') > 0),
+  '① chip 可见文本都是完整 「provider/xxx」（实际 ' + JSON.stringify(texts8) + '）');
+ok(texts8.indexOf('workbuddy/glm-5.2') >= 0,
+  '① 完整 id 「workbuddy/glm-5.2」 出现在 chip 文本里');
+ok(texts8.indexOf('glm-5.2') < 0,
+  '① 不再出现裸名 「glm-5.2」（旧口径的形态 —— 它正是"重复"的来源）');
+ok(JSON.stringify(dataIds8) === JSON.stringify(texts8),
+  '① data-id / title / 可见文本三处同为完整 id（实际 data-id=' + JSON.stringify(dataIds8) + '）');
+
+// ② 组内 id 唯一（按源码的 groupModelsByOwner 取分组，再与渲染结果对照）
+const groups8 = groupModelsByOwner(PREFIXED.map(x => ({ ...x })), []);
+const wb8 = groups8.find(g => g.owner === 'workbuddy');
+const ca8 = groups8.find(g => g.owner === 'codearts');
+ok(!!wb8 && !!ca8, '② 建出了 workbuddy / codearts 两个分组');
+const wbIds8 = wb8 ? wb8.items.map(i => i.id) : [];
+ok(new Set(wbIds8).size === wbIds8.length,
+  '② workbuddy 组内 id 唯一（实际 ' + JSON.stringify(wbIds8) + '）');
+ok(wbIds8.length === 3,
+  '② workbuddy 组内 3 条（auto / glm-5.2 / kimi-k3）—— 那条完全重复的 id 被去掉（实际 ' + wbIds8.length + '）');
+ok(wbIds8.every(i => i.indexOf('/') > 0), '② 组内 item.id 是完整 id（渲染文本与之一致）');
+ok(!!ca8 && ca8.items.map(i => i.id).indexOf('codearts/glm-5.2') >= 0,
+  '② 与 workbuddy 同名的 「glm-5.2」 在 codearts 组里**仍在**（跨组不互相吃掉）');
+ok(texts8.length === new Set(texts8).size,
+  '② 渲染出的 chip 文本无重复（实际 ' + JSON.stringify(texts8) + '）');
+ok(texts8.length === 5,
+  '② 6 条输入（含 1 条完全重复）→ 5 个 chip，去重生效（实际 ' + texts8.length + '）');
+ok(texts8.filter(t => t === 'workbuddy/glm-5.2').length === 1,
+  '② 同一分组内同名模型只渲染一次');
+
+// ---------- 9. 新口径：倍率表的键是裸名，带前缀的展示 id 仍要命中 ----------
+//
+// 这是本轮最容易退化的一条：面板显示 「workbuddy/glm-5.2」，而
+// /admin/models/preview 下发的 modelMultipliers **键是裸名 「glm-5.2」**。
+// 旧写法 「modelMultipliers[id]」 直查 → 全表落空 → 界面上满屏 「x无」。
+console.log('\n[9] 新口径：带前缀的 id 经 multTableKey 归一后仍能查到倍率');
+modelMultipliers = { 'glm-5.2': 0.51 };
+renderModels([{ id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' }]);
+const c9 = $('models').innerHTML;
+const o9 = $('model').innerHTML;
+const texts9 = chipTexts(c9);
+ok(multKeyOf('workbuddy/glm-5.2') === 'glm-5.2',
+  'multKeyOf：完整 id → 倍率表的键（去 「provider/」 前缀）');
+ok(multKeyOf('glm-5.2') === 'glm-5.2', 'multKeyOf：裸名原样返回（单上游口径不被破坏）');
+ok(texts9.length === 1 && texts9[0] === 'workbuddy/glm-5.2',
+  '③ chip 文本仍是完整 id（「workbuddy/glm-5.2」）');
+ok(c9.includes('x0.51'),
+  '③ 带前缀的 id 命中倍率表 → 渲染出 x0.51（旧写法直查 modelMultipliers[id] 会得到 x无）');
+ok(!/x无/.test(c9), '③ 带前缀的 id 不落回 x无');
+ok(o9.includes('(x0.51)'), '③ 下拉（multTagPlain）同样经归一命中');
+
+// 归一只有一处：静态确认两个查表点都经 multTableKey，而不是各写一遍去前缀/判归属。
+const multTagSrc = grab('function multTag(');
+const plainSrc = grab('function multTagPlain(');
+const resolverSrc = grab('function multTableKey(');
+ok(/multTableKey\(\s*id\s*\)/.test(multTagSrc), '③ multTag 经 multTableKey 取键（源码实读的正文里就有它）');
+ok(/multTableKey\(\s*id\s*\)/.test(plainSrc), '③ multTagPlain 经 multTableKey 取键（判据没有第二份实现）');
+ok(/multKeyOf\(\s*id\s*\)/.test(resolverSrc), '③ 去前缀的归一仍只有一处：multTableKey 内部调 multKeyOf');
+ok(!/indexOf\('\/'\)/.test(multTagSrc + plainSrc),
+  '③ 两个查表点都没有自己写去前缀（判据只在 multTableKey 一处）');
+ok(!/hasOwnProperty\.call\(modelMultipliers,\s*id\)/.test(multTagSrc + plainSrc),
+  '③ 两处都没有"直接拿展示 id 查表"的旧写法');
+
+// 有前缀 / 无前缀两种写法的结果必须一致（否则界面上会出现"同一个模型有的有倍率、有的没有"）
+ok(multTag('workbuddy/glm-5.2') === multTag('glm-5.2'),
+  '③ 带前缀与裸名的 multTag 输出逐字相同');
+
+// ---------- 10. 别家上游**不得继承**默认上游的系数 ----------
+//
+// 真 Chrome 实测过的缺陷形态：「/admin/models/preview」 的倍率表**只由默认上游的
+// 客户端构建**（键是那份目录里的裸名），而 「multKeyOf」 无条件去前缀 —— 于是
+// 「codearts/glm-5.3-flash」 命中 workbuddy 目录里同名模型的 0.06，
+// 被当成 codearts 的事实显示出来（同组另外 6 个模型显示 x无）。
+// **显示一个错的数字，比显示 x无 有害得多。**
+//
+// 这一节就是那个反例：同一份 modelMultipliers（只有一条裸名键 「glm-5.3-flash」）
+// 同时喂默认上游与别家上游的同名模型 —— 前者必须是 x0.06，后者必须是 x无。
+// 回归守住的证明也在这一段：默认上游那一条仍然有数字。
+console.log('\n[10] 别家上游不得继承默认上游的系数（回归：默认上游仍有数字）');
+DEFAULT_PROVIDER = 'workbuddy';
+modelMultipliers = { 'glm-5.3-flash': 0.06 };
+renderModels([
+  { id: 'workbuddy/glm-5.3-flash', owned_by: 'workbuddy' },
+  { id: 'codearts/glm-5.3-flash', owned_by: 'codearts' },
+]);
+const c10 = $('models').innerHTML;
+const chipBlocks10 = c10.split('<span class="chip"').slice(1);
+const wbBlock10 = chipBlocks10.find(b => b.indexOf('data-id="workbuddy/glm-5.3-flash"') >= 0);
+const caBlock10 = chipBlocks10.find(b => b.indexOf('data-id="codearts/glm-5.3-flash"') >= 0);
+ok((c10.match(/x0\.06/g) || []).length === 1,
+  '默认上游的 「workbuddy/glm-5.3-flash」 仍显示 x0.06（整块里只出现一次，实际 '
+  + ((c10.match(/x0\.06/g) || []).length) + ' 次）');
+ok(!!wbBlock10 && /x0\.06/.test(wbBlock10),
+  '**回归守住的证明**：默认上游那条 chip 上有数字（x0.06）—— 修复没有把默认上游一起打成 x无');
+ok(!!caBlock10 && /x无/.test(caBlock10),
+  '别家上游的 「codearts/glm-5.3-flash」 显示 x无（实际 ' + JSON.stringify(caBlock10 || '') + '）');
+ok(!!caBlock10 && !/x0\.06/.test(caBlock10),
+  '别家上游那条 chip 里**没有** x0.06 —— 它不再继承 workbuddy 目录里的系数');
+
+// 三个入口逐条直测（不只看渲染结果，避免被分组/去重掩盖）。
+ok(multTag('workbuddy/glm-5.3-flash').indexOf('x0.06') >= 0,
+  'multTag：默认上游 → x0.06');
+const caTag10 = multTag('codearts/glm-5.3-flash');
+ok(caTag10.indexOf('x无') >= 0, 'multTag：别家上游 → x无（实际 ' + caTag10 + '）');
+ok(caTag10.indexOf('x0.06') < 0, 'multTag：别家上游不出现 0.06');
+ok(caTag10.indexOf('倍率表只覆盖默认上游') >= 0,
+  'multTag：x无 的 title 说明原因（倍率表只覆盖默认上游）');
+ok(caTag10.indexOf('workbuddy') >= 0, 'multTag：title 里点名默认上游名 workbuddy');
+ok(multTagPlain('workbuddy/glm-5.3-flash') === ' (x0.06)', 'multTagPlain：默认上游 → " (x0.06)"');
+ok(multTagPlain('codearts/glm-5.3-flash') === '', 'multTagPlain：别家上游 → 不加倍率（实际 '
+  + JSON.stringify(multTagPlain('codearts/glm-5.3-flash')) + '）');
+
+// 裸名行为**完全不变**（单上游部署就是靠这一支）。
+ok(multTag('glm-5.3-flash').indexOf('x0.06') >= 0, '裸名（无前缀）→ 原样查表，仍是 x0.06');
+ok(multTagPlain('glm-5.3-flash') === ' (x0.06)', '裸名 → 下拉仍带 (x0.06)');
+ok(multTag('codearts/glm-5.3-flash') !== multTag('glm-5.3-flash'),
+  '同一个裸名在"默认上游前缀 / 无前缀"下一致，在"别家前缀"下**不一致**（归属被尊重）');
+
+// manifest 未到达 / 取不到：DEFAULT_PROVIDER 是空串。
+// 那时**任何**带前缀的 id 都不查表 —— 宁可 x无，也不要在归属未知时错显别家的数字。
+DEFAULT_PROVIDER = '';
+ok(multTag('workbuddy/glm-5.3-flash').indexOf('x0.06') < 0,
+  '归属未知（manifest 未到达）时不查表：带前缀的 id 不显示 0.06');
+ok(/x无/.test(multTag('workbuddy/glm-5.3-flash')),
+  '归属未知时带前缀的 id 一律显示 x无（安全方向）');
+ok(multTag('glm-5.3-flash').indexOf('x0.06') >= 0,
+  '归属未知时**裸名**仍原样查表（单上游部署不被这次修复牵连）');
+ok(multTagPlain('workbuddy/glm-5.3-flash') === '',
+  '归属未知时下拉同样不加倍率（与 chips 同一判据）');
+DEFAULT_PROVIDER = 'workbuddy';
+modelMultipliers = {};
 
 console.log(fail === 0 ? '\n=== 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');
 process.exit(fail ? 1 : 0);
