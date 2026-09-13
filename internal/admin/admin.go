@@ -462,6 +462,27 @@ type AccountView struct {
 	File           string `json:"file,omitempty"`
 	TodayCheckin   string `json:"today_checkin,omitempty"`
 	TodayCheckinAt int64  `json:"today_checkin_at,omitempty"`
+
+	// TodayWelfare 今天有没有领过福利（codearts 的每日动作）。
+	//
+	// # 取值与 today_checkin 同口径
+	//
+	//	"ok"      → 领到了（今天这次领到了东西）
+	//	"skip"    → 点过，但一项都没领到
+	//	"fail"    → 请求失败
+	//	字段缺失  → **未知**（今天没点过，或该账号不属于任何有 welfare 的上游）
+	//
+	// ⚠ 缺失**不等于**"未领取"。上游的 `/admin/welfare` 只回 `claimable`，
+	// 无法区分"今日已领完"与"资格不符"—— 所以界面在拿不到记录时显示 `—`，
+	// 绝不写"未领取"（那是把未知说成事实）。
+	//
+	// # 为什么它的来源与 today_checkin 不同
+	//
+	// `today_checkin` 查的是 checkinlog 里的 `KindCheckin`；这里查 `KindWelfare`。
+	// 两者是**不同上游的同位动作**（每天一次、点一下领东西），
+	// 混用一个 kind 会让 codearts 被渲染成"已签到"——它根本没有签到端点。
+	TodayWelfare   string `json:"today_welfare,omitempty"`
+	TodayWelfareAt int64  `json:"today_welfare_at,omitempty"`
 }
 
 // credentialExpiryOf 问**拥有这份凭证的上游**：它什么时候过期。
@@ -580,6 +601,15 @@ func (h *Handler) accountViews() []AccountView {
 				if rec.UID == st.UID && rec.Kind == checkinlog.KindCheckin {
 					v.TodayCheckin = rec.Status
 					v.TodayCheckinAt = rec.At.UnixMilli()
+				}
+				// 福利领取：**同一个循环里**再取一次，但按 KindWelfare 过滤。
+				//
+				// 不合成一个"最近一条每日动作"的判据 —— 两个 kind 属于
+				// 不同上游，混起来会让 codearts 的领取显示成 workbuddy 的签到。
+				//（上面 `today_checkin` 那条注释已经踩过一次这个形态。）
+				if rec.UID == st.UID && rec.Kind == checkinlog.KindWelfare {
+					v.TodayWelfare = rec.Status
+					v.TodayWelfareAt = rec.At.UnixMilli()
 				}
 			}
 		}

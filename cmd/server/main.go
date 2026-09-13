@@ -227,7 +227,7 @@ func main() {
 		//
 		// 三条读路径（池 secret / 后台任务 / 管理端点）的接线统一收在
 		// wireCodeartsCreds 里，好让测试能钉住**装配本身**（见 codeartscreds.go）。
-		creds = wireCodeartsCreds(cb, cfg.CodeartsAuthDir)
+		creds = wireCodeartsCreds(cb, cfg.CodeartsAuthDir, checkinLog)
 		if err := registry.Register(cb); err != nil {
 			log.Fatalf("注册 CodeArts 上游失败: %v", err)
 		}

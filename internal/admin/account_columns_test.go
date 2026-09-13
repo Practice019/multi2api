@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/pool"
 )
@@ -311,3 +312,105 @@ func TestCredentialExpiryOfRefusesUnknownProvider(t *testing.T) {
 // 保留对 context 的引用（stubProvider.Chat 的签名用到它），
 // 并防止未来有人删掉这个 import 时困惑。
 var _ = context.Background
+
+// ---------------------------------------------------------------------------
+// 今日福利：本地领取记录 → today_welfare
+// ---------------------------------------------------------------------------
+
+// newWelfareLog 造一份带一条 welfare 记录的历史。
+func newWelfareLog(t *testing.T, uid, status string) *checkinlog.Log {
+	t.Helper()
+	l := checkinlog.New(t.TempDir()+"/log.json", 30)
+	l.Append(checkinlog.Record{
+		At:     time.Now(),
+		UID:    uid,
+		Kind:   checkinlog.KindWelfare,
+		Status: status,
+	})
+	return l
+}
+
+// TestAccountViewsReportsTodayWelfare 领过 → 回 today_welfare。
+//
+// 这是用户要的「福利是否领取」的数据落点：
+// 上游只回 `claimable`，分不清"今日已领"与"资格不符"；
+// 而**我们自己**的领取动作是确定的，所以答案来自本地历史。
+func TestAccountViewsReportsTodayWelfare(t *testing.T) {
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&plainStub{stubProvider{id: "carts", caps: gateway.CapWelfare}}); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New("")
+	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "s")
+
+	h := New(Config{
+		Pool:            p,
+		Registry:        reg,
+		DefaultProvider: "carts",
+		Log:             newWelfareLog(t, "ca-1", checkinlog.StatusOK),
+	})
+
+	v := accountsFor(t, h)[0]
+	if v.TodayWelfare != checkinlog.StatusOK {
+		t.Fatalf("today_welfare = %q，want %q", v.TodayWelfare, checkinlog.StatusOK)
+	}
+	if v.TodayWelfareAt == 0 {
+		t.Error("today_welfare_at 应当带上时间戳（界面要显示这是什么时候领的）")
+	}
+}
+
+// TestAccountViewsOmitsTodayWelfareWhenNoRecord **没记录 ≠ 未领取**。
+//
+// ⚠ 这是本次最容易犯的错：把"我们不知道"渲染成"没领"。
+// 字段缺失时前端显示 `—`；若这里填一个 "no"/"未领取"，
+// 界面就在**断言**一件我们并不知道的事（上游那侧的状态我们看不到）。
+func TestAccountViewsOmitsTodayWelfareWhenNoRecord(t *testing.T) {
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&plainStub{stubProvider{id: "carts", caps: gateway.CapWelfare}}); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New("")
+	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "s")
+
+	// 历史是空的（今天没点过）
+	h := New(Config{
+		Pool:            p,
+		Registry:        reg,
+		DefaultProvider: "carts",
+		Log:             checkinlog.New(t.TempDir()+"/log.json", 30),
+	})
+
+	if v := accountsFor(t, h)[0]; v.TodayWelfare != "" {
+		t.Errorf("今天没领过时不该填 today_welfare（got %q）—— "+
+			"前端会把它渲染成一个确定的结论，而事实是「不知道」", v.TodayWelfare)
+	}
+}
+
+// TestTodayWelfareDoesNotBleedIntoTodayCheckin 两个 kind 不能互相串。
+//
+// codearts **没有**签到端点。若把 welfare 记录也算进 today_checkin，
+// 账号池会对 codearts 渲染出「已签到」—— 一个它根本没有的动作。
+func TestTodayWelfareDoesNotBleedIntoTodayCheckin(t *testing.T) {
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&plainStub{stubProvider{id: "carts", caps: gateway.CapWelfare}}); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New("")
+	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "s")
+
+	h := New(Config{
+		Pool:            p,
+		Registry:        reg,
+		DefaultProvider: "carts",
+		Log:             newWelfareLog(t, "ca-1", checkinlog.StatusOK),
+	})
+
+	v := accountsFor(t, h)[0]
+	if v.TodayCheckin != "" {
+		t.Errorf("today_checkin = %q —— welfare 记录串进了签到列，"+
+			"codearts 会被渲染成「已签到」而它没有签到端点", v.TodayCheckin)
+	}
+	if v.TodayWelfare != checkinlog.StatusOK {
+		t.Errorf("today_welfare = %q，want %q", v.TodayWelfare, checkinlog.StatusOK)
+	}
+}
