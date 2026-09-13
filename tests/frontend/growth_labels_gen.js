@@ -41,14 +41,14 @@ function renderGrowth(list) {
       ['账号数', growthSnaps.length, ''],
       // 额度排在「现在可领」前面：先看家底，再看还能拿多少。
       ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
-      ['现在可领积分', sum.right_now, sum.right_now ? 'ok' : 'dim'],
+      ['现在可领额度', sum.right_now, sum.right_now ? 'ok' : 'dim'],
       ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
       // 「待完成 / 完成后可获得」的口径是**还没做完的任务**：
       // 未接单 + 已接单 + 进行中三种状态都算（见后端 GrowthTask.Pending）。
       // 不含 completed（那属于「待领取」，领奖是另一步）。
       // 措辞强调"完成"而不是"接单"：接单只是开始计进度，不发任何奖励。
       ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
-      ['完成后可获得的积分', sum.credit, sum.credit ? 'ok' : 'dim'],
+      ['完成后可获得的额度', sum.credit, sum.credit ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
       ['能量合计', sum.energy, ''],
     ].map(([k, v, c]) =>
@@ -164,10 +164,16 @@ function renderWith(claim, credit) {
 console.log('\n[1] 卡片标签');
 const cards = renderWith(17, 2150);
 ok(cards.includes('待完成任务'), '含「待完成任务」');
-ok(cards.includes('完成后可获得的积分'), '含「完成后可获得的积分」');
+ok(cards.includes('完成后可获得的额度'), '含「完成后可获得的额度」');
 ok(!cards.includes('待接单任务'), '不再有「待接单任务」');
 ok(!cards.includes('接单后可得积分'), '不再有「接单后可得积分」');
-ok(!cards.includes('信用分'), '统一用「积分」，不再出现「信用分」');
+// ⚠ T4 订正：这条原来断言「统一用**积分**」。T4 把界面用词统一到了
+// **「额度」**（决策 5，用户原话"不要叫积分叫额度都可以"），
+// 所以"统一"这个**意图**没变，变的只是统一到哪个词。
+// 断言跟着改成"不再出现任何游离的『积分』说法" —— 它守的东西反而更强了：
+// 改造前是"两个词里挑一个"，现在是"页面上不该再有第二个词"。
+ok(!cards.includes('信用分'), '不再出现「信用分」（已废弃的第三种叫法）');
+ok(!cards.includes('现在可领积分'), '不再有「现在可领积分」（T4 已统一为「现在可领额度」）');
 // 数值仍然正确渲染
 ok(cards.includes('>17<'), '待完成数量 17 正常渲染');
 ok(cards.includes('>2150<'), '完成后可得 2150 正常渲染');
@@ -178,6 +184,9 @@ ok(!html.includes('待接单任务'), '页面无「待接单任务」');
 ok(!html.includes('接单后可得积分'), '页面无「接单后可得积分」');
 ok(!html.includes('<th>待接单</th>'), '表头不再是「待接单」');
 ok(!html.includes('<th>接单后可得</th>'), '表头不再是「接单后可得」');
+// T4：用户可见区域不该再出现「积分」。见 tests/frontend/verify_t4_t5.js
+// 那条更精确的判据（它剥注释后按**渲染结果**判，不在源码上做全文匹配）。
+ok(!html.includes('<th>积分</th>'), '表头不再是「积分」（T4 已统一为「额度」）');
 // 表格新表头
 ok(html.includes('<th>待完成</th>') && html.includes('<th>完成后可得</th>'),
    '表头已改为「待完成 / 完成后可得」');

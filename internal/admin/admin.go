@@ -412,9 +412,53 @@ type ModelMultiplier struct {
 // AccountView 是 pool.Status 的管理台增强视图（补 token 有效期、凭证文件、今日签到）。
 type AccountView struct {
 	pool.Status
-	HasToken       bool   `json:"has_token"`
-	TokenExpireAt  int64  `json:"token_expire_at,omitempty"`
-	TokenExpireSec int64  `json:"token_expire_sec,omitempty"`
+	HasToken bool `json:"has_token"`
+
+	// TokenExpireAt / TokenExpireSec 用**指针**表达"未知"。
+	//
+	// # 为什么必须是指针，而不是 int64 + omitempty（T5 的根因）
+	//
+	// 改造前是 `int64` + `omitempty`，于是：
+	//
+	//	ExpiresAt = 0（上游根本没给过期时间）
+	//	  → TokenExpireSec = 0
+	//	  → omitempty 把**整个字段**从 JSON 里删掉
+	//	  → 前端 `a.token_expire_sec || 0` 得到 0
+	//	  → 显示 "0d"
+	//
+	// 实测（2026-09-13，端口 18080）：
+	//
+	//	workbuddy: "token_expire_sec": 5154511      ← 有值才带
+	//	codearts : （字段根本不存在）                 ← omitempty 吃掉
+	//
+	// 用户看到 codearts 那一格是 `0d`，读成"这个号的 token 还剩 0 天、
+	// 马上就要过期"。**真相是它压根没有可读的过期时间** —— 界面把一个
+	// "不知道"渲染成了一个具体的、且是惊悚的值。
+	//
+	// # 为什么不用哨兵值（-1 / math.MinInt64）
+	//
+	// 哨兵把"未知"编码进**数值域**，于是每个读它的人都必须先知道
+	// "有个魔法数要特判"。漏判一处就退化成本 bug（-1 被当成"已过期 1 秒"），
+	// 而且没有任何编译期/类型层面的保护 —— 它只是一条口头约定。
+	//
+	// 指针把"未知"编码进**类型**：
+	//   · Go 侧：`nil` 与 `0` 在语言层面就不同，写 `*v.TokenExpireSec`
+	//     前必须显式处理 nil 分支，漏了会 panic 而不是静默出错
+	//   · JSON 侧：`nil` → 字段**不出现**（保持 omitempty 的下线形状，
+	//     老前端读不到就还是 `undefined`，走 `|| 0` 的老路）；
+	//     而 `0` → 显式输出 `"token_expire_sec":0`（真的刚过期）
+	//
+	// 即：**保留 omitempty 的线格式，但修好它的语义** ——
+	// `字段不存在` 现在严格等价于 `未知`，`0` 只可能来自真实的 0。
+	//
+	// # 前端契约
+	//
+	//	undefined / null → 未知 → 显示 `—`
+	//	< 0              → 已过期
+	//	>= 0             → 按 N 天 / N 小时 / N 分钟 渲染
+	TokenExpireAt  *int64 `json:"token_expire_at,omitempty"`
+	TokenExpireSec *int64 `json:"token_expire_sec,omitempty"`
+
 	File           string `json:"file,omitempty"`
 	TodayCheckin   string `json:"today_checkin,omitempty"`
 	TodayCheckinAt int64  `json:"today_checkin_at,omitempty"`
@@ -428,9 +472,20 @@ func (h *Handler) accountViews() []AccountView {
 		v := AccountView{Status: st}
 		if a := h.cfg.Pool.AuthByUID(st.UID); a != nil {
 			v.HasToken = a.AccessToken != ""
-			v.TokenExpireAt = a.ExpiresAt
+			// ⚠ 只在**上游真的给了**过期时间（ExpiresAt > 0）时才填指针。
+			//
+			// ExpiresAt == 0 的含义是"这个凭证没有可读的过期时间"
+			//（codearts 的 STS 走另一套字段；某些凭证文件就是不带 exp），
+			// 保持 nil → 字段不出现在 JSON 里 → 前端显示 `—`。
+			//
+			// 绝不要在这里写 `sec := a.ExpiresAt - time.Now().Unix()` 再无条件取址 ——
+			// 那会在 ExpiresAt=0 时造出 `now` 量级的负值（约 -17.9 亿），
+			// 前端会把它渲染成"已过期"，比原来的 `0d` 更糟。
 			if a.ExpiresAt > 0 {
-				v.TokenExpireSec = a.ExpiresAt - time.Now().Unix()
+				at := a.ExpiresAt
+				sec := a.ExpiresAt - time.Now().Unix()
+				v.TokenExpireAt = &at
+				v.TokenExpireSec = &sec
 			}
 			if a.FilePath != "" {
 				v.File = filepath.Base(a.FilePath)
