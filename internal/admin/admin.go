@@ -213,6 +213,11 @@ func New(cfg Config) *Handler {
 
 	h.register("GET /admin/accounts", h.accounts)
 	h.register("POST /admin/accounts/reload", h.accountsReload)
+	// 全上游通用的额度刷新（把上游自报的额度写回池）。
+	//
+	// 放在通用段而不是某个上游里：它是**所有上游共用**的动作，
+	// 分派目标由每个账号自己的 provider 标签决定（见 quota_refresh.go）。
+	h.register("POST /admin/accounts/quota/refresh", h.accountsQuotaRefresh)
 	h.register("POST /admin/accounts/{uid}/enable", h.accountEnable)
 	h.register("POST /admin/accounts/{uid}/disable", h.accountDisable)
 	h.register("POST /admin/accounts/{uid}/cooldown/clear", h.accountClearCooldown)
