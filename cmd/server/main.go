@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -189,6 +188,17 @@ func main() {
 	// default_provider 缺省时"裸模型名走谁"的行为与改造前完全一致（向后兼容）。
 	// codearts 只在显式配置或 "codearts/model" 前缀时才被用到。
 	var cb *codearts.Provider
+	// creds 是 codearts 凭证的**进程内唯一所有者**（见 codeartscreds.go）。
+	//
+	// ⚠ 它必须在三处是**同一个**：
+	//
+	//	SetAccounts（后台续期任务 + 请求路径的凭证来源）
+	//	SetAdminEnv（管理端点）
+	//	syncCodeartsAccounts（池 secret）
+	//
+	// 少共享一处就会回到 007 修的 bug：同一份凭证在进程里有多个对象，
+	// 对象级 refreshMu 跨对象失效，后台续期写回打不到池子 → 503 no_healthy_account。
+	var creds *codeartsCredStore
 	if cfg.CodeartsEnabled {
 		cb = codearts.NewWithConfig(codearts.Config{
 			AuthDir: cfg.CodeartsAuthDir,
@@ -209,37 +219,15 @@ func main() {
 		//
 		// 这里用**惰性**闭包而不是启动时快照：用户跑完 cmd/login 后点一下
 		// 管理台的"刷新账号"，新的 codearts*.json 应当立即生效。
-		cb.SetAccounts(func() []*codearts.Auth {
-			list, err := codearts.LoadDir(cfg.CodeartsAuthDir)
-			if err != nil {
-				log.Printf("codearts: 读取凭证目录失败: %v", err)
-				return nil
-			}
-			return list
-		})
-		// 管理端点的核心依赖：只暴露 uid 列表与按 uid 解析，核心不需要理解 CodeArts 凭证结构。
-		cb.SetAdminEnv(codearts.AdminEnv{
-			Accounts: func() []string {
-				list, _ := codearts.LoadDir(cfg.CodeartsAuthDir)
-				out := make([]string, 0, len(list))
-				for _, a := range list {
-					out = append(out, a.UID)
-				}
-				return out
-			},
-			Resolve: func(uid string) (*codearts.Auth, error) {
-				list, err := codearts.LoadDir(cfg.CodeartsAuthDir)
-				if err != nil {
-					return nil, err
-				}
-				for _, a := range list {
-					if a.UID == uid || a.AccessKey == uid {
-						return a, nil
-					}
-				}
-				return nil, fmt.Errorf("codearts: 账号不存在: %s", uid)
-			},
-		})
+		//
+		// ⚠ store.List 每次都重新枚举目录、但**按 uid 复用同一个对象**，
+		// 而不是"每次 LoadDir 造一批新对象"—— 后者正是 503 的根因：
+		// 后台续期任务拿到的那份对象与池 secret 那份不是同一个，
+		// 一次性 refresh_token 换回来的新凭证永远写不回池子。
+		//
+		// 三条读路径（池 secret / 后台任务 / 管理端点）的接线统一收在
+		// wireCodeartsCreds 里，好让测试能钉住**装配本身**（见 codeartscreds.go）。
+		creds = wireCodeartsCreds(cb, cfg.CodeartsAuthDir)
 		if err := registry.Register(cb); err != nil {
 			log.Fatalf("注册 CodeArts 上游失败: %v", err)
 		}
@@ -296,7 +284,7 @@ func main() {
 	// 再 codearts。注册顺序也保持 workbuddy 在前 —— registry.First()
 	// 因此仍是 workbuddy，"裸模型名走谁"与改造前一致。
 	if cb != nil && cfg.CodeartsPoolAccounts {
-		if n := syncCodeartsAccounts(p, cfg.CodeartsAuthDir); n > 0 {
+		if n := syncCodeartsAccounts(p, creds); n > 0 {
 			log.Printf("codearts: 已并入账号池 %d 个账号", n)
 		} else {
 			log.Printf("codearts: 账号池中暂无账号（凭证目录 %s 里没有可用的 codearts*.json）", cfg.CodeartsAuthDir)

@@ -484,33 +484,33 @@ func (c *Client) RefreshToken(a *Auth) error {
 		return fmt.Errorf("refresh_failed: 恢复 DPoP 密钥: %w", err)
 	}
 
-	tokenURL := c.stsBase() + TokenPath
-	form := url.Values{}
-	form.Set("client_id", c.clientID(a))
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", a.RefreshToken)
-	body := form.Encode()
+	status, raw, err := c.refreshAttempt(a, kp)
 
-	proof, err := kp.DPoPProof(http.MethodPost, tokenURL)
-	if err != nil {
-		return fmt.Errorf("refresh_failed: 生成 DPoP 证明: %w", err)
+	// ── 窄自愈：只在"这个 refresh_token 已被服务端消费"时读盘、重试一次 ──
+	//
+	// 为什么需要：refresh_token 是一次性的，而"内存里那份已被消费、
+	// 磁盘上有一份更新的未用 token"是**已知会发生的状态**
+	// （内存更新与写盘之间存在窗口，另见 Task 007）。修复前这里只会把
+	// 错误原样返回，只能靠重启网关恢复。
+	//
+	// 判据为什么必须窄：client_id 错、DPoP 证明无效这类 400 与 token 本身
+	// 无关 —— 磁盘上那份 token 一样过不去，读盘重试只会把一次失败放大成
+	// 两次请求。所以只认服务端明确说"已被用过"这一种体（实测原文是
+	// error_code=STS5.1806 与 error_msg 里的 'has been used'）。
+	if err != nil && status >= 400 && isRefreshTokenConsumed(raw) {
+		if c.adoptDiskRefreshToken(a) {
+			log.Printf("codearts: 内存凭证已被消费，采用磁盘上更新的 refresh_token 重试 (uid=%s)", a.UID)
+			// 只重试一次：不用递归、不进循环。
+			_, rawRetry, retryErr := c.refreshAttempt(a, kp)
+			if retryErr != nil {
+				return retryErr
+			}
+			raw, err = rawRetry, nil
+		}
 	}
-
-	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(body))
 	if err != nil {
+		// 磁盘读不出来 / token 与内存相同 / 重试仍失败 → 原样返回
 		return err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("DPoP", proof)
-
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("refresh_failed: %w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("refresh_failed: http %d: %s", resp.StatusCode, truncate(string(raw), 300))
 	}
 
 	var tok struct {
@@ -572,6 +572,99 @@ func (c *Client) RefreshToken(a *Auth) error {
 		}
 	}
 	return nil
+}
+
+// refreshAttempt 发**一次** refresh_token grant 请求，返回状态码与响应体。
+//
+// 抽成独立方法只为一件事：让"已被消费 → 读盘 → 重试一次"不必把
+// 请求构造 + DPoP 签名整段复制一遍（复制出来的第二份迟早会与第一份漂移）。
+//
+// 调用方必须已持有 a.refreshMu —— 它在这里直接读 a.RefreshToken。
+func (c *Client) refreshAttempt(a *Auth, kp *DPoPKeyPair) (int, []byte, error) {
+	tokenURL := c.stsBase() + TokenPath
+	form := url.Values{}
+	form.Set("client_id", c.clientID(a))
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", a.RefreshToken)
+	body := form.Encode()
+
+	proof, err := kp.DPoPProof(http.MethodPost, tokenURL)
+	if err != nil {
+		return 0, nil, fmt.Errorf("refresh_failed: 生成 DPoP 证明: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("DPoP", proof)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("refresh_failed: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		return resp.StatusCode, raw,
+			fmt.Errorf("refresh_failed: http %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+	return resp.StatusCode, raw, nil
+}
+
+// isRefreshTokenConsumed 判断响应体是否明确表示"这个 refresh_token 已被用过"。
+//
+// 只认上游实测的两种原文：
+//
+//	error_code = STS5.1806
+//	error_msg  = invalid refresh token: 'the refresh token has been used'
+//
+// 刻意不做宽泛匹配（例如任何含 "invalid refresh token" 的体）：
+// 判据一宽，client_id / DPoP 类的 400 也会被当成"token 已消费"，
+// 于是每次失败都多打一次请求，还会错误地采用磁盘凭证。
+func isRefreshTokenConsumed(raw []byte) bool {
+	s := string(raw)
+	return strings.Contains(s, "STS5.1806") || strings.Contains(s, "has been used")
+}
+
+// adoptDiskRefreshToken 在"内存那份 token 已被消费"时，改采磁盘上那份更新的凭证。
+//
+// 返回 true 表示已采用（调用方可以重试一次）；false 表示无从自愈，
+// 此时**不得**改动 a 的任何字段 —— 调用方应原样返回原错误。
+//
+// 为什么不无条件读盘比对：那会把"谁是权威"变成每次续期都要判一次，
+// 并引入"磁盘比内存旧"的 TOCTOU —— 只有服务端已经明确作废内存这份时，
+// 磁盘才必然更新，这个方向是单向的。
+//
+// 日志不打印 token / AK / SK（见 security-checklist）。
+func (c *Client) adoptDiskRefreshToken(a *Auth) bool {
+	if a.FilePath == "" {
+		return false
+	}
+	raw, err := os.ReadFile(a.FilePath)
+	if err != nil {
+		log.Printf("codearts: 续期自愈读盘失败 (uid=%s): %v", a.UID, err)
+		return false
+	}
+	disk, err := ParseCredential(raw)
+	if err != nil {
+		log.Printf("codearts: 续期自愈解析磁盘凭证失败 (uid=%s): %v", a.UID, err)
+		return false
+	}
+	// 空 → 磁盘没有可用 token；相同 → 磁盘那份也是刚被消费的那份。
+	if disk.RefreshToken == "" || disk.RefreshToken == a.RefreshToken {
+		return false
+	}
+
+	a.Lock()
+	a.RefreshToken = disk.RefreshToken
+	a.AccessKey = disk.AccessKey
+	a.SecretKey = disk.SecretKey
+	a.SecurityToken = disk.SecurityToken
+	a.ExpiresAt = disk.ExpiresAt
+	a.Unlock()
+	return true
 }
 
 func (c *Client) clientID(a *Auth) string {

@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,38 +44,63 @@ import (
 type refreshStub struct {
 	mu       sync.Mutex
 	used     map[string]bool // 已被消费的 refresh_token
+	requests int             // 到达续期端点的请求数
 	issued   int             // 成功续期次数
 	rejected int             // 因 token 已被用过而拒绝的次数
+}
+
+// reqCount / rejCount 供测试在锁内读数（避免直接读字段触发 -race）。
+func (st *refreshStub) reqCount() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.requests
+}
+
+func (st *refreshStub) rejCount() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.rejected
 }
 
 func newRefreshServer(t *testing.T) (*httptest.Server, *refreshStub) {
 	t.Helper()
 	st := &refreshStub{used: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in struct {
-			RefreshToken string `json:"refresh_token"`
-		}
+		// ⚠ 请求体是 application/x-www-form-urlencoded（生产代码用
+		// url.Values.Encode()），**不是 JSON**。
+		//
+		// 这里原先写的是 json.Unmarshal —— 这正是本测试假绿的根因：
+		// 表单体解出来 refresh_token 恒为空，于是下面那条
+		// "拒绝已用过的 token" 的分支永远不成立，rejected 永远是 0。
 		raw, _ := readAllLimited(r)
-		_ = json.Unmarshal(raw, &in)
+		form, _ := url.ParseQuery(string(raw))
+		rt := form.Get("refresh_token")
 
 		st.mu.Lock()
-		if in.RefreshToken != "" && st.used[in.RefreshToken] {
+		st.requests++
+		if rt != "" && st.used[rt] {
 			st.rejected++
 			st.mu.Unlock()
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"the refresh token has been used"}`))
+			// 与上游实测报文一致（客户端按这两个标记判"已消费"）。
+			_, _ = w.Write([]byte(`{"error_code":"STS5.1806",` +
+				`"error_msg":"invalid refresh token: 'the refresh token has been used'"}`))
 			return
 		}
-		if in.RefreshToken != "" {
-			st.used[in.RefreshToken] = true
+		if rt != "" {
+			st.used[rt] = true
 		}
 		st.issued++
 		st.mu.Unlock()
 
+		// ⚠ 响应体必须是**真实的 STS 形态**：credentials 嵌套 + refresh_token。
+		// 原先这里是磁盘凭证的扁平形态（accessKeyId/expiresAt），
+		// 客户端解不出 credentials → 续期永远"成功不了"，
+		// 内存里的 refresh_token 也就永远不会前进（第二层假绿）。
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"accessKeyId":"AK-new","secretAccessKey":"SK-new",
-			"securityToken":"ST-new","refreshToken":"RT-` + randHex(8) + `",
-			"expiresAt":"2099-01-01T00:00:00Z"}`))
+		_, _ = fmt.Fprintf(w, `{"credentials":{"access_key_id":"AK-new",`+
+			`"secret_access_key":"SK-new","security_token":"ST-new",`+
+			`"expiration":"2099-01-01T00:00:00Z"},"refresh_token":"RT-%s"}`, randHex(8))
 	}))
 	t.Cleanup(srv.Close)
 	return srv, st
@@ -101,13 +129,24 @@ func readAllLimited(r *http.Request) ([]byte, error) {
 
 func newTestAuth(t *testing.T, dir string) *Auth {
 	t.Helper()
+	// DPoP 私钥必须真的有 —— 否则 RefreshToken 在发请求**之前**就返回
+	// "缺 DPoP 私钥"，测试根本到不了 HTTP 层（这是本测试此前假绿的第一层原因）。
+	kp, err := NewDPoPKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwk, err := json.Marshal(kp.PrivateJWK())
+	if err != nil {
+		t.Fatal(err)
+	}
 	a := &Auth{
-		AccessKey:     "AK-old",
-		SecretKey:     "SK-old",
-		SecurityToken: "ST-old",
-		RefreshToken:  "RT-initial-" + randHex(4),
-		ExpiresAt:     time.Now().Add(-time.Hour).Unix(),
-		FilePath:      filepath.Join(dir, "codearts-test.json"),
+		AccessKey:         "AK-old",
+		SecretKey:         "SK-old",
+		SecurityToken:     "ST-old",
+		RefreshToken:      "RT-initial-" + randHex(4),
+		ExpiresAt:         time.Now().Add(-time.Hour).Unix(),
+		FilePath:          filepath.Join(dir, "codearts-test.json"),
+		DPoPPrivateKeyJWK: jwk,
 	}
 	if err := a.SaveAtomic(); err != nil {
 		t.Fatal(err)
@@ -121,7 +160,7 @@ func newTestAuth(t *testing.T, dir string) *Auth {
 // 这是**活的生产不变量**：refresh_token 一次性，
 // 而请求路径（ChatStream 惰性续期）与后台任务（jobs.go）会同时触发续期。
 func TestConcurrentRefreshConsumesTokenOnce(t *testing.T) {
-	srv, _ := newRefreshServer(t)
+	srv, st := newRefreshServer(t)
 	dir := t.TempDir()
 	a := newTestAuth(t, dir)
 
@@ -143,15 +182,26 @@ func TestConcurrentRefreshConsumesTokenOnce(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	// 防假绿第一道：请求必须真的到达了续期端点。
+	// 修复前 RefreshToken 因缺 DPoP 私钥在发请求前就返回，
+	// 这个计数会是 0 —— 测试却在"通过"。
+	if got := st.reqCount(); got != N {
+		t.Errorf("到达续期端点的请求数 = %d，期望 %d（请求没发出去 = 假绿）", got, N)
+	}
+	// 防假绿第二道：stub 必须真的有能力拒绝（见 TestRefreshStubRejectsUsedToken），
+	// 因此这里 rejected==0 才是"没有双消费"的证据而不是"stub 不会拒绝"。
+	if got := st.rejCount(); got != 0 {
+		t.Errorf("续期已被 refreshMu 串行化，不应出现 token 被重复消费，实际 rejected=%d", got)
+	}
 	for i, err := range errs {
-		if err != nil && strings.Contains(err.Error(), "has been used") {
-			t.Errorf("goroutine %d 发生双消费: %v", i, err)
+		if err != nil {
+			t.Errorf("goroutine %d 续期失败: %v", i, err)
 		}
 	}
 	if a.AccessKey == "" || a.SecretKey == "" {
 		t.Fatalf("并发续期后凭证被写坏: ak=%q sk=%q", a.AccessKey, a.SecretKey)
 	}
-	t.Logf("并发 %d 次续期后 AK=%s（无双消费）", N, a.AccessKey)
+	t.Logf("并发 %d 次续期后 AK=%s（无双消费，rejected=%d）", N, a.AccessKey, st.rejCount())
 }
 
 // TestRefreshSerializedWritesConsistentFile 并发续期后磁盘文件必须仍然合法。
@@ -192,4 +242,59 @@ func TestRefreshSerializedWritesConsistentFile(t *testing.T) {
 	if _, err := os.Stat(a.FilePath + ".tmp"); err == nil {
 		t.Error("残留 .tmp 文件，说明写盘未收尾")
 	}
+}
+
+// TestRefreshStubRejectsUsedToken 直接证明 refreshStub 的
+// "拒绝已用过的 refresh_token" 分支是**活的**。
+//
+// 为什么必须有这条：修复前 stub 用 `json.Unmarshal` 解析请求体，
+// 而 `Client.RefreshToken` 发的是 `application/x-www-form-urlencoded`
+// （`url.Values.Encode()`）→ `in.RefreshToken` **恒为空** →
+// 那条 `if in.RefreshToken != "" && st.used[...]` 永远不成立 →
+// `rejected` 永远是 0 → `TestConcurrentRefreshConsumesTokenOnce`
+// 无论有没有双消费都会绿（假绿）。
+//
+// 这条断言把"stub 真的会拒绝"变成可证伪的：
+// 把 `url.ParseQuery` 改回 `json.Unmarshal`，它立刻变红。
+func TestRefreshStubRejectsUsedToken(t *testing.T) {
+	srv, st := newRefreshServer(t)
+
+	rt := "RT-single-use-" + randHex(4)
+	if code, _ := postRefreshForm(t, srv.URL, rt); code != http.StatusOK {
+		t.Fatalf("首次续期应成功，实际 HTTP %d", code)
+	}
+
+	// 同一个 token 再用一次 —— 上游必须拒绝（STS5.1806）。
+	code, body := postRefreshForm(t, srv.URL, rt)
+	if code != http.StatusBadRequest {
+		t.Fatalf("已消费的 token 应被拒绝 (400)，实际 HTTP %d", code)
+	}
+	if !strings.Contains(body, "has been used") {
+		t.Errorf("拒绝响应体不含 'has been used': %s", body)
+	}
+	if got := st.reqCount(); got != 2 {
+		t.Fatalf("stub 收到 %d 次请求，期望 2 次", got)
+	}
+	if got := st.rejCount(); got == 0 {
+		t.Fatal("refreshStub.rejected == 0 —— stub 的拒绝分支从未被执行，" +
+			"说明请求体没有被解析出 refresh_token（假绿根因）")
+	}
+}
+
+// postRefreshForm 用与生产代码**完全相同**的形态发一次续期请求：
+// application/x-www-form-urlencoded + url.Values.Encode()。
+func postRefreshForm(t *testing.T, base, rt string) (int, string) {
+	t.Helper()
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("client_id", "vscode-codebot")
+	form.Set("refresh_token", rt)
+	resp, err := http.Post(base+TokenPath, "application/x-www-form-urlencoded",
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(raw)
 }

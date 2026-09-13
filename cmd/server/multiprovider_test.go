@@ -466,7 +466,7 @@ func TestSyncReturnsDedupedCount(t *testing.T) {
 	}
 
 	p := newTestPool(t)
-	got := syncCodeartsAccounts(p, dir)
+	got := syncCodeartsAccounts(p, newCodeartsCredStore(dir))
 
 	if got != 2 {
 		t.Errorf("syncCodeartsAccounts 返回 %d，期望 2（去重后的实际账号数）—— "+
@@ -491,7 +491,7 @@ func TestSyncSingleCredentialReturnsOne(t *testing.T) {
 		credJSON("uid-only", "AK_ONLY", "only", 1893456000, "RT", true))
 
 	p := newTestPool(t)
-	got := syncCodeartsAccounts(p, dir)
+	got := syncCodeartsAccounts(p, newCodeartsCredStore(dir))
 	if got != 1 {
 		t.Errorf("单个凭证时返回 %d，期望 1", got)
 	}
@@ -516,7 +516,7 @@ func TestSyncEmptyDirReturnsZero(t *testing.T) {
 	}()
 
 	p := newTestPool(t)
-	if got := syncCodeartsAccounts(p, dir); got != 0 {
+	if got := syncCodeartsAccounts(p, newCodeartsCredStore(dir)); got != 0 {
 		t.Errorf("空目录返回 %d，期望 0", got)
 	}
 	if s := buf.String(); s != "" {
@@ -543,7 +543,7 @@ func TestSyncPoolHasOneEntryForDuplicateUID(t *testing.T) {
 		credJSON(uid, "HSTACXI1XFLQHQ6LYQOS", "n2", 1999999999, "RT", true))
 
 	p := newTestPool(t)
-	if got := syncCodeartsAccounts(p, dir); got != 1 {
+	if got := syncCodeartsAccounts(p, newCodeartsCredStore(dir)); got != 1 {
 		t.Fatalf("返回 %d，期望 1（两份文件同一个 uid）", got)
 	}
 
