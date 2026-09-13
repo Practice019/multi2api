@@ -125,11 +125,21 @@ type loginFlow struct {
 	// 而"这次注册成哪个上游"是装配层的事实（见 Config.Provider 的注释）。
 	// 两者不一致时，读常量的写法会把凭证标到错误的上游。
 	providerID string
-	// authDir 凭证落盘目录。同样由 LoginFlow() 从 cfg 传入 ——
-	// 不在这里回头读 Provider：`loginFlow` 是核心实际持有的对象，
-	// 它必须自带回答 `AuthDir()` 所需的信息（否则又要一个反向指针）。
-	authDir string
+	// ⚠ 这里**没有** authDir 字段（原来有，随 AuthDir() 一起删）。
+	//
+	// 它只为"让 *loginFlow 满足旧 LoginFlow 接口里的 AuthDir()"而存在。
+	// 目录现在由 `*Provider.AuthDir()` 自报（gateway.AuthDirExt），
+	// 而核心正是拿 Provider 去问的（ExtOf 只接受 Provider）。
+	// 留一个不再被读的副本，就是留一个**会与真相漂移**的副本。
 }
+
+// 编译期断言：本包必须能自报凭证目录（按上游重载 auths 的前提）。
+//
+// ⚠ 拆出 AuthDirExt 之后，这条断言不能省 —— 它原来被
+// `gateway.LoginFlow` 的断言顺带覆盖，现在两者方法集不再互相保证。
+// 少了它，`ExtOf[AuthDirExt](p)` 不匹配时**不报任何错**，
+// 表现为"按上游重载对本上游静默失效"。
+var _ gateway.AuthDirExt = (*Provider)(nil)
 
 // LoginFlow 返回本上游的登录流程形状；未配置时返回 false。
 //
@@ -158,7 +168,6 @@ func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
 	return &loginFlow{
 		flow:       p.cfg.Login,
 		providerID: p.ownProviderID(),
-		authDir:    p.cfg.AuthDir,
 	}, true
 }
 
@@ -187,7 +196,7 @@ func (p *Provider) Configured() bool {
 	return p != nil && p.cfg.Login != nil
 }
 
-// AuthDir 本上游凭证的落盘目录（`gateway.LoginFlow` 要求）。
+// AuthDir 本上游凭证的落盘目录（`gateway.AuthDirExt` 要求）。
 //
 // 空串表示"用核心的默认目录"—— 单上游部署的旧行为不变。
 //
@@ -196,6 +205,19 @@ func (p *Provider) Configured() bool {
 // 实测踩过：codearts 授权后凭证被写进 workbuddy 的目录，因为核心
 // 用的是 `h.cfg.AuthDir`（默认上游的目录）。按上游分子目录之后
 // （`auths/workbuddy/`、`auths/codearts/`），每个上游必须自报。
+//
+// # 为什么它**不在** LoginFlow 里
+//
+// 它原来挂在本包的 `LoginFlow` 上。那个位置把两件无关的事绑在了一起：
+// **"我的凭证目录在哪"与"我有没有登录流程"毫无关系**。
+//
+// 手工往 `auths/workbuddy/` 拷凭证再点「重载 auths」是常规路径，
+// 而那条路径**不需要任何登录交互**。挂在 LoginFlow 上就等于说：
+// 不实现登录流程的上游，连"凭证在哪"都答不出来 ——
+// 于是按上游重载 auths 对它不成立（那正是这次要修的问题）。
+//
+// 拆出来之后，本上游即使不配 OAuth 客户端（`p.cfg.Login == nil`，
+// 没有 LoginFlow），**依然**能自报目录、**依然**支持按上游重载。
 func (p *Provider) AuthDir() string {
 	if p == nil {
 		return ""
@@ -241,13 +263,24 @@ func (f *loginFlow) Start() (string, string, error) {
 // 而用户那边其实只是还没点确认。
 func (f *loginFlow) Configured() bool { return f != nil && f.flow != nil }
 
-// AuthDir 转发给 Provider（`gateway.LoginFlow` 要求 *loginFlow 也实现）。
-func (f *loginFlow) AuthDir() string {
-	if f == nil {
-		return ""
-	}
-	return f.authDir
-}
+// ⚠ 这里**没有** AuthDir() —— 它被删掉了，不是漏了。
+//
+// 它原来是 `gateway.LoginFlow` 的一个方法，所以 `*loginFlow` 必须实现它
+// （核心拿到的是 `*loginFlow` 这个接口值，不是 `*Provider`）。
+//
+// 拆出 `gateway.AuthDirExt` 之后，核心问目录的对象变成了 **`*Provider`**
+//（见 admin.pollViaFlow：`ExtOf[AuthDirExt](p)`，p 是 Provider）——
+// 那个位置问 `*loginFlow` 连编译都过不去，因为 `ExtOf` 只接受 Provider。
+//
+// 所以这个转发方法**没有任何调用方**了：留着它等于维护一条
+// 谁也不会走的路径，而下一个人会以为"*loginFlow 也该自报目录"。
+//
+// 同理删掉了 `loginFlow.authDir` 字段：它只为这个转发方法而存在。
+// 目录的事实**只有 Provider 一处**（`p.cfg.AuthDir`），单一来源。
+//
+// 如果将来真的需要在 flow 上拿目录，不要照抄转发 ——
+// 那会同时存在两份"我的目录是哪"，而它们**可以不一致**
+//（codeartsProvider 那个 `Access is denied.` 就是这么来的）。
 
 func (f *loginFlow) Poll(state string) (gateway.Credential, error) {
 	if f == nil || f.flow == nil {

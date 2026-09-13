@@ -539,7 +539,10 @@ func TestLoginFlowStartsOneTickerOnly(t *testing.T) {
 // —— **完全看不出与文件名有关**，排查成本极高。
 func TestCredentialFromSetsFilename(t *testing.T) {
 	mgr := &fakeManager{}
-	lf := &loginFlow{mgr: mgr, providerID: "codearts", authDir: "/tmp/x"}
+	// 这里原来还设了 `authDir: "/tmp/x"` —— 与"文件名"无关的遗留设置，
+	// 随 `loginFlow.authDir` 字段一起删掉（目录不由 flow 回答）。
+	// 本用例只关心 credentialFrom 给出的**文件名**。
+	lf := &loginFlow{mgr: mgr, providerID: "codearts"}
 
 	raw := json.RawMessage(`{
 		"auth":{"accessKeyId":"AK-FN","expiresAt":1893456000},
@@ -584,22 +587,51 @@ func TestMarshalAuthFileRejectsEmptyName(t *testing.T) {
 	}
 }
 
-// TestLoginFlowReportsAuthDir 上游必须自报落盘目录。
+// TestProviderReportsAuthDir 上游必须自报落盘目录（`gateway.AuthDirExt`）。
 //
 // 实测踩过：核心用 `h.cfg.AuthDir`（默认上游 workbuddy 的目录），
 // 于是 codearts 授权成功后凭证被写进 workbuddy 的目录。
-func TestLoginFlowReportsAuthDir(t *testing.T) {
+//
+// # 为什么现在断言的是 *Provider（而不是 *loginFlow）
+//
+// 目录原来挂在 `LoginFlow` 上，所以核心拿到的是 `*loginFlow`。
+// 拆出 `gateway.AuthDirExt` 之后，核心问目录的对象是 **`*Provider`**
+// （`ExtOf` 只接受 Provider）—— 见 admin.pollViaFlow。
+//
+// 这条同时钉住**发现机制**本身：光有 `AuthDir()` 方法不够，
+// 必须**能被 `ExtOf[AuthDirExt]` 断言到**才说明"按上游重载认得出它"。
+// 少了后半句，把方法挂到别的类型上（或改了接收者）也能让前半句绿。
+func TestProviderReportsAuthDir(t *testing.T) {
 	p := &Provider{login: NewManager("", "", ""), authDir: "/tmp/codearts-auths"}
-	lf, ok := p.LoginFlow()
-	if !ok {
-		t.Fatal("LoginFlow() 应返回 true")
-	}
-	if got := lf.AuthDir(); got != "/tmp/codearts-auths" {
-		t.Errorf("*loginFlow.AuthDir() = %q，应为 Provider 的 authDir —— "+
-			"核心拿到的是 *loginFlow，所以落盘目录必须在这一层拿得到", got)
-	}
+
 	if got := p.AuthDir(); got != "/tmp/codearts-auths" {
-		t.Errorf("*Provider.AuthDir() = %q", got)
+		t.Errorf("*Provider.AuthDir() = %q，应为 Provider 的 authDir", got)
+	}
+
+	// 关键：必须能被核心的**类型断言**认出来 —— 这是"按上游重载"的前提。
+	ext, ok := gateway.ExtOf[gateway.AuthDirExt](p)
+	if !ok {
+		t.Fatal("gateway.ExtOf[AuthDirExt] 认不出 codearts 的 Provider —— " +
+			"按上游重载 auths 会对本上游**静默失效**（断言失败不报任何错）")
+	}
+	if got := ext.AuthDir(); got != "/tmp/codearts-auths" {
+		t.Errorf("经 ExtOf 取到的 AuthDir() = %q，应为 /tmp/codearts-auths", got)
+	}
+
+	// ⚠ 未配 Portal（没有 LoginFlow）时**依然**要能自报目录。
+	// 这条是本次拆分的**全部理由**：手工往 auths/codearts/ 拷凭证
+	// 再点「重载」是常规路径，它不需要任何登录流程。
+	// 若目录还挂在 LoginFlow 上，下面这个 p 就答不出来。
+	pNoLogin := &Provider{authDir: "/tmp/no-login"}
+	if _, ok := pNoLogin.LoginFlow(); ok {
+		t.Fatal("前提错了：这个 Provider 不该有 LoginFlow")
+	}
+	ext2, ok := gateway.ExtOf[gateway.AuthDirExt](pNoLogin)
+	if !ok {
+		t.Error("没配登录流程的 Provider 认不出 AuthDirExt —— " +
+			"这正是把 AuthDir 从 LoginFlow 拆出来的理由，拆了却没生效")
+	} else if got := ext2.AuthDir(); got != "/tmp/no-login" {
+		t.Errorf("无 LoginFlow 时 AuthDir() = %q，应为 /tmp/no-login", got)
 	}
 }
 

@@ -487,25 +487,110 @@ func (h *Handler) reloadProvider() string {
 //
 // 所以域必须由配置显式给出，不能依赖"谁是默认"。
 // 缺省回落到 DefaultProvider 只为兼容旧装配（并会在日志里留痕）。
+//
+// # 请求体里的 provider：这条按钮终于有了它本该有的语义
+//
+// 上面那段只解决了"域不能被默认上游带跑偏"，但**域本身仍是配置里的
+// 一个固定值**（`ReloadProvider` = workbuddy）。于是账号池页面上
+// codearts 那行的「重载 auths」按钮**扫的一直是 workbuddy 目录**，
+// 而 toast 却说「对齐 codearts」。
+//
+// 这不是"少个功能"，而是**这条按钮的存在意义被架空了** ——
+// 它的用途正是"往 `auths/<provider>/` 手工拷入凭证后不用重启网关"
+// （见 auth.UpstreamDir 的注释），而对 codearts 来说它**根本不工作**，
+// 界面还说成功了。用户实测的回执是三条一模一样的 `{"provider":"workbuddy"}`，
+// 连不存在的上游 `ghost` 都被默默接受。
+//
+// 所以要害不只是"读请求体"，而是**读不到时必须失败**（见下面的 404 分支）。
 func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
-	// 兼容读：`h.cfg.AuthDir` 现在是 workbuddy 的子目录
-	//（`auths/workbuddy/`），但迁移期凭证可能还在 `auths/` 根。
+	// 宽容解析：空体 / 坏体都**不算错**。
 	//
-	// 用 h.reloadProvider() 作为归属 —— 本目录属于哪个上游是**配置事实**
-	//（见下面那段注释），所以兼容扫描的根目录也用同一个 base。
-	provider := h.reloadProvider()
+	// 老客户端（以及缓存里的旧页面）发的是 `{}` 或空体 ——
+	// 解析失败不该让这条端点挂掉，那会把"重载"整个功能打没。
+	// 与 accountDisable / loginPoll 同一范式。
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	// 没带 provider = 老调用方：行为**逐字不变**（配置回落）。
+	// 这是向后兼容，不是重复实现 —— `reloadProvider()` 的语义一个字没动。
+	provider := body.Provider
+	if provider == "" {
+		provider = h.reloadProvider()
+	} else if _, ok := h.providerByID(provider); !ok {
+		// ⚠ 显式传了 provider 却查不到 → **404**，绝不回落默认目录。
+		//
+		// 回落正是要修的那个 bug 形态：用户点 `ghost` 那行、
+		// 或前端传了个拼错的上游名，界面会收到 200 + 一个别的上游的
+		// scanned —— 看起来"重载成功"，实际动的是别人的池子。
+		// **宁可失败得刺眼，也不要成功得可疑。**
+		//
+		// 404 而不是 400：这是"这个上游不存在"（资源问题），
+		// 不是"provider 字段格式不对"（参数问题）。
+		writeError(w, http.StatusNotFound, "上游不存在: "+provider)
+		return
+	}
+
+	// 兼容读的根：`h.cfg.AuthDir` 现在是默认上游的子目录
+	//（`auths/workbuddy/`），但迁移期凭证可能还在 `auths/` 根。
 	base := h.cfg.AuthsBase
 	if base == "" {
 		base = h.cfg.AuthDir
 	}
-	auths, err := auth.LoadDirCompat(base, provider)
+
+	// 目录：**上游自报优先**（与 pollViaFlow 的落盘目录同一条判据）。
+	//
+	// 目录是**上游的事实**（它知道自己从哪读凭证），核心不该猜。
+	// 问的是 `p`（同一个上游的 Provider 面），不是 LoginFlow ——
+	// `ExtOf` 只接受 Provider，而且"手工拷凭证再重载"这条路径
+	// **根本不需要登录流程**（见 gateway.AuthDirExt 的注释）。
+	//
+	// 上游返回空串 = "我没有独立目录，用核心默认的"（单上游部署的旧形态）。
+	dir := ""
+	if p, ok := h.providerByID(provider); ok {
+		if ext, ok2 := gateway.ExtOf[gateway.AuthDirExt](p); ok2 {
+			dir = ext.AuthDir()
+		}
+	}
+	if dir == "" {
+		// 回落也走 auth.UpstreamDir —— **不自己拼 filepath.Join**。
+		// "auths/<provider>/ 长什么样"这个判据只该写一份，
+		// 抄第二份就会在将来改命名规则时漏掉一处。
+		dir = auth.UpstreamDir(base, provider)
+	}
+
+	// ⚠ 扫描目录与"上游自报目录"的关系 —— 这里刻意做了取舍，写清楚：
+	//
+	// `LoadDirCompat(base, provider)` 内部**自己**算 `UpstreamDir(base, provider)`，
+	// 也就是说它只认"`base/<provider>` + `base` 根"这两个位置。
+	// 而上面从 `AuthDirExt` 拿到的 `dir` 是**上游自己说的**，
+	// 多上游部署里它可能与 `base/<provider>` 不同（例如各上游配了独立的
+	// auth_dir，或上游把凭证放在别处）。
+	//
+	// 两者打架时**以扫描结果的实际位置为准**，所以这里按 `dir` 反推 base：
+	//
+	//   dir == UpstreamDir(base, provider)  → 传 base，两个位置都扫（迁移期正确）
+	//   dir != UpstreamDir(base, provider)  → 传 dir 自己的父目录语义：
+	//                                        直接把 dir 当 base 传进去，
+	//                                        LoadDirCompat 会算 dir/<provider>
+	//                                        （通常不存在，于是只扫 dir 这一层）
+	//
+	// 选这个做法的理由：**优先保证"扫的就是上游说它会读的那个目录"**。
+	// 迁移期兼容（根目录也扫）只在目录布局确实是 `base/<provider>` 时才成立 ——
+	// 那正是它被设计出来的场景。若上游另立目录，再扫 `base` 根只会
+	// **把别的上游的凭证也捞进来**（LoadDir 靠 `workbuddy*.json` 前缀过滤，
+	// 但同一个上游的旧文件可能同时躺在两处 → 按 uid 去重后条数对不上，
+	// 排障时看不出是"多扫了根目录"）。
+	scanBase := base
+	if sub := auth.UpstreamDir(base, provider); dir != sub {
+		scanBase = dir
+	}
+	auths, err := auth.LoadDirCompat(scanBase, provider)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取 auths 目录失败: "+err.Error())
 		return
 	}
-	// ReloadProvider 是本目录所属的上游；空则回落默认上游，并明确记日志 ——
-	// 静默回落正是这个 bug 当初能藏住的原因。
-	// （`provider` 已在上面取过，兼容扫描要用同一个归属。）
 
 	// ⚠ 池子可能为 nil（本包其它地方都判了空，见 pollViaFlow 的注释）。
 	// 漏判的后果是 **nil pointer panic（进程级）**。
@@ -517,10 +602,15 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("admin: reload 扫描到 %d 个凭证，但没有账号池可同步", len(auths))
 	}
+	// 日志打 `dir=`（真正扫的目录）而不是 `h.cfg.AuthDir` ——
+	// 按上游重载之后两者不再是同一个值，打配置值等于没打。
 	log.Printf("admin: reload auths dir=%s provider=%s scanned=%d pool %d -> %d",
-		h.cfg.AuthDir, provider, len(auths), before, after)
+		dir, provider, len(auths), before, after)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"scanned": len(auths), "before": before, "after": after, "provider": provider,
+		// dir 回执：排障时"我点的那个上游到底扫了哪个目录"一眼可见。
+		// 前端不依赖它做逻辑，但它是这条端点最容易被问的问题的答案。
+		"dir": dir,
 	})
 }
 
@@ -728,6 +818,34 @@ func (h *Handler) wantsFlowDispatch(providerID string) (gateway.LoginFlow, bool,
 	return nil, false, false
 }
 
+// providerByID 按上游标识在注册表里找一个上游。
+//
+// # 为什么不能只拿 LoginFlow（实测的编译期约束）
+//
+// `gateway.ExtOf[T]` 的签名是 `ExtOf[T any](p Provider)` —— 它吃的是
+// **Provider**，不是任意接口值。而 `pollViaFlow` 过去只持有
+// `flow gateway.LoginFlow`，于是想在那里问 `AuthDirExt` 时会直接编译失败：
+//
+//	cannot use flow (variable of interface type gateway.LoginFlow) as
+//	gateway.Provider value in argument to ExtOf[AuthDirExt]:
+//	gateway.LoginFlow does not implement gateway.Provider (missing method Caps)
+//
+// 这不是需要绕开的麻烦 —— 它恰好说明**问错对象了**：
+// "我的凭证目录在哪"是 **Provider 这个实体**自报的事实，
+// 而 `LoginFlow` 只是它身上挂着的一个交互能力。
+// 把 `*Provider` 传下去才是对的（见 pollViaFlow 的注释）。
+func (h *Handler) providerByID(providerID string) (gateway.Provider, bool) {
+	if providerID == "" || h.cfg.Registry == nil {
+		return nil, false
+	}
+	for _, p := range h.cfg.Registry.All() {
+		if p.ID() == providerID {
+			return p, true
+		}
+	}
+	return nil, false
+}
+
 // shortState 日志里只打前 8 位 —— 完整的 state 是凭据的一部分，
 // 不该整条进日志（本项目清理过一次真实密钥泄漏）。
 func shortState(s string) string {
@@ -757,7 +875,14 @@ func (h *Handler) loginPoll(w http.ResponseWriter, r *http.Request) {
 				"上游 "+body.Provider+" 不支持在页面内添加账号（未实现登录流程）")
 			return
 		}
-		if err := h.pollViaFlow(w, flow, body.State); err != nil {
+		// 同一个上游的 Provider 面：落盘目录要问它（见 pollViaFlow 的注释）。
+		// 这里**必定**找得到 —— 上一行已经从注册表里认出了该上游。
+		p, pok := h.providerByID(body.Provider)
+		if !pok {
+			writeError(w, http.StatusNotFound, "上游不存在: "+body.Provider)
+			return
+		}
+		if err := h.pollViaFlow(w, p, flow, body.State); err != nil {
 			return
 		}
 		return
@@ -845,7 +970,15 @@ func (h *Handler) loginPoll(w http.ResponseWriter, r *http.Request) {
 // Secret 不满足时**501 并说明原因**，而不是猜字段映射：
 // 把未知结构"尽力映射"会产生看起来成功、实际字段错位的凭证文件 ——
 // 那比明确失败糟得多（本项目反复的教训）。
-func (h *Handler) pollViaFlow(w http.ResponseWriter, flow gateway.LoginFlow, state string) error {
+//
+// # 为什么要多收一个 p（Provider）
+//
+// 落盘目录必须问 `AuthDirExt`，而 `gateway.ExtOf` 只接受 `Provider`
+// （见 providerByID 的注释）。`flow` 与 `p` 是**同一个上游**的两个面：
+// `flow` 负责"怎么拿到凭证"，`p` 负责"凭证该落在哪"。
+// 由调用方（loginPoll，从注册表里遍历出来的那个 p）一并传入，
+// 而不是在这里反查 —— 反查要多一次遍历，且容易传进不一致的两个上游。
+func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow gateway.LoginFlow, state string) error {
 	cred, err := flow.Poll(state)
 	switch {
 	case errors.Is(err, gateway.ErrLoginPending):
@@ -878,8 +1011,17 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, flow gateway.LoginFlow, sta
 	// 按上游分子目录之后（`auths/workbuddy/`、`auths/codearts/`），
 	// 目录是**上游的事实**（它知道自己从哪读凭证），核心不该猜。
 	//
+	// ⚠ 目录从 `AuthDirExt` 问，**不是**从 `flow` 问 ——
+	// 它原来挂在 `LoginFlow` 上，那等于"不实现登录流程的上游连
+	// 自己的凭证目录都答不出来"，而按上游重载 auths **不需要登录流程**
+	//（手工拷凭证是常见路径）。见 gateway.AuthDirExt 的注释。
+	//
+	// 问的是 p（同一个上游的 Provider 面）：`ExtOf` 只接受 Provider。
 	// 上游返回空串 = "用核心默认目录"（单上游部署的旧形态）。
-	dir := flow.AuthDir()
+	dir := ""
+	if ext, ok := gateway.ExtOf[gateway.AuthDirExt](p); ok {
+		dir = ext.AuthDir()
+	}
 	if dir == "" {
 		dir = h.cfg.AuthDir
 	}

@@ -61,7 +61,7 @@ func (f *fakeFlow) Poll(state string) (gateway.Credential, error) {
 // 用字段而不是恒 true：这样才能写"实现了但没配置 → 不给按钮"的反例。
 func (f *fakeFlow) Configured() bool { return f.configured }
 
-// AuthDir 凭证落盘目录（`gateway.LoginFlow` 要求）。
+// AuthDir 凭证落盘目录（`gateway.AuthDirExt` 要求）。
 //
 // 用**字段**而不是恒空串：这样测试才能验"落盘用的是**上游自报的**目录"。
 // 实测踩过：我第一版用核心的默认 AuthDir，于是 codearts 授权成功后
@@ -71,6 +71,11 @@ func (f *fakeFlow) AuthDir() string { return f.authDir }
 // 编译期断言：桩必须满足接口（漏了 Configured 会在这里红，
 // 而不是在一堆用例里红 —— 定位快得多）。
 var _ gateway.LoginFlow = (*fakeFlow)(nil)
+
+// ⚠ fakeFlow 同时实现 AuthDir()，但它**不**在这里被断言成 AuthDirExt ——
+// 因为核心拿 Provider 去问目录（见 pollViaFlow），不会问一个 LoginFlow。
+// 这个方法保留的理由不是"满足接口"，而是 flowProvider 要把它**转发出去**
+//（见下）。真实上游（workbuddy / codearts）的 AuthDirExt 断言在各自包里。
 
 // flowProvider 实现了 LoginFlow 的 stub —— 供分派测试用。
 type flowProvider struct {
@@ -89,10 +94,31 @@ func (p *flowProvider) Poll(s string) (gateway.Credential, error) { return p.flo
 // **转发型桩函数必须把接口的每一个方法都转出去。**
 func (p *flowProvider) Configured() bool { return p.flow.Configured() }
 
-// AuthDir 同理必须**转发**（接口的每一个方法都要转出去）。
+// AuthDir 转发必须**保留** —— 它是本桩唯一回答"我的凭证目录在哪"的路径。
+//
+// ⚠ 它与 Configured 不同：`Configured` 转发不出去会让用例走 501 全红
+// （**会红**），而 AuthDir 转发不出去会走 pollViaFlow 的
+// "空串 → 回落 h.cfg.AuthDir" 分支 —— authdir_test.go 里那条
+// "凭证不该落进默认上游目录"的断言才会红。**两者都能被抓到**，
+// 但后者只在特定用例里红，所以更要明确写在这里。
+//
+// 拆出 `gateway.AuthDirExt` 之后，真正被核心断言的是 **flowProvider
+// （Provider 面）**，不是 fakeFlow。这条转发链因此变成了：
+//
+//	ExtOf[AuthDirExt](flowProvider) → flowProvider.AuthDir() → fakeFlow.authDir
+//
+// 所以这里必须转出去，否则 flowProvider 会自报空串。
 func (p *flowProvider) AuthDir() string { return p.flow.AuthDir() }
 
 var _ gateway.LoginFlow = (*flowProvider)(nil)
+
+// 编译期断言：flowProvider 必须能被核心当成"凭证目录自报者"认出来。
+//
+// ⚠ 这条是**真实约束**，不是装饰：`pollViaFlow` 对 p 做
+// `ExtOf[AuthDirExt](p)`，而 p 正是注册表里的 flowProvider。
+// 少了它，authdir_test.go 里"凭证写到上游自报目录"那条会
+// **静默**退化（不报错的空串回落），根本看不出断言失配。
+var _ gateway.AuthDirExt = (*flowProvider)(nil)
 
 // TestLoginStartDispatchByProvider 带 provider 时按上游分派。
 func TestLoginStartDispatchByProvider(t *testing.T) {
