@@ -577,13 +577,77 @@ func (h *Handler) accountDelete(w http.ResponseWriter, r *http.Request) {
 // 添加账号（OAuth 设备授权）
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 添加账号（按上游分派）
+//
+// # 为什么要按上游分派
+//
+// 添加账号是**上游专属**动作：workbuddy 是 OAuth 设备码，
+// codearts 是 OAuth + DPoP（还要生成密钥对、签名请求、~30 分钟凭证）——
+// 交互步骤数都不同（见 gateway.LoginFlow 的注释）。
+// 前端"账号池"的每个上游分组行都有自己的「＋ 添加账号」，
+// 点哪个上游就该走哪个上游的流程。
+//
+// # 向后兼容
+//
+// 请求体不带 `provider` 时，**完全走原路径**（`h.cfg.OAuth`，
+// 也就是装配时注入的那个客户端）。现有前端与脚本不受影响。
+//
+// # 找不到该上游的 LoginFlow 时返回 501
+//
+// 不是 500 也不是静默回落 —— "这个上游不支持页内添加"是**能力问题**，
+// 501 Not Implemented 是准确的语义。静默回落到默认上游更糟：
+// 用户在 codearts 那行点「添加账号」，账号会加进 workbuddy。
+// ---------------------------------------------------------------------------
+
 func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
+	// provider 可选：不带就走旧的硬接线路径（向后兼容）。
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	// 解析失败不算错误 —— 老客户端发的可能是 `{}` 或空体。
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	if body.Provider != "" {
+		// 指定了 provider → 必须有它自己的 LoginFlow，否则明确 501。
+		flow, ok, _ := h.wantsFlowDispatch(body.Provider)
+		if !ok {
+			writeError(w, http.StatusNotImplemented,
+				"上游 "+body.Provider+" 不支持在页面内添加账号（未实现登录流程）")
+			return
+		}
+		state, authURL, err := flow.Start()
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "向上游申请授权链接失败: "+err.Error())
+			return
+		}
+		log.Printf("admin: oauth start provider=%s state=%s", body.Provider, shortState(state))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"state":    state,
+			"auth_url": authURL,
+			"provider": body.Provider,
+			// 各上游的 state 有效期可能不同；LoginFlow 接口没暴露它，
+			// 这里沿用核心的 oauth.StateTTL（前端只用它做倒计时提示）。
+			"expires_in_sec": int64(oauth.StateTTL().Seconds()),
+		})
+		return
+	}
+
+	// 不带 provider：旧路径（向后兼容）。
+	//
+	// ⚠ 若没配 OAuth 客户端就明确报 503，**不能 panic** ——
+	// 老客户端发的就是不带 provider 的请求，崩了整片功能都没了。
+	if h.cfg.OAuth == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"未配置默认 OAuth 客户端；请指定 provider（该上游需实现登录流程）")
+		return
+	}
 	state, authURL, err := h.cfg.OAuth.Start()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "向上游申请授权链接失败: "+err.Error())
 		return
 	}
-	log.Printf("admin: oauth start state=%s", state[:8])
+	log.Printf("admin: oauth start state=%s", shortState(state))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"state":          state,
 		"auth_url":       authURL,
@@ -591,12 +655,81 @@ func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// wantsFlowDispatch 判断这次请求是否应该走「上游自己的 LoginFlow」。
+//
+// # 这里曾经写错过（测试抓到的）
+//
+// 第一版是 `body.Provider != h.providerOfDefaultOAuth()`，而
+// `providerOfDefaultOAuth()` 的两个分支**返回同一个值** —— 于是
+// "provider == DefaultProvider" 时条件恒假，请求掉进旧路径，
+// 而测试里没配 OAuth 客户端 → **panic**。
+//
+// 更要紧的是语义：**指定的上游实现了 LoginFlow 就该走它**，
+// 与"它是不是默认上游"无关。默认上游同样可能（且应该）用自己的 flow。
+// `h.cfg.OAuth` 只是**过渡期**的旧客户端，不该抢在 flow 前面。
+//
+// 所以判据只有一条：**该上游有没有实现 LoginFlow**。
+//
+//   - 指定了 provider 且它有 LoginFlow → 走 flow
+//   - 指定了 provider 但它没有      → 501（明确失败，不回落）
+//   - 没指定 provider               → 旧路径（向后兼容）
+func (h *Handler) wantsFlowDispatch(providerID string) (gateway.LoginFlow, bool, bool) {
+	// 返回 (flow, 有flow, 该上游存在)
+	if providerID == "" {
+		return nil, false, false
+	}
+	if h.cfg.Registry == nil {
+		return nil, false, false
+	}
+	for _, p := range h.cfg.Registry.All() {
+		if p.ID() != providerID {
+			continue
+		}
+		fl, ok := gateway.ExtOf[gateway.LoginFlow](p)
+		return fl, ok, true
+	}
+	// 上游不存在：既没 flow 也没这个上游
+	return nil, false, false
+}
+
+// shortState 日志里只打前 8 位 —— 完整的 state 是凭据的一部分，
+// 不该整条进日志（本项目清理过一次真实密钥泄漏）。
+func shortState(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
 func (h *Handler) loginPoll(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		State string `json:"state"`
+		State    string `json:"state"`
+		Provider string `json:"provider"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.State == "" {
 		writeError(w, http.StatusBadRequest, "缺少 state")
+		return
+	}
+	// provider 指定了且不是默认 → 走该上游自己的 LoginFlow。
+	// 与 loginStart 同一条分派规则，避免"开始走 A、轮询走 B"。
+	if body.Provider != "" {
+		// 与 loginStart **同一条**判据：指定了上游就必须有它自己的 flow。
+		// 两者不一致会产生"用 A 的 state 去问 B"的诡异现象。
+		flow, ok, _ := h.wantsFlowDispatch(body.Provider)
+		if !ok {
+			writeError(w, http.StatusNotImplemented,
+				"上游 "+body.Provider+" 不支持在页面内添加账号（未实现登录流程）")
+			return
+		}
+		if err := h.pollViaFlow(w, flow, body.State); err != nil {
+			return
+		}
+		return
+	}
+	// 不带 provider：旧路径（向后兼容）。没配客户端时明确报错，不 panic。
+	if h.cfg.OAuth == nil {
+		writeError(w, http.StatusServiceUnavailable,
+			"未配置默认 OAuth 客户端；请指定 provider（该上游需实现登录流程）")
 		return
 	}
 	cred, err := h.cfg.OAuth.Poll(body.State)
@@ -639,6 +772,113 @@ func (h *Handler) loginPoll(w http.ResponseWriter, r *http.Request) {
 		"file":          filepath.Base(path),
 	})
 }
+
+// pollViaFlow 用某个上游自己的 LoginFlow 轮询，并把拿到的凭证落盘、对齐池。
+//
+// # 为什么不能沿用旧路径的收尾
+//
+// 旧路径直接 `cred.SaveToDir(...)`（`*oauth.Credential` 的方法），
+// 它自带宽 workbuddy auth 文件格式的知识（`MarshalAuthFile` 决定文件名与内容）。
+// 而 `gateway.LoginFlow.Poll` 返回**通用** `gateway.Credential`，
+// 它的 `Secret` 是 `any` —— 各上游结构完全不同（见该类型注释）。
+//
+// # 本函数要求 Secret 实现 authFileWriter
+//
+// 落盘这件事只有上游自己知道怎么做（文件名规则、字段形状、
+// codearts 还要写 DPoP 私钥）。所以定义一个**窄接口**：
+//
+//	type authFileWriter interface {
+//	    MarshalAuthFile() (name string, raw []byte, err error)
+//	}
+//
+// 与 `*oauth.Credential` 已有的方法**同名同签名** —— 所以 workbuddy
+// 的适配器只要把 `*oauth.Credential` 放进来就自动满足，零转换代码。
+//
+// Secret 不满足时**501 并说明原因**，而不是猜字段映射：
+// 把未知结构"尽力映射"会产生看起来成功、实际字段错位的凭证文件 ——
+// 那比明确失败糟得多（本项目反复的教训）。
+func (h *Handler) pollViaFlow(w http.ResponseWriter, flow gateway.LoginFlow, state string) error {
+	cred, err := flow.Poll(state)
+	switch {
+	case errors.Is(err, gateway.ErrLoginPending):
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "pending"})
+		return errHandled
+	case err != nil:
+		// LoginFlow 的契约只有 ErrLoginPending 一个哨兵，
+		// 无法区分"state 未知"与"轮询失败"，统一 502 并带上游原文。
+		writeError(w, http.StatusBadGateway, "轮询失败: "+err.Error())
+		return errHandled
+	}
+
+	mw, ok := cred.Secret.(authFileWriter)
+	if !ok {
+		writeError(w, http.StatusNotImplemented,
+			"该上游的凭证结构尚未接入落盘"+
+				"（LoginFlow 的 Secret 需要实现 MarshalAuthFile）")
+		return errHandled
+	}
+	name, raw, merr := mw.MarshalAuthFile()
+	if merr != nil {
+		writeError(w, http.StatusInternalServerError, "凭证序列化失败: "+merr.Error())
+		return errHandled
+	}
+	path, werr := writeAuthFile(h.cfg.AuthDir, name, raw)
+	if werr != nil {
+		writeError(w, http.StatusInternalServerError, "凭证落盘失败: "+werr.Error())
+		return errHandled
+	}
+	auths, lerr := auth.LoadDir(h.cfg.AuthDir)
+	if lerr != nil {
+		writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+lerr.Error())
+		return errHandled
+	}
+	h.cfg.Pool.SyncToDirFor(h.reloadProvider(), auths)
+	log.Printf("admin: oauth(flow) 成功 provider=%s uid=%s file=%s",
+		cred.Provider, cred.UID, filepath.Base(path))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"uid":      cred.UID,
+		"nickname": cred.Nickname,
+		"provider": cred.Provider,
+		"file":     filepath.Base(path),
+	})
+	return errHandled
+}
+
+// authFileWriter 上游凭证"能自己序列化成 auth 文件"的窄接口。
+//
+// 与 `*oauth.Credential` 已有的 `MarshalAuthFile` 同名同签名 ——
+// 所以那个类型天然满足，不需要包装。
+type authFileWriter interface {
+	MarshalAuthFile() (name string, raw []byte, err error)
+}
+
+// writeAuthFile 原子写一个凭证文件。
+//
+// 单独抽出来是为了**与旧路径用同一套写盘规则**（0600 权限、先写 .tmp
+// 再 rename）。旧路径在 `oauth.Credential.SaveToDir` 里直接把这几行写在
+// 自己内部；这里复刻同样语义，保证两条路径产出的文件权限与原子性一致。
+//
+// 不共用那个方法的原因：它在 oauth 包，签名绑着 *Credential；
+// 为了共用而让 admin 依赖 oauth 的具体类型，会把"通用分派"又焊回单一上游。
+func writeAuthFile(dir, name string, raw []byte) (string, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, name)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// errHandled 表示"响应已经写过了" —— 调用方据此直接 return，
+// 不要再写第二次（重复 WriteHeader 会打日志且状态码以第一次为准）。
+var errHandled = errors.New("响应已写")
 
 // ---------------------------------------------------------------------------
 // 模型目录 / 日志 / 统计
