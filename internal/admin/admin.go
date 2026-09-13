@@ -464,6 +464,55 @@ type AccountView struct {
 	TodayCheckinAt int64  `json:"today_checkin_at,omitempty"`
 }
 
+// credentialExpiryOf 问**拥有这份凭证的上游**：它什么时候过期。
+//
+// # 为什么必须经过上游，而不是核心自己判
+//
+// 核心拿到的 secret 是**不透明**的（`any`，各上游结构完全不同：
+// workbuddy 是 accessToken，codearts 是 AK/SK/SecurityToken 三元组）。
+// 核心不许读它的字段（判据 3：核心不认识上游凭证结构）。
+//
+// 所以走 `gateway.CredentialExpiryExt` —— 与 `CredentialRefresher` 完全同构的
+// "把凭证交回给它的上游，让上游自己解释"。
+//
+// # 三种"拿不到"
+//
+//	账号不存在 / 没有 secret      → 未知
+//	provider 未注册（config 未启用）→ 未知
+//	上游没实现 CredentialExpiryExt → 未知
+//
+// 三种都返回 false，前端一律显示 `—`。**不区分**它们：对界面来说
+// "不知道什么时候过期"就是同一件事，把它们渲染成三种文案只会增加噪音。
+//（排障需要区分时看日志与 /admin/providers，不该占界面。）
+func (h *Handler) credentialExpiryOf(uid, providerID string) (int64, bool) {
+	if providerID == "" || h.cfg.Pool == nil {
+		return 0, false
+	}
+	secret, ok := h.cfg.Pool.SecretOf(uid)
+	if !ok || secret == nil {
+		return 0, false
+	}
+	p, ok := h.providerByID(providerID)
+	if !ok {
+		return 0, false
+	}
+	ext, ok := gateway.ExtOf[gateway.CredentialExpiryExt](p)
+	if !ok {
+		return 0, false
+	}
+	at, ok := ext.TokenExpiry(gateway.Credential{
+		Provider: providerID,
+		UID:      uid,
+		Secret:   secret,
+	})
+	if !ok || at <= 0 {
+		// at<=0 与 ok=false 同义（见接口注释）：绝不能把 0 当成
+		// "1970 年就过期了" 渲染出去 —— 那比不显示更糟。
+		return 0, false
+	}
+	return at, true
+}
+
 func (h *Handler) accountViews() []AccountView {
 	list := h.cfg.Pool.List()
 	today := checkinlog.TodayStart()
@@ -489,6 +538,40 @@ func (h *Handler) accountViews() []AccountView {
 			}
 			if a.FilePath != "" {
 				v.File = filepath.Base(a.FilePath)
+			}
+		}
+		// 过期时刻的**第二来源**：问上游（gateway.CredentialExpiryExt）。
+		//
+		// # 为什么必须有这条（用户实测：codearts 那一列一直是「—」）
+		//
+		// 上面那段读的是 `Pool.AuthByUID()` —— 那是**核心的通用凭证投影**
+		// （`*auth.Auth`）。而 codearts 在池子里的真实持有形态是
+		// **不透明的 secret**（`pool.SecretOf` 通道），投影里只有 {UID, Nickname}：
+		//
+		//	codearts: has_token=false, 没有 token_expire_sec   ← 实测
+		//	workbuddy: has_token=true,  token_expire_sec≈5180335
+		//
+		// 于是 codearts 明明有 STS 有效期（约 2 小时一轮），界面上却显示「—」。
+		//
+		// # 为什么不是"把 ExpiresAt 补进那份投影"
+		//
+		// 那会立刻过期：续期**原地**更新 `*codearts.Auth`（secret 那份），
+		// 而投影是启动时建的快照 —— 两者必然分叉。这正是上一轮刚修完的
+		// "续期写到另一个对象上"的同一形态。
+		//
+		// 所以权威只能是活的 secret，而核心不许解释它（判据 3）。
+		// 问**拥有它的上游** —— 与 RefreshCredential 完全同构。
+		//
+		// ⚠ 只在上面没拿到时才问：workbuddy 走的是上面那条，行为**逐字段不变**。
+		if v.TokenExpireSec == nil {
+			pid := st.Provider
+			if pid == "" {
+				pid = h.cfg.DefaultProvider
+			}
+			if at, ok := h.credentialExpiryOf(st.UID, pid); ok {
+				sec := at - time.Now().Unix()
+				v.TokenExpireAt = &at
+				v.TokenExpireSec = &sec
 			}
 		}
 		// 今日签到结果：从历史里取当天该 uid 的最近一条 checkin。
