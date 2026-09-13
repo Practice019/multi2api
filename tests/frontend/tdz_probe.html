@@ -1353,10 +1353,49 @@ let loginProvider = '';
   // 若文案永远写"添加 WorkBuddy 账号"，在 codearts 那行点开就是**骗人**的。
   // 后端补上按 provider 分派（gateway.LoginFlow 那个接缝）之后，
   // 这里无需再改。
+  // renderLoginLocalHint 提示"必须在本机浏览器完成授权"。
+  //
+  // # 判据
+  //
+  // 看**地址栏里的 hostname**：`localhost` / `127.0.0.1` / `::1` 视为本机。
+  // 其它（含局域网 IP、域名）视为远程 —— 那时浏览器打不开网关那台的
+  // `127.0.0.1:<回调端口>`。
+  //
+  // # 为什么必须提示
+  //
+  // codearts 用本地回调服务器接授权结果。远程用户点完授权页的确认后，
+  // 浏览器回调到**用户自己的 127.0.0.1**（那里没有回调服务器），
+  // 于是界面永远停在"等待授权"，**没有任何错误**。
+  //
+  // 这类"静默卡住"是本项目反复出现的问题形态：不报错，但也不成功，
+  // 用户只能猜。一句提示就能把"卡住"变成"知道为什么"。
+  //
+  // # 为什么不阻止
+  //
+  // 不隐藏按钮、不改流程 —— 远程用户**仍然可能**成功
+  //（例如把授权页链接复制到网关那台的浏览器里打开）。提示只负责
+  // 说明前提，不替用户做决定。
+  function renderLoginLocalHint() {
+    const el = $('loginLocalHint');
+    if (!el) return;
+    const h = String(location.hostname || '').toLowerCase();
+    const isLocal = h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+    if (isLocal) {
+      el.style.display = 'none';
+      el.textContent = '';
+      return;
+    }
+    el.style.display = '';
+    el.textContent = '提示：当前从「' + h + '」访问，授权完成后的回调会打到'
+      + '本机 127.0.0.1，浏览器可能无法回连。若一直停在"等待授权"，'
+      + '请把授权链接复制到运行网关那台机器的浏览器里打开。';
+  }
+
   async function addAccount(providerId, btn) {
     openModal();
     const want = providerId || '';
     $('loginTitle').textContent = want ? ('添加 ' + providerTitle(want) + ' 账号') : '添加账号';
+    renderLoginLocalHint();
     $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
     let r;
     try {
