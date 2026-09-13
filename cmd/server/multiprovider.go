@@ -237,6 +237,33 @@ func (r registryRouter) IDs() []string { return r.reg.IDs() }
 //
 // 注意**默认上游**不走向这里：它的目录由出口层自己的动态缓存 + 静态回退表
 // 提供（改造前就有的机制，行为要保持）。
+//
+// # 为什么必须从池里取凭证再传进去（T1 修的就是这里）
+//
+// 早先这里是 `pv.Models(ctx, gateway.Credential{Provider: id})` ——
+// **只填 Provider，Secret 是 nil**。
+//
+// 对 workbuddy 那类「Models() 不需要凭证」的实现这是巧合成立的；
+// 但 codearts.Provider.Models() 第一件事是 authOf(cred)，它对 nil Secret
+// 直接返回错误：
+//
+//	codearts: 凭证为空（Credential.Secret 未设置）
+//
+// 于是 router 拿到 err != nil → ok=false → 出口层 `continue` →
+// **codearts 的模型被静默跳过**。而它的 Models() 是静态表、根本不需要网络，
+// 实测能给出 7 条 —— 只是从来没人给它一份凭证。
+//
+// 现象因此极度难查：账号在池里、CapModels 已声明、RefreshModels 也返回成功，
+// 只有 /v1/models 里少了一批 id，且**一个错误都不报**。
+//
+// 修法：按上游从池里取一个可用账号，把它的**不透明 secret** 装进 Credential
+// （pool.SecretOf → any → Credential.Secret）。池子只搬不读，所以这里
+// 仍然不认识任何具体上游 —— 装配层本来就是「唯一同时认识核心与上游的地方」，
+// 凭证装配放在这一层正是它的职责。
+//
+// 取号失败（没号 / 没 secret）时回落到旧的裸 Credential 形态：
+// 那让「需要凭证的上游跳过」与「不需要凭证的上游照常工作」两者都成立，
+// 不会因为取不到 secret 就把 workbuddy 的目录一起弄丢。
 func (r registryRouter) Models(ctx context.Context, id string) ([]gateway.ModelInfo, bool) {
 	pv, ok := r.reg.Get(id)
 	if !ok {
@@ -245,9 +272,40 @@ func (r registryRouter) Models(ctx context.Context, id string) ([]gateway.ModelI
 	if id != r.Default() && r.p != nil && len(r.p.AvailableUIDsFor(id)) == 0 {
 		return nil, false
 	}
-	ms, err := pv.Models(ctx, gateway.Credential{Provider: id})
+	ms, err := pv.Models(ctx, r.credentialFor(id))
 	if err != nil || len(ms) == 0 {
 		return nil, false
 	}
 	return ms, true
+}
+
+// credentialFor 为该上游组装一份**带凭证**的 Credential。
+//
+// 凭证来源是账号池上那份不透明 secret（pool.SecretOf）—— 它由
+// SyncToDirWithSecrets 在启动时装载（codearts 的真实 AK/SK/DPoP 就在里面）。
+//
+// # 为什么按 UID 排序取第一个，而不是问池子"给我一个号"
+//
+// AvailableUIDsFor 已经按 UID 排序（稳定输出）。这里只需要**任一个**可用账号
+// 来把凭证带过去 —— 静态目录对所有账号一致，不需要也不应该走 pick 的
+// 加权随机（那会记录 lastUsed、影响真实流量的选号分布）。
+//
+// # 为什么取不到就回落
+//
+// 裸 Credential 对「不需要凭证的实现」是正确输入。回落保证这条路
+// 在池里没有 secret 时也不会把别的上游一起拖坏 —— 出口层对每个上游
+// 独立调用本方法，任何一家的失败都只影响它自己。
+func (r registryRouter) credentialFor(id string) gateway.Credential {
+	cred := gateway.Credential{Provider: id}
+	if r.p == nil {
+		return cred
+	}
+	for _, uid := range r.p.AvailableUIDsFor(id) {
+		if secret, ok := r.p.SecretOf(uid); ok && secret != nil {
+			cred.UID = uid
+			cred.Secret = secret
+			return cred
+		}
+	}
+	return cred
 }
