@@ -150,6 +150,16 @@ func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
 			providerID: p.ID(),
 			sessions:   make(map[string]*loginSession),
 		}
+		// 后台定期回收超时会话。
+		//
+		// ⚠ 必须在这里起（`sync.Once` 内），不是每个请求里 ——
+		// 否则每次 Start 都会多一个常驻 goroutine。
+		//
+		// 生命周期：这个 goroutine **永不退出**，随进程结束而结束。
+		// 这是刻意的 —— `loginFlow` 与 Provider 同生命周期，
+		// 而 Provider 是进程级的（装配一次，用到退出）。
+		// 加一个 Stop() 只会制造"谁来调它"的问题，而没有实际收益。
+		go p.loginFlowCached.gcTick(gcInterval)
 	})
 	return p.loginFlowCached, true
 }
@@ -353,6 +363,51 @@ func (f *loginFlow) gcLocked() {
 			s.oauth.CloseCallback()
 		}
 		delete(f.sessions, k)
+	}
+}
+
+// gcInterval 后台回收的间隔。
+//
+// ⚠ 抽成**变量**而不是直接写 `TTL / 4` —— 测试要把它调短，
+// 才能验"`LoginFlow()` 真的起了 ticker"这条**接线**。
+//
+// 用 `var` 而非 `const`：常量在测试里改不了，那样测试就只能自己起
+// ticker，于是它测的是"`gcTick` 函数能工作"而不是"`LoginFlow()` 会起它"
+// —— 我第一次就是这么写的，**变异验证时去掉 ticker 它仍然绿**。
+//
+// > 断言测了实现的一部分，漏了接线。
+var gcInterval = TTL / 4
+
+// gcTick 定期回收超时会话（后台 goroutine）。
+//
+// # 为什么需要它（Reviewer 抓到的缺口）
+//
+// 我第一版只在 `Start()` 里调 `gcLocked()`。Reviewer 做了 17 分钟实验定格：
+//
+//	创建会话 → 过 TTL 后**监听仍 ALIVE**（没有被回收）
+//	→ 只有触发下一次 Start 时才 DEAD
+//
+// 后果：一个**只狂点「添加账号」、从不完成授权**的用户，
+// 能在 16 分钟内堆到任意多个监听端口（Reviewer 实测堆到 24 个）。
+//
+// **不是真泄漏**（TTL 后会被下次 Start 清掉），所以判轻微 ——
+// 但"资源回收依赖下一次用户操作"本身就是坏形状：
+// 它是**无界的**（用户点得越多堆得越多），而回收时机**不在系统控制内**。
+//
+// 所以补一个定时回收，让过期会话**不依赖下一次 Start**。
+//
+// # 间隔
+//
+// 取 TTL/4（约 4 分钟）：回收延迟最多 4 分钟，既能及时释放，
+// 也不会让 ticker 太频繁。用 `TTL` 推导而不是写死分钟数 ——
+// 将来调 TTL 时这里自动跟随，不会漏改。
+func (f *loginFlow) gcTick(interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for range t.C {
+		f.mu.Lock()
+		f.gcLocked()
+		f.mu.Unlock()
 	}
 }
 

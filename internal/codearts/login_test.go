@@ -395,6 +395,130 @@ func TestLoginFlowIsStableAcrossCalls(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 8. 定期回收：过期会话不能依赖"下一次 Start"才被清掉
+// ---------------------------------------------------------------------------
+
+// TestGCTickerReclaimsWithoutStart 钉住"**LoginFlow() 真的起了**定期回收"。
+//
+// # 这条守卫是被 Reviewer 的实验逼出来的
+//
+// 我第一版只在 `Start()` 里调 `gcLocked()`。Reviewer 做了 17 分钟实验定格：
+//
+//	创建会话 → 过 TTL 后**监听仍 ALIVE**
+//	→ 只有触发下一次 Start 时才 DEAD
+//
+// 后果：一个只狂点「添加账号」、从不完成授权的用户，
+// 能在 16 分钟内堆到任意多个监听端口（Reviewer 实测堆到 24 个）。
+//
+// # ⚠ 这条守卫我第一版写错了，变异验证抓到了
+//
+// 第一版**自己起 ticker**：
+//
+//	go lf.gcTick(20 * time.Millisecond)     // ← 测试自己起
+//
+// 于是它测的是"`gcTick` 函数能工作"，**不是"`LoginFlow()` 会起它"**。
+// 变异验证（去掉 `LoginFlow()` 里的 `go ... gcTick(...)`）后**它仍然绿** ——
+// 说明那条**接线**根本没有断言覆盖。
+//
+// > 断言测了实现的一部分，漏了接线。
+//
+// 修法：判据必须**走 `LoginFlow()`**（真实入口），不能自己起。
+// 为此把间隔抽成可改的 `gcInterval`，测试调短它。
+func TestGCTickerReclaimsWithoutStart(t *testing.T) {
+	// 把间隔调短（默认 TTL/4 ≈ 4 分钟，测试等不起）
+	old := gcInterval
+	gcInterval = 20 * time.Millisecond
+	defer func() { gcInterval = old }()
+
+	p := &Provider{login: NewManager("", "", "")}
+	lf, ok := p.LoginFlow() // ← 走**真实入口**
+	if !ok {
+		t.Fatal("LoginFlow() 返回 false")
+	}
+	flow := lf.(*loginFlow)
+
+	// 塞一个过期会话 —— **不调 Start**，这样"只靠 Start 触发的回收"会失败
+	sess := &fakeSession{}
+	flow.mu.Lock()
+	flow.sessions["expired"] = &loginSession{
+		oauth: sess, startedAt: time.Now().Add(-2 * (TTL + time.Minute)),
+	}
+	flow.mu.Unlock()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		flow.mu.Lock()
+		_, still := flow.sessions["expired"]
+		flow.mu.Unlock()
+		if !still {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("等 3 秒后过期会话仍在 —— **LoginFlow() 没有起定期回收**。" +
+				"若只有 Start 里调 gcLocked，狂点「添加账号」的用户会无界堆积监听端口")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if !sess.closed {
+		t.Error("回收时没有调用 CloseCallback —— 监听端口没被释放")
+	}
+}
+
+// TestGCTickerKeepsFreshSessions 定期回收不能误删未过期的会话。
+//
+// 为什么单独测：ticker 跑得比 Start 频繁得多，"手滑删掉全部"的代价更大 ——
+// 用户授权还没做完，会话就没了，表现为"界面突然说会话不存在"。
+func TestGCTickerKeepsFreshSessions(t *testing.T) {
+	old := gcInterval
+	gcInterval = 20 * time.Millisecond
+	defer func() { gcInterval = old }()
+
+	p := &Provider{login: NewManager("", "", "")}
+	lf, _ := p.LoginFlow()
+	flow := lf.(*loginFlow)
+
+	flow.mu.Lock()
+	flow.sessions["fresh"] = &loginSession{oauth: &fakeSession{}, startedAt: time.Now()}
+	flow.mu.Unlock()
+
+	// 等 ticker 跑几轮
+	time.Sleep(200 * time.Millisecond)
+
+	flow.mu.Lock()
+	_, still := flow.sessions["fresh"]
+	flow.mu.Unlock()
+
+	if !still {
+		t.Error("未过期的会话被 ticker 误删了 —— 用户授权还没完成就丢了会话")
+	}
+}
+
+// TestLoginFlowStartsOneTickerOnly 每次 LoginFlow() 不能多起 ticker。
+//
+// 为什么重要：`LoginFlow()` 在**每次 start/poll 请求**里都会被调用。
+// 若 ticker 起在 `Once` 之外，一个高频轮询的页面会不断泄漏 goroutine ——
+// 而那些 goroutine 全都争同一把锁，表现为操作越来越慢。
+func TestLoginFlowStartsOneTickerOnly(t *testing.T) {
+	p := &Provider{login: NewManager("", "", "")}
+
+	// 反复拿同一个 flow（模拟多次请求）
+	first, _ := p.LoginFlow()
+	for i := 0; i < 50; i++ {
+		again, _ := p.LoginFlow()
+		if again != first {
+			t.Fatalf("第 %d 次 LoginFlow() 返回了不同实例 —— "+
+				"ticker 与 sessions 都会每次重来", i)
+		}
+	}
+	// 实例唯一 ⇒ `sync.Once` 只执行过一次 ⇒ `go gcTick` 只起了一次。
+	// 这里写明推理链，因为它不是直接观测（goroutine 数没法从测试断言）。
+	if first.(*loginFlow).sessions == nil {
+		t.Error("缓存的 loginFlow 没有初始化 sessions")
+	}
+}
+
 // TestLoginFlowConfiguredConsistency 两处 Configured 判据必须一致。
 //
 // `Configured` 同时挂在 `*Provider` 与 `*loginFlow` 上：
