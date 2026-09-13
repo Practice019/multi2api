@@ -109,7 +109,22 @@ func nextFire(now time.Time, hours []int) time.Time {
 // 为什么合成一个循环而不是各起一个 goroutine：日志顺序、退出纪律、
 // "错峰"这件事都只有一处实现。守卫线每 jobTickInterval 醒一次问一句
 // "有活干吗"，空转成本是一次 map/O(1) 判断，远低于再多一条 goroutine 的维护成本。
+//
+// ⚠ 两条时间线**共用同一次睡眠**，所以醒来时必须分清"这次是谁的闹钟"
+// （见 onWake）。这里出过一次实测事故：唤醒点会被守卫线提前到 tick，
+// 而槽位曾是无条件执行的 —— 于是签到（含搭车的猫猫旅行）每 30 秒打一次上游，
+// 一天约 2880 次，日志里刷满"今天已签到，请明天再来"，任务历史被灌满。
 func (s *Scheduler) Run(ctx context.Context) {
+	s.runLoop(ctx, jobTickInterval)
+}
+
+// runLoop 主循环本体；tick 是守卫线的轮询周期。
+//
+// 为什么 tick 是参数而不是直接用常量：整点时点是**小时**级的，测试里没法把
+// "到点"造到毫秒级；而"守卫线把唤醒提前"这个形态必须能在毫秒级复现，
+// 否则这条回归只能靠 sleep 30 秒去碰运气（"等不起就干脆不测"正是本项目的教训）。
+// 生产路径只由 Run 传入常量。
+func (s *Scheduler) runLoop(ctx context.Context, tick time.Duration) {
 	for {
 		next, slots := s.nextWake(time.Now())
 		// 守卫线本轮是否该跑。所有整点槽位都停用时 next 为零值 ——
@@ -129,8 +144,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 		// 睡到「下一个整点时点」与「下一条守卫线轮询」中更早的那个。
 		wake := next
-		if tick := time.Now().Add(jobTickInterval); tick.Before(wake) && s.jobs.Len() > 0 {
-			wake = tick
+		if t := time.Now().Add(tick); t.Before(wake) && s.jobs != nil && s.jobs.Len() > 0 {
+			wake = t
 		}
 		timer := time.NewTimer(time.Until(wake))
 		select {
@@ -139,12 +154,32 @@ func (s *Scheduler) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 			// 到点槽位在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
-			// 本次是守卫线轮询（而非整点）时 slots 为空，什么都不做，
-			// 回到循环顶部再判一次即可。
-			for _, sl := range slots {
-				s.RunSlot(sl.name, triggerSchedule)
-			}
+			s.onWake(time.Now(), next, slots)
 		}
+	}
+}
+
+// onWake 处理一次唤醒：**真的到了整点才跑槽位**，否则什么都不做。
+//
+// # 为什么必须有这个判断（2026-09-13 实测事故）
+//
+// next/slots 是"下一次整点"和"那一刻要跑的槽位"（见 nextWake）。
+// 而循环还会为了守卫线每 tick 醒一次 —— 那种唤醒是被 tick 提前的，
+// 此刻离 next 还远。旧实现无条件执行 slots，于是：
+//
+//	签到槽位 → 每 30 秒打一次上游签到（上游只会回"今天已签到，请明天再来"）
+//	槽位钩子 → runSlotHooks 每 30 秒喊一次猫猫旅行守卫（绕过它自己的 60s 下限）
+//	任务历史 → 每 30 秒一条记录，一天约 2880 条/账号，历史表被灌满
+//
+// 判据用 `now.Before(next)`：等于 next 也算到点（timer 不会提前触发，
+// 正常路径下醒来时刻必然 >= next）。next 为零值走不到这里 ——
+// 那种情况在上面的分支里已经 continue 了。
+func (s *Scheduler) onWake(now, next time.Time, slots []slotAt) {
+	if now.Before(next) {
+		return // 守卫线轮询：还没到整点，本次不跑任何槽位
+	}
+	for _, sl := range slots {
+		s.RunSlot(sl.name, triggerSchedule)
 	}
 }
 
