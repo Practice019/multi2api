@@ -43,6 +43,18 @@ type Config struct {
 	// 与改造前"只有一个上游"的行为逐字一致 —— 既有测试与
 	// NewWithConfig(Config{...}) 的手工构造都不需要改。
 	Provider string
+
+	// AuthDir 本上游凭证的落盘目录（供 `gateway.LoginFlow.AuthDir` 用）。
+	//
+	// # 为什么不直接用核心的 AuthDir
+	//
+	// 实测踩过：codearts 授权成功后，凭证被写进了**workbuddy 的目录**
+	//（核心的 `h.cfg.AuthDir` 是默认上游的目录）。
+	// 按上游分子目录之后（`auths/workbuddy/`、`auths/codearts/`），
+	// 每个上游必须自报自己的目录 —— 核心不该猜。
+	//
+	// 空串表示"用核心的默认目录"（单上游部署的旧形态，行为不变）。
+	AuthDir string
 	// Client 上游 HTTP 客户端。nil 时退回 upstream.New()。
 	Client *upstream.Client
 	// Log 任务结果历史（可选；nil = 不记录）。管理台的「今日签到了吗」也读它。

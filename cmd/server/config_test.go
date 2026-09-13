@@ -502,15 +502,30 @@ func TestCodeartsAbsentSectionIsDisabled(t *testing.T) {
 	}
 }
 
-// TestCodeartsAuthDirFallsBackToTopLevel 凭证目录缺省复用顶层 auth_dir。
+// TestAuthDirsArePerUpstreamSubdirs 每个上游的凭证目录是同名子目录。
 //
-// 理由：codearts.LoadDir 按 `codearts*.json` 通配，workbuddy 的是
-// `workbuddy-*.json`，前缀不同可以安全共存 —— 用户不必为了启用第二个上游
-// 就重新摆一遍凭证文件。
-func TestCodeartsAuthDirFallsBackToTopLevel(t *testing.T) {
+// # 判据变了（原因值得记）
+//
+// 这条测试原来叫 `TestCodeartsAuthDirFallsBackToTopLevel`，断言
+// "codearts 缺省复用顶层 auth_dir"。那个设计的理由是：
+//
+//	codearts.LoadDir 按 `codearts*.json` 通配，workbuddy 的是
+//	`workbuddy-*.json`，前缀不同可以安全共存
+//
+// **理由本身没错，但实测暴露了两个问题**：
+//
+//  1. codearts 授权成功后凭证被写进 workbuddy 的目录（核心用的是
+//     默认上游的 AuthDir）—— 用户实测报过
+//     `凭证落盘失败: rename auths.tmp auths: Access is denied.`
+//  2. "靠文件名前缀互相过滤"意味着前缀一旦不匹配（改名、换客户端），
+//     对方的凭证会被自己的扫描器当成"无法解析"而**静默跳过**
+//
+// 改成按上游分子目录后，"哪个文件属于谁"由**位置**表达，
+// 不再依赖文件名约定。
+func TestAuthDirsArePerUpstreamSubdirs(t *testing.T) {
 	dir := t.TempDir()
 
-	// 只开 enabled，不配 auth_dir → 应复用顶层
+	// 只写顶层 auth_dir → 两个上游各自落到同名子目录
 	fp := filepath.Join(dir, "a.json")
 	os.WriteFile(fp, []byte(`{"auth_dir":"./myauths","codearts":{"enabled":true}}`), 0o600)
 	c, err := Load(fp)
@@ -520,11 +535,19 @@ func TestCodeartsAuthDirFallsBackToTopLevel(t *testing.T) {
 	if !c.CodeartsEnabled {
 		t.Fatal("显式 enabled=true 未生效")
 	}
-	if c.CodeartsAuthDir != "./myauths" {
-		t.Errorf("auth_dir 应回落到顶层 ./myauths，得到 %q", c.CodeartsAuthDir)
+	if want := filepath.Join("./myauths", "codearts"); c.CodeartsAuthDir != want {
+		t.Errorf("codearts 的目录应是 %q，得到 %q", want, c.CodeartsAuthDir)
+	}
+	if want := filepath.Join("./myauths", "workbuddy"); c.AuthDir != want {
+		t.Errorf("workbuddy 的目录应是 %q，得到 %q", want, c.AuthDir)
+	}
+	// AuthsBase 必须保留**父目录** —— 迁移期兼容扫描靠它同时看两处
+	if c.AuthsBase != "./myauths" {
+		t.Errorf("AuthsBase 应是父目录 ./myauths，得到 %q", c.AuthsBase)
 	}
 
-	// 显式配了就用自己的
+	// 显式配了就**原样用**（不再加子目录后缀 ——
+	// 显式配置意味着"我知道凭证在哪"，加后缀会指到一个空目录）
 	fp2 := filepath.Join(dir, "b.json")
 	os.WriteFile(fp2, []byte(`{"auth_dir":"./myauths","codearts":{"enabled":true,"auth_dir":"./ca"}}`), 0o600)
 	c2, err := Load(fp2)

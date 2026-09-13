@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -272,6 +273,16 @@ type Config struct {
 	// CodeartsEnabled 为 false 时不会被读到。
 	CodeartsOAuthPortal string `json:"-"`
 	CodeartsOAuthSTS    string `json:"-"`
+
+	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
+	//
+	// # 为什么保留它
+	//
+	// 按上游分子目录之后，`AuthDir` 是 `auths/workbuddy/`（已加后缀），
+	// 而迁移期凭证可能还在 `auths/` 根。兼容扫描需要**父目录**才能两处都看。
+	//
+	// 全部迁完之后本字段可以删；保留没有害处（只是记录一个路径）。
+	AuthsBase string `json:"-"`
 }
 
 // Default 默认配置。
@@ -499,8 +510,28 @@ func (c *Config) normalize() error {
 	c.CodeartsEnabled = c.Codearts.Enabled
 	c.CodeartsAuthDir = c.Codearts.AuthDir
 	if c.CodeartsAuthDir == "" {
-		c.CodeartsAuthDir = c.AuthDir
+		// 缺省**不是**顶层 auth_dir 本身，而是它的下游子目录。
+		//
+		// # 为什么（这是实测踩出来的）
+		//
+		// 改前两个上游的凭证都往 `auths/` 根写。实测：codearts 授权
+		// 成功后，凭证被写进 workbuddy 的目录 —— 而各上游的 LoadDir
+		// 靠**文件名前缀**互相过滤，前缀一旦不匹配就会静默跳过。
+		//
+		// 现在按上游分子目录：`auths/workbuddy/`、`auths/codearts/`。
+		// "哪个文件属于谁"由**位置**表达，不再依赖文件名约定。
+		c.CodeartsAuthDir = filepath.Join(c.AuthDir, "codearts")
 	}
+	// workbuddy 侧同理：它自己的目录是 auths/workbuddy/。
+	//
+	// ⚠ 这是**破坏性**的目录变更（原来在 auths/ 根）。为了让迁移可逆，
+	// 读取侧用 LoadDirCompat（同时扫子目录与根，按 uid 去重）——
+	// 见 internal/auth/auth.go。
+	//
+	// AuthsBase 保留**父目录**，供兼容扫描用：
+	// 迁移期凭证可能还在根下，只读子目录会看到"账号池突然空了"。
+	c.AuthsBase = c.AuthDir
+	c.AuthDir = filepath.Join(c.AuthDir, "workbuddy")
 	// 未启用时不解析间隔 —— 避免"上游没启用却注册了后台任务"这类状态。
 	// 显式 0 与未配置在**已启用**时都落到默认 60s：这个字段没有"关闭"语义
 	// （关闭就是整个上游 enabled=false），因此不需要三态。

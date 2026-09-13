@@ -134,6 +134,30 @@ function get(host, port, path) {
   const state = s.json && s.json.state;
   ok(!!state, 'start 返回了 state');
 
+  // ---- 3b. **poll 必须带 provider**（这是第二个真 bug 的判据） ----
+  //
+  // 前端曾只发 `{ state }`，后端就按"不带 provider"处理 →
+  // 用**默认上游（workbuddy）**的 OAuth 去认 codearts 的 state →
+  // 报 `oauth: state 不存在或已超期，请重新发起授权`。
+  //
+  // 表现极具误导性：弹窗标题对、跳转的授权页也对，**只有轮询走错上游**。
+  // 而且那句文案是 **workbuddy 的 OAuth** 定义的 —— codearts 不会有它。
+  //
+  // 所以这条判据是：**用 codearts 的 state、但不带 provider 去 poll，
+  // 必须失败**（证明"带不带 provider"真的有区别）；然后再验证带了就对。
+  if (state) {
+    const noProv = await post('/admin/login/poll', { state }); // 故意不带 provider
+    console.log('  不带 provider 的 poll: HTTP ' + noProv.code + '  ' + noProv.body.slice(0, 80));
+    ok(noProv.code !== 202,
+      '**不带 provider** 去 poll codearts 的 state 会失败（' + noProv.code + '）—— ' +
+      '证明"带不带 provider"真的有区别，前端漏传就会走错上游');
+
+    const withProv = await post('/admin/login/poll', { state, provider: 'codearts' });
+    ok(withProv.code === 202,
+      '**带上 provider** 去 poll 同一个 state 就正常 pending（' + withProv.code + '）—— ' +
+      '这就是前端修复要保证的行为');
+  }
+
   if (state) {
     const t0 = Date.now();
     const p1 = await post('/admin/login/poll', { state, provider: 'codearts' });

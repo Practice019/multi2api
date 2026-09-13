@@ -37,6 +37,9 @@ type fakeFlow struct {
 	// configured 由用例显式设置 —— 零值是 false，所以每个需要的用例
 	// 都要写明，避免"忘了设"导致用例静默走另一条分支。
 	configured bool
+
+	// authDir 凭证落盘目录（供 AuthDir() 返回）。
+	authDir string
 }
 
 func (f *fakeFlow) Start() (string, string, error) {
@@ -58,6 +61,13 @@ func (f *fakeFlow) Poll(state string) (gateway.Credential, error) {
 // 用字段而不是恒 true：这样才能写"实现了但没配置 → 不给按钮"的反例。
 func (f *fakeFlow) Configured() bool { return f.configured }
 
+// AuthDir 凭证落盘目录（`gateway.LoginFlow` 要求）。
+//
+// 用**字段**而不是恒空串：这样测试才能验"落盘用的是**上游自报的**目录"。
+// 实测踩过：我第一版用核心的默认 AuthDir，于是 codearts 授权成功后
+// 凭证被写进了 workbuddy 的目录。
+func (f *fakeFlow) AuthDir() string { return f.authDir }
+
 // 编译期断言：桩必须满足接口（漏了 Configured 会在这里红，
 // 而不是在一堆用例里红 —— 定位快得多）。
 var _ gateway.LoginFlow = (*fakeFlow)(nil)
@@ -78,6 +88,9 @@ func (p *flowProvider) Poll(s string) (gateway.Credential, error) { return p.flo
 // 都走 501 分支，红得莫名其妙（实测踩到）。
 // **转发型桩函数必须把接口的每一个方法都转出去。**
 func (p *flowProvider) Configured() bool { return p.flow.Configured() }
+
+// AuthDir 同理必须**转发**（接口的每一个方法都要转出去）。
+func (p *flowProvider) AuthDir() string { return p.flow.AuthDir() }
 
 var _ gateway.LoginFlow = (*flowProvider)(nil)
 

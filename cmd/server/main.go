@@ -45,11 +45,17 @@ func main() {
 		}
 	}
 
-	auths, err := auth.LoadDir(cfg.AuthDir)
+	// 兼容读：迁移期凭证可能还在 `auths/` 根（旧位置），
+	// 也可能已搬到 `auths/workbuddy/`（新位置）。只读一处会看到
+	// "账号池突然空了" —— 那是很难判断的故障（看起来像凭证损坏）。
+	//
+	// LoadDirCompat 子目录优先、按 uid 去重，两处都扫。
+	auths, err := auth.LoadDirCompat(cfg.AuthsBase, workbuddy.ProviderID)
 	if err != nil {
 		log.Fatalf("load auths: %v", err)
 	}
-	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
+	log.Printf("loaded %d account(s) from %s（兼容扫描 %s）",
+		len(auths), cfg.AuthDir, cfg.AuthsBase)
 
 	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
 	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
@@ -144,6 +150,9 @@ func main() {
 		// （见 workbuddy.accountList）。与 ID() 同源，避免两处漂移。
 		Provider: workbuddy.ProviderID,
 		Log:      checkinLog,
+		// 凭证目录：按上游分子目录后，workbuddy 自己的是 `auths/workbuddy/`。
+		// 供 gateway.LoginFlow.AuthDir 用（页内添加账号落盘时用）。
+		AuthDir: cfg.AuthDir,
 		// 登录流程：装配层把具体的 OAuth 客户端适配进来。
 		//
 		// 与 Pool 同一个思路 —— workbuddy 只声明"我要什么形状"，
@@ -406,6 +415,8 @@ func main() {
 			Log:      checkinLog,
 			Ring:     logRing,
 			AuthDir:  cfg.AuthDir,
+		// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
+		AuthsBase: cfg.AuthsBase,
 			// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。
 			//
 			// 这两条端点读的是核心自己排的班，不表达任何上游身份 ——

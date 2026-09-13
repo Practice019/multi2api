@@ -52,6 +52,14 @@ type Config struct {
 	Log      *checkinlog.Log
 	Ring     *logbuf.Ring
 	AuthDir  string
+	// AuthsBase 各上游凭证目录的**父目录**（= 配置里 auth_dir 的原值）。
+	//
+	// 与 AuthDir 的关系：`AuthDir = AuthsBase/<默认上游>`。
+	// 迁移期凭证可能还在 AuthsBase 根下，兼容扫描（LoadDirCompat）
+	// 需要它才能两处都看。
+	//
+	// 空串时回落 AuthDir（单上游旧形态，行为不变）。
+	AuthsBase string
 
 	// Registry 已注册的上游。本包遍历它，把每个上游通过 AdminExt
 	// 声明的管理端点挂上来，并把通过 SettingsExt 声明的设置项合并进设置页。
@@ -480,18 +488,35 @@ func (h *Handler) reloadProvider() string {
 // 所以域必须由配置显式给出，不能依赖"谁是默认"。
 // 缺省回落到 DefaultProvider 只为兼容旧装配（并会在日志里留痕）。
 func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
-	auths, err := auth.LoadDir(h.cfg.AuthDir)
+	// 兼容读：`h.cfg.AuthDir` 现在是 workbuddy 的子目录
+	//（`auths/workbuddy/`），但迁移期凭证可能还在 `auths/` 根。
+	//
+	// 用 h.reloadProvider() 作为归属 —— 本目录属于哪个上游是**配置事实**
+	//（见下面那段注释），所以兼容扫描的根目录也用同一个 base。
+	provider := h.reloadProvider()
+	base := h.cfg.AuthsBase
+	if base == "" {
+		base = h.cfg.AuthDir
+	}
+	auths, err := auth.LoadDirCompat(base, provider)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取 auths 目录失败: "+err.Error())
 		return
 	}
 	// ReloadProvider 是本目录所属的上游；空则回落默认上游，并明确记日志 ——
 	// 静默回落正是这个 bug 当初能藏住的原因。
-	provider := h.reloadProvider()
+	// （`provider` 已在上面取过，兼容扫描要用同一个归属。）
 
-	before := len(h.cfg.Pool.List())
-	h.cfg.Pool.SyncToDirFor(provider, auths)
-	after := len(h.cfg.Pool.List())
+	// ⚠ 池子可能为 nil（本包其它地方都判了空，见 pollViaFlow 的注释）。
+	// 漏判的后果是 **nil pointer panic（进程级）**。
+	var before, after int
+	if h.cfg.Pool != nil {
+		before = len(h.cfg.Pool.List())
+		h.cfg.Pool.SyncToDirFor(provider, auths)
+		after = len(h.cfg.Pool.List())
+	} else {
+		log.Printf("admin: reload 扫描到 %d 个凭证，但没有账号池可同步", len(auths))
+	}
 	log.Printf("admin: reload auths dir=%s provider=%s scanned=%d pool %d -> %d",
 		h.cfg.AuthDir, provider, len(auths), before, after)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -766,12 +791,24 @@ func (h *Handler) loginPoll(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 与 accountsReload 同一个坑：必须显式指定域。
 	// 这里落盘的凭证进的是 `h.cfg.AuthDir`，那属于 ReloadProvider ——
 	// 用裸 SyncToDir（=当前默认上游）在默认上游不是它时会**误删**。
-	auths, lerr := auth.LoadDir(h.cfg.AuthDir)
+	//
+	// 兼容读：迁移期凭证可能还在 `auths/` 根，只读子目录会看不到。
+	base := h.cfg.AuthsBase
+	if base == "" {
+		base = h.cfg.AuthDir
+	}
+	auths, lerr := auth.LoadDirCompat(base, h.reloadProvider())
 	if lerr != nil {
 		writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+lerr.Error())
 		return
 	}
-	h.cfg.Pool.SyncToDirFor(h.reloadProvider(), auths)
+	// ⚠ 池子可能为 nil（同 pollViaFlow / accountsReload 的注释）。
+	// 漏判的后果是 nil pointer panic。
+	if h.cfg.Pool != nil {
+		h.cfg.Pool.SyncToDirFor(h.reloadProvider(), auths)
+	} else {
+		log.Printf("admin: oauth 凭证已落盘，但没有账号池可同步（uid=%s）", cred.UID)
+	}
 	log.Printf("admin: oauth 成功 uid=%s nick=%s file=%s", cred.UID, cred.Nickname, filepath.Base(path))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":        "ok",
@@ -833,19 +870,53 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, flow gateway.LoginFlow, sta
 		writeError(w, http.StatusInternalServerError, "凭证序列化失败: "+merr.Error())
 		return errHandled
 	}
-	path, werr := writeAuthFile(h.cfg.AuthDir, name, raw)
+	// ⚠ 落盘目录用**上游自报的**，不是 h.cfg.AuthDir。
+	//
+	// 我第一版用的是 h.cfg.AuthDir —— 那是**默认上游（workbuddy）的目录**。
+	// 于是 codearts 授权成功后凭证被往 workbuddy 的 `./auths` 写。
+	//
+	// 按上游分子目录之后（`auths/workbuddy/`、`auths/codearts/`），
+	// 目录是**上游的事实**（它知道自己从哪读凭证），核心不该猜。
+	//
+	// 上游返回空串 = "用核心默认目录"（单上游部署的旧形态）。
+	dir := flow.AuthDir()
+	if dir == "" {
+		dir = h.cfg.AuthDir
+	}
+	path, werr := writeAuthFile(dir, name, raw)
 	if werr != nil {
 		writeError(w, http.StatusInternalServerError, "凭证落盘失败: "+werr.Error())
 		return errHandled
 	}
-	auths, lerr := auth.LoadDir(h.cfg.AuthDir)
+	// 重扫**该上游的**目录。
+	//
+	// ⚠ 与落盘目录必须一致 —— 扫错目录会得到"写成功但池子里没有"
+	//（用户看到账号没进池，而日志说成功）。
+	//
+	// 用 LoadDirCompat：迁移期凭证可能还在旧的根目录位置，
+	// 只读子目录会看到"账号池突然空了"。
+	auths, lerr := auth.LoadDirCompat(h.cfg.AuthDir, cred.Provider)
 	if lerr != nil {
 		writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+lerr.Error())
 		return errHandled
 	}
-	h.cfg.Pool.SyncToDirFor(h.reloadProvider(), auths)
-	log.Printf("admin: oauth(flow) 成功 provider=%s uid=%s file=%s",
-		cred.Provider, cred.UID, filepath.Base(path))
+	// ⚠ 池子可能为 nil —— 本包其它地方（schedule.go / uimanifest.go）
+	// 都判了空，说明"Pool 可缺省"是**本包自己的设计假设**；
+	// 这条落盘路径原来漏判了，后果是 **nil pointer panic（进程级）**。
+	//
+	// 实测抓到：我为此写的测试在 Pool=nil 时直接 panic 在
+	// `pool.(*Pool).SyncToDirFor` 里。
+	//
+	// 凭证**已经落盘**（那一步不依赖池子），所以这里只是"没能即时进池"——
+	// 告诉调用方重启即可，而不是 500 让它以为凭证写失败了。
+	if h.cfg.Pool != nil {
+		h.cfg.Pool.SyncToDirFor(cred.Provider, auths)
+	} else {
+		log.Printf("admin: oauth(flow) 凭证已落盘，但没有账号池可同步（provider=%s uid=%s）",
+			cred.Provider, cred.UID)
+	}
+	log.Printf("admin: oauth(flow) 成功 provider=%s uid=%s file=%s dir=%s",
+		cred.Provider, cred.UID, filepath.Base(path), dir)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"uid":      cred.UID,

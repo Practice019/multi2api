@@ -125,6 +125,10 @@ type loginFlow struct {
 	// 而"这次注册成哪个上游"是装配层的事实（见 Config.Provider 的注释）。
 	// 两者不一致时，读常量的写法会把凭证标到错误的上游。
 	providerID string
+	// authDir 凭证落盘目录。同样由 LoginFlow() 从 cfg 传入 ——
+	// 不在这里回头读 Provider：`loginFlow` 是核心实际持有的对象，
+	// 它必须自带回答 `AuthDir()` 所需的信息（否则又要一个反向指针）。
+	authDir string
 }
 
 // LoginFlow 返回本上游的登录流程形状；未配置时返回 false。
@@ -151,7 +155,11 @@ func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
 	if p == nil || p.cfg.Login == nil {
 		return nil, false
 	}
-	return &loginFlow{flow: p.cfg.Login, providerID: p.ownProviderID()}, true
+	return &loginFlow{
+		flow:       p.cfg.Login,
+		providerID: p.ownProviderID(),
+		authDir:    p.cfg.AuthDir,
+	}, true
 }
 
 // Start 让 *Provider 满足 gateway.LoginFlow（见 LoginFlow 的注释）。
@@ -177,6 +185,22 @@ func (p *Provider) Start() (string, string, error) {
 // 没配客户端的部署也会看起来实现了 —— 那会渲染出假按钮。
 func (p *Provider) Configured() bool {
 	return p != nil && p.cfg.Login != nil
+}
+
+// AuthDir 本上游凭证的落盘目录（`gateway.LoginFlow` 要求）。
+//
+// 空串表示"用核心的默认目录"—— 单上游部署的旧行为不变。
+//
+// # 为什么必须由上游自报
+//
+// 实测踩过：codearts 授权后凭证被写进 workbuddy 的目录，因为核心
+// 用的是 `h.cfg.AuthDir`（默认上游的目录）。按上游分子目录之后
+// （`auths/workbuddy/`、`auths/codearts/`），每个上游必须自报。
+func (p *Provider) AuthDir() string {
+	if p == nil {
+		return ""
+	}
+	return p.cfg.AuthDir
 }
 
 // Poll 同上（让 *Provider 满足 gateway.LoginFlow）。
@@ -216,6 +240,14 @@ func (f *loginFlow) Start() (string, string, error) {
 // （fmt.Errorf("...: %w", err)），`==` 会漏判，表现为"轮询永远报错"，
 // 而用户那边其实只是还没点确认。
 func (f *loginFlow) Configured() bool { return f != nil && f.flow != nil }
+
+// AuthDir 转发给 Provider（`gateway.LoginFlow` 要求 *loginFlow 也实现）。
+func (f *loginFlow) AuthDir() string {
+	if f == nil {
+		return ""
+	}
+	return f.authDir
+}
 
 func (f *loginFlow) Poll(state string) (gateway.Credential, error) {
 	if f == nil || f.flow == nil {
