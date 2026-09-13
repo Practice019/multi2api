@@ -140,6 +140,62 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     // 文案里不该出现"对齐 …"那套旧措辞（说明确实改了，不是恰好碰对）
     ok(A.toastTxt.indexOf('对齐') < 0, 'toast 已不含旧的"（对齐 X）"措辞');
 
+    // ---------------------------------------------------------------- 判据 8
+    //
+    // ⚠ 判据 5 有一个**被 Reviewer 指出的盲区**：
+    //
+    // 它比的是"toast 里出现的上游" == "后端回执的 provider"。但在**传参正确**的
+    // 正常路径上，`r.provider` 与前端变量 `pid` **恒等** —— 所以判据 5
+    // **证明不了"文案取自 r.provider 而非 pid"**，只能证明"两者恰好一致"。
+    //
+    // 要真正区分，必须造出 **`pid !== r.provider`** 的场景：
+    //   · 文案用 `r.provider` → 显示**后端实际用的**那个（对）
+    //   · 文案用 `pid`       → 显示**前端猜的**那个（替后端撒谎）
+    //
+    // 怎么造：页面里装一个**一次性 fetch 钩子**，把发往 reload 的
+    // `provider` 篡改成空串 → 后端走回落路径 → `r.provider` 变成 workbuddy，
+    // 而按钮的 `pid` 仍是 codearts。**不改产品代码。**
+    await ev(`(function(){
+      if (window.__origFetch) return;                 // 幂等：别套两层
+      window.__origFetch = window.fetch;
+      window.__forced = false;
+      window.fetch = function(u, o){
+        try {
+          var s = (typeof u === 'string') ? u : (u && u.url) || '';
+          if (!window.__forced && s.indexOf('/admin/accounts/reload') >= 0 && o && o.body) {
+            var b = JSON.parse(o.body);
+            if (b && b.provider) {
+              b.provider = '';
+              o = Object.assign({}, o, { body: JSON.stringify(b) });
+              window.__forced = true;
+            }
+          }
+        } catch (e) {}
+        return window.__origFetch.apply(this, arguments);
+      };
+      window.__cap = [];
+    })()`);
+
+    const confuse = await clickReload('codearts');
+    const cr = confuse.cap.filter(c => c.url.indexOf('/admin/accounts/reload') >= 0)[0];
+    let cBody = null; try { cBody = JSON.parse(cr.body); } catch { }
+    console.log('  [判据 8] 篡改后的请求体: ' + JSON.stringify(cr && cr.body));
+    console.log('  [判据 8] toast: ' + JSON.stringify(confuse.toastTxt));
+
+    if (cBody && cBody.provider === '') {
+      ok(confuse.toastTxt.indexOf('已重载 workbuddy 的 auths') >= 0,
+        '【判据 8】pid(codearts) ≠ 后端回落的(workbuddy) 时，toast 显示的是**后端**那个 —— ' +
+        '这才证明文案取自 r.provider 而非 pid。实际 toast=' + JSON.stringify(confuse.toastTxt));
+      ok(confuse.toastTxt.indexOf('已重载 codearts 的 auths') < 0,
+        '【判据 8b】toast **没有**显示前端猜的 codearts（显示了就说明文案用 pid，会替后端撒谎）');
+    } else {
+      ok(false, '【判据 8】无法构造 pid≠r.provider 场景（篡改未生效，实际 body=' +
+        JSON.stringify(cr && cr.body) + '）');
+    }
+
+    // 还原 fetch，避免影响后面的判据
+    await ev(`(function(){ if (window.__origFetch) { window.fetch = window.__origFetch; window.__origFetch = null; } })()`);
+
     // ---------------------------------------------------------------- 判据 4b
     const W = await clickReload('workbuddy');
     const wr = W.cap.filter(c => c.url.indexOf('/admin/accounts/reload') >= 0)[0];
