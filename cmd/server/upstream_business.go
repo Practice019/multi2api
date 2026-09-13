@@ -16,15 +16,106 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/clientlogin"
+	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/workbuddy"
 )
+
+// ---------------------------------------------------------------------------
+// 登录流程适配（添加账号按上游分派）
+// ---------------------------------------------------------------------------
+
+// workbuddyOAuthClient 把 *oauth.Client 的**具体**凭证翻译成通用凭证。
+//
+// # 为什么翻译在本层
+//
+// `workbuddy.OAuthFlow` 要求 `Poll` 返回 `gateway.Credential`，
+// 而 `*oauth.Client.Poll` 返回 `*oauth.Credential` —— 签名不同，需要转换。
+//
+// 转换需要认识两个类型（oauth 的具体结构 + gateway 的通用结构），
+// 而**只有装配层同时认识两边** —— 与这个文件开头的类型适配同一个理由。
+//
+// # Secret 放什么
+//
+// 放 `*oauth.Credential` **本身**，因为核心落盘时要求它实现
+// `MarshalAuthFile() (name, raw, err)` —— 那个方法就在该类型上
+// （见 admin.pollViaFlow 的注释）。所以这里不需要把它拆成字段，
+// 保持原样传下去即可，落盘格式与旧路径**逐字相同**。
+type workbuddyOAuthClient struct{ c *oauth.Client }
+
+func (w workbuddyOAuthClient) Start() (string, string, error) { return w.c.Start() }
+
+// Poll 返回 any —— workbuddy.oauthClient 接口的形状。
+//
+// ⚠ pending 的翻译在这里：oauth 用自己的 `ErrPending` 哨兵，
+// 而核心用 `gateway.ErrLoginPending` 判断。不翻译的话，
+// 核心会把"用户还没点确认"当成**真错误**报 502 ——
+// 表现为授权页明明还开着，界面却已经报错了。
+func (w workbuddyOAuthClient) Poll(state string) (any, error) {
+	cred, err := w.c.Poll(state)
+	if err != nil {
+		if errors.Is(err, oauth.ErrPending) {
+			return nil, gateway.ErrLoginPending
+		}
+		return nil, err
+	}
+	return cred, nil
+}
+
+// workbuddyLogin 组装 workbuddy 的登录流程；未配置 OAuth 时返回 nil。
+//
+// 返回 nil 是**有意义**的：`workbuddy.Config.Login` 为 nil 时
+// `LoginFlow()` 返回 false，manifest 的 `login` 置空，
+// 前端不渲染「＋ 添加账号」—— 部署方没配就不给按钮。
+func workbuddyLogin(baseURL string) workbuddy.OAuthFlow {
+	log.Printf("DEBUG workbuddyLogin baseURL=%q", baseURL)
+	if baseURL == "" {
+		return nil
+	}
+	return workbuddy.WrapOAuth(
+		workbuddyOAuthClient{c: oauth.New(baseURL)},
+		func(raw any) (gateway.Credential, error) {
+			cred, ok := raw.(*oauth.Credential)
+			if !ok || cred == nil {
+				return gateway.Credential{}, errors.New("登录返回了非预期的凭证类型")
+			}
+			// ExpiresIn 是相对秒数 → 换算成绝对时刻。
+			// 0 表示"上游没给过期信息"，此时保持零值（gateway.Credential
+			// 的注释：零值 = 不提供过期信息），不要硬塞 now。
+			var exp time.Time
+			if cred.ExpiresIn > 0 {
+				exp = time.Now().Add(time.Duration(cred.ExpiresIn) * time.Second)
+			}
+			return gateway.Credential{
+				Provider:  workbuddy.ProviderID,
+				UID:       cred.UID,
+				Nickname:  cred.Nickname,
+				ExpiresAt: exp,
+				// 保持原类型：核心落盘时要求它实现 MarshalAuthFile，
+				// 而那个方法就在 *oauth.Credential 上。
+				Secret: cred,
+			}, nil
+		},
+	)
+}
+
+// 编译期断言。
+//
+// ⚠ 这里我第一版写成了 `var _ workbuddy.OAuthFlow = (*workbuddyOAuthClient)(nil)`，
+// **编译期就红了**：`workbuddyOAuthClient` 实现的是**输入**形状
+// （`oauthClient`：Poll 返回 any），而 `OAuthFlow` 是**输出**形状
+// （Poll 返回 gateway.Credential）。两者是 WrapOAuth 的入与出，不是同一个东西。
+//
+// 编译器把这个概念混淆当场挡下来了 —— 这正是断言的价值。
+var _ workbuddy.OAuthFlow = workbuddyLogin("x")
 
 // ---------------------------------------------------------------------------
 // 调度器适配器（Task 3c）

@@ -33,6 +33,10 @@ type fakeFlow struct {
 
 	// pollFn 决定 Poll 的行为（返回凭证 / ErrLoginPending / 别的错误）。
 	pollFn func(state string) (gateway.Credential, error)
+
+	// configured 由用例显式设置 —— 零值是 false，所以每个需要的用例
+	// 都要写明，避免"忘了设"导致用例静默走另一条分支。
+	configured bool
 }
 
 func (f *fakeFlow) Start() (string, string, error) {
@@ -43,6 +47,21 @@ func (f *fakeFlow) Poll(state string) (gateway.Credential, error) {
 	return f.pollFn(state)
 }
 
+// Configured 报告"这份配置真的能登录吗"。
+//
+// ⚠ 加了 `LoginFlow.Configured` 之后，**所有**测试桩都必须实现它 ——
+// 否则它们会被判定为"未配置"，一批既有用例会全红（实测如此）。
+//
+// 这是设计使然：光"实现了 Start/Poll"不足以说明可用
+// （上游为了让类型断言认出来必须挂那两个方法，与"配没配 OAuth"无关）。
+//
+// 用字段而不是恒 true：这样才能写"实现了但没配置 → 不给按钮"的反例。
+func (f *fakeFlow) Configured() bool { return f.configured }
+
+// 编译期断言：桩必须满足接口（漏了 Configured 会在这里红，
+// 而不是在一堆用例里红 —— 定位快得多）。
+var _ gateway.LoginFlow = (*fakeFlow)(nil)
+
 // flowProvider 实现了 LoginFlow 的 stub —— 供分派测试用。
 type flowProvider struct {
 	stubProvider
@@ -52,9 +71,19 @@ type flowProvider struct {
 func (p *flowProvider) Start() (string, string, error)            { return p.flow.Start() }
 func (p *flowProvider) Poll(s string) (gateway.Credential, error) { return p.flow.Poll(s) }
 
+// Configured 必须**转发**给内部的 fakeFlow。
+//
+// ⚠ 漏了它的话，flowProvider 会被判成"实现了但未配置"，
+// 而 admin 的判据是 `ExtOf && Configured` —— 于是所有用它造的用例
+// 都走 501 分支，红得莫名其妙（实测踩到）。
+// **转发型桩函数必须把接口的每一个方法都转出去。**
+func (p *flowProvider) Configured() bool { return p.flow.Configured() }
+
+var _ gateway.LoginFlow = (*flowProvider)(nil)
+
 // TestLoginStartDispatchByProvider 带 provider 时按上游分派。
 func TestLoginStartDispatchByProvider(t *testing.T) {
-	flow := &fakeFlow{startState: "ST-abc", startURL: "https://flow.example/auth"}
+	flow := &fakeFlow{startState: "ST-abc", startURL: "https://flow.example/auth", configured: true}
 	reg := gateway.NewRegistry()
 	if err := reg.Register(&flowProvider{
 		stubProvider: stubProvider{id: "flowup", caps: gateway.CapChat},
@@ -158,6 +187,7 @@ func TestLoginStartBackwardCompatible(t *testing.T) {
 // 表现为随机失败，极难定位。
 func TestLoginPollDispatchByProvider(t *testing.T) {
 	flow := &fakeFlow{
+		configured: true,
 		pollFn: func(state string) (gateway.Credential, error) {
 			return gateway.Credential{}, gateway.ErrLoginPending
 		},
@@ -203,6 +233,7 @@ func TestLoginPollDispatchByProvider(t *testing.T) {
 // 看起来成功、实际字段错位的凭证，比明确失败糟得多。
 func TestLoginFlowSecretMustMarshal(t *testing.T) {
 	flow := &fakeFlow{
+		configured: true,
 		pollFn: func(state string) (gateway.Credential, error) {
 			// Secret 是个不能 MarshalAuthFile 的类型
 			return gateway.Credential{UID: "u1", Provider: "flowup", Secret: struct{ X int }{1}}, nil

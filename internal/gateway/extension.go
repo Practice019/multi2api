@@ -97,6 +97,21 @@ type LoginFlow interface {
 	Start() (state, authURL string, err error)
 	// Poll 查询授权结果。未完成时返回 ErrLoginPending。
 	Poll(state string) (Credential, error)
+	// Configured 报告这份部署**真的能**走登录流程吗。
+	//
+	// # 为什么接口里要有这一条（而不是只看"实现了没有"）
+	//
+	// 上游为了让类型断言认出自己，必须把 Start/Poll 挂在 Provider 身上 ——
+	// 那是**编译期**的事实，与"这次部署有没有配 OAuth 客户端"无关。
+	//
+	// 只看 `ExtOf[LoginFlow](p)` 会导致：**没配登录流程的部署也"实现了"**，
+	// 于是 manifest 下发 login、前端渲染「＋ 添加账号」，
+	// 用户点下去才报错。那是"假按钮"，正是这个字段要避免的。
+	//
+	// 加这一条之后，探测方可以 `ok && lf.Configured()` ——
+	// 两道条件都满足才认为可用。实现方照实回答即可（通常是
+	// "cfg 里那个客户端不是 nil"）。
+	Configured() bool
 }
 
 // ErrLoginPending 表示登录授权尚未完成（用户在浏览器里还没点确认）。
