@@ -19,9 +19,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -109,6 +111,55 @@ func (p *flowProvider) Configured() bool { return p.flow.Configured() }
 //
 // 所以这里必须转出去，否则 flowProvider 会自报空串。
 func (p *flowProvider) AuthDir() string { return p.flow.AuthDir() }
+
+// LoadCredentials 让 flowProvider 也满足 `gateway.CredentialLoader`。
+//
+// ⚠ 这不是"为了测试方便"加上去的 —— **两个真实上游都实现了它**
+// （`workbuddy.Provider.LoadCredentials` / `codearts.Provider.LoadCredentials`），
+// 而 `pollViaFlow` 现在按 `ExtOf[CredentialLoader]` 分派重扫解析器。
+//
+// 少了它，本桩会被判定为"没实现凭证加载器" → 走 501 分支，
+// 于是 `TestPollViaFlowWritesToProviderDir` 会红在"应 200，实际 501"上。
+//
+// ⚠ 这个坑**正是这次修的 bug 的镜像**：改之前核心写死 `auth.LoadDirCompat`，
+// 桩缺不缺 `CredentialLoader` 完全看不出来 —— 测试对"核心到底问没问上游"
+// **没有判别力**。加上核心改走扩展点之后，缺接口立刻变红（实测如此）。
+// 桩与真实上游的接口面必须一致，否则测试守的是**假想的**系统。
+//
+// 实现按 workbuddy 真实上游的形状：用真实扫描器
+// （`auth.LoadDirCompat`，glob 前缀 `workbuddy*.json`）。这样
+// `TestPollViaFlowWritesToProviderDir` 的 200 是**真的**由"扫到了落盘的
+// 凭证"支撑的，而不是靠桩返回一个恒真的空切片蒙过去。
+//
+// 返回的凭证**投影成 uid/nickname**（与真实上游同款）—— 核心只要这两样。
+func (p *flowProvider) LoadCredentials(dir string) ([]gateway.Credential, error) {
+	base := dir
+	if parent := filepath.Dir(dir); parent != "" && parent != dir {
+		base = parent
+	}
+	list, err := auth.LoadDirCompat(base, p.ID())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gateway.Credential, 0, len(list))
+	for _, a := range list {
+		if a == nil || a.UID == "" {
+			continue
+		}
+		out = append(out, gateway.Credential{
+			Provider: p.ID(),
+			UID:      a.UID,
+			Nickname: a.Nickname,
+		})
+	}
+	return out, nil
+}
+
+// 编译期断言：flowProvider 必须被核心当成"凭证加载器"认出来。
+//
+// ⚠ 与上面两条同样重要：少了它，`pollViaFlow` 会返 501，
+// 而那与"上游真的不支持"无法区分。
+var _ gateway.CredentialLoader = (*flowProvider)(nil)
 
 var _ gateway.LoginFlow = (*flowProvider)(nil)
 

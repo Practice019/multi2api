@@ -35,7 +35,7 @@ import "workbuddy2api/internal/gateway"
 // 两处必须一致，且它们会出现在测试断言里。
 //
 // ⚠ 这两个值**必须**与改造前 webui.html 里的 data-act 逐字相同
-//（"checkin" / "keepalive"）—— 前端的动作分派表、busyRun 文案表、
+// （"checkin" / "keepalive"）—— 前端的动作分派表、busyRun 文案表、
 // 以及 tests/frontend/verify_account_buttons.js 的断言都以它们为准。
 const (
 	DailyActionCheckin   = "checkin"

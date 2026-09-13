@@ -156,7 +156,8 @@ func TestWorkbuddyActionURLsReallyExist(t *testing.T) {
 // 而 token 保活刷的是有有效期的凭证，提前几小时刷**没有收益**。
 //
 // ⇒ Batch 表达的是"**界面要不要给它入口**"（决策），
-//    不是"上游有没有全量端点"（事实）。两者混一起就会把删掉的功能加回来。
+//
+//	不是"上游有没有全量端点"（事实）。两者混一起就会把删掉的功能加回来。
 func TestWorkbuddyKeepaliveHasNoBulkButton(t *testing.T) {
 	for _, a := range actionsOf(t, newWorkbuddy(t)) {
 		if a.ID != "keepalive" {
@@ -175,7 +176,7 @@ func TestWorkbuddyKeepaliveHasNoBulkButton(t *testing.T) {
 // TestWorkbuddyCheckinHasBulkButton 反过来：签到**必须**有顶部入口。
 //
 // 与上一条配对。只钉"不该有的"而不钉"该有的"，会让一次误删
-//（把 Batch 全关掉）静默通过：界面上一个全量按钮都没有，
+// （把 Batch 全关掉）静默通过：界面上一个全量按钮都没有，
 // 而没有任何断言会红。
 func TestWorkbuddyCheckinHasBulkButton(t *testing.T) {
 	for _, a := range actionsOf(t, newWorkbuddy(t)) {
@@ -196,7 +197,7 @@ func TestWorkbuddyCheckinHasBulkButton(t *testing.T) {
 // TestBatchImpliesAllURL Batch=true 而 AllURL 为空是**无效组合**。
 //
 // 前端的 renderAllDailyButtons 要求 `batch && all_url` 两个都满足才渲染
-//（单独看 batch 会渲染出一个点了不知道打到哪的按钮）。
+// （单独看 batch 会渲染出一个点了不知道打到哪的按钮）。
 // 这条测试保证上游**不会产出**这种组合，于是前端那道判断是纵深防御
 // 而不是唯一防线 —— 判据有两处独立落实，任一处写错另一处会兜住。
 func TestBatchImpliesAllURL(t *testing.T) {
@@ -406,15 +407,15 @@ func TestValidDailyActionID(t *testing.T) {
 		{"welfare", true},
 		{"a1", true},
 		{"", false},
-		{"Checkin", false},   // 大写开头
-		{"checkIn", false},   // 中间大写
-		{"-checkin", false},  // 以 '-' 开头
-		{"check in", false},  // 空格
-		{"check/in", false},  // 斜杠（会破坏 URL 与选择器）
-		{`che"ck`, false},    // 引号（会破坏 HTML 属性）
-		{"check_in", false},  // 下划线不在字符集里
-		{"checkin'", false},  // 单引号
-		{"1checkin", false},  // 数字开头
+		{"Checkin", false},  // 大写开头
+		{"checkIn", false},  // 中间大写
+		{"-checkin", false}, // 以 '-' 开头
+		{"check in", false}, // 空格
+		{"check/in", false}, // 斜杠（会破坏 URL 与选择器）
+		{`che"ck`, false},   // 引号（会破坏 HTML 属性）
+		{"check_in", false}, // 下划线不在字符集里
+		{"checkin'", false}, // 单引号
+		{"1checkin", false}, // 数字开头
 	}
 	for _, c := range cases {
 		if got := gateway.ValidDailyActionID(c.id); got != c.ok {

@@ -30,9 +30,9 @@
 // # 为什么 AllURL / Batch 都留空
 //
 // /admin/welfare/claim 的语义是**对某一个账号**领取它当前可领的全部福利
-//（体是 {"uid": ...}，见 codearts/admin.go 的 handleWelfareClaim）。
+// （体是 {"uid": ...}，见 codearts/admin.go 的 handleWelfareClaim）。
 // 它没有"对全部账号一键领取"这种端点 —— 核心也没有遍历各上游账号的权限
-//（上游包不得依赖 internal/pool，arch_test.go 强制）。
+// （上游包不得依赖 internal/pool，arch_test.go 强制）。
 //
 // 所以 Batch 如实报 false。前端的"全部 X"按钮只对有全量端点的动作出现，
 // codearts 的「领取福利」就只在**账号行内**出现。这是事实，不是缺陷。

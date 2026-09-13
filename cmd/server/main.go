@@ -400,7 +400,22 @@ func main() {
 		ServiceName: cfg.ServiceName,
 		// 额度恢复策略由上游回答：workbuddy 给"次日 04:00"（等签到恢复），
 		// 核心不再内置任何具体时点。缺失时 handler 回落到 now+1h。
-		NextResetAt: wb.NextResetAt,
+		//
+		// ⚠ 参数 providerID 是**必须的**（P2 修复）：旧签名 `func() time.Time`
+		// 没有参数，装配层只能把 wb.NextResetAt 塞进去，于是 codearts 的号
+		// 也被冷到 workbuddy 的次日 04:00 —— 而 codearts 没有签到恢复机制，
+		// 04:00 不是它的任何事实（可能白闲置近 24h）。
+		//
+		// 现在按 ID 分派：`registryRouter.ResetAt` 走 gateway.ResetPolicyExt
+		// （与 RefreshSkew / Classify 同一模式，没实现的上游返回 ok=false
+		// → 核心回落 now+1h）。workbuddy 自己实现该扩展点并给出"次日 04:00"，
+		// 所以它的行为与改造前**逐字一致**（这是硬要求）。
+		//
+		// 凭证由 registryRouter 内部按 (id, uid) 组装；这里没有 uid
+		// （恢复排程是**上游**的事实，不是某一份凭证的），传零值 Credential。
+		NextResetAt: func(providerID string) (time.Time, bool) {
+			return registryRouter{reg: registry, p: p}.ResetAt(providerID, gateway.Credential{Provider: providerID})
+		},
 		// /v1/models 的 owned_by 由装配层注入（核心不再硬编码上游名）。
 		// 多上游之后它是**默认上游**的 owned_by，其余上游按各自 ID 填。
 		OwnedBy: wb.ID(),

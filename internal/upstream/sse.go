@@ -11,6 +11,34 @@ import (
 	"time"
 )
 
+// sseData 判定一行是否是 SSE 的 data 行，并把 payload 切出来。
+//
+// # 为什么必须同时接受 "data:" 与 "data: "（这是实测抓到的真 bug）
+//
+// SSE 规范（W3C EventSource）里冒号后的空格是**可选**的：
+//
+//	data:{...}      ← CodeArts（华为 InferHub）实测形态
+//	data: {...}     ← 标准 OpenAI / workbuddy 形态
+//
+// 早先的实现只认带空格的形态（`strings.HasPrefix(line, "data: ")`），
+// 于是 CodeArts 的每一帧都匹配不上：
+//
+//	Aggregate → 有效事件数恒为 0 → 502 upstream_parse
+//	Stream    → 落进"注释/其它行"分支原样透传 → 不计数也不规范化
+//
+// 症状因此被**按流式与否劈成两半**：同一个上游、同一个模型，
+// `stream:true` 看着是好的（帧被原样透传），`stream:false` 恒 502。
+// 这正是"一个解析假设，两种截然不同的失败表现"。
+//
+// 判据写成一个函数而不是在两处各写一遍：两处各写一遍正是这个 bug 的成因
+// （Aggregate 与 Stream 对同一份帧形态给过不同的答案）。
+func sseData(line string) (payload string, ok bool) {
+	if !strings.HasPrefix(line, "data:") {
+		return "", false
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "), true
+}
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -35,8 +63,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			return nil, err
 		}
 		line = strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(line, "data: ") {
-			payload := strings.TrimPrefix(line, "data: ")
+		if payload, ok := sseData(line); ok {
 			if payload == "[DONE]" {
 				// 上游显式结束：停止读取，DONE 之后的任何数据一律忽略。
 				break
@@ -325,24 +352,36 @@ readLoop:
 	for {
 		line, err := br.ReadString('\n')
 		trimmed := strings.TrimRight(line, "\r\n")
-		switch {
-		case strings.HasPrefix(trimmed, "data: [DONE]"):
-			// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
-			// [DONE] 统一在循环结束后写出，保证恰好一个。
-			break readLoop
-		case strings.HasPrefix(trimmed, "data: "):
-			n, werr := writeFrame(strings.TrimPrefix(trimmed, "data: "))
+		// 先按 data 行解析（兼容 "data:" 与 "data: " 两种形态，见 sseData）。
+		//
+		// ⚠ 顺序很重要：早先这里是 `case HasPrefix(trimmed, "data: [DONE]")`
+		// 与 `case HasPrefix(trimmed, "data: ")` 两个字面量分支，
+		// CodeArts 的无空格帧两个都不匹配 → 落进下面的"注释/其它行"分支
+		// **原样透传且不计数**。后果有两层：
+		//   1. validateFrames 恒为 0 → 循环结束后误报一帧
+		//      "empty upstream stream"（明明有数据）；
+		//   2. 帧绕过 normalizeFrame 白名单重建 → 上游的额外字段直接漏给客户端。
+		if payload, isData := sseData(trimmed); isData {
+			if strings.TrimSpace(payload) == "[DONE]" {
+				// 上游显式结束：停止读取，DONE 之后的任何数据（含垃圾帧）一律不再透传。
+				// [DONE] 统一在循环结束后写出，保证恰好一个。
+				break readLoop
+			}
+			n, werr := writeFrame(payload)
 			validFrames += n
 			if werr != nil {
 				return werr
 			}
-		case trimmed != "":
-			// 注释/其他行：原样透传
-			if _, werr := io.WriteString(w, line); werr != nil {
-				return werr
-			}
-			if fl != nil {
-				fl.Flush()
+		} else {
+			switch {
+			case trimmed != "":
+				// 注释/其他行：原样透传
+				if _, werr := io.WriteString(w, line); werr != nil {
+					return werr
+				}
+				if fl != nil {
+					fl.Flush()
+				}
 			}
 		}
 		// 空行（帧分隔）吞掉：本函数自产 "\n\n"

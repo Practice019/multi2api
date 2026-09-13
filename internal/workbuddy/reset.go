@@ -38,6 +38,10 @@ func NextCheckinReset(now time.Time) time.Time {
 // 签名刻意不带参数：它要满足 server.Config.NextResetAt 的 `func() time.Time`，
 // 由核心在需要冷却账号时调用一次。取"调用时刻"而不是固定时刻，
 // 是因为一次硬冷却可能发生在任意时刻（额度被别的客户端消耗完）。
+//
+// ⚠ 保留本方法是向后兼容：单上游部署（Provider 未注入）仍直接注入它。
+// 多上游路径已经改走 ResetAtExt（gateway.ResetPolicyExt），
+// 它把"哪个上游"这个问题回答出来 —— 见 reset_ext.go。
 func (p *Provider) NextResetAt() time.Time {
 	return NextCheckinReset(time.Now())
 }

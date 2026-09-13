@@ -323,9 +323,17 @@ func TestChatHardCreditCooldownUsesUpstreamReset(t *testing.T) {
 	p.SetCredits("bad", 2000) // bad 积分高，确定性源 → 先被选中
 	p.SetCredits("good", 1000)
 
-	// 注入一个**与 04:00 无关**的重置时刻 —— 证明核心不再写死任何时点
+	// 注入一个**与 04:00 无关**的重置时刻 —— 证明核心不再写死任何时点。
+	//
+	// ⚠ 回调现在带 providerID 参数（P2 修复）：单上游模式下核心传 ""，
+	// 所以本用例既钉住"时刻来自注入"，也钉住"单上游路径的参数是空串"。
 	want := time.Now().Add(37 * time.Minute).Truncate(time.Second)
-	h := NewHandler(Config{Pool: p, Upstream: up, NextResetAt: func() time.Time { return want }})
+	h := NewHandler(Config{Pool: p, Upstream: up, NextResetAt: func(providerID string) (time.Time, bool) {
+		if providerID != "" {
+			t.Errorf("单上游模式下 providerID 应为空串（号没打标签 → 池子报默认上游 \"\"），实际 %q", providerID)
+		}
+		return want, true
+	}})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
 	rec := httptest.NewRecorder()
