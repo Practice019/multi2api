@@ -46,7 +46,22 @@ type quotaRefresher struct {
 	Unknown int
 	// Failed 上游返回 nil 或刷新过程出错（账号解析不了等）的账号数。
 	Failed int
+	// Skipped 因上游未实现 QuotaExt 而**未被问过额度**的账号数。
+	//
+	// ⚠ 与 Unknown 区分：
+	//   Unknown = "问了，上游说不知道"（正常情况，不该刷错误日志）
+	//   Skipped = "压根没问" —— 它意味着某个上游**完全没有额度接入**，
+	//            是本文件唯一真正需要人介入的状态。
+	//
+	// 这个字段存在的理由：本文件曾经对"没实现 QuotaExt 的上游"静默 continue，
+	// 于是"某个上游整片账号没被刷到"在日志/回执/界面上**全部不可见**。
+	Skipped int
 	// Providers 本次真正被问过额度的上游（排序后，供回执/日志）。
+	//
+	// ⚠ 注意它的语义边界：它只收录**真正问过**的上游。被跳过（未实现
+	// QuotaExt）的上游**不会**出现在这里 —— 所以单独看 Providers
+	// 无法区分"这个上游只有 0 个账号"和"这个上游整片被跳过"。
+	// 后者只能靠 Skipped + 下面那条按 provider 去重的跳过日志来暴露。
 	Providers []string
 }
 
@@ -79,6 +94,14 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 	}
 
 	seen := map[string]bool{}
+	// loggedSkip 保证"某个上游没实现 QuotaExt"只打**一行**日志。
+	//
+	// # 为什么必须去重
+	//
+	// 这个循环是按账号跑的：一个来自没接额度的上游如果有 50 个账号，
+	// 不去重就会打 50 行同样的日志 —— 真正的故障（failed 的堆栈）
+	// 会被自己的噪音淹没。日志的价值在"有无"，不在"条数"。
+	loggedSkip := map[string]bool{}
 	for _, uid := range uids {
 		st, ok := h.cfg.Pool.Status(uid)
 		if !ok {
@@ -93,7 +116,18 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 		}
 		ext, ok := exts[provider]
 		if !ok {
-			continue // 该上游不报额度 → 保持未知，不写池
+			// 该上游不报额度 → 保持未知，不写池（行为不变）。
+			//
+			// ⚠ 但**必须记下来**：这里曾经是一句光秃秃的 continue。
+			// 于是"某个上游整片账号压根没被问过"在日志、回执、界面上
+			// 全部不可见 —— 这正是本文件那个 bug 能藏住的直接原因。
+			// 计数 + 按 provider 去重的日志，让它一眼可见。
+			out.Skipped++
+			if !loggedSkip[provider] {
+				loggedSkip[provider] = true
+				log.Printf("admin: 额度刷新跳过上游 %q（未实现 gateway.QuotaExt）—— 它的额度在界面上将恒为未知", provider)
+			}
+			continue
 		}
 		if !seen[provider] {
 			seen[provider] = true
@@ -115,6 +149,13 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 	}
 
 	sort.Strings(out.Providers)
+	// 收尾汇总：一行看全四个计数。
+	//
+	// ⚠ skipped 必须出现在这里。它和 unknown 是**完全不同**的东西：
+	// unknown 是上游如实回答"不知道"（正常），skipped 是"我们压根没问"
+	// （某个上游没接额度）。只报 unknown 会让后者伪装成前者。
+	log.Printf("admin: 额度刷新完成 updated=%d unknown=%d failed=%d skipped=%d providers=%v",
+		out.Updated, out.Unknown, out.Failed, out.Skipped, out.Providers)
 	return out
 }
 
@@ -189,6 +230,7 @@ func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 		"updated":   res.Updated,
 		"unknown":   res.Unknown,
 		"failed":    res.Failed,
+		"skipped":   res.Skipped,
 		"providers": res.Providers,
 		// 回执里带上刷新后的账号视图，前端一次调用就能重绘表格。
 		"accounts": h.accountViews(),
