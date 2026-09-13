@@ -471,6 +471,37 @@ func (h *Handler) reloadProvider() string {
 	return h.cfg.DefaultProvider
 }
 
+// credentialsOf 找到某个上游的凭证加载器（`gateway.CredentialLoader`）。
+//
+// 返回 (加载函数, 上游是否存在且实现了加载器)。
+//
+// # 为什么要经过扩展点，而不是核心写死解析器
+//
+// 核心原来写死用 `auth.LoadDirCompat` —— 那**恰好**是 workbuddy 的格式，
+// 所以 workbuddy 那条路径"碰巧是对的"，而 codearts 那条**彻底坏了**
+//（用户实测：重载 codearts 时扫到的是 3 个 workbuddy 旧凭证）。
+//
+// 凭证格式是**上游的事实**（与凭证目录同理），由上游自报：
+//
+//	workbuddy → auth.LoadDirCompat（`workbuddy*.json`）
+//	codearts  → codearts.LoadDir（`codearts*.json`）
+//
+// 这样核心不解释任何上游的凭证格式，**加新上游核心零改动**。
+//
+// 上游没实现 → 返回 false，调用方**明确报错**而不是回落成某个写死的解析器
+//（回落正是上面那个 bug 的形态）。
+func (h *Handler) credentialsOf(providerID string) (func(string) ([]gateway.Credential, error), bool) {
+	p, ok := h.providerByID(providerID)
+	if !ok {
+		return nil, false
+	}
+	ext, ok := gateway.ExtOf[gateway.CredentialLoader](p)
+	if !ok {
+		return nil, false
+	}
+	return ext.LoadCredentials, true
+}
+
 // accountsReload 重新扫描 auths 目录并对齐池（手工拷入凭证后无需重启网关）。
 //
 // # ⚠ 必须显式指定**这个目录属于哪个上游**
@@ -560,36 +591,65 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 		dir = auth.UpstreamDir(base, provider)
 	}
 
-	// ⚠ 扫描目录与"上游自报目录"的关系 —— 这里刻意做了取舍，写清楚：
+	// ⚠ 扫描必须**只扫这个上游自己的文件夹**，并且用**它自己的解析器**。
 	//
-	// `LoadDirCompat(base, provider)` 内部**自己**算 `UpstreamDir(base, provider)`，
-	// 也就是说它只认"`base/<provider>` + `base` 根"这两个位置。
-	// 而上面从 `AuthDirExt` 拿到的 `dir` 是**上游自己说的**，
-	// 多上游部署里它可能与 `base/<provider>` 不同（例如各上游配了独立的
-	// auth_dir，或上游把凭证放在别处）。
+	// # 这里原来错得离谱（用户实测报的"添加了账号但重载扫不到"）
 	//
-	// 两者打架时**以扫描结果的实际位置为准**，所以这里按 `dir` 反推 base：
+	// 旧代码只有一行：
 	//
-	//   dir == UpstreamDir(base, provider)  → 传 base，两个位置都扫（迁移期正确）
-	//   dir != UpstreamDir(base, provider)  → 传 dir 自己的父目录语义：
-	//                                        直接把 dir 当 base 传进去，
-	//                                        LoadDirCompat 会算 dir/<provider>
-	//                                        （通常不存在，于是只扫 dir 这一层）
+	//	auths, err := auth.LoadDirCompat(scanBase, provider)
 	//
-	// 选这个做法的理由：**优先保证"扫的就是上游说它会读的那个目录"**。
-	// 迁移期兼容（根目录也扫）只在目录布局确实是 `base/<provider>` 时才成立 ——
-	// 那正是它被设计出来的场景。若上游另立目录，再扫 `base` 根只会
-	// **把别的上游的凭证也捞进来**（LoadDir 靠 `workbuddy*.json` 前缀过滤，
-	// 但同一个上游的旧文件可能同时躺在两处 → 按 uid 去重后条数对不上，
-	// 排障时看不出是"多扫了根目录"）。
-	scanBase := base
-	if sub := auth.UpstreamDir(base, provider); dir != sub {
-		scanBase = dir
-	}
-	auths, err := auth.LoadDirCompat(scanBase, provider)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取 auths 目录失败: "+err.Error())
+	// `auth.LoadDirCompat` 是 **workbuddy 的解析器** ——
+	// 它的 Glob 前缀写死 `workbuddy*.json`：
+	//
+	//	func LoadDir(dir string) ([]*Auth, error) {
+	//	    files, _ := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
+	//
+	// 拿它去扫 codearts 目录，**一个 codearts 凭证都读不到**。
+	// 而 `LoadDirCompat` 还会**连同父目录（`auths/` 根）一起扫**，
+	// 于是它把根下遗留的 workbuddy 旧文件当成了结果：
+	//
+	//	LoadDirCompat("auths", "codearts") 返回 3 条 —— 全是 workbuddy 的：
+	//	    file=workbuddy-2e37e4f4-....json
+	//	    file=workbuddy-4e0fe0e9-....json
+	//	    file=workbuddy-ca19abfd-....json
+	//
+	// 而 `auths/codearts/` 里那个真的 codearts 凭证被完全忽略。
+	// 更糟：紧接着对 **codearts 域** `SyncToDirFor` 了那 3 个 workbuddy 账号
+	// —— **把 workbuddy 的凭证塞进了 codearts 的域**。
+	//
+	// # 正确判据（用户的原话，也正是本项目的设计）
+	//
+	//	**每个文件夹 = 一个上游的账号集合。不同上游扫各自的文件夹。**
+	//
+	// 所以：
+	//   1. **只扫 `dir`**（上游自报的那个目录），**不扫父目录** ——
+	//      根目录不该有凭证文件，那是迁移期遗留，已清理。
+	//   2. **用上游自己的解析器**（`gateway.CredentialLoader`）——
+	//      凭证格式是**上游的事实**，核心不该知道 `workbuddy*.json`
+	//      还是 `codearts*.json`。这也让"加新上游核心零改动"重新成立。
+	//
+	// 上游没实现 `CredentialLoader` 时**明确报错**，不回落成
+	// "用某个写死的解析器" —— 那正是这个 bug 的形态。
+	loaded, exists := h.credentialsOf(provider)
+	if !exists {
+		writeError(w, http.StatusNotImplemented,
+			"上游 "+provider+" 没有实现 gateway.CredentialLoader，"+
+				"无法按它自己的格式扫描凭证（核心不硬编码任何上游的凭证格式）")
 		return
+	}
+	creds, err := loaded(dir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取 "+dir+" 失败: "+err.Error())
+		return
+	}
+	// 投影成账号池要的形状（uid + nickname）。
+	auths := make([]*auth.Auth, 0, len(creds))
+	for _, c := range creds {
+		if c.UID == "" {
+			continue
+		}
+		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})
 	}
 
 	// ⚠ 池子可能为 nil（本包其它地方都判了空，见 pollViaFlow 的注释）。
@@ -1059,12 +1119,31 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow ga
 	}
 	log.Printf("admin: oauth(flow) 成功 provider=%s uid=%s file=%s dir=%s",
 		cred.Provider, cred.UID, filepath.Base(path), dir)
+	// ⚠ 回执必须带上 `dir`。
+	//
+	// 前端弹窗原来硬编码 `auths/${p.file}` 拼"凭证文件"那行 ——
+	// 而 `file` 只有 basename。按上游分子目录之后，
+	// 实际路径是 `auths/codearts/codearts-xxx.json`，
+	// 界面却显示成 `auths/codearts-xxx.json`。
+	//
+	// 用户会照着那句提示去找文件、往那儿放 —— **而那是错的地方**。
+	//（实测：用户确实被这句误导，以为"少了根目录"。）
+	//
+	// 所以把**实际落盘目录**回传，前端直接用它拼，不再自己猜。
+	//
+	// `domain` / `expires_in` 不在这里返回：
+	// `gateway.Credential` **没有** domain 字段（各上游凭证结构不同，
+	// 强行统一会造出"什么字段都有、每个上游只填三个"的超集结构体），
+	// 而 codearts 也不提供有效期。**不假装有** —— 前端对缺失字段显示 `—`。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"uid":      cred.UID,
 		"nickname": cred.Nickname,
 		"provider": cred.Provider,
+		"dir":      dir,
 		"file":     filepath.Base(path),
+		// 可能为零值（上游不提供过期信息）—— 前端据此显示 `—`
+		"expires_at": cred.ExpiresAt,
 	})
 	return errHandled
 }
