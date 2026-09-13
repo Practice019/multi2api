@@ -4976,16 +4976,80 @@ let multCatalogFailed = false;
     return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
   }
 
+  // multKeyOf 把**展示 id** 归一成**倍率表的键**：去掉 `provider/` 前缀。
+  //
+  // 为什么需要它：面板现在统一显示完整 id（`workbuddy/glm-5.2` 这种，
+  // 用户要求"workbuddy/xxx 或 codearts/xxx，统一、不要重复"），
+  // 而 /admin/models/preview 下发的 modelMultipliers **键是上游目录里的裸 id**
+  //（如 `glm-5.2`）—— 那是后端契约，前端不改它。
+  // 拿完整 id 直接查表必然全部落空，界面上就是满屏 `x无`
+  //（tests/frontend/diag_multiplier_mismatch.js 早就实测出这条错位：
+  // "倍率表用的是裸名，而面板显示 provider/model 形态 → id 对不上"）。
+  //
+  // ⚠ 归一逻辑**只此一处**：multTag 与 multTagPlain 都经由 multTableKey 调它取键
+  //（multTableKey 只额外判"这张表到底覆不覆盖这个上游"，不做第二份去前缀）。
+  // 各写一份必然会漂 —— 而漂的表现是"某处又变回 x无"，很难一眼看出。
+  function multKeyOf(id) {
+    const s = String(id || '').indexOf('/');
+    // 没有前缀（单上游的裸名，如 `glm-5.2`）→ 原样返回：它本来就是表的键。
+    return s > 0 ? String(id).slice(s + 1) : String(id || '');
+  }
+
+  // multTableKey 解析**这个展示 id 能不能查倍率表**：能查则给出键，不能查返回 null。
+  //
+  // # 为什么不能"去前缀就直接查"（这条是有真浏览器实测证据的缺陷）
+  //
+  // `modelMultipliers` 来自 `/admin/models/preview` → 后端 `h.cfg.ModelCatalog()`，
+  // 而那份目录**只由默认上游的客户端构建**（装配层的 catalogHost 只喂默认上游），
+  // 键是那份目录里的**裸名**（如 `glm-5.3-flash`）。于是别家上游的
+  // `codearts/glm-5.3-flash` 去掉前缀后，正好撞上**默认上游的同名条目**。
+  //
+  // 真 Chrome 实测（改造前）：
+  //
+  //   workbuddy 组 16 个：`workbuddy/glm-5.2` x0.79 …            ← 正确
+  //   codearts  组  7 个：`codearts/glm-5.3-flash` **x0.06**，
+  //                       同组另外 6 个 x无
+  //   /admin/models/preview 的返回里只有一条裸名 `glm-5.3-flash`:0.06，
+  //   **没有任何 codearts 条目** —— 那个 0.06 是 workbuddy 目录里的系数。
+  //
+  // ∴ **显示一个错的数字，比显示 x无 有害得多**：用户按它算成本会算错账，
+  // 而且完全看不出哪里不对（同一组里"只有一个模型有倍率"，看着还挺正常）。
+  //
+  // # 判据
+  //
+  //   · **裸名**（无 `provider/` 前缀）→ 原样去查，行为与加这个函数之前**完全一致**
+  //     （单上游部署、或后端没给前缀的条目都走这一支）。
+  //   · **带前缀** → 只有**前缀就是默认上游**时才去前缀查表；别家上游**不查**。
+  //
+  // ⚠ 判据只此一处：multTag 与 multTagPlain 都调它，各自不写第二份判断
+  //（与 multKeyOf 同一个风格：一个函数、两个调用点）。
+  //
+  // ⚠ DEFAULT_PROVIDER 的赋值时机：它**只**在 applyManifest 里、manifest 到达后
+  // 才被赋值（见它的定义处），在那之前一直是空串 `''`。而真实上游名不可能是空串，
+  // 于是**归属未知时所有带前缀的 id 都落进"不查表"这一支**，显示 x无。
+  // 这是唯一可接受的失败方向：宁可显示 x无，也不要在归属未知时错显别家的数字。
+  function multTableKey(id) {
+    const slash = String(id || '').indexOf('/');
+    // 无前缀 → 它本来就是倍率表的键（查不到就是"上游没配"，由调用方处理）。
+    if (!(slash > 0)) return multKeyOf(id);
+    const prefix = String(id).slice(0, slash);
+    // 前缀不是默认上游 → 这张表根本不覆盖它，**不查**（别家不继承默认上游的系数）。
+    if (prefix !== DEFAULT_PROVIDER) return null;
+    return multKeyOf(id);
+  }
+
   // 倍率标记：有系数才加，且 0 也要显示（免费是有效信息）。
   // 系数未知（目录里没这个模型）时不加后缀，避免用「x0」把"不知道"说成"免费"。
   function multTag(id) {
     // 用户要求：倍率表里没有的模型显示 `x无`。
     //
-    // ⚠ 但要区分**三种"没有"**，它们不该长一样：
+    // ⚠ 但要区分**四种"没有"**，它们不该长一样：
     //
     //   1. 倍率表里有            → `x0.29`
-    //   2. 表里没有这个模型       → `x无`      （本分支，用户要求）
+    //   2. 表里没有这个模型       → `x无`      （用户要求；title=上游未提供）
     //   3. **倍率表整体没加载**   → 不显示 `x无`，改为面板级提示
+    //   4. **别家上游**（表只覆盖默认上游）→ 也 `x无`，但 title 说明"这张表不覆盖它"——
+    //      与第 2 种必须可区分：一个该去问上游，一个只是本界面拿不到别家的目录。
     //
     // 第 3 种是"静默失败"的典型场景：`loadModelMultipliers` 失败时把
     // `modelMultipliers` 清空，若不区分，用户会以为**所有**模型都没有倍率，
@@ -4994,13 +5058,25 @@ let multCatalogFailed = false;
     // 用"无"而不是留空：留空与"倍率恰好是 0 但没渲染"无法区分；
     // 显式写"无"是把不确定性**显示出来**，而不是藏起来。
     // 渲染成 `x无`（小写 x）与其它 15 个同形 —— 视觉一致比照搬输入字符重要。
-    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) {
+    // 经 multTableKey 归一**并判归属**：这里拿到的是展示 id（`provider/xxx`），
+    // 而倍率表的键是**默认上游目录**里的裸名。别家上游的表根本不存在，
+    // 所以它返回 null —— 那时**不查表**，显示 x无（见 multTableKey 的注释）。
+    const key = multTableKey(id);
+    if (key === null) {
+      // ⚠ 这一支不是"上游没配倍率"，而是"这张表压根不覆盖这个上游"，
+      // 两种"没有"的 title 必须不同，否则用户会去怀疑上游配错了。
+      // 目录整体失败时不逐个挂"无"（由面板顶部提示），与下面分支同一口径。
+      if (multCatalogFailed) return '';
+      return '<span class="mult unknown" title="倍率表只覆盖默认上游 '
+        + esc(DEFAULT_PROVIDER || '（未知）') + ' 的目录，该模型属于别家上游，不显示可能属于别人的数字">x无</span>';
+    }
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, key)) {
       if (multCatalogFailed) return '';   // 目录整体失败 → 不给每个 chip 都挂"无"
       return '<span class="mult unknown" title="上游未提供该模型的倍率">x无</span>';
     }
-    const txt = multText(modelMultipliers[id]);
+    const txt = multText(modelMultipliers[key]);
     if (txt === null) return '';   // 脏数据 → 当作没有系数，而不是显示 xNaN
-    const v = modelMultipliers[id];
+    const v = modelMultipliers[key];
     // 免费（0）与高倍率（>=1）各给一个样式类，便于一眼扫出成本档位。
     // 注意：不发散到"低/中/高"多档 —— 倍率分布随上游调整，硬编码分档很快会失真。
     const cls = v === 0 ? ' free' : (v >= 1 ? ' hi' : '');
@@ -5013,33 +5089,54 @@ let multCatalogFailed = false;
     if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
 
     // 按上游分组渲染（T5）。三件事一起做：
-    //   1. **去重**：`/v1/models` 同时给裸名与 `provider/name` 两种写法，
-    //      同一个模型会出现两次（实测 32 条 = 16 个模型 × 2 种写法）。
-    //      对外 API 两种都要保留（`provider/model` 是显式指定上游用的），
-    //      但**界面上不该重复展示**。
+    //   1. **去重**：按去掉前缀后的**裸名**去重（见 groupModelsByOwner），
+    //      同一个模型只留一条。对外 API 两种写法都要保留
+    //      （`provider/model` 是显式指定上游用的），但**界面上不该重复展示**。
+    //      ⚠ 主修在**后端**：`/v1/models` 已改成只发 `provider/model` 一种写法，
+    //      正常情况下列表本来就没有重复项。这里与下拉里那处去重都是
+    //      **防御性冗余** —— 后端若再退化回"裸名 + provider/裸名 双发"
+    //      （改造前实测过 32 条 = 16 个模型 × 2 种写法），界面也不会重复。
     //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
     //   3. **可折叠**：状态存 localStorage，刷新后保持。
     const groups = groupModelsByOwner(models, emptyModelGroups());
     $('models').innerHTML = groups.map(renderModelGroup).join('');
     const sel = $('model'), keep = sel.value;
-    // T7：模型下拉按上游筛选，**不去重**。
+    // T7：模型下拉按上游筛选，并按 id **去重**。
     //
-    // 与上面的 chip 区是**两套**逻辑，故意不一致：
-    //   · chip 区（可用模型面板）：去重 + 按上游分组，便于"看有哪些模型"
-    //   · 这里（对话测试下拉）：按上游**筛选**，不去重 —— 用户要求保留
-    //     `provider/xxx` 形态，因为那是"显式指定上游"的手段，测试时要用
+    // ⚠ 主修在**后端**：/v1/models 改成只发 `provider/model` 一种写法
+    //（不再发默认上游的裸名副本），正常情况下列表本来就不会重复。
+    // 这里的去重是**防御性冗余** —— 后端若再退化回"裸名 + provider/裸名 双发"，
+    // 界面也不会出现两条一模一样的选项（用户报的正是"可用模型重复了，很多"）。
+    //
+    // 与上面的 chip 区仍是两套渲染，但 id 口径已经统一：
+    //   · chip 区（可用模型面板）：按上游分组 + 可折叠，便于"看有哪些模型"
+    //   · 这里（对话测试下拉）：按上游**筛选**成一条平铺列表，便于"选一个测试"
+    // 两边都显示**完整 id**，两边都去重（chip 区按裸名去重、这里按 id 去重）。
     //
     // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
     syncModelProviderOptions(models);
     const wantP = modelProviderFilter();
-    const shown = wantP
+    const filtered = wantP
       ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
       : models;
+    // 去重：同一个 id 只留第一条（保留上游返回的原始顺序，选择行为可预期）。
+    const seen = new Set();
+    const shown = [];
+    for (const m of filtered) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      shown.push(m);
+    }
     sel.innerHTML = shown.map(m =>
       `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
-    // 保持原选择：若它不在筛选后的列表里，回落到第一个（或 auto）。
+    // 保持原选择：若它不在筛选后的列表里，回落到 `auto`，再回落到第一个。
+    //
+    // ⚠ 比 `auto` 必须按**去前缀后的裸名**：目录收窄后这里只有 `workbuddy/auto`，
+    // 按完整 id 比会永远匹配不到 —— 于是每次刷新都把用户的选择悄悄换成列表第一项，
+    // 而 `auto` 恰好是"不指定模型"的那个默认项（最该被保持的就是它）。
+    const isAuto = m => multKeyOf(m.id) === 'auto';
     sel.value = shown.some(m => m.id === keep) ? keep
-      : ((shown.find(m => m.id === 'auto') || shown[0] || {}).id || '');
+      : ((shown.find(isAuto) || shown[0] || {}).id || '');
   }
 
   // modelOwnerOf 从模型 id 推断上游归属（T7）。
@@ -5172,15 +5269,28 @@ let multCatalogFailed = false;
       if (!m || !m.id) continue;
       const slash = m.id.indexOf('/');
       const prefix = slash > 0 ? m.id.slice(0, slash) : '';
-      const bare = slash > 0 ? m.id.slice(slash + 1) : m.id;
+      // 去前缀的裸名复用 multKeyOf：**归一只有一处**。
+      // 组内去重的键与倍率表的键是同一个变换，各写一份迟早会漂 ——
+      // 漂的表现是"界面看起来不重复，但倍率整列 x无"，很难一眼定位。
+      const bare = multKeyOf(m.id);
       // 归属：前缀优先（它就是显式指定的上游），否则用 owned_by。
       const owner = prefix || m.owned_by || '（未标注）';
       if (!byOwner.has(owner)) byOwner.set(owner, { owner: owner, items: [], seen: new Set() });
       const g = byOwner.get(owner);
       if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
       g.seen.add(bare);
-      // 展示用 id 取**裸名**；multTag 查表也用裸名（倍率表的键是裸名）。
-      g.items.push({ id: bare, fullId: m.id, owner: owner });
+      // 展示用 id 取**完整 id**（`provider/xxx` 形态）—— 用户要求统一成
+      // `workbuddy/xxx` / `codearts/xxx`，不要让裸名与带前缀名并存造成"重复"。
+      // `data-id` / `title` 也一并取完整 id（见 renderModelGroup），三处口径一致。
+      //
+      // ⚠ 去重仍按**裸名**（上面的 g.seen 用的就是 bare）：`auto` 与
+      // `workbuddy/auto` 指的是同一个模型，只按完整 id 去重会让它们在同一组里
+      // 各占一条 —— 名字看起来一模一样，用户看到的仍然是"重复"。
+      // 按裸名去重才是他要的"不要重复"。
+      //
+      // 倍率查表不受影响：multTag 内部经 multTableKey 归一后再查
+      //（倍率表的键是上游目录里的裸名，且只覆盖默认上游，见 multTableKey 的注释）。
+      g.items.push({ id: m.id, fullId: m.id, owner: owner });
     }
     // 组间按上游名排序；组内按名字排序（顺序稳定，便于扫读）。
     const out = Array.from(byOwner.values());
@@ -5241,8 +5351,14 @@ let multCatalogFailed = false;
   // <option> 只能放纯文本，不能放 HTML 标签 —— 倍率用括号包起来。
   // 与 multTag 共用 multText，保证同一个数在两处长得一样。
   function multTagPlain(id) {
-    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, id)) return '';
-    const txt = multText(modelMultipliers[id]);
+    // 与 multTag 同一口径：经 multTableKey 归一**并判归属**后查表。
+    // 下拉里给的是完整 id（与 chip 区一致），不归一会整列都拿不到倍率。
+    // 别家上游返回 null → 这里什么也不加：`<option>` 只能放纯文本，
+    // 挂不下 chips 那条 title 说明，所以与 multTag 的 x无 不同，这里**不写字**。
+    const key = multTableKey(id);
+    if (key === null) return '';
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, key)) return '';
+    const txt = multText(modelMultipliers[key]);
     return txt === null ? '' : ` (x${txt})`;
   }
 

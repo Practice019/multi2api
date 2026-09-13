@@ -316,20 +316,32 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
 //
-// # 多上游下的形状（Task 6）
+// # 多上游下的形状（目录收窄：一个上游只列一条 provider/model）
 //
-// 每个上游的模型以 "provider/model" 列出，**默认上游的模型同时以裸名再列一次**。
-// 于是同一个上游会贡献两组记录：
+// 每个上游的模型**只以 "provider/model" 列一条**，没有任何裸名记录：
 //
-//	{"id":"glm-5.2",              "owned_by":"workbuddy"}   ← 裸名，向后兼容
-//	{"id":"workbuddy/glm-5.2",    "owned_by":"workbuddy"}
-//	{"id":"codearts/GLM-5.2",     "owned_by":"codearts"}
+//	{"id":"workbuddy/glm-5.2", "owned_by":"workbuddy"}
+//	{"id":"codearts/GLM-5.2",  "owned_by":"codearts"}
 //
-// # 为什么裸名必须保留（硬要求）
+// 收窄之前默认上游是"裸名 + 带前缀"两份（workbuddy 的 16 个模型列成 32 条），
+// 同一个模型在下拉框里出现两次。用户明确要求"统一、不要重复"，
+// 所以默认上游那一支现在**只 append 带前缀的那一份**。
 //
-// 既有客户端把 "glm-5.2" 直接填进 model 就打 —— 它们是按改造前的
-// /v1/models 响应写的。去掉裸名等于让所有既有客户端一夜之间全挂。
-// 所以 DefaultProvider 的模型一律**双份**列出，其余上游只有带前缀的一份。
+// # 这次收窄的代价（如实记录，不是"没有影响"）
+//
+// 选路侧没变：providerFor（provider_router.go）对裸名仍按默认上游解析，
+// 老客户端把 "glm-5.2" 填进 model 打进来照样能用。变的是**列目录**：
+// 既有客户端若从 /v1/models 里取 id 再回填，收窄后会看不到裸名，
+// 必须改用 "provider/model" 形式。
+//
+// 顺序：默认上游的条目仍排在最前（既有客户端取 data[0] 的习惯），
+// 其后是其它上游（按字典序）。
+//
+// # def == "" 的边界（多上游但默认上游为空）
+//
+// 没有上游身份就拼不出 "provider/model"，硬拼只会得到 "/glm-5.2" ——
+// 一个没人能解析的畸形 id。所以 def == "" 时保持**裸名**（每个模型仍只有
+// 一条，只是不做前缀投影），且绝不产生以 "/" 开头的 id。
 //
 // # 未注入路由时（Provider == nil）
 //
@@ -342,15 +354,18 @@ func (h *Handler) modelList() []map[string]any {
 	}
 
 	def := h.defaultProvider()
-	out := make([]map[string]any, 0, 32)
+	out := make([]map[string]any, 0, 16)
 
-	// 1. 默认上游：裸名 + 带前缀，两份。
-	//    裸名走既有路径（动态列表 + 静态回退），保证形状完全不变。
+	// 1. 默认上游：只列带前缀的一份 —— 收窄后不再同时列裸名，
+	//    否则同一个模型会在目录里出现两次（用户报的就是这个重复）。
+	//    def == "" 是边界：拼前缀只会得到 "/glm-5.2"，
+	//    所以此时保持裸名 —— 每个模型仍然只有一条，只是没有上游前缀。
 	for _, e := range h.singleProviderModelList(h.ownedByFor(def)) {
-		out = append(out, e)
-		if def != "" {
-			out = append(out, prefixed(e, def))
+		if def == "" {
+			out = append(out, e)
+			continue
 		}
+		out = append(out, prefixed(e, def))
 	}
 
 	// 2. 其余上游：只有带前缀的一份。

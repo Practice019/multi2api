@@ -1,24 +1,37 @@
 // models_multiprovider_test.go T1 的回归 + 新增断言：/v1/models 必须**同时**给出
-// 两个上游的模型，且默认上游（workbuddy）原有的那 32 条**一条不少**。
+// 两个上游的模型，且每个上游**只列一条带前缀的 id**（目录收窄，见下）。
 //
 // # 为什么这个文件先于实现存在（硬要求）
 //
 // `/v1/models` 是**公共端点**：所有客户端都调它。改错会让**所有上游**的模型消失，
 // 而不只是新接的那个。所以顺序必须是：
 //
-//  1. 先让"workbuddy 32 条一条不少"在**改动前**是绿的（本文件的 baseline 用例）
+//  1. 先让"workbuddy 的模型一条不少"在**改动前**是绿的（本文件的 baseline 用例）
 //  2. 再动实现
-//  3. 改完再跑：32 条仍在 + codearts 的新增
+//  3. 改完再跑：workbuddy 的模型仍在 + codearts 的新增
 //
 // 跳过第 1 步就无法区分"我改对了"与"本来就坏"。
+//
+// # 目录收窄：基线从 32 条变 16 条（本文件的口径随之改变）
+//
+// 收窄前默认上游（workbuddy）是"裸名 + 带前缀"两份：16 个模型 → 32 条，
+// `glm-5.2` 与 `workbuddy/glm-5.2` 同时在列 —— 用户报的就是这个重复
+// （原话"可用模型重复了，很多"）。收窄后每个上游只列一条 `provider/model`：
+// workbuddy 16 条 + codearts 7 条 = 23 条。
+//
+// ⚠ 变少**不是**模型丢失：少的是同一个模型的第二种写法。
+// 单上游模式（Provider 未注入）仍然只有裸名 16 条、一个字没动，
+// 见 TestV1ModelsBaselineSingleProvider。
 //
 // # 基线值从哪来
 //
 // `.task/ui-convergence/shared/baselines/models-before-t1.txt`：在真实实例 18080
 // 上实测得到的 32 条 id（16 个裸名 + 16 个 workbuddy/ 前缀）。
+// 本文件只保留其中的**裸名 16 个**作为模型集合的来源；期望值改成它们的
+// `workbuddy/` 前缀投影（收窄后不再展开裸名）。
 // 裸名与代码里的 staticModels 不同（静态表只有 10 条且含 hy3-preview 等），
 // 因为真实实例走的是**动态列表**路径（fetchDynamicModels 命中上游）。
-// 本文件用桩上游复刻那条动态路径，因此基线可与真实实例逐字对齐。
+// 本文件用桩上游复刻那条动态路径，因此模型集合可与真实实例逐字对齐。
 package server
 
 import (
@@ -27,6 +40,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,10 +48,14 @@ import (
 	"workbuddy2api/internal/gateway"
 )
 
-// baselineWorkbuddyIDs 是改动前的实测基线（32 条，见源文件）。
+// baselineWorkbuddyIDs 是改动前实测基线里的**裸名 16 个**（见源文件）。
 //
 // 它按**裸名 id** 给出；带 workbuddy/ 前缀的那 16 条是前缀投影，
-// 由下面的期望函数生成，避免手抄 32 行时漏一条。
+// 由下面的期望函数生成，避免手抄时漏一条。
+//
+// ⚠ 收窄后目录里**没有**这些裸名 —— 本变量只用来生成前缀投影，
+// 不能当成"期望输出"（期望输出是 baselineWorkbuddyExpected）。
+// 多上游模式下它们必须**全部不出现**，见 TestV1ModelsIDsUniqueAndPrefixed。
 var baselineWorkbuddyIDs = []string{
 	"auto",
 	"deepseek-v4-pro",
@@ -57,10 +75,14 @@ var baselineWorkbuddyIDs = []string{
 	"minimax-m3",
 }
 
-// baselineWorkbuddyExpected 把裸名展开成真实实例上的 32 条（裸名 + 前缀版）。
+// baselineWorkbuddyExpected 是收窄后默认上游在 /v1/models 里的期望值：
+// **只有** 16 条 `workbuddy/` 前缀 id，没有任何裸名。
+//
+// 为什么从 32 变 16：收窄前每个模型列两份（裸名 + 前缀版），
+// 现在只列一份带前缀的（用户要求"统一、不要重复"）。
+// 模型集合本身一个都没少 —— 少的是同一个模型的第二种写法。
 func baselineWorkbuddyExpected() []string {
-	out := make([]string, 0, len(baselineWorkbuddyIDs)*2)
-	out = append(out, baselineWorkbuddyIDs...)
+	out := make([]string, 0, len(baselineWorkbuddyIDs))
 	for _, id := range baselineWorkbuddyIDs {
 		out = append(out, "workbuddy/"+id)
 	}
@@ -235,24 +257,52 @@ func missing(have []string, want []string) []string {
 	return out
 }
 
+// present 返回 want 里**确实出现**在 have 中的项（missing 的反向）。
+//
+// 用途：钉住"不该出现的东西出现了" —— 收窄后裸名不得再出现在多上游目录里，
+// 而 missing 只能表达"该有的丢了"，表达不了"多出来了"。
+func present(have []string, want []string) []string {
+	set := make(map[string]bool, len(have))
+	for _, h := range have {
+		set[h] = true
+	}
+	var out []string
+	for _, w := range want {
+		if set[w] {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // 回归基线：改动前就应当是绿的
 // ---------------------------------------------------------------------------
 
-// TestV1ModelsBaselineWorkbuddy32 锁定改动前的 32 条基线。
+// TestV1ModelsBaselineWorkbuddy16 锁定**收窄后**的 16 条基线。
 //
-// 这是 T1 的**回归闸门**：无论实现怎么改，这 32 条必须一条不少。
-// 装配层给了 Provider（多上游模式），所以裸名 + workbuddy/ 前缀两份都要在。
-func TestV1ModelsBaselineWorkbuddy32(t *testing.T) {
+// 这是目录收窄之后的**回归闸门**：无论实现怎么改，这 16 个模型必须一条不少，
+// 且每条都必须是 workbuddy/ 前缀形态。
+//
+// # 为什么函数名从 ...Workbuddy32 改成了 ...Workbuddy16
+//
+// 32 是"每个模型列两份"时代的数字（16 个裸名 + 16 个前缀版）。收窄后
+// 每个模型只列一条带前缀的 → 16。名字不改就是名不副实：一个叫 32 的用例
+// 断言 16，后面的人只会以为它坏了。
+//
+// 装配层给了 Provider（多上游模式）。这里刻意只注册 workbuddy 一个上游，
+// 让"总数"成为一条**有意义的**断言（否则 codearts 的 7 条会让总数变 23）。
+func TestV1ModelsBaselineWorkbuddy16(t *testing.T) {
 	resetDynamicCache()
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	up := newFakeUpstream(t, func(string) (int, string, bool) {
 		return 200, baselineDynamicBody(), false
 	})
 	h := NewHandler(Config{
-		Pool:            p,
-		Upstream:        up,
-		Provider:        newTestRouter(false),
+		Pool:     p,
+		Upstream: up,
+		// 多上游模式，但只有一个上游：目录里不该有别人的东西。
+		Provider:        testRouter{def: "workbuddy", ids: []string{"workbuddy"}},
 		DefaultProvider: "workbuddy",
 		OwnedBy:         "workbuddy",
 	})
@@ -260,15 +310,25 @@ func TestV1ModelsBaselineWorkbuddy32(t *testing.T) {
 	got := modelIDs(t, h)
 	want := baselineWorkbuddyExpected()
 
-	if len(want) != 32 {
-		t.Fatalf("基线自检失败：期望表有 %d 条，应为 32", len(want))
+	if len(want) != 16 {
+		t.Fatalf("基线自检失败：期望表有 %d 条，应为 16（16 个模型 × 1 条）", len(want))
 	}
 	if miss := missing(got, want); len(miss) > 0 {
-		t.Fatalf("★ 回归：workbuddy 原有模型丢失 %d 条: %v\n实际共 %d 条: %v",
+		t.Fatalf("★ 回归：收窄后 workbuddy 原有模型丢失 %d 条: %v\n实际共 %d 条: %v",
 			len(miss), miss, len(got), got)
 	}
-	if len(got) != 32 {
-		t.Logf("当前 %d 条（基线 32）: %v", len(got), got)
+	// 收窄的核心断言：16 条，不是 32 条。
+	// 破了会怎样：裸名那一份又回来了 → 客户端下拉框里每个模型显示两次
+	//（用户原话"可用模型重复了，很多"）。
+	if len(got) != 16 {
+		t.Fatalf("★ 回归：多上游模式下共 %d 条 want 16 —— 多出来的就是同一个模型的第二种写法（裸名 + provider/model 并存再次出现）: %v",
+			len(got), got)
+	}
+	// 每一条都必须带 workbuddy/ 前缀：裸名重现 = 重复回归。
+	for _, id := range got {
+		if !strings.HasPrefix(id, "workbuddy/") {
+			t.Errorf("★ 回归：出现了裸名 %q —— 收窄后多上游模式的每一条都必须是 provider/model", id)
+		}
 	}
 }
 
@@ -339,8 +399,9 @@ func codeartsExpectedIDs() []string {
 	return out
 }
 
-// TestV1ModelsIncludesCodearts 是 T1 的核心验收：
-// /v1/models 必须**同时**含两个上游，且 workbuddy 那 32 条一条不少。
+// TestV1ModelsIncludesCodearts 是 T1 的核心验收（目录收窄后的口径）：
+// /v1/models 必须**同时**含两个上游，且每个上游只列**一条** provider/model：
+// 16 条 workbuddy/ + 7 条 codearts/ = 23 条，一条不多一条不少。
 func TestV1ModelsIncludesCodearts(t *testing.T) {
 	resetDynamicCache()
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
@@ -357,7 +418,7 @@ func TestV1ModelsIncludesCodearts(t *testing.T) {
 
 	got := modelIDs(t, h)
 
-	// 1) 回归：workbuddy 32 条一条不少
+	// 1) 回归：workbuddy 16 条带前缀一条不少
 	if miss := missing(got, baselineWorkbuddyExpected()); len(miss) > 0 {
 		t.Fatalf("★ 回归：workbuddy 模型丢失 %v", miss)
 	}
@@ -365,9 +426,17 @@ func TestV1ModelsIncludesCodearts(t *testing.T) {
 	if miss := missing(got, codeartsExpectedIDs()); len(miss) > 0 {
 		t.Fatalf("codearts 模型缺失 %v\n实际: %v", miss, got)
 	}
-	// 3) 总数 = 32 + 7
-	if len(got) != 39 {
-		t.Fatalf("总数=%d want 39（32 workbuddy + 7 codearts）: %v", len(got), got)
+	// 3) 收窄的核心断言：裸名一条都不许在。
+	// 破了会怎样：裸名与 provider/model 并存 = 每个模型在客户端列两遍
+	//（用户报的"可用模型重复了，很多"）。
+	if bare := present(got, baselineWorkbuddyIDs); len(bare) > 0 {
+		t.Fatalf("★ 目录重复：多上游模式下列出了 %d 个裸名 %v —— 它们与 workbuddy/ 前缀版是同一个模型，会重复显示",
+			len(bare), bare)
+	}
+	// 4) 总数 = 16 + 7
+	if len(got) != 23 {
+		t.Fatalf("总数=%d want 23（16 workbuddy/ + 7 codearts/）；多了说明重复列目录，少了说明有上游被静默跳过: %v",
+			len(got), got)
 	}
 }
 
@@ -431,8 +500,8 @@ func TestV1ModelsOtherProviderFailureIsIsolated(t *testing.T) {
 	if miss := missing(got, baselineWorkbuddyExpected()); len(miss) > 0 {
 		t.Fatalf("★ 一个上游失败导致默认上游模型丢失: %v", miss)
 	}
-	if len(got) != 32 {
-		t.Fatalf("codearts 失败时应只剩 32 条 workbuddy，实际 %d: %v", len(got), got)
+	if len(got) != 16 {
+		t.Fatalf("codearts 失败时应只剩 16 条 workbuddy/（收窄后每个模型一条），实际 %d: %v", len(got), got)
 	}
 }
 
@@ -455,8 +524,8 @@ func TestV1ModelsNoProviderIDsCapability(t *testing.T) {
 	if miss := missing(got, baselineWorkbuddyExpected()); len(miss) > 0 {
 		t.Fatalf("无 IDs() 能力时默认上游模型丢失: %v", miss)
 	}
-	if len(got) != 32 {
-		t.Fatalf("应只有 32 条，实际 %d", len(got))
+	if len(got) != 16 {
+		t.Fatalf("应只有 16 条带前缀的 workbuddy/（收窄后每个模型一条），实际 %d: %v", len(got), got)
 	}
 }
 
@@ -514,8 +583,8 @@ func TestResetModelsCacheDoesNotDropOtherProviders(t *testing.T) {
 		OwnedBy:         "workbuddy",
 	})
 
-	if got := modelIDs(t, h); len(got) != 39 {
-		t.Fatalf("刷新前 %d 条 want 39", len(got))
+	if got := modelIDs(t, h); len(got) != 23 {
+		t.Fatalf("刷新前 %d 条 want 23（16 workbuddy/ + 7 codearts/）", len(got))
 	}
 	ResetModelsCache()
 	got := modelIDs(t, h)
@@ -524,5 +593,116 @@ func TestResetModelsCacheDoesNotDropOtherProviders(t *testing.T) {
 	}
 	if miss := missing(got, baselineWorkbuddyExpected()); len(miss) > 0 {
 		t.Fatalf("★ 点「刷新模型」后 workbuddy 模型消失: %v", miss)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 新增（目录收窄）：id 唯一 + 无裸名；以及 def == "" 的边界
+// ---------------------------------------------------------------------------
+
+// TestV1ModelsIDsUniqueAndPrefixed 直接钉住用户报的那个 bug：
+// 目录里**同一个模型只能出现一次**，且多上游模式下**不许有裸名**。
+//
+// 两条断言各自破了会怎样：
+//   - id 重复 → 客户端下拉框里同一个模型显示两次（用户原话"可用模型重复了，很多"）
+//   - 出现不带 "/" 的 id → 裸名那一份又回来了，重复必然随之而来
+func TestV1ModelsIDsUniqueAndPrefixed(t *testing.T) {
+	resetDynamicCache()
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, baselineDynamicBody(), false
+	})
+	h := NewHandler(Config{
+		Pool:            p,
+		Upstream:        up,
+		Provider:        newTestRouter(false),
+		DefaultProvider: "workbuddy",
+		OwnedBy:         "workbuddy",
+	})
+
+	got := modelIDs(t, h)
+
+	// 1) id 唯一：len(set) == len(list)
+	seen := make(map[string]int, len(got))
+	for _, id := range got {
+		seen[id]++
+	}
+	if len(seen) != len(got) {
+		dups := make([]string, 0, len(got)-len(seen))
+		for id, n := range seen {
+			if n > 1 {
+				dups = append(dups, fmt.Sprintf("%s×%d", id, n))
+			}
+		}
+		sort.Strings(dups)
+		t.Fatalf("★ 目录里有重复 id %v（len(set)=%d < len(list)=%d）—— 破了客户端下拉框会把同一个模型列两遍: %v",
+			dups, len(seen), len(got), got)
+	}
+
+	// 2) 一条裸名都不许有（多上游模式）
+	var bare []string
+	for _, id := range got {
+		if !strings.Contains(id, "/") {
+			bare = append(bare, id)
+		}
+	}
+	if len(bare) > 0 {
+		t.Fatalf("★ 多上游模式出现了 %d 个裸名 %v —— 裸名与 provider/model 并存就是重复列目录", len(bare), bare)
+	}
+
+	// 3) 前缀必须是**已注册**的上游：否则客户端选了会在选路时吃 400。
+	known := map[string]bool{"workbuddy": true, "codearts": true}
+	for _, id := range got {
+		pid, _, has := gateway.SplitModel(id)
+		if !has || !known[pid] {
+			t.Errorf("id=%q 的前缀 %q 不是已注册上游（(provider,model) 对不上，选了必 400）", id, pid)
+		}
+	}
+}
+
+// TestV1ModelsEmptyDefaultProviderKeepsBareNames 钉住 def == "" 的边界：
+// 多上游模式但默认上游为空时**拼不出** provider/model 前缀 ——
+// 硬拼只会得到 "/glm-5.2" 这种没有任何客户端能解析的畸形 id。
+//
+// 所以此时必须保持裸名（每个模型仍然只有一条），且**零**条以 "/" 开头的 id。
+func TestV1ModelsEmptyDefaultProviderKeepsBareNames(t *testing.T) {
+	resetDynamicCache()
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, baselineDynamicBody(), false
+	})
+	router := newTestRouter(false)
+	router.def = "" // 装配层给不出默认上游身份
+	h := NewHandler(Config{
+		Pool:     p,
+		Upstream: up,
+		Provider: router,
+		// DefaultProvider 显式留空：defaultProvider() 会去问路由，拿到 ""。
+		OwnedBy: "workbuddy",
+	})
+
+	got := modelIDs(t, h)
+
+	// 1) 默认上游的模型以裸名出现（没有上游身份可拼前缀）。
+	if miss := missing(got, baselineWorkbuddyIDs); len(miss) > 0 {
+		t.Fatalf("★ def == 空 时模型丢失 %v —— 把空上游名拼进 id 会让目录整个不可用", miss)
+	}
+	// 2) 其它上游有身份，仍照常带自己的前缀。
+	if miss := missing(got, codeartsExpectedIDs()); len(miss) > 0 {
+		t.Fatalf("codearts 模型缺失 %v —— 默认上游为空不该拖垮别的上游", miss)
+	}
+	// 3) 畸形 id：以 "/" 开头 = 拿空上游名拼出来的。
+	var malformed []string
+	for _, id := range got {
+		if len(id) > 0 && id[0] == '/' {
+			malformed = append(malformed, id)
+		}
+	}
+	if len(malformed) > 0 {
+		t.Fatalf("★ 出现 %d 条以 / 开头的畸形 id %v —— 前缀为空，任何客户端都解析不了", len(malformed), malformed)
+	}
+	// 4) 总数 = 16 裸名 + 7 codearts/（每个模型仍然只有一条，没有重复）
+	if len(got) != 23 {
+		t.Fatalf("总数=%d want 23（16 裸名 + 7 codearts/）: %v", len(got), got)
 	}
 }
