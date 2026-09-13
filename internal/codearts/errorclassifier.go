@@ -63,24 +63,24 @@ var _ gateway.ErrorClassifier = (*Provider)(nil)
 //
 // # 判据的分派顺序（顺序本身是有意义的）
 //
-//	1. 额度耗尽（DetectQuotaExhausted）—— **先判**
-//	2. 其余交给 codearts.Classify，再翻译类型
+//  1. 额度耗尽（DetectQuotaExhausted）—— **先判**
+//  2. 其余交给 codearts.Classify，再翻译类型
 //
 // # 为什么额度判定必须在前面
 //
 // 因为额度耗尽的**标准形态是 HTTP 200 + 流内业务错误**
-//（见 quota.go 的实测注释："它不是 HTTP 错误码，而是塞在 SSE 流里的业务错误"）。
+// （见 quota.go 的实测注释："它不是 HTTP 错误码，而是塞在 SSE 流里的业务错误"）。
 // 先按状态码判的话，200 会被判成"成功"，额度错误就此消失 —— 这正是危害 ①。
 //
 // 反方向的误判也要挡住：`DetectQuotaExhausted` 只在**真的**看到
 // `InferHub.4291` / `insufficient quota` / `insufficient balance` /
 // 额度中文串时才返回 ok=true，范围很窄。它不会把普通的 429/500 误判成额度问题
-//（`codearts.Classify` 的状态码判据在第二步仍然生效，两条是**叠加**而非替代）。
+// （`codearts.Classify` 的状态码判据在第二步仍然生效，两条是**叠加**而非替代）。
 //
 // # 为什么状态码判据不能省
 //
 // 只靠正文的话，一个空的 429 响应体会被判成 ErrKindNone
-//（"只换号不罚"）—— 那会让限流不再触发软冷却。
+// （"只换号不罚"）—— 那会让限流不再触发软冷却。
 // 两步叠加保证：**正文认不出时仍有状态码兜底**。
 //
 // # 纯函数（实现约束）
@@ -119,7 +119,7 @@ func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
 // 裸类型转换依赖"两个枚举的取值顺序永远一致"这个**隐含**约定 ——
 // 任何一边插一个新常量，转换就会**静默错位**。显式列举之后，
 // 新增常量会落到 default，由测试立刻报红
-//（见 TestToGatewayKindMapsEveryCodeartsKind）。
+// （见 TestToGatewayKindMapsEveryCodeartsKind）。
 //
 // # 翻译表（逐项）
 //

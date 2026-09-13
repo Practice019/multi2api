@@ -539,7 +539,7 @@ func (h *Handler) reloadProvider() string {
 //
 // 核心原来写死用 `auth.LoadDirCompat` —— 那**恰好**是 workbuddy 的格式，
 // 所以 workbuddy 那条路径"碰巧是对的"，而 codearts 那条**彻底坏了**
-//（用户实测：重载 codearts 时扫到的是 3 个 workbuddy 旧凭证）。
+// （用户实测：重载 codearts 时扫到的是 3 个 workbuddy 旧凭证）。
 //
 // 凭证格式是**上游的事实**（与凭证目录同理），由上游自报：
 //
@@ -549,7 +549,7 @@ func (h *Handler) reloadProvider() string {
 // 这样核心不解释任何上游的凭证格式，**加新上游核心零改动**。
 //
 // 上游没实现 → 返回 false，调用方**明确报错**而不是回落成某个写死的解析器
-//（回落正是上面那个 bug 的形态）。
+// （回落正是上面那个 bug 的形态）。
 func (h *Handler) credentialsOf(providerID string) (func(string) ([]gateway.Credential, error), bool) {
 	p, ok := h.providerByID(providerID)
 	if !ok {
