@@ -119,16 +119,18 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			if h.cfg.Pool != nil {
 				info.AccountCount = len(h.cfg.Pool.ListFor(p.ID()))
 			}
-			// 登录能力：该上游有没有实现 gateway.LoginFlow。
+			// 登录能力：该上游**真的能**在页面内添加账号吗。
 			//
-			// ⚠ 这是**类型断言**，不是"看上游名" —— 与本包 AdminExt / JobExt
-			// 同一个模式（见 uimanifest.go 对 AdminExt 的用法）。
-			// 前端据此决定分组行渲染「＋ 添加账号」还是不渲染。
+			// ⚠ 判据是 `ExtOf` **加上** `Configured` —— 不能只看 ExtOf。
 			//
-			// 当前只有 workbuddy 实现（codearts 的 DPoP 登录流程尚不存在），
-			// 所以 codearts 的 login 是 null，前端不渲染按钮 —— 那是**正确**的：
-			// 它真的做不到，放个按钮点了会失败。
-			if _, ok := gateway.ExtOf[gateway.LoginFlow](p); ok {
+			// 为了让 `ExtOf` 认出来，上游必须把 `Start`/`Poll` 挂在
+			// Provider 自己身上（方法集要匹配，「返回接口的访问器」
+			// 对 Go 的类型断言**不可见** —— 这是实测踩到的坑）。
+			// 但挂上去之后，**没配登录流程的部署也会"看起来"实现了**。
+			//
+			// 所以加一层 `Configured()`：由上游自报"我这份配置真的能登录吗"。
+			// 两道都满足才给按钮 —— 只满足一道会渲染出点了报错的假按钮。
+			if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
 				info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
 			}
 			infos = append(infos, info)

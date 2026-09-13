@@ -166,7 +166,10 @@ func (s *stubProvider) Models(ctx context.Context, c gateway.Credential) ([]gate
 // 为什么必须有一个"实现了的"样本：若只测"没实现的返回 null"，
 // 那么把判据改成 `info.Login = nil`（永远不给）也能全绿 ——
 // 那样的守卫是装饰品。有了这个样本，写死 nil 会立刻变红。
-type loginStubProvider struct{ stubProvider }
+type loginStubProvider struct {
+	stubProvider
+	configured bool
+}
 
 func (s *loginStubProvider) Start() (string, string, error) {
 	return "stub-state", "https://example.invalid/authorize", nil
@@ -174,6 +177,12 @@ func (s *loginStubProvider) Start() (string, string, error) {
 func (s *loginStubProvider) Poll(state string) (gateway.Credential, error) {
 	return gateway.Credential{}, nil
 }
+
+// Configured 报告这份部署真的能登录 —— 见 gateway.LoginFlow 的注释。
+// 用 pinned 字段而非恒 true：这样才能写"实现了但没配置"的反例。
+func (s *loginStubProvider) Configured() bool { return s.configured }
+
+var _ gateway.LoginFlow = (*loginStubProvider)(nil)
 
 // TestProvidersLoginReflectsLoginFlow 钉住 `login` 字段与 LoginFlow 实现一致。
 //
@@ -183,9 +192,10 @@ func (s *loginStubProvider) Poll(state string) (gateway.Credential, error) {
 func TestProvidersLoginReflectsLoginFlow(t *testing.T) {
 	reg := gateway.NewRegistry()
 	// with-login：实现了 LoginFlow
-	if err := reg.Register(&loginStubProvider{stubProvider{
-		id: "with-login", caps: gateway.CapChat,
-	}}); err != nil {
+	if err := reg.Register(&loginStubProvider{
+		stubProvider: stubProvider{id: "with-login", caps: gateway.CapChat},
+		configured:   true,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	// without-login：同一个类型，只是没实现 LoginFlow
@@ -235,5 +245,55 @@ func TestProvidersLoginReflectsLoginFlow(t *testing.T) {
 	if wol.Login != nil {
 		t.Errorf("**没有**实现 LoginFlow 的上游，login 必须是 null（实际 %+v）—— "+
 			"否则前端会渲染一个点了走不通的按钮", wol.Login)
+	}
+}
+
+// TestProvidersLoginRequiresConfigured 钉住「实现了但没配置 → 也算不支持」。
+//
+// # 为什么这条必须有（它是本轮踩到的坑）
+//
+// 上游为了让 `ExtOf` 认出来，必须把 `Start`/`Poll` 挂在 Provider 身上 ——
+// 那是**编译期**的事实，与"这次部署有没有配 OAuth 客户端"无关。
+//
+// 只看 `ExtOf` 的后果：**没配登录的部署也会下发 login**，
+// 前端渲染出「＋ 添加账号」，用户点下去才报错。
+// 那是"假按钮" —— 正是这个字段要避免的东西。
+//
+// 反例（必须被判为不支持）：实现了 Start/Poll，但 `Configured()` 为 false。
+func TestProvidersLoginRequiresConfigured(t *testing.T) {
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&loginStubProvider{
+		stubProvider: stubProvider{id: "impl-but-unconfigured", caps: gateway.CapChat},
+		configured:   false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := New(Config{Registry: reg, DefaultProvider: "impl-but-unconfigured"})
+
+	// 两个构造点都要检查 —— 这是本轮踩到的第 3 个坑：
+	// `providerInfo` 在 /admin/providers（schedule.go）与
+	// /admin/ui/manifest（uimanifest.go）各构造一次，
+	// 只改一处会出现"接口调试正常、界面按钮不出现"。
+	for _, path := range []string{"/admin/providers", "/admin/ui/manifest"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, localReq("GET", path))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, rec.Code, rec.Body)
+		}
+		var resp struct {
+			Providers []providerInfo `json:"providers"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s 解析失败: %v body=%s", path, err, rec.Body)
+		}
+		if len(resp.Providers) != 1 {
+			t.Fatalf("%s providers 数=%d want 1", path, len(resp.Providers))
+		}
+		if resp.Providers[0].Login != nil {
+			t.Errorf("%s：实现了 LoginFlow 但 Configured()=false 的上游，login 必须是 null"+
+				"（实际 %+v）—— 否则前端会渲染一个点了报错的假按钮",
+				path, resp.Providers[0].Login)
+		}
 	}
 }

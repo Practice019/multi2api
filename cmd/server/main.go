@@ -144,6 +144,15 @@ func main() {
 		// （见 workbuddy.accountList）。与 ID() 同源，避免两处漂移。
 		Provider: workbuddy.ProviderID,
 		Log:      checkinLog,
+		// 登录流程：装配层把具体的 OAuth 客户端适配进来。
+		//
+		// 与 Pool 同一个思路 —— workbuddy 只声明"我要什么形状"，
+		// 不认识 oauth 包。见 upstream_business.go 的 workbuddyLogin。
+		//
+		// ⚠ 这里与第 384 行的 `OAuth:` 各给一份，**不是重复**：
+		// admin 那份服务过渡期的旧路径（请求不带 provider 时走它），
+		// 这一份供"按 provider 分派"使用。旧路径退役后前者可删。
+		Login: workbuddyLogin(cfg.OAuthBaseURL),
 
 		TravelAutoClaimDisabled: !cfg.TravelAutoClaim,
 		TravelWatchInterval:     cfg.TravelWatchInterval,

@@ -685,8 +685,19 @@ func (h *Handler) wantsFlowDispatch(providerID string) (gateway.LoginFlow, bool,
 		if p.ID() != providerID {
 			continue
 		}
+		// ⚠ 两道判据缺一不可：
+		//   1. `ExtOf` —— 该上游把 Start/Poll 挂上了（类型层面的能力）
+		//   2. `Configured` —— 这次部署**真的配了**登录客户端
+		//
+		// 只看第 1 条会让"没配 OAuth 的部署"也通过，前端显示按钮、
+		// 点下去才报错（假按钮）。只实现了 Start/Poll 却返回
+		// Configured=false 的上游应当被当作**不支持** ——
+		// 与 schedule.go / uimanifest.go 里那两处判据逐字一致。
 		fl, ok := gateway.ExtOf[gateway.LoginFlow](p)
-		return fl, ok, true
+		if !ok || !fl.Configured() {
+			return nil, false, true
+		}
+		return fl, true, true
 	}
 	// 上游不存在：既没 flow 也没这个上游
 	return nil, false, false

@@ -166,6 +166,18 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 		if h.cfg.Pool != nil {
 			info.AccountCount = len(h.cfg.Pool.ListFor(p.ID()))
 		}
+		// ⚠ 登录能力**必须在这里也填一次**。
+		//
+		// `providerInfo` 有两个构造点：本文件（/admin/ui/manifest）与
+		// schedule.go（/admin/providers）。我第一版只改了后者，
+		// 于是 `/admin/providers` 有 login 而**前端真正读的 manifest 没有** ——
+		// 界面上「＋ 添加账号」永远不出现，而接口调试看起来一切正常。
+		//
+		// 判据与那里**逐字相同**：ExtOf 认出 + 上游自报已配置。
+		// 两条都要，缺一条会渲染出点了报错的假按钮。
+		if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
+			info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
+		}
 		m.Providers = append(m.Providers, info)
 
 		ext, ok := gateway.ExtOf[gateway.AdminExt](p)
