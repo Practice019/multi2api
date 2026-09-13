@@ -81,8 +81,15 @@ function multTagPlain(id) {
     return txt === null ? '' : ` (x${txt})`;
   }
 
-function groupModelsByOwner(list) {
+function groupModelsByOwner(list, empties) {
     const byOwner = new Map();
+    // 先把"声明了 models 能力"的上游都建好空组，
+    // 这样没有模型的上游也会出现在界面上（见 emptyModelGroups 的注释）。
+    for (const e of (empties || [])) {
+      if (!byOwner.has(e.owner)) {
+        byOwner.set(e.owner, { owner: e.owner, items: [], seen: new Set(), accountCount: e.accountCount });
+      }
+    }
     for (const m of list) {
       if (!m || !m.id) continue;
       const slash = m.id.indexOf('/');
@@ -108,6 +115,21 @@ function renderModelGroup(g) {
     const open = modelGroupOpen(g.owner);
     // 分组标题带**模型数**（不是账号数）—— 与导航里的 navgcount 区分开：
     // 那个是账号数。这里写清楚"个模型"，避免两个数字被当成同一件事。
+    //
+    // 空组（该上游声明了 models 能力、但当前一个模型都没有）不渲染 chips 区，
+    // 改为一句能自我解释的说明 —— 见 emptyModelGroups 的注释：
+    // **空白必须能自我解释**，否则用户只会以为功能坏了。
+    let body;
+    if (!g.items.length) {
+      const why = (g.accountCount === 0)
+        ? '没有可用账号，无法获取模型目录。先在「账号池」添加账号。'
+        : '上游没有返回模型目录（账号可用但目录为空）。可用「强制刷新目录」重试。';
+      body = `<div class="chips"><span class="dim" style="font-size:12px">${esc(why)}</span></div>`;
+    } else {
+      body = `<div class="chips">${g.items.map(m =>
+        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
+        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>`;
+    }
     return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
       <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
               aria-expanded="${open ? 'true' : 'false'}"
@@ -116,9 +138,7 @@ function renderModelGroup(g) {
         <span class="mowner">${esc(g.owner)}</span>
         <span class="mcount2">${g.items.length} 个模型</span>
       </button>
-      <div class="chips">${g.items.map(m =>
-        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
-        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>
+      ${body}
     </div>`;
   }
 
@@ -157,6 +177,17 @@ function syncModelProviderOptions(list) {
     setModelProviderFilter(owners.indexOf(keep) >= 0 ? keep : '');
   }
 
+function emptyModelGroups() {
+    const out = [];
+    const provs = (typeof PROVIDERS !== 'undefined' && PROVIDERS) || [];
+    for (const p of provs) {
+      if (!p || !p.id) continue;
+      if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
+      out.push({ owner: p.id, accountCount: Number(p.account_count) || 0 });
+    }
+    return out;
+  }
+
 function renderModels(list) {
     models = list || [];
     $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
@@ -169,9 +200,8 @@ function renderModels(list) {
     //      但**界面上不该重复展示**。
     //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
     //   3. **可折叠**：状态存 localStorage，刷新后保持。
-    const groups = groupModelsByOwner(models);
+    const groups = groupModelsByOwner(models, emptyModelGroups());
     $('models').innerHTML = groups.map(renderModelGroup).join('');
-
     const sel = $('model'), keep = sel.value;
     // T7：模型下拉按上游筛选，**不去重**。
     //
