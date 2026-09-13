@@ -121,6 +121,18 @@ type uiAdminRoute struct {
 	Capability string `json:"capability"`
 	// Title 面板上显示的中文名。
 	Title string `json:"title"`
+	// Hidden 该端点存在但**不是面板入口**（上游自己声明，见 gateway.AdminRoute.Hidden）。
+	//
+	// # 为什么前端需要知道它
+	//
+	// 前端按"某能力位有没有 GET 入口"决定要不要生成一个通用面板。
+	// 没有这个标志位时，唯一的排除办法是前端写死上游名 —— 那是硬编码。
+	// 有它之后，前端只读数据：hidden 的 GET 路由**不算面板入口**，
+	// 但路由本身与能力位都不受影响（账号行的每日动作仍靠能力位）。
+	//
+	// omitempty：false 是绝大多数路由的常态，不发出去让 manifest 保持精简；
+	// 前端用 `!!r.hidden` 读，缺字段与 false 等价。
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 // uiJob 一个定时任务在 UI 契约里的样子。
@@ -240,6 +252,7 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 				Path:       rt.Path,
 				Capability: routeCapName(rt.Capability),
 				Title:      rt.Title,
+				Hidden:     rt.Hidden,
 			})
 		}
 	}

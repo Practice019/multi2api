@@ -565,6 +565,35 @@ let loginProvider = '';
       String(r.method || '').toUpperCase() === 'GET');
   }
 
+  // panelRoutesFor 取某上游某能力位**真正的面板入口**（= routesFor 去掉 hidden）。
+  //
+  // # 为什么要有它，而不是在 panelCapsOf 里写 `provider === 'xxx'`
+  //
+  // 有些端点是纯动作或纯数据，不该在左侧导航里占一个标签页。直接在前端
+  // 按上游名排除是**硬编码**：加第四个上游时又要改前端（判据 1 失效），
+  // 而且前端会知道上游叫什么 —— 本项目明令禁止。
+  //
+  // 正确方向是**上游自己声明**：manifest 里那条路由带 `hidden:true`
+  //（见 gateway.AdminRoute.Hidden / uiAdminRoute.Hidden），语义是
+  // "这条路由存在、但不是面板入口"。前端只读标志位，不认识任何上游名。
+  //
+  // # 它只影响"要不要生成面板"，不影响别的
+  //
+  //   · 路由本身照挂（HTTP 语义不变，curl 仍可用）
+  //   · 能力位照留在 manifest.providers[].capabilities 里
+  //     → 账号行的每日动作（如「领取福利」）不受影响
+  //   · routesFor 的语义**不变**（仍返回该能力位的全部 GET 路由）——
+  //     loadGenericList 要用全量，改它会让已生成的面板少拉一条端点
+  //
+  // # 副作用：某上游一个可见面板都没有时，它的整组从左侧导航消失
+  //
+  // buildNav 对"该上游没有任何可见 section"直接 continue（见 `if (!secs.length)`）。
+  // 这是**预期行为**：一个分组只为它的面板存在，没有面板就不占导航位置 ——
+  // 不是漏渲染分组头。
+  function panelRoutesFor(providerId, cap) {
+    return routesFor(providerId, cap).filter(r => !r.hidden);
+  }
+
   // dailyActionsOf 取某上游**自报**的每日动作（签到 / 保活 / 领取福利…）。
   //
   // # 这个函数替换掉了什么
@@ -686,12 +715,14 @@ let loginProvider = '';
   //
   // 被排除的能力位**仍然存在于 manifest 与 capNamesOf 里** ——
   // 排除的只是"再生成一个通用列表面板"这一个动作（见上面那张表的注释）。
+  // 面板入口判据统一走 panelRoutesFor：hidden 的 GET 路由**不算入口**
+  //（上游自己声明，见 panelRoutesFor 的注释）。能力位本身不受影响。
   function panelCapsOf(providerId) {
     const out = [];
     const p = providerInfo(providerId);
     if (p && Array.isArray(p.capabilities)) {
       for (const c of p.capabilities) {
-        if (routesFor(providerId, c).length > 0 && out.indexOf(c) < 0) out.push(c);
+        if (panelRoutesFor(providerId, c).length > 0 && out.indexOf(c) < 0) out.push(c);
       }
     }
     // 保留名 core：无能力位但声明了端点的路由归在这里。
@@ -719,7 +750,7 @@ let loginProvider = '';
     //
     // 实现上不在这个 if 里单独判断：core 走下面同一条出口，
     // 由 SPECIAL_PANEL_CAPS 统一排除（见那里的注释）。
-    if (routesFor(providerId, CORE_CAP).length > 0 && out.indexOf(CORE_CAP) < 0) {
+    if (panelRoutesFor(providerId, CORE_CAP).length > 0 && out.indexOf(CORE_CAP) < 0) {
       out.push(CORE_CAP);
     }
     // 统一在出口处排一次"专属面板已承担"的能力位。
@@ -5141,6 +5172,10 @@ let multCatalogFailed = false;
     upstreamGroups: upstreamGroups,
     panelCapsOf: panelCapsOf,
     routesFor: routesFor,
+    // panelRoutesFor：与 routesFor 的差就是"去掉 hidden"。
+    // 暴露它是为了让浏览器测试能直接验"隐藏由数据驱动"，
+    // 而不是靠"某个上游的面板恰好不在"这种间接推断（那种测法在换个上游后仍会绿）。
+    panelRoutesFor: panelRoutesFor,
     capTitle: capTitle,
     providersWithCap: providersWithCap,
     hasAnyPanel: hasAnyPanel,
