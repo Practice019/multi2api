@@ -182,8 +182,28 @@ func (s *loginStubProvider) Poll(state string) (gateway.Credential, error) {
 // 用 pinned 字段而非恒 true：这样才能写"实现了但没配置"的反例。
 func (s *loginStubProvider) Configured() bool { return s.configured }
 
-// AuthDir 凭证落盘目录（`gateway.LoginFlow` 要求）。
-func (s *loginStubProvider) AuthDir() string { return "/tmp/stub-auths" }
+// ⚠ 这里**没有** AuthDir() —— 它被删掉了，不是漏了。
+//
+// 它原来只为满足旧 `gateway.LoginFlow`（那个接口当时含 AuthDir）而存在。
+// 拆出 `gateway.AuthDirExt` 之后它不再是必需方法，所以编译器不再报错 ——
+// 但"能编译"不等于"该留"，判断依据是这个桩**被用来测什么**：
+//
+//	TestProvidersLoginReflectsLoginFlow  → 断言 login 字段
+//	TestProvidersLoginRequiresConfigured → 断言"实现了但没配置"不给按钮
+//
+// 两条都只走 **uimanifest / schedule 的登录能力探测**
+//（`ExtOf[LoginFlow]` + `Configured()`），**都不经过 pollViaFlow**，
+// 因此**没有任何路径会读这个桩的 AuthDir()**。
+//
+// 留着它会传达一个错误信息："实现 LoginFlow 的桩也要报目录" ——
+// 而本次拆分恰恰是在说**这两件事无关**。删掉它，才与接口形状一致。
+//
+// 对照：`flowProvider`（login_dispatch_test.go）的 AuthDir() 留着 ——
+// 它真的被 pollViaFlow 经 ExtOf[AuthDirExt] 读到（authdir_test.go 验的）。
+// 两个桩都是 LoginFlow 桩，但只有后者是"目录路径"，所以只留后者。
+//
+// 若将来有人给本类型加回 AuthDir()，请同时加
+// `var _ gateway.AuthDirExt = (*loginStubProvider)(nil)` 并说明用途。
 
 var _ gateway.LoginFlow = (*loginStubProvider)(nil)
 

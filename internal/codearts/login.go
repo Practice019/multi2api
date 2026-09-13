@@ -98,10 +98,13 @@ type loginFlow struct {
 	mgr loginManager
 	// providerID 本上游的归属标识，由 *Provider 传入。
 	providerID string
-	// authDir 凭证落盘目录。同样由 Provider 传入 ——
-	// `loginFlow` 是核心实际持有的对象，必须自带回答 AuthDir() 所需的信息
-	//（不在这里回头读 *Provider：那会引入反向指针，且测试替身构造不出来）。
-	authDir string
+	// ⚠ 这里**没有** authDir 字段（原来有，随 AuthDir() 一起删）。
+	//
+	// 它只为"让 *loginFlow 满足旧 LoginFlow 接口里的 AuthDir()"而存在。
+	// 目录现在由 `*Provider.AuthDir()` 自报（gateway.AuthDirExt），
+	// 核心正是拿 Provider 去问的。留一个不再被读的副本，
+	// 就是留一个**会与真相漂移**的副本 —— 而这正是本次要修的
+	// "目录写错地方"那一类 bug 的温床。
 
 	mu       sync.Mutex
 	sessions map[string]*loginSession
@@ -109,6 +112,17 @@ type loginFlow struct {
 
 // 编译期断言：本类型必须满足核心认的形状。
 var _ gateway.LoginFlow = (*loginFlow)(nil)
+
+// 编译期断言：*Provider 必须能自报凭证目录。
+//
+// ⚠ 这是**独立于 LoginFlow** 的一条 —— 拆开之后两者的方法集不再互相保证。
+// 少了它，`ExtOf[AuthDirExt](p)` 会**静默**返回 false（类型断言不匹配
+// 不报任何错），表现为"按上游重载 auths 对 codearts 不生效"，
+// 而没有任何地方会红。断言把这种情况提前到**编译期**。
+//
+// 这正是把 AuthDir 从 LoginFlow 移出来的代价：以前它跟着 LoginFlow
+// 一起被断言，现在必须自己钉住。
+var _ gateway.AuthDirExt = (*Provider)(nil)
 
 // ⚠ LoginFlow() 必须**缓存**实例 —— 这是端到端实测抓到的 bug。
 //
@@ -152,7 +166,6 @@ func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
 		p.loginFlowCached = &loginFlow{
 			mgr:        p.login,
 			providerID: p.ID(),
-			authDir:    p.authDir,
 			sessions:   make(map[string]*loginSession),
 		}
 		// 后台定期回收超时会话。
@@ -195,7 +208,7 @@ func (p *Provider) Poll(state string) (gateway.Credential, error) {
 // 见 gateway.LoginFlow.Configured 的注释。
 func (p *Provider) Configured() bool { return p != nil && p.login != nil }
 
-// AuthDir 本上游凭证的落盘目录（`gateway.LoginFlow` 要求）。
+// AuthDir 本上游凭证的落盘目录（`gateway.AuthDirExt` 要求）。
 //
 // # ⚠ 这是实测踩出来的
 //
@@ -206,6 +219,15 @@ func (p *Provider) Configured() bool { return p != nil && p.login != nil }
 //
 // 现在由上游自报：Provider 知道自己从哪**读**凭证（`p.authDir`），
 // 那就是它该往哪**写**。核心只管"拿到目录 + 文件名就写"，不猜。
+//
+// # 为什么它挂在 *Provider 上（而不是 LoginFlow 上）
+//
+// 它原来在 `LoginFlow` 接口里。那是错的：**"凭证目录在哪"与
+// "有没有登录流程"无关**。手工往 `auths/codearts/` 拷凭证再点
+// 「重载 auths」是常规路径，而那条路径**不需要任何登录交互**。
+//
+// 拆出来之后，本上游即使不配 Portal（`p.login == nil`、没有 LoginFlow），
+// **依然**能回答"我的凭证在哪"，因而依然支持按上游重载。
 func (p *Provider) AuthDir() string {
 	if p == nil {
 		return ""
@@ -224,16 +246,24 @@ func (f *loginFlow) Configured() bool {
 	return f != nil && f.mgr != nil
 }
 
-// AuthDir 转发给 Provider（`gateway.LoginFlow` 要求 *loginFlow 也实现它）。
+// ⚠ 这里**没有** AuthDir() —— 它被删掉了，不是漏了。
 //
-// 核心拿到的是 `*loginFlow`，所以落盘目录必须在这一层拿得到 ——
-// 只在 `*Provider` 上实现是不够的（那正是 T10-d 踩过的"方法集不匹配"）。
-func (f *loginFlow) AuthDir() string {
-	if f == nil {
-		return ""
-	}
-	return f.authDir
-}
+// 它原来转发给 `f.authDir`，只为满足旧 `gateway.LoginFlow` 接口。
+// 拆出 `gateway.AuthDirExt` 之后，核心问目录的对象是 **`*Provider`**
+//（`admin.pollViaFlow` 里 `ExtOf[AuthDirExt](p)`，p 是 Provider）——
+// 而要拿 `ExtOf` 就必须是 Provider，`*loginFlow` 连编译都过不去。
+//
+// 所以这条转发**没有任何调用方**：留着它只会让下一个人以为
+// "*loginFlow 也自报目录"，从而写出第二份"我的目录是哪"。
+//
+// 目录的事实只有一处：`*Provider.authDir`（它同时喂 `LoadDir`
+// ——见 provider.go 与 admin.go 的 localAccounts）。单一来源。
+//
+// 同理删掉了 `loginFlow.authDir` 字段（原第 101-104 行）。
+// 那个字段的注释说"必须自带回答 AuthDir() 所需的信息，否则又要一个
+// 反向指针" —— 那个理由成立的前提是"AuthDir 要在 flow 上答"，
+// 而现在不问 flow 了，前提消失，字段也就没有存在理由。
+// ⚠ 这不是"顺手清理"：留下它就会有一个**永不更新**的目录副本。
 
 // ---------------------------------------------------------------------------
 // loginFlow 的实现
