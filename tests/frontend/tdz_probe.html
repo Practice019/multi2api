@@ -2462,6 +2462,12 @@ let loginProvider = '';
   // 模型分组折叠状态（T5）。每个上游一个键，值是 '1'/'0'。
   // 与 pagesize 同一个模式：这是用户偏好，刷新与切面板都该保持。
   const LS_MODELGROUP = 'wb2api.modelgroup';
+  // 对话测试的「上游筛选」（T7）。与 pagesize / modelgroup 同一个模式。
+  const LS_MODELPROVIDER = 'wb2api.modelprovider';
+  // modelProviderWanted：用户想要的上游筛选值。
+  // 与 DOM 分开存 —— <select> 会把不在 option 里的值归一成空串，
+  // 而恢复选择时 option 还没建出来（见 modelProviderFilter 的注释）。
+  let modelProviderWanted = '';
 
   function loadPageSize() {
     try {
@@ -3272,9 +3278,96 @@ let multCatalogFailed = false;
     $('models').innerHTML = groups.map(renderModelGroup).join('');
 
     const sel = $('model'), keep = sel.value;
-    sel.innerHTML = models.map(m =>
+    // T7：模型下拉按上游筛选，**不去重**。
+    //
+    // 与上面的 chip 区是**两套**逻辑，故意不一致：
+    //   · chip 区（可用模型面板）：去重 + 按上游分组，便于"看有哪些模型"
+    //   · 这里（对话测试下拉）：按上游**筛选**，不去重 —— 用户要求保留
+    //     `provider/xxx` 形态，因为那是"显式指定上游"的手段，测试时要用
+    //
+    // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
+    syncModelProviderOptions(models);
+    const wantP = modelProviderFilter();
+    const shown = wantP
+      ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
+      : models;
+    sel.innerHTML = shown.map(m =>
       `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
-    sel.value = models.some(m => m.id === keep) ? keep : (models.find(m => m.id === 'auto') || models[0]).id;
+    // 保持原选择：若它不在筛选后的列表里，回落到第一个（或 auto）。
+    sel.value = shown.some(m => m.id === keep) ? keep
+      : ((shown.find(m => m.id === 'auto') || shown[0] || {}).id || '');
+  }
+
+  // modelOwnerOf 从模型 id 推断上游归属（T7）。
+  //
+  // 与 groupModelsByOwner 用同一条规则：前缀优先，否则 owned_by。
+  // 抽出来共用是为了**两处判据只有一份** —— 否则筛选与分组会漂移
+  // （典型表现：分组里算 workbuddy，筛选时却算成别的）。
+  function modelOwnerOf(id, ownedBy) {
+    const s = String(id || '').indexOf('/');
+    return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
+  }
+
+  // modelProviderFilter 当前选中的上游（空串 = 全部）。
+  //
+  // ⚠ 读的是**模块变量** `modelProviderWanted`，不是 DOM 的 `select.value`。
+  //
+  // 为什么：`<select>` 会把"不在 option 列表里的值"**当场归一成空串**。
+  // 启动顺序是「恢复选择 → 同步选项」，恢复时 option 还没建出来，
+  // 于是 `el.value = 'workbuddy'` 立刻被浏览器归成 '' —— 选择丢失。
+  // （实测：刷新后 select.value 变回 ""，而 localStorage 里还存着 workbuddy。）
+  //
+  // 用变量记住"用户想要哪个上游"，DOM 只作展示；选项建好后再写回 DOM。
+  // 这样与注入顺序无关 —— 不再依赖"必须等 option 就绪才能赋值"。
+  function modelProviderFilter() {
+    return modelProviderWanted;
+  }
+
+  // setModelProviderFilter 同时更新"想要的"与 DOM（DOM 不在场也安全）。
+  function setModelProviderFilter(v) {
+    modelProviderWanted = v || '';
+    const el = $('modelProvider');
+    if (el && el.value !== modelProviderWanted) el.value = modelProviderWanted;
+  }
+
+  // saveModelProviderFilter 记住筛选选择。
+  // 为什么持久化：用户选了某个上游多半是因为"我常测它"，
+  // 每次打开都要重选一遍就变成了噪声。
+  function saveModelProviderFilter(v) {
+    try { localStorage.setItem(LS_MODELPROVIDER, v || ''); } catch { /* 隐私模式 */ }
+  }
+
+  // restoreModelProviderFilter 启动时恢复上次的选择。
+  // 只写进 select 的值，**不在这里填选项** —— 选项依赖模型列表，
+  // 要等 renderModels 拿到数据后再同步（否则会把选项清空）。
+  function restoreModelProviderFilter() {
+    const el = $('modelProvider');
+    if (!el) return;
+    try { setModelProviderFilter(localStorage.getItem(LS_MODELPROVIDER) || ''); }
+    catch { setModelProviderFilter(''); }   // 隐私模式
+  }
+
+  // syncModelProviderOptions 按模型列表刷新上游下拉的选项。
+  //
+  // 为什么要同步而不是写死：上游列表来自 manifest + 目录，
+  // 写死会让新上游不出现在筛选器里。**保留用户已选的那个** ——
+  // 重绘时若清了选择，用户刚切到某个上游就被弹回"全部"。
+  function syncModelProviderOptions(list) {
+    const el = $('modelProvider');
+    if (!el) return;
+    const owners = [];
+    for (const m of list) {
+      const o = modelOwnerOf(m.id, m.owned_by);
+      if (o && owners.indexOf(o) < 0) owners.push(o);
+    }
+    owners.sort();
+    const keep = modelProviderWanted;
+    el.innerHTML = '<option value="">全部上游</option>'
+      + owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+    // 选项就绪后把「想要的」写回 DOM。
+    // 不在列表里（上游被移除）则回落「全部」——
+    // 留着一个不存在的值会让 select 显示空、而内层 value 还是旧的。
+    setModelProviderFilter(owners.indexOf(keep) >= 0 ? keep : '');
   }
 
   // groupModelsByOwner 把模型列表按上游归组并去重。
@@ -3651,6 +3744,28 @@ let multCatalogFailed = false;
       }
       const c = e.target.closest('.chip'); if (c) $('model').value = c.dataset.id;
     });
+    // T7：切换上游筛选 → 重填模型下拉 → 记住选择。
+    //
+    // 只重填下拉，**不重绘 chip 区** —— chip 区是"看有哪些模型"的全景，
+    // 它不该跟着测试用的筛选器变（那会让两个区域的状态互相污染）。
+    if ($('modelProvider')) {
+      $('modelProvider').onchange = () => {
+        setModelProviderFilter($('modelProvider').value);
+        saveModelProviderFilter(modelProviderWanted);
+        const wantP = modelProviderFilter();
+        const shown = wantP
+          ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
+          : models;
+        const sel = $('model');
+        sel.innerHTML = shown.map(m =>
+          `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+        // 切换上游后**重置到第一项**（原选择多半不在新列表里，
+        // 留着会得到一个 value 对不上任何 option 的下拉 —— 界面显示空但
+        // 内层 value 还停在旧值，发出去的模型与看到的不一致）。
+        sel.value = (shown.find(m => m.id === 'auto') || shown[0] || {}).id || '';
+      };
+    }
+    restoreModelProviderFilter();
     $('auto').onchange = () => {
       if (timer) { clearInterval(timer); timer = null; }
       if ($('auto').checked) timer = setInterval(refresh, 5000);

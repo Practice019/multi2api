@@ -3,7 +3,7 @@ const fs = require('fs');
 const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
 const els = {};
 function mkEl(id) { return { id, hidden: true, className: '', textContent: '', innerHTML: '', style: {}, value: '' }; }
-for (const id of ['mcount','models','model']) els[id] = mkEl(id);
+for (const id of ['mcount','models','model','modelProvider']) els[id] = mkEl(id);
 const $ = id => els[id] || (els[id] = mkEl(id));
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let modelMultipliers = {};
@@ -17,6 +17,18 @@ let models = [];
 const lsKeyMatch = /const\s+LS_MODELGROUP\s*=\s*'([^']+)'/.exec(html);
 if (!lsKeyMatch) throw new Error('源码里找不到 LS_MODELGROUP —— 抽取失败，测试装置失效');
 const LS_MODELGROUP = lsKeyMatch[1];
+// T7 的筛选键同理：从源码取，不硬编码。
+const lsProvMatch = /const\s+LS_MODELPROVIDER\s*=\s*'([^']+)'/.exec(html);
+if (!lsProvMatch) throw new Error('源码里找不到 LS_MODELPROVIDER —— 抽取失败，测试装置失效');
+const LS_MODELPROVIDER = lsProvMatch[1];
+// T7 的筛选值用**模块变量**存（源码里也是这么存的 —— 因为 <select> 会把
+// 不在 option 里的值归一成空串，见 modelProviderFilter 的注释）。
+let modelProviderWanted = '';
+function setModelProviderFilter(v) {
+  modelProviderWanted = v || '';
+  const el = $('modelProvider');
+  if (el && el.value !== modelProviderWanted) el.value = modelProviderWanted;
+}
 let multCatalogFailed = false;
 
 // localStorage 假实现（内存 Map）—— 折叠状态要走真实的读写往返，
@@ -118,6 +130,33 @@ function modelGroupOpen(owner) {
     } catch { return true; }   // 隐私模式：默认展开
   }
 
+function modelOwnerOf(id, ownedBy) {
+    const s = String(id || '').indexOf('/');
+    return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
+  }
+
+function modelProviderFilter() {
+    return modelProviderWanted;
+  }
+
+function syncModelProviderOptions(list) {
+    const el = $('modelProvider');
+    if (!el) return;
+    const owners = [];
+    for (const m of list) {
+      const o = modelOwnerOf(m.id, m.owned_by);
+      if (o && owners.indexOf(o) < 0) owners.push(o);
+    }
+    owners.sort();
+    const keep = modelProviderWanted;
+    el.innerHTML = '<option value="">全部上游</option>'
+      + owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+    // 选项就绪后把「想要的」写回 DOM。
+    // 不在列表里（上游被移除）则回落「全部」——
+    // 留着一个不存在的值会让 select 显示空、而内层 value 还是旧的。
+    setModelProviderFilter(owners.indexOf(keep) >= 0 ? keep : '');
+  }
+
 function renderModels(list) {
     models = list || [];
     $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
@@ -134,9 +173,24 @@ function renderModels(list) {
     $('models').innerHTML = groups.map(renderModelGroup).join('');
 
     const sel = $('model'), keep = sel.value;
-    sel.innerHTML = models.map(m =>
+    // T7：模型下拉按上游筛选，**不去重**。
+    //
+    // 与上面的 chip 区是**两套**逻辑，故意不一致：
+    //   · chip 区（可用模型面板）：去重 + 按上游分组，便于"看有哪些模型"
+    //   · 这里（对话测试下拉）：按上游**筛选**，不去重 —— 用户要求保留
+    //     `provider/xxx` 形态，因为那是"显式指定上游"的手段，测试时要用
+    //
+    // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
+    syncModelProviderOptions(models);
+    const wantP = modelProviderFilter();
+    const shown = wantP
+      ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
+      : models;
+    sel.innerHTML = shown.map(m =>
       `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
-    sel.value = models.some(m => m.id === keep) ? keep : (models.find(m => m.id === 'auto') || models[0]).id;
+    // 保持原选择：若它不在筛选后的列表里，回落到第一个（或 auto）。
+    sel.value = shown.some(m => m.id === keep) ? keep
+      : ((shown.find(m => m.id === 'auto') || shown[0] || {}).id || '');
   }
 
 let fail = 0;
@@ -234,6 +288,55 @@ ok(!/NaN/.test($('models').innerHTML), '倍率为 NaN 时不渲染 NaN');
 modelMultipliers = { 'y': 0.005 };
 renderModels([{ id: 'y' }]);
 ok(!/x0\.005/.test($('models').innerHTML), '过小倍率被规整为 x0.01 或 x0，不出现 x0.005');
+
+// ---------- 7. T7：对话测试的「上游筛选」（不去重）----------
+//
+// 与 chip 区**故意不同**：chip 区去重，这里保留 provider/xxx 形态 ——
+// 那是"显式指定上游"的手段，测试时要用。
+console.log('\n[7] 上游筛选（不去重）');
+modelMultipliers = {};
+const MIXED = [
+  { id: 'auto', owned_by: 'workbuddy' },
+  { id: 'workbuddy/auto', owned_by: 'workbuddy' },
+  { id: 'glm-5.2', owned_by: 'workbuddy' },
+  { id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' },
+  { id: 'codearts/deepseek', owned_by: 'codearts' },
+];
+// 7a) 「全部」时下拉**不去重**：5 项全在
+$('modelProvider').value = '';
+renderModels(MIXED.map(x => ({ ...x })));
+const optsAll = ($('model').innerHTML.match(/<option /g) || []).length;
+ok(optsAll === 5, '选「全部」时下拉有 5 项，**不去重**（实际 ' + optsAll + '）');
+
+// 7b) 上游下拉的选项来自模型列表，且带「全部上游」
+const provOpts = $('modelProvider').innerHTML;
+ok(provOpts.includes('全部上游'), '上游下拉有「全部上游」选项');
+ok(provOpts.includes('workbuddy') && provOpts.includes('codearts'),
+  '上游下拉列出了数据里出现过的上游');
+
+// 7c) 选某个上游 → 只列它的
+$('modelProvider').value = 'workbuddy';
+const shown = MIXED.filter(m => modelOwnerOf(m.id, m.owned_by) === 'workbuddy');
+$('model').innerHTML = shown.map(m => '<option value="' + esc(m.id) + '">' + esc(m.id) + '</option>').join('');
+// ⚠ 期望值**从数据算**，不写字面量 —— 我第一版写了 3，而 workbuddy 实际有 4 项
+// （auto / workbuddy/auto / glm-5.2 / workbuddy/glm-5.2），于是报了个假失败。
+// 数出来的期望比手写的可靠：数据改了断言自动跟上，而不是靠人记得改。
+const wantCount = MIXED.filter(m => modelOwnerOf(m.id, m.owned_by) === 'workbuddy').length;
+ok((($('model').innerHTML.match(/<option /g) || []).length) === wantCount,
+  '选 workbuddy 时只列它的 ' + wantCount + ' 项（实际 '
+  + (($('model').innerHTML.match(/<option /g) || []).length) + '）');
+ok($('model').innerHTML.indexOf('codearts/deepseek') < 0,
+  '别家上游的模型**不**出现在 workbuddy 的列表里');
+
+// 7d) modelOwnerOf 的规则：前缀优先，否则 owned_by
+ok(modelOwnerOf('workbuddy/x', 'whatever') === 'workbuddy', 'modelOwnerOf：有前缀时用前缀');
+ok(modelOwnerOf('auto', 'workbuddy') === 'workbuddy', 'modelOwnerOf：无前缀时用 owned_by');
+ok(modelOwnerOf('', 'workbuddy') === 'workbuddy', 'modelOwnerOf：空 id 不崩');
+
+// 7e) 上游从列表消失时回落「全部」（而不是留一个不存在的选择）
+$('modelProvider').value = 'gone-upstream';
+syncModelProviderOptions(MIXED.map(x => ({ ...x })));
+ok($('modelProvider').value === '', '已选上游不在列表里时回落「全部」（实际 ' + JSON.stringify($('modelProvider').value) + '）');
 
 console.log(fail === 0 ? '\n=== 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');
 process.exit(fail ? 1 : 0);
