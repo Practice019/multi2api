@@ -1,0 +1,231 @@
+package admin
+
+// login_dispatch_test.go —— /admin/login/start|poll 的**按上游分派**守卫。
+//
+// # 为什么这些断言必须存在
+//
+// 分派写错有两种后果，都很难在界面上看出来：
+//
+//   1. **该 501 的时候回落了** —— 用户在 codearts 那行点「添加账号」，
+//      请求静默走了默认上游的 OAuth，**账号加进了 workbuddy**。
+//      界面会显示"成功"，而东西加错了地方。
+//   2. **向后兼容被破坏** —— 老客户端不带 `provider`，
+//      若分派逻辑把它当"未知上游"，添加账号整个功能挂掉。
+//
+// 所以下面同时钉住：带 provider 的 501 路径、不带 provider 的旧路径。
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"workbuddy2api/internal/gateway"
+)
+
+// fakeFlow 一个可注入的 LoginFlow，用来在测试里控制轮询结果。
+type fakeFlow struct {
+	startState string
+	startURL   string
+	startErr   error
+
+	// pollFn 决定 Poll 的行为（返回凭证 / ErrLoginPending / 别的错误）。
+	pollFn func(state string) (gateway.Credential, error)
+}
+
+func (f *fakeFlow) Start() (string, string, error) {
+	return f.startState, f.startURL, f.startErr
+}
+
+func (f *fakeFlow) Poll(state string) (gateway.Credential, error) {
+	return f.pollFn(state)
+}
+
+// flowProvider 实现了 LoginFlow 的 stub —— 供分派测试用。
+type flowProvider struct {
+	stubProvider
+	flow *fakeFlow
+}
+
+func (p *flowProvider) Start() (string, string, error)            { return p.flow.Start() }
+func (p *flowProvider) Poll(s string) (gateway.Credential, error) { return p.flow.Poll(s) }
+
+// TestLoginStartDispatchByProvider 带 provider 时按上游分派。
+func TestLoginStartDispatchByProvider(t *testing.T) {
+	flow := &fakeFlow{startState: "ST-abc", startURL: "https://flow.example/auth"}
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&flowProvider{
+		stubProvider: stubProvider{id: "flowup", caps: gateway.CapChat},
+		flow:         flow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 另一个上游**没有** LoginFlow
+	if err := reg.Register(&stubProvider{id: "noflow", caps: gateway.CapChat}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := New(Config{Registry: reg, DefaultProvider: "flowup"})
+
+	// ---- 1) 有 LoginFlow 的上游：走它自己的流程 ----
+	rec := httptest.NewRecorder()
+	req := localReq("POST", "/admin/login/start")
+	req.Body = io.NopCloser(strings.NewReader(`{"provider":"flowup"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("有 LoginFlow 的上游应 200，实际 %d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		State    string `json:"state"`
+		AuthURL  string `json:"auth_url"`
+		Provider string `json:"provider"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析失败: %v body=%s", err, rec.Body)
+	}
+	if resp.State != "ST-abc" {
+		t.Errorf("state=%q，应来自该上游的 LoginFlow（ST-abc）—— "+
+			"若走了默认 OAuth 客户端，说明分派没生效", resp.State)
+	}
+	if resp.AuthURL != "https://flow.example/auth" {
+		t.Errorf("auth_url=%q，应来自该上游的 LoginFlow", resp.AuthURL)
+	}
+	if resp.Provider != "flowup" {
+		t.Errorf("响应应回带 provider=flowup（前端据此显示对应文案），实际 %q", resp.Provider)
+	}
+
+	// ---- 2) 没有 LoginFlow 的上游：501，**不能**回落 ----
+	rec2 := httptest.NewRecorder()
+	req2 := localReq("POST", "/admin/login/start")
+	req2.Body = io.NopCloser(strings.NewReader(`{"provider":"noflow"}`))
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotImplemented {
+		t.Errorf("没有 LoginFlow 的上游应 501，实际 %d body=%s —— "+
+			"**回落是最坏的**：用户以为在给 noflow 加账号，实际加进了别处",
+			rec2.Code, rec2.Body)
+	}
+	if !strings.Contains(rec2.Body.String(), "noflow") {
+		t.Errorf("501 的错误信息应带上游名（便于排查），实际 %s", rec2.Body)
+	}
+
+	// ---- 3) 不存在的上游：也是 501（能力不存在，不是参数错） ----
+	rec3 := httptest.NewRecorder()
+	req3 := localReq("POST", "/admin/login/start")
+	req3.Body = io.NopCloser(strings.NewReader(`{"provider":"ghost"}`))
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusNotImplemented {
+		t.Errorf("不存在的上游应 501，实际 %d body=%s", rec3.Code, rec3.Body)
+	}
+}
+
+// TestLoginStartBackwardCompatible 不带 provider 时行为与改造前一致。
+//
+// 这是**向后兼容**的核心断言：老的调用方（脚本、缓存里的旧页面）
+// 发的是 `{}` 或空体，必须仍能拿到授权链接。
+func TestLoginStartBackwardCompatible(t *testing.T) {
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&stubProvider{id: "plain", caps: gateway.CapChat}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{Registry: reg, DefaultProvider: "plain"})
+
+	// 不带 provider，且**没有配 OAuth 客户端** → 应报错但**不能 panic**，
+	// 也不能因为"找不到上游的 LoginFlow"而返回 501。
+	// （没配 OAuth 是部署错误，502 是合适的；501 会被误读成"这个上游不支持"。）
+	rec := httptest.NewRecorder()
+	req := localReq("POST", "/admin/login/start")
+	req.Body = io.NopCloser(strings.NewReader(`{}`))
+	// 捕获 panic：空 OAuth 客户端是最容易崩的地方
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("不带 provider 且未配 OAuth 时 panic 了：%v —— "+
+				"老客户端会整片用不了", r)
+		}
+	}()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusNotImplemented {
+		t.Errorf("不带 provider 时**不该**返回 501 —— 那是「这个上游不支持添加账号」的语义，"+
+			"会让老客户端误以为功能没了。实际 %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+// TestLoginPollDispatchByProvider 轮询与开始用**同一条**分派规则。
+//
+// 为什么单独测：两者分派不一致会产生"用 A 的 state 去问 B"的诡异现象 ——
+// 表现为随机失败，极难定位。
+func TestLoginPollDispatchByProvider(t *testing.T) {
+	flow := &fakeFlow{
+		pollFn: func(state string) (gateway.Credential, error) {
+			return gateway.Credential{}, gateway.ErrLoginPending
+		},
+	}
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&flowProvider{
+		stubProvider: stubProvider{id: "flowup", caps: gateway.CapChat},
+		flow:         flow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{Registry: reg, DefaultProvider: "flowup"})
+
+	rec := httptest.NewRecorder()
+	req := localReq("POST", "/admin/login/poll")
+	req.Body = io.NopCloser(strings.NewReader(`{"state":"ST-abc","provider":"flowup"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Errorf("pending 时应 202，实际 %d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "pending") {
+		t.Errorf("应返回 status=pending，实际 %s", rec.Body)
+	}
+
+	// 没有 LoginFlow 的上游 → 501（与 start 一致）
+	reg2 := gateway.NewRegistry()
+	if err := reg2.Register(&stubProvider{id: "noflow", caps: gateway.CapChat}); err != nil {
+		t.Fatal(err)
+	}
+	h2 := New(Config{Registry: reg2, DefaultProvider: "noflow"})
+	rec2 := httptest.NewRecorder()
+	req2 := localReq("POST", "/admin/login/poll")
+	req2.Body = io.NopCloser(strings.NewReader(`{"state":"S","provider":"noflow"}`))
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotImplemented {
+		t.Errorf("poll 对没有 LoginFlow 的上游也应 501，实际 %d body=%s", rec2.Code, rec2.Body)
+	}
+}
+
+// TestLoginFlowSecretMustMarshal 凭证结构没接入落盘时明确 501。
+//
+// 反例（必须避免）：把未知结构"尽力映射"成 auth 文件 —— 那会写出
+// 看起来成功、实际字段错位的凭证，比明确失败糟得多。
+func TestLoginFlowSecretMustMarshal(t *testing.T) {
+	flow := &fakeFlow{
+		pollFn: func(state string) (gateway.Credential, error) {
+			// Secret 是个不能 MarshalAuthFile 的类型
+			return gateway.Credential{UID: "u1", Provider: "flowup", Secret: struct{ X int }{1}}, nil
+		},
+	}
+	reg := gateway.NewRegistry()
+	if err := reg.Register(&flowProvider{
+		stubProvider: stubProvider{id: "flowup", caps: gateway.CapChat},
+		flow:         flow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(Config{Registry: reg, DefaultProvider: "flowup", AuthDir: t.TempDir()})
+
+	rec := httptest.NewRecorder()
+	req := localReq("POST", "/admin/login/poll")
+	req.Body = io.NopCloser(strings.NewReader(`{"state":"S","provider":"flowup"}`))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("Secret 不能序列化时应 501（明确失败），实际 %d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "MarshalAuthFile") {
+		t.Errorf("错误信息应指出缺什么（MarshalAuthFile），实际 %s", rec.Body)
+	}
+}
