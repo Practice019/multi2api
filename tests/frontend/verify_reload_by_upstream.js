@@ -9,18 +9,30 @@
 //   · 前端传了但后端没读 → 后端仍用 reloadProvider（单测只测后端，看不出）
 //   · 后端读了但前端文案用自己猜的 pid → 界面继续撒谎（后端单测看不出）
 //
-// # 判据
+// # 判据（v2 —— 改掉了会报**假绿**的第一版）
 //
 // 1. **后端**：`{"provider":"codearts"}` 与 `{"provider":"workbuddy"}` 的
-//    `scanned` **必须不同**（依赖两个目录文件数不同 —— 见下）
+//    **`dir` 必须不同** —— 目录名不同是**结构性**的，与目录里几个文件无关
 // 2. **后端**：`{}`（不带 provider）行为与改前一致
 // 3. **后端**：不存在的上游 → 404
-// 4. **前端**：点 codearts 行，请求体含 `provider":"codearts"`
-// 5. **前端**：toast 文案里的上游 = 后端回执的 `provider`
+// 4. **前端**：点 codearts 行，请求体含 `provider":"codearts"`（见另一个脚本）
 //
-// ⚠ 判据 1 的前提：**两个上游目录的文件数不同**。
-// 若相同，"恒用 reloadProvider" 的错误实现会**蒙对**。
-// 本脚本会先**检查这个前提**，不满足就明确报出来，而不是给个假绿灯。
+// ## ⚠ 第一版为什么是坏的（Reviewer 抓出来的）
+//
+// 第一版靠 `scanned 不同` 判"真的选了不同目录"。**两目录文件数相同时它恒真**：
+// 恒用 workbuddy 的缺陷实现两次都返回 `scanned: 3`，
+// 而 `3 === counts.workbuddy` 与 `3 === counts.codearts` **同时成立**。
+//
+// 真实环境恰好就是 workbuddy=3 / codearts=3。实测缺陷实现下：
+//
+//   请求 codearts → {"provider":"workbuddy","scanned":3}
+//   三条 scanned 断言全部 → true → 报「验证通过」exit=0        ← **假绿**
+//
+// 第一版**确实**会打印一条"前提不满足"的警告，但它**报完警照样打 PASS、
+// 照样 exit=0、照样输出"验证通过"** —— 所以那句警告救不了任何人。
+//
+// 现在主力判据换成 **`dir`**，`scanned` 退为辅助并**明确标注它在同数时恒真**。
+// 回执若没有 `dir` 字段，脚本**直接 FAIL** 而不是静默降级成弱判据。
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -84,19 +96,49 @@ function post(path, body) {
   if (rW.json && rC.json) {
     ok(rW.json.provider === 'workbuddy', 'workbuddy 回执的 provider 正确（实际 ' + rW.json.provider + '）');
     ok(rC.json.provider === 'codearts', 'codearts 回执的 provider 正确（实际 ' + rC.json.provider + '）');
-    if (counts.workbuddy !== counts.codearts) {
-      ok(rW.json.scanned !== rC.json.scanned,
-        '两个上游 scanned **不同**（' + rW.json.scanned + ' vs ' + rC.json.scanned +
-        '）—— 证明真的按 provider 选了目录，不是恒用同一个');
+
+    // ⚠ 判据主力：回执的 **dir**，不是 scanned。
+    //
+    // # 为什么（Reviewer 抓出来的，我原来的写法会报**假绿**）
+    //
+    // 我原来靠 `scanned 不同` 判"真的选了不同目录"。**两目录文件数相同时它恒真**：
+    // 恒用 workbuddy 的缺陷实现，两次都返回 `scanned: 3`，
+    // 而 `3 === counts.workbuddy` 与 `3 === counts.codearts` **同时成立** → 照样 PASS。
+    //
+    // 实测（真实环境 workbuddy=3、codearts=3）：
+    //   缺陷实现回执：请求 codearts → {"provider":"workbuddy","scanned":3}
+    //   脚本三条 scanned 断言全部 → true → 报「验证通过」exit=0
+    //
+    // **我前两版说"脚本会自报前提所以不会骗人" —— 那句话是错的。**
+    // 它报了警，然后**照样打 PASS、照样 exit=0、照样输出"验证通过"**。
+    //
+    // 现在改用 **dir**：目录名不同是**结构性**的，不依赖文件数量。
+    // scanned 退为**辅助**判据（它仍能验"扫的是不是那个目录的条数"）。
+    const dirs = { workbuddy: 'auths\\workbuddy', codearts: 'auths\\codearts' };
+    if (rW.json.dir && rC.json.dir) {
+      ok(rW.json.dir !== rC.json.dir,
+        '两个上游扫的**目录不同**（' + rW.json.dir + ' vs ' + rC.json.dir +
+        '）—— 这是结构性判据，与目录里有几个文件无关');
+      ok(rW.json.dir === dirs.workbuddy,
+        'workbuddy 扫的是它自己的目录（实际 ' + rW.json.dir + '，期望 ' + dirs.workbuddy + '）');
+      ok(rC.json.dir === dirs.codearts,
+        'codearts 扫的是它自己的目录（实际 ' + rC.json.dir + '，期望 ' + dirs.codearts + '）');
     } else {
-      ok(rW.json.scanned === counts.workbuddy && rC.json.scanned === counts.codearts,
-        '两目录文件数相同时，各自 scanned 应对上自己的目录数');
+      // 回执没带 dir（老版本后端）→ **明确说出来**，不要静默降级成弱判据
+      console.log('  ⚠ 回执没有 dir 字段 —— 结构性判据无法执行，' +
+        '本轮**只能**靠 provider 字段判断（scanned 在同数目录下恒真，不可信）');
+      ok(false, '回执缺少 dir 字段（结构性判据依赖它）');
     }
-    // scanned 应等于**该上游目录**的文件数
+
+    // scanned 作为辅助：对上目录数
     ok(rW.json.scanned === counts.workbuddy,
-      'workbuddy 的 scanned（' + rW.json.scanned + '）== 它目录的文件数（' + counts.workbuddy + '）');
+      '（辅助）workbuddy 的 scanned（' + rW.json.scanned + '）== 它目录的文件数（' + counts.workbuddy + '）');
     ok(rC.json.scanned === counts.codearts,
-      'codearts 的 scanned（' + rC.json.scanned + '）== 它目录的文件数（' + counts.codearts + '）');
+      '（辅助）codearts 的 scanned（' + rC.json.scanned + '）== 它目录的文件数（' + counts.codearts + '）');
+    if (counts.workbuddy === counts.codearts) {
+      console.log('  ℹ 两目录文件数相同（' + counts.workbuddy + '）—— ' +
+        '上面两条 scanned 断言**在本环境下恒真**，不作为鉴别力来源（主力是 dir）');
+    }
   }
 
   // ---- 2. 不带 provider：行为与改前一致（回落到 reloadProvider）----
