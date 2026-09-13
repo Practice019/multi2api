@@ -34,10 +34,30 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
 
 // 应当存在的（顺序也断言 —— 按钮顺序是设计决策）
 //
-// T10 之后：h2 上只剩"对整池生效"的两个。
+// T10 之后：h2 上只剩"对整池生效"的动作。
 // 「＋ 添加账号」与「重载 auths」已移入**各上游分组行**（见下方分组断言）。
-const EXPECTED = ['全部签到', '刷新全部积分'];
-// 应当**不存在**的（已删除 / 已移走，防回归）
+//
+// # T3 之后的变更（本次）
+//
+// 清单里**不再有**「全部签到」这个字面量 —— 它现在由 manifest 的
+// daily_actions 驱动（workbuddy 自报 id=checkin, batch=true）。
+//
+// ⚠ 所以断言方式必须跟着改：**不能**继续写死 `['全部签到','刷新全部积分']`，
+// 那等于把"workbuddy 有签到"重新固化进前端测试 —— 而 T3 要的正是
+// "按钮来自上游自报"。正确判据是**与 manifest 对齐**：
+//
+//   界面上「全部 X」的集合 == manifest 里 batch=true 的动作按 label 生成的集合
+//
+// 期望值**从 manifest 现算**，不硬编码 —— 与下面 R2 的写法同一个理由
+//（写死就等于把这个部署的上游当成产品事实，加第三个上游时测试假红，
+// 而"漏掉新上游的全量按钮"这个真缺陷反而不会被抓）。
+const EXPECTED_STATIC = ['刷新全部积分'];
+// 应当**不存在**的（已删除 / 已移走 / 已改为自报，防回归）
+//
+// ⚠ 「全部签到」进 FORBIDDEN 是**故意的**：它不该再作为**静态 HTML** 存在。
+// 它仍然会出现在界面上（workbuddy 自报），但那是**渲染出来的** ——
+// 由下面的 daily-act 断言来验。若有人把它写回 HTML，
+// 静态扫描那条会红（见下方 data-key="accounts" 的静态检查）。
 const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
 
 (async () => {
@@ -77,10 +97,24 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
     console.log('  账号池顶部按钮: ' + JSON.stringify(btns));
     ok(Array.isArray(btns), '找到账号池面板与它的 h2 按钮区');
 
+    // ---- T3：全量按钮必须与 manifest 的 daily_actions **对齐** ----
+    //
+    // 判据（用户要的"有什么显示什么"）：
+    //   界面上「全部 X」的集合 == manifest 里 batch=true 的动作的 label 集合
+    //   **加上** 静态的「刷新全部积分」（它不是每日动作，见下面的说明）
+    const allDaily = JSON.parse(await ev(`JSON.stringify(
+      (window.__wb2api__.manifest().daily_actions || [])
+        .filter(function(a){ return a && a.batch && a.all_url && a.label; })
+        .map(function(a){ return '全部' + a.label; })
+    )`));
+    console.log('  manifest 里 batch=true 的动作为: ' + JSON.stringify(allDaily));
+
     if (Array.isArray(btns)) {
-      // 全等断言（顺序也管）—— 不是"包含"
+      // 期望 = 静态部分 ∪ manifest 自报部分（顺序：自报在前，静态在后）
+      const EXPECTED = allDaily.concat(EXPECTED_STATIC);
+      console.log('  期望清单（现算）: ' + JSON.stringify(EXPECTED));
       ok(JSON.stringify(btns) === JSON.stringify(EXPECTED),
-        '按钮清单与顺序完全等于期望\n      期望: ' + JSON.stringify(EXPECTED) +
+        '顶部按钮清单与 manifest 自报**完全一致**\n      期望: ' + JSON.stringify(EXPECTED) +
         '\n      实际: ' + JSON.stringify(btns));
 
       for (const f of FORBIDDEN) {
@@ -88,6 +122,115 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
           '已删除的「' + f + '」不在界面上（防回归）');
       }
     }
+
+    // ================================================================
+    // T3：每日动作按**上游自报**渲染（本套件的核心新断言）
+    // ================================================================
+    //
+    // # 判据（用户原话）
+    //
+    //   "签到也就是福利领取，就是签到。能不能统一一下呢"
+    //   "有什么显示什么，没有的话就不显示呗"
+    //
+    // 所以对**每一个上游的每一个账号行**：
+    //
+    //   行里出现的每日动作 data-act 集合 == manifest 里该上游自报的 id 集合
+    //
+    // 全等 —— 不是"包含"。多一个（假按钮）与少一个（功能丢了）都是缺陷。
+    console.log('\n[T3] 账号行的每日动作 == 该上游自报的 daily_actions');
+    const da = JSON.parse(await ev(`JSON.stringify((function(){
+      var W = window.__wb2api__;
+      var m = W.manifest();
+      var out = { manifest: {}, rows: [], mismatches: [] };
+      (m.providers || []).forEach(function(p){
+        if (!p || !p.id) return;
+        out.manifest[p.id] = W.dailyActionsOf(p.id).map(function(a){ return a.id; });
+      });
+      document.querySelectorAll('#accts tr.acctrow').forEach(function(tr){
+        var pid = tr.dataset.acctof;
+        // 只看**每日动作**按钮：它们带 data-dayurl，而 enable/disable/
+        // cooldown/remove 是核心通用动作（不带 dayurl），不参与这条断言。
+        var daily = Array.prototype.slice.call(tr.querySelectorAll('button[data-act][data-dayurl]'))
+          .filter(function(b){
+            // 「积分」走能力位路径（quota-probe），它不是每日动作 —— 排除。
+            return b.dataset.act !== 'credits';
+          })
+          .map(function(b){ return b.dataset.act; });
+        var labels = Array.prototype.slice.call(tr.querySelectorAll('button[data-act][data-dayurl]'))
+          .filter(function(b){ return b.dataset.act !== 'credits'; })
+          .map(function(b){ return (b.textContent||'').trim(); });
+        out.rows.push({ provider: pid, acts: daily, labels: labels });
+        var want = (out.manifest[pid] || []).slice().sort();
+        var got = daily.slice().sort();
+        if (JSON.stringify(want) !== JSON.stringify(got)) {
+          out.mismatches.push({ provider: pid, want: want, got: got, labels: labels });
+        }
+      });
+      return out;
+    })())`));
+
+    console.log('  manifest 自报的每日动作: ' + JSON.stringify(da.manifest));
+    for (const r of da.rows) {
+      console.log('    行 ' + r.provider + ': ' + JSON.stringify(r.acts) + ' 文案 ' + JSON.stringify(r.labels));
+    }
+    for (const pid of Object.keys(da.manifest)) {
+      const seen = da.rows.filter(r => r.provider === pid);
+      if (!seen.length) { console.log('    （' + pid + ' 没有账号行，跳过）'); continue; }
+    }
+    ok(da.mismatches.length === 0,
+      '每个账号行的每日动作集合 == 该上游自报的集合\n      ' +
+      (da.mismatches.length
+        ? '不一致: ' + JSON.stringify(da.mismatches)
+        : '全部一致'));
+
+    // ---- 反向守卫：codearts **不该**有签到/保活 ----
+    //
+    // 这是 T3 的直接目标：改造前它两个都有（点了打到 workbuddy 的路由）。
+    const codeartsRow = da.rows.find(r => r.provider === 'codearts');
+    if (codeartsRow) {
+      ok(codeartsRow.acts.indexOf('checkin') < 0,
+        'codearts 行里**没有**「签到」（它没有 CapCheckin，点了会打到 workbuddy 的路由）');
+      ok(codeartsRow.acts.indexOf('keepalive') < 0,
+        'codearts 行里**没有**「保活」（同上）');
+      ok(codeartsRow.labels.indexOf('领取福利') >= 0,
+        'codearts 行里有「领取福利」（它自报的唯一天动作）。实际文案: ' +
+        JSON.stringify(codeartsRow.labels));
+    } else {
+      console.log('    （本实例没有 codearts 账号行，跳过 codearts 专属断言 —— 见 README 用带 codearts 的实例覆盖）');
+    }
+
+    // ---- 反向守卫：workbuddy **必须**还有签到/保活（逐字回归）----
+    const wbRow = da.rows.find(r => r.provider === 'workbuddy');
+    if (wbRow) {
+      ok(wbRow.acts.indexOf('checkin') >= 0, 'workbuddy 行里仍有「签到」（回归基线）');
+      ok(wbRow.acts.indexOf('keepalive') >= 0, 'workbuddy 行里仍有「保活」（回归基线）');
+      const ci = wbRow.labels[wbRow.acts.indexOf('checkin')];
+      const ka = wbRow.labels[wbRow.acts.indexOf('keepalive')];
+      ok(ci === '签到', 'workbuddy 的签到按钮文案是「签到」（实际 ' + JSON.stringify(ci) + '）');
+      ok(ka === '保活', 'workbuddy 的保活按钮文案是「保活」（实际 ' + JSON.stringify(ka) + '）');
+    } else {
+      console.log('    （本实例没有 workbuddy 账号行，跳过逐字回归断言）');
+    }
+
+    // ---- 假按钮守卫：data-dayurl 指向的端点必须真的在 manifest 里 ----
+    //
+    // 与 Go 侧 TestWorkbuddyActionURLsReallyExist 同一条判据的另一面：
+    // 那边查"上游报的端点在不在它的 AdminRoutes 里"，这边查
+    // "渲染出来的按钮带没带端点"（没带的话点下去 act() 会什么都不做）。
+    const urls = JSON.parse(await ev(`JSON.stringify((function(){
+      var out = { withUrl: 0, withoutUrl: 0, urls: [] };
+      document.querySelectorAll('#accts button[data-act]').forEach(function(b){
+        var a = b.dataset.act;
+        if (a === 'enable' || a === 'disable' || a === 'cooldown' || a === 'remove') return;
+        if (b.dataset.dayurl) { out.withUrl++; out.urls.push(a + '→' + b.dataset.dayurl); }
+        else out.withoutUrl++;
+      });
+      return out;
+    })())`));
+    console.log('  带端点的动作按钮: ' + urls.withUrl + '；**不带端点**的: ' + urls.withoutUrl);
+    console.log('  实际映射: ' + JSON.stringify(urls.urls.slice(0, 8)));
+    ok(urls.withoutUrl === 0,
+      '每个动作按钮都带着 data-dayurl（否则点下去 act() 静默什么都不做 —— 正是"按钮在但没反应"那个缺陷形态）');
 
     // 行内「保活」必须仍在（那是排障动作，与删掉的"全部保活"不同）
     const inlineKeepalive = await ev(`(function(){

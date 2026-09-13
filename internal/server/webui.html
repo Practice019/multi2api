@@ -526,8 +526,23 @@
       <!-- 「＋ 添加账号」与「重载 auths」已移入**各上游分组行**（T10）——
            它们都是上游专属动作（登录流程各不同；重载的后端语义是
            "对齐 ReloadProvider 指定的那一个上游"）。点哪个上游就往哪个上游加。
-           这里只留"对整池生效"的两个。 -->
-      <button id="btnAllCheckin" style="padding:3px 10px;font-size:12px">全部签到</button>
+
+           T3：这里原本写死两个按钮：
+             <button id="btnAllCheckin">全部签到</button>
+             <button id="btnAllCredits">刷新全部积分</button>
+
+           「全部签到」是**写死**的 —— 它对整池调用 POST /admin/checkin，
+           而那条路由是 **workbuddy 挂的**。两个上游时这个按钮的语义是模糊的
+           （codearts 根本没有签到能力位，却也被"全部签到"扫进去）。
+
+           现在改成**由上游自报**：manifest 里 daily_actions 带 Batch=true
+           的动作才在这里出现一个「全部 X」，X 是上游给的名字。
+           codearts 报的「领取福利」Batch=false（它没有全量端点）→ 不出现。
+
+           「全部积分」不进这个槽位：额度刷新不是"每日动作"（可以随时点），
+           它是核心对 **CapQuotaProbe** 能力位的统合入口，与上游身份无关，
+           所以仍然单独一个按钮。 -->
+      <span id="allDailyActs"></span>
       <button id="btnAllCredits" style="padding:3px 10px;font-size:12px">刷新全部积分</button>
       <!--
         原先这里还有一个「全部保活」按钮，已删除（用户决定）。
@@ -982,6 +997,7 @@ let loginProvider = '';
     capabilities: [],
     admin_routes: [],
     jobs: [],
+    daily_actions: [],
     loaded: false,   // 是否成功取到过 manifest
   };
   let PROVIDERS = [];         // MANIFEST.providers 的快捷引用（按上游分组用）
@@ -1025,6 +1041,7 @@ let loginProvider = '';
       capabilities: objs(m.capabilities),
       admin_routes: objs(m.admin_routes),
       jobs: objs(m.jobs),
+      daily_actions: objs(m.daily_actions),
       loaded: true,
     };
     PROVIDERS = MANIFEST.providers;
@@ -1248,6 +1265,22 @@ let loginProvider = '';
     return out;
   }
 
+  // hasCap 某上游是否声明了某个能力位。
+  //
+  // 与 providersWithCap 的区别：那个返回**全集**（用于"哪些上游有这个面板"），
+  // 这个问**单个**上游（用于"这一行的这个按钮该不该出现"）。
+  //
+  // 为什么账号行要用它而不是直接读 a.capabilities：账号对象（/admin/accounts
+  // 的条目）**不带**能力位 —— 能力是上游的属性，不是账号的属性。
+  // 所以要经 providerOf(a) 回到上游、再查 manifest。
+  //
+  // 未知上游（manifest 里没有它）返回 false：宁可不显示，也不显示一个
+  // 点了不知道打到哪的按钮。这与 hideOrphanPanels 的判据一致。
+  function hasCap(providerId, cap) {
+    const p = providerInfo(providerId);
+    return !!(p && Array.isArray(p.capabilities) && p.capabilities.indexOf(cap) >= 0);
+  }
+
   // capTitle 把能力位翻译成中文标题（如 growth → 成长计划）。
   //
   // 标题由后端下发而不是前端硬编码：能力是**后端的概念**，
@@ -1279,6 +1312,36 @@ let loginProvider = '';
       r && r.provider === providerId &&
       (cap === undefined || r.capability === cap) &&
       String(r.method || '').toUpperCase() === 'GET');
+  }
+
+  // dailyActionsOf 取某上游**自报**的每日动作（签到 / 保活 / 领取福利…）。
+  //
+  // # 这个函数替换掉了什么
+  //
+  // 改造前 accountRow 里写死了三行：
+  //
+  //   `<button data-act="checkin"   ...>签到</button>`
+  //   `<button data-act="credits"   ...>积分</button>`
+  //   `<button data-act="keepalive" ...>保活</button>`
+  //
+  // 于是**每个**上游的每个账号行都长着「签到」「保活」，与这个上游
+  // 到底有没有这个动作完全无关。实测：codearts 一个 checkin 能力位都没有，
+  // 界面上照样有「签到」，点下去打的是 workbuddy 挂的 /admin/checkin。
+  //
+  // 现在按钮**全部**来自这里 —— 上游报了什么就渲染什么，没报就不渲染。
+  // 这正是用户要的"有什么显示什么，没有的话就不显示"。
+  //
+  // # 为什么按 provider 过滤而不是拿全量
+  //
+  // 同一张账号表里同时有多个上游的行，动作清单是跨上游合并下发的
+  //（每个条目自带 provider）。不过滤就会出现"codearts 的行里长出
+  // workbuddy 的签到按钮"—— 那正是改造前的缺陷形态。
+  //
+  // 归一化在 applyManifest 做过（只到数组层），这里再按对象过滤一次，
+  // 与 routesFor / providerRegistryIds 同一条防御：畸形元素不该流进渲染。
+  function dailyActionsOf(providerId) {
+    return (MANIFEST.daily_actions || []).filter(a =>
+      a && typeof a === 'object' && a.provider === providerId && a.id && a.label);
   }
 
   // upstreamGroups 返回导航用的上游分组（默认上游在最前，其余字典序）。
@@ -1574,6 +1637,76 @@ let loginProvider = '';
       for (const a of g.accounts) rows.push(accountRow(a, open));
     }
     $('accts').innerHTML = rows.join('');
+    // 顶部「全部 X」按钮与账号表**同源**（同一份 manifest.daily_actions），
+    // 所以在这里一起重绘 —— 分两处渲染会让"表格里没有了、顶上还在"
+    // 这种不一致在某次刷新的中间态被看见。
+    renderAllDailyButtons();
+  }
+
+  // renderAllDailyButtons 渲染账号池顶部的「全部 X」按钮。
+  //
+  // # 判据（用户要的"有什么显示什么"）
+  //
+  //   manifest.daily_actions 里 Batch=true 的动作 → 出现一个「全部 <label>」
+  //   没有                                       → 不出现
+  //
+  // 实测结果：workbuddy 报的「签到」Batch=true → 「全部签到」在；
+  // codearts 报的「领取福利」Batch=false（它没有全量端点）→ 没有
+  // 「全部领取福利」这种点了会 404 的按钮。
+  //
+  // # 文案为什么带上游名
+  //
+  // 全量按钮是对**某个上游**生效的（它打的是那个上游的全量端点），
+  // 而这里可能出现多个上游的全量按钮。不带上游名的话，「全部签到」
+  // 与「全部领取福利」并排时用户无法判断各自的作用域 —— 而作用域
+  // 正是改造前那个按钮最模糊的地方。
+  //
+  // 只有一个上游报了全量动作时不加后缀：那时"全部签到"没有歧义，
+  // 加个 (workbuddy) 只是噪音。
+  //
+  // # 为什么不用 innerHTML 拼 onclick
+  //
+  // 与全站一致走事件委托（见 installAllDailyActions）—— 
+  // 拼 onclick 属性需要把动作对象序列化进字符串，那是第二份数据形状。
+  function renderAllDailyButtons() {
+    const el = $('allDailyActs');
+    if (!el) return;
+    const all = (MANIFEST.daily_actions || []).filter(a =>
+      a && typeof a === 'object' && a.batch && a.all_url && a.id && a.label);
+    // 按上游分组计数，决定要不要加 (provider) 后缀
+    const byProvider = {};
+    for (const a of all) byProvider[a.provider] = (byProvider[a.provider] || 0) + 1;
+    const ambiguous = Object.keys(byProvider).length > 1;
+    el.innerHTML = all.map(a => {
+      const suffix = ambiguous || all.length > 1 ? `（${esc(a.provider)}）` : '';
+      return `<button data-allday="${esc(a.provider)}:${esc(a.id)}"`
+        + ` style="padding:3px 10px;font-size:12px"`
+        + ` title="${esc(a.title || a.label)}（对 ${esc(a.provider)} 的全部账号）">`
+        + `全部${esc(a.label)}${suffix}</button>`;
+    }).join(' ');
+  }
+
+  // installAllDailyActions 顶部「全部 X」按钮的**事件委托**（只绑一次）。
+  //
+  // 与 installGenericActions 同一个理由：容器会被反复重建
+  //（renderAllDailyButtons 直接写 innerHTML），绑在被重建的节点上
+  // 就必然要处理"何时解绑"，而 #content 从加载到关闭都不会被替换。
+  let allDailyInstalled = false;
+
+  function installAllDailyActions() {
+    if (allDailyInstalled) return;
+    allDailyInstalled = true;
+    $('content').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-allday]');
+      if (!b || b.disabled) return;
+      // 从 manifest 反查动作对象（而不是把端点写进 data 属性）——
+      // data 属性是 DOM 上的第二份状态，刷新后可能与 manifest 不一致。
+      const [pid, id] = String(b.dataset.allday || '').split(':');
+      const d = (MANIFEST.daily_actions || []).find(x =>
+        x && x.provider === pid && x.id === id && x.all_url);
+      if (!d) { toast('该动作已不再可用（渲染契约已更新）', true); return; }
+      startAll(d);
+    });
   }
 
   // renderJobs 渲染任务调度面板（T9）。
@@ -1930,10 +2063,79 @@ let loginProvider = '';
     else if (a.today_checkin === 'fail') ck = '<span class="pill err">失败</span>';
 
     const U = a.uid;
+    const pid = providerOf(a);
+
+    // ---- 每日动作按钮（**上游自报**，不再写死）----
+    //
+    // # 改造前 vs 改造后
+    //
+    //   改造前（写死，每行都一样，两个上游都长这样）：
+    //     `<button data-act="checkin"   title="单账号签到">签到</button>`
+    //     `<button data-act="credits"   title="刷新积分">积分</button>`
+    //     `<button data-act="keepalive" title="刷新 token">保活</button>`
+    //
+    //   改造后：
+    //     workbuddy 行 → 签到、保活（它自报这两个）
+    //     codearts  行 → 领取福利（它自报这一个；**没有**签到、**没有**保活）
+    //
+    // # 为什么文案与端点都由后端给
+    //
+    // 动作的**名字**是上游的事实（workbuddy 叫「签到」，codearts 叫
+    // 「领取福利」，语义上是同一件事但叫法不同）。写在前面就等于把
+    // 上游的文案搬进前端 —— 加第三个上游时又要改这里。
+    //
+    // 端点同理：data-act 存 ID，真正 POST 的路径在 daily_actions 里，
+    // 由 actionPath() 查出来。这样"按钮叫什么"与"打到哪"是同一份事实。
+    //
+    // # 兼容性（很重要）
+    //
+    // 事件分派与 act() 原本就按 data-act 分派，且 act() 里已经有一张
+    // `paths` 表。这里改成用 data-url 直接把自报的端点带到按钮上，
+    // 是**更可靠**的一条路：它不依赖前端再维护一张 ID→路径的表
+    //（那张表必然与后端漂移）。
+    const dailyBtns = dailyActionsOf(pid).map(d => {
+      if (!d.one_url) return '';
+      return `<button data-act="${esc(d.id)}" data-uid="${esc(U)}"`
+        + ` data-dayurl="${esc(d.one_url)}"`
+        + ` title="${esc(d.title || d.label)}">${esc(d.label)}</button>`;
+    }).filter(Boolean).join(' ');
+
+    // ⚠ 「积分」的位置：改造前它在**签到之后、保活之前**。
+    //
+    // 现在签到/保活是自报的（一个整体），积分走能力位路径（另一条），
+    // 于是重建顺序时它会被挤到最后。那是一次**可见的回归** ——
+    // 用户在同一个位置找同一个按钮，位置变了就是变了
+    //（本项目的先例：按钮顺序是设计决策，verify_account_buttons.js 对此有全等断言）。
+    //
+    // 所以把每日动作**按位置切开**：ID 排在 "keepalive" 之前的留在积分前面，
+    // 其余跟在积分后面。这样 workbuddy 的观感与改造前**逐字一致**：
+    //
+    //   签到 | 积分 | 保活 | 禁用 | 移除
+    //
+    // 判据不是硬编码 "checkin" 这两个字，而是"改造前积分的插入点在
+    // keepalive 之前" —— 用 keepalive 当锚点，上游改名/加动作时
+    // 这个切分点仍然有意义（它表达的是"保活总在最后"）。
+    const QUOTA_ANCHOR = 'keepalive';
+    const dailies = dailyActionsOf(pid);
+    const beforeQuota = dailies.filter(d => d.id !== QUOTA_ANCHOR && d.id < QUOTA_ANCHOR);
+    const afterQuota = dailies.filter(d => !(d.id !== QUOTA_ANCHOR && d.id < QUOTA_ANCHOR));
+
+    const dailyBtnOf = (d) => (!d.one_url ? '' :
+      `<button data-act="${esc(d.id)}" data-uid="${esc(U)}"`
+      + ` data-dayurl="${esc(d.one_url)}"`
+      + ` title="${esc(d.title || d.label)}">${esc(d.label)}</button>`);
+
+    const quotaBtn = hasCap(pid, 'quota-probe')
+      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/credits/refresh" title="刷新积分">积分</button>`
+      : '';
+
     const act = [
-      `<button data-act="checkin"  data-uid="${esc(U)}" title="单账号签到">签到</button>`,
-      `<button data-act="credits"  data-uid="${esc(U)}" title="刷新积分">积分</button>`,
-      `<button data-act="keepalive" data-uid="${esc(U)}" title="刷新 token">保活</button>`,
+      beforeQuota.map(dailyBtnOf).filter(Boolean).join(' '),
+      // 额度刷新**不是每日动作**（可以随时点，与"每天一次"无关），
+      // 所以它不走 daily_actions。它由 CapQuotaProbe 能力位驱动 ——
+      // 上游没声明这个能力位就不出现（codearts 声明了，所以它有）。
+      quotaBtn,
+      afterQuota.map(dailyBtnOf).filter(Boolean).join(' '),
       a.disabled
         ? `<button data-act="enable" data-uid="${esc(U)}">启用</button>`
         : `<button data-act="disable" data-uid="${esc(U)}">禁用</button>`,
@@ -2083,10 +2285,19 @@ let loginProvider = '';
     if (btn) btn.onclick = () => { el.hidden = true; };
   }
 
-  // ACT_LABEL 把动作名翻成中文，用于 busyRun 的进度文案
-  //（以前只在提示里零散出现，容易各写各的）。
+  // ACT_LABEL 把**本前端自己分派**的动作名翻成中文，用于 busyRun 的进度文案。
+  //
+  // # 为什么它现在只剩这几个（T3 之后）
+  //
+  // 以前这里有 checkin / credits / keepalive 三条 —— 那是把**上游的文案**
+  // 抄进前端（后端改一个字，界面就与事实不符）。
+  // 现在每日动作的文案来自 manifest 的 daily_actions[].label（上游自报），
+  // 按钮自己带着文字，progress 文案直接用**按钮上的那段文字**，
+  // 于是这里不必再维护那张表。
+  //
+  // 留下的四个是**核心通用动作**（账号生命周期，不属于任何上游），
+  // 它们的文案本来就是前端的表达，不是上游的事实。
   const ACT_LABEL = {
-    checkin: '签到', credits: '刷新积分', keepalive: '保活',
     enable: '启用', disable: '禁用', cooldown: '清冷却', remove: '移除',
   };
 
@@ -2106,18 +2317,40 @@ let loginProvider = '';
       return;
     }
 
-    const label = ACT_LABEL[action] || action;
+    // 动作的显示名：优先用**按钮自己的文字**（那是后端下发的 label），
+    // 其次才查本地表。次序不能反过来 —— 本地表对每日动作已经没有条目了，
+    // 反过来会让 progress 显示成英文 ID。
+    const btnLabel = btn ? String(btn.textContent || '').trim() : '';
+    const label = btnLabel || ACT_LABEL[action] || action;
+
     await busyRun(btn, async () => {
       let wrote = false;
       try {
-        const paths = {
-          checkin: '/admin/checkin', credits: '/admin/credits/refresh', keepalive: '/admin/keepalive',
-        };
-        if (paths[action]) {
-          const r = await admin(paths[action], { method: 'POST', body: JSON.stringify({ uid }) });
+        // ---- 每日动作：路径来自**按钮上的 data-dayurl**（后端自报）----
+        //
+        // # 为什么不再用一张 `paths` 常量表
+        //
+        // 那张表把"动作 ID → 端点"写死在前端，于是后端加/改一个动作
+        // 就要同步改这里，而**漏改不会报错** —— 表现是按钮出现但点了没反应
+        //（或打到旧路径）。把端点放在按钮上，前端就只是"把它转发出去"。
+        //
+        // data-dayurl 由 accountRow 从 manifest 的 daily_actions 填进来。
+        const dayUrl = btn && btn.dataset ? btn.dataset.dayurl : '';
+        if (dayUrl) {
+          const r = await admin(dayUrl, { method: 'POST', body: JSON.stringify({ uid }) });
+          // 回执形状有两类，都要认（否则会显示成"已提交"，看不见真实结果）：
+          //   · {result:{status,detail}}  —— workbuddy 的签到/保活
+          //   · {claimed:N, results:[…]}  —— codearts 的福利领取
           const res = r && r.result;
-          toast(`${label} ${uid.slice(0, 8)}: ${res ? res.status + (res.detail ? ' · ' + res.detail : '') : '已提交'}`,
-            res && res.status === 'fail');
+          if (res) {
+            toast(`${label} ${uid.slice(0, 8)}: ${res.status}${res.detail ? ' · ' + res.detail : ''}`,
+              res.status === 'fail');
+          } else if (r && typeof r.claimed === 'number') {
+            const total = Array.isArray(r.results) ? r.results.length : 0;
+            toast(`${label} ${uid.slice(0, 8)}：本次领到 ${r.claimed}/${total}`);
+          } else {
+            toast(`${label} ${uid.slice(0, 8)} 已提交`);
+          }
           wrote = true;
         } else if (action === 'enable' || action === 'disable') {
           await admin(`/admin/accounts/${encodeURIComponent(uid)}/${action}`, { method: 'POST', body: '{}' });
@@ -2136,17 +2369,36 @@ let loginProvider = '';
     }, { label, busyText: label + '中…' });
   }
 
-  async function startAll(kind) {
-    const paths = { checkin: '/admin/checkin', keepalive: '/admin/keepalive', credits: '/admin/credits/refresh' };
+  // startAll 触发某上游的**全量**每日动作。
+  //
+  // # 它现在收的是"动作"而不是"动作名"
+  //
+  // 改造前是 startAll('checkin')，路径从一张写死的表里取。
+  // 现在收一个 {provider, id, label, all_url} —— 全部来自 manifest 的
+  // daily_actions（上游自报）。所以顶部按钮是**按上游**生成的：
+  //
+  //   workbuddy 报了签到(Batch) → 出现「全部签到」
+  //   codearts  没报 Batch      → 不出现（它没有全量端点，如实）
+  //
+  // # 为什么形参从 kind 改成 act 对象
+  //
+  // kind 是字符串，于是"这个动作打哪个端点"只能靠前端查表 ——
+  // 而表里没有的动作会静默什么都不做。传对象之后端点随对象一起来，
+  // "表里没有"这个失败模式整个消失。
+  async function startAll(dact) {
+    if (!dact || !dact.all_url) return;
+    const label = dact.label || dact.id;
     try {
-      const r = await admin(paths[kind], { method: 'POST', body: '{}' });
-      if (r && r.started) { toast(`全量 ${kind} 已启动，后台执行中…`); watchTask(); }
+      const r = await admin(dact.all_url, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
       else if (r && r.results) {
         const ok = r.results.filter(x => x.status === 'ok').length;
-        toast(`全部积分刷新完成：成功 ${ok}/${r.results.length}`);
+        toast(`全部${label}完成：成功 ${ok}/${r.results.length}`);
         refresh(); loadHistory();
+      } else {
+        toast(`全部${label}已提交`);
       }
-    } catch (e) { toast(`${kind} 失败：${e.message}`, true); }
+    } catch (e) { toast(`全部${label}失败：${e.message}`, true); }
   }
 
   // ---------------------------------------------------------------- 全量任务进度
@@ -5113,8 +5365,19 @@ let multCatalogFailed = false;
       if ($('infoModal').style.display === 'flex') closeInfo();
       else if ($('modal').style.display === 'flex') closeModal();
     });
-    $('btnAllCheckin').onclick = () => startAll('checkin');
-    $('btnAllCredits').onclick = () => startAll('credits');
+    // 顶部的「全部 X」按钮由 manifest.daily_actions 驱动（T3），
+    // 走事件委托（容器会被 renderAllDailyButtons 重建）。
+    installAllDailyActions();
+    // 「刷新全部积分」不进每日动作槽位：额度刷新不是"每天一次"的动作，
+    // 它是核心对 CapQuotaProbe 能力位的统合入口，与上游身份无关。
+    $('btnAllCredits').onclick = () => startAll({
+      id: 'credits', label: '积分', all_url: '/admin/credits/refresh',
+    });
+    // 「全部签到」不再有静态 id —— 它现在由 workbuddy 自报的
+    // daily_actions（id=checkin, batch=true）生成。
+    // 「全部保活」同理：workbuddy 报了 Batch 能力，但**不渲染** ——
+    // 那是产品决策（见 HTML 里那段注释），不是"上游不支持"。
+    // 两者由 daily_actions 的 Batch 字段与上游自报的清单共同决定。
     // 「全部保活」按钮已删除（用户决定）—— 理由见 HTML 里那段注释：
     // 它与自动保活槽调用**同一个函数**，提前跑没有收益；
     // 行内的「保活」保留（那是同步返回结果、可定位问题的排障动作）。
@@ -5326,6 +5589,13 @@ let multCatalogFailed = false;
     capTitle: capTitle,
     providersWithCap: providersWithCap,
     hasAnyPanel: hasAnyPanel,
+    // T3：每日动作的判据全部读这两个 ——
+    //   · dailyActionsOf(pid) 是"上游报了什么"的前端投影
+    //   · hasCap(pid, cap) 是"账号行为什么要用它"的判据
+    // 不暴露它们的话，"codearts 行里没有签到按钮"这条断言就只能靠
+    // 字符串匹配 DOM，而匹配不到时无法区分"没渲染"与"渲染成了别的"。
+    dailyActionsOf: dailyActionsOf,
+    hasCap: hasCap,
     // R2/R3：账号池的"manifest 全集"判据与折叠状态。
     //
     // 为什么必须暴露：这两条都是**读页面内部状态**才能验的判据 ——

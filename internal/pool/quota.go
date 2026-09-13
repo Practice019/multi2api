@@ -13,6 +13,32 @@ package pool
 // 若继续用 int64，codearts 的额度只能被强行求和或取第一个模型，
 // 两种都是错的。
 //
+// # ⚠ T2 订正：上面关于 codearts 的那一行**是错的**（实测推翻）
+//
+// 原文说 codearts 是"按模型配额"，暗示 per_model 才是它的正确形态。
+// 用真实凭证实测（2026-09-13）后确认：
+//
+//	codearts 有数字的额度只有**订阅级积分**：
+//	    FetchSubscription.CreditRemain = 7474.04（total 7500, used 25.96）
+//	    —— 账号整体还剩多少，**就是一个标量**，int64 完全装得下。
+//
+//	而"按模型探测"那条路（QuotaState）**根本没有数值字段**：
+//	    type QuotaState struct {
+//	        Exhausted bool        // ← 只有"耗尽没耗尽"
+//	        Reason    string
+//	        CheckedAt time.Time
+//	    }
+//	    它回答的是"这个模型现在能不能用"（benefit 免费额度会独立于积分耗尽），
+//	    不是"还剩多少"。**把布尔当额度数值用是不可能的。**
+//
+// **结论：quota 需要用 QuotaView 而不是裸 int64，理由是对的；
+// 但引用 codearts 作为依据是错的** —— 真正的理由是"额度形态不止一种"
+//（unlimited / 未来可能出现真正按模型的上游），而不是 codearts 本身。
+//
+// 保留 QuotaView 不变，但 **FromPerModel 目前没有上游提供数据源**：
+// 它是为"将来某个真的按模型报额度的上游"预留的形态。
+// 接新上游时请**先实测上游到底给不给数字**，不要照着上面那行过时注释直接接。
+//
 // # 设计原则：pool 不解释额度语义
 //
 // pool 只做两件事：
@@ -152,7 +178,15 @@ func FromCredits(remaining int64) QuotaView {
 	return QuotaView{Kind: QuotaKindCredits, Remaining: remaining, HasData: true}
 }
 
-// FromPerModel 从按模型额度构造（codearts 的调用方用这个）。
+// FromPerModel 从按模型额度构造。
+//
+// ⚠ **目前没有上游会调用它**（T2 实测订正，见文件头）：
+// codearts 的"按模型探测"只返回布尔（够不够），不返回数值，
+// 所以它的额度走的是 FromCredits（订阅级积分）。
+//
+// 保留它是为**将来某个真的按模型报额度**的上游预留的形态 ——
+// 那时 ByModel 里才会有真数据，EffectiveFor(model) 也才真正有用。
+// 接新上游前请先实测上游给不给数字，不要照着过时注释直接接。
 func FromPerModel(byModel map[string]int64) QuotaView {
 	return QuotaView{Kind: QuotaKindPerModel, ByModel: byModel, HasData: true}
 }
@@ -175,12 +209,55 @@ func FromPerModel(byModel map[string]int64) QuotaView {
 //
 // 现在：额度视图**内容为空**时一律回落到 Credits，
 // 不管它自称什么 Kind。
+//
+// # ⚠ T2 修的第二个缺陷：向上升级时**凭空造出一个 0**
+//
+// 上面那条回落有个**没有被识别的副作用**：对于旧状态文件里根本没有额度信息的
+// 账号（`saved` 是零值、`legacyCredits` 也是 0），回落会造出
+//
+//	{Kind: credits, Remaining: 0, HasData: true}
+//
+// 而按本文件开头对 HasData 的定义，这**恰好**是那句话：
+//
+//	HasData=true + Remaining=0 → 查过了，确实没额度
+//
+// 真相却是**从没查过**。注意这不是"设计遗漏"，而是
+// **实现违反了自己声明的契约** —— HasData 的注释早就写明
+// "必须与 Remaining==0 区分开"，而这里恰恰没有区分。
+//
+// 实测后果（本仓 data/state.json 里的真实数据）：
+//
+//	"01a08fe0...": {"quota":{"kind":"credits","has_data":true},"credits":0}
+//	                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ remaining 被
+//	                omitempty 吃掉 = 0，用户看到的就是"codearts 额度是 0"
+//
+// 用户会把 0 读成"这个号没额度了"而去删账号 —— 这正是本次要修的坑。
+//
+// 修法：**只有真的曾经有过额度信息**（`legacyCredits != 0`）才回落到
+// Credits 单值；否则如实返回**未知**（HasData=false），界面显示 `—`。
+//
+// # 为什么这条对 workbuddy 零影响（有测试钉死）
+//
+// workbuddy 的账号走 `SetCredits` → `FromCredits` 写入，
+// 那份 quota 的 `hasContent()` 恒为 true（Kind==credits 就是一例），
+// **根本进不到兜底分支**。只有"从来没有过真数据"的账号才会走到这里。
+//
+// 见 TestRestoreQuota_WorkbuddyRealDataNotDowngraded 与
+// TestRestoreQuota_UnknownStaysUnknown。
 func restoreQuota(saved QuotaView, legacyCredits int64) QuotaView {
 	if saved.hasContent() {
 		return saved // 有内容，直接采用
 	}
-	// 旧格式，或"自称 per_model 但表是空的" —— 都用 Credits 兜底
-	return QuotaView{Kind: QuotaKindCredits, Remaining: legacyCredits, HasData: true}
+	// 旧格式，或"自称 per_model 但表是空的" —— 用 Credits 兜底。
+	//
+	// ⚠ 但**只在 legacyCredits 真的带信息时**才兜底。
+	// legacyCredits==0 意味着"这个账号从来没有被写过额度"，
+	// 此时造一个 has_data:true, remaining:0 就是**把未知伪装成确定的零**。
+	if legacyCredits != 0 {
+		return QuotaView{Kind: QuotaKindCredits, Remaining: legacyCredits, HasData: true}
+	}
+	// 从没查过 → 如实报告未知（界面显示 `—`，不是 0）。
+	return QuotaView{HasData: false}
 }
 
 // hasContent 报告这个额度视图是否真的带了数据。

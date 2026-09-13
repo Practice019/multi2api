@@ -51,6 +51,54 @@ type uiManifest struct {
 	AdminRoutes []uiAdminRoute `json:"admin_routes"`
 	// Jobs 已注册的定时任务运行状态。
 	Jobs []uiJob `json:"jobs"`
+	// DailyActions 上游自报的"每日动作"（签到 / 保活 / 领取福利…）。
+	//
+	// # 为什么它必须**单独**下发，而不是让前端从 AdminRoutes 里推
+	//
+	// AdminRoutes 是"这个上游挂了哪些端点"，DailyActions 是
+	// "这个上游有哪几个**用户可点的每日动作、各自叫什么名字**"。
+	// 两者不是一回事，三条理由：
+	//
+	//  1. **端点 ≠ 动作**：checkin 能力位下有 /admin/checkin 与 /admin/keepalive
+	//     两条路由，名字分别是「立即签到」「立即保活」。光看端点是能凑出来，
+	//     但要前端**猜**"哪些端点属于同一个每日动作槽位"——那正是硬编码。
+	//  2. **一条路由两种语义**：/admin/checkin 带 uid 是单账号、不带是全量。
+	//     AdminRoutes 里它只出现一次，表达不了"这个动作既有行内按钮
+	//     又有全量按钮"。
+	//  3. **顺序与文案是上游的表达**：上游报的顺序就是按钮顺序，
+	//     Label 就是按钮文字。让前端按能力位反推，等于把上游的文案
+	//     搬进前端 —— 加第三个上游时又要改前端。
+	//
+	// # 前端据此渲染的规则（用户要的"有什么显示什么"）
+	//
+	//	该上游报了某动作 → 它的每个账号行里有这个按钮
+	//	没报             → **不渲染**（不放假按钮）
+	//
+	// 实测收益：codearts 不再出现「签到」「保活」（它没有这两个动作，
+	// 点了会 404 或作用在别家账号上），而是出现它真有的「领取福利」。
+	DailyActions []uiDailyAction `json:"daily_actions"`
+}
+
+// uiDailyAction 一个上游自报的每日动作在 UI 契约里的样子。
+//
+// 字段与 gateway.DailyAction **一一对应**，刻意不做改名：
+// 这是同一条契约的两个投影，改名只会让"两边是不是同一个东西"
+// 变成需要对照才能回答的问题。
+type uiDailyAction struct {
+	// Provider 该动作属于哪个上游（前端按行归属取它）。
+	Provider string `json:"provider"`
+	// ID 动作的稳定标识，前端写成 button 的 data-act。
+	ID string `json:"id"`
+	// Label 按钮文案（「签到」/「保活」/「领取福利」）。
+	Label string `json:"label"`
+	// Title 悬停提示。空则前端用 Label。
+	Title string `json:"title,omitempty"`
+	// OneURL 单账号端点（体为 {"uid": ...}）。空 = 没有行内入口。
+	OneURL string `json:"one_url,omitempty"`
+	// AllURL 全量端点。空 = 没有全量入口。
+	AllURL string `json:"all_url,omitempty"`
+	// Batch 是否支持批量（决定顶部是否出现该动作的全量按钮）。
+	Batch bool `json:"batch,omitempty"`
 }
 
 // capabilityInfo 一个能力位的对外描述。
@@ -140,6 +188,7 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 		Capabilities: []capabilityInfo{},
 		AdminRoutes:  []uiAdminRoute{},
 		Jobs:         []uiJob{},
+		DailyActions: []uiDailyAction{},
 	}
 
 	// ---- 能力位字典（全量下发，不只下发被用到的）----
@@ -195,6 +244,38 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ---- 每日动作（独立于 AdminExt：一个上游可以只报动作、不报端点）----
+	//
+	// # 为什么这个循环**不在**上面的 `if !ok { continue }` 里面
+	//
+	// 那个 continue 是为 AdminExt 写的。把每日动作塞进去会让
+	// "实现了 DailyActionExt 但没实现 AdminExt"的上游整体被跳过 ——
+	// 那种上游是合法的（比如一个只有全量动作、没有管理面板的上游）。
+	//
+	// # 为什么要过 SanitizeDailyActions
+	//
+	// 前端的渲染管线对畸形输入没有防御（拿到什么渲染什么）。
+	// 在这里过一次，坏数据就变成"少一个按钮"而不是"页面某处静默坏掉"：
+	// ID 非法会让 `button[data-act="..."]` 选择器失效（按钮在但点了没反应），
+	// Label 为空会渲染出一个没有文字的按钮。
+	for _, p := range h.cfg.Registry.All() {
+		da, ok := gateway.ExtOf[gateway.DailyActionExt](p)
+		if !ok {
+			continue
+		}
+		for _, a := range gateway.SanitizeDailyActions(da.DailyActions()) {
+			m.DailyActions = append(m.DailyActions, uiDailyAction{
+				Provider: p.ID(),
+				ID:       a.ID,
+				Label:    a.Label,
+				Title:    a.Title,
+				OneURL:   a.OneURL,
+				AllURL:   a.AllURL,
+				Batch:    a.Batch,
+			})
+		}
+	}
+
 	// 排序：先按上游（默认上游在最前，其余字典序），再按路径。
 	//
 	// # 为什么必须显式排序
@@ -211,6 +292,22 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 			return a.Path < b.Path
 		}
 		return a.Method < b.Method
+	})
+
+	// 每日动作只按**上游**排序，上游**内部保持它自报的顺序**。
+	//
+	// # 为什么这里不能像 admin_routes 那样按字段排
+	//
+	// 上游报的顺序就是**按钮顺序**，那是上游的表达（"签到"在"保活"前面
+	// 是产品决策，不是巧合）。按 ID 字典序排会把 workbuddy 的
+	// 签到/保活排成 checkin/keepalive —— 这次恰好一样，但那是巧合；
+	// 一旦上游报了 "daily-gift"，字典序就会把它排到最前面。
+	//
+	// 按 provider 排序的理由与 admin_routes 相同：Registry.All() 的顺序
+	// 由 map 遍历决定，不排的话每次刷新按钮顺序都可能跳。
+	// SliceStable 保证同一上游内的相对顺序不被破坏 —— 这正是这里要的。
+	sort.SliceStable(m.DailyActions, func(i, j int) bool {
+		return m.DailyActions[i].Provider < m.DailyActions[j].Provider
 	})
 
 	// ---- 定时任务状态 ----

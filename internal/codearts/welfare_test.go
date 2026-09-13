@@ -10,10 +10,29 @@ import (
 //
 // 默认路径是仓库根的 ./auths —— 测试的工作目录是包目录
 // (internal/codearts)，所以要往上走两级。
+//
+// # ⚠ T2 修正：必须同时扫 `auths/codearts/` 子目录
+//
+// 目录布局改成"按上游分子目录"（`auths/<provider>/`）之后，
+// codearts 的凭证落到了 `auths/codearts/` —— **而这里没跟着改**。
+// 于是 LoadDir 在 `../../auths` 里只找到 workbuddy 的文件（它按
+// `codearts*.json` 通配，一个都匹配不到），len(creds)==0，
+// **本测试永远 Skip**。
+//
+// 后果不是"测试失败"，而是"测试存在但从不执行" —— 实测代价：
+// "codearts 到底能不能取到额度"从来没有被真正验证过，
+// 直到 T2 手工跑真实凭证才发现它其实能取到（7474.04）而界面上是 0。
+//
+// 所以把子目录加进候选：不修的话这条 live 覆盖永远是假的。
 func liveAuthForWelfare(t *testing.T) *Auth {
 	t.Helper()
 	p := os.Getenv("CORARTS_TEST_CRED")
-	candidates := []string{p, "../../auths", "./auths"}
+	candidates := []string{
+		p,
+		"../../auths/codearts", // 按上游分子目录后的真实位置
+		"../../auths",          // 兼容旧布局
+		"./auths",
+	}
 	for _, dir := range candidates {
 		if dir == "" {
 			continue
