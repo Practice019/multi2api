@@ -152,6 +152,52 @@ func NewManager(portalBase, stsBase, clientID string) *Manager {
 	}
 }
 
+// CloseCallback 关掉本地回调监听（幂等）。
+//
+// # 为什么需要它（源实现里没有）
+//
+// 源实现只在 `Wait()` 返回时关掉回调服务器。那是**命令行**的用法：
+// 进程跑一次、等一次、退出。所以不存在"会话没等到回调就没人管"的情况。
+//
+// 接进**常驻进程**后多了两条路径：
+//   - 用户点了「添加账号」但从未去授权（会话超时）
+//   - 用户点了多次，留下若干并发会话
+//
+// 这些会话各自占着一个监听端口（`net.Listen("tcp", "127.0.0.1:0")`），
+// 不主动关就是**端口泄漏** —— 表现为运行几天后"添加账号"开始报
+// "监听本地回调端口失败：address already in use"。
+//
+// 幂等：`Close()` 对已关闭的 Server 返回 ErrServerClosed，忽略即可。
+func (s *Session) CloseCallback() {
+	if s == nil || s.callbackS == nil {
+		return
+	}
+	_ = s.callbackS.Close()
+}
+
+// HTTPClient 暴露内部 HTTP 客户端（供 loginManager 接口用）。
+//
+// 加这一层是为了**不让适配器直接读导出字段** —— 那会把 Manager 的
+// 内部表示变成事实上的公共契约。方法可以被替换/包装，字段不能。
+//
+// nil 安全：未初始化的 Manager 返回 nil，调用方判空即可。
+// （零值 Manager 不该被使用，但"读一个字段"不该 panic。）
+func (m *Manager) HTTPClient() *http.Client {
+	if m == nil {
+		return nil
+	}
+	return m.HTTP
+}
+
+// 编译期断言：*Manager 与 *Session 必须满足适配器的窄接口。
+//
+// 这两行是**契约检查** —— 若将来给接口加了方法而实现没跟上，
+// 会在这里编译失败，而不是在运行期某个分支里静默失效。
+var (
+	_ loginManager       = (*Manager)(nil)
+	_ loginSessionHandle = (*Session)(nil)
+)
+
 // Start 开始一次授权：生成 PKCE/DPoP、起本地回调服务器、返回授权 URL。
 //
 // 返回的 Session.State 用于后续 Poll 查询。
