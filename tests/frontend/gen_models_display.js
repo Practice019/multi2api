@@ -46,6 +46,11 @@ const pieces = [
   grab('function modelOwnerOf('),
   grab('function modelProviderFilter('),
   grab('function syncModelProviderOptions('),
+  // T5 补漏：空态分组（评审抓到的漏实现）。
+  // ⚠ 这已经是第 4 次因为"给 renderModels 加了被调用的函数但忘了加进抽取列表"
+  // 而在产物里报 `xxx is not defined`。抽取是按名字取的 ——
+  // **改 renderModels 的依赖时，必须同步改这里**。
+  grab('function emptyModelGroups('),
   grab('function renderModels('),
 ];
 

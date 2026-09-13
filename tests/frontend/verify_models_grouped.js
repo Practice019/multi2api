@@ -182,6 +182,54 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     const junk = snap.names.filter(n => /undefined|NaN|null/.test(n));
     ok(junk.length === 0, 'chip 名里没有 undefined/NaN/null' + (junk.length ? ' —— ' + JSON.stringify(junk) : ''));
 
+    // ---- 5) 空态分组：声明了 models 能力但没有模型的上游必须出现 ----
+    //
+    // ⚠ 这条是**评审抓到的漏实现**：规格里画了 `codearts (0)` +
+    // "没有可用账号，无法获取模型目录"，但我没实现 —— 而当时
+    // 25 静态 + 22 E2E + 16 验收**全绿也没发现**。
+    //
+    // 原因是所有断言都在验"有的东西对不对"（去重、分组、折叠、倍率），
+    // **没有一条验"该有的东西在不在"**。空白不会让任何断言变红 ——
+    // 这正是"断言只测存在、不测内容"的镜像：**断言只测内容、不测存在**。
+    //
+    // 判据：拿 manifest 里声明了 models 能力的上游集合，
+    // 与界面上出现的分组集合对照 —— 不该有"声明了却没出现"的。
+    console.log('\n[5] 声明了 models 能力的上游都要有分组（含空态）');
+    const declared = JSON.parse(await ev(`JSON.stringify(
+      (window.__wb2api__.manifest().providers || [])
+        .filter(function(p){ return p && (p.capabilities || []).indexOf('models') >= 0; })
+        .map(function(p){ return p.id; })
+    )`));
+    const shownOwners = snap.groups.map(g => g.owner);
+    console.log('  manifest 声明 models 的上游: ' + JSON.stringify(declared));
+    console.log('  界面上出现的分组: ' + JSON.stringify(shownOwners));
+
+    const missing = declared.filter(d => shownOwners.indexOf(d) < 0);
+    ok(missing.length === 0,
+      '声明了 models 能力的上游**都**出现在模型面板里' +
+      (missing.length ? ' —— 缺失: ' + JSON.stringify(missing) : ''));
+
+    // 空态组必须有可自我解释的说明（不是一片空白）
+    const emptyState = JSON.parse(await ev(`JSON.stringify((function(){
+      var out = [];
+      document.querySelectorAll('#models .mgroup').forEach(function(g){
+        if (g.querySelectorAll('.chip').length) return;
+        out.push({ owner: g.dataset.owner,
+                   text: (g.querySelector('.chips')||{}).textContent ? g.querySelector('.chips').textContent.replace(/\\s+/g,' ').trim() : '' });
+      });
+      return out;
+    })())`));
+    console.log('  空态分组: ' + JSON.stringify(emptyState.map(e => e.owner + ' → ' + e.text.slice(0, 30))));
+    for (const e of emptyState) {
+      ok(e.text.length > 0,
+        '空态分组「' + e.owner + '」有说明文字（不是一片空白）');
+      ok(/账号|目录/.test(e.text),
+        '空态分组「' + e.owner + '」的说明讲清了原因（含"账号"或"目录"）');
+    }
+    if (emptyState.length === 0) {
+      console.log('  （当前没有空态分组 —— 所有上游都有模型）');
+    }
+
     ws.close();
   } catch (e) { console.log('EXCEPTION: ' + e.message); fail++; }
   finally { try { ch.kill(); } catch { } }

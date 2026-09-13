@@ -1631,7 +1631,13 @@ let loginProvider = '';
 
   function accountGroupRow(g) {
     const info = providerInfo(g.provider);
-    const def = g.isDefault ? ' · 默认' : '';
+    // 「默认」标记：导航组头那边已按用户要求删掉（T2），这里也一并去掉 ——
+    // 同一个控制台里对同一件事应该只有一种口径。评审指出这是**两处渲染点**，
+    // 只改一处会出现"导航没有、账号池有"的不一致。
+    //
+    // ⚠ `g.isDefault` 本身**仍然保留**（它决定账号池的排序与缺省路由提示），
+    // 这里只删**渲染**，不动数据。
+    const def = '';
     // 清单里没有这个上游时明说 —— 通常是历史账号或回落路径，
     // 显示成"未注册"比让它看起来像一个正常上游更有用。
     const known = info ? '' : '（未在 manifest 里注册）';
@@ -3245,8 +3251,20 @@ let loginProvider = '';
   // 当时这段放在 logPage 之后，logPage 求值时 DefaultPageSize 还在 TDZ 里。
   // 后续若要挪动这段代码，务必保持它在第一个 loadPageSize() 调用点之前。
 
-  // 上限 300 与 /admin/logs/history、/admin/checkin/history 服务端的单页上限一致；
-  // 下限 1。越界只在本函数里夹紧，不改变 state 的语义。
+  // 上限 300 取自 `/admin/checkin/history` 的服务端上限
+  //（`checkinlog.MaxPageSize = 300`）。下限 1。
+  // 越界只在本函数里夹紧，不改变 state 的语义。
+  //
+  // ⚠ 这里原先写的是"与 /admin/logs/history、/admin/checkin/history
+  // 服务端的单页上限**一致**" —— **那句话不实**（评审实测指出）：
+  //
+  //	/admin/checkin/history?limit=9999 → 服务端夹到 limit=300
+  //	/admin/logs/history?limit=9999    → 服务端**回显 limit=9999**
+  //	                                     （只返回 300 条，但不夹紧回显值）
+  //
+  // 所以两个端点对 limit 的处理**并不一致**：一个夹回显、一个不夹。
+  // 这里取 300 是因为它是**两个端点共同的实际返回上界**，
+  // 而不是因为"两边配置一样"。
   const PAGE_SIZE_MIN = 1;
   const PAGE_SIZE_MAX = 300;
   // DefaultPageSize 是「从未设置过」时的初值；一旦用户改过就以 localStorage 里存的为准。
@@ -4086,9 +4104,8 @@ let multCatalogFailed = false;
     //      但**界面上不该重复展示**。
     //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
     //   3. **可折叠**：状态存 localStorage，刷新后保持。
-    const groups = groupModelsByOwner(models);
+    const groups = groupModelsByOwner(models, emptyModelGroups());
     $('models').innerHTML = groups.map(renderModelGroup).join('');
-
     const sel = $('model'), keep = sel.value;
     // T7：模型下拉按上游筛选，**不去重**。
     //
@@ -4195,8 +4212,42 @@ let multCatalogFailed = false;
   // 为什么不用 `owned_by` 直接分组了事：`owned_by` 对带前缀的条目
   // 也是同一个值，但**id 不同**（`glm-5.2` vs `workbuddy/glm-5.2`），
   // 不去前缀就还是会显示两条。
-  function groupModelsByOwner(list) {
+  // emptyModelGroups 列出"应该有模型分组、但当前一个模型都没有"的上游。
+  //
+  // # 为什么需要它（这是评审抓到的漏实现）
+  //
+  // 规格里画了 `codearts (0)` + "没有可用账号，无法获取模型目录"。
+  // 但 `groupModelsByOwner` 只为**出现在模型列表里**的 owner 建组 ——
+  // codearts 一个模型都没有，于是它连分组都不出现，**用户看不到"为什么没有"**。
+  //
+  // 那正是这个项目的教训：**空白必须能自我解释**。
+  // 不显示比显示一个"没有账号"更糟 —— 用户只会以为功能坏了。
+  //
+  // # 判据
+  //
+  // 上游**声明了 `models` 能力**（说明它本该有模型目录），
+  // 却没有出现在 `/v1/models` 里。最常见原因是它没有可用账号 ——
+  // 但那句话由渲染层按 `account_count` 决定，这里只负责"让它出现"。
+  function emptyModelGroups() {
+    const out = [];
+    const provs = (typeof PROVIDERS !== 'undefined' && PROVIDERS) || [];
+    for (const p of provs) {
+      if (!p || !p.id) continue;
+      if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
+      out.push({ owner: p.id, accountCount: Number(p.account_count) || 0 });
+    }
+    return out;
+  }
+
+  function groupModelsByOwner(list, empties) {
     const byOwner = new Map();
+    // 先把"声明了 models 能力"的上游都建好空组，
+    // 这样没有模型的上游也会出现在界面上（见 emptyModelGroups 的注释）。
+    for (const e of (empties || [])) {
+      if (!byOwner.has(e.owner)) {
+        byOwner.set(e.owner, { owner: e.owner, items: [], seen: new Set(), accountCount: e.accountCount });
+      }
+    }
     for (const m of list) {
       if (!m || !m.id) continue;
       const slash = m.id.indexOf('/');
@@ -4226,6 +4277,21 @@ let multCatalogFailed = false;
     const open = modelGroupOpen(g.owner);
     // 分组标题带**模型数**（不是账号数）—— 与导航里的 navgcount 区分开：
     // 那个是账号数。这里写清楚"个模型"，避免两个数字被当成同一件事。
+    //
+    // 空组（该上游声明了 models 能力、但当前一个模型都没有）不渲染 chips 区，
+    // 改为一句能自我解释的说明 —— 见 emptyModelGroups 的注释：
+    // **空白必须能自我解释**，否则用户只会以为功能坏了。
+    let body;
+    if (!g.items.length) {
+      const why = (g.accountCount === 0)
+        ? '没有可用账号，无法获取模型目录。先在「账号池」添加账号。'
+        : '上游没有返回模型目录（账号可用但目录为空）。可用「强制刷新目录」重试。';
+      body = `<div class="chips"><span class="dim" style="font-size:12px">${esc(why)}</span></div>`;
+    } else {
+      body = `<div class="chips">${g.items.map(m =>
+        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
+        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>`;
+    }
     return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
       <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
               aria-expanded="${open ? 'true' : 'false'}"
@@ -4234,9 +4300,7 @@ let multCatalogFailed = false;
         <span class="mowner">${esc(g.owner)}</span>
         <span class="mcount2">${g.items.length} 个模型</span>
       </button>
-      <div class="chips">${g.items.map(m =>
-        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
-        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>
+      ${body}
     </div>`;
   }
 
