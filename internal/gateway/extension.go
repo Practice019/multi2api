@@ -112,6 +112,27 @@ type LoginFlow interface {
 	// 两道条件都满足才认为可用。实现方照实回答即可（通常是
 	// "cfg 里那个客户端不是 nil"）。
 	Configured() bool
+	// AuthDir 本上游的凭证落盘目录。
+	//
+	// # 为什么落盘目录必须由**上游自己**报（这是实测踩出来的）
+	//
+	// 我第一版让 `pollViaFlow` 用 `h.cfg.AuthDir` 落盘 —— 那是
+	// **默认上游（workbuddy）的目录**。而 codearts 的凭证在
+	// 另一个目录（多上游部署里各上游有自己的 auth_dir）。
+	//
+	// 实测后果：codearts 授权成功后，凭证被往 workbuddy 的 `./auths` 写。
+	// 即使不报错，也是把号放错了地方 —— 而 `workbuddy` 那边会看到
+	// 一个它不认识的 `codearts-*.json`。
+	//
+	// 更早一步的症状是 `rename auths.tmp auths: Access is denied.`
+	//（那是文件名缺失导致的，见 codeartsAuthFile.MarshalAuthFile 的注释）。
+	//
+	// 让上游自报目录，核心只管"拿到目录 + 文件名就写" ——
+	// 目录是**上游的事实**（它自己在哪读凭证），核心不该猜。
+	//
+	// 返回空串表示"上游没有独立目录，用核心的默认 AuthDir"
+	//（单上游部署就是这个形态，行为与改造前一致）。
+	AuthDir() string
 }
 
 // ErrLoginPending 表示登录授权尚未完成（用户在浏览器里还没点确认）。

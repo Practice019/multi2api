@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -516,6 +517,89 @@ func TestLoginFlowStartsOneTickerOnly(t *testing.T) {
 	// 这里写明推理链，因为它不是直接观测（goroutine 数没法从测试断言）。
 	if first.(*loginFlow).sessions == nil {
 		t.Error("缓存的 loginFlow 没有初始化 sessions")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 9. 凭证文件名必须被填上（空名会导致"重命名目录"的诡异失败）
+// ---------------------------------------------------------------------------
+
+// TestCredentialFromSetsFilename 文件名必须在 credentialFrom 里定下来。
+//
+// # 为什么这条守卫重要（用户实测报出来的）
+//
+// 我第一版让 `MarshalAuthFile` **返回空名字**，注释写着
+// "由调用方用 UID 决定文件名" —— 但核心根本没实现那个逻辑：
+//
+//	filepath.Join("auths", "") = "auths"    ← 目录本身被当成文件
+//	tmp := "auths.tmp"
+//	os.Rename("auths.tmp", "auths")         ← Access is denied
+//
+// 用户看到的报错是 `凭证落盘失败: rename auths.tmp auths: Access is denied.`
+// —— **完全看不出与文件名有关**，排查成本极高。
+func TestCredentialFromSetsFilename(t *testing.T) {
+	mgr := &fakeManager{}
+	lf := &loginFlow{mgr: mgr, providerID: "codearts", authDir: "/tmp/x"}
+
+	raw := json.RawMessage(`{
+		"auth":{"accessKeyId":"AK-FN","expiresAt":1893456000},
+		"account":{"uid":"AK-FN","nickname":"n"}}`)
+
+	cred, err := lf.credentialFrom(raw)
+	if err != nil {
+		t.Fatalf("credentialFrom 失败: %v", err)
+	}
+	mw, ok := cred.Secret.(interface {
+		MarshalAuthFile() (string, []byte, error)
+	})
+	if !ok {
+		t.Fatalf("Secret 类型 %T 没实现 MarshalAuthFile（核心会返回 501）", cred.Secret)
+	}
+	name, body, merr := mw.MarshalAuthFile()
+	if merr != nil {
+		t.Fatalf("MarshalAuthFile 报错: %v", merr)
+	}
+	if name == "" {
+		t.Error("文件名是空的 —— 核心会执行 `os.Rename(\"auths.tmp\", \"auths\")`，" +
+			"报错是 `Access is denied.`，完全看不出与文件名有关")
+	}
+	if !strings.HasPrefix(name, "codearts-") || !strings.HasSuffix(name, ".json") {
+		t.Errorf("文件名 %q 应形如 codearts-<uid>.json（与源仓库命令行路径一致）", name)
+	}
+	if len(body) == 0 {
+		t.Error("内容为空 —— 落盘会得到空文件")
+	}
+}
+
+// TestMarshalAuthFileRejectsEmptyName 空名必须**明确报错**，不能静默返回空串。
+//
+// 反例（必须避免）：返回 `("", raw, nil)` —— 那会让调用方走到
+// `filepath.Join(dir, "")`，把**目录**当成文件去重命名。
+func TestMarshalAuthFileRejectsEmptyName(t *testing.T) {
+	doc := &codeartsAuthFile{raw: json.RawMessage(`{"a":1}`)} // name 故意空
+	_, _, err := doc.MarshalAuthFile()
+	if err == nil {
+		t.Error("空文件名时应**明确报错** —— 静默返回空串会让核心" +
+			"把目录当成文件重命名，报错是 Access is denied（看不出真因）")
+	}
+}
+
+// TestLoginFlowReportsAuthDir 上游必须自报落盘目录。
+//
+// 实测踩过：核心用 `h.cfg.AuthDir`（默认上游 workbuddy 的目录），
+// 于是 codearts 授权成功后凭证被写进 workbuddy 的目录。
+func TestLoginFlowReportsAuthDir(t *testing.T) {
+	p := &Provider{login: NewManager("", "", ""), authDir: "/tmp/codearts-auths"}
+	lf, ok := p.LoginFlow()
+	if !ok {
+		t.Fatal("LoginFlow() 应返回 true")
+	}
+	if got := lf.AuthDir(); got != "/tmp/codearts-auths" {
+		t.Errorf("*loginFlow.AuthDir() = %q，应为 Provider 的 authDir —— "+
+			"核心拿到的是 *loginFlow，所以落盘目录必须在这一层拿得到", got)
+	}
+	if got := p.AuthDir(); got != "/tmp/codearts-auths" {
+		t.Errorf("*Provider.AuthDir() = %q", got)
 	}
 }
 

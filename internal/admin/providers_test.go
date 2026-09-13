@@ -182,6 +182,9 @@ func (s *loginStubProvider) Poll(state string) (gateway.Credential, error) {
 // 用 pinned 字段而非恒 true：这样才能写"实现了但没配置"的反例。
 func (s *loginStubProvider) Configured() bool { return s.configured }
 
+// AuthDir 凭证落盘目录（`gateway.LoginFlow` 要求）。
+func (s *loginStubProvider) AuthDir() string { return "/tmp/stub-auths" }
+
 var _ gateway.LoginFlow = (*loginStubProvider)(nil)
 
 // TestProvidersLoginReflectsLoginFlow 钉住 `login` 字段与 LoginFlow 实现一致。

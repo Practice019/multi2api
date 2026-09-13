@@ -98,6 +98,10 @@ type loginFlow struct {
 	mgr loginManager
 	// providerID 本上游的归属标识，由 *Provider 传入。
 	providerID string
+	// authDir 凭证落盘目录。同样由 Provider 传入 ——
+	// `loginFlow` 是核心实际持有的对象，必须自带回答 AuthDir() 所需的信息
+	//（不在这里回头读 *Provider：那会引入反向指针，且测试替身构造不出来）。
+	authDir string
 
 	mu       sync.Mutex
 	sessions map[string]*loginSession
@@ -148,6 +152,7 @@ func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
 		p.loginFlowCached = &loginFlow{
 			mgr:        p.login,
 			providerID: p.ID(),
+			authDir:    p.authDir,
 			sessions:   make(map[string]*loginSession),
 		}
 		// 后台定期回收超时会话。
@@ -190,6 +195,24 @@ func (p *Provider) Poll(state string) (gateway.Credential, error) {
 // 见 gateway.LoginFlow.Configured 的注释。
 func (p *Provider) Configured() bool { return p != nil && p.login != nil }
 
+// AuthDir 本上游凭证的落盘目录（`gateway.LoginFlow` 要求）。
+//
+// # ⚠ 这是实测踩出来的
+//
+// 我第一版让核心的 `pollViaFlow` 用 `h.cfg.AuthDir` 落盘 ——
+// 那是**默认上游（workbuddy）的目录**。于是 codearts 授权成功后，
+// 凭证被往 workbuddy 的 `./auths` 写（用户实测报的
+// `rename auths.tmp auths: Access is denied.` 就是这条路径上的第一步失败）。
+//
+// 现在由上游自报：Provider 知道自己从哪**读**凭证（`p.authDir`），
+// 那就是它该往哪**写**。核心只管"拿到目录 + 文件名就写"，不猜。
+func (p *Provider) AuthDir() string {
+	if p == nil {
+		return ""
+	}
+	return p.authDir
+}
+
 // Configured 报告这份部署真的能走登录流程（*loginFlow 视角）。
 //
 // ⚠ `*loginFlow` **也要**实现它：核心拿到的接口值是 `*loginFlow`
@@ -199,6 +222,17 @@ func (p *Provider) Configured() bool { return p != nil && p.login != nil }
 // 两处判据必须一致，否则会出现"manifest 说有按钮、点了却报未配置"。
 func (f *loginFlow) Configured() bool {
 	return f != nil && f.mgr != nil
+}
+
+// AuthDir 转发给 Provider（`gateway.LoginFlow` 要求 *loginFlow 也实现它）。
+//
+// 核心拿到的是 `*loginFlow`，所以落盘目录必须在这一层拿得到 ——
+// 只在 `*Provider` 上实现是不够的（那正是 T10-d 踩过的"方法集不匹配"）。
+func (f *loginFlow) AuthDir() string {
+	if f == nil {
+		return ""
+	}
+	return f.authDir
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +363,20 @@ func (f *loginFlow) credentialFrom(raw json.RawMessage) (gateway.Credential, err
 		return gateway.Credential{}, errors.New("codearts: 授权结果里没有账号标识（uid 与 AK 都为空）")
 	}
 
+	// ⚠ 文件名必须在这里定下来（`codearts-<uid>.json`，与源仓库命令行路径一致）。
+	//
+	// 我第一版**没有设它** —— `MarshalAuthFile` 返回空串，于是核心：
+	//
+	//	filepath.Join("auths", "") = "auths"    ← 目录本身被当成文件
+	//	os.Rename("auths.tmp", "auths")         ← Access is denied
+	//
+	// 用户看到的报错是 `凭证落盘失败: rename auths.tmp auths: Access is denied.`
+	// —— 一个**完全看不出与文件名有关**的失败。
+	//
+	// 现在 `MarshalAuthFile` 在名字为空时**明确报错**，这类错误不会再
+	// 以"重命名目录"的形态出现。
+	doc.name = "codearts-" + uid + ".json"
+
 	var expiresAt time.Time
 	if probe.Auth.ExpiresAt > 0 {
 		expiresAt = time.Unix(probe.Auth.ExpiresAt, 0)
@@ -421,19 +469,37 @@ type codeartsAuthFile struct {
 	name string
 }
 
+// MarshalAuthFile 返回 (文件名, 内容)。
+//
+// # ⚠ 这里我第一版返回了**空名字**，导致落盘直接失败
+//
+// 第一版写的是"不自己拼名，由调用方用 UID 决定"，注释还写着
+// "核心的 pollViaFlow 会用 gateway.Credential.UID 决定文件名"。
+//
+// **但核心根本没实现那个逻辑** —— 它把空名直接传给了 writeAuthFile：
+//
+//	filepath.Join("auths", "") = "auths"       ← 目录本身被当成文件
+//	tmp := "auths.tmp"
+//	os.Rename("auths.tmp", "auths")            ← Access is denied
+//
+// 用户实际看到的报错：
+//
+//	凭证落盘失败: rename auths.tmp auths: Access is denied.
+//
+// 教训：**我假设了调用方会做某件事，但没对着它的代码核实。**
+// 跨层契约里"由对方决定"这种写法，必须先去对方那里确认它真的做了 ——
+// 否则失败会以完全无关的形态出现（这里是"重命名目录"）。
 func (c *codeartsAuthFile) MarshalAuthFile() (string, []byte, error) {
 	if c == nil || len(c.raw) == 0 {
 		return "", nil, errors.New("codearts: 凭证内容为空")
 	}
-	name := c.name
-	if name == "" {
-		// 与源仓库命令行路径的命名保持一致：codearts-<ak>.json。
-		// ⚠ 这里**不**自己拼 uid —— 核心的 pollViaFlow 会用
-		// gateway.Credential.UID 决定文件名。返回空名表示
-		// "由调用方决定"，避免两处各拼一次而漂移。
-		name = ""
+	if c.name == "" {
+		// 走到这里说明 credentialFrom 没填上名字 —— 那是编程错误。
+		// **明确报错**而不是回落成空串：空串会变成"重命名目录"那种
+		// 看起来与文件名无关的诡异失败。
+		return "", nil, errors.New("codearts: 凭证文件名未设置（uid 解析失败？）")
 	}
-	return name, []byte(c.raw), nil
+	return c.name, []byte(c.raw), nil
 }
 
 // httpClientOf 暴露给测试用（本包只需要它不为 nil）。
