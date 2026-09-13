@@ -18,6 +18,8 @@ package admin
 import (
 	"net/http"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // schedule GET /admin/schedule —— 下一次唤醒时刻与当前时点设置。
@@ -75,6 +77,29 @@ type providerInfo struct {
 	Default bool `json:"default"`
 	// AccountCount 该上游当前有多少账号（前端分组标题显示数量）。
 	AccountCount int `json:"account_count"`
+	// Login 该上游**是否支持在页面内添加账号**；不支持时为 null。
+	//
+	// # 为什么要有这个字段
+	//
+	// 添加账号是**上游专属**动作：workbuddy 是 OAuth 设备码，
+	// codearts 是 OAuth + DPoP（步骤数都不同，见 gateway.LoginFlow 的注释）。
+	// 前端"账号池"的每个上游分组行据此决定：
+	//   · 有 login  → 渲染「＋ 添加账号」按钮
+	//   · 没有      → 不渲染（**不放假按钮** —— 点了会走错上游或用不了）
+	//
+	// 判据是 Registry 里的**类型断言**（该上游有没有实现 LoginFlow），
+	// 与 AdminExt / JobExt 同一个模式 —— 前端不写死上游名，
+	// 加第三个上游时前端 0 改动。
+	Login *providerLogin `json:"login"`
+}
+
+// providerLogin 登录能力的**声明**（不含任何实现细节）。
+//
+// Kind 用字符串而不是数字：它是稳定契约，前端据此决定渲染什么按钮。
+// 目前只有 "device"（设备码/授权链接），将来可能有别的形态（如密钥对导入）。
+type providerLogin struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
 }
 
 // providers GET /admin/providers —— 已注册上游清单 + 能力位。
@@ -93,6 +118,18 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			// 账号数：按 provider 过滤统计（pool 的 ListFor 已支持）。
 			if h.cfg.Pool != nil {
 				info.AccountCount = len(h.cfg.Pool.ListFor(p.ID()))
+			}
+			// 登录能力：该上游有没有实现 gateway.LoginFlow。
+			//
+			// ⚠ 这是**类型断言**，不是"看上游名" —— 与本包 AdminExt / JobExt
+			// 同一个模式（见 uimanifest.go 对 AdminExt 的用法）。
+			// 前端据此决定分组行渲染「＋ 添加账号」还是不渲染。
+			//
+			// 当前只有 workbuddy 实现（codearts 的 DPoP 登录流程尚不存在），
+			// 所以 codearts 的 login 是 null，前端不渲染按钮 —— 那是**正确**的：
+			// 它真的做不到，放个按钮点了会失败。
+			if _, ok := gateway.ExtOf[gateway.LoginFlow](p); ok {
+				info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
 			}
 			infos = append(infos, info)
 		}

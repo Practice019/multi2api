@@ -159,3 +159,81 @@ func (s *stubProvider) Chat(ctx context.Context, c gateway.Credential, b []byte)
 func (s *stubProvider) Models(ctx context.Context, c gateway.Credential) ([]gateway.ModelInfo, error) {
 	return nil, nil
 }
+
+// loginStubProvider 在 stubProvider 之上**实现 LoginFlow** ——
+// 用来验证 `login` 字段是**类型断言**得来的，而不是看上游名写死的。
+//
+// 为什么必须有一个"实现了的"样本：若只测"没实现的返回 null"，
+// 那么把判据改成 `info.Login = nil`（永远不给）也能全绿 ——
+// 那样的守卫是装饰品。有了这个样本，写死 nil 会立刻变红。
+type loginStubProvider struct{ stubProvider }
+
+func (s *loginStubProvider) Start() (string, string, error) {
+	return "stub-state", "https://example.invalid/authorize", nil
+}
+func (s *loginStubProvider) Poll(state string) (gateway.Credential, error) {
+	return gateway.Credential{}, nil
+}
+
+// TestProvidersLoginReflectsLoginFlow 钉住 `login` 字段与 LoginFlow 实现一致。
+//
+// 这是**跨层契约**：前端据 `providers[].login` 决定分组行渲染不渲染
+// 「＋ 添加账号」。若这里判错，前端要么放个点了会失败的假按钮，
+// 要么该有的按钮不出现。
+func TestProvidersLoginReflectsLoginFlow(t *testing.T) {
+	reg := gateway.NewRegistry()
+	// with-login：实现了 LoginFlow
+	if err := reg.Register(&loginStubProvider{stubProvider{
+		id: "with-login", caps: gateway.CapChat,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	// without-login：同一个类型，只是没实现 LoginFlow
+	if err := reg.Register(&stubProvider{
+		id: "without-login", caps: gateway.CapChat,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := New(Config{Registry: reg, DefaultProvider: "with-login"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Providers []providerInfo `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析失败: %v body=%s", err, rec.Body)
+	}
+	byID := map[string]providerInfo{}
+	for _, p := range resp.Providers {
+		byID[p.ID] = p
+	}
+
+	wl, ok := byID["with-login"]
+	if !ok {
+		t.Fatal("响应里没有 with-login")
+	}
+	if wl.Login == nil {
+		t.Error("实现了 LoginFlow 的上游，login 不该是 null —— " +
+			"前端据此渲染「＋ 添加账号」，判错会让按钮不出现")
+	} else {
+		if wl.Login.Kind == "" {
+			t.Error("login.kind 不能为空 —— 前端按它决定渲染什么形态的按钮")
+		}
+		if wl.Login.Label == "" {
+			t.Error("login.label 不能为空 —— 前端直接把它当按钮文案")
+		}
+	}
+
+	wol, ok := byID["without-login"]
+	if !ok {
+		t.Fatal("响应里没有 without-login")
+	}
+	if wol.Login != nil {
+		t.Errorf("**没有**实现 LoginFlow 的上游，login 必须是 null（实际 %+v）—— "+
+			"否则前端会渲染一个点了走不通的按钮", wol.Login)
+	}
+}
