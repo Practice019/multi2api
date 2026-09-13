@@ -91,7 +91,15 @@ type Provider struct {
 	accounts func() []*Auth
 
 	// adminAdminEnv 管理端点需要的核心只读依赖（账号 uid 列表等）。
+	// adminEnv 管理端点宿主依赖。
 	adminEnv AdminEnv
+
+	// login 页面内添加账号用的 OAuth 授权管理器（nil = 不支持页内添加）。
+	//
+	// 与 Config.Login 是同一个值的两种存放形态：Config 是**构造期入参**，
+	// 本字段是**运行期状态**。Provider 的字段一律小写（不导出），
+	// 外部只能通过 NewWithConfig 或 SetLogin 注入。
+	login *Manager
 
 	// refreshInterval 后台主动续期的扫描周期。<=0 表示不注册该任务
 	// （只走请求路径的惰性续期）。
@@ -119,6 +127,24 @@ type Config struct {
 	Accounts func() []*Auth
 	// Admin 管理端点宿主依赖。
 	Admin AdminEnv
+
+	// Login 页面内添加账号用的 OAuth 授权管理器（nil = 不支持页内添加）。
+	//
+	// # 为什么是 *Manager 而不是接口
+	//
+	// 与 workbuddy 那边的 `OAuthFlow` 不同：`oauth.Manager` 是**本包内**的类型
+	//（移植进来后同属 package codearts），所以不需要为了解耦而抽接口 ——
+	// 抽接口只会多一层什么都不做的转发。
+	//
+	// workbuddy 需要接口是因为它**不能 import internal/oauth**；
+	// codearts 这边没有这个约束（它自己就是授权流程的实现方）。
+	//
+	// # nil 时的行为
+	//
+	// `Configured()` 返回 false → manifest 的 login 为 null →
+	// 前端不渲染「＋ 添加账号」。**没配就不给按钮**，
+	// 与 workbuddy 保持同一条判据（见 gateway.LoginFlow.Configured）。
+	Login *Manager
 }
 
 // NewWithConfig 按配置建一个 CodeArts Provider。
@@ -131,6 +157,7 @@ func NewWithConfig(cfg Config) *Provider {
 		authDir:  cfg.AuthDir,
 		accounts: cfg.Accounts,
 		adminEnv: cfg.Admin,
+		login:    cfg.Login,
 	}
 }
 
