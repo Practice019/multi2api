@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/clientlogin"
+	"workbuddy2api/internal/codearts"
 )
 
 // Config 顶层配置。
@@ -209,6 +210,29 @@ type Config struct {
 		// 用 *bool 以便区分「没配」与「显式 false」：
 		// 键缺席时保持默认 true（nil → 默认）。
 		PoolAccounts *bool `json:"pool_accounts"`
+
+		// OAuthPortal 页内添加账号跳转的授权站点。
+		//
+		// 留空则用 codearts.DefaultPortalBase（codearts.huaweicloud.com）。
+		//
+		// # 为什么需要它
+		//
+		// 授权页地址是**部署相关**的：CN 站与国际站不同，
+		// 将来也可能换域名。写死在包里意味着换站点要改代码重编译。
+		//
+		// # 与顶层 admin.oauth_base_url 的关系
+		//
+		// **完全无关**，刻意分开：那个是 workbuddy（CodeBuddy）的授权站点，
+		// 这个是 CodeArts 的。两者若共用同一个键，配了 workbuddy
+		// 就会把 codearts 的授权页也指过去 —— 表现为"点了添加账号
+		// 打开的是另一个产品的登录页"，很难判断是配置错还是代码错。
+		OAuthPortal string `json:"oauth_portal"`
+
+		// OAuthSTS token 端点。
+		//
+		// 留空则用 codearts.DefaultSTSBase（sts.cn-north-4.myhuaweicloud.com）。
+		// 与 Portal 同理：区域不同端点不同（cn-north-4 / cn-east-3 ...）。
+		OAuthSTS string `json:"oauth_sts"`
 	} `json:"codearts"`
 
 	// 解析后
@@ -242,6 +266,12 @@ type Config struct {
 	// CodeartsPoolAccounts 是否把 codearts 账号并入核心账号池（见 Codearts.PoolAccounts）。
 	// CodeartsEnabled 为 false 时无意义。
 	CodeartsPoolAccounts bool `json:"-"`
+	// CodeartsOAuthPortal / CodeartsOAuthSTS 页内添加账号用的授权站点与 token 端点。
+	//
+	// 已填好默认值（见 normalize），所以 main 可以直接取用而不必判空。
+	// CodeartsEnabled 为 false 时不会被读到。
+	CodeartsOAuthPortal string `json:"-"`
+	CodeartsOAuthSTS    string `json:"-"`
 }
 
 // Default 默认配置。
@@ -484,6 +514,18 @@ func (c *Config) normalize() error {
 	// 并入账号池默认开（理由见 Codearts.PoolAccounts）。
 	// 未启用时恒 false —— 不注册的上游不该在池子里留下任何痕迹。
 	c.CodeartsPoolAccounts = c.CodeartsEnabled && boolOr(c.Codearts.PoolAccounts, true)
+
+	// 页内添加账号的授权站点/端点。
+	//
+	// 默认值与 codearts 包里的常量**同源**（直接引用，不写第二份字面量）——
+	// 两处各写一份会漂移，而漂移的表现是"登录成功但续期打到另一个区域"，
+	// 极难排查。这里只是把常量"提升"到配置层，让部署可以覆盖它。
+	if c.CodeartsOAuthPortal == "" {
+		c.CodeartsOAuthPortal = codearts.DefaultPortalBase
+	}
+	if c.CodeartsOAuthSTS == "" {
+		c.CodeartsOAuthSTS = codearts.DefaultSTSBase
+	}
 	return nil
 }
 

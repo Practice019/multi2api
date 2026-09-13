@@ -183,6 +183,18 @@ func main() {
 	if cfg.CodeartsEnabled {
 		cb = codearts.NewWithConfig(codearts.Config{
 			AuthDir: cfg.CodeartsAuthDir,
+			// 页内添加账号（PKCE + DPoP，走本地回调服务器）。
+			//
+			// 这里是 R1 的最后一环：`codearts.Manager` 早就在包内实现了
+			// 完整授权流程（从 codearts2api 移植），但**装配层一直没传进来** ——
+			// 于是 `Configured()` 恒为 false，manifest 的 login 恒为 null，
+			// 界面上 codearts 那一行永远没有「＋ 添加账号」。
+			//
+			// 传了之后：
+			//   manifest.providers[codearts].login = {"kind":"device","label":"添加账号"}
+			//   → 前端渲染按钮（它已经在按 manifest 渲染，前端零改动）
+			//   → /admin/login/start?provider=codearts 走 codearts 自己的流程
+			Login: codearts.NewManager(cfg.CodeartsOAuthPortal, cfg.CodeartsOAuthSTS, ""),
 		})
 		// 凭证访问器：核心把"现在有哪些账号"喂给上游（上游不得依赖 internal/pool）。
 		//

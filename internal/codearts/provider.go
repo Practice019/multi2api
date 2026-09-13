@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/gateway"
@@ -100,6 +101,24 @@ type Provider struct {
 	// 本字段是**运行期状态**。Provider 的字段一律小写（不导出），
 	// 外部只能通过 NewWithConfig 或 SetLogin 注入。
 	login *Manager
+
+	// loginFlowCached / loginFlowOnce 缓存 LoginFlow() 的返回值。
+	//
+	// # 为什么必须缓存（这是端到端实测抓到的真 bug）
+	//
+	// 第一版 `LoginFlow()` 每次调用都新建一个 `loginFlow`，
+	// 于是 `sessions` map 每次都是空的：
+	//
+	//	/admin/login/start → 实例 A 存下会话
+	//	/admin/login/poll  → 实例 B（空 map）→ "授权会话不存在或已结束"
+	//
+	// **后果：页内添加账号永远不可能成功，而且不报错，只是永远 pending/失败。**
+	//
+	// 单元测试抓不到它 —— 它们直接构造一个 loginFlow 再连续调方法，
+	// 全程同一个实例，"每次调用换实例"这件事根本不会发生。
+	// 只有**跨调用**的端到端测试能暴露。
+	loginFlowCached *loginFlow
+	loginFlowOnce   sync.Once
 
 	// refreshInterval 后台主动续期的扫描周期。<=0 表示不注册该任务
 	// （只走请求路径的惰性续期）。

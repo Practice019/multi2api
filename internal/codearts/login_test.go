@@ -329,3 +329,95 @@ func TestGCRecordsSessionClosed(t *testing.T) {
 		t.Error("回收超时会话时没有调用 CloseCallback —— 回调监听端口会泄漏")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 7. LoginFlow() 必须返回**同一个**实例（跨调用的状态）
+// ---------------------------------------------------------------------------
+
+// TestLoginFlowIsStableAcrossCalls 钉住"start 与 poll 拿到同一个 flow"。
+//
+// # 这条守卫是被一个真 bug 逼出来的
+//
+// 第一版 `LoginFlow()` 每次调用都新建实例，于是 `sessions` map 各是一份空表：
+//
+//	/admin/login/start → 实例 A 存下会话
+//	/admin/login/poll  → 实例 B（空）→ "授权会话不存在或已结束"
+//
+// 后果：**页内添加账号永远不可能成功**，且没有任何报错提示原因。
+//
+// # 为什么这个 bug 之前没被抓住
+//
+// 本文件其余测试都用 `newTestFlow` —— 它**直接构造一个 loginFlow**
+// 然后连续调方法，全程同一个实例。所以"每次调用都换实例"这件事
+// 在那些测试里**根本不会发生**。
+//
+// 我实际是靠**端到端**发现的：start 之后直打回调地址，回调服务器
+// **真能打通**（说明流程活着），但 poll 说会话不存在。
+// 两个观察互相矛盾 → 唯一解释是 poll 拿到的不是同一个 flow。
+//
+// 所以这条断言的写法必须是"**跨调用比较身份**" ——
+// 只有这样才能在不跑端到端的情况下钉住它。
+func TestLoginFlowIsStableAcrossCalls(t *testing.T) {
+	p := &Provider{login: NewManager("", "", "")}
+
+	a, ok := p.LoginFlow()
+	if !ok {
+		t.Fatal("配了 login 后 LoginFlow() 应返回 true")
+	}
+	b, ok := p.LoginFlow()
+	if !ok {
+		t.Fatal("第二次调用也应返回 true")
+	}
+
+	if a != b {
+		t.Error("LoginFlow() 两次返回了**不同实例** —— " +
+			"start 与 poll 会各自拿到一份空的 sessions map，" +
+			"表现是 poll 永远报「授权会话不存在」，而**页内添加账号永远不可能成功**。" +
+			"必须缓存实例（Provider.loginFlowCached）")
+	}
+
+	// 更强的判据：往里塞一个会话，再从**第二次调用**的返回值里读回来。
+	// 这直接模拟了 start → poll 的跨调用路径。
+	lf := b.(*loginFlow)
+	lf.mu.Lock()
+	lf.sessions["ST-cross"] = &loginSession{oauth: &fakeSession{}, done: make(chan loginResult, 1)}
+	lf.mu.Unlock()
+
+	again, _ := p.LoginFlow()
+	lf2 := again.(*loginFlow)
+	lf2.mu.Lock()
+	_, present := lf2.sessions["ST-cross"]
+	lf2.mu.Unlock()
+
+	if !present {
+		t.Error("start 存下的会话在下次 LoginFlow() 的实例里读不到 —— " +
+			"这就是那个 bug 的直接形态（跨调用状态丢失）")
+	}
+}
+
+// TestLoginFlowConfiguredConsistency 两处 Configured 判据必须一致。
+//
+// `Configured` 同时挂在 `*Provider` 与 `*loginFlow` 上：
+// 前者供 `ExtOf` 的类型断言，后者是核心实际拿到的接口值。
+// 两者若不一致，会出现"manifest 说有按钮、点了却报未配置"。
+func TestLoginFlowConfiguredConsistency(t *testing.T) {
+	// 未配置
+	p0 := &Provider{}
+	if p0.Configured() {
+		t.Error("未配置时 *Provider.Configured() 应为 false")
+	}
+
+	// 已配置 —— 两处都应为 true
+	p1 := &Provider{login: NewManager("", "", "")}
+	if !p1.Configured() {
+		t.Error("已配置时 *Provider.Configured() 应为 true")
+	}
+	lf, ok := p1.LoginFlow()
+	if !ok {
+		t.Fatal("已配置时 LoginFlow() 应为 true")
+	}
+	if !lf.Configured() {
+		t.Error("*loginFlow.Configured() 应为 true —— " +
+			"核心拿到的接口值是 *loginFlow，它若返回 false 会直接 501")
+	}
+}
