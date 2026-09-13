@@ -26,7 +26,7 @@ var _ gateway.CredentialLoader = (*Provider)(nil)
 // LoadCredentials 读取 `dir` 下全部 workbuddy 凭证。
 //
 // `dir` 由核心传入 —— 它是 `AuthDirExt.AuthDir()` 报的那个目录
-//（本包返回 `cfg.AuthDir`，可能是空串 → 核心回落默认目录）。
+// （本包返回 `cfg.AuthDir`，可能是空串 → 核心回落默认目录）。
 //
 // ⚠ 用 `auth.LoadDirCompat(dir, ProviderID)` 而不是 `auth.LoadDir(dir)`：
 // 迁移期凭证可能还在**父目录**根下（`auths/workbuddy-*.json` 与

@@ -1150,17 +1150,69 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow ga
 		writeError(w, http.StatusInternalServerError, "凭证落盘失败: "+werr.Error())
 		return errHandled
 	}
-	// 重扫**该上游的**目录。
+	// 重扫**该上游的**目录，**用它自己的解析器**。
 	//
 	// ⚠ 与落盘目录必须一致 —— 扫错目录会得到"写成功但池子里没有"
 	//（用户看到账号没进池，而日志说成功）。
 	//
-	// 用 LoadDirCompat：迁移期凭证可能还在旧的根目录位置，
-	// 只读子目录会看到"账号池突然空了"。
-	auths, lerr := auth.LoadDirCompat(h.cfg.AuthDir, cred.Provider)
+	// # 这里原来错得离谱（与 `accountsReload` 是同一个 bug 的另一半）
+	//
+	// 旧代码只有一行：
+	//
+	//	auths, lerr := auth.LoadDirCompat(h.cfg.AuthDir, cred.Provider)
+	//
+	// 上面几行刚刚**问对了**落盘目录（`gateway.AuthDirExt`），
+	// 紧接着这一行却用回了 **workbuddy 的目录 + workbuddy 的解析器**。
+	// 三个事实叠加成 bug：
+	//
+	//   1. `h.cfg.AuthDir` = `auths/workbuddy/`（`cmd/server/config.go` 显式加了后缀）
+	//   2. `auth.LoadDirCompat(base, id)` = `LoadDir(base/<id>)` **加上**
+	//      `LoadDir(base)`，而 `auth.LoadDir` 的 Glob **写死** `workbuddy*.json`
+	//      （`internal/auth/auth.go` L192）
+	//   3. `codearts.LoadDir` 的 Glob 是 `codearts*.json`
+	//      （`internal/codearts/credential.go`）
+	//
+	// → **一个都匹配不到** codearts 的凭证。于是 codearts 走
+	// `/admin/login/poll?provider=codearts` 时：凭证**正确写进**
+	// `auths/codearts/`，重扫却拿 workbuddy 的解析器扫 workbuddy 的目录，
+	// 得到的是**根目录遗留的 workbuddy 旧凭证**；紧接着
+	// `Pool.SyncToDirFor(cred.Provider /* =codearts */, auths)`
+	// **把它们灌进了 codearts 域**。回执仍然是 `status:"ok"`。
+	//
+	// # 正确判据（与 `accountsReload` **同一条**，不要发明第二套）
+	//
+	//   1. **只扫 `dir`**（上面刚问到的上游自报目录），不扫父目录。
+	//   2. **用上游自己的解析器**（`gateway.CredentialLoader`）——
+	//      凭证格式是**上游的事实**，核心不该知道 `workbuddy*.json`
+	//      还是 `codearts*.json`。这也让"加新上游核心零改动"重新成立。
+	//
+	// 上游没实现 `CredentialLoader` 时**明确报错**（501，与
+	// `accountsReload` 同口径），不回落成"用某个写死的解析器"——
+	// 那正是这个 bug 的形态。
+	//
+	// ⚠ 报 501 而不是 200：凭证**已经落盘**了，但"没能即时进池"这件事
+	// 必须让调用方知道（否则用户以为账号加好了、池子里却没有）。
+	// 错误文案里说清"凭证已写入"，避免用户以为落盘也失败了。
+	loaded, exists := h.credentialsOf(cred.Provider)
+	if !exists {
+		writeError(w, http.StatusNotImplemented,
+			"凭证已写入 "+dir+"，但上游 "+cred.Provider+
+				" 没有实现 gateway.CredentialLoader，"+
+				"无法按它自己的格式重扫凭证（核心不硬编码任何上游的凭证格式）")
+		return errHandled
+	}
+	creds, lerr := loaded(dir)
 	if lerr != nil {
 		writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+lerr.Error())
 		return errHandled
+	}
+	// 投影成账号池要的形状（uid + nickname）—— 与 `accountsReload` 同款。
+	auths := make([]*auth.Auth, 0, len(creds))
+	for _, c := range creds {
+		if c.UID == "" {
+			continue
+		}
+		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})
 	}
 	// ⚠ 池子可能为 nil —— 本包其它地方（schedule.go / uimanifest.go）
 	// 都判了空，说明"Pool 可缺省"是**本包自己的设计假设**；

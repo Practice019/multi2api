@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/session"
@@ -45,7 +47,7 @@ type Config struct {
 	// 多实例部署时同名的另一个后果是宿主认不出"这是不是我管的那一个"。
 	ServiceName string
 
-	// NextResetAt 返回"额度耗尽的账号下次可用的时刻"。
+	// NextResetAt 返回"额度耗尽的账号下次可用的时刻"，**按上游分派**。
 	//
 	// # 为什么做成可注入的回调（而不是出口层自己算）
 	//
@@ -54,8 +56,30 @@ type Config struct {
 	// 写死在核心。codearts 没有签到，次日 4 点对它毫无意义。
 	//
 	// 现在由上游提供：workbuddy 给"次日 04:00"，codearts 给"配额窗口重置时刻"。
-	// nil 时回落到一个通用的保守值（1 小时），保证没有 Provider 也能跑。
-	NextResetAt func() time.Time
+	// nil 或 ok=false 时回落到一个通用的保守值（1 小时），保证没有 Provider 也能跑。
+	//
+	// # ⚠ 为什么参数是 providerID 而不是没有参数（P2 修复）
+	//
+	// 旧签名是 `func() time.Time`。它**没有参数**，于是签名本身就排除了
+	// "按上游分派"的可能 —— 无论注释怎么写，实现永远只能返回**同一个**上游的答案。
+	// 装配层注入的是 `wb.NextResetAt`（workbuddy 的次日 04:00），于是
+	// **任何上游**的账号在 ErrHardCredit 时都被冷到 workbuddy 的次日 04:00：
+	//
+	//	codearts 明明已恢复却还冷到次日凌晨 → 白白闲置近 24h
+	//	或按 04:00 解冻而实际未恢复        → 又撞一次硬错误
+	//
+	// providerID 由 applyErrorPolicy / nextResetAt 从账号池的归属反查得到
+	// （见 Pool.ProviderOf），与 Chat / Credential / RefreshCredential /
+	// RefreshSkew 四条路径**同一形状**：出口层只按 ID 问，不做判断。
+	//
+	// # ok 的语义
+	//
+	//	ok=true   该上游上报了自己的恢复排程 → 用它的时刻
+	//	ok=false  该上游**没有**这个信息     → 核心回落通用保守值
+	//
+	// 与 RefreshSkew 的 ok=false 语义逐字一致（见 ProviderRouter.RefreshSkew），
+	// 也与 gateway.ResetPolicyExt 的返回值同形。
+	NextResetAt func(providerID string) (until time.Time, ok bool)
 
 	// OwnedBy 填进 /v1/models 的 `owned_by` 字段。
 	//
@@ -461,7 +485,32 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	}
 	dynamicModelsCache.RUnlock()
 
-	acct := h.cfg.Pool.Pick()
+	// ⚠ P1（本次修复）：选号必须带 **provider 维度**。
+	//
+	// 原来这里是 `h.cfg.Pool.Pick()` —— **不带 provider 过滤**，于是在多上游
+	// 部署里可能抽到 codearts 的账号，然后拿它去调 workbuddy 的 FetchModels。
+	// 失败之后下面那句 `Pool.NoteError(acct.UID)` 会把**一个无辜的 codearts
+	// 账号**喂进熔断计数（err_total +1，连续 3 次就熔断），而真正的原因
+	// （用错了上游的客户端）没有任何痕迹。
+	//
+	// 这与本次修的 chat 路径是同一个 bug 的两种形态：**选号按 provider 分域了，
+	// 出站调用没有**。chat 路径换成按 Provider 分派；这里没有"多上游目录"的
+	// 需求（/v1/models 的动态列表只属于默认上游），所以最小且正确的修法是
+	// 取号时限定在默认上游。
+	//
+	// ⚠ 传 **""（不是 h.defaultProvider()）**：本函数用的客户端恒是
+	// h.cfg.Upstream（默认上游的），所以候选集必须是**池子眼里的默认上游**。
+	//
+	// 池子的默认上游由 `SetDefaultProvider` 在启动时注入（cmd/server），
+	// 而 `h.cfg.DefaultProvider` 是出口层的配置值 —— 两者**可能不一致**
+	// （测试里就是：池子没注入、出口层配了 "workbuddy"）。传后者会让
+	// `normalizeProvider` 选出一个池子里根本不存在的域，候选集为空、
+	// 动态目录静默消失（实测：32 条基线掉到 27 条 —— 静默退回了静态表）。
+	//
+	// "" 的语义正是"没有上游上下文，走池子的默认"（见 normalizeProvider），
+	// 与改造前 `Pick()` 的候选集**完全一致**，只是把"不带过滤"换成了
+	// "按默认上游过滤"。两者在单上游部署里是同一个集合，因此既有部署零变化。
+	acct := h.cfg.Pool.PickForExcluding("", nil)
 	if acct == nil {
 		return nil
 	}
@@ -615,7 +664,15 @@ func (h *Handler) modelCatalog() *upstream.ModelCatalog {
 
 	tried := map[string]bool{}
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		acct := h.cfg.Pool.PickExcluding(tried)
+		// ⚠ P1（本次修复）：与 fetchDynamicModels 同一条理由 ——
+		// PickExcluding 不带 provider 过滤，混池部署里会抽到别的上游的账号，
+		// 用默认上游的客户端去拉系数必然失败，然后**惩罚那个无辜的账号**。
+		// 这里的缓存（modelCatalogCache）同样只有一份、只属于默认上游。
+		//
+		// 传 ""（不是 h.defaultProvider()）：理由见 fetchDynamicModels 里的长注释
+		// —— 本处用的客户端同样是 h.cfg.Upstream（池子眼里的默认上游），
+		// 用出口层的配置值会选出一个池子里不存在的域。
+		acct := h.cfg.Pool.PickForExcluding("", tried)
 		if acct == nil {
 			break
 		}
@@ -692,6 +749,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st.provider = reqProvider
 	defer st.done()
 
+	// ctx 供出站调用使用（Provider.Chat / RefreshCredential 都收 ctx）。
+	//
+	// # 为什么挂在 r.Context() 上
+	//
+	// 客户端断开时 r.Context() 被取消，Provider 的实现据此**立刻返回**而不是
+	// 继续跑完一次上游往返 —— 这是契约要求（见 gateway 的
+	// verifyChatRespectsCancel），对 codearts 尤其重要：它每个账号只有 3 个
+	// 并发会话槽，前端断开后上游调用仍在跑会白占槽位。
+	//
+	// ⚠ 会不会把"客户端断开"变成一次账号失败的惩罚？不会 ——
+	// 取消会走 Provider.Chat 返回的 error → chatVia 走 terr → 只换号
+	// 不喂熔断（与网络抖动同一条路径）。
+	ctx := r.Context()
+
 	tried := map[string]bool{}
 	var lastErr error
 
@@ -730,12 +801,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		// 选号：粘性号优先（PickByUID 已校验 health + 在途未满），否则普通轮换。
+		// 选号：粘性号优先（已校验 **provider + health + 在途未满**），否则普通轮换。
+		//
+		// ⚠ 必须用 PickByUIDFor(reqProvider, ...) 而不是 PickByUID(...)：
+		// 会话粘性跨上游时，粘性命中会把**别的上游的账号**塞进出站循环。
+		// 改造后出站按"账号自己的上游"分派（见 chatVia），所以它**不会报错** ——
+		// 只会让「请求 workbuddy 的模型却用了 codearts 的账号」这种路由错误
+		// 静默发生，比一次失败难查得多。
+		//
+		// 不匹配时返回 nil → 走下面的解绑 + 回落普通轮换分支，
+		// 按本次请求的 reqProvider 重新选号。粘性是优化不是契约，
+		// 跨上游时放弃绑定是正确降级。
 		var acct *auth.Auth
 		if stickyUID != "" {
-			acct = h.cfg.Pool.PickByUID(stickyUID)
+			acct = h.cfg.Pool.PickByUIDFor(reqProvider, stickyUID)
 			if acct == nil {
-				// 粘性号当前不可用（冷却/占满）→ 解绑，本次回落普通轮换。
+				// 粘性号当前不可用（别的上游/冷却/占满）→ 解绑，本次回落普通轮换。
 				h.cfg.Session.Unbind(sessKey)
 				stickyUID = ""
 			}
@@ -756,7 +837,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
 		if !h.cfg.Pool.Acquire(acct.UID) {
 			// 若被抢的正是粘性号，立即解绑并回落普通轮换，避免下一轮仍撞同一个
-			// 满载粘性号再浪费一次 PickByUID 往返（语义与 fail()/PickByUID-nil 的解绑一致）。
+			// 满载粘性号再浪费一次 PickByUIDFor 往返（语义与 fail()/PickByUIDFor-nil 的解绑一致）。
 			if stickyUID != "" && acct.UID == stickyUID {
 				h.cfg.Session.Unbind(sessKey)
 				stickyUID = ""
@@ -765,9 +846,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		heldUID = acct.UID
 
-		// token 临近过期 → 先 refresh（失败冷却换号）
-		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
-			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
+		// 该不该刷由**上游自己**回答（失败冷却换号）。
+		//
+		// ⚠ 这里刻意**不是** `acct.NeedsRefresh(h.cfg.RefreshSkew)`：
+		// 核心的 10m 窗口对 codearts（STS 仅约 30m、自己的窗口 3m）是错的，
+		// 且错的方向是"太早"—— 剩 8m 就被核心判为该刷，而 codearts 的
+		// CredentialRefresher 内部没有 skew 检查，于是真的去消费那个
+		// **一次性**的 refresh_token。判据必须与"怎么刷"同处一地，见
+		// needsRefreshVia 的注释。
+		if h.needsRefreshVia(reqProvider, acct) {
+			if err := h.refreshCredential(ctx, reqProvider, acct); err != nil {
 				lastErr = err
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
@@ -778,13 +866,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				fail(acct.UID)
 				continue
 			}
-			if err := acct.SaveAtomic(); err != nil {
-				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
-				log.Printf("chat refresh uid=%s: save auth failed: %v", acct.UID, err)
-			}
 		}
 
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, outBody)
+		// 出站：按**选中的账号所属上游**分派到它自己的实现。
+		//
+		// 这是本次修复的核心。改造前这里恒用 h.cfg.Upstream（= 默认上游的
+		// upstream.Client），于是 codearts 的请求被 workbuddy 的客户端发出去 ——
+		// 凭证格式不匹配，必然失败，而且失败得很晚（一次完整往返）。
+		//
+		// cfg.Provider == nil（单上游部署 / 既有测试）时逐字节回退到原行为，
+		// 见 chatVia 的注释。
+		cr, status, terr := h.chatVia(ctx, reqProvider, acct, outBody)
 		if terr != nil {
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。
@@ -795,12 +887,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if status >= 400 {
 			st.status = status
-			kind := upstream.Classify(status, string(respBody))
-			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+			// 非 2xx：上游的错误体在流里，读出来喂 Classify。
+			//
+			// ⚠ 上限 1MB：上游的错误体正常是几百字节，但一个坏的/恶意的响应
+			// 可能是一整个 SSE 流。无上限 ReadAll 会把它整个灌进内存，
+			// 而这里只是要一段能分类的文本。
+			respBody, _ := io.ReadAll(io.LimitReader(cr, 1<<20))
+			// 错误体读完即弃（response body 已到 EOF），Close 防连接泄漏 ——
+			// 这与成功路径上的 rc.Close() 对称。
+			_ = cr.Close()
+			//
+			// 分类按**选中账号所属上游**分派（见 classifyErr 的长注释）：
+			// 改造前这里恒调 `upstream.Classify` —— 那是 workbuddy 的分类器，
+			// 却作用在两条上游的响应体上，造成"codearts 额度漏判"与
+			// "codearts 号被裸数字 12153 永久禁用"两条真危害。
+			kind := h.classifyErr(reqProvider, status, respBody)
+			lastErr = &upstream.Error{
+				// 中立类型 → upstream.ErrKind 的翻译**仅用于拼错误消息**：
+				// lastErr 只出现在循环出口的 503 文本里（见下方 msg），
+				// 不参与任何策略判断。真正的策略走 applyErrorPolicy(kind)。
+				Kind:   upstreamKindOf(kind),
+				Status: status,
+				Msg:    string(respBody),
+			}
 			h.applyErrorPolicy(acct.UID, kind)
 			fail(acct.UID)
 			continue
 		}
+		rc := cr
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
@@ -841,54 +955,455 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
-// kind 是唯一权威分类（来自 upstream.Classify），此处不再按原始 status 二次判断。
+//
+// ⚠ 参数只有 uid：调用方（出站循环）只拿得到**出错的号**，拿不到"当前请求的
+// 上游" —— 多上游下两者可能不同（粘性命中、轮换换号）。所以需要上游事实的
+// 分支（ErrKindHardCredit）自己去池子反查归属：
+//
+//	Pool.ProviderOf(uid) → nextResetAt(uid) → cfg.Provider.ResetAt(id, cred)
+//
+// 这正是 P2 修复的形状：把"哪个上游"这个事实从 uid 反查出来，
+// 而不是让一个无参回调替所有上游回答同一个时刻。
+//
+// kind 是唯一权威分类（来自**选中账号所属上游**的错误分类器，
+// 经 gateway 层中立化后传进来），此处不再按原始 status 二次判断。
+//
 // 仅在 chatCompletions 轮转循环内调用：调用方已准备好 lastErr 并打算 continue 换号。
 //
-// 五条路径，各司其职：
-//   - ErrHardCredit → CooldownUntilNextReset：即时硬冷却到**上游给出的**下次重置时刻
-//     （workbuddy 是次日 04:00 等签到恢复；其它上游可能是配额窗口重置）。
-//   - ErrSoftRate / ErrNotFound → Cooldown(CoolSoft)：即时软冷却（429/404）。
-//   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
-//   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
+// # 为什么参数类型从 upstream.ErrKind 换成 gateway.ErrorKind
+//
+// 改造前它吃 `upstream.ErrKind` —— 那是 **workbuddy 的类型**，
+// 于是 codearts 的分类结果**在类型上就传不进来**，core 只能拿
+// workbuddy 的判据去判所有上游的响应（P2 缺口的技术根因）。
+//
+// 现在它吃 gateway.ErrorKind（跨上游中立，core 与上游都合法依赖 gateway）。
+// 各上游在自己的包里把自己的 ErrKind 翻译过来，core 只做策略决策 ——
+// **策略本身一行都没改**，只换了接缝上的词汇。
+//
+// 七条路径，各司其职：
+//   - ErrKindHardCredit → CooldownUntilNextReset：即时硬冷却到**上游给出的**
+//     下次重置时刻（workbuddy 是次日 04:00 等签到恢复；codearts 是配额窗口重置）。
+//   - ErrKindSoftRate / ErrKindNotFound → Cooldown(CoolSoft)：即时软冷却（429/404）。
+//   - ErrKindSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
+//     ⚠ **只有 workbuddy 会产生这个分类** —— codearts 的凭证失效是
+//     ErrKindAuth（可自动续期恢复），刻意不映射到这里。
+//   - ErrKindServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
-//   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断。
+//   - ErrKindAuth / 其他（default：ErrKindClient/ErrKindNone）→ 只换号不罚
+//     （防雪崩），不喂熔断。
+//
+// # ErrKindAuth 为什么走 default（只换号不罚）
+//
+// 它是 codearts 的凭证失效（401/403）。这类失效**可以由
+// RefreshCredential 恢复**（STS 凭证仅约 30 分钟，401 是常见路径而非异常，
+// 见 codearts/client.go 的 MaxAuthRetry 与 credentialrefresher.go）。
+// 把它升级成 Disable 会把"一次 401"变成"永久禁用" —— 那正是本次要修的
+// 危害 ② 的另一半。保守方向是明确的：宁可多换一次号，也不能把可恢复的
+// 账号永久打掉。续期由后台任务 + 请求路径的 needsRefreshVia 分支负责。
 //
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
-// nextResetAt 问上游"额度耗尽的号什么时候能再用"。
+// nextResetAt 问**该账号所属上游**"额度耗尽的号什么时候能再用"。
 //
-// 没有配置 NextResetAt（单上游未注入、或测试）时回落到 now+1h。
-// 选 1 小时而不是"次日某点"：那是个**通用**的保守值，
-// 不假装知道任何上游的具体重置策略。配置了上游就以它为准。
-func (h *Handler) nextResetAt() time.Time {
+// # 四条路径（与 chatVia / refreshCredential / needsRefreshVia / classifyErr 同形状）
+//
+//	Provider == nil                    → 单上游：注入的回调就代表那个上游
+//	取不到该 uid 的上游归属            → 接线问题（号不在池里），回落通用值
+//	该上游没实现 ResetPolicyExt        → ok=false → 回落通用值
+//	该上游上报了恢复排程               → 用它的时刻
+//
+// 通用值是 now+1h。选 1 小时而不是"次日某点"：那是个**通用**的保守值，
+// 不假装知道任何上游的具体重置策略。上游上报了就以上游为准。
+//
+// # ⚠ 这里为什么先反查 provider（P2 修复的核心两行）
+//
+// 旧实现直接 `return h.cfg.NextResetAt()`，而旧回调**没有参数** ——
+// 于是不管出错的号属于哪个上游，拿到的都是同一个（workbuddy 的次日 04:00）。
+// codearts 的号因此被冷到一个对它毫无意义的时刻：它**没有签到恢复机制**，
+// 04:00 既不是它的配额窗口边界，也不是它的任何事实。
+//
+// 归属由账号池回答（Pool.ProviderOf，只读 —— 池子按 provider 分域，
+// 标签与默认值都在它手里）。出口层只按 ID 问，与其它四条多上游路径同构：
+//
+//	Chat / Credential / RefreshCredential / RefreshSkew → Provider 路由
+//	ResetAt                                            → Provider 路由（本条）
+//
+// # 为什么 ProviderOf 失败时**不猜**成默认上游
+//
+// 号不在池里是接线问题，不是"它属于默认上游"。拿默认上游的排程去回答
+// 一个没有归属的号，正是本 bug 的形态（用 A 的事实回答 B 的问题）。
+// 回落通用值的方向是保守的：now+1h 比"次日 04:00"短得多，
+// 最坏情况只是多撞一次硬错误，而不是白闲置一天。
+//
+// # 为什么单上游模式（Provider == nil）不走 ProviderOf
+//
+// 单上游没有"别的上游"概念，注入的回调（或它缺省时的 nil）就是那个上游的
+// 全部事实 —— 与改造前逐字节一致。这也是既有部署与既有测试的路径。
+func (h *Handler) nextResetAt(uid string) time.Time {
+	if h.cfg.Provider != nil {
+		providerID, _ := h.cfg.Pool.ProviderOf(uid)
+		if cred, ok := h.cfg.Provider.Credential(providerID, uid); ok {
+			if until, has := h.cfg.Provider.ResetAt(providerID, cred); has {
+				return until
+			}
+		}
+		// 该上游没上报排程 → 通用保守值（不回落到注入的回调：
+		// 那个回调是**单上游/默认上游**的事实，见上面的"不猜"）。
+		return time.Now().Add(time.Hour)
+	}
 	if h.cfg.NextResetAt != nil {
-		return h.cfg.NextResetAt()
+		if until, ok := h.cfg.NextResetAt(""); ok {
+			return until
+		}
 	}
 	return time.Now().Add(time.Hour)
 }
 
-func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind) {
-	switch kind {
+// classifyErr 按**选中账号所属上游**的错误分类器判定错误类别。
+//
+// # 三条路径（与 chatVia / refreshCredential / needsRefreshVia 同形状）
+//
+//	Provider == nil                   → upstream.Classify（单上游，逐字节不变）
+//	Provider 在 && 上游实现了分类器   → 上游自己的分类（翻译成中立类型）
+//	Provider 在 && 上游没实现分类器   → upstream.Classify（回落默认上游判据）
+//
+// # 后两条回落为什么是同一个分支，且为什么**必须**是 upstream.Classify
+//
+// 单上游模式没有"别的上游"概念，行为要与改造前一致 —— 这正是
+// `upstream.Classify`。
+//
+// 而"该上游没实现 ErrorClassifier"的正确解释**不是**"用通用猜测"，
+// 而是"用默认上游的判据"：默认上游就是 workbuddy，它的分类判据
+// （hardMarkers / sessionDeadMarkers）就住在 upstream.Classify 里。
+// 换句话说，回落它不是妥协，而是**默认上游的分类器本身**。
+//
+// ⚠ 刻意**不**回落到 `gateway.DefaultErrorKind`（只按状态码的通用兜底）：
+// 那会丢掉 workbuddy 的两个正文判据 ——
+//
+//	`{"code":12153,...}` 在 200/401 上不再被判成 session dead
+//	（TestChatSessionDeadDisables 会立刻变红）
+//	`{"msg":"余额不足"}` 在 400 上不再触发硬冷却
+//	（TestChatRotatesOnHardCredit 会立刻变红）
+//
+// 也就是说：通用兜底会**静默削弱已有判据**。它不是回落目标，
+// 只是 gateway 为"将来某个全新的、既没实现分类器又不想沿用任何默认判据
+// 的上游"准备的显式选项 —— 当前没有任何上游走它。
+func (h *Handler) classifyErr(providerID string, status int, body []byte) gateway.ErrorKind {
+	if h.cfg.Provider != nil {
+		if kind, ok := h.cfg.Provider.Classify(providerID, status, string(body)); ok {
+			return kind
+		}
+	}
+	// 回落：默认上游（workbuddy）的判据 —— 也正是改造前的行为。
+	//
+	// ⚠ 这里**只**翻译类型（upstream.ErrKind → gateway.ErrorKind），
+	// 不改变任何判据：`upstream.Classify` 的返回值与改造前逐字相同。
+	return upstreamToGateway(upstream.Classify(status, string(body)))
+}
+
+// upstreamErrKindMirror 是 upstream.ErrKind → gateway.ErrorKind 的逐项镜像。
+//
+// # 为什么 core 也需要这张表（而不是只让上游翻译）
+//
+// 回落分支拿到的仍然是 `upstream.ErrKind`（那是 upstream.Classify 的签名，
+// 不归本次改动管 —— 改它会把 workbuddy 的客户端契约也一起动）。
+// 要把它的结果变成 applyErrorPolicy 能吃的中立类型，就必须翻译一次。
+//
+// ⚠ 这张表与 `internal/workbuddy` 的 `toGatewayKind` **语义相同但方向相反**
+// （一个翻译 ErrKind→中立，一个中立→ErrKind）。两份都必须存在，因为
+// core **不得** import 任何具体上游（架构判据 3，arch_test.go 强制）——
+// 它不可能是"复用 workbuddy 的那一份"。
+//
+// 风险（枚举漂移）由两侧的测试共同钉住：
+//
+//	internal/server  的 TestUpstreamKindMirrorCoversEveryKind
+//	internal/workbuddy 的 TestToGatewayKindCoversEveryUpstreamKind
+func upstreamToGateway(k upstream.ErrKind) gateway.ErrorKind {
+	switch k {
 	case upstream.ErrHardCredit:
+		return gateway.ErrKindHardCredit
+	case upstream.ErrSoftRate:
+		return gateway.ErrKindSoftRate
+	case upstream.ErrSessionDead:
+		return gateway.ErrKindSessionDead
+	case upstream.ErrNotFound:
+		return gateway.ErrKindNotFound
+	case upstream.ErrServer:
+		return gateway.ErrKindServer
+	case upstream.ErrClient:
+		return gateway.ErrKindClient
+	default:
+		return gateway.ErrKindNone
+	}
+}
+
+// upstreamKindOf 把中立类型翻回 upstream.ErrKind。
+//
+// # 唯一的用途：拼错误消息
+//
+// 出站循环的 lastErr 是 `*upstream.Error`，它的 Kind 会被 `Error()`
+// 打成 `"upstream session_dead (http 401): ..."` 这样的文本，
+// 出现在最终 503 的 body 里。那个文本**不参与任何策略判断**。
+//
+// 为什么要保留它而不是把 lastErr 整个换掉：`*upstream.Error` 还被
+// **续期分支**使用（`errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead`
+// → Pool.Disable）—— 那是刷新路径上的独立判据，不在本次改动范围内，
+// 必须原样保留。
+//
+// ⚠ 未知值回落到 `upstream.ErrNone`（打出来是 "none"）而不是某个惩罚性分类：
+// 它只影响日志文本。
+func upstreamKindOf(k gateway.ErrorKind) upstream.ErrKind {
+	switch k {
+	case gateway.ErrKindHardCredit:
+		return upstream.ErrHardCredit
+	case gateway.ErrKindSoftRate:
+		return upstream.ErrSoftRate
+	case gateway.ErrKindSessionDead:
+		return upstream.ErrSessionDead
+	case gateway.ErrKindNotFound:
+		return upstream.ErrNotFound
+	case gateway.ErrKindServer:
+		return upstream.ErrServer
+	case gateway.ErrKindClient:
+		return upstream.ErrClient
+	default:
+		// 含 gateway.ErrKindAuth 与 ErrKindNone。
+		//
+		// ⚠ ErrKindAuth 刻意落 `upstream.ErrNone`（"none"）而不是 ErrClient：
+		// upstream.ErrKind 里**没有** auth 这一档，硬塞一个会让日志暗示
+		// "codearts 的 401 是 client 错误"，那是错的归因。
+		// 而它只影响文本 —— 策略早已由 applyErrorPolicy(kind) 决定。
+		return upstream.ErrNone
+	}
+}
+
+// chatVia 按**账号所属上游**把一次对话发出去，返回 (响应流, 状态码, 传输错误)。
+//
+// # 为什么必须分派（这是 861dee5 引入、预先存在的那条真 bug）
+//
+// 「账号池支持多上游」那次改动只改了**选号**（PickFor 按 provider 过滤），
+// 没有改**出站**——出站仍然恒用 `cfg.Upstream`。于是：
+//
+//	PickFor("codearts", ...) 选出 codearts 账号   ← 对
+//	cfg.Upstream.ChatStream(codearts 账号, body)  ← 用 workbuddy 的客户端发
+//
+// codearts 的签名（SDK-HMAC-SHA256 + DPoP）、路径前缀（/api/v2）、
+// 通道头（maas_type）全在它自己的 Client.ChatStream 里。用 workbuddy 的
+// 客户端发等于把这些全跳过，必然失败。
+//
+// 出口层**无法**自己选对实现：它只认 ID（不认识任何具体上游，见包注释）。
+// 「ID → 能发请求的那个实例」是装配层的事实，所以这条路走 cfg.Provider。
+//
+// # 三条返回路径的形状（与改造前的四元组对齐）
+//
+//	Provider == nil           → cfg.Upstream 的原始四元组（逐字节回退）
+//	Provider 在 && 取到凭证   → gateway.ChatStream 的 {Status, Body}
+//	Provider 在 && 取不到凭证 → 传输错误（换号，不喂熔断）
+//
+// 第三条刻意复用 terr 而不是新造一种失败：它的语义与"网络抖动"在调用方
+// 看来完全一致 —— 这个号现在发不出请求，换下一个，**不要**惩罚它
+// （取不到凭证是接线问题，不是这个账号的错；这一点与本次修的 bug 同源：
+// 改造前正是"账号被无关的失败惩罚"）。
+//
+// 关于 status>=400 时 Body 的语义：gateway.ChatStream 把非 2xx 的
+// 上游错误体**也放在 Body 里**（见 gateway.Provider.Chat 的注释），
+// 所以调用方要在分支里 io.ReadAll 它才能喂 Classify。这与
+// upstream.Client.ChatStream 返回的 []byte respBody 是同一份数据，
+// 只是形态从 []byte 变成了流。
+func (h *Handler) chatVia(ctx context.Context, providerID string, acct *auth.Auth, body []byte) (io.ReadCloser, int, error) {
+	if h.cfg.Provider == nil {
+		// 单上游模式：没有任何多上游概念，行为与改造前**逐字节一致**。
+		//
+		// upstream.Client.ChatStream 在非 2xx 时把错误体放在**第三个返回值**里、
+		// rc 为 nil；而调用方那段 status>=400 的分支是按 gateway.ChatStream 的
+		// 契约写的（错误体在 Body 流里）。这里必须把 respBody **原样**包成流，
+		// 而不是丢掉它。
+		//
+		// ⚠ 这一条是**真踩过的**：第一版回退路径写成 `_` 丢掉 respBody、
+		// 返回一个空流。后果是 `upstream.Classify(status, "")` 永远拿不到
+		// 上游的错误正文 —— 而 session dead 的判据正是正文里的 **12153**
+		// （见 upstream.Classify）。于是 TestChatSessionDeadDisables 变红：
+		// 401 不再被分类成 ErrSessionDead，账号不再被禁用。
+		//
+		// 换句话说：回退路径的"逐字节一致"不是修辞，丢掉一个 []byte 就足以
+		// 让一条既有契约静默失效。测试抓住了它（这正是那些测试存在的理由）。
+		rc, status, respBody, err := h.cfg.Upstream.ChatStream(acct, body)
+		if err == nil && status >= 400 && rc == nil {
+			return io.NopCloser(bytes.NewReader(respBody)), status, nil
+		}
+		return rc, status, err
+	}
+
+	// 多上游：拿到这个用户 id 对应的、该上游能用的凭证。
+	// 出口层**不读 Secret**（那是上游的事实），只把装配层组装好的整份传下去。
+	cred, ok := h.cfg.Provider.Credential(providerID, acct.UID)
+	if !ok {
+		return nil, 0, errNoProviderCredential
+	}
+	cs, registered, err := h.cfg.Provider.Chat(ctx, providerID, cred, body)
+	if !registered {
+		// 该上游没接上（未注册 / 实例缺失）：与"取不到凭证"同类 —— 接线问题，
+		// 走传输错误分支换号，**不惩罚这个账号**。
+		return nil, 0, errNoProviderCredential
+	}
+	if err != nil {
+		// Provider.Chat 的契约：只有**传输层**失败才返回 error；
+		// 非 2xx 属于业务错误，走 (ChatStream, nil)。
+		return nil, 0, err
+	}
+	if cs.Body == nil {
+		// 既没有 error 又没有 body：Provider 违约。
+		// 造一个**有状态码**的空流，让调用方按 status 走分类而不是 panic
+		// （契约测试会挡住这种情况，但生产路径不能依赖测试跑过）。
+		return io.NopCloser(strings.NewReader("")), cs.Status, nil
+	}
+	return cs.Body, cs.Status, nil
+}
+
+// refreshCredential 按**账号所属上游**续期凭证。
+//
+// # 修的是什么
+//
+// 改造前：`h.cfg.Upstream.RefreshToken(acct)` —— 恒用 workbuddy 的客户端。
+// 选中 codearts 账号时它会读到一份它不认识的凭证 → "no refreshToken"
+// → 上层把**这个无辜的 codearts 账号**标记失败并冷却 → 池子耗尽 → 503。
+// 实测：一次请求让 codearts 账号的 err_total +3。
+//
+// # 分派链条
+//
+//	cfg.Provider.RefreshCredential(ctx, id, cred)
+//	  → 装配层按 id 取 Provider 实例
+//	  → gateway.ExtOf[CredentialRefresher](pv)  ← 上游自报"怎么刷新我的"
+//	  → workbuddy / codearts 各自的实现
+//
+// 出口层不认识任何具体上游，也不认识 gateway 之外的续期协议。
+//
+// # 三种"不刷新"为什么要区分
+//
+//	Provider == nil        → 回落 cfg.Upstream（单上游，行为不变）
+//	取不到凭证             → 报错换号（接线问题，不能假装成功）
+//	ok=false 且 err==nil   → **跳过刷新**，继续用现有凭证发请求
+//
+// 第三种是「该上游没实现 CredentialRefresher」，语义是**这个上游的凭证
+// 不需要刷新**（例如纯 API Key 的上游）。把它当成失败会让这类上游
+// 每次请求都白换一次号 —— 那正是"合法实现被通用假设误伤"。
+func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct *auth.Auth) error {
+	if h.cfg.Provider == nil {
+		// 单上游模式：逐字节回退（含落盘与失败日志，与改造前一致）。
+		if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
+			return err
+		}
+		if err := acct.SaveAtomic(); err != nil {
+			// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
+			log.Printf("chat refresh uid=%s: save auth failed: %v", acct.UID, err)
+		}
+		return nil
+	}
+
+	cred, ok := h.cfg.Provider.Credential(providerID, acct.UID)
+	if !ok {
+		return errNoProviderCredential
+	}
+	refreshed, err := h.cfg.Provider.RefreshCredential(ctx, providerID, cred)
+	if err != nil {
+		return err
+	}
+	if !refreshed {
+		// 该上游没有续期实现 = 它的凭证不需要刷新。落盘也归它自己管
+		// （我们连它要不要落盘都不知道，不该替它决定）。
+		return nil
+	}
+	return nil
+}
+
+// needsRefreshVia 问**上游自己**"这个号现在要不要刷"。
+//
+// # 为什么核心不能自己拿 h.cfg.RefreshSkew 判（这是出站修复的漏网）
+//
+// 改造后 `refreshCredential` 已经把"**怎么**刷"交给了上游，但"**要不要**刷"
+// 还留在核心：出站循环先做 `acct.NeedsRefresh(h.cfg.RefreshSkew)`（默认 10m），
+// 只有它为真才会走到上游的续期实现。而"多早算该刷"同样是**上游的事实**：
+//
+//	workbuddy → access token 寿命以小时计，10m 窗口合理
+//	codearts  → STS 凭证只有约 30m 寿命，它自己的 refreshSkew 是 3m
+//
+// 一个上游的 skew 被当成所有上游的 skew，后果是**两个方向的错**：
+//
+//	token 剩 8m（codearts 视角）→ 核心的 10m 判 true → 进续期分支 →
+//	  codearts 的 CredentialRefresher 里**没有**自己的 skew 检查（它只
+//	  断言+转发到 Client.RefreshToken），于是真的去消费 refresh_token ——
+//	  而它是**一次性**的（用一次即作废，见 codearts/jobs.go 的包注释）。
+//	  为省一次 401 往返烧掉一个凭证，这正是"核心越俎代庖"最贵的形态。
+//
+//	token 剩 4m 且某上游的窗口比 10m 更宽 → 核心判 false → 永不续期 → 必然 401。
+//
+// 所以判据必须和"怎么刷"待在同一个地方：上游。核心只问，不做判断。
+//
+// # 三条回落路径
+//
+//	Provider == nil        → 单上游：核心的 skew 就是那个上游的事实
+//	取不到凭证             → 接线问题（与选号无关），不刷，出站会立刻报错换号
+//	上游未上报窗口         → 回落到核心的通用兜底（明确的保守值）
+//
+// # 与"取不到凭证"为什么返回 false 而不是报错
+//
+// 本函数只回答"要不要刷"，不负责报告接线问题。取不到凭证时不刷，
+// 紧接着的 `chatVia` 会在同一次迭代里拿到同一个 errNoProviderCredential
+// 并按传输错误换号（**不惩罚账号**），语义与改造前一致。
+// 在这里提前报错反而会让两条路径的错误处理分叉。
+func (h *Handler) needsRefreshVia(providerID string, acct *auth.Auth) bool {
+	if h.cfg.Provider == nil {
+		// 单上游：没有别的上游可问，核心的窗口就是这个上游的事实。
+		return acct.NeedsRefresh(h.cfg.RefreshSkew)
+	}
+	cred, ok := h.cfg.Provider.Credential(providerID, acct.UID)
+	if !ok {
+		// 取不到凭证 = 接线问题，不是"该刷了"。出站会报错换号。
+		return false
+	}
+	skew, has := h.cfg.Provider.RefreshSkew(providerID, cred)
+	if !has {
+		// 上游只说了"怎么刷"，没说"多早刷" → 用核心的通用兜底。
+		// 这是**明确的**保守值，不是"核心假装知道上游的寿命"。
+		return acct.NeedsRefresh(h.cfg.RefreshSkew)
+	}
+	if skew <= 0 {
+		// 上游明确声明"不需要提前刷"（只在 401 后被动续期）。
+		// ⚠ 必须尊重它，不能用通用窗口覆盖 —— 那正是本函数要修的那类错误。
+		return false
+	}
+	return acct.NeedsRefresh(skew)
+}
+
+func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
+	switch kind {
+	case gateway.ErrKindHardCredit:
 		// 402 + 额度耗尽关键词：冷却到**上游给出的下次重置时刻**，立即换号。
 		//
 		// 早先这里直接调 pool.CooldownUntilTomorrow4AM —— 把 workbuddy 的
 		// 「次日 04:00 等签到恢复」写进了出口层。现在改为向 Provider 要时刻：
 		// 出口层只问"这个号什么时候能再用"，具体策略由上游定义
 		// （见 Config.NextResetAt）。
-		h.cfg.Pool.CooldownUntilNextReset(uid, h.nextResetAt(), "额度不足")
-	case upstream.ErrSoftRate:
+		//
+		// ⚠ 传 uid 而不是"当前请求的上游"：这一行**只拿得到出错的号**，
+		// 而"这个号属于哪个上游"是账号池的事实 —— 由 nextResetAt 反查
+		// （Pool.ProviderOf）。早先它无从反查，于是所有上游共用一个时刻。
+		h.cfg.Pool.CooldownUntilNextReset(uid, h.nextResetAt(uid), "额度不足")
+	case gateway.ErrKindSoftRate:
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "429 rate limit")
-	case upstream.ErrSessionDead:
+	case gateway.ErrKindSessionDead:
+		// ⚠ 只有 workbuddy 会产生这个分类（它的 401 + 12153）。
+		// codearts 的凭证失效是 ErrKindAuth，走 default 的"只换号不罚"——
+		// 见本函数上方的长注释（危害 ② 的另一半）。
 		h.cfg.Pool.Disable(uid, "12153 session dead")
-	case upstream.ErrNotFound:
+	case gateway.ErrKindNotFound:
 		// 404 短冷却（软冷却），防雪崩。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")
-	case upstream.ErrServer:
-		// 5xx 上游故障：Classify 已把 ≥500 判为 ErrServer，在此喂熔断计数（不再手写 status>=500）。
+	case gateway.ErrKindServer:
+		// 5xx 上游故障：分类器已把 ≥500 判为 server，在此喂熔断计数（不再手写 status>=500）。
 		h.cfg.Pool.NoteError(uid)
 	default:
-		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
+		// 其余（ErrKindAuth/ErrKindClient/ErrKindNone）：只换号不罚（防雪崩），不喂熔断。
 	}
 }
 

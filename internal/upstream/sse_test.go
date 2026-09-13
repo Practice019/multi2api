@@ -16,6 +16,113 @@ func TestPrepareBodyForcesStream(t *testing.T) {
 	}
 }
 
+// codeartsSSE 是 CodeArts（华为 InferHub）实测的 SSE 形态：`data:{...}`，**冒号后没有空格**。
+//
+// 这段形态不是编的：由 raw socket 抓包证实（`64 61 74 61 3A 7B` = "data:{"），
+// 且 internal/codearts 的 contract_hermetic_test.go 与 testsrv_test.go 用的也是它。
+//
+// ⚠ 它必须作为**共享夹具**存在：这个 bug 的成因正是
+// "internal/upstream 的测试全用带空格形态、internal/codearts 的测试全用不带空格形态，
+//
+//	两个包对同一份帧形态各自为政，没有任何一个测试跨过那条边界"。
+const codeartsSSE = "data:{\"id\":\"as-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.3-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n" +
+	"data:{\"id\":\"as-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"，世界\"}}]}\n\n" +
+	"data:{\"id\":\"as-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n" +
+	"data:[DONE]\n\n"
+
+// TestAggregateAcceptsCodeartsFramelessSpace 守住冒号后**无空格**的 data 帧。
+//
+// # 这个测试对应真 bug（不是防御性编程）
+//
+// 实测：`codearts/glm-5.3-flash` 非流式恒 502
+//
+//	{"error":{"code":"upstream_parse","message":"upstream stream contained no valid data events"}}
+//
+// 而**同一个上游、同一个模型**的流式请求是 200。根因是 Aggregate 只认 `"data: "`：
+// CodeArts 的每一帧都不匹配 → validEvents 恒为 0 → 走到"空流"错误分支。
+// 流式之所以"看着是好的"，是 Stream 的兜底分支把不认识的帧**原样透传**了 ——
+// 一个解析假设，两种截然不同的失败表现（这正是不该只测一种形态的理由）。
+func TestAggregateAcceptsCodeartsFramelessSpace(t *testing.T) {
+	resp, err := Aggregate(strings.NewReader(codeartsSSE))
+	if err != nil {
+		t.Fatalf("CodeArts 的无空格 data 帧必须能聚合，实际报错: %v", err)
+	}
+	choices, ok := resp["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		t.Fatalf("choices 缺失: %v", resp["choices"])
+	}
+	msg := choices[0].(map[string]any)["message"].(map[string]any)
+	if msg["content"] != "你好，世界" {
+		t.Errorf("content=%q，期望 \"你好，世界\"", msg["content"])
+	}
+	if resp["model"] != "glm-5.3-flash" {
+		t.Errorf("model=%v", resp["model"])
+	}
+	if usage, ok := resp["usage"].(map[string]any); !ok || usage["total_tokens"].(float64) != 7 {
+		t.Errorf("usage=%v", resp["usage"])
+	}
+}
+
+// TestAggregateAcceptsBothFrameShapes 两种形态必须同时成立。
+//
+// 只测一种都会漏：上游是哪个（OpenAI 带空格 / CodeArts 不带空格）不是网关能选的，
+// 而 Aggregate 是**两条路共用**的聚合器，它没有"我只服务某一个上游"的奢侈。
+func TestAggregateAcceptsBothFrameShapes(t *testing.T) {
+	// 带空格形态：把无空格夹具的每个帧头补上空格（sseFixture 即是该形态）。
+	spaced := strings.ReplaceAll(codeartsSSE, "data:{", "data: {")
+	spaced = strings.ReplaceAll(spaced, "data:[DONE]", "data: [DONE]")
+
+	for _, tc := range []struct{ name, raw string }{
+		{"CodeArts 无空格 data:{", codeartsSSE},
+		{"OpenAI 带空格 data: {", spaced},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := Aggregate(strings.NewReader(tc.raw))
+			if err != nil {
+				t.Fatalf("聚合失败: %v", err)
+			}
+			msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+			if msg["content"] != "你好，世界" {
+				t.Errorf("content=%q", msg["content"])
+			}
+		})
+	}
+}
+
+// TestStreamCodeartsFramesAreRelayedAndCounted 守住流式路径对无空格帧的处理。
+//
+// 两个断言各自对应真 bug 的一半：
+//
+//  1. 帧必须被**转发**（早先落进"注释/其它行"分支也算转发，所以这条单看是绿的）；
+//  2. 帧必须被**计数**为有效帧 —— 早先 validFrames 恒为 0，于是循环结束后
+//     明明有数据却补发一帧 `{"error":{"message":"empty upstream stream"}}`，
+//     客户端在一个成功的流里收到一个假的错误帧。
+//
+// 第 2 条是 1 的补充：只看"内容到了"会漏掉"同时报了一个假错误"。
+func TestStreamCodeartsFramesAreRelayedAndCounted(t *testing.T) {
+	rec := httptest.NewRecorder()
+	if err := Stream(rec, strings.NewReader(codeartsSSE)); err != nil {
+		t.Fatalf("Stream 不该报错: %v", err)
+	}
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "你好") || !strings.Contains(body, "，世界") {
+		t.Errorf("无空格帧的内容必须转发给客户端:\n%s", body)
+	}
+	if strings.Contains(body, "empty upstream stream") {
+		t.Errorf("有有效帧时不得补发空流错误帧（validFrames 未被正确计数）:\n%s", body)
+	}
+	if n := strings.Count(body, "data: [DONE]"); n != 1 {
+		t.Errorf("[DONE] 应恰好一个，实际 %d 个:\n%s", n, body)
+	}
+	// 每行仍是合法 SSE：以 "data: " 开头（规范化后）或是空行。
+	for _, ln := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		if ln != "" && !strings.HasPrefix(ln, "data: ") {
+			t.Errorf("非规范 SSE 行: %q", ln)
+		}
+	}
+}
+
 func TestPrepareBodyToolChoiceFunctionObject(t *testing.T) {
 	out := PrepareBodyOpt([]byte(`{"tool_choice":{"type":"function","function":{"name":"get_weather"}},"tools":[{"type":"function"}]}`), true)
 	var m map[string]any

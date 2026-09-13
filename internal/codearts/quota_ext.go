@@ -17,7 +17,7 @@
 //	                    total=7500.00  remain=7474.04  used=25.96
 //
 // 所以 codearts **有**真实可取的额度，来源是既有的 FetchSubscription
-//（GET {engineBase}/snap-manager/v1/statistics/plugin，见 welfare.go）。
+// （GET {engineBase}/snap-manager/v1/statistics/plugin，见 welfare.go）。
 //
 // # 为什么是**单值**而不是按模型（这里纠正过一条错误的注释）
 //

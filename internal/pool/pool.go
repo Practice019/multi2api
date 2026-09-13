@@ -1290,6 +1290,36 @@ func (p *Pool) Status(uid string) (Status, bool) {
 	return p.statusOf(uid, e), true
 }
 
+// ProviderOf 返回账号**生效的**上游标识（只读访问器）。
+//
+// # 为什么需要这个只读出口
+//
+// providerOf(e) 是池子内部唯一的"这个号属于哪个上游"的判据，但它收 *entry
+// 且要求调用方持锁，池外拿不到。装配层（cmd/server）在组装出站凭证时必须
+// 回答同一个问题 —— 「调用方说的这个 id，真的是这个号的归属吗」——
+// 若不许它问，它就只能像改造前那样**默认 uid 的来源可信**，于是跨上游串号。
+//
+// ok=false 表示 uid 不在池里（与 AuthByUID 返回 nil 同源，但这里用显式的
+// 布尔而不是空串："" 是一个**合法**的上游标识 —— 它是 DefaultProvider）。
+//
+// 判据与 AvailableUIDsFor / PickByUIDFor / PickFor 用的是**同一个**
+// providerOf + normalizeProvider 组合，所以四处的"归属"口径不可能分叉。
+func (p *Pool) ProviderOf(uid string) (string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return "", false
+	}
+	return p.providerOf(e), true
+}
+
+// ProviderOf 的只读出口已被上面那条路径使用；出口层的**错误策略**同样需要它：
+// applyErrorPolicy 只拿到出错的 uid，却必须按**该账号所属的上游**去问
+// "你什么时候能恢复"。早先没有这个访问器，核心只能用无参回调替所有上游
+// 回答同一个时刻，于是 codearts 的号被冷到 workbuddy 的次日 04:00
+// （P2：无参回调 = 默认上游的隐式硬编码）。
+
 // AuthByUID 返回账号的完整凭证（给调度器/运维接口用）。
 func (p *Pool) AuthByUID(uid string) *auth.Auth {
 	p.mu.RLock()
@@ -1335,12 +1365,51 @@ func (p *Pool) AvailableUIDsFor(provider string) []string {
 
 // PickByUID 若 uid 当前 healthy 且未占满在途名额，返回其凭证（记录 lastUsed 防撞号）；
 // 否则返回 nil。供会话粘性路由命中校验与直取使用。
+//
+// ⚠ **不校验 provider** —— 这是有意的历史签名，不是可供路由使用的判据。
+// 直接用它在多上游部署里会跨上游串号：会话先绑到 codearts 的号，
+// 之后同一个 key 的请求换成 workbuddy 前缀时，粘性命中会把 **codearts 的号**
+// 塞进 workbuddy 的出站循环。改造后出站按"账号自己的上游"分派，于是它**不报错**，
+// 只是静默用错上游的账号 —— 比失败更难发现。
+//
+// 路由选号请一律用 PickByUIDFor（带本次请求的 provider）。
+// 保留本方法是因为"取一个已知 uid 的凭证"在没有上游上下文时（运维/诊断/单上游）
+// 仍是合法需求；它等价于 PickByUIDFor(DefaultProvider, uid) 之外的
+// "不带上游过滤"语义，调用方必须自己保证 uid 的来源可信。
 func (p *Pool) PickByUID(uid string) *auth.Auth {
+	return p.pickByUIDLocked(uid, "", false)
+}
+
+// PickByUIDFor 在**指定上游内**按 uid 取号：uid 不存在、不属于该上游、
+// 不 healthy、或已占满在途名额，一律返回 nil（记录 lastUsed 防撞号）。
+//
+// provider 为空走默认上游（与 PickFor/AvailableUIDsFor 的归一语义一致）。
+//
+// # 为什么粘性校验必须带上游
+//
+// 会话粘性是**池子内**的概念，而池子是多上游共用的：同一个会话 key 绑定的 uid
+// 是上一次请求的产物，下一次请求的 model 前缀却可能变（客户端换模型 = 换上游）。
+// 只按"healthy + 未满载"放行，等于承认粘性可以跨上游 —— 而跨上游的号
+// 对本次请求是**没有意义**的账号（凭证结构都不同）。
+//
+// 返回 nil 让调用方走"解绑 + 正常轮换"：这是正确的降级 ——
+// 会话粘性是优化，不是契约；跨上游时放弃粘性、按本次请求的上游重新选号，
+// 比坚持一个用不了的绑定正确得多。
+func (p *Pool) PickByUIDFor(provider, uid string) *auth.Auth {
+	return p.pickByUIDLocked(uid, provider, true)
+}
+
+// pickByUIDLocked 是 PickByUID/PickByUIDFor 的共用实现。
+// checkProvider=false 时跳过上游过滤（PickByUID 的向后兼容语义）。
+func (p *Pool) pickByUIDLocked(uid, provider string, checkProvider bool) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
 		return nil
+	}
+	if checkProvider && p.providerOf(e) != p.normalizeProvider(provider) {
+		return nil // 别的上游的号：本次请求用不上（与 pickFor 的候选集过滤同源）
 	}
 	now := time.Now()
 	if !e.healthy(now) {

@@ -15,6 +15,7 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"time"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/codearts"
@@ -308,4 +309,272 @@ func (r registryRouter) credentialFor(id string) gateway.Credential {
 		}
 	}
 	return cred
+}
+
+// Credential 为**指定的那个账号**组装一份带凭证的 Credential（出站路径专用）。
+//
+// # 与 credentialFor 的关键区别
+//
+//	credentialFor(id)          —— 目录路径：任取一个号即可（静态目录人人一样）
+//	Credential(id, uid)        —— 出站路径：**必须是调用方选中的那个号**
+//
+// 出站循环已经用 `Pool.PickFor(provider, model)` 选好了号并 `Acquire` 了
+// 在途名额。这里若自作主张另选一个号，会让「被选中的号」与「真正发请求的号」
+// 分叉：名额占在 A 上、请求发在 B 上、失败惩罚记在 A 上 ——
+// 三者对不上会让整套选号/额度/熔断统计全部失真。
+//
+// ok=false 的情形（出口层一律视为「服务端暂时发不出这个号」→ 换号）：
+//   - 该上游未注册；
+//   - 账号不在池里（状态文件与 auths 目录不同步）；
+//   - **该账号不属于这个上游**（见下，P1 真漏网）；
+//   - **默认上游没有私有 secret**（见下，这是绝大多数部署的实际形态）。
+//
+// # ⚠ 归属校验：uid 必须真的属于 id 那个上游（P1 真漏网）
+//
+// 改造前这里只校验两件事：上游已注册、uid 在池里。**它不校验 uid 是否属于
+// 该上游** —— 而这是"粘性把别家的号塞进来"能一路走到底的最后一环：
+//
+//  1. 客户端发 {"model":"codearts/GLM-5.2","metadata":{"conversation_id":"K"}}
+//     → Session.Bind("K", <codearts uid>)（并镜像到 Redis）
+//  2. 同一 conversation_id=K 下次改发 {"model":"glm-5.2"}（裸名 → 默认上游）
+//  3. 粘性命中那个 codearts uid（handler 侧已被 PickByUIDFor 拦住，
+//     但**任何别的调用方**拿着这个 uid 问 workbuddy 要凭证都到这里）
+//  4. Credential("workbuddy", <codearts uid>) 交出 Secret = *codearts.Auth
+//  5. workbuddy 的 authOf 断言 *auth.Auth 失败 → 报错
+//     → **惩罚一个无辜的 codearts 账号**（记错/冷却），真正的错在路由
+//
+// 池子本来就按 provider 分域（byUID 里的每个 entry 都带 provider 标签，
+// 见 providerOf），所以"这个号属于谁"在池内是**已知事实**，只是没有只读
+// 出口让它被问出来 —— 现在用 pool.ProviderOf。
+//
+// 判据与 PickByUIDFor / AvailableUIDsFor / PickFor 用的是同一个
+// providerOf + normalizeProvider 组合，四处的归属口径不可能分叉。
+//
+// **效果**：把"粘性把别家号塞进来"降级成**一次换号**
+// （ok=false → 出口层 errNoProviderCredential → 换号重试），
+// 而不是静默的凭证类型错误 + 一个无辜账号被罚。
+// 这是**独立于粘性域对齐的第二道防线**：即使将来再有人写一条新的调用路径
+// 绕过 PickByUIDFor，凭证装配点自己也拦得住。
+//
+// # ⚠ 默认上游为什么必须回落（这是端到端实测抓出来的，不是预防性设计）
+//
+// 池子里有一个**部署形态上的不对称**：
+//
+//	codearts  用 SyncToDirWithSecrets 入池 → e.secret = *codearts.Auth
+//	workbuddy 用 SyncToDir 入池（main.go:70，改造前就有的调用）→ e.secret = nil
+//
+// 后者的"私有凭证"就是 `*auth.Auth` **本身** —— 池子在 main.go 的
+// loadOrRestore 路径上已经把明文凭证（AccessToken/RefreshToken/FilePath）
+// 直接装进了 e.a，所以**不需要**再走 secret 通道。
+// 换句话说：默认上游的 secret 通道**本来就是空的**，那是正常形态。
+//
+// 第一版这里写的是 `if secret == nil { return ok=false }`，于是：
+//
+//	裸模型名 "glm-5.3" → 选中 workbuddy 的号 → Credential 返回 ok=false
+//	→ 出口层报 errNoProviderCredential → 换号 → 三个号全换完 → 503
+//
+// 实测：**改造前能用的 workbuddy 路径被整个打挂**
+// （`503 ... 多上游模式下取不到该账号的凭证`）。这是"修好新的、弄坏旧的"的典型。
+//
+// 修法：secret 为 nil 时回落到 **e.a（*auth.Auth 本体）** ——
+// 它正是 workbuddy.Provider 的 authOf 期望的类型（断言 `*auth.Auth`）。
+// 这样两类上游拿到的东西都对了：
+//
+//	codearts  拿到 *codearts.Auth（它自己的类型）
+//	workbuddy 拿到 *auth.Auth（它自己的类型）
+//
+// 而且这个回落**不引入任何新耦合**：*auth.Auth 是核心自己的通用凭证类型，
+// 装配层把它交给上游本来就是既有机制（改造前 `cfg.Upstream.ChatStream(acct)`
+// 传的就是它）。出口层仍然不读 Secret。
+func (r registryRouter) Credential(id, uid string) (gateway.Credential, bool) {
+	if _, ok := r.reg.Get(id); !ok {
+		return gateway.Credential{}, false
+	}
+	if r.p == nil {
+		return gateway.Credential{}, false
+	}
+	a := r.p.AuthByUID(uid)
+	if a == nil {
+		return gateway.Credential{}, false
+	}
+	// 归属校验：uid 必须真的属于 id 这个上游。
+	//
+	// ⚠ 默认上游的归一：池子里 uid 可能没打 provider 标签，此时 providerOf
+	// 返回 p.defaultProvider —— 正是 normalizeProvider("") 的语义，因此
+	// `id == ""`（调用方没有上游上下文）与显式默认上游都走得通。
+	// 这里刻意**不做** id == "" 的短路放行：那会让单上游部署退回无校验，
+	// 而单上游部署里 defaultProvider 与唯一的 provider 相等，校验自然为真。
+	if got, ok := r.p.ProviderOf(uid); !ok || got != id {
+		return gateway.Credential{}, false
+	}
+
+	cred := gateway.Credential{Provider: id, UID: uid, Nickname: a.Nickname}
+	if a.ExpiresAt > 0 {
+		cred.ExpiresAt = time.Unix(a.ExpiresAt, 0)
+	}
+	// 上游私有凭证优先；没有就回落到通用凭证本身（默认上游的正常形态）。
+	if secret, ok := r.p.SecretOf(uid); ok && secret != nil {
+		cred.Secret = secret
+	} else {
+		cred.Secret = a
+	}
+	return cred, true
+}
+
+// RefreshCredential 用**该上游自己的**实现续期一份凭证。
+//
+// # 为什么分派在装配层而不是出口层
+//
+// 出口层不认识任何具体上游（判据 1），它只会按 ID 问。而「这个 ID 对应哪个
+// 实例」以及「那个实例会不会续期」是装配层的事实 —— 这里正是
+// 「唯一同时认识核心与所有具体上游的地方」。
+//
+// # 为什么用 ExtOf 而不是让 Provider 接口多一个方法
+//
+// 续期不是每个上游都有的事实：纯 API Key 的上游没有凭证生命周期。
+// 塞进 Provider 会逼所有人写一个空实现（本仓已验证的模式：
+// AdminExt / JobExt / LoginFlow / AuthDirExt / CredentialLoader 都是
+// `gateway.ExtOf[T]` 类型断言）。
+//
+// # ok=false 且 err=nil 的语义（⚠ 出口层依赖它）
+//
+// 「这个上游没有续期实现」= **它的凭证不需要刷新**，出口层据此**跳过刷新**
+// 直接用现有凭证发请求。把它当成失败会让这类上游每次请求都白换一次号。
+func (r registryRouter) RefreshCredential(_ context.Context, id string, cred gateway.Credential) (bool, error) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return false, nil
+	}
+	fr, ok := gateway.ExtOf[gateway.CredentialRefresher](pv)
+	if !ok {
+		return false, nil
+	}
+	if err := fr.RefreshCredential(cred); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+// Classify 用**该上游自己的**错误分类器判定 (status, body) 的错误类别。
+//
+// # 为什么分类也必须由装配层分派（P2 缺口的落点）
+//
+// 出站循环原先在两条上游的响应上**都**调 `upstream.Classify`
+// —— 那是 workbuddy 的分类器。它的判据里有两批上游专有的事实：
+//
+//	hardMarkers        = ["insufficient credit", "no credit", "quota exceeded", ...]
+//	sessionDeadMarkers = ["Offline user session not found", "12153"]
+//
+// 拿它判 codearts 的响应体 → 两条真危害：
+//
+//	① 额度漏判：无一条匹配 codearts 的 "insufficient quota" → 额度耗尽被忽略
+//	② 反向误伤：body 含裸数字 "12153" → session_dead → **永久禁用健康的号**
+//
+// 与 `CredentialRefresher` / `RefreshSkewExt` 用同一个模式（ExtOf 类型断言）：
+// 没有实现 `gateway.ErrorClassifier` 的上游**不算错**，
+// 返回 ok=false，核心回落到 `upstream.Classify`（默认上游的判据，
+// 也正是改造前的行为 —— 不是通用猜测）。
+//
+// # 类型边界
+//
+// 出口层不认识任何具体上游，只认识 `gateway.ErrorKind`（中立类型）。
+// 各上游在自己的包里把自己的 ErrKind 翻译过来：
+//
+//	internal/workbuddy  → toGatewayKind(upstream.Classify(...))
+//	internal/codearts   → 先 DetectQuotaExhausted，再 toGatewayKind(Classify(...))
+//
+// 装配层只做"取出该上游的实现并调用"，不做任何翻译 ——
+// 翻译是上游的事实（每家的错误码表不同）。
+func (r registryRouter) Classify(id string, status int, body string) (gateway.ErrorKind, bool) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return gateway.ErrKindNone, false
+	}
+	ext, ok := gateway.ExtOf[gateway.ErrorClassifier](pv)
+	if !ok {
+		return gateway.ErrKindNone, false
+	}
+	return ext.Classify(status, body), true
+}
+
+// RefreshSkew 问**该上游自己的**提前续期窗口。
+//
+// # 为什么"要不要刷"也必须在装配层分派
+//
+// `RefreshCredential` 把"**怎么**刷"分派出去了，但"**要不要**刷"原先留在核心：
+// 出站循环用 `cfg.RefreshSkew`（默认 10m）替所有上游回答。而这是上游的事实：
+//
+//	workbuddy → token 寿命以小时计 → 10m
+//	codearts  → STS 仅约 30m     → 3m
+//
+// 对 codearts，10m 的后果是**太早**：剩 8m 就被核心判为该刷，而 codearts 的
+// CredentialRefresher 内部没有自己的 skew 检查 → 真的去消费那个**一次性**的
+// refresh_token。为省一次 401 往返烧掉一个凭证。
+//
+// 与 CredentialRefresher 用同一个模式（ExtOf 类型断言）：没有实现该扩展点的
+// 上游**不算错**，返回 ok=false，核心回落到自己的通用兜底。
+func (r registryRouter) RefreshSkew(id string, cred gateway.Credential) (time.Duration, bool) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return 0, false
+	}
+	ext, ok := gateway.ExtOf[gateway.RefreshSkewExt](pv)
+	if !ok {
+		return 0, false
+	}
+	return ext.RefreshSkew(cred)
+}
+
+// ResetAt 问**该上游自己的**"额度耗尽的号什么时候能再用"。
+//
+// # 为什么这个能力也必须在装配层分派（P2 设计缺口）
+//
+// 与 RefreshSkew 同一形状的缺口，但断在**类型**上：出口层的
+// `Config.NextResetAt` 早先是 `func() time.Time` —— 没有参数。
+// 签名不允许按上游分派，于是它只能返回装配层注入的那**一个**时刻
+// （workbuddy 的次日 04:00），所有上游共用。
+//
+// 后果对 codearts 是实打实的：它**没有签到恢复机制**，
+// 「次日 04:00」不是它的任何事实 ——
+//
+//	明明已恢复却还冷到次日凌晨 → 白白闲置近 24h
+//	按 04:00 解冻而实际未恢复   → 又撞一次硬错误
+//
+// 现在出口层按 ID 问（ProviderRouter.ResetAt），本函数把
+// 「ID → 那个实例的排程」翻译出来。出口层仍然不认识任何具体上游。
+//
+// 与 CredentialRefresher / RefreshSkewExt / ErrorClassifier 用同一个模式
+// （ExtOf 类型断言）：没有实现 gateway.ResetPolicyExt 的上游**不算错**，
+// 返回 ok=false，核心回落到自己的通用保守值（now+1h）。
+//
+// ⚠ 刻意**不**回落到 `r.reg.First()`（默认上游）的排程：那正是本 bug 的形态 ——
+// 拿默认上游的事实去回答另一个上游的问题。ok=false 是唯一正确的回答。
+func (r registryRouter) ResetAt(id string, cred gateway.Credential) (time.Time, bool) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return time.Time{}, false
+	}
+	ext, ok := gateway.ExtOf[gateway.ResetPolicyExt](pv)
+	if !ok {
+		return time.Time{}, false
+	}
+	return ext.ResetAt(cred)
+}
+
+// Chat 用**指定上游自己的 Provider** 发一次对话。
+//
+// # 为什么必须由装配层做（本次修的 bug 的落点）
+//
+// 出口层只有 ID。把 ID 换成「能发请求的那个实例」需要 Registry，
+// 而 Registry 就在本层。出口层因此永远不需要 import 任何具体上游。
+//
+// ok=false 表示该上游未注册 / 实例缺失 —— 出口层按「服务端暂时发不出去」
+// 处理（换号、最终 503），而不是当成上游返回的业务错误。
+func (r registryRouter) Chat(ctx context.Context, id string, cred gateway.Credential, body []byte) (gateway.ChatStream, bool, error) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return gateway.ChatStream{}, false, nil
+	}
+	cs, err := pv.Chat(ctx, cred, body)
+	return cs, true, err
 }

@@ -33,7 +33,7 @@ package pool
 //
 // **结论：quota 需要用 QuotaView 而不是裸 int64，理由是对的；
 // 但引用 codearts 作为依据是错的** —— 真正的理由是"额度形态不止一种"
-//（unlimited / 未来可能出现真正按模型的上游），而不是 codearts 本身。
+// （unlimited / 未来可能出现真正按模型的上游），而不是 codearts 本身。
 //
 // 保留 QuotaView 不变，但 **FromPerModel 目前没有上游提供数据源**：
 // 它是为"将来某个真的按模型报额度的上游"预留的形态。

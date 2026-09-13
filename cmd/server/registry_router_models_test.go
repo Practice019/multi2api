@@ -99,7 +99,7 @@ func TestRegistryRouterModelsCodearts(t *testing.T) {
 
 	ms, ok := r.Models(context.Background(), "codearts")
 	if !ok {
-		t.Fatalf("★ registryRouter.Models(codearts) 返回 ok=false —— "+
+		t.Fatalf("★ registryRouter.Models(codearts) 返回 ok=false —— " +
 			"codearts 的模型在 /v1/models 里被静默跳过（这就是用户报的『扫不出来』）")
 	}
 	if len(ms) != 7 {

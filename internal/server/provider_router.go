@@ -18,13 +18,15 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 )
 
 // ProviderRouter 出口层需要的多上游能力。
 //
-// 刻意只有四个方法，且**每一个都可失败**（返回 ok=false）：
+// 刻意只有少数几个方法，且**每一个都可失败**（返回 ok=false）：
 // 拿不到上游目录是常态（账号没登录/凭证过期），不能让它变成 500。
 type ProviderRouter interface {
 	// Has 报告该 ID 是否是已注册的上游。
@@ -42,6 +44,164 @@ type ProviderRouter interface {
 	// ok=false 表示这个上游现在给不出目录（没账号、拉取失败、未实现 CapModels），
 	// 调用方应当**跳过它**而不是把整个 /v1/models 打成失败。
 	Models(ctx context.Context, id string) ([]gateway.ModelInfo, bool)
+
+	// Chat 用**指定上游自己的 Provider** 发一次对话。
+	//
+	// # 为什么出口层不能自己拿 cfg.Upstream 发（本次修的真 bug）
+	//
+	// 出站循环原先恒用 `h.cfg.Upstream`（= workbuddy 的 upstream.Client）
+	// 发**所有**请求，哪怕选中的是 codearts 的账号、请求的是 codearts 的模型。
+	// workbuddy 的客户端把 codearts 的凭证按 workbuddy 的格式解读 ——
+	// 必然失败，而且失败得很晚（一次完整的上游往返），还会惩罚那个无辜的账号。
+	//
+	// 出站层**不可能**自己选对实现：它只认 ID（不认识任何具体上游，见包注释），
+	// 而「ID → 能发请求的那个实例」是装配层的事实。
+	//
+	// 返回形状直接复用 gateway.ChatStream（而不是像 cfg.Upstream.ChatStream
+	// 那样返回四元组）：非 2xx 时上游的错误体就在 stream.Body 里，
+	// 出口层按需 `io.ReadAll` 后交给 upstream.Classify。
+	//
+	// ok=false 表示该上游根本没接上（未注册 / 实例缺失）——
+	// 出口层应当按「服务端暂时没号」处理（换号/503），而不是当成上游业务错误。
+	Chat(ctx context.Context, id string, cred gateway.Credential, body []byte) (gateway.ChatStream, bool, error)
+
+	// Credential 为该上游组装一份**带凭证**的 Credential。
+	//
+	// # 为什么"组装凭证"必须经过装配层
+	//
+	// 凭证的秘密部分存在账号池的**不透明 any 通道**里（pool.SecretOf），
+	// 只有装配层知道它是哪个上游的什么类型 —— 出口层**不得读 Secret**。
+	// 所以出口层只能问"给我一份 uid 对应的、该上游能用的凭证"。
+	//
+	// # 为什么需要 uid 参数
+	//
+	// 出站循环已经用 `Pool.PickFor(provider, model)` 选好了号，选号带模型额度
+	// 加权与在途名额判断，**不能被绕过**。所以这里按 uid 取，
+	// 而不是让装配层再选一次号（那会记录 lastUsed，打乱真实流量的选号分布，
+	// 且与已经 Acquire 的名额对不上）。
+	//
+	// ok=false 表示取不到（账号不在池里 / 没有 secret / 该上游未注册）。
+	// ⚠ 与 Models 用的 credentialFor 不同：那条路刻意用「任一个号」，
+	// 这条路必须用**调用方指定的那个号**。
+	Credential(id, uid string) (gateway.Credential, bool)
+
+	// RefreshCredential 用**该上游自己的**刷新实现续期一份凭证。
+	//
+	// # 这是本次修复的第二半（A′ 扩展点在出口层的落点）
+	//
+	// 出站循环原先恒用 `cfg.Upstream.RefreshToken(acct)`（workbuddy 的实现），
+	// 对任意上游的账号调用 —— codearts 的账号因此被报 "no refreshToken"
+	// 并被标记失败冷却（实测 err_total +3/请求）。
+	//
+	// 分派本身不在这里做判断：装配层按 `gateway.ExtOf[gateway.CredentialRefresher]`
+	// 问上游自己要实现，出口层只说"给这个上游的这个号续期"。
+	//
+	// ⚠ **没有实现该扩展点的上游不算失败** —— 那表示"它的凭证不需要刷新"。
+	// 装配层应当对这种情况返回 ok=false 且 err=nil，出口层据此**跳过刷新**
+	// 直接用凭证发请求（Caps 里没有"需要续期"这一位，缺实现就是不需要）。
+	//
+	// err 只用于诊断日志；出口层不读它做分类（刷新失败一律按"这个号现在
+	// 用不了"处理：记错、换号），因为 codearts 的"需重登"与 workbuddy 的
+	// session dead 属于**不同**的恢复路径（见各上游实现里的注释）。
+	RefreshCredential(ctx context.Context, id string, cred gateway.Credential) (ok bool, err error)
+
+	// Classify 用**该上游自己的**错误分类器判定 (status, body) 的错误类别。
+	//
+	// # 为什么分类也必须按上游分派（P2 缺口的落点）
+	//
+	// 出站循环原先在两条上游的响应上**都**调 `upstream.Classify`
+	// —— 那是 workbuddy 的分类器，它的判据里有两条上游专有的事实：
+	//
+	//	hardMarkers        = ["insufficient credit", "no credit", "quota exceeded", ...]
+	//	sessionDeadMarkers = ["Offline user session not found", "12153"]
+	//
+	// 拿它判 codearts 的响应体，两个方向同时出错：
+	//
+	//	① 额度漏判：codearts 的 "insufficient quota"（InferHub.4291.200）
+	//	   不匹配任何一条 hardMarker → ErrNone → 额度耗尽被完全忽略。
+	//
+	//	② 反向误伤（后果最重）：codearts 的错误体只要含裸数字 "12153"
+	//	   → ErrSessionDead → Pool.Disable（**永久禁用**，需人工重登）
+	//	   → 一个健康的账号被永久打掉。
+	//
+	// # 为什么返回值是 gateway.ErrorKind 而不是任何上游的 ErrKind
+	//
+	// `upstream.ErrKind` 与 `codearts.ErrKind` 是**不同包的不同类型**，
+	// core 不可能同时吃两者。所以出口层要的是一个**中立**类型 ——
+	// 它由 gateway 提供（core 与上游都合法依赖 gateway，见其包注释），
+	// 上游各自在自己的包里把它翻译出来。
+	//
+	// # ok=false 的语义
+	//
+	// 「该上游没有实现 gateway.ErrorClassifier」—— 调用方**必须**回落到
+	// `upstream.Classify`（单上游模式的行为，逐字不变），而**不是**回落
+	// 到某个通用猜测。原因见 handler.go 里 Classify 回落分支的注释：
+	// 默认上游（workbuddy）的分类判据就住在 upstream.Classify 里，
+	// 回落它是**正确**的，不是妥协。
+	//
+	// 与 Models 一样是"可能失败"的能力：拿不到就跳过，不当成上游业务错误。
+	Classify(id string, status int, body string) (gateway.ErrorKind, bool)
+
+	// RefreshSkew 问**该上游自己**"距过期不足多久就该提前续期"。
+	//
+	// # 为什么"要不要刷"必须由上游回答（这是出站修复的漏网）
+	//
+	// RefreshCredential 修好了"**怎么**刷"，但"**要不要**刷"原先留在核心：
+	// 出站循环先做 `acct.NeedsRefresh(h.cfg.RefreshSkew)`（默认 10m），
+	// 只有它为真才会走到上游的续期实现。于是核心用一个通用窗口替所有上游
+	// 回答了"多早算该刷" —— 而这是**上游的事实**：
+	//
+	//	workbuddy → access token 寿命以小时计，10m 窗口合理
+	//	codearts  → STS 凭证仅约 30m，它自己的窗口是 3m
+	//
+	// # 10m 对 codearts 的具体后果（不是"太晚"，是"太早"）
+	//
+	// 剩 8m 时核心判 true → 进续期分支 → 而 codearts 的 CredentialRefresher
+	// 内部**没有**自己的 skew 检查（只做断言+转发）→ 真的去消费那个
+	// refresh_token —— 它是**一次性**的（用一次即作废）。
+	// 为省一次 401 往返烧掉一个凭证，这正是"核心越俎代庖"最贵的形态。
+	//
+	// 所以判据必须和"怎么刷"待在同一个地方。核心只问，不做判断。
+	//
+	// # ok=false 的语义
+	//
+	// 「该上游没有上报窗口」——调用方回落到自己的通用兜底
+	// （明确的保守值，而不是假装知道上游的寿命）。
+	//
+	// ⚠ 与「skew 返回 0」必须区分：0 是上游**明确声明**"不需要提前续期"，
+	// 调用方必须尊重；ok=false 是"没有这个信息"，用兜底值是合理的。
+	RefreshSkew(id string, cred gateway.Credential) (skew time.Duration, ok bool)
+
+	// ResetAt 问**该上游自己**"额度耗尽的号什么时候能再用"（走 gateway.ResetPolicyExt）。
+	//
+	// # 为什么这个能力必须按上游分派（P2 设计缺口）
+	//
+	// 与 RefreshSkew 是同一个形状的缺口，但断在**类型**上而不是判断上：
+	// server.Config.NextResetAt 早先是 `func() time.Time` —— 没有参数。
+	// 签名不允许按上游分派，于是不管出错的号属于哪个上游，拿到的都是装配层
+	// 注入的那**一个**答案（workbuddy 的次日 04:00）。
+	//
+	// 这正是 handler.go 注释里早就写对、但类型实现不了的那件事：
+	// 「出口层只问'这个号什么时候能再用'，具体策略由上游定义」。
+	//
+	// # 与 RefreshSkew 的对照
+	//
+	//	RefreshSkew → 我的凭证多早算该刷   （凭证寿命决定）
+	//	ResetAt     → 我额度耗尽的号何时能再用（上游排程决定）
+	//
+	// 两者都收整份 Credential：策略可能取决于凭证本身（套餐/窗口），
+	// 而出口层**不得读** Credential.Secret。上游拿到整份凭证自己断言类型。
+	//
+	// # ok=false 的语义（⚠ 出口层依赖它）
+	//
+	// 「该上游没有上报恢复排程」—— 没有实现 gateway.ResetPolicyExt，
+	// 或实现里明确答"我没有这个信息"。调用方回落到自己的**通用保守值**
+	// （现在注入的兜底是 now+1h）。这是明确的兜底，不是"核心假装知道
+	// 上游的排程"。
+	//
+	// codearts 就是这一类：它**没有**签到恢复机制，次日 04:00 对它毫无意义。
+	// 把它强加上去会让号"明明已恢复却冷到次日凌晨"（白闲置近 24h）。
+	ResetAt(id string, cred gateway.Credential) (until time.Time, ok bool)
 }
 
 // providerFor 解析请求的 model 字段，返回 (上游ID, 上游侧模型名, 错误)。
@@ -88,6 +248,32 @@ func (h *Handler) defaultProvider() string {
 	}
 	return ""
 }
+
+// CredentialRefresher 是 gateway.CredentialRefresher 的**包内别名**。
+//
+// 出口层只在这里用一次（出站循环的刷新分支），起别名的意义是让
+// "这一步需要的是'谁来做续期'"这件事在 handler.go 里一眼可见，
+// 而不需要读者去翻 gateway 包。类型断言本身仍用 gateway.ExtOf 完成。
+type CredentialRefresher = gateway.CredentialRefresher
+
+// RefreshSkewExt 是 gateway.RefreshSkewExt 的**包内别名**（同上）。
+//
+// 出口层不认识任何具体上游，只认识"谁能回答我'多早该刷'"这个**问题形状**。
+type RefreshSkewExt = gateway.RefreshSkewExt
+
+// ResetPolicyExt 是 gateway.ResetPolicyExt 的**包内别名**（同上）。
+//
+// 出口层不认识任何具体上游，只认识"谁能回答我'这个号什么时候能再用'"
+// 这个**问题形状**。P2 修复的核心就是把这个问题从"无参回调"（答案唯一，
+// 必然隐式绑定默认上游）换成"按 ID 问"（每个上游答自己的）。
+type ResetPolicyExt = gateway.ResetPolicyExt
+
+// errNoProviderCredential 是多上游模式下"取不到该账号凭证"的失败原因。
+//
+// 独立成变量（而不是就地 errors.New）是为了让日志里有稳定的可 grep 文案：
+// 这一条出现就意味着装配层与账号池对不上（账号没进池 / 没有 secret），
+// 是**接线问题**而不是上游问题，不该与上游的业务错误混在一起排查。
+var errNoProviderCredential = errors.New("多上游模式下取不到该账号的凭证（账号不在池里或没有 secret）")
 
 // unknownProviderError 未知上游前缀。
 //

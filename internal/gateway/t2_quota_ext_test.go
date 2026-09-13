@@ -127,8 +127,8 @@ func TestQuotaExtIsDiscoverable(t *testing.T) {
 // quotaExtStub 是最小的 Provider + QuotaExt 实现。
 type quotaExtStub struct{}
 
-func (s *quotaExtStub) ID() string               { return "stub" }
-func (s *quotaExtStub) Caps() Capability         { return CapChat }
+func (s *quotaExtStub) ID() string       { return "stub" }
+func (s *quotaExtStub) Caps() Capability { return CapChat }
 func (s *quotaExtStub) Chat(ctx context.Context, c Credential, b []byte) (ChatStream, error) {
 	return ChatStream{}, nil
 }

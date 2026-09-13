@@ -6,9 +6,9 @@
 // `/v1/models` 是**公共端点**：所有客户端都调它。改错会让**所有上游**的模型消失，
 // 而不只是新接的那个。所以顺序必须是：
 //
-//	1. 先让"workbuddy 32 条一条不少"在**改动前**是绿的（本文件的 baseline 用例）
-//	2. 再动实现
-//	3. 改完再跑：32 条仍在 + codearts 的新增
+//  1. 先让"workbuddy 32 条一条不少"在**改动前**是绿的（本文件的 baseline 用例）
+//  2. 再动实现
+//  3. 改完再跑：32 条仍在 + codearts 的新增
 //
 // 跳过第 1 步就无法区分"我改对了"与"本来就坏"。
 //
@@ -128,6 +128,60 @@ func (r testRouter) Models(_ context.Context, id string) ([]gateway.ModelInfo, b
 		return nil, false
 	}
 	return ms, true
+}
+
+// Chat / Credential / RefreshCredential 是**出站**能力，本文件（目录合并）不涉及。
+//
+// 但它们必须存在：接口断言要求方法集精确匹配，少一个就编译不过
+// （见 tasks/plan.md 决策 E 的实测教训 —— 签名差一点是静默失配，
+// 少一个方法是编译期失败，后者反而是好事）。
+//
+// ⚠ Chat 返回 ok=false 而不是"假装成功"：本文件的用例都只调 /v1/models，
+// 一旦哪天有人拿这个桩去测 chat，会立刻拿到一个明确的"上游没接上"，
+// 而不是一个看起来正常的空流 —— 后者会让测试**假绿**。
+func (r testRouter) Chat(_ context.Context, _ string, _ gateway.Credential, _ []byte) (gateway.ChatStream, bool, error) {
+	return gateway.ChatStream{}, false, nil
+}
+
+func (r testRouter) Credential(_, _ string) (gateway.Credential, bool) {
+	return gateway.Credential{}, false
+}
+
+func (r testRouter) RefreshCredential(_ context.Context, _ string, _ gateway.Credential) (bool, error) {
+	return false, nil
+}
+
+// RefreshSkew 报告"距过期不足多久就该提前续期"。
+//
+// ⚠ 返回 `ok=false` = **本桩没有意见**，不是"不用刷"。
+// 出口层据此回落到核心的通用兜底窗口（与改造前一致）——
+// 所以既有测试的语义一字未变。
+//
+// 返回 `0, true` 含义完全不同：那是"本上游**明确声明**不需要提前刷"，
+// 出口层**必须尊重**（不刷）。两者不可混用，见 provider_router.go 的注释。
+func (r testRouter) RefreshSkew(_ string, _ gateway.Credential) (time.Duration, bool) {
+	return 0, false
+}
+
+// ResetAt 报告"额度耗尽的号什么时候能再用"（gateway.ResetPolicyExt）。
+//
+// ⚠ 同样返回 `ok=false` = **本桩没有这个信息**，出口层回落核心的通用保守值。
+// 本文件（目录合并）不涉及冷却路径，但接口断言要求方法集精确匹配。
+func (r testRouter) ResetAt(_ string, _ gateway.Credential) (time.Time, bool) {
+	return time.Time{}, false
+}
+
+// Classify 用**该上游自己的**分类器判定错误类别（gateway.ErrorClassifier）。
+//
+// ⚠ 返回 `ok=false` = **本桩的这条上游没有分类器**，出口层回落到
+// `upstream.Classify`（默认上游 workbuddy 的判据，也正是改造前的行为）。
+//
+// 刻意的取舍：本桩的上游都是虚构的（"p1"/"p2"），没有任何真实错误码表，
+// 假装给一个分类反而会让测试看起来覆盖了分类分派而其实没有。
+// 真正的分派覆盖在 chat_multiprovider_test.go 的 multiRouter（它转发到
+// 具体上游的 recordingProvider，见那边的 Classify）。
+func (r testRouter) Classify(_ string, _ int, _ string) (gateway.ErrorKind, bool) {
+	return gateway.ErrKindNone, false
 }
 
 // resetDynamicCache 清动态模型缓存（与 handler_test.go 的写法同款）。
@@ -415,6 +469,34 @@ func (r noIDsRouter) Has(id string) bool { return id == r.def }
 func (r noIDsRouter) Default() string    { return r.def }
 func (r noIDsRouter) Models(_ context.Context, _ string) ([]gateway.ModelInfo, bool) {
 	return nil, false
+}
+
+// 出站能力同样只有声明、没有实现（见 testRouter 上方的注释）。
+func (r noIDsRouter) Chat(_ context.Context, _ string, _ gateway.Credential, _ []byte) (gateway.ChatStream, bool, error) {
+	return gateway.ChatStream{}, false, nil
+}
+
+func (r noIDsRouter) Credential(_, _ string) (gateway.Credential, bool) {
+	return gateway.Credential{}, false
+}
+
+func (r noIDsRouter) RefreshCredential(_ context.Context, _ string, _ gateway.Credential) (bool, error) {
+	return false, nil
+}
+
+// RefreshSkew 同 testRouter：`ok=false` 表示本桩没有意见，走核心兜底。
+func (r noIDsRouter) RefreshSkew(_ string, _ gateway.Credential) (time.Duration, bool) {
+	return 0, false
+}
+
+// ResetAt 同 testRouter：`ok=false` = 本桩没有恢复排程，走核心通用保守值。
+func (r noIDsRouter) ResetAt(_ string, _ gateway.Credential) (time.Time, bool) {
+	return time.Time{}, false
+}
+
+// Classify 同 testRouter：`ok=false` = 本桩没有分类器，走 upstream.Classify 回落。
+func (r noIDsRouter) Classify(_ string, _ int, _ string) (gateway.ErrorKind, bool) {
+	return gateway.ErrKindNone, false
 }
 
 // TestResetModelsCacheDoesNotDropOtherProviders 「刷新模型」后 codearts 仍在 ——

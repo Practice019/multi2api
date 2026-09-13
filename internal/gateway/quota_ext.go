@@ -142,7 +142,7 @@ func UnknownQuota() QuotaView { return QuotaView{HasData: false} }
 // 构造函数把这个不变量收在一处。
 //
 // nil 安全：调用方传 `*Subscription` 之类的指针时不必先判空
-//（上游常见写法：`sub, err := Fetch(); if err != nil { return UnknownQuota(), true }`）。
+// （上游常见写法：`sub, err := Fetch(); if err != nil { return UnknownQuota(), true }`）。
 func CreditsQuota(remaining int64) QuotaView {
 	return QuotaView{Kind: QuotaKindCredits, Remaining: remaining, HasData: true}
 }
@@ -151,7 +151,7 @@ func CreditsQuota(remaining int64) QuotaView {
 //
 // 空表视为**未知**而不是"零额度"：一个没有任何模型条目的 per_model
 // 不携带任何信息，把它当成可信的 0 会让账号被静默降权
-//（pool 侧同一条判据见 restoreQuota 的 hasContent）。
+// （pool 侧同一条判据见 restoreQuota 的 hasContent）。
 func PerModelQuota(byModel map[string]int64) QuotaView {
 	if len(byModel) == 0 {
 		return UnknownQuota()

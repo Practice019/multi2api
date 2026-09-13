@@ -17,6 +17,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const cpSelf = require('child_process');   // 自检用：把自己当子进程跑，配合 AUDIT_WEBUI 换输入
 
 const REPO = path.resolve(__dirname, '..', '..');
 // 可用 AUDIT_WEBUI 指向别处的 webui.html —— 变异测试需要它指向一次性副本。
@@ -40,14 +41,57 @@ console.log('=== 静态死按钮扫描 ===\n');
 // 第一版没排除，报了 19 个假死按钮（签到/积分/派猫/领奖…全是表格行里的）。
 const isTemplateId = (id) => /\$\{/.test(id);
 
+// ⚠⚠ 必须用**剥过注释的** code，而不是原始 src。
+//
+// 这是本扫描器长期误报的根因：按钮收集在第 1 步用 src，绑定判定在第 2 步用 code，
+// 两处输入不一致。于是**被注释掉的按钮**（例如 T3 移入注释说明的
+// `<button id="btnAllCheckin">`）会被当成"页面上的真实按钮"收进来，
+// 然后在剥注释后的 code 里当然找不到绑定 → 报成死按钮。
+//
+// 实测：`btnAllCheckin` 只出现在 webui.html 的 L526–544 注释块里
+// （T3 已把它从 DOM 移除，改为 manifest 驱动的 `<span id="allDailyActs">`）。
+// 剥注释后全文 0 次出现，它根本不是页面上的按钮。
+//
+// 这与文件末尾 stripComments 注释里记的那类错误是同一个：
+// "验证书写形式而非本体" —— 这里连"本体是否存在"都没先确认。
+//
+// 判据修正：**注释不是 DOM**。注释里的 `<button>` 不渲染、不可点，
+// 既不该被算作死按钮，也不该被算作活按钮 —— 它不存在。
+const stripCommentsEarly = (s) => {
+  const lf = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return lf
+    .replace(/<!--[\s\S]*?-->/g, '')          // HTML 注释
+    .replace(/\/\*[\s\S]*?\*\//g, '')          // 块注释
+    .split('\n')
+    .map(l => l.replace(/\/\/.*$/, ''))        // 行注释
+    .join('\n');
+};
+const markup = stripCommentsEarly(src);
+
 const buttons = [];
-for (const m of src.matchAll(/<button\s[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)) {
+const commentedOut = [];
+for (const m of markup.matchAll(/<button\s[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)) {
   const id = m[1];
   if (isTemplateId(id)) continue;
   const text = m[2].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
   buttons.push({ id, text });
 }
-console.log('HTML 里的静态按钮（排除模板行按钮）: ' + buttons.length + '\n');
+
+// 透明化：被注释掉的按钮单独列出来，**不判死**。
+// 不列的话，"这个按钮怎么没被检查"就会变成下一个需要考古的谜题。
+for (const m of src.matchAll(/<button\s[^>]*id="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)) {
+  const id = m[1];
+  if (isTemplateId(id)) continue;
+  if (markup.includes(`id="${id}"`)) continue;
+  const text = m[2].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  commentedOut.push({ id, text });
+}
+console.log('HTML 里的静态按钮（排除模板行按钮 + 注释块）: ' + buttons.length + '\n');
+if (commentedOut.length) {
+  console.log('（以下按钮只存在于注释中，不渲染、不可点，故不参与判定）');
+  commentedOut.forEach(b => console.log('  · #' + b.id + ' "' + b.text + '"'));
+  console.log('');
+}
 
 // 2) 对每个 id，看源码里是否有绑定
 //
@@ -119,4 +163,54 @@ dead.forEach(b => console.log('  ✗ #' + b.id.padEnd(22) + ' "' + b.text.slice(
 
 console.log('');
 console.log('合计: ' + alive.length + ' 个有绑定, ' + dead.length + ' 个疑似死按钮');
-process.exit(dead.length ? 1 : 0);
+
+// ---------------------------------------------------------------------------
+// 自检：这个扫描器必须**同时**满足两条相反的性质，否则它是没用的。
+//
+//   性质 A（不误报）：注释块里的 `<button>` 不能被判成死按钮。
+//   性质 B（不漏报）：真正没有绑定的 `<button>` 必须被判成死按钮。
+//
+// 只修 A 的最省事写法是把"找不到绑定"一律放过 —— 那样性质 B 就死了，
+// 工具从此永远绿。所以两条都要在本文件里构造出来实测，
+// 用 AUDIT_WEBUI 指向临时副本（不动原仓库，也就不会污染别人的工作树）。
+const os = require('os');
+function scan(target) {
+  const env = { ...process.env, AUDIT_WEBUI: target };
+  const r = cpSelf.spawnSync(process.execPath, [__filename], { encoding: 'utf8', env });
+  return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
+}
+
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deadbtn-'));
+const results = [];
+function selfCheck(name, mutate, wantDead) {
+  const f = path.join(tmpDir, name + '.html');
+  fs.writeFileSync(f, mutate(src));
+  const r = scan(f);
+  const gotDead = r.code !== 0;
+  const pass = gotDead === wantDead;
+  results.push(pass);
+  console.log((pass ? '  PASS ' : '  FAIL ') + `自检 ${name}：期望${wantDead ? '判死(exit 1)' : '不判死(exit 0)'}，实际 exit ${r.code}`);
+  if (!pass) console.log(r.out.split('\n').filter(l => /✗|合计/.test(l)).map(l => '      ' + l).join('\n'));
+}
+
+// 性质 A：现有仓库（btnAllCheckin 在注释里）必须 exit 0
+selfCheck('A-当前仓库-注释里的按钮不判死', s => s, false);
+
+// 性质 B：把那个注释块**取消注释**（模拟"按钮真的回到 DOM 且没绑事件"）→ 必须判死
+selfCheck('B-取消注释成真按钮-必须判死', s => s.replace(
+  /<button id="btnAllCheckin">全部签到<\/button>/,
+  '<span></span></button></section><section><button id="btnAllCheckin">全部签到</button>'),
+  true);
+
+// 性质 B'：造一个全新的、确实没有绑定的按钮 → 必须判死（防止"只看 btnAllCheckin"的特判）
+selfCheck('B2-全新无绑定按钮-必须判死', s => s.replace(
+  '<span id="allDailyActs"></span>',
+  '<span id="allDailyActs"></span><button id="btnTotallyUnbound">没人绑我</button>'),
+  true);
+
+fs.rmSync(tmpDir, { recursive: true, force: true });
+
+console.log('');
+const selfFail = results.filter(r => !r).length;
+console.log('自检: ' + (results.length - selfFail) + '/' + results.length + ' 通过');
+process.exit(dead.length || selfFail ? 1 : 0);

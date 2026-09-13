@@ -65,7 +65,7 @@ import "strings"
 //
 // 与 Caps() 的契约同一条：**声明了就必须实现**。
 // 所以 OneURL 指向的端点必须真的挂在这条上游的 AdminRoutes 里
-//（有测试守住这一点，见 dailyaction_contract_test.go）。
+// （有测试守住这一点，见 dailyaction_contract_test.go）。
 // 报一个不存在的端点，前端就会渲染出一个点下去报错的按钮 ——
 // 与 LoginFlow.Configured 要避免的是同一类缺陷。
 type DailyActionExt interface {
@@ -181,7 +181,7 @@ func ValidDailyActionID(id string) bool {
 // # 为什么过滤发生在**核心**而不是信任上游
 //
 // 核心是"下发前的最后一道"，前端的渲染管线对畸形输入没有任何防御
-//（它拿到什么就渲染什么）。在这之前过一次，坏数据就变成"少一个按钮"
+// （它拿到什么就渲染什么）。在这之前过一次，坏数据就变成"少一个按钮"
 // 而不是"页面某处静默坏掉"。
 //
 // 三种被丢掉的情况：
