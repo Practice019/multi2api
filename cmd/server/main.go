@@ -257,6 +257,18 @@ func main() {
 		log.Printf("codearts: 已启用（凭证目录 %s）", cfg.CodeartsAuthDir)
 	} else {
 		log.Printf("codearts: 未启用（config 里 codearts.enabled 缺省为 false）")
+		// 凭证在、上游却没开 —— 这是最容易被读成"界面坏了"的一种状态：
+		// 用户明明看得见 auths/codearts/ 里的凭证，账号池与任务面板里却没有它们
+		// （实测事故：用户看到的是"2 个账号 · 按默认上游推断（未在 manifest 里注册）"
+		// 加"2 个已注册任务"，而真相就是这一行没有被启用）。
+		//
+		// 所以这里把"为什么看不到"直接讲出来。数量取实、不猜；读不到目录时
+		// 静默 —— 这一行只是提示，不该让启动失败。
+		if list, err := codearts.LoadDir(cfg.CodeartsAuthDir); err == nil && len(list) > 0 {
+			log.Printf("codearts: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池、也不会有后台续期任务；池中若残留旧账号，下一步对账会逐出",
+				cfg.CodeartsAuthDir, len(list))
+		}
 	}
 
 	log.Printf("已注册上游: %v", registry.IDs())
@@ -302,6 +314,41 @@ func main() {
 	defProvider, _ := registry.First()
 	if defProvider != "" {
 		p.SetDefaultProvider(defProvider)
+	}
+
+	// ---- 对账：逐出「本次启动没有注册的上游」的幽灵账号（见 pool_reconcile.go）----
+	//
+	// # 这次实测事故的来龙去脉
+	//
+	// 账号池是**持久化**的（data/state.json，另有 Redis 快照）。用户先用一份
+	// 启用了 codearts 的 config 跑过：auths/codearts/ 下 2 份凭证并入池子并落盘。
+	// 随后改用一份**没有 codearts 段**的 config 启动（codearts.enabled 缺省 false
+	// ⇒ 上游不注册），但启动恢复（Pool.RestoreFromSnapshot / Pool.load）只认
+	// state.json，照样把那 2 个 codearts 账号装回池子。于是：
+	//
+	//	/admin/accounts 有 5 个账号（2 个 provider="codearts"），
+	//	/admin/ui/manifest 的 providers 只有 workbuddy、jobs 只有 2 条 ——
+	//	前端账号池里冒出一个 manifest 里没注册的上游分组；
+	//	更实害：这 2 个号永远选得到却没有上游能服务、也没有续期任务
+	//	（codearts 的 STS 只有约 30 分钟寿命），请求只会失败。
+	//
+	// 修法是在"知道本次注册了哪些上游"的这一刻对账一次：池里出现过、
+	// 但不在 registry 里的上游，从**池中**逐出。
+	//
+	// # 为什么必须在 SetDefaultProvider 之后
+	//
+	// Pool.Providers() 返回的是**生效**标识：没打 provider 标签的历史账号会
+	// 回落成默认上游。默认上游还没设时它们会解析成**空串**，而空串不在
+	// registry.IDs() 里 —— 对账就会把「没有标签的号」整批误删。
+	// 所以顺序必须是 SetDefaultProvider → 对账；pruneUnregisteredProviders
+	// 内部还额外跳过空串，两道一起守（双保险）。
+	//
+	// # 不变量：凭证文件一个字节都不动
+	//
+	// 这里只把账号从**池**里逐出，auths/codearts/ 下的凭证文件原样保留 ——
+	// 重新启用该上游后，下次启动会照常把凭证重新并入池子。
+	if pruned, evicted := pruneUnregisteredProviders(p, registry.IDs(), log.Printf); pruned > 0 {
+		log.Printf("账号池：对账完成，本次启动未注册的上游 %d 个、账号 %d 个已逐出", pruned, evicted)
 	}
 
 	// 槽位定义在这里给出：核心只认识"有个叫 X 的槽位、配在 Y 点"，
