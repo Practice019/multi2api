@@ -430,8 +430,8 @@ func main() {
 			Log:      checkinLog,
 			Ring:     logRing,
 			AuthDir:  cfg.AuthDir,
-		// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
-		AuthsBase: cfg.AuthsBase,
+			// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
+			AuthsBase: cfg.AuthsBase,
 			// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。
 			//
 			// 这两条端点读的是核心自己排的班，不表达任何上游身份 ——

@@ -65,7 +65,7 @@ func TestDefaultErrorKindIgnoresBody(t *testing.T) {
 	// 同一状态码下，正文怎么变都不该改变分类。
 	bodies := []string{
 		"",
-		`{"code":12153,"msg":"Offline user session not found"}`, // workbuddy 的 session dead
+		`{"code":12153,"msg":"Offline user session not found"}`,               // workbuddy 的 session dead
 		`{"error_code":"InferHub.4291.200","error_msg":"insufficient quota"}`, // codearts 额度
 		`{"msg":"余额不足"}`,
 		`{"msg":"insufficient credit"}`,
