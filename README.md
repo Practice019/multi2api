@@ -96,6 +96,7 @@ flowchart LR
 | 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 带 `service` 身份标识可接负载均衡/宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **本地管理控制台** | `/ui` 单页 WebUI（本仓库扩展）：仪表盘 / 账号池 / 猫猫旅行 / 成长计划 / 请求日志 / 任务历史 / 设置 |
+| 🐾 **第三个上游：Loomy** | 讯飞 Loomy 桌面客户端的模型服务，OpenAI 兼容。一个 `session` 字符串即凭证，**纯转发**（见「Loomy 上游」一节） |
 
 ## 🚀 快速开始
 
@@ -359,6 +360,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `prompt.mode` | `custom` | 提示词模式：`custom` 替换客户端 system/developer；`passthrough` 透传，撞拦截时降级重试 |
 | `prompt.file` | 空 | 自定义提示词文件。**路径非空但不可读/为空 → 启动直接报错**（fail fast） |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
+| `loomy.enabled` | `false` | **显式**启用第三个上游（讯飞 Loomy）。段缺席 = 不注册，行为与之前逐字节一致 |
+| `loomy.auth_dir` | `<auth_dir>/loomy` | Loomy 凭证目录（`loomy*.json`） |
+| `loomy.base_url` | `https://loomyad.xunfei.cn/api/v1` | 上游基址（**已含 `/api/v1`**）。可配是为了换域名与本地假上游测试 |
+| `loomy.pool_accounts` | `true` | 是否把 loomy 账号并入核心账号池（`false` = 只能用管理端点） |
 | `upstash.url` / `token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
 | `pool.breaker_threshold` | `3` | 连续失败触发熔断阈值 |
@@ -1016,10 +1021,92 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 | 📦 **预编译 Release 产物** | `.github/workflows/release.yml` | 打 tag 自动构建 Win/Linux 二进制包并附校验和 |
 | 🧭 **多上游平台抽象** | `internal/gateway/` | Provider 4 方法 + 8 个可选扩展点 + 行为契约 + 架构约束测试 |
 | 💬 **系统提示词体系** | `internal/prompt/` | 从源头消灭 system 来源的内容误报；撞拦截时自动降级重试 |
+| 🐾 **第三个上游：Loomy** | `internal/loomy/` | 讯飞 Loomy 的 OpenAI 兼容端点 —— 一个 200 行的"轻上游"，判据 1 的第二次实测 |
 
 代码上对应 `internal/admin/`、`internal/checkinlog/`、`internal/logbuf/`、`internal/oauth/`、
-`internal/prompt/`、`internal/gateway/`、`internal/server/webui.html`、`start.bat`、`.github/`、`assets/`。
+`internal/prompt/`、`internal/gateway/`、`internal/loomy/`、`internal/server/webui.html`、`start.bat`、`.github/`、`assets/`。
 与上游同步时可只把这些目录单独合并，其余由上游更新覆盖。
+
+## 🐾 Loomy 上游（第三个上游，`internal/loomy/`）
+
+[Loomy](https://loomy.xunfei.cn) 是科大讯飞的桌面 AI 助手（Electron）。它的内置模型服务
+`https://loomyad.xunfei.cn/api/v1` 是**标准 OpenAI 兼容**端点，凭证就是客户端登录后写在本地
+Local Storage 里的 `session`（32 位 hex）。本网关把它做成第三个上游。
+
+### ⚠ 双轨鉴权：这一条最容易卡住
+
+**同一个上游的两个端点认不同的 Header**：
+
+| 端点 | 正确 Header | 用错的返回 |
+|---|---|---|
+| `GET /models` | `token: <session>` | `{"code":"100002","desc":"缺少 token"}` |
+| `POST /chat/completions` | `Authorization: Bearer <session>` | 同上 |
+
+注意那个响应的状态码是 **HTTP 200**（不是 401）—— 所以**"看状态码判断鉴权对不对"这条路不通**，
+失败会以"目录是空的"这种形态出现。本仓库把这条判据写成两个独立函数
+（`applyModelsAuth` / `applyChatAuth`）并配了正反两向的测试，改错任一方向都会红。
+
+### 启用
+
+```jsonc
+{
+  "loomy": {
+    "enabled": true,
+    // 缺省 <auth_dir>/loomy
+    "auth_dir": "./auths/loomy"
+  }
+}
+```
+
+然后把 session 放进 `auths/loomy/loomy-<uid>.json`。**两种形态都认** ——
+直接抄客户端登录态，或用本网关写盘的形态：
+
+```json
+{ "session": "<32 位小写 hex>", "userid": "<可选>", "phone": "<可选>" }
+```
+
+获取 session（客户端登录后，LevelDB 里搜 `loomy-auth-session`）：
+
+```powershell
+$raw = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(
+  "$env:APPDATA\Loomy\Local Storage\leveldb\000003.log"))
+# 注意：LevelDB 在键与值之间插了控制符，不能用 \s* 跳过
+[regex]::Matches($raw, 'loomy-auth-session.{0,40}?(\{.*?"session".*?\})') |
+  ForEach-Object { ($_.Groups[1].Value | ConvertFrom-Json).session }
+```
+
+### 行为说明
+
+| 项 | 说明 |
+|---|---|
+| **鉴权** | 一个 `session` 字符串；**无 TTL、无 refresh token**（实测客户端重启 4 次未轮换、源码无续期判断） |
+| **模型** | 实时拉 `GET /models`（实测 12 个）；拉不到时回落到内置静态快照，**目录不会因一次抖动整片消失** |
+| **已下架模型** | `doubao-seedream-5-lite` / `qwen-image-3.0-pro` 上游仍列出但一用就 404「该模型暂未开放」→ **不进目录** |
+| **别名** | `deepseek-v4.1-flash` → 上游自己解析成 `deepseek-v4-flash-0731`（实测），本网关不改写请求体 |
+| **额度** | 日额度 5000，**服务端按自然日自动重置**（无需签到/领取）。耗尽 → 硬冷却到下一个 CST 零点 |
+| **输出上限** | 按模型裁剪超限的 `max_tokens` / `max_completion_tokens`（最大的是 MiniMax-M3 的 512000） |
+| **session 失效** | `登录已失效，请重新登录` → **永久禁用该号**（只能人工重登；这是与 codearts 的关键区别） |
+
+### 为什么它只有 ~200 行
+
+这是判据 1（"加一个上游 = 加一个目录 + 实现接口 + 配置加一段，核心零改动"）的
+第二次实测，而且这次测的是**轻上游**形态：
+
+| 上游 | 需要实现 | 本包实际实现的扩展点 |
+|---|---|---|
+| workbuddy | 提示词/身份伪造/签到/成长/旅行 + 22 条管理端点 | AdminExt / JobExt / LoginFlow / … |
+| codearts | SDK-HMAC 签名 + DPoP + STS 续期 + 单所有者 store | AdminExt / CredentialRefresher / … |
+| **loomy** | **一个 HTTP 转发 + 静态模型表 + 分类器** | AuthDirExt / CredentialLoader(+Secret) / ErrorClassifier / ResetPolicyExt |
+
+**刻意不实现**的扩展点（每一个都对应它确实没有的东西，而不是"懒得做"）：
+`AdminExt`（没有可用管理端点）、`JobExt`（没有任何要定时做的事）、
+`LoginFlow`（登录发生在桌面客户端里，网关无法发起）、
+`CredentialRefresher` / `RefreshSkewExt`（没有可刷的凭证）、
+`SoftRateExt`（上游没给出限流解除时刻）。有测试钉住这一点 ——
+给不会变的凭证配一个空刷新实现，只会让核心误以为"这个号能自动恢复"。
+
+核心包（`gateway`/`pool`/`admin`/`server`/`scheduler`）为接入 loomy **一行未改**，
+`arch_test.go` 自动把它纳入架构约束（实测发现结果：`[codearts loomy workbuddy]`）。
 
 ## 🧰 工具脚本
 
@@ -1057,6 +1144,7 @@ internal/
   codearts/  # 第二个上游：华为 CodeArts（OAuth + DPoP + JWT 签名）[本仓库扩展]
   gateway/   # 多上游接缝：Provider 4 方法 + 可选扩展点 + 行为契约 + 架构约束 [本仓库扩展]
   logbuf/    # 请求日志环形缓冲 + 落盘                        [本仓库扩展]
+  loomy/     # 第三个上游：讯飞 Loomy（OpenAI 兼容 + 双轨鉴权）[本仓库扩展]
   oauth/     # OAuth 设备授权流程（服务端侧，state 存内存）    [本仓库扩展]
   pool/      # 账号池（状态机/熔断/租约/加权/持久化/软限流退避）
   prompt/    # 系统提示词体系：替换/透传 + 内容拦截降级状态机  [本仓库扩展]

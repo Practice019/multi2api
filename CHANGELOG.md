@@ -7,6 +7,68 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.3.0 — 2026-09-14
+
+> 本版主题：**新增第三个上游 Loomy**（讯飞桌面 AI 助手的模型服务）——
+> 判据 1（"加一个上游 = 加一个目录 + 实现接口 + 配置加一段，核心零改动"）
+> 的第二次实测，这次测的是**轻上游**形态。
+
+### 新增
+
+- **第三个上游：Loomy**（`internal/loomy/`）。`https://loomyad.xunfei.cn/api/v1`
+  是标准 OpenAI 兼容端点，凭证就是客户端登录后写在 Local Storage 里的
+  `session`（32 位 hex）。实测：12 个模型、流式 / function_calling / 视觉 / 推理全通，
+  简单问答消耗 1 积分，日额度 5000 由服务端按自然日自动重置。
+- **双轨鉴权的正反两向测试**。这个上游两个端点认不同的 Header
+  （`GET /models` 用 `token:`，`POST /chat/completions` 用 `Authorization: Bearer`），
+  而用错的那个返回 **HTTP 200** + `缺少 token` —— "看状态码判断鉴权"这条路不通。
+  仓库把它写成两个各自命名的函数并配测试，改错任一方向都会红。
+- **凭证两种形态都认**：直接抄客户端登录态，或用网关写盘的形态。
+  UID 优先取 `userid`、其次文件里的 `uid`、最后按 session 派生（确定性）。
+- **实时目录 + 静态快照兜底**：`GET /models` 拿得到就用实时的，
+  拿不到回落内置快照 —— 保证目录不会因为一次抖动/session 失效而整片消失。
+- **过滤上游已下架的模型**：`doubao-seedream-5-lite` / `qwen-image-3.0-pro`
+  上游仍列在 `/models` 里但一用就 404「该模型暂未开放」，现在不进目录。
+- **按模型裁剪超限的 `max_tokens` / `max_completion_tokens`**
+  （最大的是 MiniMax-M3 的 512000），并保证 JSON 数字字面量不被改写成科学计数法。
+- 配置段 `loomy.{enabled,auth_dir,base_url,pool_accounts}`；
+  `auths/loomy/loomy-<uid>.json` 按上游分子目录。
+
+### 说明（与 codearts 的关键区别）
+
+- **没有 `CredentialRefresher`**：Loomy 的 session 无 TTL、无 refresh token
+  （客户端重启 4 次未轮换、源码无续期判断），**没有可刷的东西**。
+  实现一个空刷新只会让核心误判"这个号能自动恢复"。
+- **session 失效 → 永久禁用**：`登录已失效，请重新登录` 只能人工重登。
+  codearts 的同类错误映到 `ErrKindAuth`（换号不罚）是因为它**能**自动续期 ——
+  两者不是同一件事，所以走的分类也不同。
+- **刻意不实现的扩展点**：`AdminExt`（没有可用管理端点）、`JobExt`（无定时事务）、
+  `LoginFlow`（登录在桌面客户端里）、`RefreshSkewExt`（无续期）、
+  `SoftRateExt`（上游未给限流解除时刻）。有测试钉住这一点。
+- 因此本包只有 ~200 行，而核心包（gateway/pool/admin/server/scheduler）**一行未改**；
+  `arch_test.go` 自动把它纳入架构约束（实测发现结果 `[codearts loomy workbuddy]`）。
+
+### 测试 / 守卫
+
+- 契约测试（判据 2）跑**假上游**，无网络无凭证也全过程执行，CI 里不会跳过；
+  假上游严格校验双轨鉴权，并有一段"负向对照"证明它真的在拦
+  （否则正向断言是 fail-open）。
+- 反向验证：把 `token:` 头改错 → `TestDualTrackAuth` 红；
+  把分类改成"先看状态码" → `TestClassify` 在三条 200-带正文判据上红。
+- `TestClassifyDoesNotBorrowOtherUpstreamsMarkers` 断言 loomy **不认**别家上游的
+  特征串（workbuddy 的 `12153`、codearts 的 `insufficient quota`）——
+  这正是 `gateway.ErrorClassifier` 要防的"用 A 的事实回答 B 的问题"。
+
+### 修复（本轮顺带）
+
+- **日志"已注册上游"打在最后一个上游注册之前**：loomy 启用时日志显示
+  `已注册上游: [workbuddy]`，与事实不符 —— 一行"看起来权威"的日志会让人
+  顺着它去查一个不存在的注册失败。已挪到所有注册之后。
+- **测试夹具里混进了真实凭证**：Loomy 手册把作者的真实 session / 手机号 /
+  userid 明文印了出来，第一版 fixture 直接照抄 —— 那等于把可用凭证提交进公开仓库
+  （本仓库上一个提交正是"清掉两处真实 api_key 硬编码"）。已全部换成合成值，
+  并把这条教训写进 fixture 的注释。
+
 ## v1.2.0 — 2026-09-14
 
 > 本版主题：**移植并接通「客户端行为遥测伪造层」** —— 让网关能把一批上游
