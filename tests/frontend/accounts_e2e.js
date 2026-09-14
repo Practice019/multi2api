@@ -106,6 +106,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ok(meta.every(g => g.cols > 0), '每张表都有表头（0 列说明列集回落失败）');
 
     // 逐组比对列集**与后端自报的一致**（这才是真正的判据）
+    //
+    // ⚠ 这里**不能**把"未知列 id"也从期望里滤掉 —— 那等于装置抄了被测对象的规则
+    //（被测代码就是"未知就跳过"，期望也"未知就跳过"，两边一起错 → 永远绿）。
+    // 所以同时取**未经处理的自报列集长度**做交叉校验：
+    // 只有当"自报的每一列前端都认识"时，渲染列数才允许等于自报列数。
     console.log('\n[B1b] 每个上游的表头 == 它在 manifest 里自报的列集');
     const colCheck = JSON.parse(await evalJs(`(() => {
       const W = window.__wb2api__;
@@ -115,11 +120,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       Array.from(document.querySelectorAll('#accts > section.acctgroup')).forEach(s => {
         const pid = s.dataset.acctgroup;
         const info = m.providers.find(p => p.id === pid);
-        const declared = (info && Array.isArray(info.accounts_columns) && info.accounts_columns.length)
+        const rawDeclared = (info && Array.isArray(info.accounts_columns) && info.accounts_columns.length)
           ? info.accounts_columns : W.DEFAULT_ACCT_COLUMNS;
-        const want = declared.map(titleOf).filter(Boolean);
+        // 期望：把**认识的**列翻成标题；同时记下有无未知列
+        const unknown = rawDeclared.filter(id => !W.ACCT_COLUMN_DEFS[id]);
+        const want = rawDeclared.map(titleOf).filter(Boolean);
         const got = Array.from(s.querySelectorAll('table > thead th')).map(th => th.textContent.trim());
-        out.push({ pid, want, got });
+        // 每个数据行的 td 数（用来交叉校验"表头跳了、单元格没跳"）
+        const rowTds = Array.from(s.querySelectorAll('table > tbody > tr.acctrow'))
+          .map(r => r.children.length);
+        out.push({ pid, want, got, rawLen: rawDeclared.length, unknown, rowTds });
       });
       return JSON.stringify(out);
     })()`));
@@ -131,6 +141,36 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     });
     ok(colBad.length === 0, '每个上游的表头都等于它自报的列集（顺序也算）' +
       (colBad.length ? ' —— ' + JSON.stringify(colBad) : ''));
+
+    // ---- 交叉校验：表头跳过的列，数据行也必须跳（评审发现的洞）----
+    //
+    // # 为什么必须有这两条
+    //
+    // 上面那条的 `want` 是"把**认识的**列翻成标题" —— 它和被测代码
+    //（acctColumnsFor 滤掉未知 id）用的是**同一套规则**。
+    // 两边一起错的时候，它会照样绿。
+    //
+    // 实测过的洞：`acctThHTML`（表头）与 `accountRow`（单元格）各自跳过未知列、
+    // 互不知情。它们恰好规则相同，所以当时 th/td 能对上 —— 但那是**巧合**：
+    // 给表头补一个占位分支就会 th 多一格、**整行错位**。
+    //
+    // 所以这里加两条**独立于实现**的判据：
+    //   ① 自报里每一列前端都要认识（有未知 id 就是契约漂移，必须显式失败）
+    //   ② 每个数据行的 td 数 == 表头列数（结构上不许错位）
+    const unknownCols = colCheck.filter(c => c.unknown.length);
+    ok(unknownCols.length === 0,
+      'manifest 自报的列 id 前端全部认识（有未知 id = 前后端契约漂移）' +
+      (unknownCols.length ? ' —— ' + JSON.stringify(unknownCols.map(c => ({ p: c.pid, unknown: c.unknown }))) : ''));
+
+    const colMisalign = [];
+    colCheck.forEach(c => {
+      c.rowTds.forEach((n, i) => {
+        if (n !== c.got.length) colMisalign.push(c.pid + ' 第' + i + '行: td=' + n + ' th=' + c.got.length);
+      });
+    });
+    ok(colMisalign.length === 0,
+      '每个数据行的 td 数 == 它表的表头列数（表头与单元格跳列不一致会在这里红）' +
+      (colMisalign.length ? ' —— ' + JSON.stringify(colMisalign) : ''));
 
     // ---------------------------------------------------------------- 分组渲染
     console.log('\n[T5] 账号池按上游分区（每个上游一个 <section>）');
