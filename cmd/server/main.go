@@ -26,6 +26,7 @@ import (
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
+	"workbuddy2api/internal/trae"
 	"workbuddy2api/internal/upstream"
 	"workbuddy2api/internal/workbuddy"
 )
@@ -401,6 +402,42 @@ func main() {
 		}
 	} else if lm != nil {
 		log.Printf("loomy: 未并入账号池（loomy.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// ---- 第四个上游：TRAE SOLO ----
+	//
+	// 注册顺序仍然 workbuddy 在前 → "裸模型名走谁"不变。
+	// trae 只有注册 + 并池两件事（凭证形态稳定：JWT + refreshToken）。
+	var tr *trae.Provider
+	if cfg.TraeEnabled {
+		tr = trae.NewWithConfig(trae.Config{
+			AuthDir:         cfg.TraeAuthDir,
+			AgentBase:       cfg.TraeAgentBase,
+			UgBase:          cfg.TraeUgBase,
+			OAuthBase:       cfg.TraeOAuthBase,
+			RefreshInterval: cfg.TraeRefreshInterval,
+			CheckinEnabled:  cfg.TraeCheckinEnabled,
+		})
+		if err := registry.Register(tr); err != nil {
+			log.Fatalf("注册 TRAE 上游失败: %v", err)
+		}
+		log.Printf("trae: 已启用（凭证目录 %s，续期间隔 %v）", cfg.TraeAuthDir, cfg.TraeRefreshInterval)
+	} else {
+		log.Printf("trae: 未启用（config 里 trae.enabled 缺省为 false）")
+		if list, err := trae.LoadDir(cfg.TraeAuthDir); err == nil && len(list) > 0 {
+			log.Printf("trae: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.TraeAuthDir, len(list))
+		}
+	}
+
+	if tr != nil && cfg.TraePoolAccounts {
+		if n := syncTraeAccounts(p, cfg.TraeAuthDir); n > 0 {
+			log.Printf("trae: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("trae: 账号池中暂无账号（凭证目录 %s 里没有可用的 trae*.json）", cfg.TraeAuthDir)
+		}
+	} else if tr != nil {
+		log.Printf("trae: 未并入账号池（trae.pool_accounts=false），只能通过其管理端点使用")
 	}
 
 	// "已注册上游"必须打在**所有**上游注册完之后。

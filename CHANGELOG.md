@@ -7,6 +7,33 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.6.0 — 2026-09-15
+
+> 本版为**未发布**的本地里程碑（已 commit、未 push 远端）。主题：**新增第四个上游 TRAE**。
+
+### 新增（TRAE 上游，`internal/trae/`）
+
+- **TRAE SOLO 对话通道**：`llm_utils_chat`（`function=solo_work_lite`），自定义 SOLO SSE
+  实时转成 OpenAI SSE（`internal/trae/sse.go`），流式/非流式/工具调用/思考链均可用。
+- **多账号 + 自动续期**：JWT + 消费型 refreshToken（与 codearts 同构），
+  后台按 `refresh_interval_seconds` 扫描续期 + 请求路径惰性续期；`CredentialExpiryExt`
+  提供「Token 到期」列。
+- **每日自动签到**：30 分钟扫一次，查状态、未签则领（幂等、跨重启安全）；
+  `DailyActionExt` 提供行内「签到」与顶部「全部签到」。
+- **权益包额度**：`ide_user_ent_usage` 的 `credits_limit` 求和 → 账号池「额度」列。
+- **模型目录**：实时拉 `get_detail_param`（config_name 即模型 ID），失败回落
+  13+1 个已知 SOLO 免费模型的静态快照（trae-solo-unlock 实测清单 + glm-5.2）。
+- 配置段 `trae.{enabled,auth_dir,refresh_interval_seconds,checkin_enabled,pool_accounts}`。
+
+### 说明
+
+- 协议来自对多个 trae 反代项目的复现研究（traework2api / trae-api / trae-local-api /
+  trae-solo-unlock），核心事实已固化进 `client.go` 的常量与测试。
+- 凭证两种形态都认（嵌套 `{auth,account}` / 扁平）；`trae-<uid>.json`。
+- TRAE 登录是浏览器 OAuth（127.0.0.1 回调），**未实现页内登录**：凭证经登录脚本
+  或手工放置后点「重载 auths」进池。
+- 契约测试用假上游全程执行（CI 不跳过），SSE 转换/分类/续期/额度均有单测。
+
 ## v1.5.0 — 2026-09-15
 
 > 本版为**自 v1.2.0 以来的累积发布**（此前 v1.3.0 / v1.4.0 两条只是里程碑记录，

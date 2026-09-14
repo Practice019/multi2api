@@ -54,6 +54,7 @@
 | **WorkBuddy** | OAuth 设备码登录 | 签到 / 保活 / 成长计划 / 猫猫旅行 / 任务一键完成 |
 | **CodeArts** | OAuth + DPoP（约 2 小时 STS，自动续期） | 签到（福利领取）/ 额度探测 |
 | **Loomy** | `session`（无 TTL） | **手机号验证码登录 / 新手任务一键完成 / 邀请码绑定 / 批量粘贴导入 / 额度实时查询** |
+| **TRAE** | SOLO 免费对话通道（JWT + 消费型 refreshToken） | **每日自动签到 / token 自动续期 / 权益包额度查询** |
 
 ## 🚀 快速开始
 
@@ -96,7 +97,7 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 | `auth_dir` | `./auths` | 凭证根目录，各上游分子目录存放 |
 | `pool.*` | — | 账号池：熔断阈值、在途上限、冷却时长等 |
 | `schedule.*` | — | 签到/保活时点与开关 |
-| `workbuddy.*` / `codearts.*` / `loomy.*` | — | 各上游开关、目录与专用参数 |
+| `workbuddy.*` / `codearts.*` / `loomy.*` / `trae.*` | — | 各上游开关、目录与专用参数 |
 
 **Loomy 特有配置段**：
 
@@ -106,6 +107,16 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 | `loomy.client_data_dir` | `""`（自动探测） | 本机 Loomy 客户端 Local Storage 目录（决定本机拾取/额度回退） |
 | `loomy.login_mode` | `auto` | `auto` 先本机拾取 / `sms` 只走手机号验证码 / `local` 只本机拾取 |
 | `loomy.sms_*` | 内嵌默认 | 讯飞账号网关（base_url / app_id / access key），一般不用改 |
+
+**TRAE 特有配置段**：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `trae.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
+| `trae.auth_dir` | `<auth_dir>/trae` | 凭证目录（`trae-*.json`，嵌套或扁平两种形态都认） |
+| `trae.refresh_interval_seconds` | `1800` | 后台 token 自动续期扫描间隔（`<=0` 关闭） |
+| `trae.checkin_enabled` | `true` | 每日自动签到（30 分钟扫一次，幂等） |
+| `trae.agent_base_url` / `ug_base_url` / `oauth_base_url` | 内嵌默认 | 三个 host 覆盖（一般不用改） |
 
 ## 🖥️ 管理控制台
 

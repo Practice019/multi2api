@@ -772,3 +772,65 @@ func TestLoomyClientDataDir(t *testing.T) {
 		}
 	})
 }
+
+// TestTraeDefaults 未配的项要落到正确的默认值上。
+//
+// 与 loomy 同一条判据：启用是显式的（trae.enabled=true），
+// 目录缺省落到 `<顶层 auth_dir>/trae`（用 AuthsBase，不是已被改写
+// 成 workbuddy 子目录的 AuthDir）。
+func TestTraeDefaults(t *testing.T) {
+	dir := t.TempDir()
+
+	fp := filepath.Join(dir, "a.json")
+	os.WriteFile(fp, []byte(`{"auth_dir":"./myauths","trae":{"enabled":true}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.TraeEnabled {
+		t.Fatal("显式 enabled=true 未生效")
+	}
+	if want := filepath.Join("./myauths", "trae"); c.TraeAuthDir != want {
+		t.Errorf("trae 目录应是 %q，得到 %q（若得到 ./myauths/workbuddy/trae，"+
+			"说明用了 c.AuthDir 而不是 c.AuthsBase）", want, c.TraeAuthDir)
+	}
+	// 续期间隔默认 1800s；签到与并池默认开。
+	if c.TraeRefreshInterval != 1800*1e9 {
+		t.Errorf("缺省续期间隔 = %v，want 1800s", c.TraeRefreshInterval)
+	}
+	if !c.TraeCheckinEnabled {
+		t.Error("缺省应启用签到任务")
+	}
+	if !c.TraePoolAccounts {
+		t.Error("启用后默认应当并入账号池")
+	}
+
+	// 显式覆盖。
+	fp2 := filepath.Join(dir, "b.json")
+	os.WriteFile(fp2, []byte(`{"trae":{"enabled":true,"auth_dir":"./tr",`+
+		`"refresh_interval_seconds":60,"checkin_enabled":false,"pool_accounts":false}}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.TraeAuthDir != "./tr" || c2.TraeRefreshInterval != 60*1e9 {
+		t.Errorf("显式 auth_dir/refresh_interval 未生效: %q %v", c2.TraeAuthDir, c2.TraeRefreshInterval)
+	}
+	if c2.TraeCheckinEnabled {
+		t.Error("checkin_enabled=false 未生效")
+	}
+	if c2.TraePoolAccounts {
+		t.Error("pool_accounts=false 未生效")
+	}
+
+	// 段缺席 = 未启用。
+	fp3 := filepath.Join(dir, "c.json")
+	os.WriteFile(fp3, []byte(`{}`), 0o600)
+	c3, err := Load(fp3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.TraeEnabled || c3.TraePoolAccounts {
+		t.Error("段缺席时不应启用 trae")
+	}
+}
