@@ -66,6 +66,11 @@ func (r *guardRouter) RefreshSkew(id string, cred gateway.Credential) (time.Dura
 
 // ResetAt / Classify 与 RefreshSkew 同款：本桩只守 Credential 那一层，
 // 其余能力原样转发给 inner（接口断言要求方法集精确匹配）。
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+func (r *guardRouter) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
 func (r *guardRouter) ResetAt(id string, cred gateway.Credential) (time.Time, bool) {
 	return r.inner.ResetAt(id, cred)
 }

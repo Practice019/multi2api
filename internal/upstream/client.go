@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/prompt"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -28,6 +29,15 @@ const (
 	ErrNotFound                   // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
 	ErrServer                     // 5xx 上游故障
 	ErrClient                     // 其他 4xx / 业务错误
+	// ErrContentBlocked 上游**内容策略**拦截（400 + 审核文案）→ 不罚账号。
+	//
+	// 追加在末尾（不插在中间）：ErrKind 的取值会被写进日志、也可能被按整数传递，
+	// 插入会让所有既有取值的数字位移。有测试钉住（见 client_test.go 的
+	// TestErrKindValuesAreStable）。
+	//
+	// 处置见 gateway.ErrKindContentBlocked：core 据此触发提示词降级重试，
+	// 而**不是**换号 —— 换号对内容问题没有意义（每个号都被同一套策略拦）。
+	ErrContentBlocked
 )
 
 func (k ErrKind) String() string {
@@ -44,6 +54,8 @@ func (k ErrKind) String() string {
 		return "server"
 	case ErrClient:
 		return "client"
+	case ErrContentBlocked:
+		return "content_blocked"
 	default:
 		return "none"
 	}
@@ -70,6 +82,39 @@ var hardMarkers = []string{
 
 var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 
+// contentBlockedMarkers 上游**内容策略**拦截的文案标记（借鉴 workbuddy2api-panel）。
+//
+// # 为什么必须与 ErrClient 分开判
+//
+// 这类拦截返回的是 HTTP 400，形状与"客户端参数写错"完全一样。
+// 若不单独识别，它会落到 ErrClient → core 反复换号重试：
+//
+//	换号对内容问题**没有意义** —— 每个账号背后是同一套内容策略，
+//	换 3 个号就是白跑 3 次往返，最后返回"所有账号不可用"，
+//	把一个内容问题误报成账号池故障。
+//
+// 单独识别之后，core 的动作变成"换提示词重试"（见 internal/prompt 的降级机制），
+// 并且**不罚账号**（内容问题不是账号问题）。
+//
+// # 三个标记的来源
+//
+//	blocked by security policy  安全策略拦截
+//	unapproved channel          未授权通道
+//	illegal api invocation      非法 API 调用
+//
+// 三者都是上游在"识别到不该出现的指纹/来源"时给出的措辞，
+// 与另一条 `code 11128`（裸数字反探测）是同一个拦截族的两种表现形态：
+// 11128 是"请求体里有那串数字"，这三个是"请求体里有那些模板句"。
+//
+// ⚠ 大小写：上游的文案大小写不完全稳定，因此比较统一走 ToLower。
+// 这是**上游自己的词汇表**，所以它必须留在本包（见 gateway 包注释的判据 1）——
+// 放进 gateway 的通用兜底就等于让每个上游被这套词汇解释。
+var contentBlockedMarkers = []string{
+	"blocked by security policy",
+	"unapproved channel",
+	"illegal api invocation",
+}
+
 // Classify 按 HTTP 状态码 + body 判定错误类别。
 func Classify(status int, body string) ErrKind {
 	if status == http.StatusPaymentRequired {
@@ -84,6 +129,27 @@ func Classify(status int, body string) ErrKind {
 	for _, m := range sessionDeadMarkers {
 		if strings.Contains(body, m) {
 			return ErrSessionDead
+		}
+	}
+	// 内容策略拦截：必须在 `status >= 400 → ErrClient` 之前判。
+	//
+	// 它的 HTTP 形态与"客户端参数写错"完全一样（400），
+	// 落到兜底就会被当成账号问题换号重试 —— 而内容问题换号没有意义。
+	//
+	// # 为什么 `11128` 刻意**不**归到这一类
+	//
+	// 11128 是上游的裸数字反探测，触发条件不止一种（见 sanitize.go 与
+	// payload.go 的 normalizeRoles 注释：role 白名单违规也会回 11128）。
+	// 把它一起归到"内容拦截"会掩盖真正的 role/参数问题 ——
+	// 那些问题换号**确实**可能解决（不同账号的上游版本/策略可能不同）。
+	//
+	// 已知的 11128 触发源（裸数字、developer 角色）已分别由
+	// sanitizeRewrites 与 normalizeRoles 在出站前消除，
+	// 因此留它在 ErrClient 是安全的保守选择。
+	lowerBody := strings.ToLower(body)
+	for _, m := range contentBlockedMarkers {
+		if strings.Contains(lowerBody, m) {
+			return ErrContentBlocked
 		}
 	}
 	if status == http.StatusTooManyRequests {
@@ -130,8 +196,71 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
+	// PromptMode 系统提示词模式：prompt.ModeCustom（默认）/ prompt.ModePassthrough。
+	//
+	// 空串按 custom 处理（与配置缺省一致）：从源头消灭 system/developer 来源的
+	// 指纹误报。见 internal/prompt 包注释里两层防护的分工。
+	PromptMode string
+	// PromptText 生效的系统提示词文本（custom 模式下替换客户端 system/developer）。
+	//
+	// 空串时回落 prompt.Default()，而不是"什么都不做" ——
+	// 后者会让"装配漏了注入"变成一个完全静默的功能失效。
+	PromptText string
+	// PromptGate 内容拦截降级状态机（nil = 永不降级，恒用 PromptText）。
+	//
+	// 由 core 在观察到内容拦截时 Trigger()；本客户端在每次出站前读它，
+	// 处于降级期则改用 prompt.Degraded 中性提示词。
+	PromptGate *prompt.Gate
+
+	// ── 出站身份（全部 opt-in，缺省与改造前逐字节一致）─────────────────
+	//
+	// 详见 headers.go 的包级注释：这些字段让出站请求头可以按部署环境
+	// 对齐官方客户端形态，而不必改代码。**全部为空/false 时行为与改造前相同。**
+
+	// UserAgent 出站 UA 的**逐字**覆盖（最高优先）。
+	// 空 = 按 ClientVersion 决定（见 userAgent）。
+	UserAgent string
+	// ClientVersion WorkBuddy 客户端版本段（如 "5.5.4"）。
+	//
+	// ⚠ 非空会让聊天/billing 出站 UA 从 `CLI/2.63.2 CodeBuddy/2.63.2`
+	// 切换成**桌面端三段式** `WorkBuddy/<v> WorkBuddy/<v> CLI/<cli>`。
+	// 空 = 保持 CLI 形态（改造前行为）。
+	ClientVersion string
+	// CliVersion 三段式 UA 里的 CLI 段；空 = defaultCliVersion（2.137.1）。
+	CliVersion string
+	// ClientName 用量归属名（X-IDE-Name / X-IDE-Type / X-Product / X-Agent-Purpose）。
+	//
+	// 官方面板「使用端」列读它。空 = 只设 X-Product: "SaaS"（改造前行为）。
+	// 配 "WorkBuddy" 即对齐官方桌面端身份。
+	ClientName string
+	// DeviceToken 全局设备风控令牌（X-Device-Token）。空 = 不使用全局值。
+	DeviceToken string
+	// DeviceTokenFile 设备令牌文件（带 5 分钟 TTL 缓存，见 device_token.go）。
+	// 优先级低于 DeviceToken 与每号 auth.DeviceToken。
+	DeviceTokenFile string
+	// PassthroughIP 是否把入站客户端 IP 透传给上游（X-Forwarded-For 等三头）。
+	//
+	// 默认 false：XFF 是客户端可伪造的头，是否可信取决于部署链路。
+	// 直连公网的部署**不应**打开它。
+	PassthroughIP bool
+
 	ChatBaseCN    string
 	BillingBaseCN string
+
+	// WebBaseCN 官网（workbuddy.cn）域。
+	//
+	// # 为什么需要第三个基址（1:1 移植自 workbuddy2api-panel）
+	//
+	// 上游的端点分布在**三个**不同的域，用途各不相同：
+	//
+	//	copilot.tencent.com  聊天 / 模型 / 增长 / 专家市场 / 行为上报（桌面指纹）
+	//	codebuddy.cn         签到 / 余额 / 活跃上报（CLI 指纹）
+	//	workbuddy.cn         官网 Web 端行为上报 + 任务领奖
+	//
+	// Web 域的事件形状与另两个域**不同**：它是浏览器指纹
+	// （os/osVersion/userAgent/machineId，带 x-client-platform: web），
+	// 用于 Library_read 这类"页面行为"任务。发到错误域会被静默丢弃。
+	WebBaseCN string
 }
 
 // New 生产默认值。配置连接池减少 TLS 握手。
@@ -149,6 +278,7 @@ func New() *Client {
 		SanitizeFingerprints: true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
+		WebBaseCN:            defaultWebBaseCN,
 	}
 }
 
@@ -164,9 +294,67 @@ func (c *Client) chatBase(a *auth.Auth) string {
 	return c.ChatBaseCN
 }
 
-// prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
+// prepareBody 组装出站请求体。
+//
+// # 顺序是硬约束：先提示词替换，再协议改写与脱敏
+//
+//	applyPrompt        ← 删掉客户端的 system/developer，插一条我们自己的
+//	PrepareBodyOpt...  ← 强制 stream / 归一 role 与 tool_choice / 注入 thinking /
+//	                     sanitize 逐串擦指纹
+//
+// 先做提示词替换的理由：替换之后，**我们自己的那条 system 是干净的**
+// （不含任何指纹），于是 sanitize 在它上面是零成本的空转，全部算力
+// 都花在真正需要擦的 user/assistant/tool 消息上。
+//
+// 反过来的话，sanitize 要先在客户端的 system 上跑一遍正则，
+// 随后那条消息又被整体删掉 —— 白做功，且顺序一乱就很容易让人以为
+// "sanitize 负责 system"（它不负责，见 internal/prompt 包注释的分工表）。
 func (c *Client) prepareBody(body []byte) []byte {
+	body = c.applyPrompt(body)
 	return PrepareBodyOptWithEfforts(body, c.SanitizeFingerprints, c.effortsSnapshot())
+}
+
+// applyPrompt 按 PromptMode 与降级状态改写请求体里的系统提示词。
+//
+// # 四种组合
+//
+//	mode=custom,      未降级 → 用 PromptText 替换 system/developer
+//	mode=custom,      降级中 → 用 prompt.Degraded 替换（比自定义人格更"无特征"）
+//	mode=passthrough, 未降级 → **原样返回**（保留客户端人格，一个字节都不动）
+//	mode=passthrough, 降级中 → 用 prompt.Degraded 替换
+//
+// # 为什么降级对一个"透传"模式也能改写
+//
+// passthrough 的语义是"尊重客户端人格"，但**降级期的存在本身就说明**
+// 那份人格刚刚撞了内容策略。此时继续透传 = 继续撞 400。
+// 降级是用户通过配置**已经同意**的兜底路径（prompt 段落存在即代表同意），
+// 而不是我们擅自改写：它只在"客户端人格已被上游拒绝"这个前提下生效。
+//
+// # custom 模式下 PromptText 为空时回落内置默认
+//
+// 见 Client.PromptText 的注释：让"装配漏了注入"表现为"功能仍按默认工作"，
+// 而不是"功能完全不生效且无任何信号"。
+func (c *Client) applyPrompt(body []byte) []byte {
+	if c == nil {
+		return body
+	}
+	mode := c.PromptMode
+	if mode == "" {
+		mode = prompt.ModeCustom // 配置缺省 = custom
+	}
+	degraded := c.PromptGate.Active()
+
+	if mode == prompt.ModePassthrough && !degraded {
+		return body
+	}
+	text := c.PromptText
+	if text == "" {
+		text = prompt.Default()
+	}
+	if degraded {
+		text = prompt.Degraded
+	}
+	return prompt.Rewrite(body, text)
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -185,6 +373,17 @@ func (c *Client) effortsSnapshot() map[string][]string {
 
 func (c *Client) billingBase(a *auth.Auth) string {
 	return c.BillingBaseCN
+}
+
+// webBase 返回官网域（任务领奖 + Web 行为上报用）。
+//
+// 未注入时回落默认值 —— 与 B 同口径：测试里只注入 ChatBaseCN/BillingBaseCN
+// 时不该让 Web 路径拿到空串（那会拼出 "/v2/report" 这种无 host 的 URL）。
+func (c *Client) webBase() string {
+	if c != nil && c.WebBaseCN != "" {
+		return c.WebBaseCN
+	}
+	return defaultWebBaseCN
 }
 
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
@@ -226,7 +425,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	if err != nil {
 		return err
 	}
-	RefreshHeaders(req, a)
+	c.RefreshHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return err
@@ -258,12 +457,31 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify(status, string(body))）、err 为 nil；
 // 只有传输层失败才返回 err。
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	return c.ChatStreamWithIP(a, body, "")
+}
+
+// ChatStreamWithIP 与 ChatStream 相同，但额外接受客户端 IP 用于透传。
+//
+// # 为什么是"新增一个带 IP 的入口"而不是给 ChatStream 加参数
+//
+// ChatStream 被大量测试直接调用（构造假上游断言出站行为）。
+// 给它加第三个参数会让每个调用点都要改，而它们**都不关心** IP。
+// 新增入口把改动收敛到真正需要透传的那两个调用方
+// （workbuddy.Provider.Chat 与 server.chatVia 的单上游回落分支）。
+//
+// clientIP 为空 或 PassthroughIP=false 时不注入任何 IP 头 ——
+// 这两种情况的行为与改造前逐字节一致。
+//
+// ⚠ 它**仍然不接受 ctx**（内部自建 context.WithCancel）：那是既有实现的事实，
+// 不在本次改造范围内。需要取消传播的调用方走 gateway.Provider.Chat(ctx, ...)，
+// 那里有显式的 ctx.Err() 前置检查（见 workbuddy/provider.go）。
+func (c *Client) ChatStreamWithIP(a *auth.Auth, body []byte, clientIP string) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	url := c.chatBase(a) + "/v2/chat/completions"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(c.prepareBody(body)))
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	ChatHeaders(req, a)
+	c.ChatHeaders(req, a, clientIP)
 	ctx, cancel := context.WithCancel(context.Background())
 	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)
@@ -420,7 +638,7 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return 0, err
@@ -468,7 +686,7 @@ func (c *Client) DailyCheckin(a *auth.Auth) error {
 	if err != nil {
 		return err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	_, err = c.doJSON(req)
 	return err
 }

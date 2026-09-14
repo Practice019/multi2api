@@ -198,6 +198,11 @@ func (r *multiRouter) RefreshSkew(id string, cred gateway.Credential) (time.Dura
 // ⚠ **必须按 id 查，绝不能回落成 `r.def` 的排程**：那正是 P2 这个 bug 的形态
 // —— 无参回调只能返回同一个上游的答案，于是 codearts 的号被冷到
 // workbuddy 的次日 04:00。找不到该上游时如实答 ok=false。
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+func (r *multiRouter) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
 func (r *multiRouter) ResetAt(id string, cred gateway.Credential) (time.Time, bool) {
 	pv, ok := r.reg[id]
 	if !ok {
@@ -688,6 +693,15 @@ func (r routerWithNoRefresher) RefreshSkew(_ string, _ gateway.Credential) (time
 // ResetAt 同 RefreshSkew：本桩的上游没有上报额度恢复排程，如实答 ok=false。
 // 出口层据此回落核心的通用保守值 now+1h。
 func (r routerWithNoRefresher) ResetAt(_ string, _ gateway.Credential) (time.Time, bool) {
+	return time.Time{}, false
+}
+
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+//
+// ⚠ 接收者必须是**值**接收者：本桩以 `routerWithNoRefresher{}`（非指针）
+// 被赋给 ProviderRouter，指针接收者会让它不满足接口。其余路由桩用指针
+// 是因为它们本来就以指针传入 —— 这里跟随各自原有的接收者形态。
+func (r routerWithNoRefresher) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
 	return time.Time{}, false
 }
 

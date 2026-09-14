@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
@@ -28,6 +30,25 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权
 	MaxRotate int    // 单请求最多换号次数，默认 3
+
+	// MaxBodyMB 出站前允许的最大请求体（MiB），<=0 回落 8。
+	//
+	// 见 cmd/server/config.go 的 Server.MaxBodyMB 注释：这是把
+	// "静默截断"换成"明确 413"的开关。默认值与改造前硬编码的 8<<20 一致，
+	// 因此既有部署的行为只在"超限"这一条路径上发生变化。
+	MaxBodyMB int
+
+	// PromptGate 内容拦截降级状态机（可为 nil）。
+	//
+	// # 为什么它必须与出站客户端**共用同一个实例**
+	//
+	// 出站循环在这里 Trigger()，出站客户端在每次发请求前读 Active()。
+	// 两个不同的实例会让机制完全失效：handler 触发了降级，
+	// 客户端却还在用正常提示词 → 每次重试都先撞一次 400。
+	//
+	// nil 表示本部署未接提示词体系：内容拦截退化为"只换号不罚号"
+	// （保守但正确 —— 不会误伤账号，只是会多跑几次往返）。
+	PromptGate *prompt.Gate
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -145,6 +166,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
+	}
+	if cfg.MaxBodyMB <= 0 {
+		cfg.MaxBodyMB = defaultMaxBodyMB
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	registerCatalogHost(h) // 让包级 ModelCatalog/ModelCatalogState 能找到本实例的缓存
@@ -714,9 +738,31 @@ func (h *Handler) modelCatalog() *upstream.ModelCatalog {
 	return stale
 }
 
+// defaultMaxBodyMB 请求体上限的兜底值（MiB）。
+//
+// 与改造前那句 `io.LimitReader(r.Body, 8<<20)` 的 8 MiB **数值相同** ——
+// 本改动的意图不是改变"能收多大"，而是改变"收不下时说什么"：
+// 从"无声截断 → 上游 11101 → 客户端以为自己的 JSON 写错了"，
+// 变成"读的时候就报 413 → 客户端知道是大小问题"。
+const defaultMaxBodyMB = 8
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	// MaxBytesReader 而不是 LimitReader：超限时 Read 返回 *http.MaxBytesError，
+	// 我们据此回 413；LimitReader 只会静默截断，把"太大"伪装成"JSON 畸形"。
+	//
+	// 传 w 是为了让 net/http 在超限时标记连接不可复用（避免残留未读字节
+	// 污染同一 keep-alive 连接上的下一个请求）。
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(h.cfg.MaxBodyMB)<<20))
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			// 报错文案必须给出**可执行的两条出路**：缩小请求 / 调大配置。
+			// 只说"too large"会让用户去猜上限是多少、在哪改。
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+				fmt.Sprintf("请求体超过上限 %d MiB（可在 config.json 的 server.max_body_mb 调整）；"+
+					"多图/长上下文会话请缩小 messages 或提高该上限", h.cfg.MaxBodyMB))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
@@ -776,10 +822,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 会不会把"客户端断开"变成一次账号失败的惩罚？不会 ——
 	// 取消会走 Provider.Chat 返回的 error → chatVia 走 terr → 只换号
 	// 不喂熔断（与网络抖动同一条路径）。
-	ctx := r.Context()
+	//
+	// # 客户端 IP 也走 ctx（而不是 Client 上的字段）
+	//
+	// 见 gateway/clientip.go：字段形态在并发下会串扰（A 请求写、B 请求读），
+	// 表现为上游看到来源错乱的 IP，且只在并发下出现。
+	// 这里**无条件**放入（即使 passthrough_ip 关闭）：放不放的成本是零，
+	// 而"要不要用"由出站客户端读它自己的配置决定 ——
+	// 判断留在唯一知道该配置的那一层。
+	ctx := gateway.WithClientIP(r.Context(), gateway.ExtractClientIP(r))
 
 	tried := map[string]bool{}
 	var lastErr error
+
+	// degradedTried 本请求是否已经用过降级提示词重试。
+	//
+	// 初值取"进入本请求时降级是否已激活"：若上一批请求已经把 Gate 触发过，
+	// 那么客户端**本次发的就是 Degraded 提示词** —— 再拦就说明问题在用户内容，
+	// 没有第三次可试。这样"每个请求最多因内容拦截重试一次"是精确成立的，
+	// 而不是靠一个恒为 false 的局部变量（那会让每次请求都白白多试一轮）。
+	degradedTried := h.cfg.PromptGate.Active()
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	sessKey := ""
@@ -874,7 +936,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					// 与出站路径同口径：刷新时的 session dead 也走计数门控。
+					// 刷新失败常常正是**竞态**（另一个并发请求刚消费了 refresh token），
+					// 一次就禁用是这个路径上最典型的误杀来源。
+					h.cfg.Pool.NoteSessionDead(acct.UID)
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
@@ -924,6 +989,55 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				Kind:   upstreamKindOf(kind),
 				Status: status,
 				Msg:    string(respBody),
+			}
+			// 内容策略拦截：**不罚账号**，改用降级提示词重试一次。
+			//
+			// 见 gateway.ErrKindContentBlocked 的长注释：内容问题换号没有意义
+			// （每个账号背后是同一套策略），正确的动作是换提示词。
+			// 因此这里刻意**不调** applyErrorPolicy —— 它会把账号冷却/熔断，
+			// 而账号在这件事上没有任何过错。
+			if kind == gateway.ErrKindContentBlocked {
+				if h.retryWithDegradedPrompt(w, st, reqProvider, acct.UID, status, respBody, &degradedTried) {
+					// 内容问题**不是账号问题**，所以这一轮的动作刻意与其它错误不同：
+					//
+					//	不调 applyErrorPolicy → 不冷却 / 不计错 / 不喂熔断
+					//	不调 fail(uid)        → 不解绑会话粘性（会话本身没坏）
+					//
+					// 只释放在途租约，并把该账号从 tried 里**撤掉** ——
+					// 让下一轮能重新选回同一个账号。
+					//
+					// # 为什么必须撤 tried（这是单账号部署的生死线）
+					//
+					// 不撤的话，PickFor 会因为 "已试过" 而跳过它：
+					// 单账号部署下一轮**选不出任何号** → 直接 break →
+					// 返回 503 "all accounts unavailable"。
+					// 于是"降级重试"在最常见的部署形态下根本没发生过，
+					// 用户看到的是"内容拦截 = 服务不可用"。
+					//
+					// 保留粘性绑定则让下一轮优先回到同一个账号（PickByUIDFor 先行），
+					// 多账号部署下若粘性未命中，普通轮换选到别的号也无妨 ——
+					// 内容策略是账号无关的，用哪个号都一样。
+					releaseHeld()
+					delete(tried, acct.UID)
+					continue
+				}
+				releaseHeld()
+				return
+			}
+			// 模型级限流收窄（借鉴 workbuddy2api-panel）：
+			// 429 code=6004 明说"将在 … 重置"时，把冷却精确到那个墙钟，
+			// 并**记录触发模型** —— 换模型请求时该账号视为可用。
+			//
+			// 必须在 applyErrorPolicy **之前**判：后者会给一个
+			// "基数 × 指数退避"的账号级冷却，那正是本收窄要避免的形态
+			// （它会让账号在只被单模型限流时被整体冷掉）。
+			if kind == gateway.ErrKindSoftRate {
+				if resetAt, ok := h.softRateReset(reqProvider, status, respBody); ok {
+					h.cfg.Pool.CooldownSoftForModel(acct.UID, h.cfg.SoftCooldown,
+						resetAt, reqModel, "429 模型级限流")
+					fail(acct.UID)
+					continue
+				}
 			}
 			h.applyErrorPolicy(acct.UID, kind)
 			fail(acct.UID)
@@ -1030,8 +1144,95 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st.status = http.StatusServiceUnavailable
 }
 
-// applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
+// retryWithDegradedPrompt 处理一次**内容策略拦截**（借鉴 workbuddy2api-panel）。
 //
+// # 语义
+//
+//	返回 true  → 已触发降级，调用方应 continue 让下一轮用中性提示词重发
+//	返回 false → 已向客户端写出终态错误，调用方应立即 return（不再重试）
+//
+// # 为什么"重试一次"就够了，不做更多
+//
+// 上游只给一句"blocked"，无法区分「system 指纹误报」与「用户内容真的违规」。
+// 换中性提示词重试一次是**唯一**能区分两者的实验：
+//
+//	重试后通过 → 是①，降级有效，本请求正常返回
+//	重试后仍被拦 → 是②，问题在用户内容里，再怎么换提示词/换账号都没用
+//
+// 继续重试只会把一次内容问题拖成 MaxRotate 次白跑往返，
+// 最后返回"所有账号不可用" —— 一个把内容问题误报成账号池故障的错误结论。
+// 因此第二次被拦时**立刻如实告诉调用方**，带上上游原文。
+//
+// # 为什么账号不罚
+//
+// 内容策略是**账号无关**的：同一套策略在所有账号后面。因此这条路径
+// 绝不调用 applyErrorPolicy（不冷却、不计错、不喂熔断）。
+// 调用方只做 fail(uid) —— 那是**释放租约 + 解绑粘性**的资源动作，不是惩罚。
+//
+// # status 兜底
+//
+// 传入的是上游的原始状态码（正常是 400）。若上游给的是 2xx（错误藏在流内），
+// 直接把它转发给客户端会让客户端以为成功 —— 因此夹到 400。
+// 这一点很重要：本函数是在"读流内错误"的分支上被复用的。
+func (h *Handler) retryWithDegradedPrompt(
+	w http.ResponseWriter, st *chatStat, providerID, uid string,
+	status int, respBody []byte, degradedTried *bool,
+) bool {
+	msg := contentBlockMsg(respBody)
+	if h.cfg.PromptGate != nil && !*degradedTried {
+		h.cfg.PromptGate.Trigger()
+		*degradedTried = true
+		log.Printf("chat uid=%s provider=%s: 内容策略拦截，已切降级提示词重试一次（降级至 %s）: %s",
+			uid, providerID, h.cfg.PromptGate.Until().Format(time.RFC3339), msg)
+		return true
+	}
+	// 中性提示词仍被拦（或本部署没接提示词体系）→ 判定为用户内容触发审核。
+	//
+	// 注意 nil gate 时也走这里：没有降级能力还继续换号是纯浪费，
+	// 如实返回上游错误比"所有账号不可用"更有信息量。
+	log.Printf("chat uid=%s provider=%s: 内容策略拦截（%s），判定为请求内容本身触发：%s",
+		uid, providerID, contentBlockExhaustedReason(h.cfg.PromptGate, *degradedTried), msg)
+	if status < 400 || status > 599 {
+		status = http.StatusBadRequest
+	}
+	writeOpenAIError(w, status, "content_blocked", "上游内容策略拦截："+msg)
+	st.status = status
+	return false
+}
+
+// contentBlockExhaustedReason 给日志一个能区分两种终态的措辞。
+func contentBlockExhaustedReason(gate *prompt.Gate, degradedTried bool) string {
+	switch {
+	case gate == nil:
+		return "未接提示词体系，无法降级"
+	case degradedTried:
+		return "降级提示词后仍被拦"
+	default:
+		return "降级重试次数已用尽"
+	}
+}
+
+// contentBlockMsg 摘要上游错误体，供日志与返回给客户端的文案使用。
+//
+// 上限 300 字节并按**字符边界**截断：上游错误体是 UTF-8 中文，
+// 按字节切会把一个汉字切成两半，产生 \ufffd 乱码
+// （本仓库已踩过这个坑，见 CHANGELOG 的「UTF-8 截断」条目）。
+func contentBlockMsg(body []byte) string {
+	s := strings.TrimSpace(string(body))
+	if s == "" {
+		return "(上游未返回错误详情)"
+	}
+	// 压掉换行，让日志保持"一行一条"
+	s = strings.Join(strings.Fields(s), " ")
+	const maxRunes = 300
+	r := []rune(s)
+	if len(r) > maxRunes {
+		return string(r[:maxRunes]) + "…"
+	}
+	return s
+}
+
+// applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
 // ⚠ 参数只有 uid：调用方（出站循环）只拿得到**出错的号**，拿不到"当前请求的
 // 上游" —— 多上游下两者可能不同（粘性命中、轮换换号）。所以需要上游事实的
 // 分支（ErrKindHardCredit）自己去池子反查归属：
@@ -1208,6 +1409,21 @@ func upstreamToGateway(k upstream.ErrKind) gateway.ErrorKind {
 		return gateway.ErrKindServer
 	case upstream.ErrClient:
 		return gateway.ErrKindClient
+	case upstream.ErrContentBlocked:
+		// ⚠ 这一条**必须**在回落分支里存在（单上游部署走的正是这里）。
+		//
+		// 漏掉它的后果不是"降级不生效"那么轻：内容拦截会被翻成
+		// gateway.ErrKindNone，而 None 在 core 侧是"只换号不罚" ——
+		// 于是单上游部署下，一次内容拦截会白烧 MaxRotate 次往返，
+		// 最后把"内容被拦"误报成"所有账号不可用"。
+		//
+		// ⚠ 这个文件里**有两张** upstream.ErrKind → gateway.ErrorKind 的表：
+		// 本函数（参与策略判断）与 upstreamKindOf（只用于日志）。
+		// 新增 upstream 常量时**两张都要改**，只改一张不会编译失败，
+		// 也不会有测试红 —— 除非 upstream_kind_mirror_test.go 的两条 guard 在。
+		// 我第一版正是只改了 upstreamKindOf，被那两个 guard 与
+		// degrade_test.go 的端到端用例一起抓出来。
+		return gateway.ErrKindContentBlocked
 	default:
 		return gateway.ErrKindNone
 	}
@@ -1242,6 +1458,11 @@ func upstreamKindOf(k gateway.ErrorKind) upstream.ErrKind {
 		return upstream.ErrServer
 	case gateway.ErrKindClient:
 		return upstream.ErrClient
+	case gateway.ErrKindContentBlocked:
+		// 内容策略拦截有独立的 upstream 分类（workbuddy 会产出它）。
+		// 日志里打成 "upstream content_blocked (http 400): blocked by security policy"，
+		// 让"内容被拦"与"客户端参数写错"在日志里可区分 —— 两者的处置完全不同。
+		return upstream.ErrContentBlocked
 	default:
 		// 含 gateway.ErrKindAuth 与 ErrKindNone。
 		//
@@ -1251,6 +1472,40 @@ func upstreamKindOf(k gateway.ErrorKind) upstream.ErrKind {
 		// 而它只影响文本 —— 策略早已由 applyErrorPolicy(kind) 决定。
 		return upstream.ErrNone
 	}
+}
+
+// softRateReset 问**该上游自己**"这次软限流有没有精确的重置时刻"。
+//
+// # 两条路径（与 classifyErr 同形状，但回落策略刻意不同）
+//
+//	Provider == nil（单上游）        → upstream.ParseSoftRateReset（逐字节旧行为 + 收窄）
+//	Provider 在 && 上游实现了扩展点  → 该上游自己解析
+//	Provider 在 && 上游没实现        → ok=false（保持账号级软冷却）
+//
+// # ⚠ 为什么第三条**刻意不**回落到默认上游的解析器
+//
+// 这与 `classifyErr` 的取舍**相反**，是刻意的：
+//
+//	分类器回落（classifyErr）→ 保守方向：把不认识的错误判成"只换号不罚"
+//	本函数回落              → **激进**方向：判成"模型级 + 已知重置时刻"
+//	                          → 账号被收窄冷却**并被豁免**
+//
+// 拿 workbuddy 的 6004 判据去解析 codearts 的错误体，最坏情况是把
+// codearts 的一次普通限流误判成"模型级且已给出重置时刻"：
+// 冷却被错误收窄 + 该模型被豁免 → 账号过早回到候选集继续撞限流。
+//
+// 那是 P2 那类"用 A 的事实回答 B 的问题"，且后果比漏判更重。
+// 所以多上游场景下，**没实现就保持旧行为**（账号级软冷却，永不更差）。
+func (h *Handler) softRateReset(providerID string, status int, body []byte) (time.Time, bool) {
+	if h.cfg.Provider != nil {
+		return h.cfg.Provider.SoftRateReset(providerID, status, string(body))
+	}
+	// 单上游：默认上游（workbuddy）的解析器就是"那个上游的事实"。
+	// status 必须显式限定为 429 —— 与 workbuddy.SoftRateReset 的两道闸门同口径。
+	if status != http.StatusTooManyRequests {
+		return time.Time{}, false
+	}
+	return upstream.ParseSoftRateReset(string(body))
 }
 
 // chatVia 按**账号所属上游**把一次对话发出去，返回 (响应流, 状态码, 传输错误)。
@@ -1303,7 +1558,7 @@ func (h *Handler) chatVia(ctx context.Context, providerID string, acct *auth.Aut
 		//
 		// 换句话说：回退路径的"逐字节一致"不是修辞，丢掉一个 []byte 就足以
 		// 让一条既有契约静默失效。测试抓住了它（这正是那些测试存在的理由）。
-		rc, status, respBody, err := h.cfg.Upstream.ChatStream(acct, body)
+		rc, status, respBody, err := h.cfg.Upstream.ChatStreamWithIP(acct, body, gateway.ClientIPFrom(ctx))
 		if err == nil && status >= 400 && rc == nil {
 			return io.NopCloser(bytes.NewReader(respBody)), status, nil
 		}
@@ -1471,7 +1726,18 @@ func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
 		// ⚠ 只有 workbuddy 会产生这个分类（它的 401 + 12153）。
 		// codearts 的凭证失效是 ErrKindAuth，走 default 的"只换号不罚"——
 		// 见本函数上方的长注释（危害 ② 的另一半）。
-		h.cfg.Pool.Disable(uid, "12153 session dead")
+		//
+		// # 为什么不是一次就 Disable（借鉴 workbuddy2api-panel）
+		//
+		// 12153 的成因里有一大类是**瞬时抖动**（网络闪断、上游瞬时故障、
+		// token 刷新竞态）。改造前一次就永久禁用，于是一次抖动
+		// 就能让一个健康的号掉出池子，而界面上只显示"已禁用"，
+		// 没有任何线索指向真因。
+		//
+		// 现在交给 Pool.NoteSessionDead 计数门控：连续 3 次才禁用，
+		// 任何一次成功都清零。真正失效的 session（每次都会 12153）
+		// 仍然会被停掉，行为与改造前一致。
+		h.cfg.Pool.NoteSessionDead(uid)
 	case gateway.ErrKindNotFound:
 		// 404 短冷却（软冷却），防雪崩。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "upstream 404")

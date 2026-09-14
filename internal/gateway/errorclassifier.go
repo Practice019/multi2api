@@ -158,6 +158,36 @@ const (
 	//
 	// 映射：upstream.ErrClient、codearts.ErrClient、codearts.ErrAuth（见上）。
 	ErrKindClient
+
+	// ErrKindContentBlocked 上游**内容策略**拦截 → 不罚账号，由提示词降级重试消化。
+	//
+	// 映射：upstream.ErrContentBlocked（**仅** workbuddy）。
+	//
+	// # 为什么它必须是一个独立类别，而不是并到 ErrKindClient
+	//
+	// 两者的**处置完全不同**：
+	//
+	//	ErrKindClient        客户端/参数问题 → 换号重试（别的号可能就能过）
+	//	ErrKindContentBlocked 内容问题       → 换号**没有意义**（每个号都会被同一套策略拦），
+	//	                                       正确的动作是换提示词重试
+	//
+	// 并到 ErrKindClient 的后果是：一次内容拦截会连着消耗 MaxRotate 个账号，
+	// 每个都白跑一次往返，最后返回"所有账号不可用" —— 一个把
+	// "内容被拦"误报成"账号池故障"的错误结论。
+	//
+	// # 为什么 core 要单独识别它
+	//
+	// 因为处置动作（触发降级 + 用降级提示词重试）是 core 的职责：
+	// 提示词替换发生在出站客户端（见 internal/prompt 与 upstream 的 applyPrompt），
+	// 而"观察到了拦截"这件事只有出站循环知道。core 需要这个类别来搭桥。
+	//
+	// # 为什么它在枚举末尾（值 8）而不是插在中间
+	//
+	// ErrorKind 的取值会被写进日志、也可能被按整数传递。
+	// 插在中间会让所有既有取值的数字全部位移 —— 历史日志与新日志无法比对，
+	// 任何 `gateway.ErrorKind(n)` 形式的代码也会静默错位。
+	// 因此**只追加，不插入**。有测试钉住（TestErrorKindValuesAreStable）。
+	ErrKindContentBlocked
 )
 
 // String 人类可读的分类名（与 upstream.ErrKind 的拼写**逐字一致**，
@@ -180,6 +210,8 @@ func (k ErrorKind) String() string {
 		return "server"
 	case ErrKindClient:
 		return "client"
+	case ErrKindContentBlocked:
+		return "content_blocked"
 	default:
 		return "none"
 	}

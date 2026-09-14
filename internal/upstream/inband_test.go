@@ -49,7 +49,7 @@ func TestAggregateInBandErrorIsNotSwallowed(t *testing.T) {
 		},
 		{
 			name: "实测：额度耗尽（200 + 流内业务错误）",
-			raw: "data:{\"error_code\":\"InferHub.4291.200\",\"error_msg\":\"insufficient quota\"}\n\n",
+			raw:  "data:{\"error_code\":\"InferHub.4291.200\",\"error_msg\":\"insufficient quota\"}\n\n",
 			want: "insufficient quota",
 		},
 		{

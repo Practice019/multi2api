@@ -39,6 +39,7 @@ func TestErrorKindValuesAreStable(t *testing.T) {
 		{ErrKindAuth, 5, "auth"},
 		{ErrKindServer, 6, "server"},
 		{ErrKindClient, 7, "client"},
+		{ErrKindContentBlocked, 8, "content_blocked"},
 	}
 	for _, c := range want {
 		if int(c.kind) != c.v {

@@ -120,7 +120,7 @@ func (c *Client) growthJSON(a *auth.Auth, method, path string, body any) (json.R
 	if err != nil {
 		return nil, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	return c.doJSON(req)
 }
 

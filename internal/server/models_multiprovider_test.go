@@ -189,6 +189,11 @@ func (r testRouter) RefreshSkew(_ string, _ gateway.Credential) (time.Duration, 
 //
 // ⚠ 同样返回 `ok=false` = **本桩没有这个信息**，出口层回落核心的通用保守值。
 // 本文件（目录合并）不涉及冷却路径，但接口断言要求方法集精确匹配。
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+func (r testRouter) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
 func (r testRouter) ResetAt(_ string, _ gateway.Credential) (time.Time, bool) {
 	return time.Time{}, false
 }
@@ -559,6 +564,11 @@ func (r noIDsRouter) RefreshSkew(_ string, _ gateway.Credential) (time.Duration,
 }
 
 // ResetAt 同 testRouter：`ok=false` = 本桩没有恢复排程，走核心通用保守值。
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+func (r noIDsRouter) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
 func (r noIDsRouter) ResetAt(_ string, _ gateway.Credential) (time.Time, bool) {
 	return time.Time{}, false
 }

@@ -188,6 +188,57 @@ func (t *GrowthTask) Pending() bool {
 	}
 }
 
+// ── 与 workbuddy2api-panel 的 Task 形状对齐的访问器 ──────────────────────
+//
+// # 为什么需要它们（而不是再定义一个 Task 类型）
+//
+// 移植过来的任务自动化层（autotask.go / blackcat.go / school.go）是按
+// B 的 `upstream.Task` 形状写的，它直接用 `t.Current` / `t.Target` / `t.Claimed`
+// 三个**字段**。本仓库的对应类型是 GrowthTask，它把进度放在嵌套的
+// `Progress *GrowthProgress` 里、把"已领取"表达成 `AcceptStatus == "claimed"`
+// （没有独立的 Claimed 字段）。
+//
+// 不重新定义一套 Task 有两个理由：
+//
+//  1. 同一个接口已经有两个模型（内部 GrowthTask / 面板视图），再加第三个
+//     会让"到底哪个是权威"变成每次读代码都要重新判断的问题；
+//  2. GrowthTask 的解析经过实测打磨（见 UnmarshalJSON 的宽容时间解析），
+//     另起一套等于把那部分风险重来一遍。
+//
+// 于是加三个只读访问器把形状补齐：移植过来的逻辑**逐字保留**（用 `t.Current()`
+// 这种形式），而数据仍走既有解析。语义与 B 的字段一一对应。
+//
+// ⚠ 三个都会对 nil 接收者安全返回零值 —— B 的字段访问没有这个问题，
+// 但本仓库存在 `Progress == nil`（**未接单**的任务不带 progress 字段，
+// 见 GrowthProgress 的注释），所以必须有兜底。
+
+// Current 当前进度值；无进度（未接单）时为 0。
+func (t *GrowthTask) Current() int64 {
+	if t == nil || t.Progress == nil {
+		return 0
+	}
+	return t.Progress.Current
+}
+
+// Target 目标进度值；无进度（未接单）时为 0。
+//
+// 注意 0 是一个**有意义的返回值**：部分任务（如 first_buddy）没有计数型进度，
+// 调用方用 `Target() > 0` 判断"这是不是计数型任务"，见 autotask 的用法。
+func (t *GrowthTask) Target() int64 {
+	if t == nil || t.Progress == nil {
+		return 0
+	}
+	return t.Progress.Target
+}
+
+// Claimed 奖励是否**已领取**。
+//
+// 与 Claimable() 成对：Claimable 是"条件已达成、待领取"，Claimed 是"已经领完"。
+// 两者的判据是互斥的状态值（completed vs claimed），不存在同时为真的情况。
+func (t *GrowthTask) Claimed() bool {
+	return t != nil && t.AcceptStatus == GrowthStatusClaimed
+}
+
 // GrowthAcceptResult 单个任务的接单结果。
 type GrowthAcceptResult struct {
 	TaskCode string `json:"task_code"`

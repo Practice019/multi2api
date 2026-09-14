@@ -42,6 +42,14 @@ const (
 	// 语义上它们是**同一个槽位**（每天一次、点一下领东西），但**归属不同上游**，
 	// 与 KindTravel / KindGrowth 分开记是同一条理由。
 	KindWelfare = "welfare"
+	// KindActivity 对话活跃上报（chat_request_send 事件，每号每天 1 次）。
+	//
+	// # 为什么单独一类
+	//
+	// 它不产出积分（奖励由其它机制给），因此与 KindCredits/KindGrowth 都不同；
+	// 但它是**领养的前置条件**，用户排查"为什么领不了猫"时第一个要看的就是它。
+	// 并进 KindTravel 会让"旅行本身失败"与"旅行前置没做"混成一条记录。
+	KindActivity = "activity"
 )
 
 // Status 结果状态。

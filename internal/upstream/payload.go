@@ -39,7 +39,20 @@ func prepareBodyOptWithLimits(src []byte, sanitize bool, efforts map[string][]st
 	obj["stream"] = true
 	normalizeToolChoice(obj)
 	normalizeRoles(obj)
+	// DeepSeek 思维链开关（见 thinking.go）：注入 thinking.type=enabled + 缺档补默认档。
+	//
+	// ⚠ 顺序是硬约束，两处都不能挪：
+	//  1. 必须在 normalizeReasoningEffort **之前** —— 补入的默认档（high）也要走
+	//     既有降级管线，模型不支持 high 时自动落到 ≤high 的最高支持档。
+	//     反过来的话注入的档位就绕过了降级，可能发出模型不认识的档位。
+	//  2. 必须在 applyFieldWhitelist **之前** —— 否则刚注入的 thinking 会被
+	//     白名单当未知字段静默剔除，"注入了但没效果"（见 supportedFields 的 thinking 项）。
+	injectThinking(obj)
 	normalizeReasoningEffort(obj, efforts)
+	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
+	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
+	// 放在降级之后无影响：它只动 messages 内部，与顶层 effort 无关。
+	backfillReasoningContent(obj)
 	// 字段归一必须在白名单**之前**：先把新名映射成上游认识的旧名，
 	// 再剔除白名单外的字段。顺序反了会把刚映射出来的字段也删掉。
 	normalizeMaxTokens(obj)
@@ -300,8 +313,15 @@ var supportedFields = map[string]bool{
 	"response_format":     true,
 	"reasoning_effort":    true,
 	"reasoningEffort":     true,
-	"functions":           true,
-	"function_call":       true,
+	// thinking 是 DeepSeek 系「开思考」的必需开关（见 thinking.go）。
+	//
+	// ⚠ 它是本白名单里**唯一由网关自己注入**的字段：不在白名单里的话，
+	// injectThinking 刚写进去就会被 applyFieldWhitelist 剔除，
+	// 表现为"代码写了但线上毫无变化"（出参里 reasoning_effort 在、thinking 没了）。
+	// 有测试钉住（见 thinking_test.go 的 TestThinkingSurvivesFieldWhitelist）。
+	"thinking":      true,
+	"functions":     true,
+	"function_call": true,
 }
 
 // normalizeMaxTokens 把 OpenAI 新字段 max_completion_tokens 归一为 max_tokens。

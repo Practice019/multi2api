@@ -24,7 +24,21 @@ type Auth struct {
 	UID          string
 	EnterpriseID string
 	Nickname     string
-	FilePath     string // 来源文件；refresh 后原子写回此处
+	// DeviceToken 该账号的设备风控令牌（X-Device-Token），可为空。
+	//
+	// # 为什么它属于账号而不是配置
+	//
+	// 官方客户端一个账号一份设备令牌。自建网关既支持"全局配一个"
+	// （upstream.device_token），也支持**每号一份** —— 后者更贴近真实形态，
+	// 且在多账号下能避免所有号共用一个设备指纹（那本身就是一个异常特征）。
+	//
+	// 优先级：本字段 > upstream.device_token > upstream.device_token_file。
+	// 见 internal/upstream/headers.go 的 resolveDeviceToken。
+	//
+	// 磁盘形态：嵌套形放 `account.deviceToken`，扁平形放顶层 `deviceToken`。
+	// 两种都认 —— 手写凭证的用户不必研究嵌套结构。
+	DeviceToken string
+	FilePath    string // 来源文件；refresh 后原子写回此处
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -66,6 +80,7 @@ func Parse(raw []byte) (*Auth, error) {
 				UID          string `json:"uid"`
 				EnterpriseID string `json:"enterpriseId"`
 				Nickname     string `json:"nickname"`
+				DeviceToken  string `json:"deviceToken"`
 			} `json:"account"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
@@ -79,6 +94,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
+			DeviceToken:  n.Account.DeviceToken,
 		}
 	} else {
 		var f struct {
@@ -89,6 +105,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
+			DeviceToken  string `json:"deviceToken"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -101,6 +118,7 @@ func Parse(raw []byte) (*Auth, error) {
 			UID:          f.UID,
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
+			DeviceToken:  f.DeviceToken,
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -132,6 +150,12 @@ func (a *Auth) SaveAtomic() error {
 			"uid":          a.UID,
 			"enterpriseId": a.EnterpriseID,
 			"nickname":     a.Nickname,
+			// DeviceToken 必须一起写回，否则 token 刷新会把用户手写的
+			// 设备令牌**静默抹掉** —— 表现是"刷新一次之后风控头就没了"，
+			// 而且下次刷新还是这样（文件里已经没有了）。
+			//
+			// 键名与 Parse 的 account.deviceToken 一致（两处必须同步）。
+			"deviceToken": a.DeviceToken,
 		},
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
