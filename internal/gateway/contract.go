@@ -137,6 +137,10 @@ var capabilityProbes = map[Capability]func(t TB, p Provider, id string, cfg cont
 // 而不是像改造前那样悄悄跳过。
 var unverifiableCaps = []Capability{
 	CapCheckin, CapGrowth, CapTravel, CapWelfare, CapQuotaProbe,
+	// tasks / invite 同理：它们的行为要真实账号 + 真实上游（会真的改服务端
+	// 状态、真的发请求），契约测试跑不了。声明它们同样要求实现 AdminExt
+	// 且路由非空、handler 不 panic —— 那条检查正是本列表存在的理由。
+	CapTasks, CapInvite,
 }
 
 // probeCapabilities 逐条验证声明的能力。

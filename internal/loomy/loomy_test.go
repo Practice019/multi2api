@@ -480,10 +480,17 @@ func TestCapsAndID(t *testing.T) {
 	if !caps.Has(gateway.CapModels) {
 		t.Error("必须声明 CapModels（实测 /models 返回 12 条）")
 	}
-	// 这五项 loomy 确实没有 —— 声明任何一个都是"声明了没实现"
+	// CapQuotaProbe：本轮补上的 —— 额度来自**本机客户端缓存的积分摘要**
+	//（不是上游端点，实测 17 条候选路径全 404，见 quota_ext.go）。
+	// 声明它的代价是契约要求实现 AdminExt（unverifiableCaps），
+	// 那条由 TestProviderDoesNotImplementUnwantedExtensions 的另一半守住。
+	if !caps.Has(gateway.CapQuotaProbe) {
+		t.Error("必须声明 CapQuotaProbe —— 额度能从本机客户端缓存读到" +
+			"（不声明的话账号行不会出现「额度」按钮，见 provider.go 的 Caps 注释）")
+	}
+	// 这四项 loomy 确实没有 —— 声明任何一个都是"声明了没实现"
 	for _, c := range []gateway.Capability{
-		gateway.CapCheckin, gateway.CapGrowth, gateway.CapTravel,
-		gateway.CapWelfare, gateway.CapQuotaProbe,
+		gateway.CapCheckin, gateway.CapGrowth, gateway.CapTravel, gateway.CapWelfare,
 	} {
 		if caps.Has(c) {
 			t.Errorf("loomy 没有 %s 能力，不该声明", gateway.String(c))
@@ -619,12 +626,23 @@ func TestAuthDirForReload(t *testing.T) {
 //
 // # 为什么这条测试有价值
 //
-// 包注释列了 6 个**刻意不实现**的扩展点，每条都有理由。但"不实现"这件事
+// 包注释列了**刻意不实现**的扩展点，每条都有理由。但"不实现"这件事
 // 在代码里是**缺席**——缺席的东西没有任何编译期信号，后来者很容易顺手加一个
 // 空实现（比如 CredentialRefresher 返回 nil）就以为"补齐了能力"。
 //
 // 而空实现是有害的：它会让核心以为"这个上游的凭证能自动恢复"，
 // 从而把「换号重试」当成有效处置 —— 而 loomy 的 session 失效只能人工重登。
+//
+// # 本轮订正（这不是"放宽断言"，是跟着事实走）
+//
+// 上一轮这条测试还把 LoginFlow / AdminExt 列在"不该实现"里，理由是
+// "登录在桌面客户端里、网关无法发起"与"没有可用的管理端点"。
+// 本轮实测发现客户端把登录态与积分摘要**明文缓存在本机**（见 clientstore.go），
+// 于是那两条理由的**前提消失了**：能读到登录态就能实现页内添加账号，
+// 有一条能自证的数据通道就能给出管理端点。
+//
+// 所以下面那两条断言**反向**了 —— 但它们守的命题没变：
+// **声明的能力必须真的做到**。"不实现"与"实现"都只有在对得上事实时才是对的。
 func TestProviderDoesNotImplementUnwantedExtensions(t *testing.T) {
 	p := NewWithConfig(Config{})
 
@@ -641,13 +659,15 @@ func TestProviderDoesNotImplementUnwantedExtensions(t *testing.T) {
 	if _, ok := gateway.ExtOf[gateway.JobExt](p); ok {
 		t.Error("loomy 没有任何要定时做的事，不该实现 JobExt")
 	}
-	if _, ok := gateway.ExtOf[gateway.LoginFlow](p); ok {
-		t.Error("登录发生在桌面客户端里，网关无法发起/轮询，不该实现 LoginFlow")
-	}
-	// ⚠ AdminExt 也同样不该实现：loomy 没有可用的管理端点，
-	// 而契约对"声明了能力位却没路由"是判不合格的（空路由列表会被 contract 拦住）。
-	if _, ok := gateway.ExtOf[gateway.AdminExt](p); ok {
-		t.Error("loomy 没有可用的管理端点，不该实现 AdminExt")
+	//  CredentialExpiryExt 也**不该**实现 —— 这是本轮唯一"反向"没变的一条。
+	//
+	// 它没有可报的到期时刻（session 不绑时间）。实现一个恒返回 (0,false)
+	// 的版本不会造成伤害，但它会让"loomy 走不走时刻这条路径"变成需要读代码
+	// 才能否定的问题，并把正确答案（「永久」）藏在另一个扩展点里。
+	// 正确的表达是 CredentialLifetimeExt，见下面"应当实现"那张表。
+	if _, ok := gateway.ExtOf[gateway.CredentialExpiryExt](p); ok {
+		t.Error("loomy 没有可报的到期时刻，不该实现 CredentialExpiryExt —— " +
+			"它的答案是「永久」，走 CredentialLifetimeExt")
 	}
 
 	// 实现的那几个必须**在**（缺席会让对应功能静默降级）
@@ -657,6 +677,21 @@ func TestProviderDoesNotImplementUnwantedExtensions(t *testing.T) {
 		"CredentialSecretLoader": extOK[gateway.CredentialSecretLoader](p),
 		"ErrorClassifier":        extOK[gateway.ErrorClassifier](p),
 		"ResetPolicyExt":         extOK[gateway.ResetPolicyExt](p),
+		// ---- 本轮补上的五个（+ 一个可选加强版）----
+		//
+		// 每一个都对应用户报过的一格空白：
+		//
+		//	AccountColumnsExt     去掉「Token」「今日签到」两列不适用的
+		//	QuotaExt              「额度」那一格
+		//	CredentialLifetimeExt 「Token 到期」那一格（答案是「永久」）
+		//	LoginFlow             「添加账号」按钮
+		//	AdminExt              上面几条的**事实来源**（诊断端点），
+		//	                      同时是 CapQuotaProbe 的契约要求
+		"AccountColumnsExt":     extOK[gateway.AccountColumnsExt](p),
+		"QuotaExt":              extOK[gateway.QuotaExt](p),
+		"CredentialLifetimeExt": extOK[gateway.CredentialLifetimeExt](p),
+		"LoginFlow":             extOK[gateway.LoginFlow](p),
+		"AdminExt":              extOK[gateway.AdminExt](p),
 	} {
 		if !ok {
 			t.Errorf("loomy 应当实现 %s（否则对应功能会静默降级）", name)

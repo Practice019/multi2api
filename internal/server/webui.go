@@ -39,7 +39,6 @@ var colPlaceholders = []struct{ token, value string }{
 	{"__COLS_TRAVEL__", "8"},
 	{"__COLS_GROWTH__", "12"},
 	{"__COLS_LOGS__", "10"},
-	{"__COLS_HIST__", "7"},
 	{"__COLS_JOBS__", "6"},
 }
 

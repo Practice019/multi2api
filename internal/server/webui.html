@@ -294,10 +294,11 @@
     text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
     display:flex;align-items:center;gap:10px}
   .body{padding:16px}
-  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:10px}
-  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 13px}
+  .cards{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 14px;
+    display:flex;flex-direction:column;justify-content:center;min-height:66px;width:max-content;min-width:120px}
   .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
-  .card .v{font-size:22px;font-weight:650;font-family:var(--mono);margin-top:2px}
+  .card .v{font-size:24px;font-weight:700;font-family:var(--mono);margin-top:4px}
   /* 仪表盘内的子段落：一块一个 h3，块间用分隔线切开。
      每个子段自己的 .body 有内边距，这里不再重复 padding。 */
   .boardsec + .boardsec{border-top:1px solid var(--line)}
@@ -735,46 +736,9 @@
     </div>
   </section>
 
-  <!-- 任务历史：归属 workbuddy 的 checkin 能力位（T4）。
-       #
-       # 为什么 data-cap 是 checkin
-       #
-       它的数据来自 /admin/checkin/history —— 而 manifest 里这条 PUT 的归属正是
-       provider=workbuddy / capability=checkin。也就是说它**本来就是** workbuddy
-       checkin 能力位的一个面板，只是过去没写 data-provider，于是被
-       hideOrphanPanels() 的 `if (!pid) continue;` 放行、永远留在通用区。
-       #
-       # 为什么这不会与 R1「删掉 workbuddy:checkin 面板」冲突
-       #
-       删掉的是 buildProviderPanels() 为 checkin 生成的**通用列表面板**
-       （重复品），不是 checkin 这个**能力位**。本 section 是能力位的
-       **专属**面板，由 SPECIAL_PANEL_CAPS 之外的路径承担 —— 两者不冲突。
-       #
-       # 显隐
-       #
-       hideOrphanPanels 按"该上游是否声明 checkin 能力位"显隐：
-       codearts 没声明 → 自动隐藏（它本来也没有这条端点），无需特判。 -->
-  <section data-provider="workbuddy" data-cap="checkin" data-key="workbuddy:history">
-    <h2>任务历史 <span class="spacer"></span>
-      <select id="histKind" style="padding:3px 8px;font-size:12px">
-        <option value="">全部</option>
-        <option value="checkin">签到</option>
-        <option value="keepalive">保活</option>
-        <option value="travel">旅行</option>
-        <!-- value 是**协议标识**（checkinlog.Kind），不是文案：
-             后端按 'credits' 这个字符串过滤记录。
-             只有显示给用户的那两个字跟着 T4 统一成「额度」。 -->
-        <option value="credits">额度</option>
-      </select>
-    </h2>
-    <div class="body" style="padding:0">
-      <div id="histRetention" class="dim" style="padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
-      <table><thead><tr>
-        <th>时间</th><th>昵称</th><th>类型</th><th>结果</th><th>额度</th><th>触发</th><th>详情</th></tr></thead>
-        <tbody id="histrows"><tr><td colspan="__COLS_HIST__" class="dim">暂无记录</td></tr></tbody></table>
-      <div class="pager" id="histPager"></div>
-    </div>
-  </section>
+  <!-- 任务历史标签页已删除（用户本轮要求）。原 section（data-key="workbuddy:history"）
+       及其 loadHistory 渲染已一并下线；checkin 能力位本身保留（账号池「今日签到」列
+       与调度都依赖它）。 -->
 
   <section data-key="models">
     <h2>可用模型 <span id="mcount" class="dim" style="font-weight:400;text-transform:none"></span>
@@ -1119,6 +1083,22 @@ let loginProvider = '';
   // 判据因此是**字段本身有没有**（`token_expire_sec` 是否是数值），
   // 与 has_token 无关。
   function tokenExpiryCellHTML(a) {
+    // ---- 第三态：**设计上不过期**（不是"不知道"）----
+    //
+    // 判据是后端的 `token_never_expires`（来自 CredentialLifetimeExt）。
+    // 它与 `token_expire_sec` 在**后端**就是互斥的（见 AccountView 的注释），
+    // 所以这里只需要先看它 —— 不需要在前端再复制一遍"谁优先"的规则。
+    //
+    // ⚠ 这一条必须排在下面"未知 → `—`"之前。反过来的话，loomy 那格
+    //   永远显示 `—`（"我们没读到时刻"），而真相是"它根本不会到期" ——
+    //   用户实测就是把那个 `—` 读成了"这功能没做"。
+    //
+    // 措辞用「永久」而不是「无 TTL」：前者是用户能直接据以决策的话
+    //（"这个号不用管"），后者是内部术语。失效的真正原因写在 title 里。
+    if (a.token_never_expires === true) {
+      return '<span class="pill ok" title="该上游的凭证不绑时间：没有 TTL、也没有 refresh token。'
+        + '它不会『到点自动失效』，只会在主动登出／改密／服务端清理／风控时失效">永久</span>';
+    }
     const d = a.token_expire_sec;
     if (d === undefined || d === null || !Number.isFinite(Number(d))) {
       // 未知：上游没提供过期时间（后端按指针语义把字段整个省掉）。
@@ -1249,15 +1229,13 @@ let loginProvider = '';
   }
 
   function renderCards(h, s) {
+    // 用户本轮要求：仪表盘"很乱"，只留两个核心数字 —— 账号总数 / 健康。
+    // 冷却中 / 已禁用 / 在途占满 / 粘性会话 / Redis / healthz 六张卡全部去掉：
+    // 它们要么是排障细节（在途/粘性/Redis），要么与"正在服务 · x/y 可用"
+    // 这句顶栏结论重复（/healthz、冷却、禁用都反映在 healthy 里）。
     const cards = [
       ['账号总数', s.total, ''],
       ['健康', s.healthy, s.healthy > 0 ? 'ok' : 'err'],
-      ['冷却中', s.cooling, s.cooling > 0 ? 'warn' : 'dim'],
-      ['已禁用', s.disabled, s.disabled > 0 ? 'err' : 'dim'],
-      ['在途占满', s.in_flight_full, s.in_flight_full > 0 ? 'warn' : 'dim'],
-      ['粘性会话', s.sticky_sessions, ''],
-      ['Redis', s.redis_mode, s.redis_mode === 'upstash' ? 'ok' : 'dim'],
-      ['/healthz', h.healthy > 0 ? '200' : '503', h.healthy > 0 ? 'ok' : 'err'],
     ];
     $('cards').innerHTML = cards.map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
@@ -1857,7 +1835,6 @@ let loginProvider = '';
     travel: 8,   // 猫猫旅行
     growth: 12,  // 成长计划
     logs: 10,    // 请求日志
-    hist: 7,     // 任务历史
     jobs: 6,     // 任务调度
   };
 
@@ -1987,7 +1964,12 @@ let loginProvider = '';
     const el = $('allDailyActs');
     if (!el) return;
     const all = (MANIFEST.daily_actions || []).filter(a =>
-      a && typeof a === 'object' && a.batch && a.all_url && a.id && a.label);
+      a && typeof a === 'object' && a.batch && a.all_url && a.id && a.label
+      // 用户本轮要求：账号池顶部的「全部签到」按钮**去掉**。
+      // 顶部只保留「刷新全部额度」（它不走这个槽位）。workbuddy 的签到
+      // 是唯一 batch+all_url 的动作，过滤掉它之后这里就空了 —— 容器留着，
+      // 渲染为空字符串，不占空间。
+      && a.id !== 'checkin');
     // 按上游分组计数，决定要不要加 (provider) 后缀
     const byProvider = {};
     for (const a of all) byProvider[a.provider] = (byProvider[a.provider] || 0) + 1;
@@ -2236,11 +2218,19 @@ let loginProvider = '';
       return '';
     }
     const login = info.login;
+    // 「批量导入」：该上游声明了 hidden POST 路由以 /import 结尾才渲染
+    //（数据驱动，不写死上游名 —— 见 adminRouteBySuffix）。
+    const importPath = adminRouteBySuffix(providerId, 'POST', '/import');
+    const importBtn = importPath
+      ? `<button class="gact" data-gimport="${esc(providerId)}"`
+        + ` title="粘贴 JSON 批量导入 ${esc(providerId)} 账号（多条/单条）；导入后自动重载账号池">批量导入</button>`
+      : '';
     if (login && login.kind) {
       // 有页内登录流程 → 给按钮。label 由后端下发（不同上游措辞可能不同）。
       return `<button class="gact" data-gadd="${esc(providerId)}"`
         + ` title="${esc(login.label || '添加账号')}（走 ${esc(providerId)} 自己的登录流程）">`
         + `＋ ${esc(login.label || '添加账号')}</button>`
+        + importBtn
         + `<button class="gact" data-greload="${esc(providerId)}"`
         + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}；手工拷入/删除凭证文件后用它。走页内添加的不需要点">`
         + `重载 auths</button>`;
@@ -2324,7 +2314,7 @@ let loginProvider = '';
   // 两处不一致会让 workbuddy 的表头与后端契约悄悄分叉。
   const DEFAULT_ACCT_COLUMNS = [
     'provider', 'nickname', 'uid', 'quota', 'status', 'token',
-    'checkin', 'success', 'breaker', 'in_flight', 'ops',
+    'checkin', 'success', 'ops',
   ];
 
   // acctColumnsFor 取某上游的列集（有序）。
@@ -2516,6 +2506,25 @@ let loginProvider = '';
     try { localStorage.setItem(LS_ACCTGROUP + '.' + providerId, open ? '1' : '0'); } catch { /* 隐私模式 */ }
   }
 
+  // maskNick 把昵称打码一部分（用户要求"所有的昵称都需要打码"）。
+  //
+  // # 规则（与后端 loomy 的 maskDisplay 同一套口径）
+  //
+  //	已经带 '*' 的（上游给的就是掩码形态，如 150****3411）→ 原样保留
+  //	太短（≤4 字符）→ 全打码
+  //	否则             → 留首 3 尾 2，中间打 *（NK1265861 → NK1****61）
+  //
+  // 打码发生在**渲染层**：数据（/admin/accounts 的 nickname）不被动，
+  // 排障时 title 里放原文（见 accountRow 的 nickname 单元格）。
+  function maskNick(n) {
+    const s = String(n == null ? '' : n);
+    if (!s) return '—';
+    if (s.indexOf('*') >= 0) return s;
+    const rs = Array.from(s);
+    if (rs.length <= 4) return rs.map(() => '*').join('');
+    return rs.slice(0, 3).join('') + '*'.repeat(rs.length - 5) + rs.slice(-2).join('');
+  }
+
   // accountRow 一个账号行。
   //
   // 参数 groupOpen：它所属的分组当前是不是展开的。
@@ -2617,15 +2626,17 @@ let loginProvider = '';
     // 用户在同一个位置找同一个按钮，位置变了就是变了
     //（本项目的先例：按钮顺序是设计决策，verify_account_buttons.js 对此有全等断言）。
     //
-    // 所以把每日动作**按位置切开**：ID 排在 "keepalive" 之前的留在积分前面，
-    // 其余跟在积分后面。这样 workbuddy 的观感与改造前**逐字一致**：
+    // 所以把每日动作**按位置切开**：ID 排在 "checkin" 之前的留在积分前面，
+    // 其余跟在积分后面。这样 workbuddy 的观感按用户本轮要求是：
     //
-    //   签到 | 积分 | 保活 | 禁用 | 移除
+    //   额度 | 签到 | 保活 | 禁用 | 移除
     //
-    // 判据不是硬编码 "checkin" 这两个字，而是"改造前积分的插入点在
-    // keepalive 之前" —— 用 keepalive 当锚点，上游改名/加动作时
-    // 这个切分点仍然有意义（它表达的是"保活总在最后"）。
-    const QUOTA_ANCHOR = 'keepalive';
+    // 上一版锚点是 "keepalive"（签到排在额度前面），用户本轮要求
+    // 「签到」与「额度」**换个位置** —— 把锚点改成 "checkin" 后，
+    // workbuddy 的动作（checkin/keepalive）都在锚点之后 → 额度排最前。
+    // 锚点仍是**数据**（动作 id），不是上游名；codearts 的「签到」（welfare）
+    // 同样落在额度之后，两张表观感一致。
+    const QUOTA_ANCHOR = 'checkin';
     const dailies = dailyActionsOf(pid);
     const beforeQuota = dailies.filter(d => d.id !== QUOTA_ANCHOR && d.id < QUOTA_ANCHOR);
     const afterQuota = dailies.filter(d => !(d.id !== QUOTA_ANCHOR && d.id < QUOTA_ANCHOR));
@@ -2694,7 +2705,7 @@ let loginProvider = '';
     // 代价是**用不到的列也白构建了一次**（几个字符串拼接，可忽略）。
     const cells = {
       provider: `<td>${pinfo}</td>`,
-      nickname: `<td>${esc(a.nickname || '—')}</td>`,
+      nickname: `<td title="${esc(a.nickname || '')}">${esc(maskNick(a.nickname))}</td>`,
       uid: `<td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>`,
       quota: `<td>${quotaCellHTML(a)}</td>`,
       status: `<td>${st}</td>`,
@@ -3129,6 +3140,27 @@ let loginProvider = '';
 
     const state = r.state;
     loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
+    // ---- 两种登录形态：**要不要浏览器**由后端回执决定 ----
+    //
+    // `auth_url` 非空  → 设备码/授权码流程：要用户去浏览器完成授权
+    // `auth_url` 为空  → **本机凭证拾取**流程（登录态就在本机那个桌面客户端的
+    //                     Local Storage 里，没有可打开的授权页）
+    //
+    // ⚠ 判据必须是**数据**（auth_url 空不空），不能是上游名 ——
+    //   写成 `if (provider === '<某个上游名>')` 就等于把上游名搬进渲染层，
+    //   加第四个上游时又要改前端（本项目最硬的判据）。
+    //
+    //    上面那句刻意**没有写出任何具体上游名**。这样"这段代码里有没有
+    //    上游名"本身就成了一条可以被断言检查的性质（见
+    //    webui_token_lifetime_test.go 的 TestWebUIAddAccountHandlesEmptyAuthURL）。
+    //    连注释里也不写，是因为那条守卫读的是**字节**，分不出注释与代码；
+    //    而让守卫去解析 JS 注释是更糟的复杂度。
+    //
+    // 原来的写法是无条件渲染那个 `<a>`，于是空 auth_url 会渲染成
+    // `<a href="">打开授权页面</a>` —— 点了只是把当前页重新加载一遍，
+    // 用户完全无法判断发生了什么。
+    const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
+    if (hasAuthURL) {
     $('loginBody').innerHTML = `
       <div class="row" style="margin-bottom:10px">
         <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer" class="primary"
@@ -3138,6 +3170,14 @@ let loginProvider = '';
         <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
       </div>
       <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
+    } else {
+      // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
+      $('loginBody').innerHTML = `
+      <div class="row" style="margin-bottom:10px">
+        <span id="loginState" class="dim" style="font-size:12px">正在从本机读取登录态…（state ${esc(state.slice(0, 8))}…）</span>
+      </div>
+      <pre id="loginOut" class="dim" style="max-height:120px">该上游的登录态保存在本机客户端里，网关直接读取，无需打开授权页面。</pre>`;
+    }
 
     if (loginPoll) clearInterval(loginPoll);
     loginPoll = setInterval(async () => {
@@ -3200,6 +3240,19 @@ let loginProvider = '';
         const dirTxt = p.dir ? p.dir.replace(/\\/g, '/') : dash;
         const fileTxt = p.file ? `${dirTxt}/${p.file}` : dash;
         const expTxt = (() => {
+          // ---- 第三态：设计上不过期（与账号表那一列**同一个**判据）----
+          //
+          // 判据来自回执的 `token_never_expires`（后端走
+          // gateway.CredentialLifetimeExt）。必须排在 `!p.expires_at` 之前：
+          // 后端现在在零值时**不下发** expires_at 了，但万一将来又有人把零值
+          // 发回来，`!p.expires_at` 会为假（那是个非空字符串），
+          // `Date.parse("0001-01-01T00:00:00Z")` 得到约 -6.2e13（truthy，
+          // 连 `!t` 那道也过不去），days 远小于 0 → 渲染成「已过期」。
+          //
+          // 用户实测报的就是这个：loomy 弹窗在「授权成功」下面写着
+          // **`有效期: 已过期`**，而**同一份凭证**在账号表里写着「永久」。
+          // 两处渲染点自相矛盾，且用户第一眼看到的是那句错的。
+          if (p.token_never_expires === true) return '永久（无 TTL）';
           if (!p.expires_at) return dash;
           const t = Date.parse(p.expires_at);
           if (!t) return dash;                       // 零值/坏值一律 `—`
@@ -3213,10 +3266,68 @@ let loginProvider = '';
           `域       : ${p.domain || dash}\n` +
           `有效期   : ${expTxt}\n` +
           `凭证文件 : ${fileTxt}`;
+        // ⚠ 本机拾取这条路上，"加进来的是哪个号"必须**显式说一句**。
+        //
+        // 原因是一个真实的时序陷阱：客户端把登录态**异步**刷进 leveldb，
+        // 用户刚在客户端里登录完、立刻回来点添加，读到的很可能**还是上一个号**。
+        // 实测就是这个：新号在客户端里 00:50:09 登录，00:50:15 点添加时
+        // 磁盘上最新的那条记录仍是旧号（旧号的 loggedInAt 反而更早）。
+        //
+        // 那时弹窗一切"正常"、uid 也照实写在下面 —— 但用户不会去比对那串
+        // 十六进制，于是"添加成功"与"加错了号"在界面上长得一模一样。
+        // 一句提示把这个静默失败变成**可核对的事实**。
+        //
+        // 判据用 hasAuthURL（本机拾取）而不是某个上游名 ——
+        // 任何走本机拾取的上游都适用，加新上游时这里零改动。
+        if (!hasAuthURL) {
+          toast(`已从本机读取账号 ${p.nickname || p.uid.slice(0, 8)}；` +
+            `若这不是你刚登录的那个号，请在客户端里确认登录状态后重试`);
+          refresh(); loadHistory();
+          return;
+        }
         toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
         refresh(); loadHistory();
       }
     }, 2500);
+  }
+
+  // ---------------------------------------------------------------- 批量导入（账号池分组行）
+  //
+  // # 为什么是一个按钮（用户要求"修改为一个按钮就行"）
+  //
+  // 账号池 loomy 分组行上多一个「批量导入」按钮（与「＋ 添加账号」「重载 auths」并列）。
+  // 点它 → 浏览器 prompt 里粘贴 JSON（单个对象或数组）→ 确定 → 导入 + 重载账号池 + toast。
+  // 没有中间页、没有多一步确认 —— 一个按钮从头到尾。
+  //
+  // # 为什么入口在账号池分组行
+  //
+  // 「批量导入」与「＋ 添加账号」「重载 auths」并列，是**账号增补动作**，
+  // 语义属于账号池，不放任何专属标签页。按钮显隐由 manifest 里的
+  // /import 路由决定（adminRouteBySuffix），不是写死上游名。
+  function openImportModal(providerId) {
+    const pid = providerId || '';
+    const impPath = adminRouteBySuffix(pid, 'POST', '/import');
+    if (!impPath) { toast('该上游没有声明批量导入端点', true); return; }
+    const text = (window.prompt(
+      '粘贴 ' + (providerTitle(pid) || pid) + ' 账号 JSON（单个对象，或 [ ] 包起来的数组）', '')
+      || '').trim();
+    if (!text) return;
+    (async () => {
+      try {
+        const r = await admin(impPath, { method: 'POST', body: text });
+        const bads = (r && Array.isArray(r.results) ? r.results : [])
+          .filter(x => !x.ok)
+          .map(x => '#' + x.index + ' ' + (x.error || '失败'));
+        toast(`导入 ${(r && r.imported) || 0} 个${r && r.failed ? '，失败 ' + r.failed + ' 个' : ''}`, !!(r && r.failed));
+        if (bads.length) showInfo('部分账号导入失败', bads.join('\n'));
+        // 写盘完成后对齐账号池（核心端点，按 provider 分派）。
+        try { await admin('/admin/accounts/reload', { method: 'POST', body: JSON.stringify({ provider: pid }) }); }
+        catch (e) { toast('凭证已写入，但重载账号池失败：' + e.message, true); }
+        refresh();
+      } catch (e) {
+        toast('导入失败：' + e.message, true);
+      }
+    })();
   }
 
   // ---------------------------------------------------------------- 调度（只读）
@@ -3464,7 +3575,9 @@ let loginProvider = '';
     if (key === 'logs') loadLogHistory();
     if (key === 'settings') loadSettings();
     // 上游专属面板：按能力位决定拉什么数据。
-    if (sec.dataset.provider) loadProviderPanel(sec.dataset.provider, sec.dataset.cap);
+    // force=true：切到该标签页时**强制**刷新一次（5 秒轮询不再碰面板，
+    // 所以"用户主动切过来"是拿到新数据的时机）。
+    if (sec.dataset.provider) loadProviderPanel(sec.dataset.provider, sec.dataset.cap, true);
   }
 
   // loadProviderPanel 按能力位给上游面板拉数据。
@@ -3484,7 +3597,12 @@ let loginProvider = '';
   // 所以现在**不再静默返回**，而是回落到通用列表渲染 ——
   // 通用渲染对任意 JSON 形状都能给出可读结果（见 renderGenericBlock），
   // 于是"忘了写渲染器"最坏也只是排版朴素，不会是一片空白。
-  function loadProviderPanel(providerId, cap) {
+  function loadProviderPanel(providerId, cap, force) {
+    // 已经加载过就跳过（force 用于"切到该标签页"与「刷新」按钮）。
+    // 见 syncProviderPanels 里的说明：这是止住周期性重绘的开关。
+    const body = document.getElementById(`pbody-${providerId}-${cap}`);
+    if (body && !force && body.dataset.lpDone === '1') return;
+    if (body) body.dataset.lpDone = '1';
     const fn = PROVIDER_PANEL_RENDERERS[cap];
     if (typeof fn === 'function') { fn(providerId, cap); return; }
     // 回落到通用列表渲染。它按 routesFor(provider, cap) 取该能力位的 GET 端点，
@@ -3526,6 +3644,10 @@ let loginProvider = '';
     // 不为它写专属字段逻辑。
     welfare: (pid) => loadGenericList(pid, 'welfare'),
     'quota-probe': (pid) => loadGenericList(pid, 'quota-probe'),
+    // 本轮为 loomy 的两个专属标签页加的（见上面那两个渲染器）。
+    // 键是**能力位名**，不是上游名 —— 任何上游声明它都会走这里。
+    tasks: (pid) => loadLoomyTasks(pid),
+    invite: (pid) => loadLoomyInvite(pid),
     // core 保留在这里只作为"若将来有人给 core 放开通用面板"的兜底：
     // 当前 SPECIAL_PANEL_CAPS 已把 core 排除在生成之外，所以它不会被触发。
     core: (pid) => loadGenericList(pid, CORE_CAP),
@@ -3548,6 +3670,31 @@ let loginProvider = '';
   function buildProviderPanels() {
     const host = $('providerPanels');
     if (!host) return;
+
+    // ── 先算"这次该有哪些面板"，与现状**一模一样就直接返回** ──
+    //
+    // # 为什么必须这样（用户报的"网页隔三岔五自动刷新"的直接成因之一）
+    //
+    // 本函数原来每次调用都**先删光再重建**所有动态面板。而它每 5 秒被
+    // `refresh()` 调一次 —— 于是即使用户什么都没做，DOM 每 5 秒被整体
+    // 拆一遍再装回去：画面闪、滚动位置跳、输入框里的字被清空。
+    //
+    // 从"删除重建"改成"没变化就不动"之后，正常刷新的代价降到 0，
+    // 只有**能力位真的变了**（启停上游、换配置）才会动 DOM。
+    const want = [];
+    for (const p of upstreamGroups()) {
+      for (const cap of panelCapsOf(p.id)) {
+        const key = p.id + ':' + cap;
+        const el = document.querySelector(`#content > section[data-key="${cssEsc(key)}"]`);
+        // 静态面板（写在 HTML 里的成长/旅行）不归本函数管，也不该进 want。
+        if (el && !el.hasAttribute('data-generated')) continue;
+        want.push(key);
+      }
+    }
+    const have = Array.from(document.querySelectorAll('#content > section[data-generated]'))
+      .map(s => s.dataset.key);
+    if (have.length === want.length && have.every((k, i) => k === want[i])) return;
+
     // 先清掉上一次生成的面板（宿主之前的那些兄弟 section）。
     // 只删**本函数生成的**（都带 data-generated），不碰 HTML 里写死的面板。
     let prev = host.previousElementSibling;
@@ -3593,6 +3740,16 @@ let loginProvider = '';
     navSections = Array.from(document.querySelectorAll('#content > section'));
   }
 
+  // sectionActive 报告某个 `data-key` 的面板当前是不是**正在显示**。
+  //
+  // 用途：周期性的只读刷新（请求日志 / 任务历史）只在它可见时才该跑。
+  // 它读的是 `.active` 类 —— 与 showPanel 切换时用**同一个**判据，
+  // 不另造一套（"当前面板是谁"只能有一个答案）。
+  function sectionActive(key) {
+    const sec = navSections.find(s => s.dataset.key === key);
+    return !!sec && sec.classList.contains('active');
+  }
+
   // syncProviderPanels 生成上游面板并按需触发它们的首次加载。
   //
   // # 它同时修掉 bug B7
@@ -3625,6 +3782,20 @@ let loginProvider = '';
       if (sec.hidden) continue;
       const pid = sec.dataset.provider;
       if (!pid || !sec.dataset.cap) continue;
+      //  已经加载过的面板**不再重复拉**（本轮新增）。
+      //
+      // 这是"网页隔三岔五自动刷新"的另一半成因：本函数每 5 秒被调一次，
+      // 原来会给每个可见面板重新发一遍请求。对 loomy 的两个专属面板
+      // 尤其贵 —— 每个面板要按账号数个请求（3 个号 ≈ 6~8 次），
+      // 于是每 5 秒十几条上游请求 + 整块表格重绘。
+      //
+      // 现在的策略：
+      //	首次（或能力位变化后）→ 加载一次
+      //	切到该标签页           → 强制刷新一次（见 showPanel）
+      //	点面板里的「刷新」      → 强制刷新一次
+      //	其余 5 秒轮询           → 不碰面板
+      const body = document.getElementById(`pbody-${pid}-${sec.dataset.cap}`);
+      if (body && body.dataset.lpDone === '1') continue;
       loadProviderPanel(pid, sec.dataset.cap);
     }
   }
@@ -3646,6 +3817,185 @@ let loginProvider = '';
       if (!alive) hidden++;
     }
     return hidden;
+  }
+
+  // ---------------------------------------------------------------- 上游专属面板（tasks / invite）
+  //
+  // # 为什么这两个渲染器**不认识上游名**
+  //
+  // 端点从 manifest 里取（`admin_routes` 按能力位 + 方法查），
+  // 于是任何上游只要声明 `tasks` / `invite` 并挂上对应路由，就会走到这里。
+  // 这正是"加新上游改前端零行"那条判据在**专属面板**上的形态。
+  //
+  // # 为什么它们不复用 loadGenericList
+  //
+  // 通用列表把回执铺成"一组条目 + 键值对"，而这两块需要的是
+  // **表格 + 行内按钮**（一键完成 / 绑定邀请码）。把按钮塞进通用渲染
+  // 就得让通用渲染去理解"哪些字段是动作"，那会把通用层弄脏。
+  function adminRouteFor(providerId, cap, method) {
+    const want = String(method || '').toUpperCase();
+    const rs = (MANIFEST.admin_routes || []).filter(r =>
+      r && r.provider === providerId && r.capability === cap &&
+      String(r.method || '').toUpperCase() === want);
+    return rs.length ? rs[0].path : '';
+  }
+
+  // adminRouteBySuffix 按「方法 + 路径后缀」在 manifest 里找一条路由。
+  //
+  // 用途：账号池分组行的「批量导入」按钮 —— 它不该为某个上游写死路径，
+  // 而是"这个上游有没有声明 /import 结尾的 hidden POST"来决定显隐。
+  function adminRouteBySuffix(providerId, method, suffix) {
+    const want = String(method || '').toUpperCase();
+    for (const r of (MANIFEST.admin_routes || [])) {
+      if (r && r.provider === providerId &&
+          String(r.method || '').toUpperCase() === want &&
+          String(r.path || '').endsWith(suffix)) {
+        return r.path;
+      }
+    }
+    return '';
+  }
+
+  // SKELETON 两个面板共用的空态/骨架。
+  function panelSkeleton(providerId, cap) {
+    return document.getElementById(`pbody-${providerId}-${cap}`);
+  }
+
+  async function loadLoomyTasks(providerId) {
+    const host = panelSkeleton(providerId, 'tasks');
+    if (!host) return;
+    const getPath = adminRouteFor(providerId, 'tasks', 'GET');
+    if (!getPath) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游没有声明任务端点。</div>';
+      return;
+    }
+    const autoOne = adminRouteFor(providerId, 'tasks', 'POST');
+    // 全部账号那条是**另一条** POST 路由（同样能力位）——按路径后缀区分。
+    let autoAll = '';
+    for (const r of (MANIFEST.admin_routes || [])) {
+      if (r && r.provider === providerId && r.capability === 'tasks' &&
+          String(r.method).toUpperCase() === 'POST' && /auto-all$/.test(r.path)) {
+        autoAll = r.path;
+      }
+    }
+    let d;
+    try { d = await admin(getPath); }
+    catch (e) { host.innerHTML = `<div class="gbad">任务查询失败：${esc(e.message)}</div>`; return; }
+
+    const defs = Array.isArray(d.defs) ? d.defs : [];
+    const labelOf = (k) => { const t = defs.find(x => x.key === k); return t ? t.label : k; };
+    const s = d.summary || {};
+    const accts = Array.isArray(d.accounts) ? d.accounts : [];
+
+    const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
+      <button data-ltask-all="${esc(providerId)}" data-lpath="${esc(autoAll)}">一键完成全部账号</button>
+      <span class="dim" style="font-size:12px">合计已得 ${esc(String(s.earned || 0))} / ${esc(String(s.max || 0))} 分 · 还有 ${esc(String(s.pending || 0))} 项待完成</span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="dim" style="font-size:11px">任务是一次性的：点一次入账一次，已完成的不再重复发分</span>
+    </div>`;
+
+    if (!accts.length) {
+      host.innerHTML = head + '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    const rows = accts.map(a => {
+      const pct = a.total ? Math.round((a.done / a.total) * 100) : 0;
+      const pending = (a.pending || []).map(k =>
+        `<span class="pill dim" title="${esc(k)}">${esc(labelOf(k))}</span>`).join(' ');
+      const st = a.ok
+        ? `<span class="pill ${a.done >= a.total ? 'ok' : 'warn'}">${a.done}/${a.total}</span>`
+        : `<span class="pill err" title="${esc(a.error || '')}">查询失败</span>`;
+      const btn = (a.ok && a.pending && a.pending.length)
+        ? `<button data-ltask="${esc(a.uid)}" data-lpath="${esc(autoOne)}">一键完成（${a.pending.length}）</button>`
+        : (a.ok ? '<span class="dim" style="font-size:11px">已全部完成</span>' : '');
+      return `<tr>
+        <td class="mono dim" title="${esc(a.uid)}">${esc((a.uid || '').slice(0, 8))}…</td>
+        <td>${esc(a.nickname || '—')}</td>
+        <td>${st}<div class="dim" style="font-size:11px">${pct}%</div></td>
+        <td class="mono">${esc(String(a.earned || 0))}/${esc(String(a.max || 0))}</td>
+        <td class="mono">${a.balance ? esc(String(a.balance)) : '<span class="dim">—</span>'}</td>
+        <td style="max-width:320px">${pending || '<span class="dim">—</span>'}</td>
+        <td style="white-space:nowrap">${btn}</td>
+      </tr>`;
+    }).join('');
+    host.innerHTML = head + `<table class="accttable"><thead><tr>
+      <th>UID</th><th>昵称</th><th>进度</th><th>已得积分</th><th>余额</th><th>待完成</th><th>操作</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  async function loadLoomyInvite(providerId) {
+    const host = panelSkeleton(providerId, 'invite');
+    if (!host) return;
+    const getPath = adminRouteFor(providerId, 'invite', 'GET');
+    if (!getPath) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游没有声明邀请码端点。</div>';
+      return;
+    }
+    const bindPath = adminRouteFor(providerId, 'invite', 'POST');
+    //  重绘前**先存下**用户已经敲进去的邀请码。
+    //
+    // 这块面板会被周期性重绘（页面每 5 秒 refresh 一次）。不存的话，
+    // 用户刚输了一半的码会被下一次重绘**清空** —— 表现出来就是
+    // "网页隔三岔五自己刷新、输入框老是空的"，而这与后端一点关系都没有。
+    const keep = {};
+    host.querySelectorAll('input[data-linvite-code]').forEach(i => {
+      if (i.value) keep[i.dataset.linviteCode] = i.value;
+    });
+    let d;
+    try { d = await admin(getPath); }
+    catch (e) { host.innerHTML = `<div class="gbad">邀请码查询失败：${esc(e.message)}</div>`; return; }
+
+    const s = d.summary || {};
+    const accts = Array.isArray(d.accounts) ? d.accounts : [];
+    const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="dim" style="font-size:12px">共 ${esc(String(s.accounts || 0))} 个账号 · 已绑定 ${esc(String(s.activated || 0))} · 未绑定 ${esc(String(s.pending || 0))}</span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="dim" style="font-size:11px">邀请码实测 6 位（形如 E3HRN8），每个码只能用一次（maxUses=1）；绑定是双向奖励。⚠ 「我生成的码」是发给**别人**用的，不能用来绑自己 —— 绑自己请填**其他账号**的码</span>
+    </div>`;
+
+    if (!accts.length) {
+      host.innerHTML = head + '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    const rows = accts.map(a => {
+      const st = !a.ok
+        ? `<span class="pill err" title="${esc(a.error || '')}">查询失败</span>`
+        : (a.activated
+          ? `<span class="pill ok">已绑定${a.applied ? ' ' + esc(a.applied) : ''}</span>`
+          : '<span class="pill warn">未绑定</span>');
+      const codes = (a.codes && a.codes.length)
+        ? a.codes.map(c => {
+            // 状态来自后端透传的上游字段：`exhausted` = 已被别人绑掉（maxUses=1 的常态）。
+            const used = (c.status === 'exhausted') ||
+              (Number(c.maxUses) > 0 && Number(c.usedCount) >= Number(c.maxUses));
+            const tip = `用过 ${c.usedCount}/${c.maxUses}` + (c.status ? ` · ${c.status}` : '');
+            return `<span class="pill ${used ? 'dim' : 'ok'} mono" title="${esc(tip)}">${esc(c.code)}</span>`;
+          }).join(' ')
+        : '<span class="dim">—</span>';
+      // 已绑定的账号不再显示输入框：码是 maxUses=1，点错一次就白费一个码。
+      const ownCodes = (a.codes || []).map(c => c.code).join(',');
+      const ops = a.ok && !a.activated
+        ? `<input data-linvite-code="${esc(a.uid)}" data-own="${esc(ownCodes)}" maxlength="6" placeholder="6 位邀请码"
+             style="width:110px;padding:2px 6px;font-size:12px;text-transform:uppercase">
+           <button data-linvite-bind="${esc(a.uid)}" data-lpath="${esc(bindPath)}">绑定</button>`
+        : '<span class="dim" style="font-size:11px">—</span>';
+      return `<tr>
+        <td class="mono dim" title="${esc(a.uid)}">${esc((a.uid || '').slice(0, 8))}…</td>
+        <td>${esc(a.nickname || '—')}</td>
+        <td>${st}</td>
+        <td class="mono">${a.balance ? esc(String(a.balance)) : '<span class="dim">—</span>'}</td>
+        <td>${codes}</td>
+        <td style="white-space:nowrap">${ops}</td>
+      </tr>`;
+    }).join('');
+    host.innerHTML = head + `<table class="accttable"><thead><tr>
+      <th>UID</th><th>昵称</th><th>激活状态</th><th>余额</th><th>我生成的码</th><th>绑定别人的码</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+    // 重绘后把用户刚才输入的值放回去（见上面 keep 的注释）。
+    host.querySelectorAll('input[data-linvite-code]').forEach(i => {
+      const v = keep[i.dataset.linviteCode];
+      if (v) i.value = v;
+    });
   }
 
   // loadGenericList 通用的"上游列表"渲染。
@@ -3909,6 +4259,92 @@ let loginProvider = '';
         // 只刷新**自己那块**面板，不刷新整页。
         await loadGenericList(pid, cap);
       }, { label: '领取福利' });
+    });
+
+    // ---- 本轮新增：两个专属面板的动作（新手任务 / 邀请码）----
+    //
+    // 与上面同一套手法：**委托**（面板内容每次刷新都重建，逐行绑会线性泄漏监听器），
+    // 端点从按钮自己带的 data-lpath 取（它来自 manifest，不是前端写死的路径）。
+    $('content').addEventListener('click', ev => {
+      const all = ev.target.closest('button[data-ltask-all]');
+      if (all && !all.disabled) {
+        const pid = all.dataset.ltaskAll;
+        const path = all.dataset.lpath;
+        if (!path) { toast('该上游没有「全部完成」端点', true); return; }
+        if (!confirm('对全部 ' + pid + ' 账号逐个完成新手任务？\n（会向上游逐个提交，已完成的不再重复发分）')) return;
+        busyRun(all, async () => {
+          const r = await admin(path, { method: 'POST', body: '{}' });
+          const c = (r && r.completed) || 0;
+          const f = (r && r.failed) || 0;
+          toast(f ? `完成 ${c} 项，${f} 项失败` : `完成 ${c} 项`, f > 0);
+          await loadLoomyTasks(pid);
+        }, { label: '一键完成全部' });
+        return;
+      }
+
+      const one = ev.target.closest('button[data-ltask]');
+      if (one && !one.disabled) {
+        const uid = one.dataset.ltask;
+        const path = one.dataset.lpath;
+        const sec = one.closest('section[data-provider]');
+        const pid = sec ? sec.dataset.provider : '';
+        if (!path) { toast('该上游没有「一键完成」端点', true); return; }
+        busyRun(one, async () => {
+          const r = await admin(path, { method: 'POST', body: JSON.stringify({ uid: uid }) });
+          const res = (r && r.result) || {};
+          const c = (res.completed || []).length;
+          const f = (res.failed || []).length;
+          toast(f ? `完成 ${c} 项，${f} 项失败：${(res.failed || []).join('；')}` : `完成 ${c} 项`, f > 0);
+          await loadLoomyTasks(pid);
+        }, { label: '一键完成' });
+        return;
+      }
+
+      // ---- 批量导入（账号池分组行按钮，见 openImportModal）----
+      const imp = ev.target.closest('button[data-gimport]');
+      if (imp) { openImportModal(imp.dataset.gimport); return; }
+
+      const bind = ev.target.closest('button[data-linvite-bind]');
+      if (bind && !bind.disabled) {
+        const uid = bind.dataset.linviteBind;
+        const path = bind.dataset.lpath;
+        const sec = bind.closest('section[data-provider]');
+        const pid = sec ? sec.dataset.provider : '';
+        const input = sec ? sec.querySelector(`input[data-linvite-code="${uid}"]`) : null;
+        const code = (input ? input.value : '').trim().toUpperCase();
+        if (!code) { toast('请先填邀请码', true); return; }
+        // ★ 最常见失败：拿**本账号自己的码**去绑自己。
+        // 上游会拒（实测 100001 请求参数错误 / 200003 邀请码不可用），
+        // 报错又晦涩，用户根本看不出为什么。这里**提前拦下**并说清楚 ——
+        // 一次请求都不浪费，也不消耗码。
+        if (input && input.dataset.own) {
+          const ownList = ',' + String(input.dataset.own).toUpperCase() + ',';
+          if (ownList.indexOf(',' + code + ',') >= 0) {
+            showInfo('不能用自己的邀请码',
+              '你输入的是「' + code + '」，它属于**本账号自己**。\n\n'
+              + '「绑定别人的码」要用**其他账号**生成的码（例如表格里其它账号「我生成的码」列里 active 的码）。\n\n'
+              + '自己的码是用来**发给别人**用的：对方绑定后，双方各 +5000。');
+            return;
+          }
+        }
+        // ⚠ 必须先确认：邀请码是 maxUses=1 的，绑错一个就废掉一个码，
+        // 而且**没有撤销**。这类不可逆动作一律要用户看一眼再点。
+        if (!confirm('确认给账号 ' + uid.slice(0, 8) + '… 绑定邀请码 ' + code + '？\n（每个码只能用一次，绑定后无法撤销）')) return;
+        busyRun(bind, async () => {
+          let r;
+          try {
+            r = await admin(path, { method: 'POST', body: JSON.stringify({ uid: uid, code: code }) });
+          } catch (e) {
+            // 把"邀请码不可用"这类晦涩上游报错翻成人话：换其他账号的 active 码。
+            toast('绑定失败：' + e.message + '\n（请确认用的是**其他账号**的码、且该码还没被用过）', true);
+            return false;
+          }
+          if (r && r.ok) toast(`绑定成功${r.applied ? '：' + r.applied : ''}`);
+          else toast(`绑定失败：${(r && r.error) || '未知原因'}（请确认码没被用过）`, true);
+          await loadLoomyInvite(pid);
+        }, { label: '绑定邀请码' });
+        return;
+      }
     });
   }
 
@@ -4941,6 +5377,10 @@ let loginProvider = '';
   const histPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'histPager', onGo: () => loadHistory() };
 
   async function loadHistory() {
+    // 「任务历史」标签页已删除（用户本轮要求）—— 本函数保留仅为兼容
+    // 既有调用点（boot、动作收尾等会调它），标签页不存在时**直接返回**，
+    // 避免对空 DOM 取 .value 抛错。
+    if (!document.getElementById('histrows')) return;
     const kind = $('histKind').value;
     let r;
     try {
@@ -5158,55 +5598,29 @@ let loginProvider = '';
     const ok = num(s.ok);
     const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
 
-    // 新维度：累计消耗 / 缓存命中率 / 推理 token。
-    // 每个都先算出「字符串或 null」，再由 card() 统一决定颜色与占位符。
-    const credit = fmtCredit(s.credit_total);
-    const hitRate = fmtRate(s.cache_hit_rate);
-    const think = fmtTokens(s.think_tokens);
-    // 缓存 token 明细：命中 + 未命中都要有数才显示「x / y」，
-    // 只有一边有数时显示那一边（避免出现 "undefined / 120"）。
-    const ch = fmtTokens(s.cache_hit_tokens);
-    const cm = fmtTokens(s.cache_miss_tokens);
-    // 初值用 null 而不是 NODATA：card() 只在 `v === null` 时把值换成占位符
-    // **并加 dim 类**。直接赋字符串会让它走"有值"分支 —— 显示同样是「—」，
-    // 但少了 dim 样式，与其它"无数据"卡片看起来不一致。
-    let cacheDetail = null;
-    if (ch !== null && cm !== null) cacheDetail = ch + ' / ' + cm;
-    else if (ch !== null) cacheDetail = ch;
-    else if (cm !== null) cacheDetail = cm;
+    // 精简后的核心统计（用户要求"不用很复杂，就是简单的统计"，参考 new-api 那类
+    // 仪表盘的呈现：请求数 / 成功失败 / 成功率 / token / 耗时）。
+    // 砍掉：缓存命中率 / 缓存 token / 推理 token / 缓冲占用 —— 排障细节，
+    // 堆在这里只会让"一眼看网关用没用起来"这件事变难。
+    //
+    // 「累计消耗」改成 token（用户本轮要求）：不同上游的 credit 单位不同
+    //（积分/额度/点），加起来没有可比性；而 token 是跨上游统一的口径。
+    // 消耗 token = 输出 token + 推理 token（usage 里记录的只有这两个）。
+    const totalTokens = (num(s.tokens) || 0) + (num(s.think_tokens) || 0);
 
     // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
-    // 颜色判据也用数值（不是真值），否则「命中率 0%」会因为 0 是 falsy 而被涂成 dim。
     const card = (k, v, cls) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
-
-    const hitRateNum = num(s.cache_hit_rate);
-    const hitRateCls = hitRateNum === null ? 'dim' : hitRateNum >= 0.5 ? 'ok' : hitRateNum >= 0.2 ? 'warn' : 'err';
-    const creditNum = num(s.credit_total);
-    const thinkNum = num(s.think_tokens);
 
     $('statsCards').innerHTML = [
       ['总请求', fmtCount(s.total), ''],
       ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
       ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
       ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
-      // 累计消耗：上游 usage 里的 credit 求和。旧格式日志行该字段恒为 0，
-      // 此时显示 0 是**正确**的（确实没有额度数据被记录），所以不特殊处理。
-      ['累计消耗', credit, creditNum ? '' : 'dim'],
-      ['缓存命中率', hitRate, hitRateCls],
-      ['缓存 token', cacheDetail, ch !== null || cm !== null ? '' : 'dim'],
-      ['推理 token', think, thinkNum ? '' : 'dim'],
+      ['消耗 token', totalTokens ? fmtTokens(totalTokens) : null, totalTokens ? '' : 'dim'],
+      ['输出 token', fmtTokens(s.tokens), num(s.tokens) ? '' : 'dim'],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
-      ['输出 token', fmtTokens(s.tokens), ''],
-      // 缓冲占用只在内存来源时才有意义；落盘来源改写为文件占用，避免两个概念混淆。
-      // 落盘只显示当前占用量：上限是配置里的固定值（默认 8 MiB），放在卡片里
-      // 既不随数据变化、又让人误以为是一根进度条，去掉更清楚。
-      [s.source === 'file' ? '落盘占用' : '缓冲占用',
-        s.source === 'file' && s.file
-          ? fmtBytes(s.file.size)
-          : ((s.held || 0) + '/' + (s.capacity || 0)),
-        'dim'],
     ].map(([k, v, c]) => card(k, v, c)).join('');
 
     renderStatsModels(s);
@@ -6503,10 +6917,15 @@ let multCatalogFailed = false;
 
     // 请求日志按 10s 刷新落盘视图（屏幕上始终是最新落盘记录）；
     // 任务历史 10s。
-    setInterval(loadLogHistory, 10000);
-    setInterval(loadHistory, 10000);
+    //
+    //  ⚠ 只在**那块面板当前可见**时才拉（本轮新增）。
+    //
+    // 原来是无条件 10 秒拉一次：用户在看账号池，日志与任务历史两块面板
+    // 照样每 10 秒发两个请求并重绘自己 —— 这是"网页一直隔三岔五自动刷新"
+    // 的第三个来源，而且是纯浪费（看不见的东西刷它做什么）。
+    // `showPanel` 已经在切到这两块时各拉一次，所以不会出现"切过去是空的"。
+    setInterval(() => { if (sectionActive('logs')) loadLogHistory(); }, 10000);
     loadLogHistory();
-    loadHistory();
     loadSettings();   // 设置页数据先备好，顺便拿到落盘日志概况（顶部日志面板要显示）
 
     // 导航最后构建：此时所有 section 都已在 DOM 里。

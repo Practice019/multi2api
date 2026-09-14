@@ -459,6 +459,30 @@ type AccountView struct {
 	TokenExpireAt  *int64 `json:"token_expire_at,omitempty"`
 	TokenExpireSec *int64 `json:"token_expire_sec,omitempty"`
 
+	// TokenNeverExpires 这份凭证**设计上就没有过期时间**（不是"我们不知道"）。
+	//
+	// # 为什么必须有第三个字段（用户实测报的缺口）
+	//
+	// 上面两个指针表达的是"有到期时刻"与"不知道"。但 loomy 的 session
+	// 既不是某个时刻、也不是信息缺失 —— 它是**服务端持久化登录态，不绑时间**。
+	// 只用两个指针，它只能落进"不知道" → 界面 `—` → 用户读成"这功能没做"。
+	//
+	// 真相是**信息不缺失**：结论就是"不会到期自动失效"。
+	//
+	// # 与 TokenExpireSec 互斥
+	//
+	// 有到期时刻时本字段恒为 false（见 accountViews 的填写顺序）：
+	//   · 先问时刻（CredentialExpiryExt）
+	//   · 只有拿不到时刻才问"是不是永久"（CredentialLifetimeExt）
+	//
+	// 反过来的后果是把一个 2 小时后失效的 STS 说成"永久"。
+	//
+	// # 前端契约
+	//
+	//	true             → 渲染「永久」（带 title 说明失效率来源）
+	//	false / 缺字段   → 走原有逻辑（时刻 / `—`），行为逐字节不变
+	TokenNeverExpires bool `json:"token_never_expires,omitempty"`
+
 	File           string `json:"file,omitempty"`
 	TodayCheckin   string `json:"today_checkin,omitempty"`
 	TodayCheckinAt int64  `json:"today_checkin_at,omitempty"`
@@ -534,6 +558,42 @@ func (h *Handler) credentialExpiryOf(uid, providerID string) (int64, bool) {
 	return at, true
 }
 
+// credentialNeverExpires 问**拥有这份凭证的上游**：它是不是设计上不过期。
+//
+// # 与 credentialExpiryOf 完全同构
+//
+// 同样的三道未知（账号不存在 / 上游未注册 / 未实现扩展点）都返回 false
+// —— 对界面来说"不确定"与"有到期时间"一样，都只能显示 `—` 或时刻，
+// **绝不能**显示「永久」。把不确定报成永久是**强断言**，说错了会让
+// 用户以为手里的号永远可用（见 gateway.CredentialLifetimeExt 的注释）。
+//
+// # 只有拿不到到期时刻时才会被调用
+//
+// 调用点保证了两者互斥（见 accountViews）。这里再判一次没有意义 ——
+// 只会多一个"谁先谁后"的第二份事实。
+func (h *Handler) credentialNeverExpires(uid, providerID string) bool {
+	if providerID == "" || h.cfg.Pool == nil {
+		return false
+	}
+	secret, ok := h.cfg.Pool.SecretOf(uid)
+	if !ok || secret == nil {
+		return false
+	}
+	p, ok := h.providerByID(providerID)
+	if !ok {
+		return false
+	}
+	ext, ok := gateway.ExtOf[gateway.CredentialLifetimeExt](p)
+	if !ok {
+		return false
+	}
+	return ext.NeverExpires(gateway.Credential{
+		Provider: providerID,
+		UID:      uid,
+		Secret:   secret,
+	})
+}
+
 func (h *Handler) accountViews() []AccountView {
 	list := h.cfg.Pool.List()
 	today := checkinlog.TodayStart()
@@ -584,16 +644,28 @@ func (h *Handler) accountViews() []AccountView {
 		// 问**拥有它的上游** —— 与 RefreshCredential 完全同构。
 		//
 		// ⚠ 只在上面没拿到时才问：workbuddy 走的是上面那条，行为**逐字段不变**。
+		//
+		// provider 在这里算一次，供下面两条判据共用 ——
+		// 原先它在 if 里各算一遍，加第三条判据时很容易漏掉一处
+		//（"同一个事实有两个计算点"正是本项目反复吃过的形态）。
+		pid := st.Provider
+		if pid == "" {
+			pid = h.cfg.DefaultProvider
+		}
 		if v.TokenExpireSec == nil {
-			pid := st.Provider
-			if pid == "" {
-				pid = h.cfg.DefaultProvider
-			}
 			if at, ok := h.credentialExpiryOf(st.UID, pid); ok {
 				sec := at - time.Now().Unix()
 				v.TokenExpireAt = &at
 				v.TokenExpireSec = &sec
 			}
+		}
+		// 到期信息的**第三态**：上游自报"这份凭证没有过期时间"（如 loomy 的 session）。
+		//
+		// ⚠ 只在**确实没有到期时刻**时才问。顺序不能反：
+		// 反过来会把一个有明确失效时刻的凭证（codearts 的 2 小时 STS）
+		// 渲染成「永久」—— 那是一个**更强、且错误**的断言。
+		if v.TokenExpireSec == nil {
+			v.TokenNeverExpires = h.credentialNeverExpires(st.UID, pid)
 		}
 		// 今日签到结果：从历史里取当天该 uid 的最近一条 checkin。
 		if h.cfg.Log != nil {
@@ -1418,17 +1490,65 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow ga
 	// `gateway.Credential` **没有** domain 字段（各上游凭证结构不同，
 	// 强行统一会造出"什么字段都有、每个上游只填三个"的超集结构体），
 	// 而 codearts 也不提供有效期。**不假装有** —— 前端对缺失字段显示 `—`。
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"status":   "ok",
 		"uid":      cred.UID,
 		"nickname": cred.Nickname,
 		"provider": cred.Provider,
 		"dir":      dir,
 		"file":     filepath.Base(path),
-		// 可能为零值（上游不提供过期信息）—— 前端据此显示 `—`
-		"expires_at": cred.ExpiresAt,
-	})
+	}
+	// ⚠ `expires_at` 只在**真的有**到期时刻时才下发。
+	//
+	// # 为什么不能无条件带上（用户实测报的"前端添加账号不对"）
+	//
+	// `gateway.Credential.ExpiresAt` 是 `time.Time`，**零值表示上游没给有效期**。
+	// 无条件序列化会把零值写成 `"0001-01-01T00:00:00Z"` —— 而前端的判据是
+	// `if (!p.expires_at) return '—'`：那是一个**非空字符串**，于是它继续往下走
+	//
+	//	Date.parse("0001-01-01T00:00:00Z") → 约 -6.2e13（truthy，跳过 !t 那道）
+	//	days = (t - now)/86400000 → 远小于 0
+	//	→ 渲染出「已过期」
+	//
+	// 于是 loomy 的弹窗在"授权成功"之后写着 **`有效期: 已过期`** ——
+	// 与同一份凭证在账号表里显示的「永久」**自相矛盾**，而用户第一眼看到的
+	// 就是这句（他会以为这个号不能用了）。
+	//
+	// 与 T5 那次的 `token_expire_sec` 是同一个形态：**用字段的存在性表达"未知"，
+	// 却把一个零值当成有效值发了出去**。所以判据必须是"零值不下发"。
+	if cred.ExpiresAt.Unix() > 0 {
+		out["expires_at"] = cred.ExpiresAt
+	}
+	// 过期信息的**第三态**：上游自报"这份凭证设计上不会过期"。
+	//
+	// 与账号表那一列走**同一个扩展点**（`gateway.CredentialLifetimeExt`），
+	// 所以两处不会各说一套：表里显示「永久」时弹窗里也显示「永久」。
+	// 拿不到凭证 / 上游没实现 / 上游不确定 → 都不下发（前端显示 `—`），
+	// 绝不把"不确定"说成"永久"（见 credentialNeverExpires（Handler 方法）的注释）。
+	if credentialNeverExpires(p, cred) {
+		out["token_never_expires"] = true
+	}
+	writeJSON(w, http.StatusOK, out)
 	return errHandled
+}
+
+// credentialNeverExpires 问**上游自己**：刚拿到的这份凭证会不会过期。
+//
+// # 为什么不复用 h.credentialNeverExpires(uid, providerID)
+//
+// 那个方法从**账号池**里按 uid 取 secret（账号表渲染路径上只有 uid 可用）。
+// 而这里是"凭证刚落盘、池子可能还没对齐"的时刻 —— 手里就有 `cred`。
+// 去池里绕一圈不仅多一次查找，还可能取到**上一版**的 secret，
+// 于是弹窗与表格可能对同一份凭证给出不同答案。
+func credentialNeverExpires(p gateway.Provider, cred gateway.Credential) bool {
+	if p == nil || cred.Secret == nil {
+		return false
+	}
+	ext, ok := gateway.ExtOf[gateway.CredentialLifetimeExt](p)
+	if !ok {
+		return false
+	}
+	return ext.NeverExpires(cred)
 }
 
 // authFileWriter 上游凭证"能自己序列化成 auth 文件"的窄接口。

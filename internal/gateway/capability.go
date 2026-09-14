@@ -33,6 +33,14 @@ const (
 	CapWelfare
 	// CapQuotaProbe 支持主动额度探测（而非被动从请求结果推断）。
 	CapQuotaProbe
+	// CapTasks 有"新手任务"体系（一次性任务，逐个完成即入账积分）。
+	//
+	// 与 CapGrowth 的区别：growth 是**持续/周期性**的成长中心（有每日进度、
+	// 等级、补领）；tasks 是一组**有限的、做完就没有**的引导任务。
+	// loomy 的 onboarding 就是后者（8 项共 10000 分）。
+	CapTasks
+	// CapInvite 有邀请码/兑换码体系（查激活状态、绑定邀请码、查自己生成的码）。
+	CapInvite
 )
 
 // capNames 能力的可读名。加能力时必须同时加这里 —— 有测试守住这一点。
@@ -44,6 +52,8 @@ var capNames = map[Capability]string{
 	CapTravel:     "travel",
 	CapWelfare:    "welfare",
 	CapQuotaProbe: "quota-probe",
+	CapTasks:      "tasks",
+	CapInvite:     "invite",
 }
 
 // String 返回能力的可读名（单个位）。用于错误信息与前端能力位下发。
@@ -61,6 +71,7 @@ func (c Capability) Names() []string {
 	// 按定义顺序遍历，保证输出稳定（map 遍历顺序随机）
 	for _, one := range []Capability{
 		CapChat, CapModels, CapCheckin, CapGrowth, CapTravel, CapWelfare, CapQuotaProbe,
+		CapTasks, CapInvite,
 	} {
 		if c&one != 0 {
 			out = append(out, capNames[one])
@@ -76,6 +87,7 @@ func (c Capability) Has(one Capability) bool { return c&one != 0 }
 func AllCapabilities() []Capability {
 	return []Capability{
 		CapChat, CapModels, CapCheckin, CapGrowth, CapTravel, CapWelfare, CapQuotaProbe,
+		CapTasks, CapInvite,
 	}
 }
 

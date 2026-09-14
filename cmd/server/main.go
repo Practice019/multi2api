@@ -365,13 +365,23 @@ func main() {
 	var lm *loomy.Provider
 	if cfg.LoomyEnabled {
 		lm = loomy.NewWithConfig(loomy.Config{
-			AuthDir: cfg.LoomyAuthDir,
-			BaseURL: cfg.LoomyBaseURL,
+			AuthDir:            cfg.LoomyAuthDir,
+			BaseURL:            cfg.LoomyBaseURL,
+			ClientDataDir:      cfg.LoomyClientDataDir,
+			SMSBaseURL:         cfg.LoomySMSBaseURL,
+			SMSAppID:           cfg.LoomySMSAppID,
+			SMSAccessKeyID:     cfg.LoomySMSAccessKeyID,
+			SMSAccessKeySecret: cfg.LoomySMSAccessKeySecret,
+			LoginMode:          cfg.LoomyLoginMode,
 		})
 		if err := registry.Register(lm); err != nil {
 			log.Fatalf("注册 Loomy 上游失败: %v", err)
 		}
 		log.Printf("loomy: 已启用（凭证目录 %s，基址 %s）", cfg.LoomyAuthDir, cfg.LoomyBaseURL)
+		// 客户端数据目录决定「添加账号」按钮出不出现、额度能不能读到。
+		// 打一行**明确**的日志而不是让用户去猜"为什么按钮不在"：
+		// 探测失败是正常部署形态（网关在服务器上），但它必须**可见**。
+		log.Printf("loomy: %s", loomy.ClientStoreHint(cfg.LoomyClientDataDir))
 	} else {
 		log.Printf("loomy: 未启用（config 里 loomy.enabled 缺省为 false）")
 		// 与 codearts 同一个提示（那段的长注释同样适用）：凭证在、上游却没开，

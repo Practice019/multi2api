@@ -38,7 +38,8 @@
     "enabled": false,
     "auth_dir": "./auths/loomy",
     "base_url": "https://loomyad.xunfei.cn/api/v1",
-    "pool_accounts": true
+    "pool_accounts": true,
+    "client_data_dir": ""
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
