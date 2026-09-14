@@ -930,30 +930,91 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		rc := cr
-		h.cfg.Pool.NoteSuccess(acct.UID)
-		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
-		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if sessKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(sessKey, acct.UID)
-		}
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
-			st.status = http.StatusOK
+			//
+			// ⚠ 这里**不能**再提前写死 `st.status = OK`：Stream 在
+			// "首帧即流内错误"时一个字节都不会写，并把 *InBandError 交回来
+			// （见 upstream.Stream 的返回值约定）。那种情形必须与下面的
+			// status>=400 同路（分类 + 换号），否则客户端拿到的就是那个
+			// `200 + 一帧没有 choices 的空壳 + [DONE]` —— 正是"外部调用 api
+			// 只有 codearts 报错"的形态。
 			stats := newChatStatsReaderSince(rc, st.start)
-			_ = upstream.Stream(w, stats)
+			serr := upstream.Stream(w, stats)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
 			st.usage = stats.Usage()
 			rc.Close()
+
+			var inband *upstream.InBandError
+			if errors.As(serr, &inband) {
+				if inband.Committed {
+					// 内容已流出、状态码已提交，错误帧也已原样下发：
+					// 既不能改响应也不再换号（客户端已经"消费"了这个回复）。
+					// 只记录，保留可排查的上游原文。
+					log.Printf("chat stream uid=%s provider=%s: 上游流内错误（状态码已提交）: %s",
+						acct.UID, reqProvider, inband.Message)
+					h.cfg.Pool.NoteSuccess(acct.UID)
+					if sessKey != "" && h.cfg.Session != nil {
+						h.cfg.Session.Bind(sessKey, acct.UID)
+					}
+					st.status = http.StatusOK
+					return
+				}
+				// 状态码未提交 → 与 status>=400 完全同路。
+				//
+				// classifyErr 用的是**该上游自己的**分类器（status 传 200：
+				// 这正是"错误藏在 2xx 里"的事实，分类器必须看得见它）。
+				// 模型名/通道类错误会落到 ErrKindNone（只换号不罚），
+				// 额度类错误会落到 ErrKindHardCredit（进硬冷却）——
+				// 判据全部来自上游，这里不新增任何假设。
+				kind := h.classifyErr(reqProvider, http.StatusOK, []byte(inband.Body))
+				lastErr = &upstream.Error{
+					Kind:   upstreamKindOf(kind),
+					Status: http.StatusOK,
+					Msg:    inband.Message,
+				}
+				h.applyErrorPolicy(acct.UID, kind)
+				fail(acct.UID)
+				continue
+			}
+
+			// 到这里才是真正的成功流（serr 非 nil 的情形只有"上游空流"，
+			// 那一帧 error + [DONE] 已由 Stream 写出，状态码必须保持 200）。
+			h.cfg.Pool.NoteSuccess(acct.UID)
+			// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
+			if sessKey != "" && h.cfg.Session != nil {
+				h.cfg.Session.Bind(sessKey, acct.UID)
+			}
+			st.status = http.StatusOK
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
 		rc.Close()
+
+		// 非流式同样要拦流内错误：Aggregate 命中错误信封时返回 *InBandError，
+		// 而不是合成一个 content:"" 的成功响应（改造前它就是这么被吞掉的）。
+		var inband *upstream.InBandError
+		if errors.As(err, &inband) {
+			kind := h.classifyErr(reqProvider, http.StatusOK, []byte(inband.Body))
+			lastErr = &upstream.Error{
+				Kind:   upstreamKindOf(kind),
+				Status: http.StatusOK,
+				Msg:    inband.Message,
+			}
+			h.applyErrorPolicy(acct.UID, kind)
+			fail(acct.UID)
+			continue
+		}
 		if err != nil {
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
 			return
+		}
+		h.cfg.Pool.NoteSuccess(acct.UID)
+		if sessKey != "" && h.cfg.Session != nil {
+			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK

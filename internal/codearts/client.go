@@ -375,7 +375,33 @@ func (c *Client) ChatStreamWith(a *Auth, body []byte, extraHeaders map[string]st
 	// max_tokens（实测 DSH 发 384000，而 deepseek 上限仅 65536），
 	// 上游对超限直接 400，且该错误会被误判成账号故障。
 	// 传 limits 让改写层把超限值裁剪到上限。
-	outBody := upstream.PrepareBodyOptWithLimits(body, c.SanitizeFingerprints, nil, MaxTokensTable())
+	// 出站前先把模型名规范化成服务端注册的逐字形态，再做通用改写。
+	//
+	// # 顺序为什么是"规范名在前"
+	//
+	// 通用改写里有两步按模型名查表：
+	//
+	//	clampMaxTokens  按模型上限裁剪 max_tokens
+	//	ChannelFor      按模型挑服务通道（maas_type 头）
+	//
+	// 如果先改名再规范化，这两步都会用**未规范的名字**去查表 —— 查不到 →
+	// 不裁剪（客户端超限的 max_tokens 原样打上去 → 上游 400）、
+	// 且落到默认通道（benefit 模型因此报 unsupported model）。
+	//
+	// # 为什么改写动作在 upstream 而规范名在本包
+	//
+	// "哪个名字才是规范的"是**本上游的事实**（见 models.go 的 knownModels）；
+	// "怎么改请求体的 model 字段"是通用动作。两者分开，核心与 upstream
+	// 都不必认识 codearts 的模型表。
+	//
+	// 未命中时（ok=false）保持原 body：那不是我们的模型，
+	// 原样转发让上游给出它自己的错误，不猜一个默认模型。
+	canonBody := body
+	if canonical, ok := CanonicalModel(modelOf(body)); ok {
+		canonBody = upstream.RewriteModelField(body, canonical)
+	}
+
+	outBody := upstream.PrepareBodyOptWithLimits(canonBody, c.SanitizeFingerprints, nil, MaxTokensTable())
 
 	// 按模型挑通道。注意用 outBody 而非 body ——
 	// 模型名以改写后的请求体为准（改写不会动 model 字段，但保持一致更稳妥）。
