@@ -187,11 +187,17 @@
   .acctgroup > .gacts .gact{padding:2px 8px;font-size:11px;font-weight:400}
   .acctgroup > table{width:100%;border-collapse:collapse}
   .acctgroup.collapsed > table{display:none}
-  /* 收起该组的账号行（R3）。
-     ⚠ 这是**持久**规则（没有 .collapsed 祖先限定），所以 accountRow 渲染时
-     就必须知道它所在组的开合状态。这一条是折叠唯一真正隐藏东西的地方 ——
-     把它删掉，"折叠"就退化成只转三角、什么也不隐藏的假动作。 */
-  tr.acctrow.collapsed{display:none}
+  /* ⚠ 这里**不能**有 tr.acctrow.collapsed{display:none} —— 加回来就是把回归带回来。
+     折叠真正隐藏东西的地方是上面那条 `.acctgroup.collapsed > table`（整表隐藏）。
+
+     历史上确实有过一条行级规则（"收起该组的账号行"），当时是扁平单表、边界靠
+     DOM 顺序表达，只能逐行写 display。拆成"每上游一张表"之后它就成了缺陷：
+     accountRow 在**渲染时**给行盖上 collapsed 类，而展开只切 section 的类
+     （纯 DOM 切换、不重绘），于是"渲染时处于折叠态 → 点开"会只剩表头，
+     一直到下一次 5 秒轮询重绘才恢复 —— 看起来就是"展开了但表是空的"。
+
+     行上的 `acctrow collapsed` 现在只是**状态标记**（渲染时记录了该组当时的开合），
+     不承担任何隐藏职责。折叠/展开只由 section 上的类驱动。 */
   /* 分组标题做成按钮（R3）：原来的 <span> 是**不可聚焦**的，键盘用户
      和读屏器完全够不着它，折叠写完也只有鼠标能用。
      ⚠ font-family:inherit 与 font:inherit 的区别不是风格问题：
@@ -6049,9 +6055,13 @@ let multCatalogFailed = false;
         //
         // # 为什么这里能做"纯 DOM 切换"，而渲染时不行
         //
-        // 渲染时表格整块是新的，行的类只能由渲染代码写；
-        // 这里是**用户当场点的这一组**，把同一个类切到它自己和它的行上即可，
+        // 渲染时表格整块是新的，section 的类只能由渲染代码写；
+        // 这里是**用户当场点的这一组**，把 collapsed 类切到 section 上即可，
         // 结果与"重绘一遍"完全一致（localStorage 已同步写好）。
+        //
+        // ⚠ 只需切 **section** 这一个类 —— 不要再往它的行上切一遍。
+        // 行级的 collapsed 没有对应的 CSS（见样式表里那段警告），
+        // 切了也不会改变显示，只会让人以为"行类也参与隐藏"。
         const box = hd.closest('.acctgroup');
         if (box) {
           box.classList.toggle('collapsed', !next);

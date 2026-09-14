@@ -5135,9 +5135,13 @@ let multCatalogFailed = false;
         //
         // # 为什么这里能做"纯 DOM 切换"，而渲染时不行
         //
-        // 渲染时表格整块是新的，行的类只能由渲染代码写；
-        // 这里是**用户当场点的这一组**，把同一个类切到它自己和它的行上即可，
+        // 渲染时表格整块是新的，section 的类只能由渲染代码写；
+        // 这里是**用户当场点的这一组**，把 collapsed 类切到 section 上即可，
         // 结果与"重绘一遍"完全一致（localStorage 已同步写好）。
+        //
+        // ⚠ 只需切 **section** 这一个类 —— 不要再往它的行上切一遍。
+        // 行级的 collapsed 没有对应的 CSS（见样式表里那段警告），
+        // 切了也不会改变显示，只会让人以为"行类也参与隐藏"。
         const box = hd.closest('.acctgroup');
         if (box) {
           box.classList.toggle('collapsed', !next);
