@@ -82,15 +82,20 @@ flowchart LR
 |---|---|
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程（无 PKCE），自动落盘凭证并重启容器 |
 | 🔄 **多账号池** | 三因子加权随机选号（积分比例 ×10 + 闲置补偿 + 成功率 ×3），Top-5 候选 + 防惊群 |
-| 🛡️ **熔断与冷却** | 429/404 软冷却、402/余额不足硬冷却至次日 04:00、连续失败指数退避熔断、在途租约限流 |
+| 🛡️ **熔断与冷却** | 429/404 软冷却（**连续触发指数退避**，封顶 `soft_rate_max`）、402/余额不足硬冷却至次日 04:00、连续失败指数退避熔断、在途租约限流 |
+| 🎯 **模型级限流收窄** | 429 `code=6004` 带「将在 … 重置」时冷却精确到上游给的重置墙钟；**换模型立即豁免**（被单模型限流不再等于整个号废掉） |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑 |
-| ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻 + 猫猫旅行（派猫/领奖）；22:00 全账号 token 刷新保活 |
+| ⏰ **定时任务** | 每日 09:00 / 21:00 自动签到 + 余额查询解冻 + 猫猫旅行（派猫/领奖）；22:00 全账号 token 刷新保活；**可选**的整点对话活跃上报 |
+| 📣 **对话活跃上报** | `POST /v2/report`（`chat_request_send` 全字段形状）—— 点亮连登 + **解锁 `first_buddy`（领养前置）**。默认关闭，配 `schedule.activity_hours` 启用 |
 | ⚡ **流式 + 非流式** | 上游 SSE 逐帧规范化透传；出站强制 `stream:true`，非流式由本地聚合为单响应 |
-| 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级 |
+| 🧠 **推理模型兼容** | `reasoning_content` 白名单保留、工具调用（`tool_calls`）按 index 合并、effort 自动降级；**DeepSeek 思维链注入**（`thinking.type=enabled` + 默认档）与**多轮 `reasoning_content` 回填** |
+| 💬 **系统提示词体系** | 出站前用网关自有提示词**替换**客户端 system/developer，从源头消灭 system 来源的内容误报；`passthrough` 模式撞拦截时**自动降级重试一次**（次日 00:00 CST 重置） |
+| 🗑️ **指纹脱敏** | 出站请求体黑名单指纹清洗（可关闭）：Claude Code / Codex 身份句、`11128` 反探测、`tool_calls.arguments` 盲区、billing header 与尾随 kv |
+| 🪪 **出站身份可配** | UA（CLI / 桌面端三段式）、用量归属头 `X-IDE-*`、设备风控头 `X-Device-Token`（三源优先级）、客户端 IP 透传 —— **全部 opt-in，不配时与改造前逐字节一致** |
+| 🚧 **请求体上限** | `server.max_body_mb`（默认 8）超限返回 **413**，而不是静默截断后让上游回 `11101` |
 | 📊 **可观测** | 每请求一行表格日志（TTFB/token 速率/uid）；`/healthz` 带 `service` 身份标识可接负载均衡/宿主探活 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **本地管理控制台** | `/ui` 单页 WebUI（本仓库扩展）：仪表盘 / 账号池 / 猫猫旅行 / 成长计划 / 请求日志 / 任务历史 / 设置 |
-| 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭） |
 
 ## 🚀 快速开始
 
@@ -287,18 +292,29 @@ curl -s http://localhost:7863/v1/chat/completions \
   "api_key": "your-api-key-here",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
-  "cooldown": { "soft_rate": "60s" },
+  "server": { "max_body_mb": 8 },
+  "cooldown": { "soft_rate": "60s", "soft_rate_max": "2h" },
   "schedule": {
     "checkin_hours": [9, 21],
     "keepalive_hours": [22],
+    "activity_hours": [10],
     "checkin_enabled": true,
-    "keepalive_enabled": true
+    "keepalive_enabled": true,
+    "activity_enabled": true
   },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
-    "idle_timeout_seconds": 300
+    "idle_timeout_seconds": 300,
+    "user_agent": "",
+    "client_version": "",
+    "cli_version": "",
+    "client_name": "",
+    "device_token": "",
+    "device_token_file": "",
+    "passthrough_ip": false
   },
+  "prompt": { "mode": "custom", "file": "" },
   "features": { "sanitize_blacklist_fingerprints": true },
   "upstash": { "url": "", "token": "" },
   "pool": {
@@ -321,14 +337,27 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
-| `cooldown.soft_rate` | `60s` | 429/404 软冷却时长 |
+| `server.max_body_mb` | `8` | 单次请求体上限（MiB）。超限返回 **413**；`<=0` 回落 8，上界夹到 1024 |
+| `cooldown.soft_rate` | `60s` | 429/404 软冷却基线 |
+| `cooldown.soft_rate_max` | `2h` | 软冷却**指数退避**封顶（连续 429 时 `soft_rate × 2^(n-1)`）；它同时是 6004 模型级冷却的上限 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询；收尾顺带跑一趟猫猫旅行。**空数组/`null` = 未配置回落默认**（不是禁用） |
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活。空数组/`null` 同上 |
+| `schedule.activity_hours` | `[]` | 对话活跃上报时点。**⚠ 空数组 = 不启用**（与上面两项相反，见下） |
 | `schedule.checkin_enabled` | `true` | 签到**总开关**；`false` 真正关掉签到（**猫猫旅行随之停摆**，见下） |
 | `schedule.keepalive_enabled` | `true` | token 保活总开关；`false` 关掉保活 |
+| `schedule.activity_enabled` | `true` | 活跃上报总开关。最终是否跑 = `activity_enabled && len(activity_hours) > 0` |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新/签到/余额/模型）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
+| `upstream.user_agent` | 空 | 出站 UA **逐字覆盖**（最高优先） |
+| `upstream.client_version` | 空 | 非空则出站 UA 切为**桌面端三段式** `WorkBuddy/<v> WorkBuddy/<v> CLI/<cli>`；空 = 保持 CLI 形态 |
+| `upstream.cli_version` | `2.137.1` | 三段式 UA 里的 CLI 段 |
+| `upstream.client_name` | 空 | 用量归属名（`X-IDE-Name`/`X-IDE-Type`/`X-Product`/`X-Agent-Purpose`），官网「使用端」列读它；配 `WorkBuddy` 即对齐官方桌面端 |
+| `upstream.device_token` | 空 | 全局设备风控头 `X-Device-Token` |
+| `upstream.device_token_file` | 空 | 设备令牌文件（5 分钟 TTL 缓存；读失败**保留上次有效值**） |
+| `upstream.passthrough_ip` | `false` | 是否把入站客户端 IP 透传给上游（`X-Forwarded-For`/`X-Real-IP`/`X-Client-IP`）。**XFF 可伪造，直连公网的部署不应打开** |
+| `prompt.mode` | `custom` | 提示词模式：`custom` 替换客户端 system/developer；`passthrough` 透传，撞拦截时降级重试 |
+| `prompt.file` | 空 | 自定义提示词文件。**路径非空但不可读/为空 → 启动直接报错**（fail fast） |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `upstash.url` / `token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
@@ -340,6 +369,19 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
+
+### 三组开关的语义差异（容易踩）
+
+| 配置项 | 空数组/缺省的含义 |
+|---|---|
+| `checkin_hours` / `keepalive_hours` | **未配置 → 回落默认时点**（既有行为不能变） |
+| `activity_hours` | **不启用**（本版本新增能力，必须显式配置才跑） |
+
+理由：活跃上报若沿用"空 = 回落默认 [10]"，所有既有部署升级后会在 10 点
+自动对每个账号发一条上游请求 —— 一个用户没要求的、默认开启的新行为。
+因此它 opt-in。
+
+三者的"真正关闭"都用 `*_enabled: false`；禁用**不擦除**时点配置，改回 `true` 即恢复。
 
 ### 上游超时语义（三段各归其位）
 
@@ -383,13 +425,91 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 分类 | 触发条件 | 账号处置 | 恢复 |
 |---|---|---|---|
 | 余额不足 | HTTP 402 / body 含余额关键词 | 硬冷却到**次日 04:00**（本地时区） | 签到（09/21 点）余额恢复自动解冻 |
-| 频控 | HTTP 429 | 软冷却 `soft_rate`（60s） | 到期自动恢复 |
-| Session 失效 | body 含 `Offline user session not found` / `12153` | **永久禁用** | 人工重新登录 |
+| 频控 | HTTP 429 | 软冷却 `soft_rate`（60s）。**连续触发按 `2^(n-1)` 指数退避**，封顶 `soft_rate_max`（2h） | 到期自动恢复；**成功或签到解冻清零退避计数** |
+| 模型级限流 | 429 + `code=6004` + 文案含「将在 … 重置」 | 冷却**精确到上游给的重置墙钟**（不做指数放大，取 `min(重置时刻, now+soft_rate_max)`），并记录触发模型 | 到重置时刻自动恢复；**期间换模型立即豁免** |
+| Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为网络抖动/刷新竞态） | 人工重新登录；失败后任意一次成功即清零计数 |
 | 上游 404 | HTTP 404 | 软冷却（60s） | 到期自动恢复 |
 | 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
-| 客户端错误 | 其余 4xx / 业务 `code≠0` | 不处罚，换号重试 | 即时 |
+| 客户端错误 | 其余 4xx / 业务 `code≠0`（含 `11101` 请求体解析失败、`11128`） | 不处罚，换号重试 | 即时 |
+| 内容策略拦截 | HTTP 400 + 审核文案（`blocked by security policy` / `unapproved channel` / `illegal api invocation`） | **不罚账号、不换号** —— 换提示词重试一次；第二次仍被拦则如实返回上游错误 | 降级期至次日 00:00 CST 自动重置 |
 
 **熔断器**：所有冷却入口（429/404/402）与 5xx 共用唯一连续失败计数器 `fails`；累计达 `breaker_threshold`（默认 3）触发熔断，退避 `breaker_cooldown × 2^retryCount`，封顶 `6h`；成功清零。
+
+**两条升级线是并行的、计数器独立**：`softStreak` 管"近期被限流"（分钟~小时级放大），
+`fails` 管"病态反复失败"（30m→6h 长期封禁）。合并成一个会让"偶尔被限流"
+与"上游持续故障"无法区分。
+
+**模型级豁免的边界**：只有 6004 带重置时间时才会记录触发模型；熔断与禁用
+**不受豁免影响**（它们是账号级事实）。非模型级冷却入口会清空豁免痕迹，
+避免上一次 6004 的豁免泄漏到账号级冷却上。
+
+**12153 为什么不再是"一次即禁"**：瞬时抖动（网络闪断、上游瞬时故障、
+token 刷新竞态）的账号完全健康 —— 一次就永久禁用意味着一次抖动打掉一个
+健康的号，且界面上只显示"已禁用"，没有任何线索指向真因。真正失效的
+session（每次请求都 12153）仍会在第 3 次被停掉。
+
+### 系统提示词与内容拦截降级
+
+客户端（Claude Code / Codex 等 CLI）会在 system prompt 里注入**固定模板句**，
+上游内容审核按**逐字精确匹配**拦截合法流量（HTTP 400 + 审核文案）。网关提供两层
+防护，**互不替代**：
+
+| 层 | 解决 | 开关 |
+|---|---|---|
+| **提示词体系** | **system / developer 消息**里的指纹 | `prompt.mode` |
+| **指纹脱敏** | 兜底 **user / assistant / tool 消息**里的指纹串 | `features.sanitize_blacklist_fingerprints` |
+
+| `prompt.mode` | 未降级时 | 降级期内 |
+|---|---|---|
+| `custom`（默认） | 用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system/developer，头部插入单条 system）；user / assistant / tool 消息逐字不动 | 改用极简中性提示词 |
+| `passthrough` | 透传客户端原始 system，**一个字节都不动** | **不再透传**，改用极简中性提示词 |
+
+内置默认提示词 **2086 字节**（约 2 KB，`internal/prompt/defaultprompt.md`，`go:embed` 进二进制）。
+`prompt.file` 指向自定义提示词文件即整体替换内置默认；**留空 = 内置默认**，
+路径非空但不可读或内容为空 → **启动直接报错**（fail fast）。
+
+> **`custom` 与 `passthrough` 怎么选（含一个容易被忽略的不对称）**
+>
+> 降级期是**进程级、全模式生效**的：任一请求撞一次内容拦截 → 之后直到次日 00:00 CST
+> 都用中性提示词。于是两种模式的失败形态不同：
+>
+> - `custom`：**确定性**丢弃客户端人格，但换上的是一份完整的工程助手人格（2 KB）；
+> - `passthrough`：**平时保真**，可一旦撞拦截，剩下的**一整天**都退化成几句
+>   "helpful assistant"（比 `custom` 的默认人格更弱）——即单次拦截的代价是全天的。
+>
+> 上游审核是**逐字匹配模板句**，而模板句正来自 CLI 客户端，命中概率不低；
+> 因此本仓库**保持 `custom` 为推荐默认**。若你的调用方是自带的普通 API 客户端
+> （system prompt 短且不含客户端模板句），改一行 `"prompt": {"mode": "passthrough"}` 即可，
+> 重启生效、随时可回退。**当前 `config.json` 已显式写出 `prompt.mode`** ——
+> 这条行为不是隐式的（见下文实测）。
+
+**内容拦截降级重试**（**两种模式都有**，不限于 `passthrough`）：请求被上游内容策略拦截时，
+判定为 system 来源的指纹误报 —— 网关**不罚账号、不换号**，
+而是在同请求内换一段极简中性提示词重试**一次**；
+
+- 重试通过 → 降级有效，本请求正常返回
+- 重试仍被拦 → 判定为**用户内容本身**触发审核，如实返回上游错误（含原文）
+- 触发降级后持续到**次日 00:00 CST**（固定 +08:00 计算，与宿主时区无关），
+  降级期内请求直达中性提示词，不再先撞一次 400
+- 降级状态是**进程内存态**，重启清零
+
+**为什么它必须是独立错误类别**：内容问题**换号没有意义**（每个账号背后是同一套策略）。
+并进"客户端错误"的后果是一次拦截白烧 `MaxRotate` 次往返，
+最后返回"所有账号不可用" —— 把内容问题误报成账号池故障。
+
+**脱敏层覆盖的四类指纹**：
+
+| 指纹 | 处理 |
+|---|---|
+| Claude Code 身份句（**不带结尾标点**，同时覆盖 CLI 的句号形态与桌面版逗号形态） | 换一词改写 |
+| Codex CLI 身份句 / Anthropic 反馈句（整句） | 换一词改写 |
+| `x-anthropic-billing-header` / 尾随 `cc_*=...;` | 整段剥离 |
+| 裸数字 `11128`（上游反探测：出现即整单拦） | 改写为 `11-128`（保留可读性；零宽空格无效） |
+
+⚠ `tool_calls[].function.arguments` 里的指纹**也会被净化** ——
+它是字符串化的 JSON，按文本处理。这块曾是盲区：只带 tool_calls 而无 content 键的
+assistant 消息（工具调用轮的常见形态）会被整条跳过，导致工具参数里的
+被拦字符串原样漏出。
 
 ### 选号策略
 
@@ -415,9 +535,23 @@ curl -s http://localhost:7863/v1/chat/completions \
 | 任务 | 开关 | 时刻（本地时区） | 行为 |
 |---|---|---|---|
 | 签到 | `schedule.checkin_enabled` 默认 `true` | `checkin_hours` 默认 `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号；**收尾顺带跑一趟猫猫旅行** |
-| 保活 | `schedule.keepalive_enabled` 默认 `true` | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效自动禁用 |
+| 保活 | `schedule.keepalive_enabled` 默认 `true` | `keepalive_hours` 默认 `[22]` 整点 | 全账号刷新 token；session 失效连续 3 次才禁用 |
+| 对话活跃上报 | `schedule.activity_enabled` 默认 `true`，但**需 `activity_hours` 非空才跑** | `activity_hours` 默认 `[]`（不启用） | `POST /v2/report`，每号每天 1 次（CST 自然日去重）。点亮连登 + **解锁 `first_buddy`（领养前置）** |
 
 容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
+
+#### 对话活跃上报（默认关闭）
+
+`chat_request_send` 事件（36 字段全形状，**必须含 `userId`**），走 billing 域。
+
+- **每号每天 1 次**：日活跃奖励按天去重，重复上报没有额外收益，只增加风控画像
+- **为什么默认关闭**：它是本版本新增的能力。若沿用"空 = 回落默认时点"的规则，
+  所有既有部署升级后会在 10 点自动对每个账号发上游请求 —— 一个用户没要求的、
+  默认开启的新行为。因此必须显式配 `activity_hours: [10]` 才跑
+- **⚠ 事件缺字段会被上游「200 静默丢弃」**：没有错误码、响应体也没差别，
+  唯一的防线是请求体形状正确。因此实现照抄客户端真实事件的完整形状，
+  并有测试逐个钉住 36 个键
+- 失败只跳过该账号本轮；失败信息落日志与任务历史（`kind=activity`）
 
 #### 关闭定时任务
 
@@ -462,10 +596,31 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 探测结果 | 动作 |
 |---|---|
-| 无猫（`buddy` 为 `null`） | 先同意协议（幂等），再尝试领养；过门槛则 +300 积分并获得猫 |
+| 无猫（`buddy` 为 `null`） | **先补一次对话活跃上报（领养前置）** → 同意协议（幂等）→ 尝试领养；过门槛则 +300 积分并获得猫 |
 | `state=idle` 且今日未派出 | 派出 `location_id=4`（古镇客栈；4 个地点收益/时长区间相同，无最优解） |
 | `state=arrived` | 领取到站奖励（带 `record_id`） |
 | `state=traveling` / 今日已达上限 / 未知状态 | 跳过 |
+
+#### ⚠ 领养前置：为什么以前恒失败（本版本修复）
+
+`first_buddy`（领取第一只 Buddy）的门槛读的是**对话活跃事件**。
+改造前的 `travelAdopt` 只有「同意协议 + buddy/first」两步，**没有发那个事件**，于是：
+
+```text
+每天试一次 → 每天 HTTP 400 "first_buddy task not completed yet" → 当日跳过
+→ 明日再试 → 永远循环
+→ 而 first_buddy 是成长计划其余 17 个任务的**前置**
+→ 表现为"17 个任务全被挡住"
+```
+
+改造前把这个 400 当作"上游的合理门槛"写在注释里，实际是**我们自己少调了一步**。
+现在 `travelAdopt` 会先补一次活跃上报再走协议与领养 —— 上游门槛因此有机会被满足。
+
+- **顺序不能换**：buddy/first 的门槛判定读的就是那个上报事件，放在后面等于没做
+- **上报失败不阻塞领养**：若门槛此前已被其它途径满足（用户自己在客户端里聊过），
+  领养仍会成功；"上报失败就不领养"会白白浪费一次机会
+- 补过上报后仍不过门槛 → 那是**真的** conversation 次数不够，
+  历史记录会写成"已补上报，对话门槛仍未达，明日再试"（与改造前的措辞区分开）
 
 - **领养门槛**：conversation 门槛未达标时上游返回 HTTP 400 `first_buddy task not completed yet`，
   属预期行为——**每账号每自然日只尝试一次**，失败后当日静默跳过，跨日（00:00 CST）自动重试；
@@ -620,6 +775,61 @@ curl -s http://127.0.0.1:7863/healthz | grep -q '"service":"workbuddy2api"'
 - 界面把 `completed` 显示成「待领取」（黄色）并给出「领取 N 分」按钮，`claimed` 显示成「已领取」。
   账号汇总表有「待领取 / 现在可领」两列，能直接看出还有多少分没拿。
 
+### 任务中心：一键完成（上报伪造的客户端行为遥测）
+
+上游的成长任务里有一批**根本不需要真人操作**——它们的计分依据是客户端上报的行为事件，
+而网关可以直接构造这些事件。本版本把这层能力接到了控制台上，共 3 个入口：
+
+| 入口 | 位置 | 调用 | 形态 |
+|---|---|---|---|
+| **一键完成** | 任务明细每一行的「操作」列 | `POST /admin/growth/auto` | 同步，实测 ~10s |
+| **一键完成待办** | 任务明细工具条（作用于下拉框选中的账号） | `POST /admin/growth/auto-all` | 202 + 后台，实测 ~186s |
+| **开学季一键完成** | 同上 | `POST /admin/school/run` | 202 + 后台 |
+
+按钮是**按后端能力表动态出现**的，不在前端写死：任务行的判据是
+「该 `task_code` 在不在 `GET /admin/growth/auto/actions` 返回的集合里」。
+
+- **在表里且未完成** → 显示「一键完成」（后端自己会处理"先接单"这一步）；
+- **不在表里**（如 `Expert_Philanthropy`，需微信真实认证）→ 仍然显示「去客户端做」，
+  保留诚实提示；
+- **已完成 / 已领取** → 不显示按钮（只查能力表会把「已领取」的行也长出按钮，
+  点了只回一句"已完成"）。
+
+> 这一格此前对 `accepted` / `in_progress` **一律**显示「去客户端做」，
+> 注释还写着"本网页无法代做"——能力接进来之后那句话就不成立了，已一并改掉。
+
+#### 两类任务，代价不同
+
+| 类别 | 任务 | 做的事 |
+|---|---|---|
+| **纯伪造** | `chat_5`、`Buddy_App`、`automation_1`、`Library_read`、`template_5`、`playbook_prompt`、`create_canvas`、`Hp_Appearance` 等 | 只发构造好的事件链，**没有任何真实动作**，不消耗账号配额 |
+| **需真实对话** | `expert_5`、`Expert_team_use_3`、`Expert_lighthouse`、`skill_1`、`Model_chat_GLM5.2`、`RichMeow_Chat` | 必须**真发一次 chat** 才能拿到上游签发的 `requestId`——上游会校验专家 id 与 requestId，自造的**不计数** |
+
+两类都是**纯收益**动作（不发真实动作、不消耗账号资源，只把该拿的分领回来），
+所以点击不弹确认框。
+
+`black_cat`（夜猫子）是唯一的例外：它**只在 23:00–08:00 本地时间计分**。
+窗口外点它不会失败，网关如实回「不在窗口、行为不计分」，并交由每日 23 点的排程补足。
+
+#### 管理台 API（`/admin/*`，仅本机）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/admin/growth/auto/actions` | 可自动化任务表（17 条），前端据此渲染按钮 |
+| `GET` | `/admin/growth/scan` | 全账号待办扫描（含开学季待办数） |
+| `POST` | `/admin/growth/auto` | `{uid, task_code}` → 单任务一键完成 |
+| `POST` | `/admin/growth/auto-all` | `{uid}` → 该账号全部可自动化任务 |
+| `GET` | `/admin/school` | 开学季任务矩阵 + 剩余抽奖次数 |
+| `POST` | `/admin/school/run` | `{uid}`（省略则全池）→ 开学季闭环 |
+| `POST` | `/admin/blackcat/run` | `{uid}` → 夜猫子补足（窗口外 409） |
+
+后两条与「一键完成待办」共用同一个**后台任务槽**：同一时刻只允许一个全量任务，
+重复触发返回 409 `{"error":"已有任务在执行中，请等它结束"}`（互斥正常工作，不是故障），
+进度通过 `GET /admin/task` 轮询（`kind` = `growth-auto-all` / `school-run`）。
+
+> 写入方会**就地刷新该账号的成长快照**，所以界面上那几行会在跑完后自动更新，
+> 不需要手动点「刷新」——缓存刷新由写入路径负责，这一条有守卫测试钉着。
+
 ### 切换本机客户端登录
 
 在「成长计划」的任务明细节头里，对**当前正在查看的那个账号**提供「切换本机登录」——把本机 WorkBuddy 桌面客户端登录态改成该账号，省去手动退出重登。
@@ -763,6 +973,7 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 | `/v2/plugin/auth/token/refresh` | POST | 同上 | token 刷新 |
 | `/v2/billing/meter/daily-checkin` | POST | `www.codebuddy.cn` | 每日签到 |
 | `/v2/billing/meter/get-user-resource` | POST | 同上 | 余额查询 |
+| `/v2/report` | POST | 同上 | **对话活跃上报**（`chat_request_send` 事件数组，必须含 `userId`）；点亮连登 + 解锁 `first_buddy` |
 | `/v2/plugin/auth/state?platform=CLI` | POST | `copilot.tencent.com` | OAuth 取授权 URL |
 | `/v2/plugin/auth/token?state=` | GET | 同上 | OAuth 轮询取 token |
 | `/v2/plugin/login/account?state=` | GET | 同上 | OAuth 取账号信息 |
@@ -798,13 +1009,17 @@ API Key 由服务端在渲染 `/ui` 时注入内联脚本（仅本机）。**顶
 | 🖥️ **本地 WebUI 控制台** | `/ui`（仅本机） | 账号池 / 成长 / 旅行 / 请求日志 / 任务历史 / 设置 一站式面板 |
 | 🔐 **管理台后端** | `/admin/*`（仅本机） | 改账号池、触发上游请求、读取积分 |
 | 💾 **请求日志缓冲** | `data/request-log.jsonl` | 落盘可保留 7 天；每条带 TTFB / token / tok/s |
-| 📅 **签到/保活/旅行历史** | `data/checkin-history.json` | 30 天保留，与请求日志共用统一分页组件 |
+| 📅 **签到/保活/旅行/活跃历史** | `data/checkin-log.json` | 30 天保留，与请求日志共用统一分页组件 |
 | 🖼️ **可嵌入 favicon** | `internal/server/favicon.svg` | 仓库自带的渐变对话气泡 + AI 火花图标 |
 | 🛠️ **Windows 双击启动** | `start.bat` | 修正 Windows 双击 exe 时工作目录错位的问题 |
 | 🛡️ **CI 质量门禁** | `.github/workflows/ci.yml` | PR 自动跑 go build / vet / test |
 | 📦 **预编译 Release 产物** | `.github/workflows/release.yml` | 打 tag 自动构建 Win/Linux 二进制包并附校验和 |
+| 🧭 **多上游平台抽象** | `internal/gateway/` | Provider 4 方法 + 8 个可选扩展点 + 行为契约 + 架构约束测试 |
+| 💬 **系统提示词体系** | `internal/prompt/` | 从源头消灭 system 来源的内容误报；撞拦截时自动降级重试 |
 
-代码上对应 `internal/admin/`、`internal/checkinlog/`、`internal/logbuf/`、`internal/oauth/`、`internal/server/webui.html`、`start.bat`、`.github/`、`assets/`。与上游同步时可只把这些目录单独合并，其余由上游更新覆盖。
+代码上对应 `internal/admin/`、`internal/checkinlog/`、`internal/logbuf/`、`internal/oauth/`、
+`internal/prompt/`、`internal/gateway/`、`internal/server/webui.html`、`start.bat`、`.github/`、`assets/`。
+与上游同步时可只把这些目录单独合并，其余由上游更新覆盖。
 
 ## 🧰 工具脚本
 
@@ -838,14 +1053,19 @@ cmd/
 internal/
   admin/     # 管理台 /admin/*（仅本机）+ 后台任务槽          [本仓库扩展]
   auth/      # 凭证解析 + token 刷新 + 原子写回
-  checkinlog/# 签到/保活/旅行历史持久化（30 天）              [本仓库扩展]
+  checkinlog/# 签到/保活/旅行/活跃历史持久化（30 天）           [本仓库扩展]
+  codearts/  # 第二个上游：华为 CodeArts（OAuth + DPoP + JWT 签名）[本仓库扩展]
+  gateway/   # 多上游接缝：Provider 4 方法 + 可选扩展点 + 行为契约 + 架构约束 [本仓库扩展]
   logbuf/    # 请求日志环形缓冲 + 落盘                        [本仓库扩展]
   oauth/     # OAuth 设备授权流程（服务端侧，state 存内存）    [本仓库扩展]
-  pool/      # 账号池（状态机/熔断/租约/加权/持久化）
-  scheduler/ # 定时签到 + 保活 + 猫猫旅行巡检
+  pool/      # 账号池（状态机/熔断/租约/加权/持久化/软限流退避）
+  prompt/    # 系统提示词体系：替换/透传 + 内容拦截降级状态机  [本仓库扩展]
+  scheduler/ # 定时槽位框架（具体任务由各上游经 JobExt 注册）
   server/    # HTTP handler + 鉴权 + 请求日志 + 内嵌控制台（/ui、favicon）
   session/   # 会话粘性路由
-  upstream/  # 上游封装（chat/billing/auth/headers/sse/payload/sanitize/idle）
+  upstream/  # workbuddy 上游封装（chat/billing/auth/headers/sse/payload/sanitize/
+             #   thinking/report/softrate/device_token/growth/travel）
+  workbuddy/ # workbuddy 的 Provider 适配：能力位/管理端点/定时任务/活跃上报
   redisstore/# Upstash 持久化 + Noop 降级
 assets/      # README 配图（logo.svg / architecture.svg / *.png）  [本仓库扩展]
 .github/     # CI 工作流（build / vet / test + 打 tag 自动出多平台产物）  [本仓库扩展]
