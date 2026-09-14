@@ -430,6 +430,32 @@ type Config struct {
 		LoginMode string `json:"login_mode"`
 	} `json:"loomy"`
 
+	// Trae 第四个上游（TRAE SOLO）的配置。
+	//
+	// # 向后兼容（与 codearts / loomy 同一条硬要求）
+	//
+	// 本段**整个缺席**时行为与之前逐字节一致：不注册 trae Provider、
+	// 不加载任何 TRAE 凭证。启用条件是**显式**的：trae.enabled = true。
+	Trae struct {
+		// Enabled 是否启用 TRAE 上游。**缺省 false**（与"段缺席"等价）。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/trae`。
+		AuthDir string `json:"auth_dir"`
+		// AgentBase / UgBase / OAuthBase 三个 host 覆盖（留空 = 包内默认：
+		// trae-api-cn.mchost.guru / api.trae.cn / api.trae.com.cn）。
+		// 只在对齐测试环境或上游换域名时需要。
+		AgentBase string `json:"agent_base_url"`
+		UgBase    string `json:"ug_base_url"`
+		OAuthBase string `json:"oauth_base_url"`
+		// RefreshIntervalSeconds 后台续期扫描周期（默认 1800）。
+		// <=0 不注册续期任务（仅请求路径惰性续期）。
+		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
+		// CheckinEnabled 是否注册每日签到任务（默认 true）。
+		CheckinEnabled *bool `json:"checkin_enabled"`
+		// PoolAccounts 是否把 trae 账号并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"trae"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -506,6 +532,16 @@ type Config struct {
 	LoomySMSAccessKeySecret string `json:"-"`
 	// LoomyLoginMode 登录方式（auto / sms / local）。
 	LoomyLoginMode string `json:"-"`
+
+	// Trae 解析后（供 main 直接取用）。
+	TraeEnabled         bool          `json:"-"`
+	TraeAuthDir         string        `json:"-"`
+	TraeAgentBase       string        `json:"-"`
+	TraeUgBase          string        `json:"-"`
+	TraeOAuthBase       string        `json:"-"`
+	TraeRefreshInterval time.Duration `json:"-"`
+	TraeCheckinEnabled  bool          `json:"-"`
+	TraePoolAccounts    bool          `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -886,6 +922,27 @@ func (c *Config) normalize() error {
 	c.LoomySMSAccessKeyID = strings.TrimSpace(c.Loomy.SMSAccessKeyID)
 	c.LoomySMSAccessKeySecret = strings.TrimSpace(c.Loomy.SMSAccessKeySecret)
 	c.LoomyLoginMode = strings.TrimSpace(c.Loomy.LoginMode)
+
+	// ---- 第四个上游：TRAE ----
+	//
+	// 与 loomy 同一套判据（启用 / 目录 / 并池），另有续期扫描与签到两个旋钮。
+	c.TraeEnabled = c.Trae.Enabled
+	c.TraeAuthDir = c.Trae.AuthDir
+	if c.TraeAuthDir == "" {
+		c.TraeAuthDir = filepath.Join(c.AuthsBase, "trae")
+	}
+	c.TraeAgentBase = strings.TrimSpace(c.Trae.AgentBase)
+	c.TraeUgBase = strings.TrimSpace(c.Trae.UgBase)
+	c.TraeOAuthBase = strings.TrimSpace(c.Trae.OAuthBase)
+	if c.TraeEnabled {
+		iv := c.Trae.RefreshIntervalSeconds
+		if iv <= 0 {
+			iv = 1800
+		}
+		c.TraeRefreshInterval = time.Duration(iv) * time.Second
+	}
+	c.TraeCheckinEnabled = boolOr(c.Trae.CheckinEnabled, true)
+	c.TraePoolAccounts = c.TraeEnabled && boolOr(c.Trae.PoolAccounts, true)
 	return nil
 }
 

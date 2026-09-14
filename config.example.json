@@ -35,6 +35,13 @@
     "enabled": true,
     "refresh_interval_seconds": 60
   },
+  "trae": {
+    "enabled": false,
+    "auth_dir": "./auths/trae",
+    "refresh_interval_seconds": 1800,
+    "checkin_enabled": true,
+    "pool_accounts": true
+  },
   "loomy": {
     "enabled": false,
     "auth_dir": "./auths/loomy",

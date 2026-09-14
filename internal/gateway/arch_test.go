@@ -259,6 +259,10 @@ func TestDiscoveryFindsKnownUpstreams(t *testing.T) {
 	if !found["loomy"] {
 		t.Error("internal/loomy 必须被推导出来（它是判据 1 的第三个实测对象）")
 	}
+	// TRAE 是第四个上游（internal/trae），同一套判据。
+	if !found["trae"] {
+		t.Error("internal/trae 必须被推导出来（它是判据 1 的第四个实测对象）")
+	}
 }
 
 // ── 已废弃：基于源码字面串的上游判定 ──────────────────────────────
