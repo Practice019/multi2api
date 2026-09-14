@@ -427,6 +427,14 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
         //（不是只看 class，要量真实几何）**一个字没变**，只是量的对象换了。
         var tb = sec.querySelector('table');
         rows.push({ h: tb ? tb.offsetHeight : 0, disp: tb ? getComputedStyle(tb).display : 'none' });
+        // ⚠ 光量表**不够**：表头也在 table 里，所以"行被藏起来了"时表依然有高度。
+        // 曾经的缺陷正是这样漏掉的 —— accountRow 渲染时给行盖上 collapsed 类，
+        // 展开只切 section 的类 → 表可见、行全隐藏、只剩表头，而 totalH > 0
+        // 让断言照样绿。这里必须直接量**行**的可见性。
+        var trs = [].slice.call(sec.querySelectorAll('tbody tr.acctrow'));
+        var rowsVisible = trs.filter(function(tr){
+          return getComputedStyle(tr).display !== 'none' && tr.offsetHeight > 0;
+        }).length;
         // ⚠ 折叠后表 display:none → offsetHeight 为 0；
         // hidden 数的是"行不可见"，现在整表一起隐藏，所以用同一判据表达。
         // ⛔ 这段注释在**模板字符串内部**，所以不能出现反引号 —— 那会提前
@@ -441,6 +449,8 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
           hidden: hiddenAll,
           visible: visibleAll,
           n: rows.length,
+          rowsTotal: trs.length,
+          rowsVisible: rowsVisible,
         };
       })())`));
 
@@ -500,6 +510,28 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
       console.log('  刷新重绘后: ' + JSON.stringify(afterRedraw));
       ok(afterRedraw.collapsed === true && afterRedraw.totalH === 0,
         '刷新（表格整块重建）后折叠仍然保持 —— 状态来自 localStorage，不是渲染期的残留 class');
+
+      // ---- ⚠ 关键回归：**渲染时处于折叠态**，再点开，表体必须真的出来 ----
+      //
+      // 这是上面那条"刷新后仍折叠"的自然续集，也是曾经的漏网处：
+      // 旧用例在折叠态刷新完就换话题了，从没再展开过。
+      //
+      // 缺陷形态：accountRow 在渲染时给每行盖上 collapsed 类，而展开只切
+      // section 的类（纯 DOM 切换、不重绘）→ 表可见、行全隐藏、只剩表头，
+      // 一直到下一次 5 秒轮询重绘。只量 table 高度的断言看不出来这一点，
+      // 所以这里断言的是**行**的可见性。
+      ok(afterRedraw.rowsTotal > 0,
+        '折叠态渲染后仍渲染出了账号行（实际 ' + afterRedraw.rowsTotal + ' 行）');
+      await ev(`document.querySelector('#accts > section.acctgroup[data-acctgroup="' + ${JSON.stringify(target)} + '"] button[data-atoggle]').click()`);
+      await sleep(400);
+      const afterExpandFromRender = await measure(target);
+      console.log('  折叠态渲染后展开: ' + JSON.stringify(afterExpandFromRender));
+      ok(afterExpandFromRender.collapsed === false && afterExpandFromRender.hidden === 0,
+        '展开后整张表恢复可见');
+      ok(afterExpandFromRender.rowsVisible === afterExpandFromRender.rowsTotal,
+        '展开后**每一行**都可见（实际 ' + afterExpandFromRender.rowsVisible + '/' +
+        afterExpandFromRender.rowsTotal + '）—— 行级 display:none 残留会在这里红，' +
+        '表现为"展开了但表是空的、只剩表头"');
 
       // ---- 折叠**不跨组**：兄弟选择器做不到这件事，所以这条必须在 ----
       //

@@ -405,10 +405,28 @@ if (jobMap) {
 //     静态这条能直接说出"别把 .mgroup 用在这里"。
 console.log('\n[9] 账号池折叠的形状（R3）');
 
-// 隐藏规则必须是**持久**选择器（不带 .collapsed 祖先限定）。
+// 折叠的隐藏必须由**整表**规则承担（拆成每上游一张表之后的形态）。
 // 它一旦被删，"折叠"就退化成一个空动作。
-ok(/tr\.acctrow\.collapsed\s*\{\s*display\s*:\s*none/.test(html),
-  '有 tr.acctrow.collapsed{display:none} —— 折叠真正隐藏东西的地方就这一条');
+//
+// ⚠ 这两条都跑在 **codeHtml（已剥注释）** 上，不是原始 html：
+// 下面那条反向守卫要找的正是这串 CSS，而样式表旁边的警告注释里**逐字引用了它**
+// （"这里不能有 tr.acctrow.collapsed{display:none}"）。直接在原文上匹配的话，
+// 警告本身会把守卫判红 —— 守卫被自己的说明文字触发，是典型的自伤。
+ok(/\.acctgroup\.collapsed\s*>\s*table\s*\{\s*display\s*:\s*none/.test(codeHtml),
+  '有 .acctgroup.collapsed > table{display:none} —— 折叠真正隐藏整张表的地方');
+
+// ⚠ 反向守卫：**不许**再出现行级的 tr.acctrow.collapsed{display:none}。
+//
+// 这条曾经是正向断言（附理由"折叠真正隐藏东西的地方就这一条"），拆多表后那句
+// 已经不成立 —— 真正隐藏的是上面那条整表规则。而那条行级规则留在样式表里
+// 会造成一个真实回归：accountRow 渲染时给行盖 collapsed 类，展开却只切
+// section 的类（纯 DOM 切换、不重绘）→ "渲染时处于折叠态 → 点开"只剩表头，
+// 直到下一次 5 秒轮询重绘。
+//
+// 所以这里必须翻成反向：留着它就等于把那个回归锁死（而且下一个人会以为
+// 它是折叠的必需机制，于是永远修不掉）。
+ok(!/tr\.acctrow\.collapsed\s*\{\s*display\s*:\s*none/.test(codeHtml),
+  '没有 tr.acctrow.collapsed{display:none} —— 行级隐藏会把"折叠态渲染后展开"弄成空表');
 
 // 分组行**不能**带 .mgroup：那会让模型面板的 `.mgroup.collapsed .chips` 命中它，
 // 而账号表里没有 .chips —— 结果是"看着折叠了、其实什么都没隐藏"。
