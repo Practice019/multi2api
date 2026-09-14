@@ -79,7 +79,7 @@ func (p *Provider) AccountColumns() []string {
 // # 为什么读的是 Secret 而不是别的
 //
 // 核心把池子里那份**不透明的** secret 原样交回来，本包断言回 `*Auth`
-//（与 Chat / RefreshCredential / RefreshSkew 同构）—— 它**就是**续期时
+// （与 Chat / RefreshCredential / RefreshSkew 同构）—— 它**就是**续期时
 // 被原地更新的那个对象，所以这里读到的是**活的**值，不是启动时的快照。
 //
 // # 三种返回

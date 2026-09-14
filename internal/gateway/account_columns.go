@@ -61,7 +61,7 @@ const (
 // 改动它会直接改变 workbuddy 的观感，属于可见回归。
 //
 // 返回**副本**：调用方可能排序或裁剪，不该让默认表被就地改写
-//（那会让下一次调用拿到被改过的"默认值"，且不报错）。
+// （那会让下一次调用拿到被改过的"默认值"，且不报错）。
 func DefaultAccountColumns() []string {
 	return []string{
 		AccountColProvider,

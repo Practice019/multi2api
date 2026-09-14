@@ -85,7 +85,7 @@ type AdminEnv struct {
 //
 // 后果是 panelCapsOf 对 codearts 的 welfare 返回空 → 不生成该面板 →
 // buildNav 里该上游一个可见面板都没有 → **整个 codearts 分组从左侧导航消失**
-//（该分组下原本只有 welfare 这一个面板）。这是**预期行为**，不是漏了分组头。
+// （该分组下原本只有 welfare 这一个面板）。这是**预期行为**，不是漏了分组头。
 //
 // 保留的部分（用户明确要求不动）：
 //   - 三条端点本身照挂（HTTP 语义不变，curl 仍可用）

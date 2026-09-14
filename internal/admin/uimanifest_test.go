@@ -229,7 +229,7 @@ func TestUIManifestHiddenRoutePropagates(t *testing.T) {
 			"前端会为一个本该隐藏的能力位生成面板", r.Hidden)
 	}
 	if r := got["/admin/visible-list"]; r.Hidden {
-		t.Errorf("/admin/visible-list 的 hidden=true，want false —— "+
+		t.Errorf("/admin/visible-list 的 hidden=true，want false —— " +
 			"标志位不能是常量（同能力位的正常入口也进了面板）")
 	}
 	// 能力位不受 Hidden 影响：两条都是 welfare。
