@@ -2264,7 +2264,7 @@ let loginProvider = '';
       //（workbuddy 的 Bearer 形态），而 codearts 的凭证是 AK/SK/STS 三元组、
       // accessToken 恒为空 → 它落到「Token」列会永远是 `—`。
       // 这里直接看**上游报的过期时刻**，与 has_token 无关。
-      tip: '凭证剩余有效期（上游上报的过期时刻）。codearts 的 STS 约 2 小时一轮，'
+      tip: '凭证剩余有效期（上游上报的过期时刻）。短效凭证（如约 2 小时一轮的 STS）'
         + '到点前会自动续期；显示「—」表示这个上游没提供过期时间。',
     },
     checkin: { title: '今日签到' },
