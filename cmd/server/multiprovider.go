@@ -549,6 +549,28 @@ func (r registryRouter) ResetAt(id string, cred gateway.Credential) (time.Time, 
 	return ext.ResetAt(cred)
 }
 
+// SoftRateReset 问**该上游自己**"这次软限流有没有精确到某模型某时刻的答案"。
+//
+// 与 ResetAt / Classify / RefreshSkew 用同一模式（ExtOf 类型断言）：
+// 没有实现 gateway.SoftRateExt 的上游**不算错**，返回 ok=false，
+// 核心退回既有的账号级软冷却路径（softRate 基数 + 指数退避 + 封顶）。
+//
+// ⚠ 刻意**不**回落到默认上游的实现：模型级限流的业务码（6004）
+// 与文案格式是 workbuddy 的**私有知识**。拿它去解析 codearts 的错误体，
+// 最坏情况是把 codearts 的一次普通限流误判成"模型级且已给出重置时刻"，
+// 于是账号被错误收窄冷却 + 被豁免 —— 正是 P2 那类"用 A 的事实回答 B 的问题"。
+func (r registryRouter) SoftRateReset(id string, status int, body string) (time.Time, bool) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return time.Time{}, false
+	}
+	ext, ok := gateway.ExtOf[gateway.SoftRateExt](pv)
+	if !ok {
+		return time.Time{}, false
+	}
+	return ext.SoftRateReset(status, body)
+}
+
 // Chat 用**指定上游自己的 Provider** 发一次对话。
 //
 // # 为什么必须由装配层做（本次修的 bug 的落点）

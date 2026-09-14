@@ -35,7 +35,20 @@ const (
 	JobTravelWatch = "workbuddy-travel-watch"
 	// JobGrowthWatch 成长中心守卫：领任务奖励 / 补签 / 连登兑换 / 开盲盒 / 抽奖。
 	JobGrowthWatch = "workbuddy-growth-watch"
+	// JobActivity 对话活跃上报：整点窗口内每号每天 1 次。
+	//
+	// 它与上面两个守卫轮**形状不同**：那两者是"按每个账号自己的到期时刻错峰"，
+	// 本任务是"每天在配置的整点窗口里跑一次全量"。因此它的 Due 判的是
+	// 时刻窗口 + 当日是否已跑，而不是账号到期表。
+	JobActivity = "workbuddy-activity"
 )
+
+// activityTickInterval 活跃上报任务的轮询粒度。
+//
+// 它只需要在整点窗口内被唤醒一次，因此用 5 分钟粒度足够 ——
+// 核心的 jobTickInterval 是 30 秒，用 Interval 把它抬到 5 分钟，
+// 避免一天里绝大多数轮次都是空转（Due 会立刻返回 false，但仍是唤醒）。
+const activityTickInterval = 5 * time.Minute
 
 // Jobs 返回本上游要注册的定时任务（gateway.JobExt）。
 //
@@ -72,7 +85,113 @@ func (p *Provider) Jobs() []gateway.Job {
 			Run:      p.runGrowthJob,
 			Due:      p.growthDueJob,
 		},
+		{
+			Name:     JobActivity,
+			Interval: activityTickInterval,
+			Run:      p.runActivityJob,
+			Due:      p.activityDueJob,
+		},
 	}
+}
+
+// runActivityJob 一趟活跃上报（只处理当日未报过的账号）。
+func (p *Provider) runActivityJob(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.markJobRun(&p.activityLastRun)
+	p.RunActivityNow()
+	return nil
+}
+
+// activityDueJob 活跃上报任务是否该跑一轮。
+//
+// # 判据（两条都要满足）
+//
+//	① 当前处于配置的整点窗口内（与签到同口径：本地时区的小时整数）
+//	② 今天还没跑过（按 CST 自然日去重 —— 与上游的日活跃重置口径一致）
+//
+// # 为什么用"当日已跑"而不是"距上次超过 24h"
+//
+// 上游的日活跃奖励按**自然日**去重。用 24h 间隔会出现：
+// 某天 23:00 跑过之后，次日 22:00 才跑（漏了次日的窗口），
+// 或者一天内跑两次（第一次在窗口外的人工触发把定时轮压到第二天）。
+// 按自然日记一次，语义与上游一致。
+func (p *Provider) activityDueJob(now time.Time) bool {
+	if !p.ActivityEnabled() {
+		return false
+	}
+	if !p.activityHourMatches(now) {
+		return false
+	}
+	p.mu.Lock()
+	lastDay := p.activityLastDay
+	p.mu.Unlock()
+	return lastDay != travelDay(now)
+}
+
+// activityHourMatches 当前小时是否落在配置的上报时点里。
+//
+// 空列表 = 未配置 → **不跑**（与签到/保活的"空 = 回落默认"不同）。
+//
+// # 为什么这里反过来了
+//
+// 签到/保活是既有功能，空配置必须保持老行为（回落默认时点）；
+// 而活跃上报是本版本**新增**的能力，既有部署的 config 里没有它的键。
+// 若沿用"空 = 回落默认 [10]"，所有老部署升级后会在 10 点自动开始
+// 对每个账号发一条上游请求 —— 一个用户没要求的、默认开启的新行为。
+//
+// 因此它**默认关闭**：必须显式配 `schedule.activity_hours` 才跑。
+// 这与"新增能力应当 opt-in"一致，也让升级行为可预测。
+func (p *Provider) activityHourMatches(now time.Time) bool {
+	p.mu.Lock()
+	hours := append([]int(nil), p.activityHours...)
+	p.mu.Unlock()
+	if len(hours) == 0 {
+		return false
+	}
+	h := now.Hour()
+	for _, x := range hours {
+		if x == h {
+			return true
+		}
+	}
+	return false
+}
+
+// SetActivitySchedule 注入活跃上报的时点与开关（main 从 config 解析后调用）。
+//
+// hours 为空表示**不启用**（见 activityHourMatches 的注释：本能力默认关闭）。
+// enabled=false 显式关闭，且不擦除 hours（与签到的开关语义一致：
+// 关掉再打开不需要重新配时点）。
+func (p *Provider) SetActivitySchedule(hours []int, enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if hours != nil {
+		p.activityHours = append([]int(nil), hours...)
+	}
+	p.activityEnabled = enabled
+}
+
+// ActivityEnabled 报告活跃上报当前是否启用。
+func (p *Provider) ActivityEnabled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.activityEnabled && len(p.activityHours) > 0
+}
+
+// ActivityHours 返回配置的上报时点（副本，供管理台展示）。
+func (p *Provider) ActivityHours() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.activityHours...)
+}
+
+// markActivityRan 记下"今天跑过了"（由 runActivity 结束后调用）。
+func (p *Provider) markActivityRan(now time.Time) {
+	p.mu.Lock()
+	p.activityLastDay = travelDay(now)
+	p.mu.Unlock()
 }
 
 // runTravelJob 一趟旅行守卫：只查到期账号，到站即领（受自动领奖开关约束）。

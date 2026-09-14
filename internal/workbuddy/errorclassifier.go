@@ -108,6 +108,14 @@ func toGatewayKind(k upstream.ErrKind) gateway.ErrorKind {
 		return gateway.ErrKindServer
 	case upstream.ErrClient:
 		return gateway.ErrKindClient
+	case upstream.ErrContentBlocked:
+		// 内容策略拦截 —— core 据此触发**提示词降级重试**，而不是换号。
+		//
+		// ⚠ 这一条不能落 default：default 是 gateway.ErrKindNone，
+		// 而 None 在 core 侧是"只换号不惩罚"。内容问题换号没有意义
+		// （每个账号背后是同一套内容策略），换号只会白烧 MaxRotate 次往返，
+		// 最后把"内容被拦"误报成"所有账号不可用"。
+		return gateway.ErrKindContentBlocked
 	default:
 		return gateway.ErrKindNone
 	}

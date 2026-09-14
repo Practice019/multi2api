@@ -137,13 +137,30 @@ func (p *Provider) travelClaim(a *auth.Auth, ts *upstream.TravelState, trigger s
 	p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusOK, "已领奖", reward, trigger)
 }
 
-// travelAdopt 无猫时领养：先同意协议（幂等）再 buddy/first。
-// conversation 门槛未达标（HTTP 400 first_buddy task not completed yet）属预期行为，
-// 记一次当日已试后静默跳过，不再重试。
+// travelAdopt 无猫时领养：先补活跃上报（前置）→ 同意协议（幂等）→ buddy/first。
+//
+// # ⚠ 改造前这里恒失败（这是本次修复的核心）
+//
+// 改造前本函数只有"同意协议 + buddy/first"两步，而 first_buddy 的门槛
+// 读的是**网关从未发过**的活跃事件。于是：
+//
+//	每天试一次 → 每天 400 "first_buddy task not completed yet" → 当日跳过
+//	→ 而 first_buddy 是成长计划其余 17 个任务的**前置**
+//	→ 表现为"17 个任务全被挡住"
+//
+// 改造前把这个 400 当作"上游的合理门槛"写在注释里，实际是**我们自己少调了一步**。
+// B 分支已实测：补上上报后领养 +300 到账（3/3 账号）。
+//
+// # 顺序：上报 → 协议 → 领养
+//
+// 上报必须最先：门槛判定读的就是它。协议与领养之间的顺序不变（协议幂等）。
 func (p *Provider) travelAdopt(a *auth.Auth, trigger string) {
 	if p.adoptTriedToday(a.UID) {
 		return
 	}
+	// 前置：补一次活跃上报（失败不阻塞，见 ensureAdoptPrereq 的注释）。
+	p.ensureAdoptPrereq(a)
+
 	if err := p.client.BuddyAgreement(a); err != nil {
 		log.Printf("travel %s: agreement: %v", a.UID, err)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusFail, "协议: "+shortErr(err), 0, trigger)
@@ -155,9 +172,16 @@ func (p *Provider) travelAdopt(a *auth.Auth, trigger string) {
 		log.Printf("travel %s: adopt ok (+300 credits)", a.UID)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusOK, "已领养 (+300)", 300, trigger)
 	case upstream.IsBuddyTaskIncomplete(err):
+		// 补过上报仍不过门槛 → 这次是**真的**门槛未达
+		// （例如 conversation 次数不够，需要真实对话量）。
+		//
+		// 已上报过前置，所以这里的跳过与改造前的"跳过"语义不同：
+		// 改造前它意味着"我们什么都没做"，现在它意味着"前置做了，量还不够"。
+		// 历史记录的措辞据此改得更准确，便于用户判断该不该去多聊几句。
 		p.markAdoptTried(a.UID)
-		log.Printf("travel %s: adopt skipped (conversation threshold not reached, retry tomorrow)", a.UID)
-		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusSkip, "对话门槛未达，明日再试", 0, trigger)
+		log.Printf("travel %s: adopt skipped (已补活跃上报，但仍未达 conversation 门槛，明日再试)", a.UID)
+		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusSkip,
+			"已补上报，对话门槛仍未达，明日再试", 0, trigger)
 	default:
 		log.Printf("travel %s: adopt: %v", a.UID, err)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusFail, "领养: "+shortErr(err), 0, trigger)

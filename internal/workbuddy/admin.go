@@ -107,7 +107,7 @@ func (h *AdminHandler) SetEnv(env AdminEnv) {
 // 核心只负责遍历挂载；**加新上游时 core 的 admin 包零改动**。
 func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 	h := NewAdminHandler(p, p.adminEnv)
-	return h.Routes()
+	return h.allRoutes()
 }
 
 // Routes 返回挂载清单（供需要显式构造宿主的调用方使用，例如测试与 cmd/server）。
@@ -162,6 +162,17 @@ func (h *AdminHandler) Routes() []gateway.AdminRoute {
 		{Method: "POST", Path: "/admin/client-login/switch", Handler: h.ClientLoginSwitch, Title: "切换本机登录"},
 		{Method: "POST", Path: "/admin/client-login/restore", Handler: h.ClientLoginRestore, Title: "回滚本机登录"},
 	}
+}
+
+// allRoutes 在基础路由之上追加任务自动化端点（见 autotask_admin.go）。
+//
+// # 为什么单独一个方法而不是直接写进 Routes 的字面量
+//
+// 任务自动化是**成块移植**进来的（对应 B 的 panel/autotask.go + taskcenter.go），
+// 单独一个切片让"这次移植加了哪些端点"一眼可见，也便于将来整块回退。
+// 核心侧完全无感：AdminRoutes() 仍然只返回一个 []gateway.AdminRoute。
+func (h *AdminHandler) allRoutes() []gateway.AdminRoute {
+	return append(h.Routes(), h.autoTaskRoutes()...)
 }
 
 // 编译期断言：Provider 实现了这些扩展点。
