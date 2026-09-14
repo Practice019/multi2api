@@ -1134,7 +1134,17 @@ let loginProvider = '';
   function welfareCellHTML(a) {
     const s = a.today_welfare;
     if (s === 'ok') return '<span class="pill ok">已领取</span>';
-    if (s === 'skip') return '<span class="pill dim" title="今天点过领取，但一项都没领到（上游只给 claimable，界面无法区分「今日已领完」与「资格不符」）">无可领</span>';
+    // ⚠ 措辞是「未领到」，**不是**「无可领」也不是「已领完」。
+    //
+    // `skip` 的事实只有一条：**我们这次点了，没领到东西**。
+    // 至于为什么 —— 上游那侧是"今天已领完了"还是"资格不符"——
+    // 它只回 `claimable` 布尔，前端**分不清**（见 welfare.go 的实测注释）。
+    //
+    // 实测（2026-09-14 07:56）：一次真实领取返回 "3 项均不可领"，
+    // 那条记录被渲染成「无可领」—— 而当时**确实是今天已经领过了**。
+    // 「无可领」把原因说成了"没得领"，与事实相反的方向。
+    // 「未领到」不猜原因，只说结果。
+    if (s === 'skip') return '<span class="pill dim" title="今天点过领取，但没领到东西（上游只给 claimable 布尔，界面无法区分「今天已领完」与「资格不符」）">未领到</span>';
     if (s === 'fail') return '<span class="pill err" title="上次领取失败">失败</span>';
     // 未知（含后端没下发该字段、以及将来新增的状态值）
     return '<span class="dim" title="今天还没领过，或拿不到领取结果 —— 这不等于「没得领」">—</span>';
