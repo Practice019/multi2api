@@ -504,7 +504,7 @@ type AccountView struct {
 //
 // 三种都返回 false，前端一律显示 `—`。**不区分**它们：对界面来说
 // "不知道什么时候过期"就是同一件事，把它们渲染成三种文案只会增加噪音。
-//（排障需要区分时看日志与 /admin/providers，不该占界面。）
+// （排障需要区分时看日志与 /admin/providers，不该占界面。）
 func (h *Handler) credentialExpiryOf(uid, providerID string) (int64, bool) {
 	if providerID == "" || h.cfg.Pool == nil {
 		return 0, false
@@ -679,7 +679,7 @@ func (h *Handler) credentialsOf(providerID string) (func(string) ([]gateway.Cred
 //
 // 没实现 `gateway.CredentialSecretLoader` 时返回 false —— 调用方回落成
 // `credentialsOf` + `SyncToDirFor`。对凭证就装在 `*auth.Auth` 里的上游
-//（workbuddy）那正是正确形态：池子自己保存的就是它的凭证。
+// （workbuddy）那正是正确形态：池子自己保存的就是它的凭证。
 //
 // 核心在这里依然不认识任何上游类型：secret 是不透明的 `any`，
 // 由 callers 原样交给池子保管（见 gateway.CredentialSecret 的注释）。

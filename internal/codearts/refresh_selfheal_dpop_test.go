@@ -53,12 +53,12 @@ import (
 
 // dpopBindingStub 一个会**校验 DPoP 公钥绑定**的假 STS 续期端点。
 type dpopBindingStub struct {
-	mu     sync.Mutex
-	used   map[string]bool              // 已被消费的 refresh_token
-	bindTo map[string]map[string]string // refresh_token → 期望的公钥 JWK
-	reqs   int                          // 到达端点的请求数
-	rejBind int                         // 因绑定不匹配被拒的次数（**必须为 0**）
-	rejUsed int                         // 因 token 已消费被拒的次数
+	mu      sync.Mutex
+	used    map[string]bool              // 已被消费的 refresh_token
+	bindTo  map[string]map[string]string // refresh_token → 期望的公钥 JWK
+	reqs    int                          // 到达端点的请求数
+	rejBind int                          // 因绑定不匹配被拒的次数（**必须为 0**）
+	rejUsed int                          // 因 token 已消费被拒的次数
 }
 
 func (st *dpopBindingStub) counts() (reqs, rejBind int) {
