@@ -19,6 +19,28 @@ const PORT = 9224;
 const URL_UNDER_TEST = process.env.ACC_TEST_URL || 'http://127.0.0.1:18099/ui';
 const PROFILE = require('os').tmpdir() + '/chrome-accprofile';  // 绝对路径（原为相对 cwd，跨目录执行会串台）
 
+// WORKBUDDY_HEADERS —— workbuddy 那 11 个表头，**硬编码**。
+//
+// # 为什么不从 `window.__wb2api__.DEFAULT_ACCT_COLUMNS` 取（那是循环论证）
+//
+// workbuddy 不实现 `AccountColumnsExt`，所以它渲染的列集来自**页面自己的**
+// 回落常量。若期望值也从这个常量派生，断言就退化成恒真：
+//
+//	把 'token' 改成 'token_expiry'、或干脆删掉一列
+//	→ want 跟着变 → 与本条及 td 数、unknown 三条一起全绿
+//
+// 实测确认过：这样改坏之后，当年那条 `ths === 11` 反而**会红** ——
+// 也就是说 T5 的改写在这一处比它替换掉的旧断言更弱。
+//
+// 所以期望值必须来自**用户的要求**（「workbuddy 直接复用现在的标题」），
+// 而不是来自被测页面。改文案要同时改这里和
+// `internal/server/webui_account_columns_test.go` 里那份 —— 两处都硬编码是
+// **故意的**：那正是"逐字不变"该有的摩擦。
+const WORKBUDDY_HEADERS = [
+  '上游', '昵称', 'UID', '额度', '状态', 'Token',
+  '今日签到', '成功', '熔断', '在途', '操作',
+];
+
 function get(url) {
   return new Promise((res, rej) => {
     http.get(url, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(d)); }).on('error', rej);
@@ -116,20 +138,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const W = window.__wb2api__;
       const m = W.manifest();
       const titleOf = id => (W.ACCT_COLUMN_DEFS[id] || {}).title || null;
+      // workbuddy 那 11 个表头由 Node 侧**硬编码**注入（不从 W.DEFAULT_ACCT_COLUMNS 取）。
+      const HARDCODED = ${JSON.stringify(WORKBUDDY_HEADERS)};
       const out = [];
       Array.from(document.querySelectorAll('#accts > section.acctgroup')).forEach(s => {
         const pid = s.dataset.acctgroup;
         const info = m.providers.find(p => p.id === pid);
-        const rawDeclared = (info && Array.isArray(info.accounts_columns) && info.accounts_columns.length)
-          ? info.accounts_columns : W.DEFAULT_ACCT_COLUMNS;
+        // 自报了列集（codearts）→ 用 manifest 当期望（"manifest ↔ 渲染一致"才是真契约）
+        // 没自报（workbuddy）→ 用硬编码的 11 列当期望
+        const declared = (info && Array.isArray(info.accounts_columns) && info.accounts_columns.length)
+          ? info.accounts_columns : null;
         // 期望：把**认识的**列翻成标题；同时记下有无未知列
-        const unknown = rawDeclared.filter(id => !W.ACCT_COLUMN_DEFS[id]);
-        const want = rawDeclared.map(titleOf).filter(Boolean);
+        const unknown = declared ? declared.filter(id => !W.ACCT_COLUMN_DEFS[id]) : [];
+        const want = declared ? declared.map(titleOf).filter(Boolean) : HARDCODED;
         const got = Array.from(s.querySelectorAll('table > thead th')).map(th => th.textContent.trim());
         // 每个数据行的 td 数（用来交叉校验"表头跳了、单元格没跳"）
         const rowTds = Array.from(s.querySelectorAll('table > tbody > tr.acctrow'))
           .map(r => r.children.length);
-        out.push({ pid, want, got, rawLen: rawDeclared.length, unknown, rowTds });
+        out.push({ pid, want, got, rawLen: declared ? declared.length : null,
+                   selfReported: !!declared, unknown, rowTds });
       });
       return JSON.stringify(out);
     })()`));
@@ -141,6 +168,29 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     });
     ok(colBad.length === 0, '每个上游的表头都等于它自报的列集（顺序也算）' +
       (colBad.length ? ' —— ' + JSON.stringify(colBad) : ''));
+
+    // ---- 上游**没自报**列集时（workbuddy）：表头必须逐字等于硬编码的 11 列 ----
+    //
+    // 上面那条对"自报列集"的上游是 manifest ↔ 渲染一致性；对没自报的上游，
+    // 期望值必须来自本文件的 WORKBUDDY_HEADERS（用户要求），不能来自页面常量。
+    const notReported = colCheck.filter(c => !c.selfReported);
+    ok(notReported.length >= 1,
+      '存在"未自报列集"的上游（workbuddy 走回落）—— 否则下面这条空转（实际 ' +
+      notReported.length + ' 个）');
+    const hardBad = notReported.filter(c =>
+      JSON.stringify(c.got) !== JSON.stringify(WORKBUDDY_HEADERS));
+    ok(hardBad.length === 0,
+      '未自报列集的上游渲染出**逐字**等于硬编码的 11 列表头' +
+      (hardBad.length ? ' —— ' + JSON.stringify(hardBad.map(c => ({ p: c.pid, got: c.got }))) : ''));
+
+    // ---- rawLen 的交叉校验：自报几列就必须渲染几列 ----
+    //
+    // `unknown` 那条只覆盖"前端不认识这个 id"；它覆盖不了"认识但被
+    // acctColumnsFor 静默漏掉"。长度比对是独立的一面。
+    const rawLenBad = colCheck.filter(c => c.selfReported && c.got.length !== c.rawLen);
+    ok(rawLenBad.length === 0,
+      '自报列集的长度 == 渲染出的列数（有列被静默丢掉会在这里红）' +
+      (rawLenBad.length ? ' —— ' + JSON.stringify(rawLenBad.map(c => ({ p: c.pid, rawLen: c.rawLen, got: c.got.length }))) : ''));
 
     // ---- 交叉校验：表头跳过的列，数据行也必须跳（评审发现的洞）----
     //
