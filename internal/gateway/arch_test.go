@@ -247,6 +247,18 @@ func TestDiscoveryFindsKnownUpstreams(t *testing.T) {
 	if !found["codearts"] {
 		t.Error("internal/codearts 必须被推导出来")
 	}
+	// Loomy 是第三个上游，也是"轻上游"的实测对象（见 internal/loomy 的包注释）。
+	//
+	// # 为什么它值得单独断言（而不是"多一个少一个无所谓"）
+	//
+	// 判据 1 声称"加一个上游 = 加一个目录 + 实现接口 + 配置加一段，核心零改动"。
+	// 那条判据只有在**上游真的被推导出来**时才有意义 —— 一个不被发现的包
+	// 既不受 TestUpstreamsDoNotDependOnCore 约束，也不受核心反向依赖检查。
+	// 所以这里钉住它必须出现在发现结果里：改名、去掉 gateway 依赖、
+	// 或把它塞进任何豁免列表，都会立刻红。
+	if !found["loomy"] {
+		t.Error("internal/loomy 必须被推导出来（它是判据 1 的第三个实测对象）")
+	}
 }
 
 // ── 已废弃：基于源码字面串的上游判定 ──────────────────────────────

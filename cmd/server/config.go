@@ -13,6 +13,7 @@ import (
 
 	"workbuddy2api/internal/clientlogin"
 	"workbuddy2api/internal/codearts"
+	"workbuddy2api/internal/loomy"
 	"workbuddy2api/internal/prompt"
 )
 
@@ -337,6 +338,53 @@ type Config struct {
 		OAuthSTS string `json:"oauth_sts"`
 	} `json:"codearts"`
 
+	// Loomy 第三个上游（讯飞 Loomy 桌面客户端的模型服务）的配置。
+	//
+	// # 向后兼容（与 codearts 同一条硬要求）
+	//
+	// 本段**整个缺席**时行为与之前**逐字节一致**：不注册 loomy Provider、
+	// 不加载任何凭证、默认上游仍是 workbuddy。
+	//
+	// 理由与 codearts 那段相同：现有部署的 config.json 里没有这一段，
+	// 若缺省即启用，它们会突然多出一个上游（而 loomy 的凭证默认在
+	// `auths/loomy/`，通常是空的 —— 表现为"多了一个空上游"）。
+	//
+	// 因此启用条件是**显式**的：loomy.enabled = true。
+	Loomy struct {
+		// Enabled 是否启用 loomy 上游。**缺省 false**（与"段缺席"等价）。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/loomy`。
+		//
+		// # 为什么 loomy 默认**不**复用顶层 auth_dir（与 codearts 不同）
+		//
+		// codearts 的默认是"复用顶层目录"，因为它按 `codearts*.json` 前缀扫，
+		// 与 workbuddy 的 `workbuddy-*.json` 靠前缀区分，可以安全共处。
+		//
+		// 而 loomy 的凭证形态（只有一个 session 字段）与 workbuddy 的
+		// 结构完全不同，两者混在一个目录里时**靠前缀区分仍然成立**，
+		// 但"用户手抄一份 session 存成 auths/session.json"这种操作会很容易
+		// 落到一个两边都扫不到的命名上 —— 于是"明明放了文件却读不到"。
+		// 按上游分子目录（auths/loomy/）把这个歧义直接消除，
+		// 也与本仓库已经形成的约定一致（正常化时两个上游都已在子目录里）。
+		AuthDir string `json:"auth_dir"`
+		// BaseURL 上游基址。留空则用 loomy.DefaultBaseURL
+		//（https://loomyad.xunfei.cn/api/v1，注意已含 /api/v1）。
+		//
+		// # 为什么它是可配的（而不是写死在包里）
+		//
+		// 两条现实理由：
+		//	· 上游换域名/加区域时，改配置即可，不必改代码重编译；
+		//	· 它让 hermetic 测试与本地假上游成为可能 —— 不必为了测一条
+		//	  转发链路去连真上游。
+		BaseURL string `json:"base_url"`
+		// PoolAccounts 是否把 loomy 账号并入核心账号池（默认 true）。
+		//
+		// 语义与 codearts.pool_accounts 完全一致（那段的长注释同样适用）：
+		// 不并入就"永远选不到 loomy 账号"。默认 true —— 已经显式写
+		// loomy.enabled=true 的部署，意图就是"用起来"。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"loomy"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -387,6 +435,18 @@ type Config struct {
 	// CodeartsEnabled 为 false 时不会被读到。
 	CodeartsOAuthPortal string `json:"-"`
 	CodeartsOAuthSTS    string `json:"-"`
+
+	// Loomy 解析后（供 main 直接取用）。
+	//
+	// LoomyEnabled 为 false 时下面三个字段无意义：不注册上游、不加载凭证。
+	LoomyEnabled bool `json:"-"`
+	// LoomyAuthDir 已填好默认值 `<顶层 auth_dir>/loomy`（见 normalize）。
+	LoomyAuthDir string `json:"-"`
+	// LoomyBaseURL 已填好默认值 loomy.DefaultBaseURL，main 可直接取用。
+	LoomyBaseURL string `json:"-"`
+	// LoomyPoolAccounts 是否把 loomy 账号并入核心账号池（见 Loomy.PoolAccounts）。
+	// LoomyEnabled 为 false 时恒为 false。
+	LoomyPoolAccounts bool `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -725,6 +785,34 @@ func (c *Config) normalize() error {
 	if c.CodeartsOAuthSTS == "" {
 		c.CodeartsOAuthSTS = codearts.DefaultSTSBase
 	}
+
+	// ---- 第三个上游：Loomy ----
+	//
+	// 与 codearts 同一套判据（三段式：启用 / 目录 / 并池），但**没有间隔**一项 ——
+	// loomy 没有任何要定时做的事（无签到、无续期、无活动），
+	// 所以这里刻意不引入 refresh_interval_seconds：多一个没有语义的旋钮，
+	// 只会让配置表看起来比实际能力大。
+	c.LoomyEnabled = c.Loomy.Enabled
+	c.LoomyAuthDir = c.Loomy.AuthDir
+	if c.LoomyAuthDir == "" {
+		// 缺省落到 `<auth_dir>/loomy`。
+		//
+		// ⚠ 这里取的 c.AuthDir 是**已经被改成 workbuddy 子目录之后**的值吗？
+		// 不是 —— 上面第 749 行把 c.AuthDir 改写成了 workbuddy 子目录，
+		// 所以必须用 AuthsBase（那个字段保存的才是配置里的原值）。
+		// 用错会得到 `auths/workbuddy/loomy` 这种"一个上游的目录长在另一个
+		// 上游里面"的路径，而它在功能上**能工作**（读得到），只是语义错乱 ——
+		// 属于那种不报错但会让人困惑很久的错。
+		c.LoomyAuthDir = filepath.Join(c.AuthsBase, "loomy")
+	}
+	// 基址缺省用包里的常量（**同源**，不写第二份字面量）。
+	// 两处各写一份迟早漂移，而漂移的表现是"改了一处却还在打旧域名"。
+	c.LoomyBaseURL = c.Loomy.BaseURL
+	if strings.TrimSpace(c.LoomyBaseURL) == "" {
+		c.LoomyBaseURL = loomy.DefaultBaseURL
+	}
+	// 并入账号池默认开；未启用时恒 false（不注册的上游不该在池里留痕迹）。
+	c.LoomyPoolAccounts = c.LoomyEnabled && boolOr(c.Loomy.PoolAccounts, true)
 	return nil
 }
 

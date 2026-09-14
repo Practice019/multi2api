@@ -18,6 +18,7 @@ import (
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/loomy"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
@@ -314,8 +315,6 @@ func main() {
 		}
 	}
 
-	log.Printf("已注册上游: %v", registry.IDs())
-
 	// ---- 把 codearts 的账号并入核心账号池（Task 6）----
 	//
 	// # 为什么必须做这件事
@@ -347,6 +346,63 @@ func main() {
 	} else if cb != nil {
 		log.Printf("codearts: 未并入账号池（codearts.pool_accounts=false），只能通过其管理端点使用")
 	}
+
+	// ---- 第三个上游：Loomy（判据 1 的第二次实测）----
+	//
+	// # 这一段的长度本身就是结论
+	//
+	// codearts 那一段（上面）要处理一次性 refresh_token、DPoP 私钥、
+	// 单一所有者 store、后台续期、残留备份提示 —— 三十多行。
+	// loomy 这一段只有注册 + 并池两件事，因为它**没有会变的凭证**：
+	// 一个 session 字符串，无 TTL、无 refresh token。
+	//
+	// 如果加第三个上游需要改核心，说明 gateway 那条接缝漏了；
+	// 这里再次确认：核心包一行未动。
+	//
+	// 注册顺序仍然是 workbuddy 在前 → registry.First() 是 workbuddy →
+	// "裸模型名走谁"与之前完全一致。loomy 只在显式配置或
+	// "loomy/模型名" 前缀时才被用到。
+	var lm *loomy.Provider
+	if cfg.LoomyEnabled {
+		lm = loomy.NewWithConfig(loomy.Config{
+			AuthDir: cfg.LoomyAuthDir,
+			BaseURL: cfg.LoomyBaseURL,
+		})
+		if err := registry.Register(lm); err != nil {
+			log.Fatalf("注册 Loomy 上游失败: %v", err)
+		}
+		log.Printf("loomy: 已启用（凭证目录 %s，基址 %s）", cfg.LoomyAuthDir, cfg.LoomyBaseURL)
+	} else {
+		log.Printf("loomy: 未启用（config 里 loomy.enabled 缺省为 false）")
+		// 与 codearts 同一个提示（那段的长注释同样适用）：凭证在、上游却没开，
+		// 是最容易被读成"界面坏了"的一种状态 —— 明明看得见文件，池里却没有号。
+		if list, err := loomy.LoadDir(cfg.LoomyAuthDir); err == nil && len(list) > 0 {
+			log.Printf("loomy: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池；池中若残留旧账号，下一步对账会逐出",
+				cfg.LoomyAuthDir, len(list))
+		}
+	}
+
+	if lm != nil && cfg.LoomyPoolAccounts {
+		if n := syncLoomyAccounts(p, cfg.LoomyAuthDir); n > 0 {
+			log.Printf("loomy: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("loomy: 账号池中暂无账号（凭证目录 %s 里没有可用的 loomy*.json）", cfg.LoomyAuthDir)
+		}
+	} else if lm != nil {
+		log.Printf("loomy: 未并入账号池（loomy.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// "已注册上游"必须打在**所有**上游注册完之后。
+	//
+	// # 为什么（实测踩到过）
+	//
+	// 它原先在 codearts 之后、loomy 之前，于是日志打出
+	// `已注册上游: [workbuddy]` 而 loomy 其实已经启用并把账号并进了池子。
+	// 一行"看起来权威"的日志与事实不符，比不打印更糟 ——
+	// 排查的人会顺着它得出"loomy 没注册上"的错误结论，
+	// 然后去查一个根本不存在的注册失败。
+	log.Printf("已注册上游: %v", registry.IDs())
 
 	// 注册表建好后校正默认上游：它必须与"裸模型名走谁"的唯一权威一致。
 	// 正常情况下就是 workbuddy（先注册），这里取 First() 是为了让
