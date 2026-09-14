@@ -91,27 +91,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const healthz = c['/healthz'] || 0;
     ok(healthz <= 3, '/healthz 调用次数合理（' + healthz + '，顶栏没有自己发请求）');
 
-    console.log('\n[3] 表格三态助手可用且列数正确');
+    console.log('\n[3] 表格三态助手可用（账号池占位已改为块级）');
     const states = await evalJs(`(() => {
-      const out = {};
       const A = window.__wb2api__;
-      // 从行里反推 span
-      const span = (html) => {
-        const d = document.createElement('tbody');
+      const probe = (html) => {
+        const d = document.createElement('div');
         d.innerHTML = html;
-        let n = 0;
-        Array.from(d.querySelectorAll('td')).forEach(td => n += Number(td.getAttribute('colspan') || 1));
-        return n;
+        return {
+          text: (d.textContent || '').trim(),
+          hasColspan: !!d.querySelector('[colspan]'),
+          hasTr: !!d.querySelector('tr'),
+        };
       };
+      const L = probe(A.accountPlaceholder('加载中…'));
+      const E = probe(A.accountPlaceholder('boom', 'err'));
       return JSON.stringify({
-        loadingAcc: span(A.accountPlaceholder('加载中…')),
-        errorAcc: span(A.accountPlaceholder('boom','err')),
+        loadingText: L.text, errorText: E.text,
+        loadingAccHasText: L.text.length > 0,
+        errorAccHasText: E.text.length > 0,
+        hasColspan: L.hasColspan || E.hasColspan,
       });
     })()`);
     const s = JSON.parse(states);
     console.log('    ' + JSON.stringify(s));
-    ok(s.loadingAcc === 11, '账号表加载态占满 11 列（实际 ' + s.loadingAcc + '）');
-    ok(s.errorAcc === 11, '账号表错误态占满 11 列（实际 ' + s.errorAcc + '）');
+    // ⚠ 这里原来是「账号表加载态/错误态**占满 11 列**」。
+    //
+    // 拆成每上游一张表之后 `accountPlaceholder` 不再是 `<tr><td colspan=N>`：
+    // `#accts` 是 <div> 不是 <tbody>，往 <div> 里塞 <tr> 会被解析器丢弃 ——
+    // 而那正是最需要它出现的时刻（接口挂了的时候）。所以占位改成了块级元素。
+    //
+    // 于是"占满几列"这个判据**不再适用**（它不属于任何一张表）。
+    // 改成断言它**真的渲染出文字**、且**不带 colspan/tr**（带了说明又退回了旧形态 ——
+    // 那种形态在 <div> 容器里会被静默丢掉）。
+    ok(s.loadingAccHasText, '加载态占位有文字（实际 ' + JSON.stringify(s.loadingText) + '）');
+    ok(s.errorAccHasText, '错误态占位有文字（实际 ' + JSON.stringify(s.errorText) + '）');
+    ok(!s.hasColspan, '占位不再依赖 colspan（#accts 是 div，colspan 没有意义）');
 
     console.log('\n[4] 每张表的三态都与表头列数一致');
     const tableCheck = await evalJs(`(() => {

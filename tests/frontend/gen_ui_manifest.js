@@ -149,6 +149,27 @@ console.log('\n[4] 表格 colspan 不出现在渲染函数里的裸数字（防 
 //
 // 完全禁止 colspan 不现实（HTML 里确实需要），但要求**同一个文件里
 // 每个表的 colspan 与它的表头列数一致**。这里做静态近似：
+// ⚠ 扫描必须跑在**剥过注释**的文本上 —— 这是本套件踩过的一个真坑。
+//
+// 注释里出现 `<table>` 这种字面量是完全正常的（本项目注释写得很长，
+// 会拿 `<table>`、`<tr>` 当例子讲结构）。而 `/<table[^>]*>([\s\S]*?)<\/table>/`
+// 会**从注释里的那个 `<table>` 开始**匹配，一路吃到后文真正的 `</table>`，
+// 于是把一整段注释当成了"一张表" —— 实测（2026-09-14）：
+// 注释里那句「一个 <table>，不能嵌套 div」被当成一张 0 列的表，
+// 而它后面恰好跟着真正的动态表，两者被合并，得出一张 0 列的幽灵表。
+//
+// CRLF 也必须先归一化：行尾是 `\r` 时 `\/\/.*$` 匹配不上，剥注释会变成空操作
+//（这条是 audit_dead_buttons.js 已经吃过一次的教训，这里照抄它的做法）。
+function stripComments(s) {
+  const lf = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  return lf
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map(l => l.replace(/\/\/.*$/, ''))
+    .join('\n');
+}
+
 // 抓出 HTML 里每个 <table>...</table>，数它的 <th>，再检查该表所在
 // section 内出现的 colspan 是否 <= 表头列数。
 function tablesWithHeaders(src) {
@@ -162,12 +183,51 @@ function tablesWithHeaders(src) {
   }
   return out;
 }
-const tables = tablesWithHeaders(html);
+// 表格扫描用剥注释后的文本；而 `<th>`/`colspan` 的字面量统计仍用原文
+//（下面那些 matchAll 是在数**真正的字面量**，注释里的不算 —— 见各自的注释）。
+const codeHtml = stripComments(html);
+const tables = tablesWithHeaders(codeHtml);
 ok(tables.length > 0, '至少解析到一个表格（' + tables.length + ' 个）');
 
 // 表头列数必须是已知的合理值（防止解析失败被当成"没问题"）
+//
+// ⚠ 账号池那张表是**动态生成**的（`<thead>` 由 `cols.map(acctThHTML)` 拼出来），
+// 所以它的静态 `<th>` 数量是 **0** —— 那不是"解析失败"，是"列数由运行期决定"。
+// 把它一并按 >=3 判会得到一个**永远红**的假警报，而假警报的代价是
+// 下一个人干脆把这段删掉 —— 那才是真正的守卫丢失。
+//
+// 所以：静态列数 >0 的表按区间判；0 列的表必须能证明它"由列集生成"。
+let zeroColSeen = 0;
 for (const t of tables) {
+  if (t.cols === 0) {
+    zeroColSeen++;
+    // ⚠ 必须切 `codeHtml`，不能切 `html` —— t.start 是**剥注释后**的偏移，
+    // 拿去索引原文会切到完全不相干的区域（原文比剥后长 11 万字符）。
+    // 第一版就是切错了对象，导致断言永远红。
+    const head = codeHtml.slice(t.start, t.start + 120);
+    ok(/class="accttable"/.test(head),
+      '0 列的表只能是账号池那张动态表（实际头部 ' + JSON.stringify(head.slice(0, 60)) + '）');
+    continue;
+  }
   ok(t.cols >= 3 && t.cols <= 20, `表格列数在合理区间（实际 ${t.cols}）`);
+}
+ok(zeroColSeen <= 1, '最多只有一张动态表（实际 ' + zeroColSeen + '）');
+
+// ⚠ 账号池的表**不在静态 HTML 里**了（拆成"每上游一张表"后由 JS 生成），
+// 所以上面的静态扫描**看不到它** —— 这正是"守卫随重构静默变弱"的形态：
+// 旧版这里靠静态那张表的 11 列兜底，现在那条兜底消失了，而扫描**照样绿**。
+//
+// 补一条针对动态表的判据：账号池的表头必须由**列集**生成，
+// 不许写死列数或列名。判据落在源码文本上（这是静态套件，跑不了浏览器）。
+{
+  const dyn = html.match(/<table class="accttable">[\s\S]{0,200}/);
+  ok(!!dyn, '账号池的动态表仍在源码里（找不到说明表结构又变了，本节的判据需要同步）');
+  // 表头必须由 cols.map(...) 生成 —— 写死一串 <th> 会让"每上游不同列集"失效
+  ok(/cols\.map\([^)]*acctThHTML/.test(html),
+    '账号池表头由列集 `cols.map(acctThHTML)` 生成（写死 <th> 会让每上游不同列集失效）');
+  // 且不许出现写死的列数
+  ok(!/ACCT_COLS\s*=\s*11\b/.test(html),
+    'ACCT_COLS 不再写死 11（它已收窄为"默认列集长度"，改回常量会让 codearts 的占位行跨错列数）');
 }
 
 // 全局 colspan 与列数的匹配检查：每个 colspan 值都必须能在**某个**表格的列数里找到

@@ -256,10 +256,13 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
     //     （没有页内登录流程的上游**不该**有添加按钮 —— 那是个假按钮）
     const grp = JSON.parse(await ev(`JSON.stringify((function(){
       var out = { groups: 0, reload: 0, add: [], addProviders: [], groupsWithAdd: [] };
-      document.querySelectorAll('#accts tr.grouprow').forEach(function(tr){
+      // ⚠ 拆成"每上游一张表"之后，分组标题是 <section class="acctgroup"> > .ghead，
+      // 不再是扁平表里的 <tr class="grouprow">。判据（每个分区都有重载按钮、
+      // 添加按钮只出现在支持页内登录的上游）一个字没变，只是选择器跟着结构走。
+      document.querySelectorAll('#accts > section.acctgroup').forEach(function(sec){
         out.groups++;
-        if (tr.querySelector('button[data-greload]')) out.reload++;
-        var a = tr.querySelector('button[data-gadd]');
+        if (sec.querySelector('button[data-greload]')) out.reload++;
+        var a = sec.querySelector('button[data-gadd]');
         if (a) { out.groupsWithAdd.push(a.dataset.gadd); out.addProviders.push(a.dataset.gadd); }
       });
       out.add = Array.from(document.querySelectorAll('#accts button[data-gadd]')).map(function(b){ return b.dataset.gadd; });
@@ -298,25 +301,19 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
     const r2 = JSON.parse(await ev(`JSON.stringify((function(){
       var W = window.__wb2api__;
       var want = W.providerRegistryIds();          // manifest 的上游全集
-      var seen = [];                               // 账号池实际渲染出来的分组
-      document.querySelectorAll('#accts tr.grouprow').forEach(function(tr){
-        seen.push(tr.dataset.acctgroup);
-      });
-      // 每个分组自己的账号行数（数到下一个分组行为止）
+      var secs = Array.prototype.slice.call(document.querySelectorAll('#accts > section.acctgroup'));
+      var seen = secs.map(function(s){ return s.dataset.acctgroup; });
+      // 每个分区自己的账号行数 —— 现在是**结构**（section > table > tbody），
+      // 不再靠"往后遍历兄弟节点、遇到下一个分组行就停"那种扁平表的补丁。
       var counts = {};
-      document.querySelectorAll('#accts tr.grouprow').forEach(function(tr){
-        var n = 0;
-        for (var e = tr.nextElementSibling; e; e = e.nextElementSibling) {
-          if (e.classList.contains('grouprow')) break;
-          if (e.classList.contains('acctrow')) n++;
-        }
-        counts[tr.dataset.acctgroup] = n;
+      secs.forEach(function(s){
+        counts[s.dataset.acctgroup] = s.querySelectorAll('table > tbody > tr.acctrow').length;
       });
       // 空组（0 账号）的自我解释文案
       var notes = {};
-      document.querySelectorAll('#accts tr.grouprow').forEach(function(tr){
-        var f = tr.querySelector('.gfolded');
-        notes[tr.dataset.acctgroup] = f ? f.textContent.trim() : '';
+      secs.forEach(function(s){
+        var f = s.querySelector('.gfolded-hint');
+        notes[s.dataset.acctgroup] = f ? f.textContent.trim() : '';
       });
       return { want: want, seen: seen, counts: counts, notes: notes };
     })())`));
@@ -366,9 +363,9 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
         var html = document.getElementById('accts').innerHTML;
         return JSON.stringify({
           hasPlaceholder: /账号池为空/.test(html),
-          groupCount: document.querySelectorAll('#accts tr.grouprow').length,
-          providers: Array.prototype.slice.call(document.querySelectorAll('#accts tr.grouprow'))
-                       .map(function(tr){ return tr.dataset.acctgroup; }),
+          groupCount: document.querySelectorAll('#accts > section.acctgroup').length,
+          providers: Array.prototype.slice.call(document.querySelectorAll('#accts > section.acctgroup'))
+                       .map(function(s){ return s.dataset.acctgroup; }),
         });
       } catch (e) { return JSON.stringify({ error: e.message }); }
     })()`);
@@ -406,17 +403,14 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
     // 找一个**有账号行**的分组来测（空组没有行可隐藏，测不出折叠）
     const target = await ev(`(function(){
       var out = null;
-      document.querySelectorAll('#accts tr.grouprow').forEach(function(tr){
+      Array.prototype.slice.call(document.querySelectorAll('#accts > section.acctgroup')).forEach(function(s){
         if (out) return;
-        for (var e = tr.nextElementSibling; e; e = e.nextElementSibling) {
-          if (e.classList.contains('grouprow')) break;
-          if (e.classList.contains('acctrow')) { out = tr.dataset.acctgroup; return; }
-        }
+        if (s.querySelector('table > tbody > tr.acctrow')) out = s.dataset.acctgroup;
       });
       return out || '';
     })()`);
     console.log('  被测分组（有账号行的）: ' + JSON.stringify(target));
-    ok(!!target, '账号池里存在"分组行 + 至少一个账号行"的分组');
+    ok(!!target, '账号池里存在"分区 + 至少一个账号行"的分区');
 
     if (target) {
       // 重置成展开态（上一次运行可能留下了偏好）
@@ -424,48 +418,56 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
 
       const measure = async (pid) => JSON.parse(await ev(`JSON.stringify((function(){
         var T = ${JSON.stringify(target)};
-        var tr = document.querySelector('#accts tr.grouprow[data-acctgroup="' + T + '"]');
-        if (!tr) return { error: '找不到分组行 ' + T };
+        var sec = document.querySelector('#accts > section.acctgroup[data-acctgroup="' + T + '"]');
+        if (!sec) return { error: '找不到分区 ' + T };
         var rows = [];
-        for (var e = tr.nextElementSibling; e; e = e.nextElementSibling) {
-          if (e.classList.contains('grouprow')) break;
-          if (e.classList.contains('acctrow')) rows.push({ h: e.offsetHeight, disp: getComputedStyle(e).display });
-        }
-        var btn = tr.querySelector('button[data-atoggle]');
+        // ⚠ 折叠的实现变了：现在是**整张表** display:none
+        //（.acctgroup.collapsed > table），不再逐行写 display。
+        // 所以"真的不占高度了"这个可观测量落在**表**上 —— 判据的意图
+        //（不是只看 class，要量真实几何）**一个字没变**，只是量的对象换了。
+        var tb = sec.querySelector('table');
+        rows.push({ h: tb ? tb.offsetHeight : 0, disp: tb ? getComputedStyle(tb).display : 'none' });
+        // ⚠ 折叠后表 display:none → offsetHeight 为 0；
+        // hidden 数的是"行不可见"，现在整表一起隐藏，所以用同一判据表达。
+        // ⛔ 这段注释在**模板字符串内部**，所以不能出现反引号 —— 那会提前
+        //    终止字符串并让整个文件语法错误（实测踩到过）。
+        var btn = sec.querySelector('button[data-atoggle]');
+        var hiddenAll = rows.filter(function(r){ return r.disp === 'none' || r.h === 0; }).length;
+        var visibleAll = rows.filter(function(r){ return r.disp !== 'none' && r.h > 0; }).length;
         return {
-          collapsed: tr.classList.contains('collapsed'),
+          collapsed: sec.classList.contains('collapsed'),
           aria: btn ? btn.getAttribute('aria-expanded') : null,
           totalH: rows.reduce(function(a, r){ return a + r.h; }, 0),
-          hidden: rows.filter(function(r){ return r.disp === 'none' && r.h === 0; }).length,
-          visible: rows.filter(function(r){ return r.disp !== 'none' && r.h > 0; }).length,
+          hidden: hiddenAll,
+          visible: visibleAll,
           n: rows.length,
         };
       })())`));
 
       const before = await measure(target);
       console.log('  折叠前: ' + JSON.stringify(before));
-      ok(!before.error, '找得到被测分组行' + (before.error ? '（' + before.error + '）' : ''));
-      ok(before.n > 0, '该分组有 ' + before.n + ' 个账号行可折叠');
+      ok(!before.error, '找得到被测分区' + (before.error ? '（' + before.error + '）' : ''));
+      ok(before.n > 0, '该分区有可折叠的表');
       ok(before.visible === before.n && before.totalH > 0,
-        '展开态：全部 ' + before.n + ' 行都可见且有高度（合计 ' + before.totalH + 'px）');
+        '展开态：表可见且有高度（合计 ' + before.totalH + 'px）');
 
       // 点标题 → 折叠
-      await ev(`document.querySelector('#accts tr.grouprow[data-acctgroup="' + ${JSON.stringify(target)} + '"] button[data-atoggle]').click()`);
+      await ev(`document.querySelector('#accts > section.acctgroup[data-acctgroup="' + ${JSON.stringify(target)} + '"] button[data-atoggle]').click()`);
       await sleep(400);
       const after = await measure(target);
       console.log('  折叠后: ' + JSON.stringify(after));
 
       // ---- 关键断言：真的塌陷了（不是只改 class）----
-      ok(after.collapsed === true, '点标题后分组行带上了 collapsed');
+      ok(after.collapsed === true, '点标题后分区带上了 collapsed');
       ok(after.hidden === after.n,
-        '折叠后**全部** ' + after.n + ' 个账号行的 display 都变成 none（实际 ' + after.hidden + ' 个）');
+        '折叠后**整张表**的 display 变成 none（实际 ' + after.hidden + '/' + after.n + '）');
       ok(after.totalH === 0,
-        '折叠后这些行的**真实高度合计为 0**（实际 ' + after.totalH + 'px）—— ' +
+        '折叠后表的**真实高度为 0**（实际 ' + after.totalH + 'px）—— ' +
         '只改 class 而不隐藏的"假折叠"会在这里红');
       ok(after.aria === 'false', 'aria-expanded 同步为 false（实际 ' + JSON.stringify(after.aria) + '）');
 
       // 再点一次 → 展开
-      await ev(`document.querySelector('#accts tr.grouprow[data-acctgroup="' + ${JSON.stringify(target)} + '"] button[data-atoggle]').click()`);
+      await ev(`document.querySelector('#accts > section.acctgroup[data-acctgroup="' + ${JSON.stringify(target)} + '"] button[data-atoggle]').click()`);
       await sleep(400);
       const back = await measure(target);
       console.log('  再展开: ' + JSON.stringify(back));
@@ -475,7 +477,7 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
 
       // ---- 折叠状态持久化（localStorage，独立前缀）----
       const lsKey = await ev(`window.__wb2api__.LS_ACCTGROUP + '.' + ${JSON.stringify(target)}`);
-      await ev(`document.querySelector('#accts tr.grouprow[data-acctgroup="' + ${JSON.stringify(target)} + '"] button[data-atoggle]').click()`);
+      await ev(`document.querySelector('#accts > section.acctgroup[data-acctgroup="' + ${JSON.stringify(target)} + '"] button[data-atoggle]').click()`);
       await sleep(400);
       const lsVal = await ev(`localStorage.getItem(window.__wb2api__.LS_ACCTGROUP + '.' + ${JSON.stringify(target)})`);
       console.log('  localStorage: ' + lsKey + ' = ' + JSON.stringify(lsVal));
@@ -505,14 +507,15 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
       // 跨越分组边界。实测证据见 foster_parenting_probe.js。
       const others = JSON.parse(await ev(`JSON.stringify((function(){
         var out = [];
-        document.querySelectorAll('#accts tr.grouprow').forEach(function(tr){
-          if (tr.dataset.acctgroup === ${JSON.stringify(target)}) return;
-          var vis = 0, tot = 0;
-          for (var e = tr.nextElementSibling; e; e = e.nextElementSibling) {
-            if (e.classList.contains('grouprow')) break;
-            if (e.classList.contains('acctrow')) { tot++; if (getComputedStyle(e).display !== 'none') vis++; }
-          }
-          out.push({ p: tr.dataset.acctgroup, tot: tot, vis: vis, collapsed: tr.classList.contains('collapsed') });
+        // 「折叠不跨组」这条断言现在**更容易成立**了：分组边界是结构
+        //（section > table），不再是"扁平表里靠 DOM 顺序推断"。
+        // 判据本身一个字没改 —— 仍要量真实可见性，不能只看 class。
+        document.querySelectorAll('#accts > section.acctgroup').forEach(function(sec){
+          if (sec.dataset.acctgroup === ${JSON.stringify(target)}) return;
+          var tb = sec.querySelector('table');
+          var tbVisible = tb && getComputedStyle(tb).display !== 'none';
+          var tot = sec.querySelectorAll('table > tbody > tr.acctrow').length;
+          out.push({ p: sec.dataset.acctgroup, tot: tot, vis: tbVisible ? tot : 0, collapsed: sec.classList.contains('collapsed') });
         });
         return out;
       })())`));
@@ -520,7 +523,7 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
       for (const o of others) {
         ok(o.collapsed === false && o.vis === o.tot,
           '折叠 ' + target + ' **不影响** ' + o.p + '（它 ' + o.vis + '/' + o.tot + ' 行仍可见）—— ' +
-          '兄弟选择器会在这里跨组隐藏');
+          '跨组隐藏会在这里红');
       }
 
       // 收尾：把偏好清掉，不给下一次运行留状态
