@@ -1099,7 +1099,11 @@ let loginProvider = '';
     //   · 绝对时刻 → 排障时要跟日志对时刻
     // 与「请求日志」面板的处理一致（那里也是"上次执行 + 距今"两列）。
     let abs = '';
-    if (a.token_expire_at) {
+    // ⚠ 显式判 undefined/null，不用 `if (a.token_expire_at)` ——
+    // 后者会把**真实的 0**（1970-01-01，即"刚过期"）也当成"没有"吞掉。
+    // 后端是按指针语义下发的（未知 = 字段整个不出现），所以 0 只可能是真值。
+    // 同文件的 fmtTokenRemain / tokenPillClass 都是这个写法，这里对齐。
+    if (a.token_expire_at !== undefined && a.token_expire_at !== null) {
       const t = new Date(a.token_expire_at * 1000);
       if (!isNaN(t)) {
         abs = t.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit',
@@ -1124,13 +1128,14 @@ let loginProvider = '';
   // 那是确定的事实（领取动作就是我们发的）。
   //
   //	ok     → 已领取   （今天这次真的领到东西了）
-  //	skip   → 无可领   （点过，但一项都没领到）
+  //	skip   → 未领到   （点过，但一项都没领到）
   //	fail   → 失败     （带原因）
   //	缺字段 → —        （今天没点过 —— **不知道**，不是"没有"）
   //
-  // ⛔ 绝不允许把缺字段渲染成「未领取」/「未领完」。
-  //   那是在**断言**一件我们并不知道的事（上游那侧的状态我们看不到）。
-  //   测试 tests/frontend/accounts_e2e.js 对这两个词有全等断言。
+  // ⛔ 绝不允许把缺字段渲染成「未领取」/「未领完」，也**不许**把 skip
+  //   说成「无可领」—— "无可领"是在断言上游没东西可给，而我们只知道
+  //   自己没领到（原因可能是"今天已领完"，也可能是"资格不符"，分不清）。
+  //   测试 tests/frontend/accounts_e2e.js 对这几个词有黑名单断言。
   function welfareCellHTML(a) {
     const s = a.today_welfare;
     if (s === 'ok') return '<span class="pill ok">已领取</span>';
@@ -2294,11 +2299,33 @@ let loginProvider = '';
   //
   // 缺省（该上游没自报）= DEFAULT_ACCT_COLUMNS。
   // 这与"自报了一个空数组"是两件不同的事：后者是明确说"一列都不要"。
+  //
+  // # ⚠ 未知列 id 必须**在这里一次剔除**（评审发现的洞）
+  //
+  // 原先"跳过未知列"是**两处各自做**的：`acctThHTML` 遇到未知 id 返回 ''、
+  // `accountRow` 的 `cells[id]` 查不到就 filter 掉。两条路径互不知情 ——
+  // 它们**恰好**用同一套规则，所以本次实测 th/td 都是 7、配平侥幸成立。
+  //
+  // 那不是不变量，是巧合：只要有人给 `acctThHTML` 补一个占位分支
+  //（比如返回 `<th></th>`），th 就变 8 而 td 仍是 7，
+  // **整行错位**且没有任何东西保证会被发现。
+  //
+  // 所以"哪些列可见"只在这里判**一次**，thead 与 tbody 共用同一个数组 ——
+  // 结构上不可能出现"表头跳了、单元格没跳"。
   function acctColumnsFor(providerId) {
     const info = providerInfo(providerId);
-    const cols = info && Array.isArray(info.accounts_columns) ? info.accounts_columns : null;
-    if (!cols || !cols.length) return DEFAULT_ACCT_COLUMNS;
-    return cols;
+    const raw = info && Array.isArray(info.accounts_columns) ? info.accounts_columns : null;
+    // 未自报（undefined）→ 默认列集。
+    // 自报空数组 → **照做**（"我一列都不要"），不回落默认
+    //（后端 gateway.AccountColumnsExt 的注释把这两件事分得很清楚，
+    //  前端以前把 `[]` 也折叠成默认，与那份契约不符）。
+    if (!raw) return DEFAULT_ACCT_COLUMNS;
+    for (const id of raw) {
+      if (!ACCT_COLUMN_DEFS[id]) {
+        console.warn('账号池：未知的列 id ' + id + ' —— 已跳过该列（检查 manifest 与列注册表）');
+      }
+    }
+    return raw.filter((id) => !!ACCT_COLUMN_DEFS[id]);
   }
 
   // ACCT_COLS 保留为**默认列集**的列数。
@@ -2423,13 +2450,21 @@ let loginProvider = '';
   // 标题与 title 提示都取自列注册表 —— 上游只报**列 id**，
   // "这一列叫什么、鼠标悬停说什么"是前端的事实（见 ACCT_COLUMN_DEFS 的注释）。
   function acctThHTML(id) {
+    // ⚠ 这里**不再**自己处理未知 id —— 那件事已收在 acctColumnsFor 里做一次。
+    //
+    // 原先这里是"未知就返回 ''"，而 accountRow 那边是"未知就 filter 掉"：
+    // 两处各自跳过、互不知情。它们恰好规则相同，所以实测 th/td 能对上 ——
+    // 但那是**巧合不是不变量**：给这里补一个占位分支就会 th 多一格、
+    // 整行错位，而没有任何断言会必然发现。
+    //
+    // 现在传进来的 id 一定在注册表里（acctColumnsFor 已过滤）。
+    // 仍留一个兜底：真出现未登记 id 时**返回空表头**而不是抛异常 ——
+    // 一格渲染失败不该让整个账号面板白屏。但要打日志，不能静默。
     const d = ACCT_COLUMN_DEFS[id];
     if (!d) {
-      // 未知列 id（前后端契约漂移）：**跳过但不炸**。
-      // 与后端 accountColumnsOf 的日志是同一条链的两端：那边记"上游报了个没见过的 id"，
-      // 这边记"前端没有这个 id 的渲染器"。两边都留痕，才查得出是谁的锅。
-      console.warn('账号池：未知的列 id ' + id + ' —— 已跳过该列（检查 manifest 与列注册表）');
-      return '';
+      console.warn('账号池：acctThHTML 收到未登记的列 id ' + id +
+        ' —— 说明它没经过 acctColumnsFor 的过滤（调用点有漏）');
+      return '<th></th>';
     }
     const t = d.tip ? ` title="${esc(d.tip)}"` : '';
     return `<th${t}>${esc(d.title)}</th>`;
