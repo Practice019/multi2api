@@ -1,6 +1,7 @@
 {
   "listen": ":7863",
   "api_key": "your-api-key-here",
+  "service_name": "multi2api",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "server": {
