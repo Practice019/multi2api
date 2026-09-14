@@ -161,24 +161,37 @@ func TestLoginConfiguredTrueViaSMS(t *testing.T) {
 	t.Error("本机没有客户端目录时，只要有短信登录就必须 Configured=true（否则用户没有入口）")
 }
 
-// TestLoginConfiguredFalseWhenNoClient 本机没有客户端 → 不给按钮。
+// TestLoginConfiguredViaSMSWhenNoClientStore Configured 在本机没有客户端目录时仍为 true。
 //
-// 这条走的是**自动探测**那条路（配置为空）。为了不依赖运行测试的机器上
-// 有没有装 Loomy，这里用一个"探测必然失败"的方式：把配置指到空串
-// 且断言在**探测结果为空**时 Configured 为 false。
-// 若这台机器上真的装了 Loomy，这条断言会变成"探测到了" ——
-// 那也是一种正确行为，所以用条件断言而不是硬断言。
-func TestLoginConfiguredFalseWhenNoClient(t *testing.T) {
-	p := NewWithConfig(Config{})
-	dir, source, exists := p.clientStoreDirWithSource()
-	if source == "missing" {
-		if exists || p.Configured() {
-			t.Error("自动探测不到时不该 Configured")
-		}
-		return
+// # 为什么这与上一版断言相反（短信登录接入后的语义变更）
+//
+// 上一版这里断言"自动探测不到时不 Configured" —— 那是**短信登录接入之前**
+// 的语义（本机拾取是唯一路径，探测不到就没有入口）。
+// 接入后 `Configured() = 本机拾取可用 **或** 短信登录可用`，而短信登录的
+// 默认 key 是内嵌的，于是**任何部署都恒为 true** —— 这正是"任何部署都能
+// 加账号"那条要求的落地（见 login.go 的 Configured）。
+//
+// 这条不再依赖运行机器有没有装 Loomy：原写法在 Linux CI 上探测不到、
+// 在 Windows 上探测到，两边走不同分支 —— 那正是它上次通过本地验证却
+// 在 CI 变红的根因。现在显式构造"必然没有客户端目录"的配置，环境无关。
+func TestLoginConfiguredViaSMSWhenNoClientStore(t *testing.T) {
+	// 显式指向一个必然不存在的客户端目录：本机拾取不可用，
+	// 但仍必须 Configured=true（短信兜底）—— 否则用户没有添加账号入口。
+	p := NewWithConfig(Config{ClientDataDir: filepath.Join(t.TempDir(), "missing")})
+	if !p.Configured() {
+		t.Error("客户端目录缺失时必须有短信登录兜底（Configured=true），否则用户没有入口")
 	}
-	if !exists || !p.Configured() {
-		t.Errorf("探测到了 %s（source=%s）却报告 Configured=false", dir, source)
+	// 空配置（自动探测）同样恒为 true。
+	if !NewWithConfig(Config{}).Configured() {
+		t.Error("空配置下 Configured 也应为 true（短信默认可用）")
+	}
+	// 反向：两条路径都不可用时才是 false（不放假按钮）。
+	// ⚠ 不能用 NewSMSClient("",...) —— 它会把空字段落回内嵌默认值；
+	//    直接注入零值 SMSClient（Configured() 为 false）才能关掉短信这条路。
+	p3 := NewWithConfig(Config{ClientDataDir: filepath.Join(t.TempDir(), "missing")})
+	p3.sms = &SMSClient{}
+	if p3.Configured() {
+		t.Error("本机拾取与短信都不可用时 Configured 应为 false（不放假按钮）")
 	}
 }
 

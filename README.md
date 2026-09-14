@@ -35,6 +35,16 @@
 | 🖥️ **管理控制台** | `/ui` 单页：仪表盘 / 账号池 / 模型目录 / 对话测试 / 请求日志 / 设置 / 上游专属标签页 |
 | 🔑 **安全默认** | `api_key` 鉴权、密钥只在本机注入、昵称自动打码、凭证按上游分子目录存放 |
 
+## 📸 界面预览
+
+| 仪表盘 | 账号池 |
+|---|---|
+| ![仪表盘](assets/shots/dash.png) | ![账号池](assets/shots/accounts.png) |
+
+| Loomy 新手任务 | Loomy 邀请码 | 请求日志 |
+|---|---|---|
+| ![新手任务](assets/shots/loomy-tasks.png) | ![邀请码](assets/shots/loomy-invite.png) | ![请求日志](assets/shots/logs.png) |
+
 ## 🐾 已接入上游
 
 | 上游 | 账号形态 | 控制台能力 |
@@ -106,16 +116,6 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 - **Loomy 专属标签页**：新手任务（一键完成单账号 / 全部账号）、邀请码（绑定别人的码、
   查看自己生成的码，含 active/exhausted 状态）。
 - **模型 / 对话测试 / 请求日志 / 设置**：日常排障所需都在页面上。
-
-## 📸 界面预览
-
-| 仪表盘 | 账号池 |
-|---|---|
-| ![仪表盘](assets/shots/dash.png) | ![账号池](assets/shots/accounts.png) |
-
-| Loomy 新手任务 | Loomy 邀请码 | 请求日志 |
-|---|---|---|
-| ![新手任务](assets/shots/loomy-tasks.png) | ![邀请码](assets/shots/loomy-invite.png) | ![请求日志](assets/shots/logs.png) |
 
 ## 🔌 API
 
