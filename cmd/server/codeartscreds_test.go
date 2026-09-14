@@ -2,7 +2,7 @@
 //
 // # 这些测试守的是什么（用户实测的 503 no_healthy_account）
 //
-// codearts 上游的 STS 凭证约 30 分钟过期，续期用的 refresh_token 是**一次性**的。
+// codearts 上游的 STS 凭证约 2 小时过期，续期用的 refresh_token 是**一次性**的。
 // 改造前，同一份 auths/codearts/*.json 在进程里被表示成**两个**对象：
 //
 //	池 secret 那份 ← 启动时 syncCodeartsAccounts 读一次（LoadDir）

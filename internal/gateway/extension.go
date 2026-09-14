@@ -102,7 +102,7 @@ type Job struct {
 // 为什么登录不做成通用实现：
 //
 //	workbuddy → OAuth device flow（申请链接 → 用户在浏览器授权 → 轮询取 token）
-//	codearts  → OAuth + DPoP（还要生成密钥对、签名请求、约 30 分钟凭证）
+//	codearts  → OAuth + DPoP（还要生成密钥对、签名请求、约 2 小时凭证）
 //
 // 交互步骤数都不同，无法用一个通用实现覆盖。
 // 但 **"/admin/login/start" 与 "/admin/login/poll" 这两个端点留在核心** ——

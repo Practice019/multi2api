@@ -236,7 +236,7 @@ func main() {
 		if stale, err := codearts.FindStaleBackups(cfg.CodeartsAuthDir); err == nil && len(stale) > 0 {
 			log.Printf("codearts: 发现 %d 个残留的续期备份（上次续期可能未完成）: %v", len(stale), stale)
 		}
-		// 后台主动续期：STS 只有约 30 分钟寿命，预热能消掉"空闲后首个请求"
+		// 后台主动续期：STS 只有约 2 小时寿命，预热能消掉"空闲后首个请求"
 		// 多付的那次续期往返。可用 refresh_interval_seconds<=0 关闭。
 		if cfg.CodeartsRefreshInterval > 0 {
 			cb.SetRefreshInterval(cfg.CodeartsRefreshInterval)
@@ -318,7 +318,7 @@ func main() {
 	//	/admin/ui/manifest 的 providers 只有 workbuddy、jobs 只有 2 条 ——
 	//	前端账号池里冒出一个 manifest 里没注册的上游分组；
 	//	更实害：这 2 个号永远选得到却没有上游能服务、也没有续期任务
-	//	（codearts 的 STS 只有约 30 分钟寿命），请求只会失败。
+	//	（codearts 的 STS 只有约 2 小时寿命），请求只会失败。
 	//
 	// 修法是在"知道本次注册了哪些上游"的这一刻对账一次：池里出现过、
 	// 但不在 registry 里的上游，从**池中**逐出。

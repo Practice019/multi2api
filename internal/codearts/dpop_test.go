@@ -189,7 +189,7 @@ func TestParseCredential(t *testing.T) {
 	}
 }
 
-// TestNeedsRefresh 校验 30 分钟短有效期下的续期判定。
+// TestNeedsRefresh 校验 2 小时短有效期下的续期判定。
 func TestNeedsRefresh(t *testing.T) {
 	// 已过期
 	expired := &Auth{ExpiresAt: 1}

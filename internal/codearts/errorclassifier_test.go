@@ -191,7 +191,7 @@ func TestClassifyNeverReturnsNoneForQuotaVariants(t *testing.T) {
 // # codearts 为什么根本没有 session dead 这个概念
 //
 // 它的凭证失效是 `ErrAuth`（401/403，securityToken 过期）——
-// **可以自动续期恢复**（STS 凭证仅约 30 分钟，401 是常见路径而非异常，
+// **可以自动续期恢复**（STS 凭证仅约 2 小时，401 是常见路径而非异常，
 // 见 client.go 的 MaxAuthRetry 与 credentialrefresher.go）。
 // 与 workbuddy 的"必须人工重登"是**完全不同的恢复路径**。
 //
@@ -249,7 +249,7 @@ func TestClassifyAuthIsNotSessionDead(t *testing.T) {
 		got := p.Classify(st, `{"error_msg":"securityToken expired"}`)
 		if got != gateway.ErrKindAuth {
 			t.Errorf("Classify(%d, ...) = %v，want auth。\n"+
-				"  codearts 的凭证失效是**可自动续期恢复**的（STS 约 30 分钟），\n"+
+				"  codearts 的凭证失效是**可自动续期恢复**的（STS 约 2 小时），\n"+
 				"  必须走 core 的\"只换号不罚\"分支，而不是永久禁用。", st, got)
 		}
 	}

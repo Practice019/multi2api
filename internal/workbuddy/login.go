@@ -4,7 +4,7 @@
 //
 // 添加账号是**上游专属**动作：workbuddy 是 OAuth 设备码
 // （申请链接 → 用户在浏览器授权 → 轮询取 token），
-// codearts 是 OAuth + DPoP（还要生成密钥对、签名请求、~30 分钟凭证）。
+// codearts 是 OAuth + DPoP（还要生成密钥对、签名请求、~2 小时凭证）。
 // 核心的 `gateway.LoginFlow` 是这条接缝的**通用形状**，
 // 本文件把本上游的具体实现适配到它。
 //

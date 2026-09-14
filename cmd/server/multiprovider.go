@@ -135,7 +135,7 @@ func codeartsWinners(list []*codearts.Auth) (picked []*codearts.Auth, uids []str
 //
 // 独立成函数是为了让判据可以被单测直接钉住：它就是"哪份胜出"的全部规则。
 func betterCodeartsCred(cand, cur *codearts.Auth) bool {
-	// 判据 1：更晚过期。STS 凭证只有约 30 分钟寿命，"哪份更晚过期"
+	// 判据 1：更晚过期。STS 凭证只有约 2 小时寿命，"哪份更晚过期"
 	// 几乎等价于"哪份还没被用过/刚续期过"。
 	if cand.ExpiresAt != cur.ExpiresAt {
 		return cand.ExpiresAt > cur.ExpiresAt
@@ -493,7 +493,7 @@ func (r registryRouter) Classify(id string, status int, body string) (gateway.Er
 // 出站循环用 `cfg.RefreshSkew`（默认 10m）替所有上游回答。而这是上游的事实：
 //
 //	workbuddy → token 寿命以小时计 → 10m
-//	codearts  → STS 仅约 30m     → 3m
+//	codearts  → STS 仅约 2h     → 3m
 //
 // 对 codearts，10m 的后果是**太早**：剩 8m 就被核心判为该刷，而 codearts 的
 // CredentialRefresher 内部没有自己的 skew 检查 → 真的去消费那个**一次性**的

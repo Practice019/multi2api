@@ -643,7 +643,7 @@ func (p *Pool) AddFor(provider string, a *auth.Auth, secret any) {
 // upsertSecretLocked 与 upsertLockedFor 同理，但同时装载/更新上游私有凭证。
 //
 // 与凭证标签不同，secret **每次同步都刷新**：它是会过期的运行态
-// （codearts 的 STS 只有 30 分钟寿命，刷新后要立刻让池子看到新值），
+// （codearts 的 STS 只有约 2 小时寿命，刷新后要立刻让池子看到新值），
 // 不刷新会让取号方一直拿着过期凭证。
 // 调用方必须已持有 p.mu。
 func (p *Pool) upsertSecretLocked(provider string, a *auth.Auth, secret any) (added bool) {

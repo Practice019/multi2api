@@ -152,7 +152,7 @@ type ProviderRouter interface {
 	// 回答了"多早算该刷" —— 而这是**上游的事实**：
 	//
 	//	workbuddy → access token 寿命以小时计，10m 窗口合理
-	//	codearts  → STS 凭证仅约 30m，它自己的窗口是 3m
+	//	codearts  → STS 凭证仅约 2h，它自己的窗口是 3m
 	//
 	// # 10m 对 codearts 的具体后果（不是"太晚"，是"太早"）
 	//

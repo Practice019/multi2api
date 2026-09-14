@@ -137,7 +137,7 @@ func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
 //
 //	workbuddy  ErrSessionDead → 必须人工重登（所以 core 会 Disable）
 //	codearts   ErrAuth        → RefreshToken 可自动恢复
-//	                            （STS 凭证仅约 30 分钟，401 是常见路径而非异常，
+//	                            （STS 凭证仅约 2 小时，401 是常见路径而非异常，
 //	                             见 client.go 的 MaxAuthRetry 重试逻辑与
 //	                             credentialrefresher.go）
 //

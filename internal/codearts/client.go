@@ -435,7 +435,7 @@ func (c *Client) ChatStreamWith(a *Auth, body []byte, extraHeaders map[string]st
 			resp.Body.Close()
 			kind := Classify(resp.StatusCode, string(raw))
 
-			// 凭证失效：自动续期后重试一次（STS 只有 30 分钟，这是常见路径而非异常）。
+			// 凭证失效：自动续期后重试一次（STS 只有约 2 小时，这是常见路径而非异常）。
 			if kind == ErrAuth && attempt < c.MaxAuthRetry {
 				if rerr := c.RefreshToken(a); rerr == nil {
 					log.Printf("codearts: 凭证失效已续期，重试 chat (uid=%s)", a.UID)

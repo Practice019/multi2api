@@ -67,7 +67,7 @@ func (a *Auth) LockRefresh()   { a.refreshMu.Lock() }
 func (a *Auth) UnlockRefresh() { a.refreshMu.Unlock() }
 
 // NeedsRefresh 报告凭证是否将在 within 内过期。
-// 注意：CodeArts 的 STS 凭证有效期**只有约 30 分钟**，
+// 注意：CodeArts 的 STS 凭证有效期**只有约 2 小时**，
 // 因此 within 必须显著小于该值（推荐 5 分钟），否则会出现
 // 「刚判定为新鲜，发出去已过期」的窗口。
 func (a *Auth) NeedsRefresh(within time.Duration) bool {

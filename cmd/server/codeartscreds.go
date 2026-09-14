@@ -2,7 +2,7 @@
 //
 // # 这个文件修的是什么（用户实测的 503 no_healthy_account）
 //
-// codearts 上游的 STS 凭证约 30 分钟过期，续期用的是**一次性** refresh_token
+// codearts 上游的 STS 凭证约 2 小时过期，续期用的是**一次性** refresh_token
 // （用一次即作废，服务端报 STS5.1806 "the refresh token has been used"）。
 //
 // 改造前，同一份 `auths/codearts/*.json` 在进程里被表示成**两个不同的对象**：

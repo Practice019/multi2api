@@ -864,7 +864,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 该不该刷由**上游自己**回答（失败冷却换号）。
 		//
 		// ⚠ 这里刻意**不是** `acct.NeedsRefresh(h.cfg.RefreshSkew)`：
-		// 核心的 10m 窗口对 codearts（STS 仅约 30m、自己的窗口 3m）是错的，
+		// 核心的 10m 窗口对 codearts（STS 仅约 2h、自己的窗口 3m）是错的，
 		// 且错的方向是"太早"—— 剩 8m 就被核心判为该刷，而 codearts 的
 		// CredentialRefresher 内部没有 skew 检查，于是真的去消费那个
 		// **一次性**的 refresh_token。判据必须与"怎么刷"同处一地，见
@@ -1010,7 +1010,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 // # ErrKindAuth 为什么走 default（只换号不罚）
 //
 // 它是 codearts 的凭证失效（401/403）。这类失效**可以由
-// RefreshCredential 恢复**（STS 凭证仅约 30 分钟，401 是常见路径而非异常，
+// RefreshCredential 恢复**（STS 凭证仅约 2 小时，401 是常见路径而非异常，
 // 见 codearts/client.go 的 MaxAuthRetry 与 credentialrefresher.go）。
 // 把它升级成 Disable 会把"一次 401"变成"永久禁用" —— 那正是本次要修的
 // 危害 ② 的另一半。保守方向是明确的：宁可多换一次号，也不能把可恢复的
@@ -1340,7 +1340,7 @@ func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct
 // 只有它为真才会走到上游的续期实现。而"多早算该刷"同样是**上游的事实**：
 //
 //	workbuddy → access token 寿命以小时计，10m 窗口合理
-//	codearts  → STS 凭证只有约 30m 寿命，它自己的 refreshSkew 是 3m
+//	codearts  → STS 凭证只有约 2h 寿命，它自己的 refreshSkew 是 3m
 //
 // 一个上游的 skew 被当成所有上游的 skew，后果是**两个方向的错**：
 //

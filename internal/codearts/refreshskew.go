@@ -6,7 +6,7 @@ package codearts
 // # 为什么必须由 codearts 回答，而不是核心的 RefreshSkew 配置
 //
 // 核心的 `cfg.RefreshSkew` 默认 **10 分钟**，而 codearts 的 STS 凭证
-// 寿命只有约 **30 分钟** —— 10m 窗口意味着"还剩三分之一寿命就去续期"。
+// 寿命只有约 **2 小时** —— 10m 窗口意味着"还剩十二分之一寿命就去续期"。
 //
 // 对 codearts 这不只是"太早"，而是**有代价的**：
 // refresh_token 是**一次性消费**的（用一次即作废，见 jobs.go 包注释与
