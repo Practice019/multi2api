@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"workbuddy2api/internal/loomy"
 )
 
 func TestDefault(t *testing.T) {
@@ -598,5 +600,107 @@ func TestCodeartsRefreshIntervalDefaults(t *testing.T) {
 	}
 	if c3.CodeartsRefreshInterval != 0 {
 		t.Errorf("未启用时不应解析出间隔，得到 %v", c3.CodeartsRefreshInterval)
+	}
+}
+
+// TestLoomyAbsentSectionIsDisabled 守住**向后兼容**：老 config 里没有 loomy 段时
+// 不得启用该上游。
+//
+// 与 codearts 那条同一条判据、同一个理由：现有部署的 config.json 里没有这一段，
+// 若"段缺席"被当成"用默认值启用"，它们升级后会突然多出一个上游
+// （而 loomy 的凭证目录通常是空的 —— 表现为"多了一个永远没号的空上游"）。
+func TestLoomyAbsentSectionIsDisabled(t *testing.T) {
+	dir := t.TempDir()
+
+	for _, tc := range []struct{ name, body string }{
+		{"老配置（完全没有 loomy 键）", `{"listen":":7863","auth_dir":"./auths"}`},
+		{"空配置", `{}`},
+		{"只配了 codearts（升级路径上最常见的形态）", `{"codearts":{"enabled":true}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := filepath.Join(dir, "c.json")
+			os.WriteFile(fp, []byte(tc.body), 0o600)
+			c, err := Load(fp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.LoomyEnabled {
+				t.Error("不应启用 loomy 上游（必须是显式 loomy.enabled=true）")
+			}
+			// 未启用时并池开关必须恒 false —— 不注册的上游不该在池里留痕迹
+			if c.LoomyPoolAccounts {
+				t.Error("未启用时 LoomyPoolAccounts 必须为 false")
+			}
+		})
+	}
+	if d := Default(); d.Loomy.Enabled {
+		t.Error("Default() 不应默认启用 loomy 上游")
+	}
+}
+
+// TestLoomyDefaults 未配的项要落到正确的默认值上。
+//
+// # 这里最容易错的一处（所以单独钉住）
+//
+// normalize 在解析 codearts 时会把 `c.AuthDir` **改写成 workbuddy 子目录**，
+// 而保存原值的是 `c.AuthsBase`。loomy 的默认目录必须基于 **AuthsBase** 拼：
+//
+//	对：filepath.Join(c.AuthsBase, "loomy") → ./myauths/loomy
+//	错：filepath.Join(c.AuthDir,  "loomy") → ./myauths/workbuddy/loomy
+//
+// 而错了**不会报错**：那个路径下确实能读能写（只要用户把凭证放那儿），
+// 只是语义错乱成"一个上游的目录长在另一个上游里面"。
+// 这种"能工作但错"的形态正是最该被测试钉住的一类。
+func TestLoomyDefaults(t *testing.T) {
+	dir := t.TempDir()
+
+	fp := filepath.Join(dir, "a.json")
+	os.WriteFile(fp, []byte(`{"auth_dir":"./myauths","loomy":{"enabled":true}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.LoomyEnabled {
+		t.Fatal("显式 enabled=true 未生效")
+	}
+	if want := filepath.Join("./myauths", "loomy"); c.LoomyAuthDir != want {
+		t.Errorf("loomy 的目录应是 %q，得到 %q\n"+
+			"（若得到 ./myauths/workbuddy/loomy，说明用了 c.AuthDir 而不是 c.AuthsBase —— "+
+			"功能上能跑，但语义错乱成「一个上游的目录长在另一个上游里面」）",
+			want, c.LoomyAuthDir)
+	}
+	// 基址必须与包里的常量同源（不写第二份字面量）
+	if c.LoomyBaseURL != loomy.DefaultBaseURL {
+		t.Errorf("缺省基址应是 loomy.DefaultBaseURL=%q，得到 %q",
+			loomy.DefaultBaseURL, c.LoomyBaseURL)
+	}
+	// 启用且未显式关 → 默认并入账号池
+	if !c.LoomyPoolAccounts {
+		t.Error("启用后默认应当并入账号池")
+	}
+
+	// 显式配了就原样用（不再拼子目录）：显式配置意味着"我知道凭证在哪"
+	fp2 := filepath.Join(dir, "b.json")
+	os.WriteFile(fp2, []byte(`{"auth_dir":"./myauths","loomy":{"enabled":true,"auth_dir":"./lm","base_url":"http://127.0.0.1:9/api/v1"}}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.LoomyAuthDir != "./lm" {
+		t.Errorf("显式 loomy.auth_dir 未生效，得到 %q", c2.LoomyAuthDir)
+	}
+	if c2.LoomyBaseURL != "http://127.0.0.1:9/api/v1" {
+		t.Errorf("显式 loomy.base_url 未生效，得到 %q", c2.LoomyBaseURL)
+	}
+
+	// 显式 pool_accounts=false → 不并池（"只想用管理端点"的退出口）
+	fp3 := filepath.Join(dir, "c.json")
+	os.WriteFile(fp3, []byte(`{"loomy":{"enabled":true,"pool_accounts":false}}`), 0o600)
+	c3, err := Load(fp3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.LoomyPoolAccounts {
+		t.Error("显式 pool_accounts=false 未生效")
 	}
 }
