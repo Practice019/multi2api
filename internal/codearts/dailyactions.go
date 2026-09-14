@@ -61,12 +61,24 @@ const DailyActionWelfare = "welfare"
 //
 // 用户的原话是"就是领取一下福利呗" —— 他要的是统一**入口位置与交互**，
 // 不是把文案也强行改成"签到"。
+// DailyActions codearts 的每日动作（gateway.DailyActionExt）。
+//
+// # 文案为什么是「签到」（用户本轮明确要求）
+//
+// 上一版这里写「领取福利」，理由是"按钮背后真的是福利中心的领取"。
+// 用户后来明确要求：codearts 的按钮文案改成「签到」（在他的概念里
+// codearts 的福利领取就是它的签到）。
+//
+// ⚠ 变的是**文案**（Label），**不是** ID（仍为 welfare）也不是端点
+// （/admin/welfare/claim）。ID 是协议：前端按它写 data-act、查端点表，
+// 两个上游的领取端点完全不同，共用一个 ID 会让跨上游时选错端点
+// （见 DailyActionWelfare 的注释）。概念统一由槽位承担，不由 ID 承担。
 func (p *Provider) DailyActions() []gateway.DailyAction {
 	return []gateway.DailyAction{
 		{
 			ID:     DailyActionWelfare,
-			Label:  "领取福利",
-			Title:  "领取该账号当前可领的全部福利",
+			Label:  "签到",
+			Title:  "领取该账号当前可领的全部福利（codearts 的签到）",
 			OneURL: "/admin/welfare/claim",
 			// AllURL 空 + Batch false：上游没有全量端点，如实报。
 		},

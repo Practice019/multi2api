@@ -17,6 +17,7 @@ func TestAccountColumnsVocabulary(t *testing.T) {
 	p := NewWithConfig(Config{})
 	got := p.AccountColumns()
 	want := []string{
+		gateway.AccountColProvider,
 		gateway.AccountColNickname,
 		gateway.AccountColUID,
 		gateway.AccountColQuota,
@@ -56,6 +57,40 @@ func TestAccountColumnsDoNotContainCheckin(t *testing.T) {
 			t.Error("codearts 的列里出现了 token —— 它的 AccessToken 恒空，" +
 				"应当用 token_expiry（走 CredentialExpiryExt）")
 		}
+	}
+}
+
+// TestAccountColumnsFirstIsProvider 钉住"首列与其他上游一致"。
+//
+// # 为什么这条单独写（而不是靠上面那条全等断言）
+//
+// 上面那条只钉住"codearts 自己这份列集长什么样"。它挡不住一个**跨上游**的
+// 回归：有人为了"清爽"把 provider 从**默认列集**（workbuddy 走的）
+// `DefaultAccountColumns()` 里删掉 —— 那时 codearts 这份仍然含有 provider，
+// 上一条测试照样绿，而**两张表又不统一了**。
+//
+// 用户的诉求原文是「和其他上游的表格统一一下第一个列」，
+// 所以这条断言比较的正是**两份列集的首列**，而不是某一份的内容。
+func TestAccountColumnsFirstIsProvider(t *testing.T) {
+	p := NewWithConfig(Config{})
+
+	got := p.AccountColumns()
+	if len(got) == 0 {
+		t.Fatal("列集为空")
+	}
+	def := gateway.DefaultAccountColumns()
+	if len(def) == 0 {
+		t.Fatal("默认列集为空")
+	}
+	// 默认列集就是**未自报列的上游**（workbuddy）的表头契约 ——
+	// 见 gateway.DefaultAccountColumns 的注释。
+	if got[0] != def[0] {
+		t.Errorf("codearts 首列 = %q，而默认列集（workbuddy）首列 = %q —— "+
+			"两张表的第一个格子必须描述同一件事，否则横向看过去对不齐",
+			got[0], def[0])
+	}
+	if got[0] != gateway.AccountColProvider {
+		t.Errorf("首列应当是 %q，得到 %q", gateway.AccountColProvider, got[0])
 	}
 }
 

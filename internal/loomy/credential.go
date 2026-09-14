@@ -306,11 +306,18 @@ func sanitizeFilePart(s string) string {
 }
 
 // shortUID 取 UID 前 8 位供日志与展示名使用（与仓库其它地方的口径一致）。
+//
+// ⚠ 按**字符**截断，不按字节：UID 来自上游的 userid 字段（形态由上游决定），
+// 一旦它不是纯 ASCII，按字节切会把一个多字节字符劈成两半 ——
+// 日志里出现 `\ufffd`（本项目在 handler.go 的 contentBlockMsg 上踩过同一个坑）。
+// 现在它还被用在额度那条日志里（短 uid 对不上时要打印两个 uid），
+// 拼错一个汉字不会影响功能，但会让排错的人以为数据坏了。
 func shortUID(uid string) string {
-	if len(uid) <= 8 {
+	rs := []rune(uid)
+	if len(rs) <= 8 {
 		return uid
 	}
-	return uid[:8]
+	return string(rs[:8])
 }
 
 // firstNonEmpty 返回第一个非空（去空白后）的字符串。

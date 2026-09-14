@@ -169,6 +169,11 @@ var capTitles = map[string]string{
 	"travel":       "猫猫旅行",
 	"welfare":      "福利中心",
 	"quota-probe":  "额度探测",
+	// tasks / invite 是本轮为 loomy 的专属标签页加的（见 internal/loomy/adminroute.go）。
+	// 标题刻意**不带上游名** —— 能力位是通用契约，任何上游声明它都会用这套文案，
+	// 导航里显示成「新手任务 · Loomy」由渲染层拼上游名，不是写在这里。
+	"tasks":  "新手任务",
+	"invite": "邀请码",
 }
 
 // CoreCapability 保留名：声明了管理端点但**没有**对应能力位的路由归到它。

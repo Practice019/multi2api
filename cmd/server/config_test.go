@@ -704,3 +704,71 @@ func TestLoomyDefaults(t *testing.T) {
 		t.Error("显式 pool_accounts=false 未生效")
 	}
 }
+
+// TestLoomyClientDataDir 客户端数据目录：**留空就是留空**（= 自动探测）。
+//
+// # 为什么这里断言的是"空串"而不是"某个路径"
+//
+// 与上面三个 loomy 字段（auth_dir / base_url / pool_accounts）不同，
+// 这一项**不做缺省填充**：填一个探测结果就等于把它变成"启动时刻的快照"，
+// 于是"先起网关、之后才装并登录客户端"这种顺序必须重启网关才能用上
+// 「添加账号」。留空让 loomy 包在**每次调用**时探测（一次 os.Stat）。
+//
+// 所以这条测试守的是一条**反直觉**的性质：别的字段都填缺省，它偏偏不填。
+// 若有人"顺手补齐默认值"，这条会红 —— 而那个改动在功能上看起来无害。
+func TestLoomyClientDataDir(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("留空 → 原样空串（由 loomy 包自动探测）", func(t *testing.T) {
+		fp := filepath.Join(dir, "empty.json")
+		os.WriteFile(fp, []byte(`{"loomy":{"enabled":true}}`), 0o600)
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.LoomyClientDataDir != "" {
+			t.Errorf("留空时必须**不做缺省填充**，得到 %q —— "+
+				"填一个快照路径会让「先起网关、后装客户端」必须重启才能用上「添加账号」",
+				c.LoomyClientDataDir)
+		}
+	})
+
+	t.Run("显式配置 → 原样生效", func(t *testing.T) {
+		fp := filepath.Join(dir, "explicit.json")
+		os.WriteFile(fp, []byte(
+			`{"loomy":{"enabled":true,"client_data_dir":"D:/loomy/Local Storage/leveldb"}}`),
+			0o600)
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.LoomyClientDataDir != "D:/loomy/Local Storage/leveldb" {
+			t.Errorf("显式 client_data_dir 未生效，得到 %q", c.LoomyClientDataDir)
+		}
+	})
+
+	t.Run("只有空白 → 视同留空", func(t *testing.T) {
+		fp := filepath.Join(dir, "blank.json")
+		os.WriteFile(fp, []byte(`{"loomy":{"enabled":true,"client_data_dir":"   "}}`), 0o600)
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.LoomyClientDataDir != "" {
+			t.Errorf("纯空白应当被裁成空串（否则会去 stat 一个叫「   」的目录），得到 %q",
+				c.LoomyClientDataDir)
+		}
+	})
+
+	t.Run("未启用时也不崩", func(t *testing.T) {
+		fp := filepath.Join(dir, "disabled.json")
+		os.WriteFile(fp, []byte(`{"loomy":{"client_data_dir":"/x"}}`), 0o600)
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.LoomyEnabled {
+			t.Error("未写 enabled 时不该启用")
+		}
+	})
+}

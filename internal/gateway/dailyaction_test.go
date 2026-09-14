@@ -211,19 +211,20 @@ func TestBatchImpliesAllURL(t *testing.T) {
 	}
 }
 
-// TestCodeartsDailyActionsExactList codearts 只报**一个**动作：领取福利。
+// TestCodeartsDailyActionsExactList codearts 只报**一个**动作：签到（福利领取）。
 func TestCodeartsDailyActionsExactList(t *testing.T) {
 	got := actionsOf(t, newCodearts(t))
 
 	if len(got) != 1 {
-		t.Fatalf("codearts 报的每日动作 = %d 个，want 1 个（领取福利）\n  实际: %+v", len(got), got)
+		t.Fatalf("codearts 报的每日动作 = %d 个，want 1 个（签到）\n  实际: %+v", len(got), got)
 	}
 	g := got[0]
 	if g.ID != "welfare" {
 		t.Errorf("ID=%q want %q", g.ID, "welfare")
 	}
-	if g.Label != "领取福利" {
-		t.Errorf("Label=%q want %q（用户原话：就是领取一下福利呗）", g.Label, "领取福利")
+	// 文案按用户本轮要求从「领取福利」改成「签到」（ID 与端点不变）。
+	if g.Label != "签到" {
+		t.Errorf("Label=%q want %q（用户本轮要求 codearts 按钮文案改为签到）", g.Label, "签到")
 	}
 	if g.OneURL != "/admin/welfare/claim" {
 		t.Errorf("OneURL=%q want %q", g.OneURL, "/admin/welfare/claim")

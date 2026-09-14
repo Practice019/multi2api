@@ -15,25 +15,44 @@
 //	codearts  → SDK-HMAC 签名 + DPoP + STS 续期 + 单所有者 store + 福利/订阅
 //	loomy     → 一个 HTTP 转发 + 一份静态模型表 + 一个分类器
 //
-// # 本包只实现 4 个**必需**扩展点里的 3 个，且刻意不实现另外几个
+// # 本包实现的核心扩展点（本轮扩充过，见下）
 //
 //	实现：AuthDirExt / CredentialLoader(+Secret) / ErrorClassifier / ResetPolicyExt
-//	不实现：AdminExt / JobExt / LoginFlow / CredentialRefresher / RefreshSkewExt / SoftRateExt
+//	      **AccountColumnsExt / QuotaExt / LoginFlow / AdminExt / CredentialLifetimeExt**
+//	不实现：JobExt / CredentialRefresher / RefreshSkewExt / SoftRateExt
+//	      / CredentialExpiryExt
 //
 // "不实现"不是"懒得做"，每一条都有具体理由：
 //
-//	AdminExt            Loomy 没有可用的管理端点（积分余额只在客户端本地缓存里，
-//	                    手册没有给出查询端点，凭空造一条只会是个假按钮）
 //	JobExt              没有签到、没有续期、没有活动 —— 没有任何要定时做的事
-//	LoginFlow           登录发生在桌面客户端里（Electron 授权），
-//	                    网关这一侧无法发起也无法轮询 → 没有"页内添加账号"
 //	CredentialRefresher 没有可刷的凭证（无 refresh token，见 credential.go）
 //	RefreshSkewExt      与上一条同因：没有续期就没有"多早算该刷"
 //	SoftRateExt         上游没有给出"限流何时解除"的信息，硬冷却即可
+//	CredentialExpiryExt 它**没有可报的到期时刻**（session 不绑时间）。
+//	                    实现一个恒 (0,false) 的空壳只会看起来"在做检查"；
+//	                    正确的表达在 CredentialLifetimeExt（见 accountview.go）。
+//
+// # 本轮为什么把"不实现"改写成了"实现"（这是订正，不是扩张）
+//
+// 上一轮这四条"不实现"的理由分别是"没有管理端点 / 余额只在客户端本地缓存 /
+// 登录在桌面客户端 / 没有到期时间"。前三条**共享同一个错误前提**：
+// 它们都把"没有 HTTP 端点"当成了"没有数据"。
+//
+// 实测（见 clientstore.go 的注释）证明：客户端把登录态与积分摘要**明文缓存在
+// 本机 Local Storage 里**。于是——
+//
+//	LoginFlow            读客户端已登录的那份 session → 有了"页内添加账号"
+//	QuotaExt             读 loomy-points-summary       → 有了额度
+//	AdminExt             把上面两件事的事实暴露成一条诊断端点
+//	AccountColumnsExt    报自己那套列（去掉签到/Token 两列不适用的）
+//	CredentialLifetimeExt 如实回答"这份凭证不会过期"
+//
+// 而"没有到期时间"那条理由**依然成立** —— 所以它留在"不实现"里，
+// 换了另一种表达方式。这一条没有被推翻，只是换了个接口说同一件事。
 //
 // 这正是 gateway 把扩展点做成**可选类型断言**而不是 Provider 方法的价值：
-// 一个纯转发的上游可以只写 100 行就接入，而不必为 6 个用不上的能力
-// 各写一个空实现。
+// 一个纯转发的上游可以只写 100 行就接入，也可以后来**逐个**补上能力，
+// 而不必为用不到的能力各写一个空实现。
 package loomy
 
 import (
@@ -44,6 +63,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -66,11 +86,37 @@ const providerID = "loomy"
 // 导出面越小越好。
 const ProviderID = providerID
 
-// Provider 实现 gateway.Provider（以及四个扩展点，见包注释）。
+// Provider 实现 gateway.Provider（以及若干可选扩展点，见包注释）。
 type Provider struct {
 	client *Client
 	// authDir 凭证目录。供 AuthDirExt 使用 —— 核心据此按上游重载 auths。
 	authDir string
+
+	// clientDataDir 本机 Loomy 客户端的数据目录（Local Storage/leveldb）。
+	//
+	// 空串 = **自动探测**（见 effectiveClientDir / DefaultClientStoreDir）。
+	// 之所以允许为空，是因为"客户端在哪"在两个平台上不一样、而且
+	// 多数部署不需要配它；显式配置只是为了"网关与客户端不在同一台机器、
+	// 但数据目录被同步过来了"这种少见形状。
+	clientDataDir string
+
+	// loginOnce / loginCached 缓存 LoginFlow 实例。
+	//
+	// ⚠ 必须缓存：每次新建会让 `sessions` map 各是一份空的，于是
+	// start 存下的会话在 poll 里找不到（codearts 那边端到端实测抓过这个 bug）。
+	// 见 login.go 的 LoginFlow()。
+	loginOnce   sync.Once
+	loginCached *loginFlow
+
+	// sms 讯飞账号网关的短信登录客户端（手机号 + 验证码，见 smslogin.go）。
+	//
+	// 与 client（模型代理）是**两个完全不同的上游**：一个 loomyad.xunfei.cn、
+	// 一个 account.xfinfr.com，鉴权方式也毫无关系（Bearer session vs HMAC-SHA1
+	// 请求签名）。所以是两个字段、两个类型，不合成一个"上游客户端"。
+	sms *SMSClient
+
+	// loginMode 见 Config.LoginMode（已归一化：auto/sms/local）。
+	loginMode string
 }
 
 // NewProvider 建一个 Loomy Provider（契约测试用的无依赖构造）。
@@ -93,6 +139,44 @@ type Config struct {
 	BaseURL string
 	// AuthDir 凭证目录（如 `auths/loomy`）。
 	AuthDir string
+	// ClientDataDir 本机 Loomy 客户端的数据目录（Local Storage/leveldb）。
+	//
+	// 留空 = 自动探测（Windows `%APPDATA%\Loomy\...`，macOS/Linux 同理，
+	// 见 DefaultClientStoreDir）。它决定三件事能不能做：
+	//
+	//	页内「添加账号」  读客户端已登录的 session
+	//	「额度」列        读客户端缓存的积分摘要
+	//	诊断端点         两者的事实
+	//
+	// ⚠ 自动探测返回空串时**不是错误** —— 网关跑在服务器上、客户端在
+	// 用户机器上，是正常部署形态。此时前两件事如实降级成"做不到"：
+	// 「添加账号」按钮**不出现**（Configured() 为 false），额度显示 `—`。
+	ClientDataDir string
+
+	// ── 短信登录（讯飞账号网关，见 smslogin.go）──────────────────────────
+	//
+	// 四个字段全部留空 = 用 smslogin.go 里那套**默认值**（生产网关 + GM3LOOMY
+	// + 随客户端分发的 access key）。之所以给默认值而不是"必须配"：
+	// 那对 key 本来就在安装包里以混淆形式明文存在，要用户去解一遍不合理。
+	//
+	// 覆盖口留在这里是为了两件事：
+	//	· 上游换网关/换 key 时不用重新编译
+	//	· 测环境（accounttest.xfinfr.com）与 hermetic 测试能指向假上游
+	SMSBaseURL         string
+	SMSAppID           string
+	SMSAccessKeyID     string
+	SMSAccessKeySecret string
+
+	// LoginMode 登录方式：`auto`（默认）/ `sms` / `local`。
+	//
+	//	auto   先试本机拾取，不行再走手机号验证码（默认；不无谓发短信）
+	//	sms    **只**走手机号验证码 —— 想加一个"另一个号"时必须用它：
+	//	       本机客户端登录的是 A，auto 会一直把 A 加回来，永远加不到 B
+	//	local  只允许本机拾取（不给表单页）
+	//
+	// 这个旋钮是**产品决策**，不放进上游协议：三条路径都是真的，
+	// 只是"默认先走哪条"取决于用户想干什么。
+	LoginMode string
 }
 
 // NewWithConfig 按配置建一个 Loomy Provider。
@@ -101,7 +185,14 @@ func NewWithConfig(cfg Config) *Provider {
 	if c == nil {
 		c = NewWithBase(cfg.BaseURL)
 	}
-	return &Provider{client: c, authDir: cfg.AuthDir}
+	return &Provider{
+		client:        c,
+		authDir:       cfg.AuthDir,
+		clientDataDir: cfg.ClientDataDir,
+		sms: NewSMSClient(cfg.SMSBaseURL, cfg.SMSAppID,
+			cfg.SMSAccessKeyID, cfg.SMSAccessKeySecret),
+		loginMode: normalizeLoginMode(cfg.LoginMode),
+	}
 }
 
 // SetClient 替换上游 HTTP 客户端（启动期一次性注入）。
@@ -118,6 +209,62 @@ func (p *Provider) SetAuthDir(dir string) {
 	}
 }
 
+// SetClientDataDir 替换本机客户端数据目录（启动期一次性注入）。
+//
+// 显式配置优先于自动探测；空串**不会**覆盖已有值（与 SetAuthDir 同一条：
+// "没配"与"显式清空"在这里不是两件需要区分的事，而空串传进来
+// 让它回落到自动探测反而更符合调用方的意图）。
+func (p *Provider) SetClientDataDir(dir string) {
+	if strings.TrimSpace(dir) != "" {
+		p.clientDataDir = dir
+	}
+}
+
+// ClientDataDir 暴露**配置里**的客户端数据目录（可能是空串）。
+//
+//	空串不等于"没有客户端" —— 那要看 effectiveClientDir 的自动探测结果。
+//
+// 这个方法只回报配置事实，供装配层与测试断言"配置有没有生效"。
+func (p *Provider) ClientDataDir() string {
+	if p == nil {
+		return ""
+	}
+	return p.clientDataDir
+}
+
+// effectiveClientDir 决定实际使用的客户端数据目录：显式配置 > 自动探测。
+//
+// 自动探测**每次调用都做**（一次 os.Stat），而不是构造时缓存：
+// 用户完全可能"先把网关跑起来、之后才装并登录客户端"。缓存会让那种顺序
+// 需要重启网关才能用上「添加账号」—— 而重启是本项目一直在削的认知成本。
+// 一次 stat 的代价远低于一个"为什么按钮不出现"的疑问。
+func (p *Provider) effectiveClientDir() string {
+	if p == nil {
+		return ""
+	}
+	if d := strings.TrimSpace(p.clientDataDir); d != "" {
+		return d
+	}
+	return DefaultClientStoreDir()
+}
+
+// smsClient 取短信登录客户端；从未注入时**就地兜一个默认实例**。
+//
+// nil 安全是必须的：契约测试会 `NewProvider()` 出一个零值 Provider 并
+// 真调 `AdminRoutes()` 里的 handler —— 那条路径不能因为 sms 为 nil 而 panic。
+func (p *Provider) smsClient() *SMSClient {
+	if p == nil {
+		return NewSMSClient("", "", "", "")
+	}
+	if p.sms == nil {
+		p.sms = NewSMSClient("", "", "", "")
+	}
+	return p.sms
+}
+
+// SMSClient 暴露底层短信登录客户端（供装配层与测试使用）。
+func (p *Provider) SMSClient() *SMSClient { return p.smsClient() }
+
 // Client 暴露底层客户端（供装配层与测试使用）。
 func (p *Provider) Client() *Client { return p.client }
 
@@ -126,23 +273,38 @@ func (p *Provider) ID() string { return providerID }
 
 // Caps 能力声明。
 //
-// Loomy 实际具备的只有两项：
+// Loomy 实际具备三项：
 //
-//	CapChat    对话（POST /chat/completions，实测流式/function_calling/视觉/推理全通）
-//	CapModels  模型目录（GET /models，实测 12 条）
+//	CapChat        对话（POST /chat/completions，实测流式/function_calling/视觉/推理全通）
+//	CapModels      模型目录（GET /models，实测 12 条）
+//	CapQuotaProbe  **本轮补上的** —— 从本机客户端缓存的积分摘要读额度
+//	               （见 quota_ext.go）。它打的不是上游端点（那不存在，实测
+//	               17 条候选路径全 404），而是**主动读取一份权威的本地事实**；
+//	               能力位问的是"能不能主动拿到额度"，答案是能。
 //
-// 其余五项**不声明**，每一项都对应一个它确实没有的东西：
+// 其余四项**不声明**，每一项都对应一个它确实没有的东西：
 //
 //	CapCheckin     没有每日签到端点（积分按自然日**自动**重置，不需要领取）
 //	CapGrowth      没有成长中心/任务体系
 //	CapTravel      没有猫猫旅行
 //	CapWelfare     没有福利领取
-//	CapQuotaProbe  没有"主动探测余额"的端点（余额只在客户端本地缓存）
+//
+// ⚠ 声明 CapQuotaProbe 有一条**契约代价**：gateway 把该能力位归入
+// `unverifiableCaps`，于是"声明了就必须实现 AdminExt 且路由非空、结构完整、
+// handler 不 panic"（见 contract.go 的 probeCapabilities / verifyAdminRoutes）。
+// loomy 为此提供了 `/admin/loomy/client-store` 这条**真的有用**的诊断端点 ——
+// 它不是为过检查而造的空壳，理由见 adminroute.go 的注释。
 //
 // ⚠ 声明 CapModels 意味着 Models() 必须真的返回非空目录 ——
 // 契约测试会验证这一条（见 contract.go 的 capabilityProbes）。
 func (p *Provider) Caps() gateway.Capability {
-	return gateway.CapChat | gateway.CapModels
+	return gateway.CapChat | gateway.CapModels | gateway.CapQuotaProbe |
+		// 本轮为 loomy 的专属标签页加的（见 points.go 与 adminroute.go）：
+		//	CapTasks   新手任务（GET/POST /api/v1/onboarding/tasks*，8 项共 10000 分）
+		//	CapInvite  邀请码（GET/POST /api/v1/points/activation 等）
+		// 两者都进了 gateway.unverifiableCaps，因此同时要求实现 AdminExt ——
+		// loomy 有（诊断端点 + 本轮这两组端点）。
+		gateway.CapTasks | gateway.CapInvite
 }
 
 // Chat 转发一次对话请求。
@@ -296,6 +458,28 @@ func authOf(cred gateway.Credential) (*Auth, error) {
 			return nil, errors.New("loomy: 凭证缺少 session（唯一鉴权材料，见 credential.go）")
 		}
 		return v, nil
+	case *authFile:
+		// 落盘包装（`LoginFlow.Poll` 交给核心的那个形态）里裹的是**同一份** *Auth。
+		//
+		// # 为什么必须放行它（与用户实测报的"添加账号不对"直接相关）
+		//
+		// "添加账号"路径上核心拿到的 `Secret` 是 `*authFile`（它要能满足
+		// `MarshalAuthFile` 才能落盘，见 login.go 的说明），而账号表路径上
+		// 从池子里拿出来的是 `*loomy.Auth`。**两条路径是同一个凭证的两个外壳。**
+		//
+		// 只认 `*Auth` 的后果不是崩溃，而是"弹窗里说不出「永久」"：
+		// 核心问 `CredentialLifetimeExt.NeverExpires` → 这里报类型不对 →
+		// 上游按契约只能回 false → 弹窗显示 `—`，而**同一份凭证**
+		// 在账号表里显示「永久」。两处渲染点自相矛盾，正是本项目反复吃的形态。
+		//
+		// 所以这里解开包装，让两个外壳在方法集上等价。
+		if v == nil || v.a == nil {
+			return nil, errors.New("loomy: 凭证是空的落盘包装")
+		}
+		if strings.TrimSpace(v.a.Session) == "" {
+			return nil, errors.New("loomy: 凭证缺少 session（唯一鉴权材料，见 credential.go）")
+		}
+		return v.a, nil
 	default:
 		return nil, fmt.Errorf("loomy: 凭证类型不对，期望 *loomy.Auth，实际 %T", cred.Secret)
 	}
@@ -386,4 +570,9 @@ var (
 	_ gateway.CredentialSecretLoader = (*Provider)(nil)
 	_ gateway.ErrorClassifier        = (*Provider)(nil)
 	_ gateway.ResetPolicyExt         = (*Provider)(nil)
+	_ gateway.AccountColumnsExt      = (*Provider)(nil)
+	_ gateway.CredentialLifetimeExt  = (*Provider)(nil)
+	_ gateway.QuotaExt               = (*Provider)(nil)
+	_ gateway.LoginFlow              = (*Provider)(nil)
+	_ gateway.AdminExt               = (*Provider)(nil)
 )

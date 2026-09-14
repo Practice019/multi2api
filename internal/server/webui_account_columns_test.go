@@ -99,18 +99,20 @@ func TestWebUIDefaultAcctColumnsMatchGatewayContract(t *testing.T) {
 	}
 }
 
-// TestWebUIWorkbuddyHeadersAreVerbatim 把 workbuddy 那 11 个**表头文字**逐字钉死。
+// TestWebUIWorkbuddyHeadersAreVerbatim 把 workbuddy 那 9 个**表头文字**逐字钉死。
 //
 // 这是用户那句「workbuddy 直接复用现在的标题」的直接编码。左边是列 id、
 // 右边是**硬编码**的期望标题 —— 改任何一个字，这条都会红，改的人必须
 // 显式改掉期望值，也就必须承认"我改了用户看得见的东西"。
+//
+// 本轮用户要求删掉「熔断」「在途」两列 → 从 11 列变成 9 列（期望值同步更新）。
 func TestWebUIWorkbuddyHeadersAreVerbatim(t *testing.T) {
 	src := string(webuiHTML)
 
 	// 期望值**硬编码**（不从 webui.html 里抽）—— 见文件头注释。
 	wantTitles := []string{
 		"上游", "昵称", "UID", "额度", "状态", "Token",
-		"今日签到", "成功", "熔断", "在途", "操作",
+		"今日签到", "成功", "操作",
 	}
 	ids := gateway.DefaultAccountColumns()
 	if len(ids) != len(wantTitles) {
@@ -120,8 +122,8 @@ func TestWebUIWorkbuddyHeadersAreVerbatim(t *testing.T) {
 	for i, id := range ids {
 		if got := webuiColumnTitle(t, src, id); got != wantTitles[i] {
 			t.Errorf("workbuddy 第 %d 列表头被改了（列 %q）：\n  实际 = %q\n  期望 = %q\n"+
-				"用户要求这 11 列表头逐字不变；确实要改就同步改掉本测试的期望值",
-				i+1, id, got, wantTitles[i])
+				"用户要求这 %d 列表头逐字不变；确实要改就同步改掉本测试的期望值",
+				i+1, id, got, wantTitles[i], len(wantTitles))
 		}
 	}
 }

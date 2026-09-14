@@ -383,6 +383,51 @@ type Config struct {
 		// 不并入就"永远选不到 loomy 账号"。默认 true —— 已经显式写
 		// loomy.enabled=true 的部署，意图就是"用起来"。
 		PoolAccounts *bool `json:"pool_accounts"`
+		// ClientDataDir 本机 Loomy 客户端的 Local Storage 目录。
+		//
+		// # 它决定三件事能不能做（见 internal/loomy/clientstore.go）
+		//
+		//	页内「添加账号」  读客户端已登录好的那份 session
+		//	「额度」列        读客户端缓存的积分摘要
+		//	诊断端点         把上面两件事的事实暴露出来
+		//
+		// # 为什么默认是**自动探测**而不是一个写死的路径
+		//
+		// 客户端目录在三个平台上位置不同，而 `os.UserConfigDir()` 恰好
+		// 在三个平台上都能拼出正确路径（Windows `%APPDATA%`、
+		// macOS `~/Library/Application Support`、Linux `~/.config`）。
+		// 写死一个 Windows 路径会在另外两个平台上**安静地不生效**。
+		//
+		// 留空 = 自动探测。显式配置只在"网关与客户端不在同一台机器、
+		// 但数据目录被同步/挂载过来了"这种形状下需要。
+		//
+		// ⚠ 探测不到**不是错误**（网关跑在服务器上、客户端在用户机器上，
+		// 是正常部署形态）。此时「添加账号」按钮不出现、额度显示 `—`，
+		// 而界面上那句"未声明页内登录流程；已有凭证文件时可点右侧加载"
+		// 正好描述了剩下的唯一路径。
+		ClientDataDir string `json:"client_data_dir"`
+
+		// ── 手机号验证码登录（讯飞账号网关）──────────────────────────
+		//
+		// 全部留空 = 用 internal/loomy/smslogin.go 里那套默认值
+		//（生产网关 account.xfinfr.com + appId GM3LOOMY + 随客户端分发的
+		// access key）。留空的理由：那对 key 本来就在 Loomy 安装包的
+		// `.env.prod` 里以混淆形式明文存在（客户端注释自述"不是真保密"），
+		// 要求用户先解一遍不合理。
+		//
+		// 需要配的只有两种场景：上游换网关/换 key（不想重编译），
+		// 以及指向测试环境 accounttest.xfinfr.com。
+		SMSBaseURL         string `json:"sms_base_url"`
+		SMSAppID           string `json:"sms_app_id"`
+		SMSAccessKeyID     string `json:"sms_access_key_id"`
+		SMSAccessKeySecret string `json:"sms_access_key_secret"`
+		// LoginMode 登录方式：`auto`（默认）/ `sms` / `local`。
+		//
+		//	auto   先试本机客户端拾取，不行再走手机号验证码
+		//	sms    **只**走手机号验证码 —— 想加一个"别的号"时用它：
+		//	       本机客户端登录的是 A，auto 每次都会把 A 加回来
+		//	local  只允许本机拾取
+		LoginMode string `json:"login_mode"`
 	} `json:"loomy"`
 
 	// 解析后
@@ -447,6 +492,20 @@ type Config struct {
 	// LoomyPoolAccounts 是否把 loomy 账号并入核心账号池（见 Loomy.PoolAccounts）。
 	// LoomyEnabled 为 false 时恒为 false。
 	LoomyPoolAccounts bool `json:"-"`
+	// LoomyClientDataDir 本机 Loomy 客户端数据目录；**空串 = 自动探测**。
+	//
+	// 与上面三个不同，这个字段**不做缺省填充** —— "留空"本身就是
+	// 一个有意义的取值（让 loomy 包在每次调用时自己探测），
+	// 而在这里填一个路径快照会让"客户端后装了也要重启网关"变成事实。
+	// 见 internal/loomy/clientstore.go 的 DefaultClientStoreDir。
+	LoomyClientDataDir string `json:"-"`
+	// LoomySMS* 讯飞账号网关的短信登录配置（全部可留空 = 用包内默认值）。
+	LoomySMSBaseURL         string `json:"-"`
+	LoomySMSAppID           string `json:"-"`
+	LoomySMSAccessKeyID     string `json:"-"`
+	LoomySMSAccessKeySecret string `json:"-"`
+	// LoomyLoginMode 登录方式（auto / sms / local）。
+	LoomyLoginMode string `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -813,6 +872,20 @@ func (c *Config) normalize() error {
 	}
 	// 并入账号池默认开；未启用时恒 false（不注册的上游不该在池里留痕迹）。
 	c.LoomyPoolAccounts = c.LoomyEnabled && boolOr(c.Loomy.PoolAccounts, true)
+	// 客户端数据目录：**原样透传，留空 = 由 loomy 包自动探测**。
+	//
+	// 刻意不在这里调用 loomy.DefaultClientStoreDir() 填一个具体路径：
+	// 那会把"客户端在哪"变成**启动时刻的快照**，于是"先起网关、后装并登录
+	// 客户端"这种顺序就必须重启网关才能用上「添加账号」。
+	// 而自动探测本身只是一次 os.Stat，放在调用点做代价可忽略
+	//（见 internal/loomy/provider.go 的 effectiveClientDir）。
+	c.LoomyClientDataDir = strings.TrimSpace(c.Loomy.ClientDataDir)
+	// 短信登录：原样透传（空 = 由 loomy 包落回内嵌默认值）。
+	c.LoomySMSBaseURL = strings.TrimSpace(c.Loomy.SMSBaseURL)
+	c.LoomySMSAppID = strings.TrimSpace(c.Loomy.SMSAppID)
+	c.LoomySMSAccessKeyID = strings.TrimSpace(c.Loomy.SMSAccessKeyID)
+	c.LoomySMSAccessKeySecret = strings.TrimSpace(c.Loomy.SMSAccessKeySecret)
+	c.LoomyLoginMode = strings.TrimSpace(c.Loomy.LoginMode)
 	return nil
 }
 

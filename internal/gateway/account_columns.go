@@ -52,13 +52,14 @@ const (
 	AccountColOps         = "ops"          // 操作
 )
 
-// DefaultAccountColumns 未自报列的上游使用的那一套（= 改造前写死的 11 列）。
+// DefaultAccountColumns 未自报列的上游使用的那一套（改造前 11 列去掉熔断/在途）。
 //
-// # 为什么默认值必须与改造前**逐列一致**
+// # 为什么默认值必须与改造前**逐列一致**（除了用户明确要求删掉的）
 //
-// 用户明确要求 workbuddy「直接复用现在的标题」。而 workbuddy 不实现本扩展点，
-// 走的就是这条默认路径 —— 所以这个数组的顺序与内容**就是**它的表头契约。
-// 改动它会直接改变 workbuddy 的观感，属于可见回归。
+// 用户要求 workbuddy「直接复用现在的标题」—— 所以这个数组的顺序与内容**就是**
+// workbuddy 的表头契约。本轮用户又明确要求：把「熔断」「在途」两列从账号池删掉
+// （workbuddy 与 loomy 都删）。熔断/在途是排障用的**计数器**，几乎不变却占两列宽；
+// 用户要的"简单统一"就是不要它们。此改动直接反映在默认列集与 loomy 的自报列集里。
 //
 // 返回**副本**：调用方可能排序或裁剪，不该让默认表被就地改写
 // （那会让下一次调用拿到被改过的"默认值"，且不报错）。
@@ -72,8 +73,6 @@ func DefaultAccountColumns() []string {
 		AccountColToken,
 		AccountColCheckin,
 		AccountColSuccess,
-		AccountColBreaker,
-		AccountColInFlight,
 		AccountColOps,
 	}
 }

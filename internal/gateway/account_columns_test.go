@@ -5,24 +5,33 @@ import (
 	"testing"
 )
 
-// TestDefaultAccountColumnsIsTheLegacy11 钉住默认列**逐列等于改造前写死的那 11 列**。
+// TestDefaultAccountColumnsExact 钉住默认列**逐列等于改造前 11 列去掉熔断/在途**。
 //
 // # 为什么这条断言的分量很重
 //
 // 用户明确要求 workbuddy「直接复用现在的标题」。而 workbuddy **不实现**
 // AccountColumnsExt（后端零改动）—— 它走的就是这个默认值。
 //
-// 所以这个数组**就是** workbuddy 的表头契约：改它 = 改用户可见的观感，
-// 属于可见回归。这里逐列全等断言，顺序也钉住（顺序 = 表头顺序）。
-func TestDefaultAccountColumnsIsTheLegacy11(t *testing.T) {
+// 所以这个数组**就是** workbuddy 的表头契约：改它 = 改用户可见的观感。
+// 本轮用户明确要求删掉「熔断」「在途」两列（workbuddy 与 loomy 都删，
+// 见 DefaultAccountColumns 的注释）—— 这是**用户点名**的变化，所以
+// 这里从"逐字等于 11 列"更新为"等于去掉那两列的 9 列"。顺序仍钉住。
+func TestDefaultAccountColumnsExact(t *testing.T) {
 	want := []string{
 		"provider", "nickname", "uid", "quota", "status", "token",
-		"checkin", "success", "breaker", "in_flight", "ops",
+		"checkin", "success", "ops",
 	}
 	got := DefaultAccountColumns()
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("默认列集变了 —— workbuddy 的表头会跟着变（用户要求复用现在的）\n"+
+		t.Fatalf("默认列集变了 —— workbuddy 的表头会跟着变\n"+
 			"  got : %v\n  want: %v", got, want)
+	}
+	for _, removed := range []string{"breaker", "in_flight"} {
+		for _, id := range got {
+			if id == removed {
+				t.Errorf("默认列集里仍有 %q —— 用户明确要求删掉「熔断」「在途」", removed)
+			}
+		}
 	}
 }
 
