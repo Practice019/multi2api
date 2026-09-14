@@ -37,13 +37,15 @@
 
 ## 📸 界面预览
 
-| 仪表盘 | 账号池 |
-|---|---|
-| ![仪表盘](assets/shots/dash.png) | ![账号池](assets/shots/accounts.png) |
+![仪表盘](assets/shots/dash.png)
 
-| Loomy 新手任务 | Loomy 邀请码 | 请求日志 |
-|---|---|---|
-| ![新手任务](assets/shots/loomy-tasks.png) | ![邀请码](assets/shots/loomy-invite.png) | ![请求日志](assets/shots/logs.png) |
+![账号池](assets/shots/accounts.png)
+
+![Loomy 新手任务](assets/shots/loomy-tasks.png)
+
+![Loomy 邀请码](assets/shots/loomy-invite.png)
+
+![请求日志](assets/shots/logs.png)
 
 ## 🐾 已接入上游
 
