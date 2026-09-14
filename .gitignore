@@ -12,6 +12,10 @@ data/
 
 # Config with secrets (use config.example.json)
 config.json
+# 配置的**备份**同样含明文 api_key（实测：config.json.bak-listen 里就是真实的
+# api_key）。只忽略 config.json 本身不够 —— 一次 `git add -A` 就会把密钥推上去。
+# config.json.* 只匹配以 "config.json." 开头的名字，不会误伤 config.example.json。
+config.json.*
 
 # Build artifacts
 /bin/

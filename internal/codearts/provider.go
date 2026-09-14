@@ -292,7 +292,19 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		}
 		return gateway.ChatStream{}, err
 	}
-	return gateway.ChatStream{Status: status, Body: rc}, nil
+
+	// 就地在真实流量上维护额度状态。
+	//
+	// 为什么要包这一层：额度耗尽藏在 **200 的流里**（不是 HTTP 错误码），
+	// 只有读过流才知道。而"就地在请求路径上标记"是 quota.go 注释里
+	// 明确设计、但改造前从未接线的能力 —— 缺了它，额度耗尽只能靠
+	// 人工点管理台探测才能发现（见 quotaTrackingBody 的注释）。
+	//
+	// modelOf 从请求体取模型名（与挑通道、裁剪 max_tokens 用的是同一个）。
+	return gateway.ChatStream{
+		Status: status,
+		Body:   &quotaTrackingBody{ReadCloser: rc, model: modelOf(body)},
+	}, nil
 }
 
 // Models 返回上游模型目录。
@@ -300,6 +312,20 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 // CodeArts 的目录是**静态**的（见 models.go 的实测依据），因此这里不发网络请求，
 // 只做凭证校验 —— 凭证不对时返回明确错误而不是"假装有目录"，
 // 这样调用方能区分"上游不可用"与"目录为空"。
+//
+// # 为什么在这里过滤"额度暂时耗尽"的模型
+//
+// 这是 quota.go 包注释里写明的设计目的："让 /v1/models 直接告诉客户端
+// 这个模型当前不可用，一眼就能换模型"。benefit 通道的免费额度是**每日**
+// 配额，用完后当天不可用、次日自动恢复 —— 把它当成"模型不存在"
+// （Verified=false）是错的，那会让它永久消失且不再被探测。
+//
+// 过滤是**可逆**的，两条恢复路径都成立：
+//
+//	日切       → IsQuotaExhausted 因 ExhaustedUntil 到期自动返回 false
+//	成功调用   → quotaTrackingBody 在见到正常数据帧时 ClearQuota
+//
+// 所以一个模型不会因为"今天额度用完"而长期从目录里消失。
 func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gateway.ModelInfo, error) {
 	if _, err := authOf(cred); err != nil {
 		return nil, err
@@ -310,6 +336,11 @@ func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gatew
 	ms := KnownModels()
 	out := make([]gateway.ModelInfo, 0, len(ms))
 	for _, m := range ms {
+		// 额度暂时耗尽的模型当天不对外暴露：客户端选中它必然失败，
+		// 而目录是客户端唯一的"选型依据"。
+		if IsQuotaExhausted(m.ID) {
+			continue
+		}
 		out = append(out, gateway.ModelInfo{
 			ID:              m.ID,
 			ContextWindow:   clampInt64(m.ContextWindow),

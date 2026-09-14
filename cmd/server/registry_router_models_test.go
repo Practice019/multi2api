@@ -16,7 +16,7 @@
 //	于是 registryRouter 拿到的 err != nil → 返回 ok=false →
 //	出口层的 modelList 走 `continue` → codearts 被静默跳过。
 //
-// **codearts 其实完全能报模型**（Models() 是静态表、不发网络请求，实测 7 条）。
+// **codearts 其实完全能报模型**（Models() 是静态表、不发网络请求）。
 // 只是没人给它一份凭证。
 package main
 
@@ -91,8 +91,18 @@ func setUpCodeartsRegistry(t *testing.T, withAccount bool) (*gateway.Registry, *
 }
 
 // TestRegistryRouterModelsCodearts 是 T1 的**失败复现**：
-// 账号在池里、Provider 声明了 CapModels、Models() 实测能给出 7 条 ——
+// 账号在池里、Provider 声明了 CapModels、Models() 能给出模型 ——
 // router.Models 必须返回 ok=true。
+//
+// ⚠ 注意本用例的断言重点不是"几条"，而是 **ok=true**：
+// 若 router 不给上游传 secret，codearts.Provider.Models() 会在 authOf(nil)
+// 上直接失败 → ok=false → 模型在 /v1/models 里被静默跳过（用户报的"扫不出来"）。
+//
+// 暴露的**内容**：静态目录里 7 个存在的模型都必须出现。
+// 注意这里**不**按额度过滤 —— codearts 的 benefit 通道是**每日**免费额度，
+// 当天用完不算"模型不存在"（曾经的错误结论，见 channel_test.go 的纠错注释）。
+// 过滤只发生在 Provider.Models 且是可逆的（日切自动失效），
+// 而本用例跑在未标记额度的干净状态下，因此应当看到全部 7 个。
 func TestRegistryRouterModelsCodearts(t *testing.T) {
 	reg, p := setUpCodeartsRegistry(t, true)
 	r := registryRouter{reg: reg, p: p}
@@ -102,24 +112,31 @@ func TestRegistryRouterModelsCodearts(t *testing.T) {
 		t.Fatalf("★ registryRouter.Models(codearts) 返回 ok=false —— " +
 			"codearts 的模型在 /v1/models 里被静默跳过（这就是用户报的『扫不出来』）")
 	}
-	if len(ms) != 7 {
-		t.Fatalf("codearts 模型数=%d want 7: %+v", len(ms), ms)
+	if len(ms) == 0 {
+		t.Fatal("ok=true 却一个模型都没有")
 	}
-	// 逐条核对 id（大小写敏感 —— codearts 的服务端注册名如此）。
-	want := map[string]bool{
-		"GLM-5.2": true, "glm-5.2-sft-harmony": true,
-		"openpangu-2.0-pro": true, "openpangu-2.0-flash": true,
-		"deepseek-v4-flash-0731": true, "deepseek-v4-pro-0813": true,
-		"glm-5.3-flash": true,
-	}
+
+	got := map[string]bool{}
 	for _, m := range ms {
-		if !want[m.ID] {
-			t.Errorf("意外的模型 %q", m.ID)
-		}
-		delete(want, m.ID)
+		got[m.ID] = true
 	}
-	for id := range want {
-		t.Errorf("缺少模型 %q", id)
+
+	// 目录必须包含全部 7 个**存在**的模型（大小写逐字符）。
+	//
+	// ⚠ 早先这里断言过"3 个 benefit 模型不得出现"—— 那是错的：
+	// 它们只是 **benefit 通道的每日免费额度**当天用完，次日重置，
+	// 不是模型不存在。是否"当前不可用"由 quotaCache 表达，
+	// 而且**默认（未标记）状态下必须全部列出** ——
+	// 这正是本用例要钉的不变式：目录层不得把"临时额度"当成"不存在"。
+	for _, id := range []string{
+		"GLM-5.2", "glm-5.2-sft-harmony",
+		"openpangu-2.0-pro", "openpangu-2.0-flash",
+		"deepseek-v4-flash-0731", "deepseek-v4-pro-0813",
+		"glm-5.3-flash",
+	} {
+		if !got[id] {
+			t.Errorf("缺少模型 %q（它在本账号上存在，只是额度可能每日耗尽）", id)
+		}
 	}
 }
 

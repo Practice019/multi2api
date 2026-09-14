@@ -58,6 +58,53 @@ func prepareBodyOptWithLimits(src []byte, sanitize bool, efforts map[string][]st
 	return out
 }
 
+// RewriteModelField 把请求体顶层的 model 字段改写为 model，**仅在确实不同**时重编码。
+//
+// # 为什么需要它（上游侧模型名规范化的落点）
+//
+// 有的上游的模型注册名**大小写敏感**（实测：CodeArts / 华为 InferHub），
+// 而客户端与 OpenAI 兼容工具链不保证遵守大小写 —— `/v1/models` 的下游消费方、
+// 手输模型名的用户都可能发来 `glm-5.2` 而不是 `GLM-5.2`。
+//
+// 上游对这种名字的拒绝方式不是 4xx，而是 **200 + 流内错误信封**
+// （`InferHub.002002009 The model is not registered`）。经过 normalizeFrame
+// 之后客户端只看到一个空回复，错误原文连日志都没有 —— 见 InBandError 的注释。
+// 在**出站前**把名字规范成上游注册的逐字形态，是从源头消除这类失败。
+//
+// # 为什么规则不在这里
+//
+// "哪张表、怎么匹配"是**上游自己的事实**（CodeArts 的规范名在
+// internal/codearts，workbuddy 的在它自己的包）。本函数只做"改写这个字段"
+// 这一件与上游无关的事，规范名由调用方传进来 —— 与 gateway 包注释里的
+// 架构判据一致：共享层不得认识任何具体上游。
+//
+// # 为什么不变时不重编码
+//
+// 重编码会重排键顺序并丢失原始空白。调用方依赖"没改就不动"的不变式
+// （同 server.rewriteModel 的注释），所以这里原样返回同一个 []byte。
+//
+// model 为空串时不改写：那会把"客户端漏了模型名"变成我们造的请求，
+// 让上游报一个不是客户端原文的错误。
+func RewriteModelField(src []byte, model string) []byte {
+	if len(src) == 0 || model == "" {
+		return src
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(src, &obj); err != nil {
+		return src
+	}
+	cur, ok := obj["model"].(string)
+	if !ok || cur == model {
+		return src
+	}
+	obj["model"] = model
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return src
+	}
+	return out
+}
+
 // PrepareBodyOptWithLimits 是最完整的**导出**改写入口，额外接受 limits 与 efforts。
 //
 // 各上游在"出站前统一改写请求体"这一步共用本函数：

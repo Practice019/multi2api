@@ -61,21 +61,66 @@ func TestChannelHeader(t *testing.T) {
 	}
 }
 
-// TestAllSevenModelsVerified 确认 7 个模型都已实测可用并对外暴露。
+// TestKnownModelsExposesEveryVerifiedModel 确认"对外暴露 == Verified"这条不变式。
 //
-// 曾经只有 1 个（GLM-5.2）被暴露，因为把通道错误误判成"账号未开通"。
-func TestAllSevenModelsVerified(t *testing.T) {
+// # 这个测试改过两次，第二次是**纠错**
+//
+// 第一版断言"7 个模型全部可用并全部暴露"，依据是"通道修对之后都能跑"。
+// 实测推翻了它：3 个 benefit 通道模型报
+// `InferHub.4004.200 benefit not found` / `InferHub.4291.200 insufficient quota`。
+//
+// 第二版据此把它们的 Verified 改成 false 并从 /v1/models 摘掉 ——
+// **这一步是错的**。那些模型在本账号上**存在且可用**，只是 benefit 通道的
+// **每日免费额度**当天用完，次日自动重置。
+//
+// 用静态的 Verified 表达"今天额度用完了"有三个后果：
+//  1. 模型永久消失（其实第二天就回来）；
+//  2. ProbeAllQuota 跳过未验证模型 → 永远发现不了它已恢复；
+//  3. 没有请求 → 不触发 ClearQuota → "越藏越久"的死锁。
+//
+// 所以是第三版：**7 个全部 Verified**（静态事实），
+// "此刻是否因额度不可用"由 quotaCache 表达 —— 见 quota.go 的
+// QuotaState.ExhaustedUntil 与 Provider.Models 的过滤，那是**可逆**的。
+func TestKnownModelsExposesEveryVerifiedModel(t *testing.T) {
 	all := AllModels()
 	if len(all) != 7 {
-		t.Fatalf("模型总数 = %d, 期望 7", len(all))
+		t.Fatalf("模型表总数 = %d, 期望 7", len(all))
 	}
-	exposed := KnownModels()
-	if len(exposed) != 7 {
-		t.Fatalf("对外暴露 %d 个, 期望 7（全部实测可用）", len(exposed))
+
+	// 默认通道 4 个 + benefit 通道 3 个，全部是本账号上真实存在的模型。
+	wantIDs := map[string]bool{
+		"GLM-5.2":                true,
+		"glm-5.2-sft-harmony":    true,
+		"openpangu-2.0-pro":      true,
+		"openpangu-2.0-flash":    true,
+		"deepseek-v4-flash-0731": true,
+		"deepseek-v4-pro-0813":   true,
+		"glm-5.3-flash":          true,
 	}
+
 	for _, m := range all {
+		if !wantIDs[m.ID] {
+			t.Errorf("意外的模型 %q（模型表结构变了？）", m.ID)
+			continue
+		}
 		if !m.Verified {
-			t.Errorf("%s 未标记为可用", m.ID)
+			t.Errorf("%s 未标记 Verified —— 它在本账号上确实存在；"+
+				"不该用 Verified 表达『今天额度用完』这种**临时**状态", m.ID)
+		}
+	}
+
+	// KnownModels 是**静态事实**层：不因额度而增减。
+	if got := len(KnownModels()); got != len(all) {
+		t.Errorf("KnownModels 暴露 %d 个但表里 %d 个 —— "+
+			"额度过滤只应发生在 Provider.Models（那才是可逆的展示层）", got, len(all))
+	}
+	exposed := map[string]bool{}
+	for _, m := range KnownModels() {
+		exposed[m.ID] = true
+	}
+	for id := range wantIDs {
+		if !exposed[id] {
+			t.Errorf("%s 已验证却未暴露", id)
 		}
 	}
 }

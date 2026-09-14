@@ -33,10 +33,34 @@ import (
 type QuotaState struct {
 	// Exhausted 为 true 表示探测确认额度不足（当前不可用）。
 	Exhausted bool `json:"exhausted"`
+	// ExhaustedUntil 该标记的失效时刻（**下一个本地日零点**）。
+	//
+	// # 为什么必须有到期时间（这是"每日额度"这个事实的落点）
+	//
+	// benefit 通道是**每日**免费额度，耗尽后次日重置。只写
+	// `Exhausted=true` 而没有到期时间会引出两个后果：
+	//
+	//  1. 模型被**永久**当成不可用（其实第二天就回来了）；
+	//  2. 更糟的是死锁 —— 一旦据此把模型从 /v1/models 摘掉，
+	//     就再也没有请求去触发 ClearQuota，"越藏越久"。
+	//
+	// 把"每日"写进数据里，自愈就是**必然**的，不依赖任何后台任务。
+	// 零值表示"无到期时间"（旧数据/测试构造），此时按永不过期处理。
+	ExhaustedUntil time.Time `json:"exhausted_until,omitempty"`
 	// Reason 是人类可读的原因（如 "insufficient quota"）。
 	Reason string `json:"reason,omitempty"`
 	// CheckedAt 最近一次探测时间。
 	CheckedAt time.Time `json:"checked_at"`
+}
+
+// nextLocalMidnight 返回下一个本地日零点。
+//
+// 用本地时区而不是 UTC：上游的"每日"是按用户所在时区的自然日重置的，
+// 用 UTC 会在错误的时间点提前恢复（东八区会提前 8 小时）。
+func nextLocalMidnight() time.Time {
+	now := time.Now()
+	y, m, d := now.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, now.Location()).AddDate(0, 0, 1)
 }
 
 // quotaProbe 探测结果缓存。
@@ -154,8 +178,12 @@ func (c *Client) ProbeQuota(a *Auth, model string, benefit bool) QuotaState {
 
 	if reason, ok := DetectQuotaExhausted(string(raw)); ok {
 		st.Exhausted = true
+		// 与 MarkQuotaExhausted 同款到期语义：探测出来的额度不足同样是
+		// **每日**额度，次日应自动恢复可用。
+		st.ExhaustedUntil = nextLocalMidnight()
 		st.Reason = reason
-		log.Printf("codearts: 模型 %s 额度不足（%s）", model, reason)
+		log.Printf("codearts: 模型 %s 额度不足（%s，%s 后自动恢复）",
+			model, reason, time.Until(st.ExhaustedUntil).Round(time.Minute))
 	}
 
 	quotaCache.mu.Lock()
@@ -192,17 +220,44 @@ func DetectQuotaExhausted(body string) (reason string, ok bool) {
 //
 // 用途：正常请求路径撞到额度错误时立刻标记，省掉一次探测往返，
 // 也让管理台在不额外发请求的前提下立刻反映真实状态。
+//
+// 标记带**到期时间**（下一个本地日零点）：benefit 是每日额度，
+// 到期即自动失效，不依赖任何后台任务清理（见 QuotaState.ExhaustedUntil）。
 func MarkQuotaExhausted(model, reason string) {
 	if model == "" {
 		return
 	}
 	quotaCache.mu.Lock()
 	quotaCache.states[model] = QuotaState{
-		Exhausted: true,
-		Reason:    reason,
-		CheckedAt: time.Now(),
+		Exhausted:      true,
+		ExhaustedUntil: nextLocalMidnight(),
+		Reason:         reason,
+		CheckedAt:      time.Now(),
 	}
 	quotaCache.mu.Unlock()
+}
+
+// IsQuotaExhausted 报告某模型**当前**是否处于额度耗尽状态。
+//
+// 与直接读 QuotaStates()[model].Exhausted 的区别：本函数会处理**日切过期** ——
+// 超过 ExhaustedUntil 的标记视为已失效（每日额度已重置），
+// 调用方据此就能自愈，不需要任何显式清理。
+//
+// 为什么把过期判断放在读取侧而不是靠后台定时删除：
+// 读取侧判断是**无状态**的，不会因为进程重启/后台任务漏跑而失效；
+// 定时删除则会留下"任务没跑 → 模型一直是隐藏的"这种静默故障。
+func IsQuotaExhausted(model string) bool {
+	quotaCache.mu.Lock()
+	defer quotaCache.mu.Unlock()
+	s, ok := quotaCache.states[model]
+	if !ok || !s.Exhausted {
+		return false
+	}
+	if !s.ExhaustedUntil.IsZero() && !time.Now().Before(s.ExhaustedUntil) {
+		// 已过到期时刻：按每日重置处理，标记自然失效。
+		return false
+	}
+	return true
 }
 
 // ClearQuota 清除某模型的额度标记（成功调用后调用）。
@@ -225,12 +280,81 @@ func ClearQuota(model string) {
 func (c *Client) ProbeAllQuota(a *Auth) map[string]QuotaState {
 	out := map[string]QuotaState{}
 	for _, m := range knownModels {
-		if !m.Verified {
-			continue
-		}
+		// ⚠ 不按 Verified 过滤：Verified 表示"该模型在本账号上确实存在"，
+		// 与"此刻额度是否耗尽"是**两件不同的事**。额度是按日恢复的临时状态，
+		// 用 Verified 过滤会让"今天额度用完 → 明天不再探测 → 永远发现不了它已恢复"。
+		// 探测本身以最小请求（max_tokens=1）做，成本可忽略。
 		out[m.ID] = c.ProbeQuota(a, m.ID, m.Channel == ChannelBenefit)
 		// 留间隔：探测本身占一个会话名额，太密会撞并发上限
 		time.Sleep(500 * time.Millisecond)
 	}
 	return out
+}
+
+// quotaTrackingBody 包装上游响应流，在**真实请求路径**上就地维护模型额度状态。
+//
+// # 为什么必须在这里（这是文档写了、却一直没接的那条线）
+//
+// quota.go 的包注释说这套机制的目的是"让 /v1/models 直接告诉客户端
+// 这个模型当前不可用"，DetectQuotaExhausted 的注释也说"导出给测试与
+// handler 复用（handler 在真实请求失败时也可就地标记，这样用户不需要等
+// 下一次探测）"。但改造前**没有任何生产调用方**：
+//
+//	MarkQuotaExhausted  只被测试调用
+//	Provider.Models()   从不读 quotaCache
+//
+// 于是"额度耗尽"只有人工点管理台的「额度探测」才会被发现 ——
+// 而用户遇到的是"三个 benefit 模型恒失败，但界面显示积分还剩很多"，
+// 完全无从判断该换模型。
+//
+// # 为什么不做在 errorclassifier.go
+//
+// 那条接缝是**纯函数**契约（见 gateway.ErrorClassifier 的实现约束：
+// 不发网络、不改共享状态），且它的签名里没有"是哪个模型"。
+//
+// # 为什么放在本包
+//
+// 本包同时握有**模型名**（请求体）与**响应流**，且不需要核心认识 codearts
+// 的任何细节（架构判据 3）。
+type quotaTrackingBody struct {
+	io.ReadCloser
+	model string
+	// buf 累积流的前若干字节用于识别；达到上限后不再累积。
+	buf []byte
+	// done 表示已得出结论（标记或清除），后续不再扫描。
+	done bool
+}
+
+// quotaScanLimit 是扫描窗口大小。
+//
+// 额度错误是**唯一**一帧（实测整段响应只有那一个 error 信封，几百字节），
+// 而正常回复的第一帧就带 "choices"。所以 8KB 远超所需，
+// 又不至于在长回复上累积内存。
+const quotaScanLimit = 8 << 10
+
+func (b *quotaTrackingBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 && !b.done {
+		if room := quotaScanLimit - len(b.buf); room > 0 {
+			take := n
+			if take > room {
+				take = room
+			}
+			b.buf = append(b.buf, p[:take]...)
+		}
+		body := string(b.buf)
+
+		if reason, ok := DetectQuotaExhausted(body); ok {
+			// 额度耗尽：就地标记（带日切到期），后续 /v1/models 立刻反映。
+			MarkQuotaExhausted(b.model, reason)
+			log.Printf("codearts: 请求路径撞到额度耗尽，标记模型 %s 不可用（%s）", b.model, reason)
+			b.done = true
+		} else if strings.Contains(body, `"choices"`) {
+			// 已经出现正常数据帧 → 本次调用与额度无关，清除旧标记。
+			// 这就是**自愈点**：额度次日恢复后，第一条成功请求即解除隐藏。
+			ClearQuota(b.model)
+			b.done = true
+		}
+	}
+	return n, err
 }
