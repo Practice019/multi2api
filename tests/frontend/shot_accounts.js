@@ -19,7 +19,20 @@ const CHROME = require('./chrome_path.js').resolveChrome();
 const PORT = 9329;
 const TARGET = process.env.T45_URL || 'http://127.0.0.1:18080/ui';
 const API = TARGET.replace(/\/ui$/, '');
-const KEY = process.env.WB2API_KEY || '__REDACTED_LEAKED_KEY__';
+// ⚠ 绝不在源码里写真实密钥的默认值。
+//
+// 这里曾经硬编码过一份**真实** api_key 作为回落值，于是它被提交进版本库。
+// 仓库自己有一条守卫（acceptance.js 的"被跟踪文件里无真实 api_key"），
+// 但它不在 CI 里跑，所以没能拦住 —— 而只要进过 git 历史，
+// 唯一可靠的补救就是**轮换密钥**，删文件是删不干净的。
+//
+// 现在只从环境变量读，缺失立刻失败：失败要响，
+// 不能静默退回一个写死的值（那正是泄漏的成因）。
+const KEY = process.env.WB2API_KEY;
+if (!KEY) {
+  console.error('缺少 WB2API_KEY 环境变量。本文件不得硬编码真实密钥。');
+  process.exit(1);
+}
 const PROFILE = path.join(os.tmpdir(), 'chrome-shot-' + Date.now());
 const OUT = path.resolve(__dirname, '..', '..', '.task', 'ui-convergence', 'shared', 'shots');
 const sleep = ms => new Promise(r => setTimeout(r, ms));

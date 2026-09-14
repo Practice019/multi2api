@@ -35,7 +35,12 @@ const CHROME = require('./chrome_path.js').resolveChrome();
 const PORT = 9317;
 const TARGET = process.env.T45_URL || 'http://127.0.0.1:18080/ui';
 const API = TARGET.replace(/\/ui$/, '');
-const KEY = process.env.WB2API_KEY || '__REDACTED_LEAKED_KEY__';
+// ⚠ 同 shot_accounts.js：不得硬编码真实密钥（详见该文件的注释）。
+const KEY = process.env.WB2API_KEY;
+if (!KEY) {
+  console.error('缺少 WB2API_KEY 环境变量。本文件不得硬编码真实密钥。');
+  process.exit(1);
+}
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function get(u, h) {
