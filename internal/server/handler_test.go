@@ -403,21 +403,53 @@ func TestChatAllUnavailableReturns503(t *testing.T) {
 	}
 }
 
+// TestChatSessionDeadDisables 连续 3 次 12153 才禁用（借鉴 workbuddy2api-panel）。
+//
+// # ⚠ 这条用例的语义在本次改造中**有意改变**
+//
+//	改造前：一次 12153 → 立即 Disable（永久禁用，需人工重登）
+//	改造后：连续 3 次才 Disable；任何一次成功清零计数
+//
+// 为什么改：12153 的成因里有一大类是**瞬时抖动**（网络闪断、上游瞬时故障、
+// token 刷新竞态）。一次就永久禁用意味着一次抖动就能让一个健康的号掉出池子，
+// 而界面上只显示"已禁用"，没有任何线索指向真因 —— 这是最难排查的一类误杀。
+//
+// 真正失效的 session（每次请求都 12153）仍然会被停掉，只是晚 2 次。
+// 见 pool.NoteSessionDead 与 sessionDeadThreshold 的注释。
 func TestChatSessionDeadDisables(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 401, `{"code":12153,"msg":"Offline user session not found"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	body := `{"model":"glm-5.2","messages":[]}`
+
+	// 前两次：只计计数，**不得**禁用。
+	for i := 1; i <= 2; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+		if rec.Code != 503 {
+			t.Errorf("第 %d 次 code=%d", i, rec.Code)
+		}
+		st, _ := p.Status("u1")
+		if st.Disabled {
+			t.Fatalf("第 %d 次就禁用了 —— 一次 12153 多为网络抖动/刷新竞态，"+
+				"立即禁用会把健康的号误杀出池（见 NoteSessionDead 的注释）: %+v", i, st)
+		}
+		if got := p.SessionDeadStreak("u1"); got != i {
+			t.Errorf("第 %d 次后计数=%d，期望 %d", i, got, i)
+		}
+	}
+
+	// 第三次：达到阈值 → 禁用（真正失效的 session 仍会被停掉）。
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
 	if rec.Code != 503 {
-		t.Errorf("code=%d", rec.Code)
+		t.Errorf("第三次 code=%d", rec.Code)
 	}
 	st, _ := p.Status("u1")
 	if !st.Disabled {
-		t.Errorf("account should be disabled: %+v", st)
+		t.Errorf("连续 3 次 12153 后应禁用（真正失效的 session 必须被停掉）: %+v", st)
 	}
 }
 

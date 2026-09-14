@@ -202,6 +202,28 @@ type ProviderRouter interface {
 	// codearts 就是这一类：它**没有**签到恢复机制，次日 04:00 对它毫无意义。
 	// 把它强加上去会让号"明明已恢复却冷到次日凌晨"（白闲置近 24h）。
 	ResetAt(id string, cred gateway.Credential) (until time.Time, ok bool)
+
+	// SoftRateReset 问**该上游自己**"这次软限流有没有精确的重置时刻"
+	// （走 gateway.SoftRateExt）。
+	//
+	// # 为什么它与 Classify 是两个问题
+	//
+	//	Classify       → 这属于哪一类（软限流？额度耗尽？）
+	//	SoftRateReset  → 这个软限流有没有**精确到某模型某时刻**的答案
+	//
+	// 前者决定走哪条策略路径，后者决定那条路径要不要**收窄**。
+	// 合并成一个方法会让"是不是软限流"与"软限流的范围/截止"耦合在一起，
+	// 而它们的判据来源完全不同（业务码 vs 文案里的时间串）。
+	//
+	// # 调用时机
+	//
+	// 仅在该上游把 (status, body) 判成 gateway.ErrKindSoftRate 之后才被调用。
+	// 对其它类别调它没有意义 —— 那些错误体里即便带了"将在 … 重置"
+	// 也不是限流语义，收窄冷却会是错的。
+	//
+	// ok=false 表示"给不出精确时刻"（非模型级限流、文案里没有时间、
+	// 或该上游没实现本扩展点）—— 调用方退回既有的账号级软冷却路径。
+	SoftRateReset(id string, status int, body string) (resetAt time.Time, ok bool)
 }
 
 // providerFor 解析请求的 model 字段，返回 (上游ID, 上游侧模型名, 错误)。

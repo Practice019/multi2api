@@ -60,7 +60,7 @@ func (c *Client) CheckAccountAlive(a *auth.Auth) (*AccountLiveness, error) {
 	if err != nil {
 		return nil, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	// 实测该端点要求 UA（与 /v3/config 同）：缺了会被上游按未知客户端拒绝。
 	req.Header.Set("User-Agent", clientUA)
 
@@ -131,7 +131,7 @@ func (c *Client) DosageNotify(a *auth.Auth) (*DosageWarning, error) {
 	if err != nil {
 		return nil, err
 	}
-	BillingHeaders(req, a)
+	c.BillingHeaders(req, a)
 	req.Header.Set("Content-Type", "application/json")
 
 	data, err := c.doJSON(req)

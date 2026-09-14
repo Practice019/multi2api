@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/prompt"
 )
 
 const (
@@ -148,6 +149,10 @@ func TestPrepareBodyDefaultSanitizes(t *testing.T) {
 }
 
 // 出站边界集成：ChatStream 发往上游的 wire body 必须无残留指纹。
+//
+// ⚠ 同样必须把 PromptMode 钉成 passthrough（理由与下面那条 disabled 用例相同）：
+// 默认 custom 模式会先把整条 system 换掉，指纹"消失"就不是脱敏干的，
+// 本用例会变成一条永远绿的假测试。
 func TestChatStreamWireBodySanitized(t *testing.T) {
 	var gotBody []byte
 	ts := newTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +164,7 @@ func TestChatStreamWireBodySanitized(t *testing.T) {
 
 	c := New()
 	c.SanitizeFingerprints = true
+	c.PromptMode = prompt.ModePassthrough // ← 隔离提示词层
 	c.ChatBaseCN = ts.URL
 	acct := &auth.Auth{AccessToken: "test-token", Domain: "copilot.tencent.com", UID: "u1"}
 
@@ -190,6 +196,16 @@ func TestChatStreamWireBodySanitized(t *testing.T) {
 }
 
 // 出站边界：关闭脱敏后 wire body 原样保留指纹（验证开关真实有效）。
+//
+// ⚠ 必须同时把 PromptMode 设成 passthrough，否则本用例**测不到脱敏开关**。
+//
+// 为什么：出站管线是 `applyPrompt` → `PrepareBodyOpt...` 两层。
+// 默认的 custom 模式会在脱敏之前就把整条 system 消息**删掉换成网关自有提示词**，
+// 于是 wire body 里当然没有指纹 —— 但那是提示词层的功劳，与脱敏开关无关。
+// 不隔离变量的话，本用例即使脱敏开关彻底失效也会通过（假绿）。
+//
+// 设成 passthrough 之后，system 原样保留，脱敏开关成为唯一的变量：
+// 关掉它 ⇒ 指纹必须原样出现在 wire body 上。
 func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 	var gotBody []byte
 	ts := newTestUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +217,7 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 
 	c := New()
 	c.SanitizeFingerprints = false
+	c.PromptMode = prompt.ModePassthrough // ← 隔离提示词层，见上方注释
 	c.ChatBaseCN = ts.URL
 	acct := &auth.Auth{AccessToken: "test-token", Domain: "copilot.tencent.com", UID: "u1"}
 

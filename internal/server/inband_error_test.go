@@ -131,6 +131,11 @@ func (r *inbandRouter) RefreshSkew(_ string, _ gateway.Credential) (time.Duratio
 	return 0, false
 }
 
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+func (r *inbandRouter) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
 func (r *inbandRouter) ResetAt(_ string, _ gateway.Credential) (time.Time, bool) {
 	return time.Time{}, false
 }

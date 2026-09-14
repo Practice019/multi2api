@@ -152,17 +152,67 @@ type entry struct {
 	fails        int       // 连续失败计数（熔断用，唯一权威）
 	retryCount   int       // 已熔断次数（指数退避的指数）
 
+	// softStreak / softRateModel 为软限流（429）的指数退避状态（**持久化**，见 stateAccount）。
+	//
+	// 与熔断器是**两条并行的升级线**，计数器独立、互不污染：
+	//
+	//	softStreak 管"最近被限流"：从 soft_rate 起按分钟~小时级放大
+	//	fails      管"病态反复失败"：按 30m→1h→2h→6h 长期封禁
+	//
+	// 两者共用冷却入口，但语义不同 —— 合并成一个计数器会让
+	// "偶尔被限流"与"上游持续故障"无法区分。
+	softStreak    int
+	softRateModel string
+
+	// sessionDeadStreak 连续 session 失效（12153）计数（**持久化**，见 stateAccount）。
+	//
+	// 达到 sessionDeadThreshold 才真正 Disable：让网络抖动/刷新竞态自愈，
+	// 而真正失效的 session（每次都会 12153）仍会被停掉。
+	sessionDeadStreak int
+
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
 }
 
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断期）。
 func (e *entry) healthy(now time.Time) bool {
+	return e.healthyForModel(now, "")
+}
+
+// healthyForModel 与 healthy 相同，但额外考虑**模型级软冷却豁免**。
+//
+// # 语义
+//
+// 当 e.softRateModel 非空且 model 非空且 model != e.softRateModel 时，
+// `until` 这一条冷却**不适用**于本次请求：那个冷却只属于被限流的那个模型，
+// 换一个模型该账号完全可用。
+//
+// 熔断（breakerUntil）与禁用**不受豁免影响** —— 它们是账号级事实，
+// 与"请求哪个模型"无关。
+//
+// # 为什么需要它
+//
+// 上游 429 code=6004 是**模型级**限流（"该模型将在 X 时刻重置"），
+// 而不是账号级。改造前所有 429 都按账号级冷却处理，后果是：
+//
+//	账号因 gpt-5.5 被限流 30 分钟 → 请求 glm-5.2 也选不到它
+//	→ 明明还有可用的模型额度，却表现为"这个号废了"
+//
+// 在单账号部署下这更严重：整个网关对该账号的所有请求都被拒，
+// 而用户只是想换个模型。
+//
+// model 为空（无模型上下文，如额度刷新、保活）时**不豁免** ——
+// 无从判断"换了哪个模型"，保守按账号级冷却处理。
+func (e *entry) healthyForModel(now time.Time, model string) bool {
 	if e.disabled {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
-		return false
+		// 模型级豁免：冷却只属于另一个模型。
+		exempt := e.softRateModel != "" && model != "" && model != e.softRateModel
+		if !exempt {
+			return false
+		}
 	}
 	if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {
 		return false
@@ -224,6 +274,38 @@ type stateAccount struct {
 	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
 	LastSuccess time.Time `json:"last_success,omitempty"`
 	LastErr     time.Time `json:"last_err,omitempty"`
+
+	// SoftStreak 连续软限流次数（429 指数退避的指数）。
+	//
+	// ⚠ 必须落盘。它是"这个号最近被限流了几次"的记忆：
+	// 不落盘的话，一次重启就把退避指数清零 —— 而上游的限流并未因我们重启而消失，
+	// 表现是"重启后立刻又被限流一次"（正是这个指数要防的）。
+	//
+	// 旧状态文件没有这个字段 → 零值 0 → 等价于"没有连续限流记录"，
+	// 与改造前的行为一致，因此升级不需要迁移脚本。
+	SoftStreak int `json:"soft_streak,omitempty"`
+	// SoftRateModel 触发软冷却时记录的**模型名**（仅 6004 带重置时间时记）。
+	//
+	// 非空表示这次软冷却只对这一个模型生效：换个模型请求时该账号仍可用
+	// （见 entry.healthyForModel）。空 = 账号级软冷却，对所有模型生效。
+	SoftRateModel string `json:"soft_rate_model,omitempty"`
+
+	// SessionDeadStreak 连续 session 失效次数（12153）。
+	//
+	// # 为什么需要计数，而不是"一次就禁用"
+	//
+	// 12153 的实际成因里有一大类是**瞬时抖动**：网络闪断、上游瞬时故障、
+	// token 刷新的竞态窗口。这些情况下账号完全健康 ——
+	// 而改造前一次 12153 就 `Disable`（永久禁用，需人工重登），
+	// 于是一次网络抖动就能让一个好好的号掉出池子，且界面上只显示"已禁用"，
+	// 没有任何线索指向"它其实是被一次抖动误杀的"。
+	//
+	// 计数到阈值（3）才禁用，让抖动自愈（下一次成功会清零），
+	// 而真正失效的 session 仍然会被停掉（它每次都会 12153）。
+	//
+	// 落盘理由同 SoftStreak：重启不该让"这个号已经连续 2 次 session 失效"
+	// 这件事被忘掉 —— 那样它永远攒不满阈值。
+	SessionDeadStreak int `json:"session_dead_streak,omitempty"`
 }
 
 // stateFile 持久化格式。
@@ -265,6 +347,9 @@ type Pool struct {
 	breakerCooldown    time.Duration
 	breakerCooldownMax time.Duration
 
+	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
+	softRateMax time.Duration
+
 	// 三因子加权调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -295,6 +380,33 @@ const (
 	defaultBreakerCooldownMax = 6 * time.Hour
 )
 
+// 软限流指数退避（429）的默认参数与上限。
+const (
+	// defaultSoftRateMax 软冷却指数放大的封顶（2 小时）。
+	//
+	// 为什么是 2h 而不是与熔断同级的 6h：软限流是**上游的窗口性限流**，
+	// 窗口通常以分钟~小时计；封顶过高会让一个本来 1 小时就恢复的号
+	// 被我们自己冷掉 6 小时。真正病态反复失败的号由熔断器接管（30m→6h）。
+	defaultSoftRateMax = 2 * time.Hour
+	// softStreakShiftMax 左移位数上限。
+	//
+	// 无上限的左移会让 time.Duration（int64 纳秒）溢出成负数 ——
+	// 冷却截止变成**过去的时刻**，表现为"这个号突然又能用了"，
+	// 且没有任何日志线索。30 位 ≈ 2^30 倍，早已越过任何封顶值，
+	// 因此这个上限只在"封顶逻辑本身失效"时兜底。
+	softStreakShiftMax = 30
+)
+
+// sessionDeadThreshold 连续 session 失效多少次才真正禁用。
+//
+// 取 3 的理由：一次 12153 无法区分"瞬时抖动"与"session 真的死了"
+// （见 stateAccount.SessionDeadStreak），而两次仍可能是同一次抖动的余波
+// （网络恢复后第一次重试、刷新竞态的第二发）。三次则几乎必然是持续性失效。
+//
+// 代价分析：阈值过大（如 10）会让真正失效的号在池子里反复被选中、
+// 每次都白跑一次往返；阈值过小（如 1）就退回了改造前的误杀行为。
+const sessionDeadThreshold = 3
+
 // StoreSnapshotter 池状态快照镜像的最小接口（redisstore.Store 满足；Noop 空实现安全）。
 // 与本地 state.json 并存，作启动恢复备份：快照比本地新才采用，否则本地优先。
 type StoreSnapshotter interface {
@@ -316,6 +428,7 @@ func New(stateFp string) *Pool {
 		breakerThreshold:   defaultBreakerThreshold,
 		breakerCooldown:    defaultBreakerCooldown,
 		breakerCooldownMax: defaultBreakerCooldownMax,
+		softRateMax:        defaultSoftRateMax,
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
 	}
@@ -338,6 +451,19 @@ func (p *Pool) SetBreaker(threshold int, cooldown, cooldownMax time.Duration) {
 	}
 	if cooldownMax > 0 {
 		p.breakerCooldownMax = cooldownMax
+	}
+}
+
+// SetSoftRateMax 注入软冷却指数退避的封顶（main 从 config 解析后调用）。
+// 非正值保留原值（用 defaultSoftRateMax）。
+//
+// 它同时是"账号级软冷却最多冷多久"与"6004 带重置时间时的上限"两个语义的封顶 ——
+// 两处共用一个值是有意的：它们回答同一个问题（"这个号因为限流最多该被排到多后"）。
+func (p *Pool) SetSoftRateMax(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d > 0 {
+		p.softRateMax = d
 	}
 }
 
@@ -798,7 +924,9 @@ func (p *Pool) pickFor(provider string, tried map[string]bool, model string) *au
 		if tried != nil && tried[uid] {
 			continue
 		}
-		if !e.healthy(now) {
+		// 按**模型**判活：模型级软冷却（6004 带重置时间）只对该模型生效，
+		// 换模型时该账号仍应参与候选（见 entry.healthyForModel）。
+		if !e.healthyForModel(now, model) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -1137,16 +1265,136 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 
 // Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。
 // 冷却入口同时是熔断器的失败信号：喂入 fails，达到阈值按指数退避熔断（与 until 正交）。
+//
+// # CoolSoft 额外做「连续软限流指数退避」（借鉴 workbuddy2api-panel）
+//
+// 同一账号**连续**触发软冷却时，实际时长按 `d << (softStreak-1)` 逐次翻倍，
+// 封顶 softRateMax。首 streak=1 → 实际时长 = d，**单次调用语义与改造前完全一致**。
+//
+// 为什么需要它：上游 429 常是"按分钟级窗口"的限流，第一次 60s 冷却到期后
+// 立刻再撞一次是很常见的形态。固定 60s 会让这个账号在限流窗口内
+// 反复被选中又反复失败 —— 每次都是一趟白跑的往返（还占轮换预算）。
+// 指数退避让"屡次被限流"的号自动退到后排，把机会让给健康的号。
+//
+// 与熔断器的分工（两条并行的升级线，计数器独立）：
+//
+//	softStreak 管"近期被限流"，分钟~小时级放大，成功或签到解冻时清零
+//	fails      管"病态反复失败"，30m→1h→2h→6h 长期封禁
+//
+// 非 CoolSoft 的冷却入口会**清空** softRateModel（见下），
+// 避免上一次模型级限流的豁免痕迹泄漏到账号级冷却上。
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		if kind == CoolSoft {
+			e.softStreak++
+			d = p.softDurationLocked(d, e.softStreak)
+		}
 		e.until = time.Now().Add(d)
 		e.coolKind = kind
 		e.reason = reason
+		// 非模型级冷却入口：清空 6004 模型豁免痕迹。
+		//
+		// 不清的话会出现这一串：账号因 gpt-5.5 被模型级限流（softRateModel=gpt-5.5）
+		// → 随后因别的原因进入**账号级**冷却 → 但 exempt 判定仍看到
+		// softRateModel 非空 → 请求别的模型时被错误豁免，继续撞账号级故障。
+		e.softRateModel = ""
 		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
 		p.dirty.Store(true)
 	}
+}
+
+// softRateMaxOr 返回生效的 softRateMax（未注入时按默认值），供封顶计算。
+// 调用方必须已持有 p.mu。
+func (p *Pool) softRateMaxOr() time.Duration {
+	if p.softRateMax > 0 {
+		return p.softRateMax
+	}
+	return defaultSoftRateMax
+}
+
+// softDurationLocked 按连续软冷却次数把基数 d 指数放大：`d << (streak-1)`，封顶 softRateMax。
+//
+// streak<=1 时原样返回 d —— 这一条保证了"单次 429"的行为与改造前逐字节一致。
+//
+// 左移位数受 softStreakShiftMax 限制：streak 极大时（例如一个号被限流几十次）
+// 无上限的左移会让 time.Duration 溢出成负数，冷却变成一个**过去的时刻**
+// —— 表现为"这个号突然又能用了"，而且看不出原因。
+//
+// 溢出兜底：左移后 d <= 0 说明已经溢出，按封顶处理。
+// 调用方必须已持有 p.mu。
+func (p *Pool) softDurationLocked(d time.Duration, streak int) time.Duration {
+	if streak <= 1 {
+		return d
+	}
+	shift := streak - 1
+	if shift > softStreakShiftMax {
+		shift = softStreakShiftMax
+	}
+	d <<= shift
+	if max := p.softRateMaxOr(); d > max || d <= 0 {
+		d = max
+	}
+	return d
+}
+
+// CooldownSoftForModel 429 的**模型级**软冷却入口。
+//
+// 与 Cooldown 的区别：当上游明说"将在 … 重置"时（429 code=6004），
+// 把冷却截止精确设为 resetAt，而不是靠"基数 × 指数退避"去猜。
+//
+// # 收窄规则
+//
+//	resetAt 非零（上游给了权威时刻）→ until = min(resetAt, now+softRateMax)，
+//	                                    softRateModel = model（该模型被豁免）
+//	resetAt 零值（无时间文案 / 非 6004）→ 完全退回 Cooldown 的现状
+//	                                    （softStreak 指数退避 + 封顶），softRateModel 保持空
+//
+// # 为什么带 resetAt 时**不做**指数放大
+//
+// 重置时间已经是上游的权威答案。再指数放大等于无视它明说的恢复时刻 ——
+// 那正是本入口要解决的问题（改造前的形态就是"猜一个越来越长的冷却"）。
+//
+// ⚠ softStreak 仍然递增：解析时间的这次冷却不参与退避，但计数照常累加，
+// 后续**无时间**的 6004 会从当前 streak 继续退避。两个口径各自成立。
+//
+// 熔断信号照旧喂入（冷却与熔断正交，行为与 Cooldown 一致）。
+func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	e.softStreak++
+	hasReset := !resetAt.IsZero()
+	now := time.Now()
+	var d time.Duration
+	if hasReset {
+		// 上游给了权威时刻：取 min(resetAt, now+softRateMax)。
+		cap := now.Add(p.softRateMaxOr())
+		switch {
+		case resetAt.After(cap):
+			d = cap.Sub(now)
+		case resetAt.After(now):
+			d = resetAt.Sub(now)
+		default:
+			// 重置时刻已过（时钟偏移 / 文案过期）→ 冷却极短，立即恢复。
+			// 用 1ms 而不是 0：0 会让 until = now，"是否在冷却中"的判定
+			// 变成与调用时刻的纳秒级竞态。
+			d = time.Millisecond
+		}
+		e.softRateModel = model // 仅带解析时间的 6004 才记模型（豁免画界）
+	} else {
+		d = p.softDurationLocked(base, e.softStreak)
+		e.softRateModel = ""
+	}
+	e.until = now.Add(d)
+	e.coolKind = CoolSoft
+	e.reason = reason
+	p.recordBreakerFailureLocked(e)
+	p.dirty.Store(true)
 }
 
 // recordBreakerFailureLocked 累计一次熔断失败；达到阈值则按指数退避熔断。
@@ -1207,6 +1455,77 @@ func (p *Pool) Disable(uid, reason string) {
 	}
 }
 
+// NoteSessionDead 记录一次 session 失效（12153），返回是否**因此被禁用**。
+//
+// # 为什么改成计数门控（借鉴 workbuddy2api-panel）
+//
+// 改造前 handler 对 ErrKindSessionDead 直接调 `Pool.Disable` —— 一次 12153
+// 就永久禁用。而 12153 的成因里有一大类是**瞬时抖动**（网络闪断、
+// 上游瞬时故障、token 刷新竞态）：账号完全健康，却因为一次抖动
+// 掉出池子，且界面上只显示"已禁用"，没有线索指向真因。
+//
+// 现在只有**连续**达到 sessionDeadThreshold 次才禁用。任何一次成功
+// （NoteSuccess）都会清零，所以：
+//
+//	真抖动      → 下一次请求成功 → 计数归零 → 账号毫发无伤
+//	session 真死 → 每次请求都 12153 → 三次后禁用（行为与改造前一致）
+//
+// 未达阈值的每一次仍然记错误并喂熔断计数：它们确实是失败，
+// 不该被当成"无事发生"（否则一个持续抖动的号会被无限使用）。
+func (p *Pool) NoteSessionDead(uid string) (disabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	e.sessionDeadStreak++
+	e.errTotal++
+	e.lastErr = time.Now()
+	if e.sessionDeadStreak >= sessionDeadThreshold {
+		e.disabled = true
+		e.reason = "12153 session dead（连续 " + itoa(e.sessionDeadStreak) + " 次）"
+		p.dirty.Store(true)
+		return true
+	}
+	p.recordBreakerFailureLocked(e)
+	p.dirty.Store(true)
+	return false
+}
+
+// SessionDeadStreak 返回账号当前连续 session 失效次数（管理台展示用）。
+func (p *Pool) SessionDeadStreak(uid string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if e, ok := p.byUID[uid]; ok {
+		return e.sessionDeadStreak
+	}
+	return 0
+}
+
+// itoa 极简整数转字符串（避免为一个日志字符串引入 strconv 到本文件顶部）。
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	var b [20]byte
+	p := len(b)
+	for i > 0 {
+		p--
+		b[p] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		p--
+		b[p] = '-'
+	}
+	return string(b[p:])
+}
+
 // reviveCoolingLocked 只清冷却（until/coolKind/reason）并更新 credits，不动熔断器
 // （fails/retryCount/breakerUntil）。签到解冻走这里：签到成功只证明余额恢复与
 // billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx 信号）不应被签到覆盖。
@@ -1217,6 +1536,13 @@ func (p *Pool) reviveCoolingLocked(e *entry, q QuotaView) {
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
+	// 签到解冻同时清软限流退避计数：余额恢复说明上游侧状态已刷新，
+	// 保留旧的连续限流次数会让解冻后的第一次 429 直接吃一个放大过的冷却。
+	e.softStreak = 0
+	e.softRateModel = "" // 冷却域清零时一并清模型豁免痕迹
+	// session 失效计数也清零：签到成功本身就是一次"会话可用"的证明
+	// （它走的正是同一条凭证路径）。不清会让签到解冻后的号继续攒旧的计数。
+	e.sessionDeadStreak = 0
 }
 
 // ReenableIfUsable 签到后解冻：由**调用方（上游）**判断这个账号是否已可用。
@@ -1275,6 +1601,14 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.fails = 0
 		e.retryCount = 0
 		e.breakerUntil = time.Time{}
+		// 软限流退避线同样清零：一次成功证明"这个号现在没被限流"，
+		// 继续按历史连续次数放大下一次冷却会让已恢复的号被过度惩罚。
+		e.softStreak = 0
+		e.softRateModel = ""
+		// session 失效计数同样清零：一次成功证明会话是活的。
+		// 这是"瞬时抖动"能自愈的关键 —— 不清的话它会把抖动一路攒到阈值，
+		// 三次跨天的无关抖动叠加起来就误禁了一个健康的号。
+		e.sessionDeadStreak = 0
 		p.dirty.Store(true)
 	}
 }
@@ -1601,6 +1935,12 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			errTotal:     errTotal,
 			lastErr:      s.LastErr,
 			lastSuccess:  s.LastSuccess,
+			// 软限流退避状态（旧文件无此字段 → 零值 = 无连续限流记录，
+			// 与改造前行为一致，无需迁移脚本）。
+			softStreak:    s.SoftStreak,
+			softRateModel: s.SoftRateModel,
+			// session 失效连续计数（旧文件无此字段 → 0 = 全新计数）。
+			sessionDeadStreak: s.SessionDeadStreak,
 		}
 	}
 }
@@ -1683,6 +2023,12 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			ErrTotal:     e.errTotal,
 			LastSuccess:  e.lastSuccess,
 			LastErr:      e.lastErr,
+			// 软限流退避状态必须落盘（理由见 stateAccount.SoftStreak）：
+			// 不落盘的话一次重启就把退避指数清零，而上游的限流并未随我们重启消失。
+			SoftStreak:    e.softStreak,
+			SoftRateModel: e.softRateModel,
+			// session 失效连续计数必须落盘（理由见 stateAccount.SessionDeadStreak）。
+			SessionDeadStreak: e.sessionDeadStreak,
 		}
 	}
 	return sf
@@ -1711,6 +2057,10 @@ func (p *Pool) Enable(uid string) bool {
 
 // ClearCooldown 人工重置：清软/硬冷却与熔断运行态（fails/retryCount/breakerUntil），
 // 让账号立刻重新参与选号。credits 不动——积分只能由上游查询结果覆盖。
+//
+// 同时清空 softStreak/softRateModel：这是"人工宣布这个号没问题"，
+// 留着退避指数会让解冻后的第一次 429 立刻吃一个被放大过的冷却 ——
+// 用户点了"清冷却"却发现它一分钟后又冷了两小时，那是个说不通的行为。
 func (p *Pool) ClearCooldown(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1724,6 +2074,11 @@ func (p *Pool) ClearCooldown(uid string) bool {
 	e.fails = 0
 	e.retryCount = 0
 	e.breakerUntil = time.Time{}
+	e.softStreak = 0
+	e.softRateModel = ""
+	// session 失效计数一并清空：这是人工宣布"这个号没问题"，
+	// 留着旧计数会让它带着 2/3 的进度重新上阵，下次抖动就被误禁。
+	e.sessionDeadStreak = 0
 	p.dirty.Store(true)
 	return true
 }

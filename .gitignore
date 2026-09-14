@@ -59,6 +59,20 @@ tasks/
 !SECURITY.md
 !CHANGELOG.md
 
+# ⚠ 被 go:embed 内嵌的 md 必须**显式**豁免 —— 它不是文档，是编译输入。
+#
+# 实测踩到的坑：`*.md` 把 internal/prompt/defaultprompt.md 一起忽略了，
+# 而 prompt.go 里是 `//go:embed defaultprompt.md`。
+# 后果是**最阴的一种**：本机 go build 正常（文件就在磁盘上），
+# 只有 CI 的干净签出才会失败 —— `go build ./...` 报
+# "pattern defaultprompt.md: no matching files found"，
+# 于是 Release workflow 整条挂掉、一个产物都出不来。
+#
+# 教训：`*.md` 这种按扩展名一刀切的规则，必须回头对每一处 go:embed 核一遍。
+# 新增内嵌资源时，先在本地跑一遍
+#   git check-ignore -v <文件>   # exit 0 = 会被忽略 = 构建必挂
+!internal/prompt/defaultprompt.md
+
 # 编辑器/工具留下的备份与「写错目标名」的编译产物。
 # 实测出现过 wb2api-server.exe~（13 MB）：某次 go build -o 的目标名
 # 多打了一个 ~，于是编译器把它当成一个**新文件**建出来，

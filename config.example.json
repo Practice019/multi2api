@@ -3,19 +3,32 @@
   "api_key": "your-api-key-here",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "server": {
+    "max_body_mb": 8
+  },
   "cooldown": {
-    "soft_rate": "60s"
+    "soft_rate": "60s",
+    "soft_rate_max": "2h"
   },
   "schedule": {
     "checkin_hours": [9, 21],
     "keepalive_hours": [22],
     "checkin_enabled": true,
-    "keepalive_enabled": true
+    "keepalive_enabled": true,
+    "activity_hours": [10],
+    "activity_enabled": true
   },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
-    "idle_timeout_seconds": 300
+    "idle_timeout_seconds": 300,
+    "user_agent": "",
+    "client_version": "",
+    "cli_version": "",
+    "client_name": "",
+    "device_token": "",
+    "device_token_file": "",
+    "passthrough_ip": false
   },
   "codearts": {
     "enabled": true,
@@ -23,6 +36,10 @@
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
+  },
+  "prompt": {
+    "mode": "custom",
+    "file": ""
   },
   "upstash": {
     "url": "",

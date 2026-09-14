@@ -60,6 +60,11 @@ type resettingProvider struct {
 
 var _ gateway.Provider = (*resettingProvider)(nil)
 
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+func (p *resettingProvider) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
+	return time.Time{}, false
+}
+
 func (p *resettingProvider) ResetAt(_ gateway.Credential) (time.Time, bool) {
 	if p.until == nil {
 		return time.Time{}, false
@@ -164,6 +169,11 @@ type extRouter struct {
 }
 
 var _ ProviderRouter = (*extRouter)(nil)
+
+// SoftRateReset 测试桩：默认不给出模型级限时（保持账号级软冷却路径）。
+func (r *extRouter) SoftRateReset(_ string, _ int, _ string) (time.Time, bool) {
+	return time.Time{}, false
+}
 
 func (r *extRouter) ResetAt(id string, cred gateway.Credential) (time.Time, bool) {
 	pv, ok := r.ext[id]
