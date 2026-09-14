@@ -340,15 +340,24 @@ func clampInt64(v int64) int {
 // Secret 是 any（各上游凭证结构不同），所以必须类型断言。
 // **断言失败要返回明确错误，不能 panic** —— 这是契约要求，也有测试守着。
 //
-// ⚠ 这里刻意**同时支持** *Auth 与 *auth.Auth：
+// ⚠ 只接受 `*codearts.Auth`，**不接受** `*auth.Auth`。
 //
-//	*codearts.Auth   本包的原生凭证（cmd/server 与测试用）
-//	*auth.Auth       核心账号池投影出来的通用凭证
+// # 这条注释曾经是错的，而错的方向很危险
 //
-// 第二条是历史包袱（改造前 backend.go 把 codearts.Auth 投影成 auth.Auth 交给
-// 旧的 server.Backend），但**保留**它有价值：核心的账号池目前仍以 auth.Auth
-// 为通用流通形态，投影后 UID/AccessToken/RefreshToken/ExpiresAt 足以重建
-// 一个可用的 CodeArts 凭证（真实签名材料 AK/SK 从 AccessToken 字段回读）。
+// 它原先写着"刻意**同时支持** *Auth 与 *auth.Auth"，第二条还给了理由
+//（"投影后足以重建一个可用的 CodeArts 凭证"）。但下面的 switch 从来就只认
+// `*Auth` —— 注释描述的是一个**不存在的**行为。
+//
+// 危险的地方在于：它恰好掩盖了唯一真会落到 `*auth.Auth` 的那条路径。
+// 核心在拿不到不透明 secret 时会回落成 `cred.Secret = e.a`（就是 `*auth.Auth`），
+// 于是这里报"凭证类型不对"。那句话读起来像"已支持"，实际是"必失败"。
+//
+// 那条回落路径现在是**可达但没有产出的**：
+//   · 正常装配下，池里每个 codearts 账号的 secret 都是 store 里的 `*Auth`
+//     （启动由 syncCodeartsAccounts 装、"重载 auths"由 CredentialSecretLoader 装）
+//   · 只有"池里有一个没有 secret 的 codearts 号"时才会走到这里 ——
+//     那正是评审 R2 修的缺口（重载路径原先不交 secret），
+//     修完之后这条回落只剩"防静默失败"的意义，不再是正常路径。
 //
 // 不接受其它类型：返回错误而不是"尽力而为"，避免出现签名材料为空的静默失败。
 func authOf(cred gateway.Credential) (*Auth, error) {
