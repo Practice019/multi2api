@@ -677,6 +677,14 @@
       <div style="padding:9px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);flex-wrap:wrap">
         <span class="dim" style="font-size:12px">任务明细</span>
         <select id="growthAccount" style="padding:3px 8px;font-size:12px;max-width:280px"></select>
+        <!-- 这两个按钮作用于**下拉框选中的那个账号**，所以放在这一行而不是顶部工具条：
+             作用域一眼可见，不必额外写说明。
+             它们对应两条真实端点（POST /admin/growth/auto-all、POST /admin/school/run），
+             都返回 202 + 后台执行 —— 进度由 watchTask() 走既有的 /admin/task 通道。 -->
+        <button id="btnGrowthAutoAll" style="padding:3px 10px;font-size:12px"
+          title="对这个账号把「一键完成」能做的待办逐个做完并领奖（伪造客户端行为遥测；后台执行，顶部显示进度）">一键完成待办</button>
+        <button id="btnGrowthSchoolRun" style="padding:3px 10px;font-size:12px"
+          title="对这个账号跑一遍开学季闭环（分享 / 3 次对话 / 专家使用 + 抽完剩余次数；后台执行）">开学季一键完成</button>
         <span class="tog" id="growthViews" style="gap:0">
           <button data-gview="acceptable" class="on" style="padding:3px 10px;font-size:12px;border-radius:8px 0 0 8px">待接单</button>
           <button data-gview="running" style="padding:3px 10px;font-size:12px;border-left:0">进行中</button>
@@ -3021,6 +3029,11 @@ let loginProvider = '';
         watchTask._hide = setTimeout(() => { el.hidden = true; }, 5000);
       }
       clearInterval(taskTimer); taskTimer = null;
+      // refresh() 拉的是账号/模型/统计，**不含成长数据** —— 而"一键完成待办"
+      // 改的正是成长面板要展示的东西。不补这一行的话，后台任务跑完 3 分钟，
+      // 任务明细里还是那一屏旧待办，用户只能自己去点刷新。
+      // loadGrowth(false) 走后端缓存（实测 ~1ms），对签到类任务也没有代价。
+      loadGrowth(false);
       refresh(); loadHistory();
     };
     tick();
@@ -4200,6 +4213,15 @@ let loginProvider = '';
   let growthViewPicked = false;
   // 任务明细一次只显示一个账号，由 growthAccount 下拉框决定。
   let growthUID = '';
+  // 可自动化任务码集合，来自 GET /admin/growth/auto/actions。
+  //
+  // # 为什么从后端取而不是写死在前端
+  //
+  // 后端的能力表（internal/workbuddy/autotask.go 的 autoActions）是**唯一的**事实来源。
+  // 前端抄一份的话，后端加第 18 条时按钮不会出现，而且**没有任何信号** ——
+  // 与 webui_endpoint_guard_test.go 要防的"静默漂移"是同一种病。
+  let autoCodes = new Set();
+  let autoCodesLoaded = false;
 
   const GROWTH_STATUS_TEXT = {
     // 「未接单」只在「还没领到第一只 Buddy」时出现，且官方前端没有这个状态。
@@ -4342,15 +4364,30 @@ let loginProvider = '';
       const locked = t.locked ? ' <span class="pill warn">未解锁</span>' : '';
       // 领取优先于接单：completed 的任务已经做完了，唯一可做的就是领奖。
       //
-      // accepted / in_progress 给的不是按钮而是说明 —— 这两类任务**本网页无法代做**，
-      // 必须去 WorkBuddy 客户端里真正把动作做掉。留一个禁用按钮只会让人反复点。
+      // ⚠ 这一格原来对 accepted / in_progress 一律显示「去客户端做」，
+      // 注释写着"这两类任务**本网页无法代做**"。移植伪造遥测层之后该结论
+      // **不再成立**：autoActions 里那 17 条就是网关能直接做完的。
+      //
+      // 所以现在的判据是「该任务码在不在后端能力表里」：
+      //   在 → 「一键完成」（后端自己会处理"先接单"这一步）
+      //   不在 → 仍然退回说明文字 —— 对**确实**只能去客户端做的任务保留诚实提示
+      //
+      // ⚠ 必须排除**已做完**的任务（claimed）。claimed 的 claimable 为 false，
+      // 于是它会一路落到这个分支上 —— 只看能力表的话，「已领取」的任务行也会
+      // 长出一个「一键完成」按钮，点了只会回一句"已完成（1/1）"。
+      // 这里复用 GROWTH_VIEWS.done.test 而**不另写一遍** status 判断：
+      // "什么算做完"只有一处定义，否则两边必然会漂移（视图把它算已完成、
+      // 按钮却认为还能再做）。
+      const canAuto = autoCodes.has(t.task_code) && !GROWTH_VIEWS.done.test(t);
       const btn = t.claimable
         ? `<button data-gclaimreward="${esc(t.task_code)}" data-uid="${esc(g.uid)}">领取 ${t.reward_credit || 0} 分</button>`
-        : (t.status === 'not_accepted' && !t.locked)
-          ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost">接单</button>`
-          : (t.status === 'accepted' || t.status === 'in_progress')
-            ? '<span class="dim" style="font-size:11px">去客户端做</span>'
-            : '<span class="dim">—</span>';
+        : (canAuto && !t.locked)
+          ? `<button data-gauto="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost" title="网关直接把该任务做完并领奖（上报伪造的客户端行为遥测）；只做这一个任务">一键完成</button>`
+          : (t.status === 'not_accepted' && !t.locked)
+            ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost">接单</button>`
+            : (t.status === 'accepted' || t.status === 'in_progress')
+              ? '<span class="dim" style="font-size:11px">去客户端做</span>'
+              : '<span class="dim">—</span>';
       const tag = t.tag ? ` <span class="pill">${esc(t.tag)}</span>` : '';
       // 到期列：只有部分任务有期限（上游 18 个里 4 个），其余显示占位。
       // 已过期时即使有「领取」按钮也要同时给出提示 —— 那种情况下按钮点了会失败。
@@ -4398,6 +4435,20 @@ let loginProvider = '';
     let r;
     try { r = await admin('/admin/growth' + (refresh ? '?refresh=1' : '')); }
     catch (e) { $('growthRows').innerHTML = rowPlaceholder(COLS.growth, e.message, 'err'); return false; }
+    // 可自动化任务码：**首次一定取**（否则页面上永远没有「一键完成」按钮），
+    // 之后只在手动「刷新」时重取 —— 它是静态能力表（17 条写死在
+    // internal/workbuddy/autotask.go 的 autoActions），不随账号变化，
+    // 没必要跟着每次领奖后的局部刷新多跑一趟。
+    //
+    // 取不到就退化为"不显示一键完成"，**不阻塞**成长数据展示：
+    // 按钮少一个远好过整块面板报错（后端没挂这条路由时正是这个分支）。
+    if (!autoCodesLoaded || refresh) {
+      try {
+        const a = await admin('/admin/growth/auto/actions');
+        autoCodes = new Set((a.actions || []).map(x => x.task_code));
+        autoCodesLoaded = true;
+      } catch { /* 能力表拿不到：保留上一次的集合，行内按钮退化为「去客户端做」 */ }
+    }
     renderGrowth(r.accounts);
     // 额度列取自 share（/admin/accounts 的本地缓存积分，只有 RefreshCredits 会更新它）。
     // 手动「刷新」意味着「我怀疑数据旧了」，所以顺手把账号视图也拉一次；
@@ -4462,7 +4513,9 @@ let loginProvider = '';
     const blocked = /需要先完成前置任务[：:]\s*(.+)$/.exec(msg);
     if (blocked) {
       notice('接单被前置任务挡住',
-        blocked[1].trim() + '\n\n这一步只能在 WorkBuddy 客户端里做，本网页无法代做。完成后回到这里再点「接单」即可。');
+        blocked[1].trim() + '\n\n若这个前置任务在上方任务表里带「一键完成」按钮，直接点它即可；' +
+        '任务表里没有的（或显示「去客户端做」的）才需要去 WorkBuddy 客户端里做。' +
+        '前置做完后回到这里再点「接单」。');
     }
   }
 
@@ -4473,6 +4526,116 @@ let loginProvider = '';
       const r = await admin('/admin/growth/' + act, { method: 'POST', body: '{}' });
       if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
     } catch (e) { growthError(e, `全部${label}`); }
+  }
+
+  // ------------------------------------------------------------ 一键完成（伪造遥测层）
+  //
+  // 三个入口 ↔ 后端三条端点：
+  //
+  //   行内「一键完成」    POST /admin/growth/auto      {uid, task_code}  **同步**，返回回执
+  //   「一键完成待办」    POST /admin/growth/auto-all  {uid}             202 + 后台
+  //   「开学季一键完成」  POST /admin/school/run       {uid}             202 + 后台
+  //
+  // # 为什么单任务同步、整账号异步
+  //
+  // 单任务实测 10s 量级（含上游异步计分的回读轮询，见 claimPollAttempts/Gap），
+  // 同步等可以接受，而且能直接把「到底动没动、加了多少分」播报出来。
+  // 整账号 17 项实测约 180s —— 同步等会把浏览器/反向代理拖到超时，后端因此返回
+  // 202 并复用本仓库既有的共享任务槽；前端用 watchTask() 轮询 /admin/task 即可，
+  // 与「全部签到」等既有按钮走**同一条**进度通道（不另造一套）。
+  //
+  // # 为什么不加 confirm
+  //
+  // 这三条都是**纯收益**动作：不发真实动作、不消耗账号资源，只把该拿的分领回来，
+  // 与 GROWTH_HARMLESS 的口径一致。它确实是"上报伪造事件"这一层能力的入口，
+  // 所以按钮 title 与本文都写明了口径，但不额外打断。
+  //
+  // # 成功判据不是 HTTP 200
+  //
+  // 上游计分是**异步**的：上报后进度要数秒才刷新，且 200 也可能是"形状不符被静默丢弃"。
+  // 后端因此回读了 progress_before/after 与 claimed，前端以这些字段为判据 ——
+  // 只看 HTTP 状态会把"没计分"误报成成功。
+
+  // autoBenign 判断一条"未完成"回执是不是**预期内**的正常情况（不该打红）。
+  //
+  // 典型两类：任务本来就已完成（幂等）、black_cat 不在 23:00–08:00 计数窗口。
+  // 这些是后端的诚实降级，不是故障 —— 与 growthError 的 benign 判据同一口径。
+  function autoBenign(r) {
+    return /已完成|不在 23:00|不在窗口|不计分|跳过|未解锁/.test((r && r.message) || '');
+  }
+
+  // autoToastText 把回执拼成一句话：后端原文 + 进度变化。
+  //
+  // ⚠ 这里**不再**追加"+N 分 +M 能"：后端已经在 message 里拼过那一段了
+  // （autotask.go 仅在 credit/energy > 0 时追加），再拼一次会渲染成
+  // "…已自动领奖 +100 分 +5 能（0/1 → 1/1），+100 分 +5 能" ——
+  // 实测就是这个样子。奖励口径只由后端一处负责，前端只补它没说的进度。
+  function autoToastText(r) {
+    const prog = (r.progress_after && r.progress_before) ? `（${r.progress_before} → ${r.progress_after}）` : '';
+    return `${r.message || '完成'}${prog}`;
+  }
+
+  async function growthAutoOne(uid, taskCode, btn) {
+    await busyRun(btn, async () => {
+      let r;
+      try {
+        r = await admin('/admin/growth/auto',
+          { method: 'POST', body: JSON.stringify({ uid, task_code: taskCode }) });
+      } catch (e) {
+        // 三条可解释的拒绝（后端的 sentinel error 原文，见 internal/workbuddy/autotask.go）：
+        //   501 errTaskNotAuto   "该任务需要客户端内交互（无对应接口），无法自动完成"
+        //   404 errTaskNotFound  "该账号没有此任务"
+        //   409 errTaskBusy      "该账号有任务动作正在执行中，请等本轮结束后再试"
+        // 文案要**逐字对齐后端**：这里按关键字匹配，改后端措辞会让判据失效。
+        // 打红的只留给真故障（502 上游错误等）。
+        const msg = (e && e.message) || String(e);
+        const benign = /无法自动完成|没有此任务|正在执行中|请等本轮/.test(msg);
+        toast(`一键完成 ${taskCode}：${msg}`, !benign);
+        return;
+      }
+      toast(`${taskCode}：${autoToastText(r)}`, !r.ok && !autoBenign(r));
+      // 刷新与 growthAct 同口径：loadGrowth(false) 读后端缓存（写入时后端已就地
+      // 刷新过该账号快照），不强制回源，避免"点了要等 7 秒"。
+      await Promise.all([loadGrowth(false), refresh(), loadHistory()]);
+      return r.ok ? true : undefined;
+    }, { label: '一键完成', busyText: '执行中…' });
+  }
+
+  // 整账号 + 开学季共用的"启动后台任务"收尾：202 → 播报 + 接上进度通道。
+  async function autoStart(url, uid, okMsg) {
+    const r = await admin(url, { method: 'POST', body: JSON.stringify({ uid }) });
+    if (r && r.started) { toast(okMsg); watchTask(); }
+    return true;
+  }
+
+  // 后台任务的 409（已有任务在跑）是**互斥锁正常工作**，不是故障 ——
+  // 与「全部签到」等按钮一样不该打红，否则用户会以为是自己点坏了。
+  // 匹配后端两处不同措辞：单账号分支回 errTaskBusy 原文，全池分支回"已有任务在执行中，请等它结束"。
+  function autoStartErr(e, label) {
+    const msg = (e && e.message) || String(e);
+    toast(`${label}：${msg}`, !/正在执行中|请等本轮|已有任务/.test(msg));
+  }
+
+  async function growthAutoAll(btn) {
+    const uid = growthUID;
+    if (!uid) { toast('先在「任务明细」里选一个账号', true); return; }
+    await busyRun(btn, async () => {
+      try {
+        return await autoStart('/admin/growth/auto-all', uid,
+          '已启动：本账号全部可自动化任务（后台执行，顶部显示进度）');
+      } catch (e) { autoStartErr(e, '一键完成待办'); return undefined; }
+    }, { label: '一键完成待办', busyText: '启动中…' });
+  }
+
+  async function growthSchoolRun(btn) {
+    const uid = growthUID;
+    if (!uid) { toast('先在「任务明细」里选一个账号', true); return; }
+    await busyRun(btn, async () => {
+      try {
+        return await autoStart('/admin/school/run', uid,
+          '开学季已启动（后台执行，顶部显示进度）');
+      } catch (e) { autoStartErr(e, '开学季一键完成'); return undefined; }
+    }, { label: '开学季一键完成', busyText: '启动中…' });
   }
 
   // ---------------------------------------------------------------- 请求日志（落盘历史）
@@ -6223,6 +6386,10 @@ let multCatalogFailed = false;
     $('btnGrowthMakeupAll').onclick = () => growthAll('makeup');
     $('btnGrowthOpenAll').onclick = () => growthAll('open');
     $('btnGrowthDrawAll').onclick = () => growthAll('draw');
+    // 一键完成：单任务在行内（data-gauto 委托，见 growthGroups），
+    // 整账号与开学季在这两个按钮上 —— 都作用于任务明细分区的下拉框选中账号。
+    $('btnGrowthAutoAll').onclick = () => growthAutoAll($('btnGrowthAutoAll'));
+    $('btnGrowthSchoolRun').onclick = () => growthSchoolRun($('btnGrowthSchoolRun'));
 
     // 本机登录的按钮长在明细节头里（随 renderGrowthGroups 重建），
     // 所以走 growthGroups 上的事件委托，而不是给按钮本身挂 onclick。
@@ -6233,6 +6400,11 @@ let multCatalogFailed = false;
       // 行内「领取 N 分」：领这一个任务的奖励
       const rw = ev.target.closest('button[data-gclaimreward]');
       if (rw) { growthAct(rw.dataset.uid, 'claim', rw.dataset.gclaimreward, rw); return; }
+      // 行内「一键完成」：网关直接把这个任务做完（上报伪造遥测）并领奖。
+      // 走这条而不是 growthAct —— 它不是 /admin/growth/<act> 那六个动作之一，
+      // 而是独立端点 POST /admin/growth/auto。
+      const au = ev.target.closest('button[data-gauto]');
+      if (au && !au.disabled) { growthAutoOne(au.dataset.uid, au.dataset.gauto, au); return; }
       // 行内「接单」：把未接单的任务接进列表
       const ac = ev.target.closest('button[data-gaccept]');
       if (ac) { growthAct(ac.dataset.uid, 'accept', ac.dataset.gaccept, ac); return; }
