@@ -500,6 +500,18 @@ func (c *Client) RefreshToken(a *Auth) error {
 	if err != nil && status >= 400 && isRefreshTokenConsumed(raw) {
 		if c.adoptDiskRefreshToken(a) {
 			log.Printf("codearts: 内存凭证已被消费，采用磁盘上更新的 refresh_token 重试 (uid=%s)", a.UID)
+			// ⚠ 必须**重新解一次钥匙**（评审发现：这里原先沿用上面那个 kp）。
+			//
+			// 采磁盘凭证时会连 DPoP 私钥一起换掉 —— 外部重新登录（或手工修好）
+			// 写进同一个文件的那份新凭证，**必然带一把新钥匙**。而 DPoP 私钥与
+			// refresh_token 是**配对**的（见 adoptCodeartsCredInPlace 的注释），
+			// 拿自愈前解出的旧 kp 去签新 token，会被上游按"签名/绑定不匹配"拒绝：
+			// 自愈重试因此变成一次**注定失败**的请求，还把账号拖进冷却。
+			kpNew, kerr := FromPrivateJWK(a.DPoPPrivateKeyJWK)
+			if kerr != nil {
+				return fmt.Errorf("refresh_failed: 自愈后恢复 DPoP 密钥: %w", kerr)
+			}
+			kp = kpNew
 			// 只重试一次：不用递归、不进循环。
 			_, rawRetry, retryErr := c.refreshAttempt(a, kp)
 			if retryErr != nil {
@@ -663,6 +675,30 @@ func (c *Client) adoptDiskRefreshToken(a *Auth) bool {
 	a.SecretKey = disk.SecretKey
 	a.SecurityToken = disk.SecurityToken
 	a.ExpiresAt = disk.ExpiresAt
+
+	// ⚠ 这里采纳的字段集必须与 adoptCodeartsCredInPlace（cmd/server）**一致**。
+	//
+	// 原先只抄 RT/AK/SK/ST/ExpiresAt，把 DPoP 私钥与 client_id 落下了 ——
+	// 于是对象进入"新 token + 旧钥匙"的配对错位状态，而这是一条**会自我固化**
+	// 的错位：
+	//
+	//	1. 自愈只抄了一半 → 重试拿旧钥匙签新 token → 上游按绑定不匹配拒绝
+	//	2. 更糟的是 store.list() 的检测判据 caCredFieldsDiffer 当时也不看钥匙，
+	//	   而 RT/AK/SK/ST/ExpiresAt 此时**已经全部相等** → 判 false →
+	//	   adoptCodeartsCredInPlace（它**会**抄钥匙）再也不跑
+	//	3. → 该账号每次续期都失败，直到重启进程（启动时 byUID 为空，才会全新加载）
+	//
+	// 第 3 步正是本次交付要根除的那类故障（"只能靠重启网关恢复"），
+	// 所以两侧的字段集与检测判据现在被一起对齐了：
+	// **检测什么，就必须能修好什么。**
+	// 可用性判据走 HasUsableDPoPKey：nil / 空白 / JSON null 都算"磁盘没带钥匙"，
+	// 那时**保持内存那把不动**（清空会让对象连发请求的资格都没有）。
+	if HasUsableDPoPKey(disk.DPoPPrivateKeyJWK) {
+		a.DPoPPrivateKeyJWK = disk.DPoPPrivateKeyJWK
+	}
+	if disk.ClientID != "" {
+		a.ClientID = disk.ClientID
+	}
 	a.Unlock()
 	return true
 }

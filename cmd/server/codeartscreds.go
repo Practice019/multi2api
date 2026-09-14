@@ -262,24 +262,48 @@ func adoptCodeartsCredInPlace(dst, src *codearts.Auth) {
 	dst.RefreshToken = src.RefreshToken
 	dst.FilePath = src.FilePath
 
-	dst.DPoPPrivateKeyJWK = src.DPoPPrivateKeyJWK
+	// 钥匙只在**带了一把可用的**时候才写：磁盘上丢了 dpop 段（或写成 null）时
+	// 不得清空内存里那把 —— 清空会让对象连发请求的资格都没有，
+	// 而"磁盘没钥匙"本身不是能被修好的差异。
+	if codearts.HasUsableDPoPKey(src.DPoPPrivateKeyJWK) {
+		dst.DPoPPrivateKeyJWK = src.DPoPPrivateKeyJWK
+	}
 	dst.ClientID = src.ClientID
 	dst.Nickname = src.Nickname
 }
 
 // caCredFieldsDiffer 报告两份凭证的**凭证材料**是否不同。
 //
-// 只比"会影响能不能发出请求"的字段（AK/ST/refresh_token/过期时刻），
-// **不比** Nickname：昵称变了不代表凭证要重装。
+// 只比"会影响能不能发出请求"的字段，**不比** Nickname：
+// 昵称变了不代表凭证要重装。
 //
 // 用途是**避免无谓的原地改写**：镜像文件在绝大多数 List 调用里与内存完全一致，
 // 那时不必写字段、也不必打日志（否则每 60 秒的后台扫描都会刷一行）。
+//
+// # 为什么必须比 DPoP 私钥与 client_id（评审发现的不对称）
+//
+// 判据的字段集必须与 adoptCodeartsCredInPlace 的**写入**字段集一致。
+// 原先这里只比 AK/SK/ST/ExpiresAt/RT，而写入方却连 DPoP 私钥一起写 ——
+// 检测能力小于修复能力，就会漏掉一整类"只有钥匙变了"的凭证。
+//
+// 这个不对称是有真实后果的（不是洁癖）：client.adoptDiskRefreshToken 曾
+// 只把 RT/AK/SK/ST/ExpiresAt 抄进内存，**落下钥匙**。那一半采纳之后，
+// 本函数会因为"其余字段全部相等"而judged false → adoptCodeartsCredInPlace
+// 再也不跑 → 对象永远停在"新 token + 旧钥匙"上，每次续期都因绑定不匹配失败，
+// **只能重启进程恢复**。而这正是本次交付要根除的那类故障。
+//
+// 所以两侧现在**同进同退**：检测什么，就必须能修好什么。
 func caCredFieldsDiffer(a, b *codearts.Auth) bool {
 	return a.AccessKey != b.AccessKey ||
 		a.SecretKey != b.SecretKey ||
 		a.SecurityToken != b.SecurityToken ||
 		a.ExpiresAt != b.ExpiresAt ||
-		a.RefreshToken != b.RefreshToken
+		a.RefreshToken != b.RefreshToken ||
+		a.ClientID != b.ClientID ||
+		// DPoP 私钥走 codearts 包里的统一口径：nil / 空白 / JSON null 一律视为
+		// "没有钥匙"，互相等价 —— 否则"内存有钥匙、磁盘丢了"会被每 60 秒判成
+		// 一次差异，刷日志却修不好任何东西（我们没法凭空造出钥匙）。
+		codearts.DPoPKeysDiffer(a.DPoPPrivateKeyJWK, b.DPoPPrivateKeyJWK)
 }
 
 // wireCodeartsCreds 把 store 接到 Provider 的**三条读路径**上。

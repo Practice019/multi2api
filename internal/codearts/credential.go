@@ -9,6 +9,7 @@
 package codearts
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -65,6 +66,47 @@ func (a *Auth) Unlock() { a.mu.Unlock() }
 // 因为真正会被重复消费的是"发出去的那个 refresh_token"。
 func (a *Auth) LockRefresh()   { a.refreshMu.Lock() }
 func (a *Auth) UnlockRefresh() { a.refreshMu.Unlock() }
+
+// HasUsableDPoPKey 报告 raw 是不是一把**可用**的 DPoP 私钥 JWK。
+//
+// 三种"没有钥匙"的形态都算不可用：nil、全空白、JSON `null`。
+//
+// # 为什么必须把 null 也算进去（踩过的坑）
+//
+// `json.RawMessage` 在"字段缺失"与"显式 null"时会留下**不同**的字节
+// （长度 0 vs 长度 4 的 `null`），所以只判 `len(raw) > 0` 会把后者当成"有钥匙"。
+// 后果是双向的：
+//
+//	· 采纳磁盘凭证时 → 磁盘上丢了 dpop 段，反而**覆盖掉内存里可用的那把**
+//	  → 对象从"能自愈"退化成"连发请求的资格都没有"
+//	  （RefreshToken 开头就因缺 DPoP 私钥直接返回）
+//	· 判定"凭证材料是否变化"时 → 空与 null 被当成两种不同的状态，
+//	  于是每 60 秒的后台扫描都会判一次"有差异"并刷一行日志
+//
+// 判定"有没有钥匙"的口径必须只有这一处 —— 上面两件事都靠它。
+func HasUsableDPoPKey(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) > 0 && !bytes.Equal(t, []byte("null"))
+}
+
+// DPoPKeysDiffer 报告两份 DPoP 私钥是否**实质不同**。
+//
+// 「没有钥匙」（nil / 空白 / null）与「有钥匙」是**两种状态**：
+// 一个空、一个非空 → 有差异；两个都空 → 无差异（不管空成哪种形态）。
+//
+// ⚠ 两边都有钥匙时按**字节**比较（去掉首尾空白）。这在生产里是安全的：
+// 两侧都是同一个文件解析出来的 `json.RawMessage`，序列化形态一致。
+// 但若一边是 `json.Marshal(PrivateJWK())` 的紧凑形态、另一边是磁盘上的缩进形态，
+// **同一把钥匙也会被判成不同** —— 那只会导致一次多余的原地改写（值相同）
+// 加一行日志，不会写坏数据。所以要断言"没有多余改写"时，
+// 请按钥匙语义比较，不要按这个函数的字节口径去断言测试结果。
+func DPoPKeysDiffer(a, b json.RawMessage) bool {
+	ha, hb := HasUsableDPoPKey(a), HasUsableDPoPKey(b)
+	if !ha || !hb {
+		return ha != hb
+	}
+	return !bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b))
+}
 
 // NeedsRefresh 报告凭证是否将在 within 内过期。
 // 注意：CodeArts 的 STS 凭证有效期**只有约 2 小时**，
