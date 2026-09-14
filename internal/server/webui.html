@@ -161,6 +161,32 @@
      否则收起就等于把信息删掉，用户只能靠记忆。 */
   tr.grouprow .gfolded{display:none;margin-right:8px}
   tr.grouprow.collapsed .gfolded{display:inline}
+
+  /* ---- 账号池：每上游一张独立的表 ---- */
+  /* 一个 .acctgroup = 该上游的标题 + 它自己的表（自己的表头）。
+     折叠 = 把那张表藏起来（与模型面板 .mgroup.collapsed .chips 同一范式：
+     一条 CSS 规则，不需要把状态流进每一行）。
+     这也顺手消掉了旧的 foster-parenting 死路 —— 那时分组标题与账号行
+     必须在同一张扁平表里，只能靠"逐行写 display"来表达折叠。 */
+  .acctgroups{padding:0}
+  .acctgroup{border-top:1px solid var(--line)}
+  .acctgroup:first-child{border-top:0}
+  .acctgroup > .ghead{background:var(--panel2);padding:7px 12px;display:flex;
+    align-items:center;gap:8px;flex-wrap:wrap}
+  .acctgroup > .ghead .ghead-btn{display:inline-flex;align-items:center;gap:6px;
+    background:none;border:0;color:inherit;font:inherit;font-weight:600;
+    padding:2px 4px;cursor:pointer}
+  .acctgroup > .ghead .acaret{display:inline-block;width:0;height:0;
+    border-left:5px solid currentColor;border-top:4px solid transparent;
+    border-bottom:4px solid transparent;transition:transform .12s;
+    margin-right:2px;opacity:.7}
+  .acctgroup.collapsed > .ghead .acaret{transform:rotate(-90deg)}
+  .acctgroup.collapsed > .gfolded-hint{display:inline}
+  .acctgroup > .gfolded-hint{display:none;font-size:11px}
+  .acctgroup > .gacts{margin-left:auto;display:inline-flex;align-items:center;gap:6px}
+  .acctgroup > .gacts .gact{padding:2px 8px;font-size:11px;font-weight:400}
+  .acctgroup > table{width:100%;border-collapse:collapse}
+  .acctgroup.collapsed > table{display:none}
   /* 收起该组的账号行（R3）。
      ⚠ 这是**持久**规则（没有 .collapsed 祖先限定），所以 accountRow 渲染时
      就必须知道它所在组的开合状态。这一条是折叠唯一真正隐藏东西的地方 ——
@@ -576,10 +602,19 @@
       -->
     </h2>
     <div class="body" style="padding:0">
-      <table><thead><tr>
-        <th>上游</th><th>昵称</th><th>UID</th><th title="账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）">额度</th><th>状态</th><th>Token</th>
-        <th>今日签到</th><th>成功</th><th>熔断</th><th>在途</th><th>操作</th></tr></thead>
-        <tbody id="accts"><tr><td colspan="11" class="dim">未连接</td></tr></tbody></table>
+      <!-- 每个上游一张**独立的表**（各自一个表头）。
+           容器从 <tbody> 换成 <div> 是必需的：多张 <table> 不能塞进一个 tbody
+           （HTML 解析器会把它们做 foster parenting 搬到表外，DOM 与写的不一样）。
+
+           # 为什么拆成多表（用户诉求）
+           「不应该所有上游共用最上面那个表格标题 —— 有些东西不是每个上游都共有的。」
+           共用表头强迫每个上游接受同一套列，而 workbuddy 有「今日签到」、
+           codearts 没有；codearts 有 STS 有效期、workbuddy 的形态又不同。
+           每个上游显示哪些列由**上游自报**（manifest.providers[].accounts_columns），
+           前端只认列 id，不认识任何上游名。 -->
+      <div id="accts" class="acctgroups">
+        <div class="dim" style="padding:12px 16px">未连接</div>
+      </div>
     </div>
   </section>
 
@@ -1027,6 +1062,82 @@ let loginProvider = '';
     if (n < 3600) return 'err';     // 一小时内：最紧迫（含 codearts 的 STS）
     if (n < 86400) return 'warn';   // 一天内
     return 'ok';
+  }
+
+  // ---------------------------------------------------------------- 账号池新增两列
+  //
+  // 这两列是用户对 codearts 提的要求：「同样需要显示 token 时间，然后就是
+  // 领取福利是否领取」。它们的列 id（token_expiry / welfare）由 codearts
+  // **自报**（见 internal/codearts/accountview.go），前端不认识上游名。
+
+  // tokenExpiryCellHTML 「Token 到期」单元格。
+  //
+  // # 为什么它必须**不依赖 has_token**
+  //
+  // 这是本次最容易写错的一处。「Token」列（workbuddy 用的那个）判据是
+  // `a.has_token` —— 而后端 `has_token` 来自 `AccessToken != ""`。
+  // codearts 的凭证是 AK/SK/SecurityToken 三元组，**没有 accessToken**，
+  // 所以它的 `has_token` 恒为 false：
+  //
+  //     provider=codearts  has_token=False  token_expire_sec=6036   ← 实测
+  //
+  // 若这一列也去看 has_token，codearts 会永远显示 `—` —— 而它明明有
+  // 1h40m 的 STS 有效期。这正是用户报的那个现象。
+  //
+  // 判据因此是**字段本身有没有**（`token_expire_sec` 是否是数值），
+  // 与 has_token 无关。
+  function tokenExpiryCellHTML(a) {
+    const d = a.token_expire_sec;
+    if (d === undefined || d === null || !Number.isFinite(Number(d))) {
+      // 未知：上游没提供过期时间（后端按指针语义把字段整个省掉）。
+      // 与"已过期"必须长得不一样 —— 后者是 `已过期` 的红色胶囊。
+      return '<span class="dim" title="该上游没有提供凭证过期时间">—</span>';
+    }
+    const n = Number(d);
+    // 绝对时刻 + 相对剩余。两者分工不同：
+    //   · 相对时间 → 判断"还够不够用"（扫一眼）
+    //   · 绝对时刻 → 排障时要跟日志对时刻
+    // 与「请求日志」面板的处理一致（那里也是"上次执行 + 距今"两列）。
+    let abs = '';
+    if (a.token_expire_at) {
+      const t = new Date(a.token_expire_at * 1000);
+      if (!isNaN(t)) {
+        abs = t.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit' });
+      }
+    }
+    const pill = `<span class="pill ${tokenPillClass(n)}">${esc(fmtTokenRemain(n))}</span>`;
+    return abs
+      ? `${pill}<br><span class="dim mono" style="font-size:11px">${esc(abs)}</span>`
+      : pill;
+  }
+
+  // welfareCellHTML 「福利」单元格 —— **三态，且绝不说"未领取"**。
+  //
+  // # 数据从哪来（这是本列能不能说真话的关键）
+  //
+  // 上游的 `/admin/welfare` 只回 `claimable` 布尔，**没有独立的"已领"标志**；
+  // 而 `claimable=false` 既可能是"今日已领"，也可能是"资格不符"——
+  // 界面**无法区分**（见 internal/codearts/welfare.go 的实测注释）。
+  //
+  // 所以本列的答案来自**我们自己的领取记录**（checkinlog 的 KindWelfare）：
+  // 那是确定的事实（领取动作就是我们发的）。
+  //
+  //	ok     → 已领取   （今天这次真的领到东西了）
+  //	skip   → 无可领   （点过，但一项都没领到）
+  //	fail   → 失败     （带原因）
+  //	缺字段 → —        （今天没点过 —— **不知道**，不是"没有"）
+  //
+  // ⛔ 绝不允许把缺字段渲染成「未领取」/「未领完」。
+  //   那是在**断言**一件我们并不知道的事（上游那侧的状态我们看不到）。
+  //   测试 tests/frontend/accounts_e2e.js 对这两个词有全等断言。
+  function welfareCellHTML(a) {
+    const s = a.today_welfare;
+    if (s === 'ok') return '<span class="pill ok">已领取</span>';
+    if (s === 'skip') return '<span class="pill dim" title="今天点过领取，但一项都没领到（上游只给 claimable，界面无法区分「今日已领完」与「资格不符」）">无可领</span>';
+    if (s === 'fail') return '<span class="pill err" title="上次领取失败">失败</span>';
+    // 未知（含后端没下发该字段、以及将来新增的状态值）
+    return '<span class="dim" title="今天还没领过，或拿不到领取结果 —— 这不等于「没得领」">—</span>';
   }
 
   // ---------------------------------------------------------------- T4：额度单元格
@@ -1676,17 +1787,17 @@ let loginProvider = '';
     }
   }
 
-  // ACCT_COLS 账号表的列数。**所有 colspan 都必须由它推导**，不许写数字。
+  // ⚠ ACCT_COLS 已**移走**（见下方账号池列注册表那一节）。
   //
-  // # 为什么（bug B1 的根因）
+  // 它原来是"账号表的列数 = 11"，而拆成每上游一张表之后**列数按上游不同**
+  //（workbuddy 11 列、codearts 7 列）。一个全局常量表达不了这件事，
+  // 留着它只会诱使新代码写出"codearts 的占位行跨 11 格"这种错。
   //
-  // 账号表从 8 列加到 11 列时（多了「上游」「今日签到」「在途」），
-  // 表格里的 colspan 没跟着改，于是鉴权失败时的整行提示只占 8 格，
-  // 后面 3 格露出表头底色。那种错不会报错、只有肉眼能看出来，
-  // 而且**每加一列就会重犯一次**。
+  // 现在它定义在列注册表旁边，含义收窄为"**默认列集**的长度"，
+  // 凡是"这一组有多少列"一律用 acctColumnsFor(provider).length。
   //
-  // 与 <thead> 里的 <th> 数量必须一致，有 T11 套件守住。
-  const ACCT_COLS = 11;
+  // 想找 bug B1 的那条教训（colspan 必须与表头列数一致）：
+  // 那条仍然成立，只是判据从"等于 ACCT_COLS"变成"等于**本组自己的**列数"。
 
   // 其余表格的列数。同样必须与各自 <thead> 的 <th> 数量一致。
   //
@@ -1782,22 +1893,18 @@ let loginProvider = '';
     // 统一走 registryAccounts() 一份枚举。
     const groups = groupAccountsByProvider(share);
     // 一个上游都没登记（manifest 没到）时，上一条说明仍然有用：
-    // 那时连分组行都渲染不出来，界面会是一片空白。
+    // 那时连分组块都渲染不出来，界面会是一片空白。
     if (!groups.length) {
       $('accts').innerHTML = accountPlaceholder('暂无上游 —— 渲染契约未加载，稍后自动重试');
       return;
     }
-    const rows = [];
-    for (const g of groups) {
-      // 开合状态在**每次重绘时重新读一遍** —— 不缓存。
-      // 缓存它就得保证"点一下也更新缓存"，而每次刷新都重建表格
-      // （renderAccounts 直接写 innerHTML），任何缓存都会在下一次刷新时
-      // 与 DOM 不一致。localStorage 才是唯一事实来源。
-      const open = accountGroupOpen(g.provider);
-      rows.push(accountGroupRow(g));
-      for (const a of g.accounts) rows.push(accountRow(a, open));
-    }
-    $('accts').innerHTML = rows.join('');
+    // 每个上游一个 <section class="acctgroup">：可点标题 + **它自己的表**（自己的表头）。
+    //
+    // 开合状态在**每次重绘时重新读一遍** —— 不缓存。
+    // 缓存它就得保证"点一下也更新缓存"，而每次刷新都重建整块
+    //（renderAccounts 直接写 innerHTML），任何缓存都会在下一次刷新时
+    // 与 DOM 不一致。localStorage 才是唯一事实来源。
+    $('accts').innerHTML = groups.map(accountGroupRow).join('');
     // 顶部「全部 X」按钮与账号表**同源**（同一份 manifest.daily_actions），
     // 所以在这里一起重绘 —— 分两处渲染会让"表格里没有了、顶上还在"
     // 这种不一致在某次刷新的中间态被看见。
@@ -1932,8 +2039,18 @@ let loginProvider = '';
   }
 
   // renderAccounts 渲染账号表。
+  // accountPlaceholder 账号池的整块占位（加载中 / 出错 / 无上游）。
+  //
+  // # 为什么不再是 rowPlaceholder（那是一行 <tr>）
+  //
+  // 拆多表之后 `#accts` 是 <div>，不是 <tbody>：往里塞 <tr> 会被 HTML 解析器
+  // 丢弃或 foster-parent 到别处，页面上就是"占位句不见了"——
+  // 而那正是最需要它出现的时刻（接口挂了的时候）。
+  //
+  // 所以占位改成块级元素。`accountRow` 的列数不再参与它 ——
+  // 它不属于任何一张表。
   function accountPlaceholder(text, cls) {
-    return rowPlaceholder(ACCT_COLS, text, cls);
+    return `<div class="${cls || 'dim'}" style="padding:12px 16px">${esc(text)}</div>`;
   }
 
   // registryAccounts 把账号并进 **manifest.providers 全集**，缺号的建空组。
@@ -2103,6 +2220,85 @@ let loginProvider = '';
       + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}">重载 auths</button>`;
   }
 
+  // ---------------------------------------------------------------- 账号池列注册表
+  //
+  // # 这是"每个上游一张自己的表头"的落点
+  //
+  // 用户诉求：不该所有上游共用最上面那个表头 —— **有些列不是每个上游都共有的**。
+  // 上游**只报列 id**（`manifest.providers[].accounts_columns`），
+  // 标题、提示、单元格怎么画**全在这张表里**。
+  //
+  // # 为什么列 id 由后端下发，而不是前端写死
+  //
+  // 写死就得写成 `if (provider === 'codearts') {...}` —— 那是把上游名
+  // 搬进渲染层，加第三个上游就要改前端（本项目最硬的判据被破）。
+  // 现在前端读的是**数据**：manifest 给什么列就画什么列，不认识任何上游名。
+  //
+  // # 未知列 id 怎么办
+  //
+  // `console.warn` + 跳过该列，**不炸**。理由与后端 accountColumnsOf 一致：
+  // 一个列名拼错不该让整张账号表打不出来。两侧都留痕，才查得出是谁的锅。
+  //
+  // ⚠ 加一列要同时改三处：gateway 的列 id 常量、DefaultAccountColumns、
+  // 以及这里的 defs。少改一处不会报错（会在上面那条 warn 里出现）。
+  const ACCT_COLUMN_DEFS = {
+    provider: { title: '上游' },
+    nickname: { title: '昵称' },
+    uid: { title: 'UID' },
+    quota: { title: '额度', tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
+    status: { title: '状态' },
+    token: { title: 'Token' },
+    token_expiry: {
+      title: 'Token 到期',
+      // 这一列与「Token」刻意分开：Token 列读的是 `has_token`/`token_expire_sec`
+      //（workbuddy 的 Bearer 形态），而 codearts 的凭证是 AK/SK/STS 三元组、
+      // accessToken 恒为空 → 它落到「Token」列会永远是 `—`。
+      // 这里直接看**上游报的过期时刻**，与 has_token 无关。
+      tip: '凭证剩余有效期（上游上报的过期时刻）。codearts 的 STS 约 2 小时一轮，'
+        + '到点前会自动续期；显示「—」表示这个上游没提供过期时间。',
+    },
+    checkin: { title: '今日签到' },
+    welfare: {
+      title: '福利',
+      // ⚠ 语义必须严格按数据（见 welfareCellHTML）。
+      tip: '今天有没有领过福利（依据是我们自己的领取记录，不是猜上游状态）。'
+        + '显示「—」表示今天还没领过、或拿不到结果 —— 那**不等于**"没得领"。',
+    },
+    success: { title: '成功' },
+    breaker: { title: '熔断' },
+    in_flight: { title: '在途' },
+    ops: { title: '操作' },
+  };
+
+  // DEFAULT_ACCT_COLUMNS 上游**没自报列集**时用的那一套。
+  //
+  // 顺序与内容必须与 `gateway.DefaultAccountColumns()` **逐列一致** ——
+  // 用户要求 workbuddy「直接复用现在的标题」，而 workbuddy 正是走这条回落的。
+  // 两处不一致会让 workbuddy 的表头与后端契约悄悄分叉。
+  const DEFAULT_ACCT_COLUMNS = [
+    'provider', 'nickname', 'uid', 'quota', 'status', 'token',
+    'checkin', 'success', 'breaker', 'in_flight', 'ops',
+  ];
+
+  // acctColumnsFor 取某上游的列集（有序）。
+  //
+  // 缺省（该上游没自报）= DEFAULT_ACCT_COLUMNS。
+  // 这与"自报了一个空数组"是两件不同的事：后者是明确说"一列都不要"。
+  function acctColumnsFor(providerId) {
+    const info = providerInfo(providerId);
+    const cols = info && Array.isArray(info.accounts_columns) ? info.accounts_columns : null;
+    if (!cols || !cols.length) return DEFAULT_ACCT_COLUMNS;
+    return cols;
+  }
+
+  // ACCT_COLS 保留为**默认列集**的列数。
+  //
+  // 它曾经是"账号表的列数"（会用于所有 colspan）。拆多表之后列数**按上游不同**，
+  // 于是它只剩两个用途：默认列集的长度，以及占位行的跨度。
+  // 凡是要"这一组有多少列"的地方，一律用 acctColumnsFor(...).length ——
+  // 用这个常量会让 codearts（7 列）的占位行跨成 11 格。
+  const ACCT_COLS = DEFAULT_ACCT_COLUMNS.length;
+
   function accountGroupRow(g) {
     const info = providerInfo(g.provider);
     // 「默认」标记：导航组头那边已按用户要求删掉（T2），这里也一并去掉 ——
@@ -2188,7 +2384,14 @@ let loginProvider = '';
     //   而账号表里根本没有 .chips，于是"折叠"变成一个什么都不隐藏的空动作，
     //   且**不会报任何错**。这正是变异验证 1 要钉住的形态。
     const open = accountGroupOpen(g.provider);
-    return `<tr class="grouprow${open ? '' : ' collapsed'}" data-acctgroup="${esc(g.provider)}"><td colspan="${ACCT_COLS}">`
+    // ⚠ 类名刻意**不叫** .mgroup / .mcaret，也不给本行加 .mgroup（见上面的注释）。
+    // 这里仍然沿用 .ghead-btn / .acaret —— 折叠的**实现**变了（整表隐藏），
+    // 但"用哪个类名"没变，既有断言与 localStorage 键都不受影响。
+    const cols = acctColumnsFor(g.provider);
+    const thead = '<tr>' + cols.map(id => acctThHTML(id)).join('') + '</tr>';
+    const rows = g.accounts.map(a => accountRow(a, open)).join('');
+    return `<section class="acctgroup${open ? '' : ' collapsed'}" data-acctgroup="${esc(g.provider)}">`
+      + `<div class="ghead">`
       + `<button class="ghead-btn" data-atoggle="${esc(g.provider)}"`
       + ` aria-expanded="${open ? 'true' : 'false'}"`
       + ` title="${esc(g.provider)} · ${n} 个账号（点标题折叠/展开）">`
@@ -2198,9 +2401,28 @@ let loginProvider = '';
       + `</button>`
       // 折叠时另起一句：组标题里的"0 个账号 · 4 项能力"回答不了
       // "为什么没有" —— 那是用户下一步要的动作。
-      + `<span class="gfolded dim" style="font-weight:400;font-size:11px">${esc(n ? '' : accountEmptyNote(g.provider))}</span>`
+      + `<span class="gfolded-hint dim">${esc(n ? '' : accountEmptyNote(g.provider))}</span>`
       + `<span class="gacts">${accountGroupActions(g.provider)}</span>`
-      + `</td></tr>`;
+      + `</div>`
+      + `<table class="accttable"><thead>${thead}</thead><tbody>${rows}</tbody></table>`
+      + `</section>`;
+  }
+
+  // acctThHTML 一列表头。
+  //
+  // 标题与 title 提示都取自列注册表 —— 上游只报**列 id**，
+  // "这一列叫什么、鼠标悬停说什么"是前端的事实（见 ACCT_COLUMN_DEFS 的注释）。
+  function acctThHTML(id) {
+    const d = ACCT_COLUMN_DEFS[id];
+    if (!d) {
+      // 未知列 id（前后端契约漂移）：**跳过但不炸**。
+      // 与后端 accountColumnsOf 的日志是同一条链的两端：那边记"上游报了个没见过的 id"，
+      // 这边记"前端没有这个 id 的渲染器"。两边都留痕，才查得出是谁的锅。
+      console.warn('账号池：未知的列 id ' + id + ' —— 已跳过该列（检查 manifest 与列注册表）');
+      return '';
+    }
+    const t = d.tip ? ` title="${esc(d.tip)}"` : '';
+    return `<th${t}>${esc(d.title)}</th>`;
   }
 
   // accountGroupOpen 读账号分组的折叠状态。未知时**默认展开** ——
@@ -2377,21 +2599,40 @@ let loginProvider = '';
       : `<span class="pill dim">${esc(providerOf(a) || '—')}</span>`;
 
     // 折叠状态由调用方传入（见函数头注释）。类名与分组行上的 **同一个**，
-    // 这样"这一行属于被收起的组"是 DOM 里可查询的事实，而不是靠内联样式猜。
+    // 这样"这一行属于被折叠的组"是 DOM 里可查询的事实，而不是靠内联样式猜。
+    //
+    // ⚠ 拆多表之后，折叠其实是**整表 display:none**（见 .acctgroup.collapsed > table）。
+    // 这个类仍然保留：它是"这一行属于被收起的组"的 DOM 事实，
+    // 既有断言（与将来可能的逐行样式）都读它。留着不花钱，删了会丢信息。
     const rowCls = groupOpen === false ? ' class="acctrow collapsed"' : ' class="acctrow"';
-    return `<tr${rowCls} data-acctof="${esc(providerOf(a))}">
-      <td>${pinfo}</td>
-      <td>${esc(a.nickname || '—')}</td>
-      <td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>
-      <td>${quotaCellHTML(a)}</td>
-      <td>${st}</td>
-      <td>${tok}</td>
-      <td>${ck}</td>
-      <td class="mono">${esc(a.success_count)}</td>
-      <td class="mono">${esc(a.breaker_fails)}</td>
-      <td class="mono">${esc(a.in_flight)}</td>
-      <td style="white-space:nowrap">${act}</td>
-    </tr>`;
+
+    // 单元格按**列 id** 组织，再按本上游自报的列集挑选与排序。
+    //
+    // # 为什么是"先全建再挑"，而不是"按列集分支构建"
+    //
+    // 前者只有一个渲染真值来源：每个 id 对应的 HTML 只写一遍。
+    // 后者会按该上游有哪些列去写 if/else，于是"某个上游的某个单元格"
+    // 会在两个地方各写一次 —— 那正是本项目反复吃过的漂移形态。
+    //
+    // 代价是**用不到的列也白构建了一次**（几个字符串拼接，可忽略）。
+    const cells = {
+      provider: `<td>${pinfo}</td>`,
+      nickname: `<td>${esc(a.nickname || '—')}</td>`,
+      uid: `<td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>`,
+      quota: `<td>${quotaCellHTML(a)}</td>`,
+      status: `<td>${st}</td>`,
+      token: `<td>${tok}</td>`,
+      token_expiry: `<td>${tokenExpiryCellHTML(a)}</td>`,
+      checkin: `<td>${ck}</td>`,
+      welfare: `<td>${welfareCellHTML(a)}</td>`,
+      success: `<td class="mono">${esc(a.success_count)}</td>`,
+      breaker: `<td class="mono">${esc(a.breaker_fails)}</td>`,
+      in_flight: `<td class="mono">${esc(a.in_flight)}</td>`,
+      ops: `<td style="white-space:nowrap">${act}</td>`,
+    };
+    const cols = acctColumnsFor(providerOf(a));
+    const tds = cols.map(id => cells[id]).filter(Boolean).join('');
+    return `<tr${rowCls} data-acctof="${esc(providerOf(a))}">${tds}</tr>`;
   }
 
   // ---------------------------------------------------------------- 管理台调用
@@ -5748,16 +5989,22 @@ let multCatalogFailed = false;
         // 渲染时表格整块是新的，行的类只能由渲染代码写；
         // 这里是**用户当场点的这一组**，把同一个类切到它自己和它的行上即可，
         // 结果与"重绘一遍"完全一致（localStorage 已同步写好）。
-        const box = hd.closest('tr.grouprow');
+        const box = hd.closest('.acctgroup');
         if (box) {
           box.classList.toggle('collapsed', !next);
-          // 兄弟行：下一个分组行之前的那些账号行。
-          // 用循环而不是 querySelectorAll 一次性抓 —— 分组行是**逐个**出现的，
-          // 只有"从本行往后、遇到下一个分组行就停"这个范围是这一组的行。
-          for (let n = box.nextElementSibling; n; n = n.nextElementSibling) {
-            if (n.classList.contains('grouprow')) break;
-            if (n.classList.contains('acctrow')) n.classList.toggle('collapsed', !next);
-          }
+          // 折叠 = **整张表** display:none（见 .acctgroup.collapsed > table）。
+          //
+          // # 这里为什么比改造前简单得多
+          //
+          // 改造前是"分组行 + 后续账号行"的扁平表，折叠只能逐行写 display，
+          // 于是这里要往后遍历兄弟节点、遇到下一个分组行就得停 ——
+          // 那段遍历是"分组边界靠 DOM 顺序表达"的补丁。
+          // 拆成每上游一张表之后，边界是**结构**（section > table），
+          // 一条 CSS 规则就够了。
+          //
+          // ⚠ 仍然只改 DOM、不重绘：重绘会丢滚动位置，也会把刚点过的按钮
+          //   换成一个新节点（与模型面板同一处理；localStorage 已同步写好，
+          //   所以下次重绘出来的状态与现在一致）。
         }
         hd.setAttribute('aria-expanded', next ? 'true' : 'false');
         return;
@@ -6134,6 +6381,11 @@ let multCatalogFailed = false;
     },
     CORE_CAP: CORE_CAP,
     ACCT_COLS: ACCT_COLS,
+    // 拆多表之后，测试必须能拿到"**每一个上游各自的**列集" ——
+    // 只暴露一个总数会让断言退化成"第一张表有几列"（那是假绿的温床）。
+    acctColumnsFor: acctColumnsFor,
+    DEFAULT_ACCT_COLUMNS: DEFAULT_ACCT_COLUMNS,
+    ACCT_COLUMN_DEFS: ACCT_COLUMN_DEFS,
     COLS: COLS,
     rowPlaceholder: rowPlaceholder,
     TableState: TableState,
