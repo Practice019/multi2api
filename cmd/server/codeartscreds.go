@@ -206,8 +206,34 @@ func (s *codeartsCredStore) list() ([]*codearts.Auth, error) {
 			//     （这条最关键：回抄它等于把刚用一次性 token 换来的新凭证丢掉，
 			//      该账号永久报废，只能重新走浏览器登录）
 			//   · 别人重写的（重新登录 / 手工修）：新凭证必然更晚过期 → 采用
-			if w.ExpiresAt >= cur.ExpiresAt && caCredFieldsDiffer(cur, w) {
-				adoptCodeartsCredInPlace(cur, w)
+			// ⚠ 读-判-写必须在**同一个 refreshMu 临界区**里（对抗评审 R1）。
+			//
+			// 原先这三步只在 s.mu 下进行，而写这些字段的是
+			// client.RefreshToken 与 client.adoptDiskRefreshToken —— 它们持的是
+			// **Auth.refreshMu / mu**，与 s.mu 没有任何同步关系。无同步读 = data race，
+			// 而且有具体交错能让账号**永久报废**：
+			//
+			//	1. 本函数 LoadDir 读到旧盘值 w（RT_old / E_old）
+			//	2. 此刻 RefreshToken 正在同一对象上跑：内存已写新值，尚未 SaveAtomic
+			//	3. 无锁读 cur.ExpiresAt 允许返回尚未发布的 E_old
+			//	   → `w.ExpiresAt >= cur.ExpiresAt` 成立；caCredFieldsDiffer 又读到
+			//	     新 RT → 判"有差异"
+			//	4. 进入原地写时**才**取 refreshMu（阻塞到续期落盘完成）
+			//	5. → 用第 1 步那份**旧盘值**覆盖刚用一次性 token 换回的新凭证
+			//
+			// 第 5 步正是本文件开头声称要防住的那件事（"只能靠重启恢复"）。
+			// 触发面：后台任务默认每 60s 一次 store.List()，请求路径随时会续期。
+			//
+			// 这里用 LockRefresh 而不是 mu：写字段的两条路径**都**持 refreshMu
+			// （一条自己持、一条由 RefreshToken 持），所以 refreshMu 是覆盖全部
+			// 写者的那一把。加锁顺序 refreshMu → mu 与 SaveAtomic 一致，无反向加锁。
+			cur.LockRefresh()
+			changed := w.ExpiresAt >= cur.ExpiresAt && caCredFieldsDiffer(cur, w)
+			if changed {
+				adoptCodeartsCredLocked(cur, w)
+			}
+			cur.UnlockRefresh()
+			if changed {
 				log.Printf("codearts: 账号 %s 的凭证文件被外部改写，已在原对象上更新字段（指针不变）", shortUID(uid))
 			}
 			out = append(out, cur)
@@ -231,9 +257,20 @@ func (s *codeartsCredStore) list() ([]*codearts.Auth, error) {
 	return out, nil
 }
 
-// adoptCodeartsCredInPlace 把 src 的凭证字段**原地**写进 dst（dst 指针不变）。
+// adoptCodeartsCredInPlace 取 refreshMu 后把 src 的凭证字段**原地**写进 dst。
 //
-// # 为什么只取 LockRefresh，不取 mu
+// 这是给**没有自己持锁**的调用方用的入口。调用方若已经持有 dst 的 refreshMu
+// （例如 store.list() 把"读-判-写"整段放进同一个临界区），必须改用
+// adoptCodeartsCredLocked —— 本函数会再取一次，而 refreshMu 不可重入 → 自死锁。
+func adoptCodeartsCredInPlace(dst, src *codearts.Auth) {
+	dst.LockRefresh()
+	defer dst.UnlockRefresh()
+	adoptCodeartsCredLocked(dst, src)
+}
+
+// adoptCodeartsCredLocked 原地改写凭证字段，**要求调用方已持有 dst.refreshMu**。
+//
+// # 为什么是 refreshMu（而不是 mu）
 //
 // 续期全过程（client.RefreshToken：从读 refresh_token 到请求、写字段、落盘）
 // 都在**同一把 refreshMu** 里，所以拿它就与续期互斥：
@@ -241,8 +278,15 @@ func (s *codeartsCredStore) list() ([]*codearts.Auth, error) {
 //	续期在途   → 这里等它写完，随后本次写入的是"另一个路径"的凭证，语义正确
 //	续期已结束 → 不存在半更新的中间态
 //
-// 反过来不能先取 dst.mu：SaveAtomic 是 refreshMu → mu 的顺序，
-// 这里若 mu → refreshMu 就是**反向加锁**，可能死锁。
+// 注意 refreshMu 也覆盖了 adoptDiskRefreshToken（它只在 RefreshToken 内部被调用），
+// 所以它是**唯一**能覆盖全部凭证字段写者的锁。
+//
+// # 为什么里面还要取 mu
+//
+// 只持 refreshMu 能挡住"另一个写者"，但挡不住**只读**的调用方（签名、Cred() 等
+// 走的是 mu）。写字段时一并取 mu，读者才不会看到半更新的中间态。
+// 顺序是 refreshMu → mu，与 SaveAtomic 一致；反过来（先 mu 再 refreshMu）
+// 会与 SaveAtomic 构成反向加锁 → 可能死锁，所以这里绝不能调换。
 //
 // # 为什么字段集比设计里列的六个多一些
 //
@@ -251,9 +295,9 @@ func (s *codeartsCredStore) list() ([]*codearts.Auth, error) {
 // 组成部分：只写一半会让对象处于"新 AK + 旧 DPoP 私钥"的状态，
 // 而 DPoP 私钥与 refresh_token 是**配对**的 —— 续期会因签名/绑定不匹配而失败。
 // UID 不写：它就是这个对象的键，按定义相等。
-func adoptCodeartsCredInPlace(dst, src *codearts.Auth) {
-	dst.LockRefresh()
-	defer dst.UnlockRefresh()
+func adoptCodeartsCredLocked(dst, src *codearts.Auth) {
+	dst.Lock()
+	defer dst.Unlock()
 
 	dst.AccessKey = src.AccessKey
 	dst.SecretKey = src.SecretKey
