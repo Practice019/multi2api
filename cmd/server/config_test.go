@@ -563,7 +563,7 @@ func TestAuthDirsArePerUpstreamSubdirs(t *testing.T) {
 //
 // 混为一谈的后果：把"没配这一项"读成 0，再读成"关闭"，
 // 于是用户明明没动过这一项，后台续期却悄悄不跑 —— 而 CodeArts 的 STS
-// 只有约 30 分钟寿命，表现是"空闲后第一个请求莫名慢几秒"。
+// 只有约 2 小时寿命，表现是"空闲后第一个请求莫名慢几秒"。
 func TestCodeartsRefreshIntervalDefaults(t *testing.T) {
 	dir := t.TempDir()
 

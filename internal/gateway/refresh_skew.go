@@ -11,7 +11,7 @@
 // 替所有上游回答了"多早算该刷" —— 而这是**上游的事实**：
 //
 //	workbuddy → access token 寿命以小时计，10 分钟窗口合理
-//	codearts  → STS 凭证只有约 30 分钟寿命，它自己的窗口是 3m
+//	codearts  → STS 凭证只有约 2 小时寿命，它自己的窗口是 3m
 //
 // # 10m 对 codearts 具体错在哪
 //
@@ -78,7 +78,7 @@ type RefreshSkewExt interface {
 	// 必须是**纯本地**判断（只读凭证里的过期时刻），不得发网络请求 ——
 	// 它在出站循环的**每次**请求上被调用（每个候选账号一次）。
 	//
-	// 窗口必须显著小于凭证寿命：codearts 的 30 分钟寿命配 3m 窗口，
+	// 窗口必须显著小于凭证寿命：codearts 的 2 小时寿命配 3m 窗口，
 	// 若窗口接近寿命会出现"刚判定为新鲜、发出去已过期"。
 	RefreshSkew(cred Credential) (skew time.Duration, ok bool)
 }

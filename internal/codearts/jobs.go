@@ -2,7 +2,7 @@
 //
 // # 为什么续期是"上游的事"
 //
-// CodeArts 的 STS 凭证只有约 30 分钟寿命，且 refresh_token 是**消费型**的
+// CodeArts 的 STS 凭证只有约 2 小时寿命，且 refresh_token 是**消费型**的
 // （用一次即作废，实测 STS5.1806 "the refresh token has been used"）。
 // 什么时候续、以多长周期扫、失败怎么退避 —— 全部是 CodeArts 专属知识，
 // 核心不该知道。核心只通过 gateway.Job 拿到"一个名字、一个间隔、一个 Run"。
@@ -36,7 +36,7 @@ const JobRefresh = "codearts-refresh"
 
 // defaultRefreshSkew 后台扫描时判定"将过期"的窗口。
 //
-// 与请求路径的 refreshSkew 一致（3 分钟）：窗口必须显著小于 30 分钟的凭证寿命，
+// 与请求路径的 refreshSkew 一致（3 分钟）：窗口必须显著小于 2 小时的凭证寿命，
 // 否则会出现"刚判定为新鲜、发出去已过期"的窗口。
 const defaultRefreshSkew = refreshSkew
 

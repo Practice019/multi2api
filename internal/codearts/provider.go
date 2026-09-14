@@ -22,7 +22,7 @@
 // # 为什么 Chat 必须自己做签名
 //
 // CodeArts 的鉴权不是 Bearer，而是每次请求现算的 SDK-HMAC-SHA256
-// （见 sign.go）+ DPoP 续期（见 dpop.go），且 STS 凭证只有约 30 分钟寿命。
+// （见 sign.go）+ DPoP 续期（见 dpop.go），且 STS 凭证只有约 2 小时寿命。
 // 把这一整套关进 Provider.Chat 里，正是 Provider 接口存在的理由 ——
 // 出口层只调一个 Chat，不需要知道签名是怎么回事。
 package codearts
@@ -59,7 +59,7 @@ const ProviderID = providerID
 
 // refreshSkew 提前续期窗口。
 //
-// 为什么是 3 分钟：CodeArts 的 STS 凭证寿命只有约 30 分钟，
+// 为什么是 3 分钟：CodeArts 的 STS 凭证寿命只有约 2 小时，
 // 窗口必须显著小于它，否则会出现"刚判定为新鲜、发出去已过期"的窗口。
 // 但也不能太大 —— 窗口越大，续期触发越频繁，而 refresh_token 是**消费型**的
 // （用一次即作废），没必要白白消耗。

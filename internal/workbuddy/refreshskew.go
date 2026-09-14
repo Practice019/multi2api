@@ -27,7 +27,7 @@ package workbuddy
 // # 与 codearts 的对照（本扩展点存在的理由）
 //
 //	workbuddy → token 以小时计 → 10m 窗口
-//	codearts  → STS 仅约 30m → 3m 窗口（见 codearts/refreshskew.go）
+//	codearts  → STS 仅约 2h → 3m 窗口（见 codearts/refreshskew.go）
 //
 // 两个数字差 3 倍多。核心用一个数字覆盖两者，无论取哪个都会错一半。
 

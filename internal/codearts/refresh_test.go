@@ -15,8 +15,8 @@ import (
 // 未提供时跳过 —— 不让缺凭证的机器上跑红。
 //
 // 为什么单独写这个测试：之前所有验证都只覆盖了签名与 chat，
-// 续期路径从未被真实验证过。而 CodeArts 的 STS 只有约 30 分钟寿命，
-// 续期一旦不通，网关跑半小时就会全线 503。
+// 续期路径从未被真实验证过。而 CodeArts 的 STS 只有约 2 小时寿命，
+// 续期一旦不通，网关跑上两小时就会全线 503。
 func TestRefreshTokenLive(t *testing.T) {
 	credPath := os.Getenv("CORARTS_TEST_CRED")
 	if credPath == "" {

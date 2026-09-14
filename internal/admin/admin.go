@@ -931,7 +931,7 @@ func (h *Handler) accountDelete(w http.ResponseWriter, r *http.Request) {
 // # 为什么要按上游分派
 //
 // 添加账号是**上游专属**动作：workbuddy 是 OAuth 设备码，
-// codearts 是 OAuth + DPoP（还要生成密钥对、签名请求、~30 分钟凭证）——
+// codearts 是 OAuth + DPoP（还要生成密钥对、签名请求、~2 小时凭证）——
 // 交互步骤数都不同（见 gateway.LoginFlow 的注释）。
 // 前端"账号池"的每个上游分组行都有自己的「＋ 添加账号」，
 // 点哪个上游就该走哪个上游的流程。
