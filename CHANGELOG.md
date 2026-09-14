@@ -7,6 +7,85 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.2.0 — 2026-09-14
+
+> 本版主题：**移植并接通「客户端行为遥测伪造层」** —— 让网关能把一批上游
+> 成长任务直接做完；同时补上**内容误报治理**（提示词体系 + 降级重试）
+> 与出站身份的一致性。
+
+### 新增
+
+- **伪造客户端行为遥测层**：按官方桌面端 / 小程序 / Web 三个域构造并上报
+  行为事件（`copilot.tencent.com` / `www.codebuddy.cn` / `www.workbuddy.cn`）。
+  覆盖成长中心 17 项可自动化任务、开学季闭环、夜猫子补足。
+  - **两类任务代价不同**：多数是**纯伪造**（只发事件链，无真实动作）；
+    `expert_5` / `Expert_team_use_3` / `Expert_lighthouse` / `skill_1` /
+    `Model_chat_GLM5.2` / `RichMeow_Chat` 必须**真发一次 chat** 拿上游签发的
+    `requestId` —— 实测上游会校验专家 id 与 requestId，自造的**不计数**。
+- **任务中心一键完成接上控制台**：任务明细行内「一键完成」、
+  工具条「一键完成待办」（整账号）与「开学季一键完成」三个入口。
+  按钮按后端能力表（`GET /admin/growth/auto/actions`）**动态出现**，
+  不在前端写死；不在表里的任务（如需微信真实认证的 `Expert_Philanthropy`）
+  仍显示「去客户端做」。
+- **管理台新端点 7 条**（仅本机）：`/admin/growth/auto`、`/admin/growth/auto-all`、
+  `/admin/growth/auto/actions`、`/admin/growth/scan`、`/admin/school`、
+  `/admin/school/run`、`/admin/blackcat/run`。
+- **系统提示词体系**：出站前用网关自有提示词**替换**客户端 system/developer
+  （`prompt.mode=custom`，内置 2086 字节，可用 `prompt.file` 整体覆盖），
+  或 `passthrough` 透传。被上游内容策略拦截时**不罚账号、不换号**，
+  同请求内换极简中性提示词重试一次，并记忆到次日 00:00 CST。
+- **出站身份一致性**：三段式 UA（`WorkBuddy/X WorkBuddy/X CLI/Y`）、
+  设备令牌（`upstream.device_token` / `device_token_file`，5 分钟缓存）、
+  客户端 IP 透传（`upstream.passthrough_ip`）、attribution 与 billing UA。
+- **软限流（`code 6004`）按模型冷却**：解析上游重置时刻，指数退避、
+  上限 `cooldown.soft_rate_max`（默认 2h），不牵连同账号的其它模型。
+- **会话死亡计数**：同一账号连续 3 次会话失效才禁用，替代"一票否决"。
+- **内容拦截成为一等错误类**（`ErrKindContentBlocked`）：与"账号故障"分开，
+  避免把内容问题误报成账号池故障。
+- **请求体硬上限**：`server.max_body_mb`（默认 8 MiB），超限返回 413。
+- **DeepSeek thinking 注入**：按模型注入 `thinking` / `reasoning_effort=high`，
+  并回填 `reasoning_content`。
+- **对话活跃上报**（`schedule.activity_hours`，**空 = 关闭**）：按自然日计分，
+  默认不发，避免存量部署升级后凭空产生上游请求。
+- **领养前置修复**：`travel` 派猫前先补 `ensureAdoptPrereq`，解决恒失败。
+
+### 修复
+
+- **>8 MiB 请求体被静默截断后仍转发成功（HTTP 200）** → 改为
+  `http.MaxBytesReader` + 413。原先调用方以为成功，实际上游收到的是残body。
+- **`thinking` 未列入 `supportedFields`** → 注入被整体剥离，配置形同无效。
+- **`sanitizeMessages` 对 `content` 键缺失的消息 `continue`**，整条消息
+  （含 `tool_calls`）被跳过。
+- **`resetDeviceTokenFileCache` 在持锁时替换整个结构体** →
+  `fatal error: sync: unlock of unlocked mutex`（必崩）。
+- **`6004` 正则会把 `"code":60040` 误判为软限流**（RE2 无环视，改用数字边界）。
+- **`upstreamToGateway` 漏映射内容拦截** → 单上游部署下返回 503
+  "无可用账号"，掩盖真实原因。
+- **单账号部署的内容拦截降级重试无法重新选号**（唯一账号被 `tried` 挡住）。
+- 任务中心四个缺陷（均为"不报错但用户会以为坏了"）：
+  已领取的任务也长出按钮；`/admin/task` 完成摘要**恒报成功 0**；
+  一键完成后**缓存快照不刷新**（跑完 186 秒界面仍显示原样待办）；
+  toast 把奖励播报两遍。
+
+### 测试 / 守卫
+
+- 新增源码级守卫：`upstream_kind_mirror`（错误类镜像一致性 ——
+  代码注释里声称存在的那条测试此前**并不存在**）、`maxbody`、`degrade`、
+  `prompt_wire`、`desktop`、`school`、`autotask`、`taskslot_summary`、
+  `webui_task_auto`、`autotask_ui`。
+- 每条守卫都做了**反向验证**（把实现改回去必须变红），其中"已完成任务不得
+  长按钮"用**单点回退真实文件**的方式，断言恰好只报 1 条并点名根因。
+
+### 文档 / 工程
+
+- README 新增：任务中心与 7 条端点表、提示词体系与降级语义、
+  出站身份与设备令牌、软限流、内容拦截错误分类、对话活跃上报、
+  领养前置说明、完整配置表与目录树。
+- 修正 README 三处**与实现不符**的描述：内置提示词体积（1.6 KB →
+  实测 2086 字节）、`passthrough` 的语义（降级期内**不再**透传）、
+  降级重试的适用范围（**两种模式都生效**，不只 `passthrough`）。
+- 仍然**零新增第三方依赖**（`go.mod` 只有 `go-redis`）。
+
 ## v1.1.0 — 2026-09-11
 
 > 本版主题：**让成本可见 + 修一个统计口径的数据正确性 bug**。
