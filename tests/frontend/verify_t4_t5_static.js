@@ -152,7 +152,7 @@ if (fStart >= 0) {
   ok(/return\s*'已过期'/.test(fBody), '负值 → `已过期`');
   ok(/' 天'/.test(fBody), '有「天」这一档');
   ok(/' 小时'/.test(fBody), '有「小时」这一档（一天以内不再一律 0d）');
-  ok(/' 分钟'/.test(fBody), '有「分钟」这一档（codearts 的 STS 只有约 30 分钟寿命，必须看得出）');
+  ok(/' 分钟'/.test(fBody), '有「分钟」这一档（codearts 的 STS 只有约 2 小时寿命，必须看得出）');
   // 向上取整会把"还剩 30 秒"显示成"1 分钟" —— 倒计时里这是**多报**，不能有。
   ok(!/Math\.round/.test(fBody), '不用 Math.round（倒计时宁可少报不可多报，一律向下取整）');
 }
@@ -208,6 +208,30 @@ function runStaticOn(variantHtml, label) {
   }
 }
 
+// replaceInFunction 只在**指定函数的函数体内**做一次字符串替换。
+//
+// # 为什么必须限定范围
+//
+// `const d = a.token_expire_sec;` 在 webui.html 里有**两处**：
+//
+//	tokenExpiryCellHTML()  —— codearts 的「Token 到期」列（本次新增）
+//	accountRow()           —— workbuddy 的「Token」列（原有）
+//
+// 而 T5-4 的守卫是**按 accountRow 的函数体**断言的。用全局 .replace 只会命中
+// 前面那处，变异就打在了守卫根本不看的地方 —— 表现是"断言没变红"，极易被误读成
+// "守卫是假的"，实际是**变异无效**。（这条 M3 就这么假报了很久。）
+//
+// 找不到函数时原样返回：下面的"变异没生效"检查会把它报出来，
+// 而不是让它静悄悄地变成一条恒绿的假变异。
+function replaceInFunction(src, fnAnchor, from, to) {
+  const i = src.indexOf(fnAnchor);
+  if (i < 0) return src;
+  // 函数体结尾：本文件用两空格缩进，函数自己的收尾是行首恰好 `  }`。
+  const j = src.indexOf('\n  }\n', i);
+  const end = j < 0 ? src.length : j;
+  return src.slice(0, i) + src.slice(i, end).replace(from, to) + src.slice(end);
+}
+
 // 变异体本身是**可编译/可解析**的 —— 它只是一次等价的字符串替换，
 // 产物仍是合法 HTML/JS。这一点很重要：一个语法坏掉的变异体让断言变红
 // 只能证明"文件坏了"，证明不了"守卫真的盯着这个行为"。
@@ -225,7 +249,9 @@ if (!process.env.WB2API_MUTANT) {
     },
     {
       name: 'M3：Token 列改回 `|| 0` + 只按天',
-      html: normalized.replace('const d = a.token_expire_sec;', 'const d = a.token_expire_sec || 0;'),
+      // 定点改 accountRow 里那一处（守卫看的正是它），不是全局第一处。
+      html: replaceInFunction(normalized, 'function accountRow(',
+        'const d = a.token_expire_sec;', 'const d = a.token_expire_sec || 0;'),
       expect: 'token_expire_sec',
     },
   ];
