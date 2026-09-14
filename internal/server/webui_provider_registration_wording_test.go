@@ -74,10 +74,16 @@ func TestWebUIAccountGroupWordingDistinguishesUnknownUpstreams(t *testing.T) {
 			"如果它被改名/拆分了，本守卫的判据也要跟着改，而不是让它空转")
 	}
 	// fail-closed 自检：确认切出来的**确实**是那个函数，而不是切短了或串到别处。
-	// 只有结构标记（ACCT_COLS / data-acctgroup 是 accountGroupRow 独有的）
-	// 齐了才继续判定 —— 否则后面的断言会在错误的文本上"绿"。
-	if !strings.Contains(body, "ACCT_COLS") || !strings.Contains(body, "data-acctgroup") {
-		t.Fatalf("切出来的函数体不像 accountGroupRow（缺 ACCT_COLS / data-acctgroup，共 %d 字节）—— "+
+	// 只有结构标记齐了才继续判定 —— 否则后面的断言会在错误的文本上"绿"。
+	//
+	// ⚠ 标记随实现变过：拆成"每上游一张表"之前是 `ACCT_COLS`
+	//（那时分组标题是一行 <tr colspan=ACCT_COLS>），现在是 `acctColumnsFor`
+	//（它按本分区的列集生成表头）+ `data-acctgroup`。
+	// **标记必须换**，不能因为旧标记消失就把这条自检删掉 ——
+	// 那正是"守卫随重构静默失效"的形态：删掉之后后面的断言照样能在
+	// 一段不相干的文本上跑绿。
+	if !strings.Contains(body, "acctColumnsFor") || !strings.Contains(body, "data-acctgroup") {
+		t.Fatalf("切出来的函数体不像 accountGroupRow（缺 acctColumnsFor / data-acctgroup，共 %d 字节）—— "+
 			"切分逻辑已失效，本守卫此时无论绿红都不可信", len(body))
 	}
 	if len(body) > 20000 || strings.Contains(body, "function accountEmptyNote(") {
