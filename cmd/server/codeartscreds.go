@@ -363,11 +363,17 @@ func caCredFieldsDiffer(a, b *codearts.Auth) bool {
 // 抽成函数之后，测试可以调用**同一段代码**（见 TestBackgroundRefreshLandsOnPoolObject），
 // 把不变量钉在真正会出问题的那个位置。
 //
-// 三条路径必须同源，缺一条就会造出第二个对象：
+// 四条读路径必须同源，缺一条就会出事：
 //
 //	SetAccounts —— 后台续期任务（jobs.go → localAccounts）
 //	AdminEnv.Accounts / Resolve —— 管理端点
-//	（第三条是池 secret，由 syncCodeartsAccounts 用同一个 store 装载）
+//	池 secret —— 由 syncCodeartsAccounts 用同一个 store 装载
+//	「重载 auths」—— admin 走 gateway.CredentialSecretLoader → 本上游的
+//	    LoadCredentialsWithSecrets，而它优先取 AdminEnv.Accounts（= 本 store）
+//
+// ⚠ 第四条缺了的后果**不是**"造出第二个对象"，而是更隐蔽的"一个对象都没有"：
+// 池里多出该 uid 却没有 secret，被选中时必然失败；而按 store 同步的路径
+// 只在启动时跑一次 → 用户得重启网关。这正是评审 R2 修的缺口。
 func wireCodeartsCreds(cb *codearts.Provider, dir string, hist *checkinlog.Log) *codeartsCredStore {
 	creds := newCodeartsCredStore(dir)
 	cb.SetAccounts(creds.List)

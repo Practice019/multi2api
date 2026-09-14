@@ -221,6 +221,44 @@ type CredentialLoader interface {
 	LoadCredentials(dir string) ([]Credential, error)
 }
 
+// CredentialSecret 是「投影后的身份」+「不透明的上游私有凭证」。
+//
+// Secret 是 `any`：核心**只搬运、不解释**。这是 `Pool.SyncToDirWithSecrets`
+// 的 secret 参数在扫描侧的对应物 —— 池子把它原样保管，取回时由装配层的
+// 适配器断言回上游自己的类型（见 pool.SecretOf 的注释）。
+type CredentialSecret struct {
+	Credential
+	// Secret 上游私有凭证（例如 codearts 的 *codearts.Auth）。
+	// 为 nil 表示这一条不需要 secret —— 核心不会因此报错。
+	Secret any
+}
+
+// CredentialSecretLoader 是 CredentialLoader 的**可选加强版**。
+//
+// # 为什么需要它（评审 R2：手工重载 auths 会让新账号拿不到凭证）
+//
+// 只用 CredentialLoader 有个缺口：它只给出投影后的 uid/nickname，于是核心
+// 同步池子时只能调 `SyncToDirFor(provider, auths)` —— 这些条目**没有 secret**。
+// 对 codearts 这种"凭证不在 *auth.Auth 里"的上游：
+//
+//	启动后新拷入/新登录的凭证 → 用户点「重载 auths」
+//	→ 池里出现该 uid，但 e.secret == nil
+//	→ 该号被选中时取不到可用的 *codearts.Auth（类型不对）→ 必失败
+//
+// 而按 store 同步账号的路径只在启动时跑一次 → **得重启网关**。
+//
+// 实现这个可选接口的上游，核心会改调
+// `Pool.SyncToDirWithSecrets(provider, auths, secrets)`，把 secret 一起装进池子。
+//
+// ⚠ 实现者必须与 CredentialLoader **同源**（读同一份权威对象）。
+// 若在这里自己 LoadDir 造出第二个 `*codearts.Auth`，就会把 007 修掉的
+// 「一次性 refresh_token 被消费两次 → 503」重新引入 —— 那正是这个接口
+// 存在的理由：只有上游知道自己的 secret 从哪来。
+type CredentialSecretLoader interface {
+	// LoadCredentialsWithSecrets 与 LoadCredentials 同源，但额外给出 Secret。
+	LoadCredentialsWithSecrets(dir string) ([]CredentialSecret, error)
+}
+
 // ErrLoginPending 表示登录授权尚未完成（用户在浏览器里还没点确认）。
 var ErrLoginPending = errLoginPending{}
 

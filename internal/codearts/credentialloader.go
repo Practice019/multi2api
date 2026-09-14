@@ -54,3 +54,61 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 	log.Printf("codearts: 从 %s 读到 %d 个凭证（LoadCredentials）", dir, len(out))
 	return out, nil
 }
+
+// 编译期断言：Provider 也满足"带 secret"的可选加强版（评审 R2）。
+var _ gateway.CredentialSecretLoader = (*Provider)(nil)
+
+// LoadCredentialsWithSecrets 与 LoadCredentials 同源，但额外给出 Secret。
+//
+// # 为什么必须优先走注入的访问器（p.accounts）
+//
+// 装配层把 `p.accounts` 接到凭证 **store** 上，而 store 里那个 `*Auth`
+// 就是池 secret / 后台任务 / 管理端点共享的**同一个对象**。
+//
+// 这里若自己 `LoadDir` 造一份新的，就会把 007 修掉的那个 503 根因重新引入：
+//
+//	对象级 refreshMu 跨对象无效 → 一次性 refresh_token 被消费两次
+//	→ 池里那份永远停在已作废的旧值上 → no_healthy_account
+//
+// 所以"secret 从哪来"必须由**上游自己**回答，而且答案必须是 store。
+// 只有没注入访问器时（单测、未接线的装配）才回落 LoadDir ——
+// 那种形态下不存在第二个所有者。
+func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialSecret, error) {
+	var list []*Auth
+	var err error
+	if p.accounts != nil {
+		// ⚠ 这条分支下 `dir` 参数**被忽略**：权威目录是 store 自己的那个
+		//（它由装配时的 cfg.CodeartsAuthDir 决定）。两者在正常装配下是同一个值，
+		// 但日志必须说清真正用了哪个 —— 否则"我点了重载但目录不对"会变成
+		// 一条查不出的线索。所以这里单独打一行，而不是复用下面那句。
+		list = p.accounts()
+		log.Printf("codearts: store 给出 %d 个凭证（LoadCredentialsWithSecrets，含 secret；"+
+			"传入的 dir=%s 被 store 自己的目录覆盖）", len(list), dir)
+		return buildCredentialSecrets(list), nil
+	}
+	list, err = LoadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("codearts: 从 %s 读到 %d 个凭证（LoadCredentialsWithSecrets，含 secret）", dir, len(list))
+	return buildCredentialSecrets(list), nil
+}
+
+// buildCredentialSecrets 把 *Auth 投影成「身份 + 不透明 secret」。
+//
+// 抽出来只为让上面两条分支共用同一套投影规则 —— 规则若有两份实现，
+// 迟早会出现"store 那条多带/少带一个字段"的分叉。
+func buildCredentialSecrets(list []*Auth) []gateway.CredentialSecret {
+	out := make([]gateway.CredentialSecret, 0, len(list))
+	for _, a := range list {
+		if a == nil || a.UID == "" {
+			continue
+		}
+		out = append(out, gateway.CredentialSecret{
+			Credential: gateway.Credential{Provider: ProviderID, UID: a.UID, Nickname: a.Nickname},
+			// 不透明值：核心只搬运，不解释。
+			Secret: a,
+		})
+	}
+	return out
+}

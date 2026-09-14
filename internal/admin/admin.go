@@ -675,6 +675,26 @@ func (h *Handler) credentialsOf(providerID string) (func(string) ([]gateway.Cred
 	return ext.LoadCredentials, true
 }
 
+// credentialSecretsOf 取该上游的「带 secret」扫描器（**可选**能力）。
+//
+// 没实现 `gateway.CredentialSecretLoader` 时返回 false —— 调用方回落成
+// `credentialsOf` + `SyncToDirFor`。对凭证就装在 `*auth.Auth` 里的上游
+//（workbuddy）那正是正确形态：池子自己保存的就是它的凭证。
+//
+// 核心在这里依然不认识任何上游类型：secret 是不透明的 `any`，
+// 由 callers 原样交给池子保管（见 gateway.CredentialSecret 的注释）。
+func (h *Handler) credentialSecretsOf(providerID string) (func(string) ([]gateway.CredentialSecret, error), bool) {
+	p, ok := h.providerByID(providerID)
+	if !ok {
+		return nil, false
+	}
+	ext, ok := gateway.ExtOf[gateway.CredentialSecretLoader](p)
+	if !ok {
+		return nil, false
+	}
+	return ext.LoadCredentialsWithSecrets, true
+}
+
 // accountsReload 重新扫描 auths 目录并对齐池（手工拷入凭证后无需重启网关）。
 //
 // # ⚠ 必须显式指定**这个目录属于哪个上游**
@@ -811,10 +831,43 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 				"无法按它自己的格式扫描凭证（核心不硬编码任何上游的凭证格式）")
 		return
 	}
-	creds, err := loaded(dir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取 "+dir+" 失败: "+err.Error())
-		return
+
+	// 优先用「带 secret」的扫描器（可选能力，见 gateway.CredentialSecretLoader）。
+	//
+	// # 为什么不能只用投影后的身份（评审 R2）
+	//
+	// `LoadCredentials` 只给出 uid/nickname，于是只能 `SyncToDirFor(provider, auths)`
+	// —— 那些池条目的 secret 是 nil。对 codearts 这种"凭证不在 *auth.Auth 里、
+	// 真凭证走池的不透明 secret 通道"的上游：
+	//
+	//	启动后新拷入/新登录的凭证 → 用户点「重载 auths」
+	//	→ 池里多出该 uid 但没有 secret
+	//	→ 该号被选中时取不到可用的 *codearts.Auth（类型不对）→ 必失败
+	//
+	// 而按 store 同步账号的路径只在启动时跑一次 → 得重启网关才恢复。
+	// 所以这里优先问上游要 secret，拿到就用 SyncToDirWithSecrets 一起装进池子。
+	var creds []gateway.Credential
+	var secrets map[string]any
+	if withSecrets, ok := h.credentialSecretsOf(provider); ok {
+		items, serr := withSecrets(dir)
+		if serr != nil {
+			writeError(w, http.StatusInternalServerError, "读取 "+dir+" 失败: "+serr.Error())
+			return
+		}
+		secrets = make(map[string]any, len(items))
+		for _, it := range items {
+			creds = append(creds, it.Credential)
+			if it.Secret != nil {
+				secrets[it.Credential.UID] = it.Secret
+			}
+		}
+	} else {
+		var cerr error
+		creds, cerr = loaded(dir)
+		if cerr != nil {
+			writeError(w, http.StatusInternalServerError, "读取 "+dir+" 失败: "+cerr.Error())
+			return
+		}
 	}
 	// 投影成账号池要的形状（uid + nickname）。
 	auths := make([]*auth.Auth, 0, len(creds))
@@ -830,7 +883,12 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 	var before, after int
 	if h.cfg.Pool != nil {
 		before = len(h.cfg.Pool.List())
-		h.cfg.Pool.SyncToDirFor(provider, auths)
+		// 拿到了 secret 就走带 secret 的同步 —— 否则池里那些新 uid 会"没有凭证"。
+		if secrets != nil {
+			h.cfg.Pool.SyncToDirWithSecrets(provider, auths, secrets)
+		} else {
+			h.cfg.Pool.SyncToDirFor(provider, auths)
+		}
 		after = len(h.cfg.Pool.List())
 	} else {
 		log.Printf("admin: reload 扫描到 %d 个凭证，但没有账号池可同步", len(auths))
