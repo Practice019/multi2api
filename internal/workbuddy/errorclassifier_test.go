@@ -74,6 +74,13 @@ func TestWorkbuddyClassifyMatchesUpstreamClassify(t *testing.T) {
 		{500, `boom`},
 		{503, `unavailable`},
 		{401, `{"code":9999,"msg":"bad token"}`}, // 不是 session dead → client
+		// 内容策略拦截（新增类别）：三个标记都要落 content_blocked，
+		// 而不是落到 ErrClient —— 两者的 core 处置完全不同
+		// （content_blocked 换提示词重试且不罚号；client 换号）。
+		{400, `{"code":1,"msg":"blocked by security policy"}`},
+		{400, `unapproved channel`},
+		{400, `illegal api invocation`},
+		{400, `BLOCKED BY SECURITY POLICY`}, // 大小写不敏感
 		{200, ``},
 		{200, `{"ok":true}`},
 	}
@@ -118,6 +125,8 @@ func upstreamToGatewayForTest(k upstream.ErrKind) gateway.ErrorKind {
 		return gateway.ErrKindServer
 	case upstream.ErrClient:
 		return gateway.ErrKindClient
+	case upstream.ErrContentBlocked:
+		return gateway.ErrKindContentBlocked
 	default:
 		panic("测试镜像没有覆盖 upstream.ErrKind 的新取值 —— 生产翻译也要同步更新")
 	}
@@ -142,6 +151,7 @@ var knownUpstreamKinds = []upstream.ErrKind{
 	upstream.ErrNotFound,
 	upstream.ErrServer,
 	upstream.ErrClient,
+	upstream.ErrContentBlocked,
 }
 
 // TestToGatewayKindCoversEveryUpstreamKind 每个合法取值都有显式翻译分支。

@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"workbuddy2api/internal/clientlogin"
 	"workbuddy2api/internal/codearts"
+	"workbuddy2api/internal/prompt"
 )
 
 // Config 顶层配置。
@@ -20,6 +22,29 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// Server 出口层（HTTP 入站）行为。
+	Server struct {
+		// MaxBodyMB 单次请求体上限（MiB），缺省 8，<=0 回落 8。
+		//
+		// # 为什么它必须存在（借鉴 workbuddy2api-panel）
+		//
+		// 改造前出口层写的是 `io.ReadAll(io.LimitReader(r.Body, 8<<20))` ——
+		// 那是一句**静默截断**：超过 8 MiB 的请求体被无声切掉尾巴，
+		// 剩下的半截 JSON 解析失败，网关把它原样转发给上游，
+		// 上游回 `code 11101 Unmarshal chat params failed`。
+		//
+		// 后果是双向的：
+		//   - 客户端拿到的是一个**指向自己的错误**（"JSON 畸形"），
+		//     而真正的原因（请求太大）从头到尾没有任何地方说出来；
+		//   - 出站错误分类把 11101 当成"上游业务错误"处理，
+		//     多图会话/长上下文这类正常请求会被反复换号重试，白烧账号健康度。
+		//
+		// 改成 MaxBytesReader 之后，超限在**读的时候就报错**，
+		// 出口层据此返回 413 —— 客户端立刻知道"是大小问题"，
+		// 而不是去猜 JSON 哪里写错了。
+		MaxBodyMB int `json:"max_body_mb"`
+	} `json:"server"`
 
 	// ServiceName 网关身份标识（顶栏标题、/healthz 的 service 字段与
 	// X-Service 头都用它）。空 = 用 server.ServiceName 的编译期默认值。
@@ -41,6 +66,14 @@ type Config struct {
 		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
 		// 旧 config 中的这些键因 JSON 未知字段而自然忽略，不报错。
 		SoftRate string `json:"soft_rate"` // "60s"
+		// SoftRateMax 软冷却**指数退避**的封顶（借鉴 workbuddy2api-panel）。
+		//
+		// 同一账号连续触发 429 软冷却时，实际时长按
+		// `soft_rate × 2^(连续次数-1)` 逐次翻倍，封顶本值。
+		//
+		// 空/非法 → 回落内置默认（2h）。它同时是"6004 带重置时间"那条路径的上限：
+		// 上游给的重置时刻再远，也不会让账号被冷超过这个时长。
+		SoftRateMax string `json:"soft_rate_max"` // "2h"
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -56,6 +89,23 @@ type Config struct {
 		//   - 无需猜测哨兵（[-1] 之类），非法小时一律报错并提示改用本开关。
 		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到（旅行随之停）
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
+
+		// ActivityHours 对话活跃上报的整点时点（本地时区）。
+		//
+		// # ⚠ 空数组 = **不启用**（与上面两项的"空 = 回落默认"语义相反）
+		//
+		// 签到/保活是既有功能，空配置必须保持老行为，所以它们"空 = 回落默认时点"。
+		// 而活跃上报是本版本**新增**的能力 —— 若沿用同一条规则，
+		// 所有老部署升级后会在 10 点自动对每个账号发上游请求，
+		// 一个用户没要求的、默认开启的新行为。
+		//
+		// 因此它默认关闭：必须显式配了时点才跑。要恢复 B 分支的口径就写 [10]。
+		ActivityHours []int `json:"activity_hours"`
+		// ActivityEnabled 活跃上报总开关；缺省 true。
+		// 最终是否跑 = ActivityEnabled && len(ActivityHours) > 0。
+		//
+		// 与签到同一条理由用独立 bool：关闭时不擦除 hours，改回 true 即恢复原时点。
+		ActivityEnabled bool `json:"activity_enabled"`
 		// 猫猫旅行已退役 travel_interval_minutes：派猫合并到签到时点执行（见 scheduler.RunCheckinNow）。
 		// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 	} `json:"schedule"`
@@ -67,12 +117,63 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+
+		// ── 出站身份（全部可省略；省略时行为与改造前逐字节一致）─────────
+		//
+		// 见 internal/upstream/headers.go 的包级注释。这些字段让出站请求头
+		// 可以按部署环境对齐官方客户端形态，而不必改代码。
+
+		// UserAgent 出站 UA 的逐字覆盖（最高优先）。空 = 按 ClientVersion 决定。
+		UserAgent string `json:"user_agent"`
+		// ClientVersion WorkBuddy 客户端版本段（如 "5.5.4"）。
+		//
+		// ⚠ 非空会把出站 UA 从 CLI 形态（`CLI/2.63.2 CodeBuddy/2.63.2`）
+		// 切换成**桌面端三段式**（`WorkBuddy/<v> WorkBuddy/<v> CLI/<cli>`）。
+		// 空 = 保持 CLI 形态 —— 这是**刻意**的缺省：UA 变更属于风险控制敏感项，
+		// 不该由升级默默替所有部署做掉。
+		ClientVersion string `json:"client_version"`
+		// CliVersion 三段式 UA 里的 CLI 段；空 = 内置默认（2.137.1）。
+		CliVersion string `json:"cli_version"`
+		// ClientName 用量归属名（X-IDE-Name / X-IDE-Type / X-Product / X-Agent-Purpose）。
+		//
+		// 官方面板「使用端」列读它。配 "WorkBuddy" 即对齐官方桌面端身份。
+		// 空 = 只设 X-Product: "SaaS"（改造前行为）。
+		ClientName string `json:"client_name"`
+		// DeviceToken 全局设备风控令牌（X-Device-Token）。空 = 不使用全局值。
+		DeviceToken string `json:"device_token"`
+		// DeviceTokenFile 设备令牌文件（带 5 分钟 TTL 缓存与失败保留）。
+		DeviceTokenFile string `json:"device_token_file"`
+		// PassthroughIP 是否把入站客户端 IP 透传给上游（三个等价头）。
+		//
+		// ⚠ 默认 false。X-Forwarded-For 是客户端可伪造的头，是否可信
+		// 完全取决于部署链路 —— 直连公网的部署**不应**打开它。
+		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
 
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
 	} `json:"features"`
+
+	// Prompt 系统提示词体系（借鉴 workbuddy2api-panel）。
+	//
+	// 客户端（Claude Code / Codex 等 CLI）注入的 system prompt 模板句
+	// 会被上游内容审核**逐字精确匹配**并整单拦截（400）。本段决定网关怎么处理：
+	//
+	//	mode=custom（默认） 出站前用网关自有提示词替换客户端 system/developer
+	//	mode=passthrough    透传客户端原始 system，撞了再靠降级兜底
+	//
+	// 两层分工与降级机制详见 internal/prompt 包注释。
+	Prompt struct {
+		// Mode "custom" / "passthrough"；空或其他值按 custom 处理。
+		Mode string `json:"mode"`
+		// File 自定义提示词文件路径。空 = 用内置默认。
+		//
+		// ⚠ 路径非空但不可读（或内容为空）→ **启动直接报错**（fail fast）。
+		// 不静默回落内置默认：那会让"路径打错一个字符"表现为
+		// "网关一切正常，只是我的人格没了" —— 一个完全无信号的失败。
+		File string `json:"file"`
+	} `json:"prompt"`
 
 	Upstash struct {
 		URL   string `json:"url"`   // 空 = 纯内存模式；支持完整 rediss:// URL 或 https://xxx.upstash.io host
@@ -237,7 +338,9 @@ type Config struct {
 	} `json:"codearts"`
 
 	// 解析后
-	SoftRateDur         time.Duration `json:"-"`
+	SoftRateDur time.Duration `json:"-"`
+	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
+	SoftRateMaxDur      time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	SessionTTL          time.Duration `json:"-"`
@@ -257,6 +360,17 @@ type Config struct {
 	ClientAuthDir       string        `json:"-"`
 	ClientArchiveDir    string        `json:"-"`
 	ClientEnabled       bool          `json:"-"`
+
+	// Prompt 解析后（供 main 直接取用）。
+	//
+	// PromptMode 一定是 prompt.ModeCustom 或 prompt.ModePassthrough
+	// （normalize 已把空/非法值收敛成 custom）。
+	//
+	// PromptText 是**已经加载好的提示词正文**：normalize 阶段就会读文件，
+	// 因此文件不可读会在启动时报错，而不是等到第一次请求。
+	// custom 模式下它一定是非空串（空文件同样被 normalize 判为错误）。
+	PromptMode string `json:"-"`
+	PromptText string `json:"-"`
 
 	// Codearts 解析后（供 main 直接取用）。
 	//
@@ -293,6 +407,7 @@ func Default() *Config {
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
 	}
+	c.Server.MaxBodyMB = 8
 	c.Cooldown.SoftRate = "60s"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
@@ -300,6 +415,8 @@ func Default() *Config {
 	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
 	c.Schedule.CheckinEnabled = true
 	c.Schedule.KeepaliveEnabled = true
+	// 活跃上报：开关缺省 true，但**时点缺省为空** ⇒ 默认不跑（见 ActivityHours 的注释）。
+	c.Schedule.ActivityEnabled = true
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -385,6 +502,15 @@ func (c *Config) normalize() error {
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}
+	// soft_rate_max：空 = 不解析（留给 pool 的默认值），非空但非法 → 报错。
+	//
+	// 为什么"空"与"非法"要区别对待：空是一个正常的"未配置"状态，
+	// 而非法值（如 "2hours"）是用户写错了，静默回落会让他以为配置生效了。
+	if s := strings.TrimSpace(c.Cooldown.SoftRateMax); s != "" {
+		if c.SoftRateMaxDur, err = time.ParseDuration(s); err != nil {
+			return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+		}
+	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)
 	}
@@ -416,6 +542,48 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
+	}
+	// 请求体上限：<=0 / 未配置一律回落 8 MiB（与改造前的硬编码常量一致，
+	// 保证既有部署的**实际接受能力**不变，只是超限时从"静默截断"变成 413）。
+	if c.Server.MaxBodyMB <= 0 {
+		c.Server.MaxBodyMB = 8
+	}
+	// 上界兜底：配置里写一个荒谬的大值（如 1e6 MiB）会让 MaxBytesReader
+	// 形同不存在，等于把内存交给客户端 —— 夹到 1024 MiB（1 GiB）。
+	if c.Server.MaxBodyMB > 1024 {
+		c.Server.MaxBodyMB = 1024
+	}
+
+	// 系统提示词：模式收敛 + **在此处就加载正文**。
+	//
+	// 加载放在 normalize 而不是第一次请求，是为了 fail fast：
+	// 提示词文件路径写错时，进程**起不来**并直接说明原因，
+	// 而不是启动成功、请求正常、只是自定义人格静默失效。
+	c.PromptMode = strings.TrimSpace(c.Prompt.Mode)
+	switch c.PromptMode {
+	case prompt.ModeCustom, prompt.ModePassthrough:
+		// 合法值原样保留
+	case "":
+		// 未配置 → 默认 custom（与 B 的缺省一致：从源头消灭指纹误报）
+		c.PromptMode = prompt.ModeCustom
+	default:
+		// 非法值**报错**而不是静默当 custom：
+		// 用户写 "passthru" / "Custom " 时，静默按 custom 处理会让
+		// "我明明配了透传，为什么人格还是被换掉了" 变成一个无从下手的问题。
+		return fmt.Errorf("prompt.mode=%q 非法：只接受 %q 或 %q",
+			c.Prompt.Mode, prompt.ModeCustom, prompt.ModePassthrough)
+	}
+	// passthrough 模式下不需要加载正文：它不会用（降级用的 Degraded 是常量）。
+	// 但**仍然校验文件**（若非空），因为那是一个明显的配置意图矛盾 ——
+	// 配了自定义人格却选了透传，多半是改了一半，早点说出来比默默忽略好。
+	text, err := prompt.Load(c.PromptMode, c.Prompt.File)
+	if err != nil {
+		return err
+	}
+	c.PromptText = text
+	if c.PromptMode == prompt.ModePassthrough && strings.TrimSpace(c.Prompt.File) != "" {
+		log.Printf("提示词：mode=passthrough 时 prompt.file 不生效（透传客户端原始 system）；" +
+			"文件已校验可读，但内容不会被使用")
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen

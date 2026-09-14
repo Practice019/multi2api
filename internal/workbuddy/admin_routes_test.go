@@ -192,9 +192,10 @@ func TestHistoryEndpointNilLogDegradesGracefully(t *testing.T) {
 // 挂载契约
 // ---------------------------------------------------------------------------
 
-// wantAdminRoutes 22 条端点的 (method, path) 清单 —— 与改造前 admin.go 逐条比对。
+// wantAdminRoutes 全部端点的 (method, path) 清单 —— 与改造前 admin.go 逐条比对，
+// 并追加成块移植进来的任务自动化端点。
 //
-// 为什么把它写成表而不是"数一下有 22 条"：路径拼错（/admin/travel/config vs
+// 为什么把它写成表而不是"数一下有几条"：路径拼错（/admin/travel/config vs
 // /admin/growth/travel/config）与动词写错都不会被"数量正确"发现。
 var wantAdminRoutes = []struct{ method, path string }{
 	{"POST", "/admin/checkin"},
@@ -220,9 +221,21 @@ var wantAdminRoutes = []struct{ method, path string }{
 	{"GET", "/admin/client-login"},
 	{"POST", "/admin/client-login/switch"},
 	{"POST", "/admin/client-login/restore"},
+
+	// ---- 任务自动化（成块移植自 workbuddy2api-panel，见 autotask_admin.go）----
+	//
+	// 这 7 条是本仓库**新增**的端点，不是"改造前 admin.go"的一部分 ——
+	// 清单里显式列出它们，是为了钉住"移植确实挂载了、且路径/动词没写错"。
+	{"GET", "/admin/growth/auto/actions"},
+	{"POST", "/admin/growth/auto"},
+	{"POST", "/admin/growth/auto-all"},
+	{"GET", "/admin/growth/scan"},
+	{"GET", "/admin/school"},
+	{"POST", "/admin/school/run"},
+	{"POST", "/admin/blackcat/run"},
 }
 
-func TestAdminRoutesCoverAll20Endpoints(t *testing.T) {
+func TestAdminRoutesCoverAllEndpoints(t *testing.T) {
 	p := NewWithConfig(Config{})
 	routes := p.AdminRoutes()
 

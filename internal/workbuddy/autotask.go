@@ -1,0 +1,929 @@
+// autotask.go 面板「一键完成」任务的动作实现。
+//
+// # 移植说明（1:1 移植自 workbuddy2api-panel/internal/panel/autotask.go）
+//
+// **动作逻辑、事件载荷、节流节奏、判据顺序一字未改。** 仅适配调用面：
+//
+//	B（panel 层）                    本仓库（workbuddy 上游层）
+//	─────────────────────────────   ─────────────────────────────────────
+//	p.cfg.Upstream.X(a, ...)         p.client.X(a, ...)
+//	p.cfg.Upstream.ListTasks(a)      p.growthTasks(a)
+//	p.cfg.Upstream.AcceptTasks       p.acceptTasks(a, codes)
+//	p.cfg.Upstream.ClaimReward       p.claimReward(a, code)
+//	p.cfg.Upstream.ChatStream(a,b,"") p.client.ChatStreamWithIP(a, b, "")
+//	p.taskByCode(a, code)            p.taskByCode(a, code)（同形）
+//
+// # 为什么落在 workbuddy 层而不是核心/管理台层
+//
+// 这些动作是**这个上游的私有业务知识**（哪个事件点亮哪个任务、什么节奏、
+// 哪些 id 必须真实）。放进核心就等于让每加一个上游都要改核心 ——
+// 与 gateway 包注释里的判据 1 冲突。
+//
+// 本文件除 packge 名与调用面之外，与 B 的同名文件逐字对应；
+// 原始逆向证据（日期 / 账号 / 抓包行号）全部保留在注释里 ——
+// 那是这套判据唯一的来源记录。
+//
+// # 设计依据
+//
+// 上游 scripts/task_*.py 实测结论 + 2026-09-12 桌面指纹协议逆向
+// （data/desktop-task-protocol.md）——
+//   - first_buddy（+300 分）：report（前置解锁）→ agreement → buddy/first
+//   - chat_5（+100 分）：累计 5 条 chat_request_send 上报
+//   - Model_chat_GLM5.2（+100 分）：accept → 用 glm-5.2 真实对话一次 → 上报（模型字段对齐）
+//   - RichMeow_Chat：桌面指纹（workbuddy-desktop）完整对话事件链，纯 API 可点亮（三账号实测）
+//   - Buddy_App / Buddy_App_QQ：buddyapp 五连事件，纯 API 可点亮（两账号实测）
+//   - automation_1：automated_task_create_suc 事件，纯 API 可点亮（两账号实测）
+//   - Library_read：web 域 web_element_click(library_doc_intro_click)（三账号实测）
+//   - template_5 / playbook_prompt / create_canvas：asar 逆向出的判据事件
+//     （template_used / playbook_prompt_send / wbx_design_canvas_*），纯 API 可点亮（三账号实测）
+//   - expert_5 / Expert_team_use_3：真实专家列表 + 召唤链 + 真实 chat（服务端 requestId）
+//   - expert_actual_use（三账号实测）
+//   - Hp_Appearance：appearance/set + appearance_skin_apply 事件（两账号实测）
+//
+// 仍未破解：skill_1（疑似要求真实 Skill 工具调用）。
+// 不做：Expert_lighthouse（需真实连接器授权）、Expert_Philanthropy（真实捐款）。
+//
+// 所有动作幂等：已 claimed/已达标的任务直接跳过，不重复消耗上游配额。
+package workbuddy
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"strings"
+	"time"
+
+	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/upstream"
+)
+
+// autoAction 一个可自动化的任务动作。
+type autoAction struct {
+	TaskCode string // 目标任务 code
+	Desc     string // 展示用说明
+	Attempt  bool   // true = 尝试型（上游未证实可脚本化，跑了可能不点亮）
+	run      func(p *Provider, a *auth.Auth) (string, error)
+}
+
+// autoActions 已实现的任务动作表（顺序即执行顺序：先解锁依赖项）。
+// first_buddy 依赖活跃上报解锁，故 chat_5/first_buddy 的执行都自带 report 步骤。
+var autoActions = []autoAction{
+	{
+		TaskCode: "chat_5",
+		Desc:     "上报 5 条对话活跃事件（自动补足差额）",
+		run:      runChat5,
+	},
+	{
+		TaskCode: "first_buddy",
+		Desc:     "上报解锁 → 同意协议 → 领取第一只 Buddy（+300 分）",
+		run:      runFirstBuddy,
+	},
+	{
+		TaskCode: "Model_chat_GLM5.2",
+		Desc:     "接受任务 → glm-5.2 真实对话一次 → 对齐模型上报",
+		run:      runModelChat,
+	},
+	{
+		TaskCode: "RichMeow_Chat",
+		Desc:     "桌面指纹事件链上报（已验证：纯 API 可点亮，三账号实测）",
+		run:      runRichMeow,
+	},
+	{
+		TaskCode: "Buddy_App",
+		Desc:     "上报「进入 Buddy 应用」事件链（已验证：纯 API 可点亮）",
+		run:      runBuddyApp,
+	},
+	{
+		TaskCode: "Buddy_App_QQ",
+		Desc:     "上报「进入企鹅教师助手」事件链（已验证：纯 API 可点亮）",
+		run:      runBuddyApp,
+	},
+	{
+		TaskCode: "automation_1",
+		Desc:     "上报「定时任务创建」事件（已验证：纯 API 可点亮）",
+		run:      runAutomationCreate,
+	},
+	{
+		TaskCode: "Library_read",
+		Desc:     "上报「读资料库介绍」事件（已验证：纯 API 可点亮）",
+		run:      runLibraryRead,
+	},
+	{
+		TaskCode: "template_5",
+		Desc:     "上报「使用模板创建任务」事件组 ×5（已验证：三账号点亮）",
+		run:      runTemplateUse,
+	},
+	{
+		TaskCode: "playbook_prompt",
+		Desc:     "上报「灵感案例做同款发送 Prompt」事件组（已验证：三账号点亮）",
+		run:      runPlaybookPrompt,
+	},
+	{
+		TaskCode: "create_canvas",
+		Desc:     "上报「设计创意画布创建」事件组（已验证：三账号点亮，+300 分）",
+		run:      runCreateCanvas,
+	},
+	{
+		TaskCode: "expert_5",
+		Desc:     "真实专家召唤+使用链 ×5（专家市场列表+真实 chat，已验证：三账号点亮）",
+		run:      runExpertUse,
+	},
+	{
+		TaskCode: "Expert_team_use_3",
+		Desc:     "真实专家团召唤+使用链 ×3（已验证：三账号点亮）",
+		run:      runExpertTeamUse,
+	},
+	{
+		TaskCode: "Hp_Appearance",
+		Desc:     "设置主题 API + 皮肤生效事件（已验证：两账号点亮）",
+		run:      runAppearance,
+	},
+	{
+		TaskCode: "skill_1",
+		Desc:     "真实对话 + skill_info 技能加载事件（已验证：人杰2 点亮）",
+		run:      runSkillFresh,
+	},
+	{
+		TaskCode: "Expert_lighthouse",
+		Desc:     "真实轻量云专家召唤+使用链（chat 链带 has_expert，已验证：两账号点亮）",
+		run:      runExpertLighthouse,
+	},
+	{
+		TaskCode: "black_cat",
+		Desc:     "夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示稍后再试）",
+		Attempt:  true,
+		run:      runBlackCat,
+	},
+}
+
+// autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
+func autoActionFor(code string) *autoAction {
+	for i := range autoActions {
+		if autoActions[i].TaskCode == strings.TrimSpace(code) {
+			return &autoActions[i]
+		}
+	}
+	return nil
+}
+
+// AutoTaskCodes 返回全部可自动化的任务码（供前端/任务中心枚举）。
+func AutoTaskCodes() []string {
+	out := make([]string, 0, len(autoActions))
+	for i := range autoActions {
+		out = append(out, autoActions[i].TaskCode)
+	}
+	return out
+}
+
+// autoActionIndex 任务在 autoActions 中的顺序（队列执行按依赖序排；未知返回大值）。
+func autoActionIndex(code string) int {
+	for i := range autoActions {
+		if autoActions[i].TaskCode == code {
+			return i
+		}
+	}
+	return 1 << 20
+}
+
+// ── 调用面适配层（本仓库与 B 的差异集中在这里）─────────────────────────
+
+// growthTasks 拉取该账号的成长任务列表（B 里叫 ListTasks）。
+func (p *Provider) growthTasks(a *auth.Auth) ([]upstream.GrowthTask, error) {
+	return p.client.GrowthTasks(a)
+}
+
+// taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
+func (p *Provider) taskByCode(a *auth.Auth, code string) (*upstream.GrowthTask, error) {
+	tasks, err := p.growthTasks(a)
+	if err != nil {
+		return nil, err
+	}
+	for i := range tasks {
+		if tasks[i].TaskCode == code {
+			return &tasks[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// acceptTasks 批量接单（B 里 AcceptTasks 只返回 error；本仓库返回逐项结果）。
+//
+// 语义不变：**失败不阻塞**——行为事件才是进度的唯一判据，接单只是让状态流转规范。
+// 这里把逐项结果丢掉并只看整体错误，与 B 的调用方式一致。
+func (p *Provider) acceptTasks(a *auth.Auth, codes []string) error {
+	_, err := p.client.GrowthAcceptTasks(a, codes)
+	return err
+}
+
+// claimReward 领取任务奖励，返回本次到账的 (credit, energy)。
+//
+// 与 B 的 ClaimReward 语义对齐：已领取过（already_claimed）时返回 (0, 0, nil) ——
+// 那是**幂等成功**，不是错误。
+//
+// ⚠ 本仓库既有的 GrowthClaim 走 CLI 域路径式端点
+// （/v2/activity/growth/tasks/<code>/claim），与 B 的 Web 域变体
+// （www.workbuddy.cn/activity/growth/tasks/<code>/claim）是两条不同路径。
+// 移植时**保留本仓库既有的那条**（它有实测记录），不引入第二条领奖路径 ——
+// 两条并存会让"到底哪条在生效"变成每次排查都要重新确认的问题。
+func (p *Provider) claimReward(a *auth.Auth, taskCode string) (credit, energy int64, err error) {
+	res, err := p.client.GrowthClaim(a, taskCode)
+	if err != nil {
+		return 0, 0, err
+	}
+	if res == nil || res.AlreadyClaimed {
+		return 0, 0, nil
+	}
+	return res.Credit, res.Energy, nil
+}
+
+// claimPollAttempts / claimPollGap 达标回读的有界轮询参数。
+// 背景：上游计分是**异步**的——行为事件上报后进度要数秒才刷新（实测 Model_chat
+// 对话完成后立即回读仍是 0/1，约 5-8 秒后才变 1/1）。一次性回读会误判"未达标"，
+// 从而跳过自动领奖。这里最多轮询 N 次、每次间隔 gap，总预算约 12 秒。
+var (
+	claimPollAttempts = 4
+	claimPollGap      = 3 * time.Second
+)
+
+// taskByCodeWaiting 回读任务，若未达标则在有界预算内轮询等待（上游异步计分）。
+// 已达标（claimable）立即返回；预算耗尽返回最后一次结果（可能仍未达标）。
+func (p *Provider) taskByCodeWaiting(a *auth.Auth, code string) (*upstream.GrowthTask, error) {
+	t, err := p.taskByCode(a, code)
+	if err != nil || t == nil {
+		return t, err
+	}
+	if t.Claimable() || t.Claimed() {
+		return t, nil
+	}
+	for i := 1; i < claimPollAttempts; i++ {
+		time.Sleep(claimPollGap)
+		t2, err2 := p.taskByCode(a, code)
+		if err2 != nil {
+			return t, nil // 轮询期间的查询失败不覆盖已拿到的结果
+		}
+		if t2 != nil {
+			t = t2
+			if t.Claimable() || t.Claimed() {
+				return t, nil
+			}
+		}
+	}
+	return t, nil
+}
+
+// taskProgressText 任务进度的可读表示（回读对比用）。
+func taskProgressText(t *upstream.GrowthTask) string {
+	if t == nil {
+		return "?"
+	}
+	if t.Target() > 0 {
+		return fmt.Sprintf("%d/%d", t.Current(), t.Target())
+	}
+	if t.Claimed() {
+		return "claimed"
+	}
+	return t.AcceptStatus
+}
+
+// truncateStr 截断错误文本（避免把上游长响应原样透给前端）。
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// ---------------------------------------------------------------------------
+// 各任务动作实现
+// ---------------------------------------------------------------------------
+
+// reportGap 连续上报之间的间隔（对齐上游脚本实测的 1.05s 口径，避免风控）。
+var reportGap = 1050 * time.Millisecond
+
+// runChat5 补足 chat_5 的进度：按差额上报 chat_request_send。
+func runChat5(p *Provider, a *auth.Auth) (string, error) {
+	t, err := p.taskByCode(a, "chat_5")
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		return "", fmt.Errorf("任务不存在")
+	}
+	target := t.Target()
+	if target <= 0 {
+		target = 5
+	}
+	need := target - t.Current()
+	if need <= 0 {
+		return "进度已达标，无需上报", nil
+	}
+	for i := int64(0); i < need; i++ {
+		cid := fmt.Sprintf("wb2api-chat5-%d-%d", time.Now().UnixMilli(), i)
+		if err := p.client.ReportChatActivity(a, cid, ""); err != nil {
+			return fmt.Sprintf("上报第 %d/%d 条失败: %v", i+1, need, err), nil
+		}
+		if i < need-1 {
+			time.Sleep(reportGap)
+		}
+	}
+	return fmt.Sprintf("已补报 %d 条对话事件", need), nil
+}
+
+// runFirstBuddy 领养：report（解锁前置）→ agreement → first。
+func runFirstBuddy(p *Provider, a *auth.Auth) (string, error) {
+	if err := p.client.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
+		return "", fmt.Errorf("前置上报: %w", err)
+	}
+	time.Sleep(reportGap) // 给上游事件处理留时间（脚本实测口径）
+	if err := p.client.BuddyAgreement(a); err != nil {
+		return "", fmt.Errorf("同意协议: %w", err)
+	}
+	if err := p.client.BuddyFirst(a); err != nil {
+		if upstream.IsBuddyTaskIncomplete(err) {
+			return "前置已上报，但领养门槛未过（上游要求当日活跃），请稍后重试", nil
+		}
+		return "", fmt.Errorf("领取 Buddy: %w", err)
+	}
+	return "已领取 Buddy（+300 分 +8 能量）", nil
+}
+
+// runModelChat 完成 Model_chat_GLM5.2：accept → 真实对话 → 对齐模型上报。
+func runModelChat(p *Provider, a *auth.Auth) (string, error) {
+	const code, modelID, modelName = "Model_chat_GLM5.2", "glm-5.2", "GLM-5.2"
+	// 1. accept（报名；失败不阻塞——行为事件才是判据）
+	if err := p.acceptTasks(a, []string{code}); err != nil {
+		log.Printf("autotask: accept %s: %v（继续走行为链路）", code, err)
+	}
+	time.Sleep(reportGap)
+	// 2. 真实对话一次（判据的最直接证据）
+	body, _ := json.Marshal(map[string]any{
+		"model": modelID,
+		"messages": []map[string]any{
+			{"role": "user", "content": "hi，请回复一句话"},
+		},
+		"stream": true,
+	})
+	rc, status, respBody, err := p.client.ChatStreamWithIP(a, body, "")
+	if err != nil {
+		return "", fmt.Errorf("对话请求: %w", err)
+	}
+	if status >= 400 {
+		rc.Close()
+		return "", fmt.Errorf("对话失败 http=%d: %s", status, truncateStr(string(respBody), 160))
+	}
+	// 读干 SSE（网关对上游强制 flow：不读完会残留连接）
+	_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))
+	rc.Close()
+	time.Sleep(reportGap)
+	// 3. 对齐模型的上报（触发进度）
+	if err := p.client.ReportChatActivityModel(a, fmt.Sprintf("wb2api-glm52-%d", time.Now().UnixMilli()), "", modelID, modelName); err != nil {
+		return "对话已完成，但进度上报失败：" + err.Error(), nil
+	}
+	return "已完成 glm-5.2 对话并上报", nil
+}
+
+// runRichMeow 完成 RichMeow_Chat（桌面端对话1次）。
+// 2026-09-12 三账号实测验证：以桌面指纹（extName=workbuddy-desktop）向
+// copilot.tencent.com/v2/report 上报完整对话事件链（agent_task_created →
+// chat_message_response isSuccessful=true 等 6 事件），纯 API 即可点亮并领奖
+// （紫川/人杰2 两账号无桌面客户端登录状态下 3 秒内 0/1 → 1/1）。
+// Hp_Appearance 的纯 API set 不计分（需客户端在主题下活跃），区别对待。
+func runRichMeow(p *Provider, a *auth.Auth) (string, error) {
+	ms := time.Now().UnixMilli()
+	conv := fmt.Sprintf("wb2api-rm-%d", ms)
+	req := fmt.Sprintf("wb2api-rm-req-%d", ms)
+	msg := fmt.Sprintf("req-%d-user", ms)
+	events := upstream.DesktopChatSequence(conv, req, msg, "fast-model", "fast-model")
+	if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+		return "", err
+	}
+	return "已按桌面端指纹上报完整对话事件链（agent_task_created→chat_response）", nil
+}
+
+// runBuddyApp 完成 Buddy_App / Buddy_App_QQ（进入 Buddy 应用）。
+// 2026-09-12 两账号实测：buddyapp 五连事件（discover→show→enter→auth_confirm→
+// bind_skip）以 workbuddy-desktop 指纹上报即点亮，服务端不校验真实授权。
+// 用企鹅教师助手（Buddy_App_QQ 判据应用）作载体，同一组事件同时满足
+// Buddy_App「进入任一应用」——两个表项共用本 run，幂等由任务状态跳过兜底。
+func runBuddyApp(p *Provider, a *auth.Auth) (string, error) {
+	events := upstream.DesktopBuddyAppSequence("cb_y5Dy46tPQGGWtueMxXbe", "企鹅教师助手")
+	if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+		return "", err
+	}
+	return "已上报 buddyapp 进入五连事件（同时覆盖 Buddy_App 与 Buddy_App_QQ）", nil
+}
+
+// runAutomationCreate 完成 automation_1（设置自动化任务）。
+// 2026-09-12 两账号实测：automated_task_create_suc 事件纯 API 上报即点亮，
+// 无需真实创建定时任务。
+func runAutomationCreate(p *Provider, a *auth.Auth) (string, error) {
+	if err := p.client.ReportDesktopEvent(a,
+		upstream.DesktopAutomationCreateEvent("wb2api 自动化")); err != nil {
+		return "", err
+	}
+	return "已上报定时任务创建事件", nil
+}
+
+// runLibraryRead 完成 Library_read（体验资料库）。
+// 2026-09-12 三账号实测：web 域 /v2/report 上报 web_element_click
+// (elementId=library_doc_intro_click) 即点亮（space 的 open/WS/inlong 都不是判据）。
+func runLibraryRead(p *Provider, a *auth.Auth) (string, error) {
+	const docURL = "https://www.workbuddy.cn/space/d/o0KWYeynteVv06UnAZqIFm"
+	if err := p.client.ReportWebEvent(a, "web_element_click", docURL,
+		"library_doc_intro_click", "WorkBuddy资料库介绍"); err != nil {
+		return "", err
+	}
+	return "已上报资料库介绍阅读事件", nil
+}
+
+// runBlackCat 完成 black_cat（夜猫子，夜间 23:00–08:00 计数）。
+// 判据 = 夜间窗口内 glm-5.2 真实对话 + chat 事件上报（WorkBuddy-Daily 实测口径）。
+// 窗口外不做（提示等排程）；网关 blackcat_hours（默认 23 点）排程会自动补足。
+func runBlackCat(p *Provider, a *auth.Auth) (string, error) {
+	if !upstream.InNightWindow(time.Now()) {
+		return "当前不在 23:00–08:00 计数窗口，行为不计分；网关会在每日 23 点自动补足", nil
+	}
+	need, err := p.client.BlackcatNeed(a)
+	if err != nil {
+		return "", err
+	}
+	if need <= 0 {
+		return "进度已达标，无需补足", nil
+	}
+	ok, err := p.client.RunNightChats(a, int(need))
+	if err != nil {
+		return fmt.Sprintf("完成 %d/%d 次后中断: %v", ok, need, err), nil
+	}
+	return fmt.Sprintf("已完成 %d 次夜间对话并上报", ok), nil
+}
+
+// runSkillFresh 完成 skill_1（尝鲜热门技能）。
+// 2026-09-12 判据（紫川手动完成抓包 row 209）：`skill_info` 事件（桌面指纹）——
+// {id:<技能名>, skillId, skillVersion, toolStatus:"success", fileCount,
+// source:"workbuddy-desktop"} JOIN 真实会话（conversationId/requestId=服务端
+// id）。此前的 skill_request_send/skill_installed/skill_action 全是错误方向。
+// 人杰2 实测 0/1 → 1/1 点亮。
+func runSkillFresh(p *Provider, a *auth.Auth) (string, error) {
+	conv, req, err := p.client.DesktopChatWithExpert(a, "")
+	if err != nil {
+		return "", fmt.Errorf("真实对话: %w", err)
+	}
+	msgID := "msg-" + req[len(req)-8:]
+	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
+	for _, ev := range events {
+		if ev["eventCode"] == "chat_message_response" {
+			ev["finishReason"] = "tool_calls" // 模型发起工具调用（技能加载）语义
+		}
+	}
+	events = append(events, upstream.DesktopEvent{
+		"eventCode":      "skill_info",
+		"id":             "润泽小馆·日报撰写",
+		"skillId":        "skill_2097350077599879168",
+		"skillVersion":   "1.0.0",
+		"toolStatus":     "success",
+		"fileCount":      56,
+		"source":         "workbuddy-desktop",
+		"conversationId": conv, "requestId": req, "messageId": msgID,
+		"requestModelId": "fast-model", "requestModelName": "fast-model",
+		"traceId": req,
+	})
+	if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+		return "", fmt.Errorf("skill_info 事件: %w", err)
+	}
+	return "已上报真实对话 + skill_info 技能加载事件", nil
+}
+
+// runExpertLighthouse 完成 Expert_lighthouse（体验「腾讯轻量云」专家）。
+// 2026-09-12 判据（真实样本 Sunny row 868）：与 expert_5 同构，但两处差异——
+// chat 链的 agent_task_created 需带 has_expert:true + expert_id（我们默认 false），
+// expert_actual_use 的 mode 为 "LOCAL"（非 craft）。id 固定为轻量云专家
+// ex_2cvvUZQhDyeJ；requestId 必须是真实 chat 的服务端 id。紫川/人杰2 实测点亮。
+func runExpertLighthouse(p *Provider, a *auth.Auth) (string, error) {
+	const lhID = "ex_2cvvUZQhDyeJ"
+	lh := upstream.MarketExpert{
+		ExpertID: lhID, ExpertType: "agent",
+		DisplayNameZH: "腾讯轻量云专家", ProfessionZH: "腾讯轻量云专家", Version: "1.0.2",
+	}
+	// 市场列表若命中真实条目则用其信息（version 等以服务端为准）。
+	if experts, err := p.client.MarketExpertList(a, "agent"); err == nil {
+		for _, e := range experts {
+			if e.ExpertID == lhID {
+				lh = e
+				break
+			}
+		}
+	}
+	if err := p.client.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(lh)...); err != nil {
+		return "", fmt.Errorf("召唤链: %w", err)
+	}
+	conv, req, err := p.client.DesktopChatWithExpert(a, lhID)
+	if err != nil {
+		return "", fmt.Errorf("真实对话: %w", err)
+	}
+	events := upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model")
+	for _, ev := range events {
+		if ev["eventCode"] == "agent_task_created" {
+			ev["has_expert"] = true
+			ev["expert_id"] = lh.ExpertID
+			ev["expert_name"] = lh.DisplayNameZH
+			ev["expert_industry_id"] = ""
+		}
+	}
+	events = append(events, upstream.DesktopExpertActualUseLocal(lh, conv, req))
+	// 对齐真实样本细节：轻量云专家 actual_use 的 type 为空、cost=0。
+	events[len(events)-1]["type"] = ""
+	events[len(events)-1]["cost"] = 0
+	if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+		return "", fmt.Errorf("使用事件: %w", err)
+	}
+	return "已上报轻量云专家召唤+使用链（真实对话 requestId）", nil
+}
+
+// runAppearance 完成 Hp_Appearance（换主题）。
+// 2026-09-12 紫川/人杰2 实测（desktopverify12）：判据是 appearance_skin_apply
+// 事件 {action:"apply",source:"settings_close",id:<resourceKey>,...}（客户端在
+// 主题生效状态下离开设置页时上报）——早期"纯 API set 不计分"的结论不准确，
+// 真相是当时只调了 appearance/set 没发事件。组合：set API 留痕 + 事件上报。
+func runAppearance(p *Provider, a *auth.Auth) (string, error) {
+	const themeKey = "theme-tkmw7j" // 和平精英激战金秋（Hp_Appearance 判据主题）
+	if err := p.client.SetAppearanceTheme(a, themeKey); err != nil {
+		return "", fmt.Errorf("设置主题: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+	if err := p.client.ReportDesktopEvent(a, upstream.DesktopEvent{
+		"eventCode": "appearance_skin_apply", "action": "apply", "source": "settings_close",
+		"id": themeKey, "vipLevel": 0, "series": "", "type": "unknown",
+	}); err != nil {
+		return "", err
+	}
+	return "已设置主题并上报皮肤生效事件", nil
+}
+
+// runTemplateUse 完成 template_5（使用 5 个模板创建任务）。
+// 2026-09-12 三账号实测：agent_task_created_with_template + template_used 事件组
+// （JOIN chat 链）一次上报 5 组即 5/5 点亮。template_id 服务端不校验真实性。
+func runTemplateUse(p *Provider, a *auth.Auth) (string, error) {
+	templates := [][2]string{{"1", "深度研究"}, {"2", "周报生成"}, {"3", "竞品分析"}, {"4", "活动策划"}, {"5", "代码评审"}}
+	for i, tp := range templates {
+		ms := time.Now().UnixMilli()
+		conv := fmt.Sprintf("wb2api-tpl-%d-%d", ms, i)
+		req := fmt.Sprintf("wb2api-tpl-req-%d-%d", ms, i)
+		events := upstream.DesktopTemplateUseSequence(conv, req, tp[0], tp[1])
+		if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+			return fmt.Sprintf("第 %d 组模板事件上报失败: %v", i+1, err), nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return "已上报 template_used ×5", nil
+}
+
+// runPlaybookPrompt 完成 playbook_prompt（灵感案例 Dialog 中发送 Prompt）。
+// 判据是 playbook_prompt_send（Dialog 发送）而非卡片曝光/点击——asar 逆向确认。
+func runPlaybookPrompt(p *Provider, a *auth.Auth) (string, error) {
+	ms := time.Now().UnixMilli()
+	conv := fmt.Sprintf("wb2api-pb-%d", ms)
+	req := fmt.Sprintf("wb2api-pb-req-%d", ms)
+	events := upstream.DesktopPlaybookPromptSequence(conv, req, "pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")
+	if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+		return "", err
+	}
+	return "已上报 playbook_cta_click + playbook_prompt_send", nil
+}
+
+// runCreateCanvas 完成 create_canvas（设计创意模式创建画布，+300 分）。
+// 判据是 wbx_design_canvas_task_create/open（Ardot create_design 工具完成遥测）。
+func runCreateCanvas(p *Provider, a *auth.Auth) (string, error) {
+	ms := time.Now().UnixMilli()
+	conv := fmt.Sprintf("wb2api-canvas-%d", ms)
+	req := fmt.Sprintf("wb2api-canvas-req-%d", ms)
+	events := upstream.DesktopDesignCanvasSequence(conv, req)
+	if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+		return "", err
+	}
+	return "已上报 wbx_design_canvas_task_create/open", nil
+}
+
+// expertSummonGap 专家召唤链的间隔（真实使用节奏，v11 实测 8s 成功率 100%）。
+const expertSummonGap = 6 * time.Second
+
+// runExpertUse 完成 expert_5（使用 5 个平台专家）。
+// 2026-09-12 三账号实测公式：真实专家列表（id 必须真实存在）→ 召唤链
+// （summon_click/summoned）→ 真实 chat 拿服务端 requestId → expert_actual_use。
+// 自造专家 id 或自造 requestId 均不计数。
+func runExpertUse(p *Provider, a *auth.Auth) (string, error) {
+	return runExpertBatch(p, a, "agent", 5)
+}
+
+// runExpertTeamUse 完成 Expert_team_use_3（使用 3 个专家团，expertType=team）。
+func runExpertTeamUse(p *Provider, a *auth.Auth) (string, error) {
+	return runExpertBatch(p, a, "team", 3)
+}
+
+// runExpertBatch 专家召唤+使用的公共实现。失败逐个继续，返回汇总信息。
+func runExpertBatch(p *Provider, a *auth.Auth, expertType string, count int) (string, error) {
+	experts, err := p.client.MarketExpertList(a, expertType)
+	if err != nil {
+		return "", fmt.Errorf("拉取专家列表: %w", err)
+	}
+	if len(experts) == 0 {
+		return "", fmt.Errorf("专家市场列表为空")
+	}
+	ok, fail := 0, 0
+	for i, e := range experts {
+		if ok >= count {
+			break
+		}
+		// 召唤链（web_element_click + summon_click + summoned）。
+		summonEvents := upstream.DesktopExpertSummonSequence(e)
+		if err := p.client.ReportDesktopEvent(a, summonEvents...); err != nil {
+			fail++
+			continue
+		}
+		// 真实 chat（带 X-Expert-Id）→ 服务端 requestId。
+		conv, req, cerr := p.client.DesktopChatWithExpert(a, e.ExpertID)
+		if cerr != nil {
+			fail++
+			continue
+		}
+		// 使用事件（JOIN 服务端 requestId）+ chat 链。
+		events := append(upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model"),
+			upstream.DesktopExpertActualUseEvent(e, conv, req))
+		if err := p.client.ReportDesktopEvent(a, events...); err != nil {
+			fail++
+			continue
+		}
+		ok++
+		if i < len(experts)-1 {
+			time.Sleep(expertSummonGap)
+		}
+	}
+	_ = fail
+	return fmt.Sprintf("已对 %d 位真实专家完成召唤+使用链（类型 %s）", ok, expertType), nil
+}
+
+// ---------------------------------------------------------------------------
+// 全量自动完成
+// ---------------------------------------------------------------------------
+
+// runAutoAll 对单账号依次执行所有可自动化任务，返回逐项结果。
+// 供「一键完成全部可自动任务」使用；单项失败不影响后续项。
+//
+// 流程：先把所有未接受的任务批量 accept（规范状态机；上游脚本建议"先 accept"），
+// 再逐项执行行为链路。accept 不是进度产生的必要条件，但让后续状态流转规范。
+func (p *Provider) runAutoAll(a *auth.Auth) []map[string]any {
+	var out []map[string]any
+
+	// 阶段 0：批量接受尚未接受的任务（失败不阻塞——行为事件才是进度唯一判据）。
+	if tasks, err := p.growthTasks(a); err == nil {
+		var codes []string
+		for i := range tasks {
+			t := &tasks[i]
+			if !t.Claimed() && !t.Locked && t.AcceptStatus != "accepted" && t.AcceptStatus != "completed" {
+				codes = append(codes, t.TaskCode)
+			}
+		}
+		if len(codes) > 0 {
+			if err := p.acceptTasks(a, codes); err != nil {
+				out = append(out, map[string]any{
+					"task_code": "(批量接受)", "status": "error",
+					"message": "接受任务失败（不阻塞后续）: " + err.Error(),
+				})
+			} else {
+				out = append(out, map[string]any{
+					"task_code": "(批量接受)", "status": "done",
+					"message": fmt.Sprintf("已接受 %d 个任务", len(codes)),
+				})
+				time.Sleep(reportGap)
+			}
+		}
+	}
+
+	for _, act := range autoActions {
+		item := map[string]any{"task_code": act.TaskCode, "desc": act.Desc}
+		before, err := p.taskByCode(a, act.TaskCode)
+		if err != nil {
+			item["status"] = "error"
+			item["message"] = "查询失败: " + err.Error()
+			out = append(out, item)
+			continue
+		}
+		if before == nil {
+			item["status"] = "skipped"
+			item["message"] = "该账号无此任务"
+			out = append(out, item)
+			continue
+		}
+		if before.Claimed() || before.Target() > 0 && before.Current() >= before.Target() {
+			item["status"] = "skipped"
+			item["message"] = "已完成（" + taskProgressText(before) + "）"
+			out = append(out, item)
+			continue
+		}
+		msg, err := act.run(p, a)
+		if err != nil {
+			item["status"] = "error"
+			item["message"] = err.Error()
+			out = append(out, item)
+			continue
+		}
+		after, _ := p.taskByCodeWaiting(a, act.TaskCode)
+		item["status"] = "done"
+		item["message"] = msg
+		item["progress_after"] = taskProgressText(after)
+		// 进度达标即自动领奖。领奖失败不掩盖主流程结果：
+		// status 仍为 done，附加 claim_error 供前端提示。
+		if after != nil && after.Claimable() {
+			item["claimable"] = true
+			if credit, energy, cerr := p.claimReward(a, act.TaskCode); cerr == nil {
+				item["claimed"] = true
+				item["credit"] = credit
+				item["energy"] = energy
+				if credit > 0 || energy > 0 {
+					item["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
+				} else {
+					item["message"] = msg + "；奖励此前已领取"
+				}
+			} else {
+				item["claim_error"] = cerr.Error()
+				item["message"] = msg + "；达标但领奖失败（可在列表手动重试）"
+			}
+		}
+		out = append(out, item)
+		time.Sleep(reportGap) // 项间节流
+	}
+	return out
+}
+
+// AutoTaskOne 执行**单个**任务动作：执行 → 回读进度 → 达标自动领奖。
+//
+// 与 B 的 accountTaskAuto（HTTP handler）对应，但把 HTTP 层剥掉 ——
+// 路由在 autotask_admin.go，本方法只做业务，便于测试直接调用。
+//
+// 返回的 map 直接作为 HTTP 响应体（字段名与 B 完全一致）。
+func (p *Provider) AutoTaskOne(uid, taskCode string) (map[string]any, error) {
+	a := p.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		return nil, fmt.Errorf("账号不存在: %s", uid)
+	}
+	act := autoActionFor(taskCode)
+	if act == nil {
+		return nil, errTaskNotAuto
+	}
+	// per-account 互斥：同账号的任务动作正在跑（单任务或全量）时直接拒绝，
+	// 不并发重跑（动作幂等但 expert/skill 系含真实对话，重跑浪费配额）。
+	if !p.tryLockAccount(uid) {
+		return nil, errTaskBusy
+	}
+	defer p.unlockAccount(uid)
+
+	// 前置读取：已完成的任务直接跳过（幂等，不浪费上游调用）。
+	before, err := p.taskByCode(a, act.TaskCode)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+	if before == nil {
+		return nil, errTaskNotFound
+	}
+	if before.Claimed() {
+		return map[string]any{"ok": true, "skipped": true, "message": "该任务已领取过奖励"}, nil
+	}
+	msg, err := act.run(p, a)
+	if err != nil {
+		return nil, fmt.Errorf("执行失败: %w", err)
+	}
+	// 回读验证：上报 200 ≠ 计分（上游可能静默丢弃 + 计分异步），
+	// 用有界轮询等异步计时落定，再决定是否自动领奖。
+	after, aerr := p.taskByCodeWaiting(a, act.TaskCode)
+	progressBefore, progressAfter := taskProgressText(before), ""
+	claimable := false
+	if aerr == nil && after != nil {
+		progressAfter = taskProgressText(after)
+		claimable = after.Claimable()
+	}
+	resp := map[string]any{
+		"ok":               true,
+		"message":          msg,
+		"progress_before":  progressBefore,
+		"progress_after":   progressAfter,
+		"claimable":        claimable,
+		"attempt":          act.Attempt,
+		"verify_supported": true,
+	}
+	// 达标即自动领奖：把"完成→领奖"收敛成一步，无需用户再点一次。
+	if claimable {
+		if credit, energy, cerr := p.claimReward(a, act.TaskCode); cerr == nil {
+			resp["claimed"] = true
+			resp["credit"] = credit
+			resp["energy"] = energy
+			if credit > 0 || energy > 0 {
+				resp["message"] = msg + fmt.Sprintf("；已自动领奖 +%d 分 +%d 能", credit, energy)
+			} else {
+				resp["message"] = msg + "；奖励此前已领取"
+			}
+		} else {
+			resp["claim_error"] = cerr.Error()
+			resp["message"] = msg + "；达标但领奖失败，可在任务列表手动点「领取」重试"
+		}
+	}
+	log.Printf("autotask: uid=%s code=%s progress %s -> %s claimable=%v claimed=%v",
+		uid, act.TaskCode, progressBefore, progressAfter, claimable, resp["claimed"])
+	// 写入任务历史，与签到/旅行/成长共用一套记录（便于界面按类型筛选）。
+	status := checkinlog.StatusOK
+	if claimable {
+		status = checkinlog.StatusOK
+	}
+	var credit int64
+	if v, ok := resp["credit"].(int64); ok {
+		credit = v
+	}
+	p.record(uid, checkinlog.KindGrowth, status, "一键完成 "+act.TaskCode+": "+truncateStr(msg, 80), credit, triggerManual)
+	// 就地刷新该账号的成长快照 —— 与 growth.go 里每条写路径同款（见
+	// refreshOwnSnapshot 的注释：写操作只改上游状态，服务端快照仍是旧的）。
+	//
+	// ⚠ 这一行是**实测补上的**：漏掉它时前端读 /admin/growth（缓存）会看到
+	// 旧状态，用户点完「一键完成」后那一行**没有任何变化** —— 于是他会再点一次。
+	// 本函数是同步返回的，所以这里多花一次单账号探测（~2s）换"点完立刻对"。
+	p.refreshOwnSnapshot(uid, status)
+	return resp, nil
+}
+
+// AutoTaskAll 对单账号执行全部可自动任务（供管理端点调用）。
+//
+// 返回逐项结果。调用方负责超时控制 —— 多项任务串联 + 每项含真实对话，
+// 实测可能耗时数分钟（B 用 5 分钟 context 兜底）。
+func (p *Provider) AutoTaskAll(uid string) ([]map[string]any, error) {
+	a := p.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		return nil, fmt.Errorf("账号不存在: %s", uid)
+	}
+	if !p.tryLockAccount(uid) {
+		return nil, errTaskBusy
+	}
+	defer p.unlockAccount(uid)
+	results := p.runAutoAll(a)
+	log.Printf("autotask: 一键完成可自动任务 uid=%s 共 %d 项", uid, len(results))
+	p.record(uid, checkinlog.KindGrowth, checkinlog.StatusOK,
+		fmt.Sprintf("一键完成 %d 项任务动作", len(results)), 0, triggerManual)
+	// 就地刷新该账号的成长快照（理由同 AutoTaskOne）。
+	//
+	// 这是**长跑后必须做**的一步：本函数实测耗时 ~186s，期间改了 16 个任务的状态，
+	// 而 /admin/growth 的缓存快照仍是启动前那一份。不刷的话，用户等了 3 分钟，
+	// 任务明细里那 15 条待办**原样还在**（实测确认：pending 仍显示 15，
+	// 强制 refresh=1 后才是 1）—— 看起来像整轮什么都没做。
+	// 只探 uid 自己（不扫全量），代价一次单账号探测。
+	p.refreshOwnSnapshot(uid, checkinlog.StatusOK)
+	return results, nil
+}
+
+// ── 错误哨兵（供 HTTP 层映射状态码）────────────────────────────────────
+
+// errTaskNotAuto 该任务没有自动化实现（需要官方客户端内交互）。
+var errTaskNotAuto = fmt.Errorf("该任务需要客户端内交互（无对应接口），无法自动完成")
+
+// errTaskBusy 该账号已有任务动作在执行（并发保护）。
+var errTaskBusy = fmt.Errorf("该账号有任务动作正在执行中，请等本轮结束后再试")
+
+// errTaskNotFound 该账号没有这个任务。
+var errTaskNotFound = fmt.Errorf("该账号没有此任务")
+
+// ── per-account 任务互斥锁 ──────────────────────────────────────────────
+
+// tryLockAccount 尝试占用某账号的任务动作槽位；已被占用返回 false。
+//
+// # 为什么需要它（1:1 移植自 B 的 autotask_lock_test.go 覆盖的那套逻辑）
+//
+// 任务动作是**幂等**的，但 expert_5 / skill_1 这类含**真实对话**的动作
+// 重跑会白烧上游配额；而且"一键完成全部"与"单任务"若并发，
+// 同一账号会同时对同一批任务上报两遍事件 —— 上游看到的是重复遥测，
+// 属于明显的异常特征。
+//
+// 因此同一账号的任何任务动作**全局互斥**（单任务与全量共用一把锁，
+// 见 B 的 TestTaskAccountLockCrossEntryShared）；不同账号互不影响。
+func (p *Provider) tryLockAccount(uid string) bool {
+	p.taskLockMu.Lock()
+	defer p.taskLockMu.Unlock()
+	if p.taskLockHeld == nil {
+		p.taskLockHeld = map[string]bool{}
+	}
+	if p.taskLockHeld[uid] {
+		return false
+	}
+	p.taskLockHeld[uid] = true
+	return true
+}
+
+// unlockAccount 释放某账号的任务动作槽位。
+func (p *Provider) unlockAccount(uid string) {
+	p.taskLockMu.Lock()
+	defer p.taskLockMu.Unlock()
+	delete(p.taskLockHeld, uid)
+}
+
+// TaskLockHeld 报告某账号当前是否有任务动作在执行（供前端置灰按钮）。
+func (p *Provider) TaskLockHeld(uid string) bool {
+	p.taskLockMu.Lock()
+	defer p.taskLockMu.Unlock()
+	return p.taskLockHeld[uid]
+}

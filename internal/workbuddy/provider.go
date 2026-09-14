@@ -75,6 +75,21 @@ type Provider struct {
 	// growth 成长中心守卫状态（快照缓存 + 到期表 + 六个自动动作开关）。
 	growth *growthWatchState
 
+	// activity 活跃上报的当日去重表（uid → 自然日 CST）。
+	//
+	// nil 安全：本包多处直接对 nil 调方法（见 ActivityTracker 的实现），
+	// 这样测试里手搓 &Provider{} 不会崩，只是失去去重。
+	activity *activityTracker
+
+	// activityHours/activityEnabled/activityLastDay 活跃上报的排程状态。
+	//
+	// 与 mu 共用同一把锁。activityHours 为空表示**未启用**
+	// （见 activityHourMatches：本能力默认关闭，必须显式配置）。
+	activityHours   []int
+	activityEnabled bool
+	activityLastDay string
+	activityLastRun time.Time
+
 	// travelLastRun/growthLastRun 各自上次守卫轮的执行时刻。
 	//
 	// 为什么本包要自己记：Due 里除了"有账号到期"还要叠加"不早于配置的守卫间隔"
@@ -100,6 +115,14 @@ type Provider struct {
 	//
 	// 与 mu 共用同一把锁。
 	adminEnv AdminEnv
+
+	// taskLockMu/taskLockHeld 任务动作的 **per-account 互斥**（见 autotask.go）。
+	//
+	// 刻意**不**复用 mu：任务动作可能跑数分钟（expert 系含真实对话），
+	// 而 mu 保护的是快照/记录等高频短临界区 —— 共用会让守卫轮在这几分钟里
+	// 全部排队，表现为"跑一次一键完成，整个控制台卡住"。
+	taskLockMu   sync.Mutex
+	taskLockHeld map[string]bool
 }
 
 // New 建一个 workbuddy Provider（契约测试用的无依赖构造）。
@@ -233,7 +256,12 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		return gateway.ChatStream{}, err
 	}
 
-	rc, status, respBody, err := p.client.ChatStream(a, body)
+	// 客户端 IP 透传：从 ctx 取（core 在入站侧放入），按请求传递而非共享字段。
+	// 取不到（单上游精简部署 / 测试直接调用）或 PassthroughIP=false 时，
+	// 出站行为与改造前逐字节一致 —— 不注入任何 IP 头。
+	clientIP := gateway.ClientIPFrom(ctx)
+
+	rc, status, respBody, err := p.client.ChatStreamWithIP(a, body, clientIP)
 	if err != nil {
 		// respBody 非空时说明是"上游返回了错误体"，属于业务错误，仍按流返回。
 		if len(respBody) > 0 {

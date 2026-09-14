@@ -20,6 +20,7 @@ import (
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
@@ -70,6 +71,8 @@ func main() {
 
 	// 熔断器 + 在途上限 + 三因子加权调优（从 config 注入，非正值回退默认）。
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
+	// 软冷却指数退避封顶（<=0 时保留 pool 的默认值 2h）。
+	p.SetSoftRateMax(cfg.SoftRateMaxDur)
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 
@@ -108,6 +111,49 @@ func main() {
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 出站身份（全部可省略；省略时出站请求头与改造前逐字节一致）。
+	up.UserAgent = cfg.Upstream.UserAgent
+	up.ClientVersion = cfg.Upstream.ClientVersion
+	up.CliVersion = cfg.Upstream.CliVersion
+	up.ClientName = cfg.Upstream.ClientName
+	up.DeviceToken = cfg.Upstream.DeviceToken
+	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
+	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	{
+		// 显式记一行：出站身份会决定"上游怎么看我们"，
+		// 排查"为什么官网使用端显示不对"时这是唯一的入口。
+		ua := "CLI/2.63.2 CodeBuddy/2.63.2（内置默认）"
+		if cfg.Upstream.UserAgent != "" {
+			ua = cfg.Upstream.UserAgent + "（user_agent 覆盖）"
+		} else if cfg.Upstream.ClientVersion != "" {
+			ua = "桌面端三段式（client_version=" + cfg.Upstream.ClientVersion + "）"
+		}
+		log.Printf("出站身份：UA=%s client_name=%q device_token=%v passthrough_ip=%v",
+			ua, cfg.Upstream.ClientName,
+			cfg.Upstream.DeviceToken != "" || cfg.Upstream.DeviceTokenFile != "",
+			cfg.Upstream.PassthroughIP)
+	}
+	// 系统提示词体系（借鉴 workbuddy2api-panel）：模式 + 正文 + 降级状态机。
+	//
+	// 正文由 cfg.normalize() 在启动时就加载好（文件不可读会在那里直接报错）。
+	// 状态机在这里创建，**同一个实例**必须同时交给两处：
+	//
+	//	up.PromptGate   出站客户端读它，决定用 PromptText 还是 Degraded
+	//	h.cfg.PromptGate 出站循环写它（观察到内容拦截时 Trigger）
+	//
+	// 两处共用同一个 *prompt.Gate 是本机制成立的前提 ——
+	// 各建一个的话，handler 触发的降级客户端永远看不到，退化成"每次重试都先撞 400"。
+	up.PromptMode = cfg.PromptMode
+	up.PromptText = cfg.PromptText
+	promptGate := prompt.NewGate()
+	up.PromptGate = promptGate
+	{
+		src := "内置默认"
+		if cfg.Prompt.File != "" {
+			src = cfg.Prompt.File
+		}
+		log.Printf("系统提示词：mode=%s 来源=%s（%d 字节）", cfg.PromptMode, src, len(cfg.PromptText))
+	}
 
 	checkinLog := checkinlog.New(cfg.CheckinLogPath, cfg.CheckinLogKeepDays)
 
@@ -176,6 +222,15 @@ func main() {
 	})
 	// 上游的 HTTP 客户端跟着 config 的超时一起装配（与改造前 upstream.New() 同一份配置）。
 	wb.SetClient(up)
+	// 对话活跃上报排程（借鉴 workbuddy2api-panel）。
+	//
+	// ⚠ 默认**不启用**：schedule.activity_hours 为空即不跑
+	// （见 config.go 的 ActivityHours 注释：新增能力必须 opt-in，
+	// 否则老部署升级后会自动开始对每个账号发上游请求）。
+	wb.SetActivitySchedule(cfg.Schedule.ActivityHours, cfg.Schedule.ActivityEnabled)
+	if wb.ActivityEnabled() {
+		log.Printf("对话活跃上报：已启用，时点 %v", wb.ActivityHours())
+	}
 	if err := registry.Register(wb); err != nil {
 		log.Fatalf("注册上游失败: %v", err)
 	}
@@ -421,13 +476,17 @@ func main() {
 	upSettings := newUpstreamSettingsAdapter(wb, cfg)
 
 	h := server.NewHandler(server.Config{
-		Pool:              p,
-		Upstream:          up,
-		APIKey:            cfg.APIKey,
-		Session:           sessRouter,
-		StickyCount:       sessCount,
-		RedisMode:         redisMode,
-		SoftCooldown:      cfg.SoftRateDur,
+		Pool:         p,
+		Upstream:     up,
+		APIKey:       cfg.APIKey,
+		Session:      sessRouter,
+		StickyCount:  sessCount,
+		RedisMode:    redisMode,
+		SoftCooldown: cfg.SoftRateDur,
+		MaxBodyMB:    cfg.Server.MaxBodyMB,
+		// ⚠ 必须是**同一个** promptGate 实例（与 up.PromptGate 一起给）：
+		// handler 在这里写、出站客户端在那里读。两个实例 = 机制失效。
+		PromptGate:        promptGate,
 		ModelCatalog:      server.ModelCatalog,
 		ModelCatalogState: server.ModelCatalogState,
 		// 实例身份：配置里给了就用配置的，否则用编译期默认值。

@@ -253,12 +253,19 @@ func TestGrowthJobDueGatesOnEmptySnapshots(t *testing.T) {
 	}
 }
 
-// TestJobsReturnsBothWatchTasks Provider 必须把两个守卫轮都注册出去。
+// TestJobsReturnsBothWatchTasks Provider 必须把守卫轮都注册出去。
+//
+// # 数量从 2 变成 3 是本版本的有意变更
+//
+// 新增了 JobActivity（对话活跃上报）。它与两个守卫轮**形状不同**：
+// 守卫轮按"每个账号自己的到期时刻"错峰，活跃上报按"整点窗口 + 当日是否已跑"。
+// 但三者都通过同一个 gateway.Job 契约注册，因此这里的结构断言（名字非空、
+// Run/Due/Interval 齐备）对三者同样成立。
 func TestJobsReturnsBothWatchTasks(t *testing.T) {
 	s, _ := newTestProvider(t, stubServer(t, defaultGrowthStub().handler()), testAuth("u1"))
 	jobs := s.Jobs()
-	if len(jobs) != 2 {
-		t.Fatalf("应注册 2 个任务，得到 %d", len(jobs))
+	if len(jobs) != 3 {
+		t.Fatalf("应注册 3 个任务（旅行守卫 / 成长守卫 / 活跃上报），得到 %d", len(jobs))
 	}
 	names := map[string]bool{}
 	for _, j := range jobs {
@@ -269,14 +276,14 @@ func TestJobsReturnsBothWatchTasks(t *testing.T) {
 			t.Errorf("任务 %s 缺 Run", j.Name)
 		}
 		if j.Due == nil {
-			t.Errorf("任务 %s 缺 Due —— 两个守卫轮都是按账号到期错峰的，不是固定间隔", j.Name)
+			t.Errorf("任务 %s 缺 Due —— 守卫轮按账号到期错峰、活跃上报按整点窗口，都不是纯固定间隔", j.Name)
 		}
 		if j.Interval <= 0 {
 			t.Errorf("任务 %s 的 Interval 应 > 0（作为轮询下限）", j.Name)
 		}
 		names[j.Name] = true
 	}
-	for _, want := range []string{JobTravelWatch, JobGrowthWatch} {
+	for _, want := range []string{JobTravelWatch, JobGrowthWatch, JobActivity} {
 		if !names[want] {
 			t.Errorf("缺少任务 %s", want)
 		}
