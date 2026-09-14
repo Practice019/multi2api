@@ -1283,26 +1283,67 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 //
 // 非 CoolSoft 的冷却入口会**清空** softRateModel（见下），
 // 避免上一次模型级限流的豁免痕迹泄漏到账号级冷却上。
+//
+// ⚠ 这是**相对时长**入口。要"冷却到某个绝对时刻"请用 CooldownUntilNextReset ——
+// 不要自己算 `until.Sub(time.Now())` 再传进来：那会经过两次读钟，把调用方给的
+// 时刻改写掉几百纳秒（详见 cooldownUntil 的注释，那是本版修掉的一个真 bug）。
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
+	if d < 0 {
+		d = 0
+	}
+	p.cooldownUntil(uid, kind, time.Now().Add(d), reason)
+}
+
+// cooldownUntil 是全部冷却入口的**唯一**落点：把 until 当作**绝对时刻**存下来。
+//
+// # 为什么必须区分"绝对时刻"与"相对时长"（本版修的一个真 bug）
+//
+// 原实现是两段式：
+//
+//	CooldownUntilNextReset: now := time.Now(); d := until.Sub(now)   // 读钟 #1
+//	→ Cooldown:             e.until = time.Now().Add(d)              // 读钟 #2
+//
+// 两次读钟之间的差被**加进了**调用方给的时刻。后果不是"误差小可忽略"，
+// 而是**契约被悄悄改写** —— 上游给的重置时刻没有原样生效：
+//
+//	CI(Linux) 实测: 期望 …04:00:00        实得 …04:00:00.000000331
+//	CI(Linux) 实测: 期望 …13:11:33        实得 …13:11:33.00000019
+//
+// 更麻烦的是它**只在 Linux 上暴露**：Windows 时钟粒度粗（约 15ms），
+// 两次读钟通常返回同一个值，于是本机一直是绿的 —— 属于"平台相关且不报错"
+// 的最难查的一类。所以这里把两种语义分开：
+//
+//	绝对时刻入口（CooldownUntilNextReset）→ 原样存 until，不经过时长往返
+//	相对时长入口（Cooldown）            → 先换算成绝对时刻，再走本函数
+func (p *Pool) cooldownUntil(uid string, kind CoolKind, until time.Time, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
-		if kind == CoolSoft {
-			e.softStreak++
-			d = p.softDurationLocked(d, e.softStreak)
-		}
-		e.until = time.Now().Add(d)
-		e.coolKind = kind
-		e.reason = reason
-		// 非模型级冷却入口：清空 6004 模型豁免痕迹。
-		//
-		// 不清的话会出现这一串：账号因 gpt-5.5 被模型级限流（softRateModel=gpt-5.5）
-		// → 随后因别的原因进入**账号级**冷却 → 但 exempt 判定仍看到
-		// softRateModel 非空 → 请求别的模型时被错误豁免，继续撞账号级故障。
-		e.softRateModel = ""
-		p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
-		p.dirty.Store(true)
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
 	}
+	if kind == CoolSoft {
+		// 软限流仍是**时长**语义（要按 streak 指数放大），
+		// 因此换算回时长、放大后再落回绝对时刻。
+		now := time.Now()
+		d := until.Sub(now)
+		if d < 0 {
+			d = 0
+		}
+		e.softStreak++
+		until = now.Add(p.softDurationLocked(d, e.softStreak))
+	}
+	e.until = until
+	e.coolKind = kind
+	e.reason = reason
+	// 非模型级冷却入口：清空 6004 模型豁免痕迹。
+	//
+	// 不清的话会出现这一串：账号因 gpt-5.5 被模型级限流（softRateModel=gpt-5.5）
+	// → 随后因别的原因进入**账号级**冷却 → 但 exempt 判定仍看到
+	// softRateModel 非空 → 请求别的模型时被错误豁免，继续撞账号级故障。
+	e.softRateModel = ""
+	p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
+	p.dirty.Store(true)
 }
 
 // softRateMaxOr 返回生效的 softRateMax（未注入时按默认值），供封顶计算。
@@ -1435,13 +1476,15 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 // pool 只负责"冷却到某个时刻"，不再知道那个时刻是怎么来的。
 // 原先那个 Deprecated 的 4 点薄封装与 nextDay4AM 已随 Task 3c 迁入
 // internal/workbuddy（见 reset.go 的 NextCheckinReset）。
+//
+// ⚠ 存下来的必须是**调用方给的那个时刻本身**，不能经过 `until.Sub(now)` 再
+// `now.Add(d)` 的往返 —— 那会引入几百纳秒的平台相关偏差（见 cooldownUntil）。
+// 目标时刻已过时退化为"立即结束冷却"，与原先 d=0 的行为一致。
 func (p *Pool) CooldownUntilNextReset(uid string, until time.Time, reason string) {
-	now := time.Now()
-	d := until.Sub(now)
-	if d < 0 {
-		d = 0 // 目标时刻已过 → 不冷却（而不是负时长导致未定义行为）
+	if now := time.Now(); until.Before(now) {
+		until = now
 	}
-	p.Cooldown(uid, CoolHard, d, reason)
+	p.cooldownUntil(uid, CoolHard, until, reason)
 }
 
 // Disable 永久禁用（session 死亡），需人工重登后手工恢复或文件替换。
