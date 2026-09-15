@@ -6,6 +6,8 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"errors"
+	"io/fs"
 	"os"
 	"os/signal"
 	"syscall"
@@ -37,9 +39,15 @@ func main() {
 
 	cfg, err := Load(*cfgPath)
 	if err != nil {
-		// 配置文件不存在时给一次机会用纯默认 + env
-		if os.IsNotExist(err) {
-			log.Printf("config %s not found, using defaults+env", *cfgPath)
+		// 配置文件不存在时给一次机会用纯默认 + env。
+		//
+		// ⚠ 必须用 errors.Is(err, fs.ErrNotExist) 而不是 os.IsNotExist(err)：
+		// Load 把读取错误包成 "read config: %w"，Windows 下 os.IsNotExist 对
+		// 被包装的错误判不了（实测：空目录直接退出 "load config: read config:
+		// open config.json: ..."），优雅回落成了死代码。errors.Is 穿透包装链。
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Printf("config %s 不存在：请从 Release/仓库复制 config.example.json 改为 config.json 后编辑"+
+				"（配置说明见 README）；本次先用纯默认值启动", *cfgPath)
 			cfg, err = Load("")
 		}
 		if err != nil {
