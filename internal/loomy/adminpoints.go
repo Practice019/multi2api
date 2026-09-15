@@ -344,13 +344,19 @@ func (p *Provider) handleInviteBind(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := strings.TrimSpace(req.UID)
 	code := strings.TrimSpace(req.Code)
+	// ⚠ 全程日志（用户报"绑定失败：未知原因，且没有日志"）。
+	// 每个分支都落一条，从"请求到达"起 —— 若复现后连到达行都没有，
+	// 说明请求根本没进这个 handler（前端路径/页面缓存问题），那本身就是答案。
+	log.Printf("loomy: 绑定邀请码请求到达 uid=%s code=%s", uid, code)
 	if uid == "" || code == "" {
+		log.Printf("loomy: 绑定邀请码被拒（uid/code 为空）uid=%q code=%q", uid, code)
 		writeLoomyJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "uid 与 code 都不能为空"})
 		return
 	}
 	if len(code) < 4 || len(code) > 32 {
 		// 实测邀请码 6 位，但不设死 —— 上游才是权威，长度怪异的码交给上游
 		// 判定（200003 邀请码不可用），而不是在这里因为"不是 6 位"就白拒。
+		log.Printf("loomy: 绑定邀请码被拒（长度异常）uid=%s code=%s len=%d", uid, code, len(code))
 		writeLoomyJSON(w, http.StatusBadRequest,
 			map[string]any{"ok": false, "error": "邀请码长度异常（应为 6 位，实测形如 E3HRN8）"})
 		return
@@ -364,6 +370,7 @@ func (p *Provider) handleInviteBind(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == nil {
+		log.Printf("loomy: 绑定邀请码被拒（账号不存在）uid=%s code=%s", uid, code)
 		writeLoomyJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这个 loomy 账号: " + uid})
 		return
 	}
@@ -379,6 +386,7 @@ func (p *Provider) handleInviteBind(w http.ResponseWriter, r *http.Request) {
 		writeLoomyJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": translated})
 		return
 	}
+	log.Printf("loomy: 绑定邀请码上游成功 uid=%s code=%s（开始复查激活状态）", shortUID(uid), code)
 	act, applied, err := p.Activation(ctx, target.Session)
 	bal, _, _ := p.Balance(ctx, target.Session)
 	resp := map[string]any{
@@ -390,7 +398,10 @@ func (p *Provider) handleInviteBind(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		resp["error"] = "绑定已提交，但复查激活状态失败：" + err.Error()
+		log.Printf("loomy: 绑定已提交但复查失败 uid=%s code=%s 复查错误=%v", shortUID(uid), code, err)
 	}
+	log.Printf("loomy: 绑定邀请码结果 uid=%s code=%s ok=%v activated=%v applied=%q balance=%d",
+		shortUID(uid), code, resp["ok"], act, applied, bal)
 	writeLoomyJSON(w, http.StatusOK, resp)
 }
 
