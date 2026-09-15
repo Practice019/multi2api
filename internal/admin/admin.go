@@ -34,6 +34,7 @@ import (
 	"sync"
 	"time"
 
+	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
@@ -147,6 +148,10 @@ type Config struct {
 	// 所以域由配置给出。空串时回落 DefaultProvider（兼容旧装配），但会记日志 ——
 	// **静默回落正是这个 bug 当初能藏住的原因**。
 	ReloadProvider string
+
+	// APIKeys 多 API key 管理存储（对标 new-api 令牌体系）。
+	// nil = 不注册 /admin/apikeys 路由（未启用该功能，与旧行为一致）。
+	APIKeys *apikey.Store
 }
 
 // SchedulerView 核心调度器在本包看来是什么样（只保留 /admin/schedule 读的字段）。
@@ -265,6 +270,11 @@ func New(cfg Config) *Handler {
 	// 一次下发 —— 前端据此渲染导航与面板，**不认识任何上游名字**。
 	// 放在 mountUpstreamRoutes 之前：通用端点优先，上游不得覆盖它。
 	h.register("GET /admin/ui/manifest", h.uiManifest)
+
+	// API key 管理（对标 new-api 令牌体系）：未注入 Store 时不注册路由。
+	if h.cfg.APIKeys != nil {
+		h.registerAPIKeys()
+	}
 
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
 	// 所以冲突时以先注册的为准（见 mountUpstreamRoutes）。

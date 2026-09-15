@@ -855,6 +855,25 @@
     </div>
   </section>
 
+  <section data-key="apikeys">
+    <h2>API 管理 <span class="spacer"></span>
+      <button id="btnApiKeyNew" class="primary" style="padding:3px 10px;font-size:12px">新建 API Key</button>
+    </h2>
+    <div class="body">
+      <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.7">
+        API Key 是调用 <code>/v1/chat/completions</code> 的凭据：每把可单独设额度
+        （token 上限，0=不限）与每分钟请求上限（0=不限）。顶部配置里的
+        <code>api_key</code> 仍是管理钥匙（不限额）。数据存 <code>data/apikeys.json</code>。
+      </div>
+      <table>
+        <thead><tr>
+          <th>名称</th><th>Key</th><th>状态</th><th>额度</th><th>请求</th><th>失败</th><th>限速</th><th>创建</th><th>操作</th>
+        </tr></thead>
+        <tbody id="apiKeyRows"><tr><td colspan="9" class="dim">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- 动态上游面板宿主。
        这里**没有**任何写死的面板 —— 每个已在 manifest 里声明了能力位、
        且该能力位有 GET 端点的上游，会由 buildProviderPanels() 在此生成
@@ -3575,6 +3594,7 @@ let loginProvider = '';
     const key = sec.dataset.key || '';
     if (key === 'logs') loadLogHistory();
     if (key === 'settings') loadSettings();
+    if (key === 'apikeys') loadAPIKeys();
     // 上游专属面板：按能力位决定拉什么数据。
     // force=true：切到该标签页时**强制**刷新一次（5 秒轮询不再碰面板，
     // 所以"用户主动切过来"是拿到新数据的时机）。
@@ -4472,6 +4492,149 @@ let loginProvider = '';
       else out[key] = el.value.trim();
     }
     return out;
+  }
+
+  // ---------------------------------------------------------------- API 管理
+  //
+  // 对标 new-api 的令牌管理（单机简化版）：多把 key、每把独立额度/限速/用量。
+  // 端点由核心 admin 提供（/admin/apikeys 系列），仅 loopback 可访问。
+  //
+  // 显示：掩码 key（完整 key 只在创建时返回一次）、状态、额度、用量。
+  // 操作：新建（name/limit/rpm）、启用/禁用、重置额度、改配额、删除。
+  // 无感刷新：30s 轮询只更新数值单元格（同 pollPoolValues 的 diff 手法）。
+
+  async function loadAPIKeys() {
+    let d;
+    try { d = await admin('/admin/apikeys'); }
+    catch { $('apiKeyRows').innerHTML = '<tr><td colspan="9" class="err">读取失败</td></tr>'; return; }
+    renderAPIKeys(d && d.keys ? d.keys : []);
+  }
+
+  function apiKeyRemain(k) {
+    if (k.limit <= 0) return '不限';
+    const r = k.limit - k.used;
+    return r > 0 ? r : 0;
+  }
+
+  function renderAPIKeys(list) {
+    const host = $('apiKeyRows');
+    if (!host) return;
+    if (!list.length) {
+      host.innerHTML = '<tr><td colspan="9" class="dim">还没有 API Key —— 点右上角「新建 API Key」创建第一把。</td></tr>';
+      return;
+    }
+    host.innerHTML = list.map(k => {
+      const st = k.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill err">禁用</span>';
+      const quota = `${k.used} / ${k.limit > 0 ? k.limit : '∞'}`;
+      const remain = k.limit > 0 ? `<span class="dim" style="font-size:11px">剩 ${apiKeyRemain(k)}</span>` : '';
+      const created = k.created_at ? k.created_at.slice(0, 10) : '—';
+      const ops = [
+        `<button data-apikey="${esc(k.id)}" data-act="toggle" ${k.enabled ? '' : 'class="primary"'}>${k.enabled ? '禁用' : '启用'}</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="edit">改配额</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="reset">重置</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="delete" style="color:var(--err)">删除</button>`,
+      ].join(' ');
+      return `<tr>
+        <td>${esc(k.name)}</td>
+        <td class="mono dim" title="完整 key 只在创建时显示一次">${esc(k.masked || k.id)}</td>
+        <td>${st}</td>
+        <td>${quota} ${remain}</td>
+        <td class="mono">${esc(k.requests)}</td>
+        <td class="mono">${esc(k.fails)}</td>
+        <td class="mono">${k.rpm > 0 ? k.rpm + '/min' : '不限'}</td>
+        <td class="dim">${created}</td>
+        <td style="white-space:nowrap">${ops}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // 新建 API Key：内联询问 name / limit / rpm（回车分隔）。
+  async function apiKeyCreate(btn) {
+    const name = (window.prompt('名称（调用方/用途，必填）') || '').trim();
+    if (!name) { toast('名称不能为空', true); return; }
+    const limStr = window.prompt('额度上限（token 数，0=不限，默认 0）') || '0';
+    const rpmStr = window.prompt('每分钟请求上限（0=不限，默认 0）') || '0';
+    const limit = parseInt(limStr, 10); const rpm = parseInt(rpmStr, 10);
+    if (isNaN(limit) || isNaN(rpm)) { toast('额度/限速必须是数字', true); return; }
+    await busyRun(btn, async () => {
+      try {
+        const r = await admin('/admin/apikeys', { method: 'POST', body: JSON.stringify({ name, limit, rpm }) });
+        if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
+        toast(`已创建（仅此一次显示完整 key）：\n${r.full}\n请立即复制保存`, false, 15000);
+        copyText(r.full, 'API Key');
+        await loadAPIKeys();
+        return true;
+      } catch (e) { toast('创建失败：' + e.message, true); return false; }
+    }, { label: '新建 API Key', busyText: '创建中…' });
+  }
+
+  // 行内操作：事件委托（表格行会随刷新重建）。
+  $('apiKeyRows').addEventListener('click', async ev => {
+    const b = ev.target.closest('button[data-apikey]');
+    if (!b || b.disabled) return;
+    const id = b.dataset.apikey, act = b.dataset.act;
+    if (act === 'toggle') {
+      await busyRun(b, async () => {
+        try {
+          const on = b.textContent === '启用';
+          await admin('/admin/apikeys/toggle', { method: 'POST', body: JSON.stringify({ id, enabled: on }) });
+          toast(on ? '已启用' : '已禁用');
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('操作失败：' + e.message, true); return false; }
+      }, { label: '切换', busyText: '…' });
+      return;
+    }
+    if (act === 'edit') {
+      const limStr = window.prompt('新的额度上限（token 数，0=不限）') || '0';
+      const rpmStr = window.prompt('新的每分钟上限（0=不限）') || '0';
+      const limit = parseInt(limStr, 10); const rpm = parseInt(rpmStr, 10);
+      if (isNaN(limit) || isNaN(rpm)) { toast('额度/限速必须是数字', true); return; }
+      await busyRun(b, async () => {
+        try {
+          await admin('/admin/apikeys/update', { method: 'POST', body: JSON.stringify({ id, limit, rpm }) });
+          toast('已更新配额');
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('更新失败：' + e.message, true); return false; }
+      }, { label: '改配额', busyText: '…' });
+      return;
+    }
+    if (act === 'reset') {
+      if (!confirm('重置这把 key 的已用额度与失败数？')) return;
+      await busyRun(b, async () => {
+        try {
+          await admin('/admin/apikeys/reset', { method: 'POST', body: JSON.stringify({ id }) });
+          toast('已重置');
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('重置失败：' + e.message, true); return false; }
+      }, { label: '重置', busyText: '…' });
+      return;
+    }
+    if (act === 'delete') {
+      if (!confirm('删除这把 API key？删除后使用它的调用方立即失效。')) return;
+      await busyRun(b, async () => {
+        try {
+          await admin('/admin/apikeys/delete', { method: 'POST', body: JSON.stringify({ id }) });
+          toast('已删除');
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('删除失败：' + e.message, true); return false; }
+      }, { label: '删除', busyText: '…' });
+      return;
+    }
+  });
+
+  // pollAPIKeys 无感轮询：digest 比对（enabled/used/requests/fails 变化才重绘）。
+  async function pollAPIKeys() {
+    if (document.hidden) return;
+    const sec = $('apiKeyRows');
+    if (!sec || sec.offsetParent === null) return; // 面板不可见不刷
+    let d;
+    try { d = await admin('/admin/apikeys'); }
+    catch { return; }
+    const list = (d && d.keys) || [];
+    const digest = JSON.stringify(list.map(k => [k.id, k.enabled, k.used, k.requests, k.fails]));
+    if (digest === sec._last) return;
+    sec._last = digest;
+    renderAPIKeys(list);
   }
 
   function markDirty(on) {
@@ -6781,6 +6944,7 @@ let multCatalogFailed = false;
     setInterval(() => {
       pollPoolValues();
       pollStatsCards();
+      pollAPIKeys();
     }, 30000);
 
     // 账号操作：事件委托，避免每行都绑 handler。
@@ -7115,6 +7279,9 @@ let multCatalogFailed = false;
     setInterval(() => { if (sectionActive('logs')) loadLogHistory(); }, 10000);
     loadLogHistory();
     loadSettings();   // 设置页数据先备好，顺便拿到落盘日志概况（顶部日志面板要显示）
+
+    // API 管理：新建按钮 + 初始加载（无感轮询已挂在上面的 30s 间隔里）。
+    $('btnApiKeyNew').onclick = () => apiKeyCreate($('btnApiKeyNew'));
 
     // 导航最后构建：此时所有 section 都已在 DOM 里。
     //

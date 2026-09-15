@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"workbuddy2api/internal/admin"
+	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/clientlogin"
@@ -607,10 +609,19 @@ func main() {
 	// 22 个管理端点已经由 workbuddy 自己通过 AdminExt 注册，不再经核心转发。
 	upSettings := newUpstreamSettingsAdapter(wb, cfg)
 
+	// API key 管理（对标 new-api 令牌体系）：config.api_key 是管理钥匙，
+	// 普通 key 走 data/apikeys.json（与 state.json 同级，CWD 相对）。
+	// 初始化失败必须显式暴露（数据文件损坏不该静默重建丢 key）。
+	apiKeysStore, err := apikey.New(filepath.Join("data", "apikeys.json"))
+	if err != nil {
+		log.Fatalf("load apikeys: %v", err)
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		APIKeys:      apiKeysStore, // 多 API key 管理（普通 key 走它）
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
@@ -656,6 +667,7 @@ func main() {
 			Log:      checkinLog,
 			Ring:     logRing,
 			AuthDir:  cfg.AuthDir,
+			APIKeys:  apiKeysStore, // /admin/apikeys 管理端点
 			// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
 			AuthsBase: cfg.AuthsBase,
 			// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。

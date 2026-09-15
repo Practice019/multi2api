@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
@@ -26,10 +27,14 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	APIKey   string // 空 = 不鉴权
+	// APIKeys 多 API key 管理（对标 new-api 令牌体系）：config.api_key 是
+	// 管理钥匙（不限额），普通 key 走 apikey.Store 的额度/限速/用量。
+	// nil = 不启用多 key 管理（旧行为）。
+	APIKeys   *apikey.Store
+	MaxRotate int // 单请求最多换号次数，默认 3
 
 	// MaxBodyMB 出站前允许的最大请求体（MiB），<=0 回落 8。
 	//
@@ -221,21 +226,87 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-// validBearer 报告请求是否携带正确凭据；未配置 APIKey 时恒真。
+// apikeyCtxKey 请求上下文里存放"本次鉴权命中的 API key id"的键。
+type apikeyCtxKeyType struct{}
+
+var apikeyCtxKey apikeyCtxKeyType
+
+// validBearer 报告请求是否携带正确凭据；未配置任何鉴权时恒真。
+//
+// 鉴权优先级（对标 new-api 的令牌体系，config.api_key 是管理钥匙）：
+//
+//	config.api_key 非空且匹配       → 管理 key，通过（不限额不限速）
+//	apikey.Store 非空且 Bearer 命中 → 普通 key，通过（额度/限速校验见下）
+//	两者都未配置                     → 不鉴权（旧行为）
+//
+// 普通 key 的错误映射：未知/禁用 → 401；额度用尽 → 402；超速 → 429。
 // 抽成独立方法供 /ui 的非本机分支复用（那里要出 401 + 纯文本，而不是 OpenAI 错误信封）。
 func (h *Handler) validBearer(r *http.Request) bool {
-	if h.cfg.APIKey == "" {
+	bearer := ""
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+		bearer = strings.TrimPrefix(authz, "Bearer ")
+	}
+	if h.cfg.APIKey == "" && h.cfg.APIKeys == nil {
 		return true
 	}
-	authz := r.Header.Get("Authorization")
-	return strings.HasPrefix(authz, "Bearer ") && strings.TrimPrefix(authz, "Bearer ") == h.cfg.APIKey
+	if h.cfg.APIKey != "" && bearer == h.cfg.APIKey {
+		return true
+	}
+	if h.cfg.APIKeys != nil && bearer != "" {
+		_, err := h.cfg.APIKeys.Validate(bearer)
+		// 额度/限速错误由 withAuth 映射 402/429；这里只回答"凭证是否有效"。
+		return err == nil
+	}
+	return false
+}
+
+// authResult 鉴权结果：命中的 apikey id（空 = 管理 key / 无多 key）与错误。
+type authResult struct {
+	apikeyID string
+	err      error // nil = 通过；否则为 apikey 包的哨兵错误
+}
+
+// authorize 完整鉴权判定（含普通 key 的额度/限速）。
+func (h *Handler) authorize(r *http.Request) authResult {
+	bearer := ""
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+		bearer = strings.TrimPrefix(authz, "Bearer ")
+	}
+	// 未配置任何鉴权 → 恒通过（旧行为）。
+	if h.cfg.APIKey == "" && h.cfg.APIKeys == nil {
+		return authResult{}
+	}
+	// 管理 key 优先。
+	if h.cfg.APIKey != "" && bearer == h.cfg.APIKey {
+		return authResult{}
+	}
+	// 普通 key。
+	if h.cfg.APIKeys != nil && bearer != "" {
+		id, err := h.cfg.APIKeys.Validate(bearer)
+		if err == nil {
+			return authResult{apikeyID: id}
+		}
+		return authResult{err: err}
+	}
+	return authResult{err: apikey.ErrUnknown}
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !h.validBearer(r) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+		ar := h.authorize(r)
+		if ar.err != nil {
+			switch {
+			case errors.Is(ar.err, apikey.ErrQuota):
+				writeOpenAIError(w, http.StatusPaymentRequired, "insufficient_quota", "API key 额度已用完")
+			case errors.Is(ar.err, apikey.ErrRateLimit):
+				writeOpenAIError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "请求过于频繁（触发该 API key 的每分钟上限）")
+			default:
+				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			}
 			return
+		}
+		if ar.apikeyID != "" {
+			r = r.WithContext(context.WithValue(r.Context(), apikeyCtxKey, ar.apikeyID))
 		}
 		next(w, r)
 	}
@@ -808,6 +879,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	st.provider = reqProvider
+	// API key 用量记录：命中普通 key 时在出口把 token/成败记给该 key。
+	if kid, ok := r.Context().Value(apikeyCtxKey).(string); ok && kid != "" && h.cfg.APIKeys != nil {
+		st.apikeyID = kid
+		st.bump = func(toks int, ok bool) { h.cfg.APIKeys.BumpUsage(kid, int64(toks), ok) }
+	}
 	defer st.done()
 
 	// ctx 供出站调用使用（Provider.Chat / RefreshCredential 都收 ctx）。
