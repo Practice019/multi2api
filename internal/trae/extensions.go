@@ -2,14 +2,11 @@
 //
 // 按"上游只实现自己有的"原则，这里实现：
 //
-//	AuthDirExt / CredentialLoader(+Secret) / CredentialRefresher / RefreshSkewExt
+//	LoginFlow / AuthDirExt / CredentialLoader(+Secret) / CredentialRefresher / RefreshSkewExt
 //	CredentialExpiryExt / QuotaExt / AccountColumnsExt / DailyActionExt / JobExt / AdminExt
 //
 // 刻意**不实现**：
 //
-//	LoginFlow      TRAE 的登录是浏览器 OAuth（127.0.0.1 回调），
-//	               不适合塞进 device-flow 形状；凭证通过手工放置/登录脚本导入
-//	               （与 traework2api 的 login.sh 同一条路），点「重载 auths」进池。
 //	SoftRateExt    上游没有给出"限流何时解除"，硬冷却即可。
 //	ResetPolicyExt 权益不足的恢复时刻由 core 默认处理（本上游不额外声明）。
 package trae
@@ -24,6 +21,7 @@ import (
 
 // 编译期断言：Provider 实现它声称支持的全部扩展点。
 var (
+	_ gateway.LoginFlow              = (*Provider)(nil)
 	_ gateway.AuthDirExt             = (*Provider)(nil)
 	_ gateway.CredentialLoader       = (*Provider)(nil)
 	_ gateway.CredentialSecretLoader = (*Provider)(nil)
