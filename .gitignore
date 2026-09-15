@@ -87,3 +87,5 @@ ode tests/frontend/gen_xxx.js 时，
 # 而它是**未跟踪**的，很容易被 git add . 顺手带进版本库。
 # 锚定根目录，不影响 tests/frontend/ 下的正品。
 /*_gen.js
+# Release 预编译产物（gh release 上传用，不入版本库）
+dist/
