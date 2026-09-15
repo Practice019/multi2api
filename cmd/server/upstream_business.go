@@ -157,7 +157,7 @@ func (a schedulerAdapter) Hours() ([]int, []int) {
 	// 时点槽位已弃用（统一 30 分钟扫描）：恒空。
 	return nil, nil
 }
-func (a schedulerAdapter) CheckinEnabled() bool { return a.checkinOn }
+func (a schedulerAdapter) CheckinEnabled() bool   { return a.checkinOn }
 func (a schedulerAdapter) KeepaliveEnabled() bool { return a.keepaliveOn }
 
 // ---- workbuddy 侧槽位写入口（设置页改时点/开关） ----
@@ -288,7 +288,7 @@ func (a adminSchedulerAdapter) Hours() ([]int, []int) {
 	// 时点槽位已弃用（统一 30 分钟扫描）：恒空。
 	return nil, nil
 }
-func (a adminSchedulerAdapter) CheckinEnabled() bool { return a.checkinOn }
+func (a adminSchedulerAdapter) CheckinEnabled() bool   { return a.checkinOn }
 func (a adminSchedulerAdapter) KeepaliveEnabled() bool { return a.keepaliveOn }
 
 // JobStatuses 把已注册任务的运行状态透给控制台（admin.JobStatusView）。
