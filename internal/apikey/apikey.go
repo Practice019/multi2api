@@ -343,3 +343,13 @@ func newID() string {
 	}
 	return "sk-" + hex.EncodeToString(b)
 }
+
+// NewAdminKey 生成新的管理钥匙（mk- 前缀 + 32 hex，crypto/rand）。
+// 供「轮换管理密钥」端点使用：写回 config.api_key 并立即生效。
+func NewAdminKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		b = []byte(fmt.Sprintf("%016x%016x", time.Now().UnixNano(), time.Now().UnixNano()))
+	}
+	return "mk-" + hex.EncodeToString(b)
+}

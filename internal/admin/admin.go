@@ -156,6 +156,18 @@ type Config struct {
 	// 让管理页与仪表盘「API 接入信息」显示同一把钥匙（一个事实来源）。
 	// 空 = 未配置管理钥匙。
 	APIKey string
+	// ConfigPath config.json 路径（轮换管理钥匙时写回 api_key 字段）。
+	// 空 = 不支持写回（轮换端点返回错误）。
+	ConfigPath string
+	// OnAPIKeyRotated 轮换成功后的通知（装配层注入，更新 handler 内存钥匙，
+	// 让新 key 立即生效无需重启）。nil = 只写文件不更新内存。
+	OnAPIKeyRotated func(newKey string)
+}
+
+// SetOnAPIKeyRotated 注入管理钥匙轮换后的通知（装配层在 handler 构造完成后调用，
+// 因为回调要引用 handler —— 它不能在 admin.New 的 Config 里直接闭包捕获）。
+func (h *Handler) SetOnAPIKeyRotated(fn func(newKey string)) {
+	h.cfg.OnAPIKeyRotated = fn
 }
 
 // SchedulerView 核心调度器在本包看来是什么样（只保留 /admin/schedule 读的字段）。

@@ -617,6 +617,10 @@ func main() {
 		log.Fatalf("load apikeys: %v", err)
 	}
 
+	// 管理钥匙轮换的间接回调（见 admin.Config.OnAPIKeyRotated 注释：
+	// h 在 admin.New 的 Config 求值时尚未绑定，不能直接捕获，经此变量间接引用）。
+	var onRotate func(string) = func(string) {}
+
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -669,6 +673,10 @@ func main() {
 			AuthDir:  cfg.AuthDir,
 			APIKeys:  apiKeysStore, // /admin/apikeys 管理端点
 			APIKey:   cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）
+			// 轮换管理钥匙写回 config.json 的路径（回调经 onRotate 间接引用 h ——
+			// h 在此闭包求值时尚未绑定，不能直接捕获，见构造后的 onRotate 赋值）。
+			ConfigPath:      *cfgPath,
+			OnAPIKeyRotated: func(newKey string) { onRotate(newKey) },
 			// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
 			AuthsBase: cfg.AuthsBase,
 			// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。
@@ -717,6 +725,12 @@ func main() {
 			StartedAt: time.Now(),
 		}),
 	})
+
+	// 轮换管理钥匙：h 构造完成后把「更新内存」接上（闭包经 onRotate 间接引用）。
+	onRotate = func(newKey string) {
+		h.SetAPIKey(newKey)
+		log.Printf("admin: 管理钥匙已轮换并立即生效（新 key 已写入 %s）", *cfgPath)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
