@@ -152,6 +152,10 @@ type Config struct {
 	// APIKeys 多 API key 管理存储（对标 new-api 令牌体系）。
 	// nil = 不注册 /admin/apikeys 路由（未启用该功能，与旧行为一致）。
 	APIKeys *apikey.Store
+	// APIKey 管理钥匙（config.api_key 原值）：/admin/apikeys 返回它的掩码，
+	// 让管理页与仪表盘「API 接入信息」显示同一把钥匙（一个事实来源）。
+	// 空 = 未配置管理钥匙。
+	APIKey string
 }
 
 // SchedulerView 核心调度器在本包看来是什么样（只保留 /admin/schedule 读的字段）。

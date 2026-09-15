@@ -35,14 +35,18 @@ func (h *Handler) registerAPIKeys() {
 	h.register("POST /admin/apikeys/update", h.apiKeysUpdate)
 }
 
-// apiKeysList GET /admin/apikeys —— 全部 key 的掩码视图。
+// apiKeysList GET /admin/apikeys —— 全部 key 的掩码视图 + 管理钥匙掩码。
 func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 	s := h.apiKeysStore()
 	if s == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"keys": []apikey.View{}, "enabled": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"keys": s.List(), "enabled": true})
+	adminMask := ""
+	if h.cfg.APIKey != "" {
+		adminMask = apikey.MaskID(h.cfg.APIKey)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": s.List(), "enabled": true, "admin_key": adminMask})
 }
 
 // apiKeysCreate POST /admin/apikeys —— body {"name":"...","limit":0,"rpm":0}。
