@@ -36,7 +36,7 @@
     "refresh_interval_seconds": 60
   },
   "trae": {
-    "enabled": false,
+    "enabled": true,
     "auth_dir": "./auths/trae",
     "refresh_interval_seconds": 1800,
     "checkin_enabled": true,
@@ -47,7 +47,7 @@
     "max_attempts": 3
   },
   "loomy": {
-    "enabled": false,
+    "enabled": true,
     "auth_dir": "./auths/loomy",
     "base_url": "https://loomyad.xunfei.cn/api/v1",
     "pool_accounts": true,
