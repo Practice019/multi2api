@@ -26,6 +26,7 @@ import (
 	"context"
 	"time"
 
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -41,6 +42,12 @@ const (
 	// 本任务是"每天在配置的整点窗口里跑一次全量"。因此它的 Due 判的是
 	// 时刻窗口 + 当日是否已跑，而不是账号到期表。
 	JobActivity = "workbuddy-activity"
+	// JobCheckin 每日签到：统一 30 分钟粒度扫描（用户要求全部上游同一粒度）。
+	// 幂等：本地历史里今天已签到的账号跳过；扫描末尾搭上旅行巡检
+	//（原 AfterSlot(SlotCheckin) 的职责，签到槽位已移除）。
+	JobCheckin = "workbuddy-checkin"
+	// JobRefresh token 保活（被动）扫描：只刷临近过期的，统一 30 分钟粒度。
+	JobRefresh = "workbuddy-refresh"
 )
 
 // activityTickInterval 活跃上报任务的轮询粒度。
@@ -72,7 +79,7 @@ const activityTickInterval = 5 * time.Minute
 // 这里保持 force=false，**不**改成 true —— 改成 true 会让每一轮都全量回源，
 // 把「不盲轮询」这个设计完全推翻（在途账号会被反复打扰）。
 func (p *Provider) Jobs() []gateway.Job {
-	return []gateway.Job{
+	jobs := []gateway.Job{
 		{
 			Name:     JobTravelWatch,
 			Interval: p.WatchInterval(),
@@ -92,6 +99,84 @@ func (p *Provider) Jobs() []gateway.Job {
 			Due:      p.activityDueJob,
 		},
 	}
+	// 每日签到 + token 保活：统一为「30 分钟被动扫描」（用户要求全部上游
+	// 同一粒度）。此前是整点槽位（签到 9/21、保活 22），现在改成
+	// JobExt 固定间隔扫描，与 trae/codearts 完全一致。
+	// ⚠ 必须 interval>0 才注册：<=0 会让 scheduler 把任务当"每轮都跑"。
+	if p.cfg.CheckinEnabled && p.cfg.CheckinInterval > 0 {
+		jobs = append(jobs, gateway.Job{
+			Name:     JobCheckin,
+			Interval: p.cfg.CheckinInterval,
+			Run:      p.runCheckinScan,
+		})
+	}
+	if p.cfg.RefreshInterval > 0 {
+		jobs = append(jobs, gateway.Job{
+			Name:     JobRefresh,
+			Interval: p.cfg.RefreshInterval,
+			Run:      p.runRefreshScan,
+		})
+	}
+	return jobs
+}
+
+// runRefreshScan 一趟 token 保活（被动）扫描 —— 只刷临近过期的。
+//
+// 与 RunKeepaliveAll 同一条被动判据（NeedsRefresh 10m 窗口）：
+// 用户要求与签到一起统一成 30 分钟粒度扫描。
+func (p *Provider) runRefreshScan(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.RunKeepaliveAll("schedule")
+	return nil
+}
+
+// runCheckinScan 一趟**30 分钟粒度**的签到扫描（用户要求全部上游统一）。
+//
+// # 幂等
+//
+// 本地历史（checkinlog）里今天已签到（ok/already）的账号跳过，不重复打上游
+// —— 与 trae-checkin（先查 CheckinStatus）同一效果，只是 workbuddy 没有
+// 独立的状态查询端点，用**我们自己记录的历史**判断。
+//
+// # 旅行搭车（原 AfterSlot 的职责）
+//
+// 签到槽位已移除，AfterSlot 不会再被核心喊到 —— 旅行的驱动点搬到这里：
+// 每轮扫描末尾跑一趟 RunTravelNow()。频率从每天两次变成每 30 分钟一次，
+// 猫到站更快被领；RunTravelNow 内部按「派出」计日上限，多跑无害。
+func (p *Provider) runCheckinScan(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, st := range p.ownAccounts() {
+		if st.Disabled || ctx.Err() != nil {
+			continue
+		}
+		if p.checkedInToday(st.UID) {
+			continue
+		}
+		p.checkinOne(st.UID, "schedule")
+	}
+	p.RunTravelNow()
+	return nil
+}
+
+// checkedInToday 本地历史里该账号今天是否已签到（ok/already）。
+//
+// 不把 status=fail 算作已签：失败要在下一轮重试。
+func (p *Provider) checkedInToday(uid string) bool {
+	if p.cfg.Log == nil {
+		return false
+	}
+	rec, ok := p.cfg.Log.LastByUID(uid, checkinlog.KindCheckin)
+	if !ok {
+		return false
+	}
+	if rec.Status != checkinlog.StatusOK && rec.Status != checkinlog.StatusAlready {
+		return false
+	}
+	return !rec.At.Before(checkinlog.TodayStart())
 }
 
 // runActivityJob 一趟活跃上报（只处理当日未报过的账号）。

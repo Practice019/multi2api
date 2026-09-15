@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/checkinlog"
@@ -161,9 +162,12 @@ func (p *Provider) claimWelfareFor(a *Auth, trigger string) (int, []WelfareResul
 		return 0, nil, err
 	}
 	claimed := 0
+	allAlready := len(results) > 0
 	for _, x := range results {
 		if x.Claimed {
 			claimed++
+		} else if !strings.Contains(x.Message, "已领") {
+			allAlready = false
 		}
 	}
 	log.Printf("codearts: 福利领取 uid=%s 本次领到 %d/%d（trigger=%s）", a.UID, claimed, len(results), trigger)
@@ -180,9 +184,13 @@ func (p *Provider) claimWelfareFor(a *Auth, trigger string) (int, []WelfareResul
 	// 所以如实记下**我们这次动作的结果**，不去猜上游状态：
 	//
 	//	领到 ≥1 项   → StatusOK     （界面上说「已领取」）
-	//	一项都没领到 → StatusSkip   （界面上说「无可领」—— 不说"已领"，
+	//	一项都没领到 → StatusSkip   （界面上说「未领到」—— 不说"已领"，
 	//	                             因为我们无法区分"今天领完了"与"没资格"）
 	//	请求报错     → StatusFail   （界面上说「失败」，并带原因）
+	//
+	// ⚠ 例外（用户本轮报的 bug）：全部结果都带"已领"消息（claimable=false
+	// 的活动 ClaimAllWelfare 固定回 "今日已领"）时，**今天确实已经领过** ——
+	// 记 StatusOK（已领取）而不是 skip（未领到），让"已签到"如实显示。
 	if p.adminEnv.Log != nil {
 		rec := checkinlog.Record{
 			At:       time.Now(),
@@ -196,6 +204,9 @@ func (p *Provider) claimWelfareFor(a *Auth, trigger string) (int, []WelfareResul
 		case claimed > 0:
 			rec.Status = checkinlog.StatusOK
 			rec.Detail = fmt.Sprintf("领到 %d/%d 项", claimed, len(results))
+		case allAlready:
+			rec.Status = checkinlog.StatusOK
+			rec.Detail = "今日已领（上游 claimable=false）"
 		default:
 			rec.Status = checkinlog.StatusSkip
 			rec.Detail = fmt.Sprintf("%d 项均不可领", len(results))

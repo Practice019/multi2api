@@ -91,6 +91,13 @@ type Config struct {
 		CheckinEnabled   bool `json:"checkin_enabled"`   // 缺省 true；false = 关签到（旅行随之停）
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 
+		// CheckinIntervalSeconds / KeepaliveIntervalSeconds 签到与 token 保活的
+		// 扫描周期（默认 1800 = 30 分钟）。用户要求：所有上游的自动签到/保活
+		// 统一为 30 分钟被动扫描（原先是整点时点槽位 9/21、22 —— 时点语义已弃用，
+		// 保留 checkin_hours / keepalive_hours 字段仅为配置兼容，不再生效）。
+		CheckinIntervalSeconds   int `json:"checkin_interval_seconds"`
+		KeepaliveIntervalSeconds int `json:"keepalive_interval_seconds"`
+
 		// ActivityHours 对话活跃上报的整点时点（本地时区）。
 		//
 		// # ⚠ 空数组 = **不启用**（与上面两项的"空 = 回落默认"语义相反）
@@ -503,6 +510,10 @@ type Config struct {
 	ClientAuthDir       string        `json:"-"`
 	ClientArchiveDir    string        `json:"-"`
 	ClientEnabled       bool          `json:"-"`
+	// ScheduleCheckinInterval / ScheduleKeepaliveInterval 签到/保活扫描周期
+	//（统一 30 分钟，见 Schedule 段的注释）。
+	ScheduleCheckinInterval   time.Duration `json:"-"`
+	ScheduleKeepaliveInterval time.Duration `json:"-"`
 
 	// Prompt 解析后（供 main 直接取用）。
 	//
@@ -904,6 +915,17 @@ func (c *Config) normalize() error {
 		}
 		c.CodeartsWelfareInterval = time.Duration(wiv) * time.Second
 	}
+	// 签到/保活统一为 30 分钟扫描（默认 1800s）。
+	iv := c.Schedule.CheckinIntervalSeconds
+	if iv <= 0 {
+		iv = 1800
+	}
+	c.ScheduleCheckinInterval = time.Duration(iv) * time.Second
+	kv := c.Schedule.KeepaliveIntervalSeconds
+	if kv <= 0 {
+		kv = 1800
+	}
+	c.ScheduleKeepaliveInterval = time.Duration(kv) * time.Second
 	// 并入账号池默认开（理由见 Codearts.PoolAccounts）。
 	// 未启用时恒 false —— 不注册的上游不该在池子里留下任何痕迹。
 	c.CodeartsPoolAccounts = c.CodeartsEnabled && boolOr(c.Codearts.PoolAccounts, true)
