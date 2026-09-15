@@ -25,6 +25,7 @@ package loomy
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -347,11 +348,11 @@ func (p *Provider) handleInviteBind(w http.ResponseWriter, r *http.Request) {
 		writeLoomyJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "uid 与 code 都不能为空"})
 		return
 	}
-	if len(code) != inviteCodeLen {
-		// 实测码形如 E3HRN8（6 位）。长度不对**先拦一次** ——
-		// 上游会消耗一次尝试，而且码是 maxUses=1 的，别拿它当试验田。
+	if len(code) < 4 || len(code) > 32 {
+		// 实测邀请码 6 位，但不设死 —— 上游才是权威，长度怪异的码交给上游
+		// 判定（200003 邀请码不可用），而不是在这里因为"不是 6 位"就白拒。
 		writeLoomyJSON(w, http.StatusBadRequest,
-			map[string]any{"ok": false, "error": "邀请码应为 6 位（实测形如 E3HRN8）"})
+			map[string]any{"ok": false, "error": "邀请码长度异常（应为 6 位，实测形如 E3HRN8）"})
 		return
 	}
 	var target *accountRef
@@ -370,7 +371,12 @@ func (p *Provider) handleInviteBind(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if err := p.BindInvite(ctx, target.Session, code); err != nil {
-		writeLoomyJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		// 上游错误码原文很晦涩（实测：自绑=100001"请求参数错误"、已用/失效码=200003
+		// "邀请码不可用"），用户根本看不出"码为什么不行"。这里翻译成人话，
+		// 并把**原文**落日志 —— 排查时能看真实错误码，界面上不甩晦涩报错。
+		translated := translateBindError(err)
+		log.Printf("loomy: 绑定邀请码失败 uid=%s code=%s 原文=%v", shortUID(uid), code, err)
+		writeLoomyJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": translated})
 		return
 	}
 	act, applied, err := p.Activation(ctx, target.Session)
@@ -390,3 +396,31 @@ func (p *Provider) handleInviteBind(w http.ResponseWriter, r *http.Request) {
 
 // inviteCodeLen 实测邀请码长度（见 handleInviteBind）。
 const inviteCodeLen = 6
+
+// translateBindError 把绑定邀请码的上游错误翻译成人话。
+//
+// 实测错误码（2026-09-15）：
+//
+//	100001  请求参数错误  —— 自绑（拿自己账号生成的码绑自己）时返回
+//	200002  邀请码不存在  —— 抄错/多复制字符/码格式不对
+//	200003  邀请码不可用  —— 已用（maxUses=1 被消费过）/ 失效
+//
+// 三个原文都让人看不出"码为什么不行"，用户会以为是 bug。这里按码翻译，
+// 未命中时保留原文并补一句通用提示（也不让界面光秃秃一行晦涩报错）。
+func translateBindError(err error) string {
+	if err == nil {
+		return "未知错误"
+	}
+	msg := err.Error()
+	hint := "（请确认用的是**其他账号**「我生成的码」里 active 的码、且该码还没被用过）"
+	switch {
+	case strings.Contains(msg, "100001"):
+		return "不能绑定自己账号生成的邀请码 —— " + hint
+	case strings.Contains(msg, "200002"):
+		return "邀请码不存在：可能抄错了字符或多复制了内容 —— " + hint
+	case strings.Contains(msg, "200003"):
+		return "邀请码不可用：已被使用或已失效 —— " + hint
+	default:
+		return msg + " —— " + hint
+	}
+}
