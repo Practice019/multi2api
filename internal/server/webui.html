@@ -3340,12 +3340,17 @@ let loginProvider = '';
     try { s = await admin('/admin/schedule'); } catch { $('schInfo').textContent = '读取失败'; return; }
     const cd = s.next_in_sec > 0 ? `${Math.floor(s.next_in_sec / 3600)}h${Math.floor((s.next_in_sec % 3600) / 60)}m 后` : '—';
     const on = v => v ? '<span class="pill ok">已启用</span>' : '<span class="pill dim">已关闭</span>';
+    // 统一 30 分钟扫描后没有整点时点槽位：next_tasks 恒空，时点恒 []。
+    // 若签到/保活是启用的，如实显示"扫描模式"而不是误导性的"无（均已关闭）"。
+    const nxt = (s.next_tasks || []).join(' + ');
+    const scan = !nxt && (s.checkin_enabled || s.keepalive_enabled);
     $('schInfo').innerHTML =
       `签到 ${on(s.checkin_enabled)}　保活 ${on(s.keepalive_enabled)}`
-      + `<br>下次任务：<b>${esc((s.next_tasks || []).join(' + ') || '无（均已关闭）')}</b> · ${cd}`
-      + `（${s.next_at ? new Date(s.next_at).toLocaleString('zh-CN', { hour12: false }) : '—'}）`
-      + `<br>签到时点 <span class="mono">[${(s.checkin_hours || []).join(', ')}]</span>`
-      + `　保活时点 <span class="mono">[${(s.keepalive_hours || []).join(', ')}]</span>`;
+      + `<br>下次任务：<b>${scan ? '每 30 分钟扫描（统一间隔，不再定时点）' : esc(nxt || '无（均已关闭）')}</b> · ${cd}`
+      + (scan ? '' : `（${s.next_at ? new Date(s.next_at).toLocaleString('zh-CN', { hour12: false }) : '—'}）`)
+      + `<br>${scan
+          ? '签到/保活均为固定间隔扫描，无时点配置'
+          : `签到时点 <span class="mono">[${(s.checkin_hours || []).join(', ')}]</span>　保活时点 <span class="mono">[${(s.keepalive_hours || []).join(', ')}]</span>`}`;
   }
 
   // ---------------------------------------------------------------- 左侧导航
