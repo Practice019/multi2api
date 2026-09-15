@@ -136,7 +136,13 @@ var _ workbuddy.OAuthFlow = workbuddyLogin("x")
 // 改造后签到/保活的**业务**在 workbuddy，核心只有排程与落库。
 // 所以这一层现在主要不是"把核心的能力借给上游"，而是给上游
 // 提供两条核心设施：调度视图（读）与历史落库（写）。
-type schedulerAdapter struct{ sch *scheduler.Scheduler }
+type schedulerAdapter struct {
+	sch *scheduler.Scheduler
+	// checkinOn / keepaliveOn 签到/保活开关（来自 config，不再读槽位 ——
+	// 签到/保活已统一为 JobExt 扫描，槽位不再注册，SlotEnabled 恒 false）。
+	checkinOn   bool
+	keepaliveOn bool
+}
 
 // ---- workbuddy.coreService ----
 
@@ -148,14 +154,11 @@ func (a schedulerAdapter) Record(uid, kind, status, detail string, credits int64
 
 func (a schedulerAdapter) NextWake() (time.Time, []string) { return a.sch.NextWake() }
 func (a schedulerAdapter) Hours() ([]int, []int) {
-	return a.sch.SlotHours(workbuddy.SlotCheckin), a.sch.SlotHours(workbuddy.SlotKeepalive)
+	// 时点槽位已弃用（统一 30 分钟扫描）：恒空。
+	return nil, nil
 }
-func (a schedulerAdapter) CheckinEnabled() bool {
-	return a.sch.SlotEnabled(workbuddy.SlotCheckin)
-}
-func (a schedulerAdapter) KeepaliveEnabled() bool {
-	return a.sch.SlotEnabled(workbuddy.SlotKeepalive)
-}
+func (a schedulerAdapter) CheckinEnabled() bool { return a.checkinOn }
+func (a schedulerAdapter) KeepaliveEnabled() bool { return a.keepaliveOn }
 
 // ---- workbuddy 侧槽位写入口（设置页改时点/开关） ----
 

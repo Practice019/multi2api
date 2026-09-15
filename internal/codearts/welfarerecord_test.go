@@ -6,13 +6,15 @@
 // 而 `claimable=false` 既可能是"今日已领"，也可能是"资格不符"——
 // 界面无法区分。所以唯一能如实回答"今天领过没有"的，是**我们自己**的领取动作。
 //
-// 这组测试钉住三件事：
+// 这组测试钉住三件事（语义随用户本轮反馈更新）：
 //
-//	领到东西   → 记 ok      （界面说「已领取」）
-//	一项没领到 → 记 skip    （界面说「无可领」—— 不说"已领"，因为分不清）
-//	请求报错   → 记 fail    （界面说「失败」，带原因）
+//	领到东西            → 记 ok      （界面说「已领取」）
+//	全部返回"已领"消息   → 记 ok      （今日确实已领过，界面说「已领取」——
+//	                                 用户报：已签到了却显示「未领到」，要求如实显示）
+//	claim 被拒（非"已领"消息，如资格不符）→ 记 skip （界面说「未领到」）
+//	请求报错            → 记 fail    （界面说「失败」，带原因）
 //
-// ⚠ 第三条最容易被漏：不记的话界面永远停在「—」，
+// ⚠ 请求报错最容易被漏：不记的话界面永远停在「—」，
 // 用户分不清"没领过"与"领过但失败了"。
 package codearts
 
@@ -31,10 +33,11 @@ import (
 //	GET  /v1/ops/delivery  → 活动列表（claimable 由用例决定）
 //	POST /v1/ops/claim     → 领取（code=0 视为成功）
 type welfareStub struct {
-	srv       *httptest.Server
-	claimable bool
-	claimFail bool // true = claim 端点回 500
-	listFail  bool // true = delivery 端点回 500
+	srv         *httptest.Server
+	claimable   bool
+	claimFail   bool   // true = claim 端点回 500
+	listFail    bool   // true = delivery 端点回 500
+	claimReject string // 非空 = claim 端点回业务拒绝（如 "资格不符"）
 }
 
 func newWelfareStub(t *testing.T, claimable bool) *welfareStub {
@@ -59,6 +62,10 @@ func newWelfareStub(t *testing.T, claimable bool) *welfareStub {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			if st.claimReject != "" {
+				_, _ = w.Write([]byte(`{"code":1,"message":"` + st.claimReject + `"}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"code":0,"message":""}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -137,12 +144,14 @@ func TestWelfareClaimRecordsOK(t *testing.T) {
 	}
 }
 
-// TestWelfareClaimRecordsSkipWhenNothingClaimed 一项都没领到 → 记 skip。
+// TestWelfareClaimRecordsAlreadyClaimedAsOK 全部活动都不可领（= 今日已领）→ 记 ok。
 //
-// ⚠ 关键：**不能**记成 ok。上游在 `claimable=false` 时既可能是"今日已领"
-// 也可能是"资格不符"，我们无法区分 —— 所以只能说"这次没领到"。
-func TestWelfareClaimRecordsSkipWhenNothingClaimed(t *testing.T) {
-	st := newWelfareStub(t, false) // 唯一的活动不可领
+// ⚠ 语义随用户本轮反馈更新：`claimable=false` 时上游无法区分"今日已领"与
+// "资格不符"，但 ClaimAllWelfare 对不可领活动固定回消息「今日已领」——
+// 全部结果都带"已领"消息时，**今天确实已经领过了**，如实记 ok（界面说
+// 「已领取」）。此前记 skip 会让"已签到了却显示未领到"（用户报的 bug）。
+func TestWelfareClaimRecordsAlreadyClaimedAsOK(t *testing.T) {
+	st := newWelfareStub(t, false) // 唯一的活动不可领 → 全部"今日已领"
 	p, hist := newWelfareProvider(t, st)
 
 	if rec := claimVia(t, p); rec.Code != http.StatusOK {
@@ -150,10 +159,33 @@ func TestWelfareClaimRecordsSkipWhenNothingClaimed(t *testing.T) {
 	}
 	got, ok := lastWelfareRecord(t, hist)
 	if !ok {
-		t.Fatal("没领到也该留一条记录（否则界面停在「—」）")
+		t.Fatal("今日已领也该留一条记录（否则界面停在「—」）")
+	}
+	if got.Status != checkinlog.StatusOK {
+		t.Errorf("Status = %q，want %q（今日已领 → 已领取）", got.Status, checkinlog.StatusOK)
+	}
+	if !strings.Contains(got.Detail, "已领") {
+		t.Errorf("Detail = %q，应说明是「今日已领」", got.Detail)
+	}
+}
+
+// TestWelfareClaimRecordsSkipOnReject 领取被上游拒绝（非"已领"消息，如资格不符）
+// → 记 skip。这一条守住"不能把所有没领到都当已领取"：只有明确带"已领"消息
+// 才算已领，其余仍是「未领到」。
+func TestWelfareClaimRecordsSkipOnReject(t *testing.T) {
+	st := newWelfareStub(t, true) // 可领，但 claim 被拒
+	st.claimReject = "资格不符"
+	p, hist := newWelfareProvider(t, st)
+
+	if rec := claimVia(t, p); rec.Code != http.StatusOK {
+		t.Fatalf("HTTP %d，want 200（业务拒绝不是传输错误）", rec.Code)
+	}
+	got, ok := lastWelfareRecord(t, hist)
+	if !ok {
+		t.Fatal("被拒也该留一条记录（否则界面停在「—」）")
 	}
 	if got.Status == checkinlog.StatusOK {
-		t.Error("★ 一项都没领到却记成了 ok —— 界面会说「已领取」，那是假的")
+		t.Error("★ 消息不带「已领」却记成了 ok —— 界面会说「已领取」，那是假的")
 	}
 	if got.Status != checkinlog.StatusSkip {
 		t.Errorf("Status = %q，want %q", got.Status, checkinlog.StatusSkip)

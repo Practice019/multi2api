@@ -213,6 +213,13 @@ func main() {
 		TravelAutoClaimDisabled: !cfg.TravelAutoClaim,
 		TravelWatchInterval:     cfg.TravelWatchInterval,
 
+		// 签到/保活统一为「30 分钟被动扫描」（用户要求全部上游同一粒度）：
+		// 不再注册整点槽位（9/21、22 点），改由 JobExt 固定间隔扫描。
+		// CheckinInterval/RefreshInterval <= 0 时任务不注册。
+		CheckinEnabled:  cfg.Schedule.CheckinEnabled,
+		CheckinInterval: cfg.ScheduleCheckinInterval,
+		RefreshInterval: cfg.ScheduleKeepaliveInterval,
+
 		GrowthWatchInterval: cfg.GrowthWatchInterval,
 		// 传指针：nil 表示「未设置」，由 workbuddy 决定默认（领奖开、接单开、补签开、其余关）。
 		GrowthAutoClaim:  &cfg.GrowthAutoClaim,
@@ -505,50 +512,33 @@ func main() {
 		log.Printf("账号池：对账完成，本次启动未注册的上游 %d 个、账号 %d 个已逐出", pruned, evicted)
 	}
 
-	// 槽位定义在这里给出：核心只认识"有个叫 X 的槽位、配在 Y 点"，
-	// 不认识 checkin/keepalive 是什么业务 —— 那是 workbuddy 的事。
-	// 装配处（本文件）是唯一同时认识核心与上游的地方，翻译在这里发生。
+	// 签到/保活已统一为「30 分钟被动扫描」JobExt 任务（见 workbuddy jobs.go），
+	// 不再注册整点槽位 —— 核心的调度器只剩下 Job 轮询。
+	// 槽位机制仍保留给……（当前无槽位；旅行搭车已移入 runCheckinScan）。
 	sch := scheduler.New(scheduler.Config{
-		Slots: []scheduler.Slot{
-			{
-				Name:     workbuddy.SlotCheckin,
-				Hours:    cfg.Schedule.CheckinHours,
-				Disabled: !cfg.Schedule.CheckinEnabled,
-			},
-			{
-				Name:     workbuddy.SlotKeepalive,
-				Hours:    cfg.Schedule.KeepaliveHours,
-				Disabled: !cfg.Schedule.KeepaliveEnabled,
-			},
-		},
+		// 无整点槽位：签到/保活/旅行都由 JobExt 扫描驱动（用户要求统一 30 分钟粒度）。
+		Slots: nil,
 		// 到点喊谁：上游实现 scheduler.SlotRunner（RunSlot/RunSlotFor），
 		// 适配器只做一次返回类型的逐字段转换（两侧各自声明的类型不得共用）。
 		Runner: slotRunnerAdapter{p: wb},
 		Log:    checkinLog,
-		// 注册表交给调度器：它自己发现各上游的 JobExt 任务（成长/旅行守卫轮）。
+		// 注册表交给调度器：它自己发现各上游的 JobExt 任务（签到/保活/成长/旅行守卫轮）。
 		Registry: registry,
 	})
 	// 历史落库经核心：格式跨上游统一，Nickname 由核心从账号池补。
-	wb.SetCore(schedulerAdapter{sch: sch})
+	wb.SetCore(schedulerAdapter{sch: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true})
 	// 管理端点的核心依赖（/admin/schedule 的时点 + 与签到/保活共用的任务槽）。
 	// 后注入的理由就在这里：调度器在 Provider 之后构造。
 	wb.SetAdminEnv(workbuddy.AdminEnv{
-		Schedule: schedulerAdapter{sch: sch},
+		Schedule: schedulerAdapter{sch: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true},
 		TaskSlot: newTaskSlotAdapter(sch),
 	})
-	// 本机客户端登录态管理（见下）。
-	// 槽位收尾的搭车任务（旅行状态机）由上游提供，核心只负责在正确的时机喊一声。
-	sch.AddSlotHook(wb)
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）：猫猫旅行同时停摆（搭签到便车）")
-	case len(cfg.Schedule.CheckinHours) == 0:
-		log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励")
 	default:
-		log.Printf("猫猫旅行已合并到签到时点执行：签到 + 派猫 + 领取旅行奖励（%v 点）", cfg.Schedule.CheckinHours)
-	}
-	if !cfg.Schedule.KeepaliveEnabled {
-		log.Printf("token 保活已禁用（schedule.keepalive_enabled=false）")
+		log.Printf("签到/保活已统一为每 %s 被动扫描（workbuddy-checkin / workbuddy-refresh）；旅行随签到扫描巡检",
+			cfg.ScheduleCheckinInterval)
 	}
 
 	// 本机客户端登录态管理：能读就开面板，读不到就置 nil（该面板降级为 503），

@@ -99,6 +99,16 @@ type Config struct {
 	// <=0 回落 1 分钟。
 	TravelWatchInterval time.Duration
 
+	// CheckinEnabled 是否注册「每日签到」后台扫描任务（统一 30 分钟粒度）。
+	// false = 不自动签到（仅手动按钮）。
+	CheckinEnabled bool
+	// CheckinInterval 签到扫描周期（统一 30 分钟）。<=0 不注册任务。
+	// 幂等：本地历史里今天已签到的账号跳过，不重复打上游。
+	CheckinInterval time.Duration
+	// RefreshInterval token 保活（被动）扫描周期（统一 30 分钟）。
+	// <=0 不注册任务（仅请求路径惰性续期 + 手动按钮）。
+	RefreshInterval time.Duration
+
 	// GrowthWatchInterval 成长中心扫描间隔。<=0 回落 10 分钟。
 	GrowthWatchInterval time.Duration
 	// 六个自动动作的初始开关。用 *bool 区分「未设置」与「显式 false」，

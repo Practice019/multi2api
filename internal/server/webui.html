@@ -806,12 +806,13 @@
         <div class="formgrid">
           <div class="pair">
             <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
-            <div class="field"><input type="text" id="setCheckinHours" placeholder="9,21" title="签到时点（小时，逗号分隔，0-23 本地时区）"></div>
           </div>
         </div>
         <!-- 保活已统一为「被动后台扫描」（只刷临近过期的 token），是防掉线的
              安全网 —— 只读展示，不提供开关（避免误关）。
-             猫到站自动领奖为纯收益动作，默认开启，不在设置页展示（用户决定）。 -->
+             猫到站自动领奖为纯收益动作，默认开启，不在设置页展示（用户决定）。
+             签到/保活统一为每 30 分钟扫描（用户要求全部上游同一粒度），
+             不再配置时点。 -->
         <div class="info-line" style="margin-top:10px">保活：<span id="setKeepaliveRO">…</span></div>
       </fieldset>
 
@@ -4392,7 +4393,6 @@ let loginProvider = '';
   //   - 隐藏：凭证目录、Redis 模式
   const SET_FIELDS = [
     ['setCheckinEnabled', 'checkin_enabled', 'bool'],
-    ['setCheckinHours', 'checkin_hours', 'hours'],
     ['setGrowthMakeup', 'growth_auto_makeup', 'bool'],
     ['setGrowthRedeem', 'growth_auto_redeem', 'bool'],
     ['setGrowthOpen', 'growth_auto_open', 'bool'],
