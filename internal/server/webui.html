@@ -3931,7 +3931,14 @@ let loginProvider = '';
       host.innerHTML = '<div class="dim" style="font-size:12px">该上游没有声明邀请码端点。</div>';
       return;
     }
-    const bindPath = adminRouteFor(providerId, 'invite', 'POST');
+    // ⚠ 必须按**后缀**找绑定路由，不能 adminRouteFor(…, 'POST')！
+    // 该上游有两个 CapInvite+POST 路由：/invite/bind 与 /import，而
+    // adminRouteFor 取**第一条匹配** → 返回 /import —— 于是点「绑定」把
+    // {uid,code} 发到了导入接口：2xx + 无 ok/error 字段 → 前端显示
+    // "绑定失败：未知原因"，后端绑定链路根本没被调用（实测抓包定位）。
+    // adminRouteBySuffix 与导入按钮找 /import 是同一套手法，专为区分
+    // 同能力位的多条路由而设。
+    const bindPath = adminRouteBySuffix(providerId, 'POST', '/bind');
     //  重绘前**先存下**用户已经敲进去的邀请码。
     //
     // 这块面板会被周期性重绘（页面每 5 秒 refresh 一次）。不存的话，
