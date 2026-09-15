@@ -799,20 +799,13 @@
       <button id="btnSettingsSave" class="primary" style="padding:3px 12px;font-size:12px">保存设置</button>
     </h2>
     <div class="body">
-      <!-- 下次唤醒状态：与调度开关同处一组，信息与操作挨在一起。 -->
+      <!-- 调度信息：签到/保活已统一为 30 分钟被动扫描（用户要求全部上游同一粒度），
+           不再提供「启用每日签到」开关与时点 —— 开关只是概念残留，会让人以为还能
+           配置时点。保活同为被动扫描，只读展示（安全网，避免误关）。
+           猫到站自动领奖为纯收益动作，默认开启，不在设置页展示（用户决定）。 -->
       <fieldset>
-        <legend>日常调度 <span class="badge badge--hot">立即生效</span></legend>
+        <legend>日常调度 <span class="badge badge--hot">自动执行</span></legend>
         <p class="info-line" id="schInfo">未连接</p>
-        <div class="formgrid">
-          <div class="pair">
-            <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
-          </div>
-        </div>
-        <!-- 保活已统一为「被动后台扫描」（只刷临近过期的 token），是防掉线的
-             安全网 —— 只读展示，不提供开关（避免误关）。
-             猫到站自动领奖为纯收益动作，默认开启，不在设置页展示（用户决定）。
-             签到/保活统一为每 30 分钟扫描（用户要求全部上游同一粒度），
-             不再配置时点。 -->
         <div class="info-line" style="margin-top:10px">保活：<span id="setKeepaliveRO">…</span></div>
       </fieldset>
 
@@ -1689,7 +1682,8 @@ let loginProvider = '';
   // 但实测它是「任务历史」的劣化重复品：只有 1 个「刷新」按钮、无输入控件，
   // 内容是**同一份**只读签到流水（同一个端点 /admin/checkin/history，
   // 字段与任务历史完全相同，任务历史还多一个 kind 筛选）。
-  // 签到/保活的开关与时点全在「设置」里（setCheckinEnabled 等 5 个控件）。
+  // 签到/保活已统一为 30 分钟被动扫描：设置页不再有开关与时点控件
+  //（「启用每日签到」已移除；保活只读展示）。
   // 结论：它是重复品，用户已确认删掉。
   //
   // # 为什么不能直接在 panelCapsOf 里排除 'checkin'
@@ -4397,7 +4391,6 @@ let loginProvider = '';
   //   - 只读（安全网/加固）：保活开关/指纹脱敏/会话粘性
   //   - 隐藏：凭证目录、Redis 模式
   const SET_FIELDS = [
-    ['setCheckinEnabled', 'checkin_enabled', 'bool'],
     ['setGrowthMakeup', 'growth_auto_makeup', 'bool'],
     ['setGrowthRedeem', 'growth_auto_redeem', 'bool'],
     ['setGrowthOpen', 'growth_auto_open', 'bool'],
@@ -4497,8 +4490,8 @@ let loginProvider = '';
 
   async function saveSettings() {
     const body = collectSettings();
-    if (!body.checkin_hours || !body.checkin_hours.length) { toast('签到时点不能为空', true); return; }
-    if (!body.keepalive_hours || !body.keepalive_hours.length) { toast('保活时点不能为空', true); return; }
+    // 签到时点/保活时点已弃用（统一 30 分钟扫描，设置页不再展示）——
+    // body 里不再有这两个键，原来的"时点不能为空"校验随之删除。
     const btn = $('btnSettingsSave');
     btn.disabled = true;
     try {
