@@ -2707,7 +2707,7 @@ let loginProvider = '';
       provider: `<td>${pinfo}</td>`,
       nickname: `<td title="${esc(a.nickname || '')}">${esc(maskNick(a.nickname))}</td>`,
       uid: `<td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>`,
-      quota: `<td>${quotaCellHTML(a)}</td>`,
+      quota: `<td data-quota-uid="${esc(U)}" title="额度「—」表示还没探测过（与额度为 0 是两件事）">${quotaCellHTML(a)}</td>`,
       status: `<td>${st}</td>`,
       token: `<td>${tok}</td>`,
       token_expiry: `<td>${tokenExpiryCellHTML(a)}</td>`,
@@ -6418,6 +6418,45 @@ let multCatalogFailed = false;
     refresh();
   }
 
+  // pollQuotaValues 额度**无感**轮询：只更新账号表里的额度数字，不整页重绘。
+  //
+  // # 为什么是"轮询 + 单元格 diff"而不是整页 refresh（用户本轮要求）
+  //
+  // 整页 refresh() 每 5 秒：重拉 manifest → 重建所有面板与导航 → 整块表格
+  // 重绘。开销大、且会打断正在交互的用户（此前"输入框被清空""绑定按钮
+  // 莫名失效"都源于此）。成熟仪表盘（Grafana / new-api 之类）的做法是：
+  // **只轮询数据源、按 key 定位单元格、数值变了才原地替换**。这里照做：
+  //
+  //   1. 每 30 秒取一次 /admin/accounts —— 本地 JSON，**无上游调用**
+  //     （上游额度由服务端周期性刷新，客户端只读它的缓存视图）
+  //   2. 用 `data-quota-uid` 定位每个额度单元格（见 accountRow 的 cells.quota）
+  //   3. 文本没变就不碰；变了才替换该单元格 —— 表格行/面板/导航全部原样
+  //
+  // 守卫与 autoTick 一致：后台标签、弹窗打开、账号表不可见时不刷。
+  async function pollQuotaValues() {
+    if (document.hidden) return;
+    const info = $('infoModal'), login = $('modal');
+    if (info && info.style.display !== 'none') return;
+    if (login && login.style.display !== 'none') return;
+    const acctsSec = document.getElementById('accts');
+    if (!acctsSec || acctsSec.offsetParent === null) return; // 账号表不可见
+    let d;
+    try { d = await admin('/admin/accounts'); }
+    catch { return; } // 轮询失败静默，下轮再试
+    const list = (d && d.accounts) || [];
+    for (const a of list) {
+      const key = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(a.uid)) : String(a.uid);
+      const cell = document.querySelector(`td[data-quota-uid="${key}"]`);
+      if (!cell) continue;
+      const fresh = quotaCellHTML(a);
+      // diff：新旧都转纯文本再比 —— HTML 结构不变时不做无谓的 innerHTML 替换。
+      const tmp = document.createElement('div');
+      tmp.innerHTML = fresh;
+      if (tmp.textContent === cell.textContent) continue;
+      cell.innerHTML = fresh;
+    }
+  }
+
   async function refresh() {
     if (!KEY && $('key').value.trim()) KEY = $('key').value.trim();
     let h, s;
@@ -6662,6 +6701,11 @@ let multCatalogFailed = false;
     };
     // 注意：不在这里无条件 setInterval —— 上面的 INJECTED 分支已经拉开轮询，
     // 这里再来一次会形成两个并行定时器（重复请求 + 清不干净）。
+
+    // 额度**无感**轮询：常驻开启（用户要求额度实时）。它只更新额度单元格，
+    // 不整页重绘、不重建面板 —— 与上面"每 5s 整页刷新"的开关相互独立：
+    // 即使关闭了整页自动刷新，额度数字仍会每 30 秒静默对齐一次。
+    setInterval(pollQuotaValues, 30000);
 
     // 账号操作：事件委托，避免每行都绑 handler。
     // 把按钮自身传进去，让它能在「写 + 刷新」期间禁用并显示进行中文案。
