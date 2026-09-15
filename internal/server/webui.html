@@ -6876,7 +6876,15 @@ let multCatalogFailed = false;
     installGenericActions();
     // 切换任务类型筛选属于「主动改变查询范围」→ 必须回第 1 页。
     // 否则用户在第 3 页切到只有 1 页的类型时，会停在一个不存在的页上。
-    $('histKind').onchange = () => { histPage.offset = 0; loadHistory(); };
+    //
+    // ⚠ 必须判空：任务历史标签页已删除（用户本轮要求），`#histKind` 不存在。
+    // 之前这里直接 `$('histKind').onchange = ...` → null.onchange 崩溃，
+    // **boot 整段中断** —— 后面所有初始化（轮询/面板/导航）都没跑，界面半死。
+    // loadHistory() 自身有 histrows 守卫，这里只需同样容忍元素缺失。
+    const histKindEl = $('histKind');
+    if (histKindEl) {
+      histKindEl.onchange = () => { histPage.offset = 0; loadHistory(); };
+    }
 
     // 清屏。
     //
