@@ -65,6 +65,11 @@ type Provider struct {
 	cbOnce   sync.Once
 	cbServer *http.Server
 	cbErr    error
+
+	// onRefreshFailure / onRefreshSuccess 装配层注入的续期结果通知
+	//（Config.OnRefreshFailure / OnRefreshSuccess，通常接 pool 的失败计数/成功清零）。
+	onRefreshFailure func(uid string)
+	onRefreshSuccess func(uid string)
 }
 
 // Config Provider 的可选依赖，全部可缺省。
@@ -89,6 +94,12 @@ type Config struct {
 	FallbackEnabled bool
 	QueueThreshold  int64
 	MaxAttempts     int
+
+	// OnRefreshFailure / OnRefreshSuccess 后台凭证续期结果通知（装配层注入，
+	// 通常接 pool.NoteRefreshFailure / NoteSuccess：连续失败自动禁用，让死
+	// token 账号在账号池里可见「需重新登录」）。nil = 不通知。
+	OnRefreshFailure func(uid string)
+	OnRefreshSuccess func(uid string)
 }
 
 // NewProvider 契约测试用的无依赖构造。
@@ -111,15 +122,17 @@ func NewWithConfig(cfg Config) *Provider {
 	}
 	checkin := cfg.CheckinEnabled
 	return &Provider{
-		client:          c,
-		authDir:         cfg.AuthDir,
-		refreshInterval: cfg.RefreshInterval,
-		checkinEnabled:  checkin,
-		callbackPort:    cfg.CallbackPort,
-		log:             cfg.Log,
-		fallbackEnabled: cfg.FallbackEnabled,
-		queueThreshold:  cfg.QueueThreshold,
-		maxAttempts:     cfg.MaxAttempts,
+		client:           c,
+		authDir:          cfg.AuthDir,
+		refreshInterval:  cfg.RefreshInterval,
+		checkinEnabled:   checkin,
+		callbackPort:     cfg.CallbackPort,
+		log:              cfg.Log,
+		fallbackEnabled:  cfg.FallbackEnabled,
+		queueThreshold:   cfg.QueueThreshold,
+		maxAttempts:      cfg.MaxAttempts,
+		onRefreshFailure: cfg.OnRefreshFailure,
+		onRefreshSuccess: cfg.OnRefreshSuccess,
 	}
 }
 

@@ -292,12 +292,20 @@ func (p *Provider) keepaliveOne(uid, trigger string) CheckinOutcome {
 			p.cfg.Pool.Disable(uid, "12153 session dead")
 			res.Detail = "session dead，已禁用"
 		}
+		// 通知装配层（pool.NoteRefreshFailure）：连续失败自动禁用，
+		// 死 token 账号在账号池里可见「需重新登录」。
+		if p.cfg.OnRefreshFailure != nil {
+			p.cfg.OnRefreshFailure(uid)
+		}
 		p.recordViaCore(uid, checkinlog.KindKeepalive, res.Status, res.Detail, 0, trigger)
 		return res
 	}
 	if err := a.SaveAtomic(); err != nil {
 		log.Printf("keepalive %s save: %v", uid, err)
 		res.Detail = "刷新成功但落盘失败: " + shortErr(err)
+	}
+	if p.cfg.OnRefreshSuccess != nil {
+		p.cfg.OnRefreshSuccess(uid)
 	}
 	res.Status = checkinlog.StatusOK
 	p.recordViaCore(uid, checkinlog.KindKeepalive, res.Status, res.Detail, 0, trigger)

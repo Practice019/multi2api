@@ -26,6 +26,7 @@ package codearts
 import (
 	"context"
 	"log"
+	"math/rand"
 	"os"
 	"strings"
 	"time"
@@ -150,9 +151,17 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		if err := p.client.RefreshToken(a); err != nil {
 			log.Printf("codearts: 后台续期失败 (uid=%s): %v", a.UID, err)
 			p.holdRefresh(a, err)
+			// 通知装配层（pool.NoteRefreshFailure）：连续失败达上限自动禁用，
+			// 死 token 账号在账号池里可见「需重新登录」。
+			if p.onRefreshFailure != nil {
+				p.onRefreshFailure(a.UID)
+			}
 			continue
 		}
 		p.clearRefreshHold(a.UID)
+		if p.onRefreshSuccess != nil {
+			p.onRefreshSuccess(a.UID)
+		}
 		log.Printf("codearts: 后台续期成功 (uid=%s)，新过期 %s",
 			a.UID, time.Unix(a.ExpiresAt, 0).Format(time.RFC3339))
 	}
@@ -163,18 +172,45 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 //
 // 永久性凭证错误（refresh token 已被服务端消费 / 无 token / 缺 DPoP 私钥）
 // → 停 24 小时等用户重新登录，否则每轮扫描都打一次注定失败的上游请求
-// （实测 STS5.1806 死 token 每 60s 一次）。其余错误（网络/5xx 抖动）→ 10 分钟短退避。
+// （实测 STS5.1806 死 token 每 60s 一次）。
+// 其余错误（网络/5xx 抖动）→ **指数退避 + 抖动**（借鉴 LiteLLM）：
+// 2m → 4m → 8m → … 封顶 30m，每次失败翻倍并带 ±20% 随机抖动 ——
+// 多账号同时抖动失败时不会在同一时刻集体重试（惊群）。
 // 凭证文件被外部更新（重新登录写盘）时由 onRefreshHold 提前解除。
 func (p *Provider) holdRefresh(a *Auth, err error) {
-	hold := 10 * time.Minute
+	now := time.Now()
+	p.refreshHoldMu.Lock()
+	defer p.refreshHoldMu.Unlock()
+	e := p.refreshHold[a.UID]
+	e.fails++
+
+	hold := refreshBackoff(e.fails)
 	if isPermanentRefreshError(err) {
 		hold = 24 * time.Hour
 		log.Printf("codearts: 凭证已失效（%v）—— 已暂停该账号自动续期，请重新登录（页内「＋添加账号」或 cmd/login）；凭证文件更新后自动恢复", err)
 	}
-	now := time.Now()
-	p.refreshHoldMu.Lock()
-	p.refreshHold[a.UID] = refreshHoldEntry{until: now.Add(hold), holdAt: now}
-	p.refreshHoldMu.Unlock()
+	e.until = now.Add(hold)
+	e.holdAt = now
+	p.refreshHold[a.UID] = e
+}
+
+// refreshBackoff 指数退避 + 抖动：base 2m 起，每多一次失败翻倍，封顶 30m，
+// 再乘 (0.8, 1.2) 的随机抖动。借鉴 LiteLLM 的 exponential backoff + jitter。
+func refreshBackoff(fails int) time.Duration {
+	const (
+		base = 2 * time.Minute
+		cap  = 30 * time.Minute
+	)
+	d := base
+	for i := 1; i < fails && d < cap; i++ {
+		d *= 2
+	}
+	if d > cap {
+		d = cap
+	}
+	// ±20% 抖动（math/rand 全局锁开销可忽略：退避是低频路径）
+	jitter := 0.8 + 0.4*rand.Float64()
+	return time.Duration(float64(d) * jitter)
 }
 
 // onRefreshHold 该账号是否处于退避期。

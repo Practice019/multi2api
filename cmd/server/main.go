@@ -227,6 +227,13 @@ func main() {
 		CheckinEnabled:  cfg.Schedule.CheckinEnabled,
 		CheckinInterval: cfg.ScheduleCheckinInterval,
 		RefreshInterval: cfg.ScheduleKeepaliveInterval,
+		// 后台保活失败/成功 → pool 刷新失败计数（连续 3 次自动禁用，UI 可见）。
+		OnRefreshFailure: func(uid string) {
+			if p.NoteRefreshFailure(uid) {
+				log.Printf("workbuddy: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录）", uid)
+			}
+		},
+		OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
 
 		GrowthWatchInterval: cfg.GrowthWatchInterval,
 		// 传指针：nil 表示「未设置」，由 workbuddy 决定默认（领奖开、接单开、补签开、其余关）。
@@ -274,6 +281,15 @@ func main() {
 	if cfg.CodeartsEnabled {
 		cb = codearts.NewWithConfig(codearts.Config{
 			AuthDir: cfg.CodeartsAuthDir,
+			// 后台续期失败/成功通知 → pool 的刷新失败计数（连续 3 次自动禁用，
+			// 死 token 账号在账号池里可见「需重新登录」—— 借鉴 one-api/LiteLLM
+			// 的渠道禁用可见性）。
+			OnRefreshFailure: func(uid string) {
+				if p.NoteRefreshFailure(uid) {
+					log.Printf("codearts: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录）", uid)
+				}
+			},
+			OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
 			// 页内添加账号（PKCE + DPoP，走本地回调服务器）。
 			//
 			// 这里是 R1 的最后一环：`codearts.Manager` 早就在包内实现了
@@ -439,6 +455,13 @@ func main() {
 			FallbackEnabled: cfg.TraeFallbackEnabled,
 			QueueThreshold:  cfg.TraeQueueThreshold,
 			MaxAttempts:     cfg.TraeMaxAttempts,
+			// 后台续期失败/成功 → pool 刷新失败计数（连续 3 次自动禁用）。
+			OnRefreshFailure: func(uid string) {
+				if p.NoteRefreshFailure(uid) {
+					log.Printf("trae: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录）", uid)
+				}
+			},
+			OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
 		})
 		if err := registry.Register(tr); err != nil {
 			log.Fatalf("注册 TRAE 上游失败: %v", err)

@@ -355,7 +355,15 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		}
 		if err := p.client.RefreshToken(a); err != nil {
 			log.Printf("trae: 后台续期失败 uid=%s: %v", shortUID(a.UID), err)
+			// 通知装配层（pool.NoteRefreshFailure）：连续失败自动禁用，
+			// 死 token 账号在账号池里可见「需重新登录」。
+			if p.onRefreshFailure != nil {
+				p.onRefreshFailure(a.UID)
+			}
 			continue
+		}
+		if p.onRefreshSuccess != nil {
+			p.onRefreshSuccess(a.UID)
 		}
 		if err := a.SaveAtomic(); err != nil {
 			log.Printf("trae: 续期成功但落盘失败 uid=%s: %v", shortUID(a.UID), err)

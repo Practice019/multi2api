@@ -24,6 +24,53 @@ import (
 	"time"
 )
 
+// TestRunRefreshNotifiesOutcomeHook 失败/成功会通知装配层 hook
+// （pool.NoteRefreshFailure 的接线点，借鉴 one-api/LiteLLM 的渠道禁用可见性）。
+func TestRunRefreshNotifiesOutcomeHook(t *testing.T) {
+	var failCalls, okCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error_code":"STS5.1806","error_msg":"invalid refresh token: 'the refresh token has been used'"}`))
+	}))
+	defer srv.Close()
+
+	kp, err := NewDPoPKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwkRaw, err := json.Marshal(kp.PrivateJWK())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.STSBase = srv.URL
+	p := NewWithConfig(Config{
+		Client:           c,
+		OnRefreshFailure: func(uid string) { failCalls++ },
+		OnRefreshSuccess: func(uid string) { okCalls++ },
+	})
+	p.accounts = func() []*Auth {
+		return []*Auth{{
+			UID:               "u1",
+			RefreshToken:      "rt",
+			DPoPPrivateKeyJWK: jwkRaw,
+			ExpiresAt:         time.Now().Add(1 * time.Minute).Unix(),
+		}}
+	}
+
+	if err := p.runRefresh(context.Background()); err != nil {
+		t.Fatalf("runRefresh: %v", err)
+	}
+	if failCalls != 1 {
+		t.Errorf("失败应通知 hook 1 次，实际 %d", failCalls)
+	}
+	if okCalls != 0 {
+		t.Errorf("失败轮不应通知成功 hook，实际 %d", okCalls)
+	}
+}
+
 // TestIsPermanentRefreshError 永久性凭证错误必须被识别（决定退避时长）。
 func TestIsPermanentRefreshError(t *testing.T) {
 	cases := []struct {
