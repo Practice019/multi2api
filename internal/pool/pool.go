@@ -747,11 +747,30 @@ func (p *Pool) upsertLocked(a *auth.Auth) {
 // 且对齐目录是启动/人工刷新时的低频动作，即时落盘比等 5s 定时更稳。
 func (p *Pool) upsertLockedFor(provider string, a *auth.Auth) (added bool) {
 	if e, ok := p.byUID[a.UID]; ok {
+		// 重复导入保护（用户报 bug：重新导入重复凭证后账号池该号失效）：
+		// 管理台 reload 传进来的是**投影**（只有 UID/Nickname，见 admin 的
+		// accountsReload），而池里已装载的 workbuddy 凭证（token）在旧 e.a 上。
+		// 无条件 `e.a = a` 会把 token 清空 → has_token=False → 401。
+		// 规则：新 a 无凭证且旧 e.a 有凭证 → **保留旧凭证**（只同步昵称）。
+		//   有凭证的 a 正常覆盖（启动 LoadDir / 凭证刷新都会带 token）。
+		//   双方都无凭证（codearts 等投影形账号）→ 正常覆盖（凭证走 secret 通道）。
+		if !authHasCreds(a) && authHasCreds(e.a) {
+			if a.Nickname != "" {
+				e.a.Nickname = a.Nickname
+			}
+			return false
+		}
 		e.a = a // 保留 credits/cooling 状态
 		return false
 	}
 	p.byUID[a.UID] = &entry{a: a, provider: provider}
 	return true
+}
+
+// authHasCreds 该 auth 是否携带真实凭证（token 类字段任一非空）。
+// 投影（管理台 reload / /admin/accounts 的纯身份视图）恒为 false。
+func authHasCreds(a *auth.Auth) bool {
+	return a != nil && (a.AccessToken != "" || a.RefreshToken != "")
 }
 
 // AddFor 加入一个**指定上游**的账号（含上游私有凭证 secret）。
@@ -778,7 +797,15 @@ func (p *Pool) AddFor(provider string, a *auth.Auth, secret any) {
 // 调用方必须已持有 p.mu。
 func (p *Pool) upsertSecretLocked(provider string, a *auth.Auth, secret any) (added bool) {
 	if e, ok := p.byUID[a.UID]; ok {
-		e.a = a
+		// 与 upsertLockedFor 同一条重复导入保护：新 a 若是无凭证投影，
+		// 不清掉旧 e.a 上已装载的凭证（workbuddy 取号读 e.a）。
+		if !authHasCreds(a) && authHasCreds(e.a) {
+			if a.Nickname != "" {
+				e.a.Nickname = a.Nickname
+			}
+		} else {
+			e.a = a
+		}
 		if secret != nil {
 			e.secret = secret
 		}
