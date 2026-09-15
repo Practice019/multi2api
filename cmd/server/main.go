@@ -683,6 +683,21 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 账号池主动健康检查（A2 移植）：探测冷却/熔断中的账号并提前恢复。
+	// 它是**核心**任务（不属于任何上游），由装配层注册，provider 标 core。
+	if cfg.Pool.HealthCheckIntervalSeconds > 0 {
+		iv := time.Duration(cfg.Pool.HealthCheckIntervalSeconds) * time.Second
+		sch.AddJob("core", gateway.Job{
+			Name:     "pool-health-check",
+			Interval: iv,
+			Run: func(ctx context.Context) error {
+				return runPoolHealthCheck(ctx, p, registry)
+			},
+		})
+		log.Printf("pool: 主动健康检查已开启（每 %v 探测冷却/熔断中的账号并提前恢复）", iv)
+	} else {
+		log.Printf("pool: 主动健康检查已关闭（pool.health_check_interval_seconds=0，冷却到期自然恢复）")
+	}
 	// 核心调度循环：整点签到/保活 + 各上游通过 gateway.JobExt 注册的守卫任务
 	// （workbuddy 的成长/旅行守卫轮就在其中）。核心**不认识**具体任务名。
 	go sch.Run(ctx)

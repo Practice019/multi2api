@@ -142,6 +142,28 @@ func newContractCredential(uid string) gateway.Credential {
 	}
 }
 
+// TestProbeHealth 主动健康检查（A2 移植）：探测成功/失败/凭证错。
+func TestProbeHealth(t *testing.T) {
+	want := &Auth{AccessToken: fixtureToken, UID: "u1"}
+	srv, _ := fakeUpstream(t, want)
+	p := NewWithConfig(Config{Client: NewWithBase(srv.URL)})
+
+	// 成功：假上游的模型端点认这个 token。
+	if err := p.ProbeHealth(context.Background(), newContractCredential("u1")); err != nil {
+		t.Errorf("健康探测应成功: %v", err)
+	}
+	// 失败：token 不对 → 假上游 401。
+	bad := newContractCredential("u1")
+	bad.Secret = &Auth{AccessToken: "wrong-token", UID: "u1"}
+	if err := p.ProbeHealth(context.Background(), bad); err == nil {
+		t.Error("错误 token 的健康探测应失败")
+	}
+	// 凭证类型错：报错不 panic。
+	if err := p.ProbeHealth(context.Background(), gateway.Credential{Secret: "nope"}); err == nil {
+		t.Error("凭证类型错应报错")
+	}
+}
+
 // TestContract 契约在假上游上全程执行（CI 里不跳过）。
 func TestContract(t *testing.T) {
 	want := &Auth{AccessToken: fixtureToken, UID: "contract-fixture"}

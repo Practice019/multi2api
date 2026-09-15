@@ -281,6 +281,21 @@ func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gatew
 	return toModelInfos(staticModels), nil
 }
 
+// ProbeHealth 探测一份凭证是否健康可用（gateway.HealthProbeExt，A2 移植）。
+//
+// 用 get_detail_param（模型目录）—— 便宜、真实带出鉴权头，401 即失败。
+func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) error {
+	a, err := authOf(cred)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err = p.client.FetchModels(ctx, a)
+	return err
+}
+
 // toModelInfos 把本包 Model 投影成中立契约 gateway.ModelInfo。
 func toModelInfos(ms []ModelInfo) []gateway.ModelInfo {
 	out := make([]gateway.ModelInfo, 0, len(ms))

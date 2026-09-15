@@ -70,7 +70,8 @@
     "breaker_cooldown": "30m",
     "breaker_cooldown_max": "6h",
     "idle_weight_per_hour": 0.5,
-    "idle_weight_max": 5.0
+    "idle_weight_max": 5.0,
+    "health_check_interval_seconds": 600
   },
   "session_sticky": {
     "enabled": true,

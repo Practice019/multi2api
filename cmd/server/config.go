@@ -188,6 +188,10 @@ type Config struct {
 		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
+		// HealthCheckIntervalSeconds 主动健康检查周期（A2 移植）：定时探测
+		// 冷却/熔断中的账号，成功即提前恢复（额度"提前回血"的号不用干等）。
+		// 0 = 关闭主动探测（冷却到期自然恢复）。默认 600。
+		HealthCheckIntervalSeconds int `json:"health_check_interval_seconds"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -597,6 +601,7 @@ func Default() *Config {
 	c.Pool.BreakerCooldownMax = "6h"
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
+	c.Pool.HealthCheckIntervalSeconds = 600
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"

@@ -1622,6 +1622,7 @@ func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct
 	if h.cfg.Provider == nil {
 		// 单上游模式：逐字节回退（含落盘与失败日志，与改造前一致）。
 		if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
+			h.noteRefreshFailure(acct.UID)
 			return err
 		}
 		if err := acct.SaveAtomic(); err != nil {
@@ -1637,6 +1638,7 @@ func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct
 	}
 	refreshed, err := h.cfg.Provider.RefreshCredential(ctx, providerID, cred)
 	if err != nil {
+		h.noteRefreshFailure(acct.UID)
 		return err
 	}
 	if !refreshed {
@@ -1645,6 +1647,21 @@ func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct
 		return nil
 	}
 	return nil
+}
+
+// noteRefreshFailure 记录一次凭证续期失败；连续失败达上限则禁用（A2 移植）。
+//
+// # 为什么在刷新路径上计数
+//
+// refresh token 连续失效基本是"已死"（被踢/过期），反复重试只会每次请求
+// 都多付一次失败往返。达到上限直接禁用，让对账/重新登录接管。
+func (h *Handler) noteRefreshFailure(uid string) {
+	if h.cfg.Pool == nil {
+		return
+	}
+	if h.cfg.Pool.NoteRefreshFailure(uid) {
+		log.Printf("chat refresh uid=%s: 凭证续期连续失败达上限，已禁用（需重新登录）", uid)
+	}
 }
 
 // needsRefreshVia 问**上游自己**"这个号现在要不要刷"。
