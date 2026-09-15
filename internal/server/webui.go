@@ -37,7 +37,7 @@ const keyPlaceholder = "__WB2API_KEY__"
 // 那是唯一能防住"两边漂移"的位置：JS 常量与 Go 侧的替换表必须相等。
 var colPlaceholders = []struct{ token, value string }{
 	{"__COLS_TRAVEL__", "8"},
-	{"__COLS_GROWTH__", "12"},
+	{"__COLS_GROWTH__", "6"},
 	{"__COLS_LOGS__", "10"},
 	{"__COLS_JOBS__", "6"},
 }

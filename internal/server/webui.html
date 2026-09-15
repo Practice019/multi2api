@@ -669,8 +669,12 @@
     </div>
     <div class="body" style="padding:0">
       <table><thead><tr>
-        <th>昵称</th><th title="账号剩余额度，取自网关本地缓存（点上方「刷新」会一并更新）">额度</th><th>连登</th><th>补签卡</th><th>能量</th><th>盲盒可开</th><th>抽奖</th>
-        <th>待领取</th><th>现在可领</th><th>待完成</th><th>完成后可得</th><th>操作</th>
+        <th>昵称</th>
+        <th title="账号剩余额度（网关本地缓存），⚡后是该账号的能量">额度</th>
+        <th title="连续登录天数，补签×N 是可用的补签卡数">连登</th>
+        <th title="还没做完的任务数，+N 是完成后可获得的额度">待完成</th>
+        <th title="已完成、奖励还没领的部分（领取后到账）">可领</th>
+        <th>操作</th>
       </tr></thead>
       <tbody id="growthRows"><tr><td colspan="__COLS_GROWTH__" class="dim">加载中…</td></tr></tbody></table>
     </div>
@@ -1833,7 +1837,7 @@ let loginProvider = '';
   // 集中定义后，加列只改一行，且有 T11 套件核对它和真实表头是否一致。
   const COLS = {
     travel: 8,   // 猫猫旅行
-    growth: 12,  // 成长计划
+    growth: 6,   // 成长计划（精简：额度/能量、连登/补签、待完成/可得、可领 合并）
     logs: 10,    // 请求日志
     jobs: 6,     // 任务调度
   };
@@ -4549,16 +4553,12 @@ let loginProvider = '';
 
     $('growthCards').innerHTML = [
       ['账号数', growthSnaps.length, ''],
-      // 额度排在「现在可领」前面：先看家底，再看还能拿多少。
+      // 额度排在「可领」前面：先看家底，再看还能拿多少。
       ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
-      ['现在可领额度', sum.right_now, sum.right_now ? 'ok' : 'dim'],
-      ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
-      // 「待完成 / 完成后可获得」的口径是**还没做完的任务**：
-      // 未接单 + 已接单 + 进行中三种状态都算（见后端 GrowthTask.Pending）。
-      // 不含 completed（那属于「待领取」，领奖是另一步）。
-      // 措辞强调"完成"而不是"接单"：接单只是开始计进度，不发任何奖励。
-      ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
-      ['完成后可获得的额度', sum.credit, sum.credit ? 'ok' : 'dim'],
+      // 待办合计 = 待完成任务 + 完成后可得（合并：「5 任务 · +600」）。
+      ['待办合计', `${sum.claim} 任务 · +${sum.credit}`, sum.claim ? 'warn' : 'dim'],
+      // 可领合计 = 待领取任务 + 现在可领额度（合并：「2 项 · +300」）。
+      ['可领合计', `${sum.right_now_n} 项 · +${sum.right_now}`, sum.right_now_n ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
       ['能量合计', sum.energy, ''],
     ].map(([k, v, c]) =>
@@ -4598,31 +4598,20 @@ let loginProvider = '';
       const streak = g.streak_days
         ? `${g.streak_days} 天${g.next_tier ? `<br><span class="dim" style="font-size:11px">距 ${esc(g.next_tier)} 还差 ${g.next_tier_remaining}</span>` : ''}`
         : '<span class="dim">—</span>';
-      const cards = g.makeup_cards
-        ? `${g.makeup_cards}${g.makeup_dates && g.makeup_dates.length ? ` <span class="pill warn">可补${g.makeup_dates.length}</span>` : ''}`
-        : '<span class="dim">—</span>';
+      // 连登列并入补签卡（有卡才显示徽章，盲盒/抽奖信息并入按钮的禁用态）。
+      const makeupHtml = g.makeup_cards
+        ? `<br><span class="dim" style="font-size:11px">补签×${g.makeup_cards}${g.makeup_dates && g.makeup_dates.length ? ` <span class="pill warn">可补${g.makeup_dates.length}</span>` : ''}</span>`
+        : '';
       // 待完成 / 完成后可得：口径是"还没做完"（未接单+已接单+进行中），
-      // 与「接单」按钮的可用性（acceptable_count，只数未接单）是两件事。
+      // 合并成一格：「5 +600」（+600 = 完成后可获得的额度）。
       const pendN = g.pending_count != null ? g.pending_count : (g.acceptable_count || 0);
       const pendC = g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0);
-      const claim = pendN
-        ? `<span class="pill ok">${pendN}</span>`
+      const pendCell = pendN
+        ? `<span class="pill ok">${pendN}</span>${pendC ? `<span class="dim" style="font-size:11px"> +${pendC}</span>` : ''}`
         : '<span class="dim">—</span>';
-      const credit = pendC
-        ? `<span class="pill ok">${pendC}</span>`
-        : '<span class="dim">—</span>';
-      // 待领取 / 现在可领：来自 completed 的任务，领了就到账。
-      const pendingN = g.claimable_count
-        ? `<span class="pill warn">${g.claimable_count}</span>`
-        : '<span class="dim">—</span>';
-      const pendingC = g.claimable_credit
-        ? `<span class="pill warn">${g.claimable_credit}</span>`
-        : '<span class="dim">—</span>';
-      const box = g.blind_box_affordable
-        ? `<span class="pill ok">${g.blind_box_affordable}</span>`
-        : '<span class="dim">—</span>';
-      const draw = g.lottery_chances
-        ? `<span class="pill ok">${g.lottery_chances}</span>`
+      // 可领：已完成但奖励还没领（合并待领取 + 现在可领）：「2 +300」。
+      const claimCell = g.claimable_count
+        ? `<span class="pill warn">${g.claimable_count}</span>${g.claimable_credit ? `<span class="dim" style="font-size:11px"> +${g.claimable_credit}</span>` : ''}`
         : '<span class="dim">—</span>';
 
       const act = [
@@ -4635,18 +4624,15 @@ let loginProvider = '';
         `<button data-gact="draw"   data-uid="${U}"${g.lottery_chances ? '' : ' disabled'}>抽奖</button>`,
       ].join(' ');
 
+      // 额度/能量合并成一格：额度 + ⚡能量（能量 >0 才显示）。
+      const quotaEnergy = `${quota}${g.energy ? ` <span class="dim" style="font-size:11px">⚡${g.energy}</span>` : ''}`;
+
       return `<tr>
         <td>${name}</td>
-        <td>${quota}</td>
-        <td>${streak}</td>
-        <td class="mono">${cards}</td>
-        <td class="mono">${esc(g.energy)}</td>
-        <td>${box}</td>
-        <td>${draw}</td>
-        <td>${pendingN}</td>
-        <td>${pendingC}</td>
-        <td>${claim}</td>
-        <td>${credit}</td>
+        <td>${quotaEnergy}</td>
+        <td>${streak}${makeupHtml}</td>
+        <td>${pendCell}</td>
+        <td>${claimCell}</td>
         <td style="white-space:nowrap">${act}</td>
       </tr>`;
     }).join('');
