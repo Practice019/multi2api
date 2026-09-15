@@ -3282,11 +3282,11 @@ let loginProvider = '';
         if (!hasAuthURL) {
           toast(`已从本机读取账号 ${p.nickname || p.uid.slice(0, 8)}；` +
             `若这不是你刚登录的那个号，请在客户端里确认登录状态后重试`);
-          refresh(); loadHistory();
+          await refreshAfterAccountChange();
           return;
         }
         toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
-        refresh(); loadHistory();
+        await refreshAfterAccountChange();
       }
     }, 2500);
   }
@@ -3323,7 +3323,7 @@ let loginProvider = '';
         // 写盘完成后对齐账号池（核心端点，按 provider 分派）。
         try { await admin('/admin/accounts/reload', { method: 'POST', body: JSON.stringify({ provider: pid }) }); }
         catch (e) { toast('凭证已写入，但重载账号池失败：' + e.message, true); }
-        refresh();
+        await refreshAfterAccountChange();
       } catch (e) {
         toast('导入失败：' + e.message, true);
       }
@@ -3975,8 +3975,9 @@ let loginProvider = '';
       // 已绑定的账号不再显示输入框：码是 maxUses=1，点错一次就白费一个码。
       const ownCodes = (a.codes || []).map(c => c.code).join(',');
       const ops = a.ok && !a.activated
-        ? `<input data-linvite-code="${esc(a.uid)}" data-own="${esc(ownCodes)}" maxlength="6" placeholder="6 位邀请码"
-             style="width:110px;padding:2px 6px;font-size:12px;text-transform:uppercase">
+        ? `<input data-linvite-code="${esc(a.uid)}" data-own="${esc(ownCodes)}" maxlength="16" placeholder="6 位邀请码"
+             style="width:110px;padding:2px 6px;font-size:12px;text-transform:uppercase"
+             title="实测 6 位（形如 E3HRN8）">
            <button data-linvite-bind="${esc(a.uid)}" data-lpath="${esc(bindPath)}">绑定</button>`
         : '<span class="dim" style="font-size:11px">—</span>';
       return `<tr>
@@ -6447,6 +6448,25 @@ let multCatalogFailed = false;
     // 记下摘要供调用方（顶部「立即刷新」）提示用；轮询调用方不看这个字段。
     refresh._last = { healthy: h.healthy || 0, total: h.total || 0 };
     return true;
+  }
+
+  // refreshAfterAccountChange 添加/导入账号成功后：立即刷一次全池额度，再整体重绘。
+  //
+  // # 为什么必须有它（用户报：添加账号后额度/token 不自动刷新）
+  //
+  // 新账号的额度列是「—」（还没探测过），而额度探测要么靠手动点「刷新全部
+  // 额度」、要么等后台周期性额度刷新（分钟级）。用户希望添加后立刻看到
+  // 额度 —— 所以这里在成功路径上补一发 core 的 `/admin/accounts/quota/refresh`。
+  // 额度刷新失败不阻塞列表展示（后端对 unknown/skipped 是正常状态）。
+  async function refreshAfterAccountChange() {
+    const da = (MANIFEST.daily_actions || []).find(d => d.id === 'credits');
+    const url = da ? da.all_url : '';
+    if (url) {
+      try { await admin(url, { method: 'POST', body: '{}' }); }
+      catch (e) { /* 额度刷新失败不阻塞列表 */ }
+    }
+    refresh();
+    loadHistory();
   }
 
   async function send() {
