@@ -127,6 +127,26 @@ type Provider struct {
 	// welfareEnabled=false 或 interval<=0 时不注册该任务（仅手动按钮）。
 	welfareEnabled  bool
 	welfareInterval time.Duration
+
+	// refreshHold 后台续期失败后的重试退避：uid → 该时刻之前不再自动续期。
+	//
+	// 为什么需要（用户报 bug：codearts 死 token 每 60s 打一次上游失败请求）：
+	// refresh_token 是**消费型**的，一旦被服务端消费（STS5.1806 'has been used'），
+	// 每次刷新都注定失败。没有退避的话 runRefresh 每轮都命中
+	// NeedsRefresh（token 一直没更新 → 一直临近过期）→ 每分钟一次失败请求，
+	// 永不停歇。这里对失败账号挂退避：永久性凭证错误停 24h 等重新登录，
+	// 其余错误短退避 10 分钟；凭证文件被外部更新（重新登录写盘）时提前解除。
+	refreshHold   map[string]refreshHoldEntry
+	refreshHoldMu sync.Mutex
+}
+
+// refreshHoldEntry 一条续期退避记录。
+type refreshHoldEntry struct {
+	// until 该时刻之后允许重试。
+	until time.Time
+	// holdAt 进入退避的时刻 —— onRefreshHold 用它判断凭证文件是否"更新过"
+	//（文件 mtime 晚于 holdAt = 用户重新登录写入了新凭证 → 提前解除）。
+	holdAt time.Time
 }
 
 // NewProvider 建一个 CodeArts Provider（契约测试用的无依赖构造）。
@@ -192,6 +212,7 @@ func NewWithConfig(cfg Config) *Provider {
 		login:           cfg.Login,
 		welfareEnabled:  cfg.WelfareEnabled,
 		welfareInterval: cfg.WelfareInterval,
+		refreshHold:     make(map[string]refreshHoldEntry),
 	}
 }
 
