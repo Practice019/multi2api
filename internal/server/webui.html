@@ -536,8 +536,13 @@
 
     <!-- 2) 调用统计 -->
     <div class="boardsec">
-      <h3>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span></h3>
+      <h3>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span>
+        <span class="dim" style="font-weight:400;text-transform:none;font-size:11px">（趋势：请求数 + 成功率，24h 逐小时）</span>
+      </h3>
       <div class="body">
+        <!-- 趋势图（对标 one-api/new-api 仪表盘的第一屏形态）：
+             内联 SVG 双折线（请求量 + 成功率），零图表库依赖。 -->
+        <div id="statsTrend" style="margin-bottom:12px;height:110px;position:relative"></div>
         <div class="cards" id="statsCards"></div>
         <!-- 模型维度：每行一个模型，列 = 调用次数 / 成本系数。
              系数来自上游 /v3/config（1h 缓存），拿不到时整块降级成一句说明 —— 
@@ -6693,6 +6698,70 @@ let multCatalogFailed = false;
     }
   }
 
+  // ---- 趋势图（对标 one-api/new-api 仪表盘的第一屏：请求量 + 成功率折线）----
+  //
+  // 数据来自 /admin/stats/series（服务端按小时桶聚合 request-log），
+  // 内联 SVG 双折线：请求量（青）与成功率（绿，右轴）。零图表库依赖。
+  let trendSeries = [];
+
+  async function loadTrendSeries() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=24h'); }
+    catch { return; }
+    const list = (d && d.series) || [];
+    // digest 比对：末尾桶数值变了才重绘（30s 轮询无感）。
+    const digest = JSON.stringify(list.slice(-6).map(p => [p.total, p.ok, p.fail]));
+    if (digest === trendSeries._last) return;
+    trendSeries._last = digest;
+    renderTrendSVG(list);
+  }
+
+  function renderTrendSVG(list) {
+    const host = $('statsTrend');
+    if (!host) return;
+    if (!list || !list.length) { host.innerHTML = '<div class="dim" style="font-size:12px">暂无趋势数据</div>'; return; }
+    const W = 900, H = 100, PAD = 4;
+    const maxTotal = Math.max(1, ...list.map(p => p.total));
+    const rateOf = p => p.total ? Math.round(p.ok / p.total * 100) : null;
+    const pts = list.map((p, i) => ({
+      x: PAD + (W - PAD * 2) * i / Math.max(1, list.length - 1),
+      y: H - PAD - (H - PAD * 2) * p.total / maxTotal,
+      total: p.total, rate: rateOf(p),
+      label: p.ts.slice(11, 16),           // HH:MM
+      day: p.ts.slice(5, 10),              // MM-DD
+    }));
+    const line = (getY, cls) => pts.map((p, i) =>
+      `${i ? 'L' : 'M'}${p.x.toFixed(1)},${getY(p).toFixed(1)}`).join(' ');
+    // 成功率线：0-100% 映射右轴
+    const rateY = p => p.rate === null ? null : (H - PAD - (H - PAD * 2) * p.rate / 100);
+    const totalPath = line(p => p.y, '');
+    const ratePath = pts.filter(p => p.rate !== null).map((p, i) =>
+      `${i ? 'L' : 'M'}${p.x.toFixed(1)},${rateY(p).toFixed(1)}`).join(' ');
+    // 面积填充（请求量）
+    const areaPath = `${totalPath}L${pts[pts.length - 1].x.toFixed(1)},${H - PAD}L${pts[0].x.toFixed(1)},${H - PAD}Z`;
+    const last = pts[pts.length - 1];
+    host.innerHTML =
+      `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;display:block" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="var(--fg)" stop-opacity=".18"/>
+            <stop offset="100%" stop-color="var(--fg)" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <path d="${areaPath}" fill="url(#trendFill)"/>
+        <path d="${totalPath}" fill="none" stroke="#3fb950" stroke-width="1.6" opacity=".9"/>
+        ${ratePath ? `<path d="${ratePath}" fill="none" stroke="#58a6ff" stroke-width="1.4" opacity=".85"/>` : ''}
+        ${pts.map((p, i) => i % Math.max(1, Math.floor(list.length / 6)) === 0 || i === pts.length - 1
+          ? `<text x="${p.x}" y="${H - 2}" font-size="9" fill="var(--dim)" text-anchor="middle">${esc(p.label)}</text>` : '').join('')}
+        <circle cx="${last.x}" cy="${last.y}" r="2.6" fill="#3fb950"/>
+      </svg>
+      <div style="position:absolute;right:0;top:0;font-size:11px" class="dim">
+        请求 <span style="color:#3fb950">${esc(last.total)}</span>
+        ${last.rate !== null ? `· 成功率 <span style="color:#58a6ff">${last.rate}%</span>` : ''}
+        · 最新 ${esc(last.day || last.label)}
+      </div>`;
+  }
+
   async function refresh() {
     if (!KEY && $('key').value.trim()) KEY = $('key').value.trim();
     let h, s;
@@ -6754,6 +6823,7 @@ let multCatalogFailed = false;
     catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     loadSchedule();
     try { renderStats(await admin('/admin/stats')); } catch { /* 统计非关键 */ }
+    try { loadTrendSeries(); } catch { /* 趋势图非关键 */ }
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
     try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();
@@ -6944,6 +7014,7 @@ let multCatalogFailed = false;
     setInterval(() => {
       pollPoolValues();
       pollStatsCards();
+      loadTrendSeries();
       pollAPIKeys();
     }, 30000);
 

@@ -237,6 +237,7 @@ func New(cfg Config) *Handler {
 	h.register("GET /admin/logs", h.logs)
 	h.register("GET /admin/logs/history", h.logsHistory)
 	h.register("GET /admin/stats", h.stats)
+	h.register("GET /admin/stats/series", h.statsSeries)
 
 	h.register("GET /admin/settings", h.settings)
 	h.register("PUT /admin/settings", h.settingsUpdate)
