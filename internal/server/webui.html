@@ -2525,6 +2525,15 @@ let loginProvider = '';
     return rs.slice(0, 3).join('') + '*'.repeat(rs.length - 5) + rs.slice(-2).join('');
   }
 
+  // statusCellHTML 账号状态单元格（供 accountRow 与无感轮询共用）。
+  function statusCellHTML(a) {
+    if (!a) return '<span class="pill dim">—</span>';
+    if (a.disabled) return '<span class="pill err">已禁用</span>';
+    if (a.cooling) return `<span class="pill warn">冷却 ${esc(a.cool_kind || '')} ${a.cool_remaining_sec ? a.cool_remaining_sec + 's' : ''}</span>`;
+    if (a.breaker_fails > 0) return '<span class="pill warn">熔断 ' + a.breaker_fails + '</span>';
+    return '<span class="pill ok">正常</span>';
+  }
+
   // accountRow 一个账号行。
   //
   // 参数 groupOpen：它所属的分组当前是不是展开的。
@@ -2546,10 +2555,7 @@ let loginProvider = '';
   // ⇒ 显隐只能写在行上。所以渲染每一行时**必须**知道它所在组的开合状态。
   //   变异验证 1 就是把这个参数拿掉，看断言会不会红。
   function accountRow(a, groupOpen) {
-    let st = '<span class="pill ok">正常</span>';
-    if (a.disabled) st = '<span class="pill err">已禁用</span>';
-    else if (a.cooling) st = `<span class="pill warn">冷却 ${esc(a.cool_kind || '')} ${a.cool_remaining_sec ? a.cool_remaining_sec + 's' : ''}</span>`;
-    else if (a.breaker_fails > 0) st = '<span class="pill warn">熔断 ' + a.breaker_fails + '</span>';
+    const st = statusCellHTML(a);
 
     // Token 列（T5）：**未知**（字段不存在）与 **0 秒** 必须长得不一样。
     //
@@ -2708,7 +2714,7 @@ let loginProvider = '';
       nickname: `<td title="${esc(a.nickname || '')}">${esc(maskNick(a.nickname))}</td>`,
       uid: `<td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>`,
       quota: `<td data-quota-uid="${esc(U)}" title="额度「—」表示还没探测过（与额度为 0 是两件事）">${quotaCellHTML(a)}</td>`,
-      status: `<td>${st}</td>`,
+      status: `<td data-status-uid="${esc(U)}">${st}</td>`,
       token: `<td>${tok}</td>`,
       token_expiry: `<td>${tokenExpiryCellHTML(a)}</td>`,
       checkin: `<td>${ck}</td>`,
@@ -5622,13 +5628,29 @@ let loginProvider = '';
     // 「累计消耗」改成 token（用户本轮要求）：不同上游的 credit 单位不同
     //（积分/额度/点），加起来没有可比性；而 token 是跨上游统一的口径。
     // 消耗 token = 输出 token + 推理 token（usage 里记录的只有这两个）。
+    //
+    // 计算抽成 statsCardsEntries：renderStats（整页渲染）与无感轮询
+    // pollStatsCards（只改数值）共用同一份判据，杜绝两处漂移。
     const totalTokens = (num(s.tokens) || 0) + (num(s.think_tokens) || 0);
 
     // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
+    // data-stat-key 供无感轮询定位（见 pollStatsCards）。
     const card = (k, v, cls) =>
-      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
+      `<div class="card" data-stat-key="${esc(k)}"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
 
-    $('statsCards').innerHTML = [
+    $('statsCards').innerHTML = statsCardsEntries(s).map(([k, v, c]) => card(k, v, c)).join('');
+
+    renderStatsModels(s);
+  }
+
+  // statsCardsEntries 统计卡的内容（renderStats 与无感轮询共用）。
+  function statsCardsEntries(s) {
+    if (!s) return [];
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
+    const totalTokens = (num(s.tokens) || 0) + (num(s.think_tokens) || 0);
+    return [
       ['总请求', fmtCount(s.total), ''],
       ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
       ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
@@ -5637,9 +5659,7 @@ let loginProvider = '';
       ['输出 token', fmtTokens(s.tokens), num(s.tokens) ? '' : 'dim'],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
-    ].map(([k, v, c]) => card(k, v, c)).join('');
-
-    renderStatsModels(s);
+    ];
   }
 
   // renderStatsModels 模型明细：一行一个模型，同时给出调用次数与成本系数。
@@ -6418,7 +6438,7 @@ let multCatalogFailed = false;
     refresh();
   }
 
-  // pollQuotaValues 额度**无感**轮询：只更新账号表里的额度数字，不整页重绘。
+  // pollPoolValues 账号池**无感**轮询：只更新额度/状态数字，不整页重绘。
   //
   // # 为什么是"轮询 + 单元格 diff"而不是整页 refresh（用户本轮要求）
   //
@@ -6429,11 +6449,16 @@ let multCatalogFailed = false;
   //
   //   1. 每 30 秒取一次 /admin/accounts —— 本地 JSON，**无上游调用**
   //     （上游额度由服务端周期性刷新，客户端只读它的缓存视图）
-  //   2. 用 `data-quota-uid` 定位每个额度单元格（见 accountRow 的 cells.quota）
+  //   2. 用 `data-quota-uid` / `data-status-uid` 定位单元格
   //   3. 文本没变就不碰；变了才替换该单元格 —— 表格行/面板/导航全部原样
   //
+  // 覆盖的数值（理性判断"哪些需要实时"）：
+  //   - 额度：本号/上游随时变，最该实时
+  //   - 状态：冷却/熔断/恢复切换（含主动健康检查的提前恢复），运营最关心
+  //   其余（成功数/Token 到期）变化频率低，手动刷新足够，不纳入。
+  //
   // 守卫与 autoTick 一致：后台标签、弹窗打开、账号表不可见时不刷。
-  async function pollQuotaValues() {
+  async function pollPoolValues() {
     if (document.hidden) return;
     const info = $('infoModal'), login = $('modal');
     if (info && info.style.display !== 'none') return;
@@ -6447,13 +6472,40 @@ let multCatalogFailed = false;
     for (const a of list) {
       const key = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(a.uid)) : String(a.uid);
       const cell = document.querySelector(`td[data-quota-uid="${key}"]`);
-      if (!cell) continue;
-      const fresh = quotaCellHTML(a);
-      // diff：新旧都转纯文本再比 —— HTML 结构不变时不做无谓的 innerHTML 替换。
-      const tmp = document.createElement('div');
-      tmp.innerHTML = fresh;
-      if (tmp.textContent === cell.textContent) continue;
-      cell.innerHTML = fresh;
+      if (cell) diffCell(cell, quotaCellHTML(a));
+      const stCell = document.querySelector(`td[data-status-uid="${key}"]`);
+      if (stCell) diffCell(stCell, statusCellHTML(a));
+    }
+  }
+
+  // diffCell 单元格 diff：新旧转纯文本比较，变了才替换 innerHTML。
+  function diffCell(cell, freshHTML) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = freshHTML;
+    if (tmp.textContent === cell.textContent) return;
+    cell.innerHTML = freshHTML;
+  }
+
+  // pollStatsCards 调用统计**无感**轮询：只更新 8 张卡的数值，不重绘整块。
+  //
+  // /admin/stats 聚合的是本地请求日志（无上游调用），30 秒一次很便宜。
+  // 按 data-stat-key 定位卡片、diff 后原地更新数值；模型明细（行数会变）
+  // 仍走整页刷新，不在无感轮询范围。
+  async function pollStatsCards() {
+    if (document.hidden) return;
+    let d;
+    try { d = await admin('/admin/stats'); }
+    catch { return; }
+    const entries = statsCardsEntries(d);
+    for (const [k, v, cls] of entries) {
+      const el = document.querySelector(`#statsCards .card[data-stat-key="${CSS.escape ? CSS.escape(k) : k}"]`);
+      if (!el) continue;
+      const val = el.querySelector('.v');
+      if (!val) continue;
+      const fresh = v === null ? NODATA : String(v);
+      if (val.textContent === fresh) continue;
+      val.textContent = fresh;
+      val.className = 'v ' + (v === null ? 'dim' : (cls || ''));
     }
   }
 
@@ -6702,10 +6754,13 @@ let multCatalogFailed = false;
     // 注意：不在这里无条件 setInterval —— 上面的 INJECTED 分支已经拉开轮询，
     // 这里再来一次会形成两个并行定时器（重复请求 + 清不干净）。
 
-    // 额度**无感**轮询：常驻开启（用户要求额度实时）。它只更新额度单元格，
-    // 不整页重绘、不重建面板 —— 与上面"每 5s 整页刷新"的开关相互独立：
-    // 即使关闭了整页自动刷新，额度数字仍会每 30 秒静默对齐一次。
-    setInterval(pollQuotaValues, 30000);
+    // 额度/状态/统计**无感**轮询：常驻开启（用户要求数值实时）。它只更新
+    // 单元格与卡片数值，不整页重绘、不重建面板 —— 与上面"每 5s 整页刷新"
+    // 的开关相互独立：即使关闭了整页自动刷新，这些数字仍每 30 秒静默对齐。
+    setInterval(() => {
+      pollPoolValues();
+      pollStatsCards();
+    }, 30000);
 
     // 账号操作：事件委托，避免每行都绑 handler。
     // 把按钮自身传进去，让它能在「写 + 刷新」期间禁用并显示进行中文案。
