@@ -71,8 +71,13 @@ func checkWebUITaskAutoWiring(src string) []string {
 		// 判据钉住"排除 done"，并要求复用 GROWTH_VIEWS.done.test 而不是另写
 		// 一遍 status 判断（同一语义在视图与按钮两处各定义一次必然漂移）。
 		{"已完成的任务不得渲染一键完成", "!GROWTH_VIEWS.done.test(t)"},
-		{"「一键完成待办」按钮的绑定", "$('btnGrowthAutoAll').onclick"},
-		{"「开学季一键完成」按钮的绑定", "$('btnGrowthSchoolRun').onclick"},
+		// 「一键完成待办」与「开学季一键完成」已合并为一个按钮（用户本轮要求）：
+		// 按钮绑定合并函数 growthOneClick，它依次调用两个端点（auto-all → school/run），
+		// 且支持「全部账号」（growthUID 为空 = 省略 uid，后端按全池处理）。
+		{"「一键完成」按钮的绑定", "$('btnGrowthAutoAll').onclick"},
+		{"合并函数（顺序执行成长待办+开学季）", "growthOneClick"},
+		{"合并按钮支持全部账号（空 uid）", "growthUID || ''"},
+		{"合并后等待任务槽空闲再启动第二个（全局单槽）", "waitTaskIdle"},
 	}
 	for _, n := range need {
 		if !strings.Contains(code, n.want) {

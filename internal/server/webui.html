@@ -286,6 +286,20 @@
   .field.chk label{font-size:13px;color:var(--fg)}
   fieldset{border:1px solid var(--line);border-radius:10px;padding:14px;margin:0 0 16px}
   legend{font-size:12px;color:var(--dim);padding:0 8px;letter-spacing:.4px}
+  /* 设置页重设计（用户本轮要求）新增的呈现类：生效时机徽章 / 组内子块 / 信息条 */
+  .badge{font-size:11px;font-family:var(--mono);padding:1px 7px;border-radius:999px;
+    border:1px solid currentColor;margin-left:8px;vertical-align:1px}
+  .badge--hot{color:#3fb950}          /* 立即生效 */
+  .badge--cold{color:#d29922}         /* 重启生效 */
+  .badge--ro{color:#8b949e}           /* 只读 */
+  .subgroup{margin:16px 0 6px;font-size:12px;font-weight:600;color:var(--fg);
+    padding-top:12px;border-top:1px dashed var(--line)}
+  .subgroup:first-child{margin-top:0;padding-top:0;border-top:0}
+  .info-line{font-size:12px;color:var(--dim);line-height:1.7;margin:0 0 12px}
+  /* 开关 + 参数并排成一行（如：启用签到 [9,21]） */
+  .pair{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+  .pair .field{margin:0}
+  .pair input[type=text],.pair input[type=number]{width:120px}
   .readonly dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:13px}
   .readonly dt{color:var(--dim);font-size:12px}
   .readonly dd{margin:0;font-family:var(--mono);font-size:12px;word-break:break-all}
@@ -682,14 +696,13 @@
       <div style="padding:9px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);flex-wrap:wrap">
         <span class="dim" style="font-size:12px">任务明细</span>
         <select id="growthAccount" style="padding:3px 8px;font-size:12px;max-width:280px"></select>
-        <!-- 这两个按钮作用于**下拉框选中的那个账号**，所以放在这一行而不是顶部工具条：
-             作用域一眼可见，不必额外写说明。
-             它们对应两条真实端点（POST /admin/growth/auto-all、POST /admin/school/run），
+        <!-- 合并后的「一键完成」按钮（原「一键完成待办」+「开学季一键完成」合并）：
+             作用于下拉框选中的账号，选「全部账号」则作用于所有账号。
+             依次执行两条真实端点（POST /admin/growth/auto-all → POST /admin/school/run，
+             任务槽全局唯一，必须等第一个结束再启动第二个），
              都返回 202 + 后台执行 —— 进度由 watchTask() 走既有的 /admin/task 通道。 -->
         <button id="btnGrowthAutoAll" style="padding:3px 10px;font-size:12px"
-          title="对这个账号把「一键完成」能做的待办逐个做完并领奖（伪造客户端行为遥测；后台执行，顶部显示进度）">一键完成待办</button>
-        <button id="btnGrowthSchoolRun" style="padding:3px 10px;font-size:12px"
-          title="对这个账号跑一遍开学季闭环（分享 / 3 次对话 / 专家使用 + 抽完剩余次数；后台执行）">开学季一键完成</button>
+          title="对选中账号（或全部账号）依次执行：成长待办自动完成+领奖 → 开学季闭环（分享/对话/专家使用/抽奖）。后台执行，顶部显示进度">一键完成</button>
         <span class="tog" id="growthViews" style="gap:0">
           <button data-gview="acceptable" class="on" style="padding:3px 10px;font-size:12px;border-radius:8px 0 0 8px">待接单</button>
           <button data-gview="running" style="padding:3px 10px;font-size:12px;border-left:0">进行中</button>
@@ -786,85 +799,91 @@
       <button id="btnSettingsSave" class="primary" style="padding:3px 12px;font-size:12px">保存设置</button>
     </h2>
     <div class="body">
-      <!-- 下次唤醒状态：原先在独立的「调度」面板，但那面板只有这一条只读信息，
-           与设置里的调度开关重复。并入这里后既保留信息，又少一个标签页。 -->
-      <div id="schInfo" class="dim" style="margin-bottom:14px;line-height:1.7">未连接</div>
+      <!-- 下次唤醒状态：与调度开关同处一组，信息与操作挨在一起。 -->
       <fieldset>
-        <legend>调度（保存后立即生效）</legend>
-        <!-- 开关与参数分成两个 .fieldgroup：复选框归复选框、输入框归输入框，
-             组内不再交叉（详见 .fieldgroup 的样式注释）。 -->
+        <legend>日常调度 <span class="badge badge--hot">立即生效</span></legend>
+        <p class="info-line" id="schInfo">未连接</p>
+        <!-- 开关 + 参数并排成行：三行取代原来 6 个散落字段 -->
+        <div class="formgrid">
+          <div class="pair">
+            <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
+            <div class="field"><input type="text" id="setCheckinHours" placeholder="9,21" title="签到时点（小时，逗号分隔，0-23 本地时区）"></div>
+          </div>
+          <div class="pair">
+            <div class="field chk"><input type="checkbox" id="setKeepaliveEnabled"><label for="setKeepaliveEnabled">启用 token 保活</label></div>
+            <div class="field"><input type="text" id="setKeepaliveHours" placeholder="22" title="保活时点（小时，逗号分隔，0-23 本地时区）"></div>
+          </div>
+          <div class="pair">
+            <div class="field chk"><input type="checkbox" id="setTravelAuto"><label for="setTravelAuto">猫到站自动领奖</label></div>
+            <div class="field"><input type="number" id="setTravelInterval" min="10" max="3600" title="旅行守卫间隔（秒）；同时是上游未给到站时间时的兜底轮询周期"></div>
+          </div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>成长中心自动化 <span class="badge badge--cold" style="color:#3fb950">自动执行</span></legend>
+        <div class="subgroup">纯收益 · 默认开（领已达成的奖励、用补签卡补回断登）</div>
         <div class="fieldgroup checks">
-          <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
-          <div class="field chk"><input type="checkbox" id="setKeepaliveEnabled"><label for="setKeepaliveEnabled">启用 token 保活</label></div>
-          <div class="field chk"><input type="checkbox" id="setTravelAuto"><label for="setTravelAuto">猫到站自动领奖</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单</label></div>
         </div>
-        <div class="fieldgroup">
-          <div class="formgrid">
-            <div class="field"><label>签到时点（小时，逗号分隔）</label>
-              <input type="text" id="setCheckinHours" placeholder="9,21"><span class="hint">0-23，本地时区</span></div>
-            <div class="field"><label>保活时点（小时，逗号分隔）</label>
-              <input type="text" id="setKeepaliveHours" placeholder="22"><span class="hint">0-23，本地时区</span></div>
-            <div class="field"><label>旅行守卫间隔（秒）</label>
-              <input type="number" id="setTravelInterval" min="10" max="3600"><span class="hint">同时是上游未给到站时间时的兜底轮询周期</span></div>
-          </div>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>成长中心自动动作（保存后立即生效）</legend>
-        <div class="fieldgroup">
-          <div class="field chk stack"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励（把已完成任务的奖励领回来，唯一让额度到账的动作）</label></div>
-          <div class="field chk stack"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单（把未接单任务接进列表开始计进度，不发奖励）</label><span class="hint">只在新账号「还没领到第一只 Buddy」时有实际作用；官方前端没有接单按钮</span></div>
-          <div class="field chk stack"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
-          <div class="field chk stack"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
-          <div class="field chk stack"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
-          <div class="field chk stack"><input type="checkbox" id="setGrowthDraw"><label for="setGrowthDraw">自动抽奖</label></div>
-        </div>
-        <div class="dim" style="margin-top:10px;font-size:12px">
-          前两项是纯收益（领已达成的奖励、用补签卡补回断登），默认开启。
-          后三项会消耗资源 —— 兑换花连登天数、开盲盒花能量、抽奖花抽奖次数，默认关闭。
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>历史与日志（保存后立即生效）</legend>
-        <div class="fieldgroup">
-          <div class="formgrid">
-            <div class="field"><label>签到历史保留天数</label>
-              <input type="number" id="setCheckinLogDays" min="1" max="3650"></div>
-            <div class="field"><label>请求日志保留天数</label>
-              <input type="number" id="setReqLogDays" min="1" max="3650"><span class="hint">超过窗口的旧记录在下次裁剪时清除</span></div>
-          </div>
-        </div>
-        <div id="setLogFileInfo" class="dim" style="margin-top:12px;font-size:12px"></div>
-      </fieldset>
-
-      <fieldset>
-        <legend>需要重启才生效（仍会写入 config.json）</legend>
-        <div class="fieldgroup">
-          <div class="formgrid">
-            <div class="field"><label>429 软冷却时长</label><input type="text" id="setSoftRate" placeholder="60s"></div>
-            <div class="field"><label>上游短 RPC 超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
-            <div class="field"><label>SSE 首字节超时（秒）</label><input type="number" id="setUpHeaderTimeout" min="1"></div>
-            <div class="field"><label>SSE 流中空闲超时（秒）</label><input type="number" id="setUpIdleTimeout" min="1"></div>
-            <div class="field"><label>单账号最大在途</label><input type="number" id="setMaxInFlight" min="0"><span class="hint">0 = 不限</span></div>
-            <div class="field"><label>熔断阈值（连续失败次数）</label><input type="number" id="setBreakerThreshold" min="1"></div>
-            <div class="field"><label>熔断基础时长</label><input type="text" id="setBreakerCooldown" placeholder="30m"></div>
-            <div class="field"><label>熔断退避封顶</label><input type="text" id="setBreakerCooldownMax" placeholder="6h"></div>
-            <div class="field"><label>Upstash Redis 地址（可空）</label><input type="text" id="setUpstashURL" placeholder="留空 = 纯内存模式"></div>
-            <div class="field"><label>会话粘性 TTL</label><input type="text" id="setStickyTTL" placeholder="30m"></div>
-            <div class="field"><label>成长中心扫描间隔（秒）</label>
-              <input type="number" id="setGrowthInterval" min="60" max="86400"><span class="hint">守卫轮 ticker 在启动时创建，改动需重启</span></div>
-          </div>
-        </div>
+        <div class="subgroup">消耗资源 · 默认关（兑换花连登天数、开盲盒花能量、抽奖花次数）</div>
         <div class="fieldgroup checks">
-          <div class="field chk"><input type="checkbox" id="setSanitize"><label for="setSanitize">出站请求体指纹脱敏</label></div>
-          <div class="field chk"><input type="checkbox" id="setStickyEnabled"><label for="setStickyEnabled">会话粘性</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthRedeem"><label for="setGrowthRedeem">自动连登兑换</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
+          <div class="field chk"><input type="checkbox" id="setGrowthDraw"><label for="setGrowthDraw">自动抽奖</label></div>
         </div>
+        <div class="subgroup">执行节奏</div>
+        <div class="field" style="max-width:280px"><label>成长中心扫描间隔（秒）<span class="badge badge--cold">重启生效</span></label>
+          <input type="number" id="setGrowthInterval" min="60" max="86400"><span class="hint">守卫轮 ticker 在启动时创建，改动需重启</span></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>历史与日志 <span class="badge badge--hot">立即生效</span></legend>
+        <div class="formgrid">
+          <div class="field"><label>签到历史保留天数</label>
+            <input type="number" id="setCheckinLogDays" min="1" max="3650"></div>
+          <div class="field"><label>请求日志保留天数</label>
+            <input type="number" id="setReqLogDays" min="1" max="3650"><span class="hint">超过窗口的旧记录在下次裁剪时清除</span></div>
+        </div>
+        <p class="info-line" id="setLogFileInfo" style="margin-top:12px"></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>网络与容错 <span class="badge badge--cold">重启生效</span></legend>
+        <div class="subgroup">上游超时</div>
+        <div class="formgrid">
+          <div class="field"><label>短 RPC 超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
+          <div class="field"><label>SSE 首字节超时（秒）</label><input type="number" id="setUpHeaderTimeout" min="1"></div>
+          <div class="field"><label>SSE 流中空闲超时（秒）</label><input type="number" id="setUpIdleTimeout" min="1"></div>
+        </div>
+        <div class="subgroup">限流与并发</div>
+        <div class="formgrid">
+          <div class="field"><label>429 软冷却时长</label><input type="text" id="setSoftRate" placeholder="60s"></div>
+          <div class="field"><label>单账号最大在途</label><input type="number" id="setMaxInFlight" min="0"><span class="hint">0 = 不限</span></div>
+        </div>
+        <div class="subgroup">熔断保护</div>
+        <div class="formgrid">
+          <div class="field"><label>熔断阈值（连续失败次数）</label><input type="number" id="setBreakerThreshold" min="1"></div>
+          <div class="field"><label>熔断基础时长</label><input type="text" id="setBreakerCooldown" placeholder="30m"></div>
+          <div class="field"><label>熔断退避封顶</label><input type="text" id="setBreakerCooldownMax" placeholder="6h"></div>
+        </div>
+        <div class="subgroup">出站请求安全</div>
+        <div class="field chk"><input type="checkbox" id="setSanitize"><label for="setSanitize">出站请求体指纹脱敏</label></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>会话粘性 <span class="badge badge--cold">重启生效</span></legend>
+        <div class="pair">
+          <div class="field chk"><input type="checkbox" id="setStickyEnabled"><label for="setStickyEnabled">启用会话粘性</label></div>
+          <div class="field"><label>粘性 TTL</label><input type="text" id="setStickyTTL" placeholder="30m"></div>
+        </div>
+        <div class="hint" style="margin-top:8px">粘性让同一会话尽量落在同一账号上（避免多账号轮转把对话拆散）。</div>
       </fieldset>
 
       <fieldset class="readonly">
-        <legend>只读</legend>
+        <legend>运行信息 <span class="badge badge--ro">只读</span></legend>
         <dl id="setReadonly"></dl>
       </fieldset>
     </div>
@@ -4415,7 +4434,6 @@ let loginProvider = '';
     ['setBreakerCooldown', 'pool_breaker_cooldown', 'str'],
     ['setBreakerCooldownMax', 'pool_breaker_cooldown_max', 'str'],
     ['setSanitize', 'sanitize_blacklist_fingerprints', 'bool'],
-    ['setUpstashURL', 'upstash_url', 'str'],
     ['setStickyEnabled', 'session_sticky_enabled', 'bool'],
     ['setStickyTTL', 'session_sticky_ttl', 'str'],
   ];
@@ -4575,7 +4593,7 @@ let loginProvider = '';
       const stale = g.stale
         ? ` <span class="pill warn" title="本次刷新失败，展示的是 ${new Date(g.observed_at).toLocaleTimeString('zh-CN', { hour12: false })} 的数据：${esc(g.error || '')}">可能过期</span>`
         : '';
-      const name = esc(g.nickname || (g.uid || '').slice(0, 8)) + stale;
+      const name = esc(maskNick(g.nickname)) + stale;
       const U = esc(g.uid);
       if (g.error && !g.tasks_total) {
         // 「昵称」列已占 1 格，余下 COLS.growth - 1 格由错误信息占满。
@@ -4733,9 +4751,11 @@ let loginProvider = '';
     const sel = $('growthAccount');
     if (!sel) return;
     const prev = growthUID;
-    const opts = growthSnaps.map(g => {
+    // 「全部账号」= 空 uid：下拉按钮（一键完成）与顶部「全部xxx」动作将作用于所有账号。
+    const allOpt = `<option value="">全部账号（下方按钮对所有账号执行）</option>`;
+    const opts = allOpt + growthSnaps.map(g => {
       const c = growthCounts(g);
-      const name = g.nickname || (g.uid || '').slice(0, 8);
+      const name = maskNick(g.nickname);
       const hint = g.tasks_total
         ? `（待接单 ${c.acceptable} · 进行中 ${c.running}）`
         : '（未探测）';
@@ -4743,9 +4763,9 @@ let loginProvider = '';
     }).join('');
     sel.innerHTML = opts;
 
-    // 保持原选择；账号被删掉时回落到第一个。
+    // 保持原选择；账号被删掉时回落到「全部账号」。
     const exists = growthSnaps.some(g => g.uid === prev);
-    growthUID = exists ? prev : ((growthSnaps[0] || {}).uid || '');
+    growthUID = (exists || prev === '') ? prev : '';
     sel.value = growthUID;
   }
 
@@ -4761,6 +4781,24 @@ let loginProvider = '';
     }
 
     buildGrowthAccountSelect();
+    // 「全部账号」选中时：任务表按账号铺开太长，显示提示 + 各账号待办摘要，
+    // 让"点一键完成 = 所有账号都执行"这个作用域一眼可见。
+    if (growthUID === '') {
+      const lines = growthSnaps.map(g => {
+        const c = growthCounts(g);
+        const name = esc(maskNick(g.nickname));
+        const left = c.acceptable + c.running;
+        const done = c.done;
+        return `<div style="padding:5px 0;font-size:12px">${name}
+          <span class="pill ${left ? 'warn' : 'dim'}">待完成 ${left}</span>
+          <span class="pill ${done ? 'ok' : 'dim'}">已完成 ${done}</span></div>`;
+      }).join('');
+      host.innerHTML = `<div class="dim" style="padding:12px 16px;font-size:12px">
+        已选择「全部账号」：点上方「一键完成」将对所有账号依次执行（成长待办+领奖 → 开学季）。
+        要查看/操作单个账号请在下拉框选择它。</div><div style="padding:0 16px">${lines}</div>`;
+      $('growthTaskMeta').textContent = '';
+      return;
+    }
     const g = growthSnaps.find(x => x.uid === growthUID) || growthSnaps[0];
     const c = growthCounts(g);
 
@@ -4780,7 +4818,7 @@ let loginProvider = '';
     $('growthTaskMeta').textContent =
       `待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done} · 共 ${c.all}`;
 
-    const name = esc(g.nickname || (g.uid || '').slice(0, 8));
+    const name = esc(maskNick(g.nickname));
     if (g.error && !g.tasks_total) {
       host.innerHTML = `<div class="ggroup">
         <div class="ghead"><span class="gname">${name}</span>
@@ -5060,26 +5098,49 @@ let loginProvider = '';
     toast(`${label}：${msg}`, !/正在执行中|请等本轮|已有任务/.test(msg));
   }
 
-  async function growthAutoAll(btn) {
-    const uid = growthUID;
-    if (!uid) { toast('先在「任务明细」里选一个账号', true); return; }
+  // growthOneClick 合并后的「一键完成」（原「一键完成待办」+「开学季一键完成」）。
+  //
+  // 作用域：下拉框选中的账号；选「全部账号」（growthUID=''）→ 对所有账号执行
+  // （后端两个端点都支持省略 uid = 全池，见 autotask_admin.go）。
+  //
+  // 顺序执行：任务槽全局唯一（taskslot.Start 有 running 互斥），两个后台任务
+  // 不能并发 —— 先启动成长待办（auto-all，实测 ~3 分钟），等它结束后再启动
+  // 开学季（school/run）。
+  async function growthOneClick(btn) {
+    const uid = growthUID || '';   // '' = 全部账号
+    const scope = uid ? '本账号' : '全部账号';
     await busyRun(btn, async () => {
       try {
-        return await autoStart('/admin/growth/auto-all', uid,
-          '已启动：本账号全部可自动化任务（后台执行，顶部显示进度）');
-      } catch (e) { autoStartErr(e, '一键完成待办'); return undefined; }
-    }, { label: '一键完成待办', busyText: '启动中…' });
+        // 第一步：成长待办自动完成 + 领奖。
+        await autoStart('/admin/growth/auto-all', uid,
+          `已启动：${scope}一键完成成长待办（后台执行，顶部显示进度）`);
+        // 第二步：等第一个任务结束（全局单槽），再启动开学季。
+        const done = await waitTaskIdle(15 * 60 * 1000);
+        if (!done) { toast('成长待办执行超时（15 分钟），请到顶部任务进度查看', true); return undefined; }
+        await autoStart('/admin/school/run', uid,
+          `已启动：${scope}开学季闭环（后台执行，顶部显示进度）`);
+        return true;
+      } catch (e) { autoStartErr(e, '一键完成'); return undefined; }
+    }, { label: '一键完成', busyText: '启动中…' });
   }
 
-  async function growthSchoolRun(btn) {
-    const uid = growthUID;
-    if (!uid) { toast('先在「任务明细」里选一个账号', true); return; }
-    await busyRun(btn, async () => {
-      try {
-        return await autoStart('/admin/school/run', uid,
-          '开学季已启动（后台执行，顶部显示进度）');
-      } catch (e) { autoStartErr(e, '开学季一键完成'); return undefined; }
-    }, { label: '开学季一键完成', busyText: '启动中…' });
+  // waitTaskIdle 轮询 /admin/task，等后台任务槽空闲（上个任务跑完）。
+  // 返回 true = 在超时前空闲；false = 超时。
+  function waitTaskIdle(timeoutMs) {
+    return new Promise(resolve => {
+      const t0 = Date.now();
+      const iv = setInterval(async () => {
+        let idle = false;
+        try {
+          const st = await admin('/admin/task');
+          idle = !(st && st.running);
+        } catch { /* 轮询失败继续等 */ }
+        if (idle || Date.now() - t0 > timeoutMs) {
+          clearInterval(iv);
+          resolve(idle);
+        }
+      }, 2000);
+    });
   }
 
   // ---------------------------------------------------------------- 请求日志（落盘历史）
@@ -5739,7 +5800,7 @@ let loginProvider = '';
       return;
     }
     $('travelRows').innerHTML = list.map(t => {
-      const name = esc(t.nickname || (t.uid || '').slice(0, 8));
+      const name = esc(maskNick(t.nickname));
       const buddy = t.has_buddy
         ? `${esc(t.buddy_name || '未命名')}${t.buddy_rarity ? ` <span class="dim">${esc(t.buddy_rarity)}</span>` : ''}`
         : '<span class="dim">还没有猫</span>';
@@ -6946,9 +7007,9 @@ let multCatalogFailed = false;
     $('btnGrowthOpenAll').onclick = () => growthAll('open');
     $('btnGrowthDrawAll').onclick = () => growthAll('draw');
     // 一键完成：单任务在行内（data-gauto 委托，见 growthGroups），
-    // 整账号与开学季在这两个按钮上 —— 都作用于任务明细分区的下拉框选中账号。
-    $('btnGrowthAutoAll').onclick = () => growthAutoAll($('btnGrowthAutoAll'));
-    $('btnGrowthSchoolRun').onclick = () => growthSchoolRun($('btnGrowthSchoolRun'));
+    // 合并后的整账号/全部账号「一键完成」在这个按钮上 —— 作用域由
+    // 任务明细分区的下拉框决定（选「全部账号」= 对所有账号执行）。
+    $('btnGrowthAutoAll').onclick = () => growthOneClick($('btnGrowthAutoAll'));
 
     // 本机登录的按钮长在明细节头里（随 renderGrowthGroups 重建），
     // 所以走 growthGroups 上的事件委托，而不是给按钮本身挂 onclick。
