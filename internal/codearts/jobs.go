@@ -26,6 +26,8 @@ package codearts
 import (
 	"context"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/gateway"
@@ -128,6 +130,10 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		if a.RefreshToken == "" {
 			continue
 		}
+		// 失败退避中的账号不尝试（凭证永久失效时等重新登录，见 holdRefresh）。
+		if p.onRefreshHold(a) {
+			continue
+		}
 		if a.NeedsRefresh(defaultRefreshSkew) {
 			need = append(need, a)
 		}
@@ -143,12 +149,77 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		}
 		if err := p.client.RefreshToken(a); err != nil {
 			log.Printf("codearts: 后台续期失败 (uid=%s): %v", a.UID, err)
+			p.holdRefresh(a, err)
 			continue
 		}
+		p.clearRefreshHold(a.UID)
 		log.Printf("codearts: 后台续期成功 (uid=%s)，新过期 %s",
 			a.UID, time.Unix(a.ExpiresAt, 0).Format(time.RFC3339))
 	}
 	return nil
+}
+
+// holdRefresh 续期失败后挂退避。
+//
+// 永久性凭证错误（refresh token 已被服务端消费 / 无 token / 缺 DPoP 私钥）
+// → 停 24 小时等用户重新登录，否则每轮扫描都打一次注定失败的上游请求
+// （实测 STS5.1806 死 token 每 60s 一次）。其余错误（网络/5xx 抖动）→ 10 分钟短退避。
+// 凭证文件被外部更新（重新登录写盘）时由 onRefreshHold 提前解除。
+func (p *Provider) holdRefresh(a *Auth, err error) {
+	hold := 10 * time.Minute
+	if isPermanentRefreshError(err) {
+		hold = 24 * time.Hour
+		log.Printf("codearts: 凭证已失效（%v）—— 已暂停该账号自动续期，请重新登录（页内「＋添加账号」或 cmd/login）；凭证文件更新后自动恢复", err)
+	}
+	now := time.Now()
+	p.refreshHoldMu.Lock()
+	p.refreshHold[a.UID] = refreshHoldEntry{until: now.Add(hold), holdAt: now}
+	p.refreshHoldMu.Unlock()
+}
+
+// onRefreshHold 该账号是否处于退避期。
+//
+// 特判"外部重新登录"：凭证文件（a.FilePath）的修改时间晚于进入退避的时刻
+// （holdAt）→ 说明用户已重新登录写入了新凭证，提前解除退避，下一轮恢复自动续期。
+func (p *Provider) onRefreshHold(a *Auth) bool {
+	p.refreshHoldMu.Lock()
+	defer p.refreshHoldMu.Unlock()
+	e, ok := p.refreshHold[a.UID]
+	if !ok {
+		return false
+	}
+	if time.Now().Before(e.until) {
+		if a.FilePath != "" {
+			if fi, err := os.Stat(a.FilePath); err == nil && fi.ModTime().After(e.holdAt) {
+				delete(p.refreshHold, a.UID)
+				return false
+			}
+		}
+		return true
+	}
+	delete(p.refreshHold, a.UID)
+	return false
+}
+
+// clearRefreshHold 续期成功（或重试窗口过期）时清除退避。
+func (p *Provider) clearRefreshHold(uid string) {
+	p.refreshHoldMu.Lock()
+	delete(p.refreshHold, uid)
+	p.refreshHoldMu.Unlock()
+}
+
+// isPermanentRefreshError 凭证**永久失效**（必须重新登录才能恢复）的错误特征。
+//
+// 与之相对的是一次性抖动（网络、5xx）—— 那些只挂短退避，下轮重试。
+func isPermanentRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "has been used") || // STS5.1806：refresh token 已被服务端消费
+		strings.Contains(s, "无 refresh_token") ||
+		strings.Contains(s, "缺 DPoP") ||
+		strings.Contains(s, "需重新登录")
 }
 
 // 编译期断言：Provider 实现 JobExt。
