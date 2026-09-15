@@ -157,10 +157,15 @@ func TestCheckinErrorDoesNotCrash(t *testing.T) {
 //
 // 核心把槽位名原样转过来（它不认识 checkedin/keepalive 是什么），
 // "这个名字对应哪段业务"的判断发生在本包。
+//
+// ⚠ 保活的 fixture token 必须是**临近过期**的：保活已统一为被动后台扫描
+// （只刷 NeedsRefresh(10m) 内的），新鲜 token 会被跳过 —— 用远未来时间戳
+// 会让"槽位应触发保活"这条断言恒失败（那是旧"无条件刷新"语义的遗留写法）。
 func TestRunSlotDispatchesBySlotName(t *testing.T) {
 	f := &fakeUpstream{resourceRemain: 100}
 	s, _ := newCheckinProvider(t, f,
-		&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+		&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt",
+			ExpiresAt: time.Now().Add(5 * time.Minute).Unix()})
 
 	s.RunSlot(SlotCheckin, "schedule")
 	if f.checkinCalls.Load() != 1 {

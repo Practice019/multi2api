@@ -231,11 +231,31 @@ func isAlreadyCheckin(msg string) bool {
 
 // RunKeepaliveAll 全量 token 保活；trigger 为 "schedule" 或 "manual"。
 //
-// ⚠ 同 RunCheckinAll：账号集必须按上游取。这里也是调度路径 ——
-// 实测那批"别家上游账号被 schedule 触发"的记录里，保活占 110 条。
+// # 统一为「被动后台扫描」（用户本轮要求，与 codearts/trae 同一模型）
+//
+// 以前这里是**无条件**刷新所有账号的 token（每天到点就把所有号全刷一遍）。
+// 这与其他两个上游的模型不一致 —— 它们都是"后台扫描 + 只刷需要刷的"：
+//
+//	codearts → 每 60s 扫一次，只刷快过期的（NeedsRefresh 3m 窗口）
+//	trae     → 每 30min 扫一次，只刷快过期的（NeedsRefresh 10m 窗口）
+//
+// 这里对齐：**只刷新临近过期（10m 窗口）的账号**。请求路径还有一层
+// 惰性续期（CredentialRefresher）兜底 —— 扫描间隙里过期的 token 会在
+// 下次请求前被按需刷新，不会因扫描频率而漏。
+//
+// 手动入口（行内「保活」按钮 → RunKeepaliveFor）**仍然强制刷新**：
+// 用户点了就是"现在就刷"，不受被动窗口约束。
 func (p *Provider) RunKeepaliveAll(trigger string) {
 	for _, st := range p.ownAccounts() {
 		if st.Disabled {
+			continue
+		}
+		a := p.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshToken == "" {
+			continue
+		}
+		// 被动判据：只有临近过期的才刷（与 codearts/trae 的后台扫描同口径）。
+		if !a.NeedsRefresh(refreshSkew) {
 			continue
 		}
 		p.keepaliveOne(st.UID, trigger)

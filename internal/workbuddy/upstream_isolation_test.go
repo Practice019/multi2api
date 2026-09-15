@@ -245,7 +245,15 @@ func TestRunCheckinAllSkipsOtherUpstream(t *testing.T) {
 
 // TestRunKeepaliveAllSkipsOtherUpstream 全量保活同理（对应 110 条 keepalive）。
 func TestRunKeepaliveAllSkipsOtherUpstream(t *testing.T) {
-	p, foreign := seedMultiProviderPool(t, testAuth("wb1"), testAuth("wb2"))
+	// 保活已统一为被动后台扫描（只刷 NeedsRefresh(10m) 内的 token），
+	// 本上游的 wb1/wb2 必须用**临近过期**的凭证，否则会被被动判据跳过、
+	// 隔离断言变成空转（seen 空 = 谁也看不到，测不出"只刷本上游"）。
+	expiring := func(uid string) *auth.Auth {
+		a := testAuth(uid)
+		a.ExpiresAt = time.Now().Add(5 * time.Minute).Unix()
+		return a
+	}
+	p, foreign := seedMultiProviderPool(t, expiring("wb1"), expiring("wb2"))
 	prov := newIsolationProvider(t, p)
 
 	prov.RunKeepaliveAll("schedule")
