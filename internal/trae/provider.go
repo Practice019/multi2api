@@ -26,6 +26,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/gateway"
@@ -46,6 +47,10 @@ type Provider struct {
 	refreshInterval time.Duration
 	// checkinEnabled 是否注册每日签到任务。
 	checkinEnabled bool
+
+	// loginOnce / loginCached 缓存 LoginFlow 实例（见 login.go）。
+	loginOnce   sync.Once
+	loginCached *loginFlow
 }
 
 // Config Provider 的可选依赖，全部可缺省。

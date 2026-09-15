@@ -23,6 +23,10 @@
 - **权益包额度**：`ide_user_ent_usage` 的 `credits_limit` 求和 → 账号池「额度」列。
 - **模型目录**：实时拉 `get_detail_param`（config_name 即模型 ID），失败回落
   13+1 个已知 SOLO 免费模型的静态快照（trae-solo-unlock 实测清单 + glm-5.2）。
+- **页内添加账号**：TRAE 浏览器 OAuth（`www.trae.cn/authorization` + 127.0.0.1 回调）
+  完整搬进控制台 —— 「＋ 添加账号」打开登录表单页：生成登录链接 → 浏览器登录 →
+  粘贴回调链接 → ExchangeToken 换 token（无 refreshToken 时用 userJwt.Token 兜底）→
+  GetUserInfo 拿身份 → 落盘并池；每次登录换新 machine/device id。
 - 配置段 `trae.{enabled,auth_dir,refresh_interval_seconds,checkin_enabled,pool_accounts}`。
 
 ### 说明
@@ -30,9 +34,7 @@
 - 协议来自对多个 trae 反代项目的复现研究（traework2api / trae-api / trae-local-api /
   trae-solo-unlock），核心事实已固化进 `client.go` 的常量与测试。
 - 凭证两种形态都认（嵌套 `{auth,account}` / 扁平）；`trae-<uid>.json`。
-- TRAE 登录是浏览器 OAuth（127.0.0.1 回调），**未实现页内登录**：凭证经登录脚本
-  或手工放置后点「重载 auths」进池。
-- 契约测试用假上游全程执行（CI 不跳过），SSE 转换/分类/续期/额度均有单测。
+- 契约测试用假上游全程执行（CI 不跳过），SSE 转换/分类/续期/额度/登录流程均有单测。
 
 ## v1.5.0 — 2026-09-15
 
