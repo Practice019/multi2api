@@ -668,6 +668,7 @@ func main() {
 			Ring:     logRing,
 			AuthDir:  cfg.AuthDir,
 			APIKeys:  apiKeysStore, // /admin/apikeys 管理端点
+			APIKey:   cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）
 			// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
 			AuthsBase: cfg.AuthsBase,
 			// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。

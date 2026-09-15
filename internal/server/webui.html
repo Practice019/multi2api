@@ -572,6 +572,29 @@
     </div>
   </section>
 
+  <!-- API 管理（对标 new-api 令牌体系）：放在仪表盘之后 —— 网关的"调用凭据"
+       紧跟"网关状态"，是运维最先想看的两个面。 -->
+  <section data-key="apikeys">
+    <h2>API 管理 <span class="spacer"></span>
+      <button id="btnApiKeyNew" class="primary" style="padding:3px 10px;font-size:12px">新建 API Key</button>
+    </h2>
+    <div class="body">
+      <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.7">
+        API Key 是调用 <code>/v1/chat/completions</code> 的凭据：每把可单独设额度
+        （token 上限，0=不限）与每分钟请求上限（0=不限）。数据存 <code>data/apikeys.json</code>。
+      </div>
+      <!-- 管理钥匙（config.api_key）与普通 key 同屏显示，与仪表盘「API 接入信息」统一：
+           一把钥匙只有一个事实来源，不该在仪表盘看到、在管理页却"没有"。 -->
+      <div id="apiAdminKey" class="dim" style="font-size:12px;margin-bottom:10px"></div>
+      <table>
+        <thead><tr>
+          <th>名称</th><th>Key</th><th>状态</th><th>额度</th><th>请求</th><th>失败</th><th>限速</th><th>创建</th><th>操作</th>
+        </tr></thead>
+        <tbody id="apiKeyRows"><tr><td colspan="9" class="dim">加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
   <section data-key="accounts">
     <h2>账号池
       <span class="spacer"></span>
@@ -857,25 +880,6 @@
         <legend>运行信息 <span class="badge badge--ro">只读</span></legend>
         <dl id="setReadonly"></dl>
       </fieldset>
-    </div>
-  </section>
-
-  <section data-key="apikeys">
-    <h2>API 管理 <span class="spacer"></span>
-      <button id="btnApiKeyNew" class="primary" style="padding:3px 10px;font-size:12px">新建 API Key</button>
-    </h2>
-    <div class="body">
-      <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.7">
-        API Key 是调用 <code>/v1/chat/completions</code> 的凭据：每把可单独设额度
-        （token 上限，0=不限）与每分钟请求上限（0=不限）。顶部配置里的
-        <code>api_key</code> 仍是管理钥匙（不限额）。数据存 <code>data/apikeys.json</code>。
-      </div>
-      <table>
-        <thead><tr>
-          <th>名称</th><th>Key</th><th>状态</th><th>额度</th><th>请求</th><th>失败</th><th>限速</th><th>创建</th><th>操作</th>
-        </tr></thead>
-        <tbody id="apiKeyRows"><tr><td colspan="9" class="dim">加载中…</td></tr></tbody>
-      </table>
     </div>
   </section>
 
@@ -1242,13 +1246,25 @@ let loginProvider = '';
   }
 
   function renderCards(h, s) {
-    // 用户本轮要求：仪表盘"很乱"，只留两个核心数字 —— 账号总数 / 健康。
-    // 冷却中 / 已禁用 / 在途占满 / 粘性会话 / Redis / healthz 六张卡全部去掉：
-    // 它们要么是排障细节（在途/粘性/Redis），要么与"正在服务 · x/y 可用"
-    // 这句顶栏结论重复（/healthz、冷却、禁用都反映在 healthy 里）。
+    // 网关状态卡：核心运营读数（对标 one-api 管理台"渠道健康 + 汇总"）。
+    // 之前精简到 2 张后用户觉得太少 —— 这里加回排障/运营真正有用的维度：
+    // 冷却中/已禁用/在途 来自 /status 的每账号画像；累计请求/成功率来自
+    // /admin/stats（stats 数据在 renderStats 里单独渲染，这里只读缓存值）。
+    const accts = (s && s.accounts) || [];
+    const cooling = accts.filter(a => a.cooling).length;
+    const disabled = accts.filter(a => a.disabled).length;
+    const inflight = accts.reduce((n, a) => n + (a.in_flight || 0), 0);
+    const st = window._statsCache;
+    const reqTotal = st ? st.total : '—';
+    const reqRate = (st && st.total) ? Math.round((st.ok / st.total) * 100) + '%' : '—';
     const cards = [
       ['账号总数', s.total, ''],
       ['健康', s.healthy, s.healthy > 0 ? 'ok' : 'err'],
+      ['冷却中', cooling, cooling > 0 ? 'warn' : ''],
+      ['已禁用', disabled, disabled > 0 ? 'err' : ''],
+      ['在途请求', inflight, inflight > 0 ? 'warn' : ''],
+      ['累计请求', reqTotal, ''],
+      ['成功率', reqRate, (st && st.total) ? (st.ok / st.total >= 0.95 ? 'ok' : 'warn') : ''],
     ];
     $('cards').innerHTML = cards.map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
@@ -4512,6 +4528,13 @@ let loginProvider = '';
     let d;
     try { d = await admin('/admin/apikeys'); }
     catch { $('apiKeyRows').innerHTML = '<tr><td colspan="9" class="err">读取失败</td></tr>'; return; }
+    // 管理钥匙行：config.api_key 与普通 key 同屏（一个事实来源，与仪表盘一致）。
+    const ak = $('apiAdminKey');
+    if (ak) {
+      ak.innerHTML = d && d.admin_key
+        ? `管理钥匙：<code class="mono">${esc(d.admin_key)}</code>（config 里的 <code>api_key</code>，不限额不限速，勿泄露；完整值见「仪表盘 → API 接入信息」）`
+        : '未配置管理钥匙（config 里没有 api_key —— 请用下方新建的 key 调用）。';
+    }
     renderAPIKeys(d && d.keys ? d.keys : []);
   }
 
@@ -5774,6 +5797,9 @@ let loginProvider = '';
   const NODATA = '—';
 
   function renderStats(s) {
+    // 网关状态卡要读累计请求/成功率：存一份供 renderCards 使用
+    //（renderCards 在 refresh 里先于 renderStats 调用）。
+    window._statsCache = s;
     if (!s) return;
     // 窗口文案必须如实说明数据来源：统计改为聚合落盘历史后，
     // 不再是「进程内窗口」，而落盘不可用时会回落到内存 —— 两种情况不能混为一谈。
@@ -6720,46 +6746,68 @@ let multCatalogFailed = false;
     const host = $('statsTrend');
     if (!host) return;
     if (!list || !list.length) { host.innerHTML = '<div class="dim" style="font-size:12px">暂无趋势数据</div>'; return; }
-    const W = 900, H = 100, PAD = 4;
+    const W = 900, H = 92, PAD = 6;
     const maxTotal = Math.max(1, ...list.map(p => p.total));
     const rateOf = p => p.total ? Math.round(p.ok / p.total * 100) : null;
     const pts = list.map((p, i) => ({
       x: PAD + (W - PAD * 2) * i / Math.max(1, list.length - 1),
       y: H - PAD - (H - PAD * 2) * p.total / maxTotal,
-      total: p.total, rate: rateOf(p),
+      total: p.total, ok: p.ok, fail: p.fail, tokens: p.tokens, rate: rateOf(p),
       label: p.ts.slice(11, 16),           // HH:MM
       day: p.ts.slice(5, 10),              // MM-DD
     }));
     const line = (getY, cls) => pts.map((p, i) =>
       `${i ? 'L' : 'M'}${p.x.toFixed(1)},${getY(p).toFixed(1)}`).join(' ');
-    // 成功率线：0-100% 映射右轴
     const rateY = p => p.rate === null ? null : (H - PAD - (H - PAD * 2) * p.rate / 100);
     const totalPath = line(p => p.y, '');
     const ratePath = pts.filter(p => p.rate !== null).map((p, i) =>
       `${i ? 'L' : 'M'}${p.x.toFixed(1)},${rateY(p).toFixed(1)}`).join(' ');
-    // 面积填充（请求量）
     const areaPath = `${totalPath}L${pts[pts.length - 1].x.toFixed(1)},${H - PAD}L${pts[0].x.toFixed(1)},${H - PAD}Z`;
     const last = pts[pts.length - 1];
+    // 布局：摘要/图例放**容器顶部一行**（不覆盖折线）；x 轴时间靠 hover tooltip
+    // 提供，不再画在图上（避免与面积填充重叠）。
     host.innerHTML =
-      `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:110px;display:block" preserveAspectRatio="none">
-        <defs>
-          <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="var(--fg)" stop-opacity=".18"/>
-            <stop offset="100%" stop-color="var(--fg)" stop-opacity="0"/>
-          </linearGradient>
-        </defs>
-        <path d="${areaPath}" fill="url(#trendFill)"/>
-        <path d="${totalPath}" fill="none" stroke="#3fb950" stroke-width="1.6" opacity=".9"/>
-        ${ratePath ? `<path d="${ratePath}" fill="none" stroke="#58a6ff" stroke-width="1.4" opacity=".85"/>` : ''}
-        ${pts.map((p, i) => i % Math.max(1, Math.floor(list.length / 6)) === 0 || i === pts.length - 1
-          ? `<text x="${p.x}" y="${H - 2}" font-size="9" fill="var(--dim)" text-anchor="middle">${esc(p.label)}</text>` : '').join('')}
-        <circle cx="${last.x}" cy="${last.y}" r="2.6" fill="#3fb950"/>
-      </svg>
-      <div style="position:absolute;right:0;top:0;font-size:11px" class="dim">
-        请求 <span style="color:#3fb950">${esc(last.total)}</span>
-        ${last.rate !== null ? `· 成功率 <span style="color:#58a6ff">${last.rate}%</span>` : ''}
-        · 最新 ${esc(last.day || last.label)}
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;font-size:11px" class="dim">
+        <span>最近 24h 逐小时 · 请求量 <span style="color:#3fb950">●</span> 成功率 <span style="color:#58a6ff">●</span></span>
+        <span>最新 ${esc(last.day || '')} ${esc(last.label)} · 请求 <b style="color:var(--fg)">${esc(last.total)}</b> · 成功率 <b style="color:var(--fg)">${last.rate === null ? '—' : last.rate + '%'}</b></span>
+      </div>
+      <div style="position:relative">
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:88px;display:block" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--fg)" stop-opacity=".18"/>
+              <stop offset="100%" stop-color="var(--fg)" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <path d="${areaPath}" fill="url(#trendFill)"/>
+          <path d="${totalPath}" fill="none" stroke="#3fb950" stroke-width="1.6" opacity=".9"/>
+          ${ratePath ? `<path d="${ratePath}" fill="none" stroke="#58a6ff" stroke-width="1.4" opacity=".85"/>` : ''}
+          <circle cx="${last.x}" cy="${last.y}" r="2.6" fill="#3fb950"/>
+          <circle id="trendCursor" r="3.2" fill="none" stroke="#e3b341" stroke-width="1.6" style="display:none"/>
+        </svg>
+        <div id="trendTip" style="display:none;position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:11px;white-space:nowrap;z-index:5"></div>
       </div>`;
+    // hover：移动到最近数据点 → tooltip 显示该桶的请求/成功/失败/token，并高亮。
+    const svg = host.querySelector('svg');
+    const tip = host.querySelector('#trendTip');
+    const cur = host.querySelector('#trendCursor');
+    const toXY = (p) => [p.x, p.y];
+    svg.addEventListener('mousemove', ev => {
+      const rect = svg.getBoundingClientRect();
+      const x = (ev.clientX - rect.left) / rect.width * W;
+      let best = pts[0], bd = 1e9;
+      for (const p of pts) { const d = Math.abs(p.x - x); if (d < bd) { bd = d; best = p; } }
+      tip.style.display = 'block';
+      const tipX = (ev.clientX - rect.left);
+      tip.style.left = Math.min(Math.max(tipX - 40, 2), rect.width - 110) + 'px';
+      tip.style.top = '2px';
+      tip.innerHTML = `<b>${esc(best.day || '')} ${esc(best.label)}</b>` +
+        `：请求 ${best.total} · 成功 ${best.ok} · 失败 ${best.fail} · token ${best.tokens}`;
+      const [cx, cy] = toXY(best);
+      cur.setAttribute('cx', cx); cur.setAttribute('cy', cy);
+      cur.style.display = 'block';
+    });
+    svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; cur.style.display = 'none'; });
   }
 
   async function refresh() {
@@ -6792,6 +6840,9 @@ let multCatalogFailed = false;
     }
     setDot(h.healthy > 0 ? 'ok' : 'bad',
       (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
+    // 网关卡读累计请求/成功率：先拉 stats 填缓存（renderStats 内部写
+    // window._statsCache；它必须在 renderCards 之前执行，否则卡片恒 —）。
+    try { renderStats(await admin('/admin/stats')); } catch { /* 统计非关键 */ }
     renderCards(h, s);
     // 上游契约要**最先**取：renderAccounts 依赖它把账号归到上游，
     // 导航分组也依赖它。单独 try —— 拿不到 manifest 不该让账号表显示不出来
