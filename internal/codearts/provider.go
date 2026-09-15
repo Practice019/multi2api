@@ -135,9 +135,15 @@ type Provider struct {
 	// 每次刷新都注定失败。没有退避的话 runRefresh 每轮都命中
 	// NeedsRefresh（token 一直没更新 → 一直临近过期）→ 每分钟一次失败请求，
 	// 永不停歇。这里对失败账号挂退避：永久性凭证错误停 24h 等重新登录，
-	// 其余错误短退避 10 分钟；凭证文件被外部更新（重新登录写盘）时提前解除。
+	// 其余错误指数退避（2m→4m→…封顶 30m，带 ±20% 抖动，借鉴 LiteLLM）；
+	// 凭证文件被外部更新（重新登录写盘）时提前解除。
 	refreshHold   map[string]refreshHoldEntry
 	refreshHoldMu sync.Mutex
+
+	// onRefreshFailure / onRefreshSuccess 装配层注入的续期结果通知
+	//（Config.OnRefreshFailure / OnRefreshSuccess，通常接 pool 的失败计数/成功清零）。
+	onRefreshFailure func(uid string)
+	onRefreshSuccess func(uid string)
 }
 
 // refreshHoldEntry 一条续期退避记录。
@@ -147,6 +153,8 @@ type refreshHoldEntry struct {
 	// holdAt 进入退避的时刻 —— onRefreshHold 用它判断凭证文件是否"更新过"
 	//（文件 mtime 晚于 holdAt = 用户重新登录写入了新凭证 → 提前解除）。
 	holdAt time.Time
+	// fails 连续失败次数（指数退避的底数）。
+	fails int
 }
 
 // NewProvider 建一个 CodeArts Provider（契约测试用的无依赖构造）。
@@ -197,6 +205,13 @@ type Config struct {
 	// WelfareInterval 福利领取任务的扫描周期。<=0 不注册任务。
 	// 幂等（领过就 claimable=false），30 分钟粒度足够。
 	WelfareInterval time.Duration
+
+	// OnRefreshFailure / OnRefreshSuccess 后台凭证续期结果通知（装配层注入，
+	// 通常接 pool.NoteRefreshFailure / NoteSuccess：连续失败自动禁用，让死
+	// token 账号在账号池里可见「需重新登录」，而不是后台静默跳过 ——
+	// 借鉴 one-api/LiteLLM 的渠道禁用可见性）。nil = 不通知。
+	OnRefreshFailure func(uid string)
+	OnRefreshSuccess func(uid string)
 }
 
 // NewWithConfig 按配置建一个 CodeArts Provider。
@@ -205,14 +220,16 @@ func NewWithConfig(cfg Config) *Provider {
 		cfg.Client = New()
 	}
 	return &Provider{
-		client:          cfg.Client,
-		authDir:         cfg.AuthDir,
-		accounts:        cfg.Accounts,
-		adminEnv:        cfg.Admin,
-		login:           cfg.Login,
-		welfareEnabled:  cfg.WelfareEnabled,
-		welfareInterval: cfg.WelfareInterval,
-		refreshHold:     make(map[string]refreshHoldEntry),
+		client:           cfg.Client,
+		authDir:          cfg.AuthDir,
+		accounts:         cfg.Accounts,
+		adminEnv:         cfg.Admin,
+		login:            cfg.Login,
+		welfareEnabled:   cfg.WelfareEnabled,
+		welfareInterval:  cfg.WelfareInterval,
+		refreshHold:      make(map[string]refreshHoldEntry),
+		onRefreshFailure: cfg.OnRefreshFailure,
+		onRefreshSuccess: cfg.OnRefreshSuccess,
 	}
 }
 

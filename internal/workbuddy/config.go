@@ -109,6 +109,12 @@ type Config struct {
 	// <=0 不注册任务（仅请求路径惰性续期 + 手动按钮）。
 	RefreshInterval time.Duration
 
+	// OnRefreshFailure / OnRefreshSuccess 后台凭证续期结果通知（装配层注入，
+	// 通常接 pool.NoteRefreshFailure / NoteSuccess：连续失败自动禁用，让死
+	// token 账号在账号池里可见「需重新登录」）。nil = 不通知。
+	OnRefreshFailure func(uid string)
+	OnRefreshSuccess func(uid string)
+
 	// GrowthWatchInterval 成长中心扫描间隔。<=0 回落 10 分钟。
 	GrowthWatchInterval time.Duration
 	// 六个自动动作的初始开关。用 *bool 区分「未设置」与「显式 false」，
