@@ -25,10 +25,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -47,10 +49,22 @@ type Provider struct {
 	refreshInterval time.Duration
 	// checkinEnabled 是否注册每日签到任务。
 	checkinEnabled bool
+	// callbackPort 本机 OAuth 回调端口（见 callback.go）。
+	callbackPort string
+	// log 任务历史落点（签到/续期结果写这里，「今日签到」列才有数据）。
+	log *checkinlog.Log
+	// fallbackEnabled / queueThreshold / maxAttempts 排队降级（见 tiers.go）。
+	fallbackEnabled bool
+	queueThreshold  int64
+	maxAttempts     int
 
 	// loginOnce / loginCached 缓存 LoginFlow 实例（见 login.go）。
 	loginOnce   sync.Once
 	loginCached *loginFlow
+	// cbOnce / cbServer / cbErr 本机回调监听（见 callback.go）。
+	cbOnce   sync.Once
+	cbServer *http.Server
+	cbErr    error
 }
 
 // Config Provider 的可选依赖，全部可缺省。
@@ -66,6 +80,15 @@ type Config struct {
 	RefreshInterval time.Duration
 	// CheckinEnabled 是否注册每日签到任务（默认 true）。
 	CheckinEnabled bool
+	// CallbackPort 本机 OAuth 回调端口（默认 18080）。
+	CallbackPort string
+	// Log 任务历史落点（签到结果写这里，「今日签到」列才有数据）。
+	// 未注入则签到只执行不记历史（与 scheduler 的"静默丢弃"一致）。
+	Log *checkinlog.Log
+	// FallbackEnabled / QueueThreshold / MaxAttempts 排队检测自动降级（见 tiers.go）。
+	FallbackEnabled bool
+	QueueThreshold  int64
+	MaxAttempts     int
 }
 
 // NewProvider 契约测试用的无依赖构造。
@@ -92,6 +115,11 @@ func NewWithConfig(cfg Config) *Provider {
 		authDir:         cfg.AuthDir,
 		refreshInterval: cfg.RefreshInterval,
 		checkinEnabled:  checkin,
+		callbackPort:    cfg.CallbackPort,
+		log:             cfg.Log,
+		fallbackEnabled: cfg.FallbackEnabled,
+		queueThreshold:  cfg.QueueThreshold,
+		maxAttempts:     cfg.MaxAttempts,
 	}
 }
 
@@ -118,9 +146,14 @@ func (p *Provider) Caps() gateway.Capability {
 // # 为什么返回的是"转换后的 OpenAI SSE"
 //
 // 上游返回自定义 SOLO SSE，而出口层只认 OpenAI SSE（见 sse.go 的文件头）。
-// 所以这里把上游 body 包进一个管道：读上游 → ConvertSOLOToOpenAI 写 OpenAI
-// chunk → 出口层读到标准形状。非 2xx 时 body 原样上交（供分类器用），
-// 不转换 —— 它是一次性的错误体，不是 SSE。
+// 所以这里把上游 body 包进一个管道：读上游 → 转 OpenAI chunk → 出口层读到标准形状。
+//
+// # 排队自动降级（用户本轮要求）
+//
+// 转换循环里监听 `request_wait_in_queue`：排队位置超过阈值、且还没产出
+// 任何内容、且还有降级候选 → 放弃当前流、换同档/下一档模型重发（见
+// tiers.go 的 fallbackChain）。客户端只看到一个连续的 OpenAI 流。
+// 非 2xx 时 body 原样上交（供分类器用），不转换、不降级。
 func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byte) (gateway.ChatStream, error) {
 	a, err := authOf(cred)
 	if err != nil {
@@ -137,20 +170,72 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		return gateway.ChatStream{}, err
 	}
 	if status >= 400 {
-		// 非 2xx：上游错误体原样上交（分类器在出口层读它），不转换。
 		if rc != nil {
 			_ = rc.Close()
 		}
 		return gateway.ChatStream{Status: status, Body: io.NopCloser(strings.NewReader(string(respBody)))}, nil
 	}
-	// 2xx：转换 SOLO SSE → OpenAI SSE。
+	// 2xx：转换 SOLO SSE → OpenAI SSE（goroutine 内跑降级循环）。
 	pr, pw := io.Pipe()
-	go func() {
-		cerr := ConvertSOLOToOpenAI(rc, pw)
-		_ = rc.Close()
-		_ = pw.CloseWithError(cerr)
-	}()
+	go p.convertWithFallback(ctx, a, body, rc, pw)
 	return gateway.ChatStream{Status: status, Body: pr}, nil
+}
+
+// convertWithFallback 转换循环 + 排队降级（在 Chat 的 goroutine 里跑）。
+func (p *Provider) convertWithFallback(ctx context.Context, a *Auth, body []byte, rc io.ReadCloser, pw *io.PipeWriter) {
+	maxAttempts := p.maxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = defaultMaxAttempts
+	}
+	threshold := p.queueThreshold
+	if threshold <= 0 {
+		threshold = defaultQueueThreshold
+	}
+	chain := fallbackChain(modelOf(body), maxAttempts)
+	attempt := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		canRetry := p.fallbackEnabled && attempt+1 < len(chain)
+		queuedPos, cerr := convertSOLOWithQueue(rc, pw, threshold, canRetry)
+		if cerr != nil {
+			_ = rc.Close()
+			_ = pw.CloseWithError(cerr)
+			return
+		}
+		if queuedPos <= 0 {
+			// 正常结束（[DONE] 已写）。
+			_ = rc.Close()
+			_ = pw.Close()
+			return
+		}
+		// 排队超阈值 → 换下一个候选模型重发。
+		_ = rc.Close()
+		attempt++
+		next := chain[attempt]
+		log.Printf("trae: %s 排队位置 %d 超过阈值 %d，降级到 %s", chain[attempt-1], queuedPos, threshold, next)
+		nrc, nstatus, nresp, err := p.client.ChatStream(ctx, a, rewriteModelBody(body, next))
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		if nstatus >= 400 {
+			// 重试也非 2xx：客户端已拿到 200，只能写流内错误信封 + [DONE]。
+			_ = nrc.Close()
+			_ = writeOpenAIChunk(pw, map[string]any{
+				"error": map[string]any{
+					"code":    fmt.Sprintf("%d", nstatus),
+					"message": truncate(string(nresp), 200),
+				},
+			})
+			_, _ = io.WriteString(pw, "data: [DONE]\n\n")
+			_ = pw.Close()
+			return
+		}
+		rc = nrc
+	}
 }
 
 // staticModels SOLO 免费模型静态快照（trae-solo-unlock 实测清单 + glm-5.2）。

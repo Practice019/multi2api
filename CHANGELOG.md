@@ -24,10 +24,16 @@
 - **模型目录**：实时拉 `get_detail_param`（config_name 即模型 ID），失败回落
   13+1 个已知 SOLO 免费模型的静态快照（trae-solo-unlock 实测清单 + glm-5.2）。
 - **页内添加账号**：TRAE 浏览器 OAuth（`www.trae.cn/authorization` + 127.0.0.1 回调）
-  完整搬进控制台 —— 「＋ 添加账号」打开登录表单页：生成登录链接 → 浏览器登录 →
-  粘贴回调链接 → ExchangeToken 换 token（无 refreshToken 时用 userJwt.Token 兜底）→
-  GetUserInfo 拿身份 → 落盘并池；每次登录换新 machine/device id。
-- 配置段 `trae.{enabled,auth_dir,refresh_interval_seconds,checkin_enabled,pool_accounts}`。
+  完整搬进控制台 —— 「＋ 添加账号」返回**真实 TRAE 登录页**，网关在
+  `127.0.0.1:18080/authorize`（可配 `trae.oauth_callback_port`）**自动接收登录回跳**，
+  全程零手动步骤（无需复制链接/粘贴回调）；每次登录换新 machine/device id。
+- **排队检测 + 模型分档自动降级**：监听上游 `request_wait_in_queue` 事件，
+  排队位置超过阈值（默认 300）且尚未出内容时，自动换同档其它模型 → 下一档 → 兜底
+  `glm-5`（`trae.fallback_enabled / queue_threshold / max_attempts` 可配）；
+  已出内容后不再切换（避免客户端看到两段不连续回复）。
+- **签到写历史**：「今日签到」列修复 —— trae 签到（手动/定时/批量）现在写
+  checkinlog，账号表正确显示「已签到/失败/跳过」。
+- 配置段 `trae.{enabled,auth_dir,refresh_interval_seconds,checkin_enabled,pool_accounts,oauth_callback_port,fallback_enabled,queue_threshold,max_attempts}`。
 
 ### 说明
 

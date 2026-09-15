@@ -40,7 +40,11 @@
     "auth_dir": "./auths/trae",
     "refresh_interval_seconds": 1800,
     "checkin_enabled": true,
-    "pool_accounts": true
+    "pool_accounts": true,
+    "oauth_callback_port": "18080",
+    "fallback_enabled": true,
+    "queue_threshold": 300,
+    "max_attempts": 3
   },
   "loomy": {
     "enabled": false,

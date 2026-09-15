@@ -14,10 +14,24 @@ package trae
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
 )
+
+// shortErr 把错误压缩成一行短句（表格 detail 列用）。
+func shortErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.TrimSpace(err.Error())
+	if len(s) > 60 {
+		return s[:60]
+	}
+	return s
+}
 
 // 编译期断言：Provider 实现它声称支持的全部扩展点。
 var (
@@ -251,7 +265,29 @@ func (p *Provider) Jobs() []gateway.Job {
 // 已签就跳过 —— 幂等且跨重启安全（比"每天 9 点整"更稳）。
 const checkinInterval = 30 * time.Minute
 
-// runCheckin 一趟签到：扫凭证，逐个查状态、未签则领。
+// recordCheckin 写一条签到历史（「今日签到」列的数据源）。
+//
+// # 为什么必须有它（用户报的小 bug）
+//
+// 管理台账号表的「今日签到」列读的是 checkinlog 的 KindCheckin 记录
+// （internal/admin/admin.go），不是实时去上游查。此前 trae 签到后不写
+// 历史，于是今天已经签到也不显示 —— 这就是"签到按钮点了、列还是空"。
+func (p *Provider) recordCheckin(uid, status, detail string, credits int64, trigger string) {
+	if p == nil || p.log == nil {
+		return
+	}
+	p.log.Append(checkinlog.Record{
+		At:      time.Now(),
+		UID:     checkinlog.NormalizeUID(uid),
+		Kind:    checkinlog.KindCheckin,
+		Status:  status,
+		Detail:  detail,
+		Credits: credits,
+		Trigger: trigger,
+	})
+}
+
+// runCheckin 一趟签到：扫凭证，逐个查状态、未签则领；结果写历史。
 func (p *Provider) runCheckin(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -267,19 +303,23 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 		checkedIn, credits, enable, serr := p.client.CheckinStatus(ctx, a)
 		if serr != nil {
 			log.Printf("trae: 签到状态查询失败 uid=%s: %v", shortUID(a.UID), serr)
+			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(serr), 0, "sched")
 			continue
 		}
 		if !enable {
 			continue // 上游关闭了签到
 		}
 		if checkedIn {
+			p.recordCheckin(a.UID, checkinlog.StatusAlready, "今天已签到", credits, "sched")
 			continue // 今天已签
 		}
 		if cerr := p.client.CheckinClaim(ctx, a); cerr != nil {
 			log.Printf("trae: 签到失败 uid=%s: %v", shortUID(a.UID), cerr)
+			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(cerr), 0, "sched")
 			continue
 		}
 		log.Printf("trae: 签到成功 uid=%s credits=%d", shortUID(a.UID), credits)
+		p.recordCheckin(a.UID, checkinlog.StatusOK, "", credits, "sched")
 	}
 	return nil
 }

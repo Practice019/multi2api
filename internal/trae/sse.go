@@ -38,6 +38,7 @@ type soloEvent struct {
 	FinishReason string
 	ErrorCode    int64
 	ErrorMessage string
+	Position     int64 // 排队事件（request_wait_in_queue）的排队位置
 }
 
 // parseSOLOLine 解析一条事件（eventName 为 event 行值，dataLine 为 data 行值）。
@@ -73,6 +74,15 @@ func parseSOLOLine(eventName, dataLine string) (*soloEvent, error) {
 		}
 		if v, ok := raw["message"].(string); ok {
 			ev.ErrorMessage = v
+		}
+	case "request_wait_in_queue":
+		// 排队位置：data 可能是 {"position":N} 或 {"data":{"position":N}}（trae-local 实测两种都有）
+		if v, ok := raw["position"].(float64); ok {
+			ev.Position = int64(v)
+		} else if d, ok := raw["data"].(map[string]any); ok {
+			if v, ok := d["position"].(float64); ok {
+				ev.Position = int64(v)
+			}
 		}
 	}
 	return ev, nil
@@ -225,4 +235,115 @@ type SOLOStreamError struct {
 
 func (e *SOLOStreamError) Error() string {
 	return fmt.Sprintf("trae solo error code=%d msg=%s", e.Code, e.Msg)
+}
+
+// convertSOLOWithQueue 同 ConvertSOLOToOpenAI，但**监听排队事件**。
+//
+// 返回语义：
+//
+//	queuedPos > 0 → 排队位置超过 threshold、且还没产出任何内容、
+//	               且 canRetry —— 放弃当前流，调用方换模型重发。
+//	queuedPos == 0 → 正常结束（[DONE] 已写）。
+//	err != nil     → 转换失败（写侧错误）。
+//
+// ⚠ 已产出内容后（emitted=true）即使再来排队事件也不放弃 ——
+// 客户端已经看到部分回复，换模型会让它看到两段不连续的内容。
+func convertSOLOWithQueue(r io.Reader, w io.Writer, threshold int64, canRetry bool) (int64, error) {
+	br := bufio.NewReaderSize(r, 64*1024)
+	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	created := time.Now().Unix()
+
+	base := func() map[string]any {
+		return map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   "",
+		}
+	}
+	writeDelta := func(delta map[string]any, finish string) error {
+		chunk := base()
+		chunk["choices"] = []any{
+			map[string]any{"index": 0, "delta": delta},
+		}
+		if finish != "" {
+			chunk["choices"].([]any)[0].(map[string]any)["finish_reason"] = finish
+		}
+		return writeOpenAIChunk(w, chunk)
+	}
+
+	st := &sseState{}
+	var pendingUsage map[string]any
+	emitted := false
+	upstreamErr := error(nil)
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		if ev := scanLine(st, strings.TrimRight(line, "\r\n")); ev != nil {
+			switch ev.Event {
+			case "output":
+				delta := map[string]any{}
+				if ev.Response != "" {
+					delta["content"] = ev.Response
+				}
+				if ev.Reasoning != "" {
+					delta["reasoning_content"] = ev.Reasoning
+				}
+				if len(ev.ToolCalls) > 0 && string(ev.ToolCalls) != "null" {
+					delta["tool_calls"] = ev.ToolCalls
+				}
+				if len(delta) > 0 {
+					if werr := writeDelta(delta, ""); werr != nil {
+						return 0, werr
+					}
+					emitted = true
+				}
+			case "token_usage":
+				pendingUsage = ev.Usage
+			case "request_wait_in_queue":
+				// 排队位置超阈值 + 还没出内容 + 允许重试 → 放弃当前流。
+				if ev.Position > threshold && !emitted && canRetry {
+					return ev.Position, nil
+				}
+			case "done":
+				finish := ev.FinishReason
+				if finish == "" {
+					finish = "stop"
+				}
+				chunk := base()
+				chunk["choices"] = []any{
+					map[string]any{"index": 0, "delta": map[string]any{}},
+				}
+				if pendingUsage != nil {
+					chunk["usage"] = pendingUsage
+				}
+				chunk["choices"].([]any)[0].(map[string]any)["finish_reason"] = finish
+				if werr := writeOpenAIChunk(w, chunk); werr != nil {
+					return 0, werr
+				}
+				emitted = true
+			case "error":
+				upstreamErr = &SOLOStreamError{Code: ev.ErrorCode, Msg: ev.ErrorMessage}
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	if upstreamErr != nil {
+		if werr := writeOpenAIChunk(w, map[string]any{
+			"error": map[string]any{
+				"code":    fmt.Sprintf("%d", upstreamErr.(*SOLOStreamError).Code),
+				"message": upstreamErr.(*SOLOStreamError).Msg,
+			},
+		}); werr != nil {
+			return 0, werr
+		}
+	}
+	if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr != nil {
+		return 0, werr
+	}
+	return 0, nil
 }
