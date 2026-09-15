@@ -103,6 +103,32 @@ func PrepareBody(src []byte) []byte {
 	return out
 }
 
+// extractModel 取请求体里的 model 字段（缺失返回空串）。
+func extractModel(body []byte) string {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	m, _ := obj["model"].(string)
+	return strings.TrimSpace(m)
+}
+
+// rewriteModelBody 换一个模型重发（排队降级用）：只改 model + config_name，
+// 其余字段原样。body 解析失败时原样返回（调用方保持原模型）。
+func rewriteModelBody(body []byte, model string) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	obj["model"] = model
+	obj["config_name"] = model
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。
 func normalizeToolChoice(obj map[string]any) {
 	suppress := func() {

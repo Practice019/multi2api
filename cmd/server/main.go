@@ -407,7 +407,6 @@ func main() {
 	// ---- 第四个上游：TRAE SOLO ----
 	//
 	// 注册顺序仍然 workbuddy 在前 → "裸模型名走谁"不变。
-	// trae 只有注册 + 并池两件事（凭证形态稳定：JWT + refreshToken）。
 	var tr *trae.Provider
 	if cfg.TraeEnabled {
 		tr = trae.NewWithConfig(trae.Config{
@@ -417,11 +416,17 @@ func main() {
 			OAuthBase:       cfg.TraeOAuthBase,
 			RefreshInterval: cfg.TraeRefreshInterval,
 			CheckinEnabled:  cfg.TraeCheckinEnabled,
+			CallbackPort:    cfg.TraeOAuthCallbackPort,
+			Log:             checkinLog,
+			FallbackEnabled: cfg.TraeFallbackEnabled,
+			QueueThreshold:  cfg.TraeQueueThreshold,
+			MaxAttempts:     cfg.TraeMaxAttempts,
 		})
 		if err := registry.Register(tr); err != nil {
 			log.Fatalf("注册 TRAE 上游失败: %v", err)
 		}
-		log.Printf("trae: 已启用（凭证目录 %s，续期间隔 %v）", cfg.TraeAuthDir, cfg.TraeRefreshInterval)
+		log.Printf("trae: 已启用（凭证目录 %s，续期间隔 %v，回调端口 %s，排队降级=%v）",
+			cfg.TraeAuthDir, cfg.TraeRefreshInterval, cfg.TraeOAuthCallbackPort, cfg.TraeFallbackEnabled)
 	} else {
 		log.Printf("trae: 未启用（config 里 trae.enabled 缺省为 false）")
 		if list, err := trae.LoadDir(cfg.TraeAuthDir); err == nil && len(list) > 0 {

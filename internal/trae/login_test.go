@@ -4,14 +4,28 @@ package trae
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
 	"workbuddy2api/internal/gateway"
 )
+
+// freePort 找一个可用的本机端口（登录测试各用自己的回调端口，避免互抢 18080）。
+func freePort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return strconv.Itoa(port)
+}
 
 // TestBuildLoginURL 登录 URL 的参数必须齐全且机器/设备 id 前后一致。
 func TestBuildLoginURL(t *testing.T) {
@@ -96,7 +110,7 @@ func fakeOAuthServer(t *testing.T) *httptest.Server {
 // TestLoginFlowEndToEnd Start → 生成链接 → finish（回调换 token）→ Poll。
 func TestLoginFlowEndToEnd(t *testing.T) {
 	oauth := fakeOAuthServer(t)
-	p := NewWithConfig(Config{Client: NewWithBase(oauth.URL)})
+	p := NewWithConfig(Config{Client: NewWithBase(oauth.URL), CallbackPort: freePort(t)})
 	flow, ok := p.LoginFlow()
 	if !ok {
 		t.Fatal("LoginFlow 必须可用")
@@ -109,8 +123,15 @@ func TestLoginFlowEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state == "" || !strings.Contains(authURL, "state=") {
-		t.Fatalf("Start 回执异常: state=%q authURL=%q", state, authURL)
+	if state == "" {
+		t.Fatalf("Start 回执异常: state 为空 authURL=%q", authURL)
+	}
+	// 对齐其它上游：authURL 是**真实 TRAE 登录页**（不是网关表单页）。
+	if !strings.Contains(authURL, "www.trae.cn/authorization") {
+		t.Errorf("authURL 应是 TRAE 官方登录页: %s", authURL)
+	}
+	if !strings.Contains(authURL, "machine_id=") || !strings.Contains(authURL, "device_id=") {
+		t.Errorf("authURL 应带 machine/device id: %s", authURL)
 	}
 
 	// 未完成前 Poll 应 pending。
@@ -118,20 +139,10 @@ func TestLoginFlowEndToEnd(t *testing.T) {
 		t.Fatalf("未完成时应 pending，得到 %v", err)
 	}
 
-	// 生成登录链接（假上游的 client 已指向 fake，链接本身用默认 host）。
-	f, _ := p.LoginFlow()
-	u, err := f.(*loginFlow).loginURL(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(u, "www.trae.cn/authorization") {
-		t.Errorf("登录链接异常: %s", u)
-	}
-
 	// 用回调链接完成登录（refreshToken 路径 → ExchangeToken → GetUserInfo）。
 	cb := "http://127.0.0.1:18080/authorize?refreshToken=rt-cb&" +
 		"userInfo=" + url.QueryEscape(`{"UserID":"uid-cb","ScreenName":"cb-nick"}`)
-	if _, err := f.(*loginFlow).finish(state, cb); err != nil {
+	if _, err := flow.(*loginFlow).finish(state, cb); err != nil {
 		t.Fatal(err)
 	}
 
@@ -176,7 +187,7 @@ func TestLoginFlowNoRefreshToken(t *testing.T) {
 	oauth := fakeOAuthServer(t)
 	// 假上游只回 GetUserInfo 正常；如果走了 ExchangeToken，Token 会被换掉，
 	// 这里断言最后 AccessToken 仍是回调里的 at-only —— 证明没走 ExchangeToken。
-	p := NewWithConfig(Config{Client: NewWithBase(oauth.URL)})
+	p := NewWithConfig(Config{Client: NewWithBase(oauth.URL), CallbackPort: freePort(t)})
 	f, _ := p.LoginFlow()
 	state, _, err := f.Start()
 	if err != nil {
@@ -200,7 +211,7 @@ func TestLoginFlowNoRefreshToken(t *testing.T) {
 // TestLoginFlowFinishTwice 重复 finish 要报错。
 func TestLoginFlowFinishTwice(t *testing.T) {
 	oauth := fakeOAuthServer(t)
-	p := NewWithConfig(Config{Client: NewWithBase(oauth.URL)})
+	p := NewWithConfig(Config{Client: NewWithBase(oauth.URL), CallbackPort: freePort(t)})
 	f, _ := p.LoginFlow()
 	state, _, err := f.Start()
 	if err != nil {

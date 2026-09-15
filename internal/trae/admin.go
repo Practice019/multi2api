@@ -1,14 +1,14 @@
 // admin.go TRAE 的管理端点（gateway.AdminExt 实现）。
 //
-// 端点全部 Hidden：它们不是面板入口，由账号池行内动作、顶部按钮与登录表单页调用。
+// 端点全部 Hidden：它们不是面板入口，由账号池行内动作与顶部按钮调用。
 //
-//	GET  /admin/trae/login             登录表单页（LoginFlow 的 authURL）
-//	POST /admin/trae/login/url         表单页第 1 步：生成登录链接
-//	POST /admin/trae/login/finish      表单页第 2 步：回调链接换 token
 //	POST /admin/trae/checkin           单账号签到（DailyAction OneURL）
 //	POST /admin/trae/checkin/all       全量签到（DailyAction AllURL）
 //	POST /admin/trae/credits           单账号额度（行内「额度」按钮的探测回执）
 //	GET  /admin/trae/models            实时模型目录预览
+//
+// 登录不需要管理端点：authURL 直接是 TRAE 官方登录页，回调由本机监听
+// （127.0.0.1:18080/authorize）自动接收，见 callback.go。
 package trae
 
 import (
@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -32,32 +33,8 @@ const (
 //
 // ⚠ CapCheckin / CapQuotaProbe 都在 gateway.unverifiableCaps 里，
 // 声明它们就必须有非空的路由（契约的 probeCapabilities 检查）。
-//
-// 登录页 GET 不挂 Capability —— 它由 LoginFlow 的 authURL 直接引用，
-// 前端不会把它当面板渲染（与 loomy 的登录页同一条）。
 func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 	return []gateway.AdminRoute{
-		{
-			Method:  http.MethodGet,
-			Path:    loginPagePath,
-			Handler: p.handleLoginPage,
-			Title:   "登录（表单页）",
-			Hidden:  true,
-		},
-		{
-			Method:  http.MethodPost,
-			Path:    loginURLPath,
-			Handler: p.handleLoginURL,
-			Title:   "登录（生成链接）",
-			Hidden:  true,
-		},
-		{
-			Method:  http.MethodPost,
-			Path:    loginFinishPath,
-			Handler: p.handleLoginFinish,
-			Title:   "登录（回调换 token）",
-			Hidden:  true,
-		},
 		{
 			Method:     http.MethodPost,
 			Path:       checkinPath,
@@ -130,7 +107,7 @@ func (p *Provider) accounts() []accountRef {
 	return out
 }
 
-// handleCheckin POST /admin/trae/checkin —— 单账号签到。
+// handleCheckin POST /admin/trae/checkin —— 单账号签到（结果写历史）。
 func (p *Provider) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UID string `json:"uid"`
@@ -145,24 +122,28 @@ func (p *Provider) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		checkedIn, credits, _, err := p.client.CheckinStatus(ctx, a.Auth)
 		if err != nil {
+			p.recordCheckin(uid, checkinlog.StatusFail, shortErr(err), 0, "manual")
 			writeTraeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		if checkedIn {
+			p.recordCheckin(uid, checkinlog.StatusAlready, "今天已签到", credits, "manual")
 			writeTraeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "already", "credits": credits})
 			return
 		}
 		if err := p.client.CheckinClaim(ctx, a.Auth); err != nil {
+			p.recordCheckin(uid, checkinlog.StatusFail, shortErr(err), 0, "manual")
 			writeTraeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		p.recordCheckin(uid, checkinlog.StatusOK, "", credits, "manual")
 		writeTraeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "ok", "credits": credits})
 		return
 	}
 	writeTraeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这个 trae 账号: " + uid})
 }
 
-// handleCheckinAll POST /admin/trae/checkin/all —— 全量签到。
+// handleCheckinAll POST /admin/trae/checkin/all —— 全量签到（结果写历史）。
 func (p *Provider) handleCheckinAll(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 2*time.Minute)
 	defer cancel()
@@ -173,19 +154,23 @@ func (p *Provider) handleCheckinAll(w http.ResponseWriter, r *http.Request) {
 		checkedIn, credits, _, err := p.client.CheckinStatus(ctx, a.Auth)
 		if err != nil {
 			res["status"] = "fail"
-			res["error"] = err.Error()
+			res["error"] = shortErr(err)
+			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(err), 0, "manual-all")
 			failed++
 		} else if checkedIn {
 			res["status"] = "already"
 			res["credits"] = credits
+			p.recordCheckin(a.UID, checkinlog.StatusAlready, "今天已签到", credits, "manual-all")
 			already++
 		} else if cerr := p.client.CheckinClaim(ctx, a.Auth); cerr != nil {
 			res["status"] = "fail"
-			res["error"] = cerr.Error()
+			res["error"] = shortErr(cerr)
+			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(cerr), 0, "manual-all")
 			failed++
 		} else {
 			res["status"] = "ok"
 			res["credits"] = credits
+			p.recordCheckin(a.UID, checkinlog.StatusOK, "", credits, "manual-all")
 			okN++
 		}
 		results = append(results, res)

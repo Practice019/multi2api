@@ -454,6 +454,16 @@ type Config struct {
 		CheckinEnabled *bool `json:"checkin_enabled"`
 		// PoolAccounts 是否把 trae 账号并入核心账号池（默认 true）。
 		PoolAccounts *bool `json:"pool_accounts"`
+		// OAuthCallbackPort 本机 OAuth 回调端口（默认 18080）。
+		// TRAE 登录页把回调写死在 127.0.0.1:<port>/authorize，网关在这里监听、
+		// 自动接收登录回跳（无需手动复制粘贴，见 internal/trae/callback.go）。
+		OAuthCallbackPort string `json:"oauth_callback_port"`
+		// FallbackEnabled 排队自动降级总开关（默认 true）。
+		FallbackEnabled *bool `json:"fallback_enabled"`
+		// QueueThreshold 排队位置超过它就换模型（默认 300，trae-local 实测口径）。
+		QueueThreshold int64 `json:"queue_threshold"`
+		// MaxAttempts 一次请求最多尝试的模型数（含原模型，默认 3）。
+		MaxAttempts int `json:"max_attempts"`
 	} `json:"trae"`
 
 	// 解析后
@@ -534,14 +544,18 @@ type Config struct {
 	LoomyLoginMode string `json:"-"`
 
 	// Trae 解析后（供 main 直接取用）。
-	TraeEnabled         bool          `json:"-"`
-	TraeAuthDir         string        `json:"-"`
-	TraeAgentBase       string        `json:"-"`
-	TraeUgBase          string        `json:"-"`
-	TraeOAuthBase       string        `json:"-"`
-	TraeRefreshInterval time.Duration `json:"-"`
-	TraeCheckinEnabled  bool          `json:"-"`
-	TraePoolAccounts    bool          `json:"-"`
+	TraeEnabled           bool          `json:"-"`
+	TraeAuthDir           string        `json:"-"`
+	TraeAgentBase         string        `json:"-"`
+	TraeUgBase            string        `json:"-"`
+	TraeOAuthBase         string        `json:"-"`
+	TraeRefreshInterval   time.Duration `json:"-"`
+	TraeCheckinEnabled    bool          `json:"-"`
+	TraePoolAccounts      bool          `json:"-"`
+	TraeOAuthCallbackPort string        `json:"-"`
+	TraeFallbackEnabled   bool          `json:"-"`
+	TraeQueueThreshold    int64         `json:"-"`
+	TraeMaxAttempts       int           `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -943,6 +957,21 @@ func (c *Config) normalize() error {
 	}
 	c.TraeCheckinEnabled = boolOr(c.Trae.CheckinEnabled, true)
 	c.TraePoolAccounts = c.TraeEnabled && boolOr(c.Trae.PoolAccounts, true)
+	// 回调端口缺省 18080（与 traework2api login.sh / trae-api-proxy 一致）。
+	c.TraeOAuthCallbackPort = strings.TrimSpace(c.Trae.OAuthCallbackPort)
+	if c.TraeOAuthCallbackPort == "" {
+		c.TraeOAuthCallbackPort = "18080"
+	}
+	// 排队降级：开关缺省开，阈值 300，最多尝试 3 个模型。
+	c.TraeFallbackEnabled = boolOr(c.Trae.FallbackEnabled, true)
+	c.TraeQueueThreshold = c.Trae.QueueThreshold
+	if c.TraeQueueThreshold <= 0 {
+		c.TraeQueueThreshold = 300
+	}
+	c.TraeMaxAttempts = c.Trae.MaxAttempts
+	if c.TraeMaxAttempts <= 0 {
+		c.TraeMaxAttempts = 3
+	}
 	return nil
 }
 
