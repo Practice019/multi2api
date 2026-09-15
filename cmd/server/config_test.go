@@ -834,3 +834,26 @@ func TestTraeDefaults(t *testing.T) {
 		t.Error("段缺席时不应启用 trae")
 	}
 }
+
+// TestPoolHealthCheckDefaults 主动健康检查配置：默认 600s，0 = 关闭。
+func TestPoolHealthCheckDefaults(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "a.json")
+	os.WriteFile(fp, []byte(`{}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.HealthCheckIntervalSeconds != 600 {
+		t.Errorf("缺省 health_check_interval_seconds = %d，want 600", c.Pool.HealthCheckIntervalSeconds)
+	}
+	fp2 := filepath.Join(dir, "b.json")
+	os.WriteFile(fp2, []byte(`{"pool":{"health_check_interval_seconds":0}}`), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Pool.HealthCheckIntervalSeconds != 0 {
+		t.Errorf("显式 0 应保持 0（关闭主动探测），得到 %d", c2.Pool.HealthCheckIntervalSeconds)
+	}
+}

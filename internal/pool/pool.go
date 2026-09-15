@@ -152,6 +152,10 @@ type entry struct {
 	fails        int       // 连续失败计数（熔断用，唯一权威）
 	retryCount   int       // 已熔断次数（指数退避的指数）
 
+	// refreshFails 凭证续期连续失败计数（A2 移植，见 health.go 的 NoteRefreshFailure）。
+	// 成功清零；连续失败达上限 → 禁用（refresh token 已死）。
+	refreshFails int
+
 	// softStreak / softRateModel 为软限流（429）的指数退避状态（**持久化**，见 stateAccount）。
 	//
 	// 与熔断器是**两条并行的升级线**，计数器独立、互不污染：
@@ -1440,7 +1444,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 
 // recordBreakerFailureLocked 累计一次熔断失败；达到阈值则按指数退避熔断。
 // 熔断与冷却（until）解耦：冷却按错误类别给固定时长，熔断则对"反复失败"逐次加长封禁。
-// 调用方必须已持有 p.mu。
+// 调用方必须已持有 p.mu。时间窗衰减已在 NoteError 里做（见其注释）。
 func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.fails++
 	if e.fails < p.breakerThreshold {
@@ -1627,6 +1631,12 @@ func (p *Pool) NoteError(uid string) {
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.errTotal++
+		// A2 移植：错误计数按时间窗衰减 —— 用**上一次**错误时间判断
+		//（刚设的 lastErr 不能拿来自己跟自己比）。窗口外的失败先把计数清零，
+		// 只有窗口内的**突发**失败才累计到熔断阈值。
+		if breakerFailureWindow > 0 && time.Since(e.lastErr) > breakerFailureWindow {
+			e.fails = 0
+		}
 		e.lastErr = time.Now()
 		p.recordBreakerFailureLocked(e)
 		p.dirty.Store(true)
@@ -1652,6 +1662,8 @@ func (p *Pool) NoteSuccess(uid string) {
 		// 这是"瞬时抖动"能自愈的关键 —— 不清的话它会把抖动一路攒到阈值，
 		// 三次跨天的无关抖动叠加起来就误禁了一个健康的号。
 		e.sessionDeadStreak = 0
+		// 凭证续期失败计数同样清零（A2 移植，见 health.go）：一次成功说明 token 又活了。
+		e.refreshFails = 0
 		p.dirty.Store(true)
 	}
 }

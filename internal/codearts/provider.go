@@ -407,6 +407,20 @@ func authOf(cred gateway.Credential) (*Auth, error) {
 	}
 }
 
+// ProbeHealth 探测一份凭证是否健康可用（gateway.HealthProbeExt，A2 移植）。
+//
+// 用现成的 Client.Verify（CallerIdentity 校验）—— 最便宜且真实校验 STS 凭证。
+func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) error {
+	a, err := authOf(cred)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return p.client.Verify(a)
+}
+
 // 编译期断言：Provider 实现核心契约与 AdminExt 扩展点。
 //
 // 不实现会在这里编译失败，而不是等到运行时"路由神秘地没挂上"。

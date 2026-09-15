@@ -318,6 +318,21 @@ func clampInt64(v int64) int {
 	return int(v)
 }
 
+// ProbeHealth 探测一份凭证是否健康可用（gateway.HealthProbeExt，A2 移植）。
+//
+// 用 FetchModels —— 便宜、且真实带出鉴权头，401/会话失效都会在这里暴露。
+func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) error {
+	a, err := authOf(cred)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err = p.client.FetchModels(a)
+	return err
+}
+
 // authOf 从 Credential 里取出 workbuddy 的凭证结构。
 //
 // Secret 是 any（各上游凭证结构不同），所以必须类型断言。

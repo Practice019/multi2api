@@ -374,6 +374,18 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 // 过滤是安全的：它只是不显示，请求仍然能发（上游的错误会如实返回），
 // 而且上游一旦真的开放，实时目录会把它带回来（filterUnavailable 只按
 // 静态表里的 Unavailable 标记过滤，不按 ID 白名单）。
+func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) error {
+	a, err := authOf(cred)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, err = p.client.ModelList(ctx, a)
+	return err
+}
+
 func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gateway.ModelInfo, error) {
 	if _, err := authOf(cred); err != nil {
 		return nil, err

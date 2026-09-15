@@ -81,6 +81,22 @@ func New(cfg Config) *Scheduler {
 	return s
 }
 
+// AddJob 注册一条**核心自带**的任务（如账号池健康检查）。
+//
+// # 为什么需要它（A2 移植的落地）
+//
+// Discover 只收各上游通过 JobExt 自报的任务；而账号池健康检查是**跨上游**
+// 的稳定性机制（探测冷却中的账号并提前恢复），不属于任何单个上游 ——
+// 它由装配层（cmd/server）注册，providerID 传 "core"（仅用于日志）。
+//
+// 在 New 之后、Run 之前调用：任务清单是动态的，runDue 每轮都会重读。
+func (s *Scheduler) AddJob(providerID string, job gateway.Job) bool {
+	if s == nil || s.jobs == nil {
+		return false
+	}
+	return s.jobs.add(providerID, job)
+}
+
 // nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
 //
 // 空 hours 返回零时间（该槽位不产生唤醒点）。now 恰好落在整点上时**滚到明天**：
