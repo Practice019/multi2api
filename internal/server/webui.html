@@ -515,13 +515,12 @@
   <nav class="sidebar" id="nav"><!-- 导航项由脚本按 .content > section 的 DOM 顺序生成 --></nav>
   <div class="content" id="content">
   <!-- 仪表盘：网关状态 / 调用统计 / API 接入信息 三段合成一页。
-       三段各有独立标题（h3.boardsec）与独立控制区，但共用同一个「每 5s 刷新」开关 ——
-       原先三页各有一套刷新语义，既重复又容易只刷一半，这里收敛成一处。
+       三段各有独立标题（h3.boardsec）与独立控制区；数值刷新统一走 30s
+       无感轮询（额度/状态/统计/趋势/API key），整页「立即刷新」手动触发。
        导航标签取 h2 的首个文本节点，即「仪表盘」。 -->
   <section data-key="dashboard">
     <h2>仪表盘
       <span class="spacer"></span>
-      <label class="tog"><input id="auto" type="checkbox"> 每 5s 刷新</label>
       <button id="refresh" style="padding:3px 10px;font-size:12px">立即刷新</button>
     </h2>
 
@@ -584,7 +583,8 @@
         （token 上限，0=不限）与每分钟请求上限（0=不限）。数据存 <code>data/apikeys.json</code>。
       </div>
       <!-- 管理钥匙（config.api_key）与普通 key 同屏显示，与仪表盘「API 接入信息」统一：
-           一把钥匙只有一个事实来源，不该在仪表盘看到、在管理页却"没有"。 -->
+           一把钥匙只有一个事实来源，不该在仪表盘看到、在管理页却"没有"。
+           提供「轮换」按钮：生成新钥匙写回 config 并立即生效（旧钥匙作废）。 -->
       <div id="apiAdminKey" class="dim" style="font-size:12px;margin-bottom:10px"></div>
       <table>
         <thead><tr>
@@ -954,7 +954,6 @@
   const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY_SENTINEL__')
     ? window.__WB2API_KEY__ : '';
   let KEY = '';
-  let timer = null;
   let models = [];
   // 管理台状态
   let share = [];          // 最近一次 /admin/accounts 的账号视图（操作按钮按 uid 回查）
@@ -4532,10 +4531,30 @@ let loginProvider = '';
     const ak = $('apiAdminKey');
     if (ak) {
       ak.innerHTML = d && d.admin_key
-        ? `管理钥匙：<code class="mono">${esc(d.admin_key)}</code>（config 里的 <code>api_key</code>，不限额不限速，勿泄露；完整值见「仪表盘 → API 接入信息」）`
+        ? `管理钥匙：<code class="mono">${esc(d.admin_key)}</code>（config 里的 <code>api_key</code>，不限额不限速；完整值见「仪表盘 → API 接入信息」）
+           <button id="btnRotateAdminKey" style="padding:2px 8px;font-size:12px">轮换</button>`
         : '未配置管理钥匙（config 里没有 api_key —— 请用下方新建的 key 调用）。';
+      const rb = $('btnRotateAdminKey');
+      if (rb) {
+        rb.onclick = () => apiKeyRotateAdmin(rb);
+      }
     }
     renderAPIKeys(d && d.keys ? d.keys : []);
+  }
+
+  // apiKeyRotateAdmin 轮换管理钥匙：生成新 key → 写回 config.json → 立即生效。
+  async function apiKeyRotateAdmin(btn) {
+    if (!confirm('轮换管理钥匙？\n\n· 生成新钥匙写入 config.json（api_key 字段）\n· 立即生效：旧钥匙作废，用旧钥匙的调用方需换新\n· 新钥匙仅此一次完整显示')) return;
+    await busyRun(btn, async () => {
+      try {
+        const r = await admin('/admin/apikeys/rotate-admin', { method: 'POST' });
+        if (!r || !r.full) { toast('轮换失败：未知原因', true); return false; }
+        toast(`已轮换（仅此一次显示完整钥匙）：\n${r.full}\n请立即复制保存`, false, 15000);
+        copyText(r.full, '管理钥匙');
+        await loadAPIKeys();
+        return true;
+      } catch (e) { toast('轮换失败：' + e.message, true); return false; }
+    }, { label: '轮换', busyText: '轮换中…' });
   }
 
   function apiKeyRemain(k) {
@@ -6532,8 +6551,8 @@ let multCatalogFailed = false;
   }
 
   function stopAuto() {
-    if (timer) { clearInterval(timer); timer = null; }
-    $('auto').checked = false;
+    // 整页自动轮询已整体移除（无「每 5s 刷新」开关），此函数保留为空壳
+    // 以免 401 等历史路径仍调用它报错。数值刷新靠 30s 无感轮询，不受影响。
   }
 
   // ------------------------------------------------------- 本地登录（客户端账号切换）
@@ -6631,28 +6650,6 @@ let multCatalogFailed = false;
     } catch (e) { toast('回滚失败：' + e.message, true); }
   }
 
-  // autoTick 自动轮询的**严谨版**：不是每个 5 秒无脑整页重绘，而是先过三道闸。
-  //
-  // 用户本轮要求："去掉自动刷新的干扰；要刷就手动，或者操作完成自动刷一次；
-  // 若保留自动刷新也要更严谨。" 这里保留的自动刷新（勾选「自动刷新」后）：
-  //
-  //	① 后台标签页不刷 —— 看不见的页面刷了只是白费上游请求与带宽
-  //	② 弹窗打开不刷 —— 登录/信息弹窗期间整页重绘会打断用户正在做的事
-  //	③ 正在输入时不刷 —— 面板里的输入框有焦点时跳过（避免半输的码被重绘打断）
-  //
-  // 操作按钮完成后的 refresh()（立即刷新）不受这些闸门约束 —— 那是用户
-  // 主动动作的收尾，必须执行。
-  function autoTick() {
-    if (document.hidden) return;
-    // 弹窗（登录添加账号 / 信息提示）打开时不刷，避免整页重绘打断用户正在做的事。
-    const info = $('infoModal'), login = $('modal');
-    if (info && info.style.display !== 'none') return;
-    if (login && login.style.display !== 'none') return;
-    const ae = document.activeElement;
-    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT')) return;
-    refresh();
-  }
-
   // pollPoolValues 账号池**无感**轮询：只更新额度/状态数字，不整页重绘。
   //
   // # 为什么是"轮询 + 单元格 diff"而不是整页 refresh（用户本轮要求）
@@ -6672,7 +6669,7 @@ let multCatalogFailed = false;
   //   - 状态：冷却/熔断/恢复切换（含主动健康检查的提前恢复），运营最关心
   //   其余（成功数/Token 到期）变化频率低，手动刷新足够，不纳入。
   //
-  // 守卫与 autoTick 一致：后台标签、弹窗打开、账号表不可见时不刷。
+  // 守卫与无感轮询一致：后台标签、弹窗打开、账号表不可见时不刷。
   async function pollPoolValues() {
     if (document.hidden) return;
     const info = $('infoModal'), login = $('modal');
@@ -6962,11 +6959,9 @@ let multCatalogFailed = false;
     // 本机访问：服务端已注入 Key，直接跑起来。顶栏不显示任何 API 信息，
     // 查看/复制统一在「仪表盘 → API 接入信息」里完成。
     //
-    // ⚠ 默认**不开** 5 秒自动轮询（用户本轮要求）：页面只在初始加载一次，
-    // 之后靠「立即刷新」按钮与各操作按钮完成后的自动刷新。开自动轮询会
-    // 周期性整页重绘 —— 用户在输入/弹窗交互时被重绘打断，正是此前
-    // "输入框老是被清空""弹窗期间页面被刷掉"这类问题的来源。
-    // 需要时勾选顶部「自动刷新」即可恢复轮询（带可见性/弹窗守卫，见 autoTick）。
+    // 整页自动轮询（旧「每 5s 刷新」开关）已整体移除（用户要求）：
+    // 额度/状态/统计卡/趋势/API key 全部由 30s **无感轮询**覆盖（只 diff
+    // 数值不重绘），整页 refresh 只在初始加载与「立即刷新」/操作收尾时跑。
     if (INJECTED) {
       KEY = INJECTED;
       refresh();
@@ -6977,9 +6972,6 @@ let multCatalogFailed = false;
       $('conn').onclick = () => {
         KEY = $('key').value.trim();
         if ($('remember').checked) localStorage.setItem(LS, KEY); else localStorage.removeItem(LS);
-        $('auto').checked = true;
-        if (timer) clearInterval(timer);
-        timer = setInterval(autoTick, 5000);
         refresh();
       };
       $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('conn').click(); });
@@ -7052,15 +7044,12 @@ let multCatalogFailed = false;
       };
     }
     restoreModelProviderFilter();
-    $('auto').onchange = () => {
-      if (timer) { clearInterval(timer); timer = null; }
-      if ($('auto').checked) timer = setInterval(autoTick, 5000);
-    };
-    // 注意：不在这里无条件 setInterval —— 上面的 INJECTED 分支已经拉开轮询，
-    // 这里再来一次会形成两个并行定时器（重复请求 + 清不干净）。
+    // 整页自动轮询已整体移除（无「每 5s 刷新」开关）：数值刷新全靠
+    // 30s 无感轮询（pollPoolValues/pollStatsCards/loadTrendSeries/pollAPIKeys），
+    // 整页 refresh 只在初始加载与「立即刷新」/操作收尾时跑。
 
     // 额度/状态/统计**无感**轮询：常驻开启（用户要求数值实时）。它只更新
-    // 单元格与卡片数值，不整页重绘、不重建面板 —— 与上面"每 5s 整页刷新"
+    // 单元格与卡片数值，不整页重绘、不重建面板 —— 与已移除的"整页自动刷新"
     // 的开关相互独立：即使关闭了整页自动刷新，这些数字仍每 30 秒静默对齐。
     setInterval(() => {
       pollPoolValues();

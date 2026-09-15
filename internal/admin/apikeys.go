@@ -10,7 +10,10 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"os"
 
 	"workbuddy2api/internal/apikey"
 )
@@ -33,6 +36,7 @@ func (h *Handler) registerAPIKeys() {
 	h.register("POST /admin/apikeys/delete", h.apiKeysDelete)
 	h.register("POST /admin/apikeys/reset", h.apiKeysReset)
 	h.register("POST /admin/apikeys/update", h.apiKeysUpdate)
+	h.register("POST /admin/apikeys/rotate-admin", h.apiKeysRotateAdmin)
 }
 
 // apiKeysList GET /admin/apikeys —— 全部 key 的掩码视图 + 管理钥匙掩码。
@@ -180,4 +184,56 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusBadRequest, err.Error())
 	}
+}
+
+// apiKeysRotateAdmin POST /admin/apikeys/rotate-admin —— 轮换管理钥匙。
+//
+// 生成新 key → 写回 config.json 的 api_key 字段（ConfigPath）→ 通过
+// OnAPIKeyRotated 通知装配层更新 handler 内存（立即生效，无需重启）→
+// 返回新 key（仅此一次显示完整值）。
+func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.APIKey == "" {
+		writeError(w, http.StatusBadRequest, "当前未配置管理钥匙（config 里没有 api_key），无需轮换")
+		return
+	}
+	newKey := apikey.NewAdminKey()
+	// 写回 config.json（保留其余字段）。
+	if h.cfg.ConfigPath != "" {
+		if err := setConfigAPIKey(h.cfg.ConfigPath, newKey); err != nil {
+			writeError(w, http.StatusInternalServerError, "写回 config.json 失败: "+err.Error()+"（新 key 未生效）")
+			return
+		}
+	}
+	// 内存立即生效（装配层更新 handler 的管理钥匙）。
+	if h.cfg.OnAPIKeyRotated != nil {
+		h.cfg.OnAPIKeyRotated(newKey)
+	}
+	log.Printf("admin: 管理钥匙已轮换（写入 %s，立即生效）", h.cfg.ConfigPath)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"full":   newKey,
+		"masked": apikey.MaskID(newKey),
+		"path":   h.cfg.ConfigPath,
+	})
+}
+
+// setConfigAPIKey 读 config.json → 改 api_key 字段 → 原子写回（其余字段原样保留）。
+func setConfigAPIKey(path, newKey string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取: %w", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return fmt.Errorf("解析: %w", err)
+	}
+	cfg["api_key"] = newKey
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("写入临时文件: %w", err)
+	}
+	return os.Rename(tmp, path)
 }

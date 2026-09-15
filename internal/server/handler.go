@@ -159,6 +159,24 @@ const ServiceName = "multi2api"
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+	// apiKey 当前生效的管理钥匙（config api_key，支持运行时轮换）。
+	// 与 cfg.APIKey 解耦：轮换写回 config 后调用 SetAPIKey 立即生效，无需重启。
+	apiKeyMu sync.RWMutex
+	apiKey   string
+}
+
+// SetAPIKey 运行时更新管理钥匙（管理台「轮换管理密钥」用）。
+func (h *Handler) SetAPIKey(k string) {
+	h.apiKeyMu.Lock()
+	h.apiKey = k
+	h.apiKeyMu.Unlock()
+}
+
+// currentAPIKey 返回当前生效的管理钥匙。
+func (h *Handler) currentAPIKey() string {
+	h.apiKeyMu.RLock()
+	defer h.apiKeyMu.RUnlock()
+	return h.apiKey
 }
 
 // NewHandler 构建 handler。
@@ -175,7 +193,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaxBodyMB <= 0 {
 		cfg.MaxBodyMB = defaultMaxBodyMB
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), apiKey: cfg.APIKey}
 	registerCatalogHost(h) // 让包级 ModelCatalog/ModelCatalogState 能找到本实例的缓存
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -246,10 +264,11 @@ func (h *Handler) validBearer(r *http.Request) bool {
 	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
 		bearer = strings.TrimPrefix(authz, "Bearer ")
 	}
-	if h.cfg.APIKey == "" && h.cfg.APIKeys == nil {
+	ak := h.currentAPIKey()
+	if ak == "" && h.cfg.APIKeys == nil {
 		return true
 	}
-	if h.cfg.APIKey != "" && bearer == h.cfg.APIKey {
+	if ak != "" && bearer == ak {
 		return true
 	}
 	if h.cfg.APIKeys != nil && bearer != "" {
@@ -272,12 +291,13 @@ func (h *Handler) authorize(r *http.Request) authResult {
 	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
 		bearer = strings.TrimPrefix(authz, "Bearer ")
 	}
+	ak := h.currentAPIKey()
 	// 未配置任何鉴权 → 恒通过（旧行为）。
-	if h.cfg.APIKey == "" && h.cfg.APIKeys == nil {
+	if ak == "" && h.cfg.APIKeys == nil {
 		return authResult{}
 	}
 	// 管理 key 优先。
-	if h.cfg.APIKey != "" && bearer == h.cfg.APIKey {
+	if ak != "" && bearer == ak {
 		return authResult{}
 	}
 	// 普通 key。
