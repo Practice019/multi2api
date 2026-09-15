@@ -3,11 +3,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
-	"errors"
-	"io/fs"
 	"os"
 	"os/signal"
 	"syscall"
