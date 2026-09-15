@@ -635,7 +635,7 @@ func main() {
 			//
 			// 任务槽与 workbuddy 指向**同一个** sharedTaskSlot：
 			// "同一时刻只允许一个全量任务"是进程级语义，不分上游。
-			Scheduler: adminSchedulerAdapter{sch},
+			Scheduler: adminSchedulerAdapter{s: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true},
 			TaskSlot:  adminTaskSlotAdapter{sharedTaskSlot},
 			// 缺省上游：/admin/providers 标出它，前端据此把它的模型按**裸名**展示
 			//（其余上游带前缀）。裸名向后兼容是硬要求，所以这个值必须与

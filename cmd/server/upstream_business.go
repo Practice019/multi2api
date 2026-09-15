@@ -275,18 +275,21 @@ func newTaskSlotAdapter(sch *scheduler.Scheduler) workbuddy.TaskSlot {
 // 一个实现满足两个同名接口没有问题（方法签名完全一致）。
 
 // adminSchedulerAdapter 把 *scheduler.Scheduler 适配成 admin.SchedulerView。
-type adminSchedulerAdapter struct{ s *scheduler.Scheduler }
+type adminSchedulerAdapter struct {
+	s *scheduler.Scheduler
+	// checkinOn / keepaliveOn 来自配置（同 schedulerAdapter 的理由：
+	// 签到/保活已统一为 JobExt 扫描，槽位不再注册，SlotEnabled 恒 false）。
+	checkinOn   bool
+	keepaliveOn bool
+}
 
 func (a adminSchedulerAdapter) NextWake() (time.Time, []string) { return a.s.NextWake() }
 func (a adminSchedulerAdapter) Hours() ([]int, []int) {
-	return a.s.SlotHours(workbuddy.SlotCheckin), a.s.SlotHours(workbuddy.SlotKeepalive)
+	// 时点槽位已弃用（统一 30 分钟扫描）：恒空。
+	return nil, nil
 }
-func (a adminSchedulerAdapter) CheckinEnabled() bool {
-	return a.s.SlotEnabled(workbuddy.SlotCheckin)
-}
-func (a adminSchedulerAdapter) KeepaliveEnabled() bool {
-	return a.s.SlotEnabled(workbuddy.SlotKeepalive)
-}
+func (a adminSchedulerAdapter) CheckinEnabled() bool { return a.checkinOn }
+func (a adminSchedulerAdapter) KeepaliveEnabled() bool { return a.keepaliveOn }
 
 // JobStatuses 把已注册任务的运行状态透给控制台（admin.JobStatusView）。
 //
