@@ -62,6 +62,11 @@ type chatStat struct {
 	// 刻意不在此处缓存解析结果：usage 只被引用、不复制，落盘是一次性的。
 	usage map[string]any
 
+	// apikeyID 本次请求鉴权命中的 API key（空 = 管理 key / 未启用多 key）。
+	// bump 请求出口时把用量记给该 key（nil = 不计）。
+	apikeyID string
+	bump     func(toks int, ok bool)
+
 	logged bool
 }
 
@@ -80,6 +85,15 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
+	// API key 用量记录（请求出口，任何路径都会走到）：
+	// 成功按实际 token 计、失败计失败数；usage 缺失（toks<0）按 0 计。
+	if s.bump != nil {
+		toks := s.toks
+		if toks < 0 {
+			toks = 0
+		}
+		s.bump(toks, s.status >= 200 && s.status < 300)
+	}
 	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage)
 }
 
