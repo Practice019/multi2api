@@ -297,6 +297,16 @@ type Config struct {
 		// 要关就整段 enabled=false（少一个三态就少一类误配）。
 		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
 
+		// WelfareEnabled 是否注册「每日福利自动领取」后台任务（默认 true）。
+		//
+		// CodeArts 没有独立签到端点，它的「签到」= 福利领取（幂等）。
+		// 开启后与 workbuddy（每日时点槽位）/ trae（自带任务）一样**自动**执行
+		// 每日签到语义，用户无需手动点「签到」。
+		WelfareEnabled *bool `json:"welfare_enabled"`
+		// WelfareIntervalSeconds 福利领取任务扫描周期（默认 1800）。
+		// 幂等（今日已领的 claimable=false 自动跳过），30 分钟粒度足够。
+		WelfareIntervalSeconds int `json:"welfare_interval_seconds"`
+
 		// PoolAccounts 是否把 CodeArts 账号**并入核心账号池**（默认 true）。
 		//
 		// # 为什么需要这个开关
@@ -511,6 +521,9 @@ type Config struct {
 	CodeartsEnabled         bool          `json:"-"`
 	CodeartsAuthDir         string        `json:"-"`
 	CodeartsRefreshInterval time.Duration `json:"-"`
+	// CodeartsWelfareEnabled / CodeartsWelfareInterval 每日福利自动领取任务。
+	CodeartsWelfareEnabled  bool          `json:"-"`
+	CodeartsWelfareInterval time.Duration `json:"-"`
 	// CodeartsPoolAccounts 是否把 codearts 账号并入核心账号池（见 Codearts.PoolAccounts）。
 	// CodeartsEnabled 为 false 时无意义。
 	CodeartsPoolAccounts bool `json:"-"`
@@ -883,6 +896,13 @@ func (c *Config) normalize() error {
 			iv = 60
 		}
 		c.CodeartsRefreshInterval = time.Duration(iv) * time.Second
+		// 福利自动领取（签到语义）：默认开，30 分钟扫一次。
+		c.CodeartsWelfareEnabled = boolOr(c.Codearts.WelfareEnabled, true)
+		wiv := c.Codearts.WelfareIntervalSeconds
+		if wiv <= 0 {
+			wiv = 1800
+		}
+		c.CodeartsWelfareInterval = time.Duration(wiv) * time.Second
 	}
 	// 并入账号池默认开（理由见 Codearts.PoolAccounts）。
 	// 未启用时恒 false —— 不注册的上游不该在池子里留下任何痕迹。

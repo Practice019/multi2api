@@ -808,22 +808,17 @@
             <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
             <div class="field"><input type="text" id="setCheckinHours" placeholder="9,21" title="签到时点（小时，逗号分隔，0-23 本地时区）"></div>
           </div>
-          <div class="pair">
-            <div class="field chk"><input type="checkbox" id="setTravelAuto"><label for="setTravelAuto">猫到站自动领奖</label></div>
-          </div>
         </div>
         <!-- 保活已统一为「被动后台扫描」（只刷临近过期的 token），是防掉线的
-             安全网 —— 只读展示，不提供开关（避免误关）。 -->
+             安全网 —— 只读展示，不提供开关（避免误关）。
+             猫到站自动领奖为纯收益动作，默认开启，不在设置页展示（用户决定）。 -->
         <div class="info-line" style="margin-top:10px">保活：<span id="setKeepaliveRO">…</span></div>
       </fieldset>
 
       <fieldset>
         <legend>成长中心自动化 <span class="badge badge--hot">立即生效</span></legend>
-        <div class="subgroup">纯收益 · 默认开（领已达成的奖励、用补签卡补回断登）</div>
-        <div class="fieldgroup checks">
-          <div class="field chk"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励</label></div>
-          <div class="field chk"><input type="checkbox" id="setGrowthAccept"><label for="setGrowthAccept">自动接单</label></div>
-        </div>
+        <!-- 「自动领取奖励」「自动接单」是纯收益动作（默认开启），用户决定不展示；
+             只保留需要权衡的「消耗资源」四项。 -->
         <div class="subgroup">消耗资源 · 默认关（兑换花连登天数、开盲盒花能量、抽奖花次数）</div>
         <div class="fieldgroup checks">
           <div class="field chk"><input type="checkbox" id="setGrowthMakeup"><label for="setGrowthMakeup">自动补签</label></div>
@@ -4388,22 +4383,16 @@ let loginProvider = '';
   // ---------------------------------------------------------------- 设置
   // SET_FIELDS 设置页**可编辑**控件的注册表（保存/回填循环只遍历它）。
   //
-  // # 为什么只有 12 项（其余要么删了、要么只读，见设置页 HTML）
+  // # 为什么只有 9 项（其余删了 / 只读 / 隐藏，见设置页 HTML）
   //
   // 与子代理审计后收敛（用户要求"删掉不必要的；必要但不该改的只读/隐藏"）：
-  //   - 删除（后端默认值足够）：保活时点/旅行间隔/成长扫描间隔/SSE 两个超时/
-  //     429 软冷却/单账号最大在途/熔断三件套/粘性 TTL
-  //   - 只读（安全网/加固，避免误关）：保活开关/指纹脱敏/会话粘性
-  //   - 隐藏（信息价值低）：凭证目录、Redis 模式
-  //
-  // 只读项的值在 fillSettings 里单独渲染（setKeepaliveRO 等），**不**进本表 ——
-  // 进了本表 saveSettings 会把只读值当可保存字段写回。
+  //   - 删除：保活时点/旅行间隔/成长扫描间隔/SSE 两个超时/429 软冷却/在途/
+  //     熔断三件套/粘性 TTL/纯收益成长两开关/猫到站自动领奖（默认开启纯收益）
+  //   - 只读（安全网/加固）：保活开关/指纹脱敏/会话粘性
+  //   - 隐藏：凭证目录、Redis 模式
   const SET_FIELDS = [
     ['setCheckinEnabled', 'checkin_enabled', 'bool'],
     ['setCheckinHours', 'checkin_hours', 'hours'],
-    ['setTravelAuto', 'travel_auto_claim', 'bool'],
-    ['setGrowthClaim', 'growth_auto_claim', 'bool'],
-    ['setGrowthAccept', 'growth_auto_accept_tasks', 'bool'],
     ['setGrowthMakeup', 'growth_auto_makeup', 'bool'],
     ['setGrowthRedeem', 'growth_auto_redeem', 'bool'],
     ['setGrowthOpen', 'growth_auto_open', 'bool'],

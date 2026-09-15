@@ -136,21 +136,16 @@ func (p *Provider) handleWelfareList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWelfareClaim 领取所有当前可领的福利。
-func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		UID string `json:"uid"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-
-	a, err := p.accountFor(body.UID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
+// claimWelfareFor 对一个账号领取全部可领福利并记录本地历史。
+//
+// 由管理端点（trigger=manual）与后台福利任务（trigger=sched）**共用同一份**
+// 判据 —— 两条路径的"领到/无可领/失败"语义不允许各自实现一遍（会漂移）。
+//
+// 返回 (claimed, results, err)。err != nil 时历史已记 fail。
+func (p *Provider) claimWelfareFor(a *Auth, trigger string) (int, []WelfareResult, error) {
 	results, err := p.client.ClaimAllWelfare(a)
 	if err != nil {
-		// 失败也要留痕（理由见下面成功分支的注释）：
+		// 失败也要留痕（理由见 handleWelfareClaim 的注释）：
 		// 不记的话账号池那一列会停在「—」，用户分不清"没领过"与"领失败了"。
 		if p.adminEnv.Log != nil {
 			p.adminEnv.Log.Append(checkinlog.Record{
@@ -160,11 +155,10 @@ func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
 				Kind:     checkinlog.KindWelfare,
 				Status:   checkinlog.StatusFail,
 				Detail:   truncate(err.Error(), 200),
-				Trigger:  "manual",
+				Trigger:  trigger,
 			})
 		}
-		writeError(w, http.StatusBadGateway, "领取失败: "+err.Error())
-		return
+		return 0, nil, err
 	}
 	claimed := 0
 	for _, x := range results {
@@ -172,7 +166,7 @@ func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
 			claimed++
 		}
 	}
-	log.Printf("codearts: 福利领取 uid=%s 本次领到 %d/%d", a.UID, claimed, len(results))
+	log.Printf("codearts: 福利领取 uid=%s 本次领到 %d/%d（trigger=%s）", a.UID, claimed, len(results), trigger)
 
 	// 记一条本地历史 —— 账号池的「福利」列据此回答"今天领过没有"。
 	//
@@ -189,16 +183,13 @@ func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
 	//	一项都没领到 → StatusSkip   （界面上说「无可领」—— 不说"已领"，
 	//	                             因为我们无法区分"今天领完了"与"没资格"）
 	//	请求报错     → StatusFail   （界面上说「失败」，并带原因）
-	//
-	// ⚠ 报错分支也要记：不记的话界面会永远停在「—」，
-	// 用户分不清"没领过"与"领过但失败了"。
 	if p.adminEnv.Log != nil {
 		rec := checkinlog.Record{
 			At:       time.Now(),
 			UID:      a.UID,
 			Nickname: a.Nickname,
 			Kind:     checkinlog.KindWelfare,
-			Trigger:  "manual",
+			Trigger:  trigger,
 			Credits:  int64(claimed),
 		}
 		switch {
@@ -211,7 +202,26 @@ func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
 		}
 		p.adminEnv.Log.Append(rec)
 	}
+	return claimed, results, nil
+}
 
+// handleWelfareClaim 领取所有当前可领的福利（管理台入口）。
+func (p *Provider) handleWelfareClaim(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		UID string `json:"uid"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	a, err := p.accountFor(body.UID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	claimed, results, err := p.claimWelfareFor(a, "manual")
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "领取失败: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uid": a.UID, "results": results, "claimed": claimed,
 	})

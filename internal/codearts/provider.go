@@ -123,6 +123,10 @@ type Provider struct {
 	// refreshInterval 后台主动续期的扫描周期。<=0 表示不注册该任务
 	// （只走请求路径的惰性续期）。
 	refreshInterval time.Duration
+	// welfareEnabled / welfareInterval 每日福利自动领取（签到语义）。
+	// welfareEnabled=false 或 interval<=0 时不注册该任务（仅手动按钮）。
+	welfareEnabled  bool
+	welfareInterval time.Duration
 }
 
 // NewProvider 建一个 CodeArts Provider（契约测试用的无依赖构造）。
@@ -164,6 +168,15 @@ type Config struct {
 	// 前端不渲染「＋ 添加账号」。**没配就不给按钮**，
 	// 与 workbuddy 保持同一条判据（见 gateway.LoginFlow.Configured）。
 	Login *Manager
+
+	// WelfareEnabled 是否注册「每日福利自动领取」后台任务（默认建议 true）。
+	// codearts 没有独立签到端点，它的「签到」= 福利领取（/v1/ops/claim，
+	// 幂等：claimable=false 的跳过）。开启后与 workbuddy/trae 一样
+	// **自动**执行每日签到语义，用户无需手动点「签到」。
+	WelfareEnabled bool
+	// WelfareInterval 福利领取任务的扫描周期。<=0 不注册任务。
+	// 幂等（领过就 claimable=false），30 分钟粒度足够。
+	WelfareInterval time.Duration
 }
 
 // NewWithConfig 按配置建一个 CodeArts Provider。
@@ -172,11 +185,13 @@ func NewWithConfig(cfg Config) *Provider {
 		cfg.Client = New()
 	}
 	return &Provider{
-		client:   cfg.Client,
-		authDir:  cfg.AuthDir,
-		accounts: cfg.Accounts,
-		adminEnv: cfg.Admin,
-		login:    cfg.Login,
+		client:          cfg.Client,
+		authDir:         cfg.AuthDir,
+		accounts:        cfg.Accounts,
+		adminEnv:        cfg.Admin,
+		login:           cfg.Login,
+		welfareEnabled:  cfg.WelfareEnabled,
+		welfareInterval: cfg.WelfareInterval,
 	}
 }
 

@@ -271,6 +271,9 @@ func main() {
 			//   → 前端渲染按钮（它已经在按 manifest 渲染，前端零改动）
 			//   → /admin/login/start?provider=codearts 走 codearts 自己的流程
 			Login: codearts.NewManager(cfg.CodeartsOAuthPortal, cfg.CodeartsOAuthSTS, ""),
+			// 每日福利自动领取（签到语义）：与 workbuddy/trae 对齐，自动执行。
+			WelfareEnabled:  cfg.CodeartsWelfareEnabled,
+			WelfareInterval: cfg.CodeartsWelfareInterval,
 		})
 		// 凭证访问器：核心把"现在有哪些账号"喂给上游（上游不得依赖 internal/pool）。
 		//

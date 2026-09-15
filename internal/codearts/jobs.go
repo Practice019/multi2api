@@ -34,6 +34,17 @@ import (
 // JobRefresh 后台续期任务的稳定标识（用于调度器日志与状态展示）。
 const JobRefresh = "codearts-refresh"
 
+// JobWelfare 每日福利自动领取（签到语义）任务的稳定标识。
+//
+// # 为什么要有它（用户要求"所有上游都自动签到"）
+//
+// 每日签到时点（9/21）的槽位只跑 workbuddy；trae 有自己的 trae-checkin；
+// codearts 此前**只能手动点「签到」按钮** —— 三个有签到语义的上游里
+// 唯独它不自动。这里补一个幂等的后台任务：每 welfareInterval 扫一次，
+// ClaimAllWelfare 内部已跳过 claimable=false（今日已领）的活动，
+// 领不到就记 skip，不重复消耗。
+const JobWelfare = "codearts-welfare"
+
 // defaultRefreshSkew 后台扫描时判定"将过期"的窗口。
 //
 // 与请求路径的 refreshSkew 一致（3 分钟）：窗口必须显著小于 2 小时的凭证寿命，
@@ -49,16 +60,43 @@ const defaultRefreshSkew = refreshSkew
 // 而"谁快过期"本身就要扫一遍凭证（很便宜，纯本地时间比较），
 // 用 Due 再扫一遍没有收益。固定间隔即可。
 func (p *Provider) Jobs() []gateway.Job {
-	if p.refreshInterval <= 0 {
-		return nil
-	}
-	return []gateway.Job{
-		{
+	jobs := make([]gateway.Job, 0, 2)
+	if p.refreshInterval > 0 {
+		jobs = append(jobs, gateway.Job{
 			Name:     JobRefresh,
 			Interval: p.refreshInterval,
 			Run:      p.runRefresh,
-		},
+		})
 	}
+	if p.welfareEnabled && p.welfareInterval > 0 {
+		jobs = append(jobs, gateway.Job{
+			Name:     JobWelfare,
+			Interval: p.welfareInterval,
+			Run:      p.runWelfare,
+		})
+	}
+	return jobs
+}
+
+// runWelfare 一趟福利自动领取（签到语义）：逐账号领取可领福利并记录历史。
+func (p *Provider) runWelfare(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	list, err := p.localAccounts()
+	if err != nil {
+		return err
+	}
+	for _, a := range list {
+		if a == nil || ctx.Err() != nil {
+			continue
+		}
+		if _, _, err := p.claimWelfareFor(a, "sched"); err != nil {
+			log.Printf("codearts: 福利自动领取失败 uid=%s: %v", a.UID, err)
+			continue
+		}
+	}
+	return nil
 }
 
 // runRefresh 一趟后台续期：扫凭证目录，对将过期的账号串行续期。
