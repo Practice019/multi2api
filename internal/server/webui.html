@@ -803,25 +803,22 @@
       <fieldset>
         <legend>日常调度 <span class="badge badge--hot">立即生效</span></legend>
         <p class="info-line" id="schInfo">未连接</p>
-        <!-- 开关 + 参数并排成行：三行取代原来 6 个散落字段 -->
         <div class="formgrid">
           <div class="pair">
             <div class="field chk"><input type="checkbox" id="setCheckinEnabled"><label for="setCheckinEnabled">启用每日签到</label></div>
             <div class="field"><input type="text" id="setCheckinHours" placeholder="9,21" title="签到时点（小时，逗号分隔，0-23 本地时区）"></div>
           </div>
           <div class="pair">
-            <div class="field chk"><input type="checkbox" id="setKeepaliveEnabled"><label for="setKeepaliveEnabled">启用 token 保活</label></div>
-            <div class="field"><input type="text" id="setKeepaliveHours" placeholder="22" title="保活时点（小时，逗号分隔，0-23 本地时区）"></div>
-          </div>
-          <div class="pair">
             <div class="field chk"><input type="checkbox" id="setTravelAuto"><label for="setTravelAuto">猫到站自动领奖</label></div>
-            <div class="field"><input type="number" id="setTravelInterval" min="10" max="3600" title="旅行守卫间隔（秒）；同时是上游未给到站时间时的兜底轮询周期"></div>
           </div>
         </div>
+        <!-- 保活已统一为「被动后台扫描」（只刷临近过期的 token），是防掉线的
+             安全网 —— 只读展示，不提供开关（避免误关）。 -->
+        <div class="info-line" style="margin-top:10px">保活：<span id="setKeepaliveRO">…</span></div>
       </fieldset>
 
       <fieldset>
-        <legend>成长中心自动化 <span class="badge badge--cold" style="color:#3fb950">自动执行</span></legend>
+        <legend>成长中心自动化 <span class="badge badge--hot">立即生效</span></legend>
         <div class="subgroup">纯收益 · 默认开（领已达成的奖励、用补签卡补回断登）</div>
         <div class="fieldgroup checks">
           <div class="field chk"><input type="checkbox" id="setGrowthClaim"><label for="setGrowthClaim">自动领取奖励</label></div>
@@ -834,9 +831,6 @@
           <div class="field chk"><input type="checkbox" id="setGrowthOpen"><label for="setGrowthOpen">自动开盲盒</label></div>
           <div class="field chk"><input type="checkbox" id="setGrowthDraw"><label for="setGrowthDraw">自动抽奖</label></div>
         </div>
-        <div class="subgroup">执行节奏</div>
-        <div class="field" style="max-width:280px"><label>成长中心扫描间隔（秒）<span class="badge badge--cold">重启生效</span></label>
-          <input type="number" id="setGrowthInterval" min="60" max="86400"><span class="hint">守卫轮 ticker 在启动时创建，改动需重启</span></div>
       </fieldset>
 
       <fieldset>
@@ -852,34 +846,17 @@
 
       <fieldset>
         <legend>网络与容错 <span class="badge badge--cold">重启生效</span></legend>
-        <div class="subgroup">上游超时</div>
         <div class="formgrid">
-          <div class="field"><label>短 RPC 超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
-          <div class="field"><label>SSE 首字节超时（秒）</label><input type="number" id="setUpHeaderTimeout" min="1"></div>
-          <div class="field"><label>SSE 流中空闲超时（秒）</label><input type="number" id="setUpIdleTimeout" min="1"></div>
-        </div>
-        <div class="subgroup">限流与并发</div>
-        <div class="formgrid">
-          <div class="field"><label>429 软冷却时长</label><input type="text" id="setSoftRate" placeholder="60s"></div>
-          <div class="field"><label>单账号最大在途</label><input type="number" id="setMaxInFlight" min="0"><span class="hint">0 = 不限</span></div>
-        </div>
-        <div class="subgroup">熔断保护</div>
-        <div class="formgrid">
-          <div class="field"><label>熔断阈值（连续失败次数）</label><input type="number" id="setBreakerThreshold" min="1"></div>
-          <div class="field"><label>熔断基础时长</label><input type="text" id="setBreakerCooldown" placeholder="30m"></div>
-          <div class="field"><label>熔断退避封顶</label><input type="text" id="setBreakerCooldownMax" placeholder="6h"></div>
+          <div class="field"><label>上游请求超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
         </div>
         <div class="subgroup">出站请求安全</div>
-        <div class="field chk"><input type="checkbox" id="setSanitize"><label for="setSanitize">出站请求体指纹脱敏</label></div>
+        <div class="info-line" style="margin-bottom:0">指纹脱敏：<span id="setSanitizeRO">…</span></div>
       </fieldset>
 
-      <fieldset>
-        <legend>会话粘性 <span class="badge badge--cold">重启生效</span></legend>
-        <div class="pair">
-          <div class="field chk"><input type="checkbox" id="setStickyEnabled"><label for="setStickyEnabled">启用会话粘性</label></div>
-          <div class="field"><label>粘性 TTL</label><input type="text" id="setStickyTTL" placeholder="30m"></div>
-        </div>
-        <div class="hint" style="margin-top:8px">粘性让同一会话尽量落在同一账号上（避免多账号轮转把对话拆散）。</div>
+      <fieldset class="readonly">
+        <legend>会话粘性 <span class="badge badge--ro">只读</span></legend>
+        <div class="info-line" style="margin-bottom:0">会话粘性让同一会话尽量落在同一账号上（避免多账号轮转把对话拆散）。<br>
+          当前：<span id="setStickyRO">…</span></div>
       </fieldset>
 
       <fieldset class="readonly">
@@ -4409,33 +4386,31 @@ let loginProvider = '';
   }
 
   // ---------------------------------------------------------------- 设置
+  // SET_FIELDS 设置页**可编辑**控件的注册表（保存/回填循环只遍历它）。
+  //
+  // # 为什么只有 12 项（其余要么删了、要么只读，见设置页 HTML）
+  //
+  // 与子代理审计后收敛（用户要求"删掉不必要的；必要但不该改的只读/隐藏"）：
+  //   - 删除（后端默认值足够）：保活时点/旅行间隔/成长扫描间隔/SSE 两个超时/
+  //     429 软冷却/单账号最大在途/熔断三件套/粘性 TTL
+  //   - 只读（安全网/加固，避免误关）：保活开关/指纹脱敏/会话粘性
+  //   - 隐藏（信息价值低）：凭证目录、Redis 模式
+  //
+  // 只读项的值在 fillSettings 里单独渲染（setKeepaliveRO 等），**不**进本表 ——
+  // 进了本表 saveSettings 会把只读值当可保存字段写回。
   const SET_FIELDS = [
     ['setCheckinEnabled', 'checkin_enabled', 'bool'],
-    ['setKeepaliveEnabled', 'keepalive_enabled', 'bool'],
     ['setCheckinHours', 'checkin_hours', 'hours'],
-    ['setKeepaliveHours', 'keepalive_hours', 'hours'],
     ['setTravelAuto', 'travel_auto_claim', 'bool'],
-    ['setTravelInterval', 'travel_watch_interval_seconds', 'int'],
     ['setGrowthClaim', 'growth_auto_claim', 'bool'],
     ['setGrowthAccept', 'growth_auto_accept_tasks', 'bool'],
     ['setGrowthMakeup', 'growth_auto_makeup', 'bool'],
     ['setGrowthRedeem', 'growth_auto_redeem', 'bool'],
     ['setGrowthOpen', 'growth_auto_open', 'bool'],
     ['setGrowthDraw', 'growth_auto_draw', 'bool'],
-    ['setGrowthInterval', 'growth_watch_interval_seconds', 'int'],
     ['setCheckinLogDays', 'checkin_log_keep_days', 'int'],
     ['setReqLogDays', 'request_log_keep_days', 'int'],
-    ['setSoftRate', 'cooldown_soft_rate', 'str'],
     ['setUpTimeout', 'upstream_timeout_seconds', 'int'],
-    ['setUpHeaderTimeout', 'upstream_header_timeout_seconds', 'int'],
-    ['setUpIdleTimeout', 'upstream_idle_timeout_seconds', 'int'],
-    ['setMaxInFlight', 'pool_max_in_flight', 'int'],
-    ['setBreakerThreshold', 'pool_breaker_threshold', 'int'],
-    ['setBreakerCooldown', 'pool_breaker_cooldown', 'str'],
-    ['setBreakerCooldownMax', 'pool_breaker_cooldown_max', 'str'],
-    ['setSanitize', 'sanitize_blacklist_fingerprints', 'bool'],
-    ['setStickyEnabled', 'session_sticky_enabled', 'bool'],
-    ['setStickyTTL', 'session_sticky_ttl', 'str'],
   ];
   let savedSettings = null;
 
@@ -4451,12 +4426,24 @@ let loginProvider = '';
       else if (kind === 'hours') el.value = (s[key] || []).join(',');
       else el.value = s[key];
     }
+    // 只读行（必要但不该被改的设置，见设置页 HTML 的注释）：
+    // 值只展示，**不进** SET_FIELDS —— 否则 saveSettings 会把它们当可保存字段写回。
+    const setRO = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+    setRO('setKeepaliveRO',
+      (s.keepalive_enabled ? '已启用' : '已禁用') + '（被动后台扫描：每天定时检查临近过期的 token 并自动刷新；' +
+      '如需调整请改 config.json 的 keepalive_enabled / keepalive_hours）');
+    setRO('setSanitizeRO',
+      (s.sanitize_blacklist_fingerprints ? '已启用' : '已禁用') + '（出站请求体指纹脱敏，安全加固项，默认开启；' +
+      '如需关闭请改 config.json 的 sanitize_blacklist_fingerprints）');
+    setRO('setStickyRO',
+      (s.session_sticky_enabled ? '已启用 · TTL ' + (s.session_sticky_ttl || '30m') : '已禁用') +
+      '（当前正在使用，切换会中断在途会话；如需调整请改 config.json 后重启）');
+    // 运行信息：保留连接入口/配置文件/API Key；凭证目录与 Redis 模式已隐藏
+    //（信息价值低，且凭证目录暴露本地路径没有展示收益）。
     const ro = [
       ['监听地址', s.listen],
-      ['凭证目录', s.auth_dir],
       ['配置文件', s.config_path],
       ['API Key', s.api_key_set ? '已配置' : '未配置（不鉴权）'],
-      ['Redis', s.redis_mode || (s.upstash_url ? 'upstash' : 'noop（纯内存）')],
     ];
     $('setReadonly').innerHTML = ro.map(([k, v]) =>
       `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
