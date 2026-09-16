@@ -324,7 +324,12 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 	return nil
 }
 
-// runRefresh 一趟后台续期：扫凭证，对将过期的账号串行续期。
+// runRefresh 一趟后台续期：扫凭证，对全部账号**无条件全量续**（用户要求：
+// 所有上游统一 30 分钟主动全量刷新，不问剩余寿命）。
+//
+// 此前是 NeedsRefresh 过滤（只刷临近过期），用户观察到 token 倒计时
+// 但"不续"（还没进窗口）—— 判定正确但观感差。改为到点全量续：
+// token 永远是"30 分钟内续过"的。
 func (p *Provider) runRefresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -341,14 +346,13 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		if a.RefreshToken == "" {
 			continue
 		}
-		if a.NeedsRefresh(refreshSkew) {
-			need = append(need, a)
-		}
+		// 无条件全量续（去掉 NeedsRefresh 过滤）。
+		need = append(need, a)
 	}
 	if len(need) == 0 {
 		return nil
 	}
-	log.Printf("trae: 后台续期开始，%d 个账号临近过期（窗口 %v）", len(need), refreshSkew)
+	log.Printf("trae: 后台续期开始，%d 个账号（全量续）", len(need))
 	for _, a := range need {
 		if ctx.Err() != nil {
 			return ctx.Err()

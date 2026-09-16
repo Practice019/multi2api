@@ -904,7 +904,8 @@ func (c *Config) normalize() error {
 	if c.CodeartsEnabled {
 		iv := c.Codearts.RefreshIntervalSeconds
 		if iv <= 0 {
-			iv = 60
+			// 统一为 30 分钟（用户要求：所有上游每 30min 主动全量续）。
+			iv = 1800
 		}
 		c.CodeartsRefreshInterval = time.Duration(iv) * time.Second
 		// 福利自动领取（签到语义）：默认开，30 分钟扫一次。

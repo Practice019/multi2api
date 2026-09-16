@@ -231,20 +231,20 @@ func isAlreadyCheckin(msg string) bool {
 
 // RunKeepaliveAll 全量 token 保活；trigger 为 "schedule" 或 "manual"。
 //
-// # 统一为「被动后台扫描」（用户本轮要求，与 codearts/trae 同一模型）
+// # 统一为「30 分钟主动全量续」（用户本轮要求：所有上游每 30min 无条件
+// 刷新全部账号 token，不问剩余寿命）
 //
-// 以前这里是**无条件**刷新所有账号的 token（每天到点就把所有号全刷一遍）。
-// 这与其他两个上游的模型不一致 —— 它们都是"后台扫描 + 只刷需要刷的"：
+// 此前是"被动只刷临近过期"（NeedsRefresh 窗口），用户观察到 codearts
+// token 从 1 小时多降到 20 多分钟却不续（因为还没进 3min 窗口）——
+// 判定逻辑正确但观感是"没续"。按用户要求改为**到点全量续**：
 //
-//	codearts → 每 60s 扫一次，只刷快过期的（NeedsRefresh 3m 窗口）
-//	trae     → 每 30min 扫一次，只刷快过期的（NeedsRefresh 10m 窗口）
+//	每 30min → 遍历所有账号 → 无条件 RefreshToken（保留死号退避，见下）
 //
-// 这里对齐：**只刷新临近过期（10m 窗口）的账号**。请求路径还有一层
-// 惰性续期（CredentialRefresher）兜底 —— 扫描间隙里过期的 token 会在
-// 下次请求前被按需刷新，不会因扫描频率而漏。
+// 代价：每次全量续都会打上游刷新接口（每账号 30min 一次，量小）；
+// 收益：token 永远是"30 分钟内续过"的，永远不会走到"请求时发现过期"。
 //
-// 手动入口（行内「保活」按钮 → RunKeepaliveFor）**仍然强制刷新**：
-// 用户点了就是"现在就刷"，不受被动窗口约束。
+// 死号处理：refresh token 已失效的账号在 RefreshToken 里走
+// holdRefresh 退避（24h），不会每轮都打失败请求。
 func (p *Provider) RunKeepaliveAll(trigger string) {
 	for _, st := range p.ownAccounts() {
 		if st.Disabled {
@@ -254,10 +254,7 @@ func (p *Provider) RunKeepaliveAll(trigger string) {
 		if a == nil || a.RefreshToken == "" {
 			continue
 		}
-		// 被动判据：只有临近过期的才刷（与 codearts/trae 的后台扫描同口径）。
-		if !a.NeedsRefresh(refreshSkew) {
-			continue
-		}
+		// 无条件全量续（不再按 NeedsRefresh 过滤）。
 		p.keepaliveOne(st.UID, trigger)
 	}
 }
