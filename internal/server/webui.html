@@ -6681,6 +6681,16 @@ let multCatalogFailed = false;
     try { d = await admin('/admin/accounts'); }
     catch { return; } // 轮询失败静默，下轮再试
     const list = (d && d.accounts) || [];
+    // 账号集合变化（新增/删除）→ 整表重建：无感轮询只 diff 单元格，
+    // 新账号行不会自己长出来 —— 这正是"导入/重载后数据不自动更新"的
+    // 一部分（另一部分是重载路径不刷额度，已在 handler 修复）。
+    const current = Array.from(document.querySelectorAll('tr[data-acctof]'))
+      .map(tr => tr.getAttribute('data-acctof')).sort().join(',');
+    const wanted = list.map(a => providerOf(a)).sort().join(',');
+    if (current !== wanted || Array.from(document.querySelectorAll('tr[data-acctof]')).length !== list.length) {
+      renderAccounts(list);
+      return;
+    }
     for (const a of list) {
       const key = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(a.uid)) : String(a.uid);
       const cell = document.querySelector(`td[data-quota-uid="${key}"]`);
@@ -7144,7 +7154,10 @@ let multCatalogFailed = false;
           // 回执的 provider 是后端**实际使用**的那个值，写它才是复述事实。
           toast(`已重载 ${r.provider} 的 auths：扫描 ${r.scanned} 个文件，`
             + `池内账号 ${r.before} 个变为 ${r.after} 个`);
-          await refresh();     // 必须 await：否则 busy 态先于数据更新结束，界面看起来"没变"
+          // ⚠ 必须走 refreshAfterAccountChange 而不是裸 refresh()：
+          // 重载后新账号的额度/token/签到都要**探测/加载**（裸 refresh 只重绘
+          // 已有视图，新号的额度列会一直「—」—— 用户报"导入后不自动更新"）。
+          await refreshAfterAccountChange();
           return undefined;    // 上面已给出更具体的回执
         }, { label: '重载 auths', busyText: '重载中…' });
       }
