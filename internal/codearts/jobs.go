@@ -135,15 +135,15 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		if p.onRefreshHold(a) {
 			continue
 		}
-		if a.NeedsRefresh(defaultRefreshSkew) {
-			need = append(need, a)
-		}
+		// 无条件全量续（去掉 NeedsRefresh 过滤 —— 用户要求所有上游
+		// 统一 30 分钟主动全量刷新，不问剩余寿命）。
+		need = append(need, a)
 	}
 	if len(need) == 0 {
 		return nil
 	}
 
-	log.Printf("codearts: 后台续期开始，%d 个账号临近过期（窗口 %v）", len(need), defaultRefreshSkew)
+	log.Printf("codearts: 后台续期开始，%d 个账号（全量续）", len(need))
 	for _, a := range need {
 		if err := ctx.Err(); err != nil {
 			return err

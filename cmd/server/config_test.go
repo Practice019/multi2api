@@ -576,8 +576,8 @@ func TestCodeartsRefreshIntervalDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.CodeartsRefreshInterval.Seconds() != 60 {
-		t.Errorf("未配间隔应默认 60s，得到 %v", c.CodeartsRefreshInterval)
+	if c.CodeartsRefreshInterval.Seconds() != 1800 {
+		t.Errorf("未配间隔应默认 30m（统一全量续周期），得到 %v", c.CodeartsRefreshInterval)
 	}
 
 	// 显式配 → 用配置值
