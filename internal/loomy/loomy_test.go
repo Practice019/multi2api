@@ -51,6 +51,24 @@ func TestParseClientShapedCredential(t *testing.T) {
 	}
 }
 
+// TestParseCredentialPhoneTakesPrecedenceOverNickname 用户要求统一手机号显示：
+// 凭证同时带 phone 与 nickname 时，昵称必须取 phone（批量导入后也显示手机号）。
+func TestParseCredentialPhoneTakesPrecedenceOverNickname(t *testing.T) {
+	a, err := ParseCredential([]byte(`{
+      "phone": "19846952053",
+      "nickname": "NK6952053",
+      "session": "0123456789abcdef0123456789abcdef",
+      "userid": "260825101823357254",
+      "loggedInAt": "2026-09-16T02:21:06Z"
+    }`))
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if a.Nickname != "19846952053" {
+		t.Errorf("nickname = %q，期望取手机号 19846952053（而不是 nickname 字段 %q）", a.Nickname, "NK6952053")
+	}
+}
+
 // TestParseCredentialUIDFallbacks 钉住 UID 的取值优先级。
 //
 // 顺序错乱的后果不是报错，而是**池子里出现幽灵账号**（同一份凭证两个 uid），

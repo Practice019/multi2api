@@ -2540,8 +2540,9 @@ let loginProvider = '';
   // # 规则（与后端 loomy 的 maskDisplay 同一套口径）
   //
   //	已经带 '*' 的（上游给的就是掩码形态，如 150****3411）→ 原样保留
-  //	太短（≤4 字符）→ 全打码
-  //	否则             → 留首 3 尾 2，中间打 *（NK1265861 → NK1****61）
+  //	太短（≤4 字符）→ **原样保留** —— 全打码会变成不可辨认的 ***，
+  //	  比如「妖精七七」→ 无法判断是哪个号（管理台本就可见原文，title 也有）
+  //	否则             → 留首 3 尾 2，中间打 *（13858156740 → 138*****740）
   //
   // 打码发生在**渲染层**：数据（/admin/accounts 的 nickname）不被动，
   // 排障时 title 里放原文（见 accountRow 的 nickname 单元格）。
@@ -2550,7 +2551,7 @@ let loginProvider = '';
     if (!s) return '—';
     if (s.indexOf('*') >= 0) return s;
     const rs = Array.from(s);
-    if (rs.length <= 4) return rs.map(() => '*').join('');
+    if (rs.length <= 4) return s;   // 太短全打码 = 不可辨认，原样
     return rs.slice(0, 3).join('') + '*'.repeat(rs.length - 5) + rs.slice(-2).join('');
   }
 
