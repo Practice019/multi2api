@@ -171,7 +171,12 @@ func ParseCredential(raw []byte) (*Auth, error) {
 	// 都没有才派生。顺序不能反 —— 同一个号在"先派生了 uid、后拿到 userid"
 	// 之后必须收敛到 userid，否则池子里会出现同一份凭证的两个账号。
 	a.UID = firstNonEmpty(a.UserID, strings.TrimSpace(rs.UID), deriveUID(session))
-	a.Nickname = firstNonEmpty(strings.TrimSpace(rs.Nickname), a.Phone, shortUID(a.UID))
+	// 昵称：**手机号优先**（用户要求：所有上游统一用手机号显示账号）。
+	// 顺序不能是 Nickname 字段在前 —— 批量导入的凭证里 nickname 往往是
+	// 登录态的名称（如 NK6952053），而同一份凭证里明明有 phone
+	//（19846952053，手机号登录的必然带）。修复前导入后显示名称、
+	// 手动登录显示手机号，两者不一致。
+	a.Nickname = firstNonEmpty(a.Phone, strings.TrimSpace(rs.Nickname), shortUID(a.UID))
 
 	if !looksLikeSession(session) {
 		// 只告警（见 looksLikeSession 的注释）。
