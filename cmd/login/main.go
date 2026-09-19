@@ -2,7 +2,8 @@
 //
 // 两个子命令，由 login.sh 顺序驱动：
 //
-//	login url   → POST /v2/plugin/auth/state?platform=CLI 拿 state+authUrl，
+//	login url   → POST /v2/plugin/auth/state?platform=workbuddy-ai&version=5.5.2（海外版）
+//	              / ?platform=CLI（国内版）拿 state+authUrl，
 //	              state 落 /tmp/wb2api-login-state.json，stdout 打印授权 URL
 //	login poll  → 读 state，GET /v2/plugin/auth/token?state= 一次，
 //	              成功再 GET /v2/plugin/login/account?state= 拿 uid/nickname，
@@ -54,7 +55,10 @@ func newLoginEnv(intl bool) loginEnv {
 			origin:    originRefererIntl,
 			stateFile: stateFileIntl,
 			channel:   "intl",
-			authState: upstreamBaseIntl + "/v2/plugin/auth/state?platform=CLI",
+			// ★ platform=workbuddy-ai（客户端流程，含「设置地区」），不用 CLI：
+			//   CLI 版登录页没有地区那一步 → 账号不完整开通 → 对话 14017 / 计费 500。
+			//   参照 register-machine 已跑通的注册流程。见 internal/oauth 常量区注释。
+			authState: upstreamBaseIntl + "/v2/plugin/auth/state?platform=workbuddy-ai&version=5.5.2",
 			loginAcct: upstreamBaseIntl + "/v2/plugin/login/account?state=",
 			authToken: upstreamBaseIntl + "/v2/plugin/auth/token?state=",
 		}
