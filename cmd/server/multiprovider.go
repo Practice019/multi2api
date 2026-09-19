@@ -268,6 +268,30 @@ func (r registryRouter) Models(ctx context.Context, id string) ([]gateway.ModelI
 	return ms, true
 }
 
+// ModelMultipliers 经 gateway.ModelMultiplierExt 发现上游自报的官方倍率。
+//
+// workbuddy 系不实现该扩展点（它的倍率走 /v3/config 的 ModelCatalogFor）；
+// codearts / loomy / trae 各自实现，用**自己的官方接口**回答倍率。
+// ok=false = 未实现 / 没账号 / 接口失败 —— 调用方跳过（保持 x无 而不是假数）。
+func (r registryRouter) ModelMultipliers(ctx context.Context, id string) (map[string]float64, bool) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return nil, false
+	}
+	if r.p != nil && len(r.p.AvailableUIDsFor(id)) == 0 {
+		return nil, false
+	}
+	ext, ok := gateway.ExtOf[gateway.ModelMultiplierExt](pv)
+	if !ok {
+		return nil, false
+	}
+	m, err := ext.ModelMultipliers(ctx, r.credentialFor(id))
+	if err != nil || len(m) == 0 {
+		return nil, false
+	}
+	return m, true
+}
+
 // credentialFor 为该上游组装一份**带凭证**的 Credential。
 //
 // 凭证来源是账号池上那份不透明 secret（pool.SecretOf）—— 它由

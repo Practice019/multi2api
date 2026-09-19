@@ -7,6 +7,62 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## 未发布 — 海外版 WorkBuddy AI 渠道（workbuddy-intl）
+
+> 本版主题：**国内版 + 海外版（www.workbuddy.ai）双渠道账号池**。
+
+### 新增
+
+- **海外版渠道实例 `workbuddy-intl`**：同一个 workbuddy.Provider 实现注册第二个实例，
+  凭证目录 `auths/workbuddy-intl/`，OAuth 站点 `https://www.workbuddy.ai`；
+  配置 `workbuddy_intl.enabled=true` 显式启用（缺省关闭，老配置零影响）。
+- **能力裁剪（海外版实测依据）**：海外版 product.json 显式禁用签到/成长/旅行
+  （DisableCheckin=true、UserGrowth=false、DisableActivityBanner=true），
+  因此 workbuddy-intl 实例**只声明对话/模型/额度探测**，不注册玩法后台任务、
+  不挂玩法管理端点（DisableGrowthTravel 开关，默认关，国内版行为不变）。
+- **多实例隔离**：管理端点路径按实例 ID 加 `/<id>` 前缀、后台任务名加 `<id>-` 前缀，
+  同一实现注册多个实例不再互相冲突（默认实例路径/任务名逐字节不变）。
+- **凭证级渠道路由**：`auth` 块新增可选 `channel` 字段（`cn`/`intl`），
+  旧凭证无该字段时按 `domain` 自动推导（含 `workbuddy.ai` → intl）；
+  chat/billing/web 三个域与 Origin/Referer 头随账号渠道自动选择
+  （CN：copilot.tencent.com / www.codebuddy.cn / workbuddy.cn；Intl：www.workbuddy.ai）。
+- **登录**：`./login.sh -intl` / `cmd/login -intl` 走海外版设备授权；
+  WebUI「＋ 添加账号」按上游分派（workbuddy-intl 行内按钮用海外授权站点）。
+- **本机客户端登录切换支持海外版**：按目标账号渠道写
+  `workbuddy-desktop-ai.info` + `~/.workbuddy-ai`（CN 仍为
+  `workbuddy-desktop.info` + `~/.workbuddy`）；进程检测覆盖 `WorkBuddyAI.exe`；
+  备份/回滚带渠道元数据（last.meta.json）。
+- **集成验证**：临时实例实测两个 provider（workbuddy / workbuddy-intl）账号
+  正确并入同一账号池并各自路由。
+
+### 文档 / 工程
+
+- README / config.example.json：海外版渠道章节与配置示例。
+- 凭证格式不变（account+auth 两块），channel 字段可选，旧文件零迁移。
+
+### 新增 — 「添加账号」默认用**无痕窗口**打开授权页
+
+- **默认无痕（`login.open_browser`，缺省 true）**：点「＋ 添加账号」时由**网关自己
+  启动浏览器**打开授权页，不再把"用哪个窗口"交给用户当前浏览器状态 ——
+  否则 OAuth 会拿浏览器里**已登录的账号**完成授权（"加新号"变"加老号"，且无任何报错）。
+- **独立 profile（`login.isolated`，缺省 true）**：给浏览器一份临时
+  `--user-data-dir`（`%TEMP%/wb2api-login-*`，48h 后自动清理），
+  让这次授权从零 cookie 开始；只给无痕参数时，走 SSO 的站点仍可直接用已登录账号。
+  代价是需重新输入账号密码（`isolated=false` 可关，仅开无痕窗口）。
+- **新包 `internal/browseropen`**：`Plan` 是纯决策函数（平台/浏览器/参数向量
+  全部可断言，测试不弹窗口），`Open` = Plan + 启动且**不等待**浏览器退出。
+  候选顺序 Edge → Chrome → Brave → Chromium（Windows 上 Edge 一定存在，
+  避免"点了没反应"）；macOS 走 `open -n -a <App> --args`；`login.browser` 可显式指定路径。
+- **新端点 `POST /admin/login/open`**：用无痕窗口**重新**打开刚签发的授权链接
+  （手滑关掉窗口时用，不会作废当前 state）。**只认本进程签发过的链接** ——
+  入参是 URL 而它会被交给本机浏览器打开，不校验就等于"用本机浏览器访问任意地址"。
+- **失败不拖垮主流程**：开不起来（无 GUI / 策略限制）时授权链接照常返回，
+  响应带 `browser_error` 供界面显示「未能自动打开，请复制链接」；
+  未接线 opener 的部署行为与改造前逐字节一致（不出现 browser 字段）。
+- 前端：弹窗主状态改为「已用 X（无痕）打开」，新增「重新无痕打开」按钮，
+  原「打开授权页面」降级为「普通窗口打开」并标注风险。
+- 配置段 `login.{open_browser,browser,isolated}`。
+
 ## v1.6.0 — 2026-09-15
 
 > 本版为**未发布**的本地里程碑（已 commit、未 push 远端）。主题：**新增第四个上游 TRAE** +

@@ -12,6 +12,25 @@ import (
 	"time"
 )
 
+// 渠道（channel）标识：账号来自哪个上游站点。
+// 与「域名」解耦：域名随 Keycloak 发行方下发（auth 文件里的 domain 字段），
+// 渠道是网关侧的路由维度（选 chat/billing base 与 Origin 头）。
+const (
+	// ChannelCN 国内版 WorkBuddy / CodeBuddy（copilot.tencent.com / www.codebuddy.cn）。
+	ChannelCN = "cn"
+	// ChannelIntl 海外版 WorkBuddy AI（www.workbuddy.ai）。
+	ChannelIntl = "intl"
+)
+
+// DeriveChannel 从凭证 domain 推导渠道：含 workbuddy.ai 的域名视为海外版，
+// 其余（含空值）回落国内版 —— 向后兼容旧凭证文件（无 channel 字段）。
+func DeriveChannel(domain string) string {
+	if strings.Contains(strings.ToLower(domain), "workbuddy.ai") {
+		return ChannelIntl
+	}
+	return ChannelCN
+}
+
 // Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
 type Auth struct {
 	// mu 串行化 RefreshToken 写与 SaveAtomic 读，防止并发写回半更新 token。
@@ -21,6 +40,7 @@ type Auth struct {
 	RefreshToken string
 	ExpiresAt    int64 // Unix 秒
 	Domain       string
+	Channel      string // cn / intl；空 = cn（DeriveChannel 兜底）
 	UID          string
 	EnterpriseID string
 	Nickname     string
@@ -75,6 +95,7 @@ func Parse(raw []byte) (*Auth, error) {
 				RefreshToken string `json:"refreshToken"`
 				ExpiresAt    int64  `json:"expiresAt"`
 				Domain       string `json:"domain"`
+				Channel      string `json:"channel"`
 			} `json:"auth"`
 			Account struct {
 				UID          string `json:"uid"`
@@ -91,6 +112,7 @@ func Parse(raw []byte) (*Auth, error) {
 			RefreshToken: n.Auth.RefreshToken,
 			ExpiresAt:    n.Auth.ExpiresAt,
 			Domain:       n.Auth.Domain,
+			Channel:      n.Auth.Channel,
 			UID:          n.Account.UID,
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
@@ -102,6 +124,7 @@ func Parse(raw []byte) (*Auth, error) {
 			RefreshToken string `json:"refreshToken"`
 			ExpiresAt    int64  `json:"expiresAt"`
 			Domain       string `json:"domain"`
+			Channel      string `json:"channel"`
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
@@ -115,6 +138,7 @@ func Parse(raw []byte) (*Auth, error) {
 			RefreshToken: f.RefreshToken,
 			ExpiresAt:    f.ExpiresAt,
 			Domain:       f.Domain,
+			Channel:      f.Channel,
 			UID:          f.UID,
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
@@ -123,6 +147,10 @@ func Parse(raw []byte) (*Auth, error) {
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
+	}
+	// 旧凭证无 channel 字段：按 domain 推导，保证老文件零迁移即可识别渠道。
+	if a.Channel == "" {
+		a.Channel = DeriveChannel(a.Domain)
 	}
 	return &a, nil
 }
@@ -145,6 +173,7 @@ func (a *Auth) SaveAtomic() error {
 			"refreshToken": a.RefreshToken,
 			"expiresAt":    a.ExpiresAt,
 			"domain":       a.Domain,
+			"channel":      a.Channel,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,

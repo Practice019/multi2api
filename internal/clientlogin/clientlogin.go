@@ -40,9 +40,19 @@ import (
 )
 
 // 客户端凭证文件的固定名，以及它默认所在的目录。
+// 国内版与海外版（WorkBuddy AI）客户端共用同一个凭证目录
+// （%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth），仅文件名与数据目录不同：
+//
+//	CN:    workbuddy-desktop.info        + ~/.workbuddy
+//	Intl:  workbuddy-desktop-ai.info     + ~/.workbuddy-ai
 const (
-	ClientFileName = "workbuddy-desktop.info"
-	snapshotName   = "account-snapshot.json"
+	ClientFileName   = "workbuddy-desktop.info"
+	ClientFileNameAI = "workbuddy-desktop-ai.info"
+	snapshotName     = "account-snapshot.json"
+
+	// homeDirCN / homeDirAI 客户端账号指针（account-snapshot.json）所在的数据目录名。
+	homeDirCN = ".workbuddy"
+	homeDirAI = ".workbuddy-ai"
 
 	// SourceClient 表示凭证取自客户端自己的文件（含轮转备份），字段最完整。
 	SourceClient = "client"
@@ -370,9 +380,19 @@ func (m *Manager) Status() (*Status, error) {
 	// 先把客户端目录里所有凭证（当前 + 轮转备份）归档，候选表才有原生来源。
 	_ = m.syncArchive()
 
-	cur, err := m.loadCurrent()
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		st.Error = err.Error()
+	// 当前登录态：CN 与海外版（AI）客户端文件并存时，取 mtime 较新者
+	// （客户端刷新 token 会更新对应渠道文件的修改时间，mtime 新 = 最近登录态）。
+	// 只有一边存在则用那边；两边都读不到则按未登录处理（候选表仍可用）。
+	cur, curChannel, curErr := m.currentLogin()
+	if cur == nil {
+		if curErr != nil {
+			st.Error = "读取客户端登录态失败: " + curErr.Error()
+		} else {
+			st.Error = "客户端未登录（凭证文件缺失），可从下方候选账号切换"
+		}
+	} else {
+		st.SnapshotFile = m.snapshotPathFor(curChannel)
+		st.ClientFile = m.clientPathFor(curChannel)
 	}
 
 	byUID := map[string]*Candidate{}
@@ -429,7 +449,12 @@ func (m *Manager) Status() (*Status, error) {
 	if bk, err := m.readLastBackup(); err == nil && bk != nil {
 		// 备份与当前账号相同 => 回滚是无操作。这里就把 HasBackup 置否，
 		// 让界面上的「回滚上一次」按钮同步禁用，而不是等用户点了再收 409。
-		same := st.Current != nil && st.Current.UID == bk.Account.UID
+		// 比较口径与 Restore 一致：按备份渠道读当前文件，避免跨渠道误判。
+		ch := m.lastBackupChannel(bk)
+		same := false
+		if bcur, berr := m.loadCurrentFor(ch); berr == nil && bcur != nil {
+			same = bcur.Account.UID == bk.Account.UID
+		}
 		if !same {
 			st.HasBackup = true
 			st.BackupUID = bk.Account.UID
@@ -440,6 +465,35 @@ func (m *Manager) Status() (*Status, error) {
 		}
 	}
 	return st, nil
+}
+
+// currentLogin 返回当前登录态（凭证 + 渠道 + 读取错误）。
+// 双渠道并存时按文件 mtime 取较新者；非 ENOENT 读取错误（损坏/权限）透传给调用方，
+// 由 Status 呈现（候选表不阻断）。
+func (m *Manager) currentLogin() (*credential, string, error) {
+	cn, errCN := m.loadCurrentFor(auth.ChannelCN)
+	ai, errAI := m.loadCurrentFor(auth.ChannelIntl)
+	notExist := func(err error) bool { return err != nil && errors.Is(err, os.ErrNotExist) }
+	switch {
+	case cn != nil && ai != nil:
+		// 两边都有：mtime 新者胜。
+		cnM, cnErr := os.Stat(m.clientPathFor(auth.ChannelCN))
+		aiM, aiErr := os.Stat(m.clientPathFor(auth.ChannelIntl))
+		if cnErr == nil && aiErr == nil && aiM.ModTime().After(cnM.ModTime()) {
+			return ai, auth.ChannelIntl, nil
+		}
+		return cn, auth.ChannelCN, nil
+	case cn != nil:
+		return cn, auth.ChannelCN, nil
+	case ai != nil:
+		return ai, auth.ChannelIntl, nil
+	case errCN != nil && !notExist(errCN):
+		return nil, auth.ChannelCN, errCN
+	case errAI != nil && !notExist(errAI):
+		return nil, auth.ChannelIntl, errAI
+	default:
+		return nil, auth.ChannelCN, nil
+	}
 }
 
 // candidate 从一份客户端原生凭证生成候选视图。
@@ -502,18 +556,50 @@ func tokenHint(tok string) string {
 // 读写
 // ---------------------------------------------------------------------------
 
-func (m *Manager) clientPath() string { return filepath.Join(m.clientDir, ClientFileName) }
-func (m *Manager) snapshotPath() string {
-	return filepath.Join(m.home, ".workbuddy", "storage", "skeleton", snapshotName)
+func (m *Manager) clientPathFor(channel string) string {
+	return filepath.Join(m.clientDir, clientFileNameFor(channel))
 }
 
-// loadCurrent 读取客户端当前凭证。
+// clientFileNameFor 按渠道返回客户端凭证文件名。
+// 海外版（intl）客户端写 workbuddy-desktop-ai.info，国内版写 workbuddy-desktop.info。
+func clientFileNameFor(channel string) string {
+	if channel == auth.ChannelIntl {
+		return ClientFileNameAI
+	}
+	return ClientFileName
+}
+
+func (m *Manager) snapshotPathFor(channel string) string {
+	home := homeDirNameFor(channel)
+	return filepath.Join(m.home, home, "storage", "skeleton", snapshotName)
+}
+
+// homeDirNameFor 按渠道返回客户端数据目录名（~ 下的目录）。
+func homeDirNameFor(channel string) string {
+	if channel == auth.ChannelIntl {
+		return homeDirAI
+	}
+	return homeDirCN
+}
+
+// clientPath / snapshotPath 保留 CN 默认语义（国内版客户端），
+// 供读取「当前客户端状态」等默认场景使用；切换/回滚按目标账号渠道走 *For 版本。
+func (m *Manager) clientPath() string { return m.clientPathFor(auth.ChannelCN) }
+func (m *Manager) snapshotPath() string {
+	return m.snapshotPathFor(auth.ChannelCN)
+}
+
+// loadCurrent 读取国内版客户端当前凭证；loadCurrentFor 按渠道读。
 func (m *Manager) loadCurrent() (*credential, error) {
-	raw, err := os.ReadFile(m.clientPath())
+	return m.loadCurrentFor(auth.ChannelCN)
+}
+
+func (m *Manager) loadCurrentFor(channel string) (*credential, error) {
+	raw, err := os.ReadFile(m.clientPathFor(channel))
 	if err != nil {
 		return nil, err
 	}
-	return parseCredential(raw, m.clientPath())
+	return parseCredential(raw, m.clientPathFor(channel))
 }
 
 // syncArchive 扫描客户端目录，把每份凭证按 uid 归档到 archiveDir/<uid>.json，
@@ -639,6 +725,28 @@ func (m *Manager) lastBackupPath() string {
 	return filepath.Join(m.archiveDir, "last.json")
 }
 
+// lastBackupMetaPath 是与 last.json 配套的渠道元数据（{"channel":"cn|intl","uid":"..."}）。
+// Restore 据此把备份写回正确的渠道文件，不依赖备份内容里的 domain 字段。
+func (m *Manager) lastBackupMetaPath() string {
+	return filepath.Join(m.archiveDir, "last.meta.json")
+}
+
+// lastBackupChannel 读渠道元数据；缺失或解析失败时回退按备份 domain 推导。
+func (m *Manager) lastBackupChannel(bk *credential) string {
+	if raw, err := os.ReadFile(m.lastBackupMetaPath()); err == nil {
+		var meta struct {
+			Channel string `json:"channel"`
+		}
+		if json.Unmarshal(raw, &meta) == nil && meta.Channel != "" {
+			return meta.Channel
+		}
+	}
+	if bk != nil {
+		return auth.DeriveChannel(bk.Auth.Domain)
+	}
+	return auth.ChannelCN
+}
+
 func (m *Manager) readLastBackup() (*credential, error) {
 	raw, err := os.ReadFile(m.lastBackupPath())
 	if err != nil {
@@ -702,9 +810,27 @@ func (m *Manager) Switch(uid string) (*SwitchResult, error) {
 		return nil, fmt.Errorf("归档客户端凭证失败: %w", err)
 	}
 
-	cur, curErr := m.loadCurrent()
+	// 先把目标凭证解析出来，确定渠道（buildTarget 不依赖当前文件，
+	// 模板继承在拿到渠道后按目标渠道文件补齐——见 inheritClientFields）。
+	target, source, channel, err := m.buildTarget(uid)
+	if err != nil {
+		return nil, err
+	}
+	// 防御：绝不用空 token 覆盖有效凭据。
+	if strings.TrimSpace(target.Auth.AccessToken) == "" {
+		return nil, errors.New("拒绝写入空 accessToken")
+	}
+
+	targetPath := m.clientPathFor(channel)
+
+	// 目标渠道的当前登录态：same-account 判断与模板继承都按目标渠道文件，
+	// 避免把 CN 文件的会话字段误写进 intl 文件（或反之）。
+	cur, curErr := m.loadCurrentFor(channel)
 	if curErr == nil && cur != nil && cur.Account.UID == uid {
 		return nil, ErrSameAccount
+	}
+	if cur != nil {
+		target = m.inheritClientFields(target, cur)
 	}
 
 	// 客户端在跑就直接拒绝：写进去也会被它按内存会话覆盖回去（见 ErrClientRunning）。
@@ -713,45 +839,37 @@ func (m *Manager) Switch(uid string) (*SwitchResult, error) {
 		return nil, ErrClientRunning
 	}
 
-	// 先把目标凭证解析出来，再动备份。
-	// 顺序很重要：buildTarget 会失败（账号不存在、凭据解析不了），
-	// 如果先写备份，一次失败就会覆盖掉上一次的有效备份 ——
-	// 用户本来能回滚到 A，失败一次之后只能回滚到 B，回滚目标被静默换掉了。
-	target, source, err := m.buildTarget(uid, cur)
-	if err != nil {
-		return nil, err
-	}
-	// 防御：绝不用空 token 覆盖有效凭据。
-	if strings.TrimSpace(target.Auth.AccessToken) == "" {
-		return nil, errors.New("拒绝写入空 accessToken")
-	}
 	out, err := target.marshal()
 	if err != nil {
 		return nil, fmt.Errorf("生成凭据失败: %w", err)
 	}
 
 	// 到这里才确认这次切换写得成，开始备份。
-	// 备份失败就中止 —— 没有回滚能力时不做破坏性操作。
+	// 备份对象是「即将被覆盖的那个文件」；首次切换该渠道（文件不存在）时
+	// ENOENT 不算失败——没有旧登录态可备份，直接继续。
+	// 备份失败才中止 —— 没有回滚能力时不做破坏性操作。
 	backupPath := ""
-	if curErr == nil && cur != nil {
-		raw, err := os.ReadFile(m.clientPath())
-		if err != nil {
-			return nil, fmt.Errorf("读取当前凭据失败: %w", err)
-		}
+	if raw, err := os.ReadFile(targetPath); err == nil {
 		if err := writeFileAtomic(m.lastBackupPath(), raw, 0o600); err != nil {
 			return nil, fmt.Errorf("备份当前登录态失败，已中止切换: %w", err)
+		}
+		// 渠道元数据随备份落盘：Restore 按它回写正确渠道，不依赖备份内容里的 domain。
+		if err := writeFileAtomic(m.lastBackupMetaPath(), []byte(`{"channel":"`+channel+`","uid":"`+uid+`"}`+"\n"), 0o600); err != nil {
+			return nil, fmt.Errorf("备份渠道元数据失败，已中止切换: %w", err)
 		}
 		// 除 last.json 外再留一份带时间戳的副本：连点两次切换时，last.json 会被覆盖，
 		// 而带时间戳的副本让每一次切换都留下独立痕迹。
 		ts := time.Now().Format("20060102-150405")
 		backupPath = filepath.Join(m.archiveDir, fmt.Sprintf("switch-backup-%s-%s.info", ts, sanitizeUID(uid)))
 		_ = writeFileAtomic(backupPath, raw, 0o600)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("读取当前凭据失败: %w", err)
 	}
 
-	if err := writeFileAtomic(m.clientPath(), out, 0o600); err != nil {
+	if err := writeFileAtomic(targetPath, out, 0o600); err != nil {
 		return nil, fmt.Errorf("写入客户端凭据失败: %w", err)
 	}
-	if err := m.writeSnapshot(target.Account); err != nil {
+	if err := m.writeSnapshotFor(target.Account, channel); err != nil {
 		// 凭据已写入，账号指针没跟上：客户端可能仍按旧账号显示。
 		// 不静默吞掉，明确告诉调用方。
 		return nil, fmt.Errorf("凭据已切换，但账号指针写入失败（客户端可能仍显示旧账号）: %w", err)
@@ -771,61 +889,50 @@ func (m *Manager) Switch(uid string) (*SwitchResult, error) {
 	}, nil
 }
 
-// buildTarget 选出目标凭证并补齐客户端专有字段。
-func (m *Manager) buildTarget(uid string, cur *credential) (*credential, string, error) {
+// buildTarget 选出目标凭证（客户端原生存档优先，账号池兜底）。
+// 返回的第三个值是目标账号的渠道（cn/intl），决定写入哪个客户端文件与账号指针。
+// 模板继承（客户端专有字段）由调用方在拿到渠道后按目标渠道文件补齐。
+func (m *Manager) buildTarget(uid string) (*credential, string, string, error) {
 	// 先找客户端原生凭证（存档里最完整，含 sessionState/scope/uin/phoneNumber）。
 	for _, c := range m.listArchive() {
 		if c.Account.UID == uid {
 			cp := *c
-			cp.path = m.clientPath()
+			ch := auth.DeriveChannel(c.Auth.Domain)
+			cp.path = m.clientPathFor(ch)
 			cp.Account.LastLogin = true
-			return &cp, SourceClient, nil
+			return &cp, SourceClient, ch, nil
 		}
 	}
 
 	// 回退到管理台账号池：token 同源，只需补齐客户端专有的元数据。
 	p := m.gatewayPath(uid)
 	if p == "" {
-		return nil, "", fmt.Errorf("账号 %s 在客户端存档和账号池里都找不到凭证", uid)
+		return nil, "", "", fmt.Errorf("账号 %s 在客户端存档和账号池里都找不到凭证", uid)
 	}
 	raw, err := os.ReadFile(p)
 	if err != nil {
-		return nil, "", fmt.Errorf("读取账号池凭据失败: %w", err)
+		return nil, "", "", fmt.Errorf("读取账号池凭据失败: %w", err)
 	}
 	a, err := auth.Parse(raw)
 	if err != nil {
-		return nil, "", fmt.Errorf("解析账号池凭据失败: %w", err)
+		return nil, "", "", fmt.Errorf("解析账号池凭据失败: %w", err)
+	}
+	ch := a.Channel
+	if ch == "" {
+		ch = auth.DeriveChannel(a.Domain)
 	}
 
-	// 从当前文件继承「与账号身份无关」的字段，保留客户端自己写进去的其他顶层键。
-	// 关键：account 块必须区分「可以继承的外观字段」与「属于某个账号的身份字段」——
-	// 身份字段（uid/nickname/uin/phoneNumber/mpOpenId）一律重写，
-	// 否则会出现「新账号带着旧账号手机号」这种比不切换更糟的状态。
-	tmpl := map[string]json.RawMessage{}
-	var acct accountBlock
-	if cur != nil {
-		for k, v := range cur.keys {
-			tmpl[k] = v
-		}
-		acct = accountBlock{
-			PluginEnabled: cur.Account.PluginEnabled,
-			DeployStatus:  cur.Account.DeployStatus,
-			AccountType:   cur.Account.AccountType,
-			SSO:           cur.Account.SSO,
-			Idp:           cur.Account.Idp,
-			// EditionType 之类的展示字段不在本次写入范围内，交由 account-snapshot 保留。
-		}
-	} else {
-		acct.PluginEnabled = true
+	acct := accountBlock{
+		UID:           a.UID,
+		Nickname:      a.Nickname,
+		Type:          "personal",
+		LastLogin:     true,
+		Uin:           "",
+		MpOpenID:      "",
+		PluginEnabled: true,
+		// 昵称在个人账号下就是手机号；账号池拿不到 phoneNumber，用昵称兜底比留空好。
+		PhoneNumber: a.Nickname,
 	}
-	acct.UID = a.UID
-	acct.Nickname = a.Nickname
-	acct.Type = "personal"
-	acct.LastLogin = true
-	acct.Uin = ""
-	acct.MpOpenID = ""
-	// 昵称在个人账号下就是手机号；账号池拿不到 phoneNumber，用昵称兜底比留空好。
-	acct.PhoneNumber = a.Nickname
 
 	ab := authBlock{
 		AccessToken:  a.AccessToken,
@@ -835,11 +942,8 @@ func (m *Manager) buildTarget(uid string, cur *credential) (*credential, string,
 		Scope:        "profile offline_access email",
 		ExpiresAt:    a.ExpiresAt * 1000, // 客户端用毫秒
 	}
-	// 从当前文件继承常量型字段（realm 的 notBeforePolicy 等），拿不到就用观察到的默认值。
-	if cur != nil {
-		ab.NotBeforePolicy = cur.Auth.NotBeforePolicy
-		ab.SessionState = cur.Auth.SessionState
-	}
+	// 常量型字段（realm 的 notBeforePolicy 等）拿不到时用观察到的默认值；
+	// 会话字段（sessionState）必须在拿到目标渠道当前文件后继承，见 inheritClientFields。
 	if ab.NotBeforePolicy == 0 {
 		ab.NotBeforePolicy = 1724292326
 	}
@@ -856,11 +960,42 @@ func (m *Manager) buildTarget(uid string, cur *credential) (*credential, string,
 	}
 
 	return &credential{
-		keys:    tmpl,
+		keys:    nil, // keys 由 inheritClientFields 从目标渠道当前文件填充
 		Account: acct,
 		Auth:    ab,
-		path:    m.clientPath(),
-	}, SourceGateway, nil
+		path:    m.clientPathFor(ch),
+	}, SourceGateway, ch, nil
+}
+
+// inheritClientFields 把目标渠道当前文件里「与账号身份无关」的字段继承到目标凭证：
+// 顶层未知键（keys）、account 外观字段（SSO/Idp/DeployStatus…）、auth 会话字段
+// （NotBeforePolicy/SessionState）。身份字段（uid/nickname/uin/phoneNumber/mpOpenId）
+// 一律重写，否则会出现「新账号带着旧账号手机号」这种比不切换更糟的状态。
+// cur 必须来自目标渠道（loadCurrentFor(channel)），避免跨渠道串会话参数。
+func (m *Manager) inheritClientFields(target *credential, cur *credential) *credential {
+	if cur == nil {
+		return target
+	}
+	tmpl := map[string]json.RawMessage{}
+	for k, v := range cur.keys {
+		tmpl[k] = v
+	}
+	// 外观字段无条件继承（与原逻辑一致：cur 存在即以 cur 为准）。
+	// 身份字段（uid/nickname/uin/phoneNumber/mpOpenId）已在 buildTarget 里重写，不覆盖。
+	target.Account.PluginEnabled = cur.Account.PluginEnabled
+	target.Account.DeployStatus = cur.Account.DeployStatus
+	target.Account.AccountType = cur.Account.AccountType
+	target.Account.SSO = cur.Account.SSO
+	target.Account.Idp = cur.Account.Idp
+	// auth 会话字段：NotBeforePolicy/SessionState 属于 realm/会话，随当前文件继承。
+	if target.Auth.NotBeforePolicy == 0 {
+		target.Auth.NotBeforePolicy = cur.Auth.NotBeforePolicy
+	}
+	if target.Auth.SessionState == "" {
+		target.Auth.SessionState = cur.Auth.SessionState
+	}
+	target.keys = tmpl
+	return target
 }
 
 // snapshotDoc 对应 ~/.workbuddy/storage/skeleton/account-snapshot.json。
@@ -878,10 +1013,15 @@ type snapshotDoc struct {
 	} `json:"primary"`
 }
 
-// writeSnapshot 让客户端的「当前账号」指针指向刚切过去的账号。
-// 文件不存在时按观察到的形态新建；存在时保留 editionType 之类的原值。
+// writeSnapshot 让客户端的「当前账号」指针指向刚切过去的账号（CN 客户端）。
 func (m *Manager) writeSnapshot(acct accountBlock) error {
-	p := m.snapshotPath()
+	return m.writeSnapshotFor(acct, auth.ChannelCN)
+}
+
+// writeSnapshotFor 按渠道写账号指针：CN → ~/.workbuddy，intl → ~/.workbuddy-ai。
+// 文件不存在时按观察到的形态新建；存在时保留 editionType 之类的原值。
+func (m *Manager) writeSnapshotFor(acct accountBlock, channel string) error {
+	p := m.snapshotPathFor(channel)
 	if p == "" {
 		return errors.New("无法定位 account-snapshot.json")
 	}
@@ -931,18 +1071,21 @@ func (m *Manager) Restore() (*SwitchResult, error) {
 	}
 	// 备份与当前是同一个账号时无事可做。这种情况出现在「切换后立刻回滚」之后再点一次回滚：
 	// 直接报错比默默重写两个文件更诚实（重写还会平白刷新 savedAt）。
-	if cur, cerr := m.loadCurrent(); cerr == nil && cur != nil && cur.Account.UID == bk.Account.UID {
+	// 渠道取备份元数据（last.meta.json），缺失才回退按备份 domain 推导。
+	ch := m.lastBackupChannel(bk)
+	if cur, cerr := m.loadCurrentFor(ch); cerr == nil && cur != nil && cur.Account.UID == bk.Account.UID {
 		return nil, ErrAlreadyBackedUp
 	}
 	// 回滚本身也要可回滚：先把当前文件转存成一份带时间戳的副本。
-	if cur, err := os.ReadFile(m.clientPath()); err == nil && len(cur) > 0 {
+	curPath := m.clientPathFor(ch)
+	if cur, err := os.ReadFile(curPath); err == nil && len(cur) > 0 {
 		ts := time.Now().Format("20060102-150405")
 		_ = writeFileAtomic(filepath.Join(m.archiveDir, "restore-backup-"+ts+".info"), cur, 0o600)
 	}
-	if err := writeFileAtomic(m.clientPath(), raw, 0o600); err != nil {
+	if err := writeFileAtomic(curPath, raw, 0o600); err != nil {
 		return nil, fmt.Errorf("回滚凭据失败: %w", err)
 	}
-	if err := m.writeSnapshot(bk.Account); err != nil {
+	if err := m.writeSnapshotFor(bk.Account, ch); err != nil {
 		return nil, fmt.Errorf("凭据已回滚，但账号指针写入失败: %w", err)
 	}
 	nick := bk.Account.Nickname

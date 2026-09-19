@@ -1541,8 +1541,22 @@ let loginProvider = '';
     for (const p of (PROVIDERS || [])) {
       if (p && typeof p === 'object' && p.id) ids.push(String(p.id));
     }
-    ids.sort();
+    // 保持 manifest 下发顺序，**不再字典序重排**。
+    //
+    // 旧实现 `ids.sort()` 把所有上游拉回字典序（codearts < loomy < trae <
+    // workbuddy < workbuddy-intl），把服务端显式排好的展示顺序覆盖掉 ——
+    // 账号池分组、模型分组、导航分组全部失效（海外版永远排不到最前）。
+    // 顺序的单一来源是服务端（admin/uimanifest.go 的 prioritizeProviders），
+    // 这里原样透传；顺序稳定性由服务端的 stable 排序保证。
     return ids;
+  }
+
+  // providerRank 上游在 manifest 中的位置（providerRegistryIds 的索引）。
+  // 不在 manifest 里的 id（历史号、兜底组、owned_by 值）排到末尾；
+  // 同名 id 用稳定排序保持相对顺序。
+  function providerRank(id) {
+    const i = providerRegistryIds().indexOf(id);
+    return i < 0 ? providerRegistryIds().length : i;
   }
 
   // providersWithCap 返回声明了某能力的所有上游 id。
@@ -1667,13 +1681,16 @@ let loginProvider = '';
       a && typeof a === 'object' && a.provider === providerId && a.id && a.label);
   }
 
-  // upstreamGroups 返回导航用的上游分组（默认上游在最前，其余字典序）。
+  // upstreamGroups 返回导航用的上游分组。
   //
-  // # 为什么排序必须显式做
+  // # 排序以服务端 manifest 为准（不再本地重排）
   //
   // 顺序必须**稳定**，不能依赖对象/数组遍历顺序，否则每次刷新导航都会跳位。
-  // 后端 manifest 已经排过一次（按 provider 字典序），这里再按"默认优先"重排，
-  // 保证默认上游始终在第一组。
+  // 旧实现在这里"默认上游最前 + 其余字典序"重排 —— 它会把后端 manifest
+  // 显式排好的顺序覆盖掉（海外版 workbuddy-intl 按字典序被丢到 workbuddy
+  // 后面，与后端下发的展示顺序相悖）。现在顺序由后端单一来源决定
+  // （admin/uimanifest.go 的 prioritizeProviders：workbuddy-intl 置顶、
+  // workbuddy 次之、其余保持注册顺序），前端原样透传。
   function upstreamGroups() {
     // 过滤掉 null / 非对象元素（CP3 评审 F1）。
     //
@@ -1687,11 +1704,6 @@ let loginProvider = '';
     //
     // 2 行的成本换掉一类"不可达但真发生时极难查"的故障，值得。
     const out = (PROVIDERS || []).filter(p => p && typeof p === 'object');
-    out.sort((x, y) => {
-      const xd = !!x.default, yd = !!y.default;
-      if (xd !== yd) return xd ? -1 : 1;
-      return x.id < y.id ? -1 : x.id > y.id ? 1 : 0;
-    });
     // 没有任何能力面板且账号数为 0 的上游不占导航位置（见计划的"显示门槛"决策）。
     return out.filter(p => p.account_count > 0 || hasAnyPanel(p.id));
   }
@@ -2169,25 +2181,19 @@ let loginProvider = '';
 
   // groupAccountsByProvider 把账号按上游分组。
   //
-  // 排序必须**稳定**：默认上游优先；其余**有账号的在前、0 账号的在后**，
-  // 组内按 id 字典序。不依赖 Map 遍历顺序，否则每次刷新行序都会跳。
+  // # 排序以服务端 manifest 为准（不再本地重排）
   //
-  // # 为什么空组要排在后面（用户确认的排序）
+  // 分组顺序直接来自 registryAccounts（它按 providerRegistryIds 建组，
+  // 而后者已透传 manifest 顺序）——**这里不再 sort**。
   //
-  // 账号池的第一眼用途是"我的号在哪"。空组是**待办**，不是内容 ——
-  // 排在前面会把每个上游都变成一行噪声，把真实账号挤到屏幕外。
-  // 本函数只负责排序；空组由 registryAccounts 建出来。
+  // 旧排序"有账号的在前 + 默认上游优先 + 组内字典序"曾把服务端显式顺序
+  // 覆盖掉：workbuddy-intl（海外版，0 账号）被按字典序/空组规则挤到最后，
+  // 用户要求的展示顺序（workbuddy-intl → workbuddy → codearts → loomy →
+  // trae）永远到不了前端。顺序的单一来源是服务端
+  // （admin/uimanifest.go 的 prioritizeProviders），前端原样透传。
   function groupAccountsByProvider(list) {
     const out = registryAccounts(list);
     for (const g of out) g.isDefault = g.provider === DEFAULT_PROVIDER;
-    out.sort((x, y) => {
-      // 有号的优先。这是主序 —— 「默认上游」只在**同级之间**才起作用，
-      // 否则默认上游恰好没号时，它会被顶到有号的上游前面。
-      const xe = x.accounts.length === 0, ye = y.accounts.length === 0;
-      if (xe !== ye) return xe ? 1 : -1;
-      if (x.isDefault !== y.isDefault) return x.isDefault ? -1 : 1;
-      return x.provider < y.provider ? -1 : x.provider > y.provider ? 1 : 0;
-    });
     return out;
   }
 
@@ -3197,15 +3203,107 @@ let loginProvider = '';
     // 用户完全无法判断发生了什么。
     const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
     if (hasAuthURL) {
+    // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
+    //
+    // 用户要求：默认打开的就是无痕模式。打开动作由**后端**完成
+    // （点「添加账号」时自动开一次，见 admin 的 openAuthBrowser /
+    // internal/browseropen），因为前端 target=_blank 打开的窗口
+    // 属于用户当前的浏览器状态 —— OAuth 会拿那边已登录的账号完成授权，
+    // 于是"加新号"变成"把老号再加一遍"，而且它**成功**了，没有报错。
+    //
+    // 三种回执要区分开，不能糊成一句"请打开授权页"：
+    //   r.browser       后端已开成 → 告诉用户去那个无痕窗口
+    //   r.browser_error 后端没开成 → 明确说"没开成"并突出复制链接
+    //   两者都空        未接线    → 说清是部署没启用，别让用户干等
+    // ⚠ 这段刻意**只用** else-if 收尾，不写最后那个 else 关键字加花括号：
+    // 下面那条「无授权页分支不许出现 <a href=」的守卫是按**第一处**
+    // else 块切分函数体的（它读的是**字节**，分不出注释与代码），
+    // 在这里插一个 else 块会把切分点提前，让守卫去检查错误的区域
+    //（fail-open 地失去判别力 —— 而不是报错，所以特别难发现）。
+    let openNote = `<div id="loginOpenNote" class="dim" style="font-size:12px;margin-bottom:8px">
+        本部署未启用自动打开浏览器：请点「复制链接」，粘贴到
+        <b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+      </div>`;
+    if (r.browser) {
+      openNote = `<div id="loginOpenNote" class="ok" style="font-size:12px;margin-bottom:8px">
+        ✅ 已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
+      </div>`;
+    } else if (r.browser_error) {
+      openNote = `<div id="loginOpenNote" class="err" style="font-size:12px;margin-bottom:8px">
+        ⚠ 未能自动打开浏览器（${esc(r.browser_error)}）——
+        请点「复制链接」，粘贴到<b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+      </div>`;
+    }
     $('loginBody').innerHTML = `
       <div class="row" style="margin-bottom:10px">
-        <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer" class="primary"
-           style="text-decoration:none;padding:8px 16px;border-radius:8px;background:var(--acc);color:#fff;font-weight:600">
-         打开授权页面
-        </a>
+        <button id="btnReopenAuth" type="button" class="primary"
+           style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:#fff;cursor:pointer;font-weight:600"
+           title="用无痕窗口重新打开本次授权链接">重新无痕打开</button>
+        <button id="btnCopyAuth" type="button"
+           style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
+           title="复制授权链接，粘贴到无痕/隐私窗口">复制链接</button>
+        <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer"
+           style="padding:8px 12px;border-radius:8px;color:var(--dim);font-size:12px"
+           title="在普通窗口打开（不推荐：可能用浏览器里已登录的账号完成授权）">普通窗口打开</a>
         <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
       </div>
+      ${openNote}
+      <div class="dim" style="font-size:12px;margin-bottom:8px">
+        💡 无痕窗口可避免浏览器里已登录的腾讯账号把会话串到别的账号上。
+      </div>
       <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
+    // 重开：后端只认「本进程刚签发过的链接」（见 /admin/login/open），
+    // 所以这里回传的必须是本次 start 拿到的那条 r.auth_url。
+    // 手滑关掉无痕窗口时用它 —— 比重走一遍 start 好：不会作废当前 state。
+    const btnReopen = $('btnReopenAuth');
+    if (btnReopen) {
+      btnReopen.onclick = async () => {
+        btnReopen.disabled = true;
+        btnReopen.textContent = '正在打开…';
+        try {
+          const o = await admin('/admin/login/open',
+            { method: 'POST', body: JSON.stringify({ url: r.auth_url }) });
+          btnReopen.textContent = '已打开 ✓';
+          if (o && o.browser) {
+            // 按 **id** 定位提示行，不用 querySelector('.dim') ——
+            // 同一块 DOM 里的 #loginState 也是 .dim 且在文档序更靠前，
+            // 按类查会命中它，把"等待授权…"覆盖成"已打开"（状态就丢了）。
+            const first = $('loginOpenNote');
+            if (first) {
+              first.className = 'ok';
+              first.style.fontSize = '12px';
+              first.style.marginBottom = '8px';
+              first.innerHTML = `✅ 已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
+            }
+          }
+        } catch (e) {
+          // 失败必须说出来：静默失败会显示成"点了没反应"。
+          btnReopen.textContent = '打开失败';
+          const out = $('loginOut');
+          if (out) out.textContent = '重新打开失败：' + (e && e.message ? e.message : e);
+        }
+        setTimeout(() => { btnReopen.textContent = '重新无痕打开'; btnReopen.disabled = false; }, 2000);
+      };
+    }
+    const btnCopy = $('btnCopyAuth');
+    if (btnCopy) {
+      btnCopy.onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(r.auth_url);
+          btnCopy.textContent = '已复制 ✓';
+        } catch {
+          // 剪贴板 API 不可用（http 非 https / 权限）时回落选中文本提示。
+          const tmp = document.createElement('textarea');
+          tmp.value = r.auth_url;
+          document.body.appendChild(tmp);
+          tmp.select();
+          document.execCommand('copy');
+          tmp.remove();
+          btnCopy.textContent = '已复制 ✓';
+        }
+        setTimeout(() => { btnCopy.textContent = '复制链接'; }, 2000);
+      };
+    }
     } else {
       // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
       $('loginBody').innerHTML = `
@@ -6126,7 +6224,11 @@ let multCatalogFailed = false;
       const next = {};
       for (const m of (r && r.models) || []) {
         // 保留 0：x0.00 是「免费」这个有意义的事实，不能用真值判断把它丢掉。
-        if (m && m.model) next[m.model] = Number(m.multiplier) || 0;
+        if (!m || !m.model) continue;
+        // 键 = `provider/裸名`（多上游同名模型互不覆盖；裸名条目兼容单上游）。
+        // 后端 modelsPreview 自多上游改造起给每条带 provider。
+        const key = m.provider ? m.provider + '/' + m.model : m.model;
+        next[key] = Number(m.multiplier) || 0;
       }
       modelMultipliers = next;
       multCatalogFailed = false;
@@ -6186,45 +6288,29 @@ let multCatalogFailed = false;
 
   // multTableKey 解析**这个展示 id 能不能查倍率表**：能查则给出键，不能查返回 null。
   //
-  // # 为什么不能"去前缀就直接查"（这条是有真浏览器实测证据的缺陷）
+  // # 多上游改造后：表按 (provider, 裸名) 组织，任何上游都能查
   //
-  // `modelMultipliers` 来自 `/admin/models/preview` → 后端 `h.cfg.ModelCatalog()`，
-  // 而那份目录**只由默认上游的客户端构建**（装配层的 catalogHost 只喂默认上游），
-  // 键是那份目录里的**裸名**（如 `glm-5.3-flash`）。于是别家上游的
-  // `codearts/glm-5.3-flash` 去掉前缀后，正好撞上**默认上游的同名条目**。
+  // 改造前（单上游时代）`modelMultipliers` 只有默认上游一份目录，于是带前缀的
+  // `codearts/glm-5.3-flash` 去掉前缀会**撞上默认上游的同名条目**（一个错的数字
+  // 比 x无 有害得多）。真 Chrome 实测过那种错位，判据是"只有默认上游才查表"。
   //
-  // 真 Chrome 实测（改造前）：
-  //
-  //   workbuddy 组 16 个：`workbuddy/glm-5.2` x0.79 …            ← 正确
-  //   codearts  组  7 个：`codearts/glm-5.3-flash` **x0.06**，
-  //                       同组另外 6 个 x无
-  //   /admin/models/preview 的返回里只有一条裸名 `glm-5.3-flash`:0.06，
-  //   **没有任何 codearts 条目** —— 那个 0.06 是 workbuddy 目录里的系数。
-  //
-  // ∴ **显示一个错的数字，比显示 x无 有害得多**：用户按它算成本会算错账，
-  // 而且完全看不出哪里不对（同一组里"只有一个模型有倍率"，看着还挺正常）。
-  //
-  // # 判据
-  //
-  //   · **裸名**（无 `provider/` 前缀）→ 原样去查，行为与加这个函数之前**完全一致**
-  //     （单上游部署、或后端没给前缀的条目都走这一支）。
-  //   · **带前缀** → 只有**前缀就是默认上游**时才去前缀查表；别家上游**不查**。
+  // 自多上游倍率改造起，后端 /admin/models/preview 遍历**全部已注册上游**、
+  // 每条带 provider，前端表键 = `provider/裸名`（workbuddy 与 workbuddy-intl 的
+  // 同名模型互不覆盖）。因此带前缀的展示 id 直接以 `prefix/裸名` 查表即可，
+  // 不再限制默认上游 —— 限制会把海外版（workbuddy-intl）的倍率整组判成 x无。
   //
   // ⚠ 判据只此一处：multTag 与 multTagPlain 都调它，各自不写第二份判断
   //（与 multKeyOf 同一个风格：一个函数、两个调用点）。
   //
-  // ⚠ DEFAULT_PROVIDER 的赋值时机：它**只**在 applyManifest 里、manifest 到达后
-  // 才被赋值（见它的定义处），在那之前一直是空串 `''`。而真实上游名不可能是空串，
-  // 于是**归属未知时所有带前缀的 id 都落进"不查表"这一支**，显示 x无。
-  // 这是唯一可接受的失败方向：宁可显示 x无，也不要在归属未知时错显别家的数字。
+  // ⚠ 兼容：裸名（无前缀）仍按裸名查（单上游部署、后端没带 provider 的条目）。
+  // 带前缀但表里没有 `provider/裸名` 键 → 返回 null（不显示别家的数字）。
   function multTableKey(id) {
     const slash = String(id || '').indexOf('/');
     // 无前缀 → 它本来就是倍率表的键（查不到就是"上游没配"，由调用方处理）。
     if (!(slash > 0)) return multKeyOf(id);
-    const prefix = String(id).slice(0, slash);
-    // 前缀不是默认上游 → 这张表根本不覆盖它，**不查**（别家不继承默认上游的系数）。
-    if (prefix !== DEFAULT_PROVIDER) return null;
-    return multKeyOf(id);
+    // 带前缀 → `provider/裸名` 组合键。查不到说明这张表没有该上游的该模型
+    //（显示 x无，title 区分"上游未提供"与"目录不覆盖"见 multTag）。
+    return String(id);
   }
 
   // 倍率标记：有系数才加，且 0 也要显示（免费是有效信息）。
@@ -6390,7 +6476,7 @@ let multCatalogFailed = false;
       const o = modelOwnerOf(m.id, m.owned_by);
       if (o && owners.indexOf(o) < 0) owners.push(o);
     }
-    owners.sort();
+    owners.sort((a, b) => providerRank(a) - providerRank(b));
     const keep = modelProviderWanted;
     el.innerHTML = '<option value="">全部上游</option>'
       + owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
@@ -6481,9 +6567,9 @@ let multCatalogFailed = false;
       //（倍率表的键是上游目录里的裸名，且只覆盖默认上游，见 multTableKey 的注释）。
       g.items.push({ id: m.id, fullId: m.id, owner: owner });
     }
-    // 组间按上游名排序；组内按名字排序（顺序稳定，便于扫读）。
+    // 组间按 manifest 上游顺序排序（providerRank）；组内按名字排序（顺序稳定，便于扫读）。
     const out = Array.from(byOwner.values());
-    out.sort((a, b) => (a.owner < b.owner ? -1 : a.owner > b.owner ? 1 : 0));
+    out.sort((a, b) => providerRank(a.owner) - providerRank(b.owner));
     out.forEach(g => g.items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
     return out;
   }
@@ -6910,6 +6996,18 @@ let multCatalogFailed = false;
     loadHistory();
   }
 
+  // testUsageLine 组装对话测试的 token 用量行：prompt/completion/总计 + tok/s。
+  // 复用 tokPerSec（与请求日志表格同口径：tokens<0 视为缺失显示 -）。
+  function testUsageLine(usage, totalMs) {
+    if (!usage || typeof usage !== 'object') return '';
+    const p = usage.prompt_tokens, c = usage.completion_tokens;
+    const np = Number(p), nc = Number(c);
+    const total = (Number.isFinite(np) && np > 0 ? np : 0) + (Number.isFinite(nc) && nc > 0 ? nc : 0);
+    const pt = Number.isFinite(np) ? np : '-';
+    const ct = Number.isFinite(nc) ? nc : '-';
+    return ` · prompt ${pt} / completion ${ct} · 共 ${total} tokens · ${tokPerSec(total, totalMs)} tok/s`;
+  }
+
   async function send() {
     const btn = $('send'), out = $('out');
     const body = {
@@ -6927,7 +7025,7 @@ let multCatalogFailed = false;
         });
         const ms = Math.round(performance.now() - t0);
         out.textContent = r.choices[0].message.content +
-          `\n\n— ${r.model} · ${ms}ms · prompt ${r.usage?.prompt_tokens} / completion ${r.usage?.completion_tokens}`;
+          `\n\n— ${r.model} · ${ms}ms` + testUsageLine(r.usage, ms);
       } else {
         const r = await fetch('/v1/chat/completions', {
           method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, hdr()),
@@ -6954,8 +7052,9 @@ let multCatalogFailed = false;
           }
         }
         const ms = Math.round(performance.now() - t0);
+        const usageLine = testUsageLine(usage, ms);
         out.textContent = txt + `\n\n— ${model} · ${ms}ms · 流式` +
-          (usage ? ` · prompt ${usage.prompt_tokens} / completion ${usage.completion_tokens}` : '');
+          (usageLine || ' · usage 缺失（上游未回传 token 用量）');
       }
     } catch (e) {
       out.classList.add('err');

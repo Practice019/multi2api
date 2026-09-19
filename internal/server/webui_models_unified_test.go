@@ -401,7 +401,7 @@ func multiplierKeyingProblems(code, multTagBody, multTagPlainBody string) []stri
 }
 
 // --------------------------------------------------------------------------
-// 判据组 2b：倍率表只覆盖默认上游 —— 别家上游不得继承它的系数
+// 判据组 2b：倍率表按 (provider, 裸名) 组织 —— 别家上游不得撞默认上游的裸名系数
 // --------------------------------------------------------------------------
 
 // TestWebUIModelIDsUnifiedMultiplierUpstreamOwnership 守住「别家上游不继承默认上游系数」。
@@ -415,16 +415,21 @@ func multiplierKeyingProblems(code, multTagBody, multTagPlainBody string) []stri
 // 那个 0.06 是 **workbuddy** 目录里 glm-5.3-flash 的系数 —— 被「无条件去前缀查表」
 // 当成了 codearts 的事实。**显示一个错的数字比显示 x无 有害得多**。
 //
-// # 判据
+// # 多上游改造后的判据（2026-09）
 //
-//	① `multTableKey` 存在且只定义一次（归属判据只有一处）
-//	② 全文件里 `!== DEFAULT_PROVIDER` 恰好 1 次，且就在它体内
-//	   —— 0 次 = 判据被删（回到"无条件去前缀"），>1 次 = 判据被复制
-//	③ 不同上游 `return null`（不查表）；无前缀原样查表（单上游行为不变）
-//	④ 它内部仍调 multKeyOf —— 去前缀的归一没有被复制成第二份
+// 后端 /admin/models/preview 已遍历全部已注册上游、每条带 provider，
+// 前端表键 = `provider/裸名`（workbuddy 与 workbuddy-intl 的同名模型互不覆盖）。
+// 于是带前缀的展示 id 直接以 `provider/裸名` 组合键查表，**不再去前缀** ——
+// 去前缀正是旧缺陷（撞默认上游裸名）的来源。
+//
+//	① `multTableKey` 存在且只定义一次（键规则只有一处）
+//	② 带前缀分支返回**原 id**（`provider/裸名` 组合键），**绝不**去前缀
+//	   —— 全文件里带前缀分支不应出现 `multKeyOf(id)`（那会撞默认上游裸名）
+//	③ 无前缀分支原样查表（单上游行为不变）
+//	④ 它内部仍调 multKeyOf —— 仅限无前缀分支（单上游裸名键）
 //	⑤ multTag / multTagPlain 都经它取键，且都不自己写去前缀
-//	⑥ multTag 的 x无 带 title 说明「倍率表只覆盖默认上游 …」，
-//	   与「上游未提供该模型的倍率」可区分（两种"没有"不该长一样）
+//	⑥ 前端表键由 loadModelMultipliers 拼成 `provider/裸名`（`m.provider + '/' + m.model`），
+//	   与 multTableKey 的组合键规则同源
 func TestWebUIModelIDsUnifiedMultiplierUpstreamOwnership(t *testing.T) {
 	src, err := readWebUIHTML()
 	if err != nil {
@@ -443,6 +448,13 @@ func TestWebUIModelIDsUnifiedMultiplierUpstreamOwnership(t *testing.T) {
 
 	for _, p := range multiplierOwnershipProblems(code, multTagBody, multTagPlainBody) {
 		t.Errorf("%s", p)
+	}
+
+	// 表键拼接在真源码层检查（multiplierOwnershipProblems 的入参可能是测试样本，
+	// 不含 loadModelMultipliers —— 那把检查放这里，用完整的真实源码）。
+	if !strings.Contains(code, "m.provider + '/' + m.model") {
+		t.Errorf("loadModelMultipliers 里找不到表键拼接 `m.provider + '/' + m.model`。\n"+
+			"    破了会怎样：表键不是 provider/裸名，multTableKey 的组合键查不到，满屏 x无")
 	}
 }
 
@@ -499,7 +511,7 @@ func multiplierOwnershipProblems(code, multTagBody, multTagPlainBody string) []s
 
 	body, ok := extractJSFunction(code, "function multTableKey(")
 	if !ok {
-		return append(problems, "切不出 multTableKey 的函数体 —— 归属判据判不了（fail-open），"+
+		return append(problems, "切不出 multTableKey 的函数体 —— 键规则判不了（fail-open），"+
 			"此时本守卫无论绿红都不可信")
 	}
 	// fail-closed 自检：切出来的必须像 multTableKey（否则判据读的不是它）。
@@ -508,27 +520,24 @@ func multiplierOwnershipProblems(code, multTagBody, multTagPlainBody string) []s
 			itoa(len(body))+" 字节）—— 切分逻辑已失效，本守卫此时无论绿红都不可信")
 	}
 
-	// ---- ② 判据只有一处：全文件只允许一次「前缀 != 默认上游」的比较 --------
-	if n := strings.Count(code, "!== DEFAULT_PROVIDER"); n != 1 {
-		problems = append(problems, "全文件里 `!== DEFAULT_PROVIDER` 出现 "+itoa(n)+
-			" 次（应恰好 1 次，且就在 multTableKey 里）。\n"+
-			"    破了会怎样：0 次 = 归属判据被删 —— 退回「无条件去前缀查表」，\n"+
-			"    别家上游重新继承默认上游的系数（真 Chrome 实测 x0.06）；\n"+
-			"    >1 次 = 判据被复制成多份，两份迟早漂")
+	// ---- ② 带前缀分支绝不"去前缀"（去前缀 = 撞默认上游裸名 = 旧缺陷） --------
+	// multKeyOf 只允许出现在无前缀分支一次；带前缀分支若也调它（去前缀查表）
+	// 就会变成 2 次 —— 那正是旧缺陷形态（codearts/glm-5.3-flash 撞默认上游裸名）。
+	if n := strings.Count(body, "multKeyOf(id)"); n != 1 {
+		problems = append(problems, "multTableKey 里 `multKeyOf(id)` 出现 "+itoa(n)+
+			" 次（应恰好 1 次，只在无前缀分支）。\n"+
+			"    破了会怎样：带前缀分支去前缀查表 → `codearts/glm-5.3-flash` 撞上默认上游\n"+
+			"    目录里的同名裸名，显示出**别人的系数**（真 Chrome 实测 x0.06）—— \n"+
+			"    一个看起来正常的错数字，比 x无 危险得多")
 	}
-	if !strings.Contains(body, "!== DEFAULT_PROVIDER") {
-		problems = append(problems, "multTableKey 的函数体里没有 `prefix !== DEFAULT_PROVIDER` —— 它没有在比上游归属")
-	}
-	if strings.Count(body, "DEFAULT_PROVIDER") == 0 {
-		problems = append(problems, "multTableKey 里根本没提到 DEFAULT_PROVIDER —— 它不可能判得出归属")
+	// 带前缀分支必须返回原 id（provider/裸名 组合键），而不是别的东西。
+	if !strings.Contains(body, "return String(id)") {
+		problems = append(problems, "multTableKey 的带前缀分支没有返回原 id（`return String(id)`）。\n"+
+			"    破了会怎样：前端表键是 `provider/裸名`，若这里去前缀或返回 null，\n"+
+			"    别家上游（含海外版 workbuddy-intl）的模型全部 x无")
 	}
 
-	// ---- ③ 不同上游不查表；无前缀原样查表 --------------------------------
-	if !strings.Contains(body, "return null") {
-		problems = append(problems, "multTableKey 里找不到 `return null` —— 别家上游没有被显式拒绝查表。\n"+
-			"    破了会怎样：调用方只能拿到一个键，于是照样去倍率表里查 ——\n"+
-			"    `codearts/glm-5.3-flash` 又会命中默认上游的同名条目")
-	}
+	// ---- ③ 无前缀（裸名）原样查表 --------------------------------
 	if !strings.Contains(body, "!(slash > 0)") {
 		problems = append(problems, "multTableKey 里找不到无前缀（裸名）原样查表的分支（`!(slash > 0)`）。\n"+
 			"    破了会怎样：单上游部署下后端下发的裸名会被当成「没有前缀就没有归属」而返回 null，\n"+
@@ -883,35 +892,35 @@ func TestWebUIModelIDsUnifiedGuardCatchesRevertedCode(t *testing.T) {
 		t.Fatalf("守卫对修复后的倍率写法误报（会变成噪音）：\n%s", strings.Join(got, "\n"))
 	}
 
-	// ---- 脏样本 2b / 干净样本 2b：默认上游归属判据 --------------------------
+	// ---- 脏样本 2b / 干净样本 2b：倍率表按 (provider, 裸名) 组织 --------------------------
 	//
-	// 这是本轮的新缺陷形态：**判据被删掉**（multTableKey 退回"无条件去前缀查表"），
+	// 这是本轮的新缺陷形态：**带前缀分支退回"无条件去前缀查表"**，
 	// 于是别家上游的 `codearts/glm-5.3-flash` 继承默认上游的 0.06。
 	// 真实回退长这样 —— 函数还在、也被调用，看起来"归一仍然只有一处"。
 	const cleanMultTableKeySrc = "" +
 		"  function multTableKey(id) {\n" +
 		"    const slash = String(id || '').indexOf('/');\n" +
 		"    if (!(slash > 0)) return multKeyOf(id);\n" +
-		"    const prefix = String(id).slice(0, slash);\n" +
-		"    if (prefix !== DEFAULT_PROVIDER) return null;\n" +
-		"    return multKeyOf(id);\n" +
+		"    return String(id);\n" +
 		"  }\n"
 	const revertedMultTableKeySrc = "" +
 		"  function multTableKey(id) {\n" +
+		"    const slash = String(id || '').indexOf('/');\n" +
+		"    if (!(slash > 0)) return multKeyOf(id);\n" +
 		"    return multKeyOf(id);\n" +
 		"  }\n"
 	gotOwnership := multiplierOwnershipProblems(keyCode+revertedMultTableKeySrc, cleanMultTag, cleanMultTagPlain)
 	if len(gotOwnership) == 0 {
-		t.Fatal("守卫抓不住『把默认上游归属判据去掉』（multTableKey 退回无条件去前缀查表）—— " +
+		t.Fatal("守卫抓不住『带前缀分支去前缀查表』（multTableKey 退回无条件去前缀）—— " +
 			"它是装饰品：这正是本次缺陷的回退形态，别家上游会重新继承默认上游的系数")
 	}
 	joinedOwnership := strings.Join(gotOwnership, "\n")
-	if !strings.Contains(joinedOwnership, "DEFAULT_PROVIDER") {
-		t.Errorf("回退样本被报了，但没报出『没有在比 DEFAULT_PROVIDER』这一条 —— 报的是别的问题。守卫输出：\n%s",
+	if !strings.Contains(joinedOwnership, "multKeyOf") {
+		t.Errorf("回退样本被报了，但没报出『multKeyOf 出现在带前缀分支』这一条 —— 报的是别的问题。守卫输出：\n%s",
 			joinedOwnership)
 	}
 	if got := multiplierOwnershipProblems(keyCode+cleanMultTableKeySrc, cleanMultTag, cleanMultTagPlain); len(got) != 0 {
-		t.Fatalf("守卫对修复后的归属判据误报（会变成噪音）：\n%s", strings.Join(got, "\n"))
+		t.Fatalf("守卫对修复后的倍率写法误报（会变成噪音）：\n%s", strings.Join(got, "\n"))
 	}
 
 	// ---- 脏样本 3：下拉不去重 --------------------------------------------

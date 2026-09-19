@@ -88,9 +88,11 @@ type Config struct {
 	ResetModelsCache func()
 	// ModelCatalog 取模型目录快照（成本系数来源）。nil = 未接线，统计里报 unavailable。
 	//
-	// 由 cmd/server 注入 server.(*Handler).ModelCatalog —— 它内部按 1h TTL / 5min 失败
-	// 负缓存惰性回源上游。这里只当「取数函数」用，缓存与重试策略全部留在 server 包。
-	ModelCatalog func() *upstream.ModelCatalog
+	// 签名带 provider：多上游部署下每个上游的 /v3/config 是各自的事实
+	// （workbuddy 与 workbuddy-intl 的模型互不相干），按上游取目录才能
+	// 给每个上游的模型都标上倍率。由 cmd/server 注入 server.(*Handler).ModelCatalogFor
+	// —— 它内部按 provider 分缓存（1h TTL / 5min 失败负缓存）。
+	ModelCatalog func(provider string) *upstream.ModelCatalog
 	// ModelCatalogState 只读的目录缓存状态（ok/stale/unavailable）。nil = 未接线。
 	// 与 ModelCatalog 分开注入是刻意的：状态查询**绝不能**触发上游请求，
 	// 而取目录会。把两者混成一个函数，就没法在 /admin/stats 里安全地只要状态。
@@ -162,6 +164,23 @@ type Config struct {
 	// OnAPIKeyRotated 轮换成功后的通知（装配层注入，更新 handler 内存钥匙，
 	// 让新 key 立即生效无需重启）。nil = 只写文件不更新内存。
 	OnAPIKeyRotated func(newKey string)
+
+	// OpenAuthURL 用**无痕/隐私窗口**打开一条授权链接，返回浏览器的展示名。
+	//
+	// # 为什么由装配层注入，而不是在 admin 里直接 exec
+	//
+	// 1. admin 包要保持"可测且无副作用"：这个函数一调就真的会弹窗口，
+	//    测试必须能替换它。注入让"不弹窗口"成为默认（nil）。
+	// 2. 具体怎么开（哪个浏览器、要不要独立 profile、平台差异）是
+	//    部署环境的事，属于 `internal/browseropen`；admin 只该知道
+	//    "有这么一个动作"，并把结果回传给前端。
+	//
+	// 非空时，「添加账号」会**默认**调用它一次（用户要求：默认就是无痕模式），
+	// 并在响应里回带 browser / browser_error。
+	//
+	// nil = 本部署不自动开浏览器（无 GUI 服务器，或配置里关了）——
+	// 此时行为与改造前逐字节一致：只回 auth_url，让用户自己复制。
+	OpenAuthURL func(rawURL string) (browser string, err error)
 }
 
 // SetOnAPIKeyRotated 注入管理钥匙轮换后的通知（装配层在 handler 构造完成后调用，
@@ -226,6 +245,20 @@ type Handler struct {
 	statsSource string
 	statsErr    error
 	statsAt     time.Time
+
+	// issuedMu / issuedAuth：本进程**签发过**的授权链接（值 = 签发时刻）。
+	//
+	// # 为什么需要它（安全）
+	//
+	// 「再开一次无痕窗口」需要一条接受 URL 的端点。若接受任意 URL，
+	// 这条端点就等于「让本机浏览器访问任意地址」—— 而本机浏览器里
+	// 带着用户的全部登录态，打开攻击者给的地址就够钓鱼了。
+	// 只认自己刚签发过的链接，把可打开的集合收窄到"我们发出的授权页"。
+	//
+	// 只存内存、进程重启即失效：授权链接的有效期本来就跟 state 绑定
+	//（分钟级），长期保存反而是把过期凭证留在内存里。
+	issuedMu   sync.Mutex
+	issuedAuth map[string]time.Time
 }
 
 // New 构建管理台 handler。
@@ -246,6 +279,12 @@ func New(cfg Config) *Handler {
 
 	h.register("POST /admin/login/start", h.loginStart)
 	h.register("POST /admin/login/poll", h.loginPoll)
+	// 重新用无痕窗口打开**刚刚签发的**那条授权链接。
+	//
+	// 为什么需要这一条：start 已经会自动打开（默认无痕），但用户可能
+	// 手滑关掉了窗口。此时让他重走 start 是错误的 —— 那会作废旧 state、
+	// 并且上游那边多一次无用的授权申请。正确做法是重开同一条链接。
+	h.register("POST /admin/login/open", h.loginOpenBrowser)
 
 	h.register("POST /admin/models/refresh", h.modelsRefresh)
 	h.register("GET /admin/models/preview", h.modelsPreview)
@@ -431,6 +470,10 @@ type ModelCatalogState struct {
 type ModelMultiplier struct {
 	Model      string  `json:"model"`
 	Multiplier float64 `json:"multiplier"`
+	// Provider 该倍率所属的上游。多上游部署下每个上游的 /v3/config 是各自的事实，
+	// 同名模型（如 workbuddy 与 workbuddy-intl 都有 glm-5.2）倍率互不相同，
+	// 前端按 (provider, model) 组合查表。单上游（裸名）部署时省略。
+	Provider string `json:"provider,omitempty"`
 	// Calls 该模型在本次聚合窗口内的调用次数（来自 by_model），
 	// 让前端能在同一条 chip 上同时说清「调了多少次」和「每次贵多少倍」。
 	Calls int `json:"calls"`
@@ -585,6 +628,46 @@ func (h *Handler) credentialExpiryOf(uid, providerID string) (int64, bool) {
 	return at, true
 }
 
+// credentialHasToken 问**拥有这份凭证的上游**：它带不带可用的 access token。
+//
+// # 与 credentialExpiryOf 完全同构
+//
+// 同样的三道未知（账号不存在 / 上游未注册 / 未实现扩展点）都返回 false
+// —— 界面显示 `—`（未知），**不假装**"这个号没有 token"。
+//
+// # 为什么需要（用户实测：workbuddy-intl 登录后 token 列恒为 `—`）
+//
+// 账号列表的 has_token 原来只读核心投影 `Pool.AuthByUID()`。但按上游
+// 分子目录之后，管理台两条入池路径交给池子的都是**裸投影**（只有
+// UID/Nickname），真凭证走池的不透明 secret 通道 —— 于是第二个实例
+// （workbuddy-intl）的投影里永远没有 token：
+//
+//	workbuddy-intl: has_token=false   ← 实测（secret 里明明有 accessToken）
+//	workbuddy:      has_token=true    ← 默认上游，投影里就带着 token
+//
+// 核心不解释 secret（判据 3），所以问上游 —— 与 credentialExpiryOf 同一条。
+func (h *Handler) credentialHasToken(uid, providerID string) bool {
+	if providerID == "" || h.cfg.Pool == nil {
+		return false
+	}
+	secret, ok := h.cfg.Pool.SecretOf(uid)
+	if !ok || secret == nil {
+		return false
+	}
+	p, ok := h.providerByID(providerID)
+	if !ok {
+		return false
+	}
+	ext, ok := gateway.ExtOf[gateway.CredentialTokenExt](p)
+	if !ok {
+		return false
+	}
+	return ext.HasToken(gateway.Credential{
+		Provider: providerID,
+		UID:      uid,
+		Secret:   secret,
+	})
+}
 // credentialNeverExpires 问**拥有这份凭证的上游**：它是不是设计上不过期。
 //
 // # 与 credentialExpiryOf 完全同构
@@ -670,14 +753,31 @@ func (h *Handler) accountViews() []AccountView {
 		// 所以权威只能是活的 secret，而核心不许解释它（判据 3）。
 		// 问**拥有它的上游** —— 与 RefreshCredential 完全同构。
 		//
-		// ⚠ 只在上面没拿到时才问：workbuddy 走的是上面那条，行为**逐字段不变**。
+		// ★ has_token 的**第二来源**：问上游「这份凭证有可用 token 吗」。
 		//
-		// provider 在这里算一次，供下面两条判据共用 ——
-		// 原先它在 if 里各算一遍，加第三条判据时很容易漏掉一处
-		//（"同一个事实有两个计算点"正是本项目反复吃过的形态）。
+		// 上面读的是 `Pool.AuthByUID()` —— 核心的通用投影（`*auth.Auth`）。
+		// 但按上游分子目录之后，管理台两条入池路径（accountsReload /
+		// pollViaFlow）交给池子的都是**裸投影**（只有 UID/Nickname），
+		// 真凭证走池的不透明 secret 通道。
+		//
+		// 于是第二个实例（workbuddy-intl）的账号投影里**永远没有 token**：
+		//
+		//	workbuddy-intl: has_token=false   ← 实测（secret 里明明有 accessToken）
+		//	workbuddy:      has_token=true    ← 默认上游，投影里就带着 token
+		//
+		// 界面把「我们没在投影里读到」说成了「这个号没有 token」，
+		// 用户据此以为登录失败 —— 而凭证完全正常。
+		//
+		// ⚠ 只在上面确实没读到 token 时才问（与 token_expire_sec 同一条判据）：
+		// 默认上游的行为必须**逐字段不变**。
 		pid := st.Provider
 		if pid == "" {
 			pid = h.cfg.DefaultProvider
+		}
+		if !v.HasToken {
+			if h.credentialHasToken(st.UID, pid) {
+				v.HasToken = true
+			}
 		}
 		if v.TokenExpireSec == nil {
 			if at, ok := h.credentialExpiryOf(st.UID, pid); ok {
@@ -1127,14 +1227,24 @@ func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("admin: oauth start provider=%s state=%s", body.Provider, shortState(state))
-		writeJSON(w, http.StatusOK, map[string]any{
+		browser, browserErr := h.openAuthBrowser(authURL)
+		resp := map[string]any{
 			"state":    state,
 			"auth_url": authURL,
 			"provider": body.Provider,
 			// 各上游的 state 有效期可能不同；LoginFlow 接口没暴露它，
 			// 这里沿用核心的 oauth.StateTTL（前端只用它做倒计时提示）。
 			"expires_in_sec": int64(oauth.StateTTL().Seconds()),
-		})
+		}
+		// browser / browser_error 只在有话说的时候出现 ——
+		// 未接线时响应里多两个空字段会让前端去渲染一个不存在的动作。
+		if browser != "" {
+			resp["browser"] = browser
+		}
+		if browserErr != "" {
+			resp["browser_error"] = browserErr
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -1153,11 +1263,142 @@ func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("admin: oauth start state=%s", shortState(state))
-	writeJSON(w, http.StatusOK, map[string]any{
+	browser, browserErr := h.openAuthBrowser(authURL)
+	resp := map[string]any{
 		"state":          state,
 		"auth_url":       authURL,
 		"expires_in_sec": int64(oauth.StateTTL().Seconds()),
-	})
+	}
+	if browser != "" {
+		resp["browser"] = browser
+	}
+	if browserErr != "" {
+		resp["browser_error"] = browserErr
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// issuedAuthTTL 已签发授权链接的可重开窗口。
+//
+// 不需要很长：授权链接的有效期由上游的 state 决定（分钟级），
+// 过期之后重开也只会看到一个"state 无效"的页面。2h 足够覆盖
+// "用户去干别的、回来接着弄"的场景，又不会把过期凭证长期留在内存。
+const issuedAuthTTL = 2 * time.Hour
+
+// openAuthBrowser 记录本次签发的授权链接，并**默认用无痕窗口打开**它。
+//
+// # 为什么默认就开（而不是等用户点）
+//
+// 用户的要求是「默认打开的就是无痕模式」。若把"用哪个窗口"留给前端
+// 的 `target=_blank`，那开的窗口属于用户当前的浏览器状态 ——
+// OAuth 会拿**已登录的账号**完成授权，账号串号，而整个过程"成功"了，
+// 没有任何报错。所以打开动作必须由网关自己做，且默认无痕。
+//
+// # 失败**不**改变主流程
+//
+// 无 GUI 的服务器、受策略限制的进程都可能开不起来。此时授权链接照常
+// 返回（那是用户唯一的退路），另外把失败原因如实回传，让界面显示
+// 「未能自动打开，请复制链接到无痕窗口」。两种更糟的写法：
+//   - 整个请求 5xx → 用户连链接都拿不到；
+//   - 静默吞掉 → 界面显示"已用无痕窗口打开"而窗口不存在。
+//
+// 返回 (展示名, 错误文本)；两者最多一个非空。
+func (h *Handler) openAuthBrowser(authURL string) (browser, browserErr string) {
+	if authURL == "" {
+		return "", ""
+	}
+	// 先记账再打开：即使打开失败，"这条链接是本进程签发的"这个事实
+	// 仍然成立，用户还可以走 /admin/login/open 重试。
+	h.noteIssuedAuthURL(authURL)
+	if h.cfg.OpenAuthURL == nil {
+		return "", ""
+	}
+	name, err := h.cfg.OpenAuthURL(authURL)
+	if err != nil {
+		log.Printf("admin: 无痕打开授权页失败（连接照常返回，请手动复制）: %v", err)
+		return "", err.Error()
+	}
+	if name == "" {
+		name = "浏览器"
+	}
+	log.Printf("admin: 已用无痕窗口打开授权页（%s）", name)
+	return name, ""
+}
+
+// noteIssuedAuthURL 记下一条"本进程签发的"授权链接（顺便清理过期的）。
+func (h *Handler) noteIssuedAuthURL(authURL string) {
+	if authURL == "" {
+		return
+	}
+	now := time.Now()
+	h.issuedMu.Lock()
+	defer h.issuedMu.Unlock()
+	if h.issuedAuth == nil {
+		h.issuedAuth = make(map[string]time.Time, 4)
+	}
+	for k, t := range h.issuedAuth {
+		if now.Sub(t) > issuedAuthTTL {
+			delete(h.issuedAuth, k)
+		}
+	}
+	h.issuedAuth[authURL] = now
+}
+
+// isIssuedAuthURL 判断这条链接是不是本进程刚刚签发过的。
+func (h *Handler) isIssuedAuthURL(authURL string) bool {
+	h.issuedMu.Lock()
+	defer h.issuedMu.Unlock()
+	t, ok := h.issuedAuth[authURL]
+	if !ok {
+		return false
+	}
+	return time.Since(t) <= issuedAuthTTL
+}
+
+// loginOpenBrowser 用无痕窗口**重新**打开一条已签发的授权链接。
+//
+// 见路由注册处的注释：用于"用户手滑关掉了窗口"这种情况，
+// 避免重走 start（那会作废旧 state 并多申请一次授权）。
+//
+// ⚠ 只认 `isIssuedAuthURL` 里的链接。这条端点的入参是 URL，
+// 而它最终会把 URL 交给本机浏览器打开 —— 不加这道校验，
+// 它就等于「让本机浏览器访问任意地址」，而那是在用户带着
+// 全部登录态的浏览器里打开攻击者给的页面。
+func (h *Handler) loginOpenBrowser(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体无法解析: "+err.Error())
+		return
+	}
+	authURL := strings.TrimSpace(body.URL)
+	if authURL == "" {
+		writeError(w, http.StatusBadRequest, "缺少 url")
+		return
+	}
+	// 能力检查放在链接校验**之前**：没接线 opener 的部署
+	// 无论传什么链接都做不到，"能力不存在"（501）才是准确语义。
+	if h.cfg.OpenAuthURL == nil {
+		writeError(w, http.StatusNotImplemented,
+			"本部署未启用「自动打开浏览器」（配置里关掉了 login_open_browser，或运行在无 GUI 环境）")
+		return
+	}
+	if !h.isIssuedAuthURL(authURL) {
+		writeError(w, http.StatusForbidden,
+			"只允许打开本网关刚刚签发的授权链接（未签发或已过期）")
+		return
+	}
+	name, err := h.cfg.OpenAuthURL(authURL)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "打开浏览器失败: "+err.Error())
+		return
+	}
+	if name == "" {
+		name = "浏览器"
+	}
+	log.Printf("admin: 已用无痕窗口重新打开授权页（%s）", name)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "browser": name})
 }
 
 // wantsFlowDispatch 判断这次请求是否应该走「上游自己的 LoginFlow」。
@@ -1471,10 +1712,43 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow ga
 				"无法按它自己的格式重扫凭证（核心不硬编码任何上游的凭证格式）")
 		return errHandled
 	}
-	creds, lerr := loaded(dir)
-	if lerr != nil {
-		writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+lerr.Error())
-		return errHandled
+	// ★ 与 accountsReload **同一条**：优先用「带 secret」的扫描器。
+	//
+	// # 这是 accountsReload 已经修过、而这条路径漏修的另一半
+	//
+	// 只走 `credentialsOf`（不带 secret）时，池里新增的账号 secret 恒为 nil：
+	//
+	//	workbuddy-intl 登录成功 → 落盘正确 → 入池但 **secret=nil**
+	//	→ `/v1/models` 的 router 路径取不到凭证（类型断言失败）
+	//	→ **模型目录恒为空**；界面 has_token 也显示 `—`
+	//
+	// 这正是 credentialloader.go 里 LoadCredentialsWithSecrets 的注释
+	// 警告过的形态（"没有这个加强版时……模型目录为空（实测 0 个模型）"）。
+	//
+	// 上游没实现 CredentialSecretLoader 时回落成旧行为（SyncToDirFor），
+	// 对"凭证就装在 *auth.Auth 里"的默认上游那正是正确形态。
+	var creds []gateway.Credential
+	var secrets map[string]any
+	if withSecrets, ok := h.credentialSecretsOf(cred.Provider); ok {
+		items, serr := withSecrets(dir)
+		if serr != nil {
+			writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+serr.Error())
+			return errHandled
+		}
+		secrets = make(map[string]any, len(items))
+		for _, it := range items {
+			creds = append(creds, it.Credential)
+			if it.Secret != nil {
+				secrets[it.Credential.UID] = it.Secret
+			}
+		}
+	} else {
+		var lerr error
+		creds, lerr = loaded(dir)
+		if lerr != nil {
+			writeError(w, http.StatusInternalServerError, "凭证已写入但重扫目录失败: "+lerr.Error())
+			return errHandled
+		}
 	}
 	// 投影成账号池要的形状（uid + nickname）—— 与 `accountsReload` 同款。
 	auths := make([]*auth.Auth, 0, len(creds))
@@ -1494,7 +1768,13 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow ga
 	// 凭证**已经落盘**（那一步不依赖池子），所以这里只是"没能即时进池"——
 	// 告诉调用方重启即可，而不是 500 让它以为凭证写失败了。
 	if h.cfg.Pool != nil {
-		h.cfg.Pool.SyncToDirFor(cred.Provider, auths)
+		// 拿到了 secret 就走带 secret 的同步 —— 否则池里新账号的
+		// secret 恒为 nil，第二个实例的模型目录会恒为空（见上面的注释）。
+		if secrets != nil {
+			h.cfg.Pool.SyncToDirWithSecrets(cred.Provider, auths, secrets)
+		} else {
+			h.cfg.Pool.SyncToDirFor(cred.Provider, auths)
+		}
 	} else {
 		log.Printf("admin: oauth(flow) 凭证已落盘，但没有账号池可同步（provider=%s uid=%s）",
 			cred.Provider, cred.UID)
@@ -1642,16 +1922,29 @@ func (h *Handler) modelsRefresh(w http.ResponseWriter, r *http.Request) {
 // 前端拿不到倍率就只显示模型名，不该让整个模型列表渲染失败。
 func (h *Handler) modelsPreview(w http.ResponseWriter, r *http.Request) {
 	out := []ModelMultiplier{}
-	if h.cfg.ModelCatalog != nil {
-		if cat := h.cfg.ModelCatalog(); cat != nil {
-			for _, m := range cat.Models {
-				if m.ID == "" {
-					continue
-				}
-				// 与 stats 那份不同：这里**保留 0 倍率**。
-				// x0.00 是"免费"这个有意义的事实，不是"没有数据"。
-				out = append(out, ModelMultiplier{Model: m.ID, Multiplier: m.Multiplier})
+	// 遍历所有已注册上游，把各自的 /v3/config 倍率合并下发 ——
+	// 只查默认上游会让其余上游的模型在模型面板上永远没有倍率。
+	// 每条带 Provider：多上游同名模型（workbuddy 与 workbuddy-intl 都有 glm-5.2）
+	// 倍率互不相同，前端按 (provider, model) 组合查表。
+	for _, id := range h.registeredProviderIDs() {
+		if h.cfg.ModelCatalog == nil {
+			break
+		}
+		cat := h.cfg.ModelCatalog(id)
+		if cat == nil {
+			continue
+		}
+		for _, m := range cat.Models {
+			if m.ID == "" {
+				continue
 			}
+			// 与 stats 那份不同：这里**保留 0 倍率**。
+			// x0.00 是"免费"这个有意义的事实，不是"没有数据"。
+			out = append(out, ModelMultiplier{
+				Model:      m.ID,
+				Multiplier: m.Multiplier,
+				Provider:   id,
+			})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": out})
@@ -1821,8 +2114,24 @@ func (h *Handler) modelMultipliers(resp map[string]any) []ModelMultiplier {
 	if !ok || len(byModel) == 0 || h.cfg.ModelCatalog == nil {
 		return out
 	}
-	cat := h.cfg.ModelCatalog()
-	if cat == nil {
+	// 合并所有已注册上游的倍率表：每个上游的 /v3/config 是各自的事实，
+	// 只查默认上游会让其余上游被调用的模型倍率全部缺失。
+	// 键 = `provider/裸名`（同名模型跨上游互不覆盖）；默认上游额外保留裸名键，
+	// 兼容统计键为裸名的老形态。
+	tbl := map[string]float64{}
+	for _, id := range h.registeredProviderIDs() {
+		cat := h.cfg.ModelCatalog(id)
+		if cat == nil {
+			continue
+		}
+		for k, v := range cat.MultiplierTable() {
+			tbl[id+"/"+k] = v
+			if id == "" {
+				tbl[k] = v
+			}
+		}
+	}
+	if len(tbl) == 0 {
 		return out
 	}
 	// 按模型名排序输出：map 遍历顺序随机，固定顺序让响应可 diff（与目录排序同一动机）。
@@ -1832,7 +2141,11 @@ func (h *Handler) modelMultipliers(resp map[string]any) []ModelMultiplier {
 	}
 	sort.Strings(names)
 	for _, id := range names {
-		m, ok := cat.Multiplier(id)
+		// 统计键形态：带前缀（provider/裸名）直接用；裸名按默认上游组合查。
+		m, ok := tbl[id]
+		if !ok && !strings.Contains(id, "/") {
+			m, ok = tbl["/"+id]
+		}
 		if !ok {
 			// 目录里没有这个模型（或系数为 0）：不输出条目，而不是输出 0 ——
 			// 0 系数在前端会显示成「免费」，而真相是「不知道」。
@@ -1841,6 +2154,20 @@ func (h *Handler) modelMultipliers(resp map[string]any) []ModelMultiplier {
 		out = append(out, ModelMultiplier{Model: id, Multiplier: m, Calls: byModel[id]})
 	}
 	return out
+}
+
+// registeredProviderIDs 返回注册表里全部上游 id（按注册顺序）。
+// 注册表未接线（单上游部署/测试桩）时返回 []string{""} —— 空串 = 默认上游，
+// 与 ModelCatalogFor("") 的语义一致，让无 registry 的调用方照常取到默认目录。
+func (h *Handler) registeredProviderIDs() []string {
+	if h.cfg.Registry == nil {
+		return []string{""}
+	}
+	ids := h.cfg.Registry.IDs()
+	if len(ids) == 0 {
+		return []string{""}
+	}
+	return ids
 }
 
 // statsItems 取出用于聚合的条目及其来源标识。

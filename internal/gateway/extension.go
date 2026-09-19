@@ -259,6 +259,31 @@ type CredentialSecretLoader interface {
 	LoadCredentialsWithSecrets(dir string) ([]CredentialSecret, error)
 }
 
+// ModelMultiplierExt 上游自报「模型成本倍率」（credits 系数，跨上游统一口径）。
+//
+// # 为什么需要它（三家上游倍率需求）
+//
+// workbuddy 系的倍率在 `/v3/config`（server.ModelCatalogFor 拉取）；而
+// codearts / loomy / trae 是**别的产品**，没有 workbuddy 的 /v3/config。
+// 它们的官方倍率数据源各不相同：
+//
+//	codearts  服务端随模型配置下发 ratio_display（knownModels 静态表，官方值）
+//	loomy     官方 /models 的模型 name 带倍率后缀（如 "（x3.0）"）
+//	trae      官方 get_detail_param（待凭证有效时解析）
+//
+// 本扩展点让各上游用**自己的官方数据源**回答倍率；核心只消费 map，
+// 不解释数据从哪来（与 CredentialLoader 同一个"事实归上游"的思路）。
+//
+// ⚠ 返回的倍率必须是**上游官方**下发的值，不是本地估算 ——
+// 0 或缺失表示"该模型没有官方倍率"（不显示/显示 x无，而非假装免费）。
+type ModelMultiplierExt interface {
+	// ModelMultipliers 返回本上游的模型倍率表（模型 id → 系数）。
+	//
+	// 需要凭证/网络的实现用传入的 cred（与 Provider.Models 同一份凭证来源）。
+	// 空 map 表示"该上游当前没有可用的官方倍率"（调用方跳过，不报错）。
+	ModelMultipliers(ctx context.Context, cred Credential) (map[string]float64, error)
+}
+
 // ErrLoginPending 表示登录授权尚未完成（用户在浏览器里还没点确认）。
 var ErrLoginPending = errLoginPending{}
 

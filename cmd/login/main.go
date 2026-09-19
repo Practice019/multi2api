@@ -1,4 +1,4 @@
-// login.go — WorkBuddy CN OAuth 登录（设备授权流程，CN realm only）。
+// login.go — WorkBuddy CN / 海外版（WorkBuddy AI）OAuth 登录（设备授权流程）。
 //
 // 两个子命令，由 login.sh 顺序驱动：
 //
@@ -9,37 +9,73 @@
 //	              stdout 打印完整 token+account JSON
 //
 // 无 PKCE（workbuddy 设备流由服务端签发 state）。
+//
+// 渠道：默认 CN（copilot.tencent.com）；`-intl` flag 或环境变量 WB2A_LOGIN_INTL=1
+// 切换到海外版（www.workbuddy.ai），state 文件与 Origin 头随之切换。
 package main
 
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
+	"strings"
 	"time"
 )
 
-// 上游常量（CN only）
+// 上游常量。CN 为默认；intl 由 -intl 切换。
 const (
 	upstreamBaseCN    = "https://copilot.tencent.com"
+	upstreamBaseIntl  = "https://www.workbuddy.ai"
 	clientUA          = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originReferer     = "https://www.codebuddy.cn"
-	endpointAuthState = upstreamBaseCN + "/v2/plugin/auth/state?platform=CLI"
-	endpointLoginAcct = upstreamBaseCN + "/v2/plugin/login/account?state="
-	endpointAuthToken = upstreamBaseCN + "/v2/plugin/auth/token?state="
-	stateFile         = "/tmp/wb2api-login-state.json"
+	originRefererCN   = "https://www.codebuddy.cn"
+	originRefererIntl = "https://www.workbuddy.ai"
+	stateFileCN       = "/tmp/wb2api-login-state.json"
+	stateFileIntl     = "/tmp/wb2api-login-state-intl.json"
 )
 
-// commonHeaders 通用请求头
-func commonHeaders(req *http.Request) {
+// loginEnv 一次登录流程的站点常量（CN / intl 二选一）。
+type loginEnv struct {
+	origin    string
+	stateFile string
+	channel   string // cn / intl
+	authState string
+	loginAcct string
+	authToken string
+}
+
+func newLoginEnv(intl bool) loginEnv {
+	if intl {
+		return loginEnv{
+			origin:    originRefererIntl,
+			stateFile: stateFileIntl,
+			channel:   "intl",
+			authState: upstreamBaseIntl + "/v2/plugin/auth/state?platform=CLI",
+			loginAcct: upstreamBaseIntl + "/v2/plugin/login/account?state=",
+			authToken: upstreamBaseIntl + "/v2/plugin/auth/token?state=",
+		}
+	}
+	return loginEnv{
+		origin:    originRefererCN,
+		stateFile: stateFileCN,
+		channel:   "cn",
+		authState: upstreamBaseCN + "/v2/plugin/auth/state?platform=CLI",
+		loginAcct: upstreamBaseCN + "/v2/plugin/login/account?state=",
+		authToken: upstreamBaseCN + "/v2/plugin/auth/token?state=",
+	}
+}
+
+// commonHeaders 通用请求头（origin 随渠道）。
+func commonHeaders(req *http.Request, env loginEnv) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", originReferer)
-	req.Header.Set("Referer", originReferer+"/")
+	req.Header.Set("Origin", env.origin)
+	req.Header.Set("Referer", env.origin+"/")
 	req.Header.Set("User-Agent", clientUA)
 }
 
@@ -58,8 +94,6 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	}
 	if headers != nil {
 		headers(req)
-	} else {
-		commonHeaders(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -93,17 +127,25 @@ type loginState struct {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fatal("usage: login <url|poll>")
+	intl := flag.Bool("intl", false, "登录海外版 WorkBuddy AI (www.workbuddy.ai)")
+	flag.Parse()
+	if v := strings.TrimSpace(os.Getenv("WB2A_LOGIN_INTL")); v != "" && (v == "1" || strings.EqualFold(v, "true")) {
+		*intl = true
 	}
+	if flag.NArg() < 1 {
+		fatal("usage: login [-intl] <url|poll>")
+	}
+	env := newLoginEnv(*intl)
 	// 每个流程独立 cookie jar（oauth.go:22-29：多账号登录互不串会话）
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: 30 * time.Second, Jar: jar}
 
-	switch os.Args[1] {
+	common := func(r *http.Request) { commonHeaders(r, env) }
+
+	switch flag.Arg(0) {
 	case "url":
 		// handleStartLogin (oauth.go:68-87)
-		data, _, err := doJSON(client, http.MethodPost, endpointAuthState, nil, bytes.NewReader([]byte("{}")))
+		data, _, err := doJSON(client, http.MethodPost, env.authState, common, bytes.NewReader([]byte("{}")))
 		if err != nil {
 			fatal("auth state failed: %v", err)
 		}
@@ -115,13 +157,13 @@ func main() {
 			fatal("auth state: missing state or authUrl")
 		}
 		raw, _ := json.Marshal(loginState{State: st.State})
-		if err := os.WriteFile(stateFile, raw, 0o600); err != nil {
+		if err := os.WriteFile(env.stateFile, raw, 0o600); err != nil {
 			fatal("write state: %v", err)
 		}
 		fmt.Println(st.AuthURL)
 
 	case "poll":
-		raw, err := os.ReadFile(stateFile)
+		raw, err := os.ReadFile(env.stateFile)
 		if err != nil {
 			fatal("read state: %v (先跑 login url)", err)
 		}
@@ -131,7 +173,7 @@ func main() {
 		}
 		// handlePollLogin (oauth.go:108-162)：auth/token 是权威登录状态端点，
 		// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle
-		tokRaw, status, errTok := doJSON(client, http.MethodGet, endpointAuthToken+ls.State, nil, nil)
+		tokRaw, status, errTok := doJSON(client, http.MethodGet, env.authToken+ls.State, common, nil)
 		if errTok != nil {
 			if status == 0 || status >= 500 {
 				fatal("token endpoint error: %v", errTok)
@@ -154,10 +196,10 @@ func main() {
 			Nickname     string `json:"nickname"`
 		}
 		acctHeaders := func(r *http.Request) {
-			commonHeaders(r)
+			commonHeaders(r, env)
 			r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 		}
-		if acctRaw, _, errAcct := doJSON(client, http.MethodGet, endpointLoginAcct+ls.State, acctHeaders, nil); errAcct == nil {
+		if acctRaw, _, errAcct := doJSON(client, http.MethodGet, env.loginAcct+ls.State, acctHeaders, nil); errAcct == nil {
 			_ = json.Unmarshal(acctRaw, &acct)
 		}
 		out := map[string]any{
@@ -165,15 +207,16 @@ func main() {
 			"refresh_token": tok.RefreshToken,
 			"expires_in":    tok.ExpiresIn,
 			"domain":        tok.Domain,
+			"channel":       env.channel,
 			"uid":           acct.UID,
 			"enterprise_id": acct.EnterpriseID,
 			"nickname":      acct.Nickname,
 		}
 		oraw, _ := json.Marshal(out)
 		fmt.Println(string(oraw))
-		os.Remove(stateFile)
+		os.Remove(env.stateFile)
 
 	default:
-		fatal("unknown subcommand %q (want url|poll)", os.Args[1])
+		fatal("unknown subcommand %q (want url|poll)", flag.Arg(0))
 	}
 }

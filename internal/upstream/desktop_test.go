@@ -402,13 +402,19 @@ func TestReportWebEventShape(t *testing.T) {
 // 空串会拼出 "/v2/report"（无 host）→ http.NewRequest 报错。
 // 测试里只注入 ChatBaseCN/BillingBaseCN 时很容易踩到。
 func TestWebBaseFallback(t *testing.T) {
+	cnAcct := &auth.Auth{Channel: auth.ChannelCN}
+	intlAcct := &auth.Auth{Channel: auth.ChannelIntl}
 	c := &Client{}
-	if got := c.webBase(); got != defaultWebBaseCN {
+	if got := c.webBase(cnAcct); got != defaultWebBaseCN {
 		t.Errorf("webBase()=%q，期望回落 %q", got, defaultWebBaseCN)
 	}
 	c2 := &Client{WebBaseCN: "https://custom.example"}
-	if got := c2.webBase(); got != "https://custom.example" {
+	if got := c2.webBase(cnAcct); got != "https://custom.example" {
 		t.Errorf("webBase()=%q，注入值应优先", got)
+	}
+	// 海外版账号走 www.workbuddy.ai（未显式注入时）。
+	if got := c.webBase(intlAcct); got != "https://www.workbuddy.ai" {
+		t.Errorf("webBase(intl)=%q，期望 www.workbuddy.ai", got)
 	}
 }
 

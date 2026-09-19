@@ -500,7 +500,7 @@ func catalogWith(entries ...upstream.ModelCatalogEntry) *upstream.ModelCatalog {
 // 系数只对**窗口里被调用过**的模型输出，且直接给在 /admin/stats 的同一个响应里。
 func TestStatsModelMultipliersFilteredByByModel(t *testing.T) {
 	h, _ := newStatsHandler(t, persistedEntries(3))
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog {
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog {
 		return catalogWith(
 			upstream.ModelCatalogEntry{ID: "deepseek-v4", Multiplier: 0.51}, // 窗口里有调用
 			upstream.ModelCatalogEntry{ID: "never-called", Multiplier: 9.9}, // 窗口里没有
@@ -530,7 +530,7 @@ func TestStatsModelMultipliersFilteredByByModel(t *testing.T) {
 // 这是硬约束 2（失败不得 break 统计接口）的可测形态。
 func TestStatsDegradesWhenCatalogUnavailable(t *testing.T) {
 	h, _ := newStatsHandler(t, persistedEntries(5))
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog { return nil }
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog { return nil }
 	h.cfg.ModelCatalogState = func() ModelCatalogState {
 		return ModelCatalogState{State: "unavailable", Cooldown: true}
 	}
@@ -577,7 +577,7 @@ func TestStatsWithoutCatalogWiring(t *testing.T) {
 func TestStatsStillTriesCatalogWhenStateUnavailable(t *testing.T) {
 	var calls int
 	h, _ := newStatsHandler(t, persistedEntries(2))
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog { calls++; return nil }
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog { calls++; return nil }
 	h.cfg.ModelCatalogState = func() ModelCatalogState {
 		return ModelCatalogState{State: "unavailable"}
 	}
@@ -600,7 +600,7 @@ func TestStatsStillTriesCatalogWhenStateUnavailable(t *testing.T) {
 func TestStatsDoesNotFetchCatalogWhenNoCalls(t *testing.T) {
 	var calls int
 	h, _ := newStatsHandler(t, nil) // 空窗口
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog { calls++; return nil }
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog { calls++; return nil }
 	h.cfg.ModelCatalogState = func() ModelCatalogState { return ModelCatalogState{State: "ok"} }
 	doStats(t, h)
 	if calls != 0 {
@@ -615,7 +615,7 @@ func TestStatsModelMultipliersOrderIsStable(t *testing.T) {
 		{At: time.Now(), Model: "alpha", Status: 200, TotalMS: 1},
 		{At: time.Now(), Model: "mid", Status: 200, TotalMS: 1},
 	}
-	cat := func() *upstream.ModelCatalog {
+	cat := func(string) *upstream.ModelCatalog {
 		return catalogWith(
 			upstream.ModelCatalogEntry{ID: "zeta", Multiplier: 3},
 			upstream.ModelCatalogEntry{ID: "alpha", Multiplier: 1},
@@ -644,7 +644,7 @@ func TestStatsOmitsModelsAbsentFromCatalog(t *testing.T) {
 		{At: time.Now(), Model: "unknown", Status: 200, TotalMS: 1},
 	}
 	h, _ := newStatsHandler(t, items)
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog {
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog {
 		return catalogWith(upstream.ModelCatalogEntry{ID: "known", Multiplier: 1.5})
 	}
 	h.cfg.ModelCatalogState = func() ModelCatalogState { return ModelCatalogState{State: "ok"} }
@@ -673,3 +673,5 @@ func TestAggregateChatLogStaysPure(t *testing.T) {
 		}
 	}
 }
+
+

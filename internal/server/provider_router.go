@@ -45,6 +45,14 @@ type ProviderRouter interface {
 	// 调用方应当**跳过它**而不是把整个 /v1/models 打成失败。
 	Models(ctx context.Context, id string) ([]gateway.ModelInfo, bool)
 
+	// ModelMultipliers 返回指定上游的模型成本倍率表（模型 id → 系数）。
+	//
+	// 数据源是**各上游自己的官方接口**（经 gateway.ModelMultiplierExt 自报；
+	// workbuddy 系走 /v3/config 的 ModelCatalogFor，不在此列）。
+	// ok=false 表示该上游没实现扩展点 / 当前拿不到官方倍率（没账号、接口失败），
+	// 调用方应当跳过而不是把整个倍率表打成失败。
+	ModelMultipliers(ctx context.Context, id string) (map[string]float64, bool)
+
 	// Chat 用**指定上游自己的 Provider** 发一次对话。
 	//
 	// # 为什么出口层不能自己拿 cfg.Upstream 发（本次修的真 bug）

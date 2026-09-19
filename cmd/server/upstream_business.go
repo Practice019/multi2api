@@ -74,7 +74,11 @@ func (w workbuddyOAuthClient) Poll(state string) (any, error) {
 // 返回 nil 是**有意义**的：`workbuddy.Config.Login` 为 nil 时
 // `LoginFlow()` 返回 false，manifest 的 `login` 置空，
 // 前端不渲染「＋ 添加账号」—— 部署方没配就不给按钮。
-func workbuddyLogin(baseURL string) workbuddy.OAuthFlow {
+//
+// provider 是登录成功凭证归属的上游标识（workbuddy 用 workbuddy.ProviderID；
+// 海外版渠道实例用 workbuddy-intl），baseURL 是授权站点
+// （CN 用 copilot.tencent.com；海外版用 www.workbuddy.ai）。
+func workbuddyLogin(provider, baseURL string) workbuddy.OAuthFlow {
 	if baseURL == "" {
 		return nil
 	}
@@ -93,7 +97,7 @@ func workbuddyLogin(baseURL string) workbuddy.OAuthFlow {
 				exp = time.Now().Add(time.Duration(cred.ExpiresIn) * time.Second)
 			}
 			return gateway.Credential{
-				Provider:  workbuddy.ProviderID,
+				Provider:  provider,
 				UID:       cred.UID,
 				Nickname:  cred.Nickname,
 				ExpiresAt: exp,
@@ -113,7 +117,7 @@ func workbuddyLogin(baseURL string) workbuddy.OAuthFlow {
 // （Poll 返回 gateway.Credential）。两者是 WrapOAuth 的入与出，不是同一个东西。
 //
 // 编译器把这个概念混淆当场挡下来了 —— 这正是断言的价值。
-var _ workbuddy.OAuthFlow = workbuddyLogin("x")
+var _ workbuddy.OAuthFlow = workbuddyLogin("workbuddy", "x")
 
 // ---------------------------------------------------------------------------
 // 调度器适配器（Task 3c）

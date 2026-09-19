@@ -47,6 +47,39 @@ type Config struct {
 		MaxBodyMB int `json:"max_body_mb"`
 	} `json:"server"`
 
+	// Login 页内「添加账号」的浏览器行为。
+	//
+	// # 为什么默认就是"自动开 + 无痕 + 独立 profile"
+	//
+	// 授权页若在用户**当前**的浏览器里打开，OAuth 会拿那个浏览器里
+	// 已登录的账号完成授权 —— 用户以为在加新号，实际加的是老号（串号）。
+	// 而且这个过程是**成功**的：账号池里多了一个账号，没有任何报错
+	// 提示你去看它是不是你想要的那个。所以默认口径必须是
+	// "网关自己开一个无痕窗口"，而不是"给用户一条链接让他自己粘贴"。
+	Login struct {
+		// OpenBrowser 点「添加账号」时是否**自动**用无痕窗口打开授权页。
+		//
+		// 缺省 true。false = 只回授权链接（无 GUI 服务器，或用户想
+		// 自己控制用哪个浏览器）。关掉之后行为与改造前逐字节一致。
+		OpenBrowser bool `json:"open_browser"`
+
+		// Browser 显式指定的浏览器可执行文件路径。空 = 自动探测
+		//（Edge → Chrome → Brave → Chromium；Windows 上 Edge 一定存在，
+		// 所以它排第一，避免"点了没反应"）。
+		Browser string `json:"browser"`
+
+		// Isolated 是否给浏览器一份**独立 profile**（临时目录）。
+		//
+		// 缺省 true —— 这是"真无痕"与"看起来像无痕"的分界线：
+		// 只给无痕参数时，无痕窗口仍属于**同一份浏览器安装**，
+		// 走 SSO 的站点可以直接用已登录账号跳过登录页完成授权。
+		// 独立 profile 让这次授权从一份全新、无任何 cookie 的目录开始
+		//（代价：要在授权页重新输入账号密码 —— 这正是本需求想要的语义）。
+		//
+		// false = 复用用户自己的 profile，只开一个无痕窗口。
+		Isolated bool `json:"isolated"`
+	} `json:"login"`
+
 	// ServiceName 网关身份标识（顶栏标题、/healthz 的 service 字段与
 	// X-Service 头都用它）。空 = 用 server.ServiceName 的编译期默认值。
 	//
@@ -359,6 +392,45 @@ type Config struct {
 		OAuthSTS string `json:"oauth_sts"`
 	} `json:"codearts"`
 
+	// WorkbuddyIntl 海外版 WorkBuddy AI（www.workbuddy.ai）渠道的配置。
+	//
+	// # 它是"workbuddy 上游的第二个渠道实例"，不是一个新协议
+	//
+	// 海外版与国内版是同一个上游实现、同一份凭证格式（account+auth 两块，
+	// auth.channel 字段标注渠道），只是端点域不同：
+	//
+	//	国内版   chat/billing = copilot.tencent.com / www.codebuddy.cn
+	//	海外版   chat/billing = www.workbuddy.ai（同一域）
+	//
+	// 按本仓库"加一个新上游 = 加一个目录 + 实现接口 + 配置加一段"的判据，
+	// 装配层用**同一个 workbuddy.Provider 实现**注册第二个实例
+	//（ID = workbuddy-intl），凭证目录 `auths/workbuddy-intl/`。
+	// 请求路由按**凭证**的 channel 字段自动选择上游域（auth.DeriveChannel），
+	// 因此 CN 与海外账号可以在同一账号池内共存。
+	//
+	// # 向后兼容（硬要求，与 codearts/loomy 同一条）
+	//
+	// 本段**整个缺席**时行为与现在**逐字节一致**：不注册海外版实例、
+	// 不加载 `auths/workbuddy-intl/`、默认上游仍是 workbuddy（国内版）。
+	// 启用条件是**显式**的：workbuddy_intl.enabled = true。
+	WorkbuddyIntl struct {
+		// Enabled 是否启用海外版 WorkBuddy AI 渠道。**缺省 false**。
+		Enabled bool `json:"enabled"`
+		// AuthDir 海外版凭证目录。留空则用 `<顶层 auth_dir>/workbuddy-intl`
+		//（按上游分子目录的既有约定，auth.UpstreamDir 自动推导）。
+		AuthDir string `json:"auth_dir"`
+		// OAuthBaseURL 海外版设备授权站点，默认 https://www.workbuddy.ai。
+		//
+		// 与顶层 admin.oauth_base_url 完全无关，刻意分开：那个是国内版
+		//（copilot.tencent.com）的授权站点，配错会把海外版账号导去国内登录页。
+		OAuthBaseURL string `json:"oauth_base_url"`
+		// PoolAccounts 是否把海外版账号并入核心账号池（默认 true）。
+		//
+		// 语义与 codearts.pool_accounts 一致：不并入就"永远选不到海外账号"。
+		// 默认 true —— 已经显式写 enabled=true 的部署，意图就是"用起来"。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"workbuddy_intl"`
+
 	// Loomy 第三个上游（讯飞 Loomy 桌面客户端的模型服务）的配置。
 	//
 	// # 向后兼容（与 codearts 同一条硬要求）
@@ -545,6 +617,19 @@ type Config struct {
 	CodeartsOAuthPortal string `json:"-"`
 	CodeartsOAuthSTS    string `json:"-"`
 
+	// WorkbuddyIntl 解析后（供 main 直接取用）。
+	//
+	// WorkbuddyIntlEnabled 为 false 时下面几个字段无意义：不注册海外版实例、
+	// 不加载 `auths/workbuddy-intl/` 凭证。
+	WorkbuddyIntlEnabled bool `json:"-"`
+	// WorkbuddyIntlAuthDir 已填好默认值 `<顶层 auth_dir>/workbuddy-intl`（见 normalize）。
+	WorkbuddyIntlAuthDir string `json:"-"`
+	// WorkbuddyIntlOAuthBaseURL 已填好默认值 https://www.workbuddy.ai，main 可直接取用。
+	WorkbuddyIntlOAuthBaseURL string `json:"-"`
+	// WorkbuddyIntlPoolAccounts 是否把海外版账号并入核心账号池
+	//（见 WorkbuddyIntl.PoolAccounts）。未启用时恒为 false。
+	WorkbuddyIntlPoolAccounts bool `json:"-"`
+
 	// Loomy 解析后（供 main 直接取用）。
 	//
 	// LoomyEnabled 为 false 时下面三个字段无意义：不注册上游、不加载凭证。
@@ -605,6 +690,13 @@ func Default() *Config {
 		StateFile: "./data/state.json",
 	}
 	c.Server.MaxBodyMB = 8
+	// 「添加账号」默认用无痕窗口打开授权页（用户要求）。
+	// 与 Schedule 的开关同一条实现路径：Default() 里置 true，
+	// Load 再用 json.Unmarshal 覆盖 —— 键缺席时保留 true，
+	// 只有显式 false 才关。
+	c.Login.OpenBrowser = true
+	// 独立 profile 也默认开：这是"真无痕"的分界线，见 Login.Isolated 的注释。
+	c.Login.Isolated = true
 	c.Cooldown.SoftRate = "60s"
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.KeepaliveHours = []int{22}
@@ -930,6 +1022,22 @@ func (c *Config) normalize() error {
 	// 并入账号池默认开（理由见 Codearts.PoolAccounts）。
 	// 未启用时恒 false —— 不注册的上游不该在池子里留下任何痕迹。
 	c.CodeartsPoolAccounts = c.CodeartsEnabled && boolOr(c.Codearts.PoolAccounts, true)
+
+	// 海外版 WorkBuddy AI（workbuddy-intl 渠道实例）。
+	//
+	// 与 codearts 同一套缺省规则：enabled 缺省 false；auth_dir 缺省
+	// `<顶层 auth_dir>/workbuddy-intl`（按上游分子目录的既有约定）；
+	// oauth_base_url 缺省官方海外站；pool_accounts 缺省 true。
+	c.WorkbuddyIntlEnabled = c.WorkbuddyIntl.Enabled
+	c.WorkbuddyIntlAuthDir = c.WorkbuddyIntl.AuthDir
+	if c.WorkbuddyIntlAuthDir == "" {
+		c.WorkbuddyIntlAuthDir = filepath.Join(c.AuthsBase, "workbuddy-intl")
+	}
+	c.WorkbuddyIntlOAuthBaseURL = c.WorkbuddyIntl.OAuthBaseURL
+	if c.WorkbuddyIntlOAuthBaseURL == "" {
+		c.WorkbuddyIntlOAuthBaseURL = "https://www.workbuddy.ai"
+	}
+	c.WorkbuddyIntlPoolAccounts = c.WorkbuddyIntlEnabled && boolOr(c.WorkbuddyIntl.PoolAccounts, true)
 
 	// 页内添加账号的授权站点/端点。
 	//

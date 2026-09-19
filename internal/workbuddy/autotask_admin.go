@@ -27,8 +27,9 @@ import (
 // autoTaskRoutes 返回任务自动化相关的管理端点。
 //
 // 由 admin.go 的 Routes() 追加（不直接改那个文件，便于对照 B 的移植范围）。
+// 路径同样经 prefixed 按实例 ID 加前缀（见 admin.go 的 pathPrefix）。
 func (h *AdminHandler) autoTaskRoutes() []gateway.AdminRoute {
-	return []gateway.AdminRoute{
+	return h.prefixed([]gateway.AdminRoute{
 		// 可自动化任务清单（前端渲染"一键完成"按钮用）。
 		{Method: "GET", Path: "/admin/growth/auto/actions", Handler: h.AutoActions, Title: "可自动化任务"},
 		// 单任务一键完成。
@@ -42,7 +43,7 @@ func (h *AdminHandler) autoTaskRoutes() []gateway.AdminRoute {
 		{Method: "POST", Path: "/admin/school/run", Handler: h.SchoolRun, Title: "开学季一键完成"},
 		// 夜猫子。
 		{Method: "POST", Path: "/admin/blackcat/run", Handler: h.BlackcatRun, Title: "夜猫子补足"},
-	}
+	})
 }
 
 // ── 可自动化任务清单 ────────────────────────────────────────────────────

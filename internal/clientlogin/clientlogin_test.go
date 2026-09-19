@@ -637,3 +637,151 @@ func assertSnapshot(t *testing.T, home, uid, nick string) {
 		t.Error("snapshot savedAt 应被更新")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 海外版（WorkBuddy AI）渠道：文件 / 账号指针 / 切换 / 回滚
+// ---------------------------------------------------------------------------
+
+// intlGatewayDoc 生成海外版账号池凭证（domain + channel 均为 intl）。
+func intlGatewayDoc(uid, nick, token string, expiresAtSec int64) string {
+	raw, _ := json.MarshalIndent(map[string]any{
+		"auth": map[string]any{
+			"accessToken": token, "refreshToken": "gwrefresh-" + uid,
+			"expiresAt": expiresAtSec, "domain": "www.workbuddy.ai", "channel": "intl",
+		},
+		"account": map[string]any{"uid": uid, "nickname": nick, "enterpriseId": ""},
+	}, "", "  ")
+	return string(raw)
+}
+
+// intlClientDoc 生成形态与海外版客户端一致的凭据（domain=www.workbuddy.ai）。
+func intlClientDoc(uid, nick, token string, expiresAtMS int64) string {
+	doc := clientDoc(uid, nick, token, expiresAtMS, nil, nil)
+	// 覆盖 domain 为海外版（auth 块在 doc 里是字符串化的 map，这里直接替换文本最稳妥）。
+	raw := strings.Replace(doc, `"domain": "copilot.tencent.com"`, `"domain": "www.workbuddy.ai"`, 1)
+	return raw
+}
+
+// TestSwitchCNToIntlIntlFileAbsent（P0-1 回归）：只装 CN 客户端（intl 文件不存在）、
+// 账号池有海外版账号时，切到 intl 必须成功——备份目标文件 ENOENT 不能中止切换。
+func TestSwitchCNToIntlIntlFileAbsent(t *testing.T) {
+	m, clientDir, gwDir, home := newTestManager(t)
+	beforeCN := clientDoc("uid-cn", "国内", "tok-cn", 4_000_000_000_000, nil, nil)
+	writeFile(t, filepath.Join(clientDir, ClientFileName), beforeCN)
+	writeFile(t, filepath.Join(gwDir, "workbuddy-uid-intl.json"),
+		intlGatewayDoc("uid-intl", "海外", "gw-tok-intl", 4_000_000_000))
+
+	if _, err := m.Switch("uid-intl"); err != nil {
+		t.Fatalf("CN 客户端切 intl 账号失败: %v", err)
+	}
+	// intl 文件被创建、CN 文件保持原样。
+	intlRaw, err := os.ReadFile(filepath.Join(clientDir, ClientFileNameAI))
+	if err != nil {
+		t.Fatalf("intl 凭证文件未创建: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(clientDir, ClientFileName)); string(got) != beforeCN {
+		t.Error("切换 intl 不应改动 CN 客户端文件")
+	}
+	cur, err := parseCredential(intlRaw, ClientFileNameAI)
+	if err != nil || cur.Account.UID != "uid-intl" {
+		t.Fatalf("intl 文件内容错误: uid=%v err=%v", cur.Account.UID, err)
+	}
+	// 账号指针写到 ~/.workbuddy-ai。
+	aiSnap := filepath.Join(home, ".workbuddy-ai", "storage", "skeleton", snapshotName)
+	if raw, err := os.ReadFile(aiSnap); err != nil || !strings.Contains(string(raw), "uid-intl") {
+		t.Errorf("intl 账号指针未写入: err=%v raw=%s", err, raw)
+	}
+	// 首次切换该渠道没有旧登录态：不应产生备份，也不该报错。
+	if _, err := os.Stat(m.lastBackupPath()); err == nil {
+		t.Error("首次切换 intl 渠道不应产生 last.json 备份")
+	}
+}
+
+// TestSwitchCNToIntlIntlFileExists（P0-1 正常路径）：intl 文件已存在时，
+// 切换必须把旧 intl 登录态备份进 last.json（含渠道元数据）。
+func TestSwitchCNToIntlIntlFileExists(t *testing.T) {
+	m, clientDir, gwDir, _ := newTestManager(t)
+	writeFile(t, filepath.Join(clientDir, ClientFileName),
+		clientDoc("uid-cn", "国内", "tok-cn", 4_000_000_000_000, nil, nil))
+	oldIntl := intlClientDoc("uid-intl-old", "海外旧", "tok-intl-old", 3_000_000_000_000)
+	writeFile(t, filepath.Join(clientDir, ClientFileNameAI), oldIntl)
+	writeFile(t, filepath.Join(gwDir, "workbuddy-uid-intl.json"),
+		intlGatewayDoc("uid-intl", "海外新", "gw-tok-intl", 4_000_000_000))
+
+	if _, err := m.Switch("uid-intl"); err != nil {
+		t.Fatalf("切换失败: %v", err)
+	}
+	// last.json 备份的是旧 intl 登录态。
+	bk, err := os.ReadFile(m.lastBackupPath())
+	if err != nil {
+		t.Fatalf("last.json 未产生: %v", err)
+	}
+	oldCur, err := parseCredential(bk, "last.json")
+	if err != nil || oldCur.Account.UID != "uid-intl-old" {
+		t.Errorf("备份内容错误: uid=%v err=%v", oldCur.Account.UID, err)
+	}
+	// 渠道元数据落盘，供 Restore 按 intl 渠道回写。
+	metaRaw, err := os.ReadFile(m.lastBackupMetaPath())
+	if err != nil {
+		t.Fatalf("last.meta.json 未产生: %v", err)
+	}
+	var meta struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.Unmarshal(metaRaw, &meta); err != nil || meta.Channel != "intl" {
+		t.Errorf("渠道元数据错误: %s (err=%v)", metaRaw, err)
+	}
+}
+
+// TestSwitchIntlSameAccount（P1-2 回归）：当前登录态是 intl 账号 X 时再切 X，
+// 必须判为同账号（ErrSameAccount），不能重写文件谎报切换。
+func TestSwitchIntlSameAccount(t *testing.T) {
+	m, clientDir, gwDir, _ := newTestManager(t)
+	writeFile(t, filepath.Join(clientDir, ClientFileNameAI),
+		intlClientDoc("uid-intl", "海外", "tok-intl", 4_000_000_000_000))
+	writeFile(t, filepath.Join(gwDir, "workbuddy-uid-intl.json"),
+		intlGatewayDoc("uid-intl", "海外", "gw-tok-intl", 4_000_000_000))
+
+	if _, err := m.Switch("uid-intl"); !errors.Is(err, ErrSameAccount) {
+		t.Fatalf("期望 ErrSameAccount，得到 %v", err)
+	}
+}
+
+// TestRestoreIntlChannel（P1-3）：切到 intl 后回滚，必须把备份写回 intl 文件，
+// CN 客户端文件不受影响。
+func TestRestoreIntlChannel(t *testing.T) {
+	m, clientDir, gwDir, home := newTestManager(t)
+	beforeCN := clientDoc("uid-cn", "国内", "tok-cn", 4_000_000_000_000, nil, nil)
+	oldIntl := intlClientDoc("uid-intl-old", "海外旧", "tok-intl-old", 3_000_000_000_000)
+	writeFile(t, filepath.Join(clientDir, ClientFileName), beforeCN)
+	writeFile(t, filepath.Join(clientDir, ClientFileNameAI), oldIntl)
+	writeFile(t, filepath.Join(gwDir, "workbuddy-uid-intl.json"),
+		intlGatewayDoc("uid-intl", "海外新", "gw-tok-intl", 4_000_000_000))
+
+	if _, err := m.Switch("uid-intl"); err != nil {
+		t.Fatalf("切换失败: %v", err)
+	}
+	res, err := m.Restore()
+	if err != nil {
+		t.Fatalf("回滚失败: %v", err)
+	}
+	if res.UID != "uid-intl-old" {
+		t.Errorf("回滚目标 uid=%s，期望 uid-intl-old", res.UID)
+	}
+	// intl 文件恢复为旧登录态。
+	aiRaw, err := os.ReadFile(filepath.Join(clientDir, ClientFileNameAI))
+	if err != nil {
+		t.Fatalf("intl 文件丢失: %v", err)
+	}
+	cur, err := parseCredential(aiRaw, ClientFileNameAI)
+	if err != nil || cur.Account.UID != "uid-intl-old" {
+		t.Errorf("intl 文件未恢复: uid=%v err=%v", cur.Account.UID, err)
+	}
+	// CN 文件与 CN 账号指针不受影响（CN snapshot 从未创建过，回滚也不该创建）。
+	if got, _ := os.ReadFile(filepath.Join(clientDir, ClientFileName)); string(got) != beforeCN {
+		t.Error("回滚不应改动 CN 客户端文件")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".workbuddy", "storage", "skeleton", snapshotName)); err == nil {
+		t.Error("回滚不应创建 CN 账号指针（本次从未操作 CN 渠道）")
+	}
+}

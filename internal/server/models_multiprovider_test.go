@@ -152,6 +152,11 @@ func (r testRouter) Models(_ context.Context, id string) ([]gateway.ModelInfo, b
 	return ms, true
 }
 
+// ModelMultipliers 测试桩：未实现官方倍率扩展点。
+func (r testRouter) ModelMultipliers(_ context.Context, _ string) (map[string]float64, bool) {
+	return nil, false
+}
+
 // Chat / Credential / RefreshCredential 是**出站**能力，本文件（目录合并）不涉及。
 //
 // 但它们必须存在：接口断言要求方法集精确匹配，少一个就编译不过
@@ -544,6 +549,9 @@ func (r noIDsRouter) Default() string    { return r.def }
 func (r noIDsRouter) Models(_ context.Context, _ string) ([]gateway.ModelInfo, bool) {
 	return nil, false
 }
+func (r noIDsRouter) ModelMultipliers(_ context.Context, _ string) (map[string]float64, bool) {
+	return nil, false
+}
 
 // 出站能力同样只有声明、没有实现（见 testRouter 上方的注释）。
 func (r noIDsRouter) Chat(_ context.Context, _ string, _ gateway.Credential, _ []byte) (gateway.ChatStream, bool, error) {
@@ -716,3 +724,4 @@ func TestV1ModelsEmptyDefaultProviderKeepsBareNames(t *testing.T) {
 		t.Fatalf("总数=%d want 23（16 裸名 + 7 codearts/）: %v", len(got), got)
 	}
 }
+

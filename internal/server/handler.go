@@ -228,9 +228,7 @@ func ResetModelsCache() {
 	dynamicModelsCache.Unlock()
 
 	modelCatalogCache.Lock()
-	modelCatalogCache.cat = nil
-	modelCatalogCache.fetched = time.Time{}
-	modelCatalogCache.lastFail = time.Time{}
+	modelCatalogCache.entries = nil // 全上游一起清：刷新意图是"立刻看到最新目录"
 	modelCatalogCache.Unlock()
 }
 
@@ -661,20 +659,30 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	return infos
 }
 
-// modelCatalogCache 模型目录（GET /v3/config，成本系数）缓存。
+// modelCatalogCache 模型目录（GET /v3/config，成本系数）缓存，**按上游各一份**。
 //
 // 与 dynamicModelsCache 是**两份**缓存而不是合并成一份，理由与两个端点不能互相替代同源：
 //   - 数据源不同：/console/enterprises/personal/models（模型可用性）vs /v3/config（成本系数）；
 //   - 失败模式不同：系数拿不到只是少一个观测维度，不该把 /v1/models 的模型列表也拖下水。
 //
+// # 为什么按上游分域（海外版渠道支持）
+//
+// 多上游部署下每个上游的 /v3/config 是**各自的事实**（workbuddy 的 glm-5.2 倍率
+// 与 workbuddy-intl 的 default-model 倍率互不相干）。单份缓存只能服务默认上游，
+// 其余上游的模型在界面上永远显示不出倍率。key = provider 标识（"" = 默认上游，
+// 与 Pool 的未打标签语义一致）。
+//
 // 生命周期策略刻意与 dynamicModelsCache 完全一致（1h 正缓存 + 5min 失败负缓存、
 // 惰性拉取、不加 ticker/goroutine），这样「什么时候会打上游」在代码里只有一套心智模型。
-// cat 存 *upstream.ModelCatalog：nil 表示尚无有效目录。
-var modelCatalogCache struct {
-	sync.RWMutex
+type modelCatalogEntry struct {
 	cat      *upstream.ModelCatalog
 	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
+}
+
+var modelCatalogCache struct {
+	sync.RWMutex
+	entries map[string]*modelCatalogEntry // provider → 目录缓存（惰性创建）
 }
 
 // ModelCatalog 返回缓存的模型目录；缓存失效时惰性回源一次，失败返回 nil。
@@ -699,9 +707,21 @@ var modelCatalogCache struct {
 // 缓存本身也是包级变量（与 dynamicModelsCache 同款），所以不持有 Handler 也不丢东西。
 // ModelCatalog 与 ModelCatalogState 通过 Config 的两个同名字段注入，
 // 测试可覆盖成桩函数，生产由 cmd/server 直接传这两个包级函数。
+// ModelCatalog 返回**默认上游**的模型目录（兼容旧签名；等价 ModelCatalogFor("")）。
 func ModelCatalog() *upstream.ModelCatalog {
 	if h := catalogHost.Load(); h != nil {
-		return h.modelCatalog()
+		return h.modelCatalogFor("")
+	}
+	return nil
+}
+
+// ModelCatalogFor 返回指定上游的模型目录；缓存失效时惰性回源一次，失败返回 nil。
+//
+// provider 为空串 = 默认上游（与 Pool 未打标签语义一致，单上游部署逐字节不变）。
+// 多上游部署下每个上游的倍率各拉各的 /v3/config（见 modelCatalogCache 的注释）。
+func ModelCatalogFor(provider string) *upstream.ModelCatalog {
+	if h := catalogHost.Load(); h != nil {
+		return h.modelCatalogFor(provider)
 	}
 	return nil
 }
@@ -752,19 +772,24 @@ type CatalogState struct {
 }
 
 func (h *Handler) modelCatalogState() CatalogState {
+	// 状态按默认上游（"" 键）报告：与改造前单份缓存同一语义 ——
+	// 状态是"缓存这件事"的观测维度，多上游各自成功/失败不合并成一个数。
 	modelCatalogCache.RLock()
 	defer modelCatalogCache.RUnlock()
 	st := CatalogState{State: "unavailable"}
-	if cool := !modelCatalogCache.lastFail.IsZero() &&
-		time.Since(modelCatalogCache.lastFail) < modelsFetchFailCooldown; cool {
-		st.Cooldown = true
-	}
-	if modelCatalogCache.cat == nil {
+	e := modelCatalogCache.entries[""]
+	if e == nil {
 		return st
 	}
-	st.Models = len(modelCatalogCache.cat.Models)
-	st.FetchedAt = modelCatalogCache.fetched
-	if !modelCatalogCache.fetched.IsZero() && time.Since(modelCatalogCache.fetched) >= dynamicModelsTTL {
+	if cool := !e.lastFail.IsZero() && time.Since(e.lastFail) < modelsFetchFailCooldown; cool {
+		st.Cooldown = true
+	}
+	if e.cat == nil {
+		return st
+	}
+	st.Models = len(e.cat.Models)
+	st.FetchedAt = e.fetched
+	if !e.fetched.IsZero() && time.Since(e.fetched) >= dynamicModelsTTL {
 		st.State, st.Stale = "stale", true
 		return st
 	}
@@ -772,37 +797,66 @@ func (h *Handler) modelCatalogState() CatalogState {
 	return st
 }
 
-// modelCatalog 是 (*Handler) 上的实现体，语义见包级 ModelCatalog。
-func (h *Handler) modelCatalog() *upstream.ModelCatalog {
+// modelCatalogFor 是 (*Handler) 上的实现体，语义见包级 ModelCatalogFor。
+// provider 为空串 = 默认上游。
+func (h *Handler) modelCatalogFor(provider string) *upstream.ModelCatalog {
 	if h.cfg.Upstream == nil || h.cfg.Pool == nil {
 		return nil
 	}
+
+	// ⚠ 数据源分两路（多上游倍率改造）：
+	//
+	//	扩展点（gateway.ModelMultiplierExt）优先 —— codearts/loomy/trae 的
+	//	倍率来自**它们自己的官方接口**（ratio_display / 展示名后缀）。
+	//	workbuddy 系不实现该扩展点（它的倍率在 /v3/config），自然落入下方回退。
+	//
+	// 这样每个上游的倍率都由自己的官方数据源回答，且不走 workbuddy 的
+	// /v3/config（拿别家凭证打 copilot.tencent.com 只会失败并惩罚无辜账号）。
+	if h.cfg.Provider != nil && provider != "" {
+		if m, ok := h.cfg.Provider.ModelMultipliers(context.Background(), provider); ok && len(m) > 0 {
+			models := make([]upstream.ModelCatalogEntry, 0, len(m))
+			for id, mult := range m {
+				models = append(models, upstream.ModelCatalogEntry{ID: id, Multiplier: mult})
+			}
+			return &upstream.ModelCatalog{Models: models}
+		}
+	}
+
 	modelCatalogCache.RLock()
-	if modelCatalogCache.cat != nil && time.Since(modelCatalogCache.fetched) < dynamicModelsTTL {
-		cat := modelCatalogCache.cat
+	e := modelCatalogCache.entries[provider]
+	if e != nil && e.cat != nil && time.Since(e.fetched) < dynamicModelsTTL {
+		cat := e.cat
 		modelCatalogCache.RUnlock()
 		return cat
 	}
 	// 失败负缓存：冷却期内不再请求上游（与 dynamicModelsCache 同一套语义）。
-	if !modelCatalogCache.lastFail.IsZero() && time.Since(modelCatalogCache.lastFail) < modelsFetchFailCooldown {
+	if e != nil && !e.lastFail.IsZero() && time.Since(e.lastFail) < modelsFetchFailCooldown {
 		modelCatalogCache.RUnlock()
 		return nil
 	}
 	// 内有未过期目录但已超 TTL：先取出来，全部重取失败时回吐旧目录。
-	stale := modelCatalogCache.cat
+	var stale *upstream.ModelCatalog
+	if e != nil {
+		stale = e.cat
+	}
 	modelCatalogCache.RUnlock()
 
 	tried := map[string]bool{}
 	for i := 0; i < h.cfg.MaxRotate; i++ {
-		// ⚠ P1（本次修复）：与 fetchDynamicModels 同一条理由 ——
-		// PickExcluding 不带 provider 过滤，混池部署里会抽到别的上游的账号，
-		// 用默认上游的客户端去拉系数必然失败，然后**惩罚那个无辜的账号**。
-		// 这里的缓存（modelCatalogCache）同样只有一份、只属于默认上游。
-		//
-		// 传 ""（不是 h.defaultProvider()）：理由见 fetchDynamicModels 里的长注释
-		// —— 本处用的客户端同样是 h.cfg.Upstream（池子眼里的默认上游），
-		// 用出口层的配置值会选出一个池子里不存在的域。
-		acct := h.cfg.Pool.PickForExcluding("", tried)
+		// 按 provider 取号：多上游部署下不能拿默认上游的账号去拉别的上游的 /v3/config。
+		// provider 为空串时退回 PickForExcluding("")（默认上游，单上游部署逐字节不变）。
+		var acct *auth.Auth
+		if provider == "" {
+			acct = h.cfg.Pool.PickForExcluding("", tried)
+		} else {
+			for _, uid := range h.cfg.Pool.AvailableUIDsFor(provider) {
+				if tried[uid] {
+					continue
+				}
+				acct = h.cfg.Pool.AuthByUID(uid)
+				break
+			}
+		}
 		if acct == nil {
 			break
 		}
@@ -814,9 +868,14 @@ func (h *Handler) modelCatalog() *upstream.ModelCatalog {
 			continue
 		}
 		modelCatalogCache.Lock()
-		modelCatalogCache.cat = cat
-		modelCatalogCache.fetched = time.Now()
-		modelCatalogCache.lastFail = time.Time{} // 成功则清空负缓存
+		if modelCatalogCache.entries == nil {
+			modelCatalogCache.entries = map[string]*modelCatalogEntry{}
+		}
+		modelCatalogCache.entries[provider] = &modelCatalogEntry{
+			cat:      cat,
+			fetched:  time.Now(),
+			lastFail: time.Time{},
+		}
 		modelCatalogCache.Unlock()
 		return cat
 	}
@@ -824,7 +883,13 @@ func (h *Handler) modelCatalog() *upstream.ModelCatalog {
 	// 全部尝试失败：进负缓存。已有旧目录时**保留它并返回** ——
 	// 成本系数是观测维度，过期的系数比没有系数有用得多（前端会标 stale 提示其不可信）。
 	modelCatalogCache.Lock()
-	modelCatalogCache.lastFail = time.Now()
+	if modelCatalogCache.entries == nil {
+		modelCatalogCache.entries = map[string]*modelCatalogEntry{}
+	}
+	modelCatalogCache.entries[provider] = &modelCatalogEntry{
+		cat:      stale,
+		lastFail: time.Now(),
+	}
 	modelCatalogCache.Unlock()
 	return stale
 }

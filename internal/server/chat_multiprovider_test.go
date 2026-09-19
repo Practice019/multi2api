@@ -136,6 +136,11 @@ func (r *multiRouter) Models(_ context.Context, id string) ([]gateway.ModelInfo,
 	return []gateway.ModelInfo{{ID: pv.id}}, true
 }
 
+// ModelMultipliers 测试桩：未实现官方倍率扩展点（ok=false，调用方跳过）。
+func (r *multiRouter) ModelMultipliers(_ context.Context, _ string) (map[string]float64, bool) {
+	return nil, false
+}
+
 func (r *multiRouter) Chat(ctx context.Context, id string, cred gateway.Credential, body []byte) (gateway.ChatStream, bool, error) {
 	pv, ok := r.reg[id]
 	if !ok {
@@ -670,6 +675,9 @@ func (r routerWithNoRefresher) Default() string    { return r.def }
 func (r routerWithNoRefresher) Models(_ context.Context, _ string) ([]gateway.ModelInfo, bool) {
 	return nil, false
 }
+func (r routerWithNoRefresher) ModelMultipliers(_ context.Context, _ string) (map[string]float64, bool) {
+	return nil, false
+}
 func (r routerWithNoRefresher) Chat(_ context.Context, id string, cred gateway.Credential, body []byte) (gateway.ChatStream, bool, error) {
 	if id != r.def {
 		return gateway.ChatStream{}, false, nil
@@ -741,3 +749,4 @@ func setExpiry(t *testing.T, h *Handler, uid string, at int64) {
 	a.ExpiresAt = at
 	a.Unlock()
 }
+

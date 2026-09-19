@@ -54,6 +54,9 @@ func (r *guardRouter) Default() string    { return r.inner.Default() }
 func (r *guardRouter) Models(ctx context.Context, id string) ([]gateway.ModelInfo, bool) {
 	return r.inner.Models(ctx, id)
 }
+func (r *guardRouter) ModelMultipliers(ctx context.Context, id string) (map[string]float64, bool) {
+	return r.inner.ModelMultipliers(ctx, id)
+}
 func (r *guardRouter) Chat(ctx context.Context, id string, cred gateway.Credential, body []byte) (gateway.ChatStream, bool, error) {
 	return r.inner.Chat(ctx, id, cred, body)
 }

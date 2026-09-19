@@ -34,7 +34,7 @@ func TestStatsColdStartCanBootstrapCatalog(t *testing.T) {
 		}
 		return ModelCatalogState{State: "ok", Models: 1}
 	}
-	fetchFn := func() *upstream.ModelCatalog {
+	fetchFn := func(string) *upstream.ModelCatalog {
 		fetchCalls.Add(1)
 		haveCatalog.Store(true)
 		return catalogWith(upstream.ModelCatalogEntry{ID: "deepseek-v4", Multiplier: 0.51})
@@ -74,7 +74,7 @@ func TestStatsDoesNotHammerCatalogWhenFetchFails(t *testing.T) {
 		{Model: "deepseek-v4", Status: 200, Tokens: 10},
 	})
 	// 永远拿不到目录（模拟上游持续失败）
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog {
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog {
 		fetchCalls.Add(1)
 		return nil
 	}
@@ -94,3 +94,5 @@ func TestStatsDoesNotHammerCatalogWhenFetchFails(t *testing.T) {
 		t.Error("拿不到目录时仍应尝试过（而非静默跳过）")
 	}
 }
+
+

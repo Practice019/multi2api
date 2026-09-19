@@ -17,12 +17,17 @@
 
 ```
 你的应用 ──► multi2api ──┬──► WorkBuddy（腾讯 CodeBuddy 桌面端）
+                         ├──► WorkBuddy AI（海外版，www.workbuddy.ai，可选渠道）
                          ├──► CodeArts（华为云 CodeArts）
                          └──► Loomy（讯飞 Loomy 桌面端）
 ```
 
 > 注意：**它不再只是 WorkBuddy 专用**。架构上"加一个上游 = 加一个目录 + 实现一组
 > 接口 + 配置加一段，核心零改动"——这是本项目最硬的判据，由架构约束测试守着。
+> 海外版 WorkBuddy AI 就是这条判据的又一次实践：**同一个 workbuddy 上游实现**
+> 注册第二个实例（`workbuddy-intl`），凭证目录 `auths/workbuddy-intl/`，
+> 请求按**凭证的 channel 字段**自动选择上游域（国内版 copilot.tencent.com /
+> 海外版 www.workbuddy.ai），国内与海外账号可在同一账号池共存。
 
 ## ✨ 核心能力
 
@@ -53,6 +58,7 @@
 | 上游 | 账号形态 | 控制台能力 |
 |---|---|---|
 | **WorkBuddy** | OAuth 设备码登录 | 签到 / 保活 / 成长计划 / 猫猫旅行 / 任务一键完成 |
+| **WorkBuddy AI**（海外版渠道） | OAuth 设备码登录（www.workbuddy.ai） | 对话 / 模型 / 额度查询（**海外版无签到/成长/旅行**，product.json 显式禁用） |
 | **CodeArts** | OAuth + DPoP（约 2 小时 STS，自动续期） | 签到（福利领取）/ 额度探测 |
 | **Loomy** | `session`（无 TTL） | **手机号验证码登录 / 新手任务一键完成 / 邀请码绑定 / 批量粘贴导入 / 额度实时查询** |
 | **TRAE** | SOLO 免费对话通道（JWT + 消费型 refreshToken） | **页内添加账号（浏览器 OAuth） / 每日自动签到 / token 自动续期 / 权益包额度查询** |
@@ -83,6 +89,9 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 ### 添加账号
 
 - **WorkBuddy / CodeArts**：控制台「账号池」分组行点「＋ 添加账号」，走各自的登录流程。
+  授权页**默认由网关用无痕窗口打开**（见下方 `login.*`），避免浏览器里已登录的
+  腾讯账号把会话串到别的账号上；窗口被关掉时可点「重新无痕打开」，
+  或点「复制链接」粘贴到无痕/隐私窗口。
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。
@@ -99,6 +108,17 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 | `pool.*` | — | 账号池：熔断阈值、在途上限、冷却时长等 |
 | `schedule.*` | — | 签到/保活时点与开关 |
 | `workbuddy.*` / `codearts.*` / `loomy.*` / `trae.*` | — | 各上游开关、目录与专用参数 |
+
+**「添加账号」的浏览器行为（`login.*`）**：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `login.open_browser` | `true` | 点「＋ 添加账号」时由网关自动用**无痕窗口**打开授权页；`false` = 只回授权链接 |
+| `login.isolated` | `true` | 给浏览器一份**独立 profile**（临时目录，48h 后自动清理）：这次授权从零 cookie 开始，代价是需重新输入账号密码；`false` = 复用当前 profile，仅开无痕窗口 |
+| `login.browser` | `""`（自动探测） | 显式指定浏览器可执行文件路径；探测顺序 Edge → Chrome → Brave → Chromium（macOS 走 `open -n -a`） |
+
+本机没有任何受支持的浏览器、或运行在无 GUI 环境时，启动日志会说明原因，
+「添加账号」自动退回「复制链接 → 粘贴到无痕窗口」的老路径（功能不受影响）。
 
 **Loomy 特有配置段**：
 

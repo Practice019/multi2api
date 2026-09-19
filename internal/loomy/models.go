@@ -30,6 +30,10 @@ type Model struct {
 	// 手册第 10 节的排错表里有一条正是
 	// `Model "xxx" is not supported on this endpoint`。
 	ID string
+	// Name 官方展示名（来自 /models 接口的 name 字段）。上游把成本倍率
+	// 下放在展示名后缀（如 "DeepSeek V4 Flash 0731（x3.0）"），
+	// 实时目录拉到后倍率解析靠它（见 multipliers.go）。
+	Name string
 	// ContextWindow 上下文窗口（token）。
 	ContextWindow int
 	// MaxOutputTokens 单次输出上限（token）。用于裁剪超限的 max_tokens。
