@@ -180,6 +180,9 @@ type modelsWire struct {
 
 type modelEntry struct {
 	ID string `json:"id"`
+	// Name 官方展示名 —— 上游把成本倍率下放在展示名后缀里
+	//（如 "DeepSeek V4 Flash 0731（x3.0）"），倍率解析靠它（见 multipliers.go）。
+	Name string `json:"name"`
 	// 上下文与输出上限的字段名在各家实现里不统一，把见过的几种都收进来。
 	ContextWindow   int `json:"context_window"`
 	MaxOutputTokens int `json:"max_output_tokens"`
@@ -234,6 +237,7 @@ func (c *Client) ModelList(ctx context.Context, a *Auth) ([]Model, error) {
 		}
 		out = append(out, Model{
 			ID:              id,
+			Name:            e.Name,
 			ContextWindow:   firstPositive(e.ContextWindow, e.ContextLength),
 			MaxOutputTokens: firstPositive(e.MaxOutputTokens, e.MaxTokens, e.MaxOutputLength),
 		})

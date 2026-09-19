@@ -1,4 +1,4 @@
-// Package oauth 实现 WorkBuddy CN 的 OAuth 设备授权流程（服务端侧）。
+// Package oauth 实现 WorkBuddy CN / 海外版（WorkBuddy AI）的 OAuth 设备授权流程（服务端侧）。
 //
 // 与 cmd/login 的差异：本包把 device state 放在进程内存里（带 TTL），不落 /tmp 文件，
 // 因此天然适配「一个网关进程服务多个浏览器会话」的场景；cmd/login 保持原样不动。
@@ -18,13 +18,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"workbuddy2api/internal/auth"
 )
 
-// 上游常量（CN only）。与 cmd/login/main.go 保持一致。
+// 上游常量。CN 为默认；海外版（baseURL 含 workbuddy.ai）由 New 推导。
 const (
 	defaultBaseURL = "https://copilot.tencent.com"
 	clientUA       = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originReferer  = "https://www.codebuddy.cn"
+	originCN       = "https://www.codebuddy.cn"
+	originIntl     = "https://www.workbuddy.ai"
 )
 
 // ErrPending 表示用户尚未在浏览器完成授权；调用方应继续轮询。
@@ -40,6 +43,7 @@ type Credential struct {
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int64  `json:"expires_in"`
 	Domain       string `json:"domain"`
+	Channel      string `json:"channel"` // cn / intl（由 domain 推导，落盘后池/出口据此路由）
 	UID          string `json:"uid"`
 	EnterpriseID string `json:"enterprise_id"`
 	Nickname     string `json:"nickname"`
@@ -54,13 +58,15 @@ func (c *Credential) ExpiresAt() int64 {
 }
 
 // authDoc 是落盘格式（嵌套形）：internal/auth 的 Parse 认这个形状，
-// 与 cmd/login + login.sh 写出的文件逐字段一致。
+// 与 cmd/login + login.sh 写出的文件逐字段一致。channel 额外落盘：
+// 旧文件没有该字段时由 auth.Parse 按 domain 推导，这里显式写上是给新凭证一个确定值。
 type authDoc struct {
 	Auth struct {
 		AccessToken  string `json:"accessToken"`
 		RefreshToken string `json:"refreshToken"`
 		ExpiresAt    int64  `json:"expiresAt"`
 		Domain       string `json:"domain"`
+		Channel      string `json:"channel"`
 	} `json:"auth"`
 	Account struct {
 		UID          string `json:"uid"`
@@ -82,6 +88,7 @@ func (c *Credential) MarshalAuthFile() (name string, raw []byte, err error) {
 	doc.Auth.RefreshToken = c.RefreshToken
 	doc.Auth.ExpiresAt = c.ExpiresAt()
 	doc.Auth.Domain = c.Domain
+	doc.Auth.Channel = c.Channel
 	doc.Account.UID = c.UID
 	doc.Account.EnterpriseID = c.EnterpriseID
 	doc.Account.Nickname = c.Nickname
@@ -122,19 +129,28 @@ type Client struct {
 	BaseURL string
 	HTTP    *http.Client
 
+	// OriginReferer 随渠道（CN/海外）变化：登录请求的 Origin/Referer 头。
+	OriginReferer string
+
 	mu      sync.Mutex
 	pending map[string]pending
 }
 
 // New 构建客户端；baseURL 为空时用 CN 默认站点。
+// OriginReferer 按 baseURL 推导：含 workbuddy.ai 的站点视为海外版。
 func New(baseURL string) *Client {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
+	origin := originCN
+	if auth.DeriveChannel(baseURL) == auth.ChannelIntl {
+		origin = originIntl
+	}
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
-		pending: make(map[string]pending),
+		BaseURL:       strings.TrimRight(baseURL, "/"),
+		HTTP:          &http.Client{Timeout: 30 * time.Second},
+		OriginReferer: origin,
+		pending:       make(map[string]pending),
 	}
 }
 
@@ -142,8 +158,8 @@ func (c *Client) headers(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("Origin", originReferer)
-	req.Header.Set("Referer", originReferer+"/")
+	req.Header.Set("Origin", c.OriginReferer)
+	req.Header.Set("Referer", c.OriginReferer+"/")
 	req.Header.Set("User-Agent", clientUA)
 }
 
@@ -268,6 +284,7 @@ func (c *Client) Poll(state string) (*Credential, error) {
 		RefreshToken: tok.RefreshToken,
 		ExpiresIn:    tok.ExpiresIn,
 		Domain:       tok.Domain,
+		Channel:      auth.DeriveChannel(tok.Domain),
 	}
 
 	// 账号信息拿不到不算失败：凭证已可用，UID 缺失才致命（文件名/池主键都靠它）。

@@ -44,6 +44,22 @@ type Config struct {
 	// NewWithConfig(Config{...}) 的手工构造都不需要改。
 	Provider string
 
+	// ID 本实例在 registry 里注册的唯一标识。
+	//
+	// # 为什么需要它（海外版渠道支持）
+	//
+	// 海外版 WorkBuddy AI 与国内版是同一个上游实现、同一个凭证格式，
+	// 只是端点域不同。按"加一个目录 + 实现接口 + 配置加一段"的判据，
+	// 装配层用**同一个 Provider 实现**注册第二个实例（如 workbuddy-intl）。
+	// registry 要求每个 Provider 的 ID() 全局唯一 —— 包级常量 providerID
+	// 满足不了两个实例，所以 ID() 落到配置上。
+	//
+	// 零值 = "" 时用包级常量 providerID（"workbuddy"），向后兼容。
+	// 渠道（cn/intl）不在这里表达：路由由**凭证**的 channel 字段决定
+	// （见 auth.DeriveChannel / upstream 的 base 选择），本实例只管
+	// 自己在 registry 与账号池里的标签。
+	ID string
+
 	// AuthDir 本上游凭证的落盘目录（供 `gateway.LoginFlow.AuthDir` 用）。
 	//
 	// # 为什么不直接用核心的 AuthDir
@@ -117,6 +133,24 @@ type Config struct {
 
 	// GrowthWatchInterval 成长中心扫描间隔。<=0 回落 10 分钟。
 	GrowthWatchInterval time.Duration
+
+	// DisableGrowthTravel 关闭本实例的「签到 / 成长中心 / 猫猫旅行 / 活跃上报」
+	// 全部玩法类能力，仅保留对话、模型目录与额度探测。
+	//
+	// # 为什么需要它（海外版渠道支持）
+	//
+	// 海外版 WorkBuddy AI（www.workbuddy.ai）的产品配置**显式禁用**了这些玩法
+	//（逆向 product.json：DisableCheckin=true、UserGrowth=false、
+	// DisableActivityBanner=true）—— 它的客户端里根本没有签到/成长/旅行入口。
+	// 若把国内版的能力声明原样套给 workbuddy-intl 实例：
+	//
+	//	· Caps() 会声明 CapCheckin/CapGrowth/CapTravel → 前端显示不存在的面板；
+	//	· Jobs() 会注册成长/旅行守卫 → 后台任务对着不存在的接口空打；
+	//	· AdminRoutes 会挂 22 条玩法端点 → 可调用但上游恒失败。
+	//
+	// 本开关让装配层（cmd/server 配海外版实例时置 true）按实例裁剪这三块，
+	// 默认 false —— 国内版实例行为逐字节不变。
+	DisableGrowthTravel bool
 	// 六个自动动作的初始开关。用 *bool 区分「未设置」与「显式 false」，
 	// 默认值在 New 里给出：领奖 true、补签 true、接单 true，其余三个 false。
 	// 这里刻意不用 Disabled/Enabled 命名：各开关默认值不一致，

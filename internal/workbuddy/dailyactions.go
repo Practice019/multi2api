@@ -71,15 +71,7 @@ const (
 // 把两者混成一个"有没有全量端点"的推断，就会把用户删掉的按钮**偷偷加回来**。
 // 有测试钉住这一条（TestWorkbuddyKeepaliveHasNoBulkButton）。
 func (p *Provider) DailyActions() []gateway.DailyAction {
-	return []gateway.DailyAction{
-		{
-			ID:     DailyActionCheckin,
-			Label:  "签到",
-			Title:  "单账号签到",
-			OneURL: "/admin/checkin",
-			AllURL: "/admin/checkin",
-			Batch:  true,
-		},
+	actions := []gateway.DailyAction{
 		{
 			ID:     DailyActionKeepalive,
 			Label:  "保活",
@@ -91,6 +83,21 @@ func (p *Provider) DailyActions() []gateway.DailyAction {
 			Batch:  false,
 		},
 	}
+	// 签到仅在国内版提供：海外版（DisableGrowthTravel）没有签到玩法
+	// （product.json DisableCheckin=true），报出来只会给一行点不动/恒失败的按钮。
+	if p == nil || !p.cfg.DisableGrowthTravel {
+		actions = append([]gateway.DailyAction{
+			{
+				ID:     DailyActionCheckin,
+				Label:  "签到",
+				Title:  "单账号签到",
+				OneURL: "/admin/checkin",
+				AllURL: "/admin/checkin",
+				Batch:  true,
+			},
+		}, actions...)
+	}
+	return actions
 }
 
 // 编译期断言：Provider 实现了每日动作扩展点。

@@ -105,6 +105,11 @@ func (r *inbandRouter) Models(_ context.Context, id string) ([]gateway.ModelInfo
 	return ms, true
 }
 
+// ModelMultipliers 测试桩：未实现官方倍率扩展点。
+func (r *inbandRouter) ModelMultipliers(_ context.Context, _ string) (map[string]float64, bool) {
+	return nil, false
+}
+
 func (r *inbandRouter) Chat(ctx context.Context, id string, cred gateway.Credential, body []byte) (gateway.ChatStream, bool, error) {
 	pv, ok := r.reg[id]
 	if !ok {
@@ -328,3 +333,4 @@ func TestChatStreamNormalControlStillWorks(t *testing.T) {
 		t.Errorf("正常流不该惩罚账号：err_total=%d cooling=%v", st.ErrTotal, st.Cooling)
 	}
 }
+

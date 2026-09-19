@@ -11,12 +11,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/browseropen"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/clientlogin"
 	"workbuddy2api/internal/codearts"
@@ -218,7 +220,7 @@ func main() {
 		// ⚠ 这里与第 384 行的 `OAuth:` 各给一份，**不是重复**：
 		// admin 那份服务过渡期的旧路径（请求不带 provider 时走它），
 		// 这一份供"按 provider 分派"使用。旧路径退役后前者可删。
-		Login: workbuddyLogin(cfg.OAuthBaseURL),
+		Login: workbuddyLogin(workbuddy.ProviderID, cfg.OAuthBaseURL),
 
 		TravelAutoClaimDisabled: !cfg.TravelAutoClaim,
 		TravelWatchInterval:     cfg.TravelWatchInterval,
@@ -259,6 +261,71 @@ func main() {
 	}
 	if err := registry.Register(wb); err != nil {
 		log.Fatalf("注册上游失败: %v", err)
+	}
+
+	// ---- 海外版 WorkBuddy AI（workbuddy-intl 渠道实例）----
+	//
+	// 同一个 workbuddy.Provider 实现注册第二个实例：ID=workbuddy-intl，
+	// 凭证目录 `auths/workbuddy-intl/`，OAuth 站点为海外版（www.workbuddy.ai）。
+	// 请求路由按**凭证**的 channel 字段自动选择上游域（auth.DeriveChannel），
+	// 因此 CN 与海外账号可在同一账号池共存、互不干扰。
+	//
+	// 业务配置（签到/保活/成长/旅行）与国内版实例共用同一组值 ——
+	// 各守卫轮按 provider 过滤账号（ListFor），只处理本实例自己的号；
+	// 单个账号失败只跳过该号（失败隔离），不会把接口不存在的上游拖进死循环。
+	//
+	// 向后兼容：config 里 workbuddy_intl 段缺席（enabled=false）时
+	// 整段不执行，行为与改造前逐字节一致。
+	if cfg.WorkbuddyIntlEnabled {
+		wbIntl := workbuddy.NewWithConfig(workbuddy.Config{
+			Pool:     poolAdapter{p: p},
+			Provider: "workbuddy-intl",
+			ID:       "workbuddy-intl",
+			Log:      checkinLog,
+			// 海外版凭证目录（auths/workbuddy-intl/），供登录落盘与池同步用。
+			AuthDir: cfg.WorkbuddyIntlAuthDir,
+			// 页内添加账号：海外版授权站点。
+			Login: workbuddyLogin("workbuddy-intl", cfg.WorkbuddyIntlOAuthBaseURL),
+
+			// 海外版没有签到/成长/旅行玩法（product.json：DisableCheckin=true、
+			// UserGrowth=false）—— 实例只保留对话/模型/额度探测，
+			// 后台任务与管理端点一并裁剪（见 workbuddy.Config.DisableGrowthTravel）。
+			DisableGrowthTravel: true,
+			// token 保活必须保留（凭证会过期），签到不启用。
+			RefreshInterval: cfg.ScheduleKeepaliveInterval,
+			// 后台保活失败/成功 → pool 刷新失败计数（与国内版实例同一套语义）。
+			OnRefreshFailure: func(uid string) {
+				if p.NoteRefreshFailure(uid) {
+					log.Printf("workbuddy-intl: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录）", uid)
+				}
+			},
+			OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
+		})
+		wbIntl.SetClient(up)
+		if err := registry.Register(wbIntl); err != nil {
+			log.Fatalf("注册海外版上游失败: %v", err)
+		}
+		// 并入核心账号池（可配关）：同步凭证进池，请求才可能路由到海外账号。
+		// ⚠ 必须用 SyncToDirWithSecrets：workbuddy 的凭证就是 *auth.Auth 本身，
+		// 把它作为 secret 一起装进池子 —— 否则 /v1/models 的 router 路径
+		// 取不到凭证，workbuddy-intl 模型目录恒为空。
+		if cfg.WorkbuddyIntlPoolAccounts {
+			intlAuths, lerr := auth.LoadDirCompat(cfg.AuthsBase, "workbuddy-intl")
+			if lerr != nil {
+				log.Printf("workbuddy-intl: 读取凭证失败: %v", lerr)
+			} else {
+				secrets := make(map[string]any, len(intlAuths))
+				for _, a := range intlAuths {
+					if a.UID != "" {
+						secrets[a.UID] = a
+					}
+				}
+				p.SyncToDirWithSecrets("workbuddy-intl", intlAuths, secrets)
+				log.Printf("workbuddy-intl: 已并入 %d 个海外版账号到账号池", len(intlAuths))
+			}
+		}
+		log.Printf("已注册海外版上游 workbuddy-intl（授权站点 %s，凭证目录 %s）",
+			cfg.WorkbuddyIntlOAuthBaseURL, cfg.WorkbuddyIntlAuthDir)
 	}
 
 	// ---- 第二个上游：CodeArts（判据 1 的实测对象）----
@@ -715,7 +782,7 @@ func main() {
 			// —— 表现成设置页少几个键且没有任何报错。
 			SettingsExts:      []admin.SettingsExt{upSettings},
 			ResetModelsCache:  server.ResetModelsCache,
-			ModelCatalog:      server.ModelCatalog,
+			ModelCatalog:      server.ModelCatalogFor,
 			ModelCatalogState: modelCatalogState,
 			Settings: newSettingsStore(*cfgPath, cfg, sch, upSettings, checkinLog, func(days int) {
 				if s := logRing.Sink(); s != nil {
@@ -723,6 +790,15 @@ func main() {
 				}
 			}),
 			StartedAt: time.Now(),
+			// 「添加账号」默认用**无痕窗口**打开授权页（用户要求）。
+			//
+			// 放在装配层而不是 admin 里直接 exec：admin 保持"可测、无副作用"，
+			// 而"怎么开浏览器"是部署环境的事（平台差异、独立 profile、
+			// 本机装了哪个浏览器）。见 internal/browseropen 的包注释。
+			//
+			// 返回 nil 表示本部署不自动开（配置关掉了，或本机没有
+			// 受支持的浏览器）—— admin 会退回"只回授权链接"的旧行为。
+			OpenAuthURL: loginBrowserOpener(cfg),
 		}),
 	})
 
@@ -777,3 +853,59 @@ func main() {
 	}
 	log.Printf("bye")
 }
+
+// loginBrowserOpener 装配「用无痕窗口打开授权页」这个动作。
+//
+// # 为什么返回 nil 而不是"打不开时报错"
+//
+// 自动打开是**便利**，不是功能本身：授权链接无论如何都会经
+// /admin/login/start 返回给前端。所以本部署里没有可用浏览器时，
+// 正确做法是退回"只回链接"的旧行为（并记一条日志说明为什么），
+// 而不是让「添加账号」整个不可用。
+//
+// # 为什么启动时就探测一次
+//
+// 否则"本机没装受支持的浏览器"这件事只在用户点「添加账号」时才暴露，
+// 而且表现成"点了没反应"（窗口不出现、也没人告诉他为什么）。
+// 启动期探测把问题提前到日志里。
+func loginBrowserOpener(cfg *Config) func(string) (string, error) {
+	if !cfg.Login.OpenBrowser {
+		log.Printf("login: 自动打开授权页已关闭（login.open_browser=false）" +
+			"——「添加账号」只回授权链接，请手动粘贴到无痕窗口")
+		return nil
+	}
+	// 探测用的 Opts **不带** Isolated：Isolated 只影响参数里的
+	// --user-data-dir，而"本机有没有这个浏览器"与它无关。
+	// 带着它会在每次启动时白建一个临时 profile 目录。
+	probe := browseropen.Opts{Explicit: cfg.Login.Browser}
+	cmd, err := browseropen.Plan(runtime.GOOS, "https://example.invalid/probe", probe)
+	if err != nil {
+		log.Printf("login: 未能启用「自动用无痕窗口打开授权页」（%v）"+
+			"——「添加账号」仍可用，请在无痕窗口里手动粘贴授权链接", err)
+		return nil
+	}
+	log.Printf("login: 「添加账号」将自动用无痕窗口打开授权页（%s%s）",
+		cmd.Browser, isolatedNote(cfg.Login.Isolated))
+
+	opts := browseropen.Opts{Isolated: cfg.Login.Isolated, Explicit: cfg.Login.Browser}
+	return func(rawURL string) (string, error) {
+		c, err := browseropen.Open(rawURL, opts)
+		if err != nil {
+			return "", err
+		}
+		return c.Browser + "（无痕）", nil
+	}
+}
+
+// isolatedNote 把"要不要独立 profile"翻译成日志里的一句话。
+//
+// 为什么值得单独说：这两者的用户体验差别很大 ——
+// 独立 profile 下用户**必须重新输入账号密码**。
+// 日志里不写清楚，"为什么每次添加账号都要重新登录"就变成了要读源码的问题。
+func isolatedNote(isolated bool) string {
+	if isolated {
+		return "，独立 profile（需重新输入账号密码，不会串号）"
+	}
+	return "，复用当前 profile（不串号保护较弱）"
+}
+

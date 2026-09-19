@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# login.sh — WorkBuddy CN OAuth 登录 → 落盘 auth 文件
+# login.sh — WorkBuddy CN / 海外版（WorkBuddy AI）OAuth 登录 → 落盘 auth 文件
 #
 # 用法:
-#   ./login.sh
+#   ./login.sh           # 国内版（copilot.tencent.com）
+#   ./login.sh -intl     # 海外版（www.workbuddy.ai）
 #
 # 流程:
 #   1. POST /v2/plugin/auth/state 拿授权 URL（无 PKCE，state 由服务端签发）
@@ -15,6 +16,14 @@ cd "$(dirname "$0")"
 AUTH_DIR="./auths"
 CONTAINER="workbuddy2api"
 
+# 渠道：-intl → 海外版。auth 文件统一格式（account+auth 两块），channel 字段落盘。
+INTL_FLAG=""
+CHECKIN_HOST="https://www.codebuddy.cn"
+if [[ "${1:-}" == "-intl" ]]; then
+    INTL_FLAG="-intl"
+    CHECKIN_HOST="https://www.workbuddy.ai"
+fi
+
 mkdir -p "$AUTH_DIR"
 
 # login 工具：不存在才编译（源码改动后手动 go build -o login ./cmd/login）
@@ -24,11 +33,15 @@ if [[ ! -x "$LOGIN_BIN" ]]; then
 fi
 
 echo "============================================================"
-echo "  WorkBuddy OAuth 登录"
+if [[ -n "$INTL_FLAG" ]]; then
+    echo "  WorkBuddy AI（海外版）OAuth 登录"
+else
+    echo "  WorkBuddy（国内版）OAuth 登录"
+fi
 echo "============================================================"
 echo ""
 
-AUTH_URL=$("$LOGIN_BIN" url)
+AUTH_URL=$("$LOGIN_BIN" $INTL_FLAG url)
 
 echo "请在浏览器中打开以下链接完成登录："
 echo ""
@@ -51,7 +64,7 @@ fi
 echo ""
 echo "正在获取 token..."
 
-RESULT=$("$LOGIN_BIN" poll) || {
+RESULT=$("$LOGIN_BIN" $INTL_FLAG poll) || {
     echo ""
     echo "获取 token 失败。可能原因："
     echo "  - 登录还没完成就按了 y（重新运行 ./login.sh 再试）"
@@ -63,6 +76,7 @@ TOKEN=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)
 REFRESH=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)['refresh_token'])")
 EXPIRES_IN=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin)['expires_in'])")
 DOMAIN=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('domain',''))")
+CHANNEL=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('channel',''))")
 USER_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uid',''))")
 ENT_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enterprise_id',''))")
 NICKNAME=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('nickname',''))")
@@ -74,12 +88,12 @@ fi
 
 EXPIRES_AT=$(( $(date +%s) + EXPIRES_IN ))
 
-# ─── 签到（CN：POST codebuddy.cn/v2/billing/meter/daily-checkin，幂等不阻塞）───
+# ─── 签到（幂等不阻塞；host 随渠道：CN=www.codebuddy.cn，intl=www.workbuddy.ai）───
 python3 - <<PYEOF
 import json, urllib.request, urllib.error
 
 req = urllib.request.Request(
-    "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
+    "$CHECKIN_HOST/v2/billing/meter/daily-checkin",
     method="POST", data=b"{}",
     headers={
         "Authorization": "Bearer $TOKEN",
@@ -130,7 +144,8 @@ auth = {
         "accessToken": "$TOKEN",
         "refreshToken": "$REFRESH",
         "expiresAt": $EXPIRES_AT,
-        "domain": "$DOMAIN"
+        "domain": "$DOMAIN",
+        "channel": "$CHANNEL"
     }
 }
 with open("$AUTH_FILE", "w") as f:

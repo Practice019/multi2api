@@ -161,12 +161,12 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 				{"id":"glm-5.2","name":"GLM-5.2","maxInputTokens":131072,"maxOutputTokens":8192,"reasoning":{"effort":"high","supportedEfforts":["low","high"]}}
 			],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`), nil
 		default:
-			outbound, _ = io.ReadAll(r.Body)
-			return &http.Response{
-				StatusCode: 200,
-				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-				Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
-			}, nil
+			// FetchModels 现在会补打 /v3/config（GET，无 body）——
+			// 空目录即可（合并逻辑加 0 个模型，不影响本用例断言）。
+			if r.Body != nil {
+				outbound, _ = io.ReadAll(r.Body)
+			}
+			return jsonResp(200, `{"code":0,"msg":"OK","data":{"models":[]}}`), nil
 		}
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
@@ -319,9 +319,42 @@ func TestBasesAlwaysCN(t *testing.T) {
 	if c.chatBase(cn) != "https://chat.example" || c.billingBase(cn) != "https://billing.example" {
 		t.Error("cn bases wrong")
 	}
-	// 恒 CN：domain 不同不改变上游 host。
+	// 同渠道下 domain 不同不改变上游 host（渠道才是路由维度）。
 	if c.chatBase(other) != c.chatBase(cn) || c.billingBase(other) != c.billingBase(cn) {
 		t.Error("bases must be CN regardless of domain")
+	}
+}
+
+// TestBasesRouteByChannel channel=intl 走海外版 base，channel 空/cn 走国内版。
+func TestBasesRouteByChannel(t *testing.T) {
+	c := testClient(nil)
+	c.ChatBaseIntl = "https://chat-intl.example"
+	c.BillingBaseIntl = "https://billing-intl.example"
+	intl := &auth.Auth{Channel: auth.ChannelIntl, Domain: "www.workbuddy.ai"}
+	if got := c.chatBase(intl); got != "https://chat-intl.example" {
+		t.Errorf("chatBase(intl)=%q", got)
+	}
+	if got := c.billingBase(intl); got != "https://billing-intl.example" {
+		t.Errorf("billingBase(intl)=%q", got)
+	}
+	// 空 channel 与显式 cn 都走国内版（向后兼容）。
+	for _, a := range []*auth.Auth{{}, {Channel: auth.ChannelCN}, {Domain: "copilot.tencent.com"}} {
+		if got := c.chatBase(a); got != "https://chat.example" {
+			t.Errorf("chatBase(%+v)=%q, want CN", a, got)
+		}
+	}
+}
+
+// TestOriginRefererByChannel Origin/Referer 头随渠道：intl → www.workbuddy.ai。
+func TestOriginRefererByChannel(t *testing.T) {
+	if got := originRefererFor(&auth.Auth{Channel: auth.ChannelIntl}); got != "https://www.workbuddy.ai" {
+		t.Errorf("intl origin=%q", got)
+	}
+	if got := originRefererFor(&auth.Auth{Channel: auth.ChannelCN}); got != "https://www.codebuddy.cn" {
+		t.Errorf("cn origin=%q", got)
+	}
+	if got := originRefererFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "https://www.codebuddy.cn" {
+		t.Errorf("default origin=%q", got)
 	}
 }
 

@@ -45,10 +45,16 @@ const (
 	defaultClientVersion = "5.5.4"
 	defaultCliVersion    = "2.137.1"
 
-	originRefererCN = "https://www.codebuddy.cn"
+	originRefererCN   = "https://www.codebuddy.cn"
+	originRefererIntl = "https://www.workbuddy.ai"
 )
 
+// originRefererFor 按账号渠道选 Origin/Referer：
+// 国际版（channel=intl）用 www.workbuddy.ai，国内版用 www.codebuddy.cn。
 func originRefererFor(a *auth.Auth) string {
+	if a != nil && a.Channel == auth.ChannelIntl {
+		return originRefererIntl
+	}
 	return originRefererCN
 }
 

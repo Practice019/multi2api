@@ -1,6 +1,7 @@
 package workbuddy
 
 import (
+	"strings"
 	"sync"
 
 	"workbuddy2api/internal/gateway"
@@ -112,7 +113,7 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 
 // Routes 返回挂载清单（供需要显式构造宿主的调用方使用，例如测试与 cmd/server）。
 func (h *AdminHandler) Routes() []gateway.AdminRoute {
-	return []gateway.AdminRoute{
+	return h.prefixed([]gateway.AdminRoute{
 		// ---- 签到 ----
 		{Method: "POST", Path: "/admin/checkin", Handler: h.Checkin, Capability: gateway.CapCheckin, Title: "立即签到"},
 		{Method: "GET", Path: "/admin/checkin/history", Handler: h.History, Capability: gateway.CapCheckin, Title: "签到历史"},
@@ -161,7 +162,68 @@ func (h *AdminHandler) Routes() []gateway.AdminRoute {
 		{Method: "GET", Path: "/admin/client-login", Handler: h.ClientLoginStatus, Title: "本机登录状态"},
 		{Method: "POST", Path: "/admin/client-login/switch", Handler: h.ClientLoginSwitch, Title: "切换本机登录"},
 		{Method: "POST", Path: "/admin/client-login/restore", Handler: h.ClientLoginRestore, Title: "回滚本机登录"},
+	})
+}
+
+// prefixed 按实例 ID 给管理端点路径加前缀。
+//
+// # 为什么需要它（海外版渠道支持）
+//
+// 海外版（workbuddy-intl）与国内版是**同一个实现**注册的第二个实例，
+// 两者声明的 AdminRoutes 路径完全相同 —— 而 admin 核心挂载时对同 pattern
+// 保留先注册者（见 admin.mountUpstreamRoutes 的冲突规则），后注册实例的
+// 端点会整批被跳过。给非默认实例的路径加 `/<id>` 前缀后冲突消失，
+// 且 manifest 下发的 admin_routes 路径同步带前缀，前端按 manifest 渲染自动适配。
+//
+// 默认实例（providerID "workbuddy"）不加前缀 —— 既有部署的端点路径
+// 与前端行为逐字节不变。
+//
+// 同时按实例裁剪玩法类端点：DisableGrowthTravel（海外版）实例不挂
+// 签到/成长/旅行/活动类端点 —— 上游没有这些玩法（product.json 显式禁用），
+// 挂了只会得到恒失败。判定走双通道：能力位（CapCheckin/CapGrowth/CapTravel）
+// + 路径前缀（autotask/school/blackcat 等玩法端点的 Capability 为 0，
+// 能力位通道滤不到它们，见 autoTaskRoutes）。
+func (h *AdminHandler) prefixed(routes []gateway.AdminRoute) []gateway.AdminRoute {
+	prefix := h.pathPrefix()
+	out := make([]gateway.AdminRoute, 0, len(routes))
+	for _, r := range routes {
+		if h.p != nil && h.p.cfg.DisableGrowthTravel &&
+			(r.Capability&(gateway.CapCheckin|gateway.CapGrowth|gateway.CapTravel) != 0 ||
+				isPlayFeaturePath(r.Path)) {
+			continue
+		}
+		if prefix != "" {
+			r.Path = prefix + r.Path
+		}
+		out = append(out, r)
 	}
+	return out
+}
+
+// isPlayFeaturePath 判定路径是否属于「玩法类」（签到/成长/旅行/活动）端点。
+// 与 Caps()/Jobs() 的 DisableGrowthTravel 同一条判据，按路径前缀识别，
+// 覆盖 Capability 为 0 的玩法端点（autotask/school/blackcat）。
+func isPlayFeaturePath(path string) bool {
+	for _, p := range []string{
+		"/admin/checkin",
+		"/admin/growth",
+		"/admin/travel",
+		"/admin/school",
+		"/admin/blackcat",
+	} {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathPrefix 返回本实例的管理端点路径前缀；默认实例无前缀。
+func (h *AdminHandler) pathPrefix() string {
+	if h == nil || h.p == nil || h.p.ID() == providerID {
+		return ""
+	}
+	return "/" + h.p.ID()
 }
 
 // allRoutes 在基础路由之上追加任务自动化端点（见 autotask_admin.go）。

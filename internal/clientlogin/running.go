@@ -28,10 +28,13 @@ import (
 const procCacheTTL = 3 * time.Second
 
 // clientImageNames 是可能代表「客户端正在运行」的进程名（小写比较）。
-// 主进程是 WorkBuddy.exe；不同版本/安装方式下可能还有别的名字，一并覆盖。
+// 主进程国内版是 WorkBuddy.exe，海外版（WorkBuddy AI）是 WorkBuddyAI.exe；
+// 不同版本/安装方式下可能还有别的名字，一并覆盖。
 var clientImageNames = []string{
 	"workbuddy.exe",
+	"workbuddyai.exe", // 海外版主进程 WorkBuddyAI.exe
 	"workbuddy",
+	"workbuddy-ai",
 	"codebuddy.exe",
 }
 
@@ -82,20 +85,32 @@ func defaultProbe() bool {
 // /NH 去掉表头，/FO CSV 让输出好解析。
 // 没有任何匹配时 tasklist 输出的是 "INFO: No tasks are running..."，
 // 因此不能只看退出码，必须看输出里有没有进程名。
+// 国内版（WorkBuddy.exe）与海外版（WorkBuddyAI.exe）都要查。
 func probeWindows() bool {
 	// tasklist 在 System32 下；万一 PATH 被裁剪，用绝对路径兜底。
 	candidates := []string{"tasklist", `C:\Windows\System32\tasklist.exe`}
 	for _, bin := range candidates {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		out, err := exec.CommandContext(ctx, bin,
-			"/FI", "IMAGENAME eq WorkBuddy.exe", "/NH", "/FO", "CSV").Output()
-		cancel()
-		if err != nil {
-			// 换个候选路径再试；全都失败就只能返回 false（不阻断功能，
-			// 只是失去这层保护，由 UI 上的说明兜住）。
-			continue
+		// 任一 image 查询失败 = 这个 bin 不可用（命令缺失/超时），换下一个 bin；
+		// 全部查询成功且无匹配则 bin 可用、结论为未运行，直接返回。
+		usable := true
+		for _, image := range []string{"WorkBuddy.exe", "WorkBuddyAI.exe"} {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			out, err := exec.CommandContext(ctx, bin,
+				"/FI", "IMAGENAME eq "+image, "/NH", "/FO", "CSV").Output()
+			cancel()
+			if err != nil {
+				// 换个候选路径再试；全都失败就只能返回 false（不阻断功能，
+				// 只是失去这层保护，由 UI 上的说明兜住）。
+				usable = false
+				break
+			}
+			if containsClientImage(string(out)) {
+				return true
+			}
 		}
-		return containsClientImage(string(out))
+		if usable {
+			return false
+		}
 	}
 	return false
 }

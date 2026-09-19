@@ -247,6 +247,12 @@ type Client struct {
 	ChatBaseCN    string
 	BillingBaseCN string
 
+	// 渠道 base：海外版（channel=intl，WorkBuddy AI）走 ChatBaseIntl/BillingBaseIntl/WebBaseIntl。
+	// 每个账号按凭证里的 channel 字段路由（auth.DeriveChannel 兜底），
+	// 因此同一个网关进程可以同时服务 CN 与国际版账号池。
+	ChatBaseIntl    string
+	BillingBaseIntl string
+
 	// WebBaseCN 官网（workbuddy.cn）域。
 	//
 	// # 为什么需要第三个基址（1:1 移植自 workbuddy2api-panel）
@@ -260,7 +266,8 @@ type Client struct {
 	// Web 域的事件形状与另两个域**不同**：它是浏览器指纹
 	// （os/osVersion/userAgent/machineId，带 x-client-platform: web），
 	// 用于 Library_read 这类"页面行为"任务。发到错误域会被静默丢弃。
-	WebBaseCN string
+	WebBaseCN   string
+	WebBaseIntl string
 }
 
 // New 生产默认值。配置连接池减少 TLS 握手。
@@ -279,6 +286,9 @@ func New() *Client {
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
 		WebBaseCN:            defaultWebBaseCN,
+		ChatBaseIntl:         "https://www.workbuddy.ai",
+		BillingBaseIntl:      "https://www.workbuddy.ai",
+		WebBaseIntl:          "https://www.workbuddy.ai",
 	}
 }
 
@@ -291,6 +301,9 @@ func (c *Client) chatHTTP() *http.Client {
 }
 
 func (c *Client) chatBase(a *auth.Auth) string {
+	if a != nil && a.Channel == auth.ChannelIntl {
+		return c.ChatBaseIntl
+	}
 	return c.ChatBaseCN
 }
 
@@ -372,14 +385,23 @@ func (c *Client) effortsSnapshot() map[string][]string {
 }
 
 func (c *Client) billingBase(a *auth.Auth) string {
+	if a != nil && a.Channel == auth.ChannelIntl {
+		return c.BillingBaseIntl
+	}
 	return c.BillingBaseCN
 }
 
-// webBase 返回官网域（任务领奖 + Web 行为上报用）。
+// webBase 返回官网域（任务领奖 + Web 行为上报用）。随账号渠道：intl → www.workbuddy.ai。
 //
 // 未注入时回落默认值 —— 与 B 同口径：测试里只注入 ChatBaseCN/BillingBaseCN
 // 时不该让 Web 路径拿到空串（那会拼出 "/v2/report" 这种无 host 的 URL）。
-func (c *Client) webBase() string {
+func (c *Client) webBase(a *auth.Auth) string {
+	if a != nil && a.Channel == auth.ChannelIntl {
+		if c.WebBaseIntl != "" {
+			return c.WebBaseIntl
+		}
+		return "https://www.workbuddy.ai"
+	}
 	if c != nil && c.WebBaseCN != "" {
 		return c.WebBaseCN
 	}
@@ -516,8 +538,19 @@ type ModelInfo struct {
 
 // FetchModels 调上游动态模型接口。
 // 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
+//
+// # 路径随渠道（实测海外版与国内版不同）
+//
+//	CN（copilot.tencent.com）  /console/enterprises/personal/models
+//	Intl（www.workbuddy.ai）   /v2/enterprises/personal/models
+//
+// 实测海外版走国内路径返回 500（APISIX 网关），`/v2/` 前缀路径返回 200。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
-	url := c.chatBase(a) + "/console/enterprises/personal/models"
+	modelsPath := "/console/enterprises/personal/models"
+	if a != nil && a.Channel == auth.ChannelIntl {
+		modelsPath = "/v2/enterprises/personal/models"
+	}
+	url := c.chatBase(a) + modelsPath
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -607,6 +640,35 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
+	}
+	// 合并 /v3/config 里多出的模型（模型列表全面化）。
+	//
+	// # 为什么需要（实测：主列表不全面）
+	//
+	// 主列表（/console 或 /v2/enterprises/personal/models 的 cli agent 集合）
+	// 对海外版只给 18 个 —— 而 /v3/config（模型目录/倍率表）有 21 个，
+	// 多出 deepseek-v4.1-flash / deepseek-v4.1-flash-sg / gpt-6-astra /
+	// kimi-k2.8-preview。这些模型**真实可用**（实测直接调用上游正常响应），
+	// 只是不在 cli agent 的挂载集合里。合并后 /v1/models 列表全面，
+	// 用户在界面上能选到 v4.1 等模型。
+	//
+	// 国内版同样受益：CN 主列表 16 个 vs /v3/config 更多模型。
+	//
+	// /v3/config 拉取失败不阻断（主列表照常返回）—— 它是锦上添花。
+	if cat, cerr := c.FetchModelCatalog(a); cerr == nil && cat != nil && len(cat.Models) > 0 {
+		seen := make(map[string]bool, len(out))
+		for _, mi := range out {
+			seen[mi.ID] = true
+		}
+		for _, ce := range cat.Models {
+			if ce.ID == "" || seen[ce.ID] {
+				continue
+			}
+			seen[ce.ID] = true
+			// 主列表缺这些模型的元信息（ContextWindow/MaxTokens/Efforts 未知），
+			// 只给 ID/Name —— 名称正确、可调用、倍率从目录表来，足够用户选择。
+			out = append(out, ModelInfo{ID: ce.ID, Name: ce.ID})
+		}
 	}
 	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入缓存）。
 	cache := make(map[string][]string, len(out))

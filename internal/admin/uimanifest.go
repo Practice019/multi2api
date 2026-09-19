@@ -198,6 +198,33 @@ func capTitle(id string) string {
 //
 // 空注册表返回空数组而不是报错：前端要能在"未配置任何上游"的部署下
 // 正常渲染空态，而不是拿到 500 后整页崩。
+// prioritizeProviders 把给定 id 的 provider 按 firstIDs 顺序稳定移到列表最前，
+// 其余保持相对顺序。未出现在 firstIDs 里的 provider 保持原相对顺序排在后面。
+func prioritizeProviders(list []providerInfo, firstIDs ...string) []providerInfo {
+	if len(list) < 2 || len(firstIDs) == 0 {
+		return list
+	}
+	rank := make(map[string]int, len(firstIDs))
+	for i, id := range firstIDs {
+		rank[id] = i
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		ri, okI := rank[list[i].ID]
+		rj, okJ := rank[list[j].ID]
+		switch {
+		case okI && okJ:
+			return ri < rj
+		case okI:
+			return true // i 在前置名单，j 不在 → i 在前
+		case okJ:
+			return false
+		default:
+			return false // 都不在名单：稳定排序保持原相对顺序
+		}
+	})
+	return list
+}
+
 func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 	m := uiManifest{
 		Service:      h.cfg.ServiceName,
@@ -267,6 +294,17 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+
+	// ---- 上游显示顺序：workbuddy 双渠道（海外版 workbuddy-intl + 国内版 workbuddy）置顶 ----
+	//
+	// 纯**展示**顺序：只影响前端 providers 列表的排列，**不影响**
+	// 注册顺序、默认上游（registry.First()）与账号归属 —— 那三者
+	// 仍是装配层的注册时序（workbuddy 先注册 = 默认上游）。
+	//
+	// 为什么用字符串特例而不是配置：置顶需求是 workbuddy 双渠道的固定诉求，
+	// 特例集中在本文件一处、带注释说明；admin 核心不 import 具体上游包，
+	// 这里只是 manifest 展示层按 id 排序（与 capTitle 等同类字符串关联）。
+	m.Providers = prioritizeProviders(m.Providers, "workbuddy-intl", "workbuddy")
 
 	// ---- 每日动作（独立于 AdminExt：一个上游可以只报动作、不报端点）----
 	//

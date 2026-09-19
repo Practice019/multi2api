@@ -22,9 +22,7 @@ const catalogBody = `{"code":0,"msg":"OK","data":{"models":[
 // （与 handler_test.go 里清 dynamicModelsCache 的写法同款）。
 func resetCatalogCache() {
 	modelCatalogCache.Lock()
-	modelCatalogCache.cat = nil
-	modelCatalogCache.fetched = time.Time{}
-	modelCatalogCache.lastFail = time.Time{}
+	modelCatalogCache.entries = nil
 	modelCatalogCache.Unlock()
 }
 
@@ -128,7 +126,9 @@ func TestModelCatalogStateStaleAfterTTL(t *testing.T) {
 	}
 	// 把成功时间拨回 2h 前（> dynamicModelsTTL）——缓存内容保留，只动时间戳。
 	modelCatalogCache.Lock()
-	modelCatalogCache.fetched = time.Now().Add(-2 * time.Hour)
+	if e := modelCatalogCache.entries[""]; e != nil {
+		e.fetched = time.Now().Add(-2 * time.Hour)
+	}
 	modelCatalogCache.Unlock()
 
 	st := ModelCatalogState()

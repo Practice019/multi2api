@@ -93,3 +93,82 @@ func TestNeedsRefresh(t *testing.T) {
 		t.Error("far future should not need refresh")
 	}
 }
+
+// TestDeriveChannel 渠道推导：workbuddy.ai → intl，其余（含空）→ cn。
+func TestDeriveChannel(t *testing.T) {
+	cases := []struct {
+		domain string
+		want   string
+	}{
+		{"", ChannelCN},
+		{"copilot.tencent.com", ChannelCN},
+		{"www.codebuddy.cn", ChannelCN},
+		{"www.workbuddy.ai", ChannelIntl},
+		{"workbuddy.ai", ChannelIntl},
+		{"WWW.WORKBUDDY.AI", ChannelIntl}, // 大小写不敏感
+	}
+	for _, c := range cases {
+		if got := DeriveChannel(c.domain); got != c.want {
+			t.Errorf("DeriveChannel(%q) = %q, want %q", c.domain, got, c.want)
+		}
+	}
+}
+
+// TestParseChannelFallback 旧凭证（无 channel 字段）按 domain 推导渠道。
+func TestParseChannelFallback(t *testing.T) {
+	intl := `{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai"},"account":{"uid":"u-intl"}}`
+	a, err := Parse([]byte(intl))
+	if err != nil {
+		t.Fatalf("parse intl: %v", err)
+	}
+	if a.Channel != ChannelIntl {
+		t.Errorf("intl fallback: got %q, want %q", a.Channel, ChannelIntl)
+	}
+
+	cn := `{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1,"domain":"copilot.tencent.com"},"account":{"uid":"u-cn"}}`
+	a2, err := Parse([]byte(cn))
+	if err != nil {
+		t.Fatalf("parse cn: %v", err)
+	}
+	if a2.Channel != ChannelCN {
+		t.Errorf("cn fallback: got %q, want %q", a2.Channel, ChannelCN)
+	}
+
+	// 显式 channel 优先于 domain 推导。
+	explicit := `{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1,"domain":"copilot.tencent.com","channel":"intl"},"account":{"uid":"u-x"}}`
+	a3, err := Parse([]byte(explicit))
+	if err != nil {
+		t.Fatalf("parse explicit: %v", err)
+	}
+	if a3.Channel != ChannelIntl {
+		t.Errorf("explicit channel: got %q, want %q", a3.Channel, ChannelIntl)
+	}
+}
+
+// TestSaveAtomicWritesChannel channel 字段随 auth 块落盘，重读不变。
+func TestSaveAtomicWritesChannel(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-u-intl.json")
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1753600000,
+		Domain: "www.workbuddy.ai", Channel: ChannelIntl,
+		UID: "u-intl", FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	b, err := Parse(mustRead(t, fp))
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	if b.Channel != ChannelIntl {
+		t.Errorf("roundtrip channel: got %q, want %q", b.Channel, ChannelIntl)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return raw
+}

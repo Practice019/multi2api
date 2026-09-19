@@ -20,7 +20,7 @@ import (
 //   - 这份是**全部目录模型**（选择口径：这个模型多贵），前端要在下拉框里标注所有选项
 func TestModelsPreviewReturnsAllCatalogMultipliers(t *testing.T) {
 	h, _ := newStatsHandler(t, nil)
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog {
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog {
 		return catalogWith(
 			upstream.ModelCatalogEntry{ID: "deepseek-v4-pro", Multiplier: 0.51},
 			upstream.ModelCatalogEntry{ID: "hy4-preview-f", Multiplier: 0}, // 免费：x0.00
@@ -95,7 +95,7 @@ func TestModelsPreviewNilCatalogIsEmptyNotError(t *testing.T) {
 // 目录拿不到（返回 nil）时同样退化为空表。
 func TestModelsPreviewFetchFailureIsEmpty(t *testing.T) {
 	h, _ := newStatsHandler(t, nil)
-	h.cfg.ModelCatalog = func() *upstream.ModelCatalog { return nil }
+	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog { return nil }
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/models/preview", nil)
@@ -112,3 +112,4 @@ func TestModelsPreviewFetchFailureIsEmpty(t *testing.T) {
 		t.Errorf("拿不到目录时应为空，得到 %v", list)
 	}
 }
+

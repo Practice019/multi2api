@@ -57,6 +57,24 @@ const (
 // 避免一天里绝大多数轮次都是空转（Due 会立刻返回 false，但仍是唤醒）。
 const activityTickInterval = 5 * time.Minute
 
+// jobName 按实例 ID 派生任务名。
+//
+// # 为什么需要它（海外版渠道支持）
+//
+// 同一实现注册多个实例（workbuddy 与 workbuddy-intl）时，Jobs() 声明
+// 的任务名如果都是包级常量，调度器按名字去重会把后注册实例的任务整批跳过
+// （实测日志：任务名 workbuddy-travel-watch 重复，已跳过后者）。
+// 非默认实例的任务名加 `<id>-` 前缀，各自独立注册。
+//
+// 默认实例（providerID "workbuddy"）用原始常量名 —— 既有部署的
+// 任务名/状态展示逐字节不变。
+func (p *Provider) jobName(base string) string {
+	if p == nil || p.ID() == providerID {
+		return base
+	}
+	return p.ID() + "-" + base
+}
+
 // Jobs 返回本上游要注册的定时任务（gateway.JobExt）。
 //
 // # 与改造前的行为对齐
@@ -79,25 +97,30 @@ const activityTickInterval = 5 * time.Minute
 // 这里保持 force=false，**不**改成 true —— 改成 true 会让每一轮都全量回源，
 // 把「不盲轮询」这个设计完全推翻（在途账号会被反复打扰）。
 func (p *Provider) Jobs() []gateway.Job {
-	jobs := []gateway.Job{
-		{
-			Name:     JobTravelWatch,
-			Interval: p.WatchInterval(),
-			Run:      p.runTravelJob,
-			Due:      p.travelDue,
-		},
-		{
-			Name:     JobGrowthWatch,
-			Interval: p.GrowthWatchInterval(),
-			Run:      p.runGrowthJob,
-			Due:      p.growthDueJob,
-		},
-		{
-			Name:     JobActivity,
-			Interval: activityTickInterval,
-			Run:      p.runActivityJob,
-			Due:      p.activityDueJob,
-		},
+	jobs := []gateway.Job{}
+	// 玩法类任务（旅行/成长/活跃上报）按实例裁剪：海外版（DisableGrowthTravel）
+	// 没有这些玩法，注册了会对不存在的接口空打（见 Config.DisableGrowthTravel）。
+	if p == nil || !p.cfg.DisableGrowthTravel {
+		jobs = append(jobs,
+			gateway.Job{
+				Name:     p.jobName(JobTravelWatch),
+				Interval: p.WatchInterval(),
+				Run:      p.runTravelJob,
+				Due:      p.travelDue,
+			},
+			gateway.Job{
+				Name:     p.jobName(JobGrowthWatch),
+				Interval: p.GrowthWatchInterval(),
+				Run:      p.runGrowthJob,
+				Due:      p.growthDueJob,
+			},
+			gateway.Job{
+				Name:     p.jobName(JobActivity),
+				Interval: activityTickInterval,
+				Run:      p.runActivityJob,
+				Due:      p.activityDueJob,
+			},
+		)
 	}
 	// 每日签到 + token 保活：统一为「30 分钟被动扫描」（用户要求全部上游
 	// 同一粒度）。此前是整点槽位（签到 9/21、保活 22），现在改成
@@ -105,14 +128,14 @@ func (p *Provider) Jobs() []gateway.Job {
 	// ⚠ 必须 interval>0 才注册：<=0 会让 scheduler 把任务当"每轮都跑"。
 	if p.cfg.CheckinEnabled && p.cfg.CheckinInterval > 0 {
 		jobs = append(jobs, gateway.Job{
-			Name:     JobCheckin,
+			Name:     p.jobName(JobCheckin),
 			Interval: p.cfg.CheckinInterval,
 			Run:      p.runCheckinScan,
 		})
 	}
 	if p.cfg.RefreshInterval > 0 {
 		jobs = append(jobs, gateway.Job{
-			Name:     JobRefresh,
+			Name:     p.jobName(JobRefresh),
 			Interval: p.cfg.RefreshInterval,
 			Run:      p.runRefreshScan,
 		})

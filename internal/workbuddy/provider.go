@@ -208,7 +208,18 @@ func (p *Provider) clientLogin() ClientLoginManager {
 }
 
 // ID 上游标识。
-func (p *Provider) ID() string { return providerID }
+//
+// # 实例级（海外版渠道支持）
+//
+// 装配层可用同一个实现注册第二个实例（如 workbuddy-intl）——
+// registry 要求 ID 全局唯一，所以 ID 落在 Config.ID 上（空 = 包级
+// 常量 providerID，向后兼容单实例部署）。
+func (p *Provider) ID() string {
+	if p != nil && p.cfg.ID != "" {
+		return p.cfg.ID
+	}
+	return providerID
+}
 
 // Caps 能力声明。
 //
@@ -231,12 +242,15 @@ func (p *Provider) ID() string { return providerID }
 // /admin/credits/refresh 在"签到能力被关闭"的部署里一起消失 —— 而刷新额度
 // 与签到是两件事（前者只查询，后者会上报签到）。
 func (p *Provider) Caps() gateway.Capability {
-	return gateway.CapChat |
+	caps := gateway.CapChat |
 		gateway.CapModels |
-		gateway.CapCheckin |
-		gateway.CapGrowth |
-		gateway.CapTravel |
 		gateway.CapQuotaProbe
+	// 玩法类能力（签到/成长/旅行）按实例裁剪：海外版（DisableGrowthTravel）
+	// 没有这些玩法（product.json 显式禁用），声明了等于给前端画不存在的面板。
+	if p == nil || !p.cfg.DisableGrowthTravel {
+		caps |= gateway.CapCheckin | gateway.CapGrowth | gateway.CapTravel
+	}
+	return caps
 }
 
 // Chat 转发一次对话请求。

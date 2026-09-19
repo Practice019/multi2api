@@ -7,6 +7,11 @@
   "server": {
     "max_body_mb": 8
   },
+  "login": {
+    "open_browser": true,
+    "browser": "",
+    "isolated": true
+  },
   "cooldown": {
     "soft_rate": "60s",
     "soft_rate_max": "2h"
@@ -34,6 +39,12 @@
   "codearts": {
     "enabled": true,
     "refresh_interval_seconds": 60
+  },
+  "workbuddy_intl": {
+    "enabled": true,
+    "oauth_base_url": "https://www.workbuddy.ai",
+    "auth_dir": "",
+    "pool_accounts": true
   },
   "trae": {
     "enabled": true,
