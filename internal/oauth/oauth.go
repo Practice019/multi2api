@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,6 +29,29 @@ const (
 	clientUA       = "CLI/2.63.2 CodeBuddy/2.63.2"
 	originCN       = "https://www.codebuddy.cn"
 	originIntl     = "https://www.workbuddy.ai"
+
+	// platform / version：auth/state 的查询参数，决定**登录页走哪套流程**。
+	//
+	// ★ 2026-09-19 修（用户实测报的 bug）：海外版原来用 platform=CLI，拿到的是
+	//   **CLI 插件版**登录页 —— 它**没有「设置地区」这一步**。后果：
+	//
+	//	CLI 流程登录的号 → 后端没激活试用 →
+	//	  对话：429 code=14017「The trial version is not yet activated」
+	//	  计费：/v2/billing/meter/get-user-resource 恒 500（额度显示 —）
+	//
+	//   而官方桌面客户端登录的号完全正常（478 credits，chat 通）。
+	//
+	// 参照 register-machine（注册机项目）已跑通的客户端登录：
+	//   `platform=workbuddy-ai&version=5.5.2`
+	//   其 driveAuthFlow 注释直接印证：
+	//   「地区完善页（**桌面客户端平台特有**；漏了这步账号不完整开通，计费接口会 500）」
+	//
+	// 所以海外版改用客户端的 platform=workbuddy-ai（带 version），
+	// 登录页就变成客户端那套（含设置地区），账号才会完整开通。
+	// CN 版保持 platform=CLI 不变 —— CN 账号本来就正常，且无实测依据改它。
+	platformCN    = "CLI"
+	platformIntl  = "workbuddy-ai"
+	clientVersion = "5.5.2"
 )
 
 // ErrPending 表示用户尚未在浏览器完成授权；调用方应继续轮询。
@@ -132,6 +156,11 @@ type Client struct {
 	// OriginReferer 随渠道（CN/海外）变化：登录请求的 Origin/Referer 头。
 	OriginReferer string
 
+	// Platform 传给 auth/state 的 platform 参数，决定登录页走哪套流程：
+	// 海外版必须是 workbuddy-ai（客户端流程，含「设置地区」），否则账号不完整开通。
+	// 见本文件常量区的注释。
+	Platform string
+
 	mu      sync.Mutex
 	pending map[string]pending
 }
@@ -143,13 +172,16 @@ func New(baseURL string) *Client {
 		baseURL = defaultBaseURL
 	}
 	origin := originCN
+	platform := platformCN
 	if auth.DeriveChannel(baseURL) == auth.ChannelIntl {
 		origin = originIntl
+		platform = platformIntl
 	}
 	return &Client{
 		BaseURL:       strings.TrimRight(baseURL, "/"),
 		HTTP:          &http.Client{Timeout: 30 * time.Second},
 		OriginReferer: origin,
+		Platform:      platform,
 		pending:       make(map[string]pending),
 	}
 }
@@ -197,8 +229,18 @@ func (c *Client) Start() (state, authURL string, err error) {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: 30 * time.Second, Jar: jar}
 
-	req, err := http.NewRequest(http.MethodPost,
-		c.BaseURL+"/v2/plugin/auth/state?platform=CLI", bytes.NewReader([]byte("{}")))
+	// ★ platform 决定登录页走哪套：海外版必须是 workbuddy-ai（客户端流程，含「设置地区」），
+	//   否则登录出来的号不完整开通（对话 14017 / 计费 500）。见常量区注释。
+	platform := c.Platform
+	if platform == "" {
+		platform = platformCN
+	}
+	// version：客户端登录页需要（实测客户端带 version=5.5.2）；CN 的 CLI 流程原来不带，
+	// 带上无害（上游忽略未知/多余参数），为简单起见两版都带。
+	authStateURL := fmt.Sprintf("%s/v2/plugin/auth/state?platform=%s&version=%s",
+		c.BaseURL, url.QueryEscape(platform), url.QueryEscape(clientVersion))
+
+	req, err := http.NewRequest(http.MethodPost, authStateURL, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return "", "", err
 	}
