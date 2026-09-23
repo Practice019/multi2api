@@ -176,6 +176,7 @@ func (f *loginFlow) buildAuth(e *loginEntry, callback string) (*Auth, error) {
 		Domain:    "trae.cn",
 		MachineID: e.machineID,
 		DeviceID:  e.deviceID,
+		ClientID:  info.ClientID, // 签发 refreshToken 的那个 client id（ExchangeToken 要用）
 	}
 	if info.RefreshToken != "" {
 		// 主路径：refreshToken → ExchangeToken（换 accessToken + 轮换 refreshToken）。

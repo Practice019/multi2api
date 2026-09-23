@@ -13,6 +13,8 @@ package trae
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +34,7 @@ const (
 	IdeVersion     = "0.1.43"
 	IdeVersionCode = "20260716"
 	DeviceBrand    = "83DG"
+	DeviceCPU      = "Intel(R) Core(TM) Ultra 9 285K"
 	OSVersion      = "Windows 11 Pro"
 	Function       = "solo_work_lite"
 
@@ -124,6 +127,13 @@ func soloHeaders(req *http.Request, a *Auth, stream bool) {
 	req.Header.Set("X-Device-Type", "windows")
 	req.Header.Set("X-OS-Version", OSVersion)
 	req.Header.Set("X-Device-Brand", DeviceBrand)
+	// 与 trae-api-proxy / trae-local-api 对齐的指纹头：设备 CPU 与链路追踪 ID。
+	// 上游风控以"请求头指纹是否完整一致"为常用判据，缺头是异常特征。
+	req.Header.Set("X-Device-Cpu", DeviceCPU)
+	rid := newTraceID()
+	req.Header.Set("X-Request-ID", rid)
+	req.Header.Set("X-Trae-Request-ID", rid)
+	req.Header.Set("X-Custom-Trace-Id", newTraceID())
 	req.Header.Set("Request-Traffic-Type", "prod")
 	if a.MachineID != "" {
 		req.Header.Set("X-Machine-Id", a.MachineID)
@@ -273,8 +283,14 @@ func (c *Client) refreshLocked(a *Auth) error {
 	if host == "" {
 		host = c.oauthBase()
 	}
+	// ClientID 必须与**签发** refreshToken 的那个一致（桌面端导入的凭证
+	// 用的 client id 可能与默认值不同，见 credential.go 的 ClientID 注释）。
+	clientID := strings.TrimSpace(a.ClientID)
+	if clientID == "" {
+		clientID = c.ClientID
+	}
 	body := map[string]any{
-		"ClientID":     c.ClientID,
+		"ClientID":     clientID,
 		"RefreshToken": a.RefreshToken,
 		"ClientSecret": "-",
 		"UserID":       "",
@@ -285,32 +301,68 @@ func (c *Client) refreshLocked(a *Auth) error {
 		return err
 	}
 	oauthHeaders(req)
+	// 与 trae-api-proxy 对齐：ExchangeToken 带当前 accessToken 作为
+	// X-Cloudide-Token（会话绑定/风控识别，少带是缺头特征）。
+	// ⚠ 这里**不能**用 a.JWT()：refreshLocked 全程持 a.mu 写锁，
+	// JWT() 会再取读锁 —— Go 的 RWMutex 不可重入，直接死锁。
+	if at := a.AccessToken; at != "" {
+		req.Header.Set("X-Cloudide-Token", at)
+	}
 	data, err := c.doJSON(req)
 	if err != nil {
 		return err
 	}
+	// 兼容两种回执形态（实测）：`{"Result":{...}}`（PascalCase）与
+	// 顶层 camelCase（trae-local-api 读的就是顶层 token/expiredAt/refreshExpiredAt）。
 	var resp struct {
 		Result struct {
 			Token               string `json:"Token"`
 			TokenExpireAt       int64  `json:"TokenExpireAt"`
 			TokenExpireDuration int64  `json:"TokenExpireDuration"`
 			RefreshToken        string `json:"RefreshToken"`
+			RefreshExpireAt     int64  `json:"RefreshExpireAt"`
 		} `json:"Result"`
+		Token               string `json:"token"`
+		TokenExpireAt       int64  `json:"expiredAt"`
+		TokenExpireDuration int64  `json:"tokenExpireDuration"`
+		RefreshToken        string `json:"refreshToken"`
+		RefreshExpireAt     int64  `json:"refreshExpiredAt"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return fmt.Errorf("trae: exchange 回执解析失败: %w", err)
 	}
-	if strings.TrimSpace(resp.Result.Token) == "" {
+	newToken := resp.Result.Token
+	if newToken == "" {
+		newToken = resp.Token
+	}
+	if strings.TrimSpace(newToken) == "" {
 		return fmt.Errorf("trae: 刷新失败 —— 回执里没有 Token，需要重新登录")
 	}
-	a.AccessToken = resp.Result.Token
-	if resp.Result.RefreshToken != "" {
-		a.RefreshToken = resp.Result.RefreshToken
+	a.AccessToken = newToken
+	newRefresh := resp.Result.RefreshToken
+	if newRefresh == "" {
+		newRefresh = resp.RefreshToken
 	}
-	if resp.Result.TokenExpireAt > 0 {
-		a.ExpiresAt = normalizeExpiresAt(resp.Result.TokenExpireAt)
-	} else if resp.Result.TokenExpireDuration > 0 {
-		a.ExpiresAt = time.Now().Add(time.Duration(resp.Result.TokenExpireDuration) * time.Second).Unix()
+	if newRefresh != "" {
+		a.RefreshToken = newRefresh
+	}
+	expAt := resp.Result.TokenExpireAt
+	if expAt <= 0 {
+		expAt = resp.TokenExpireAt
+	}
+	if expAt > 0 {
+		a.ExpiresAt = normalizeExpiresAt(expAt)
+	} else if d := resp.Result.TokenExpireDuration; d > 0 {
+		a.ExpiresAt = time.Now().Add(time.Duration(d) * time.Second).Unix()
+	} else if d := resp.TokenExpireDuration; d > 0 {
+		a.ExpiresAt = time.Now().Add(time.Duration(d) * time.Second).Unix()
+	}
+	rExp := resp.Result.RefreshExpireAt
+	if rExp <= 0 {
+		rExp = resp.RefreshExpireAt
+	}
+	if rExp > 0 {
+		a.RefreshExpiresAt = normalizeExpiresAt(rExp)
 	}
 	return nil
 }
@@ -433,6 +485,16 @@ func truncate(s string, n int) string {
 		return s[:n]
 	}
 	return s
+}
+
+// newTraceID 生成一个 32 位 hex 的链路追踪 ID（X-Request-ID 系请求头用，
+// 与上游客户端同形状）。
+func newTraceID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }
 
 // UpstreamError 带 HTTP 状态码的上游错误（分类见 errorclassifier.go）。

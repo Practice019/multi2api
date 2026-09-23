@@ -517,6 +517,7 @@ func main() {
 			AgentBase:       cfg.TraeAgentBase,
 			UgBase:          cfg.TraeUgBase,
 			OAuthBase:       cfg.TraeOAuthBase,
+			ClientID:        cfg.TraeClientID,
 			RefreshInterval: cfg.TraeRefreshInterval,
 			CheckinEnabled:  cfg.TraeCheckinEnabled,
 			CallbackPort:    cfg.TraeOAuthCallbackPort,

@@ -89,3 +89,7 @@ ode tests/frontend/gen_xxx.js 时，
 /*_gen.js
 # Release 预编译产物（gh release 上传用，不入版本库）
 dist/
+# 本地测试实例（7864）的配置与数据：与生产 auths/data 同理，不入版本库
+config-test.json
+auths-test/
+data-test/

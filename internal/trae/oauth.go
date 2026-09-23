@@ -69,6 +69,9 @@ type CallbackInfo struct {
 	ScreenName    string
 	TenantID      string
 	TokenExpireAt int64
+	// ClientID 签发这份 refreshToken 的 OAuth client id（ExchangeToken 必须用它）。
+	// 来源：userJwt.ClientID / 顶层 clientID / client_id（兼容三种命名）。
+	ClientID string
 }
 
 // ParseCallback 解析回调链接（parse_qs + unquote 处理 URL 编码，与 login.sh 一致）。
@@ -109,6 +112,15 @@ func ParseCallback(callback string) (*CallbackInfo, error) {
 	}
 	if v, _ := userJWT["TokenExpireAt"].(float64); v > 0 {
 		info.TokenExpireAt = int64(v)
+	}
+	if v, _ := userJWT["ClientID"].(string); v != "" {
+		info.ClientID = v
+	}
+	if info.ClientID == "" {
+		info.ClientID = q.Get("clientID")
+	}
+	if info.ClientID == "" {
+		info.ClientID = q.Get("client_id")
 	}
 
 	if info.RefreshToken == "" && info.Token == "" {

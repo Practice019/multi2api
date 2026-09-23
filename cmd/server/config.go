@@ -540,6 +540,10 @@ type Config struct {
 		AgentBase string `json:"agent_base_url"`
 		UgBase    string `json:"ug_base_url"`
 		OAuthBase string `json:"oauth_base_url"`
+		// ClientID ExchangeToken 使用的 OAuth client id 默认值覆盖。
+		// 凭证文件里保存的 clientId 优先；留空用包内默认（en1oxy7wnw8j9n）。
+		// 上游停用默认 id、或换登录渠道时在此指定签发 refreshToken 的那个 id。
+		ClientID string `json:"client_id"`
 		// RefreshIntervalSeconds 后台续期扫描周期（默认 1800）。
 		// <=0 不注册续期任务（仅请求路径惰性续期）。
 		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
@@ -662,6 +666,7 @@ type Config struct {
 	TraeAgentBase         string        `json:"-"`
 	TraeUgBase            string        `json:"-"`
 	TraeOAuthBase         string        `json:"-"`
+	TraeClientID          string        `json:"-"`
 	TraeRefreshInterval   time.Duration `json:"-"`
 	TraeCheckinEnabled    bool          `json:"-"`
 	TraePoolAccounts      bool          `json:"-"`
@@ -1104,6 +1109,7 @@ func (c *Config) normalize() error {
 	c.TraeAgentBase = strings.TrimSpace(c.Trae.AgentBase)
 	c.TraeUgBase = strings.TrimSpace(c.Trae.UgBase)
 	c.TraeOAuthBase = strings.TrimSpace(c.Trae.OAuthBase)
+	c.TraeClientID = strings.TrimSpace(c.Trae.ClientID)
 	if c.TraeEnabled {
 		iv := c.Trae.RefreshIntervalSeconds
 		if iv <= 0 {
