@@ -49,6 +49,7 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 			Provider: ProviderID,
 			UID:      a.UID,
 			Nickname: a.Nickname,
+			FilePath: a.FilePath,
 		})
 	}
 	log.Printf("codearts: 从 %s 读到 %d 个凭证（LoadCredentials）", dir, len(out))
@@ -105,7 +106,7 @@ func buildCredentialSecrets(list []*Auth) []gateway.CredentialSecret {
 			continue
 		}
 		out = append(out, gateway.CredentialSecret{
-			Credential: gateway.Credential{Provider: ProviderID, UID: a.UID, Nickname: a.Nickname},
+			Credential: gateway.Credential{Provider: ProviderID, UID: a.UID, Nickname: a.Nickname, FilePath: a.FilePath},
 			// 不透明值：核心只搬运，不解释。
 			Secret: a,
 		})

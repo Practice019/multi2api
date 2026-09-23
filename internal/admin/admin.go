@@ -705,6 +705,7 @@ func (h *Handler) credentialHasToken(uid, providerID string) bool {
 		Secret:   secret,
 	})
 }
+
 // credentialNeverExpires 问**拥有这份凭证的上游**：它是不是设计上不过期。
 //
 // # 与 credentialExpiryOf 完全同构
@@ -1111,7 +1112,7 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 		if c.UID == "" {
 			continue
 		}
-		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})
+		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname, FilePath: c.FilePath})
 	}
 
 	// ⚠ 池子可能为 nil（本包其它地方都判了空，见 pollViaFlow 的注释）。
@@ -1196,8 +1197,16 @@ func (h *Handler) accountDelete(w http.ResponseWriter, r *http.Request) {
 
 	deleted := ""
 	if purge && filePath != "" {
-		// 只允许删 auths 目录内的文件：防止 FilePath 被构造成任意路径删除。
-		absDir, _ := filepath.Abs(h.cfg.AuthDir)
+		// 只允许删**凭证树**（AuthsBase = 各上游子目录的父目录）内的文件：
+		// 防止 FilePath 被构造成任意路径删除。早先用 h.cfg.AuthDir
+		// （默认上游子目录 auths/workbuddy）做前缀，于是 loomy/trae/mimo
+		// 的 auths/<上游>/ 文件永远前缀不匹配 → "拒绝删目录外文件" →
+		// 用户删号后重启复活（实测 bug）。父目录才是所有上游的合法根。
+		root := h.cfg.AuthsBase
+		if root == "" {
+			root = h.cfg.AuthDir
+		}
+		absDir, _ := filepath.Abs(root)
 		absFile, _ := filepath.Abs(filePath)
 		if strings.HasPrefix(absFile, absDir+string(os.PathSeparator)) {
 			if err := os.Remove(absFile); err != nil {
@@ -1793,7 +1802,7 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow ga
 		if c.UID == "" {
 			continue
 		}
-		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})
+		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname, FilePath: c.FilePath})
 	}
 	// ⚠ 池子可能为 nil —— 本包其它地方（schedule.go / uimanifest.go）
 	// 都判了空，说明"Pool 可缺省"是**本包自己的设计假设**；

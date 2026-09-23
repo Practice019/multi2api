@@ -75,7 +75,7 @@ func dedupeCodeartsByUID(list []*codearts.Auth) ([]*auth.Auth, map[string]any) {
 		// 上游凭证本身作为 secret 交给池子保管（不透明，池子不读它的字段）。
 		secrets[uids[i]] = ca
 		// 核心只需要 uid（主键）与 nickname（展示），其余字段一律留在 secret 里。
-		auths = append(auths, &auth.Auth{UID: uids[i], Nickname: ca.Nickname})
+		auths = append(auths, &auth.Auth{UID: uids[i], Nickname: ca.Nickname, FilePath: ca.FilePath})
 	}
 	return auths, secrets
 }

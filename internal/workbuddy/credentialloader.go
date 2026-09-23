@@ -22,8 +22,8 @@ import (
 
 // 编译期断言（与 AuthDirExt 那条并列）。
 var (
-	_ gateway.CredentialLoader        = (*Provider)(nil)
-	_ gateway.CredentialSecretLoader  = (*Provider)(nil)
+	_ gateway.CredentialLoader       = (*Provider)(nil)
+	_ gateway.CredentialSecretLoader = (*Provider)(nil)
 )
 
 // LoadCredentials 读取 `dir` 下全部 workbuddy 凭证。
@@ -69,6 +69,7 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 			Provider: p.ID(),
 			UID:      a.UID,
 			Nickname: a.Nickname,
+			FilePath: a.FilePath,
 		})
 	}
 	return out, nil
@@ -107,6 +108,7 @@ func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialS
 				Provider: p.ID(),
 				UID:      a.UID,
 				Nickname: a.Nickname,
+				FilePath: a.FilePath,
 			},
 			// workbuddy 的上游私有凭证就是 *auth.Auth 本身。
 			Secret: a,

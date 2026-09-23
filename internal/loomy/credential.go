@@ -74,6 +74,10 @@ type Auth struct {
 	// 其次 UID 后缀。两者都没有时留空，界面按 UID 前缀显示。
 	Nickname string `json:"nickname,omitempty"`
 
+	// FilePath 凭证文件位置（加载时记录，不参与序列化）。
+	// 删除账号要连文件一起移除 —— 没有它，重启后文件又会被并池"复活"。
+	FilePath string `json:"-"`
+
 	// Phone 客户端登录态里的手机号（可能已掩码）。
 	Phone string `json:"phone,omitempty"`
 	// UserID 客户端登录态里的 `userid`（原样保留；UID 就是它，除非缺失）。
@@ -227,6 +231,7 @@ func LoadDir(dir string) ([]*Auth, error) {
 			log.Printf("loomy: 解析凭证文件失败，已跳过 %s: %v", filepath.Base(fp), err)
 			continue
 		}
+		a.FilePath = fp
 		out = append(out, a)
 	}
 	return pickWinners(out), nil

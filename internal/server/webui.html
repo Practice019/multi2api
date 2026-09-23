@@ -2908,14 +2908,20 @@ let loginProvider = '';
     // 取消后又要恢复，反而闪）。
     if (action === 'remove') {
       const a = share.find(x => x.uid === uid) || {};
-      if (!confirm(`确认把账号「${a.nickname || uid.slice(0, 8)}」移出账号池？\n\n默认仅出池，auths 里的凭证文件保留（下次重载还会回来）。`)) return;
-      const purge = confirm('是否连 auths 目录里的凭证文件一起删除？\n\n确定 = 删文件（不可恢复）\n取消 = 只出池、保留文件');
+      // 一次确认、**默认删净**（出池 + 删凭证文件）。
+      //
+      // 旧交互是"默认只出池、文件保留，再问一次要不要删文件"—— 而凭证文件
+      // 就是账号在本机的实体：文件还在，下次重载/重启必把它装回池子，
+      // 用户实测读成「删除不生效、重启复活」的 bug。"暂时退出服务"的正确
+      // 形态本来就是「禁用」（保留凭证、随时可启用），不需要"出池留文件"
+      // 这种半删除状态 —— 它只制造复活惊喜，不制造任何能力。
+      if (!confirm(`彻底删除账号「${a.nickname || uid.slice(0, 8)}」？\n\n· 移出账号池，并删除 auths 里的凭证文件（不可恢复）\n· 只是暂时停用？请用「禁用」，凭证保留、随时可启用`)) return;
       await busyRun(btn, async () => {
-        await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=${purge ? 1 : 0}`, { method: 'DELETE' });
-        toast(`已移除 ${a.nickname || uid.slice(0, 8)}${purge ? '（凭证文件已删）' : '（文件保留）'}`);
+        await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=1`, { method: 'DELETE' });
+        toast(`已彻底删除 ${a.nickname || uid.slice(0, 8)}`);
         await Promise.all([refresh(), loadHistory()]);
         return undefined;
-      }, { label: '移除账号', busyText: '移除中…' });
+      }, { label: '移除账号', busyText: '删除中…' });
       return;
     }
 

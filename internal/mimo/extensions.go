@@ -80,7 +80,7 @@ func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialS
 	out := make([]gateway.CredentialSecret, 0, len(list))
 	for _, a := range list {
 		out = append(out, gateway.CredentialSecret{
-			Credential: gateway.Credential{Provider: providerID, UID: a.UID, Nickname: a.Nickname},
+			Credential: gateway.Credential{Provider: providerID, UID: a.UID, Nickname: a.Nickname, FilePath: a.FilePath},
 			Secret:     a,
 		})
 	}
