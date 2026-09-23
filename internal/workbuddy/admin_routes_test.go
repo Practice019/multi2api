@@ -222,6 +222,13 @@ var wantAdminRoutes = []struct{ method, path string }{
 	{"POST", "/admin/client-login/switch"},
 	{"POST", "/admin/client-login/restore"},
 
+	// ---- 批量粘贴导入（账号池分组行「批量导入」按钮的数据源）----
+	//
+	// Hidden 的 POST …/import：前端按 adminRouteBySuffix 决定按钮显隐。
+	// intl 实例的路径由 prefixed() 自动加前缀（/admin/workbuddy-intl/import），
+	// 与既有端点同一条规则，不在清单里单列。
+	{"POST", "/admin/import"},
+
 	// ---- 任务自动化（成块移植自 workbuddy2api-panel，见 autotask_admin.go）----
 	//
 	// 这 7 条是本仓库**新增**的端点，不是"改造前 admin.go"的一部分 ——
