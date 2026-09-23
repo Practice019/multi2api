@@ -56,23 +56,22 @@ func newOAuthSession() (*oauthSession, error) {
 	}, nil
 }
 
-// authorizeURL 构造授权链接（官方参数集，mimo.ts:76-84）。
+// authorizeURL 构造授权链接 —— 参数集与用户 v2 探测报告 §7.2 逐字对齐：
 //
-// manual=true 时 redirect_uri 指向平台 code/callback —— 用户复制回跳 URL 里的
-// u 参数粘贴回控制台（无浏览器直达回调端口的部署形态兜底）。
-func authorizeURL(platform, pkB64URL, redirect string, kn string) string {
+//	{platform}/authorize?pk={pub}&redirect_uri={回调}&kn=mimocode&key_name={key名}&app=MiMo
+//
+// ⚠ 曾经的偏差（v2 报告纠正）：kn 是**固定渠道名 "mimocode"**，key_name 才是
+// 生成的钥匙名 —— 我们一度把钥匙名塞进了 kn（并靠平台宽容才没炸），且缺
+// app=MiMo。manual 模式下 redirect_uri 指平台 code/callback 页（展示加密
+// code 供粘贴），auto 模式指本机 127.0.0.1:port。
+func authorizeURL(platform, pkB64URL, redirect, keyName string) string {
 	q := url.Values{}
 	q.Set("pk", pkB64URL)
 	q.Set("redirect_uri", redirect)
-	q.Set("kn", nonDefault(kn, "mimocode"))
+	q.Set("kn", "mimocode")
+	q.Set("key_name", keyName)
+	q.Set("app", "MiMo")
 	return platform + "/authorize?" + q.Encode()
-}
-
-func nonDefault(v, def string) string {
-	if strings.TrimSpace(v) == "" {
-		return def
-	}
-	return v
 }
 
 // pubKeyB64URL pk=base64url(SPKI DER)。

@@ -106,8 +106,6 @@ func (f *loginFlow) Start() (string, string, error) {
 		redirect = f.p.platformBase() + "/authorize/code/callback"
 	}
 	authURL := authorizeURL(f.p.platformBase(), o.pubKeyB64URL(), redirect, o.keyName)
-	// 授权 URL 带上 key_name（官方 mimo.ts:76-84 的参数名是 key_name）。
-	authURL += "&key_name=" + url.QueryEscape(o.keyName)
 
 	f.mu.Lock()
 	f.gcLocked()
