@@ -1316,6 +1316,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	msg := "all accounts unavailable (cooling/disabled)"
+	// 把"为什么一个都不可用"写进错误里（真实困惑：上游 402 触发冷却后，旧文案
+	// 只说 all accounts unavailable —— 用户据此怀疑"登录失败了"，而真相是
+	// "key 有效但账户没钱在冷却"。一句话的差别，省一轮客服）。
+	if hint := h.poolUnavailableHint(reqProvider); hint != "" {
+		msg += " —— " + hint
+	}
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
 	}
@@ -1948,6 +1954,65 @@ func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// poolUnavailableHint 概括"这个上游域为什么选不出号"（≤3 个号时逐个给
+// 状态；多了只给计数，消息不被刷屏）。空串 = 没信息可加。
+//
+// 只暴露冷却原因/时刻与禁用原因 —— 都是管理台可见信息，不含凭证内容。
+func (h *Handler) poolUnavailableHint(provider string) string {
+	if h.cfg.Pool == nil {
+		return ""
+	}
+	return poolUnavailableHintOf(h.cfg.Pool.ListFor(provider))
+}
+
+// poolUnavailableHintOf 纯函数版（测试直接钉）。
+func poolUnavailableHintOf(list []pool.Status) string {
+	if len(list) == 0 {
+		return "该上游池内暂无账号（先在控制台导入凭证或添加账号）"
+	}
+	if len(list) > 3 {
+		nDis, nCool := 0, 0
+		for _, st := range list {
+			switch {
+			case st.Disabled:
+				nDis++
+			case st.Cooling:
+				nCool++
+			}
+		}
+		return fmt.Sprintf("%d 个账号：%d 禁用、%d 冷却", len(list), nDis, nCool)
+	}
+	parts := make([]string, 0, len(list))
+	for _, st := range list {
+		uid := st.UID
+		if len([]rune(uid)) > 8 {
+			uid = string([]rune(uid)[:8])
+		}
+		switch {
+		case st.Disabled:
+			r := st.Reason
+			if r == "" {
+				r = "已禁用"
+			}
+			parts = append(parts, fmt.Sprintf("%s 禁用(%s，需启用或重新登录)", uid, r))
+		case st.Cooling:
+			r := st.Reason
+			if r == "" {
+				r = "冷却中"
+			}
+			tail := ""
+			if !st.Until.IsZero() {
+				tail = "，约 " + st.Until.Local().Format("15:04") + " 自动恢复"
+			}
+			parts = append(parts, fmt.Sprintf("%s %s%s", uid, r, tail))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "；")
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	raw, _ := json.Marshal(v)
