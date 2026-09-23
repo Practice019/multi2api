@@ -419,24 +419,53 @@ func (h *Handler) register(pattern string, fn http.HandlerFunc) {
 	h.patterns = append(h.patterns, pattern)
 }
 
-// ServeHTTP 先做本机校验，再进路由。
+// ServeHTTP 先做凭据校验，再进路由。
 //
 // 这里统一把请求体读完再回应：Go 的 http server 在 body 未被耗尽时会直接关闭连接
 // 而非复用，客户端可能观察到 ECONNRESET（表现为「服务端日志成功、浏览器/脚本报连接重置」）。
 // 不要求每个 handler 自己记得 drain，放在唯一入口一次做掉。
+//
+// # 远程访问（非 loopback）的凭据要求
+//
+// 原实现整个 /admin/* 子树只接受 loopback 直连（浏览器从别的设备打开时
+// 无法自动携带 Bearer，与其做半吊子鉴权，不如直接关在门外）。但 Docker
+// 端口映射下容器看到的来源**永远不是** 127.0.0.1 —— 于是控制台在容器
+// 部署里彻底不可用。
+//
+// 现在放开为：非本机请求只要携带**管理钥匙**（config.api_key，经
+// Authorization: Bearer 头或 `?token=` 查询参数）即放行；普通 API key
+// **不解锁**管理端点 —— 管理台能改账号池、能触发上游请求，只有管理钥匙
+// 配得上这个权限级。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			_, _ = io.Copy(io.Discard, r.Body)
 		}
 	}()
-	if !isLoopback(r.RemoteAddr) {
+	if !isLoopback(r.RemoteAddr) && !h.remoteAdminAuthorized(r) {
 		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error": "管理接口仅允许本机直连（RemoteAddr=" + r.RemoteAddr + "）。需要远程访问请使用 SSH 隧道。",
+			"error": "管理接口仅允许本机直连，或携带管理钥匙（Authorization: Bearer <api_key> 或 ?token=<api_key>）。",
 		})
 		return
 	}
 	h.mux.ServeHTTP(w, r)
+}
+
+// remoteAdminAuthorized 远程访问管理台的凭据判定：只认 config.api_key
+// （管理钥匙），Bearer 头或 `?token=` 查询参数均可。
+//
+// 未配置管理钥匙（cfg.APIKey == ""）时恒 false —— 维持「仅本机」原状，
+// 不带钥匙的部署不该凭空多出远程管理面。
+func (h *Handler) remoteAdminAuthorized(r *http.Request) bool {
+	ak := h.cfg.APIKey
+	if ak == "" {
+		return false
+	}
+	cred := bearerOf(r)
+	if cred == "" {
+		cred = r.URL.Query().Get("token")
+	}
+	return cred == ak
 }
 
 func isLoopback(remoteAddr string) bool {
@@ -446,6 +475,14 @@ func isLoopback(remoteAddr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// bearerOf 取出请求 Authorization 头里的 Bearer 凭据（无则空串）。
+func bearerOf(r *http.Request) string {
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+		return strings.TrimPrefix(authz, "Bearer ")
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
