@@ -253,6 +253,16 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 // renewForChat 按凭证轨续期（oauth→账号域刷新+落盘；free→作废旧票重 bootstrap+落盘）。
 func (p *Provider) renewForChat(ctx context.Context, a *Auth) error {
 	switch {
+	case a.Channel == ChannelRoute:
+		// SSO 链换票（需要凭证存了 passToken+cUserId；旧式纯 serviceToken
+		// 凭证 Renewable=false，根本走不到这里）。
+		if err := p.client.SSOFresh(ctx, a); err != nil {
+			return err
+		}
+		if err := a.SaveAtomic(); err != nil {
+			log.Printf("mimo: SSO 换票成功但落盘失败 uid=%s: %v", shortUID(a.UID), err)
+		}
+		return nil
 	case a.Channel == ChannelFree:
 		p.client.DropCachedJWT(a.Fingerprint)
 		jwt, err := p.client.Bootstrap(ctx, a.Fingerprint)

@@ -193,8 +193,22 @@ func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) err
 		return err
 	case ChannelRoute:
 		// /api/user/xiaomi/me：最便宜、直接反映"登录态还活着吗"（302→折算401）。
-		_, err := p.client.RouteMe(ctx, a)
-		return err
+		if _, err := p.client.RouteMe(ctx, a); err == nil {
+			return nil
+		} else if a.Renewable() {
+			// 票死了但链活着：健康检查正是"提前恢复"的位置 —— 先 SSO 换票
+			// 再探一次，冷却/禁用中的号因此能自己回血（不等对话撞 401）。
+			if rerr := p.client.SSOFresh(ctx, a); rerr != nil {
+				return err // 报原始探测错误，SSO 失败由计数路径处理
+			}
+			if serr := a.SaveAtomic(); serr != nil {
+				log.Printf("mimo: 健康检查换票落盘失败 uid=%s: %v", shortUID(a.UID), serr)
+			}
+			_, err2 := p.client.RouteMe(ctx, a)
+			return err2
+		} else {
+			return err
+		}
 	default:
 		_, err := p.client.FetchModels(ctx, a)
 		return err
@@ -313,6 +327,11 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 			continue
 		}
 		if !a.NeedsRefresh(oauthRefreshSkew) {
+			// route+passToken：serviceToken 无公开 TTL，按"年龄>6h"预换
+			// （宁多换一次，不让对话现场吃 401 往返）。
+			if a.Channel == ChannelRoute && a.ServiceTokenAged(time.Now()) {
+				need = append(need, a)
+			}
 			continue
 		}
 		need = append(need, a)
