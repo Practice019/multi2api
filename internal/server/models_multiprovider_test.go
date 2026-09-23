@@ -724,4 +724,3 @@ func TestV1ModelsEmptyDefaultProviderKeepsBareNames(t *testing.T) {
 		t.Fatalf("总数=%d want 23（16 裸名 + 7 codearts/）: %v", len(got), got)
 	}
 }
-

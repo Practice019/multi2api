@@ -749,4 +749,3 @@ func setExpiry(t *testing.T, h *Handler, uid string, at int64) {
 	a.ExpiresAt = at
 	a.Unlock()
 }
-
