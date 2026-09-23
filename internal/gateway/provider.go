@@ -98,6 +98,16 @@ type Credential struct {
 	Nickname string `json:"nickname,omitempty"`
 	// ExpiresAt 凭证过期时刻。零值表示"上游不提供过期信息"。
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	// FilePath 凭证在磁盘上的落点。"凭证文件在哪"是与 Nickname 同级的
+	// **跨上游共识**的运维事实（核心不读内容，只消费位置本身）。
+	//
+	// 核心只拿它做两件事：账号池"文件"列展示、删除账号时连文件一起移除。
+	// 空 = 上游的凭证不是文件形态 → 删除只能出池。
+	//
+	// ⚠ 不带上它的后果（用户实测报的"删除后重启复活"）：admin 的
+	// accountDelete 拿不到 FilePath，purge_file 静默空转，文件还在 →
+	// 下次启动并池又把账号装回来。装配层的投影必须把它透传进池子。
+	FilePath string `json:"-"`
 
 	// Secret 各上游**完全不同**的凭证结构，由各上游包自己定义并用类型断言读取。
 	//

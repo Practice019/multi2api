@@ -41,7 +41,7 @@ func dedupeMimoByUID(list []*mimo.Auth) ([]*auth.Auth, map[string]any) {
 	auths := make([]*auth.Auth, 0, len(byUID))
 	secrets := make(map[string]any, len(byUID))
 	for uid, a := range byUID {
-		auths = append(auths, &auth.Auth{UID: uid, Nickname: a.Nickname})
+		auths = append(auths, &auth.Auth{UID: uid, Nickname: a.Nickname, FilePath: a.FilePath})
 		secrets[uid] = a
 	}
 	return auths, secrets

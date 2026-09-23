@@ -66,6 +66,7 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 			Provider: providerID,
 			UID:      a.UID,
 			Nickname: a.Nickname,
+			FilePath: a.FilePath,
 		})
 	}
 	return out, nil
@@ -85,6 +86,7 @@ func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialS
 				Provider: providerID,
 				UID:      a.UID,
 				Nickname: a.Nickname,
+				FilePath: a.FilePath,
 			},
 			Secret: a,
 		})
