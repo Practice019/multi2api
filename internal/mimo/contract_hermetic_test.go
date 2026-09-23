@@ -720,18 +720,26 @@ func TestManualLoginCompleteFullChain(t *testing.T) {
 		t.Errorf("manual 模式 redirect_uri 应指平台 code/callback: %s", authURL)
 	}
 
-	// 从 authURL 解出服务端公钥 pk（raw32 base64url，与 DecryptCallbackU 对称）。
+	// pk 必须是 base64url(SPKI DER)（用户教程 §3.2 的 MCowBQYDK2VuAyEA… 前缀）——
+	// 平台按 SPKI 解析，我们发 raw32 会让真链路解密必败（假上游闭环测不出来）。
 	uu, err := url.Parse(authURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkRaw, err := base64.RawURLEncoding.DecodeString(uu.Query().Get("pk"))
+	pkB64 := uu.Query().Get("pk")
+	if !strings.HasPrefix(pkB64, "MCowBQYDK2VuAyEA") {
+		t.Fatalf("pk 不是 SPKI DER 编码（应含 X25519 SPKI 前缀 MCowBQYDK2VuAyEA）: %.20s…", pkB64)
+	}
+	pkRaw, err := base64.RawURLEncoding.DecodeString(pkB64)
 	if err != nil {
 		t.Fatalf("pk 不是 base64url: %v", err)
 	}
-	srvPub, err := ecdh.X25519().NewPublicKey(pkRaw)
+	if len(pkRaw) != 12+32 {
+		t.Fatalf("pk 应为 SPKI(12B 头)+raw32，共 44 字节，实为 %d", len(pkRaw))
+	}
+	srvPub, err := ecdh.X25519().NewPublicKey(pkRaw[12:])
 	if err != nil {
-		t.Fatalf("pk 不是 X25519 raw32: %v", err)
+		t.Fatalf("pk 去掉 SPKI 头后不是合法 X25519 raw32: %v", err)
 	}
 	// 扮演平台：临时密钥 ECDH → SHA256 → AES-256-GCM 封 {sk,uid}。
 	eph, err := ecdh.X25519().GenerateKey(rand.Reader)

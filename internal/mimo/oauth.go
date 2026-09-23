@@ -74,9 +74,22 @@ func authorizeURL(platform, pkB64URL, redirect, keyName string) string {
 	return platform + "/authorize?" + q.Encode()
 }
 
-// pubKeyB64URL pk=base64url(SPKI DER)。
+// spkiPrefixX25519 X25519 公钥的 DER(SPKI) 固定头（12 字节）。
+// base64url 后即用户教程 §3.2 示例里 pk=MCowBQYDK2VuAyEA… 的那个前缀。
+var spkiPrefixX25519 = []byte{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21, 0x00}
+
+// pubKeyB64URL pk=base64url(SPKI DER) —— **不是裸 32 字节**！
+//
+// 官方桌面端与用户手动登录教程（§3.1 generateKeyPairSync spki/der）都以
+// SPKI 编码交换 pk；发 raw32 会让平台侧按错误结构解出对不上的公钥，
+// ECDH 共享密钥整体错位 → 我们解密必败。早先的测试是"自己加密自己解密"
+// 的闭环，钉不住与官方的一致性 —— 教训同 TRAE：假上游全绿 ≠ 真上游能跑。
+// u 参数里的临时公钥仍是 raw32（官方拆法 r.subarray(0,32) 为证），解 u 不变。
 func (o *oauthSession) pubKeyB64URL() string {
-	return base64.RawURLEncoding.EncodeToString(o.priv.PublicKey().Bytes())
+	spki := make([]byte, 0, len(spkiPrefixX25519)+32)
+	spki = append(spki, spkiPrefixX25519...)
+	spki = append(spki, o.priv.PublicKey().Bytes()...)
+	return base64.RawURLEncoding.EncodeToString(spki)
 }
 
 // DecryptCallbackU 解回调 `u` 参数 → {sk,uid,url}。
