@@ -579,6 +579,7 @@ func main() {
 			CredentialPriority: cfg.MimoCredentialPriority,
 			ImportClientAuth:   cfg.MimoImportClientAuth,
 			ClientAuthDir:      cfg.MimoClientAuthDir,
+			OAuthRedirectMode:  cfg.MimoOAuthRedirectMode,
 			Log:                checkinLog,
 			// 后台续期失败/成功 → pool 刷新失败计数（连续失败自动禁用，UI 可见）。
 			OnRefreshFailure: func(uid string) {

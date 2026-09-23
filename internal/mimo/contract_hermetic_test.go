@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -686,3 +687,100 @@ func TestImportHandler(t *testing.T) {
 }
 
 func boolp(b bool) *bool { return &b }
+
+// ── 手动 code 粘贴全链（服务器部署逃生路径）─────────────────────────────
+
+func TestManualLoginCompleteFullChain(t *testing.T) {
+	// manual 模式不要求本机回调端口可达 —— 这是"网关在服务器上"的核心诉求。
+	p := NewWithConfig(Config{OAuthRedirectMode: "manual"})
+	if _, instr := p.ManualLogin(); instr == "" {
+		t.Fatal("ManualLogin 必须带用户指引文案")
+	}
+	state, authURL, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(authURL, "/authorize?") || !strings.Contains(authURL, "pk=") {
+		t.Fatalf("authURL 形态不对: %s", authURL)
+	}
+	if !strings.Contains(authURL, url.QueryEscape("code/callback")) &&
+		!strings.Contains(authURL, "code%2Fcallback") {
+		t.Errorf("manual 模式 redirect_uri 应指平台 code/callback: %s", authURL)
+	}
+
+	// 从 authURL 解出服务端公钥 pk（raw32 base64url，与 DecryptCallbackU 对称）。
+	uu, err := url.Parse(authURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkRaw, err := base64.RawURLEncoding.DecodeString(uu.Query().Get("pk"))
+	if err != nil {
+		t.Fatalf("pk 不是 base64url: %v", err)
+	}
+	srvPub, err := ecdh.X25519().NewPublicKey(pkRaw)
+	if err != nil {
+		t.Fatalf("pk 不是 X25519 raw32: %v", err)
+	}
+	// 扮演平台：临时密钥 ECDH → SHA256 → AES-256-GCM 封 {sk,uid}。
+	eph, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := eph.ECDH(srvPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := sha256.Sum256(shared)
+	block, _ := aes.NewCipher(key[:])
+	gcm, _ := cipher.NewGCM(block)
+	nonce := make([]byte, 12)
+	_, _ = rand.Read(nonce)
+	sealed := gcm.Seal(nil, nonce, []byte(`{"sk":"sk-manual-1","uid":"777","url":"https://token-plan-cn.xiaomimimo.com/v1"}`), nil)
+	u := append(append(append([]byte{}, eph.PublicKey().Bytes()...), nonce...), sealed...)
+	// 用户粘贴的是**完整回跳 URL**（浏览器地址栏形态）—— extractUParam 要能剥。
+	pasted := "http://127.0.0.1:18081/?u=" + url.QueryEscape(base64.RawURLEncoding.EncodeToString(u))
+
+	body, _ := json.Marshal(map[string]string{"state": state, "code": pasted})
+	req := httptest.NewRequest(http.MethodPost, "/admin/mimo/login/complete", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.handleCompleteLogin(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("complete 回执 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Poll 应拿到真凭证（含账号专属网关）。
+	cred, err := p.Poll(state)
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	af, ok := cred.Secret.(*authFile)
+	if !ok || af.a == nil {
+		t.Fatalf("Secret 类型: %T", cred.Secret)
+	}
+	if af.a.Key != "sk-manual-1" || af.a.UID != "777" ||
+		!strings.HasPrefix(af.a.BaseURL, "https://token-plan") {
+		t.Errorf("凭证内容不对: %+v", af.a)
+	}
+	name, raw, err := af.MarshalAuthFile()
+	if err != nil || name != "mimo-777.json" {
+		t.Fatalf("落盘形态: name=%q err=%v", name, err)
+	}
+	back, err := Parse(raw)
+	if err != nil || back.BaseURL != af.a.BaseURL {
+		t.Errorf("回读丢 baseUrl: %v %+v", err, back)
+	}
+}
+
+func TestAutoModeKeepsLocalCallback(t *testing.T) {
+	// 默认（auto）redirect_uri 必须仍是本机 127.0.0.1:port —— 同机部署的
+	// 零粘贴体验不能因 manual 模式回归。
+	p := NewWithConfig(Config{CallbackPort: "19313"})
+	_, authURL, err := p.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(authURL, url.QueryEscape("127.0.0.1:19313")) {
+		t.Errorf("auto 模式 redirect_uri 应指本机回调: %s", authURL)
+	}
+}

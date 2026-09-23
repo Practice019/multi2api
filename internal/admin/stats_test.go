@@ -673,5 +673,3 @@ func TestAggregateChatLogStaysPure(t *testing.T) {
 		}
 	}
 }
-
-

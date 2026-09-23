@@ -79,7 +79,8 @@
     "reasoning_backfill": true,
     "credential_priority": "tp",
     "import_client_auth": false,
-    "client_auth_dir": ""
+    "client_auth_dir": "",
+    "oauth_redirect_mode": "auto"
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

@@ -290,3 +290,24 @@ var ErrLoginPending = errLoginPending{}
 type errLoginPending struct{}
 
 func (errLoginPending) Error() string { return "登录授权尚未完成" }
+
+// ManualLoginExt 上游自报的可选扩展点：「服务器部署下回调到不了本机时，
+// 用户可以把浏览器地址栏里的回跳 URL/授权码手动粘贴回来完成登录」。
+//
+// # 为什么需要它（用户实测）
+//
+// 页内 OAuth 的 redirect_uri 是 http://127.0.0.1:<port>/ —— 它指向的是
+// **浏览器所在机器**的回环地址。网关跑在服务器上时，用户浏览器的回调永远
+// 打不进服务器端口：无痕窗口里看到的是"连接被拒绝"的空白页，授权链接走完了、
+// token 却在地址栏里进不了池子。官方 CLI 自己有手动模式（平台 code/callback
+// 页展示密文 code，用户复制粘贴进终端），我们把它对齐到控制台：
+//
+//	manifest.providers[].login.manual = {path, instructions}
+//	→ 前端渲染「粘贴回跳 URL 完成」输入框 → POST path {state, code}。
+//
+// 与 Configured() 同一判据哲学：**上游自报有没有这条逃生路径**，
+// 前端只按数据渲染，不认识任何上游名字。
+type ManualLoginExt interface {
+	// ManualLogin 返回 (完成端点路径, 给用户的指引文案)。
+	ManualLogin() (path string, instructions string)
+}

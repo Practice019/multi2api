@@ -112,4 +112,3 @@ func TestModelsPreviewFetchFailureIsEmpty(t *testing.T) {
 		t.Errorf("拿不到目录时应为空，得到 %v", list)
 	}
 }
-

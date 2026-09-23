@@ -48,7 +48,19 @@ var (
 	_ gateway.HealthProbeExt         = (*Provider)(nil)
 	_ gateway.JobExt                 = (*Provider)(nil)
 	_ gateway.AdminExt               = (*Provider)(nil)
+	_ gateway.ManualLoginExt         = (*Provider)(nil)
 )
+
+// ── 手动登录完成（服务器部署逃生路径）──────────────────────────────────
+
+// ManualLogin 自报手动粘贴完成端点（gateway.ManualLoginExt）。
+//
+// 场景：网关跑在 Linux 服务器上，OAuth 回调地址是"浏览器那台机器"的
+// 127.0.0.1 —— 收不到。manual 模式（mimo.oauth_redirect_mode=manual）下
+// 授权完成页会展示密文回跳 URL，用户复制过来粘贴即可。
+func (p *Provider) ManualLogin() (string, string) {
+	return completePath, "浏览器授权完成后：若回跳页面打不开或提示连接被拒绝，请复制浏览器地址栏的完整回跳 URL（含 u=…），粘贴到这里完成添加。"
+}
 
 // ── 凭证目录与加载 ──────────────────────────────────────────────────────
 
