@@ -136,20 +136,22 @@ const refreshSkew = 10 * time.Minute
 
 // RefreshSkew 返回本上游的提前续期窗口（gateway.RefreshSkewExt）。
 //
-// 返回 (0, false)：**不声明预检窗口** —— 核心对"未上报窗口"的语义是
-// "只在 401 后被动续期"（见 internal/server/handler.go needsRefreshVia：
-// skew<=0 或 ok=false 都不触发请求前刷新）。
+// 返回 (0, **true**)：显式声明"不需要预检续期，只在 401 后被动续期"。
 //
-// # 为什么刻意不声明（修复"账号突然过期"）
+// # ⚠ 为什么 true 而不是 false（上一版修复在这里是失效的）
 //
-// 请求路径的预检判定 `acct.NeedsRefresh(skew)` 读的是**账号池投影**
-// （cmd/server/traecreds.go 只带 {UID, Nickname}，ExpiresAt=0），对 trae
-// 恒为 true —— 声明任何正数窗口都会让每个对话请求先消费一次 refreshToken。
-// TRAE 的 refreshToken 是消费型、且常与桌面客户端共用同一账号链，高频轮换
-// 极易断链。改为：后台 runRefresh（30 分钟窗口）负责主动续期，请求期 401
-// 由 Provider.Chat 的"401 自愈续期重试"被动恢复（见 provider.go）。
+// needsRefreshVia 的分支语义（internal/server/handler.go）：
+//
+//	has=false → **回落核心兜底窗口**（10m）—— 不是"不刷"！
+//	has=true 且 skew<=0 → 真正关闭预检
+//
+// 而账号池投影（cmd/server/traecreds.go）只带 {UID, Nickname}，ExpiresAt=0，
+// auth.Auth.NeedsRefresh 对零值**恒真** —— 于是返回 (0,false) 时预检照旧
+// 每个请求触发一次 ExchangeToken，一次性 refreshToken 仍被每请求消费，
+// "账号突然过期"的根因形状原封不动。（评审实锤：报告 §6-1。）
+// 唯一正确的关闭方式就是 (0,true)：显式"报过窗口"，且窗口为 0。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
-	return 0, false
+	return 0, true
 }
 
 // TokenExpiry 报告这份凭证的过期时刻（gateway.CredentialExpiryExt）。

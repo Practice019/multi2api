@@ -563,6 +563,44 @@ type Config struct {
 		MaxAttempts int `json:"max_attempts"`
 	} `json:"trae"`
 
+	// Mimo 第五个上游（小米 MiMo 开放平台，OpenAI 兼容 + reasoning 方言）。
+	//
+	// 与 trae/loomy 同律：**启用是显式的**（mimo.enabled=true），段缺席=不加载。
+	Mimo struct {
+		// Enabled 是否启用 MiMo 上游。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/mimo`。
+		AuthDir string `json:"auth_dir"`
+		// BaseURL 开放平台网关（留空=https://api.xiaomimimo.com/v1）。
+		// 区域 Token Plan 用户填 token-plan-{cn,sgp,ams}.xiaomimimo.com/v1；
+		// 单个凭证自带的 baseUrl（账号专属网关）**优先于这里**。
+		BaseURL string `json:"base_url"`
+		// FreeBaseURL 免费通道站点（留空=https://api.xiaomimimo.com）。
+		FreeBaseURL string `json:"free_base_url"`
+		// FreeEnabled CLI 免费通道开关。**默认 false**：2026-07-26 官方 sunset，
+		// 实测 chat 全 403 illegal_access（评审报告 §1）；留位防复活，勿轻易开。
+		FreeEnabled *bool `json:"free_enabled"`
+		// AuthHeader 鉴权头形态："bearer"（默认，Authorization: Bearer）
+		// 或 "api-key"（OmniProxy 同款：注入前删 Authorization 防歧义）。
+		AuthHeader string `json:"auth_header"`
+		// ClientVersion UA 版本（官方两段式 mimocode/<ver>，默认 0.1.3）。
+		ClientVersion string `json:"client_version"`
+		// OAuthCallbackPort 页内登录回调端口（默认 18081；勿撞 trae 18080）。
+		OAuthCallbackPort string `json:"oauth_callback_port"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+		// RefreshIntervalSeconds oauth/free 轨后台续期扫描间隔（默认 1800；<=0 关）。
+		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
+		// ReasoningBackfill 方言层开关（默认 true）：出站回注/降级 reasoning_content。
+		ReasoningBackfill *bool `json:"reasoning_backfill"`
+		// CredentialPriority 混池策略位："tp"（默认，套餐 key 优先）|"sk"|"none"。
+		CredentialPriority string `json:"credential_priority"`
+		// ImportClientAuth 允许读本机官方客户端 auth.json（默认 false：显式开）。
+		ImportClientAuth *bool `json:"import_client_auth"`
+		// ClientAuthDir 官方 data 目录覆盖（默认按 XDG/MIMOCODE_HOME 探测）。
+		ClientAuthDir string `json:"client_auth_dir"`
+	} `json:"mimo"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -674,6 +712,22 @@ type Config struct {
 	TraeFallbackEnabled   bool          `json:"-"`
 	TraeQueueThreshold    int64         `json:"-"`
 	TraeMaxAttempts       int           `json:"-"`
+
+	// Mimo 解析后（供 main 直接取用）。
+	MimoEnabled            bool          `json:"-"`
+	MimoAuthDir            string        `json:"-"`
+	MimoBaseURL            string        `json:"-"`
+	MimoFreeBaseURL        string        `json:"-"`
+	MimoFreeEnabled        bool          `json:"-"`
+	MimoAuthHeader         string        `json:"-"`
+	MimoClientVersion      string        `json:"-"`
+	MimoOAuthCallbackPort  string        `json:"-"`
+	MimoPoolAccounts       bool          `json:"-"`
+	MimoRefreshInterval    time.Duration `json:"-"`
+	MimoReasoningBackfill  bool          `json:"-"`
+	MimoCredentialPriority string        `json:"-"`
+	MimoImportClientAuth   bool          `json:"-"`
+	MimoClientAuthDir      string        `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -1134,6 +1188,39 @@ func (c *Config) normalize() error {
 	if c.TraeMaxAttempts <= 0 {
 		c.TraeMaxAttempts = 3
 	}
+
+	// ---- mimo（第五上游）----
+	c.MimoEnabled = c.Mimo.Enabled
+	c.MimoAuthDir = c.Mimo.AuthDir
+	if c.MimoAuthDir == "" {
+		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
+		//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
+		c.MimoAuthDir = filepath.Join(c.AuthsBase, "mimo")
+	}
+	c.MimoBaseURL = strings.TrimSpace(c.Mimo.BaseURL)
+	c.MimoFreeBaseURL = strings.TrimSpace(c.Mimo.FreeBaseURL)
+	c.MimoFreeEnabled = boolOr(c.Mimo.FreeEnabled, false) // 通道实测已死：默认关
+	c.MimoAuthHeader = strings.ToLower(strings.TrimSpace(c.Mimo.AuthHeader))
+	c.MimoClientVersion = strings.TrimSpace(c.Mimo.ClientVersion)
+	c.MimoOAuthCallbackPort = strings.TrimSpace(c.Mimo.OAuthCallbackPort)
+	if c.MimoOAuthCallbackPort == "" {
+		c.MimoOAuthCallbackPort = "18081" // 勿撞 trae 的 18080
+	}
+	c.MimoPoolAccounts = c.MimoEnabled && boolOr(c.Mimo.PoolAccounts, true)
+	{
+		iv := c.Mimo.RefreshIntervalSeconds
+		if iv == 0 {
+			iv = 1800
+		}
+		c.MimoRefreshInterval = time.Duration(iv) * time.Second
+	}
+	c.MimoReasoningBackfill = boolOr(c.Mimo.ReasoningBackfill, true)
+	c.MimoCredentialPriority = strings.ToLower(strings.TrimSpace(c.Mimo.CredentialPriority))
+	if c.MimoCredentialPriority == "" {
+		c.MimoCredentialPriority = "tp"
+	}
+	c.MimoImportClientAuth = boolOr(c.Mimo.ImportClientAuth, false)
+	c.MimoClientAuthDir = strings.TrimSpace(c.Mimo.ClientAuthDir)
 	return nil
 }
 

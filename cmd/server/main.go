@@ -25,6 +25,7 @@ import (
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/loomy"
+	"workbuddy2api/internal/mimo"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
@@ -556,6 +557,61 @@ func main() {
 		log.Printf("trae: 未并入账号池（trae.pool_accounts=false），只能通过其管理端点使用")
 	}
 
+	// ---- 第五个上游：MiMo（小米开放平台，OpenAI 兼容 + reasoning 方言）----
+	//
+	// 注册顺序仍然 workbuddy 在前 → "裸模型名走谁"不变；mimo 只在显式配置
+	// 或 "mimo/模型名" 前缀时被用到。协议实现与落地依据见
+	// reports/mimo-upstream-implementation-report.md 与 internal/mimo 包注释。
+	var mm *mimo.Provider
+	if cfg.MimoEnabled {
+		free := cfg.MimoFreeEnabled
+		backfill := cfg.MimoReasoningBackfill
+		mm = mimo.NewWithConfig(mimo.Config{
+			AuthDir:            cfg.MimoAuthDir,
+			BaseURL:            cfg.MimoBaseURL,
+			FreeBaseURL:        cfg.MimoFreeBaseURL,
+			FreeEnabled:        &free,
+			AuthHeader:         cfg.MimoAuthHeader,
+			ClientVersion:      cfg.MimoClientVersion,
+			CallbackPort:       cfg.MimoOAuthCallbackPort,
+			RefreshInterval:    cfg.MimoRefreshInterval,
+			ReasoningBackfill:  &backfill,
+			CredentialPriority: cfg.MimoCredentialPriority,
+			ImportClientAuth:   cfg.MimoImportClientAuth,
+			ClientAuthDir:      cfg.MimoClientAuthDir,
+			Log:                checkinLog,
+			// 后台续期失败/成功 → pool 刷新失败计数（连续失败自动禁用，UI 可见）。
+			OnRefreshFailure: func(uid string) {
+				if p.NoteRefreshFailure(uid) {
+					log.Printf("mimo: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录/导入）", uid)
+				}
+			},
+			OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
+		})
+		if err := registry.Register(mm); err != nil {
+			log.Fatalf("注册 MiMo 上游失败: %v", err)
+		}
+		log.Printf("mimo: 已启用（凭证目录 %s，基址 %s，free 轨=%v）",
+			cfg.MimoAuthDir, firstNonEmpty(cfg.MimoBaseURL, "https://api.xiaomimimo.com/v1"), cfg.MimoFreeEnabled)
+	} else {
+		log.Printf("mimo: 未启用（config 里 mimo.enabled 缺省为 false）")
+		// 凭证在、上游没开 —— 与 codearts/trae 同款提示（防"界面上看不到号"被读成界面坏）。
+		if list, err := mimo.LoadDir(cfg.MimoAuthDir); err == nil && len(list) > 0 {
+			log.Printf("mimo: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.MimoAuthDir, len(list))
+		}
+	}
+
+	if mm != nil && cfg.MimoPoolAccounts {
+		if n := syncMimoAccounts(p, cfg.MimoAuthDir); n > 0 {
+			log.Printf("mimo: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("mimo: 账号池中暂无账号（凭证目录 %s 里没有可用的 mimo*.json）", cfg.MimoAuthDir)
+		}
+	} else if mm != nil {
+		log.Printf("mimo: 未并入账号池（mimo.pool_accounts=false），只能通过其管理端点使用")
+	}
+
 	// "已注册上游"必须打在**所有**上游注册完之后。
 	//
 	// # 为什么（实测踩到过）
@@ -909,4 +965,3 @@ func isolatedNote(isolated bool) string {
 	}
 	return "，复用当前 profile（不串号保护较弱）"
 }
-

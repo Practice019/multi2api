@@ -65,6 +65,22 @@
     "pool_accounts": true,
     "client_data_dir": ""
   },
+  "mimo": {
+    "enabled": true,
+    "auth_dir": "./auths/mimo",
+    "base_url": "https://api.xiaomimimo.com/v1",
+    "free_base_url": "https://api.xiaomimimo.com",
+    "free_enabled": false,
+    "auth_header": "bearer",
+    "client_version": "0.1.3",
+    "oauth_callback_port": "18081",
+    "pool_accounts": true,
+    "refresh_interval_seconds": 1800,
+    "reasoning_backfill": true,
+    "credential_priority": "tp",
+    "import_client_auth": false,
+    "client_auth_dir": ""
+  },
   "features": {
     "sanitize_blacklist_fingerprints": true
   },

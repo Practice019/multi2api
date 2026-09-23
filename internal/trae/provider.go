@@ -194,6 +194,42 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		if rc != nil {
 			_ = rc.Close()
 		}
+		// 401 自愈：accessToken 可能刚过期（后台/请求期刷新没赶上），
+		// 先 ExchangeToken 续期，再原请求重试一次。
+		//
+		// 修复"账号突然过期"的关键一环：token 在两次刷新之间过期时，
+		// 以前是 401 → SessionDead 计数 → 3 次后禁用；现在同一账号
+		// 先自救（续期 + 重试），救得回来就继续服务，救不回来
+		// （refreshToken 已被别处消费/过期）才上交 401 给分类器。
+		//
+		// ⚠ 只重试一次：连续 401 说明会话真死了，多试只会白烧 ExchangeToken
+		// 往返（分类器的 3 次门控仍会把它停掉并显示「需重新登录」）。
+		//
+		// ⚠ 本分支曾被一次 `git checkout` 误还原掉而测试没拦住 ——
+		// TestChat401AutoRefreshRetry 钉的就是它，改动 provider.go 后必须跑。
+		if status == http.StatusUnauthorized && strings.TrimSpace(a.RefreshToken) != "" {
+			if rerr := p.client.RefreshToken(a); rerr == nil {
+				if serr := a.SaveAtomic(); serr != nil {
+					log.Printf("trae: 401 自愈续期成功但落盘失败 uid=%s: %v", shortUID(a.UID), serr)
+				} else {
+					log.Printf("trae: 401 自愈：uid=%s 续期后重试", shortUID(a.UID))
+				}
+				rc2, status2, respBody2, err2 := p.client.ChatStream(ctx, a, body)
+				if err2 != nil {
+					return gateway.ChatStream{}, err2
+				}
+				if status2 >= 400 {
+					if rc2 != nil {
+						_ = rc2.Close()
+					}
+					return gateway.ChatStream{Status: status2, Body: io.NopCloser(strings.NewReader(string(respBody2)))}, nil
+				}
+				// 重试成功：正常转换 SOLO SSE → OpenAI SSE。
+				pr, pw := io.Pipe()
+				go p.convertWithFallback(ctx, a, body, rc2, pw)
+				return gateway.ChatStream{Status: status2, Body: pr}, nil
+			}
+		}
 		return gateway.ChatStream{Status: status, Body: io.NopCloser(strings.NewReader(string(respBody)))}, nil
 	}
 	// 2xx：转换 SOLO SSE → OpenAI SSE（goroutine 内跑降级循环）。
