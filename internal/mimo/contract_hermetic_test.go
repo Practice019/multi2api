@@ -957,3 +957,45 @@ func TestRouteCookieImportFlow(t *testing.T) {
 		t.Errorf("route 文件名铁律: %s", FileName(list[0]))
 	}
 }
+
+// TestSyncEndpointUpsert 桌面令牌同步口的核心语义：**同 uid 幂等 upsert**。
+// 同步脚本会周期性把最新四件套贴过来 —— 绝不能每同步一次多一个重复账号。
+func TestSyncEndpointUpsert(t *testing.T) {
+	srv, _ := newFakeRouteUpstream(t)
+	dir := t.TempDir()
+	p := NewWithConfig(Config{AuthDir: dir, Client: NewWithBase(srv.URL)})
+	post := func(cookie string) (int, map[string]any) {
+		body, _ := json.Marshal(map[string]string{"cookie": cookie})
+		req := httptest.NewRequest(http.MethodPost, "/admin/mimo/sync", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.handleSync(rec, req)
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out
+	}
+	// 首次：created
+	if code, out := post("serviceToken=svc-good; userId=3146522385; mimopc_slh=s1; mimopc_ph=p1"); code != 200 || out["ok"] != true || out["action"] != "created" {
+		t.Fatalf("首同步应 created: %d %+v", code, out)
+	}
+	// 令牌轮换后（桌面重启换了 svc-rotated？假上游只认 svc-good）——
+	// 换个值验活会失败：应 200 + ok:false（业务失败不走 HTTP 5xx）。
+	if code, out := post("serviceToken=svc-stale; userId=3146522385"); code != 200 || out["ok"] != false {
+		t.Fatalf("坏令牌应 200+ok:false: %d %+v", code, out)
+	}
+	// 再同步（同 uid 好令牌）：updated 且**文件仍只有一份**、令牌已刷新。
+	if _, out := post("serviceToken=svc-good; userId=3146522385; mimopc_slh=s2; mimopc_ph=p2"); out["action"] != "updated" {
+		t.Fatalf("二同步应 updated: %+v", out)
+	}
+	list, _ := LoadDir(dir)
+	if len(list) != 1 {
+		t.Fatalf("同步不应产生重复账号: %d 份", len(list))
+	}
+	if list[0].Slh != "s2" || list[0].Ph != "p2" {
+		t.Errorf("updated 未刷新 Cookie 部件: slh=%q ph=%q", list[0].Slh, list[0].Ph)
+	}
+	// route 号昵称已刷新为 me 接口的真昵称。
+	if list[0].Nickname != "妖精七七" {
+		t.Errorf("昵称应为 me 回执: %q", list[0].Nickname)
+	}
+}

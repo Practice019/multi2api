@@ -55,9 +55,14 @@ type Auth struct {
 	// 抓包实锤（2026-09-24 桌面端探测报告 §5.1/§6.3）：业务 API 一律
 	// `Cookie: serviceToken=…; userId=…; mimopc_slh=…; mimopc_ph=…`，
 	// **无 Authorization 头、无设备绑定校验**，令牌可独立复制调用。
-	ServiceToken string // 会话级令牌（过期只能重新抓包导入 —— passToken 自动换新链未取证）
+	ServiceToken string // 会话级令牌（由 SSO 链现换，见 sso.go）
+	// ── SSO 链的输入（用户探测报告 §3.3：一条 passToken 就能全自动换票）──
+	PassToken string // 小米账号会话（30 天；serviceLogin 每次会续签 —— 网关同步滚动保存）
+	CUserID   string // cUserId（serviceLogin 全套 account cookie 之一，缺一则 302 进 SPA 死路）
+
 	Slh          string // mimopc_slh Cookie
 	Ph           string // mimopc_ph Cookie
+	ServiceAt    int64  // serviceToken 换到手时刻（Unix 秒）—— 主动预换的年龄依据
 	DeviceD      string // 抓包时的设备指纹 d=pc_<hex32>（信息位，供审计/复现）
 	RouteVersion string // x-client-version（桌面 app 版本，默认 26.923.232338）
 	BaseURL      string // 账号专属网关（OAuth url 字段/区域网关）；空=用配置默认
@@ -150,7 +155,9 @@ func (a *Auth) Renewable() bool {
 	}
 	switch a.Channel {
 	case ChannelRoute:
-		return false // 会话级 Cookie，过期须重抓包导入 —— 不假装能续（TRAE 教训的反面）
+		// 有 passToken 才能走 SSO 链自动换票；只贴了 serviceToken 的旧式凭证
+		// 依旧不可续（过期显示「需重新登录」—— 不假装能刷，TRAE 教训）。
+		return a.PassToken != "" && a.CUserID != ""
 	case ChannelFree:
 		return a.Fingerprint != ""
 	case ChannelPaid:
@@ -247,6 +254,12 @@ func Parse(raw []byte) (*Auth, error) {
 	a.ClientID = Str("clientId", "client_id")
 	a.AccountID = Str("accountId", "account_id")
 	a.ServiceToken = Str("serviceToken", "service_token")
+	a.PassToken = Str("passToken", "pass_token")
+	a.CUserID = Str("cUserId", "c_user_id")
+	if a.DeviceD == "" {
+		a.DeviceD = Str("deviceId", "device_id") // 与抓包 d=pc_… 同值（§3.3）
+	}
+	a.ServiceAt = normalizeExpiresAt(Int("serviceAt", "service_at"))
 	a.Slh = Str("mimopc_slh", "slh")
 	a.Ph = Str("mimopc_ph", "ph")
 	a.DeviceD = Str("deviceD", "device_d", "d")
@@ -263,7 +276,7 @@ func Parse(raw []byte) (*Auth, error) {
 
 	if a.Channel == "" {
 		switch {
-		case a.ServiceToken != "":
+		case a.ServiceToken != "" || (a.PassToken != "" && a.CUserID != ""):
 			a.Channel = ChannelRoute
 		case a.Fingerprint != "" && a.AccessToken != "" && a.Key == "":
 			a.Channel = ChannelFree // 纯 free 档案
@@ -280,8 +293,8 @@ func Parse(raw []byte) (*Auth, error) {
 	}
 	// 判"有鉴权材料"：route 要 serviceToken+userId；paid 要 key；oauth 要 access；free 要 jwt/指纹。
 	switch {
-	case a.Channel == ChannelRoute && (a.ServiceToken == "" || a.UID == ""):
-		return nil, fmt.Errorf("mimo: route 凭证缺 serviceToken 或 userId（Cookie 导入需四项：serviceToken/userId/mimopc_slh/mimopc_ph）")
+	case a.Channel == ChannelRoute && a.ServiceToken == "" && (a.PassToken == "" || a.CUserID == ""):
+		return nil, fmt.Errorf("mimo: route 凭证既没有 serviceToken（即时可用），也没有 passToken+cUserId（SSO 可续）")
 	case a.Channel == ChannelPaid && a.Type == TypeAPI && a.Key == "":
 		return nil, fmt.Errorf("mimo: paid/api 凭证缺 key（sk-/tp-）")
 	case a.Channel == ChannelPaid && a.Type == TypeOAuth && a.AccessToken == "" && a.RefreshToken == "":
@@ -297,9 +310,13 @@ func Parse(raw []byte) (*Auth, error) {
 		}
 	}
 	if a.UID == "" {
-		return nil, fmt.Errorf("mimo: 凭证无法确定 uid（缺 uid 与可推导的 key）")
+		// pass-only 的 route 凭证此刻可以没有 uid —— SSO 换票返回 userId 后
+		// 由 import/sync 回填；其余形态仍必须有稳定主键。
+		if !(a.Channel == ChannelRoute && a.PassToken != "") {
+			return nil, fmt.Errorf("mimo: 凭证无法确定 uid（缺 uid 与可推导的 key）")
+		}
 	}
-	if a.Nickname == "" {
+	if a.Nickname == "" && (a.Key != "" || a.AccessToken != "") {
 		a.Nickname = MaskKey(firstNonEmpty(a.Key, a.AccessToken))
 	}
 	return a, nil
@@ -381,6 +398,9 @@ func marshalLocked(a *Auth) ([]byte, error) {
 	}
 	set("key", a.Key)
 	set("serviceToken", a.ServiceToken)
+	set("passToken", a.PassToken)
+	set("cUserId", a.CUserID)
+	set("deviceId", a.DeviceD)
 	set("mimopc_slh", a.Slh)
 	set("mimopc_ph", a.Ph)
 	set("deviceD", a.DeviceD)
@@ -399,6 +419,7 @@ func marshalLocked(a *Auth) ([]byte, error) {
 			doc[k] = v
 		}
 	}
+	setNum("serviceAt", a.ServiceAt)
 	setNum("expiresAt", a.ExpiresAt)
 	setNum("refreshExpiresAt", a.RefreshExpiresAt)
 	raw, err := json.MarshalIndent(doc, "", "  ")

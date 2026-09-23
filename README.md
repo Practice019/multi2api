@@ -93,13 +93,16 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
   授权页**默认由网关用无痕窗口打开**（见下方 `login.*`），避免浏览器里已登录的
   腾讯账号把会话串到别的账号上；窗口被关掉时可点「重新无痕打开」，
   或点「复制链接」粘贴到无痕/隐私窗口。
-- **MiMo（桌面端 Cookie / route 通道）**：在自己的 Windows/macOS 上用
-  [mitmproxy 抓一次 `Set-Cookie`]（或直接解密 `%APPDATA%\Xiaomi MiMo\Network\Cookies`），
-  拿到 `serviceToken=…; userId=…; mimopc_slh=…; mimopc_ph=…` 四项后，
-  在「批量导入」框整行粘贴（一行一个账号）→ 网关自动验活、取真昵称、落盘入池；
-  该通道推理走 `mimo-server-cn.xiaomimimo.com/api/route/chat/completions`
-  （桌面配额，不烧平台余额）。serviceToken 是会话级：过期后该号显示
-  「需重新登录」（网关把 302 跳 SSO 折算成 401），重新抓包再导一次即可。
+- **MiMo（桌面端 route 通道，服务端计费=免费额度）**：推荐贴 **passToken 套**
+  （`passToken=…; cUserId=…; userId=…; deviceId=pc_…`，都在桌面端 Cookie 库
+  明文可得，一次性获取、30 天有效）→ 网关内藏完整 SSO 链
+  （`/api/user/xiaomi/me → serviceLogin → /api/sts`），此后**全自动换
+  serviceToken**：对话吃 401 现换、后台按年龄预换、健康检查复活时换、
+  serviceLogin 续签的 passToken 滚动保存 —— 只要链跑着，账号自我续命，
+  零维护。也兼容只贴 serviceToken 四件套（会话级，过期显示「需重新登录」）。
+  配套 `mimo_tools/mimo_sync.py`（Windows 一条命令从 Cookie 库上送 passToken 套）。
+  推理走 `mimo-server-cn.xiaomimimo.com/api/route/chat/completions`（桌面配额，
+  与 `api.xiaomimimo.com` 的 402 余额通道互不相干）。
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。

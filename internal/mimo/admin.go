@@ -20,6 +20,7 @@ import (
 
 const (
 	modelsPath   = "/admin/mimo/models"
+	syncPath     = "/admin/mimo/sync"
 	importPath   = "/admin/mimo/import"
 	verifyPath   = "/admin/mimo/keys/verify"
 	storePath    = "/admin/mimo/clientstore"
@@ -34,6 +35,8 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 		{Method: http.MethodPost, Path: verifyPath, Handler: p.handleVerify, Capability: gateway.CapChat, Title: "逐 key 验活", Hidden: true},
 		{Method: http.MethodGet, Path: storePath, Handler: p.handleClientStore, Capability: gateway.CapChat, Title: "本机客户端凭证探测", Hidden: true},
 		{Method: http.MethodPost, Path: completePath, Handler: p.handleCompleteLogin, Capability: gateway.CapChat, Title: "手动完成登录", Hidden: true},
+		// sync：给桌面侧脚本用的幂等令牌上送口（serviceToken 刷新即同步）。
+		{Method: http.MethodPost, Path: syncPath, Handler: p.handleSync, Capability: gateway.CapChat, Title: "桌面令牌同步", Hidden: true},
 	}
 }
 
@@ -199,10 +202,10 @@ func (p *Provider) handleImport(w http.ResponseWriter, r *http.Request) {
 	writeMimoJSON(w, http.StatusOK, map[string]any{"ok": anyOK || len(results) == 0, "imported": idx, "results": results})
 }
 
-// importRouteCookie 解析一行 Cookie 串（serviceToken=…; userId=…; mimopc_slh=…; mimopc_ph=…）
-// 成 route 凭证：解析后立即用 /api/user/xiaomi/me 验活并取昵称 —— 导错的令牌
-// 当场报错比进池后静默 401 友好得多。
-func (p *Provider) importRouteCookie(ctx context.Context, line string) map[string]any {
+// parseRouteCookie 解析 Cookie 串（serviceToken=…; userId=…; mimopc_slh=…; mimopc_ph=…）
+// 成未验活的 route 凭证 —— import 与 sync 共用这一份解析规则（解析逻辑只此一处）。
+// 返回 (凭证, 错误文案)；错误为空串表示解析成功。
+func parseRouteCookie(line string) (*Auth, string) {
 	cookies := map[string]string{}
 	for _, kv := range strings.Split(line, ";") {
 		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
@@ -211,23 +214,52 @@ func (p *Provider) importRouteCookie(ctx context.Context, line string) map[strin
 		}
 	}
 	st, uid := cookies["servicetoken"], cookies["userid"]
-	if st == "" {
-		return map[string]any{"ok": false, "error": "Cookie 串里没有 serviceToken"}
+	pass, cuid := cookies["passtoken"], cookies["cuserid"]
+	dev := firstNonEmpty(cookies["deviceid"], cookies["d"])
+	switch {
+	case st == "" && (pass == "" || cuid == ""):
+		return nil, "Cookie 里至少要有一套：serviceToken（即时可用）或 passToken+cUserId+userId（SSO 自动换票续命）"
+	case st == "" && uid == "":
+		// 实测（探测报告 §7）：serviceLogin 缺 userId cookie 会 302 进 SPA 死路，
+		// SSO 链要求账号 cookie **全套** —— passToken 套必须连 userId 一起带。
+		return nil, "passToken 套还缺 userId（SSO 链要求全套账号 cookie，缺一即死路；Cookie 库/抓包里都有它，不是密钥）"
 	}
-	if uid == "" {
-		return map[string]any{"ok": false, "error": "Cookie 串里没有 userId（route 通道 uid 主键）"}
+	nick := ""
+	if uid != "" {
+		nick = "route:" + uid
 	}
-	if seenKey := "route:" + st; cookieSeen[seenKey] {
+	return &Auth{Channel: ChannelRoute, Type: TypeAPI, ServiceToken: st, PassToken: pass,
+		CUserID: cuid, UID: uid, Slh: cookies["mimopc_slh"], Ph: cookies["mimopc_ph"],
+		DeviceD: dev, Nickname: nick,
+		Source: "cookie-import", LoggedInAt: time.Now().UTC().Format(time.RFC3339)}, ""
+}
+
+// importRouteCookie 一行 Cookie 进池：解析 → 验活 → 落盘。导错当场报错，
+// 比进池后静默 401 友好。
+func (p *Provider) importRouteCookie(ctx context.Context, line string) map[string]any {
+	a, fail := parseRouteCookie(line)
+	if fail != "" {
+		return map[string]any{"ok": false, "error": fail}
+	}
+	st, uid := a.ServiceToken, a.UID
+	if cookieSeen["route:"+st] && st != "" {
 		return nil // 去重：同一 serviceToken 只导一次（不占回执条）
 	}
-	a := &Auth{Channel: ChannelRoute, Type: TypeAPI, ServiceToken: st, UID: uid,
-		Slh: cookies["mimopc_slh"], Ph: cookies["mimopc_ph"],
-		DeviceD: cookies["d"], Nickname: "route:" + uid,
-		Source: "cookie-import", LoggedInAt: time.Now().UTC().Format(time.RFC3339)}
+	cctx, cc := context.WithTimeout(ctx, 40*time.Second)
+	defer cc()
+	// pass-only 凭证（没有 serviceToken）：先跑一次 SSO 链现换 —— 换票失败
+	// 就是 passToken 死了，当场报错（这正是"以后能不能自动续"的第一次考验）。
+	if a.ServiceToken == "" {
+		if err := p.client.SSOFresh(cctx, a); err != nil {
+			return map[string]any{"ok": false, "error": "SSO 换票失败: " + truncate(err.Error(), 160)}
+		}
+		st, uid = a.ServiceToken, a.UID
+		if uid == "" {
+			return map[string]any{"ok": false, "error": "SSO 链没带回 userId（异常回执，请联系网关维护者）"}
+		}
+	}
 	// 验活 + 真昵称（失败不拦导入：令牌可能刚从别的机器带来，池子的健康检查
 	// 会负责后续；但把探到的昵称/错误带进回执，让用户立刻知道状态）。
-	cctx, cc := context.WithTimeout(ctx, 20*time.Second)
-	defer cc()
 	if nick, err := p.client.RouteMe(cctx, a); err != nil {
 		return map[string]any{"ok": false, "error": "令牌验活失败（大概率已过期，重新抓包）: " + truncate(err.Error(), 140), "uid": uid}
 	} else if nick != "" {
@@ -334,6 +366,79 @@ func (p *Provider) handleClientStore(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "enabled": p.importClientAuth, "candidates": out,
 		"note": "导入需 mimo.import_client_auth=true；本接口永不回传 key 本体",
 	})
+}
+
+// handleSync POST /admin/mimo/sync —— 桌面 serviceToken 幂等上送（同步器专用）。
+//
+// 与 import 的区别：**按 uid upsert**。桌面端每次启动都会换发新 serviceToken，
+// 同步脚本无脑把最新四件套贴过来即可 —— 首次 created、之后 updated，
+// 永远只有一份凭证（不会每次同步堆一个重复账号）。
+func (p *Provider) handleSync(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cookie string `json:"cookie"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeMimoJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体不是合法 JSON"})
+		return
+	}
+	a, fail := parseRouteCookie(req.Cookie)
+	if fail != "" {
+		writeMimoJSON(w, http.StatusOK, map[string]any{"ok": false, "error": fail})
+		return
+	}
+	ctx, cancel := mimoCtx(r, 60*time.Second)
+	defer cancel()
+	// 同步器可以只推 passToken 套（桌面 cookie 库那份 30 天的）：先现换再验。
+	if a.ServiceToken == "" {
+		if err := p.client.SSOFresh(ctx, a); err != nil {
+			writeMimoJSON(w, http.StatusOK, map[string]any{"ok": false, "uid": a.UID, "error": "SSO 换票失败: " + truncate(err.Error(), 160)})
+			return
+		}
+	}
+	// 验活 + 取昵称。注意**失败也回 200**（带 ok:false）：同步脚本/插件里
+	// 非 2xx 常被当传输故障重试刷日志，"令牌这次不新鲜"是业务事实。
+	nick, verr := p.client.RouteMe(ctx, a)
+	if verr != nil {
+		writeMimoJSON(w, http.StatusOK, map[string]any{"ok": false, "uid": a.UID, "error": truncate(verr.Error(), 160)})
+		return
+	}
+	if nick != "" {
+		a.Nickname = nick
+	}
+	action := "created"
+	list, _ := p.localAccounts()
+	for _, cur := range list {
+		if cur != nil && cur.UID == a.UID && cur.Channel == ChannelRoute {
+			// 就地更新令牌三件（Slh/Ph/DeviceD 有新值则覆盖），保留创建时间与昵称回落。
+			cur.ServiceToken = a.ServiceToken
+			for _, pair := range []struct {
+				dst *string
+				src string
+			}{{&cur.Slh, a.Slh}, {&cur.Ph, a.Ph}, {&cur.DeviceD, a.DeviceD},
+				{&cur.PassToken, a.PassToken}, {&cur.CUserID, a.CUserID}} {
+				if pair.src != "" {
+					*pair.dst = pair.src
+				}
+			}
+			cur.ServiceAt = a.ServiceAt
+			if cur.Nickname == "" || strings.HasPrefix(cur.Nickname, "route:") {
+				cur.Nickname = a.Nickname
+			}
+			if err := cur.SaveAtomic(); err != nil {
+				writeMimoJSON(w, http.StatusOK, map[string]any{"ok": false, "uid": cur.UID, "error": "落盘失败: " + err.Error()})
+				return
+			}
+			action = "updated"
+			a = cur
+			goto done
+		}
+	}
+	if err := p.saveAuth(a); err != nil {
+		writeMimoJSON(w, http.StatusOK, map[string]any{"ok": false, "uid": a.UID, "error": err.Error()})
+		return
+	}
+done:
+	writeMimoJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": a.UID, "nickname": a.Nickname, "action": action})
 }
 
 // handleCompleteLogin POST /admin/mimo/login/complete —— 手动粘贴回跳 URL/u。
