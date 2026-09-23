@@ -31,7 +31,17 @@ import (
 
 // 技术常量（实测/官方源码定稿，见报告 §2.1）。
 const (
-	DefaultPaidBase  = "https://api.xiaomimimo.com/v1"
+	DefaultPaidBase = "https://api.xiaomimimo.com/v1"
+	// 桌面端主网关（2026-09-24 抓包报告 §4.1/§5.1）：静态扫描不暴露、
+	// 第三方反代仓库全都没发现 —— Cookie(serviceToken) 认证 + OpenAI 兼容格式。
+	DefaultRouteBase    = "https://mimo-server-cn.xiaomimimo.com"
+	EpRouteChat         = "/api/route/chat/completions"
+	EpRouteModels       = "/api/model/list"
+	EpRouteMe           = "/api/user/xiaomi/me"
+	DefaultRouteVersion = "26.923.232338"
+	// 抓包实锤的来源头/UA（§6.3 的验证组合，原样复刻；可配置覆盖）。
+	RouteMimoSource  = "mimocode-cli-free"
+	RouteUA          = "mimocode/desktop-1579e7d ai-sdk/provider-utils/4.0.23 runtime/node.js/24"
 	DefaultFreeBase  = "https://api.xiaomimimo.com"
 	DefaultOAuthHost = "https://account.xiaomi.com"
 	DefaultClientID  = "mimocode-desktop" // oauth refresh 的 client_id（MiMo2API 孤证；随凭证可覆盖）
@@ -57,6 +67,8 @@ type Client struct {
 
 	PaidBase    string
 	FreeBase    string
+	RouteBase   string
+	RouteVer    string // x-client-version
 	OAuthHost   string
 	AuthHeader  string // ""|"bearer" → Authorization: Bearer；"api-key" → api-key 头
 	ClientVer   string // UA: mimocode/<ClientVer>（官方两段式，报告裁决表）
@@ -66,6 +78,10 @@ type Client struct {
 	bootMu    sync.Mutex
 	bootCache map[string]*bootEntry
 	bootFlt   map[string]*sync.WaitGroup
+
+	// routeNoRedirect 禁自动重定向的 client：serviceToken 失效时网关 302
+	// 回小米 SSO —— 跟随会拿到登录页 HTML + 200，把"令牌死了"伪装成成功。
+	routeNoRedirect *http.Client
 }
 
 // ModelInfo 本包模型投影。
@@ -92,6 +108,8 @@ func New() *Client {
 		StreamHTTP: &http.Client{Transport: tr},
 		PaidBase:   DefaultPaidBase,
 		FreeBase:   DefaultFreeBase,
+		RouteBase:  DefaultRouteBase,
+		RouteVer:   DefaultRouteVersion,
 		OAuthHost:  DefaultOAuthHost,
 		AuthHeader: "bearer",
 		ClientVer:  DefaultVersion,
@@ -105,6 +123,7 @@ func NewWithBase(base string) *Client {
 	c := New()
 	c.PaidBase = base + "/v1"
 	c.FreeBase = base
+	c.RouteBase = base
 	c.OAuthHost = base
 	return c
 }
@@ -161,6 +180,156 @@ func (c *Client) freeHeaders(req *http.Request, a *Auth, jwt, affinity string) {
 	if affinity != "" {
 		req.Header.Set("x-session-affinity", affinity)
 	}
+}
+
+// routeHeaders 桌面端网关头（实锤 §6.3 组合）。
+func (c *Client) routeHeaders(req *http.Request, a *Auth, stream bool) {
+	req.Header.Set("Content-Type", "application/json")
+	if stream {
+		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
+	req.Header.Set("User-Agent", RouteUA)
+	req.Header.Set("Cookie", a.CookieString())
+	req.Header.Set("x-client-version", nonEmpty(a.RouteVersion, nonEmpty(c.RouteVer, DefaultRouteVersion)))
+	req.Header.Set("x-mimo-source", RouteMimoSource)
+	// 会话亲和沿用 paid 的语义（同一下游会话稳定）。
+}
+
+// routeChatStream 走桌面端网关推理（Cookie 认证，OpenAI 兼容体）。
+//
+// ⚠ CheckRedirect 停在 3xx：serviceToken 失效时网关会 302 回小米 SSO ——
+// 若跟随重定向，会拿到登录页 HTML + 200，把"令牌死了"伪装成成功。
+// 302/307 在这里一律折算成 401 语义（auth 失效）上交。
+func (c *Client) routeChatStream(ctx context.Context, a *Auth, body []byte, affinity string) (io.ReadCloser, int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(c.routeBase(), "/")+EpRouteChat, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	c.routeHeaders(req, a, true)
+	if affinity != "" {
+		req.Header.Set("x-session-affinity", affinity)
+	}
+	resp, err := c.routeHTTP().Do(req)
+	if err != nil {
+		log.Printf("mimo: route chat uid=%s transport error: %v", shortUID(a.UID), err)
+		return nil, 0, nil, err
+	}
+	return c.ingestRouteResp(resp)
+}
+
+func (c *Client) ingestRouteResp(resp *http.Response) (io.ReadCloser, int, []byte, error) {
+	// 3xx（跳 SSO）与 401 同义：令牌失效。折算成 401 让上游自愈/分类逻辑统一。
+	status := resp.StatusCode
+	if status >= 300 && status < 400 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return nil, http.StatusUnauthorized,
+			[]byte(`{"error":{"message":"serviceToken expired (redirected to SSO)","type":"invalid_key","code":"401"}}`), nil
+	}
+	if status >= 400 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBody))
+		_ = resp.Body.Close()
+		return nil, status, raw, nil
+	}
+	return resp.Body, status, nil, nil
+}
+
+// routeBase/routeHTTP：route 通道的 base 与客户端（禁用自动重定向）。
+func (c *Client) routeBase() string {
+	if b := strings.TrimSpace(c.RouteBase); b != "" {
+		return b
+	}
+	return DefaultRouteBase
+}
+
+func (c *Client) routeHTTP() *http.Client {
+	// 每实例惰性派生一份禁跳转的 client（共享 Transport 复用连接池）。
+	if c.routeNoRedirect == nil {
+		nr := *c.StreamHTTP
+		nr.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+		c.routeNoRedirect = &nr
+	}
+	return c.routeNoRedirect
+}
+
+// routeJSON 发一次 route GET 并取 2xx 响应体（302 折算 401 语义）。
+func (c *Client) routeJSON(req *http.Request) (json.RawMessage, error) {
+	resp, err := c.routeHTTP().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	rc, status, raw, err := c.ingestRouteResp(resp)
+	if status >= 400 {
+		return nil, &UpstreamError{Status: status, Msg: truncate(string(raw), 200)}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if rc == nil {
+		return nil, fmt.Errorf("mimo: route 回执 2xx 但无 body")
+	}
+	defer func() { _ = rc.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(rc, maxRespBody))
+	return body, nil
+}
+
+// RouteModels 拉桌面端模型目录（GET /api/model/list，Cookie + x-client-version）。
+// 响应字段是 modelName（与开放平台的 id 不同名，实测 §5.1）。
+func (c *Client) RouteModels(ctx context.Context, a *Auth) ([]ModelInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(c.routeBase(), "/")+EpRouteModels, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.routeHeaders(req, a, false)
+	raw, err := c.routeJSON(req)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Data []struct {
+			ModelName string `json:"modelName"`
+			ModelType string `json:"modelType"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &out) != nil {
+		return nil, fmt.Errorf("mimo: route 模型回执解析失败")
+	}
+	infos := make([]ModelInfo, 0, len(out.Data))
+	for _, m := range out.Data {
+		if strings.TrimSpace(m.ModelName) == "" {
+			continue
+		}
+		infos = append(infos, ModelInfo{ID: m.ModelName})
+	}
+	if len(infos) == 0 {
+		return nil, fmt.Errorf("mimo: route 模型目录为空")
+	}
+	return infos, nil
+}
+
+// RouteMe 探测登录态 + 拿昵称（GET /api/user/xiaomi/me?userId=…）。
+func (c *Client) RouteMe(ctx context.Context, a *Auth) (nickname string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimRight(c.routeBase(), "/")+EpRouteMe+"?userId="+url.QueryEscape(a.UID), nil)
+	if err != nil {
+		return "", err
+	}
+	c.routeHeaders(req, a, false)
+	raw, err := c.routeJSON(req)
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		Data struct {
+			Nickname string `json:"nickname"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &out)
+	return strings.TrimSpace(out.Data.Nickname), nil
 }
 
 // Bootstrap free 轨取 JWT：**per-fingerprint 缓存 + 300s 提前量 + 并发单飞**。
@@ -281,8 +450,11 @@ func jwtExpiry(tok string) int64 {
 // 非 2xx → (nil, status, respBody, nil)；传输层失败 → err。
 // 2xx → Body 为**原样透传**的 OpenAI SSE；聚合在调用方的旁路 reader 里做。
 func (c *Client) ChatStream(ctx context.Context, a *Auth, body []byte, affinity string) (io.ReadCloser, int, []byte, error) {
-	if a.Channel == ChannelFree {
+	switch a.Channel {
+	case ChannelFree:
 		return c.freeChatStream(ctx, a, body, affinity)
+	case ChannelRoute:
+		return c.routeChatStream(ctx, a, body, affinity)
 	}
 	prepared := body
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,

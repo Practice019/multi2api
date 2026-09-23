@@ -9,6 +9,7 @@ package mimo
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -99,6 +100,8 @@ func (p *Provider) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeMimoJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求体不是合法 JSON"})
 		return
 	}
+	ctx, cancel := mimoCtx(r, 3*time.Minute)
+	defer cancel()
 	results := make([]map[string]any, 0, 16)
 	idx := 0
 	add := func(m map[string]any) { m["index"] = idx; idx++; results = append(results, m) }
@@ -109,9 +112,17 @@ func (p *Provider) handleImport(w http.ResponseWriter, r *http.Request) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// 行形态分派：含 serviceToken= 的行按 **route 通道 Cookie 串**导入
+		// （桌面端网关探测报告 §6.3 的四件套），否则按 sk/tp key 导入。
+		if strings.Contains(line, "serviceToken=") {
+			if res := p.importRouteCookie(ctx, line); res != nil {
+				add(res)
+			}
+			continue
+		}
 		name, key := splitNamed(line)
 		if key == "" {
-			add(map[string]any{"ok": false, "error": "行里没有找到 sk-/tp- key: " + truncate(line, 40)})
+			add(map[string]any{"ok": false, "error": "行里既没有 sk-/tp- key 也没有 serviceToken Cookie: " + truncate(line, 40)})
 			continue
 		}
 		if seen[key] {
@@ -188,6 +199,49 @@ func (p *Provider) handleImport(w http.ResponseWriter, r *http.Request) {
 	writeMimoJSON(w, http.StatusOK, map[string]any{"ok": anyOK || len(results) == 0, "imported": idx, "results": results})
 }
 
+// importRouteCookie 解析一行 Cookie 串（serviceToken=…; userId=…; mimopc_slh=…; mimopc_ph=…）
+// 成 route 凭证：解析后立即用 /api/user/xiaomi/me 验活并取昵称 —— 导错的令牌
+// 当场报错比进池后静默 401 友好得多。
+func (p *Provider) importRouteCookie(ctx context.Context, line string) map[string]any {
+	cookies := map[string]string{}
+	for _, kv := range strings.Split(line, ";") {
+		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if ok && v != "" {
+			cookies[strings.ToLower(k)] = strings.TrimSpace(v)
+		}
+	}
+	st, uid := cookies["servicetoken"], cookies["userid"]
+	if st == "" {
+		return map[string]any{"ok": false, "error": "Cookie 串里没有 serviceToken"}
+	}
+	if uid == "" {
+		return map[string]any{"ok": false, "error": "Cookie 串里没有 userId（route 通道 uid 主键）"}
+	}
+	if seenKey := "route:" + st; cookieSeen[seenKey] {
+		return nil // 去重：同一 serviceToken 只导一次（不占回执条）
+	}
+	a := &Auth{Channel: ChannelRoute, Type: TypeAPI, ServiceToken: st, UID: uid,
+		Slh: cookies["mimopc_slh"], Ph: cookies["mimopc_ph"],
+		DeviceD: cookies["d"], Nickname: "route:" + uid,
+		Source: "cookie-import", LoggedInAt: time.Now().UTC().Format(time.RFC3339)}
+	// 验活 + 真昵称（失败不拦导入：令牌可能刚从别的机器带来，池子的健康检查
+	// 会负责后续；但把探到的昵称/错误带进回执，让用户立刻知道状态）。
+	cctx, cc := context.WithTimeout(ctx, 20*time.Second)
+	defer cc()
+	if nick, err := p.client.RouteMe(cctx, a); err != nil {
+		return map[string]any{"ok": false, "error": "令牌验活失败（大概率已过期，重新抓包）: " + truncate(err.Error(), 140), "uid": uid}
+	} else if nick != "" {
+		a.Nickname = nick
+	}
+	if err := p.saveAuth(a); err != nil {
+		return map[string]any{"ok": false, "error": err.Error()}
+	}
+	cookieSeen["route:"+st] = true
+	return map[string]any{"ok": true, "uid": uid, "nickname": a.Nickname, "channel": "route"}
+}
+
+var cookieSeen = map[string]bool{} // 导入会话内去重（进程生命周期，够用）
+
 // saveAuth 落盘一份导入凭证（文件名铁律 mimo-<uid>.json）。
 func (p *Provider) saveAuth(a *Auth) error {
 	if p.authDir == "" {
@@ -224,10 +278,21 @@ func (p *Provider) handleVerify(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	for _, a := range list {
 		res := map[string]any{"uid": a.UID, "nickname": a.Nickname, "channel": a.Channel}
-		if a.Channel == ChannelFree {
-			res["ok"] = false
-			res["error"] = "free 通道无验活端点（探活=bootstrap，由健康检查负责）"
-		} else if err := p.client.fetchModelsErr(ctx, a); err != nil {
+		var err error
+		switch a.Channel {
+		case ChannelFree:
+			err = fmt.Errorf("free 通道无验活端点（探活=bootstrap，由健康检查负责）")
+		case ChannelRoute:
+			// route 验活 = /api/user/xiaomi/me（302/401 都会折算成错误返回）。
+			var nick string
+			nick, err = p.client.RouteMe(ctx, a)
+			if err == nil && nick != "" {
+				res["nickname"] = nick // 顺手刷新真昵称进回执
+			}
+		default:
+			err = p.client.fetchModelsErr(ctx, a)
+		}
+		if err != nil {
 			res["ok"] = false
 			res["error"] = truncate(err.Error(), 160)
 		} else {

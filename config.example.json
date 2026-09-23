@@ -80,6 +80,8 @@
     "credential_priority": "tp",
     "import_client_auth": false,
     "client_auth_dir": "",
+    "route_base_url": "https://mimo-server-cn.xiaomimimo.com",
+    "route_client_version": "26.923.232338",
     "oauth_redirect_mode": "auto"
   },
   "features": {

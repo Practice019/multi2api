@@ -599,6 +599,11 @@ type Config struct {
 		ImportClientAuth *bool `json:"import_client_auth"`
 		// ClientAuthDir 官方 data 目录覆盖（默认按 XDG/MIMOCODE_HOME 探测）。
 		ClientAuthDir string `json:"client_auth_dir"`
+		// RouteBaseURL 桌面端主网关覆盖（空=https://mimo-server-cn.xiaomimimo.com，
+		// 抓包实测的 route 通道 —— Cookie serviceToken 认证，桌面配额）。
+		RouteBaseURL string `json:"route_base_url"`
+		// RouteClientVersion route 通道 x-client-version（空=26.923.232338）。
+		RouteClientVersion string `json:"route_client_version"`
 		// OAuthRedirectMode 页内登录回调形态："auto"（默认，回调进网关所在
 		// 机器的 127.0.0.1:port —— 浏览器必须与网关同机）或 "manual"
 		// （平台 code/callback 页展示密文，用户复制粘贴回控制台完成）。
@@ -734,6 +739,8 @@ type Config struct {
 	MimoImportClientAuth   bool          `json:"-"`
 	MimoClientAuthDir      string        `json:"-"`
 	MimoOAuthRedirectMode  string        `json:"-"`
+	MimoRouteBaseURL       string        `json:"-"`
+	MimoRouteClientVersion string        `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -1227,6 +1234,8 @@ func (c *Config) normalize() error {
 	}
 	c.MimoImportClientAuth = boolOr(c.Mimo.ImportClientAuth, false)
 	c.MimoClientAuthDir = strings.TrimSpace(c.Mimo.ClientAuthDir)
+	c.MimoRouteBaseURL = strings.TrimSpace(c.Mimo.RouteBaseURL)
+	c.MimoRouteClientVersion = strings.TrimSpace(c.Mimo.RouteClientVersion)
 	c.MimoOAuthRedirectMode = strings.ToLower(strings.TrimSpace(c.Mimo.OAuthRedirectMode))
 	if c.MimoOAuthRedirectMode == "" {
 		c.MimoOAuthRedirectMode = "auto"

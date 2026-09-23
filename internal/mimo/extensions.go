@@ -187,12 +187,18 @@ func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if a.Channel == ChannelFree {
+	switch a.Channel {
+	case ChannelFree:
 		_, err := p.client.Bootstrap(ctx, a.Fingerprint)
 		return err
+	case ChannelRoute:
+		// /api/user/xiaomi/me：最便宜、直接反映"登录态还活着吗"（302→折算401）。
+		_, err := p.client.RouteMe(ctx, a)
+		return err
+	default:
+		_, err := p.client.FetchModels(ctx, a)
+		return err
 	}
-	_, err = p.client.FetchModels(ctx, a)
-	return err
 }
 
 // ── 软限流恢复时刻 ──────────────────────────────────────────────────────
