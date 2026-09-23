@@ -544,3 +544,27 @@ func TestChat401AutoRefreshRetry(t *testing.T) {
 		t.Errorf("refreshExpiresAt 未落字段: %d", a.RefreshExpiresAt)
 	}
 }
+
+// TestRefreshSkewMustDisablePreflight 钉死「预检真正关闭」的形状：(0, true)。
+//
+// # 为什么单独立一条测试
+//
+// needsRefreshVia（internal/server/handler.go）的分支语义是：
+//
+//	has=false → 回落核心兜底窗口 10m —— 而账号池投影 ExpiresAt=0 恒判"该刷"
+//	has=true && skew<=0 → 真正关闭预检
+//
+// 上一版修复返回过 (0,false)，**看起来**关了实际没关：一次性 refreshToken
+// 仍被每个对话请求消费（"账号突然过期"根因）。这条测试把唯一正确形状钉住：
+// 谁改回 false，这里先红。
+func TestRefreshSkewMustDisablePreflight(t *testing.T) {
+	p := NewWithConfig(Config{})
+	skew, has := p.RefreshSkew(gateway.Credential{Provider: providerID, UID: "x", Secret: &Auth{AccessToken: "at"}})
+	if !has {
+		t.Fatal("RefreshSkew 必须上报 ok=true：ok=false 会回落核心兜底窗口（10m），" +
+			"配合池投影 ExpiresAt=0 = 每请求预检续期 —— 正是本文件注释里记录过的事故形状")
+	}
+	if skew > 0 {
+		t.Errorf("skew=%v，want <=0（任何正窗口都会让每请求预检续期）", skew)
+	}
+}

@@ -62,6 +62,7 @@
 | **CodeArts** | OAuth + DPoP（约 2 小时 STS，自动续期） | 签到（福利领取）/ 额度探测 |
 | **Loomy** | `session`（无 TTL） | **手机号验证码登录 / 新手任务一键完成 / 邀请码绑定 / 批量粘贴导入 / 额度实时查询** |
 | **TRAE** | SOLO 免费对话通道（JWT + 消费型 refreshToken） | **页内添加账号（浏览器 OAuth） / 每日自动签到 / token 自动续期 / 权益包额度查询** |
+| **MiMo** | 开放平台长期 key（`sk-` 按量 / `tp-` Token Plan）或页内 OAuth（X25519 加密回调） | **批量粘贴导入 / 本机官方客户端拾取 / 逐 key 验活 / reasoning_content 方言自动回注** |
 
 ## 🚀 快速开始
 
@@ -159,7 +160,7 @@ curl http://127.0.0.1:7863/v1/chat/completions \
   -d '{"model":"loomy/deepseek-v4-flash-0731","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
-- 模型名带上游前缀：`loomy/xxx`、`workbuddy/xxx`、`codearts/xxx`；裸模型名走默认上游。
+- 模型名带上游前缀：`mimo/mimo-v2.6-pro`、`loomy/xxx`、`workbuddy/xxx`、`codearts/xxx`；裸模型名走默认上游。
 - 健康检查：`GET /healthz`（无鉴权，负载均衡友好）。
 - 管理 API：`/admin/*`（默认只建议本机使用）。
 
