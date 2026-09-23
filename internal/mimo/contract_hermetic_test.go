@@ -705,6 +705,16 @@ func TestManualLoginCompleteFullChain(t *testing.T) {
 	if !strings.Contains(authURL, "/authorize?") || !strings.Contains(authURL, "pk=") {
 		t.Fatalf("authURL 形态不对: %s", authURL)
 	}
+	// v2 探测报告 §7.2 的官方参数集逐钉：kn 固定 mimocode、key_name 是生成名、app=MiMo。
+	if !strings.Contains(authURL, "kn=mimocode") {
+		t.Errorf("kn 必须是固定渠道名 mimocode: %s", authURL)
+	}
+	if !strings.Contains(authURL, "key_name=mimo-code-cli-key-") {
+		t.Errorf("缺 key_name 或格式不对: %s", authURL)
+	}
+	if !strings.Contains(authURL, "app=MiMo") {
+		t.Errorf("缺 app=MiMo（v2 报告实参）: %s", authURL)
+	}
 	if !strings.Contains(authURL, url.QueryEscape("code/callback")) &&
 		!strings.Contains(authURL, "code%2Fcallback") {
 		t.Errorf("manual 模式 redirect_uri 应指平台 code/callback: %s", authURL)
