@@ -453,7 +453,7 @@ func TestWebUIModelIDsUnifiedMultiplierUpstreamOwnership(t *testing.T) {
 	// 表键拼接在真源码层检查（multiplierOwnershipProblems 的入参可能是测试样本，
 	// 不含 loadModelMultipliers —— 那把检查放这里，用完整的真实源码）。
 	if !strings.Contains(code, "m.provider + '/' + m.model") {
-		t.Errorf("loadModelMultipliers 里找不到表键拼接 `m.provider + '/' + m.model`。\n"+
+		t.Errorf("loadModelMultipliers 里找不到表键拼接 `m.provider + '/' + m.model`。\n" +
 			"    破了会怎样：表键不是 provider/裸名，multTableKey 的组合键查不到，满屏 x无")
 	}
 }

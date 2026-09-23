@@ -323,4 +323,3 @@ func TestHardCreditCooldownUnknownUIDFallsBack(t *testing.T) {
 			"不存在的号没有上游归属，不能猜成默认上游", d, got.Format(time.RFC3339))
 	}
 }
-

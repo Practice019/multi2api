@@ -333,4 +333,3 @@ func TestChatStreamNormalControlStillWorks(t *testing.T) {
 		t.Errorf("正常流不该惩罚账号：err_total=%d cooling=%v", st.ErrTotal, st.Cooling)
 	}
 }
-

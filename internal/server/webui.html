@@ -3185,22 +3185,7 @@ let loginProvider = '';
     try {
       r = await admin('/admin/login/start', { method: 'POST', body: JSON.stringify({ provider: want }) });
     } catch (e) {
-      // 服务器部署逃生路径（数据驱动）：上游在 manifest 里自报
-    // login.manual = {path, instructions} 时，渲染"粘贴回跳 URL 完成"输入框。
-    // 回调口打在浏览器那台机器上（127.0.0.1）永远进不了服务器 —— 用户把
-    // 地址栏里的完整回跳 URL 粘进来，POST 到上游自报的完成端点即可收号。
-    const mEntry = (MANIFEST.providers || []).find(x => x && x.id === (loginProvider || '')) || {};
-    const mLogin = (mEntry.login || {}).manual;
-    const manualBox = mLogin && mLogin.path ? `
-      <div style="margin:10px 0 8px">
-        <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
-        <div class="row" style="gap:8px">
-          <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
-          <button id="btnManualComplete" type="button">粘贴完成</button>
-        </div>
-      </div>` : '';
-
-    $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
+      $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
       return;
     }
     // 后端认了哪个上游：优先用它回传的，否则用点进来的那个。
@@ -3227,6 +3212,21 @@ let loginProvider = '';
     // 原来的写法是无条件渲染那个 `<a>`，于是空 auth_url 会渲染成
     // `<a href="">打开授权页面</a>` —— 点了只是把当前页重新加载一遍，
     // 用户完全无法判断发生了什么。
+    // 服务器部署逃生路径（数据驱动）：上游在 manifest 里自报
+    // login.manual = {path, instructions} 时，渲染"粘贴回跳 URL 完成"输入框。
+    // 回调口打在浏览器那台机器上（127.0.0.1）永远进不了服务器 —— 用户把
+    // 地址栏里的完整回跳 URL 粘进来，POST 到上游自报的完成端点即可收号。
+    const mEntry = (MANIFEST.providers || []).find(x => x && x.id === (loginProvider || '')) || {};
+    const mLogin = (mEntry.login || {}).manual;
+    const manualBox = mLogin && mLogin.path ? `
+      <div style="margin:10px 0 8px">
+        <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
+        <div class="row" style="gap:8px">
+          <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
+          <button id="btnManualComplete" type="button">粘贴完成</button>
+        </div>
+      </div>` : '';
+
     const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
     if (hasAuthURL) {
     // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
