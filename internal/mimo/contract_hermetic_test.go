@@ -509,6 +509,8 @@ func TestClassifyMatrix(t *testing.T) {
 		{"400 441 风控", 400, `{"error":{"message":"x","code":"441"}}`, gateway.ErrKindSoftRate},
 		{"HTTP 441 直发", 441, `risk`, gateway.ErrKindSoftRate},
 		{"402 quota", 402, `{"error":{"message":"Quota exceeded. Check your plan","code":"insufficient_quota"}}`, gateway.ErrKindHardCredit},
+		{"402 balance(实测原文)", 402, `{"error":{"code":"402","message":"Insufficient account balance","type":"insufficient_balance"}}`, gateway.ErrKindHardCredit},
+		{"400 balance(防包装形态)", 400, `{"error":{"code":"400","message":"no credits","type":"insufficient_balance"}}`, gateway.ErrKindHardCredit},
 		{"流内 quota 词", 500, `{"type":"error","error":{"code":"insufficient_quota","message":"Quota exceeded."}}`, gateway.ErrKindHardCredit},
 		{"429 裸", 429, `too many requests`, gateway.ErrKindSoftRate},
 		{"FreeUsageLimit", 400, `{"error":{"code":"FreeUsageLimitError"}}`, gateway.ErrKindHardCredit},

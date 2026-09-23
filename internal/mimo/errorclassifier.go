@@ -38,8 +38,11 @@ var rateLimitMarkers = []string{
 
 // quotaMarkers 余额/credits 耗尽（不可重试的"钱尽"语义 → 冷却而非禁用）。
 var quotaMarkers = []string{
-	"insufficient_quota", "quota exceeded",
-	"freeusagelimiterror", "subscriptionusagelimiterror",
+	// 实测原文（2026-09-24，真 key 直连）：402 {"type":"insufficient_balance",
+	// "message":"Insufficient account balance"} —— balance 系必须进词表，
+	// 不能只靠 402 状态码兜底（同款语义若被包进 400/200 流内就漏判）。
+	"insufficient_quota", "insufficient_balance", "insufficient balance",
+	"quota exceeded", "freeusagelimiterror", "subscriptionusagelimiterror",
 }
 
 // mimoErrBody MiMo/开放AI 兼容的错误信封（error.code 是字符串！）。
