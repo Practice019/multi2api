@@ -2766,9 +2766,14 @@ let loginProvider = '';
   }
 
   // ---------------------------------------------------------------- 管理台调用
+  //
+  // ⚠ 必须带 hdr()（Bearer）：远程访问管理台时（/ui?token=<api_key> 或 SSH 隧道
+  // 之外的任何非回环访问），/admin/* 由服务端校验管理钥匙。历史上本机直连时
+  // admin 端点只认回环地址、不要求凭证，所以这里一度只有 Content-Type ——
+  // 远程放开后漏掉它 = 每个标签页都 403「管理接口仅允许本机直连…」。
   async function admin(path, opts = {}) {
     const r = await fetch(path, Object.assign({}, opts, {
-      headers: Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {}),
+      headers: Object.assign({ 'Content-Type': 'application/json' }, hdr(), opts.headers || {}),
     }));
     const txt = await r.text();
     let j = null;

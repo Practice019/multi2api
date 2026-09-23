@@ -201,6 +201,11 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/model", h.withAuth(h.models))
 	// 内嵌本地控制台（同源，无需 CORS）。
 	h.mux.HandleFunc("GET /ui", h.ui)
+	// 带尾斜杠的 /ui/ 也接受（用户习惯打 `http://host:port/ui/?token=...`）：
+	// 302 到无斜杠的规范路径，查询参数（如 ?token=）原样保留。
+	h.mux.HandleFunc("GET /ui/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui?"+r.URL.RawQuery, http.StatusFound)
+	})
 	h.mux.HandleFunc("GET /favicon.ico", h.favicon)
 	h.mux.HandleFunc("GET /favicon.svg", h.favicon)
 	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -258,23 +263,36 @@ var apikeyCtxKey apikeyCtxKeyType
 // 普通 key 的错误映射：未知/禁用 → 401；额度用尽 → 402；超速 → 429。
 // 抽成独立方法供 /ui 的非本机分支复用（那里要出 401 + 纯文本，而不是 OpenAI 错误信封）。
 func (h *Handler) validBearer(r *http.Request) bool {
-	bearer := ""
-	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
-		bearer = strings.TrimPrefix(authz, "Bearer ")
-	}
+	return h.validCredential(bearerOf(r))
+}
+
+// validCredential 报告凭据字符串是否有效（不依赖请求上下文）。
+//
+// 与 validBearer 同一套判定，只是入参是裸字符串 —— 供 /ui 的
+// `?token=` 查询参数分支复用（远程浏览器无法自定义请求头，
+// 查询参数是它唯一能携带凭据的地方）。
+func (h *Handler) validCredential(cred string) bool {
 	ak := h.currentAPIKey()
 	if ak == "" && h.cfg.APIKeys == nil {
 		return true
 	}
-	if ak != "" && bearer == ak {
+	if ak != "" && cred == ak {
 		return true
 	}
-	if h.cfg.APIKeys != nil && bearer != "" {
-		_, err := h.cfg.APIKeys.Validate(bearer)
+	if h.cfg.APIKeys != nil && cred != "" {
+		_, err := h.cfg.APIKeys.Validate(cred)
 		// 额度/限速错误由 withAuth 映射 402/429；这里只回答"凭证是否有效"。
 		return err == nil
 	}
 	return false
+}
+
+// bearerOf 取出请求 Authorization 头里的 Bearer 凭据（无则空串）。
+func bearerOf(r *http.Request) string {
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+		return strings.TrimPrefix(authz, "Bearer ")
+	}
+	return ""
 }
 
 // authResult 鉴权结果：命中的 apikey id（空 = 管理 key / 无多 key）与错误。

@@ -90,18 +90,35 @@ func isLoopback(remoteAddr string) bool {
 
 // ui 提供内嵌控制台。
 //
-// 两条分支都是为了「密钥不出本机」：
-//   - 本机访问：把网关自己的 api_key 注入页面内联脚本，省掉手输 Key 的往返；
-//   - 非本机访问：仅在未启用鉴权时放行；启用鉴权时必须带 Bearer，否则 401。
-//     否则任何能连到 7863 的局域网设备都能白拿一个内嵌了密钥的管理页面。
+// 凭据获取优先级（远程访问时二选一）：
+//   - `Authorization: Bearer <key>` 头（脚本/扩展可携带）；
+//   - `?token=<key>` 查询参数（浏览器地址栏直接打开，无需拼请求头）。
+//
+// 只要请求携带了**有效**凭据（或来自本机回环），就把该凭据注入页面内联脚本，
+// 页面后续访问 /admin/* 与 /v1/* 自动带上它 —— 远程浏览器打开控制台零配置。
+//
+// # 为什么"本机自动注入"在 Docker 下失效（本次修复的根因）
+//
+// 原实现只在 `isLoopback(r.RemoteAddr)` 时注入 config.api_key。但容器端口映射
+// 之后，容器看到的来源是 Docker 网桥网关（如 172.17.0.1），**永远不是** 127.0.0.1
+// —— 于是 Docker 部署下控制台连本机都打不开（401 + 后续 /admin/* 全 403）。
+// 改为"凭据有效即注入"后，只要访问者出示了正确的 Key（本机回环则直接注入
+// config.api_key），页面就能完整工作，不再依赖来源地址。
 func (h *Handler) ui(w http.ResponseWriter, r *http.Request) {
 	local := isLoopback(r.RemoteAddr)
-	if !local && !h.validBearer(r) {
-		http.Error(w, "401 unauthorized: /ui 仅本机直连；远程访问请带 Authorization: Bearer <api_key>", http.StatusUnauthorized)
+	cred := bearerOf(r)
+	if cred == "" {
+		cred = r.URL.Query().Get("token")
+	}
+	if local && cred == "" {
+		cred = h.cfg.APIKey
+	}
+	if !local && !h.validCredential(cred) {
+		http.Error(w, "401 unauthorized: /ui 远程访问请带 Authorization: Bearer <api_key> 或 ?token=<api_key>", http.StatusUnauthorized)
 		return
 	}
 
-	page := renderUI(webuiHTML, h.cfg.APIKey, local)
+	page := renderUI(webuiHTML, cred, cred != "")
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
