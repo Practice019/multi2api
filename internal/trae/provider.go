@@ -81,6 +81,11 @@ type Config struct {
 	AgentBase string
 	UgBase    string
 	OAuthBase string
+	// ClientID ExchangeToken 使用的 OAuth client id 默认值覆盖。
+	//
+	// 凭证里保存的 clientId 优先于它（签发 refreshToken 的那个 id 才有效）；
+	// 留空用 Client 内置默认。部署方若发现默认 id 被上游停用，可在此换新。
+	ClientID string
 	// RefreshInterval 后台续期扫描间隔；<=0 不注册任务。
 	RefreshInterval time.Duration
 	// CheckinEnabled 是否注册每日签到任务（默认 true）。
@@ -119,6 +124,9 @@ func NewWithConfig(cfg Config) *Provider {
 		if cfg.OAuthBase != "" {
 			c.OAuthHost = cfg.OAuthBase
 		}
+	}
+	if cfg.ClientID != "" {
+		c.ClientID = cfg.ClientID
 	}
 	checkin := cfg.CheckinEnabled
 	return &Provider{

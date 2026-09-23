@@ -55,7 +55,8 @@
     "oauth_callback_port": "18080",
     "fallback_enabled": true,
     "queue_threshold": 300,
-    "max_attempts": 3
+    "max_attempts": 3,
+    "client_id": ""
   },
   "loomy": {
     "enabled": true,

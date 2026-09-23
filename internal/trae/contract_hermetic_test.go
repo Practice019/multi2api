@@ -404,3 +404,143 @@ func TestAuthNeedsRefresh(t *testing.T) {
 		t.Error("无过期时间的凭证应视为需要刷新")
 	}
 }
+
+// TestCredentialNewFieldsParse 新字段（clientId / refreshExpiresAt）的多形态解析与回读。
+//
+// 这两个字段是"账号突然过期"修复的一部分：ClientID 必须随凭证保存
+// （ExchangeToken 要用签发它的那个 id），refreshToken 自身有效期必须跟踪
+// （到期前预警，避免静默死亡后盲重试计数禁用）。
+func TestCredentialNewFieldsParse(t *testing.T) {
+	// 嵌套形：auth.clientId + auth.refreshExpiresAt。
+	nested := []byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1786847930,` +
+		`"refreshExpiresAt":1786847930000,"clientId":"cid-nested"},` +
+		`"account":{"uid":"u1","nickname":"n1"}}`)
+	a, err := Parse(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ClientID != "cid-nested" {
+		t.Errorf("嵌套形 clientId = %q", a.ClientID)
+	}
+	// 毫秒 → 秒归一化。
+	if a.RefreshExpiresAt != 1786847930 {
+		t.Errorf("嵌套形 refreshExpiresAt = %d, want 1786847930", a.RefreshExpiresAt)
+	}
+
+	// 顶层 clientId / clientID / client_id 三种命名都认（Trae2api-cn 导出的形态）。
+	flat := []byte(`{"accessToken":"at2","refreshToken":"rt2","uid":"u2","clientId":"cid-flat","refreshExpireAt":1786847930}`)
+	a2, err := Parse(flat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a2.ClientID != "cid-flat" {
+		t.Errorf("扁平形 clientId = %q", a2.ClientID)
+	}
+	if a2.RefreshExpiresAt != 1786847930 {
+		t.Errorf("扁平形 refreshExpiresAt = %d", a2.RefreshExpiresAt)
+	}
+
+	// 落盘形态（嵌套）回读不丢字段。
+	raw, err := MarshalAuthFile(a2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("回读失败: %v", err)
+	}
+	if back.ClientID != "cid-flat" || back.RefreshExpiresAt != 1786847930 {
+		t.Errorf("回读丢字段: clientId=%q refreshExpiresAt=%d", back.ClientID, back.RefreshExpiresAt)
+	}
+
+	// RefreshTokenDead 判定：<=0 = 未知 → 不死；已过期 → 死。
+	unknown := &Auth{RefreshToken: "rt", RefreshExpiresAt: 0}
+	if unknown.RefreshTokenDead() {
+		t.Error("RefreshExpiresAt=0（未知）不应判死")
+	}
+	dead := &Auth{RefreshToken: "rt", RefreshExpiresAt: time.Now().Unix() - 1}
+	if !dead.RefreshTokenDead() {
+		t.Error("已过期的 refreshToken 应判死")
+	}
+	alive := &Auth{RefreshToken: "rt", RefreshExpiresAt: time.Now().Unix() + 3600}
+	if alive.RefreshTokenDead() {
+		t.Error("未过期的 refreshToken 不应判死")
+	}
+}
+
+// TestChat401AutoRefreshRetry 401 自愈：对话遇 401 → ExchangeToken 续期 → 原请求重试一次。
+//
+// 修复"账号突然过期"的核心路径：token 在两次刷新之间过期时，以前是
+// 401 → SessionDead 计数 → 3 次禁用；现在同一账号先自救（续期+重试），
+// 救得回来就继续服务。
+func TestChat401AutoRefreshRetry(t *testing.T) {
+	oldToken := fixtureToken
+	newToken := "at-refreshed-001"
+
+	var exchangeCalls, chatCalls401, chatCallsOK int
+	mux := http.NewServeMux()
+	// ExchangeToken：换新 token + 轮换 refreshToken + 带 refreshExpiresAt。
+	mux.HandleFunc(EpExchange, func(w http.ResponseWriter, r *http.Request) {
+		exchangeCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"Result":{"Token":"at-refreshed-001",`+
+			`"TokenExpireAt":1786847930141,"RefreshToken":"rt-new","RefreshExpireAt":1786847930141}}`)
+	})
+	// 对话：旧 token 一律 401，新 token 才放行（200 SOLO SSE）。
+	mux.HandleFunc(EpChat, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Cloud-IDE-JWT "+newToken {
+			chatCallsOK++
+			_, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "id:1\nevent:metadata\ndata:{\"model\":\"\"}\n\n")
+			_, _ = io.WriteString(w, "event:output\ndata:{\"response\":\"你好\"}\n\n")
+			_, _ = io.WriteString(w, "event:done\ndata:{\"finish_reason\":\"stop\"}\n\n")
+			return
+		}
+		chatCalls401++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"code":"401","message":"token expired"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	a := &Auth{
+		AccessToken:  oldToken,
+		RefreshToken: fixtureRefreshToken,
+		ExpiresAt:    time.Now().Add(24 * time.Hour).Unix(),
+	}
+	// 模拟池子保管的凭证：同一对象在续期时被原地更新。
+	cred := newContractCredential("u401")
+	cred.Secret = a
+
+	p := NewWithConfig(Config{Client: NewWithBase(srv.URL)})
+	cs, err := p.Chat(context.Background(), cred,
+		[]byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Body.Close() }()
+	if cs.Status != http.StatusOK {
+		t.Fatalf("401 自愈后 status=%d，want 200", cs.Status)
+	}
+	raw, _ := io.ReadAll(cs.Body)
+	if !strings.Contains(string(raw), `"content":"你好"`) {
+		t.Errorf("自愈重试的输出不是 OpenAI chunk: %s", raw)
+	}
+	if exchangeCalls != 1 {
+		t.Errorf("ExchangeToken 调用次数 = %d, want 1", exchangeCalls)
+	}
+	if chatCalls401 != 1 || chatCallsOK != 1 {
+		t.Errorf("对话调用 = 401:%d 成功:%d，want 401:1 成功:1", chatCalls401, chatCallsOK)
+	}
+	// 续期原地生效：凭证对象被更新为新 token。
+	if a.AccessToken != newToken {
+		t.Errorf("凭证未被续期: AccessToken=%q", a.AccessToken)
+	}
+	if a.RefreshToken != "rt-new" {
+		t.Errorf("refreshToken 未轮换: %q", a.RefreshToken)
+	}
+	if a.RefreshExpiresAt != 1786847930 {
+		t.Errorf("refreshExpiresAt 未落字段: %d", a.RefreshExpiresAt)
+	}
+}

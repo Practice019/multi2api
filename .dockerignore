@@ -9,3 +9,8 @@ PLAN.md
 SPEC.md
 LOOP.md
 README.md
+tests/
+assets/
+.github/
+config-test.json
+config.json.bak*

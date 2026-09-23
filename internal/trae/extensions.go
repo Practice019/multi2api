@@ -128,17 +128,28 @@ func (p *Provider) RefreshCredential(cred gateway.Credential) error {
 
 // refreshSkew 提前续期窗口。
 //
-// TRAE 的 accessToken 寿命以小时计（实测 traework2api 的 schedule refresh_hours
-// 每天刷 1 次），提前 10 分钟足够覆盖 401 往返与调度抖动。
+// ⚠ 已停用（见下）：TRAE 的 refreshToken 是消费型的，请求路径的预检续期
+// 在账号池投影（ExpiresAt=0）下**恒为真** → 每个对话请求都先 ExchangeToken
+// 轮换一次，轮换频率比真人客户端高两个量级，是"账号突然过期"的头号嫌疑。
+// 该常量仅保留给后台窗口化续期（runRefresh 的 refreshScanSkew）作参照。
 const refreshSkew = 10 * time.Minute
 
 // RefreshSkew 返回本上游的提前续期窗口（gateway.RefreshSkewExt）。
+//
+// 返回 (0, false)：**不声明预检窗口** —— 核心对"未上报窗口"的语义是
+// "只在 401 后被动续期"（见 internal/server/handler.go needsRefreshVia：
+// skew<=0 或 ok=false 都不触发请求前刷新）。
+//
+// # 为什么刻意不声明（修复"账号突然过期"）
+//
+// 请求路径的预检判定 `acct.NeedsRefresh(skew)` 读的是**账号池投影**
+// （cmd/server/traecreds.go 只带 {UID, Nickname}，ExpiresAt=0），对 trae
+// 恒为 true —— 声明任何正数窗口都会让每个对话请求先消费一次 refreshToken。
+// TRAE 的 refreshToken 是消费型、且常与桌面客户端共用同一账号链，高频轮换
+// 极易断链。改为：后台 runRefresh（30 分钟窗口）负责主动续期，请求期 401
+// 由 Provider.Chat 的"401 自愈续期重试"被动恢复（见 provider.go）。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
-	_, err := authOf(cred)
-	if err != nil {
-		return 0, false
-	}
-	return refreshSkew, true
+	return 0, false
 }
 
 // TokenExpiry 报告这份凭证的过期时刻（gateway.CredentialExpiryExt）。
@@ -324,12 +335,26 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 	return nil
 }
 
-// runRefresh 一趟后台续期：扫凭证，对全部账号**无条件全量续**（用户要求：
-// 所有上游统一 30 分钟主动全量刷新，不问剩余寿命）。
+// runRefresh 一趟后台续期：扫凭证，对**临近过期**的账号续期（用户要求：
+// 所有上游统一 30 分钟粒度扫描，但只刷需要刷的）。
 //
-// 此前是 NeedsRefresh 过滤（只刷临近过期），用户观察到 token 倒计时
-// 但"不续"（还没进窗口）—— 判定正确但观感差。改为到点全量续：
-// token 永远是"30 分钟内续过"的。
+// # 为什么不是无条件全量续（修复"账号突然过期"）
+//
+// refreshToken 是**消费型**的（每次 ExchangeToken 即轮换）。无条件每 30 分钟
+// 全量续，等于把 refreshToken 链每 30 分钟转一圈：
+//
+//   - 与桌面客户端共用同一账号时，桌面端与网关抢一条 refreshToken 链，
+//     一边刷新另一边立刻失效 → 网关下次 ExchangeToken 失败 → 到期 401 →
+//     计数禁用，界面表现为"账号突然过期"。
+//   - 频繁轮换也更容易被上游风控判定为异常。
+//
+// 改为「距过期 30 分钟才刷」（对齐 trae-local-api 的 isTokenExpiringSoon
+// 阈值）：寿命数小时的 token 每天只轮换一两次，而不是 48 次。请求路径的
+// needsRefreshVia（10 分钟窗口）仍会在对话前兜底；真正的死 token（refreshToken
+// 被消费/过期）走下面的 RefreshTokenDead 分支 —— 直接记失败并让装配层
+// 计数禁用（界面显示「需重新登录」），不再反复白刷。
+const refreshScanSkew = 30 * time.Minute
+
 func (p *Provider) runRefresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -346,13 +371,27 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		if a.RefreshToken == "" {
 			continue
 		}
-		// 无条件全量续（去掉 NeedsRefresh 过滤）。
+		// refreshToken 已死（自身过期）：续期必然失败，直接预警 + 计数，
+		// 让 pool 在连续失败后禁用并显示「需重新登录」（界面可见，不再静默）。
+		if a.RefreshTokenDead() {
+			log.Printf("trae: uid=%s refreshToken 已过期（RefreshExpiresAt=%d），"+
+				"无法自动续期 —— 请在控制台重新登录该账号",
+				shortUID(a.UID), a.RefreshExpiresAt)
+			if p.onRefreshFailure != nil {
+				p.onRefreshFailure(a.UID)
+			}
+			continue
+		}
+		// 距过期 30 分钟内才刷（NeedsRefresh 判定，含已过期）。
+		if !a.NeedsRefresh(refreshScanSkew) {
+			continue
+		}
 		need = append(need, a)
 	}
 	if len(need) == 0 {
 		return nil
 	}
-	log.Printf("trae: 后台续期开始，%d 个账号（全量续）", len(need))
+	log.Printf("trae: 后台续期开始，%d 个账号临近过期（30 分钟窗口）", len(need))
 	for _, a := range need {
 		if ctx.Err() != nil {
 			return ctx.Err()
