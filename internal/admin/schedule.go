@@ -140,6 +140,15 @@ func accountColumnsOf(p gateway.Provider) []string {
 type providerLogin struct {
 	Kind  string `json:"kind"`
 	Label string `json:"label"`
+	// Manual 服务器部署逃生路径（上游实现了 gateway.ManualLoginExt 时才有）：
+	// 前端据此在登录弹窗里渲染「粘贴回跳 URL 完成」输入框。
+	Manual *manualLogin `json:"manual,omitempty"`
+}
+
+// manualLogin 手动完成登录的端点与指引文案（上游自报，核心不造）。
+type manualLogin struct {
+	Path         string `json:"path"`
+	Instructions string `json:"instructions"`
 }
 
 // providers GET /admin/providers —— 已注册上游清单 + 能力位。
@@ -172,6 +181,7 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			// 两道都满足才给按钮 —— 只满足一道会渲染出点了报错的假按钮。
 			if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
 				info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
+				fillManualLogin(info.Login, p)
 			}
 			// 账号池列集：上游自报（未实现 = nil = 用默认 11 列）。
 			info.AccountColumns = accountColumnsOf(p)
@@ -182,4 +192,21 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 		"providers": infos,
 		"default":   h.cfg.DefaultProvider,
 	})
+}
+
+// fillManualLogin 把上游的 ManualLoginExt 自报填进登录声明。
+// 未实现 = 保持 nil（omitempty → 不下发，前端不渲染粘贴框）。
+func fillManualLogin(login *providerLogin, p gateway.Provider) {
+	if login == nil {
+		return
+	}
+	ext, ok := gateway.ExtOf[gateway.ManualLoginExt](p)
+	if !ok {
+		return
+	}
+	path, instructions := ext.ManualLogin()
+	if path == "" {
+		return
+	}
+	login.Manual = &manualLogin{Path: path, Instructions: instructions}
 }

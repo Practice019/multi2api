@@ -270,6 +270,7 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 		// 两条都要，缺一条会渲染出点了报错的假按钮。
 		if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
 			info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
+			fillManualLogin(info.Login, p)
 		}
 		// ⚠ 账号池列集**也必须在这里填一次** —— 与上面 login 完全同一个坑：
 		// 前端真正读的是 manifest，而 providerInfo 有两个构造点

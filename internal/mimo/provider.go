@@ -38,6 +38,7 @@ type Provider struct {
 	callbackPort       string
 	importClientAuth   bool
 	clientAuthDir      string
+	oauthRedirectMode  string // auto|manual：manual 用平台 code/callback（服务器部署）
 
 	onRefreshFailure func(uid string)
 	onRefreshSuccess func(uid string)
@@ -74,6 +75,10 @@ type Config struct {
 	CallbackPort string
 	// ImportClientAuth 允许读本机官方客户端 auth.json（默认 false：显式开）。
 	ImportClientAuth bool
+	// OAuthRedirectMode："auto"（默认，回调进本机 127.0.0.1:port —— 要求
+	// 浏览器与网关同机）或 "manual"（redirect_uri 用平台 code/callback 页，
+	// 授权后页面展示密文，用户复制粘贴回控制台完成 —— **服务器部署用这个**）。
+	OAuthRedirectMode string
 	// ClientAuthDir 官方 data 目录覆盖（探测候选见 oauth.go）。
 	ClientAuthDir string
 
@@ -134,6 +139,7 @@ func NewWithConfig(cfg Config) *Provider {
 		callbackPort:       port,
 		importClientAuth:   cfg.ImportClientAuth,
 		clientAuthDir:      cfg.ClientAuthDir,
+		oauthRedirectMode:  firstNonEmpty(strings.ToLower(strings.TrimSpace(cfg.OAuthRedirectMode)), "auto"),
 		onRefreshFailure:   cfg.OnRefreshFailure,
 		onRefreshSuccess:   cfg.OnRefreshSuccess,
 		cache:              newReasoningCache(),

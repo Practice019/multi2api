@@ -82,8 +82,12 @@ func (p *Provider) Configured() bool { return p != nil }
 func (f *loginFlow) Configured() bool { return f != nil && f.p != nil }
 
 func (f *loginFlow) Start() (string, string, error) {
-	if err := f.p.ensureCallbackServer(); err != nil {
-		return "", "", err
+	// manual 模式不需要本机回调端口（结果靠用户粘贴 code 回来）—— 不去绑，
+	// 否则端口被占会让"服务器上的手动登录"被无关故障误杀。
+	if f.p.oauthRedirectMode != "manual" {
+		if err := f.p.ensureCallbackServer(); err != nil {
+			return "", "", err
+		}
 	}
 	o, err := newOAuthSession()
 	if err != nil {
@@ -93,7 +97,14 @@ func (f *loginFlow) Start() (string, string, error) {
 	if kn, kerr := loadOrCreateKeyName(f.p.authDir); kerr == nil && kn != "" {
 		o.keyName = kn
 	}
+	// redirect_uri 两态：
+	//   auto   → 本机 127.0.0.1:port（浏览器与网关同机才收得到回调）
+	//   manual → 平台 code/callback 页（服务器部署：授权后页面展示密文，
+	//            用户复制回跳 URL 粘贴进控制台，走 /admin/mimo/login/complete）
 	redirect := fmt.Sprintf("http://127.0.0.1:%s/", f.p.callbackPort)
+	if f.p.oauthRedirectMode == "manual" {
+		redirect = f.p.platformBase() + "/authorize/code/callback"
+	}
 	authURL := authorizeURL(f.p.platformBase(), o.pubKeyB64URL(), redirect, o.keyName)
 	// 授权 URL 带上 key_name（官方 mimo.ts:76-84 的参数名是 key_name）。
 	authURL += "&key_name=" + url.QueryEscape(o.keyName)

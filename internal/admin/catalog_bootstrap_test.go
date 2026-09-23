@@ -94,5 +94,3 @@ func TestStatsDoesNotHammerCatalogWhenFetchFails(t *testing.T) {
 		t.Error("拿不到目录时仍应尝试过（而非静默跳过）")
 	}
 }
-
-
