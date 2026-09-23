@@ -162,6 +162,29 @@ func (h *AdminHandler) Routes() []gateway.AdminRoute {
 		{Method: "GET", Path: "/admin/client-login", Handler: h.ClientLoginStatus, Title: "本机登录状态"},
 		{Method: "POST", Path: "/admin/client-login/switch", Handler: h.ClientLoginSwitch, Title: "切换本机登录"},
 		{Method: "POST", Path: "/admin/client-login/restore", Handler: h.ClientLoginRestore, Title: "回滚本机登录"},
+
+		// ---- 批量粘贴导入（本轮新增）----
+		//
+		// # 为什么 Hidden（与 loomy 的 /admin/loomy/import 同一条判据）
+		//
+		// 它是**账号池分组行「批量导入」按钮**的数据源，不是面板入口。
+		// 前端的唯一触发判据是"该上游声明了 hidden POST 路由以 /import 结尾"
+		//（webui.html 的 adminRouteBySuffix）—— 声明即按钮出现，前端零改动。
+		// 不声明 Hidden 的话，manifest 会为它生成一个没人需要的面板入口。
+		//
+		// # 为什么能力位是 0（归 "core"）
+		//
+		// 与上面三条 client-login 同一理由：导入是账号增补动作，不属于
+		// 任何一个业务能力位（签到/成长/旅行/额度都解释不了它）。
+		// 归 0 走 manifest 的保留字 "core" 通道（见 uimanifest.go 的
+		// routeCapName），语义是"有端点，但没有对应能力位"。
+		//
+		// # 为什么对两个实例都可用
+		//
+		// 海外版（workbuddy-intl）与国内版是同一个实现注册的第二个实例，
+		// 路径经 prefixed() 自动带 /workbuddy-intl 前缀；渠道（intl/cn）由
+		// **导入进哪个实例**决定（见 import.go 的 importChannelDefaults）。
+		{Method: "POST", Path: importPath, Handler: h.handleImport, Title: "批量导入账号", Hidden: true},
 	})
 }
 
