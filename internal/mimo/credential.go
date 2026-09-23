@@ -31,8 +31,9 @@ const filePrefix = "mimo"
 
 // 通道与凭证类型判别值。
 const (
-	ChannelPaid = "paid" // 开放平台（主目标）
-	ChannelFree = "free" // CLI 免费通道（留位，默认关）
+	ChannelPaid  = "paid"  // 开放平台（Bearer sk/tp）
+	ChannelRoute = "route" // 桌面端主网关（Cookie serviceToken）—— 桌面配额，与平台余额两个池
+	ChannelFree  = "free"  // CLI 免费通道（留位，默认关）
 
 	TypeAPI   = "api"   // 长期 sk-/tp-
 	TypeOAuth = "oauth" // 小米账号 OAuth（导入兼容位，孤证链路）
@@ -49,10 +50,19 @@ type Auth struct {
 	Channel string // paid|free（空=paid，向后兼容）
 	Type    string // api|oauth（空=api）
 
-	Key       string // sk-/tp- 长期 key（paid 主轨唯一鉴权材料）
-	BaseURL   string // 账号专属网关（OAuth url 字段/区域网关）；空=用配置默认
-	ClientID  string // oauth 刷新用的 client id（**随凭证保存**，TRAE 教训）
-	AccountID string // oauth accountId（可选）
+	Key string // sk-/tp- 长期 key（paid 主轨唯一鉴权材料）
+	// ── route 通道专用（桌面端 mimo-server-cn 网关，Cookie 认证）──
+	// 抓包实锤（2026-09-24 桌面端探测报告 §5.1/§6.3）：业务 API 一律
+	// `Cookie: serviceToken=…; userId=…; mimopc_slh=…; mimopc_ph=…`，
+	// **无 Authorization 头、无设备绑定校验**，令牌可独立复制调用。
+	ServiceToken string // 会话级令牌（过期只能重新抓包导入 —— passToken 自动换新链未取证）
+	Slh          string // mimopc_slh Cookie
+	Ph           string // mimopc_ph Cookie
+	DeviceD      string // 抓包时的设备指纹 d=pc_<hex32>（信息位，供审计/复现）
+	RouteVersion string // x-client-version（桌面 app 版本，默认 26.923.232338）
+	BaseURL      string // 账号专属网关（OAuth url 字段/区域网关）；空=用配置默认
+	ClientID     string // oauth 刷新用的 client id（**随凭证保存**，TRAE 教训）
+	AccountID    string // oauth accountId（可选）
 
 	AccessToken      string // oauth：access token；free：bootstrap JWT
 	RefreshToken     string // oauth：refresh_token（是否一次性轮换未证 → 持锁刷）
@@ -79,6 +89,25 @@ func (a *Auth) KeyType() string {
 	default:
 		return "unknown"
 	}
+}
+
+// CookieString 拼 route 通道的完整 Cookie 头（四项，实锤 §6.3）。
+// 空值的辅助项跳过 —— 实测必需的是 serviceToken/userId，slh/ph 带上更像话。
+func (a *Auth) CookieString() string {
+	if a == nil {
+		return ""
+	}
+	var parts []string
+	add := func(k, v string) {
+		if v != "" {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	add("serviceToken", a.ServiceToken)
+	add("userId", a.UID)
+	add("mimopc_slh", a.Slh)
+	add("mimopc_ph", a.Ph)
+	return strings.Join(parts, "; ")
 }
 
 // BearerToken 当前可用的鉴权材料快照（paid=Key；oauth/free=AccessToken）。
@@ -120,6 +149,8 @@ func (a *Auth) Renewable() bool {
 		return false
 	}
 	switch a.Channel {
+	case ChannelRoute:
+		return false // 会话级 Cookie，过期须重抓包导入 —— 不假装能续（TRAE 教训的反面）
 	case ChannelFree:
 		return a.Fingerprint != ""
 	case ChannelPaid:
@@ -215,6 +246,11 @@ func Parse(raw []byte) (*Auth, error) {
 	a.BaseURL = firstNonEmpty(Str("baseUrl", "base_url"), meta.BaseURL)
 	a.ClientID = Str("clientId", "client_id")
 	a.AccountID = Str("accountId", "account_id")
+	a.ServiceToken = Str("serviceToken", "service_token")
+	a.Slh = Str("mimopc_slh", "slh")
+	a.Ph = Str("mimopc_ph", "ph")
+	a.DeviceD = Str("deviceD", "device_d", "d")
+	a.RouteVersion = Str("routeVersion", "client_version")
 	a.AccessToken = Str("accessToken", "access_token", "access", "jwt")
 	a.RefreshToken = Str("refreshToken", "refresh_token", "refresh")
 	a.ExpiresAt = normalizeExpiresAt(Int("expiresAt", "expires_at", "expires", "jwtExpiresAt"))
@@ -226,9 +262,12 @@ func Parse(raw []byte) (*Auth, error) {
 	a.Source = Str("source")
 
 	if a.Channel == "" {
-		if a.Fingerprint != "" && a.AccessToken != "" && a.Key == "" {
+		switch {
+		case a.ServiceToken != "":
+			a.Channel = ChannelRoute
+		case a.Fingerprint != "" && a.AccessToken != "" && a.Key == "":
 			a.Channel = ChannelFree // 纯 free 档案
-		} else {
+		default:
 			a.Channel = ChannelPaid
 		}
 	}
@@ -239,8 +278,10 @@ func Parse(raw []byte) (*Auth, error) {
 			a.Type = TypeAPI
 		}
 	}
-	// 判"有鉴权材料"：paid 要 key；oauth 要 access（或至少 refresh）；free 要 jwt/指纹。
+	// 判"有鉴权材料"：route 要 serviceToken+userId；paid 要 key；oauth 要 access；free 要 jwt/指纹。
 	switch {
+	case a.Channel == ChannelRoute && (a.ServiceToken == "" || a.UID == ""):
+		return nil, fmt.Errorf("mimo: route 凭证缺 serviceToken 或 userId（Cookie 导入需四项：serviceToken/userId/mimopc_slh/mimopc_ph）")
 	case a.Channel == ChannelPaid && a.Type == TypeAPI && a.Key == "":
 		return nil, fmt.Errorf("mimo: paid/api 凭证缺 key（sk-/tp-）")
 	case a.Channel == ChannelPaid && a.Type == TypeOAuth && a.AccessToken == "" && a.RefreshToken == "":
@@ -339,6 +380,11 @@ func marshalLocked(a *Auth) ([]byte, error) {
 		}
 	}
 	set("key", a.Key)
+	set("serviceToken", a.ServiceToken)
+	set("mimopc_slh", a.Slh)
+	set("mimopc_ph", a.Ph)
+	set("deviceD", a.DeviceD)
+	set("routeVersion", a.RouteVersion)
 	set("baseUrl", a.BaseURL)
 	set("clientId", a.ClientID)
 	set("accountId", a.AccountID)

@@ -62,7 +62,7 @@
 | **CodeArts** | OAuth + DPoP（约 2 小时 STS，自动续期） | 签到（福利领取）/ 额度探测 |
 | **Loomy** | `session`（无 TTL） | **手机号验证码登录 / 新手任务一键完成 / 邀请码绑定 / 批量粘贴导入 / 额度实时查询** |
 | **TRAE** | SOLO 免费对话通道（JWT + 消费型 refreshToken） | **页内添加账号（浏览器 OAuth） / 每日自动签到 / token 自动续期 / 权益包额度查询** |
-| **MiMo** | 开放平台长期 key（`sk-` 按量 / `tp-` Token Plan）或页内 OAuth（X25519 加密回调） | **批量粘贴导入 / 本机官方客户端拾取 / 逐 key 验活 / reasoning_content 方言自动回注** |
+| **MiMo** | 三条通道：① 开放平台长期 key（`sk-`/`tp-`，Bearer）② **桌面端网关 Cookie（serviceToken，走桌面配额，与平台余额两个池）** ③ 页内 OAuth（X25519 加密回调） | **批量粘贴导入（key 行或 Cookie 行混贴）/ 逐号验活 / reasoning_content 方言自动回注 / 桌面令牌 302→SSO 自动折算失效告警** |
 
 ## 🚀 快速开始
 
@@ -93,6 +93,13 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
   授权页**默认由网关用无痕窗口打开**（见下方 `login.*`），避免浏览器里已登录的
   腾讯账号把会话串到别的账号上；窗口被关掉时可点「重新无痕打开」，
   或点「复制链接」粘贴到无痕/隐私窗口。
+- **MiMo（桌面端 Cookie / route 通道）**：在自己的 Windows/macOS 上用
+  [mitmproxy 抓一次 `Set-Cookie`]（或直接解密 `%APPDATA%\Xiaomi MiMo\Network\Cookies`），
+  拿到 `serviceToken=…; userId=…; mimopc_slh=…; mimopc_ph=…` 四项后，
+  在「批量导入」框整行粘贴（一行一个账号）→ 网关自动验活、取真昵称、落盘入池；
+  该通道推理走 `mimo-server-cn.xiaomimimo.com/api/route/chat/completions`
+  （桌面配额，不烧平台余额）。serviceToken 是会话级：过期后该号显示
+  「需重新登录」（网关把 302 跳 SSO 折算成 401），重新抓包再导一次即可。
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。

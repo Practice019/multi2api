@@ -786,3 +786,156 @@ func TestAutoModeKeepsLocalCallback(t *testing.T) {
 		t.Errorf("auto 模式 redirect_uri 应指本机回调: %s", authURL)
 	}
 }
+
+// ── route 通道（桌面网关 Cookie 反代）───────────────────────────────────
+//
+// 假上游严格复刻 2026-09-24 探测报告实锤的三端点与 Cookie 语义。
+
+func newFakeRouteUpstream(t *testing.T) (*httptest.Server, *fakeCalls) {
+	t.Helper()
+	c := &fakeCalls{}
+	mux := http.NewServeMux()
+	ok := func(r *http.Request) bool {
+		ck := r.Header.Get("Cookie")
+		return strings.Contains(ck, "serviceToken=svc-good") && strings.Contains(ck, "userId=3146522385") &&
+			r.Header.Get("x-client-version") != "" && r.Header.Get("x-mimo-source") != ""
+	}
+	mux.HandleFunc("/api/route/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&c.chat, 1)
+		if !ok(r) {
+			// 令牌失效的真实形态：302 跳 SSO（客户端必须停下折算 401）。
+			w.Header().Set("Location", "https://account.xiaomi.com/pass/serviceLogin")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"思\"}}]}\n\n")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"成功\"}}]}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	})
+	mux.HandleFunc("/api/model/list", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&c.models, 1)
+		if !ok(r) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		io.WriteString(w, `{"data":[{"modelName":"mimo-v2.6-flash","modelType":"TEXT"},{"modelName":"mimo-route-only-model","modelType":"TEXT"}]}`)
+	})
+	mux.HandleFunc("/api/user/xiaomi/me", func(w http.ResponseWriter, r *http.Request) {
+		if !ok(r) {
+			w.Header().Set("Location", "https://account.xiaomi.com/pass/serviceLogin")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		io.WriteString(w, `{"data":{"nickname":"妖精七七","region":"CN"}}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, c
+}
+
+func routeCred() gateway.Credential {
+	return gateway.Credential{Provider: providerID, UID: "3146522385", Secret: &Auth{
+		Channel: ChannelRoute, Type: TypeAPI, ServiceToken: "svc-good", UID: "3146522385",
+		Slh: "s1", Ph: "p1",
+	}}
+}
+
+func TestRouteChatCookiePassthrough(t *testing.T) {
+	srv, c := newFakeRouteUpstream(t)
+	p := NewWithConfig(Config{Client: NewWithBase(srv.URL)})
+	body := []byte(`{"model":"mimo-v2.6-flash","messages":[{"role":"user","content":"只回复两个字：成功"}],"stream":true}`)
+	cs, err := p.Chat(context.Background(), routeCred(), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Body.Close() }()
+	if cs.Status != 200 {
+		t.Fatalf("status=%d", cs.Status)
+	}
+	raw, _ := io.ReadAll(cs.Body)
+	if !strings.Contains(string(raw), "成功") || !strings.Contains(string(raw), "思") {
+		t.Errorf("直通内容缺失: %s", raw)
+	}
+	_ = c
+}
+
+// TestRouteStaleTokenFoldsTo401 302→SSO 必须折算成 401（不能跟到登录页 HTML
+// 伪装 200 —— 那是"令牌死了却显示正常"的最阴险形态）。
+func TestRouteStaleTokenFoldsTo401(t *testing.T) {
+	srv, _ := newFakeRouteUpstream(t)
+	p := NewWithConfig(Config{Client: NewWithBase(srv.URL)})
+	bad := routeCred()
+	bad.Secret.(*Auth).ServiceToken = "svc-expired"
+	body := []byte(`{"model":"mimo-v2.6-flash","messages":[{"role":"user","content":"x"}],"stream":true}`)
+	cs, err := p.Chat(context.Background(), bad, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Body.Close() }()
+	if cs.Status != 401 {
+		t.Fatalf("302 应折算 401，实得 %d", cs.Status)
+	}
+	// route 不可刷 → 不会触发任何 refresh，直接上交分类。
+	if got := Classify(cs.Status, string(readAllShort(cs.Body))); got != gateway.ErrKindSessionDead {
+		t.Errorf("route 401 应判 SessionDead（令牌到期，重抓 Cookie），得 %v", got)
+	}
+}
+
+func readAllShort(rc io.Reader) []byte {
+	raw, _ := io.ReadAll(io.LimitReader(rc, 512))
+	return raw
+}
+
+func TestRouteModelsCatalog(t *testing.T) {
+	srv, _ := newFakeRouteUpstream(t)
+	p := NewWithConfig(Config{Client: NewWithBase(srv.URL)})
+	ms, err := p.Models(context.Background(), routeCred())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, m := range ms {
+		ids[m.ID] = true
+	}
+	// mimo-route-only-model 故意不在静态表里 —— 若 2xx 解析再次坏掉，
+	// Models() 会静默回落静态表，这个 id 就消失，测试立刻红。
+	if !ids["mimo-v2.6-flash"] || !ids["mimo-route-only-model"] {
+		t.Errorf("route 目录（modelName 字段）解析不符: %v", ids)
+	}
+}
+
+func TestRouteCookieImportFlow(t *testing.T) {
+	srv, _ := newFakeRouteUpstream(t)
+	dir := t.TempDir()
+	p := NewWithConfig(Config{AuthDir: dir, Client: NewWithBase(srv.URL)})
+	// 好 Cookie：验活过 + 真昵称 + 落盘 mimo-<uid>.json
+	req := httptest.NewRequest(http.MethodPost, "/admin/mimo/import",
+		strings.NewReader(`{"keys_text":"serviceToken=svc-good; userId=3146522385; mimopc_slh=s1; mimopc_ph=p1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.handleImport(rec, req)
+	var resp struct {
+		Results []struct {
+			OK       bool   `json:"ok"`
+			UID      string `json:"uid"`
+			Nickname string `json:"nickname"`
+			Channel  string `json:"channel"`
+			Error    string `json:"error"`
+		} `json:"results"`
+	}
+	if json.Unmarshal(rec.Body.Bytes(), &resp) != nil || len(resp.Results) != 1 {
+		t.Fatalf("回执解析: %s", rec.Body.String())
+	}
+	r0 := resp.Results[0]
+	if !r0.OK || r0.UID != "3146522385" || r0.Channel != "route" || r0.Nickname != "妖精七七" {
+		t.Fatalf("route 导入回执不符: %+v", r0)
+	}
+	list, _ := LoadDir(dir)
+	if len(list) != 1 || list[0].Channel != ChannelRoute || list[0].Slh != "s1" {
+		t.Fatalf("落盘回读不符: %+v", list)
+	}
+	if FileName(list[0]) != "mimo-3146522385.json" {
+		t.Errorf("route 文件名铁律: %s", FileName(list[0]))
+	}
+}

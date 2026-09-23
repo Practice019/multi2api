@@ -75,6 +75,10 @@ type Config struct {
 	CallbackPort string
 	// ImportClientAuth 允许读本机官方客户端 auth.json（默认 false：显式开）。
 	ImportClientAuth bool
+	// RouteBaseURL 桌面端主网关覆盖（空=https://mimo-server-cn.xiaomimimo.com）。
+	RouteBaseURL string
+	// RouteClientVersion route 通道 x-client-version（空=26.923.232338，抓包版）。
+	RouteClientVersion string
 	// OAuthRedirectMode："auto"（默认，回调进本机 127.0.0.1:port —— 要求
 	// 浏览器与网关同机）或 "manual"（redirect_uri 用平台 code/callback 页，
 	// 授权后页面展示密文，用户复制粘贴回控制台完成 —— **服务器部署用这个**）。
@@ -293,6 +297,16 @@ func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gatew
 	}
 	if a.Channel == ChannelFree {
 		return toInfos(staticModels), nil // 免费面无 /models 端点（存档）
+	}
+	if a.Channel == ChannelRoute {
+		live, lerr := p.client.RouteModels(ctx, a)
+		if lerr == nil && len(live) > 0 {
+			return toInfos(live), nil
+		}
+		if lerr != nil {
+			log.Printf("mimo: route 模型目录拉取失败，回落静态快照: %v", lerr)
+		}
+		return toInfos(staticModels), nil
 	}
 	live, lerr := p.client.FetchModels(ctx, a)
 	if lerr == nil && len(live) > 0 {
