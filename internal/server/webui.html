@@ -2824,11 +2824,19 @@ let loginProvider = '';
     const t0 = Date.now();
     // 阈值从 SLOW_HINT_MS 推导，不写字面量 2 —— 否则改常量时这里会悄悄漂移。
     const slowSec = Math.ceil(SLOW_HINT_MS / 1000);
+    // 进度文案：默认"正在刷新界面"，但**等后台任务**的调用方必须能覆盖它。
+    //
+    // 为什么：`growthOneClick`（一键完成）等的是"成长待办后台跑完"，
+    // 单账号实测约 15s（专家链 8 次 × 6s 节流 + 事件上报间隔 1.05s），
+    // 4 个账号串行约 1 分钟。而默认文案写的是"正在刷新界面" ——
+    // 用户看到的是一句与事实无关的话，自然读成"卡住了 / 这功能坏了"。
+    // 传 progress 后显示"正在等待上游执行"，等待性质一目了然。
+    const progress = o.progress || '正在刷新界面';
     const render = () => {
       const sec = Math.floor((Date.now() - t0) / 1000);
       g.textContent = sec >= slowSec
-        ? `${label}：正在刷新界面…（上游较慢，已等 ${sec}s）`
-        : `${label}：正在刷新界面…`;
+        ? `${label}：${progress}…（上游较慢，已等 ${sec}s）`
+        : `${label}：${progress}…`;
     };
     render();
     g.hidden = false;
@@ -5436,19 +5444,30 @@ let loginProvider = '';
   async function growthOneClick(btn) {
     const uid = growthUID || '';   // '' = 全部账号
     const scope = uid ? '本账号' : '全部账号';
+    // 预计耗时：成长待办里专家链是 8 次 × 6s 节流（expertSummonGap，
+    // 真实使用节奏，为过风控刻意留的），加上事件上报间隔 1.05s（reportGap），
+    // 单账号实测约 15s；全池按账号数串行累加（后端有意串行，避免并发风控画像）。
+    const n = uid ? 1 : (growthSnaps ? growthSnaps.length : 0);
+    const etaSec = Math.max(15, n * 15);
     await busyRun(btn, async () => {
       try {
         // 第一步：成长待办自动完成 + 领奖。
         await autoStart('/admin/growth/auto-all', uid,
           `已启动：${scope}一键完成成长待办（后台执行，顶部显示进度）`);
         // 第二步：等第一个任务结束（全局单槽），再启动开学季。
+        // ⚠ 这一步可能要等很久（见上面 etaSec 的推算），所以进度文案必须
+        //   说清"在等后台任务"而不是"正在刷新界面"—— 后者会让人以为卡死。
         const done = await waitTaskIdle(15 * 60 * 1000);
         if (!done) { toast('成长待办执行超时（15 分钟），请到顶部任务进度查看', true); return undefined; }
         await autoStart('/admin/school/run', uid,
           `已启动：${scope}开学季闭环（后台执行，顶部显示进度）`);
         return true;
       } catch (e) { autoStartErr(e, '一键完成'); return undefined; }
-    }, { label: '一键完成', busyText: '启动中…' });
+    }, {
+      label: '一键完成',
+      busyText: '启动中…',
+      progress: `等待上游执行后台任务（约 ${etaSec}s，顶部有进度）`,
+    });
   }
 
   // waitTaskIdle 轮询 /admin/task，等后台任务槽空闲（上个任务跑完）。
