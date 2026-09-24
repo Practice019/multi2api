@@ -366,3 +366,110 @@ func TestImportRejectsUnsafeUID(t *testing.T) {
 		t.Errorf("目录里出现了意外文件: %v", names)
 	}
 }
+
+// TestImportAcceptsNestedCredentialFormat ★ 本条在修复前必红。
+//
+// # 守的是用户实测报的 bug
+//
+// 用户把**本项目自己落盘的凭证格式**（嵌套形：account + auth 两层）原样
+// 粘回「批量导入」，端点回：
+//
+//	#1 缺少 accessToken（它是唯一鉴权材料）
+//
+// 而那份 JSON 里 `auth.accessToken` 明明有值 —— 因为 importItem 是**扁平**
+// 结构、fillAliases 只在**顶层**找键，嵌套层根本没进去，所有字段读成空串。
+//
+// 这个缺口自相矛盾：auth.Parse 专门有嵌套分支读这种文件（落盘格式的权威），
+// 也就是说"自己导出的凭证自己导入不了"。
+//
+// 变异：去掉 importFieldLayers 里的 "auth"/"account" 两层 → 本用例必红。
+func TestImportAcceptsNestedCredentialFormat(t *testing.T) {
+	p, dir := importProvider(t)
+	srv := newAdminTestServer(t, p)
+
+	sess := makeJWT(t, map[string]any{"sub": "2e37e4f4-0e23-4710-9c69-07a5f5e8b313", "exp": 1794994227})
+	refresh := makeJWT(t, map[string]any{"typ": "Offline"})
+	// 与本项目 SaveAtomic 的落盘形状逐字段一致（含空的 deviceToken/enterpriseId）。
+	body := fmt.Sprintf(`{
+	  "account": {"deviceToken":"","enterpriseId":"","nickname":"13858156740",
+	              "uid":"2e37e4f4-0e23-4710-9c69-07a5f5e8b313"},
+	  "auth": {"accessToken":%q,"refreshToken":%q,"expiresAt":1794994227,
+	           "channel":"cn","domain":"copilot.tencent.com"}
+	}`, sess, refresh)
+
+	status, out := postImport(t, srv, intlImportPath, body)
+	if status != http.StatusOK {
+		t.Fatalf("HTTP %d: %v", status, out)
+	}
+	if got := out["imported"].(float64); got != 1 {
+		t.Fatalf("嵌套格式应导入成功，imported=%v（out=%v）\n"+
+			"这是用户报的 bug：把本项目自己导出的凭证原样导入会报"+
+			"『缺少 accessToken（它是唯一鉴权材料）』", got, out)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "workbuddy-2e37e4f4-0e23-4710-9c69-07a5f5e8b313.json"))
+	if err != nil {
+		t.Fatalf("凭证文件未落盘: %v", err)
+	}
+	a, err := auth.Parse(raw)
+	if err != nil {
+		t.Fatalf("落盘文件解析失败: %v", err)
+	}
+	if a.AccessToken != sess {
+		t.Error("嵌套层的 accessToken 未被导入")
+	}
+	if a.RefreshToken != refresh {
+		t.Error("嵌套层的 refreshToken 未被导入")
+	}
+	if a.UID != "2e37e4f4-0e23-4710-9c69-07a5f5e8b313" {
+		t.Errorf("嵌套层的 uid 未被导入: %q", a.UID)
+	}
+	if a.Nickname != "13858156740" {
+		t.Errorf("嵌套层的 nickname 未被导入: %q", a.Nickname)
+	}
+	if a.ExpiresAt != 1794994227 {
+		t.Errorf("嵌套层的 expiresAt 未被导入: %d", a.ExpiresAt)
+	}
+}
+
+// TestImportFlatStillWinsOverNested 兼容性守卫：顶层显式写了的值**优先**，
+// 不会被嵌套层覆盖 —— 保证既有扁平输入的语义逐字不变。
+func TestImportFlatStillWinsOverNested(t *testing.T) {
+	p, dir := importProvider(t)
+	srv := newAdminTestServer(t, p)
+
+	// 顶层与嵌套层给出**不同**的值：结果必须是顶层那份。
+	body := `{
+	  "uid":"flat-uid","sessionToken":"flat-token","refreshToken":"flat-refresh","expiresAt":1111111111,
+	  "account":{"uid":"nested-uid","nickname":"nested-nick"},
+	  "auth":{"accessToken":"nested-token","refreshToken":"nested-refresh","expiresAt":2222222222}
+	}`
+	status, out := postImport(t, srv, intlImportPath, body)
+	if status != http.StatusOK {
+		t.Fatalf("HTTP %d: %v", status, out)
+	}
+	if got := out["imported"].(float64); got != 1 {
+		t.Fatalf("imported=%v，want 1（out=%v）", got, out)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, "workbuddy-flat-uid.json"))
+	if err != nil {
+		t.Fatalf("凭证文件未落盘（uid 应取顶层的 flat-uid）: %v", err)
+	}
+	a, err := auth.Parse(raw)
+	if err != nil {
+		t.Fatalf("落盘文件解析失败: %v", err)
+	}
+	if a.AccessToken != "flat-token" {
+		t.Errorf("顶层 sessionToken 应优先，实际 %q", a.AccessToken)
+	}
+	if a.RefreshToken != "flat-refresh" {
+		t.Errorf("顶层 refreshToken 应优先，实际 %q", a.RefreshToken)
+	}
+	if a.ExpiresAt != 1111111111 {
+		t.Errorf("顶层 expiresAt 应优先，实际 %d", a.ExpiresAt)
+	}
+	if a.Nickname != "nested-nick" {
+		t.Errorf("顶层没有 nickname 时应下沉到嵌套层，实际 %q", a.Nickname)
+	}
+}
