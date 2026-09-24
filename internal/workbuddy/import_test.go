@@ -131,7 +131,7 @@ func TestImportWritesIntlCredentialFromChineseKeys(t *testing.T) {
 	}
 }
 
-// TestImportAcceptsArrayOfItems 数组形态 + 坏条目隔离：一条缺 sessionToken
+// TestImportAcceptsArrayOfItems 数组形态 + 坏条目隔离：一条缺 accessToken
 // 的数据只让它自己失败，不拖累整批。
 func TestImportAcceptsArrayOfItems(t *testing.T) {
 	p, dir := importProvider(t)
@@ -161,8 +161,8 @@ func TestImportAcceptsArrayOfItems(t *testing.T) {
 	if last["ok"] != false {
 		t.Errorf("坏条目应标记失败: %v", last)
 	}
-	if msg, _ := last["error"].(string); !strings.Contains(msg, "sessionToken") {
-		t.Errorf("失败原因应指出缺 sessionToken，得到 %q", msg)
+	if msg, _ := last["error"].(string); !strings.Contains(msg, "accessToken") {
+		t.Errorf("失败原因应指出缺 accessToken，得到 %q", msg)
 	}
 	// 坏条目不落盘；两个好的都落盘。
 	if _, err := os.Stat(filepath.Join(dir, "workbuddy-bbbbbbbb-1111-2222-3333-444444444444.json")); !os.IsNotExist(err) {

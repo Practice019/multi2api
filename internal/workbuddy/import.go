@@ -80,7 +80,9 @@ type importItem struct {
 	Source       string `json:"源"`
 	Username     string `json:"用户名"`
 	UID          string `json:"uid"`
-	SessionToken string `json:"sessionToken"`
+	// AccessToken 是 workbuddy 的唯一鉴权材料（Bearer JWT）。
+	// json 键保持 `sessionToken` 兼容既有导出工具格式；别名 accessToken 也接受。
+	AccessToken string `json:"sessionToken"`
 	RefreshToken string `json:"refreshToken"`
 	Quota        int64  `json:"可用额度"`
 	Health       string `json:"是否健康"`
@@ -102,8 +104,8 @@ func fillAliases(it *importItem, m map[string]any) {
 	if it.Username == "" {
 		it.Username = importFirstStringField(m, "username", "nickname")
 	}
-	if it.SessionToken == "" {
-		it.SessionToken = importFirstStringField(m, "session", "accessToken")
+	if it.AccessToken == "" {
+		it.AccessToken = importFirstStringField(m, "sessionToken", "session", "accessToken")
 	}
 	if it.RefreshToken == "" {
 		it.RefreshToken = importStringField(m, "refresh_token")
@@ -144,7 +146,7 @@ func importNumberField(m map[string]any, key string) (int64, bool) {
 	}
 }
 
-// jwtClaims sessionToken（Keycloak 签发的 JWT）payload 里导入兜底用得上的字段。
+// jwtClaims accessToken（Keycloak 签发的 JWT）payload 里导入兜底用得上的字段。
 //
 // # 为什么要解码 JWT
 //
@@ -313,9 +315,9 @@ func (h *AdminHandler) handleImport(w http.ResponseWriter, r *http.Request) {
 // 返回 (uid, 警告, 错误)：warn 非空表示落盘成功但有值得知道的事
 // （当前只有"缺 refreshToken"—— access token 到期后无法续期）。
 func importOne(dir, instanceID string, it importItem) (string, string, error) {
-	sess := strings.TrimSpace(it.SessionToken)
+	sess := strings.TrimSpace(it.AccessToken)
 	if sess == "" {
-		return "", "", errors.New("缺少 sessionToken（它是唯一鉴权材料）")
+		return "", "", errors.New("缺少 accessToken（它是唯一鉴权材料）")
 	}
 	claims, _ := decodeJWTClaims(sess)
 
