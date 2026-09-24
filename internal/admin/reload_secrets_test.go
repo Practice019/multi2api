@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"testing"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/pool"
 )
@@ -178,5 +179,123 @@ func TestReloadWithoutSecretLoaderLeavesNoSecret(t *testing.T) {
 	}
 	if got, ok := p.SecretOf("u-1"); ok && got != nil {
 		t.Fatalf("没实现 CredentialSecretLoader 的上游不该凭空得到 secret，实际 %#v", got)
+	}
+}
+
+// TestReloadCarriesCredsWhenSecretIsAuth 钉住"secret 就是带凭证的 *auth.Auth"这条路径。
+//
+// # 守的是用户实测报的 bug
+//
+// 现象：管理台「批量导入」一个 workbuddy 账号后，该号在账号池里可见、
+// 刷新额度与签到都正常，但**猫猫旅行 / 成长计划一律报「无可用凭证」**。
+//
+// 根因：accountsReload 把扫描结果**投影成 uid/nickname** 再交给池
+//（`auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})`），
+// 而 workbuddy 的凭证就是 `*auth.Auth` 本身、走 secret 通道。
+// 于是池里 `e.a` 成了空投影，而 workbuddy 的取号点
+//（creds() / authOf() / 各处 AuthByUID）**只读 e.a、不读 secret**
+// → RefreshToken 为空 → 判定"无可用凭证"。
+//
+// pool 侧 `!authHasCreds(a) && authHasCreds(e.a)` 那条保护覆盖不到本场景：
+// 首次导入后池里那份本来就是空投影，新旧两边都无凭证 → 保护不生效，
+// `e.a = a` 照常把 token 清掉（且重启也修不好，因为 reload 同样传投影）。
+//
+// 修法：secret 是带凭证的 *auth.Auth 时，**直接用它当池条目**，不投影。
+//
+// 变异：去掉 accountsReload 里那个 `if sa, ok := secrets[c.UID].(*auth.Auth); ok ...`
+// 分支（退回无条件投影）→ 本用例必须变红。
+func TestReloadCarriesCredsWhenSecretIsAuth(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "workbuddy")
+
+	// workbuddy 的真实形态：Credential 是投影，Secret 是同源的 *auth.Auth（带 token）。
+	realAuth := &auth.Auth{
+		UID:          "wb-1",
+		Nickname:     "妖精七七",
+		AccessToken:  "at-real",
+		RefreshToken: "rt-real",
+		ExpiresAt:    1794994297,
+	}
+	reg := gateway.NewRegistry()
+	prov := &secretProvider{
+		stubProvider: stubProvider{id: "workbuddy", caps: gateway.CapChat},
+		dir:          dir,
+		items: []gateway.CredentialSecret{
+			{Credential: gateway.Credential{UID: "wb-1", Nickname: "妖精七七"}, Secret: realAuth},
+		},
+	}
+	if err := reg.Register(prov); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
+	p.SetDefaultProvider("workbuddy")
+	h := New(Config{Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "workbuddy"})
+
+	rec, resp := postReload(t, h, `{"provider":"workbuddy"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reload 失败: HTTP %d %s", rec.Code, rec.Body.String())
+	}
+	if resp.Scanned != 1 {
+		t.Fatalf("scanned 应为 1，实际 %d", resp.Scanned)
+	}
+
+	// ★ 核心断言：取号路径读的就是 AuthByUID 返回的 e.a，它必须带凭证。
+	a := p.AuthByUID("wb-1")
+	if a == nil {
+		t.Fatal("账号应已进池")
+	}
+	if a.RefreshToken == "" {
+		t.Fatalf("❌ e.a.RefreshToken 为空 —— workbuddy 的 creds()/authOf() 会判定"+
+			"「无可用凭证」，猫猫旅行与成长计划会整片报错。实际: %+v", a)
+	}
+	if a.AccessToken != "at-real" {
+		t.Errorf("AccessToken 应为真实凭证，实际 %q", a.AccessToken)
+	}
+
+	// secret 通道照常。
+	if got, ok := p.SecretOf("wb-1"); !ok || got != realAuth {
+		t.Errorf("secret 通道应保存同一份 *auth.Auth: %v, %v", got, ok)
+	}
+}
+
+// TestReloadStillProjectsWhenSecretIsOpaque 保证上面那条修复**不影响别的上游**。
+//
+// codearts 这类上游的凭证不在 *auth.Auth 上（是不透明的 STS 结构），
+// secret 不是 *auth.Auth → 仍走原投影路径 → e.a 里不该凭空出现凭证。
+// 这是"改一个上游不能顺手改掉另一个上游语义"的守卫。
+func TestReloadStillProjectsWhenSecretIsOpaque(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "codearts")
+	secret := map[string]string{"kind": "opaque-upstream-cred", "token": "T-1"}
+
+	reg := gateway.NewRegistry()
+	prov := &secretProvider{
+		stubProvider: stubProvider{id: "codearts", caps: gateway.CapChat},
+		dir:          dir,
+		items: []gateway.CredentialSecret{
+			{Credential: gateway.Credential{UID: "ca-1", Nickname: "codearts号"}, Secret: secret},
+		},
+	}
+	if err := reg.Register(prov); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
+	p.SetDefaultProvider("codearts")
+	h := New(Config{Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "codearts"})
+
+	rec, _ := postReload(t, h, `{"provider":"codearts"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reload 失败: HTTP %d %s", rec.Code, rec.Body.String())
+	}
+
+	a := p.AuthByUID("ca-1")
+	if a == nil {
+		t.Fatal("账号应已进池")
+	}
+	if a.AccessToken != "" || a.RefreshToken != "" {
+		t.Errorf("非 *auth.Auth 的 secret 不该被塞进 e.a: %+v", a)
+	}
+	if got, ok := p.SecretOf("ca-1"); !ok || !reflect.DeepEqual(got, secret) {
+		t.Errorf("不透明 secret 应照常保存: %v, %v", got, ok)
 	}
 }

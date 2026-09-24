@@ -94,27 +94,83 @@ type importItem struct {
 //
 // 只补**主字段为空**的槽位 —— 用户给出的中文键永远优先，别名只是让
 // "手抄一份、字段名打了个英文"的输入也不至于整条失败。
+//
+// # 嵌套格式（本项目自己落盘的形状）
+//
+// 除了扁平输入，还必须接受**嵌套**输入：
+//
+//	{"account": {"uid": "...", "nickname": "..."},
+//	 "auth":    {"accessToken": "...", "refreshToken": "...", "expiresAt": ...}}
+//
+// 这正是本项目凭证文件的落盘格式（见 auth.Parse 的嵌套分支）。用户报的
+// bug：把**自己导出的凭证**原样粘贴回「批量导入」→ 报「缺少 accessToken」。
+// 原因是 fillAliases 只在**顶层**找键，而 token/uid 都在第二层里，
+// 于是所有字段读成空串。
+//
+// 修法：把"要查的 map"从只有顶层，扩展成 [顶层, auth, account] 三层候选，
+// 逐层找第一个非空值。层序保证兼容性：
+//   · 顶层优先 → 扁平输入的行为逐字不变；
+//   · 后两层只在前者取不到时才被问到 → 不会覆盖用户显式写在顶层的值。
 func fillAliases(it *importItem, m map[string]any) {
 	if it == nil || m == nil {
 		return
 	}
+	layers := importFieldLayers(m)
+
 	if it.UID == "" {
-		it.UID = importStringField(m, "userid")
+		it.UID = importFirstStringFieldLayers(layers, "uid", "userid")
 	}
 	if it.Username == "" {
-		it.Username = importFirstStringField(m, "username", "nickname")
+		it.Username = importFirstStringFieldLayers(layers, "用户名", "username", "nickname")
 	}
 	if it.AccessToken == "" {
-		it.AccessToken = importFirstStringField(m, "sessionToken", "session", "accessToken")
+		it.AccessToken = importFirstStringFieldLayers(
+			layers, "sessionToken", "session", "accessToken")
 	}
 	if it.RefreshToken == "" {
-		it.RefreshToken = importStringField(m, "refresh_token")
+		it.RefreshToken = importFirstStringFieldLayers(
+			layers, "refreshToken", "refresh_token")
 	}
 	if it.ExpiresAt <= 0 {
-		if v, ok := importNumberField(m, "expires_at"); ok {
-			it.ExpiresAt = v
+		for _, layer := range layers {
+			if v, ok := importNumberField(layer, "expiresAt"); ok && v > 0 {
+				it.ExpiresAt = v
+				break
+			}
+			if v, ok := importNumberField(layer, "expires_at"); ok && v > 0 {
+				it.ExpiresAt = v
+				break
+			}
 		}
 	}
+}
+
+// importFieldLayers 返回按优先级排列的"待查字段层"：顶层在前，嵌套在后。
+//
+// 只有**是 JSON 对象**的子层才入列（`auth` 是字符串/数组时直接跳过），
+// 避免把非对象值当成 map 去查键。
+func importFieldLayers(m map[string]any) []map[string]any {
+	layers := []map[string]any{m}
+	for _, key := range []string{"auth", "account"} {
+		if sub, ok := m[key].(map[string]any); ok && sub != nil {
+			layers = append(layers, sub)
+		}
+	}
+	return layers
+}
+
+// importFirstStringFieldLayers 逐层按 keys 顺序找第一个非空字符串。
+//
+// 语义是"**层优先**于键序"：先把顶层所有候选键问一遍，顶层都没有才下沉到
+// auth、再 account。这与"顶层优先"的兼容性目标一致 —— 只要用户在顶层写了
+// 任一个候选键，就不会去读嵌套层。
+func importFirstStringFieldLayers(layers []map[string]any, keys ...string) string {
+	for _, layer := range layers {
+		if s := importFirstStringField(layer, keys...); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func importStringField(m map[string]any, key string) string {

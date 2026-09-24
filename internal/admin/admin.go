@@ -1107,10 +1107,38 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// 投影成账号池要的形状（uid + nickname）。
+	//
+	// ⚠ 例外：secret 本身就是**带凭证的 `*auth.Auth`** 时，直接用它当池条目，
+	// 而不是投影。这是 workbuddy 这类"凭证即 *auth.Auth"上游的形态
+	// （见 workbuddy.LoadCredentialsWithSecrets：Secret 就是同源的 *auth.Auth）。
+	//
+	// 用户报 bug：管理台「批量导入」后，账号在池里可见、刷新额度与签到都正常，
+	// 但**猫猫旅行 / 成长计划一律报「无可用凭证」**。
+	//
+	// 根因就是这里传了空投影：池里 `e.a` 变成无 token 的投影，而
+	// workbuddy 的取号点（creds() / authOf() / 各处 AuthByUID）**只读 e.a**，
+	// 不读 secret 通道 → RefreshToken 为空 → 判定无可用凭证。
+	// 而刷新额度/签到走的是 SecretOf 那条路，所以看起来"凭据明明能用"。
+	//
+	// pool 侧那条 `!authHasCreds(a) && authHasCreds(e.a)` 保护覆盖不到本场景：
+	// 首次导入后池里那份本来就是空投影，两边都无凭证 → 保护不生效。
+	// 因此在这里就把凭证带上，而不是去改 pool 的通用语义
+	// （AuthByUID 的契约"无凭证时 RefreshToken 为空"是既有约定，且
+	//  admin 的 credential_token_test 正是钉它的 —— 不该动）。
+	//
+	// 对 secret 非 *auth.Auth 的上游（codearts 的 STS 等），下面的断言不成立，
+	// 仍走原投影路径 → 行为与改动前逐字相同。
 	auths := make([]*auth.Auth, 0, len(creds))
 	for _, c := range creds {
 		if c.UID == "" {
 			continue
+		}
+		if secrets != nil {
+			if sa, ok := secrets[c.UID].(*auth.Auth); ok && sa != nil &&
+				(sa.AccessToken != "" || sa.RefreshToken != "") {
+				auths = append(auths, sa)
+				continue
+			}
 		}
 		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname, FilePath: c.FilePath})
 	}
