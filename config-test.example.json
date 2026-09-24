@@ -1,0 +1,119 @@
+{
+  "listen": ":7864",
+  "api_key": "replace-with-your-test-admin-key",
+  "service_name": "multi2api-test",
+  "auth_dir": "./auths",
+  "state_file": "./data/state.json",
+  "server": {
+    "max_body_mb": 8
+  },
+  "login": {
+    "open_browser": false,
+    "browser": "",
+    "isolated": true
+  },
+  "cooldown": {
+    "soft_rate": "60s",
+    "soft_rate_max": "2h"
+  },
+  "schedule": {
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "keepalive_hours": [
+      22
+    ],
+    "checkin_enabled": true,
+    "keepalive_enabled": true,
+    "activity_hours": [
+      10
+    ],
+    "activity_enabled": true
+  },
+  "upstream": {
+    "timeout_seconds": 120,
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300,
+    "user_agent": "",
+    "client_version": "",
+    "cli_version": "",
+    "client_name": "",
+    "device_token": "",
+    "device_token_file": "",
+    "passthrough_ip": false
+  },
+  "codearts": {
+    "enabled": true,
+    "refresh_interval_seconds": 60
+  },
+  "workbuddy_intl": {
+    "enabled": true,
+    "oauth_base_url": "https://www.workbuddy.ai",
+    "auth_dir": "",
+    "pool_accounts": true
+  },
+  "trae": {
+    "enabled": true,
+    "auth_dir": "./auths/trae",
+    "refresh_interval_seconds": 1800,
+    "checkin_enabled": true,
+    "pool_accounts": true,
+    "oauth_callback_port": "18081",
+    "fallback_enabled": true,
+    "queue_threshold": 300,
+    "max_attempts": 3,
+    "client_id": ""
+  },
+  "loomy": {
+    "enabled": true,
+    "auth_dir": "./auths/loomy",
+    "base_url": "https://loomyad.xunfei.cn/api/v1",
+    "pool_accounts": true,
+    "client_data_dir": ""
+  },
+  "features": {
+    "sanitize_blacklist_fingerprints": true
+  },
+  "prompt": {
+    "mode": "custom",
+    "file": ""
+  },
+  "upstash": {
+    "url": "",
+    "token": ""
+  },
+  "pool": {
+    "max_in_flight": 3,
+    "breaker_threshold": 3,
+    "breaker_cooldown": "30m",
+    "breaker_cooldown_max": "6h",
+    "idle_weight_per_hour": 0.5,
+    "idle_weight_max": 5.0,
+    "health_check_interval_seconds": 600
+  },
+  "session_sticky": {
+    "enabled": true,
+    "ttl": "30m",
+    "gc_interval": "5m"
+  },
+  "mimo": {
+    "enabled": true,
+    "auth_dir": "./auths/mimo",
+    "base_url": "https://api.xiaomimimo.com/v1",
+    "free_base_url": "https://api.xiaomimimo.com",
+    "free_enabled": false,
+    "auth_header": "bearer",
+    "client_version": "0.1.3",
+    "oauth_callback_port": "18081",
+    "pool_accounts": true,
+    "refresh_interval_seconds": 1800,
+    "reasoning_backfill": true,
+    "credential_priority": "tp",
+    "import_client_auth": false,
+    "client_auth_dir": "",
+    "oauth_redirect_mode": "manual",
+    "route_base_url": "https://mimo-server-cn.xiaomimimo.com",
+    "route_client_version": "26.923.232338"
+  }
+}
