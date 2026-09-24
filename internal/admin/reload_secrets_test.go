@@ -190,10 +190,10 @@ func TestReloadWithoutSecretLoaderLeavesNoSecret(t *testing.T) {
 // 刷新额度与签到都正常，但**猫猫旅行 / 成长计划一律报「无可用凭证」**。
 //
 // 根因：accountsReload 把扫描结果**投影成 uid/nickname** 再交给池
-//（`auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})`），
+// （`auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})`），
 // 而 workbuddy 的凭证就是 `*auth.Auth` 本身、走 secret 通道。
 // 于是池里 `e.a` 成了空投影，而 workbuddy 的取号点
-//（creds() / authOf() / 各处 AuthByUID）**只读 e.a、不读 secret**
+// （creds() / authOf() / 各处 AuthByUID）**只读 e.a、不读 secret**
 // → RefreshToken 为空 → 判定"无可用凭证"。
 //
 // pool 侧 `!authHasCreds(a) && authHasCreds(e.a)` 那条保护覆盖不到本场景：
@@ -297,5 +297,66 @@ func TestReloadStillProjectsWhenSecretIsOpaque(t *testing.T) {
 	}
 	if got, ok := p.SecretOf("ca-1"); !ok || !reflect.DeepEqual(got, secret) {
 		t.Errorf("不透明 secret 应照常保存: %v, %v", got, ok)
+	}
+}
+
+// TestPoolAuthsFromCredsSharedByBothEntryPaths 钉住"投影规则只有一份实现"。
+//
+// 背景：同一个缺陷在这两条入池路径上各复发过一次 ——
+//
+//	reload（accountsReload）  投影掉 token → 导入的号报「无可用凭证」
+//	oauth （oauthFlow）       照抄了同样的投影 → OAuth 登录的新号
+//	                          额度探测恒 401、旅行/成长报「无可用凭证」，
+//	                          而重启网关即恢复（内存 e.a 与磁盘不同步）
+//
+// 两条路径现在都调 poolAuthsFromCreds。本用例直接锁这个函数的行为，
+// 于是**任何一条路径**再退回内联投影都会在行为上暴露。
+func TestPoolAuthsFromCredsSharedByBothEntryPaths(t *testing.T) {
+	creds := []gateway.Credential{
+		{UID: "wb-1", Nickname: "workbuddy号", FilePath: "auths/workbuddy/workbuddy-wb-1.json"},
+		{UID: "ca-1", Nickname: "codearts号", FilePath: "auths/codearts/codearts-ca-1.json"},
+		{UID: "", Nickname: "无uid"}, // 应被跳过
+	}
+	realAuth := &auth.Auth{
+		UID: "wb-1", Nickname: "workbuddy号",
+		AccessToken: "at-real", RefreshToken: "rt-real",
+	}
+	secrets := map[string]any{
+		"wb-1": realAuth,                                 // workbuddy 形态：secret 就是 *auth.Auth
+		"ca-1": map[string]string{"sts": "opaque-token"}, // codearts 形态：不透明 secret
+	}
+
+	got := poolAuthsFromCreds(creds, secrets)
+	if len(got) != 2 {
+		t.Fatalf("应投影出 2 条（跳过无 uid 的那条），实际 %d: %+v", len(got), got)
+	}
+
+	// workbuddy：必须直接用带凭证的那份 *auth.Auth（否则取号点读不到 token）
+	if got[0] != realAuth {
+		t.Errorf("secret 是带凭证的 *auth.Auth 时应直接采用它，实际 %+v", got[0])
+	}
+	if got[0].RefreshToken != "rt-real" {
+		t.Errorf("❌ RefreshToken 丢了 —— creds()/authOf() 会判定「无可用凭证」: %+v", got[0])
+	}
+
+	// codearts：不透明 secret → 仍走投影，e.a 里不该有凭证
+	if got[1].AccessToken != "" || got[1].RefreshToken != "" {
+		t.Errorf("不透明 secret 的上游不该往 e.a 塞凭证: %+v", got[1])
+	}
+	if got[1].UID != "ca-1" || got[1].Nickname != "codearts号" {
+		t.Errorf("投影应保留身份字段: %+v", got[1])
+	}
+}
+
+// TestPoolAuthsFromCredsWithoutSecrets 没有 secret 通道时退回纯投影
+// （未实现 CredentialSecretLoader 的上游，行为与改动前一致）。
+func TestPoolAuthsFromCredsWithoutSecrets(t *testing.T) {
+	creds := []gateway.Credential{{UID: "u-1", Nickname: "n"}}
+	got := poolAuthsFromCreds(creds, nil)
+	if len(got) != 1 || got[0].UID != "u-1" || got[0].Nickname != "n" {
+		t.Fatalf("应退回纯投影: %+v", got)
+	}
+	if got[0].AccessToken != "" || got[0].RefreshToken != "" {
+		t.Errorf("无 secret 时不该凭空造出凭证: %+v", got[0])
 	}
 }

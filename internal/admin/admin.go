@@ -932,6 +932,56 @@ func (h *Handler) credentialSecretsOf(providerID string) (func(string) ([]gatewa
 	return ext.LoadCredentialsWithSecrets, true
 }
 
+// poolAuthsFromCreds 把扫描到的凭证投影成账号池条目的形状。
+//
+// # 为什么必须是**一个**共用函数（而不是各路径自己写一遍）
+//
+// 两条入池路径（accountsReload 的「重载 auths」、oauthFlow 的「登录成功后入池」）
+// 原先各自内联了一份一模一样的投影。结果是同一个缺陷修了一条、漏了另一条：
+//
+//	第一次：reload 路径投影掉 token → 导入的号报「无可用凭证」（已修）
+//	第二次：oauth 路径**照抄了同样的投影** → OAuth 登录的新号额度探测恒 401、
+//	        旅行/成长报「无可用凭证」，而重启网关即恢复
+//
+// 抽成一处之后，投影规则只有一个来源，加第三条第入池路径时也不会再漏。
+//
+// # 投影规则
+//
+// 默认投影成 uid + nickname（池条目只需要身份；真凭证走 secret 通道，
+// 这是 codearts 那类"凭证不在 *auth.Auth 里"的上游的形态）。
+//
+// ⚠ 例外：secret 本身就是**带凭证的 `*auth.Auth`** 时，直接用它当池条目。
+// 这是 workbuddy 这类"凭证即 *auth.Auth"上游的形态
+// （见 workbuddy.LoadCredentialsWithSecrets：Secret 就是同源的 *auth.Auth）。
+//
+// 为什么必须这样：workbuddy 的取号点（creds() / authOf() / 各处 AuthByUID）
+// **只读池条目的 e.a，不读 secret 通道**。若 e.a 是空投影，RefreshToken 为空
+// → 一律判定「无可用凭证」。而额度刷新/签到走 SecretOf 那条路，于是表现为
+// "凭据明明能用、部分功能却报无可用凭证"这种最难查的割裂。
+//
+// pool 侧那条 `!authHasCreds(a) && authHasCreds(e.a)` 保护覆盖不到：
+// 新号首次入池时，池里那份本来就是空投影（两边都无凭证）→ 保护不生效。
+//
+// 对 secret 非 *auth.Auth 的上游（codearts 的 STS 等），类型断言不成立，
+// 仍走投影路径 → 行为与改动前逐字相同。
+func poolAuthsFromCreds(creds []gateway.Credential, secrets map[string]any) []*auth.Auth {
+	auths := make([]*auth.Auth, 0, len(creds))
+	for _, c := range creds {
+		if c.UID == "" {
+			continue
+		}
+		if secrets != nil {
+			if sa, ok := secrets[c.UID].(*auth.Auth); ok && sa != nil &&
+				(sa.AccessToken != "" || sa.RefreshToken != "") {
+				auths = append(auths, sa)
+				continue
+			}
+		}
+		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname, FilePath: c.FilePath})
+	}
+	return auths
+}
+
 // accountsReload 重新扫描 auths 目录并对齐池（手工拷入凭证后无需重启网关）。
 //
 // # ⚠ 必须显式指定**这个目录属于哪个上游**
@@ -1106,42 +1156,8 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 投影成账号池要的形状（uid + nickname）。
-	//
-	// ⚠ 例外：secret 本身就是**带凭证的 `*auth.Auth`** 时，直接用它当池条目，
-	// 而不是投影。这是 workbuddy 这类"凭证即 *auth.Auth"上游的形态
-	// （见 workbuddy.LoadCredentialsWithSecrets：Secret 就是同源的 *auth.Auth）。
-	//
-	// 用户报 bug：管理台「批量导入」后，账号在池里可见、刷新额度与签到都正常，
-	// 但**猫猫旅行 / 成长计划一律报「无可用凭证」**。
-	//
-	// 根因就是这里传了空投影：池里 `e.a` 变成无 token 的投影，而
-	// workbuddy 的取号点（creds() / authOf() / 各处 AuthByUID）**只读 e.a**，
-	// 不读 secret 通道 → RefreshToken 为空 → 判定无可用凭证。
-	// 而刷新额度/签到走的是 SecretOf 那条路，所以看起来"凭据明明能用"。
-	//
-	// pool 侧那条 `!authHasCreds(a) && authHasCreds(e.a)` 保护覆盖不到本场景：
-	// 首次导入后池里那份本来就是空投影，两边都无凭证 → 保护不生效。
-	// 因此在这里就把凭证带上，而不是去改 pool 的通用语义
-	// （AuthByUID 的契约"无凭证时 RefreshToken 为空"是既有约定，且
-	//  admin 的 credential_token_test 正是钉它的 —— 不该动）。
-	//
-	// 对 secret 非 *auth.Auth 的上游（codearts 的 STS 等），下面的断言不成立，
-	// 仍走原投影路径 → 行为与改动前逐字相同。
-	auths := make([]*auth.Auth, 0, len(creds))
-	for _, c := range creds {
-		if c.UID == "" {
-			continue
-		}
-		if secrets != nil {
-			if sa, ok := secrets[c.UID].(*auth.Auth); ok && sa != nil &&
-				(sa.AccessToken != "" || sa.RefreshToken != "") {
-				auths = append(auths, sa)
-				continue
-			}
-		}
-		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname, FilePath: c.FilePath})
-	}
+	// 投影成账号池要的形状（uid + nickname）—— 见 poolAuthsFromCreds 的注释。
+	auths := poolAuthsFromCreds(creds, secrets)
 
 	// ⚠ 池子可能为 nil（本包其它地方都判了空，见 pollViaFlow 的注释）。
 	// 漏判的后果是 **nil pointer panic（进程级）**。
@@ -1824,14 +1840,16 @@ func (h *Handler) pollViaFlow(w http.ResponseWriter, p gateway.Provider, flow ga
 			return errHandled
 		}
 	}
-	// 投影成账号池要的形状（uid + nickname）—— 与 `accountsReload` 同款。
-	auths := make([]*auth.Auth, 0, len(creds))
-	for _, c := range creds {
-		if c.UID == "" {
-			continue
-		}
-		auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname, FilePath: c.FilePath})
-	}
+	// 投影成账号池要的形状（uid + nickname）—— 与 accountsReload 共用同一函数。
+	//
+	// ⚠ 这条路径原先自己内联了一份投影，于是**同一个缺陷复发**：
+	// 用户在 OAuth 登录一个新号后，号在池里可见、大模型请求也能通，
+	// 但额度探测恒 401（HTML 网关错误页）、猫猫旅行/成长计划报「无可用凭证」，
+	// 且重启网关即恢复 —— 正是"内存 e.a 与磁盘凭证不同步"的形态。
+	//
+	// 教训：投影规则只能有一份实现。抽成 poolAuthsFromCreds 后，
+	// 两条入池路径（reload / oauth）自动保持一致，不会再各漏一半。
+	auths := poolAuthsFromCreds(creds, secrets)
 	// ⚠ 池子可能为 nil —— 本包其它地方（schedule.go / uimanifest.go）
 	// 都判了空，说明"Pool 可缺省"是**本包自己的设计假设**；
 	// 这条落盘路径原来漏判了，后果是 **nil pointer panic（进程级）**。
