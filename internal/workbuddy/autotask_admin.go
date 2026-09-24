@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -155,23 +156,52 @@ func (h *AdminHandler) AutoAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 全池：逐账号串行（账号内已互斥；账号间串行是为了不给上游造成并发风控画像）。
+	// 全池：**受限并发**（账号内已互斥，账号间并发但受共享预算夹住）。
+	//
+	// # 为什么从串行改成并发（用户要求）
+	//
+	// 串行时 4 个账号约 60s（单账号实测 ~15s：专家链 8 次 × 6s 节流 +
+	// 事件上报 1.05s 间隔），前端「一键完成」要等第一步全跑完才启动第二步，
+	// 于是按钮被禁用近一分钟，用户读成卡死。
+	//
+	// # 为什么不是"无限制并发"
+	//
+	// 上游是同一个腾讯服务，多账号同时打过去有触发风控的风险 ——
+	// 这正是原先串行注释担心的事（"账号间串行是为了不给上游造成并发风控画像"），
+	// 也是 growth.go 里 GrowthProbeConcurrency 存在的理由
+	//（"账号多时同时打过去有触发风控的风险；旅行模块已有账号间间隔 800ms 的先例"）。
+	//
+	// 所以这里**沿用同一套共享预算**（p.probeSem），而不是新造一个上限：
+	// 它约束的是「同时在途的账号数」，账号内部的串行节奏（reportGap /
+	// expertSummonGap）一个都不动 —— 那些节流是过风控的关键，调小才是真风险。
+	//
+	// 并发安全性：AutoTaskAll 有 per-account 互斥（tryLockAccount），
+	// 不同账号之间不共享可变状态；结果按下标写回 out，无需加锁。
 	accts := h.p.ownAccounts()
 	if !h.task.Start("growth-auto-all", func() []map[string]any {
-		out := make([]map[string]any, 0, len(accts))
-		for _, st := range accts {
+		out := make([]map[string]any, len(accts))
+		var wg sync.WaitGroup
+		for i, st := range accts {
 			if st.Disabled {
-				out = append(out, map[string]any{"uid": st.UID, "status": "skipped", "message": "已禁用"})
+				out[i] = map[string]any{"uid": st.UID, "status": "skipped", "message": "已禁用"}
 				continue
 			}
-			res, err := h.p.AutoTaskAll(st.UID)
-			if err != nil {
-				out = append(out, map[string]any{"uid": st.UID, "status": statusFail, "message": err.Error()})
-				continue
-			}
-			out = append(out, map[string]any{"uid": st.UID, "status": statusOK, "results": res})
-			time.Sleep(reportGap)
+			wg.Add(1)
+			go func(i int, uid string) {
+				defer wg.Done()
+				// 共享预算：同时在途的账号数受 GrowthProbeConcurrency 夹住
+				h.p.probeSem.acquire()
+				defer h.p.probeSem.release()
+
+				res, err := h.p.AutoTaskAll(uid)
+				if err != nil {
+					out[i] = map[string]any{"uid": uid, "status": statusFail, "message": err.Error()}
+					return
+				}
+				out[i] = map[string]any{"uid": uid, "status": statusOK, "results": res}
+			}(i, st.UID)
 		}
+		wg.Wait()
 		return out
 	}) {
 		writeError(w, http.StatusConflict, "已有任务在执行中，请等它结束")
