@@ -45,6 +45,22 @@ func (s *tokenStub) HasToken(cred gateway.Credential) bool { return s.hasToken }
 //
 // 形态与 workbuddy-intl 完全一致：入池时是**裸投影**（UID/Nickname），
 // 真凭证在 secret 里。修复前 has_token 恒为 false（界面显示 `—`）。
+//
+// # ⚠ secret 为什么用自定义类型而不是 *auth.Auth
+//
+// 本用例要测的是"**通用投影没有 token 时**，has_token 靠问上游兜底"。
+// 而 pool 现在有一条兜底（upsertSecretLocked → authFromSecret）：
+// 当 secret 是**带凭证的 `*auth.Auth`** 时，会把它采用为 e.a ——
+// 于是 AuthByUID 也有 token 了，本用例的前置条件（投影无 token）不再成立，
+// 测的就变成了"直接读 e.a"，**兜底路径根本没被覆盖**（测试假绿）。
+//
+// 所以这里刻意用一个**不透明 secret**（非 *auth.Auth）：
+//   · 它代表 codearts 那类"凭证不在 *auth.Auth 里"的上游；
+//   · pool 的兜底对它不生效（类型断言不成立）→ 投影保持无 token；
+//   · has_token 于是只能靠 HasToken(cred) 这条第二来源得到 true。
+//
+// 换句话说：这条测试守的机制（第二来源）在"不透明 secret"这个真实形态下
+// 依然有效，且这正是它当初要守的场景。
 func TestAccountViewsFillsHasTokenFromProvider(t *testing.T) {
 	reg := gateway.NewRegistry()
 	if err := reg.Register(&tokenStub{
@@ -55,10 +71,9 @@ func TestAccountViewsFillsHasTokenFromProvider(t *testing.T) {
 	}
 
 	p := pool.New("")
-	// ⚠ 裸投影 + secret —— 这正是 pollViaFlow / accountsReload 入池的形状。
-	p.AddFor("wbintl", &auth.Auth{UID: "wb-1", Nickname: "uxjxxx"}, &auth.Auth{
-		UID: "wb-1", AccessToken: "real-access-token", ExpiresAt: 1821328439,
-	})
+	// ⚠ 裸投影 + **不透明** secret —— 投影里没有 token，真凭证在不透明通道里。
+	p.AddFor("wbintl", &auth.Auth{UID: "wb-1", Nickname: "uxjxxx"},
+		opaqueSecret{AccessToken: "real-access-token"})
 
 	v := accountsFor(t, New(Config{Pool: p, Registry: reg, DefaultProvider: "wbintl"}))[0]
 
@@ -75,6 +90,13 @@ func TestAccountViewsFillsHasTokenFromProvider(t *testing.T) {
 			"界面上那一列永远是「—」，用户会以为登录没拿到 token，" +
 			"而 secret 里的 accessToken 明明是好的（workbuddy-intl 实测）")
 	}
+}
+
+// opaqueSecret 模拟"凭证不在 *auth.Auth 里、走上游私有结构"的 secret
+// （codearts 的 STS 三元组是同类）。刻意**不是** *auth.Auth ——
+// pool 的兜底只认带凭证的 *auth.Auth，因此对它是无操作的。
+type opaqueSecret struct {
+	AccessToken string
 }
 
 // TestAccountViewsHasTokenUnknownWhenProviderSilent 上游不实现扩展点时**逐字节不变**。

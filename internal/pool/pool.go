@@ -809,10 +809,58 @@ func (p *Pool) upsertSecretLocked(provider string, a *auth.Auth, secret any) (ad
 		if secret != nil {
 			e.secret = secret
 		}
+		// 兜底：e.a 仍无凭证、而 secret 本身就是带凭证的 *auth.Auth 时采用它。
+		//
+		// # 守的是用户实测报的 bug（同一形态已复发两次）
+		//
+		// 两条入池路径（reload / oauth）都曾把扫描结果**投影成 uid+nickname**
+		// 再交给池，而真凭证在 secret 通道里。结果 e.a 是空投影，而所有取号点
+		// 读的都是 e.a：
+		//
+		//	AuthByUID / creds() / authOf() → e.a      ← 空 → 「无可用凭证」
+		//	SecretOf                      → e.secret  ← 有凭证（这几处不读它）
+		//
+		// 用户表现：号在池里可见、大模型请求也通，但额度探测恒 401、
+		// 猫猫旅行/成长计划报「无可用凭证」，**重启网关即恢复**
+		//（启动时 LoadDir 从磁盘读回了真凭证）。
+		//
+		// 上面的 `!authHasCreds(a) && authHasCreds(e.a)` 保护覆盖不到本场景：
+		// 新号首次入池时池里那份本来就是空投影（两边都无凭证）→ 保护不生效。
+		//
+		// 主修法在**入池前**（admin.poolAuthsFromCreds：secret 是 *auth.Auth 时
+		// 直接采用它），这里补的是**兜底** —— 让"忘了这件事的第三条第入池路径"
+		// 也不会静默丢凭证。两处判据一致，且都只认带凭证的 *auth.Auth：
+		// 对 codearts 这类凭证不在 *auth.Auth 里的上游，类型断言不成立 → 行为不变。
+		if !authHasCreds(e.a) {
+			if sa := authFromSecret(secret); sa != nil {
+				e.a = sa
+			}
+		}
 		return false
+	}
+	// 新增路径同样兜底，否则"新号入池即空投影"，旅行/成长从那一刻起就报无凭证。
+	if !authHasCreds(a) {
+		if sa := authFromSecret(secret); sa != nil {
+			a = sa
+		}
 	}
 	p.byUID[a.UID] = &entry{a: a, provider: provider, secret: secret}
 	return true
+}
+
+// authFromSecret 若 secret 本身就是**带凭证的 `*auth.Auth`**，返回它；否则 nil。
+//
+// 这是 workbuddy 这类"凭证即 *auth.Auth"上游的形态
+// （见 workbuddy.LoadCredentialsWithSecrets：Secret 就是同源的 *auth.Auth）。
+//
+// 对 codearts 这类凭证不在 *auth.Auth 里、走各自结构体的上游，
+// secret 不是 *auth.Auth → 返回 nil → 调用方行为与改动前逐字相同。
+func authFromSecret(secret any) *auth.Auth {
+	sa, ok := secret.(*auth.Auth)
+	if !ok || sa == nil || !authHasCreds(sa) {
+		return nil
+	}
+	return sa
 }
 
 // SyncToDirWithSecrets 按上游维度对齐账号，并为每个账号绑定上游私有凭证。
