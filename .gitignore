@@ -93,3 +93,6 @@ dist/
 config-test.json
 auths-test/
 data-test/
+# scripts 下同步工具的本机化副本/临时输出（钥匙相关永不入库）
+scripts/mimo/*.local.py
+scripts/mimo/cookie_dump*
