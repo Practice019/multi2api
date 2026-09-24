@@ -43,6 +43,14 @@ type Provider struct {
 	onRefreshFailure func(uid string)
 	onRefreshSuccess func(uid string)
 
+	// probeDesktopCookies 登录完成后自动补齐 route 通道（按登录账号 uid 从
+	// 本机浏览器/桌面 Cookie 库取 passToken 套；本机无该账号会话 → 保持 paid
+	// 兜底）。测试可注入替换。
+	probeDesktopCookies func(uid string) (*DesktopCookie, error)
+	// launchBrowserLogin 读库未命中时的兜底：自启受控浏览器（Edge/Chrome 独立
+	// 实例）打开小米账号登录页，用户登录后 CDP 监控收割 Cookie（3 分钟超时）。
+	launchBrowserLogin func(uid string) (*DesktopCookie, error)
+
 	cache       *reasoningCache
 	loginOnce   sync.Once
 	loginCached *loginFlow
@@ -146,7 +154,9 @@ func NewWithConfig(cfg Config) *Provider {
 		oauthRedirectMode:  firstNonEmpty(strings.ToLower(strings.TrimSpace(cfg.OAuthRedirectMode)), "auto"),
 		onRefreshFailure:   cfg.OnRefreshFailure,
 		onRefreshSuccess:   cfg.OnRefreshSuccess,
-		cache:              newReasoningCache(),
+		probeDesktopCookies: DefaultDesktopProbe,
+		launchBrowserLogin:  DefaultLaunchBrowserLogin,
+		cache:               newReasoningCache(),
 	}
 }
 
