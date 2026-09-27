@@ -134,6 +134,7 @@ func main() {
 	up.ClientVersion = cfg.Upstream.ClientVersion
 	up.CliVersion = cfg.Upstream.CliVersion
 	up.ClientName = cfg.Upstream.ClientName
+	up.ProductCode = cfg.Upstream.ProductCode
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP

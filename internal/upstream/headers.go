@@ -198,7 +198,7 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string) {
 	c.injectDeviceToken(req, a)
 }
 
-// injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product）。
+// injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product / X-Product-Code）。
 //
 // # 它解决什么问题
 //
@@ -206,16 +206,34 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string) {
 // 不注入时该列显示为空或 "SaaS"，无法确认流量确实走的是自己配置的桌面端身份。
 //
 // ClientName 非空时全量跟随该值，空则只保留 X-Product="SaaS"（旧行为，向后兼容）。
+//
+// # X-Product-Code 是**独立**的（不与 ClientName 联动）
+//
+// 它与 X-Product 语义不同：
+//
+//	X-Product      用量归属**名**（WorkBuddy / CodeBuddy）
+//	X-Product-Code 产品**代码**（workbuddy / codebuddy）
+//
+// 参照项目把两者分别配在 BuddyProduct 的 attributionName 与 productCode 上，
+// 两个 CodeBuddy 系产品取值都不同（codebuddy vs workbuddy）。
+// 因此这里不做"由 ClientName 推导"的联动 —— 那会把两个独立事实绑成一个，
+// 而它们本来可以各自设置（例如归属名要写中文品牌、product code 必须是英文小写）。
+//
+// 空 = 不注入（改造前行为，既有部署逐字节不变）。
 func (c *Client) injectAttribution(req *http.Request) {
 	if c == nil || c.ClientName == "" {
 		req.Header.Set("X-Product", "SaaS")
-		return
+	} else {
+		req.Header.Set("X-Agent-Purpose", "conversation")
+		req.Header.Set("X-IDE-Name", c.ClientName)
+		req.Header.Set("X-IDE-Type", c.ClientName)
+		req.Header.Set("X-IDE-Version", c.clientVersion())
+		req.Header.Set("X-Product", c.ClientName)
 	}
-	req.Header.Set("X-Agent-Purpose", "conversation")
-	req.Header.Set("X-IDE-Name", c.ClientName)
-	req.Header.Set("X-IDE-Type", c.ClientName)
-	req.Header.Set("X-IDE-Version", c.clientVersion())
-	req.Header.Set("X-Product", c.ClientName)
+	// X-Product-Code 独立注入：它不随 ClientName 走（见上）。
+	if c != nil && c.ProductCode != "" {
+		req.Header.Set("X-Product-Code", c.ProductCode)
+	}
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 透传给上游（三等价头）。
@@ -265,6 +283,11 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	}
 	if a.Domain != "" {
 		req.Header.Set("X-Domain", a.Domain)
+	}
+	// 产品代码：参照项目的 checkinHeaders（对应本条 billing 路径）**确实**发这个头
+	//（见其 credits.ts 的 checkinHeaders），所以这里也发 —— 只在配置了非空值时。
+	if c != nil && c.ProductCode != "" {
+		req.Header.Set("X-Product-Code", c.ProductCode)
 	}
 	// 设备风控头：billing 域（report / travel / balance / checkin）同样注入。
 	c.injectDeviceToken(req, a)
