@@ -72,6 +72,49 @@ func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
 // 所以恒为 true（除非 Provider 自身为空）。
 func (f *loginFlow) Configured() bool { return f != nil && f.p != nil }
 
+// ── 让 *Provider 直接满足 gateway.LoginFlow ────────────────────────────────
+//
+// ⚠ 这三个转发方法是**必需的**，不是风格问题。
+//
+// 核心用 `gateway.ExtOf[LoginFlow](p)` 发现扩展点，那是**类型断言**
+// `p.(LoginFlow)`；而访问器 `LoginFlow() (LoginFlow, bool)` 的返回值
+// 不参与方法集匹配 —— 断言对它**不可见**。
+//
+// 少了这三个方法，本包自己的测试全绿（测试走访问器），
+// 但 `/admin/providers` 会下发 `login:null`，界面上没有「＋ 添加账号」按钮。
+// 实测事故就是这个形态；现在由 gateway.RunProviderContract 的
+// verifyExtensionsDiscoverable 守住（见那里的注释）。
+//
+// 与 trae / workbuddy / loomy / mimo 的写法一致。
+
+// Start 让 *Provider 直接满足 gateway.LoginFlow。
+func (p *Provider) Start() (string, string, error) {
+	lf, ok := p.LoginFlow()
+	if !ok {
+		return "", "", errors.New("cline: 登录流程未初始化")
+	}
+	return lf.Start()
+}
+
+// Poll 让 *Provider 直接满足 gateway.LoginFlow。
+func (p *Provider) Poll(state string) (gateway.Credential, error) {
+	lf, ok := p.LoginFlow()
+	if !ok {
+		return gateway.Credential{}, errors.New("cline: 登录流程未初始化")
+	}
+	return lf.Poll(state)
+}
+
+// Configured 让 *Provider 直接满足 gateway.LoginFlow。
+//
+// 转发到流程实例的 Configured，而不是直接 `return p != nil`：
+// 保持"配置判据只有一处"（将来 Cline 若引入需要配置的登录方式，
+// 只改 loginFlow.Configured 一处即可，不会出现两份判据漂移）。
+func (p *Provider) Configured() bool {
+	lf, ok := p.LoginFlow()
+	return ok && lf.Configured()
+}
+
 // Start 发起一次登录：拿设备码 + 授权 URL，并启动后台轮询。
 //
 // 返回 (state, authURL, error)。state 供 Poll 使用。
