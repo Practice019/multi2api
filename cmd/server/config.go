@@ -656,6 +656,30 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"raccoon"`
 
+	// LobsterAI 第八个上游（有道龙虾）。
+	//
+	// ⚠ 登录需要**绑本地回调端口**（portal 只跳到 redirect_uri，
+	// 而它必须是 http://127.0.0.1:{port}/auth/callback）。
+	// 故这条路径**只适用于网关与浏览器同机的部署** ——
+	// 服务器部署下回调打不进服务器端口，而 LobsterAI 没有 manual 模式可退。
+	Lobsterai struct {
+		// Enabled 是否启用 LobsterAI 上游。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/lobsterai`。
+		AuthDir string `json:"auth_dir"`
+		// APIBase 业务 API（留空=https://lobsterai-server.youdao.com）。
+		APIBase string `json:"api_base"`
+		// PortalBase 登录门户（留空=https://lobsterai.youdao.com）。
+		PortalBase string `json:"portal_base"`
+		// VersionAPI 客户端版本号接口（留空=api-overmind.youdao.com）。
+		//
+		// ⚠ 该域名与业务域名是**不同的服务**，实测存在网络层/证书层差异
+		//（直连曾失败）→ 实现里保留了 fallbackClientVersion 兜底。
+		VersionAPI string `json:"version_api"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"lobsterai"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -800,6 +824,13 @@ type Config struct {
 	RaccoonAPIBase      string `json:"-"`
 	RaccoonPoolAccounts bool   `json:"-"`
 
+	// Lobsterai（第八上游）解析后。
+	LobsteraiEnabled      bool   `json:"-"`
+	LobsteraiAuthDir      string `json:"-"`
+	LobsteraiAPIBase      string `json:"-"`
+	LobsteraiPortalBase   string `json:"-"`
+	LobsteraiVersionAPI   string `json:"-"`
+	LobsteraiPoolAccounts bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
 	// # 为什么保留它

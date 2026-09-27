@@ -24,6 +24,7 @@ import (
 	"workbuddy2api/internal/cline"
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/lobsterai"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/loomy"
 	"workbuddy2api/internal/mimo"
@@ -702,6 +703,69 @@ func main() {
 		}
 	} else if rc != nil {
 		log.Printf("raccoon: 未并入账号池（raccoon.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// ---- 第八个上游：LobsterAI（有道龙虾）----
+	//
+	// 与 CodeBuddy 系**完全不同源**：登录方式、请求头、续期载荷、签到流程
+	// 都不一样，所以它是独立一套实现，只共用架构模式。
+	//
+	// ⚠ 登录要绑本地回调端口，**只适用于网关与浏览器同机的部署** ——
+	// portal 只跳到 redirect_uri，而它必须是 127.0.0.1:{port}/auth/callback。
+	// 服务器部署下回调打不进服务器端口，而 LobsterAI 没有 manual 模式可退。
+	var lb *lobsterai.Provider
+	if cfg.LobsteraiEnabled {
+		lb = lobsterai.NewWithConfig(lobsterai.Config{
+			APIBase:    cfg.LobsteraiAPIBase,
+			PortalBase: cfg.LobsteraiPortalBase,
+			VersionAPI: cfg.LobsteraiVersionAPI,
+			AuthDir:    cfg.LobsteraiAuthDir,
+		})
+		// 注入凭证访问器（管理端点的签到/余额要按 uid 取凭证）。
+		// 上游不得 import pool，故由装配层适配进来。
+		//
+		// ⚠ 用 SecretOf 而不是 AuthByUID：SecretOf 返回的是**上游私有凭证**
+		//（SyncToDirWithSecrets 装进去的那个 *lobsterai.Auth），
+		// 而 AuthByUID 返回的是核心账号投影（只有 uid/nickname）。
+		// 签到与余额需要前者 —— 后者没有 accessToken。
+		lb.SetCredentialSource(func(uid string) (gateway.Credential, bool) {
+			secret, ok := p.SecretOf(uid)
+			if !ok {
+				return gateway.Credential{}, false
+			}
+			a, ok := secret.(*lobsterai.Auth)
+			if !ok || a == nil {
+				return gateway.Credential{}, false
+			}
+			return gateway.Credential{
+				Provider: lobsterai.ProviderID,
+				UID:      uid,
+				Nickname: a.Nickname,
+				Secret:   a,
+			}, true
+		})
+		if err := registry.Register(lb); err != nil {
+			log.Fatalf("注册 LobsterAI 上游失败: %v", err)
+		}
+		log.Printf("lobsterai: 已启用（凭证目录 %s，API %s）",
+			cfg.LobsteraiAuthDir,
+			firstNonEmpty(cfg.LobsteraiAPIBase, lobsterai.DefaultAPIBase))
+	} else {
+		log.Printf("lobsterai: 未启用（config 里 lobsterai.enabled 缺省为 false）")
+		if list, err := lobsterai.LoadDir(cfg.LobsteraiAuthDir); err == nil && len(list) > 0 {
+			log.Printf("lobsterai: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.LobsteraiAuthDir, len(list))
+		}
+	}
+
+	if lb != nil && cfg.LobsteraiPoolAccounts {
+		if n := syncLobsteraiAccounts(p, cfg.LobsteraiAuthDir); n > 0 {
+			log.Printf("lobsterai: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("lobsterai: 账号池中暂无账号（凭证目录 %s 里没有可用的 lobsterai*.json）", cfg.LobsteraiAuthDir)
+		}
+	} else if lb != nil {
+		log.Printf("lobsterai: 未并入账号池（lobsterai.pool_accounts=false），只能通过其管理端点使用")
 	}
 
 	// "已注册上游"必须打在**所有**上游注册完之后。
