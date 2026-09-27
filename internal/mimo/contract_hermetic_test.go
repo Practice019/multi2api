@@ -694,7 +694,26 @@ func boolp(b bool) *bool { return &b }
 
 func TestManualLoginCompleteFullChain(t *testing.T) {
 	// manual 模式不要求本机回调端口可达 —— 这是"网关在服务器上"的核心诉求。
-	p := NewWithConfig(Config{OAuthRedirectMode: "manual"})
+	//
+	// ⚠ 下面两处注入都是为了**保持本测试 hermetic**（文件名就是 contract_hermetic）。
+	// ca8d66f「login-time route channel automation」给 completeWithU 加了两条分支，
+	// 但不注入时本测试会既不快也不封闭（它是那次改动后被漏更新的测试）：
+	//
+	//  1. 假 SSO 上游：命中本机会话后 completeWithU 会 route 化并调 SSOFresh 换票。
+	//     用默认 Client 时那条链会**真的**访问 account.xiaomi.com（实测 245ms，
+	//     拿到的是真实 SPA 登录页）。测试要可复现，不能依赖外网。
+	//  2. probe 注入命中：不注入时 completeWithU 落进**挂起等待自动收割**分支
+	//     —— watchRoute 先轮询读库 3×(5s)，再自启受控浏览器弹窗等 3 分钟。
+	//     既是 15s+ 的等待，又会真的弹出一个窗口。
+	//
+	// 本测试要验的是**协议与落盘形态**（manual 的 redirect_uri、pk 的 SPKI 编码、
+	// u 密文解密、MarshalAuthFile 落盘回读），与 route 通道无关。所以把探测钉成
+	// 「本机已有该账号会话」，让整条链同步走完 —— 这也顺带覆盖了 route 命中路径。
+	srv, _ := newFakeSSO(t)
+	p := NewWithConfig(Config{OAuthRedirectMode: "manual", Client: NewWithBase(srv.URL)})
+	p.probeDesktopCookies = func(uid string) (*DesktopCookie, error) {
+		return &DesktopCookie{PassToken: "V1:pass-initial", CUserID: "cu-1", UserID: uid}, nil
+	}
 	if _, instr := p.ManualLogin(); instr == "" {
 		t.Fatal("ManualLogin 必须带用户指引文案")
 	}
