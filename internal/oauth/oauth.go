@@ -161,6 +161,20 @@ type Client struct {
 	// 见本文件常量区的注释。
 	Platform string
 
+	// UserAgent 三步登录（auth/state / 轮询 token / 拉账户）共用的出站 UA。
+	//
+	// # 为什么它需要**按渠道**变（参照 project.ts:70-71）
+	//
+	//	海外版  WorkBuddy/<v> WorkBuddy AI/<v> CLI/<v>
+	//	国内版  WorkBuddy/<v> WorkBuddy/<v>    CLI/<v>
+	//
+	// 参照 buddy-oauth.ts 明确要求：三步**都要**带产品身份标识，
+	// 注释原文：「否则 WorkBuddy 登录会以 CodeBuddy 的 UA 发请求」——
+	// 即一个固定 UA 会让海外版登录在服务端侧被当成另一种产品。
+
+	// 空 = 回落 clientUA（改造前的行为，既有部署逐字节不变）。
+	UserAgent string
+
 	mu      sync.Mutex
 	pending map[string]pending
 }
@@ -186,13 +200,22 @@ func New(baseURL string) *Client {
 	}
 }
 
+// ua 本次登录请求使用的 UA：Client.UserAgent 非空时用它，否则回落 clientUA
+// （改造前的行为 —— 既有部署升级后**逐字节不变**）。
+func (c *Client) ua() string {
+	if c != nil && strings.TrimSpace(c.UserAgent) != "" {
+		return strings.TrimSpace(c.UserAgent)
+	}
+	return clientUA
+}
+
 func (c *Client) headers(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Origin", c.OriginReferer)
 	req.Header.Set("Referer", c.OriginReferer+"/")
-	req.Header.Set("User-Agent", clientUA)
+	req.Header.Set("User-Agent", c.ua())
 }
 
 type envelope struct {

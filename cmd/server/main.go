@@ -258,7 +258,7 @@ func main() {
 		// ⚠ 这里与第 384 行的 `OAuth:` 各给一份，**不是重复**：
 		// admin 那份服务过渡期的旧路径（请求不带 provider 时走它），
 		// 这一份供"按 provider 分派"使用。旧路径退役后前者可删。
-		Login: workbuddyLogin(workbuddy.ProviderID, cfg.OAuthBaseURL),
+		Login: workbuddyLogin(workbuddy.ProviderID, cfg.OAuthBaseURL, ""),
 
 		TravelAutoClaimDisabled: !cfg.TravelAutoClaim,
 		TravelWatchInterval:     cfg.TravelWatchInterval,
@@ -314,6 +314,30 @@ func main() {
 	//
 	// 向后兼容：config 里 workbuddy_intl 段缺席（enabled=false）时
 	// 整段不执行，行为与改造前逐字节一致。
+	// intlLoginUA 海外版**登录三步**（auth/state / 轮询 token / 拉账户）共用的 UA。
+	//
+	// # 为什么它必须与 CN 不同（参照 product.ts:70-71）
+	//
+	//	海外版  WorkBuddy/<v> WorkBuddy AI/<v> CLI/<v>
+	//	国内版  WorkBuddy/<v> WorkBuddy/<v>    CLI/<v>
+	//	                       ^^^^^^^^^^^ 差异只在品牌段
+	//
+	// 参照 buddy-oauth.ts 的注释：「轮询 token / 账户两步同样带产品身份标识，
+	// 否则 WorkBuddy 登录会以 CodeBuddy 的 UA 发请求」。
+	//
+	// ⚠ 与 platform 配套：海外版是 `platform=workbuddy-ai` + 这个 UA，
+	// 两者一致才完整复刻官方客户端形态。
+	//
+	// 版本段跟 config 的 client_version / cli_version（与出站 UA 同源，避免两处漂移）。
+	intlLoginUA := ""
+	if cfg.Upstream.ClientVersion != "" {
+		v := cfg.Upstream.ClientVersion
+		cli := cfg.Upstream.CliVersion
+		if cli == "" {
+			cli = v // 与 upstream 包的三段式默认一致（参照 workbuddy cliVersion=5.5.2）
+		}
+		intlLoginUA = "WorkBuddy/" + v + " WorkBuddy AI/" + v + " CLI/" + cli
+	}
 	if cfg.WorkbuddyIntlEnabled {
 		wbIntl := workbuddy.NewWithConfig(workbuddy.Config{
 			Pool:     poolAdapter{p: p},
@@ -323,7 +347,12 @@ func main() {
 			// 海外版凭证目录（auths/workbuddy-intl/），供登录落盘与池同步用。
 			AuthDir: cfg.WorkbuddyIntlAuthDir,
 			// 页内添加账号：海外版授权站点。
-			Login: workbuddyLogin("workbuddy-intl", cfg.WorkbuddyIntlOAuthBaseURL),
+			//
+			// ⚠ 第三参数是**登录三步共用的 UA**：海外版必须用
+			// `WorkBuddy/<v> WorkBuddy AI/<v> CLI/<v>` 形态。
+			// 参照 buddy-oauth.ts 明确要求三步都带产品身份，
+			// 注释原文：「否则 WorkBuddy 登录会以 CodeBuddy 的 UA 发请求」。
+			Login: workbuddyLogin("workbuddy-intl", cfg.WorkbuddyIntlOAuthBaseURL, intlLoginUA),
 
 			// 海外版没有签到/成长/旅行玩法（product.json：DisableCheckin=true、
 			// UserGrowth=false）—— 实例只保留对话/模型/额度探测，
