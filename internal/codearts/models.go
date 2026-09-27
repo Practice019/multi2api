@@ -15,7 +15,6 @@
 package codearts
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 
@@ -332,37 +331,6 @@ func SetModelVerified(id string) {
 }
 
 var modelMu sync.Mutex
-
-// BuildModelCatalog 把模型表映射成 upstream.ModelCatalog。
-//
-// 倍率来自 knownModels 的 Multiplier（**上游下发的固定值**），
-// 不再是此前硬编码的 1.0 —— 那个占位值让管理台的倍率显示形同虚设。
-//
-// 上游未下发倍率的模型（MultiplierKnown == false）**不写入目录**：
-// ModelCatalog.MultiplierTable() 只收 Multiplier > 0 的条目，
-// 写 0 等于告诉调用方"这个模型免费"，而我们实际只是不知道。
-// 宁可不显示，也不要给一个会被读错的数字。
-func BuildModelCatalog() *upstream.ModelCatalog {
-	cat := &upstream.ModelCatalog{}
-	for _, m := range knownModels {
-		if !m.Verified || !m.MultiplierKnown {
-			continue
-		}
-		cat.Models = append(cat.Models, upstream.ModelCatalogEntry{
-			ID:                m.ID,
-			Name:              m.Name,
-			Vendor:            "codearts",
-			Tags:              []string{"codearts"},
-			CreditsRaw:        fmt.Sprintf("x%.2f credits", m.Multiplier),
-			Multiplier:        m.Multiplier,
-			MaxInputTokens:    m.ContextWindow,
-			SupportsToolCall:  true,
-			SupportsImages:    false,
-			SupportsReasoning: m.Reasoning,
-		})
-	}
-	return cat
-}
 
 // MultiplierFor 返回某模型的**上游固定倍率**，以及该值是否已知。
 //

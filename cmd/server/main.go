@@ -792,11 +792,10 @@ func main() {
 		Provider:        registryRouter{reg: registry, p: p},
 		DefaultProvider: func() string { id, _ := registry.First(); return id }(),
 		Admin: admin.New(admin.Config{
-			Pool:     p,
-			Upstream: up,
-			OAuth:    oauth.New(cfg.OAuthBaseURL),
-			Log:      checkinLog,
-			Ring:     logRing,
+			Pool:  p,
+			OAuth: oauth.New(cfg.OAuthBaseURL),
+			Log:   checkinLog,
+			Ring:  logRing,
 			AuthDir:  cfg.AuthDir,
 			APIKeys:  apiKeysStore, // /admin/apikeys 管理端点
 			APIKey:   cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）

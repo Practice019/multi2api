@@ -47,12 +47,24 @@ import (
 
 // Config 管理台依赖。
 type Config struct {
-	Pool     *pool.Pool
-	Upstream *upstream.Client
-	OAuth    *oauth.Client
-	Log      *checkinlog.Log
-	Ring     *logbuf.Ring
-	AuthDir  string
+	Pool *pool.Pool
+	// ⚠ 这里**没有** Upstream 字段 —— 已删除（它曾是 `*upstream.Client`，workbuddy 的私有 SDK）。
+	//
+	// 删除理由（两层，第二层是架构约束）：
+	//
+	//  1. 那个字段声明了却**从未被本包读取**（生产代码零引用），是个死字段 ——
+	//     注入方 cmd/server 一直在传，管理台从不消费。
+	//  2. 它让 admin 这条**核心线**依赖了某个上游的私有 SDK，直接打破
+	//     「加新上游核心零改动」这条判据（arch_test.go 的
+	//     TestPrivateSDKIsNotConsumedByOtherUpstreams 现在会拦下它）。
+	//
+	// 若将来管理台真的需要某个上游的能力，正确入口是 gateway 的扩展点
+	// （AdminExt 或新加一个），而不是把某个具体上游的客户端塞进来 ——
+	// 后者会让管理台长出只对某一个上游成立的行为。
+	OAuth   *oauth.Client
+	Log     *checkinlog.Log
+	Ring    *logbuf.Ring
+	AuthDir string
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里 auth_dir 的原值）。
 	//
 	// 与 AuthDir 的关系：`AuthDir = AuthsBase/<默认上游>`。
