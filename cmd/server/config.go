@@ -635,6 +635,27 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"cline"`
 
+	// Raccoon 第七个上游（商汤小浣熊 Raccoon Work）。
+	//
+	// 与其它上游同律：**启用是显式的**（raccoon.enabled=true），段缺席=不加载。
+	//
+	// ⚠ 登录走**微信扫码**：网关返回二维码承载 URL，前端渲染成二维码给用户扫。
+	// 扫码 code 由客户端本地随机生成，服务端接受任意自造 code ——
+	// 所以**不需要**官方 `office-raccoon://auth/callback` 那条不可用的链路。
+	//
+	// ⚠ 短信登录**不实现**：它要求阿里云滑块的 captcha_param，
+	// 而那只由浏览器里的 AliyunCaptcha.js 产出，纯 Go 无法程序化完成。
+	Raccoon struct {
+		// Enabled 是否启用 Raccoon 上游。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/raccoon`。
+		AuthDir string `json:"auth_dir"`
+		// APIBase 上游基址（留空=https://xiaohuanxiong.com）。
+		APIBase string `json:"api_base"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"raccoon"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -772,6 +793,12 @@ type Config struct {
 	ClineAPIBase      string `json:"-"`
 	ClineWorkOSBase   string `json:"-"`
 	ClinePoolAccounts bool   `json:"-"`
+
+	// Raccoon（第七上游）解析后。
+	RaccoonEnabled      bool   `json:"-"`
+	RaccoonAuthDir      string `json:"-"`
+	RaccoonAPIBase      string `json:"-"`
+	RaccoonPoolAccounts bool   `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -1284,6 +1311,17 @@ func (c *Config) normalize() error {
 	c.ClineWorkOSBase = strings.TrimSpace(c.Cline.WorkOSBase)
 	// 与其它上游一致：启用即默认并入账号池。
 	c.ClinePoolAccounts = c.ClineEnabled && boolOr(c.Cline.PoolAccounts, true)
+
+	// ---- raccoon（第七上游）----
+	c.RaccoonEnabled = c.Raccoon.Enabled
+	c.RaccoonAuthDir = strings.TrimSpace(c.Raccoon.AuthDir)
+	if c.RaccoonAuthDir == "" {
+		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
+		//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
+		c.RaccoonAuthDir = filepath.Join(c.AuthsBase, "raccoon")
+	}
+	c.RaccoonAPIBase = strings.TrimSpace(c.Raccoon.APIBase)
+	c.RaccoonPoolAccounts = c.RaccoonEnabled && boolOr(c.Raccoon.PoolAccounts, true)
 	return nil
 }
 

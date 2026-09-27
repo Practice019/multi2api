@@ -29,6 +29,7 @@ import (
 	"workbuddy2api/internal/mimo"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/raccoon"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
@@ -659,6 +660,48 @@ func main() {
 		}
 	} else if cl != nil {
 		log.Printf("cline: 未并入账号池（cline.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// ---- 第七个上游：Raccoon（商汤小浣熊 Raccoon Work）----
+	//
+	// 注册顺序仍 workbuddy 在前 → "裸模型名走谁"不变。
+	//
+	// # 与其它上游最大的不同：登录是**微信扫码**
+	//
+	// 网关返回二维码承载 URL，前端把它渲染成二维码给用户扫。
+	// 扫码 code 由客户端本地随机生成（服务端接受任意自造 code），
+	// 所以不需要官方那条 `office-raccoon://auth/callback` 链路
+	//（那条也不可用：回调地址写死在 Web bundle 里）。
+	//
+	// ⚠ 短信登录不实现：它要求阿里云滑块的 captcha_param，
+	// 那只由浏览器里的 AliyunCaptcha.js 产出，纯 Go 无法程序化完成。
+	var rc *raccoon.Provider
+	if cfg.RaccoonEnabled {
+		rc = raccoon.NewWithConfig(raccoon.Config{
+			APIBase: cfg.RaccoonAPIBase,
+			AuthDir: cfg.RaccoonAuthDir,
+		})
+		if err := registry.Register(rc); err != nil {
+			log.Fatalf("注册 Raccoon 上游失败: %v", err)
+		}
+		log.Printf("raccoon: 已启用（凭证目录 %s，基址 %s）",
+			cfg.RaccoonAuthDir, firstNonEmpty(cfg.RaccoonAPIBase, raccoon.DefaultAPIBase))
+	} else {
+		log.Printf("raccoon: 未启用（config 里 raccoon.enabled 缺省为 false）")
+		if list, err := raccoon.LoadDir(cfg.RaccoonAuthDir); err == nil && len(list) > 0 {
+			log.Printf("raccoon: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.RaccoonAuthDir, len(list))
+		}
+	}
+
+	if rc != nil && cfg.RaccoonPoolAccounts {
+		if n := syncRaccoonAccounts(p, cfg.RaccoonAuthDir); n > 0 {
+			log.Printf("raccoon: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("raccoon: 账号池中暂无账号（凭证目录 %s 里没有可用的 raccoon*.json）", cfg.RaccoonAuthDir)
+		}
+	} else if rc != nil {
+		log.Printf("raccoon: 未并入账号池（raccoon.pool_accounts=false），只能通过其管理端点使用")
 	}
 
 	// "已注册上游"必须打在**所有**上游注册完之后。
