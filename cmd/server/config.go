@@ -611,6 +611,30 @@ type Config struct {
 		OAuthRedirectMode string `json:"oauth_redirect_mode"`
 	} `json:"mimo"`
 
+	// Cline 第六个上游（Cline 桌面端 / Cline API）。
+	//
+	// 与 trae/loomy/mimo 同律：**启用是显式的**（cline.enabled=true），段缺席=不加载。
+	//
+	// ⚠ Cline 的登录与其它上游都不同：走 **WorkOS 设备码轮询**，
+	// **不起本地监听端口**（所以没有 oauth_callback_port 这类配置）。
+	// 也就没有"服务器部署下回调打不进本机"的问题 ——
+	// 不需要 manual 模式，也不需要用户粘贴任何东西。
+	Cline struct {
+		// Enabled 是否启用 Cline 上游。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/cline`。
+		AuthDir string `json:"auth_dir"`
+		// APIBase 推理/账号端点基址（留空=https://api.cline.bot）。
+		APIBase string `json:"api_base"`
+		// WorkOSBase 设备码授权基址（留空=https://api.workos.com）。
+		//
+		// ⚠ 与 APIBase 是**两个不同的域**，不要统一。把设备码请求发到
+		// api.cline.bot 会 404。
+		WorkOSBase string `json:"workos_base"`
+		// PoolAccounts 是否并入核心账号池（默认 true，与其它上游一致）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"cline"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -741,6 +765,13 @@ type Config struct {
 	MimoOAuthRedirectMode  string        `json:"-"`
 	MimoRouteBaseURL       string        `json:"-"`
 	MimoRouteClientVersion string        `json:"-"`
+
+	// Cline（第六上游）解析后。
+	ClineEnabled      bool   `json:"-"`
+	ClineAuthDir      string `json:"-"`
+	ClineAPIBase      string `json:"-"`
+	ClineWorkOSBase   string `json:"-"`
+	ClinePoolAccounts bool   `json:"-"`
 
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
@@ -1240,6 +1271,19 @@ func (c *Config) normalize() error {
 	if c.MimoOAuthRedirectMode == "" {
 		c.MimoOAuthRedirectMode = "auto"
 	}
+
+	// ---- cline（第六上游）----
+	c.ClineEnabled = c.Cline.Enabled
+	c.ClineAuthDir = strings.TrimSpace(c.Cline.AuthDir)
+	if c.ClineAuthDir == "" {
+		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
+		//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
+		c.ClineAuthDir = filepath.Join(c.AuthsBase, "cline")
+	}
+	c.ClineAPIBase = strings.TrimSpace(c.Cline.APIBase)
+	c.ClineWorkOSBase = strings.TrimSpace(c.Cline.WorkOSBase)
+	// 与其它上游一致：启用即默认并入账号池。
+	c.ClinePoolAccounts = c.ClineEnabled && boolOr(c.Cline.PoolAccounts, true)
 	return nil
 }
 
