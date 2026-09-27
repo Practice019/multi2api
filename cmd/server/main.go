@@ -21,6 +21,7 @@ import (
 	"workbuddy2api/internal/browseropen"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/clientlogin"
+	"workbuddy2api/internal/cline"
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
@@ -613,6 +614,51 @@ func main() {
 		}
 	} else if mm != nil {
 		log.Printf("mimo: 未并入账号池（mimo.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// ---- 第六个上游：Cline（Cline 桌面端 / Cline API）----
+	//
+	// 注册顺序仍 workbuddy 在前 → "裸模型名走谁"不变；cline 只在显式配置
+	// 或 "cline/模型名" 前缀时被用到。
+	//
+	// # 与其它上游最大的不同：登录不需要回调地址
+	//
+	// Cline 走 **WorkOS 设备码轮询**（拿设备码 → 用户浏览器确认 → 网关轮询换票），
+	// 不起本地监听端口。所以这里**没有** oauth_callback_port 之类的配置，
+	// 也没有 manual 模式 —— 服务器部署下天然可用。
+	//
+	// 协议实现与实测依据见 internal/cline 的包注释。
+	var cl *cline.Provider
+	if cfg.ClineEnabled {
+		cl = cline.NewWithConfig(cline.Config{
+			APIBase:    cfg.ClineAPIBase,
+			WorkOSBase: cfg.ClineWorkOSBase,
+			AuthDir:    cfg.ClineAuthDir,
+		})
+		if err := registry.Register(cl); err != nil {
+			log.Fatalf("注册 Cline 上游失败: %v", err)
+		}
+		log.Printf("cline: 已启用（凭证目录 %s，API %s，WorkOS %s）",
+			cfg.ClineAuthDir,
+			firstNonEmpty(cfg.ClineAPIBase, cline.DefaultAPIBase),
+			firstNonEmpty(cfg.ClineWorkOSBase, cline.DefaultWorkOSBase))
+	} else {
+		log.Printf("cline: 未启用（config 里 cline.enabled 缺省为 false）")
+		// 凭证在、上游没开 —— 与 codearts/trae/mimo 同款提示（防"界面上看不到号"被读成界面坏）。
+		if list, err := cline.LoadDir(cfg.ClineAuthDir); err == nil && len(list) > 0 {
+			log.Printf("cline: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.ClineAuthDir, len(list))
+		}
+	}
+
+	if cl != nil && cfg.ClinePoolAccounts {
+		if n := syncClineAccounts(p, cfg.ClineAuthDir); n > 0 {
+			log.Printf("cline: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("cline: 账号池中暂无账号（凭证目录 %s 里没有可用的 cline*.json）", cfg.ClineAuthDir)
+		}
+	} else if cl != nil {
+		log.Printf("cline: 未并入账号池（cline.pool_accounts=false），只能通过其管理端点使用")
 	}
 
 	// "已注册上游"必须打在**所有**上游注册完之后。
