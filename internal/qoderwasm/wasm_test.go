@@ -11,21 +11,27 @@ import (
 // newTestSigner 建一个用于测试的签名器（固定输入，不碰网络）。
 func newTestSigner(t *testing.T) *Signer {
 	t.Helper()
-	s, err := NewSigner(context.Background(), SignerOptions{
-		UID:                "fixture-uid-0001",
-		SecurityOAuthToken: "fixture-token-abc",
-		MachineID:          "fixture-machine-id-xyz",
-		Host:               "api2.qoder.sh",
-		ClientType:         "5",
-		BusinessProduct:    "cli",
-		BusinessType:       "agent",
-		Scene:              "assistant",
+	s, err := NewSigner(Options{
+		Host:            "api2.qoder.sh",
+		ClientType:      "5",
+		BusinessProduct: "cli",
+		BusinessType:    "agent",
+		Scene:           "assistant",
 	})
 	if err != nil {
 		t.Fatalf("NewSigner: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close(context.Background()) })
 	return s
+}
+
+// testIdentity 测试用账号身份。
+func testIdentity() Identity {
+	return Identity{
+		UID:         "fixture-uid-0001",
+		AccessToken: "fixture-token-abc",
+		MachineID:   "fixture-machine-id-xyz",
+	}
 }
 
 // TestWasmInstantiate 最小事实：WASM 能实例化、导出齐全。
@@ -155,7 +161,7 @@ func TestBuildInferRequestProtocolFacts(t *testing.T) {
 		"messages": []map[string]any{{"role": "user", "content": "hi"}},
 		"stream":   true,
 	})
-	path, payload, headers, err := s.BuildInferRequest("qfmodel", body)
+	path, payload, headers, err := s.BuildInferRequest(testIdentity(), "qfmodel", body)
 	if err != nil {
 		t.Fatalf("BuildInferRequest: %v", err)
 	}
@@ -212,7 +218,7 @@ func TestBuildInferRequestProtocolFacts(t *testing.T) {
 // 发一个必然失败的请求好。
 func TestBuildInferRequestRejectsMissingModel(t *testing.T) {
 	s := newTestSigner(t)
-	_, _, _, err := s.BuildInferRequest("", []byte(`{"messages":[]}`))
+	_, _, _, err := s.BuildInferRequest(testIdentity(), "", []byte(`{"messages":[]}`))
 	if err == nil {
 		t.Fatal("缺 model 时应报错")
 	}
@@ -221,16 +227,14 @@ func TestBuildInferRequestRejectsMissingModel(t *testing.T) {
 // TestBuildInferRequestRejectsBadJSON 非法 JSON 必须报错而不是发出垃圾。
 func TestBuildInferRequestRejectsBadJSON(t *testing.T) {
 	s := newTestSigner(t)
-	if _, _, _, err := s.BuildInferRequest("qfmodel", []byte(`{not json`)); err == nil {
+	if _, _, _, err := s.BuildInferRequest(testIdentity(), "qfmodel", []byte(`{not json`)); err == nil {
 		t.Fatal("非法 JSON 应报错")
 	}
 }
 
 // TestCloseIsIdempotent Close 幂等（避免 defer 与显式 Close 并存时二次报错）。
 func TestCloseIsIdempotent(t *testing.T) {
-	s, err := NewSigner(context.Background(), SignerOptions{
-		UID: "u", SecurityOAuthToken: "t", MachineID: "m", Host: "api2.qoder.sh",
-	})
+	s, err := NewSigner(Options{Host: "api2.qoder.sh"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +243,14 @@ func TestCloseIsIdempotent(t *testing.T) {
 	}
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("二次 Close 应返回 nil，得到: %v", err)
+	}
+	// 从未用过就 Close 也不该报错（懒编译意味着此时 mod 还是 nil）
+	s2, err := NewSigner(Options{Host: "api2.qoder.sh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Close(context.Background()); err != nil {
+		t.Fatalf("未使用时 Close 应返回 nil，得到: %v", err)
 	}
 }
 
@@ -278,7 +290,7 @@ func TestMemoryIsRecycledBeforeExhaustion(t *testing.T) {
 	})
 
 	// 预热，让初始分配稳定
-	if _, _, _, err := s.BuildInferRequest("qfmodel", body); err != nil {
+	if _, _, _, err := s.BuildInferRequest(testIdentity(), "qfmodel", body); err != nil {
 		t.Fatal(err)
 	}
 	// 把阈值压到略高于当前内存：再跑几次就该触发重建
@@ -288,7 +300,7 @@ func TestMemoryIsRecycledBeforeExhaustion(t *testing.T) {
 	peak := base
 	recycled := false
 	for i := 0; i < 300; i++ {
-		if _, _, _, err := s.BuildInferRequest("qfmodel", body); err != nil {
+		if _, _, _, err := s.BuildInferRequest(testIdentity(), "qfmodel", body); err != nil {
 			t.Fatalf("第 %d 次调用失败: %v", i, err)
 		}
 		cur := s.mod.mod.Memory().Size()
@@ -306,7 +318,7 @@ func TestMemoryIsRecycledBeforeExhaustion(t *testing.T) {
 			"内存会一直涨到 32 位地址空间耗尽", peak, base, s.memLimit)
 	}
 	// 重建后必须**仍然能正常出请求**（换实例不能把状态换坏）
-	path, payload, headers, err := s.BuildInferRequest("qfmodel", body)
+	path, payload, headers, err := s.BuildInferRequest(testIdentity(), "qfmodel", body)
 	if err != nil {
 		t.Fatalf("重建后调用失败: %v", err)
 	}
@@ -327,13 +339,13 @@ func TestRecyclePreservesIdentity(t *testing.T) {
 		"messages": []map[string]any{{"role": "user", "content": "hi"}},
 	})
 
-	_, _, h1, err := s.BuildInferRequest("qfmodel", body)
+	_, _, h1, err := s.BuildInferRequest(testIdentity(), "qfmodel", body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 强制重建
 	s.memLimit = 1
-	_, _, h2, err := s.BuildInferRequest("qfmodel", body)
+	_, _, h2, err := s.BuildInferRequest(testIdentity(), "qfmodel", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +376,7 @@ func TestConcurrentCallsAreSerialized(t *testing.T) {
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func() {
-			_, _, hdrs, err := s.BuildInferRequest("qfmodel", body)
+			_, _, hdrs, err := s.BuildInferRequest(testIdentity(), "qfmodel", body)
 			if err != nil {
 				errs <- err
 				return

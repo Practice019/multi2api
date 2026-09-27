@@ -30,16 +30,38 @@ type Client struct {
 	Signer RequestSigner
 }
 
+// SignIdentity 加密签名所需的账号身份。
+//
+// # 为什么用**独立结构体**而不是直接传 *Auth
+//
+// 实现方（internal/qoderwasm）**不能 import 本包** ——
+// 本包依赖 internal/gateway，而 arch_test 的 discoverUpstreams 用的是
+// `go list -deps`（**传递**依赖）：一旦 qoderwasm 依赖本包，
+// 它就会被判成一个"消费契约"的上游，而它没有 Provider 方法 → 判据红。
+//
+// 所以这里用**纯标量**把身份传过去，实现方不需要认识本包的任何类型。
+// 适配由装配层（cmd/server）做 —— 那里可以同时 import 两边。
+type SignIdentity struct {
+	// UID 账号主键（进 Cosy-User 与鉴权字段）。
+	UID string
+	// AccessToken 访问令牌（WASM 用它算 encrypt_user_info）。
+	AccessToken string
+	// MachineID 机器标识（进 Cosy-MachineId / Cosy-MachineToken）。
+	MachineID string
+}
+
 // RequestSigner 把一次推理请求编成加密端点的 (URL, 请求体, 签名头)。
 //
-// 这是 WASM 与网络层的接缝：WASM 部分（wasm*.go）实现它，
-// 本文件只负责把它产出的东西发出去。这样"加密怎么做"与"怎么发请求"
-// 各自可独立测试。
+// 这是 WASM 与网络层的接缝：WASM 部分实现它，本文件只负责把它产出的
+// 东西发出去。这样"加密怎么做"与"怎么发请求"各自可独立测试。
 type RequestSigner interface {
 	// BuildInferRequest 构造加密推理请求。
 	//
-	// 返回 (完整 URL 路径的 query 部分, 请求体字节, 额外请求头, error)。
-	BuildInferRequest(model string, body []byte) (path string, payload []byte, headers map[string]string, err error)
+	// id 是**本账号**的身份：签名与鉴权字段都由它派生，
+	// 所以同一个 Signer 实例可以服务多个账号（实现方自己缓存）。
+	//
+	// 返回 (URL 的 query 部分, 请求体字节, 额外请求头, error)。
+	BuildInferRequest(id SignIdentity, model string, body []byte) (path string, payload []byte, headers map[string]string, err error)
 }
 
 // New 生产默认值（国际版）。
@@ -357,7 +379,11 @@ func (c *Client) ChatStream(ctx context.Context, a *Auth, body []byte) (io.ReadC
 		return nil, 0, nil, ErrNoSigner
 	}
 	model := modelOf(body)
-	path, payload, headers, err := c.Signer.BuildInferRequest(model, body)
+	path, payload, headers, err := c.Signer.BuildInferRequest(SignIdentity{
+		UID:         a.UIDValue(),
+		AccessToken: a.AccessToken,
+		MachineID:   a.MachineID,
+	}, model, body)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("qoder: 构造加密请求失败: %w", err)
 	}

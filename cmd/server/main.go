@@ -792,21 +792,37 @@ func main() {
 			prod.EncryptedInferBase = cfg.QoderAPIBase
 			prodCN.EncryptedInferBase = cfg.QoderAPIBase
 		}
+		// WASM 签名器：加密推理的**唯一**可行路径（公开端点不认目录 key）。
+		// 一个签名器服务所有账号（内部按 uid 缓存各自的 QoderContext）。
+		qSigner := newQoderSigner(prod.EncryptedInferBase)
+		if qSigner != nil {
+			defer closeQoderSigner(qSigner)
+		}
+
 		qd = qoder.NewWithConfig(qoder.Config{
 			Product: prod,
 			AuthDir: cfg.QoderAuthDir,
 		})
+		if qSigner != nil {
+			qd.SetSigner(qoderSigner{s: qSigner})
+		}
 		if err := registry.Register(qd); err != nil {
 			log.Fatalf("注册 Qoder 上游失败: %v", err)
 		}
-		log.Printf("qoder: 已启用（凭证目录 %s，加密推理端点 %s）",
-			cfg.QoderAuthDir, prod.EncryptedInferBase)
+		log.Printf("qoder: 已启用（凭证目录 %s，加密推理端点 %s，WASM 签名器=%v）",
+			cfg.QoderAuthDir, prod.EncryptedInferBase, qSigner != nil)
 
 		if cfg.QoderCNActive {
 			qdCN = qoder.NewWithConfig(qoder.Config{
 				Product: prodCN,
 				AuthDir: cfg.QoderAuthDir,
 			})
+			// 中国版与国际版**共用同一个签名器**：两者同协议族、同一份 WASM，
+			// 且账号池里两个产品的凭证本来就在同一个目录（靠 product_id 区分）。
+			// 各建一个会重复编译 298 KB WASM（实测数百毫秒）。
+			if qSigner != nil {
+				qdCN.SetSigner(qoderSigner{s: qSigner})
+			}
 			if err := registry.Register(qdCN); err != nil {
 				log.Fatalf("注册 Qoder CN 上游失败: %v", err)
 			}
