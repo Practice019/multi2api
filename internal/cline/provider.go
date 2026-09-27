@@ -33,6 +33,10 @@ type Provider struct {
 	workOS   string
 	emailDummy struct{} // 占位，保持结构体非空便于未来加字段
 
+	// creds 按 uid 取凭证（装配层注入；nil = 管理端点不可用）。
+	// 见 adminroute.go 的 credentialSource。
+	creds credentialSource
+
 	loginOnce   sync.Once
 	loginCached *loginFlow
 }
@@ -87,8 +91,12 @@ func (p *Provider) ID() string { return providerID }
 //
 // ⚠ Cline **没有**签到接口（对整个 sidecar 做字符串扫描，checkin/daily/campaign
 // 均无 Cline 业务端点命中），所以**不声明** CapCheckin —— 声明了等于给前端画一个
-// 点了必然失败的面板。同理不声明 CapQuotaProbe：它没有主动额度探测端点，
-// 余额是另一套（/users/{id}/balance，见 FetchBalance），由 AdminExt 暴露。
+// 点了必然失败的面板。同理不声明 CapQuotaProbe：它没有主动额度探测端点。
+//
+// 余额是另一套（/users/{id}/balance，见 FetchBalance），由 AdminExt 暴露 ——
+// **这句话此前是不成立的**：AdminRoutes 当时并不存在，那个余额查询实现了
+// 却没有任何入口能调到（只有测试能碰）。现已在 adminroute.go 补上端点，
+// 注释与代码这才一致。
 //
 // 契约测试会检查"声明了的必须真的可用"，所以这里少报是安全的、多报会被当场抓住。
 func (p *Provider) Caps() gateway.Capability {

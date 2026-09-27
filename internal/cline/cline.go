@@ -90,6 +90,13 @@ const (
 // balancesPathFmt 余额查询路径模板（accountId 需 URL 编码）。
 const balancesPathFmt = "/api/v1/users/%s/balance"
 
+// normalizedBalance 把原始余额换算成展示量级（见 balanceScale 的注释）。
+//
+// 保留两位小数（与其它 provider 的积分展示精度一致）。
+func normalizedBalance(raw float64) float64 {
+	return float64(int64(raw/balanceScale*100+0.5)) / 100
+}
+
 // deviceGrantType 设备码轮询的 grant_type。
 //
 // ⚠ 逐字取自 RFC 8628，编码后是
