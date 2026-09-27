@@ -98,6 +98,13 @@ const (
 
 	// loginRewardPoints 登录奖励兜底积分（popup.points 缺失时用）。
 	loginRewardPoints = 3000
+
+	// loginRewardEventName 登录奖励在账单里的 `event_name`。
+	//
+	// ⚠ 判「登录奖励是否已领」必须同时匹配 `biz_type == "reward_grant"`
+	// **与**本常量 —— 「新人注册礼包」也是 reward_grant，
+	// 只判 biz_type 会让**新用户一开始就显示「已领取」**。
+	loginRewardEventName = "桌面端登录奖励"
 )
 
 // envelope 统一业务信封。

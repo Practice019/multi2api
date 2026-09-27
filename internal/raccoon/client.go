@@ -493,11 +493,67 @@ func (c *Client) ClaimLoginGrant(ctx context.Context, a *Auth) (LoginGrantResult
 	if !data.Granted {
 		return LoginGrantResult{Claimed: false}, nil // 已经领过（不是错误）
 	}
+
 	pts := float64(loginRewardPoints)
 	if data.Popup != nil && data.Popup.Points > 0 {
 		pts = data.Popup.Points
 	}
 	return LoginGrantResult{Claimed: true, Points: pts}, nil
+}
+
+// OnboardingStatus 「桌面端登录奖励」是否已领。
+type OnboardingStatus struct {
+	// Claimed 已领过（每号一次）。
+	Claimed bool
+	// Points 已领到的积分（未领或账单未给出时为默认额度）。
+	Points float64
+}
+
+// FetchOnboardingStatus 查登录奖励是否已领（供管理端点显示）。
+//
+// # 为什么必须查账单明细
+//
+// ⚠ **不能靠 balance 推断** —— 余额是多个来源（注册礼包 / 每日 / 充值）
+// 的合计，无法区分某一项是否已领。
+//
+// ⚠ **不能只按 `biz_type === 'reward_grant'` 判定** —— 「新人注册礼包」
+// 也是 reward_grant，把它算作登录奖励会让**新用户一开始就显示「已领取」**。
+// 必须同时匹配 `event_name === '桌面端登录奖励'`。
+//
+// ⚠ **服务端没有单独的奖励状态端点**（实测），故只能查账单明细。
+//
+// ⚠ 查询失败时**保守返回 Claimed:false** —— 宁可让用户多点一次
+//（服务端幂等，无害），也不要误报「已领」而让他真的错过。
+func (c *Client) FetchOnboardingStatus(ctx context.Context, a *Auth) OnboardingStatus {
+	fallback := OnboardingStatus{Claimed: false, Points: float64(loginRewardPoints)}
+	u := c.base() + pointsPrefix + "/bills?paging.limit=50&paging.offset=0"
+	env, _, err := c.doJSON(ctx, http.MethodGet, u, nil,
+		requestTimeoutMS, func(req *http.Request) { raccoonHeaders(req, a, true) })
+	if err != nil || env.Code != 0 {
+		return fallback
+	}
+	var data struct {
+		Items []struct {
+			BizType   string  `json:"biz_type"`
+			EventName string  `json:"event_name"`
+			Points    float64 `json:"points"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return fallback
+	}
+	for _, it := range data.Items {
+		// ⚠ 两个条件都要判（见函数注释：只判 biz_type 会让新用户误报已领）。
+		if it.BizType != "reward_grant" || it.EventName != loginRewardEventName {
+			continue
+		}
+		out := OnboardingStatus{Claimed: true, Points: fallback.Points}
+		if it.Points > 0 {
+			out.Points = it.Points
+		}
+		return out
+	}
+	return fallback
 }
 
 // ── 推理（raccoon-adapter.ts）───────────────────────────────────────────
