@@ -1,0 +1,317 @@
+// provider.go 把 Qoder 适配为 gateway.Provider。
+//
+// # 这个包同时服务两个 provider
+//
+//	qoder     国际版
+//	qodercn   中国版（同协议族、共用同一份 WASM，差异全在 Product 配置里）
+//
+// 这与参照项目一致：它是两个 `QoderAuth` 实例（`new QoderAuth(ctx)` 与
+// `new QoderAuth(ctx, { product: QODER_CN })`），不是两套实现。
+//
+// # 与其它上游的差异
+//
+//	推理走**加密端点**（请求体与签名头由 WASM 生成）
+//	模型列表是**静态表**（远端端点需 WASM 签名，我们不发那个请求）
+//	续期请求体必须带 machine_id
+//	错误帧是独立的 `event: error` + 顶层 {code,message,type}
+package qoder
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"sync"
+
+	"workbuddy2api/internal/gateway"
+)
+
+// Provider 实现 gateway.Provider 与若干可选扩展点。
+type Provider struct {
+	client  *Client
+	authDir string
+	// productID 本实例的产品标识（qoder / qodercn）。
+	productID string
+
+	loginOnce   sync.Once
+	loginCached *loginFlow
+}
+
+// Config Provider 的可选依赖。
+type Config struct {
+	// Client 上游 HTTP 客户端。nil 时按 Product 构造。
+	Client *Client
+	// Product 产品配置（零值时用国际版）。
+	Product Product
+	// Signer WASM 请求签名器（nil = 加密推理不可用，Chat 会明确报错）。
+	Signer RequestSigner
+	// AuthDir 凭证目录。
+	AuthDir string
+}
+
+// NewProvider 契约测试用的无依赖构造（国际版）。
+func NewProvider() gateway.Provider { return NewWithConfig(Config{}) }
+
+// NewProviderCN 中国版的无依赖构造。
+func NewProviderCN() gateway.Provider {
+	return NewWithConfig(Config{Product: QoderCN})
+}
+
+// NewWithConfig 建 Provider。
+func NewWithConfig(cfg Config) *Provider {
+	p := cfg.Product
+	if p.ID == "" {
+		p = Qoder
+	}
+	c := cfg.Client
+	if c == nil {
+		c = NewWithProduct(p)
+	}
+	if cfg.Signer != nil {
+		c.Signer = cfg.Signer
+	}
+	return &Provider{client: c, authDir: cfg.AuthDir, productID: p.ID}
+}
+
+// SetSigner 注入 WASM 签名器（装配层在 wasm 层就绪后调用）。
+func (p *Provider) SetSigner(s RequestSigner) {
+	if p != nil && p.client != nil {
+		p.client.Signer = s
+	}
+}
+
+// ID 上游标识。
+func (p *Provider) ID() string { return p.productID }
+
+// Caps 能力声明。
+//
+// 只声明可验证的两项：对话与模型目录。
+//
+// ⚠ 不声明 CapCheckin：Qoder 的每日积分领取在参照项目里是独立的
+// credits 模块，但那是**网页端活动**，不经 LLM 网关；本包不实现它。
+// ⚠ 不声明 CapQuotaProbe：没有主动额度探测端点。
+func (p *Provider) Caps() gateway.Capability {
+	return gateway.CapChat | gateway.CapModels
+}
+
+// Client 上游 HTTP 客户端。
+func (p *Provider) Client() *Client { return p.client }
+
+// Product 本实例的产品配置。
+func (p *Provider) Product() Product {
+	if p == nil || p.client == nil {
+		return Qoder
+	}
+	return p.client.Product
+}
+
+// AuthDir 凭证目录（gateway.AuthDirExt）。
+func (p *Provider) AuthDir() string {
+	if p != nil && p.authDir != "" {
+		return p.authDir
+	}
+	return ""
+}
+
+func authOf(cred gateway.Credential) (*Auth, error) {
+	if cred.Secret == nil {
+		return nil, errors.New("qoder: 凭证为空（Credential.Secret 未设置）")
+	}
+	a, ok := cred.Secret.(*Auth)
+	if !ok {
+		return nil, fmt.Errorf("qoder: 凭证类型不对，期望 *qoder.Auth，实际 %T", cred.Secret)
+	}
+	if a == nil {
+		return nil, errors.New("qoder: 凭证是 nil 指针")
+	}
+	if a.AccessToken == "" {
+		return nil, errors.New("qoder: 凭证缺少 accessToken（唯一鉴权材料）")
+	}
+	return a, nil
+}
+
+// Chat 转发一次对话（走加密端点）。
+func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byte) (gateway.ChatStream, error) {
+	a, err := authOf(cred)
+	if err != nil {
+		return gateway.ChatStream{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return gateway.ChatStream{}, err
+	}
+
+	rc, status, respBody, err := p.client.ChatStream(ctx, a, body)
+	if err != nil {
+		if len(respBody) > 0 {
+			return gateway.ChatStream{Status: status, Body: io.NopCloser(byteReader(respBody))}, nil
+		}
+		return gateway.ChatStream{}, err
+	}
+	if rc == nil {
+		rc = io.NopCloser(byteReader(nil))
+	}
+	return gateway.ChatStream{Status: status, Body: rc}, nil
+}
+
+// Models 返回模型目录（**静态表，不发网络请求**）。
+//
+// ⚠ 为什么用静态表：远端 `GET /algo/api/v2/model/list` 需 **WASM 签名**，
+// 故参照实现也不发这个请求 —— 表就是权威。
+func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gateway.ModelInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	models := ModelsFor(p.productID)
+	out := make([]gateway.ModelInfo, 0, len(models))
+	for _, m := range models {
+		out = append(out, gateway.ModelInfo{
+			ID:              m.ID,
+			ContextWindow:   m.ContextWindow,
+			MaxOutputTokens: 0, // 静态表里没有该字段（上游不下发）
+		})
+	}
+	return out, nil
+}
+
+// ProbeHealth 探测凭证是否健康（gateway.HealthProbeExt）。
+func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) error {
+	a, err := authOf(cred)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ui := p.client.FetchUserInfo(ctx, a)
+	if ui.UID == "" && ui.Nickname == "" {
+		return fmt.Errorf("qoder: 令牌校验未返回用户信息（可能已失效）")
+	}
+	return nil
+}
+
+// Classify 错误分类（gateway.ErrorClassifier）。
+func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
+	return Classify(status, body)
+}
+
+// ── 凭证读写 ────────────────────────────────────────────────────────────
+
+// LoadCredentials 读取 dir 下本产品的凭证。
+func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
+	list, err := LoadDirFor(p.effectiveDir(dir), p.productID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gateway.Credential, 0, len(list))
+	for _, a := range list {
+		out = append(out, gateway.Credential{
+			Provider: p.productID, UID: a.UIDValue(),
+			Nickname: a.Nickname, FilePath: a.FilePath,
+		})
+	}
+	return out, nil
+}
+
+// LoadCredentialsWithSecrets 与 LoadCredentials 同源，但额外给出 Secret。
+func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialSecret, error) {
+	list, err := LoadDirFor(p.effectiveDir(dir), p.productID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gateway.CredentialSecret, 0, len(list))
+	for _, a := range list {
+		out = append(out, gateway.CredentialSecret{
+			Credential: gateway.Credential{
+				Provider: p.productID, UID: a.UIDValue(),
+				Nickname: a.Nickname, FilePath: a.FilePath,
+			},
+			Secret: a,
+		})
+	}
+	return out, nil
+}
+
+func (p *Provider) effectiveDir(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	if p != nil {
+		return p.authDir
+	}
+	return ""
+}
+
+// ── 续期 ────────────────────────────────────────────────────────────────
+
+// RefreshCredential 续期（原地更新 + 落盘）。
+//
+// ⚠ machine_id 必须保留 —— 续期请求体要用它。
+func (p *Provider) RefreshCredential(cred gateway.Credential) error {
+	a, err := authOf(cred)
+	if err != nil {
+		return err
+	}
+	next, err := p.client.RefreshCredential(context.Background(), a)
+	if err != nil {
+		return err
+	}
+	a.AccessToken = next.AccessToken
+	if next.RefreshToken != "" {
+		a.RefreshToken = next.RefreshToken
+	}
+	if next.ExpiresIn > 0 {
+		a.ExpiresIn = next.ExpiresIn
+	}
+	if err := saveAuthFile(a); err != nil {
+		return nil // 落盘失败不让刷新失败
+	}
+	return nil
+}
+
+// Renewable 报告是否可续期。
+func (p *Provider) Renewable(cred gateway.Credential) bool {
+	a, err := authOf(cred)
+	if err != nil {
+		return false
+	}
+	return a.Renewable()
+}
+
+// LoginFlow 返回（并缓存）登录流程。
+func (p *Provider) LoginFlow() (gateway.LoginFlow, bool) {
+	if p == nil {
+		return nil, false
+	}
+	p.loginOnce.Do(func() {
+		p.loginCached = &loginFlow{p: p, ses: map[string]*loginEntry{}}
+	})
+	return p.loginCached, true
+}
+
+// byteReader 把 []byte 包成 io.Reader。
+func byteReader(b []byte) io.Reader { return &sliceReader{b: b} }
+
+type sliceReader struct {
+	b []byte
+	i int
+}
+
+func (r *sliceReader) Read(p []byte) (int, error) {
+	if r.i >= len(r.b) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.b[r.i:])
+	r.i += n
+	return n, nil
+}
+
+// 编译期断言。
+var (
+	_ gateway.Provider               = (*Provider)(nil)
+	_ gateway.CredentialLoader       = (*Provider)(nil)
+	_ gateway.CredentialSecretLoader = (*Provider)(nil)
+	_ gateway.AuthDirExt             = (*Provider)(nil)
+	_ gateway.ErrorClassifier        = (*Provider)(nil)
+	_ gateway.HealthProbeExt         = (*Provider)(nil)
+	_ gateway.CredentialRefresher    = (*Provider)(nil)
+)

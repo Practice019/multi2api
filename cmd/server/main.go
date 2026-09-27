@@ -31,6 +31,7 @@ import (
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/raccoon"
+	"workbuddy2api/internal/qoder"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
@@ -767,6 +768,65 @@ func main() {
 		}
 	} else if lb != nil {
 		log.Printf("lobsterai: 未并入账号池（lobsterai.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// ---- 第九、十个上游：Qoder（阿里系，国际版 + 中国版）----
+	//
+	// ⚠ 两者是同协议族（共用同一份 WASM），差异全在**模型表与产品配置**里，
+	// 所以是同一个实现的**两个实例**，不是两套实现 ——
+	// 与参照项目一致（它也是两个 QoderAuth 实例）。
+	//
+	// ⚠ 推理走**加密端点**：目录 key（qfmodel / dmodel 等）只有那条路能用。
+	// 公开端点认通用名（qwen-flash），发目录 key 一律 `Unsupported model`。
+	//
+	// ⚠ 当前**未接 WASM 签名器** → 加密推理不可用，Chat 会返回明确错误
+	//（刻意不回落公开端点：那会把"加密不可用"伪装成"模型不存在"）。
+	// WASM 桥（wasm-bindgen 的 JS 对象堆模拟）是独立的一块，见 internal/qoder
+	// 包注释里的说明。
+	var qd, qdCN *qoder.Provider
+	if cfg.QoderEnabled {
+		qd = qoder.NewWithConfig(qoder.Config{
+			Product: qoder.Qoder,
+			AuthDir: cfg.QoderAuthDir,
+		})
+		if err := registry.Register(qd); err != nil {
+			log.Fatalf("注册 Qoder 上游失败: %v", err)
+		}
+		log.Printf("qoder: 已启用（凭证目录 %s，加密推理端点 %s）",
+			cfg.QoderAuthDir, qoder.Qoder.EncryptedInferBase)
+
+		if cfg.QoderCNActive {
+			qdCN = qoder.NewWithConfig(qoder.Config{
+				Product: qoder.QoderCN,
+				AuthDir: cfg.QoderAuthDir,
+			})
+			if err := registry.Register(qdCN); err != nil {
+				log.Fatalf("注册 Qoder CN 上游失败: %v", err)
+			}
+			log.Printf("qoder: 中国版（qodercn）已启用 —— 模型表与国际版**不同**" +
+				"（CN 独有 q37fmodel/gm51model，且没有 ultimate/performance 等 5 个）")
+		}
+	} else {
+		log.Printf("qoder: 未启用（config 里 qoder.enabled 缺省为 false）")
+		if list, err := qoder.LoadDir(cfg.QoderAuthDir); err == nil && len(list) > 0 {
+			log.Printf("qoder: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.QoderAuthDir, len(list))
+		}
+	}
+
+	if qd != nil && cfg.QoderPoolAccounts {
+		if n := syncQoderAccounts(p, cfg.QoderAuthDir, qoder.ProviderID); n > 0 {
+			log.Printf("qoder: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("qoder: 账号池中暂无账号（凭证目录 %s 里没有 qoder*.json）", cfg.QoderAuthDir)
+		}
+	}
+	if qdCN != nil && cfg.QoderPoolAccounts {
+		if n := syncQoderAccounts(p, cfg.QoderAuthDir, qoder.ProviderIDCN); n > 0 {
+			log.Printf("qodercn: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("qodercn: 账号池中暂无账号（凭证目录 %s 里没有 CN 凭证）", cfg.QoderAuthDir)
+		}
 	}
 
 	// "已注册上游"必须打在**所有**上游注册完之后。
