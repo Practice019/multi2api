@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"workbuddy2api/internal/logbuf"
-	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/gateway"
 )
 
 // 冷启动契约：/admin/stats 必须能**自行**把模型目录拉起来。
@@ -34,10 +34,10 @@ func TestStatsColdStartCanBootstrapCatalog(t *testing.T) {
 		}
 		return ModelCatalogState{State: "ok", Models: 1}
 	}
-	fetchFn := func(string) *upstream.ModelCatalog {
+	fetchFn := func(string) *gateway.ModelCatalog {
 		fetchCalls.Add(1)
 		haveCatalog.Store(true)
-		return catalogWith(upstream.ModelCatalogEntry{ID: "deepseek-v4", Multiplier: 0.51})
+		return catalogWith(gateway.ModelCatalogEntry{ID: "deepseek-v4", Multiplier: 0.51})
 	}
 
 	h, _ := newStatsHandler(t, []logbuf.Entry{
@@ -74,7 +74,7 @@ func TestStatsDoesNotHammerCatalogWhenFetchFails(t *testing.T) {
 		{Model: "deepseek-v4", Status: 200, Tokens: 10},
 	})
 	// 永远拿不到目录（模拟上游持续失败）
-	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog {
+	h.cfg.ModelCatalog = func(string) *gateway.ModelCatalog {
 		fetchCalls.Add(1)
 		return nil
 	}

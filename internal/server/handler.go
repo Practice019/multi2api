@@ -144,7 +144,7 @@ type Config struct {
 	// 这种「由 server 注入闭包」的方向；反向传 *Handler 会让 admin → server 形成
 	// 编译期依赖，而 server 反过来 import admin 是为了挂 /admin/ 子树 —— 一反向就是
 	// import cycle。传函数既避开环，也让 admin 不必知道缓存住在哪个包。
-	ModelCatalog func() *upstream.ModelCatalog
+	ModelCatalog func() *gateway.ModelCatalog
 	// ModelCatalogState 只读地报告模型目录缓存状态（ok/stale/unavailable）。
 	// 语义见包级 ModelCatalogState —— 它绝不触发上游请求。nil = 未接线。
 	ModelCatalogState func() CatalogState
@@ -693,7 +693,7 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 // 生命周期策略刻意与 dynamicModelsCache 完全一致（1h 正缓存 + 5min 失败负缓存、
 // 惰性拉取、不加 ticker/goroutine），这样「什么时候会打上游」在代码里只有一套心智模型。
 type modelCatalogEntry struct {
-	cat      *upstream.ModelCatalog
+	cat      *gateway.ModelCatalog
 	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
 }
@@ -701,6 +701,47 @@ type modelCatalogEntry struct {
 var modelCatalogCache struct {
 	sync.RWMutex
 	entries map[string]*modelCatalogEntry // provider → 目录缓存（惰性创建）
+}
+
+// toGatewayCatalog 把 workbuddy 的目录投影成中立类型。
+//
+// # 为什么需要这个转换（而不是让 workbuddy 直接返回中立类型）
+//
+// `upstream.ModelCatalog` 的字段是 workbuddy /v3/config 的 schema
+// （CreditsRaw 的 "x0.51 credits" 形态、MaxInputTokens、
+// SupportsToolCall/Images/Reasoning）—— 那是**它的事实**，不该为了迁就
+// 核心而改掉它的解析层。而核心需要的是中立概念（模型 + 倍率）。
+//
+// 投影放在这里（server 是消费方），而不是让 workbuddy 反向依赖 gateway 的
+// 目录类型来产出它：转换方向要顺着依赖方向。
+//
+// ⚠ 这是 S5 收敛后**唯一**剩下的 workbuddy 私有目录用法。其余上游
+// （codearts/loomy/trae）都走 ModelMultiplierExt，不经这里。
+//
+// MultiplierKnown 的填法：上游给了非空 CreditsRaw 就说明它表态过
+// （哪怕系数解析成 0，那是"免费"而不是"未知"）。这与 admin 的
+// modelsPreview「保留 0 倍率」的语义一致 —— x0.00 是"免费"这个有意义的事实。
+func toGatewayCatalog(src *upstream.ModelCatalog) *gateway.ModelCatalog {
+	if src == nil {
+		return nil
+	}
+	out := &gateway.ModelCatalog{Models: make([]gateway.ModelCatalogEntry, 0, len(src.Models))}
+	for _, m := range src.Models {
+		out.Models = append(out.Models, gateway.ModelCatalogEntry{
+			ID:                m.ID,
+			Name:              m.Name,
+			Vendor:            m.Vendor,
+			Tags:              m.Tags,
+			CreditsRaw:        m.CreditsRaw,
+			Multiplier:        m.Multiplier,
+			MultiplierKnown:   m.CreditsRaw != "",
+			MaxInputTokens:    m.MaxInputTokens,
+			SupportsToolCall:  m.SupportsToolCall,
+			SupportsImages:    m.SupportsImages,
+			SupportsReasoning: m.SupportsReasoning,
+		})
+	}
+	return out
 }
 
 // ModelCatalog 返回缓存的模型目录；缓存失效时惰性回源一次，失败返回 nil。
@@ -726,7 +767,7 @@ var modelCatalogCache struct {
 // ModelCatalog 与 ModelCatalogState 通过 Config 的两个同名字段注入，
 // 测试可覆盖成桩函数，生产由 cmd/server 直接传这两个包级函数。
 // ModelCatalog 返回**默认上游**的模型目录（兼容旧签名；等价 ModelCatalogFor("")）。
-func ModelCatalog() *upstream.ModelCatalog {
+func ModelCatalog() *gateway.ModelCatalog {
 	if h := catalogHost.Load(); h != nil {
 		return h.modelCatalogFor("")
 	}
@@ -737,7 +778,7 @@ func ModelCatalog() *upstream.ModelCatalog {
 //
 // provider 为空串 = 默认上游（与 Pool 未打标签语义一致，单上游部署逐字节不变）。
 // 多上游部署下每个上游的倍率各拉各的 /v3/config（见 modelCatalogCache 的注释）。
-func ModelCatalogFor(provider string) *upstream.ModelCatalog {
+func ModelCatalogFor(provider string) *gateway.ModelCatalog {
 	if h := catalogHost.Load(); h != nil {
 		return h.modelCatalogFor(provider)
 	}
@@ -817,7 +858,7 @@ func (h *Handler) modelCatalogState() CatalogState {
 
 // modelCatalogFor 是 (*Handler) 上的实现体，语义见包级 ModelCatalogFor。
 // provider 为空串 = 默认上游。
-func (h *Handler) modelCatalogFor(provider string) *upstream.ModelCatalog {
+func (h *Handler) modelCatalogFor(provider string) *gateway.ModelCatalog {
 	if h.cfg.Upstream == nil || h.cfg.Pool == nil {
 		return nil
 	}
@@ -832,11 +873,7 @@ func (h *Handler) modelCatalogFor(provider string) *upstream.ModelCatalog {
 	// /v3/config（拿别家凭证打 copilot.tencent.com 只会失败并惩罚无辜账号）。
 	if h.cfg.Provider != nil && provider != "" {
 		if m, ok := h.cfg.Provider.ModelMultipliers(context.Background(), provider); ok && len(m) > 0 {
-			models := make([]upstream.ModelCatalogEntry, 0, len(m))
-			for id, mult := range m {
-				models = append(models, upstream.ModelCatalogEntry{ID: id, Multiplier: mult})
-			}
-			return &upstream.ModelCatalog{Models: models}
+			return gateway.CatalogOf(m)
 		}
 	}
 
@@ -853,7 +890,7 @@ func (h *Handler) modelCatalogFor(provider string) *upstream.ModelCatalog {
 		return nil
 	}
 	// 内有未过期目录但已超 TTL：先取出来，全部重取失败时回吐旧目录。
-	var stale *upstream.ModelCatalog
+	var stale *gateway.ModelCatalog
 	if e != nil {
 		stale = e.cat
 	}
@@ -879,12 +916,18 @@ func (h *Handler) modelCatalogFor(provider string) *upstream.ModelCatalog {
 			break
 		}
 		tried[acct.UID] = true
-		cat, err := h.cfg.Upstream.FetchModelCatalog(acct)
-		if err != nil || cat == nil || len(cat.Models) == 0 {
+		// ⚠ 这里是**装配边界**：`cfg.Upstream` 是 workbuddy 的客户端，它返回的是
+		// workbuddy 自己的 `*upstream.ModelCatalog`；而缓存与出口层用的是中立类型
+		// `gateway.ModelCatalog`。转换必须发生在这里 —— 这一处是 core 与
+		// workbuddy 之间的必经点，也是 S5 收敛后**唯一**剩下的 workbuddy 私有
+		// 目录用法（其余都走 ModelMultiplierExt）。
+		raw, err := h.cfg.Upstream.FetchModelCatalog(acct)
+		if err != nil || raw == nil || len(raw.Models) == 0 {
 			// 与 fetchDynamicModels 同口径：惩罚该账号，避免下次 Pick 又选中同一个反复失败的号。
 			h.cfg.Pool.NoteError(acct.UID)
 			continue
 		}
+		cat := toGatewayCatalog(raw)
 		modelCatalogCache.Lock()
 		if modelCatalogCache.entries == nil {
 			modelCatalogCache.entries = map[string]*modelCatalogEntry{}

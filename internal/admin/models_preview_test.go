@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/gateway"
 )
 
 // GET /admin/models/preview 返回「模型 id → 成本倍率」，供前端在模型列表上标注倍率。
@@ -20,11 +20,11 @@ import (
 //   - 这份是**全部目录模型**（选择口径：这个模型多贵），前端要在下拉框里标注所有选项
 func TestModelsPreviewReturnsAllCatalogMultipliers(t *testing.T) {
 	h, _ := newStatsHandler(t, nil)
-	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog {
+	h.cfg.ModelCatalog = func(string) *gateway.ModelCatalog {
 		return catalogWith(
-			upstream.ModelCatalogEntry{ID: "deepseek-v4-pro", Multiplier: 0.51},
-			upstream.ModelCatalogEntry{ID: "hy4-preview-f", Multiplier: 0}, // 免费：x0.00
-			upstream.ModelCatalogEntry{ID: "kimi-k3-1", Multiplier: 1.62},
+			gateway.ModelCatalogEntry{ID: "deepseek-v4-pro", Multiplier: 0.51},
+			gateway.ModelCatalogEntry{ID: "hy4-preview-f", Multiplier: 0}, // 免费：x0.00
+			gateway.ModelCatalogEntry{ID: "kimi-k3-1", Multiplier: 1.62},
 		)
 	}
 
@@ -95,7 +95,7 @@ func TestModelsPreviewNilCatalogIsEmptyNotError(t *testing.T) {
 // 目录拿不到（返回 nil）时同样退化为空表。
 func TestModelsPreviewFetchFailureIsEmpty(t *testing.T) {
 	h, _ := newStatsHandler(t, nil)
-	h.cfg.ModelCatalog = func(string) *upstream.ModelCatalog { return nil }
+	h.cfg.ModelCatalog = func(string) *gateway.ModelCatalog { return nil }
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/models/preview", nil)
