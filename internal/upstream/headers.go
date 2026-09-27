@@ -270,6 +270,37 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	c.injectDeviceToken(req, a)
 }
 
+// authRefreshSource X-Auth-Refresh-Source 的取值。
+//
+// # 已知差异：我们用 "workbuddy"，官方 IDE 形态是 "ide-main"（**刻意保留现状**）
+//
+// 参照项目 dsh-codearts-auth（从 CodeBuddy CN IDE 逆向，见其 src/buddy.ts:95）
+// 用的是 `ide-main`，且注释写明依据：「对齐 IDE 的 ide-main」——
+// 它的 header 常量整段标注「逆向自 IDE Jd/jM/qM 定义」，不是猜的。
+//
+// 而我们的值是 `workbuddy`，来历是**初始导入**（git log -S 显示来自
+// `c1a14cb init: workbuddy2api source`），从未有过实机依据。
+//
+// 为什么仍然保留 workbuddy（三条一起看）：
+//
+//  1. **实测能工作**：三个独立的 Go fork（workbuddy2api 上游、panel fork、
+//     codearts2api）全都是 `workbuddy`，且都在生产里跑续期。一个必然
+//     导致续期失败的取值不会在三个 fork 里同时存活。
+//  2. **本仓当前无有效凭证**：改它属于行为变更，而我无法在改完后实测
+//     续期仍正常（codearts 的 STS 凭证已失效 STS5.1806）。
+//     无验证手段的行为变更 = 赌。
+//  3. **代价不对称**：若 workbuddy 是对的，改成 ide-main 会打断所有账号的
+//     自动续期；若 ide-main 更"正确"但 workbuddy 也能用，保留它没有任何损失。
+//
+// 所以：**保留现状，把差异记录在此**。将来若拿到有效凭证，可用这条命令
+// 做一次 A/B（改值 → 观察续期是否仍成功）：
+//
+//	# 改前先记下当前 refresh 请求的响应码，改后对比
+//	set 该常量为 "ide-main" && go test ./internal/upstream/ -run TestRefreshToken
+//
+// 若届时确认 ide-main 也对（或更好），改过来并删掉这一段。
+const authRefreshSource = "workbuddy"
+
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
 func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
 	c.CommonHeaders(req, a)
@@ -277,5 +308,5 @@ func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 	}
-	req.Header.Set("X-Auth-Refresh-Source", "workbuddy")
+	req.Header.Set("X-Auth-Refresh-Source", authRefreshSource)
 }
