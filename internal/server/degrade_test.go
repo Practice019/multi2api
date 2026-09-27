@@ -29,7 +29,6 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/prompt"
-	"workbuddy2api/internal/upstream"
 )
 
 // newBuf 返回一个记录响应的 ResponseRecorder。
@@ -88,10 +87,10 @@ func (r *chatRecorder) next(i int) (int, string, bool) {
 }
 
 // newRecorderUpstream 造一个会记录请求 body 的假上游。
-func newRecorderUpstream(t *testing.T, r *chatRecorder) *upstream.Client {
+func newRecorderUpstream(t *testing.T, r *chatRecorder) upstreamAdapter {
 	t.Helper()
 	c := newFakeUpstream(t, func(string) (int, string, bool) { return 500, "", false })
-	c.HTTP = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	c.Client().HTTP = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		raw, _ := io.ReadAll(req.Body)
 		n := r.calls()
 		r.record(raw)
@@ -181,14 +180,15 @@ func TestContentBlockTriggersDegradeAndRetries(t *testing.T) {
 	)
 	up := newRecorderUpstream(t, rec)
 	gate := prompt.NewGate()
-	up.PromptMode = prompt.ModeCustom
-	up.PromptText = "网关自有提示词"
-	up.PromptGate = gate
+	up.Client().PromptMode = prompt.ModeCustom
+	up.Client().PromptText = "网关自有提示词"
+	up.Client().PromptGate = gate
 
 	uid := "u-block"
 	h := NewHandler(Config{
 		Pool:       testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream:   up,
+		DefaultClassifier: defaultClassifierOf(),
 		PromptGate: gate,
 	})
 
@@ -236,14 +236,15 @@ func TestContentBlockTwiceReturnsUpstreamErrorWithoutRotating(t *testing.T) {
 
 	up := newRecorderUpstream(t, rec)
 	gate := prompt.NewGate()
-	up.PromptMode = prompt.ModeCustom
-	up.PromptText = "网关自有提示词"
-	up.PromptGate = gate
+	up.Client().PromptMode = prompt.ModeCustom
+	up.Client().PromptText = "网关自有提示词"
+	up.Client().PromptGate = gate
 
 	uid := "u-block2"
 	h := NewHandler(Config{
 		Pool:       testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream:   up,
+		DefaultClassifier: defaultClassifierOf(),
 		PromptGate: gate,
 		MaxRotate:  5, // 给足预算：若实现仍在换号，这里会跑满 5 次
 	})
@@ -306,14 +307,15 @@ func TestContentBlockSingleAccountStillRetries(t *testing.T) {
 	)
 	up := newRecorderUpstream(t, rec)
 	gate := prompt.NewGate()
-	up.PromptMode = prompt.ModeCustom
-	up.PromptText = "网关自有提示词"
-	up.PromptGate = gate
+	up.Client().PromptMode = prompt.ModeCustom
+	up.Client().PromptText = "网关自有提示词"
+	up.Client().PromptGate = gate
 
 	// 池里**只有一个**账号 —— 这正是绝大多数自托管部署的形态。
 	h := NewHandler(Config{
 		Pool:       testPoolWith(&auth.Auth{UID: "only", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream:   up,
+		DefaultClassifier: defaultClassifierOf(),
 		PromptGate: gate,
 	})
 
@@ -350,6 +352,7 @@ func TestContentBlockWithNilGateReturnsErrorNoRetry(t *testing.T) {
 	h := NewHandler(Config{
 		Pool:      testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream:  up,
+		DefaultClassifier: defaultClassifierOf(),
 		MaxRotate: 5,
 	})
 
@@ -382,14 +385,15 @@ func TestContentBlockAlreadyDegradedDoesNotRetryAgain(t *testing.T) {
 	up := newRecorderUpstream(t, rec)
 	gate := prompt.NewGate()
 	gate.Trigger() // 已在降级期
-	up.PromptMode = prompt.ModeCustom
-	up.PromptText = "网关自有提示词"
-	up.PromptGate = gate
+	up.Client().PromptMode = prompt.ModeCustom
+	up.Client().PromptText = "网关自有提示词"
+	up.Client().PromptGate = gate
 
 	uid := "u-predegraded"
 	h := NewHandler(Config{
 		Pool:       testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream:   up,
+		DefaultClassifier: defaultClassifierOf(),
 		PromptGate: gate,
 		MaxRotate:  5,
 	})

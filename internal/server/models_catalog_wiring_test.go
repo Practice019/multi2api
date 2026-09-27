@@ -55,7 +55,7 @@ func TestModelCatalogFetchesAndCaches(t *testing.T) {
 	resetCatalogCache()
 	var hits int
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: newCatalogUpstream(200, catalogBody, &hits)})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(newCatalogUpstream(200, catalogBody, &hits))})
 
 	cat := ModelCatalog()
 	if cat == nil {
@@ -89,7 +89,7 @@ func TestModelCatalogStateIsReadOnly(t *testing.T) {
 	resetCatalogCache()
 	var hits int
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	_ = NewHandler(Config{Pool: p, Upstream: newCatalogUpstream(200, catalogBody, &hits)})
+	_ = NewHandler(Config{Pool: p, Upstream: wrapUpstream(newCatalogUpstream(200, catalogBody, &hits))})
 
 	// 空缓存：unavailable，且一次上游都不打
 	st := ModelCatalogState()
@@ -119,7 +119,7 @@ func TestModelCatalogStateStaleAfterTTL(t *testing.T) {
 	resetCatalogCache()
 	var hits int
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	_ = NewHandler(Config{Pool: p, Upstream: newCatalogUpstream(200, catalogBody, &hits)})
+	_ = NewHandler(Config{Pool: p, Upstream: wrapUpstream(newCatalogUpstream(200, catalogBody, &hits))})
 
 	if ModelCatalog() == nil {
 		t.Fatal("ModelCatalog() 应有数据")
@@ -151,7 +151,7 @@ func TestModelCatalogFailureNegativeCache(t *testing.T) {
 	var hits int
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	up := newCatalogUpstream(500, `{"code":500,"msg":"boom"}`, &hits)
-	_ = NewHandler(Config{Pool: p, Upstream: up})
+	_ = NewHandler(Config{Pool: p, Upstream: wrapUpstream(up)})
 
 	if cat := ModelCatalog(); cat != nil {
 		t.Fatalf("上游 500 时应返回 nil, got %+v", cat)
@@ -196,7 +196,7 @@ func TestModelCatalogRotatesOnFailure(t *testing.T) {
 		ChatBaseCN:    "https://fake.example",
 		BillingBaseCN: "https://fake.example",
 	}
-	_ = NewHandler(Config{Pool: p, Upstream: up})
+	_ = NewHandler(Config{Pool: p, Upstream: wrapUpstream(up)})
 
 	cat := ModelCatalog()
 	if cat == nil || len(cat.Models) != 3 {
@@ -217,7 +217,7 @@ func TestResetModelsCacheAlsoClearsCatalog(t *testing.T) {
 	resetCatalogCache()
 	var hits int
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	_ = NewHandler(Config{Pool: p, Upstream: newCatalogUpstream(200, catalogBody, &hits)})
+	_ = NewHandler(Config{Pool: p, Upstream: wrapUpstream(newCatalogUpstream(200, catalogBody, &hits))})
 
 	if ModelCatalog() == nil {
 		t.Fatal("应有数据")

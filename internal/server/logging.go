@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/logbuf"
-	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/wire"
 )
 
 // chatSeq 进程级请求序号（只用于 stdout 表格的 #%03d 显示）。
@@ -149,9 +149,9 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	s.hasUsage = true
 	s.usage = chunk.Usage
 	// completion_tokens 缺失时保持 0（与原有「末帧 usage 覆盖前值」的行为一致）。
-	// 用 upstream.UsageInt 而不是裸 float64 断言：与 completionTokens 同因 ——
+	// 用 wire.UsageInt 而不是裸 float64 断言：与 completionTokens 同因 ——
 	// 该值门控着扩展字段，不该因为"数字被字符串化"就把 credit 一起丢掉。
-	s.tokens = upstream.UsageInt(chunk.Usage["completion_tokens"])
+	s.tokens = wire.UsageInt(chunk.Usage["completion_tokens"])
 }
 
 // Read 返回原始数据，同时解析统计 TTFB/token。
@@ -185,7 +185,7 @@ func parseModelFromBody(body []byte) string {
 
 // completionTokens 从 Aggregate 返回的响应中提取 usage.completion_tokens；缺失返回 -1。
 //
-// 用 upstream.UsageInt 而不是直接断言 float64：这个返回值是**哨兵**（-1 表示
+// 用 wire.UsageInt 而不是直接断言 float64：这个返回值是**哨兵**（-1 表示
 // usage 缺失），而它同时**门控**着 credit/推理/缓存三个新字段的落盘
 // （见 logChatRow）。若只认 float64，上游一旦把 completion_tokens 字符串化，
 // 就会连"能读的 credit"一起被丢掉 —— 解析器比它旁边的提取器宽容，这里对齐。
@@ -199,7 +199,7 @@ func completionTokens(resp map[string]any) int {
 	if !ok {
 		return -1
 	}
-	return upstream.UsageInt(v)
+	return wire.UsageInt(v)
 }
 
 // usageOf 从 Aggregate 返回的响应中取 usage 对象；缺失返回 nil。
@@ -254,7 +254,7 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 	// tokens<0 是「usage 缺失」的哨兵；此时 usage 对象即使非 nil 也不可信
 	// （例如上游给了半截 usage），扩展字段一律留 0。
 	if toks >= 0 {
-		x := upstream.ParseUsageExtras(usage)
+		x := wire.ParseUsageExtras(usage)
 		entry.Credit = x.Credit
 		entry.ThinkTokens = x.ThinkTokens
 		entry.CacheHitTokens = x.CacheHitTokens

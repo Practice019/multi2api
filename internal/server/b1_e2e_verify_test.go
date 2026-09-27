@@ -78,7 +78,7 @@ func TestB1EndToEnd(t *testing.T) {
 		Credit: 1.25, ThinkTokens: 7, CacheHitTokens: 15, CacheMissTokens: 5,
 	})
 
-	h := NewHandler(Config{Pool: p, Upstream: cl, Admin: nil})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(cl), Admin: nil})
 	_ = sink
 
 	// --- 1. 目录接线 ---

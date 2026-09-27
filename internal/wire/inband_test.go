@@ -14,7 +14,7 @@
 // 这正是"内置对话测试正常、外部调用 api 只有 codearts 报错"的根因。
 //
 // 下面每条都是**变异验证**：把 inBandErrorOf 的判定去掉，用例立刻变红。
-package upstream
+package wire
 
 import (
 	"encoding/json"

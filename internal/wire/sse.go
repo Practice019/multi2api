@@ -1,5 +1,5 @@
 // sse.go 处理上游 SSE 流：聚合成单个 OpenAI 响应，或透传给客户端。
-package upstream
+package wire
 
 import (
 	"bufio"

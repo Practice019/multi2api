@@ -1,4 +1,16 @@
-// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + upstream 转发。
+// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + 转发到上游。
+//
+// # 本包**不依赖任何具体上游**（架构判据 3）
+//
+// 它认识的是：
+//
+//	gateway.Provider      契约（经 cfg.Provider / ProviderRouter 注入）
+//	DefaultUpstream       默认上游客户端（窄接口，见其注释）
+//	DefaultClassifier     默认上游的错误分类器（函数值）
+//	wire.*                中立线协议工具（SSE 读写、usage 抽取、限流解析）
+//
+// 它**不认识** workbuddy / codearts / … 中的任何一个包。
+// 这条边界由 arch_test.go 的 TestCoreDoesNotDependOnUpstreams 强制。
 package server
 
 import (
@@ -22,14 +34,28 @@ import (
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
-	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/wire"
 )
 
 // Config handler 依赖。
 type Config struct {
 	Pool     *pool.Pool
-	Upstream *upstream.Client
+	Upstream DefaultUpstream
 	APIKey   string // 空 = 不鉴权
+	// DefaultClassifier 默认上游的错误分类器（装配层注入）。
+	//
+	// # 为什么由装配层注入而不是核心自己调
+	//
+	// 分类判据（`hardMarkers` / `sessionDeadMarkers` / `12153`）是
+	// **workbuddy 的上游知识**。核心包不得认识任何具体上游
+	//（arch_test 判据 3 强制），所以核心只收一个函数值。
+	//
+	// 单上游部署（`Provider == nil`）与"该上游没实现 ErrorClassifier"
+	// 两种情形都回落到它 —— 语义上就是"用默认上游的判据"，
+	// 与改造前逐字节一致。
+	//
+	// nil 时回落 `gateway.DefaultErrorKind`（只按状态码）—— 那是**明确的降级**。
+	DefaultClassifier func(status int, body string) gateway.ErrorKind
 	// APIKeys 多 API key 管理（对标 new-api 令牌体系）：config.api_key 是
 	// 管理钥匙（不限额），普通 key 走 apikey.Store 的额度/限速/用量。
 	// nil = 不启用多 key 管理（旧行为）。
@@ -424,10 +450,80 @@ var staticModels = []map[string]any{
 	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "context_length": 131072},
 }
 
+// DefaultUpstream 默认上游的客户端（装配层注入）。
+//
+// # 为什么核心只收接口，不收 *upstream.Client
+//
+// `*upstream.Client` 是 **workbuddy 私有 SDK 的类型**。核心包（出口层）
+// 认识它，就等于核心依赖某个具体上游 —— 正是 arch_test 判据 3 禁止的、
+// 也是 privateSDKKnownDebt 里 server 那条债的形态。
+//
+// 改成接口之后，**判据与行为一个字没变**（方法签名逐字对齐），
+// 变的只是"核心认识的是一个形状，而不是某个包"。
+//
+// # 方法集是怎么定出来的（不是照抄 Client 的全部方法）
+//
+// 只列出口层**真正调用**的四个：FetchModels / FetchModelCatalog /
+// RefreshToken / ChatStreamWithIP。Client 上其余方法（签到、成长、旅行、
+// 上报…）是 workbuddy 的业务动作，出口层从不碰。
+//
+// 窄接口的好处不只是"看着干净"：它让"出口层到底需要上游提供什么"
+// 变成可读的事实。宽接口会掩盖这一点 —— 后来者会以为出口层依赖全部。
+type DefaultUpstream interface {
+	// FetchModels 拉默认上游的动态模型目录。
+	FetchModels(a *auth.Auth) ([]DefaultModel, error)
+
+	// FetchModelCatalog 拉默认上游的模型目录（含倍率）。
+	FetchModelCatalog(a *auth.Auth) (*gateway.ModelCatalog, error)
+
+	// RefreshToken 续期一个凭证。
+	//
+	// 失败时**应当**返回 `*RefreshError`（装配层的适配器负责包装）。
+	// 出口层据此区分"session 已死"（计数门控后禁用）与一般失败
+	//（只记一次错）。返回其它错误类型时一律按一般失败处理 ——
+	// 那是**保守方向**：不会误禁用账号。
+	RefreshToken(a *auth.Auth) error
+
+	// ChatStreamWithIP 发起一次对话流。
+	ChatStreamWithIP(a *auth.Auth, body []byte, clientIP string) (rc io.ReadCloser, status int, respBody []byte, err error)
+}
+
+// DefaultModel 出口层需要的模型元信息（中立形状）。
+//
+// # 为什么不用 gateway.ModelInfo
+//
+// `gateway.ModelInfo` 的窗口字段是 `int`，而默认上游给的是 `int64`
+//（上游用 int64 存 token 数）。改 gateway 的字段类型会牵动所有上游的
+// 实现与契约测试 —— 那是为了让一个**内部投影**少写两个字段，
+// 代价与收益不成比例。
+//
+// 所以这里保留 int64：出口层拿到后按需 `int64(...)` 提升
+//（`entryOf` 本来就收 int64）。适配层做一次转换即可。
+//
+// ⚠ 刻意**不**收 `Name` / `Efforts`：出口层从不读它们
+//（模型名直接用 ID；思考档位由出站改写层处理）。
+// 收进来只会让"接口比消费者需要的宽"，而宽接口会掩盖真实依赖。
+type DefaultModel struct {
+	ID            string
+	ContextWindow int64
+	MaxTokens     int64
+}
+
+// defaultUpstreamAdapter 把 *upstream.Client 适配成 DefaultUpstream。
+//
+// # 为什么适配器在装配层（cmd/server）而不是这里
+//
+// 本文件在 corePackages 里，**不得** import 任何具体上游。
+// 适配器要同时认识两边，只能住在能同时 import 它们的地方 ——
+// 装配层正是那个地方（与 poolAdapter / workbuddyLogin 同一手法）。
+//
+// 本文件只定义接口；`cmd/server` 提供实现。这样"核心要什么"与
+// "上游给什么"的转换发生在唯一的接缝上，而不是散进核心。
+
 // dynamicModelsCache 动态模型缓存。
 var dynamicModelsCache struct {
 	sync.RWMutex
-	ids      []upstream.ModelInfo
+	ids      []DefaultModel
 	fetched  time.Time // 最近一次成功拉取时间
 	lastFail time.Time // 最近一次拉取失败时间（负缓存）
 }
@@ -617,7 +713,7 @@ func (h *Handler) ownedByFor(id string) string {
 
 // fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
 // 拉取失败记录时间戳进入 5min 负缓存，冷却期内直接用静态表，避免反复打上游。
-func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
+func (h *Handler) fetchDynamicModels() []DefaultModel {
 	dynamicModelsCache.RLock()
 	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
 		out := dynamicModelsCache.ids
@@ -703,46 +799,23 @@ var modelCatalogCache struct {
 	entries map[string]*modelCatalogEntry // provider → 目录缓存（惰性创建）
 }
 
-// toGatewayCatalog 把 workbuddy 的目录投影成中立类型。
+// toGatewayCatalog 搬到了装配层（cmd/server/defaultupstream.go）。
 //
-// # 为什么需要这个转换（而不是让 workbuddy 直接返回中立类型）
+// # 为什么它不该留在核心
 //
-// `upstream.ModelCatalog` 的字段是 workbuddy /v3/config 的 schema
-// （CreditsRaw 的 "x0.51 credits" 形态、MaxInputTokens、
-// SupportsToolCall/Images/Reasoning）—— 那是**它的事实**，不该为了迁就
-// 核心而改掉它的解析层。而核心需要的是中立概念（模型 + 倍率）。
+// 它的入参是 `*upstream.ModelCatalog` —— **workbuddy 私有 SDK 的类型**。
+// 只要核心签名里出现它，核心就依赖了那个上游，无论函数体多"中立"。
 //
-// 投影放在这里（server 是消费方），而不是让 workbuddy 反向依赖 gateway 的
-// 目录类型来产出它：转换方向要顺着依赖方向。
+// 现在 DefaultUpstream 接口直接声明返回 `*gateway.ModelCatalog`，
+// 投影由装配层的适配器做（那里可以同时认识两边）。
 //
-// ⚠ 这是 S5 收敛后**唯一**剩下的 workbuddy 私有目录用法。其余上游
-// （codearts/loomy/trae）都走 ModelMultiplierExt，不经这里。
+// 函数体**逐字段原样搬走**，包括 MultiplierKnown 那条容易漏的填法：
 //
-// MultiplierKnown 的填法：上游给了非空 CreditsRaw 就说明它表态过
-// （哪怕系数解析成 0，那是"免费"而不是"未知"）。这与 admin 的
-// modelsPreview「保留 0 倍率」的语义一致 —— x0.00 是"免费"这个有意义的事实。
-func toGatewayCatalog(src *upstream.ModelCatalog) *gateway.ModelCatalog {
-	if src == nil {
-		return nil
-	}
-	out := &gateway.ModelCatalog{Models: make([]gateway.ModelCatalogEntry, 0, len(src.Models))}
-	for _, m := range src.Models {
-		out.Models = append(out.Models, gateway.ModelCatalogEntry{
-			ID:                m.ID,
-			Name:              m.Name,
-			Vendor:            m.Vendor,
-			Tags:              m.Tags,
-			CreditsRaw:        m.CreditsRaw,
-			Multiplier:        m.Multiplier,
-			MultiplierKnown:   m.CreditsRaw != "",
-			MaxInputTokens:    m.MaxInputTokens,
-			SupportsToolCall:  m.SupportsToolCall,
-			SupportsImages:    m.SupportsImages,
-			SupportsReasoning: m.SupportsReasoning,
-		})
-	}
-	return out
-}
+//	MultiplierKnown: m.CreditsRaw != ""
+//
+// 语义是"上游给了非空 CreditsRaw 就说明它表态过"（哪怕系数解析成 0，
+// 那是"免费"而不是"未知"）。这与 admin 的 modelsPreview「保留 0 倍率」
+// 一致 —— x0.00 是"免费"这个有意义的事实。
 
 // ModelCatalog 返回缓存的模型目录；缓存失效时惰性回源一次，失败返回 nil。
 //
@@ -916,18 +989,20 @@ func (h *Handler) modelCatalogFor(provider string) *gateway.ModelCatalog {
 			break
 		}
 		tried[acct.UID] = true
-		// ⚠ 这里是**装配边界**：`cfg.Upstream` 是 workbuddy 的客户端，它返回的是
-		// workbuddy 自己的 `*upstream.ModelCatalog`；而缓存与出口层用的是中立类型
-		// `gateway.ModelCatalog`。转换必须发生在这里 —— 这一处是 core 与
-		// workbuddy 之间的必经点，也是 S5 收敛后**唯一**剩下的 workbuddy 私有
-		// 目录用法（其余都走 ModelMultiplierExt）。
-		raw, err := h.cfg.Upstream.FetchModelCatalog(acct)
-		if err != nil || raw == nil || len(raw.Models) == 0 {
+		// ⚠ 这里原先是一处**装配边界**：`cfg.Upstream` 是 workbuddy 的客户端，
+		// 它返回 workbuddy 自己的 `*upstream.ModelCatalog`，而缓存与出口层用
+		// 中立类型 `gateway.ModelCatalog` —— 所以调一个 toGatewayCatalog 做投影。
+		//
+		// 现在那个投影**搬到了装配层**（见 cmd/server 的 defaultUpstream 适配器）：
+		// 接口直接声明返回 `*gateway.ModelCatalog`，核心拿到的就是中立类型。
+		// 投影本身一个字段都没变（逐字段搬运 + MultiplierKnown 的填法），
+		// 只是发生的位置从"核心里"挪到了"接缝上"。
+		cat, err := h.cfg.Upstream.FetchModelCatalog(acct)
+		if err != nil || cat == nil || len(cat.Models) == 0 {
 			// 与 fetchDynamicModels 同口径：惩罚该账号，避免下次 Pick 又选中同一个反复失败的号。
 			h.cfg.Pool.NoteError(acct.UID)
 			continue
 		}
-		cat := toGatewayCatalog(raw)
 		modelCatalogCache.Lock()
 		if modelCatalogCache.entries == nil {
 			modelCatalogCache.entries = map[string]*modelCatalogEntry{}
@@ -1156,8 +1231,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if h.needsRefreshVia(reqProvider, acct) {
 			if err := h.refreshCredential(ctx, reqProvider, acct); err != nil {
 				lastErr = err
-				var ue *upstream.Error
-				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+				var re *RefreshError
+				if errors.As(err, &re) && re.SessionDead {
 					// 与出站路径同口径：刷新时的 session dead 也走计数门控。
 					// 刷新失败常常正是**竞态**（另一个并发请求刚消费了 refresh token），
 					// 一次就禁用是这个路径上最典型的误杀来源。
@@ -1204,11 +1279,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 却作用在两条上游的响应体上，造成"codearts 额度漏判"与
 			// "codearts 号被裸数字 12153 永久禁用"两条真危害。
 			kind := h.classifyErr(reqProvider, status, respBody)
-			lastErr = &upstream.Error{
-				// 中立类型 → upstream.ErrKind 的翻译**仅用于拼错误消息**：
-				// lastErr 只出现在循环出口的 503 文本里（见下方 msg），
-				// 不参与任何策略判断。真正的策略走 applyErrorPolicy(kind)。
-				Kind:   upstreamKindOf(kind),
+			lastErr = &chatError{
+				Kind:   kind,
 				Status: status,
 				Msg:    string(respBody),
 			}
@@ -1276,13 +1348,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// `200 + 一帧没有 choices 的空壳 + [DONE]` —— 正是"外部调用 api
 			// 只有 codearts 报错"的形态。
 			stats := newChatStatsReaderSince(rc, st.start)
-			serr := upstream.Stream(w, stats)
+			serr := wire.Stream(w, stats)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
 			st.usage = stats.Usage()
 			rc.Close()
 
-			var inband *upstream.InBandError
+			var inband *wire.InBandError
 			if errors.As(serr, &inband) {
 				if inband.Committed {
 					// 内容已流出、状态码已提交，错误帧也已原样下发：
@@ -1305,8 +1377,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 额度类错误会落到 ErrKindHardCredit（进硬冷却）——
 				// 判据全部来自上游，这里不新增任何假设。
 				kind := h.classifyErr(reqProvider, http.StatusOK, []byte(inband.Body))
-				lastErr = &upstream.Error{
-					Kind:   upstreamKindOf(kind),
+				lastErr = &chatError{
+					Kind:   kind,
 					Status: http.StatusOK,
 					Msg:    inband.Message,
 				}
@@ -1325,16 +1397,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusOK
 			return
 		}
-		resp, err := upstream.Aggregate(rc)
+		resp, err := wire.Aggregate(rc)
 		rc.Close()
 
 		// 非流式同样要拦流内错误：Aggregate 命中错误信封时返回 *InBandError，
 		// 而不是合成一个 content:"" 的成功响应（改造前它就是这么被吞掉的）。
-		var inband *upstream.InBandError
+		var inband *wire.InBandError
 		if errors.As(err, &inband) {
 			kind := h.classifyErr(reqProvider, http.StatusOK, []byte(inband.Body))
-			lastErr = &upstream.Error{
-				Kind:   upstreamKindOf(kind),
+			lastErr = &chatError{
+				Kind:   kind,
 				Status: http.StatusOK,
 				Msg:    inband.Message,
 			}
@@ -1568,19 +1640,17 @@ func (h *Handler) nextResetAt(uid string) time.Time {
 //
 // # 三条路径（与 chatVia / refreshCredential / needsRefreshVia 同形状）
 //
-//	Provider == nil                   → upstream.Classify（单上游，逐字节不变）
+//	Provider == nil                   → cfg.DefaultClassifier（单上游，逐字节不变）
 //	Provider 在 && 上游实现了分类器   → 上游自己的分类（翻译成中立类型）
-//	Provider 在 && 上游没实现分类器   → upstream.Classify（回落默认上游判据）
+//	Provider 在 && 上游没实现分类器   → cfg.DefaultClassifier（回落默认上游判据）
 //
-// # 后两条回落为什么是同一个分支，且为什么**必须**是 upstream.Classify
+// # 后两条回落为什么是同一个分支，且为什么**必须**用默认上游的判据
 //
-// 单上游模式没有"别的上游"概念，行为要与改造前一致 —— 这正是
-// `upstream.Classify`。
+// 单上游模式没有"别的上游"概念，行为要与改造前一致。
 //
 // 而"该上游没实现 ErrorClassifier"的正确解释**不是**"用通用猜测"，
 // 而是"用默认上游的判据"：默认上游就是 workbuddy，它的分类判据
-// （hardMarkers / sessionDeadMarkers）就住在 upstream.Classify 里。
-// 换句话说，回落它不是妥协，而是**默认上游的分类器本身**。
+//（hardMarkers / sessionDeadMarkers）是 workbuddy 的**上游知识**。
 //
 // ⚠ 刻意**不**回落到 `gateway.DefaultErrorKind`（只按状态码的通用兜底）：
 // 那会丢掉 workbuddy 的两个正文判据 ——
@@ -1590,123 +1660,105 @@ func (h *Handler) nextResetAt(uid string) time.Time {
 //	`{"msg":"余额不足"}` 在 400 上不再触发硬冷却
 //	（TestChatRotatesOnHardCredit 会立刻变红）
 //
-// 也就是说：通用兜底会**静默削弱已有判据**。它不是回落目标，
-// 只是 gateway 为"将来某个全新的、既没实现分类器又不想沿用任何默认判据
-// 的上游"准备的显式选项 —— 当前没有任何上游走它。
+// 也就是说：通用兜底会**静默削弱已有判据**。
+//
+// # 这次改动把回落目标从 upstream.Classify 换成注入的分类器
+//
+// 原先这里直接调 `upstream.Classify` —— 那是**核心包 import 某个上游的
+// 私有 SDK**，正是 privateSDKKnownDebt 里 server 那条债的形态。
+//
+// 现在改由装配层注入（`cmd/server` 里包一层 `workbuddy.Classify`）：
+// **判据一个字没变**（还是 workbuddy 的那份），但核心不再需要认识
+// upstream 这个包。这是"把上游知识留在上游、核心只收接口"的常规手法。
+//
+// 注入为 nil 时（测试里的手工构造、或单上游但没接线的部署）回落到
+// `gateway.DefaultErrorKind` —— 只按状态码判断。那是**明确的降级**，
+// 不是静默削弱：nil 注入是调用方的显式选择。
 func (h *Handler) classifyErr(providerID string, status int, body []byte) gateway.ErrorKind {
 	if h.cfg.Provider != nil {
 		if kind, ok := h.cfg.Provider.Classify(providerID, status, string(body)); ok {
 			return kind
 		}
 	}
-	// 回落：默认上游（workbuddy）的判据 —— 也正是改造前的行为。
-	//
-	// ⚠ 这里**只**翻译类型（upstream.ErrKind → gateway.ErrorKind），
-	// 不改变任何判据：`upstream.Classify` 的返回值与改造前逐字相同。
-	return upstreamToGateway(upstream.Classify(status, string(body)))
+	if h.cfg.DefaultClassifier != nil {
+		return h.cfg.DefaultClassifier(status, string(body))
+	}
+	return gateway.DefaultErrorKind(status, string(body))
 }
 
-// upstreamErrKindMirror 是 upstream.ErrKind → gateway.ErrorKind 的逐项镜像。
+// RefreshError 续期失败的中立错误（装配层的适配器产出）。
 //
-// # 为什么 core 也需要这张表（而不是只让上游翻译）
+// # 为什么需要它（而不是直接看 upstream.Error）
 //
-// 回落分支拿到的仍然是 `upstream.ErrKind`（那是 upstream.Classify 的签名，
-// 不归本次改动管 —— 改它会把 workbuddy 的客户端契约也一起动）。
-// 要把它的结果变成 applyErrorPolicy 能吃的中立类型，就必须翻译一次。
+// 出口层原先用 `errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead`
+// 判断"该不该走计数门控"。`*upstream.Error` 是 workbuddy 私有 SDK 的类型 ——
+// 核心为了一个布尔判断依赖了某个上游的 SDK。
 //
-// ⚠ 这张表与 `internal/workbuddy` 的 `toGatewayKind` **语义相同但方向相反**
-// （一个翻译 ErrKind→中立，一个中立→ErrKind）。两份都必须存在，因为
-// core **不得** import 任何具体上游（架构判据 3，arch_test.go 强制）——
-// 它不可能是"复用 workbuddy 的那一份"。
+// 换成这个中立类型后判据完全一样（SessionDead 这个字段就是那个布尔），
+// 而核心不再认识 upstream 包。
 //
-// 风险（枚举漂移）由两侧的测试共同钉住：
-//
-//	internal/server  的 TestUpstreamKindMirrorCoversEveryKind
-//	internal/workbuddy 的 TestToGatewayKindCoversEveryUpstreamKind
-func upstreamToGateway(k upstream.ErrKind) gateway.ErrorKind {
-	switch k {
-	case upstream.ErrHardCredit:
-		return gateway.ErrKindHardCredit
-	case upstream.ErrSoftRate:
-		return gateway.ErrKindSoftRate
-	case upstream.ErrSessionDead:
-		return gateway.ErrKindSessionDead
-	case upstream.ErrNotFound:
-		return gateway.ErrKindNotFound
-	case upstream.ErrServer:
-		return gateway.ErrKindServer
-	case upstream.ErrClient:
-		return gateway.ErrKindClient
-	case upstream.ErrContentBlocked:
-		// ⚠ 这一条**必须**在回落分支里存在（单上游部署走的正是这里）。
-		//
-		// 漏掉它的后果不是"降级不生效"那么轻：内容拦截会被翻成
-		// gateway.ErrKindNone，而 None 在 core 侧是"只换号不罚" ——
-		// 于是单上游部署下，一次内容拦截会白烧 MaxRotate 次往返，
-		// 最后把"内容被拦"误报成"所有账号不可用"。
-		//
-		// ⚠ 这个文件里**有两张** upstream.ErrKind → gateway.ErrorKind 的表：
-		// 本函数（参与策略判断）与 upstreamKindOf（只用于日志）。
-		// 新增 upstream 常量时**两张都要改**，只改一张不会编译失败，
-		// 也不会有测试红 —— 除非 upstream_kind_mirror_test.go 的两条 guard 在。
-		// 我第一版正是只改了 upstreamKindOf，被那两个 guard 与
-		// degrade_test.go 的端到端用例一起抓出来。
-		return gateway.ErrKindContentBlocked
-	default:
-		return gateway.ErrKindNone
-	}
+// ⚠ `SessionDead` 用**具名字段**而不是直接复用 gateway.ErrorKind：
+// 这里的语义是"刷新路径上要不要走计数门控"，与"这次响应属于哪一类错误"
+// 是两件事（后者才是 ErrorKind）。合成一个会让读者以为它们是同一套判据。
+type RefreshError struct {
+	// SessionDead 凭证会话已死（需人工重登）。
+	SessionDead bool
+	// Msg 上游原文（保留可排查性）。
+	Msg string
+	// Err 原始错误（便于日志与 errors.Is 链）。
+	Err error
 }
 
-// upstreamKindOf 把中立类型翻回 upstream.ErrKind。
-//
-// # 唯一的用途：拼错误消息
-//
-// 出站循环的 lastErr 是 `*upstream.Error`，它的 Kind 会被 `Error()`
-// 打成 `"upstream session_dead (http 401): ..."` 这样的文本，
-// 出现在最终 503 的 body 里。那个文本**不参与任何策略判断**。
-//
-// 为什么要保留它而不是把 lastErr 整个换掉：`*upstream.Error` 还被
-// **续期分支**使用（`errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead`
-// → Pool.Disable）—— 那是刷新路径上的独立判据，不在本次改动范围内，
-// 必须原样保留。
-//
-// ⚠ 未知值回落到 `upstream.ErrNone`（打出来是 "none"）而不是某个惩罚性分类：
-// 它只影响日志文本。
-func upstreamKindOf(k gateway.ErrorKind) upstream.ErrKind {
-	switch k {
-	case gateway.ErrKindHardCredit:
-		return upstream.ErrHardCredit
-	case gateway.ErrKindSoftRate:
-		return upstream.ErrSoftRate
-	case gateway.ErrKindSessionDead:
-		return upstream.ErrSessionDead
-	case gateway.ErrKindNotFound:
-		return upstream.ErrNotFound
-	case gateway.ErrKindServer:
-		return upstream.ErrServer
-	case gateway.ErrKindClient:
-		return upstream.ErrClient
-	case gateway.ErrKindContentBlocked:
-		// 内容策略拦截有独立的 upstream 分类（workbuddy 会产出它）。
-		// 日志里打成 "upstream content_blocked (http 400): blocked by security policy"，
-		// 让"内容被拦"与"客户端参数写错"在日志里可区分 —— 两者的处置完全不同。
-		return upstream.ErrContentBlocked
-	default:
-		// 含 gateway.ErrKindAuth 与 ErrKindNone。
-		//
-		// ⚠ ErrKindAuth 刻意落 `upstream.ErrNone`（"none"）而不是 ErrClient：
-		// upstream.ErrKind 里**没有** auth 这一档，硬塞一个会让日志暗示
-		// "codearts 的 401 是 client 错误"，那是错的归因。
-		// 而它只影响文本 —— 策略早已由 applyErrorPolicy(kind) 决定。
-		return upstream.ErrNone
+func (e *RefreshError) Error() string {
+	if e == nil {
+		return ""
 	}
+	if e.Msg != "" {
+		return e.Msg
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "refresh failed"
+}
+
+func (e *RefreshError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// chatError 出站循环里累积的最后一个错误（**只用于拼 503 的文案**）。
+//
+// # 为什么不用 upstream.Error（这次重构把它换掉了）
+//
+// 原先这里用的是 `*upstream.Error` —— 那是 **workbuddy 私有 SDK 的类型**，
+// 而本包是核心出口层。为了一个纯展示用的结构体让核心依赖某个上游的 SDK，
+// 正是 privateSDKKnownDebt 里 server 那条债的形态。
+//
+// 换成 server 自己的类型之后，Kind 直接就是 `gateway.ErrorKind`
+//（中立类型），不再需要 upstreamKindOf 那层"中立 → upstream"的翻译 ——
+// 那层翻译**存在的唯一理由是 upstream.Error.Kind 是 upstream.ErrKind**。
+// 换句话说：这条依赖链被整条剪掉了，而不是被绕开。
+type chatError struct {
+	// Kind 错误类别（中立类型）。
+	Kind gateway.ErrorKind
+	// Status 上游返回的 HTTP 状态码（流内错误时为 200 —— 那是事实）。
+	Status int
+	// Msg 上游原文（原样保留，便于排查）。
+	Msg string
+}
+
+func (e *chatError) Error() string {
+	return fmt.Sprintf("upstream %s (http %d): %s", e.Kind, e.Status, e.Msg)
 }
 
 // softRateReset 问**该上游自己**"这次软限流有没有精确的重置时刻"。
 //
 // # 两条路径（与 classifyErr 同形状，但回落策略刻意不同）
 //
-//	Provider == nil（单上游）        → upstream.ParseSoftRateReset（逐字节旧行为 + 收窄）
+//	Provider == nil（单上游）        → wire.ParseSoftRateReset（逐字节旧行为 + 收窄）
 //	Provider 在 && 上游实现了扩展点  → 该上游自己解析
 //	Provider 在 && 上游没实现        → ok=false（保持账号级软冷却）
 //
@@ -1733,7 +1785,7 @@ func (h *Handler) softRateReset(providerID string, status int, body []byte) (tim
 	if status != http.StatusTooManyRequests {
 		return time.Time{}, false
 	}
-	return upstream.ParseSoftRateReset(string(body))
+	return wire.ParseSoftRateReset(string(body))
 }
 
 // chatVia 按**账号所属上游**把一次对话发出去，返回 (响应流, 状态码, 传输错误)。

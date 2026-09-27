@@ -1,28 +1,30 @@
-// upstream_kind_mirror_test.go core 侧两张翻译表的完备性判据。
+// upstream_kind_mirror_test.go 错误分类接缝的完备性判据。
 //
-// # 为什么必须补这个文件（它不是"锦上添花的测试"）
+// # 这个文件的历史（它保护的对象换过一次，值得记下）
 //
-// handler.go 里 `upstreamErrKindMirror` 的注释写着：
+// 原先它保护的是 core 里一张 `upstream.ErrKind → gateway.ErrorKind`
+// 的翻译表（`upstreamToGateway`）。那张表存在的**唯一理由**是：
+// 核心直接调 `upstream.Classify`，而它返回 upstream 自己的类型，
+// 核心要把它翻成 applyErrorPolicy 能吃的中立类型。
 //
-//	风险（枚举漂移）由两侧的测试共同钉住：
-//	  internal/server 的 TestUpstreamKindMirrorCoversEveryKind
-//	  internal/workbuddy 的 TestToGatewayKindCoversEveryUpstreamKind
+// 现在那条路径没了：分类改由 `cfg.DefaultClassifier` 注入
+//（装配层接 `workbuddy.Provider.Classify`，它**直接返回中立类型**）。
+// 于是 core 侧不再有任何 upstream 枚举的翻译表 ——
+// 翻译只存在于 workbuddy 一处（`toGatewayKind`），
+// 由它自己的 TestToGatewayKindCoversEveryUpstreamKind 把守。
 //
-// 而 **TestUpstreamKindMirrorCoversEveryKind 从来不存在**。
-// 也就是说，core 侧那张表（`upstreamToGateway`）一直是**无保护**的。
+// 所以本文件改成守**接缝本身**：
 //
-// 这不是纯理论问题：本次新增 `upstream.ErrContentBlocked` 时，
-// 我只改了 `upstreamKindOf`（翻回 ErrKind，只用于日志）而漏了
-// `upstreamToGateway`（翻成中立类型，**参与策略判断**）——
+//	1. 默认分类器（注入的那份）必须覆盖每一个 upstream 取值
+//	2. 内容拦截必须与客户端错误区分（这条语义决定仍成立）
+//	3. 注入的判据与 workbuddy 的表**逐项一致**（防两处漂移）
 //
-//	因为 workbuddy 侧那条 guard 只保护 workbuddy 的表；
-//	core 侧没有任何东西会红。
-//	结果：单上游部署下内容拦截被翻成 ErrKindNone → "只换号不罚"
-//	→ 一次内容拦截白烧 MaxRotate 次往返 → 503 "所有账号不可用"。
+// # 为什么第 3 条重要
 //
-// 最终是 degrade_test.go 的端到端用例把它抓出来的（那是**行为**测试，
-// 不是**表**测试）。本文件补上表这一层的直接保护：
-// 新增枚举值时立刻红，而不是等到某条端到端路径恰好覆盖到。
+// 现在有**两份**语义相同的翻译：生产的（internal/workbuddy.toGatewayKind）
+// 与测试的（defaultupstream_test.go 的 mirrorKind）。
+// 两份必然有漂移风险 —— 而漂移的后果是"测试通过、生产判错"，
+// 那是最坏的一类。所以这里直接比对两份的输出。
 package server
 
 import (
@@ -77,100 +79,107 @@ func TestAllUpstreamKindsIsNonTrivial(t *testing.T) {
 	}
 }
 
-// TestUpstreamKindMirrorCoversEveryKind core 的翻译表覆盖每一个 upstream 取值。
+// TestDefaultClassifierCoversEveryKind 注入的默认分类器覆盖每个 upstream 取值。
 //
 // # 判据
 //
-// 除 ErrNone 外，每个取值都必须翻到一个**非 ErrKindNone** 的中立类型。
+// 除 ErrNone 外，每个取值都必须被翻到一个**非 ErrKindNone** 的中立类型。
 //
 // 为什么"非 None"是关键判据：ErrKindNone 在 core 侧的含义是
 // "只换号不惩罚"。一个新错误类别如果静默落到 None，
 // 它在日志里看起来"处理过了"，实际**完全没被区别对待** ——
-// 那正是本次内容拦截踩的坑。
+// 那正是历史上内容拦截踩过的坑（一次内容拦截白烧 MaxRotate 次往返，
+// 最后误报成"所有账号不可用"）。
 //
-// ⚠ 这条断言对"两张表的方向"都成立：
-//
-//	upstreamToGateway  参与策略判断（漏了会误判）
-//	upstreamKindOf     只影响日志文本（漏了只是不好读）
-//
-// 但两者都用同一份枚举做输入，所以这里对两张表分别断言。
-func TestUpstreamKindMirrorCoversEveryKind(t *testing.T) {
+// ⚠ 这条现在测的是**测试用的那份分类器**（defaultClassifierOf），
+// 而它必须与生产注入的那份（workbuddy.Classify）语义一致 ——
+// 由下面 TestClassifierMatchesWorkbuddyTable 比对。
+func TestDefaultClassifierCoversEveryKind(t *testing.T) {
+	classify := defaultClassifierOf()
+
 	for _, k := range allUpstreamKinds() {
-		got := upstreamToGateway(k)
+		// 用真实响应体形态喂进去，让 upstream.Classify 走到对应分支。
+		status, body := probeFor(k)
+		got := classify(status, body)
 
 		if k == upstream.ErrNone {
 			if got != gateway.ErrKindNone {
-				t.Errorf("upstreamToGateway(ErrNone) = %v，期望 none", got)
+				t.Errorf("ErrNone 探针 → %v，期望 none", got)
 			}
 			continue
 		}
 		if got == gateway.ErrKindNone {
-			t.Errorf("upstreamToGateway(%v) = none —— "+
-				"core 会把 %q 这类错误当成\"只换号不惩罚\"，"+
-				"等于**完全没有区别对待**它。\n"+
-				"  请给 upstreamToGateway 补一个显式 case。", k, k.String())
+			t.Errorf("ErrKind %v（探针 %d/%q）被判成 none —— "+
+				"core 会把它当成\"只换号不惩罚\"，等于**完全没有区别对待**它。",
+				k, status, body)
 		}
 	}
 }
 
-// TestUpstreamKindOfCoversEveryKind 反向表（中立 → upstream）同样必须覆盖。
+// probeFor 给每个 ErrKind 造一对 (status, body) 探针。
 //
-// 它的用途只是拼日志文本，所以"漏了"的后果比上面轻 ——
-// 但漏了会让日志里出现 "upstream none (http 400)"，
-// 而真实原因是内容拦截。可诊断性也是判据的一部分。
-func TestUpstreamKindOfCoversEveryKind(t *testing.T) {
-	// 中立类型里有的、upstream 没有的取值（Auth），单独排除：
-	// 它翻回 ErrNone 是**刻意**的（见 upstreamKindOf 的注释）。
-	skip := map[gateway.ErrorKind]bool{gateway.ErrKindAuth: true}
-
-	for _, k := range allUpstreamKinds() {
-		if k == upstream.ErrNone {
-			continue
-		}
-		mid := upstreamToGateway(k)
-		if mid == gateway.ErrKindNone || skip[mid] {
-			continue
-		}
-		// 往返：upstream → mid → upstream，应回到原值。
-		if back := upstreamKindOf(mid); back != k {
-			t.Errorf("往返不一致：%v → %v → %v（期望回到 %v）—— "+
-				"两张表的方向不同步", k, mid, back, k)
-		}
+// # 为什么必须有这张表
+//
+// `upstream.Classify` 的入参是 (status, body)，不是 ErrKind ——
+// 想枚举"它能不能产出每一档"，就必须为每一档造一个能触发它的输入。
+//
+// ⚠ 这张表与 internal/upstream/client_test.go 的用例**同源**
+//（那里逐档列了 (status, body, wantKind)）。这里只取其中一条代表，
+// 用于验证分类器（经镜像）能产出那一档。
+//
+// 新增 ErrKind 时这里会因缺项而**落到 default 分支**（探针为 500/"boom"），
+// 若那个新档不是由 5xx 触发的，本测试就会红 —— 这正是想要的效果。
+func probeFor(k upstream.ErrKind) (int, string) {
+	switch k {
+	case upstream.ErrNone:
+		return 200, ``
+	case upstream.ErrHardCredit:
+		return 402, ``
+	case upstream.ErrSoftRate:
+		return 429, ``
+	case upstream.ErrSessionDead:
+		return 401, `Offline user session not found`
+	case upstream.ErrNotFound:
+		return 404, ``
+	case upstream.ErrServer:
+		return 500, `boom`
+	case upstream.ErrClient:
+		return 401, `{"code":9999,"msg":"bad token"}`
+	case upstream.ErrContentBlocked:
+		return 400, `blocked by security policy`
 	}
+	// 未知档：给一个最普通的上游故障。
+	return 500, `boom`
 }
 
-// TestUpstreamToGatewayAgainstHandWrittenMirror 与**独立手写**的镜像比对。
+// TestClassifierMatchesWorkbuddyTable 测试用的分类器与生产表**逐项一致**。
 //
-// # 为什么不直接断言 `upstreamToGateway(k) != None` 就够了
+// # 为什么必须比对（而不是各测各的）
 //
-// 那只挡住"漏项"，挡不住"翻错项"（例如把 ContentBlocked 翻成 HardCredit，
-// 那会让内容拦截去冷却账号 —— 比漏项更糟）。
+// 现在有**两份**语义相同的翻译：
 //
-// 这里手写一份**测试侧**的期望，与生产代码相互独立：
-// 两者不一致时红，由人来判断哪一份错了。
+//	生产：internal/workbuddy.toGatewayKind（经 wb.Classify 注入）
+//	测试：defaultupstream_test.go 的 mirrorKind
 //
-// 反向判别力：把生产表里 ErrContentBlocked 的 case 改成返回
-// gateway.ErrKindHardCredit → 本用例红 ✓
-func TestUpstreamToGatewayAgainstHandWrittenMirror(t *testing.T) {
-	want := map[upstream.ErrKind]gateway.ErrorKind{
-		upstream.ErrNone:           gateway.ErrKindNone,
-		upstream.ErrHardCredit:     gateway.ErrKindHardCredit,
-		upstream.ErrSoftRate:       gateway.ErrKindSoftRate,
-		upstream.ErrSessionDead:    gateway.ErrKindSessionDead,
-		upstream.ErrNotFound:       gateway.ErrKindNotFound,
-		upstream.ErrServer:         gateway.ErrKindServer,
-		upstream.ErrClient:         gateway.ErrKindClient,
-		upstream.ErrContentBlocked: gateway.ErrKindContentBlocked,
-	}
-	for k, w := range want {
-		if got := upstreamToGateway(k); got != w {
-			t.Errorf("upstreamToGateway(%v) = %v，手写镜像期望 %v", k, got, w)
-		}
-	}
-	// 手写表本身也要覆盖全部枚举（否则它自己就是个漏项的弱判据）。
+// 两份必然有漂移风险，而漂移的后果是"测试通过、生产判错"——
+// 最坏的一类。这里用同一组探针喂两份，逐项比对输出。
+//
+// ⚠ 本测试**不能**直接 import workbuddy（那会让本包的测试依赖具体上游）。
+// 所以比对的是"测试镜像 vs upstream.Classify 的直译结果" ——
+// 而 workbuddy 的表由它自己的 TestToGatewayKindCoversEveryUpstreamKind
+// 保证与 upstream.Classify 一致。两条测试串起来覆盖了整条链。
+func TestClassifierMatchesWorkbuddyTable(t *testing.T) {
 	for _, k := range allUpstreamKinds() {
-		if _, ok := want[k]; !ok {
-			t.Errorf("手写镜像缺 %v —— 本用例的覆盖度不足", k)
+		status, body := probeFor(k)
+
+		// 直译：upstream.Classify 的原始结果 → 测试镜像
+		direct := mirrorKind(upstream.Classify(status, body))
+		// 经注入分类器：应当得到同一个值
+		viaClassifier := defaultClassifierOf()(status, body)
+
+		if direct != viaClassifier {
+			t.Errorf("两条路径不一致（探针 %d/%q）：直译 %v vs 分类器 %v —— "+
+				"两份翻译表漂移了", status, body, direct, viaClassifier)
 		}
 	}
 }
@@ -189,11 +198,47 @@ func TestUpstreamToGatewayAgainstHandWrittenMirror(t *testing.T) {
 //
 // 这条断言把那个语义决定固化成可执行的约束。
 func TestContentBlockedIsDistinctFromClient(t *testing.T) {
-	if upstreamToGateway(upstream.ErrContentBlocked) == upstreamToGateway(upstream.ErrClient) {
-		t.Fatal("content_blocked 被翻成了与 client 相同的类别 —— " +
+	classify := defaultClassifierOf()
+	blocked := classify(400, `blocked by security policy`)
+	client := classify(401, `{"code":9999,"msg":"bad token"}`)
+
+	if blocked == client {
+		t.Fatal("content_blocked 被判成了与 client 相同的类别 —— " +
 			"内容问题会走换号路径，白烧轮换预算并把内容问题误报成账号故障")
+	}
+	if blocked != gateway.ErrKindContentBlocked {
+		t.Errorf("内容拦截探针 → %v，期望 ErrKindContentBlocked", blocked)
 	}
 	if gateway.ErrKindContentBlocked == gateway.ErrKindClient {
 		t.Fatal("gateway 侧两个常量取值相同")
+	}
+}
+
+// TestNilDefaultClassifierDegradesSafely 未注入分类器时必须安全降级。
+//
+// # 为什么需要这条
+//
+// `cfg.DefaultClassifier == nil` 是**允许**的（测试里的手工构造、
+// 或某个部署没接线）。此时 classifyErr 回落到 gateway.DefaultErrorKind
+//（只按状态码）—— 那是**明确的降级**，但不能是"崩掉"或"全部判 None"。
+//
+// 判据：nil 注入下，402/429/5xx 仍要落到各自的类别
+//（那是状态码能表达的部分），而不是一律 None。
+func TestNilDefaultClassifierDegradesSafely(t *testing.T) {
+	h := NewHandler(Config{Pool: testPoolWith(), Upstream: nil, DefaultClassifier: nil})
+
+	cases := []struct {
+		status int
+		want   gateway.ErrorKind
+	}{
+		{402, gateway.ErrKindHardCredit},
+		{429, gateway.ErrKindSoftRate},
+		{500, gateway.ErrKindServer},
+	}
+	for _, c := range cases {
+		if got := h.classifyErr("", c.status, nil); got != c.want {
+			t.Errorf("nil 分类器下 status=%d → %v，期望 %v（按状态码兜底）",
+				c.status, got, c.want)
+		}
 	}
 }
