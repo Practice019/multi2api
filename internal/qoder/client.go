@@ -389,7 +389,10 @@ func (c *Client) ChatStream(ctx context.Context, a *Auth, body []byte) (io.ReadC
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
 		return nil, resp.StatusCode, raw, nil
 	}
-	return resp.Body, resp.StatusCode, nil, nil
+	// ⚠ 必须解包：加密端点的每帧都多一层信封（见 envelope.go 的文件头）。
+	// 不解包时下游看到的每帧都没有 choices 字段 —— 表现为**静默无输出**
+	//（流正常结束、不报错、用户什么都没看到，是最坏的一类故障）。
+	return unwrapEnvelopeStream(resp.Body), resp.StatusCode, nil, nil
 }
 
 // modelOf 从请求体里取 model 字段（不解析时返回空串）。
