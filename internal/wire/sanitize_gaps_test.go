@@ -8,7 +8,7 @@
 //
 // 因此每条盲区都要有一个"**输入含指纹 → 输出不含**"的断言，
 // 而 11128 那条还要额外断言**预检闸门确实打开**（见 TestEveryRewriteReachable）。
-package upstream
+package wire
 
 import (
 	"encoding/json"

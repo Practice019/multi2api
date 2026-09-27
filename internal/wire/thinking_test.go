@@ -10,7 +10,7 @@
 //
 // 因此每个用例断言的都是**上游最终收到的字节**（PrepareBodyOpt* 的出参），
 // 而不是内部函数返回值 —— 只有前者能证明"真的发出去了"。
-package upstream
+package wire
 
 import (
 	"encoding/json"

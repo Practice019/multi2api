@@ -29,7 +29,7 @@
 // 理由见 payload.go 的 normalizeRoles 注释：脱敏关掉的是"改写用户内容"，
 // 不是"不补上游必需的协议字段"。这两件事混在一个开关下会让
 // "我不想改内容" 意外变成 "我的思维链没了"。
-package upstream
+package wire
 
 import (
 	"strings"

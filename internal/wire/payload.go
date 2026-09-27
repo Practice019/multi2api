@@ -1,7 +1,7 @@
 // payload.go 改写发往上游的 chat 请求体：
 //  1. 强制 stream:true（上游拒绝非流式）
 //  2. tool_choice 归一化（上游该字段是 string，对象形式会 400 code=11101）
-package upstream
+package wire
 
 import (
 	"encoding/json"
