@@ -25,6 +25,10 @@ type Provider struct {
 	client  *Client
 	authDir string
 
+	// creds 按 uid 取凭证（装配层注入；nil = 管理端点不可用）。
+	// 见 adminroute.go 的 credentialSource。
+	creds credentialSource
+
 	loginOnce   sync.Once
 	loginCached *loginFlow
 }

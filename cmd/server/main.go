@@ -687,6 +687,8 @@ func main() {
 			APIBase: cfg.RaccoonAPIBase,
 			AuthDir: cfg.RaccoonAuthDir,
 		})
+		// 余额与登录奖励端点需要活凭证（access_token）—— 那在 pool.SecretOf 里。
+		rc.SetCredentialSource(raccoonCredSource(p))
 		if err := registry.Register(rc); err != nil {
 			log.Fatalf("注册 Raccoon 上游失败: %v", err)
 		}
