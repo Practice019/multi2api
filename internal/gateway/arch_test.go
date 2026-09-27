@@ -455,12 +455,26 @@ var privateSDKKnownDebt = []struct {
 	// Reason 为什么还没修（诚实写清，不要写"以后再说"）。
 	Reason string
 }{
-	{
-		SDK: "upstream", Dependent: "server",
-		Reason: "错误栈 + Config.Upstream 共 39 处，牵涉单上游回落路径（cfg.Provider==nil）" +
-			"与 70+ 处测试构造。需先抽中立线协议层（InBandError/Stream/Aggregate/Usage），" +
-			"再让 Provider 路径成为必经。分阶段做。",
-	},
+	// ⚠ server 那条已删除（债已还清，见提交「核心与 workbuddy 私有 SDK 解耦」）：
+	//
+	//	原先：错误栈 + Config.Upstream 共 39 处（InBandError / Stream /
+	//	      Aggregate / UsageInt / ParseSoftRateReset / Classify / ErrKind /
+	//	      ModelInfo / ModelCatalog / Error…）。
+	//
+	//	现在分三步还清：
+	//	  1. SSE 读写（Stream/Aggregate/InBandError）、usage 抽取
+	//	     （UsageInt/ParseUsageExtras）、限流解析（ParseSoftRateReset）
+	//	     全部搬到 internal/wire（零内部依赖的中立线协议层）
+	//	  2. Config.Upstream 从 `*upstream.Client` 换成窄接口
+	//	     `server.DefaultUpstream`（只声明出口层真正调用的 4 个方法），
+	//	     两处投影（ModelInfo→DefaultModel、ModelCatalog→gateway.ModelCatalog）
+	//	     搬到装配层的适配器
+	//	  3. 错误分类由 `cfg.DefaultClassifier` 注入（函数值）；
+	//	     `upstream.Error` 换成 server 自己的 chatError / RefreshError
+	//
+	//	判据一个字没变：适配器里的投影是逐字段搬来的，分类器就是
+	//	workbuddy.Provider 自己实现的那个。
+	//
 	// ⚠ codearts 那条已删除（债已还清，见提交「抽 internal/wire 中立线协议层」）：
 	//
 	//	原先：RewriteModelField + PrepareBodyOptWithLimits 两处，

@@ -10,7 +10,7 @@
 //   - 不返回 NaN/Inf/负数：缺失或不可解析统一 0；入库字段是累加量，负值无意义；
 //   - 同时吃多种数值类型：上游可能在 JSON（float64）、Go 内部构造（int/int64）、
 //     字符串化数字（"123" / "12.5"）三种形态间摇摆，全部归一化。
-package upstream
+package wire
 
 import (
 	"math"

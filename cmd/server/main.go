@@ -986,15 +986,25 @@ func main() {
 	var onRotate func(string) = func(string) {}
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		APIKeys:      apiKeysStore, // 多 API key 管理（普通 key 走它）
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		MaxBodyMB:    cfg.Server.MaxBodyMB,
+		Pool: p,
+		// ⚠ 两个注入是**成对**的，都为了同一个目标：让核心不认识
+		// `internal/upstream` 这个 workbuddy 私有 SDK。
+		//
+		//	Upstream          → 窄接口（4 个方法 + 两处投影）
+		//	DefaultClassifier → 默认上游的错误分类器（函数值）
+		//
+		// 判据一个字没变：适配器里的投影是逐字段搬来的，
+		// 分类器就是 workbuddy.Provider 自己实现的那个（它内部仍调
+		// upstream.Classify —— 那是**上游的知识留在了上游**，正确）。
+		Upstream:          defaultUpstream{c: up},
+		DefaultClassifier: wb.Classify,
+		APIKey:            cfg.APIKey,
+		APIKeys:           apiKeysStore, // 多 API key 管理（普通 key 走它）
+		Session:           sessRouter,
+		StickyCount:       sessCount,
+		RedisMode:         redisMode,
+		SoftCooldown:      cfg.SoftRateDur,
+		MaxBodyMB:         cfg.Server.MaxBodyMB,
 		// ⚠ 必须是**同一个** promptGate 实例（与 up.PromptGate 一起给）：
 		// handler 在这里写、出站客户端在那里读。两个实例 = 机制失效。
 		PromptGate:        promptGate,

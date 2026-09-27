@@ -32,9 +32,9 @@ const sseOK = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\"
 
 // newFakeUpstream 返回一个 ChatStream 走 fake 的 upstream.Client。
 // fake 依据 Authorization 头决定行为。
-func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body string, isStream bool)) *upstream.Client {
+func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body string, isStream bool)) upstreamAdapter {
 	t.Helper()
-	return &upstream.Client{
+	return upstreamAdapter{c: &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			authz := r.Header.Get("Authorization")
 			status, body, isStream := behavior(authz)
@@ -50,7 +50,7 @@ func newFakeUpstream(t *testing.T, behavior func(auth string) (status int, body 
 		})},
 		ChatBaseCN:    "https://fake.example",
 		BillingBaseCN: "https://fake.example",
-	}
+	}}
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -421,7 +421,12 @@ func TestChatSessionDeadDisables(t *testing.T) {
 		return 401, `{"code":12153,"msg":"Offline user session not found"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up})
+	// ⚠ 必须注入默认分类器：本用例依赖 `{"code":12153}` 被判成 session dead，
+	// 而那条判据是 **workbuddy 的上游知识**（现在由装配层注入）。
+	// 不注入时 classifyErr 回落到 gateway.DefaultErrorKind（只看状态码）——
+	// 401 会落到 ErrKindClient，于是 NoteSessionDead 永不被调用，
+	// 本用例会以"计数=0"失败。这不是测试坏了，而是**接缝没接**。
+	h := NewHandler(Config{Pool: p, Upstream: up, DefaultClassifier: defaultClassifierOf()})
 	body := `{"model":"glm-5.2","messages":[]}`
 
 	// 前两次：只计计数，**不得**禁用。
@@ -463,7 +468,7 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 		BillingBaseCN: "https://fake.example",
 	}
 	// 传输错误不喂熔断计数：一次 transport error 不应累计 errTotal 也不应熔断。
-	h := NewHandler(Config{Pool: p, Upstream: up})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(up)})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec.Code != 503 {
@@ -512,7 +517,7 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: wrapUpstream(upstream.New())})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -701,7 +706,7 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 func TestAPIKeyAuth(t *testing.T) {
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
-		Upstream: upstream.New(),
+		Upstream: wrapUpstream(upstream.New()),
 		APIKey:   "secret",
 	})
 	// 无 key
@@ -732,7 +737,7 @@ func TestAPIKeyAuth(t *testing.T) {
 func TestStatusEndpoint(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	p.SetCredits("u1", 42)
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
 	req := httptest.NewRequest("GET", "/status", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -775,7 +780,7 @@ func TestStatusInFlightFull(t *testing.T) {
 	p.Acquire("full")
 	defer p.Release("full")
 
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
 	if rec.Code != 200 {
@@ -800,7 +805,7 @@ func TestStatusPortraitFields(t *testing.T) {
 	p.NoteSuccess("u1")
 	p.NoteError("u1") // 记录 last_err + err_total（累计，不冷却）
 	p.Cooldown("u1", pool.CoolSoft, time.Hour, "429 rate limit")
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
 	if rec.Code != 200 {
@@ -835,7 +840,7 @@ func TestStatusPortraitFields(t *testing.T) {
 
 // TestHealthzEmptyPool 空池（healthy=0）→ 503，表示暂不可服务。
 func TestHealthzEmptyPool(t *testing.T) {
-	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: wrapUpstream(upstream.New())})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -854,7 +859,7 @@ func TestHealthzEmptyPool(t *testing.T) {
 func TestHealthz503WhenNoHealthy(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 	p.Disable("u1", "session dead")
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -884,7 +889,7 @@ func TestHealthz503WhenAllInFlightFull(t *testing.T) {
 	if p.ServableNow() {
 		t.Fatal("servable should be false when the only healthy account is in-flight full")
 	}
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -903,7 +908,7 @@ func TestHealthz503WhenAllInFlightFull(t *testing.T) {
 // TestHealthz200WhenHealthy 有健康账号 → 200。
 func TestHealthz200WithHealthy(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != http.StatusOK {
@@ -934,7 +939,7 @@ func TestHealthzServiceIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 			tc.setup(p)
-			h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
+			h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 			if rec.Code != tc.wantCode {
@@ -959,7 +964,7 @@ func TestHealthzServiceIdentity(t *testing.T) {
 func TestHealthzServiceIdentityWithoutAuth(t *testing.T) {
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
-		Upstream: upstream.New(),
+		Upstream: wrapUpstream(upstream.New()),
 		APIKey:   "secret",
 	})
 	rec := httptest.NewRecorder()
@@ -974,7 +979,7 @@ func TestHealthzServiceIdentityWithoutAuth(t *testing.T) {
 
 func TestStatusRequiresAuth(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: upstream.New(), APIKey: "secret"})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), APIKey: "secret"})
 
 	// 无 token → 401
 	rec := httptest.NewRecorder()

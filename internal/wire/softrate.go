@@ -24,7 +24,7 @@
 //
 // 无「将在 … 重置」文案的 6004，以及一切非 6004 的软限流，
 // **完全退回改造前的行为**（softRate 基数 + 指数退避 + 封顶）。
-package upstream
+package wire
 
 import (
 	"regexp"

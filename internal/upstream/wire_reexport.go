@@ -42,3 +42,40 @@ var (
 // ⚠ 它是 wire 里的**未导出**函数，upstream 无法直接别名 ——
 // 而它只被同包的测试用（测三层签名的等价性）。
 // 故这里不转发；需要它的测试已随之搬进 wire 包。
+
+// usage 抽取（原先住在本包，2026-09 搬到 wire）。
+//
+// # 为什么它也属于中立层
+//
+// `usage` 对象是 **OpenAI 线协议**的一部分（`prompt_tokens` /
+// `completion_tokens` / `prompt_tokens_details.cached_tokens` …），
+// 与"是哪个上游"无关。而 server（出口层）要从每个 chunk 里取它做日志 ——
+// 那个需求同样与上游无关。
+//
+// 它原先住在这里，于是 **server 为了读 usage 不得不 import workbuddy 的 SDK**
+// （这是 privateSDKKnownDebt 里 server 那条债的一半）。
+//
+// 类型也要转发：`UsageExtras` 是 `ParseUsageExtras` 的返回类型，
+// 调用方要能写出 `var x upstream.UsageExtras = ...` ——
+// 只转发函数不转发类型会留下一个"函数能调但结果存不下"的怪状态。
+type UsageExtras = wire.UsageExtras
+
+var (
+	// ParseUsageExtras 从 usage map 里抽取结构化字段（缓存命中、推理 token 等）。
+	ParseUsageExtras = wire.ParseUsageExtras
+	// UsageInt 把 usage 里的数值字段安全地取成 int（容忍 string / float / 缺失）。
+	UsageInt = wire.UsageInt
+)
+
+// ParseSoftRateReset 429 code=6004 的"重置时刻"解析（原先住在本包，2026-09 搬到 wire）。
+//
+// # 为什么它也属于中立层
+//
+// "从错误文案里抠出「将在 … 重置」的时刻"是**线协议层的文本解析**，
+// 与是哪个上游无关。而它有两个消费者，一个属上游、一个属核心：
+//
+//	workbuddy  softrate_ext.go —— 它实现 gateway 的软限流扩展点
+//	server     handler.go      —— 单上游回退路径（Provider == nil）
+//
+// 后者是核心包，**不该为了读一段文案依赖某个上游的 SDK**。
+var ParseSoftRateReset = wire.ParseSoftRateReset
