@@ -2,6 +2,8 @@
   "admin": {
     "checkin_log_keep_days": 30,
     "checkin_log_path": "./data-test/checkin-log.json",
+    "client_archive_dir": "./data-test/client-login",
+    "client_login_enabled": false,
     "growth_auto_accept_tasks": true,
     "growth_auto_claim": true,
     "growth_auto_draw": false,
