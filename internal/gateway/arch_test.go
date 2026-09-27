@@ -372,6 +372,313 @@ func keysOf(m map[string]bool) []string {
 	return out
 }
 
+// ── 盲区补丁：私有 SDK 不得被当作共享基础设施 ──────────────────────────────
+//
+// # 为什么要有这一组测试（实测出来的 fail-open）
+//
+// 上面那套判据推导上游的方式是「非测试依赖里含 internal/gateway」。
+// 它对 internal/workbuddy / codearts / loomy / mimo / trae 都有效，
+// 但对 internal/upstream **永远返回 false** ——
+//
+//	internal/upstream 不 import gateway（它早于 gateway 存在，
+//	是被「适配」的那一方，契约在 workbuddy 侧适配），于是它落在
+//	discoveryExemptPackages 的豁免里，整套架构约束**完全管不到它**。
+//
+// 而它的真实身份由自己的包注释写得很清楚（client.go:1）：
+//
+//	// Package upstream 封装对 CodeBuddy 上游（chat / billing / auth）的全部 HTTP 调用，
+//	// 以及错误分类（驱动 pool 冷却状态机）。
+//
+// **它是 workbuddy 的私有 SDK，不是共享基础设施。** 名字叫 upstream 只是
+// 因为它早于多上游改造。豁免名单把它当「通用基础设施」放行了，
+// 于是下面这条约束被静默绕过：
+//
+//	TestUpstreamsDoNotDependOnCore 里写着「上游之间也不该互相依赖
+//	（否则拔掉一个会牵连另一个）」—— 而 codearts（上游）确实 import 了
+//	upstream（另一个上游），8 处。
+//
+// 后果不是理论上的：codearts/client.go:401-404 把 **codearts 的请求体**
+// 送进 workbuddy 的 PrepareBodyOptWithLimits，于是 workbuddy 的反探测改写
+// （sanitize.go 的 11-128 / Claude Code 身份句 / 字段白名单）会逐字作用在
+// codearts 流量上。这是比类型耦合更实质的语义泄漏 —— 一个上游的怪癖
+// 被另一个上游的补丁解释。
+//
+// # 判据为什么不靠「包名」或「豁免名单」声明
+//
+// 靠包名（"upstream 听起来像共享的"）就是这次出错的根源 —— 名字是声明，
+// 声明会骗人。所以判据必须是**可验证的依赖事实**：
+//
+//	被 ≥2 个上游实现依赖的包，必须要么是 gateway（契约），
+//	要么在 sharedInfraPackages 里**逐个自证**（见下）。
+//
+// workbuddyPrivateSDK 是显式登记「这其实是某个上游的私有 SDK」的名单。
+// 它与 discoveryExemptPackages 的区别：那边说"不是上游"，这边说"是上游私有物"。
+// 两者都由测试强制自证，都不能凭空声明。
+
+// workbuddyPrivateSDK 名为通用、实为 workbuddy 私有 SDK 的包。
+//
+// ⚠ 加入这个名单**不会**让它免于约束 —— 恰恰相反：
+// TestPrivateSDKIsNotConsumedByOtherUpstreams 会禁止**除 workbuddy 之外的
+// 任何上游**依赖它。这正是本名单存在的意义（把"谁可以依赖它"钉死）。
+var workbuddyPrivateSDK = []string{"upstream"}
+
+// TestPrivateSDKIsNotConsumedByOtherUpstreams 私有 SDK 只许它的所有者用。
+//
+// 判据：workbuddyPrivateSDK 里的每个包，只允许被 internal/workbuddy 依赖；
+// 其它上游（codearts/loomy/mimo/trae）都不许。核心包（corePackages）也不许 ——
+// 核心依赖某个上游的私有 SDK，等于「加新上游核心零改动」这条判据破产。
+func TestPrivateSDKIsNotConsumedByOtherUpstreams(t *testing.T) {
+	root := moduleRoot(t)
+
+	// 所有者：每个私有 SDK 归哪个上游。
+	owner := map[string]string{"upstream": "workbuddy"}
+
+	for _, sdk := range workbuddyPrivateSDK {
+		own, ok := owner[sdk]
+		if !ok {
+			t.Errorf("internal/%s 在 workbuddyPrivateSDK 名单里但没有登记所有者 —— "+
+				"没有所有者就无法判断谁能依赖它，名单会退化成「豁免」", sdk)
+			continue
+		}
+
+		dependents := packagesDependingOn(t, root, "workbuddy2api/internal/"+sdk)
+		t.Logf("internal/%s（所有者 %s）的依赖者: %v", sdk, own, dependents)
+
+		for _, d := range dependents {
+			name := strings.TrimPrefix(d, "workbuddy2api/internal/")
+			// 允许：所有者自己
+			if name == own {
+				continue
+			}
+			// 允许：装配层 cmd/*（它是唯一同时认识核心与所有上游的地方）
+			if strings.HasPrefix(d, "workbuddy2api/cmd/") {
+				continue
+			}
+			// 违规：另一个上游
+			if isUpstreamPackage(t, root, name) {
+				t.Errorf("架构违规：上游 %s 依赖了 internal/%s —— 那是 %s 的私有 SDK。\n"+
+					"  上游之间必须独立：拔掉 %s 不该牵连 %s。\n"+
+					"  修法：用 gateway 里的中立类型，或在本包内实现自己需要的那部分。",
+					name, sdk, own, own, name)
+				continue
+			}
+			// 违规：核心包
+			for _, c := range corePackages {
+				if d == c {
+					t.Errorf("架构违规：核心包 %s 依赖了 internal/%s —— 那是 %s 的私有 SDK。\n"+
+						"  判据 1 要求加新上游时核心零改动；核心依赖某个上游的 SDK 会直接打破它。\n"+
+						"  修法：把跨上游共识的类型提到 gateway。",
+						c, sdk, own)
+				}
+			}
+		}
+	}
+}
+
+// TestSharedInfraIsGenuinelyShared 被多个上游依赖的包必须**真的是共享的**。
+//
+// # 判据
+//
+// 一个 internal/<name> 若被 ≥2 个上游实现依赖，它必须满足其一：
+//
+//	1) 是 gateway（唯一的契约包，天然共享）；或
+//	2) 在 sharedInfraPackages 里**显式登记**，且该登记是**必需**的
+//	   （它确实被多个上游依赖 —— 否则这条登记就是陈旧的，测试要求删掉）
+//
+// # 为什么这条能防住这次的漏洞
+//
+// 漏洞的形态是：一个包**被多个上游依赖**（codearts 与 workbuddy 都依赖
+// internal/upstream），却没有任何测试要求"它凭什么共享"。
+// 加上这条之后，任何"某个上游的私有物被另一个上游顺手 import"的形态
+// 都会在**下一次运行测试时**被迫表态：要么登记为共享基础设施，
+// 要么改掉依赖。
+func TestSharedInfraIsGenuinelyShared(t *testing.T) {
+	root := moduleRoot(t)
+	upstreams := discoverUpstreams(t, root)
+	if len(upstreams) < 2 {
+		t.Fatalf("推导出的上游不足 2 个（%v）—— 本测试的判据失去意义，先修推导", upstreams)
+	}
+
+	// 显式登记的共享基础设施（不含 gateway，它单独放行）。
+	//
+	// 每个都必须被 ≥2 个上游依赖，否则测试会要求删掉这里的登记。
+	registered := map[string]bool{
+		"auth":       true, // 凭证结构（各上游都往池子里放 *auth.Auth 投影）
+		"checkinlog": true, // 签到/动作历史日志
+		"prompt":     true, // 提示词降级（出站改写共用）
+	}
+
+	// 收集每个 internal 包的依赖者
+	candidates := candidatePackages(t, root)
+	for _, name := range candidates {
+		dependents := upstreamDependents(t, root, name)
+		if len(dependents) < 2 {
+			continue
+		}
+		if name == "gateway" {
+			continue // 契约包，天然共享
+		}
+		if !registered[name] {
+			t.Errorf("internal/%s 被 %d 个上游依赖（%v），但它既不是 gateway、也没在 sharedInfraPackages 登记。\n"+
+				"  ⚠ 这正是这次漏洞的形态：一个上游的私有物被别的上游顺手 import，\n"+
+				"     而没有任何测试要求它说明「凭什么共享」。\n"+
+				"  修法（二选一）：\n"+
+				"    a) 若它真是共享基础设施 → 加进本测试的 registered 名单（那是一次显式表态）\n"+
+				"    b) 若它是某个上游的私有 SDK → 加进 workbuddyPrivateSDK，并改掉越界依赖",
+				name, len(dependents), dependents)
+		}
+	}
+
+	// 反向：登记了却没人用 → 陈旧登记，要求删掉（防名单腐化）
+	for name := range registered {
+		if _, err := os.Stat(filepath.Join(root, "internal", name)); err != nil {
+			t.Errorf("sharedInfraPackages 里的 internal/%s 不存在了 —— 陈旧登记，请删除", name)
+			continue
+		}
+		dep := upstreamDependents(t, root, name)
+		if len(dep) < 2 {
+			t.Errorf("internal/%s 被登记为共享基础设施，但只有 %d 个上游依赖它（%v）—— "+
+				"登记已陈旧。若它其实是某个上游的私有物，请移进 workbuddyPrivateSDK。",
+				name, len(dep), dep)
+		}
+	}
+}
+
+// ── 辅助：依赖关系查询 ────────────────────────────────────────────────────
+//
+// # 为什么要缓存（实测：没有缓存时子进程调用量是 O(N²)）
+//
+// listDeps 每次调用都会 fork 一个 `go list -deps`（实测单次约 0.5-1s）。
+// 而"上游依赖图"这件事在同一轮测试里是**不变的** —— 但下面几个辅助函数
+// 都写成在循环里反复问它：
+//
+//	discoverUpstreams        自己就是 N 次 go list
+//	upstreamDependents       又对每个上游问一次
+//	packagesDependingOn      对 internal/ 与 cmd/ 下**每个**包问一次
+//
+// 组合起来的调用量约 N²×M。补上盲区测试后实测从 9s 涨到 56s ——
+// 一个架构约束测试如果慢到没人愿意跑，它就等于不存在。
+//
+// 缓存只按包路径记结果，不改变任何判据（同一进程内依赖图是常量）。
+
+// depsCache 包路径 → 依赖列表（含自身）。同一进程内依赖图不变，故可缓存。
+var depsCache = map[string][]string{}
+
+// discoverCache 缓存 discoverUpstreams 的结果（root 相同的场景只有一个）。
+var discoverCache = map[string][]string{}
+
+// ── 辅助：依赖关系查询 ────────────────────────────────────────────────────
+
+// candidatePackages 返回 internal/ 下所有值得检查的包名
+// （排除下划线/点开头、以及非包目录）。
+func candidatePackages(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, "internal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// upstreamDependents 返回哪些**上游实现**依赖 internal/<name>（非测试依赖）。
+func upstreamDependents(t *testing.T, root, name string) []string {
+	t.Helper()
+	var out []string
+	for _, up := range discoverUpstreams(t, root) {
+		if up == name {
+			continue
+		}
+		deps, err := listDeps(root, "workbuddy2api/internal/"+up)
+		if err != nil {
+			continue
+		}
+		for _, d := range deps {
+			if d == "workbuddy2api/internal/"+name {
+				out = append(out, up)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// packagesDependingOn 返回 internal/ 与 cmd/ 下所有依赖 pkg 的包。
+func packagesDependingOn(t *testing.T, root, pkg string) []string {
+	t.Helper()
+	var out []string
+	for _, name := range candidatePackages(t, root) {
+		if "workbuddy2api/internal/"+name == pkg {
+			continue
+		}
+		if dependsOnPkg(root, "workbuddy2api/internal/"+name, pkg) {
+			out = append(out, "workbuddy2api/internal/"+name)
+		}
+	}
+	for _, name := range cmdPackages(t, root) {
+		if dependsOnPkg(root, "workbuddy2api/cmd/"+name, pkg) {
+			out = append(out, "workbuddy2api/cmd/"+name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// cmdPackages 返回 cmd/ 下的子包名。
+func cmdPackages(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, "cmd"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), "_") || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		out = append(out, e.Name())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isUpstreamPackage 报告 internal/<name> 是否是上游实现（由发现逻辑判定）。
+func isUpstreamPackage(t *testing.T, root, name string) bool {
+	t.Helper()
+	for _, u := range discoverUpstreams(t, root) {
+		if u == name {
+			return true
+		}
+	}
+	return false
+}
+
+// dependsOnPkg 报告 pkg 的非测试依赖里是否含 want。
+func dependsOnPkg(root, pkg, want string) bool {
+	deps, err := listDeps(root, pkg)
+	if err != nil {
+		return false
+	}
+	for _, d := range deps {
+		if d == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCoreDoesNotDependOnUpstreams 核心包不得依赖任何具体上游。
 //
 // 判据：`go list -deps <core>` 的输出里不得出现任何 **被发现的上游包**。
@@ -528,7 +835,15 @@ func findViolations(deps []string, upstreams []string, prefix string) []string {
 }
 
 // listDeps 返回一个包的全部依赖（含自身）。
+//
+// ⚠ 带缓存：每次调用都会 fork 一个 `go list -deps`（实测约 0.5-1s），
+// 而辅助函数会在循环里反复问同一个包。依赖图在同一进程内不变，故可缓存。
+// 缓存只影响速度，不影响判据 —— 失败**不**入缓存（否则一次瞬时失败
+// 会让后续所有查询都拿到空依赖，形成 fail-open）。
 func listDeps(root, pkg string) ([]string, error) {
+	if deps, ok := depsCache[pkg]; ok {
+		return deps, nil
+	}
 	cmd := exec.Command("go", "list", "-deps", pkg)
 	cmd.Dir = root
 	out, err := cmd.Output()
@@ -541,5 +856,6 @@ func listDeps(root, pkg string) ([]string, error) {
 			deps = append(deps, l)
 		}
 	}
+	depsCache[pkg] = deps
 	return deps, nil
 }
