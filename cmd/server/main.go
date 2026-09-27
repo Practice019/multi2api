@@ -639,6 +639,9 @@ func main() {
 			WorkOSBase: cfg.ClineWorkOSBase,
 			AuthDir:    cfg.ClineAuthDir,
 		})
+		// 余额端点需要活凭证（access_token + account_id）——
+		// 那在 pool.SecretOf 里，不在账号投影里。
+		cl.SetCredentialSource(clineCredSource(p))
 		if err := registry.Register(cl); err != nil {
 			log.Fatalf("注册 Cline 上游失败: %v", err)
 		}
