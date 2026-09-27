@@ -16,6 +16,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/admin"
@@ -78,12 +79,12 @@ func (w workbuddyOAuthClient) Poll(state string) (any, error) {
 // provider 是登录成功凭证归属的上游标识（workbuddy 用 workbuddy.ProviderID；
 // 海外版渠道实例用 workbuddy-intl），baseURL 是授权站点
 // （CN 用 copilot.tencent.com；海外版用 www.workbuddy.ai）。
-func workbuddyLogin(provider, baseURL string) workbuddy.OAuthFlow {
+func workbuddyLogin(provider, baseURL, ua string) workbuddy.OAuthFlow {
 	if baseURL == "" {
 		return nil
 	}
 	return workbuddy.WrapOAuth(
-		workbuddyOAuthClient{c: oauth.New(baseURL)},
+		workbuddyOAuthClient{c: newOAuthClientFor(baseURL, ua)},
 		func(raw any) (gateway.Credential, error) {
 			cred, ok := raw.(*oauth.Credential)
 			if !ok || cred == nil {
@@ -109,6 +110,22 @@ func workbuddyLogin(provider, baseURL string) workbuddy.OAuthFlow {
 	)
 }
 
+// newOAuthClientFor 按渠道构建登录客户端。
+//
+// ua 为空时**不设**（回落 oauth 包内置的 CLI 形态）——
+// 既有部署升级后登录三步发出的 UA 必须逐字节不变。
+//
+// 非空时三步（auth/state / 轮询 token / 拉账户）**共用**它：
+// 参照 buddy-oauth.ts 明确要求三步都带产品身份，注释原文：「否则 WorkBuddy
+// 登录会以 CodeBuddy 的 UA 发请求」。
+func newOAuthClientFor(baseURL, ua string) *oauth.Client {
+	c := oauth.New(baseURL)
+	if strings.TrimSpace(ua) != "" {
+		c.UserAgent = strings.TrimSpace(ua)
+	}
+	return c
+}
+
 // 编译期断言。
 //
 // ⚠ 这里我第一版写成了 `var _ workbuddy.OAuthFlow = (*workbuddyOAuthClient)(nil)`，
@@ -117,7 +134,7 @@ func workbuddyLogin(provider, baseURL string) workbuddy.OAuthFlow {
 // （Poll 返回 gateway.Credential）。两者是 WrapOAuth 的入与出，不是同一个东西。
 //
 // 编译器把这个概念混淆当场挡下来了 —— 这正是断言的价值。
-var _ workbuddy.OAuthFlow = workbuddyLogin("workbuddy", "x")
+var _ workbuddy.OAuthFlow = workbuddyLogin("workbuddy", "x", "")
 
 // ---------------------------------------------------------------------------
 // 调度器适配器（Task 3c）
