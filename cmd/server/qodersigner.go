@@ -21,6 +21,8 @@ import (
 	"context"
 	"log"
 
+	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/qoder"
 	"workbuddy2api/internal/qoderwasm"
 )
@@ -78,5 +80,38 @@ func closeQoderSigner(s *qoderwasm.Signer) {
 	}
 	if err := s.Close(context.Background()); err != nil {
 		log.Printf("qoder: 释放 WASM 签名器时出错: %v", err)
+	}
+}
+
+// qoderCredSource 造一个"按 uid 取活凭证"的访问器（签到与余额端点用）。
+//
+// # 为什么不能用账号池的 AuthByUID
+//
+// `AuthByUID` 返回的是**核心账号投影**（只有 uid / nickname / filePath），
+// 而签到与余额要的是 `*qoder.Auth`（含 access_token）——
+// 那个东西在 `pool.SecretOf` 里（凭证并池时由 SyncToDirWithSecrets 装进去）。
+//
+// # 为什么 providerID 必须按实例传
+//
+// 两个产品（qoder / qodercn）的凭证在**同一个目录**，靠凭证里的
+// product_id 区分，并池时也按 provider 标签分域。所以投影必须带对标签：
+// 传错会让 qodercn 的端点取到 qoder 的账号（或取不到，
+// 表现为"账号不在池里"这种误导性错误）。
+func qoderCredSource(p *pool.Pool, providerID string) func(string) (gateway.Credential, bool) {
+	return func(uid string) (gateway.Credential, bool) {
+		secret, ok := p.SecretOf(uid)
+		if !ok {
+			return gateway.Credential{}, false
+		}
+		a, ok := secret.(*qoder.Auth)
+		if !ok || a == nil {
+			return gateway.Credential{}, false
+		}
+		return gateway.Credential{
+			Provider: providerID,
+			UID:      uid,
+			Nickname: a.Nickname,
+			Secret:   a,
+		}, true
 	}
 }

@@ -33,6 +33,10 @@ type Provider struct {
 	// productID 本实例的产品标识（qoder / qodercn）。
 	productID string
 
+	// creds 按 uid 取凭证（装配层注入；nil = 管理端点不可用）。
+	// 见 adminroute.go 的 credentialSource。
+	creds credentialSource
+
 	loginOnce   sync.Once
 	loginCached *loginFlow
 }
@@ -85,13 +89,27 @@ func (p *Provider) ID() string { return p.productID }
 
 // Caps 能力声明。
 //
-// 只声明可验证的两项：对话与模型目录。
+// 声明三项：对话、模型目录、签到（每日积分领取）。
 //
-// ⚠ 不声明 CapCheckin：Qoder 的每日积分领取在参照项目里是独立的
-// credits 模块，但那是**网页端活动**，不经 LLM 网关；本包不实现它。
-// ⚠ 不声明 CapQuotaProbe：没有主动额度探测端点。
+// # 签到为什么可以声明了（此前刻意不声明）
+//
+// 此前的注释写着「Qoder 的每日积分领取在参照项目里是独立的 credits 模块，
+// 但那是**网页端活动**，不经 LLM 网关；本包不实现它」。那个判断有**两处错**：
+//
+//  1. 它并非"网页端"—— `/sash/api/v1/me/campaigns` 是**客户端 API**，
+//     Bearer + Cosy-ClientType 即可访问（**不需要 WASM 签名**，
+//     那是推理端点才有的要求）
+//  2. 参照实现早期也误判过「Qoder 无积分端点」，原因只是它按 `/api/`
+//     前缀搜索，而真实路径是 `/sash/api/`—— 搜索范围问题，不是端点不存在
+//
+// 现在 credits.go 实现了它（余额 + 活动列表 + 逐个领取），
+// 并有 AdminRoutes 暴露出来，所以声明 CapCheckin 是**名实相符**的。
+//
+// ⚠ 不声明 CapQuotaProbe：没有主动额度探测端点。积分余额（CapCheckin
+// 下的 /balance）与"额度探测"不是同一件事 —— 后者是 pool 的主动健康探测，
+// Qoder 没有对应端点。
 func (p *Provider) Caps() gateway.Capability {
-	return gateway.CapChat | gateway.CapModels
+	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin
 }
 
 // Client 上游 HTTP 客户端。
