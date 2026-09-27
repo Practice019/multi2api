@@ -1,7 +1,10 @@
 package codearts
 
 import (
+	"context"
 	"testing"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // TestMultiplierIsUpstreamFixedValue 锁定倍率来自上游下发值而非本地估算。
@@ -64,51 +67,45 @@ func TestMultiplierForDistinguishesUnknownFromFree(t *testing.T) {
 	}
 }
 
-// TestBuildModelCatalogOnlyIncludesKnownMultipliers 确认未下发倍率的模型不进目录。
+// TestModelMultipliersOnlyIncludesKnown 确认未下发倍率的模型不进倍率表。
 //
-// 理由：ModelCatalog.MultiplierTable() 只收 Multiplier > 0 的条目，
-// 若把未知写成 0，等于对外宣称"这个模型免费"。
-// 宁可不显示，也不给一个会被读错的数字。
-func TestBuildModelCatalogOnlyIncludesKnownMultipliers(t *testing.T) {
-	cat := BuildModelCatalog()
-	if cat == nil {
-		t.Fatal("BuildModelCatalog 返回 nil")
+// 理由：调用方按 `if m > 0` 判断系数可用性，若把未知写成 0，
+// 等于对外宣称"这个模型免费"。宁可不显示，也不给一个会被读错的数字。
+//
+// ⚠ 本测试原先测的是 `BuildModelCatalog()`（返回 *upstream.ModelCatalog）。
+// 那个函数已删除 —— 它是被 gateway.ModelMultiplierExt 取代的**旧路径**：
+// 两者用的是同一个 `MultiplierKnown` 判据，但扩展点才是**真的接线了的**那条
+// （server 的 modelCatalogFor 优先问扩展点，不走 workbuddy 的 /v3/config）。
+// 所以断言**平移到活路径**上，而不是跟着死代码一起删掉 —— 否则这份判据就丢了。
+func TestModelMultipliersOnlyIncludesKnown(t *testing.T) {
+	p := NewWithConfig(Config{})
+	m, err := p.ModelMultipliers(context.Background(), gateway.Credential{Provider: ProviderID, UID: "u1"})
+	if err != nil {
+		t.Fatalf("ModelMultipliers 报错: %v", err)
+	}
+	if m == nil {
+		t.Fatal("ModelMultipliers 返回 nil（应为非 nil 表）")
 	}
 
-	ids := map[string]float64{}
-	for _, e := range cat.Models {
-		ids[e.ID] = e.Multiplier
-	}
-
-	// 三个有倍率的必须在
-	for _, id := range []string{"GLM-5.2", "glm-5.2-sft-harmony", "openpangu-2.0-pro", "openpangu-2.0-flash"} {
-		v, ok := ids[id]
+	// 四个有倍率的必须在，且值来自上游下发的固定值（不是硬编码 1.0）
+	for id, want := range map[string]float64{
+		"GLM-5.2": 0.7, "glm-5.2-sft-harmony": 0.7,
+		"openpangu-2.0-pro": 0.7, "openpangu-2.0-flash": 0.32,
+	} {
+		v, ok := m[id]
 		if !ok {
-			t.Errorf("有倍率的 %s 未进目录", id)
+			t.Errorf("有倍率的 %s 未进倍率表", id)
 			continue
 		}
-		wantMult := map[string]float64{
-			"GLM-5.2": 0.7, "glm-5.2-sft-harmony": 0.7,
-			"openpangu-2.0-pro": 0.7, "openpangu-2.0-flash": 0.32,
-		}[id]
-		if v != wantMult {
-			t.Errorf("%s 目录里的倍率 = %v, 期望 %v", id, v, wantMult)
+		if v != want {
+			t.Errorf("%s 的倍率 = %v, 期望 %v", id, v, want)
 		}
 	}
 
-	// 四个未知的不能在
+	// 倍率未知的不能在（写 0 会被读成"免费"）
 	for _, id := range []string{"deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "glm-5.3-flash"} {
-		if _, ok := ids[id]; ok {
-			t.Errorf("倍率未知的 %s 不应进目录（会被误读为免费）", id)
+		if _, ok := m[id]; ok {
+			t.Errorf("倍率未知的 %s 不应进倍率表（会被误读为免费）", id)
 		}
-	}
-
-	// MultiplierTable 应能查到且有值
-	tbl := cat.MultiplierTable()
-	if tbl == nil {
-		t.Fatal("MultiplierTable 返回 nil")
-	}
-	if v := tbl["GLM-5.2"]; v != 0.7 {
-		t.Errorf("MultiplierTable[GLM-5.2] = %v, 期望 0.7", v)
 	}
 }
