@@ -17,8 +17,6 @@ package codearts
 import (
 	"strings"
 	"sync"
-
-	"workbuddy2api/internal/upstream"
 )
 
 // ModelSpec 是 CodeArts 侧的模型描述（含实测可用性）。
@@ -293,18 +291,27 @@ func MaxTokensTable() map[string]int {
 }
 
 // KnownModels 返回可对外暴露的模型（仅 Verified 的）。
-func KnownModels() []upstream.ModelInfo {
-	out := make([]upstream.ModelInfo, 0, len(knownModels))
+//
+// # 返回本包的 ModelSpec，而不是某个外部包的类型
+//
+// 返回类型原先是 `[]upstream.ModelInfo` —— 那是 **workbuddy 的私有 SDK 类型**。
+// 用它导致本包（一个上游实现）依赖了另一个上游的 SDK，违反"上游之间必须独立"
+// （arch_test 的 TestPrivateSDKIsNotConsumedByOtherUpstreams 会拦）。
+//
+// 而且那次依赖是**没有收益**的：调用方（provider.go 的 Models）拿到之后
+// 立刻把它映射成 gateway.ModelInfo，**只用到 ID / ContextWindow / MaxTokens**
+// 三个字段，Name 一路被丢弃。所以这里直接返回本包的事实来源 ModelSpec，
+// 映射留在已经存在的那个循环里 —— 少一次中转，也少一个跨包类型依赖。
+//
+// 语义不变：仍然只返回 **Verified** 的（"验过"是静态事实，
+// 额度过滤属于 Provider.Models 的可逆展示层，见 channel_test.go 的注释）。
+func KnownModels() []ModelSpec {
+	out := make([]ModelSpec, 0, len(knownModels))
 	for _, m := range knownModels {
 		if !m.Verified {
 			continue
 		}
-		out = append(out, upstream.ModelInfo{
-			ID:            m.ID,
-			Name:          m.Name,
-			ContextWindow: m.ContextWindow,
-			MaxTokens:     m.MaxTokens,
-		})
+		out = append(out, m)
 	}
 	return out
 }
