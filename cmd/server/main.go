@@ -785,19 +785,26 @@ func main() {
 	// 包注释里的说明。
 	var qd, qdCN *qoder.Provider
 	if cfg.QoderEnabled {
+		// 两个实例共用同一份产品配置，只有 Product 不同；APIBase 覆盖
+		// 只作用于加密推理基址（公开端点在本实现里不被使用）。
+		prod, prodCN := qoder.Qoder, qoder.QoderCN
+		if cfg.QoderAPIBase != "" {
+			prod.EncryptedInferBase = cfg.QoderAPIBase
+			prodCN.EncryptedInferBase = cfg.QoderAPIBase
+		}
 		qd = qoder.NewWithConfig(qoder.Config{
-			Product: qoder.Qoder,
+			Product: prod,
 			AuthDir: cfg.QoderAuthDir,
 		})
 		if err := registry.Register(qd); err != nil {
 			log.Fatalf("注册 Qoder 上游失败: %v", err)
 		}
 		log.Printf("qoder: 已启用（凭证目录 %s，加密推理端点 %s）",
-			cfg.QoderAuthDir, qoder.Qoder.EncryptedInferBase)
+			cfg.QoderAuthDir, prod.EncryptedInferBase)
 
 		if cfg.QoderCNActive {
 			qdCN = qoder.NewWithConfig(qoder.Config{
-				Product: qoder.QoderCN,
+				Product: prodCN,
 				AuthDir: cfg.QoderAuthDir,
 			})
 			if err := registry.Register(qdCN); err != nil {
