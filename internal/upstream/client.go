@@ -233,6 +233,21 @@ type Client struct {
 	// 官方面板「使用端」列读它。空 = 只设 X-Product: "SaaS"（改造前行为）。
 	// 配 "WorkBuddy" 即对齐官方桌面端身份。
 	ClientName string
+	// ProductCode X-Product-Code 头的取值。
+	//
+	// # 为什么需要它（CodeBuddy 中国版的身份对齐）
+	//
+	// 参照项目（从 CodeBuddy CN IDE 逆向）的 buddy 产品配置里有
+	// `productCode: 'codebuddy'`，且注释写明「对齐 IDE headers 设置」——
+	// 它的 header 常量整段标注「逆向自 IDE Jd/jM/qM 定义」。
+	// 同一份配置里 workbuddy 用 `productCode: 'workbuddy'`。
+	//
+	// 也就是说**这个头是产品身份的一部分**，与 UA 同级。
+	// 本网关的 workbuddy 上游 CN 路径的端点就是 copilot.tencent.com
+	//（见 New() 的 ChatBaseCN），所以服务 CodeBuddy 凭证时该发 codebuddy。
+	//
+	// 空 = 不注入该头（保持改造前行为，既有部署逐字节不变）。
+	ProductCode string
 	// DeviceToken 全局设备风控令牌（X-Device-Token）。空 = 不使用全局值。
 	DeviceToken string
 	// DeviceTokenFile 设备令牌文件（带 5 分钟 TTL 缓存，见 device_token.go）。

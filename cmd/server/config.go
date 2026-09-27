@@ -180,6 +180,19 @@ type Config struct {
 		// 官方面板「使用端」列读它。配 "WorkBuddy" 即对齐官方桌面端身份。
 		// 空 = 只设 X-Product: "SaaS"（改造前行为）。
 		ClientName string `json:"client_name"`
+		// ProductCode X-Product-Code 头的取值（产品身份的一部分）。
+		//
+		// # 为什么它是独立配置项，不由 client_name 推导
+		//
+		// 两者语义不同：X-Product 是**用量归属名**（WorkBuddy / CodeBuddy），
+		// X-Product-Code 是**产品代码**（workbuddy / codebuddy）。
+		// 参照项目（从 CodeBuddy CN IDE 逆向）把两者分别配在
+		// BuddyProduct 的 attributionName 与 productCode 上。
+		//
+		// 本网关的 workbuddy 上游 CN 路径端点就是 copilot.tencent.com，
+		// 所以服务 CodeBuddy 凭证时应配 "codebuddy"。
+		// 空 = 不注入该头（改造前行为，既有部署逐字节不变）。
+		ProductCode string `json:"product_code"`
 		// DeviceToken 全局设备风控令牌（X-Device-Token）。空 = 不使用全局值。
 		DeviceToken string `json:"device_token"`
 		// DeviceTokenFile 设备令牌文件（带 5 分钟 TTL 缓存与失败保留）。
