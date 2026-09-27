@@ -42,7 +42,6 @@ import (
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/scheduler"
-	"workbuddy2api/internal/upstream"
 )
 
 // Config 管理台依赖。
@@ -104,7 +103,7 @@ type Config struct {
 	// （workbuddy 与 workbuddy-intl 的模型互不相干），按上游取目录才能
 	// 给每个上游的模型都标上倍率。由 cmd/server 注入 server.(*Handler).ModelCatalogFor
 	// —— 它内部按 provider 分缓存（1h TTL / 5min 失败负缓存）。
-	ModelCatalog func(provider string) *upstream.ModelCatalog
+	ModelCatalog func(provider string) *gateway.ModelCatalog
 	// ModelCatalogState 只读的目录缓存状态（ok/stale/unavailable）。nil = 未接线。
 	// 与 ModelCatalog 分开注入是刻意的：状态查询**绝不能**触发上游请求，
 	// 而取目录会。把两者混成一个函数，就没法在 /admin/stats 里安全地只要状态。
