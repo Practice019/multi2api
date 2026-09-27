@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/wire"
 )
 
 // 上游域名。与 product.json 的 commercialVersionDomain.newFramework.productDomain 对应。
@@ -398,10 +398,10 @@ func (c *Client) ChatStreamWith(a *Auth, body []byte, extraHeaders map[string]st
 	// 原样转发让上游给出它自己的错误，不猜一个默认模型。
 	canonBody := body
 	if canonical, ok := CanonicalModel(modelOf(body)); ok {
-		canonBody = upstream.RewriteModelField(body, canonical)
+		canonBody = wire.RewriteModelField(body, canonical)
 	}
 
-	outBody := upstream.PrepareBodyOptWithLimits(canonBody, c.SanitizeFingerprints, nil, MaxTokensTable())
+	outBody := wire.PrepareBodyOptWithLimits(canonBody, c.SanitizeFingerprints, nil, MaxTokensTable())
 
 	// 按模型挑通道。注意用 outBody 而非 body ——
 	// 模型名以改写后的请求体为准（改写不会动 model 字段，但保持一致更稳妥）。

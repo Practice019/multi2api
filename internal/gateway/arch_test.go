@@ -457,17 +457,21 @@ var privateSDKKnownDebt = []struct {
 }{
 	{
 		SDK: "upstream", Dependent: "server",
-		Reason: "错误栈 + Config.Upstream 共 43 处，牵涉单上游回落路径（cfg.Provider==nil）" +
+		Reason: "错误栈 + Config.Upstream 共 39 处，牵涉单上游回落路径（cfg.Provider==nil）" +
 			"与 70+ 处测试构造。需先抽中立线协议层（InBandError/Stream/Aggregate/Usage），" +
 			"再让 Provider 路径成为必经。分阶段做。",
 	},
-	{
-		SDK: "upstream", Dependent: "codearts",
-		Reason: "RewriteModelField + PrepareBodyOptWithLimits 两处。这不只是类型耦合：" +
-			"codearts 的 SanitizeFingerprints=true，于是 workbuddy 的反指纹改写" +
-			"（含剥离裸数字 11-128）会作用在 codearts 流量上。修法需先确认" +
-			"codearts 上游是否真的需要这套改写（需有效凭证实测，当前凭证已失效）。",
-	},
+	// ⚠ codearts 那条已删除（债已还清，见提交「抽 internal/wire 中立线协议层」）：
+	//
+	//	原先：RewriteModelField + PrepareBodyOptWithLimits 两处，
+	//	      且因 codearts.SanitizeFingerprints=true，workbuddy 的反指纹改写
+	//	      （含剥离裸数字 11-128）会作用在 codearts 流量上。
+	//
+	//	现在：出站请求体改写搬到 internal/wire（零内部依赖），
+	//	      codearts 直接用 wire —— 对 internal/upstream **零依赖**。
+	//
+	// 这条不是"被删掉了就没人管"：防陈旧互锁（下方 observed 检查）要求
+	// 债还清后必须删登记，否则它会腐化成永久豁免。本次正是它触发的删除。
 }
 
 // TestPrivateSDKIsNotConsumedByOtherUpstreams 私有 SDK 只许它的所有者用。
@@ -597,9 +601,10 @@ func TestSharedInfraIsGenuinelyShared(t *testing.T) {
 	//
 	// 每个都必须被 ≥2 个上游依赖，否则测试会要求删掉这里的登记。
 	registered := map[string]bool{
-		"auth":       true, // 凭证结构（各上游都往池子里放 *auth.Auth 投影）
+		"auth":       true, // 凭证结构（上游产出 *auth.Auth，核心 pool/server/admin 消费）
 		"checkinlog": true, // 签到/动作历史日志
-		"prompt":     true, // 提示词降级（出站改写共用）
+		"prompt":     true, // 提示词降级（出站改写 + 核心降级状态机共用）
+		"wire":       true, // 出站线协议改写（workbuddy 与 codearts 共用，见 wire_reexport.go）
 	}
 
 	// 已被 workbuddyPrivateSDK 归类为「某个上游的私有 SDK」的包 —— 跳过。
@@ -651,17 +656,35 @@ func TestSharedInfraIsGenuinelyShared(t *testing.T) {
 		}
 	}
 
-	// 反向：登记了却没人用 → 陈旧登记，要求删掉（防名单腐化）
+	// 反向：登记了却**真的**没人用 → 陈旧登记，要求删掉（防名单腐化）
+	//
+	// # 判据为什么是「上游 + 核心」的总依赖者数，而不只是上游数
+	//
+	// 「共享基础设施」的实质是**跨切面复用**，而切面有两类：
+	//
+	//	上游 ↔ 上游    例：wire（workbuddy 与 codearts 共用出站改写）
+	//	上游 ↔ 核心    例：auth（上游产出 *auth.Auth，核心 pool/server/admin 消费）
+	//	                     prompt（上游出站改写 + 核心降级状态机共用）
+	//
+	// 只数上游会把第二类误判成"陈旧"。这不是假设 —— 本次把 codearts 的出站
+	// 改写从 internal/upstream 挪到 internal/wire 之后，auth 与 prompt 的
+	// **上游侧**依赖者就只剩 workbuddy 了（原先 codearts 也算一个），
+	// 于是旧判据要求"删掉这两条登记"——而它们明明是核心与上游共享的词汇表，
+	// 删了反而会让下一次有人把它们私有化时无人可拦。
+	//
+	// 换句话说：旧判据把「上游数量」当成了「共享程度」，而前者只是后者的
+	// 一个**下界**。改成总数之后，真正的腐化（没人用）仍然会被抓到。
 	for name := range registered {
 		if _, err := os.Stat(filepath.Join(root, "internal", name)); err != nil {
 			t.Errorf("sharedInfraPackages 里的 internal/%s 不存在了 —— 陈旧登记，请删除", name)
 			continue
 		}
-		dep := upstreamDependents(t, root, name)
-		if len(dep) < 2 {
-			t.Errorf("internal/%s 被登记为共享基础设施，但只有 %d 个上游依赖它（%v）—— "+
+		ups := upstreamDependents(t, root, name)
+		cores := coreDependents(t, root, name)
+		if len(ups)+len(cores) < 2 {
+			t.Errorf("internal/%s 被登记为共享基础设施，但只有 %d 个依赖者（上游 %v；核心 %v）—— "+
 				"登记已陈旧。若它其实是某个上游的私有物，请移进 workbuddyPrivateSDK。",
-				name, len(dep), dep)
+				name, len(ups)+len(cores), ups, cores)
 		}
 	}
 }
@@ -690,6 +713,26 @@ var depsCache = map[string][]string{}
 var discoverCache = map[string][]string{}
 
 // ── 辅助：依赖关系查询 ────────────────────────────────────────────────────
+
+// coreDependents 返回哪些**核心包**依赖 internal/<name>（非测试依赖）。
+//
+// 与 upstreamDependents 配对，用于 TestSharedInfraIsGenuinelyShared 的
+// "共享程度"判定 —— 共享可以发生在上游↔上游，也可以发生在上游↔核心
+//（见该测试里 registered 的注释）。
+func coreDependents(t *testing.T, root, name string) []string {
+	t.Helper()
+	var out []string
+	for _, c := range corePackages {
+		if c == "workbuddy2api/internal/"+name {
+			continue
+		}
+		if dependsOnPkg(root, c, "workbuddy2api/internal/"+name) {
+			out = append(out, strings.TrimPrefix(c, "workbuddy2api/internal/"))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // candidatePackages 返回 internal/ 下所有值得检查的包名
 // （排除下划线/点开头、以及非包目录）。
