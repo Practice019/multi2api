@@ -844,6 +844,12 @@ type Config struct {
 	LobsteraiPortalBase   string `json:"-"`
 	LobsteraiVersionAPI   string `json:"-"`
 	LobsteraiPoolAccounts bool   `json:"-"`
+	// Qoder（第九/十上游）解析后。
+	QoderEnabled      bool   `json:"-"`
+	QoderCNActive     bool   `json:"-"`
+	QoderAuthDir      string `json:"-"`
+	QoderAPIBase      string `json:"-"`
+	QoderPoolAccounts bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
 	// # 为什么保留它
