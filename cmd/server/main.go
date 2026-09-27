@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -39,6 +40,7 @@ import (
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/trae"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/wire"
 	"workbuddy2api/internal/workbuddy"
 )
 
@@ -139,6 +141,24 @@ func main() {
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 按模型族分档的 UA 覆写表（可选；空 = 不分档，与改造前逐字节相同）。
+	//
+	// 对齐参照项目的 userAgentByModelFamily：国际版与国内版共用同一后端协议，
+	// 但模型池分属不同产品线，而后台按 UA 归因「使用端」——
+	// 只用一个全局 UA 会让其中一类模型的账单显示成 `-`。
+	//
+	// ⚠ 这里做一次 config 类型 → wire 类型的转换（两层刻意分开，
+	// 见 UAModelFamilyConfig 的注释）。
+	for _, r := range cfg.Upstream.UAModelFamilies {
+		match := strings.TrimSpace(r.Match)
+		ua := strings.TrimSpace(r.UA)
+		if match == "" || ua == "" {
+			// 空 match 会匹配一切（把全部模型都覆写掉），空 UA 会发出一个
+			// 空 User-Agent —— 两者都是配置错误，明确报出来而不是静默生效。
+			log.Fatalf("upstream.ua_model_families: 每一项都要有 match 与 ua（得到 match=%q ua=%q）", r.Match, r.UA)
+		}
+		up.UAModelFamilies = append(up.UAModelFamilies, wire.UAModelFamilyRule{Match: match, UA: ua})
+	}
 	{
 		// 显式记一行：出站身份会决定"上游怎么看我们"，
 		// 排查"为什么官网使用端显示不对"时这是唯一的入口。
@@ -152,6 +172,18 @@ func main() {
 			ua, cfg.Upstream.ClientName,
 			cfg.Upstream.DeviceToken != "" || cfg.Upstream.DeviceTokenFile != "",
 			cfg.Upstream.PassthroughIP)
+		// 分档表单独记一行：它是"账单里某个模型显示成 `-`"的唯一解释。
+		//
+		// 不并进上一行的理由：表可以有 7 条以上，拼进去会把那行撑爆，
+		// 而上一行是每次启动都要看的（越短越容易被读到）。
+		if n := len(up.UAModelFamilies); n > 0 {
+			parts := make([]string, 0, n)
+			for _, r := range up.UAModelFamilies {
+				parts = append(parts, r.Match+"→"+r.UA)
+			}
+			log.Printf("出站 UA 按模型族分档（%d 条，先命中先返回）：%s",
+				n, strings.Join(parts, "；"))
+		}
 	}
 	// 系统提示词体系（借鉴 workbuddy2api-panel）：模式 + 正文 + 降级状态机。
 	//

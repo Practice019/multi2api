@@ -66,6 +66,18 @@
     "enabled": true
   },
   "upstream": {
+    "client_version": "5.5.2",
+    "cli_version": "5.5.2",
+    "ua_model_families": [
+      {"match": "gpt-", "ua": "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"},
+      {"match": "gemini-", "ua": "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"},
+      {"match": "claude-", "ua": "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"},
+      {"match": "glm-", "ua": "WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2"},
+      {"match": "hy", "ua": "WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2"},
+      {"match": "kimi-", "ua": "WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2"},
+      {"match": "minimax-", "ua": "WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2"}
+    ],
+
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
     "timeout_seconds": 120

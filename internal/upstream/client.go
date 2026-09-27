@@ -16,6 +16,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/wire"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -228,6 +229,24 @@ type Client struct {
 	ClientVersion string
 	// CliVersion 三段式 UA 里的 CLI 段；空 = defaultCliVersion（2.137.1）。
 	CliVersion string
+	// UAModelFamilies 按**模型族**覆写出站 UA 的规则表（先命中先返回）。
+	//
+	// # 为什么需要它（参照项目有、我们此前没有）
+	//
+	// 国际版与国内版**共用同一后端协议，但模型池分属不同产品线**，
+	// 而腾讯后台按出站 UA 归因「使用端」—— 只用一个全局 UA 会让其中一类
+	// 模型的账单显示成 `-`（见 internal/wire/useragent.go 的文件头）。
+	//
+	// 参照 product.ts 的 intl 表（逐字）：
+	//
+	//	gpt- / gemini- / claude-  → WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2
+	//	glm- / hy / kimi- / minimax- → WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2
+	//
+	// 空表 = 不分档（全部用默认形态）—— 与改造前行为**逐字节相同**。
+	//
+	// ⚠ 只在 ClientVersion 非空（走三段式）时生效：第 ① 级（UserAgent
+	// 逐字覆盖）是"配置完全接管"，分档不该越过它。
+	UAModelFamilies []wire.UAModelFamilyRule
 	// ClientName 用量归属名（X-IDE-Name / X-IDE-Type / X-Product / X-Agent-Purpose）。
 	//
 	// 官方面板「使用端」列读它。空 = 只设 X-Product: "SaaS"（改造前行为）。
@@ -518,7 +537,7 @@ func (c *Client) ChatStreamWithIP(a *auth.Auth, body []byte, clientIP string) (r
 	if err != nil {
 		return nil, 0, nil, err
 	}
-	c.ChatHeaders(req, a, clientIP)
+	c.ChatHeaders(req, a, clientIP, wire.ModelOf(body))
 	ctx, cancel := context.WithCancel(context.Background())
 	req = req.WithContext(ctx)
 	resp, err := c.chatHTTP().Do(req)

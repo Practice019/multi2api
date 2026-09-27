@@ -17,6 +17,20 @@ import (
 	"workbuddy2api/internal/prompt"
 )
 
+// UAModelFamilyConfig 一条"按模型名前缀覆写 UA"的规则。
+//
+// 与 internal/wire.UAModelFamilyRule 字段一一对应 —— 分成两个类型是
+// 有意的分层：config 是**外部输入**（JSON），wire 是**内部契约**。
+// 装配层做一次转换，于是 JSON 字段名怎么改都不会牵动 wire。
+//
+// ⚠ 表序即优先级（先命中先返回）。参照实现也是这个语义。
+type UAModelFamilyConfig struct {
+	// Match 模型名前缀（如 "gpt-" / "glm-"）。
+	Match string `json:"match"`
+	// UA 命中时使用的 UA（逐字）。
+	UA string `json:"ua"`
+}
+
 // Config 顶层配置。
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
@@ -193,6 +207,29 @@ type Config struct {
 		// 所以服务 CodeBuddy 凭证时应配 "codebuddy"。
 		// 空 = 不注入该头（改造前行为，既有部署逐字节不变）。
 		ProductCode string `json:"product_code"`
+		// UAModelFamilies 按**模型族**覆写出站 UA 的规则表（可选，默认空）。
+		//
+		// # 为什么需要它（对齐参照项目的 userAgentByModelFamily）
+		//
+		// 国际版与国内版共用同一后端协议，但模型池分属不同产品线，
+		// 而腾讯后台按出站 UA 归因「使用端」—— 只用一个全局 UA 会让
+		// 其中一类模型的账单显示成 `-`。
+		//
+		// 参照 product.ts 的 intl 表（逐字）：
+		//
+		//	gpt- / gemini- / claude-     → WorkBuddy/<v> WorkBuddy AI/<v> CLI/<v>
+		//	glm- / hy / kimi- / minimax- → WorkBuddy/<v> WorkBuddy/<v>    CLI/<v>
+		//
+		// # 默认空 = 不分档（与改造前**逐字节相同**）
+		//
+		// ⚠ 刻意不设默认值。我们的三段式默认是 **CN 形态**，而参照 intl 的
+		// 默认档是 **INTL 形态**（品牌段含 `AI`）—— 两者不同。为了对齐参照
+		// 而改默认，会让所有既有部署的出站 UA 突然变化（牵动上游归因/风控/限流）。
+		//
+		// 想对齐参照的部署**显式**配这张表；差异由
+		// internal/upstream/useragent_family_test.go 的
+		// TestDefaultUADiffersFromReferenceIntl 显式记录。
+		UAModelFamilies []UAModelFamilyConfig `json:"ua_model_families"`
 		// DeviceToken 全局设备风控令牌（X-Device-Token）。空 = 不使用全局值。
 		DeviceToken string `json:"device_token"`
 		// DeviceTokenFile 设备令牌文件（带 5 分钟 TTL 缓存与失败保留）。

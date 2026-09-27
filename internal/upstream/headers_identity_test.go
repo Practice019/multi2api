@@ -40,7 +40,7 @@ func TestDefaultOutboundIdentityUnchanged(t *testing.T) {
 	c := New() // 不设任何身份字段
 	a := &auth.Auth{AccessToken: "tok", UID: "u1", EnterpriseID: "e1", Domain: "d1"}
 	req := newHdrReq(t)
-	c.ChatHeaders(req, a, "")
+	c.ChatHeaders(req, a, "", "")
 
 	if got := req.Header.Get("User-Agent"); got != clientUA {
 		t.Errorf("缺省 UA=%q，必须是改造前的常量 %q", got, clientUA)
@@ -81,7 +81,7 @@ func TestUserAgentOverrideVerbatim(t *testing.T) {
 	c.UserAgent = "MyAgent/9.9"
 	c.ClientVersion = "5.5.4" // 同时配了 client_version，也应被 user_agent 压住
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "")
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "", "")
 
 	if got := req.Header.Get("User-Agent"); got != "MyAgent/9.9" {
 		t.Errorf("UA=%q，期望 user_agent 逐字覆盖（优先级最高）", got)
@@ -96,7 +96,7 @@ func TestClientVersionEnablesThreeSegmentUA(t *testing.T) {
 	c := New()
 	c.ClientVersion = "5.5.4"
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "")
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "", "")
 
 	want := "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"
 	if got := req.Header.Get("User-Agent"); got != want {
@@ -110,7 +110,7 @@ func TestCliVersionOverridesCliSegment(t *testing.T) {
 	c.ClientVersion = "5.5.6"
 	c.CliVersion = "2.140.0"
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "")
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "", "")
 
 	want := "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.140.0"
 	if got := req.Header.Get("User-Agent"); got != want {
@@ -124,7 +124,7 @@ func TestClientNameEnablesAttribution(t *testing.T) {
 	c.ClientName = "WorkBuddy"
 	c.ClientVersion = "5.5.4"
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "")
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "", "")
 
 	for h, want := range map[string]string{
 		"X-Agent-Purpose": "conversation",
@@ -154,7 +154,7 @@ func TestDeviceTokenPrecedence(t *testing.T) {
 	c := New()
 	c.DeviceTokenFile = fp
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "")
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "", "")
 	if got := req.Header.Get("X-Device-Token"); got != "from-file" {
 		t.Errorf("文件来源：X-Device-Token=%q，期望 from-file（且已 trim）", got)
 	}
@@ -164,7 +164,7 @@ func TestDeviceTokenPrecedence(t *testing.T) {
 	c2.DeviceTokenFile = fp
 	c2.DeviceToken = "from-config"
 	req2 := newHdrReq(t)
-	c2.ChatHeaders(req2, &auth.Auth{AccessToken: "t", UID: "u"}, "")
+	c2.ChatHeaders(req2, &auth.Auth{AccessToken: "t", UID: "u"}, "", "")
 	if got := req2.Header.Get("X-Device-Token"); got != "from-config" {
 		t.Errorf("配置来源：X-Device-Token=%q，期望 from-config（高于文件）", got)
 	}
@@ -174,7 +174,7 @@ func TestDeviceTokenPrecedence(t *testing.T) {
 	c3.DeviceTokenFile = fp
 	c3.DeviceToken = "from-config"
 	req3 := newHdrReq(t)
-	c3.ChatHeaders(req3, &auth.Auth{AccessToken: "t", UID: "u", DeviceToken: "per-account"}, "")
+	c3.ChatHeaders(req3, &auth.Auth{AccessToken: "t", UID: "u", DeviceToken: "per-account"}, "", "")
 	if got := req3.Header.Get("X-Device-Token"); got != "per-account" {
 		t.Errorf("每号来源：X-Device-Token=%q，期望 per-account（优先级最高）", got)
 	}
@@ -206,7 +206,7 @@ func TestDeviceTokenMissingFileDegradesSilently(t *testing.T) {
 	c := New()
 	c.DeviceTokenFile = filepath.Join(t.TempDir(), "不存在.token")
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "") // 不得 panic
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "", "") // 不得 panic
 
 	if v := req.Header.Get("X-Device-Token"); v != "" {
 		t.Errorf("文件不可读时不该注入该头，得到 %q", v)
@@ -221,7 +221,7 @@ func TestPassthroughIPInjectsThreeHeaders(t *testing.T) {
 	c := New()
 	c.PassthroughIP = true
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "203.0.113.7")
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "203.0.113.7", "")
 
 	for h := range map[string]bool{
 		"X-Forwarded-For": true, "X-Real-IP": true, "X-Client-IP": true,
@@ -238,7 +238,7 @@ func TestPassthroughIPInjectsThreeHeaders(t *testing.T) {
 func TestPassthroughIPOffIgnoresClientIP(t *testing.T) {
 	c := New() // PassthroughIP 默认 false
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "203.0.113.7")
+	c.ChatHeaders(req, &auth.Auth{AccessToken: "t", UID: "u"}, "203.0.113.7", "")
 
 	for _, h := range []string{"X-Forwarded-For", "X-Real-IP", "X-Client-IP"} {
 		if v := req.Header.Get(h); v != "" {
@@ -254,7 +254,7 @@ func TestPassthroughIPOffIgnoresClientIP(t *testing.T) {
 func TestEmptyAccountHeadersUseNoConvention(t *testing.T) {
 	c := New()
 	req := newHdrReq(t)
-	c.ChatHeaders(req, &auth.Auth{}, "") // 全空账号
+	c.ChatHeaders(req, &auth.Auth{}, "", "") // 全空账号
 
 	for h := range map[string]bool{
 		"X-No-Authorization": true, "X-No-User-Id": true,

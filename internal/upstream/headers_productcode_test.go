@@ -32,7 +32,7 @@ func TestProductCodeHeader(t *testing.T) {
 		c := New()
 		c.ProductCode = "codebuddy"
 		req := newHdrReq(t)
-		c.ChatHeaders(req, authOf(), "")
+		c.ChatHeaders(req, authOf(), "", "")
 		if got := req.Header.Get("X-Product-Code"); got != "codebuddy" {
 			t.Errorf("X-Product-Code = %q, want codebuddy", got)
 		}
@@ -42,7 +42,7 @@ func TestProductCodeHeader(t *testing.T) {
 		c := New()
 		c.ProductCode = ""
 		req := newHdrReq(t)
-		c.ChatHeaders(req, authOf(), "")
+		c.ChatHeaders(req, authOf(), "", "")
 		if _, present := req.Header["X-Product-Code"]; present {
 			t.Error("ProductCode 为空时不该注入该头（改造前行为：既有部署不多任何头）")
 		}
@@ -55,7 +55,7 @@ func TestProductCodeHeader(t *testing.T) {
 		c.ClientName = "WorkBuddy"
 		c.ProductCode = "workbuddy"
 		req := newHdrReq(t)
-		c.ChatHeaders(req, authOf(), "")
+		c.ChatHeaders(req, authOf(), "", "")
 		if got := req.Header.Get("X-Product"); got != "WorkBuddy" {
 			t.Errorf("X-Product = %q, want WorkBuddy", got)
 		}
@@ -70,7 +70,7 @@ func TestProductCodeHeader(t *testing.T) {
 		c := New()
 		c.ProductCode = "codebuddy"
 		req := newHdrReq(t)
-		c.ChatHeaders(req, authOf(), "")
+		c.ChatHeaders(req, authOf(), "", "")
 		if got := req.Header.Get("X-Product"); got != "SaaS" {
 			t.Errorf("ClientName 为空时 X-Product 应为 SaaS，实际 %q", got)
 		}
