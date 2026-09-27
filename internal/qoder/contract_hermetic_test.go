@@ -38,9 +38,14 @@ type stubSigner struct {
 	path string
 }
 
-func (s *stubSigner) BuildInferRequest(model string, body []byte) (string, []byte, map[string]string, error) {
+func (s *stubSigner) BuildInferRequest(id SignIdentity, model string, body []byte) (string, []byte, map[string]string, error) {
 	if model == "" {
 		return "", nil, nil, fmt.Errorf("stub: 缺 model")
+	}
+	if id.UID == "" {
+		// 真实实现靠 uid 算鉴权字段；桩也把这条判据带上，
+		// 好让"上游忘了传身份"这类缺陷在桩测试里也暴露。
+		return "", nil, nil, fmt.Errorf("stub: 缺账号身份（uid）")
 	}
 	head := s.head
 	if head == "" {
@@ -49,6 +54,7 @@ func (s *stubSigner) BuildInferRequest(model string, body []byte) (string, []byt
 	return s.path, body, map[string]string{
 		"X-Signature": head,
 		"X-Model":     model,
+		"X-UID":       id.UID,
 	}, nil
 }
 
@@ -127,6 +133,15 @@ func fakeUpstream(t *testing.T, pollFirst404 int) (*httptest.Server, *fakeCalls)
 		if r.Header.Get("X-Model") == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"code":1,"message":"missing model"}`))
+			return
+		}
+		// ⚠ 账号身份必须传到签名器（真实实现靠它算鉴权字段与 Cosy-User）。
+		// 这条钉住的是**接缝本身**：请求走到网络层时，用的必须是
+		// "这次选中的那个账号"的身份，而不是空值或别的账号 ——
+		// 传错身份会把请求发到别人的账号上（最严重的一类缺陷）。
+		if r.Header.Get("X-UID") == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":1,"message":"missing uid"}`))
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
