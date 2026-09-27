@@ -806,6 +806,9 @@ func main() {
 		if qSigner != nil {
 			qd.SetSigner(qoderSigner{s: qSigner})
 		}
+		// 签到与余额端点需要**活凭证**（access_token），而 AuthByUID 返回的
+		// 是核心账号投影（只有 uid/nickname）—— 前者才是能发请求的那个。
+		qd.SetCredentialSource(qoderCredSource(p, qoder.ProviderID))
 		if err := registry.Register(qd); err != nil {
 			log.Fatalf("注册 Qoder 上游失败: %v", err)
 		}
@@ -823,6 +826,10 @@ func main() {
 			if qSigner != nil {
 				qdCN.SetSigner(qoderSigner{s: qSigner})
 			}
+			// ⚠ providerID 用 CN 的：两个产品在同一目录，但核心账号池按
+			// provider 标签分域（qoder / qodercn），所以投影必须带对标签 ——
+			// 否则 qodercn 的端点会取到 qoder 的账号（或取不到）。
+			qdCN.SetCredentialSource(qoderCredSource(p, qoder.ProviderIDCN))
 			if err := registry.Register(qdCN); err != nil {
 				log.Fatalf("注册 Qoder CN 上游失败: %v", err)
 			}
