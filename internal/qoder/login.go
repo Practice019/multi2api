@@ -42,6 +42,43 @@ type loginFlow struct {
 // Configured 是否可走登录流程。
 func (f *loginFlow) Configured() bool { return f != nil && f.p != nil }
 
+// ── 让 *Provider 直接满足 gateway.LoginFlow ────────────────────────────────
+//
+// ⚠ 这三个转发方法是**必需的**：核心用 `ExtOf[LoginFlow](p)`（类型断言）
+// 发现扩展点，而访问器 `LoginFlow() (LoginFlow, bool)` 的返回值
+// **不参与方法集匹配** —— 断言看不见它。
+//
+// 少了它们，本包测试全绿（测试走访问器）但 `/admin/providers` 下发
+// `login:null`，界面上没有「＋ 添加账号」按钮。实测事故就是这个形态，
+// 现由 gateway.RunProviderContract 的 verifyExtensionsDiscoverable 守住。
+//
+// ⚠ 两个 Qoder 实例（国际版 / 中国版）都靠这三个方法获得登录能力 ——
+// 它们是同类型的两个值，方法集相同。
+
+// Start 让 *Provider 直接满足 gateway.LoginFlow。
+func (p *Provider) Start() (string, string, error) {
+	lf, ok := p.LoginFlow()
+	if !ok {
+		return "", "", errors.New("qoder: 登录流程未初始化")
+	}
+	return lf.Start()
+}
+
+// Poll 让 *Provider 直接满足 gateway.LoginFlow。
+func (p *Provider) Poll(state string) (gateway.Credential, error) {
+	lf, ok := p.LoginFlow()
+	if !ok {
+		return gateway.Credential{}, errors.New("qoder: 登录流程未初始化")
+	}
+	return lf.Poll(state)
+}
+
+// Configured 让 *Provider 直接满足 gateway.LoginFlow。
+func (p *Provider) Configured() bool {
+	lf, ok := p.LoginFlow()
+	return ok && lf.Configured()
+}
+
 // Start 发起一次登录：生成 state + 授权 URL，后台轮询。
 //
 // 返回 (state, authURL, error)。

@@ -10,6 +10,7 @@ package gateway
 import (
 	"context"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -47,6 +48,10 @@ func TestContractGenuinelyDetectsViolations(t *testing.T) {
 		{"Chat-panic", func() Provider { return &panicProvider{} }, "panic"},
 		{"流不Close", func() Provider { return &leakyProvider{} }, "Close"},
 		{"假声明Models", func() Provider { return &liarProvider{} }, "Models"},
+		{"访问器式扩展点（ExtOf 看不见）", func() Provider {
+			// 给一个合法 ID：否则会先报"ID() 为空"，掩盖真正要验的那条
+			return &accessorOnlyProvider{goodProvider{id: "acc"}}
+		}, "ExtOf"},
 	}
 
 	for _, c := range cases {
@@ -76,9 +81,65 @@ func firstLine(s string) string {
 	return s
 }
 
+// accessorOnlyProvider 复刻实测事故的形态：有 LoginFlow() 访问器，
+// 但 **没有** 把 Start/Poll/Configured 挂到 *Provider 上。
+//
+// 这正是 cline / raccoon / lobsterai / qoder 四个上游原来的写法：
+// 各自端到端测试走访问器（全绿），生产走 ExtOf 类型断言（必然失败）——
+// 测试与生产走了两条不同的路。
+type accessorOnlyProvider struct{ goodProvider }
+
+func (a *accessorOnlyProvider) LoginFlow() (LoginFlow, bool) {
+	return &fakeLoginFlow{}, true
+}
+
+// fakeLoginFlow 只为满足接口形状（本用例永远不会调到它）。
+type fakeLoginFlow struct{}
+
+func (f *fakeLoginFlow) Start() (string, string, error) { return "", "", nil }
+func (f *fakeLoginFlow) Poll(string) (Credential, error) {
+	return Credential{}, ErrLoginPending
+}
+func (f *fakeLoginFlow) Configured() bool { return true }
+
+// TestExtAccessorPredicateIsNotSilentlyFalse 直接钉住反射判据本身。
+//
+// # 为什么必须单独测这个谓词
+//
+// 第一版 isExtAccessor 写成 `mt.NumIn() != 0` —— 但 reflect 的
+// **方法** Func 类型把接收者算作第一个入参，于是 NumIn() 恒为 1，
+// 谓词恒 false，整条 verifyExtensionsDiscoverable 静默失效：
+// 四个有缺陷的上游照旧全绿。
+//
+// 也就是说"检查"自己踩了它要防的那个坑（判据写错 → 检查变成装饰）。
+// 上面那条 accessorOnlyProvider 反向用例能抓到这种失效，
+// 这里再把谓词的两侧边界直接钉住 —— 一个是行为级，一个是单元级。
+func TestExtAccessorPredicateIsNotSilentlyFalse(t *testing.T) {
+	// 正面：*Provider 上的 LoginFlow() 必须是"访问器"形态
+	rt := reflect.TypeOf(&accessorOnlyProvider{})
+	m, ok := rt.MethodByName("LoginFlow")
+	if !ok {
+		t.Fatal("测试桩自身有问题：找不到 LoginFlow 方法")
+	}
+	if !isExtAccessor(m.Type) {
+		t.Errorf("isExtAccessor 未能认出 %v —— 谓词失效会让整条检查静默变绿", m.Type)
+	}
+
+	// 反面：业务方法（有入参/只有一个返回值）不得被误认成访问器，
+	// 否则会把无关方法当成"声称实现了扩展点"而误报。
+	if isExtAccessor(reflect.TypeOf(func(int) {})) {
+		t.Error("有入参的函数不该被认成访问器")
+	}
+	if isExtAccessor(reflect.TypeOf(func() {})) {
+		t.Error("无返回值的函数不该被认成访问器")
+	}
+	if isExtAccessor(reflect.TypeOf(func() (int, int) { return 0, 0 })) {
+		t.Error("第二返回值非 bool 不该被认成访问器")
+	}
+}
+
 // noChatCaps 声明了别的能力但没有 CapChat。
 type noChatCaps struct{}
-
 func (n *noChatCaps) ID() string       { return "nocap" }
 func (n *noChatCaps) Caps() Capability { return CapModels }
 func (n *noChatCaps) Chat(ctx context.Context, c Credential, b []byte) (ChatStream, error) {

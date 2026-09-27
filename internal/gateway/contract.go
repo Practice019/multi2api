@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http/httptest"
+	"reflect"
 	"time"
 )
 
@@ -84,6 +85,9 @@ func RunProviderContract(t TB, factory func() Provider, opts ...ContractOption) 
 
 	// ---- 4. 声明的能力必须真的可用 ----
 	probeCapabilities(t, p, caps, id, cfg)
+
+	// ---- 4b. 扩展点必须真的能被 ExtOf 发现 ----
+	verifyExtensionsDiscoverable(t, p, id)
 
 	// ---- 5. Chat 行为 ----
 	if caps.Has(CapChat) {
@@ -183,6 +187,119 @@ func probeCapabilities(t TB, p Provider, caps Capability, id string, cfg contrac
 			verifyAdminRoutes(t, ax, caps)
 		}
 	}
+}
+
+// verifyExtensionsDiscoverable 检查"实现了扩展点"与"ExtOf 能发现它"是同一件事。
+//
+// # 这条检查补的是一个**真的漏过**的洞（不是预防性加固）
+//
+// 实测事故：cline / raccoon / lobsterai / qoder 四个上游各自写好了完整的
+// 登录流程，测试也全绿 —— 但 `/admin/providers` 对它们一律下发 `login: null`，
+// 界面上没有「＋ 添加账号」按钮。根因是两套调用约定不一致：
+//
+//	上游提供的是**访问器**：func (p *Provider) LoginFlow() (LoginFlow, bool)
+//	核心用的是**类型断言**：ExtOf[LoginFlow](p) 即 p.(LoginFlow)
+//
+// 访问器对类型断言**不可见**（返回接口的方法不参与方法集匹配），
+// 于是"上游说我有"与"核心能找到"分叉。而 gateway 里早就写下了这条坑
+//（见 extension.go 里 LoginFlow 的注释），**但没有任何检查执行它** ——
+// 注释拦不住一个照抄隔壁包、恰好抄错半边的新上游。
+//
+// 更隐蔽的是：四个上游的端到端测试都调**访问器**
+//（`lf, ok := p.LoginFlow()`），所以测试全绿；只有生产路径走 ExtOf。
+// 测试与生产走了两条不同的路，正是"测试通过而功能不可用"的典型成因。
+//
+// # 判据
+//
+// 若 `p` 上有形如 `Xxx() (SomeExt, bool)` 的**访问器方法**，
+// 就要求 `ExtOf[SomeExt](p)` 也能成功。即：
+// 声明某扩展点的两种写法必须一致 —— 要么都通，要么都不通。
+//
+// 用反射枚举而不是硬编码 LoginFlow：加下一个扩展点时不用回来改这里，
+// 新上游也不会因为"这次检查没覆盖到"而再漏一次。
+func verifyExtensionsDiscoverable(t TB, p Provider, id string) {
+	t.Helper()
+
+	// 反射拿方法集：这里必须用**具体类型**的反射，不能用 Provider 接口类型 ——
+	// 后者只有 4 个方法，看不到上游挂上去的扩展点方法。
+	rt := reflect.TypeOf(p)
+	if rt == nil {
+		return
+	}
+
+	for _, ext := range discoverableExtensions {
+		acc, ok := rt.MethodByName(ext.accessor)
+		if !ok {
+			continue // 没写访问器 —— 那就该直接挂方法，不涉及这条分叉
+		}
+		// 签名必须是 `func() (Ext, bool)`：不满足说明这不是我们认的那种访问器
+		//（可能是个碰巧同名的业务方法），跳过而不是误报。
+		if !isExtAccessor(acc.Type) {
+			continue
+		}
+		// 访问器存在 ⇒ 上游声称实现了该扩展点。核心必须也能发现它。
+		if ext.discoverable(p) {
+			continue
+		}
+		t.Errorf("上游 %s 有访问器 %s() 声明实现了 %s，但核心的 ExtOf 发现不了它。\n"+
+			"原因：ExtOf 做的是类型断言 p.(%s)，而**返回接口的访问器方法\n"+
+			"不参与方法集匹配** —— 断言必然失败。\n"+
+			"表现：/admin/providers 对该上游下发 login:null（或对应扩展点视为未实现），\n"+
+			"界面上少一个按钮，而测试全绿（测试若走访问器，就与生产走了两条不同的路）。\n"+
+			"修法：在 *Provider 上补一组转发方法把接口直接满足掉，例如\n"+
+			"    func (p *Provider) Start() (string, string, error) { ... }\n"+
+			"    func (p *Provider) Poll(state string) (Credential, error) { ... }\n"+
+			"    func (p *Provider) Configured() bool { return p != nil }\n"+
+			"参照 internal/trae/login.go 或 internal/workbuddy/login.go 的写法。",
+			id, ext.accessor, ext.iface, ext.iface)
+	}
+}
+
+// extAccessor 一个"可能被访问器暴露"的扩展点。
+//
+// discoverable 用**泛型实例化的闭包**而不是接口名查表：Go 的 reflect 拿不到
+// "名字 → 接口类型"的映射（泛型类型参数运行期已擦除），而写死闭包既类型安全，
+// 也把"用 ExtOf 判断"这一条与生产代码**共用同一个机制** ——
+// 检查与被检查对象同源，不会各自漂移。
+type extAccessor struct {
+	// accessor 访问器方法名（如 "LoginFlow"）。
+	accessor string
+	// iface 扩展点接口名（只用于报错文案）。
+	iface string
+	// discoverable 该扩展点能否被 ExtOf 发现（就是生产那条判据）。
+	discoverable func(Provider) bool
+}
+
+// discoverableExtensions 已知会被访问器暴露的扩展点。
+//
+// 目前只有 LoginFlow —— 它是唯一一个有"访问器"惯例的扩展点
+//（其它扩展点如 AdminExt 一直是直接挂方法）。
+// 加新惯例时在这里补一行，检查自动覆盖。
+var discoverableExtensions = []extAccessor{
+	{
+		accessor: "LoginFlow",
+		iface:    "LoginFlow",
+		discoverable: func(p Provider) bool {
+			_, ok := ExtOf[LoginFlow](p)
+			return ok
+		},
+	},
+}
+
+// isExtAccessor 判断方法签名是否是 `func() (Ext, bool)` 形态。
+//
+// ⚠ `reflect.Type.MethodByName` 返回的 **Func 类型带接收者**：
+// 方法的 NumIn() 是 1（接收者）而不是 0，两个返回值才是 NumOut()。
+// 第一版这里写成 `NumIn() != 0` 于是**恒为 false** —— 检查自己静默失效、
+// 四个上游照旧全绿。这正是本条检查要防的同一类缺陷（判据写错 →
+// 检查变成装饰），所以判据本身也得被验证：见
+// internal/gateway/contract_extprobe_test.go 的反向用例。
+func isExtAccessor(mt reflect.Type) bool {
+	// 1 个入参 = 接收者（方法），0 个返回值除外的业务方法都不算。
+	if mt.NumIn() != 1 || mt.NumOut() != 2 {
+		return false
+	}
+	return mt.Out(1).Kind() == reflect.Bool
 }
 
 // verifyAdminRoutes 检查 AdminExt 的实现不是空壳。
