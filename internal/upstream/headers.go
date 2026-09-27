@@ -26,6 +26,7 @@ import (
 	"net/http"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/wire"
 )
 
 const (
@@ -94,12 +95,23 @@ func (c *Client) defaultWorkBuddyUA() string {
 //
 // ⚠ 第 ③ 条的措辞是"改造前的行为"，这是本条设计的核心约束：
 // 未配置的部署**必须**发出与升级前完全相同的 UA。
-func (c *Client) userAgent() string {
+//
+// # 按模型族分档（②的细化）
+//
+// 参照项目的 BuddyProduct 有 `userAgentByModelFamily`：国际版与国内版
+// 共用同一后端协议，但模型池分属不同产品线，而后台按 UA 归因「使用端」——
+// 只用一个全局 UA 会让其中一类模型的账单显示成 `-`。
+//
+// 所以 ② 展开成：先按 model 在 UAModelFamilies 里选，无命中用默认形态。
+//
+// ⚠ model 为空（非 chat 路径）时**不猜**分档，直接用默认形态 ——
+// 见 wire.PickUA 的注释。
+func (c *Client) userAgent(model string) string {
 	if c != nil && c.UserAgent != "" {
 		return c.UserAgent
 	}
 	if c != nil && c.ClientVersion != "" {
-		return c.defaultWorkBuddyUA()
+		return wire.PickUA(c.UAModelFamilies, model, c.defaultWorkBuddyUA())
 	}
 	return clientUA
 }
@@ -147,14 +159,17 @@ func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
 }
 
 // CommonHeaders 设置所有 API 共享的请求头。
-func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
+//
+// model 用于**按模型族选 UA**（见 userAgent 的注释）。非 chat 路径传空串，
+// 表示"不知道这次是什么模型" → 用默认形态。
+func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth, model string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", c.userAgent())
+	req.Header.Set("User-Agent", c.userAgent(model))
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
@@ -166,8 +181,8 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 // 后者在并发下会串扰（A 请求写、B 请求读，B 的 IP 被 A 覆盖），
 // 表现为上游看到一批莫名其妙的来源 IP。这也是 B 修过的同一个坑。
 // PassthroughIP=false 或 clientIP 为空时不注入任何 IP 头。
-func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string) {
-	c.CommonHeaders(req, a)
+func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP, model string) {
+	c.CommonHeaders(req, a, model)
 	if a.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+a.AccessToken)
 	} else {
@@ -326,7 +341,8 @@ const authRefreshSource = "workbuddy"
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
 func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
-	c.CommonHeaders(req, a)
+	// 非 chat 路径：不知道这次是什么模型 → 空 model（不猜分档）。
+	c.CommonHeaders(req, a, "")
 	req.Header.Set("X-Refresh-Token", a.RefreshToken)
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
