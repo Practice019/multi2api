@@ -1,0 +1,102 @@
+{
+  "admin": {
+    "checkin_log_keep_days": 30,
+    "checkin_log_path": "./data-test/checkin-log.json",
+    "growth_auto_accept_tasks": true,
+    "growth_auto_claim": true,
+    "growth_auto_draw": false,
+    "growth_auto_makeup": true,
+    "growth_auto_open": false,
+    "growth_auto_redeem": false,
+    "growth_watch_interval_seconds": 600,
+    "travel_auto_claim": true,
+    "travel_watch_interval_seconds": 60
+  },
+  "api_key": "test-local-key-for-port-7864",
+  "auth_dir": "./auths-test",
+  "codearts": {
+    "enabled": true
+  },
+  "cooldown": {
+    "soft_rate": "60s"
+  },
+  "features": {
+    "sanitize_blacklist_fingerprints": true
+  },
+  "listen": "127.0.0.1:7864",
+  "login": {
+    "open_browser": false,
+    "isolated": true
+  },
+  "loomy": {
+    "auth_dir": "./auths-test/loomy",
+    "enabled": true,
+    "login_mode": "sms"
+  },
+  "pool": {
+    "breaker_cooldown": "30m",
+    "breaker_cooldown_max": "6h",
+    "breaker_threshold": 3,
+    "idle_weight_max": 5,
+    "idle_weight_per_hour": 0.5,
+    "max_in_flight": 3
+  },
+  "prompt": {
+    "mode": "custom"
+  },
+  "request_log_path": "./data-test/request-log.jsonl",
+  "request_log_keep_days": 7,
+  "schedule": {
+    "activity_hours": [9, 21],
+    "checkin_enabled": true,
+    "checkin_hours": [9, 21],
+    "keepalive_enabled": true,
+    "keepalive_hours": [22]
+  },
+  "session_sticky": {
+    "enabled": true,
+    "gc_interval": "5m",
+    "ttl": "30m"
+  },
+  "state_file": "./data-test/state.json",
+  "trae": {
+    "auth_dir": "./auths-test/trae",
+    "enabled": true
+  },
+  "upstream": {
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300,
+    "timeout_seconds": 120
+  },
+  "workbuddy_intl": {
+    "enabled": true,
+    "oauth_base_url": "https://www.workbuddy.ai",
+    "auth_dir": "./auths-test/workbuddy-intl",
+    "pool_accounts": true
+  },
+  "mimo": {
+    "enabled": true,
+    "auth_dir": "./auths-test/mimo",
+    "pool_accounts": true
+  },
+  "cline": {
+    "enabled": true,
+    "auth_dir": "./auths-test/cline",
+    "pool_accounts": true
+  },
+  "raccoon": {
+    "enabled": true,
+    "auth_dir": "./auths-test/raccoon",
+    "pool_accounts": true
+  },
+  "lobsterai": {
+    "enabled": true,
+    "auth_dir": "./auths-test/lobsterai",
+    "pool_accounts": true
+  },
+  "qoder": {
+    "enabled": true,
+    "auth_dir": "./auths-test/qoder",
+    "pool_accounts": true
+  }
+}

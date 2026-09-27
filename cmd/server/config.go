@@ -693,6 +693,41 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"lobsterai"`
 
+	// Qoder 第九/十个上游（阿里系，国际版 + 中国版）。
+	//
+	// 与其它上游同律：**启用是显式的**（qoder.enabled=true），段缺席=不加载。
+	//
+	// ⚠ 一个开关注册**两个上游**：qoder（国际版）+ qodercn（中国版）。
+	// 两者同协议族、共用同一份 WASM 与同一个凭证目录（靠凭证里的
+	// product_id 区分），差异全在模型表与产品配置里 —— 所以是同一个
+	// 实现的**两个实例**。cn_enabled 控制是否连中国版一起注册。
+	//
+	// ⚠ 推理走**加密端点**（api2.qoder.sh）：目录 key（qfmodel/dmodel 等）
+	// 只有那条路能用。公开端点认通用名（qwen-flash），发目录 key 一律
+	// `Unsupported model`。故未接 WASM 签名器时 Chat 直接报错，
+	// **刻意不回落公开端点**（那会把"加密不可用"伪装成"模型不存在"）。
+	Qoder struct {
+		// Enabled 是否启用 Qoder 上游（含中国版，见 CNActive）。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/qoder`。
+		//
+		// ⚠ 国际版与中国版**共用这一个目录**：靠凭证里的 product_id 过滤，
+		// 不要拆成两个目录（拆了就会出现同一账号被两份凭证各管一半）。
+		AuthDir string `json:"auth_dir"`
+		// APIBase 加密推理基址覆盖（留空=https://api2.qoder.sh）。
+		//
+		// 覆盖的是 Product.EncryptedInferBase，即"我们实际用的那条"；
+		// 公开的 InferBase 不暴露成开关 —— 它在本实现里根本不被使用。
+		APIBase string `json:"api_base"`
+		// CNEnabled 是否连中国版（qodercn）一起注册。
+		//
+		// ⚠ 与 Enabled 是**与**关系，不是独立开关：Enabled=false 时
+		// 即使这里为 true 也不注册中国版。
+		CNEnabled *bool `json:"cn_enabled"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"qoder"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -1372,6 +1407,32 @@ func (c *Config) normalize() error {
 	}
 	c.RaccoonAPIBase = strings.TrimSpace(c.Raccoon.APIBase)
 	c.RaccoonPoolAccounts = c.RaccoonEnabled && boolOr(c.Raccoon.PoolAccounts, true)
+
+	// ---- lobsterai（第八上游）----
+	c.LobsteraiEnabled = c.Lobsterai.Enabled
+	c.LobsteraiAuthDir = strings.TrimSpace(c.Lobsterai.AuthDir)
+	if c.LobsteraiAuthDir == "" {
+		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
+		//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
+		c.LobsteraiAuthDir = filepath.Join(c.AuthsBase, "lobsterai")
+	}
+	c.LobsteraiAPIBase = strings.TrimSpace(c.Lobsterai.APIBase)
+	c.LobsteraiPortalBase = strings.TrimSpace(c.Lobsterai.PortalBase)
+	c.LobsteraiVersionAPI = strings.TrimSpace(c.Lobsterai.VersionAPI)
+	c.LobsteraiPoolAccounts = c.LobsteraiEnabled && boolOr(c.Lobsterai.PoolAccounts, true)
+
+	// ---- qoder（第九、十上游，国际版 + 中国版）----
+	c.QoderEnabled = c.Qoder.Enabled
+	c.QoderAuthDir = strings.TrimSpace(c.Qoder.AuthDir)
+	if c.QoderAuthDir == "" {
+		// ⚠ 同上：用 AuthsBase 拼接。两个产品共用这一个目录。
+		c.QoderAuthDir = filepath.Join(c.AuthsBase, "qoder")
+	}
+	c.QoderAPIBase = strings.TrimSpace(c.Qoder.APIBase)
+	// ⚠ 与 Enabled 取"与"：Qoder 关着时 cn_enabled=true 也不该注册中国版，
+	// 否则会出现"主开关说没启用、注册表里却有个 qodercn"的鬼影。
+	c.QoderCNActive = c.QoderEnabled && boolOr(c.Qoder.CNEnabled, true)
+	c.QoderPoolAccounts = c.QoderEnabled && boolOr(c.Qoder.PoolAccounts, true)
 	return nil
 }
 
