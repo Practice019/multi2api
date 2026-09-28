@@ -87,6 +87,26 @@ func (p *Provider) SetSigner(s RequestSigner) {
 // ID 上游标识。
 func (p *Provider) ID() string { return p.productID }
 
+// DisplayName 界面上给人看的名字（gateway.DisplayNameExt）。
+//
+// # 为什么 qoder 需要它（用户报的问题）
+//
+// 两个实例的 id 是 `qoder` 与 `qodercn` —— 只差一个后缀，而它们是
+// **两个不同的服务**（不同域名、不同 clientId，见 QoderCN 的注释）。
+// 用户在国际版与中国版之间看不出区别，加账号时不知道该点哪个。
+//
+// 取产品表里的 DisplayName（"Qoder" / "Qoder (中国版)"），
+// 于是显示名与产品定义**同源**，不会两处漂移。
+func (p *Provider) DisplayName() string {
+	if p != nil {
+		if n := p.Product().DisplayName; n != "" {
+			return n
+		}
+		return p.productID
+	}
+	return ""
+}
+
 // Caps 能力声明。
 //
 // 声明三项：对话、模型目录、签到（每日积分领取）。

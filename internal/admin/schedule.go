@@ -18,6 +18,7 @@ package admin
 import (
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/gateway"
@@ -72,7 +73,20 @@ func (h *Handler) taskStatus(w http.ResponseWriter, r *http.Request) {
 // Capabilities 用**字符串名**（gateway.Capability.Names 的输出）而不是位掩码：
 // 位掩码的数值是内部表示，前端不该依赖它；名字是稳定契约。
 type providerInfo struct {
-	ID           string   `json:"id"`
+	ID string `json:"id"`
+	// DisplayName 给**人看**的名字（上游自报；未实现 DisplayNameExt 时 = ID）。
+	//
+	// # 为什么必须单独一个字段（用户报的问题）
+	//
+	// 前端此前直接显示 `id`，于是 `qoder` 与 `qodercn` 在界面上只差一个
+	// 后缀 —— 而它们是**两个不同的服务**（不同域名、不同 clientId）。
+	// 用户看不出哪个是"中国版"，加账号时无从选择。
+	//
+	// 让上游自己报名字，前端只读数据（不硬编码上游名，与其余扩展点同一条）。
+	//
+	// omitempty：未实现扩展点时不下发，前端回落显示 `id` ——
+	// 既有部署的界面因此**逐字节不变**。
+	DisplayName string   `json:"display_name,omitempty"`
 	Capabilities []string `json:"capabilities"`
 	// Default 该上游是缺省上游（裸模型名走它）。
 	Default bool `json:"default"`
@@ -103,6 +117,27 @@ type providerInfo struct {
 	// `omitempty` 让前者不出现在 JSON 里，前端把它读成 `undefined`
 	// → 回落默认列。**前端不需要认识任何上游名**。
 	AccountColumns []string `json:"accounts_columns,omitempty"`
+}
+
+// displayNameOf 问上游「你在界面上叫什么」。
+//
+// 未实现 DisplayNameExt、或报回空串 → 回落 ID（= 改造前的行为）。
+//
+// ⚠ 回落**不是**"给个默认中文名"：多数上游的 id 就是它最准确的名字
+//（`codearts` / `raccoon` / `mimo`），硬塞一个译名反而是噪音。
+// 只有"id 不足以表达身份"的上游才需要实现这个扩展点。
+func displayNameOf(p gateway.Provider) string {
+	if p == nil {
+		return ""
+	}
+	if ext, ok := gateway.ExtOf[gateway.DisplayNameExt](p); ok {
+		if n := strings.TrimSpace(ext.DisplayName()); n != "" {
+			return n
+		}
+	}
+	// 回落 ID —— 但**不写进结构体**（omitempty 让字段不下发，
+	// 前端据此显示 id，与改造前逐字节一致）。
+	return ""
 }
 
 // accountColumnsOf 问上游「账号池里你要哪些列」。
@@ -161,6 +196,7 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 		for _, p := range h.cfg.Registry.All() {
 			info := providerInfo{
 				ID:           p.ID(),
+				DisplayName:  displayNameOf(p),
 				Capabilities: p.Caps().Names(),
 				Default:      p.ID() == h.cfg.DefaultProvider,
 			}
