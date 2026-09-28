@@ -619,6 +619,25 @@ func TestSharedInfraIsGenuinelyShared(t *testing.T) {
 		"checkinlog": true, // 签到/动作历史日志
 		"prompt":     true, // 提示词降级（出站改写 + 核心降级状态机共用）
 		"wire":       true, // 出站线协议改写（workbuddy 与 codearts 共用，见 wire_reexport.go）
+		// dailycheckin 签到类动作的共享驱动（lobsterai 与 qoder 共用）。
+		//
+		// # 它为什么**必须**是共享基础设施（而不是某个上游的私有物）
+		//
+		// 签到是跨上游同构的动作："扫自己的账号 → 查状态 → 没签就签 →
+		// 结果写 checkinlog"。此前每个上游各写一遍，抄漏一处就少一块功能
+		// 而**漏了不报错** —— 用户报的 lobsterai 现象正是这样：
+		// 有签到端点、Caps 也声明了，但账号行没按钮、没有自动签到、
+		// 签到不写历史（界面「今日签到」列恒为空）。
+		//
+		// 本包把这件事收敛成"上游只实现三个方法 + 三行转发"，
+		// 于是那三处接线在结构上不可能漏。
+		//
+		// ⚠ 它**不依赖** internal/gateway（有 TestNoGatewayImport 守）——
+		// 这是它能被登记在这里的前提：依赖 gateway 的包会被
+		// discoverUpstreams 当成上游实现，于是各上游 import 它
+		// 就变成"上游依赖上游"（第一次构建时 arch_test 正是这样报的）。
+		// 翻译成 gateway 类型是上游侧的事（每个上游三行样板）。
+		"dailycheckin": true,
 	}
 
 	// 已被 workbuddyPrivateSDK 归类为「某个上游的私有 SDK」的包 —— 跳过。

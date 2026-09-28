@@ -51,15 +51,17 @@ func (p *Provider) checkinPath() string { return "/admin/" + p.ID() + "/checkin"
 func (p *Provider) balancePath() string { return "/admin/" + p.ID() + "/balance" }
 
 // AdminRoutes 实现 gateway.AdminExt。
+//
+// # 签到两条从本文件挪走了（"统一接口"的落点）
+//
+// 此前本文件手写了一条 `/admin/{id}/checkin`，而它**只做了领取**：
+// 不写签到历史（界面「今日签到」列恒为空）、没有全量端点、没有自动任务。
+// 那三件事此前要靠上游各写一遍 —— 漏了不报错，正是用户报的形态。
+//
+// 现在签到整块交给共享驱动（internal/dailycheckin），本文件只留余额。
+// 路径**不变**（仍由 checkinPath() 按实例生成），所以既有前端与文档不用改。
 func (p *Provider) AdminRoutes() []gateway.AdminRoute {
-	return []gateway.AdminRoute{
-		{
-			Method:     http.MethodPost,
-			Path:       p.checkinPath(),
-			Handler:    p.handleCheckin,
-			Capability: gateway.CapCheckin,
-			Title:      "每日签到",
-		},
+	routes := []gateway.AdminRoute{
 		{
 			Method:  http.MethodGet,
 			Path:    p.balancePath(),
@@ -67,6 +69,33 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Title:   "积分余额",
 		},
 	}
+	// 签到两条由共享驱动提供（单账号 + 全量）。
+	//
+	// ⚠ 把驱动的 Descriptor 翻成 gateway.AdminRoute —— 三行样板，
+	// 必须在**上游包内**写（dailycheckin 不 import gateway，见其 doc.go）。
+	if p.checkin != nil && p.checkin.Ready() {
+		d := p.checkin.Descriptor()
+		routes = append(routes,
+			gateway.AdminRoute{
+				Method:     http.MethodPost,
+				Path:       d.OneURL,
+				Handler:    p.checkin.HandlerOne,
+				Capability: gateway.CapCheckin,
+				Title:      d.Title,
+			},
+			gateway.AdminRoute{
+				Method: http.MethodPost,
+				Path:   d.AllURL,
+				// ⚠ Hidden：全量端点是"分组/批量按钮"的入口，
+				// 不是账号行里的动作（行内按钮走 OneURL）。
+				Hidden:     true,
+				Handler:    p.checkin.HandlerAll,
+				Capability: gateway.CapCheckin,
+				Title:      d.Title + "（全部账号）",
+			},
+		)
+	}
+	return routes
 }
 
 // resolveCred 从请求里取 uid 并解析出凭证。
@@ -98,34 +127,6 @@ func authFor(cred gateway.Credential) (*Auth, bool) {
 		return nil, false
 	}
 	return a, true
-}
-
-// handleCheckin 一键签到。
-func (p *Provider) handleCheckin(w http.ResponseWriter, r *http.Request) {
-	cred, uid, ok := p.resolveCred(r)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"ok": false, "error": "账号不在池里（uid=" + uid + "）",
-		})
-		return
-	}
-	a, ok := authFor(cred)
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": false, "error": "凭证结构不对（可能来自另一个产品的目录）",
-		})
-		return
-	}
-	out := p.client.ClaimDailyCheckin(r.Context(), a)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      out.Kind != "failed",
-		"kind":    out.Kind,
-		"credit":  out.Credit,
-		"message": out.Message,
-		// actionRequired 是给 UI 的**显式信号**（而非让它去猜文案）：
-		// 这条 inactive 需要用户去官方客户端登录一次，必须单独醒目展示。
-		"action_required": out.ActionRequired,
-	})
 }
 
 // handleBalance 查积分余额。
