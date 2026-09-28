@@ -828,6 +828,14 @@ func main() {
 			PortalBase: cfg.LobsteraiPortalBase,
 			VersionAPI: cfg.LobsteraiVersionAPI,
 			AuthDir:    cfg.LobsteraiAuthDir,
+			// 签到历史 + 自动签到节奏：与 workbuddy / trae **同一个**
+			// checkinLog 与同一个 30 分钟间隔（用户要求统一）。
+			//
+			// ⚠ 不传 Log 的直接后果：界面「今日签到」列恒为空
+			//（那一列读 checkinlog 的 KindCheckin 记录），
+			// 而用户看到的是"签到按钮点了、列还是空"。
+			Log:             checkinLog,
+			CheckinInterval: cfg.ScheduleCheckinInterval,
 		})
 		// 注入凭证访问器（管理端点的签到/余额要按 uid 取凭证）。
 		// 上游不得 import pool，故由装配层适配进来。

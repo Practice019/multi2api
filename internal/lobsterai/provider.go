@@ -19,7 +19,10 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
+	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/dailycheckin"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -33,6 +36,20 @@ type Provider struct {
 
 	// creds 凭证访问器（装配层注入，见 adminroute.go）。
 	creds credentialSource
+
+	// log 签到历史（装配层注入；nil = 不记历史，但那样界面「今日签到」
+	// 列会永远为空 —— 见 checkin.go 的注释）。
+	log *checkinlog.Log
+	// checkinInterval 自动签到扫描间隔（<=0 = 不注册自动签到任务）。
+	//
+	// 与 workbuddy / trae **同一个值**（30 分钟）—— 用户要求
+	// 「所有上游共用一个签到的接口」，节奏也统一。
+	checkinInterval time.Duration
+	// checkin 共享签到驱动（internal/dailycheckin）。
+	//
+	// 按钮 / 自动任务 / 手动端点 / 写历史 四件事都由它提供 ——
+	// 上游侧只实现"列账号、查状态、领取"三个方法。
+	checkin *dailycheckin.Driver
 }
 
 // Config Provider 的可选依赖，全部可缺省。
@@ -45,6 +62,12 @@ type Config struct {
 	VersionAPI string
 	// AuthDir 本上游凭证的落盘目录（供 gateway.AuthDirExt 用）。
 	AuthDir string
+	// Log 签到历史（nil = 不记历史，但界面「今日签到」列会因此恒为空）。
+	Log *checkinlog.Log
+	// CheckinInterval 自动签到扫描间隔；<=0 = 不注册自动签到任务。
+	//
+	// 装配层传 30 分钟（与 workbuddy / trae 同一节奏）。
+	CheckinInterval time.Duration
 }
 
 // NewProvider 契约测试用的无依赖构造。
@@ -65,9 +88,17 @@ func NewWithConfig(cfg Config) *Provider {
 			c.VersionA = cfg.VersionAPI
 		}
 	}
-	return &Provider{client: c, authDir: cfg.AuthDir}
+	p := &Provider{
+		client:          c,
+		authDir:         cfg.AuthDir,
+		log:             cfg.Log,
+		checkinInterval: cfg.CheckinInterval,
+	}
+	// 构造共享签到驱动（按钮 / 自动任务 / 端点 / 写历史 都在它里面）。
+	// 必须在字段就位之后调用 —— 它读 p.log 与 p.checkinInterval。
+	p.initCheckin()
+	return p
 }
-
 // ID 上游标识。
 func (p *Provider) ID() string { return providerID }
 
