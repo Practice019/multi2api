@@ -176,6 +176,37 @@ type AuthDirExt interface {
 	AuthDir() string
 }
 
+// DisplayNameExt 上游自报**给人看的名字**（中文名）。
+//
+// # 为什么需要它（用户报的问题）
+//
+// 界面上的上游分组标题此前直接显示 `Provider.ID()` —— 于是用户看到
+// 一排裸 id：`workbuddy` / `workbuddy-intl` / `qoder` / `qodercn` /
+// `lobsterai` / `raccoon` / `mimo` / `trae` / `loomy`。
+//
+// 其中 `qoder` 与 `qodercn` 是**两个不同的服务**（不同域名、不同 clientId，
+// 见 internal/qoder 里 QoderCN 的注释），但裸 id 只差一个 `cn` 后缀 ——
+// 用户根本看不出后者是"中国版"，加账号时不知道该点哪个。
+//
+// # 为什么不把映射写在前端
+//
+// 前端硬编码上游名正是本仓一直在避免的（见 AdminExt / AccountColumnsExt
+// 的注释：加新上游时前端应当 0 改动）。让上游自己报名字，
+// 前端只读数据。
+//
+// # 不实现它就是"用 ID 当名字"
+//
+// 多数上游的中文名与 id 一致或无需翻译，**不实现这个扩展点完全正常** ——
+// 核心回落 `Provider.ID()`，行为与改造前逐字节相同。
+//
+// 实现它只是给"id 不足以表达身份"的上游一个出口（qodercn 就是这种）。
+type DisplayNameExt interface {
+	// DisplayName 展示名（给人看的中文名，如 "Qoder (中国版)"）。
+	//
+	// 返回空串表示"没有更好的名字，用 ID"。
+	DisplayName() string
+}
+
 // CredentialLoader 上游自报"怎么把我的凭证文件读出来"。
 //
 // # 为什么必须有这个扩展点（这是实测踩出来的真 bug）

@@ -111,18 +111,51 @@ var Qoder = Product{
 //	  —— 沿用国际版会让菜单出现 5 个 CN 端点根本不认的模型，点了就报错
 //	5 条上下文窗口、4 条思考标记、1 条 vl 标记不同
 //	mmodel 在 CN 是 MiniMax-M2.7（国际版 M3）
+//
+// # ⚠ 中国版是**另一个服务**，不是"同一端点的另一张模型表"
+//
+// 这一点我第一版移植时判断错了：看到 CN「没有可用的公开端点」，
+// 就顺手把国际版的四个端点与 clientId 全抄了一遍，只改了 ID 与显示名。
+// 参照的 CN 定义是**独立的一份配置**（qoder-product.ts:433-482）：
+//
+//	authBase            qoder.cn                  （国际版 qoder.com）
+//	openApiBase         openapi.qoder.com.cn      （国际版 openapi.qoder.sh）
+//	encryptedInferBase  gateway.qoder.com.cn      （国际版 api2.qoder.sh）
+//	clientId            732aef47-9cf2-46a2-95fe-4cebb5d0d1fa
+//	                    （国际版 e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb）
+//
+// 参照对 clientId 的措辞最要紧：「**与国际版完全不同** —— 国际版两个 id
+// 在 CN asar 里命中 0 次」，且
+//
+//	用错的症状是「授权页 302 正常、点击授权后报参数无效」，
+//	故**不能**靠探测入口验证，必须真实登录闭环
+//
+// 也就是说 clientId 写错**不会**在任何探测里暴露 —— 授权页照常打开，
+// 只有用户真的点了授权才失败。所以这四个值必须逐字照抄，不能"看起来
+// 差不多就复用"。
+//
+// ⚠ InferBase 在两边都**没有调用方**（公开端点方案早已被加密端点取代）。
+// 参照把 CN 的 inferBase 填成与 encryptedInferBase 同值，仅表示
+//「没有独立公开端点」，不要据此发请求 —— 实测 gateway.qoder.com.cn
+// 的公开路径回 503（alb 无上游路由）。
 var QoderCN = Product{
 	ID:                 ProviderIDCN,
 	DisplayName:        "Qoder (中国版)",
-	AuthBase:           "https://qoder.com",
-	OpenAPIBase:        "https://openapi.qoder.sh",
-	InferBase:          "https://api2-v2.qoder.sh",
-	EncryptedInferBase: "https://api2.qoder.sh",
-	ClientID:           "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
-	TestClientID:       "e93fe488-5778-4c35-a6fc-0f54ed7b3139",
-	UserAgentPrefix:    "qoder",
-	SashClientType:     "10",
-	SashBase:           "https://qoder.com",
+	AuthBase:           "https://qoder.cn",
+	OpenAPIBase:        "https://openapi.qoder.com.cn",
+	// ⚠ 与 EncryptedInferBase 同值只表示"没有独立公开端点"，见上。
+	InferBase:          "https://gateway.qoder.com.cn",
+	EncryptedInferBase: "https://gateway.qoder.com.cn",
+	// ⚠ 与国际版**完全不同**，且写错只在"点击授权后"才暴露。
+	ClientID: "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
+	// ⚠ CN 的 test 与 prod 是**同一个值**（国际版那两个不同）。
+	// 故不存在国际版"J_a / G_a 被读反"那类风险。
+	TestClientID:    "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa",
+	UserAgentPrefix: "qoder",
+	// E10：CN asar 里同样是 `Fh = Object.freeze({ clientType: 10, … })`。
+	SashClientType: "10",
+	// sash 系列的基址随产品走（CN 是 qoder.cn）。
+	SashBase: "https://qoder.cn",
 }
 
 // 端点路径。

@@ -253,6 +253,7 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 	for _, p := range h.cfg.Registry.All() {
 		info := providerInfo{
 			ID:           p.ID(),
+			DisplayName:  displayNameOf(p),
 			Capabilities: p.Caps().Names(),
 			Default:      p.ID() == h.cfg.DefaultProvider,
 		}
