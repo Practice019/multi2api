@@ -72,7 +72,16 @@ func (p *Provider) ID() string { return providerID }
 // 同理不声明 CapQuotaProbe：它没有主动额度探测端点（余额是另一套，
 // 由 /points/v1/balance 提供，走 AdminExt）。
 func (p *Provider) Caps() gateway.Capability {
-	return gateway.CapChat | gateway.CapModels
+	// CapQuotaProbe：有主动额度探测端点（QuotaExt 已实现）。
+	//
+	// ⚠ 本能力位是**行内「额度」按钮的判据**（前端 hasCap(pid,"quota-probe")）。
+	// 不声明它 → 该上游的账号行里根本不出现那个按钮（用户报的
+	// 「cline 没有单独的账号刷新额度按钮」就是这个原因）。
+	//
+	// 声明的前提是**真的能探测**：本上游已实现 gateway.QuotaExt
+	//（见 quotaext.go），且契约测试会检查"声明了必须实现 AdminExt
+	// 且路由非空"——两点都满足。
+	return gateway.CapChat | gateway.CapModels | gateway.CapQuotaProbe
 }
 
 // Client 上游 HTTP 客户端（供装配层与测试使用）。

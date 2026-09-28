@@ -129,7 +129,11 @@ func (p *Provider) DisplayName() string {
 // 下的 /balance）与"额度探测"不是同一件事 —— 后者是 pool 的主动健康探测，
 // Qoder 没有对应端点。
 func (p *Provider) Caps() gateway.Capability {
-	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin
+	// CapQuotaProbe：有主动额度探测端点（QuotaExt 已实现）。
+	//
+	// ⚠ 本能力位是**行内「额度」按钮的判据**（前端 hasCap(pid,"quota-probe")）。
+	// 不声明它 → 该上游的账号行里根本不出现那个按钮。
+	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe
 }
 
 // Client 上游 HTTP 客户端。

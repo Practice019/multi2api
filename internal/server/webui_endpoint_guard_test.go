@@ -330,7 +330,7 @@ func TestWebUIQuotaButtonsUseCoreEndpoint(t *testing.T) {
 //  2. 该分支排在 `r.results` 分支**之前**
 //     —— 顺序反了就等于给未来埋雷：core 若给额度回执补上 results，
 //     旧分支会先截胡，本 bug 以同款形态复发。
-//  3. 该分支真的调用了 quotaToast（而不是又一句"已提交"）
+//  3. 该分支真的调用了 quotaScopeToast（而不是又一句"已提交"）
 //
 // ⚠ 判据 2 用**下标比较**而不是"包含"：只包含不能表达顺序，
 // 而顺序正是这条守卫的全部意义。
@@ -368,8 +368,8 @@ func TestStartAllHandlesQuotaReceipt(t *testing.T) {
 			"core 若给额度回执补上 results，旧分支会先截胡，本 bug 以同款形态复发。"+
 			"新分支必须排在 r.results 之前。", resultMark, iQuota, iResult)
 	}
-	if !strings.Contains(body, "quotaToast(") {
-		t.Error("startAll 的额度分支没有调用 quotaToast —— " +
+	if !strings.Contains(body, "quotaScopeToast(") {
+		t.Error("startAll 的额度分支没有调用 quotaScopeToast —— " +
 			"skipped（某个上游整片没被刷到）就不会被说出来，而那正是本 bug 的形态")
 	}
 }
@@ -389,9 +389,9 @@ func TestQuotaToastReportsSkipped(t *testing.T) {
 	}
 	code := stripJSComments(src)
 
-	body, ok := extractJSFunction(code, "function quotaToast(")
+	body, ok := extractJSFunction(code, "function quotaScopeToast(")
 	if !ok {
-		t.Fatal("找不到 quotaToast 函数 —— core 额度回执没有可读的渲染器（守卫失效）")
+		t.Fatal("找不到 quotaScopeToast 函数 —— core 额度回执没有可读的渲染器（守卫失效）")
 	}
 
 	for _, need := range []string{
@@ -402,18 +402,109 @@ func TestQuotaToastReportsSkipped(t *testing.T) {
 		"r.providers", // 本次真正被问过的上游
 	} {
 		if !strings.Contains(body, need) {
-			t.Errorf("quotaToast 没有读 %s —— 该计数在界面上不可见", need)
+			t.Errorf("quotaScopeToast 没有读 %s —— 该计数在界面上不可见", need)
 		}
 	}
 
 	// bad 只由 failed 决定：把 unknown/skipped 也标红会让"上游不报额度"
 	// 看起来像故障，从而被误修（与后端 refreshQuotas 的分开计数同一条理由）。
 	if !strings.Contains(body, "r.failed || 0") {
-		t.Error("quotaToast 的 bad 判据看起来不是只取 failed —— " +
+		t.Error("quotaScopeToast 的 bad 判据看起来不是只取 failed —— " +
 			"unknown/skipped 被标红会让正常情况看起来像故障")
 	}
 	if strings.Contains(body, "r.skipped || 0) > 0") && !strings.Contains(body, "const bad = (r.failed || 0) > 0") {
-		t.Error("quotaToast 把 skipped 也算进了 bad —— skipped 不是错误，是'没接额度'")
+		t.Error("quotaScopeToast 把 skipped 也算进了 bad —— skipped 不是错误，是'没接额度'")
+	}
+}
+
+// TestQuotaScopeToastIsScopeAware 文案必须按**作用域**分档（三层各自的措辞）。
+//
+// # 为什么单独立一条（用户报的「点一行却刷了全部」）
+//
+// 三个入口打同一个端点，只靠 body 区分作用域：
+//
+//	行内「额度」          {uid}       只刷该账号
+//	分组「刷新本上游额度」 {provider}  只刷该上游
+//	顶部「刷新全部额度」   空 body     刷全部
+//
+// 若文案不区分作用域，点了单账号却说"全部额度完成" ——
+// 那是**界面替后端撒谎**：用户无法从回执判断实际刷了哪些账号。
+//
+// 判据：函数体里必须读回执的 `scope`，且三个取值都有分支。
+//
+// 变异可检：把 switch(r.scope) 换成固定 `'全部额度完成：'` → 本用例红。
+func TestQuotaScopeToastIsScopeAware(t *testing.T) {
+	src, err := readWebUIHTML()
+	if err != nil {
+		t.Fatalf("读 webui.html 失败: %v", err)
+	}
+	code := stripJSComments(src)
+
+	body, ok := extractJSFunction(code, "function quotaScopeToast(")
+	if !ok {
+		t.Fatal("找不到 quotaScopeToast 函数")
+	}
+	// ⚠ 判据必须是「**按回执的 scope 分档**」，不是「文中出现过 r.scope」。
+	//
+	// 我第一版只断言 `strings.Contains(body, "r.scope")` —— 然后做了个
+	// 把 `switch (r.scope)` 改成 `switch ("all")` 的变异，**测试照绿**：
+	// 函数体末尾还有一句 `r.scope === 'all'`（providers 明细的判据），
+	// 它单独就满足了 Contains。这正是"变异没有判别力"的形态。
+	//
+	// 改成钉住**分档结构的骨架**：`switch (r.scope)` 这个字面形式。
+	// 它与 `r.scope === 'x'` 这类比较式不同 —— 前者才是"按档分支"。
+	if !strings.Contains(body, "switch (r.scope)") {
+		t.Error("quotaScopeToast 没有按回执的 scope 分档（找不到 `switch (r.scope)`）—— " +
+			"三个作用域（单账号/单上游/全部）的文案会一模一样，" +
+			"用户点了一行却看到「全部额度完成」")
+	}
+	for _, sc := range []string{"'account'", "'provider'"} {
+		if !strings.Contains(body, sc) {
+			t.Errorf("quotaScopeToast 缺 %s 分支 —— 该作用域没有自己的措辞", sc)
+		}
+	}
+	// 默认分支兜住 'all'（以及旧后端不回 scope 的情况）。
+	if !strings.Contains(body, "default:") {
+		t.Error("quotaScopeToast 缺 default 分支 —— " +
+			"旧后端/其它调用方不回 scope 时应当回落「全部额度完成」，" +
+			"而不是显示 undefined")
+	}
+}
+
+// TestQuotaEntryPointsSendTheirOwnScope 三个入口各自发对作用域参数。
+//
+//	行内   必须带 uid（否则后端按"全部"刷）
+//	分组   必须带 provider
+//	顶部   必须**不带**参数（刷全部）
+//
+// 这条把"前端发的"与"后端认的"两头对上 —— 只改一头会让作用域静默失效。
+func TestQuotaEntryPointsSendTheirOwnScope(t *testing.T) {
+	src, err := readWebUIHTML()
+	if err != nil {
+		t.Fatalf("读 webui.html 失败: %v", err)
+	}
+	code := stripJSComments(src)
+
+	// ① 行内按钮：data-dayurl 指向额度端点，且请求体带 uid。
+	//    （走既有的 dayUrl 通道，那里统一 JSON.stringify({uid})。）
+	if !strings.Contains(code, "data-dayurl=\"/admin/accounts/quota/refresh\"") {
+		t.Error("行内「额度」按钮没有指向 /admin/accounts/quota/refresh")
+	}
+	if !strings.Contains(code, "JSON.stringify({ uid })") {
+		t.Error("行内按钮的请求体没带 uid —— 后端会按「全部」刷（用户报的 bug）")
+	}
+
+	// ② 分组按钮：必须带 provider。
+	if !strings.Contains(code, "data-gquota=") {
+		t.Error("找不到分组「刷新本上游额度」按钮（data-gquota）—— 三层作用域缺中间一层")
+	}
+	if !strings.Contains(code, "JSON.stringify({ provider: pid })") {
+		t.Error("分组按钮的请求体没带 provider —— 它会退化成「刷全部」")
+	}
+
+	// ③ 顶部按钮：不带参数（空 body = 全池，后端默认档）。
+	if !strings.Contains(code, "btnAllCredits") {
+		t.Error("找不到顶部「刷新全部额度」按钮")
 	}
 }
 

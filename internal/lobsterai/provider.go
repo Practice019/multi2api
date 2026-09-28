@@ -78,7 +78,11 @@ func (p *Provider) ID() string { return providerID }
 // ⚠ 不声明 CapQuotaProbe：它没有"主动额度探测"端点，
 // 余额走 /api/user/profile-summary（由 AdminExt 暴露），两者是不同的事。
 func (p *Provider) Caps() gateway.Capability {
-	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin
+	// CapQuotaProbe：有主动额度探测端点（QuotaExt 已实现）。
+	//
+	// ⚠ 本能力位是**行内「额度」按钮的判据**（前端 hasCap(pid,"quota-probe")）。
+	// 不声明它 → 该上游的账号行里根本不出现那个按钮。
+	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe
 }
 
 // Client 上游 HTTP 客户端（供装配层与测试使用）。
