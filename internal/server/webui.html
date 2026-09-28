@@ -2260,12 +2260,32 @@ let loginProvider = '';
       ? `<button class="gact" data-gimport="${esc(providerId)}"`
         + ` title="粘贴 JSON 批量导入 ${esc(providerId)} 账号（多条/单条）；导入后自动重载账号池">批量导入</button>`
       : '';
+    // 「刷新本上游额度」：该上游**声明了 CapQuotaProbe** 才渲染。
+    //
+    // # 三层作用域里的中间一层（用户要求）
+    //
+    //   行内「额度」            只刷**该账号**
+    //   分组「刷新本上游额度」  ← 本按钮，只刷**该上游**的账号
+    //   顶部「刷新全部额度」     刷**所有**账号
+    //
+    // 判据用能力位（数据驱动，不写死上游名）：声明了 quota-probe 才出现。
+    // 没声明的上游点了也是恒失败 —— 那是"假按钮"，本项目一直避免。
+    //
+    // ⚠ 账号数写进 title：用户点之前该知道会刷几个号
+    //（"1 个"和"13 个"是两件事，尤其刷新会真的打上游）。
+    const gQuotaCount = (MANIFEST.providers.find(x => x.id === providerId) || {}).account_count;
+    const gQuotaBtn = hasCap(providerId, 'quota-probe')
+      ? `<button class="gact" data-gquota="${esc(providerId)}"`
+        + ` title="只重新探测 ${esc(providerId)} 的${gQuotaCount === undefined ? '' : gQuotaCount + ' 个'}账号剩余额度`
+        + `（不含其它上游的账号）">刷新本上游额度</button>`
+      : '';
     if (login && login.kind) {
       // 有页内登录流程 → 给按钮。label 由后端下发（不同上游措辞可能不同）。
       return `<button class="gact" data-gadd="${esc(providerId)}"`
         + ` title="${esc(login.label || '添加账号')}（走 ${esc(providerId)} 自己的登录流程）">`
         + `＋ ${esc(login.label || '添加账号')}</button>`
         + importBtn
+        + gQuotaBtn
         + `<button class="gact" data-greload="${esc(providerId)}"`
         + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}；手工拷入/删除凭证文件后用它。走页内添加的不需要点">`
         + `重载 auths</button>`;
@@ -2288,6 +2308,7 @@ let loginProvider = '';
     return `<span class="dim" style="font-size:11px"`
       + ` title="该上游未在 manifest 的 login 字段里声明页内登录流程">`
       + `未声明页内登录流程；已有凭证文件时可点右侧加载</span>`
+      + gQuotaBtn
       + `<button class="gact" data-greload="${esc(providerId)}"`
       + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}">重载 auths</button>`;
   }
@@ -2697,14 +2718,23 @@ let loginProvider = '';
     //     /admin/accounts/quota/refresh 上才会被刷到 —— 于是 codearts
     //     那一整片账号的额度**从来没有被这个按钮碰到过**，而且界面完全沉默。
     // 现在统一走 core 的 `/admin/accounts/quota/refresh`：它按每个账号**自己**
-    // 的 provider 分派到各自的 gateway.QuotaExt，两个上游一次刷完。
+    // 的 provider 分派到各自的 gateway.QuotaExt。
     //
-    // ⚠ 语义变化（必须写在 title 里，不许让用户自己发现）：
-    //   旧文案说"重新探测**该账号**的剩余额度"，而 core 的通用端点**不收 uid**
-    //   （它恒为全池刷新）。所以点了本行却整表刷新 —— 不明说就是界面撒谎。
-    //   这里如实写成"（刷新全部账号）"，与顶部按钮同一句话。
+    // # 三层作用域（用户报「点一行却刷了全部」后改的）
+    //
+    // 那个通用端点以前**不收任何参数**，恒为全池刷新 —— 于是行内按钮
+    // 与顶部「刷新全部额度」行为完全相同，而"行内"只存在于按钮的视觉位置里。
+    //
+    // 现在端点接受可选参数，三层各司其职：
+    //
+    //	行内「额度」（本按钮）   body {uid}      只刷该账号
+    //	分组「刷新本上游额度」    body {provider} 只刷该上游
+    //	顶部「刷新全部额度」      空 body        刷全部
+    //
+    // 前端**本来就带 uid**（见下面 dayUrl 那段），只是后端以前忽略它 ——
+    // 所以这里不需要改请求，改的是后端与文案。
     const quotaBtn = hasCap(pid, 'quota-probe')
-      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/accounts/quota/refresh" title="通过核心通用端点重新探测全部账号的剩余额度（该端点按每个账号自己的上游分派，不限于本行；行内按钮与顶部「刷新全部额度」是同一个动作）">额度</button>`
+      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/accounts/quota/refresh" title="重新探测**本行这一个账号**的剩余额度（只刷它，不动其它账号；要刷整个 ${esc(pid)} 用分组上的「刷新本上游额度」，要刷全部用顶部按钮）">额度</button>`
       : '';
 
     const act = [
@@ -2948,10 +2978,7 @@ let loginProvider = '';
           const r = await admin(dayUrl, { method: 'POST', body: JSON.stringify({ uid }) });
           // 回执形状有三类，都要认（否则会显示成"已提交"，看不见真实结果）：
           //   · {result:{status,detail}}                     —— workbuddy 的签到/保活
-          //   · {updated,unknown,failed,skipped,providers}   —— core 的额度刷新
-          //     （行内「额度」按钮走这条：它打的是 /admin/accounts/quota/refresh，
-          //      该端点**不收 uid**，恒为全池刷新 —— 所以这里用 quotaToast
-          //      渲染的是"全部账号"的结果，与顶部按钮同一种文案。）
+          //   · {updated,unknown,failed,skipped,scope,count} —— core 的额度刷新
           //   · {claimed:N, results:[…]}                     —— codearts 的福利领取
           //
           // ⚠ 分支次序：额度那条必须排在 claimed 之前。新回执里没有 `claimed`，
@@ -2964,9 +2991,11 @@ let loginProvider = '';
             toast(`${label} ${uid.slice(0, 8)}: ${res.status}${res.detail ? ' · ' + res.detail : ''}`,
               res.status === 'fail');
           } else if (r && typeof r.updated === 'number') {
-            // 行内按钮打的是**全池**端点 → 文案不能说"该账号"，如实说"全部"。
-            const t = quotaToast(r);
-            toast(t.msg, t.bad);
+            // 额度刷新：**行内按钮现在只刷这一个账号**（body 里带了 uid，
+            // 后端按 uid 分档）。文案由 quotaScopeToast 统一渲染 ——
+            // 三处入口（行内 / 分组 / 顶部）共用同一个函数，
+            // 措辞不会各写一份而漂移。
+            toast(quotaScopeToast(r));
           } else if (r && typeof r.claimed === 'number') {
             const total = Array.isArray(r.results) ? r.results.length : 0;
             toast(`${label} ${uid.slice(0, 8)}：本次领到 ${r.claimed}/${total}`);
@@ -3024,7 +3053,7 @@ let loginProvider = '';
       // 放在 results 之前，是为了将来 core 若也给额度回执补上个 results 时，
       // 这条仍然先命中 —— 顺序反了就等于给未来埋一颗同形的雷。
       else if (r && typeof r.updated === 'number') {
-        const t = quotaToast(r);
+        const t = quotaScopeToast(r);
         toast(t.msg, t.bad);
         refresh(); loadHistory();
       }
@@ -3038,7 +3067,7 @@ let loginProvider = '';
     } catch (e) { toast(`全部${label}失败：${e.message}`, true); }
   }
 
-  // quotaToast 把 core 额度刷新回执渲染成一句话。
+  // quotaScopeToast 把 core 额度刷新回执渲染成一句话（按作用域分档）。
   //
   // # 为什么必须分四段（updated / unknown / failed / skipped）
   //
@@ -3055,16 +3084,53 @@ let loginProvider = '';
   //
   // bad 只由 failed 决定：把 unknown/skipped 也标红会让"上游不报额度"
   // 看起来像故障，从而被误修（与后端 refreshQuotas 的分开计数同一条理由）。
-  function quotaToast(r) {
+  // quotaScopeToast 额度刷新回执的统一文案（三处入口共用）。
+  //
+  // # 为什么必须统一（用户报的问题的根因之一）
+  //
+  // 三个入口打的是**同一个端点**（`/admin/accounts/quota/refresh`），
+  // 只靠 body 区分作用域：
+  //
+  //	行内「额度」          {uid}       只刷该账号
+  //	分组「刷新本上游额度」 {provider}  只刷该上游
+  //	顶部「刷新全部额度」   空 body     刷全部
+  //
+  // 文案若各写一份，就会出现"点了单账号却说全部额度完成"这种
+  // **界面替后端撒谎**的形态。所以措辞只在这里写一次，按回执的
+  // `scope` 分档 —— scope 由**后端**给出（它才知道实际刷了哪些），
+  // 不是前端按自己传的参数猜的（那个在回落路径上会不等于事实）。
+  //
+  // ⚠ 回执里没有 scope 时（旧后端 / 别的调用方）回落成"全部额度" ——
+  // 与改造前的文案逐字相同，不制造新措辞。
+  function quotaScopeToast(r, providerLabel) {
     const bad = (r.failed || 0) > 0;
     const parts = [`已更新 ${r.updated || 0}`];
     if (r.unknown) parts.push(`未知 ${r.unknown}`);
     if (r.failed)  parts.push(`失败 ${r.failed}`);
     if (r.skipped) parts.push(`跳过 ${r.skipped}`);
-    const prov = Array.isArray(r.providers) && r.providers.length ? `（${r.providers.join('、')}）` : '';
+    const n = typeof r.count === 'number' ? r.count : null;
+    // 标题按作用域分档。provider 用调用方给的展示名（分组按钮知道是谁），
+    // 没给就用回执里的 providers 字段。
+    let head;
+    switch (r.scope) {
+      case 'account':
+        head = '该账号额度完成：';
+        break;
+      case 'provider': {
+        const who = providerLabel
+          || (Array.isArray(r.providers) && r.providers.length ? r.providers.join('、') : '该上游');
+        head = `${who} 额度完成${n === null ? '' : `（${n} 个账号）`}：`;
+        break;
+      }
+      default:
+        head = `全部额度完成${n === null ? '' : `（${n} 个账号）`}：`;
+    }
+    // providers 明细只在跨上游时有意义（单账号/单上游时上面已说过是谁）。
+    const prov = r.scope === 'all' && Array.isArray(r.providers) && r.providers.length
+      ? `（${r.providers.join('、')}）` : '';
     const tail = r.skipped ? `；跳过 ${r.skipped} 个账号的上游未接入额度`
                : (r.unknown ? '；未知表示上游未报额度，不是错误' : '');
-    return { msg: `全部额度完成：${parts.join(' · ')}${prov}${tail}`, bad };
+    return { msg: `${head}${parts.join(' · ')}${prov}${tail}`, bad };
   }
 
   // ---------------------------------------------------------------- 全量任务进度
@@ -7270,6 +7336,31 @@ let multCatalogFailed = false;
       }
       const add = ev.target.closest('button[data-gadd]');
       if (add) { addAccount(add.dataset.gadd, add); return; }
+      // 「刷新本上游额度」—— 三层作用域里的中间一层。
+      //
+      //   行内「额度」  → body {uid}       只刷该账号
+      //   本按钮        → body {provider}  只刷该上游
+      //   顶部按钮      → 空 body          刷全部
+      //
+      // 三者打**同一个端点** `/admin/accounts/quota/refresh`，只靠 body
+      // 区分作用域 —— 后端读 uid/provider，都没有就是全池
+      //（见 admin/accountsQuotaRefresh 的三档注释）。
+      //
+      // ⚠ 文案用**回执的** scope/count，不用上面那个 pid 猜：
+      // 与 greload 同一条原则（用后端说的，不用前端猜的）。后端可能
+      // 因该上游无账号而 404，那正是要暴露的真相 —— 不 catch、让它抛，
+      // 由 busyRun 统一提示。
+      const gq = ev.target.closest('button[data-gquota]');
+      if (gq) {
+        const pid = gq.dataset.gquota;
+        busyRun(gq, async () => {
+          const r = await admin('/admin/accounts/quota/refresh',
+            { method: 'POST', body: JSON.stringify({ provider: pid }) });
+          toast(quotaScopeToast(r, pid));
+          await refreshAccounts(r);
+        });
+        return;
+      }
       const rl = ev.target.closest('button[data-greload]');
       if (rl) {
         // 点的是**哪一个上游**的那行按钮，就把那个上游**传进请求体**。

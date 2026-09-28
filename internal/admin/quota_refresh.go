@@ -27,6 +27,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"sort"
@@ -216,15 +217,82 @@ func toPoolQuota(q gateway.QuotaView) pool.QuotaView {
 //
 // 两者并存是刻意的：后者不碰解冻（那需要上游回答"能不能用"，是另一件事），
 // 所以它对已有路径**零行为改变**，纯粹是新增的只读+写额度入口。
+//
+// # 三种作用域（用户报的问题：「行内按钮却刷了全部」）
+//
+// 用户实测：在账号池里点某一行的「额度」按钮，**所有账号的额度都被刷新了**。
+// 原因是本端点以前**不收任何参数**，恒为全池刷新 ——
+// 而前端行内按钮与顶部「刷新全部额度」打的是同一个 URL，
+// 于是"行内"这个作用域只存在于按钮的视觉位置里，后端根本不知道。
+//
+// 现在按可选参数分三档：
+//
+//	（无参数）            全部账号        顶部「刷新全部额度」
+//	{"uid":"..."}         只刷这一个账号   行内「额度」按钮
+//	{"provider":"..."}    只刷该上游的账号 上游分组标题上的「刷新本上游额度」
+//
+// # 向后兼容
+//
+// 不带参数时行为与改造前**逐字段相同**（全池刷新）。既有调用方
+// （含前端顶部按钮、脚本、curl）一行都不用改。
 func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Pool == nil {
 		writeError(w, http.StatusNotImplemented, "账号池未接线")
 		return
 	}
-	uids := make([]string, 0)
-	for _, st := range h.cfg.Pool.List() {
-		uids = append(uids, st.UID)
+	// 请求体可缺（GET 或空 body 都合法 = 全池刷新）。
+	var body struct {
+		UID      string `json:"uid"`
+		Provider string `json:"provider"`
 	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	// query 参数也认（便于 curl 与脚本按作用域调用，不必构造 JSON）。
+	if body.UID == "" {
+		body.UID = r.URL.Query().Get("uid")
+	}
+	if body.Provider == "" {
+		body.Provider = r.URL.Query().Get("provider")
+	}
+
+	all := h.cfg.Pool.List()
+	var uids []string
+	scope := "all"
+
+	switch {
+	case body.UID != "":
+		// 单账号：先确认它在池里，否则 404 而不是"刷了 0 个"。
+		scope = "account"
+		want := body.UID
+		for _, st := range all {
+			if st.UID == want {
+				uids = append(uids, want)
+				break
+			}
+		}
+		if len(uids) == 0 {
+			writeError(w, http.StatusNotFound, "账号不存在: "+want)
+			return
+		}
+	case body.Provider != "":
+		// 按上游：该上游自己在池里的全部账号。
+		scope = "provider"
+		pid := body.Provider
+		for _, st := range all {
+			if h.providerOf(st) == pid {
+				uids = append(uids, st.UID)
+			}
+		}
+		if len(uids) == 0 {
+			writeError(w, http.StatusNotFound, "该上游在池里没有账号: "+pid)
+			return
+		}
+	default:
+		uids = make([]string, 0, len(all))
+		for _, st := range all {
+			uids = append(uids, st.UID)
+		}
+	}
+
 	res := h.refreshQuotas(uids)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"updated":   res.Updated,
@@ -232,7 +300,19 @@ func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 		"failed":    res.Failed,
 		"skipped":   res.Skipped,
 		"providers": res.Providers,
+		// Scope 告诉前端"这次刷的是哪一档"，回执文案据此措辞
+		//（"已刷新 3 个账号" vs "已刷新全部 12 个账号"）。
+		"scope": scope,
+		"count": len(uids),
 		// 回执里带上刷新后的账号视图，前端一次调用就能重绘表格。
 		"accounts": h.accountViews(),
 	})
+}
+
+// providerOf 取账号所属上游（空则落默认上游，与 accountViews 同一判据）。
+func (h *Handler) providerOf(st pool.Status) string {
+	if st.Provider != "" {
+		return st.Provider
+	}
+	return h.cfg.DefaultProvider
 }
