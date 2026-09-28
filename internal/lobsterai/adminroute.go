@@ -27,8 +27,11 @@ import (
 )
 
 // 管理端点路径。
+//
+// ⚠ 签到那两条（单账号 / 全量）**不在**本文件声明 —— 它们由共享驱动
+// （internal/dailycheckin）产出，见 checkin.go 的 checkinDescriptor。
+// 本文件只管余额。
 const (
-	checkinPath = "/admin/lobsterai/checkin"
 	balancePath = "/admin/lobsterai/balance"
 )
 
@@ -46,15 +49,17 @@ type credentialSource func(uid string) (gateway.Credential, bool)
 func (p *Provider) SetCredentialSource(fn credentialSource) { p.creds = fn }
 
 // AdminRoutes 实现 gateway.AdminExt。
+//
+// # 为什么签到两条从本文件挪走了（"统一接口"的落点）
+//
+// 此前本文件手写了一条 `/admin/lobsterai/checkin`，而它**只做了签到**：
+// 不写签到历史（界面「今日签到」列恒为空）、没有全量端点、没有自动任务。
+// 那三件事此前要靠上游各写一遍 —— 漏了不报错，正是用户报的形态。
+//
+// 现在签到整块交给共享驱动（它同时提供单账号端点、全量端点、定时任务、
+// 写历史），本文件只留余额。于是"上游各写一遍"这件事在结构上消失了。
 func (p *Provider) AdminRoutes() []gateway.AdminRoute {
-	return []gateway.AdminRoute{
-		{
-			Method:     http.MethodPost,
-			Path:       checkinPath,
-			Handler:    p.handleCheckin,
-			Capability: gateway.CapCheckin,
-			Title:      "每日签到",
-		},
+	routes := []gateway.AdminRoute{
 		{
 			Method:  http.MethodGet,
 			Path:    balancePath,
@@ -62,6 +67,34 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Title:   "积分余额",
 		},
 	}
+	// 签到两条由共享驱动提供（单账号 + 全量）。
+	//
+	// ⚠ 这里把驱动的 Descriptor 翻成 gateway.AdminRoute —— 三行样板，
+	// 必须在**上游包内**写（dailycheckin 不 import gateway，见其 doc.go）。
+	if p.checkin != nil && p.checkin.Ready() {
+		d := p.checkin.Descriptor()
+		routes = append(routes,
+			gateway.AdminRoute{
+				Method:     http.MethodPost,
+				Path:       d.OneURL,
+				Handler:    p.checkin.HandlerOne,
+				Capability: gateway.CapCheckin,
+				Title:      d.Title,
+			},
+			gateway.AdminRoute{
+				Method: http.MethodPost,
+				Path:   d.AllURL,
+				// ⚠ Hidden：全量端点是"分组/批量按钮"的入口，
+				// 不是账号行里的动作（行内按钮走 OneURL）。
+				// 不标的话前端会把它当成又一个面板入口。
+				Hidden:     true,
+				Handler:    p.checkin.HandlerAll,
+				Capability: gateway.CapCheckin,
+				Title:      d.Title + "（全部账号）",
+			},
+		)
+	}
+	return routes
 }
 
 // resolveCred 从请求里取 uid 并解析出凭证。
@@ -84,24 +117,6 @@ func (p *Provider) resolveCred(r *http.Request) (gateway.Credential, string, boo
 	}
 	cred, ok := p.creds(uid)
 	return cred, uid, ok
-}
-
-// handleCheckin 一键签到。
-func (p *Provider) handleCheckin(w http.ResponseWriter, r *http.Request) {
-	cred, uid, ok := p.resolveCred(r)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"ok": false, "error": "账号不在池里（uid=" + uid + "）",
-		})
-		return
-	}
-	out := p.ClaimDailyCheckin(r.Context(), cred)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      out.Kind != "failed",
-		"kind":    out.Kind,
-		"credit":  out.Credit,
-		"message": out.Message,
-	})
 }
 
 // handleBalance 查积分余额。

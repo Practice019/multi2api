@@ -514,6 +514,52 @@ func (c *Client) fetchActivityContext(ctx context.Context, a *Auth, slot *Activi
 	return rec.State.ClaimedToday, actions, nil
 }
 
+// CheckinStatus 只查签到状态，**不领取**。
+//
+// # 为什么必须把它从 ClaimDailyCheckin 里拆出来
+//
+// ClaimDailyCheckin 的判据链是（见其注释的 7 步）：
+//
+//	1. 槽位查询失败          → failed
+//	2. slotState 不可用      → inactive
+//	3. 上下文查询失败        → failed
+//	4. claimedToday          → already-claimed
+//	5. actions 不含 check_in → inactive
+//	6. 领取失败              → failed
+//	7. 成功                  → claimed
+//
+// 前 5 步**全是只读的**，只有第 6 步真的提交。而"今天签过没有"这个问题
+// 只需要前 5 步 —— 共享驱动（internal/dailycheckin）在决定"要不要领"
+// 之前必须先问它，否则每天都会重复提交一次领取请求（靠上游幂等兜住，
+// 但那既浪费一次往返，也可能被风控当异常）。
+func (c *Client) CheckinStatus(ctx context.Context, a *Auth) ClaimOutcome {
+	slot, err := c.fetchActivitySlot(ctx, a)
+	if err != nil {
+		return ClaimOutcome{Kind: "failed", Message: "活动槽位查询失败: " + err.Error()}
+	}
+	if slot.SlotState != "available" || slot.ActivityCode == "" {
+		return ClaimOutcome{Kind: "inactive",
+			Message: fmt.Sprintf("无可用活动（slotState=%s）", slot.SlotState)}
+	}
+
+	claimed, actions, err := c.fetchActivityContext(ctx, a, slot)
+	if err != nil {
+		return ClaimOutcome{Kind: "failed", Message: "活动上下文查询失败: " + err.Error()}
+	}
+	if claimed {
+		return ClaimOutcome{Kind: "already-claimed", Message: "今天已签到"}
+	}
+	if !containsStr(actions, checkInActionName) {
+		return ClaimOutcome{Kind: "inactive", Message: "当前不可签到"}
+	}
+	// ⚠ 与 ClaimDailyCheckin 的**唯一**区别：到这里返回 "claimable"
+	//（"还没签、可以签"），不提交领取。
+	//
+	// 用新 Kind 而不是复用 "claimed"：复用会让调用方误以为刚领过了，
+	// 于是永远不领 —— 那是与"重复提交"相反方向、同样错的一种。
+	return ClaimOutcome{Kind: "claimable", Message: "可签到"}
+}
+
 // ClaimDailyCheckin 执行每日签到（三步）。
 //
 // 步骤与判据（参照 claimLobsteraiDailyCheckin）：
