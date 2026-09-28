@@ -2276,7 +2276,7 @@ let loginProvider = '';
     const gQuotaCount = (MANIFEST.providers.find(x => x.id === providerId) || {}).account_count;
     const gQuotaBtn = hasCap(providerId, 'quota-probe')
       ? `<button class="gact" data-gquota="${esc(providerId)}"`
-        + ` title="只重新探测 ${esc(providerId)} 的${gQuotaCount === undefined ? '' : gQuotaCount + ' 个'}账号剩余额度`
+        + ` title="只重新探测 ${esc(providerId)} 的${gQuotaCount === undefined ? '' : ' ' + gQuotaCount + ' 个'}账号剩余额度`
         + `（不含其它上游的账号）">刷新本上游额度</button>`
       : '';
     if (login && login.kind) {
