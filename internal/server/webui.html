@@ -183,8 +183,26 @@
   .acctgroup.collapsed > .ghead .acaret{transform:rotate(-90deg)}
   .acctgroup.collapsed > .gfolded-hint{display:inline}
   .acctgroup > .gfolded-hint{display:none;font-size:11px}
-  .acctgroup > .gacts{margin-left:auto;display:inline-flex;align-items:center;gap:6px}
-  .acctgroup > .gacts .gact{padding:2px 8px;font-size:11px;font-weight:400}
+  /* ⚠ 选择器必须是 `.acctgroup > .ghead > .gacts`（三层）。
+     我第一版写的是 `.acctgroup > .gacts` —— 而 .gacts 是 .ghead 的**子节点**，
+     不是 .acctgroup 的直接子节点，所以那条规则**从来没有匹配过**，
+     `margin-left:auto` 也就从没生效 → 按钮一直靠左（用户报的现象）。
+
+     HTML 结构（见 accountGroupHTML）：
+       <section class="acctgroup">
+         <div class="ghead">                        ← flex 容器
+           <button class="ghead-btn">…</button>     标题（可点击折叠）
+           <span class="gfolded-hint">…</span>
+           <span class="gacts">…</span>             ← margin-left:auto 推到最右
+         </div>
+         <table>…</table>
+       </section>
+
+     用户要求：分组行右侧那组按钮（＋添加账号 / 批量导入 / 刷新本上游额度 /
+     重载 auths）**全部右对齐**。靠的就是 margin-left:auto ——
+     在 flex 容器里把该元素及其后所有兄弟推到行尾。 */
+  .acctgroup > .ghead > .gacts{margin-left:auto;display:inline-flex;align-items:center;gap:6px}
+  .acctgroup > .ghead > .gacts .gact{padding:2px 8px;font-size:11px;font-weight:400}
   .acctgroup > table{width:100%;border-collapse:collapse}
   .acctgroup.collapsed > table{display:none}
   /* ⚠ 这里**不能**有 tr.acctrow.collapsed{display:none} —— 加回来就是把回归带回来。

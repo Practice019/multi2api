@@ -116,26 +116,43 @@ func numToUnix(v float64) int64 {
 	return n
 }
 
-// RefreshSkewAtRatio 按「已用寿命 ≥ ratio」算出提前续期窗口。
+// RefreshSkewAtRatio 按「剩余寿命 ≤ 寿命×ratio」算出提前续期窗口。
 //
 // 返回值语义（与 RefreshSkewExt 一致）：
 //
-//	(skew > 0, true)  距过期还有 skew 或更少时该续期
-//	(0, true)         已过阈值，**现在就该续**（对齐"立即触发"的语义）
-//	(0, false)        算不出来（缺 iat/exp）→ 调用方回落固定窗口
+//	(window > 0, true)  距过期还有 window 或更少时该续期
+//	(0, false)          算不出来（缺 iat/exp）→ 调用方回落固定窗口
 //
-// # 算法
+// # ⚠ 只有这两种返回 —— 绝不能返回 (0, true)
 //
-//	寿命 = exp - iat
-//	阈值时刻 = iat + 寿命×ratio      （= "已用一半"的时刻）
-//	窗口 = exp - 阈值时刻            （= 剩这么久时触发）
+// 核心的判定（handler.needsRefreshVia）把 `skew <= 0` 读成
 //
-// ⚠ ratio 取 0.5 时窗口 = 寿命的一半 —— 于是"剩一半寿命时续期"。
+//	「上游明确声明**不需要**提前刷（只在 401 后被动续期）」→ return false
 //
-// # 时间基准可注入（now）
+// 所以 `(0, true)` 的语义是"**永不**主动续期"，不是"现在就续"。
+// 我在这个函数的第一版里正是按后者理解的：
 //
-// 便于测试固定时刻；生产调用传 `time.Now()`。
-func RefreshSkewAtRatio(t JWTTimes, ratio float64, now time.Time) (time.Duration, bool) {
+//	triggerAt := iat + 寿命×ratio
+//	if now >= triggerAt { return 0, true }   // ← 错：恰好在该续期的时刻
+//	                                          //   告诉核心"不用续期"
+//
+// 后果是整个比例策略**完全不生效**，退化成 mimo/trae 那种被动续期 ——
+// 而且症状是"看起来一切正常，只是从不提前续期"，极难发现。
+// 见 refreshratio_fire_test.go：那条测试把返回值喂进核心真实的判定式，
+// 断言"已用 ≥ 50% 时真的会触发"。
+//
+// # 为什么不读 `now`（用户指出的正确表述）
+//
+// 核心的判据是 `now + window >= exp`，等价于 **`剩余 <= window`**。
+// 于是"剩余 ≤ 寿命的一半"这个策略只需要 **window = 寿命×(1-ratio)** ——
+// 一个**常量**，与当下时间无关：
+//
+//	剩余 <= 寿命/2   ⟺   已用 >= 寿命/2      （已用 + 剩余 = 寿命）
+//
+// 两种说法数学等价，但按"剩余"表述的实现**不需要读 now**，
+// 因此没有"什么时候该返回 0"这种会出错的分支。
+// 这是这个函数不再接受 now 参数的原因 —— 保留它只会诱人写回那个 bug。
+func RefreshSkewAtRatio(t JWTTimes, ratio float64) (time.Duration, bool) {
 	if t.IssuedAt <= 0 || t.ExpiresAt <= 0 {
 		return 0, false // 缺一半信息 → 交给调用方回落
 	}
@@ -148,20 +165,23 @@ func RefreshSkewAtRatio(t JWTTimes, ratio float64, now time.Time) (time.Duration
 	if ratio <= 0 || ratio >= 1 {
 		ratio = DefaultRefreshRatio
 	}
-	// 触发时刻 = 签发时刻 + 寿命×ratio
-	triggerAt := t.IssuedAt + int64(float64(lifetime)*ratio)
-	window := t.ExpiresAt - triggerAt
-	if window < 0 {
-		window = 0
+	// 窗口 = 寿命 × (1 - ratio)。
+	//
+	// ratio=0.5 → 窗口 = 寿命的一半 → "剩余 ≤ 一半就续"。
+	//
+	// ⚠ 先乘后除 + 四舍五入，避免 `int64(float64(lifetime)*(1-ratio))`
+	// 的浮点截断（ratio=0.8 时会少 1 秒）。
+	windowSec := (lifetime*int64((1-ratio)*1_000_000) + 500_000) / 1_000_000
+	if windowSec <= 0 {
+		// ratio 极大（如 0.999999）时窗口可能舍入到 0 ——
+		// 返回 (0,false) 让调用方回落，**不要**返回 (0,true)（= 永不续期）。
+		return 0, false
 	}
-	// 已经过了触发时刻 → 现在就续（0 表示"立即"）。
-	if now.Unix() >= triggerAt {
-		return 0, true
-	}
-	return time.Duration(window) * time.Second, true
+	return time.Duration(windowSec) * time.Second, true
 }
 
-// RefreshSkewFromToken 一步到位：从 token 串算提前续期窗口。
+// RefreshSkewFromToken 一步到位：从 token 串算出提前续期窗口
+//（默认按"剩余 ≤ 寿命的一半"）。
 //
 // 供上游一行接入：
 //
@@ -171,5 +191,5 @@ func RefreshSkewAtRatio(t JWTTimes, ratio float64, now time.Time) (time.Duration
 //	    return gateway.RefreshSkewFromToken(a.AccessToken)
 //	}
 func RefreshSkewFromToken(token string) (time.Duration, bool) {
-	return RefreshSkewAtRatio(ParseJWTTimes(token), DefaultRefreshRatio, time.Now())
+	return RefreshSkewAtRatio(ParseJWTTimes(token), DefaultRefreshRatio)
 }
