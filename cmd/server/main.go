@@ -124,67 +124,9 @@ func main() {
 	up := upstream.New()
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
-	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
-	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
-	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
-		tr.ResponseHeaderTimeout = up.HeaderTimeout
-	}
-	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
-	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
-	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
-	// 出站身份（全部可省略；省略时出站请求头与改造前逐字节一致）。
-	up.UserAgent = cfg.Upstream.UserAgent
-	up.ClientVersion = cfg.Upstream.ClientVersion
-	up.CliVersion = cfg.Upstream.CliVersion
-	up.ClientName = cfg.Upstream.ClientName
-	up.ProductCode = cfg.Upstream.ProductCode
-	up.DeviceToken = cfg.Upstream.DeviceToken
-	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
-	up.PassthroughIP = cfg.Upstream.PassthroughIP
-	// 按模型族分档的 UA 覆写表（可选；空 = 不分档，与改造前逐字节相同）。
-	//
-	// 对齐参照项目的 userAgentByModelFamily：国际版与国内版共用同一后端协议，
-	// 但模型池分属不同产品线，而后台按 UA 归因「使用端」——
-	// 只用一个全局 UA 会让其中一类模型的账单显示成 `-`。
-	//
-	// ⚠ 这里做一次 config 类型 → wire 类型的转换（两层刻意分开，
-	// 见 UAModelFamilyConfig 的注释）。
-	for _, r := range cfg.Upstream.UAModelFamilies {
-		match := strings.TrimSpace(r.Match)
-		ua := strings.TrimSpace(r.UA)
-		if match == "" || ua == "" {
-			// 空 match 会匹配一切（把全部模型都覆写掉），空 UA 会发出一个
-			// 空 User-Agent —— 两者都是配置错误，明确报出来而不是静默生效。
-			log.Fatalf("upstream.ua_model_families: 每一项都要有 match 与 ua（得到 match=%q ua=%q）", r.Match, r.UA)
-		}
-		up.UAModelFamilies = append(up.UAModelFamilies, wire.UAModelFamilyRule{Match: match, UA: ua})
-	}
-	{
-		// 显式记一行：出站身份会决定"上游怎么看我们"，
-		// 排查"为什么官网使用端显示不对"时这是唯一的入口。
-		ua := "CLI/2.63.2 CodeBuddy/2.63.2（内置默认）"
-		if cfg.Upstream.UserAgent != "" {
-			ua = cfg.Upstream.UserAgent + "（user_agent 覆盖）"
-		} else if cfg.Upstream.ClientVersion != "" {
-			ua = "桌面端三段式（client_version=" + cfg.Upstream.ClientVersion + "）"
-		}
-		log.Printf("出站身份：UA=%s client_name=%q device_token=%v passthrough_ip=%v",
-			ua, cfg.Upstream.ClientName,
-			cfg.Upstream.DeviceToken != "" || cfg.Upstream.DeviceTokenFile != "",
-			cfg.Upstream.PassthroughIP)
-		// 分档表单独记一行：它是"账单里某个模型显示成 `-`"的唯一解释。
-		//
-		// 不并进上一行的理由：表可以有 7 条以上，拼进去会把那行撑爆，
-		// 而上一行是每次启动都要看的（越短越容易被读到）。
-		if n := len(up.UAModelFamilies); n > 0 {
-			parts := make([]string, 0, n)
-			for _, r := range up.UAModelFamilies {
-				parts = append(parts, r.Match+"→"+r.UA)
-			}
-			log.Printf("出站 UA 按模型族分档（%d 条，先命中先返回）：%s",
-				n, strings.Join(parts, "；"))
-		}
-	}
+	// 超时 / 脱敏 / 出站身份（含按模型族分档）全部在 configureUpstream 里 ——
+	// 抽成函数是为了让 buddy 实例能走**同一条**构造路径（见 newUpstreamClient）。
+	configureUpstream(up, cfg)
 	// 系统提示词体系（借鉴 workbuddy2api-panel）：模式 + 正文 + 降级状态机。
 	//
 	// 正文由 cfg.normalize() 在启动时就加载好（文件不可读会在那里直接报错）。
@@ -199,6 +141,7 @@ func main() {
 	up.PromptText = cfg.PromptText
 	promptGate := prompt.NewGate()
 	up.PromptGate = promptGate
+	logUpstreamIdentity(up, "全局")
 	{
 		src := "内置默认"
 		if cfg.Prompt.File != "" {
@@ -393,6 +336,103 @@ func main() {
 		}
 		log.Printf("已注册海外版上游 workbuddy-intl（授权站点 %s，凭证目录 %s）",
 			cfg.WorkbuddyIntlOAuthBaseURL, cfg.WorkbuddyIntlAuthDir)
+	}
+
+	// ---- buddy：腾讯 CodeBuddy 中国版（参照 CODEBUDDY 的身份）----
+	//
+	// # 它打的是**与国内版 workbuddy 同一个上游**
+	//
+	// 参照 product.ts 的两个产品（逐字）：
+	//
+	//	CODEBUDDY  id=buddy      endpoint=copilot.tencent.com  platform=ide
+	//	           productCode=codebuddy  userAgent=CodeBuddyIDE/1.106.1
+	//	WORKBUDDY  id=workbuddy  endpoint=www.workbuddy.ai     platform=workbuddy-ai
+	//
+	// 而本网关的 `workbuddy` 实例端点就是 copilot.tencent.com ——
+	// 我们的 workbuddy 占的是参照里 **buddy** 的槽位，workbuddy-intl 占的是
+	// 参照里 **workbuddy** 的槽位。所以这里不是"接一个新上游"，
+	// 而是让同一上游能以参照验证过的 **IDE 身份**再注册一份。
+	//
+	// # 与国内版实例的三点实质差异
+	//
+	//	① 出站 UA        CodeBuddyIDE/1.106.1   vs CLI/2.63.2 CodeBuddy/2.63.2
+	//	② X-Product-Code codebuddy              vs （空）
+	//	③ 登录 platform  ide                     vs CLI
+	//
+	// ① ② 决定腾讯后台账单的「使用端」归因（缺品牌字样则显示 `-`）；
+	// ③ 决定登录页走哪套流程。
+	//
+	// # 为什么默认关、且不动既有 CN 通道
+	//
+	// 我们 CN 通道的 platform=CLI 是**生产验证过**的形态；参照用 ide 且实测正常。
+	// 两者都能用，但我没有真实凭据去判定哪个更好 —— 所以**不替换**，
+	// 而是做成可显式启用的第二个实例：想用 IDE 身份的运维把号放进
+	// `auths/buddy/`，`auths/workbuddy/` 全程不受影响。
+	//
+	// 玩法类端点（签到/成长/旅行）**保留** —— 参照里 buddy(CN) 没有
+	// 禁用玩法的迹象（那套 DisableGrowthTravel 判定只针对海外版）。
+	if cfg.BuddyEnabled {
+		// 第二个出站客户端：身份不同，其余（超时/脱敏/分档表）与全局同源。
+		//
+		// ⚠ 不能浅拷贝 `up`（Client 里有 sync.RWMutex），走 newUpstreamClient。
+		// 但 promptGate **必须共用同一个** —— 各建一个的话 handler 触发的
+		// 降级这个实例永远看不到（见 promptGate 那段的注释）。
+		upBuddy := newUpstreamClient(cfg, upstreamIdentity{
+			UserAgent:     cfg.BuddyUserAgent,
+			ClientVersion: cfg.BuddyClientVersion,
+			CliVersion:    cfg.BuddyCliVersion,
+			ClientName:    cfg.BuddyClientName,
+			ProductCode:   cfg.BuddyProductCode,
+			// ⚠ 清空分档表：参照 CODEBUDDY 是空表，注释写明「中国版只有一条
+			// 产品线，无需按模型分档：全部模型沿用 IDE UA」。
+			// 不清空的话 glm-/hy 模型的 UA 会被全局表覆写成 WorkBuddy/...，
+			// 把 CodeBuddyIDE 身份冲掉（账单归因跟着错）。
+			NoUAModelFamilies: true,
+		})
+		upBuddy.PromptMode = cfg.PromptMode
+		upBuddy.PromptText = cfg.PromptText
+		upBuddy.PromptGate = promptGate
+
+		wbBuddy := workbuddy.NewWithConfig(workbuddy.Config{
+			Pool:     poolAdapter{p: p},
+			Provider: "buddy",
+			ID:       "buddy",
+			Log:      checkinLog,
+			AuthDir:  cfg.BuddyAuthDir,
+			// 登录：授权站点与平台。platform 默认 "ide"（参照取值），
+			// UA 用本实例的（未配则回落全局/内置形态）。
+			Login: workbuddyLoginWithPlatform("buddy", cfg.BuddyOAuthBaseURL,
+				cfg.BuddyOAuthPlatform, cfg.BuddyUserAgent),
+			RefreshInterval: cfg.ScheduleKeepaliveInterval,
+			OnRefreshFailure: func(uid string) {
+				if p.NoteRefreshFailure(uid) {
+					log.Printf("buddy: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录）", uid)
+				}
+			},
+			OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
+		})
+		wbBuddy.SetClient(upBuddy)
+		if err := registry.Register(wbBuddy); err != nil {
+			log.Fatalf("注册 buddy 上游失败: %v", err)
+		}
+		if cfg.BuddyPoolAccounts {
+			buddyAuths, lerr := auth.LoadDirCompat(cfg.AuthsBase, "buddy")
+			if lerr != nil {
+				log.Printf("buddy: 读取凭证失败: %v", lerr)
+			} else if len(buddyAuths) > 0 {
+				secrets := make(map[string]any, len(buddyAuths))
+				for _, a := range buddyAuths {
+					if a.UID != "" {
+						secrets[a.UID] = a
+					}
+				}
+				p.SyncToDirWithSecrets("buddy", buddyAuths, secrets)
+				log.Printf("buddy: 已并入 %d 个账号到账号池", len(buddyAuths))
+			}
+		}
+		logUpstreamIdentity(upBuddy, "buddy")
+		log.Printf("已注册上游 buddy（授权站点 %s，platform=%q，凭证目录 %s）",
+			cfg.BuddyOAuthBaseURL, cfg.BuddyOAuthPlatform, cfg.BuddyAuthDir)
 	}
 
 	// ---- 第二个上游：CodeArts（判据 1 的实测对象）----
@@ -1247,6 +1287,138 @@ func main() {
 // 否则"本机没装受支持的浏览器"这件事只在用户点「添加账号」时才暴露，
 // 而且表现成"点了没反应"（窗口不出现、也没人告诉他为什么）。
 // 启动期探测把问题提前到日志里。
+// configureUpstream 把 config 里的超时 / 脱敏 / 出站身份写进一个 Client。
+//
+// # 为什么抽成函数（buddy 实例需要第二个 Client）
+//
+// 出站身份（UA / product_code / client_name）住在 `upstream.Client` 上，
+// 而所有 workbuddy 系实例原本共用**同一个** `up`。buddy 要用**不同的身份**
+// 打同一个上游，就得有自己的 Client。
+//
+// 两种写法我都排除了：
+//
+//   - **再手写一遍这些赋值** → 两处必然漂移（改一处忘另一处，
+//     表现为"两个实例超时不一致"这类极难查的故障）。
+//   - **`*up` 浅拷贝再改字段** → Client 里有 `sync.RWMutex`，
+//     拷贝带锁的结构体是错的（go vet 也会报），且锁状态被复制后行为未定义。
+//
+// 所以：新建 Client + 走**同一个** configureUpstream，只在之后按实例覆盖身份。
+func configureUpstream(up *upstream.Client, cfg *Config) {
+	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
+	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
+	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
+		tr.ResponseHeaderTimeout = up.HeaderTimeout
+	}
+	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
+	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
+	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 出站身份（全部可省略；省略时出站请求头与改造前逐字节一致）。
+	up.UserAgent = cfg.Upstream.UserAgent
+	up.ClientVersion = cfg.Upstream.ClientVersion
+	up.CliVersion = cfg.Upstream.CliVersion
+	up.ClientName = cfg.Upstream.ClientName
+	up.ProductCode = cfg.Upstream.ProductCode
+	up.DeviceToken = cfg.Upstream.DeviceToken
+	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
+	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 按模型族分档的 UA 覆写表（可选；空 = 不分档，与改造前逐字节相同）。
+	//
+	// 对齐参照项目的 userAgentByModelFamily：国际版与国内版共用同一后端协议，
+	// 但模型池分属不同产品线，而后台按 UA 归因「使用端」——
+	// 只用一个全局 UA 会让其中一类模型的账单显示成 `-`。
+	//
+	// ⚠ 这里做一次 config 类型 → wire 类型的转换（两层刻意分开，
+	// 见 UAModelFamilyConfig 的注释）。
+	for _, r := range cfg.Upstream.UAModelFamilies {
+		match := strings.TrimSpace(r.Match)
+		ua := strings.TrimSpace(r.UA)
+		if match == "" || ua == "" {
+			// 空 match 会匹配一切（把全部模型都覆写掉），空 UA 会发出一个
+			// 空 User-Agent —— 两者都是配置错误，明确报出来而不是静默生效。
+			log.Fatalf("upstream.ua_model_families: 每一项都要有 match 与 ua（得到 match=%q ua=%q）", r.Match, r.UA)
+		}
+		up.UAModelFamilies = append(up.UAModelFamilies, wire.UAModelFamilyRule{Match: match, UA: ua})
+	}
+}
+
+// logUpstreamIdentity 记一行出站身份（排查"官网使用端显示不对"的唯一入口）。
+func logUpstreamIdentity(up *upstream.Client, who string) {
+	ua := "CLI/2.63.2 CodeBuddy/2.63.2（内置默认）"
+	switch {
+	case up.UserAgent != "":
+		ua = up.UserAgent + "（user_agent 覆盖）"
+	case up.ClientVersion != "":
+		ua = "桌面端三段式（client_version=" + up.ClientVersion + "）"
+	}
+	log.Printf("%s 出站身份：UA=%s client_name=%q product_code=%q device_token=%v passthrough_ip=%v",
+		who, ua, up.ClientName, up.ProductCode,
+		up.DeviceToken != "" || up.DeviceTokenFile != "", up.PassthroughIP)
+	// 分档表单独记一行：它是"账单里某个模型显示成 `-`"的唯一解释。
+	//
+	// 不并进上一行的理由：表可以有 7 条以上，拼进去会把那行撑爆，
+	// 而上一行是每次启动都要看的（越短越容易被读到）。
+	if n := len(up.UAModelFamilies); n > 0 {
+		parts := make([]string, 0, n)
+		for _, r := range up.UAModelFamilies {
+			parts = append(parts, r.Match+"→"+r.UA)
+		}
+		log.Printf("%s 出站 UA 按模型族分档（%d 条，先命中先返回）：%s",
+			who, n, strings.Join(parts, "；"))
+	}
+}
+
+// upstreamIdentity 按实例覆盖的出站身份（空串 = 不覆盖）。
+type upstreamIdentity struct {
+	UserAgent     string
+	ClientVersion string
+	CliVersion    string
+	ClientName    string
+	ProductCode   string
+	// NoUAModelFamilies 清空**按模型族分档**的表。
+	//
+	// # 为什么需要这个开关（buddy 必须用它）
+	//
+	// 参照 product.ts 的 CODEBUDDY 是 `userAgentByModelFamily: []`，注释原文：
+	//
+	//	中国版只有一条产品线，无需按模型分档：全部模型沿用 IDE UA
+	//
+	// 而分档表是**全局**配的（upstream.ua_model_families，服务于国际版那个
+	// "gpt 系与 glm 系形态不同"的事实）。若 buddy 直接继承它，glm-/hy 模型的
+	// UA 会被覆写成 `WorkBuddy/...` —— **把 CodeBuddyIDE 身份冲掉**，
+	// 账单归因也就跟着错了。
+	//
+	// 所以 buddy 实例显式清空它：IDE 身份必须对所有模型一视同仁。
+	NoUAModelFamilies bool
+}
+
+// newUpstreamClient 造一个配置好的出站客户端；overrides 按实例覆盖身份。
+//
+// 覆盖字段**为空串即不覆盖**（保留全局值）—— 这是"未配置的部署
+// 行为逐字节不变"这条硬约束的落点。
+func newUpstreamClient(cfg *Config, overrides upstreamIdentity) *upstream.Client {
+	up := upstream.New()
+	configureUpstream(up, cfg)
+	if overrides.UserAgent != "" {
+		up.UserAgent = overrides.UserAgent
+	}
+	if overrides.ClientVersion != "" {
+		up.ClientVersion = overrides.ClientVersion
+	}
+	if overrides.CliVersion != "" {
+		up.CliVersion = overrides.CliVersion
+	}
+	if overrides.ClientName != "" {
+		up.ClientName = overrides.ClientName
+	}
+	if overrides.ProductCode != "" {
+		up.ProductCode = overrides.ProductCode
+	}
+	if overrides.NoUAModelFamilies {
+		up.UAModelFamilies = nil
+	}
+	return up
+}
+
 func loginBrowserOpener(cfg *Config) func(string) (string, error) {
 	if !cfg.Login.OpenBrowser {
 		log.Printf("login: 自动打开授权页已关闭（login.open_browser=false）" +

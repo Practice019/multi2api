@@ -481,6 +481,77 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"workbuddy_intl"`
 
+	// Buddy 腾讯 CodeBuddy 中国版（buddy）的配置。
+	//
+	// # 它打的是**与国内版 workbuddy 同一个上游**，差异只在**出站身份**
+	//
+	// 参照项目的 product.ts 里有两个产品（逐字对照）：
+	//
+	//	CODEBUDDY  id=buddy      endpoint=copilot.tencent.com  platform=ide
+	//	           productCode=codebuddy  userAgent=CodeBuddyIDE/1.106.1
+	//	WORKBUDDY  id=workbuddy  endpoint=www.workbuddy.ai     platform=workbuddy-ai
+	//
+	// 而本网关的 `workbuddy` 实例端点就是 copilot.tencent.com ——
+	// 也就是说**我们的 workbuddy 占的是参照里 buddy 的槽位**，
+	// 而 `workbuddy-intl` 占的是参照里 workbuddy 的槽位。
+	//
+	// 所以这里不是"接一个新上游"，而是让同一个上游能以**参照验证过的
+	// IDE 身份**（CodeBuddyIDE UA + productCode=codebuddy + platform=ide）
+	// 再注册一份 —— 两个 provider ID 对应两套账号池与两种账单归因。
+	//
+	// # 为什么默认关（不自动替换我们现有的 CN 通道）
+	//
+	// 我们 CN 通道用的是 `platform=CLI` + `CLI/2.63.2 CodeBuddy/2.63.2` UA，
+	// 那是**生产验证过**的形态。参照用 `platform=ide` 且实测正常。
+	// 两者都能用，但我没有真实凭据去判定哪个更好 ——
+	// 所以**不改动既有路径**，把参照的身份做成可显式启用的第二个实例。
+	//
+	// 想让既有部署改用 IDE 身份的运维，把账号挪到 `auths/buddy/` 即可，
+	// 全程不影响 `auths/workbuddy/`。
+	//
+	// # 向后兼容（硬要求，与其余新增段同一条）
+	//
+	// 本段缺席时行为与现在**逐字节一致**：不注册 buddy 实例、
+	// 不加载 `auths/buddy/`。启用条件是**显式**的：buddy.enabled = true。
+	Buddy struct {
+		// Enabled 是否启用 buddy 渠道。**缺省 false**。
+		Enabled bool `json:"enabled"`
+		// AuthDir buddy 凭证目录。留空则用 `<顶层 auth_dir>/buddy`。
+		AuthDir string `json:"auth_dir"`
+		// OAuthBaseURL 设备授权站点，默认 https://copilot.tencent.com
+		//（与国内版同一站点 —— 它本来就是同一个上游）。
+		OAuthBaseURL string `json:"oauth_base_url"`
+		// OAuthPlatform 传给 auth/state 的 platform 参数，默认 "ide"。
+		//
+		// ⚠ 这是参照 CODEBUDDY 的取值（product.ts: platform='ide'），
+		// 与我们国内版实例的 `CLI` 不同 —— 两者的登录页流程不同。
+		// 留空即回落 oauth 包按 baseURL 推导的值（CN 站 → "CLI"）。
+		OAuthPlatform string `json:"oauth_platform"`
+		// UserAgent 出站 UA，默认 "CodeBuddyIDE/1.106.1"。
+		//
+		// 参照 CODEBUDDY 的逐字取值。它决定腾讯后台账单的「使用端」归因。
+		// 留空即回落 upstream.Client 的全局值（与未配时逐字节相同）。
+		UserAgent string `json:"user_agent"`
+		// ProductCode X-Product-Code 头取值，默认 "codebuddy"。
+		//
+		// 参照 CODEBUDDY 的 productCode。留空即回落全局值。
+		ProductCode string `json:"product_code"`
+		// ClientName 用量归属名（X-IDE-Name / X-Product 等），默认 "CodeBuddy"。
+		//
+		// 参照 CODEBUDDY 的 attributionName。留空即回落全局值。
+		ClientName string `json:"client_name"`
+		// ClientVersion WorkBuddy 客户端版本段，默认 "1.106.1"。
+		//
+		// 参照 CODEBUDDY 的 clientVersion。只在 UserAgent 留空时用于拼三段式。
+		ClientVersion string `json:"client_version"`
+		// CliVersion 三段式 UA 的 CLI 段，默认 "2.137.1"。
+		//
+		// 参照 CODEBUDDY 的 cliVersion。
+		CliVersion string `json:"cli_version"`
+		// PoolAccounts 是否把 buddy 账号并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"buddy"`
+
 	// Loomy 第三个上游（讯飞 Loomy 桌面客户端的模型服务）的配置。
 	//
 	// # 向后兼容（与 codearts 同一条硬要求）
@@ -835,6 +906,33 @@ type Config struct {
 	// WorkbuddyIntlPoolAccounts 是否把海外版账号并入核心账号池
 	//（见 WorkbuddyIntl.PoolAccounts）。未启用时恒为 false。
 	WorkbuddyIntlPoolAccounts bool `json:"-"`
+
+	// Buddy 解析后（供 main 直接取用）。
+	//
+	// BuddyEnabled 为 false 时下面几个字段无意义：不注册 buddy 实例、
+	// 不加载 `auths/buddy/` 凭证。
+	BuddyEnabled bool `json:"-"`
+	// BuddyAuthDir 已填好默认值 `<顶层 auth_dir>/buddy`（见 normalize）。
+	BuddyAuthDir string `json:"-"`
+	// BuddyOAuthBaseURL 已填好默认值 https://copilot.tencent.com。
+	BuddyOAuthBaseURL string `json:"-"`
+	// BuddyOAuthPlatform 已填好默认值 "ide"（参照 CODEBUDDY 的取值）。
+	//
+	// 用户显式留空**不会**被默认值覆盖（见 normalize 的注释）——
+	// 那时回落 oauth 包按 baseURL 推导的 "CLI"。
+	BuddyOAuthPlatform string `json:"-"`
+	// BuddyUserAgent / BuddyProductCode / BuddyClientName / BuddyClientVersion /
+	// BuddyCliVersion 出站身份（参照 CODEBUDDY 的逐字取值，见 Buddy 段的注释）。
+	//
+	// 用户显式留空时**保留空串** —— 装配层据此"不覆盖"，
+	// 于是未配置的部署行为与升级前逐字节相同。
+	BuddyUserAgent    string `json:"-"`
+	BuddyProductCode  string `json:"-"`
+	BuddyClientName   string `json:"-"`
+	BuddyClientVersion string `json:"-"`
+	BuddyCliVersion   string `json:"-"`
+	// BuddyPoolAccounts 是否把 buddy 账号并入核心账号池。
+	BuddyPoolAccounts bool `json:"-"`
 
 	// Loomy 解析后（供 main 直接取用）。
 	//
@@ -1290,6 +1388,39 @@ func (c *Config) normalize() error {
 		c.WorkbuddyIntlOAuthBaseURL = "https://www.workbuddy.ai"
 	}
 	c.WorkbuddyIntlPoolAccounts = c.WorkbuddyIntlEnabled && boolOr(c.WorkbuddyIntl.PoolAccounts, true)
+
+	// buddy（腾讯 CodeBuddy 中国版，参照 CODEBUDDY 的身份）。
+	//
+	// 与 workbuddy-intl 同一套缺省规则：enabled 缺省 false；auth_dir 缺省
+	// `<顶层 auth_dir>/buddy`；oauth_base_url 缺省 copilot.tencent.com
+	//（与国内版同一站点 —— 它本来就是同一个上游）。
+	c.BuddyEnabled = c.Buddy.Enabled
+	c.BuddyAuthDir = c.Buddy.AuthDir
+	if c.BuddyAuthDir == "" {
+		c.BuddyAuthDir = filepath.Join(c.AuthsBase, "buddy")
+	}
+	c.BuddyOAuthBaseURL = c.Buddy.OAuthBaseURL
+	if c.BuddyOAuthBaseURL == "" {
+		c.BuddyOAuthBaseURL = "https://copilot.tencent.com"
+	}
+	//
+	// platform **填默认 "ide"**：buddy 整段是显式启用才生效的新实例，
+	// 不存在"既有部署行为改变"的问题 —— 所以要给的就是参照验证过的取值。
+	// 想用 CLI 流程的运维在配置里写 `oauth_platform: "CLI"` 即可。
+	c.BuddyOAuthPlatform = strings.TrimSpace(c.Buddy.OAuthPlatform)
+	if c.BuddyOAuthPlatform == "" {
+		c.BuddyOAuthPlatform = "ide"
+	}
+	//
+	// ⚠ 以下几项**刻意不填默认值**：用户显式留空时保留空串，
+	// 装配层据此"不覆盖"，于是未配这些项的部署出站请求与升级前逐字节相同。
+	// 想拿到参照的 IDE 身份就在配置里**显式**写上（见 Buddy 段的注释）。
+	c.BuddyUserAgent = c.Buddy.UserAgent
+	c.BuddyProductCode = c.Buddy.ProductCode
+	c.BuddyClientName = c.Buddy.ClientName
+	c.BuddyClientVersion = c.Buddy.ClientVersion
+	c.BuddyCliVersion = c.Buddy.CliVersion
+	c.BuddyPoolAccounts = c.BuddyEnabled && boolOr(c.Buddy.PoolAccounts, true)
 
 	// 页内添加账号的授权站点/端点。
 	//

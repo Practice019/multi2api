@@ -85,29 +85,79 @@ func workbuddyLogin(provider, baseURL, ua string) workbuddy.OAuthFlow {
 	}
 	return workbuddy.WrapOAuth(
 		workbuddyOAuthClient{c: newOAuthClientFor(baseURL, ua)},
-		func(raw any) (gateway.Credential, error) {
-			cred, ok := raw.(*oauth.Credential)
-			if !ok || cred == nil {
-				return gateway.Credential{}, errors.New("登录返回了非预期的凭证类型")
-			}
-			// ExpiresIn 是相对秒数 → 换算成绝对时刻。
-			// 0 表示"上游没给过期信息"，此时保持零值（gateway.Credential
-			// 的注释：零值 = 不提供过期信息），不要硬塞 now。
-			var exp time.Time
-			if cred.ExpiresIn > 0 {
-				exp = time.Now().Add(time.Duration(cred.ExpiresIn) * time.Second)
-			}
-			return gateway.Credential{
-				Provider:  provider,
-				UID:       cred.UID,
-				Nickname:  cred.Nickname,
-				ExpiresAt: exp,
-				// 保持原类型：核心落盘时要求它实现 MarshalAuthFile，
-				// 而那个方法就在 *oauth.Credential 上。
-				Secret: cred,
-			}, nil
-		},
+		toCredential(provider),
 	)
+}
+
+// toCredential 把 oauth 登录结果转成核心凭证。
+//
+// 抽出来是因为现在有两个登录入口（workbuddyLogin / workbuddyLoginWithPlatform），
+// 两处各写一份转换必然漂移。
+func toCredential(provider string) func(any) (gateway.Credential, error) {
+	return func(raw any) (gateway.Credential, error) {
+		cred, ok := raw.(*oauth.Credential)
+		if !ok || cred == nil {
+			return gateway.Credential{}, errors.New("登录返回了非预期的凭证类型")
+		}
+		// ExpiresIn 是相对秒数 → 换算成绝对时刻。
+		// 0 表示"上游没给过期信息"，此时保持零值（gateway.Credential
+		// 的注释：零值 = 不提供过期信息），不要硬塞 now。
+		var exp time.Time
+		if cred.ExpiresIn > 0 {
+			exp = time.Now().Add(time.Duration(cred.ExpiresIn) * time.Second)
+		}
+		return gateway.Credential{
+			Provider:  provider,
+			UID:       cred.UID,
+			Nickname:  cred.Nickname,
+			ExpiresAt: exp,
+			// 保持原类型：核心落盘时要求它实现 MarshalAuthFile，
+			// 而那个方法就在 *oauth.Credential 上。
+			Secret: cred,
+		}, nil
+	}
+}
+
+// newOAuthClientFor 按渠道构建登录客户端。
+//
+// ua 为空时**不设**（回落 oauth 包内置的 CLI 形态）——
+// 既有部署升级后登录三步发出的 UA 必须逐字节不变。
+//
+// 非空时三步（auth/state / 轮询 token / 拉账户）**共用**它：
+// 参照 buddy-oauth.ts 明确要求三步都带产品身份，注释原文：「否则 WorkBuddy
+// 登录会以 CodeBuddy 的 UA 发请求」。
+// workbuddyLoginWithPlatform 与 workbuddyLogin 相同，但可覆盖登录 platform。
+//
+// # 为什么需要它（buddy 用 platform=ide，我们 CN 通道用 CLI）
+//
+// 参照 product.ts 的 CODEBUDDY 是 `platform: 'ide'`，而我们的 CN 通道
+// 用 `platform=CLI`（生产验证过）。两者登录页流程不同。
+//
+// platform 为空时**不覆盖**，回落 oauth 包按 baseURL 推导的值 ——
+// 于是未配时行为与升级前逐字节相同。
+func workbuddyLoginWithPlatform(provider, baseURL, platform, ua string) workbuddy.OAuthFlow {
+	if baseURL == "" {
+		return nil
+	}
+	return workbuddy.WrapOAuth(
+		workbuddyOAuthClient{c: newOAuthClientWithPlatform(baseURL, platform, ua)},
+		toCredential(provider),
+	)
+}
+
+// newOAuthClientWithPlatform 构建登录客户端（可覆盖 platform 与 UA）。
+//
+// 两者**为空即不覆盖**（回落 oauth 包的推导值 / 内置 CLI 形态）——
+// 既有部署升级后登录三步发出的请求必须逐字节不变。
+func newOAuthClientWithPlatform(baseURL, platform, ua string) *oauth.Client {
+	c := oauth.New(baseURL)
+	if strings.TrimSpace(platform) != "" {
+		c.Platform = strings.TrimSpace(platform)
+	}
+	if strings.TrimSpace(ua) != "" {
+		c.UserAgent = strings.TrimSpace(ua)
+	}
+	return c
 }
 
 // newOAuthClientFor 按渠道构建登录客户端。
@@ -119,11 +169,7 @@ func workbuddyLogin(provider, baseURL, ua string) workbuddy.OAuthFlow {
 // 参照 buddy-oauth.ts 明确要求三步都带产品身份，注释原文：「否则 WorkBuddy
 // 登录会以 CodeBuddy 的 UA 发请求」。
 func newOAuthClientFor(baseURL, ua string) *oauth.Client {
-	c := oauth.New(baseURL)
-	if strings.TrimSpace(ua) != "" {
-		c.UserAgent = strings.TrimSpace(ua)
-	}
-	return c
+	return newOAuthClientWithPlatform(baseURL, "", ua)
 }
 
 // 编译期断言。
