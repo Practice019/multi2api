@@ -264,10 +264,14 @@ func TestLoginFlowEndToEnd(t *testing.T) {
 	if cred.UID == "" {
 		t.Fatalf("25 秒内未拿到凭证（poll 次数=%d）", atomic.LoadInt32(&calls.poll))
 	}
-	a, ok := cred.Secret.(*Auth)
-	if !ok || a == nil {
-		t.Fatalf("Secret 类型: %T", cred.Secret)
+	// ⚠ Secret 是 authFile 包装（核心落盘要求它实现 MarshalAuthFile）。
+	// 要断言的字段在对内的 *Auth 上，所以这里解一层。
+	// 包装存在的理由见 login.go 的 authFile 注释。
+	af, ok := cred.Secret.(*authFile)
+	if !ok || af == nil || af.a == nil {
+		t.Fatalf("Secret 类型: %T（want *authFile，且内含非空 *Auth）", cred.Secret)
 	}
+	a := af.a
 	// ⚠ machine_id 必须生成并进凭据（续期要用）
 	if a.MachineID == "" {
 		t.Error("登录后必须生成 machine_id（续期请求体要用它）")

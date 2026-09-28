@@ -399,10 +399,14 @@ func TestLoginEndToEnd(t *testing.T) {
 	if cred.UID != "7445120" {
 		t.Errorf("uid = %q, want 7445120", cred.UID)
 	}
-	a, ok := cred.Secret.(*Auth)
-	if !ok || a == nil {
-		t.Fatalf("Secret 类型: %T", cred.Secret)
+	// ⚠ Secret 是 authFile 包装（核心落盘要求它实现 MarshalAuthFile）。
+	// 要断言的字段在对内的 *Auth 上，所以这里解一层。
+	// 包装存在的理由见 login.go 的 authFile 注释。
+	af, ok := cred.Secret.(*authFile)
+	if !ok || af == nil || af.a == nil {
+		t.Fatalf("Secret 类型: %T（want *authFile，且内含非空 *Auth）", cred.Secret)
 	}
+	a := af.a
 	if a.RefreshToken != "rt-1" {
 		t.Errorf("refresh_token = %q, want rt-1", a.RefreshToken)
 	}

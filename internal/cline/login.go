@@ -257,7 +257,17 @@ func (f *loginFlow) markReady(e *loginEntry, a *Auth) {
 		Provider: providerID,
 		UID:      a.UID(),
 		Nickname: a.Nickname,
-		Secret:   a,
+		// ⚠ 必须是 authFile 包装，不能直接放 `a`。
+		//
+		// 核心落盘（admin.go 的 pollViaFlow）要求 Secret 实现
+		//
+		//	MarshalAuthFile() (name string, raw []byte, err error)
+		//
+		// 因为**只有上游自己知道**凭证该写成什么文件名、什么字段形状。
+		// 直接放 `a` 会让浏览器授权成功后停在
+		//「该上游的凭证结构尚未接入落盘（LoginFlow 的 Secret 需要实现
+		// MarshalAuthFile）」—— 用户看到的是"登录不了"。
+		Secret: &authFile{a: a},
 	}
 	if a.ExpireTime > 0 {
 		cred.ExpiresAt = time.UnixMilli(a.ExpireTime)
@@ -266,6 +276,38 @@ func (f *loginFlow) markReady(e *loginEntry, a *Auth) {
 	e.ready = true
 	e.cred = cred
 	e.mu.Unlock()
+}
+
+// ── 凭证落盘包装 ────────────────────────────────────────────────────────
+
+// authFile 让一份 *Auth 满足核心的落盘窄接口（MarshalAuthFile）。
+//
+// # 为什么用包装类型而不是给 *Auth 直接加方法
+//
+// `*Auth` 有两个身份，且**形状不同**：
+//
+//	池内 secret   运行期用的结构（含 FilePath 等不落盘字段）
+//	落盘文件      嵌套形 {"auth":{…},"account":{…}}（见 MarshalAuthFile）
+//
+// 让同一个类型同时承担两者，就意味着"池里那份"和"盘上那份"共用一个
+// 序列化路径 —— 而它们的字段集并不相同。包装类型把"落盘形态"这件事
+// 显式化，也与 trae / mimo / loomy / codearts 的既有做法一致。
+type authFile struct{ a *Auth }
+
+// MarshalAuthFile 返回 (文件名, 内容) —— 核心 pollViaFlow 的 authFileWriter 契约。
+func (f *authFile) MarshalAuthFile() (string, []byte, error) {
+	if f == nil || f.a == nil {
+		return "", nil, errors.New("cline: 凭证为空")
+	}
+	raw, err := MarshalAuthFile(f.a)
+	if err != nil {
+		return "", nil, err
+	}
+	name := FileName(f.a)
+	if name == "" {
+		return "", nil, errors.New("cline: 凭证文件名为空")
+	}
+	return name, raw, nil
 }
 
 // markFailed 标记会话失败。
