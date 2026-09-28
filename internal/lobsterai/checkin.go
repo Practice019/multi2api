@@ -90,31 +90,34 @@ func (u *checkinUpstream) Status(ctx context.Context, acc dailycheckin.Account) 
 }
 
 // Claim 领取今天的签到。
-func (u *checkinUpstream) Claim(ctx context.Context, acc dailycheckin.Account) (int64, error) {
+//
+// 第二个返回值恒 false —— lobsterai 没有"需要用户去官方侧做一步"
+// 这类 inactive（它的 inactive 是"活动未开始/已结束/无资格"，用户无事可做）。
+func (u *checkinUpstream) Claim(ctx context.Context, acc dailycheckin.Account) (int64, bool, error) {
 	a, ok := acc.Secret.(*Auth)
 	if !ok || a == nil {
-		return 0, errors.New("lobsterai: 凭证类型不对")
+		return 0, false, errors.New("lobsterai: 凭证类型不对")
 	}
 	out := u.p.client.ClaimDailyCheckin(ctx, a)
 	switch out.Kind {
 	case "claimed":
-		return int64(out.Credit), nil
+		return int64(out.Credit), false, nil
 	case "already-claimed":
 		// 竞态：查的时候还没签，领的时候已签。
 		// **不当作错误** —— 结果与"签到成功"对用户等价，返回 0 积分即可
 		//（重复提交的风险由上游幂等键兜住）。
-		return 0, nil
+		return 0, false, nil
 	case "inactive":
 		// 活动关了：与 Status 的 inactive 同义。
 		//
 		// ⚠ 返回错误（而不是静默成功）：用户点了按钮应当知道
 		// "上游今天不开放"，而不是看到一个假的"签到成功"。
-		return 0, errors.New("上游未开放签到活动（" + out.Message + "）")
+		return 0, false, errors.New("上游未开放签到活动（" + out.Message + "）")
 	default:
 		if out.Message == "" {
-			return 0, errors.New("签到失败")
+			return 0, false, errors.New("签到失败")
 		}
-		return 0, errors.New(out.Message)
+		return 0, false, errors.New(out.Message)
 	}
 }
 

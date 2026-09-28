@@ -25,6 +25,8 @@ type stub struct {
 	// statusErr / claimErr 按 uid 注入错误
 	statusErr map[string]error
 	claimErr  map[string]error
+	// actionRequired 按 uid 注入"需要用户去官方侧做一步"
+	actionRequired map[string]bool
 	// credits 领取返回的积分
 	credits int64
 
@@ -37,8 +39,9 @@ func newStub() *stub {
 	return &stub{
 		signed:    map[string]bool{},
 		inactive:  map[string]bool{},
-		statusErr: map[string]error{},
-		claimErr:  map[string]error{},
+		statusErr:      map[string]error{},
+		claimErr:       map[string]error{},
+		actionRequired: map[string]bool{},
 		credits:   100,
 	}
 }
@@ -56,12 +59,12 @@ func (s *stub) Status(_ context.Context, a Account) (bool, bool, error) {
 	return s.signed[a.UID], true, nil
 }
 
-func (s *stub) Claim(_ context.Context, a Account) (int64, error) {
+func (s *stub) Claim(_ context.Context, a Account) (int64, bool, error) {
 	s.claimCalls = append(s.claimCalls, a.UID)
 	if err := s.claimErr[a.UID]; err != nil {
-		return 0, err
+		return 0, s.actionRequired[a.UID], err
 	}
-	return s.credits, nil
+	return s.credits, false, nil
 }
 
 // newTestLog 造一个临时 checkinlog。

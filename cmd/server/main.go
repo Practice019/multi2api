@@ -916,6 +916,13 @@ func main() {
 		qd = qoder.NewWithConfig(qoder.Config{
 			Product: prod,
 			AuthDir: cfg.QoderAuthDir,
+			// 签到历史 + 自动签到节奏：与 workbuddy / trae **同一个**
+			// checkinLog 与同一个 30 分钟间隔（用户要求统一）。
+			//
+			// ⚠ 不传 Log 的直接后果：界面「今日签到」列恒为空
+			//（那一列读 checkinlog 的 KindCheckin 记录）。
+			Log:             checkinLog,
+			CheckinInterval: cfg.ScheduleCheckinInterval,
 		})
 		if qSigner != nil {
 			qd.SetSigner(qoderSigner{s: qSigner})
@@ -933,6 +940,11 @@ func main() {
 			qdCN = qoder.NewWithConfig(qoder.Config{
 				Product: prodCN,
 				AuthDir: cfg.QoderAuthDir,
+				// 与 qoder 同一份历史与节奏。
+				// ⚠ 两份实例共用 checkinLog 是对的：历史记录带 uid，
+				// 而两个产品的 uid 不同，不会互相污染。
+				Log:             checkinLog,
+				CheckinInterval: cfg.ScheduleCheckinInterval,
 			})
 			// 中国版与国际版**共用同一个签名器**：两者同协议族、同一份 WASM，
 			// 且账号池里两个产品的凭证本来就在同一个目录（靠 product_id 区分）。

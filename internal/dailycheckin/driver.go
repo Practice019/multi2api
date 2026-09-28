@@ -40,9 +40,14 @@ type Upstream interface {
 
 	// Claim 替一个账号领今天的签到。
 	//
-	// 返回领到的数量（用于历史里的 Credits 与界面展示；无此概念的
-	// 上游返回 0）。错误会让驱动记 StatusFail。
-	Claim(ctx context.Context, a Account) (credits int64, err error)
+	// 返回 (领到的数量, 是否需要用户去官方侧完成一步, 错误)。
+	//
+	// 第二个返回值是给"账号尚未在官方客户端登录过"这类情况的 ——
+	// 它既不是"上游没开放"（等就好），也不是纯粹的失败（用户能做点什么）。
+	// 见 Result.ActionRequired 的注释。
+	//
+	// 无此概念的上游恒返回 false。
+	Claim(ctx context.Context, a Account) (credits int64, actionRequired bool, err error)
 }
 
 // Account 驱动眼里的一个账号。
@@ -157,6 +162,18 @@ type Result struct {
 	Status  string `json:"status"`
 	Credits int64  `json:"credits,omitempty"`
 	Detail  string `json:"detail,omitempty"`
+	// ActionRequired 需要用户去**官方客户端**做一次动作（如登录）才能领。
+	//
+	// # 为什么它是 Result 的字段，而不是某个上游的私有回执
+	//
+	// qoder 的领取有一条 inactive 是"账号尚未在官方客户端登录过"——
+	// 那是**要用户去别处做一件事**，与"上游没开放活动"（等就好）不是
+	// 一回事。前端必须能单独醒目展示它，否则用户看到「签到失败」会
+	// 反复点按钮而永远不成功。
+	//
+	// 收进共享 Result 的理由：这不是 qoder 独有 —— 任何上游都可能出现
+	// "需要用户去官方侧完成一步"，而**回执形状必须统一**（用户要求）。
+	ActionRequired bool `json:"action_required,omitempty"`
 }
 
 // CheckinOne 签一个账号，并写历史。
@@ -193,11 +210,17 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 		return Result{UID: acc.UID, Status: checkinlog.StatusAlready, Detail: "今天已签到"}
 	}
 
-	credits, cerr := d.up.Claim(ctx, acc)
+	credits, actionRequired, cerr := d.up.Claim(ctx, acc)
 	if cerr != nil {
 		d.record(acc.UID, checkinlog.StatusFail, shortErr(cerr), 0, trigger)
 		log.Printf("%s: 签到失败 uid=%s: %v", d.desc.ID, shortUID(acc.UID), cerr)
-		return Result{UID: acc.UID, Status: checkinlog.StatusFail, Detail: shortErr(cerr)}
+		return Result{
+			UID: acc.UID, Status: checkinlog.StatusFail, Detail: shortErr(cerr),
+			// ⚠ actionRequired 要跟着错误一起出去：qoder 那条
+			// "账号尚未在官方客户端登录过"就是错 + 需要用户动作。
+			// 丢掉它，前端只能显示"签到失败"，用户会反复点而永远不成功。
+			ActionRequired: actionRequired,
+		}
 	}
 	d.record(acc.UID, checkinlog.StatusOK, "", credits, trigger)
 	log.Printf("%s: 签到成功 uid=%s credits=%d", d.desc.ID, shortUID(acc.UID), credits)
@@ -277,6 +300,9 @@ func (d *Driver) HandlerOne(w http.ResponseWriter, r *http.Request) {
 			"status": res.Status,
 			"detail": res.Detail,
 			"credit": res.Credits,
+			// action_required 是给 UI 的**显式信号**（而非让它去猜文案）：
+			// 这条需要用户去官方客户端做一步，必须单独醒目展示。
+			"action_required": res.ActionRequired,
 		},
 	})
 }
