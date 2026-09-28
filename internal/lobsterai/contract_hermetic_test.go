@@ -576,10 +576,14 @@ func TestLoginEndToEnd(t *testing.T) {
 	if atomic.LoadInt32(&calls.exchange) != 1 {
 		t.Error("应发 1 次 exchange")
 	}
-	a, ok := cred.Secret.(*Auth)
-	if !ok || a == nil {
-		t.Fatalf("Secret 类型: %T", cred.Secret)
+	// ⚠ Secret 是 authFile 包装（核心落盘要求它实现 MarshalAuthFile）。
+	// 要断言的字段在对内的 *Auth 上，所以这里解一层。
+	// 包装存在的理由见 login.go 的 authFile 注释。
+	af, ok := cred.Secret.(*authFile)
+	if !ok || af == nil || af.a == nil {
+		t.Fatalf("Secret 类型: %T（want *authFile，且内含非空 *Auth）", cred.Secret)
 	}
+	a := af.a
 	// ⚠ uuid / keyfrom 必须随凭据持久化（续期要用）
 	if a.UUID == "" || a.FirstKeyfrom == "" || a.LatestKeyfrom == "" {
 		t.Errorf("登录后必须带上 uuid/keyfrom: %+v", a)
