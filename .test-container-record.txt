@@ -1,0 +1,10 @@
+容器名: /workbuddy2api-test
+镜像ID: sha256:7c8228ce1a60edf428a88b5f33dd4d907c2b971a57cc221a484731da169b0d7c
+启动命令: [/app/wb2api -config /app/config.json] <no value>
+端口: 7863/tcp -> 7864/tcp -> 0.0.0.0:7864:::7864
+重启策略: unless-stopped
+网络: bridge
+挂载:
+  /root/project/multi2api/auths-test -> /app/auths
+  /root/project/multi2api/data-test -> /app/data
+  /root/project/multi2api/config-test.json -> /app/config.json

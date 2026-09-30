@@ -65,3 +65,60 @@ func TestProjectionAuthHasNoCreds(t *testing.T) {
 		t.Error("有 refresh token 应视为携带凭证")
 	}
 }
+
+// TestPoolEntryKeepsCredsWhenProjectionMeetsRealSecret ★ 钉住用户报的 bug 形态。
+//
+// # 守的是什么
+//
+// 两条入池路径（reload / oauth）历史上都做过同一件危险事：
+// **把扫描结果投影成 uid+nickname 再交给池**，而真凭证在 secret 通道里。
+// 结果池条目 e.a 是空投影，而所有取号点读的都是 e.a：
+//
+//	AuthByUID / creds() / authOf() → e.a      ← 空 → 「无可用凭证」
+//	SecretOf                      → e.secret  ← 有凭证（这几处不读它）
+//
+// 用户实测表现：号在池里可见、大模型请求也通，但额度探测恒 401、
+// 猫猫旅行/成长计划报「无可用凭证」，**重启网关即恢复**
+// （启动时 LoadDir 从磁盘读回了真凭证）。
+//
+// 修法在**入池前**（admin.poolAuthsFromCreds：secret 是 *auth.Auth 时直接采用它），
+// 而不是改 pool 的通用语义（AuthByUID 的契约"无凭证时 RefreshToken 为空"
+// 是既有约定，admin 的 credential_token_test 正是钉它的）。
+//
+// # 本用例锁的是**兜底**这一层
+//
+// 即便调用方传了投影，只要 secret 是真凭证，池也必须让取号点拿到凭证 ——
+// 否则"刷新走 secret、取号走 e.a"两条路会永久分叉。
+//
+// 变异：把 upsertSecretLocked 里那段"e.a 无凭证时采用 secret"删掉 → 本用例必红。
+func TestPoolEntryKeepsCredsWhenProjectionMeetsRealSecret(t *testing.T) {
+	p := New("")
+
+	// ⚠ 刻意模仿**危险接线**：auths 传投影（uid+nickname），secret 传真凭证。
+	projection := &auth.Auth{UID: "wb-1", Nickname: "妖精七七", FilePath: "auths/workbuddy/workbuddy-wb-1.json"}
+	real := &auth.Auth{
+		UID: "wb-1", Nickname: "妖精七七",
+		AccessToken: "AT-REAL", RefreshToken: "RT-REAL",
+	}
+	p.SyncToDirWithSecrets("workbuddy", []*auth.Auth{projection}, map[string]any{"wb-1": real})
+
+	a := p.AuthByUID("wb-1")
+	if a == nil {
+		t.Fatal("账号应已进池")
+	}
+	if a.RefreshToken == "" {
+		t.Fatalf("❌ 取号点读到的 e.a.RefreshToken 为空 —— workbuddy 的 creds()/authOf()\n"+
+			"会判定「无可用凭证」，而额度刷新/签到走 SecretOf 却正常，\n"+
+			"于是表现为『凭据明明能用、部分功能却失效』，且重启才恢复。\n"+
+			"实际: %+v", a)
+	}
+	if a.AccessToken != "AT-REAL" {
+		t.Errorf("e.a 应采用 secret 里的真凭证，实际 AccessToken=%q", a.AccessToken)
+	}
+
+	// 二次同步（仍是投影）也不能把凭证弄丢
+	p.SyncToDirWithSecrets("workbuddy", []*auth.Auth{projection}, map[string]any{"wb-1": real})
+	if a = p.AuthByUID("wb-1"); a == nil || a.RefreshToken != "RT-REAL" {
+		t.Fatalf("二次同步后凭证丢失: %+v", a)
+	}
+}

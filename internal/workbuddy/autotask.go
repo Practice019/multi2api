@@ -40,8 +40,14 @@
 //   - expert_actual_use（三账号实测）
 //   - Hp_Appearance：appearance/set + appearance_skin_apply 事件（两账号实测）
 //
-// 仍未破解：skill_1（疑似要求真实 Skill 工具调用）。
-// 不做：Expert_lighthouse（需真实连接器授权）、Expert_Philanthropy（真实捐款）。
+// 不做：Expert_Philanthropy（真实捐款）、wb_wechat_oa_subscribe_task
+// （关注公众号满 24h，需真实关注行为）—— 二者登记在 notAutomatable 里，
+// 由 runAutoAll 显式报告"已跳过 + 原因"。
+//
+// ⚠ 上面这份清单**只是概览，可能滞后**。判断某任务到底能不能自动化，
+// 请以 `autoActions` 表 + `notAutomatable` 表为准（两者互斥，有测试守着）。
+// 本注释曾把 skill_1 / Expert_lighthouse 写成"未破解/不做"，
+// 而它们后来都实现了（注释里"已验证点亮"）—— 读注释会得出错误结论。
 //
 // 所有动作幂等：已 claimed/已达标的任务直接跳过，不重复消耗上游配额。
 package workbuddy
@@ -65,6 +71,36 @@ type autoAction struct {
 	Desc     string // 展示用说明
 	Attempt  bool   // true = 尝试型（上游未证实可脚本化，跑了可能不点亮）
 	run      func(p *Provider, a *auth.Auth) (string, error)
+}
+
+// notAutomatable 已知**无法通过遥测/API 点亮**的任务：遇到就跳过，不要试图完成。
+//
+// # 为什么要有这张表（而不是"不放进 autoActions 就行"）
+//
+// 不在 autoActions 里的任务本来就会被跳过 —— 但那是**隐式**的：代码里没有任何
+// 一处说明"这几个是明确知道做不到才跳的"。后果是维护者看到待办列表里挂着它们，
+// 会以为"漏实现了"，于是去尝试造遥测事件 —— 而下面这些任务的上游判据**不在
+// 遥测里**，造事件不会点亮，只会白耗上游配额、增加风控面。
+//
+// 登记在这里的第二个作用：`runAutoAll` 会为它们输出一条 status=skipped +
+// 明确原因，让「一键完成」的结果里能看出"这几个是刻意跳过的"，
+// 而不是让用户对着一直不变的 0/1 猜。
+//
+// ⚠ **只登记"确实不在 autoActions 里"的任务**。这两者互斥，且有测试守着：
+// 一个任务要么有执行动作、要么被明确跳过，不能两头都占。
+// （曾把 skill_1 / Expert_lighthouse / black_cat 误登记进来 —— 它们其实都已
+//
+//	实现且注释写明"已验证点亮"，只是文件头那段旧注释还写着"未破解/不做"。
+//	所以这里的判据必须是**读表**，不是读注释。）
+var notAutomatable = map[string]string{
+	"Expert_Philanthropy":         "需真实捐款（真实支付流水），无法通过遥测完成",
+	"wb_wechat_oa_subscribe_task": "需真实关注官方公众号并满 24 小时，无法通过遥测完成",
+}
+
+// notAutomatableReason 该任务是否已知无法自动化；是则返回原因。
+func notAutomatableReason(code string) (string, bool) {
+	r, ok := notAutomatable[code]
+	return r, ok
 }
 
 // autoActions 已实现的任务动作表（顺序即执行顺序：先解锁依赖项）。
@@ -753,6 +789,33 @@ func (p *Provider) runAutoAll(a *auth.Auth) []map[string]any {
 		out = append(out, item)
 		time.Sleep(reportGap) // 项间节流
 	}
+
+	// 显式报告"已知无法自动化"的任务：遇到就跳过，并说明为什么。
+	//
+	// 不放进 autoActions 也能跳过，但那是隐式的 —— 结果里看不到这几项，
+	// 用户对着一直不变的 0/3 只能猜，维护者也容易误以为漏实现而去造遥测事件
+	//（而这几项的上游判据不在遥测里，造了也不点亮，只白耗配额）。
+	// 这里为它们各输出一条 skipped + 原因，让"刻意跳过"可见。
+	//
+	// 只报**仍未完成**的：已达标的不必再提（避免每次一键完成都刷一堆噪音）。
+	if tasks, err := p.growthTasks(a); err == nil {
+		for i := range tasks {
+			t := &tasks[i]
+			reason, known := notAutomatableReason(t.TaskCode)
+			if !known {
+				continue
+			}
+			if t.Claimed() || (t.Target() > 0 && t.Current() >= t.Target()) {
+				continue // 已完成，不再提示
+			}
+			out = append(out, map[string]any{
+				"task_code": t.TaskCode,
+				"status":    "skipped",
+				"message":   "已知无法自动化，跳过：" + reason,
+			})
+		}
+	}
+
 	return out
 }
 
