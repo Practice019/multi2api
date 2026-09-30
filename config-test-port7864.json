@@ -82,25 +82,10 @@
     "idle_timeout_seconds": 300,
     "timeout_seconds": 120
   },
-  "buddy": {
-    "enabled": true,
-    "oauth_platform": "ide",
-    "user_agent": "CodeBuddyIDE/1.106.1",
-    "product_code": "codebuddy",
-    "client_name": "CodeBuddy",
-    "client_version": "1.106.1",
-    "cli_version": "2.137.1",
-    "pool_accounts": true
-  },
   "workbuddy_intl": {
     "enabled": true,
     "oauth_base_url": "https://www.workbuddy.ai",
     "auth_dir": "./auths-test/workbuddy-intl",
-    "pool_accounts": true
-  },
-  "mimo": {
-    "enabled": true,
-    "auth_dir": "./auths-test/mimo",
     "pool_accounts": true
   },
   "cline": {

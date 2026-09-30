@@ -481,77 +481,6 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"workbuddy_intl"`
 
-	// Buddy 腾讯 CodeBuddy 中国版（buddy）的配置。
-	//
-	// # 它打的是**与国内版 workbuddy 同一个上游**，差异只在**出站身份**
-	//
-	// 参照项目的 product.ts 里有两个产品（逐字对照）：
-	//
-	//	CODEBUDDY  id=buddy      endpoint=copilot.tencent.com  platform=ide
-	//	           productCode=codebuddy  userAgent=CodeBuddyIDE/1.106.1
-	//	WORKBUDDY  id=workbuddy  endpoint=www.workbuddy.ai     platform=workbuddy-ai
-	//
-	// 而本网关的 `workbuddy` 实例端点就是 copilot.tencent.com ——
-	// 也就是说**我们的 workbuddy 占的是参照里 buddy 的槽位**，
-	// 而 `workbuddy-intl` 占的是参照里 workbuddy 的槽位。
-	//
-	// 所以这里不是"接一个新上游"，而是让同一个上游能以**参照验证过的
-	// IDE 身份**（CodeBuddyIDE UA + productCode=codebuddy + platform=ide）
-	// 再注册一份 —— 两个 provider ID 对应两套账号池与两种账单归因。
-	//
-	// # 为什么默认关（不自动替换我们现有的 CN 通道）
-	//
-	// 我们 CN 通道用的是 `platform=CLI` + `CLI/2.63.2 CodeBuddy/2.63.2` UA，
-	// 那是**生产验证过**的形态。参照用 `platform=ide` 且实测正常。
-	// 两者都能用，但我没有真实凭据去判定哪个更好 ——
-	// 所以**不改动既有路径**，把参照的身份做成可显式启用的第二个实例。
-	//
-	// 想让既有部署改用 IDE 身份的运维，把账号挪到 `auths/buddy/` 即可，
-	// 全程不影响 `auths/workbuddy/`。
-	//
-	// # 向后兼容（硬要求，与其余新增段同一条）
-	//
-	// 本段缺席时行为与现在**逐字节一致**：不注册 buddy 实例、
-	// 不加载 `auths/buddy/`。启用条件是**显式**的：buddy.enabled = true。
-	Buddy struct {
-		// Enabled 是否启用 buddy 渠道。**缺省 false**。
-		Enabled bool `json:"enabled"`
-		// AuthDir buddy 凭证目录。留空则用 `<顶层 auth_dir>/buddy`。
-		AuthDir string `json:"auth_dir"`
-		// OAuthBaseURL 设备授权站点，默认 https://copilot.tencent.com
-		//（与国内版同一站点 —— 它本来就是同一个上游）。
-		OAuthBaseURL string `json:"oauth_base_url"`
-		// OAuthPlatform 传给 auth/state 的 platform 参数，默认 "ide"。
-		//
-		// ⚠ 这是参照 CODEBUDDY 的取值（product.ts: platform='ide'），
-		// 与我们国内版实例的 `CLI` 不同 —— 两者的登录页流程不同。
-		// 留空即回落 oauth 包按 baseURL 推导的值（CN 站 → "CLI"）。
-		OAuthPlatform string `json:"oauth_platform"`
-		// UserAgent 出站 UA，默认 "CodeBuddyIDE/1.106.1"。
-		//
-		// 参照 CODEBUDDY 的逐字取值。它决定腾讯后台账单的「使用端」归因。
-		// 留空即回落 upstream.Client 的全局值（与未配时逐字节相同）。
-		UserAgent string `json:"user_agent"`
-		// ProductCode X-Product-Code 头取值，默认 "codebuddy"。
-		//
-		// 参照 CODEBUDDY 的 productCode。留空即回落全局值。
-		ProductCode string `json:"product_code"`
-		// ClientName 用量归属名（X-IDE-Name / X-Product 等），默认 "CodeBuddy"。
-		//
-		// 参照 CODEBUDDY 的 attributionName。留空即回落全局值。
-		ClientName string `json:"client_name"`
-		// ClientVersion WorkBuddy 客户端版本段，默认 "1.106.1"。
-		//
-		// 参照 CODEBUDDY 的 clientVersion。只在 UserAgent 留空时用于拼三段式。
-		ClientVersion string `json:"client_version"`
-		// CliVersion 三段式 UA 的 CLI 段，默认 "2.137.1"。
-		//
-		// 参照 CODEBUDDY 的 cliVersion。
-		CliVersion string `json:"cli_version"`
-		// PoolAccounts 是否把 buddy 账号并入核心账号池（默认 true）。
-		PoolAccounts *bool `json:"pool_accounts"`
-	} `json:"buddy"`
-
 	// Loomy 第三个上游（讯飞 Loomy 桌面客户端的模型服务）的配置。
 	//
 	// # 向后兼容（与 codearts 同一条硬要求）
@@ -684,57 +613,9 @@ type Config struct {
 		MaxAttempts int `json:"max_attempts"`
 	} `json:"trae"`
 
-	// Mimo 第五个上游（小米 MiMo 开放平台，OpenAI 兼容 + reasoning 方言）。
-	//
-	// 与 trae/loomy 同律：**启用是显式的**（mimo.enabled=true），段缺席=不加载。
-	Mimo struct {
-		// Enabled 是否启用 MiMo 上游。
-		Enabled bool `json:"enabled"`
-		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/mimo`。
-		AuthDir string `json:"auth_dir"`
-		// BaseURL 开放平台网关（留空=https://api.xiaomimimo.com/v1）。
-		// 区域 Token Plan 用户填 token-plan-{cn,sgp,ams}.xiaomimimo.com/v1；
-		// 单个凭证自带的 baseUrl（账号专属网关）**优先于这里**。
-		BaseURL string `json:"base_url"`
-		// FreeBaseURL 免费通道站点（留空=https://api.xiaomimimo.com）。
-		FreeBaseURL string `json:"free_base_url"`
-		// FreeEnabled CLI 免费通道开关。**默认 false**：2026-07-26 官方 sunset，
-		// 实测 chat 全 403 illegal_access（评审报告 §1）；留位防复活，勿轻易开。
-		FreeEnabled *bool `json:"free_enabled"`
-		// AuthHeader 鉴权头形态："bearer"（默认，Authorization: Bearer）
-		// 或 "api-key"（OmniProxy 同款：注入前删 Authorization 防歧义）。
-		AuthHeader string `json:"auth_header"`
-		// ClientVersion UA 版本（官方两段式 mimocode/<ver>，默认 0.1.3）。
-		ClientVersion string `json:"client_version"`
-		// OAuthCallbackPort 页内登录回调端口（默认 18081；勿撞 trae 18080）。
-		OAuthCallbackPort string `json:"oauth_callback_port"`
-		// PoolAccounts 是否并入核心账号池（默认 true）。
-		PoolAccounts *bool `json:"pool_accounts"`
-		// RefreshIntervalSeconds oauth/free 轨后台续期扫描间隔（默认 1800；<=0 关）。
-		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
-		// ReasoningBackfill 方言层开关（默认 true）：出站回注/降级 reasoning_content。
-		ReasoningBackfill *bool `json:"reasoning_backfill"`
-		// CredentialPriority 混池策略位："tp"（默认，套餐 key 优先）|"sk"|"none"。
-		CredentialPriority string `json:"credential_priority"`
-		// ImportClientAuth 允许读本机官方客户端 auth.json（默认 false：显式开）。
-		ImportClientAuth *bool `json:"import_client_auth"`
-		// ClientAuthDir 官方 data 目录覆盖（默认按 XDG/MIMOCODE_HOME 探测）。
-		ClientAuthDir string `json:"client_auth_dir"`
-		// RouteBaseURL 桌面端主网关覆盖（空=https://mimo-server-cn.xiaomimimo.com，
-		// 抓包实测的 route 通道 —— Cookie serviceToken 认证，桌面配额）。
-		RouteBaseURL string `json:"route_base_url"`
-		// RouteClientVersion route 通道 x-client-version（空=26.923.232338）。
-		RouteClientVersion string `json:"route_client_version"`
-		// OAuthRedirectMode 页内登录回调形态："auto"（默认，回调进网关所在
-		// 机器的 127.0.0.1:port —— 浏览器必须与网关同机）或 "manual"
-		// （平台 code/callback 页展示密文，用户复制粘贴回控制台完成）。
-		// 网关部署在服务器上、浏览器在本地 → 用 manual。
-		OAuthRedirectMode string `json:"oauth_redirect_mode"`
-	} `json:"mimo"`
-
 	// Cline 第六个上游（Cline 桌面端 / Cline API）。
 	//
-	// 与 trae/loomy/mimo 同律：**启用是显式的**（cline.enabled=true），段缺席=不加载。
+	// 与 trae/loomy 同律：**启用是显式的**（cline.enabled=true），段缺席=不加载。
 	//
 	// ⚠ Cline 的登录与其它上游都不同：走 **WorkOS 设备码轮询**，
 	// **不起本地监听端口**（所以没有 oauth_callback_port 这类配置）。
@@ -907,33 +788,6 @@ type Config struct {
 	//（见 WorkbuddyIntl.PoolAccounts）。未启用时恒为 false。
 	WorkbuddyIntlPoolAccounts bool `json:"-"`
 
-	// Buddy 解析后（供 main 直接取用）。
-	//
-	// BuddyEnabled 为 false 时下面几个字段无意义：不注册 buddy 实例、
-	// 不加载 `auths/buddy/` 凭证。
-	BuddyEnabled bool `json:"-"`
-	// BuddyAuthDir 已填好默认值 `<顶层 auth_dir>/buddy`（见 normalize）。
-	BuddyAuthDir string `json:"-"`
-	// BuddyOAuthBaseURL 已填好默认值 https://copilot.tencent.com。
-	BuddyOAuthBaseURL string `json:"-"`
-	// BuddyOAuthPlatform 已填好默认值 "ide"（参照 CODEBUDDY 的取值）。
-	//
-	// 用户显式留空**不会**被默认值覆盖（见 normalize 的注释）——
-	// 那时回落 oauth 包按 baseURL 推导的 "CLI"。
-	BuddyOAuthPlatform string `json:"-"`
-	// BuddyUserAgent / BuddyProductCode / BuddyClientName / BuddyClientVersion /
-	// BuddyCliVersion 出站身份（参照 CODEBUDDY 的逐字取值，见 Buddy 段的注释）。
-	//
-	// 用户显式留空时**保留空串** —— 装配层据此"不覆盖"，
-	// 于是未配置的部署行为与升级前逐字节相同。
-	BuddyUserAgent    string `json:"-"`
-	BuddyProductCode  string `json:"-"`
-	BuddyClientName   string `json:"-"`
-	BuddyClientVersion string `json:"-"`
-	BuddyCliVersion   string `json:"-"`
-	// BuddyPoolAccounts 是否把 buddy 账号并入核心账号池。
-	BuddyPoolAccounts bool `json:"-"`
-
 	// Loomy 解析后（供 main 直接取用）。
 	//
 	// LoomyEnabled 为 false 时下面三个字段无意义：不注册上游、不加载凭证。
@@ -974,25 +828,6 @@ type Config struct {
 	TraeFallbackEnabled   bool          `json:"-"`
 	TraeQueueThreshold    int64         `json:"-"`
 	TraeMaxAttempts       int           `json:"-"`
-
-	// Mimo 解析后（供 main 直接取用）。
-	MimoEnabled            bool          `json:"-"`
-	MimoAuthDir            string        `json:"-"`
-	MimoBaseURL            string        `json:"-"`
-	MimoFreeBaseURL        string        `json:"-"`
-	MimoFreeEnabled        bool          `json:"-"`
-	MimoAuthHeader         string        `json:"-"`
-	MimoClientVersion      string        `json:"-"`
-	MimoOAuthCallbackPort  string        `json:"-"`
-	MimoPoolAccounts       bool          `json:"-"`
-	MimoRefreshInterval    time.Duration `json:"-"`
-	MimoReasoningBackfill  bool          `json:"-"`
-	MimoCredentialPriority string        `json:"-"`
-	MimoImportClientAuth   bool          `json:"-"`
-	MimoClientAuthDir      string        `json:"-"`
-	MimoOAuthRedirectMode  string        `json:"-"`
-	MimoRouteBaseURL       string        `json:"-"`
-	MimoRouteClientVersion string        `json:"-"`
 
 	// Cline（第六上游）解析后。
 	ClineEnabled      bool   `json:"-"`
@@ -1389,39 +1224,6 @@ func (c *Config) normalize() error {
 	}
 	c.WorkbuddyIntlPoolAccounts = c.WorkbuddyIntlEnabled && boolOr(c.WorkbuddyIntl.PoolAccounts, true)
 
-	// buddy（腾讯 CodeBuddy 中国版，参照 CODEBUDDY 的身份）。
-	//
-	// 与 workbuddy-intl 同一套缺省规则：enabled 缺省 false；auth_dir 缺省
-	// `<顶层 auth_dir>/buddy`；oauth_base_url 缺省 copilot.tencent.com
-	//（与国内版同一站点 —— 它本来就是同一个上游）。
-	c.BuddyEnabled = c.Buddy.Enabled
-	c.BuddyAuthDir = c.Buddy.AuthDir
-	if c.BuddyAuthDir == "" {
-		c.BuddyAuthDir = filepath.Join(c.AuthsBase, "buddy")
-	}
-	c.BuddyOAuthBaseURL = c.Buddy.OAuthBaseURL
-	if c.BuddyOAuthBaseURL == "" {
-		c.BuddyOAuthBaseURL = "https://copilot.tencent.com"
-	}
-	//
-	// platform **填默认 "ide"**：buddy 整段是显式启用才生效的新实例，
-	// 不存在"既有部署行为改变"的问题 —— 所以要给的就是参照验证过的取值。
-	// 想用 CLI 流程的运维在配置里写 `oauth_platform: "CLI"` 即可。
-	c.BuddyOAuthPlatform = strings.TrimSpace(c.Buddy.OAuthPlatform)
-	if c.BuddyOAuthPlatform == "" {
-		c.BuddyOAuthPlatform = "ide"
-	}
-	//
-	// ⚠ 以下几项**刻意不填默认值**：用户显式留空时保留空串，
-	// 装配层据此"不覆盖"，于是未配这些项的部署出站请求与升级前逐字节相同。
-	// 想拿到参照的 IDE 身份就在配置里**显式**写上（见 Buddy 段的注释）。
-	c.BuddyUserAgent = c.Buddy.UserAgent
-	c.BuddyProductCode = c.Buddy.ProductCode
-	c.BuddyClientName = c.Buddy.ClientName
-	c.BuddyClientVersion = c.Buddy.ClientVersion
-	c.BuddyCliVersion = c.Buddy.CliVersion
-	c.BuddyPoolAccounts = c.BuddyEnabled && boolOr(c.Buddy.PoolAccounts, true)
-
 	// 页内添加账号的授权站点/端点。
 	//
 	// 默认值与 codearts 包里的常量**同源**（直接引用，不写第二份字面量）——
@@ -1511,45 +1313,6 @@ func (c *Config) normalize() error {
 	c.TraeMaxAttempts = c.Trae.MaxAttempts
 	if c.TraeMaxAttempts <= 0 {
 		c.TraeMaxAttempts = 3
-	}
-
-	// ---- mimo（第五上游）----
-	c.MimoEnabled = c.Mimo.Enabled
-	c.MimoAuthDir = c.Mimo.AuthDir
-	if c.MimoAuthDir == "" {
-		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
-		//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
-		c.MimoAuthDir = filepath.Join(c.AuthsBase, "mimo")
-	}
-	c.MimoBaseURL = strings.TrimSpace(c.Mimo.BaseURL)
-	c.MimoFreeBaseURL = strings.TrimSpace(c.Mimo.FreeBaseURL)
-	c.MimoFreeEnabled = boolOr(c.Mimo.FreeEnabled, false) // 通道实测已死：默认关
-	c.MimoAuthHeader = strings.ToLower(strings.TrimSpace(c.Mimo.AuthHeader))
-	c.MimoClientVersion = strings.TrimSpace(c.Mimo.ClientVersion)
-	c.MimoOAuthCallbackPort = strings.TrimSpace(c.Mimo.OAuthCallbackPort)
-	if c.MimoOAuthCallbackPort == "" {
-		c.MimoOAuthCallbackPort = "18081" // 勿撞 trae 的 18080
-	}
-	c.MimoPoolAccounts = c.MimoEnabled && boolOr(c.Mimo.PoolAccounts, true)
-	{
-		iv := c.Mimo.RefreshIntervalSeconds
-		if iv == 0 {
-			iv = 1800
-		}
-		c.MimoRefreshInterval = time.Duration(iv) * time.Second
-	}
-	c.MimoReasoningBackfill = boolOr(c.Mimo.ReasoningBackfill, true)
-	c.MimoCredentialPriority = strings.ToLower(strings.TrimSpace(c.Mimo.CredentialPriority))
-	if c.MimoCredentialPriority == "" {
-		c.MimoCredentialPriority = "tp"
-	}
-	c.MimoImportClientAuth = boolOr(c.Mimo.ImportClientAuth, false)
-	c.MimoClientAuthDir = strings.TrimSpace(c.Mimo.ClientAuthDir)
-	c.MimoRouteBaseURL = strings.TrimSpace(c.Mimo.RouteBaseURL)
-	c.MimoRouteClientVersion = strings.TrimSpace(c.Mimo.RouteClientVersion)
-	c.MimoOAuthRedirectMode = strings.ToLower(strings.TrimSpace(c.Mimo.OAuthRedirectMode))
-	if c.MimoOAuthRedirectMode == "" {
-		c.MimoOAuthRedirectMode = "auto"
 	}
 
 	// ---- cline（第六上游）----

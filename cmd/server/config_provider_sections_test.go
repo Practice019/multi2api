@@ -169,11 +169,15 @@ func providerSections(t *testing.T) []providerSection {
 		}
 		out = append(out, providerSection{name: f.Name, key: key})
 	}
-	if len(out) < 9 {
+	if len(out) < 8 {
 		// 自我校验：枚举机制本身失效（比如有人把 tag 写成了别的形态）时
 		// 上面的循环会"零节通过"，看起来全绿 —— 那是最糟的假绿。
-		t.Fatalf("只枚举到 %d 个上游配置段（预期 ≥9：codearts/workbuddy_intl/loomy/"+
-			"trae/mimo/cline/raccoon/lobsterai/qoder）—— 枚举判据可能已失效", len(out))
+		//
+		// ⚠ 这个下限要跟着"上游数量"改（删掉 mimo 后从 9 降到 8）。
+		// 它是**枚举机制的存活检查**，不是上游清单 —— 清单由反射枚举出来，
+		// 所以新增上游不需要改这里（那正是用结构而非硬编码清单的理由）。
+		t.Fatalf("只枚举到 %d 个上游配置段（预期 ≥8：codearts/workbuddy_intl/loomy/"+
+			"trae/cline/raccoon/lobsterai/qoder）—— 枚举判据可能已失效", len(out))
 	}
 	return out
 }
