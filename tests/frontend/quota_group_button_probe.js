@@ -32,12 +32,32 @@ const hasCap = (pid, cap) => (
   ((MANIFEST.providers.find((x) => x.id === pid) || {}).capabilities || []).includes(cap)
 );
 const providerInfo = (pid) => MANIFEST.providers.find((x) => x.id === pid);
+
+// ⚠ 保留它：`accountGroupActions` 里可能还有别的按路由后缀渲染的分支，
+// 少了这个参数就是 ReferenceError（探针崩，而不是断言失败）。
 const adminRouteBySuffix = () => '';
 
+// dailyAllActionsHTML「全部签到」那组按钮的渲染。
+//
+// # 为什么探针要补注入它（本轮 accountGroupActions 新增了依赖）
+//
+// `accountGroupActions` 现在会调 `dailyAllActionsHTML(pid)`（卡片头的
+// 「全部签到」）与 `hasCap(pid,'import')`（批量导入按钮）——
+// 本探针是 `new Function` 单独 eval 那个函数体的，外部依赖必须**显式注入**，
+// 少一个就是 `ReferenceError`（不是断言失败，整个探针崩）。
+//
+// 这里给一个**忠实的替身**：按 manifest 的 daily_actions 渲染，
+// 与页面里的实现同形（有 batch+all_url 才出按钮）。替身只求"不崩 +
+// 不含额度按钮"，本探针的判据仍然是额度按钮本身。
+const dailyAllActionsHTML = (pid) => (MANIFEST.daily_actions || [])
+  .filter((a) => a && a.provider === pid && a.batch && a.all_url && a.label)
+  .map((a) => `<button class="gact" data-allday="${esc(a.provider)}:${esc(a.id)}">全部${esc(a.label)}</button>`)
+  .join('');
+
 const fn = new Function(
-  'esc', 'MANIFEST', 'hasCap', 'providerInfo', 'adminRouteBySuffix',
+  'esc', 'MANIFEST', 'hasCap', 'providerInfo', 'adminRouteBySuffix', 'dailyAllActionsHTML',
   'return ' + fnSrc,
-)(esc, MANIFEST, hasCap, providerInfo, adminRouteBySuffix);
+)(esc, MANIFEST, hasCap, providerInfo, adminRouteBySuffix, dailyAllActionsHTML);
 
 let fails = 0;
 const check = (name, cond) => {
@@ -67,12 +87,17 @@ check('额度按钮 title 说明不含其它上游', quotaTitle.includes('不含
 check('按钮 class 是 gact（与其它分组按钮同款）', out.includes('class="gact" data-gquota'));
 
 // ② 没有 quota-probe 的上游 → **不得**出现（避免假按钮）
+//
+// ⚠ 这里用的是**虚构的上游名**（不是真上游）—— 判据只依赖
+// `capabilities` 里有没有 quota-probe，与名字无关。
+// 早先借用过 `mimo`（那时它确实是"没有 quota-probe"的真实上游），
+// 但它已被整体删除，继续用那个名字会让人以为代码里还依赖它。
 setProviders([{
-  id: 'mimo', account_count: 1,
+  id: 'no-quota-fake', account_count: 1,
   capabilities: ['chat', 'models'],
   login: { kind: 'device', label: '添加账号' },
 }]);
-out = fn('mimo');
+out = fn('no-quota-fake');
 check('无 quota-probe → 不渲染该按钮', !out.includes('刷新本上游额度'));
 
 // ③ 没有 login 流程的上游（走另一条 return 分支）也要有该按钮

@@ -167,18 +167,20 @@ func (h *AdminHandler) Checkin(w http.ResponseWriter, r *http.Request) {
 //
 // 与改造前 admin.runCheckinAll 的差异只有类型：结果是中转后的 JSON 形状，
 // 顺序、跳过条件、旅行搭车的位置都逐字未变。
+//
+// ⚠ 遍历**复用** DailyCheckinAll（与 gateway.DailyCheckinExt 同一段业务）。
+//
+// 顶部那个跨上游的「全部签到」走核心 → CheckinAll → DailyCheckinAll；
+// 本处（POST /admin/checkin 不带 uid）是分组头那个按钮的入口。
+// 两个入口若各写一份遍历，"点分组按钮和点顶部按钮结果不同"这种差异
+// 没有任何测试会发现（两边各绿各的），所以这里必须指向同一段。
 func (h *AdminHandler) runCheckinAll() []map[string]any {
-	list := h.accountList()
+	list := h.p.DailyCheckinAll("manual")
 	out := make([]map[string]any, 0, len(list))
-	for _, st := range list {
-		if st.Disabled {
-			continue
-		}
-		if res, ok := h.p.RunCheckinFor(st.UID, "manual"); ok {
-			out = append(out, resultView{
-				UID: res.UID, Status: res.Status, Detail: res.Detail, Credits: res.Credits,
-			}.map_())
-		}
+	for _, res := range list {
+		out = append(out, resultView{
+			UID: res.UID, Status: res.Status, Detail: res.Detail, Credits: res.Credits,
+		}.map_())
 	}
 	// 旅行搭签到的便车：必须在签到之后跑（签到会解冻刚充值的账号）。
 	h.p.RunTravelManual()

@@ -108,6 +108,9 @@ func (p *Provider) accounts() []accountRef {
 }
 
 // handleCheckin POST /admin/trae/checkin —— 单账号签到（结果写历史）。
+//
+// ⚠ 签到本体在 checkinOne（dailycheckin.go）：全量端点与跨上游入口
+// 都调它。这里只做"找账号 + 组装 HTTP 回执"。
 func (p *Provider) handleCheckin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UID string `json:"uid"`
@@ -120,67 +123,41 @@ func (p *Provider) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := contextWithTimeout(r, 30*time.Second)
 		defer cancel()
-		checkedIn, credits, _, err := p.client.CheckinStatus(ctx, a.Auth)
-		if err != nil {
-			p.recordCheckin(uid, checkinlog.StatusFail, shortErr(err), 0, "manual")
-			writeTraeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		res := p.checkinOne(ctx, a, "manual")
+		if res.status == checkinlog.StatusFail {
+			writeTraeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": res.detail})
 			return
 		}
-		if checkedIn {
-			p.recordCheckin(uid, checkinlog.StatusAlready, "今天已签到", credits, "manual")
-			writeTraeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "already", "credits": credits})
-			return
-		}
-		if err := p.client.CheckinClaim(ctx, a.Auth); err != nil {
-			p.recordCheckin(uid, checkinlog.StatusFail, shortErr(err), 0, "manual")
-			writeTraeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
-			return
-		}
-		p.recordCheckin(uid, checkinlog.StatusOK, "", credits, "manual")
-		writeTraeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "ok", "credits": credits})
+		writeTraeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "status": res.status, "credits": res.credits,
+		})
 		return
 	}
 	writeTraeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "没有这个 trae 账号: " + uid})
 }
 
 // handleCheckinAll POST /admin/trae/checkin/all —— 全量签到（结果写历史）。
+//
+// ⚠ 遍历复用 checkinAllOnce（与 gateway.DailyCheckinExt 同一段业务）：
+// 顶部跨上游的「全部签到」和本按钮必须是同一个动作。
 func (p *Provider) handleCheckinAll(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := contextWithTimeout(r, 2*time.Minute)
 	defer cancel()
+	results := p.checkinAllOnce(ctx, "manual-all")
 	var okN, already, failed int
-	results := make([]map[string]any, 0, len(p.accounts()))
-	for _, a := range p.accounts() {
-		res := map[string]any{"uid": a.UID}
-		checkedIn, credits, _, err := p.client.CheckinStatus(ctx, a.Auth)
-		if err != nil {
-			res["status"] = "fail"
-			res["error"] = shortErr(err)
-			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(err), 0, "manual-all")
-			failed++
-		} else if checkedIn {
-			res["status"] = "already"
-			res["credits"] = credits
-			p.recordCheckin(a.UID, checkinlog.StatusAlready, "今天已签到", credits, "manual-all")
-			already++
-		} else if cerr := p.client.CheckinClaim(ctx, a.Auth); cerr != nil {
-			res["status"] = "fail"
-			res["error"] = shortErr(cerr)
-			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(cerr), 0, "manual-all")
-			failed++
-		} else {
-			res["status"] = "ok"
-			res["credits"] = credits
-			p.recordCheckin(a.UID, checkinlog.StatusOK, "", credits, "manual-all")
+	for _, res := range results {
+		switch res.Status {
+		case checkinlog.StatusOK:
 			okN++
+		case checkinlog.StatusAlready:
+			already++
+		default:
+			failed++
 		}
-		results = append(results, res)
 	}
 	writeTraeJSON(w, http.StatusOK, map[string]any{
-		"ok":       failed == 0,
-		"ok_count": okN,
-		"already":  already,
-		"failed":   failed,
-		"results":  results,
+		"ok": failed == 0, "ok_count": okN, "already": already, "failed": failed,
+		"results": results,
 	})
 }
 

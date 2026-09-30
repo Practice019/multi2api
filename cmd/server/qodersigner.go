@@ -115,3 +115,25 @@ func qoderCredSource(p *pool.Pool, providerID string) func(string) (gateway.Cred
 		}, true
 	}
 }
+
+// qoderQuotaSink 把 qoder 的额度写回账号池。
+//
+// # 为什么需要它（用户报「额度是 0」）
+//
+// `gateway.QuotaExt.RefreshQuota` 只在有人点「刷新本上游额度」时被核心
+// 调用 —— 全仓**没有**定时任务扫它（只有 workbuddy 在签到 / 旅行路径里
+// 顺带回写）。于是**重启后额度列一直是空的**：界面上那个 0 不是
+// "余额 0"，而是"我们还没问过上游"。
+//
+// 与 `qoderCredSource` 同形：上游不认识账号池的类型，由装配层把
+// `pool.SetQuota` 适配进来 —— 两边各自只认自己的形状，核心全程不解释
+// 额度字段的语义。
+func qoderQuotaSink(p *pool.Pool) func(string, gateway.QuotaView) {
+	return func(uid string, q gateway.QuotaView) {
+		p.SetQuota(uid, pool.QuotaView{
+			Kind:      q.Kind,
+			Remaining: q.Remaining,
+			HasData:   q.HasData,
+		})
+	}
+}

@@ -70,16 +70,40 @@ const (
 //
 // 把两者混成一个"有没有全量端点"的推断，就会把用户删掉的按钮**偷偷加回来**。
 // 有测试钉住这一条（TestWorkbuddyKeepaliveHasNoBulkButton）。
+// # ⚠ 端点路径必须按**实例**生成（本轮修的缺陷）
+//
+// 本方法原先写死 `/admin/checkin` / `/admin/keepalive`。对默认实例
+// （ID=workbuddy）那是对的，对非默认实例（buddy / workbuddy-intl）就错了 ——
+// 它们的真实路由带 `/<id>` 前缀（见 admin.go 的 prefixed()）：
+//
+//	buddy          报 /admin/checkin    真实挂载 /buddy/admin/checkin
+//	workbuddy-intl 报 /admin/keepalive  真实挂载（**没有**，被玩法裁剪）
+//
+// 后果不是 404 那么轻 —— `/admin/checkin` 是**默认实例**的路由，于是
+// "点 buddy 卡片上的「全部签到」"会去签到 workbuddy 的账号。本仓历史上
+// 正是这个形态留下了 703 条脏记录（见 upstream_isolation_test.go 的文件头）。
+//
+// 修法是路径与裁剪都**问 Provider**（PathPrefix / PlayFeaturesDisabled），
+// 与 AdminRoutes 的 prefixed() 同一个来源 —— 两处不可能再漂移。
 func (p *Provider) DailyActions() []gateway.DailyAction {
+	// 玩法类端点被裁剪的实例（海外版）**一个动作都不报**。
+	//
+	// 它的真实路由里没有签到/保活（prefixed() 按同一判据跳过），
+	// 报了就是"假按钮"：点下去打到默认实例的账号上。
+	if p != nil && p.PlayFeaturesDisabled() {
+		return nil
+	}
+	prefix := p.PathPrefix()
+
 	actions := []gateway.DailyAction{
 		{
 			ID:     DailyActionKeepalive,
 			Label:  "保活",
 			Title:  "刷新 token",
-			OneURL: "/admin/keepalive",
+			OneURL: prefix + "/admin/keepalive",
 			// AllURL 仍然如实报（端点是存在的），但 Batch=false
 			// 让前端**不渲染**「全部保活」—— 见上面那段注释。
-			AllURL: "/admin/keepalive",
+			AllURL: prefix + "/admin/keepalive",
 			Batch:  false,
 		},
 	}
@@ -91,8 +115,8 @@ func (p *Provider) DailyActions() []gateway.DailyAction {
 				ID:     DailyActionCheckin,
 				Label:  "签到",
 				Title:  "单账号签到",
-				OneURL: "/admin/checkin",
-				AllURL: "/admin/checkin",
+				OneURL: prefix + "/admin/checkin",
+				AllURL: prefix + "/admin/checkin",
 				Batch:  true,
 			},
 		}, actions...)

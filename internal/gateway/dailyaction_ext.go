@@ -53,7 +53,10 @@
 // 稳定 ID、人类可读文案、单账号端点、可选的全量端点。
 package gateway
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // DailyActionExt 上游自报"我有哪些每日可执行的动作"。
 //
@@ -149,6 +152,83 @@ type DailyAction struct {
 	// 反过来说：Batch=true 而 AllURL 为空是**无效组合**（按钮点了没端点），
 	// 前端渲染时必须两个都判（见 webui.html 的 renderAllDailyButtons）。
 	Batch bool `json:"batch,omitempty"`
+}
+
+// DailyCheckinExt 上游自报"我怎么对自己**全部**账号执行一次签到"。
+//
+// # 为什么 DailyAction 之外还要一个扩展点
+//
+// DailyAction 只描述**按钮**（ID / 文案 / 端点路径），它回答不了
+// "核心要一次性把所有上游都签到一遍时，该调什么"。
+// 用户本轮要求（原话）：
+//
+//	"账号池水平的位置只放一个全部签到，是签到所有的上游
+//	 也就是触发所有上游的全部签到"
+//
+// 于是需要一条**跨上游**的入口。核心若自己去拼每个上游的 AllURL
+// 就等于认识上游（架构铁律不允许），而发 HTTP 打自己的 mux 会让
+// 一次用户点击变成 N 次内部往返 —— 两端都不成立。
+//
+// 所以由上游自报一个**执行体**：核心遍历注册表、逐个调用、汇总回执。
+// 加新上游时它实现本接口即可，核心零改动。
+//
+// # 与 DailyAction.AllURL 的关系（不是替代，是同一件事的两个面）
+//
+//	AllURL   给**前端**用（分组头那个「全部签到」按钮打它）
+//	本接口   给**核心**用（顶部那个跨上游的「全部签到」打它）
+//
+// 两者指向同一段业务：实现方应当让它们落在**同一个函数**上，
+// 否则会出现"点分组按钮和点顶部按钮结果不同"这种最难查的漂移。
+// 有契约测试钉住这一点（dailycheckin_ext_test.go）。
+type DailyCheckinExt interface {
+	// CheckinAll 对本上游**全部**账号执行一次签到，返回每个账号的结果。
+	//
+	// # 为什么返回逐账号结果而不是一个数字
+	//
+	// 顶部按钮要一次性触发多个上游。只回一个总数，某个上游整片失败时
+	// 用户看到的是"成功了 N 个"，无法判断是哪个上游没动 —— 正是
+	// 额度刷新那次 skipped 一直沉默的同款形态。
+	//
+	// # 写历史是**必须**的
+	//
+	// 结果要流进「今日签到」列（admin 读 checkinlog）。历史上 trae /
+	// lobsterai / qoder 都栽在"签了但不写历史"，表现为"点了按钮、列还是空"。
+	//
+	// ctx 被取消时应当尽快返回（全量任务可能扫几十个号）。
+	CheckinAll(ctx context.Context) DailyCheckinReport
+}
+
+// DailyCheckinReport 一个上游一趟全量签到的结果。
+//
+// # 为什么 Provider 字段由**核心**填，不由上游填
+//
+// 上游自己报名字等于让它复述一遍自己的 ID —— 一旦两处不一致
+// （改名、复制粘贴），界面上的归属就会错。核心遍历注册表时本来
+// 就持有 p.ID()，用它填是零成本且必然等于事实。
+type DailyCheckinReport struct {
+	// Provider 该结果属于哪个上游（由核心填）。
+	Provider string `json:"provider"`
+	// Results 逐账号结果。空切片表示"本上游 0 个账号"（不是失败）。
+	Results []DailyCheckinResult `json:"results,omitempty"`
+	// Error 整趟失败的原因（列账号失败等）。空串表示没有。
+	//
+	// ⚠ 它**不表示**"有账号签到失败" —— 那是 Results 里 status=fail 的事。
+	// 两者混在一起会让"一个号失败"被渲染成"整个上游没跑"，那是谎报。
+	Error string `json:"error,omitempty"`
+}
+
+// DailyCheckinResult 一个账号的签到结果。
+//
+// Status 的取值沿用 checkinlog 的那四个（ok / already / fail / skip），
+// 但本包**不 import** checkinlog（gateway 是上游与核心之间唯一接缝，
+// 依赖面越小越好），所以这里只约定字符串不引用常量。
+type DailyCheckinResult struct {
+	// UID 账号池主键。
+	UID string `json:"uid"`
+	// Status ok / already / fail / skip。
+	Status string `json:"status"`
+	// Detail 失败原因或补充说明。
+	Detail string `json:"detail,omitempty"`
 }
 
 // ValidDailyActionID 校验动作 ID 的字符集。

@@ -19,6 +19,33 @@ const fs = require('fs');
 const path = require('path');
 const cpSelf = require('child_process');   // 自检用：把自己当子进程跑，配合 AUDIT_WEBUI 换输入
 
+// ⚠⚠ 递归哨兵 —— 没有它这个脚本会**炸掉机器**（实测：内存打满、进程树失控）。
+//
+// # 缺陷形态（本仓库既有，2026-09-30 修）
+//
+// `scan()` 用 spawnSync(process.execPath, [__filename]) **把自己再跑一遍**
+// 去换 AUDIT_WEBUI。而子进程里**同样**会跑到文件末尾那 3 个自检，
+// 每个自检又各 spawn 一次 —— 分支因子 3、深度无界：
+//
+//	1 → 3 → 9 → 27 → …（每次都是完整 Node 进程，各自还要读 440KB HTML）
+//
+// 实测后果：跑到第 3~4 层时内存打满、系统卡死（用户报"内存爆炸了 卡死了"）。
+//
+// # 为什么之前没人发现
+//
+// 它的输出是"自检 N/N 通过"，看不出底下起了一棵树；而且前两层很快就
+// 返回了，只有机器慢的时候才会暴露成"卡死"。
+//
+// # 修法：子进程只做扫描，不再自检
+//
+// 自检的**目的**是"证明扫描器抓得住注入的缺陷"，那只需要跑**一层**子进程
+// （父进程注入样本 → 子进程扫描 → 看退出码）。子进程再自检没有任何意义 ——
+// 它扫的是父进程刚写好的临时文件，与"扫描器有没有判别力"无关。
+//
+// ⚠ 用环境变量而不是命令行参数：`scan()` 已经在传 env，加一个键最省，
+// 也不会与"用户手跑 node audit_dead_buttons.js"的用法冲突。
+const IS_CHILD_SCAN = process.env.AUDIT_DEAD_BTN_CHILD === '1';
+
 const REPO = path.resolve(__dirname, '..', '..');
 // 可用 AUDIT_WEBUI 指向别处的 webui.html —— 变异测试需要它指向一次性副本。
 // （我第一版漏了这行，于是"验证扫描器能抓出缺陷"时一直在扫真实仓库，
@@ -48,8 +75,9 @@ const isTemplateId = (id) => /\$\{/.test(id);
 // `<button id="btnAllCheckin">`）会被当成"页面上的真实按钮"收进来，
 // 然后在剥注释后的 code 里当然找不到绑定 → 报成死按钮。
 //
-// 实测：`btnAllCheckin` 只出现在 webui.html 的 L526–544 注释块里
-// （T3 已把它从 DOM 移除，改为 manifest 驱动的 `<span id="allDailyActs">`）。
+// 实测：`btnAllCheckin` 只出现在 webui.html 的账号池 h2 注释块里
+// （T3 已把它从 DOM 移除；本轮起它被 **btnAllCheckinAll** 取代 ——
+// 见下面自检样本的注释：换名字是刻意的，能让"旧实现回来了"一眼可见）。
 // 剥注释后全文 0 次出现，它根本不是页面上的按钮。
 //
 // 这与文件末尾 stripComments 注释里记的那类错误是同一个：
@@ -175,9 +203,17 @@ console.log('合计: ' + alive.length + ' 个有绑定, ' + dead.length + ' 个�
 // 用 AUDIT_WEBUI 指向临时副本（不动原仓库，也就不会污染别人的工作树）。
 const os = require('os');
 function scan(target) {
-  const env = { ...process.env, AUDIT_WEBUI: target };
+  // ⚠ 必须带哨兵：子进程只扫描、**不再自检**。否则会递归派生进程树
+  //（分支因子 3、深度无界）—— 实测把内存打满、机器卡死。
+  // 详见文件头 IS_CHILD_SCAN 的注释。
+  const env = { ...process.env, AUDIT_WEBUI: target, AUDIT_DEAD_BTN_CHILD: '1' };
   const r = cpSelf.spawnSync(process.execPath, [__filename], { encoding: 'utf8', env });
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
+}
+
+// 子进程到此为止：它只负责"扫这个文件、用退出码回答有没有死按钮"。
+if (IS_CHILD_SCAN) {
+  process.exit(dead.length ? 1 : 0);
 }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deadbtn-'));
@@ -193,22 +229,79 @@ function selfCheck(name, mutate, wantDead) {
   if (!pass) console.log(r.out.split('\n').filter(l => /✗|合计/.test(l)).map(l => '      ' + l).join('\n'));
 }
 
-// 性质 A：现有仓库（btnAllCheckin 在注释里）必须 exit 0
-selfCheck('A-当前仓库-注释里的按钮不判死', s => s, false);
+// 性质 A：现有仓库必须 exit 0（注释里的按钮不判死、真按钮都有绑定）
+selfCheck('A-当前仓库-无死按钮', s => s, false);
 
-// 性质 B：把那个注释块**取消注释**（模拟"按钮真的回到 DOM 且没绑事件"）→ 必须判死
-selfCheck('B-取消注释成真按钮-必须判死', s => s.replace(
-  /<button id="btnAllCheckin">全部签到<\/button>/,
-  '<span></span></button></section><section><button id="btnAllCheckin">全部签到</button>'),
+// 性质 B：把账号池顶部那个按钮的绑定**整段删掉** → 必须判死。
+//
+// # 为什么样本从"取消注释旧按钮"换成"删掉绑定"
+//
+// 旧样本注入的是 `<button id="btnAllCheckin">全部签到</button>`（T3 之前的
+// 写死按钮）。本轮起它只存在于**注释块**里，而注释不是 DOM ——
+// 注入进去也扫不到，于是"注入了缺陷却期望判死"变成**永远红**。
+// 一条永远红的自检等于没有自检（下一个人会把它删掉）。
+//
+// 新样本与本轮的真实结构同形：真按钮在 DOM 里、绑定被拿掉。
+// 判据（"没有绑定的按钮必须被判死"）一个字没变。
+//
+// ⚠ 注入方式必须是**删掉整行**，不能只把它替换成别的代码：
+// 扫描器的第二档判据是"这个 id 出现在某段 onclick/addEventListener
+// 附近（400 字符窗口）" —— 把绑定替换成注释掉的空语句时，
+// 窗口里仍然有 `onclick` 字样，于是它照样算"有绑定"。
+// （实测：我第一版就是这么写的，自检 B 假绿变假红。）
+selfCheck('B-真按钮的绑定被删掉-必须判死', s => s.replace(
+  "$('btnAllCheckinAll').onclick = () => busyRun($('btnAllCheckinAll'), async () => {",
+  'void 0; {'),
   true);
 
-// 性质 B'：造一个全新的、确实没有绑定的按钮 → 必须判死（防止"只看 btnAllCheckin"的特判）
+// 性质 B2：造一个全新的、确实没有绑定的按钮 → 必须判死（防止"只看某个 id"的特判）
+//
+// ⚠ 插入锚点本轮从 `<span id="allDailyActs">`（已随 T3 的顶部槽位一起删掉）
+// 换成账号池 h2 里那条**真实存在**的按钮行。锚点不存在时
+// `s.replace` 会**静默返回原串** —— 于是"注入了缺陷"这句话是假的，
+// 而自检照样按"期望判死"去比，得到的红/绿都无意义。
 selfCheck('B2-全新无绑定按钮-必须判死', s => s.replace(
-  '<span id="allDailyActs"></span>',
-  '<span id="allDailyActs"></span><button id="btnTotallyUnbound">没人绑我</button>'),
+  '<button id="btnAllCheckinAll"',
+  '<button id="btnTotallyUnbound">没人绑我</button><button id="btnAllCheckinAll"'),
   true);
 
 fs.rmSync(tmpDir, { recursive: true, force: true });
+
+// ---------------------------------------------------------------------------
+// 递归守卫：**注入一个"没有哨兵的 scan()"**，确认这条自检抓得住它。
+//
+// # 为什么需要它（这条是踩出来的）
+//
+// 上面那个递归缺陷（scan 派生自己、子进程又自检）已经真实发生过一次：
+// 实测把内存打满、机器卡死。它当时**没有任何断言**能发现 ——
+// 输出照样是"自检 3/3 通过"。
+//
+// 判据（静态、与运行期行为无关）：
+//   scan() 传的 env 里必须有哨兵键，且文件里必须有 IS_CHILD_SCAN 的提前退出。
+// 两条缺一，进程树就会长出来。
+//
+// ⚠ 与文件里其余自检同一条原则：**用与真实缺陷同形的样本喂给判据**，
+// 而不是声称"我们检查了"。
+// ---------------------------------------------------------------------------
+{
+  const selfSrc = fs.readFileSync(__filename, 'utf8');
+  const checks = [
+    ['scan() 传了递归哨兵（AUDIT_DEAD_BTN_CHILD）',
+      /AUDIT_DEAD_BTN_CHILD:\s*'1'/.test(selfSrc)],
+    ['文件里有 IS_CHILD_SCAN 的提前退出',
+      /if\s*\(\s*IS_CHILD_SCAN\s*\)\s*\{\s*process\.exit/.test(selfSrc)],
+  ];
+  for (const [name, okk] of checks) {
+    results.push(okk);
+    console.log((okk ? '  PASS ' : '  FAIL ') + '自检 递归哨兵：' + name);
+  }
+  // 反向：把哨兵那行注掉，判据必须变红（否则这条守卫是装饰品）。
+  const mutated = selfSrc.replace(/AUDIT_DEAD_BTN_CHILD:\s*'1'/, 'AUDIT_DEAD_BTN_CHILD: undefined');
+  const caught = !/AUDIT_DEAD_BTN_CHILD:\s*'1'/.test(mutated);
+  results.push(caught);
+  console.log((caught ? '  PASS ' : '  FAIL ') +
+    '自检 递归哨兵变异可检：拿掉哨兵后判据变红');
+}
 
 console.log('');
 const selfFail = results.filter(r => !r).length;

@@ -41,6 +41,17 @@ const (
 	CapTasks
 	// CapInvite 有邀请码/兑换码体系（查激活状态、绑定邀请码、查自己生成的码）。
 	CapInvite
+	// CapImport 支持批量粘贴导入（用户手上已有一批凭证，直接贴进界面入库）。
+	//
+	// # 判据：实现了 `AccountImportExt` 才该声明它
+	//
+	// 与其余能力位同一条契约 —— **声明了就必须能用**。前端的「批量导入」
+	// 按钮据此显隐，声明了却不能用就会渲染出一个点了报 501 的假按钮。
+	//
+	// ⚠ 这是**用户态动作**（把已有凭证搬进网关），与 `CapChat` 那类
+	// "上游能做什么"不是一回事 —— 它描述的是"网关这边能不能收这个上游的凭证"。
+	// 放在能力位里的理由与其余几条相同：前端按**数据**渲染，不认识上游名。
+	CapImport
 )
 
 // capNames 能力的可读名。加能力时必须同时加这里 —— 有测试守住这一点。
@@ -54,6 +65,7 @@ var capNames = map[Capability]string{
 	CapQuotaProbe: "quota-probe",
 	CapTasks:      "tasks",
 	CapInvite:     "invite",
+	CapImport:     "import",
 }
 
 // String 返回能力的可读名（单个位）。用于错误信息与前端能力位下发。
@@ -71,7 +83,7 @@ func (c Capability) Names() []string {
 	// 按定义顺序遍历，保证输出稳定（map 遍历顺序随机）
 	for _, one := range []Capability{
 		CapChat, CapModels, CapCheckin, CapGrowth, CapTravel, CapWelfare, CapQuotaProbe,
-		CapTasks, CapInvite,
+		CapTasks, CapInvite, CapImport,
 	} {
 		if c&one != 0 {
 			out = append(out, capNames[one])
@@ -87,7 +99,7 @@ func (c Capability) Has(one Capability) bool { return c&one != 0 }
 func AllCapabilities() []Capability {
 	return []Capability{
 		CapChat, CapModels, CapCheckin, CapGrowth, CapTravel, CapWelfare, CapQuotaProbe,
-		CapTasks, CapInvite,
+		CapTasks, CapInvite, CapImport,
 	}
 }
 

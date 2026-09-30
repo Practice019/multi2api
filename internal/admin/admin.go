@@ -278,11 +278,27 @@ func New(cfg Config) *Handler {
 
 	h.register("GET /admin/accounts", h.accounts)
 	h.register("POST /admin/accounts/reload", h.accountsReload)
+	// 全上游通用的**批量粘贴导入**。
+	//
+	// 放在通用段而不是某个上游里（与 quota/refresh、checkin/all 同一取舍）：
+	// 它是**所有上游共用**的动作，分派目标由请求体里的 provider 决定，
+	// 而上游**只负责把那段 JSON 解释成自己的凭证**
+	//（gateway.AccountImportExt）。详见 account_import.go。
+	h.register("POST /admin/accounts/import", h.accountsImport)
 	// 全上游通用的额度刷新（把上游自报的额度写回池）。
 	//
 	// 放在通用段而不是某个上游里：它是**所有上游共用**的动作，
 	// 分派目标由每个账号自己的 provider 标签决定（见 quota_refresh.go）。
 	h.register("POST /admin/accounts/quota/refresh", h.accountsQuotaRefresh)
+	// 跨上游的**全量签到**：触发所有上游各自的全量签到（后台任务）。
+	//
+	// 与上面那条额度刷新是同一类端点：作用域是"整池 / 所有上游"，
+	// 不表达任何单个上游的身份，所以属于核心 —— 上游之间互不可见，
+	// 没人能自己遍历"所有上游"。
+	//
+	// 账号池顶部那个唯一的「全部签到」打它；各上游卡片顶部那个
+	// 「全部签到」打的是上游自己的 AllURL（见 checkin_all.go）。
+	h.register("POST /admin/accounts/checkin/all", h.accountsCheckinAll)
 	h.register("POST /admin/accounts/{uid}/enable", h.accountEnable)
 	h.register("POST /admin/accounts/{uid}/disable", h.accountDisable)
 	h.register("POST /admin/accounts/{uid}/cooldown/clear", h.accountClearCooldown)
@@ -1210,7 +1226,7 @@ func (h *Handler) accountDelete(w http.ResponseWriter, r *http.Request) {
 	if purge && filePath != "" {
 		// 只允许删**凭证树**（AuthsBase = 各上游子目录的父目录）内的文件：
 		// 防止 FilePath 被构造成任意路径删除。早先用 h.cfg.AuthDir
-		// （默认上游子目录 auths/workbuddy）做前缀，于是 loomy/trae/mimo
+		// （默认上游子目录 auths/workbuddy）做前缀，于是 loomy/trae
 		// 的 auths/<上游>/ 文件永远前缀不匹配 → "拒绝删目录外文件" →
 		// 用户删号后重启复活（实测 bug）。父目录才是所有上游的合法根。
 		root := h.cfg.AuthsBase
@@ -1293,6 +1309,22 @@ func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
 			// 这里沿用核心的 oauth.StateTTL（前端只用它做倒计时提示）。
 			"expires_in_sec": int64(oauth.StateTTL().Seconds()),
 		}
+		// 扫码流程（raccoon 那类）：把 auth_url 编成二维码一起下发。
+		//
+		// ⚠ 判据是**上游自报**（QRLoginExt），不是"链接长得像不像二维码"
+		// —— 后者要求前端认识上游或 URL 形态，而"加一个上游时前端一行
+		// 都不该改"是本项目最硬的禁忌。判错了也不报错，只会静默渲染出
+		// 一个扫不了的链接（正是用户报的这个缺陷）。
+		//
+		// 走这条分支时**不开浏览器**：扫码流程的链接是给手机扫的，
+		// 在本机打开它只会看到"请在微信中打开"之类的页面。
+		if qr := qrLoginSVGOf(h.cfg.Registry, body.Provider, authURL); qr != "" {
+			resp["qr_svg"] = qr
+			// 有二维码时不下发 browser/browser_error：让前端聚焦"扫码"，
+			// 而不是同时看到"已用浏览器打开"这种与扫码无关的提示。
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 		// browser / browser_error 只在有话说的时候出现 ——
 		// 未接线时响应里多两个空字段会让前端去渲染一个不存在的动作。
 		if browser != "" {
@@ -1333,6 +1365,31 @@ func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
 		resp["browser_error"] = browserErr
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// qrLoginSVGOf 取某上游自报的登录二维码 SVG（未实现该扩展点则空串）。
+//
+// # 为什么按 provider 反查注册表
+//
+// `loginStart` 拿到的是 `gateway.LoginFlow`（接口），而 QRLoginExt 挂在
+// **Provider** 上 —— LoginFlow 的返回值看不见它。所以这里按 id 从注册表
+// 取回 Provider，再做类型断言。
+//
+// ⚠ 编不出来（内容过长等）时返回空串，调用方回落到"显示链接"——
+// 不产出扫不出来的坏码。
+func qrLoginSVGOf(reg *gateway.Registry, providerID, authURL string) string {
+	if reg == nil || providerID == "" || authURL == "" {
+		return ""
+	}
+	p, ok := reg.Get(providerID)
+	if !ok {
+		return ""
+	}
+	ext, ok := gateway.ExtOf[gateway.QRLoginExt](p)
+	if !ok {
+		return ""
+	}
+	return ext.QRLoginSVG(authURL)
 }
 
 // issuedAuthTTL 已签发授权链接的可重开窗口。

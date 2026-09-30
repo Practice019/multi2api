@@ -223,8 +223,23 @@ type Auth struct {
 	AccessToken string `json:"access_token"`
 	// RefreshToken 续期令牌。
 	RefreshToken string `json:"refresh_token,omitempty"`
-	// ExpiresIn 相对过期秒数。
-	ExpiresIn int64 `json:"expires_in,omitempty"`
+	// ExpiresAt 访问令牌的**绝对**过期时刻（毫秒时间戳）。
+	//
+	// # ⚠ 为什么是绝对时刻而不是旧的 `expires_in`（相对秒）
+	//
+	// 上游续期响应给的是 `expires_at`（ISO 字符串，实测
+	// `"2026-10-30T06:56:55Z"`），**不是** `expires_in`。旧实现存相对秒
+	// 有两层问题：字段名对不上（永远存不进来），且相对值一离开响应就
+	// 没有参照点 —— 存下来再读只能得到"签发那一刻剩余多久"。
+	//
+	// ⚠ 本字段是「Token」列与"要不要续期"的**唯一**权威：
+	// qoder 的 access_token 是 `dt-` 前缀的**不透明串**（27 字符，不是 JWT），
+	// 所以"解 JWT exp"那条路走不通（旧实现只走那条 → 界面恒显示 `—`）。
+	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// RefreshTokenExpiresAt refresh_token 的绝对过期时刻（毫秒）。
+	//
+	// 用来区分"access 过期（可自动续）"与"refresh 也过期（只能重登）"。
+	RefreshTokenExpiresAt int64 `json:"refresh_token_expires_at,omitempty"`
 	// UID 账号主键。
 	UID string `json:"uid,omitempty"`
 	// Nickname 展示名。
@@ -269,12 +284,24 @@ func (a *Auth) Renewable() bool {
 
 // ExpiresAtMS 过期时刻（毫秒）。
 //
-// 顺序：JWT exp → 无（返回 0）。
+// # 顺序（本轮修正）
 //
-// ⚠ 与某些上游不同，Qoder 的凭证里没有绝对过期字段，只能读 JWT。
+//	① Auth.ExpiresAt（落盘字段，来自续期响应的 `expires_at`）
+//	② access_token 的 JWT `exp`（回落：手工导入的 JWT 凭据没有落盘字段）
+//	③ 0 = 未知
+//
+// ⚠ 旧实现**只**走 ② —— 而 qodercn 的 access_token 是 `dt-` 前缀的
+// 不透明串（27 字符，不是 JWT），于是恒返回 0，界面「Token」列恒显示 `—`
+// （用户报障："没有 Token"）。落盘字段才是主路径，JWT 只是兜底。
+//
+// ⚠ 返回 0 的含义是"**不知道**"，不是"1970 年过期"——
+// 调用方（CredentialExpiryExt）据此让界面显示 `—` 而不是"已过期"。
 func (a *Auth) ExpiresAtMS() int64 {
 	if a == nil {
 		return 0
+	}
+	if a.ExpiresAt > 0 {
+		return a.ExpiresAt
 	}
 	return jwtExpMS(a.AccessToken)
 }

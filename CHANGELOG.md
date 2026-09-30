@@ -7,6 +7,140 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.7.0 — 2026-09-30
+
+> 本版主题：**上游清单扩到 10 个**（新增 cline / raccoon / lobsterai / qoder /
+> qodercn）+ **登录、签到、额度、续期四条链路的系统性补齐**。
+>
+> ⚠ 本版是**破坏性**的：删除了 `mimo` 上游，且多条链路的
+> 实现被重写。详见下方「移除」与各条标注。
+>
+> 上游净变化：v1.6.2 注册 6 个（workbuddy / workbuddy-intl / **codearts** /
+> loomy / trae / mimo）→ 本版 10 个（workbuddy / workbuddy-intl / codearts /
+> loomy / trae / **cline / raccoon / lobsterai / qoder / qodercn**）。
+>
+> ⚠ 即：**新增 5 个**（cline / raccoon / lobsterai / qoder / qodercn）、
+> **删除 1 个**（mimo）；`codearts` 上一版已有。
+
+### 新增上游（+5：cline / raccoon / lobsterai / qoder / qodercn）
+
+- **Cline**（Cline 桌面端 / Cline API）：WorkOS 设备码轮询登录（**不起本地端口**，
+  服务器部署天然可用）+ 余额查询 + 后台续期。
+- **Raccoon Work**（商汤小浣熊）：**微信扫码**登录 + 积分余额 + 登录奖励 +
+  onboarding 状态查询。
+- **LobsterAI**（有道龙虾）：三步式签到领取积分 + 30 分钟自动签到。
+- **Qoder / Qoder 中国版**（阿里系，两个实例）：PKCE 设备码登录 +
+  积分余额 + 每日签到 + **WASM 加密推理桥**。
+- **TRAE SOLO**：SOLO 免费通道 + 权益包额度 + 每日签到。
+  （trae 与 workbuddy-intl 在 v1.6.2 已在，此处列出只是为了说明现状；
+  本版给它们补的是签到/额度/续期的接线。）
+- **WorkBuddy 海外版**（`workbuddy-intl`）：双渠道账号池，按凭证 `channel` 字段
+  自动选择 chat/billing/web 三个域的 base 与 Origin/Referer 头。
+
+### 新增 — 统一的「全部签到」（两级）
+
+- 顶部**一个**「全部签到」触发**所有**上游的全量签到（`POST /admin/accounts/checkin/all`，
+  后台任务 + 进度回执）；各上游卡片头另有自己的「全部签到」（只签本上游）。
+- 新增 `gateway.DailyCheckinExt`：有签到的上游都实现它，顶部那个据此发现它们。
+- 为 codearts 补上全量端点 `/admin/welfare/claim/all`（此前只有单账号）。
+
+### 新增 — 额度三层作用域 + 原始值显示
+
+- **行内「额度」**只刷该账号；**卡片头「刷新本上游额度」**只刷该上游；
+  **顶部「刷新全部额度」**刷所有账号。三者共用同一个文案渲染函数，措辞不会漂移。
+- 四个上游实现 `gateway.QuotaExt`，额度列显示**上游自己的记账单位**（不做换算假设）。
+- ⚠ 修 `qoder` 额度恒为 0/空：`QuotaExt` 只在**手动**刷新时被调用，全仓没有定时
+  任务扫它 → 重启后额度列一直是空的。现由续期任务每轮顺带写回（新增 `QuotaSink`）。
+
+### 新增 — Token 列 / 续期链路
+
+- 统一「寿命 50% 续期」：各上游经 `gateway.RefreshSkewExt` 自报提前续期窗口，
+  且 `RefreshSkewAtRatio` 按 **token 自己的 iat/exp** 算（不再依赖账号池投影）。
+- 补齐 `gateway.CredentialExpiryExt` / `CredentialTokenExt` 的接线 ——
+  「Token 到期」列此前恒为 `—`，根因是投影里没有 `ExpiresAt`（见 `HasToken` 修复）。
+- ⚠ 修 `qoder` / `qodercn`「没有 Token」：续期响应字段名全错
+  （读 `access_token` + `expires_in`，上游实际返回 `device_token` + `expires_at`
+  ISO 字符串）→ 续期永远报"缺少访问令牌"、过期时刻从未落盘。
+- ⚠ 修 `cline` 从不自动续期：`CredentialRefresher` 实现了，但**没有 `Jobs()`** ——
+  核心两条续期路径（出站请求 / 后台任务）一条都不占。
+- ⚠ 修 `qoder` 两个实例注册**同名**后台任务 → 调度器
+  `任务名 qoder-refresh 重复（上游 qoder 与 qodercn），已跳过后者`
+  → **中国版永不续期**。任务名改为 `<productID>-refresh`。
+
+### 新增 — 批量导入统一到**全部**上游
+
+- 新增 `gateway.AccountImportExt` + 能力位 `CapImport`，核心提供**一个**通用端点
+  `POST /admin/accounts/import {provider,data}`；8 个上游各实现 `ImportCredentials`。
+- 改造前只有 2 个上游有（workbuddy / loomy 各写一份）。
+- 「导入」就是各上游**已有**的 `ParseCredential` + `MarshalAuthFile` 的复合，
+  所以每个上游只需极少的搬运代码，不手写字段映射。
+
+### 新增 — 机器人与登录
+
+- **`runtime-info.exe` 实时生成设备身份**（qoder）：此前的"读磁盘缓存"路径
+  在本机**文件根本不存在**（纯登录流程不产生它）→ 两个必需头从未发出 →
+  每日签到**永远失败**。
+- **扫码登录的二维码渲染**：新增 `internal/qrcode`（自实现二维码，零依赖，
+  byte 模式 + 纠错 M + 版本 1–10）+ `gateway.QRLoginExt`。此前 raccoon 的
+  「添加账号」给出一个**扫不了的链接**。
+- 「添加账号」默认用**无痕窗口**打开授权页（网关自己启动浏览器 + 独立 profile）。
+- 登录三步补齐**产品身份 UA**（此前全用 CLI 形态）。
+
+### 控制台 UI
+
+- **卡片头按钮顺序统一**（用户指定）：
+  `全部签到 → 添加账号 → 批量导入 → 刷新本上游额度 → 重载 auths`。
+  「添加账号」去掉 `＋` 前缀（右端多项对齐时不一致）。
+- 账号池额度/状态卡**无感轮询**：只更新数值不整页重绘。
+- 扫码类上游的引导语按**登录形态**分叉（qr / local / browser）——
+  此前会同时显示「去浏览器登录」与「用手机微信扫码」两句矛盾的话。
+
+### 安全 / 正确性修复
+
+- ⚠ **导入不再丢失 `deviceToken`**：`SaveAtomic` 会把 `account.deviceToken`
+  一起写回，导入不认它 = **用空串覆盖用户已有的设备令牌**（每账号一个的风控头
+  丢了，表现为"导入后这个号开始被风控"）。两条导入路径各有一处同样的漏，都补了。
+- ⚠ **`qoder` 中国版导入误拒**：`normalize()` 用**包级常量** `"qoder"` 兜底，
+  拿不到实例产品 → CN 实例**必然误拒**没写 `product_id` 的凭证，
+  且错误信息指向用户没写过的东西。判据改为读**粘贴原文**。
+- ⚠ **`lobsterai` 签到永远失败**：上游返回的 `actions` 是**裸字符串数组**
+  `["check_in"]`，我们按对象数组解析 → 每次签到都在第 3 步失败。
+  契约测试的假上游当时也用了错形状，**把缺陷验证成了正确行为**。
+- ⚠ **`refreshAccounts is not defined`**：分组行「刷新本上游额度」调用了一个
+  从未定义的函数 → 点下去必抛。静态断言抓不到（文本里有这个名字）。
+- ⚠ **`quotaScopeToast` 返回对象却被当字符串**：界面显示 `[object Object]`。
+- ⚠ **瞬时 503 被当成永久失败**（qoder campaigns）：实测上游约 25% 请求回
+  `DEPENDENCY_UNAVAILABLE`（与请求头无关，`/usage` 同时刻恒 200），
+  而旧实现不重试 → 签到每 30 分钟扫一次，撞上就记一次 `fail`。现加 5xx 退避重试。
+
+### 移除
+
+- **`mimo`（小米 MiMo）上游删除** —— 用户要求整体移除。
+  连带删掉 `internal/mimo/`（16 文件）、`cmd/server/mimocreds.go`、
+  `scripts/mimo/`（5 脚本）、配置段与 17 个扁平字段。
+  ⚠ `internal/{cline,loomy}/models.go` 里的 `mimo` 是**模型名**（cline 代理的
+  `xiaomi/mimo-v2.6-pro` 等），**不是**那个上游 —— 保留。
+- ⚠ **`buddy`（腾讯 CodeBuddy 中国版）一次都没发布过**：它在**本批未发布的
+  提交里加进来过**（commit `12c335d`），随后被删除（与 workbuddy 同一后端
+  `copilot.tencent.com`，仅出站身份不同，用户判定重复）。
+  所以 v1.6.2 → v1.7.0 的用户**看不到它**，不需要做任何迁移 —— 列出只为说明
+  那批代码的来龙去脉（`cmd/server/buddy_identity_test.go` /
+  `config_buddy_test.go` 随之一并删除）。
+- 上游总数 **11 → 10**（11 含那个从未发布的 buddy）。
+- ⚠ 配置里残留的 `mimo` 段会被**静默忽略**（JSON 未知字段不报错），
+  但建议删掉以免误导。
+
+### 文档 / 工程
+
+- `gateway` 契约测试新增：`CapImport` 声明必须实现 `AccountImportExt`
+  （防"点了回 501 的假按钮"）。
+- 前端探针：新增两个**真浏览器 e2e**（`verify_checkin_ui_e2e.js` /
+  `verify_all_buttons_e2e.js`），验的是**行为**（点一下发几个请求、发的是哪个 URL、
+  刷新后委托是否累积）—— 变异验证过（把"只绑一次"守卫去掉 → 刷新 5 次后点一次发
+  **7 个**请求，而所有 DOM 静态断言全绿）。
+- `internal/qrcode` 的正确性由**交叉验证**守住：真的调用 Python `qrcode` 库
+  逐位比矩阵（结构断言全绿≠码能扫 —— 实测把 zigzag 方向改错时只有交叉验证会红）。
+
 ## 未发布 — 海外版 WorkBuddy AI 渠道（workbuddy-intl）
 
 > 本版主题：**国内版 + 海外版（www.workbuddy.ai）双渠道账号池**。

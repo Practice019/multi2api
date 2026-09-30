@@ -182,7 +182,7 @@ type AuthDirExt interface {
 //
 // 界面上的上游分组标题此前直接显示 `Provider.ID()` —— 于是用户看到
 // 一排裸 id：`workbuddy` / `workbuddy-intl` / `qoder` / `qodercn` /
-// `lobsterai` / `raccoon` / `mimo` / `trae` / `loomy`。
+// `lobsterai` / `raccoon` / `trae` / `loomy`。
 //
 // 其中 `qoder` 与 `qodercn` 是**两个不同的服务**（不同域名、不同 clientId，
 // 见 internal/qoder 里 QoderCN 的注释），但裸 id 只差一个 `cn` 后缀 ——

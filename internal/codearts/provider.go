@@ -296,7 +296,8 @@ func (p *Provider) Caps() gateway.Capability {
 	return gateway.CapChat |
 		gateway.CapModels |
 		gateway.CapWelfare |
-		gateway.CapQuotaProbe
+		gateway.CapQuotaProbe |
+		gateway.CapImport
 }
 
 // Chat 转发一次对话请求。

@@ -178,14 +178,50 @@ func (p *Provider) DailyActions() []gateway.DailyAction {
 	}}
 }
 
-// Jobs 自动签到任务（gateway.JobExt）。
-func (p *Provider) Jobs() []gateway.Job {
-	if p == nil || p.checkin == nil || !p.checkin.AutoEnabled() {
-		return nil
+// CheckinAll gateway.DailyCheckinExt：核心触发"所有上游签到"时调它。
+//
+// # 跨上游入口必须逐实例分开（qoder / qodercn 是两个 Provider 实例）
+//
+// 核心遍历注册表时它们各被问一次，各自只扫自己的账号 ——
+// 与 checkinPath() 按实例生成同一个理由（见文件头注释）。
+//
+// # 为什么不用 p.checkin.RunAll
+//
+// 它丢弃逐账号结果（定时任务只需要 error）。跨上游入口要逐账号结果，
+// 否则某个上游整片失败时用户只看到"成功了 N 个"。
+// 签到本体仍是驱动的 CheckinOne —— 与按钮、定时任务同一段。
+func (p *Provider) CheckinAll(ctx context.Context) gateway.DailyCheckinReport {
+	if p == nil || p.checkin == nil || !p.checkin.Ready() {
+		return gateway.DailyCheckinReport{Results: nil}
 	}
-	return []gateway.Job{{
-		Name:     p.checkin.Descriptor().ID,
-		Interval: p.checkin.Interval(),
-		Run:      p.checkin.RunAll,
-	}}
+	up := &checkinUpstream{p: p}
+	accs, err := up.Accounts(ctx)
+	if err != nil {
+		return gateway.DailyCheckinReport{Error: "列账号失败: " + err.Error()}
+	}
+	out := make([]gateway.DailyCheckinResult, 0, len(accs))
+	for _, acc := range accs {
+		if ctx.Err() != nil {
+			break
+		}
+		res := p.checkin.CheckinOne(ctx, acc, "manual")
+		out = append(out, gateway.DailyCheckinResult{
+			UID:    res.UID,
+			Status: res.Status,
+			Detail: res.Detail,
+		})
+	}
+	return gateway.DailyCheckinReport{Results: out}
 }
+
+// Jobs 自动任务（gateway.JobExt）—— 签到 + 续期，实现在 **jobs_refresh.go**。
+//
+// ⚠ 这个函数**搬到那边去**了，不是删掉。理由：`Jobs()` 只有一处，
+// 而本上游需要两个任务（签到 / 续期）。分在两个文件里各实现一份
+// `Jobs()` 会编译冲突；只在这边返回签到那一条，续期任务就**永远注册不上**
+// —— 那正是本轮缺陷的形态（用户报「没有 Token」：因为从不续期，
+// 而过期时刻只能从续期响应拿到）。
+//
+// 留这条注释是为了让"签到相关的代码在 checkin.go"这个直觉
+// 不至于让人在这里重新加一个 Jobs()。
+

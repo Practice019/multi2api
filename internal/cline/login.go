@@ -4,7 +4,6 @@
 //
 //	codearts / lobsterai → 本地回调服务器收 code（要绑端口）
 //	qoder                → PKCE 设备码轮询（404 = 尚未授权）
-//	mimo                 → 加密回跳 URL 粘贴
 //	cline                → WorkOS 设备码轮询（authorization_pending = 尚未授权）
 //
 // Cline **不起本地端口**，也就没有"服务器部署下回调打不进本机"这类问题
@@ -85,7 +84,7 @@ func (f *loginFlow) Configured() bool { return f != nil && f.p != nil }
 // 实测事故就是这个形态；现在由 gateway.RunProviderContract 的
 // verifyExtensionsDiscoverable 守住（见那里的注释）。
 //
-// 与 trae / workbuddy / loomy / mimo 的写法一致。
+// 与 trae / workbuddy / loomy 的写法一致。
 
 // Start 让 *Provider 直接满足 gateway.LoginFlow。
 func (p *Provider) Start() (string, string, error) {
@@ -291,7 +290,7 @@ func (f *loginFlow) markReady(e *loginEntry, a *Auth) {
 //
 // 让同一个类型同时承担两者，就意味着"池里那份"和"盘上那份"共用一个
 // 序列化路径 —— 而它们的字段集并不相同。包装类型把"落盘形态"这件事
-// 显式化，也与 trae / mimo / loomy / codearts 的既有做法一致。
+// 显式化，也与 trae / loomy / codearts 的既有做法一致。
 type authFile struct{ a *Auth }
 
 // MarshalAuthFile 返回 (文件名, 内容) —— 核心 pollViaFlow 的 authFileWriter 契约。

@@ -500,18 +500,34 @@ func (c *Client) fetchActivityContext(ctx context.Context, a *Auth, slot *Activi
 		State struct {
 			ClaimedToday bool `json:"claimedToday"`
 		} `json:"state"`
-		Actions []struct {
-			ActionName string `json:"actionName"`
-		} `json:"actions"`
+		// ⚠ Actions 是**字符串数组**（`["check_in"]`），不是对象数组。
+		//
+		// # 这是个真实缺陷（用户报"签到失败"）
+		//
+		// 旧实现把它解析成 `[]struct{ ActionName string }`（即期望
+		// `[{"actionName":"check_in"}]`）。2026-09-30 实测：上游返回的是
+		// **裸字符串数组**，于是 json.Unmarshal 报
+		//
+		//	json: cannot unmarshal string into Go struct field .actions
+		//	  of type struct { ActionName string "json:\"actionName\"" }
+		//
+		// 后果：**每一次**签到都在第 3 步（上下文查询）失败 ——
+		// 界面上「今日签到」永远显示"失败"，而额度、Token 都正常，
+		// 看起来像"上游不给签"，实际是我们解析错了。
+		//
+		// 参照实现（dsh-codearts-auth 的 lobsterai-credits.ts）里
+		// `actions: string[]`，`readActions` 就是 `filter(typeof === 'string')`
+		// —— 与这里一致。
+		//
+		// ⚠ 用 []string 直接收：形状不对时 Unmarshal 会**响亮报错**，
+		// 而不是像 []any 那样把类型错悄悄吞掉、留下一串空动作名
+		// （那会让判据 `actions 含 check_in` 恒为假 → 静默判成 inactive）。
+		Actions []string `json:"actions"`
 	}
 	if err := json.Unmarshal(env.Data, &rec); err != nil {
 		return false, nil, fmt.Errorf("lobsterai: 上下文响应无法解析: %w", err)
 	}
-	actions := make([]string, 0, len(rec.Actions))
-	for _, act := range rec.Actions {
-		actions = append(actions, act.ActionName)
-	}
-	return rec.State.ClaimedToday, actions, nil
+	return rec.State.ClaimedToday, rec.Actions, nil
 }
 
 // CheckinStatus 只查签到状态，**不领取**。

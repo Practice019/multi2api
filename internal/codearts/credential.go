@@ -310,6 +310,32 @@ func (a *Auth) SaveAtomic() error {
 	if a.FilePath == "" {
 		return fmt.Errorf("no FilePath set")
 	}
+	raw, err := a.MarshalNested()
+	if err != nil {
+		return err
+	}
+	tmp := a.FilePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.FilePath)
+}
+
+// MarshalNested 把凭证序列化成**落盘用的嵌套形**（不写盘、不加锁）。
+//
+// # 为什么从 SaveAtomic 里抽出来（本轮加的）
+//
+// 批量导入需要"把一份凭证变成要写的字节"，但**不该**由上游落盘
+// （落盘位置由核心决定 —— 上游不认识 AuthDir 的权威值）。
+// 抽出来之前，导入只能自己再写一遍 credFile 的拼装 —— 那就是
+// 第二份序列化，迟早与这份漂移（本项目反复吃这个亏）。
+//
+// ⚠ 调用方负责加锁（SaveAtomic 自己加；导入路径用的是刚解析出来的
+// 新对象，没有并发读者）。
+func (a *Auth) MarshalNested() ([]byte, error) {
+	if a == nil {
+		return nil, fmt.Errorf("codearts: 凭证为空")
+	}
 	doc := credFile{
 		Auth: credBody{
 			AccessKey:     a.AccessKey,
@@ -325,13 +351,9 @@ func (a *Auth) SaveAtomic() error {
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.FilePath)
+	return append(raw, '\n'), nil
 }
 
 // LoadDir 扫描 dir 下 codearts*.json。

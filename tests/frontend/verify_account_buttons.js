@@ -35,39 +35,42 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
 // 应当存在的（顺序也断言 —— 按钮顺序是设计决策）
 //
 // T10 之后：h2 上只剩"对整池生效"的动作。
-// 「＋ 添加账号」与「重载 auths」已移入**各上游分组行**（见下方分组断言）。
+// 「添加账号」与「重载 auths」已移入**各上游分组行**（见下方分组断言）。
 //
-// # T3 之后的变更（本次）
+// # T3 的变更（历史）
 //
-// 清单里**不再有**「全部签到」这个字面量 —— 它现在由 manifest 的
+// 清单里**不再有**「全部签到」这个字面量 —— 它改由 manifest 的
 // daily_actions 驱动（workbuddy 自报 id=checkin, batch=true）。
 //
-// ⚠ 所以断言方式必须跟着改：**不能**继续写死 `['全部签到','刷新全部积分']`，
-// 那等于把"workbuddy 有签到"重新固化进前端测试 —— 而 T3 要的正是
-// "按钮来自上游自报"。正确判据是**与 manifest 对齐**：
+// # 本轮（用户要求）的分级 —— 顶部只剩**一个**「全部签到」
 //
-//   界面上「全部 X」的集合 == manifest 里 batch=true 的动作按 label 生成的集合
+//	"全部签到（lobsterai）…这些放到上游的卡片顶部
+//	 不要放到和账号池水平的位置；账号池水平的位置只放一个全部签到，
+//	 是签到所有的上游，也就是触发所有上游的全部签到"
 //
-// 期望值**从 manifest 现算**，不硬编码 —— 与下面 R2 的写法同一个理由
-//（写死就等于把这个部署的上游当成产品事实，加第三个上游时测试假红，
-// 而"漏掉新上游的全量按钮"这个真缺陷反而不会被抓）。
-// ⚠ T4 改了这一个字面量：`刷新全部积分` → **`刷新全部额度`**。
+// 于是顶部那一排是**固定两个**：
 //
-// 这是**文案统一**（决策 5）的一部分，不是功能变更 —— 按钮的 id
-// （`btnAllCredits`）与端点（`/admin/credits/refresh`）都没动。
+//	全部签到      btnAllCheckinAll → POST /admin/accounts/checkin/all（所有上游）
+//	刷新全部额度  btnAllCredits    → POST /admin/accounts/quota/refresh（所有账号）
 //
-// 为什么这里仍然写死而不是"从按钮 id 反查 label"：这条断言要守的正是
-// "顶部静态按钮的**文案与顺序**"本身，它没有可现算的第二来源。
-// 但为了不让下一次改名变成一次"假红 → 被忽略 → 真缺陷也漏掉"，
-// 下面按钮清单那条断言会把"静态部分对不上"单独报出来（见 116 行附近）。
-const EXPECTED_STATIC = ['刷新全部额度'];
+// ⚠ 所以这条清单**不再从 manifest 现算**（T3 那版是现算的）。
+// 顶部那个按钮是**核心的**：它的存在与上游数量无关 ——
+// 没有任何上游实现全量签到时它也在，只是点了会得到
+// "没有任何上游实现了全量签到"。这与「刷新全部额度」同一个道理
+//（都是"对整池生效"的动作，不是某个上游自报的每日动作）。
+//
+// 按上游生效的那些「全部签到」现在住在各上游**卡片头**（.gacts），
+// 判据见下面 [卡片头] 那段 —— 那里才是"与 manifest 对齐"该待的地方。
+//
+// ⚠ T4 改了另一个字面量：`刷新全部积分` → **`刷新全部额度`**。
+// 那是文案统一，不是功能变更（id `btnAllCredits` 与端点都没动）。
+const EXPECTED_STATIC = ['全部签到', '刷新全部额度'];
 // 应当**不存在**的（已删除 / 已移走 / 已改为自报，防回归）
 //
-// ⚠ 「全部签到」进 FORBIDDEN 是**故意的**：它不该再作为**静态 HTML** 存在。
-// 它仍然会出现在界面上（workbuddy 自报），但那是**渲染出来的** ——
-// 由下面的 daily-act 断言来验。若有人把它写回 HTML，
-// 静态扫描那条会红（见下方 data-key="accounts" 的静态检查）。
-const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
+// ⚠ 这几个字面量都**不该**作为静态 HTML 或卡片头按钮出现。
+// 「全部签到」不在 FORBIDDEN 里 —— 它本轮**回到了**顶部（作为一个
+// 核心级按钮），而卡片头那些是渲染出来的（由 [卡片头] 那段验）。
+const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
 
 (async () => {
   let fail = 0;
@@ -108,9 +111,14 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
 
     // ---- T3：全量按钮必须与 manifest 的 daily_actions **对齐** ----
     //
-    // 判据（用户要的"有什么显示什么"）：
-    //   界面上「全部 X」的集合 == manifest 里 batch=true 的动作的 label 集合
-    //   **加上** 静态的「刷新全部积分」（它不是每日动作，见下面的说明）
+    // 判据（本轮）：顶部是**固定两个**"对整池生效"的动作，
+    // 与 manifest 里有多少个上游**无关**：
+    //
+    //   全部签到      所有上游各自的全量签到（核心端点）
+    //   刷新全部额度  所有账号的额度（核心端点）
+    //
+    // 按上游生效的那些「全部签到」在**各上游卡片头**里 —— 由下面
+    // [卡片头] 那段与 manifest 逐上游对齐（那里才是该现算的地方）。
     const allDaily = JSON.parse(await ev(`JSON.stringify(
       (window.__wb2api__.manifest().daily_actions || [])
         .filter(function(a){ return a && a.batch && a.all_url && a.label; })
@@ -119,12 +127,40 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
     console.log('  manifest 里 batch=true 的动作为: ' + JSON.stringify(allDaily));
 
     if (Array.isArray(btns)) {
-      // 期望 = 静态部分 ∪ manifest 自报部分（顺序：自报在前，静态在后）
-      const EXPECTED = allDaily.concat(EXPECTED_STATIC);
-      console.log('  期望清单（现算）: ' + JSON.stringify(EXPECTED));
-      ok(JSON.stringify(btns) === JSON.stringify(EXPECTED),
-        '顶部按钮清单与 manifest 自报**完全一致**\n      期望: ' + JSON.stringify(EXPECTED) +
-        '\n      实际: ' + JSON.stringify(btns));
+      console.log('  期望清单: ' + JSON.stringify(EXPECTED_STATIC));
+      ok(JSON.stringify(btns) === JSON.stringify(EXPECTED_STATIC),
+        '账号池**顶部**只有两个对整池生效的动作（本轮分级要求）\n      期望: ' +
+        JSON.stringify(EXPECTED_STATIC) + '\n      实际: ' + JSON.stringify(btns));
+
+      // 反向：顶部**不该有任何 per-provider 的全量按钮**。
+      //
+      // ⚠ 这条是本轮的核心判据（用户原话："不要放到和账号池水平的位置"）。
+      // 少了它，有人把 per-provider 按钮挪回顶部时不会有任何断言红 ——
+      // 而"顶部那一排"正是用户明确要求清空的地方。
+      //
+      // ⚠⚠ 判据必须是**身份**（data-allday 属性），不能是**文案**。
+      //
+      // 我第一版写的是 `allDaily.filter(x => btns.indexOf(x) >= 0)`
+      //（拿"全部签到"这个字符串去比顶部按钮的文案）—— 实测**假红**：
+      // 顶部那个**全局**按钮的文案也是「全部签到」，于是它被误判成
+      // "per-provider 的漏回来了"。两者文案相同、语义完全不同：
+      //
+      //	顶部全局按钮   打 /admin/accounts/checkin/all，**没有** data-allday
+      //	卡片头按钮     打该上游的 all_url，**带** data-allday
+      //
+      // 所以唯一可靠的判据是"顶部有没有 data-allday 按钮"。
+      // 文案相同是设计使然（两者都叫「全部签到」），不是缺陷。
+      const topAllday = JSON.parse(await ev(`JSON.stringify(
+        Array.prototype.slice.call(
+          (document.querySelector('#content > section[data-key="accounts"] h2') || {querySelectorAll: function(){return []}})
+            .querySelectorAll('button[data-allday]')
+        ).map(function(b){ return b.dataset.allday; })
+      )`));
+      console.log('  顶部带 data-allday 的按钮: ' + JSON.stringify(topAllday));
+      ok(topAllday.length === 0,
+        '账号池顶部**没有**任何 per-provider 的全量按钮（本轮要求：它们只在各卡片头上）\n      ' +
+        '实际: ' + JSON.stringify(topAllday) +
+        '\n      （顶部只该有 ' + JSON.stringify(EXPECTED_STATIC) + '）');
 
       for (const f of FORBIDDEN) {
         ok(!btns.some(b => b.indexOf(f) >= 0),
@@ -274,7 +310,7 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
     ok(grp.reload === grp.groups,
       '每个分组行都有「重载 auths」（' + grp.reload + '/' + grp.groups + '）');
 
-    // 有页内登录流程的上游才该有「＋ 添加账号」
+    // 有页内登录流程的上游才该有「添加账号」（文案不带加号）
     const withLogin = JSON.parse(await ev(`JSON.stringify(
       (window.__wb2api__.manifest().providers || [])
         .filter(function(p){ return p && p.login && p.login.kind; })
@@ -283,8 +319,101 @@ const FORBIDDEN = ['全部保活', '＋ 添加账号', '重载 auths'];
     console.log('  manifest 里支持页内登录的上游: ' + JSON.stringify(withLogin));
     const sameSet = JSON.stringify(grp.add.slice().sort()) === JSON.stringify(withLogin.slice().sort());
     ok(sameSet,
-      '「＋ 添加账号」只出现在支持页内登录的上游上\n      界面: ' + JSON.stringify(grp.add) +
+      '「添加账号」只出现在支持页内登录的上游上\n      界面: ' + JSON.stringify(grp.add) +
       '\n      manifest: ' + JSON.stringify(withLogin));
+
+    // ================================================================
+    // 本轮：各上游**卡片头**上的「全部签到」
+    // ================================================================
+    //
+    // # 判据（用户原话）
+    //
+    //	"全部签到（lobsterai）全部签到（qoder）全部签到（qodercn）
+    //	 全部签到（trae）这些放到上游的卡片顶部
+    //	 不要放到和账号池水平的位置"
+    //
+    // 所以对**每一个上游**：
+    //
+    //   它卡片头上的「全部 X」集合 == manifest 里它自报的 batch+all_url 动作
+    //
+    // 全等 —— 少一个（那个上游点不了全量签到）与多一个（假按钮）都是缺陷。
+    // 期望值从 manifest 现算，不硬编码上游名（加第四个上游时前端 0 改动，
+    // 这条断言也跟着 0 改动）。
+    //
+    // # 为什么必须量**卡片头**而不是整个 #accts
+    //
+    // 账号**行内**也有每日动作按钮（data-act，不带 data-allday）。
+    // 不限定容器的话，"行内那个签到按钮"会被算进来，判据就失效了。
+    console.log('\n[卡片头] 每个上游的「全部 X」== 它自报的 batch 动作');
+    const heads = JSON.parse(await ev(`JSON.stringify((function(){
+      var W = window.__wb2api__;
+      var out = { want: {}, got: {}, groups: [], mismatches: [] };
+      (W.manifest().providers || []).forEach(function(p){
+        if (!p || !p.id) return;
+        out.want[p.id] = W.dailyActionsOf(p.id)
+          .filter(function(a){ return a.batch && a.all_url && a.label; })
+          .map(function(a){ return '全部' + a.label; });
+      });
+      document.querySelectorAll('#accts > section.acctgroup').forEach(function(sec){
+        var pid = sec.dataset.acctgroup;
+        // ⚠ 只取**卡片头**（.ghead > .gacts）里的全量按钮 ——
+        // 行内的每日动作是 data-act，不是 data-allday，本来不会混；
+        // 但限定容器能让"有人把按钮渲染到表格里"这件事也被抓到。
+        var hd = sec.querySelector('.ghead .gacts');
+        var got = hd ? Array.prototype.slice.call(hd.querySelectorAll('button[data-allday]'))
+          .map(function(b){ return (b.textContent || '').trim(); }) : [];
+        out.got[pid] = got;
+        out.groups.push(pid);
+        var want = (out.want[pid] || []).slice().sort();
+        if (JSON.stringify(want) !== JSON.stringify(got.slice().sort())) {
+          out.mismatches.push({ provider: pid, want: want, got: got });
+        }
+      });
+      return out;
+    })())`));
+    console.log('  manifest 自报的全量动作: ' + JSON.stringify(heads.want));
+    for (const pid of heads.groups) {
+      console.log('    卡片 ' + pid + ': ' + JSON.stringify(heads.got[pid] || []));
+    }
+    ok(heads.groups.length > 0, '账号池里有上游卡片（' + heads.groups.length + ' 个）');
+    ok(heads.mismatches.length === 0,
+      '每个上游卡片头的「全部 X」== 它自报的 batch+all_url 动作\n      ' +
+      (heads.mismatches.length ? '不一致: ' + JSON.stringify(heads.mismatches) : '全部一致'));
+
+    // 反向守卫：卡片头那个按钮必须带 data-allday（否则点了没反应）。
+    //
+    // 与下面"每个动作按钮都带 data-dayurl"同一条判据的另一面：
+    // data-allday 是事件委托唯一的选择器，缺了它按钮就是个装饰品。
+    const headBtns = JSON.parse(await ev(`JSON.stringify((function(){
+      var out = { total: 0, withAttr: 0, texts: [] };
+      document.querySelectorAll('#accts > section.acctgroup .ghead .gacts button').forEach(function(b){
+        var t = (b.textContent || '').trim();
+        if (t.indexOf('全部') !== 0) return;   // 只看「全部 X」
+        out.total++;
+        if (b.dataset.allday) { out.withAttr++; out.texts.push(t + '→' + b.dataset.allday); }
+      });
+      return out;
+    })())`));
+    console.log('  卡片头全量按钮: ' + JSON.stringify(headBtns.texts));
+    ok(headBtns.total === 0 || headBtns.withAttr === headBtns.total,
+      '每个卡片头「全部 X」按钮都带 data-allday（' + headBtns.withAttr + '/' + headBtns.total +
+      '）—— 缺了它事件委托认不出，按钮点了没反应');
+
+    // 反向守卫：这些按钮**不得**再出现在账号池顶部（用户明确要求）。
+    //
+    // 与上面 [卡片头] 互补：那边验"在卡片上"，这边验"不在顶上"。
+    // 只验前者的话，"两处都渲染"会全绿 —— 而用户要的正是只有一处。
+    const topLeak = await ev(`(function(){
+      var sec = document.querySelector('#content > section[data-key="accounts"]');
+      if (!sec) return -1;
+      var h2 = sec.querySelector('h2');
+      if (!h2) return -1;
+      return h2.querySelectorAll('button[data-allday]').length;
+    })()`);
+    console.log('  账号池顶部残留的卡片式全量按钮: ' + topLeak);
+    ok(topLeak === 0,
+      '账号池**顶部**没有任何 data-allday 按钮（它们只在各上游卡片头）—— ' +
+      '实际 ' + topLeak + ' 个');
 
     // ================================================================
     // R2：账号池必须列出**所有**上游（含 0 账号）

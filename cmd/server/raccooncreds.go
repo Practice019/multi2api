@@ -1,6 +1,6 @@
 // raccooncreds.go 把 Raccoon 凭证并入核心账号池。
 //
-// 与 clinecreds.go / mimocreds.go 同构：上游包不依赖 internal/pool，
+// 与 clinecreds.go 同构：上游包不依赖 internal/pool，
 // "投影成核心账号 + 不透明 secret"由装配层做。
 package main
 

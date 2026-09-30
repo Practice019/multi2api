@@ -244,7 +244,10 @@ func (p *Provider) ID() string {
 func (p *Provider) Caps() gateway.Capability {
 	caps := gateway.CapChat |
 		gateway.CapModels |
-		gateway.CapQuotaProbe
+		gateway.CapQuotaProbe |
+		// CapImport：批量粘贴导入（本轮统一到所有上游；实现见 import.go 与
+		// accountimport.go）。两个实例（国内/海外）共用本方法。
+		gateway.CapImport
 	// 玩法类能力（签到/成长/旅行）按实例裁剪：海外版（DisableGrowthTravel）
 	// 没有这些玩法（product.json 显式禁用），声明了等于给前端画不存在的面板。
 	if p == nil || !p.cfg.DisableGrowthTravel {

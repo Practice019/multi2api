@@ -175,7 +175,13 @@ func fakeUpstream(t *testing.T, slotState string, claimedToday bool) (*httptest.
 			_, _ = w.Write([]byte(`{"code":0,"msg":"","data":{"state":{"claimedToday":true},"actions":[]}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"code":0,"msg":"","data":{"state":{"claimedToday":false},"actions":[{"actionName":"check_in"}]}}`))
+		// ⚠ actions 是**字符串数组**，不是对象数组。
+		//
+		// 这里此前写的是 `[{"actionName":"check_in"}]` —— 那是**错的形状**，
+		// 而假上游用错形状返回，就等于把真实缺陷**验证成了正确行为**：
+		// 生产环境上游返回 `["check_in"]`，解析必然失败，而契约测试全绿。
+		// 2026-09-30 用户报「签到失败」就是这个（见 client.go 的注释）。
+		_, _ = w.Write([]byte(`{"code":0,"msg":"","data":{"state":{"claimedToday":false},"actions":["check_in"]}}`))
 	})
 	mux.HandleFunc(activityContextPath+"/act-1/actions/check_in", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls.checkin, 1)

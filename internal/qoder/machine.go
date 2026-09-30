@@ -15,31 +15,24 @@
 //
 // 结论：**两个头必须成对**，缺一即失效。
 //
-// # 值的来源：本机 IDE 的 machine_token.json
+// # 值的来源：**实时 spawn** `runtime-info.exe`（主路径），磁盘缓存只作退路
 //
-//	%APPDATA%\Qoder\SharedClientCache\cache\machine_token.json
-//	{ "token": "P1gA…", "type": "f677427e14abd0f6c1", "updateAt": … }
+//	主路径  <home>/.qoder{,-cn}/.bin/umid-<hash>/runtime-info(.exe) 3 --account-stdin
+//	退路    %APPDATA%\Qoder\SharedClientCache\cache\machine_token.json
+//	        { "token": "P1gA…", "type": "f677427e14abd0f6c1", "updateAt": … }
 //
-// 即 Cosy-MachineToken = token，Cosy-MachineType = type。
+// ⚠ **本轮改的（用户报障"qodercn 签到失败"）**：旧实现**只读缓存文件**，
+// 而实测该文件在本机**根本不存在**（纯登录流程不产生它）—— 于是
+// "读不到就保守降级"实际变成"两个头永远不发 → 签到永远失败"。
 //
-// ⚠ **读不到时返回 nil，调用方照常发请求（只是不带这两个头）**：
-// 这与修复前的行为一致，属**保守降级** —— 用户若未安装 Qoder 桌面端
-//（纯插件登录的账号）就没有该文件，此时不能让整个积分功能报错。
+// 旧注释里的三条理由也都被实测推翻或不再成立，逐条记下免得有人再改回去：
 //
-// # 为什么直接读文件而不自己生成 token
+//	"spawn 是部署耦合"      → 但 exe 本来就在用户机上（IDE 自带），
+//	                          且找不到就退回缓存，不会让功能报错
+//	"参照说旧文件仍然有效"   → 前提是**文件存在**；本机不存在
+//	"代价可控（少一次可领）" → 实际代价是**整个签到功能不可用**
 //
-// 官方经 `runtime-info.exe`（UMID 模块）生成，内部含设备指纹与签名逻辑，
-// 复刻代价高；而该文件就在本机、格式稳定，直接读更可靠。
-//
-// ⚠ 参照实现后来改成"实时 spawn runtime-info.exe"（因为该文件会长期陈旧，
-// 实测停在 179 天前）。**我们没有走那条路**，理由：
-//
-//  1. spawn 一个外部 exe 是**部署耦合**（网关要能找到那个 exe，
-//     还要处理超时/杀软扫描）—— 与"网关是纯 Go 单二进制"的定位冲突
-//  2. 参照实现自己也说"实测该文件即使很旧，token 依然有效"
-//  3. 拿不到就降级（少一次可领活动），而不是报错 —— 代价可控
-//
-// 所以这里只读文件。若将来发现陈旧文件真的会失效，再评估 spawn。
+// 因此现在与参照实现同序：实时 spawn 优先，缓存兜底。详见 runtimeinfo.go。
 package qoder
 
 import (
@@ -66,10 +59,24 @@ var (
 
 // resolveMachineIdentity 解析本机 Qoder 设备身份；拿不到返回 nil。
 //
-// 结果被缓存（含「拿不到」这一结果）—— 不缓存的话每次积分请求都要读盘，
-// 而"没装 Qoder 桌面端"是常见情形，那会让每次请求都白做一次失败的系统调用。
+// # 顺序：**先实时 spawn，再退磁盘缓存**（本轮改的，用户报障）
+//
+// 旧实现只读磁盘缓存，前提是"那个文件存在、只是陈旧"。
+// 实测（2026-09-30）：**文件根本不存在**（纯登录流程不产生它），
+// 于是两个头从来没发出去 → 服务端不下发可领活动 → 签到**永远失败**，
+// 而额度、Token 都正常，看起来像"上游不给签"。
+//
+// 现在与参照实现同序：实时 spawn 是主路径（见 runtimeinfo.go 的实测证据），
+// 缓存只是退路（万一 exe 未安装 / 超时）。两条都拿不到才算 nil。
+//
+// 结果被缓存（**含"拿不到"这一结果**）—— 不缓存的话每次积分请求都要
+// spawn 一个 exe（实测约 3.8 秒），那会让额度查询慢到不可用。
 func resolveMachineIdentity() *MachineIdentity {
 	machineOnce.Do(func() {
+		if id := resolveMachineIdentityLive(); id != nil {
+			machineVal = id
+			return
+		}
 		for _, p := range machineTokenPaths() {
 			if id, ok := parseMachineTokenFile(p); ok {
 				machineVal = id

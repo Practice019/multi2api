@@ -74,8 +74,17 @@ const staleTwoLevel = html.split('\n').some((l) =>
 check('没有残留的两层规则 .acctgroup > .gacts{', !staleTwoLevel,
   '两层规则不匹配实际 DOM，留着会让人以为已经右对齐了');
 
-// ---- ④ 四个按钮都在 .gacts 里（用户要求"这些按钮全部右对齐"）----
-const wanted = ['＋ 添加账号', '批量导入', '刷新本上游额度', '重载 auths'];
+// ---- ④ 按钮都在 .gacts 里（用户要求"这些按钮全部右对齐"）----
+//
+// ⚠ 「添加账号」的文案**不带 `＋`**（用户明确要求"添加账号不需要那个加号"）。
+// 这里跟着改 —— 否则这条探针会因为一个已经不存在的加号而永远红。
+//
+// ⚠ 顺序也由用户指定（第三版）：
+//
+//	全部签到 → 添加账号 → 批量导入 → 刷新本上游额度 → 重载 auths
+//
+// 顺序由下面 ⑤ 单独钉住；这里只查"每一项都还在"。
+const wanted = ['添加账号', '批量导入', '刷新本上游额度', '重载 auths'];
 for (const label of wanted) {
   check(`按钮「${label}」由 accountGroupActions 产出`, html.includes(label),
     `没找到「${label}」`);
@@ -83,6 +92,34 @@ for (const label of wanted) {
 check('accountGroupActions 的输出挂在 .gacts 里',
   /class="gacts">\$\{accountGroupActions\(/.test(html),
   '按钮若不在 .gacts 容器里，margin-left:auto 推不到它们');
+
+// ---- ⑤ 五项的出现次序必须与用户指定的完全一致 ----
+//
+// # 为什么这条值得单独立
+//
+// 用户连续给了三版顺序，前两版我理解错了。把次序钉在探针里，
+// 下次有人"顺手重排"时会当场红，而不是等用户再报一次。
+//
+// 判据取**最后一次 return** 里各变量的出现位置（accountGroupActions 只有一个
+// return，中间那些 var 定义不算）。
+const retAt = html.lastIndexOf('return gDailyAll');
+if (retAt < 0) {
+  check('找到 accountGroupActions 的 return', false, '找不到 return gDailyAll');
+} else {
+  const ret = html.slice(retAt, retAt + 400);
+  const order = ['gDailyAll', 'addBtn', 'importBtn', 'gQuotaBtn', 'reloadBtn'];
+  let last = -1;
+  let ok = true;
+  const seen = [];
+  for (const v of order) {
+    const i = ret.indexOf(v);
+    seen.push(v + '@' + i);
+    if (i < 0 || i < last) { ok = false; }
+    last = i;
+  }
+  check('按钮顺序 == 全部签到 → 添加账号 → 批量导入 → 刷新额度 → 重载 auths',
+    ok, '实际位置: ' + seen.join(' '));
+}
 
 console.log(fails === 0 ? 'ALL PASS' : ('FAILED: ' + fails));
 process.exit(fails === 0 ? 0 : 1);

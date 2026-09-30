@@ -252,7 +252,7 @@ var _ gateway.LoginFlow = (*loginFlow)(nil)
 //
 // 让同一个类型承担两者，意味着"池里那份"和"盘上那份"共用一个序列化路径，
 // 而它们的字段集并不相同。包装类型把"落盘形态"这件事显式化，
-// 也与 trae / mimo / loomy / codearts 的既有做法一致。
+// 也与 trae / loomy / codearts 的既有做法一致。
 type authFile struct{ a *Auth }
 
 // MarshalAuthFile 返回 (文件名, 内容) —— 核心 pollViaFlow 的 authFileWriter 契约。

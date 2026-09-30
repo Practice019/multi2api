@@ -27,15 +27,18 @@
 // 这正是"假按钮"的形态，也正是 gateway.LoginFlow.Configured 那条注释
 // 反复强调要避免的东西。
 //
-// # 为什么 AllURL / Batch 都留空
+// # 为什么上一版 AllURL / Batch 都留空，而现在补上
+//
+// 上一版的理由仍然成立且记录在案：
 //
 // /admin/welfare/claim 的语义是**对某一个账号**领取它当前可领的全部福利
-// （体是 {"uid": ...}，见 codearts/admin.go 的 handleWelfareClaim）。
-// 它没有"对全部账号一键领取"这种端点 —— 核心也没有遍历各上游账号的权限
-// （上游包不得依赖 internal/pool，arch_test.go 强制）。
+// （体是 {"uid": ...}），本包当时没有"对全部账号一键领取"的端点，
+// 于是如实报 Batch=false。
 //
-// 所以 Batch 如实报 false。前端的"全部 X"按钮只对有全量端点的动作出现，
-// codearts 的「领取福利」就只在**账号行内**出现。这是事实，不是缺陷。
+// 用户本轮要求「统一所有上游」之后，本包**补了**这条全量端点
+// （POST /admin/welfare/claim/all，见 dailycheckin.go），
+// 于是这里如实改成有全量入口 —— AllURL 的语义是"上游有没有这个端点"，
+// 它跟着**事实**走，不是跟着历史形态走。
 package codearts
 
 import "workbuddy2api/internal/gateway"
@@ -80,7 +83,10 @@ func (p *Provider) DailyActions() []gateway.DailyAction {
 			Label:  "签到",
 			Title:  "领取该账号当前可领的全部福利（codearts 的签到）",
 			OneURL: "/admin/welfare/claim",
-			// AllURL 空 + Batch false：上游没有全量端点，如实报。
+			// 全量端点由本包提供（dailycheckin.go）—— 与其它上游同形。
+			// Batch=true → 该上游的分组头上出现「全部签到」。
+			AllURL: checkinAllPath,
+			Batch:  true,
 		},
 	}
 }

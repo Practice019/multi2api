@@ -192,6 +192,27 @@ func TestCreditsHeadersUseSashClientType(t *testing.T) {
 	}
 }
 
+// disableLiveMachineIdentity 强制走**磁盘缓存退路**（禁掉实时 spawn）。
+//
+// # 为什么每个碰 machine 身份的用例都必须调它
+//
+// `resolveMachineIdentity` 的主路径是实时 spawn `runtime-info.exe`
+//（见 runtimeinfo.go）。若不隔离，在**装了 Qoder 的开发机**上：
+//
+//   - 用例会真的去 spawn（每次约 3.8 秒，整套测试白白变慢）
+//   - **拿到的是开发机的真实身份**，而用例断言的是 fixture 里的值 → 假红
+//   - 更糟：在没装 Qoder 的 CI 上走缓存、在开发机上走 spawn，
+//     同一份用例行为不同 —— 结果随环境漂移
+//
+// 指向一个**不存在的路径**即等价于"本机没装 Qoder"，于是自然退回缓存。
+// 这与参照实现的 `QODER_RUNTIME_INFO` 隔离手段同一个用法。
+func disableLiveMachineIdentity(t *testing.T) {
+	t.Helper()
+	t.Setenv("QODER_RUNTIME_INFO", "/nonexistent/runtime-info")
+	resetMachineIdentity()
+	t.Cleanup(resetMachineIdentity)
+}
+
 // TestCreditsHeadersMachinePairIsAtomic machine 头**必须成对**，不能只发一个。
 //
 // 消融实验：去掉 MachineToken 或 MachineType 任一 → 服务端退回 1 条
@@ -201,8 +222,7 @@ func TestCreditsHeadersMachinePairIsAtomic(t *testing.T) {
 	fp := dir + "/machine_token.json"
 	writeText(t, fp, `{"token":"tok-1","type":"typ-1"}`)
 	t.Setenv("QODER_MACHINE_TOKEN_PATH", fp)
-	resetMachineIdentity()
-	t.Cleanup(resetMachineIdentity)
+	disableLiveMachineIdentity(t)
 
 	f := &creditsFake{campaignsBody: `{"showCampaign":false,"claimable":false,"campaigns":[]}`}
 	c := newCreditsServer(t, f)
@@ -225,8 +245,7 @@ func TestCreditsHeadersMachinePairIsAtomic(t *testing.T) {
 //（保守降级：少一次可领活动，而不是功能不可用）。
 func TestCreditsHeadersOmitMachineWhenUnavailable(t *testing.T) {
 	t.Setenv("QODER_MACHINE_TOKEN_PATH", "/nonexistent/path/machine_token.json")
-	resetMachineIdentity()
-	t.Cleanup(resetMachineIdentity)
+	disableLiveMachineIdentity(t)
 
 	f := &creditsFake{campaignsBody: `{"showCampaign":false,"claimable":false,"campaigns":[]}`}
 	c := newCreditsServer(t, f)
@@ -256,8 +275,7 @@ func TestMachineIdentityRequiresBothFields(t *testing.T) {
 			fp := dir + "/mt.json"
 			writeText(t, fp, tc.body)
 			t.Setenv("QODER_MACHINE_TOKEN_PATH", fp)
-			resetMachineIdentity()
-			t.Cleanup(resetMachineIdentity)
+			disableLiveMachineIdentity(t)
 
 			if got := resolveMachineIdentity(); got != nil {
 				t.Errorf("应当视为拿不到（配对是必要条件），得到 %+v", got)

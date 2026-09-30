@@ -68,15 +68,34 @@ func fakeUpstream(t *testing.T, pollFirst404 int) (*httptest.Server, *fakeCalls)
 
 	mux := http.NewServeMux()
 
-	// 设备码轮询：前 N 次返回 **404**（= 用户尚未授权）
+	// 设备码轮询：**GET**，参数在 query（challenge/verifier/nonce）。
+	//
+	// ⚠ 本轮之前这里断言的是 POST + JSON body 里的 client_id ——
+	// 那是**我们自己的错误形状**，于是假上游把缺陷当正确行为"验证"通过。
+	// 现在按参照实现（qoder-oauth.ts，已实测跑通）断言：
+	//
+	//	method=GET、verifier 与 challenge 配对、nonce 存在
+	//
+	// 任何一项不对就回 400 —— 让"形状写错"在单测里立刻暴露。
 	mux.HandleFunc(devicePollPath, func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&polls, 1)
 		atomic.AddInt32(&calls.poll, 1)
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body["client_id"] != Qoder.ClientID {
+		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"code":1,"message":"bad client_id"}`))
+			_, _ = w.Write([]byte(`{"code":1,"message":"poll must be GET"}`))
+			return
+		}
+		q := r.URL.Query()
+		verifier := q.Get("verifier")
+		nonce := q.Get("nonce")
+		if verifier == "" || nonce == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":1,"message":"verifier and nonce required"}`))
+			return
+		}
+		if q.Get("challenge_method") != "S256" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":1,"message":"challenge_method must be S256"}`))
 			return
 		}
 		if int(n) <= pollFirst404 {
@@ -85,7 +104,10 @@ func fakeUpstream(t *testing.T, pollFirst404 int) (*httptest.Server, *fakeCalls)
 			_, _ = w.Write([]byte(`{"code":404,"message":"session not ready"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"code":0,"message":"","data":{"access_token":"` + token + `","refresh_token":"rt-1"}}`))
+		// ⚠ 用 `token`（登录响应的字段名），不是 access_token ——
+		// 参照的 parseQoderTokenPayload 读 token/device_token/access_token，
+		// 我们此前只认 access_token，导致登录响应永远解析不出 token。
+		_, _ = w.Write([]byte(`{"code":0,"message":"","token":"` + token + `","refresh_token":"rt-1","user_id":"u-1","user_name":"Qoder用户"}`))
 	})
 
 	// 续期：**必须带 machine_id**
@@ -216,9 +238,15 @@ func TestPoll404MeansPending(t *testing.T) {
 	srv, calls := fakeUpstream(t, 1) // 第一次 404
 	c := NewWithBase(srv.URL)
 
-	res, err := c.PollDeviceToken(context.Background(), "state-1")
+	// ⚠ 本轮起轮询收的是**设备会话**（PKCE + nonce + machine_id），
+	// 不再是裸 state —— 因为服务端要靠 verifier 校验 challenge。
+	sess, err := newDeviceSession()
 	if err != nil {
-		t.Fatalf("404 不该是错误: %v", err)
+		t.Fatalf("生成设备会话失败: %v", err)
+	}
+	res, perr := c.PollDeviceToken(context.Background(), &sess)
+	if perr != nil {
+		t.Fatalf("404 不该是错误: %v", perr)
 	}
 	if !res.Pending {
 		t.Error("404 必须解成 Pending=true")
@@ -370,18 +398,158 @@ func TestSignatureHeadersPassedThrough(t *testing.T) {
 	}
 }
 
-// TestDeviceSelectURLShape 授权 URL 形态（含 prod client_id）。
+// TestDeviceSelectURLShape 授权 URL 形态（PKCE + prod client_id）。
+//
+// # ⚠ 本条本轮被**改写**：旧版钉的是**缺陷**形状
+//
+// 旧断言要求 URL 含 `state=` / `client_type=5` / `business_product=cli` /
+// `scene=assistant` —— 那是我们**自己发明的**参数（不是参照实现的），
+// 而且**完全没有 PKCE**。于是它把"缺 PKCE"这个真实缺陷**保护**成了正确行为：
+// 任何人想修都得先让这条测试变红，而红的原因看起来像是"你改坏了 URL"。
+//
+// 这是本仓最危险的一类测试形态（AGENTS.md 明确警告过"测试主动保护 bug"）。
+//
+// 现在的判据照抄参照实现（dsh-codearts-auth 的 buildQoderAuthUrl，
+// 已实测跑通）：
+//
+//	challenge + challenge_method=S256 + nonce + machine_id + client_id
 func TestDeviceSelectURLShape(t *testing.T) {
 	c := New()
-	u := c.DeviceSelectURL("state-abc")
+	sess, err := newDeviceSession()
+	if err != nil {
+		t.Fatalf("生成设备会话失败: %v", err)
+	}
+	u := c.DeviceSelectURL(&sess)
 	if !strings.HasPrefix(u, Qoder.AuthBase+deviceSelectPath) {
 		t.Errorf("URL 前缀不对: %s", u)
 	}
-	for _, want := range []string{"client_id=" + Qoder.ClientID, "state=state-abc",
-		"client_type=5", "business_product=cli", "scene=assistant"} {
+	// PKCE 三件套 + machine_id + prod client_id —— 缺一不可。
+	for _, want := range []string{
+		"challenge=" + sess.Pkce.Challenge,
+		"challenge_method=S256",
+		"nonce=" + sess.Nonce,
+		"machine_id=" + sess.MachineID,
+		"client_id=" + Qoder.ClientID,
+	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("URL 缺 %q: %s", want, u)
 		}
+	}
+	// 反向：旧实现那两个"自己发明的"参数**不该**再出现
+	//（state 已被 nonce 取代；client_type 那几个元数据参照里没有）。
+	for _, bad := range []string{"state=", "client_type=", "business_product=", "scene="} {
+		if strings.Contains(u, bad) {
+			t.Errorf("URL 里还有旧实现的 %q（参照实现没有这些参数）: %s", bad, u)
+		}
+	}
+	// challenge 必须**无 padding** —— 带 '=' 会让服务端校验失败。
+	if strings.Contains(sess.Pkce.Challenge, "=") {
+		t.Errorf("challenge 带了 padding（%q）—— 服务端比对的是无 padding 形态", sess.Pkce.Challenge)
+	}
+}
+
+// TestDevicePollURLShape 轮询 URL 形态（GET + query 里的 verifier）。
+//
+// ⚠ 这是本轮缺陷的第二半：我们此前发 **POST + JSON body**，
+// 而参照是 **GET + query**。服务端既拿不到 verifier（PKCE 校验失败），
+// 方法也不对 —— 表现同样是"授权成功但一直 pending"。
+func TestDevicePollURLShape(t *testing.T) {
+	c := New()
+	sess, err := newDeviceSession()
+	if err != nil {
+		t.Fatalf("生成设备会话失败: %v", err)
+	}
+	u := c.DevicePollURL(&sess)
+	// ⚠ 挂 openAPIBase（不是 authBase）：qoder.com 的同名路径返回 401。
+	if !strings.HasPrefix(u, Qoder.OpenAPIBase+devicePollPath) {
+		t.Errorf("轮询 URL 必须挂 openAPIBase: %s", u)
+	}
+	for _, want := range []string{
+		"nonce=" + sess.Nonce,
+		"verifier=" + sess.Pkce.Verifier,
+		"challenge_method=S256",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("轮询 URL 缺 %q: %s", want, u)
+		}
+	}
+	// verifier 与 challenge 必须是**配对**的（服务端靠它校验）。
+	if pkceChallenge(sess.Pkce.Verifier) != sess.Pkce.Challenge {
+		t.Error("challenge ≠ sha256(verifier) —— 服务端校验必然失败")
+	}
+}
+
+// TestPollAcceptsTokenFieldNames 登录响应用 `token`，不是 `access_token`。
+//
+// # 为什么单独一条
+//
+// 参照的 parseQoderTokenPayload 接受四种字段名：
+//
+//	登录响应  token / device_token
+//	续期响应  access_token
+//
+// 我们此前只认 access_token，于是**登录响应永远解析不出 token** ——
+// 表现为"授权成功但一直 pending 到超时"，与缺 PKCE 的现象一模一样。
+// 两条独立缺陷指向同一个症状，所以必须各自有断言。
+func TestPollAcceptsTokenFieldNames(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"token", `{"token":"tok-1","refresh_token":"ref-1"}`},
+		{"device_token", `{"device_token":"tok-2","refresh_token":"ref-2"}`},
+		{"access_token", `{"access_token":"tok-3","refresh_token":"ref-3"}`},
+		{"data.token", `{"data":{"token":"tok-4","refresh_token":"ref-4"}}`},
+		{"data.access_token", `{"data":{"access_token":"tok-5","refresh_token":"ref-5"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c := NewWithBase(srv.URL)
+			sess, err := newDeviceSession()
+			if err != nil {
+				t.Fatalf("生成设备会话失败: %v", err)
+			}
+			res, err := c.PollDeviceToken(context.Background(), &sess)
+			if err != nil {
+				t.Fatalf("轮询报错: %v", err)
+			}
+			if res.Pending || res.AccessToken == "" {
+				t.Errorf("字段 %s 没被认出来（Pending=%v token=%q）—— "+
+					"登录响应用的是 token/device_token，只认 access_token 会让登录永远 pending",
+					tc.name, res.Pending, res.AccessToken)
+			}
+		})
+	}
+}
+
+// TestPollReadsUserID 设备码响应里的 user_id / user_name 必须读出来。
+//
+// ⚠ 加密推理需要 uid（WASM 用它派生 encrypt_user_info）。漏读会让
+// 账号能登录、能列模型，但一对话就挂 —— 是最难查的那类形态。
+func TestPollReadsUserID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"tok","refresh_token":"ref","user_id":"u-42","user_name":"阿猫"}`))
+	}))
+	defer srv.Close()
+	c := NewWithBase(srv.URL)
+	sess, err := newDeviceSession()
+	if err != nil {
+		t.Fatalf("生成设备会话失败: %v", err)
+	}
+	res, err := c.PollDeviceToken(context.Background(), &sess)
+	if err != nil {
+		t.Fatalf("轮询报错: %v", err)
+	}
+	if res.UID != "u-42" {
+		t.Errorf("UID=%q want u-42 —— 漏读它会让加密推理缺 uid", res.UID)
+	}
+	if res.Nickname != "阿猫" {
+		t.Errorf("Nickname=%q want 阿猫", res.Nickname)
 	}
 }
 

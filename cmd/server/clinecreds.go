@@ -1,6 +1,6 @@
 // clinecreds.go 把 Cline 凭证并入核心账号池。
 //
-// 与 mimocreds.go / traecreds.go / loomycreds.go 同构：上游包不依赖 internal/pool，
+// 与 traecreds.go / loomycreds.go 同构：上游包不依赖 internal/pool，
 // "投影成核心账号 + 不透明 secret"由装配层做 —— 它同时握有 pool 与 cline。
 package main
 

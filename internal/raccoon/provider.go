@@ -81,7 +81,8 @@ func (p *Provider) Caps() gateway.Capability {
 	// 声明的前提是**真的能探测**：本上游已实现 gateway.QuotaExt
 	//（见 quotaext.go），且契约测试会检查"声明了必须实现 AdminExt
 	// 且路由非空"——两点都满足。
-	return gateway.CapChat | gateway.CapModels | gateway.CapQuotaProbe
+	return gateway.CapChat | gateway.CapModels | gateway.CapQuotaProbe |
+		gateway.CapImport
 }
 
 // Client 上游 HTTP 客户端（供装配层与测试使用）。

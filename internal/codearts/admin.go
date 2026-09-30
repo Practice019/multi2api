@@ -104,6 +104,29 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Method: "POST", Path: "/admin/welfare/claim",
 			Handler: p.handleWelfareClaim, Capability: gateway.CapWelfare, Title: "领取福利",
 		},
+		// 全量福利领取（本上游的「全部签到」）。
+		//
+		// # 为什么它在此前**不存在**（不是漏了）
+		//
+		// codearts 只有 `/admin/welfare/claim`（对**一个**账号领取它当前
+		// 可领的全部福利），没有"对全部账号一键领取"这种端点 —— 于是
+		// DailyAction 如实报了 AllURL 空、Batch=false（见 dailyactions.go）。
+		//
+		// # 为什么现在补上（用户本轮明确要求）
+		//
+		//	"只有单账号的那就创建全部签到  统一所有的上游"
+		//
+		// 用户要的是**所有上游统一都有「全部签到」**，不因某个上游的历史
+		// 端点形态而留下例外。所以这里在**上游包内**补一条全量端点
+		// （它不是核心端点：遍历哪个目录、领哪些活动都是 codearts 的事实）。
+		//
+		// ⚠ 路径与其余上游同形（/xxx/all），且它与单账号端点共用
+		// claimWelfareFor —— 两条入口的"领到/无可领/失败"判据必须完全一致，
+		// 否则界面与历史列会各说一套。
+		{
+			Method: "POST", Path: checkinAllPath,
+			Handler: p.handleWelfareClaimAll, Capability: gateway.CapWelfare, Title: "领取福利（全部账号）",
+		},
 		{
 			Method: "GET", Path: "/admin/subscription",
 			Handler: p.handleSubscription, Capability: gateway.CapWelfare, Title: "套餐与额度",

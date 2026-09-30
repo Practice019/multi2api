@@ -774,6 +774,12 @@ func main() {
 		// 签到与余额端点需要**活凭证**（access_token），而 AuthByUID 返回的
 		// 是核心账号投影（只有 uid/nickname）—— 前者才是能发请求的那个。
 		qd.SetCredentialSource(qoderCredSource(p, qoder.ProviderID))
+		// 额度写回通道。
+		//
+		// ⚠ 不注入的直接后果：**重启后额度列一直是空的**（界面显示 0），
+		// 因为 `QuotaExt.RefreshQuota` 只在有人点「刷新本上游额度」时才被核心
+		// 调用，全仓没有定时任务扫它（见 qoder.Provider.quotaSink 的注释）。
+		qd.SetQuotaSink(qoderQuotaSink(p))
 		if err := registry.Register(qd); err != nil {
 			log.Fatalf("注册 Qoder 上游失败: %v", err)
 		}
@@ -800,6 +806,8 @@ func main() {
 			// provider 标签分域（qoder / qodercn），所以投影必须带对标签 ——
 			// 否则 qodercn 的端点会取到 qoder 的账号（或取不到）。
 			qdCN.SetCredentialSource(qoderCredSource(p, qoder.ProviderIDCN))
+			// 额度写回通道（与国际版同一条理由：不注入则额度列永远是空的）。
+			qdCN.SetQuotaSink(qoderQuotaSink(p))
 			if err := registry.Register(qdCN); err != nil {
 				log.Fatalf("注册 Qoder CN 上游失败: %v", err)
 			}
