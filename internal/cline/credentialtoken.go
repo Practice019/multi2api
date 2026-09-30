@@ -7,7 +7,7 @@ import "workbuddy2api/internal/gateway"
 // # 为什么需要它（用户报的：Token 列一直是 `—`）
 //
 // 界面「Token」列的判据是 `has_token`，而它原来只读**账号池投影**
-//（`Pool.AuthByUID()` 返回的核心 `*auth.Auth`）。对 cline 而言投影里
+// （`Pool.AuthByUID()` 返回的核心 `*auth.Auth`）。对 cline 而言投影里
 // 那个字段**永远是空的**，因为字段名对不上：
 //
 //	核心 auth.Parse 读 `auth.accessToken`（驼峰）
@@ -25,7 +25,7 @@ import "workbuddy2api/internal/gateway"
 //
 // 该扩展点的文档（credential_token.go 的文件头）记录的就是这个失败形态 ——
 // 当年 workbuddy-intl 登录成功后 token 列恒为 `—`，根因完全相同
-//（非默认上游的条目进池时只带 {UID, Nickname} 的裸投影，真凭证走
+// （非默认上游的条目进池时只带 {UID, Nickname} 的裸投影，真凭证走
 // `Pool.SecretOf` 的不透明通道）。当时的结论是：
 //
 //	让上游自己回答「我的凭证有 token 吗」，核心不猜投影里的字段。

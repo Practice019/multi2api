@@ -19,7 +19,7 @@ import (
 //	带 machine 头    200×8  503×2
 //
 // `campaign service is temporarily unavailable` 是**上游间歇性**故障
-//（与请求头无关，`/usage` 端点同时刻恒 200）。而签到每 30 分钟扫一次，
+// （与请求头无关，`/usage` 端点同时刻恒 200）。而签到每 30 分钟扫一次，
 // 撞上 503 就记一次 "fail" —— 用户看到的「今日签到 失败」有相当比例
 // 就是这么来的。旧实现不重试，**一次 503 直接判失败**。
 func TestGetJSONRetriesTransient5xx(t *testing.T) {

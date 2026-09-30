@@ -23,8 +23,8 @@ package lobsterai
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -133,7 +133,7 @@ func envelopeError(e envelope) error {
 // parseEnvelope 解析信封并判成功。
 //
 // ⚠ code 用 *int 承接：缺 code 字段与 code=0 必须区分开
-//（缺字段时参照实现回落 -1，即视为失败）。
+// （缺字段时参照实现回落 -1，即视为失败）。
 func parseEnvelope(raw []byte) (envelope, error) {
 	var rec map[string]any
 	if err := json.Unmarshal(raw, &rec); err != nil {
@@ -247,9 +247,9 @@ func jwtExpMS(token string) int64 {
 //
 // 取值顺序（参照 lobsteraiCredentialExpiresAtMs）：
 //
-//	1. expires_at 是纯数字串 → > 1e12 视为毫秒，否则视为秒（×1000）
-//	2. expires_at 是日期串   → 按 RFC3339 解析
-//	3. 都拿不到              → 回退 JWT exp
+//  1. expires_at 是纯数字串 → > 1e12 视为毫秒，否则视为秒（×1000）
+//  2. expires_at 是日期串   → 按 RFC3339 解析
+//  3. 都拿不到              → 回退 JWT exp
 //
 // ⚠ 第 3 步的回退是必需的：没有它，老凭据/手工导入的凭证过期判定恒为 false，
 // 续期永远不触发 —— 表现为"凭据悄悄过期"，静默失效。

@@ -165,7 +165,7 @@ func (p *Provider) initCheckin() {
 // DailyActions 账号行的每日动作按钮（gateway.DailyActionExt）。
 //
 // 实现它之后，账号池里 lobsterai 的**每一行**都会出现「签到」按钮
-//（此前没有 —— 用户报的现象）。
+// （此前没有 —— 用户报的现象）。
 func (p *Provider) DailyActions() []gateway.DailyAction {
 	if p == nil || p.checkin == nil || !p.checkin.Ready() {
 		return nil

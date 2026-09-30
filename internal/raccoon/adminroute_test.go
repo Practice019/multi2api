@@ -47,7 +47,7 @@ func testAuth() *Auth { return &Auth{AccessToken: "at-test"} }
 //
 // ⚠ 各池**分开作 package**，让用户看出「奖励 / 每日 / 会员 / 充值」
 // 是独立来源 —— 它们的有效期与回补规则都不同
-//（每日积分每日刷新、充值积分长期有效）。
+// （每日积分每日刷新、充值积分长期有效）。
 //
 // 变异可检：把任何一个池的读取删掉 → 本用例红。
 func TestBalanceReadsAllPools(t *testing.T) {
@@ -190,7 +190,7 @@ func TestOnboardingQueryFailureIsConservative(t *testing.T) {
 	c := newCreditsServer(t, &creditsFake{billsBody: `{"code":500,"message":"boom"}`})
 	st := c.FetchOnboardingStatus(context.Background(), testAuth())
 	if st.Claimed {
-		t.Error("查询失败时必须保守返回「未领」—— "+
+		t.Error("查询失败时必须保守返回「未领」—— " +
 			"误报「已领」会让用户真的错过奖励")
 	}
 	if st.Points != 3000 {
@@ -224,7 +224,7 @@ func TestOnboardingDoesNotUseBalance(t *testing.T) {
 //
 // `FetchBalance` 与 `ClaimLoginGrant` 此前都已实现、也有测试，
 // 但本包**没有** AdminRoutes —— 那两件事没有任何入口能调到
-//（只有测试能碰）。cline 的余额端点踩过同一个坑。
+// （只有测试能碰）。cline 的余额端点踩过同一个坑。
 func TestAdminRoutesExposeBalanceAndReward(t *testing.T) {
 	p := NewWithConfig(Config{})
 	routes := p.AdminRoutes()

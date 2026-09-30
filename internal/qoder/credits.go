@@ -19,7 +19,7 @@
 // # ⚠ 余额不只在 userQuota 里
 //
 // 实测某账号 `userQuota.remaining = 0` 而 `addOnQuota.remaining = 100`
-//（用户说的「资源包 100 积分」正是后者）。只读 userQuota 会显示 0 ——
+// （用户说的「资源包 100 积分」正是后者）。只读 userQuota 会显示 0 ——
 // 与其它 provider 的「漏读某一层」是同一类缺陷。
 //
 // # ⚠ 两个头都必需，缺一服务端就不下发「可领取」的活动
@@ -189,7 +189,7 @@ func (c *Client) creditsHeaders(a *Auth) map[string]string {
 //	带 machine 头    200×8  503×2
 //
 // 即 `campaign service is temporarily unavailable` 是**上游间歇性**故障
-//（与请求头无关，`/usage` 端点同时刻恒 200）。而签到是每 30 分钟扫一次，
+// （与请求头无关，`/usage` 端点同时刻恒 200）。而签到是每 30 分钟扫一次，
 // 撞上 503 就记一次 "fail" —— 用户看到的「今日签到 失败」有相当比例
 // 就是这么来的。所以对 5xx / 网络错误**退避重试**，只有全试完才认失败。
 func (c *Client) getJSON(ctx context.Context, a *Auth, path string, out any) (bool, string) {
@@ -513,9 +513,9 @@ func isNotActivated(c *campaignsResult, usageBody map[string]any) bool {
 // 一个账号可能同时有多个 CLAIM_BENEFIT 活动，故逐个领取而非只领第一个。
 //
 // ⚠ **「无可领活动」必须是 inactive，不能报 already-claimed**
-//（真实缺陷，用户报障「没领过就显示已经领取」）：旧实现在
+// （真实缺陷，用户报障「没领过就显示已经领取」）：旧实现在
 // targets 为空时直接返回「今天已领取」，于是只要服务端没下发可领项
-//（含请求头不完整、未到刷新时间、本就无活动三种情形），
+// （含请求头不完整、未到刷新时间、本就无活动三种情形），
 // 界面就显示「今天已领取」，与 IDE 的「可领取」直接矛盾。
 // 二者语义完全不同：inactive = 没东西可领；already-claimed = 领过了。
 func (c *Client) ClaimDailyCheckin(ctx context.Context, a *Auth) ClaimOutcome {

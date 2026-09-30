@@ -136,7 +136,7 @@ func defaultClassifierOf() func(int, string) gateway.ErrorKind {
 // mirrorKind 是 upstream.ErrKind → gateway.ErrorKind 的逐项镜像（测试用）。
 //
 // ⚠ 它**故意**与生产代码里那份分开：生产的那份在 internal/workbuddy
-//（`toGatewayKind`），本份只在测试里用。两者由
+// （`toGatewayKind`），本份只在测试里用。两者由
 // TestUpstreamKindMirrorCoversEveryKind 一起钉住 —— 那条测试枚举
 // upstream.ErrKind 的**每一个**取值，任一档漏映射就红。
 func mirrorKind(k upstream.ErrKind) gateway.ErrorKind {

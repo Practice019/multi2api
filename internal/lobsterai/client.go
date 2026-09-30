@@ -142,7 +142,7 @@ func applyCapabilityHeaders(req *http.Request, clientVersion string) {
 // ClientVersion 取生效的客户端版本号（带 12 小时缓存 + 兜底）。
 //
 // ⚠ **必须保留兜底**：版本接口在第三方域名上，实测存在网络层/证书层差异
-//（直连曾失败）。拿不到就用 DefaultClientVersion。
+// （直连曾失败）。拿不到就用 DefaultClientVersion。
 //
 // 版本号是签到接口的必填参数，所以这里的失败会让签到降级 ——
 // 那比"整个上游不可用"轻得多。
@@ -536,13 +536,13 @@ func (c *Client) fetchActivityContext(ctx context.Context, a *Auth, slot *Activi
 //
 // ClaimDailyCheckin 的判据链是（见其注释的 7 步）：
 //
-//	1. 槽位查询失败          → failed
-//	2. slotState 不可用      → inactive
-//	3. 上下文查询失败        → failed
-//	4. claimedToday          → already-claimed
-//	5. actions 不含 check_in → inactive
-//	6. 领取失败              → failed
-//	7. 成功                  → claimed
+//  1. 槽位查询失败          → failed
+//  2. slotState 不可用      → inactive
+//  3. 上下文查询失败        → failed
+//  4. claimedToday          → already-claimed
+//  5. actions 不含 check_in → inactive
+//  6. 领取失败              → failed
+//  7. 成功                  → claimed
 //
 // 前 5 步**全是只读的**，只有第 6 步真的提交。而"今天签过没有"这个问题
 // 只需要前 5 步 —— 共享驱动（internal/dailycheckin）在决定"要不要领"
@@ -580,13 +580,13 @@ func (c *Client) CheckinStatus(ctx context.Context, a *Auth) ClaimOutcome {
 //
 // 步骤与判据（参照 claimLobsteraiDailyCheckin）：
 //
-//	1. 槽位查询失败          → failed
-//	2. slotState != available 或无 activityCode → inactive
-//	3. 上下文查询失败        → failed
-//	4. claimedToday          → already-claimed
-//	5. actions 不含 check_in → inactive
-//	6. 领取失败              → failed
-//	7. 成功                  → claimed（积分三级回退）
+//  1. 槽位查询失败          → failed
+//  2. slotState != available 或无 activityCode → inactive
+//  3. 上下文查询失败        → failed
+//  4. claimedToday          → already-claimed
+//  5. actions 不含 check_in → inactive
+//  6. 领取失败              → failed
+//  7. 成功                  → claimed（积分三级回退）
 //
 // ⚠ 第 4 步与第 5 步刻意分开："今天已领"用户无需动作；
 // "当前不可签到"（未开始/已结束/无资格）是另一回事。
@@ -683,7 +683,7 @@ type BalanceItem struct {
 //
 // ⚠ 端点用 `profile-summary` 而**不是** `/api/user/quota`：
 // 后者只显示 freeCreditsTotal=300，**不含活动积分**
-//（实测某账号 profile-summary 有 5297.72，quota 只有 300）。
+// （实测某账号 profile-summary 有 5297.72，quota 只有 300）。
 func (c *Client) FetchBalance(ctx context.Context, a *Auth) (*Balance, error) {
 	ver := c.ClientVersion(ctx)
 	req, err := http.NewRequest(http.MethodGet, c.api()+profileSummaryPath, nil)
@@ -707,9 +707,9 @@ func (c *Client) FetchBalance(ctx context.Context, a *Auth) (*Balance, error) {
 	var rec struct {
 		TotalCreditsRemaining float64 `json:"totalCreditsRemaining"`
 		CreditItems           []struct {
-			Type            string  `json:"type"`
+			Type             string  `json:"type"`
 			CreditsRemaining float64 `json:"creditsRemaining"`
-			ExpiresAt       string  `json:"expiresAt"`
+			ExpiresAt        string  `json:"expiresAt"`
 		} `json:"creditItems"`
 	}
 	if err := json.Unmarshal(env.Data, &rec); err != nil {

@@ -11,7 +11,7 @@ import "workbuddy2api/internal/gateway"
 //	checkin「今日签到」 → raccoon **没有**签到端点
 //
 // ⚠ 这里有个**容易搞错**的点：raccoon 确实有"桌面端登录奖励"
-//（`POST …/login/points/grant`），但它**不是每日签到** ——
+// （`POST …/login/points/grant`），但它**不是每日签到** ——
 //
 //	新人注册礼包  3000  注册时服务端自动发放        不涉及
 //	桌面端登录奖励 3000  一次性（每号一次）          ✅ 已实现

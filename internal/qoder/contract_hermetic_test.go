@@ -356,7 +356,7 @@ func TestRefreshExpiredIsSentinel(t *testing.T) {
 // TestNoSignerFailsLoudly 无 WASM 签名器必须**明确报错**，不回落公开端点。
 //
 // ⚠ 回落公开端点会把"加密不可用"伪装成"模型不存在"
-//（公开端点不认目录 key，一律 `Unsupported model`），排查方向完全跑偏。
+// （公开端点不认目录 key，一律 `Unsupported model`），排查方向完全跑偏。
 func TestNoSignerFailsLoudly(t *testing.T) {
 	srv, calls := fakeUpstream(t, 0)
 	c := NewWithBase(srv.URL)
@@ -704,7 +704,7 @@ func TestLoadDirFiltersByProduct(t *testing.T) {
 	dir := t.TempDir()
 	writeCred := func(name string, product string) {
 		a := &Auth{
-			AccessToken: fixtureJWT(time.Now().Add(time.Hour).Unix()),
+			AccessToken:  fixtureJWT(time.Now().Add(time.Hour).Unix()),
 			RefreshToken: "rt", UID: name, ProductID: product,
 		}
 		raw, _ := MarshalAuthFile(a)

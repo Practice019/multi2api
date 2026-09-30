@@ -4,8 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logbuf"
 )
 
 // 冷启动契约：/admin/stats 必须能**自行**把模型目录拉起来。

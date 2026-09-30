@@ -47,13 +47,13 @@ func newQuotaProvider(t *testing.T, c *Client, uid string, a *Auth) *Provider {
 // # 用户明确要求：显示原始值、不做单位假设
 //
 // `balance: 500000` 的单位**没有确证** —— 参照项目里它只出现在 zod schema
-//（`z.string()`）与 redaction 关键词表，没有任何换算点。
+// （`z.string()`）与 redaction 关键词表，没有任何换算点。
 //
 // 我们另有一个 `balanceScale`（推断为 micro-USD，÷100000 → $5.00），
 // 但本扩展点**不用它**：界面上的数字若带了错误的单位，比没有数字更误导。
 //
 // 变异可检：把返回改成 `int64(res.Raw / balanceScale)` → 本用例红
-//（500000 会变成 5）。
+// （500000 会变成 5）。
 func TestRefreshQuotaReportsRawValue(t *testing.T) {
 	c := newQuotaServer(t, 500000, 0)
 	p := newQuotaProvider(t, c, "usr-x", &Auth{AccessToken: "workos:t", AccountID: "usr-x"})

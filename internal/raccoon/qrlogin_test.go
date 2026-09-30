@@ -56,7 +56,7 @@ func TestQRLoginSVGEmptyOnEmptyURL(t *testing.T) {
 // 不同 URL 必须产出不同的 SVG（相同则说明编码时丢了输入）。
 //
 // 真正的"扫出来是什么"由 internal/qrcode 的交叉验证测试守住
-//（它与独立的 Python 实现逐位比对）。
+// （它与独立的 Python 实现逐位比对）。
 func TestQRLoginSVGEncodesTheURL(t *testing.T) {
 	p := NewWithConfig(Config{})
 	ext, _ := gateway.ExtOf[gateway.QRLoginExt](p)

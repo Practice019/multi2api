@@ -9,7 +9,7 @@
 //
 // 形状一样，但 qoderwasm **不能 import internal/qoder** —— 后者依赖
 // internal/gateway，而 arch_test 的 discoverUpstreams 用 `go list -deps`
-//（**传递**依赖）判定"谁消费契约"：一旦 qoderwasm 依赖它，
+// （**传递**依赖）判定"谁消费契约"：一旦 qoderwasm 依赖它，
 // 就会被判成一个没有 Provider 方法的上游 → 判据红。
 //
 // 所以适配放在装配层（这里可以同时 import 两边）。这与

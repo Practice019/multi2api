@@ -99,6 +99,7 @@ func NewWithConfig(cfg Config) *Provider {
 	p.initCheckin()
 	return p
 }
+
 // ID 上游标识。
 func (p *Provider) ID() string { return providerID }
 
@@ -194,7 +195,7 @@ func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gatew
 // ProbeHealth 探测凭证是否健康（gateway.HealthProbeExt）。
 //
 // 用 profile-summary：信封 code==0 才算健康
-//（⚠ 不能用 HTTP 200 当判据 —— 业务失败也是 200）。
+// （⚠ 不能用 HTTP 200 当判据 —— 业务失败也是 200）。
 func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) error {
 	a, err := authOf(cred)
 	if err != nil {

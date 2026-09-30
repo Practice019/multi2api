@@ -55,9 +55,10 @@ func (s *tokenStub) HasToken(cred gateway.Credential) bool { return s.hasToken }
 // 测的就变成了"直接读 e.a"，**兜底路径根本没被覆盖**（测试假绿）。
 //
 // 所以这里刻意用一个**不透明 secret**（非 *auth.Auth）：
-//   · 它代表 codearts 那类"凭证不在 *auth.Auth 里"的上游；
-//   · pool 的兜底对它不生效（类型断言不成立）→ 投影保持无 token；
-//   · has_token 于是只能靠 HasToken(cred) 这条第二来源得到 true。
+//
+//	· 它代表 codearts 那类"凭证不在 *auth.Auth 里"的上游；
+//	· pool 的兜底对它不生效（类型断言不成立）→ 投影保持无 token；
+//	· has_token 于是只能靠 HasToken(cred) 这条第二来源得到 true。
 //
 // 换句话说：这条测试守的机制（第二来源）在"不透明 secret"这个真实形态下
 // 依然有效，且这正是它当初要守的场景。

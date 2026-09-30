@@ -186,10 +186,10 @@ func TestContentBlockTriggersDegradeAndRetries(t *testing.T) {
 
 	uid := "u-block"
 	h := NewHandler(Config{
-		Pool:       testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
-		Upstream:   up,
+		Pool:              testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:          up,
 		DefaultClassifier: defaultClassifierOf(),
-		PromptGate: gate,
+		PromptGate:        gate,
 	})
 
 	rec2 := newBuf()
@@ -242,11 +242,11 @@ func TestContentBlockTwiceReturnsUpstreamErrorWithoutRotating(t *testing.T) {
 
 	uid := "u-block2"
 	h := NewHandler(Config{
-		Pool:       testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
-		Upstream:   up,
+		Pool:              testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:          up,
 		DefaultClassifier: defaultClassifierOf(),
-		PromptGate: gate,
-		MaxRotate:  5, // 给足预算：若实现仍在换号，这里会跑满 5 次
+		PromptGate:        gate,
+		MaxRotate:         5, // 给足预算：若实现仍在换号，这里会跑满 5 次
 	})
 
 	w := newBuf()
@@ -313,10 +313,10 @@ func TestContentBlockSingleAccountStillRetries(t *testing.T) {
 
 	// 池里**只有一个**账号 —— 这正是绝大多数自托管部署的形态。
 	h := NewHandler(Config{
-		Pool:       testPoolWith(&auth.Auth{UID: "only", AccessToken: "at1", ExpiresAt: 9999999999}),
-		Upstream:   up,
+		Pool:              testPoolWith(&auth.Auth{UID: "only", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:          up,
 		DefaultClassifier: defaultClassifierOf(),
-		PromptGate: gate,
+		PromptGate:        gate,
 	})
 
 	w := newBuf()
@@ -350,10 +350,10 @@ func TestContentBlockWithNilGateReturnsErrorNoRetry(t *testing.T) {
 
 	uid := "u-nogate"
 	h := NewHandler(Config{
-		Pool:      testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
-		Upstream:  up,
+		Pool:              testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:          up,
 		DefaultClassifier: defaultClassifierOf(),
-		MaxRotate: 5,
+		MaxRotate:         5,
 	})
 
 	w := newBuf()
@@ -391,11 +391,11 @@ func TestContentBlockAlreadyDegradedDoesNotRetryAgain(t *testing.T) {
 
 	uid := "u-predegraded"
 	h := NewHandler(Config{
-		Pool:       testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
-		Upstream:   up,
+		Pool:              testPoolWith(&auth.Auth{UID: uid, AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:          up,
 		DefaultClassifier: defaultClassifierOf(),
-		PromptGate: gate,
-		MaxRotate:  5,
+		PromptGate:        gate,
+		MaxRotate:         5,
 	})
 
 	w := newBuf()

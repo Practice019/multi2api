@@ -346,14 +346,14 @@ func (c *Client) FetchModelCatalog(ctx context.Context, a *Auth) []RemoteModel {
 	}
 
 	var chatModels []struct {
-		Name        string          `json:"name"`
-		Description string          `json:"description"`
-		Visible     *bool           `json:"visible"`
-		Params      json.RawMessage `json:"params"`
-		ContextWindow int           `json:"context_window"`
-		BillingEffectiveMultiplier *float64 `json:"billing_effective_multiplier"`
-		BillingMultiplier          *float64 `json:"billing_multiplier"`
-		Tags                       []string `json:"tags"`
+		Name                       string          `json:"name"`
+		Description                string          `json:"description"`
+		Visible                    *bool           `json:"visible"`
+		Params                     json.RawMessage `json:"params"`
+		ContextWindow              int             `json:"context_window"`
+		BillingEffectiveMultiplier *float64        `json:"billing_effective_multiplier"`
+		BillingMultiplier          *float64        `json:"billing_multiplier"`
+		Tags                       []string        `json:"tags"`
 	}
 	for _, cat := range payload.Categories {
 		if cat.Type == "chat" {
@@ -523,7 +523,7 @@ type OnboardingStatus struct {
 // ⚠ **服务端没有单独的奖励状态端点**（实测），故只能查账单明细。
 //
 // ⚠ 查询失败时**保守返回 Claimed:false** —— 宁可让用户多点一次
-//（服务端幂等，无害），也不要误报「已领」而让他真的错过。
+// （服务端幂等，无害），也不要误报「已领」而让他真的错过。
 func (c *Client) FetchOnboardingStatus(ctx context.Context, a *Auth) OnboardingStatus {
 	fallback := OnboardingStatus{Claimed: false, Points: float64(loginRewardPoints)}
 	u := c.base() + pointsPrefix + "/bills?paging.limit=50&paging.offset=0"

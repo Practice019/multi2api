@@ -84,7 +84,7 @@ func doScope(t *testing.T, h *Handler, body string) map[string]any {
 // 判据：被问到的 uid **集合恰好是那一个**（多一个少一个都算错）。
 //
 // 变异可检：后端改回"忽略 body.uid 恒刷全池" → 本用例红
-//（asked 会变成 3 个而不是 1 个）。
+// （asked 会变成 3 个而不是 1 个）。
 func TestQuotaRefreshScopeAccount(t *testing.T) {
 	h, asked := newScopeFixture(t)
 	out := doScope(t, h, `{"uid":"a1"}`)

@@ -26,7 +26,7 @@
 // # ⚠ 本包**不 import internal/gateway**（架构硬约束，不是偷懒）
 //
 // 架构判据把"internal/ 下依赖 gateway 的包"一律当成**上游实现**
-//（见 gateway/arch_test.go 的 discoverUpstreams），而"上游之间不得互相依赖"。
+// （见 gateway/arch_test.go 的 discoverUpstreams），而"上游之间不得互相依赖"。
 // 所以本包一旦 import gateway 就会被判成上游，于是：
 //
 //	lobsterai 依赖 dailycheckin → 上游依赖上游 → **架构违规**
@@ -41,7 +41,7 @@
 // 所以正确答案不是"改豁免名单"，而是**本包根本不该认识 gateway 的类型**：
 // 它是共享基础设施，只描述"签到这件事怎么办"；把结果翻译成
 // gateway.DailyAction / gateway.Job / gateway.AdminRoute 是**上游侧**的事
-//（每个上游三行，见各包的 checkin.go）。
+// （每个上游三行，见各包的 checkin.go）。
 //
 // 这也是更干净的层次：驱动不依赖契约，契约也不依赖驱动。
 package dailycheckin

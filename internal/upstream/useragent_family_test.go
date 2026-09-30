@@ -132,7 +132,7 @@ func TestDefaultUADiffersFromReferenceIntl(t *testing.T) {
 // 不能有任何变化（否则上游侧归因、风控、限流都可能受影响）。
 //
 // 判据：空表 + 非空 ClientVersion 时，UA 必须等于三段式默认值
-//（defaultWorkBuddyUA），与加这个特性之前**完全相同**。
+// （defaultWorkBuddyUA），与加这个特性之前**完全相同**。
 func TestEmptyUAModelFamiliesIsByteIdenticalToBefore(t *testing.T) {
 	c := New()
 	c.ClientVersion = "5.5.2"

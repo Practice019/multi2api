@@ -31,7 +31,7 @@ import (
 // 这正是本仓多个 refreshskew.go 注释里反复警告的"续期写到另一个对象上"。
 //
 // 判据：`refreshCandidates` 在有 `creds` 时必须返回**池里那个指针**
-//（`== live`，不是"内容相同"）—— 只有同一个对象，原地更新才会被界面看到。
+// （`== live`，不是"内容相同"）—— 只有同一个对象，原地更新才会被界面看到。
 func TestRefreshCandidatesPreferLiveSecret(t *testing.T) {
 	dir := t.TempDir()
 	writeClineAuth(t, dir, "u-live", "DISK-TOKEN", "REF", time.Now().Add(-time.Hour).UnixMilli())
@@ -54,7 +54,7 @@ func TestRefreshCandidatesPreferLiveSecret(t *testing.T) {
 		t.Fatalf("应有 1 个候选，实际 %d", len(got))
 	}
 	if got[0] != live {
-		t.Error("没有返回池里那个对象 —— 刷磁盘副本会导致"+
+		t.Error("没有返回池里那个对象 —— 刷磁盘副本会导致" +
 			"「落盘已续期、界面仍显示已过期」（实测就是这个形态）")
 	}
 	if got[0].AccessToken != "LIVE-TOKEN" {
@@ -170,8 +170,9 @@ func writeClineAuth(t *testing.T, dir, uid, accessToken, refreshToken string, ex
 // TestRunRefreshRefreshesExpiredToken 后台任务**真的会把过期 token 换掉**。
 //
 // 端到端：写一份过期凭证 → 起假上游 → 跑 runRefresh → 断言
-//   ① 上游确实被请求了（POST /refresh 或等价端点）
-//   ② 磁盘上的 token **变了**（不只是内存）
+//
+//	① 上游确实被请求了（POST /refresh 或等价端点）
+//	② 磁盘上的 token **变了**（不只是内存）
 func TestRunRefreshRefreshesExpiredToken(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,9 +239,9 @@ func TestRunRefreshSkipsNonRenewable(t *testing.T) {
 	// 即使它已经过期很久 —— 没有 refresh_token 就是刷不了，
 	// 判成"该刷"只会让每轮都白发一次请求。
 	expiredNoRef := &Auth{
-		AccessToken: "OLD",
+		AccessToken:  "OLD",
 		RefreshToken: "",
-		ExpireTime:  time.Now().Add(-24 * time.Hour).UnixMilli(),
+		ExpireTime:   time.Now().Add(-24 * time.Hour).UnixMilli(),
 	}
 	if expiredNoRef.needsRefresh(time.Now(), defaultRefreshScanInterval) {
 		t.Error("没有 refresh_token 的凭证被判为「该刷」—— " +

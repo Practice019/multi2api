@@ -224,4 +224,3 @@ func (p *Provider) CheckinAll(ctx context.Context) gateway.DailyCheckinReport {
 //
 // 留这条注释是为了让"签到相关的代码在 checkin.go"这个直觉
 // 不至于让人在这里重新加一个 Jobs()。
-

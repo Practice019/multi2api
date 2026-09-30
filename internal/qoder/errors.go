@@ -17,7 +17,7 @@ var ErrRefreshExpired = errors.New("qoder: refresh_token 已失效，请重新�
 // 返回 401，说明它被网关豁免认证、由业务层报「会话未就绪」。
 //
 // 这与 Cline 的 `authorization_pending` 是同一类语义，但**判据形态完全不同**
-//（Cline 看响应体的 error 字段且状态码可能 400；Qoder 看状态码 404）。
+// （Cline 看响应体的 error 字段且状态码可能 400；Qoder 看状态码 404）。
 var ErrLoginPending = errors.New("qoder: 授权尚未完成")
 
 // CodeTokenNotReady / CodeAccountNotReady 轮询的业务码。
@@ -91,8 +91,8 @@ func containsAny(s string, needles []string) bool {
 //
 // 判据（两条都要认）：
 //
-//	1. `event: error` 行（Qoder 的独立错误事件）
-//	2. 顶层 `{code, message, type}` 且 code 非 0（无 error 包裹）
+//  1. `event: error` 行（Qoder 的独立错误事件）
+//  2. 顶层 `{code, message, type}` 且 code 非 0（无 error 包裹）
 func IsInBandError(frame string) (bool, string) {
 	if strings.Contains(frame, "event: error") {
 		return true, extractInBandMessage(frame)

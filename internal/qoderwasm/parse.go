@@ -122,7 +122,7 @@ func parseOpenAIBody(model string, body []byte) (InferAsk, error) {
 //
 // 多模态块里的图片**这里丢掉**：加密端点的图片走 `chat_context.imageUrls`
 // 与 `content` 数组的另一种形状，而那条路径尚未验证。宁可先只发文本
-//（模型至少能回答），也不要发一个形状没验证过的数组让它报错。
+// （模型至少能回答），也不要发一个形状没验证过的数组让它报错。
 func textOf(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -153,7 +153,7 @@ func textOf(raw json.RawMessage) string {
 // contentOf 保留 content 的原始形态（字符串或数组）。
 //
 // 与 textOf 的区别：`messages[].content` 要保持调用方给的形状
-//（数组里有图时别压成文本），而 `chat_context.text` 只要文本。
+// （数组里有图时别压成文本），而 `chat_context.text` 只要文本。
 func contentOf(raw json.RawMessage) any {
 	if len(raw) == 0 {
 		return ""

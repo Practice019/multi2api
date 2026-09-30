@@ -28,7 +28,7 @@ import (
 // 我们没有可靠依据做换算，所以不引入任何系数。
 //
 // ⚠ 这里只报**合计**，不报分项：池的 `CreditsQuota` 是单值语义
-//（分项在 `/admin/<upstream>/balance` 的 items 里，那是按需查询的出口）。
+// （分项在 `/admin/<upstream>/balance` 的 items 里，那是按需查询的出口）。
 //
 // 编译期断言。
 var _ gateway.QuotaExt = (*Provider)(nil)

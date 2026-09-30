@@ -35,16 +35,16 @@ import (
 
 // loginEntry 一次在途登录的会话。
 type loginEntry struct {
-	state       string
-	qrCode      string
-	qrURL       string
-	issuedAt    time.Time
-	expiredAt   string
-	rotations   int // canceled 时换过几次 code
-	ready       bool
-	cred        gateway.Credential
-	failRsn     string
-	mu          sync.Mutex
+	state     string
+	qrCode    string
+	qrURL     string
+	issuedAt  time.Time
+	expiredAt string
+	rotations int // canceled 时换过几次 code
+	ready     bool
+	cred      gateway.Credential
+	failRsn   string
+	mu        sync.Mutex
 }
 
 // loginFlow 实现 gateway.LoginFlow。

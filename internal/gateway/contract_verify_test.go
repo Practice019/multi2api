@@ -140,6 +140,7 @@ func TestExtAccessorPredicateIsNotSilentlyFalse(t *testing.T) {
 
 // noChatCaps 声明了别的能力但没有 CapChat。
 type noChatCaps struct{}
+
 func (n *noChatCaps) ID() string       { return "nocap" }
 func (n *noChatCaps) Caps() Capability { return CapModels }
 func (n *noChatCaps) Chat(ctx context.Context, c Credential, b []byte) (ChatStream, error) {

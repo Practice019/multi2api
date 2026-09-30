@@ -479,7 +479,7 @@ func TestExpiryFallsBackToJWT(t *testing.T) {
 	now := time.Now()
 
 	// 有 expires_at：用它
-	a1 := &Auth{AccessToken: fixtureJWT(now.Add(10*time.Hour).Unix()),
+	a1 := &Auth{AccessToken: fixtureJWT(now.Add(10 * time.Hour).Unix()),
 		ExpiresAt: fmt.Sprintf("%d", now.Add(-time.Hour).UnixMilli())}
 	if !a1.IsExpired(now) {
 		t.Error("expires_at 已过期时应判过期（即便 JWT 还没到期）")
@@ -532,12 +532,12 @@ func TestDisplayNameRules(t *testing.T) {
 		base, eff float64
 		want      string
 	}{
-		{"Kimi-K3", 1, 1, "Kimi-K3 · x1"},                 // ⚠ 1 倍也要显示
+		{"Kimi-K3", 1, 1, "Kimi-K3 · x1"}, // ⚠ 1 倍也要显示
 		{"GLM-5-3", 0.75, 0.75, "GLM-5-3 · x0.75"},
 		{"GLM-5-3-Flash", 0.2, 0.1, "GLM-5-3-Flash · x0.2→x0.1"}, // 折扣
-		{"Free-1", 0.5, 0, "Free-1 · 免费"},                // 0 = 免费
-		{"No-Info", 0, -1, "No-Info"},                     // 负数 = 取不到 → 不加后缀
-		{"No-Info2", 0, 0.0, "No-Info2 · 免费"},            // 0 是"免费"，不是"取不到"
+		{"Free-1", 0.5, 0, "Free-1 · 免费"},                        // 0 = 免费
+		{"No-Info", 0, -1, "No-Info"},                            // 负数 = 取不到 → 不加后缀
+		{"No-Info2", 0, 0.0, "No-Info2 · 免费"},                    // 0 是"免费"，不是"取不到"
 	}
 	for _, c := range cases {
 		if got := DisplayName("id", c.desc, c.base, c.eff); got != c.want {

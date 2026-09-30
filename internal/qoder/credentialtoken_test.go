@@ -11,7 +11,7 @@ import (
 // # 这是用户报的「Token 列一直是 `—`」的真正原因
 //
 // 界面的「Token」列判据是 `has_token`，而它原来只读账号池投影
-//（核心的 `*auth.Auth`）。对 cline 而言投影里那个字段**永远是空的**：
+// （核心的 `*auth.Auth`）。对 cline 而言投影里那个字段**永远是空的**：
 //
 //	核心 auth.Parse 读 `auth.accessToken`（驼峰）
 //	本上游落盘写的令牌字段名与它不同
@@ -59,4 +59,3 @@ func TestHasTokenSkipsNetwork(t *testing.T) {
 	// 不发网络的话这里立刻返回；若发了会因基址不可达而慢/失败。
 	_ = p.HasToken(gateway.Credential{Secret: &Auth{AccessToken: "t"}})
 }
-

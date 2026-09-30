@@ -181,7 +181,7 @@ func RefreshSkewAtRatio(t JWTTimes, ratio float64) (time.Duration, bool) {
 }
 
 // RefreshSkewFromToken 一步到位：从 token 串算出提前续期窗口
-//（默认按"剩余 ≤ 寿命的一半"）。
+// （默认按"剩余 ≤ 寿命的一半"）。
 //
 // 供上游一行接入：
 //

@@ -355,7 +355,7 @@ func (c *Client) PollDeviceToken(ctx context.Context, s *DeviceSession) (PollRes
 // RefreshCredential 续期一份凭证。
 //
 // ⚠ 请求体**必须带 machine_id** —— 这是 Qoder 特有的要求
-//（多数 OAuth 实现不带机器标识）。丢了它续期会被服务端拒绝。
+// （多数 OAuth 实现不带机器标识）。丢了它续期会被服务端拒绝。
 func (c *Client) RefreshCredential(ctx context.Context, a *Auth) (*Auth, error) {
 	if a == nil || !a.Renewable() {
 		return nil, ErrRefreshExpired
@@ -407,8 +407,8 @@ func (c *Client) RefreshCredential(ctx context.Context, a *Auth) (*Auth, error) 
 	// token 本身是 **`dt-` 前缀的不透明串**（27 字符，不是 JWT），
 	// 所以"解 JWT exp"那条路也走不通 —— 过期时刻**只能**从这里存。
 	var rec struct {
-		Code         int    `json:"code"`
-		Message      string `json:"message"`
+		Code    int    `json:"code"`
+		Message string `json:"message"`
 		// 登录响应用 `token`、续期响应用 `device_token`，两者都认（参照同）。
 		Token        string `json:"token"`
 		DeviceToken  string `json:"device_token"`

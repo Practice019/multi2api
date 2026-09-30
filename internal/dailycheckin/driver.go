@@ -91,7 +91,7 @@ type Descriptor struct {
 //
 // ⚠ 那三行**必须在各上游包内**写（不能下沉到本包）—— 因为本包不 import
 // gateway，见 doc.go。代价是三行样板，收益是架构约束成立
-//（第一次构建时 arch_test 就把"上游依赖上游"判成了违规）。
+// （第一次构建时 arch_test 就把"上游依赖上游"判成了违规）。
 type Driver struct {
 	up   Upstream
 	desc Descriptor
@@ -180,7 +180,7 @@ type Result struct {
 //
 // 这是**唯一**的签到实现 —— 单账号端点、全量端点、定时任务三条路径
 // 全部调它。所以"记得写历史"只在这里成立一次，不存在"某个入口忘了写"
-//（那正是 trae 当年踩过的 bug，也是 lobsterai/qoder 移植时漏掉的那处）。
+// （那正是 trae 当年踩过的 bug，也是 lobsterai/qoder 移植时漏掉的那处）。
 func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Result {
 	if !d.Ready() {
 		return Result{UID: acc.UID, Status: checkinlog.StatusFail, Detail: "签到未接线"}
@@ -266,7 +266,7 @@ func (d *Driver) RunAll(ctx context.Context) error {
 // # 入参：uid（query 或 JSON body 都认）
 //
 // 两种都认是**为了统一**：本项目既有的每日动作端点一律用 body {"uid":…}
-//（前端 dayUrl 通道如此），但手工 curl 时 query 更顺手。
+// （前端 dayUrl 通道如此），但手工 curl 时 query 更顺手。
 // 各上游此前写法不一 —— 那正是"接口不统一"的一部分。
 func (d *Driver) HandlerOne(w http.ResponseWriter, r *http.Request) {
 	if !d.Ready() {

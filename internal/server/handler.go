@@ -493,15 +493,15 @@ type DefaultUpstream interface {
 // # 为什么不用 gateway.ModelInfo
 //
 // `gateway.ModelInfo` 的窗口字段是 `int`，而默认上游给的是 `int64`
-//（上游用 int64 存 token 数）。改 gateway 的字段类型会牵动所有上游的
+// （上游用 int64 存 token 数）。改 gateway 的字段类型会牵动所有上游的
 // 实现与契约测试 —— 那是为了让一个**内部投影**少写两个字段，
 // 代价与收益不成比例。
 //
 // 所以这里保留 int64：出口层拿到后按需 `int64(...)` 提升
-//（`entryOf` 本来就收 int64）。适配层做一次转换即可。
+// （`entryOf` 本来就收 int64）。适配层做一次转换即可。
 //
 // ⚠ 刻意**不**收 `Name` / `Efforts`：出口层从不读它们
-//（模型名直接用 ID；思考档位由出站改写层处理）。
+// （模型名直接用 ID；思考档位由出站改写层处理）。
 // 收进来只会让"接口比消费者需要的宽"，而宽接口会掩盖真实依赖。
 type DefaultModel struct {
 	ID            string
@@ -1650,7 +1650,7 @@ func (h *Handler) nextResetAt(uid string) time.Time {
 //
 // 而"该上游没实现 ErrorClassifier"的正确解释**不是**"用通用猜测"，
 // 而是"用默认上游的判据"：默认上游就是 workbuddy，它的分类判据
-//（hardMarkers / sessionDeadMarkers）是 workbuddy 的**上游知识**。
+// （hardMarkers / sessionDeadMarkers）是 workbuddy 的**上游知识**。
 //
 // ⚠ 刻意**不**回落到 `gateway.DefaultErrorKind`（只按状态码的通用兜底）：
 // 那会丢掉 workbuddy 的两个正文判据 ——
@@ -1738,7 +1738,7 @@ func (e *RefreshError) Unwrap() error {
 // 正是 privateSDKKnownDebt 里 server 那条债的形态。
 //
 // 换成 server 自己的类型之后，Kind 直接就是 `gateway.ErrorKind`
-//（中立类型），不再需要 upstreamKindOf 那层"中立 → upstream"的翻译 ——
+// （中立类型），不再需要 upstreamKindOf 那层"中立 → upstream"的翻译 ——
 // 那层翻译**存在的唯一理由是 upstream.Error.Kind 是 upstream.ErrKind**。
 // 换句话说：这条依赖链被整条剪掉了，而不是被绕开。
 type chatError struct {

@@ -106,6 +106,7 @@ func TestRefreshSkewUsesHalfLifetime(t *testing.T) {
 		}
 	})
 }
+
 // TestRefreshSkewStripsWorkOSPrefix cline 的 `workos:` 前缀不影响时间戳解析。
 //
 // ⚠ 那个前缀**不可剥离**（剥了即 401），所以本方法必须先剥前缀再解 ——

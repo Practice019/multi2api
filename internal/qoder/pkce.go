@@ -61,7 +61,7 @@ type Pkce struct {
 //
 // 源码 `Y_a()` 取 `43 + floor(86 * random)`。虽然 RFC 只要求 43..128，
 // 但**照抄源码的分布**更安全：服务端若对长度做了统计性检查
-//（例如拒绝固定长度的 verifier），随机长度才不会踩雷。
+// （例如拒绝固定长度的 verifier），随机长度才不会踩雷。
 //
 // 熵来源是 crypto/rand（不是 math/rand）—— verifier 是一次性密钥，
 // 可预测的 verifier 等于把授权码交给攻击者。

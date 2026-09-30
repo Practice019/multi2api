@@ -14,7 +14,7 @@ import (
 // 前端的「批量导入」按钮判据是 manifest 里的能力位 `import`，而后端
 // 声明它的前提是**真的实现了** `gateway.AccountImportExt`。
 // 少了这个扩展点，按钮要么不出现（用户看不到）、要么点了回 501
-//（假按钮）—— 两种都是本轮要消灭的形态。
+// （假按钮）—— 两种都是本轮要消灭的形态。
 func TestImplementsAccountImportExt(t *testing.T) {
 	var p gateway.Provider = NewWithConfig(Config{})
 	if _, ok := gateway.ExtOf[gateway.AccountImportExt](p); !ok {

@@ -45,7 +45,7 @@ func (p *Provider) SetCredentialSource(fn credentialSource) { p.creds = fn }
 //
 // ⚠ 用 p.ID() 而不是包级常量：两个产品是**同类型的两份实例**，
 // 路径必须按实例区分，否则 qodercn 的签到会作用在 qoder 的账号上
-//（前端按 uid 调用，而两个产品的账号池是分开的 —— 但路径相同会让
+// （前端按 uid 调用，而两个产品的账号池是分开的 —— 但路径相同会让
 // 路由表里两条同路径注册冲突）。
 func (p *Provider) checkinPath() string { return "/admin/" + p.ID() + "/checkin" }
 func (p *Provider) balancePath() string { return "/admin/" + p.ID() + "/balance" }
@@ -156,11 +156,11 @@ func (p *Provider) handleBalance(w http.ResponseWriter, r *http.Request) {
 	pkgs := make([]map[string]any, 0, len(b.Packages))
 	for _, pkg := range b.Packages {
 		pkgs = append(pkgs, map[string]any{
-			"name":      pkg.Name,
-			"unit":      pkg.Unit,
-			"remaining": pkg.Remaining,
-			"total":     pkg.Total,
-			"used":      pkg.Used,
+			"name":       pkg.Name,
+			"unit":       pkg.Unit,
+			"remaining":  pkg.Remaining,
+			"total":      pkg.Total,
+			"used":       pkg.Used,
 			"expires_at": pkg.ExpiredTime,
 		})
 	}

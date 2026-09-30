@@ -488,8 +488,8 @@ func TestParseClientVersionValidates(t *testing.T) {
 		{"2026.9.4-beta.1", "2026.9.4"},
 		{"  2026.9.4  ", "2026.9.4"},
 		{"", ""},
-		{"v2026.9.4", ""},           // 非点分数字开头
-		{"<html>error</html>", ""},  // HTML 错误页
+		{"v2026.9.4", ""},          // 非点分数字开头
+		{"<html>error</html>", ""}, // HTML 错误页
 		{"null", ""},
 	}
 	for _, c := range cases {

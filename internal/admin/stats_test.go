@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logbuf"
 )
 
 // 调用统计必须覆盖**全部历史**，而不是「进程启动至今」。

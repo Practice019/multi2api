@@ -27,10 +27,10 @@ import (
 
 // Provider 实现 gateway.Provider 与若干可选扩展点。
 type Provider struct {
-	client   *Client
-	authDir  string
-	apiBase  string
-	workOS   string
+	client     *Client
+	authDir    string
+	apiBase    string
+	workOS     string
 	emailDummy struct{} // 占位，保持结构体非空便于未来加字段
 
 	// creds 按 uid 取凭证（装配层注入；nil = 管理端点不可用）。

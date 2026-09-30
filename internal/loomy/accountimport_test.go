@@ -33,7 +33,7 @@ func TestImplementsAccountImportExt(t *testing.T) {
 // loomyCredFixture 一份**真实形态**的凭证（键名取自 auths/loomy/ 的实测文件）。
 //
 // 值全是假的。`session` 用 32 位小写 hex 是因为该**形态**才是判据
-//（looksLikeSession 的正例）—— 32 位这个长度是"要不要打告警"的分界，
+// （looksLikeSession 的正例）—— 32 位这个长度是"要不要打告警"的分界，
 // 而具体是哪 32 个字符与任何断言无关（见 contract_hermetic_test.go 里
 // 「不要把真实凭证抄进 fixture」那条教训）。
 const loomyCredFixture = `{` +

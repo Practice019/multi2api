@@ -56,13 +56,13 @@ func TestQoderCNDiffersFromIntlEndpoints(t *testing.T) {
 // ⚠ 改任何一个都必须有新的实测依据，并同步更新这里的期望值。
 func TestQoderCNExactValues(t *testing.T) {
 	want := map[string]struct{ got, want string }{
-		"AuthBase":  {QoderCN.AuthBase, "https://qoder.cn"},
-		"OpenAPIBase": {QoderCN.OpenAPIBase, "https://openapi.qoder.com.cn"},
+		"AuthBase":           {QoderCN.AuthBase, "https://qoder.cn"},
+		"OpenAPIBase":        {QoderCN.OpenAPIBase, "https://openapi.qoder.com.cn"},
 		"EncryptedInferBase": {QoderCN.EncryptedInferBase, "https://gateway.qoder.com.cn"},
-		"ClientID": {QoderCN.ClientID, "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"},
-		"TestClientID": {QoderCN.TestClientID, "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"},
-		"SashClientType": {QoderCN.SashClientType, "10"},
-		"UserAgentPrefix": {QoderCN.UserAgentPrefix, "qoder"},
+		"ClientID":           {QoderCN.ClientID, "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"},
+		"TestClientID":       {QoderCN.TestClientID, "732aef47-9cf2-46a2-95fe-4cebb5d0d1fa"},
+		"SashClientType":     {QoderCN.SashClientType, "10"},
+		"UserAgentPrefix":    {QoderCN.UserAgentPrefix, "qoder"},
 	}
 	for name, w := range want {
 		if w.got != w.want {

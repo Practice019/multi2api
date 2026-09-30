@@ -4,7 +4,7 @@
 //
 // `FetchBalance` 与 `ClaimLoginGrant` 此前都已实现、也有测试覆盖，
 // 但本包**没有** AdminRoutes —— 也就是说这两件事**没有任何入口能调到**
-//（前端看不到、命令行调不到，只有测试能碰）。
+// （前端看不到、命令行调不到，只有测试能碰）。
 // cline 的余额端点踩过同一个坑（见那边的注释），这里一并补上。
 //
 // # ⚠ 登录奖励**不是**每日签到（这个区别必须保住）
@@ -41,9 +41,9 @@ import (
 // 那是发给上游的；这里是核心挂给前端的。两者重名会让读者以为
 // 是同一个东西。
 const (
-	adminBalancePath    = "/admin/raccoon/balance"
+	adminBalancePath     = "/admin/raccoon/balance"
 	adminLoginRewardPath = "/admin/raccoon/login-reward"
-	adminOnboardingPath = "/admin/raccoon/onboarding"
+	adminOnboardingPath  = "/admin/raccoon/onboarding"
 )
 
 // credentialSource 由装配层注入的"按 uid 取凭证"访问器。
@@ -114,7 +114,7 @@ func authFor(cred gateway.Credential) (*Auth, bool) {
 //
 // ⚠ 各池**分开作 package**，让用户看出「奖励 / 每日 / 会员 / 充值」
 // 是独立来源 —— 它们的有效期与回补规则都不同
-//（每日积分每日刷新、充值积分长期有效）。
+// （每日积分每日刷新、充值积分长期有效）。
 func (p *Provider) handleBalance(w http.ResponseWriter, r *http.Request) {
 	cred, uid, ok := p.resolveCred(r)
 	if !ok {
