@@ -9,10 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,12 +28,11 @@ import (
 	"workbuddy2api/internal/lobsterai"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/loomy"
-	"workbuddy2api/internal/mimo"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
-	"workbuddy2api/internal/raccoon"
-	"workbuddy2api/internal/qoder"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/qoder"
+	"workbuddy2api/internal/raccoon"
 	"workbuddy2api/internal/redisstore"
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
@@ -125,7 +124,7 @@ func main() {
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 超时 / 脱敏 / 出站身份（含按模型族分档）全部在 configureUpstream 里 ——
-	// 抽成函数是为了让 buddy 实例能走**同一条**构造路径（见 newUpstreamClient）。
+	// 抽成函数是为了让"构造一个配置好的出站客户端"只有一处（装配层与测试共用）。
 	configureUpstream(up, cfg)
 	// 系统提示词体系（借鉴 workbuddy2api-panel）：模式 + 正文 + 降级状态机。
 	//
@@ -336,103 +335,6 @@ func main() {
 		}
 		log.Printf("已注册海外版上游 workbuddy-intl（授权站点 %s，凭证目录 %s）",
 			cfg.WorkbuddyIntlOAuthBaseURL, cfg.WorkbuddyIntlAuthDir)
-	}
-
-	// ---- buddy：腾讯 CodeBuddy 中国版（参照 CODEBUDDY 的身份）----
-	//
-	// # 它打的是**与国内版 workbuddy 同一个上游**
-	//
-	// 参照 product.ts 的两个产品（逐字）：
-	//
-	//	CODEBUDDY  id=buddy      endpoint=copilot.tencent.com  platform=ide
-	//	           productCode=codebuddy  userAgent=CodeBuddyIDE/1.106.1
-	//	WORKBUDDY  id=workbuddy  endpoint=www.workbuddy.ai     platform=workbuddy-ai
-	//
-	// 而本网关的 `workbuddy` 实例端点就是 copilot.tencent.com ——
-	// 我们的 workbuddy 占的是参照里 **buddy** 的槽位，workbuddy-intl 占的是
-	// 参照里 **workbuddy** 的槽位。所以这里不是"接一个新上游"，
-	// 而是让同一上游能以参照验证过的 **IDE 身份**再注册一份。
-	//
-	// # 与国内版实例的三点实质差异
-	//
-	//	① 出站 UA        CodeBuddyIDE/1.106.1   vs CLI/2.63.2 CodeBuddy/2.63.2
-	//	② X-Product-Code codebuddy              vs （空）
-	//	③ 登录 platform  ide                     vs CLI
-	//
-	// ① ② 决定腾讯后台账单的「使用端」归因（缺品牌字样则显示 `-`）；
-	// ③ 决定登录页走哪套流程。
-	//
-	// # 为什么默认关、且不动既有 CN 通道
-	//
-	// 我们 CN 通道的 platform=CLI 是**生产验证过**的形态；参照用 ide 且实测正常。
-	// 两者都能用，但我没有真实凭据去判定哪个更好 —— 所以**不替换**，
-	// 而是做成可显式启用的第二个实例：想用 IDE 身份的运维把号放进
-	// `auths/buddy/`，`auths/workbuddy/` 全程不受影响。
-	//
-	// 玩法类端点（签到/成长/旅行）**保留** —— 参照里 buddy(CN) 没有
-	// 禁用玩法的迹象（那套 DisableGrowthTravel 判定只针对海外版）。
-	if cfg.BuddyEnabled {
-		// 第二个出站客户端：身份不同，其余（超时/脱敏/分档表）与全局同源。
-		//
-		// ⚠ 不能浅拷贝 `up`（Client 里有 sync.RWMutex），走 newUpstreamClient。
-		// 但 promptGate **必须共用同一个** —— 各建一个的话 handler 触发的
-		// 降级这个实例永远看不到（见 promptGate 那段的注释）。
-		upBuddy := newUpstreamClient(cfg, upstreamIdentity{
-			UserAgent:     cfg.BuddyUserAgent,
-			ClientVersion: cfg.BuddyClientVersion,
-			CliVersion:    cfg.BuddyCliVersion,
-			ClientName:    cfg.BuddyClientName,
-			ProductCode:   cfg.BuddyProductCode,
-			// ⚠ 清空分档表：参照 CODEBUDDY 是空表，注释写明「中国版只有一条
-			// 产品线，无需按模型分档：全部模型沿用 IDE UA」。
-			// 不清空的话 glm-/hy 模型的 UA 会被全局表覆写成 WorkBuddy/...，
-			// 把 CodeBuddyIDE 身份冲掉（账单归因跟着错）。
-			NoUAModelFamilies: true,
-		})
-		upBuddy.PromptMode = cfg.PromptMode
-		upBuddy.PromptText = cfg.PromptText
-		upBuddy.PromptGate = promptGate
-
-		wbBuddy := workbuddy.NewWithConfig(workbuddy.Config{
-			Pool:     poolAdapter{p: p},
-			Provider: "buddy",
-			ID:       "buddy",
-			Log:      checkinLog,
-			AuthDir:  cfg.BuddyAuthDir,
-			// 登录：授权站点与平台。platform 默认 "ide"（参照取值），
-			// UA 用本实例的（未配则回落全局/内置形态）。
-			Login: workbuddyLoginWithPlatform("buddy", cfg.BuddyOAuthBaseURL,
-				cfg.BuddyOAuthPlatform, cfg.BuddyUserAgent),
-			RefreshInterval: cfg.ScheduleKeepaliveInterval,
-			OnRefreshFailure: func(uid string) {
-				if p.NoteRefreshFailure(uid) {
-					log.Printf("buddy: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录）", uid)
-				}
-			},
-			OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
-		})
-		wbBuddy.SetClient(upBuddy)
-		if err := registry.Register(wbBuddy); err != nil {
-			log.Fatalf("注册 buddy 上游失败: %v", err)
-		}
-		if cfg.BuddyPoolAccounts {
-			buddyAuths, lerr := auth.LoadDirCompat(cfg.AuthsBase, "buddy")
-			if lerr != nil {
-				log.Printf("buddy: 读取凭证失败: %v", lerr)
-			} else if len(buddyAuths) > 0 {
-				secrets := make(map[string]any, len(buddyAuths))
-				for _, a := range buddyAuths {
-					if a.UID != "" {
-						secrets[a.UID] = a
-					}
-				}
-				p.SyncToDirWithSecrets("buddy", buddyAuths, secrets)
-				log.Printf("buddy: 已并入 %d 个账号到账号池", len(buddyAuths))
-			}
-		}
-		logUpstreamIdentity(upBuddy, "buddy")
-		log.Printf("已注册上游 buddy（授权站点 %s，platform=%q，凭证目录 %s）",
-			cfg.BuddyOAuthBaseURL, cfg.BuddyOAuthPlatform, cfg.BuddyAuthDir)
 	}
 
 	// ---- 第二个上游：CodeArts（判据 1 的实测对象）----
@@ -663,64 +565,6 @@ func main() {
 		log.Printf("trae: 未并入账号池（trae.pool_accounts=false），只能通过其管理端点使用")
 	}
 
-	// ---- 第五个上游：MiMo（小米开放平台，OpenAI 兼容 + reasoning 方言）----
-	//
-	// 注册顺序仍然 workbuddy 在前 → "裸模型名走谁"不变；mimo 只在显式配置
-	// 或 "mimo/模型名" 前缀时被用到。协议实现与落地依据见
-	// reports/mimo-upstream-implementation-report.md 与 internal/mimo 包注释。
-	var mm *mimo.Provider
-	if cfg.MimoEnabled {
-		free := cfg.MimoFreeEnabled
-		backfill := cfg.MimoReasoningBackfill
-		mm = mimo.NewWithConfig(mimo.Config{
-			AuthDir:            cfg.MimoAuthDir,
-			BaseURL:            cfg.MimoBaseURL,
-			FreeBaseURL:        cfg.MimoFreeBaseURL,
-			FreeEnabled:        &free,
-			AuthHeader:         cfg.MimoAuthHeader,
-			ClientVersion:      cfg.MimoClientVersion,
-			CallbackPort:       cfg.MimoOAuthCallbackPort,
-			RefreshInterval:    cfg.MimoRefreshInterval,
-			ReasoningBackfill:  &backfill,
-			CredentialPriority: cfg.MimoCredentialPriority,
-			ImportClientAuth:   cfg.MimoImportClientAuth,
-			ClientAuthDir:      cfg.MimoClientAuthDir,
-			OAuthRedirectMode:  cfg.MimoOAuthRedirectMode,
-			RouteBaseURL:       cfg.MimoRouteBaseURL,
-			RouteClientVersion: cfg.MimoRouteClientVersion,
-			Log:                checkinLog,
-			// 后台续期失败/成功 → pool 刷新失败计数（连续失败自动禁用，UI 可见）。
-			OnRefreshFailure: func(uid string) {
-				if p.NoteRefreshFailure(uid) {
-					log.Printf("mimo: 凭证续期连续失败达上限，已禁用 uid=%s（需重新登录/导入）", uid)
-				}
-			},
-			OnRefreshSuccess: func(uid string) { p.NoteSuccess(uid) },
-		})
-		if err := registry.Register(mm); err != nil {
-			log.Fatalf("注册 MiMo 上游失败: %v", err)
-		}
-		log.Printf("mimo: 已启用（凭证目录 %s，基址 %s，free 轨=%v）",
-			cfg.MimoAuthDir, firstNonEmpty(cfg.MimoBaseURL, "https://api.xiaomimimo.com/v1"), cfg.MimoFreeEnabled)
-	} else {
-		log.Printf("mimo: 未启用（config 里 mimo.enabled 缺省为 false）")
-		// 凭证在、上游没开 —— 与 codearts/trae 同款提示（防"界面上看不到号"被读成界面坏）。
-		if list, err := mimo.LoadDir(cfg.MimoAuthDir); err == nil && len(list) > 0 {
-			log.Printf("mimo: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
-				"它们不会并入账号池", cfg.MimoAuthDir, len(list))
-		}
-	}
-
-	if mm != nil && cfg.MimoPoolAccounts {
-		if n := syncMimoAccounts(p, cfg.MimoAuthDir); n > 0 {
-			log.Printf("mimo: 已并入账号池 %d 个账号", n)
-		} else {
-			log.Printf("mimo: 账号池中暂无账号（凭证目录 %s 里没有可用的 mimo*.json）", cfg.MimoAuthDir)
-		}
-	} else if mm != nil {
-		log.Printf("mimo: 未并入账号池（mimo.pool_accounts=false），只能通过其管理端点使用")
-	}
-
 	// ---- 第六个上游：Cline（Cline 桌面端 / Cline API）----
 	//
 	// 注册顺序仍 workbuddy 在前 → "裸模型名走谁"不变；cline 只在显式配置
@@ -752,7 +596,7 @@ func main() {
 			firstNonEmpty(cfg.ClineWorkOSBase, cline.DefaultWorkOSBase))
 	} else {
 		log.Printf("cline: 未启用（config 里 cline.enabled 缺省为 false）")
-		// 凭证在、上游没开 —— 与 codearts/trae/mimo 同款提示（防"界面上看不到号"被读成界面坏）。
+		// 凭证在、上游没开 —— 与 codearts/trae 同款提示（防"界面上看不到号"被读成界面坏）。
 		if list, err := cline.LoadDir(cfg.ClineAuthDir); err == nil && len(list) > 0 {
 			log.Printf("cline: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
 				"它们不会并入账号池", cfg.ClineAuthDir, len(list))
@@ -1172,13 +1016,13 @@ func main() {
 		Provider:        registryRouter{reg: registry, p: p},
 		DefaultProvider: func() string { id, _ := registry.First(); return id }(),
 		Admin: admin.New(admin.Config{
-			Pool:  p,
-			OAuth: oauth.New(cfg.OAuthBaseURL),
-			Log:   checkinLog,
-			Ring:  logRing,
-			AuthDir:  cfg.AuthDir,
-			APIKeys:  apiKeysStore, // /admin/apikeys 管理端点
-			APIKey:   cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）
+			Pool:    p,
+			OAuth:   oauth.New(cfg.OAuthBaseURL),
+			Log:     checkinLog,
+			Ring:    logRing,
+			AuthDir: cfg.AuthDir,
+			APIKeys: apiKeysStore, // /admin/apikeys 管理端点
+			APIKey:  cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）
 			// 轮换管理钥匙写回 config.json 的路径（回调经 onRotate 间接引用 h ——
 			// h 在此闭包求值时尚未绑定，不能直接捕获，见构造后的 onRotate 赋值）。
 			ConfigPath:      *cfgPath,
@@ -1307,22 +1151,47 @@ func main() {
 // 否则"本机没装受支持的浏览器"这件事只在用户点「添加账号」时才暴露，
 // 而且表现成"点了没反应"（窗口不出现、也没人告诉他为什么）。
 // 启动期探测把问题提前到日志里。
+func loginBrowserOpener(cfg *Config) func(string) (string, error) {
+	if !cfg.Login.OpenBrowser {
+		log.Printf("login: 自动打开授权页已关闭（login.open_browser=false）" +
+			"——「添加账号」只回授权链接，请手动粘贴到无痕窗口")
+		return nil
+	}
+	// 探测用的 Opts **不带** Isolated：Isolated 只影响参数里的
+	// --user-data-dir，而"本机有没有这个浏览器"与它无关。
+	// 带着它会在每次启动时白建一个临时 profile 目录。
+	probe := browseropen.Opts{Explicit: cfg.Login.Browser}
+	cmd, err := browseropen.Plan(runtime.GOOS, "https://example.invalid/probe", probe)
+	if err != nil {
+		log.Printf("login: 未能启用「自动用无痕窗口打开授权页」（%v）"+
+			"——「添加账号」仍可用，请在无痕窗口里手动粘贴授权链接", err)
+		return nil
+	}
+	log.Printf("login: 「添加账号」将自动用无痕窗口打开授权页（%s%s）",
+		cmd.Browser, isolatedNote(cfg.Login.Isolated))
+
+	opts := browseropen.Opts{Isolated: cfg.Login.Isolated, Explicit: cfg.Login.Browser}
+	return func(rawURL string) (string, error) {
+		c, err := browseropen.Open(rawURL, opts)
+		if err != nil {
+			return "", err
+		}
+		return c.Browser + "（无痕）", nil
+	}
+}
+
 // configureUpstream 把 config 里的超时 / 脱敏 / 出站身份写进一个 Client。
 //
-// # 为什么抽成函数（buddy 实例需要第二个 Client）
+// # 为什么是函数而不是内联在装配处
 //
-// 出站身份（UA / product_code / client_name）住在 `upstream.Client` 上，
-// 而所有 workbuddy 系实例原本共用**同一个** `up`。buddy 要用**不同的身份**
-// 打同一个上游，就得有自己的 Client。
+// 出站身份（UA / product_code / client_name）住在 `upstream.Client` 上。
+// 装配层与测试都需要"一个配置好的 Client"，内联两遍必然漂移 ——
+// 而漂移的表现是"某条路径的超时/身份与另一条不一致"这类极难查的故障。
 //
-// 两种写法我都排除了：
-//
-//   - **再手写一遍这些赋值** → 两处必然漂移（改一处忘另一处，
-//     表现为"两个实例超时不一致"这类极难查的故障）。
-//   - **`*up` 浅拷贝再改字段** → Client 里有 `sync.RWMutex`，
-//     拷贝带锁的结构体是错的（go vet 也会报），且锁状态被复制后行为未定义。
-//
-// 所以：新建 Client + 走**同一个** configureUpstream，只在之后按实例覆盖身份。
+// ⚠ 注意本函数只负责**全局**身份。按实例覆盖身份的能力（曾经服务于
+// 已删除的 buddy 实例）随该实例一起删掉了 —— 现在进程内只有一个
+// 出站身份来源。将来若再出现"同上游、不同身份"的需求，
+// 正确做法是恢复一个带 overrides 的构造函数，而不是在这里加 if。
 func configureUpstream(up *upstream.Client, cfg *Config) {
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
 	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
@@ -1384,87 +1253,6 @@ func logUpstreamIdentity(up *upstream.Client, who string) {
 		}
 		log.Printf("%s 出站 UA 按模型族分档（%d 条，先命中先返回）：%s",
 			who, n, strings.Join(parts, "；"))
-	}
-}
-
-// upstreamIdentity 按实例覆盖的出站身份（空串 = 不覆盖）。
-type upstreamIdentity struct {
-	UserAgent     string
-	ClientVersion string
-	CliVersion    string
-	ClientName    string
-	ProductCode   string
-	// NoUAModelFamilies 清空**按模型族分档**的表。
-	//
-	// # 为什么需要这个开关（buddy 必须用它）
-	//
-	// 参照 product.ts 的 CODEBUDDY 是 `userAgentByModelFamily: []`，注释原文：
-	//
-	//	中国版只有一条产品线，无需按模型分档：全部模型沿用 IDE UA
-	//
-	// 而分档表是**全局**配的（upstream.ua_model_families，服务于国际版那个
-	// "gpt 系与 glm 系形态不同"的事实）。若 buddy 直接继承它，glm-/hy 模型的
-	// UA 会被覆写成 `WorkBuddy/...` —— **把 CodeBuddyIDE 身份冲掉**，
-	// 账单归因也就跟着错了。
-	//
-	// 所以 buddy 实例显式清空它：IDE 身份必须对所有模型一视同仁。
-	NoUAModelFamilies bool
-}
-
-// newUpstreamClient 造一个配置好的出站客户端；overrides 按实例覆盖身份。
-//
-// 覆盖字段**为空串即不覆盖**（保留全局值）—— 这是"未配置的部署
-// 行为逐字节不变"这条硬约束的落点。
-func newUpstreamClient(cfg *Config, overrides upstreamIdentity) *upstream.Client {
-	up := upstream.New()
-	configureUpstream(up, cfg)
-	if overrides.UserAgent != "" {
-		up.UserAgent = overrides.UserAgent
-	}
-	if overrides.ClientVersion != "" {
-		up.ClientVersion = overrides.ClientVersion
-	}
-	if overrides.CliVersion != "" {
-		up.CliVersion = overrides.CliVersion
-	}
-	if overrides.ClientName != "" {
-		up.ClientName = overrides.ClientName
-	}
-	if overrides.ProductCode != "" {
-		up.ProductCode = overrides.ProductCode
-	}
-	if overrides.NoUAModelFamilies {
-		up.UAModelFamilies = nil
-	}
-	return up
-}
-
-func loginBrowserOpener(cfg *Config) func(string) (string, error) {
-	if !cfg.Login.OpenBrowser {
-		log.Printf("login: 自动打开授权页已关闭（login.open_browser=false）" +
-			"——「添加账号」只回授权链接，请手动粘贴到无痕窗口")
-		return nil
-	}
-	// 探测用的 Opts **不带** Isolated：Isolated 只影响参数里的
-	// --user-data-dir，而"本机有没有这个浏览器"与它无关。
-	// 带着它会在每次启动时白建一个临时 profile 目录。
-	probe := browseropen.Opts{Explicit: cfg.Login.Browser}
-	cmd, err := browseropen.Plan(runtime.GOOS, "https://example.invalid/probe", probe)
-	if err != nil {
-		log.Printf("login: 未能启用「自动用无痕窗口打开授权页」（%v）"+
-			"——「添加账号」仍可用，请在无痕窗口里手动粘贴授权链接", err)
-		return nil
-	}
-	log.Printf("login: 「添加账号」将自动用无痕窗口打开授权页（%s%s）",
-		cmd.Browser, isolatedNote(cfg.Login.Isolated))
-
-	opts := browseropen.Opts{Isolated: cfg.Login.Isolated, Explicit: cfg.Login.Browser}
-	return func(rawURL string) (string, error) {
-		c, err := browseropen.Open(rawURL, opts)
-		if err != nil {
-			return "", err
-		}
-		return c.Browser + "（无痕）", nil
 	}
 }
 

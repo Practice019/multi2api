@@ -16,6 +16,13 @@ config.json
 # api_key）。只忽略 config.json 本身不够 —— 一次 `git add -A` 就会把密钥推上去。
 # config.json.* 只匹配以 "config.json." 开头的名字，不会误伤 config.example.json。
 config.json.*
+# 其它测试配置的备份（config-test-port7864.json.bak-buddy-… 这种）。
+# ⚠ config.json.* 那条**盖不住**它们 —— 前缀是 config-test…，不是 config.json.。
+# 本仓库有**跟踪**的测试配置（config-test-port7864.json），所以它的备份
+# 必须显式忽略，否则改动它时留下的 .bak-* 会被一起 add 进版本库。
+config-test*.json.bak-*
+config.example.json.bak-*
+config-test.example.json.bak-*
 
 # Build artifacts
 /bin/
@@ -93,9 +100,6 @@ dist/
 config-test.json
 auths-test/
 data-test/
-# scripts 下同步工具的本机化副本/临时输出（钥匙相关永不入库）
-scripts/mimo/*.local.py
-scripts/mimo/cookie_dump*
 
 # Import dumps with real phone/session (credentials)
 loomy-import.json
