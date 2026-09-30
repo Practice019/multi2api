@@ -40,6 +40,27 @@
     "enabled": true,
     "refresh_interval_seconds": 60
   },
+  "cline": {
+    "enabled": true,
+    "auth_dir": "./auths/cline",
+    "pool_accounts": true
+  },
+  "raccoon": {
+    "enabled": true,
+    "auth_dir": "./auths/raccoon",
+    "pool_accounts": true
+  },
+  "lobsterai": {
+    "enabled": true,
+    "auth_dir": "./auths/lobsterai",
+    "pool_accounts": true
+  },
+  "qoder": {
+    "enabled": true,
+    "cn_enabled": true,
+    "auth_dir": "./auths/qoder",
+    "pool_accounts": true
+  },
   "workbuddy_intl": {
     "enabled": true,
     "oauth_base_url": "https://www.workbuddy.ai",
