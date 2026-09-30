@@ -9,20 +9,23 @@
 
 ## v1.7.0 — 2026-09-30
 
-> 本版主题：**上游清单扩到 10 个**（新增 cline / raccoon / lobsterai / qoder /
-> qodercn）+ **登录、签到、额度、续期四条链路的系统性补齐**。
+> 本版主题：**上游清单从 4 个扩到 10 个** + **登录、签到、额度、续期四条链路的
+> 系统性补齐**。
 >
-> ⚠ 本版是**破坏性**的：删除了 `mimo` 上游，且多条链路的
-> 实现被重写。详见下方「移除」与各条标注。
+> 上游净变化（以**已发布的 v1.6.2 tag** 为基准）：
 >
-> 上游净变化：v1.6.2 注册 6 个（workbuddy / workbuddy-intl / **codearts** /
-> loomy / trae / mimo）→ 本版 10 个（workbuddy / workbuddy-intl / codearts /
-> loomy / trae / **cline / raccoon / lobsterai / qoder / qodercn**）。
+>     v1.6.2 注册 4 个：workbuddy / codearts / loomy / trae
+>     本版  注册 10 个：+ workbuddy-intl / cline / raccoon / lobsterai /
+>                        qoder / qodercn
 >
-> ⚠ 即：**新增 5 个**（cline / raccoon / lobsterai / qoder / qodercn）、
-> **删除 1 个**（mimo）；`codearts` 上一版已有。
+> ⚠ 所以本版**只增不删** —— 新增 6 个，没有删除任何已发布过的上游。
+> 下面「移除」一节里的 `mimo` / `buddy` 都**从未发布过**（它们在
+> v1.6.2 之后的未发布提交里出现），对用户无影响，列出只为说明代码来龙去脉。
+>
+> ⚠ 但本版仍是**破坏性**的：多条链路的实现被重写（见各条标注），
+> 且新增了 `dailycheckin` / `qrcode` 两个包与一批扩展点。
 
-### 新增上游（+5：cline / raccoon / lobsterai / qoder / qodercn）
+### 新增上游（+6）
 
 - **Cline**（Cline 桌面端 / Cline API）：WorkOS 设备码轮询登录（**不起本地端口**，
   服务器部署天然可用）+ 余额查询 + 后台续期。
@@ -31,9 +34,6 @@
 - **LobsterAI**（有道龙虾）：三步式签到领取积分 + 30 分钟自动签到。
 - **Qoder / Qoder 中国版**（阿里系，两个实例）：PKCE 设备码登录 +
   积分余额 + 每日签到 + **WASM 加密推理桥**。
-- **TRAE SOLO**：SOLO 免费通道 + 权益包额度 + 每日签到。
-  （trae 与 workbuddy-intl 在 v1.6.2 已在，此处列出只是为了说明现状；
-  本版给它们补的是签到/额度/续期的接线。）
 - **WorkBuddy 海外版**（`workbuddy-intl`）：双渠道账号池，按凭证 `channel` 字段
   自动选择 chat/billing/web 三个域的 base 与 Origin/Referer 头。
 
@@ -113,25 +113,39 @@
   `DEPENDENCY_UNAVAILABLE`（与请求头无关，`/usage` 同时刻恒 200），
   而旧实现不重试 → 签到每 30 分钟扫一次，撞上就记一次 `fail`。现加 5xx 退避重试。
 
-### 移除
+### 移除（两个都**从未发布过**，对用户无影响）
 
-- **`mimo`（小米 MiMo）上游删除** —— 用户要求整体移除。
+- **`mimo`（小米 MiMo）上游删除** —— 用户要求整体移除（"小米这个有问题"）。
   连带删掉 `internal/mimo/`（16 文件）、`cmd/server/mimocreds.go`、
   `scripts/mimo/`（5 脚本）、配置段与 17 个扁平字段。
+  ⚠ 它是 v1.6.2 之后加进来的（commit `a796690`），**从未进过任何 Release** ——
+  所以升级的用户不用担心这个功能消失，他们本来就没见过。
   ⚠ `internal/{cline,loomy}/models.go` 里的 `mimo` 是**模型名**（cline 代理的
   `xiaomi/mimo-v2.6-pro` 等），**不是**那个上游 —— 保留。
-- ⚠ **`buddy`（腾讯 CodeBuddy 中国版）一次都没发布过**：它在**本批未发布的
+- **`buddy`（腾讯 CodeBuddy 中国版）也从未发布过**：它在**本批未发布的
   提交里加进来过**（commit `12c335d`），随后被删除（与 workbuddy 同一后端
   `copilot.tencent.com`，仅出站身份不同，用户判定重复）。
-  所以 v1.6.2 → v1.7.0 的用户**看不到它**，不需要做任何迁移 —— 列出只为说明
-  那批代码的来龙去脉（`cmd/server/buddy_identity_test.go` /
-  `config_buddy_test.go` 随之一并删除）。
-- 上游总数 **11 → 10**（11 含那个从未发布的 buddy）。
+  `cmd/server/buddy_identity_test.go` / `config_buddy_test.go` 随之一并删除。
 - ⚠ 配置里残留的 `mimo` 段会被**静默忽略**（JSON 未知字段不报错），
   但建议删掉以免误导。
 
+### 破坏性变更有哪些（尽量列全）
+
+| 变更 | 影响 |
+|---|---|
+| 新增 6 个上游 | 无（都在 `enabled=false` 或缺省关闭时不改变既有行为） |
+| `mimo` 段失效 | 若你的 config 里有它：被静默忽略，建议删除 |
+| 签到/额度/续期链路重写 | 行为变化（修的都是"本来就不工作"的路径） |
+| 卡片头按钮顺序 + 去掉 `＋` | 纯 UI |
+| 新增 `internal/dailycheckin`、`internal/qrcode` | 无（内部包） |
+
+**没有任何配置字段被改名或删除** —— 旧 config.json 可直接用。
+
 ### 文档 / 工程
 
+- `config.example.json` **补齐 4 个新上游段**（cline / raccoon / lobsterai / qoder）
+  —— 它是 Release 压缩包里的配置模板，此前缺项，用户下载后看不到怎么启用它们。
+  已用这份模板原样启动验证：10 个上游全部注册成功。
 - `gateway` 契约测试新增：`CapImport` 声明必须实现 `AccountImportExt`
   （防"点了回 501 的假按钮"）。
 - 前端探针：新增两个**真浏览器 e2e**（`verify_checkin_ui_e2e.js` /
