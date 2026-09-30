@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"testing"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/pool"
 )
@@ -178,5 +179,184 @@ func TestReloadWithoutSecretLoaderLeavesNoSecret(t *testing.T) {
 	}
 	if got, ok := p.SecretOf("u-1"); ok && got != nil {
 		t.Fatalf("没实现 CredentialSecretLoader 的上游不该凭空得到 secret，实际 %#v", got)
+	}
+}
+
+// TestReloadCarriesCredsWhenSecretIsAuth 钉住"secret 就是带凭证的 *auth.Auth"这条路径。
+//
+// # 守的是用户实测报的 bug
+//
+// 现象：管理台「批量导入」一个 workbuddy 账号后，该号在账号池里可见、
+// 刷新额度与签到都正常，但**猫猫旅行 / 成长计划一律报「无可用凭证」**。
+//
+// 根因：accountsReload 把扫描结果**投影成 uid/nickname** 再交给池
+// （`auths = append(auths, &auth.Auth{UID: c.UID, Nickname: c.Nickname})`），
+// 而 workbuddy 的凭证就是 `*auth.Auth` 本身、走 secret 通道。
+// 于是池里 `e.a` 成了空投影，而 workbuddy 的取号点
+// （creds() / authOf() / 各处 AuthByUID）**只读 e.a、不读 secret**
+// → RefreshToken 为空 → 判定"无可用凭证"。
+//
+// pool 侧 `!authHasCreds(a) && authHasCreds(e.a)` 那条保护覆盖不到本场景：
+// 首次导入后池里那份本来就是空投影，新旧两边都无凭证 → 保护不生效，
+// `e.a = a` 照常把 token 清掉（且重启也修不好，因为 reload 同样传投影）。
+//
+// 修法：secret 是带凭证的 *auth.Auth 时，**直接用它当池条目**，不投影。
+//
+// 变异：去掉 accountsReload 里那个 `if sa, ok := secrets[c.UID].(*auth.Auth); ok ...`
+// 分支（退回无条件投影）→ 本用例必须变红。
+func TestReloadCarriesCredsWhenSecretIsAuth(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "workbuddy")
+
+	// workbuddy 的真实形态：Credential 是投影，Secret 是同源的 *auth.Auth（带 token）。
+	realAuth := &auth.Auth{
+		UID:          "wb-1",
+		Nickname:     "妖精七七",
+		AccessToken:  "at-real",
+		RefreshToken: "rt-real",
+		ExpiresAt:    1794994297,
+	}
+	reg := gateway.NewRegistry()
+	prov := &secretProvider{
+		stubProvider: stubProvider{id: "workbuddy", caps: gateway.CapChat},
+		dir:          dir,
+		items: []gateway.CredentialSecret{
+			{Credential: gateway.Credential{UID: "wb-1", Nickname: "妖精七七"}, Secret: realAuth},
+		},
+	}
+	if err := reg.Register(prov); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
+	p.SetDefaultProvider("workbuddy")
+	h := New(Config{Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "workbuddy"})
+
+	rec, resp := postReload(t, h, `{"provider":"workbuddy"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reload 失败: HTTP %d %s", rec.Code, rec.Body.String())
+	}
+	if resp.Scanned != 1 {
+		t.Fatalf("scanned 应为 1，实际 %d", resp.Scanned)
+	}
+
+	// ★ 核心断言：取号路径读的就是 AuthByUID 返回的 e.a，它必须带凭证。
+	a := p.AuthByUID("wb-1")
+	if a == nil {
+		t.Fatal("账号应已进池")
+	}
+	if a.RefreshToken == "" {
+		t.Fatalf("❌ e.a.RefreshToken 为空 —— workbuddy 的 creds()/authOf() 会判定"+
+			"「无可用凭证」，猫猫旅行与成长计划会整片报错。实际: %+v", a)
+	}
+	if a.AccessToken != "at-real" {
+		t.Errorf("AccessToken 应为真实凭证，实际 %q", a.AccessToken)
+	}
+
+	// secret 通道照常。
+	if got, ok := p.SecretOf("wb-1"); !ok || got != realAuth {
+		t.Errorf("secret 通道应保存同一份 *auth.Auth: %v, %v", got, ok)
+	}
+}
+
+// TestReloadStillProjectsWhenSecretIsOpaque 保证上面那条修复**不影响别的上游**。
+//
+// codearts 这类上游的凭证不在 *auth.Auth 上（是不透明的 STS 结构），
+// secret 不是 *auth.Auth → 仍走原投影路径 → e.a 里不该凭空出现凭证。
+// 这是"改一个上游不能顺手改掉另一个上游语义"的守卫。
+func TestReloadStillProjectsWhenSecretIsOpaque(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "codearts")
+	secret := map[string]string{"kind": "opaque-upstream-cred", "token": "T-1"}
+
+	reg := gateway.NewRegistry()
+	prov := &secretProvider{
+		stubProvider: stubProvider{id: "codearts", caps: gateway.CapChat},
+		dir:          dir,
+		items: []gateway.CredentialSecret{
+			{Credential: gateway.Credential{UID: "ca-1", Nickname: "codearts号"}, Secret: secret},
+		},
+	}
+	if err := reg.Register(prov); err != nil {
+		t.Fatal(err)
+	}
+	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
+	p.SetDefaultProvider("codearts")
+	h := New(Config{Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "codearts"})
+
+	rec, _ := postReload(t, h, `{"provider":"codearts"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reload 失败: HTTP %d %s", rec.Code, rec.Body.String())
+	}
+
+	a := p.AuthByUID("ca-1")
+	if a == nil {
+		t.Fatal("账号应已进池")
+	}
+	if a.AccessToken != "" || a.RefreshToken != "" {
+		t.Errorf("非 *auth.Auth 的 secret 不该被塞进 e.a: %+v", a)
+	}
+	if got, ok := p.SecretOf("ca-1"); !ok || !reflect.DeepEqual(got, secret) {
+		t.Errorf("不透明 secret 应照常保存: %v, %v", got, ok)
+	}
+}
+
+// TestPoolAuthsFromCredsSharedByBothEntryPaths 钉住"投影规则只有一份实现"。
+//
+// 背景：同一个缺陷在这两条入池路径上各复发过一次 ——
+//
+//	reload（accountsReload）  投影掉 token → 导入的号报「无可用凭证」
+//	oauth （oauthFlow）       照抄了同样的投影 → OAuth 登录的新号
+//	                          额度探测恒 401、旅行/成长报「无可用凭证」，
+//	                          而重启网关即恢复（内存 e.a 与磁盘不同步）
+//
+// 两条路径现在都调 poolAuthsFromCreds。本用例直接锁这个函数的行为，
+// 于是**任何一条路径**再退回内联投影都会在行为上暴露。
+func TestPoolAuthsFromCredsSharedByBothEntryPaths(t *testing.T) {
+	creds := []gateway.Credential{
+		{UID: "wb-1", Nickname: "workbuddy号", FilePath: "auths/workbuddy/workbuddy-wb-1.json"},
+		{UID: "ca-1", Nickname: "codearts号", FilePath: "auths/codearts/codearts-ca-1.json"},
+		{UID: "", Nickname: "无uid"}, // 应被跳过
+	}
+	realAuth := &auth.Auth{
+		UID: "wb-1", Nickname: "workbuddy号",
+		AccessToken: "at-real", RefreshToken: "rt-real",
+	}
+	secrets := map[string]any{
+		"wb-1": realAuth,                                 // workbuddy 形态：secret 就是 *auth.Auth
+		"ca-1": map[string]string{"sts": "opaque-token"}, // codearts 形态：不透明 secret
+	}
+
+	got := poolAuthsFromCreds(creds, secrets)
+	if len(got) != 2 {
+		t.Fatalf("应投影出 2 条（跳过无 uid 的那条），实际 %d: %+v", len(got), got)
+	}
+
+	// workbuddy：必须直接用带凭证的那份 *auth.Auth（否则取号点读不到 token）
+	if got[0] != realAuth {
+		t.Errorf("secret 是带凭证的 *auth.Auth 时应直接采用它，实际 %+v", got[0])
+	}
+	if got[0].RefreshToken != "rt-real" {
+		t.Errorf("❌ RefreshToken 丢了 —— creds()/authOf() 会判定「无可用凭证」: %+v", got[0])
+	}
+
+	// codearts：不透明 secret → 仍走投影，e.a 里不该有凭证
+	if got[1].AccessToken != "" || got[1].RefreshToken != "" {
+		t.Errorf("不透明 secret 的上游不该往 e.a 塞凭证: %+v", got[1])
+	}
+	if got[1].UID != "ca-1" || got[1].Nickname != "codearts号" {
+		t.Errorf("投影应保留身份字段: %+v", got[1])
+	}
+}
+
+// TestPoolAuthsFromCredsWithoutSecrets 没有 secret 通道时退回纯投影
+// （未实现 CredentialSecretLoader 的上游，行为与改动前一致）。
+func TestPoolAuthsFromCredsWithoutSecrets(t *testing.T) {
+	creds := []gateway.Credential{{UID: "u-1", Nickname: "n"}}
+	got := poolAuthsFromCreds(creds, nil)
+	if len(got) != 1 || got[0].UID != "u-1" || got[0].Nickname != "n" {
+		t.Fatalf("应退回纯投影: %+v", got)
+	}
+	if got[0].AccessToken != "" || got[0].RefreshToken != "" {
+		t.Errorf("无 secret 时不该凭空造出凭证: %+v", got[0])
 	}
 }
