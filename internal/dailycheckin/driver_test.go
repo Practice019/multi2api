@@ -37,12 +37,12 @@ type stub struct {
 
 func newStub() *stub {
 	return &stub{
-		signed:    map[string]bool{},
-		inactive:  map[string]bool{},
+		signed:         map[string]bool{},
+		inactive:       map[string]bool{},
 		statusErr:      map[string]error{},
 		claimErr:       map[string]error{},
 		actionRequired: map[string]bool{},
-		credits:   100,
+		credits:        100,
 	}
 }
 
@@ -89,7 +89,7 @@ func testDesc() Descriptor {
 // # 这是本包存在的首要理由（用户报的「今日签到列是 —」）
 //
 // 界面「今日签到」列读的就是 checkinlog 的 KindCheckin 记录
-//（internal/admin/admin.go）。不写它 → 那一列永远是 `—`，
+// （internal/admin/admin.go）。不写它 → 那一列永远是 `—`，
 // 而用户看到的是"签到按钮点了、列还是空"。
 //
 // 本仓已有先例：trae 的代码注释写着同样的话。lobsterai/qoder 移植时漏了。
@@ -437,7 +437,7 @@ func TestAutoEnabledFollowsOptions(t *testing.T) {
 // # 为什么要一条测试守它
 //
 // 架构判据把"internal/ 下依赖 gateway 的包"一律当成上游实现
-//（gateway/arch_test.go 的 discoverUpstreams），而"上游之间不得互相依赖"。
+// （gateway/arch_test.go 的 discoverUpstreams），而"上游之间不得互相依赖"。
 // 本包一旦 import gateway，各上游依赖它就会被判成"上游依赖上游"：
 //
 //	第一次构建就是这样被 arch_test 抓住的

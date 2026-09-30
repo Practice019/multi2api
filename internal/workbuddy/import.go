@@ -77,12 +77,12 @@ const importPath = "/admin/import"
 // 对任意字符串成立）。状态类字段（源/可用额度/是否健康/healthNote）解析出来
 // 但**不落盘**，见文件头注释。
 type importItem struct {
-	Source       string `json:"源"`
-	Username     string `json:"用户名"`
-	UID          string `json:"uid"`
+	Source   string `json:"源"`
+	Username string `json:"用户名"`
+	UID      string `json:"uid"`
 	// AccessToken 是 workbuddy 的唯一鉴权材料（Bearer JWT）。
 	// json 键保持 `sessionToken` 兼容既有导出工具格式；别名 accessToken 也接受。
-	AccessToken string `json:"sessionToken"`
+	AccessToken  string `json:"sessionToken"`
 	RefreshToken string `json:"refreshToken"`
 	// DeviceToken 风控头 `X-Device-Token` 的设备令牌（**每个账号一个**）。
 	//
@@ -102,10 +102,10 @@ type importItem struct {
 	// 键名与 `auth.Auth` 的落盘键（`account.deviceToken`）一致，
 	// 也接受导出工具常用的 `device_token` 写法。
 	DeviceToken string `json:"deviceToken"`
-	Quota        int64  `json:"可用额度"`
-	Health       string `json:"是否健康"`
-	ExpiresAt    int64  `json:"expiresAt"`
-	HealthNote   string `json:"healthNote"`
+	Quota       int64  `json:"可用额度"`
+	Health      string `json:"是否健康"`
+	ExpiresAt   int64  `json:"expiresAt"`
+	HealthNote  string `json:"healthNote"`
 }
 
 // fillAliases 容错：导出工具的键名变体（英文同义词）补到主字段上。
@@ -127,8 +127,9 @@ type importItem struct {
 //
 // 修法：把"要查的 map"从只有顶层，扩展成 [顶层, auth, account] 三层候选，
 // 逐层找第一个非空值。层序保证兼容性：
-//   · 顶层优先 → 扁平输入的行为逐字不变；
-//   · 后两层只在前者取不到时才被问到 → 不会覆盖用户显式写在顶层的值。
+//
+//	· 顶层优先 → 扁平输入的行为逐字不变；
+//	· 后两层只在前者取不到时才被问到 → 不会覆盖用户显式写在顶层的值。
 func fillAliases(it *importItem, m map[string]any) {
 	if it == nil || m == nil {
 		return

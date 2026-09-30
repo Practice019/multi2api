@@ -70,7 +70,7 @@ func TestPickUANilRules(t *testing.T) {
 //	glm- / hy / kimi- / minimax- → 国内形态
 //
 // ⚠ 注意 `hy` 没有连字符 —— 它同时匹配 `hy3` / `hy3-x` / `hy4-preview`
-//（那些模型名都没有 `hy-` 前缀）。改成 `hy-` 会让它们全部落到 fallback。
+// （那些模型名都没有 `hy-` 前缀）。改成 `hy-` 会让它们全部落到 fallback。
 func TestReferenceTableShape(t *testing.T) {
 	const intlUA = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
 	const cnUA = "WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2"
@@ -92,9 +92,9 @@ func TestReferenceTableShape(t *testing.T) {
 		{"gemini-3.5-flash", intlUA},
 		{"claude-4.5", intlUA},
 		{"glm-5.2", cnUA},
-		{"hy3", cnUA},          // ⚠ 无连字符也匹配
-		{"hy3-x", cnUA},        // ⚠
-		{"hy4-preview", cnUA},  // ⚠
+		{"hy3", cnUA},         // ⚠ 无连字符也匹配
+		{"hy3-x", cnUA},       // ⚠
+		{"hy4-preview", cnUA}, // ⚠
 		{"kimi-k3", cnUA},
 		{"minimax-m3", cnUA},
 		{"default-model", intlUA}, // 无命中 → 国际版默认形态

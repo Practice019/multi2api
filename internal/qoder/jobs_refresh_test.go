@@ -34,7 +34,7 @@ import (
 //	expires_in   不存在 → 过期时刻从没被存下 → 界面 Token 列恒显示 `—`
 //
 // 所以判据必须断言**逐个字段**，而不是"续期成功了吗"
-//（后者在旧代码里对 `device_token` 这种形状也是失败的，但它失败得"看起来合理"）。
+// （后者在旧代码里对 `device_token` 这种形状也是失败的，但它失败得"看起来合理"）。
 func TestRefreshResponseFieldNames(t *testing.T) {
 	// 上游真实形状（值换成假的）
 	const realBody = `{"device_token":"dt-NEW","refresh_token":"drt-NEW",` +
@@ -163,7 +163,7 @@ func TestTokenExpiryReportsStoredField(t *testing.T) {
 // 而过期时刻只能从续期响应拿到，于是界面 Token 列恒为空。
 //
 // ⚠ 名字必须不同：调度器按名字区分任务，同名会互相覆盖
-//（表现为"只有一个在跑"，且没有任何报错）。
+// （表现为"只有一个在跑"，且没有任何报错）。
 //
 // ⚠⚠ 而且名字必须**带产品 id**：qoder 与 qodercn 是两个实例，
 // 实测它们注册同一个 `qoder-refresh` 时调度器输出
@@ -296,7 +296,7 @@ func TestShouldRefreshWhenExpiryUnknown(t *testing.T) {
 	// 不透明 token + 没有落盘过期字段 = 我们完全不知道它何时过期
 	a := &Auth{AccessToken: "dt-opaque", RefreshToken: "drt-x"}
 	if !p.shouldRefresh(a, time.Now()) {
-		t.Error("过期时刻未知时必须刷一次去问清楚 —— "+
+		t.Error("过期时刻未知时必须刷一次去问清楚 —— " +
 			"否则 expires_at 永远存不进来，界面 Token 列永远显示 `—`")
 	}
 }
@@ -307,18 +307,18 @@ func TestShouldRefreshWhenExpiryUnknown(t *testing.T) {
 func TestShouldRefreshSkipsFarFromExpiry(t *testing.T) {
 	p := NewWithConfig(Config{})
 	a := &Auth{
-		AccessToken: "dt-opaque",
+		AccessToken:  "dt-opaque",
 		RefreshToken: "drt-x",
-		ExpiresAt:   time.Now().Add(29 * 24 * time.Hour).UnixMilli(), // 还有 29 天
+		ExpiresAt:    time.Now().Add(29 * 24 * time.Hour).UnixMilli(), // 还有 29 天
 	}
 	if p.shouldRefresh(a, time.Now()) {
 		t.Error("还有 29 天过期时不该刷 —— 每轮都刷只是白耗配额")
 	}
 	// 但真的临近时必须刷
 	b := &Auth{
-		AccessToken: "dt-opaque",
+		AccessToken:  "dt-opaque",
 		RefreshToken: "drt-x",
-		ExpiresAt:   time.Now().Add(1 * time.Minute).UnixMilli(),
+		ExpiresAt:    time.Now().Add(1 * time.Minute).UnixMilli(),
 	}
 	if !p.shouldRefresh(b, time.Now()) {
 		t.Error("只剩 1 分钟时必须刷")

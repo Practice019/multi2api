@@ -268,7 +268,7 @@ func TestBearerPrefixIsNotStrippable(t *testing.T) {
 		in   string
 		want string
 	}{
-		{fixtureToken, tokenPrefix + fixtureToken},          // 裸 JWT → 补前缀
+		{fixtureToken, tokenPrefix + fixtureToken},               // 裸 JWT → 补前缀
 		{tokenPrefix + fixtureToken, tokenPrefix + fixtureToken}, // 已有 → 不变（幂等）
 		{"  " + fixtureToken + "  ", tokenPrefix + fixtureToken}, // trim 后补
 		{"", ""},
@@ -632,7 +632,7 @@ func TestParseTimestamp(t *testing.T) {
 		in   any
 		want int64
 	}{
-		{float64(1790323427), 1790323427000},   // 10 位 → 秒
+		{float64(1790323427), 1790323427000},    // 10 位 → 秒
 		{float64(1790323427000), 1790323427000}, // 13 位 → 已是毫秒
 		// 2026-09-25T05:23:47.000Z 的 UTC 毫秒值（用 time.Parse 核实过）
 		{"2026-09-25T05:23:47.000Z", 1790313827000},

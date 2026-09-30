@@ -15,7 +15,6 @@ func TestTokenExpiryFallsBackToJWT(t *testing.T) {
 	exp := time.Now().Add(30 * time.Minute).Unix()
 	cred := gateway.Credential{Secret: &Auth{
 		AccessToken: mkToken(t, exp-3600, exp, ""),
-
 	}}
 	at, ok := p.TokenExpiry(cred)
 	if !ok {

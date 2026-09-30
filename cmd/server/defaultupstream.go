@@ -3,7 +3,7 @@
 // # 这个文件是干什么的（以及为什么它必须存在）
 //
 // `internal/server` 是核心出口层，**不得**依赖任何具体上游
-//（arch_test 判据 3）。但它确实需要默认上游提供四件事：
+// （arch_test 判据 3）。但它确实需要默认上游提供四件事：
 //
 //	拉模型列表 / 拉模型目录（含倍率）/ 续期凭证 / 发对话流
 //
@@ -46,7 +46,7 @@ var _ server.DefaultUpstream = defaultUpstream{}
 //
 // 只搬核心真正读的三个字段（ID / ContextWindow / MaxTokens）。
 // `Name` 与 `Efforts` **刻意不搬** —— 核心从不读它们
-//（模型名直接用 ID；思考档位由出站改写层处理）。
+// （模型名直接用 ID；思考档位由出站改写层处理）。
 func (a defaultUpstream) FetchModels(acc *auth.Auth) ([]server.DefaultModel, error) {
 	infos, err := a.c.FetchModels(acc)
 	if err != nil {

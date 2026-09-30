@@ -8,16 +8,16 @@
 // 核心要把它翻成 applyErrorPolicy 能吃的中立类型。
 //
 // 现在那条路径没了：分类改由 `cfg.DefaultClassifier` 注入
-//（装配层接 `workbuddy.Provider.Classify`，它**直接返回中立类型**）。
+// （装配层接 `workbuddy.Provider.Classify`，它**直接返回中立类型**）。
 // 于是 core 侧不再有任何 upstream 枚举的翻译表 ——
 // 翻译只存在于 workbuddy 一处（`toGatewayKind`），
 // 由它自己的 TestToGatewayKindCoversEveryUpstreamKind 把守。
 //
 // 所以本文件改成守**接缝本身**：
 //
-//	1. 默认分类器（注入的那份）必须覆盖每一个 upstream 取值
-//	2. 内容拦截必须与客户端错误区分（这条语义决定仍成立）
-//	3. 注入的判据与 workbuddy 的表**逐项一致**（防两处漂移）
+//  1. 默认分类器（注入的那份）必须覆盖每一个 upstream 取值
+//  2. 内容拦截必须与客户端错误区分（这条语义决定仍成立）
+//  3. 注入的判据与 workbuddy 的表**逐项一致**（防两处漂移）
 //
 // # 为什么第 3 条重要
 //
@@ -124,7 +124,7 @@ func TestDefaultClassifierCoversEveryKind(t *testing.T) {
 // 想枚举"它能不能产出每一档"，就必须为每一档造一个能触发它的输入。
 //
 // ⚠ 这张表与 internal/upstream/client_test.go 的用例**同源**
-//（那里逐档列了 (status, body, wantKind)）。这里只取其中一条代表，
+// （那里逐档列了 (status, body, wantKind)）。这里只取其中一条代表，
 // 用于验证分类器（经镜像）能产出那一档。
 //
 // 新增 ErrKind 时这里会因缺项而**落到 default 分支**（探针为 500/"boom"），
@@ -220,10 +220,10 @@ func TestContentBlockedIsDistinctFromClient(t *testing.T) {
 //
 // `cfg.DefaultClassifier == nil` 是**允许**的（测试里的手工构造、
 // 或某个部署没接线）。此时 classifyErr 回落到 gateway.DefaultErrorKind
-//（只按状态码）—— 那是**明确的降级**，但不能是"崩掉"或"全部判 None"。
+// （只按状态码）—— 那是**明确的降级**，但不能是"崩掉"或"全部判 None"。
 //
 // 判据：nil 注入下，402/429/5xx 仍要落到各自的类别
-//（那是状态码能表达的部分），而不是一律 None。
+// （那是状态码能表达的部分），而不是一律 None。
 func TestNilDefaultClassifierDegradesSafely(t *testing.T) {
 	h := NewHandler(Config{Pool: testPoolWith(), Upstream: nil, DefaultClassifier: nil})
 

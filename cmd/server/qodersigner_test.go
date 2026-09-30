@@ -26,7 +26,7 @@ import (
 // 而后果是"签名与身份不符" → 上游 403，排查时看起来像凭据问题。
 //
 // 判据落在**产物**上而不是"调了哪个函数"：产物里必须出现该 uid
-//（`Cosy-User`），且必须是一份带 COSY 签名的真加密请求。
+// （`Cosy-User`），且必须是一份带 COSY 签名的真加密请求。
 func TestQoderSignerAdapterProducesRealEncryptedRequest(t *testing.T) {
 	s := newQoderSigner("api2.qoder.sh")
 	if s == nil {

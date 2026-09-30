@@ -27,7 +27,7 @@ import (
 // 来源：参照项目 `dsh-codearts-auth` 的 `src/codearts-credits.ts`（已实测跑通）。
 // 它把这套流程写成四步，并明确标注：
 //
-//	5. 响应 `id !== null` 时补 `POST /v1/ops/confirm`（**漏掉会让积分停在待确认**）
+//  5. 响应 `id !== null` 时补 `POST /v1/ops/confirm`（**漏掉会让积分停在待确认**）
 //
 // 我们原先只做到 claim，没有 confirm —— 也就是说领取动作**成功但未入账**，
 // 积分停在「待确认」态。这是参照项目已经踩过并修好的坑，直接照搬其判据：

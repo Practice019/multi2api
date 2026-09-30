@@ -118,7 +118,7 @@ func TestImportAcceptsDeviceTokenAliases(t *testing.T) {
 // 不一致的表现是"导入成功、账号出现、但一对话就 401"。
 //
 // ⚠ 按 `channel`/`domain` 校验而不只是 token：它们决定**请求打哪个路由**
-//（国内 copilot.tencent.com / 海外 www.workbuddy.ai），
+// （国内 copilot.tencent.com / 海外 www.workbuddy.ai），
 // 而两个实例共用同一个导入实现 —— 渠道推错会让账号进错池、请求打错站点。
 func TestImportCredentialsRoundTrip(t *testing.T) {
 	in := `{"用户名":"u1","uid":"d0c45ed6-aaaa-bbbb-cccc-ddddeeeeffff",` +

@@ -80,7 +80,7 @@ func testAuth() *Auth {
 // # 这条钉住的是一个真实缺陷形态
 //
 // 实测某账号 `userQuota.remaining = 0` 而 `addOnQuota.remaining = 100`
-//（用户说的「资源包 100 积分」正是后者）。只读 userQuota 会显示 0 ——
+// （用户说的「资源包 100 积分」正是后者）。只读 userQuota 会显示 0 ——
 // 与其它 provider 的「漏读某一层」是同一类缺陷。
 //
 // 变异可检：把 addOnQuota 那一段删掉 → 本用例红（total 变 0）。
@@ -197,7 +197,7 @@ func TestCreditsHeadersUseSashClientType(t *testing.T) {
 // # 为什么每个碰 machine 身份的用例都必须调它
 //
 // `resolveMachineIdentity` 的主路径是实时 spawn `runtime-info.exe`
-//（见 runtimeinfo.go）。若不隔离，在**装了 Qoder 的开发机**上：
+// （见 runtimeinfo.go）。若不隔离，在**装了 Qoder 的开发机**上：
 //
 //   - 用例会真的去 spawn（每次约 3.8 秒，整套测试白白变慢）
 //   - **拿到的是开发机的真实身份**，而用例断言的是 fixture 里的值 → 假红
@@ -242,7 +242,7 @@ func TestCreditsHeadersMachinePairIsAtomic(t *testing.T) {
 // TestCreditsHeadersOmitMachineWhenUnavailable 拿不到 machine 身份时**照常发请求**。
 //
 // 用户若未安装 Qoder 桌面端就没有该文件 —— 此时不能让整个积分功能报错
-//（保守降级：少一次可领活动，而不是功能不可用）。
+// （保守降级：少一次可领活动，而不是功能不可用）。
 func TestCreditsHeadersOmitMachineWhenUnavailable(t *testing.T) {
 	t.Setenv("QODER_MACHINE_TOKEN_PATH", "/nonexistent/path/machine_token.json")
 	disableLiveMachineIdentity(t)
@@ -310,7 +310,7 @@ func TestCheckinStatusClaimedMeansAlreadyClaimed(t *testing.T) {
 		t.Error("有 CLAIM_BENEFIT+CLAIMED 应判「今天已领」")
 	}
 	if !st.Active {
-		t.Error("拿到响应即 active=true（不能按列表非空判定 —— "+
+		t.Error("拿到响应即 active=true（不能按列表非空判定 —— " +
 			"服务端在「今天已领」时会把 campaigns 清空）")
 	}
 }
@@ -448,7 +448,7 @@ func TestClaimReplayedMeansAlreadyClaimed(t *testing.T) {
 // 算出的 credit 也是 0 —— 与正确路径殊途同归（见那里的长注释）。
 //
 // 这条**故意让 replayed 响应带上 benefit**：真实服务端不会这么回
-//（回放的是上次结果，不含新 benefit），但它是**判别性输入** ——
+// （回放的是上次结果，不含新 benefit），但它是**判别性输入** ——
 // 短路判断时 credit 会变成 100 并被累加进 total，
 // 于是聚合层会报 "claimed +100"，把「今天已领」误报成「加 100 分」。
 //
@@ -519,9 +519,9 @@ func TestClaimNoTargetsIsInactiveNotAlreadyClaimed(t *testing.T) {
 //
 // 判据（两条同时满足，避免误报）：
 //
-//	1. 活动列表里没有 CLAIM_BENEFIT（连已领的都没有）
-//	2. 用量响应里 addOnQuota 字段**不存在**（缺失，不是 0 ——
-//	   已开通账号即使额度用尽也有该字段）
+//  1. 活动列表里没有 CLAIM_BENEFIT（连已领的都没有）
+//  2. 用量响应里 addOnQuota 字段**不存在**（缺失，不是 0 ——
+//     已开通账号即使额度用尽也有该字段）
 //
 // ⚠ 第 2 条用「字段是否存在」而非「remaining 是否为 0」：后者对
 // 「额度用光」与「从未开通」不可区分，会把用光额度的老账号误报成未开通。

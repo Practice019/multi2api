@@ -3,7 +3,7 @@
 // # 为什么需要它（本轮修的缺陷）
 //
 // `raccoon` 的登录是**微信扫码**：`Start()` 返回的是一个**要扫的 URL**
-//（`https://xiaohuanxiong.com/login/mp?code=<32位hex>`），而不是一个
+// （`https://xiaohuanxiong.com/login/mp?code=<32位hex>`），而不是一个
 // "点开就能授权"的链接。而前端此前对所有上游都只渲染
 // 「打开链接 / 复制链接」—— 用户拿到一条链接，无法扫码，
 // 「添加账号」等于不可用。
@@ -15,7 +15,7 @@
 // # 为什么自己实现而不引入依赖
 //
 // 本仓的硬约束是「Release 下载即用」：go.mod 直接依赖只有 go-redis
-//（见 AGENTS.md 的依赖铁律）。为一个固定形态的短 URL 引入 QR 库
+// （见 AGENTS.md 的依赖铁律）。为一个固定形态的短 URL 引入 QR 库
 // 会破坏它。参照项目也做了同样选择（它连 node_modules 里没有 QR 依赖
 // 这件事都专门记了一笔）。
 //
@@ -252,7 +252,7 @@ func alignmentPositions(version, size int) []int {
 		return nil
 	}
 	numAlign := version/7 + 2
-	step := ((version*4+4)+(numAlign*2-2)-1)/(numAlign*2-2) * 2
+	step := ((version*4 + 4) + (numAlign*2 - 2) - 1) / (numAlign*2 - 2) * 2
 	result := []int{6}
 	for pos := size - 7; len(result) < numAlign; pos -= step {
 		result = append(result[:1], append([]int{pos}, result[1:]...)...)

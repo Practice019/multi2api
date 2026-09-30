@@ -202,11 +202,11 @@ func probeCapabilities(t TB, p Provider, caps Capability, id string, cfg contrac
 //
 // 访问器对类型断言**不可见**（返回接口的方法不参与方法集匹配），
 // 于是"上游说我有"与"核心能找到"分叉。而 gateway 里早就写下了这条坑
-//（见 extension.go 里 LoginFlow 的注释），**但没有任何检查执行它** ——
+// （见 extension.go 里 LoginFlow 的注释），**但没有任何检查执行它** ——
 // 注释拦不住一个照抄隔壁包、恰好抄错半边的新上游。
 //
 // 更隐蔽的是：四个上游的端到端测试都调**访问器**
-//（`lf, ok := p.LoginFlow()`），所以测试全绿；只有生产路径走 ExtOf。
+// （`lf, ok := p.LoginFlow()`），所以测试全绿；只有生产路径走 ExtOf。
 // 测试与生产走了两条不同的路，正是"测试通过而功能不可用"的典型成因。
 //
 // # 判据
@@ -273,7 +273,7 @@ type extAccessor struct {
 // discoverableExtensions 已知会被访问器暴露的扩展点。
 //
 // 目前只有 LoginFlow —— 它是唯一一个有"访问器"惯例的扩展点
-//（其它扩展点如 AdminExt 一直是直接挂方法）。
+// （其它扩展点如 AdminExt 一直是直接挂方法）。
 // 加新惯例时在这里补一行，检查自动覆盖。
 var discoverableExtensions = []extAccessor{
 	{

@@ -136,13 +136,13 @@ var Qoder = Product{
 //
 // ⚠ InferBase 在两边都**没有调用方**（公开端点方案早已被加密端点取代）。
 // 参照把 CN 的 inferBase 填成与 encryptedInferBase 同值，仅表示
-//「没有独立公开端点」，不要据此发请求 —— 实测 gateway.qoder.com.cn
+// 「没有独立公开端点」，不要据此发请求 —— 实测 gateway.qoder.com.cn
 // 的公开路径回 503（alb 无上游路由）。
 var QoderCN = Product{
-	ID:                 ProviderIDCN,
-	DisplayName:        "Qoder (中国版)",
-	AuthBase:           "https://qoder.cn",
-	OpenAPIBase:        "https://openapi.qoder.com.cn",
+	ID:          ProviderIDCN,
+	DisplayName: "Qoder (中国版)",
+	AuthBase:    "https://qoder.cn",
+	OpenAPIBase: "https://openapi.qoder.com.cn",
 	// ⚠ 与 EncryptedInferBase 同值只表示"没有独立公开端点"，见上。
 	InferBase:          "https://gateway.qoder.com.cn",
 	EncryptedInferBase: "https://gateway.qoder.com.cn",

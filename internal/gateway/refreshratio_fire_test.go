@@ -30,7 +30,7 @@ import (
 // 与"按寿命比例提前续期"完全相反。
 //
 // 本测试把 `RefreshSkew` 的返回值喂进**核心真实的判定式**
-//（handler.needsRefreshVia 的三条分支），断言在该续期的时刻它真的返回 true。
+// （handler.needsRefreshVia 的三条分支），断言在该续期的时刻它真的返回 true。
 //
 // 变异可检：把 `return window, true` 改成"过了触发点就 return 0, true"
 // → 第二条子用例红。
@@ -95,7 +95,7 @@ func TestRatioWindowActuallyFiresAtHalf(t *testing.T) {
 // 不需要读 now** —— 于是没有"什么时候该返回 0"这种会出错的分支。
 //
 // 我第一版读 now 并在"过了触发点"时返回 0，正是因此踩了核心契约的坑
-//（见上一条测试）。用户指出"应该按剩余时间算"是对的。
+// （见上一条测试）。用户指出"应该按剩余时间算"是对的。
 func TestRatioWindowIsLifetimeHalf(t *testing.T) {
 	const lifetime = 3600
 	iat := int64(1_000_000)

@@ -249,7 +249,7 @@ func TestImportCredentialsEmptyProductAssignedToInstance(t *testing.T) {
 //
 // ⚠ 这条测试钉的是**修好之后**的行为 —— 与原来那份 characterization
 // 测试是相反的两面。它自己的注释当时就写了"一旦修好，删掉它"
-//（因为留着它会红）。删除 + 换成正面断言，正是那条指示的落实。
+// （因为留着它会红）。删除 + 换成正面断言，正是那条指示的落实。
 func TestImportCredentialsCNAcceptsEmptyProduct(t *testing.T) {
 	p := NewWithConfig(Config{Product: QoderCN})
 	// 没写 product_id（手工抄的凭证常常就是这样）
@@ -283,7 +283,7 @@ func TestImportCredentialsCNAcceptsEmptyProduct(t *testing.T) {
 // # 为什么要相邻地放在这里
 //
 // 修"空值被误拒"最容易的做法是把整个产品校验删掉。那会把真正该拒的
-//（用户拿国际版的凭证往 CN 卡片上贴）也放行 —— 而那种凭证的续期
+// （用户拿国际版的凭证往 CN 卡片上贴）也放行 —— 而那种凭证的续期
 // **必然失败**（两个产品的 authBase / clientId 完全不同），
 // 界面上表现为"凭证已失效，请重新登录"，把"贴错产品"说成了"凭证坏了"。
 func TestImportCredentialsExplicitWrongProductStillRejected(t *testing.T) {

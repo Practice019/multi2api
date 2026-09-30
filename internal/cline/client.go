@@ -538,8 +538,8 @@ func (c *Client) FetchBalance(ctx context.Context, a *Auth) BalanceResult {
 	}
 
 	var rec struct {
-		Success *bool   `json:"success"`
-		Error   string  `json:"error"`
+		Success *bool  `json:"success"`
+		Error   string `json:"error"`
 		Data    *struct {
 			Balance *float64 `json:"balance"`
 		} `json:"data"`

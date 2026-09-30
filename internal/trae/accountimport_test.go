@@ -28,11 +28,11 @@ func TestImplementsAccountImportExt(t *testing.T) {
 // traeCredFixture 一份**真实形态**的凭证（键名取自 auths/trae/ 的实测文件）。
 //
 // 形态是嵌套形 `{"auth":{…},"account":{…}}`，且 `auth` 段用**驼峰**
-//（`accessToken` / `machineId`）而 `account` 段用驼峰（`enterpriseId`）——
+// （`accessToken` / `machineId`）而 `account` 段用驼峰（`enterpriseId`）——
 // 与其它上游的小写下划线完全不同。这是本包最容易"看起来对、实际全丢"的地方。
 //
 // ⚠ 这份 fixture 刻意带上 `clientId`：它是 trae 最容易漏的一个字段
-//（ExchangeToken 的 ClientID 必须与**签发**这份 refreshToken 的那个一致）。
+// （ExchangeToken 的 ClientID 必须与**签发**这份 refreshToken 的那个一致）。
 // 硬编码一个值去刷所有账号，对"从桌面客户端导入"的账号会刷新失败 →
 // 到期 → 账号表现为"突然过期"。只测 accessToken 能读回会完全漏掉它。
 //

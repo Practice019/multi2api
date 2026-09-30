@@ -86,7 +86,7 @@ type providerInfo struct {
 	//
 	// omitempty：未实现扩展点时不下发，前端回落显示 `id` ——
 	// 既有部署的界面因此**逐字节不变**。
-	DisplayName string   `json:"display_name,omitempty"`
+	DisplayName  string   `json:"display_name,omitempty"`
 	Capabilities []string `json:"capabilities"`
 	// Default 该上游是缺省上游（裸模型名走它）。
 	Default bool `json:"default"`
@@ -124,7 +124,7 @@ type providerInfo struct {
 // 未实现 DisplayNameExt、或报回空串 → 回落 ID（= 改造前的行为）。
 //
 // ⚠ 回落**不是**"给个默认中文名"：多数上游的 id 就是它最准确的名字
-//（`codearts` / `raccoon`），硬塞一个译名反而是噪音。
+// （`codearts` / `raccoon`），硬塞一个译名反而是噪音。
 // 只有"id 不足以表达身份"的上游才需要实现这个扩展点。
 func displayNameOf(p gateway.Provider) string {
 	if p == nil {

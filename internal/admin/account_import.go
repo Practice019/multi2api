@@ -15,7 +15,7 @@
 //	{"provider":"cline","data":"{…}"}        ← data 是用户粘的**原文**
 //
 // 落盘与池对齐都在这里做；而"那段 JSON 是什么意思"完全交给上游
-//（`gateway.AccountImportExt`）—— 核心不解析、不理解凭证内容。
+// （`gateway.AccountImportExt`）—— 核心不解析、不理解凭证内容。
 //
 // # 为什么路由参数是 `provider` 而不是"从路径里取"
 //

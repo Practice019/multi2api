@@ -49,7 +49,7 @@ type UAModelFamilyRule struct {
 // 所以这里**保序**，不排序、不去重。
 //
 // ⚠ `model` 为空时直接返回 fallback：那是"不知道这次是什么模型"的情形
-//（如非 chat 路径），此时不该猜一个分档。
+// （如非 chat 路径），此时不该猜一个分档。
 func PickUA(rules []UAModelFamilyRule, model, fallback string) string {
 	if model == "" {
 		return fallback

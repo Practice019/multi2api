@@ -43,7 +43,7 @@ func newBalanceServer(t *testing.T, f *balanceFake) *Client {
 //
 // 实测：传 sub（`user_01M3BCQ86DV4S9KKBT85X4GKTV`）返回
 // `400 {"error":"Invalid request format"}`。两者形态完全不同
-//（`usr-…` vs `user_…`），但都是"用户标识"，混用时不会编译失败、
+// （`usr-…` vs `user_…`），但都是"用户标识"，混用时不会编译失败、
 // 只会得到一个与真实原因毫不相干的 400。
 func TestBalanceUsesAccountIDNotSub(t *testing.T) {
 	f := &balanceFake{body: `{"success":true,"data":{"userId":"usr-1","balance":500000}}`}

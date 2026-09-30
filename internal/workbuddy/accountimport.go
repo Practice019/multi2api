@@ -20,7 +20,7 @@ import (
 //
 // 只声明 `CapImport` 而不接这个扩展点 → 界面渲染出「批量导入」按钮、
 // 点下去回 501（**假按钮**）。这条不一致是**守卫测试当场抓到的**
-//（`gateway.TestCapImportRequiresAccountImportExt` 的判据 + 各上游契约测试）。
+// （`gateway.TestCapImportRequiresAccountImportExt` 的判据 + 各上游契约测试）。
 //
 // # 为什么不把 import.go 的逻辑搬过来（避免两份实现漂移）
 //
@@ -40,7 +40,7 @@ var errMissingAccessToken = errors.New("缺少 accessToken（它是唯一鉴权�
 //
 // 落盘走 `auth.Auth` 的嵌套形（与页内 OAuth 登录**逐字段同形**），
 // 但这里**不落盘** —— 只产出"文件名 + 内容"，由核心决定写到哪
-//（上游不认识 AuthDir 的权威值，与其它上游同一条约束）。
+// （上游不认识 AuthDir 的权威值，与其它上游同一条约束）。
 func (p *Provider) ImportCredentials(pasted string) ([]gateway.ImportedCredential, error) {
 	items, err := gateway.SplitAccountImportItems(pasted)
 	if err != nil {

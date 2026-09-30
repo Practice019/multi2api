@@ -146,7 +146,7 @@ func TestUnwrapEnvelopeHandlesUnescapedBodyObject(t *testing.T) {
 //
 // ⚠ 这是流式解析的**核心风险**：TCP 分片不尊重行边界，一次 Read 很可能拿到
 // 半行。把半行当整行转换会得到一段无法解析的 JSON —— 表现为随机丢帧
-//（且只在网络分片恰好在中间时复现，极难定位）。
+// （且只在网络分片恰好在中间时复现，极难定位）。
 func TestUnwrapEnvelopeStreamSplitsAcrossChunks(t *testing.T) {
 	full := `data:{"body":"{\"choices\":[{\"delta\":{\"content\":\"A\"}}]}"}` + "\n" +
 		`data:{"body":"{\"choices\":[{\"delta\":{\"content\":\"B\"}}]}"}` + "\n"

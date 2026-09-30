@@ -75,7 +75,7 @@ func TestWasmInstantiate(t *testing.T) {
 // --experimental-transform-types 能直接跑 .ts），不是估的。
 //
 // ⚠ 我第一版把它们写成 152/108 —— 那是我在探针里**看错了**输出行
-//（那次的输入与这次不同）。教训：黄金值必须来自与被测代码**同样的输入**，
+// （那次的输入与这次不同）。教训：黄金值必须来自与被测代码**同样的输入**，
 // 否则测的是"两个不同的东西"。
 func TestGenerateRuntimeAuthFields(t *testing.T) {
 	// 直接调底层，便于拿到原始串
@@ -364,7 +364,7 @@ func TestRecyclePreservesIdentity(t *testing.T) {
 // TestConcurrentCallsAreSerialized 并发调用不得互相踩对象堆。
 //
 // 对象堆是共享可变状态；不串行化会得到随机的签名错误
-//（只在并发时复现，极难定位）。
+// （只在并发时复现，极难定位）。
 func TestConcurrentCallsAreSerialized(t *testing.T) {
 	s := newTestSigner(t)
 	body, _ := json.Marshal(map[string]any{
@@ -404,7 +404,7 @@ func (*noAuthErr) Error() string { return "并发下 Authorization 丢失" }
 // TestWasmFileIsEmbedded WASM 必须 embed 进二进制。
 //
 // 运行时读文件会让部署多一个可静默失效的步骤
-//（"忘拷 wasm → 加密推理不可用"）。embed 之后二进制自带，
+// （"忘拷 wasm → 加密推理不可用"）。embed 之后二进制自带，
 // 这条测试断言的就是"我们真的用的是 embed 那份"。
 func TestWasmFileIsEmbedded(t *testing.T) {
 	if len(wasmBytes) == 0 {

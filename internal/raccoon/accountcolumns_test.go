@@ -14,8 +14,9 @@ import (
 // 用户会以为"今天还没签到"，实际是 raccoon **没有签到端点**（它的登录奖励是一次性的，不是每日签到）。
 //
 // 判据：列集里不得出现 checkin，且**其余默认列都要保留**
-//（只去掉那一列，不要顺手改成一份新的硬编码列表 ——
-//  那样核心给默认列集加列时 raccoon 会静默不跟随）。
+// （只去掉那一列，不要顺手改成一份新的硬编码列表 ——
+//
+//	那样核心给默认列集加列时 raccoon 会静默不跟随）。
 func TestAccountColumnsDropsCheckin(t *testing.T) {
 	p := NewWithConfig(Config{})
 	cols := p.AccountColumns()

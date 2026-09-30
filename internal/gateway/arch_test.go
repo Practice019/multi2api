@@ -593,9 +593,9 @@ func TestPrivateSDKIsNotConsumedByOtherUpstreams(t *testing.T) {
 //
 // 一个 internal/<name> 若被 ≥2 个上游实现依赖，它必须满足其一：
 //
-//	1) 是 gateway（唯一的契约包，天然共享）；或
-//	2) 在 sharedInfraPackages 里**显式登记**，且该登记是**必需**的
-//	   （它确实被多个上游依赖 —— 否则这条登记就是陈旧的，测试要求删掉）
+//  1. 是 gateway（唯一的契约包，天然共享）；或
+//  2. 在 sharedInfraPackages 里**显式登记**，且该登记是**必需**的
+//     （它确实被多个上游依赖 —— 否则这条登记就是陈旧的，测试要求删掉）
 //
 // # 为什么这条能防住这次的漏洞
 //
@@ -751,7 +751,7 @@ var discoverCache = map[string][]string{}
 //
 // 与 upstreamDependents 配对，用于 TestSharedInfraIsGenuinelyShared 的
 // "共享程度"判定 —— 共享可以发生在上游↔上游，也可以发生在上游↔核心
-//（见该测试里 registered 的注释）。
+// （见该测试里 registered 的注释）。
 func coreDependents(t *testing.T, root, name string) []string {
 	t.Helper()
 	var out []string
