@@ -56,6 +56,16 @@ const (
 	campaignsPath = "/sash/api/v1/me/campaigns"
 )
 
+// creditsMaxAttempts 一次 GET 最多尝试几次（含首次）。
+//
+// 取 3：实测上游 503 率约 20~30%，且是"临时不可用"。
+// 3 次全撞上的概率约 1~3%，足够低；而最坏耗时 200+400ms 的退避，
+// 对"每 30 分钟扫一次"的签到完全可接受，也不会让界面转圈。
+const creditsMaxAttempts = 3
+
+// creditsRetryDelayMS 重试退避的基数（毫秒）。第 n 次失败后等 n×base。
+const creditsRetryDelayMS = 200
+
 // creditsTimeoutMS 积分请求超时。
 const creditsTimeoutMS = 15_000
 
@@ -162,11 +172,64 @@ func (c *Client) creditsHeaders(a *Auth) map[string]string {
 	return h
 }
 
-// getJSON 发一次带 creditsHeaders 的 GET，返回响应体（非 2xx 返回 nil）。
-func (c *Client) getJSON(ctx context.Context, a *Auth, path string, out any) bool {
+// getJSON 发一次带 creditsHeaders 的 GET；失败返回 (nil, 原因描述)。
+//
+// # 为什么返回"原因"而不是 bool（本轮改的，用户报障）
+//
+// 旧签名是 `bool`，于是调用方只能说"活动列表查询失败"——用户看到
+// 「签到 失败」却完全不知道为什么（是凭据过期？限流？上游挂了？）。
+// 这一轮排查里，我不得不**手工**打端点才知道真相是 503
+// `DEPENDENCY_UNAVAILABLE`。把原因带出来，下次一眼可见。
+//
+// # ⚠ 503 是**可重试**的，不能一次定生死（本轮修的第二个缺陷）
+//
+// 实测（同一凭据、同一时刻交替打 10 次）：
+//
+//	不带 machine 头  200×7  503×3
+//	带 machine 头    200×8  503×2
+//
+// 即 `campaign service is temporarily unavailable` 是**上游间歇性**故障
+//（与请求头无关，`/usage` 端点同时刻恒 200）。而签到是每 30 分钟扫一次，
+// 撞上 503 就记一次 "fail" —— 用户看到的「今日签到 失败」有相当比例
+// 就是这么来的。所以对 5xx / 网络错误**退避重试**，只有全试完才认失败。
+func (c *Client) getJSON(ctx context.Context, a *Auth, path string, out any) (bool, string) {
+	var lastReason string
+	for attempt := 0; attempt < creditsMaxAttempts; attempt++ {
+		if attempt > 0 {
+			// 退避：200ms / 400ms …（上游是"临时不可用"，等一小会儿往往就好）
+			select {
+			case <-ctx.Done():
+				return false, "已取消"
+			case <-time.After(time.Duration(attempt) * creditsRetryDelayMS * time.Millisecond):
+			}
+		}
+		status, body, err := c.getJSONOnce(ctx, a, path)
+		if err != nil {
+			lastReason = "网络错误：" + err.Error()
+			continue // 网络错误可重试
+		}
+		if status >= 200 && status < 300 {
+			if jerr := json.Unmarshal(body, out); jerr != nil {
+				// 2xx 却解不动：**不重试**（重试也是同样的字节），直接报形状问题。
+				return false, fmt.Sprintf("响应无法解析（HTTP %d）：%s", status, snippet(body))
+			}
+			return true, ""
+		}
+		lastReason = describeNonJSON(status, string(body))
+		if status < 500 {
+			// 4xx 是确定性的（凭据失效 / 参数错），重试无意义。
+			return false, lastReason
+		}
+		// 5xx：重试
+	}
+	return false, lastReason
+}
+
+// getJSONOnce 发一次 GET，返回 (状态码, 响应体)。网络失败时 err 非 nil。
+func (c *Client) getJSONOnce(ctx context.Context, a *Auth, path string) (int, []byte, error) {
 	req, err := http.NewRequest(http.MethodGet, c.openAPI()+path, nil)
 	if err != nil {
-		return false
+		return 0, nil, err
 	}
 	for k, v := range c.creditsHeaders(a) {
 		req.Header.Set(k, v)
@@ -175,17 +238,23 @@ func (c *Client) getJSON(ctx context.Context, a *Auth, path string, out any) boo
 	defer cancel()
 	resp, err := c.httpClient().Do(req.WithContext(ctx))
 	if err != nil {
-		return false
+		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return false
+		return resp.StatusCode, nil, err
 	}
-	return json.Unmarshal(body, out) == nil
+	return resp.StatusCode, body, nil
+}
+
+// snippet 压平空白并截断（进错误文案用）。
+func snippet(b []byte) string {
+	s := strings.Join(strings.Fields(string(b)), " ")
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
 }
 
 // FetchUsageRaw 拉原始用量响应（供「是否未开通」判据使用）。
@@ -195,7 +264,7 @@ func (c *Client) getJSON(ctx context.Context, a *Auth, path string, out any) boo
 // 「余额 0」都可能变成 nil，不足以区分开通与否）。
 func (c *Client) FetchUsageRaw(ctx context.Context, a *Auth) map[string]any {
 	var out map[string]any
-	if !c.getJSON(ctx, a, usagePath, &out) {
+	if ok, _ := c.getJSON(ctx, a, usagePath, &out); !ok {
 		return nil
 	}
 	return out
@@ -207,7 +276,7 @@ func (c *Client) FetchUsageRaw(ctx context.Context, a *Auth) map[string]any {
 // 与「余额为 0」严格区分 —— 失败时界面应显示原因而不是 0。
 func (c *Client) FetchCreditBalance(ctx context.Context, a *Auth) (*CreditBalance, bool) {
 	var root map[string]any
-	if !c.getJSON(ctx, a, usagePath, &root) {
+	if ok, _ := c.getJSON(ctx, a, usagePath, &root); !ok {
 		return nil, false
 	}
 	// 企业版：无额度数字，只有外部链接。返回 not-ok 而非 0（报 0 会误导）。
@@ -308,7 +377,7 @@ type campaignsResult struct {
 // 抽出来是因为签到状态与领取都要它 —— 早期两处各写一次会**重复发一次 GET**。
 func (c *Client) loadCampaigns(ctx context.Context, a *Auth) (*campaignsResult, bool) {
 	var root map[string]any
-	if !c.getJSON(ctx, a, campaignsPath, &root) {
+	if ok, _ := c.getJSON(ctx, a, campaignsPath, &root); !ok {
 		return nil, false
 	}
 	out := &campaignsResult{}
@@ -541,16 +610,54 @@ func (c *Client) claimOne(ctx context.Context, a *Auth, campaignID string) Claim
 	return ClaimOutcome{Kind: "claimed", Credit: readNumberAny(root, "benefit", "amount")}
 }
 
-// describeNonJSON 非 JSON 响应的可读原因（凭据失效时网关返回 HTML）。
+// describeNonJSON 把非 2xx 的响应压成一句可读原因。
+//
+// # ⚠ 名字与文案不一致（本轮修的一个小缺陷）
+//
+// 旧文案一律说「服务端返回了**非 JSON** 响应」，但它对被调用的场合太宽：
+// 503 的错误体**本身就是 JSON**
+//
+//	{"errorCode":"DEPENDENCY_UNAVAILABLE","errorMessage":"campaign service…"}
+//
+// 于是界面报「非 JSON 响应」，而用户/排查者看到的是 JSON —— 这句文案
+// 会把人往"解析器坏了"的方向带，而真相是"上游服务临时不可用"。
+// 现在的判据是**看 body 到底是不是 JSON**，而不是假设。
 func describeNonJSON(status int, text string) string {
 	if status == 401 || status == 403 {
 		return fmt.Sprintf("凭据已失效（HTTP %d），请重新登录该账号", status)
 	}
 	snippet := strings.Join(strings.Fields(text), " ")
-	if len(snippet) > 80 {
-		snippet = snippet[:80]
+	if len(snippet) > 120 {
+		snippet = snippet[:120]
 	}
-	return fmt.Sprintf("服务端返回了非 JSON 响应（HTTP %d）：%s", status, snippet)
+	// 服务端的错误体是 JSON 时，把它的 errorCode/errorMessage 抠出来 ——
+	// 那两个字段才是有诊断价值的（HTTP 状态码只说"哪一类"，它们是"为什么"）。
+	if code, msg := jsonErrorCodeMessage(text); code != "" || msg != "" {
+		if status == 503 {
+			return fmt.Sprintf("上游服务暂时不可用（HTTP %d %s：%s）—— 稍后会自动重试",
+				status, code, msg)
+		}
+		return fmt.Sprintf("服务端拒绝（HTTP %d %s：%s）", status, code, msg)
+	}
+	return fmt.Sprintf("服务端返回了无法识别的响应（HTTP %d）：%s", status, snippet)
+}
+
+// jsonErrorCodeMessage 从服务端错误体里取 errorCode / errorMessage。
+//
+// 取不到（不是 JSON / 没有这两个字段）时返回空串 —— 由调用方回落成截断文本。
+func jsonErrorCodeMessage(text string) (code, msg string) {
+	start := strings.Index(text, "{")
+	if start < 0 {
+		return "", ""
+	}
+	var rec struct {
+		Code    string `json:"errorCode"`
+		Message string `json:"errorMessage"`
+	}
+	if err := json.Unmarshal([]byte(text[start:]), &rec); err != nil {
+		return "", ""
+	}
+	return rec.Code, rec.Message
 }
 
 // ── 安全读值（容忍字符串/数字/缺失） ──

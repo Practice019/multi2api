@@ -210,7 +210,7 @@ func (h *AdminHandler) prefixed(routes []gateway.AdminRoute) []gateway.AdminRout
 	prefix := h.pathPrefix()
 	out := make([]gateway.AdminRoute, 0, len(routes))
 	for _, r := range routes {
-		if h.p != nil && h.p.cfg.DisableGrowthTravel &&
+		if h.p != nil && h.p.PlayFeaturesDisabled() &&
 			(r.Capability&(gateway.CapCheckin|gateway.CapGrowth|gateway.CapTravel) != 0 ||
 				isPlayFeaturePath(r.Path)) {
 			continue
@@ -243,10 +243,46 @@ func isPlayFeaturePath(path string) bool {
 
 // pathPrefix 返回本实例的管理端点路径前缀；默认实例无前缀。
 func (h *AdminHandler) pathPrefix() string {
-	if h == nil || h.p == nil || h.p.ID() == providerID {
+	if h == nil || h.p == nil {
 		return ""
 	}
-	return "/" + h.p.ID()
+	return h.p.PathPrefix()
+}
+
+// PathPrefix 本实例管理端点的路径前缀（默认实例返回空串）。
+//
+// # 为什么它从 AdminHandler 提到 Provider 上（本轮修的缺陷）
+//
+// 它原先只服务 `prefixed()`（AdminRoutes 的路径改写）。而**每日动作**
+// （DailyActions）也报路径，却**没有**经过它 —— 于是非默认实例自报的端点
+// 指向了默认实例的路由。实测（隔离实例 7871）：
+//
+//	buddy          报 /admin/checkin      真实挂载 /buddy/admin/checkin
+//	workbuddy-intl 报 /admin/keepalive    真实挂载（**没有**，被玩法裁剪）
+//
+// 后果是"点 buddy 卡片上的「全部签到」会签到 workbuddy 的号" ——
+// 正是本仓历史上那 703 条脏记录的同款形态（见 upstream_isolation_test.go）。
+//
+// 提到 Provider 上之后，**两处路径来源合成一处**：谁要报路径就问它，
+// 不可能再出现"路由带前缀、动作不带"的漂移。
+func (p *Provider) PathPrefix() string {
+	if p == nil || p.ID() == providerID {
+		return ""
+	}
+	return "/" + p.ID()
+}
+
+// PlayFeaturesDisabled 本实例是否裁剪了玩法类端点（签到/成长/旅行/活动）。
+//
+// # 为什么它也要提上来（同一处缺陷的第二半）
+//
+// `prefixed()` 会按 DisableGrowthTravel 跳过玩法端点 —— 于是海外版实例
+// **没有** `/workbuddy-intl/admin/checkin` 这条路由。但 DailyActions()
+// 照样报了签到/保活动作，前端于是渲染出一个点下去打到**默认实例**账号的按钮。
+//
+// 两处判据合成一处后，"挂不挂这条路由"与"报不报这个动作"必然一致。
+func (p *Provider) PlayFeaturesDisabled() bool {
+	return p != nil && p.cfg.DisableGrowthTravel
 }
 
 // allRoutes 在基础路由之上追加任务自动化端点（见 autotask_admin.go）。

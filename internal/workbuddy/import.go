@@ -84,6 +84,24 @@ type importItem struct {
 	// json 键保持 `sessionToken` 兼容既有导出工具格式；别名 accessToken 也接受。
 	AccessToken string `json:"sessionToken"`
 	RefreshToken string `json:"refreshToken"`
+	// DeviceToken 风控头 `X-Device-Token` 的设备令牌（**每个账号一个**）。
+	//
+	// # ⚠ 为什么必须收它（用户实测报的："没有 deviceToken"）
+	//
+	// `SaveAtomic` 会把 `account.deviceToken` **一起写回**文件
+	//（见 auth.Auth.MarshalNested 的注释：不写回就等于让 token 刷新
+	// 把用户手写的设备令牌静默抹掉）。所以导入若不认这个字段：
+	//
+	//	导入 → 构造的 auth.Auth.DeviceToken 为空 → SaveAtomic 写空串
+	//	→ **用户原本手写进文件的设备令牌被覆盖成空**
+	//
+	// 之后 `resolveDeviceToken` 的回落链只剩「配置里的全局值 / 全局文件」，
+	// 而**每账号一个**的设备令牌才是服务端认的那个 —— 表现为
+	// "导入之后这个号开始被风控/某些接口失败"，且看不出与导入有关。
+	//
+	// 键名与 `auth.Auth` 的落盘键（`account.deviceToken`）一致，
+	// 也接受导出工具常用的 `device_token` 写法。
+	DeviceToken string `json:"deviceToken"`
 	Quota        int64  `json:"可用额度"`
 	Health       string `json:"是否健康"`
 	ExpiresAt    int64  `json:"expiresAt"`
@@ -114,6 +132,13 @@ func fillAliases(it *importItem, m map[string]any) {
 		if v, ok := importNumberField(m, "expires_at"); ok {
 			it.ExpiresAt = v
 		}
+	}
+	// deviceToken：接受 snake_case 别名。
+	//
+	// ⚠ 这一条漏了会**静默抹掉**用户已有的设备令牌（见 importItem.DeviceToken
+	// 的注释）—— 是本轮用户实测点出来的。
+	if it.DeviceToken == "" {
+		it.DeviceToken = importFirstStringField(m, "device_token", "deviceToken", "设备令牌")
 	}
 }
 
@@ -345,6 +370,11 @@ func importOne(dir, instanceID string, it importItem) (string, string, error) {
 		Channel:      channel,
 		UID:          uid,
 		Nickname:     nickname,
+		// ⚠ 必须带上（用户实测点出来的）：`SaveAtomic` 会把它一起写回，
+		// 不给值就等于用空串覆盖用户已有的设备令牌 —— 而那是**每账号一个**
+		// 的风控头，丢了之后回落链只剩下全局值，表现为"导入后这个号开始
+		// 被风控"，且看不出与导入有关。见 importItem.DeviceToken 的注释。
+		DeviceToken: strings.TrimSpace(it.DeviceToken),
 		// FilePath 决定 SaveAtomic 写回哪里；文件名与 auth.LoadDir 的
 		// glob（workbuddy*.json）及现有落盘惯例（两个实例同前缀）一致。
 		FilePath: filepath.Join(dir, "workbuddy-"+uid+".json"),

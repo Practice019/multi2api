@@ -121,6 +121,10 @@ func TestWorkbuddyDailyActionsExactList(t *testing.T) {
 //
 // 这是"假按钮"守卫：OneURL/AllURL 指向一条不存在的路由时，前端会渲染
 // 一个点下去 404 的按钮，而**没有任何测试会红** —— 除非有这一条。
+//
+// ⚠ 本条只覆盖**默认实例**（ID=workbuddy，路径无前缀）。非默认实例
+// （buddy / workbuddy-intl）走 TestWorkbuddyInstanceActionURLsMatchInstance ——
+// 那个漏洞正是"只测默认实例"造成的，两条必须都在。
 func TestWorkbuddyActionURLsReallyExist(t *testing.T) {
 	p := newWorkbuddy(t)
 	routes := routeSet(t, p)
@@ -136,6 +140,117 @@ func TestWorkbuddyActionURLsReallyExist(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestWorkbuddyInstanceActionURLsMatchInstance 非默认实例的动作端点必须带它自己的前缀。
+//
+// # 这条是本轮实测抓出来的缺陷的守卫（不是假想）
+//
+// 隔离实例实测（7871，同时开了 buddy 与 workbuddy-intl）：
+//
+//	buddy          自报 /admin/checkin     真实挂载 /buddy/admin/checkin
+//	workbuddy-intl 自报 /admin/keepalive   真实挂载（**没有**，被玩法裁剪）
+//
+// 而 `/admin/checkin` 与 `/admin/keepalive` 是**默认实例**的路由 ——
+// 于是"点 buddy 卡片上的「全部签到」"会去签到 workbuddy 的账号。
+// 本仓历史上这个形态留下过 703 条脏记录（见 upstream_isolation_test.go）。
+//
+// # 为什么旧断言抓不住它
+//
+// TestWorkbuddyActionURLsReallyExist 用 `workbuddy.NewWithConfig(Config{})`
+// 构造 —— 那是**默认实例**，路径本来就不带前缀，于是它检查的
+// `/admin/checkin` 永远存在，**永远绿**。缺陷住在"非默认实例"这个
+// 测试从未构造过的输入里。
+//
+// 判据（两条，缺一不可）：
+//
+//	① 非默认实例报的每个端点，必须出现在**它自己**的 AdminRoutes 里
+//	② 这些端点必须**带它自己的前缀**（不能等于默认实例的路径）
+//
+// ② 是必须的：只做 ① 的话，若某实例的 AdminRoutes 恰好也含无前缀路径
+// （默认实例的那份），① 会蒙对。
+func TestWorkbuddyInstanceActionURLsMatchInstance(t *testing.T) {
+	for _, id := range []string{"buddy", "workbuddy-intl"} {
+		// 海外版（workbuddy-intl）走 DisableGrowthTravel —— 与装配层一致。
+		cfg := workbuddy.Config{ID: id, Provider: id}
+		if id == "workbuddy-intl" {
+			cfg.DisableGrowthTravel = true
+		}
+		p := workbuddy.NewWithConfig(cfg)
+		if p.ID() != id {
+			t.Fatalf("构造出来的实例 ID=%q，want %q（测试装置没配对上）", p.ID(), id)
+		}
+		routes := routeSet(t, p)
+		acts := actionsOfOrNil(p)
+
+		// ① 每个报出来的端点必须真的挂在**本实例**的路由上。
+		for _, a := range acts {
+			for _, u := range []string{a.OneURL, a.AllURL} {
+				if u == "" {
+					continue
+				}
+				if !routes["POST "+u] {
+					t.Errorf("%s（非默认实例）的动作 %s 报了 %s，但它自己的 AdminRoutes 里没有这条\n"+
+						"  已挂载: %v\n"+
+						"  ⚠ 这会打到**默认实例**的同名路由上（签到/保活别家的账号）",
+						id, a.ID, u, sortedKeys(routes))
+				}
+			}
+		}
+
+		// ② 端点必须带自己的前缀（不能是默认实例的裸路径）。
+		prefix := "/" + id
+		for _, a := range acts {
+			for _, u := range []string{a.OneURL, a.AllURL} {
+				if u == "" {
+					continue
+				}
+				if !strings.HasPrefix(u, prefix+"/") {
+					t.Errorf("%s（非默认实例）的动作 %s 端点 %q 没有带前缀 %q —— "+
+						"它会打到默认实例的同名路由上", id, a.ID, u, prefix)
+				}
+			}
+		}
+	}
+}
+
+// TestWorkbuddyIntlReportsNoPlayActions 海外版实例**一个玩法动作都不报**。
+//
+// # 为什么（同一处缺陷的第二半）
+//
+// 海外版（DisableGrowthTravel）的真实路由里**没有**签到/保活
+// （prefixed() 按同一判据跳过，实测 7871 的 manifest 里
+// workbuddy-intl 只有 client-login / credits / import 五条）。
+// 但它此前照样报了「保活」—— 于是账号行里长出一个点下去
+// 打到 workbuddy 账号的按钮。
+//
+// 判据：报了动作就必须挂得出端点；挂不出就**不报**（"有什么显示什么"）。
+func TestWorkbuddyIntlReportsNoPlayActions(t *testing.T) {
+	p := workbuddy.NewWithConfig(workbuddy.Config{
+		ID: "workbuddy-intl", Provider: "workbuddy-intl", DisableGrowthTravel: true,
+	})
+	if got := actionsOfOrNil(p); len(got) != 0 {
+		t.Errorf("workbuddy-intl 报了 %d 个玩法动作（%+v）—— "+
+			"它的路由里没有这些端点（玩法被裁剪），报了就是打到别家账号的假按钮",
+			len(got), got)
+	}
+	// 反向：默认实例**必须**还有这两个动作（别把修法用过头）。
+	if got := actionsOfOrNil(workbuddy.NewWithConfig(workbuddy.Config{})); len(got) != 2 {
+		t.Errorf("默认实例报了 %d 个动作，want 2（签到+保活）—— "+
+			"修前缀时把默认实例的动作也删掉了", len(got))
+	}
+}
+
+// actionsOfOrNil 取某实例自报的动作（**允许它一个都不报**，不 Fatal）。
+//
+// 与 actionsOf 的区别：那个在"没实现扩展点"时 Fatal，而本文件的
+// 非默认实例用例要断言"报了 0 个"—— 那需要能拿到空切片。
+func actionsOfOrNil(p gateway.Provider) []gateway.DailyAction {
+	ext, ok := gateway.ExtOf[gateway.DailyActionExt](p)
+	if !ok || ext == nil {
+		return nil
+	}
+	return gateway.SanitizeDailyActions(ext.DailyActions())
 }
 
 // TestWorkbuddyKeepaliveHasNoBulkButton 「全部保活」**不得**回来。
@@ -229,31 +344,49 @@ func TestCodeartsDailyActionsExactList(t *testing.T) {
 	if g.OneURL != "/admin/welfare/claim" {
 		t.Errorf("OneURL=%q want %q", g.OneURL, "/admin/welfare/claim")
 	}
-	// Batch / AllURL 必须为空 —— 上游没有"全部领取"这种端点，如实报。
+	// Batch / AllURL 必须是**真挂着**的那条全量端点。
 	//
-	// ⚠ 这条不是形式主义：若有人给它填上 AllURL，前端的顶部就会出现
-	// 一个「全部领取福利」按钮，点下去要么 404，要么（更糟）遍历
-	// **整个账号池**去领取 —— 包括别家上游的账号。
-	if g.Batch {
-		t.Error("codearts 的福利领取不该声明 Batch=true —— 它没有全量端点")
+	// # 本条在 2026-09-30 被**主动改过**（不是测试坏了，是事实变了）
+	//
+	// 上一版钉的是"AllURL 必为空"，理由是"codearts 没有全量端点"。
+	// 用户本轮要求「统一所有上游」：
+	//
+	//	"只有单账号的那就创建全部签到  统一所有的上游"
+	//
+	// 于是 codearts **补了** POST /admin/welfare/claim/all（见
+	// internal/codearts/dailycheckin.go），AllURL 的事实随之改变。
+	//
+	// ⚠ 但这条断言的**意图一个字没变**：AllURL 若指向一条不存在的路由，
+	// 前端就会渲染一个点下去 404 的按钮。所以这里改成钉"它等于那条真端点"，
+	// 并由下面的 TestCodeartsActionURLsReallyExist 复核它确实挂着 ——
+	// 而不是因为"上游现在有了"就干脆不检查 AllURL。
+	if !g.Batch {
+		t.Error("codearts 的签到（福利领取）Batch=false —— 它那张卡片上不会出现" +
+			"「全部签到」，与『所有上游统一』的要求不符（本轮已补全量端点）")
 	}
-	if g.AllURL != "" {
-		t.Errorf("codearts 的福利领取 AllURL=%q，want 空（没有全量端点）", g.AllURL)
+	if g.AllURL != "/admin/welfare/claim/all" {
+		t.Errorf("codearts 的签到 AllURL=%q，want /admin/welfare/claim/all", g.AllURL)
 	}
 }
 
 // TestCodeartsActionURLsReallyExist 同 workbuddy 的"假按钮"守卫。
+//
+// ⚠ 本轮起**必须连 AllURL 一起查**（上一版只查了 OneURL）：
+// 全量端点本轮才补上，而"报了但没挂"正是最容易出现的状态 ——
+// 它不报编译错误，只在用户点了按钮之后 404。
 func TestCodeartsActionURLsReallyExist(t *testing.T) {
 	p := newCodearts(t)
 	routes := routeSet(t, p)
 	for _, a := range actionsOf(t, p) {
-		if a.OneURL == "" {
-			continue
-		}
-		key := "POST " + a.OneURL
-		if !routes[key] {
-			t.Errorf("动作 %s 报了 %s，但 %s 不在 AdminRoutes 里\n  已挂载: %v",
-				a.ID, a.OneURL, key, sortedKeys(routes))
+		for _, u := range []string{a.OneURL, a.AllURL} {
+			if u == "" {
+				continue
+			}
+			key := "POST " + u
+			if !routes[key] {
+				t.Errorf("动作 %s 报了 %s，但 %s 不在 AdminRoutes 里\n  已挂载: %v",
+					a.ID, u, key, sortedKeys(routes))
+			}
 		}
 	}
 }

@@ -38,7 +38,7 @@ import (
 //
 // 也就是"能续，但白白多一次往返，且每次都在换 token"。
 //
-// ⚠ 这个坑项目里有记录（cmd/server/mimocreds.go 的文件头，
+// ⚠ 这个坑项目里有记录（handoff.md 的「TRAE 账号突然过期」事故档案，
 // 标注为 TRAE「账号突然过期」事故的根因之一）：
 //
 //	过期权威只走 gateway.CredentialExpiryExt（问上游活 secret），

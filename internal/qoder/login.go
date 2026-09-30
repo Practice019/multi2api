@@ -25,6 +25,7 @@ import (
 // loginEntry 一次在途登录。
 type loginEntry struct {
 	state    string
+	session  DeviceSession
 	issuedAt time.Time
 	ready    bool
 	cred     gateway.Credential
@@ -79,24 +80,38 @@ func (p *Provider) Configured() bool {
 	return ok && lf.Configured()
 }
 
-// Start 发起一次登录：生成 state + 授权 URL，后台轮询。
+// Start 发起一次登录：生成设备会话（PKCE + nonce + machine_id）与授权 URL，
+// 后台轮询。
 //
 // 返回 (state, authURL, error)。
+//
+// # ⚠ 本轮修的缺陷：此前**没有 PKCE**
+//
+// 旧实现只生成一个 `state`，授权 URL 带 `client_id/response_type/state`，
+// 轮询也只提交 `state`。而参照实现（已实测跑通）是标准 PKCE 设备码流程 ——
+// 服务端靠轮询提交的 `verifier` 校验授权时的 `challenge`。
+//
+// 缺了它：授权页照常打开、用户照常点授权，但服务端没有可校验的东西，
+// **永远拿不到 token**（一直 pending 到 5 分钟超时）。用户报的
+// "qoder / qodercn 添加账号有问题"就是这个。
 func (f *loginFlow) Start() (string, string, error) {
 	if f == nil || f.p == nil {
 		return "", "", errors.New("qoder: 登录流程未配置")
 	}
-	state, err := randomState()
+	sess, err := newDeviceSession()
 	if err != nil {
-		return "", "", fmt.Errorf("qoder: 生成 state 失败: %w", err)
+		return "", "", fmt.Errorf("qoder: 生成设备会话失败: %w", err)
 	}
-	e := &loginEntry{state: state, issuedAt: time.Now()}
+	// state 用 nonce：它天然唯一且随机，且是**服务端认识的**那个标识
+	//（授权与轮询两处都带它）。另造一个 state 只会多一份要同步的状态。
+	state := sess.Nonce
+	e := &loginEntry{state: state, session: sess, issuedAt: time.Now()}
 	f.mu.Lock()
 	f.ses[state] = e
 	f.mu.Unlock()
 
 	go f.pollLoop(e)
-	return state, f.p.client.DeviceSelectURL(state), nil
+	return state, f.p.client.DeviceSelectURL(&sess), nil
 }
 
 // randomState 生成随机 state（32 位 hex）。
@@ -130,7 +145,7 @@ func (f *loginFlow) pollLoop(e *loginEntry) {
 
 		ctx, cancel := context.WithTimeout(context.Background(),
 			time.Duration(requestTimeoutMS)*time.Millisecond)
-		res, err := f.p.client.PollDeviceToken(ctx, e.state)
+		res, err := f.p.client.PollDeviceToken(ctx, &e.session)
 		cancel()
 
 		if err != nil {
@@ -147,30 +162,45 @@ func (f *loginFlow) pollLoop(e *loginEntry) {
 		if res.Pending {
 			continue
 		}
-		f.finishLogin(e, res.AccessToken, res.RefreshToken)
+		f.finishLogin(e, res)
 		return
 	}
 }
 
 // finishLogin 构造凭据并标记就绪。
-func (f *loginFlow) finishLogin(e *loginEntry, accessToken, refreshToken string) {
+//
+// # 字段取值（逐字照抄参照 buildQoderCredential）
+//
+//	machine_id  用**本次会话**生成的那个 —— 它必须随凭据持久化，
+//	            续期请求体要带它（见 RefreshCredential）
+//	uid         优先用设备码响应里的 user_id；**加密推理需要它**
+//	            （WASM 用它派生 encrypt_user_info），拿不到才回落派生值
+//	nickname    优先 user_name，再回落 userinfo，最后回落短 uid
+func (f *loginFlow) finishLogin(e *loginEntry, res PollResult) {
 	a := &Auth{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
+		AccessToken:  res.AccessToken,
+		RefreshToken: res.RefreshToken,
 		ProductID:    f.p.productID,
+		// ⚠ 会话里生成的那个，不是新造的 —— 服务端把 machine_id 与
+		// 本次授权绑定，换一个会让续期被拒。
+		MachineID: e.session.MachineID,
+		UID:       res.UID,
+		Nickname:  res.Nickname,
 	}
-	// machine_id：续期请求体要用它，登录时生成一次
-	if mid, err := randomState(); err == nil {
-		a.MachineID = mid
+	// 设备码响应没带 uid/nickname 时尽力补全（失败不影响登录）。
+	if a.UID == "" || a.Nickname == "" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeoutMS)*time.Millisecond)
+		ui := f.p.client.FetchUserInfo(ctx, a)
+		cancel()
+		if a.UID == "" {
+			a.UID = ui.UID
+		}
+		if a.Nickname == "" {
+			a.Nickname = ui.Nickname
+		}
 	}
-	// 尽力补全展示信息（失败不影响登录）
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(requestTimeoutMS)*time.Millisecond)
-	ui := f.p.client.FetchUserInfo(ctx, a)
-	cancel()
-	a.UID = ui.UID
-	a.Nickname = ui.Nickname
 	if a.UID == "" {
-		a.UID = DerivedUID(accessToken)
+		a.UID = DerivedUID(res.AccessToken)
 	}
 	if a.Nickname == "" {
 		a.Nickname = shortUID(a.UID)
@@ -243,7 +273,7 @@ var _ gateway.LoginFlow = (*loginFlow)(nil)
 //
 // 让同一个类型承担两者，意味着"池里那份"和"盘上那份"共用一个序列化路径，
 // 而它们的字段集并不相同。包装类型把"落盘形态"这件事显式化，
-// 也与 trae / mimo / loomy / codearts 的既有做法一致。
+// 也与 trae / loomy / codearts 的既有做法一致。
 type authFile struct{ a *Auth }
 
 // MarshalAuthFile 返回 (文件名, 内容) —— 核心 pollViaFlow 的 authFileWriter 契约。

@@ -628,14 +628,25 @@
            而那条路由是 **workbuddy 挂的**。两个上游时这个按钮的语义是模糊的
            （codearts 根本没有签到能力位，却也被"全部签到"扫进去）。
 
-           现在改成**由上游自报**：manifest 里 daily_actions 带 Batch=true
-           的动作才在这里出现一个「全部 X」，X 是上游给的名字。
-           codearts 报的「领取福利」Batch=false（它没有全量端点）→ 不出现。
+            # 本轮（用户要求）的**两级**「全部签到」
 
-           「全部额度」不进这个槽位：额度刷新不是"每日动作"（可以随时点），
-           它是核心对 **CapQuotaProbe** 能力位的统合入口，与上游身份无关，
-           所以仍然单独一个按钮。 -->
-      <span id="allDailyActs"></span>
+            「全部签到（lobsterai）/（qoder）/（qodercn）/（trae）…」
+            放到**各上游卡片顶部**（分组行的 .gacts 里，见 accountGroupActions），
+            不带上游名后缀 —— 它就在那张卡片上，上下文已经说清了是谁。
+            它们打的是该上游自己的 AllURL，只管自己那几个号。
+
+            账号池**水平**的这一排只留**一个**「全部签到」：
+            它打核心端点 /admin/accounts/checkin/all，触发**所有**上游
+            各自的全量签到（后台任务，进度走 /admin/task）。
+            id 用 btnAllCheckinAll —— 刻意不叫 btnAllCheckin：那个名字属于
+            改造前"打 workbuddy 私有路由"的按钮，换个名字能让"旧实现回来了"
+            在代码审阅时一眼可见。
+
+            「全部额度」不进这个槽位：额度刷新不是"每日动作"（可以随时点），
+            它是核心对 **CapQuotaProbe** 能力位的统合入口，与上游身份无关，
+            所以仍然单独一个按钮。 -->
+      <button id="btnAllCheckinAll" style="padding:3px 10px;font-size:12px"
+        title="触发**所有**上游各自的全量签到（后台执行，顶部显示进度）；只想签某一个上游用那张卡片上的「全部签到」">全部签到</button>
       <button id="btnAllCredits" style="padding:3px 10px;font-size:12px" title="重新探测所有账号的剩余额度">刷新全部额度</button>
       <!--
         原先这里还有一个「全部保活」按钮，已删除（用户决定）。
@@ -921,9 +932,13 @@
 <div id="modal" style="display:none;position:fixed;inset:0;background:var(--overlay);z-index:99;align-items:center;justify-content:center">
   <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:560px;width:calc(100% - 40px)">
     <h3 id="loginTitle" style="margin:0 0 4px;font-size:15px">添加账号</h3>
-    <p class="dim" style="margin:0 0 14px;font-size:12px">
-      点下面的链接在浏览器完成登录（本机已是登录态的话通常一键确认），网关会自动轮询并落盘凭证。
-    </p>
+    <!-- 引导语（**按登录形态切换**，由 JS 填内容）。
+         ⚠ 它此前是一句写死的「点下面的链接在浏览器完成登录」——
+         对扫码类上游（raccoon：用微信扫，链接在屏幕上手机扫不了）是**错的**，
+         而它又不在 #loginBody 里，于是那些上游的弹窗会**同时**显示
+         "去浏览器登录" 与 "用手机微信扫码" 两段互相矛盾的话。
+         现在给 id 由 renderLoginIntro 按形态改写。 -->
+    <p id="loginIntro" class="dim" style="margin:0 0 14px;font-size:12px"></p>
     <!-- 本机提示（R1-d 的可用性缺口）。
          为什么需要它：codearts 用**本地回调服务器**（127.0.0.1:<随机端口>）
          接收授权结果。若用户从**另一台机器**打开控制台，浏览器会把回调
@@ -1988,65 +2003,62 @@ let loginProvider = '';
     //（renderAccounts 直接写 innerHTML），任何缓存都会在下一次刷新时
     // 与 DOM 不一致。localStorage 才是唯一事实来源。
     $('accts').innerHTML = groups.map(accountGroupRow).join('');
-    // 顶部「全部 X」按钮与账号表**同源**（同一份 manifest.daily_actions），
-    // 所以在这里一起重绘 —— 分两处渲染会让"表格里没有了、顶上还在"
-    // 这种不一致在某次刷新的中间态被看见。
-    renderAllDailyButtons();
+    // 每个上游卡片顶部的「全部 X」按钮与账号表**同源**（同一份
+    // manifest.daily_actions），所以它随这一起重绘 —— 分两处渲染会让
+    // "表格里没有了、卡片头上还在"这种不一致在某次刷新的中间态被看见。
   }
 
-  // renderAllDailyButtons 渲染账号池顶部的「全部 X」按钮。
+  // dailyAllActionsHTML 渲染**某一个上游**卡片顶部的「全部 X」按钮。
   //
   // # 判据（用户要的"有什么显示什么"）
   //
-  //   manifest.daily_actions 里 Batch=true 的动作 → 出现一个「全部 <label>」
-  //   没有                                       → 不出现
+  //   manifest.daily_actions 里该上游的 Batch=true 动作 → 出现「全部 <label>」
+  //   没有                                             → 不出现
   //
-  // 实测结果：workbuddy 报的「签到」Batch=true → 「全部签到」在；
-  // codearts 报的「领取福利」Batch=false（它没有全量端点）→ 没有
-  // 「全部领取福利」这种点了会 404 的按钮。
+  // 实测：workbuddy 报的「签到」Batch=true → 它那张卡片上有「全部签到」；
+  // codearts 的「签到」本轮补了全量端点（/admin/welfare/claim/all）后
+  // 也报 Batch=true → 同样有。
   //
-  // # 文案为什么带上游名
+  // # 为什么按钮在**卡片上**而不是账号池顶部（用户本轮要求）
   //
-  // 全量按钮是对**某个上游**生效的（它打的是那个上游的全量端点），
-  // 而这里可能出现多个上游的全量按钮。不带上游名的话，「全部签到」
-  // 与「全部领取福利」并排时用户无法判断各自的作用域 —— 而作用域
-  // 正是改造前那个按钮最模糊的地方。
+  //	"全部签到（lobsterai）全部签到（qoder）全部签到（qodercn）
+  //	 全部签到（trae）这些放到上游的卡片顶部
+  //	 不要放到和账号池水平的位置"
   //
-  // 只有一个上游报了全量动作时不加后缀：那时"全部签到"没有歧义，
-  // 加个 (workbuddy) 只是噪音。
+  // 顶部那一排是"对整池生效"的动作；按上游生效的按钮放在整池那一排，
+  // 语义上就与旁边「刷新全部额度」混在一起 —— 而"作用域模糊"正是改造前
+  // 那个写死的「全部签到」被诟病的点（它打的是 workbuddy 的私有路由，
+  // 却摆在"整池"的位置上）。
+  //
+  // # 文案为什么**不带**上游名后缀
+  //
+  // 上一版在顶部并排时才带「（workbuddy）」后缀。现在按钮就在它自己的
+  // 卡片上，卡片标题已经写着是哪个上游 —— 再加后缀是重复，不是澄清。
+  // 作用域由**位置**表达（比文字后缀更不容易看错）。
   //
   // # 为什么不用 innerHTML 拼 onclick
   //
-  // 与全站一致走事件委托（见 installAllDailyActions）—— 
+  // 与全站一致走事件委托（见 installAllDailyActions）——
   // 拼 onclick 属性需要把动作对象序列化进字符串，那是第二份数据形状。
-  function renderAllDailyButtons() {
-    const el = $('allDailyActs');
-    if (!el) return;
+  function dailyAllActionsHTML(providerId) {
     const all = (MANIFEST.daily_actions || []).filter(a =>
-      a && typeof a === 'object' && a.batch && a.all_url && a.id && a.label
-      // 用户本轮要求：账号池顶部的「全部签到」按钮**去掉**。
-      // 顶部只保留「刷新全部额度」（它不走这个槽位）。workbuddy 的签到
-      // 是唯一 batch+all_url 的动作，过滤掉它之后这里就空了 —— 容器留着，
-      // 渲染为空字符串，不占空间。
-      && a.id !== 'checkin');
-    // 按上游分组计数，决定要不要加 (provider) 后缀
-    const byProvider = {};
-    for (const a of all) byProvider[a.provider] = (byProvider[a.provider] || 0) + 1;
-    const ambiguous = Object.keys(byProvider).length > 1;
-    el.innerHTML = all.map(a => {
-      const suffix = ambiguous || all.length > 1 ? `（${esc(a.provider)}）` : '';
-      return `<button data-allday="${esc(a.provider)}:${esc(a.id)}"`
-        + ` style="padding:3px 10px;font-size:12px"`
-        + ` title="${esc(a.title || a.label)}（对 ${esc(a.provider)} 的全部账号）">`
-        + `全部${esc(a.label)}${suffix}</button>`;
-    }).join(' ');
+      a && typeof a === "object" && a.provider === providerId
+      && a.batch && a.all_url && a.id && a.label);
+    return all.map(a =>
+      `<button class="gact" data-allday="${esc(a.provider)}:${esc(a.id)}"`
+      + ` title="${esc(a.title || a.label)}（只对 ${esc(a.provider)} 的账号，不影响其它上游）">`
+      + `全部${esc(a.label)}</button>`).join("");
   }
 
-  // installAllDailyActions 顶部「全部 X」按钮的**事件委托**（只绑一次）。
+  // installAllDailyActions **上游卡片**上「全部 X」按钮的事件委托（只绑一次）。
   //
   // 与 installGenericActions 同一个理由：容器会被反复重建
-  //（renderAllDailyButtons 直接写 innerHTML），绑在被重建的节点上
-  // 就必然要处理"何时解绑"，而 #content 从加载到关闭都不会被替换。
+  //（renderAccounts 每次刷新都重写 #accts 的 innerHTML），绑在被重建的
+  // 节点上就必然要处理"何时解绑"，而 #content 从加载到关闭都不会被替换。
+  //
+  // ⚠ "只绑一次"这个守卫**不是可选的**：去掉它、或改成每次重绘都调本函数，
+  // 点一次按钮会发 N 个请求（N = 重绘次数）。实测：刷新 5 次后点一次发 7 个。
+  // DOM 长得一模一样，只有"数请求"能发现 —— 见 tests/frontend 里的 e2e 探针。
   let allDailyInstalled = false;
 
   function installAllDailyActions() {
@@ -2271,12 +2283,21 @@ let loginProvider = '';
       return '';
     }
     const login = info.login;
-    // 「批量导入」：该上游声明了 hidden POST 路由以 /import 结尾才渲染
-    //（数据驱动，不写死上游名 —— 见 adminRouteBySuffix）。
-    const importPath = adminRouteBySuffix(providerId, 'POST', '/import');
-    const importBtn = importPath
+    // 「批量导入」：**不再看该上游有没有自己的 /import 路由**。
+    //
+    // # 本轮改造（用户要求"全部上游都可以制作这个功能"）
+    //
+    // 改造前判据是 `adminRouteBySuffix(providerId,'POST','/import')` ——
+    // 只有自己实现了导入端点的上游（workbuddy / loomy）才有这个按钮。
+    // 于是同一排按钮在不同上游上数量不一，用户看到的正是"这几个也不齐"。
+    //
+    // 现在核心提供一个**通用**端点 `POST /admin/accounts/import`
+    //（请求体带 provider），能不能导入由上游声明 `AccountImportExt` 决定。
+    // 判据换成 manifest 里该上游的能力位 `import`
+    //（仍**是数据**，不是上游名 —— 加新上游时前端零改动）。
+    const importBtn = hasCap(providerId, 'import')
       ? `<button class="gact" data-gimport="${esc(providerId)}"`
-        + ` title="粘贴 JSON 批量导入 ${esc(providerId)} 账号（多条/单条）；导入后自动重载账号池">批量导入</button>`
+        + ` title="粘贴 ${esc(providerId)} 的凭证 JSON 批量导入（单条或 [ ] 数组）；导入后自动重载账号池">批量导入</button>`
       : '';
     // 「刷新本上游额度」：该上游**声明了 CapQuotaProbe** 才渲染。
     //
@@ -2297,38 +2318,64 @@ let loginProvider = '';
         + ` title="只重新探测 ${esc(providerId)} 的${gQuotaCount === undefined ? '' : ' ' + gQuotaCount + ' 个'}账号剩余额度`
         + `（不含其它上游的账号）">刷新本上游额度</button>`
       : '';
-    if (login && login.kind) {
-      // 有页内登录流程 → 给按钮。label 由后端下发（不同上游措辞可能不同）。
-      return `<button class="gact" data-gadd="${esc(providerId)}"`
+
+    // 「全部签到」—— 本上游卡片顶部的全量动作（用户本轮要求的位置）。
+    //
+    // # 它与顶部那个「全部签到」是**两级**，不是重复
+    //
+    //   本按钮   打该上游自己的 all_url            → 只签这一个上游的号
+    //   顶部那个 打 /admin/accounts/checkin/all    → 触发**所有**上游
+    //
+    // 两个入口的文案刻意**不同域**（本按钮在卡片上、顶部那个在整池那一排），
+    // 位置本身就说清了作用域；title 里再补一句明示，避免误点。
+    //
+    // 判据仍是**上游自报**（batch && all_url）：没有全量端点的上游不出现，
+    // 与"有什么显示什么"同一条。
+    const gDailyAll = dailyAllActionsHTML(providerId);
+
+    // ---- 按钮顺序（用户第三版要求，**逐字**照做）----
+    //
+    //	全部签到 → 添加账号 → 批量导入 → 刷新本上游额度 → 重载 auths
+    //
+    // 用户原话：
+    //
+    //	「全部签到、添加账号、批量导入、刷新本上游额度、重载 Auths。
+    //	  按照这样排序，你换一下顺序就行。」
+    //
+    // 前两版我理解错了（先按"右端固定三项"排、又改成把重载 auths 放最右），
+    // 这一版是用户直接给出的完整次序，照做即可。
+    //
+    // ⚠ 「添加账号」**不带 `＋`**（用户明确要求"添加账号不需要那个加号"）——
+    // 这条从上一版起就成立，别在重排时把加号加回来。
+    const addBtn = (login && login.kind)
+      ? `<button class="gact" data-gadd="${esc(providerId)}"`
         + ` title="${esc(login.label || '添加账号')}（走 ${esc(providerId)} 自己的登录流程）">`
-        + `＋ ${esc(login.label || '添加账号')}</button>`
-        + importBtn
-        + gQuotaBtn
-        + `<button class="gact" data-greload="${esc(providerId)}"`
-        + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}；手工拷入/删除凭证文件后用它。走页内添加的不需要点">`
-        + `重载 auths</button>`;
-    }
-    // 没有页内登录流程 → 不放假按钮，但仍给「重载 auths」。
+        + `${esc(login.label || '添加账号')}</button>`
+      : '';
+    const reloadBtn = `<button class="gact" data-greload="${esc(providerId)}"`
+      + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}；手工拷入/删除凭证文件后用它。走页内添加的不需要点">`
+      + `重载 auths</button>`;
+
+    // 没有页内登录流程时，用一句说明**替代**「添加账号」按钮的位置。
     //
     // ⚠ 措辞**不能一律说"需手工放置凭证"** —— 那对 workbuddy 是**错的**：
     // 它的页内 OAuth 流程一直是通的（`POST /admin/login/start` 打的就是
-    // copilot.tencent.com），只是后端还没有在 manifest 里声明 `login`。
-    //
-    // 实测（2026-09-13）：两个上游的 manifest 都还没有 login 字段。
-    // 若按"没声明 = 不支持"渲染，会在 workbuddy 那行写出与事实相反的话 ——
-    // 用户明明能用按钮添加，界面却说"无法在页面内完成"。
-    //
+    // copilot.tencent.com），只是后端还没在 manifest 里声明 `login`。
     // 所以这里只说**能确定的事**：manifest 里没声明这个字段。
-    // 不推断"支持"也不断言"不支持"。
-    //
-    // 等后端补上按 provider 分派（gateway.LoginFlow 那个接缝）并下发
-    // login 字段后，workbuddy 会自动走上面的分支，这里无需再改。
-    return `<span class="dim" style="font-size:11px"`
+    const noLoginNote = (login && login.kind) ? '' :
+      `<span class="dim" style="font-size:11px"`
       + ` title="该上游未在 manifest 的 login 字段里声明页内登录流程">`
-      + `未声明页内登录流程；已有凭证文件时可点右侧加载</span>`
+      + `未声明页内登录流程</span>`;
+
+    // ⚠ 每项**各自**按数据驱动决定出不出（全部签到要 batch+all_url、
+    // 添加账号要 login、批量导入要 `import` 能力位、额度要 quota-probe）——
+    // 次序固定，但"没有就不渲染"这条不变（那正是假按钮的防线）。
+    return gDailyAll
+      + addBtn
+      + noLoginNote
+      + importBtn
       + gQuotaBtn
-      + `<button class="gact" data-greload="${esc(providerId)}"`
-      + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}">重载 auths</button>`;
+      + reloadBtn;
   }
 
   // ---------------------------------------------------------------- 账号池列注册表
@@ -3013,7 +3060,12 @@ let loginProvider = '';
             // 后端按 uid 分档）。文案由 quotaScopeToast 统一渲染 ——
             // 三处入口（行内 / 分组 / 顶部）共用同一个函数，
             // 措辞不会各写一份而漂移。
-            toast(quotaScopeToast(r));
+            //
+            // ⚠ 它返回的是 {msg, bad} **对象**，不是字符串。
+            // 直接 toast(quotaScopeToast(r)) 会把对象交给 toast，
+            // 界面显示 "[object Object]"（实测踩到）。必须取 .msg / .bad。
+            const t = quotaScopeToast(r);
+            toast(t.msg, t.bad);
           } else if (r && typeof r.claimed === 'number') {
             const total = Array.isArray(r.results) ? r.results.length : 0;
             toast(`${label} ${uid.slice(0, 8)}：本次领到 ${r.claimed}/${total}`);
@@ -3036,6 +3088,37 @@ let loginProvider = '';
       await Promise.all([refresh(), loadHistory()]);
       return wrote ? true : undefined;
     }, { label, busyText: label + '中…' });
+  }
+
+  // refreshAccounts 用额度刷新回执里的账号视图重绘账号表。
+  //
+  // # 为什么需要它（本函数此前**不存在**，而调用点早就写好了）
+  //
+  // 分组行的「刷新本上游额度」在本函数缺失的情况下直接调用它 ——
+  // 于是那个按钮点下去**必抛** `refreshAccounts is not defined`，
+  // 界面只显示"刷新本上游额度失败：refreshAccounts is not defined"。
+  //
+  // 这是本仓反复出现的同一类缺陷：**调用点与实现分家**。
+  // 分组额度按钮是在"三层作用域"那次改动里加的，而它的收尾刷新
+  // 写成了调用一个从未定义的函数 —— 静态断言看不出来（文本里
+  // 有这个名字），只有真点一次才知道。
+  //
+  // # 为什么用回执里的 accounts 而不是再发一次请求
+  //
+  // `/admin/accounts/quota/refresh` 的**回执里本来就带着刷新后的账号视图**
+  //（见 internal/admin/quota_refresh.go：`"accounts": h.accountViews()`）。
+  // 再调一次 refresh() 会多一轮全量回源（healthz + status + accounts +
+  // 模型 + 统计…），而我们要的只是把新额度画上去。
+  //
+  // ⚠ 回执里没有 accounts（旧后端 / 别的调用方）时**回落整页 refresh()**，
+  // 而不是静默什么都不做 —— 那会让"额度刷了但表格没变"，用户以为没生效。
+  async function refreshAccounts(receipt) {
+    const list = receipt && receipt.accounts;
+    if (Array.isArray(list)) {
+      renderAccounts(list);
+      return;
+    }
+    await refresh();
   }
 
   // startAll 触发某上游的**全量**每日动作。
@@ -3259,11 +3342,41 @@ let loginProvider = '';
       + '请把授权链接复制到运行网关那台机器的浏览器里打开。';
   }
 
+  // renderLoginIntro 按**登录形态**改写弹窗顶部那句引导语。
+  //
+  // # 为什么它会是一句错话（用户报障）
+  //
+  // 它原本是 HTML 里写死的一句「点下面的链接在浏览器完成登录」。
+  // 而 raccoon 的登录是**微信扫码**：它的 auth_url 是要扫的内容，
+  // 在屏幕上手机扫不了同一块屏幕。于是那个弹窗**同时**显示
+  // 「去浏览器登录」与「用手机微信扫码」两句互相矛盾的话 ——
+  // 用户按第一句点了「复制链接」，然后不知道该怎么办。
+  //
+  // # 判据是**数据**，不是上游名
+  //
+  //	mode 'qr'      → 后端下发了 qr_svg，这是扫码流程
+  //	mode 'local'   → 没有 auth_url，登录态在本机客户端里
+  //	mode 'browser' → 有 auth_url，去（无痕）窗口打开
+  //
+  // 与 addAccount 里那条同源：**前端不许认识任何上游名**。
+  function renderLoginIntro(mode) {
+    const el = $('loginIntro');
+    if (!el) return;
+    if (mode === 'qr') {
+      el.textContent = '用手机扫描下面的二维码完成登录，网关会自动轮询并落盘凭证。无需在电脑上打开任何页面。';
+    } else if (mode === 'local') {
+      el.textContent = '登录态就在本机那个桌面客户端里，网关直接读取，无需任何操作。';
+    } else {
+      el.textContent = '点下面的链接在浏览器完成登录（本机已是登录态的话通常一键确认），网关会自动轮询并落盘凭证。';
+    }
+  }
+
   async function addAccount(providerId, btn) {
     openModal();
     const want = providerId || '';
     $('loginTitle').textContent = want ? ('添加 ' + providerTitle(want) + ' 账号') : '添加账号';
     renderLoginLocalHint();
+    renderLoginIntro('browser'); // 申请期间的占位；拿到回执后按形态改写
     $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
     let r;
     try {
@@ -3312,7 +3425,81 @@ let loginProvider = '';
       </div>` : '';
 
     const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
-    if (hasAuthURL) {
+
+    // ---- 扫码流程：后端给了二维码就渲染它，**不**渲染"打开链接" ----
+    //
+    // raccoon（微信扫码）那类上游的 auth_url 是**要扫的内容**，不是网页：
+    // 它在屏幕上，手机扫不了同一块屏幕。此前对所有上游都渲染
+    // 「打开授权页 / 复制链接」，于是那种上游的「＋ 添加账号」等于不可用
+    //（用户报的缺陷）。
+    //
+    // ⚠ 判据是**数据**（后端有没有下发 qr_svg），不是上游名，也不是
+    //   "链接长得像不像二维码 URL" —— 后者要求前端认识上游或 URL 形态，
+    //   而"加一个上游时前端一行都不改"是本项目最硬的禁忌。
+    //
+    // ⚠ qr_svg 是**后端生成的** SVG 字符串（上游自报要不要扫码，
+    //   见 gateway.QRLoginExt）。直接 innerHTML 插进来 ——
+    //   它是我们自己后端产出的固定形态（只有 svg/rect/path 与数字），
+    //   不含任何用户输入，不存在注入面。
+    const qrSVG = typeof r.qr_svg === 'string' ? r.qr_svg.trim() : '';
+    if (qrSVG && !hasAuthURL) {
+      // 理论到不了（后端只在有 auth_url 时才给 qr_svg）——
+      // 但两个字段自相矛盾时宁可说清，也不要渲染半截界面。
+      $('loginBody').innerHTML = `<span class="err">后端回执异常：给了二维码但没有授权链接</span>`;
+      return;
+    }
+    if (qrSVG) {
+      renderLoginIntro('qr');
+      // ⚠ 这里**不提供**任何"在浏览器打开"的入口（用户明确要求）。
+      //
+      // 扫码类上游的 auth_url 是**给手机扫的内容**，在电脑浏览器里打开它
+      // 只会看到一个"请在微信中打开"之类的页面 —— 不是登录路径，
+      // 照着点会让人以为流程就是这样。所以这个分支只有：
+      //
+      //	二维码（主路径）+ 「复制链接」（给"想换个设备扫"的人）+ 轮询状态
+      //
+      // 「复制链接」保留但改了说明：它是"把链接复制到别的设备去扫"，
+      // 不是"复制到浏览器打开"。文案里刻意不出现"浏览器"三个字。
+      $('loginBody').innerHTML = `
+        <div class="row" style="margin-bottom:10px">
+          <button id="btnCopyAuth" type="button"
+             style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
+             title="复制二维码里的链接（供在另一台设备上生成二维码再扫）">复制链接</button>
+          <span id="loginState" class="dim" style="font-size:12px">等待扫码…（state ${esc(state.slice(0, 8))}…）</span>
+        </div>
+        <div style="display:flex;justify-content:center;margin:8px 0 4px">${qrSVG}</div>
+        <div class="dim" style="font-size:12px;margin-bottom:8px;text-align:center">
+          📱 用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
+          扫完后本窗口会自动检测并落盘凭证（无需回来点任何按钮）。
+        </div>
+        ${manualBox}
+        <pre id="loginOut" class="dim" style="max-height:120px">扫码完成后，本窗口会自动检测并落盘凭证。</pre>`;
+      const btnCopyQR = $('btnCopyAuth');
+      if (btnCopyQR) {
+        btnCopyQR.onclick = () => {
+          copyText(r.auth_url);
+          btnCopyQR.textContent = '已复制 ✓';
+          setTimeout(() => { btnCopyQR.textContent = '复制链接'; }, 1500);
+        };
+      }
+      const btnManualQR = $('btnManualComplete');
+      if (btnManualQR) {
+        btnManualQR.onclick = async () => {
+          const code = ($('manualCode').value || '').trim();
+          if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
+          btnManualQR.disabled = true;
+          $('loginState').textContent = '已提交，正在解密收号…';
+          try {
+            await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
+            $('loginState').textContent = '完成 ✅ 稍候账号会自动出现在池子里';
+          } catch (e) {
+            $('loginState').textContent = '失败：' + e.message;
+            btnManualQR.disabled = false;
+          }
+        };
+      }
+    } else if (hasAuthURL) {
+    renderLoginIntro('browser');
     // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
     //
     // 用户要求：默认打开的就是无痕模式。打开动作由**后端**完成
@@ -3434,6 +3621,7 @@ let loginProvider = '';
     }
     } else {
       // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
+      renderLoginIntro('local');
       $('loginBody').innerHTML = `
       <div class="row" style="margin-bottom:10px">
         <span id="loginState" class="dim" style="font-size:12px">正在从本机读取登录态…（state ${esc(state.slice(0, 8))}…）</span>
@@ -3557,26 +3745,30 @@ let loginProvider = '';
   //
   // # 为什么是一个按钮（用户要求"修改为一个按钮就行"）
   //
-  // 账号池 loomy 分组行上多一个「批量导入」按钮（与「＋ 添加账号」「重载 auths」并列）。
-  // 点它 → 浏览器 prompt 里粘贴 JSON（单个对象或数组）→ 确定 → 导入 + 重载账号池 + toast。
-  // 没有中间页、没有多一步确认 —— 一个按钮从头到尾。
+  // 点它 → 浏览器 prompt 里粘贴 JSON（单个对象或数组）→ 确定 →
+  // 导入 + 重载账号池 + toast。没有中间页、没有多一步确认。
   //
-  // # 为什么入口在账号池分组行
+  // # 本轮改造：走**通用**端点（用户要求"全部上游都可以"）
   //
-  // 「批量导入」与「＋ 添加账号」「重载 auths」并列，是**账号增补动作**，
-  // 语义属于账号池，不放任何专属标签页。按钮显隐由 manifest 里的
-  // /import 路由决定（adminRouteBySuffix），不是写死上游名。
+  // 改造前这里先查 `adminRouteBySuffix(pid,'POST','/import')` ——
+  // 只有自己实现过导入端点的上游（workbuddy / loomy）才点得动。
+  // 现在统一打 `POST /admin/accounts/import {provider, data}`：
+  //
+  //	· 前端不再关心"这个上游有没有自己的导入端点"
+  //	· 后端按 provider 分派给上游的 `AccountImportExt`
+  //	· 上游没实现时回 501，这里照实报出来（不静默）
   function openImportModal(providerId) {
     const pid = providerId || '';
-    const impPath = adminRouteBySuffix(pid, 'POST', '/import');
-    if (!impPath) { toast('该上游没有声明批量导入端点', true); return; }
     const text = (window.prompt(
-      '粘贴 ' + (providerTitle(pid) || pid) + ' 账号 JSON（单个对象，或 [ ] 包起来的数组）', '')
+      '粘贴 ' + (providerTitle(pid) || pid) + ' 的凭证 JSON（单个对象，或 [ ] 包起来的数组）', '')
       || '').trim();
     if (!text) return;
     (async () => {
       try {
-        const r = await admin(impPath, { method: 'POST', body: text });
+        const r = await admin('/admin/accounts/import', {
+          method: 'POST',
+          body: JSON.stringify({ provider: pid, data: text }),
+        });
         const bads = (r && Array.isArray(r.results) ? r.results : [])
           .filter(x => !x.ok)
           .map(x => '#' + x.index + ' ' + (x.error || '失败'));
@@ -7374,7 +7566,12 @@ let multCatalogFailed = false;
         busyRun(gq, async () => {
           const r = await admin('/admin/accounts/quota/refresh',
             { method: 'POST', body: JSON.stringify({ provider: pid }) });
-          toast(quotaScopeToast(r, pid));
+          // ⚠ quotaScopeToast 返回 {msg, bad} **对象**，不是字符串 ——
+          // 直接 toast(quotaScopeToast(r, pid)) 会渲染成 "[object Object]"
+          //（实测踩到：按钮看起来"成功"了，但用户看不到任何数字）。
+          // 必须取 .msg / .bad，与 startAll 里那条同一写法。
+          const t = quotaScopeToast(r, pid);
+          toast(t.msg, t.bad);
           await refreshAccounts(r);
         });
         return;
@@ -7429,9 +7626,37 @@ let multCatalogFailed = false;
       if ($('infoModal').style.display === 'flex') closeInfo();
       else if ($('modal').style.display === 'flex') closeModal();
     });
-    // 顶部的「全部 X」按钮由 manifest.daily_actions 驱动（T3），
-    // 走事件委托（容器会被 renderAllDailyButtons 重建）。
+    // 各**上游卡片**上的「全部 X」按钮由 manifest.daily_actions 驱动（T3），
+    // 走事件委托（#accts 每次刷新都重写 innerHTML）。
     installAllDailyActions();
+    // 账号池**顶部**这个「全部签到」触发**所有上游**（用户本轮要求）：
+    //
+    //   POST /admin/accounts/checkin/all —— 核心端点，遍历注册表里所有
+    //   实现了 gateway.DailyCheckinExt 的上游，逐个跑它们自己的全量签到。
+    //
+    // # 为什么不复用 startAll
+    //
+    // startAll 认的是**单个** daily action 的回执（{results} / {updated}）。
+    // 本端点是跨上游的：它回 202 {started, providers, count}，真结果要等
+    // 后台任务跑完去 /admin/task 看。两种回执形状不同，混进一个函数就会
+    // 出现"按错的分支解析" —— 那正是额度那次的形态（新回执落进兜底 else）。
+    //
+    // # providers 必须说出来
+    //
+    // "所有上游"里的"所有"指的是哪些，是这条按钮的全部语义。不回这份清单，
+    // 用户点完只看到三个计数，无从判断有没有哪个上游根本没被跑到。
+    $('btnAllCheckinAll').onclick = () => busyRun($('btnAllCheckinAll'), async () => {
+      const r = await admin('/admin/accounts/checkin/all', { method: 'POST', body: '{}' });
+      const ps = Array.isArray(r.providers) ? r.providers : [];
+      if (r && r.started) {
+        toast('全部签到已启动：' + (ps.length ? ps.join('、') : '（无上游）')
+          + (ps.length > 1 ? ' 共 ' + ps.length + ' 个上游' : '') + '，后台执行中…');
+        watchTask();   // 与 workbuddy 全量签到走**同一条**进度通道
+        return undefined;   // 上面已给出更具体的回执
+      }
+      toast('全部签到未能启动（后端未接受）', true);
+      return false;
+    }, { label: '全部签到', busyText: '启动中…' });
     // 「刷新全部额度」不进每日动作槽位：额度刷新不是"每天一次"的动作，
     // 它是核心对 CapQuotaProbe 能力位的统合入口，与上游身份无关。
     //
@@ -7456,14 +7681,14 @@ let multCatalogFailed = false;
     $('btnAllCredits').onclick = () => startAll({
       id: 'credits', label: '额度', all_url: '/admin/accounts/quota/refresh',
     });
-    // 「全部签到」不再有静态 id —— 它现在由 workbuddy 自报的
-    // daily_actions（id=checkin, batch=true）生成。
-    // 「全部保活」同理：workbuddy 报了 Batch 能力，但**不渲染** ——
-    // 那是产品决策（见 HTML 里那段注释），不是"上游不支持"。
-    // 两者由 daily_actions 的 Batch 字段与上游自报的清单共同决定。
+    // 各上游卡片上的「全部签到」由 manifest.daily_actions（batch=true）驱动，
+    // 不在这里生成 —— 见 dailyAllActionsHTML。
     // 「全部保活」按钮已删除（用户决定）—— 理由见 HTML 里那段注释：
     // 它与自动保活槽调用**同一个函数**，提前跑没有收益；
     // 行内的「保活」保留（那是同步返回结果、可定位问题的排障动作）。
+    // workbuddy 的保活**仍然如实报** AllURL 端点（能力在），
+    // 但 Batch=false —— 那是"界面要不要给它入口"的产品决策，
+    // 把决策伪装成"有没有端点"的推断会把删掉的按钮偷偷加回来。
 
     // 猫猫旅行：只保留「动作」按钮（派猫/领奖/刷新），开关类一律归「设置」
     $('travelRows').addEventListener('click', ev => {

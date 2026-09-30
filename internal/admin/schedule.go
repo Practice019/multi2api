@@ -124,7 +124,7 @@ type providerInfo struct {
 // 未实现 DisplayNameExt、或报回空串 → 回落 ID（= 改造前的行为）。
 //
 // ⚠ 回落**不是**"给个默认中文名"：多数上游的 id 就是它最准确的名字
-//（`codearts` / `raccoon` / `mimo`），硬塞一个译名反而是噪音。
+//（`codearts` / `raccoon`），硬塞一个译名反而是噪音。
 // 只有"id 不足以表达身份"的上游才需要实现这个扩展点。
 func displayNameOf(p gateway.Provider) string {
 	if p == nil {

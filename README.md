@@ -62,7 +62,6 @@
 | **CodeArts** | OAuth + DPoP（约 2 小时 STS，自动续期） | 签到（福利领取）/ 额度探测 |
 | **Loomy** | `session`（无 TTL） | **手机号验证码登录 / 新手任务一键完成 / 邀请码绑定 / 批量粘贴导入 / 额度实时查询** |
 | **TRAE** | SOLO 免费对话通道（JWT + 消费型 refreshToken） | **页内添加账号（浏览器 OAuth） / 每日自动签到 / token 自动续期 / 权益包额度查询** |
-| **MiMo** | 三条通道：① 开放平台长期 key（`sk-`/`tp-`，Bearer）② **桌面端网关 Cookie（serviceToken，走桌面配额，与平台余额两个池）** ③ 页内 OAuth（X25519 加密回调） | **批量粘贴导入（key 行或 Cookie 行混贴）/ 逐号验活 / reasoning_content 方言自动回注 / 桌面令牌 302→SSO 自动折算失效告警** |
 
 ## 🚀 快速开始
 
@@ -93,16 +92,6 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
   授权页**默认由网关用无痕窗口打开**（见下方 `login.*`），避免浏览器里已登录的
   腾讯账号把会话串到别的账号上；窗口被关掉时可点「重新无痕打开」，
   或点「复制链接」粘贴到无痕/隐私窗口。
-- **MiMo（桌面端 route 通道，服务端计费=免费额度）**：推荐贴 **passToken 套**
-  （`passToken=…; cUserId=…; userId=…; deviceId=pc_…`，都在桌面端 Cookie 库
-  明文可得，一次性获取、30 天有效）→ 网关内藏完整 SSO 链
-  （`/api/user/xiaomi/me → serviceLogin → /api/sts`），此后**全自动换
-  serviceToken**：对话吃 401 现换、后台按年龄预换、健康检查复活时换、
-  serviceLogin 续签的 passToken 滚动保存 —— 只要链跑着，账号自我续命，
-  零维护。也兼容只贴 serviceToken 四件套（会话级，过期显示「需重新登录」）。
-  配套 `mimo_tools/mimo_sync.py`（Windows 一条命令从 Cookie 库上送 passToken 套）。
-  推理走 `mimo-server-cn.xiaomimimo.com/api/route/chat/completions`（桌面配额，
-  与 `api.xiaomimimo.com` 的 402 余额通道互不相干）。
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。
@@ -170,7 +159,7 @@ curl http://127.0.0.1:7863/v1/chat/completions \
   -d '{"model":"loomy/deepseek-v4-flash-0731","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
-- 模型名带上游前缀：`mimo/mimo-v2.6-pro`、`loomy/xxx`、`workbuddy/xxx`、`codearts/xxx`；裸模型名走默认上游。
+- 模型名带上游前缀：`loomy/xxx`、`workbuddy/xxx`、`codearts/xxx`；裸模型名走默认上游。
 - 健康检查：`GET /healthz`（无鉴权，负载均衡友好）。
 - 管理 API：`/admin/*`（默认只建议本机使用）。
 

@@ -377,7 +377,7 @@ func keysOf(m map[string]bool) []string {
 // # 为什么要有这一组测试（实测出来的 fail-open）
 //
 // 上面那套判据推导上游的方式是「非测试依赖里含 internal/gateway」。
-// 它对 internal/workbuddy / codearts / loomy / mimo / trae 都有效，
+// 它对 internal/workbuddy / codearts / loomy / trae 都有效，
 // 但对 internal/upstream **永远返回 false** ——
 //
 //	internal/upstream 不 import gateway（它早于 gateway 存在，
@@ -491,7 +491,7 @@ var privateSDKKnownDebt = []struct {
 // TestPrivateSDKIsNotConsumedByOtherUpstreams 私有 SDK 只许它的所有者用。
 //
 // 判据：workbuddyPrivateSDK 里的每个包，只允许被 internal/workbuddy 依赖；
-// 其它上游（codearts/loomy/mimo/trae）都不许。核心包（corePackages）也不许 ——
+// 其它上游（codearts/loomy/trae）都不许。核心包（corePackages）也不许 ——
 // 核心依赖某个上游的私有 SDK，等于「加新上游核心零改动」这条判据破产。
 //
 // ⚠ 已知债见 privateSDKKnownDebt —— 它只放过**已登记**的违规，

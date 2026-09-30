@@ -159,7 +159,8 @@ func (p *Provider) ID() string { return providerID }
 // 声明后三项会进 gateway.unverifiableCaps → 必须实现 AdminExt 且路由非空
 // （本包有签到/额度/模型三条管理端点，见 admin.go）。
 func (p *Provider) Caps() gateway.Capability {
-	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe
+	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe |
+		gateway.CapImport
 }
 
 // Chat 转发一次对话请求。

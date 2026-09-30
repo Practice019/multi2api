@@ -76,6 +76,30 @@ const PROBES = [
   // "绑了几次"只有运行期数得出来。
   // 实例不在时会明确失败而不是静默跳过 —— 静默跳过等于没有守卫。
   'verify_accts_delegation.js',
+  // 「全部签到」分级布局的**真前端 e2e**（本轮新增）。
+  //
+  // ⚠ 它**自己起一个隔离实例**（临时目录 + 空闲端口 7871，可用 E2E_PORT
+  // 覆盖），不依赖外部实例，也**不碰**仓库里已有的 config.json（7863）/
+  // config-test-port7864.json（7864）—— 那两个可能是用户正在用的。
+  //
+  // 为什么值得占一个套件位：它抓的是**行为**（点一下发几个请求、
+  // 发的是哪个 URL、刷新后按钮与委托是否累积），而 DOM 静态断言
+  // 对这几条**完全没有判别力**。变异验证：去掉 installAllDailyActions
+  // 的"只绑一次"守卫并每次重绘都调它 → 刷新 5 次后点一次发 7 个请求，
+  // 而所有只看 DOM 的断言全绿。
+  'verify_checkin_ui_e2e.js',
+  // 逐个上游点「刷新本上游额度」+ 点「全部签到」的真前端 e2e（本轮新增）。
+  //
+  // ⚠ 它抓的是**运行时错误**，静态断言对此**完全没有判别力**：
+  // `refreshAccounts is not defined` 那个缺陷，文本里确实有这个名字
+  //（grep 得到、正则也匹配得上），只有**真点一次**才会抛 ReferenceError。
+  //
+  // 变异验证过两条（都已还原）：
+  //   · 去掉 refreshAccounts 的定义 → 三个上游都报 "is not defined"
+  //   · 把 quotaScopeToast 的对象直接传给 toast → 显示 "[object Object]"
+  //
+  // 同样自己起隔离实例（临时目录 + 空闲端口 7874，可用 E2E_PORT 覆盖）。
+  'verify_all_buttons_e2e.js',
 ];
 
 function run(file) {

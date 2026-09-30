@@ -180,12 +180,15 @@ func MarshalAuthFile(a *Auth) ([]byte, error) {
 		"auth": map[string]any{
 			"access_token":  a.AccessToken,
 			"refresh_token": a.RefreshToken,
-			"expires_in":    a.ExpiresIn,
-			"uid":           a.UID,
-			"nickname":      a.Nickname,
-			"machine_id":    a.MachineID,
-			"device_id":     a.DeviceID,
-			"product_id":    a.ProductID,
+			// ⚠ 绝对毫秒时刻（不是旧的相对秒 `expires_in`）——
+			// 它是「Token」列与"要不要续期"的唯一权威，见 Auth.ExpiresAt。
+			"expires_at":               a.ExpiresAt,
+			"refresh_token_expires_at": a.RefreshTokenExpiresAt,
+			"uid":                      a.UID,
+			"nickname":                 a.Nickname,
+			"machine_id":               a.MachineID,
+			"device_id":                a.DeviceID,
+			"product_id":               a.ProductID,
 		},
 		"account": map[string]any{
 			"uid":      a.UIDValue(),

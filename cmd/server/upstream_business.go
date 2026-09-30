@@ -128,10 +128,16 @@ func toCredential(provider string) func(any) (gateway.Credential, error) {
 // 登录会以 CodeBuddy 的 UA 发请求」。
 // workbuddyLoginWithPlatform 与 workbuddyLogin 相同，但可覆盖登录 platform。
 //
-// # 为什么需要它（buddy 用 platform=ide，我们 CN 通道用 CLI）
+// # 为什么保留"可覆盖 platform"这个能力
 //
-// 参照 product.ts 的 CODEBUDDY 是 `platform: 'ide'`，而我们的 CN 通道
-// 用 `platform=CLI`（生产验证过）。两者登录页流程不同。
+// 参照 product.ts 里同一后端有两个产品身份：CODEBUDDY 是
+// `platform: 'ide'`，WORKBUDDY 是 `platform: 'workbuddy-ai'`；
+// 而我们的 CN 通道用 `platform=CLI`（生产验证过）。三者的登录页流程不同。
+//
+// ⚠ 曾有一个 `buddy` 实例用 platform=ide 走这里，它已按用户要求删除
+// （同一个上游、只是账单归因身份不同，被判定为冗余）。
+// 本函数**保留**：platform 覆盖是 oauth 层的通用能力，
+// 与"要不要再注册一个身份实例"是两件事；将来要恢复 IDE 身份时不必重写它。
 //
 // platform 为空时**不覆盖**，回落 oauth 包按 baseURL 推导的值 ——
 // 于是未配时行为与升级前逐字节相同。
@@ -374,9 +380,19 @@ func (a adminSchedulerAdapter) JobStatuses() []scheduler.Status {
 // 与 workbuddy.TaskSlot 指向**同一个** sharedTaskSlot ——
 // 这正是要保证的："同一时刻只允许一个全量任务"是进程级语义，
 // 不论触发方是签到/保活（workbuddy）还是别的上游，都走同一个槽。
+//
+// ⚠ 它必须**同时**满足 admin 的 taskSlotStarter（可选接口，见
+// internal/admin/checkin_all.go）：跨上游的全量签到要能往这个槽里
+// 塞任务，否则那条端点只能回 501。
+// 这里转发的是同一个 *taskSlot，所以两处的"是否已有任务在跑"是同一个
+// 事实 —— 不会出现"顶部按钮说在跑、任务槽说空闲"这种两处不一致。
 type adminTaskSlotAdapter struct{ s workbuddy.TaskSlot }
 
 func (a adminTaskSlotAdapter) Snapshot() map[string]any { return a.s.Snapshot() }
+
+func (a adminTaskSlotAdapter) Start(kind string, fn func() []map[string]any) bool {
+	return a.s.Start(kind, fn)
+}
 
 var (
 	_ admin.SchedulerView = adminSchedulerAdapter{}

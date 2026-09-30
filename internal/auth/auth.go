@@ -161,11 +161,39 @@ func Parse(raw []byte) (*Auth, error) {
 func (a *Auth) SaveAtomic() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	raw, err := a.MarshalNested()
+	if err != nil {
+		return err
+	}
+	tmp := a.FilePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, a.FilePath)
+}
+
+// MarshalNested 把凭证序列化成**落盘用的嵌套形**（不写盘）。
+//
+// # 为什么从 SaveAtomic 里抽出来
+//
+// 批量导入需要"把一份凭证变成要写的字节"，但**不该**由上游落盘
+//（落盘位置由核心决定 —— 上游不认识 AuthDir 的权威值，见
+// gateway.AccountImportExt 的注释）。抽出来之前，导入只能自己再拼一遍
+// 那个 map —— 那就是第二份序列化，迟早与这份漂移，
+// 而"导入产出的凭证与登录产出的不同形"会让账号池出现无法解释的差异。
+//
+// ⚠ 调用方负责持锁（SaveAtomic 自己加；导入路径用的是刚构造出来的
+// 新对象，没有并发读者）。凭证为空时返回错误 —— 与 SaveAtomic 同一条
+// 防御（避免误用空凭证覆盖有效文件）。
+func (a *Auth) MarshalNested() ([]byte, error) {
+	if a == nil {
+		return nil, fmt.Errorf("auth: 凭证为空")
+	}
 	if strings.TrimSpace(a.AccessToken) == "" {
-		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
+		return nil, fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
 	}
 	if a.FilePath == "" {
-		return fmt.Errorf("no FilePath set")
+		return nil, fmt.Errorf("no FilePath set")
 	}
 	doc := map[string]any{
 		"auth": map[string]any{
@@ -187,15 +215,7 @@ func (a *Auth) SaveAtomic() error {
 			"deviceToken": a.DeviceToken,
 		},
 	}
-	raw, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.FilePath)
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 // UpstreamDir 返回某个上游在 base 下的专属凭证子目录。

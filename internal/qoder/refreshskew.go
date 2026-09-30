@@ -31,7 +31,7 @@ import (
 // 过期字段名与它不同。`NeedsRefresh` 对 `ExpiresAt <= 0` **恒返回 true**，
 // 于是每个 chat 请求都先做一次续期往返。
 //
-// ⚠ 这个坑项目里有记录（cmd/server/mimocreds.go 的文件头，
+// ⚠ 这个坑项目里有记录（handoff.md 的「TRAE 账号突然过期」事故档案，
 // 标注为 TRAE「账号突然过期」事故的根因之一）：
 //
 //	过期权威只走 gateway.CredentialExpiryExt（问上游活 secret），

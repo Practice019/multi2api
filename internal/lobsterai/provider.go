@@ -113,7 +113,8 @@ func (p *Provider) Caps() gateway.Capability {
 	//
 	// ⚠ 本能力位是**行内「额度」按钮的判据**（前端 hasCap(pid,"quota-probe")）。
 	// 不声明它 → 该上游的账号行里根本不出现那个按钮。
-	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe
+	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe |
+		gateway.CapImport
 }
 
 // Client 上游 HTTP 客户端（供装配层与测试使用）。

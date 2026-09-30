@@ -3,6 +3,7 @@ package lobsterai
 import (
 	"context"
 	"errors"
+	"log"
 
 	"workbuddy2api/internal/dailycheckin"
 	"workbuddy2api/internal/gateway"
@@ -180,6 +181,55 @@ func (p *Provider) DailyActions() []gateway.DailyAction {
 		//（分组标题上的批量按钮据此出现）。
 		Batch: d.AllURL != "",
 	}}
+}
+
+// CheckinAll gateway.DailyCheckinExt：核心触发"所有上游签到"时调它。
+//
+// # 为什么它只转发给驱动，不自己遍历
+//
+// 遍历、写历史、状态归一化**都在共享驱动里**（dailycheckin.RunAll）。
+// 本包若再写一遍遍历，就会回到"抄漏"那条老路 —— 用户报的三处缺接线
+// （没按钮 / 不自动 / 不写历史）全是抄漏的产物，且不报错。
+//
+// # 回执形状
+//
+// 驱动只回 error（它的 RunAll 是给定时任务用的 `func(ctx) error`），
+// 而跨上游入口要**逐账号**结果，否则某个上游整片失败时用户只看到
+// "成功了 N 个"，无法判断是哪个上游没动。所以这里调 HandlerAll
+// 的同一段业务，而不是 RunAll —— 两个入口仍是同一段签到逻辑
+// （HandlerAll 内部就是对每个号调 CheckinOne）。
+func (p *Provider) CheckinAll(ctx context.Context) gateway.DailyCheckinReport {
+	if p == nil || p.checkin == nil || !p.checkin.Ready() {
+		return gateway.DailyCheckinReport{Results: nil}
+	}
+	// 复用驱动的执行体：先取本上游账号，再逐个 CheckinOne。
+	//
+	// ⚠ 不直接用 p.checkin.RunAll —— 它丢弃逐账号结果（定时任务不需要）。
+	// 这里需要结果，所以走与 HTTP 全量端点同一条路（见 runCheckinAllOnce）。
+	return gateway.DailyCheckinReport{Results: p.runCheckinAllOnce(ctx)}
+}
+
+// runCheckinAllOnce 逐个账号签到并收集结果（全量端点与本扩展点共用）。
+func (p *Provider) runCheckinAllOnce(ctx context.Context) []gateway.DailyCheckinResult {
+	up := &checkinUpstream{p: p}
+	accs, err := up.Accounts(ctx)
+	if err != nil {
+		log.Printf("%s: 全量签到列账号失败: %v", checkinDescriptor.ID, err)
+		return nil
+	}
+	out := make([]gateway.DailyCheckinResult, 0, len(accs))
+	for _, acc := range accs {
+		if ctx.Err() != nil {
+			break
+		}
+		res := p.checkin.CheckinOne(ctx, acc, "manual")
+		out = append(out, gateway.DailyCheckinResult{
+			UID:    res.UID,
+			Status: res.Status,
+			Detail: res.Detail,
+		})
+	}
+	return out
 }
 
 // Jobs 自动签到任务（gateway.JobExt）。

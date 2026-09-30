@@ -40,6 +40,21 @@ type Provider struct {
 	// 见 adminroute.go 的 credentialSource。
 	creds credentialSource
 
+	// quotaSink 把额度写回账号池（装配层注入；nil = 不写，界面额度列恒为空）。
+	//
+	// # 为什么需要它（用户报「额度是 0」）
+	//
+	// 本上游有 `RefreshQuota`（`gateway.QuotaExt`），但那个扩展点**只在
+	// 有人点「刷新本上游额度」时才被调用** —— 核心**没有**定时任务去扫
+	// （全仓只有 workbuddy 一个上游在签到/旅行路径里顺带回写）。
+	//
+	// 于是重启后额度列是空的，直到有人手动点一次 —— 而用户看到的
+	// 「额度 0」正是"我们还没问过上游"被渲染成了 0。
+	//
+	// 这里给后台任务一个写回通道：续期那一轮**顺带**查一次额度
+	//（同一个 host，一次往返），不必新起任务。
+	quotaSink func(uid string, q gateway.QuotaView)
+
 	// log 签到历史（装配层注入；nil = 不记历史，但那样界面「今日签到」
 	// 列会永远为空 —— 见 checkin.go 的注释）。
 	log *checkinlog.Log
@@ -69,6 +84,11 @@ type Config struct {
 	//
 	// 装配层传 30 分钟（与 workbuddy / trae 同一节奏）。
 	CheckinInterval time.Duration
+	// QuotaSink 把额度写回账号池（nil = 后台任务不回写额度）。
+	//
+	// 见 Provider.quotaSink 的注释：没有它，重启后额度列一直是空的
+	//（用户报「额度 0」的形态）。
+	QuotaSink func(uid string, q gateway.QuotaView)
 }
 
 // NewProvider 契约测试用的无依赖构造（国际版）。
@@ -98,6 +118,7 @@ func NewWithConfig(cfg Config) *Provider {
 		productID:       prod.ID,
 		log:             cfg.Log,
 		checkinInterval: cfg.CheckinInterval,
+		quotaSink:       cfg.QuotaSink,
 	}
 	// 构造共享签到驱动（按钮 / 自动任务 / 端点 / 写历史 都在它里面）。
 	// 必须在字段就位之后调用 —— 它读 p.log / p.checkinInterval / p.ID()。
@@ -161,7 +182,8 @@ func (p *Provider) Caps() gateway.Capability {
 	//
 	// ⚠ 本能力位是**行内「额度」按钮的判据**（前端 hasCap(pid,"quota-probe")）。
 	// 不声明它 → 该上游的账号行里根本不出现那个按钮。
-	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe
+	return gateway.CapChat | gateway.CapModels | gateway.CapCheckin | gateway.CapQuotaProbe |
+		gateway.CapImport
 }
 
 // Client 上游 HTTP 客户端。
@@ -329,8 +351,15 @@ func (p *Provider) RefreshCredential(cred gateway.Credential) error {
 	if next.RefreshToken != "" {
 		a.RefreshToken = next.RefreshToken
 	}
-	if next.ExpiresIn > 0 {
-		a.ExpiresIn = next.ExpiresIn
+	// ⚠ 绝对毫秒时刻（不是相对秒）：它是「Token」列的唯一权威。
+	//
+	// 旧实现写 `a.ExpiresIn = next.ExpiresIn`，而那个字段来自上游响应里
+	// **不存在**的 `expires_in` → 恒为 0 → 界面永远显示 `—`（用户报障）。
+	if next.ExpiresAt > 0 {
+		a.ExpiresAt = next.ExpiresAt
+	}
+	if next.RefreshTokenExpiresAt > 0 {
+		a.RefreshTokenExpiresAt = next.RefreshTokenExpiresAt
 	}
 	if err := saveAuthFile(a); err != nil {
 		return nil // 落盘失败不让刷新失败

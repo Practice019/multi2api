@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -145,38 +147,132 @@ func (c *Client) userAgent() string {
 	return prefix + "/1.0.0"
 }
 
+// DeviceSession 一次设备码登录会话。
+//
+// # 三个字段缺一不可（本轮修的缺陷就是"只带了 state"）
+//
+//	Pkce       授权时提交 challenge，轮询时提交 verifier —— 服务端据此配对
+//	Nonce      一次性随机串，授权与轮询两处必须是**同一个**
+//	MachineID  设备标识，授权 URL 要带；且**必须随凭据持久化**
+//	           （续期请求体也要它，见 RefreshCredential）
+//
+// 参照实现的 createQoderDeviceSession 也是这三个字段，
+// 其中 machineId 由客户端生成并持久化（不是硬件指纹）。
+type DeviceSession struct {
+	Pkce      Pkce
+	Nonce     string
+	MachineID string
+}
+
+// newDeviceSession 生成一次设备码登录会话。
+func newDeviceSession() (DeviceSession, error) {
+	p, err := newPkce()
+	if err != nil {
+		return DeviceSession{}, err
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return DeviceSession{}, err
+	}
+	// machine_id 与 nonce 同形（16 字节 hex）。参照用 UUID；
+	// 两者都是"客户端生成的随机标识"，服务端不做格式校验
+	//（参照的注释明确说它不复制 Qoder 的硬件指纹逻辑）。
+	machineID, err := randomNonce()
+	if err != nil {
+		return DeviceSession{}, err
+	}
+	return DeviceSession{Pkce: p, Nonce: nonce, MachineID: machineID}, nil
+}
+
 // ── 设备码登录（qoder-oauth.ts）─────────────────────────────────────────
+//
+// # ⚠ 本轮修的缺陷：此前**完全没有 PKCE**
+//
+// 授权 URL 只带了 `client_id` / `response_type=code` / `state`，
+// 轮询也只提交一个 `state`。而参照实现（已实测跑通）是标准 PKCE：
+//
+//	授权 URL  {authBase}/device/selectAccounts
+//	          ?challenge=<base64url(sha256(verifier))>&challenge_method=S256
+//	          &nonce=<uuid>&machine_id=<uuid>&client_id=<product.ClientID>
+//
+//	轮询      **GET** {openAPIBase}/api/v1/deviceToken/poll
+//	          ?nonce=<同一个>&verifier=<明文 verifier>&challenge_method=S256
+//
+// 服务端靠 `verifier` 校验授权时提交的 `challenge`。不发 PKCE 时，
+// 授权页照常打开、用户照常点授权，但服务端没有可校验的东西 ——
+// **永远拿不到 token**，直到 5 分钟超时。用户报的"添加账号有问题"就是这个。
+//
+// 三个细节见 pkce.go 的文件头（长度、去 padding、GET 而非 POST）。
 
 // DeviceSelectURL 返回设备码授权入口 URL（用户在浏览器里打开它）。
 //
+// # 形态（逐字照抄参照 buildQoderAuthUrl）
+//
+//	{authBase}/device/selectAccounts
+//	  ?challenge=<pkce.Challenge>&challenge_method=S256
+//	  &nonce=<session.Nonce>&machine_id=<session.MachineID>
+//	  &client_id=<product.ClientID>
+//
+// ⚠ `client_id` 必须用 **prod** 那个（Qoder.ClientID）。
+// 参照的注释写明：用错成 test 的 id 时，"授权页 302 正常、点击授权后
+// 报参数无效" —— 故**不能**靠探测入口验证，只有真实登录闭环才暴露。
+//
 // ⚠ 该路径对**任一** client_id（含全零 UUID）都返回 302 ——
 // 故 GET 它的状态码**不能**用来校验 client_id。
-// client_id 的错误要到**授权回调阶段**才被服务端校验出来。
-//
 // 这也是为什么本函数是纯 URL 构造、不发请求：发一次 GET 也验不出什么。
-func (c *Client) DeviceSelectURL(state string) string {
-	// 路径与查询参数按参照实现拼装。
-	q := []string{
-		"client_id=" + c.Product.ClientID,
-		"response_type=code",
-		"state=" + state,
+func (c *Client) DeviceSelectURL(s *DeviceSession) string {
+	if s == nil {
+		return ""
 	}
-	for k, v := range clientMetadata {
-		q = append(q, k+"="+v)
+	q := []string{
+		"challenge=" + url.QueryEscape(s.Pkce.Challenge),
+		"challenge_method=S256",
+		"nonce=" + url.QueryEscape(s.Nonce),
+		"machine_id=" + url.QueryEscape(s.MachineID),
+		"client_id=" + url.QueryEscape(c.Product.ClientID),
 	}
 	return c.authBase() + deviceSelectPath + "?" + strings.Join(q, "&")
 }
 
+// DevicePollURL 轮询取 token 的完整 URL（**GET** + query 参数）。
+//
+// # 为什么是 GET 而不是 POST（本轮修的缺陷之一）
+//
+// 参照实现：`fetcher(pollUrl, { method: 'GET' })`，参数全在 query。
+// 我们此前发的是 POST + JSON body（只有 state / client_id）——
+// 服务端既拿不到 verifier（PKCE 校验失败），方法也不对。
+//
+// ⚠ 挂的是 **openAPIBase**，不是 authBase：
+// 实测 `qoder.com` 的同名路径返回 401，而 `openapi.qoder.sh` 返回 404
+// （= 无待授权会话，应继续轮询）。写错 host 会让登录永远失败。
+func (c *Client) DevicePollURL(s *DeviceSession) string {
+	if s == nil {
+		return ""
+	}
+	q := []string{
+		"nonce=" + url.QueryEscape(s.Nonce),
+		"verifier=" + url.QueryEscape(s.Pkce.Verifier),
+		"challenge_method=S256",
+	}
+	return c.openAPI() + devicePollPath + "?" + strings.Join(q, "&")
+}
+
 // PollResult 一次轮询的结果。
 type PollResult struct {
-	// Pending 用户尚未完成授权（HTTP 404），继续轮询。
+	// Pending 用户尚未完成授权（HTTP 404 / 2xx 但无 token），继续轮询。
 	Pending bool
 	// AccessToken / RefreshToken 授权完成时的令牌。
 	AccessToken  string
 	RefreshToken string
+	// UID / Nickname 设备码响应里的 user_id / user_name。
+	//
+	// ⚠ 必须读出来：**加密推理需要 uid**（WASM 用它派生 encrypt_user_info）。
+	// 早期漏读导致只能走公开端点 —— 而公开端点不认目录 key（见 qoder.go）。
+	UID      string
+	Nickname string
 }
 
-// PollDeviceToken 轮询一次设备码。
+// PollDeviceToken 轮询一次设备码（**GET**，参数在 query）。
 //
 // # ⚠ 判据是 **HTTP 404**，不是响应体
 //
@@ -186,16 +282,17 @@ type PollResult struct {
 // 轮询 host 是 **openapi.qoder.sh**（qoder.com 的同名路径返回 401）。
 //
 // 业务码 11217 / 12151（token/account not ready）同样表示"继续等"。
-func (c *Client) PollDeviceToken(ctx context.Context, state string) (PollResult, error) {
-	payload, _ := json.Marshal(map[string]any{
-		"state":     state,
-		"client_id": c.Product.ClientID,
-	})
-	req, err := http.NewRequest(http.MethodPost, c.openAPI()+devicePollPath, bytes.NewReader(payload))
+//
+// # ⚠ 2xx 但无 token 也要继续（不能当失败）
+//
+// 参照实现的判据是 `payload.accessToken.length > 0` 才返回；
+// 否则 sleep 后重试。把它当错误会让"刚点完授权、服务端还在处理"
+// 这个正常中间态变成失败。
+func (c *Client) PollDeviceToken(ctx context.Context, s *DeviceSession) (PollResult, error) {
+	req, err := http.NewRequest(http.MethodGet, c.DevicePollURL(s), nil)
 	if err != nil {
 		return PollResult{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.userAgent())
 
@@ -216,11 +313,19 @@ func (c *Client) PollDeviceToken(ctx context.Context, state string) (PollResult,
 	var rec struct {
 		Code         int    `json:"code"`
 		Message      string `json:"message"`
+		Token        string `json:"token"`
+		DeviceToken  string `json:"device_token"`
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
+		UserID       string `json:"user_id"`
+		UserName     string `json:"user_name"`
 		Data         struct {
+			Token        string `json:"token"`
+			DeviceToken  string `json:"device_token"`
 			AccessToken  string `json:"access_token"`
 			RefreshToken string `json:"refresh_token"`
+			UserID       string `json:"user_id"`
+			UserName     string `json:"user_name"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &rec); err != nil {
@@ -230,18 +335,19 @@ func (c *Client) PollDeviceToken(ctx context.Context, state string) (PollResult,
 	if rec.Code == codeTokenNotReady || rec.Code == codeAccountNotReady {
 		return PollResult{Pending: true}, nil
 	}
-	at := rec.AccessToken
-	rt := rec.RefreshToken
-	if at == "" {
-		at = rec.Data.AccessToken
-	}
-	if rt == "" {
-		rt = rec.Data.RefreshToken
-	}
+	// ⚠ 字段名有四种（参照 parseQoderTokenPayload 逐字照抄）：
+	//   登录响应用 `token` / `device_token`，续期响应用 `access_token`。
+	// 只认 access_token 会让**登录响应永远解析不出 token** →
+	// 表现同样是"授权成功但一直 pending 到超时"。
+	at := firstNonEmpty(rec.Token, rec.DeviceToken, rec.AccessToken,
+		rec.Data.Token, rec.Data.DeviceToken, rec.Data.AccessToken)
+	rt := firstNonEmpty(rec.RefreshToken, rec.Data.RefreshToken)
+	uid := firstNonEmpty(rec.UserID, rec.Data.UserID)
+	nick := firstNonEmpty(rec.UserName, rec.Data.UserName)
 	if at == "" {
 		return PollResult{Pending: true}, nil // 无 token 视为未就绪（不产出半截凭据）
 	}
-	return PollResult{AccessToken: at, RefreshToken: rt}, nil
+	return PollResult{AccessToken: at, RefreshToken: rt, UID: uid, Nickname: nick}, nil
 }
 
 // ── 续期 ────────────────────────────────────────────────────────────────
@@ -281,28 +387,53 @@ func (c *Client) RefreshCredential(ctx context.Context, a *Auth) (*Auth, error) 
 		return nil, fmt.Errorf("qoder: 续期 HTTP %d: %s", status, truncate(string(raw), 160))
 	}
 
+	// ⚠ 字段名与形状**逐字照抄参照 parseQoderTokenPayload**（本轮修的缺陷）。
+	//
+	// 实测真实续期响应（2026-09-30）：
+	//
+	//	{"device_token":"dt-9PpG1q39MXpdm8CCYa6smmXl",
+	//	 "refresh_token":"drt-EEpc518l3XX9AdEMCVMcvZ2y",
+	//	 "token_type":"Bearer",
+	//	 "expires_at":"2026-10-30T06:56:55Z",          ← ISO 绝对时刻
+	//	 "refresh_token_expires_at":"2027-09-25T06:56:55Z",
+	//	 "created_at":"2026-09-30T06:56:55Z"}
+	//
+	// 而旧实现读的是 `access_token` + `expires_in`（相对秒）—— **两个都不存在**：
+	//
+	//	access_token 不存在 → at=="" → 报"续期响应缺少 access_token"
+	//	                       （即"续期永远失败"，即使服务端回了 200）
+	//	expires_in   不存在 → 过期时刻从来没被存下来 → 界面 Token 列恒显示 `—`
+	//
+	// token 本身是 **`dt-` 前缀的不透明串**（27 字符，不是 JWT），
+	// 所以"解 JWT exp"那条路也走不通 —— 过期时刻**只能**从这里存。
 	var rec struct {
 		Code         int    `json:"code"`
 		Message      string `json:"message"`
+		// 登录响应用 `token`、续期响应用 `device_token`，两者都认（参照同）。
+		Token        string `json:"token"`
+		DeviceToken  string `json:"device_token"`
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-		Data         struct {
+		// ExpiresAt 是 **ISO 字符串**（不是秒数），见 parseQoderTimeMS。
+		ExpiresAt string `json:"expires_at"`
+		// RefreshTokenExpiresAt refresh_token 的过期时刻（ISO 字符串）。
+		RefreshTokenExpiresAt string `json:"refresh_token_expires_at"`
+		Data                  struct {
+			Token        string `json:"token"`
+			DeviceToken  string `json:"device_token"`
 			AccessToken  string `json:"access_token"`
 			RefreshToken string `json:"refresh_token"`
-			ExpiresIn    int64  `json:"expires_in"`
+			ExpiresAt    string `json:"expires_at"`
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(raw, &rec)
 
-	at := firstNonEmpty(rec.AccessToken, rec.Data.AccessToken)
+	at := firstNonEmpty(rec.Token, rec.DeviceToken, rec.AccessToken,
+		rec.Data.Token, rec.Data.DeviceToken, rec.Data.AccessToken)
 	rt := firstNonEmpty(rec.RefreshToken, rec.Data.RefreshToken)
-	exp := rec.ExpiresIn
-	if exp == 0 {
-		exp = rec.Data.ExpiresIn
-	}
+	expISO := firstNonEmpty(rec.ExpiresAt, rec.Data.ExpiresAt)
 	if at == "" {
-		return nil, fmt.Errorf("%w：续期响应缺少 access_token", ErrRefreshExpired)
+		return nil, fmt.Errorf("%w：续期响应缺少访问令牌", ErrRefreshExpired)
 	}
 
 	next := *a
@@ -310,11 +441,54 @@ func (c *Client) RefreshCredential(ctx context.Context, a *Auth) (*Auth, error) 
 	if rt != "" {
 		next.RefreshToken = rt
 	}
-	if exp > 0 {
-		next.ExpiresIn = exp
+	// 过期时刻存**绝对毫秒**（parseQoderTimeMS 兼容 ISO 字符串与秒/毫秒数字）。
+	//
+	// ⚠ 不存"相对秒数"：相对值一离开响应就没有参照点了 ——
+	// 存下来再读只会得到"签发时的那一刻剩余多久"，与现在无关。
+	if ms := parseQoderTimeMS(expISO); ms > 0 {
+		next.ExpiresAt = ms
+	}
+	if ms := parseQoderTimeMS(rec.RefreshTokenExpiresAt); ms > 0 {
+		next.RefreshTokenExpiresAt = ms
 	}
 	// machine_id 必须保留（续期请求体要用）
 	return &next, nil
+}
+
+// parseQoderTimeMS 把上游的时间值解析成**毫秒时间戳**；解不出返回 0。
+//
+// 兼容两种形态（与参照 readTimestamp 逐字对齐）：
+//
+//	ISO 字符串  "2026-10-30T06:56:55Z"   ← 实测续期响应用的就是它
+//	数字        10 位视为秒、13 位视为毫秒
+//
+// ⚠ **解不出返回 0，绝不填当前时间**：「没有过期时间」与「刚过期」
+// 是两回事，后者会让界面显示"已过期"并误导用户去重新登录。
+func parseQoderTimeMS(v string) int64 {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	// 纯数字：按位数判秒/毫秒
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n <= 0 {
+			return 0
+		}
+		if n < 1e12 {
+			return n * 1000
+		}
+		return n
+	}
+	// ISO 8601 / RFC3339
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.UnixMilli()
+	}
+	// 秒带小数点的 ISO（如 "2026-10-30T06:56:55.123Z"）由 RFC3339 覆盖；
+	// 这里再兜一次不带时区的形态。
+	if t, err := time.Parse("2006-01-02T15:04:05", v); err == nil {
+		return t.UnixMilli()
+	}
+	return 0
 }
 
 // ── 用户信息 ────────────────────────────────────────────────────────────

@@ -304,7 +304,9 @@ func (p *Provider) Caps() gateway.Capability {
 		//	CapInvite  邀请码（GET/POST /api/v1/points/activation 等）
 		// 两者都进了 gateway.unverifiableCaps，因此同时要求实现 AdminExt ——
 		// loomy 有（诊断端点 + 本轮这两组端点）。
-		gateway.CapTasks | gateway.CapInvite
+		gateway.CapTasks | gateway.CapInvite |
+		// CapImport：批量粘贴导入（本轮统一到所有上游）。
+		gateway.CapImport
 }
 
 // Chat 转发一次对话请求。
