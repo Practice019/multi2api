@@ -41,7 +41,15 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 		return false, nil
 	}
 
-	body, err := injectTools(p.body, tools)
+	// 网关注入的工具名集合 —— 用于把模型的调用分成"我们的"与"客户端的"。
+	mine := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		mine[t.Name] = true
+	}
+
+	// 客户端已声明的工具名：合并时以它为准（重名不注入，避免上游 400）。
+	existing := existingToolNames(p.body)
+	body, err := injectTools(p.body, tools, existing)
 	if err != nil {
 		// 注入失败只可能是请求体不是 JSON —— 但那在更早的 peek 阶段就该发现。
 		// 走到这里说明 body 在中间被改坏了：明确报错，不要静默降级成
@@ -90,10 +98,32 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 			break
 		}
 
+		ours, theirs := partitionToolCalls(calls, mine)
+
+		// ── 客户端自己的工具：原样交给它执行，本循环**就此打住** ──
+		//
+		// # 为什么必须立刻收手（这是"agent 框架零改动"的关键）
+		//
+		// DSH / Claude Code 这类客户端**自己要驱动工具循环**：它收到
+		// tool_calls 就去执行，再把结果发回来。所以我们必须把这一轮的
+		// tool_calls **原样**返回给它 —— 不能拦、不能改、不能替它执行。
+		//
+		// 拦下来的后果（第一版就是这样）：agent 框架永远收不到它的
+		// tool_calls，它的执行循环卡死，表现是"DSH 突然不会用工具了"。
+		//
+		// ⚠ 已经执行完的我们自己的工具**不能**在这轮一起返回：
+		// 客户端的会话历史里没有那些 tool 结果，它会按自己的协议
+		// 去解释这一轮，容易错乱。宁可让模型下一轮重来
+		//（它看到的是"我上一轮的工具没被执行"），也不要塞给它
+		// 一份它无法对应的历史。
+		if len(theirs) > 0 {
+			final = resp
+			break
+		}
+
 		if round == maxToolRounds {
 			// 到顶了还在调工具：不再执行（避免无限烧积分），
-			// 把已完成的结果交给模型做最后一次收尾 —— 且**不带工具**，
-			// 它就没有再调的余地，只会说话。
+			// 把已完成的结果交给模型做最后一次收尾。
 			//
 			// 比"直接报错"好：用户至少拿到已经生成好的东西 + 一句解释。
 			log.Printf("chat tools: 达到轮次上限 %d，强制收尾 uid=%s provider=%s",
@@ -102,9 +132,9 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 			break
 		}
 
-		// 执行本轮的所有工具调用。
-		results := make([]toolExecResult, 0, len(calls))
-		for _, call := range calls {
+		// ── 网关注入的工具：自己执行，客户端看不到这一步 ──
+		results := make([]toolExecResult, 0, len(ours))
+		for _, call := range ours {
 			results = append(results, h.execOneTool(p, call.ID, call.Name, call.Args))
 		}
 		// 收集产物（图片/搜索）。
