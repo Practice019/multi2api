@@ -27,6 +27,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"workbuddy2api/internal/gateway"
@@ -206,29 +207,54 @@ func (p *Provider) execGenerateImage(ctx context.Context, uid string, args json.
 		}, nil
 	}
 
-	url := resp.Data[0].URL
+	rawURL := resp.Data[0].URL
 	points := ""
 	if resp.PointsConsumed != nil {
 		points = fmt.Sprintf("（消耗 %v 积分）", resp.PointsConsumed)
 	}
 
+	// 上游给的是 COS **签名** URL，而它对 HEAD 请求必然 403（见
+	// imagedisplay.go 的实测记录）—— 预览器一探测就失败，用户看到
+	// "图片无法预览"。这里探一下裸形式是否可用（bucket 公开读的话可用），
+	// 可用就换成裸的（HEAD/GET 都通、不过期、markdown 里也没有 & 和 ;）。
+	//
+	// ⚠ 探测失败**不报错**：退回签名 URL，它 GET 仍可用 ——
+	// 比"整个工具失败"好得多。
+	display, usedBare := displayImageURL(ctx, p.imageProbeClient(), rawURL)
+
 	return gateway.ChatToolResult{
 		OK: true,
-		// Content 给**模型**看：它需要知道"图出来了 + URL 是什么"才能收尾。
-		Content: fmt.Sprintf("图片已生成成功%s。图片 URL：%s\n请用一句自然的话告诉用户图片已生成，"+
-			"不要复述这个 URL（网关会在回复末尾自动附上图片）。", points, url),
+		// Content 给**模型**看：它需要知道"图出来了"才能收尾。
+		// 刻意**不给 URL**：给了它会忍不住复述一长串签名串，
+		// 那对用户毫无价值（网关会在回复末尾附上图片）。
+		Content: fmt.Sprintf("图片已生成成功%s。请用一句自然的话告诉用户图片已生成，"+
+			"不要输出任何 URL 或 markdown 图片语法（网关会自动附上图片）。", points),
 		// Markdown 给**客户端**渲染 —— 由出口层追加到最终回复末尾。
-		// 这样即使客户端不支持 markdown 图片，URL 也是可见可复制的。
-		Markdown: fmt.Sprintf("![%s](%s)", markdownAltText(prompt), url),
+		//
+		// alt 必须转义（提示词是用户输入，含 `]` 会截断整个链接，
+		// 那正是"图片无法预览"的第二个根因，见 markdownAltText）。
+		Markdown: fmt.Sprintf("![%s](%s)", markdownAltText(prompt), display),
 		Artifacts: []gateway.Artifact{{
-			"type":            "image",
-			"url":             url,
-			"prompt":          prompt,
-			"size":            size,
-			"model":           imageModelIDs[0].ID,
+			"type":   "image",
+			"url":    display,
+			"prompt": prompt,
+			"size":   size,
+			"model":  imageModelIDs[0].ID,
+			// 原始签名 URL 一并给出：调用方若发现展示用的那个取不到，
+			// 还能退回它（它 GET 可用）。
+			"url_signed":      rawURL,
+			"url_is_bare":     usedBare,
 			"points_consumed": resp.PointsConsumed,
 		}},
 	}, nil
+}
+
+// imageProbeClient 探测用 HTTP 客户端（与出站共用同一个，便于测试注入）。
+func (p *Provider) imageProbeClient() *http.Client {
+	if p == nil || p.client == nil {
+		return nil
+	}
+	return p.client.httpClient()
 }
 
 // Search 用某个账号向上游发起一次联网搜索。
@@ -440,16 +466,59 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(kept, sep)
 }
 
-// markdownAltText 从提示词生成图片的 alt 文本。
+// markdownAltText 从提示词生成图片的 alt 文本，并**转义 markdown 元字符**。
 //
-// 取提示词前若干个字符（去掉换行）：alt 是给"图没加载出来"或读屏软件用的，
-// 完整提示词太长（可能几百字），那不是 alt 该干的事。
+// # 为什么必须转义（这是用户报的"图片无法预览"的第二个根因）
+//
+// 提示词是**用户输入**，而它会被直接插进 markdown 链接语法：
+//
+//	![<这里是提示词>](https://…)
+//
+// CommonMark 规定 alt 文本在**第一个未转义的 `]`** 处结束。所以：
+//
+//	提示词 "含]括号"           → ![含]括号](url)
+//	                              ↑ alt 到此为止 → 图不显示、URL 变成纯文本
+//	提示词 "电商主图 [主推款]"  → 同上（用户实测就是这类提示词）
+//
+// 用户看到的正是"图片无法预览" + 一段被截断的提示词文本 ——
+// 那段文本就是**截断后的 alt**。
+//
+// 需要转义的字符（markdown 讲究"能破坏链接/标题结构"的那几个）：
+//
+//	\   反斜杠本身（必须最先转义）
+//	[ ] 链接/图片的括号
+//	( ) 目标 URL 的括号 —— alt 里虽不直接致断，但会让某些解析器歧义
+//	< > 可能被当 HTML/自动链接
+//	* _ ` ~ | 强调与代码/表格分隔
+//	#    行首会被当标题（alt 一般不在行首，但转义它零代价）
+//
+// ⚠ 只转义，**不删除**字符：用户想看的是自己的提示词，不是被我们
+// 洗过的版本。转义后渲染出来仍是原样的文字。
 func markdownAltText(prompt string) string {
 	s := strings.Join(strings.Fields(prompt), " ")
-	if len([]rune(s)) <= 40 {
-		return s
+	if len([]rune(s)) > 40 {
+		// 先截断再转义：转义会插入反斜杠，先转义再截断可能把
+		// `\x` 从中间切断（露出一个悬空反斜杠，它又会转义后面的字符）。
+		s = string([]rune(s)[:40]) + "…"
 	}
-	return string([]rune(s)[:40]) + "…"
+	return escapeMarkdownText(s)
+}
+
+// escapeMarkdownText 转义会破坏 markdown 结构的字符。
+//
+// 顺序很重要：**反斜杠先转**，否则后面插入的反斜杠会被自己再转一遍
+// （`]` → `\]` → `\\]`，渲染出多一个反斜杠）。
+func escapeMarkdownText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		switch r {
+		case '\\', '[', ']', '(', ')', '<', '>', '*', '_', '`', '~', '|', '#':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // clipForTool 按字节裁剪文本（工具结果喂回模型时的长度上限）。
