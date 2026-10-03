@@ -1363,13 +1363,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 客户端自己带了 tools 时**不接管**：那说明它懂协议、要自己驱动
 		// 工具循环，网关再插一脚会两边打架（见 shouldRunToolLoop）。
 		if ext, yes := h.shouldRunToolLoop(reqProvider, outBody); yes {
-			done, werr := h.runToolLoop(w, toolLoopParams{
-				ext:        ext,
-				providerID: reqProvider,
-				uid:        acct.UID,
-				body:       outBody,
-				stream:     peek.Stream,
-			})
+			// 流式与**非流式**走两条实现（见 chattool_stream.go 的文件头）：
+			//
+			//	流式    逐帧转发，只在真调我们的工具时才拦 —— 保住打字机效果
+			//	非流式  内部跑完整轮再一次性返回（原本就无流式可言）
+			//
+			// ⚠ 第一版只有非流式那条，于是**每个** loomy 请求都被缓冲成
+			// 一整块，用户看到"文字不是流式的了"——范围远大于生图的回归。
+			var done bool
+			var werr error
+			if peek.Stream {
+				done, werr = h.runToolLoopStream(w, toolLoopParams{
+					ext:        ext,
+					providerID: reqProvider,
+					uid:        acct.UID,
+					body:       outBody,
+					stream:     true,
+				}, h.chatToolsOf(reqProvider))
+			} else {
+				done, werr = h.runToolLoop(w, toolLoopParams{
+					ext:        ext,
+					providerID: reqProvider,
+					uid:        acct.UID,
+					body:       outBody,
+					stream:     false,
+				})
+			}
 			if werr != nil {
 				// 循环内的硬失败（注入失败/上游连续报错）：
 				// 分类后按换号处理，与普通 chat 路径同一条。
