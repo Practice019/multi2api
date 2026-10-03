@@ -44,6 +44,8 @@ const (
 	// ⚠ 与上面两条的区别：它是**唯一**能跑两个生图模型的端点
 	//（doubao-seedream-5-lite / qwen-image-3.0-pro 走 ChatPath 会 404）。
 	ImageGeneratePath = "/images/generations"
+	// SearchPath 联网搜索端点（实测可用，见 search.go）。
+	SearchPath = "/search/tencent"
 )
 
 // maxErrorBody 读取上游错误体时的上限。
@@ -52,6 +54,15 @@ const (
 // 实现不必再截断）。这里是**我们自己**读上游响应的那一侧，必须自带上限：
 // 一个畸形的巨大错误体不该把网关的内存吃掉。
 const maxErrorBody = 1 << 20 // 1 MiB
+
+// maxSearchRespBody 读取搜索结果的上限。
+//
+// 实测一次 10 条结果的响应约几十 KB（每条 content 是网页正文摘要）。
+// 4 MiB 给"用户要 50 条 + 正文很长"留足余量，同时挡住畸形响应。
+//
+// ⚠ 读全之后再裁剪喂给模型（见 chattool.go 的 clipForTool）——
+// 在读取层就截断的话，JSON 会被截成非法形态，反而连一条结果都解析不出来。
+const maxSearchRespBody = 4 << 20 // 4 MiB
 
 // maxImageRespBody 读取生图响应体的上限。
 //

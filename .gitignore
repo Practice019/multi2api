@@ -55,6 +55,7 @@ SPEC.md
 docs/*
 !docs/loomy-local-toolchain.md
 !docs/image-generation.md
+!docs/chat-tools.md
 
 # 运行期产物
 # logs/ 是 start.bat 与网关控制台写出的日志（含本机绝对路径、账号昵称、
@@ -80,6 +81,7 @@ tasks/
 # 上面对 docs/ 的 `docs/*` + `!docs/xxx.md` 是**不够的**（先命中哪条看顺序）。
 !docs/loomy-local-toolchain.md
 !docs/image-generation.md
+!docs/chat-tools.md
 
 # ⚠ 被 go:embed 内嵌的 md 必须**显式**豁免 —— 它不是文档，是编译输入。
 #

@@ -59,6 +59,19 @@ type Config struct {
 		// 出口层据此返回 413 —— 客户端立刻知道"是大小问题"，
 		// 而不是去猜 JSON 哪里写错了。
 		MaxBodyMB int `json:"max_body_mb"`
+
+		// DisableChatTools 关闭「上游工具自动注入」。
+		//
+		// 缺省 false（**开启**）：用 loomy 的对话模型说一句"帮我画只猫"
+		// 就能拿到图，客户端零改动。见 docs/chat-tools.md。
+		//
+		// 关掉它的场景：某个客户端虽然不带 tools，但对响应形状极敏感
+		// （例如自己逐字段解析 message）—— 那种客户端遇到工具循环
+		// 产生的响应（正文多一段 markdown、顶层多 loomy_artifacts）会不适应。
+		// 留这个开关让运维能局部退回改造前的行为。
+		//
+		// ⚠ 它只影响**注入**。客户端自己带 tools 时本就不接管，与此无关。
+		DisableChatTools bool `json:"disables_chat_tools"`
 	} `json:"server"`
 
 	// Login 页内「添加账号」的浏览器行为。
