@@ -116,3 +116,51 @@ func (h *Handler) credentialFor(providerID, uid string) (gateway.Credential, boo
 	}
 	return s.Credential(providerID, uid)
 }
+
+// chatStreamOnce 发一次**流式**对话请求，把上游的 SSE 流原样返回。
+//
+// 与 chatOnceNonStream 成对：那个读全（聚合用），这个不读（逐帧转发用）。
+// 工具循环的流式路径必须用这个 —— 用那个就等于把流式体验丢了。
+func (h *Handler) chatStreamOnce(uid string, body []byte) (io.ReadCloser, int, error) {
+	if h.cfg.Provider == nil {
+		return nil, 0, fmt.Errorf("chatStreamOnce: 未接线（cfg.Provider 为 nil）")
+	}
+	acct := h.cfg.Pool.PickByUID(uid)
+	if acct == nil {
+		return nil, 0, fmt.Errorf("chatStreamOnce: 账号 %s 不在池里（可能已被移除）", uid)
+	}
+	providerID, hasProv := h.cfg.Pool.ProviderOf(uid)
+	if !hasProv || providerID == "" {
+		providerID = h.defaultProvider()
+	}
+	cred, ok := h.credentialFor(providerID, uid)
+	if !ok {
+		return nil, 0, fmt.Errorf("chatStreamOnce: 取不到账号 %s 的凭证", uid)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), toolExecTimeout)
+	// ⚠ 不能 defer cancel()：返回的 rc 还要被调用方读完。
+	// 用"读完即取消"的包装把 cancel 绑到 rc 上，避免泄漏计时器。
+	cs, err := h.chatProvider(ctx, providerID, cred, body)
+	if err != nil {
+		cancel()
+		return nil, 0, err
+	}
+	if cs.Body == nil {
+		cancel()
+		return nil, cs.Status, nil
+	}
+	return &cancelReadCloser{rc: cs.Body, cancel: cancel}, cs.Status, nil
+}
+
+// cancelReadCloser 在 Close 时释放 context（让超时计时器不再挂住）。
+type cancelReadCloser struct {
+	rc     io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelReadCloser) Read(p []byte) (int, error) { return c.rc.Read(p) }
+func (c *cancelReadCloser) Close() error {
+	c.cancel()
+	return c.rc.Close()
+}
