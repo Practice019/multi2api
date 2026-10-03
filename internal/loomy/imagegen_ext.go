@@ -42,18 +42,27 @@ import (
 	"workbuddy2api/internal/gateway"
 )
 
-// imageModelIDs 本上游**仅用于生图**的模型（实测清单）。
+// imageModelIDs 本上游**仅用于生图**的模型（实测清单，2026-10-03）。
 //
 // ⚠ 与 models.go 的 knownModels 是**两个轴**：
 //
 //	knownModels   "这个模型能不能走 /chat/completions"
 //	imageModelIDs "这个模型能不能走 /images/generations"
 //
-// 两个生图模型在前者是"不可用"、在后者是"可用"。这正是旧结论写错的地方：
+// 这三个在前者是"不可用"、在后者是"可用"。这正是旧结论写错的地方：
 // 当时只有一个轴，于是把"chat 不可用"记成了"不可用"。
+//
+// ⚠ 判据不是"名字像不像生图"，而是**上游自己的模态声明**：
+// 三个模型的 `modalities.output` 都只有 `image`（见 Loomy 客户端
+// opencode.json）。名字只是旁证，模态才是上游的契约。
+//
+// `Hy-Image-3.5-preview` 起初按"名字像但未实测"排除在外，
+// 后实测它能走生图端点（HTTP 200 + 图片，扣 110 分）才补进来 ——
+// **先验证再声明**，而不是"名字像就先写上"。
 var imageModelIDs = []gateway.ImageModel{
 	{ID: "doubao-seedream-5-lite", Name: "Doubao seedream 5 lite"},
 	{ID: "qwen-image-3.0-pro", Name: "Qwen Image 3.0 Pro"},
+	{ID: "Hy-Image-3.5-preview", Name: "Hy image 3.5 preview"},
 }
 
 // GenerateImage 用某个账号向上游发起一次生图（gateway.ImageGenExt）。

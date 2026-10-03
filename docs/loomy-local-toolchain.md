@@ -217,7 +217,7 @@ POST /api/v1/images/generations {model:"doubao-seedream-5-lite", ...}
 | `mimo-v2.5` | 对话 |
 | **`doubao-seedream-5-lite`** | **生图**（豆包 Seedream 5 Lite） |
 | **`qwen-image-3.0-pro`** | **生图**（通义万相） |
-| `Hy-Image-3.5-preview` | ⚠ 未验证（名字含 Image，但未实测生图） |
+| **`Hy-Image-3.5-preview`** | **生图**（实测通过，见第十节） |
 
 ---
 
@@ -281,12 +281,13 @@ POST /api/v1/images/generations {model:"doubao-seedream-5-lite", ...}
 
 ## 九、未验证 / 存疑
 
-- `Hy-Image-3.5-preview` 是否支持 `/images/generations` —— **未测**（所以没进生图清单）
+- ~~`Hy-Image-3.5-preview` 是否支持 `/images/generations`~~ —— **已实测通过**
+  （2026-10-03，返回 200 + PNG，扣 110 积分），已进生图清单。见第十节。
 - `size` 的合法取值集合 —— 只测了 `2304x1728` 与 `1024x1024`
 - **图生图**（带 `images` 参数）—— **未测**（本文只实测了文生图）
 - 签名 URL 的**确切**有效期 —— 仅从 `q-sign-time` 推断约 12 小时，未实测过期行为
 
-## 十、实现阶段补测的两个事实（2026-10-03 追加）
+## 十、实现阶段补测的事实（2026-10-03 追加）
 
 ### 10.1 `response_format=b64_json` 被**忽略**
 
@@ -307,3 +308,104 @@ POST /api/v1/images/generations {model:"doubao-seedream-5-lite", ...}
 上游忽略 `n`。**静默少给**：调用方不会收到错误，只会拿到一张图。
 这是上游的固有行为，网关如实透传、不纠正（纠正意味着网关自己猜
 "用户其实想要两张"，并自行发两次请求 —— 那会在计费上做出未经同意的决定）。
+
+### 10.3 `Hy-Image-3.5-preview` 走生图端点是通的
+
+```
+POST /images/generations  {"model":"Hy-Image-3.5-preview", …}
+→ 200，data[0].url 是 PNG，points_consumed = 110
+```
+
+**关键教训**：它的模型名里含 "Image"，但从名字推断是错的两种方向都有 ——
+当初因为"名字含 Image 但没实测"就排除它，现在实测证明它可用。
+反过来也应警惕：不含 Image 的名字未必不能生图。
+清单只收**实测通过**的成员。
+
+### 10.4 对话模型**不能**生图（这是"工具注入"方案的前提）
+
+```
+qwen3.8-flash + "帮我画一只橘猫"（不带工具）
+→ HTTP 200，content 里是一段 **SVG 源码**，不是图片
+```
+
+原因在模型声明的 `modalities.output`：
+
+| 类别 | 模型 | `output` | `tool_call` |
+|---|---|---|---|
+| 对话 | deepseek-v4-flash / MiniMax-M3 / Kimi-k2.6 / qwen-3.8-max / GLM-5.3-Flash / qwen3.8-flash / spark-x / mimo-v2.5 | `["text"]` | `true` |
+| 生图 | doubao-seedream-5-lite / qwen-image-3.0-pro / Hy-Image-3.5-preview | `["image"]` | `false` |
+
+**两个轴完全对齐**：会说话的都不会画，会画的都不会说话。
+所以"让对话模型生成图片"在协议层就不可能 —— 只能由**外部**
+（原先是 Loomy 客户端，现在是本网关）替它去调生图模型。
+
+### 10.5 上游**支持工具调用**，且能跑通完整闭环
+
+这是"客户端零改动"方案可行性的根据，三条都实测过：
+
+**① 给它工具定义，它自己会调**
+
+```
+qwen3.8-flash + tools:[generate_image] + "帮我生成一张图：一只橘猫"
+→ HTTP 200，finish_reason = "tool_calls"
+  tool_calls[0].function.name = "generate_image"
+  arguments = {"prompt":"一只可爱的橘猫，圆圆的眼睛，毛色橙黄带条纹，坐在阳光下的窗台上…"}
+```
+
+**② 把工具结果喂回去，它能收尾**
+
+```
+messages += [assistant(tool_calls), tool(tool_call_id, content=结果 JSON)]
+→ HTTP 200，finish_reason = "stop"
+  content = "图片已经生成好了：一只橘猫悠闲地坐在窗台上 🐱 …"
+```
+
+**③ 上游接受 `stream: false`**
+
+工具循环必须拿完整响应才能判断"要不要执行工具"，
+所以非流式是前提。实测 `{"stream":false}` 正常返回（`finish_reason=stop`）。
+
+### 10.6 联网搜索：**同一个上游、同一个 session**
+
+```
+POST {base}/search/tencent   {"query":"…","Mode":0}
+→ 200 {"Pages":[…],"Query":"…","RequestId":"…","Version":"…","points_consumed":25}
+```
+
+⚠ **`Mode` 必须是 int（0/1/2），传字符串会 400**：
+
+```
+{"error":{"code":"10011","message":"请求体解析失败: json: cannot unmarshal
+ string into Go struct field TencentSearchRequest.mode of type int64"}}
+```
+
+Loomy 客户端的 `normalizeMode` 有 `natural/vr/mixed → 0/1/2` 的映射，
+但**那个映射在客户端侧，不在线上协议里** —— 照抄客户端的入参形态
+会写出一个恒定 400 的调用。这是"读代码而不打上游"的典型代价。
+
+`Pages[]` 条目的**实测**字段（不是猜的）：
+
+```
+authority_level, content, date, favicon, passage, pics, score, site, title, url
+```
+
+站点名是 **`site`**（不是 `site_name`）。猜错不会报错 —— 只会让
+每个条目的站点/标题悄悄变空，喂给模型的物料质量下降而无人察觉。
+
+成功判据照抄客户端：`code` 字段**存在且 ≠ "000000"** 才算业务错误。
+⚠ 实测成功响应里**根本没有 `code` 字段** —— 写成"code 必须等于 000000
+才算成功"会让每一次成功调用都被判失败。
+
+### 10.7 五个内置工具的**后端归属**（决定哪些能搬进网关）
+
+| 工具 | 后端 | 能否搬 |
+|---|---|---|
+| `loomy_image` | `{base}/images/generations` | ✅ 同上游同 session |
+| `loomy_websearch` | `{base}/search/tencent` | ✅ 同上游同 session |
+| `loomy_config` | 本地 MCP/定时任务配置（写本地文件、spawn 子进程） | ❌ 那是 Loomy 客户端自己的配置，网关里没有对应物 |
+| `loomy_soul` | 本地 `loomy-souls.json` 人设文件 | ❌ 同上 |
+| `loomy_glasses` | 眼镜端翻译（需 `GLASSES_MODE_ENABLED`） | ❌ 硬件绑定 |
+
+前两个只是"往同一个上游发不同 body"，所以能搬；后三个的语义依赖
+Loomy 客户端本地的状态与硬件，**搬过来就是空壳**。
+

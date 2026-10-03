@@ -990,6 +990,8 @@ func main() {
 		RedisMode:         redisMode,
 		SoftCooldown:      cfg.SoftRateDur,
 		MaxBodyMB:         cfg.Server.MaxBodyMB,
+		// 上游工具自动注入（loomy 的生图/搜索）。缺省开启，见 docs/chat-tools.md。
+		DisableChatTools: cfg.Server.DisableChatTools,
 		// ⚠ 必须是**同一个** promptGate 实例（与 up.PromptGate 一起给）：
 		// handler 在这里写、出站客户端在那里读。两个实例 = 机制失效。
 		PromptGate:        promptGate,

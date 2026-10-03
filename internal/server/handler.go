@@ -162,6 +162,18 @@ type Config struct {
 	// 空串与 Provider 为 nil 两种情形下的语义都是"没有多上游概念"，
 	// 此时 /v1/models 与选号都保持单上游行为。
 	DefaultProvider string
+
+	// DisableChatTools 关闭「上游工具自动注入」。
+	//
+	// 默认 false（开启）—— 用户要求「我要生图的话，它自动调用生图模型」，
+	// 而且希望**客户端零改动**（普通聊天客户端不懂工具协议）。
+	//
+	// 关掉它的场景：某个客户端虽然不带 tools，但对响应形状极敏感
+	// （例如自己解析 message 的每个字段）—— 那种客户端遇到工具循环
+	// 产生的响应会不适应。留这个开关让运维能局部退回改造前的行为。
+	//
+	// ⚠ 它只影响**注入**；客户端自己带 tools 时本就不接管，与此开关无关。
+	DisableChatTools bool
 	// Admin 管理台子树（挂在 /admin/，由 internal/admin 提供）。nil = 不注册该子树。
 	Admin http.Handler
 	// ModelCatalog 供管理台取模型目录快照（成本系数用）。nil = 本实例不提供该能力。
@@ -1335,6 +1347,48 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				fail(acct.UID)
 				continue
 			}
+		}
+
+		// ── 工具循环（上游声明的工具，客户端零改动）──
+		//
+		// 客户端**不需要**懂工具调用：它照常发一句"帮我画只猫"，
+		// 网关替它注入工具、执行工具、把结果回喂给模型收尾。
+		//
+		// ⚠ 作用域天然是"本上游的"：工具定义与执行都问**装配层**要
+		// （`ChatTools(id)` / `ExecuteChatTool(id,…)`），而 id 是
+		// 本次被路由到的那个上游。所以 loomy 的请求拿到生图+搜索，
+		// workbuddy 的请求（没实现该扩展点）一个都拿不到 ——
+		// 不需要在核心写任何 `if provider == "loomy"`。
+		//
+		// 客户端自己带了 tools 时**不接管**：那说明它懂协议、要自己驱动
+		// 工具循环，网关再插一脚会两边打架（见 shouldRunToolLoop）。
+		if ext, yes := h.shouldRunToolLoop(reqProvider, outBody); yes {
+			done, werr := h.runToolLoop(w, toolLoopParams{
+				ext:        ext,
+				providerID: reqProvider,
+				uid:        acct.UID,
+				body:       outBody,
+				stream:     peek.Stream,
+			})
+			if werr != nil {
+				// 循环内的硬失败（注入失败/上游连续报错）：
+				// 分类后按换号处理，与普通 chat 路径同一条。
+				lastErr = werr
+				fail(acct.UID)
+				continue
+			}
+			if done {
+				// 已经写过响应了（含状态码），直接收工。
+				h.cfg.Pool.NoteSuccess(acct.UID)
+				if sessKey != "" && h.cfg.Session != nil {
+					h.cfg.Session.Bind(sessKey, acct.UID)
+				}
+				st.status = http.StatusOK
+				return
+			}
+			// done=false：本轮没跑成（如上游报错），换号重试。
+			fail(acct.UID)
+			continue
 		}
 
 		// 出站：按**选中的账号所属上游**分派到它自己的实现。
