@@ -612,3 +612,50 @@ func (r registryRouter) Chat(ctx context.Context, id string, cred gateway.Creden
 	cs, err := pv.Chat(ctx, cred, body)
 	return cs, true, err
 }
+
+// ImageGen 向上游发起一次生图（出口层按接口断言发现它）。
+//
+// # 为什么也走装配层（与 Chat 同一条理由）
+//
+// 出口层只有上游 ID，而 `ExtOf[ImageGenExt]` 要的是**能断言的 Provider 实例** ——
+// 那个实例在 Registry 里，本层才握有它。出口层因此不必 import 任何具体上游。
+//
+// # 三值返回的语义（与 Chat 一致的形状）
+//
+//	ok=false        该上游未注册 / 没实现 ImageGenExt → 出口层回 501
+//	err != nil      传输层失败（凭证取不到 / 网络）→ 出口层回 502
+//	否则            (响应体, 上游状态码) 原样回给调用方（含 4xx/5xx）
+//
+// ⚠ 传 uid 而不是完整凭证：生图用的 session 由上游自己按 uid 从它的凭证目录取
+// （`p.authByUID`）。核心的 Credential 投影里没有 session（只有 uid/nickname），
+// 所以这里给主键才是够的信息 —— 让出口层去拼凭证反而做不到。
+func (r registryRouter) ImageGen(ctx context.Context, id, uid string, body []byte) ([]byte, int, bool, error) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return nil, 0, false, nil
+	}
+	ext, ok := gateway.ExtOf[gateway.ImageGenExt](pv)
+	if !ok {
+		return nil, 0, false, nil
+	}
+	raw, status, err := ext.GenerateImage(ctx, uid, body)
+	return raw, status, true, err
+}
+
+// ImageModels 返回某上游声明的**生图模型**（出口层按接口断言发现它）。
+//
+// 与 Models 的区别：那条要账号才能拉目录，这条是上游的**静态声明**，
+// 所以没账号也能回答（`/v1/models` 因此永远能列出"这个上游支持生图"）。
+//
+// ok=false 表示该上游没实现 ImageModelExt（不参与生图目录）。
+func (r registryRouter) ImageModels(id string) ([]gateway.ImageModel, bool) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return nil, false
+	}
+	ext, ok := gateway.ExtOf[gateway.ImageModelExt](pv)
+	if !ok {
+		return nil, false
+	}
+	return ext.ImageModels(), true
+}

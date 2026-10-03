@@ -38,11 +38,30 @@ type Model struct {
 	ContextWindow int
 	// MaxOutputTokens 单次输出上限（token）。用于裁剪超限的 max_tokens。
 	MaxOutputTokens int
-	// Unavailable 上游对这个模型返回 404「该模型暂未开放」。
+	// Unavailable 上游在 **/chat/completions** 上对这个模型返回 404
+	//「该模型暂未开放」。
 	//
-	// 手册实测的两个生图模型就是这种状态。它们仍然留在表里（而不是删掉）：
-	// 用户看到 404 时能查到"这个是被上游自己下架的，不是我写错了 ID"，
-	// 这个区别在排错时很值钱。
+	// ⚠⚠ 这个字段**只**描述对话端点，不代表"这个模型不能用"。
+	//
+	// # 为什么必须说清这一点（实测纠正）
+	//
+	// 它的判据最初只有一条实测：「打 chat 端点，404」。那时网关也只有
+	// chat 一条出口，于是"chat 不可用"被记成了"不可用"。
+	//
+	// 但本上游有两个模型是**专用于生图**的，它们的 `modalities.output`
+	// 只有 `image`（见 Loomy 客户端 opencode.json），本来就不该走 chat：
+	//
+	//	POST /chat/completions  {"model":"doubao-seedream-5-lite"}  → 404 该模型暂未开放
+	//	POST /images/generations {"model":"doubao-seedream-5-lite"}  → 200 + 图片
+	//
+	// 两条都是实测（2026-10-03）。所以"能不能用"取决于**端点**，
+	// 这一个 bool 表达不了 —— 生图那一侧的事实由 `imageModelIDs` 记录
+	// （见 imagegen_ext.go），两者是**两个轴**：
+	//
+	//	Unavailable    "能不能走 chat"
+	//	imageModelIDs  "能不能走 images/generations"
+	//
+	// 判据：任何按 Unavailable 过滤的地方，都只在**对话**语境下过滤。
 	Unavailable bool
 }
 

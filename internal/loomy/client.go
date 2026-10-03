@@ -39,6 +39,11 @@ const DefaultBaseURL = "https://loomyad.xunfei.cn/api/v1"
 const (
 	ModelsPath = "/models"
 	ChatPath   = "/chat/completions"
+	// ImageGeneratePath 生图端点。
+	//
+	// ⚠ 与上面两条的区别：它是**唯一**能跑两个生图模型的端点
+	//（doubao-seedream-5-lite / qwen-image-3.0-pro 走 ChatPath 会 404）。
+	ImageGeneratePath = "/images/generations"
 )
 
 // maxErrorBody 读取上游错误体时的上限。
@@ -47,6 +52,17 @@ const (
 // 实现不必再截断）。这里是**我们自己**读上游响应的那一侧，必须自带上限：
 // 一个畸形的巨大错误体不该把网关的内存吃掉。
 const maxErrorBody = 1 << 20 // 1 MiB
+
+// maxImageRespBody 读取生图响应体的上限。
+//
+// 生图响应本身是**小 JSON**（实测 ~300 字节：图片在腾讯 COS 上，
+// 响应里只有 URL 与 points_consumed）。但两种情况下它会变大：
+//
+//	response_format=b64_json  图片被内联成 base64（2304x1728 约 3-4 MB）
+//	上游异常                  返回一个巨大的错误页面
+//
+// 8 MiB 覆盖前者（base64 膨胀后最长边图约 5 MB）且远小于会伤到网关的量。
+const maxImageRespBody = 8 << 20 // 8 MiB
 
 // respHeaderTimeout 等响应头的上限。
 //
@@ -285,6 +301,59 @@ func (c *Client) ChatStream(ctx context.Context, a *Auth, body []byte) (io.ReadC
 		return io.NopCloser(bytes.NewReader(raw)), resp.StatusCode, raw, nil
 	}
 	return resp.Body, resp.StatusCode, nil, nil
+}
+
+// ── 生图 ────────────────────────────────────────────────────────────────
+
+// GenerateImage 向上游发起一次生图，返回响应体与状态码。
+//
+// # 与 ChatStream 的两处不同（都是实测差异，不是风格选择）
+//
+//  1. **鉴权头两个都发**。client.go 上面记的"双轨鉴权"判据是"一个端点认一个头"，
+//     但生图端点实测**两个都认**，且 Loomy 官方客户端也是两个都发
+//     （其 image-generation-service.js 的注释："session 模式同时塞
+//     token + Authorization（兼容 Loomy iModel 两种入参）"）。
+//     这是唯一有实测背书的形态 —— 只发一个或许也能通，但没有证据。
+//
+//  2. **不再改写请求体**。对话路径要强制 stream=true 并裁剪 max_tokens
+//     （见 prepareBody），而生图请求体是 `{model,prompt,n,size,response_format}`，
+//     没有这些字段，硬套 prepareBody 只会把 body 弄坏。
+//
+// # 为什么状态码原样交回（包括 4xx/5xx）
+//
+// 上游的错误信封带 `type`/`code`/`metadata`（实测 404 时给出
+// `{"message":"该模型暂未开放","type":"not_found_error","code":404}`），
+// 对调用方的诊断价值高于网关自己重写的一句话。
+// 网关只在**传输层**失败（拿不到应答）时报 error。
+func (c *Client) GenerateImage(ctx context.Context, a *Auth, body []byte) ([]byte, int, error) {
+	if a == nil || strings.TrimSpace(a.Session) == "" {
+		return nil, 0, fmt.Errorf("loomy: 凭证缺少 session，无法生图")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.base()+ImageGeneratePath, bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, fmt.Errorf("loomy: 构造生图请求失败: %w", err)
+	}
+	// ⚠ 两个头都发（见方法注释）。先 applyChatAuth 装 Authorization，
+	// 再补 token —— 顺序无关，但两行并排更能看出"这里刻意发了两个"。
+	applyChatAuth(req.Header, a)
+	applyModelsAuth(req.Header, a)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("loomy: 生图请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 生图响应是小 JSON（图片在 COS 上，不在响应体里），但仍设上限
+	// 防止上游异常返回把内存吃满。8 MB 远大于任何正常响应。
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxImageRespBody))
+	if err != nil {
+		return nil, 0, fmt.Errorf("loomy: 读取生图响应失败: %w", err)
+	}
+	return raw, resp.StatusCode, nil
 }
 
 // ── 出站请求体改写 ──────────────────────────────────────────────────────
