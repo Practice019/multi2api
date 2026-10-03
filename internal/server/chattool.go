@@ -114,18 +114,35 @@ func (h *Handler) chatToolsOf(id string) []gateway.ChatTool {
 //
 //	① 装配层提供工具能力（本部署接了多上游）
 //	② 被路由到的上游确实有工具
-//	③ 请求里**没有** tools/tool_choice 字段
-//	④ 未被配置显式关闭
+//	③ 未被配置显式关闭
 //
-// # 为什么 ③ 是"客户端自己带工具就不接管"
+// # ⚠ 这里**曾经**有一条"客户端自带 tools 就不接管"，已删除
 //
-// 客户端自带 tools 说明它**懂**这个协议 —— 它期望拿到 tool_calls
-// 自己去执行（这是标准用法：agent 框架都这么干）。
-// 网关再插一脚替它执行，两边会打架：客户端收到的是"已经执行完的结果"，
-// 而它按自己的期待仍在等 tool_calls。
+// 那条判据写在"普通聊天客户端"的语境里，初衷是对的：客户端带 tools
+// 说明它懂协议、要自己驱动工具循环，网关再插一脚会两边打架。
 //
-// 所以：不带的（普通聊天客户端）→ 网关接管；带的（agent 客户端）→ 只转发。
-// 这条让两类客户端都能正常工作，且各自的行为都可预期。
+// 但它在 **agent 框架**（DSH / Claude Code / Cursor 这类）下**完全错误** ——
+// 因为那些客户端**每轮都带自己的工具**（bash / read / write …）。
+//
+// 后果：它们永远命中那条判据 → 网关一个工具都不注入 →
+// 模型没有 generate_image 可调 → 只能吐一段 SVG 源码或说"我画不了"。
+//
+// 用户观察到的"DSH 里生不了图"正是这条判据造成的 ——
+// 看起来像"DSH 判定该模型不能生图"，其实是网关主动不给了。
+//
+// 用户的要求（原话）：
+//
+//	"我又不希望在 DSH 注册那些工具，因为我需要完成自包含、自依赖。"
+//
+// 所以正确的边界不是"客户端带工具就整个不接管"，而是**按工具名分工**：
+//
+//	模型调客户端自己的工具（bash/read/…）→ 原样透传，客户端执行
+//	模型调网关注入的工具（generate_image/…）→ 网关自己执行，客户端无感
+//
+// 这样 agent 框架不必在配置里声明任何生图/搜索工具，
+// 它以为模型就是"直接回复了一段带图的 markdown"。
+//
+// 分工的实现见 runToolLoop 的 partitionToolCalls；重名去重见 injectTools。
 func (h *Handler) shouldRunToolLoop(providerID string, body []byte) (toolCapable, bool) {
 	if h.cfg.DisableChatTools {
 		return nil, false
@@ -137,65 +154,98 @@ func (h *Handler) shouldRunToolLoop(providerID string, body []byte) (toolCapable
 	if len(h.chatToolsOf(providerID)) == 0 {
 		return nil, false
 	}
-	if hasOwnTools(body) {
-		return nil, false
-	}
 	return tc, true
 }
 
-// hasOwnTools 报告请求体里是否**真的**带了工具。
+// existingToolNames 摘出请求体里**客户端已声明**的工具名集合。
 //
-// # 为什么不能只看"字段存在"
+// # 为什么需要它（不去重会真的坏掉）
 //
-// 有的客户端会显式发空容器：
+// agent 框架的工具名与我们的撞车概率很高 —— 尤其 `web_search`
+// 几乎是标配。工具列表里出现**重名**时上游会直接拒绝
+// （OpenAI 系返回 400：duplicate tool name），而那个错误看起来
+// 与"生图"毫无关系，排查时会绕远路。
 //
-//	{"tools":[]}            某些 SDK 初始化后就是空数组
-//	{"tool_choice":{}}      同理
+// 所以合并时以**客户端声明的为准**：它已经有 `web_search` 就不注入我们的
+// （它那个归它执行，模型照常调）。我们的工具是"补充"，不是"覆盖"。
 //
-// 那与"没带工具"是同一个意思 —— 客户端没有要自己驱动工具循环。
-// 若按"字段存在"判定，这些客户端就**永远拿不到自动生图**
-// （而它们的 JSON 看起来"带了 tools"，排查时极难看出原因）。
-//
-// 所以判据是"**非空**容器"：空数组 / 空对象 / null 都算没带。
-func hasOwnTools(body []byte) bool {
+// 返回 nil 表示客户端没带工具（parse 失败也返回 nil —— 畸形请求
+// 交给后续路径去报错，这里不因它而改变行为）。
+func existingToolNames(body []byte) map[string]bool {
 	var probe struct {
-		Tools      json.RawMessage `json:"tools"`
-		ToolChoice json.RawMessage `json:"tool_choice"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+			// 有的客户端用扁平形态（少见但合法）：{"name":"…","type":"…"}
+			Name string `json:"name"`
+		} `json:"tools"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
-		// body 不是 JSON（畸形请求）→ 交给后续的解析路径去报错。
-		// 这里返回 false 表示"不因这个判据而跳过工具循环"。
-		return false
+		return nil
 	}
-	return nonEmptyJSON(probe.Tools) || nonEmptyJSON(probe.ToolChoice)
+	if len(probe.Tools) == 0 {
+		return nil
+	}
+	names := make(map[string]bool, len(probe.Tools))
+	for _, t := range probe.Tools {
+		if n := strings.TrimSpace(t.Function.Name); n != "" {
+			names[n] = true
+			continue
+		}
+		if n := strings.TrimSpace(t.Name); n != "" {
+			names[n] = true
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
 }
 
-// nonEmptyJSON 报告一段原始 JSON 是否是"有内容的容器"。
+// injectTools 把我们声明的工具**并进**客户端已有的工具列表。
 //
-// 空数组 `[]`、空对象 `{}`、`null`、以及空白都算**空**。
-func nonEmptyJSON(raw json.RawMessage) bool {
-	s := strings.TrimSpace(string(raw))
-	switch s {
-	case "", "null", "[]", "{}":
-		return false
-	}
-	return true
-}
-
-// injectTools 把工具定义并进请求体。
+// # 为什么必须"合并"而不是"赋值"（第一版写成赋值，是真 bug）
 //
-// # 为什么是"并进"而不是"覆盖"
+// 第一版是 `obj["tools"] = wireTools` —— 那是**替换**。
+// 当时它不会出问题，只因为上游那条"客户端带 tools 就不接管"的判据
+// 挡住了所有带工具的客户端。判据一删，替换就会**抹掉 agent 框架的
+// 全部工具**（bash / read / write …）—— 模型再也执行不了任何命令，
+// 而现象是"DSH 突然变笨了"，与本功能毫无表面关联。
 //
-// 客户端没带 tools 才会走到这里（见 shouldRunToolLoop），
-// 所以实际上不会覆盖任何东西。写成 append 而不是赋值，是为了
-// 万一将来判据放宽，也不会静默丢掉客户端给的工具。
-func injectTools(body []byte, tools []gateway.ChatTool) ([]byte, error) {
+// # 为什么以客户端声明为准（重名不注入）
+//
+// agent 框架的工具名与我们的撞车概率很高（`web_search` 几乎是标配）。
+// 上游遇到重名工具会直接 400（duplicate tool name）——
+// 那个错误看起来与生图无关，排查时极难联想到。
+//
+// 所以：客户端已有的名字，我们不注入（它那个归它执行，模型照常调）。
+// 我们的工具是**补充**，不是**替代**。
+//
+// # 为什么不去动 stream
+//
+// 第一版在这里强制 `obj["stream"] = false`（因为循环内部要完整响应）。
+// 但"内部非流式"与"请求体写什么"是两件事：循环自己发的是非流式请求，
+// 不该去改**客户端**请求体里的 stream 字段 —— 那个字段还要用来决定
+// 最后以什么形态发射（见 runToolLoop 末尾）。写在这里会让
+// 后续读 body 判断 stream 的代码永远看到 false。
+func injectTools(body []byte, tools []gateway.ChatTool, existing map[string]bool) ([]byte, error) {
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil, err
 	}
-	wireTools := make([]any, 0, len(tools))
+
+	// 保留客户端已有的工具（原样，不解析不重构 —— 那是它的对象）。
+	merged := make([]any, 0, len(tools)+4)
+	if cur, ok := obj["tools"].([]any); ok {
+		merged = append(merged, cur...)
+	}
+
 	for _, t := range tools {
+		if existing[t.Name] {
+			// 客户端已经声明了同名工具 → 让它的生效，我们不插。
+			continue
+		}
 		fn := map[string]any{
 			"name":        t.Name,
 			"description": t.Description,
@@ -205,19 +255,48 @@ func injectTools(body []byte, tools []gateway.ChatTool) ([]byte, error) {
 			// 再解析一遍只会引入"我以为它长这样"的假设。
 			fn["parameters"] = json.RawMessage(t.Parameters)
 		}
-		wireTools = append(wireTools, map[string]any{
+		merged = append(merged, map[string]any{
 			"type":     "function",
 			"function": fn,
 		})
 	}
-	obj["tools"] = wireTools
-	// stream=false：循环内部必须拿完整响应（见文件头注释）。
-	obj["stream"] = false
+	obj["tools"] = merged
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// partitionToolCalls 按**归属**把模型发起的工具调用分成两组。
+//
+// # 这是"agent 框架零改动"的核心
+//
+//	ours   = 网关注入的工具 → 网关自己执行，**不告诉客户端**
+//	theirs = 客户端声明的工具 → 原样透传，客户端执行
+//
+// 两类可以在**同一次**响应里同时出现（模型一轮里既想画图又想跑命令），
+// 所以两件事都要做：
+//
+//	① 网关注入的工具自己执行完、结果回喂，客户端看不到这一步
+//	② 客户端自己的工具必须**原样返回** tool_calls 给它 —— 否则它
+//	   的执行循环卡住（它按自己的期待在等 tool_calls）
+//
+// 第一版没有这个分工：只要发现任何 tool_calls 就全部拿来执行，
+// 于是 agent 框架的工具名会被送到 ExecuteChatTool →
+// 返回"未知工具名"错误。对 DSH 来说就是它的 bash 永远不执行。
+//
+// 返回 (ours, theirs)。theirs 非空时调用方**必须**把这轮的 tool_calls
+// 原样交给客户端（见 runToolLoop 的 early-return）。
+func partitionToolCalls(calls []toolCall, mine map[string]bool) (ours, theirs []toolCall) {
+	for _, c := range calls {
+		if mine[c.Name] {
+			ours = append(ours, c)
+			continue
+		}
+		theirs = append(theirs, c)
+	}
+	return ours, theirs
 }
 
 // appendToolMessages 把"模型的 tool_calls + 工具结果"追加进消息历史。
@@ -274,24 +353,49 @@ type toolExecResult struct {
 	artifacts []gateway.Artifact
 }
 
+// toolCall 模型发起的一次工具调用。
+//
+// 用具名类型而不是匿名结构体：它现在会跨函数传递
+// （parseToolCalls → partitionToolCalls → execOneTool / 透传），
+// 匿名结构体做不到（两处写法必须逐字相同且无法复用方法）。
+type toolCall struct {
+	// ID 工具调用 id。tool 消息靠它回指对应的调用 —— 对不上上游会 400。
+	ID string
+	// Name 工具名。**决定归属**（是我们的还是客户端的）。
+	Name string
+	// Args 模型给的参数（原始 JSON）。
+	//
+	// ⚠ 它是 JSON **字符串**（OpenAI 协议里最反直觉的一处：
+	// arguments 字段的值本身是一段 JSON 文本）。原样带走由工具解析。
+	Args json.RawMessage
+}
+
 // parseToolCalls 从非流式响应的 message 里取出 tool_calls。
 //
 // 返回空切片表示"模型没调工具"（正常收尾）。
-func parseToolCalls(msg map[string]any) []struct {
-	ID   string
-	Name string
-	Args json.RawMessage
-} {
-	// ⚠ 两种形状都认 —— 见下方 toolCallsOf 的注释（漏认一种就是静默失败）。
+//
+// # ⚠ 这里有一个**静默失败**的陷阱（我踩过，务必保留这条注释）
+//
+// `wire.Aggregate` 把 tool_calls 放进 message 时用的是
+// **`[]map[string]any`**（见 wire/sse.go 的 `make([]map[string]any, …)`），
+// 而**不是** `[]any`。
+//
+// 我第一版断言 `.([]any)`，于是：
+//
+//	上游确实回了 tool_calls（37 KB 的流、finish_reason=tool_calls）
+//	聚合也成功（message["tool_calls"] 里躺着 1 个调用）
+//	**但断言失败 → 返回 0 个调用 → 循环判成"模型没调工具"→ 直接收尾**
+//
+// 表现是"客户端收到 finish_reason=tool_calls 但没有工具结果"——
+// 看起来像"上游不支持工具"，而真相只是一个类型写错了。
+//
+// 两种形状都认（见 toolCallsOf）。少认一种就是这条 bug。
+func parseToolCalls(msg map[string]any) []toolCall {
 	rawList := toolCallsOf(msg)
 	if len(rawList) == 0 {
 		return nil
 	}
-	out := make([]struct {
-		ID   string
-		Name string
-		Args json.RawMessage
-	}, 0, len(rawList))
+	out := make([]toolCall, 0, len(rawList))
 	for _, call := range rawList {
 		id, _ := call["id"].(string)
 		fn, _ := call["function"].(map[string]any)
@@ -300,16 +404,9 @@ func parseToolCalls(msg map[string]any) []struct {
 		}
 		name, _ := fn["name"].(string)
 		argStr, _ := fn["arguments"].(string)
-		out = append(out, struct {
-			ID   string
-			Name string
-			Args json.RawMessage
-		}{
+		out = append(out, toolCall{
 			ID:   id,
 			Name: name,
-			// arguments 是 JSON **字符串**（这是 OpenAI 协议里最反直觉的一处：
-			// 它在 JSON 里又编了一层）。原样带走，由工具自己解析 ——
-			// 解析失败也是工具的事（它要把"参数不合法"回给模型去修）。
 			Args: json.RawMessage(argStr),
 		})
 	}

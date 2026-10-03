@@ -102,34 +102,171 @@ func TestParseToolCallsExtractsFields(t *testing.T) {
 	}
 }
 
-// TestHasOwnTools 客户端自带 tools 时不该接管。
+// TestExistingToolNames 摘客户端已有的工具名（合并时以它为准）。
 //
-// # 为什么这条判据重要
+// # 为什么这条重要
 //
-// 客户端带 tools 说明它**懂协议**、要自己驱动工具循环（agent 框架都这么干）。
-// 网关再插一脚替它执行，两边会打架：客户端按自己的期待仍在等 tool_calls，
-// 却收到了"已经执行完的结果"。
+// agent 框架的工具名与我们的撞车概率很高（`web_search` 几乎是标配）。
+// 上游遇到**重名**工具会直接 400（duplicate tool name），
+// 而那个错误看起来与生图毫无关系，排查时会绕远路。
 //
-// 所以：不带的（普通聊天客户端）→ 网关接管；带的 → 只转发。
-func TestHasOwnTools(t *testing.T) {
+// 返回 nil 的情形也要对：没带工具、空数组、畸形 JSON。
+func TestExistingToolNames(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		body string
-		want bool
+		want []string
 	}{
-		{"只有 messages", `{"model":"m","messages":[]}`, false},
-		{"带 tools", `{"model":"m","tools":[{"type":"function"}]}`, true},
-		{"tool_choice 是空对象（等于没带）", `{"model":"m","tool_choice":{}}`, false},
-		{"tools 是 null（等于没带）", `{"model":"m","tools":null}`, false},
-		{"带 tool_choice", `{"model":"m","tool_choice":"auto"}`, true},
-		{"tools 是空数组（等于没带）", `{"model":"m","tools":[]}`, false},
-		{"非法 JSON", `{`, false},
+		{"没带 tools", `{"model":"m","messages":[]}`, nil},
+		{"空数组", `{"model":"m","tools":[]}`, nil},
+		{"畸形 JSON", `{`, nil},
+		{"嵌套形态（OpenAI 标准）", `{"tools":[{"type":"function","function":{"name":"bash"}}]}`, []string{"bash"}},
+		{"扁平形态", `{"tools":[{"name":"read","type":"function"}]}`, []string{"read"}},
+		{"多个", `{"tools":[{"function":{"name":"bash"}},{"function":{"name":"web_search"}}]}`, []string{"bash", "web_search"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := hasOwnTools([]byte(tc.body)); got != tc.want {
-				t.Errorf("hasOwnTools(%s) = %v，want %v", tc.body, got, tc.want)
+			got := existingToolNames([]byte(tc.body))
+			if len(got) != len(tc.want) {
+				t.Fatalf("得到 %d 个名字 %v，want %d 个 %v", len(got), got, len(tc.want), tc.want)
+			}
+			for _, w := range tc.want {
+				if !got[w] {
+					t.Errorf("缺名字 %q（得到 %v）", w, got)
+				}
 			}
 		})
+	}
+}
+
+// TestPartitionToolCalls 按归属把调用分成"我们的"与"客户端的"。
+//
+// # 这是"agent 框架零改动"的核心判据
+//
+//	我们的   → 网关自己执行，**不告诉客户端**
+//	客户端的 → 原样透传，客户端执行
+//
+// 第一版没有这个分工：只要发现任何 tool_calls 就全部拿来执行，
+// 于是 agent 框架的工具名被送到 ExecuteChatTool → "未知工具名"错误。
+// 对 DSH 来说就是它的 bash 永远不执行（而现象看起来像"工具坏了"）。
+func TestPartitionToolCalls(t *testing.T) {
+	mine := map[string]bool{"generate_image": true, "web_search": true}
+
+	t.Run("只有我们的", func(t *testing.T) {
+		ours, theirs := partitionToolCalls([]toolCall{
+			{ID: "1", Name: "generate_image"},
+		}, mine)
+		if len(ours) != 1 || len(theirs) != 0 {
+			t.Errorf("ours=%d theirs=%d，want 1/0", len(ours), len(theirs))
+		}
+	})
+	t.Run("只有客户端的", func(t *testing.T) {
+		ours, theirs := partitionToolCalls([]toolCall{
+			{ID: "1", Name: "bash"},
+		}, mine)
+		if len(ours) != 0 || len(theirs) != 1 {
+			t.Errorf("ours=%d theirs=%d，want 0/1", len(ours), len(theirs))
+		}
+	})
+	t.Run("混在一起（模型一轮里既想画图又想跑命令）", func(t *testing.T) {
+		ours, theirs := partitionToolCalls([]toolCall{
+			{ID: "1", Name: "bash"},
+			{ID: "2", Name: "generate_image"},
+			{ID: "3", Name: "read"},
+		}, mine)
+		if len(ours) != 1 {
+			t.Errorf("ours=%d，want 1（只有 generate_image）", len(ours))
+		}
+		if len(theirs) != 2 {
+			t.Errorf("theirs=%d，want 2（bash + read）", len(theirs))
+		}
+		if ours[0].Name != "generate_image" {
+			t.Errorf("ours[0] = %q", ours[0].Name)
+		}
+	})
+	t.Run("空输入", func(t *testing.T) {
+		ours, theirs := partitionToolCalls(nil, mine)
+		if len(ours) != 0 || len(theirs) != 0 {
+			t.Errorf("空输入应当两组都空")
+		}
+	})
+}
+
+// TestInjectToolsMerges 注入必须是**合并**，不能替换客户端的工具。
+//
+// # 这条是本次最关键的一条（第一版写成替换，是真 bug）
+//
+// 第一版是 `obj["tools"] = wireTools` —— 那是**替换**。
+// 当时它不出问题，只因为那条"客户端带 tools 就不接管"的判据
+// 挡住了所有带工具的客户端。判据一删，替换就会**抹掉 agent 框架的
+// 全部工具**（bash / read / write …）—— 模型再也执行不了任何命令，
+// 而现象是"DSH 突然变笨了"，与本功能毫无表面关联。
+func TestInjectToolsMerges(t *testing.T) {
+	in := []byte(`{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"bash","description":"DSH 自己的"}}]}`)
+	out, err := injectTools(in, []gateway.ChatTool{{
+		Name: "generate_image", Description: "生图",
+	}}, map[string]bool{"bash": true})
+	if err != nil {
+		t.Fatalf("注入失败: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("注入后不是合法 JSON: %v", err)
+	}
+	tools, _ := obj["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("工具数 = %d，want 2（客户端的 bash + 我们的 generate_image）—— "+
+			"少于 2 说明替换掉了客户端的工具，agent 框架会瘫痪", len(tools))
+	}
+	names := map[string]bool{}
+	for _, it := range tools {
+		m, _ := it.(map[string]any)
+		fn, _ := m["function"].(map[string]any)
+		if n, _ := fn["name"].(string); n != "" {
+			names[n] = true
+		}
+	}
+	if !names["bash"] {
+		t.Error("客户端的 bash 被抹掉了 —— 这正是替换 vs 合并的 bug")
+	}
+	if !names["generate_image"] {
+		t.Error("我们的 generate_image 没注入")
+	}
+}
+
+// TestInjectToolsSkipsDuplicateNames 重名时以客户端为准（不注入我们的）。
+//
+// 上游遇到重名工具会直接 400（duplicate tool name），
+// 而那个错误看起来与生图毫无关系。
+func TestInjectToolsSkipsDuplicateNames(t *testing.T) {
+	// 客户端已经有一个 web_search（agent 框架的标配）
+	in := []byte(`{"model":"m","tools":[{"type":"function","function":{"name":"web_search","description":"客户端自己的搜索"}}]}`)
+	out, err := injectTools(in, []gateway.ChatTool{
+		{Name: "web_search", Description: "我们的搜索"},
+		{Name: "generate_image", Description: "生图"},
+	}, map[string]bool{"web_search": true})
+	if err != nil {
+		t.Fatalf("注入失败: %v", err)
+	}
+	var obj map[string]any
+	_ = json.Unmarshal(out, &obj)
+	tools, _ := obj["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("工具数 = %d，want 2（bash 的那个 web_search + generate_image）", len(tools))
+	}
+	// web_search 只出现一次，且**是客户端那个**（描述为"客户端自己的搜索"）
+	count := 0
+	for _, it := range tools {
+		m, _ := it.(map[string]any)
+		fn, _ := m["function"].(map[string]any)
+		if fn["name"] == "web_search" {
+			count++
+			if fn["description"] != "客户端自己的搜索" {
+				t.Errorf("web_search 的 description = %v，want 客户端那个（重名应以客户端为准）", fn["description"])
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("web_search 出现 %d 次，want 1（重名会让上游 400）", count)
 	}
 }
 
@@ -143,7 +280,7 @@ func TestInjectToolsShape(t *testing.T) {
 		Name:        "generate_image",
 		Description: "生成图片",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]}`),
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("注入失败: %v", err)
 	}
@@ -170,13 +307,14 @@ func TestInjectToolsShape(t *testing.T) {
 	if _, ok := fn["parameters"]; !ok {
 		t.Error("缺 function.parameters（模型没法知道参数形状）")
 	}
-	// ② stream 被强制 false（循环内部要完整响应）
-	if v, ok := obj["stream"].(bool); !ok || v {
-		t.Errorf("stream = %v，want false —— 循环内部必须拿完整响应", obj["stream"])
-	}
-	// ③ 原有字段没被动过
+	// ② 原有字段没被动过
 	if obj["model"] != "m" {
 		t.Errorf("model 被改坏了: %v", obj["model"])
+	}
+	// ③ **不**动 stream：那个字段还要用来决定最后的发射形态。
+	//    （第一版在这里强制 stream=false，是错的 —— 见 injectTools 注释。）
+	if _, exists := obj["stream"]; exists {
+		t.Errorf("不该动 stream 字段（客户端没发它，注入也不该造一个）：%v", obj["stream"])
 	}
 }
 
