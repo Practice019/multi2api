@@ -45,7 +45,16 @@ backups/
 LOOP.md
 PLAN.md
 SPEC.md
-docs/
+# docs/ 整体是过程产物（进度日志、探究草稿），不入库。
+#
+# ⚠ 但**探究报告是交付物** —— 它记录了"上游有什么、我们怎么验证的"，
+# 是后续维护者唯一能查到的依据（代码注释里多处指向它）。
+# 所以这里用 `docs/*` 而不是 `docs/`：前者只忽略文件，
+# 允许下面用 `!` 把指定的报告重新包含进来。
+# （`docs/` 会连目录一起排除，那时内部文件**无法**用 `!` 挽回 —— git 的规则。）
+docs/*
+!docs/loomy-local-toolchain.md
+!docs/image-generation.md
 
 # 运行期产物
 # logs/ 是 start.bat 与网关控制台写出的日志（含本机绝对路径、账号昵称、
@@ -65,6 +74,12 @@ tasks/
 !README.md
 !SECURITY.md
 !CHANGELOG.md
+# 上游探究报告是**交付物**：它记录"上游有什么、怎么验证的"，
+# 是后续维护者唯一的依据（代码注释多处指向它）。
+# 注意：`*.md` 会连 docs/ 下的文件一起忽略，所以这里要点名豁免 ——
+# 上面对 docs/ 的 `docs/*` + `!docs/xxx.md` 是**不够的**（先命中哪条看顺序）。
+!docs/loomy-local-toolchain.md
+!docs/image-generation.md
 
 # ⚠ 被 go:embed 内嵌的 md 必须**显式**豁免 —— 它不是文档，是编译输入。
 #

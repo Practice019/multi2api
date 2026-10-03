@@ -222,6 +222,12 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), apiKey: cfg.APIKey}
 	registerCatalogHost(h) // 让包级 ModelCatalog/ModelCatalogState 能找到本实例的缓存
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// 生图出口（OpenAI Images API 形状）。
+	//
+	// 与 chat 同一条鉴权（同一个 Bearer）：出口层多一条路径不该多一套凭据
+	// —— 调用方已经把 api_key 配在 chat 上了，生图再要一个会让人以为
+	// 这是两个服务。额度/限速也复用同一套 apikey 判定。
+	h.mux.HandleFunc("POST /v1/images/generations", h.withAuth(h.imagesGenerations))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	// 单数别名：部分客户端/探针按 /v1/model 探测，与 /v1/models 同源同响应。
 	h.mux.HandleFunc("GET /v1/model", h.withAuth(h.models))
@@ -605,6 +611,92 @@ func (h *Handler) modelList() []map[string]any {
 		for _, mi := range infos {
 			out = append(out, prefixed(h.entryOf(mi.ID, int64(mi.ContextWindow), int64(mi.MaxOutputTokens), h.ownedByFor(id)), id))
 		}
+	}
+
+	// 3. **生图模型**（默认上游 + 其余上游）。
+	//
+	// # 为什么要单独一步（它们不在上面的目录里）
+	//
+	// 上游的 `/models` 目录**不含**两个生图模型，或者含了也被对话语境的
+	// 过滤逻辑剔除（见 loomy/models.go 的 Unavailable 注释：那个标记
+	// 只说明"不能走 chat"）。而 `/v1/images/generations` 恰恰只能用它们 ——
+	// 不进目录，调用方就不知道能生图、也不知道该填哪个 model。
+	//
+	// 用接口断言发现可选能力（与 providerIDs 同一范式）：不实现
+	// ImageModelExt 的上游在这里被静默跳过，行为与改造前一致。
+	imageIDs := append([]string{def}, h.otherProviders(def)...)
+	for _, id := range imageIDs {
+		for _, im := range h.imageModelsOf(id) {
+			e := h.entryOf(im.ID, 0, 0, h.ownedByFor(id))
+			// 标出生图能力：调用方据此判断"这个模型要用
+			// /v1/images/generations，不是 chat/completions"。
+			// 非标准字段（OpenAI 没有这个概念），但**不标就无法区分**
+			// —— 目录里两个模型看名字都知道是生图，但程序不该靠名字猜。
+			e["capabilities"] = []string{"image_generation"}
+			if id != "" {
+				out = append(out, prefixed(e, id))
+				continue
+			}
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// imageModelsOf 问装配层要某上游声明的生图模型。
+//
+// 与 providerIDs() 同一范式（可选接口断言）：没实现 ImageModelExt
+// 或本部署没接线时返回 nil，调用方静默跳过。
+func (h *Handler) imageModelsOf(id string) []gateway.ImageModel {
+	if h.cfg.Provider == nil {
+		return nil
+	}
+	lookup, ok := h.cfg.Provider.(interface {
+		ImageModels(id string) ([]gateway.ImageModel, bool)
+	})
+	if !ok {
+		return nil
+	}
+	list, ok := lookup.ImageModels(id)
+	if !ok {
+		return nil
+	}
+	return list
+}
+
+// imageModelEntries 把某上游声明的生图模型编成目录条目。
+//
+// # 为什么两条路径都要调它（单上游 / 多上游）
+//
+// 生图模型**不在**上游的对话目录里（它们走 /chat/completions 会 404，
+// 见 loomy/models.go 的 Unavailable 注释）。所以无论部署是单上游还是多上游，
+// 都必须在目录里**补一次** —— 漏了任何一条路径，那种部署下
+// `/v1/images/generations` 就是"端点在、但没人知道该填哪个 model"。
+//
+// id 为空串表示"不带前缀"（单上游模式）；非空时加 `<id>/` 前缀
+// （与其余条目一致：前缀是网关的路由记号）。
+func (h *Handler) imageModelEntries(id, owned string) []map[string]any {
+	list := h.imageModelsOf(id)
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, im := range list {
+		e := h.entryOf(im.ID, 0, 0, owned)
+		// 标出生图能力：调用方据此知道这个模型要走
+		// /v1/images/generations 而不是 chat/completions。
+		//
+		// 为什么不靠名字猜（"seedream"/"image" 看起来就像生图）：
+		// 名字是上游可以随时改的展示字符串，而这是**能力声明**。
+		// 用名字判断的代码在上游改名那天会静默错。
+		e["capabilities"] = []string{"image_generation"}
+		if name := strings.TrimSpace(im.Name); name != "" {
+			e["name"] = name
+		}
+		if id != "" {
+			e = prefixed(e, id)
+		}
+		out = append(out, e)
 	}
 	return out
 }
