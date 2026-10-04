@@ -116,6 +116,25 @@ func newChatStatsReaderSince(r io.Reader, since time.Time) *chatStatsReader {
 	return &chatStatsReader{br: bufio.NewReaderSize(r, 64*1024), start: since}
 }
 
+// SetReader 把底层流换成 rc（nil 时以空流占位）。
+//
+// # 为什么需要它（工具循环的场景）
+//
+// 工具循环要先建统计器、**之后**才拿到上游流（每一轮一个流）。
+// 用一个"可换底层流"的包装器，就能让统计逻辑与普通路径**共用同一份**
+// （而不是在工具循环里重写一遍 usage 解析 —— 那份知识只该有一个实现）。
+//
+// ⚠ 只在**还没读过任何数据**时安全。工具循环每轮换一次流，而每轮的
+// 统计要累积（TTFB 只记一次、tokens 用最后一轮的值）—— 所以换流时
+// 刻意**不重置** seen/tokens/usage，让它们跨轮累积。
+func (s *chatStatsReader) SetReader(r io.Reader) {
+	if r == nil {
+		r = strings.NewReader("")
+	}
+	s.br = bufio.NewReaderSize(r, 64*1024)
+	s.pend = nil
+}
+
 // TTFB 返回首个 data 帧到达耗时；无帧时为 0。
 func (s *chatStatsReader) TTFB() time.Duration { return s.ttfb }
 

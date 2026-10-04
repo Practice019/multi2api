@@ -38,6 +38,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/wire"
@@ -141,7 +142,16 @@ type roundOutcome struct {
 //
 // 与非流式那条（runToolLoop）的区别：**不预先把整轮缓冲**，
 // 而是逐帧转发，只在模型确实要调我们的工具时才拦下相关帧。
-func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, tools []gateway.ChatTool) (bool, error) {
+// 返回 (done, stats, err)。stats 供调用方写进 chatStat —— 这条路径绕过了
+// chatStatsReader，统计必须靠自己回传（见 chatstat.go 的文件头）。
+func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, tools []gateway.ChatTool) (bool, *toolLoopStats, error) {
+	// TTFB 起点必须是**请求进入 handler 的时刻**（p.start），
+	// 不能在这里 time.Now() —— 那会少算鉴权/选号/建连的开销，把 TTFB 报小。
+	since := p.start
+	if since.IsZero() {
+		since = time.Now()
+	}
+	stats := newToolLoopStats(since)
 	// 网关注入的工具名集合 —— 决定"这个调用归谁"。
 	mine := make(map[string]bool, len(tools))
 	for _, t := range tools {
@@ -150,16 +160,16 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 
 	body, err := injectTools(p.body, tools, existingToolNames(p.body))
 	if err != nil {
-		return false, fmt.Errorf("注入工具失败: %w", err)
+		return false, stats, fmt.Errorf("注入工具失败: %w", err)
 	}
 
 	sw := newSSEWriter(w)
 	collected := make([]gateway.Artifact, 0)
 
 	for round := 1; round <= maxToolRounds; round++ {
-		out := h.consumeRound(sw, p.providerID, p.uid, body, mine)
+		out := h.consumeRound(sw, p.providerID, p.uid, body, mine, stats)
 		if out.err != nil {
-			return false, out.err
+			return false, stats, out.err
 		}
 		if out.handedOff {
 			// 客户端的工具，已原样透传 → 网关收手，让它自己驱动。
@@ -169,7 +179,7 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 			// "这轮交给客户端了"就丢掉。
 			emitArtifactsAsText(sw, collected)
 			sw.done()
-			return true, nil
+			return true, stats, nil
 		}
 		if !out.takeOver {
 			// 纯文字回复，已经逐帧流出去了 —— 这正是本次修复的目标。
@@ -180,20 +190,20 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 			// （我第一版就是漏了这里，实测才发现图片 markdown 缺失。）
 			emitArtifactsAsText(sw, collected)
 			sw.done()
-			return true, nil
+			return true, stats, nil
 		}
 
 		// 模型调用了我们的工具：执行它们，把结果回喂，进入下一轮。
 		resp, aerr := wire.Aggregate(strings.NewReader(out.bufferedSSE))
 		if aerr != nil {
-			return false, fmt.Errorf("聚合工具调用失败: %w", aerr)
+			return false, stats, fmt.Errorf("聚合工具调用失败: %w", aerr)
 		}
 		msg := firstMessage(resp)
 		calls := parseToolCalls(msg)
 		if len(calls) == 0 {
 			// 不该发生（out.takeOver 就代表看到了 tool_calls）。真发生了
 			// 说明聚合结果与判定不一致 —— 明确报错，不要静默当成正常回复。
-			return false, fmt.Errorf("判定为工具调用但聚合后取不到 tool_calls")
+			return false, stats, fmt.Errorf("判定为工具调用但聚合后取不到 tool_calls")
 		}
 
 		// 保活：工具执行期间不写任何字节，先发一个注释帧。
@@ -207,14 +217,14 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 
 		var obj map[string]any
 		if jerr := json.Unmarshal(body, &obj); jerr != nil {
-			return false, fmt.Errorf("工具循环内解析请求体失败: %w", jerr)
+			return false, stats, fmt.Errorf("工具循环内解析请求体失败: %w", jerr)
 		}
 		if aerr := appendToolMessages(obj, msg, results); aerr != nil {
-			return false, aerr
+			return false, stats, aerr
 		}
 		body, err = json.Marshal(obj)
 		if err != nil {
-			return false, fmt.Errorf("工具循环内重编码请求体失败: %w", err)
+			return false, stats, fmt.Errorf("工具循环内重编码请求体失败: %w", err)
 		}
 	}
 
@@ -229,11 +239,11 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 	if nerr == nil {
 		// mine 传空：**所有**工具调用都视为"不是我们的" → consumeRound
 		// 会把它们原样透传（不会误拦）。这一步的目标只是拿一句文字总结。
-		out := h.consumeRound(sw, p.providerID, p.uid, noTools, nil)
+		out := h.consumeRound(sw, p.providerID, p.uid, noTools, nil, stats)
 		if out.err == nil {
 			emitArtifactsAsText(sw, collected)
 			sw.done()
-			return true, nil
+			return true, stats, nil
 		}
 	}
 
@@ -241,7 +251,7 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 	//（图片已经在 collected 里，丢了它用户就白花积分了）。
 	emitArtifactsAsText(sw, collected)
 	sw.done()
-	return true, nil
+	return true, stats, nil
 }
 
 // consumeRound 消费一轮上游流，边读边决定"转发 / 拦下"。
@@ -262,7 +272,7 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 //
 // 回放是合法的：客户端本来就要把 tool_calls 的 delta 累积起来，
 // 晚几个毫秒到不影响正确性。
-func (h *Handler) consumeRound(sw *sseWriter, providerID, uid string, body []byte, mine map[string]bool) roundOutcome {
+func (h *Handler) consumeRound(sw *sseWriter, providerID, uid string, body []byte, mine map[string]bool, stats *toolLoopStats) roundOutcome {
 	var out roundOutcome
 
 	rc, status, herr := h.chatStreamOnce(uid, body)
@@ -283,7 +293,10 @@ func (h *Handler) consumeRound(sw *sseWriter, providerID, uid string, body []byt
 		return out
 	}
 
-	sc := wire.NewFrameScanner(rc)
+	// ⚠ 把上游流包进统计 reader —— 这样 TTFB/tokens/usage 与普通路径
+	// **同一份实现**读出来（不在这里重写 usage 解析）。
+	// 用户报过"TTFB/tok/tok/s 三列全空"，根因就是这条路径绕过了统计。
+	sc := wire.NewFrameScanner(stats.wrap(rc))
 	var buf strings.Builder
 	inToolCalls := false
 	handedOff := false
