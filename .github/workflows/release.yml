@@ -2,16 +2,44 @@ name: Release
 
 # 打 v* tag 时自动构建多平台二进制并挂到 GitHub Release。
 #
-# 为什么在 CI 里构建而不是本机编译后上传：
-#   1. 干净环境 —— 构建产物不含作者本机的路径 / 用户名 / go module 缓存路径
+# # 为什么在 CI 里构建而不是本机编译后上传
+#
+#   1. 干净环境 —— 产物不含作者本机的路径 / 用户名 / go module 缓存路径
 #      （实测：不加 -trimpath 时二进制里会有 C:/Users/<name>/go/pkg/mod/...）
 #   2. 可复现 —— 任何人 fork 后打 tag 都能得到同构产物
-#   3. 交叉编译 —— 一台机器出三平台产物，无需本地装多套工具链
+#   3. 交叉编译 —— 一台机器出五平台产物，无需本地装多套工具链
+#   4. **唯一来源** —— 见下
 #
-# 产物：
-#   wb2api-server-windows-amd64.zip   <- 含 exe + config.example.json + start.bat
-#   wb2api-server-linux-amd64.tar.gz  <- 含可执行文件 + config.example.json
-#   附 SHA256SUMS.txt 供校验
+# # 为什么强调"唯一来源"（v1.7.0 踩过的坑）
+#
+# v1.7.0 的 Release 上有 **7 个**资产，但实际只有 5 个平台 ——
+# 因为两套命名并存：
+#
+#   CI 编的：  wb2api-server-windows-amd64.zip
+#              wb2api-server-linux-amd64.tar.gz
+#   本机编的： wb2api-server-v1.7.0-windows-amd64.zip
+#              wb2api-server-v1.7.0-linux-amd64.zip
+#              （还有 linux-arm64 / darwin-amd64 / darwin-arm64）
+#
+# 其中 windows-amd64 与 linux-amd64 **各重复了一次**，且命名风格还不一致
+# （一个带版本号、一个不带；一个用 tar.gz、一个用 zip）。
+# 下载的人分不清该拿哪个，两个文件的内容也可能来自不同 commit。
+#
+# 所以现在的约定是：
+#
+#   **所有平台都由本 workflow 出，本机不再手工上传任何产物。**
+#   命名统一为 `wb2api-server-<goos>-<goarch>.<zip|tar.gz>`（不带版本号 ——
+#   版本信息在 Release tag 与 zip 内的二进制里，文件名带版本号只会让
+#   "同一个 tag 重发"产生两个名字）。
+#
+# # 产物
+#
+#   wb2api-server-windows-amd64.zip      含 exe + config.example.json + start.bat
+#   wb2api-server-linux-amd64.tar.gz     含可执行文件 + config.example.json
+#   wb2api-server-linux-arm64.tar.gz
+#   wb2api-server-darwin-amd64.tar.gz
+#   wb2api-server-darwin-arm64.tar.gz
+#   SHA256SUMS.txt                       上面五者的校验和（合并成一份）
 on:
   push:
     tags: ['v*']
@@ -21,19 +49,72 @@ permissions:
   contents: write         # 需要写 Release
 
 jobs:
+  # 先过质量门禁：坏的代码不该被做成 Release 产物。
+  #
+  # 单独一个 job（而不是塞进 matrix）的理由：让它在**所有**平台构建之前
+  # 跑一次就够。放进 matrix 会跑五遍（浪费额度），且失败的信号被埋在
+  # 五个 job 的输出里。
+  verify:
+    name: verify before packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      # 与 ci.yml 保持一致（不跑 -race：那一步在 ci.yml 里是 advisory）。
+      - name: Build / vet / test
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^$' || true)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
   build:
     name: build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: verify
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
+          # archive 只分两种：Windows 用 zip（双击即用），其余用 tar.gz。
+          # 不按平台逐个写 zip —— 那是无谓的差异，且让"该怎么解压"
+          # 变成一件要查文档的事。
           - goos: windows
             goarch: amd64
             ext: .exe
             archive: zip
           - goos: linux
             goarch: amd64
+            ext: ''
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ''
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            ext: ''
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
             ext: ''
             archive: tar.gz
     steps:
@@ -44,19 +125,11 @@ jobs:
           go-version: '1.22'
           cache: true
 
-      # 发布前先过一遍质量门禁：坏的代码不该被做成 Release 产物。
-      # 与 ci.yml 保持一致的三件套，但这里不跑 -race（该步骤是 advisory）。
-      - name: Verify before packaging
-        run: |
-          go build ./...
-          go vet ./...
-          go test ./... -count=1
-
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: '0'          # 纯静态，产物可丢到任意同级 Linux 上跑
+          CGO_ENABLED: '0'          # 纯静态，产物可丢到任意同级系统上跑
         run: |
           # -trimpath 必须保留：去掉本机绝对路径与 module 缓存路径
           # -s -w 去掉符号表与 DWARF，体积约减小 30%
@@ -70,7 +143,9 @@ jobs:
           mkdir -p "pkg/$PKG"
           cp "dist/wb2api-server${{ matrix.ext }}" "pkg/$PKG/"
           cp config.example.json "pkg/$PKG/"
-          # Windows 包额外带上 start.bat（双击即用）
+          # Windows 包额外带上 start.bat（双击即用）。
+          # 其它平台不带：那些平台的用户习惯自己写启动脚本，
+          # 塞一个 .sh 进去反而要处理执行权限。
           if [ "${{ matrix.goos }}" = "windows" ]; then
             cp start.bat "pkg/$PKG/"
           fi
@@ -81,11 +156,12 @@ jobs:
             tar czf "../$PKG.tar.gz" "$PKG"
           fi
           cd ..
+          echo "--- 产物 ---"
           ls -la
 
       - name: Checksums
         run: |
-          # 每个 matrix job 只产出自己那一种归档（windows→zip / linux→tar.gz），
+          # 每个 matrix job 只产出自己那一种归档（见上面的 archive 字段），
           # 所以这里不能同时 glob 两种扩展名 —— 缺的那种会被 bash 当成
           # "No such file or directory" 直接失败。
           # 改用 find 只收集实际存在的文件。
@@ -132,7 +208,9 @@ jobs:
           # Release 可能已被人工创建（本仓库习惯：先建带说明的 Release，
           # 再补资产）。存在就 upload --clobber，不存在就 create。
           #
-          # 只上传归档与合并后的校验和 —— 列目录避免把多余文件带上去。
+          # ⚠ `--clobber` 只覆盖**同名**资产。若历史上存在另一套命名的
+          # 资产（v1.7.0 就同时有带版本号与不带版本号的两套），
+          # 它们不会被清掉 —— 那种历史残留由下一步处理。
           cd artifacts
           ASSETS=$(find . -maxdepth 1 \( -name '*.zip' -o -name '*.tar.gz' -o -name 'SHA256SUMS.txt' \) -printf '%f\n' | sort)
           echo "将上传："
@@ -146,5 +224,41 @@ jobs:
             echo "$ASSETS" | xargs gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "WorkBuddy2API $TAG" \
-              --notes "自动构建产物（Windows / Linux amd64）。详见仓库 README。"
+              --notes "自动构建产物（Windows / Linux / macOS，amd64 + arm64）。详见仓库 README。"
           fi
+
+      - name: Prune stale assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # 删掉"不该由本 workflow 产出"的资产残留。
+        #
+        # # 为什么要这一步（v1.7.0 的教训）
+        #
+        # 上一版的产物来自两处：本机手工编的 5 个（文件名带版本号）
+        # + CI 的 2 个。于是 Release 上有 7 个资产、两个平台重复。
+        # 那些手工产物在后续 tag 上不会重现，但它们在 v1.7.0 上会一直
+        # 留着，让下载的人分不清哪个才是这个 tag 的产物。
+        #
+        # 判据：资产名必须匹配本 workflow 的命名规范。
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME}"
+          echo "检查 $TAG 上的资产是否符合命名规范…"
+          # 允许的名字：wb2api-server-<os>-<arch>.<zip|tar.gz> 与 SHA256SUMS.txt
+          STALE=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' \
+            | grep -Ev '^wb2api-server-(windows|linux|darwin)-(amd64|arm64)\.(zip|tar\.gz)$' \
+            | grep -v '^SHA256SUMS\.txt$' || true)
+          if [ -z "$STALE" ]; then
+            echo "没有残留资产。"
+            exit 0
+          fi
+          echo "发现命名不符的资产（可能来自旧的手工上传）："
+          echo "$STALE"
+          echo "$STALE" | while read -r name; do
+            [ -z "$name" ] && continue
+            echo "删除 $name"
+            gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes
+          done
+          echo "清理完成。剩余资产："
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
