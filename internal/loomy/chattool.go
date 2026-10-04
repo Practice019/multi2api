@@ -194,9 +194,20 @@ func (p *Provider) execGenerateImage(ctx context.Context, uid string, args json.
 		}, nil
 	}
 
+	// ⚠ 注意：URL 的**裸形式转换已经在 GenerateImage 里做过了**
+	//（见 imagedisplay_rewrite.go 的文件头）。
+	//
+	// 我第一版在**这里**也做了一遍 —— 于是同一个 URL 被探测两次，
+	// 而且两处各有一份"怎么取展示 URL"的判断（典型的两份实现）。
+	// 现在只有 GenerateImage 那一处负责改写，这里只负责**读结果**：
+	//
+	//	url         展示用（裸形式；探测失败时是原签名 URL）
+	//	url_signed  原始签名 URL（兜底）
 	var resp struct {
 		Data []struct {
-			URL string `json:"url"`
+			URL       string `json:"url"`
+			URLSigned string `json:"url_signed"`
+			URLIsBare bool   `json:"url_is_bare"`
 		} `json:"data"`
 		PointsConsumed any `json:"points_consumed"`
 	}
@@ -207,20 +218,18 @@ func (p *Provider) execGenerateImage(ctx context.Context, uid string, args json.
 		}, nil
 	}
 
-	rawURL := resp.Data[0].URL
+	display := resp.Data[0].URL
+	usedBare := resp.Data[0].URLIsBare
+	// 兜底：万一改写那层没给出 url_signed（旧响应/探测失败），
+	// 就用展示 URL 自己 —— 至少有一个能用的链接。
+	rawURL := resp.Data[0].URLSigned
+	if rawURL == "" {
+		rawURL = display
+	}
 	points := ""
 	if resp.PointsConsumed != nil {
 		points = fmt.Sprintf("（消耗 %v 积分）", resp.PointsConsumed)
 	}
-
-	// 上游给的是 COS **签名** URL，而它对 HEAD 请求必然 403（见
-	// imagedisplay.go 的实测记录）—— 预览器一探测就失败，用户看到
-	// "图片无法预览"。这里探一下裸形式是否可用（bucket 公开读的话可用），
-	// 可用就换成裸的（HEAD/GET 都通、不过期、markdown 里也没有 & 和 ;）。
-	//
-	// ⚠ 探测失败**不报错**：退回签名 URL，它 GET 仍可用 ——
-	// 比"整个工具失败"好得多。
-	display, usedBare := displayImageURL(ctx, p.imageProbeClient(), rawURL)
 
 	return gateway.ChatToolResult{
 		OK: true,
