@@ -1127,10 +1127,32 @@ func main() {
 		log.Printf("猫猫旅行自动领奖已关闭（admin.travel_auto_claim=false），仅手动领奖")
 	}
 
+	// 超时设置：**刻意不设 WriteTimeout**。
+	//
+	// # 为什么不能设 WriteTimeout（本处最容易做错的地方）
+	//
+	// 它的语义是"从读完请求头到写完响应的总时限"。而本项目的主力接口
+	// 是 SSE（对话流式），实测的正常时长远超任何"看起来合理"的值：
+	//
+	//	流式搜索      35.4s（569 帧）
+	//	流式生图      25-30s（工具执行期间只有保活注释帧）
+	//	工具循环最长   3 轮 × 5 分钟 = 15 分钟
+	//
+	// 设 60s 会直接掐断上面每一类正常请求，而且是"短请求都好、长请求
+	// 偶发中断"的形态 —— 极难归因到超时上。
+	//
+	// 逐请求的超时由 handler 自己的 ctx 管（工具循环已接请求 ctx）：
+	// 那种超时取消的是**上游请求**，会返回正经的错误，而不是静默断连。
+	idleTimeout, maxHeaderBytes := server.ServerTimeouts()
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           h,
 		ReadHeaderTimeout: 30 * time.Second,
+		// IdleTimeout keep-alive 空闲连接回收。不设的话每个空闲连接
+		// 一直占着 fd 与 goroutine，慢速客户端攒多了会把资源耗光。
+		IdleTimeout: idleTimeout,
+		// MaxHeaderBytes 请求头上限（显式写出来让"考虑过"可见）。
+		MaxHeaderBytes: maxHeaderBytes,
 	}
 	go func() {
 		<-ctx.Done()

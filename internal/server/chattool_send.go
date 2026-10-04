@@ -35,7 +35,7 @@ const toolExecTimeout = 5 * time.Minute
 //
 // 返回 (响应字节, 状态码, error)。状态码 >= 400 时响应字节是**上游的错误体**
 // （原样带回，交给调用方分类 —— 与 chatVia 的契约一致）。
-func (h *Handler) chatOnceNonStream(uid string, body []byte, stats *toolLoopStats) ([]byte, int, error) {
+func (h *Handler) chatOnceNonStream(reqCtx context.Context, uid string, body []byte, stats *toolLoopStats) ([]byte, int, error) {
 	if h.cfg.Provider == nil {
 		return nil, 0, fmt.Errorf("chatOnceNonStream: 未接线（cfg.Provider 为 nil）")
 	}
@@ -127,7 +127,7 @@ func (h *Handler) credentialFor(providerID, uid string) (gateway.Credential, boo
 //
 // 与 chatOnceNonStream 成对：那个读全（聚合用），这个不读（逐帧转发用）。
 // 工具循环的流式路径必须用这个 —— 用那个就等于把流式体验丢了。
-func (h *Handler) chatStreamOnce(uid string, body []byte) (io.ReadCloser, int, error) {
+func (h *Handler) chatStreamOnce(reqCtx context.Context, uid string, body []byte) (io.ReadCloser, int, error) {
 	if h.cfg.Provider == nil {
 		return nil, 0, fmt.Errorf("chatStreamOnce: 未接线（cfg.Provider 为 nil）")
 	}

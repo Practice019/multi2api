@@ -22,6 +22,18 @@ type toolLoopParams struct {
 	body       []byte
 	// stream 客户端是否要事件流（决定最后的发射形态）。
 	stream bool
+	// ctx 本次 HTTP 请求的上下文（带 client IP、随客户端断连取消）。
+	//
+	// # 为什么必须传进来（原来用的是 context.Background()）
+	//
+	// 客户端断开时 r.Context() 会被取消。工具循环若不接这个 ctx：
+	//
+	//	客户已经走了 → 生图照跑满 5 分钟 → **积分照扣**
+	//
+	// 也就是说用户取消了他以为取消了的请求，钱还是花了。
+	// 这类"取消不生效"的代价是钱，不是体验，所以不能省。
+	ctx context.Context
+
 	// start 请求进入 handler 的时刻 —— TTFB 的计时起点。
 	//
 	// 必须由调用方给（而不是循环自己 time.Now()）：TTFB 的语义是
@@ -78,7 +90,7 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, *t
 		// ⚠ 读上游时穿过 stats —— 非流式这一轮也是整段 SSE，
 		// 让 chatStatsReader 读一遍，TTFB/tokens/usage 就齐了。
 		// （用户报过日志三列全空，根因就是这条路径没接统计。）
-		raw, status, herr := h.chatOnceNonStream(p.uid, body, stats)
+		raw, status, herr := h.chatOnceNonStream(p.ctx, p.uid, body, stats)
 		if herr != nil {
 			return false, stats, herr
 		}
