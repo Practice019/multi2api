@@ -388,7 +388,9 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if ar.apikeyID != "" {
 			r = r.WithContext(context.WithValue(r.Context(), apikeyCtxKey, ar.apikeyID))
 		}
-		next(w, r)
+		// panic → 可诊断的 500（而不是静默断连）。见 harden.go 的文件头。
+		// 放在 withAuth 里而不是各个注册点：加新端点时不会漏。
+		h.panicRecovery(next)(w, r)
 	}
 }
 
@@ -1385,6 +1387,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					body:       outBody,
 					stream:     true,
 					start:      st.start,
+					ctx:        ctx,
 				}, h.chatToolsOf(reqProvider))
 			} else {
 				done, loopStats, werr = h.runToolLoop(w, toolLoopParams{
@@ -1393,9 +1396,36 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					uid:        acct.UID,
 					body:       outBody,
 					stream:     false,
+					ctx:        ctx,
 				})
 			}
 			if werr != nil {
+				// ── 已写出响应 → **绝不能**换号重试 ──
+				//
+				// 流式路径是边读边写的。一旦写过字节：
+				//
+				//	状态码收不回来（已发 200）
+				//	已发内容收不回来
+				//
+				// 此时换号重试会往**同一个** ResponseWriter 再写一套 SSE，
+				// 客户端收到两段交错的事件流（协议损坏、内容重复）。
+				//
+				// 所以这是"只能收尾"的收场：记日志 + 保持已发内容不变。
+				// 对比之下"未写过"才是可重试的，那种情况照旧换号。
+				var committed *ErrResponseCommitted
+				if errors.As(werr, &committed) {
+					log.Printf("chat tools: 响应已提交，停止重试 uid=%s provider=%s: %v",
+						acct.UID, reqProvider, committed.Cause)
+					// 账号不算失败：这轮错误是"上游在后续轮次回了 400"，
+					// 而非凭证/额度问题 —— 计失败会误伤一个健康的账号。
+					h.cfg.Pool.NoteSuccess(acct.UID)
+					if sessKey != "" && h.cfg.Session != nil {
+						h.cfg.Session.Bind(sessKey, acct.UID)
+					}
+					loopStats.applyTo(st)
+					st.status = http.StatusOK
+					return
+				}
 				// 循环内的硬失败（注入失败/上游连续报错）：
 				// 分类后按换号处理，与普通 chat 路径同一条。
 				lastErr = werr

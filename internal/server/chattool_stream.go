@@ -122,6 +122,36 @@ func (s *sseWriter) done() {
 	_ = s.raw("data: [DONE]\n\n")
 }
 
+// wrapIfCommitted 把"已写过响应"的错误包成 ErrResponseCommitted。
+//
+// 未写过时原样返回 —— 那种情况换号重试是正确动作。
+func wrapIfCommitted(out roundOutcome, sw *sseWriter) error {
+	if out.err == nil {
+		return nil
+	}
+	if out.committed || (sw != nil && sw.committed) {
+		return &ErrResponseCommitted{Cause: out.err}
+	}
+	return out.err
+}
+
+// finalize 刷新 committed 后返回自己。
+//
+// # 为什么要有这个统一出口
+//
+// consumeRound 有十余条 return 路径，每条返回时"是否已写过字节"都可能
+// 已经改变。逐条手写 `out.committed = sw.committed` 就是十余处可能漏掉
+// 的地方 —— 而漏掉一处的后果是"已写过还去换号重试"（P0 那个 bug 的形态）。
+//
+// 一个统一出口让"committed 永远是最新的"成为**结构上**成立的事实，
+// 而不是靠每一处都记得写。
+func (o roundOutcome) finalize(sw *sseWriter) roundOutcome {
+	if sw != nil {
+		o.committed = sw.committed
+	}
+	return o
+}
+
 // roundOutcome 一轮上游流的消费结果。
 type roundOutcome struct {
 	// takeOver 模型调用了**我们的**工具（已被拦下，等待执行）。
@@ -134,9 +164,61 @@ type roundOutcome struct {
 	// 从而复用那份**已被测试覆盖**的 delta 合并逻辑 ——
 	// 自己再写一遍合并就是第二个实现，迟早会与它漂移。
 	bufferedSSE string
+	// committed 本轮**已经向客户端写过任何字节**。
+	//
+	// # 为什么必须把它带回调用方（P0 修复）
+	//
+	// 流式路径是边读边写的，一旦写过字节：
+	//
+	//	状态码收不回来（已经是 200）
+	//	已发出的内容收不回来
+	//
+	// 而调用方（handler）拿到 err 会**换号重试** —— 那次重试会往
+	// **同一个** ResponseWriter 再写一套 SSE，客户端收到两段交错的
+	// 事件流（协议损坏、内容重复）。
+	//
+	// 所以"已写过字节"是**不可重试**的硬信号：调用方必须据此收手，
+	// 而不是换号。非流式路径不存在这个状态（它只在最后写一次响应）。
+	committed bool
+
 	// err 硬错误（交给调用方分类 + 换号）。
+	//
+	// ⚠ committed == true 时**不得**换号重试，见上。
 	err error
 }
+
+// ErrResponseCommitted 表示**响应已经写出去了，不能换号重试**。
+//
+// # 为什么需要一个独立的错误类型（P0 那个 bug 的正解）
+//
+// 流式路径是边读边写的，一旦写过字节：
+//
+//	状态码收不回来（已发 200）
+//	已发内容收不回来
+//
+// 此时若把 err 交给 handler 的"换号重试"逻辑，那次重试会往**同一个**
+// ResponseWriter 再写一套 SSE —— 客户端收到两段交错的事件流。
+//
+// 所以"已写过字节"与"这个账号失败了"是**两种不同的收场**，
+// 需要不同的动作：
+//
+//	未写过 → 换号重试（还有机会成功）
+//	已写过 → 只能收尾（记日志 + 补一个错误帧 + [DONE]）
+//
+// 用一个普通 error 表达不了这个区分，于是这里给它一个独立类型。
+type ErrResponseCommitted struct {
+	// Cause 原始错误（日志与错误帧里都要带，便于排查）。
+	Cause error
+}
+
+func (e *ErrResponseCommitted) Error() string {
+	if e.Cause != nil {
+		return "响应已提交（不可换号重试）: " + e.Cause.Error()
+	}
+	return "响应已提交（不可换号重试）"
+}
+
+func (e *ErrResponseCommitted) Unwrap() error { return e.Cause }
 
 // runToolLoopStream 流式跑工具循环。
 //
@@ -167,9 +249,9 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 	collected := make([]gateway.Artifact, 0)
 
 	for round := 1; round <= maxToolRounds; round++ {
-		out := h.consumeRound(sw, p.providerID, p.uid, body, mine, stats)
+		out := h.consumeRound(sw, p, body, mine, stats)
 		if out.err != nil {
-			return false, stats, out.err
+			return false, stats, wrapIfCommitted(out, sw)
 		}
 		if out.handedOff {
 			// 客户端的工具，已原样透传 → 网关收手，让它自己驱动。
@@ -196,14 +278,14 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 		// 模型调用了我们的工具：执行它们，把结果回喂，进入下一轮。
 		resp, aerr := wire.Aggregate(strings.NewReader(out.bufferedSSE))
 		if aerr != nil {
-			return false, stats, fmt.Errorf("聚合工具调用失败: %w", aerr)
+			return false, stats, wrapIfCommitted(roundOutcome{err: fmt.Errorf("聚合工具调用失败: %w", aerr)}, sw)
 		}
 		msg := firstMessage(resp)
 		calls := parseToolCalls(msg)
 		if len(calls) == 0 {
 			// 不该发生（out.takeOver 就代表看到了 tool_calls）。真发生了
 			// 说明聚合结果与判定不一致 —— 明确报错，不要静默当成正常回复。
-			return false, stats, fmt.Errorf("判定为工具调用但聚合后取不到 tool_calls")
+			return false, stats, wrapIfCommitted(roundOutcome{err: fmt.Errorf("判定为工具调用但聚合后取不到 tool_calls")}, sw)
 		}
 
 		// 保活：工具执行期间不写任何字节，先发一个注释帧。
@@ -217,14 +299,14 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 
 		var obj map[string]any
 		if jerr := json.Unmarshal(body, &obj); jerr != nil {
-			return false, stats, fmt.Errorf("工具循环内解析请求体失败: %w", jerr)
+			return false, stats, wrapIfCommitted(roundOutcome{err: fmt.Errorf("工具循环内解析请求体失败: %w", jerr)}, sw)
 		}
 		if aerr := appendToolMessages(obj, msg, results); aerr != nil {
-			return false, stats, aerr
+			return false, stats, wrapIfCommitted(roundOutcome{err: aerr}, sw)
 		}
 		body, err = json.Marshal(obj)
 		if err != nil {
-			return false, stats, fmt.Errorf("工具循环内重编码请求体失败: %w", err)
+			return false, stats, wrapIfCommitted(roundOutcome{err: fmt.Errorf("工具循环内重编码请求体失败: %w", err)}, sw)
 		}
 	}
 
@@ -239,7 +321,7 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 	if nerr == nil {
 		// mine 传空：**所有**工具调用都视为"不是我们的" → consumeRound
 		// 会把它们原样透传（不会误拦）。这一步的目标只是拿一句文字总结。
-		out := h.consumeRound(sw, p.providerID, p.uid, noTools, nil, stats)
+		out := h.consumeRound(sw, p, noTools, nil, stats)
 		if out.err == nil {
 			emitArtifactsAsText(sw, collected)
 			sw.done()
@@ -272,25 +354,32 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 //
 // 回放是合法的：客户端本来就要把 tool_calls 的 delta 累积起来，
 // 晚几个毫秒到不影响正确性。
-func (h *Handler) consumeRound(sw *sseWriter, providerID, uid string, body []byte, mine map[string]bool, stats *toolLoopStats) roundOutcome {
+func (h *Handler) consumeRound(sw *sseWriter, p toolLoopParams, body []byte, mine map[string]bool, stats *toolLoopStats) roundOutcome {
 	var out roundOutcome
 
-	rc, status, herr := h.chatStreamOnce(uid, body)
+	rc, status, herr := h.chatStreamOnce(p.ctx, p.uid, body)
 	if herr != nil {
 		out.err = herr
-		return out
+		return out.finalize(sw)
 	}
 	defer rc.Close()
+
+	// ⚠ 这一句必须在**任何** return 之前：它决定调用方能不能换号重试。
+	// 注意 sw.committed 反映的是"本轮之前是否已写过"（多轮循环里
+	// 前几轮可能已经写过内容了）。
+	out.committed = sw.committed
 
 	if status >= 400 {
 		// 上游拒绝：把错误体读出来交给调用方分类（与普通路径同一条）。
 		raw, _ := io.ReadAll(io.LimitReader(rc, maxToolLoopRespBytes))
 		out.err = &chatError{
-			Kind:   h.classifyErr(providerID, status, raw),
+			Kind:   h.classifyErr(p.providerID, status, raw),
 			Status: status,
 			Msg:    clipForLog(string(raw)),
 		}
-		return out
+		// 已写过内容时把 committed 再确认一次（上面那次是在开流前取的）。
+		out.committed = sw.committed
+		return out.finalize(sw)
 	}
 
 	// ⚠ 把上游流包进统计 reader —— 这样 TTFB/tokens/usage 与普通路径
@@ -310,12 +399,12 @@ func (h *Handler) consumeRound(sw *sseWriter, providerID, uid string, body []byt
 			// 读流中断：如果客户端已经收到内容，只能记日志收尾
 			//（状态码与已发内容都收不回来）。
 			if sw.committed {
-				log.Printf("chat tools(stream): 读上游流中断（客户端已收内容）uid=%s: %v", uid, ferr)
+				log.Printf("chat tools(stream): 读上游流中断（客户端已收内容）uid=%s: %v", p.uid, ferr)
 				out.handedOff = true
-				return out
+				return out.finalize(sw).finalize(sw).finalize(sw)
 			}
 			out.err = ferr
-			return out
+			return out.finalize(sw).finalize(sw)
 		}
 		if f.IsDone {
 			break
@@ -340,16 +429,16 @@ func (h *Handler) consumeRound(sw *sseWriter, providerID, uid string, body []byt
 			if !sw.committed {
 				// 还没写过任何字节 → 状态码可改，交给调用方走错误路径。
 				out.err = &chatError{
-					Kind:   h.classifyErr(providerID, http.StatusOK, []byte(ib.Body)),
+					Kind:   h.classifyErr(p.providerID, http.StatusOK, []byte(ib.Body)),
 					Status: http.StatusOK,
 					Msg:    ib.Message,
 				}
-				return out
+				return out.finalize(sw).finalize(sw).finalize(sw)
 			}
 			// 已流出内容：错误帧必须到达客户端，然后收尾。
 			_ = sw.data(f.Raw)
 			out.handedOff = true
-			return out
+			return out.finalize(sw).finalize(sw)
 		}
 
 		names := toolCallNamesIn(f.Obj)
@@ -390,7 +479,7 @@ func (h *Handler) consumeRound(sw *sseWriter, providerID, uid string, body []byt
 	out.bufferedSSE = buf.String()
 	out.handedOff = handedOff
 	out.takeOver = inToolCalls && !handedOff
-	return out
+	return out.finalize(sw)
 }
 
 // toolCallNamesIn 取一帧 delta 里的工具名（可能多个，也可能一个都没有）。
