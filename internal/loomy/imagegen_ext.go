@@ -85,7 +85,26 @@ func (p *Provider) GenerateImage(ctx context.Context, uid string, body []byte) (
 		// 那是一个把人往"鉴权头写错了"方向带的误导性失败。
 		return nil, 0, fmt.Errorf("loomy: 找不到账号 %s 的凭证（无法生图）", shortUID(uid))
 	}
-	return p.client.GenerateImage(ctx, a, body)
+	raw, status, err := p.client.GenerateImage(ctx, a, body)
+	if err != nil {
+		return nil, status, err
+	}
+	// ⚠ 在**共同入口**改写图片 URL（见 imagedisplay_rewrite.go 的文件头）。
+	//
+	// 两条生图路径都经过这里：
+	//
+	//	对话工具路径  execGenerateImage → GenerateImage
+	//	生图端点路径  /v1/images/generations → ImageGen → GenerateImage
+	//
+	// 我第一版只在对话工具路径做了这个转换，端点路径漏了 ——
+	// 实测那边返回的仍是签名 URL（HEAD 403，预览器取不到）。
+	// 放在这里两条路径自动一致。
+	//
+	// 只在成功响应上改：错误信封里没有 url，改它没意义还可能弄坏格式。
+	if status >= 200 && status < 300 {
+		raw = p.rewriteImageURLs(ctx, raw)
+	}
+	return raw, status, nil
 }
 
 // ImageModels 报出本上游的生图模型（gateway.ImageModelExt）。
