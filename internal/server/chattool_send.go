@@ -35,7 +35,7 @@ const toolExecTimeout = 5 * time.Minute
 //
 // 返回 (响应字节, 状态码, error)。状态码 >= 400 时响应字节是**上游的错误体**
 // （原样带回，交给调用方分类 —— 与 chatVia 的契约一致）。
-func (h *Handler) chatOnceNonStream(uid string, body []byte) ([]byte, int, error) {
+func (h *Handler) chatOnceNonStream(uid string, body []byte, stats *toolLoopStats) ([]byte, int, error) {
 	if h.cfg.Provider == nil {
 		return nil, 0, fmt.Errorf("chatOnceNonStream: 未接线（cfg.Provider 为 nil）")
 	}
@@ -66,7 +66,13 @@ func (h *Handler) chatOnceNonStream(uid string, body []byte) ([]byte, int, error
 	}
 	defer cs.Body.Close()
 
-	raw, rerr := io.ReadAll(io.LimitReader(cs.Body, maxToolLoopRespBytes))
+	// ⚠ 穿过 stats 读 —— 这条路径给非流式工具循环用，它也需要
+	// TTFB/tokens/usage（日志那三列）。stats 为 nil 时退化为直读。
+	var src io.Reader = cs.Body
+	if stats != nil {
+		src = stats.wrap(cs.Body)
+	}
+	raw, rerr := io.ReadAll(io.LimitReader(src, maxToolLoopRespBytes))
 	if rerr != nil {
 		return nil, cs.Status, fmt.Errorf("读上游响应失败: %w", rerr)
 	}

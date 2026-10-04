@@ -1371,17 +1371,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// ⚠ 第一版只有非流式那条，于是**每个** loomy 请求都被缓冲成
 			// 一整块，用户看到"文字不是流式的了"——范围远大于生图的回归。
 			var done bool
+			// loopStats 接收工具循环读到的统计（TTFB/tokens/usage）。
+			// ⚠ 这条路径绕过了 chatStatsReader（普通 chat 用它读数），
+			// 所以必须自己把统计接回来 —— 否则日志的 TTFB / tok / tok/s
+			// 三列全是空的（用户实测报过）。见 chatstat.go 的文件头。
+			var loopStats *toolLoopStats
 			var werr error
 			if peek.Stream {
-				done, werr = h.runToolLoopStream(w, toolLoopParams{
+				done, loopStats, werr = h.runToolLoopStream(w, toolLoopParams{
 					ext:        ext,
 					providerID: reqProvider,
 					uid:        acct.UID,
 					body:       outBody,
 					stream:     true,
+					start:      st.start,
 				}, h.chatToolsOf(reqProvider))
 			} else {
-				done, werr = h.runToolLoop(w, toolLoopParams{
+				done, loopStats, werr = h.runToolLoop(w, toolLoopParams{
 					ext:        ext,
 					providerID: reqProvider,
 					uid:        acct.UID,
@@ -1402,6 +1408,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if sessKey != "" && h.cfg.Session != nil {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
+				// 把循环读到的统计写回 —— 日志的 TTFB/tok/tok/s 靠它。
+				loopStats.applyTo(st)
 				st.status = http.StatusOK
 				return
 			}

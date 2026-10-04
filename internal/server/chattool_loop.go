@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/wire"
@@ -21,6 +22,12 @@ type toolLoopParams struct {
 	body       []byte
 	// stream 客户端是否要事件流（决定最后的发射形态）。
 	stream bool
+	// start 请求进入 handler 的时刻 —— TTFB 的计时起点。
+	//
+	// 必须由调用方给（而不是循环自己 time.Now()）：TTFB 的语义是
+	// "从客户端发起到首个 token 回来"，起点在进入 handler 那一刻，
+	// 循环内部取的时间会把它算短（少算了鉴权/选号/建连的开销）。
+	start time.Time
 }
 
 // runToolLoop 驱动一次完整的工具调用循环并写出响应。
@@ -35,10 +42,16 @@ type toolLoopParams struct {
 // "写过了响应"与"失败了"是**互斥**的两种收场，且调用方的动作完全不同：
 // 前者必须立刻 return（再写一次会 "superfluous WriteHeader"），
 // 后者要继续换号。用一个 error 表达不了三态，用一个 bool 又丢了原因。
-func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, error) {
+func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, *toolLoopStats, error) {
+	since := p.start
+	if since.IsZero() {
+		since = time.Now()
+	}
+	stats := newToolLoopStats(since)
+
 	tools := h.chatToolsOf(p.providerID)
 	if len(tools) == 0 {
-		return false, nil
+		return false, stats, nil
 	}
 
 	// 网关注入的工具名集合 —— 用于把模型的调用分成"我们的"与"客户端的"。
@@ -54,7 +67,7 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 		// 注入失败只可能是请求体不是 JSON —— 但那在更早的 peek 阶段就该发现。
 		// 走到这里说明 body 在中间被改坏了：明确报错，不要静默降级成
 		// "工具没生效"（那会让用户以为功能坏了却查不出原因）。
-		return false, fmt.Errorf("注入工具失败: %w", err)
+		return false, stats, fmt.Errorf("注入工具失败: %w", err)
 	}
 
 	collected := make([]gateway.Artifact, 0)
@@ -62,14 +75,17 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 
 	for round := 1; round <= maxToolRounds; round++ {
 		// 每轮都问上游（非流式 —— 循环内部需要完整响应才能判断有没有 tool_calls）。
-		raw, status, herr := h.chatOnceNonStream(p.uid, body)
+		// ⚠ 读上游时穿过 stats —— 非流式这一轮也是整段 SSE，
+		// 让 chatStatsReader 读一遍，TTFB/tokens/usage 就齐了。
+		// （用户报过日志三列全空，根因就是这条路径没接统计。）
+		raw, status, herr := h.chatOnceNonStream(p.uid, body, stats)
 		if herr != nil {
-			return false, herr
+			return false, stats, herr
 		}
 		if status >= 400 {
 			// 上游拒绝：把它的错误交给调用方走普通失败路径（分类 + 换号）。
 			// 不在这里自己回错 —— 那会绕过既有的分类与重试逻辑。
-			return false, &chatError{
+			return false, stats, &chatError{
 				Kind:   h.classifyErr(p.providerID, status, raw),
 				Status: status,
 				Msg:    clipForLog(string(raw)),
@@ -81,13 +97,13 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 			// 流内错误信封：与普通路径同一条处理（分类 + 换号）。
 			var inband *wire.InBandError
 			if errors.As(perr, &inband) {
-				return false, &chatError{
+				return false, stats, &chatError{
 					Kind:   h.classifyErr(p.providerID, http.StatusOK, []byte(inband.Body)),
 					Status: http.StatusOK,
 					Msg:    inband.Message,
 				}
 			}
-			return false, fmt.Errorf("解析上游响应失败: %w", perr)
+			return false, stats, fmt.Errorf("解析上游响应失败: %w", perr)
 		}
 
 		msg := firstMessage(resp)
@@ -178,23 +194,23 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 		// 把 tool_calls + 结果回喂，进入下一轮。
 		var obj map[string]any
 		if jerr := json.Unmarshal(body, &obj); jerr != nil {
-			return false, fmt.Errorf("工具循环内解析请求体失败: %w", jerr)
+			return false, stats, fmt.Errorf("工具循环内解析请求体失败: %w", jerr)
 		}
 		if aerr := appendToolMessages(obj, msg, results); aerr != nil {
-			return false, aerr
+			return false, stats, aerr
 		}
 		body, err = json.Marshal(obj)
 		if err != nil {
-			return false, fmt.Errorf("工具循环内重编码请求体失败: %w", err)
+			return false, stats, fmt.Errorf("工具循环内重编码请求体失败: %w", err)
 		}
 	}
 
 	if final == nil {
-		return false, fmt.Errorf("工具循环未能取得最终回复")
+		return false, stats, fmt.Errorf("工具循环未能取得最终回复")
 	}
 
 	if aerr := appendArtifactsToResponse(final, collected); aerr != nil {
-		return false, aerr
+		return false, stats, aerr
 	}
 
 	// 按客户端要的形态发射。
@@ -203,7 +219,7 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, er
 	} else {
 		writeJSON(w, http.StatusOK, final)
 	}
-	return true, nil
+	return true, stats, nil
 }
 
 // execOneTool 执行一次工具调用，把它包成 toolExecResult。
