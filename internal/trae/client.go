@@ -144,15 +144,66 @@ func soloHeaders(req *http.Request, a *Auth, stream bool) {
 }
 
 // ugHeaders 设置签到/积分（api.trae.cn）所需头。
+//
+// # ⚠ `X-Device-Id` 必须用**账号 uid**，不是凭证里的 32hex deviceId
+//
+// 这是用户报障「签到不了」的**主因**。实测（真实上游，同一份凭证）：
+//
+//	体检状态            claim 结果
+//	X-Device-Id=uid     {"code":0}           → 到手（credits=100+extra=100）
+//	X-Device-Id=32hex   {"code":9074}        → 拒绝
+//	不带该头            {"code":9004}        → 拒绝
+//
+// 三者的**设备维度**回执也印证了同一点（status 的 did_checked_in 字段
+// 是"这台设备今天的名额用掉了没"，与账号维度的 checked_in 是两回事）：
+//
+//	uid       → did_checked_in=true     ← 上游承认这台"设备"
+//	32hex     → did_checked_in=false    ← 不承认
+//	随机 16 位 → did_checked_in=false    ← 不承认
+//
+// # 为什么会这样（两种设备标识是不同的东西）
+//
+//	credential.DeviceID  登录/对话用的设备指纹（login.go 里 randomHex32 生成，
+//	                     参与登录 URL 的 device_id / x_device_id 参数）
+//	签到接口要的            账号在 CN 签到体系里的**设备标识 = uid**
+//
+// 本包最初把 `X-Device-Id` 直接填成登录用的 32hex —— 端点、头名、body 都对，
+// 唯独这个**值**错了，于是每次都拿 9074，而旧代码又只看 HTTP 状态
+// （200），把拒绝记成"签到成功"。两个缺陷叠加就成了「签到不了」。
+//
+// # 与社区实现的关系
+//
+// connectedGraph/trae2api-web 等实现同样填 `a.DeviceID`，所以它们对
+// "桌面客户端导入"的凭证会撞上同一个坑 —— 本仓的取值是**实测结论**，
+// 与那份参照不同，且优先于它（实例事实 > 参照实现）。
 func ugHeaders(req *http.Request, a *Auth) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", clientUA)
 	req.Header.Set("Authorization", "Cloud-IDE-JWT "+a.JWT())
 	req.Header.Set("X-User-Region", "CN")
-	if a.DeviceID != "" {
-		req.Header.Set("X-Device-Id", a.DeviceID)
+	if dev := checkinDeviceID(a); dev != "" {
+		req.Header.Set("X-Device-Id", dev)
 	}
+}
+
+// checkinDeviceID 返回签到/积分接口该用的 `X-Device-Id` 值。
+//
+// 优先 uid（实测唯一被接受的形态）；uid 缺失时才退回登录用的 DeviceID ——
+// 那种凭证本来也签不了（没有账号主键），但发一个值比发空串更接近既有行为
+// （空串会让上游回 9004，看起来像"缺头"而不是"凭证不全"）。
+//
+// ⚠ 不加锁：UID 与 DeviceID 都是**装载期之后不再改写**的字段
+// （`mu` 只保护 AccessToken / RefreshToken / ExpiresAt —— 见 credential.go
+// 的并发模型注释），所以读它们不需要 RLock。
+func checkinDeviceID(a *Auth) string {
+	if a == nil {
+		return ""
+	}
+	if a.UID != "" {
+		return a.UID
+	}
+	return a.DeviceID
 }
 
 // oauthHeaders 设置 ExchangeToken / GetUserInfo 所需头（无签名，仅 UA）。
@@ -377,39 +428,155 @@ func normalizeExpiresAt(v int64) int64 {
 	return v
 }
 
+// checkinEnvelope 签到接口的**业务信封**字段（status / claim 共用）。
+//
+// # ⚠ 业务失败是 HTTP 200 + `code != 0`，不是 HTTP 4xx/5xx
+//
+// 这是本包最初漏掉的一层：`doJSON` 只在 `StatusCode >= 400` 时报错，
+// 于是 `{"code":9074,"message":"当前参与用户太多"}` 这类**业务拒绝**
+// 被当成成功 —— `CheckinClaim` 返回 nil，上层记 `StatusOK`，
+// 而**一分积分都没到账**。
+//
+// 实测（真实上游，同一份凭证连打 8 次，间隔 30 秒）：
+//
+//	{"code":9074,"message":"当前参与用户太多，请稍后再试"}   HTTP 200 × 8/8
+//
+// 即 9074 会**持续数分钟**，不是瞬时抖动。界面显示"签到成功"、
+// 历史表记 `ok`，而实际没有奖励 —— 正是用户报的「签到不了」。
+//
+// 参照实现（connectedGraph/trae2api-web、caigee-cmd/cli2api、
+// yetone/magpie）都显式解析 code，并把 9074/9095 区分对待。
+type checkinEnvelope struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	// status 专有
+	CheckedIn    bool  `json:"checked_in"`
+	DidCheckedIn bool  `json:"did_checked_in"`
+	Credits      int64 `json:"credits"`
+	ExtraCredits int64 `json:"extra_credits"`
+	Enable       bool  `json:"enable"`
+}
+
+// 签到的业务错误码（多源实证，见 checkinEnvelope 注释）。
+const (
+	checkinCodeOK       = 0
+	checkinCodeNoDevice = 9004 // 缺/无效 x-device-id → "order parameters are incorrect"
+	checkinCodeBusy     = 9074 // 当前参与用户太多（设备级限流，可持续数分钟）
+	checkinCodeDevDone  = 9095 // 当前设备今日已签
+)
+
 // CheckinStatus 查询签到状态。
-func (c *Client) CheckinStatus(ctx context.Context, a *Auth) (checkedIn bool, credits int64, enable bool, err error) {
+//
+// 返回 (账号今日已签, 基础奖励, 额外奖励, 活动是否开启, 错误)。
+//
+// ⚠ 与旧版的差异：现在**校验业务 code**。旧版不读 code，于是上游返回
+// 错误信封（如鉴权失败）时全部字段为零值 → `checked_in=false, enable=false`
+// → 被当成"活动未开启"静默跳过，或继续去 claim。
+func (c *Client) CheckinStatus(ctx context.Context, a *Auth) (checkedIn bool, credits, extraCredits int64, enable bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.ugBase()+EpCheckinStatus, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return false, 0, false, err
+		return false, 0, 0, false, err
 	}
 	ugHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
-		return false, 0, false, err
+		return false, 0, 0, false, err
 	}
-	var resp struct {
-		CheckedIn bool  `json:"checked_in"`
-		Credits   int64 `json:"credits"`
-		Enable    bool  `json:"enable"`
-	}
+	var resp checkinEnvelope
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return false, 0, false, fmt.Errorf("trae: 签到状态解析失败: %w", err)
+		return false, 0, 0, false, fmt.Errorf("trae: 签到状态解析失败: %w", err)
 	}
-	return resp.CheckedIn, resp.Credits, resp.Enable, nil
+	if resp.Code != checkinCodeOK {
+		return false, 0, 0, false, checkinError("查询签到状态", resp)
+	}
+	return resp.CheckedIn, resp.Credits, resp.ExtraCredits, resp.Enable, nil
 }
 
 // CheckinClaim 执行签到。
-func (c *Client) CheckinClaim(ctx context.Context, a *Auth) error {
+//
+// # ⚠ 只能靠「复查 status」判定成败（实测）
+//
+// claim 的业务失败是 HTTP 200 + code != 0，所以**必须解析 code**。
+// 但解析 code 仍不够 —— 参照实现 caigee-cmd/cli2api 的结论是：
+//
+//	"The claim endpoint answers code 0 even when the device identity is
+//	 refused (9074) or the daily grant was already taken, so success is
+//	 decided by re-probing: a real claim flips checked_in to true."
+//
+// 即存在「code=0 但没真到账」的情形。所以判据是**复查一次 status**，
+// 只有 `checked_in` 真的翻成 true 才算成功。
+//
+// 返回的 checkinClaimResult 带上复查到的信息，供上层写历史与展示。
+func (c *Client) CheckinClaim(ctx context.Context, a *Auth) (checkinClaimResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
 	if err != nil {
-		return err
+		return checkinClaimResult{}, err
 	}
 	ugHeaders(req, a)
-	_, err = c.doJSON(req)
-	return err
+	data, err := c.doJSON(req)
+	if err != nil {
+		return checkinClaimResult{}, err
+	}
+	var claim checkinEnvelope
+	if err := json.Unmarshal(data, &claim); err != nil {
+		return checkinClaimResult{}, fmt.Errorf("trae: 签到响应解析失败: %w", err)
+	}
+	// 业务拒绝：如实报错（含 code 与上游原文），**不**记成功。
+	if claim.Code != checkinCodeOK {
+		return checkinClaimResult{}, checkinError("签到", claim)
+	}
+
+	// 复查：code=0 也可能是"没真到账"。
+	//
+	// ⚠ 这里刻意**不**把复查失败当签到失败 —— 复查是额外的网络往返，
+	// 它自己失败（网络抖动）不代表签到没成功。所以复查出错时返回
+	// "不确定"，由上层决定措辞，而不是谎报成功或谎报失败。
+	afterIn, afterCredits, afterExtra, _, err := c.CheckinStatus(ctx, a)
+	if err != nil {
+		return checkinClaimResult{Credits: claim.Credits, Confirmed: false}, nil
+	}
+	// 额外奖励（实测 status 的 extra_credits 与 credits 是两个口径）。
+	total := claim.Credits
+	if total <= 0 {
+		total = afterCredits + afterExtra
+	}
+	return checkinClaimResult{Credits: total, Confirmed: afterIn}, nil
+}
+
+// checkinClaimResult claim 之后的**已核实**结果。
+type checkinClaimResult struct {
+	// Credits 本次实得（claim 回执优先，缺失时取复查的 status）。
+	Credits int64
+	// Confirmed 复查确认 `checked_in` 已为 true（真的到账了）。
+	Confirmed bool
+}
+
+// checkinError 把业务信封转成可读错误（带 code，便于排障与分类）。
+//
+// ⚠ 带上 code 而不是只带 message：message 可能是中文提示语
+// （"当前参与用户太多，请稍后再试"），而 code 是**稳定的判据**——
+// 上层要按它区分"限流/设备已签/缺设备"三种完全不同的处置。
+func checkinError(what string, env checkinEnvelope) error {
+	msg := strings.TrimSpace(env.Message)
+	if msg == "" {
+		msg = "(上游未给 message)"
+	}
+	return fmt.Errorf("trae: %s被上游拒绝（code %d）：%s", what, env.Code, msg)
+}
+
+// IsCheckinBusy 报告错误是否是"当前参与用户太多"（9074，设备级限流）。
+//
+// 与"今天已签到"（9095）区分：前者**过一会儿可能成功**，后者今天不必再试。
+// 混为一谈会让界面把限流说成"已签到"（用户以为签过了，实际没有）。
+func IsCheckinBusy(err error) bool {
+	return err != nil && strings.Contains(err.Error(), fmt.Sprintf("code %d", checkinCodeBusy))
+}
+
+// IsCheckinDeviceDone 报告错误是否是"当前设备今日已签"（9095）。
+func IsCheckinDeviceDone(err error) bool {
+	return err != nil && strings.Contains(err.Error(), fmt.Sprintf("code %d", checkinCodeDevDone))
 }
 
 // UserEntUsage 聚合积分（ide_user_ent_usage 的 credits_limit 求和）。
