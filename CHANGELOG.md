@@ -7,6 +7,126 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.8.0 — 2026-10-06
+
+> 本版主题：**新增第十一个上游 ZCode（Z.ai / 智谱 GLM Coding Plan）**。
+> 首个**协议非 OpenAI** 的上游 —— 因此本版也带来了本仓第一个
+> 协议转换层。无破坏性变更、无配置项改名（只新增 `zcode.*` 段）。
+
+### 新增 — ZCode 上游
+
+Z.ai（智谱关联）的 AI coding agent，官方仓库
+[`zai-org/ZCode`](https://github.com/zai-org/ZCode) 是**完整开源的
+TypeScript monorepo**（Apache-2.0，7433★）。这意味着本上游的协议事实
+**全部来自一手证据**，不是逆向猜测：
+
+    官方源码   config/provider/zcode-builtin.json   端点与协议类型
+               packages/shared/src/zcodeEndpoint.ts URL 构造
+               packages/shared/src/zcode-source-headers.ts 来源头全集
+    Go 参照    D3-vin/Zcode2Api          头集合 field-by-field 移植（含实证风控警告）
+               genevatrkassulkusc82-collab/zcode-proxy  三协议转换 + 验证码求解
+    我的实测   每个端点都用真实 HTTP 请求验过存在性与鉴权形态
+
+#### 两条通道（默认只开不需要验证码的那条）
+
+    通道       协议       验证码   协议转换   额外依赖
+    api-key   OpenAI      不需要   不需要     零
+    jwt       Anthropic   每请求要  需要       浏览器（可选）
+
+**API Key 通道是本版的主路径**：`api.z.ai/api/paas/v4`（或
+`/api/coding/paas/v4`，Coding Plan 的 Key 专用 —— 官方文档明示两者
+**额度不互通**）。零依赖、服务器可用、粘贴即用。
+
+#### 一个实测否证过的假设（值得记）
+
+我一开始推断"Coding Plan 应该也有 OpenAI 形态"（那样能省掉转换层），
+**实测否证**：
+
+    /api/v1/zcode-plan/paas/v4/chat/completions   → 404   ← 想当然的路径
+    /api/v1/zcode-plan/v1/chat/completions        → 404
+    /api/v1/zcode-plan/anthropic/v1/messages      → 401   ← 只有这个
+    /api/v1/off-peak/anthropic/v1/messages        → 401
+    /api/v1/ultra-zai/anthropic/v1/messages       → 401   ← 服务端改写目标
+
+所以 JWT 通道**必须**做协议转换（本仓第一份，见
+`internal/zcode/anthropic.go`）。这个代价换的是**订阅额度可用**。
+
+#### 抄来的两条实证规则（自己绝无可能推断出来）
+
+**① 风控敏感：多发一个头就触发 3012**
+
+参照实现里的逐字警告：
+
+    JWT (start-plan) channel rules from the reference:
+      - x-api-key, x-query-id, x-session-id are NOT sent — the official
+        start-plan client omits them; sending x-query-id/x-session-id here
+        triggers upstream 3012 "unusual activity" (empirically).
+
+即"补齐看起来该有的头"会触发风控。本包按通道分支发头，并有测试钉住。
+
+**② 设备指纹每账号独立**
+
+参照实现原话：`X-Device-Mid` 是 "the account's own persisted uuid4
+('a fresh install on this machine' per account), not a shared/derived id."
+共用会让上游把多个账号看成同一台设备。
+
+#### 关于验证码（诚实标注）
+
+JWT 通道每请求要一个新的阿里云验证码参数。**官方仓库搜
+`captcha`/`aliyun` 零命中** —— 说明这是纯第三方逆向的机制，
+失效风险高于本包其它部分。所以：
+
+- 求解失败**如实报错**，绝不静默去掉请求头（那会被上游当风控）
+- 求解器做成接口（`CaptchaSolver`），缓存 45s + 宽限 300s + 并发去重
+- 默认**不启用**（`zcode.jwt_captcha: false`）—— 它需要图形界面
+- 本包用**系统浏览器开本机回环页**求解（对齐本仓其它上游的做法），
+  而不是参照项目的 go-rod（那会引入浏览器自动化依赖树且要求部署机有 Chrome）
+
+⚠ 若上游校验页面来源域，本机回环页会被拒 —— 此时错误信息会**直接
+建议改用 API Key 通道**。
+
+#### 配额与诊断端点
+
+    GET /admin/zcode/quota?uid=…      额度（JWT 走计量端点，Key 通道如实报"没有"）
+    GET /admin/zcode/diagnose?uid=…   令牌生命周期诊断（把三种 401 分开）
+
+诊断端点回显令牌**只给长度与尾 4 位**（它的输出常被贴到 issue 里求助）。
+
+### 修复 — 契约测试逼出来的两个真实缺口
+
+这两处都是"写了但没人能用"，而**单测全绿**：
+
+1. **`AccountImportExt` 实现了但 `AdminExt` 没有** ——
+   导入解析写得再对，界面上**没有任何入口**。契约测试的判定
+   （"声明了能力位就必须有 AdminRoutes"）抓到了它。
+2. **诊断端点返回空数组** —— `knownUIDs` 读的是 Provider 本地表，
+   而真实运行时凭证在 `pool` 里，本地表是空的。于是端点返回
+   `200 + {"accounts":[]}`：看起来"没有账号"，而账号好好的。
+   **一个静默的空列表比报错更难查。**
+
+### 关于"能抄则抄"的一次实践
+
+本版是这条原则最完整的一次落地：官方源码给了协议事实，
+Go 参照给了头集合与风控警告，我的实测用来**否证推断**与
+**确认端点存在性**。三者的分工在文件头注释里都标了来源。
+
+值得单独说：**参照实现不一定对**。它用 go-rod 驱动 Chrome 解验证码
+（因为它面向桌面部署），而本仓的判据是对齐既有做法 —— 所以这里
+选了系统浏览器 + 本机回环页，代价是需要一次人工交互，但零新依赖。
+
+### 已知限制
+
+- **JWT 通道未在真账号上端到端跑通**（需要有 z.ai 订阅 + 过滑块）。
+  API Key 通道的形状与错误路径都已实测（假 Key → 如实报 401）。
+- **验证码求解未在真上游验证过**（同上）。
+- 官方 `official-coding-plan-gateway.ts` 揭示 Coding Plan 的请求会被
+  服务端**动态改写**到 `/api/v1/ultra[-zai]/...` —— 所以 base URL
+  做成了可配置覆盖（`zcode.origin`），硬编码有失效风险。
+- 不做生图、没有每日签到（Z.ai 没有签到概念，额度由订阅周期决定）。
+- JWT **不可刷新**：官方明确"暂未提供 refresh token 交换接口"，
+  过期只能重新登录。
+
+---
 ## v1.7.3 — 2026-10-05
 
 > 本版主题：**修两个用户报障**（TRAE 签到"假成功" / raccoon「添加账号」打不开可用页面）

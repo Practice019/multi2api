@@ -41,6 +41,7 @@ import (
 	"workbuddy2api/internal/upstream"
 	"workbuddy2api/internal/wire"
 	"workbuddy2api/internal/workbuddy"
+	"workbuddy2api/internal/zcode"
 )
 
 func main() {
@@ -834,6 +835,85 @@ func main() {
 			log.Printf("qodercn: 已并入账号池 %d 个账号", n)
 		} else {
 			log.Printf("qodercn: 账号池中暂无账号（凭证目录 %s 里没有 CN 凭证）", cfg.QoderAuthDir)
+		}
+	}
+
+	// ---- 第十一个上游：ZCode（Z.ai / 智谱 GLM Coding Plan）----
+	//
+	// 注册顺序仍 workbuddy 在前 → "裸模型名走谁"不变。
+	//
+	// # 这个上游的协议事实全部来自一手证据（能抄则抄）
+	//
+	//	官方源码  zai-org/ZCode（Apache-2.0，7433★，完整开源 monorepo）
+	//	Go 参照   D3-vin/Zcode2Api（头集合 field-by-field 移植，含实证的风控警告）
+	//	          genevatrkassulkusc82-collab/zcode-proxy（三协议转换 + 验证码求解）
+	//	我的实测  每个端点都用真实 HTTP 请求验过存在性与鉴权形态
+	//
+	// # 两条通道，默认只开不需要验证码的那条
+	//
+	//	api-key  OpenAI 端点（api.z.ai/api/paas/v4）→ 零依赖、服务器可用
+	//	jwt      Anthropic 端点（zcode.z.ai/api/v1/zcode-plan/anthropic）
+	//	         → 每请求要阿里云验证码，需要图形界面
+	//
+	// 默认不建验证码求解器（= JWT 通道不可用，但请求会**明确报错**而不是静默
+	// 去掉验证码头 —— 后者会被上游当风控，那比报错更难查）。
+	// 只有配了 `zcode.jwt_captcha: true` 才装 —— 装它会**弹浏览器窗口**，
+	// 在服务器上那是纯噪音（而且必然超时失败）。
+	var zc *zcode.Provider
+	if cfg.ZCodeEnabled {
+		zcfg := zcode.Config{
+			Origin:  cfg.ZCodeOrigin,
+			AuthDir: cfg.ZCodeAuthDir,
+		}
+		if cfg.ZCodeJWTCaptcha {
+			cc := zcode.DefaultCaptchaConfig
+			if live, err := zcode.FetchCaptchaConfig(context.Background(), nil); err == nil {
+				cc = live
+				log.Printf("zcode: 已取到上游验证码配置（region=%s sceneId=%s）", cc.Region, cc.SceneID)
+			} else {
+				log.Printf("zcode: 取实时验证码配置失败（用实测兜底值）: %v", err)
+			}
+			zcfg.Captcha = zcode.NewCachedSolver(&zcode.BrowserSolver{
+				Config: cc,
+				// 用系统浏览器打开本机回环页（对齐本仓其它上游的做法）。
+				//
+				// ⚠ 这里**不用**独立 profile（Isolated=false）：
+				// 验证码页要的是"和用户平时的浏览器一样"的环境
+				//（阿里云会看 UA/指纹），而独立 profile 会让指纹更"新"。
+				// 这与登录授权的取舍相反 —— 那里要隔离会话防串号。
+				Open: func(pageURL string) error {
+					_, err := browseropen.Open(pageURL, browseropen.Opts{
+						Explicit: cfg.Login.Browser,
+						Isolated: false,
+					})
+					return err
+				},
+			})
+			log.Printf("zcode: JWT 通道验证码求解**已启用** —— 求解时会用系统浏览器打开本机页面")
+		}
+		zc = zcode.New(zcfg)
+		zc.SetCredentialSource(zcodeCredSource(p))
+		// 诊断/额度端点要**列出全部账号**，而 credSrc 只能按名查 ——
+		// 没这个枚举器时那些端点会返回空数组（看起来"没有账号"）。
+		zc.SetUIDEnumerator(zcodeUIDEnumerator(p))
+		if err := registry.Register(zc); err != nil {
+			log.Fatalf("注册 ZCode 上游失败: %v", err)
+		}
+		log.Printf("zcode: 已启用（凭证目录 %s，平台 %s，JWT 验证码=%v）",
+			cfg.ZCodeAuthDir, firstNonEmpty(cfg.ZCodeOrigin, "按账号自动选"), cfg.ZCodeJWTCaptcha)
+	} else {
+		log.Printf("zcode: 未启用（config 里 zcode.enabled 缺省为 false）")
+		if list, err := zcode.LoadDir(cfg.ZCodeAuthDir); err == nil && len(list) > 0 {
+			log.Printf("zcode: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.ZCodeAuthDir, len(list))
+		}
+	}
+
+	if zc != nil && cfg.ZCodePoolAccounts {
+		if n := syncZCodeAccounts(p, cfg.ZCodeAuthDir); n > 0 {
+			log.Printf("zcode: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("zcode: 账号池中暂无账号（凭证目录 %s 里没有 zcode*.json）", cfg.ZCodeAuthDir)
 		}
 	}
 

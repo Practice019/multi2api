@@ -61,6 +61,13 @@
     "auth_dir": "./auths/qoder",
     "pool_accounts": true
   },
+  "zcode": {
+    "enabled": true,
+    "auth_dir": "./auths/zcode",
+    "origin": "",
+    "pool_accounts": true,
+    "jwt_captcha": false
+  },
   "workbuddy_intl": {
     "enabled": true,
     "oauth_base_url": "https://www.workbuddy.ai",

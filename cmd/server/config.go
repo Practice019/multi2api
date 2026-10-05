@@ -730,6 +730,40 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"qoder"`
 
+	// ZCode 第十一个上游（Z.ai / 智谱 GLM Coding Plan）。
+	//
+	// # 与其它上游最大的不同：它有**两条互斥的凭证路径**
+	//
+	//	api-key  Z.ai / BigModel 的 API Key
+	//	         → 走 OpenAI 兼容端点，**不需要验证码**、不需要协议转换、零额外依赖
+	//	jwt      OAuth 登录得到的 Coding Plan JWT
+	//	         → 走 Anthropic 端点（实测只有该协议），
+	//	           每请求要一个新验证码，需要协议转换
+	//
+	// 默认**只开 API Key 通道**（零依赖、服务器可用）。
+	// JWT 通道要显式打开，因为它需要一个能过阿里云滑块的浏览器。
+	ZCode struct {
+		// Enabled 是否启用 ZCode 上游。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/zcode`。
+		AuthDir string `json:"auth_dir"`
+		// Origin 平台基址覆盖（留空 = 按每个账号的 platform 字段自动选）。
+		//
+		// 为什么是**账号级**而不是全局：Z.ai（国际，api.z.ai）与
+		// BigModel（国内，open.bigmodel.cn）是两套独立平台，同一个 Key
+		// 不能跨用。一个网关同时有两边 Key 是常见情形。
+		// 这里配的是"默认值"，凭证里的 origin 字段优先。
+		Origin string `json:"origin"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+		// JWTCaptcha 是否为 JWT 通道启用浏览器验证码求解（默认 false）。
+		//
+		// ⚠ 打开它的前提：网关所在机器**有图形界面**且能开浏览器。
+		// 服务器/容器部署下开了也没用 —— 求解会超时并如实报错
+		//（不会静默降级，因为不带验证码的请求会被上游当风控）。
+		JWTCaptcha bool `json:"jwt_captcha"`
+	} `json:"zcode"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -868,6 +902,13 @@ type Config struct {
 	QoderAuthDir      string `json:"-"`
 	QoderAPIBase      string `json:"-"`
 	QoderPoolAccounts bool   `json:"-"`
+
+	// ZCode（第十一上游，Z.ai / 智谱 GLM）解析后。
+	ZCodeEnabled      bool   `json:"-"`
+	ZCodeAuthDir      string `json:"-"`
+	ZCodeOrigin       string `json:"-"`
+	ZCodePoolAccounts bool   `json:"-"`
+	ZCodeJWTCaptcha   bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
 	// # 为什么保留它
@@ -1377,6 +1418,19 @@ func (c *Config) normalize() error {
 	// 否则会出现"主开关说没启用、注册表里却有个 qodercn"的鬼影。
 	c.QoderCNActive = c.QoderEnabled && boolOr(c.Qoder.CNEnabled, true)
 	c.QoderPoolAccounts = c.QoderEnabled && boolOr(c.Qoder.PoolAccounts, true)
+
+	// ---- zcode（第十一上游，Z.ai / 智谱 GLM）----
+	c.ZCodeEnabled = c.ZCode.Enabled
+	c.ZCodeAuthDir = strings.TrimSpace(c.ZCode.AuthDir)
+	if c.ZCodeAuthDir == "" {
+		// ⚠ 同上：用 AuthsBase 拼接。
+		c.ZCodeAuthDir = filepath.Join(c.AuthsBase, "zcode")
+	}
+	c.ZCodeOrigin = strings.TrimSpace(c.ZCode.Origin)
+	// ⚠ 与 Enabled 取"与"：上游关着时 jwt_captcha=true 也不该去起浏览器，
+	// 否则会出现"没启用上游却在后台弹验证码窗口"的鬼影。
+	c.ZCodeJWTCaptcha = c.ZCodeEnabled && c.ZCode.JWTCaptcha
+	c.ZCodePoolAccounts = c.ZCodeEnabled && boolOr(c.ZCode.PoolAccounts, true)
 	return nil
 }
 
