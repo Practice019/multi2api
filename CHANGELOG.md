@@ -7,6 +7,133 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.7.3 — 2026-10-05
+
+> 本版主题：**修两个用户报障**（TRAE 签到"假成功" / raccoon「添加账号」打不开可用页面）
+> \+ **一个跨全部上游的续期缺陷**。全部是修复，无新增上游、无配置项变更、
+> 无破坏性变更。
+>
+> 三处缺陷有共同形态：**上游的业务失败是 HTTP 200 + body 里的业务码**，
+> 而旧代码只看 HTTP 状态码 —— 于是失败被记成成功，界面显示绿色、历史表写 `ok`，
+> 而实际什么也没发生。失败至少能被发现，假成功会一直骗到用户自己去核对。
+
+### 修复 — TRAE 签到「签到不了」（closes #1）
+
+用户报障（#1）：*trae的签到没生效*。实测复现，**两个缺陷叠加**：
+
+**① `X-Device-Id` 发错了值**（每次都被上游拒绝）
+
+签到接口要的"设备"是**账号 uid**，而本包一直发登录用的 32 位 hex 指纹
+（`credential.DeviceID`，是 `login.go` 里 `randomHex32` 生成、参与登录 URL 的那个）。
+端点、头名、body 全对，唯独这个**值**错了。真实上游三对照：
+
+    X-Device-Id = uid(3929003642848586)   → {"code":0}      到手
+    X-Device-Id = 32hex(ca2079…)          → {"code":9074}   拒绝
+    不带该头                               → {"code":9004}   拒绝
+
+设备维度的回执同样印证（`did_checked_in` 是设备级、`checked_in` 是账号级）：
+
+    uid       → did_checked_in=true    ← 上游承认这台"设备"
+    32hex     → did_checked_in=false   ← 不承认
+    随机 16 位 → did_checked_in=false   ← 不承认
+
+**② 业务失败被记成成功**
+
+TRAE 签到的业务拒绝是 **HTTP 200 + `code != 0`**，而 `doJSON` 只在
+`StatusCode >= 400` 时报错。于是：
+
+    上游回 {"code":9074,"message":"当前参与用户太多"} → err == nil
+    → 记 StatusOK → 界面"签到成功"、历史 `ok` → **积分一分没到账**
+
+实测 9074 会**持续数分钟**（8/8 次、间隔 30 秒都不恢复），所以"重试一下就好"不成立。
+
+改法：解析业务 `code`（9074 限流 / 9095 设备今日已签 / 9004 缺设备 / 1005 权益不足
+分别可分类）；claim 后用**复查 status 的 `checked_in`** 判定成败（存在 `code=0`
+但没真到账的情形）；补上 `enable` 守卫；`credits + extra_credits` 一并统计
+（**额外奖励此前完全没统计**）。同一 bug 在后台定时任务里也有第四处，一并修。
+
+实测（走真实网关）：`{"credits":200,"ok":true,"status":"already"}`。
+
+### 修复 — raccoon「添加账号」打开的是**微信落地页**
+
+用户报障：点「添加账号」后浏览器打开是空白/无用页。
+（用户明确指出扫码与手机号都是正常路径，要修浏览器那条。）
+
+根因：旧实现返回 `https://xiaohuanxiong.com/login/mp?code=<32hex>` ——
+那是**二维码内容**，只能在微信里打开：
+
+    官网主 bundle 里 `login/mp` 出现 **0 次**（只被当作二维码内容拼出来）
+    微信 UA 与桌面 UA 请求它 → 返回**同一份 SPA 外壳**
+    （3884 字节，路由表里没有 `mp`）
+
+即"在电脑浏览器里打开它什么都没有"是**上游设计如此**，不是我们拼错了。
+
+改法：改用商汤**官方 VS Code 扩展**自己的浏览器登录机制
+（`Raccoon-VSCode/src/raccoonClient/raccoonClinet.ts` 的 getAuthUrl）：
+
+    /login?appname=…&redirect=http://127.0.0.1:<端口>/raccoon/callback?nonce=…
+
+官方页面上有**微信扫码**与**手机号短信**两个 Tab，过完阿里云滑块点授权后
+把 `authorization_code` 回调到本机端口 —— 我们当场换凭证。
+**滑块由官方页面与用户完成，我们不碰。**
+
+实测（真实账号，端到端跑通）：
+
+    回调收到  authorization_code=ac_TBFJ_…
+    换凭证    HTTP 200 {"code":0,"message":"success","data":{"access_token":"eyJ…"}}
+    user_info HTTP 200 {"code":0,"name":"RaccoonSophia","id":"7497524"}
+
+`redirect` **没有白名单限制**。
+
+⚠ 两个必须遵守的细节（都有实证理由）：
+
+  - **绝不能带 `login_source=desktop`** —— 官网用它判断是否走
+    `office-raccoon://` 深链；带了就**完全忽略 redirect**，永远等不到回调。
+  - **防串号标识塞进 redirect 的 query（nonce），不能用 `state`** ——
+    官网只转发 `authorization_code`，不复制其它参数。
+
+⚠ 移除了 `QRLoginExt`：新 URL 编成二维码是**坏码**（手机扫会跳到
+**手机自己的** localhost）。扫码能力没丢 —— 官方登录页自己就有扫码 Tab。
+
+顺带说明：短信路径此前被认为"不可程序化"，准确说法是**"不能绕过滑块"** ——
+`EncryptPhone`（AES-128-CFB）早已实现，实测加密后能通过，只差滑块；
+现在滑块在官方页面里过，所以手机号登录可用。
+
+### 修复 — 每个请求都续期（跨全部 10 个上游）
+
+出口层判"该不该续期"读的是**池投影**的过期时刻，而各上游的池投影都**刻意不抄**
+`ExpiresAt`（投影纪律：它是启动快照、活 secret 续期后不会跟新）。
+实测 `/admin/accounts` 里 `expires_at` 键**一个上游都没有** ⇒ 恒为 0。
+
+而 `auth.NeedsRefresh` 对 `ExpiresAt <= 0` **恒返回 true** ⇒
+「该不该刷」对每个上游都恒真 ⇒ **每个 chat 请求先做一次续期往返**。
+危害按 `refresh_token` 形态分两档：
+
+    可重复使用（cline 等）→ 白费一次往返（实测：发一次对话后 token 被换了）
+    **一次性**（raccoon / codearts）→ **每次请求烧掉一个 token**
+
+改法：判据优先用**活凭证**的过期时刻（装配层已用 `CredentialExpiryExt`
+从活 secret 补齐它，8 个上游全都实现了该扩展点）。
+
+顺带修：`ParseJWTTimes` 缺 `iat` 时回落到 `nbf` —— raccoon 的 token
+**只有 nbf 没有 iat**（抽样全部上游，只有它是这样），于是它的比例窗口
+**整个空转**（`RefreshSkewExt` 形同虚设，注释却写着"iat + exp 都在"）。
+
+实测：修前发一次 cline 对话请求 token 被换，修后不再被换。
+
+### 已知限制（与上一版相同，未变）
+
+- 只接了 Loomy 生图。其它上游要生图需各自实现 `ImageGenExt`。
+- **图生图未实测**（上游支持 `images` 参数，本次只实测文生图）。
+- 上游忽略 `response_format=b64_json` 与 `n>1`，网关如实透传、不替它纠正。
+- 工具循环轮次上限 3；到顶会去掉工具定义强制收尾。
+- 没有 WebUI 生图入口（只有 API）。
+- 裸图片 URL 依赖"对象存储桶是公开读"这个**上游部署事实**；
+  上游若改成私有读，会自动退回签名 URL（HEAD 会 403，预览器可能仍不工作）。
+- raccoon 的登录依赖**上游 `/login?redirect=` 机制不做白名单校验**（本版实测可行）；
+  若上游将来收紧，登录会退回"回调收不到 code"并如实报错（不静默超时）。
+
+---
 ## v1.7.2 — 2026-10-05
 
 > 本版主题：**修三个用户实际报障的缺陷**（agent 框架里生不了图 / 图片取不到 /
