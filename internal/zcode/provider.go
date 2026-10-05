@@ -177,18 +177,28 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 
 // Models 返回模型目录。
 //
-// 数据来源是**官方实时配置**（`GET /api/v1/client/configs`，免鉴权公开）——
-// 不是我们硬编码的清单。这样做的好处：上游加模型时我们自动跟上。
+// # ⚠ 无凭证也必须给目录（实测发现的缺口）
 //
-// 但**离线兜底必须有**：那个端点挂了不该让 /v1/models 整个空掉，
-// 也不该让"新增上游"这件事依赖一个外部端点。
+// 一开始的写法是"先 authOf，失败就返回 error" —— 看起来合理，但它让
+// **内置兜底清单成了死代码**：出口层调 Models 时**不带凭证**
+// （见 handler.go 的 modelList：`h.cfg.Provider.Models(ctx, id)`，
+// 只传 provider id），于是新装的 zcode 上游在 `/v1/models` 里
+// **一个模型都不出现**，直到有人加账号。
+//
+// 而那正是用户第一次配置上游的时刻 —— 他会看到"zcode 没有模型"，
+// 以为装坏了。本仓其它上游（见 raccoon 的同款注释"无凭据也要能给出
+// 兜底目录"）都是这个行为，所以这里对齐。
+//
+// 顺序：先用 live 配置（有凭证且取得到时），失败一律回落内置清单。
 func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gateway.ModelInfo, error) {
-	a, err := p.authOf(cred)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if list, err := p.fetchModels(ctx, a); err == nil && len(list) > 0 {
-		return list, nil
+	// 拿不到凭证不算错误 —— 见上面的说明。
+	if a, err := p.authOf(cred); err == nil && a != nil {
+		if list, ferr := p.fetchModels(ctx); ferr == nil && len(list) > 0 {
+			return list, nil
+		}
 	}
 	return builtinModels(), nil
 }
@@ -211,7 +221,15 @@ func builtinModels() []gateway.ModelInfo {
 }
 
 // fetchModels 从官方实时配置拉模型清单。
-func (p *Provider) fetchModels(ctx context.Context, a *Auth) ([]gateway.ModelInfo, error) {
+//
+// ⚠ **它不需要凭证** —— 那个端点是免鉴权公开的（实测 HTTP 200）。
+// 参数里刻意不收 *Auth：收了会让人误以为"要先有凭证才能取目录"，
+// 而那正是上面 Models 注解里说的那个缺口。
+//
+// 它也**不是必须成功**的：失败时调用方回落内置清单。所以这里
+// 不重试、不缓存 —— 出口层的模型列表不是热路径，而多一层缓存
+// 只会多一个"清单不跟新"的排查点。
+func (p *Provider) fetchModels(ctx context.Context) ([]gateway.ModelInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		planOrigin+"/api/v1/client/configs?app_version="+defaultAppVersion, nil)
 	if err != nil {

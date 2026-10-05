@@ -109,7 +109,7 @@ func (p *Provider) handleQuota(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provider": ProviderID,
-		"accounts": rows,
+		"accounts": nonNilRows(rows),
 	})
 }
 
@@ -191,7 +191,7 @@ func (p *Provider) handleDiagnose(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provider": ProviderID,
-		"accounts": rows,
+		"accounts": nonNilRows(rows),
 	})
 }
 
@@ -276,6 +276,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(v)
+}
+
+// nonNilRows 把可能为 nil 的行切片收敛成**空数组**。
+//
+// # 为什么必需（实测发现的 `accounts: null` 缺陷）
+//
+// Go 的 nil 切片序列化成 `null` 而不是 `[]`：
+//
+//	{"accounts":null}   ← nil 切片
+//	{"accounts":[]}     ← 空切片
+//
+// 两者对前端的差别是**致命的**：`data.accounts.length` 在 null 上会抛
+// `TypeError`，而后端返回的是 200 —— 于是界面什么都不显示、控制台一个异常，
+// 看起来像"接口坏了"。
+//
+// 实测触发路径：账号池里还没有本上游的账号时（也就是**第一次配置**时），
+// 两个诊断端点都返回 null。而那正是用户最需要看到"我该做什么"的时刻。
+//
+// 用泛型是因为两个端点的行类型不同（quotaRow / diagRow）。
+func nonNilRows[T any](rows []T) []T {
+	if rows == nil {
+		return []T{}
+	}
+	return rows
 }
 
 // ProbeOriginAll 给装配层用：把没有显式平台的凭证探测一遍并回填。
