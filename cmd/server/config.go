@@ -754,6 +754,12 @@ type Config struct {
 		// 不能跨用。一个网关同时有两边 Key 是常见情形。
 		// 这里配的是"默认值"，凭证里的 origin 字段优先。
 		Origin string `json:"origin"`
+		// OAuthBase 登录端点基址覆盖（留空 = 官方线上 zcode.z.ai/api/v1）。
+		//
+		// 存在的理由：官方自己会**动态改写** Coding Plan 的端点
+		//（见 official-coding-plan-gateway.ts），且 .env.example 里有内网
+		// 覆盖项 —— 硬编码等于把「上游改架构」变成我们的故障。
+		OAuthBase string `json:"oauth_base"`
 		// PoolAccounts 是否并入核心账号池（默认 true）。
 		PoolAccounts *bool `json:"pool_accounts"`
 		// JWTCaptcha 是否为 JWT 通道启用浏览器验证码求解（默认 false）。
@@ -907,6 +913,7 @@ type Config struct {
 	ZCodeEnabled      bool   `json:"-"`
 	ZCodeAuthDir      string `json:"-"`
 	ZCodeOrigin       string `json:"-"`
+	ZCodeOAuthBase    string `json:"-"`
 	ZCodePoolAccounts bool   `json:"-"`
 	ZCodeJWTCaptcha   bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
@@ -1427,6 +1434,7 @@ func (c *Config) normalize() error {
 		c.ZCodeAuthDir = filepath.Join(c.AuthsBase, "zcode")
 	}
 	c.ZCodeOrigin = strings.TrimSpace(c.ZCode.Origin)
+	c.ZCodeOAuthBase = strings.TrimSpace(c.ZCode.OAuthBase)
 	// ⚠ 与 Enabled 取"与"：上游关着时 jwt_captcha=true 也不该去起浏览器，
 	// 否则会出现"没启用上游却在后台弹验证码窗口"的鬼影。
 	c.ZCodeJWTCaptcha = c.ZCodeEnabled && c.ZCode.JWTCaptcha

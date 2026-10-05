@@ -724,24 +724,80 @@ func TestTokenExpiryIsMilliseconds(t *testing.T) {
 	}
 }
 
-// AccountColumnsExt：列数要与取值个数一致。
-func TestAccountColumnsMatchCells(t *testing.T) {
+// AccountColumnsExt：自报的列 id **必须在规范词汇表里**。
+//
+// # 为什么这条必须存在（实测发现的缺陷）
+//
+// 我第一版回的是 `[]string{"通道", "平台"}` —— 那是**列标题**，不是 id。
+// 核心校验时把它们当"未登记的 id"，前端直接跳过 →
+// **两列都不会显示**，而这只在运行时日志里有一行警告：
+//
+//	admin: 上游 zcode 自报的账号列 id "通道" 不在规范词汇表里
+//
+// 既不编译失败、测试也不会红 —— 除非专门断言"id 已登记"。
+// 这正是本条要守的。
+func TestAccountColumnsAreRegisteredIDs(t *testing.T) {
 	f := newFakeUpstream(t, nil)
 	p := newTestProvider(t, f)
 
+	// 规范词汇表（gateway 里那些 AccountCol* 常量）。
+	// 这里**刻意列全**而不是只列本上游用的几个：将来有人复制本上游的
+	// 列集去写新上游时，这个集合能让"有没有搞错"一眼可见。
+	registered := map[string]bool{
+		gateway.AccountColProvider:    true,
+		gateway.AccountColNickname:    true,
+		gateway.AccountColUID:         true,
+		gateway.AccountColQuota:       true,
+		gateway.AccountColStatus:      true,
+		gateway.AccountColToken:       true,
+		gateway.AccountColTokenExpiry: true,
+		gateway.AccountColCheckin:     true,
+		gateway.AccountColWelfare:     true,
+		gateway.AccountColSuccess:     true,
+		gateway.AccountColBreaker:     true,
+		gateway.AccountColInFlight:    true,
+		gateway.AccountColOps:         true,
+	}
+
 	cols := p.AccountColumns()
 	if len(cols) == 0 {
-		t.Fatal("应至少给出一列（通道/平台）")
+		t.Fatal("应至少给出一列")
 	}
-	for _, a := range []*Auth{
-		{Kind: CredKindAPIKey, APIKey: "k"},
-		{Kind: CredKindJWT, JWT: "j"},
-		{Kind: CredKindAPIKey, APIKey: "k", Origin: originBigModel},
+	for _, c := range cols {
+		if !registered[c] {
+			t.Errorf("列 id %q 不在规范词汇表里 —— 前端会跳过它，该列**不会显示**。"+
+				"（列标题是前端的事实，上游只能报 id。见 gateway/account_columns.go）", c)
+		}
+		// 中文标题混进来是最典型的错法，单独点出来。
+		for _, r := range c {
+			if r > 0x4e00 && r < 0x9fff {
+				t.Errorf("列 id %q 里含中文字符 —— 那看起来是列标题而不是 id", c)
+				break
+			}
+		}
+	}
+
+	// 本上游该有的四列（上游/UID/Token/额度）。
+	for _, want := range []string{
+		gateway.AccountColProvider, gateway.AccountColUID,
+		gateway.AccountColToken, gateway.AccountColQuota,
 	} {
-		cells := p.accountCells(a)
-		if len(cells) != len(cols) {
-			t.Errorf("列数 %d 与取值数 %d 不一致（表会错位）: cols=%v cells=%v",
-				len(cols), len(cells), cols, cells)
+		var found bool
+		for _, c := range cols {
+			if c == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("缺少列 %q", want)
+		}
+	}
+	// 本上游**不该**有签到/福利（它没有这些概念）。
+	for _, bad := range []string{gateway.AccountColCheckin, gateway.AccountColWelfare} {
+		for _, c := range cols {
+			if c == bad {
+				t.Errorf("本上游没有 %q 对应的概念，不该自报它", bad)
+			}
 		}
 	}
 }

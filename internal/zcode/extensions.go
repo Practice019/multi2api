@@ -102,27 +102,39 @@ func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 	return refreshSkew, true
 }
 
-// AccountColumns 账号池额外列。
+// AccountColumns 账号池列集（有序的**规范列 id**）。
 //
-// 列集由上游**自报**（本仓约定），核心不硬编码任何上游的列。
+// # ⚠ 必须回规范词汇表里的 id，不是中文标题
+//
+// 我第一版回的是 `[]string{"通道", "平台"}` —— 那是**列标题**，不是 id。
+// 核心校验时把它们当"未登记的 id"：
+//
+//	admin: 上游 zcode 自报的账号列 id "通道" 不在规范词汇表里
+//	       —— 前端会跳过它（该列不会显示）
+//
+// 也就是说**两列都不会显示**，而这只有**运行时日志**才暴露 ——
+// 既不编译失败，测试也不会红（除非专门断言 id 在词汇表里）。
+//
+// 修法：回本仓已有的规范 id。本上游的语义与它们**真的对应**：
+//
+//	provider  "上游"   多上游部署下靠它区分
+//	uid       "UID"    本上游的 API Key 通道没有账号概念，uid 是派生的
+//	                   key 哈希（见 credential.go）——它就是这个账号的身份
+//	token     "Token"  **相对剩余有效期**。JWT 通道有明确过期时刻，
+//	                   这一列有真实数据；未知时前端显示 `—`
+//	                   ⚠ 不用 token_expiry：那一列要**绝对时刻**，
+//	                   而 ExpiresAt 为 0 时我们确实不知道它几时过期
+//	quota     "额度"   JWT 通道走计量端点；Key 通道如实报"没有端点"
+//
+// 刻意**不报**：checkin / welfare（本上游没有这些概念）、
+// success / breaker / in_flight（排障计数器，用户在账号池里已经删掉了）。
 func (p *Provider) AccountColumns() []string {
-	// 两列都是本上游特有的运维事实：
-	//	通道   api-key / jwt —— 决定它能不能用（jwt 要验证码求解器）
-	//	平台   Z.ai / BigModel —— 决定同一个 Key 该打哪个域
-	return []string{"通道", "平台"}
-}
-
-// accountCells 返回上面两列的值（本仓的列值渲染约定）。
-func (p *Provider) accountCells(a *Auth) []string {
-	kind := "API Key"
-	if a.UsesJWT() {
-		kind = "Coding Plan"
+	return []string{
+		gateway.AccountColProvider,
+		gateway.AccountColUID,
+		gateway.AccountColToken,
+		gateway.AccountColQuota,
 	}
-	plat := "Z.ai"
-	if strings.Contains(p.client.originFor(a), "bigmodel") {
-		plat = "BigModel"
-	}
-	return []string{kind, plat}
 }
 
 // Quota 取额度视图。

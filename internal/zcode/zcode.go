@@ -32,6 +32,7 @@
 package zcode
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 )
@@ -95,6 +96,14 @@ const (
 	codeProviderOverloaded = 1312
 	// codeServerError 服务端错误（2007）—— 可重试。
 	codeServerError = 2007
+	// codeInvalidFlow 登录会话无效（3004）。
+	//
+	// 实测：`GET /api/v1/oauth/cli/poll/<不存在的 flow>` → HTTP 400
+	// `{"code":3004,"msg":"invalid_flow"}`。
+	//
+	// 它是**终态**而不是可重试错误 —— 会话已过期或服务重启过，
+	// 重试一万次都一样。归错类会让用户对着一个永远转不完的圈等下去。
+	codeInvalidFlow = 3004
 )
 
 // 凭证形态。ZCode 有两条**互斥**的凭证路径，本包都支持。
@@ -214,6 +223,15 @@ func parseIntish(raw json.RawMessage) int {
 		return -n
 	}
 	return n
+}
+
+// base64URLDecode 解 JWT 的 payload 段（无填充的 base64url）。
+//
+// 为什么单独写而不用 base64.RawURLEncoding 直接调：JWT 的段**可能**带
+// 填充（有些实现会加 "="），RawURLEncoding 遇到填充会报错。
+// 这里统一去掉填充 —— 只为一处调用点引入两种解码尝试不值得。
+func base64URLDecode(s string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
 // isTerminalCode 该业务码是否属于"终止，不该重试"（抄官方分类）。
