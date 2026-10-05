@@ -3,8 +3,8 @@
 // # 与其他上游的差异（都已实测，来自参照项目）
 //
 //	统一信封      业务响应是 {code,message,details,data}，**失败可能是 HTTP 200 + 非 0 code**
-//	扫码 code     由客户端本地随机生成，服务端接受任意自造 code
-//	手机号        AES-128-CFB 加密（仅短信路径用；本包不用，短信不可程序化）
+//	登录          浏览器授权码链路（/login?redirect= 指本机回环，见 login.go）
+//	手机号        AES-128-CFB 加密（`EncryptPhone` 已实现；直连短信端点时才需要）
 //	过期判定      expires_at → JWT exp **回退是必需的**（只读前者会让续期静默失效）
 //	无每日签到    服务端按日自动发放，**没有端点** → 不声明 CapCheckin
 //	有一次性奖励  POST /desktop/v1/login/points/grant（需 X-Client-Platform）
