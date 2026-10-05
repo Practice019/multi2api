@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,6 +76,22 @@ func fakeUpstream(t *testing.T, qrStatuses []string) (*httptest.Server, *fakeCal
 		default:
 			_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"status":"success","access_token":"` + token + `","refresh_token":"rt-1"}}`))
 		}
+	})
+
+	// ── 浏览器登录：授权码换凭证（本包的登录主路径）────────────────────
+	//
+	// 与真实上游同形状：成功 → {"code":0,data:{access_token,refresh_token}}；
+	// 失效码 → HTTP 400 + code 200035（实测值）。
+	mux.HandleFunc(authPrefix+"/login_with_authorization_code", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls.authCode, 1)
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if strings.TrimSpace(body["authorization_code"]) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"code":200035,"message":"authorization_code_not_found_error"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"access_token":"` + token + `","refresh_token":"rt-1"}}`))
 	})
 
 	// ── 用户信息 ───────────────────────────────────────────────────────
@@ -206,11 +223,12 @@ func fakeUpstream(t *testing.T, qrStatuses []string) (*httptest.Server, *fakeCal
 const desktopPlatformExpected = "desktop-windows"
 
 type fakeCalls struct {
-	qrPoll  int32
-	refresh int32
-	catalog int32
-	chat    int32
-	grant   int32
+	qrPoll   int32
+	authCode int32
+	refresh  int32
+	catalog  int32
+	chat     int32
+	grant    int32
 }
 
 func newContractProvider(base string) gateway.Provider {
@@ -362,10 +380,27 @@ func TestQRLoginCarriesNoAuthorization(t *testing.T) {
 	}
 }
 
-// TestLoginEndToEnd 扫码登录端到端（含 canceled 换码）。
+// TestLoginEndToEnd 浏览器登录端到端：起本地回调 → 收 authorization_code
+// → 换凭证 → Poll 拿到。
+//
+// # 这条测试驱动的是**真实链路**（不是打桩的中间态）
+//
+// Start() 会做三件事：绑一个 127.0.0.1 随机端口、把该端口的回调地址塞进
+// `/login?redirect=`、后台跑回调服务器。本测试**真的去请求那个回调地址**
+// （从返回的 URL 里解出来），于是覆盖了：
+//
+//	URL 拼装（redirect 有没有被正确编码）
+//	nonce 校验（防跨会话串号）
+//	authorization_code 换凭证
+//	finishLogin（expires_at / authFile 包装 / 展示名）
+//	Poll 的就绪判定
+//
+// # 为什么不能只断言 URL
+//
+// 旧版这条测试只断言 "URL 里含 code=state" —— 而用户报的缺陷恰恰是
+// **那个 URL 在浏览器里打不开**。只断言形状的测试对这种缺陷完全无感。
 func TestLoginEndToEnd(t *testing.T) {
-	// 先 canceled（触发换码），再 success
-	srv, _ := fakeUpstream(t, []string{"canceled", "logging"})
+	srv, calls := fakeUpstream(t, nil)
 	p := NewWithConfig(Config{Client: NewWithBase(srv.URL)})
 
 	lf, ok := p.LoginFlow()
@@ -376,12 +411,82 @@ func TestLoginEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start 报错: %v", err)
 	}
-	if !strings.Contains(url, "code="+state) {
-		t.Errorf("返回的 URL 应含 state（qrcode_code）: %s", url)
+
+	// ① URL 必须是官方的**浏览器登录**入口，且带上我们的本机回调。
+	if !strings.Contains(url, "/login?") {
+		t.Errorf("应当是官方浏览器登录入口 /login?…，实际: %s", url)
+	}
+	// ⚠ 绝不能带 login_source=desktop —— 那会让 /code/authorize 走
+	// office-raccoon:// 深链分支、完全忽略 redirect，我们永远等不到回调。
+	if strings.Contains(url, "login_source") {
+		t.Errorf("不能带 login_source（会让 redirect 失效）: %s", url)
+	}
+	// ⚠ 也不能是 /login/mp —— 那是微信落地页，桌面浏览器打不开。
+	if strings.Contains(url, "/login/mp") {
+		t.Errorf("绝不能给浏览器 /login/mp（微信落地页，无可用内容）: %s", url)
 	}
 
+	// ② 解出 redirect，真的去回调它（等价于"用户在浏览器里走完登录"）。
+	u, perr := neturl.Parse(url)
+	if perr != nil {
+		t.Fatalf("URL 解析失败: %v", perr)
+	}
+	redirect := u.Query().Get("redirect")
+	if redirect == "" {
+		t.Fatalf("URL 里没有 redirect（回调收不到凭证）: %s", url)
+	}
+	ru, perr := neturl.Parse(redirect)
+	if perr != nil {
+		t.Fatalf("redirect 解析失败: %v", perr)
+	}
+	if ru.Hostname() != "127.0.0.1" {
+		t.Errorf("redirect 应指向 127.0.0.1（本机回环），实际 %q", ru.Host)
+	}
+	// 回调地址里必须带 nonce（官方只追加 authorization_code，不转发别的参数，
+	// 所以防串号标识只能塞在 redirect 自己的 query 里）。
+	if ru.Query().Get("nonce") == "" {
+		t.Errorf("redirect 里没有 nonce（无法防跨会话串号）: %s", redirect)
+	}
+
+	// ③ 先试**错误 nonce**，必须被拒（否则任何本机进程都能塞凭据进来）。
+	//
+	// ⚠ 必须**替换** nonce，不能追加 —— redirect 里本来就是正确的 nonce，
+	// 直接拼 authorization_code 会构成一次合法请求（我第一版就这么写错了：
+	// 那次请求把登录消费掉、端口关闭，后面的断言全崩）。
+	badURL := strings.Replace(redirect,
+		"nonce="+ru.Query().Get("nonce"),
+		"nonce=0000000000000000deadbeefdeadbeef", 1) + "&authorization_code=ac_test"
+	badResp, berr := http.Get(badURL)
+	if berr != nil {
+		t.Fatalf("错误 nonce 的回调都没连上（说明监听没起）: %v", berr)
+	}
+	_ = badResp.Body.Close()
+	if badResp.StatusCode != http.StatusBadRequest {
+		t.Errorf("nonce 不匹配时应当 400，实际 %d —— "+
+			"不校验 nonce 的话，任何本机进程都能往账号池里塞凭据", badResp.StatusCode)
+	}
+	// 被拒的那次**不该**消费登录：会话仍应 pending。
+	if _, perr := lf.Poll(state); perr != gateway.ErrLoginPending {
+		t.Errorf("nonce 被拒后会话不该结束，实际 %v", perr)
+	}
+
+	// ④ 正确的回调：带 authorization_code。
+	goodURL := redirect + "&authorization_code=ac_real_code"
+	resp, gerr := http.Get(goodURL)
+	if gerr != nil {
+		t.Fatalf("回调本机端口失败（说明 Start 没真的起监听）: %v", gerr)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("回调应 200，实际 %d", resp.StatusCode)
+	}
+	if atomic.LoadInt32(&calls.authCode) == 0 {
+		t.Error("没有向 /login_with_authorization_code 发请求 —— 拿到 code 后没去换凭证")
+	}
+
+	// ⑤ Poll 必须给出就绪凭证。
 	var cred gateway.Credential
-	deadline := time.Now().Add(25 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		c, perr := lf.Poll(state)
 		if perr == nil {
@@ -391,10 +496,10 @@ func TestLoginEndToEnd(t *testing.T) {
 		if perr != gateway.ErrLoginPending {
 			t.Fatalf("轮询报错: %v", perr)
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	if cred.UID == "" {
-		t.Fatal("25 秒内未拿到凭证")
+		t.Fatal("回调成功后 10 秒内未拿到凭证")
 	}
 	if cred.UID != "7445120" {
 		t.Errorf("uid = %q, want 7445120", cred.UID)
@@ -410,9 +515,44 @@ func TestLoginEndToEnd(t *testing.T) {
 	if a.RefreshToken != "rt-1" {
 		t.Errorf("refresh_token = %q, want rt-1", a.RefreshToken)
 	}
+	// expires_at 必须从 JWT 的 exp 算出来（缺了它账目过期时间未知）
+	if a.ExpiresAtMS() <= 0 {
+		t.Error("expires_at 未从 JWT exp 回填 —— finishLogin 没被走到")
+	}
 	// 展示名应含手机号后 4 位（服务端昵称不可区分多账号）
 	if !strings.Contains(cred.Nickname, "1100") {
 		t.Errorf("展示名应含手机号后 4 位，实际 %q", cred.Nickname)
+	}
+}
+
+// TestLoginRejectsMissingCode 回调没带 authorization_code 时如实报错。
+//
+// 上游若改了转发方式（不再拼 authorization_code），必须**说出来**，
+// 而不是静默等到 5 分钟超时 —— 后者会让人以为"是我操作慢了"。
+func TestLoginRejectsMissingCode(t *testing.T) {
+	srv, _ := fakeUpstream(t, nil)
+	p := NewWithConfig(Config{Client: NewWithBase(srv.URL)})
+	lf, _ := p.LoginFlow()
+	state, url, err := lf.Start()
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	u, _ := neturl.Parse(url)
+	redirect := u.Query().Get("redirect")
+
+	// 不带 authorization_code 直接回调
+	resp, gerr := http.Get(redirect)
+	if gerr != nil {
+		t.Fatalf("回调失败: %v", gerr)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("缺 code 应 400，实际 %d", resp.StatusCode)
+	}
+
+	// Poll 应报出明确原因（不是一直 pending）
+	if _, perr := lf.Poll(state); perr == nil || perr == gateway.ErrLoginPending {
+		t.Errorf("缺 code 后 Poll 应报错，实际 %v —— 静默等超时会让人以为是自己操作慢了", perr)
 	}
 }
 
