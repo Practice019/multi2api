@@ -315,7 +315,7 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 		if a == nil || ctx.Err() != nil {
 			continue
 		}
-		checkedIn, credits, enable, serr := p.client.CheckinStatus(ctx, a)
+		checkedIn, credits, extra, enable, serr := p.client.CheckinStatus(ctx, a)
 		if serr != nil {
 			log.Printf("trae: 签到状态查询失败 uid=%s: %v", shortUID(a.UID), serr)
 			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(serr), 0, "sched")
@@ -325,16 +325,27 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 			continue // 上游关闭了签到
 		}
 		if checkedIn {
-			p.recordCheckin(a.UID, checkinlog.StatusAlready, "今天已签到", credits, "sched")
+			p.recordCheckin(a.UID, checkinlog.StatusAlready, "今天已签到", credits+extra, "sched")
 			continue // 今天已签
 		}
-		if cerr := p.client.CheckinClaim(ctx, a); cerr != nil {
+		// ⚠ claim 的成败只能靠**已核实**的 Confirmed 判定 ——
+		// 业务失败是 HTTP 200 + code!=0（见 client.go 的 checkinEnvelope），
+		// 且 code=0 也可能是"没真到账"。旧版把 code!=0 记成成功，
+		// 于是界面显示"签到成功"而实际没奖励（用户报的「签到不了」）。
+		res, cerr := p.client.CheckinClaim(ctx, a)
+		if cerr != nil {
 			log.Printf("trae: 签到失败 uid=%s: %v", shortUID(a.UID), cerr)
 			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(cerr), 0, "sched")
 			continue
 		}
-		log.Printf("trae: 签到成功 uid=%s credits=%d", shortUID(a.UID), credits)
-		p.recordCheckin(a.UID, checkinlog.StatusOK, "", credits, "sched")
+		if !res.Confirmed {
+			// code=0 但复查没看到 checked_in=true —— 不谎报成功。
+			log.Printf("trae: 签到未到账 uid=%s（复查 checked_in 仍为 false）", shortUID(a.UID))
+			p.recordCheckin(a.UID, checkinlog.StatusFail, "上游未确认到账（可能限流，稍后重试）", 0, "sched")
+			continue
+		}
+		log.Printf("trae: 签到成功 uid=%s credits=%d", shortUID(a.UID), res.Credits)
+		p.recordCheckin(a.UID, checkinlog.StatusOK, "", res.Credits, "sched")
 	}
 	return nil
 }

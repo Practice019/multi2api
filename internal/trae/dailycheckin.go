@@ -58,26 +58,56 @@ type checkinOneResult struct {
 // handleCheckin（单账号）与 checkinAllOnce（全量）共用它 ——
 // 历史上 trae 就栽在"签到不写历史"上，共用一个函数可让
 // "记得写历史"只在一处成立。
+//
+// # ⚠ 判据必须是「已核实到账」，不是「HTTP 通了」
+//
+// 这个函数曾经的写法是 `if err := CheckinClaim(...); err != nil` ——
+// 而 claim 的业务失败是 **HTTP 200 + `code != 0`**（实测 9074
+// "当前参与用户太多"连续 8/8 次都返回 200）。于是：
+//
+//	上游拒绝 → err == nil → 记 StatusOK → 界面"签到成功"、历史 `ok`
+//	而**积分一分没到账** ⇒ 用户报的「签到不了」
+//
+// 现在两重校验：claim 的业务 code，以及**复查 status 的 checked_in**。
+// 参照实现（caigee-cmd/cli2api）的结论是后者必需 —— 存在 code=0
+// 但没真到账的情形。
 func (p *Provider) checkinOne(ctx context.Context, a accountRef, trigger string) checkinOneResult {
 	res := checkinOneResult{uid: a.UID}
-	checkedIn, credits, _, err := p.client.CheckinStatus(ctx, a.Auth)
+	checkedIn, credits, extra, enable, err := p.client.CheckinStatus(ctx, a.Auth)
 	if err != nil {
 		res.status, res.detail = checkinlog.StatusFail, shortErr(err)
 		p.recordCheckin(a.UID, res.status, res.detail, 0, trigger)
 		return res
 	}
-	if checkedIn {
-		res.status, res.detail, res.credits = checkinlog.StatusAlready, "今天已签到", credits
-		p.recordCheckin(a.UID, res.status, res.detail, credits, trigger)
+	// ⚠ 活动关闭时**如实说**，不要继续去 claim。
+	//
+	// 旧版把 enable 丢掉了（`_`），于是"上游关闭签到"会走到 claim、
+	// 拿一个业务错误、再被记成"签到成功"。
+	if !enable {
+		res.status, res.detail = checkinlog.StatusSkip, "上游当前未开启签到活动"
+		p.recordCheckin(a.UID, res.status, res.detail, 0, trigger)
 		return res
 	}
-	if cerr := p.client.CheckinClaim(ctx, a.Auth); cerr != nil {
+	if checkedIn {
+		res.status, res.detail, res.credits = checkinlog.StatusAlready, "今天已签到", credits+extra
+		p.recordCheckin(a.UID, res.status, res.detail, res.credits, trigger)
+		return res
+	}
+
+	claim, cerr := p.client.CheckinClaim(ctx, a.Auth)
+	if cerr != nil {
 		res.status, res.detail = checkinlog.StatusFail, shortErr(cerr)
 		p.recordCheckin(a.UID, res.status, res.detail, 0, trigger)
 		return res
 	}
-	res.status, res.credits = checkinlog.StatusOK, credits
-	p.recordCheckin(a.UID, res.status, "", credits, trigger)
+	if !claim.Confirmed {
+		// code=0 但复查没看到到账 —— 不谎报成功。
+		res.status, res.detail = checkinlog.StatusFail, "上游未确认到账（可能限流，稍后重试）"
+		p.recordCheckin(a.UID, res.status, res.detail, 0, trigger)
+		return res
+	}
+	res.status, res.credits = checkinlog.StatusOK, claim.Credits
+	p.recordCheckin(a.UID, res.status, "", res.credits, trigger)
 	return res
 }
 
