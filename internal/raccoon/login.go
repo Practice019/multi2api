@@ -1,26 +1,49 @@
-// login.go Raccoon 的登录流程（微信扫码轮询）。
+// login.go Raccoon 的登录流程（浏览器授权码链路）。
 //
-// # 关键事实：code 由客户端本地随机生成，服务端接受任意自造 code
+// # 现在的流程（本包的登录主路径）
 //
-// 实测（AGENTS.md:3539-3541）：POST /login_with_qrcode_code 带一个本地生成的
-// 32 位 hex 就返回 200 + {"status":"pending"}。扫码后服务端把该 code 置为 success。
+//	Start()   起本机回环端口（net.Listen "127.0.0.1:0"），返回
+//	          /login?appname=…&redirect=http://127.0.0.1:PORT/raccoon/callback?nonce=…
+//	用户      在**官方登录页**上完成登录（微信扫码 或 手机号短信，两个 Tab 都在）
+//	          → 过阿里云滑块 → 点授权
+//	上游      把 authorization_code 回调到本机端口
+//	我们      当场换凭证 → Poll 拿到 → 落盘
 //
-// 正因如此，我们**完全不需要**官方 `office-raccoon://auth/callback` 那条链路
-// （那条也不可用：回调地址写死在 Web bundle 里，改不成 localhost）。
+// `/login?redirect=` 是**商汤官方 VS Code 扩展自己的浏览器登录机制**
+// （SenseTime-Copilot/Raccoon-VSCode 的 raccoonClinet.ts#getAuthUrl，
+// browser 模式就拼这个），`redirect` 由调用方指定 —— 官方指向
+// `vscode://SenseTime.raccoon/login`，我们指向本机回环。
 //
-// # 与参照项目的一处差异（刻意）
+// # ⚠ 为什么不能用 `/login/mp?code=…`（用户报障的根因）
 //
-// 参照项目把二维码渲染在一个**本机 HTTP 登录页**里（127.0.0.1 随机端口，
-// 页面内联 SVG 二维码 + 阿里云滑块脚本）。本网关是纯后端，没有那个页面 ——
-// 改为把**二维码承载 URL** 作为登录链接返回，由前端自行渲染成二维码。
+// 那个 URL 是**微信落地页**，只能在微信里打开。实测：
 //
-// 这样做的好处：不绑端口、不注入 HTML、不需要 QR 编码实现；
-// 且二维码内容（URL）本来就是扫码要的东西，页面只是它的可视化 ——
-// 参照项目自己也把"SVG 转义引号"列为踩过的坑（AGENTS.md:3654-3666）。
+//	官网主 bundle 里 `login/mp` 出现 **0 次**（只被当作二维码内容拼出来）
+//	微信 UA 与桌面 UA 请求它 → 返回**同一份 SPA 外壳**（路由表里没有 `mp`）
 //
-// 短信路径**不实现**：它要求 `captcha_param`，而那只能由 AliyunCaptcha.js
-// 在浏览器里执行滑块后产出（raccoon-login-page.ts:417,506-524）。
-// 纯 Go 无法程序化完成，源码侧也把短信列为次选。
+// 所以"用浏览器打开它什么都没有"是上游设计如此 —— 它是给微信扫的。
+// 本包此前正是把它当"登录链接"返回，于是「添加账号」打开是空白页。
+//
+// # 两个必须遵守的细节（都有实证理由）
+//
+//  1. **绝不能带 `login_source=desktop`** —— 官网 `/code/authorize` 用它判断
+//     是否走 `office-raccoon://` 深链；带了就**完全忽略 redirect**，
+//     我们永远等不到回调。官方桌面端走深链是因为它有 Electron 宿主能收。
+//  2. **防串号标识塞进 redirect 的 query（nonce），不能用 `state` 参数** ——
+//     官网只转发 `authorization_code`，**不复制**其它参数。
+//
+// # 短信链路为什么现在能用了
+//
+// 直接调 `send_sms` / `login_with_sms` 需要 `captcha_param`，而它只能由
+// AliyunCaptcha.js 在浏览器里执行滑块后产出。三层实测：
+//
+//	明文手机号     → 100003 params_encryted_error（加密是必需项）
+//	加密手机号     → 100006 captcha_verify_error （加密✅通过，卡滑块）
+//	加密 + 空滑块  → 100006                      （空串绕不过去）
+//
+// 所以"短信不可程序化"的准确说法是**"不能绕过滑块"** —— 而现在滑块在
+// **官方页面**里由用户过，于是手机号登录可用，只是我们不碰滑块。
+// （`EncryptPhone` 已实现，但只在官方页面之外直连上游时才需要。）
 package raccoon
 
 import (

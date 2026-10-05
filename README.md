@@ -5,8 +5,8 @@
 <h1 align="center">multi2api</h1>
 
 <p align="center">
-  <b>把多个 AI 上游（WorkBuddy / CodeArts / Loomy）聚合成 OpenAI 兼容 API 的多账号网关</b><br>
-  统一鉴权 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时调度 · 管理控制台
+  <b>把 10 个 AI 上游聚合成 OpenAI 兼容 API 的多账号网关</b><br>
+  统一鉴权 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到与续期 · 管理控制台
 </p>
 
 ## 这是什么
@@ -16,28 +16,39 @@
 签到、续期、冷却与排障。
 
 ```
-你的应用 ──► multi2api ──┬──► WorkBuddy（腾讯 CodeBuddy 桌面端）
-                         ├──► WorkBuddy AI（海外版，www.workbuddy.ai，可选渠道）
-                         ├──► CodeArts（华为云 CodeArts）
-                         └──► Loomy（讯飞 Loomy 桌面端）
+你的应用 ──► multi2api ──┬──► WorkBuddy          腾讯 CodeBuddy 桌面端（默认上游）
+                         ├──► WorkBuddy AI       海外版（www.workbuddy.ai）
+                         ├──► CodeArts           华为云 CodeArts
+                         ├──► Loomy              讯飞 Loomy 桌面端
+                         ├──► Cline              Cline 桌面端
+                         ├──► TRAE               字节 TRAE
+                         ├──► Raccoon Work       商汤小浣熊
+                         ├──► LobsterAI          有道龙虾
+                         ├──► Qoder              阿里 Qoder
+                         └──► Qoder（中国版）
 ```
 
-> 注意：**它不再只是 WorkBuddy 专用**。架构上"加一个上游 = 加一个目录 + 实现一组
-> 接口 + 配置加一段，核心零改动"——这是本项目最硬的判据，由架构约束测试守着。
-> 海外版 WorkBuddy AI 就是这条判据的又一次实践：**同一个 workbuddy 上游实现**
-> 注册第二个实例（`workbuddy-intl`），凭证目录 `auths/workbuddy-intl/`，
-> 请求按**凭证的 channel 字段**自动选择上游域（国内版 copilot.tencent.com /
-> 海外版 www.workbuddy.ai），国内与海外账号可在同一账号池共存。
+> ⚠ **它不再是 WorkBuddy 专用**。架构上"加一个上游 = 加一个目录 + 实现一组接口 +
+> 配置加一段，**核心零改动**"——这是本项目最硬的判据，由
+> `internal/gateway/arch_test.go` 的**可执行断言**守着（不是约定）：
+>
+> - 核心包不得依赖任何具体上游
+> - 上游之间不得互相依赖
+> - 新增上游只需在 `cmd/server/main.go` 加一行 `registry.Register(...)`
+>
+> 从 4 个上游扩到 10 个的过程中，核心包**一行没改** —— 这条判据是实践过的，不是口号。
 
 ## ✨ 核心能力
 
 | 能力 | 说明 |
 |---|---|
-| 🔌 **OpenAI 兼容** | `POST /v1/chat/completions`（流式/非流式）、`GET /v1/models`、`GET /healthz`；任何 OpenAI SDK 直接可用 |
+| 🔌 **OpenAI 兼容** | `POST /v1/chat/completions`（流式/非流式）、`POST /v1/images/generations`（**生图**）、`GET /v1/models`、`GET /healthz`；任何 OpenAI SDK 直接可用 |
 | 🧠 **统一账号池** | 多上游账号混在一个池：健康/冷却/熔断/禁用/在途状态机，按权重自动选号，坏号自动摘除 |
-| 🔄 **自动调度** | 定时签到、保活、旅行领奖、额度刷新——全部由各上游**自报**的清单生成，加新上游核心零改动 |
-| ❤️‍🩹 **自愈机制** | **主动健康检查**（每 10 分钟探测冷却/熔断中的账号并提前恢复，额度提前回血不再干等）、熔断错误按时间窗衰减（零散错误不攒坏账号）、凭证续期连续失败自动禁用 |
-| 🛡️ **错误治理** | 硬冷却（额度耗尽）/软限流/会话失效/内容拦截分类处置：该换号换号、该禁用禁用 |
+| 🎨 **生图** | 生图端点 + **对话工具自动注入**：拿任一对话题一句"画一张…"就自动调生图模型。返回**可预览的裸 URL**（见下方说明） |
+| 🛠️ **对话工具注入** | 上游自报工具（Loomy 的生图 / 联网搜索）。**agent 框架零配置可用** —— 客户端自带的工具原样透传，网关注入的自己执行 |
+| 🔄 **自动调度** | 定时签到、保活、旅行领奖、额度刷新、凭证续期——全部由各上游**自报**的清单生成，加新上游核心零改动 |
+| ❤️‍🩹 **自愈机制** | **主动健康检查**（每 10 分钟探测冷却/熔断中的账号并提前恢复）、熔断错误按时间窗衰减（零散错误不攒坏账号）、凭证续期连续失败自动禁用 |
+| 🛡️ **错误治理** | 硬冷却（额度耗尽）/软限流/会话失效/内容拦截分类处置：该换号换号、该禁用禁用。上游的**业务失败是 HTTP 200 + body 里的业务码**的，也按业务码处置 |
 | 🖥️ **管理控制台** | `/ui` 单页：仪表盘 / 账号池 / 模型目录 / 对话测试 / 请求日志 / 设置 / 上游专属标签页 |
 | 🔑 **安全默认** | `api_key` 鉴权、密钥只在本机注入、昵称自动打码、凭证按上游分子目录存放 |
 
@@ -57,11 +68,15 @@
 
 | 上游 | 账号形态 | 控制台能力 |
 |---|---|---|
-| **WorkBuddy** | OAuth 设备码登录 | 签到 / 保活 / 成长计划 / 猫猫旅行 / 任务一键完成 |
-| **WorkBuddy AI**（海外版渠道） | OAuth 设备码登录（www.workbuddy.ai） | 对话 / 模型 / 额度查询（**海外版无签到/成长/旅行**，product.json 显式禁用） |
+| **WorkBuddy**（默认） | OAuth 设备码登录 | 签到 / 保活 / 成长计划 / 猫猫旅行 / 任务一键完成 |
+| **WorkBuddy AI**（海外版） | OAuth 设备码登录（www.workbuddy.ai） | 对话 / 模型 / 额度查询（**海外版无签到/成长/旅行**，显式禁用）。按凭证的 `channel` 字段自动选域，国内与海外账号可同池共存 |
 | **CodeArts** | OAuth + DPoP（约 2 小时 STS，自动续期） | 签到（福利领取）/ 额度探测 |
-| **Loomy** | `session`（无 TTL） | **手机号验证码登录 / 新手任务一键完成 / 邀请码绑定 / 批量粘贴导入 / 额度实时查询** |
-| **TRAE** | SOLO 免费对话通道（JWT + 消费型 refreshToken） | **页内添加账号（浏览器 OAuth） / 每日自动签到 / token 自动续期 / 权益包额度查询** |
+| **Loomy** | `session`（无 TTL） | 手机号验证码登录 / 新手任务一键完成 / 邀请码绑定 / 批量粘贴导入 / 额度实时查询 / **生图 + 联网搜索** |
+| **Cline** | WorkOS 设备码轮询 | 余额查询 / 后台续期（**不起本地端口**，服务器部署天然可用） |
+| **TRAE** | JWT + 消费型 refreshToken | 页内添加账号（浏览器授权） / 每日自动签到 / token 自动续期 / 权益包额度 |
+| **Raccoon Work** | **浏览器授权（微信扫码 / 手机号）** | 积分余额 / 登录奖励 / onboarding 状态 |
+| **LobsterAI** | 浏览器 OAuth 回跳 | 三步式签到领取积分 / 定时自动签到 |
+| **Qoder / Qoder 中国版** | PKCE 设备码 | 积分余额 / 每日签到 / WASM 加密推理桥 |
 
 ## 🚀 快速开始
 
@@ -70,7 +85,11 @@
 到 [Releases](../../releases) 下载对应平台包（用 `SHA256SUMS.txt` 校验）：
 
 - Windows：`wb2api-server-windows-amd64.zip`（exe + `config.example.json` + `start.bat`）
-- Linux：`wb2api-server-linux-amd64.tar.gz`
+- Linux：`wb2api-server-linux-amd64.tar.gz` / `wb2api-server-linux-arm64.tar.gz`
+- macOS：`wb2api-server-darwin-amd64.tar.gz` / `wb2api-server-darwin-arm64.tar.gz`
+
+**全部五个平台由 CI 构建**（本机不手工上传产物），命名统一为
+`wb2api-server-<goos>-<goarch>.<zip|tar.gz>`。
 
 ```bash
 # Windows
@@ -88,13 +107,62 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 
 ### 添加账号
 
-- **WorkBuddy / CodeArts**：控制台「账号池」分组行点「＋ 添加账号」，走各自的登录流程。
-  授权页**默认由网关用无痕窗口打开**（见下方 `login.*`），避免浏览器里已登录的
-  腾讯账号把会话串到别的账号上；窗口被关掉时可点「重新无痕打开」，
-  或点「复制链接」粘贴到无痕/隐私窗口。
+控制台「账号池」分组行点「＋ 添加账号」，各上游走自己的流程：
+
+- **WorkBuddy / CodeArts / TRAE / LobsterAI / Qoder / Raccoon**：点「添加账号」后
+  **由网关用无痕窗口自动打开授权页**（见下方 `login.*`）。
+  授权页里有各自的登录方式（扫码 / 设备码 / 手机号，取决于上游）。
+  - **Raccoon**：打开的是**官方登录页**，页内有**微信扫码**与**手机号短信**两个 Tab。
+    过完滑块点授权后会回调到本机端口，网关当场换取凭证。
+  - 窗口被关掉时可点「重新无痕打开」，或点「复制链接」粘贴到无痕/隐私窗口。
+- **Cline**：WorkOS 设备码轮询，**不起本地端口** —— 服务器部署也能用。
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。
+
+> ⚠ **关于无痕窗口**：默认给浏览器一份**独立 profile**（临时目录），
+> 这次授权从零 cookie 开始 —— 避免浏览器里已登录的账号把会话串到别的账号上。
+> 代价是需重新输入账号密码。
+
+### 生图怎么用
+
+两种方式，任选：
+
+```bash
+# ① 对话里说一句（网关自动调生图模型）
+curl http://127.0.0.1:7863/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"loomy/deepseek-v4-flash-0731","messages":[{"role":"user","content":"画一张：赛博朋克城市夜景"}]}'
+
+# ② 直接调生图端点（OpenAI 兼容）
+curl http://127.0.0.1:7863/v1/images/generations \
+  -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"loomy/doubao-seedream-5-lite","prompt":"赛博朋克城市夜景","n":1,"size":"1024x1024"}'
+```
+
+生图模型会出现在 `GET /v1/models` 里，带 `capabilities: ["image_generation"]` ——
+调用方据此知道该用 `/v1/images/generations` 而不是 `/chat/completions`。
+
+> ⚠ **返回的图片 URL 是"裸 URL"**（已剥掉 COS 签名）。这不是偷懒：上游给的是签名
+> URL，而它对 **HEAD 请求必然 403**（COS 把 HTTP method 也算进签名，URL 是按 GET 签的），
+> 而预览器 / 取图器 / 文件发送队列**通常先发 HEAD** 探测 —— 一探测就失败，
+> 表现为"图片无法预览 / 拿不到文件实体"。
+>
+> 原始签名 URL 保留在同级的 `url_signed` 字段里作兜底（bucket 若改成私有读，
+> 会自动退回它）。
+
+### `agent` 框架里用（零配置）
+
+网关把上游工具**注入**给模型，并在网关侧执行 —— 所以 **agent 框架（DSH /
+Claude Code / Cursor 等）不需要在配置里声明任何工具**：
+
+| 模型调谁 | 谁执行 | agent 框架看到什么 |
+|---|---|---|
+| 客户端自己的（`bash` / `read` / …） | **客户端** | 正常的 `tool_calls` |
+| 网关注入的（`generate_image` / `web_search`） | **网关** | 只见模型"直接回了张带图的 markdown" |
+
+即两边**按工具名分工**，互不打架。想关掉注入：`server.disables_chat_tools: true`
+（⚠ 只影响**注入**；客户端自己带 `tools` 时本就按名分工，与此开关无关）。
 
 ## ⚙️ 配置说明
 
@@ -105,9 +173,18 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 | `listen` | `127.0.0.1:7863` | 监听地址（默认只绑本机） |
 | `api_key` | — | 调用方 Bearer 鉴权；为空则不鉴权（不建议） |
 | `auth_dir` | `./auths` | 凭证根目录，各上游分子目录存放 |
-| `pool.*` | — | 账号池：熔断阈值、在途上限、冷却时长等 |
-| `schedule.*` | — | 签到/保活时点与开关 |
-| `workbuddy.*` / `codearts.*` / `loomy.*` / `trae.*` | — | 各上游开关、目录与专用参数 |
+| `server.*` | — | `max_body_mb`（请求体上限）、`disables_chat_tools`（关工具注入） |
+| `pool.*` | — | 账号池：熔断阈值、在途上限、冷却时长、`health_check_interval_seconds` |
+| `schedule.*` | — | 签到 / 保活的间隔与开关（**统一 30 分钟被动扫描**） |
+| `session_sticky.*` | `enabled=true` / `ttl=30m` / `gc_interval=5m` | 会话粘性：同一会话固定用同一账号 |
+| `upstream.*` | 内嵌默认 | 出站身份（UA / 客户端版本 / 设备 token / IP 透传） |
+| `prompt.*` | 内嵌默认 | 系统提示词（`mode` = `custom` / `passthrough`，空值按 `custom`；`file` 可指向自定义文件） |
+| `upstash.*` | — | 可选 Redis/Upstash 后端；不配则纯内存 |
+
+各上游的配置段（都支持 `enabled` / `auth_dir`，其余见下）：
+
+`workbuddy` · `workbuddy_intl` · `codearts` · `loomy` · `trae` · `cline` ·
+`raccoon` · `lobsterai` · `qoder`
 
 **「添加账号」的浏览器行为（`login.*`）**：
 
@@ -133,7 +210,6 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `trae.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
 | `trae.auth_dir` | `<auth_dir>/trae` | 凭证目录（`trae-*.json`，嵌套或扁平两种形态都认） |
 | `trae.refresh_interval_seconds` | `1800` | 后台 token 自动续期扫描间隔（`<=0` 关闭） |
 | `trae.checkin_enabled` | `true` | 每日自动签到（30 分钟扫一次，幂等） |
@@ -159,8 +235,10 @@ curl http://127.0.0.1:7863/v1/chat/completions \
   -d '{"model":"loomy/deepseek-v4-flash-0731","messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
-- 模型名带上游前缀：`loomy/xxx`、`workbuddy/xxx`、`codearts/xxx`；裸模型名走默认上游。
-- 健康检查：`GET /healthz`（无鉴权，负载均衡友好）。
+- 模型名带上游前缀：`loomy/xxx`、`workbuddy/xxx`、`codearts/xxx`…；裸模型名走默认上游。
+- `GET /v1/models`：各上游目录合并（含生图模型，带 `capabilities` 标注）。
+- `POST /v1/images/generations`：OpenAI 兼容生图。
+- 健康检查：`GET /healthz`（**无鉴权**，负载均衡友好）；`GET /status`（需鉴权，带详情）。
 - 管理 API：`/admin/*`（默认只建议本机使用）。
 
 ## 🛡️ 安全与合规
@@ -175,16 +253,28 @@ curl http://127.0.0.1:7863/v1/chat/completions \
 ## 🛠️ 开发
 
 ```bash
-go test ./... -count=1     # 全量测试（含假上游契约测试，CI 中不跳过）
-go vet ./... && gofmt -l . # 质量门禁
+go build ./... && go vet ./...        # 构建 + 静态检查
+go test ./... -count=1                # 全量测试（含假上游契约测试，CI 中不跳过）
+gofmt -l .                            # 格式检查
 ```
 
+> ⚠ **Windows 上 `gofmt -l .` 会误报**（CRLF 被当成格式问题）。本地判真实情况要先
+> LF 归一化再查；CI（Linux）不受影响。
+>
+> ⚠ `go test -race` 在 CI 里是 **advisory**（`continue-on-error: true`）。
+> 本机若无 gcc 则跑不了 —— **不要假装跑过**。
+
 - **架构**：`internal/gateway` 是唯一接缝 —— `Provider` 4 方法 + 若干可选扩展点
-  （登录流程 / 凭证加载 / 额度探测 / 每日动作 / 列集自报 / 凭证寿命 / 诊断端点……）。
-  加新上游不改核心；`internal/gateway/arch_test.go` 自动约束包依赖方向。
-- **CI**（`.github/workflows/ci.yml`）：`go mod tidy` 检查 / build / vet / gofmt / 全量测试。
-- **发布**（`.github/workflows/release.yml`）：打 `v*` 标签自动构建 Windows/Linux 包、
-  生成 `SHA256SUMS.txt` 并挂到 GitHub Release。
+  （登录流程 / 凭证加载 / 额度探测 / 每日动作 / 列集自报 / 凭证寿命 / 后台任务 /
+  生图 / 对话工具 / 诊断端点……）。加新上游不改核心；
+  `internal/gateway/arch_test.go` 自动约束包依赖方向（判据是**包级依赖图**，
+  不是源码文本匹配）。
+- **CI**（`.github/workflows/ci.yml`）：`go mod tidy` 检查 / build / vet / gofmt /
+  全量测试（五项门禁，缺一不可合）。
+- **发布**（`.github/workflows/release.yml`）：打 `v*` 标签自动构建
+  **五个平台**（windows-amd64 / linux-amd64 / linux-arm64 / darwin-amd64 /
+  darwin-arm64）、生成 `SHA256SUMS.txt` 并挂到 GitHub Release。
+  发布 Release 的**说明由人写**（含回滚方案），workflow 只负责产物。
 
 ## 免责声明
 
