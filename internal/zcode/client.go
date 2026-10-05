@@ -40,6 +40,19 @@ const DefaultOriginBigModel = originBigModel
 type Config struct {
 	// Origin 基址覆盖。空 = 按账号的 AuthDir 自动选（见 clientFor）。
 	Origin string
+	// OAuthBase 登录端点的基址覆盖（空 = 官方线上 `https://zcode.z.ai/api/v1`）。
+	//
+	// # 为什么它必须可覆盖（两个理由，都不是为了测试方便）
+	//
+	//  1. **官方自己会改写端点**：`official-coding-plan-gateway.ts` 揭示
+	//     Coding Plan 的请求会被服务端动态改写到 `/api/v1/ultra[-zai]/...`。
+	//     硬编码等于把"上游改架构"变成我们的故障。
+	//  2. **内网/私有部署**：官方 `.env.example` 里有 `ZCODE_DEPS_BASE_URL` /
+	//     `INTRANET_MACHINE_HOST` 这类内网覆盖项，说明存在自建部署形态。
+	//
+	// （顺带的好处：测试能把假上游指进来，而不必真去打线上 ——
+	// 之前硬编码时测试真的把请求发出去了，那是不可接受的副作用。）
+	OAuthBase string
 	// AuthDir 凭证目录。
 	AuthDir string
 	// HTTPClient 注入的 HTTP 客户端（测试用；空 = 默认）。
@@ -50,11 +63,12 @@ type Config struct {
 
 // Client 一个 ZCode 上游实例的 HTTP 客户端。
 type Client struct {
-	origin   string
-	http     *http.Client
-	captcha  CaptchaSolver
-	appVer   string
-	accounts map[string]*Auth // UID → 活凭证（由 Provider 装配时注入）
+	origin    string
+	oauthBase string
+	http      *http.Client
+	captcha   CaptchaSolver
+	appVer    string
+	accounts  map[string]*Auth // UID → 活凭证（由 Provider 装配时注入）
 }
 
 // NewClient 构造客户端。
@@ -75,11 +89,16 @@ func NewClient(cfg Config) *Client {
 			},
 		}
 	}
+	base := strings.TrimRight(strings.TrimSpace(cfg.OAuthBase), "/")
+	if base == "" {
+		base = cliOAuthBase
+	}
 	return &Client{
-		origin:  strings.TrimRight(strings.TrimSpace(cfg.Origin), "/"),
-		http:    hc,
-		captcha: cfg.Captcha,
-		appVer:  defaultAppVersion,
+		origin:    strings.TrimRight(strings.TrimSpace(cfg.Origin), "/"),
+		oauthBase: base,
+		http:      hc,
+		captcha:   cfg.Captcha,
+		appVer:    defaultAppVersion,
 	}
 }
 

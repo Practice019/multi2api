@@ -862,8 +862,9 @@ func main() {
 	var zc *zcode.Provider
 	if cfg.ZCodeEnabled {
 		zcfg := zcode.Config{
-			Origin:  cfg.ZCodeOrigin,
-			AuthDir: cfg.ZCodeAuthDir,
+			Origin:    cfg.ZCodeOrigin,
+			OAuthBase: cfg.ZCodeOAuthBase,
+			AuthDir:   cfg.ZCodeAuthDir,
 		}
 		if cfg.ZCodeJWTCaptcha {
 			cc := zcode.DefaultCaptchaConfig

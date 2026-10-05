@@ -82,6 +82,12 @@ type Provider struct {
 	// 而诊断端点要列全部账号。见 admin.go 的 knownUIDs。
 	uidEnumerator func() []string
 
+	// logins 进行中的登录会话（flow_id → 会话）。
+	//
+	// 为什么放在 Provider 上而不是全局：登录是**上游专属**的，
+	// 两个上游的 flow_id 空间互不相干；放全局还要加前缀防撞。
+	logins map[string]*loginEntry
+
 	// originProbe 是否在装配时探测凭证属于哪个平台。
 	// 测试里关掉它（避免真发请求）。
 	probeOrigin bool
@@ -93,6 +99,7 @@ func New(cfg Config) *Provider {
 		client:      NewClient(cfg),
 		authDir:     cfg.AuthDir,
 		creds:       map[string]*Auth{},
+		logins:      map[string]*loginEntry{},
 		probeOrigin: true,
 	}
 	return p
