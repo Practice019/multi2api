@@ -361,10 +361,47 @@ func TestPollReturnsCredentialWhenReady(t *testing.T) {
 		t.Error("Nickname 不能为空（账号池显示它）")
 	}
 
-	a, ok := cred.Secret.(*Auth)
-	if !ok || a == nil {
-		t.Fatalf("Secret 应是 *Auth，实际 %T", cred.Secret)
+	// ⚠ Secret 必须是**能 MarshalAuthFile 的包装类型**，不是裸 *Auth。
+	//
+	// # 这条断言本身就是对一次真实事故的修补
+	//
+	// 我最初的测试断言的是 `Secret.(*Auth)` —— 而生产代码的落盘判据是
+	// `Secret.(authFileWriter)`（见 admin.pollViaFlow）。两者**不一致**，
+	// 于是测试全绿、登录却在 501 处卡死：
+	//
+	//	该上游的凭证结构尚未接入落盘
+	//	（LoginFlow 的 Secret 需要实现 MarshalAuthFile）
+	//
+	// 用户看到的是"登录不了"，而上游那边其实已经授权成功。
+	// 断言写错了判据 = 守了一个**生产中不存在**的契约。
+	mw, ok := cred.Secret.(interface {
+		MarshalAuthFile() (string, []byte, error)
+	})
+	if !ok {
+		t.Fatalf("Secret 必须实现 MarshalAuthFile（落盘判据），实际 %T —— "+
+			"否则核心会 501「该上游的凭证结构尚未接入落盘」", cred.Secret)
 	}
+	name, raw, err := mw.MarshalAuthFile()
+	if err != nil {
+		t.Fatalf("MarshalAuthFile 失败: %v", err)
+	}
+	if !strings.HasSuffix(name, ".json") || !strings.HasPrefix(name, "zcode-") {
+		t.Errorf("文件名应形如 zcode-<uid>.json，实际 %q", name)
+	}
+	// 落盘内容必须能被**本包自己**读回来（导入/重载走的是同一条解析路径）。
+	back, err := parseAuth(raw)
+	if err != nil {
+		t.Fatalf("落盘内容读不回来: %v\n%s", err, raw)
+	}
+	if back.JWT == "" || back.UID == "" {
+		t.Errorf("回读的凭证缺字段: %+v", back)
+	}
+	if back.KindOf() != CredKindJWT {
+		t.Errorf("回读的通道应是 jwt，实际 %q", back.KindOf())
+	}
+
+	// 取出内层 *Auth 做字段断言。
+	a := back
 	// 通道必须是 jwt —— JWT 通道走 Anthropic 协议 + 验证码，
 	// 判错会让请求打到错误端点（而且大概率是 401 而非明确的参数错）。
 	if a.KindOf() != CredKindJWT {

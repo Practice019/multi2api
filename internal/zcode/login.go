@@ -177,7 +177,25 @@ func (p *Provider) Poll(state string) (gateway.Credential, error) {
 		return gateway.Credential{}, fmt.Errorf("zcode: 上游报告本次授权失败 —— 请重新点「添加账号」")
 	default:
 		p.dropLogin(state)
-		return gateway.Credential{Provider: providerID, UID: cred.UID, Nickname: cred.Nickname, Secret: cred}, nil
+		// ⚠ Secret 必须是 `*authFile` 而**不是** `*Auth`。
+		//
+		// 核心的 pollViaFlow 落盘那一步是类型断言：
+		//
+		//	mw, ok := cred.Secret.(authFileWriter)  // MarshalAuthFile() (name, raw, err)
+		//	if !ok → 501「该上游的凭证结构尚未接入落盘」
+		//
+		// 直接放 `cred` 会让**浏览器授权成功、然后停在 501** ——
+		// 用户看到的是"登录不了"，而上游那边其实已经授权过了。
+		//
+		// 我在 raccoon 上踩过完全相同的坑（并在那次总结里记下过），
+		// 这次又犯了一遍 —— 说明这条约束该由**测试**守，不该靠记性。
+		// 见 login_test.go 的 TestPollSecretSupportsAuthFileMarshal。
+		return gateway.Credential{
+			Provider: providerID,
+			UID:      cred.UID,
+			Nickname: cred.Nickname,
+			Secret:   &authFile{A: cred},
+		}, nil
 	}
 }
 
