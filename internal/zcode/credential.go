@@ -125,6 +125,30 @@ type authFile struct {
 	Remark string `json:"remark,omitempty"`
 }
 
+// MarshalAuthFile 返回 (文件名, 内容) —— 核心 pollViaFlow 的 authFileWriter 契约。
+//
+// ⚠ **不实现它就等于"登录不了"**：浏览器授权会成功，但核心落盘那一步
+// 是类型断言 `cred.Secret.(authFileWriter)`，断言失败就 501
+// 「该上游的凭证结构尚未接入落盘」。
+//
+// 所以我不能把 `*Auth` 直接当 Secret 交出去 —— 必须是这个包装类型
+// （见 login.go 的 Poll）。
+//
+// 我在 raccoon 上踩过一次完全相同的坑，这次又犯了一遍，所以
+// login_test.go 里专门有一条断言"Poll 返回的 Secret 能 MarshalAuthFile"，
+// 让这个约束由**测试**守而不是靠记性。
+func (f *authFile) MarshalAuthFile() (string, []byte, error) {
+	if f == nil || f.A == nil {
+		return "", nil, fmt.Errorf("zcode: 凭证为空")
+	}
+	raw, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return "", nil, err
+	}
+	name := "zcode-" + sanitizeUID(f.A.UID) + ".json"
+	return name, raw, nil
+}
+
 // Kind 归一化后的凭证类型（空值按 api-key）。
 func (a *Auth) KindOf() string {
 	k := strings.ToLower(strings.TrimSpace(a.Kind))

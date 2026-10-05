@@ -290,6 +290,82 @@ func parseClientConfigModels(raw []byte) ([]gateway.ModelInfo, error) {
 	return out, nil
 }
 
+// ---- gateway.CredentialLoader / CredentialSecretLoader ----
+//
+// # 为什么必须实现这两个（实测发现的第二个必需扩展点）
+//
+// 登录流程走完后，核心要**重扫该上游的凭证目录**把它并进账号池。
+// 那一步的判据也是类型断言：
+//
+//	都不实现 → 501「凭证已写入 …，但上游 X 没有实现
+//	           gateway.CredentialLoader，无法按它自己的格式重扫凭证」
+//
+// 症状极具迷惑性：**凭证文件正确落盘了**（用户去目录里能看到），
+// 但账号池里没有它 —— 用户看到的是"登录成功但账号没出现"。
+//
+// 这也解释了为什么核心不自己解析：凭证格式是**上游的事实**，
+// 核心硬编码它等于打破"加新上游核心零改动"这条判据。
+
+// LoadCredentials 读取 dir 下全部凭证（只投影 uid/nickname）。
+func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
+	list, err := LoadDir(p.effectiveDir(dir))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gateway.Credential, 0, len(list))
+	for _, a := range list {
+		out = append(out, gateway.Credential{
+			Provider: providerID,
+			UID:      DisplayUID(a),
+			Nickname: DisplayNameOf(a),
+			FilePath: a.FilePath,
+		})
+	}
+	return out, nil
+}
+
+// LoadCredentialsWithSecrets 与 LoadCredentials 同源，但额外给出 Secret。
+//
+// ⚠ **必须与 LoadCredentials 读同一份对象**（同一次 LoadDir 的结果），
+// 不能各扫一次：各造一份会让"活凭证"与"投影"分叉 ——
+// 池子里那份 Secret 与磁盘上那份是两个 Go 对象，
+// 续期改了池里那份而投影指向的另一份没变，
+// 表现为"续期之后重启又变回旧的"。raccoon 的同款注释记的是另一面代价
+// （一次性 refresh_token 被消费两次，池里那份永远停在作废的旧值上）。
+func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialSecret, error) {
+	list, err := LoadDir(p.effectiveDir(dir))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]gateway.CredentialSecret, 0, len(list))
+	for _, a := range list {
+		out = append(out, gateway.CredentialSecret{
+			Credential: gateway.Credential{
+				Provider: providerID,
+				UID:      DisplayUID(a),
+				Nickname: DisplayNameOf(a),
+				FilePath: a.FilePath,
+			},
+			Secret: a,
+		})
+	}
+	return out, nil
+}
+
+// effectiveDir 解析生效的凭证目录。
+//
+// 核心传进来的 dir 一般就是 AuthDirExt 报的那个；为空时回落本实例的配置
+// （单上游部署的旧形态会传空串）。
+func (p *Provider) effectiveDir(dir string) string {
+	if s := strings.TrimSpace(dir); s != "" {
+		return s
+	}
+	if p != nil {
+		return p.authDir
+	}
+	return ""
+}
+
 // ---- 内部辅助 ----
 
 // authOf 从 gateway.Credential 里取出本包的 Auth。
