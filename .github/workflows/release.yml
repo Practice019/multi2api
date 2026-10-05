@@ -221,9 +221,18 @@ jobs:
             echo "$ASSETS" | xargs gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber
           else
             echo "Release $TAG 不存在，创建"
+            # 标题格式：`multi2api <tag>`，**只这两段**。
+            #
+            # ⚠ 不要写回 `WorkBuddy2API $TAG`（历史遗留名）：
+            #
+            #	- 仓库与服务名都是 multi2api（/healthz 的 service 字段也是）
+            #	- "WorkBuddy2API" 只是**上游 fork 来源**的名字，不是本项目名
+            #
+            # 也不要附加主题描述（曾出现 `— 上游 4 个 → 10 个 + …` 这种）：
+            # 标题该是**可检索的标识**，说明留在 notes 里。
             echo "$ASSETS" | xargs gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "WorkBuddy2API $TAG" \
+              --title "multi2api $TAG" \
               --notes "自动构建产物（Windows / Linux / macOS，amd64 + arm64）。详见仓库 README。"
           fi
 
