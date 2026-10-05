@@ -20,6 +20,7 @@ package zcode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -153,6 +154,242 @@ func contractCredential(uid string) gateway.Credential {
 	a := &Auth{Kind: CredKindAPIKey, APIKey: "test.key", UID: uid}
 	a.ensureUID()
 	return gateway.Credential{Provider: ProviderID, UID: uid, Secret: a}
+}
+
+// Models **无凭证也必须给出目录**。
+//
+// # 为什么这条必须存在（实测发现的缺口）
+//
+// 出口层调 Models 时**不带凭证**（handler.go 的 modelList 只传 provider id）。
+// 早先的实现在拿不到凭证时返回 error，于是：
+//
+//	新装的 zcode 上游在 /v1/models 里**一个模型都不出现**，
+//	直到有人加账号 —— 而那正是用户第一次配置上游的时刻。
+//	他会看到"zcode 没有模型"，以为装坏了。
+//
+// 更要紧的是：**内置兜底清单成了死代码**（永远走不到），
+// 而单测因为总是塞了凭证，对此完全无感。
+func TestModelsWithoutCredentialStillReturnsCatalog(t *testing.T) {
+	f := newFakeUpstream(t, nil)
+	p := newTestProvider(t, f) // 刻意不装任何凭证
+
+	list, err := p.Models(context.Background(), gateway.Credential{})
+	if err != nil {
+		t.Fatalf("无凭证时 Models 不该报错（出口层就是不带凭证调的）: %v", err)
+	}
+	if len(list) == 0 {
+		t.Fatal("无凭证时也要给出兜底目录 —— 否则新装的上游在 /v1/models 里是空的")
+	}
+	var found bool
+	for _, m := range list {
+		if m.ID == "GLM-5.3" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("兜底目录里应有 GLM-5.3，实际 %+v", list)
+	}
+
+	// 只带 UID（没有 Secret）时也要能用 —— 那是装配层探测路径的形状。
+	list2, err := p.Models(context.Background(), gateway.Credential{UID: "unknown-uid"})
+	if err != nil {
+		t.Fatalf("只带 UID 时也不该报错: %v", err)
+	}
+	if len(list2) == 0 {
+		t.Error("只带 UID 时也要给出目录")
+	}
+}
+
+// 官网实时配置取不到时回落内置清单（不能整个空掉）。
+func TestModelsFallsBackToBuiltin(t *testing.T) {
+	// 假上游没有 /api/v1/client/configs（它在 planOrigin 上，换不进去），
+	// 所以这条必然走回落路径 —— 正是我们要守的行为。
+	f := newFakeUpstream(t, nil)
+	a := &Auth{Kind: CredKindAPIKey, APIKey: "k", UID: "u1"}
+	p := newTestProvider(t, f, a)
+
+	list, err := p.Models(context.Background(), credOf(a))
+	if err != nil {
+		t.Fatalf("取不到实时配置时不该报错: %v", err)
+	}
+	if len(list) == 0 {
+		t.Fatal("应回落内置清单，而不是返回空")
+	}
+}
+
+// 管理端点：**无账号时必须回 `[]` 而不是 `null`**。
+//
+// # 为什么这条必须存在（实测发现的缺陷）
+//
+// Go 的 nil 切片序列化成 `null`，而前端 `data.accounts.length`
+// 在 null 上会抛 TypeError —— 后端返回的却是 200。
+// 症状是"界面什么都不显示 + 控制台一个异常"，看起来像接口坏了。
+//
+// 而触发它的正是**第一次配置上游**的时刻（还没加账号），
+// 也就是说：用户最需要看到"我该做什么"的那一次，看到的是空白。
+func TestAdminEndpointsReturnEmptyArrayNotNull(t *testing.T) {
+	f := newFakeUpstream(t, nil)
+	p := newTestProvider(t, f) // 无任何凭证
+
+	for _, path := range []string{"/admin/zcode/diagnose", "/admin/zcode/quota"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			for _, r := range p.AdminRoutes() {
+				if r.Path == path {
+					r.Handler(rec, req)
+				}
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("HTTP %d，期望 200", rec.Code)
+			}
+			body := rec.Body.String()
+
+			// 决定性断言：原始 JSON 里必须是 `[]`，不能是 `null`。
+			if strings.Contains(body, `"accounts":null`) {
+				t.Fatalf("accounts 是 null —— 前端 .length 会抛 TypeError。"+
+					"必须是 []：\n%s", body)
+			}
+			if !strings.Contains(body, `"accounts":[]`) {
+				t.Errorf("accounts 应是空数组，实际：\n%s", body)
+			}
+
+			// 顺带守：response 里要有 provider 字段（前端据此分组）。
+			if !strings.Contains(body, `"provider":"zcode"`) {
+				t.Errorf("响应缺少 provider 字段：\n%s", body)
+			}
+		})
+	}
+}
+
+// 管理端点：**有账号时要真的列出诊断信息**（不是空数组）。
+//
+// # ⚠ 这条测试为什么要刻意把凭证放在 credSrc 而不是本地表
+//
+// 真实运行时凭证在 `pool` 里，Provider 侧的 `p.creds` **是空的**
+// （见 knownUIDs 的注释：装配层只注入 credSrc 与枚举器）。
+//
+// 我第一版测试把凭证同时塞进 `p.creds` 与枚举器 —— 于是**变异验证
+// 发现它守不住**：把枚举器停掉后，knownUIDs 回落到本地表照样能返回
+// 那个 uid，测试仍然绿。而生产中本地表是空的，端点会返回 `[]`。
+//
+// 所以这里刻意**只**走 credSrc 路径：凭证不进 p.creds，
+// 只能通过 credSrc 与枚举器拿到 —— 与真实运行时的形状一致。
+func TestDiagnoseListsAccountsWhenPresent(t *testing.T) {
+	f := newFakeUpstream(t, nil)
+	a := &Auth{
+		Kind: CredKindAPIKey, APIKey: "diag-key-1111.2222",
+		UID: "diag-user", Nickname: "诊断号", Origin: originBigModel,
+	}
+	a.ensureUID()
+
+	// ⚠ p.creds 刻意**不装**这份凭证 —— 模拟真实运行时。
+	p := New(Config{Origin: f.srv.URL, AuthDir: t.TempDir(), HTTPClient: f.srv.Client()})
+	p.probeOrigin = false
+	p.SetCredentialSource(func(uid string) (gateway.Credential, bool) {
+		if uid != "diag-user" {
+			return gateway.Credential{}, false
+		}
+		return gateway.Credential{Provider: ProviderID, UID: uid, Nickname: a.Nickname, Secret: a}, true
+	})
+	// 枚举器是**唯一**能列出账号的途径（真实运行时它来自 pool.ListFor）。
+	p.SetUIDEnumerator(func() []string { return []string{"diag-user"} })
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/zcode/diagnose", nil)
+	rec := httptest.NewRecorder()
+	for _, r := range p.AdminRoutes() {
+		if r.Path == "/admin/zcode/diagnose" {
+			r.Handler(rec, req)
+		}
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"accounts":[]`) || strings.Contains(body, `"accounts":null`) {
+		t.Fatalf("枚举器给了 uid，端点却没列出账号 —— "+
+			"说明它没走枚举器（真实运行时 p.creds 是空的）：\n%s", body)
+	}
+	var resp struct {
+		Accounts []map[string]any `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(resp.Accounts) != 1 {
+		t.Fatalf("应列出 1 个账号，实际 %d：%s", len(resp.Accounts), body)
+	}
+	row := resp.Accounts[0]
+	if row["uid"] != "diag-user" {
+		t.Errorf("uid 不对: %v", row["uid"])
+	}
+	if row["platform"] != "BigModel" {
+		t.Errorf("平台应识别成 BigModel（凭证里写的是 bigmodel），实际 %v", row["platform"])
+	}
+	if row["channel"] != "API Key" {
+		t.Errorf("通道应识别成 API Key，实际 %v", row["channel"])
+	}
+	// ⚠ 令牌**不能**被完整回显 —— 诊断输出常被贴到 issue 里求助。
+	if tok, _ := row["token_tail"].(string); tok != "…2222" {
+		t.Errorf("token_tail 应只给尾 4 位，实际 %q", tok)
+	}
+	if s, _ := row["endpoint"].(string); !strings.Contains(s, pathPaaS) {
+		t.Errorf("endpoint 不对（BigModel 的普通 Key 应走 %s）: %q", pathPaaS, s)
+	}
+}
+
+// 管理端点：**只靠 credSrc 也要能取到凭证**（不是只读本地表）。
+//
+// 与上一条配合：那条测"能列出账号"，这条测"能读到凭证内容"。
+// 两条分开是因为它们走的是**两条不同的注入通道**
+// （枚举器 vs credSrc），任何一条断了都要能单独发现。
+func TestQuotaUsesCredentialSourceNotLocalTable(t *testing.T) {
+	f := newFakeUpstream(t, nil)
+	a := &Auth{Kind: CredKindAPIKey, APIKey: "src-key", UID: "src-user"}
+	a.ensureUID()
+
+	p := New(Config{Origin: f.srv.URL, AuthDir: t.TempDir(), HTTPClient: f.srv.Client()})
+	p.probeOrigin = false
+	p.SetCredentialSource(func(uid string) (gateway.Credential, bool) {
+		if uid != "src-user" {
+			return gateway.Credential{}, false
+		}
+		return gateway.Credential{Provider: ProviderID, UID: uid, Secret: a}, true
+	})
+	p.SetUIDEnumerator(func() []string { return []string{"src-user"} })
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/zcode/quota", nil)
+	rec := httptest.NewRecorder()
+	for _, r := range p.AdminRoutes() {
+		if r.Path == "/admin/zcode/quota" {
+			r.Handler(rec, req)
+		}
+	}
+	body := rec.Body.String()
+	// API Key 通道没有额度端点 → has_data 必须是 false（不是 0）。
+	var resp struct {
+		Accounts []struct {
+			UID      string `json:"uid"`
+			Channel  string `json:"channel"`
+			HasData  bool   `json:"has_data"`
+			Note     string `json:"note"`
+			Platform string `json:"platform"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v\n%s", err, body)
+	}
+	if len(resp.Accounts) != 1 {
+		t.Fatalf("应列出 1 个账号（说明读到了 credSrc 里的凭证），实际 %d：%s",
+			len(resp.Accounts), body)
+	}
+	row := resp.Accounts[0]
+	if row.UID != "src-user" {
+		t.Errorf("uid 不对: %q", row.UID)
+	}
+	if row.HasData {
+		t.Error("API Key 通道没有额度端点 → has_data 必须为 false（不能谎报 0）")
+	}
+	if row.Note == "" {
+		t.Error("没有额度数据时必须说明原因，否则用户以为是接口坏了")
+	}
 }
 
 // ID 与能力位。
