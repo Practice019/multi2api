@@ -5,7 +5,7 @@
 <h1 align="center">multi2api</h1>
 
 <p align="center">
-  <b>把 10 个 AI 上游聚合成 OpenAI 兼容 API 的多账号网关</b><br>
+  <b>把 11 个 AI 上游聚合成 OpenAI 兼容 API 的多账号网关</b><br>
   统一鉴权 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到与续期 · 管理控制台
 </p>
 
@@ -25,7 +25,8 @@
                          ├──► Raccoon Work       商汤小浣熊
                          ├──► LobsterAI          有道龙虾
                          ├──► Qoder              阿里 Qoder
-                         └──► Qoder（中国版）
+                         ├──► Qoder（中国版）
+                         └──► ZCode              Z.ai / 智谱 GLM Coding Plan
 ```
 
 > ⚠ **它不再是 WorkBuddy 专用**。架构上"加一个上游 = 加一个目录 + 实现一组接口 +
@@ -77,6 +78,7 @@
 | **Raccoon Work** | **浏览器授权（微信扫码 / 手机号）** | 积分余额 / 登录奖励 / onboarding 状态 |
 | **LobsterAI** | 浏览器 OAuth 回跳 | 三步式签到领取积分 / 定时自动签到 |
 | **Qoder / Qoder 中国版** | PKCE 设备码 | 积分余额 / 每日签到 / WASM 加密推理桥 |
+| **ZCode** | **API Key（OpenAI 协议）或 OAuth JWT（Anthropic 协议）** | 额度查询 / 令牌诊断 / 粘贴导入。**首个非 OpenAI 协议的上游** —— JWT 通道需要协议转换 |
 
 ## 🚀 快速开始
 
@@ -116,6 +118,12 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
     过完滑块点授权后会回调到本机端口，网关当场换取凭证。
   - 窗口被关掉时可点「重新无痕打开」，或点「复制链接」粘贴到无痕/隐私窗口。
 - **Cline**：WorkOS 设备码轮询，**不起本地端口** —— 服务器部署也能用。
+- **ZCode**：**只需要粘贴一个 API Key**，不需要打开浏览器、不需要验证码。
+  点「＋ 添加账号」后粘贴 Z.ai 或 BigModel 的 Key（支持平台前缀 `zai:` /
+  `bigmodel:`，以及 Coding Plan 标记 `cp:`，也支持一次粘贴多行）。
+  - 平台可以省略 —— 网关会**探测**这把 Key 属于哪个平台并记在凭证上。
+  - 只有走 Coding Plan 的 **JWT** 通道时才需要 `zcode.jwt_captcha: true`
+    （那会用系统浏览器打开一个本机页面过一次滑块，**需要图形界面**）。
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。
@@ -184,7 +192,49 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 各上游的配置段（都支持 `enabled` / `auth_dir`，其余见下）：
 
 `workbuddy` · `workbuddy_intl` · `codearts` · `loomy` · `trae` · `cline` ·
-`raccoon` · `lobsterai` · `qoder`
+`raccoon` · `lobsterai` · `qoder` · `zcode`
+
+**ZCode 特有配置段**：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `zcode.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
+| `zcode.auth_dir` | `<auth_dir>/zcode` | 凭证目录（`zcode-*.json`）。`api-key` 与 `jwt` 两种凭证共用 |
+| `zcode.origin` | `""`（按账号自动选） | 平台基址。**凭证里的 `origin` 优先** —— Z.ai（`api.z.ai`）与 BigModel（`open.bigmodel.cn`）是两套独立平台，同一个 Key 不能跨用 |
+| `zcode.pool_accounts` | `true` | 是否并入核心账号池 |
+| `zcode.jwt_captcha` | `false` | JWT 通道的浏览器验证码求解。⚠ 需要**图形界面** —— 服务器/容器部署下开了也必然超时 |
+
+> ⚠ **ZCode 的两条通道需要分清**（这是本上游与其它所有上游最大的不同）：
+>
+> | 通道 | 协议 | 验证码 | 额外依赖 | 端点 |
+> |---|---|---|---|---|
+> | `api-key` | OpenAI | 不需要 | 零 | `api.z.ai/api/paas/v4` |
+> | `jwt` | **Anthropic** | **每请求要** | 浏览器 | `zcode.z.ai/api/v1/zcode-plan/anthropic` |
+>
+> **API Key 通道是推荐路径**（粘贴即用、服务器可用）。Coding Plan 的 Key
+> 走 `/api/coding/paas/v4` —— 官方文档明示它与通用端点**额度不互通**，
+> 所以凭证里要标 `"coding_plan": true`，否则会"有额度却报无额度"。
+>
+> JWT 通道**必须**做协议转换（本仓唯一一处），因为实测它的 OpenAI 形态不存在：
+>
+> ```
+> /api/v1/zcode-plan/paas/v4/chat/completions   → 404   想当然的路径
+> /api/v1/zcode-plan/anthropic/v1/messages      → 401   只有这个
+> ```
+
+**ZCode 凭证格式**（`auths/zcode/zcode-<uid>.json`）：
+
+```json
+{"auth": {"kind": "api-key", "api_key": "你的Key.secretKey", "coding_plan": false}}
+```
+
+或直接在控制台「添加账号」粘贴 Key。也支持平台前缀与 Coding Plan 标记：
+
+```
+zai:你的Key.secretKey          指定平台（Z.ai）
+bigmodel:你的Key               指定平台（BigModel）
+cp:你的Key.secretKey           标记为 Coding Plan 的 Key
+```
 
 **「添加账号」的浏览器行为（`login.*`）**：
 
