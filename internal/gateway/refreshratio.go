@@ -51,14 +51,38 @@ const DefaultRefreshRatio = 0.5
 
 // JWTTimes 从 JWT 里读出的两个时刻（Unix 秒；读不到为 0）。
 type JWTTimes struct {
-	// IssuedAt 签发时刻（`iat`）。0 = token 里没有这个字段。
+	// IssuedAt 寿命起点：`iat` 优先，缺失时取 `nbf`（见 ParseJWTTimes 的文件头
+	// —— raccoon 的 token 只有 nbf，没有 iat）。0 = 两个字段都没有。
 	IssuedAt int64
 	// ExpiresAt 过期时刻（`exp`）。0 = token 里没有这个字段。
 	ExpiresAt int64
 }
 
-// ParseJWTTimes 读 JWT 的 `iat` / `exp`（不带签名校验 —— 我们只读本地时间戳，
-// 不需要信任它）。
+// ParseJWTTimes 读 JWT 的 `iat` / `nbf` / `exp`（不带签名校验 —— 我们只读本地
+// 时间戳，不需要信任它）。
+//
+// # ⚠ `nbf` 回退是**必需的**，不是锦上添花
+//
+// JWT 规范里 `iat`（签发时刻）是**可选**的，实现也常用 `nbf`（not before）
+// 表达"从何时起有效"。实测抽样本仓全部上游：
+//
+//	cline / codearts / lobsterai / trae / workbuddy / …   有 iat
+//	**raccoon**                                            只有 nbf，没有 iat
+//
+// 只读 `iat` 会让 raccoon **永远算不出比例窗口**（IssuedAt=0 →
+// RefreshSkewAtRatio 要求两者都 >0 → 返回 (0,false)）→ 上游的
+// RefreshSkewExt 扩展点**整个空转**，而它自己的注释还写着"iat + exp 都在"。
+//
+// 那是"看着接好了、实际没生效"的形态：没有报错、没有日志，只是判据
+// 悄悄退化成兜底窗口。
+//
+// # 为什么 nbf 能当寿命起点
+//
+// 比例策略要的是"寿命多长、用了多少"。nbf → exp 是服务端自己给出的有效
+// 区间，与 iat → exp 在这个用途上等价（通常只差几秒；即便有差，也不影响
+// "剩一半时续期"这种粗粒度判断）。
+//
+// 优先级 `iat` > `nbf`：有 iat 时仍以它为准（不改既有上游的行为）。
 //
 // # 宽容失败
 //
@@ -92,13 +116,19 @@ func ParseJWTTimes(token string) JWTTimes {
 	}
 	var payload struct {
 		Iat float64 `json:"iat"`
+		Nbf float64 `json:"nbf"`
 		Exp float64 `json:"exp"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return JWTTimes{}
 	}
+	// 寿命起点：iat 优先，缺失时用 nbf（见函数头注释）。
+	issued := numToUnix(payload.Iat)
+	if issued <= 0 {
+		issued = numToUnix(payload.Nbf)
+	}
 	return JWTTimes{
-		IssuedAt:  numToUnix(payload.Iat),
+		IssuedAt:  issued,
 		ExpiresAt: numToUnix(payload.Exp),
 	}
 }

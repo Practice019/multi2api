@@ -2196,14 +2196,60 @@ func (h *Handler) needsRefreshVia(providerID string, acct *auth.Auth) bool {
 	if !has {
 		// 上游只说了"怎么刷"，没说"多早刷" → 用核心的通用兜底。
 		// 这是**明确的**保守值，不是"核心假装知道上游的寿命"。
-		return acct.NeedsRefresh(h.cfg.RefreshSkew)
+		return refreshDueAt(acct, cred, h.cfg.RefreshSkew)
 	}
 	if skew <= 0 {
 		// 上游明确声明"不需要提前刷"（只在 401 后被动续期）。
 		// ⚠ 必须尊重它，不能用通用窗口覆盖 —— 那正是本函数要修的那类错误。
 		return false
 	}
-	return acct.NeedsRefresh(skew)
+	return refreshDueAt(acct, cred, skew)
+}
+
+// refreshDueAt 判"距过期不足 within" —— **优先用活凭证的过期时刻**。
+//
+// # 为什么不能直接 `acct.NeedsRefresh(within)`（实测的真 bug）
+//
+// `acct` 是**池投影**，而各上游的投影都刻意不抄 ExpiresAt
+// （见 raccooncreds.go / clinecreds.go 的「投影纪律」：投影是启动快照，
+// 活 secret 被续期后投影不会跟新）。实测 `/admin/accounts` 里
+// `expires_at` 键**一个上游都没有** ⇒ `acct.ExpiresAt` 恒为 0。
+//
+// 而 `auth.NeedsRefresh` 对 `ExpiresAt <= 0` **恒返回 true**：
+//
+//	func (a *Auth) NeedsRefresh(within time.Duration) bool {
+//		if a.ExpiresAt <= 0 { return true }   // ← 恒真
+//		return time.Now().Add(within).Unix() >= a.ExpiresAt
+//	}
+//
+// 于是"该不该刷"这个判断**对每个上游都恒为真** ⇒ 每个 chat 请求先做一次
+// 续期往返。危害按 refresh_token 的形态分两档：
+//
+//	可重复使用（cline 等）→ 白费一次往返
+//	**一次性**（raccoon / codearts）→ **每次请求烧掉一个 token**
+//
+// 实测 cline：发一次对话请求后 access_token **被换了**。
+// raccoon 更严重：一次性 token 被刷爆 → 续期连续失败 → 账号禁用
+// （正是用户报障的那个形态）。
+//
+// 所以这里优先读 `cred.ExpiresAt` —— 装配层已用
+// `gateway.CredentialExpiryExt` 把它从活 secret 上补齐（8 个上游都实现了
+// 该扩展点）。只有拿不到时才回落池投影。
+//
+// # 仍拿不到过期信息时保持**原有**行为（要刷）
+//
+// 那是"完全不知道什么时候过期"的上游。既有取舍是保守地刷
+// （宁可多一次往返，也不要拿一个可能过期的凭证去发请求，让服务端回 401）。
+// 本次**不改**这个取舍 —— 修的是"明明知道却不读"。
+func refreshDueAt(acct *auth.Auth, cred gateway.Credential, within time.Duration) bool {
+	at := cred.ExpiresAt.Unix()
+	if at <= 0 && acct != nil {
+		at = acct.ExpiresAt
+	}
+	if at <= 0 {
+		return true
+	}
+	return time.Now().Add(within).Unix() >= at
 }
 
 func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
