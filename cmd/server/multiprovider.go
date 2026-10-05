@@ -430,7 +430,60 @@ func (r registryRouter) Credential(id, uid string) (gateway.Credential, bool) {
 	} else {
 		cred.Secret = a
 	}
+	// ⚠ 池投影（a）**没有**过期信息时，问**上游活 secret** 要。
+	//
+	// # 为什么必须有这一步（实测的真 bug：每个请求都续期）
+	//
+	// 各上游的池投影都刻意**不抄** ExpiresAt（见 raccooncreds.go /
+	// clinecreds.go 的「投影纪律」：投影是启动快照，活 secret 被续期后
+	// 投影不会跟新）。实测 /admin/accounts 里 `expires_at` 键
+	// **一个上游都没有** —— 即 a.ExpiresAt 恒为 0。
+	//
+	// 而出口层的「要不要刷」判据要读过期时刻。它读不到就会退化成
+	// "每个 chat 请求先做一次续期往返"：
+	//
+	//	对可重复使用的 refresh_token（cline 等）→ 白费一次往返
+	//	对**一次性**的（raccoon / codearts）→ 每次请求烧掉一个 token
+	//
+	// 实测 cline：发一次对话请求后 access_token **被换了**。
+	// raccoon 更严重：一次性 token 被刷爆 → 续期开始失败 → 账号禁用。
+	//
+	// 过期权威在活 secret 上，已有扩展点可拿（8 个上游全都实现了它）。
+	// 这里补上，出口层就能用**真实**过期时刻判据。
+	if cred.ExpiresAt.IsZero() {
+		if at, ok := liveTokenExpiry(r.reg, id, cred); ok {
+			cred.ExpiresAt = time.Unix(at, 0)
+		}
+	}
 	return cred, true
+}
+
+// liveTokenExpiry 问上游活 secret 的过期时刻（gateway.CredentialExpiryExt）。
+//
+// ok=false 的三种情形与 admin 的 credentialExpiryOf 同义（都表示"不知道"）：
+//
+//	上游未注册 / 未实现该扩展点 → 不知道
+//	扩展点返回 ok=false         → 不知道
+//	返回 at<=0                  → 不知道（0 不是"1970 年过期"）
+//
+// **不区分**它们：调用方对"不知道"的处理只有一种。
+func liveTokenExpiry(reg *gateway.Registry, id string, cred gateway.Credential) (int64, bool) {
+	if reg == nil || cred.Secret == nil {
+		return 0, false
+	}
+	pv, ok := reg.Get(id)
+	if !ok {
+		return 0, false
+	}
+	ext, ok := gateway.ExtOf[gateway.CredentialExpiryExt](pv)
+	if !ok {
+		return 0, false
+	}
+	at, ok := ext.TokenExpiry(cred)
+	if !ok || at <= 0 {
+		return 0, false
+	}
+	return at, true
 }
 
 // RefreshCredential 用**该上游自己的**实现续期一份凭证。
