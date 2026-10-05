@@ -25,8 +25,14 @@ package raccoon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,16 +41,54 @@ import (
 
 // loginEntry 一次在途登录的会话。
 type loginEntry struct {
-	state     string
-	qrCode    string
-	qrURL     string
-	issuedAt  time.Time
-	expiredAt string
-	rotations int // canceled 时换过几次 code
-	ready     bool
-	cred      gateway.Credential
-	failRsn   string
-	mu        sync.Mutex
+	state string
+	// nonce 回调防串号标识（塞进 redirect 的 query，见 Start）。
+	nonce string
+	// port 本机回调端口（仅用于日志与排障）。
+	port     int
+	issuedAt time.Time
+	// ready/failRsn/cred 由 finishLogin / markFailed 写入，Poll 读取。
+	ready   bool
+	cred    gateway.Credential
+	failRsn string
+	mu      sync.Mutex
+}
+
+// authCallbackPath 本机回调的路径。
+const authCallbackPath = "/raccoon/callback"
+
+// browserLoginAppName 浏览器登录 URL 里的 appname。
+//
+// 取官方桌面端用的那一个（`/code/authorize` 的 appname 参数）——
+// 它只是展示在授权页上的产品名，不影响鉴权。
+const browserLoginAppName = "办公小浣熊客户端"
+
+// loginTimeout 登录会话的有效期。
+//
+// 5 分钟：登录需要人操作（打开浏览器 → 登录 → 过滑块 → 授权），
+// 与参照项目的 RACCOON_LOGIN_TIMEOUT_MS 同值。
+const loginTimeout = 5 * time.Minute
+
+// randomNonce 生成 32 位 hex 随机串（回调防串号标识）。
+func randomNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// markFailed 标记会话失败（Poll 会把它转成错误）。
+func (f *loginFlow) markFailed(e *loginEntry, reason string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	// 已有结果就不覆盖：先到的成功比后到的超时更可信。
+	if !e.ready && e.failRsn == "" {
+		e.failRsn = reason
+	}
+	e.mu.Unlock()
 }
 
 // loginFlow 实现 gateway.LoginFlow。
@@ -107,30 +151,145 @@ func (p *Provider) Configured() bool {
 	return ok && lf.Configured()
 }
 
-// Start 发起一次登录：生成 code + 承载 URL，并启动后台轮询。
+// Start 发起一次登录：起本地回调端口 + 返回**浏览器登录 URL**。
 //
 // 返回 (state, loginURL, error)。state 供 Poll 使用。
+//
+// # 为什么改走「浏览器登录」而不是旧的「直接给二维码内容」（用户报障）
+//
+// 旧实现返回 `https://xiaohuanxiong.com/login/mp?code=<32hex>` —— 那是
+// **微信落地页**，只能在微信里打开：
+//
+//	官网主 bundle 里 `login/mp` 出现 **0 次**（它只被当作二维码内容拼出来）
+//	微信 UA 与桌面 UA 请求它，返回的是**同一份 SPA 外壳**（路由表无 `mp`）
+//
+// 于是「用浏览器打开」和「直接点开这串链接」都是死路。而
+// `/login?appname=…&redirect=…` 是**商汤官方 VS Code 扩展自己的浏览器登录
+// 机制**（`Raccoon-VSCode/src/raccoonClient/raccoonClinet.ts` 的 getAuthUrl，
+// browser 模式就是拼这个），`redirect` 由调用方指定。
+//
+// 走这条路后，**微信扫码与手机号短信都在官方页面上完成** ——
+// 我们不碰阿里云滑块、不逆向，而且两种登录方式都可用。
+//
+// ⚠ 实测（2026-10-05，真实账号）：整条链路跑通，回调收到
+// `authorization_code=ac_…`，换回 `{"code":0}` + 真实 access_token。
+// `redirect` **没有白名单限制**。
 func (f *loginFlow) Start() (string, string, error) {
 	if f == nil || f.p == nil {
 		return "", "", errors.New("raccoon: 登录流程未配置")
 	}
-	code, err := GenerateQRCode()
+	// ① 绑一个本机回环端口收回调（与 lobsterai 同一手法：只绑 127.0.0.1，
+	//    端口交给内核选，避免与用户的其它服务抢固定端口）。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return "", "", fmt.Errorf("raccoon: 生成扫码 code 失败: %w", err)
+		return "", "", fmt.Errorf("raccoon: 回调端口监听失败: %w", err)
 	}
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	// ② nonce 防串号：回调只认自己发出去的那一个。
+	//
+	// ⚠ 用 nonce 而不是 `state` 参数：官方的 `/code/authorize` 只转发
+	// `authorization_code`，**不复制**我们塞进 `/login` 的其它参数
+	// （bundle 里 `_r` 只读 redirect/appname/ide）。所以防串号的标识
+	// 必须塞进 **redirect 自己的 query**，它会以 `&` 追加 code 而不覆盖。
+	nonce, err := randomNonce()
+	if err != nil {
+		_ = ln.Close()
+		return "", "", fmt.Errorf("raccoon: 生成 nonce 失败: %w", err)
+	}
+
+	state := nonce // state 即 nonce（天然唯一且随机）
+
 	e := &loginEntry{
-		state:    code, // state 即 qrcode_code（它天然唯一且随机）
-		qrCode:   code,
-		qrURL:    QRLoginURL(code),
+		state:    state,
+		nonce:    nonce,
+		port:     port,
 		issuedAt: time.Now(),
 	}
-
 	f.mu.Lock()
-	f.ses[e.state] = e
+	f.ses[state] = e
 	f.mu.Unlock()
 
-	go f.pollLoop(e)
-	return e.state, e.qrURL, nil
+	go f.serveAuthCallback(ln, e)
+
+	webflow := fmt.Sprintf("http://127.0.0.1:%d%s?nonce=%s", port, authCallbackPath, nonce)
+	return state, BrowserLoginURL(browserLoginAppName, webflow), nil
+}
+
+// serveAuthCallback 跑本机回调服务器，拿到 authorization_code 后立刻换凭证。
+//
+// 与 lobsterai 的 serveCallback 同构（那边是 portal 的 redirect_uri 回调）。
+func (f *loginFlow) serveAuthCallback(ln net.Listener, e *loginEntry) {
+	mux := http.NewServeMux()
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	finish := func() { closeOnce.Do(func() { close(done) }) }
+
+	mux.HandleFunc(authCallbackPath, func(w http.ResponseWriter, r *http.Request) {
+		gotNonce := r.URL.Query().Get("nonce")
+		code := r.URL.Query().Get("authorization_code")
+
+		// ⚠ nonce 必须匹配（防跨会话串号：同一台机器上可能有多个在途登录）。
+		if gotNonce != e.nonce {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, "nonce 不匹配，请回到控制台重新发起登录")
+			return
+		}
+		if strings.TrimSpace(code) == "" {
+			// 回调来了但没带 code：说明上游没按预期转发（机制变了）。
+			// 如实说清楚，而不是静默等超时。
+			f.markFailed(e, "上游回调没有携带 authorization_code（登录链路可能已变更）")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, "回调缺少 authorization_code")
+			finish()
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(),
+			time.Duration(requestTimeoutMS)*time.Millisecond)
+		a, err := f.p.client.ExchangeAuthorizationCode(ctx, code)
+		cancel()
+		if err != nil {
+			f.markFailed(e, err.Error())
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, "换取登录凭证失败："+err.Error())
+			finish()
+			return
+		}
+		// ⚠ 复用 finishLogin 而不是自己拼凭据 —— 它多做了三件必要的事：
+		//
+		//	① 从 JWT 的 exp 算 expires_at（缺了它账目过期时间未知）
+		//	② EnrichCredential 补昵称/手机号（展示用，失败不影响可用性）
+		//	③ 领一次性登录奖励
+		//
+		// 以及 `Secret: &authFile{...}` 这个**必需**的包装 ——
+		// 直接放 `*Auth` 会让授权成功后停在"凭证结构尚未接入落盘"，
+		// 用户看到的是"登录不了"。
+		f.finishLogin(e, a.AccessToken, a.RefreshToken)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, "<h2>登录成功 ✅</h2><p>可以关闭此页面，回到控制台。</p>")
+		finish()
+	})
+	// 浏览器常请求 /favicon.ico：给 204，避免它落进 404 被误读成错误。
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+
+	// 超时或完成后关服务器（释放端口）。
+	// 与 lobsterai 同值：登录是需要人操作的流程，5 分钟是常见体验下限。
+	timeout := time.NewTimer(loginTimeout)
+	defer timeout.Stop()
+	select {
+	case <-done:
+	case <-timeout.C:
+		f.markFailed(e, "登录超时（5 分钟内未完成）")
+	}
+	shutCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutCtx)
 }
 
 // Poll 查询授权结果。未完成时返回 gateway.ErrLoginPending。
@@ -160,77 +319,6 @@ func (f *loginFlow) Poll(state string) (gateway.Credential, error) {
 	return cred, nil
 }
 
-// QRCodeURL 返回本次登录的二维码承载 URL（供前端渲染二维码）。
-//
-// 未完成的会话才会返回；已完成/不存在时返回空串。
-func (f *loginFlow) QRCodeURL(state string) string {
-	f.mu.Lock()
-	e := f.ses[state]
-	f.mu.Unlock()
-	if e == nil {
-		return ""
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.qrURL
-}
-
-// pollLoop 后台轮询直到成功/取消/超时。
-//
-// # 状态处理（照搬参照 raccoon-oauth.ts:140-180）
-//
-//	pending  → 继续
-//	logging  → 继续，记录 expired_at
-//	canceled → **换一个新 code** 并更新 URL（不换的话用户卡死）
-//	success  → 取凭据
-//	其它      → 已在 NormalizeQRStatus 里降级为 pending
-func (f *loginFlow) pollLoop(e *loginEntry) {
-	deadline := time.Now().Add(time.Duration(loginTimeoutMS) * time.Millisecond)
-	interval := time.Duration(qrPollIntervalMS) * time.Millisecond
-
-	for {
-		if time.Now().After(deadline) {
-			f.markFailed(e, "raccoon: 登录超时（300 秒内未完成）")
-			return
-		}
-		time.Sleep(interval)
-
-		ctx, cancel := context.WithTimeout(context.Background(),
-			time.Duration(requestTimeoutMS)*time.Millisecond)
-		res, err := f.p.client.PollQRCode(ctx, e.qrCode)
-		cancel()
-
-		// ⚠ 任何异常都降级为 pending 继续轮询（不终止、不换 code）：
-		// 网络抖动不该让用户正在扫的二维码作废。
-		if err != nil {
-			continue
-		}
-
-		switch res.Status {
-		case QRStatusLogging:
-			if res.ExpiredAt != "" {
-				e.mu.Lock()
-				e.expiredAt = res.ExpiredAt
-				e.mu.Unlock()
-			}
-		case QRStatusCanceled:
-			// ⚠ 换一个新 code（否则用户卡死），并更新 URL
-			if code, gerr := GenerateQRCode(); gerr == nil {
-				e.mu.Lock()
-				e.qrCode = code
-				e.qrURL = QRLoginURL(code)
-				e.rotations++
-				e.mu.Unlock()
-			}
-		case QRStatusSuccess:
-			f.finishLogin(e, res.AccessToken, res.RefreshToken)
-			return
-		}
-		// pending 与其它情况：继续
-	}
-}
-
-// finishLogin 用拿到的 token 构造凭据并标记就绪。
 func (f *loginFlow) finishLogin(e *loginEntry, accessToken, refreshToken string) {
 	a := &Auth{
 		AccessToken:  accessToken,
@@ -275,12 +363,6 @@ func (f *loginFlow) finishLogin(e *loginEntry, accessToken, refreshToken string)
 }
 
 // markFailed 标记会话失败。
-func (f *loginFlow) markFailed(e *loginEntry, reason string) {
-	e.mu.Lock()
-	e.failRsn = reason
-	e.mu.Unlock()
-}
-
 // 编译期断言。
 var _ gateway.LoginFlow = (*loginFlow)(nil)
 

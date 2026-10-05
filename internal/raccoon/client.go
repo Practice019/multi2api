@@ -12,9 +12,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -126,6 +128,97 @@ func (c *Client) doJSON(ctx context.Context, method, url string, body any,
 		}
 	}
 	return env, resp.StatusCode, nil
+}
+
+// ── 浏览器登录（授权码链路，实测于 2026-10-05）────────────────────────────
+
+// ExchangeAuthorizationCode 用 `authorization_code` 换凭证。
+//
+// # 这条链路的来源与实证
+//
+// 商汤**官方 VS Code 扩展**（SenseTime-Copilot/Raccoon-VSCode，
+// `src/raccoonClient/raccoonClinet.ts` 的 getAuthUrl）本身就有两种登录 URL：
+//
+//	browser 模式  `${base}/login?appname=${app}&redirect=${callback}`
+//	wechat  模式  `${base}/login/mp?code=${uuid}&appname=${app}`
+//
+// 即 `/login?redirect=` 是**官方自己的浏览器登录机制**，`redirect` 由调用方
+// 指定（官方指向 `vscode://SenseTime.raccoon/login`，靠 registerUriHandler 收回）。
+// 我们指向 `http://127.0.0.1:<端口>` —— 同一机制的合法用法。
+//
+// 官网 bundle（`/code/authorize` chunk）里转发 code 的原文：
+//
+//	else if (d.get("redirect")) {
+//	    let r = d.get("redirect") || ""
+//	    const I = new URL(decodeURIComponent(r)), P = new URLSearchParams(I.search)
+//	    const y = `authorization_code=${j}`
+//	    P.toString() ? r += `&${y}` : r += `?${y}`
+//	    window.open(r)
+//	}
+//
+// 我们**实测跑通了整条链路**（真实账号）：回调收到
+// `authorization_code=ac_TBFJ_…`，本方法换回 `{"code":0}` +
+// 真实 access_token / refresh_token。
+//
+// # ⚠ 与 `/login/mp` 的区别（这是用户报障的根因）
+//
+// `/login/mp?code=…` 是**微信落地页**：官网主 bundle 里 `login/mp` 出现 0 次
+// （它只被当作二维码内容拼出来），用微信 UA 与桌面 UA 请求返回的是
+// **同一份 SPA 外壳**（路由表里没有 `mp`）。所以在电脑浏览器里打开它
+// 什么也看不到 —— 它是给微信扫的，不是给人点的。
+func (c *Client) ExchangeAuthorizationCode(ctx context.Context, code string) (*Auth, error) {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil, errors.New("raccoon: authorization_code 为空")
+	}
+	env, _, err := c.doJSON(ctx, http.MethodPost,
+		c.base()+authorizationCodePath,
+		map[string]string{"authorization_code": code}, requestTimeoutMS, nil)
+	if err != nil {
+		// 实测失效码：HTTP 400 + {"code":200035}
+		return nil, err
+	}
+	if env.Code != 0 {
+		return nil, envelopeError(env)
+	}
+
+	var data struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		OfficeIdent  string `json:"office_identity"`
+		ExpiredAt    string `json:"expired_at"`
+	}
+	_ = json.Unmarshal(env.Data, &data)
+	if strings.TrimSpace(data.AccessToken) == "" {
+		// 不产出半截凭证（与 PollQRCode 的 success-但-空-token 同一取舍）。
+		return nil, errors.New("raccoon: 授权码换取成功但未返回 access_token")
+	}
+	return &Auth{
+		AccessToken:    data.AccessToken,
+		RefreshToken:   data.RefreshToken,
+		OfficeIdentity: data.OfficeIdent,
+	}, nil
+}
+
+// BrowserLoginURL 拼浏览器登录 URL（授权码链路）。
+//
+// webflow 是回调地址（本机回环，见 login.go 的 serveAuthCallback）。
+//
+// # ⚠ 绝不能带 login_source=desktop
+//
+// 官网的 `/code/authorize` 页面用 `isDesktop()`（`login_source=desktop`）
+// 分支决定把 code 往哪送：
+//
+//	有 login_source=desktop → 跳 `office-raccoon://auth/callback`（自定义协议）
+//	无、且有 redirect       → 拼到 redirect 上并 window.open
+//
+// 带了它 `redirect` 就被**完全忽略**，我们会永远等不到回调。
+// 官方桌面端走深链是因为它有 Electron 宿主能收；我们没有。
+func BrowserLoginURL(appName, webflow string) string {
+	q := url.Values{}
+	q.Set("appname", appName)
+	q.Set("redirect", webflow)
+	return DefaultAPIBase + "/login?" + q.Encode()
 }
 
 // ── 扫码登录（raccoon-oauth.ts:140-180）──────────────────────────────────

@@ -52,6 +52,11 @@ const (
 const (
 	// qrcodeLoginPath 轮询扫码状态（唯一必需头：Content-Type，**不带 Authorization**）。
 	qrcodeLoginPath = authPrefix + "/login_with_qrcode_code"
+	// authorizationCodePath 用授权码换凭证（浏览器登录链路的第二跳）。
+	//
+	// 实测（2026-10-05，真实账号）：POST {authorization_code} → {"code":0}
+	// + access_token / refresh_token；失效码 → HTTP 400 + code 200035。
+	authorizationCodePath = authPrefix + "/login_with_authorization_code"
 	// refreshPath 续期。
 	refreshPath = authPrefix + "/refresh"
 	// userInfoPath 用户信息。
