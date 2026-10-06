@@ -201,6 +201,8 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 | `zcode.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
 | `zcode.auth_dir` | `<auth_dir>/zcode` | 凭证目录（`zcode-*.json`）。`api-key` 与 `jwt` 两种凭证共用 |
 | `zcode.origin` | `""`（按账号自动选） | 平台基址。**凭证里的 `origin` 优先** —— Z.ai（`api.z.ai`）与 BigModel（`open.bigmodel.cn`）是两套独立平台，同一个 Key 不能跨用 |
+| `zcode.oauth_base` | `""`（官方线上） | 页内登录（CLI OAuth）的端点基址 |
+| `zcode.billing_origin` | `""`（官方线上） | 额度查询端点的 origin。⚠ **与 `oauth_base` 必须分开**：登录路径 `/oauth/cli/init` 不含 `/api/v1`，而计量路径 `/api/v1/zcode-plan/…` **自带**它 —— 混用会拼出 `/api/v1/api/v1/…`（404） |
 | `zcode.pool_accounts` | `true` | 是否并入核心账号池 |
 | `zcode.jwt_captcha` | `false` | JWT 通道的浏览器验证码求解。⚠ 需要**图形界面** —— 服务器/容器部署下开了也必然超时 |
 

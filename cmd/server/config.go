@@ -760,6 +760,12 @@ type Config struct {
 		//（见 official-coding-plan-gateway.ts），且 .env.example 里有内网
 		// 覆盖项 —— 硬编码等于把「上游改架构」变成我们的故障。
 		OAuthBase string `json:"oauth_base"`
+		// BillingOrigin 计量端点的 origin 覆盖（留空 = 官方线上 zcode.z.ai）。
+		//
+		// ⚠ 与 OAuthBase **必须分开**：CLI OAuth 的路径 `/oauth/cli/init`
+		// 不含 `/api/v1` 前缀，而计量路径 `/api/v1/zcode-plan/…` **自带**它。
+		// 混用会拼出 `/api/v1/api/v1/…` → 404（实测踩过）。
+		BillingOrigin string `json:"billing_origin"`
 		// PoolAccounts 是否并入核心账号池（默认 true）。
 		PoolAccounts *bool `json:"pool_accounts"`
 		// JWTCaptcha 是否为 JWT 通道启用浏览器验证码求解（默认 false）。
@@ -910,12 +916,13 @@ type Config struct {
 	QoderPoolAccounts bool   `json:"-"`
 
 	// ZCode（第十一上游，Z.ai / 智谱 GLM）解析后。
-	ZCodeEnabled      bool   `json:"-"`
-	ZCodeAuthDir      string `json:"-"`
-	ZCodeOrigin       string `json:"-"`
-	ZCodeOAuthBase    string `json:"-"`
-	ZCodePoolAccounts bool   `json:"-"`
-	ZCodeJWTCaptcha   bool   `json:"-"`
+	ZCodeEnabled       bool   `json:"-"`
+	ZCodeAuthDir       string `json:"-"`
+	ZCodeOrigin        string `json:"-"`
+	ZCodeOAuthBase     string `json:"-"`
+	ZCodeBillingOrigin string `json:"-"`
+	ZCodePoolAccounts  bool   `json:"-"`
+	ZCodeJWTCaptcha    bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
 	// # 为什么保留它
@@ -1435,6 +1442,7 @@ func (c *Config) normalize() error {
 	}
 	c.ZCodeOrigin = strings.TrimSpace(c.ZCode.Origin)
 	c.ZCodeOAuthBase = strings.TrimSpace(c.ZCode.OAuthBase)
+	c.ZCodeBillingOrigin = strings.TrimSpace(c.ZCode.BillingOrigin)
 	// ⚠ 与 Enabled 取"与"：上游关着时 jwt_captcha=true 也不该去起浏览器，
 	// 否则会出现"没启用上游却在后台弹验证码窗口"的鬼影。
 	c.ZCodeJWTCaptcha = c.ZCodeEnabled && c.ZCode.JWTCaptcha

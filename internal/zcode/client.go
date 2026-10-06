@@ -53,6 +53,17 @@ type Config struct {
 	// （顺带的好处：测试能把假上游指进来，而不必真去打线上 ——
 	// 之前硬编码时测试真的把请求发出去了，那是不可接受的副作用。）
 	OAuthBase string
+	// BillingOrigin 计量端点的 origin 覆盖（空 = 官方线上 zcode.z.ai）。
+	//
+	// ⚠ **不能与 OAuthBase 复用同一个字段**（第一版就是那样，结果 404）：
+	//
+	//	CLI OAuth 的路径  /oauth/cli/init          ← 不含 /api/v1 前缀
+	//	计量端点的路径    /api/v1/zcode-plan/…     ← **自带** /api/v1
+	//
+	// 两边前缀约定不同，共用一个 base 会拼出
+	// `https://zcode.z.ai/api/v1/api/v1/zcode-plan/…`（实测 404）。
+	// 所以它们是两个独立的注入点。
+	BillingOrigin string
 	// AuthDir 凭证目录。
 	AuthDir string
 	// HTTPClient 注入的 HTTP 客户端（测试用；空 = 默认）。
@@ -65,10 +76,12 @@ type Config struct {
 type Client struct {
 	origin    string
 	oauthBase string
-	http      *http.Client
-	captcha   CaptchaSolver
-	appVer    string
-	accounts  map[string]*Auth // UID → 活凭证（由 Provider 装配时注入）
+	// billingOrigin 计量端点的 origin（与 oauthBase 分开的原因见 Config）。
+	billingOrigin string
+	http          *http.Client
+	captcha       CaptchaSolver
+	appVer        string
+	accounts      map[string]*Auth // UID → 活凭证（由 Provider 装配时注入）
 }
 
 // NewClient 构造客户端。
@@ -93,12 +106,17 @@ func NewClient(cfg Config) *Client {
 	if base == "" {
 		base = cliOAuthBase
 	}
+	billBase := strings.TrimRight(strings.TrimSpace(cfg.BillingOrigin), "/")
+	if billBase == "" {
+		billBase = planOrigin
+	}
 	return &Client{
-		origin:    strings.TrimRight(strings.TrimSpace(cfg.Origin), "/"),
-		oauthBase: base,
-		http:      hc,
-		captcha:   cfg.Captcha,
-		appVer:    defaultAppVersion,
+		origin:        strings.TrimRight(strings.TrimSpace(cfg.Origin), "/"),
+		oauthBase:     base,
+		billingOrigin: billBase,
+		http:          hc,
+		captcha:       cfg.Captcha,
+		appVer:        defaultAppVersion,
 	}
 }
 
@@ -235,7 +253,11 @@ func (c *Client) billingGet(ctx context.Context, a *Auth, path string) ([]byte, 
 	if a == nil || !a.Usable() {
 		return nil, fmt.Errorf("zcode: 凭证缺失或不可用")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, planOrigin+path, nil)
+	// ⚠ 必须带 `?app_version=` —— 参照实现两个端点都带它
+	//（config.BillingClientVersion）。实测 current 不带也能通，
+	// 但照抄版本头/查询串能让请求与官方客户端一致，少一个被风控的理由。
+	target := c.billingBase() + path + "?app_version=" + c.appVer
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -255,6 +277,20 @@ func (c *Client) billingGet(ctx context.Context, a *Auth, path string) ([]byte, 
 			resp.StatusCode, firstLine(errMessage(raw)))
 	}
 	return raw, nil
+}
+
+// billingBase 计量端点的基址。
+//
+// 为什么做成方法而不是直接用常量：测试要能把假上游指进来，
+// 否则"主备顺序"与"端点选择"这两件事**无法被断言** ——
+// 而它们正是用户报的那个 bug 的核心（我打了 balance 而它报参数错）。
+//
+// 生产上它恒等于 planOrigin（除非将来上游改写端点）。
+func (c *Client) billingBase() string {
+	if c != nil && c.billingOrigin != "" {
+		return c.billingOrigin
+	}
+	return planOrigin
 }
 
 // firstLine 取字符串第一行（塞进错误信息时避免把整个 JSON 打进去）。
