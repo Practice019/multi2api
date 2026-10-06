@@ -26,18 +26,42 @@ import (
 // 两个端点，都对应我声明的能力位：
 //
 //	/admin/zcode/quota    余额/配额查询（CapQuotaProbe）
-//	/admin/zcode/token    令牌生命周期诊断（给排障用）
+//	/admin/zcode/diagnose 令牌生命周期诊断（排障用）
+//
+// # ⚠ 两个都是 Hidden（用户要求："这个 zcode 不需要有额外的标签页"）
+//
+// Hidden 的语义是「这条路由存在、但**不是面板入口**」——
+// 前端 panelRoutesFor 会把它从"该生成一个标签页吗"的判据里排掉，
+// 而**路由本身照挂**（curl / 调试仍可用）。
+//
+// 我原来让 quota 这条**可见**，于是左侧导航多出一个「额度探测」标签页。
+// 那个标签页是本上游独有的 —— 对照其它上游：
+//
+//	codearts  声明 CapQuotaProbe，但端点是 **POST**（§routesFor 只认 GET）
+//	           → 不生成面板
+//	trae      声明 CapQuotaProbe，**没有任何路由**
+//	           → 不生成面板
+//	workbuddy 声明 CapQuotaProbe，没有独立 GET 额度端点
+//	           → 不生成面板
+//
+// 也就是说：**zcode 是唯一因为这个而多出一个空标签页的上游**。
+// 而那个面板里其实什么都没有 —— 额度已经在账号池的「额度」列、
+// 以及分组行的「刷新本上游额度」按钮上（两者都走 core 的
+// `POST /admin/accounts/quota/refresh`，与本路由无关）。
+//
+// 所以隐藏它不损失任何功能，只是去掉一个重复的空壳入口。
 //
 // 刻意**不做**的端点：
 //
 //	签到相关      Z.ai 没有签到概念（额度由订阅周期决定）
-//	登录相关      API Key 通道不需要登录（粘贴即用）；
-//	              JWT 通道的 OAuth 是另一个工作量，见下面的说明
 func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 	return []gateway.AdminRoute{
 		{
-			Method:     http.MethodGet,
-			Path:       "/admin/zcode/quota",
+			Method: http.MethodGet,
+			Path:   "/admin/zcode/quota",
+			// Hidden：见上面那段 —— 额度已经由账号池的「额度」列与
+			// 分组行的「刷新本上游额度」按钮承担，不需要额外的标签页。
+			Hidden:     true,
 			Handler:    p.handleQuota,
 			Capability: gateway.CapQuotaProbe,
 			Title:      "ZCode 额度",

@@ -117,6 +117,15 @@ type providerInfo struct {
 	// `omitempty` 让前者不出现在 JSON 里，前端把它读成 `undefined`
 	// → 回落默认列。**前端不需要认识任何上游名**。
 	AccountColumns []string `json:"accounts_columns,omitempty"`
+	// Notice 上游要在**自己的分组标题旁**显示的一句提醒（如「测试中」）。
+	//
+	// 由上游自报（gateway.NoticeExt），核心只搬运 —— 前端读数据渲染，
+	// **不认识任何上游名**。这与 DisplayName 同一条纪律：
+	// 「哪个上游是测试」是上游自己的事实，不是前端或核心该知道的东西。
+	//
+	// omitempty：不实现扩展点、或报回空串时不下发，
+	// 既有上游的界面因此**逐字节不变**。
+	Notice string `json:"notice,omitempty"`
 }
 
 // displayNameOf 问上游「你在界面上叫什么」。
@@ -166,6 +175,22 @@ func accountColumnsOf(p gateway.Provider) []string {
 		}
 	}
 	return cols
+}
+
+// noticeOf 问上游「界面上要不要给你挂一句提醒」。
+//
+// 未实现 NoticeExt、或报回空串 → 空串（字段不下发，界面不变）。
+//
+// ⚠ 做一次 TrimSpace：上游返回 " " / "\n" 时不该渲染出
+// 一个空的小字块（那会在分组标题旁留一格无名空白）。
+func noticeOf(p gateway.Provider) string {
+	if p == nil {
+		return ""
+	}
+	if ext, ok := gateway.ExtOf[gateway.NoticeExt](p); ok {
+		return strings.TrimSpace(ext.Notice())
+	}
+	return ""
 }
 
 // providerLogin 登录能力的**声明**（不含任何实现细节）。
@@ -221,6 +246,7 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			}
 			// 账号池列集：上游自报（未实现 = nil = 用默认 11 列）。
 			info.AccountColumns = accountColumnsOf(p)
+			info.Notice = noticeOf(p)
 			infos = append(infos, info)
 		}
 	}

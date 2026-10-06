@@ -282,6 +282,10 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 		// "/admin/providers 有、前端读到的 manifest 没有" → 列集永远用不上，
 		// 而接口调试看起来一切正常。
 		info.AccountColumns = accountColumnsOf(p)
+		// ⚠ 与上面列集同一个坑：**必须在这里也填一次**。
+		// 前端真正读的是 manifest，而 providerInfo 有两个构造点
+		//（本文件 + schedule.go 的 /admin/providers）。
+		info.Notice = noticeOf(p)
 		m.Providers = append(m.Providers, info)
 
 		ext, ok := gateway.ExtOf[gateway.AdminExt](p)
