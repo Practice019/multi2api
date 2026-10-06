@@ -1639,6 +1639,36 @@ let loginProvider = '';
     return id || '（未标注）';
   }
 
+  // noticeHTML 上游自报的提醒（渲染在账号池分组标题里，小字）。
+  //
+  // # 数据来源与"谁说了这句话"
+  //
+  // 读 manifest.providers[].notice —— 由**上游自己**下发
+  //（后端 gateway.NoticeExt，见 internal/zcode 的 Notice()）。
+  //
+  // ⚠ 这里**绝不能**写成 `if (id === 'zcode') return '…'`：
+  // 那会让前端知道上游名，加第 12 个上游要改前端 —— 正是本仓
+  // 一直在避免的（判据 1）。现在的形态是"上游报什么就显示什么"，
+  // 前端对上游零知识。
+  //
+  // # 没有 notice 字段时返回空串
+  //
+  // 于是没有该字段的上游，渲染结果与改造前**逐字节相同**
+  //（不会多出空 span / 多余间距）。
+  //
+  // # 为什么按纯文本转义渲染
+  //
+  // 措辞来自上游（在当前部署里是 zcode 的常量，但扩展点允许它由
+  // 运行时配置决定）。**不解析成 HTML** —— 否则一个上游名或配置里的
+  // `<` 就能改本页 DOM（本仓对上游数据一律 esc 的既有纪律）。
+  function noticeHTML(providerId) {
+    const p = providerInfo(providerId);
+    const n = p && typeof p.notice === 'string' ? p.notice.trim() : '';
+    if (!n) return '';
+    return `<span class="dim" style="font-weight:400;font-size:11px;opacity:.85">`
+      + `<span style="opacity:.7">·</span> ${esc(n)}</span>`;
+  }
+
   // providerInfo 取某上游的 manifest 描述。
   function providerInfo(id) {
     return (PROVIDERS || []).find(p => p && p.id === id) || null;
@@ -2578,6 +2608,18 @@ let loginProvider = '';
       + `<span class="acaret"></span>`
       + `<span class="gname">${esc(providerTitle(g.provider) || UNLABELED_PROVIDER)}</span>`
       + `<span class="dim" style="font-weight:400;font-size:11px">${esc(n + ' 个账号 · ' + meta + def)}</span>`
+      // 上游自报的提醒（如「测试中」）。**放在 .ghead-btn 之内** ——
+      // 它属于标题这一行，折叠时跟着标题走；也避免用户按它时
+      // 落进"点了却没反应"的空白（按钮内整行可折叠，这是本仓既有行为）。
+      //
+      // ⚠ 判据是 manifest 里的 `notice` 字段，**不是上游名**。
+      // 前端不认识任何上游 —— 谁要挂提醒、挂什么话，都是上游自己的事实
+      //（见 gateway.NoticeExt 的注释）。没有这个字段的上游，
+      // 渲染结果与改造前**逐字节相同**。
+      //
+      // 样式刻意用 .dim + 更小字号：它是**提醒**不是警告，
+      // 不该在视觉上盖过「N 个账号」这类主信息。
+      + noticeHTML(g.provider)
       + `</button>`
       // 折叠时另起一句：组标题里的"0 个账号 · 4 项能力"回答不了
       // "为什么没有" —— 那是用户下一步要的动作。
