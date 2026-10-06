@@ -76,9 +76,21 @@ var (
 // 刻意**不含**：
 //
 //	「今日签到」   它没有这个能力位
-//	成功/熔断/在途 通用计数器。用户要求 codearts 那份"重写"、保持清爽；
-//	              这三个数在 8 列里会占掉近一半宽度却几乎不变。
-//	              （要恢复只需往下面这个数组里加三个 id，前端零改动。）
+//	「熔断」「在途」 通用计数器。用户要求 codearts 那份"重写"、保持清爽；
+//	              这两个数占宽度却几乎不变（用户明确要求全上游删掉它们，
+//	              见 gateway.DefaultAccountColumns 的注释）。
+//
+// # ⚠ 「成功」列曾在上面这一行里，理由是错的（用户指出）
+//
+// 原注释是"成功/熔断/在途 通用计数器，用户要求保持清爽"——
+// 把三列混成一件，但**用户明确要求删的只有熔断与在途**。
+// 而「成功」一直在默认列集里，用户现在的明确要求是
+// **"每一个上游都需要有成功列"**。
+//
+// 而且它与那两列性质不同：`success` 来自核心的 `pool.NoteSuccess`
+// （`pool.go` 的 `successCount`）—— **任何上游的账号都有这个计数器**。
+// 所以"要不要显示它"不是上游能选的：核心已经在为每个账号数了，
+// 漏掉它只是让用户看不到一个**已经存在**的事实。
 //
 // 返回值是切片字面量，每次调用都是新的（调用方可能排序，不该共享底层数组）。
 func (p *Provider) AccountColumns() []string {
@@ -90,6 +102,7 @@ func (p *Provider) AccountColumns() []string {
 		gateway.AccountColStatus,
 		gateway.AccountColTokenExpiry,
 		gateway.AccountColWelfare,
+		gateway.AccountColSuccess,
 		gateway.AccountColOps,
 	}
 }

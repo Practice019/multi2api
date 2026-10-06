@@ -87,14 +87,33 @@ type Status struct {
 	// 前端、统计、以及 55 处既有测试都在用它。
 	//
 	// ⚠ 它不再是真相来源。新代码请用 Quota。
-	Credits         int64     `json:"credits"`
-	Cooling         bool      `json:"cooling"`
-	CoolKind        string    `json:"cool_kind,omitempty"`
-	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
-	Until           time.Time `json:"until,omitempty"`
-	Reason          string    `json:"reason,omitempty"`
-	Disabled        bool      `json:"disabled"`
-	SuccessCount    int64     `json:"success_count,omitempty"`
+	Credits       int64     `json:"credits"`
+	Cooling       bool      `json:"cooling"`
+	CoolKind      string    `json:"cool_kind,omitempty"`
+	CoolRemaining int64     `json:"cool_remaining_sec,omitempty"`
+	Until         time.Time `json:"until,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	Disabled      bool      `json:"disabled"`
+	// SuccessCount 该账号累计成功请求数。
+	//
+	// ⚠ **刻意没有 `omitempty`**（这是我修的一个真 bug）。
+	//
+	// 原来写了 `omitempty`，于是 `0` 时**字段整个不出现在 JSON 里** →
+	// 前端 `esc(a.success_count)` 收到 `undefined` → 渲染出**空白单元格**。
+	// 而同一个结构体里 `in_flight` / `breaker_fails` **没有** omitempty，
+	// 所以那两个计数能正常显示 `0` —— 三个同类字段两种行为。
+	//
+	// 为什么 `0` 必须显示成 `0`（本仓反复的教训，见 AccountView.TokenExpireSec）：
+	//
+	//	0      = 确定的事实「这个号一次都没成功过」
+	//	空白   = 读的人不知道是「0」还是「我们没在数」
+	//
+	// 而用户刚明确要求每个上游都要有「成功」列 —— 一列全是空白的
+	// 成功列比没有这一列更让人困惑。
+	//
+	// 落盘那份（`stateAccount`）**保留 omitempty**：那里省字节是有意义的，
+	// 且 Go 零值天然 round-trip，不像前端要区分"缺字段"与"是 0"。
+	SuccessCount    int64     `json:"success_count"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
 	LastErrTime     time.Time `json:"last_err,omitempty"`

@@ -13,6 +13,16 @@ import (
 //
 // 列集是**用户可见的契约**：多一列少一列、顺序变了，都是观感变化。
 // 只断言"包含 token_expiry" 的话，顺手多加一列不会有任何测试变红。
+//
+// # 2026-10 加了 `success`（用户要求）
+//
+// 用户："每一个上游都需要有成功列"。我原先把「成功」与「熔断/在途」
+// 一起当成"可选排障计数器"省略了 —— 那是错的：用户明确要求删的
+// **只有熔断与在途**，而「成功」的数据来自核心 `pool.NoteSuccess`，
+// 每个账号都有这个计数器。
+//
+// ⚠ 这条**全等**断言正是当时能拦住我的东西 —— 它红了，
+// 我必须明确地把 success 加进 want 里，而不是"顺手多加一列"。
 func TestAccountColumnsVocabulary(t *testing.T) {
 	p := NewWithConfig(Config{})
 	got := p.AccountColumns()
@@ -24,6 +34,7 @@ func TestAccountColumnsVocabulary(t *testing.T) {
 		gateway.AccountColStatus,
 		gateway.AccountColTokenExpiry,
 		gateway.AccountColWelfare,
+		gateway.AccountColSuccess,
 		gateway.AccountColOps,
 	}
 	if len(got) != len(want) {

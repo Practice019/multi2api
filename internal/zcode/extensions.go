@@ -166,6 +166,7 @@ func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 //	nickname  "昵称"   本上游有昵称（登录拿到 name/email）——
 //	                   比 UID 可读得多，而 UID 是 36 位 uuid
 //	quota     "额度"   JWT 通道走 billing/current，这一列**有真实数据**
+//	success   "成功"   该账号累计成功请求数
 //
 // 刻意**不报**：
 //
@@ -173,12 +174,31 @@ func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 //	uid                    36 位 uuid 占很宽，昵称更有用；
 //	                       完整 uid 在诊断端点里能看
 //	checkin / welfare      本上游没有这些概念
-//	success/breaker/in_flight  排障计数器，用户在账号池里已经删掉了
+//	breaker / in_flight    熔断/在途是用户明确要求删掉的两列
+//
+// # ⚠ 「成功」列我曾漏掉，理由是错的（用户指出）
+//
+// 我原来的注释写的是"success/breaker/in_flight 排障计数器，用户在账号池里
+// 已经删掉了"。**那句话把三列混为一谈，而它们不一样**：
+//
+//	breaker / in_flight  用户**明确要求删掉**的只有这两列
+//	                     （见 gateway.DefaultAccountColumns 的注释）
+//	success              **从来不在删除之列** —— 它就在默认列集里，
+//	                     而且用户现在的明确要求是"每一个上游都要有成功列"
+//
+// 而且 `success` 与那两列在**性质**上就不同：它来自核心的
+// `pool.NoteSuccess`（`pool.go` 的 `successCount`），
+// **任何上游的账号都有这个计数器** —— 它是"这个号被用过多少次、成不成功"
+// 的最直接读数，不是上游特有的排障指标。
+//
+// 所以"哪个上游有用它"根本不是上游能选的事：核心已经为每个账号在数了。
+// 漏掉它只是让用户看不到一个**已经存在**的事实。
 func (p *Provider) AccountColumns() []string {
 	return []string{
 		gateway.AccountColProvider,
 		gateway.AccountColNickname,
 		gateway.AccountColQuota,
+		gateway.AccountColSuccess,
 	}
 }
 

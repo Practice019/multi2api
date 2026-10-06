@@ -215,6 +215,11 @@ func (p *Provider) authByUID(uid string) *Auth {
 //
 // 与 workbuddy 首列一致（上游），含 Token 到期（走 CredentialExpiryExt）
 // 与今日签到（走 DailyActionExt）。熔断/在途按用户本轮要求全上游不显示。
+//
+// ⚠ 「成功」列**必须在**（用户明确要求"每一个上游都需要有成功列"）。
+// 它不是我原来以为的可选排障计数器 —— 它来自核心的
+// `pool.NoteSuccess`（`pool.go` 的 `successCount`），
+// **任何上游的账号都有这个计数器**，与 trae 有没有对应能力位无关。
 func (p *Provider) AccountColumns() []string {
 	return []string{
 		gateway.AccountColProvider,
@@ -224,6 +229,7 @@ func (p *Provider) AccountColumns() []string {
 		gateway.AccountColStatus,
 		gateway.AccountColTokenExpiry,
 		gateway.AccountColCheckin,
+		gateway.AccountColSuccess,
 		gateway.AccountColOps,
 	}
 }
