@@ -899,12 +899,12 @@ func TestQuotaFromBilling(t *testing.T) {
 	// 这是用户账号的实际响应（我实测抓到的）：
 	//
 	//	GET /billing/current?app_version=3.14.0
-	//	→ 200 {"code":0,"msg":"","data":{"server_time":1791258568,"plans":[]}}
+	//	→ 200 {"code":0,"msg":"","data":{"server_time":1700000000,"plans":[]}}
 	//
 	// ⚠ 这一条必须报 HasData=true + 0，**不能**报 false。
 	// 报 false 会让界面显示 `—`，用户以为是我们查不到 ——
 	// 而真相是"登录成功了，但这个号没有 Coding Plan 额度"。
-	view, ok = parseBillingSnapshot([]byte(`{"code":0,"msg":"","data":{"server_time":1791258568,"plans":[]}}`))
+	view, ok = parseBillingSnapshot([]byte(`{"code":0,"msg":"","data":{"server_time":1700000000,"plans":[]}}`))
 	if !ok {
 		t.Fatal("查询成功（code=0）应返回 ok=true —— 即使没有额度数据")
 	}

@@ -511,7 +511,7 @@ func shortTail(s string) string {
 //
 // 解码一个真实登录得到的 token，payload 只有：
 //
-//	{"user_id":"d9726374-…","token_version":0,"sub":"d9726374-…","iat":1791258329}
+//	{"user_id":"<uuid>","token_version":0,"sub":"<uuid>","iat":1700000000}
 //
 // 没有 `exp`。而官方自己的 `resolveJwtExpiration`
 // （packages/shared/src/oauth.ts）对这种情况也返回 `"unknown"`：

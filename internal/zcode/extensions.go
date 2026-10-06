@@ -119,7 +119,7 @@ func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 //
 // 而 zcode 的 JWT **没有 `exp`**（实测解出来只有 iat）：
 //
-//	{"user_id":"…","token_version":0,"sub":"…","iat":1791258329}
+//	{"user_id":"…","token_version":0,"sub":"…","iat":1700000000}
 //
 // 官方自己的 `resolveJwtExpiration` 对这种 token 也返回 `"unknown"`：
 //
