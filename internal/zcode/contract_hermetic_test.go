@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -777,10 +778,10 @@ func TestAccountColumnsAreRegisteredIDs(t *testing.T) {
 		}
 	}
 
-	// 本上游该有的四列（上游/UID/Token/额度）。
+	// 本上游该有的三列（上游/昵称/额度）。
 	for _, want := range []string{
-		gateway.AccountColProvider, gateway.AccountColUID,
-		gateway.AccountColToken, gateway.AccountColQuota,
+		gateway.AccountColProvider, gateway.AccountColNickname,
+		gateway.AccountColQuota,
 	} {
 		var found bool
 		for _, c := range cols {
@@ -792,11 +793,24 @@ func TestAccountColumnsAreRegisteredIDs(t *testing.T) {
 			t.Errorf("缺少列 %q", want)
 		}
 	}
-	// 本上游**不该**有签到/福利（它没有这些概念）。
-	for _, bad := range []string{gateway.AccountColCheckin, gateway.AccountColWelfare} {
+
+	// ⚠ **不该**报的列（两类，理由不同，都值得钉住）
+	//
+	// ① token / token_expiry：zcode 的 JWT **没有 exp**（实测解出来只有 iat，
+	//    官方 resolveJwtExpiration 对这种情况也返回 "unknown"）。
+	//    报它们会让那两列**永远是 `—`**，而用户会把 `—` 读成"功能没做"。
+	// ② checkin / welfare：本上游没有这些概念。
+	for _, bad := range []string{
+		gateway.AccountColToken,
+		gateway.AccountColTokenExpiry,
+		gateway.AccountColCheckin,
+		gateway.AccountColWelfare,
+	} {
 		for _, c := range cols {
 			if c == bad {
-				t.Errorf("本上游没有 %q 对应的概念，不该自报它", bad)
+				t.Errorf("本上游不该自报列 %q：\n"+
+					"  token/token_expiry → JWT 无 exp，这两列会永远是 `—`\n"+
+					"  checkin/welfare    → 本上游没有这些概念", bad)
 			}
 		}
 	}
@@ -842,25 +856,32 @@ func TestQuotaReportsNoDataWhenCredentialUnusable(t *testing.T) {
 	}
 }
 
-// 计量端点的解析：缺数据必须报 HasData=false（不是 0）。
-func TestQuotaBillingMissingDataReportsNoData(t *testing.T) {
+// 计量端点的解析：**真失败**必须报 HasData=false（不是 0）。
+//
+// ⚠ 与下面那条的区别（这是我第一版搞混的地方）：
+//
+//	真失败（网络/业务码非 0/非法 JSON）  → HasData=false（界面 `—`）
+//	查询成功但账号没有套餐（plans 空）    → HasData=true, 0（界面 `0`）
+//
+// 两者都"看起来没有数据"，但含义完全相反：前者是"我们没查到"，
+// 后者是"这个号确实没额度"。混为一谈会让用户对着 `—` 排查我们的服务。
+func TestQuotaBillingRealFailureReportsNoData(t *testing.T) {
 	for _, raw := range []string{
-		``,                                  // 空响应
-		`{"code":0}`,                        // 没有 balances 字段
-		`{"code":0,"data":{}}`,              // 空 data
-		`not json`,                          // 非 JSON
-		`{"code":0,"data":{"balances":[]}}`, // 空 balances
+		``,         // 空响应
+		`not json`, // 非 JSON
+		`<html>502</html>`,
+		`{"code":3004,"msg":"invalid_flow"}`, // 业务码非 0
+		`{"code":401,"msg":"token expired"}`,
 	} {
-		if view, _ := parseBillingBalance([]byte(raw)); view.HasData {
-			t.Errorf("响应 %q 应报 HasData=false，实际 %+v", raw, view)
+		if view, ok := parseBillingSnapshot([]byte(raw)); ok || view.HasData {
+			t.Errorf("响应 %q 是**真失败**，应报 HasData=false，实际 %+v (ok=%v)", raw, view, ok)
 		}
 	}
 }
 
 func TestQuotaFromBilling(t *testing.T) {
-	// 计量端点的 origin 是常量（planOrigin），假上游换不进去，
-	// 所以这一条直接测**解析函数** —— 它是取额度里唯一有逻辑的部分。
-	view, ok := parseBillingBalance([]byte(`{"code":0,"data":{"balances":[
+	// ① 有额度桶（参照实现的字段名）。
+	view, ok := parseBillingSnapshot([]byte(`{"code":0,"data":{"balances":[
 	  {"remaining_units":1234,"total_units":5000,"unit_type":"tokens","show_name":"GLM-5.3"}
 	]}}`))
 	if !ok {
@@ -873,13 +894,282 @@ func TestQuotaFromBilling(t *testing.T) {
 		t.Errorf("Remaining = %d，期望 1234", view.Remaining)
 	}
 
-	// 空 balances → HasData=false（不是 0）。
-	if view, _ := parseBillingBalance([]byte(`{"code":0,"data":{"balances":[]}}`)); view.HasData {
-		t.Error("空 balances 应报 HasData=false（界面显示 —，不是 0）")
+	// ② **实测的真实形态**：查询成功但账号没有订阅套餐。
+	//
+	// 这是用户账号的实际响应（我实测抓到的）：
+	//
+	//	GET /billing/current?app_version=3.14.0
+	//	→ 200 {"code":0,"msg":"","data":{"server_time":1791258568,"plans":[]}}
+	//
+	// ⚠ 这一条必须报 HasData=true + 0，**不能**报 false。
+	// 报 false 会让界面显示 `—`，用户以为是我们查不到 ——
+	// 而真相是"登录成功了，但这个号没有 Coding Plan 额度"。
+	view, ok = parseBillingSnapshot([]byte(`{"code":0,"msg":"","data":{"server_time":1791258568,"plans":[]}}`))
+	if !ok {
+		t.Fatal("查询成功（code=0）应返回 ok=true —— 即使没有额度数据")
 	}
-	// 非法 JSON → HasData=false，不 panic。
-	if view, _ := parseBillingBalance([]byte(`not json`)); view.HasData {
-		t.Error("非法 JSON 应报 HasData=false")
+	if !view.HasData {
+		t.Error("code=0 但无额度 → 应报 HasData=true, Remaining=0（界面显示 0），" +
+			"而不是 HasData=false（界面显示 —，会让用户以为是查询失败）")
+	}
+	if view.Remaining != 0 {
+		t.Errorf("Remaining 应为 0，实际 %d", view.Remaining)
+	}
+
+	// ③ 三值互推：只给 total + used，剩余量要能算出来（照参照实现）。
+	view, ok = parseBillingSnapshot([]byte(`{"code":0,"data":{"balances":[
+	  {"total_units":100,"used_units":30,"show_name":"额度A"}
+	]}}`))
+	if !ok || view.Remaining != 70 {
+		t.Errorf("应能由 total-used 推出剩余 70，实际 ok=%v %+v", ok, view)
+	}
+
+	// ④ 字段别名：上游改过字段名，参照实现同时认多套。
+	view, ok = parseBillingSnapshot([]byte(`{"code":0,"data":{"balances":[
+	  {"remaining":55,"name":"别名桶"}
+	]}}`))
+	if !ok || view.Remaining != 55 {
+		t.Errorf("应认得别名 remaining，实际 ok=%v %+v", ok, view)
+	}
+
+	// ⑤ 字符串数字 + 千分位（参照实现专门去掉了逗号）。
+	view, ok = parseBillingSnapshot([]byte(`{"code":0,"data":{"balances":[
+	  {"remaining_units":"1,234","show_name":"字符串桶"}
+	]}}`))
+	if !ok || view.Remaining != 1234 {
+		t.Errorf("应认得带千分位的字符串数字，实际 ok=%v %+v", ok, view)
+	}
+
+	// ⑥ 顶层直给（部分响应不带 balances）。
+	view, ok = parseBillingSnapshot([]byte(`{"code":0,"data":{"remaining_units":88}}`))
+	if !ok || view.Remaining != 88 {
+		t.Errorf("应认得顶层 remaining_units，实际 ok=%v %+v", ok, view)
+	}
+
+	// ⑦ 多个桶 → per_model 且带明细。
+	view, ok = parseBillingSnapshot([]byte(`{"code":0,"data":{"balances":[
+	  {"remaining_units":10,"show_name":"A"},
+	  {"remaining_units":20,"show_name":"B"}
+	]}}`))
+	if !ok || view.Remaining != 30 {
+		t.Fatalf("多桶应合计 30，实际 %+v", view)
+	}
+	if view.Kind != "per_model" || len(view.ByModel) != 2 {
+		t.Errorf("多桶应报 per_model 并带明细，实际 %+v", view)
+	}
+}
+
+// QuotaExt：**必须先打 current，且把它的数据写回**。
+//
+// # 为什么这条必须存在（用户实测报的 bug）
+//
+// 我原来直接打 `balance`，而**实测它是 400**（用真请求验的）：
+//
+//	GET /billing/balance                     → 400 {"code":3001,"msg":"parameter error"}
+//	GET /billing/balance?app_version=3.14.0  → 400 {"code":3001,"msg":"parameter error"}
+//	GET /billing/balance?user_id=…           → 400 {"code":3001,"msg":"parameter error"}
+//	GET /billing/current?app_version=3.14.0  → 200 {"code":0,"data":{"server_time":…,"plans":[]}}
+//
+// 参照实现（zcode-proxy/quota.go）的注释印证了这个顺序：
+//
+//	jwt → zcode.z.ai /api/v1/zcode-plan/billing/current（失败再试 /billing/balance）
+//
+// 顺序反了**不会有任何报错**：只会表现为"额度永远查不到"。
+// 所以用一个假上游记录**实际打到的路径**来钉住它。
+func TestBillingHitsCurrentFirst(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path+"?"+r.URL.RawQuery)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		// current 成功（模拟真实上游 —— 它确实通）。
+		if strings.Contains(r.URL.Path, "current") {
+			_, _ = w.Write([]byte(`{"code":0,"msg":"","data":{"server_time":1,"plans":[]}}`))
+			return
+		}
+		// balance 报参数错（模拟实测行为）—— 这样一旦打到它就暴露了。
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":3001,"msg":"parameter error"}`))
+	}))
+	defer srv.Close()
+
+	// 把假上游指进 client（billingBase 可注入 —— 正是为了这条测试）。
+	p := New(Config{AuthDir: t.TempDir(), HTTPClient: srv.Client(), BillingOrigin: srv.URL})
+	p.probeOrigin = false
+	a := &Auth{Kind: CredKindJWT, JWT: "jwt-x", UID: "billing-user"}
+	p.creds[a.UID] = a
+
+	view, ok := p.RefreshQuota(a.UID)
+	if !ok {
+		mu.Lock()
+		t.Fatalf("应拿到额度；实际打到的路径: %v", paths)
+		mu.Unlock()
+	}
+	if !view.HasData {
+		t.Error("应报 HasData=true")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) == 0 {
+		t.Fatal("没有任何请求 —— quotaFromBilling 没走到网络层")
+	}
+	// ① 第一条必须是 current（不能是 balance）。
+	if !strings.Contains(paths[0], "/billing/current") {
+		t.Errorf("第一条请求应打 current（实测可用），实际 %q ——\n"+
+			"balance 实测返回 400 parameter error，先打它等于额度永远查不到", paths[0])
+	}
+	// ② 必须带 app_version（参照实现两个端点都带）。
+	if !strings.Contains(paths[0], "app_version=") {
+		t.Errorf("应带 app_version 查询参数（参照实现两个端点都带），实际 %q", paths[0])
+	}
+	// ③ current 成功就不该再打 balance（省一次无用请求，且它必然失败）。
+	if len(paths) != 1 {
+		t.Errorf("current 成功后不该再打别的端点，实际打了 %v", paths)
+	}
+}
+
+// QuotaExt：current 失败时要**回退到 balance**（参照实现的主备语义）。
+func TestBillingFallsBackToBalance(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "current") {
+			// current 失败 → 应触发兜底。
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"code":2007,"msg":"server error"}`))
+			return
+		}
+		// balance 这次给真实数据。
+		_, _ = w.Write([]byte(`{"code":0,"data":{"balances":[
+		  {"remaining_units":777,"show_name":"兜底桶"}]}}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{AuthDir: t.TempDir(), HTTPClient: srv.Client(), BillingOrigin: srv.URL})
+	p.probeOrigin = false
+	a := &Auth{Kind: CredKindJWT, JWT: "jwt-x", UID: "fb-user"}
+	p.creds[a.UID] = a
+
+	view, ok := p.RefreshQuota(a.UID)
+	if !ok || !view.HasData {
+		mu.Lock()
+		t.Fatalf("current 失败后应回退 balance 并拿到数据；路径: %v", paths)
+		mu.Unlock()
+	}
+	if view.Remaining != 777 {
+		t.Errorf("应拿到兜底的 777，实际 %d", view.Remaining)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(paths) != 2 || !strings.Contains(paths[0], "current") || !strings.Contains(paths[1], "balance") {
+		t.Errorf("应先 current 再 balance，实际 %v", paths)
+	}
+}
+
+// QuotaExt：两条端点都失败 → 如实报 HasData=false（不编 0）。
+func TestBillingBothFailReportsNoData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":3001,"msg":"parameter error"}`))
+	}))
+	defer srv.Close()
+
+	p := New(Config{AuthDir: t.TempDir(), HTTPClient: srv.Client(), BillingOrigin: srv.URL})
+	p.probeOrigin = false
+	a := &Auth{Kind: CredKindJWT, JWT: "jwt-x", UID: "fail-user"}
+	p.creds[a.UID] = a
+
+	view, ok := p.RefreshQuota(a.UID)
+	if ok && view.HasData {
+		t.Errorf("两条端点都失败时应报 HasData=false（界面 —），实际 %+v", view)
+	}
+}
+
+// 两个注入点**必须是分开的字段**（我把它们合成一个，结果 404）。
+//
+// # 这个 bug 的形态很隐蔽，值得专门钉住
+//
+// 我一度让 billing 复用 `oauthBase`（看起来合理：都是 zcode.z.ai 上的端点），
+// 但两个前缀约定不同：
+//
+//	CLI OAuth  cliOAuthBase = https://zcode.z.ai/api/v1  +  /oauth/cli/init
+//	                                                        ↑ 路径**不含**前缀
+//	计量端点   planOrigin   = https://zcode.z.ai         +  /api/v1/zcode-plan/…
+//	                                                        ↑ 路径**自带**前缀
+//
+// 复用会拼出 `https://zcode.z.ai/api/v1/api/v1/zcode-plan/billing/current` → 404。
+//
+// ⚠ 症状特别难查：**不报编译错**，只表现为"额度刷新 failed=1"，
+// 日志里只有一个 HTTP 404 —— 看起来像上游改了端点。
+// 我是靠"改完之后 updated 从 1 变成 failed=1"的**回归**才发现的，
+// 而这原本应该由测试挡住。
+func TestOAuthAndBillingOriginsAreSeparateFields(t *testing.T) {
+	// ① 两个 base 的默认值**不同**：一个带 /api/v1，一个不带。这正是不能复用的根据。
+	if !strings.HasSuffix(cliOAuthBase, "/api/v1") {
+		t.Errorf("cliOAuthBase 应带 /api/v1 后缀（其路径不含前缀），实际 %q", cliOAuthBase)
+	}
+	if strings.HasSuffix(planOrigin, "/api/v1") {
+		t.Errorf("planOrigin 不该带 /api/v1（计量路径自带前缀），实际 %q", planOrigin)
+	}
+	// ② 计量路径自带 /api/v1 —— 所以 base 必须**不含**它。
+	if !strings.HasPrefix(planBillingCurrentPath, "/api/v1/") {
+		t.Errorf("计量路径应自带 /api/v1 前缀，实际 %q", planBillingCurrentPath)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"remaining_units":1}}`))
+	}))
+	defer srv.Close()
+
+	// ③ 注入 BillingOrigin 后必须能取到额度。
+	p := New(Config{AuthDir: t.TempDir(), HTTPClient: srv.Client(), BillingOrigin: srv.URL})
+	p.probeOrigin = false
+	a := &Auth{Kind: CredKindJWT, JWT: "jwt-x", UID: "u1"}
+	p.creds[a.UID] = a
+	if view, ok := p.RefreshQuota(a.UID); !ok || !view.HasData {
+		t.Fatalf("BillingOrigin 注入后应能取到额度（ok=%v view=%+v）——"+
+			"若这里失败，说明 billingBase 又复用了 oauthBase（会拼出 /api/v1/api/v1/… → 404）",
+			ok, view)
+	}
+
+	// ④ 反过来：只注入 OAuthBase **不该**改变 billing 的指向（两者独立）。
+	p2 := New(Config{AuthDir: t.TempDir(), HTTPClient: srv.Client(), OAuthBase: srv.URL})
+	p2.probeOrigin = false
+	a2 := &Auth{Kind: CredKindJWT, JWT: "jwt-x", UID: "u2"}
+	p2.creds[a2.UID] = a2
+	if _, ok := p2.RefreshQuota(a2.UID); ok {
+		t.Error("只注入 OAuthBase 时 billing 不该被指到那个假上游 —— " +
+			"两者是一对独立的注入点，混用会拼出带重复 /api/v1 的 URL")
+	}
+
+	// ⑤ **生产默认值**必须拼出正确的 URL（上面几条都注入了假上游，
+	//    所以它们挡不住"默认值被改错"）。
+	//
+	// ⚠ 这条是变异验证逼出来的：我把 `billBase = planOrigin` 改成
+	// `cliOAuthBase` 之后，前四条**全部仍然绿** —— 因为它们都注入了
+	// 假 origin，默认值根本没被走到。
+	// 而那个改动的后果是线上拼出 `/api/v1/api/v1/zcode-plan/…` → 404。
+	def := New(Config{AuthDir: t.TempDir()})
+	if got := def.client.billingBase(); got != planOrigin {
+		t.Errorf("计量端点的默认 base 必须是 planOrigin（%q），实际 %q ——\n"+
+			"若这里变成 cliOAuthBase 会拼出 /api/v1/api/v1/… → 404", planOrigin, got)
+	}
+	// 并且拼出来的完整 URL 里 `/api/v1` 只能出现一次。
+	full := def.client.billingBase() + planBillingCurrentPath
+	if n := strings.Count(full, "/api/v1"); n != 1 {
+		t.Errorf("完整 URL 里 /api/v1 应恰好出现 1 次，实际 %d 次: %s", n, full)
+	}
+	if !strings.HasPrefix(full, "https://zcode.z.ai/api/v1/zcode-plan/") {
+		t.Errorf("完整 URL 形状不对: %s", full)
 	}
 }
 

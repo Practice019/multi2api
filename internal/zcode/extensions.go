@@ -32,7 +32,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,43 +109,79 @@ func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 // # ⚠ 必须回规范词汇表里的 id，不是中文标题
 //
 // 我第一版回的是 `[]string{"通道", "平台"}` —— 那是**列标题**，不是 id。
-// 核心校验时把它们当"未登记的 id"：
+// 核心按规范词汇表校验，未登记的 id 被跳过 → 两列都不显示，
+// 而这只在运行时日志里有一行警告。
 //
-//	admin: 上游 zcode 自报的账号列 id "通道" 不在规范词汇表里
-//	       —— 前端会跳过它（该列不会显示）
+// # ⚠ 第二版又报了错的列（Token 永远显示 `—`）
 //
-// 也就是说**两列都不会显示**，而这只有**运行时日志**才暴露 ——
-// 既不编译失败，测试也不会红（除非专门断言 id 在词汇表里）。
+// 我原来报了 `token`（"Token 剩余有效期"）。但那个列的判据是
+// `has_token` + `token_expire_sec` —— 也就是**上游要提供一个到期时刻**。
 //
-// 修法：回本仓已有的规范 id。本上游的语义与它们**真的对应**：
+// 而 zcode 的 JWT **没有 `exp`**（实测解出来只有 iat）：
+//
+//	{"user_id":"…","token_version":0,"sub":"…","iat":1791258329}
+//
+// 官方自己的 `resolveJwtExpiration` 对这种 token 也返回 `"unknown"`：
+//
+//	if (typeof payload.exp !== "number" || …) return { kind: "unknown" }
+//
+// 也就是说"没有 exp"是**上游的事实**，不是我们没解析出来 ——
+// 所以这一列对 zcode 永远只会是 `—`。前端注释里
+// （webui.html 的 tokenExpiryCellHTML）把这类情况写得很清楚：
+//
+//	codearts 的凭证是 AK/SK/STS 三元组、accessToken 恒为空
+//	→ 它落到「Token」列会永远是 `—`
+//
+// 我犯了与那时同一个判断错误：**给一个"没有该字段"的上游报了依赖该字段的列**。
+//
+// # 现在报哪几列
 //
 //	provider  "上游"   多上游部署下靠它区分
-//	uid       "UID"    本上游的 API Key 通道没有账号概念，uid 是派生的
-//	                   key 哈希（见 credential.go）——它就是这个账号的身份
-//	token     "Token"  **相对剩余有效期**。JWT 通道有明确过期时刻，
-//	                   这一列有真实数据；未知时前端显示 `—`
-//	                   ⚠ 不用 token_expiry：那一列要**绝对时刻**，
-//	                   而 ExpiresAt 为 0 时我们确实不知道它几时过期
-//	quota     "额度"   JWT 通道走计量端点；Key 通道如实报"没有端点"
+//	nickname  "昵称"   本上游有昵称（登录拿到 name/email）——
+//	                   比 UID 可读得多，而 UID 是 36 位 uuid
+//	quota     "额度"   JWT 通道走 billing/current，这一列**有真实数据**
 //
-// 刻意**不报**：checkin / welfare（本上游没有这些概念）、
-// success / breaker / in_flight（排障计数器，用户在账号池里已经删掉了）。
+// 刻意**不报**：
+//
+//	token / token_expiry  见上（JWT 无 exp，永远是 `—`）
+//	uid                    36 位 uuid 占很宽，昵称更有用；
+//	                       完整 uid 在诊断端点里能看
+//	checkin / welfare      本上游没有这些概念
+//	success/breaker/in_flight  排障计数器，用户在账号池里已经删掉了
 func (p *Provider) AccountColumns() []string {
 	return []string{
 		gateway.AccountColProvider,
-		gateway.AccountColUID,
-		gateway.AccountColToken,
+		gateway.AccountColNickname,
 		gateway.AccountColQuota,
 	}
 }
 
 // Quota 取额度视图。
 //
-// # 两条通道的取法不同（都实测过端点存在）
+// # 两条通道的取法不同（实测确认）
 //
-//	jwt     → GET /api/v1/zcode-plan/billing/{current,balance}
-//	          （实测修正：是 GET 不是 POST；POST 会 404 被误判成"端点不存在"）
+//	jwt     → GET /api/v1/zcode-plan/billing/**current**?app_version=…
+//	          （current 失败再试 /billing/balance —— 抄参照实现的主备顺序）
 //	api-key → 没有额度端点，用一次 1-token 探测判断"能不能用"
+//
+// # ⚠ 我把主备顺序搞反过（用户实测报的 bug）
+//
+// 我原来直接打 `balance`，而**实测它是 400**：
+//
+//	GET /billing/balance                      → 400 {"code":3001,"msg":"parameter error"}
+//	GET /billing/balance?app_version=3.14.0   → 400 {"code":3001,"msg":"parameter error"}
+//	GET /billing/balance?user_id=…            → 400 {"code":3001,"msg":"parameter error"}
+//
+// 而 `current` 直接就通：
+//
+//	GET /billing/current?app_version=3.14.0   → 200 {"code":0,"data":{"server_time":…,"plans":[]}}
+//
+// 参照实现（zcode-proxy quota.go）的原话印证了这个顺序：
+//
+//	jwt → zcode.z.ai /api/v1/zcode-plan/billing/current（失败再试 /billing/balance）
+//
+// 两条都要带 `?app_version=` —— 缺了它 current 也能通（实测），
+// 但参照实现的头集合与查询串里都有版本，所以照抄以保持一致。
 //
 // # 为什么 HasData 不能随便置 true
 //
@@ -154,6 +192,10 @@ func (p *Provider) AccountColumns() []string {
 //
 // 把"查不到"报成 0 会让用户以为额度用尽了（而实际是我们没查到），
 // 那会引发一轮无意义的排查。
+//
+// ⚠ 但"查到了但账号没有套餐"（plans 与 balances 都空）**是**一个真实结论 ——
+// 那种情况报 HasData=true + Remaining=0 才对，界面显示 `0` 而非 `—`：
+// 用户需要知道"这个号登录成功了，但没有订阅额度"，而不是"我们查不到"。
 func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	a := p.cred(uid)
 	if a == nil || !a.Usable() {
@@ -168,71 +210,205 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	return p.quotaFromProbe(ctx, a)
 }
 
-// quotaFromBilling 从 Coding Plan 的计量端点取额度。
+// quotaFromBilling 从 Coding Plan 的计量端点取额度（current → balance 主备）。
 func (p *Provider) quotaFromBilling(ctx context.Context, a *Auth) (gateway.QuotaView, bool) {
-	raw, err := p.client.BillingBalance(ctx, a)
-	if err != nil {
-		// 计量端点失败**不等于额度为 0** —— 如实报"没查到"。
-		return gateway.QuotaView{HasData: false}, false
+	// ① 主：billing/current（实测 200）。
+	if raw, err := p.client.BillingCurrent(ctx, a); err == nil {
+		if view, ok := parseBillingSnapshot(raw); ok {
+			return view, true
+		}
 	}
-	return parseBillingBalance(raw)
+	// ② 备：billing/balance。
+	//
+	// ⚠ 实测它对**没有 plan 上下文的调用**返回 400 parameter error ——
+	// 所以这条兜底常常失败。这也正是"主路径必须是 current"的原因。
+	if raw, err := p.client.BillingBalance(ctx, a); err == nil {
+		if view, ok := parseBillingSnapshot(raw); ok {
+			return view, true
+		}
+	}
+	// 两条都拿不到 → 如实报"没查到"（不编 0）。
+	return gateway.QuotaView{HasData: false}, false
 }
 
-// billingBalance 计量端点的响应结构。
+// billingSnapshot 计量端点的响应结构（current 与 balance 同形）。
 //
-// 结构抄自官方源码 `zaiStartPlanBilling.ts` 的 TS interface
-// （研究员核对过），不是猜的。只取我们真正会展示的字段。
-type billingBalance struct {
+// 字段名抄参照实现 `zcode-proxy/quota.go` 的 normalizeBalanceResponse，
+// 它同时接受多组别名（`total_units`/`total`/`remaining`）——
+// 因为**上游在不同版本里改过字段名**，只认一套会静默取到 0。
+//
+// ⚠ 数字字段一律用 `any` 而不是 `json.Number`：
+// 上游会把用量写成**带引号的字符串**，参照实现为此专门处理
+// `"1,234"`（去掉千分位逗号，见它的 jsonNum）。
+// 而 `json.Number` 只接**裸数字**，遇到 `"1234"` 会让整个 Unmarshal 失败 ——
+// 那是**全盘静默丢失**（连其它字段一起丢掉），比取到 0 更难查。
+type billingSnapshot struct {
 	Data struct {
+		Plans []struct {
+			PlanID string `json:"plan_id"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			// 到期时刻：参照实现按 ends_at → expires_at 顺序取。
+			EndsAt    any `json:"ends_at"`
+			ExpiresAt any `json:"expires_at"`
+		} `json:"plans"`
 		Balances []struct {
-			// RemainingUnits 剩余量（可能是负的：超支）。
-			RemainingUnits float64 `json:"remaining_units"`
-			// TotalUnits 总量。
-			TotalUnits float64 `json:"total_units"`
-			// UnitType 单位（如 "tokens" / "credits"）。
-			UnitType string `json:"unit_type"`
-			// ShowName 展示名（如 "GLM-5.3 额度"）。
-			ShowName string `json:"show_name"`
+			ShowName      string `json:"show_name"`
+			Name          string `json:"name"`
+			EntitlementID string `json:"entitlement_id"`
+			// 主字段名。
+			RemainingUnits any `json:"remaining_units"`
+			TotalUnits     any `json:"total_units"`
+			UsedUnits      any `json:"used_units"`
+			// 别名（参照实现容忍的更老/更新字段名）。
+			Remaining any    `json:"remaining"`
+			Total     any    `json:"total"`
+			Used      any    `json:"used"`
+			UnitType  string `json:"unit_type"`
+			Meter     string `json:"meter"`
 		} `json:"balances"`
+		// 顶层直给（部分响应不带 balances）。
+		TotalUnits     any `json:"total_units"`
+		UsedUnits      any `json:"used_units"`
+		RemainingUnits any `json:"remaining_units"`
 	} `json:"data"`
 }
 
-// parseBillingBalance 把计量响应转成 QuotaView。
+// parseBillingSnapshot 把计量响应转成 QuotaView。
 //
-// 多个 bucket 时取**剩余量的合计** —— 因为账号池的"额度"列只有一个数字，
-// 而订阅可能有多个额度桶（不同模型/不同计价）。合计至少方向是对的
-// （比只取第一个桶更不容易误导），且 ByModel 会把明细带出去。
-func parseBillingBalance(raw []byte) (gateway.QuotaView, bool) {
-	var b billingBalance
-	if err := json.Unmarshal(raw, &b); err != nil {
+// # 三态语义（照参照实现，也是本仓 QuotaView 的约定）
+//
+//	信封不存在 / code 非 0        → ok=false（没查到 → 界面 `—`）
+//	查到了但 plans 与 balances 全空 → HasData=true, Remaining=0（界面 `0`）
+//	查到了有额度                  → HasData=true, Remaining=N
+//
+// 中间那条是本次修复的要点：用户账号登录成功但没有订阅套餐时，
+// 上游回的是 `{"plans":[]}`（**实测就是这个形态**）。
+// 如果我把它当"没查到"，界面显示 `—`，用户会以为是我们坏了；
+// 报 `0` 才是实话："这个号确实没有额度"。
+func parseBillingSnapshot(raw []byte) (gateway.QuotaView, bool) {
+	// 先判信封：code 非 0 时是业务失败，不是"空额度"。
+	var env struct {
+		Code int `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return gateway.QuotaView{HasData: false}, false
 	}
-	if len(b.Data.Balances) == 0 {
+	if env.Code != 0 {
 		return gateway.QuotaView{HasData: false}, false
 	}
-	var total int64
+
+	var snap billingSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return gateway.QuotaView{HasData: false}, false
+	}
+
 	byModel := map[string]int64{}
-	for _, x := range b.Data.Balances {
-		n := int64(x.RemainingUnits)
+	var total int64
+	for _, b := range snap.Data.Balances {
+		// 三值互推：参照实现的做法（缺一个时用另两个算）。
+		totalUnits := numOr(b.TotalUnits, b.Total)
+		usedUnits := numOr(b.UsedUnits, b.Used)
+		remainUnits := numOr(b.RemainingUnits, b.Remaining)
+		if remainUnits == nil && totalUnits != nil && usedUnits != nil {
+			r := *totalUnits - *usedUnits
+			if r < 0 {
+				r = 0
+			}
+			remainUnits = &r
+		}
+		if remainUnits == nil {
+			// 一个数都没有 → 这个桶没信息，跳过（不要造 0）。
+			continue
+		}
+		n := int64(*remainUnits)
 		total += n
-		name := strings.TrimSpace(x.ShowName)
+
+		name := firstNonEmptyStr(b.ShowName, b.Name, b.EntitlementID, b.UnitType, b.Meter)
 		if name == "" {
-			name = x.UnitType
+			name = "额度"
 		}
-		if name != "" {
-			byModel[name] = n
+		byModel[name] += n
+	}
+	if len(byModel) > 0 {
+		view := gateway.QuotaView{Kind: "credits", Remaining: total, HasData: true}
+		if len(byModel) > 1 {
+			view.Kind = "per_model"
+			view.ByModel = byModel
+		}
+		return view, true
+	}
+
+	// 没有 balances 桶：看顶层直给的数字（参照实现也认这套）。
+	if n := numOr(snap.Data.RemainingUnits); n != nil {
+		return gateway.QuotaView{Kind: "credits", Remaining: int64(*n), HasData: true}, true
+	}
+	if t := numOr(snap.Data.TotalUnits); t != nil {
+		used := numOr(snap.Data.UsedUnits)
+		remain := *t
+		if used != nil {
+			remain = *t - *used
+			if remain < 0 {
+				remain = 0
+			}
+		}
+		return gateway.QuotaView{Kind: "credits", Remaining: int64(remain), HasData: true}, true
+	}
+
+	// ⚠ 走到这里说明：信封 code=0（查询成功）但确实没有任何额度数据。
+	// 这是**真实结论**（账号没有订阅套餐），不是"查不到"。
+	// 报 HasData=true + 0 让界面显示 `0`，而不是会误导的 `—`。
+	return gateway.QuotaView{Kind: "credits", Remaining: 0, HasData: true}, true
+}
+
+// numOr 取第一个能解成数字的值（对应参照实现的 jsonNum）。
+//
+// 为什么容忍字符串数字：上游不同版本把用量写成 `"1,234"` 或 `"1234"`。
+// 参照实现为此专门去掉千分位逗号；我们照抄这条容忍度 ——
+// 只认 JSON 数字会让那些版本静默取到 0。
+func numOr(vals ...any) *float64 {
+	for _, v := range vals {
+		if v == nil {
+			continue
+		}
+		switch x := v.(type) {
+		case float64:
+			if math.IsNaN(x) || math.IsInf(x, 0) {
+				continue
+			}
+			n := x
+			return &n
+		case int:
+			n := float64(x)
+			return &n
+		case int64:
+			n := float64(x)
+			return &n
+		case json.Number:
+			if f, err := x.Float64(); err == nil {
+				return &f
+			}
+		case string:
+			s := strings.ReplaceAll(strings.TrimSpace(x), ",", "")
+			if s == "" {
+				continue
+			}
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return &f
+			}
 		}
 	}
-	view := gateway.QuotaView{
-		Kind:      "credits",
-		Remaining: total,
-		HasData:   true,
+	return nil
+}
+
+// firstNonEmptyStr 取第一个非空串。
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
 	}
-	if len(byModel) > 1 {
-		view.Kind = "per_model"
-		view.ByModel = byModel
-	}
-	return view, true
+	return ""
 }
 
 // quotaFromProbe API Key 通道没有额度端点，用探测判断可用性。

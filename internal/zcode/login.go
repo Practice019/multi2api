@@ -507,9 +507,27 @@ func shortTail(s string) string {
 
 // jwtExpiry 从 JWT 里解出 exp（秒）。解不出返回 0。
 //
-// ⚠ 本包不解签名（也不需要）：令牌是上游签的，我们只是读自己的过期时刻。
-// 返回 0 的语义是"不知道何时过期"，而**不是"永不过期"** ——
-// 调用方（Auth.Expired）对 0 的处置也是"不判过期"，两者一致。
+// # ⚠ zcode 的 JWT **真的没有 exp**（实测，不是我们没解出来）
+//
+// 解码一个真实登录得到的 token，payload 只有：
+//
+//	{"user_id":"d9726374-…","token_version":0,"sub":"d9726374-…","iat":1791258329}
+//
+// 没有 `exp`。而官方自己的 `resolveJwtExpiration`
+// （packages/shared/src/oauth.ts）对这种情况也返回 `"unknown"`：
+//
+//	if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp) || …)
+//	  return { kind: "unknown" }
+//
+// 所以"没有 exp"是**上游的凭证形态**，不是解析缺陷 ——
+// 令牌的真实有效期由服务端决定（`token_version` 字段暗示服务端可撤销）。
+//
+// 由此推出一条**列声明上的纪律**：本上游不该声明依赖过期时刻的列
+// （Token / Token 到期）—— 那种列会永远是 `—`，而用户把 `—` 读成
+// "这功能没做"。见 extensions.go 的 AccountColumns。
+//
+// 函数本身保留的两个理由：① token 形态可能变（上游加 exp 就自动生效）；
+// ② 读本地时间戳不需要信任签名，所以不做签名校验。
 func jwtExpiry(token string) int64 {
 	parts := strings.Split(token, ".")
 	if len(parts) < 2 {

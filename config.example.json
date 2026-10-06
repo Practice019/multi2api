@@ -65,6 +65,8 @@
     "enabled": true,
     "auth_dir": "./auths/zcode",
     "origin": "",
+    "oauth_base": "",
+    "billing_origin": "",
     "pool_accounts": true,
     "jwt_captcha": false
   },
