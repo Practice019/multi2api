@@ -22,6 +22,8 @@ type growthStub struct {
 	lotteryJSON string
 
 	acceptCalls, redeemCalls, makeupCalls, openCalls, drawCalls, claimCalls atomic.Int32
+	// 「领取一只 Buddy」链路的三步调用计数（自愈补前置时会被打到）。
+	buddyFirstCalls, buddyAgreementCalls, reportCalls atomic.Int32
 	// tasksCalls 统计 /tasks 被调用次数 —— 每次 probeGrowth 必调它一次，
 	// 因此可以用它数「探针跑了几次」（用于验证写操作后是否就地刷新）。
 	tasksCalls atomic.Int32
@@ -142,6 +144,22 @@ func (g *growthStub) handler() http.Handler {
 			ok(`{}`)
 		case r.URL.Path == base+"/lottery/draw":
 			g.drawCalls.Add(1)
+			ok(`{}`)
+		// 「领取一只 Buddy」链路（runFirstBuddy 的三步）。
+		//
+		// 用 HasSuffix 而不是相等：这三个路径分属 growth 与 travel 两个 base
+		// （buddyFirstPath 在 travel.go 里登记为 "/activity/growth/buddy/first"），
+		// 写死前缀会让用例随 base 调整而静默失效 —— 而失效的表现是
+		// "补前置永远失败"，与没实现这个自愈长得一样。
+		case strings.HasSuffix(r.URL.Path, "/buddy/first"):
+			g.buddyFirstCalls.Add(1)
+			ok(`{}`)
+		case strings.HasSuffix(r.URL.Path, "/buddy/agreement"):
+			g.buddyAgreementCalls.Add(1)
+			ok(`{}`)
+		// 活跃上报：reportPath = "/v2/report"（走 billingBase）。
+		case strings.HasSuffix(r.URL.Path, "/v2/report"):
+			g.reportCalls.Add(1)
 			ok(`{}`)
 		default:
 			http.Error(w, "not found", 404)
@@ -758,6 +776,10 @@ func (g *growthStub) handlerPerCode() http.Handler {
 		case r.URL.Path == base+"/lottery/chances":
 			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, g.lotteryJSON)
 		case r.URL.Path == base+"/tasks/accept":
+			// ⚠ 这个计数必须与 handler() 里那份一致 —— 少了它，
+			// "补完前置有没有重试接单"这类断言会恒为 0 而**静默失败**
+			//（看起来像"没重试"，实际是夹具没数）。
+			g.acceptCalls.Add(1)
 			var b struct {
 				TaskCodes []string `json:"task_codes"`
 			}
@@ -774,6 +796,21 @@ func (g *growthStub) handlerPerCode() http.Handler {
 				rs = append(rs, raw)
 			}
 			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":{"results":[%s]}}`, strings.Join(rs, ","))
+		// 「领取一只 Buddy」链路与活跃上报 —— 与 handler() 里的那几条**同款**。
+		//
+		// ⚠ 两份 handler 必须都能服务这几条：本夹具是 handlerPerCode 专用的
+		//（按 task_code 定制接单结果），而"被前置挡住 → 自愈补前置"这个场景
+		// 只能在 handlerPerCode 上表达。漏在这里的表现是
+		// "补前置永远 404 失败"，看起来像自愈没实现。
+		case strings.HasSuffix(r.URL.Path, "/buddy/first"):
+			g.buddyFirstCalls.Add(1)
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, `{}`)
+		case strings.HasSuffix(r.URL.Path, "/buddy/agreement"):
+			g.buddyAgreementCalls.Add(1)
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, `{}`)
+		case strings.HasSuffix(r.URL.Path, "/v2/report"):
+			g.reportCalls.Add(1)
+			fmt.Fprintf(w, `{"code":0,"msg":"OK","data":%s}`, `{}`)
 		default:
 			http.Error(w, "not found", 404)
 		}
@@ -845,8 +882,27 @@ func TestGrowthAcceptAllBlockedByPrerequisiteIsSkip(t *testing.T) {
 	if !strings.Contains(res.Detail, "领取一只 Buddy") {
 		t.Errorf("Detail 应把 first_buddy 翻译成可读指引，得到 %q", res.Detail)
 	}
-	if !strings.Contains(res.Detail, "WorkBuddy 客户端") {
-		t.Errorf("Detail 应说明要去哪里做，得到 %q", res.Detail)
+	// ⚠ 这里曾经断言的是「必须包含 'WorkBuddy 客户端'」——
+	// **那条断言本身就是错的**，也正是这句话能一直错着的原因：
+	//
+	//	测试绿只说明"指引里提了客户端"，
+	//	**不说明那件事真的要在客户端做**。
+	//
+	// 而 first_buddy 其实就在 autoActions 表里（runFirstBuddy：上报活跃 →
+	// 同意协议 → 领取 Buddy）。用户实测指出这一点（2026-10，账号 17005247808）：
+	//
+	//	POST /admin/growth/auto {"task_code":"first_buddy"}
+	//	→ {"ok":true,"message":"已领取 Buddy（+300 分 +8 能量）"}
+	//
+	// 现在断言的方向反过来：Detail 必须指向**可执行的入口**（一键完成按钮），
+	// 且不得把用户赶去客户端。
+	if !strings.Contains(res.Detail, "一键完成") {
+		t.Errorf("Detail 应指向可执行入口（任务表里的「一键完成」按钮），得到 %q", res.Detail)
+	}
+	if strings.Contains(res.Detail, "无法代做") ||
+		strings.Contains(res.Detail, "需在 WorkBuddy 客户端") {
+		t.Errorf("Detail 不得把用户赶去客户端 —— first_buddy 在 autoActions 表里，"+
+			"网关能代做（实测 ok=true，+300 分 +8 能量）。得到 %q", res.Detail)
 	}
 	if strings.Contains(res.Detail, "失败") {
 		t.Errorf("不该出现「失败」字样，得到 %q", res.Detail)

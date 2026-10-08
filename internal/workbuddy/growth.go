@@ -170,6 +170,17 @@ type GrowthActionResult struct {
 	Count   int   `json:"count,omitempty"`
 	// AlreadyClaimed 为真表示这次调用是幂等空转（奖励之前就领过了）。
 	AlreadyClaimed bool `json:"already_claimed,omitempty"`
+	// BlockedBy 本次被哪个**前置任务**挡住（仅 accept 会填）。
+	//
+	// # 为什么必须是**结构化字段**，而不是从 Detail 里抠字符串
+	//
+	// 守卫轮要据此自愈（见 runGrowthAutoActions）：被前置挡住时先把前置做掉、
+	// 再重试接单。而 Detail 是给人看的中文（形如
+	// "接单 0 个（跳过 17）；需要先完成前置任务：first_buddy（「领取一只 Buddy」…）"）——
+	// 拿它当判据就是**用文案当协议**：改一个字（加个标点、换个译名）
+	// 就静默失效，而失效的表现是"账号永远卡在被前置挡住的状态"，
+	// 与没实现这个功能长得一模一样。
+	BlockedBy string `json:"blocked_by,omitempty"`
 }
 
 // growthWatchState 成长守卫的可变状态。
@@ -666,6 +677,8 @@ func (p *Provider) GrowthAcceptFor(uid, taskCode, trigger string) GrowthActionRe
 		parts = append(parts, fmt.Sprintf("失败 %d", failN))
 	}
 	res.Detail = strings.Join(parts, "（") + strings.Repeat("）", len(parts)-1)
+	// 结构化地带出前置任务码：守卫轮据此自愈（见 runGrowthAutoActions）。
+	res.BlockedBy = blockedBy
 	if blockedBy != "" {
 		// 把「被谁挡住」翻译成「去做什么」——光报任务码 first_buddy 用户看不懂。
 		res.Detail += "；需要先完成前置任务：" + prerequisiteHint(blockedBy)
@@ -724,9 +737,12 @@ func (p *Provider) refreshOwnSnapshot(uid, status string) {
 //
 //	prerequisite not met: first_buddy
 //	    前置任务未完成。典型场景：成长中心要求先完成 first_buddy（领取一只 Buddy），
-//	    其余任务才允许接单。这不是故障，用户去把前置任务做掉即可。
-//	    注意 first_buddy 自身会回 "task does not require acceptance" —— 它由
-//	    上游自动派生，不需要也不能手动接单。
+//	    其余任务才允许接单。这不是故障。
+//	    ⚠ 前置**能由网关代做**（autotask.go 的 runFirstBuddy：上报活跃 →
+//	    同意协议 → 领取 Buddy），所以指引应当是"点它的「一键完成」按钮"，
+//	    而不是"去客户端做" —— 见 prerequisiteHints 的注释（那里曾写错）。
+//	    注意 first_buddy 自身会回 "task does not require acceptance"：
+//	    它**不需要接单**（接单与完任务是两件事），不等于"做不了"。
 //	task does not require acceptance
 //	    该任务本来就不需要接单（上游已自动纳入，或属于活动类任务）。
 //	message 为空
@@ -751,11 +767,38 @@ func acceptRejectionReason(msg string) (string, bool) {
 // prerequisiteHints 把上游的前置任务码翻译成用户能照做的中文指引。
 //
 // 为什么需要翻译：上游只回 "prerequisite not met: first_buddy"，
-// 用户看到的是个内部任务码，不知道要去客户端点哪里。
-// first_buddy 尤其反直觉 —— 它在任务列表里显示为「领取一只 Buddy」，
-// 但不能（也不需要）在网页上接单，必须去 WorkBuddy 客户端里真正领一只。
+// 用户看到的是个内部任务码，不知道要做什么。
+//
+// # ⚠ 这条文案曾经是错的（用户实测指出，已修）
+//
+// 原文写的是：
+//
+//	"「领取一只 Buddy」—— 需在 WorkBuddy 客户端内完成（本网页无法代做），
+//	 完成后其余任务才能接单"
+//
+// 而 `first_buddy` **就在 autoActions 表里**（`autotask.go` 的
+// `runFirstBuddy`：上报活跃 → 同意协议 → 领取 Buddy，+300 分 +8 能量）——
+// 也就是说网页**完全能代做**，而那句话把用户赶去了客户端。
+//
+// 实测（2026-10，账号 17005247808）：
+//
+//	POST /admin/growth/auto {"uid":"…","task_code":"first_buddy"}
+//	→ {"ok":true,"message":"已领取 Buddy（+300 分 +8 能量）",
+//	   "progress_before":"not_accepted","progress_after":"1/1"}
+//	随后 POST /admin/growth/accept {"task_code":"chat_5"}
+//	→ {"status":"ok","detail":"接单 1 个"}      ← 前置确实解除了
+//
+// # 它为什么能一直错着没人发现
+//
+// 前端 `webui_task_auto_test.go` 有一条守卫专门禁止"本网页无法代做"
+// —— 但它**只扫 webui.html**，而这句话在 **Go 源码**里，
+// 经 `prerequisiteHint` → `res.Detail` 下发到界面上。
+// 于是同一句假话在前端被禁、在后端存活（见下面那条新守卫）。
+//
+// 这也是"提示文案与能力表是两份事实"的典型：能力表说了能做，
+// 文案说了不能做，而两者没有任何一处对账。
 var prerequisiteHints = map[string]string{
-	"first_buddy": "「领取一只 Buddy」—— 需在 WorkBuddy 客户端内完成（本网页无法代做），完成后其余任务才能接单",
+	"first_buddy": "「领取一只 Buddy」—— 点任务表里它的「一键完成」按钮即可（网关代做：上报活跃 → 同意协议 → 领取 Buddy，+300 分 +8 能量）；完成后其余任务就能接单了",
 }
 
 // prerequisiteHint 返回可读指引。
@@ -1081,7 +1124,36 @@ func (p *Provider) runGrowthAutoActions(snap *GrowthSnapshot) {
 		}
 	}
 	if accept && snap.AcceptableCount > 0 {
-		p.GrowthAcceptFor(snap.UID, "", triggerAuto)
+		res := p.GrowthAcceptFor(snap.UID, "", triggerAuto)
+		// 被**可自动化的前置**挡住 → 先把前置做掉，再重试一次接单。
+		//
+		// # 这个自愈是必需的，不是优化（用户实测指出）
+		//
+		// 改造前这里只有一句裸的 GrowthAcceptFor：前置没做掉时接单必然被拒
+		//（上游回 "prerequisite not met: first_buddy"，被归成 skip 而非 fail），
+		// 而**守卫轮里没有任何一步会做前置任务** —— 于是那位用户的两个账号
+		// 变成"每轮空转一次、17 个任务永远接不上"，界面看起来只是在等。
+		//
+		// 实测（2026-10，账号 17005247808）：
+		//
+		//	POST /admin/growth/auto {"task_code":"first_buddy"} → ok，+300 分 +8 能量
+		//	再 POST /admin/growth/accept → 接单成功，前置解除
+		//
+		// 也就是"手工点一次就行，但循环里没人点"。现在循环自己点。
+		//
+		// # 为什么只重试一次
+		//
+		// 前置任务之间可以有依赖（autoActions 的顺序就是执行顺序），
+		// 但**一次补一个再重试一次**已经能覆盖实测的形态；做成循环重试
+		// 会在"前置本身做不成"时反复打上游（风控面），收益却很小。
+		// 剩余情况由下一轮守卫处理 —— 它本来就会再来。
+		if res.BlockedBy != "" {
+			if msg, healed := p.healGrowthPrerequisite(snap.UID, res.BlockedBy); healed {
+				log.Printf("growth: 前置 %s 已自动完成（%s），重试接单 uid=%s",
+					res.BlockedBy, msg, snap.UID)
+				res = p.GrowthAcceptFor(snap.UID, "", triggerAuto)
+			}
+		}
 		p.probeGrowth(snap.UID) // 接完刷新快照，供后续动作判断
 	}
 	if makeup && snap.MakeupCards > 0 && len(snap.MakeupDates) > 0 {
@@ -1096,6 +1168,39 @@ func (p *Provider) runGrowthAutoActions(snap *GrowthSnapshot) {
 	if draw && snap.LotteryChances > 0 {
 		p.GrowthDrawFor(snap.UID, triggerAuto)
 	}
+}
+
+// healGrowthPrerequisite 补掉挡住接单的前置任务。
+//
+// 返回 (完成说明, 是否真的补掉了)。补不掉时返回 false —— 调用方保持原回执，
+// 不把"接单被前置挡住"改写成"补前置失败"（那是两件事，混起来会让日志骗人）。
+//
+// # 它调用的是**同一份实现**，不是又写一遍
+//
+// 前置任务本身就是一条可自动化动作（`first_buddy` 在 autoActions 表里，
+// 走 `runFirstBuddy`：上报活跃 → 同意协议 → 领取 Buddy）。
+// 所以这里查表调用它 —— 手柄端「一键完成」按钮走的是同一个 run 函数，
+// 两边不可能漂移。
+//
+// 不可自动化的前置（`notAutomatable` 里那两个）在这里返回 false：
+// 它们只能由用户去客户端做，守卫轮不该假装能补。
+func (p *Provider) healGrowthPrerequisite(uid, code string) (string, bool) {
+	act := autoActionFor(code)
+	if act == nil {
+		return "", false
+	}
+	a := p.creds(uid)
+	if a == nil {
+		return "", false
+	}
+	msg, err := act.run(p, a)
+	if err != nil {
+		log.Printf("growth: 补前置 %s 失败 uid=%s: %v（下一轮守卫会再试）", code, uid, err)
+		return "", false
+	}
+	p.record(uid, checkinlog.KindGrowth, checkinlog.StatusOK,
+		"自动补前置 "+code+"："+msg, 0, triggerAuto)
+	return msg, true
 }
 
 // RunGrowthWatcher 常驻守卫：启动即全量扫一次填满缓存，之后按间隔复查。
