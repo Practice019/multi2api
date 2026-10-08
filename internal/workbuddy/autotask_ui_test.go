@@ -165,3 +165,107 @@ func TestAutotaskWritePathsRefreshGrowthSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 守卫：前置任务的提示文案不得**否定**该任务其实可自动化
+// ---------------------------------------------------------------------------
+
+// TestPrerequisiteHintsDoNotDenyAutomatableTasks 提示文案不能与能力表相互矛盾。
+//
+// # 这条守卫守的是什么 bug（用户实测指出）
+//
+// `prerequisiteHints["first_buddy"]` 曾经写着：
+//
+//	"「领取一只 Buddy」—— 需在 WorkBuddy 客户端内完成（本网页无法代做）…"
+//
+// 而 `first_buddy` **就在 autoActions 表里**（`runFirstBuddy`：上报活跃 →
+// 同意协议 → 领取 Buddy，+300 分 +8 能量）—— 网页**完全能代做**。
+//
+// 实测（2026-10，账号 17005247808）：
+//
+//	POST /admin/growth/auto {"task_code":"first_buddy"} → ok=true，+300 分 +8 能量
+//	POST /admin/growth/accept {"task_code":"chat_5"}    → ok，前置确实解除
+//
+// # 为什么它能一直错着（两层守卫都漏了）
+//
+//   - 前端 `webui_task_auto_test.go` 有一条"禁止本网页无法代做"的守卫，
+//     但它**只扫 webui.html**；
+//   - 而这句话住在 **Go 源码**里，经 `prerequisiteHint` → `res.Detail`
+//     下发到界面 —— 两个文件，各扫各的，没人对账。
+//
+// 判据因此是**跨表对账**：凡是"既在前置提示里、又在能力表里"的任务码，
+// 提示文案就不得出现否定可自动化的措辞。
+//
+// 这也是本项目一直在防的形态：**两份事实（能力表 / 文案）各写各的**。
+// 与 `notAutomatable` 必须与 `autoActions` 互斥那条守卫是同一个思路。
+func TestPrerequisiteHintsDoNotDenyAutomatableTasks(t *testing.T) {
+	if len(prerequisiteHints) == 0 {
+		t.Fatal("prerequisiteHints 为空 —— 判据没有输入，守卫失效（fail-open）")
+	}
+	if len(autoActions) == 0 {
+		t.Fatal("autoActions 为空 —— 判据没有输入，守卫失效（fail-open）")
+	}
+
+	// 否定「网页能代做」这层意思的措辞。
+	//
+	// ⚠ 只列**明确否定**的说法。像"接单"这种词不在其中 ——
+	// first_buddy 确实不需要接单（上游回 "task does not require acceptance"），
+	// 说"它不用接单"是对的，说"它做不了"才是错的。
+	denials := []string{
+		"无法代做",
+		"本网页无法",
+		"需在 WorkBuddy 客户端",
+		"需在客户端",
+		"必须去 WorkBuddy 客户端",
+	}
+
+	for code, hint := range prerequisiteHints {
+		act := autoActionFor(code)
+		if act == nil {
+			// 不可自动化的前置：提示里让它去客户端是**对的**，跳过。
+			continue
+		}
+		for _, d := range denials {
+			if strings.Contains(hint, d) {
+				t.Errorf("前置提示 %q 否定了可自动化，但 %q 就在 autoActions 表里：\n"+
+					"  提示: %s\n  动作: %s\n\n"+
+					"后果：用户被告知「必须去客户端做」，而网关本来就能代做 ——\n"+
+					"他会白跑一趟客户端，且永远不知道网页上有那个按钮。\n"+
+					"（前端那条同名守卫只扫 webui.html，管不到这里的 Go 文案。）",
+					code, code, hint, act.Desc)
+			}
+		}
+		// 正向要求：可自动化的前置，提示里应当指出**可执行的入口**。
+		// 只说"去把这个任务做掉"仍然不够 —— 用户不知道在哪做。
+		if !strings.Contains(hint, "一键完成") {
+			t.Errorf("前置提示 %q 是可自动化的（%s），但没有告诉用户点「一键完成」：\n"+
+				"  提示: %s", code, act.Desc, hint)
+		}
+	}
+}
+
+// 反向验证：把那条错的文案塞回去，守卫必须变红。
+//
+// 没有这条的话，"跨表对账"的逻辑写错了也会永远绿灯
+// —— 本仓库反复强调：守卫本身必须被验证过（见 arch_test.go 的同一取舍）。
+func TestPrerequisiteHintGuardCatchesTheRealRegression(t *testing.T) {
+	// 真实的历史文案（就是用户看到的那句）。
+	const bad = "「领取一只 Buddy」—— 需在 WorkBuddy 客户端内完成（本网页无法代做），完成后其余任务才能接单"
+
+	// 复刻守卫的判据（不改全局表，避免污染其他测试）。
+	denied := false
+	for _, d := range []string{"无法代做", "本网页无法", "需在 WorkBuddy 客户端", "需在客户端", "必须去 WorkBuddy 客户端"} {
+		if strings.Contains(bad, d) {
+			denied = true
+			break
+		}
+	}
+	if !denied {
+		t.Error("守卫的判据抓不到真实的历史文案 —— 判据写错了，" +
+			"这条守卫等于没有（它会在真实回归发生时依然绿灯）")
+	}
+	if autoActionFor("first_buddy") == nil {
+		t.Error("前置 first_buddy 不在 autoActions 表里了 —— " +
+			"那这条守卫的前提变了，需要同步更新（它现在是「可真可假」）")
+	}
+}
