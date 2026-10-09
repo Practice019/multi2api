@@ -418,6 +418,69 @@ func TestImportCredentialsJSON(t *testing.T) {
 	}
 }
 
+// TestImportCredentialsMultipleObjects 多个**独立对象**连在一起也要认。
+//
+// # 守的是用户实测提的需求
+//
+// 用户："我通常导入的时候会导入多个独立的 JSON 文件，那这个时候它就不行了。
+//
+//	希望能够自动组合成一个完整的大的 JSON 文件再导入。"
+//
+// 改造前本包的 ImportCredentials 自己写了一套分支：
+//
+//	`{` → importJSON（只认单个对象）
+//	`[` → importJSONArray
+//
+// 而"多个独立对象连在一起"是在 gateway.SplitAccountImportItems 里做的 ——
+// 本包没走那个共享判据，于是**只有别家上游能导入**，zcode 不能。
+// 共享判据抄两遍，必然有一遍漏更新。
+func TestImportCredentialsMultipleObjects(t *testing.T) {
+	p := &Provider{}
+
+	// 依次粘贴两个独立文件的内容（换行分隔）。
+	got, err := p.ImportCredentials(
+		"{\"api_key\":\"a.1\",\"nickname\":\"甲\"}\n{\"api_key\":\"b.2\",\"nickname\":\"乙\"}")
+	if err != nil {
+		t.Fatalf("多个独立对象应当能导入: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("应导入 2 条，实际 %d 条: %#v", len(got), got)
+	}
+
+	// 逗号分隔（从数组里复制掉方括号）同样要认。
+	got2, err := p.ImportCredentials(`{"api_key":"a.1"},{"api_key":"b.2"}`)
+	if err != nil {
+		t.Fatalf("逗号分隔的多个对象应当能导入: %v", err)
+	}
+	if len(got2) != 2 {
+		t.Fatalf("逗号分隔应导入 2 条，实际 %d 条", len(got2))
+	}
+
+	// 多条里有一条坏的 → 好的仍要成功（与数组导入同一条容错契约）。
+	got3, err := p.ImportCredentials(`{"api_key":"a.1"}` + "\n" + `{"no_token":true}`)
+	if err != nil {
+		t.Fatalf("坏条目应被跳过而不是全盘失败: %v", err)
+	}
+	if len(got3) != 1 {
+		t.Fatalf("应导入 1 条好的，实际 %d 条", len(got3))
+	}
+}
+
+// 裸 API Key 的既有路径不能被这次改动碰坏（回归防线）。
+//
+// zcode 认"每行一个 Key"这种非 JSON 输入；而多对象支持的实现如果写成
+// "统一先包一层 [ ]"，就会把 `sk-xxx` 变成 `["sk-xxx"]` —— 静默改变含义。
+func TestImportCredentialsBareKeysUnaffected(t *testing.T) {
+	p := &Provider{}
+	got, err := p.ImportCredentials("sk-aaa111\nsk-bbb222")
+	if err != nil {
+		t.Fatalf("每行一个裸 Key 应当能导入: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("应导入 2 条，实际 %d 条", len(got))
+	}
+}
+
 // 时间戳解析要认秒与毫秒两种。
 //
 // ⚠ 判据是**量级**：大于 1e12 一定是毫秒（1e12 秒 = 公元 33658 年）。
