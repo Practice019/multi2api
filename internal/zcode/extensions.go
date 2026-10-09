@@ -561,12 +561,39 @@ func (p *Provider) ImportCredentials(pasted string) ([]gateway.ImportedCredentia
 	if text == "" {
 		return nil, fmt.Errorf("zcode: 粘贴内容为空")
 	}
-	// 整体是 JSON → 按 JSON 解析（可能是对象或数组）。
-	if strings.HasPrefix(text, "{") {
-		return p.importJSON(text)
-	}
-	if strings.HasPrefix(text, "[") {
-		return p.importJSONArray(text)
+	// 整体是 JSON → 交给**共享**的切分器，再逐条解析。
+	//
+	// ⚠ 这里曾经自己写了一套 `{` → importJSON / `[` → importJSONArray 的分支，
+	// 于是"多个独立对象连在一起"（用户一次粘 N 个文件）只在**别家上游**生效
+	// —— 因为那件事是在 gateway.SplitAccountImportItems 里做的，而本包没走它。
+	// 共享判据抄两遍，必然有一遍漏更新。
+	if strings.HasPrefix(text, "{") || strings.HasPrefix(text, "[") {
+		items, err := gateway.SplitAccountImportItems(text)
+		if err != nil {
+			return nil, fmt.Errorf("zcode: %w", err)
+		}
+		// ⚠ 多条输入时**跳过坏条目**、只要求至少有一条成功。
+		//
+		// 这是本包既有的、被 credential_test.go 钉住的契约：
+		// "数组里有坏条目 → 好的仍要成功（不能因一条坏的全盘失败）"。
+		//
+		// 我第一次改写时按"任一坏则全盘失败"处理，被那条测试当场拦下 ——
+		// 单条输入时两种写法等价（坏就是坏），差别只在多条的容错，
+		// 而那正是用户一次粘几十条时最要紧的性质。
+		out := make([]gateway.ImportedCredential, 0, len(items))
+		var errs []string
+		for i, it := range items {
+			got, ierr := p.importJSON(it)
+			if ierr != nil {
+				errs = append(errs, fmt.Sprintf("第 %d 条: %v", i+1, ierr))
+				continue
+			}
+			out = append(out, got...)
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("zcode: 没有解析出任何可用凭证：%s", strings.Join(errs, "; "))
+		}
+		return out, nil
 	}
 	// 否则按"每行一个 Key"处理。
 	var out []gateway.ImportedCredential
@@ -638,33 +665,6 @@ func (p *Provider) importJSON(text string) ([]gateway.ImportedCredential, error)
 		return nil, err
 	}
 	return []gateway.ImportedCredential{ic}, nil
-}
-
-// importJSONArray 解析 JSON 数组。
-func (p *Provider) importJSONArray(text string) ([]gateway.ImportedCredential, error) {
-	var arr []map[string]any
-	if err := json.Unmarshal([]byte(text), &arr); err != nil {
-		return nil, fmt.Errorf("zcode: JSON 数组解析失败: %w", err)
-	}
-	var out []gateway.ImportedCredential
-	var errs []string
-	for i, m := range arr {
-		a, err := authFromMap(m)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("第 %d 条: %v", i+1, err))
-			continue
-		}
-		ic, err := p.credentialFor(a)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("第 %d 条: %v", i+1, err))
-			continue
-		}
-		out = append(out, ic)
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("zcode: 数组里没有可用凭证：%s", strings.Join(errs, "; "))
-	}
-	return out, nil
 }
 
 // authFromMap 从 JSON 对象里构造 Auth。

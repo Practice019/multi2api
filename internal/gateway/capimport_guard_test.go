@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -106,6 +107,188 @@ func TestSplitAccountImportItems(t *testing.T) {
 			if _, err := SplitAccountImportItems(bad.in); err == nil {
 				t.Errorf("%q 应当报错（静默返回空切片会让用户看到"+
 					"「导入了 0 个」而不知道哪里错了）", bad.in)
+			}
+		})
+	}
+}
+
+// TestSplitAccountImportItemsMultipleObjects 多个**独立对象**连在一起也要认。
+//
+// # 这条守的是用户实测提的需求
+//
+// 用户原话："我通常导入的时候会导入多个独立的 JSON 文件，那这个时候它就不行了。
+// 所以希望能够多加一个功能，就是如果它是多个独立的 JSON 文件，它可以自动
+// 组合成一个完整的大的 JSON 文件，然后再导入。"
+//
+// 也就是他一次粘 N 个文件的内容。改造前 `SplitAccountImportItems` 只认
+// 「单对象」与「[ ] 数组」两种形状 —— 而这个需求恰好落在两者之间：
+// 用户手上是 N 个文件，不是一个大数组，所以**每次都会失败**。
+//
+// # 为什么"多个对象"要覆盖三种分隔形态
+//
+// 它们来自用户不同的复制手法，而每一种都在真实场景里出现过：
+//
+//	{…}\n{…}   依次换行粘贴（最常见）
+//	{…}{…}     无分隔拼接（编辑器里连在一起）
+//	{…},{…}    带逗号（从数组里复制掉方括号）
+//
+// 只覆盖一种会让用户"换个粘法又不行了"，而那是**无法自查**的失败。
+func TestSplitAccountImportItemsMultipleObjects(t *testing.T) {
+	// 故意用不同的键名，好断言"拆出来的顺序与内容都对"，
+	// 而不只是"条数对"（条数对但内容串位是更隐蔽的错）。
+	obj := func(k string) string { return `{"` + k + `":1}` }
+	a, b, c := obj("a"), obj("b"), obj("c")
+
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"换行分隔（最常见：依次粘贴 N 个文件）",
+			a + "\n" + b + "\n" + c, []string{a, b, c}},
+		{"无分隔拼接", a + b, []string{a, b}},
+		{"逗号分隔（从数组里复制掉方括号）", a + "," + b + "," + c, []string{a, b, c}},
+		{"逗号 + 换行混用", a + ",\n" + b + ",\n  " + c, []string{a, b, c}},
+		{"首尾带空白（复制粘贴常带）", "\n  " + a + "\n" + b + "\n  ", []string{a, b}},
+		{"两个也算（不能只在 ≥3 时才生效）", a + "\n" + b, []string{a, b}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SplitAccountImportItems(tc.in)
+			if err != nil {
+				t.Fatalf("应当能拆开，却报错: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("拆出 %d 条，期望 %d 条: %#v", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if strings.TrimSpace(got[i]) != tc.want[i] {
+					t.Errorf("第 %d 条 = %q，期望 %q（顺序/内容串位比条数错更难发现）",
+						i, strings.TrimSpace(got[i]), tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+// 非对象形态的输入**绝不能**被"宽松改写"成一个条目。
+//
+// # 这条来自一次被变异验证抓出来的错误认知
+//
+// 我最初的注释写的是「宽松实现会把 `sk-abcdef` 变成 `["sk-abcdef"]`」——
+// 那句话**是错的**：`[sk-abcdef]` 并不是合法 JSON（裸标识符），
+// 所以那种实现根本不会碰它。我据此写的用例因此**测不出任何东西**
+// （变异验证把"统一先包一层 [ ]"注进实现后，用例仍然全绿）。
+//
+// 真正会被宽松改写吃掉的是**本身就是合法 JSON 的值**：
+//
+//	"sk-abcdef"    带引号的字符串（从 JSON 文件里复制某个键的值）
+//	123            数字
+//	true           布尔
+//
+// 它们套上 [ ] 之后都是合法数组 → 会被当成"一个条目"交给上游，
+// 而上游拿到的是个**被改写过的非对象**。所以这三类必须报错。
+//
+// 判据因此分两组：裸文本（括号后仍非法）与 JSON 原始值（括号后合法）——
+// 只有后者能真正区分"保守"与"宽松"两种实现。
+func TestSplitAccountImportItemsDoesNotWrapPrimitives(t *testing.T) {
+	for _, in := range []string{
+		// —— 裸文本：`[in]` 本身非法，保守实现自然拒绝 ——
+		`sk-abcdef123456`,
+		`zai:sk-abcdef123456`,
+		`Bearer sk-abcdef123456`,
+		`not json`,
+		// —— JSON 原始值：`[in]` **合法**，只有保守实现才拒绝 ——
+		//（这三条才是真正能区分两种实现的用例）
+		`"sk-abcdef123456"`,
+		`123`,
+		`true`,
+	} {
+		t.Run(in, func(t *testing.T) {
+			got, err := SplitAccountImportItems(in)
+			if err == nil {
+				t.Errorf("%q 不该被这个切分器接受（它是「逐条 JSON 对象」专用入口）——\n"+
+					"实际拆出 %#v。\n"+
+					"若实现是「统一先包一层 [ ] 再看」，这类**本身就是合法 JSON 的值**"+
+					"会被包成数组、当成一个条目交给上游 —— 用户粘的东西被静默改写，\n"+
+					"而上游拿到的是个非对象。", in, got)
+			}
+		})
+	}
+}
+
+// 单个对象**不能被**这条新逻辑改变含义（回归防线）。
+//
+// 判据：`{…}` 仍然只拆出 1 条，且原样返回（不重新序列化 —— 上游按原文解析，
+// 重新序列化会丢掉它可能依赖的键序/格式）。
+func TestSplitAccountImportItemsSingleObjectUnchanged(t *testing.T) {
+	one := `{  "a" : 1 , "b" : [1,2,3] }`
+	got, err := SplitAccountImportItems(one)
+	if err != nil {
+		t.Fatalf("单个对象不该报错: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("单个对象应拆成 1 条，实际 %d 条: %#v", len(got), got)
+	}
+	if got[0] != one {
+		t.Errorf("单个对象应**原样**返回（不重新序列化），实际 %q", got[0])
+	}
+}
+
+// ⚠ 尾部有残渣时必须**报错**，不能"能读几条算几条"。
+//
+// # 为什么这条最要紧
+//
+// 流式解析极易写成"读到一个算一个、读不动就停"。那样的话
+//
+//	{好对象}\n{好对象}\n{粘坏的
+//
+// 会变成"导入 2 个、第 3 个静默消失" —— 用户以为三个都进去了。
+// 本项目的判据是**静默丢数据比明确失败糟得多**（见 gateway 里多处同款注释），
+// 所以这里要求输入被完整消费。
+func TestSplitAccountImportItemsRejectsTrailingGarbage(t *testing.T) {
+	good := `{"a":1}`
+	for _, bad := range []struct{ name, in string }{
+		{"两个完好 + 一个半截", good + "\n" + `{"b":2}` + "\n" + `{"c":`},
+		{"一个完好 + 尾部垃圾", good + "\n" + `这不是 JSON`},
+		{"两个完好 + 尾部裸标识符", good + "\n" + `{"b":2}` + "\n" + `oops`},
+	} {
+		t.Run(bad.name, func(t *testing.T) {
+			got, err := SplitAccountImportItems(bad.in)
+			if err == nil {
+				t.Errorf("尾部有残渣时应当报错，实际静默拆出 %d 条: %#v\n"+
+					"「能读几条算几条」会让用户以为全部导入成功，"+
+					"而其中一部分**静默消失**", len(got), got)
+			}
+		})
+	}
+}
+
+// 裸 API Key / 前缀形态**绝不能**被这条新逻辑改写。
+//
+// # 为什么这是独立的一条（而不是顺带的边界情况）
+//
+// 实现多对象支持最危险的写法是"统一先包一层 [ ] 再看能不能解析" ——
+// 那会把 `sk-abcdef` 变成 `["sk-abcdef"]`，于是：
+//
+//	zcode 认裸 Key（`importOneKey`），而它拿到的是个**数组字面量字符串**；
+//	上游可能仍然解析成功（把整串当 Key），也可能失败 —— 无论哪种，
+//	**用户粘的东西被静默改了含义**，而这是最难查的一类缺陷。
+//
+// 所以判据是：不以 `{` / `[` 开头的输入，必须**原样报错**（而不是被包装）。
+func TestSplitAccountImportItemsDoesNotWrapBareKeys(t *testing.T) {
+	for _, bare := range []string{
+		`sk-abcdef123456`,
+		`zai:sk-abcdef123456`,
+		`Bearer sk-abcdef123456`,
+	} {
+		t.Run(bare, func(t *testing.T) {
+			got, err := SplitAccountImportItems(bare)
+			if err == nil {
+				t.Errorf("裸 Key %q 不该被这个切分器接受（它是 JSON 专用入口）——"+
+					"实际拆出 %#v。\n若实现是「统一包一层 [ ]」，这里会得到 "+
+					`["%s"] 这种被改写过的输入，让只认裸 Key 的上游（zcode）`+
+					"静默改变含义", bare, got, bare)
 			}
 		})
 	}

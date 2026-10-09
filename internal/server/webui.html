@@ -2327,7 +2327,7 @@ let loginProvider = '';
     //（仍**是数据**，不是上游名 —— 加新上游时前端零改动）。
     const importBtn = hasCap(providerId, 'import')
       ? `<button class="gact" data-gimport="${esc(providerId)}"`
-        + ` title="粘贴 ${esc(providerId)} 的凭证 JSON 批量导入（单条或 [ ] 数组）；导入后自动重载账号池">批量导入</button>`
+        + ` title="粘贴 ${esc(providerId)} 的凭证 JSON 批量导入（单个对象 / [ ] 数组 / 多个独立对象依次粘进来会自动合并）；导入后自动重载账号池">批量导入</button>`
       : '';
     // 「刷新本上游额度」：该上游**声明了 CapQuotaProbe** 才渲染。
     //
@@ -3810,7 +3810,9 @@ let loginProvider = '';
   function openImportModal(providerId) {
     const pid = providerId || '';
     const text = (window.prompt(
-      '粘贴 ' + (providerTitle(pid) || pid) + ' 的凭证 JSON（单个对象，或 [ ] 包起来的数组）', '')
+      '粘贴 ' + (providerTitle(pid) || pid) + ' 的凭证 JSON'
+        + '（单个对象、[ ] 包起来的数组，或把多个独立文件的内容依次粘进来——'
+        + '会自动合并）', '')
       || '').trim();
     if (!text) return;
     (async () => {
