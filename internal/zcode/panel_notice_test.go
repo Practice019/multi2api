@@ -95,75 +95,24 @@ func TestAdminRoutesStillExistButHidden(t *testing.T) {
 	}
 }
 
-// ② 本上游**必须**自报一句提醒，且它要能被 NoticeExt 认出来。
+// ② 界面提醒（NoticeExt）**本上游刻意不实现**。
 //
-// # 为什么必须由 ExtOf 认出来
+// # 为什么留一条"它被删过"的反向断言（而不是把用例整段删掉）
 //
-// 核心下发 notice 的判据是**类型断言**：
+// 用户先要求「Zcode 那个地方用小字提醒一下，这个是测试」，我实现了它；
+// 后来用户又要求「去掉这个文字」。留一条反向断言能防住两种误改：
 //
-//	if ext, ok := gateway.ExtOf[gateway.NoticeExt](p); ok { info.Notice = … }
+//	有人以为这里漏了 → 补上提醒 → 这条红（用户已明确不要它）
+//	有人恢复时只改一半 → 也红（缺 extensions.go 或编译期断言）
 //
-// 所以"写了 Notice() 方法"与"核心能拿到它"是两件事 ——
-// 方法名差一个字母就静默失效，而**编译能过**、界面也不报错，
-// 只是那句提醒永远不出现。（本仓在 LoginFlow 上踩过同一个坑。）
-func TestNoticeIsDiscoverable(t *testing.T) {
+// 判据：ExtOf[gateway.NoticeExt] 对本上游**必须失败** ——
+// 与「实现了但返回空串」是不同形态（后者会下发一个空字段）。
+func TestNoticeIsDeliberatelyAbsent(t *testing.T) {
 	p := New(Config{AuthDir: t.TempDir()})
 	p.probeOrigin = false
 
-	ext, ok := gateway.ExtOf[gateway.NoticeExt](p)
-	if !ok {
-		t.Fatal("NoticeExt 未被 ExtOf 认出 —— 界面上那句提醒不会出现，" +
-			"而前端不会报错（读不到字段就不渲染），所以只能靠这条断言拦")
+	if _, ok := gateway.ExtOf[gateway.NoticeExt](p); ok {
+		t.Error("本上游不该实现 NoticeExt —— 用户已要求去掉那句提醒。若要恢复，需同时补回 " +
+			"extensions.go 的 Notice()、interfaces_compile_test.go 的编译期断言，以及本文件的正面用例。")
 	}
-	got := ext.Notice()
-	if got == "" {
-		t.Fatal("Notice() 返回空串 = 不显示提醒（与不实现等价）—— " +
-			"用户要求这个上游要提醒「这个是测试」")
-	}
-	if len([]rune(got)) > 40 {
-		t.Errorf("提醒过长（%d 字）：它渲染在分组标题的小字区，\n"+
-			"太长会挤掉「N 个账号 · M 项能力」。实际: %q", len([]rune(got)), got)
-	}
-	// 必须真的传达"测试"这件事 —— 否则这句提醒没完成任务。
-	if !containsAny(got, "测试", "实验", "试用", "beta", "Beta") {
-		t.Errorf("提醒里应表明这是测试/实验性质，实际 %q", got)
-	}
-}
-
-// 提醒的措辞不该假装稳定（诚实性约束）。
-//
-// 为什么值得测：这句提醒是给用户做**决策依据**的（"要不要依赖这个上游"）。
-// 写成"暂不支持 JWT"这种会被当成**事实陈述**，而真相是"没验证过"。
-// 两者对用户的含义完全不同 —— 前者是设计如此，后者是要谨慎。
-func TestNoticeIsHonestAboutWhatIsUntested(t *testing.T) {
-	p := New(Config{AuthDir: t.TempDir()})
-	p.probeOrigin = false
-
-	got := p.Notice()
-	// ⚠ 不能写"不支持"/"不可用"这类**断言性**说法 ——
-	// JWT 通道是"没验证过"，不是"不支持"（代码是完整的）。
-	for _, bad := range []string{"不支持", "不可用", "无法使用", "已废弃"} {
-		if containsAny(got, bad) {
-			t.Errorf("提醒不该断言「%s」—— JWT 通道是**未验证**而非不支持。\n"+
-				"措辞: %q", bad, got)
-		}
-	}
-	// 应当说出"未经真实验证"这层意思。
-	if !containsAny(got, "未", "没有", "尚") {
-		t.Errorf("提醒应说明「尚未验证」这层含义，实际 %q", got)
-	}
-}
-
-// containsAny 是否含任一子串（小工具，避免为一个断言引入 strings 依赖的噪音）。
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if len(sub) > 0 && len(s) >= len(sub) {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }

@@ -62,13 +62,6 @@ var (
 	_ gateway.QuotaExt       = (*Provider)(nil)
 	_ gateway.HealthProbeExt = (*Provider)(nil)
 
-	// 界面提醒（用户要求"Zcode 那个地方用小字提醒一下，这个是测试"）。
-	//
-	// 缺了它 → manifest 里没有 notice 字段 → 前端不显示提醒。
-	// ⚠ 而前端**不会报错**（读不到字段就不渲染），所以这类缺失
-	// 只能靠编译期断言拦 —— 这正是本文件存在的理由。
-	_ gateway.NoticeExt = (*Provider)(nil)
-
 	// 导入与错误分类。
 	_ gateway.AccountImportExt = (*Provider)(nil)
 	// SoftRateExt 是**本上游最要紧的一个** —— 它的失败可能是
