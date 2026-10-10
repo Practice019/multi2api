@@ -66,21 +66,29 @@ func (p *Provider) HasToken(cred gateway.Credential) bool {
 	return ok && a != nil && a.Usable()
 }
 
-// TokenExpiry 报凭证过期时刻（**毫秒**）。
+// TokenExpiry 报凭证过期时刻（**Unix 秒**）。
 //
-// ⚠ 单位是毫秒（本仓约定），不是秒 —— 传秒会让界面显示"1970 年"。
+// ⚠ 契约是**秒**（见 `gateway.CredentialExpiryExt` 的文档与
+// `AccountView.TokenExpireSec` 的字段名）。
+//
+// 我第一版回的是**毫秒**，界面于是显示「20715653 天」—— 用户实测报出来的。
+// 而本仓 4 个上游（raccoon / cline / lobsterai / qoder）都是
+// `time.UnixMilli(ms).Unix()` 这个写法，照它们即可。
+//
 // 不知道时返回 ok=false（界面显示 `—`），**不是** 0（0 表示"真的已过期"）。
 func (p *Provider) TokenExpiry(cred gateway.Credential) (int64, bool) {
 	a, ok := cred.Secret.(*Auth)
 	if !ok || a == nil {
 		return 0, false
 	}
+	// Auth.ExpiresAt 是**毫秒**（上游给的是 expires_in，我们换算成毫秒存），
+	// 所以这里要转成秒 —— 这一行是本方法的核心，别省。
 	ms := a.ExpiresAtMS()
 	if ms <= 0 {
 		// "不知道"与"是 0"必须分开 —— 本仓的三态纪律。
 		return 0, false
 	}
-	return ms, true
+	return time.UnixMilli(ms).Unix(), true
 }
 
 // NeverExpires 本上游的凭证**不会**永不过期。

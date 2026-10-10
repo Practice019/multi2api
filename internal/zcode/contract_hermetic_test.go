@@ -704,8 +704,21 @@ func TestRefreshSkewOnlyForJWT(t *testing.T) {
 	}
 }
 
-// TokenExpiry 的单位必须是**毫秒**（本仓约定）。
-func TestTokenExpiryIsMilliseconds(t *testing.T) {
+// TokenExpiry 的单位必须是**秒**（gateway 的契约）。
+//
+// # ⚠ 这条测试曾经断言**毫秒** —— 它把 bug 固化成了"正确"
+//
+// 我原来写的名字是 `TestTokenExpiryIsMilliseconds`、断言 `got == sec*1000`。
+// 于是实现回毫秒时它是**绿的** —— 而界面上显示的是「20715653 天」。
+// 用户实测报了这个数字，才发现契约其实是秒
+// （`gateway.CredentialExpiryExt` 的文档：「报告这份凭证的过期时刻（Unix 秒）」；
+//
+//	字段名也是 `AccountView.TokenExpireSec`）。
+//
+// 所以这条断言现在**逐字对着契约**写：传进去 sec，出来的必须是 sec。
+// 本仓 4 个上游（raccoon / cline / lobsterai / qoder）都是
+// `time.UnixMilli(ms).Unix()` —— 那才是标准写法。
+func TestTokenExpiryIsSeconds(t *testing.T) {
 	f := newFakeUpstream(t, nil)
 	p := newTestProvider(t, f)
 
@@ -715,8 +728,15 @@ func TestTokenExpiryIsMilliseconds(t *testing.T) {
 	if !ok {
 		t.Fatal("JWT 有 exp 时应报 ok=true")
 	}
-	if got != sec*1000 {
-		t.Errorf("TokenExpiry = %d，期望 %d（毫秒）—— 单位错了会让账号被判早/晚过期", got, sec*1000)
+	if got != sec {
+		t.Errorf("TokenExpiry = %d，期望 %d（**秒**）——\n"+
+			"回毫秒会让界面显示「几千万天」（用户实测报过 20715653 天）。\n"+
+			"契约见 gateway.CredentialExpiryExt 的文档与 AccountView.TokenExpireSec。",
+			got, sec)
+	}
+	// 量级哨兵：秒级时间戳不该是 1e12 那种形态。
+	if got >= 100_000_000_000 {
+		t.Errorf("TokenExpiry = %d —— 量级像**毫秒**", got)
 	}
 
 	// 没有过期信息 → ok=false（不能报 0，那会被当成"刚过期"）。

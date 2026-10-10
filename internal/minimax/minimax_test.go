@@ -13,6 +13,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // parseCreditBalance 必须取 `Σ details[].remaining_amount`，
@@ -410,5 +412,48 @@ func TestAuthBasics(t *testing.T) {
 	old := &Auth{AccessToken: "x", ExpiresAt: "1000000000001"}
 	if !old.Expired() {
 		t.Error("2001 年的时刻（毫秒）应判已过期")
+	}
+}
+
+// gatewayCred 把 *Auth 包成核心凭证（测试用）。
+func gatewayCred(a *Auth) gateway.Credential {
+	return gateway.Credential{Provider: providerID, UID: a.UID(), Secret: a}
+}
+
+// TokenExpiry 必须回**秒**（gateway 的契约）。
+//
+// ⚠ 我第一版回的是**毫秒**，界面于是显示「20715653 天」——用户实测报出来的。
+// 契约见 `gateway.CredentialExpiryExt` 的文档（"报告这份凭证的过期时刻（Unix 秒）"）
+// 与 `AccountView.TokenExpireSec` 的字段名。
+//
+// 本仓 4 个上游（raccoon / cline / lobsterai / qoder）都是
+// `time.UnixMilli(ms).Unix()` —— 那才是"内部存毫秒、报出去转秒"的标准写法。
+func TestTokenExpiryIsSeconds(t *testing.T) {
+	const want = 1793000000 // 秒
+	// Auth.ExpiresAt 是**毫秒**串（上游给 expires_in，我们换算成毫秒存）。
+	a := &Auth{AccessToken: "mmoat_x", ExpiresAt: "1793000000000"}
+	p := New(Config{})
+
+	got, ok := p.TokenExpiry(gatewayCred(a))
+	if !ok {
+		t.Fatal("有 expires_at 时应报 ok=true")
+	}
+	if got != want {
+		t.Errorf("TokenExpiry = %d，期望 %d（**秒**）——\n"+
+			"回毫秒会让界面显示「几千万天」（用户实测报过 20715653 天）。",
+			got, want)
+	}
+	if got >= 100_000_000_000 {
+		t.Errorf("TokenExpiry = %d —— 量级像毫秒", got)
+	}
+
+	// 没有过期信息 → ok=false（不是 0；0 表示"真的已过期"）。
+	if _, ok := p.TokenExpiry(gatewayCred(&Auth{AccessToken: "mmoat_y"})); ok {
+		t.Error("没有 expires_at 时应返回 ok=false")
+	}
+	// 秒级输入也要认（parseExpiryMillis 的兼容路径）。
+	a2 := &Auth{AccessToken: "mmoat_z", ExpiresAt: "1793000000"}
+	if got2, ok2 := p.TokenExpiry(gatewayCred(a2)); !ok2 || got2 != want {
+		t.Errorf("秒级输入应换算成同一个时刻，实际 (%d, %v)", got2, ok2)
 	}
 }
