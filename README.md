@@ -26,7 +26,8 @@
                          ├──► LobsterAI          有道龙虾
                          ├──► Qoder              阿里 Qoder
                          ├──► Qoder（中国版）
-                         └──► ZCode              Z.ai / 智谱 GLM Coding Plan
+                         ├──► ZCode              Z.ai / 智谱 GLM Coding Plan
+                         └──► MiniMax Code       MiniMax（Anthropic Messages 协议）
 ```
 
 > ⚠ **它不再是 WorkBuddy 专用**。架构上"加一个上游 = 加一个目录 + 实现一组接口 +
@@ -37,7 +38,7 @@
 > - 上游之间不得互相依赖
 > - 新增上游只需在 `cmd/server/main.go` 加一行 `registry.Register(...)`
 >
-> 从 4 个上游扩到 10 个的过程中，核心包**一行没改** —— 这条判据是实践过的，不是口号。
+> 从 4 个上游扩到 12 个的过程中，核心包**一行没改** —— 这条判据是实践过的，不是口号。
 
 ## ✨ 核心能力
 
@@ -79,6 +80,7 @@
 | **LobsterAI** | 浏览器 OAuth 回跳 | 三步式签到领取积分 / 定时自动签到 |
 | **Qoder / Qoder 中国版** | PKCE 设备码 | 积分余额 / 每日签到 / WASM 加密推理桥 |
 | **ZCode** | **API Key（OpenAI 协议）或 OAuth JWT（Anthropic 协议）** | 额度查询 / 令牌诊断 / 粘贴导入。**首个非 OpenAI 协议的上游** —— JWT 通道需要协议转换 |
+| **MiniMax Code**（中国版） | OAuth 设备码 + PKCE（不起本地端口） | 积分余额 / 每日签到（幂等）/ 粘贴导入。**第二个 Anthropic 协议族上游** —— 只有 Anthropic 端点，没有 OpenAI 形态 |
 
 ## 🚀 快速开始
 
@@ -124,6 +126,12 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
   - 平台可以省略 —— 网关会**探测**这把 Key 属于哪个平台并记在凭证上。
   - 只有走 Coding Plan 的 **JWT** 通道时才需要 `zcode.jwt_captcha: true`
     （那会用系统浏览器打开一个本机页面过一次滑块，**需要图形界面**）。
+- **MiniMax Code**：与 Cline 同型 —— **设备码 + PKCE 轮询，不起本地端口**，
+  服务器部署也能用。点「＋ 添加账号」会打开官方的设备授权页。
+  - 也可以直接「批量导入」粘贴 token：单个 JSON 对象、`[ ]` 数组，
+    或**把多个独立文件的内容依次粘进来**（会自动合并）。
+  - 客户端登录态文件（`accessToken` / `refreshToken` / `expiresAtMs`，
+    camelCase）也认 —— 直接从客户端 auth.json 里复制即可。
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。
@@ -192,7 +200,29 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 各上游的配置段（都支持 `enabled` / `auth_dir`，其余见下）：
 
 `workbuddy` · `workbuddy_intl` · `codearts` · `loomy` · `trae` · `cline` ·
-`raccoon` · `lobsterai` · `qoder` · `zcode`
+`raccoon` · `lobsterai` · `qoder` · `zcode` · `minimax`
+
+**MiniMax Code 特有配置段**：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `minimax.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
+| `minimax.auth_dir` | `<auth_dir>/minimax` | 凭证目录（`minimax-*.json`） |
+| `minimax.account_base` | `""`（官方 `account.minimax.cn`） | OAuth 端点基址 |
+| `minimax.api_base` | `""`（官方 `agent.minimax.cn`） | 业务 / 推理端点基址。⚠ **与 `account_base` 必须分开** —— OAuth 与业务是两个不同的 host，打错会得到 404（而 404 在本仓通常表示「账号不存在」） |
+| `minimax.timezone_id` | `""`（按本机推断） | 签到端点要的 IANA 时区。⚠ 它是 **query 参数**，而且放错位置**也返回 HTTP 200**（回 `1406010011 invalid timezone_id`）—— 所以「200 = 成功」在这个端点上不成立 |
+| `minimax.pool_accounts` | `true` | 是否并入核心账号池 |
+
+> ⚠ **MiniMax 只有 Anthropic Messages 一条通道**（`/mavis/api/v1/llm/v1/messages`），
+> 没有 OpenAI 形态的端点可退。所以它的协议转换是**无条件**的，走与本仓
+> ZCode JWT 通道**同一份**共享转换层（`internal/anthroconv`）—— 两个消费者
+> 一套判据，不会分叉。
+>
+> 与 ZCode 不同的是：它**不需要**任何额外依赖（无验证码、无浏览器），
+> 设备码登录在服务器上就能跑完。
+>
+> 协议事实来自开源参照实现的源码逐行提取，**未在真实上游做过对话验证** ——
+> 上游分组旁会显示这句提醒。
 
 **ZCode 特有配置段**：
 
@@ -217,7 +247,7 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 > 走 `/api/coding/paas/v4` —— 官方文档明示它与通用端点**额度不互通**，
 > 所以凭证里要标 `"coding_plan": true`，否则会"有额度却报无额度"。
 >
-> JWT 通道**必须**做协议转换（本仓唯一一处），因为实测它的 OpenAI 形态不存在：
+> JWT 通道**必须**做协议转换，因为实测它的 OpenAI 形态不存在：
 >
 > ```
 > /api/v1/zcode-plan/paas/v4/chat/completions   → 404   想当然的路径
