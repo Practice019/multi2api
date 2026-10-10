@@ -188,6 +188,34 @@ func (p *Provider) Poll(state string) (gateway.Credential, error) {
 	if nick := strings.TrimSpace(res.Nickname); nick != "" {
 		a.Nickname = nick
 	}
+
+	// ---- 判重：同一个号**更新已有那条**，而不是新增一条 ----
+	//
+	// 用户实测报的缺陷：同一个 MiniMax 账号登录两次 ⇒ 账号池里两条。
+	// 根因是我把 uid 建成 access_token 的哈希，而重登必然换发新令牌。
+	//
+	// 上游不给账号身份（实测 9 个可能的端点全 404、可用端点的真实响应里
+	// 也没有任何 id 字段），所以这里改用**账号作用域的数据指纹**做证据：
+	// 同一个号的两条不同令牌，打积分端点返回逐字段一致的桶标识。
+	//
+	// ⚠ 三条硬约束（见 accountkey.go 文件头）：
+	//	· 指纹为空 ⇒ 不合并（否则两个"零积分的不同账号"会被并成一个）
+	//	· 判不准 ⇒ 保持新增（可逆，用户能删；覆盖别人的凭证不可逆）
+	//	· 只在登录落盘前做一次，不进任何每请求路径
+	if matched, ok := p.dedupIdentity(a); ok {
+		a.Identity = matched
+		// 昵称继承已有的那条 —— 否则重登会把用户认得出的名字
+		// 变成陌生的哈希前缀（上游不下发昵称时必然发生）。
+		if strings.TrimSpace(a.Nickname) == "" {
+			if old := p.cred(matched); old != nil {
+				a.Nickname = old.Nickname
+			}
+		}
+		logf("minimax: 登录判重命中已有账号 uid=%s ⇒ 更新它（不新增）", matched)
+	} else {
+		logf("minimax: 登录判重未命中（新账号或指纹不足）⇒ 作为新账号加入")
+	}
+
 	return gateway.Credential{
 		Provider: providerID,
 		UID:      a.UID(),
