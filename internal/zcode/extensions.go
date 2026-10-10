@@ -16,7 +16,7 @@
 //	✓ CredentialTokenExt   有没有令牌（空凭证不并池）
 //	✓ CredentialExpiryExt  过期时刻（续期判据靠它）
 //	✓ CredentialLifetimeExt API Key 通道**永不过期**
-//	✓ RefreshSkewExt       续期提前量（JWT 走到最后一刻才续会撞 401）
+//	✓ RefreshSkewExt       JWT **明确声明不需要提前刷**（刷不了，见该方法的注释）
 //	✓ AccountColumnsExt    账号池多两列（通道 / 平台）
 //	✓ AccountImportExt     粘贴 API Key 导入
 //	✓ QuotaExt             余额/配额（JWT 通道走 billing，Key 通道走探测）
@@ -108,14 +108,58 @@ func (p *Provider) NeverExpires(cred gateway.Credential) bool {
 
 // RefreshSkew 续期提前量。
 //
-// ok=false 的语义是"该凭证不需要续期"（与 NeverExpires 一致）。
+// # ⚠ 这里曾经是一个**假承诺**（用户报「已过期」之后才查出来）
+//
+// 原实现：JWT 通道返回 `refreshSkew`（10 分钟）。
+// 而本上游**没有实现 `gateway.CredentialRefresher`** ——
+// 因为 JWT **根本刷不了**（官方无 refresh 接口，见 credential.go 的注释）。
+//
+// 于是链条是这样断的：
+//
+//  1. 核心问 needsRefreshVia → 本函数说「剩 10 分钟以内该刷了」→ true
+//  2. 核心调 refreshCredential → ExtOf[CredentialRefresher] **失败**
+//  3. 语义被解释成「该上游的凭证不需要刷新」→ **静默跳过**
+//  4. token 就这么过期着 —— 界面显示「已过期」，而**没有任何日志**说为什么
+//
+// 第 3 步那条语义本身没错（纯 API Key 的上游确实不用刷），但它把
+// **「我承诺要刷但没能力刷」**和**「我本来就不用刷」**混成了同一件事。
+// 所以「声明了 skew 却没实现 refresher」这个组合**不会报任何错** ——
+// 这正是它的隐蔽之处。
+//
+// # 正确声明：skew=0, ok=true（「不需要提前刷」）
+//
+// 既然刷不了，就不该让核心白跑一趟续期分支。skew=0 是**上游的明确声明**，
+// 核心必须尊重它（见 gateway.RefreshSkewExt 的返回值语义），
+// 于是核心不再尝试续期；token 真的过期时走 401 → 账号被标记需重登 ——
+// 那才是本上游唯一的真实路径（重新走 OAuth 登录）。
+//
+// ⚠ 不能回 ok=false：那是「我没有这个信息」，会让核心用**它自己的兜底窗口**
+// （默认 10 分钟）—— 结果和原来一模一样（照样宣告"该刷了"然后刷不动）。
+// 必须用 skew=0 这个**明确的**「不需要」，才能把那条路径关掉。
+//
+// API Key 通道：本来就不过期，回 ok=false（核心不会问它）。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 	a, ok := cred.Secret.(*Auth)
 	if !ok || a == nil || !a.UsesJWT() {
 		return 0, false
 	}
-	return refreshSkew, true
+	// JWT：有明确过期时刻，但**刷不了** ⇒ 明确声明"不需要提前刷"。
+	return 0, true
 }
+
+// RefreshCredential **不实现**（故意的，不是漏的）。
+//
+// gateway.CredentialRefresher 的契约是「怎么刷新我的凭证」。
+// zcode 的 JWT 在官方层面就没有 refresh 接口（`credential.go` 有依据），
+// API Key 通道则根本不过期 —— 所以**没有任何可实现的刷新动作**。
+//
+// ⚠ 刻意**不**写一个"返回错误"的实现来"表态"：那会让核心对临近过期的
+// 凭证反复走续期分支、每次记一次失败，最终把账号**禁用** ——
+// 而正确的路径是让它自然过期、由 401 走"需重登"（那条路会提示用户重新登录，
+// 而不是悄悄把号禁掉）。
+//
+// 判据：**「刷不了」用 RefreshSkew 回 0 表达，「没有刷新动作」用不实现本接口表达。**
+// 两者都不该被写成"实现它但返回错误"或"声明 skew 却无实现"。
 
 // AccountColumns 账号池列集（有序的**规范列 id**）。
 //

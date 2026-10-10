@@ -687,20 +687,43 @@ func TestNeverExpiresOnlyForAPIKeyChannel(t *testing.T) {
 	}
 }
 
-// RefreshSkewExt：只有 JWT 通道需要提前量。
-func TestRefreshSkewOnlyForJWT(t *testing.T) {
+// RefreshSkewExt：JWT 通道必须明确声明**不需要提前刷**。
+//
+// # ⚠ 这条测试曾经断言「提前量应为正数」—— 它把一个假承诺固化成了"正确"
+//
+// 原断言：JWT 的 skew 必须 > 0。而本上游**没有实现 CredentialRefresher**
+// （JWT 官方无 refresh 接口，`credential.go` 有依据）—— 于是那句
+// "剩 10 分钟该刷了"是一句**兑现不了的承诺**：
+//
+//	核心判「该刷了」→ 找不到续期实现 → 解释成「不需要刷新」→ 静默跳过
+//
+// 用户看到的就是「已过期」一直挂着，且**没有任何日志**说明为什么。
+//
+// 所以正确断言是反过来的：**skew 必须恰好为 0 且 ok=true**。
+// 那不是"没信息"，是上游的**明确声明**（gateway.RefreshSkewExt 的返回值语义：
+// 「skew == 0 → 不需要提前续期」）—— 核心必须尊重它，于是不再白跑续期分支。
+//
+// ⚠ 不能回 ok=false：那会让核心用**它自己的**兜底窗口（默认 10m），
+// 结果是"照样宣告该刷、然后刷不动" —— 与修之前一模一样。
+func TestRefreshSkewDeclaresNoEarlyRenewalForJWT(t *testing.T) {
 	f := newFakeUpstream(t, nil)
 	p := newTestProvider(t, f)
 
+	// API Key：本来就不过期 ⇒ 核心不该问它（ok=false）。
 	if _, ok := p.RefreshSkew(credOf(&Auth{Kind: CredKindAPIKey, APIKey: "k"})); ok {
-		t.Error("API Key 通道不需要续期提前量")
+		t.Error("API Key 通道不该上报提前量")
 	}
+
 	skew, ok := p.RefreshSkew(credOf(&Auth{Kind: CredKindJWT, JWT: "j", ExpiresAt: time.Now().Add(time.Hour).Unix()}))
 	if !ok {
-		t.Fatal("JWT 通道应有续期提前量")
+		t.Fatal("JWT 必须**明确**声明（ok=true）—— 回 ok=false 会让核心用它自己的兜底窗口，" +
+			"于是又变成「宣告该刷但刷不动」")
 	}
-	if skew <= 0 {
-		t.Errorf("提前量应为正数，实际 %v", skew)
+	if skew != 0 {
+		t.Errorf("JWT 的提前量必须恰好为 0（本上游刷不了，声明正数就是假承诺）——\n"+
+			"实际 %v。\n"+
+			"判据：skew=0 是上游的明确声明「不需要提前刷」；\n"+
+			"     正数会让核心走续期分支，而那里没有 CredentialRefresher ⇒ 静默跳过。", skew)
 	}
 }
 

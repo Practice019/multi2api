@@ -41,6 +41,17 @@ type Auth struct {
 	TokenType string `json:"token_type,omitempty"`
 	// ExpiresAt 过期时刻，**毫秒时间戳的字符串**。
 	ExpiresAt string `json:"expires_at,omitempty"`
+	// IssuedAt 这份 token 的**发证时刻**（毫秒字符串，可选）。
+	//
+	// # 为什么需要它（用户提的问题逼出来的）
+	//
+	// 用户问：「Token 时间过了 50% 就会自动续期吗？」
+	//
+	// 要按比例算窗口就必须知道**总寿命**，而凭证里只有过期时刻。
+	// ExpiresAt - IssuedAt 就是总寿命 ⇒ 窗口取一半即用户期望的语义。
+	//
+	// 手工导入的凭证没有这个字段（omitempty），那时回落到固定窗口。
+	IssuedAt string `json:"issued_at,omitempty"`
 	// Scope 授权范围（空格分隔）。必须含 `agent.default` 才算有效。
 	Scope string `json:"scope,omitempty"`
 	// AccountID 账号标识。
@@ -164,6 +175,21 @@ func (a *Auth) Expired() bool {
 }
 
 // Refreshable 是否有 refresh_token 可续期。
+// LifetimeMillis 这份凭证的总寿命（毫秒）；未知时 0。
+//
+// 判据：IssuedAt 与 ExpiresAt 都在、且后者更大。
+// 0 是**未知**哨兵（不是「寿命为零」）—— 调用方据此回落固定窗口。
+func (a *Auth) LifetimeMillis() int64 {
+	if a == nil {
+		return 0
+	}
+	issued := parseExpiryMillis(a.IssuedAt)
+	expires := a.ExpiresAtMS()
+	if issued <= 0 || expires <= issued {
+		return 0
+	}
+	return expires - issued
+}
 func (a *Auth) Refreshable() bool {
 	return a != nil && strings.TrimSpace(a.RefreshToken) != ""
 }
@@ -316,4 +342,38 @@ func SaveFile(dir string, a *Auth) (string, error) {
 	}
 	a.FilePath = path
 	return path, nil
+}
+
+// saveInPlace 把凭证写回它**自己的来源文件**（原子写 + 0600）。
+//
+// # 为什么需要它（而不是复用 SaveFile）
+//
+// `SaveFile(dir, a)` 会按 uid **重新算文件名**并写到指定目录。
+// 而续期要的是"写回它原来那个文件" —— 两者在正常情况下结果相同，
+// 但有一个真实的分叉：用户手工放进来的凭证文件名可能不是
+// `minimax-<uid>.json`（例如从别处导来的 `my-token.json`）。
+// 用 SaveFile 会**多出一个文件**，而旧的那份还在 —— 重启后
+// LoadDir 读到两份、uid 相同被去重，行为取决于读目录的顺序。
+//
+// 所以续期走"就地写回"，语义明确。
+//
+// FilePath 为空（内存里造的凭证，例如粘贴导入但还没落盘）时
+// 返回 nil —— 那不是错误，调用方只记日志。
+func saveInPlace(a *Auth) error {
+	if a == nil || a.FilePath == "" {
+		return nil
+	}
+	raw, err := json.MarshalIndent(authFile{A: a}, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := a.FilePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, a.FilePath); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

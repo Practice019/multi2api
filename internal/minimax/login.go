@@ -405,14 +405,17 @@ func parseTokenGrant(m map[string]any, previousRefresh string) (*Auth, error) {
 	if !hasScope(scope, oauthScope) {
 		return nil, fmt.Errorf("令牌响应的 scope 不含 %s（实际 %q）", oauthScope, scope)
 	}
-	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(expiresIn) * time.Second).UnixMilli()
 	return &Auth{
 		AccessToken:  access,
 		RefreshToken: refresh,
 		TokenType:    "Bearer",
 		// ⚠ 毫秒时间戳的**字符串**（参照项目的原形状就是 string）。
 		ExpiresAt: fmt.Sprintf("%d", expiresAt),
-		Scope:     scope,
+		// 记下发证时刻 ⇒ 寿命可推（RefreshSkew 按比例算窗口要用）。
+		IssuedAt: fmt.Sprintf("%d", now.UnixMilli()),
+		Scope:    scope,
 	}, nil
 }
 

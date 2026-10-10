@@ -3,7 +3,6 @@ package minimax
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -162,7 +161,6 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if err != nil {
 		return gateway.ChatStream{}, err
 	}
-	stream := detectStream(body)
 	anthroBody, err := anthroconv.OpenAIToAnthropic(body)
 	if err != nil {
 		return gateway.ChatStream{}, fmt.Errorf("minimax: 请求体转换失败: %w", err)
@@ -189,9 +187,16 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		// 出口层拿不到那个分类，所以这里**保留原文**，不吞。
 		return gateway.ChatStream{Status: resp.StatusCode, Body: resp.Body}, nil
 	}
-	if !stream {
-		return p.translateNonStream(resp)
-	}
+	// ⚠ **流式与非流式走同一条**：都产出 OpenAI SSE。
+	//
+	// 端到端实测暴露了原来的错：非流式去调 AnthropicJSONToOpenAI，
+	// 而上游这个端点**恒回 SSE**（我们恒发 stream:true），于是 JSON
+	// 解析失败、把原始 SSE 当 JSON 交出去 —— 客户端拿到**空 content**，
+	// 不报错、不中断，只是回答是空的。
+	//
+	// 正解由核心架构决定：非流式请求由出口层用 wire.Aggregate 把 SSE
+	// 合成一条 JSON（handler.go:1603）。所以上游侧**不需要**为非流式
+	// 做第二套转换 —— 给它一份好的 SSE 就够了。
 	pr, pw := io.Pipe()
 	go func() {
 		defer resp.Body.Close()
@@ -199,44 +204,6 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		pw.CloseWithError(err)
 	}()
 	return gateway.ChatStream{Status: resp.StatusCode, Body: pr}, nil
-}
-
-// translateNonStream 非流式响应：Anthropic JSON → OpenAI JSON。
-//
-// ⚠ 上游端点**恒回 SSE**（我们恒发 stream:true），所以这条路径实际上
-// 只在"客户端请求非流式"时被走到 —— 那时我们仍按 SSE 收，
-// 但要把它压成一条 OpenAI JSON。做不到就**如实返回上游原文**，
-// 不编一个空响应（伪造成功会让"转换器有 bug"伪装成"模型答了空话"）。
-func (p *Provider) translateNonStream(resp *http.Response) (gateway.ChatStream, error) {
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	resp.Body.Close()
-	if err != nil {
-		return gateway.ChatStream{}, err
-	}
-	converted, err := anthroconv.AnthropicJSONToOpenAI(raw)
-	if err != nil {
-		return gateway.ChatStream{
-			Status: resp.StatusCode,
-			Body:   io.NopCloser(strings.NewReader(string(raw))),
-		}, nil
-	}
-	return gateway.ChatStream{
-		Status: resp.StatusCode,
-		Body:   io.NopCloser(strings.NewReader(string(converted))),
-	}, nil
-}
-
-// detectStream 请求体里是不是 `stream:true`。
-func detectStream(body []byte) bool {
-	var probe struct {
-		Stream json.RawMessage `json:"stream"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		// 解不出来时按**非流式**处理：非流式路径对畸形 body 更宽容
-		//（上游会直接报 400，而流式路径会先建立 SSE 连接再失败）。
-		return false
-	}
-	return strings.TrimSpace(string(probe.Stream)) == "true"
 }
 
 // ---- 模型目录 ----

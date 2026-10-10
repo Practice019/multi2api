@@ -106,9 +106,33 @@ func (p *Provider) NeverExpires(cred gateway.Credential) bool { return false }
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 	a, ok := cred.Secret.(*Auth)
 	if !ok || a == nil || !a.Refreshable() {
+		// 没有 refresh_token ⇒ 刷不了。回 ok=false 让核心用它的兜底窗口，
+		// 而不是谎称「我会在 5 分钟前刷」。
+		// 注意这**不是**「不需要刷」（那是 skew=0, ok=true 的语义）——
+		// 是「我提供不了这个信息」。
 		return 0, false
 	}
-	return 5 * time.Minute, true
+	// 按**寿命的一半**算窗口（用户明确期望的语义：「过了 50% 就续期」）。
+	//
+	// 为什么不能写死一个常数：寿命是上游的事实，而它可能变
+	//（参照项目实测 expires_in 由服务端下发，不同环境不同）。
+	// 写死 5 分钟对 1 小时的 token 是 8%，对 10 分钟的 token 是 50% ——
+	// 同一个数字在两种寿命下安全性差 6 倍。
+	if life := a.LifetimeMillis(); life > 0 {
+		skew := time.Duration(life/2) * time.Millisecond
+		// 上下夹紧：
+		//   下限 2m —— 太小的窗口在「调度间隔 + 一次失败重试」下会被跳过
+		//   上限 30m —— 太早续期只是多打几次续期请求，但没必要
+		if skew < 2*time.Minute {
+			skew = 2 * time.Minute
+		}
+		if skew > 30*time.Minute {
+			skew = 30 * time.Minute
+		}
+		return skew, true
+	}
+	// 寿命未知（手工导入的凭证没有 issued_at）⇒ 保守固定值。
+	return 10 * time.Minute, true
 }
 
 // ---- 按上游重扫凭证 ----

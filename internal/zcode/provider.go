@@ -38,8 +38,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
-
 	"workbuddy2api/internal/anthroconv"
 	"workbuddy2api/internal/gateway"
 )
@@ -441,9 +439,12 @@ func (p *Provider) translateAnthropic(ctx context.Context, resp *http.Response, 
 	}, nil
 }
 
-// refreshSkew 续期提前量。
+// （原 refreshSkew 常量已删除。）
 //
-// 为什么需要提前量：JWT 走到最后一刻才续期，会有"刚好在过期瞬间发请求"
-// 的窗口，那一次必然 401 —— 而 401 在本上游的处置是"标记需重登"，
-// 代价很高。提前 10 分钟避免这个窗口。
-const refreshSkew = 10 * time.Minute
+// 它原来是"JWT 提前 10 分钟续期"的窗口值。而本上游**没有**（也做不出）
+// CredentialRefresher —— JWT 官方无 refresh 接口。所以那个正数窗口是一句
+// 兑现不了的承诺：核心据此走进续期分支，发现没有实现，再解释成
+// 「不需要刷新」而静默跳过。用户看到的就是「已过期」一直挂着。
+//
+// 现在 RefreshSkew 对 JWT 明确回 (0, true)（"不需要提前刷"），
+// 这个常量随之失去用途 —— 留着它会诱使下一个人把它接回去。

@@ -47,6 +47,17 @@ var (
 	_ gateway.CredentialExpiryExt   = (*Provider)(nil)
 	_ gateway.CredentialLifetimeExt = (*Provider)(nil)
 	_ gateway.RefreshSkewExt        = (*Provider)(nil)
+	// CredentialRefresher 与 RefreshSkewExt **必须成对**
+	//（见 gateway/refresh_skew.go 的标题）。
+	//
+	// 我第一版只实现了 RefreshSkewExt（「多早该刷」）而漏了这一个
+	//（「怎么刷」）—— 后果不是「不续期」，而是**声明了却兑现不了**：
+	// 核心每次判「该刷了」，然后发现没有续期实现 ⇒ 被解释成
+	//「该上游的凭证不需要刷新」⇒ 静默跳过。用户看到的是
+	//「已过期」一直挂着。
+	//
+	// 漏实现它**不会报任何错** —— 所以必须有这条编译期断言。
+	_ gateway.CredentialRefresher = (*Provider)(nil)
 
 	// 运维端点与健康。
 	_ gateway.AdminExt       = (*Provider)(nil)
