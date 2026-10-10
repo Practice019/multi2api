@@ -28,6 +28,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/anthroconv"
 )
 
 // DefaultOriginZAI Z.ai 开放平台（国际版）默认基址。
@@ -209,7 +211,7 @@ func (c *Client) buildBody(a *Auth, openaiBody []byte) ([]byte, error) {
 	if !a.UsesJWT() {
 		return openaiBody, nil
 	}
-	return openAIToAnthropic(openaiBody)
+	return anthroconv.OpenAIToAnthropic(openaiBody)
 }
 
 // attachCaptcha 给 JWT 通道的请求挂上验证码参数。

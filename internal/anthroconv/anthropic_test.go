@@ -8,7 +8,7 @@
 // 上游/model/prompt，而不是我们的转换器。
 //
 // 所以这里的断言**全部逐字段比对语义**，不满足于"没报错"。
-package zcode
+package anthroconv
 
 import (
 	"encoding/json"
@@ -387,7 +387,7 @@ func TestRequestSamplingParamsPassThrough(t *testing.T) {
 
 // 非法 JSON 要报错（而不是产出一个空请求打上游）。
 func TestRequestRejectsMalformedBody(t *testing.T) {
-	if _, err := openAIToAnthropic([]byte(`{not json`)); err == nil {
+	if _, err := OpenAIToAnthropic([]byte(`{not json`)); err == nil {
 		t.Error("非法 JSON 应报错")
 	}
 }
@@ -625,7 +625,7 @@ func TestResponseStopReasonMapping(t *testing.T) {
 // 上游错误体必须**原样透传**（出口层要按业务码判）。
 func TestResponseErrorPassthrough(t *testing.T) {
 	in := `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`
-	out, err := anthropicJSONToOpenAI([]byte(in))
+	out, err := AnthropicJSONToOpenAI([]byte(in))
 	if err != nil {
 		t.Fatalf("错误体不该导致转换失败: %v", err)
 	}
@@ -639,7 +639,7 @@ func TestResponseErrorPassthrough(t *testing.T) {
 // 已经是 OpenAI 形态的响应体原样透传（兼容层会这样）。
 func TestResponseAlreadyOpenAIPassthrough(t *testing.T) {
 	in := `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
-	out, err := anthropicJSONToOpenAI([]byte(in))
+	out, err := AnthropicJSONToOpenAI([]byte(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +654,7 @@ func TestResponseAlreadyOpenAIPassthrough(t *testing.T) {
 
 // 非法 JSON 要报错。
 func TestResponseRejectsMalformedBody(t *testing.T) {
-	if _, err := anthropicJSONToOpenAI([]byte(`<html>502</html>`)); err == nil {
+	if _, err := AnthropicJSONToOpenAI([]byte(`<html>502</html>`)); err == nil {
 		t.Error("非法 JSON 应报错")
 	}
 }
@@ -670,7 +670,7 @@ func TestResponseLongContentNotTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out2, err := anthropicJSONToOpenAI(body)
+	out2, err := AnthropicJSONToOpenAI(body)
 	if err != nil {
 		t.Fatalf("响应转换失败: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestStreamTextConversion(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("转换失败: %v", err)
 	}
 	out := sb.String()
@@ -804,7 +804,7 @@ func TestStreamToolCallArgumentsAccumulate(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("转换失败: %v", err)
 	}
 	frames := parseSSEFrames(t, sb.String())
@@ -885,7 +885,7 @@ func TestStreamPingIgnoredWithoutBreaking(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("ping 不该导致失败: %v", err)
 	}
 	if !strings.Contains(sb.String(), `"A"`) {
@@ -914,7 +914,7 @@ func TestStreamUnknownEventsAreSkipped(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("未知事件不该导致失败: %v", err)
 	}
 	if !strings.Contains(sb.String(), "还在") {
@@ -939,7 +939,7 @@ func TestStreamMalformedFrameIsSkipped(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("畸形帧不该导致失败: %v", err)
 	}
 	if !strings.Contains(sb.String(), "活着") {
@@ -968,7 +968,7 @@ func TestStreamAcceptsDataWithoutSpace(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("无空格的 data: 不该导致失败: %v", err)
 	}
 	if !strings.Contains(sb.String(), "无空格") {
@@ -988,7 +988,7 @@ func TestStreamErrorFrameThenDone(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("error 事件不该导致函数返回错误: %v", err)
 	}
 	out := sb.String()
@@ -1003,7 +1003,7 @@ func TestStreamErrorFrameThenDone(t *testing.T) {
 // 空流（上游直接断了）也要给出合法收尾，且**不伪造内容**。
 func TestStreamEmptyGivesValidTerminator(t *testing.T) {
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(""), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(""), &sb); err != nil {
 		t.Fatalf("空流不该报错: %v", err)
 	}
 	out := sb.String()
@@ -1038,7 +1038,7 @@ func TestStreamThinkingDelta(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("失败: %v", err)
 	}
 	frames := parseSSEFrames(t, sb.String())
@@ -1066,7 +1066,7 @@ func TestStreamWorksWithoutEventLines(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("失败: %v", err)
 	}
 	if !strings.Contains(sb.String(), "无事件行") {
@@ -1105,7 +1105,7 @@ func TestStreamToolCallIndexIsIndependentOfBlockIndex(t *testing.T) {
 	}, "\n")
 
 	var sb strings.Builder
-	if err := anthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
+	if err := AnthropicSSEToOpenAI(strings.NewReader(sse), &sb); err != nil {
 		t.Fatalf("失败: %v", err)
 	}
 	frames := parseSSEFrames(t, sb.String())
@@ -1153,11 +1153,11 @@ func parseSSEFrames(t *testing.T, sse string) []map[string]any {
 
 // mustReq 把 OpenAI 请求体转成 Anthropic（失败即 Fatal）。
 //
-// 为什么不写成 mustConv(t, openAIToAnthropic(x))：Go 不允许把多值返回
+// 为什么不写成 mustConv(t, OpenAIToAnthropic(x))：Go 不允许把多值返回
 // 展开成另一个函数的参数，所以助手要接**输入**而不是接结果。
 func mustReq(t *testing.T, openAIBody string) map[string]any {
 	t.Helper()
-	out, err := openAIToAnthropic([]byte(openAIBody))
+	out, err := OpenAIToAnthropic([]byte(openAIBody))
 	if err != nil {
 		t.Fatalf("请求转换失败: %v", err)
 	}
@@ -1167,7 +1167,7 @@ func mustReq(t *testing.T, openAIBody string) map[string]any {
 // mustResp 把 Anthropic 响应体转成 OpenAI（失败即 Fatal）。
 func mustResp(t *testing.T, anthropicBody string) map[string]any {
 	t.Helper()
-	out, err := anthropicJSONToOpenAI([]byte(anthropicBody))
+	out, err := AnthropicJSONToOpenAI([]byte(anthropicBody))
 	if err != nil {
 		t.Fatalf("响应转换失败: %v", err)
 	}
