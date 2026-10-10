@@ -33,7 +33,7 @@
 //  3. **不伪造数据**。转换不出来就如实报错或原样透传，
 //     绝不编一个"看起来对"的空响应 —— 那会让"转换器有 bug"
 //     伪装成"模型答了空话"，极难归因。
-package zcode
+package anthroconv
 
 import (
 	"bufio"
@@ -57,7 +57,7 @@ const defaultMaxTokens = 4096
 
 // ---- 请求转换：OpenAI → Anthropic ----
 
-// openAIToAnthropic 把 OpenAI chat/completions 请求体转成 Anthropic messages 请求体。
+// OpenAIToAnthropic 把 OpenAI chat/completions 请求体转成 Anthropic messages 请求体。
 //
 // 主要差异（这些是协议本身的差异，不是实现细节）：
 //
@@ -68,7 +68,7 @@ const defaultMaxTokens = 4096
 //	tool 结果      要包成 `tool_result` block（且必须排在 user 消息里）
 //	max_tokens     Anthropic **必填**
 //	stop           Anthropic 叫 `stop_sequences`，且必须是**数组**
-func openAIToAnthropic(openAIBody []byte) ([]byte, error) {
+func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
 	var src map[string]any
 	if err := json.Unmarshal(openAIBody, &src); err != nil {
 		return nil, fmt.Errorf("zcode: 请求体不是合法 JSON: %w", err)
@@ -511,8 +511,8 @@ func convertToolChoice(v any) any {
 
 // ---- 非流式响应转换：Anthropic → OpenAI ----
 
-// anthropicJSONToOpenAI 把非流式 Anthropic 响应转成 OpenAI 响应。
-func anthropicJSONToOpenAI(anthropicBody []byte) ([]byte, error) {
+// AnthropicJSONToOpenAI 把非流式 Anthropic 响应转成 OpenAI 响应。
+func AnthropicJSONToOpenAI(anthropicBody []byte) ([]byte, error) {
 	var src map[string]any
 	if err := json.Unmarshal(anthropicBody, &src); err != nil {
 		return nil, fmt.Errorf("zcode: 上游响应不是合法 JSON: %w", err)
@@ -670,7 +670,7 @@ func orDefault(v any, def string) string {
 
 // ---- 流式转换：Anthropic SSE → OpenAI SSE ----
 
-// anthropicSSEToOpenAI 把 Anthropic 的 SSE 流转成 OpenAI 的 SSE 流。
+// AnthropicSSEToOpenAI 把 Anthropic 的 SSE 流转成 OpenAI 的 SSE 流。
 //
 // # 事件对照
 //
@@ -690,7 +690,7 @@ func orDefault(v any, def string) string {
 // 上游会加新事件类型（我们这个转换器写于某个版本）。
 // 遇到不认识的 `event:` 名时**跳过并继续**，不要中断整条流 ——
 // 否则上游一次小版本升级就会让我们这条通道全挂。
-func anthropicSSEToOpenAI(r io.Reader, w io.Writer) error {
+func AnthropicSSEToOpenAI(r io.Reader, w io.Writer) error {
 	br := bufio.NewReaderSize(r, 64*1024)
 	bw := bufio.NewWriterSize(w, 32*1024)
 

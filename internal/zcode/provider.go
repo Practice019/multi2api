@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"workbuddy2api/internal/anthroconv"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -414,7 +415,7 @@ func (p *Provider) translateAnthropic(ctx context.Context, resp *http.Response, 
 		pr, pw := io.Pipe()
 		go func() {
 			defer resp.Body.Close()
-			err := anthropicSSEToOpenAI(resp.Body, pw)
+			err := anthroconv.AnthropicSSEToOpenAI(resp.Body, pw)
 			pw.CloseWithError(err)
 		}()
 		return gateway.ChatStream{Status: resp.StatusCode, Body: pr}, nil
@@ -424,7 +425,7 @@ func (p *Provider) translateAnthropic(ctx context.Context, resp *http.Response, 
 	if err != nil {
 		return gateway.ChatStream{}, err
 	}
-	converted, err := anthropicJSONToOpenAI(raw)
+	converted, err := anthroconv.AnthropicJSONToOpenAI(raw)
 	if err != nil {
 		// 转换失败：把**原文**交出去，并保留 200 ——
 		// 出口层会因解不出 OpenAI 结构而报 upstream_parse，

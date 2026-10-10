@@ -223,6 +223,10 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		"prompt": true, "qrcode": true, "qoderwasm": true, "redisstore": true,
 		"scheduler": true, "server": true, "session": true, "upstream": true,
 		"wire": true,
+		// anthroconv 是**共享协议转换层**（Anthropic ⇄ OpenAI），不实现
+		// gateway.Provider —— 它是被上游 import 的，不是上游。
+		// 加它时这条守卫**确实红了**：这正是它的作用（新目录必须显式归类）。
+		"anthroconv": true,
 	}
 
 	entries, err := os.ReadDir("../../internal")
