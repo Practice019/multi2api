@@ -776,6 +776,36 @@ type Config struct {
 		JWTCaptcha bool `json:"jwt_captcha"`
 	} `json:"zcode"`
 
+	// MiniMax MiniMax Code（中国版）上游。
+	//
+	// # 与其它上游最大的不同
+	//
+	// 推理走 **Anthropic Messages** 协议（本仓第二个该协议族的上游，
+	// 第一个是 zcode 的 JWT 通道）。协议事实抄自开源参照实现
+	// `deepseek-harness-codearts/src/minimax*.ts`。
+	//
+	// ⚠ **两个 host 不能合并**：OAuth 在 account.minimax.cn，
+	// 业务/推理在 agent.minimax.cn。打错会得到 404，
+	// 而 404 在本仓通常表示「账号不存在」。
+	MiniMax struct {
+		// Enabled 是否启用 MiniMax 上游。
+		Enabled bool `json:"enabled"`
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/minimax`。
+		AuthDir string `json:"auth_dir"`
+		// AccountBase OAuth 主机覆盖（留空 = 官方 account.minimax.cn）。
+		AccountBase string `json:"account_base"`
+		// APIBase 业务/推理主机覆盖（留空 = 官方 agent.minimax.cn）。
+		APIBase string `json:"api_base"`
+		// TimezoneID 签到端点要的 IANA 时区（留空 = 从本机推断）。
+		//
+		// ⚠ 它是 **query 参数**，而且放错位置**也返回 HTTP 200**
+		//（放头上回 `1406010011 invalid timezone_id`，仍然是 200）。
+		// 所以「200 = 成功」在这个端点上不成立。
+		TimezoneID string `json:"timezone_id"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"minimax"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -916,13 +946,19 @@ type Config struct {
 	QoderPoolAccounts bool   `json:"-"`
 
 	// ZCode（第十一上游，Z.ai / 智谱 GLM）解析后。
-	ZCodeEnabled       bool   `json:"-"`
-	ZCodeAuthDir       string `json:"-"`
-	ZCodeOrigin        string `json:"-"`
-	ZCodeOAuthBase     string `json:"-"`
-	ZCodeBillingOrigin string `json:"-"`
-	ZCodePoolAccounts  bool   `json:"-"`
-	ZCodeJWTCaptcha    bool   `json:"-"`
+	ZCodeEnabled        bool   `json:"-"`
+	ZCodeAuthDir        string `json:"-"`
+	ZCodeOrigin         string `json:"-"`
+	ZCodeOAuthBase      string `json:"-"`
+	ZCodeBillingOrigin  string `json:"-"`
+	MiniMaxEnabled      bool   `json:"-"`
+	MiniMaxAuthDir      string `json:"-"`
+	MiniMaxAccountBase  string `json:"-"`
+	MiniMaxAPIBase      string `json:"-"`
+	MiniMaxTimezoneID   string `json:"-"`
+	MiniMaxPoolAccounts bool   `json:"-"`
+	ZCodePoolAccounts   bool   `json:"-"`
+	ZCodeJWTCaptcha     bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
 	// # 为什么保留它
@@ -1443,6 +1479,20 @@ func (c *Config) normalize() error {
 	c.ZCodeOrigin = strings.TrimSpace(c.ZCode.Origin)
 	c.ZCodeOAuthBase = strings.TrimSpace(c.ZCode.OAuthBase)
 	c.ZCodeBillingOrigin = strings.TrimSpace(c.ZCode.BillingOrigin)
+	c.MiniMaxEnabled = c.MiniMax.Enabled
+	c.MiniMaxAccountBase = strings.TrimSpace(c.MiniMax.AccountBase)
+	c.MiniMaxAPIBase = strings.TrimSpace(c.MiniMax.APIBase)
+	c.MiniMaxTimezoneID = strings.TrimSpace(c.MiniMax.TimezoneID)
+	// 凭证目录：留空则用 `<auth_dir>/minimax`（与其余上游同款回落）。
+	c.MiniMaxAuthDir = strings.TrimSpace(c.MiniMax.AuthDir)
+	if c.MiniMaxAuthDir == "" {
+		c.MiniMaxAuthDir = filepath.Join(c.AuthsBase, "minimax")
+	}
+	// ⚠ 与其余上游同款：**未启用时并池开关恒 false**。
+	// 不注册的上游不该在池里留痕迹，而现有部署的 config.json
+	// 没有 minimax 段 —— 无条件置 true 会让升级后凭空多出一个上游。
+	// 判据与 ZCodePoolAccounts 逐字一致。
+	c.MiniMaxPoolAccounts = c.MiniMaxEnabled && boolOr(c.MiniMax.PoolAccounts, true)
 	// ⚠ 与 Enabled 取"与"：上游关着时 jwt_captcha=true 也不该去起浏览器，
 	// 否则会出现"没启用上游却在后台弹验证码窗口"的鬼影。
 	c.ZCodeJWTCaptcha = c.ZCodeEnabled && c.ZCode.JWTCaptcha

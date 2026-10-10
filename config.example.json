@@ -70,6 +70,14 @@
     "pool_accounts": true,
     "jwt_captcha": false
   },
+  "minimax": {
+    "enabled": false,
+    "auth_dir": "./auths/minimax",
+    "account_base": "",
+    "api_base": "",
+    "timezone_id": "",
+    "pool_accounts": true
+  },
   "workbuddy_intl": {
     "enabled": true,
     "oauth_base_url": "https://www.workbuddy.ai",

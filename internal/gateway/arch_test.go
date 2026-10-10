@@ -638,6 +638,19 @@ func TestSharedInfraIsGenuinelyShared(t *testing.T) {
 		// 就变成"上游依赖上游"（第一次构建时 arch_test 正是这样报的）。
 		// 翻译成 gateway 类型是上游侧的事（每个上游三行样板）。
 		"dailycheckin": true,
+		// anthroconv：Anthropic ⇄ OpenAI 协议转换层。
+		//
+		// # 它为什么是共享基础设施而不是某个上游的私有 SDK
+		//
+		// 本仓有**两个** Anthropic 消费者：zcode 的 JWT 通道与 minimax。
+		// 共享一份转换实现正是为了不让判据分叉 —— 参照项目自己给的
+		// 判据是「同族第二个产品出现时再抽」（它当时只有一个消费者，
+		// 所以明确说「不做通用 Anthropic 层抽象」；第二个出现后
+		// 抽出来就成了必需）。
+		//
+		// ⚠ 它**不依赖** internal/gateway（纯协议转换，不认识任何上游）——
+		// 这是它能被登记在这里的前提（同 dailycheckin 的理由）。
+		"anthroconv": true,
 	}
 
 	// 已被 workbuddyPrivateSDK 归类为「某个上游的私有 SDK」的包 —— 跳过。

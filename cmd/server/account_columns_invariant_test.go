@@ -46,6 +46,7 @@ import (
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/lobsterai"
 	"workbuddy2api/internal/loomy"
+	"workbuddy2api/internal/minimax"
 	"workbuddy2api/internal/qoder"
 	"workbuddy2api/internal/raccoon"
 	"workbuddy2api/internal/trae"
@@ -90,6 +91,7 @@ func allUpstreams(t *testing.T) []upstreamCase {
 		{"qoder", "qoder", qoder.NewProvider()},
 		{"qoder", "qodercn", qoder.NewProviderCN()},
 		{"zcode", "zcode", zcode.New(zcode.Config{})},
+		{"minimax", "minimax", minimax.New(minimax.Config{})},
 	}
 }
 
