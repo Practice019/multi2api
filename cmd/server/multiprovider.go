@@ -483,8 +483,33 @@ func liveTokenExpiry(reg *gateway.Registry, id string, cred gateway.Credential) 
 	if !ok || at <= 0 {
 		return 0, false
 	}
+	// ⚠ 量级哨兵：本接口的契约是 **Unix 秒**。
+	//
+	// 上游若误回**毫秒**（1000×），界面会把剩余时间渲染成
+	// 「20715653 天」（≈56755 年）—— 用户实测报过（zcode 与 minimax 都犯过，
+	// 都是我写的）。那种数字看起来像"这个 token 有效期特别长"，
+	// 而不是像 bug，所以很难被当成缺陷排查。
+	//
+	// 判据取 1e11 秒（公元 5138 年）：真实凭证不可能有这么久的有效期，
+	// 而毫秒级时间戳恒 >= 1e12。这条线能把"单位写错"与"真的很久"分开，
+	// 且不会误伤任何合法值。
+	//
+	// 处置：**按未知处理**（界面显示 `—`，不是错误数字）+ 打一行日志
+	// 指明是哪个上游。宁可显示"不知道"，也不要显示一个 1000 倍错的数字 ——
+	// 前者用户会去查，后者用户会信。
+	if at >= tokenExpiryMillisThreshold {
+		log.Printf("⚠ 上游 %s 的 TokenExpiry 回了 %d —— 量级像**毫秒**，"+
+			"而契约是 Unix **秒**（见 gateway.CredentialExpiryExt）。已按未知处理。"+
+			"修法：return time.UnixMilli(ms).Unix(), true", id, at)
+		return 0, false
+	}
 	return at, true
 }
+
+// tokenExpiryMillisThreshold 秒级过期时刻的**上限**（1e11 秒 = 公元 5138 年）。
+//
+// 超过它几乎必然是毫秒（>=1e12）—— 见 liveTokenExpiry 里那段哨兵注释。
+const tokenExpiryMillisThreshold = 100_000_000_000
 
 // RefreshCredential 用**该上游自己的**实现续期一份凭证。
 //

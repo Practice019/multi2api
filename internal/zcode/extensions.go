@@ -57,10 +57,21 @@ func (p *Provider) HasToken(cred gateway.Credential) bool {
 	return ok && a != nil && a.Usable()
 }
 
-// TokenExpiry 凭证过期时刻（Unix 毫秒）。
+// TokenExpiry 凭证过期时刻（**Unix 秒**）。
 //
-// ⚠ 本仓的约定是**毫秒**（见 gateway.CredentialExpiryExt 与 raccoon 的实现），
-// 而 Auth.ExpiresAt 存的是秒 —— 转换在这里做，不让上游单位泄漏到核心。
+// # ⚠ 这里曾经写错单位（用户实测报出来的）
+//
+// 我原来的注释写的是"本仓的约定是**毫秒**"，于是返回 `a.ExpiresAt * 1000`
+// —— 而 `gateway.CredentialExpiryExt` 的文档白纸黑字写着
+// 「报告这份凭证的过期时刻（**Unix 秒**）」，字段名也是 `AccountView.TokenExpireSec`。
+//
+// 1000 倍偏大的后果：界面把剩余时间渲染成「**20715653 天**」（≈56755 年）。
+// 用户第一反应是"这个 token 有效期这么长没问题吗" —— 而真相是单位搞错了。
+//
+// 同期 minimax 也犯了同一个错（也是我写的）。本仓**7 个**上游是对的，
+// 其中 4 个（raccoon / cline / lobsterai / qoder）都显式写了
+// `time.UnixMilli(ms).Unix()` —— 那就是"内部存毫秒、报出去转秒"
+// 的标准写法。我照抄了别人的字段名，却没照抄那一行转换。
 //
 // ok=false 表示"没有过期信息"。**不能返回 0 表示永不**
 // —— 那会让续期判据把 API Key 当成"刚过期"，于是每个请求都去续期。
@@ -72,7 +83,9 @@ func (p *Provider) TokenExpiry(cred gateway.Credential) (int64, bool) {
 	if a.ExpiresAt <= 0 {
 		return 0, false
 	}
-	return a.ExpiresAt * 1000, true
+	// Auth.ExpiresAt 存的**就是秒**（见 admin.go 的
+	// `time.Unix(a.ExpiresAt, 0)`），契约要的也是秒 ⇒ 直接返回。
+	return a.ExpiresAt, true
 }
 
 // NeverExpires API Key 通道的凭证永不过期。
