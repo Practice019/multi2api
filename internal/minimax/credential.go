@@ -60,6 +60,11 @@ type Auth struct {
 	// **不是 JWT** ⇒ 实测恒为空。故本包**不拿它当账号主键** ——
 	// 主键是派生出来的 uid（见 `UID`）。
 	AccountID string `json:"account_id,omitempty"`
+	// AccountKey 账号指纹的**缓存**（登录/判重时取到就存，见 accountkey.go）。
+	//
+	// 它只用于加速与兜底比对，**不是**账号身份 —— 上游没有身份可用。
+	AccountKey string `json:"account_key,omitempty"`
+
 	// Identity **判重得到的既有账号 uid**（登录落盘前写入，见 accountkey.go）。
 	//
 	// # 为什么需要它（用户实测报的重复账号）
