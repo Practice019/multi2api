@@ -60,6 +60,20 @@ type Auth struct {
 	// **不是 JWT** ⇒ 实测恒为空。故本包**不拿它当账号主键** ——
 	// 主键是派生出来的 uid（见 `UID`）。
 	AccountID string `json:"account_id,omitempty"`
+	// Identity **判重得到的既有账号 uid**（登录落盘前写入，见 accountkey.go）。
+	//
+	// # 为什么需要它（用户实测报的重复账号）
+	//
+	// 上游不提供账号身份，所以同一个号登录两次会得到两个不同的
+	// access_token ⇒ 两个哈希 ⇒ 账号池里两条重复。
+	//
+	// 登录落盘前用账号指纹比对出「这就是已有的那个号」时，把它的 uid
+	// 记在这里 —— `UID()` 优先返回它，于是**文件名与池记录都对齐到旧那条**，
+	// 结果就是用户期望的「更新」而不是「新增」。
+	//
+	// ⚠ 只能由**判重证据**（指纹非空且相等）得出，绝不凭猜测填：
+	// 覆盖旧凭证是**不可逆**的（旧 refresh_token 被替换就找不回来了）。
+	Identity string `json:"identity,omitempty"`
 	// Nickname 展示名（登录时取，可空）。
 	Nickname string `json:"nickname,omitempty"`
 
@@ -98,21 +112,33 @@ func FileName(a *Auth) string {
 
 // UID 账号池主键。
 //
-// # 为什么不能用上游给的 id
+// # 优先用判重证据（Identity），其次上游 id，最后才是 token 哈希
 //
-// 参照项目实测：真实凭据里没有可用的账号 id ——
-// `account_id` 由 JWT 的 `sub` 派生，而 access_token **不是 JWT** ⇒ 恒为空；
-// 客户端登录态文件里也只有 token，没有 user id。
+// ⚠ 这条注释原来写的是「同一个 token 永远得到同一个 uid（幂等：重装/
+// 重登不会产生两个账号）」—— **那句话是错的，而它就是重复账号的源头**。
+// 用户实测：同一个号登录两次得到两条账号。
 //
-// 所以主键必须是**我们派生的**。判据与 zcode 的 API Key 通道同款：
-// 取 access_token 的短哈希 —— 同一个 token 永远得到同一个 uid
-// （幂等：重装/重登不会产生两个账号），而不同 token 不会撞。
+// 错在哪：重登拿到的**是一个新的 access_token**（实测两条令牌 60 字符
+// 随机串、除前缀外无一相同），所以哈希必然不同。把哈希说成"重登幂等"
+// 是概念错误，不是笔误。
 //
-// ⚠ 不用 `expires_at` 参与哈希：续期后 token 会变，但**账号是同一个**。
-// 续期走的是"就地更新文件"（见 SaveFile），不产生新 uid。
+// 现在：
+//
+//	Identity   判重（账号指纹）确认"这就是已有的那个号"时由登录流程写入
+//	AccountID  上游若哪天给了真 id 就用它（实测恒为空，见 accountkey.go）
+//	token-hash **兜底**：全新账号，或判不准的时候
+//
+// 兜底仍会产出新 uid —— 那是**故意的**：判不准时宁可多一条让用户删，
+// 也不静默覆盖别人的凭证（覆盖不可逆）。
+//
+// ⚠ 续期（refresh）**不会**改 uid：它是就地更新同一份 Auth，
+// Identity 与哈希基准都不动 ⇒ 池记录保持一条。
 func (a *Auth) UID() string {
 	if a == nil {
 		return ""
+	}
+	if s := strings.TrimSpace(a.Identity); s != "" {
+		return s
 	}
 	if s := strings.TrimSpace(a.AccountID); s != "" {
 		return s
