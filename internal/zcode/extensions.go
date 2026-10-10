@@ -44,32 +44,6 @@ import (
 // DisplayName 控制台显示名。
 func (p *Provider) DisplayName() string { return displayName }
 
-// Notice 界面上挂在本上游分组旁的一句提醒。
-//
-// # 用户的要求
-//
-// "在上游账号管理里，Zcode 那个地方用小字提醒一下，这个是测试。"
-//
-// # 为什么由**上游自己**来报（而不是前端认名字）
-//
-// 本仓的纪律是**前端不认识任何上游名**（见 gateway.NoticeExt 的注释）。
-// 前端只读 manifest 里的 notice 字段、按纯文本渲染；核心只搬运。
-// 所以这句话的"作者"是本文件 —— 改措辞不需要动前端与核心。
-//
-// # 为什么值得提醒（不是客套话）
-//
-// 本上游有**两处实测未验证**的地方，用户据此决定要不要依赖它：
-//
-//   - JWT 通道的**协议转换**（Anthropic ← → OpenAI）只被单元测试覆盖，
-//     没做过一次真实对话
-//   - JWT 通道的**验证码求解**（阿里云滑块）同理 ——
-//     官方源码里零 `captcha|aliyun` 命中，那是纯第三方逆向的结论
-//
-// ⚠ 措辞刻意**短**：它渲染在分组标题的小字区，太长会挤掉
-// 「N 个账号 · M 项能力」。而且不写"不稳"这类没有依据的话 ——
-// 已实测的部分（API Key 通道、额度查询、登录落盘）是稳的。
-func (p *Provider) Notice() string { return "测试中：JWT 通道尚未经真实对话验证" }
-
 // AuthDir 凭证目录。
 func (p *Provider) AuthDir() string { return p.authDir }
 
