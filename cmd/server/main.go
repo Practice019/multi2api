@@ -28,6 +28,7 @@ import (
 	"workbuddy2api/internal/lobsterai"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/loomy"
+	"workbuddy2api/internal/minimax"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
@@ -909,6 +910,51 @@ func main() {
 			log.Printf("zcode: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
 				"它们不会并入账号池", cfg.ZCodeAuthDir, len(list))
 		}
+	}
+
+	// ---- 第十二个上游：MiniMax Code（中国版）----
+	//
+	// 它是本仓**第二个 Anthropic Messages 协议族**的上游
+	//（第一个是 zcode 的 JWT 通道），所以协议转换走共享的
+	// `internal/anthroconv` —— 两个消费者一套判据，不会分叉。
+	//
+	// ⚠ 两个 host 不能合并：OAuth 在 account.minimax.cn，
+	// 业务/推理在 agent.minimax.cn（见 config.go 的 Minimax 段）。
+	var mm *minimax.Provider
+	if cfg.MiniMaxEnabled {
+		mm = minimax.New(minimax.Config{
+			AccountBase: cfg.MiniMaxAccountBase,
+			APIBase:     cfg.MiniMaxAPIBase,
+			AuthDir:     cfg.MiniMaxAuthDir,
+			TimezoneID:  cfg.MiniMaxTimezoneID,
+		})
+		mm.SetCredentialSource(minimaxCredSource(p))
+		// 额度/诊断端点要**列出全部账号**，而 credSrc 只能按名查 ——
+		// 没这个枚举器时那些端点会返回空数组（看起来「没有账号」）。
+		mm.SetUIDEnumerator(minimaxUIDEnumerator(p))
+		if err := registry.Register(mm); err != nil {
+			log.Fatalf("注册 MiniMax 上游失败: %v", err)
+		}
+		log.Printf("minimax: 已启用（凭证目录 %s，OAuth %s，API %s，时区 %s）",
+			cfg.MiniMaxAuthDir,
+			firstNonEmpty(cfg.MiniMaxAccountBase, minimax.DefaultAccountBase()),
+			firstNonEmpty(cfg.MiniMaxAPIBase, minimax.DefaultAPIBase()),
+			firstNonEmpty(cfg.MiniMaxTimezoneID, "按本机推断"))
+	} else {
+		log.Printf("minimax: 未启用（config 里 minimax.enabled 缺省为 false）")
+		if list, err := minimax.LoadDir(cfg.MiniMaxAuthDir); err == nil && len(list) > 0 {
+			log.Printf("minimax: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.MiniMaxAuthDir, len(list))
+		}
+	}
+
+	// 并池（与其余上游同款：目录为空也要对账剔删，否则删掉文件后账号变幽灵）。
+	if mm != nil && cfg.MiniMaxPoolAccounts {
+		if n := syncMiniMaxAccounts(p, cfg.MiniMaxAuthDir); n > 0 {
+			log.Printf("minimax: 已并入账号池 %d 个账号", n)
+		}
+	} else if mm != nil {
+		log.Printf("minimax: 未并入账号池（minimax.pool_accounts=false），只能通过其管理端点使用")
 	}
 
 	if zc != nil && cfg.ZCodePoolAccounts {
