@@ -7,7 +7,7 @@
 //	CredentialLoader / CredentialSecretLoader          按上游重扫凭证
 //	QuotaExt / HealthProbeExt / SoftRateExt            额度与健康
 //	AdminExt / AccountImportExt / DailyActionExt       运维端点与签到
-//	LoginFlow（在 login.go） / NoticeExt
+//	LoginFlow（在 login.go）
 //
 // ⚠ 每一个都是**类型断言**发现的：方法名差一个字母就静默失效，
 // 而编译能过、界面不报错。所以 interfaces_compile_test.go 里有一份
@@ -566,25 +566,6 @@ func signinClaimResult(data map[string]any) (signinClaimOutcome, error) {
 }
 
 // ---- 内部辅助 ----
-
-// Notice 界面上挂在本上游分组旁的一句提醒。
-//
-// # 为什么要提醒（不是客套话）
-//
-// 本上游的协议事实全部来自开源参照项目的**源码逐行提取**
-// （`deepseek-harness-codearts/src/minimax*.ts`），而本机**没有** MiniMax
-// 凭证（客户端登录态文件 `~/.minimax/auth/.../auth.json` 也不在这台机器上），
-// 所以：
-//
-//	已验证：OAuth 设备码握手形状、目录/积分/签到的解析、SSE 转换、
-//	        错误分类 —— 全部用 hermetic 假上游覆盖
-//	未验证：**真实对话**（推理端点一次都没打过真上游）
-//
-// 与 zcode 那条提醒同款口径：只说"未经真实对话验证"，
-// **不写"不稳"**这类没有依据的话 —— 已实测的部分是稳的。
-func (p *Provider) Notice() string {
-	return "测试中：未经真实对话验证（协议抄自开源参照实现）"
-}
 
 // knownUIDs 本实例已知的 uid 列表。
 //

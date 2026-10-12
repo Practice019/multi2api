@@ -22,6 +22,8 @@
 package minimax
 
 import (
+	"testing"
+
 	"workbuddy2api/internal/gateway"
 )
 
@@ -75,8 +77,11 @@ var (
 	_ gateway.DailyActionExt  = (*Provider)(nil)
 	_ gateway.DailyCheckinExt = (*Provider)(nil)
 
-	// 界面提醒（可选，但本上游要提醒"未经真实对话验证"）。
-	_ gateway.NoticeExt = (*Provider)(nil)
+	// ⚠ 界面提醒（NoticeExt）**刻意不实现** —— 用户要求「这个测试中的这些
+	// 文字不需要写出来」。
+	//
+	// 与 zcode 同款处置：**不实现**，而不是返回空串。返回空串会下发一个
+	// 空字段（"有这个上游的提醒，只是内容为空"），与"本上游没有提醒"是两种形态。
 )
 
 // authFile 必须能序列化成凭证文件（核心 pollViaFlow 的落盘判据）。
@@ -88,3 +93,25 @@ var (
 var _ interface {
 	MarshalAuthFile() (name string, raw []byte, err error)
 } = (*authFile)(nil)
+
+// TestNoticeIsDeliberatelyAbsent 本上游**不该**实现 NoticeExt。
+//
+// # 为什么留一条反向用例（而不是把断言删干净）
+//
+// 用户先要求「Zcode 那个地方用小字提醒一下」，后来又要求去掉；
+// 对 minimax 则直接说「这个测试中的这些文字不需要写出来」。
+//
+// 留这条能防住两种误改：
+//
+//	有人以为这里漏了 → 补上提醒 → 红（用户已明确不要它）
+//	有人恢复时只改一半 → 也红（缺 extensions.go 的 Notice 方法）
+//
+// 判据刻意用「不实现」而不是「返回空串」：后者会下发一个空字段，
+// 与「这个上游没有提醒」是两种形态。与 zcode 的同名用例逐字同型。
+func TestNoticeIsDeliberatelyAbsent(t *testing.T) {
+	p := New(Config{})
+	if _, ok := gateway.ExtOf[gateway.NoticeExt](p); ok {
+		t.Error("minimax 不该实现 NoticeExt —— 用户已要求去掉那句「测试中」提醒。\n" +
+			"若要恢复，需同时补回 extensions.go 的 Notice() 与本文件顶部的编译期断言。")
+	}
+}
