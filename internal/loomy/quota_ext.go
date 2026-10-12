@@ -85,16 +85,28 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	// 上面两条同时消失。这才是"额度查询"应有的样子。
 	if a := p.authByUID(uid); a != nil {
 		ctx, cancel := pointsCtx()
-		bal, daily, err := p.Balance(ctx, a.Session)
+		pts, err := p.PointsSnapshot(ctx, a.Session)
 		cancel()
 		if err == nil {
+			bal, daily := pts.Available, pts.Daily
 			// 顺手回填候选分档缓存（见 candidate_tier.go）。
 			//
 			// 这条路径（管理端「刷新额度」/ 启动后的额度刷新）本来就要查一次
 			// 余额，结果与分档需要的**完全同一个数** —— 不回填就是白查一次，
 			// 而选号路径只能读缓存、不能自己发请求。
 			p.tiers.set(uid, tierOf(bal, daily))
-			return gateway.CreditsQuota(clampNonNegative(bal)), true
+
+			q := gateway.CreditsQuota(clampNonNegative(bal))
+			// 「免费额度」列：带上**每日赠送**的余额（会按自然日重置的那部分）。
+			//
+			// ⚠ 只在回执里**真的有** dailyBalance 时才带 —— 否则留零值，
+			// 界面显示 `—`（"这个上游不区分 / 这次没读到"）。
+			// 把缺失当 0 会渲染成「免费额度已用完」，用户据此以为账号
+			// 正在烧永久积分 —— 一个**看起来完全合理但错误**的结论。
+			if pts.DailyKnown {
+				q = q.WithFree(clampNonNegative(daily))
+			}
+			return q, true
 		}
 		// 查失败（网络/上游 5xx/session 失效）→ 回落到本机缓存，
 		// 而不是直接报未知。缓存至少对"本机那一个号"是可信的历史值。
@@ -144,7 +156,14 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 		log.Printf("loomy: 额度未知 —— 客户端未缓存积分摘要（uid=%s）", shortUID(uid))
 		return gateway.UnknownQuota(), true
 	}
-	return gateway.CreditsQuota(clampNonNegative(pts.Balance)), true
+	q := gateway.CreditsQuota(clampNonNegative(pts.Balance))
+	// 本机缓存里的 dailyBalance 与积分网关那侧**同一个语义**，一并带上。
+	// ⚠ 同样只在键真的出现过时才带（DailyKnown）—— 实测缓存里存在
+	// 只写 balance 的部分更新，那时这一列必须是 `—`。
+	if pts.DailyKnown {
+		q = q.WithFree(clampNonNegative(pts.DailyBalance))
+	}
+	return q, true
 }
 
 // clampNonNegative 负数（理论上的透支）clamp 到 0。

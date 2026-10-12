@@ -97,6 +97,36 @@ type QuotaView struct {
 	// ByModel 按模型额度（Kind == per_model 时有效）。
 	ByModel map[string]int64 `json:"by_model,omitempty"`
 
+	// Free 会**按周期重置**的那部分额度（Loomy 的「每日赠送」）。
+	//
+	// # 为什么它不是"另一种 Kind"，而是一个并列的子项
+	//
+	// 上游的额度可能分成两个并行的账本，而它们的**关系是包含**：
+	//
+	//	Loomy  availableBalance(26434) = balance(25000 永久) + dailyBalance(1434 每日)
+	//
+	// 所以「额度」与「免费额度」不是两种互斥的形态，而是"总数"与
+	// "总数里会过期的那部分"。用 Kind 表达会逼调用方二选一 ——
+	// 而用户**两个数都要看**（额度列看总数，新加的免费额度列看待重置的部分）。
+	//
+	// # 三态由 FreeKnown 表达（与 HasData 同一条纪律）
+	//
+	//	FreeKnown=false          → 该上游不区分 / 这次没查到 → 界面 `—`
+	//	FreeKnown=true, Free=0   → 确实用完了
+	//	FreeKnown=true, Free>0   → 还剩 N
+	//
+	// ⚠ **不能复用 HasData**：HasData 说的是"整个额度视图有没有数据"。
+	// 完全可能出现"总数查到了、分项拿不到"（老接口形态）——
+	// 那时 Free 必须以 `—` 呈现。若把它当 0 显示，用户会得出
+	// 「免费额度已经用完、正在烧永久积分」这个**看起来合理但完全错误**的结论。
+	//
+	// ⚠ 不支持分项的上游**什么都不用做**（两个字段留零值 = 不区分），
+	// 与改造前逐字节相同。
+	Free int64 `json:"free,omitempty"`
+
+	// FreeKnown 上面那个 Free 是不是**真的**拿到了（见 Free 的说明）。
+	FreeKnown bool `json:"free_known,omitempty"`
+
 	// HasData 上游是否**真的**给出了额度数据。
 	//
 	// # 这个字段是整个扩展点的关键
@@ -145,6 +175,26 @@ func UnknownQuota() QuotaView { return QuotaView{HasData: false} }
 // （上游常见写法：`sub, err := Fetch(); if err != nil { return UnknownQuota(), true }`）。
 func CreditsQuota(remaining int64) QuotaView {
 	return QuotaView{Kind: QuotaKindCredits, Remaining: remaining, HasData: true}
+}
+
+// WithFree 给额度视图补上「会按周期重置的那部分」（见 Free 的说明）。
+//
+// 用法（Loomy）：
+//
+//	q := CreditsQuota(available).WithFree(daily)
+//
+// ⚠ **拿不到分项时不要调用本方法**，而不是"传 0 进去"：
+// 留零值 = 不区分 = 界面 `—`；传 0 会被渲染成「免费额度已用完」——
+// 那是把未知伪装成确定（与 HasData 那条纪律同型，见 Free 的说明）。
+//
+// 负数（理论上的透支）clamp 到 0 —— 负的"剩余额度"在展示上没有意义。
+func (q QuotaView) WithFree(free int64) QuotaView {
+	if free < 0 {
+		free = 0
+	}
+	q.Free = free
+	q.FreeKnown = true
+	return q
 }
 
 // PerModelQuota 从按模型额度构造（codearts 的按模型探测用）。

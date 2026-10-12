@@ -32,6 +32,10 @@ func TestLoomyAccountColumns(t *testing.T) {
 		gateway.AccountColNickname,
 		gateway.AccountColUID,
 		gateway.AccountColQuota,
+		// 「免费额度」是用户点名要的一列：会按自然日重置的那部分（每日赠送）
+		// 还剩多少。它与「额度」是总数与子集的关系，不是重复 ——
+		// 前者说"还能不能跑"，后者说"该不该现在用这个号"。
+		gateway.AccountColFreeQuota,
 		gateway.AccountColStatus,
 		gateway.AccountColTokenExpiry,
 		gateway.AccountColSuccess,

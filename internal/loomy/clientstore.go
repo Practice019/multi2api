@@ -143,6 +143,18 @@ type LocalPoints struct {
 	DailyConsumedPoints  int64  `json:"dailyConsumedPoints"`
 	DailyRemainingPoints int64  `json:"dailyRemainingPoints"`
 	UpdatedAt            string `json:"updatedAt"`
+
+	// DailyKnown `dailyBalance` 这个键在**至少一条**记录里出现过。
+	//
+	// # 为什么 int64 的零值不够（这是展示契约，不是实现细节）
+	//
+	// 「免费额度」那一列是三态的（`—` / `0` / `N`）。上面那个 int64 的 0
+	// 无法区分"缓存里没写这个字段"与"每日赠送确实用完了" ——
+	// 而后者会被渲染成「免费额度已用完」，用户据此以为账号在烧永久积分。
+	//
+	// 实测存在只写 balance 的部分更新（见 pointsWire 的注释），所以
+	// "没写过 dailyBalance"是**真实会发生**的形态，不是理论顾虑。
+	DailyKnown bool `json:"daily_known,omitempty"`
 }
 
 // pointsWire 是积分摘要的**逐字段可选**形态。
@@ -198,6 +210,9 @@ func pointsFold(list []pointsWire) *LocalPoints {
 		}
 		if w.DailyBalance != nil {
 			out.DailyBalance = *w.DailyBalance
+			// 记下"这个键真的出现过" —— 展示层要拿它区分
+			// 「没写过」与「写着 0」（见 LocalPoints.DailyKnown）。
+			out.DailyKnown = true
 		}
 		if w.DailyConsumedPoints != nil {
 			out.DailyConsumedPoints = *w.DailyConsumedPoints

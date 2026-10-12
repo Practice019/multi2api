@@ -167,10 +167,45 @@ func (p *Provider) pointsCall(ctx context.Context, session, method, path string,
 //	(可用总额度, 每日剩余, error) —— 可用总额度优先取 availableBalance，
 //	拿不到（老接口）时回落 balance。每日剩余只是给界面展示用，不是主值。
 func (p *Provider) Balance(ctx context.Context, session string) (int64, int64, error) {
+	pts, err := p.PointsSnapshot(ctx, session)
+	if err != nil {
+		return 0, 0, err
+	}
+	return pts.Available, pts.Daily, nil
+}
+
+// Points 一次积分查询的三个账本，以及**哪几项真的拿到了**。
+type Points struct {
+	// Available 可用总额度（availableBalance；拿不到时回落 balance）。
+	Available int64
+	// Daily 今日赠送剩余（dailyBalance）。
+	Daily int64
+	// DailyKnown dailyBalance 这个字段在回执里**存在**。
+	//
+	// # 为什么必须带上"拿到了没有"（而不是只回一个 int64）
+	//
+	// 「免费额度」那一列的判据是**三态**：没查到 / 确实是 0 / 大于 0。
+	// 只回 int64 的话"字段缺失"会被读成 0 —— 界面显示「免费额度已用完」，
+	// 而真相是"这次没读到"，用户会据此以为账号正在烧永久积分。
+	// 这是**把未知说成确定的零**，与 gateway.QuotaView.HasData 同一条纪律
+	//（也同型于 pool.restoreQuota 那个"凭空造出一个 0"的真实缺陷）。
+	DailyKnown bool
+
+	// Permanent 永久额度（balance：邀请/充值累积，不含每日赠送）。
+	Permanent int64
+	// PermanentKnown balance 字段存在。
+	PermanentKnown bool
+}
+
+// PointsSnapshot 查三个账本，并如实报告哪几项拿到了。
+//
+// 契约与 Balance 相同（失败返回 error），只是**多了 presence**。
+// Balance 是它的薄封装（那些老调用方只要两个数）。
+func (p *Provider) PointsSnapshot(ctx context.Context, session string) (Points, error) {
 	data, err := p.pointsCall(ctx, session, http.MethodGet,
 		"/points/records?pageNo=1&pageSize=1", nil)
 	if err != nil {
-		return 0, 0, err
+		return Points{}, err
 	}
 	// 优先看有 balance 的那一层；两层都试。
 	for _, raw := range []json.RawMessage{data, nestedData(data)} {
@@ -186,19 +221,24 @@ func (p *Provider) Balance(ctx context.Context, session string) (int64, int64, e
 			(w.Balance == nil && w.AvailableBalance == nil) {
 			continue
 		}
-		var out, daily int64
+		var out Points
 		// 可用总额度优先；这是用户要求展示的那个数。
 		if w.AvailableBalance != nil {
-			out = *w.AvailableBalance
+			out.Available = *w.AvailableBalance
 		} else {
-			out = *w.Balance
+			out.Available = *w.Balance
 		}
 		if w.DailyBalance != nil {
-			daily = *w.DailyBalance
+			out.Daily = *w.DailyBalance
+			out.DailyKnown = true
 		}
-		return out, daily, nil
+		if w.Balance != nil {
+			out.Permanent = *w.Balance
+			out.PermanentKnown = true
+		}
+		return out, nil
 	}
-	return 0, 0, fmt.Errorf("loomy: 积分账本回执里没有 balance/availableBalance 字段: %s", summarize(data))
+	return Points{}, fmt.Errorf("loomy: 积分账本回执里没有 balance/availableBalance 字段: %s", summarize(data))
 }
 
 // nestedData 取 `{"data":{...}}` 里那一层；没有就返回 nil。
