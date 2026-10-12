@@ -975,6 +975,63 @@
   </div>
 </div>
 
+<!-- 新建 / 编辑 API Key 的弹窗。
+     改造前这里是 window.prompt 一串问下来（名称/额度/限速/模型手打），
+     用户原话：「创建API的过程太简陋了。因为这个模型不应该让我们输入，
+     而应该是选择。我们不是有模型列表吗？要从模型列表里面选，还要支持搜索」。
+
+     ⚠ 模型**必须**从 /v1/models 选，不能手打：白名单是按模型名比对的，
+     手打一个拼错的模型名会得到"看起来设了限制、实际一个都调不了" ——
+     而且这个失败形态在创建时**完全看不出来**（保存成功、列表里也有）。 -->
+<div id="akModal" style="display:none;position:fixed;inset:0;background:var(--overlay);z-index:110;align-items:center;justify-content:center">
+  <div style="background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;max-width:680px;width:calc(100% - 40px);max-height:88vh;overflow:auto">
+    <h3 id="akTitle" style="margin:0 0 14px;font-size:15px">新建 API Key</h3>
+
+    <div id="akNameRow" style="margin-bottom:12px">
+      <label class="dim" style="font-size:12px;display:block;margin-bottom:4px">名称（调用方/用途，必填）</label>
+      <input id="akName" type="text" placeholder="例如：我的爬虫 / 张三的客户端" style="width:100%;box-sizing:border-box">
+    </div>
+    <div id="akNameRO" class="dim" style="font-size:12px;margin-bottom:12px;display:none"></div>
+
+    <div class="row" style="gap:12px;margin-bottom:12px">
+      <div style="flex:1">
+        <label class="dim" style="font-size:12px;display:block;margin-bottom:4px">额度上限（token 数，0 = 不限）</label>
+        <input id="akLimit" type="number" min="0" step="1" value="0" style="width:100%;box-sizing:border-box">
+      </div>
+      <div style="flex:1">
+        <label class="dim" style="font-size:12px;display:block;margin-bottom:4px">每分钟请求上限（0 = 不限）</label>
+        <input id="akRpm" type="number" min="0" step="1" value="0" style="width:100%;box-sizing:border-box">
+      </div>
+    </div>
+
+    <!-- 可用模型：不限 / 白名单 二选一 + 可搜索的多选列表 -->
+    <div style="border:1px solid var(--line);border-radius:10px;padding:12px">
+      <div class="row" style="align-items:center;gap:8px;margin-bottom:8px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input id="akAll" type="checkbox"> <b>全部允许</b>（不限制模型）
+        </label>
+        <span id="akCount" class="dim" style="font-size:12px;margin-left:auto"></span>
+      </div>
+
+      <div id="akPicker">
+        <div class="row" style="gap:8px;margin-bottom:8px">
+          <input id="akSearch" type="text" placeholder="搜索模型名（支持部分匹配，例如 glm / deepseek）"
+                 style="flex:1;box-sizing:border-box">
+          <button id="akSelAll" style="padding:3px 10px;font-size:12px">全选当前</button>
+          <button id="akSelNone" style="padding:3px 10px;font-size:12px">清空</button>
+        </div>
+        <div id="akModelList" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px"></div>
+        <div id="akEmpty" class="dim" style="font-size:12px;padding:8px;display:none"></div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:16px;justify-content:flex-end;gap:8px">
+      <button id="akCancel" style="padding:3px 10px;font-size:12px">取消</button>
+      <button id="akSave" class="primary" style="padding:3px 12px;font-size:12px">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (() => {
   const $ = id => document.getElementById(id);
@@ -5089,24 +5146,9 @@ let loginProvider = '';
     return `<span class="mono" style="font-size:11px" title="${esc(list.join('\n'))}">${shown}${more}</span>`;
   }
 
-  // parseModelList 把输入框里的一行文本切成模型名列表。
-  //
-  // 分隔符同时认逗号与空白（含换行）：用户从别处复制模型名时，可能是
-  // "glm-5.2,glm-5.1" 也可能是每行一个。两种都认，省得他为了格式再试一次。
-  //
-  // ⚠ 返回 null 与返回 [] 是**两件事**（调用方必须分开处理）：
-  //
-  //	null  用户取消了输入 → **不改**现有白名单
-  //	[]    用户清空了输入 → 清空白名单 = 恢复不限制
-  //
-  // 混在一起的话，"取消"会被当成"清空" —— 用户点一次取消就把模型限制
-  // 静默解开了，而他什么都没改。
-  function parseModelList(raw) {
-    if (raw === null) return null; // 取消
-    return String(raw).split(/[\s,，、]+/).map(s => s.trim()).filter(Boolean);
-  }
-
   function renderAPIKeys(list) {
+    // 缓存一份：行内「编辑」要从这里取现值打开弹窗（见那个分支的注释）。
+    window._apikeysCache = list || [];
     const host = $('apiKeyRows');
     if (!host) return;
     if (!list.length) {
@@ -5118,16 +5160,19 @@ let loginProvider = '';
       const quota = `${k.used} / ${k.limit > 0 ? k.limit : '∞'}`;
       const remain = k.limit > 0 ? `<span class="dim" style="font-size:11px">剩 ${apiKeyRemain(k)}</span>` : '';
       const created = k.created_at ? k.created_at.slice(0, 10) : '—';
+      // 操作：配额与模型合进一个「编辑」（打开同一个弹窗）。
+      //
+      // 改造前是两个 prompt 按钮（改配额 / 改模型）—— 那是"字段各自一个入口"
+      // 的老界面，用户要改两样就得点两次、走两套流程。弹窗同屏可见，一个入口够。
       const ops = [
         `<button data-apikey="${esc(k.id)}" data-act="toggle" ${k.enabled ? '' : 'class="primary"'}>${k.enabled ? '禁用' : '启用'}</button>`,
-        `<button data-apikey="${esc(k.id)}" data-act="edit">改配额</button>`,
-        `<button data-apikey="${esc(k.id)}" data-act="models">改模型</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="edit">编辑</button>`,
         `<button data-apikey="${esc(k.id)}" data-act="reset">重置</button>`,
         `<button data-apikey="${esc(k.id)}" data-act="delete" style="color:var(--err)">删除</button>`,
       ].join(' ');
       return `<tr>
         <td>${esc(k.name)}</td>
-        <td class="mono dim" title="完整 key 只在创建时显示一次">${esc(k.masked || k.id)}</td>
+        <td>${apiKeyCellHTML(k)}</td>
         <td>${st}</td>
         <td>${quota} ${remain}</td>
         <td class="mono">${esc(k.requests)}</td>
@@ -5140,31 +5185,215 @@ let loginProvider = '';
     }).join('');
   }
 
-  // 新建 API Key：内联询问 name / limit / rpm / 可用模型。
-  async function apiKeyCreate(btn) {
-    const name = (window.prompt('名称（调用方/用途，必填）') || '').trim();
-    if (!name) { toast('名称不能为空', true); return; }
-    const limStr = window.prompt('额度上限（token 数，0=不限，默认 0）') || '0';
-    const rpmStr = window.prompt('每分钟请求上限（0=不限，默认 0）') || '0';
-    const limit = parseInt(limStr, 10); const rpm = parseInt(rpmStr, 10);
-    if (isNaN(limit) || isNaN(rpm)) { toast('额度/限速必须是数字', true); return; }
-    // 可用模型：留空 = 不限制。分隔符认逗号与换行（见 parseModelList）。
-    const models = parseModelList(window.prompt(
-      '允许调用的模型（逗号或换行分隔；**留空 = 不限制**）\n'
-      + '提示：填裸模型名即可，带不带上游前缀都算同一个模型。\n'
-      + '例：glm-5.2, deepseek-v4-flash', '')) || [];
+  // apiKeyCellHTML key 单元格：**默认打码，点一下显示完整值并复制**。
+  //
+  // 用户的要求：
+  //
+  //	「我不要那个 API key 只在第一次创建的时候显示，它永久都可以显示。
+  //	  但是默认的时候应该是把它给…中间部分是要屏蔽一下，就打个码。
+  //	  但是你可以再点击一下那个 API key，点击之后它就显示出来了，
+  //	  并且自动复制到那个剪切板里面去。」
+  //
+  // 为什么"随时可看"不削弱安全性：能打开这个页面的人本来就持有**管理钥匙**
+  // （/admin/* 要鉴权），他本来就能新建 key、也能直接读 data/apikeys.json。
+  // 把它藏起来只防住了"顺手拍屏/截图"，而那正是"默认打码"解决的。
+  function apiKeyCellHTML(k) {
+    const full = k.id || '';
+    if (!full) return '<span class="dim">—</span>';
+    const mask = k.masked || (full.length > 12 ? full.slice(0, 8) + '…' + full.slice(-4) : full);
+    return `<button data-akkey="${esc(full)}" data-akmask="${esc(mask)}" `
+      + `title="点击显示完整 key 并自动复制到剪贴板"`
+      + ` style="background:none;border:0;padding:0;cursor:pointer;text-align:left;`
+      + `font-family:ui-monospace,Consolas,monospace;font-size:12px;color:inherit">${esc(mask)}</button>`;
+  }
+
+  // ── API Key 弹窗（新建 / 编辑）────────────────────────────────────────
+  //
+  // 改造前是一串 window.prompt（名称 → 额度 → 限速 → 模型手打）。三个问题：
+  //
+  //	① **模型要手打**：拼错一个字母就得到"设了限制却一个都调不了"，
+  //	   而保存时**完全看不出来**（保存成功、列表里也显示着那个名字）
+  //	② **没有回显**：填了 4 步看不到自己填过什么，点错只能从头再来
+  //	③ **取消 = 0**：prompt 的 null（取消）与输入 0 分不开，
+  //	   老实现用 `|| '0'` 把两者合成一个 —— 取消一次就把额度设成"不限"
+  //
+  // 现在所有字段同屏可见、模型从 /v1/models 多选且可搜索、取消就是取消。
+
+  let akMode = 'create';    // create | edit
+  let akEditingID = '';     // 编辑模式下的 key id（也是完整 key）
+  let akCatalog = null;     // /v1/models 的缓存（弹窗内复用，避免每次重拉）
+
+  // ensureAKCatalog 拉一次模型目录（同一会话内缓存）。
+  //
+  // ⚠ 用 /v1/models 而不是别的目录端点：那是**调用方真正能发**的模型名集合。
+  // 白名单里的名字必须能对上这个集合里的名字 —— 用另一个来源会造出
+  // "列表里选得到、实际调不通"。
+  async function ensureAKCatalog() {
+    if (akCatalog) return akCatalog;
+    try {
+      const r = await api('/v1/models');
+      akCatalog = ((r && r.data) || []).map(m => ({
+        id: String(m.id || ''),
+        owner: String(m.owned_by || ''),
+      })).filter(m => m.id).sort((a, b) => a.id.localeCompare(b.id));
+    } catch (e) {
+      akCatalog = [];
+      throw e;
+    }
+    return akCatalog;
+  }
+
+  // renderAKModelList 按搜索词渲染可勾选列表；保留已勾选状态。
+  function renderAKModelList() {
+    const host = $('akModelList'), empty = $('akEmpty');
+    if (!host) return;
+    const kw = ($('akSearch').value || '').trim().toLowerCase();
+    const list = (akCatalog || []).filter(m => !kw || m.id.toLowerCase().includes(kw));
+
+    // 记住当前的勾选（重渲染会丢掉 DOM）
+    const checked = new Set(akSelected());
+    if (!list.length) {
+      host.innerHTML = '';
+      empty.style.display = '';
+      empty.textContent = (akCatalog && akCatalog.length)
+        ? `没有匹配「${kw}」的模型` : '模型目录为空（上游可能都不可用；仍可先建 key，稍后再改模型）';
+      return;
+    }
+    empty.style.display = 'none';
+    host.innerHTML = list.map(m => {
+      const on = checked.has(m.id) ? ' checked' : '';
+      return `<label style="display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:12px;cursor:pointer">
+        <input type="checkbox" data-akm="${esc(m.id)}"${on}>
+        <span class="mono">${esc(m.id)}</span>
+        ${m.owner ? `<span class="dim" style="margin-left:auto">${esc(m.owner)}</span>` : ''}
+      </label>`;
+    }).join('');
+    updateAKCount();
+  }
+
+  // akSelected 当前勾选的模型 id（只算**当前可见**的那些吗？不算 —— 见下）。
+  //
+  // ⚠ 搜索会隐藏一部分行，但**隐藏不等于取消勾选**：用户搜"glm"勾两个、
+  // 再搜"deepseek"勾一个，期望是 3 个都在白名单里。所以这里的判据是
+  // 「DOM 里当前勾着的」+「已勾但被搜索隐藏的（存在 akHiddenChecked 里）」。
+  let akHiddenChecked = new Set();
+
+  function akSelected() {
+    const out = new Set(akHiddenChecked);
+    document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => {
+      if (cb.checked) out.add(cb.dataset.akm);
+      else out.delete(cb.dataset.akm);
+    });
+    return [...out];
+  }
+
+  // stashAKChecked 把"即将被搜索隐藏"的勾选记下来，重渲染后再并回去。
+  function stashAKChecked() {
+    akHiddenChecked = new Set(akSelected());
+  }
+
+  function updateAKCount() {
+    const n = akSelected().length;
+    const all = $('akAll') && $('akAll').checked;
+    const c = $('akCount');
+    if (!c) return;
+    c.textContent = all ? '全部允许（不限制模型）' : (n ? `已选 ${n} 个模型` : '未选任何模型 —— 保存后这把 key 将无法调用任何模型');
+    c.style.color = (!all && n === 0) ? 'var(--err)' : '';
+  }
+
+  // syncAKPicker 让"全部允许"与选择器互斥：勾了全部就把列表置灰并清空选择。
+  function syncAKPicker() {
+    const all = $('akAll').checked;
+    $('akPicker').style.opacity = all ? '0.45' : '1';
+    $('akPicker').style.pointerEvents = all ? 'none' : 'auto';
+    if (all) akHiddenChecked = new Set();
+    updateAKCount();
+  }
+
+  // openAPIKeyModal 打开弹窗。mode='create' 或 'edit'。
+  function openAPIKeyModal(mode, k) {
+    akMode = mode === 'edit' ? 'edit' : 'create';
+    akEditingID = (k && k.id) || '';
+    akHiddenChecked = new Set();
+
+    $('akTitle').textContent = akMode === 'edit' ? '编辑 API Key' : '新建 API Key';
+    // 名称：新建可填，编辑只读（后端 Update 不支持改名 —— 与其给一个
+    // 存不下去的输入框，不如明说）。
+    if (akMode === 'edit') {
+      $('akNameRow').style.display = 'none';
+      $('akNameRO').style.display = '';
+      $('akNameRO').textContent = '名称：' + ((k && k.name) || '');
+    } else {
+      $('akNameRow').style.display = '';
+      $('akNameRO').style.display = 'none';
+      $('akName').value = '';
+    }
+
+    const hasList = !!(k && Array.isArray(k.models) && k.models.length);
+    $('akLimit').value = k ? (k.limit || 0) : 0;
+    $('akRpm').value = k ? (k.rpm || 0) : 0;
+    $('akAll').checked = !hasList;      // 默认「全部允许」= 不限制
+    $('akSearch').value = '';
+    if (hasList) akHiddenChecked = new Set(k.models);
+
+    $('akModal').style.display = 'flex';
+    $('akSave').disabled = false;
+    // 目录拉取是异步的：先渲染一个占位，回来后重渲染。
+    $('akModelList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取模型目录…</div>';
+    ensureAKCatalog().then(() => { stashAKChecked(); renderAKModelList(); })
+      .catch(e => {
+        $('akModelList').innerHTML =
+          `<div class="dim" style="font-size:12px;padding:6px">读取模型目录失败：${esc(e.message)}</div>`;
+      });
+    syncAKPicker();
+  }
+
+  function closeAPIKeyModal() {
+    $('akModal').style.display = 'none';
+  }
+
+  // saveAPIKeyModal 保存（新建 / 编辑）。
+  async function saveAPIKeyModal(btn) {
+    const all = $('akAll').checked;
+    const models = all ? [] : akSelected();
+    if (!all && models.length === 0) {
+      // 明确拦下而不是静默存一个空名单 —— 空名单等于"不限制"，与用户此刻的
+      // 意图（他刚选了"不是全部允许"）恰好相反。这种"看起来设了限制其实没设"
+      // 是白名单最危险的失败形态。
+      toast('要么勾「全部允许」，要么至少选一个模型', true);
+      return;
+    }
+    const limit = parseInt($('akLimit').value, 10);
+    const rpm = parseInt($('akRpm').value, 10);
+    if (isNaN(limit) || limit < 0 || isNaN(rpm) || rpm < 0) {
+      toast('额度/限速必须是非负数字', true);
+      return;
+    }
+
     await busyRun(btn, async () => {
       try {
-        const r = await admin('/admin/apikeys', { method: 'POST', body: JSON.stringify({ name, limit, rpm, models }) });
-        if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
-        const scope = models.length ? `\n可用模型：${models.join('、')}` : '\n可用模型：全部（不限制）';
-        toast(`已创建（仅此一次显示完整 key）：\n${r.full}${scope}\n请立即复制保存`, false, 15000);
-        copyText(r.full, 'API Key');
+        if (akMode === 'create') {
+          const name = ($('akName').value || '').trim();
+          if (!name) { toast('名称不能为空', true); return false; }
+          const r = await admin('/admin/apikeys', {
+            method: 'POST', body: JSON.stringify({ name, limit, rpm, models }),
+          });
+          if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
+          toast(`已创建 ${r.name || name}（完整 key 下面直接复制）\n${r.full}`, false, 15000);
+          copyText(r.full, 'API Key');
+        } else {
+          await admin('/admin/apikeys/update', {
+            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, models }),
+          });
+          toast(all ? '已保存：全部模型可用' : `已保存：限制为 ${models.length} 个模型`);
+        }
+        closeAPIKeyModal();
         await loadAPIKeys();
         return true;
-      } catch (e) { toast('创建失败：' + e.message, true); return false; }
-    }, { label: '新建 API Key', busyText: '创建中…' });
+      } catch (e) { toast('保存失败：' + e.message, true); return false; }
+    }, { label: '保存', busyText: '保存中…' });
   }
+
 
   // 行内操作：事件委托（表格行会随刷新重建）。
   $('apiKeyRows').addEventListener('click', async ev => {
@@ -5183,49 +5412,14 @@ let loginProvider = '';
       return;
     }
     if (act === 'edit') {
-      // ⚠ 取消（null）与输入 0 是**两件事**：取消 = 不改这一项，
-      // 输入 0 = 设为不限。旧实现用 `|| '0'` 把两者合成一个，
-      // 于是点一次取消就把额度静默设成"不限"—— 而用户什么都没改。
-      // 后端的 limit/rpm 已按指针契约支持"缺失 = 不改"。
-      const body = { id };
-      const limRaw = window.prompt('新的额度上限（token 数，0=不限；取消=不改这一项）');
-      if (limRaw !== null) {
-        const v = parseInt(limRaw, 10);
-        if (isNaN(v) || v < 0) { toast('额度必须是非负数字', true); return; }
-        body.limit = v;
-      }
-      const rpmRaw = window.prompt('新的每分钟上限（0=不限；取消=不改这一项）');
-      if (rpmRaw !== null) {
-        const v = parseInt(rpmRaw, 10);
-        if (isNaN(v) || v < 0) { toast('限速必须是非负数字', true); return; }
-        body.rpm = v;
-      }
-      if (body.limit === undefined && body.rpm === undefined) return; // 两项都取消
-      await busyRun(b, async () => {
-        try {
-          await admin('/admin/apikeys/update', { method: 'POST', body: JSON.stringify(body) });
-          toast('已更新配额');
-          await loadAPIKeys(); return true;
-        } catch (e) { toast('更新失败：' + e.message, true); return false; }
-      }, { label: '改配额', busyText: '…' });
-      return;
-    }
-    if (act === 'models') {
-      // 「改模型」与「改配额」是两个独立动作，各自**只带自己那几个字段** ——
-      // 后端的指针/切片三态保证另几项不被顺手改掉。
-      const models = parseModelList(window.prompt(
-        '允许调用的模型（逗号或换行分隔）\n'
-        + '· 清空并确定 = **不限制**（全部模型都可用）\n'
-        + '· 取消 = 不改这一项\n'
-        + '提示：填裸模型名即可，带不带上游前缀都算同一个模型。', ''));
-      if (models === null) return; // 取消
-      await busyRun(b, async () => {
-        try {
-          await admin('/admin/apikeys/update', { method: 'POST', body: JSON.stringify({ id, models }) });
-          toast(models.length ? `已限制为 ${models.length} 个模型` : '已取消模型限制（全部可用）');
-          await loadAPIKeys(); return true;
-        } catch (e) { toast('更新失败：' + e.message, true); return false; }
-      }, { label: '改模型', busyText: '…' });
+      // 打开弹窗（额度 / 限速 / 可用模型同屏可改）。
+      //
+      // ⚠ 现值取自**表格当前渲染用的那份数据**而不是再查一次后端：
+      // 用户点的就是这一行，值就在手上；再查一次只会引入"点了编辑，
+      // 弹窗里显示的却是别的 key（或刚好被刷新换了值）"这类时序问题。
+      const cur = (window._apikeysCache || []).find(x => x.id === id);
+      if (!cur) { toast('账号列表已变化，请刷新后重试', true); return; }
+      openAPIKeyModal('edit', cur);
       return;
     }
     if (act === 'reset') {
@@ -8061,7 +8255,50 @@ let multCatalogFailed = false;
     loadSettings();   // 设置页数据先备好，顺便拿到落盘日志概况（顶部日志面板要显示）
 
     // API 管理：新建按钮 + 初始加载（无感轮询已挂在上面的 30s 间隔里）。
-    $('btnApiKeyNew').onclick = () => apiKeyCreate($('btnApiKeyNew'));
+    $('btnApiKeyNew').onclick = () => openAPIKeyModal('create');
+
+    // key 单元格：点一下 → 显示完整值 + 自动复制。
+    //
+    // 事件委托挂在 **document** 上而不是表格行上：行会随每次刷新重建，
+    // 挂在行上的监听会一起被丢掉（本仓在别处踩过这个形态 ——
+    // "按钮在、点了没反应"，而页面上不报任何错）。
+    document.addEventListener('click', ev => {
+      const kb = ev.target.closest('button[data-akkey]');
+      if (!kb) return;
+      const full = kb.dataset.akkey || '';
+      const mask = kb.dataset.akmask || '';
+      // 第一次点：把打码换成完整值。再点：只复制。
+      //
+      // 刻意**不做**"再点一次藏回去"：那个开关状态没有任何价值，
+      // 而误点一次反而把已经看到的值又藏起来（用户会以为复制失败了）。
+      if (kb.textContent === mask && full) kb.textContent = full;
+      copyText(full, 'API Key');
+    });
+
+    // ── API Key 弹窗的控件接线 ────────────────────────────────────────────
+    $('akCancel').onclick = closeAPIKeyModal;
+    $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
+    $('akAll').onchange = syncAKPicker;
+    // 搜索：把"即将被隐藏"的勾选先记下来（隐藏 ≠ 取消勾选，见 akHiddenChecked）。
+    $('akSearch').oninput = () => { stashAKChecked(); renderAKModelList(); };
+    $('akSelAll').onclick = () => {
+      document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = true; });
+      stashAKChecked(); updateAKCount();
+    };
+    $('akSelNone').onclick = () => {
+      document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = false; });
+      akHiddenChecked = new Set(); updateAKCount();
+    };
+    // 勾选变化 → 更新计数。委托在容器上，列表重渲染后依然有效。
+    $('akModelList').addEventListener('change', ev => {
+      if (ev.target.matches('input[data-akm]')) { stashAKChecked(); updateAKCount(); }
+    });
+    // 点遮罩关闭（点面板内部不关）。
+    $('akModal').addEventListener('click', ev => { if (ev.target.id === 'akModal') closeAPIKeyModal(); });
+    // Esc 关闭。
+    document.addEventListener('keydown', ev => {
+      if (ev.key === 'Escape' && $('akModal').style.display !== 'none') closeAPIKeyModal();
+    });
 
     // 导航最后构建：此时所有 section 都已在 DOM 里。
     //

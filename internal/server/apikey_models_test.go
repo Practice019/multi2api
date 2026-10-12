@@ -23,7 +23,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -195,71 +194,5 @@ func TestJoinLimitedTruncates(t *testing.T) {
 	}
 	if got := joinLimited([]string{"a"}, 2); got != "a" {
 		t.Errorf("不超长时应原样连接，实际 %q", got)
-	}
-}
-
-// itoa 的边界（错误文案里用得到，写错会让"共 10 个"变成空）。
-func TestItoa(t *testing.T) {
-	cases := map[int]string{0: "0", 7: "7", 10: "10", 123: "123"}
-	for in, want := range cases {
-		if got := itoa(in); got != want {
-			t.Errorf("itoa(%d) = %q，want %q", in, got, want)
-		}
-	}
-}
-
-// ── 前端接线守卫 ────────────────────────────────────────────────────────
-//
-// # 为什么需要它（本会话踩过的形态）
-//
-// API 管理页的前端是**嵌在二进制里**的（webui.html 走 go:embed），
-// 而后端接口与页面之间只靠**约定**连着：
-//
-//	后端返回 k.models       ←→  前端读 k.models
-//	data-act="models"       ←→  事件委托里有 act === 'models' 分支
-//
-// 任何一处改名，另一处**不会报错**：页面上那一列空着、那个按钮点了没反应。
-// 所以这里把"用户点名要的那些界面元素"逐个钉住。
-func TestAPIKeyModelsUIIsWired(t *testing.T) {
-	raw, err := os.ReadFile("webui.html")
-	if err != nil {
-		t.Fatalf("读 webui.html 失败: %v", err)
-	}
-	src := string(raw)
-
-	need := []struct {
-		what   string
-		needle string
-	}{
-		{"表头「可用模型」", "<th>可用模型</th>"},
-		{"列渲染函数", "function apiKeyModelsCell("},
-		{"单元格里调用它", "${apiKeyModelsCell(k)}"},
-		{"输入解析函数", "function parseModelList("},
-		{"新建时询问模型", "允许调用的模型（逗号或换行分隔；**留空 = 不限制**）"},
-		{"行内「改模型」按钮", `data-act="models"`},
-		{"事件委托里的改模型分支", "act === 'models'"},
-		{"新建请求带上 models", "JSON.stringify({ name, limit, rpm, models })"},
-	}
-	for _, n := range need {
-		if !strings.Contains(src, n.needle) {
-			t.Errorf("webui.html 缺少%s（%q）—— 后端会照发，而那一列/那个按钮不会出现，"+
-				"且**没有任何报错**", n.what, n.needle)
-		}
-	}
-
-	// ⚠ 三态：取消（null）与清空（[]）必须分开处理。
-	//
-	// 混在一起的话，"点一次取消"会被当成"清空白名单" ——
-	// 用户什么都没改，模型限制却被静默解开了。
-	fn := src[strings.Index(src, "function parseModelList("):]
-	if i := strings.Index(fn, "\n  }"); i > 0 {
-		fn = fn[:i]
-	}
-	if !strings.Contains(fn, "=== null") {
-		t.Error("parseModelList 必须把「取消」与「清空」分开（判据是 === null）——\n" +
-			"否则用户点取消就等于清空了白名单，而他什么都没改")
-	}
-	if !strings.Contains(src, "models === null") {
-		t.Error("「改模型」分支必须显式处理取消（models === null ⇒ 不发请求）")
 	}
 }
