@@ -598,7 +598,9 @@
     <div class="body">
       <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.7">
         API Key 是调用 <code>/v1/chat/completions</code> 的凭据：每把可单独设额度
-        （token 上限，0=不限）与每分钟请求上限（0=不限）。数据存 <code>data/apikeys.json</code>。
+        （token 上限，0=不限）、每分钟请求上限（0=不限），以及<b>可用模型白名单</b>
+        （留空=不限制；设了之后调别的模型回 403，且 <code>/v1/models</code> 只列出允许的那些）。
+        数据存 <code>data/apikeys.json</code>。
       </div>
       <!-- 管理钥匙（config.api_key）与普通 key 同屏显示，与仪表盘「API 接入信息」统一：
            一把钥匙只有一个事实来源，不该在仪表盘看到、在管理页却"没有"。
@@ -606,9 +608,9 @@
       <div id="apiAdminKey" class="dim" style="font-size:12px;margin-bottom:10px"></div>
       <table>
         <thead><tr>
-          <th>名称</th><th>Key</th><th>状态</th><th>额度</th><th>请求</th><th>失败</th><th>限速</th><th>创建</th><th>操作</th>
+          <th>名称</th><th>Key</th><th>状态</th><th>额度</th><th>请求</th><th>失败</th><th>限速</th><th>可用模型</th><th>创建</th><th>操作</th>
         </tr></thead>
-        <tbody id="apiKeyRows"><tr><td colspan="9" class="dim">加载中…</td></tr></tbody>
+        <tbody id="apiKeyRows"><tr><td colspan="10" class="dim">加载中…</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -5070,11 +5072,45 @@ let loginProvider = '';
     return r > 0 ? r : 0;
   }
 
+  // apiKeyModelsCell 「可用模型」单元格。
+  //
+  // 三态与后端同一口径（见 apikey.Key.Models）：
+  //
+  //	字段缺失 / 空数组 → **不限制**，显示「全部」
+  //	非空              → 列出模型名（多了截断，title 里给全量）
+  //
+  // ⚠ 「全部」不能写成一个空白格：用户看到空白会以为是"还没加载"，
+  // 于是去刷新页面；而"没设限制"是个**明确的状态**，得说出来。
+  function apiKeyModelsCell(k) {
+    const list = Array.isArray(k.models) ? k.models.filter(Boolean) : [];
+    if (!list.length) return '<span class="dim">全部</span>';
+    const shown = list.slice(0, 3).map(esc).join('、');
+    const more = list.length > 3 ? `<span class="dim"> +${list.length - 3}</span>` : '';
+    return `<span class="mono" style="font-size:11px" title="${esc(list.join('\n'))}">${shown}${more}</span>`;
+  }
+
+  // parseModelList 把输入框里的一行文本切成模型名列表。
+  //
+  // 分隔符同时认逗号与空白（含换行）：用户从别处复制模型名时，可能是
+  // "glm-5.2,glm-5.1" 也可能是每行一个。两种都认，省得他为了格式再试一次。
+  //
+  // ⚠ 返回 null 与返回 [] 是**两件事**（调用方必须分开处理）：
+  //
+  //	null  用户取消了输入 → **不改**现有白名单
+  //	[]    用户清空了输入 → 清空白名单 = 恢复不限制
+  //
+  // 混在一起的话，"取消"会被当成"清空" —— 用户点一次取消就把模型限制
+  // 静默解开了，而他什么都没改。
+  function parseModelList(raw) {
+    if (raw === null) return null; // 取消
+    return String(raw).split(/[\s,，、]+/).map(s => s.trim()).filter(Boolean);
+  }
+
   function renderAPIKeys(list) {
     const host = $('apiKeyRows');
     if (!host) return;
     if (!list.length) {
-      host.innerHTML = '<tr><td colspan="9" class="dim">还没有 API Key —— 点右上角「新建 API Key」创建第一把。</td></tr>';
+      host.innerHTML = '<tr><td colspan="10" class="dim">还没有 API Key —— 点右上角「新建 API Key」创建第一把。</td></tr>';
       return;
     }
     host.innerHTML = list.map(k => {
@@ -5085,6 +5121,7 @@ let loginProvider = '';
       const ops = [
         `<button data-apikey="${esc(k.id)}" data-act="toggle" ${k.enabled ? '' : 'class="primary"'}>${k.enabled ? '禁用' : '启用'}</button>`,
         `<button data-apikey="${esc(k.id)}" data-act="edit">改配额</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="models">改模型</button>`,
         `<button data-apikey="${esc(k.id)}" data-act="reset">重置</button>`,
         `<button data-apikey="${esc(k.id)}" data-act="delete" style="color:var(--err)">删除</button>`,
       ].join(' ');
@@ -5096,13 +5133,14 @@ let loginProvider = '';
         <td class="mono">${esc(k.requests)}</td>
         <td class="mono">${esc(k.fails)}</td>
         <td class="mono">${k.rpm > 0 ? k.rpm + '/min' : '不限'}</td>
+        <td>${apiKeyModelsCell(k)}</td>
         <td class="dim">${created}</td>
         <td style="white-space:nowrap">${ops}</td>
       </tr>`;
     }).join('');
   }
 
-  // 新建 API Key：内联询问 name / limit / rpm（回车分隔）。
+  // 新建 API Key：内联询问 name / limit / rpm / 可用模型。
   async function apiKeyCreate(btn) {
     const name = (window.prompt('名称（调用方/用途，必填）') || '').trim();
     if (!name) { toast('名称不能为空', true); return; }
@@ -5110,11 +5148,17 @@ let loginProvider = '';
     const rpmStr = window.prompt('每分钟请求上限（0=不限，默认 0）') || '0';
     const limit = parseInt(limStr, 10); const rpm = parseInt(rpmStr, 10);
     if (isNaN(limit) || isNaN(rpm)) { toast('额度/限速必须是数字', true); return; }
+    // 可用模型：留空 = 不限制。分隔符认逗号与换行（见 parseModelList）。
+    const models = parseModelList(window.prompt(
+      '允许调用的模型（逗号或换行分隔；**留空 = 不限制**）\n'
+      + '提示：填裸模型名即可，带不带上游前缀都算同一个模型。\n'
+      + '例：glm-5.2, deepseek-v4-flash', '')) || [];
     await busyRun(btn, async () => {
       try {
-        const r = await admin('/admin/apikeys', { method: 'POST', body: JSON.stringify({ name, limit, rpm }) });
+        const r = await admin('/admin/apikeys', { method: 'POST', body: JSON.stringify({ name, limit, rpm, models }) });
         if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
-        toast(`已创建（仅此一次显示完整 key）：\n${r.full}\n请立即复制保存`, false, 15000);
+        const scope = models.length ? `\n可用模型：${models.join('、')}` : '\n可用模型：全部（不限制）';
+        toast(`已创建（仅此一次显示完整 key）：\n${r.full}${scope}\n请立即复制保存`, false, 15000);
         copyText(r.full, 'API Key');
         await loadAPIKeys();
         return true;
@@ -5139,17 +5183,49 @@ let loginProvider = '';
       return;
     }
     if (act === 'edit') {
-      const limStr = window.prompt('新的额度上限（token 数，0=不限）') || '0';
-      const rpmStr = window.prompt('新的每分钟上限（0=不限）') || '0';
-      const limit = parseInt(limStr, 10); const rpm = parseInt(rpmStr, 10);
-      if (isNaN(limit) || isNaN(rpm)) { toast('额度/限速必须是数字', true); return; }
+      // ⚠ 取消（null）与输入 0 是**两件事**：取消 = 不改这一项，
+      // 输入 0 = 设为不限。旧实现用 `|| '0'` 把两者合成一个，
+      // 于是点一次取消就把额度静默设成"不限"—— 而用户什么都没改。
+      // 后端的 limit/rpm 已按指针契约支持"缺失 = 不改"。
+      const body = { id };
+      const limRaw = window.prompt('新的额度上限（token 数，0=不限；取消=不改这一项）');
+      if (limRaw !== null) {
+        const v = parseInt(limRaw, 10);
+        if (isNaN(v) || v < 0) { toast('额度必须是非负数字', true); return; }
+        body.limit = v;
+      }
+      const rpmRaw = window.prompt('新的每分钟上限（0=不限；取消=不改这一项）');
+      if (rpmRaw !== null) {
+        const v = parseInt(rpmRaw, 10);
+        if (isNaN(v) || v < 0) { toast('限速必须是非负数字', true); return; }
+        body.rpm = v;
+      }
+      if (body.limit === undefined && body.rpm === undefined) return; // 两项都取消
       await busyRun(b, async () => {
         try {
-          await admin('/admin/apikeys/update', { method: 'POST', body: JSON.stringify({ id, limit, rpm }) });
+          await admin('/admin/apikeys/update', { method: 'POST', body: JSON.stringify(body) });
           toast('已更新配额');
           await loadAPIKeys(); return true;
         } catch (e) { toast('更新失败：' + e.message, true); return false; }
       }, { label: '改配额', busyText: '…' });
+      return;
+    }
+    if (act === 'models') {
+      // 「改模型」与「改配额」是两个独立动作，各自**只带自己那几个字段** ——
+      // 后端的指针/切片三态保证另几项不被顺手改掉。
+      const models = parseModelList(window.prompt(
+        '允许调用的模型（逗号或换行分隔）\n'
+        + '· 清空并确定 = **不限制**（全部模型都可用）\n'
+        + '· 取消 = 不改这一项\n'
+        + '提示：填裸模型名即可，带不带上游前缀都算同一个模型。', ''));
+      if (models === null) return; // 取消
+      await busyRun(b, async () => {
+        try {
+          await admin('/admin/apikeys/update', { method: 'POST', body: JSON.stringify({ id, models }) });
+          toast(models.length ? `已限制为 ${models.length} 个模型` : '已取消模型限制（全部可用）');
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('更新失败：' + e.message, true); return false; }
+      }, { label: '改模型', busyText: '…' });
       return;
     }
     if (act === 'reset') {

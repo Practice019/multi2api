@@ -134,8 +134,13 @@ func validProviderID(id string) bool {
 //   - "auto" → ("", "auto", false)          裸名，走默认上游
 //   - "workbuddy/auto" → ("workbuddy", "auto", true)
 //   - "workbuddy/" → ("workbuddy", "", true) 空模型名留给上游报错，不在这里吞掉
-//   - "/auto" → ("", "auto", false)          空前缀视为裸名
+//   - "/auto" → ("", "/auto", false)         ⚠ 原样返回**含斜杠的整串**
 //   - "a/b/c" → ("a", "b/c", true)           只切第一个 '/'（模型名本身可能含 '/'）
+//
+// ⚠ `/auto` 那一行原来是**错的**：注释写的是 `("", "auto", false)`（剥掉前导斜杠），
+// 而代码与 TestSplitModel 的断言都是**原样返回 `/auto`**。我按注释写白名单的
+// 用例时被它误导了一次（以为 `/auto` 会被剥成 `auto`）。注释已按实际行为订正 ——
+// 有测试钉住的实现才是权威，注释要跟它。
 func SplitModel(s string) (providerID, model string, hasPrefix bool) {
 	if s == "" {
 		return "", "", false

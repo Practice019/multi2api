@@ -555,9 +555,14 @@ const (
 
 // models 返回模型列表：优先动态（缓存 1h），失败回退静态表。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	// 被限制的 key **只看到自己允许的模型**。
+	//
+	// 不这么做的话：列表里看得见几十个模型，调哪个都 403 ——
+	// 用户会读成"网关坏了"，而不是"这把 key 没这个权限"。
+	// 列表如实反映权限，权限才是可发现的。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   h.filterModelsForRequest(r, h.modelList()),
 	})
 }
 
@@ -1185,6 +1190,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)
 	if perr != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "unknown_provider", perr.Error())
+		return
+	}
+	// API key 的模型白名单：拿到模型名之后、动手之前立刻判。
+	//
+	// 位置刻意在 providerFor **之后**：白名单按裸模型名比（见
+	// apikey.ModelAllowed），而剥前缀的口径要用选路那一套 —— 先解析出
+	// 结构化的模型名，再比，两处判据不会分叉。
+	if !h.modelAllowedForRequest(w, r, peek.Model) {
 		return
 	}
 	// 出站请求体里必须写回**剥掉前缀**的模型名：前缀是网关的路由记号，

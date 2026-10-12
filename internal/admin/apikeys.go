@@ -53,8 +53,10 @@ func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"keys": s.List(), "enabled": true, "admin_key": adminMask})
 }
 
-// apiKeysCreate POST /admin/apikeys —— body {"name":"...","limit":0,"rpm":0}。
+// apiKeysCreate POST /admin/apikeys —— body {"name":"...","limit":0,"rpm":0,"models":["..."]}。
 // 返回完整 key（**仅这一次**返回明文，前端展示后不再可得）。
+//
+// models 省略 / null / [] 都等于**不限制模型**（见 apikey.Key.Models 的三态说明）。
 func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 	s := h.apiKeysStore()
 	if s == nil {
@@ -62,15 +64,16 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name  string `json:"name"`
-		Limit int64  `json:"limit"`
-		RPM   int    `json:"rpm"`
+		Name   string   `json:"name"`
+		Limit  int64    `json:"limit"`
+		RPM    int      `json:"rpm"`
+		Models []string `json:"models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	k, err := s.Create(body.Name, body.Limit, body.RPM)
+	k, err := s.Create(body.Name, body.Limit, body.RPM, body.Models)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -83,6 +86,7 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		"enabled":    k.Enabled,
 		"limit":      k.Limit,
 		"rpm":        k.RPM,
+		"models":     k.Models,
 		"created_at": k.CreatedAt,
 	})
 }
@@ -152,8 +156,17 @@ func (h *Handler) apiKeysReset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
 }
 
-// apiKeysUpdate POST /admin/apikeys/update —— body {"id":"...","limit":0,"rpm":0}。
-// 改配额/限速（负值不改，沿用现值语义由 Store 处理）。
+// apiKeysUpdate POST /admin/apikeys/update —— body {"id":"...","limit":0,"rpm":0,"models":[...]}。
+// 改配额/限速/模型白名单。
+//
+// # 每个字段都是三态（**字段缺失 = 不改这一项**）
+//
+//	limit / rpm 用**指针**：缺失 / null → 不改；给 0 → 设为不限；给 N → 设为 N
+//	models 用切片：缺失 / null → 不改；给 `[]` → 清空（恢复不限制）；给非空 → 设为白名单
+//
+// ⚠ 前端有「改配额」与「改模型」两个独立动作，各自只带自己那几个字段。
+// 把"缺失"当成"设为 0 / 清空"会让**用户没动过的字段被悄悄改掉** ——
+// 改一次模型把额度清零，或改一次配额把模型限制解开。两者界面上都看不出来。
 func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 	s := h.apiKeysStore()
 	if s == nil {
@@ -161,15 +174,16 @@ func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ID    string `json:"id"`
-		Limit int64  `json:"limit"`
-		RPM   int    `json:"rpm"`
+		ID     string   `json:"id"`
+		Limit  *int64   `json:"limit"`
+		RPM    *int     `json:"rpm"`
+		Models []string `json:"models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	if err := s.Update(body.ID, body.Limit, body.RPM); err != nil {
+	if err := s.Update(body.ID, body.Limit, body.RPM, body.Models); err != nil {
 		writeStoreError(w, err)
 		return
 	}

@@ -93,6 +93,13 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "unknown_provider", perr.Error())
 		return
 	}
+	// API key 的模型白名单：与 chat 同一条判据（生图模型也属于"模型"）。
+	//
+	// ⚠ 少了这一处，被限制的 key 仍然可以调生图 —— 那是个真实的绕过口：
+	// 白名单看起来生效了（chat 403），而同一个模型家族的生图入口照样能用。
+	if !h.modelAllowedForRequest(w, r, peek.Model) {
+		return
+	}
 
 	// 出站请求体写回**剥掉前缀**的模型名：前缀是网关的路由记号，
 	// 上游不认识它（与 chatCompletions 同一条，见那里的注释）。
