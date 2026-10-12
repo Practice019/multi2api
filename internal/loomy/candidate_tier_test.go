@@ -82,18 +82,18 @@ func TestTierOfMatchesUserRule(t *testing.T) {
 		want      int
 		why       string
 	}{
-		{"还有每日赠送", 26434, 1434, tierDaily,
+		{"还有每日赠送", 26434, 1434, tierFree,
 			"用它不消耗永久积分 —— 这是要优先的那一档"},
-		{"每日赠送刚好用完", 25000, 0, tierPermanent,
+		{"每日赠送刚好用完", 25000, 0, tierPaid,
 			"available == 永久额度（因为 daily==0），用它真的在花钱"},
-		{"只剩一点点每日", 1, 1, tierDaily,
+		{"只剩一点点每日", 1, 1, tierFree,
 			"只要 >0 就是免费额度，不该因为数额小就被跳过"},
-		{"两个账本都空", 0, 0, tierUnknown,
-			"没额度可用 —— 与'查不到'同档"},
-		{"余额为负（理论透支）", -5, 0, tierUnknown,
-			"负数不构成可用额度"},
-		{"只有永久额度且很大", 999999, 0, tierPermanent,
-			"再大也是永久额度，只该在所有免费额度用尽后才用"},
+		{"两个账本都空", 0, 0, tierPaid,
+			"**问过了**、确实是空 ⇒ 这是「已确认没有免费额度」，与「没问到」是两件事"},
+		{"余额为负（理论透支）", -5, 0, tierPaid,
+			"负数不构成可用额度，同样属于「已确认没有」"},
+		{"只有永久额度且很大", 999999, 0, tierPaid,
+			"再大也是永久额度，只该在所有「可能还有免费额度」的号都不存在时才用"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -116,11 +116,11 @@ func TestTierDependsOnMeasuredIdentity(t *testing.T) {
 	if permanent+daily != 26434 {
 		t.Fatal("实测样本本身不自洽")
 	}
-	if tierOf(26434, daily) != tierDaily {
+	if tierOf(26434, daily) != tierFree {
 		t.Error("两个账本相加等于 available 时，有每日赠送的号必须落 0 档")
 	}
 	// daily==0 ⇒ available 恰好等于永久额度
-	if tierOf(permanent, 0) != tierPermanent {
+	if tierOf(permanent, 0) != tierPaid {
 		t.Error("daily==0 时 available 就是永久额度，必须落 1 档")
 	}
 }
@@ -132,14 +132,14 @@ func TestTierDependsOnMeasuredIdentity(t *testing.T) {
 func TestCandidateTiersReadsCacheOnly(t *testing.T) {
 	p := NewWithConfig(Config{Client: NewWithBase(deadBase)})
 	uid := "260101010101010101"
-	p.tiers.set(uid, tierDaily)
+	p.tiers.set(uid, tierFree)
 
 	start := time.Now()
 	got := p.CandidateTiers("", []string{uid})
 	elapsed := time.Since(start)
 
-	if got[uid] != tierDaily {
-		t.Errorf("应返回缓存里的档位 %d，实际 %d", tierDaily, got[uid])
+	if got[uid] != tierFree {
+		t.Errorf("应返回缓存里的档位 %d，实际 %d", tierFree, got[uid])
 	}
 	if elapsed > 200*time.Millisecond {
 		t.Errorf("耗时 %v —— 明显像发了网络请求。\n"+
@@ -160,8 +160,8 @@ func TestCandidateTiersColdCacheIsUnknownAndFast(t *testing.T) {
 	elapsed := time.Since(start)
 
 	for _, uid := range []string{"u1", "u2"} {
-		if got[uid] != tierUnknown {
-			t.Errorf("冷缓存时 %s 应回未知档 %d，实际 %d", uid, tierUnknown, got[uid])
+		if got[uid] != tierUnsure {
+			t.Errorf("冷缓存时 %s 应回未知档 %d，实际 %d", uid, tierUnsure, got[uid])
 		}
 	}
 	if elapsed > 200*time.Millisecond {
@@ -178,10 +178,10 @@ func TestRefreshQuotaFillsTierCache(t *testing.T) {
 		t.Fatal("额度查询应成功（假上游可用）")
 	}
 	got := p.CandidateTiers("", []string{"260101010101010101"})
-	if got["260101010101010101"] != tierDaily {
+	if got["260101010101010101"] != tierFree {
 		t.Errorf("刷新额度后档位应已知（%d），实际 %d —— "+
 			"额度路径与分档路径查的是同一个数，不回填等于白查一次",
-			tierDaily, got["260101010101010101"])
+			tierFree, got["260101010101010101"])
 	}
 }
 
@@ -195,14 +195,14 @@ func TestAsyncRefreshFillsCacheSelfHealing(t *testing.T) {
 
 	// 第一拍：cold ⇒ 未知（且不阻塞）
 	first := p.CandidateTiers("", []string{"260101010101010101"})
-	if first["260101010101010101"] != tierUnknown {
+	if first["260101010101010101"] != tierUnsure {
 		t.Fatalf("冷缓存第一拍应是未知档，实际 %d", first["260101010101010101"])
 	}
 
 	// 等异步刷新落定（最多 3 秒）
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if e, ok := p.tiers.get("260101010101010101"); ok && e.tier == tierDaily {
+		if e, ok := p.tiers.get("260101010101010101"); ok && e.tier == tierFree {
 			return // 自愈成功
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -222,11 +222,11 @@ func TestCandidateTiersDistinguishesFreeAndPermanent(t *testing.T) {
 	p.refreshTierOne("260202020202020202") // 只剩永久额度
 
 	got := p.CandidateTiers("", []string{"260101010101010101", "260202020202020202"})
-	if got["260101010101010101"] != tierDaily {
-		t.Errorf("还有免费额度的号应是 %d 档，实际 %d", tierDaily, got["260101010101010101"])
+	if got["260101010101010101"] != tierFree {
+		t.Errorf("还有免费额度的号应是 %d 档，实际 %d", tierFree, got["260101010101010101"])
 	}
-	if got["260202020202020202"] != tierPermanent {
-		t.Errorf("只剩永久额度的号应是 %d 档，实际 %d", tierPermanent, got["260202020202020202"])
+	if got["260202020202020202"] != tierPaid {
+		t.Errorf("只剩永久额度的号应是 %d 档，实际 %d", tierPaid, got["260202020202020202"])
 	}
 	if got["260101010101010101"] >= got["260202020202020202"] {
 		t.Error("有免费额度的号必须**严格优先**于只剩永久额度的号")

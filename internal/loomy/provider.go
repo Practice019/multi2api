@@ -335,7 +335,7 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if err != nil {
 		return gateway.ChatStream{}, err
 	}
-	// 契约要求"ctx 取消时 Chat 必须尽快返回"。这里先检查一次，
+	// 契约要求「ctx 取消时 Chat 必须尽快返回」。这里先检查一次，
 	// 保证调用方传已取消的 ctx 时不必等一次网络往返。
 	if err := ctx.Err(); err != nil {
 		return gateway.ChatStream{}, err
@@ -345,10 +345,10 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if err != nil {
 		// respBody 非空 = 上游返回了错误体（业务错误），仍按流返回。
 		if len(respBody) > 0 {
-			return gateway.ChatStream{
+			return p.withTierInvalidate(tierUID(a), gateway.ChatStream{
 				Status: status,
 				Body:   io.NopCloser(bytes.NewReader(respBody)),
-			}, nil
+			}), nil
 		}
 		return gateway.ChatStream{}, err
 	}
@@ -359,7 +359,67 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if rc == nil {
 		rc = io.NopCloser(bytes.NewReader(nil))
 	}
-	return gateway.ChatStream{Status: status, Body: rc}, nil
+	return p.withTierInvalidate(tierUID(a), gateway.ChatStream{Status: status, Body: rc}), nil
+}
+
+// tierUID 取一个**一定非空**的账号标识（Auth.UID 为空时回落到 session 派生）。
+//
+// # 为什么需要它
+//
+// 标脏以 uid 为键，而 `withTierInvalidate` 对空 uid 会**静默返回**
+// （那是防呆，不是防错）。生产上 LoadDir 一定会填 UID ——
+// 但「某条路径忘了填」的代价是**整条修复失效且毫无征兆**：
+// 不报错、不红测试，只是永久积分继续被烧。所以这里兜一层。
+//
+// 兜底口径与 LoadDir 的 `deriveUID(session)` 一致，因此两边算出的 uid 相同。
+func tierUID(a *Auth) string {
+	if a == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(a.UID); s != "" {
+		return s
+	}
+	return deriveUID(a.Session)
+}
+
+// withTierInvalidate 给响应体挂上「被关闭时把这个号的档位缓存标脏」。
+//
+// # 为什么是"响应体关闭时"，而不是请求前后
+//
+// 这个账号的余额在**这次请求完成时**变了 —— 而缓存里那个数记的是"花之前"的
+// 状态。不标脏的话，一个号的免费额度被我们用完之后，缓存仍说它"确认还有
+// 免费额度"，于是整个 TTL 窗口内它继续被优先选中，把永久额度一点点烧掉
+// （用户实测报的正是这个形态）。
+//
+// ⚠ 我第一版把标脏写在**请求之前**，结果它和请求**竞争**：异步刷新可能在
+// 上游记账之前就读到旧余额（还有免费额度），于是刚被标脏的号又被标回
+// "确认有免费额度" —— 修了个寂寞。隔离实验里那个号仍被多用了 1 次。
+//
+// 挂在 Close 上是对的：核心负责 Close（契约要求），而那一刻响应已经读完、
+// 上游也已记账。
+func (p *Provider) withTierInvalidate(uid string, cs gateway.ChatStream) gateway.ChatStream {
+	if cs.Body == nil || uid == "" {
+		return cs
+	}
+	cs.Body = &tierInvalidateBody{inner: cs.Body, onClose: func() { p.invalidateTier(uid) }}
+	return cs
+}
+
+// tierInvalidateBody 在 Close 时回调一次（幂等）。
+type tierInvalidateBody struct {
+	inner   io.ReadCloser
+	once    sync.Once
+	onClose func()
+}
+
+func (b *tierInvalidateBody) Read(p []byte) (int, error) { return b.inner.Read(p) }
+
+func (b *tierInvalidateBody) Close() error {
+	err := b.inner.Close()
+	// 幂等：核心可能先读到 EOF 再 Close，也可能直接 Close ——
+	// 只该标脏一次（标脏本身幂等，但避免重复触发刷新）。
+	b.once.Do(b.onClose)
+	return err
 }
 
 // Models 返回模型目录。

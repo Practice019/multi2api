@@ -5,18 +5,14 @@
 //	「Loomy 每一个账号每天都会送 5000 的免费额度，但是如果这个免费额度
 //	  没有用完，明天还是重置 5000 的免费额度，也就是不会保留。所以我希望
 //	  调用 Loomy 账号的时候，优先使用免费额度，轮询所有账号，把所有账号的
-//	  免费额度用完之后，它才能用永久的额度。如果说有一个账号的免费额度用完了，
-//	  那就轮询下一个账号，直到所有的账号免费额度都没有了，才能用永久额度。」
+//	  免费额度用完之后，它才能用永久的额度。」
 //
-// # 为什么必须"在选号时"分档，而不能等上游报错
+// # 为什么必须"在选号时"分档，不能等上游报错
 //
 // Loomy 额度耗尽时**不报错**：服务端静默降级 —— 继续扣永久积分、照常返回 200。
-// 所以本仓既有的"按限流错误换号"机制对它**完全无效**：它会一直烧同一个号的
-// 永久积分，而核心永远不会知道该换号。
+// 所以本仓既有的"按限流错误换号"机制对它**完全无效**。
 //
-// 要在这种上游上实现用户的规则，唯一的位置就是**选号时按余额把候选分开**。
-//
-// # 两个账本与档位的对应（这是本文件的核心）
+// # 两个账本
 //
 // 实测三个字段的关系（见 points.go 的文件头）：
 //
@@ -24,30 +20,48 @@
 //	dailyBalance       1434  今日赠送剩余（服务端按自然日重置为 5000）
 //	availableBalance  26434  = balance + dailyBalance
 //
-// 因为 available = 永久 + 今日，所以**只看 (available, daily) 就能分档**：
+// # 档位：**三档**，而"不确定"排在"确认只剩永久"**前面**
 //
-//	daily > 0            → 0 档：还有免费额度，用它不花永久积分
-//	daily == 0 且 available > 0 → 1 档：只剩永久额度，用它是真的在花钱
-//	其余（两个都为 0 / 查不到）  → 2 档：与"未知"同档
+//	0  确认还有免费额度      → 优先用它
+//	1  **不确定**            → 刚被用过 / 缓存过期 / 从没查到
+//	2  确认只剩永久额度      → 只有在没有任何"可能还有免费额度"的账号时才用
 //
-// 第 3 条刻意把"余额为 0"与"查不到"放**同一档**（用户明确要求）：
-// 宁可先用能确认余额的账号。把"查不到"当最优会让网关拿不准的号去烧额度。
+// ⚠⚠ 这条顺序与开源参照实现**相反**（它把"查询失败"放最后一档，理由是
+// "宁可先用能确认余额的账号"）—— 那是**稳健性**口径。而本用户的诉求是
+// **别烧永久积分**：一个"不确定"的账号**可能**还有免费额度，而一个
+// "确认只剩永久"的账号**一定**没有。先在不确定的那些里找，才符合用户要的顺序。
 //
-// # ⚠ 为什么不能在这里发网络请求（这条决定了整个实现形状）
+// ⚠ 代价如实标注：不确定的账号里也可能恰好是个坏号（session 失效）。
+// 那种情况下这次请求失败 → 核心换号重试（**不扣永久积分**）。
+// 而顺序反过来时的代价是**直接烧掉用户明确不想烧的永久额度**。两者不对等。
 //
-// 核心在**持有账号池锁**的状态下调用 CandidateTiers（见 pool.pickFor）。
-// 若这里逐个账号查余额（N 次 HTTP × 每次超时），会把整个池子的选号
-// 串行阻塞住 —— 等于网关停摆。
+// # ⚠⚠ 第二次报障：真正的问题是"新鲜度是相对墙上时钟的"
 //
-// 所以：
+// 用户报：某个号免费额度已经是 0，别的号还有免费额度，它却仍被使用、
+// 永久额度一直在减。
 //
-//	本方法**只读缓存**（纯内存 map，微秒级）
-//	缓存由**异步刷新**填充（fire-and-forget，不阻塞调用方）
-//	同时 RefreshQuota（管理端「刷新额度」）也顺带回填 —— 那条路径本来就要查余额
+// 我第一版用 60 秒 TTL 判断新鲜度，而这**抓不住真正的问题**：
 //
-// 冷缓存时的行为是**优雅降级**：所有 uid 都回 2 档 ⇒ 核心保留全部候选
-// ⇒ 与改造前**逐字节相同**。等异步刷新回来（秒级）就自动开始分档。
-// 这个"第一拍不分档"是刻意的取舍：宁可晚一拍生效，也不阻塞选号。
+//	某账号的免费额度是**被我们自己的请求消耗掉的**。它服务完一次之后，
+//	缓存里仍然写着"0 档（还有 2000 免费）" —— 那个值在写入时是对的，
+//	而现在**因为它刚被用过**已经不成立了。60 秒 TTL 之内它一直"新鲜但已经错了"，
+//	于是整个突发期内它继续被优先选中，把永久额度烧掉。
+//
+// 隔离实验复现（两个号：A 只有 2000 免费、B 有 20000，每次扣 2000）：
+//
+//	#1 A 服务（正确 —— 它当时还有 2000）
+//	#2 B 服务
+//	#3 A 服务 ← ✗ B 还有 18000 免费，却用了 A 的永久额度
+//	#5 #7 #9 #11 同上；最终 A 烧掉 9000 永久，而 B 还剩 8000 免费
+//
+// 修法两条，都要有：
+//
+//	① **用完就标脏**：`Chat` 一返回就把该账号的档位缓存删掉（见 invalidateTier）。
+//	   它下次被看到时落到「不确定」档 —— 而在"还有确认有免费额度的号"时，
+//	   不确定的号不会被优先选中。
+//	② 档位顺序把「不确定」放在「确认只剩永久」前面（见上）。
+//
+// 两条合起来，复现用例里 #3 那一步会去用 B（唯一"确认还有免费额度"的号）。
 package loomy
 
 import (
@@ -59,23 +73,22 @@ import (
 
 // 档位号（**数字越小越优先**，见 gateway.CandidateTierExt 的契约）。
 const (
-	// tierDaily 还有今日赠送额度 —— 用它不消耗永久积分。
-	tierDaily = 0
-	// tierPermanent 今日赠送已用尽、只剩永久额度 —— 用它是真的在花钱。
-	tierPermanent = 1
-	// tierUnknown 两个账本都空，或**查不到**（同一档，见文件头）。
-	tierUnknown = 2
+	// tierFree 已确认还有今日赠送额度 —— 用它不消耗永久积分。只有它会被优先。
+	tierFree = 0
+	// tierUnsure 不确定：刚被用过（余额一定变了）、缓存过期、或从没查到。
+	//
+	// 排在"确认只剩永久"之前 —— 理由见文件头（用户要的是"别烧永久积分"，
+	// 而这个档里的账号**可能**还有免费额度）。
+	tierUnsure = 1
+	// tierPaid 已确认没有免费额度（只剩永久，或两个账本都空）。
+	tierPaid = 2
 )
 
 // tierCacheTTL 档位缓存的存活期。
 //
-// 60 秒：与参照实现同量级。它要平衡两件事 ——
-//
-//	太短 → 每次选号都可能触发一遍全账号查询（N 次网络往返）
-//	太长 → 免费额度用完到"换号"之间有明显滞后（用户会看到"明明还有额度却换了号"
-//	       或"用完了还在用同一个号"）
-//
-// 60 秒的滞后是可接受的：用户的诉求是"别烧永久积分"，晚一分钟换号不影响它。
+// 它只兜底"我们没用过这个号、但上游状态被别处改变了"的情形（例如用户
+// 自己在 Loomy 客户端里消耗、或自然日重置）。**被我们自己用掉**那一种
+// 由 invalidateTier 精确处理，不依赖这个值 —— 所以它不需要很短。
 const tierCacheTTL = 60 * time.Second
 
 // tierEntry 一个账号的档位与取到的时刻。
@@ -85,22 +98,16 @@ type tierEntry struct {
 }
 
 // tierCache 档位缓存。
-//
-// 两个 map 各自被 mu 保护：
-//
-//	m     uid → 档位（读多写少）
-//	busy  uid → 正在刷新中（去重，避免同一账号被反复并发查询）
 type tierCache struct {
 	mu   sync.RWMutex
 	m    map[string]tierEntry
-	busy map[string]bool
+	busy map[string]bool // 正在刷新的 uid（去重）
 }
 
 func newTierCache() *tierCache {
 	return &tierCache{m: map[string]tierEntry{}, busy: map[string]bool{}}
 }
 
-// get 读一个 uid 的档位（**纯内存**，调用方可能持有池锁）。
 func (c *tierCache) get(uid string) (tierEntry, bool) {
 	if c == nil {
 		return tierEntry{}, false
@@ -111,7 +118,6 @@ func (c *tierCache) get(uid string) (tierEntry, bool) {
 	return e, ok
 }
 
-// set 写入档位。
 func (c *tierCache) set(uid string, tier int) {
 	if c == nil || uid == "" {
 		return
@@ -121,10 +127,17 @@ func (c *tierCache) set(uid string, tier int) {
 	c.mu.Unlock()
 }
 
-// claim 尝试占住一个 uid 的刷新权；已被别人占住则返回 false。
-//
-// 这一个方法就是"异步刷新的去重"：并发调用 CandidateTiers 时，
-// 同一个 uid 只会有一个刷新在飞。
+// drop 删掉一个账号的档位（见 invalidateTier）。
+func (c *tierCache) drop(uid string) {
+	if c == nil || uid == "" {
+		return
+	}
+	c.mu.Lock()
+	delete(c.m, uid)
+	c.mu.Unlock()
+}
+
+// claim 尝试占住一个 uid 的刷新权（并发去重）。
 func (c *tierCache) claim(uid string) bool {
 	if c == nil || uid == "" {
 		return false
@@ -138,7 +151,6 @@ func (c *tierCache) claim(uid string) bool {
 	return true
 }
 
-// release 释放刷新权。
 func (c *tierCache) release(uid string) {
 	if c == nil {
 		return
@@ -150,20 +162,12 @@ func (c *tierCache) release(uid string) {
 
 // CandidateTiers 返回候选 uid 的档位（gateway.CandidateTierExt）。
 //
-// # 三条契约（见 gateway/candidate_tier.go）
+// **纯内存**：不查网络、不读磁盘。调用方在持有账号池锁时调用它。
 //
-//	数字越小越优先；未出现在返回 map 里的 uid 视为最低优先级
-//	**档内不排序** —— 本方法只回答"谁属于哪档"
-//	查不到归**最后的档**
-//
-// # 性能契约（这是本方法存在的形状）
-//
-// **纯内存**：不查网络、不读磁盘。调用方在持有池锁时调用它。
-// 缓存未命中的 uid 会被排进一次**异步**刷新，本拍先如实回答"未知"（2 档）。
-//
-// model 参数本上游用不上（两个账本与模型无关），保留是为了契约一致。
+// 缓存未命中或已过期的 uid ⇒ 报 tierUnsure（**不是**把过期值当当前值报出去），
+// 同时排一次异步刷新。这是第三次报障的修法之一 —— 见文件头。
 func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
-	_ = model
+	_ = model // 两个账本与模型无关；保留参数是为了契约一致
 	if p == nil || len(uids) == 0 {
 		return nil
 	}
@@ -176,15 +180,18 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 		}
 		e, ok := p.tiers.get(uid)
 		if !ok {
-			// 从未查过：如实回答"未知"（2 档），并排一次刷新。
-			out[uid] = tierUnknown
+			out[uid] = tierUnsure // 从没查到
+			stale = append(stale, uid)
+			continue
+		}
+		if now.Sub(e.at) >= tierCacheTTL {
+			// ⚠ **不能**报 e.tier：它描述的是"上一次问的时候"。
+			// 报出去就等于拿一个旧结论当新事实用 —— 那正是烧永久额度的形态。
+			out[uid] = tierUnsure
 			stale = append(stale, uid)
 			continue
 		}
 		out[uid] = e.tier
-		if now.Sub(e.at) >= tierCacheTTL {
-			stale = append(stale, uid) // 过期：先用旧值，同时后台刷新
-		}
 	}
 	if len(stale) > 0 {
 		p.refreshTiersAsync(stale)
@@ -192,10 +199,29 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 	return out
 }
 
-// refreshTiersAsync 后台刷新若干 uid 的档位（**不阻塞调用方**）。
+// invalidateTier 把一个账号的档位缓存**删掉**：它的余额刚刚变过。
 //
-// 用 claim/release 去重：同一个 uid 同时只会有一个刷新在飞，
-// 所以高频选号不会把上游打爆。
+// # 谁调用它（这条是本次修复的核心）
+//
+// `Provider.Chat` —— 每次对话返回后（成功或失败都算）都调一次。
+// 理由：那个账号的余额**一定**变了（我们刚花了它的额度），
+// 而缓存里那个数记的是"花之前"的状态。
+//
+// 不这么做的话，一个号的免费额度被我们用完后，缓存仍说它"确认还有免费额度"，
+// 于是整个 TTL 窗口内它继续被优先选中，把永久额度烧掉 ——
+// 用户实测报的就是这个（隔离实验也复现了：见文件头那段序列）。
+//
+// 删掉之后它落到 tierUnsure：只要还有**别的**账号是"确认有免费额度"，
+// 这个号就不会被优先选中。等异步刷新回来，它的新状态（tierPaid）落定。
+func (p *Provider) invalidateTier(uid string) {
+	if p == nil || uid == "" {
+		return
+	}
+	p.tiers.drop(uid)
+	p.refreshTiersAsync([]string{uid})
+}
+
+// refreshTiersAsync 后台刷新若干 uid 的档位（**不阻塞调用方**）。
 func (p *Provider) refreshTiersAsync(uids []string) {
 	todo := make([]string, 0, len(uids))
 	for _, uid := range uids {
@@ -208,7 +234,6 @@ func (p *Provider) refreshTiersAsync(uids []string) {
 	}
 	go func() {
 		defer func() {
-			// 兜住上游实现的 panic：刷新是后台活，崩了不该带走进程。
 			if r := recover(); r != nil {
 				log.Printf("loomy: 档位刷新 panic（已忽略）: %v", r)
 			}
@@ -224,9 +249,8 @@ func (p *Provider) refreshTiersAsync(uids []string) {
 
 // refreshTierOne 查一个账号的余额并把档位写进缓存。
 //
-// 查不到时**不写缓存**（保持"未知"）—— 写一个 2 档进去会让它
-// 在 TTL 内被当成"确认过是最后档"，而下次刷新前它可能已经回血。
-// 不写就等于"下次还会再试"，代价只是每拍多一次 claim。
+// 查不到时**不写缓存**（保持"不确定"）—— 写一个档位进去会让它在 TTL 内
+// 被当成"已确认"，而那个号可能已经回血（或者刚刚才失败过）。
 func (p *Provider) refreshTierOne(uid string) {
 	a := p.authByUID(uid)
 	if a == nil {
@@ -236,35 +260,31 @@ func (p *Provider) refreshTierOne(uid string) {
 	defer cancel()
 	bal, daily, err := p.Balance(ctx, a.Session)
 	if err != nil {
-		log.Printf("loomy: 档位刷新失败 uid=%s: %v（保持未知）", shortUID(uid), err)
+		log.Printf("loomy: 档位刷新失败 uid=%s: %v（保持不确定）", shortUID(uid), err)
 		return
 	}
 	p.tiers.set(uid, tierOf(bal, daily))
 }
 
-// tierOf 由 (可用总额度, 今日剩余) 算出档位。
-//
-// 纯函数，单独拿出来是为了能被直接断言 —— 分档规则是这个需求的全部内容，
-// 不该只能通过"发一个假请求再看选号结果"来验证。
+// tierOf 由 (可用总额度, 今日剩余) 算出一个**已知**余额的档位。
 //
 //	available = 永久 + 今日（实测关系，见 points.go）
 //	所以 daily == 0 时 available 就是永久额度。
+//
+// 只有两种结果：还有免费额度 / 已经没有。第三个档（不确定）不是由余额算出来的，
+// 而是"不知道余额"时由 CandidateTiers 直接给的 —— 两者刻意分开：
+// 混在一起会让"查不到"被当成"确认没有"，而那正好会烧掉永久额度。
 func tierOf(available, daily int64) int {
-	switch {
-	case daily > 0:
-		return tierDaily
-	case available > 0:
-		return tierPermanent
-	default:
-		return tierUnknown
+	if daily > 0 {
+		return tierFree
 	}
+	return tierPaid
 }
 
 // 编译期断言：Provider 实现候选分档扩展点。
 //
 // 缺了它不会编译失败，而是**静默退化**：核心拿不到档位 ⇒ 保留全部候选
 // ⇒ 用户的规则完全不生效，而界面上看不出任何异常。
-// 与本包其它扩展点同一条理由（见 provider.go 顶部那份清单）。
 var _ interface {
 	CandidateTiers(model string, uids []string) map[string]int
 } = (*Provider)(nil)
