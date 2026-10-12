@@ -146,3 +146,57 @@ func TestWithFreeMarksKnownAndClamps(t *testing.T) {
 		t.Errorf("负数应 clamp 成 0 且仍是已知，实际 %+v", q2)
 	}
 }
+
+// ── 本机客户端缓存那条**回落路径** ────────────────────────────────────
+//
+// # 为什么必须单独测它（变异验证逼出来的）
+//
+// 上面几条用例都指向一个**能用的**假上游 ⇒ 走的是「积分网关」那条路。
+// 而 RefreshQuota 还有第二条路：积分网关查不到时回落到**本机客户端的
+// 积分摘要缓存**（只有"本机登录的那个号"有值）。
+//
+// 我把 clientstore 里记 DailyKnown 的那一行删掉做变异时，**全部用例仍然绿** ——
+// 说明第二条路径上的分项接线**一条断言都没覆盖**。
+// 它的后果不是崩溃：本机那个号的「免费额度」列会永远显示 `—`，
+// 而别的号正常显示数字 —— 一个很容易被当成"那个号刚好查不到"的假象。
+
+// 本机缓存里有 dailyBalance ⇒ 分项要带上。
+func TestRefreshQuotaLocalCacheReportsFree(t *testing.T) {
+	dir := pointsStoreDir(t, "260911173523492332", fixtureSession,
+		`{"balance":8000,"dailyBalance":5000,"updatedAt":"2026-09-14T08:15:28.627Z"}`)
+	// 不配 AuthDir ⇒ 找不到凭证 ⇒ 直接走本机缓存那条回落路径
+	//（与既有的 TestRefreshQuotaReportsBalance 同一条路径）。
+	p := NewWithConfig(Config{ClientDataDir: dir})
+
+	qv, ok := p.RefreshQuota("260911173523492332")
+	if !ok || !qv.HasData {
+		t.Fatal("本机缓存里有本机登录那个号的摘要 ⇒ 应当拿到额度")
+	}
+	if !qv.FreeKnown {
+		t.Fatalf("缓存里有 dailyBalance ⇒ 分项必须已知，实际 %+v —— "+
+			"漏掉它会让本机那个号的「免费额度」列永远是 —", qv)
+	}
+	if qv.Free != 5000 {
+		t.Errorf("免费额度 = %d，want 5000（缓存里的 dailyBalance）", qv.Free)
+	}
+}
+
+// ⚠ 缓存里**只有 balance** ⇒ 分项必须未知。
+//
+// 实测客户端会写**部分更新**的记录（例如只有 balance 的那条），
+// 所以"没写过 dailyBalance"是真实形态。把它当 0 会让界面显示
+// 「免费额度已用完」—— 而那个号其实还有额度。
+func TestRefreshQuotaLocalCacheWithoutDailyStaysUnknown(t *testing.T) {
+	dir := pointsStoreDir(t, "260911173523492332", fixtureSession,
+		`{"balance":8000,"updatedAt":"2026-09-14T03:04:34.627Z"}`)
+	p := NewWithConfig(Config{ClientDataDir: dir})
+
+	qv, ok := p.RefreshQuota("260911173523492332")
+	if !ok || !qv.HasData {
+		t.Fatal("有 balance 就应当拿到额度（只是分项没有）")
+	}
+	if qv.FreeKnown {
+		t.Errorf("缓存里没有 dailyBalance ⇒ 分项必须**未知**（界面显示 —），"+
+			"实际给出了 Free=%d ⇒ 会被渲染成「免费额度已用完」", qv.Free)
+	}
+}
