@@ -987,6 +987,48 @@ func main() {
 		p.SetDefaultProvider(defProvider)
 	}
 
+	// ---- 候选分档：让**上游**参与「先用哪个号」的决定（gateway.CandidateTierExt）----
+	//
+	// # 为什么接线必须在这里
+	//
+	// 池子只 import internal/auth —— **不认识 gateway，更不认识任何上游**
+	// （本仓最硬的架构判据，由 arch_test 守着）。而「provider id → 实例 →
+	// 那个实例有没有实现分档扩展点」是**只有装配层同时知道**的三件事。
+	//
+	// # ⚠ 注入的函数必须是**纯本地**判断
+	//
+	// 它在**持有池锁**时被调用（pool.pickFor 的候选构建里）。若这里发网络
+	// 请求（例如逐个账号查余额），整个池子的选号会被串行阻塞 ——
+	// N 个账号 × 每次超时，等于网关停摆。
+	//
+	// 所以：上游侧读到的是**它自己的缓存**（Loomy 见 candidate_tier.go，
+	// 60 秒 TTL + 异步刷新），这里只做一次类型断言并转调，**不引入任何 I/O**。
+	//
+	// 没实现该扩展点的上游拿到 nil ⇒ 池子保持原有候选集 ⇒ 行为与改造前相同。
+	p.SetCandidateRanker(func(provider, model string, uids []string) map[string]int {
+		pv, ok := registry.Get(provider)
+		if !ok {
+			return nil
+		}
+		ext, ok := gateway.ExtOf[gateway.CandidateTierExt](pv)
+		if !ok {
+			return nil
+		}
+		return ext.CandidateTiers(model, uids)
+	})
+
+	// 打一遍参与的上游：用户问「为什么 Loomy 还是没优先用免费额度」时，
+	// 这一行能直接区分"没接线"与"接线了但余额查不到"。
+	var tiered []string
+	for _, id := range registry.IDs() {
+		if pv, ok := registry.Get(id); ok {
+			if _, has := gateway.ExtOf[gateway.CandidateTierExt](pv); has {
+				tiered = append(tiered, id)
+			}
+		}
+	}
+	log.Printf("候选分档：已接线（按上游自报的余额档位优先选号），参与的上游=%v", tiered)
+
 	// ---- 对账：逐出「本次启动没有注册的上游」的幽灵账号（见 pool_reconcile.go）----
 	//
 	// # 这次实测事故的来龙去脉

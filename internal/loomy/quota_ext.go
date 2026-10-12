@@ -85,9 +85,15 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	// 上面两条同时消失。这才是"额度查询"应有的样子。
 	if a := p.authByUID(uid); a != nil {
 		ctx, cancel := pointsCtx()
-		bal, _, err := p.Balance(ctx, a.Session)
+		bal, daily, err := p.Balance(ctx, a.Session)
 		cancel()
 		if err == nil {
+			// 顺手回填候选分档缓存（见 candidate_tier.go）。
+			//
+			// 这条路径（管理端「刷新额度」/ 启动后的额度刷新）本来就要查一次
+			// 余额，结果与分档需要的**完全同一个数** —— 不回填就是白查一次，
+			// 而选号路径只能读缓存、不能自己发请求。
+			p.tiers.set(uid, tierOf(bal, daily))
 			return gateway.CreditsQuota(clampNonNegative(bal)), true
 		}
 		// 查失败（网络/上游 5xx/session 失效）→ 回落到本机缓存，

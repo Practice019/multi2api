@@ -387,6 +387,17 @@ type Pool struct {
 	// providerOf(e) 对未打标签账号返回 ""，与改造前的行为完全一致。
 	defaultProvider string
 
+	// candidateRanker 上游自己的候选分档（见 gateway.CandidateTierExt）。
+	//
+	// 装配层注入；本包**不认识任何上游**，只调用这个函数。
+	//
+	// ⚠ 它会在**持有 p.mu 的情况下**被调用（选号路径）——
+	// 所以注入的实现必须是**纯本地**判断（读缓存），**不得发网络请求**。
+	// 理由：N 个账号逐个查询会把整个池子的选号串行阻塞住。
+	// 装配层那侧只做一次 `ExtOf[CandidateTierExt]` 断言并转调，
+	// 网络留在上游自己的缓存刷新里。
+	candidateRanker func(provider, model string, uids []string) map[string]int
+
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -636,6 +647,29 @@ func (p *Pool) SetRandomSource(fn func(n int64) int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.randInt64N = fn
+}
+
+// SetCandidateRanker 注入「上游自己的候选分档」（见 gateway.CandidateTierExt）。
+//
+// # 为什么由装配层注入，而不是池子直接问上游
+//
+// 本包只 import `internal/auth` —— **不认识 gateway**，更不认识任何上游。
+// 这是本仓最硬的架构判据（核心包不得依赖具体上游，见 arch_test）。
+// 而"哪个 provider id 对应哪个实例""那个实例有没有实现分档扩展点"是
+// **装配层**的事实（它是唯一同时认识核心与全部上游的地方），
+// 与 `SetStore` / `SetRandomSource` 同一条理由。
+//
+// # ⚠ 注入的实现必须是纯本地判断
+//
+// 它在**持有池锁**时被调用。若实现里发网络请求，整个池子的选号会被
+// 串行阻塞 —— N 个账号 × 超时，等于网关停摆。
+//
+// 传 nil 表示"本部署没有分档能力"（单上游、或上游未实现该扩展点），
+// 此时选号行为与改造前**逐字节相同**。
+func (p *Pool) SetCandidateRanker(fn func(provider, model string, uids []string) map[string]int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.candidateRanker = fn
 }
 
 // startFlusher 每 flushInterval 检查 dirty 标志，有变更则 saveLocked 落盘。
@@ -1037,6 +1071,65 @@ func (p *Pool) pickFor(provider string, tried map[string]bool, model string) *au
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(want, tried, now)
 	}
+	// ── 上游自己的候选分档（见 gateway.CandidateTierExt）──
+	//
+	// 只保留**最优那一档**的候选，然后再走下面既有的加权选号。
+	//
+	// # 为什么必须是"硬分档"而不是把余额当权重
+	//
+	// Loomy 这类上游在额度耗尽时**不报错**（服务端静默降级、继续扣永久
+	// 积分、照常返回 200）。所以本仓既有的"按限流错误换号"对它完全无效 ——
+	// 它会一直烧同一个号，而核心永远不会知道。要在那种上游上实现
+	// 「先用完所有号的免费额度，再动永久额度」，只能**在选号时**就分开。
+	//
+	// 把余额当权重（soft）不够：权重低只是"更少被选中"，仍会偶尔选中，
+	// 于是永久积分被慢慢烧掉 —— 用户要的是"不许动"。
+	//
+	// # 三条边界
+	//
+	//	ranker == nil / 返回空 map  → 完全不改变行为（与改造前逐字节相同）
+	//	候选只有 1 个               → 不调用（分档无意义，省一次调用）
+	//	全部 uid 都不在返回 map 里  → 保持原候选集（不改行为）
+	//
+	// 未出现在返回 map 里的 uid 按**最低优先级**处理（与"未知同档"）：
+	// 只要还有一个账号的档位是已知的，就优先用它 —— 宁可先用能确认
+	// 余额的号，也不拿查不准的号去烧额度。
+	if ranker := p.candidateRanker; ranker != nil && len(cands) > 1 {
+		uids := make([]string, 0, len(cands))
+		for _, e := range cands {
+			if e.a != nil && e.a.UID != "" {
+				uids = append(uids, e.a.UID)
+			}
+		}
+		if tiers := ranker(want, model, uids); len(tiers) > 0 {
+			best, found := 0, false
+			for _, e := range cands {
+				if e.a == nil {
+					continue
+				}
+				if t, ok := tiers[e.a.UID]; ok {
+					if !found || t < best {
+						best, found = t, true
+					}
+				}
+			}
+			if found {
+				kept := make([]*entry, 0, len(cands))
+				for _, e := range cands {
+					if e.a == nil {
+						continue
+					}
+					if t, ok := tiers[e.a.UID]; ok && t == best {
+						kept = append(kept, e)
+					}
+				}
+				if len(kept) > 0 {
+					cands = kept
+				}
+			}
+		}
+	}
+
 	// top5 短名单按三因子权重降序截断（而非额度单纯降序）：否则闲置补偿 + 成功率
 	// 根本进不了短名单决策，低额度但高成功率/久置的账号会永远排不进 top5。
 	//

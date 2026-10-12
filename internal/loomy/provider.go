@@ -19,6 +19,7 @@
 //
 //	实现：AuthDirExt / CredentialLoader(+Secret) / ErrorClassifier / ResetPolicyExt
 //	      **AccountColumnsExt / QuotaExt / LoginFlow / AdminExt / CredentialLifetimeExt**
+//	      **CandidateTierExt**（候选分档：免费额度优先，见 candidate_tier.go）
 //	不实现：JobExt / CredentialRefresher / RefreshSkewExt / SoftRateExt
 //	      / CredentialExpiryExt
 //
@@ -117,6 +118,12 @@ type Provider struct {
 
 	// loginMode 见 Config.LoginMode（已归一化：auto/sms/local）。
 	loginMode string
+
+	// tiers 候选分档的余额缓存（见 candidate_tier.go）。
+	//
+	// ⚠ 存在的**唯一理由**是"选号路径不能发网络请求"：核心在持有账号池锁时
+	// 调 CandidateTiers，那里只能读内存。缓存由异步刷新与 RefreshQuota 回填。
+	tiers *tierCache
 }
 
 // NewProvider 建一个 Loomy Provider（契约测试用的无依赖构造）。
@@ -192,6 +199,7 @@ func NewWithConfig(cfg Config) *Provider {
 		sms: NewSMSClient(cfg.SMSBaseURL, cfg.SMSAppID,
 			cfg.SMSAccessKeyID, cfg.SMSAccessKeySecret),
 		loginMode: normalizeLoginMode(cfg.LoginMode),
+		tiers:     newTierCache(),
 	}
 }
 
