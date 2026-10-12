@@ -21,7 +21,18 @@ import (
 func newPagedLog(t *testing.T, n int) *Log {
 	t.Helper()
 	l := New(filepath.Join(t.TempDir(), "h.json"), 30)
-	base := time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
+	// ⚠ 基准时间必须**相对现在**，不能写死日历日期。
+	//
+	// 这条日志有**保留期**（checkinlog.New 的第二个参数，本文件传 30 天）：
+	// 记录一旦超出保留期，load() 时就被裁掉。写死日期等于给测试装了一颗
+	// 定时炸弹 —— 日期一过保留期，total 变成 0，用例报出与主题毫不相干的
+	// 「total=0，期望 N」。
+	//
+	// 实测：2026-09-11 这个固定基准在 2026-10-12 起开始失败，
+	// 而 CI 在两天前（2026-10-10）还是绿的 —— 同一次提交、不同日期、不同结果。
+	//
+	// 回退 2 小时足够：本文件最多 40 条、每条相隔 1 分钟（共 40 分钟）。
+	base := time.Now().Add(-2 * time.Hour)
 	for i := 0; i < n; i++ {
 		kind := KindCheckin
 		if i%3 == 0 {
