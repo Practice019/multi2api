@@ -42,14 +42,32 @@ var (
 
 // AccountColumns 报 loomy 在账号池里要显示的列（有序）。
 //
-// # 为什么是这 8 列
+// # 为什么是这 9 列
 //
 //	上游 / 昵称 / UID   身份
-//	额度               积分网关查到的可用总额度（见 quota_ext.go）
+//	额度               积分网关查到的**可用总额度**（永久 + 每日，见 quota_ext.go）
+//	免费额度           **每日赠送**还剩多少 —— 会按自然日重置、不用就浪费的那部分
 //	状态               核心状态（正常/冷却/禁用/熔断），与上游无关
 //	Token 到期         走 CredentialLifetimeExt → 渲染成「永久」
 //	成功               通用计数器
 //	操作               行内动作（额度 / 禁用 / 移除…）
+//
+// # 「免费额度」这一列是用户点名要的
+//
+//	「账号管理里的 Loomy 上游，能不能再添加一列数据，用于显示这个账号的
+//	  免费额度还剩多少？」
+//
+// 它与「额度」列是**总数与子集**的关系，不是重复：
+//
+//	availableBalance = balance(永久) + dailyBalance(每日赠送)
+//
+// 而两者的行为完全不同 —— 每日赠送次日重置、不用就浪费，永久额度不会。
+// 所以"这个号还有多少"（额度列）与"这个号还有多少**会过期的**"（本列）
+// 是两个都要看的事实：前者决定能不能用，后者决定**该不该现在用它**。
+//
+// ⚠ 三态与「额度」列同一条纪律（见 AccountView.FreeQuota）：
+// 拿不到分项时显示 `—`，**不显示 0** —— 把"没查到"说成"已用完"会让用户
+// 以为账号正在烧永久积分。
 //
 // 刻意**不含**：
 //
@@ -68,6 +86,7 @@ func (p *Provider) AccountColumns() []string {
 		gateway.AccountColNickname,
 		gateway.AccountColUID,
 		gateway.AccountColQuota,
+		gateway.AccountColFreeQuota,
 		gateway.AccountColStatus,
 		gateway.AccountColTokenExpiry,
 		gateway.AccountColSuccess,

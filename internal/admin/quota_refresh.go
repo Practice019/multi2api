@@ -194,6 +194,12 @@ func toPoolQuota(q gateway.QuotaView) pool.QuotaView {
 		Kind:      q.Kind,
 		Remaining: q.Remaining,
 		HasData:   q.HasData,
+		// 「会按周期重置的那部分」（Loomy 的每日赠送）。
+		// ⚠ 两个字段**成对**搬：只搬 Free 不搬 FreeKnown 会让
+		// "拿不到分项"退化成"分项是 0"，界面显示「免费额度已用完」——
+		// 而那正是本列最容易骗人的形态（看起来完全合理）。
+		Free:      q.Free,
+		FreeKnown: q.FreeKnown,
 	}
 	if len(q.ByModel) > 0 {
 		// 深拷贝：pool 会把这份 map 存进 entry，之后可能被其它 goroutine 读。

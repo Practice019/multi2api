@@ -41,6 +41,7 @@ const (
 	AccountColNickname    = "nickname"     // 昵称
 	AccountColUID         = "uid"          // UID
 	AccountColQuota       = "quota"        // 额度
+	AccountColFreeQuota   = "free_quota"   // 免费额度（会按周期重置的那部分）
 	AccountColStatus      = "status"       // 状态（正常/冷却/禁用/熔断）
 	AccountColToken       = "token"        // Token（剩余有效期）
 	AccountColTokenExpiry = "token_expiry" // Token 到期（绝对值 + 相对时间）
@@ -84,9 +85,9 @@ func DefaultAccountColumns() []string {
 func IsKnownAccountColumn(id string) bool {
 	switch id {
 	case AccountColProvider, AccountColNickname, AccountColUID, AccountColQuota,
-		AccountColStatus, AccountColToken, AccountColTokenExpiry, AccountColCheckin,
-		AccountColWelfare, AccountColSuccess, AccountColBreaker, AccountColInFlight,
-		AccountColOps:
+		AccountColFreeQuota, AccountColStatus, AccountColToken, AccountColTokenExpiry,
+		AccountColCheckin, AccountColWelfare, AccountColSuccess, AccountColBreaker,
+		AccountColInFlight, AccountColOps:
 		return true
 	}
 	return false

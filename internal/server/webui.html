@@ -1264,6 +1264,35 @@ let loginProvider = '';
     return `<span class="mono">${esc(n)}</span>`;
   }
 
+  // freeQuotaCellHTML 「免费额度」单元格 —— **三态，且绝不说"已用完"**。
+  //
+  // # 语义（Loomy 的每日赠送）
+  //
+  // 上游的额度有两个并行账本，而它们是**包含**关系：
+  //
+  //	availableBalance = balance(永久) + dailyBalance(每日赠送)
+  //
+  // 所以「额度」列是总数，「免费额度」列是其中**会按自然日重置**的那部分 ——
+  // 不用就浪费。两列不是重复：前者说"还能不能跑"，后者说"该不该现在用它"。
+  //
+  // # 判据是"字段在不在"，不是"数是不是 0"
+  //
+  // 后端只在**真的拿到分项**时才下发 `free_quota`
+  //（见 admin.AccountView.FreeQuota 的三态契约），所以：
+  //
+  //	字段缺失   → `—`（这个上游不区分这一项 / 这次没读到）
+  //	0          → `0`（确实用完了）
+  //	N > 0      → `N`
+  //
+  // ⚠ 把缺失渲染成 0 会让用户读成「免费额度已用完、账号正在烧永久积分」——
+  // 一个**看起来完全合理但错误**的结论。这正是本列最容易骗人的形态，
+  // 与 quotaCellHTML 靠 has_data 区分"没查过 / 查到 0"是同一条纪律。
+  function freeQuotaCellHTML(a) {
+    const v = a && a.free_quota;
+    if (typeof v !== 'number') return '<span class="dim">—</span>';
+    return `<span class="mono">${esc(v)}</span>`;
+  }
+
   const hdr = () => KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
 
   function setDot(cls, txt) {
@@ -2434,6 +2463,12 @@ let loginProvider = '';
     nickname: { title: '昵称' },
     uid: { title: 'UID' },
     quota: { title: '额度', tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
+    free_quota: {
+      title: '免费额度',
+      tip: '会按自然日重置的那部分额度（Loomy 的每日赠送）还剩多少；不用就浪费，'
+        + '所以在它用完之前不该动永久积分。'
+        + '「—」表示这个上游不区分这一项、或这次没读到 —— 那不等于"已经用完"。',
+    },
     status: { title: '状态' },
     token: { title: 'Token' },
     token_expiry: {
@@ -2887,6 +2922,7 @@ let loginProvider = '';
       nickname: `<td title="${esc(a.nickname || '')}">${esc(maskNick(a.nickname))}</td>`,
       uid: `<td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>`,
       quota: `<td data-quota-uid="${esc(U)}" title="额度「—」表示还没探测过（与额度为 0 是两件事）">${quotaCellHTML(a)}</td>`,
+      free_quota: `<td data-free-quota-uid="${esc(U)}">${freeQuotaCellHTML(a)}</td>`,
       status: `<td data-status-uid="${esc(U)}">${st}</td>`,
       token: `<td>${tok}</td>`,
       token_expiry: `<td>${tokenExpiryCellHTML(a)}</td>`,
@@ -7131,11 +7167,12 @@ let multCatalogFailed = false;
   //
   //   1. 每 30 秒取一次 /admin/accounts —— 本地 JSON，**无上游调用**
   //     （上游额度由服务端周期性刷新，客户端只读它的缓存视图）
-  //   2. 用 `data-quota-uid` / `data-status-uid` 定位单元格
+  //   2. 用 `data-quota-uid` / `data-free-quota-uid` / `data-status-uid` 定位单元格
   //   3. 文本没变就不碰；变了才替换该单元格 —— 表格行/面板/导航全部原样
   //
   // 覆盖的数值（理性判断"哪些需要实时"）：
   //   - 额度：本号/上游随时变，最该实时
+  //   - 免费额度：与额度同源（同一次刷新一起回来），且它决定"该不该现在用这个号"
   //   - 状态：冷却/熔断/恢复切换（含主动健康检查的提前恢复），运营最关心
   //   其余（成功数/Token 到期）变化频率低，手动刷新足够，不纳入。
   //
@@ -7165,6 +7202,8 @@ let multCatalogFailed = false;
       const key = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(a.uid)) : String(a.uid);
       const cell = document.querySelector(`td[data-quota-uid="${key}"]`);
       if (cell) diffCell(cell, quotaCellHTML(a));
+      const fqCell = document.querySelector(`td[data-free-quota-uid="${key}"]`);
+      if (fqCell) diffCell(fqCell, freeQuotaCellHTML(a));
       const stCell = document.querySelector(`td[data-status-uid="${key}"]`);
       if (stCell) diffCell(stCell, statusCellHTML(a));
     }

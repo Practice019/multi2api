@@ -66,6 +66,25 @@ type QuotaView struct {
 	//   HasData=true + Remaining=0 → 查过了，确实没额度
 	// 混为一谈会让新账号在选号时被永久降权。
 	HasData bool `json:"has_data,omitempty"`
+
+	// Free 会**按周期重置**的那部分额度（Loomy 的「每日赠送」）。
+	//
+	// ⚠ 它是 Remaining 的**子集**，不是"另一种 Kind"：
+	// Loomy 的 availableBalance = 永久 + 每日，所以「额度」是总数，
+	// 「免费额度」是其中会过期的那部分。两者**都要给用户看**。
+	//
+	// 三态由 FreeKnown 表达（与 HasData 同一条纪律）：
+	//
+	//	FreeKnown=false        → 上游不区分 / 这次没查到 → 界面 `—`
+	//	FreeKnown=true, Free=0 → 确实用完了
+	//	FreeKnown=true, Free>0 → 还剩 N
+	//
+	// 不支持分项的上游保持零值即可，行为与改造前逐字节相同。
+	// 语义与 gateway.QuotaView.Free 完全一致（那一侧是真相来源，这里只是存）。
+	Free int64 `json:"free,omitempty"`
+
+	// FreeKnown 上面那个 Free 是不是真的拿到了（见 Free 的说明）。
+	FreeKnown bool `json:"free_known,omitempty"`
 }
 
 // 额度形态常量。

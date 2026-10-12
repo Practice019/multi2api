@@ -641,6 +641,23 @@ type AccountView struct {
 	// 混用一个 kind 会让 codearts 被渲染成"已签到"——它根本没有签到端点。
 	TodayWelfare   string `json:"today_welfare,omitempty"`
 	TodayWelfareAt int64  `json:"today_welfare_at,omitempty"`
+
+	// FreeQuota 会**按周期重置**的那部分额度还剩多少（Loomy 的「每日赠送」）。
+	//
+	// # 契约（三态，与「额度」列同一条纪律）
+	//
+	//	字段缺失        → 该上游不区分 / 这次没查到 → 界面 `—`
+	//	指向 0          → 确实用完了
+	//	指向 N > 0      → 还剩 N
+	//
+	// ⚠ 用**指针**而不是 int64：后者的零值无法与"没有这个信息"区分，
+	// 而这两件事在界面上必须长得不一样 —— 把"没查到"显示成 0 会让用户
+	// 得出「免费额度已用完、正在烧永久积分」这个**看起来完全合理但错误**的
+	// 结论。（与 TokenExpireSec 用指针是同一条判据。）
+	//
+	// 来源：`pool.Status.Quota` 的 Free/FreeKnown ——
+	// 即上游通过 `QuotaExt.RefreshQuota` 报上来的那部分。
+	FreeQuota *int64 `json:"free_quota,omitempty"`
 }
 
 // credentialExpiryOf 问**拥有这份凭证的上游**：它什么时候过期。
@@ -775,6 +792,17 @@ func (h *Handler) accountViews() []AccountView {
 	out := make([]AccountView, 0, len(list))
 	for _, st := range list {
 		v := AccountView{Status: st}
+		// 「免费额度」列的数据源：池里那份额度视图的分项。
+		//
+		// ⚠ 只在**上游真的报过分项**（FreeKnown）时才取址 —— 否则留 nil
+		// ⇒ 字段不进 JSON ⇒ 前端显示 `—`。
+		// 无条件取址会把"该上游不区分这个分项"渲染成一个确定的 `0`
+		//（读作「免费额度已用完，正在烧永久积分」）—— 那是把未知说成事实，
+		// 也正是这一列最容易骗人的形态（它看起来完全合理）。
+		if st.Quota.FreeKnown {
+			free := st.Quota.Free
+			v.FreeQuota = &free
+		}
 		if a := h.cfg.Pool.AuthByUID(st.UID); a != nil {
 			v.HasToken = a.AccessToken != ""
 			// ⚠ 只在**上游真的给了**过期时间（ExpiresAt > 0）时才填指针。
