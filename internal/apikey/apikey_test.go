@@ -19,7 +19,7 @@ func newTestStore(t *testing.T) *Store {
 // TestCreateValidateBump 生命周期：创建 → 校验通过 → 记用量 → 额度用尽拒绝。
 func TestCreateValidateBump(t *testing.T) {
 	s := newTestStore(t)
-	k, err := s.Create("test-app", 100, 0)
+	k, err := s.Create("test-app", 100, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestCreateValidateBump(t *testing.T) {
 // TestValidateDisabled 禁用后拒绝（401 语义）。
 func TestValidateDisabled(t *testing.T) {
 	s := newTestStore(t)
-	k, _ := s.Create("a", 0, 0)
+	k, _ := s.Create("a", 0, 0, nil)
 	if _, err := s.Toggle(k.ID, false); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestValidateUnknown(t *testing.T) {
 // TestRateLimit RPM 上限（429 语义）。
 func TestRateLimit(t *testing.T) {
 	s := newTestStore(t)
-	k, _ := s.Create("rpm", 0, 3)
+	k, _ := s.Create("rpm", 0, 3, nil)
 	for i := 0; i < 3; i++ {
 		if _, err := s.Validate(k.ID); err != nil {
 			t.Fatalf("第 %d 次应通过: %v", i+1, err)
@@ -81,7 +81,7 @@ func TestPersistReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, _ := s.Create("persist", 50, 0)
+	k, _ := s.Create("persist", 50, 0, nil)
 	s.BumpUsage(k.ID, 30, true)
 	s.Toggle(k.ID, false)
 
@@ -104,7 +104,7 @@ func TestPersistReload(t *testing.T) {
 // TestDeleteReset 删除与重置。
 func TestDeleteReset(t *testing.T) {
 	s := newTestStore(t)
-	k, _ := s.Create("d", 10, 0)
+	k, _ := s.Create("d", 10, 0, nil)
 	s.BumpUsage(k.ID, 5, true)
 	if err := s.Reset(k.ID); err != nil {
 		t.Fatal(err)

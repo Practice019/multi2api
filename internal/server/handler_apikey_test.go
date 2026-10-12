@@ -69,7 +69,7 @@ func TestAPIKeyAdminKeyCompat(t *testing.T) {
 // TestAPIKeyStoreAuthAndUsage 普通 key 通过且用量被记录。
 func TestAPIKeyStoreAuthAndUsage(t *testing.T) {
 	store := newAPIKeyStore(t)
-	k, err := store.Create("app-1", 100000, 0)
+	k, err := store.Create("app-1", 100000, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestAPIKeyStoreAuthAndUsage(t *testing.T) {
 // TestAPIKeyQuotaExhausted 额度用尽 → 402。
 func TestAPIKeyQuotaExhausted(t *testing.T) {
 	store := newAPIKeyStore(t)
-	k, _ := store.Create("tiny", 5, 0)
+	k, _ := store.Create("tiny", 5, 0, nil)
 	store.BumpUsage(k.ID, 5, true) // 直接用完
 	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
 	h := NewHandler(Config{
@@ -121,7 +121,7 @@ func TestAPIKeyQuotaExhausted(t *testing.T) {
 // TestAPIKeyDisabled 禁用 → 401。
 func TestAPIKeyDisabled(t *testing.T) {
 	store := newAPIKeyStore(t)
-	k, _ := store.Create("off", 0, 0)
+	k, _ := store.Create("off", 0, 0, nil)
 	store.Toggle(k.ID, false)
 	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
 	h := NewHandler(Config{
@@ -141,7 +141,7 @@ func TestAPIKeyDisabled(t *testing.T) {
 // TestAPIKeyRateLimit RPM 超限 → 429。
 func TestAPIKeyRateLimit(t *testing.T) {
 	store := newAPIKeyStore(t)
-	k, _ := store.Create("burst", 0, 2)
+	k, _ := store.Create("burst", 0, 2, nil)
 	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),

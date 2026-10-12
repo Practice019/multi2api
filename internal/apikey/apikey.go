@@ -55,6 +55,25 @@ type Key struct {
 	Fails     int64  `json:"fails"`      // 失败请求数
 	RPM       int    `json:"rpm"`        // 每分钟请求上限，0 = 不限
 	CreatedAt string `json:"created_at"` // RFC3339
+
+	// Models 这把 key **允许调用的模型白名单**（空 = 不限制，全部可用）。
+	//
+	// # 语义（三态，与其它"空值"判据分开）
+	//
+	//	nil / 空切片 → 不限制（既有 key 与新建时不填，都是这个状态）
+	//	非空         → 只允许列表里的模型；其余一律 403
+	//
+	// ⚠ 「空 = 不限制」而不是「空 = 一个都不许」是刻意的：那把**所有既有的
+	// key** 以及"没想过要限制"的新 key 都变成不可用 —— 一次升级把所有调用方
+	// 打死。要"一个都不许"的正确表达是禁用这把 key（Enabled=false）。
+	//
+	// # 匹配口径：按**裸模型名**比
+	//
+	// 客户端发来的名字可能是 `glm-5.2`（裸名，走默认上游）或
+	// `workbuddy/glm-5.2`（带上游前缀）。两者是**同一个模型**，
+	// 所以比对时都剥掉上游前缀再比（见 ModelAllowed）。
+	// 于是用户填 `glm-5.2` 就同时放行了两种写法，不需要他填两遍。
+	Models []string `json:"models,omitempty"`
 }
 
 // View 列表/管理端点的对外形态。
@@ -72,6 +91,8 @@ type View struct {
 	Fails     int64  `json:"fails"`
 	RPM       int    `json:"rpm"`
 	CreatedAt string `json:"created_at"`
+	// Models 模型白名单（空 = 不限制）。管理界面据此展示"这把 key 能用什么"。
+	Models []string `json:"models,omitempty"`
 }
 
 // Store 是 API key 的进程内权威 + JSON 持久化。
@@ -139,8 +160,8 @@ func (s *Store) saveLocked() error {
 	return os.Rename(tmp, s.path)
 }
 
-// Create 新建一把 key。limit=0 不限额度；rpm=0 不限速。
-func (s *Store) Create(name string, limit int64, rpm int) (*Key, error) {
+// Create 新建一把 key。limit=0 不限额度；rpm=0 不限速；models 为空则不限制模型。
+func (s *Store) Create(name string, limit int64, rpm int, models []string) (*Key, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("名称不能为空")
@@ -156,6 +177,7 @@ func (s *Store) Create(name string, limit int64, rpm int) (*Key, error) {
 		Enabled:   true,
 		Limit:     limit,
 		RPM:       rpm,
+		Models:    normalizeModels(models),
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
 	s.keys[k.ID] = k
@@ -165,6 +187,67 @@ func (s *Store) Create(name string, limit int64, rpm int) (*Key, error) {
 	}
 	return k, nil
 }
+
+// normalizeModels 规整白名单：去空白、丢空项、去重（保序）。
+//
+// 返回 nil（而不是空切片）表示"不限制"。这一步是**必要的**而不是洁癖：
+// 用户在输入框里多打一个回车、或从邮件里复制带空格的模型名，都会产出
+// `["glm-5.2", ""]` —— 若原样存下，`len(models) > 0` 会让这把 key
+// 变成"受限制"，而白名单里那个空串永远匹配不上任何模型。
+// 后果是"我明明留空了却全都不许用"，极难往"多打了一个回车"上想。
+func normalizeModels(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range in {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out
+}
+
+// ModelsOf 返回一把 key 的模型白名单，以及这把 key 是否存在。
+//
+// 空切片 = 不限制。调用方（出口层）用它做准入判断 —— 见 ModelAllowed。
+func (s *Store) ModelsOf(id string) ([]string, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, false
+	}
+	// 返回副本：调用方不该拿到内部切片（它能 append 到我们的底层数组上）。
+	if len(k.Models) == 0 {
+		return nil, true
+	}
+	out := make([]string, len(k.Models))
+	copy(out, k.Models)
+	return out, true
+}
+
+// ⚠ 本包**没有** ModelAllowed —— 那是出口层的事，理由见下。
+//
+// # 为什么"模型名怎么比"不属于本包（架构守卫逼出来的结论）
+//
+// 我第一版把 ModelAllowed 写在这里，内部调 `gateway.SplitModel` 复用选路的
+// 边界。结果**架构守卫当场抓住**：
+//
+//	import 了 gateway 的包会被 discoverUpstreams 当成**上游实现**，
+//	于是核心（admin / server）依赖本包 = 「核心依赖上游」= 判据 1 违规
+//
+// 我第二版想退一步：在本包写一份"最保守的近似"（按最后一个 '/' 切）。
+// 那更糟 —— 它会在"模型名本身含 '/'"时与选路**分叉**，而分叉的表现是
+// "白名单认的模型"与"请求会路由到的模型"不是同一个东西，
+// 于是偶尔 403 一个看起来完全合法的请求。同一个判据两份实现，必然出事。
+//
+// 所以：**本包只负责存**（Models/ModelsOf/normalize），
+// **怎么比**只有一份，在 internal/server/apikey_models.go（那一层认识 gateway）。
 
 // List 返回全部 key 的掩码视图（按创建时间排序）。
 func (s *Store) List() []View {
@@ -191,6 +274,7 @@ func (s *Store) List() []View {
 			Fails:     k.Fails,
 			RPM:       k.RPM,
 			CreatedAt: k.CreatedAt,
+			Models:    append([]string(nil), k.Models...),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
@@ -227,10 +311,30 @@ func (s *Store) Delete(id string) error {
 	return s.saveLocked()
 }
 
-// Update 修改一把 key 的额度上限与限速（0 = 不限）。不存在返回 ErrUnknown。
-func (s *Store) Update(id string, limit int64, rpm int) error {
-	if limit < 0 || rpm < 0 {
-		return errors.New("额度/限速不能为负数")
+// Update 修改一把 key 的额度上限、限速与模型白名单。不存在返回 ErrUnknown。
+//
+// # 每个字段都是三态（`nil` = **不改**）
+//
+//	limit  == nil       → 不改额度；指向 0 → 不限；指向 N → 上限 N
+//	rpm    == nil       → 不改限速；指向 0 → 不限；指向 N → N 次/分
+//	models == nil       → **不改**白名单（字段缺失 / 显式 null）
+//	models == []string{}→ **清空**白名单 = 恢复不限制
+//	models 非空         → 设为这份白名单
+//
+// ⚠ 为什么数字也要指针：前端有**两类提交** ——
+//
+//	「改配额」只带 limit/rpm     「改模型」只带 models
+//
+// 若把"缺失"当成"设为 0"，第一次改模型就会把额度上限**清零**；
+// 反过来若把 models 的缺失当成"清空"，改一次配额就把模型限制**静默解开**。
+// 两条都是"用户没动过的字段被悄悄改掉"，而界面上看不出任何异常。
+// 与 settings 里"漏带字段 = 重置"同型（本仓在 disabledModels 上踩过）。
+func (s *Store) Update(id string, limit *int64, rpm *int, models []string) error {
+	if limit != nil && *limit < 0 {
+		return errors.New("额度不能为负数")
+	}
+	if rpm != nil && *rpm < 0 {
+		return errors.New("限速不能为负数")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,8 +342,15 @@ func (s *Store) Update(id string, limit int64, rpm int) error {
 	if !ok {
 		return ErrUnknown
 	}
-	k.Limit = limit
-	k.RPM = rpm
+	if limit != nil {
+		k.Limit = *limit
+	}
+	if rpm != nil {
+		k.RPM = *rpm
+	}
+	if models != nil {
+		k.Models = normalizeModels(models)
+	}
 	return s.saveLocked()
 }
 
