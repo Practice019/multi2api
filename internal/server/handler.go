@@ -1315,6 +1315,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// serverRetryExtra 次换号机会（实测场景：讯飞网关抖动数秒，
 	// 池里 11 个健康号，旧行为试 3 个就回 503）。
 	maxAttempts := h.cfg.MaxRotate
+	// tierOffset 重试时逐次**下沉档位**（对标 new-api 的 retry→降档：
+	// GetRandomSatisfiedChannel 用 retry 直接索引优先级档，见 model/channel_cache.go）。
+	//
+	// 只在上游 5xx（ErrKindServer）时下沉：那类错误说明"这一档现在整体不可用"
+	// （上游网关抖 / 该批号被限流），换档才有意义；而 4xx（请求本身的问题）
+	// 换到哪一档都一样失败，下沉只会白烧低档号。
+	tierOffset := 0
 	for i := 0; i < maxAttempts; i++ {
 		// 选号：粘性号优先（已校验 **provider + health + 在途未满**），否则普通轮换。
 		//
@@ -1340,7 +1347,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 按 (上游, 模型) 选号：只在该上游的账号里挑，
 			// 绝不让 codearts 的请求落到 workbuddy 的账号上。
 			// reqProvider 为空（单上游模式 / 裸模型名）时池子按默认上游解释。
-			acct = h.cfg.Pool.PickFor(reqProvider, reqModel, tried)
+			acct = h.cfg.Pool.PickForTier(reqProvider, reqModel, tried, tierOffset)
 		}
 		if acct == nil {
 			// ⚠ 出口语义（用户实测 503 的真正来源）：
@@ -1533,8 +1540,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// "codearts 号被裸数字 12153 永久禁用"两条真危害。
 			kind := h.classifyErr(reqProvider, status, respBody)
 			lastKind = kind
-			if kind == gateway.ErrKindServer && maxAttempts < h.cfg.MaxRotate+serverRetryExtra {
-				maxAttempts++
+			if kind == gateway.ErrKindServer {
+				if maxAttempts < h.cfg.MaxRotate+serverRetryExtra {
+					maxAttempts++
+				}
+				// 上游还在抖 → 下一轮沉降一档（先用免费额度那档、再往永久额度沉），
+				// 而不是在同一档里把号反复试一遍。
+				tierOffset++
 			}
 			lastErr = &chatError{
 				Kind:   kind,

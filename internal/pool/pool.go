@@ -1020,6 +1020,24 @@ func (p *Pool) PickFor(provider, model string, tried map[string]bool) *auth.Auth
 	return p.pickFor(provider, tried, model)
 }
 
+// PickForTier 按上游 + 模型 + **档位偏移**选号（对标 new-api 的 retry→降档）。
+//
+// # 为什么需要它（new-api 的核心机制，我们此前缺的就是这个）
+//
+// new-api 的 `GetRandomSatisfiedChannel(group, model, retry)` 里，retry 不是
+// "换一个同档的渠道"，而是**直接决定用第几档优先级**：
+//
+//	retry=0 → 最高优先级那一档；retry=1 → 次高档；…（见 model/channel_cache.go:161-170）
+//
+// 于是"重试"天然会**逐层下沉**，不会反复在最高档里打转。我们的旧实现只有
+// `tried`（排除试过的号），档位恒为最高档 —— 重试仍可能砸在同一批高热号上。
+//
+// tierOffset：0 = 最高档（默认，行为与 PickFor 相同）；1 = 次高档；以此类推。
+// 超出档位总数时钳到最低档（而不是返回 nil —— 让调用方还能拿到号去试）。
+func (p *Pool) PickForTier(provider, model string, tried map[string]bool, tierOffset int) *auth.Auth {
+	return p.pickForTier(provider, tried, model, tierOffset)
+}
+
 // PickForExcluding 按上游选号（无模型上下文）。见 PickFor。
 func (p *Pool) PickForExcluding(provider string, tried map[string]bool) *auth.Auth {
 	return p.pickFor(provider, tried, "")
@@ -1043,6 +1061,12 @@ func (p *Pool) pick(tried map[string]bool, model string) *auth.Auth {
 // provider 为空 → 归一成默认上游。这样"未打标签的账号"与
 // "显式指定默认上游"落到同一个候选集，向后兼容由此成立。
 func (p *Pool) pickFor(provider string, tried map[string]bool, model string) *auth.Auth {
+	return p.pickForTier(provider, tried, model, 0)
+}
+
+// pickForTier 是 pickFor 的档位感知版本：候选先按上游/健康/在途过滤，
+// 再由 CandidateTierExt 分档，**按 tierOffset 选档**后在该档内加权随机。
+func (p *Pool) pickForTier(provider string, tried map[string]bool, model string, tierOffset int) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -1102,24 +1126,43 @@ func (p *Pool) pickFor(provider string, tried map[string]bool, model string) *au
 			}
 		}
 		if tiers := ranker(want, model, uids); len(tiers) > 0 {
-			best, found := 0, false
+			// ① 收集候选实际拥有的档位并升序（数字小 = 优先）。
+			//
+			//   ⚠ 只对**本批候选里真实存在的档位**排序 —— 不是"0..N 连续枚举"：
+			//   loomy 的档位是 0/1/2 三档，别的上游可能只有两档，按存在值排序
+			//   才能让 tierOffset 在各上游语义一致（"下沉一层"而不是"跳到某个数字"）。
+			seen := map[int]bool{}
 			for _, e := range cands {
 				if e.a == nil {
 					continue
 				}
 				if t, ok := tiers[e.a.UID]; ok {
-					if !found || t < best {
-						best, found = t, true
-					}
+					seen[t] = true
 				}
 			}
-			if found {
+			levels := make([]int, 0, len(seen))
+			for t := range seen {
+				levels = append(levels, t)
+			}
+			sort.Ints(levels)
+			// ② 按偏移取档；越界钳到最低档（对标 new-api 的
+			//    `if retry >= len(uniquePriorities) { retry = len-1 }`，见
+			//    model/channel_cache.go:161-163 —— 同样选择"钳到底"而非返回空）。
+			idx := tierOffset
+			if idx < 0 {
+				idx = 0
+			}
+			if idx >= len(levels) {
+				idx = len(levels) - 1
+			}
+			if len(levels) > 0 {
+				pickTier := levels[idx]
 				kept := make([]*entry, 0, len(cands))
 				for _, e := range cands {
 					if e.a == nil {
 						continue
 					}
-					if t, ok := tiers[e.a.UID]; ok && t == best {
+					if t, ok := tiers[e.a.UID]; ok && t == pickTier {
 						kept = append(kept, e)
 					}
 				}
@@ -1374,37 +1417,67 @@ func (p *Pool) pickWeighted(cands []*entry, model string) *entry {
 //
 // model 非空时额度项取该模型的可用量（EffectiveFor），与 maxCredits 的口径保持一致。
 func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time, model string) float64 {
+	// ⚠ 额度**不再参与选号**（对标 new-api：它的渠道选择只看 priority + 人工 weight，
+	// 余额只用于展示与自动禁用）。
+	//
+	// # 为什么必须把额度赶出去（实测数据）
+	//
+	// 旧实现是"额度占比×10 + 闲置补偿(≤5) + 成功率×3"，额度一项跨度就是 10 分，
+	// 另两项加起来最多 8 分 —— 于是加权随机实际退化成"额度高的号反复被选中"。
+	// 实测（11 个 loomy 号，2 小时窗口）：最高的号吃 10 次，最低的只 1 次，
+	// 6 并发实验里 4 个号完全没被用到。
+	//
+	// 更糟的是**方向**：`quotaFor` 对 loomy 返回 availableBalance = 永久 + 免费，
+	// 于是"永久积分多"的号权重最高 —— 与用户明确要求的
+	// 「先用完所有号的免费额度、别动永久积分」正好相反。
+	//
+	// # 现在只保留两个**防退化**因子（都是小幅修正，不主导）
+	//
+	//	成功率：把连续失败的号自然降权（最多 1.0，即 2 倍于基准）
+	//	闲置  ：从未被选中/久未使用的号略微优先（最多 1.0）
+	//
+	// 基准权重恒为 1.0 —— 于是"所有号都没记录"时退化为**完全等概率随机**，
+	// 这正是 new-api 的默认行为（weight 全 0 → 每渠道等权）。
+	// 额度分档（CandidateTierExt）仍在外层决定"先用哪一档"，
+	// 那是**跨档硬隔离**，与本函数的档内选号是两件事。
 	w := 1.0
 
-	// 1. 额度比例 ×10（会计入 mid-credit 锚点，避免全员 0 时该项为 0）。
-	if maxCredits > 0 {
-		w += float64(e.quotaFor(model)) / float64(maxCredits) * 10
-	}
-
-	// 2. 闲置补偿。
-	if e.lastUsed.IsZero() {
-		w += p.idleWeightMax // 从未使用 → 满分
-	} else {
-		hours := now.Sub(e.lastUsed).Hours()
-		idleW := hours * p.idleWeightPerHour
-		if idleW > p.idleWeightMax {
-			idleW = p.idleWeightMax
-		}
-		if idleW < 0 {
-			idleW = 0 // lastUsed 在未来（时钟回拨）时钳 0
-		}
-		w += idleW
-	}
-
-	// 3. 成功率 ×3。
+	// 1) 成功率修正：范围 [0, 1] —— 全失败降到 1.0 基准以下不可能，
+	//    但能显著低于"全成功"的 2.0 上限。
 	totalReq := e.successCount + e.errTotal
 	if totalReq > 0 {
-		w += float64(e.successCount) / float64(totalReq) * 3
+		w += float64(e.successCount) / float64(totalReq)
 	} else {
-		w += 1.5 // 无请求记录 → 中性偏信任
+		w += 0.5 // 无记录 → 中性偏信任（等权基准）
 	}
+
+	// 2) 闲置修正：范围 [0, 1]，按"距上次被选中的时长"线性给分。
+	if e.lastUsed.IsZero() {
+		w += 1.0 // 从未用过：满额优先（新号快速摊平）
+	} else {
+		idleHours := now.Sub(e.lastUsed).Hours()
+		idle := idleHours / idleWeightFullHours
+		if idle > 1 {
+			idle = 1
+		}
+		if idle < 0 {
+			idle = 0 // 时钟回拨时钳 0
+		}
+		w += idle
+	}
+	_ = maxCredits // 保留参数签名：额度已退出选号，调用方仍传（避免大改调用点）
+	_ = model
 	return w
 }
+
+// idleWeightFullHours 闲置修正达到满额所需的时长。
+//
+// ⚠ 从 30 分钟调到 2 小时（实测依据）：30 分钟窗口下"1 小时前用过"的号
+// 已经拿满闲置补偿，于是它和"从未用过"的号权重完全相同（都是 2.5）——
+// 补偿实际失效，只剩成功率在起作用。2 小时让"刚刚用过"与"很久没用"
+// 拉出可见差距（单位时间斜率 = 0.5/小时），同时远大于一次对话的耗时
+// （实测 3–20s），不会造成两个号之间的来回抖动。
+const idleWeightFullHours = 2.0
 
 // SetQuota 更新账号额度视图（真相来源）。
 //
@@ -1533,7 +1606,15 @@ func (p *Pool) cooldownUntil(uid string, kind CoolKind, until time.Time, reason 
 	// → 随后因别的原因进入**账号级**冷却 → 但 exempt 判定仍看到
 	// softRateModel 非空 → 请求别的模型时被错误豁免，继续撞账号级故障。
 	e.softRateModel = ""
-	p.recordBreakerFailureLocked(e) // 冷却入口也是熔断器的失败信号
+	// ⚠ 软限流**不喂**熔断计数器（本轮修正：注释与实现不一致的真 bug）。
+	//
+	// 旧实现这里无条件 recordBreakerFailureLocked，于是 429 与真正的病态失败
+	// 共用 e.fails —— 三次零散 429（哪怕横跨几小时、账号完全健康）就凑满
+	// breakerThreshold=3，把号封 30 分钟（retryCount>0 时还会倍增到 6h）。
+	// 用户侧观察到的症状正是"余额充足、响应正常的号突然消失半小时"。
+	//
+	// 软限流有自己的升级线：softStreak → softDurationLocked 指数退避（封顶
+	// softRateMax），那才是限流的正确处置。熔断器只留 5xx/网络/会话失效。
 	p.dirty.Store(true)
 }
 
@@ -1625,7 +1706,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	e.until = now.Add(d)
 	e.coolKind = CoolSoft
 	e.reason = reason
-	p.recordBreakerFailureLocked(e)
+	// 模型级软限流同理不喂熔断（见 cooldownUntil 的说明）。
 	p.dirty.Store(true)
 }
 

@@ -104,7 +104,14 @@ func TestCandidateRankerKeepsAllWithinSameTier(t *testing.T) {
 	p.SetDefaultProvider("loomy")
 	p.SyncToDirFor("loomy", []*auth.Auth{{UID: "u1"}, {UID: "u2"}, {UID: "u3"}})
 
-	// 三者同档（都 0 档），但额度差 6 个数量级 ⇒ 加权选号应明显偏向 u3。
+	// 三者同档（都 0 档），额度差 6 个数量级 —— 但**额度不参与档内选号**
+	// （对标 new-api：选号只看 priority + 权重，余额不参与）。
+	//
+	// ⚠ 语义变更（本轮）：旧断言是"高额度应占明显多数"，那正是用户实测报的
+	// 多账号轮询问题 —— 额度项 ×10 的跨度压过闲置(≤5)与成功率(≤3)，
+	// 加权随机退化成"额度高的号反复被选中"（11 个号实测 10:1 偏斜，
+	// 6 并发里 4 个号完全没被用到）。新版额度退出档内权重，
+	// 于是同档内退化为**近似等概率**（仅剩成功率/闲置的小幅修正）。
 	p.SetQuota("u1", FromCredits(1))
 	p.SetQuota("u2", FromCredits(1))
 	p.SetQuota("u3", FromCredits(1_000_000))
@@ -120,12 +127,26 @@ func TestCandidateRankerKeepsAllWithinSameTier(t *testing.T) {
 		}
 		picks[a.UID]++
 	}
-	if picks["u3"] < n*2/3 {
-		t.Errorf("高额度账号应占明显多数（至少 %d/%d），实际分布 %v。\n"+
-			"同档内**不得**被收窄候选集 —— 那会把既有的加权选号退化成"+
-			"「随机挑一个 map 里排第一的」，既有的负载均衡随之失效。",
-			n*2/3, n, picks)
+	// 同档三个号必须都被用到，且没有谁占绝对多数（各占 1/3 上下）。
+	for _, uid := range []string{"u1", "u2", "u3"} {
+		if picks[uid] == 0 {
+			t.Errorf("同档账号 %s 一次都没被选中 —— 轮询退化成偏斜：%v", uid, picks)
+		}
 	}
+	if max := maxOf(picks); max > n*7/10 {
+		t.Errorf("同档内单个账号占比过高（%d/%d），额度不应再主导档内选号：%v", max, n, picks)
+	}
+}
+
+// maxOf 取 map 最大值（测试内小工具）。
+func maxOf(m map[string]int) int {
+	best := 0
+	for _, v := range m {
+		if v > best {
+			best = v
+		}
+	}
+	return best
 }
 
 // ranker 传 nil（本部署没有分档能力）⇒ 行为与改造前**完全一致**。
