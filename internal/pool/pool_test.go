@@ -23,15 +23,17 @@ func withNoPickGap(t *testing.T) {
 
 func TestPickHighestCredits(t *testing.T) {
 	withNoPickGap(t)
-	// 三因子加权（credits 比例×10 + 闲置 + 成功率）：积分悬殊时高积分账号应被多数选中，
-	// 但不再像纯 credits 加权那样接近 99%（闲置补偿 + 成功率中性 1.5 拉平了基线）。
+	// ⚠ 语义变更（对标 new-api）：额度**不参与**档内选号。
+	//
+	// 旧断言"高积分账号应被多数选中"钉的正是用户实测报障的那个行为：
+	// 额度项 ×10 压过闲置(≤5)+成功率(≤3)，加权随机退化成额度排序
+	// （11 个 loomy 号实测 10:1 偏斜、6 并发里 4 个号完全没被用到）。
+	//
+	// 新语义：积分悬殊时三者也应被**均匀轮询**（只剩成功率/闲置的小幅修正）。
 	p := New("")
-	a1 := &auth.Auth{UID: "u1"}
-	a2 := &auth.Auth{UID: "u2"}
-	a3 := &auth.Auth{UID: "u3"}
-	p.Add(a1)
-	p.Add(a2)
-	p.Add(a3)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.Add(&auth.Auth{UID: "u3"})
 	p.SetCredits("u1", 100)
 	p.SetCredits("u2", 50000)
 	p.SetCredits("u3", 300)
@@ -39,11 +41,15 @@ func TestPickHighestCredits(t *testing.T) {
 	for i := 0; i < 3000; i++ {
 		counts[p.Pick().UID]++
 	}
-	if counts["u2"] <= counts["u1"] || counts["u2"] <= counts["u3"] {
-		t.Errorf("u2 (highest credits) should be picked most: %v", counts)
+	for _, uid := range []string{"u1", "u2", "u3"} {
+		if counts[uid] == 0 {
+			t.Errorf("账号 %s 一次都没被选中（额度不该主导选号）: %v", uid, counts)
+		}
+	}
+	if mx := maxOf(counts); mx > 3000*7/10 {
+		t.Errorf("单个账号占比过高（%d/3000），额度仍在主导选号: %v", mx, counts)
 	}
 }
-
 func TestPickSkipsCooling(t *testing.T) {
 	p := New("")
 	a1 := &auth.Auth{UID: "u1"}
@@ -116,30 +122,30 @@ func TestPickExcludingStaysWithinHealthy(t *testing.T) {
 	}
 }
 
-func TestPickWeightedSkewTowardHighCredits(t *testing.T) {
+func TestPickHasNoCreditsSkew(t *testing.T) {
 	withNoPickGap(t)
-	// Top5 三因子加权：单账号 credits 占比足够高时，多数挑中它。
+	// 对标 new-api：档内按**等权**选号（weight 全 0 → 每渠道等权），
+	// 额度不参与 —— 因此"积分最高者必然是最大赢家"这一旧契约被**有意**移除。
 	p := New("")
 	for _, u := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
 		p.Add(&auth.Auth{UID: u})
 		p.SetCredits(u, 1)
 	}
-	p.SetCredits("w1", 1000)
+	p.SetCredits("w1", 1000) // 积分高 1000 倍
 	counts := map[string]int{}
 	for i := 0; i < 5000; i++ {
 		counts[p.Pick().UID]++
 	}
-	mx, mxUID := 0, ""
-	for uid, n := range counts {
-		if n > mx {
-			mx, mxUID = n, uid
+	// 六个号必须全部被用到（旧的 top5 截断 + 额度权重会让低积分号饿死）。
+	for _, uid := range []string{"w1", "w2", "w3", "w4", "w5", "w6"} {
+		if counts[uid] == 0 {
+			t.Errorf("账号 %s 被饿死（轮询未覆盖全池）: %v", uid, counts)
 		}
 	}
-	if mxUID != "w1" {
-		t.Errorf("w1 (highest credits) should be picked most: %v", counts)
+	if mx := maxOf(counts); mx > 5000*6/10 {
+		t.Errorf("单个账号占比过高（%d/5000），额度仍在主导: %v", mx, counts)
 	}
 }
-
 func TestPickWeightedUniformWhenAllZero(t *testing.T) {
 	withNoPickGap(t)
 	// credits 全为 0 → 退化为均匀随机，不能只挑固定一个。
@@ -156,9 +162,13 @@ func TestPickWeightedUniformWhenAllZero(t *testing.T) {
 	}
 }
 
-func TestPickWeightedTopFiveOnly(t *testing.T) {
+func TestPickCoversWholePool(t *testing.T) {
 	withNoPickGap(t)
-	// 第 6 高 credits 的账号在 Top5 之外，权重抽签永远轮不到它。
+	// ⚠ 语义变更：旧实现按"额度权重"取 top5 短名单，低积分号永远进不了抽签池
+	// —— 那正是"轮询不覆盖全池"的成因之一。新实现额度退出权重，短名单按
+	// 等权+成功率/闲置排序，且候选多于 5 时仍只取前 5 —— 但**不再由额度决定谁进**。
+	//
+	// 本用例守的性质：池里 6 个号（积分悬殊）**都**必须有机会被选中。
 	p := New("")
 	for _, u := range []string{"a1", "a2", "a3", "a4", "a5", "a6"} {
 		p.Add(&auth.Auth{UID: u})
@@ -168,14 +178,19 @@ func TestPickWeightedTopFiveOnly(t *testing.T) {
 	p.SetCredits("a3", 1000)
 	p.SetCredits("a4", 1000)
 	p.SetCredits("a5", 1000)
-	p.SetCredits("a6", 5) // Top5 之外
-	for i := 0; i < 2000; i++ {
-		if got := p.Pick(); got == nil || got.UID == "a6" {
-			t.Fatalf("iter %d: picked %+v, a6 must stay outside top-5", i, got)
+	p.SetCredits("a6", 5)
+	seen := map[string]bool{}
+	for i := 0; i < 3000; i++ {
+		got := p.Pick()
+		if got == nil {
+			t.Fatalf("iter %d: Pick 返回 nil", i)
 		}
+		seen[got.UID] = true
+	}
+	if len(seen) != 6 {
+		t.Errorf("全池 6 个号都应被选中过，实际只覆盖 %d 个: %v", len(seen), seen)
 	}
 }
-
 func TestPickTopFiveBySuccessRateNotCredits(t *testing.T) {
 	withNoPickGap(t)
 	// C1 回归：top5 短名单必须按三因子权重（含成功率）而非纯 credits 截断。
@@ -227,22 +242,31 @@ func TestPickTopFiveByIdleNotCredits(t *testing.T) {
 	}
 }
 
+// TestPickDeterministicViaSetRandomSource 注入随机源 ⇒ 选号可确定复现。
+//
+// ⚠ 与轮询的关系（本轮语义变更后的边界）：注入**常量**随机源（恒 0）
+// 意味着"永远抽中累加权重第一段"，因此同一次会话里只会命中排在最前的号 ——
+// 这是注入源的性质，不能用来验证"轮询覆盖全池"。轮询覆盖由
+// TestPickCoversWholePool / TestPickHasNoCreditsSkew 用真实随机验证。
 func TestPickDeterministicViaSetRandomSource(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "u1"})
 	p.Add(&auth.Auth{UID: "u2"})
-	p.SetCredits("u1", 100)
-	p.SetCredits("u2", 50)
-	// r=0 ∈ [0,50) → 命中 u1。注入源应使选号完全确定。
+	// 用成功率造权重差（额度已退出权重）：u1 权重 3.0 > u2 的 2.0，
+	// 排序后 u1 在前 ⇒ 恒 0 的注入源每次都命中 u1（确定性）。
+	p.mu.Lock()
+	p.byUID["u1"].successCount = 10
+	p.byUID["u2"].errTotal = 10
+	p.mu.Unlock()
+
 	for i := 0; i < 50; i++ {
 		if got := p.Pick(); got == nil || got.UID != "u1" {
-			t.Fatalf("iter %d: pick=%+v want u1 (deterministic)", i, got)
+			t.Fatalf("iter %d: pick=%+v want u1（注入常量随机源时应确定命中）", i, got)
 		}
 	}
 }
-
 func TestPickAntiThunderingHerd(t *testing.T) {
 	// 100 goroutine 同时 Pick：防并发撞号窗口内同一账号不应被重复选中。
 	// credits 相同 → 无注入源时加权随机应天然打散；为保证稳定，全部置 0 走均匀随机。
@@ -1023,18 +1047,19 @@ func (p *Pool) entryWeight(uid string) float64 {
 	return p.weightOf(e, maxCredits, time.Now(), "")
 }
 
-func TestWeightHighCreditsDominates(t *testing.T) {
+func TestWeightIgnoresCredits(t *testing.T) {
+	// ⚠ 语义变更（对标 new-api）：额度**不参与**选号权重。
+	// 旧契约"high credits should weigh more"已移除 —— 见 TestPickHighestCredits 的说明。
 	p := New("")
 	p.Add(&auth.Auth{UID: "hi"})
 	p.Add(&auth.Auth{UID: "lo"})
 	p.SetCredits("hi", 1000)
 	p.SetCredits("lo", 10)
 	wHi, wLo := p.entryWeight("hi"), p.entryWeight("lo")
-	if wHi <= wLo {
-		t.Errorf("high credits should weigh more: hi=%v lo=%v", wHi, wLo)
+	if wHi != wLo {
+		t.Errorf("额度不该影响权重：hi=%v lo=%v（应相等）", wHi, wLo)
 	}
 }
-
 func TestWeightIdleCompensation(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "used"})

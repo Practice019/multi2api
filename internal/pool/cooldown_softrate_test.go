@@ -108,9 +108,18 @@ func TestSoftCooldownNeverNegativeFromOverflow(t *testing.T) {
 	if !st.Until.After(time.Now().Add(-time.Second)) {
 		t.Fatalf("冷却截止落在过去（%v）—— 左移溢出成负数了", st.Until)
 	}
-	// 也必须仍在冷却中（封顶是最小值，但不应被解读成"不冷"）。
-	if !st.Cooling {
-		t.Errorf("200 次连续软限流后仍在冷却中，得到 %+v", st)
+	// ⚠ 这里**不再**断言 Cooling=true（本轮语义修正）。
+	//
+	// 旧实现之所以"仍在冷却中"，是**借了熔断的力**：软冷却入口当时会顺带
+	// 喂熔断计数器，200 次调用早就把号熔断 30 分钟了 —— 那正是本轮修掉的
+	// bug（429 不该触发熔断，见 softrate_breaker_test.go）。
+	//
+	// 拆开之后真实语义是：本用例把封顶设成 1 纳秒，于是 200 次软限流后
+	// `until ≈ now + 1ns` —— **立刻就是过期时刻**，Cooling 自然为 false。
+	// 这是封顶值的正确表现，不是回归。溢出防护真正要守的是上一条断言：
+	// until 必须落在未来附近，而不是因左移溢出变成过去的时刻。
+	if st.Until.Sub(time.Now()) > time.Minute {
+		t.Errorf("封顶应钳到 softRateMax（1ns 量级），实得 %v", st.Until.Sub(time.Now()))
 	}
 }
 

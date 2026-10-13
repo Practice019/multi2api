@@ -179,10 +179,11 @@ func TestUsableDrivesReenable(t *testing.T) {
 // （两个账号各 50%），从而掩盖权重差异 —— 既有测试同样这样处理。
 func TestSelectionWeightUsesEffective(t *testing.T) {
 	withNoPickGap(t)
+	// ⚠ 语义变更（对标 new-api）：额度（含按模型形态）已退出选号权重。
+	// 本用例保留的价值：两种额度形态都能被池子正常收纳，且都**不再**改变概率。
 	p := New("")
 	p.Add(&auth.Auth{UID: "rich"})
 	p.Add(&auth.Auth{UID: "poor"})
-	// rich 用单值、poor 用按模型 —— 两种形态都要能进权重
 	p.SetQuota("rich", QuotaView{Kind: QuotaKindCredits, Remaining: 100000, HasData: true})
 	p.SetQuota("poor", QuotaView{Kind: QuotaKindPerModel, ByModel: map[string]int64{"m": 1}, HasData: true})
 
@@ -194,20 +195,13 @@ func TestSelectionWeightUsesEffective(t *testing.T) {
 		}
 		got[a.UID]++
 	}
-	if got["rich"] <= got["poor"] {
-		t.Errorf("高额度账号应更常被选中: rich=%d poor=%d", got["rich"], got["poor"])
+	if got["rich"] == 0 || got["poor"] == 0 {
+		t.Errorf("两个号都应被选中（额度不主导选号）: %+v", got)
+	}
+	if mx := maxOf(got); mx > 3000*7/10 {
+		t.Errorf("单号占比过高（%d/3000），额度仍在主导选号: %+v", mx, got)
 	}
 }
-
-// ---------------------------------------------------------------- 兼容层
-
-// TestLegacySetCreditsStillWorks 旧的 SetCredits / ReenableIfCredits 保留为薄封装。
-//
-// 为什么保留：**55 处测试调用点**依赖它们（46 处 pool_test + 6 处 handler_test + …）。
-// 全部改名会让这次提交淹没在噪音里，且增加回归风险。
-// 保留薄封装 = 零调用点改动，同时新代码用新 API。
-//
-// 这也是"向后兼容优先"的一贯做法：先让新的能用，再逐步迁移。
 func TestLegacySetCreditsStillWorks(t *testing.T) {
 	p := poolWithU1(t)
 	p.SetCredits("u1", 1234) // 旧 API

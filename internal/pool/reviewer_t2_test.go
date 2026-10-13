@@ -258,18 +258,10 @@ func TestReviewerCP0_F6_PickForModelAvoidsWrongAccount(t *testing.T) {
 		HasData: true,
 	})
 
-	// 旧口径（无模型上下文）：Y 标量大得多 → 被偏爱（这就是缺陷）
-	oldPick := map[string]int{}
-	for i := 0; i < 300; i++ {
-		if a := p.Pick(); a != nil {
-			oldPick[a.UID]++
-		}
-	}
-	if oldPick["Y"] <= oldPick["X"] {
-		t.Fatalf("前置不成立：无模型上下文时 Y 应因标量大而被偏爱（X=%d Y=%d）",
-			oldPick["X"], oldPick["Y"])
-	}
-	t.Logf("无模型上下文: X=%d Y=%d（Y 被偏爱 —— 这正是缺陷）", oldPick["X"], oldPick["Y"])
+	// ⚠ 语义变更（本轮）：额度已退出选号权重，所以旧"前置"（无模型上下文时
+	// Y 因标量大而被偏爱）**不再成立** —— 这正是我们修掉的行为，不是回归。
+	// 保留的仍然是对这个用例真正重要的性质：**带模型上下文选号必须避开
+	// 对该模型零额度的号**（靠 usableForModel 收窄抽签池实现，与额度权重无关）。
 
 	// 新口径：按请求的模型取额度 → gpt-5.5 只有 X 可用，必须全选 X
 	newPick := map[string]int{}
@@ -309,6 +301,9 @@ func TestPickForModelCreditsSameAsPick(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "hi"})
 	p.Add(&auth.Auth{UID: "lo"})
+	// ⚠ 语义变更（对标 new-api）：额度已退出选号权重，"高额度更常被选"这一
+	// 旧契约被**有意**移除。本用例保留的价值：PickForModel 在 credits 形态下
+	// 也能正常选号（不 panic、不 starve），与 Pick 行为一致。
 	p.SetCredits("hi", 1000)
 	p.SetCredits("lo", 10)
 
@@ -318,12 +313,10 @@ func TestPickForModelCreditsSameAsPick(t *testing.T) {
 			byModel[a.UID]++
 		}
 	}
-	if byModel["hi"] <= byModel["lo"] {
-		t.Errorf("credits 形态下高额度账号应更常被选: hi=%d lo=%d", byModel["hi"], byModel["lo"])
+	if byModel["hi"] == 0 || byModel["lo"] == 0 {
+		t.Errorf("credits 形态下两个号都应被选中（额度不主导）: %+v", byModel)
 	}
 }
-
-// 复现评审 F7（新增 nit）：Status.Quota 把内部 map 直接递出去。
 func TestReviewerF7_QuotaMapMustBeCopied(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
