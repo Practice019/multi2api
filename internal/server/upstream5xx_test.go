@@ -200,3 +200,52 @@ func TestPoolHintMentionsNoAccounts(t *testing.T) {
 	}
 	_ = httptest.NewRequest // 保持 httptest 依赖（chatOnce 已用）
 }
+
+// TestUpstream5xxAllAccountsTrippedStill502 打的是**另一条出口**（用户实测的
+// 真正来源）：上游 5xx 喂 NoteError → 熔断把号逐个摘出候选 → 某轮 `acct == nil`
+// 提前 break。旧代码这条路径无条件 503（连 lastKind 都不看），于是
+// 「上游抖 502、池里号全健康」被报成「账号全不可用」。
+//
+// 构造：2 个号 + 熔断阈值 1（一次 5xx 即摘）→ 第 3 轮必然选不出号。
+func TestUpstream5xxAllAccountsTrippedStill502(t *testing.T) {
+	pv := &scriptedProvider{id: "codearts", steps: []struct {
+		status int
+		body   string
+	}{{502, xunfei502}}}
+	p := pool.New("")
+	p.SetRandomSource(func(int64) int64 { return 0 })
+	p.SetDefaultProvider("codearts")
+	p.SetBreaker(1, time.Hour, time.Hour) // 一次 5xx 即熔断
+	secrets := map[string]any{}
+	var auths []*auth.Auth
+	for _, uid := range []string{"a-uid", "b-uid"} {
+		auths = append(auths, &auth.Auth{UID: uid, Nickname: uid})
+		secrets[uid] = &fakeCodeartsSecret{AK: "AK-" + uid}
+		p.SetCredits(uid, 100000)
+	}
+	p.SyncToDirWithSecrets("codearts", auths, secrets)
+	p.SetMaxInFlight(50)
+
+	h := NewHandler(Config{
+		Pool:              p,
+		Provider:          &scriptedRouter{pv: pv, uid: "codearts"},
+		DefaultProvider:   "codearts",
+		OwnedBy:           "codearts",
+		DefaultClassifier: defaultClassifierOf(),
+	})
+	code, body := chatOnce(t, h, "codearts/glm-5.3-flash")
+
+	if code != 502 {
+		t.Fatalf("code=%d want 502（号被上游 5xx 熔断摘出 ≠ 账号不可用）body=%s", code, body)
+	}
+	if !strings.Contains(body, "upstream_error") {
+		t.Errorf("错误码应为 upstream_error: %s", body)
+	}
+	// 上游原文必须仍在（这轮它是被熔断摘号，不是没号）。
+	if !strings.Contains(body, "xunfei") {
+		t.Errorf("丢了上游 502 原文: %s", body)
+	}
+	if got := pv.calls.Load(); got != 2 {
+		t.Errorf("两个号各试一次（第 3 轮无号可选）: calls=%d", got)
+	}
+}
