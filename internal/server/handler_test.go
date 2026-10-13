@@ -490,8 +490,15 @@ func TestChatHTTP5xxPenalizes(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	// ⚠ 状态码语义修正（用户实测报障）：上游 5xx 是**服务端故障**，出口回
+	// 502 upstream_error（客户端应重试），而不是 503 no_healthy_account
+	//（那会被读成"账号都不可用"，实测讯飞网关抖 502 时池里 11 个号全健康）。
+	// 本用例的本意是"5xx 要罚号（熔断）"，那一条没变 —— 只换了状态码。
+	if rec.Code != 502 {
+		t.Fatalf("code=%d want 502（上游 5xx）body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "upstream_error") {
+		t.Errorf("应带 upstream_error 错误码: %s", rec.Body.String())
 	}
 	st, _ := p.Status("u1")
 	if !st.Cooling {
