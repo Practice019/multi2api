@@ -37,6 +37,21 @@ import (
 	"workbuddy2api/internal/wire"
 )
 
+// serverRetryExtra 上游 5xx（服务端故障）时额外允许的换号次数（MaxRotate 之上）。
+//
+// # 为什么需要它（用户实测报障）
+//
+// 讯飞 Loomy 网关抖动时短暂返 502，而默认 MaxRotate=3：一次用户请求试完
+// 3 个号就回 503「all accounts unavailable」—— 池里 11 个号其实全是健康的。
+// 用户看到的是"账号都不可用"，真相是"上游抖了几秒"（实测：同刻直连上游 200）。
+//
+// # 为什么是 2
+//
+// 抖动通常持续数秒到数十秒，而每次换号是一次完整往返；多试 2 个号足以跨过
+// 短抖动，同时不会在一次请求里把整个池子的熔断计数都喂一遍（那会让
+// "上游抖"演变成"全池冷却"，比一次失败更糟）。
+const serverRetryExtra = 2
+
 // Config handler 依赖。
 type Config struct {
 	Pool     *pool.Pool
@@ -1250,6 +1265,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// lastKind 最近一次上游错误的分类：出口要按它区分"上游抖"与"池子真空"。
+	var lastKind gateway.ErrorKind = gateway.ErrKindNone
 
 	// degradedTried 本请求是否已经用过降级提示词重试。
 	//
@@ -1293,7 +1310,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for i := 0; i < h.cfg.MaxRotate; i++ {
+	// 上游 5xx（502/503/504）不是某个账号的过错：一抖就只试 MaxRotate 次
+	// 会把它放大成"用户请求失败"。这里为 server 类错误额外加
+	// serverRetryExtra 次换号机会（实测场景：讯飞网关抖动数秒，
+	// 池里 11 个健康号，旧行为试 3 个就回 503）。
+	maxAttempts := h.cfg.MaxRotate
+	for i := 0; i < maxAttempts; i++ {
 		// 选号：粘性号优先（已校验 **provider + health + 在途未满**），否则普通轮换。
 		//
 		// ⚠ 必须用 PickByUIDFor(reqProvider, ...) 而不是 PickByUID(...)：
@@ -1495,6 +1517,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 却作用在两条上游的响应体上，造成"codearts 额度漏判"与
 			// "codearts 号被裸数字 12153 永久禁用"两条真危害。
 			kind := h.classifyErr(reqProvider, status, respBody)
+			lastKind = kind
+			if kind == gateway.ErrKindServer && maxAttempts < h.cfg.MaxRotate+serverRetryExtra {
+				maxAttempts++
+			}
 			lastErr = &chatError{
 				Kind:   kind,
 				Status: status,
@@ -1593,6 +1619,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 额度类错误会落到 ErrKindHardCredit（进硬冷却）——
 				// 判据全部来自上游，这里不新增任何假设。
 				kind := h.classifyErr(reqProvider, http.StatusOK, []byte(inband.Body))
+				lastKind = kind
+				lastKind = kind
 				lastErr = &chatError{
 					Kind:   kind,
 					Status: http.StatusOK,
@@ -1621,6 +1649,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var inband *wire.InBandError
 		if errors.As(err, &inband) {
 			kind := h.classifyErr(reqProvider, http.StatusOK, []byte(inband.Body))
+			lastKind = kind
 			lastErr = &chatError{
 				Kind:   kind,
 				Status: http.StatusOK,
@@ -1646,7 +1675,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.usage = usageOf(resp)
 		return
 	}
+	// 出口分两种语义（这是用户实测报的那个 503 的根因）：
+	//
+	//	上游 5xx（服务端故障） → 502 upstream_error：**客户端应该重试**，
+	//	  账号本身没问题（实测：讯飞网关抖 502，池里 11 个号全健康，
+	//	  旧行为却回 503 no_healthy_account，把"上游抖"报成"账号不可用"）。
+	//	池子真空/全冷却         → 503 no_healthy_account：这是池子状态问题，
+	//	  重试无用，得去控制台处理。
 	msg := "all accounts unavailable (cooling/disabled)"
+	if lastKind == gateway.ErrKindServer {
+		msg = "上游服务异常（已自动轮换多个账号重试，仍失败）"
+	}
 	// 把"为什么一个都不可用"写进错误里（真实困惑：上游 402 触发冷却后，旧文案
 	// 只说 all accounts unavailable —— 用户据此怀疑"登录失败了"，而真相是
 	// "key 有效但账户没钱在冷却"。一句话的差别，省一轮客服）。
@@ -1655,6 +1694,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
+	}
+	if lastKind == gateway.ErrKindServer {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", msg)
+		st.status = http.StatusBadGateway
+		return
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
 	st.status = http.StatusServiceUnavailable
