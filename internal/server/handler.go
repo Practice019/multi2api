@@ -1343,7 +1343,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickFor(reqProvider, reqModel, tried)
 		}
 		if acct == nil {
+			// ⚠ 出口语义（用户实测 503 的真正来源）：
+			//
+			// 上游 5xx 会喂 NoteError → 熔断把号逐个摘出候选 → 某一轮**选不出号**
+			// 就在这里 break。旧代码无论为什么选不出号都置 503 —— 于是
+			// "讯飞网关抖 502、池里 11 个号全健康"被你看到的是
+			// `503 no_healthy_account: all accounts unavailable`，语义完全错了。
+			//
+			// 判据用 lastKind：本轮已吃过上游 5xx（ErrKindServer）→ 这是
+			// **上游故障**，回 502 upstream_error（客户端应重试）；
+			// lastKind 仍是 None → 池子真没号/全在冷却 → 503（重试无用）。
+			// ⚠ 刻意**不动** lastErr：那里存着上游 502 的原文（排障最有用的一段），
+			// 覆盖成一句概括反而把证据抹掉了。最终状态码由出口按 lastKind 决定。
 			st.status = http.StatusServiceUnavailable
+			if lastKind == gateway.ErrKindServer {
+				st.status = http.StatusBadGateway
+			}
 			break
 		}
 		st.uid = acct.UID
@@ -1619,7 +1634,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 额度类错误会落到 ErrKindHardCredit（进硬冷却）——
 				// 判据全部来自上游，这里不新增任何假设。
 				kind := h.classifyErr(reqProvider, http.StatusOK, []byte(inband.Body))
-				lastKind = kind
 				lastKind = kind
 				lastErr = &chatError{
 					Kind:   kind,
