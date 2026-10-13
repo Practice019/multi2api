@@ -242,7 +242,7 @@ func (p *Provider) refreshTiersAsync(uids []string) {
 			}
 		}()
 		for _, uid := range todo {
-			p.refreshTierOne(uid)
+			p.refreshTierOne(uid, false)
 		}
 	}()
 }
@@ -251,7 +251,11 @@ func (p *Provider) refreshTiersAsync(uids []string) {
 //
 // 查不到时**不写缓存**（保持"不确定"）—— 写一个档位进去会让它在 TTL 内
 // 被当成"已确认"，而那个号可能已经回血（或者刚刚才失败过）。
-func (p *Provider) refreshTierOne(uid string) {
+//
+// quiet=true 时不逐条打日志（后台预热用；它改成打一行汇总）。
+// 理由：后台预热会**周期性**重试——某个号 session 死了就会每轮失败一次，
+// 逐条打日志会变成每分钟两条噪音，把真正的信号淹掉。
+func (p *Provider) refreshTierOne(uid string, quiet bool) {
 	a := p.authByUID(uid)
 	if a == nil {
 		return // 该 uid 不属于本上游（或凭证目录里没有）—— 不是错误
@@ -260,10 +264,104 @@ func (p *Provider) refreshTierOne(uid string) {
 	defer cancel()
 	bal, daily, err := p.Balance(ctx, a.Session)
 	if err != nil {
-		log.Printf("loomy: 档位刷新失败 uid=%s: %v（保持不确定）", shortUID(uid), err)
+		if !quiet {
+			log.Printf("loomy: 档位刷新失败 uid=%s: %v（保持不确定）", shortUID(uid), err)
+		}
 		return
 	}
 	p.tiers.set(uid, tierOf(bal, daily))
+}
+
+// tierWarmupInterval 后台预热的间隔。
+//
+// 它只补齐"未知或过期"的账号，**全部新鲜时一轮查询都不发**（只读一次凭证
+// 目录）。所以这个间隔决定的是"一个号从变成未知到被补上"的上限，
+// 而不是上游压力 —— 30 秒是个够快又不浪费的值。
+// ⚠ 它是 var 而不是 const，**只为测试**：测试要把它调到几十毫秒，
+// 才可能在不睡 30 秒的前提下验证「周期补齐真的会发生」。生产代码不要改它。
+var tierWarmupInterval = 30 * time.Second
+
+// StartTierWarmup 启动后台档位预热（装配层在启动期调用一次；幂等）。
+//
+// # 为什么需要它（这是用户实测到的那个 -30 永久积分的根因）
+//
+// 档位缓存是**纯内存**的，重启后是空的。空缓存里每个账号都是「不确定」档，
+// 而"不确定"之间**没有优先级** —— 选号退化成加权抽签。
+//
+// 用户实测的形态：他 10-13 14:22 重启过实例，之后 22 小时里唯一一次计费，
+// 记在了那唯一一个免费额度为 0 的号上（永久积分 -30），而另外 21 个号都还有
+// 免费额度。**那一次是重启后缓存空导致的，本来可以避免。**
+//
+// 与"第一次选号时顺带异步刷新"的区别：
+//
+//	那个是**请求驱动**的 —— 第一次抽签已经发生了才去刷新，
+//	所以第一次必然没有偏好；
+//	这个是**启动驱动**的 —— 在第一个请求到达之前就把档位准备好。
+//
+// 三个来源都靠它自愈：
+//
+//	① 进程重启（缓存空）
+//	② 新导入的账号（首次出现在候选里之前就被补上）
+//	③ 之前刷新失败的账号（周期重试）
+//
+// ⚠ 不阻塞启动：全部查询在一个后台 goroutine 里**串行**做完。
+// 串行是刻意的：34 个号并发打上游容易被限流，而那会把"预热"变成"批量失败"。
+func (p *Provider) StartTierWarmup() {
+	if p == nil {
+		return
+	}
+	p.warmupOnce.Do(func() {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("loomy: 档位预热 panic（已忽略）: %v", r)
+				}
+			}()
+			p.warmupPass() // 立即一遍：第一个请求到达之前就把档位准备好
+			t := time.NewTicker(tierWarmupInterval)
+			defer t.Stop()
+			for range t.C {
+				p.warmupPass()
+			}
+		}()
+	})
+}
+
+// warmupPass 把"未知或过期"的账号补齐，并打一行汇总。
+//
+// 全程新鲜时**一次上游查询都不发** —— 所以空闲部署的周期成本只是一次
+// 目录读取。这条很重要：预热器不该在没人用的时候白白打上游。
+func (p *Provider) warmupPass() {
+	refs := p.accounts()
+	if len(refs) == 0 {
+		return
+	}
+	now := time.Now()
+	var todo []string
+	for _, r := range refs {
+		e, ok := p.tiers.get(r.UID)
+		if !ok || now.Sub(e.at) >= tierCacheTTL {
+			todo = append(todo, r.UID)
+		}
+	}
+	if len(todo) == 0 {
+		return // 全都新鲜：不发查询、不打日志
+	}
+	okN := 0
+	for _, uid := range todo {
+		before, _ := p.tiers.get(uid)
+		p.refreshTierOne(uid, true)
+		if e, ok := p.tiers.get(uid); ok && (!before.at.Equal(e.at)) {
+			okN++
+		}
+	}
+	// 一行汇总（而不是逐条）：失败的那几个已经在上面被 quiet 掉了，
+	// 但"有几个没补上"必须可见 —— 否则预热的失效是静默的。
+	if okN < len(todo) {
+		log.Printf("loomy: 档位预热 %d/%d 个账号（其余查不到，保持不确定）", okN, len(todo))
+	} else {
+		log.Printf("loomy: 档位预热完成 %d 个账号", okN)
+	}
 }
 
 // tierOf 由 (可用总额度, 今日剩余) 算出一个**已知**余额的档位。

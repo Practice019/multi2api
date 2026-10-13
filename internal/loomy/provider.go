@@ -109,6 +109,9 @@ type Provider struct {
 	loginOnce   sync.Once
 	loginCached *loginFlow
 
+	// warmupOnce 保证后台档位预热只启动一次（StartTierWarmup 幂等）。
+	warmupOnce sync.Once
+
 	// sms 讯飞账号网关的短信登录客户端（手机号 + 验证码，见 smslogin.go）。
 	//
 	// 与 client（模型代理）是**两个完全不同的上游**：一个 loomyad.xunfei.cn、
