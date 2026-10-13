@@ -218,8 +218,8 @@ func TestCandidateTiersDistinguishesFreeAndPermanent(t *testing.T) {
 	defer closeSrv()
 
 	// 直接喂缓存（避开异步时序），先把两个号的真实余额查出来。
-	p.refreshTierOne("260101010101010101") // 有每日赠送
-	p.refreshTierOne("260202020202020202") // 只剩永久额度
+	p.refreshTierOne("260101010101010101", false) // 有每日赠送
+	p.refreshTierOne("260202020202020202", false) // 只剩永久额度
 
 	got := p.CandidateTiers("", []string{"260101010101010101", "260202020202020202"})
 	if got["260101010101010101"] != tierFree {
@@ -238,7 +238,7 @@ func TestCandidateTiersDistinguishesFreeAndPermanent(t *testing.T) {
 // 若把失败也写成一个档位，它会在 TTL 内被当成"已确认"，而那个号可能已经回血。
 func TestRefreshFailureLeavesCacheEmpty(t *testing.T) {
 	p := NewWithConfig(Config{Client: NewWithBase(deadBase)})
-	p.refreshTierOne("260101010101010101")
+	p.refreshTierOne("260101010101010101", false)
 	if _, ok := p.tiers.get("260101010101010101"); ok {
 		t.Error("查失败不应写缓存 —— 写进去会让它在 TTL 内被误当成'已确认'")
 	}
@@ -248,7 +248,7 @@ func TestRefreshFailureLeavesCacheEmpty(t *testing.T) {
 func TestRefreshTierSkipsUnknownUID(t *testing.T) {
 	p, closeSrv := tierFixture(t)
 	defer closeSrv()
-	p.refreshTierOne("不存在的-uid")
+	p.refreshTierOne("不存在的-uid", false)
 	if _, ok := p.tiers.get("不存在的-uid"); ok {
 		t.Error("凭证目录里没有的 uid 不该被写入缓存")
 	}
