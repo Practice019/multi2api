@@ -574,6 +574,17 @@ func main() {
 	} else if tr != nil {
 		log.Printf("trae: 未并入账号池（trae.pool_accounts=false），只能通过其管理端点使用")
 	}
+
+	// ⚠ 必须在并池**之后**接线：后台续期要用它取"池里那份活凭证"。
+	//
+	// 接在并池前的后果不是报错，而是**静默刷错对象** —— 续期成功、磁盘更新，
+	// 但池里那份不变 ⇒ 界面一直显示「已过期」（见 traecredsource.go 的实测记录）。
+	// 而 TRAE 的 RefreshSkew 是 (0,true)（请求路径不预检），所以它是唯一路径，
+	// 这个状态会一直持续到进程重启。
+	if tr != nil {
+		tr.SetCredentialSource(traeCredSource(p))
+	}
+
 	// ---- 第六个上游：Cline（Cline 桌面端 / Cline API）----
 	//
 	// 注册顺序仍 workbuddy 在前 → "裸模型名走谁"不变；cline 只在显式配置

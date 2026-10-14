@@ -102,9 +102,53 @@ func (p *Provider) effectiveDir(dir string) string {
 	return p.authDir
 }
 
-// localAccounts 扫本上游凭证目录。
+// localAccounts 扫本上游凭证目录 —— 但**优先返回池里持有的那个对象**。
+//
+// # ⚠ 这里原先只是 `LoadDir(p.authDir)`，那是一个实测确认的缺陷
+//
+// 后台续期拿到的如果全是磁盘副本，`Client.RefreshToken(a)` 更新的是副本，
+// 池里那份（`TokenExpiry` 读的那个）永远不变 ⇒
+// **落盘已续期、界面仍显示「已过期」**，而且对 TRAE 是**永久**的
+// （它的 RefreshSkew 返回 (0,true)，请求路径永不预检）。
+//
+// 修法与 raccoon 一致：磁盘负责"有哪些 uid"，池子负责"那个 uid 的对象"。
+//
+//	池里有该 uid → 用池里那个（续期才会反映到界面）
+//	池里没有（刚放进目录、还没对账）→ 用磁盘那份，至少把它续上
 func (p *Provider) localAccounts() ([]*Auth, error) {
-	return LoadDir(p.authDir)
+	disk, err := LoadDir(p.authDir)
+	if err != nil {
+		return nil, err
+	}
+	if p.credSrc == nil {
+		// 未接线（纯单测 / 本上游未入池）⇒ 磁盘副本就是唯一的一份。
+		return disk, nil
+	}
+	out := make([]*Auth, 0, len(disk))
+	for _, d := range disk {
+		if d == nil {
+			continue
+		}
+		uid := d.UID
+		if uid == "" {
+			continue
+		}
+		if cred, ok := p.credSrc(uid); ok {
+			if live, aerr := authOf(cred); aerr == nil && live != nil {
+				out = append(out, live)
+				continue
+			}
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// SetCredentialSource 注入"取池里那份活凭证"的访问器（见 credSrc 字段的长注释）。
+//
+// 装配层在并池之后调用；不调用时 `localAccounts` 回落磁盘（旧行为）。
+func (p *Provider) SetCredentialSource(fn func(uid string) (gateway.Credential, bool)) {
+	p.credSrc = fn
 }
 
 // ── 续期 ────────────────────────────────────────────────────────────────
