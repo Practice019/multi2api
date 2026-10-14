@@ -484,8 +484,10 @@ func TestCodeartsAbsentSectionIsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.CodeartsEnabled {
-		t.Error("老配置（无 codearts 段）不应启用 CodeArts 上游")
+	// ⚠ 判据已反转（2026-10：用户要求「默认全部启动」）。
+	// 老 config（无 codearts 段）现在**应当**启用。
+	if !c.CodeartsEnabled {
+		t.Error("老配置（无 codearts 段）应当启用 CodeArts 上游（缺省=true）")
 	}
 
 	// 空配置同理
@@ -495,12 +497,18 @@ func TestCodeartsAbsentSectionIsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c2.CodeartsEnabled {
-		t.Error("空配置不应启用 CodeArts 上游")
+	// ⚠ 判据已**反转**（2026-10：用户要求「默认全部启动」）。
+	//
+	// 这条原先断言"空配置不应启用 CodeArts" —— 那是"启用必须显式"的旧语义。
+	// 现在缺省是**开**，所以这里改成断言"空配置**应当**启用"。
+	//
+	// 保留这条测试（而不是删掉）的原因：它现在守的是**相反方向**的回归 ——
+	// 哪天有人把某个上游的缺省改回 false，这条会红。
+	if !c2.CodeartsEnabled {
+		t.Error("空配置应当启用 CodeArts 上游（缺省=true；要关请写 codearts.enabled=false）")
 	}
-	// Default() 也不得默认开启
-	if d := Default(); d.Codearts.Enabled {
-		t.Error("Default() 不应默认启用 CodeArts 上游")
+	if d := Default(); !d.CodeartsEnabled {
+		t.Error("Default() 应当启用 CodeArts 上游（enabled 字段已移除，一律启用）")
 	}
 }
 
@@ -592,14 +600,29 @@ func TestCodeartsRefreshIntervalDefaults(t *testing.T) {
 	}
 
 	// 未启用 → 即使配了间隔也不注册（不启动无用的后台任务）
+	// ⚠ 这一段判据已**失效**（2026-10：删掉 enabled 字段）。
+	//
+	// 它原先断言"未启用时即使配了间隔也不解析"——即
+	// `{"codearts":{"enabled":false,...}}` ⇒ CodeartsRefreshInterval == 0。
+	//
+	// 现在 codearts **无法关闭**（用户要求删掉那个开关），所以配置里写
+	// `"enabled":false` 会被当成**未知字段忽略**，而间隔照常解析（15s）。
+	// 也就是说：这个断言守的那个状态**不存在了**。
+	//
+	// 我没有删掉这个用例，而是把它改成断言**新**行为 ——
+	// 因为"配置里残留 enabled=false 会怎样"本身是需要被写下来的事实：
+	// 它会被忽略、上游照常启用。有人升级后看到自己的 codearts 又跑起来了，
+	// 这条注释就是答案。
 	fp3 := filepath.Join(dir, "c.json")
 	os.WriteFile(fp3, []byte(`{"codearts":{"enabled":false,"refresh_interval_seconds":15}}`), 0o600)
 	c3, err := Load(fp3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c3.CodeartsRefreshInterval != 0 {
-		t.Errorf("未启用时不应解析出间隔，得到 %v", c3.CodeartsRefreshInterval)
+	t.Log("已废弃：codearts 无法关闭，配置里残留的 enabled=false 被忽略（间隔照常解析）")
+	if c3.CodeartsRefreshInterval.Seconds() != 15 {
+		t.Errorf("残留 enabled=false 被忽略后，显式间隔应当照常生效（15s），得到 %v",
+			c3.CodeartsRefreshInterval)
 	}
 }
 
@@ -624,17 +647,19 @@ func TestLoomyAbsentSectionIsDisabled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c.LoomyEnabled {
-				t.Error("不应启用 loomy 上游（必须是显式 loomy.enabled=true）")
+			// ⚠ 判据已反转：缺省是**开**（用户要求「默认全部启动」）。
+			if !c.LoomyEnabled {
+				t.Error("loomy 应当缺省启用（缺省=true；要关请写 loomy.enabled=false）")
 			}
-			// 未启用时并池开关必须恒 false —— 不注册的上游不该在池里留痕迹
-			if c.LoomyPoolAccounts {
-				t.Error("未启用时 LoomyPoolAccounts 必须为 false")
+			// 已启用且未显式 pool_accounts=false ⇒ 应当并池。
+			// （这条原先守的是"未启用时池里不留痕迹"，判据随默认值一起反转。）
+			if !c.LoomyPoolAccounts {
+				t.Error("缺省启用时 LoomyPoolAccounts 应为 true")
 			}
 		})
 	}
-	if d := Default(); d.Loomy.Enabled {
-		t.Error("Default() 不应默认启用 loomy 上游")
+	if d := Default(); !d.LoomyEnabled {
+		t.Error("Default() 应当启用 loomy 上游（enabled 字段已移除，一律启用）")
 	}
 }
 
@@ -760,15 +785,16 @@ func TestLoomyClientDataDir(t *testing.T) {
 		}
 	})
 
-	t.Run("未启用时也不崩", func(t *testing.T) {
-		fp := filepath.Join(dir, "disabled.json")
+	t.Run("缺省启用时也不崩", func(t *testing.T) {
+		fp := filepath.Join(dir, "default.json")
 		os.WriteFile(fp, []byte(`{"loomy":{"client_data_dir":"/x"}}`), 0o600)
 		c, err := Load(fp)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.LoomyEnabled {
-			t.Error("未写 enabled 时不该启用")
+		// 判据已反转：未写 enabled ⇒ 启用。
+		if !c.LoomyEnabled {
+			t.Error("未写 enabled 时应当启用（缺省 true）")
 		}
 	})
 }
@@ -823,15 +849,15 @@ func TestTraeDefaults(t *testing.T) {
 		t.Error("pool_accounts=false 未生效")
 	}
 
-	// 段缺席 = 未启用。
+	// 判据已反转：段缺席 = **启用**（用户要求「默认全部启动」）。
 	fp3 := filepath.Join(dir, "c.json")
 	os.WriteFile(fp3, []byte(`{}`), 0o600)
 	c3, err := Load(fp3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c3.TraeEnabled || c3.TraePoolAccounts {
-		t.Error("段缺席时不应启用 trae")
+	if !c3.TraeEnabled || !c3.TraePoolAccounts {
+		t.Error("段缺席时应当启用 trae（且默认并池）")
 	}
 }
 

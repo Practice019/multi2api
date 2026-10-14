@@ -2,7 +2,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -378,10 +377,9 @@ type Config struct {
 	// 理由：现有部署的 config.json 里没有这一段，若缺省即启用会让它们
 	// 突然多出一个上游（并可能因为扫不到凭证而报错）。
 	//
-	// 因此启用条件是**显式**的：codearts.enabled = true。
+	// CodeArts 现在**一律启用**（enabled 字段已移除，见 default_on_upstreams.go）。
 	Codearts struct {
-		// Enabled 是否启用 CodeArts 上游。**缺省 false**（与"段缺席"等价）。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir CodeArts 凭证目录。
 		//
 		// 留空则**复用顶层 auth_dir**：codearts.LoadDir 按 `codearts*.json` 通配，
@@ -475,10 +473,9 @@ type Config struct {
 	//
 	// 本段**整个缺席**时行为与现在**逐字节一致**：不注册海外版实例、
 	// 不加载 `auths/workbuddy-intl/`、默认上游仍是 workbuddy（国内版）。
-	// 启用条件是**显式**的：workbuddy_intl.enabled = true。
+	// 海外版现在**一律启用**（enabled 字段已移除）。
 	WorkbuddyIntl struct {
-		// Enabled 是否启用海外版 WorkBuddy AI 渠道。**缺省 false**。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 海外版凭证目录。留空则用 `<顶层 auth_dir>/workbuddy-intl`
 		//（按上游分子目录的既有约定，auth.UpstreamDir 自动推导）。
 		AuthDir string `json:"auth_dir"`
@@ -505,10 +502,9 @@ type Config struct {
 	// 若缺省即启用，它们会突然多出一个上游（而 loomy 的凭证默认在
 	// `auths/loomy/`，通常是空的 —— 表现为"多了一个空上游"）。
 	//
-	// 因此启用条件是**显式**的：loomy.enabled = true。
+	// loomy 现在**一律启用**（enabled 字段已移除）。
 	Loomy struct {
-		// Enabled 是否启用 loomy 上游。**缺省 false**（与"段缺席"等价）。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/loomy`。
 		//
 		// # 为什么 loomy 默认**不**复用顶层 auth_dir（与 codearts 不同）
@@ -591,10 +587,9 @@ type Config struct {
 	// # 向后兼容（与 codearts / loomy 同一条硬要求）
 	//
 	// 本段**整个缺席**时行为与之前逐字节一致：不注册 trae Provider、
-	// 不加载任何 TRAE 凭证。启用条件是**显式**的：trae.enabled = true。
+	// 不加载任何 TRAE 凭证。TRAE 现在**一律启用**（enabled 字段已移除）。
 	Trae struct {
-		// Enabled 是否启用 TRAE 上游。**缺省 false**（与"段缺席"等价）。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/trae`。
 		AuthDir string `json:"auth_dir"`
 		// AgentBase / UgBase / OAuthBase 三个 host 覆盖（留空 = 包内默认：
@@ -635,8 +630,7 @@ type Config struct {
 	// 也就没有"服务器部署下回调打不进本机"的问题 ——
 	// 不需要 manual 模式，也不需要用户粘贴任何东西。
 	Cline struct {
-		// Enabled 是否启用 Cline 上游。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/cline`。
 		AuthDir string `json:"auth_dir"`
 		// APIBase 推理/账号端点基址（留空=https://api.cline.bot）。
@@ -661,8 +655,7 @@ type Config struct {
 	// ⚠ 短信登录**不实现**：它要求阿里云滑块的 captcha_param，
 	// 而那只由浏览器里的 AliyunCaptcha.js 产出，纯 Go 无法程序化完成。
 	Raccoon struct {
-		// Enabled 是否启用 Raccoon 上游。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/raccoon`。
 		AuthDir string `json:"auth_dir"`
 		// APIBase 上游基址（留空=https://xiaohuanxiong.com）。
@@ -678,8 +671,7 @@ type Config struct {
 	// 故这条路径**只适用于网关与浏览器同机的部署** ——
 	// 服务器部署下回调打不进服务器端口，而 LobsterAI 没有 manual 模式可退。
 	Lobsterai struct {
-		// Enabled 是否启用 LobsterAI 上游。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/lobsterai`。
 		AuthDir string `json:"auth_dir"`
 		// APIBase 业务 API（留空=https://lobsterai-server.youdao.com）。
@@ -709,8 +701,7 @@ type Config struct {
 	// `Unsupported model`。故未接 WASM 签名器时 Chat 直接报错，
 	// **刻意不回落公开端点**（那会把"加密不可用"伪装成"模型不存在"）。
 	Qoder struct {
-		// Enabled 是否启用 Qoder 上游（含中国版，见 CNActive）。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/qoder`。
 		//
 		// ⚠ 国际版与中国版**共用这一个目录**：靠凭证里的 product_id 过滤，
@@ -743,8 +734,7 @@ type Config struct {
 	// 默认**只开 API Key 通道**（零依赖、服务器可用）。
 	// JWT 通道要显式打开，因为它需要一个能过阿里云滑块的浏览器。
 	ZCode struct {
-		// Enabled 是否启用 ZCode 上游。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/zcode`。
 		AuthDir string `json:"auth_dir"`
 		// Origin 平台基址覆盖（留空 = 按每个账号的 platform 字段自动选）。
@@ -788,8 +778,7 @@ type Config struct {
 	// 业务/推理在 agent.minimax.cn。打错会得到 404，
 	// 而 404 在本仓通常表示「账号不存在」。
 	MiniMax struct {
-		// Enabled 是否启用 MiniMax 上游。
-		Enabled bool `json:"enabled"`
+
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/minimax`。
 		AuthDir string `json:"auth_dir"`
 		// AccountBase OAuth 主机覆盖（留空 = 官方 account.minimax.cn）。
@@ -1016,7 +1005,65 @@ func Default() *Config {
 	c.Admin.ClientArchiveDir = "./data/client-login"
 	c.RequestLogPath = "./data/request-log.jsonl"
 	c.RequestLogKeepDays = 7
+
+	// 上游「缺省全部启用」（用户要求：「不要有启动或者不启动了，默认全部启动」）。
+	//
+	// # 为什么在这里置指针（而不是只靠 normalize 里的 boolOr）
+	//
+	// 与上面 `Login.OpenBrowser` / `Schedule.CheckinEnabled` 是**同一套惯例**：
+	// Default() 给出非零起点，`Load` 再用 json.Unmarshal 覆盖 ——
+	// 键缺席时保留 true，只有显式 false 才关。
+	//
+	// 两处都要，因为 `Default()` 也会被**直接**使用（测试与
+	// "Load 读不到文件时的回落"路径），那时 normalize 不参与；
+	// 而 normalize 里的 `boolOr(..., upstreamEnableDefault)` 兜的是
+	// "Config 不是从 Default() 来的"（例如测试里 `json.Unmarshal` 直接构造）。
+	//
+	// ⚠ 指针字面量不能直接取地址，所以用局部变量 —— 见 default_on_upstreams.go
+	// 的 enableDefaults()。
+	enableDefaults(c)
 	return c
+}
+
+// enableDefaults 把"缺省启用"写进各个上游段的 Enabled 指针**以及**派生字段。
+//
+// # 为什么派生字段也要在这里赋值
+//
+// `Default()` 会被**直接**使用（测试、以及"配置文件读不到时的回落"路径），
+// 那条路径**不经过** normalize() —— 而 10 个 `XxxEnabled` 派生字段只在
+// normalize 里赋值。不同步的话 `Default().LoomyEnabled` 是零值 false，
+// 而 `Default().Loomy.Enabled` 是 true，两者自相矛盾：读代码的人会以为
+// "缺省开着"，而实际求值结果是关的。
+//
+// ⚠ 刻意**不**在 Default() 里调 normalize()：它带副作用（会改写 AuthDir
+// 等字段），而且 Load() 紧接着还会再跑一遍 —— 跑两次的后果没人验证过。
+// 显式赋值没有这些问题。
+//
+// 抽成函数是为了让"哪些上游缺省开"只有**一处**可读：
+// 20 行赋值散在 Default() 里，将来加第 13 个上游时漏一行的表现是
+// "它缺省关着，而其他都开着" —— 这种不对称最难被注意到。
+//
+// 由 default_on_upstreams_test.go 逐条守住。
+func enableDefaults(c *Config) {
+	on := upstreamEnableDefault
+	// 上游现在**一律启用** —— 没有 `enabled` 字段可读了（用户要求删掉那个开关）。
+	//
+	// 只赋值派生字段：Default() 会被**直接**使用（不经 normalize），
+	// 那时派生字段也得是对的，否则 Default().LoomyEnabled 是零值 false，
+	// 与"上游一律启用"自相矛盾。
+	//
+	// ⚠ 值取自 upstreamEnableDefault 而不是字面 true：将来若要改
+	// "上游缺省是否启用"，那应该是改**一处常量**，而不是在 20 个赋值里找。
+	c.CodeartsEnabled = on
+	c.WorkbuddyIntlEnabled = on
+	c.LoomyEnabled = on
+	c.TraeEnabled = on
+	c.ClineEnabled = on
+	c.RaccoonEnabled = on
+	c.LobsteraiEnabled = on
+	c.QoderEnabled = on
+	c.ZCodeEnabled = on
+	c.MiniMaxEnabled = on
 }
 
 // Load 从文件读，再用 WB2A_* env 覆盖。
@@ -1027,7 +1074,11 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
 		}
-		if err := json.Unmarshal(raw, c); err != nil {
+		// 走 JSONC：config.json 允许 `//` 与 `/* */` 注释。
+		//
+		// 用户要的那份"干净配置"里带中文说明 —— 而标准库不认注释，
+		// 见 jsonc.go 的说明。
+		if err := unmarshalJSONC(raw, c); err != nil {
 			return nil, fmt.Errorf("parse config: %w", err)
 		}
 	}
@@ -1249,12 +1300,12 @@ func (c *Config) normalize() error {
 	// CodeArts 第二上游。
 	//
 	// 三条规则，都是为了"老配置零影响"：
-	//  1. enabled 缺省 false —— 段缺席与显式 false 等价，都**不注册**上游
+	//  1. 上游**一律注册** —— enabled 字段已移除，段缺席也照常启用
 	//  2. auth_dir 缺省复用顶层 auth_dir —— codearts*.json 与 workbuddy-*.json
 	//     前缀不同，共处一个目录互不干扰；要隔离再显式配
 	//  3. refresh_interval_seconds 缺省 60；显式 <=0 表示关闭后台续期
 	//     （不能把"未配置"与"关闭"混为一谈，否则老配置会被无意间开启后台任务）
-	c.CodeartsEnabled = c.Codearts.Enabled
+	c.CodeartsEnabled = true
 	c.CodeartsAuthDir = c.Codearts.AuthDir
 	if c.CodeartsAuthDir == "" {
 		// 缺省**不是**顶层 auth_dir 本身，而是它的下游子目录。
@@ -1314,10 +1365,10 @@ func (c *Config) normalize() error {
 
 	// 海外版 WorkBuddy AI（workbuddy-intl 渠道实例）。
 	//
-	// 与 codearts 同一套缺省规则：enabled 缺省 false；auth_dir 缺省
+	// 与 codearts 同一套规则：一律启用（enabled 已移除）；auth_dir 缺省
 	// `<顶层 auth_dir>/workbuddy-intl`（按上游分子目录的既有约定）；
 	// oauth_base_url 缺省官方海外站；pool_accounts 缺省 true。
-	c.WorkbuddyIntlEnabled = c.WorkbuddyIntl.Enabled
+	c.WorkbuddyIntlEnabled = true
 	c.WorkbuddyIntlAuthDir = c.WorkbuddyIntl.AuthDir
 	if c.WorkbuddyIntlAuthDir == "" {
 		c.WorkbuddyIntlAuthDir = filepath.Join(c.AuthsBase, "workbuddy-intl")
@@ -1346,7 +1397,7 @@ func (c *Config) normalize() error {
 	// loomy 没有任何要定时做的事（无签到、无续期、无活动），
 	// 所以这里刻意不引入 refresh_interval_seconds：多一个没有语义的旋钮，
 	// 只会让配置表看起来比实际能力大。
-	c.LoomyEnabled = c.Loomy.Enabled
+	c.LoomyEnabled = true
 	c.LoomyAuthDir = c.Loomy.AuthDir
 	if c.LoomyAuthDir == "" {
 		// 缺省落到 `<auth_dir>/loomy`。
@@ -1385,7 +1436,7 @@ func (c *Config) normalize() error {
 	// ---- 第四个上游：TRAE ----
 	//
 	// 与 loomy 同一套判据（启用 / 目录 / 并池），另有续期扫描与签到两个旋钮。
-	c.TraeEnabled = c.Trae.Enabled
+	c.TraeEnabled = true
 	c.TraeAuthDir = c.Trae.AuthDir
 	if c.TraeAuthDir == "" {
 		c.TraeAuthDir = filepath.Join(c.AuthsBase, "trae")
@@ -1420,7 +1471,7 @@ func (c *Config) normalize() error {
 	}
 
 	// ---- cline（第六上游）----
-	c.ClineEnabled = c.Cline.Enabled
+	c.ClineEnabled = true
 	c.ClineAuthDir = strings.TrimSpace(c.Cline.AuthDir)
 	if c.ClineAuthDir == "" {
 		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
@@ -1433,7 +1484,7 @@ func (c *Config) normalize() error {
 	c.ClinePoolAccounts = c.ClineEnabled && boolOr(c.Cline.PoolAccounts, true)
 
 	// ---- raccoon（第七上游）----
-	c.RaccoonEnabled = c.Raccoon.Enabled
+	c.RaccoonEnabled = true
 	c.RaccoonAuthDir = strings.TrimSpace(c.Raccoon.AuthDir)
 	if c.RaccoonAuthDir == "" {
 		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
@@ -1444,7 +1495,7 @@ func (c *Config) normalize() error {
 	c.RaccoonPoolAccounts = c.RaccoonEnabled && boolOr(c.Raccoon.PoolAccounts, true)
 
 	// ---- lobsterai（第八上游）----
-	c.LobsteraiEnabled = c.Lobsterai.Enabled
+	c.LobsteraiEnabled = true
 	c.LobsteraiAuthDir = strings.TrimSpace(c.Lobsterai.AuthDir)
 	if c.LobsteraiAuthDir == "" {
 		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
@@ -1457,7 +1508,7 @@ func (c *Config) normalize() error {
 	c.LobsteraiPoolAccounts = c.LobsteraiEnabled && boolOr(c.Lobsterai.PoolAccounts, true)
 
 	// ---- qoder（第九、十上游，国际版 + 中国版）----
-	c.QoderEnabled = c.Qoder.Enabled
+	c.QoderEnabled = true
 	c.QoderAuthDir = strings.TrimSpace(c.Qoder.AuthDir)
 	if c.QoderAuthDir == "" {
 		// ⚠ 同上：用 AuthsBase 拼接。两个产品共用这一个目录。
@@ -1470,7 +1521,7 @@ func (c *Config) normalize() error {
 	c.QoderPoolAccounts = c.QoderEnabled && boolOr(c.Qoder.PoolAccounts, true)
 
 	// ---- zcode（第十一上游，Z.ai / 智谱 GLM）----
-	c.ZCodeEnabled = c.ZCode.Enabled
+	c.ZCodeEnabled = true
 	c.ZCodeAuthDir = strings.TrimSpace(c.ZCode.AuthDir)
 	if c.ZCodeAuthDir == "" {
 		// ⚠ 同上：用 AuthsBase 拼接。
@@ -1479,7 +1530,7 @@ func (c *Config) normalize() error {
 	c.ZCodeOrigin = strings.TrimSpace(c.ZCode.Origin)
 	c.ZCodeOAuthBase = strings.TrimSpace(c.ZCode.OAuthBase)
 	c.ZCodeBillingOrigin = strings.TrimSpace(c.ZCode.BillingOrigin)
-	c.MiniMaxEnabled = c.MiniMax.Enabled
+	c.MiniMaxEnabled = true
 	c.MiniMaxAccountBase = strings.TrimSpace(c.MiniMax.AccountBase)
 	c.MiniMaxAPIBase = strings.TrimSpace(c.MiniMax.APIBase)
 	c.MiniMaxTimezoneID = strings.TrimSpace(c.MiniMax.TimezoneID)

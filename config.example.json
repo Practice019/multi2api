@@ -1,131 +1,170 @@
 {
-  "listen": ":7863",
+  // ==========================================================================
+  // multi2api 配置示例
+  //
+  // ⚠ 这个文件支持注释（`//` 与 `/* */`）。
+  //    程序**只改动 `api_key` 一处**（轮换管理钥匙时），其余内容逐字节保留 ——
+  //    所以你在这里写的注释、空行、字段顺序都不会被程序弄乱。
+  //
+  // ⚠ 「哪些上游启用」**不在这里配**：上游一律全部启用（12 个）。
+  //    如果你以前写过 `"enabled": false`，它会被忽略，上游照常启动。
+  //    要停用一个上游，把它的凭证从 auths/ 移走即可。
+  //
+  // 复制成 config.json 再改。config.json 不会被提交（见 .gitignore）。
+  // ==========================================================================
+
+  // ---- 基础 ----------------------------------------------------------------
+
+  // 监听地址。
+  //   127.0.0.1:7863  只允许本机访问（默认，最安全）
+  //   :7863           允许局域网访问（注意：本机打开仍用 127.0.0.1）
+  "listen": "127.0.0.1:7863",
+
+  // 管理钥匙：控制台、/admin/*、以及不限量的 API 调用都用它。
+  // 在控制台「仪表盘 → API 接入信息」里可以查看/复制；用 API 管理页
+  // 的「轮换管理密钥」按钮可以换一把（旧钥匙立即作废）。
   "api_key": "your-api-key-here",
+
   "service_name": "multi2api",
+
+  // 凭证根目录。各上游默认用它的同名子目录（auths/workbuddy、auths/loomy …）。
   "auth_dir": "./auths",
+
+  // 运行状态（账号冷却/熔断等）的落盘位置。删掉它会重置所有账号状态。
   "state_file": "./data/state.json",
-  "server": {
-    "max_body_mb": 8
+
+  // ---- 出站请求 ------------------------------------------------------------
+  //
+  // 这几项都可不写（缺省值如下）。其余可选键：
+  //
+  //   user_agent / client_version / cli_version / client_name
+  //       出站请求的头。留空即用各上游的默认值（通常不需要改）。
+  //
+  //   device_token / device_token_file
+  //       全局限流令牌（X-Device-Token）。多数部署不需要，留空即可；
+  //       个别账号需要时写在那个账号的凭证文件里（优先级更高）。
+  //
+  //   passthrough_ip
+  //       是否把调用方 IP 透传给上游（默认 false）。
+  "upstream": {
+    // 整次请求超时（秒）。上游偶尔很慢，调小会让长回答被截断。
+    "timeout_seconds": 120,
+    // 响应头超时（秒）：只等"开始回话"，比整体超时更早发现死连接。
+    "header_timeout_seconds": 120,
+    // 空闲超时（秒）：流式回答时"两段之间"允许的最大停顿。
+    "idle_timeout_seconds": 300
   },
-  "login": {
-    "open_browser": true,
-    "browser": "",
-    "isolated": true
+
+  // ---- 账号池 --------------------------------------------------------------
+
+  "pool": {
+    // 同一账号的并发上限。上游对单账号并发敏感（有的只有 3 个会话槽），
+    // 调大会把"并发请求"变成"账号被限流"。
+    "max_in_flight": 3,
+
+    // 熔断：连续失败几次后冷却多久（指数退避，上限 cooldown_max）。
+    "breaker_threshold": 3,
+    "breaker_cooldown": "30m",
+    "breaker_cooldown_max": "6h",
+
+    // 权重里的"闲置加分"：闲置越久的账号越容易被选中，避免总是同一批。
+    "idle_weight_per_hour": 0.5,
+    "idle_weight_max": 5.0,
+
+    // 主动健康检查间隔（秒）：探测冷却/熔断中的账号，提前恢复。
+    // 0 = 关闭（不推荐：关闭后只能等冷却自然到期）。
+    "health_check_interval_seconds": 600
   },
+
+  // 软限流：上游"没报错但明显在限速"时，让该账号短暂退避。
   "cooldown": {
     "soft_rate": "60s",
     "soft_rate_max": "2h"
   },
-  "schedule": {
-    "checkin_hours": [9, 21],
-    "keepalive_hours": [22],
-    "checkin_enabled": true,
-    "keepalive_enabled": true,
-    "activity_hours": [10],
-    "activity_enabled": true
-  },
-  "upstream": {
-    "timeout_seconds": 120,
-    "header_timeout_seconds": 120,
-    "idle_timeout_seconds": 300,
-    "user_agent": "",
-    "client_version": "",
-    "cli_version": "",
-    "client_name": "",
-    "device_token": "",
-    "device_token_file": "",
-    "passthrough_ip": false
-  },
-  "codearts": {
-    "enabled": true,
-    "refresh_interval_seconds": 60
-  },
-  "cline": {
-    "enabled": true,
-    "auth_dir": "./auths/cline",
-    "pool_accounts": true
-  },
-  "raccoon": {
-    "enabled": true,
-    "auth_dir": "./auths/raccoon",
-    "pool_accounts": true
-  },
-  "lobsterai": {
-    "enabled": true,
-    "auth_dir": "./auths/lobsterai",
-    "pool_accounts": true
-  },
-  "qoder": {
-    "enabled": true,
-    "cn_enabled": true,
-    "auth_dir": "./auths/qoder",
-    "pool_accounts": true
-  },
-  "zcode": {
-    "enabled": true,
-    "auth_dir": "./auths/zcode",
-    "origin": "",
-    "oauth_base": "",
-    "billing_origin": "",
-    "pool_accounts": true,
-    "jwt_captcha": false
-  },
-  "minimax": {
-    "enabled": false,
-    "auth_dir": "./auths/minimax",
-    "account_base": "",
-    "api_base": "",
-    "timezone_id": "",
-    "pool_accounts": true
-  },
-  "workbuddy_intl": {
-    "enabled": true,
-    "oauth_base_url": "https://www.workbuddy.ai",
-    "auth_dir": "",
-    "pool_accounts": true
-  },
-  "trae": {
-    "enabled": true,
-    "auth_dir": "./auths/trae",
-    "refresh_interval_seconds": 1800,
-    "checkin_enabled": true,
-    "pool_accounts": true,
-    "oauth_callback_port": "18080",
-    "fallback_enabled": true,
-    "queue_threshold": 300,
-    "max_attempts": 3,
-    "client_id": ""
-  },
-  "loomy": {
-    "enabled": true,
-    "auth_dir": "./auths/loomy",
-    "base_url": "https://loomyad.xunfei.cn/api/v1",
-    "pool_accounts": true,
-    "client_data_dir": ""
-  },
-  "features": {
-    "sanitize_blacklist_fingerprints": true
-  },
-  "prompt": {
-    "mode": "custom",
-    "file": ""
-  },
-  "upstash": {
-    "url": "",
-    "token": ""
-  },
-  "pool": {
-    "max_in_flight": 3,
-    "breaker_threshold": 3,
-    "breaker_cooldown": "30m",
-    "breaker_cooldown_max": "6h",
-    "idle_weight_per_hour": 0.5,
-    "idle_weight_max": 5.0,
-    "health_check_interval_seconds": 600
-  },
+
+  // 会话粘性：同一会话尽量落在同一账号上（否则多账号轮转会把对话拆散）。
+  // 对无状态调用方（每次新会话）没有影响。
   "session_sticky": {
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+
+  // ---- 调度 ----------------------------------------------------------------
+
+  "schedule": {
+    // 每日签到（各上游统一为 30 分钟被动扫描，这里只给「允许执行的时段」）。
+    //   小时取本机时区。留空数组 = 不跑。
+    "checkin_enabled": true,
+    "checkin_hours": [9, 21],
+
+    // Token 保活。凭证快过期时提前续期，避免"空闲两小时后第一个请求慢一拍"。
+    "keepalive_enabled": true,
+    "keepalive_hours": [22],
+
+    // 活跃上报（成长中心用）。开关默认开，但时点默认空 = 不跑。
+    "activity_enabled": true,
+    "activity_hours": [10]
+  },
+
+  // ---- 控制台与服务 --------------------------------------------------------
+
+  "server": {
+    // 请求体上限（MB）。长上下文对话可能很大，太小会 413。
+    "max_body_mb": 8
+  },
+
+  "login": {
+    // 「添加账号」时自动用无痕窗口打开授权页（独立 profile，避免串号）。
+    // 关掉后仍可用「复制链接」手动打开。
+    "open_browser": true,
+    "browser": "",
+    "isolated": true
+  },
+
+  "features": {
+    // 出站请求的指纹脱敏（去掉本机特征）。关掉会让上游更容易识别成非客户端。
+    "sanitize_blacklist_fingerprints": true
+  },
+
+  "prompt": {
+    // 系统提示词模式：custom = 用内置默认（改这里通常没必要）。
+    "mode": "custom",
+    "file": ""
+  },
+
+  // ---- 上游专项（可选）----------------------------------------------------
+  //
+  // 每个上游的段**全部可以省略** —— 缺省值就是你要的样子，且上游一律启用。
+  // 只有需要覆盖时才写进来。凭证目录缺省是 auths/<上游名>。
+  //
+  // 可写的内容（示例，按需打开）：
+  //
+  //   "codearts":       { "auth_dir": "./auths/codearts",
+  //                       "refresh_interval_seconds": 60 }
+  //   "workbuddy_intl": { "auth_dir": "./auths/workbuddy-intl",
+  //                       "oauth_base_url": "https://www.workbuddy.ai" }
+  //   "loomy":          { "auth_dir": "./auths/loomy",
+  //                       "base_url": "https://loomyad.xunfei.cn/api/v1",
+  //                       "login_mode": "sms" }
+  //   "trae":           { "auth_dir": "./auths/trae",
+  //                       "refresh_interval_seconds": 1800,
+  //                       "oauth_callback_port": "18080" }
+  //   "cline":          { "auth_dir": "./auths/cline" }
+  //   "raccoon":        { "auth_dir": "./auths/raccoon" }
+  //   "lobsterai":      { "auth_dir": "./auths/lobsterai" }
+  //   "qoder":          { "auth_dir": "./auths/qoder", "cn_enabled": true }
+  //   "zcode":          { "auth_dir": "./auths/zcode", "jwt_captcha": false }
+  //   "minimax":        { "auth_dir": "./auths/minimax",
+  //                       "account_base": "",
+  //                       "api_base": "" }
+
+  // ---- 跨实例共享会话状态（可选）------------------------------------------
+  //
+  // 多实例部署才需要 —— 让几个网关实例共享会话粘性状态。
+  // 单实例部署**留空即可**（默认走进程内存）。
+  "upstash": {
+    "url": "",
+    "token": ""
   }
 }
