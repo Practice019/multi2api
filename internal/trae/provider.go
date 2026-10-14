@@ -70,6 +70,35 @@ type Provider struct {
 	//（Config.OnRefreshFailure / OnRefreshSuccess，通常接 pool 的失败计数/成功清零）。
 	onRefreshFailure func(uid string)
 	onRefreshSuccess func(uid string)
+
+	// credSrc 装配层注入的**活凭证**访问器（池里持有的那个 *Auth）。
+	//
+	// # ⚠ 为什么必须有它（2026-10 实测确认的缺陷）
+	//
+	// 后台续期原先走 `localAccounts()` = `LoadDir(authDir)`，而 `LoadDir`
+	// 用 `Parse(raw)` **每次新建对象**。池子持有的是启动时
+	// `syncTraeAccounts` 放进去的**另一个** `*Auth`。于是：
+	//
+	//	续期刷的是新建的副本 → 磁盘更新了（SaveAtomic）
+	//	池里那份纹丝不动     → `TokenExpiry` 读池 ⇒ 界面一直「已过期」
+	//
+	// 实测（internal/trae 的那条守卫）：
+	//
+	//	上游交换次数=1
+	//	池里那份 AccessToken = "old-access"   ← 没更新
+	//	磁盘那份 AccessToken = "new-access"   ← 更新了
+	//
+	// # 为什么这对 TRAE 尤其致命
+	//
+	// TRAE 的 `RefreshSkew` 返回 **(0, true)** —— 显式声明"请求路径不预检
+	// 续期"（理由见 extensions.go：refreshToken 是消费型的，预检会让每个
+	// 请求都轮换一次）。所以**后台是唯一的续期路径**：一旦它刷错了对象，
+	// 那个账号的界面状态就**永久**停在过期上，直到重启（重启重新 LoadDir
+	// 才会读到新 token）。
+	//
+	// 与 raccoon 的 `SetCredentialSource` 同款、同一个坑的第二次踩
+	//（raccoon/jobs.go 有完整记录）。
+	credSrc func(uid string) (gateway.Credential, bool)
 }
 
 // Config Provider 的可选依赖，全部可缺省。
