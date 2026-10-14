@@ -197,7 +197,11 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 | `prompt.*` | 内嵌默认 | 系统提示词（`mode` = `custom` / `passthrough`，空值按 `custom`；`file` 可指向自定义文件） |
 | `upstash.*` | — | 可选 Redis/Upstash 后端；不配则纯内存 |
 
-各上游的配置段（都支持 `enabled` / `auth_dir`，其余见下）：
+各上游的配置段（都可以整段省略 —— 上游**一律启用**；要写就写 `auth_dir` 等）：
+
+> ⚠ **没有 `enabled` 开关**（v1.8.0 起移除）。上游一律启用，段缺席也照常启用。
+> 配置里残留的 `"enabled": false` 会被当成未知字段**忽略**。
+> 要停用一个上游，把它的凭证从 `auths/` 移走。
 
 `workbuddy` · `workbuddy_intl` · `codearts` · `loomy` · `trae` · `cline` ·
 `raccoon` · `lobsterai` · `qoder` · `zcode` · `minimax`
@@ -206,7 +210,6 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `minimax.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
 | `minimax.auth_dir` | `<auth_dir>/minimax` | 凭证目录（`minimax-*.json`） |
 | `minimax.account_base` | `""`（官方 `account.minimax.cn`） | OAuth 端点基址 |
 | `minimax.api_base` | `""`（官方 `agent.minimax.cn`） | 业务 / 推理端点基址。⚠ **与 `account_base` 必须分开** —— OAuth 与业务是两个不同的 host，打错会得到 404（而 404 在本仓通常表示「账号不存在」） |
@@ -228,7 +231,6 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `zcode.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
 | `zcode.auth_dir` | `<auth_dir>/zcode` | 凭证目录（`zcode-*.json`）。`api-key` 与 `jwt` 两种凭证共用 |
 | `zcode.origin` | `""`（按账号自动选） | 平台基址。**凭证里的 `origin` 优先** —— Z.ai（`api.z.ai`）与 BigModel（`open.bigmodel.cn`）是两套独立平台，同一个 Key 不能跨用 |
 | `zcode.oauth_base` | `""`（官方线上） | 页内登录（CLI OAuth）的端点基址 |
@@ -283,7 +285,6 @@ cp:你的Key.secretKey           标记为 Coding Plan 的 Key
 
 | 项 | 默认 | 说明 |
 |---|---|---|
-| `loomy.enabled` | `false` | 显式启用（缺省不启用，向后兼容） |
 | `loomy.client_data_dir` | `""`（自动探测） | 本机 Loomy 客户端 Local Storage 目录（决定本机拾取/额度回退） |
 | `loomy.login_mode` | `auto` | `auto` 先本机拾取 / `sms` 只走手机号验证码 / `local` 只本机拾取 |
 | `loomy.sms_*` | 内嵌默认 | 讯飞账号网关（base_url / app_id / access key），一般不用改 |
