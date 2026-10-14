@@ -574,7 +574,6 @@ func main() {
 	} else if tr != nil {
 		log.Printf("trae: 未并入账号池（trae.pool_accounts=false），只能通过其管理端点使用")
 	}
-
 	// ---- 第六个上游：Cline（Cline 桌面端 / Cline API）----
 	//
 	// 注册顺序仍 workbuddy 在前 → "裸模型名走谁"不变；cline 只在显式配置
@@ -1340,7 +1339,43 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("%s listening on %s (api_key=%v)", server.ServiceName, cfg.Listen, cfg.APIKey != "")
+	// 启动横幅：用户最先要找的两个地址。
+	//
+	// # 为什么不能只打 `listening on 127.0.0.1:7863`（改造前就是这样）
+	//
+	// 用户实测的困惑：
+	//
+	//	「运行之后，命令行里需要打印出网关地址是多少，比如 http://127.0.0.1:7863」
+	//	「前端如果说他没有这个、需要填写那个东西，你需要提醒他去哪里查看」
+	//
+	// 改造前那一行只有 `host:port`，没说是 http 还是 https，也没给控制台路径 ——
+	// 于是"网关地址是多少"要靠猜（`http://` 还是 `:7863/ui`？）。
+	//
+	// ⚠ 三种 listen 形态必须区别对待（这是 uiOrigin/extraOrigins 存在的理由）：
+	//
+	//	":7863" / "0.0.0.0:7863" → 绑全部网卡，但 http://0.0.0.0:7863 **点不开**
+	//	"127.0.0.1:7863"        → 只能本机访问
+	//
+	// 所以本机地址一律用 127.0.0.1 拼（永远可点），绑了非回环时额外给局域网地址。
+	log.Printf("%s 已启动", server.ServiceName)
+	log.Printf("  控制台   %s/ui", uiOrigin(cfg.Listen))
+	log.Printf("  API 基址 %s/v1", uiOrigin(cfg.Listen))
+	for _, extra := range extraOrigins(cfg.Listen) {
+		log.Printf("  局域网   %s/ui   ← 从别的机器打开时要在地址后加 ?token=<管理钥匙>", extra)
+	}
+	if cfg.APIKey != "" {
+		// ⚠⚠ 这里**刻意不打印**管理钥匙本身。
+		//
+		// 用户的原始顾虑就是"命令行会不会打印 Token" —— 而这把 key 是
+		// **权限最大**的那把（不限额度、不限模型、还能调 /admin/*）。
+		// 把它打进日志/终端，等于写进 scrollback、写进他截的图、
+		// 写进任何一份 `start.bat > log.txt`。
+		//
+		// 所以这里只**指路**（这正是"提醒他去哪里查看"的落点）：
+		// 告诉他钥匙在哪个文件、哪个字段，他自己去打开取。
+		log.Printf("  管理钥匙  未打印（避免留在终端历史/日志里）—— 在 %s 的顶层 \"api_key\" 字段；", *cfgPath)
+		log.Printf("            或本机打开控制台 → 仪表盘 → 「API 接入信息」→ 点「显示」")
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

@@ -482,6 +482,17 @@
   .pager .pagesize::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
   .pager .pagesize{-moz-appearance:textfield;appearance:textfield}
   .pager .spacer{flex:1}
+
+  /* 管理钥匙提示块（非本机访问时出现，见 showKeyHint）。
+     视觉语言与 .info-line 一致：淡底 + 左侧强调条，不抢眼但要看得见 ——
+     它是"页面连不上"那一刻用户唯一能照做的东西。 */
+  .keyhint{margin:0 18px 14px;padding:12px 14px;background:var(--panel2);
+    border:1px solid var(--line);border-left:3px solid var(--warn);
+    border-radius:10px;font-size:12px;line-height:1.75;color:var(--fg)}
+  .keyhint .khhead{font-weight:600;font-size:13px;margin-bottom:4px}
+  .keyhint ul{margin:8px 0 0;padding-left:18px}
+  .keyhint li{margin:3px 0}
+  .keyhint b{color:var(--acc)}
 </style>
 </head>
 <body>
@@ -520,13 +531,26 @@
     <button data-theme-mode="dark" style="padding:4px 9px;font-size:11px;border-radius:0 8px 8px 0;border-left:0">深色</button>
   </span>
   <!-- 非本机访问（服务端未注入 Key）时才出现的兜底入口；本机访问这里完全为空。
-       API Key 的查看与复制统一在「仪表盘 → API 接入信息」里，顶栏不再重复。 -->
+       管理钥匙的查看与复制统一在「仪表盘 → API 接入信息」里，顶栏不再重复。
+
+       ⚠ 措辞刻意用「管理钥匙」而不是「API Key」：本页还有一个 **API 管理** 页，
+       里面那些 `sk-…` 也叫 API Key。两个东西同名，用户会拿 `sk-` 那把往
+       这里填 —— 而它连不上控制台（控制台认的是 config 里的管理钥匙）。
+       实测见过这个困惑，所以两个名字必须分开：
+         config.api_key   → 「管理钥匙」（40 位，管控制台 + 管理接口）
+         /admin/apikeys   → 「API Key」（sk- 开头，是给调用方的） -->
   <span id="keyFallback" style="display:none;align-items:center;gap:8px">
-    <input id="key" class="key" type="password" placeholder="API Key（非本机访问需手填）" autocomplete="off">
+    <input id="key" class="key" type="password"
+           placeholder="管理钥匙（40 位，非本机访问需手填）" autocomplete="off">
     <label class="tog"><input id="remember" type="checkbox" checked> 记住</label>
     <button id="conn" class="primary">连接</button>
   </span>
 </header>
+
+<!-- 「管理钥匙没有自动注入」的说明块。
+     只在非本机访问时由 showKeyHint() 填充并显示 —— 本机访问时它一直 display:none。
+     放在 header 之后而不是顶栏里：顶栏是横排的，塞进一段多行说明会把布局挤坏。 -->
+<div id="keyHint" style="display:none" class="keyhint"></div>
 
 <main>
  <div class="layout">
@@ -1603,6 +1627,35 @@ let loginProvider = '';
   }
 
   // initTheme 读持久化偏好并绑定按钮 + 跟随系统变化。
+  // showKeyHint 在「服务端没注入管理钥匙」时，把**去哪拿**写清楚。
+  //
+  // # 为什么需要它（用户原话）
+  //
+  //	「前端如果说他没有这个、需要填写那个东西，你需要提醒他去哪里查看」
+  //
+  // 改造前只有一个 placeholder，用户看到的是一个空的密码框 ——
+  // 他知道"要填东西"，但不知道该填什么、去哪找。而这里恰好有个**同名陷阱**：
+  // 本页「API 管理」里的那些 `sk-…` 也叫 API Key，填它**连不上**
+  //（控制台认的是 config 里那把管理钥匙）。实测见过这个困惑。
+  //
+  // 所以提示要同时回答三件事：填哪一把、去哪拿、最快的绕过方式。
+  function showKeyHint() {
+    const host = $('keyHint');
+    if (!host) return;
+    const rows = [
+      ['最省事', '在地址后加 ?token=<管理钥匙> 直接打开本页；本机打开一次，把地址存成书签即可。'],
+      ['去哪拿', '打开跑网关那台机器上的 config.json，顶层 "api_key" 字段就是它（40 位）。'],
+      ['从界面上拿', '在那台机器上本机打开控制台 → 仪表盘 → 「API 接入信息」→ 点「显示」。'],
+      ['⚠ 别填错', '本页「API 管理」里那些 sk- 开头的是给调用方的 API Key，'
+        + '它不能登录控制台 —— 控制台只认 config 里的管理钥匙。'],
+    ];
+    host.innerHTML =
+      '<div class="khhead">管理钥匙没有自动注入</div>'
+      + '<div>你可能是<b>从别的机器</b>打开的 —— 服务端只对本机直连自动注入。</div>'
+      + '<ul>' + rows.map(([k, v]) => `<li><b>${esc(k)}</b>：${esc(v)}</li>`).join('') + '</ul>';
+    host.style.display = '';
+  }
+
   function initTheme() {
     let pref = 'system';
     try { pref = localStorage.getItem(LS_THEME) || 'system'; } catch { /* 隐私模式 */ }
@@ -7768,7 +7821,13 @@ let multCatalogFailed = false;
       KEY = INJECTED;
       refresh();
     } else {
+      // 服务端**没有**注入管理钥匙 —— 只可能是"不是从本机打开的"。
+      //
+      // 用户的诉求：「前端如果说他没有这个、需要填写那个东西，
+      // 你需要提醒他去哪里查看」。所以这里不只给输入框，
+      // 还要**把去哪儿拿写清楚**（见 showKeyHint）。
       $('keyFallback').style.display = 'inline-flex';
+      showKeyHint();
       const saved = localStorage.getItem(LS);
       if (saved) { $('key').value = saved; KEY = saved; }
       $('conn').onclick = () => {
