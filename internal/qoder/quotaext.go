@@ -65,6 +65,16 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 		log.Printf("qoder: 额度刷新失败 uid=%s: 上游未给出可用余额（显示为未知）", shortUID(uid))
 		return gateway.UnknownQuota(), true
 	}
+	// ⚠ 成功查到余额 ⇒ 它是一个**新基准**，把"上次查询之后、还没上报的消耗"
+	// 清掉。
+	//
+	// 不清的话：这份新值**已经包含**了那些消耗，而我们稍后还会把它们上报一次
+	// ⇒ 核心在我们的旧值上再减一遍 ⇒ **多扣**（把还有额度的账号显示成用完）。
+	//
+	// 这也是那段偏差"有界且自愈"的原因：最多撑到下一次刷新。
+	if p.consumed != nil {
+		p.consumed.reset(uid)
+	}
 	// ⚠ 原始值直接转 int64，**不乘不除**（见文件头）。
 	return gateway.CreditsQuota(int64(b.Total)), true
 }
