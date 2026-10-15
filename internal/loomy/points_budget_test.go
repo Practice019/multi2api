@@ -141,6 +141,20 @@ func TestFanOutHandlersDoNotShareOneBudget(t *testing.T) {
 			t.Errorf("★ %s 里出现了循环外共用的 `ctx, cancel := pointsCtx()` ——\n"+
 				"那就是本次缺陷本身。请改用 withPointsTimeout。", fn)
 		}
+		// ⚠ 扇出还必须**限流并发**。
+		//
+		// 串行的实测代价：35 个账号 × 2 次请求，而上游单次 0.2~23.7 秒
+		//（同一账号同一端点，差 90 倍）⇒ 串行总和 272 秒，面板一直显示
+		//「加载中…」，用户以为坏了。
+		//
+		// ⚠ 这条判据是对"串行"的**回归**：把 fanOutConcurrent 去掉会让面板
+		// 重新变成 4 分半，而功能上"仍然正确"—— 所以只有这条源码级判据能抓到它。
+		if !strings.Contains(body, "fanOutConcurrent") {
+			t.Errorf("★ %s 里没有 fanOutConcurrent ——\n"+
+				"串行跑 35 个账号（每个 2 次上游请求，单次 0.2~23.7 秒）要 3~4 分钟，\n"+
+				"面板会一直显示「加载中…」。用户的评价是「看起来坏了」。\n"+
+				"并发上限见 loomyPanelConcurrency（实测 12 条并发上游就开始 502）。", fn)
+		}
 	}
 }
 

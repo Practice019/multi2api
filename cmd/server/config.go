@@ -417,9 +417,26 @@ type Config struct {
 		// 纯靠请求路径惰性续期会让"空闲两小时后的第一个请求"多付一次
 		// 续期往返（实测 1-3 秒）。后台预热把这个代价挪到空闲时间。
 		//
-		// <=0 或未配置一律取 60；本字段**没有**"关闭"语义 ——
-		// 要关就整段 enabled=false（少一个三态就少一类误配）。
-		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
+		// # 三态：**未配** 与 **显式 0** 不同
+		//
+		//	未配（字段缺席 / null） → 默认 1800 秒（30 分钟扫一次）
+		//	显式 0                → **关闭后台续期**（0 ⇒ 装配层不注册该任务）
+		//	> 0                   → 按该秒数扫描
+		//
+		// ⚠ 这里原来写的是「没有『关闭』语义 —— 要关就整段 enabled=false」，
+		// 而依据的那条 enabled 字段**后来被删掉了**（codearts 现在一律启用，
+		// 见 default_on_upstreams.go）⇒ 那个「要关就…」的出路**已经不存在**，
+		// 于是后台续期变成**关不掉**的。
+		//
+		// 而 codearts 的 refreshToken 是**消费型**的（换一次旧的作废）：
+		// 关不掉就意味着它会一直在后台把用户的凭证刷失效 —— 实测用户账号被
+		// 刷成 invalid refresh token: 'the refresh token has been used'，
+		// 只能重新登录。所以这个开关必须真的能关。
+		//
+		// ⚠ 与 main.go 的契约（那里写着「可用 refresh_interval_seconds<=0 关闭」）：
+		// 装配层判据是 cfg.CodeartsRefreshInterval > 0，所以**显式 0 必须
+		// 原样传下去**，不能在这里被改成默认值（改造前就是在这里被改掉的）。
+		RefreshIntervalSeconds *int `json:"refresh_interval_seconds"`
 
 		// WelfareEnabled 是否注册「每日福利自动领取」后台任务（默认 true）。
 		//
@@ -625,9 +642,18 @@ type Config struct {
 		// 凭证文件里保存的 clientId 优先；留空用包内默认（en1oxy7wnw8j9n）。
 		// 上游停用默认 id、或换登录渠道时在此指定签发 refreshToken 的那个 id。
 		ClientID string `json:"client_id"`
-		// RefreshIntervalSeconds 后台续期扫描周期（默认 1800）。
-		// <=0 不注册续期任务（仅请求路径惰性续期）。
-		RefreshIntervalSeconds int `json:"refresh_interval_seconds"`
+		// RefreshIntervalSeconds 后台续期扫描周期。
+		//
+		// # 三态（与 codearts 同一条纪律）
+		//
+		//	未配 → 默认 1800 秒
+		//	显式 0 → **不注册**续期任务（仅请求路径惰性续期）
+		//	> 0  → 按该秒数扫描
+		//
+		// ⚠ 这条注释一直这么写，但 normalize 里原先的「if iv <= 0 { iv = 1800 }」
+		// 让「显式 0」永远到不了装配层 —— 文档承诺的行为从来没生效过。
+		// 实测：配 "refresh_interval_seconds": 0 后启动日志仍是「续期间隔 30m0s」。
+		RefreshIntervalSeconds *int `json:"refresh_interval_seconds"`
 		// CheckinEnabled 是否注册每日签到任务（默认 true）。
 		CheckinEnabled *bool `json:"checkin_enabled"`
 		// PoolAccounts 是否把 trae 账号并入核心账号池（默认 true）。
@@ -1357,12 +1383,10 @@ func (c *Config) normalize() error {
 	// 显式 0 与未配置在**已启用**时都落到默认 60s：这个字段没有"关闭"语义
 	// （关闭就是整个上游 enabled=false），因此不需要三态。
 	if c.CodeartsEnabled {
-		iv := c.Codearts.RefreshIntervalSeconds
-		if iv <= 0 {
-			// 统一为 30 分钟（用户要求：所有上游每 30min 主动全量续）。
-			iv = 1800
-		}
-		c.CodeartsRefreshInterval = time.Duration(iv) * time.Second
+		// ⚠ 用 secsOr：**显式 0 要原样传下去**（= 关闭），
+		// 只有「没配」才落默认 1800。改造前这里无条件把 <=0 改成 1800，
+		// 于是 main.go 那个「> 0 才注册」的判断永远为真 —— 关不掉。
+		c.CodeartsRefreshInterval = time.Duration(secsOr(c.Codearts.RefreshIntervalSeconds, 1800)) * time.Second
 		// 福利自动领取（签到语义）：默认开，30 分钟扫一次。
 		c.CodeartsWelfareEnabled = boolOr(c.Codearts.WelfareEnabled, true)
 		wiv := c.Codearts.WelfareIntervalSeconds
@@ -1469,11 +1493,8 @@ func (c *Config) normalize() error {
 	c.TraeOAuthBase = strings.TrimSpace(c.Trae.OAuthBase)
 	c.TraeClientID = strings.TrimSpace(c.Trae.ClientID)
 	if c.TraeEnabled {
-		iv := c.Trae.RefreshIntervalSeconds
-		if iv <= 0 {
-			iv = 1800
-		}
-		c.TraeRefreshInterval = time.Duration(iv) * time.Second
+		// ⚠ 用 secsOr：显式 0 = 不注册续期任务（字段注释承诺的行为）。
+		c.TraeRefreshInterval = time.Duration(secsOr(c.Trae.RefreshIntervalSeconds, 1800)) * time.Second
 	}
 	c.TraeCheckinEnabled = boolOr(c.Trae.CheckinEnabled, true)
 	c.TraePoolAccounts = c.TraeEnabled && boolOr(c.Trae.PoolAccounts, true)
@@ -1578,6 +1599,31 @@ func (c *Config) normalize() error {
 // 用于把「没配」与「显式 false」区分开——这是所有新开关统一的做法。
 func boolOr(p *bool, def bool) bool {
 	if p == nil {
+		return def
+	}
+	return *p
+}
+
+// secsOr 取 *int 的秒数值，nil（未配）时返回默认值 —— 与 boolOr 同一条纪律。
+//
+// # ⚠ 为什么不能直接判 iv<=0 就落默认（这是本次修的缺陷）
+//
+// 对**秒数型**的开关，「没配」与「显式 0」必须区分开：
+//
+//	nil  → 默认（例如 1800 秒扫一次）
+//	0    → **关闭**（0 秒 ⇒ 装配层 interval > 0 为假 ⇒ 不注册该任务）
+//	>0   → 自身
+//
+// 把两者混起来（老写法 iv<=0 就落 1800）的后果是「关闭开关失效」：
+// 用户按注释写 0 想关掉，却得到一个**默认开启**的周期任务。对 codearts / trae
+// 这种 refreshToken **消费型**的上游，这不是小问题 —— 它会一直在后台把
+// 用户的凭证刷失效（实测：账号被刷成 the refresh token has been used）。
+//
+// ⚠ 负数按「没配」处理（落默认），不是「关闭」。理由：负数是明显的笔误，
+// 而把它当成「关闭」会让一个写错的配置**静默地少一个能力**；落默认则
+// 行为与「没写这一行」一致，符合「配置写错时按最保守/最熟悉的方式走」。
+func secsOr(p *int, def int) int {
+	if p == nil || *p < 0 {
 		return def
 	}
 	return *p

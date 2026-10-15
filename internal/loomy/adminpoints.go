@@ -86,9 +86,11 @@ type accountTasksView struct {
 // handleTasksList GET /admin/loomy/tasks —— 每个账号的任务进度。
 func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
 	accts := p.accounts()
-	out := make([]accountTasksView, 0, len(accts))
-	var totalEarned, totalMax int64
-	for _, a := range accts {
+	// ⚠ **定长**切片 + 下标写入：并发时不能 append 共享切片（会丢数据、不报错）。
+	out := make([]accountTasksView, len(accts))
+	// 并发限流：串行要 3~4 分钟，面板一直转（见 loomyPanelConcurrency）。
+	fanOutConcurrent(len(accts), loomyPanelConcurrency, func(i int) {
+		a := accts[i]
 		v := accountTasksView{UID: a.UID, Nickname: maskDisplay(a.Nickname),
 			Total: len(TaskDefs), Max: taskMaxPoints()}
 		// ⚠ **每个账号一份独立预算**。共用一份会让前几个账号把 20 秒吃光，
@@ -113,9 +115,14 @@ func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
 				v.Balance = bal
 			}
 		})
+		out[i] = v
+	})
+	// 汇总放在扇出之后：v.Earned/v.Max 由各 goroutine 写进自己的格子，
+	// 这里串行读，不需要锁。
+	var totalEarned, totalMax int64
+	for _, v := range out {
 		totalEarned += v.Earned
 		totalMax += v.Max
-		out = append(out, v)
 	}
 	writeLoomyJSON(w, http.StatusOK, map[string]any{
 		"defs":     TaskDefs,
@@ -240,17 +247,19 @@ func (p *Provider) handleTasksAuto(w http.ResponseWriter, r *http.Request) {
 // handleTasksAutoAll POST /admin/loomy/tasks/auto-all —— 一键完成**全部** loomy 账号。
 func (p *Provider) handleTasksAutoAll(w http.ResponseWriter, r *http.Request) {
 	accts := p.accounts()
-	results := make([]taskRunResult, 0, len(accts))
-	var completed, failed int
-	for _, a := range accts {
+	results := make([]taskRunResult, len(accts))
+	// 写操作更要限流：对同一个上游打太快会被限流，而每个账号要跑 8 个任务。
+	fanOutConcurrent(len(accts), loomyPanelConcurrency, func(i int) {
+		a := accts[i]
 		// ⚠ 每个账号一份独立预算（见 withPointsTimeout 的事故记录）。
 		// 这条更危险：共用预算会让**后面的账号一个任务都跑不成**，
 		// 而界面上只显示"失败"，看不出是超时。
-		var res taskRunResult
-		withPointsTimeout(func(ctx context.Context) { res = p.runTasks(ctx, a) })
+		withPointsTimeout(func(ctx context.Context) { results[i] = p.runTasks(ctx, a) })
+	})
+	var completed, failed int
+	for _, res := range results {
 		completed += len(res.Completed)
 		failed += len(res.Failed)
-		results = append(results, res)
 	}
 	writeLoomyJSON(w, http.StatusOK, map[string]any{
 		"ok":        failed == 0,
@@ -278,9 +287,9 @@ type accountInviteView struct {
 // handleInviteList GET /admin/loomy/invite —— 每个账号的激活状态 + 自己生成的码。
 func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	accts := p.accounts()
-	out := make([]accountInviteView, 0, len(accts))
-	activatedN := 0
-	for _, a := range accts {
+	out := make([]accountInviteView, len(accts))
+	fanOutConcurrent(len(accts), loomyPanelConcurrency, func(i int) {
+		a := accts[i]
 		v := accountInviteView{UID: a.UID, Nickname: maskDisplay(a.Nickname)}
 		// ⚠ **每个账号一份独立预算**（见 withPointsTimeout 的事故记录）。
 		withPointsTimeout(func(ctx context.Context) {
@@ -292,9 +301,6 @@ func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
 			v.OK = true
 			v.Activated = act
 			v.Applied = applied
-			if act {
-				activatedN++
-			}
 			// 自己的码是**附加信息**：查不到不影响激活状态那一行（所以错误只丢进 Error）。
 			codes, cerr := p.InvitationCodes(ctx, a.Session)
 			if cerr == nil && len(codes) == 0 {
@@ -318,7 +324,14 @@ func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
 				v.Balance = bal
 			}
 		})
-		out = append(out, v)
+		out[i] = v
+	})
+	// ⚠ activatedN 在扇出之后统计：并发下在闭包里裸加是有竞争的。
+	activatedN := 0
+	for _, v := range out {
+		if v.Activated {
+			activatedN++
+		}
 	}
 	writeLoomyJSON(w, http.StatusOK, map[string]any{
 		"accounts": out,
