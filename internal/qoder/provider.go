@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -58,6 +59,22 @@ type Provider struct {
 	// log 签到历史（装配层注入；nil = 不记历史，但那样界面「今日签到」
 	// 列会永远为空 —— 见 checkin.go 的注释）。
 	log *checkinlog.Log
+
+	// quotaConsumed 上游"我消耗了额度"的上报口（装配层注入；nil = 不上报）。
+	//
+	// # 为什么不是复用上面的 quotaSink（那个写**完整值**）
+	//
+	// `quotaSink(uid, QuotaView)` 要求调用方**知道当前值** —— 那是给"刚查到
+	// 一个新余额"用的。而对话消耗只知道**增量**：若在这里自己算
+	// `上次已知 − 消耗` 再整份写回去，会把别处（后台续期、手动刷新）刚写进去
+	// 的新值**回退**掉。
+	//
+	// 所以增量走**独立通道**，由核心在自己的锁里应用（见
+	// gateway.QuotaConsumedSink 的说明）。
+	quotaConsumed gateway.QuotaConsumedSink
+
+	// consumed 本上游"上次查询之后、还没上报"的消耗累计（见 consumed.go）。
+	consumed *consumedAcc
 	// checkinInterval 自动签到扫描间隔（<=0 = 不注册自动签到任务）。
 	// 与 workbuddy / trae 同一个值（30 分钟）。
 	checkinInterval time.Duration
@@ -84,6 +101,11 @@ type Config struct {
 	//
 	// 装配层传 30 分钟（与 workbuddy / trae 同一节奏）。
 	CheckinInterval time.Duration
+	// QuotaConsumed 上游上报「我刚消耗了 N 个显示单位」（nil = 不上报）。
+	//
+	// 见 Provider.quotaConsumed 的说明：增量与「写完整值」是两条通道。
+	QuotaConsumed gateway.QuotaConsumedSink
+
 	// QuotaSink 把额度写回账号池（nil = 后台任务不回写额度）。
 	//
 	// 见 Provider.quotaSink 的注释：没有它，重启后额度列一直是空的
@@ -119,6 +141,8 @@ func NewWithConfig(cfg Config) *Provider {
 		log:             cfg.Log,
 		checkinInterval: cfg.CheckinInterval,
 		quotaSink:       cfg.QuotaSink,
+		quotaConsumed:   cfg.QuotaConsumed,
+		consumed:        newConsumedAcc(),
 	}
 	// 构造共享签到驱动（按钮 / 自动任务 / 端点 / 写历史 都在它里面）。
 	// 必须在字段就位之后调用 —— 它读 p.log / p.checkinInterval / p.ID()。
@@ -241,6 +265,27 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	}
 	if rc == nil {
 		rc = io.NopCloser(byteReader(nil))
+	}
+	// ⚠ 在**本就要转发**的响应体上旁听 `usage.credits` —— 零额外请求。
+	//
+	// 用户的想法：「发一次请求之后，我们就把那个额度给更新掉就行了」。
+	// 实测上游两种模式都带这个字段（见 consumed.go 的文件头）。
+	//
+	// 三条纪律由 gateway.NewUsageTap 保证（逐字节透传 / 不缓冲不阻塞 /
+	// 读不出来静默），这里只做"累计 + 跨整数上报"。
+	if p.quotaConsumed != nil && p.consumed != nil && cred.UID != "" {
+		tapped, terr := gateway.NewUsageTap(rc, quotaTapSpec(), func(scaled int64) {
+			if whole := p.consumed.add(cred.UID, scaled); whole > 0 {
+				p.quotaConsumed.OnQuotaConsumed(p.ID(), cred.UID, whole)
+			}
+		})
+		if terr != nil {
+			// ⚠ spec 写错是**装配期**错误，但不能因此让转发失败 ——
+			// 转发是主线，额度跟踪是附线。记一行日志、原样透传。
+			log.Printf("qoder: usage tap 未装配（%v）—— 转发照常，额度不会自动更新", terr)
+		} else {
+			rc = tapped
+		}
 	}
 	return gateway.ChatStream{Status: status, Body: rc}, nil
 }

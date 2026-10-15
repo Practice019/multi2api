@@ -1492,6 +1492,47 @@ func (p *Pool) SetQuota(uid string, q QuotaView) {
 	}
 }
 
+// ApplyQuotaConsumed 把一个账号的额度**减少** units 个显示单位。
+//
+// # 为什么读-改-写必须在**同一把锁**里（而不是 Get + 减 + Set）
+//
+// 分开写会有 TOCTOU：两次调用之间可能插进一次 `SetQuota`（那是一次
+// RefreshQuota 拿到的新余额），于是我们基于一个**已经过期**的值做减法 ——
+// 结果多扣，把一个还有额度的账号显示成用完。
+//
+// # 谁会调它
+//
+// 核心在收到上游的额度上报时（`gateway.QuotaConsumedSink` 的实现里）。
+// 上游从对话回执里读到"这次花了多少"，但**不能直接写核心池子**
+// （arch_test.go 守着那条接缝），所以由核心来应用。
+//
+// # ⚠ 只在**单值额度**上扣
+//
+// `per_model` 没有"一个可减的数"；`unlimited` 减一个不限额的额度更是荒谬。
+// 硬减就是编数据 —— 所以形态不对时**什么都不做**，让界面继续显示上游真相。
+func (p *Pool) ApplyQuotaConsumed(uid string, units int64) {
+	if uid == "" || units <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if e.quota.Kind != QuotaKindCredits || !e.quota.HasData {
+		return // 形态不支持减法（见上）
+	}
+	left := e.quota.Remaining - units
+	if left < 0 {
+		// ⚠ 钳到 0 而不是显示负数：负余额是记账噪声，不是"欠着"。
+		left = 0
+	}
+	e.quota.Remaining = left
+	e.credits = e.quota.Effective()
+	p.dirty.Store(true)
+}
+
 // SetCredits 更新账号余额（单值形态）。
 //
 // # ⚠ 它不会把已有的"按模型额度"降级成单值

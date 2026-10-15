@@ -795,6 +795,10 @@ func main() {
 			//（那一列读 checkinlog 的 KindCheckin 记录）。
 			Log:             checkinLog,
 			CheckinInterval: cfg.ScheduleCheckinInterval,
+			// 上游上报「我刚消耗了 N 个显示单位」，由核心应用到账号池。
+			// 见 cmd/server/quota_consumed.go —— 上游不允许 import 核心，
+			// 所以增量走上报；读-改-写在池子同一把锁里（避免 TOCTOU 多扣）。
+			QuotaConsumed: quotaConsumedSink{p: p},
 		})
 		if qSigner != nil {
 			qd.SetSigner(qoderSigner{s: qSigner})
@@ -823,6 +827,7 @@ func main() {
 				// 而两个产品的 uid 不同，不会互相污染。
 				Log:             checkinLog,
 				CheckinInterval: cfg.ScheduleCheckinInterval,
+				QuotaConsumed:   quotaConsumedSink{p: p},
 			})
 			// 中国版与国际版**共用同一个签名器**：两者同协议族、同一份 WASM，
 			// 且账号池里两个产品的凭证本来就在同一个目录（靠 product_id 区分）。
