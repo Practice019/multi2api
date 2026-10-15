@@ -123,9 +123,31 @@ func TestStartupBannerDoesNotPrintAPIKey(t *testing.T) {
 	}
 
 	// 正向：必须有一条"到哪去拿"的提示（用户要求的"提醒他去哪里查看"）。
-	if !strings.Contains(src, "顶层") || !strings.Contains(src, "api_key") {
-		t.Error("启动横幅应当指路：告诉用户管理钥匙在配置文件顶层 api_key 字段、" +
-			"或本机控制台的「API 接入信息」里看 —— 这是用户明确要求的")
+	//
+	// ⚠ 必须指向 **admin_token**（本次修的就是它指错了字段）。
+	//
+	// 门禁令牌与对话 api_key 分开之后，横幅还在说"在 config.json 的顶层 api_key
+	// 字段" —— 而拿那把钥匙**进不了**控制台（403）。这正是本仓反复修的那类
+	// 「指错地方」缺陷：提示本身成了让人反复试错的原因。
+	if !strings.Contains(src, "顶层") || !strings.Contains(src, "admin_token") {
+		t.Error("启动横幅应当指路：告诉用户管理令牌在配置文件顶层 **admin_token** 字段" +
+			"（不是 api_key —— 后者只能调 /v1 对话接口，进不了控制台）")
+	}
+	// 反向：横幅里不许把门禁令牌说成 api_key。
+	//
+	// 判据：出现「管理令牌 … api_key 字段」这种搭配就是错的。
+	for _, bad := range []string{
+		`管理钥匙  未打印（避免留在终端历史/日志里）—— 在 %s 的顶层 \"api_key\" 字段；`,
+	} {
+		if strings.Contains(src, bad) {
+			t.Errorf("横幅仍把管理令牌指向 api_key：%q ——\n"+
+				"两个凭据独立之后，这样指会让人拿对话密钥去登控制台，而它必然 403。", bad)
+		}
+	}
+	// 未配 admin_token 时必须说清后果（否则"远程打不开"会被当成坏了）。
+	if !strings.Contains(src, "没有远程管理面") {
+		t.Error("横幅应当在 admin_token 为空时说明「没有远程管理面」，" +
+			"否则用户会把「远程进不去」当成故障去查（而那是安全默认）。")
 	}
 }
 

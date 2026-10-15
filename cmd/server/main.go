@@ -1400,7 +1400,7 @@ func main() {
 	log.Printf("  控制台   %s/ui", uiOrigin(cfg.Listen))
 	log.Printf("  API 基址 %s/v1", uiOrigin(cfg.Listen))
 	for _, extra := range extraOrigins(cfg.Listen) {
-		log.Printf("  局域网   %s/ui   ← 从别的机器打开时要在地址后加 ?token=<管理钥匙>", extra)
+		log.Printf("  局域网   %s/ui   ← 从别的机器打开时要在地址后加 ?token=<管理令牌>", extra)
 	}
 	if cfg.APIKey != "" {
 		// ⚠⚠ 这里**刻意不打印**管理钥匙本身。
@@ -1412,8 +1412,13 @@ func main() {
 		//
 		// 所以这里只**指路**（这正是"提醒他去哪里查看"的落点）：
 		// 告诉他钥匙在哪个文件、哪个字段，他自己去打开取。
-		log.Printf("  管理钥匙  未打印（避免留在终端历史/日志里）—— 在 %s 的顶层 \"api_key\" 字段；", *cfgPath)
-		log.Printf("            或本机打开控制台 → 仪表盘 → 「API 接入信息」→ 点「显示」")
+		log.Printf("  管理令牌  未打印（避免留在终端历史/日志里）—— 在 %s 的顶层 \"admin_token\" 字段；", *cfgPath)
+		log.Printf("            或本机打开控制台 → 「API 管理」→ 那一行显示它的掩码（可轮换）")
+		if cfg.AdminToken == "" {
+			// ⚠ 没配就**必须**说清后果，否则用户会以为"远程打不开"是坏了。
+			log.Printf("            ⚠ 当前没配 admin_token ⇒ **没有远程管理面**（只有本机能进控制台）。")
+			log.Printf("              要从别的机器管理，请在 %s 里加一行 \"admin_token\": \"<一串足够长的随机值>\" 再重启。", *cfgPath)
+		}
 	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
