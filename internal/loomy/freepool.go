@@ -63,6 +63,11 @@ type freePool struct {
 	// ⚠ 必须与 have 分开存：只看 have 无法区分"已知为 0"与"还没查过"，
 	// 而这两者在前端/选号上的含义完全不同。
 	zero map[string]bool
+	// free 每个 uid **上一次已知的**今日赠送剩余（绝对值）。
+	//
+	// 它不是为了展示 —— 它是"用对话回执里的 points_consumed 做减法"的基准：
+	// 没有绝对值就无法扣减（扣了就是凭空造数）。见 noteConsumed。
+	free map[string]int64
 	// day 池子所属的自然日；变了就整体清空（见 resetIfNewDay）。
 	day string
 	// checkedAt 每个 uid 上次**成功查到**余额的时刻（用于重查节流）。
@@ -81,6 +86,7 @@ func newFreePool() *freePool {
 	return &freePool{
 		have:        map[string]bool{},
 		zero:        map[string]bool{},
+		free:        map[string]int64{},
 		day:         naturalDay(time.Now()),
 		checkedAt:   map[string]time.Time{},
 		failAt:      map[string]time.Time{},
@@ -111,6 +117,9 @@ func (f *freePool) resetIfNewDay(now time.Time) {
 	f.day = d
 	f.have = map[string]bool{}
 	f.zero = map[string]bool{}
+	// free 也要清：它是"今日赠送剩余"的绝对值，跨天必须重新取
+	//（昨天的余额今天不成立），不能凭一个过期的基准做减法。
+	f.free = map[string]int64{}
 	f.checkedAt = map[string]time.Time{}
 	f.failAt = map[string]time.Time{}
 	f.needRecheck = map[string]bool{}
@@ -133,10 +142,58 @@ func (f *freePool) noteQuota(uid string, daily int64, dailyKnown bool, now time.
 	delete(f.needRecheck, uid)
 	if daily > 0 {
 		f.have[uid] = true
+		f.free[uid] = daily // 绝对值基准：之后靠 points_consumed 递减
 		delete(f.zero, uid)
 		return
 	}
 	delete(f.have, uid)
+	delete(f.free, uid)
+	f.zero[uid] = true
+}
+
+// noteConsumed 用**对话回执里**的 points_consumed 扣减本地估计值。
+//
+// # 用户的思路（原话）
+//
+//	「如果发一次请求就有返回额度的话，那就直接每次发请求之后，我们就把那个
+//	  额度给更新掉就行了，把那个缓存给更新掉。那我们就不需要去管那个缓存了，
+//	  也就等于我们会自动去更新我们网页上前端那个数据，那不是更快吗？」
+//
+// 这是"用完一个号就从池子里出去"最便宜的实现：**零额外请求**，而且用的是
+// 上游自己报的数（实测与账本吻合：1870 → 1868，两次请求 points_consumed 各 1）。
+//
+// ⚠ 只减**免费（今日赠送）**那一份：赠送额度按自然日重置；永久额度没有
+// "用完"的语义，也不该让账号离开池子。扣除后 ≤ 0 ⇒ 移出池子（用户要的那条）。
+//
+// ⚠ **不知道绝对值就什么都不做**（见 free 字段）：凭空减等于造数，
+// 而造出来的"已用完"会让一个还有免费额度的号被跳过。
+//
+// ⚠ 漂移如实标注：网关之外的消耗（用户自己在 Loomy 桌面客户端里用）不经过
+// 这里，所以这个估计会**偏高**（以为还有免费额度）。定期清扫那条对账路径
+// 不能删 —— 它就是兜这个漂移的。
+func (f *freePool) noteConsumed(uid string, points int64, now time.Time) {
+	if uid == "" || points <= 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetIfNewDay(now)
+	// 只有"已知还有免费额度"的号才扣。未知的不猜 —— 不猜就不会猜错。
+	if !f.have[uid] {
+		return
+	}
+	left, ok := f.free[uid]
+	if !ok {
+		return // 没有绝对值基准 ⇒ 不能减
+	}
+	left -= points
+	if left > 0 {
+		f.free[uid] = left
+		return
+	}
+	// 免费额度用完 ⇒ 从池子里出去（用户原话："它就从池子里出去"）。
+	delete(f.have, uid)
+	delete(f.free, uid)
 	f.zero[uid] = true
 }
 
