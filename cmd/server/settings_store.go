@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -322,76 +323,102 @@ func validateSettings(p admin.Settings) error {
 }
 
 // persist 把设置合并进 config.json，保留文件里已有的其它键。
+//
+// # ⚠⚠ 这里曾经把用户的整个配置重写掉（真实事故，2026-10-15）
+//
+// 事故现场：用户的 config.json 从 26 个顶层键变成 **9 个** —— 只剩这个函数管的
+// 那些设置段（admin / cooldown / features / pool / request_log_keep_days /
+// schedule / session_sticky / upstash / upstream）。丢掉的包括：
+//
+//	api_key      （对话凭据 —— 丢了客户端全部 401）
+//	listen       （丢了就回落 Default() 的 ":7863" = 监听全部网卡）
+//	auth_dir / state_file
+//	注释（用户手写的说明）
+//	全部上游段
+//
+// 两条原因**叠加**：
+//
+//	① 旧代码用 `json.Unmarshal` 读这个文件，而它**不认注释**。
+//	   而本仓的 config.json 是**支持注释**的（JSONC，见 jsonc.go）——
+//	   用户手写的 73 行说明让它解析失败。
+//	② 解析失败时旧代码写的是：
+//
+//		_ = json.Unmarshal(raw, &doc) // 解析失败就用空文档重写
+//
+//	   把"解析失败"当成了"从空开始"，而"从空开始"= **丢掉用户的一切配置**
+//	   然后 MarshalIndent 写回去。于是"点一下保存设置"就把配置擦了。
+//
+// 修法两条，都要有：
+//
+//	· 读用它该用的解析器（unmarshalJSONC，与 Load 同一条路径）
+//	· **解析失败时绝不重写**：报错退出，让用户看到"保存失败"
+//
+// 第 2 条是这次的关键教训：对"用户的配置文件"，**任何读不懂的情形都必须
+// 停下**，绝不能"当成空的"继续写 —— 那是把一次读失败放大成一次数据丢失。
 func (s *settingsStore) persist(p admin.Settings) error {
 	doc := map[string]any{}
 	if raw, err := os.ReadFile(s.path); err == nil {
-		_ = json.Unmarshal(raw, &doc) // 解析失败就用空文档重写
+		// ⚠ 用 unmarshalJSONC（不是 json.Unmarshal）：config.json 允许写注释，
+		// 而标准库不认。这里读不懂就**必须**报错 —— 见函数头的事故记录。
+		if err := unmarshalJSONC(raw, &doc); err != nil {
+			return fmt.Errorf("读取现有配置失败，已中止保存（避免把配置写坏）: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("读取 %s 失败: %w", s.path, err)
 	}
 
-	set := func(section string, kv map[string]any) {
-		sub, _ := doc[section].(map[string]any)
-		if sub == nil {
-			sub = map[string]any{}
-		}
-		for k, v := range kv {
-			sub[k] = v
-		}
-		doc[section] = sub
+	// ⚠ 逐项**字节级**写回（不是解析成 map 再序列化）。
+	//
+	// 解析成 map 再 MarshalIndent 写回去会**丢掉注释与字段顺序** ——
+	// 那正是用户上一轮报的「配置太乱」的同一个机制，也是本次事故里
+	// "73 行注释全没了" 的直接原因。见 settings_edit.go 的文件头。
+	sets := []managedSetting{
+		{"schedule", "checkin_enabled", p.CheckinEnabled},
+		{"schedule", "keepalive_enabled", p.KeepaliveEnabled},
+		{"schedule", "checkin_hours", p.CheckinHours},
+		{"schedule", "keepalive_hours", p.KeepaliveHours},
+		{"cooldown", "soft_rate", p.SoftRate},
+		{"upstream", "timeout_seconds", p.UpstreamTimeoutSec},
+		{"upstream", "header_timeout_seconds", p.UpstreamHeaderTimeout},
+		{"upstream", "idle_timeout_seconds", p.UpstreamIdleTimeout},
+		{"pool", "max_in_flight", p.PoolMaxInFlight},
+		{"pool", "breaker_threshold", p.BreakerThreshold},
+		{"pool", "breaker_cooldown", p.BreakerCooldown},
+		{"pool", "breaker_cooldown_max", p.BreakerCooldownMax},
+		{"features", "sanitize_blacklist_fingerprints", p.SanitizeFingerprints},
+		{"upstash", "url", p.UpstashURL},
+		{"session_sticky", "enabled", p.SessionStickyEnabled},
+		{"session_sticky", "ttl", p.SessionStickyTTL},
+		{"admin", "checkin_log_keep_days", p.CheckinLogKeepDays},
+		{"", "request_log_keep_days", p.RequestLogKeepDays},
 	}
-	// unset 从某个段里删掉一个键。用于把历史遗留的别名键收敛掉：
-	// 只写新键而不删旧键的话，文件里会同时存在两个意思相同、值可能相反的键，
-	// 下次读哪个就说不清了。
-	unset := func(section, key string) {
-		if sub, ok := doc[section].(map[string]any); ok {
-			delete(sub, key)
-		}
-	}
-
-	set("schedule", map[string]any{
-		"checkin_enabled":   p.CheckinEnabled,
-		"keepalive_enabled": p.KeepaliveEnabled,
-		"checkin_hours":     p.CheckinHours,
-		"keepalive_hours":   p.KeepaliveHours,
-	})
-	set("cooldown", map[string]any{"soft_rate": p.SoftRate})
-	set("upstream", map[string]any{
-		"timeout_seconds":        p.UpstreamTimeoutSec,
-		"header_timeout_seconds": p.UpstreamHeaderTimeout,
-		"idle_timeout_seconds":   p.UpstreamIdleTimeout,
-	})
-	set("pool", map[string]any{
-		"max_in_flight":        p.PoolMaxInFlight,
-		"breaker_threshold":    p.BreakerThreshold,
-		"breaker_cooldown":     p.BreakerCooldown,
-		"breaker_cooldown_max": p.BreakerCooldownMax,
-	})
-	set("features", map[string]any{"sanitize_blacklist_fingerprints": p.SanitizeFingerprints})
-	set("upstash", map[string]any{"url": p.UpstashURL})
-	set("session_sticky", map[string]any{
-		"enabled": p.SessionStickyEnabled,
-		"ttl":     p.SessionStickyTTL,
-	})
-	set("admin", map[string]any{
-		"checkin_log_keep_days": p.CheckinLogKeepDays,
-	})
 	// 上游段：由适配器给出它自己的键值（核心不认识这些键名，也不再列它们）。
-	// 这里用 set 合并而不是整体替换 —— 与上面各段同一语义，
-	// 保留用户手工写在该段里的其它键。
 	if s.up != nil {
-		set("admin", s.up.Values())
+		for k, v := range s.up.Values() {
+			sets = append(sets, managedSetting{"admin", k, v})
+		}
 	}
-	// 别名键收敛：写入规范键 growth_auto_claim 后，删掉曾用过（且曾被静默忽略）的
-	// growth_auto_claim_tasks，避免两个键并存给出互相矛盾的信号。
-	unset("admin", "growth_auto_claim_tasks")
-	doc["request_log_keep_days"] = p.RequestLogKeepDays
 
-	raw, err := json.MarshalIndent(doc, "", "  ")
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("读取 %s 失败: %w", s.path, err)
+		}
+		raw = []byte("{}\n")
+	}
+	out, missing, err := applyManagedSettings(raw, sets)
 	if err != nil {
 		return err
 	}
-	raw = append(raw, '\n')
+	// 别名键收敛：写入规范键 growth_auto_claim 后，删掉曾用过（且曾被静默忽略）的
+	// growth_auto_claim_tasks，避免两个键并存给出互相矛盾的信号。
+	// 字节级抹掉（保留行号），其余不动。
+	out = blankKeyInSection(out, "admin", "growth_auto_claim_tasks")
+	if len(missing) > 0 {
+		log.Printf("设置：这些项原本不在 config.json 里，已插入 %v（其余内容逐字节保留）", missing)
+	}
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return err
 	}
 	if dir := filepath.Dir(s.path); dir != "" {
