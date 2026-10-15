@@ -44,7 +44,7 @@ func TestUpstreamRoutesActuallyDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{Registry: reg})
+	h := New(Config{ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, stubPath, nil)

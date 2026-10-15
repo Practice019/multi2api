@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"workbuddy2api/internal/apikey"
 )
@@ -38,6 +39,7 @@ func (h *Handler) registerAPIKeys() {
 	h.register("POST /admin/apikeys/reset", h.apiKeysReset)
 	h.register("POST /admin/apikeys/update", h.apiKeysUpdate)
 	h.register("POST /admin/apikeys/rotate-admin", h.apiKeysRotateAdmin)
+	h.register("POST /admin/apikeys/rotate-api-key", h.apiKeysRotateAPIKey)
 }
 
 // apiKeysList GET /admin/apikeys —— 全部 key 的掩码视图 + 管理钥匙掩码。
@@ -47,11 +49,28 @@ func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"keys": []apikey.View{}, "enabled": false})
 		return
 	}
+	// 两把钥匙的掩码分别回传（它们**互相独立**）：
+	//
+	//	admin_key   对话接口的 api_key（不限额，给调用方）
+	//	admin_token 管理台门禁令牌（进控制台）
+	//
+	// ⚠ 为什么必须都回：前端要能分别显示"我用的是哪一把、轮换的是哪一把"。
+	// 改造前只有 admin_key，而那时它同时是门禁 —— 一个字段承担两个语义，
+	// 正是用户报的"门禁 token 不能和 api 一样"。
 	adminMask := ""
 	if h.cfg.APIKey != "" {
 		adminMask = apikey.MaskID(h.cfg.APIKey)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"keys": s.List(), "enabled": true, "admin_key": adminMask})
+	adminTokenMask := ""
+	if t := h.currentAdminToken(); t != "" {
+		adminTokenMask = apikey.MaskID(t)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"keys":        s.List(),
+		"enabled":     true,
+		"admin_key":   adminMask,
+		"admin_token": adminTokenMask,
+	})
 }
 
 // apiKeysCreate POST /admin/apikeys —— body {"name":"...","limit":0,"rpm":0,"models":["..."]}。
@@ -205,33 +224,156 @@ func writeStoreError(w http.ResponseWriter, err error) {
 //
 // 生成新 key → 写回 config.json 的 api_key 字段（ConfigPath）→ 通过
 // OnAPIKeyRotated 通知装配层更新 handler 内存（立即生效，无需重启）→
-// 返回新 key（仅此一次显示完整值）。
+// apiKeysRotateAdmin 轮换**管理令牌**（admin_token）。
+//
+// # 与 apiKeysRotateAPIKey 的分工（用户要求：门禁 token 与 api 必须分开）
+//
+//	本端点          → 换 admin_token（管理台门禁）。换完**旧令牌立即作废**。
+//	apiKey 那个端点 → 换 api_key（对话接口凭据）。
+//
+// 两者互不影响 —— 这正是"两把钥匙"的意义：轮换对话 key 不该把管理台锁掉，
+// 反之亦然。
+//
+// ⚠ 改造前这个端点换的是 **api_key**（名字叫 rotate-admin 却动对话凭据），
+// 而门禁也认 api_key —— 于是"轮换管理钥匙"实际是"换掉对话 key 并顺带
+// 改变门禁"，两者纠缠在一起。现在它只管门禁。
+//
+// # 与 apiKeysRotateAPIKey 的分工（用户要求：门禁 token 与 api 必须分开）
+//
+//	本端点          → 换 admin_token（管理台门禁）。换完**旧令牌立即作废**。
+//	apiKey 那个端点 → 换 api_key（对话接口凭据）。
+//
+// 两者互不影响 —— 这正是"两把钥匙"的意义：轮换对话 key 不该把管理台锁掉，
+// 反之亦然。
+//
+// # 无令牌时的行为（不生成、而是引导配置）
+//
+// 部署可能根本没配 admin_token（那时只有本机免令牌可用）。此时**不应该**
+// 偷偷生成一把并写盘 —— 那会改变"本部署有没有远程管理面"这个安全事实，
+// 而该事实应当由人在 config 里显式写定。所以这里明确报错并给出做法。
 func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.APIKey == "" {
-		writeError(w, http.StatusBadRequest, "当前未配置管理钥匙（config 里没有 api_key），无需轮换")
+	if h.cfg.ConfigPath == "" {
+		writeError(w, http.StatusBadRequest, "本部署不支持写回 config.json（未接线 ConfigPath），无法轮换")
+		return
+	}
+	if strings.TrimSpace(h.currentAdminToken()) == "" {
+		writeError(w, http.StatusBadRequest,
+			"当前未配置 admin_token。请先在 config.json 里加一个 `\"admin_token\": \"<足够长的随机值>\"` "+
+				"再重启；那之后本端点就能免重启地轮换它了。"+
+				"（不自动生成：'本部署有没有远程管理面'该由人在配置里写定，不由一次点击决定。）")
 		return
 	}
 	newKey := apikey.NewAdminKey()
-	// 写回 config.json（保留其余字段）。
-	if h.cfg.ConfigPath != "" {
-		if err := setConfigAPIKey(h.cfg.ConfigPath, newKey); err != nil {
-			writeError(w, http.StatusInternalServerError, "写回 config.json 失败: "+err.Error()+"（新 key 未生效）")
-			return
-		}
+	if err := setConfigField(h.cfg.ConfigPath, "admin_token", newKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "写回 config.json 失败: "+err.Error()+"（新令牌未生效）")
+		return
 	}
-	// 内存立即生效（装配层更新 handler 的管理钥匙）。
-	if h.cfg.OnAPIKeyRotated != nil {
-		h.cfg.OnAPIKeyRotated(newKey)
+	// 内存立即生效（必须**跨包**同步，否则就是本次修的"要重启才生效"）。
+	h.SetAdminToken(newKey)
+	if h.cfg.OnAdminTokenRotated != nil {
+		h.cfg.OnAdminTokenRotated(newKey)
 	}
-	log.Printf("admin: 管理钥匙已轮换（写入 %s，立即生效）", h.cfg.ConfigPath)
+	log.Printf("admin: 管理令牌已轮换（写入 %s，立即生效，无需重启）", h.cfg.ConfigPath)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"full":   newKey,
 		"masked": apikey.MaskID(newKey),
 		"path":   h.cfg.ConfigPath,
+		"note": "旧管理令牌已立即失效。请用新令牌重新登录控制台" +
+			"（本机直连不受影响）。",
 	})
 }
 
-// setConfigAPIKey 读 config.json → 只改 api_key 的值 → 原子写回。
+// apiKeysRotateAPIKey 轮换**对话接口的 api_key**（与门禁令牌无关）。
+func (h *Handler) apiKeysRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.APIKey == "" {
+		writeError(w, http.StatusBadRequest, "当前未配置 api_key（config 里没有），无需轮换")
+		return
+	}
+	if h.cfg.ConfigPath == "" {
+		writeError(w, http.StatusBadRequest, "本部署不支持写回 config.json（未接线 ConfigPath），无法轮换")
+		return
+	}
+	newKey := apikey.NewAdminKey()
+	if err := setConfigField(h.cfg.ConfigPath, "api_key", newKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "写回 config.json 失败: "+err.Error()+"（新 key 未生效）")
+		return
+	}
+	if h.cfg.OnAPIKeyRotated != nil {
+		h.cfg.OnAPIKeyRotated(newKey)
+	}
+	log.Printf("admin: api_key 已轮换（写入 %s，立即生效）", h.cfg.ConfigPath)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"full":   newKey,
+		"masked": apikey.MaskID(newKey),
+		"path":   h.cfg.ConfigPath,
+		"note":   "这是**对话接口**的凭据。管理台门禁用的是 admin_token，两者独立。",
+	})
+}
+
+// setConfigField 读 config.json → 只改指定顶层字段的值 → 原子写回。
+//
+// 这是 setConfigAPIKey 的泛化：字段名参数化，其余逐字节保留的语义完全一致。
+// 抽出来的理由是**现在有两个字段要改**（api_key 与 admin_token），
+// 而它们在同一个文件里、必须是同一套"只动那一处值"的写法。
+func setConfigField(path, field, newValue string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取: %w", err)
+	}
+	if out, ok := replaceJSONStringValue(raw, field, newValue); ok {
+		return writeFileAtomic(path, out)
+	}
+	// 回落：文件里没有该字段 —— 那说明它还没被写过。
+	//
+	// ⚠ 这里**不能**用"整体重新序列化"（那会丢注释/顺序，正是用户报的
+	// 「配置太乱」）。改成**插入**一行：在顶层对象的开括号之后插入。
+	out, ok := insertTopLevelString(raw, field, newValue)
+	if !ok {
+		return fmt.Errorf("config.json 里定位不到顶层对象的插入点（文件畸形？）")
+	}
+	log.Printf("admin: config.json 原本没有 %s 字段，已插入（其余内容逐字节保留）", field)
+	return writeFileAtomic(path, out)
+}
+
+// insertTopLevelString 在顶层 JSON 对象的第一个 `{` 之后插入 `"field": "value",`。
+//
+// # 为什么是"插入"而不是"解析后重写"
+//
+// 解析后重写会丢注释与字段顺序（见 setConfigField 的注释）——
+// 而本仓的 config.json 现在**支持并鼓励**写注释（用户要求）。
+// 插入只影响那一行的位置，其余逐字节保留。
+//
+// 缩进取 2 空格（与 config.example.json 及各部署的既有风格一致）。
+func insertTopLevelString(raw []byte, field, value string) ([]byte, bool) {
+	// 找第一个非空白、非注释字符里的 `{`（顶层对象开括号）。
+	clean := stripCommentsForRewrite(raw)
+	open := -1
+	for i := 0; i < len(clean); i++ {
+		switch clean[i] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{':
+			open = i
+		}
+		break
+	}
+	if open < 0 {
+		return nil, false
+	}
+	enc, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	// 插入文本：换行 + 2 空格缩进 + "field": "value",
+	insert := "\n  \"" + field + "\": " + string(enc) + ","
+	out := make([]byte, 0, len(raw)+len(insert))
+	out = append(out, raw[:open+1]...)
+	out = append(out, insert...)
+	out = append(out, raw[open+1:]...)
+	return out, true
+}
+
+// setConfigAPIKey 保留旧名（既有调用方与测试用它），语义 = setConfigField("api_key")。
 //
 // # ⚠ 改造前它把整个 config 重新序列化，这是用户那份配置"乱"的根源
 //
@@ -255,33 +397,8 @@ func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
 //
 // 定位 `"api_key"` 这个键、找到它后面的字符串字面量、只替换那一段。
 // 其余**逐字节原样保留** —— 注释、顺序、空行、缩进全部不动。
-//
-// 找不到该键时（比如配置里根本没写 api_key）才回落到"解析 + 重写"，
-// 因为那种情况下没有可替换的原文 —— 而这种回落是**有日志的**，
-// 用户能知道自己的注释这次被规整了。
 func setConfigAPIKey(path, newKey string) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("读取: %w", err)
-	}
-
-	if out, ok := replaceJSONStringValue(raw, "api_key", newKey); ok {
-		return writeFileAtomic(path, out)
-	}
-
-	// 回落：文件里没有 api_key 键（或形态异常到定位不了）。
-	log.Printf("admin: config.json 里没有可替换的 api_key（首次写入）—— "+
-		"本次会重新序列化该文件，注释与原有顺序不再保留（写入 %s）", path)
-	var cfg map[string]any
-	if err := json.Unmarshal(stripCommentsForRewrite(raw), &cfg); err != nil {
-		return fmt.Errorf("解析: %w", err)
-	}
-	cfg["api_key"] = newKey
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化: %w", err)
-	}
-	return writeFileAtomic(path, out)
+	return setConfigField(path, "api_key", newKey)
 }
 
 // replaceJSONStringValue 把 `"key": "..."` 里的值替换成 newValue，

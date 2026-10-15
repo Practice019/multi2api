@@ -186,7 +186,7 @@ func TestLoginStartDispatchByProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{Registry: reg, DefaultProvider: "flowup"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
 
 	// ---- 1) 有 LoginFlow 的上游：走它自己的流程 ----
 	rec := httptest.NewRecorder()
@@ -248,7 +248,7 @@ func TestLoginStartBackwardCompatible(t *testing.T) {
 	if err := reg.Register(&stubProvider{id: "plain", caps: gateway.CapChat}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, DefaultProvider: "plain"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "plain"})
 
 	// 不带 provider，且**没有配 OAuth 客户端** → 应报错但**不能 panic**，
 	// 也不能因为"找不到上游的 LoginFlow"而返回 501。
@@ -289,7 +289,7 @@ func TestLoginPollDispatchByProvider(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, DefaultProvider: "flowup"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
 
 	rec := httptest.NewRecorder()
 	req := localReq("POST", "/admin/login/poll")
@@ -307,7 +307,7 @@ func TestLoginPollDispatchByProvider(t *testing.T) {
 	if err := reg2.Register(&stubProvider{id: "noflow", caps: gateway.CapChat}); err != nil {
 		t.Fatal(err)
 	}
-	h2 := New(Config{Registry: reg2, DefaultProvider: "noflow"})
+	h2 := New(Config{ListensLoopback: true, Registry: reg2, DefaultProvider: "noflow"})
 	rec2 := httptest.NewRecorder()
 	req2 := localReq("POST", "/admin/login/poll")
 	req2.Body = io.NopCloser(strings.NewReader(`{"state":"S","provider":"noflow"}`))
@@ -336,7 +336,7 @@ func TestLoginFlowSecretMustMarshal(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, DefaultProvider: "flowup", AuthDir: t.TempDir()})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup", AuthDir: t.TempDir()})
 
 	rec := httptest.NewRecorder()
 	req := localReq("POST", "/admin/login/poll")

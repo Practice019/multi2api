@@ -121,7 +121,7 @@ func TestReloadScopesToConfiguredProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{
+	h := New(Config{ListensLoopback: true,
 		Registry:        reg,
 		Pool:            p,
 		AuthDir:         dir,
@@ -175,7 +175,7 @@ func TestReloadFallsBackButWorks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{Registry: reg, Pool: p, AuthDir: dir, AuthsBase: dir, DefaultProvider: "workbuddy"}) // 无 ReloadProvider
+	h := New(Config{ListensLoopback: true, Registry: reg, Pool: p, AuthDir: dir, AuthsBase: dir, DefaultProvider: "workbuddy"}) // 无 ReloadProvider
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localPost("/admin/accounts/reload"))
 

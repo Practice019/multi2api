@@ -34,7 +34,7 @@ func TestProvidersEndpointListsAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{Registry: reg, DefaultProvider: "alpha"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "alpha"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
 
@@ -105,7 +105,7 @@ func contains(xs []string, v string) bool {
 // 前端要能在"未配置任何上游"的部署下正常渲染（显示空态），
 // 而不是拿到 500 后整页崩。
 func TestProvidersEndpointEmptyRegistry(t *testing.T) {
-	h := New(Config{Registry: gateway.NewRegistry()})
+	h := New(Config{ListensLoopback: true, Registry: gateway.NewRegistry()})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
 
@@ -125,7 +125,7 @@ func TestProvidersEndpointEmptyRegistry(t *testing.T) {
 
 // TestProvidersEndpointNilRegistry nil 注册表也要降级，不 panic。
 func TestProvidersEndpointNilRegistry(t *testing.T) {
-	h := New(Config{})
+	h := New(Config{ListensLoopback: true})
 	rec := httptest.NewRecorder()
 	// 不应 panic
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
@@ -228,7 +228,7 @@ func TestProvidersLoginReflectsLoginFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{Registry: reg, DefaultProvider: "with-login"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "with-login"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
 	if rec.Code != http.StatusOK {
@@ -292,7 +292,7 @@ func TestProvidersLoginRequiresConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{Registry: reg, DefaultProvider: "impl-but-unconfigured"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "impl-but-unconfigured"})
 
 	// 两个构造点都要检查 —— 这是本轮踩到的第 3 个坑：
 	// `providerInfo` 在 /admin/providers（schedule.go）与

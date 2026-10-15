@@ -54,7 +54,7 @@ func newScopeFixture(t *testing.T) (*Handler, *[]string) {
 	} {
 		p.AddFor(c.provider, &auth.Auth{UID: c.uid, Nickname: c.uid}, nil)
 	}
-	h := New(Config{Registry: reg, Pool: p, DefaultProvider: "alpha"})
+	h := New(Config{ListensLoopback: true, Registry: reg, Pool: p, DefaultProvider: "alpha"})
 	return h, asked
 }
 

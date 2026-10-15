@@ -90,6 +90,34 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// listensLoopback 报告 listen 是否**只**绑定回环地址。
+//
+// # 它是「本机免令牌」的前提之一（安全相关，不是工具函数）
+//
+// 管理台门禁对"本机直连"免令牌（用户要求：本机不该手填）。但这个放宽
+// 只有在**进程根本没对外监听**时才是安全的 —— 否则任何人都能连上那个
+// 端口，而请求的来源地址并不保证是回环。
+//
+//	127.0.0.1:7863 / localhost:7863 / [::1]:7863  → true（只本机可达）
+//	:7863 / 0.0.0.0:7863 / 192.168.0.5:7863       → false（对外可达）
+//
+// ⚠ 空 host（`:7863`）与 `0.0.0.0` 都是"监听全部网卡"，**不是**回环。
+// 这是最容易写错的一条：`net.SplitHostPort(":7863")` 给出空串 host，
+// 而空串在 net.Listen 里等于所有网卡 —— 若按"空 = 本机"处理，
+// 就会把一个对外暴露的部署当成只本机可达。
+//
+// ⚠ 与 isLoopbackHost 的区别：那个回答"这个 host 是不是回环地址"，
+// 这个回答"这个 listen 配置会不会对外敞开"。空 host 在前者返回 false
+// （解析不出 IP），在这里也必须返回 false —— 两者判据不同，不能互相替代。
+func listensLoopback(listen string) bool {
+	host, _ := splitHostPort(strings.TrimSpace(listen))
+	// 通配（空 / 0.0.0.0 / ::）一律不算回环。
+	if h := strings.Trim(strings.TrimSpace(host), "[]"); h == "" || h == "0.0.0.0" || h == "::" {
+		return false
+	}
+	return isLoopbackHost(host)
+}
+
 // localIPv4s 列出本机的私有 IPv4（局域网地址），按稳定性排序。
 //
 // 只取私有网段（RFC1918）与链路本地之外的回环排除 —— 公网 IPv4 与

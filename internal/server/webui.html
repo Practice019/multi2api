@@ -6,7 +6,8 @@
 <title>网关控制台</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="apple-touch-icon" href="/favicon.svg">
-<script>window.__WB2API_KEY__ = "__WB2API_KEY__";</script>
+<script>window.__WB2API_KEY__ = "__WB2API_KEY__";
+window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
 <script>
 // 主题防闪白：必须在 <style> 之前、同步执行。
 //
@@ -530,18 +531,18 @@
     <button data-theme-mode="light" style="padding:4px 9px;font-size:11px;border-left:0">浅色</button>
     <button data-theme-mode="dark" style="padding:4px 9px;font-size:11px;border-radius:0 8px 8px 0;border-left:0">深色</button>
   </span>
-  <!-- 非本机访问（服务端未注入 Key）时才出现的兜底入口；本机访问这里完全为空。
-       管理钥匙的查看与复制统一在「仪表盘 → API 接入信息」里，顶栏不再重复。
+  <!-- 未授权访问（服务端没注入任何凭据）时才出现的兜底入口；已授权时这里完全为空。
+       管理令牌的查看与轮换统一在「API 管理」页里，顶栏不再重复。
 
-       ⚠ 措辞刻意用「管理钥匙」而不是「API Key」：本页还有一个 **API 管理** 页，
+       ⚠ 措辞刻意用「管理令牌」而不是「API Key」：本页还有一个 **API 管理** 页，
        里面那些 `sk-…` 也叫 API Key。两个东西同名，用户会拿 `sk-` 那把往
-       这里填 —— 而它连不上控制台（控制台认的是 config 里的管理钥匙）。
-       实测见过这个困惑，所以两个名字必须分开：
-         config.api_key   → 「管理钥匙」（40 位，管控制台 + 管理接口）
-         /admin/apikeys   → 「API Key」（sk- 开头，是给调用方的） -->
+       这里填 —— 而它连不上控制台。实测见过这个困惑，所以两个名字必须分开：
+         config.admin_token → 「管理令牌」（进控制台，本页填这个）
+         config.api_key     → 「对话密钥」（调 /v1 接口，给客户端/机器人）
+         /admin/apikeys     → 「API Key」（sk- 开头，也是给调用方的） -->
   <span id="keyFallback" style="display:none;align-items:center;gap:8px">
     <input id="key" class="key" type="password"
-           placeholder="管理钥匙（40 位，非本机访问需手填）" autocomplete="off">
+           placeholder="管理令牌 admin_token（非本机访问需手填）" autocomplete="off">
     <label class="tog"><input id="remember" type="checkbox" checked> 记住</label>
     <button id="conn" class="primary">连接</button>
   </span>
@@ -1060,16 +1061,48 @@
 (() => {
   const $ = id => document.getElementById(id);
   const LS = 'wb2api.key';
-  // 网关在 /ui 响应里注入本机 api_key；仍是哨兵则说明网关未启用鉴权。
+  // 网关在 /ui 响应里注入凭据；仍是占位符则说明**本次访问未授权**。
   //
-  // 守卫用的哨兵是**独立**的 __WB2API_KEY_SENTINEL__（不是 __WB2API_KEY__），
-  // 这样 Go 侧就可以把 __WB2API_KEY__ "全部替换"（ReplaceAll），而不会误伤
-  // 守卫里的对比基准——两层职责互不串扰。
-  // 旧的实现是 `Replace(..., 1)` 只替换 1 处，靠**漏改 5 处**侥幸正确，
-  // 是定时炸弹：哪天有人"顺手优化"成 ReplaceAll 就静默杀死自动连接。
-  const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY_SENTINEL__')
+  // ⚠⚠ 守卫的判据是「值**还是不是**那个占位符」。
+  //
+  // 页面顶部的初值就是占位符本身（见 <head> 里那两行赋值）。服务端注入时
+  // 只把**双引号**的那个字面量换成真实凭据（见 internal/server/webui.go 的
+  // injectPlaceholder —— 它匹配的是带引号的形式，不是裸 token）。
+  //
+  // 所以这里的比较基准用**单引号**写：占位符加单引号那个形态服务端不认、
+  // 也不会去替换，两者因此互不干扰。
+  //
+  // ⚠ 本注释里刻意**不写**带双引号的占位符：服务端按双引号匹配，
+  // 写在注释里也会被一起替换成真实密钥（实测踩到过 —— 页面上密钥因此
+  // 多出现了一次，而"密钥只该出现一次"正是下面那条断言在守的性质）。
+  //
+  // # 这里曾经是一个真 bug（本次修掉）
+  //
+  // 旧代码比较的是**另一个**字符串（一个带 `_SENTINEL__` 后缀的名字），
+  // 而页面初值是上面那个占位符 —— 两者不相等，于是"未注入"时
+  // INJECTED 恒为那个占位符字符串（**真值**）⇒ 页面以为已经拿到钥匙，
+  // 直接跑 refresh()，而所有请求都拿占位符当 Bearer ⇒ 全部 401/403。
+  //
+  // 后果正是用户看到的现象：未授权时界面既没提示、也用不了，
+  // 而"手输钥匙"那条分支**从来没有运行过**（死代码）。
+  const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY__')
     ? window.__WB2API_KEY__ : '';
+
+  // ADMIN_INJECTED 管理台门禁令牌（与 api_key **独立**的一把钥匙）。
+  //
+  // # 为什么页面需要两把（用户要求：门禁 token 不能和 api 一样）
+  //
+  //	/admin/*  → admin_token
+  //	/v1/*     → api_key
+  //
+  // 服务端只对**已授权**的请求注入（本机免令牌，或出示了正确的管理令牌）；
+  // 未授权时两个哨兵都保持占位符，前端据此显示登录框。
+  const ADMIN_INJECTED = (typeof window.__WB2API_ADMIN_TOKEN__ === 'string'
+    && window.__WB2API_ADMIN_TOKEN__ !== '__WB2API_ADMIN_TOKEN__')
+    ? window.__WB2API_ADMIN_TOKEN__ : '';
   let KEY = '';
+  // ADMIN_TOKEN 管理台请求用的凭据。初始 = 服务端注入的那把（可能为空）。
+  let ADMIN_TOKEN = ADMIN_INJECTED;
   let models = [];
   // 管理台状态
   let share = [];          // 最近一次 /admin/accounts 的账号视图（操作按钮按 uid 回查）
@@ -1376,7 +1409,14 @@ let loginProvider = '';
     return `<span class="mono">${esc(v)}</span>`;
   }
 
+  // hdr 对话接口（/v1/*）的鉴权头 —— 用 api_key。
   const hdr = () => KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
+  // adminHdr 管理接口（/admin/*）的鉴权头 —— 用 **admin_token**。
+  //
+  // ⚠ 两把钥匙必须分开用（用户要求：门禁 token 不能和 api 一样）：
+  // 管理面拿 api_key 会被 403，对话面拿 admin_token 会被 401，
+  // 而那种失败信息很像"服务坏了"，很难往"用错钥匙了"上想。
+  const adminHdr = () => ADMIN_TOKEN ? { 'Authorization': 'Bearer ' + ADMIN_TOKEN } : {};
 
   function setDot(cls, txt) {
     $('hdot').className = 'dot ' + cls;
@@ -1636,22 +1676,32 @@ let loginProvider = '';
   // 改造前只有一个 placeholder，用户看到的是一个空的密码框 ——
   // 他知道"要填东西"，但不知道该填什么、去哪找。而这里恰好有个**同名陷阱**：
   // 本页「API 管理」里的那些 `sk-…` 也叫 API Key，填它**连不上**
-  //（控制台认的是 config 里那把管理钥匙）。实测见过这个困惑。
+  //（控制台认的是 config 里那把**管理令牌** admin_token）。实测见过这个困惑。
   //
-  // 所以提示要同时回答三件事：填哪一把、去哪拿、最快的绕过方式。
+  // ⚠ 门禁令牌与对话 api_key 是**两把不同的钥匙**（用户要求分开）：
+  //
+  //	admin_token → 进控制台（本页）
+  //	api_key     → 调 /v1 对话接口（给客户端/机器人用）
+  //
+  // 所以提示必须点名 admin_token，而不是 api_key —— 指错字段会让人反复试错一把
+  // 本来就打不开管理台的钥匙。
+  //
+  // 提示要同时回答三件事：填哪一把、去哪拿、最快的绕过方式。
   function showKeyHint() {
     const host = $('keyHint');
     if (!host) return;
     const rows = [
-      ['最省事', '在地址后加 ?token=<管理钥匙> 直接打开本页；本机打开一次，把地址存成书签即可。'],
-      ['去哪拿', '打开跑网关那台机器上的 config.json，顶层 "api_key" 字段就是它（40 位）。'],
-      ['从界面上拿', '在那台机器上本机打开控制台 → 仪表盘 → 「API 接入信息」→ 点「显示」。'],
-      ['⚠ 别填错', '本页「API 管理」里那些 sk- 开头的是给调用方的 API Key，'
-        + '它不能登录控制台 —— 控制台只认 config 里的管理钥匙。'],
+      ['最省事', '在地址后加 ?token=<管理令牌> 直接打开本页；本机打开一次，把地址存成书签即可。'],
+      ['填哪一把', '填**管理令牌** admin_token（不是对话用的 api_key）。'],
+      ['去哪拿', '打开跑网关那台机器上的 config.json，顶层 "admin_token" 字段就是它。'],
+      ['还没配？', 'admin_token 为空时没有远程管理面（只有本机可进）。'
+        + '在 config.json 里加一行 "admin_token": "<一串足够长的随机值>" 再重启即可。'],
+      ['⚠ 别填错', '本页「API 管理」里那些 sk- 开头的是给调用方的 api_key，'
+        + '它只能调 /v1 对话接口，**不能**登录控制台。'],
     ];
     host.innerHTML =
-      '<div class="khhead">管理钥匙没有自动注入</div>'
-      + '<div>你可能是<b>从别的机器</b>打开的 —— 服务端只对本机直连自动注入。</div>'
+      '<div class="khhead">本次访问未获授权</div>'
+      + '<div>你可能是<b>从别的机器</b>打开的 —— 服务端只对<b>本机直连</b>自动注入凭据。</div>'
       + '<ul>' + rows.map(([k, v]) => `<li><b>${esc(k)}</b>：${esc(v)}</li>`).join('') + '</ul>';
     host.style.display = '';
   }
@@ -3058,7 +3108,7 @@ let loginProvider = '';
   // 远程放开后漏掉它 = 每个标签页都 403「管理接口仅允许本机直连…」。
   async function admin(path, opts = {}) {
     const r = await fetch(path, Object.assign({}, opts, {
-      headers: Object.assign({ 'Content-Type': 'application/json' }, hdr(), opts.headers || {}),
+      headers: Object.assign({ 'Content-Type': 'application/json' }, adminHdr(), opts.headers || {}),
     }));
     const txt = await r.text();
     let j = null;
@@ -5146,30 +5196,81 @@ let loginProvider = '';
     let d;
     try { d = await admin('/admin/apikeys'); }
     catch { $('apiKeyRows').innerHTML = '<tr><td colspan="9" class="err">读取失败</td></tr>'; return; }
-    // 管理钥匙行：config.api_key 与普通 key 同屏（一个事实来源，与仪表盘一致）。
+    // 两把钥匙各一行 —— 它们**互相独立**，且各自可轮换。
+    //
+    // ⚠ 为什么不再是一行（用户报障「门禁 token 不能和 api 一样」）
+    //
+    // 改造前这里只有一行「管理钥匙 = config.api_key」，而那一把**同时**是
+    // 对话凭据与门禁凭据。用户明确指出这不对：给客户端配一把对话 key
+    // 不该等于交出管理台。现在分开显示、分开轮换。
     const ak = $('apiAdminKey');
     if (ak) {
-      ak.innerHTML = d && d.admin_key
-        ? `管理钥匙：<code class="mono">${esc(d.admin_key)}</code>（config 里的 <code>api_key</code>，不限额不限速；完整值见「仪表盘 → API 接入信息」）
-           <button id="btnRotateAdminKey" style="padding:2px 8px;font-size:12px">轮换</button>`
-        : '未配置管理钥匙（config 里没有 api_key —— 请用下方新建的 key 调用）。';
-      const rb = $('btnRotateAdminKey');
-      if (rb) {
-        rb.onclick = () => apiKeyRotateAdmin(rb);
+      const parts = [];
+      if (d && d.admin_token) {
+        parts.push(`<div style="margin-bottom:6px">管理令牌（进控制台，<b>admin_token</b>）：`
+          + `<code class="mono">${esc(d.admin_token)}</code>`
+          + ` <button id="btnRotateAdminToken" style="padding:2px 8px;font-size:12px">轮换</button>`
+          + ` <span class="dim" style="font-size:12px">轮换后**立即生效**，无需重启</span></div>`);
+      } else {
+        parts.push('<div style="margin-bottom:6px">管理令牌（<b>admin_token</b>）：'
+          + '<span class="dim">未配置 —— 远程访问管理台需要它。'
+          + '在 config.json 里加一行 <code>"admin_token": "&lt;随机串&gt;"</code>；'
+          + '不配则只有本机可进控制台。</span></div>');
       }
+      if (d && d.admin_key) {
+        parts.push(`<div>对话密钥（调 <b>/v1</b> 接口，<code>api_key</code>）：`
+          + `<code class="mono">${esc(d.admin_key)}</code>`
+          + ` <button id="btnRotateAPIKey" style="padding:2px 8px;font-size:12px">轮换</button>`
+          + ` <span class="dim" style="font-size:12px">不限额不限速；完整值见「仪表盘 → API 接入信息」</span></div>`);
+      }
+      if (!parts.length) {
+        parts.push('<span class="dim">既没有 admin_token 也没有 api_key —— '
+          + '请用下方新建的 key 调用 /v1 接口。</span>');
+      }
+      ak.innerHTML = parts.join('');
+      const rbT = $('btnRotateAdminToken');
+      if (rbT) rbT.onclick = () => apiKeyRotateAdminToken(rbT);
+      const rbK = $('btnRotateAPIKey');
+      if (rbK) rbK.onclick = () => apiKeyRotateAPIKey(rbK);
     }
     renderAPIKeys(d && d.keys ? d.keys : []);
   }
 
-  // apiKeyRotateAdmin 轮换管理钥匙：生成新 key → 写回 config.json → 立即生效。
-  async function apiKeyRotateAdmin(btn) {
-    if (!confirm('轮换管理钥匙？\n\n· 生成新钥匙写入 config.json（api_key 字段）\n· 立即生效：旧钥匙作废，用旧钥匙的调用方需换新\n· 新钥匙仅此一次完整显示')) return;
+  // apiKeyRotateAdminToken 轮换**管理令牌**（admin_token）。
+  //
+  // ⚠ 与下面那个（轮换对话 api_key）是**两个**动作，别合并：
+  // 用户要求两者独立 —— 轮换对话 key 不该把管理台锁掉，反之亦然。
+  async function apiKeyRotateAdminToken(btn) {
+    if (!confirm('轮换管理令牌（admin_token）？\n\n'
+      + '· 生成新令牌写入 config.json（admin_token 字段）\n'
+      + '· **立即生效**：旧令牌作废，其它机器需要换新令牌\n'
+      + '· 本机直连不受影响\n'
+      + '· 新令牌仅此一次完整显示')) return;
     await busyRun(btn, async () => {
       try {
         const r = await admin('/admin/apikeys/rotate-admin', { method: 'POST' });
         if (!r || !r.full) { toast('轮换失败：未知原因', true); return false; }
-        toast(`已轮换（仅此一次显示完整钥匙）：\n${r.full}\n请立即复制保存`, false, 15000);
-        copyText(r.full, '管理钥匙');
+        toast(`已轮换（仅此一次显示完整令牌）：\n${r.full}\n请立即复制保存`, false, 15000);
+        copyText(r.full, '管理令牌');
+        await loadAPIKeys();
+        return true;
+      } catch (e) { toast('轮换失败：' + e.message, true); return false; }
+    }, { label: '轮换', busyText: '轮换中…' });
+  }
+
+  // apiKeyRotateAPIKey 轮换**对话接口**的 api_key（与门禁令牌无关）。
+  async function apiKeyRotateAPIKey(btn) {
+    if (!confirm('轮换对话密钥（api_key）？\n\n'
+      + '· 生成新密钥写入 config.json（api_key 字段）\n'
+      + '· 立即生效：旧密钥作废，客户端需要换新\n'
+      + '· 不影响控制台登录（那用 admin_token）\n'
+      + '· 新密钥仅此一次完整显示')) return;
+    await busyRun(btn, async () => {
+      try {
+        const r = await admin('/admin/apikeys/rotate-api-key', { method: 'POST' });
+        if (!r || !r.full) { toast('轮换失败：未知原因', true); return false; }
+        toast(`已轮换（仅此一次显示完整密钥）：\n${r.full}\n请立即复制保存`, false, 15000);
+        copyText(r.full, '对话密钥');
         await loadAPIKeys();
         return true;
       } catch (e) { toast('轮换失败：' + e.message, true); return false; }
@@ -7817,22 +7918,35 @@ let multCatalogFailed = false;
     // 整页自动轮询（旧「每 5s 刷新」开关）已整体移除（用户要求）：
     // 额度/状态/统计卡/趋势/API key 全部由 30s **无感轮询**覆盖（只 diff
     // 数值不重绘），整页 refresh 只在初始加载与「立即刷新」/操作收尾时跑。
-    if (INJECTED) {
+    if (ADMIN_INJECTED || INJECTED) {
+      // 服务端注入了凭据 ⇒ 本次访问已被授权（本机免令牌，或远程带了门禁令牌）。
+      // 两个哨兵任一被注入即说明服务端放行了这次请求。
       KEY = INJECTED;
+      ADMIN_TOKEN = ADMIN_INJECTED || KEY;
       refresh();
     } else {
-      // 服务端**没有**注入管理钥匙 —— 只可能是"不是从本机打开的"。
+      // 服务端**没有**注入任何凭据 —— 说明这次是"未授权的远程访问"。
       //
-      // 用户的诉求：「前端如果说他没有这个、需要填写那个东西，
-      // 你需要提醒他去哪里查看」。所以这里不只给输入框，
-      // 还要**把去哪儿拿写清楚**（见 showKeyHint）。
+      // # ⚠ 这里必须**什么都访问不了**（用户报障）
+      //
+      // 报障原文：*"token 没有授权的时候，它竟然能修改设置里面的内容"*。
+      // 那时的原因是：本机回环就免令牌并注入 api_key，而门禁也认 api_key
+      // —— 于是"能打开页面"等于"能改一切"。现在服务端对未授权请求
+      // 直接返回 401（页面根本不会走到这里），而走到这里的情形是
+      // "服务端没配凭据、本机访问"——那种部署本就不需要凭据。
+      //
+      // 仍然保留输入框：远程访问者要靠它粘门禁令牌。
       $('keyFallback').style.display = 'inline-flex';
       showKeyHint();
       const saved = localStorage.getItem(LS);
-      if (saved) { $('key').value = saved; KEY = saved; }
+      if (saved) { $('key').value = saved; ADMIN_TOKEN = saved; }
       $('conn').onclick = () => {
-        KEY = $('key').value.trim();
-        if ($('remember').checked) localStorage.setItem(LS, KEY); else localStorage.removeItem(LS);
+        // ⚠ 输入框里的是**门禁令牌**（进管理台用的），不是对话 api_key。
+        // 两者独立之后，这里只能填门禁令牌 —— 而它同时也是管理台那一路
+        // 的凭据。对话凭据（api_key）不在这里填：远程管理台要用对话测试时
+        // 应当另外配置，而不是把"进得了管理台"当成"拿到对话凭据"。
+        ADMIN_TOKEN = $('key').value.trim();
+        if ($('remember').checked) localStorage.setItem(LS, ADMIN_TOKEN); else localStorage.removeItem(LS);
         refresh();
       };
       $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('conn').click(); });
