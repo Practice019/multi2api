@@ -89,12 +89,55 @@ const (
 // 它只兜底"我们没用过这个号、但上游状态被别处改变了"的情形（例如用户
 // 自己在 Loomy 客户端里消耗、或自然日重置）。**被我们自己用掉**那一种
 // 由 invalidateTier 精确处理，不依赖这个值 —— 所以它不需要很短。
+//
+// ⚠ 它**不**适用于"已确认只剩永久"那一档，见 tierPaidRecheck。
 const tierCacheTTL = 60 * time.Second
 
-// tierEntry 一个账号的档位与取到的时刻。
+// tierPaidRecheck 「已确认只剩永久」在**同一个自然日内**的复查周期。
+//
+// # 为什么不能沿用 60 秒的 tierCacheTTL（用户报障）
+//
+// `tierCacheTTL` 是为"免费额度可能被别处消耗掉"设计的 —— 那种情形下
+// 结论会**变坏**，所以要勤查。而"只剩永久"这个结论在同一个自然日内
+// **不会变好**：赠送额度只按自然日重置，所以它今天不可能变回"有"。
+//
+// 每 60 秒复查一次只会换来一串注定相同的答案，而上游那份接口一抖
+// （实测 502 / 非 JSON 回执），或者我们自己刚用过它一次，就会把它从
+// tierPaid(2) 降级成 tierUnsure(1) —— 而 1 排在 2 **前面**：
+//
+//	结果：一个已知没有免费额度的号，**因为缓存过期或刚被用过而变得更优先**，
+//	于是在"所有号的免费额度都耗尽"之后反复抢走选号机会。
+//
+// 30 分钟是个折中：既能在"我们当初读错了"时当天自愈，又不会因为上游
+// 一抖就反复降级。自然日一变（见 CandidateTiers 的 day 判据）立刻重新评估。
+const tierPaidRecheck = 30 * time.Minute
+
+// naturalDay 返回某时刻所属的自然日（本地时区，"2006-01-02"）。
+//
+// Loomy 的赠送额度**按自然日重置**为 5000，所以"档位"这个结论天然
+// 带一个自然日的作用域：
+//
+//	"还剩免费额度"  同一自然日内怎么查都还是"有"
+//	"只剩永久额度"  同一自然日内**不会**变回"有"
+//
+// 于是"只剩永久"是**当天有效**的结论，不该因为缓存过了 60 秒就被降级。
+//
+// ⚠ 用本地时区而不是 UTC：上游按它的服务端时区重置，而我们看不到它。
+// 差几小时的唯一后果是自然日边界附近那一小段会多查几次（保守方向），
+// 不会漏判；而"该重查时不重查"那种错由 tierPaidRecheck 兜住。
+func naturalDay(t time.Time) string { return t.Format("2006-01-02") }
+
+// tierEntry 一个账号的档位、取到的时刻、以及它属于哪个自然日。
 type tierEntry struct {
 	tier int
 	at   time.Time
+	// day 得出这个结论时的自然日（见 naturalDay）。
+	//
+	// ⚠ 它只对 tierPaid 有意义（那是唯一"当天不会反悔"的结论）。
+	// 加这个字段而不是靠 at 推算：at 是"取到的时刻"，而 day 是
+	// "这个结论属于哪一天" —— 两者在自然日边界附近会不同（23:59 取的
+	// paid 结论，00:01 就作废了）。
+	day string
 }
 
 // tierCache 档位缓存。
@@ -122,8 +165,9 @@ func (c *tierCache) set(uid string, tier int) {
 	if c == nil || uid == "" {
 		return
 	}
+	now := time.Now()
 	c.mu.Lock()
-	c.m[uid] = tierEntry{tier: tier, at: time.Now()}
+	c.m[uid] = tierEntry{tier: tier, at: now, day: naturalDay(now)}
 	c.mu.Unlock()
 }
 
@@ -184,7 +228,24 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 			stale = append(stale, uid)
 			continue
 		}
-		if now.Sub(e.at) >= tierCacheTTL {
+		// ⚠⚠「已确认只剩永久」在**同一个自然日内**是个稳定结论。
+		//
+		// 赠送额度只按自然日重置，所以它这一天里**不会**变回"有免费额度"。
+		// 因此**不能**因为缓存过了 TTL 就把它降级成"不确定" ——
+		// tierUnsure(1) 排在 tierPaid(2) **前面**，降级等于让一个已知
+		// 没有免费额度的号**因为缓存过期而变得更优先**。
+		//
+		// 但仍按 tierPaidRecheck 复查一次：万一我们当初**读错了**
+		//（例如把 dailyBalance 的缺失读成了 0），当天也要能自愈，
+		// 而不是一错一整天。
+		if e.tier == tierPaid && e.day == naturalDay(now) {
+			if now.Sub(e.at) >= tierPaidRecheck {
+				stale = append(stale, uid)
+			}
+			out[uid] = tierPaid
+			continue
+		}
+		if now.Sub(e.at) >= tierCacheTTL || e.day != naturalDay(now) {
 			// ⚠ **不能**报 e.tier：它描述的是"上一次问的时候"。
 			// 报出去就等于拿一个旧结论当新事实用 —— 那正是烧永久额度的形态。
 			out[uid] = tierUnsure
@@ -215,6 +276,23 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 // 这个号就不会被优先选中。等异步刷新回来，它的新状态（tierPaid）落定。
 func (p *Provider) invalidateTier(uid string) {
 	if p == nil || uid == "" {
+		return
+	}
+	// ⚠⚠「已确认只剩永久」**不能**因为"刚被用过"就标脏（用户报障的一半）。
+	//
+	// 旧实现无条件 drop，于是"用过一次"就把它降级成 tierUnsure(1) ——
+	// 而 tierUnsure 排在 tierPaid(2) **前面**：一个已知没有免费额度的号
+	// **因为刚被用过而变得更优先**。
+	//
+	// 在"所有号的免费额度都耗尽"之后（那正是用户规则里允许烧永久的时刻），
+	// 它们全在 unsure/paid 之间反复，本已不构成偏好；而这个 drop 让
+	// "刚用过的那个"额外获得了优先权 —— 于是它反复被选中、永久额度一路减。
+	//
+	// ⚠ 为什么"用它"不会改变这个结论：用它只会消耗**赠送**额度（用完了
+	// 就落到永久），而赠送额度**只按自然日重置**。所以"只剩永久"这件事
+	// 在今天之内不会因为被用而变。这正是它与其他档位的关键区别 ——
+	// tierFree 用完就**必须**标脏（它可能刚刚变成 paid）。
+	if e, ok := p.tiers.get(uid); ok && e.tier == tierPaid && e.day == naturalDay(time.Now()) {
 		return
 	}
 	p.tiers.drop(uid)
@@ -262,14 +340,44 @@ func (p *Provider) refreshTierOne(uid string, quiet bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	bal, daily, err := p.Balance(ctx, a.Session)
+	// ⚠ 用 PointsSnapshot 而**不是** Balance（本次修的根因之一）。
+	//
+	// `Balance` 是 `PointsSnapshot` 的薄封装，它把这面旗帜丢掉了：
+	//
+	//	return pts.Available, pts.Daily, nil     // ← DailyKnown 丢了
+	//
+	// 而 `Points.DailyKnown` 的存在理由就是这条（见 points.go 那段注释：
+	// "只回 int64 的话字段缺失会被读成 0 …… 这是把未知说成确定的零"）。
+	pts, err := p.PointsSnapshot(ctx, a.Session)
 	if err != nil {
 		if !quiet {
-			log.Printf("loomy: 档位刷新失败 uid=%s: %v（保持不确定）", shortUID(uid), err)
+			log.Printf("loomy: 档位刷新失败 uid=%s: %v（保持上次结论）", shortUID(uid), err)
 		}
 		return
 	}
-	p.tiers.set(uid, tierOf(bal, daily))
+	p.tiers.set(uid, tierOfPoints(pts))
+}
+
+// tierOfPoints 由**三态**余额算档位。
+//
+// # ⚠ 为什么必须看 DailyKnown（本次修的根因）
+//
+// `dailyBalance` 字段**缺失**时 `Daily` 是 0，而 0 与"确实是 0"是两件事。
+// 只回 int64 的实现会把"没读到"读成"免费额度已用完" —— 于是这个号被判成
+// **tierPaid（确认只剩永久）**，与**真正**用完免费额度的号**同档**。
+//
+// 硬分档（pickForTier 只留最优那一档）因此选不出任何差别：一个**还有**
+// 免费额度的号，会被与"该烧永久"的号一起抽中 —— 这正是用户报的
+// *「赠送积分没有了还是会调用，优先免费额度的功能没起作用」*。
+//
+// 落 tierUnsure 才是如实的：它**可能**还有免费额度，而"不确定"档在
+// "已确认还有免费额度"的号面前不会胜出（档位顺序 0 < 1 < 2，见文件头）。
+func tierOfPoints(pts Points) int {
+	if !pts.DailyKnown {
+		// 没读到"今日赠送剩余" ⇒ 不能说它"只剩永久"。
+		return tierUnsure
+	}
+	return tierOf(pts.Available, pts.Daily)
 }
 
 // tierWarmupInterval 后台预热的间隔。

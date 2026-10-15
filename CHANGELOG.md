@@ -486,6 +486,65 @@ MiniMax **满足** `CredentialRefresher`（`refresh.go` 的 `RefreshCredential`
 > 改成了"三者都要被用到且无绝对多数"。合并时我**丢弃了自己那版**（它基于旧语义），
 > 采用上游的。
 
+### 修复 — loomy「赠送积分用完了还是会被调用」
+
+用户报障原文：*「loomy 如果赠送积分没有了还是会调用，也就是优先免费额度的功能没起作用」*。
+
+这是同一块逻辑的**第三次**报障（前两次见 `internal/loomy/candidate_tier.go` 文件头），
+但洞与前两次不同：前两次修的是**新鲜度**，这次修的是**两条把"已知"降级成"未知"的路径**。
+
+#### ① 把「没读到 dailyBalance」读成了「确认只剩永久」
+
+`internal/loomy/points.go` 里的 `Points.DailyKnown` 就是为这条存在的，它自己的注释写着：
+
+> 只回 int64 的话"字段缺失"会被读成 0 —— 界面显示「免费额度已用完」，而真相是
+> "这次没读到" …… 这是**把未知说成确定的零**。
+
+而档位刷新走的却是 `Balance` —— `PointsSnapshot` 的**薄封装**，恰好把这面旗帜丢掉了：
+
+    return pts.Available, pts.Daily, nil     // ← DailyKnown 丢了
+
+后果：`dailyBalance` 没读到时 `daily = 0` ⇒ `tierOf` 判 **tierPaid（确认只剩永久）**
+⇒ 这个号与**真正**用完免费额度的号**同档** ⇒ 硬分档（`pool.pickForTier` 只留
+最优那一档）选不出任何差别 ⇒ 一个**还有免费额度**的号被与"该烧永久"的号一起抽中。
+
+修法：档位刷新改用 `PointsSnapshot`，新增 `tierOfPoints` 按三态判档
+（`DailyKnown == false` ⇒ `tierUnsure`，**不是** `tierPaid`）。
+
+#### ② 把「已确认只剩永久」因为缓存过期/刚用过而降级成「不确定」
+
+档位顺序是 `tierFree(0) < tierUnsure(1) < tierPaid(2)`，而 `tierUnsure` **排在
+`tierPaid` 前面**。于是"降级成不确定"= 让一个已知没有免费额度的号**变得更优先**。
+
+两条降级路径都有这个问题：
+
+- `CandidateTiers` 过 TTL ⇒ 报 `tierUnsure`
+- `invalidateTier`（`Chat` 返回后）⇒ 无条件 `drop`
+
+修法：**「只剩永久」在同一个自然日内是稳定结论** —— 赠送额度只按自然日
+重置，所以它今天不会变回"有"。于是：
+
+- 同一天的 `tierPaid` 过 TTL 后**仍报 `tierPaid`**，只按 `tierPaidRecheck`（30 分钟）
+  复查一次（万一当初读错了，当天要能自愈，而不是一错一整天）
+- `invalidateTier` 对同一天的 `tierPaid` **不标脏**（用它只消耗赠送额度）
+- 自然日一变（新增 `naturalDay` 与 `tierEntry.day`）立刻重新评估
+
+⚠ 反向也守住了：**用完一个 `tierFree` 的号必须标脏**（它可能刚刚变成 paid）。
+两个方向都有守卫，否则只修好一半。
+
+#### 守卫（新增 `candidate_tier_tristate_test.go`，6 条，全部变异验证过）
+
+| 用例 | 抓什么 |
+|---|---|
+| `TestTierOfPointsDailyUnknownIsNotPaid` | dailyBalance 缺席 ⇒ 必须 `tierUnsure` |
+| `TestTierOfPointsDailyKnownZeroIsPaid` | 确实是 0 ⇒ 才该 `tierPaid`（反向） |
+| `TestPaidTierSurvivesTTLWithinSameDay` | 同一天内过期**不降级** |
+| `TestPaidTierReevaluatedAfterDayRollover` | 跨自然日**必须重评**（反向） |
+| `TestInvalidateKeepsPaidTierSameDay` | 用过不标脏 |
+| `TestInvalidateDropsFreeTier` | 用完 `tierFree` 必须标脏（反向） |
+
+变异验证 3/3 全部变红：不看 `DailyKnown` / 过期即降级 / 无条件标脏。
+
 ### 已知限制
 
 - **JWT 通道未在真账号上端到端跑通**（需要有 z.ai 订阅 + 过滑块）。
