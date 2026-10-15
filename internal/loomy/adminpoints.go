@@ -25,10 +25,13 @@ package loomy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // 本轮新增的路径。
@@ -86,6 +89,115 @@ func restrictToUID(accts []accountRef, uid string) []accountRef {
 		}
 	}
 	return nil
+}
+
+// panelPageSize 两个面板每页固定行数（用户要求写死 25）。
+//
+// # 为什么固定、而不是可配
+//
+// 分页在这里的目的不是排版，而是**把每次打开页面的上游查询量限住**：
+// 25 个账号 × 2 次请求，而不是"全部账号"（会随账号数一直涨）。
+const panelPageSize = 25
+
+// panelPage 解析 ?page=（1 基）并返回合法区间 [lo, hi)。
+//
+// 越界**钳到合法范围**（而不是报错）：翻页按钮与手工改 URL 都可能给出越界值，
+// 而"回到最后一页"比"报错"更符合用户预期。
+func panelPage(q string, total int) (page, pages, lo, hi int) {
+	pages = (total + panelPageSize - 1) / panelPageSize
+	if pages < 1 {
+		pages = 1
+	}
+	fmt.Sscanf(q, "%d", &page)
+	if page < 1 {
+		page = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	lo = (page - 1) * panelPageSize
+	hi = lo + panelPageSize
+	if hi > total {
+		hi = total
+	}
+	return page, pages, lo, hi
+}
+
+// panelRowCache 面板行的**服务端缓存**（用户要求：一打开先显示缓存数据）。
+//
+// # ⚠ 为什么缓存放服务端，而不是只放前端
+//
+// 用户要的是"一打开页面显示是缓存数据 + 一句正在更新"。缓存若只在前端，
+// 那么**换浏览器 / 清过缓存之后第一次打开**仍然是空白等 20 秒 —— 而那正是
+// 「网页加载不出来」的原始形态。放服务端则任何客户端第一眼就有数据。
+//
+// ⚠ 它只按 uid 存"最近一次成功的结果"，**不做失效判定**：面板是展示性的，
+// "这条多旧"由前端显示的「正在更新」与逐行刷新来表达，不必在这里猜 TTL。
+type panelRowCache[T any] struct {
+	mu sync.RWMutex
+	m  map[string]T
+	at time.Time
+}
+
+func newPanelRowCache[T any]() *panelRowCache[T] {
+	return &panelRowCache[T]{m: map[string]T{}}
+}
+
+func (c *panelRowCache[T]) get(uid string) (T, bool) {
+	var zero T
+	if c == nil {
+		return zero, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	v, ok := c.m[uid]
+	if !ok {
+		return zero, false
+	}
+	return v, true
+}
+
+func (c *panelRowCache[T]) set(uid string, v T) {
+	if c == nil || uid == "" {
+		return
+	}
+	c.mu.Lock()
+	c.m[uid] = v
+	c.at = time.Now()
+	c.mu.Unlock()
+}
+
+// updatedAt 最近一次写入的时刻（前端据此显示「更新于 …」）。
+func (c *panelRowCache[T]) updatedAt() time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.at
+}
+
+// tasksPanel / invitePanel 两个面板的行缓存（惰性初始化）。
+//
+// ⚠ 惰性而不是在构造函数里建：Provider 有多个构造入口（New / NewWithConfig /
+// 测试夹具），漏一个就会出现"这个入口下缓存是 nil" —— 而 nil 接收者上的
+// get/set 是安全的（已经在上面处理），所以宁可惰性 + 空安全。
+func (p *Provider) tasksPanel() *panelRowCache[accountTasksView] {
+	p.panelMu.Lock()
+	defer p.panelMu.Unlock()
+	if p.panelTasks == nil {
+		p.panelTasks = newPanelRowCache[accountTasksView]()
+	}
+	return p.panelTasks
+}
+
+func (p *Provider) invitePanel() *panelRowCache[accountInviteView] {
+	p.panelMu.Lock()
+	defer p.panelMu.Unlock()
+	if p.panelInvite == nil {
+		p.panelInvite = newPanelRowCache[accountInviteView]()
+	}
+	return p.panelInvite
 }
 
 // ─ 新手任务 ───────────────────────────────────────────────────────────
