@@ -122,12 +122,57 @@ func TestUsageTapDoesNotDoubleCount(t *testing.T) {
 }
 
 // 关键字被读边界切开也要能认出来。
+//
+// ⚠ 这条测试的**判别性来自"关键字确实被切开"**，所以不能凭手写一个 pad
+// 碰运气 —— 我第一次就是那样写的：正文前缀恰好 24 字符、读缓冲 7 字节，
+// 关键字正好落在块边界上、根本没被切开，于是**去掉 carry 尾巴它也照样通过**
+// （变异验证把这一点抓出来了）。
+//
+// 现在显式算出"关键字起点不是 readSize 的整数倍"，切开是**断言出来的性质**，
+// 不是巧合。
 func TestUsageTapHandlesSplitKey(t *testing.T) {
-	body := "{\"pad\":\"xxx\",\"usage\":{\"points_consumed\":7}}"
-	_, got := runTap(t, body, consumedSpec("points_consumed"))
-	if len(got) != 1 || got[0] != 7 {
-		t.Errorf("★ 跨读边界的关键字没被认出来（得到 %v，期望 [7]）——\n"+
-			"没有 carry 尾巴的话，生产上会随机漏读（取决于网络分片）。", got)
+	const readSize = 7
+	const key = "points_consumed"
+
+	for _, padLen := range []int{0, 1, 2, 3, 4, 5, 6} {
+		body := `{"pad":"` + strings.Repeat("x", padLen) + `","usage":{"` + key + `":7}}`
+		at := strings.Index(body, `"`+key+`"`)
+		if at < 0 {
+			t.Fatalf("夹具坏了：正文里找不到键")
+		}
+		// 关键字必须跨越读边界（起点不是整数倍）—— 否则这条用例没有判别性。
+		if at%readSize == 0 {
+			continue // 这个 padLen 不切，换下一个
+		}
+
+		var got []int64
+		tap, err := NewUsageTap(io.NopCloser(strings.NewReader(body)), consumedSpec(key),
+			func(v int64) { got = append(got, v) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, readSize)
+		var out bytes.Buffer
+		for {
+			n, rerr := tap.Read(buf)
+			if n > 0 {
+				out.Write(buf[:n])
+			}
+			if rerr != nil {
+				break
+			}
+		}
+		_ = tap.Close()
+
+		if out.String() != body {
+			t.Errorf("padLen=%d：透传被改动", padLen)
+		}
+		if len(got) != 1 || got[0] != 7 {
+			t.Errorf("★ padLen=%d（键起点 %d 不是 %d 的整数倍 ⇒ 真被切开）得到 %v，期望 [7] ——\n"+
+				"没有 carry 尾巴的话，生产上会随机漏读（取决于网络分片）：\n"+
+				"同一个字段有时读得到、有时读不到，表现为\"额度偶尔不更新\"。",
+				padLen, at, readSize, got)
+		}
 	}
 }
 
