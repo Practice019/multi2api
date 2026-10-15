@@ -65,6 +65,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -375,7 +376,17 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if rc == nil {
 		rc = io.NopCloser(bytes.NewReader(nil))
 	}
-	return p.withTierInvalidate(tierUID(a), gateway.ChatStream{Status: status, Body: rc}), nil
+	// ⚠ 在**同一个**响应体上旁听 `usage.points_consumed`，喂给免费额度轮询池。
+	//
+	// 零额外请求 —— 这就是用户的想法（"发一次请求之后我们就把额度更新掉"），
+	// 实测上游两种模式都带这个字段（见 usagetap.go 的文件头）。
+	//
+	// 三条纪律（都不能破）：不改一个字节 · 不缓冲不阻塞 · 读不出来也不影响转发。
+	uid := tierUID(a)
+	tapped := io.ReadCloser(newUsageTap(rc, uid, func(u string, pts int64) {
+		p.pool().noteConsumed(u, pts, time.Now())
+	}))
+	return p.withTierInvalidate(uid, gateway.ChatStream{Status: status, Body: tapped}), nil
 }
 
 // tierUID 取一个**一定非空**的账号标识（Auth.UID 为空时回落到 session 派生）。
