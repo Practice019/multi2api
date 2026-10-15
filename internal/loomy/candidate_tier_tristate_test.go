@@ -100,22 +100,25 @@ func TestTierOfPointsDailyKnownZeroIsPaid(t *testing.T) {
 // 所以"因为缓存过期而降级"等于让一个已知没有免费额度的号**变得更优先**。
 func TestPaidTierSurvivesTTLWithinSameDay(t *testing.T) {
 	p := NewWithConfig(Config{AuthDir: t.TempDir()})
-	const uid = "260404040404040404"
 	now := time.Now()
+	po := p.pool()
+	// ⚠ 用**免费额度池**（见 freepool.go）—— 它是现在选号的权威。
+	// 改造前这条断言的是"档位缓存过了 TTL 不降级"，那套缓存已被池子取代；
+	// 而**同一条意图**必须继续成立：一个已知没有免费额度的号，在同一天里
+	// 不该因为"过了多久"而变得更优先。
+	//
+	// 池子天然满足它：它没有 TTL，"已知为 0"只在**自然日变更**时才失效。
+	po.noteQuota("HAVE", 1434, true, now) // 让池子非空（否则全员放开）
+	po.noteQuota("PAID", 0, true, now)
 
-	// 手动写一个"已过期但同一天"的 paid 档位。
-	p.tiers.mu.Lock()
-	p.tiers.m[uid] = tierEntry{tier: tierPaid, at: now.Add(-tierCacheTTL - time.Minute), day: naturalDay(now)}
-	p.tiers.mu.Unlock()
-
-	got := p.CandidateTiers("", []string{uid})
-	if got[uid] != tierPaid {
-		t.Errorf("★ 同一天内已确认'只剩永久'的号，过了 TTL 之后被降级成 %d（期望 %d）——\n"+
+	got := p.CandidateTiers("", []string{"PAID"})
+	if got["PAID"] != tierPaid {
+		t.Errorf("★ 同一天内已确认'只剩永久'的号报了 %d（期望 %d）——\n"+
 			"\n"+
-			"tierUnsure(%d) 排在 tierPaid(%d) **前面**，所以这个降级等于：\n"+
-			"一个**已知没有免费额度**的号，因为缓存过期而**变得更优先**。\n"+
+			"tierUnsure(%d) 排在 tierPaid(%d) **前面**，所以报不确定等于：\n"+
+			"一个**已知没有免费额度**的号，变得比真正该省的号更优先。\n"+
 			"赠送额度只按自然日重置 ⇒ 它这一天里不会变回'有' ⇒ 没有理由降级。",
-			got[uid], tierPaid, tierUnsure, tierPaid)
+			got["PAID"], tierPaid, tierUnsure, tierPaid)
 	}
 }
 
@@ -144,39 +147,54 @@ func TestPaidTierReevaluatedAfterDayRollover(t *testing.T) {
 // ⚠ "用它"不该把已确认"只剩永久"标脏（用户报障的另一半）。
 func TestInvalidateKeepsPaidTierSameDay(t *testing.T) {
 	p := NewWithConfig(Config{AuthDir: t.TempDir()})
-	const uid = "260606060606060606"
 	now := time.Now()
+	po := p.pool()
+	// ⚠ 用池子建状态（它是现在选号的权威）。改造前这里手写档位缓存 ——
+	// 那套缓存已被池子取代，而**同一条意图**必须继续成立：
+	// 用一个"已知只剩永久"的号，不该让它变得更优先。
+	po.noteQuota("HAVE", 1434, true, now) // 让池子非空
+	po.noteQuota("PAID", 0, true, now)
 
-	p.tiers.mu.Lock()
-	p.tiers.m[uid] = tierEntry{tier: tierPaid, at: now, day: naturalDay(now)}
-	p.tiers.mu.Unlock()
+	p.invalidateTier("PAID")
 
-	p.invalidateTier(uid)
-
-	if got := p.CandidateTiers("", []string{uid}); got[uid] != tierPaid {
+	if got := p.CandidateTiers("", []string{"PAID"}); got["PAID"] != tierPaid {
 		t.Errorf("★ 用过一个'已确认只剩永久'的号之后，它被降级成 %d（期望 %d）——\n"+
 			"\n"+
 			"用它只会消耗**赠送**额度，而赠送额度只按自然日重置 ⇒\n"+
 			"这个结论今天不会因为被用而变。旧实现无条件 drop，于是\n"+
 			"'刚用过的那个'额外获得优先权（tierUnsure 排在 tierPaid 前面）——\n"+
 			"那正是用户看到的「赠送额度没有了反而更常被调用」。",
-			got[uid], tierPaid)
+			got["PAID"], tierPaid)
+	}
+	// 反向：已知为 0 的号被用到**不该**挂重查标记（池子空了才会用到它，
+	// 那时它已经是"允许动永久额度"的状态，重查一个已知为 0 的号没有意义）。
+	if po.needRecheck["PAID"] {
+		t.Error("已知为 0 的号被用到不该挂重查标记")
 	}
 }
 
-// 反向：**用完一个 tierFree 的号必须标脏**。
+// 反向：**用完一个还有免费额度的号必须挂重查标记**。
 //
-// 那条例子是"它可能刚刚变成 paid"，所以不能一起改坏 ——
+// 那条例子是"它可能刚刚把免费额度用完"，所以不能一起改坏 ——
 // 两个方向都要有，否则守卫只保护了一半。
 func TestInvalidateDropsFreeTier(t *testing.T) {
 	p := NewWithConfig(Config{AuthDir: t.TempDir()})
-	const uid = "260707070707070707"
+	now := time.Now()
+	po := p.pool()
+	po.noteQuota("HAVE", 1434, true, now)
 
-	p.tiers.set(uid, tierFree)
-	p.invalidateTier(uid)
+	p.invalidateTier("HAVE")
 
-	if e, ok := p.tiers.get(uid); ok {
-		t.Errorf("用过一次 tierFree 的号之后，档位缓存应当被标脏（实际仍是 %d）——\n"+
-			"它可能刚刚把免费额度用完了，不重查就会继续按'还有免费'优先。", e.tier)
+	// ⚠ 判据从"缓存被删"改成"标记被挂上"：意图（这个号的余额刚变过、
+	// 它的档位不再可信）不变，但代价从"每次对话一次查询"降到"按节流查"。
+	if !po.needRecheck["HAVE"] {
+		t.Errorf("用过一次还有免费额度的号之后，它应当被挂上「需要重查」标记 ——\n" +
+			"它可能刚刚把免费额度用完了，不重查就会继续按'还有免费'优先，\n" +
+			"也就是继续烧永久额度（用户报的正是这个）。")
+	}
+	// 而且它**仍然在池子里**（重查回来之前不该把它踢出去）——
+	// 踢出去会让一个可能还有免费额度的号被跳过。
+	if have, _ := po.snapshot(now); !have["HAVE"] {
+		t.Error("重查回来之前不该把该号移出池子（它可能还有免费额度）")
 	}
 }

@@ -133,14 +133,17 @@ func TestTierDependsOnMeasuredIdentity(t *testing.T) {
 func TestCandidateTiersReadsCacheOnly(t *testing.T) {
 	p := NewWithConfig(Config{Client: NewWithBase(deadBase)})
 	uid := "260101010101010101"
-	p.tiers.set(uid, tierFree)
+	// ⚠ 填的是**免费额度池**（见 freepool.go）—— 它是现在选号的权威。
+	// 改造前这里是 `p.tiers.set(...)`，那条路径已被池子取代（档位缓存现在
+	// 只是"上次查到的档位"的记录，不再决定选号）。
+	p.pool().noteQuota(uid, 1434, true, time.Now())
 
 	start := time.Now()
 	got := p.CandidateTiers("", []string{uid})
 	elapsed := time.Since(start)
 
 	if got[uid] != tierFree {
-		t.Errorf("应返回缓存里的档位 %d，实际 %d", tierFree, got[uid])
+		t.Errorf("应返回池子里的档位 %d，实际 %d", tierFree, got[uid])
 	}
 	if elapsed > 200*time.Millisecond {
 		t.Errorf("耗时 %v —— 明显像发了网络请求。\n"+
