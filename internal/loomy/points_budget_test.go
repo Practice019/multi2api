@@ -108,61 +108,77 @@ func TestTasksListGivesEachAccountItsOwnBudget(t *testing.T) {
 	}
 }
 
-// 源码级守：扇出型 handler 不许在循环外建 ctx。
+// 源码级守：「每个账号一份独立预算」+「限流并发」两条都不能少。
 //
-// 行为测试覆盖的是 `handleTasksList`；这条覆盖**同型的另外两处**
-// （`handleInviteList`、`handleTasksAutoAll`）—— 它们不是可以靠
-// "记得改"来保证的：少改一处，那个面板就会重演同一个形态，
-// 而且不报任何错，只是列表里一片"查询失败"。
+// # ⚠ 这条判据**随结构演进而改过一次**（2026-10-15）
+//
+//	改造前  withPointsTimeout / fanOutConcurrent 直接写在 handler 体内
+//	改造后  两者搬进了 tasksViewFor / inviteViewFor（handler 只负责分页、
+//	        缓存与 HTTP 形态）
+//
+// 于是原来"在 handler 里找 withPointsTimeout"的判据不再成立 —— 而**缺陷
+// 本身仍然可能回来**（谁把取数函数里的 withPointsTimeout 去掉，面板就会
+// 重演"前几个账号把 20 秒吃光"）。
+//
+// ⚠ 这次守卫之所以有价值，正是因为它**在我重构之后立刻变红了** —— 它挡住了
+// "改了结构、判据失效、于是缺陷可以悄悄回来"这条路。改编据时要按**职责**找，
+// 不要按位置找，否则下次搬代码它又失效。
+//
+//	handler      → 必须限流并发（fanOutConcurrent），且不许出现共用的 pointsCtx()
+//	取数函数      → 必须每个账号一份独立预算（withPointsTimeout）
 func TestFanOutHandlersDoNotShareOneBudget(t *testing.T) {
-	raw, err := readLoomyGo(t, "adminpoints.go")
+	src, err := readLoomyGo(t, "adminpoints.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := strings.ReplaceAll(raw, "\r\n", "\n")
 
-	for _, fn := range []string{"handleTasksList", "handleInviteList", "handleTasksAutoAll"} {
-		start := strings.Index(src, "func (p *Provider) "+fn+"(")
-		if start < 0 {
-			t.Errorf("找不到 %s（改名了？那这条守卫要跟着改）", fn)
-			continue
+	bodyOf := func(mark string) string {
+		i := strings.Index(src, mark)
+		if i < 0 {
+			return ""
 		}
-		body := src[start:]
+		body := src[i:]
 		if end := strings.Index(body, "\n}\n"); end > 0 {
 			body = body[:end]
 		}
-		if !strings.Contains(body, "withPointsTimeout") {
-			t.Errorf("★ %s 里没有 withPointsTimeout ——\n"+
-				"它遍历多个账号，必须在**每个账号**上建一份超时预算。\n"+
-				"共用一份 ⇒ 前面的账号把预算吃光 ⇒ 后面全部报「查询失败」，\n"+
-				"而手动单查同一个账号却正常（用户实测的形态）。", fn)
+		return body
+	}
+
+	// ① 三个扇出 handler：必须限流并发，且不许出现循环外共用的 pointsCtx()。
+	for _, fn := range []string{"handleTasksList", "handleInviteList", "handleTasksAutoAll"} {
+		body := bodyOf("func (p *Provider) " + fn + "(")
+		if body == "" {
+			t.Errorf("找不到 %s（改名了？那这条守卫要跟着改，否则它会静默失效）", fn)
+			continue
+		}
+		if !strings.Contains(body, "fanOutConcurrent") {
+			t.Errorf("★ %s 里没有 fanOutConcurrent ——\n"+
+				"它遍历多个账号，必须限流并发。\n"+
+				"串行跑 35 个账号（每个 2 次上游请求，单次 0.2~23.7 秒）要 3~4 分钟，\n"+
+				"面板会一直显示「加载中…」，用户的评价是「看起来坏了」。\n"+
+				"并发上限见 loomyPanelConcurrency（实测 12 条并发上游就开始 502）。", fn)
 		}
 		if strings.Contains(body, "ctx, cancel := pointsCtx()") {
 			t.Errorf("★ %s 里出现了循环外共用的 `ctx, cancel := pointsCtx()` ——\n"+
-				"那就是本次缺陷本身。请改用 withPointsTimeout。", fn)
-		}
-		// ⚠ 扇出还必须**限流并发**。
-		//
-		// 串行的实测代价：35 个账号 × 2 次请求，而上游单次 0.2~23.7 秒
-		//（同一账号同一端点，差 90 倍）⇒ 串行总和 272 秒，面板一直显示
-		//「加载中…」，用户以为坏了。
-		//
-		// ⚠ 这条判据是对"串行"的**回归**：把 fanOutConcurrent 去掉会让面板
-		// 重新变成 4 分半，而功能上"仍然正确"—— 所以只有这条源码级判据能抓到它。
-		if !strings.Contains(body, "fanOutConcurrent") {
-			t.Errorf("★ %s 里没有 fanOutConcurrent ——\n"+
-				"串行跑 35 个账号（每个 2 次上游请求，单次 0.2~23.7 秒）要 3~4 分钟，\n"+
-				"面板会一直显示「加载中…」。用户的评价是「看起来坏了」。\n"+
-				"并发上限见 loomyPanelConcurrency（实测 12 条并发上游就开始 502）。", fn)
+				"那就是本次缺陷本身：那 20 秒是**所有账号加起来**的预算，\n"+
+				"上游一慢，预算在前 3~5 个账号就被吃光，其余全部\n"+
+				"`context deadline exceeded`（用户看到的就是「几乎全部查询失败」）。", fn)
 		}
 	}
-}
 
-func min(a, b int) int {
-	if a < b {
-		return a
+	// ② 两个取数函数：必须**每个账号一份独立预算**。
+	for _, fn := range []string{"tasksViewFor", "inviteViewFor"} {
+		body := bodyOf("func (p *Provider) " + fn + "(")
+		if body == "" {
+			t.Errorf("找不到 %s —— 若它被删/改名，这条守卫会静默失效，必须同步改", fn)
+			continue
+		}
+		if !strings.Contains(body, "withPointsTimeout") {
+			t.Errorf("★ %s 里没有 withPointsTimeout ——\n"+
+				"共用一份预算 ⇒ 前面的账号把 20 秒吃光 ⇒ 后面全部报「查询失败」，\n"+
+				"而**手动单查同一个账号却完全正常** —— 用户实测的正是这个形态。", fn)
+		}
 	}
-	return b
 }
 
 // readLoomyGo 读本包的一个源文件（源码级判据用）。

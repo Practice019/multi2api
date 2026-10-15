@@ -215,46 +215,74 @@ type accountTasksView struct {
 	Balance  int64           `json:"balance"`
 	Pending  []string        `json:"pending,omitempty"`
 	Error    string          `json:"error,omitempty"`
+	// Stale 这一行是**缓存占位**（还没读到），不是查询结果。
+	//
+	// ⚠ 与 OK=false 必须分开：OK=false + Error 是"查失败了"，
+	// 而 Stale=true 是"这一次还没查"（缓存未命中）。两者在前端是
+	// 两种显示（「查询失败」vs「正在读取…」），混起来会让用户以为坏号。
+	Stale bool `json:"stale,omitempty"`
 }
 
 // handleTasksList GET /admin/loomy/tasks —— 每个账号的任务进度。
 func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
-	accts := p.accounts()
-	// `?uid=` = 只查这一个（面板逐行取数；见 restrictToUID）。
-	accts = restrictToUID(accts, strings.TrimSpace(r.URL.Query().Get("uid")))
-	// ⚠ **定长**切片 + 下标写入：并发时不能 append 共享切片（会丢数据、不报错）。
-	out := make([]accountTasksView, len(accts))
-	// 并发限流：串行要 3~4 分钟，面板一直转（见 loomyPanelConcurrency）。
-	fanOutConcurrent(len(accts), loomyPanelConcurrency, func(i int) {
-		a := accts[i]
-		v := accountTasksView{UID: a.UID, Nickname: maskDisplay(a.Nickname),
-			Total: len(TaskDefs), Max: taskMaxPoints()}
-		// ⚠ **每个账号一份独立预算**。共用一份会让前几个账号把 20 秒吃光，
-		// 其余全部报 context deadline exceeded（见 withPointsTimeout 的事故记录）。
-		withPointsTimeout(func(ctx context.Context) {
-			tasks, err := p.Tasks(ctx, a.Session)
-			if err != nil {
-				v.Error = err.Error()
-				return
-			}
-			v.OK = true
-			v.Tasks = tasks
-			for _, d := range TaskDefs {
-				if tasks[d.Key] {
-					v.Done++
-					v.Earned += d.Points
-				} else {
-					v.Pending = append(v.Pending, d.Key)
-				}
-			}
-			if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
-				v.Balance = bal
-			}
+	all := p.accounts()
+	totalN := len(all)
+	q := r.URL.Query()
+
+	// ── `?uid=` 只查这一个（面板逐行刷新用）并写进服务端缓存 ──
+	if uid := strings.TrimSpace(q.Get("uid")); uid != "" {
+		one := restrictToUID(all, uid)
+		out := make([]accountTasksView, len(one))
+		fanOutConcurrent(len(one), loomyPanelConcurrency, func(i int) {
+			out[i] = p.tasksViewFor(one[i])
 		})
-		out[i] = v
+		var earned, mx int64
+		for _, v := range out {
+			earned += v.Earned
+			mx += v.Max
+		}
+		writeLoomyJSON(w, http.StatusOK, map[string]any{
+			"defs": TaskDefs, "accounts": out,
+			"page": 1, "pages": 1, "total": len(out), "size": panelPageSize,
+			"updated_at": p.tasksPanel().updatedAt(),
+			"summary": map[string]any{"accounts": len(out), "earned": earned,
+				"max": mx, "pending": countPending(out)},
+		})
+		return
+	}
+
+	// ── `?page=` **只读缓存、零上游请求** ──
+	//
+	// 这是用户设计的核心：打开页面先看到"上一轮的数据"，而不是空表等 20 秒。
+	// 没缓存的行带 stale=true，前端据此显示「正在读取…」并随后逐行刷新。
+	if q.Get("page") != "" {
+		page, pages, lo, hi := panelPage(q.Get("page"), totalN)
+		out := p.tasksCachedPage(all[lo:hi])
+		var earned, mx int64
+		for _, v := range out {
+			if v.OK {
+				earned += v.Earned
+				mx += v.Max
+			}
+		}
+		writeLoomyJSON(w, http.StatusOK, map[string]any{
+			"defs": TaskDefs, "accounts": out,
+			"page": page, "pages": pages, "total": totalN, "size": panelPageSize,
+			"from_cache": true, "updated_at": p.tasksPanel().updatedAt(),
+			"summary": map[string]any{"accounts": len(out), "earned": earned,
+				"max": mx, "pending": countPending(out)},
+		})
+		return
+	}
+
+	// ── 都不带：与改造前逐字节相同（全量查 + 顺手写缓存）──
+	//
+	// ⚠ 特意保留这条：后端先上、前端分页后跟，不存在"后端改了前端没跟上"
+	// 那种半截状态 —— 面板不会因为分页这次改动而坏掉。
+	out := make([]accountTasksView, totalN)
+	fanOutConcurrent(totalN, loomyPanelConcurrency, func(i int) {
+		out[i] = p.tasksViewFor(all[i])
 	})
-	// 汇总放在扇出之后：v.Earned/v.Max 由各 goroutine 写进自己的格子，
-	// 这里串行读，不需要锁。
 	var totalEarned, totalMax int64
 	for _, v := range out {
 		totalEarned += v.Earned
@@ -263,6 +291,8 @@ func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
 	writeLoomyJSON(w, http.StatusOK, map[string]any{
 		"defs":     TaskDefs,
 		"accounts": out,
+		"page":     1, "pages": 1, "total": totalN, "size": panelPageSize,
+		"updated_at": p.tasksPanel().updatedAt(),
 		"summary": map[string]any{
 			"accounts": len(out),
 			"earned":   totalEarned,
@@ -270,6 +300,58 @@ func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
 			"pending":  countPending(out),
 		},
 	})
+}
+
+// tasksViewFor 查一个账号的任务与余额，并写进服务端缓存。
+//
+// ⚠ **只有成功的结果才写缓存**：把一次失败的查询缓存起来，会让"上次失败"
+// 在下一次打开页面时被当成**已确认的事实**显示出来（而它可能只是抖了一下）。
+func (p *Provider) tasksViewFor(a accountRef) accountTasksView {
+	v := accountTasksView{UID: a.UID, Nickname: maskDisplay(a.Nickname),
+		Total: len(TaskDefs), Max: taskMaxPoints()}
+	// ⚠ **每个账号一份独立预算**（见 withPointsTimeout 的事故记录）。
+	withPointsTimeout(func(ctx context.Context) {
+		tasks, err := p.Tasks(ctx, a.Session)
+		if err != nil {
+			v.Error = err.Error()
+			return
+		}
+		v.OK = true
+		v.Tasks = tasks
+		for _, d := range TaskDefs {
+			if tasks[d.Key] {
+				v.Done++
+				v.Earned += d.Points
+			} else {
+				v.Pending = append(v.Pending, d.Key)
+			}
+		}
+		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
+			v.Balance = bal
+		}
+	})
+	if v.OK {
+		p.tasksPanel().set(a.UID, v)
+	}
+	return v
+}
+
+// tasksCachedPage 从服务端缓存取一页。**零上游请求。**
+//
+// 没缓存的行给一个 Stale 占位（uid/昵称是本地就有的）—— 前端据此渲染
+// 「正在读取…」并随后逐行 `?uid=` 刷新。这样"打开页面"永远是瞬时的。
+func (p *Provider) tasksCachedPage(accts []accountRef) []accountTasksView {
+	out := make([]accountTasksView, len(accts))
+	c := p.tasksPanel()
+	for i, a := range accts {
+		if v, ok := c.get(a.UID); ok {
+			out[i] = v
+			continue
+		}
+		out[i] = accountTasksView{UID: a.UID, Nickname: maskDisplay(a.Nickname),
+			Total: len(TaskDefs), Max: taskMaxPoints(), Stale: true}
+	}
+	return out
 }
 
 // taskMaxPoints 全部任务的总分。
@@ -420,67 +502,131 @@ type accountInviteView struct {
 	Balance   int64        `json:"balance"`
 	Codes     []InviteCode `json:"codes,omitempty"`
 	Error     string       `json:"error,omitempty"`
+	// Stale 见 accountTasksView.Stale 的说明。
+	Stale bool `json:"stale,omitempty"`
 }
 
 // handleInviteList GET /admin/loomy/invite —— 每个账号的激活状态 + 自己生成的码。
 func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
-	accts := p.accounts()
-	// `?uid=` = 只查这一个（面板逐行取数；见 restrictToUID）。
-	accts = restrictToUID(accts, strings.TrimSpace(r.URL.Query().Get("uid")))
-	out := make([]accountInviteView, len(accts))
-	fanOutConcurrent(len(accts), loomyPanelConcurrency, func(i int) {
-		a := accts[i]
-		v := accountInviteView{UID: a.UID, Nickname: maskDisplay(a.Nickname)}
-		// ⚠ **每个账号一份独立预算**（见 withPointsTimeout 的事故记录）。
-		withPointsTimeout(func(ctx context.Context) {
-			act, applied, err := p.Activation(ctx, a.Session)
-			if err != nil {
-				v.Error = err.Error()
-				return
-			}
-			v.OK = true
-			v.Activated = act
-			v.Applied = applied
-			// 自己的码是**附加信息**：查不到不影响激活状态那一行（所以错误只丢进 Error）。
-			codes, cerr := p.InvitationCodes(ctx, a.Session)
-			if cerr == nil && len(codes) == 0 {
-				// ⚠ 上游没给码但查询是成功的 → 大概率是"从没做过首登初始化"
-				//（客户端每次登录后会自动调 first-login，而导入/添加的号跳过了这步）。
-				// 实测：初始化后 invitation-codes 立刻返回 5 个码、并补发注册奖励。
-				// 服务端有 alreadyProcessed 幂等保护，重复调用不会重复发奖 ——
-				// 所以这里**自动补一次**，让"我生成的码"不用用户手动点任何东西就出现。
-				if ferr := p.FirstLogin(ctx, a.Session); ferr == nil {
-					codes, cerr = p.InvitationCodes(ctx, a.Session)
-				} else {
-					cerr = ferr
-				}
-			}
-			if cerr == nil {
-				v.Codes = codes
-			} else if v.Error == "" {
-				v.Error = "邀请码列表查询失败：" + cerr.Error()
-			}
-			if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
-				v.Balance = bal
-			}
+	all := p.accounts()
+	totalN := len(all)
+	q := r.URL.Query()
+
+	if uid := strings.TrimSpace(q.Get("uid")); uid != "" {
+		one := restrictToUID(all, uid)
+		out := make([]accountInviteView, len(one))
+		fanOutConcurrent(len(one), loomyPanelConcurrency, func(i int) {
+			out[i] = p.inviteViewFor(one[i])
 		})
-		out[i] = v
-	})
-	// ⚠ activatedN 在扇出之后统计：并发下在闭包里裸加是有竞争的。
-	activatedN := 0
-	for _, v := range out {
-		if v.Activated {
-			activatedN++
-		}
+		writeLoomyJSON(w, http.StatusOK, map[string]any{
+			"accounts": out,
+			"page":     1, "pages": 1, "total": len(out), "size": panelPageSize,
+			"updated_at": p.invitePanel().updatedAt(),
+			"summary":    inviteSummary(out),
+		})
+		return
 	}
+
+	if q.Get("page") != "" {
+		page, pages, lo, hi := panelPage(q.Get("page"), totalN)
+		out := p.inviteCachedPage(all[lo:hi])
+		writeLoomyJSON(w, http.StatusOK, map[string]any{
+			"accounts": out,
+			"page":     page, "pages": pages, "total": totalN, "size": panelPageSize,
+			"from_cache": true, "updated_at": p.invitePanel().updatedAt(),
+			"summary": inviteSummary(out),
+		})
+		return
+	}
+
+	out := make([]accountInviteView, totalN)
+	fanOutConcurrent(totalN, loomyPanelConcurrency, func(i int) {
+		out[i] = p.inviteViewFor(all[i])
+	})
 	writeLoomyJSON(w, http.StatusOK, map[string]any{
 		"accounts": out,
-		"summary": map[string]any{
-			"accounts":  len(out),
-			"activated": activatedN,
-			"pending":   len(out) - activatedN,
-		},
+		"page":     1, "pages": 1, "total": totalN, "size": panelPageSize,
+		"updated_at": p.invitePanel().updatedAt(),
+		"summary":    inviteSummary(out),
 	})
+}
+
+// inviteViewFor 查一个账号的激活状态与邀请码，并写进服务端缓存。
+func (p *Provider) inviteViewFor(a accountRef) accountInviteView {
+	v := accountInviteView{UID: a.UID, Nickname: maskDisplay(a.Nickname)}
+	// ⚠ **每个账号一份独立预算**（见 withPointsTimeout 的事故记录）。
+	withPointsTimeout(func(ctx context.Context) {
+		act, applied, err := p.Activation(ctx, a.Session)
+		if err != nil {
+			v.Error = err.Error()
+			return
+		}
+		v.OK = true
+		v.Activated = act
+		v.Applied = applied
+		// 自己的码是**附加信息**：查不到不影响激活状态那一行（所以错误只丢进 Error）。
+		codes, cerr := p.InvitationCodes(ctx, a.Session)
+		if cerr == nil && len(codes) == 0 {
+			// ⚠ 上游没给码但查询是成功的 → 大概率是"从没做过首登初始化"
+			//（客户端每次登录后会自动调 first-login，而导入/添加的号跳过了这步）。
+			// 实测：初始化后 invitation-codes 立刻返回 5 个码、并补发注册奖励。
+			// 服务端有 alreadyProcessed 幂等保护，重复调用不会重复发奖 ——
+			// 所以这里**自动补一次**，让"我生成的码"不用用户手动点任何东西就出现。
+			if ferr := p.FirstLogin(ctx, a.Session); ferr == nil {
+				codes, cerr = p.InvitationCodes(ctx, a.Session)
+			} else {
+				cerr = ferr
+			}
+		}
+		if cerr == nil {
+			v.Codes = codes
+		} else if v.Error == "" {
+			v.Error = "邀请码列表查询失败：" + cerr.Error()
+		}
+		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
+			v.Balance = bal
+		}
+	})
+	if v.OK {
+		p.invitePanel().set(a.UID, v)
+	}
+	return v
+}
+
+// inviteCachedPage 从服务端缓存取一页（零上游请求）。见 tasksCachedPage。
+func (p *Provider) inviteCachedPage(accts []accountRef) []accountInviteView {
+	out := make([]accountInviteView, len(accts))
+	c := p.invitePanel()
+	for i, a := range accts {
+		if v, ok := c.get(a.UID); ok {
+			out[i] = v
+			continue
+		}
+		out[i] = accountInviteView{UID: a.UID, Nickname: maskDisplay(a.Nickname), Stale: true}
+	}
+	return out
+}
+
+// inviteSummary 汇总（激活/未绑定数）。
+//
+// ⚠ Stale 占位行**不计入**分母：它们还没读到，算进"未绑定"会让界面
+// 在刷新的那几秒里显示一个假的"未绑定 N"（而那个 N 会随后跳变）。
+func inviteSummary(out []accountInviteView) map[string]any {
+	known, activated := 0, 0
+	for _, v := range out {
+		if v.Stale {
+			continue
+		}
+		known++
+		if v.Activated {
+			activated++
+		}
+	}
+	return map[string]any{
+		"accounts":  known,
+		"activated": activated,
+		"pending":   known - activated,
+	}
 }
 
 // handleInviteBind POST /admin/loomy/invite/bind —— 给某个账号绑定邀请码。
