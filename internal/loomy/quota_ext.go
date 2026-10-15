@@ -47,6 +47,7 @@ package loomy
 import (
 	"log"
 	"strings"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -98,6 +99,12 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 			// 字段缺失时 Daily 是 0，把它当「确实是 0」会把「没读到」判成
 			// 「免费额度已用完」（见 points.go 的 Points.DailyKnown）。
 			p.tiers.set(uid, tierOfPoints(pts))
+			// 同时喂给**免费额度池**：它是选号的权威（见 freepool.go）。
+			//
+			// ⚠ 必须传 DailyKnown：字段缺失时 daily 是 0，而"没读到"
+			// 与"确实是 0"是两件事 —— 把前者记成"已用完"会让一个可能
+			// 还有免费额度的号被永久跳过。
+			p.pool().noteQuota(uid, pts.Daily, pts.DailyKnown, time.Now())
 
 			q := gateway.CreditsQuota(clampNonNegative(bal))
 			// 「免费额度」列：带上**每日赠送**的余额（会按自然日重置的那部分）。

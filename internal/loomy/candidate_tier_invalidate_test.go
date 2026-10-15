@@ -103,12 +103,19 @@ func TestChatInvalidatesTierOnBodyClose(t *testing.T) {
 		t.Fatalf("Close 失败: %v", err)
 	}
 
-	// ② 关闭之后 ⇒ 档位应当已被删（下次读会落「不确定」）。
-	if e, ok := p.tiers.get(fqUID); ok {
-		t.Errorf("响应体关闭后档位仍缓存着 %+v —— 那个数记的是"+
-			"「这次请求花额度**之前**」的状态，而我们刚花了它的额度。\n"+
-			"不删的话，它的免费额度被我们用完后仍会被优先选中，把永久额度烧掉"+
-			"（用户实测报的正是这个形态）。", e)
+	// ② 关闭之后 ⇒ 该账号被挂上「需要重查」标记。
+	//
+	// ⚠ 新机制（见 freepool.go 的 noteUsed）：**不删档位缓存**，只挂标记，
+	// 再由池子按 freeRecheckEvery 节流去查。
+	//
+	// 改造前这里是"删缓存 + 立刻异步查一次"，那等于**每次对话一次上游查询**
+	// —— 正是用户报的「查询太多、太频繁」。所以判据从"缓存被删"改成
+	// "标记被挂上"：意图（这个号的档位不再可信）不变，代价降下来了。
+	if !p.pool().needRecheck[fqUID] {
+		t.Errorf("响应体关闭后该账号没有被挂上「需要重查」标记 ——\n" +
+			"那个数记的是「这次请求花额度**之前**」的状态，而我们刚花了它的额度。\n" +
+			"不重查的话，它的免费额度被我们用完后仍会被优先选中，把永久额度烧掉" +
+			"（用户实测报的正是这个形态）。")
 	}
 }
 
@@ -128,8 +135,10 @@ func TestChatInvalidateIsIdempotent(t *testing.T) {
 	if err := cs.Body.Close(); err != nil {
 		t.Errorf("重复 Close 不该报错: %v", err)
 	}
-	if _, ok := p.tiers.get(fqUID); ok {
-		t.Error("重复 Close 之后档位仍不该在")
+	// ⚠ 新机制：Close 之后挂的是「需要重查」标记，而**不再删档位缓存**
+	//（删缓存 + 立刻异步查一次 = 每次对话一次上游查询，用户报过）。
+	if m := p.pool(); !m.needRecheck[fqUID] {
+		t.Error("Close 之后该账号应被挂上「需要重查」标记")
 	}
 }
 

@@ -490,6 +490,9 @@ func main() {
 			LoginMode:          cfg.LoomyLoginMode,
 		})
 		if err := registry.Register(lm); err != nil {
+			// 启动时**一次性**填充免费额度池（不挂 ticker —— 见 StartFreePoolFill）。
+			// 它是"第一个请求到达之前规则就成立"的前提；周期重刷那种才叫频繁查询。
+			lm.StartFreePoolFill()
 			log.Fatalf("注册 Loomy 上游失败: %v", err)
 		}
 		log.Printf("loomy: 已启用（凭证目录 %s，基址 %s）", cfg.LoomyAuthDir, cfg.LoomyBaseURL)

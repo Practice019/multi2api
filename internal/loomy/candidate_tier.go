@@ -184,34 +184,35 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 	if p == nil || len(uids) == 0 {
 		return nil
 	}
-	out := make(map[string]int, len(uids))
 	now := time.Now()
+	have, zero := p.pool().snapshot(now)
+
+	out := make(map[string]int, len(uids))
+
+	// 池子空了 = **所有已知账号**的免费额度都用完了 ⇒ 允许动永久额度。
+	//（用户原话：「当所有的这个轮询池都没有账号了之后，那就说明所有的免费
+	//  额度都没了，那再把那个所有的账号再重新添加回去」。）
+	//
+	// ⚠ 判据是「len(zero) > 0」而不是只看「len(have) == 0」：
+	// 一个账号都还没查过时 have 也是空的，但那时**不能**说"免费额度用完了"
+	// —— 那会正好烧在用户最不想烧的地方（启动后第一波请求）。
+	// 那种情况落 tierUnsure（不确定），不构成偏好，但也不"确认可以烧"。
+	empty := len(have) == 0 && len(zero) > 0
+
 	for _, uid := range uids {
 		if uid == "" {
 			continue
 		}
-		e, ok := p.tiers.get(uid)
-		if !ok {
-			out[uid] = tierUnsure // 从没查到
-			continue
-		}
-		// ⚠⚠「已确认只剩永久」在**同一个自然日内**是个稳定结论。
-		//
-		// 赠送额度只按自然日重置，所以它这一天里**不会**变回"有免费额度"。
-		// 因此**不能**因为缓存过了 TTL 就把它降级成"不确定" ——
-		// tierUnsure(1) 排在 tierPaid(2) **前面**，降级等于让一个已知
-		// 没有免费额度的号**因为缓存过期而变得更优先**。
-		if e.tier == tierPaid && e.day == naturalDay(now) {
+		switch {
+		case have[uid]:
+			out[uid] = tierFree
+		case empty:
+			out[uid] = tierFree // 池子空了：全体放开（含已知为 0 的那些）
+		case zero[uid]:
 			out[uid] = tierPaid
-			continue
+		default:
+			out[uid] = tierUnsure // 还没查过
 		}
-		if now.Sub(e.at) >= tierCacheTTL || e.day != naturalDay(now) {
-			// ⚠ **不能**报 e.tier：它描述的是"上一次问的时候"。
-			// 报出去就等于拿一个旧结论当新事实用 —— 那正是烧永久额度的形态。
-			out[uid] = tierUnsure
-			continue
-		}
-		out[uid] = e.tier
 	}
 	return out
 }
@@ -253,10 +254,13 @@ func (p *Provider) invalidateTier(uid string) {
 	// 就落到永久），而赠送额度**只按自然日重置**。所以"只剩永久"这件事
 	// 在今天之内不会因为被用而变。这正是它与其他档位的关键区别 ——
 	// tierFree 用完就**必须**标脏（它可能刚刚变成 paid）。
-	if e, ok := p.tiers.get(uid); ok && e.tier == tierPaid && e.day == naturalDay(time.Now()) {
-		return
-	}
-	p.tiers.drop(uid)
+	// ⚠ 改成挂"需要重查"的标记，而**不再删缓存、也不在这里发请求**。
+	//
+	// 旧实现在这里 drop + 立刻异步查一次 —— 那等于"每次对话一次上游查询"，
+	// 正是用户报的"查询太多太频繁"。现在只挂标记，查询由池子按
+	// freeRecheckEvery 节流、并带失败退避（见 freepool.go 的 noteUsed）。
+	p.pool().noteUsed(uid, time.Now())
+	go p.drainRecheck()
 }
 
 // tierOfPoints 由**三态**余额算档位。

@@ -89,6 +89,13 @@ const ProviderID = providerID
 
 // Provider 实现 gateway.Provider（以及若干可选扩展点，见包注释）。
 type Provider struct {
+	// 免费额度轮询池（见 freepool.go）。
+	//
+	// ⚠ 与 panelMu 分开各一把锁：池子被**选号路径**读（那里在池锁内），
+	// 而面板锁只在管理端点用到 —— 共用一把会无谓地拉长临界区。
+	poolMu   sync.Mutex
+	freePool *freePool
+
 	// 两个面板的行缓存（见 adminpoints.go 的 panelRowCache）。
 	//
 	// ⚠ 必须有这把锁：惰性初始化会在并发请求下同时写这两个字段。
