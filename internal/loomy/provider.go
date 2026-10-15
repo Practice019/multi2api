@@ -379,13 +379,23 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	// ⚠ 在**同一个**响应体上旁听 `usage.points_consumed`，喂给免费额度轮询池。
 	//
 	// 零额外请求 —— 这就是用户的想法（"发一次请求之后我们就把额度更新掉"），
-	// 实测上游两种模式都带这个字段（见 usagetap.go 的文件头）。
-	//
-	// 三条纪律（都不能破）：不改一个字节 · 不缓冲不阻塞 · 读不出来也不影响转发。
+	// 实测上游两种模式都带这个字段。实现已提升到接缝层（internal/gateway/
+	// usagetap.go），这里只声明"本上游的那个键叫什么、什么语义、什么刻度"。
 	uid := tierUID(a)
-	tapped := io.ReadCloser(newUsageTap(rc, uid, func(u string, pts int64) {
-		p.pool().noteConsumed(u, pts, time.Now())
-	}))
+	tapSpec := gateway.UsageTapSpec{
+		Key:   "points_consumed",
+		Scale: 1, // loomy 的积分本来就是整数
+		Mode:  gateway.UsageConsumed,
+	}
+	tapped, terr := gateway.NewUsageTap(rc, tapSpec, func(points int64) {
+		p.pool().noteConsumed(uid, points, time.Now())
+	})
+	if terr != nil {
+		// ⚠ spec 写错是装配期错误，但**不能因此让转发失败** ——
+		// 转发是主线，额度跟踪是附线。记一行日志、原样透传。
+		log.Printf("loomy: usage tap 未装配（%v）—— 转发照常，额度不会自动更新", terr)
+		tapped = rc
+	}
 	return p.withTierInvalidate(uid, gateway.ChatStream{Status: status, Body: tapped}), nil
 }
 
