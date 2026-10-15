@@ -605,7 +605,7 @@ func TestCodeartsRefreshIntervalDefaults(t *testing.T) {
 	// 它原先断言"未启用时即使配了间隔也不解析"——即
 	// `{"codearts":{"enabled":false,...}}` ⇒ CodeartsRefreshInterval == 0。
 	//
-	// 现在 codearts **无法关闭**（用户要求删掉那个开关），所以配置里写
+	// 现在 `enabled` 字段已被删除（用户要求 codearts 一律启用），所以配置里写
 	// `"enabled":false` 会被当成**未知字段忽略**，而间隔照常解析（15s）。
 	// 也就是说：这个断言守的那个状态**不存在了**。
 	//
@@ -613,13 +613,24 @@ func TestCodeartsRefreshIntervalDefaults(t *testing.T) {
 	// 因为"配置里残留 enabled=false 会怎样"本身是需要被写下来的事实：
 	// 它会被忽略、上游照常启用。有人升级后看到自己的 codearts 又跑起来了，
 	// 这条注释就是答案。
+	//
+	// ⚠⚠ 补（2026-10-15）：删掉 enabled 的**代价**是"后台续期一度关不掉"，
+	// 而 codearts 的 refreshToken 是**消费型**的 —— 关不掉就意味着它会一直在
+	// 后台把用户的凭证刷失效（实测用户账号被刷成
+	// `invalid refresh token: 'the refresh token has been used'`）。
+	//
+	// 现在那个"要关就整段 enabled=false"的出路**已经由删字段废掉了**，
+	// 所以关闭语义改挂在间隔上：`"refresh_interval_seconds": 0` = 关闭后台续期
+	//（三态：未配 → 默认 1800s；显式 0 → 关闭；>0 → 该秒数）。
+	// 见 refresh_interval_tristate_test.go。
 	fp3 := filepath.Join(dir, "c.json")
 	os.WriteFile(fp3, []byte(`{"codearts":{"enabled":false,"refresh_interval_seconds":15}}`), 0o600)
 	c3, err := Load(fp3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log("已废弃：codearts 无法关闭，配置里残留的 enabled=false 被忽略（间隔照常解析）")
+	t.Log("已废弃：codearts 的 enabled 字段被忽略（上游一律启用）；" +
+		"要关后台续期请用 refresh_interval_seconds: 0")
 	if c3.CodeartsRefreshInterval.Seconds() != 15 {
 		t.Errorf("残留 enabled=false 被忽略后，显式间隔应当照常生效（15s），得到 %v",
 			c3.CodeartsRefreshInterval)

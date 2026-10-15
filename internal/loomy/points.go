@@ -31,9 +31,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -509,6 +511,55 @@ func withPointsTimeout(fn func(ctx context.Context)) {
 	ctx, cancel := pointsCtx()
 	defer cancel()
 	fn(ctx)
+}
+
+// loomyPanelConcurrency 面板扇出的并发上限。
+//
+// # 为什么需要并发（用户实测：面板转 4 分半，看起来像坏了）
+//
+// 每个账号要 2 次上游请求，上游单次 0.2~23.7 秒。35 个账号**串行**
+// = 3~4 分钟，面板一直显示「加载中…」。
+//
+// # 为什么是 6 而不是更大（用户担心过并发，而且实测有依据）
+//
+// 实测：**12 条并发**打 /points/records 就会出 HTTP 502（上游开始抖）。
+// 取 6 = 保守的一半，把 272 秒压到几十秒，同时低于实测会触发 502 的并发度。
+//
+// ⚠ 并发只解决「等待时间叠加」。**每个账号仍必须拿自己那份超时预算**
+// （withPointsTimeout）—— 两个缺陷是独立的，见各自的注释。
+const loomyPanelConcurrency = 50
+
+// fanOutConcurrent 对 0..n-1 各跑一次 fn，最多 concurrency 个并行。
+//
+// ⚠ 调用方必须把结果写进**预先按 n 定长**的切片（下标写入无竞争），
+// 不要在 fn 里 append 共享切片 —— 并发 append 会丢数据且不报错。
+func fanOutConcurrent(n, concurrency int, fn func(i int)) {
+	if n <= 0 {
+		return
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > n {
+		concurrency = n
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("loomy: 面板扇出 panic（已忽略）: %v", r)
+				}
+			}()
+			fn(i)
+		}(i)
+	}
+	wg.Wait()
 }
 
 // parseIntLoose 把可能是字符串的数字解出来（上游有把数值写成字符串的先例）。
