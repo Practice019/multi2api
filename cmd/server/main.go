@@ -1316,6 +1316,24 @@ func main() {
 		h.SetAPIKey(newKey)
 		log.Printf("admin: 管理钥匙已轮换并立即生效（新 key 已写入 %s）", *cfgPath)
 	}
+	// ⚠ 这条**必须接上**，与上面那条分开。
+	//
+	// 事故（2026-10-15）：这里原先只有声明、**没有赋值** ——
+	// `var onRotateAdminToken func(string) = func(string) {}` 那个空操作一直被调。
+	// 后果是"轮换只更新了一半"：
+	//
+	//	admin.Handler 的令牌  → 更新了（/admin/* 用新令牌能进）
+	//	server.Handler 的令牌 → **没更新**（/ui 注入还拿旧令牌）
+	//
+	// 于是用户拿着新令牌打开 /ui：页面 200 但显示"未授权"
+	//（因为服务端比对的是**旧**令牌）—— 用户原话「你给我的我进不去」。
+	//
+	// 这与上面那条是**同一个类**的两个实例：轮换要更新**每一份**内存副本，
+	// 少接一条就有一半功能失灵，而且不报任何错。
+	onRotateAdminToken = func(newKey string) {
+		h.SetAdminToken(newKey)
+		log.Printf("admin: 管理令牌已轮换，/ui 注入同步更新（新令牌已写入 %s）", *cfgPath)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
