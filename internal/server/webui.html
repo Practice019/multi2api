@@ -553,7 +553,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      放在 header 之后而不是顶栏里：顶栏是横排的，塞进一段多行说明会把布局挤坏。 -->
 <div id="keyHint" style="display:none" class="keyhint"></div>
 
-<main>
+<main id="appMain">
  <div class="layout">
   <nav class="sidebar" id="nav"><!-- 导航项由脚本按 .content > section 的 DOM 顺序生成 --></nav>
   <div class="content" id="content">
@@ -1417,6 +1417,25 @@ let loginProvider = '';
   // 管理面拿 api_key 会被 403，对话面拿 admin_token 会被 401，
   // 而那种失败信息很像"服务坏了"，很难往"用错钥匙了"上想。
   const adminHdr = () => ADMIN_TOKEN ? { 'Authorization': 'Bearer ' + ADMIN_TOKEN } : {};
+
+  // showConsole 显示整个控制台（导航 + 内容）。
+  //
+  // ⚠ 未授权时**必须**让它整块消失（用户要求）：
+  // 原话「我希望只显示红色，绿色全部不要」—— 红色是那句"本次访问未获授权"
+  // 的指路提示，绿色是导航 + 所有面板。未授权时留着面板只有坏处：
+  // 用户会以为"能看见就能改"，而每点一下都 403，看不出到底发生了什么。
+  function showConsole() {
+    const m = $('appMain'); if (m) m.style.display = '';
+    const h = $('keyHint'); if (h) h.style.display = 'none';
+    const kf = $('keyFallback'); if (kf) kf.style.display = 'none';
+  }
+
+  // hideConsole 只留顶栏（主题 + 令牌输入 + 连接）与那句指路提示。
+  function hideConsole() {
+    const m = $('appMain'); if (m) m.style.display = 'none';
+    const kf = $('keyFallback'); if (kf) kf.style.display = 'inline-flex';
+    showKeyHint();
+  }
 
   function setDot(cls, txt) {
     $('hdot').className = 'dot ' + cls;
@@ -7760,16 +7779,10 @@ let multCatalogFailed = false;
       if (e.message.startsWith('HTTP 401')) {
         // 401 会被 5s 轮询无限复现，先把轮询停掉再提示，别刷控制台。
         stopAuto();
-        setDot('bad', '鉴权失败 · 需要 API Key');
-        $('cards').innerHTML =
-          '<div class="card" style="grid-column:1/-1">' +
-          '<div class="k">401 Unauthorized</div>' +
-          '<div class="v" style="font-size:13px;font-weight:400">' +
-          '本机打开 <code>/ui</code> 时网关会自动注入 Key，出现此提示说明要么是从非本机地址访问，' +
-          '要么网关重启换了新 Key。在顶部填入 API Key 后点「连接」即可（已暂停自动刷新）。' +
-          '</div></div>';
-        $('accts').innerHTML = accountPlaceholder('未授权 —— 已暂停自动刷新', 'err');
-        $('models').innerHTML = '<span class="dim">未授权</span>';
+        // ⚠ 凭据失效（令牌被轮换/填错）时也要**收起控制台**：
+        // 否则界面上留着满屏面板、每点一下 403，而用户看不出是凭据的问题。
+        hideConsole();
+        setDot('bad', '鉴权失败 · 需要管理令牌');
         refresh._last = null;
         return false;
       }
@@ -7778,6 +7791,10 @@ let multCatalogFailed = false;
       refresh._last = null;
       return false;
     }
+    // 到这里说明取数成功 ⇒ 凭据有效 ⇒ 确保控制台是展开的。
+    // （初始加载时已授权也会走这里，所以这一句同时覆盖"首次进入"与
+    // "连接后重载"两条路。）
+    showConsole();
     setDot(h.healthy > 0 ? 'ok' : 'bad',
       (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
     // 网关卡读累计请求/成功率：先拉 stats 填缓存（renderStats 内部写
@@ -7919,35 +7936,38 @@ let multCatalogFailed = false;
     // 额度/状态/统计卡/趋势/API key 全部由 30s **无感轮询**覆盖（只 diff
     // 数值不重绘），整页 refresh 只在初始加载与「立即刷新」/操作收尾时跑。
     if (ADMIN_INJECTED || INJECTED) {
-      // 服务端注入了凭据 ⇒ 本次访问已被授权（本机免令牌，或远程带了门禁令牌）。
+      // 服务端注入了凭据 ⇒ 本次访问已被授权（本机免令牌，或远程带了管理令牌）。
       // 两个哨兵任一被注入即说明服务端放行了这次请求。
       KEY = INJECTED;
       ADMIN_TOKEN = ADMIN_INJECTED || KEY;
+      showConsole();
       refresh();
     } else {
-      // 服务端**没有**注入任何凭据 —— 说明这次是"未授权的远程访问"。
+      // 服务端**没有**注入任何凭据 ⇒ 本次访问未获授权。
       //
-      // # ⚠ 这里必须**什么都访问不了**（用户报障）
+      // # ⚠ 未授权时整块控制台都不显示（用户要求）
       //
-      // 报障原文：*"token 没有授权的时候，它竟然能修改设置里面的内容"*。
-      // 那时的原因是：本机回环就免令牌并注入 api_key，而门禁也认 api_key
-      // —— 于是"能打开页面"等于"能改一切"。现在服务端对未授权请求
-      // 直接返回 401（页面根本不会走到这里），而走到这里的情形是
-      // "服务端没配凭据、本机访问"——那种部署本就不需要凭据。
+      // 原话：*「我希望只显示红色，绿色全部不要」* ——
+      // 红色是下面那句"本次访问未获授权"的指路提示，绿色是导航 + 所有面板。
       //
-      // 仍然保留输入框：远程访问者要靠它粘门禁令牌。
-      $('keyFallback').style.display = 'inline-flex';
-      showKeyHint();
+      // 未授权时留着面板只有坏处：用户会以为"能看见就能改"，而每点一下
+      // 都 403，看不出到底发生了什么。原来这里只加了一段提示、面板照常渲染，
+      // 用户看到的正是"提示说没授权，但设置页还在那里"。
+      hideConsole();
       const saved = localStorage.getItem(LS);
-      if (saved) { $('key').value = saved; ADMIN_TOKEN = saved; }
+      if (saved) { $('key').value = saved; }
+      // 「连接」= 带 ?token= **重新加载本页**。
+      //
+      // ⚠ 为什么是重载而不是就地刷新：凭据由**服务端**在渲染页面时注入
+      // （见 internal/server/webui.go 的 ui）。就地改 ADMIN_TOKEN 只能让
+      // /admin/* 通，而 /v1/* 那一路（模型目录、对话测试）拿不到 api_key，
+      // 界面上会显示成"模型一个都没有"—— 那种残缺很难归因。
+      // 重载之后服务端认得这个令牌，两把凭据一起注入，页面就是完好的。
       $('conn').onclick = () => {
-        // ⚠ 输入框里的是**门禁令牌**（进管理台用的），不是对话 api_key。
-        // 两者独立之后，这里只能填门禁令牌 —— 而它同时也是管理台那一路
-        // 的凭据。对话凭据（api_key）不在这里填：远程管理台要用对话测试时
-        // 应当另外配置，而不是把"进得了管理台"当成"拿到对话凭据"。
-        ADMIN_TOKEN = $('key').value.trim();
-        if ($('remember').checked) localStorage.setItem(LS, ADMIN_TOKEN); else localStorage.removeItem(LS);
-        refresh();
+        const v = $('key').value.trim();
+        if (!v) { toast('请先填入管理令牌', true); return; }
+        if ($('remember').checked) localStorage.setItem(LS, v); else localStorage.removeItem(LS);
+        location.href = '/ui?token=' + encodeURIComponent(v);
       };
       $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('conn').click(); });
     }
