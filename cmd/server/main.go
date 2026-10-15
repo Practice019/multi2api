@@ -493,6 +493,12 @@ func main() {
 			// 启动时**一次性**填充免费额度池（不挂 ticker —— 见 StartFreePoolFill）。
 			// 它是"第一个请求到达之前规则就成立"的前提；周期重刷那种才叫频繁查询。
 			lm.StartFreePoolFill()
+			// 定期把「免费额度已用完」的账号移出轮询池。
+			//
+			// ⚠ 它**只查池子成员**（我们相信还有免费额度的那些），池子会随额度
+			// 用尽单调缩小到零；池子空了一轮请求都不发。所以它不是旧那种"所有账号
+			// 每 30 秒一轮"的预热 —— 见 StartFreePoolSweep 的说明。
+			lm.StartFreePoolSweep()
 			log.Fatalf("注册 Loomy 上游失败: %v", err)
 		}
 		log.Printf("loomy: 已启用（凭证目录 %s，基址 %s）", cfg.LoomyAuthDir, cfg.LoomyBaseURL)

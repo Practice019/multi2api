@@ -2,6 +2,7 @@ package loomy
 
 import (
 	"log"
+	"sort"
 	"sync"
 	"time"
 )
@@ -72,6 +73,8 @@ type freePool struct {
 	needRecheck map[string]bool
 	// filling 启动填充是否已经在跑（幂等）。
 	filling bool
+	// sweepOnce 定期清扫只启动一次（幂等）。
+	sweepOnce sync.Once
 }
 
 func newFreePool() *freePool {
@@ -290,4 +293,166 @@ func (p *Provider) drainRecheck() {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
+}
+
+// ── 定期清扫（用户提的第二个设计）────────────────────────────────────
+
+// freePoolSweepBatch 一轮清扫**最多**查几个账号。
+//
+// # ⚠ 为什么必须有这个上限（用户的问题问得对，这条是它的答案）
+//
+// 用户问：「定期扫描它不也是读缓存吗？读缓存怎么会那样呢？怎么会变成查询
+// 洪水呢？除非那个缓存没更新，对不对？」
+//
+// **后半句就是答案**：清扫**不是**读缓存，它必须**向上游发请求** ——
+// 因为"缓存没更新"正是它要解决的问题。纯读缓存是没用的：缓存里已经知道的
+// 那些（已知为 0 的）本来就不在池子里了；池子成员之所以要清扫，正是因为
+// **我们不确定它们现在的值**，而要知道就得问上游。
+//
+// 于是"每轮查哪些"就成了成本本身。两条限制：
+//
+//	dueForSweep()      同一账号 90 秒内不重复查（freeRecheckEvery）+ 失败退避
+//	本常量             一轮最多查 N 个（轮转推进，谁久没查谁先来）
+//
+// 合起来是**严格有界**的：每分钟最多 N 个请求，与池子大小无关。
+// 池子大的时候每个账号的复查周期自动变长 —— 这比"每轮把整个池子刷一遍"
+// 稳得多（后者在 100 个号时会变成每分钟 100 个请求）。
+const freePoolSweepBatch = 4
+
+// freePoolSweepInterval 定期清扫的间隔。
+//
+// ⚠ var 而不是 const，**只为测试**：测试要把它压到几十毫秒，才可能在不睡
+// 一分钟的前提下验证"周期清扫真的会发生"。生产代码不要改它。
+var freePoolSweepInterval = 60 * time.Second
+
+// StartFreePoolSweep 定期把"免费额度已经用完"的账号移出轮询池（幂等）。
+//
+// # 用户提的两个设计，这是其中之一（原话）
+//
+//	「或者你可以添加一个任务，那个任务，然后30秒或者1分钟循环一次。或者说，
+//	  就是定期检测轮询池里面有没有额度为0的，然后移出去就行了。」
+//
+// 另一个（"发请求的时候读缓存看它是不是0，是0就移出去、找下一个"）
+// **本来就已经是现在的做法**：`CandidateTiers` 在选号时被调用，它只读内存
+// （那条"纯内存、不查网络"的性能契约有守卫钉着），报出来的档位直接决定
+// "这一轮只用哪些账号" —— 已知为 0 的会被排除掉。
+//
+// 所以本清扫补的是**另一段空窗**：缓存里还不知道"它已经变成 0 了"的时候。
+//
+// # ⚠ 为什么它不会变成查询洪水（与旧预热的关键区别）
+//
+//	旧预热：**所有账号**，每 30 秒一轮 —— 池子大小不随消耗下降，
+//	        空闲部署也在打上游，而且（当时的）失败没有退避 ⇒ 越失败越查。
+//	本清扫：**只查池子成员** —— 我们相信"还有免费额度"的那些。
+//
+//	账号额度被用完 → 移出池子 → **下一轮就不再查它**
+//	池子空了       → 一轮一个请求都不发（直接 return）
+//
+// 于是查询量随"还有免费额度的账号数"**单调下降**，而不是永远等于账号总数。
+// 再加两条限制：`freeRecheckEvery`（同一账号 90 秒内不重复查）与
+// `freeFailBackoff`（刚失败过的先放着）。
+//
+// 换句话说：这套的稳态负载是"池子里还有多少号要盯" × 每分钟一次，
+// 而池子只会越来越小、直到归零。
+func (p *Provider) StartFreePoolSweep() {
+	if p == nil {
+		return
+	}
+	p.pool().sweepOnce.Do(func() {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("loomy: 免费额度池清扫 panic（已忽略）: %v", r)
+				}
+			}()
+			t := time.NewTicker(freePoolSweepInterval)
+			defer t.Stop()
+			for range t.C {
+				p.sweepFreePool()
+			}
+		}()
+	})
+}
+
+// sweepFreePool 一轮清扫：只查池子成员，把变成 0 的移出去。
+//
+// ⚠ 返回值只为测试 —— 生产代码不关心"这轮查了几个"。
+func (p *Provider) sweepFreePool() int {
+	f := p.pool()
+	now := time.Now()
+	members := f.members(now)
+	if len(members) == 0 {
+		// 池子空了 = 所有已知账号的免费额度都用完了，我们正在用永久额度。
+		// 此时**一个请求都不发**：没有什么可"用尽"了，等到自然日重置即可。
+		return 0
+	}
+	todo := f.dueForSweep(members, now)
+	// ⚠ **严格限批量**：一轮最多查 freePoolSweepBatch 个。
+	//
+	// 不限制的话，"每分钟把池子里所有成员都查一遍"在账号多的时候就是
+	// 每分钟 N 个请求 —— 那正是用户担心的事。限批量之后每分钟最多
+	// freePoolSweepBatch 个，与池子大小**无关**；池子大时每个账号的
+	// 复查周期自动拉长（这是我们要的方向：先保证不烧永久额度，再谈新鲜度）。
+	//
+	// 选谁先查：谁最久没查过谁先来（dueForSweep 已按节流与退避筛过）。
+	if len(todo) > freePoolSweepBatch {
+		todo = todo[:freePoolSweepBatch]
+	}
+	if len(todo) == 0 {
+		return 0
+	}
+	before := len(members)
+	for _, uid := range todo {
+		// 复用 RefreshQuota：它本来就查一次余额、写档位缓存，并喂给池子。
+		// 不为清扫另写一条查询路径（两条路径迟早会不一致）。
+		p.RefreshQuota(uid)
+		time.Sleep(150 * time.Millisecond) // 串行 + 间隔：不冲上游
+	}
+	// ⚠ 只在**池子大小变了**的时候打日志（= 有账号被移出去），
+	// 否则每分钟一行"查了 N 个"会变成噪音、把真正的信号淹掉。
+	if after := len(f.members(time.Now())); after != before {
+		log.Printf("loomy: 免费额度池清扫 —— %d → %d 个账号（用完的已移出，不再参与轮询）",
+			before, after)
+	}
+	return len(todo)
+}
+
+// members 池子当前成员（已知免费额度 > 0 的 uid）。
+func (f *freePool) members(now time.Time) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetIfNewDay(now)
+	out := make([]string, 0, len(f.have))
+	for uid := range f.have {
+		out = append(out, uid)
+	}
+	return out
+}
+
+// dueForSweep 从池子成员里挑出"该查"的那些（节流 + 失败退避之后）。
+//
+// ⚠ 只对**成员**做节流判断，不对已知为 0 的做 —— 后者已经不在池子里了，
+// 不需要也不应该再查（它今天不会变回"有"）。
+func (f *freePool) dueForSweep(members []string, now time.Time) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetIfNewDay(now)
+	out := make([]string, 0, len(members))
+	for _, uid := range members {
+		if at, ok := f.failAt[uid]; ok && now.Sub(at) < freeFailBackoff {
+			continue // 刚失败过：先放着（没有这条就会"越失败越查"）
+		}
+		if at, ok := f.checkedAt[uid]; ok && now.Sub(at) < freeRecheckEvery {
+			continue // 刚查过：一个账号 90 秒内不重复查
+		}
+		out = append(out, uid)
+	}
+	// ⚠ 按"谁最久没查过"升序 —— 因为调用方会**截断成一小批**（见
+	// freePoolSweepBatch）。不排序的话，截断永远取到同一批账号（map 遍历顺序
+	// 虽然随机，但"没查过的 at 是零值"会让它们长期霸占名额），
+	// 于是后面的账号永远轮不到 —— 那是"限批量"引入的新缺陷。
+	sort.Slice(out, func(i, j int) bool {
+		return f.checkedAt[out[i]].Before(f.checkedAt[out[j]])
+	})
+	return out
 }
