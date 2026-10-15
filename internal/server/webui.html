@@ -4585,6 +4585,95 @@ let loginProvider = '';
     return '';
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // 面板的「逐行按需取数」
+  //
+  // # 为什么（用户报障原话）
+  //
+  //	「网页还是加载不出来。能不能先加载网页，然后按需加载里面的数据呢？」
+  //
+  // 原实现是**一次请求拿全部**：35 个账号、上游单次 0.2~23.7 秒 ⇒ 整张表
+  // 空着转 20 秒以上，用户看到的一直是「加载中…」，于是判断成"坏了"。
+  //
+  // # 改法
+  //
+  // ① 用**已经在内存里**的账号列表先把表格骨架渲染出来（每行一句「加载中…」）
+  // ② 再按 uid **逐行**请求（`?uid=`），谁先回来谁先填
+  // ③ 顶部那条汇总随行数累加，用户能看到"正在长出来"
+  //
+  // 于是：表格结构**立刻**可见，第一行约 1 秒就有数据，慢账号只拖慢它自己。
+  // ──────────────────────────────────────────────────────────────────────
+
+  // PANEL_ROW_CONCURRENCY 逐行取数的并发。
+  //
+  // ⚠ 为什么是 6 而不是更大：实测 **12 条并发**打同一个积分端点，上游就开始
+  // 返回 502。逐行取数已经比"后端一次扇出 35 个"温和得多，6 是保守值。
+  // 它同时也是"上游压力"的上限：最多 6 个在途。
+  const PANEL_ROW_CONCURRENCY = 6;
+
+  // providerUids 从**已经在内存里的**账号列表里取某个上游的 uid。
+  //
+  // 用它而不是再请求一次 /admin/accounts：那份数据本轮 refresh 刚加载过，
+  // 复用它才符合"不重复发请求"这条（同一个事实只留一个来源）。
+  function providerUids(providerId) {
+    return (share || [])
+      .filter(a => providerOf(a) === providerId && a.uid)
+      .map(a => a.uid);
+  }
+
+  // panelRowId 一行的 DOM id（填数时按 id 定位替换）。
+  function panelRowId(cap, uid) { return 'lrow-' + cap + '-' + uid; }
+
+  // withRowId 给渲染出来的 `<tr>` 挂上 id，好让后来的数据替换掉它。
+  function withRowId(html, cap, uid) {
+    return html.replace('<tr>', '<tr id="' + esc(panelRowId(cap, uid)) + '">');
+  }
+
+  // panelRowPlaceholder 占位行：只有第一列（uid 已知）与一句「加载中…」。
+  function panelRowPlaceholder(cap, uid, cols) {
+    const first = '<td class="mono dim" title="' + esc(uid) + '">' +
+      esc((uid || '').slice(0, 8)) + '…</td>';
+    const rest = Array(cols - 1).fill('<td><span class="dim">加载中…</span></td>').join('');
+    return '<tr id="' + esc(panelRowId(cap, uid)) + '">' + first + rest + '</tr>';
+  }
+
+  // panelRowErr 取数失败的那一行。
+  function panelRowErr(cap, uid, msg, cols) {
+    const first = '<td class="mono dim" title="' + esc(uid) + '">' +
+      esc((uid || '').slice(0, 8)) + '…</td>';
+    const rest = Array(Math.max(0, cols - 2)).fill('<td></td>').join('');
+    return '<tr id="' + esc(panelRowId(cap, uid)) + '">' + first +
+      '<td><span class="pill err" title="' + esc(msg) + '">查询失败</span></td>' +
+      rest + '</tr>';
+  }
+
+  // panelFillRows 按 uid 逐行取数并替换占位行。
+  //
+  // rowFor(d, one) 必须返回带 `<tr>` 的整行 HTML；d 是整份回执（行渲染要
+  // 用它拿 defs 之类与账号无关的公共部分），one 是这个账号那一项。
+  async function panelFillRows(cap, uids, getPath, rowFor, failFor) {
+    let next = 0;
+    const worker = async () => {
+      while (next < uids.length) {
+        const uid = uids[next++];
+        let html;
+        try {
+          const sep = getPath.indexOf('?') >= 0 ? '&' : '?';
+          const d = await admin(getPath + sep + 'uid=' + encodeURIComponent(uid));
+          const one = (d && Array.isArray(d.accounts) && d.accounts.length)
+            ? d.accounts[0] : { uid: uid };
+          html = withRowId(rowFor(d, one), cap, uid);
+        } catch (e) {
+          html = failFor ? failFor(uid, e.message) : panelRowErr(cap, uid, e.message, 2);
+        }
+        const tr = document.getElementById(panelRowId(cap, uid));
+        if (tr) tr.outerHTML = html;
+      }
+    };
+    const n = Math.min(PANEL_ROW_CONCURRENCY, uids.length);
+    await Promise.all(Array.from({ length: n }, () => worker()));
+  }
+
   // SKELETON 两个面板共用的空态/骨架。
   function panelSkeleton(providerId, cap) {
     return document.getElementById(`pbody-${providerId}-${cap}`);
@@ -4607,36 +4696,66 @@ let loginProvider = '';
         autoAll = r.path;
       }
     }
-    let d;
-    try { d = await admin(getPath); }
-    catch (e) { host.innerHTML = `<div class="gbad">任务查询失败：${esc(e.message)}</div>`; return; }
 
-    const defs = Array.isArray(d.defs) ? d.defs : [];
-    const labelOf = (k) => { const t = defs.find(x => x.key === k); return t ? t.label : k; };
-    const s = d.summary || {};
-    const accts = Array.isArray(d.accounts) ? d.accounts : [];
-
+    // ⚠ **先把页面渲染出来**：骨架用内存里已有的账号列表，一次请求都不发。
+    const uids = providerUids(providerId);
+    if (!uids.length) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    const sum = { earned: 0, max: 0, pending: 0, done: 0 };
     const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
       <button data-ltask-all="${esc(providerId)}" data-lpath="${esc(autoAll)}">一键完成全部账号</button>
-      <span class="dim" style="font-size:12px">合计已得 ${esc(String(s.earned || 0))} / ${esc(String(s.max || 0))} 分 · 还有 ${esc(String(s.pending || 0))} 项待完成</span>
+      <span class="dim" style="font-size:12px" id="ltask-sum-${esc(providerId)}">正在逐个读取…（0 / ${uids.length}）</span>
       <span class="spacer" style="flex:1"></span>
       <span class="dim" style="font-size:11px">任务是一次性的：点一次入账一次，已完成的不再重复发分</span>
     </div>`;
+    const body = uids.map(u => panelRowPlaceholder('tasks', u, 7)).join('');
+    host.innerHTML = head + `<table class="accttable"><thead><tr>
+      <th>UID</th><th>昵称</th><th>进度</th><th>已得积分</th><th>余额</th><th>待完成</th><th>操作</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
 
-    if (!accts.length) {
-      host.innerHTML = head + '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
-      return;
-    }
-    const rows = accts.map(a => {
+    // defs 与账号无关（是任务定义），从**任一份**回执里取一次即可。
+    let defs = [];
+    const labelOf = (k) => { const t = defs.find(x => x.key === k); return t ? t.label : k; };
+    const paintSum = () => {
+      const el = document.getElementById(`ltask-sum-${providerId}`);
+      if (!el) return;
+      const tail = sum.done < uids.length
+        ? `（${sum.done} / ${uids.length} 已读取）`
+        : '（全部已读取）';
+      el.textContent = `合计已得 ${sum.earned} / ${sum.max} 分 · 还有 ${sum.pending} 项待完成 ${tail}`;
+    };
+    // 收尾刷新：一次性重绘整页会打断正在填的行，所以这里只更新汇总文字。
+    const after = () => {
+      if (sum.done >= uids.length) { /* 全部读完，等用户手动刷新 */ }
+    };
+
+    const rowFor = (d, a) => {
+      if (!defs.length && Array.isArray(d.defs)) defs = d.defs;
+      if (!a.ok) {
+        sum.done++;
+        paintSum();
+        return `<tr>${''}<td class="mono dim" title="${esc(a.uid || '')}">${esc((a.uid || '').slice(0, 8))}…</td>
+          <td>${esc(a.nickname || '—')}</td>
+          <td><span class="pill err" title="${esc(a.error || '')}">查询失败</span><div class="dim" style="font-size:11px">0%</div></td>
+          <td class="mono">0/${esc(String(a.total || 0))}</td>
+          <td class="mono"><span class="dim">—</span></td>
+          <td><span class="dim">—</span></td>
+          <td></td></tr>`;
+      }
       const pct = a.total ? Math.round((a.done / a.total) * 100) : 0;
       const pending = (a.pending || []).map(k =>
         `<span class="pill dim" title="${esc(k)}">${esc(labelOf(k))}</span>`).join(' ');
-      const st = a.ok
-        ? `<span class="pill ${a.done >= a.total ? 'ok' : 'warn'}">${a.done}/${a.total}</span>`
-        : `<span class="pill err" title="${esc(a.error || '')}">查询失败</span>`;
-      const btn = (a.ok && a.pending && a.pending.length)
+      const st = `<span class="pill ${a.done >= a.total ? 'ok' : 'warn'}">${a.done}/${a.total}</span>`;
+      const btn = (a.pending && a.pending.length)
         ? `<button data-ltask="${esc(a.uid)}" data-lpath="${esc(autoOne)}">一键完成（${a.pending.length}）</button>`
-        : (a.ok ? '<span class="dim" style="font-size:11px">已全部完成</span>' : '');
+        : '<span class="dim" style="font-size:11px">已全部完成</span>';
+      sum.earned += (a.earned || 0);
+      sum.max += (a.max || 0);
+      sum.pending += (a.pending || []).length;
+      sum.done++;
+      paintSum();
       return `<tr>
         <td class="mono dim" title="${esc(a.uid)}">${esc((a.uid || '').slice(0, 8))}…</td>
         <td>${esc(a.nickname || '—')}</td>
@@ -4646,10 +4765,9 @@ let loginProvider = '';
         <td style="max-width:320px">${pending || '<span class="dim">—</span>'}</td>
         <td style="white-space:nowrap">${btn}</td>
       </tr>`;
-    }).join('');
-    host.innerHTML = head + `<table class="accttable"><thead><tr>
-      <th>UID</th><th>昵称</th><th>进度</th><th>已得积分</th><th>余额</th><th>待完成</th><th>操作</th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
+    };
+    await panelFillRows('tasks', uids, getPath, rowFor, null);
+    after();
   }
 
   async function loadLoomyInvite(providerId) {
@@ -4670,38 +4788,60 @@ let loginProvider = '';
     const bindPath = adminRouteBySuffix(providerId, 'POST', '/bind');
     //  重绘前**先存下**用户已经敲进去的邀请码。
     //
-    // 这块面板会被周期性重绘（页面每 5 秒 refresh 一次）。不存的话，
-    // 用户刚输了一半的码会被下一次重绘**清空** —— 表现出来就是
-    // "网页隔三岔五自己刷新、输入框老是空的"，而这与后端一点关系都没有。
+    // 这块面板会被周期性重绘（页面每 5 秒 refresh 一次）。不存的话，用户刚输入的
+    // 码会被下一次重绘**清空** —— 表现出来就是"网页隔三岔五自己刷新、输入框老是空的"。
     const keep = {};
     host.querySelectorAll('input[data-linvite-code]').forEach(i => {
       if (i.value) keep[i.dataset.linviteCode] = i.value;
     });
-    let d;
-    try { d = await admin(getPath); }
-    catch (e) { host.innerHTML = `<div class="gbad">邀请码查询失败：${esc(e.message)}</div>`; return; }
 
-    const s = d.summary || {};
-    const accts = Array.isArray(d.accounts) ? d.accounts : [];
+    // ⚠ 先把页面渲染出来（一次请求都不发），再逐行取数。见文件头的说明。
+    const uids = providerUids(providerId);
+    if (!uids.length) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    const sum = { activated: 0, done: 0 };
     const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
-      <span class="dim" style="font-size:12px">共 ${esc(String(s.accounts || 0))} 个账号 · 已绑定 ${esc(String(s.activated || 0))} · 未绑定 ${esc(String(s.pending || 0))}</span>
+      <span class="dim" style="font-size:12px" id="linv-sum-${esc(providerId)}">正在逐个读取…（0 / ${uids.length}）</span>
       <span class="spacer" style="flex:1"></span>
       <span class="dim" style="font-size:11px">邀请码实测 6 位（形如 E3HRN8），每个码只能用一次（maxUses=1）；绑定是双向奖励。⚠ 「我生成的码」是发给**别人**用的，不能用来绑自己 —— 绑自己请填**其他账号**的码</span>
     </div>`;
+    const body = uids.map(u => panelRowPlaceholder('invite', u, 6)).join('');
+    host.innerHTML = head + `<table class="accttable"><thead><tr>
+      <th>UID</th><th>昵称</th><th>激活状态</th><th>余额</th><th>我生成的码</th><th>绑定别人的码</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
 
-    if (!accts.length) {
-      host.innerHTML = head + '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
-      return;
-    }
-    const rows = accts.map(a => {
-      const st = !a.ok
-        ? `<span class="pill err" title="${esc(a.error || '')}">查询失败</span>`
-        : (a.activated
-          ? `<span class="pill ok">已绑定${a.applied ? ' ' + esc(a.applied) : ''}</span>`
-          : '<span class="pill warn">未绑定</span>');
+    const paintSum = () => {
+      const el = document.getElementById(`linv-sum-${providerId}`);
+      if (!el) return;
+      const tail = sum.done < uids.length
+        ? `（${sum.done} / ${uids.length} 已读取）`
+        : '（全部已读取）';
+      el.textContent = `共 ${uids.length} 个账号 · 已绑定 ${sum.activated} · 未绑定 ${uids.length - sum.activated} ${tail}`;
+    };
+
+    const rowFor = (d, a) => {
+      if (!a.ok) {
+        sum.done++;
+        paintSum();
+        return `<tr>
+          <td class="mono dim" title="${esc(a.uid || '')}">${esc((a.uid || '').slice(0, 8))}…</td>
+          <td>${esc(a.nickname || '—')}</td>
+          <td><span class="pill err" title="${esc(a.error || '')}">查询失败</span></td>
+          <td class="mono"><span class="dim">—</span></td>
+          <td><span class="dim">—</span></td>
+          <td><span class="dim">—</span></td></tr>`;
+      }
+      if (a.activated) sum.activated++;
+      sum.done++;
+      paintSum();
+      const st = a.activated
+        ? `<span class="pill ok">已绑定${a.applied ? ' ' + esc(a.applied) : ''}</span>`
+        : '<span class="pill warn">未绑定</span>';
       const codes = (a.codes && a.codes.length)
         ? a.codes.map(c => {
-            // 状态来自后端透传的上游字段：`exhausted` = 已被别人绑掉（maxUses=1 的常态）。
+            // 状态来自后端透传的上游字段：exhausted = 已被别人绑掉（maxUses=1 的常态）。
             const used = (c.status === 'exhausted') ||
               (Number(c.maxUses) > 0 && Number(c.usedCount) >= Number(c.maxUses));
             const tip = `用过 ${c.usedCount}/${c.maxUses}` + (c.status ? ` · ${c.status}` : '');
@@ -4710,8 +4850,10 @@ let loginProvider = '';
         : '<span class="dim">—</span>';
       // 已绑定的账号不再显示输入框：码是 maxUses=1，点错一次就白费一个码。
       const ownCodes = (a.codes || []).map(c => c.code).join(',');
-      const ops = a.ok && !a.activated
+      const saved = keep[a.uid] || '';
+      const ops = !a.activated
         ? `<input data-linvite-code="${esc(a.uid)}" data-own="${esc(ownCodes)}" maxlength="16" placeholder="6 位邀请码"
+             value="${esc(saved)}"
              style="width:110px;padding:2px 6px;font-size:12px;text-transform:uppercase"
              title="实测 6 位（形如 E3HRN8）">
            <button data-linvite-bind="${esc(a.uid)}" data-lpath="${esc(bindPath)}">绑定</button>`
@@ -4724,15 +4866,8 @@ let loginProvider = '';
         <td>${codes}</td>
         <td style="white-space:nowrap">${ops}</td>
       </tr>`;
-    }).join('');
-    host.innerHTML = head + `<table class="accttable"><thead><tr>
-      <th>UID</th><th>昵称</th><th>激活状态</th><th>余额</th><th>我生成的码</th><th>绑定别人的码</th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
-    // 重绘后把用户刚才输入的值放回去（见上面 keep 的注释）。
-    host.querySelectorAll('input[data-linvite-code]').forEach(i => {
-      const v = keep[i.dataset.linviteCode];
-      if (v) i.value = v;
-    });
+    };
+    await panelFillRows('invite', uids, getPath, rowFor, null);
   }
 
   // loadGenericList 通用的"上游列表"渲染。

@@ -66,6 +66,28 @@ func (p *Provider) accounts() []accountRef {
 	return out
 }
 
+// restrictToUID 支持 `?uid=` 只查一个账号（面板逐行取数用）。
+//
+// # 为什么需要它（用户要求：先加载网页，再按需加载里面的数据）
+//
+// 面板一次查 35 个账号，上游单次 0.2~23.7 秒 ⇒ 整张表空着转 20 秒以上，
+// 用户的原话是「网页还是加载不出来」。现在前端先渲染表格骨架，再**逐行**
+// 请求（每行一次 `?uid=`）—— 第一行约 1 秒就出现，慢账号只拖慢它自己。
+//
+// ⚠ 找不到该 uid 时返回 **nil**（不是全部）：把"这个号不在池里"当成
+// "查全部"会让前端那一行显示成别人的数据 —— 一个静默的串号。
+func restrictToUID(accts []accountRef, uid string) []accountRef {
+	if uid == "" {
+		return accts
+	}
+	for _, x := range accts {
+		if x.UID == uid {
+			return []accountRef{x}
+		}
+	}
+	return nil
+}
+
 // ─ 新手任务 ───────────────────────────────────────────────────────────
 
 // accountTasksView 一个账号的任务状态。
@@ -86,6 +108,8 @@ type accountTasksView struct {
 // handleTasksList GET /admin/loomy/tasks —— 每个账号的任务进度。
 func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
 	accts := p.accounts()
+	// `?uid=` = 只查这一个（面板逐行取数；见 restrictToUID）。
+	accts = restrictToUID(accts, strings.TrimSpace(r.URL.Query().Get("uid")))
 	// ⚠ **定长**切片 + 下标写入：并发时不能 append 共享切片（会丢数据、不报错）。
 	out := make([]accountTasksView, len(accts))
 	// 并发限流：串行要 3~4 分钟，面板一直转（见 loomyPanelConcurrency）。
@@ -247,6 +271,8 @@ func (p *Provider) handleTasksAuto(w http.ResponseWriter, r *http.Request) {
 // handleTasksAutoAll POST /admin/loomy/tasks/auto-all —— 一键完成**全部** loomy 账号。
 func (p *Provider) handleTasksAutoAll(w http.ResponseWriter, r *http.Request) {
 	accts := p.accounts()
+	// `?uid=` = 只查这一个（面板逐行取数；见 restrictToUID）。
+	accts = restrictToUID(accts, strings.TrimSpace(r.URL.Query().Get("uid")))
 	results := make([]taskRunResult, len(accts))
 	// 写操作更要限流：对同一个上游打太快会被限流，而每个账号要跑 8 个任务。
 	fanOutConcurrent(len(accts), loomyPanelConcurrency, func(i int) {
@@ -287,6 +313,8 @@ type accountInviteView struct {
 // handleInviteList GET /admin/loomy/invite —— 每个账号的激活状态 + 自己生成的码。
 func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	accts := p.accounts()
+	// `?uid=` = 只查这一个（面板逐行取数；见 restrictToUID）。
+	accts = restrictToUID(accts, strings.TrimSpace(r.URL.Query().Get("uid")))
 	out := make([]accountInviteView, len(accts))
 	fanOutConcurrent(len(accts), loomyPanelConcurrency, func(i int) {
 		a := accts[i]
