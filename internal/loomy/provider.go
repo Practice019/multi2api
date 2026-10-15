@@ -89,6 +89,13 @@ const ProviderID = providerID
 
 // Provider 实现 gateway.Provider（以及若干可选扩展点，见包注释）。
 type Provider struct {
+	// 两个面板的行缓存（见 adminpoints.go 的 panelRowCache）。
+	//
+	// ⚠ 必须有这把锁：惰性初始化会在并发请求下同时写这两个字段。
+	panelMu     sync.Mutex
+	panelTasks  *panelRowCache[accountTasksView]
+	panelInvite *panelRowCache[accountInviteView]
+
 	client *Client
 	// authDir 凭证目录。供 AuthDirExt 使用 —— 核心据此按上游重载 auths。
 	authDir string
