@@ -504,7 +504,6 @@ func main() {
 		// 加权抽签。用户实测过这个后果：重启后 22 小时里唯一一次计费，
 		// 记在了那唯一一个免费额度为 0 的号上（永久积分 -30），而另外 21 个号
 		// 都还有免费额度。预热就是让那第一次抽签也有偏好。
-		lm.StartTierWarmup()
 	} else {
 		log.Printf("loomy: 未启用（config 里 loomy.enabled 缺省为 false）")
 		// 与 codearts 同一个提示（那段的长注释同样适用）：凭证在、上游却没开，

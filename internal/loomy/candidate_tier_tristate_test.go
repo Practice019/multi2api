@@ -51,7 +51,7 @@ func TestTierOfPointsDailyUnknownIsNotPaid(t *testing.T) {
 	writeFile(t, dir, "loomy-c.json", `{"session":"`+sess+`","userid":"`+uid+`"}`)
 	p := NewWithConfig(Config{Client: NewWithBase(srv.URL), AuthDir: dir})
 
-	p.refreshTierOne(uid, true)
+	p.RefreshQuota(uid)
 
 	e, ok := p.tiers.get(uid)
 	if !ok {
