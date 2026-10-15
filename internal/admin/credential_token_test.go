@@ -76,7 +76,7 @@ func TestAccountViewsFillsHasTokenFromProvider(t *testing.T) {
 	p.AddFor("wbintl", &auth.Auth{UID: "wb-1", Nickname: "uxjxxx"},
 		opaqueSecret{AccessToken: "real-access-token"})
 
-	v := accountsFor(t, New(Config{Pool: p, Registry: reg, DefaultProvider: "wbintl"}))[0]
+	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "wbintl"}))[0]
 
 	// 前置条件：投影里确实没有 token（否则这条测试没测到东西）。
 	if v.Status.UID != "wb-1" {
@@ -116,7 +116,7 @@ func TestAccountViewsHasTokenUnknownWhenProviderSilent(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "不透明的 secret")
 
-	v := accountsFor(t, New(Config{Pool: p, Registry: reg, DefaultProvider: "carts"}))[0]
+	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "carts"}))[0]
 	if v.HasToken {
 		t.Error("上游没实现 CredentialTokenExt 时 has_token 不该翻成 true —— " +
 			"那是核心在猜，而不是上游在答")
@@ -142,7 +142,7 @@ func TestAccountViewsHasTokenPrefersProjection(t *testing.T) {
 	// 投影里**带着** token —— 启动时经 LoadDir 装载的形态。
 	p.AddFor("wb", &auth.Auth{UID: "wb-1", AccessToken: "from-projection"}, nil)
 
-	v := accountsFor(t, New(Config{Pool: p, Registry: reg, DefaultProvider: "wb"}))[0]
+	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "wb"}))[0]
 	if !v.HasToken {
 		t.Error("投影里有 token 时 has_token 必须为 true —— " +
 			"先问上游会把默认上游的 true 覆盖成 false")

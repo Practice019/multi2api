@@ -218,7 +218,7 @@ func newReloadFixture(t *testing.T) *reloadFixture {
 	p.SyncToDirFor("codearts", []*auth.Auth{{UID: "ca-existing"}})
 	p.SyncToDirFor("other", []*auth.Auth{{UID: "zz-existing"}})
 
-	h := New(Config{
+	h := New(Config{ListensLoopback: true,
 		Pool:            p,
 		Registry:        reg,
 		AuthDir:         wbDir, // 默认上游的目录
@@ -476,7 +476,7 @@ func TestReloadNilPoolDoesNotPanic(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, AuthDir: base, AuthsBase: base, DefaultProvider: "codearts"})
+	h := New(Config{ListensLoopback: true, Registry: reg, AuthDir: base, AuthsBase: base, DefaultProvider: "codearts"})
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -528,7 +528,7 @@ func TestReloadFallsBackToUpstreamDirWhenNoAuthDirExt(t *testing.T) {
 		t.Fatal("前提不满足：本桩必须实现 CredentialLoader")
 	}
 
-	h := New(Config{Registry: reg, AuthDir: base, AuthsBase: base, DefaultProvider: "codearts"})
+	h := New(Config{ListensLoopback: true, Registry: reg, AuthDir: base, AuthsBase: base, DefaultProvider: "codearts"})
 	rec, resp := postReload(t, h, `{"provider":"codearts"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)

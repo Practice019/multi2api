@@ -19,6 +19,7 @@
 package admin
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -168,13 +169,51 @@ type Config struct {
 	// APIKey 管理钥匙（config.api_key 原值）：/admin/apikeys 返回它的掩码，
 	// 让管理页与仪表盘「API 接入信息」显示同一把钥匙（一个事实来源）。
 	// 空 = 未配置管理钥匙。
+	//
+	// ⚠ 它**不再**用于门禁 —— 门禁认 AdminToken（见下）。这里保留它只是
+	// 为了让管理页能显示"对话接口用的那把 key 是什么"（掩码形式）。
 	APIKey string
+
+	// AdminToken 管理台门禁令牌（与 api_key 完全独立）。
+	//
+	// # 为什么必须独立（用户报障：门禁 token 不能和 api 一样）
+	//
+	// 改造前门禁认的就是 APIKey，也就是对话接口那把 —— 后果是"给某个
+	// 客户端配一把 key 调对话"等于"把整个管理台交出去"。详见
+	// ServeHTTP / adminTokenMatches 的注释。
+	//
+	// 空 = 没有远程管理面（只有本机免令牌那条路，且要求监听在回环地址）。
+	AdminToken string
+
+	// ListensLoopback 本进程是否**只**监听回环地址。
+	//
+	// 装配层在启动时算一次（从 config.listen 解析，`:7863` 与 `0.0.0.0:7863`
+	// 都算"非回环"）。它是「本机免令牌」的前提之一 —— 见 localExempt。
+	//
+	// 为什么必须由装配层告知而不是这里自己判断：admin 包拿不到
+	// "进程监听到了哪些地址"（那是 net.Listener 的事实），而 config.listen
+	// 的字面值在装配层已经解析过一次（startup_addr.go）。
+	ListensLoopback bool
+
 	// ConfigPath config.json 路径（轮换管理钥匙时写回 api_key 字段）。
 	// 空 = 不支持写回（轮换端点返回错误）。
 	ConfigPath string
 	// OnAPIKeyRotated 轮换成功后的通知（装配层注入，更新 handler 内存钥匙，
 	// 让新 key 立即生效无需重启）。nil = 只写文件不更新内存。
 	OnAPIKeyRotated func(newKey string)
+
+	// OnAdminTokenRotated 管理令牌轮换成功后的通知。
+	//
+	// ⚠ 与 OnAPIKeyRotated **分开**（用户报障：轮换之后还要重启才有用）。
+	//
+	// 原因是两条内存副本原本不同步：
+	//
+	//	server.Handler.apiKey  → 有 SetAPIKey，轮换后立即生效
+	//	admin.Handler.cfg.APIKey → **构造期快照**，永不更新
+	//
+	// 而门禁恰恰读的是后者 ⇒ 轮换写成功、内存里门禁还是旧值 ⇒ 表现为
+	// "轮换后必须重启"。现在两条各有各的更新回调，且**都接上**。
+	OnAdminTokenRotated func(newKey string)
 
 	// OpenAuthURL 用**无痕/隐私窗口**打开一条授权链接，返回浏览器的展示名。
 	//
@@ -240,6 +279,18 @@ type TaskSlot interface {
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+
+	// adminTokenMu / adminToken 当前生效的管理令牌（支持运行时轮换）。
+	//
+	// # 为什么它是**可变**的而不是直接用 cfg.AdminToken
+	//
+	// cfg 是 admin.New 时的结构体快照。改造前门禁读 cfg.APIKey，
+	// 于是轮换写了盘、内存里门禁还是旧值 ⇒「轮换后要重启才生效」（用户报障）。
+	// 把门禁判据挪到这个可变字段，轮换时 SetAdminToken 一下即可。
+	//
+	// 空串 = 还没人轮换过 ⇒ 回落 cfg.AdminToken（普通部署行为不变）。
+	adminTokenMu sync.RWMutex
+	adminToken   string
 
 	// patterns 已注册的通用端点 pattern（"METHOD /path" 形式）。
 	//
@@ -452,47 +503,186 @@ func (h *Handler) register(pattern string, fn http.HandlerFunc) {
 // 而非复用，客户端可能观察到 ECONNRESET（表现为「服务端日志成功、浏览器/脚本报连接重置」）。
 // 不要求每个 handler 自己记得 drain，放在唯一入口一次做掉。
 //
-// # 远程访问（非 loopback）的凭据要求
+// # 门禁判据（2026-10 重做，用户报障「没授权却能改设置」）
 //
-// 原实现整个 /admin/* 子树只接受 loopback 直连（浏览器从别的设备打开时
-// 无法自动携带 Bearer，与其做半吊子鉴权，不如直接关在门外）。但 Docker
-// 端口映射下容器看到的来源**永远不是** 127.0.0.1 —— 于是控制台在容器
-// 部署里彻底不可用。
+// 改造前的判据是：
 //
-// 现在放开为：非本机请求只要携带**管理钥匙**（config.api_key，经
-// Authorization: Bearer 头或 `?token=` 查询参数）即放行；普通 API key
-// **不解锁**管理端点 —— 管理台能改账号池、能触发上游请求，只有管理钥匙
-// 配得上这个权限级。
+//	if !isLoopback(r.RemoteAddr) && !h.remoteAdminAuthorized(r) { 403 }
+//	// 其中 remoteAdminAuthorized 认的是 **config.api_key**
+//
+// 两处都有问题，且会叠加成一个**完全敞开**的部署：
+//
+//	① 凭据就是对话接口那把 api_key —— 给任何客户端配一把 key 调对话，
+//	   就同时把整个管理台交出去了（能改配置、删账号、轮换钥匙）
+//	② `RemoteAddr` 只反映"**上一跳**是谁"。任何本机反代
+//	   （nginx / caddy / frp / 各种内网穿透）从 127.0.0.1 连过来时，
+//	   RemoteAddr 就是回环 ⇒ 判定为"本机" ⇒ 免凭据放行。
+//	   于是"我只在局域网/公网暴露这个域名"变成了"管理台对全网敞开"。
+//	③ /ui 在本机访问时还会把 api_key **明文注入页面**（见 server/ui 的
+//	   injectKey 逻辑），所以那个"敞开的页面"自己就带着钥匙。
+//
+// 现在的判据把三件事分开：
+//
+//	本机免令牌  只在「监听回环 且 上一跳是回环 且 请求不是经反代转发」时成立
+//	远程访问    必须出示 **admin_token**（独立令牌），api_key 不再解锁管理面
+//	无令牌      监听非回环却没有 admin_token ⇒ 拒绝一切非本机请求（安全默认）
+//
+// 第 3 条是刻意的安全兜底：不配 admin_token 就没有远程管理面，
+// 而不是"回落到用 api_key"（那正是要修掉的东西）。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			_, _ = io.Copy(io.Discard, r.Body)
 		}
 	}()
-	if !isLoopback(r.RemoteAddr) && !h.remoteAdminAuthorized(r) {
+	if !h.adminAllowed(r) {
 		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error": "管理接口仅允许本机直连，或携带管理钥匙（Authorization: Bearer <api_key> 或 ?token=<api_key>）。",
+			"error": "管理接口需要授权。请在 config.json 里配置 admin_token，" +
+				"并用 Authorization: Bearer <admin_token> 或 ?token=<admin_token> 访问。" +
+				"（admin_token 与 api_key 是**两把**不同的钥匙：api_key 只用于 /v1 对话接口。）",
+			"hint": h.denyHint(r),
 		})
 		return
 	}
 	h.mux.ServeHTTP(w, r)
 }
 
-// remoteAdminAuthorized 远程访问管理台的凭据判定：只认 config.api_key
-// （管理钥匙），Bearer 头或 `?token=` 查询参数均可。
+// denyHint 给出一条**可执行**的说明，而不是让用户去猜。
 //
-// 未配置管理钥匙（cfg.APIKey == ""）时恒 false —— 维持「仅本机」原状，
-// 不带钥匙的部署不该凭空多出远程管理面。
-func (h *Handler) remoteAdminAuthorized(r *http.Request) bool {
-	ak := h.cfg.APIKey
-	if ak == "" {
+// 三种拒绝理由的处置完全不同，混成一句话会让人反复试错的钥匙：
+//
+//	没配 admin_token 且监听非回环 → 去 config 加 admin_token（并重启）
+//	配了但没出示/出示错          → 检查你带的凭据
+//	经反代转发而来               → 本机免令牌不适用于转发请求
+func (h *Handler) denyHint(r *http.Request) string {
+	if h.currentAdminToken() == "" {
+		return "当前 config.json 里没有 admin_token。管理台远程访问需要独立配置它" +
+			"（可用控制台的「轮换管理密钥」生成，或自己填一串足够长的随机值）。"
+	}
+	if forwarded(r) {
+		return "本请求像是经反向代理转发而来（带 X-Forwarded-* / X-Real-IP 头）。" +
+			"「本机免令牌」只对**真正的**本机直连生效，经代理的请求必须带 admin_token。"
+	}
+	return "凭据不正确。管理台要的是 admin_token（不是 api_key）。"
+}
+
+// adminAllowed 管理面的总门禁。
+//
+// 顺序刻意如此：先判"本机免令牌"（最便宜、且要求最严），再判令牌。
+func (h *Handler) adminAllowed(r *http.Request) bool {
+	if h.localExempt(r) {
+		return true
+	}
+	return h.adminTokenMatches(r)
+}
+
+// localExempt 是否享受「本机免令牌」。
+//
+// # 三个条件必须**同时**成立（这是本次修复的核心）
+//
+//	① 本进程**监听在回环地址**：如果它监听 0.0.0.0，那么"本机"这个词
+//	   就没有意义了 —— 任何人的请求都会以某个来源地址到达，而端口是公开的。
+//	   这条挡住"我绑了 0.0.0.0 但以为只有本机能访问"。
+//	② 上一跳（RemoteAddr）是回环。
+//	③ 请求**没有**经由反向代理转发（无 X-Forwarded-* / X-Real-IP 头）。
+//
+// 只判 ② 就是改造前的漏洞：nginx 从 127.0.0.1 连过来时 ② 恒成立。
+// 加上 ③ 之后，反代必须显式出示 admin_token —— 而反代是能设请求头的，
+// 所以这不影响正常的"我用 nginx 加个认证再暴露出去"的用法。
+//
+// ⚠ 为什么不信任 X-Forwarded-For 来判"真实客户端是不是本机"：
+// 那些头是**客户端可以随便伪造**的。用它做"放行"判据等于把门禁交给攻击者
+// （伪造 `X-Forwarded-For: 127.0.0.1` 即可通过）。所以这里只用它做**收紧**
+// （出现即视为"经代理"，进而要求令牌），绝不用它做放宽。
+func (h *Handler) localExempt(r *http.Request) bool {
+	if !h.cfg.ListensLoopback {
+		return false
+	}
+	if !isLoopback(r.RemoteAddr) {
+		return false
+	}
+	return !forwarded(r)
+}
+
+// forwarded 报告请求是否带有反向代理的转发痕迹。
+//
+// 这几个头都由代理**附加**，正常直连不该出现。出现即说明链路上有代理 ——
+// 于是"本机直连"这个前提不成立（我们看不到真实客户端，只看到代理）。
+func forwarded(r *http.Request) bool {
+	for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Real-Ip", "Forwarded"} {
+		if strings.TrimSpace(r.Header.Get(h)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// adminTokenMatches 请求是否出示了正确的**管理令牌**。
+//
+// # 与 api_key 的关系：**不认识**
+//
+// 这里刻意只比对 admin_token。改造前它比的是 config.api_key，
+// 于是"给客户端配一把对话 key"等于"交出管理台"。现在两把钥匙各管一段：
+//
+//	api_key     → /v1/chat/completions、/v1/images/generations、/v1/models
+//	admin_token → /admin/* 与 /ui 的远程访问
+//
+// 未配置 admin_token（空串）时恒 false —— 维持"没有远程管理面"的安全默认，
+// 而**不是**回落到 api_key（那正是要修掉的权限倒挂）。
+func (h *Handler) adminTokenMatches(r *http.Request) bool {
+	want := h.currentAdminToken()
+	if want == "" {
 		return false
 	}
 	cred := bearerOf(r)
 	if cred == "" {
 		cred = r.URL.Query().Get("token")
 	}
-	return cred == ak
+	// 定长比较：避免按字节提前返回泄漏"前几位对了"的时序信息。
+	return subtleEqual(cred, want)
+}
+
+// SetAdminToken 运行时更新管理令牌（轮换端点用）。
+//
+// # 为什么必须有它（用户报障：轮换之后还要重启才有用）
+//
+// 改造前：门禁读 `h.cfg.APIKey`，那是 admin.New 时的**结构体快照**；
+// 轮换端点写回了 config.json、也调了 OnAPIKeyRotated，但那个回调更新的是
+// **另一个包**（server.Handler.apiKey）的内存副本。于是：
+//
+//	文件        → 新值（写盘成功）
+//	门禁判据    → 旧值（cfg.APIKey 快照，永不更新）
+//	表现为      → 用新钥匙被 403，用旧钥匙还能进 ⇒「要重启才生效」
+//
+// 现在门禁读这个可变字段，轮换时同步更新，**无需重启**。
+func (h *Handler) SetAdminToken(k string) {
+	h.adminTokenMu.Lock()
+	h.adminToken = k
+	h.adminTokenMu.Unlock()
+}
+
+// currentAdminToken 返回当前生效的管理令牌。
+//
+// 回落规则：字段为空（未调用过 SetAdminToken）时用构造时的 cfg.AdminToken。
+// 这保证"没人轮换过"的普通部署行为不变，而轮换过的部署读新值。
+func (h *Handler) currentAdminToken() string {
+	h.adminTokenMu.RLock()
+	v := h.adminToken
+	h.adminTokenMu.RUnlock()
+	if v != "" {
+		return v
+	}
+	// ⚠ 这里**只**回落 cfg.AdminToken（不是 cfg.APIKey）。
+	// 回落 api_key 就是改造前那个权限倒挂，绝不能回来。
+	return strings.TrimSpace(h.cfg.AdminToken)
+}
+
+// subtleEqual 等时比较两个字符串（长度不同也走完整流程）。
+//
+// 管理令牌是**高权限**凭据，逐字节提前返回的比较会给爆破留一条侧信道。
+// crypto/subtle 已经是标准库依赖，不引入新依赖树。
+func subtleEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func isLoopback(remoteAddr string) bool {

@@ -67,7 +67,7 @@ func newFreeQuotaHandler(t *testing.T, q pool.QuotaView) *Handler {
 	p := pool.New("")
 	p.AddFor("loomy", &auth.Auth{UID: "ly-1"}, nil)
 	p.SetQuota("ly-1", q)
-	return New(Config{Pool: p, DefaultProvider: "loomy"})
+	return New(Config{ListensLoopback: true, Pool: p, DefaultProvider: "loomy"})
 }
 
 // 有分项 ⇒ JSON 里出现 free_quota，值是那个数。

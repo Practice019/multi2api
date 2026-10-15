@@ -32,8 +32,31 @@ type UAModelFamilyConfig struct {
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	Listen string `json:"listen"` // ":7863"
+	APIKey string `json:"api_key"`
+
+	// AdminToken 管理台门禁令牌 —— 与 APIKey **完全独立**的一把钥匙。
+	//
+	// # 为什么必须独立（用户报障：门禁 token 不能和 api 一样）
+	//
+	// 改造前 /admin/* 的门禁凭据**就是** config.api_key，也就是对话接口
+	// `POST /v1/chat/completions` 用的那把。后果是一个权限**倒挂**：
+	//
+	//	· 你为某个第三方客户端/机器人配一把 key 让它调对话 ——
+	//	  那把 key 同时就解锁了整个管理台（改配置、删账号、轮换钥匙）
+	//	· 轮换对话 key 会连带把管理台锁掉（因为它们是同一把）
+	//
+	// 两件事的**风险等级完全不同**：对话 key 泄露 = 别人白用你的额度；
+	// 管理台钥匙泄露 = 别人接管你的整个网关。用同一把就是让低等级凭据
+	// 自动获得高等级权限。
+	//
+	// # 缺省行为（空 = 走"本机免令牌"的兼容模式）
+	//
+	// 留空时：只有**本机**访问免令牌；一旦监听在非回环地址（`0.0.0.0:7863`
+	// 这种），管理台会**拒绝一切非本机请求**，并在启动日志里明确要求你配一个。
+	// 详见 internal/admin 的门禁实现与 startup 的提示。
+	AdminToken string `json:"admin_token"`
+
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 

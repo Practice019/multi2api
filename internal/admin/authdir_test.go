@@ -76,7 +76,7 @@ func TestPollViaFlowWritesToProviderDir(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{
+	h := New(Config{ListensLoopback: true,
 		Registry:  reg,
 		AuthDir:   workbuddyDir, // ← 默认上游的目录（**不该**被用到）
 		AuthsBase: t.TempDir(),
@@ -198,7 +198,7 @@ func TestPollViaFlowRescansWithUpstreamParser(t *testing.T) {
 	// `SyncToDirFor` 会把它**删掉**（这也是可观测的差异）。
 	p.SyncToDirFor("codearts", []*auth.Auth{{UID: "ca-old"}})
 
-	h := New(Config{
+	h := New(Config{ListensLoopback: true,
 		Pool:            p,
 		Registry:        reg,
 		DefaultProvider: "codearts",
@@ -346,7 +346,7 @@ func TestPollViaFlowRejectsNilPool(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, AuthDir: dir, AuthsBase: t.TempDir()}) // Pool = nil
+	h := New(Config{ListensLoopback: true, Registry: reg, AuthDir: dir, AuthsBase: t.TempDir()}) // Pool = nil
 
 	defer func() {
 		if r := recover(); r != nil {

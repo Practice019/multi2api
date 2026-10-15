@@ -24,7 +24,7 @@ func TestProviderDisplayNameReachesManifest(t *testing.T) {
 	if err := reg.Register(namedProvider{id: "fakecn", name: "Fake (中国版)"}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg})
+	h := New(Config{ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/ui/manifest"))
@@ -57,7 +57,7 @@ func TestProviderWithoutDisplayNameOmitsField(t *testing.T) {
 	if err := reg.Register(plainNoNameProvider{id: "plain"}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg})
+	h := New(Config{ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/ui/manifest"))
@@ -87,7 +87,7 @@ func TestProviderEmptyDisplayNameFallsBackToOmit(t *testing.T) {
 	if err := reg.Register(namedProvider{id: "blank", name: "   "}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg})
+	h := New(Config{ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/ui/manifest"))
@@ -112,7 +112,7 @@ func TestProvidersEndpointAlsoCarriesDisplayName(t *testing.T) {
 	if err := reg.Register(namedProvider{id: "fakecn", name: "Fake (中国版)"}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg})
+	h := New(Config{ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/providers"))

@@ -82,7 +82,7 @@ func TestManifestCarriesAccountColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := manifestFor(t, New(Config{Registry: reg}))
+	m := manifestFor(t, New(Config{ListensLoopback: true, Registry: reg}))
 	info := findProvider(t, m, "selfreport")
 	if len(info.AccountColumns) != len(want) {
 		t.Fatalf("accounts_columns 长度 = %d，want %d（实际 %v）",
@@ -112,7 +112,7 @@ func TestManifestOmitsAccountColumnsWhenNotReported(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/ui/manifest", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	New(Config{Registry: reg}).ServeHTTP(rec, req)
+	New(Config{ListensLoopback: true, Registry: reg}).ServeHTTP(rec, req)
 
 	var raw struct {
 		Providers []map[string]json.RawMessage `json:"providers"`
@@ -141,7 +141,7 @@ func TestManifestCarriesUnknownColumnIDToo(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	info := findProvider(t, manifestFor(t, New(Config{Registry: reg})), "typo")
+	info := findProvider(t, manifestFor(t, New(Config{ListensLoopback: true, Registry: reg})), "typo")
 	if len(info.AccountColumns) != 2 || info.AccountColumns[1] != "uid_typo_column" {
 		t.Fatalf("未知列 id 应当照常下发（由前端跳过并 warn），实际 %v", info.AccountColumns)
 	}
@@ -205,7 +205,7 @@ func TestAccountViewsFillsTokenExpiryFromProvider(t *testing.T) {
 	// 投影里**没有** ExpiresAt —— 这正是 codearts 的形态。
 	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "不透明的 secret")
 
-	h := New(Config{Pool: p, Registry: reg, DefaultProvider: "carts"})
+	h := New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "carts"})
 	accts := accountsFor(t, h)
 	if len(accts) != 1 {
 		t.Fatalf("账号数 = %d，want 1", len(accts))
@@ -243,7 +243,7 @@ func TestAccountViewsOmitsTokenExpiryWhenProviderSaysUnknown(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "不透明的 secret")
 
-	v := accountsFor(t, New(Config{Pool: p, Registry: reg, DefaultProvider: "carts"}))[0]
+	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "carts"}))[0]
 	if v.TokenExpireSec != nil || v.TokenExpireAt != nil {
 		t.Errorf("上游说未知时不该填过期字段（got sec=%v at=%v）—— "+
 			"前端会把 0 渲染成「已过期」，比显示「—」更糟", v.TokenExpireSec, v.TokenExpireAt)
@@ -268,7 +268,7 @@ func TestAccountViewsWorkbuddyPathUnchanged(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("wb", &auth.Auth{UID: "wb-1", AccessToken: "tok", ExpiresAt: at}, nil)
 
-	v := accountsFor(t, New(Config{Pool: p, Registry: reg, DefaultProvider: "wb"}))[0]
+	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "wb"}))[0]
 	if !v.HasToken {
 		t.Error("workbuddy 的 has_token 应当为 true（AccessToken 非空）")
 	}
@@ -291,7 +291,7 @@ func TestCredentialExpiryOfRefusesUnknownProvider(t *testing.T) {
 	}
 	p := pool.New("")
 	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "s")
-	h := New(Config{Pool: p, Registry: reg, DefaultProvider: "carts"})
+	h := New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "carts"})
 
 	cases := []struct {
 		name     string
@@ -343,7 +343,7 @@ func TestAccountViewsReportsTodayWelfare(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "s")
 
-	h := New(Config{
+	h := New(Config{ListensLoopback: true,
 		Pool:            p,
 		Registry:        reg,
 		DefaultProvider: "carts",
@@ -373,7 +373,7 @@ func TestAccountViewsOmitsTodayWelfareWhenNoRecord(t *testing.T) {
 	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "s")
 
 	// 历史是空的（今天没点过）
-	h := New(Config{
+	h := New(Config{ListensLoopback: true,
 		Pool:            p,
 		Registry:        reg,
 		DefaultProvider: "carts",
@@ -398,7 +398,7 @@ func TestTodayWelfareDoesNotBleedIntoTodayCheckin(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("carts", &auth.Auth{UID: "ca-1"}, "s")
 
-	h := New(Config{
+	h := New(Config{ListensLoopback: true,
 		Pool:            p,
 		Registry:        reg,
 		DefaultProvider: "carts",

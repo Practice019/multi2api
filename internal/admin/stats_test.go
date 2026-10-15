@@ -33,7 +33,7 @@ func newStatsHandler(t *testing.T, persisted []logbuf.Entry) (*Handler, *logbuf.
 	}
 	ring := logbuf.New(4) // 故意很小的内存缓冲
 	ring.SetSink(sink)
-	return New(Config{Ring: ring}), ring
+	return New(Config{ListensLoopback: true, Ring: ring}), ring
 }
 
 func doStats(t *testing.T, h *Handler) map[string]any {
@@ -187,7 +187,7 @@ func TestStatsWindowFromPersistedRange(t *testing.T) {
 func TestStatsFallsBackToMemoryWhenFileEmpty(t *testing.T) {
 	ring := logbuf.New(8)
 	ring.Push(logbuf.Entry{At: time.Now(), Model: "m", Mode: "stream", Status: 200, TotalMS: 5})
-	h := New(Config{Ring: ring})
+	h := New(Config{ListensLoopback: true, Ring: ring})
 
 	out := doStats(t, h)
 	if got := out["total"].(float64); got != 1 {
@@ -200,7 +200,7 @@ func TestStatsFallsBackToMemoryWhenFileEmpty(t *testing.T) {
 
 // 没有 Ring 时（配置缺失）应优雅降级，不能 panic。
 func TestStatsWithoutRing(t *testing.T) {
-	h := New(Config{})
+	h := New(Config{ListensLoopback: true})
 	out := doStats(t, h)
 	if got := out["total"].(float64); got != 0 {
 		t.Errorf("total=%v，期望 0", got)

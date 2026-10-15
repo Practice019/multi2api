@@ -88,7 +88,7 @@ func TestLoginPollOmitsZeroExpiresAt(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, DefaultProvider: "flowup"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
 	// ⚠ AuthDir 与 flow.authDir 都要给：前者给 LoadCredentials 扫，
 	// 后者是"上游自报的落盘目录"。只给一个是既有用例踩过的坑。
 	h.cfg.AuthDir = flow.authDir
@@ -138,7 +138,7 @@ func TestLoginPollReportsNeverExpires(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, DefaultProvider: "flowup"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
 	h.cfg.AuthDir = flow.authDir
 
 	code, out, body := pollOnce(t, h)
@@ -181,7 +181,7 @@ func TestLoginPollOmitsNeverExpiresWhenNotImplemented(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{Registry: reg, DefaultProvider: "flowup"})
+	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
 	h.cfg.AuthDir = flow.authDir
 
 	code, out, body := pollOnce(t, h)

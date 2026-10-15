@@ -57,6 +57,22 @@ type Config struct {
 	Pool     *pool.Pool
 	Upstream DefaultUpstream
 	APIKey   string // 空 = 不鉴权
+	// AdminToken 管理台门禁令牌（与 APIKey **完全独立**）。
+	//
+	// # 为什么必须独立（用户要求：门禁 token 不能和 api 一样）
+	//
+	// 改造前 /admin/* 的门禁凭据就是 APIKey，也就是对话接口那把 ——
+	// 于是"给某个客户端配一把 key 调对话"同时把整个管理台交了出去。
+	// 两件事的风险等级完全不同：对话 key 泄露 = 别人白用额度；
+	// 管理令牌泄露 = 别人接管网关。详见 admin 包的 adminTokenMatches。
+	//
+	// 空 = 没有远程管理面（只有"本机免令牌"那条路，且要求监听回环）。
+	AdminToken string
+	// ListensLoopback 本进程是否**只**监听回环地址。
+	//
+	// 它是「本机免令牌」的前提之一（见 webui.go 的 localExempt）：
+	// 绑 0.0.0.0 时"本机"没有意义（端口公开），豁免必须失效。
+	ListensLoopback bool
 	// DefaultClassifier 默认上游的错误分类器（装配层注入）。
 	//
 	// # 为什么由装配层注入而不是核心自己调
@@ -214,8 +230,18 @@ type Handler struct {
 	mux *http.ServeMux
 	// apiKey 当前生效的管理钥匙（config api_key，支持运行时轮换）。
 	// 与 cfg.APIKey 解耦：轮换写回 config 后调用 SetAPIKey 立即生效，无需重启。
+	//
+	// ⚠ 它**只**用于 /v1/*（对话、生图、模型目录）。管理台门禁读 adminToken ——
+	// 两者是独立的钥匙（用户明确要求：门禁 token 不能和 api 一样）。
 	apiKeyMu sync.RWMutex
 	apiKey   string
+
+	// adminToken 当前生效的**管理台门禁令牌**（支持运行时轮换）。
+	//
+	// 与 apiKey 共用一把锁（两个字段都在 apiKeyMu 保护下）—— 它们总是一起
+	// 被轮换/读取的场景很少，但共用锁省一个 mutex，而这两处都不是热点路径。
+	// 空串 = 还没人轮换过 ⇒ 回落 cfg.AdminToken。
+	adminToken string
 }
 
 // SetAPIKey 运行时更新管理钥匙（管理台「轮换管理密钥」用）。
@@ -224,6 +250,43 @@ func (h *Handler) SetAPIKey(k string) {
 	h.apiKey = k
 	h.apiKeyMu.Unlock()
 }
+
+// SetAdminToken 运行时更新**管理令牌**（轮换门禁令牌用）。
+//
+// # 为什么必须与 SetAPIKey 分开（用户报障：轮换后要重启才生效）
+//
+// 两者是两把独立的钥匙，服务两个不同的面：
+//
+//	api_key     → /v1/*（对话、生图、模型目录）
+//	admin_token → /admin/* 与 /ui 的远程访问
+//
+// 改造前门禁认 api_key，内存里只有一份副本（h.apiKey），所以"轮换"看起来
+// 只需要更新它。现在门禁读 admin_token，就必须有**第二条**更新路径 ——
+// 否则轮换写盘成功、内存里门禁还是旧值，表现为"轮换后必须重启"。
+func (h *Handler) SetAdminToken(k string) {
+	h.apiKeyMu.Lock()
+	h.adminToken = k
+	h.apiKeyMu.Unlock()
+}
+
+// currentAdminToken 返回当前生效的管理令牌。
+//
+// 回落：没人轮换过（字段为空）时用构造时的 cfg.AdminToken。
+func (h *Handler) currentAdminToken() string {
+	h.apiKeyMu.RLock()
+	v := h.adminToken
+	h.apiKeyMu.RUnlock()
+	if v != "" {
+		return v
+	}
+	// ⚠ 只回落 cfg.AdminToken，**不**回落 cfg.APIKey（那正是要修掉的倒挂）。
+	return strings.TrimSpace(h.cfg.AdminToken)
+}
+
+// ListensLoopback 本进程是否只监听回环地址（决定 /ui 是否享受本机免令牌）。
+//
+// 装配层在启动时算一次（见 cmd/server 的 listensLoopback）。
+func (h *Handler) listensLoopback() bool { return h.cfg.ListensLoopback }
 
 // currentAPIKey 返回当前生效的管理钥匙。
 func (h *Handler) currentAPIKey() string {
@@ -246,7 +309,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.MaxBodyMB <= 0 {
 		cfg.MaxBodyMB = defaultMaxBodyMB
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), apiKey: cfg.APIKey}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), apiKey: cfg.APIKey, adminToken: cfg.AdminToken}
 	registerCatalogHost(h) // 让包级 ModelCatalog/ModelCatalogState 能找到本实例的缓存
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// 生图出口（OpenAI Images API 形状）。
@@ -615,7 +678,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 // 完全退化成改造前的单上游行为：**只有裸名，没有任何前缀记录**。
 // 这是既有测试与既有部署的路径，字节级不变。
 func (h *Handler) modelList() []map[string]any {
-	// 单上游模式：与改造前逐字节一致。
+	// 单上游模式：与改造前逐字节一致（除账号判据，见 singleProviderModelList）。
 	if h.cfg.Provider == nil {
 		return h.singleProviderModelList(h.ownedBy())
 	}
@@ -637,6 +700,11 @@ func (h *Handler) modelList() []map[string]any {
 
 	// 2. 其余上游：只有带前缀的一份。
 	//    顺序上排在默认上游之后 —— 既有客户端取 data[0] 时拿到的仍是它熟悉的那个。
+	//
+	// ⚠ 这里同样先判账号（与 singleProviderModelList 同一条判据）：
+	// 没有可用账号的上游**不该**出现在目录里。用户报障的正是这个 ——
+	// 未列入"能列模型"的上游在界面上会走空态并说明原因，而列出来的
+	// 却被当成"可以用"。
 	for _, id := range h.otherProviders(def) {
 		infos, ok := h.cfg.Provider.Models(context.Background(), id)
 		if !ok || len(infos) == 0 {
@@ -736,8 +804,44 @@ func (h *Handler) imageModelEntries(id, owned string) []map[string]any {
 }
 
 // singleProviderModelList 单上游路径：动态列表优先，失败回退静态表。
-// owned 是填进 owned_by 的值。
+// owned 是填进 owned_by 的展示值。
+//
+// # ⚠ 本次新增「无可用账号 ⇒ 空」这一条（用户报障）
+//
+// 报障原文：*「我一个账号没有，应该所有的[上游]都无法扫描到模型才对」*。
+//
+// 改造前这个函数只回落静态表，于是两种完全不同的情形共用一个出口：
+//
+//	没账号   → fetchDynamicModels 返回 nil → 回落静态表 → 报「10 个模型」
+//	拉取失败 → fetchDynamicModels 返回 nil → 回落静态表 → 报「10 个模型」
+//
+// 前者**一个模型都调不了**，界面却显示"有 10 个模型"。现在先判账号。
+//
+// ⚠ 账号判据用 `AvailableUIDsFor("")` —— 空串的语义是"池子的默认上游"
+// （`normalizeProvider` 负责解析），而这正是本函数服务的那个上游：
+// 它只在两处被调（单上游模式、多上游模式的**默认上游**，见 modelList）。
+//
+// ⚠⚠ 这里**刻意不传** `h.cfg.DefaultProvider` / `def`：
+// "池子的默认上游"与"出口层配的默认上游"**可能不是同一个**（测试里就是：
+// 池子没注入默认、出口层配了 "workbuddy"）。传具体名字会选出一个池子里
+// 根本不存在的域 → 候选集为空 → **有账号也被判成没账号** → 目录静默变空。
+//
+// 这与 `fetchDynamicModels` 里"取号传 \"\" 而不是 h.defaultProvider()"
+// 是**同一条教训**（那段注释记录了同一个 32→27 的静默退化）。
+//
+// 其余上游（非默认）不走这里：它们经 `registryRouter.Models`，那条路径
+// 自己按**具体上游 id** 判账号（见 cmd/server/multiprovider.go）。
 func (h *Handler) singleProviderModelList(owned string) []map[string]any {
+	// 没有可用账号 ⇒ 这个上游的目录**必然**给不出来（动态要凭证、
+	// 静态表也与真实可用性无关），所以这里直接空，不再回落。
+	//
+	// ⚠ 判据用 `AvailableUIDsFor`（只读）而**不是** `PickForExcluding`：
+	// 后者会写 `lastUsed`（防并发撞号），而本函数在每次 /v1/models 上都会被调
+	// —— 那等于每刷新一次目录就"用掉"一次选号机会，把轮询权重搅歪。
+	// 同一判据在 `registryRouter.Models` / `ModelMultipliers` 里也是这么用的。
+	if h.cfg.Pool != nil && len(h.cfg.Pool.AvailableUIDsFor("")) == 0 {
+		return nil
+	}
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
 		out := make([]map[string]any, 0, len(infos))
 		for _, mi := range infos {

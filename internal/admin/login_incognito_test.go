@@ -53,7 +53,7 @@ func loginFlowHandler(t *testing.T, authURL string, open func(string) (string, e
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return New(Config{Registry: reg, DefaultProvider: "flowup", OpenAuthURL: open}), flow
+	return New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup", OpenAuthURL: open}), flow
 }
 
 // postLogin 发一条 admin POST 并返回响应。

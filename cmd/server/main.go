@@ -1157,6 +1157,93 @@ func main() {
 	// 管理钥匙轮换的间接回调（见 admin.Config.OnAPIKeyRotated 注释：
 	// h 在 admin.New 的 Config 求值时尚未绑定，不能直接捕获，经此变量间接引用）。
 	var onRotate func(string) = func(string) {}
+	// 门禁令牌轮换的间接回调（同上，但要更新的是**admin 那份**内存副本 ——
+	// 用户报障「轮换之后还需要重启整个项目才有用」的根因就是它没被更新）。
+	var onRotateAdminToken func(string) = func(string) {}
+	// adminH 先声明后赋值：OnAdminTokenRotated 的回调要引用它，而它在
+	// admin.New 求值时还没绑定（同一个"闭包间接引用"手法）。
+	var adminH *admin.Handler
+
+	// adminH 先构造（而不是内联进下面那个 Config）—— 目的只有一个：
+	// 让 OnAdminTokenRotated 的回调能引用到**这个**实例。
+	//
+	// 内联的话回调只能写成闭包捕获变量，而那个变量在 admin.New 求值时
+	// 还没绑定（`adminH = admin.New(admin.Config{ ... OnAdminTokenRotated:
+	// func(k){ adminH.SetAdminToken(k) } })` 里的 adminH 此刻是 nil）。
+	// 所以先建实例、再挂回调。
+	adminH = admin.New(admin.Config{
+		Pool:    p,
+		OAuth:   oauth.New(cfg.OAuthBaseURL),
+		Log:     checkinLog,
+		Ring:    logRing,
+		AuthDir: cfg.AuthDir,
+		APIKeys: apiKeysStore, // /admin/apikeys 管理端点
+		APIKey:  cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）
+		// ⚠ 门禁令牌与 api_key **独立**（用户要求：门禁 token 不能和 api 一样）。
+		// 见 internal/admin 的 adminTokenMatches 注释：改造前门禁认 api_key，
+		// 于是"给客户端配一把对话 key"等于"交出管理台"。
+		AdminToken: cfg.AdminToken,
+		// 「本机免令牌」的前提之一：进程**只**监听回环地址。
+		// 绑 0.0.0.0 时这个为 false，本机豁免随之失效（见 localExempt）。
+		ListensLoopback: listensLoopback(cfg.Listen),
+		// 轮换管理钥匙写回 config.json 的路径（回调经 onRotate 间接引用 h ——
+		// h 在此闭包求值时尚未绑定，不能直接捕获，见构造后的 onRotate 赋值）。
+		ConfigPath:      *cfgPath,
+		OnAPIKeyRotated: func(newKey string) { onRotate(newKey) },
+		// 门禁令牌轮换的回调 —— **必须**与上面那条分开接（用户报障：
+		// 「轮换之后还需要重启整个项目才有用」）。两条各自更新自己那份
+		// 内存副本：对话 key 在 server.Handler，门禁令牌在 admin 这一份。
+		OnAdminTokenRotated: func(newKey string) {
+			adminH.SetAdminToken(newKey)
+			onRotateAdminToken(newKey)
+		},
+		// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
+		AuthsBase: cfg.AuthsBase,
+		// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。
+		//
+		// 这两条端点读的是核心自己排的班，不表达任何上游身份 ——
+		// Task 3c 曾把它们放进 workbuddy，阶段 0 评审指出
+		// 第二个上游若不声明 CapCheckin 就没人服务它们。已移回核心。
+		//
+		// 任务槽与 workbuddy 指向**同一个** sharedTaskSlot：
+		// "同一时刻只允许一个全量任务"是进程级语义，不分上游。
+		Scheduler: adminSchedulerAdapter{s: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true},
+		TaskSlot:  adminTaskSlotAdapter{sharedTaskSlot},
+		// 缺省上游：/admin/providers 标出它，前端据此把它的模型按**裸名**展示
+		DefaultProvider: func() string { id, _ := registry.First(); return id }(),
+		// 上游 ID 清单由注册表提供 —— 加新上游时 admin 包零改动（判据 1）。
+		Registry: registry,
+		// 控制台渲染契约里的服务名，与 /healthz 的 service 字段同源。
+		//
+		// admin 不得 import server（server 依赖 admin，反向会成环），
+		// 所以这个值必须在这里显式传进去。
+		// 用 cfg.ServiceName（可为空）→ server 内部再回落默认常量，
+		// 保证"配置没写"与"配置写了空串"行为一致。
+		ServiceName: firstNonEmpty(cfg.ServiceName, server.ServiceName),
+		// 上游设置项必须以**适配器**形式显式注入，不能靠从 Registry 里
+		// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
+		// （各自声明，互不 import），方法集精确匹配会静默失败
+		// —— 表现成设置页少几个键且没有任何报错。
+		SettingsExts:      []admin.SettingsExt{upSettings},
+		ResetModelsCache:  server.ResetModelsCache,
+		ModelCatalog:      server.ModelCatalogFor,
+		ModelCatalogState: modelCatalogState,
+		Settings: newSettingsStore(*cfgPath, cfg, sch, upSettings, checkinLog, func(days int) {
+			if s := logRing.Sink(); s != nil {
+				s.SetKeepDays(days)
+			}
+		}),
+		StartedAt: time.Now(),
+		// 「添加账号」默认用**无痕窗口**打开授权页（用户要求）。
+		//
+		// 放在装配层而不是 admin 里直接 exec：admin 保持"可测、无副作用"，
+		// 而"怎么开浏览器"是部署环境的事（平台差异、独立 profile、
+		// 本机装了哪个浏览器）。见 internal/browseropen 的包注释。
+		//
+		// 返回 nil 表示本部署不自动开（配置关掉了，或本机没有
+		// 受支持的浏览器）—— admin 会退回"只回授权链接"的旧行为。
+		OpenAuthURL: loginBrowserOpener(cfg),
+	})
 
 	h := server.NewHandler(server.Config{
 		Pool: p,
@@ -1173,11 +1260,19 @@ func main() {
 		DefaultClassifier: wb.Classify,
 		APIKey:            cfg.APIKey,
 		APIKeys:           apiKeysStore, // 多 API key 管理（普通 key 走它）
-		Session:           sessRouter,
-		StickyCount:       sessCount,
-		RedisMode:         redisMode,
-		SoftCooldown:      cfg.SoftRateDur,
-		MaxBodyMB:         cfg.Server.MaxBodyMB,
+		// 管理台门禁令牌（与 api_key **独立**）与监听范围 —— 两者共同决定
+		// 「本机免令牌」是否成立，见 internal/server/webui.go 的 localExempt。
+		//
+		// ⚠ 这里必须传 ListensLoopback：绑 0.0.0.0 时它会关闭"本机免令牌"，
+		// 那是本次安全修复的关键一环（否则任何经反代/局域网到达的请求
+		// 都可能被当成"本机"）。
+		AdminToken:      cfg.AdminToken,
+		ListensLoopback: listensLoopback(cfg.Listen),
+		Session:         sessRouter,
+		StickyCount:     sessCount,
+		RedisMode:       redisMode,
+		SoftCooldown:    cfg.SoftRateDur,
+		MaxBodyMB:       cfg.Server.MaxBodyMB,
 		// 上游工具自动注入（loomy 的生图/搜索）。缺省开启，见 docs/chat-tools.md。
 		DisableChatTools: cfg.Server.DisableChatTools,
 		// ⚠ 必须是**同一个** promptGate 实例（与 up.PromptGate 一起给）：
@@ -1213,74 +1308,7 @@ func main() {
 		// 注册表 + 账号池在这一层合并成出口层要的那个小接口。
 		Provider:        registryRouter{reg: registry, p: p},
 		DefaultProvider: func() string { id, _ := registry.First(); return id }(),
-		Admin: admin.New(admin.Config{
-			Pool:    p,
-			OAuth:   oauth.New(cfg.OAuthBaseURL),
-			Log:     checkinLog,
-			Ring:    logRing,
-			AuthDir: cfg.AuthDir,
-			APIKeys: apiKeysStore, // /admin/apikeys 管理端点
-			APIKey:  cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）
-			// 轮换管理钥匙写回 config.json 的路径（回调经 onRotate 间接引用 h ——
-			// h 在此闭包求值时尚未绑定，不能直接捕获，见构造后的 onRotate 赋值）。
-			ConfigPath:      *cfgPath,
-			OnAPIKeyRotated: func(newKey string) { onRotate(newKey) },
-			// 兼容扫描的父目录：迁移期凭证可能还在 `auths/` 根。
-			AuthsBase: cfg.AuthsBase,
-			// 核心调度视图 + 共享任务槽，供 /admin/schedule 与 /admin/task。
-			//
-			// 这两条端点读的是核心自己排的班，不表达任何上游身份 ——
-			// Task 3c 曾把它们放进 workbuddy，阶段 0 评审指出
-			// 第二个上游若不声明 CapCheckin 就没人服务它们。已移回核心。
-			//
-			// 任务槽与 workbuddy 指向**同一个** sharedTaskSlot：
-			// "同一时刻只允许一个全量任务"是进程级语义，不分上游。
-			Scheduler: adminSchedulerAdapter{s: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true},
-			TaskSlot:  adminTaskSlotAdapter{sharedTaskSlot},
-			// 缺省上游：/admin/providers 标出它，前端据此把它的模型按**裸名**展示
-			//（其余上游带前缀）。裸名向后兼容是硬要求，所以这个值必须与
-			// 出口层实际用的缺省上游一致。
-			DefaultProvider: defProvider,
-			// `AuthDir` 里的凭证属于 workbuddy（`auth.LoadDir` 只 glob
-			// `workbuddy*.json`）—— 必须**显式**声明，不能让 reload 靠
-			// "谁是默认上游"去猜。评审 F3：那在本部署里碰巧正确
-			//（workbuddy 恰好第一个注册），但默认上游一变就会误删别的上游账号。
-			ReloadProvider: workbuddy.ProviderID,
-			// 注册表：admin 遍历它，把每个上游通过 AdminExt 声明的管理端点挂上来。
-			// Task 3c 之后 22 个 workbuddy 端点就是这样挂的 ——
-			// 加新上游时 admin 包零改动（判据 1）。
-			Registry: registry,
-			// 控制台渲染契约里的服务名，与 /healthz 的 service 字段同源。
-			//
-			// admin 不得 import server（server 依赖 admin，反向会成环），
-			// 所以这个值必须在这里显式传进去。
-			// 用 cfg.ServiceName（可为空）→ server 内部再回落默认常量，
-			// 保证"配置没写"与"配置写了空串"行为一致。
-			ServiceName: firstNonEmpty(cfg.ServiceName, server.ServiceName),
-			// 上游设置项必须以**适配器**形式显式注入，不能靠从 Registry 里
-			// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
-			// （各自声明，互不 import），方法集精确匹配会静默失败
-			// —— 表现成设置页少几个键且没有任何报错。
-			SettingsExts:      []admin.SettingsExt{upSettings},
-			ResetModelsCache:  server.ResetModelsCache,
-			ModelCatalog:      server.ModelCatalogFor,
-			ModelCatalogState: modelCatalogState,
-			Settings: newSettingsStore(*cfgPath, cfg, sch, upSettings, checkinLog, func(days int) {
-				if s := logRing.Sink(); s != nil {
-					s.SetKeepDays(days)
-				}
-			}),
-			StartedAt: time.Now(),
-			// 「添加账号」默认用**无痕窗口**打开授权页（用户要求）。
-			//
-			// 放在装配层而不是 admin 里直接 exec：admin 保持"可测、无副作用"，
-			// 而"怎么开浏览器"是部署环境的事（平台差异、独立 profile、
-			// 本机装了哪个浏览器）。见 internal/browseropen 的包注释。
-			//
-			// 返回 nil 表示本部署不自动开（配置关掉了，或本机没有
-			// 受支持的浏览器）—— admin 会退回"只回授权链接"的旧行为。
-			OpenAuthURL: loginBrowserOpener(cfg),
-		}),
+		Admin:           adminH, // 已在上方构造（回调需要引用它，见那段注释）
 	})
 
 	// 轮换管理钥匙：h 构造完成后把「更新内存」接上（闭包经 onRotate 间接引用）。

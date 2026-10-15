@@ -101,7 +101,7 @@ func TestColPlaceholdersMatchJSCols(t *testing.T) {
 // 只测"表里有"不够 —— 替换代码漏了一个 token，表现是页面上出现
 // `colspan="__COLS_LOGS__"` 这种字面量（真实发生过的缺陷）。
 func TestRenderUIReplacesEveryPlaceholder(t *testing.T) {
-	out := string(renderUI([]byte(webuiHTML), "test-key", true))
+	out := string(renderUI([]byte(webuiHTML), "test-key", true, "", false))
 	for _, p := range colPlaceholders {
 		if strings.Contains(out, p.token) {
 			t.Errorf("renderUI 输出里仍残留占位符 %s —— 该空态行的 colspan 会变成非法值", p.token)
@@ -137,7 +137,7 @@ func TestRenderUIReplacesEveryPlaceholder(t *testing.T) {
 // 现在基准改为独立哨兵 `__WB2API_KEY_SENTINEL__`，本测试把这三类位置
 // 与两个开关状态全部钉住。
 func TestRenderUIKeyInjection(t *testing.T) {
-	out := string(renderUI([]byte(webuiHTML), "SECRET-AAA", true))
+	out := string(renderUI([]byte(webuiHTML), "SECRET-AAA", true, "", false))
 
 	// (1) 值被替换
 	if !strings.Contains(out, `window.__WB2API_KEY__ = "SECRET-AAA"`) {
@@ -151,18 +151,34 @@ func TestRenderUIKeyInjection(t *testing.T) {
 	if strings.Contains(out, `window."SECRET-AAA"`) || strings.Contains(out, `window.SECRET-AAA`) {
 		t.Error("属性名位置被注入了密钥 —— window.\"SECRET-AAA\" 是非法 JS")
 	}
-	// (4) 守卫基准是独立哨兵，且未被替换
-	if !strings.Contains(out, `!== '__WB2API_KEY_SENTINEL__'`) {
-		t.Error("JS 守卫的哨兵不是独立 token —— 与赋值同名时会被一并替换，" +
-			"INJECTED 恒为空，自动连接静默失效")
+	// (4) 守卫基准必须与页面初值**相等** —— 这是本次修掉的真 bug。
+	//
+	// 旧代码比较的是另一个字符串（`__WB2API_KEY_SENTINEL__`），而页面初值是
+	// `__WB2API_KEY__`：两者不相等 ⇒ "未注入"时 INJECTED 恒为真值 ⇒
+	// 页面以为已拿到钥匙、直接 refresh()，而每个请求都拿占位符当 Bearer
+	// ⇒ 全部 401/403；"手输钥匙"那条分支**从未运行过**。
+	//
+	// 判据：把注入关掉之后，页面里的守卫必须**认得出**初值就是占位符。
+	off := string(renderUI([]byte(webuiHTML), "SECRET-AAA", false, "", false))
+	if strings.Contains(off, "__WB2API_KEY_SENTINEL__") {
+		t.Error("页面里仍有 __WB2API_KEY_SENTINEL__ —— 那个哨兵是**旧的、错的**基准：" +
+			"它与页面初值不相等，会让「未注入」被判成「已注入」")
+	}
+	if !strings.Contains(off, `!== '__WB2API_KEY__'`) {
+		t.Error("JS 守卫的比较基准必须是与页面初值相同的占位符（单引号形态）——" +
+			"否则 INJECTED 在未授权时恒为真值")
 	}
 	// (5) 密钥只出现在赋值那一处，不得泄漏到别处
+	//
+	// ⚠ 这条也是"注释里不能写带双引号的占位符"的守卫：服务端按双引号匹配，
+	// 写在注释里会被一起替换成密钥（实测踩到过）。
 	if n := strings.Count(out, "SECRET-AAA"); n != 1 {
-		t.Errorf("密钥在页面里出现 %d 次，期望恰好 1 次（赋值处）", n)
+		t.Errorf("密钥在页面里出现 %d 次，期望恰好 1 次（赋值处）——\n"+
+			"多出来的那些通常来自**注释里的带双引号占位符**：服务端按双引号匹配替换，"+
+			"注释里的也会被换成明文密钥。", n)
 	}
 
-	// 注入关闭（非本机访问）：页面按"需手输 Key"处理，且不得出现明文
-	off := string(renderUI([]byte(webuiHTML), "SECRET-AAA", false))
+	// 注入关闭（未授权访问）：页面按"需手输 Key"处理，且不得出现明文
 	if !strings.Contains(off, `window.__WB2API_KEY__ = "__WB2API_KEY__"`) {
 		t.Error("关闭注入时，赋值语句不应被替换")
 	}
