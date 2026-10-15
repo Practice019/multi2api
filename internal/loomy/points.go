@@ -463,12 +463,52 @@ func extractCodeList(data json.RawMessage) []json.RawMessage {
 	return nil
 }
 
-// pointsTimeout 积分接口的默认超时（这些都是短请求）。
-const pointsTimeout = 20 * time.Second
+// pointsTimeout 积分接口的超时（这些都是短请求）。
+//
+// ⚠ 它是 var 而不是 const，**只为测试**：行为测试要把它压到几百毫秒，
+// 才可能在"10 个账号各延迟 50ms"这种量级上复现
+// 「共用一份预算 ⇒ 前面的账号把预算吃光 ⇒ 后面的全部超时」。
+// 用真实的 20 秒去重现那个形态要跑上一分钟，没人会跑。
+// 生产代码不要改它。
+var pointsTimeout = 20 * time.Second
 
 // pointsCtx 给积分接口用的 ctx。
+//
+// ⚠ 它给的是**一次请求**的预算。凡是在循环里查多个账号的地方，
+// 都必须**每个账号建一份**，不能全局共用 —— 见 withPointsTimeout。
 func pointsCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), pointsTimeout)
+}
+
+// withPointsTimeout 给**单个账号**一份独立的积分接口超时预算。
+//
+// # ⚠⚠ 这个 helper 是为一个真实缺陷存在的（2026-10-15）
+//
+// 症状：新手任务/邀请码面板里 35 个账号**只有前 3 个**有数据，其余全是
+// 「查询失败」+ 余额 —。而**单独手动打那几个"失败"的账号完全正常**。
+//
+// 根因：那几个面板是在循环**外**建一次 ctx、整个循环共用：
+//
+//	ctx, cancel := pointsCtx()      // 20 秒
+//	defer cancel()
+//	for _, a := range accts {       // 35 个账号 × 每个 2 次请求 = 70 次
+//		tasks, err := p.Tasks(ctx, a.Session)
+//		...
+//	}
+//
+// 于是那 20 秒是**所有账号加起来**的预算。上游实测单次 0.2~23.7 秒，
+// 预算在前 3~5 个账号就被吃光 ⇒ 其余全部报
+// "loomy: 调用积分接口失败（/onboarding/tasks）: context deadline exceeded"。
+//
+// ⚠ 为什么它像"账号坏了"而不是"我们超时了"：界面上那一列只显示
+// 「查询失败」，而**手动单查同一个账号是好的** —— 于是很自然会怀疑
+// session 失效或上游故障。实际是预算被前几个账号摊光了。
+//
+// 所以预算必须按账号切分：**一个慢账号只该拖慢它自己**。
+func withPointsTimeout(fn func(ctx context.Context)) {
+	ctx, cancel := pointsCtx()
+	defer cancel()
+	fn(ctx)
 }
 
 // parseIntLoose 把可能是字符串的数字解出来（上游有把数值写成字符串的先例）。

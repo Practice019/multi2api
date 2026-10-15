@@ -94,7 +94,10 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 			// 这条路径（管理端「刷新额度」/ 启动后的额度刷新）本来就要查一次
 			// 余额，结果与分档需要的**完全同一个数** —— 不回填就是白查一次，
 			// 而选号路径只能读缓存、不能自己发请求。
-			p.tiers.set(uid, tierOf(bal, daily))
+			// ⚠ 用 tierOfPoints（看 DailyKnown）而不是 tierOf：dailyBalance
+			// 字段缺失时 Daily 是 0，把它当「确实是 0」会把「没读到」判成
+			// 「免费额度已用完」（见 points.go 的 Points.DailyKnown）。
+			p.tiers.set(uid, tierOfPoints(pts))
 
 			q := gateway.CreditsQuota(clampNonNegative(bal))
 			// 「免费额度」列：带上**每日赠送**的余额（会按自然日重置的那部分）。

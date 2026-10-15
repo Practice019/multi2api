@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -185,29 +186,69 @@ func TestRefreshQuotaFillsTierCache(t *testing.T) {
 	}
 }
 
-// 异步刷新：冷缓存先答"未知"，稍后缓存被填上。
+// ⚠⚠ 反向钉住第三次报障的修法：**抽号路径不许发上游查询**。
 //
-// 这条钉住"自愈"：网关刚启动时没有档位，但不需要人工点「刷新额度」，
-// 选号路径自己会把缓存热起来。
-func TestAsyncRefreshFillsCacheSelfHealing(t *testing.T) {
-	p, closeSrv := tierFixture(t)
-	defer closeSrv()
+// # 这条替换了原来的 TestAsyncRefreshFillsCacheSelfHealing
+//
+// 那条测的是"异步自愈"：冷缓存先答未知、稍后选号路径自己把缓存热起来。
+// 而用户明确要求把这个行为**去掉**（原话）：
+//
+//	「不要预热。为什么要预热呢？我们现在查询太多、太频繁了。
+//	  把这个弄成之前的逻辑，之前的逻辑挺好的，就是按需查，也不要频繁查。」
+//
+// 所以契约反过来了：**抽号路径一次请求都不许发**，补齐只走按需的
+// `RefreshQuota`（管理端「刷新额度」）。
+//
+// ⚠ 判据必须数**上游收到的请求数**，不能只看"档位是不是未知" ——
+// 那两者在旧实现下也能对上（异步刷新是"稍后"落地的）。
+func TestPickPathDoesNotQueryUpstream(t *testing.T) {
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"code":"000000","desc":"ok","data":{"balance":25000,"dailyBalance":1434,"availableBalance":26434}}`)
+	}))
+	defer srv.Close()
 
-	// 第一拍：cold ⇒ 未知（且不阻塞）
-	first := p.CandidateTiers("", []string{"260101010101010101"})
-	if first["260101010101010101"] != tierUnsure {
-		t.Fatalf("冷缓存第一拍应是未知档，实际 %d", first["260101010101010101"])
-	}
+	const (
+		uid  = "260808080808080808"
+		sess = "dddddddddddddddddddddddddddddddd"
+	)
+	dir := t.TempDir()
+	writeFile(t, dir, "loomy-d.json", `{"session":"`+sess+`","userid":"`+uid+`"}`)
+	p := NewWithConfig(Config{Client: NewWithBase(srv.URL), AuthDir: dir})
 
-	// 等异步刷新落定（最多 3 秒）
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if e, ok := p.tiers.get("260101010101010101"); ok && e.tier == tierFree {
-			return // 自愈成功
+	// 冷缓存下反复抽号 —— 旧实现每次都会触发一轮异步刷新。
+	for i := 0; i < 8; i++ {
+		got := p.CandidateTiers("", []string{uid})
+		if got[uid] != tierUnsure {
+			t.Fatalf("冷缓存应报未知档，实际 %d", got[uid])
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	t.Error("异步刷新未在 3 秒内填上档位 —— 没有它，用户要手工点「刷新额度」才生效")
+	// 给任何"异步刷新"足够的时间落地（旧实现是 go 出去的）。
+	time.Sleep(400 * time.Millisecond)
+
+	if n := atomic.LoadInt64(&hits); n != 0 {
+		t.Errorf("★ 抽号路径向积分接口发起了 %d 次查询（期望 0）——\n"+
+			"\n"+
+			"用户报障原话：*「我们现在查询太多、太频繁了 … 就是按需查，也不要频繁查」*。\n"+
+			"抽号是**每次对话请求**都会走的路径，从这里发查询等于\n"+
+			"「抽号频率 × 账号数」次上游请求，而上游实测单次 1.8~23.7 秒\n"+
+			"（并发 12 条就出 502）⇒ 日志里「全是查询失败」。\n"+
+			"\n"+
+			"补齐只该走**按需**的 RefreshQuota（管理端「刷新额度」）。", n)
+	}
+
+	// 反向：按需那条路必须仍然能回填（否则档位功能等于废掉）。
+	p.RefreshQuota(uid)
+	e, ok := p.tiers.get(uid)
+	if !ok {
+		t.Fatal("RefreshQuota 之后档位缓存仍是空的 —— 按需回填这条唯一的写入口坏了")
+	}
+	if e.tier != tierFree {
+		t.Errorf("RefreshQuota 回填的档位 = %d，期望 %d（假上游给的是"+
+			"有每日赠送）", e.tier, tierFree)
+	}
 }
 
 // 两个账号：还有免费额度的落 0 档、只剩永久额度的落 1 档。
@@ -218,8 +259,8 @@ func TestCandidateTiersDistinguishesFreeAndPermanent(t *testing.T) {
 	defer closeSrv()
 
 	// 直接喂缓存（避开异步时序），先把两个号的真实余额查出来。
-	p.refreshTierOne("260101010101010101", false) // 有每日赠送
-	p.refreshTierOne("260202020202020202", false) // 只剩永久额度
+	p.RefreshQuota("260101010101010101") // 有每日赠送
+	p.RefreshQuota("260202020202020202") // 只剩永久额度
 
 	got := p.CandidateTiers("", []string{"260101010101010101", "260202020202020202"})
 	if got["260101010101010101"] != tierFree {
@@ -238,7 +279,7 @@ func TestCandidateTiersDistinguishesFreeAndPermanent(t *testing.T) {
 // 若把失败也写成一个档位，它会在 TTL 内被当成"已确认"，而那个号可能已经回血。
 func TestRefreshFailureLeavesCacheEmpty(t *testing.T) {
 	p := NewWithConfig(Config{Client: NewWithBase(deadBase)})
-	p.refreshTierOne("260101010101010101", false)
+	p.RefreshQuota("260101010101010101")
 	if _, ok := p.tiers.get("260101010101010101"); ok {
 		t.Error("查失败不应写缓存 —— 写进去会让它在 TTL 内被误当成'已确认'")
 	}
@@ -248,7 +289,7 @@ func TestRefreshFailureLeavesCacheEmpty(t *testing.T) {
 func TestRefreshTierSkipsUnknownUID(t *testing.T) {
 	p, closeSrv := tierFixture(t)
 	defer closeSrv()
-	p.refreshTierOne("不存在的-uid", false)
+	p.RefreshQuota("不存在的-uid")
 	if _, ok := p.tiers.get("不存在的-uid"); ok {
 		t.Error("凭证目录里没有的 uid 不该被写入缓存")
 	}

@@ -85,34 +85,34 @@ type accountTasksView struct {
 
 // handleTasksList GET /admin/loomy/tasks —— 每个账号的任务进度。
 func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := pointsCtx()
-	defer cancel()
-
 	accts := p.accounts()
 	out := make([]accountTasksView, 0, len(accts))
 	var totalEarned, totalMax int64
 	for _, a := range accts {
 		v := accountTasksView{UID: a.UID, Nickname: maskDisplay(a.Nickname),
 			Total: len(TaskDefs), Max: taskMaxPoints()}
-		tasks, err := p.Tasks(ctx, a.Session)
-		if err != nil {
-			v.Error = err.Error()
-			out = append(out, v)
-			continue
-		}
-		v.OK = true
-		v.Tasks = tasks
-		for _, d := range TaskDefs {
-			if tasks[d.Key] {
-				v.Done++
-				v.Earned += d.Points
-			} else {
-				v.Pending = append(v.Pending, d.Key)
+		// ⚠ **每个账号一份独立预算**。共用一份会让前几个账号把 20 秒吃光，
+		// 其余全部报 context deadline exceeded（见 withPointsTimeout 的事故记录）。
+		withPointsTimeout(func(ctx context.Context) {
+			tasks, err := p.Tasks(ctx, a.Session)
+			if err != nil {
+				v.Error = err.Error()
+				return
 			}
-		}
-		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
-			v.Balance = bal
-		}
+			v.OK = true
+			v.Tasks = tasks
+			for _, d := range TaskDefs {
+				if tasks[d.Key] {
+					v.Done++
+					v.Earned += d.Points
+				} else {
+					v.Pending = append(v.Pending, d.Key)
+				}
+			}
+			if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
+				v.Balance = bal
+			}
+		})
 		totalEarned += v.Earned
 		totalMax += v.Max
 		out = append(out, v)
@@ -239,13 +239,15 @@ func (p *Provider) handleTasksAuto(w http.ResponseWriter, r *http.Request) {
 
 // handleTasksAutoAll POST /admin/loomy/tasks/auto-all —— 一键完成**全部** loomy 账号。
 func (p *Provider) handleTasksAutoAll(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := pointsCtx()
-	defer cancel()
 	accts := p.accounts()
 	results := make([]taskRunResult, 0, len(accts))
 	var completed, failed int
 	for _, a := range accts {
-		res := p.runTasks(ctx, a)
+		// ⚠ 每个账号一份独立预算（见 withPointsTimeout 的事故记录）。
+		// 这条更危险：共用预算会让**后面的账号一个任务都跑不成**，
+		// 而界面上只显示"失败"，看不出是超时。
+		var res taskRunResult
+		withPointsTimeout(func(ctx context.Context) { res = p.runTasks(ctx, a) })
 		completed += len(res.Completed)
 		failed += len(res.Failed)
 		results = append(results, res)
@@ -275,48 +277,47 @@ type accountInviteView struct {
 
 // handleInviteList GET /admin/loomy/invite —— 每个账号的激活状态 + 自己生成的码。
 func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := pointsCtx()
-	defer cancel()
-
 	accts := p.accounts()
 	out := make([]accountInviteView, 0, len(accts))
 	activatedN := 0
 	for _, a := range accts {
 		v := accountInviteView{UID: a.UID, Nickname: maskDisplay(a.Nickname)}
-		act, applied, err := p.Activation(ctx, a.Session)
-		if err != nil {
-			v.Error = err.Error()
-			out = append(out, v)
-			continue
-		}
-		v.OK = true
-		v.Activated = act
-		v.Applied = applied
-		if act {
-			activatedN++
-		}
-		// 自己的码是**附加信息**：查不到不影响激活状态那一行（所以错误只丢进 Error）。
-		codes, cerr := p.InvitationCodes(ctx, a.Session)
-		if cerr == nil && len(codes) == 0 {
-			// ⚠ 上游没给码但查询是成功的 → 大概率是"从没做过首登初始化"
-			//（客户端每次登录后会自动调 first-login，而导入/添加的号跳过了这步）。
-			// 实测：初始化后 invitation-codes 立刻返回 5 个码、并补发注册奖励。
-			// 服务端有 alreadyProcessed 幂等保护，重复调用不会重复发奖 ——
-			// 所以这里**自动补一次**，让"我生成的码"不用用户手动点任何东西就出现。
-			if ferr := p.FirstLogin(ctx, a.Session); ferr == nil {
-				codes, cerr = p.InvitationCodes(ctx, a.Session)
-			} else {
-				cerr = ferr
+		// ⚠ **每个账号一份独立预算**（见 withPointsTimeout 的事故记录）。
+		withPointsTimeout(func(ctx context.Context) {
+			act, applied, err := p.Activation(ctx, a.Session)
+			if err != nil {
+				v.Error = err.Error()
+				return
 			}
-		}
-		if cerr == nil {
-			v.Codes = codes
-		} else if v.Error == "" {
-			v.Error = "邀请码列表查询失败：" + cerr.Error()
-		}
-		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
-			v.Balance = bal
-		}
+			v.OK = true
+			v.Activated = act
+			v.Applied = applied
+			if act {
+				activatedN++
+			}
+			// 自己的码是**附加信息**：查不到不影响激活状态那一行（所以错误只丢进 Error）。
+			codes, cerr := p.InvitationCodes(ctx, a.Session)
+			if cerr == nil && len(codes) == 0 {
+				// ⚠ 上游没给码但查询是成功的 → 大概率是"从没做过首登初始化"
+				//（客户端每次登录后会自动调 first-login，而导入/添加的号跳过了这步）。
+				// 实测：初始化后 invitation-codes 立刻返回 5 个码、并补发注册奖励。
+				// 服务端有 alreadyProcessed 幂等保护，重复调用不会重复发奖 ——
+				// 所以这里**自动补一次**，让"我生成的码"不用用户手动点任何东西就出现。
+				if ferr := p.FirstLogin(ctx, a.Session); ferr == nil {
+					codes, cerr = p.InvitationCodes(ctx, a.Session)
+				} else {
+					cerr = ferr
+				}
+			}
+			if cerr == nil {
+				v.Codes = codes
+			} else if v.Error == "" {
+				v.Error = "邀请码列表查询失败：" + cerr.Error()
+			}
+			if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
+				v.Balance = bal
+			}
+		})
 		out = append(out, v)
 	}
 	writeLoomyJSON(w, http.StatusOK, map[string]any{
