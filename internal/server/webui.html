@@ -711,13 +711,27 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
              ⚠ 所以这里的标签只能叫「趋势范围」，不能写成"统计范围" —— 否则用户会以为
                下面的 Top 榜也跟着变了（那就成了"两个口径混着看"）。
              样式复用已有的 `.tog button.on`（分段控件的既有画法）。 -->
+        <!-- ⚠⚠ **统计范围**（2026-10-18 加）—— agent2api 那排 `[今天|7天|30天|本月|全部]`。
+             它与下面那个「趋势范围」是**两回事**：
+               · 本排影响**所有卡 / Top 账号榜 / 上游用量环 / 模型用量环 / 缓存四格**（都读 /admin/stats）；
+               · 下面那排只影响**两张趋势图**（读 /admin/stats/series）。
+             ⚠ 后端 `?range=` 支持 today / 7 / 30 / month / all（空 = 全部，也是默认）。
+             ⚠ 它那边还有第 6 档「自定义」（两个日期输入）—— 我们暂不做（后端也只到 month）。 -->
+        <span class="tog" id="statsRange" style="font-weight:400;margin-right:10px">
+          <button data-sr="" class="on">全部</button>
+          <button data-sr="today">今天</button>
+          <button data-sr="7">7天</button>
+          <button data-sr="30">30天</button>
+          <button data-sr="month">本月</button>
+        </span>
         <span class="tog" id="trendRange" style="font-weight:400">
           <button data-range="24h" class="on">24h</button>
           <button data-range="7d">7d</button>
           <!-- ⚠ 30d/365d 是 2026-10-18 加的：后端 `seriesSpan` 已支持（`365d` 本来是为热力图加的，
-               顺带就能当趋势档用）。⚠ 它那边"统计概览"的 6 档（今天/7天/30天/本月/全部/自定义）
-               影响的是**所有卡**，那需要 `/admin/stats` 支持时间入参 —— ⚠ 我们还没有，
-               所以这里扩的是**趋势**的档，标签也只能叫「趋势范围」。 -->
+               顺带就能当趋势档用）。
+               ⚠ 更新（同日晚些）：它那边"统计概览"的 6 档影响**所有卡**，那需要
+               `/admin/stats` 支持时间入参 —— ⚠ **现在有了**（左边那排 `#statsRange`），
+               所以这排**只管趋势**、左边那排管统计，两者别混。 -->
           <button data-range="30d">30d</button>
           <button data-range="365d">365d</button>
         </span>
@@ -9427,7 +9441,12 @@ let multCatalogFailed = false;
     //   （见文件里那句 `setInterval(..., 30000)`），若共用 30 秒缓存，
     //   轮询会大量命中旧值 ⇒ **界面上统计数字会看起来"不刷新"**。
     //   5 秒既消掉同一轮 refresh 里的重复请求，又不会让轮询读到过期数据。
-    try { d = await sharedGet('ep:/admin/stats', () => admin('/admin/stats'), 5000); }
+    // ⚠⚠ **key 必须带档位**（2026-10-18）：`statsRange` 变了就是另一份数据，
+    //   若共用 `ep:/admin/stats` 这个键，切档后会命中上一个档的缓存
+    //   —— 那正是后端 `statsAggCached` 刚修掉的串位在前端的同形（账本 E071）。
+    //   ⚠ 空档（全部）时 key 是 `ep:/admin/stats?`、URL 不带 `?range=` —— 与既有行为一致。
+    const statsKey = statsKeyOf();
+    try { d = await sharedGet(statsKey, () => admin(statsURL()), 5000); }
     catch { return; }
     const entries = statsCardsEntries(d);
     for (const [k, v, cls] of entries) {
@@ -9455,6 +9474,19 @@ let multCatalogFailed = false;
   let trendSeries = [];
   // trendRange 当前选的范围。⚠ 只影响**趋势** —— 卡片与 Top 榜/环是全量窗口（见标题注释）。
   let trendRange = '24h';
+  // statsRange **统计范围**（2026-10-18 加）：它就是 agent2api 那排 `[今天|7天|30天|本月|全部]`，
+  // 与 `trendRange` 不同 —— **它影响所有卡 / Top 榜 / 两个环 / 缓存四格**（它们都读 /admin/stats）。
+  // ⚠ 空串 = 全部（= 本接口原来的行为，也是默认）。
+  // ⚠⚠ 它**必须参与那个 sharedGet 的 key**：否则切档时五处会命中同一个缓存键、
+  //   拿到上一个档的数据 —— 那正是后端 `statsAggCached` 刚修掉的串位（见账本 E071）在前端的同形。
+  let statsRange = '';
+  // ⚠⚠ 统计取数的**唯一两个入口**（2026-10-18 抽，AGENTS.md 第 6 条）。
+  //   为什么必须抽：`/admin/stats` 全文件有**两处**取数 —— `refresh` 的异步补画与
+  //   `pollStatsCards` 的轮询。我上次只给其中一处带了档位，另一处照旧拉"全部"、
+  //   而且它在后面执行 ⇒ **把切档的结果整块盖掉**（症状：切档后数字纹丝不动）。
+  //   ⇒ 只要"取数"这件事有两处，就必须共用一个函数，否则迟早漏一处。
+  const statsURL = () => '/admin/stats' + (statsRange ? '?range=' + statsRange : '');
+  const statsKeyOf = () => 'ep:/admin/stats?' + statsRange;
   // 趋势范围切换的事件绑定。照本文件已有的分段控件写法（`growthView` 那处）：
   // `dataset` 判等 + `classList.toggle('on', …)`，不自创新的画法。
   // ⚠ 三个细节：
@@ -9462,6 +9494,21 @@ let multCatalogFailed = false;
   //   2. 切完**清掉 digest**（`trendSeries._last`）—— 否则新 range 若末尾桶恰好相同会被判"没变"而不重绘；
   //   3. ⚠ **只切趋势**。卡片与 Top 榜/环的数据来自 `/admin/stats`，它**不支持时间入参** ⇒
   //      永远是全量窗口。这个限制写在标题旁的注释里，也是标签叫「趋势范围」而不是"统计范围"的原因。
+  for (const b of document.querySelectorAll('#statsRange button')) {
+    b.addEventListener('click', () => {
+      if (b.dataset.sr === statsRange) return;          // ⚠ 点当前已选的不重取
+      statsRange = b.dataset.sr;
+      for (const x of document.querySelectorAll('#statsRange button')) {
+        x.classList.toggle('on', x.dataset.sr === statsRange);
+      }
+      // ⚠ 走整页 refresh：它会把卡 / 榜 / 两个环 / 缓存四格**一起**重取 ——
+      //   这五处都读 /admin/stats，正是这一档要影响的范围。
+      // ⚠ 不需要清任何 digest：那个 sharedGet 的 key 带了档位（见 statsRange 的注释），
+      //   换档天然命中不同的键；而各 fill 函数也都有自己的"值变了才重画"守卫。
+      try { refresh(); } catch (e) { console.error('切统计范围失败:', e && e.message); }
+    });
+  }
+
   for (const b of document.querySelectorAll('#trendRange button')) {
     b.addEventListener('click', () => {
       if (b.dataset.range === trendRange) return;
@@ -9608,7 +9655,7 @@ let multCatalogFailed = false;
     //   ② stats 回来后**再画一遍**，数字自动填上。
     // ⚠ 这与本文件其它面板同一套做法（缓存优先 + 后台补），也是用户一贯的要求：
     //   "第一眼先出内容，不要为了拿最新数据先等一次网络往返"。
-    admin('/admin/stats')
+    admin(statsURL())
       // ⚠⚠ 顺序很要紧：**`renderStats` 必须排第一**。
       //   它内部的 `$('statsCards').innerHTML = …` 会**重建卡片** ⇒
       //   若先填后画，刚填的值会被整块抹掉（实测：把 renderStats 放最后，
