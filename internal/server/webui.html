@@ -427,6 +427,10 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .heatcell.lv3{background:color-mix(in srgb,var(--acc) 70%,transparent)}
   .heatcell.lv4{background:var(--acc)}
   .heatfoot{display:flex;align-items:center;gap:5px;margin-top:6px;font-size:11px;flex-wrap:wrap}
+  /* 缓存命中率趋势（双轴）—— 容器给个高度下限，免得数据没回来时整页往下跳一截
+     （它那边也有同样的顾虑：容器高度下限与 SVG 高度对齐）。 */
+  .cachetrend{height:180px;position:relative}
+  .cachetrend .ax{font-size:10px;fill:var(--dim)}
   /* 仪表盘内的子段落：一块一个 h3，块间用分隔线切开。
      每个子段自己的 .body 有内边距，这里不再重复 padding。 */
   .boardsec + .boardsec{border-top:1px solid var(--line)}
@@ -797,6 +801,28 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
       <h3>缓存命中率 <span class="dim" style="font-weight:400;text-transform:none">按窗口 · 越短越贴近「此刻」</span></h3>
       <div class="body">
         <div class="cards" id="cacheCards"></div>
+      </div>
+    </div>
+
+    <!-- 2d) 近 24 小时缓存命中率趋势（双轴）· 2026-10-18 照 agent2api 报表页那块加。
+         ⚠ 口径照抄它 `cacheTrendView`（report-charts.ts:862-918）的 5 条：
+           1. 24 个本地整点；⚠ **无请求的整点按 0% 计，但不写读数**（否则连成一排没信息的 0%）
+           2. rate = cache_hit / (cache_hit + cache_miss) —— 与四档、与顶层同一口径
+           3. ⚠ **双纵轴**：命中率（左）· 总 Token（右）—— 两者量纲差几个数量级，
+              共用一条轴会让 Token 线压平在底部
+           4. ⚠ 命中率轴上限按**真实峰值**抬、下限 1、**不夹到 100%**（上游分开上报时合法可超 100%）
+           5. ⚠ 整段区间 Token 全 0 ⇒ **不画那条线、也不画右侧刻度** ——
+              画一条贴地的直线会被读成"用量就是 0"，而事实是"这份数据里没有" -->
+    <div class="boardsec">
+      <h3>近 24 小时缓存命中率趋势 <span class="dim" style="font-weight:400;text-transform:none">按本地整点 · 无请求的整点不标注</span></h3>
+      <div class="body">
+        <div id="cacheTrend" class="cachetrend"></div>
+        <div class="heatfoot" style="margin-top:4px">
+          <span style="color:#58a6ff">━</span><span class="dim">缓存命中率（左轴）</span>
+          <span style="color:var(--warn)">━</span><span class="dim">总 Token（右轴）</span>
+          <span class="spacer"></span>
+          <span class="dim">无请求的整点按 0% 计，但不写读数</span>
+        </div>
       </div>
     </div>
 
@@ -8168,6 +8194,106 @@ let loginProvider = '';
     }).join('');
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // 近 24 小时缓存命中率趋势（双轴）· 照 agent2api 的 cacheTrendView
+  //
+  // ⚠ 五条口径照抄它（见 report-charts.ts:862-918 的注释与 report-page.tsx 的 TIP）：
+  //   1. **24 个本地整点**；⚠ **无请求的整点按 0% 计，但不写读数** —— 否则会连成一排
+  //      毫无信息量的 `0%`（它的原话）；
+  //   2. `rate = cache_hit / (cache_hit + cache_miss)` —— 与四格、与顶层同一口径；
+  //   3. ⚠ **双纵轴**：命中率（左，蓝）· 总 Token（右，琥珀）—— 量纲差几个数量级，
+  //      共用一条轴时要么 Token 线压平在底部、要么命中率线贴着顶边；
+  //   4. ⚠ 命中率轴上限**按真实峰值抬、下限 1、不夹到 100%** ——
+  //      它原话："上游把缓存读取与输入分开上报时命中率会合法地超过 100%，
+  //      **夹到 100% 等于谎报数据**"；
+  //   5. ⚠ 整段 Token 全 0 ⇒ **不画那条线、也不画右侧刻度** ——
+  //      "画一条贴地的直线会让人以为『用量就是 0』，而事实是『这份数据里没有』"。
+  //
+  // ⚠ 全部内联 SVG、零依赖（与上面那条"请求量 + 成功率"同一立场）。
+  let cacheTrendSig = '';
+
+  async function loadCacheTrend() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=24h'); }
+    catch { return; }
+    const list = (d && d.series) || [];
+    if (!list.length) return;
+    // ⚠ 签名只取会改变画面的量，避免 30 秒轮询整块重绘（会闪）
+    const sig = list.length + '|' + list.reduce((a, p) => a + (p.cache_hit || 0) + (p.cache_miss || 0) + (p.tokens || 0), 0);
+    if (sig === cacheTrendSig) return;
+    cacheTrendSig = sig;
+    renderCacheTrendSVG(list);
+  }
+
+  function renderCacheTrendSVG(list) {
+    const host = $('cacheTrend');
+    if (!host) return;
+    const W = 900, H = 150, PADL = 46, PADR = 52, PADT = 20, PADB = 22;
+    const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
+    const n = list.length;
+
+    // ⚠ 命中率：分母 0 ⇒ 记成 null（**不写读数**，但仍按 0% 画线 —— 它那句"按 0% 计"）
+    const rateOf = (p) => {
+      const h = p.cache_hit || 0, m = p.cache_miss || 0;
+      const den = h + m;
+      return { rate: den > 0 ? h / den : 0, has: den > 0 };
+    };
+    const rows = list.map((p) => ({
+      ts: String(p.ts || ''), total: p.total || 0, tokens: p.tokens || 0, ...rateOf(p),
+    }));
+
+    // ⚠ 命中率轴：上限按真实峰值抬、**下限 1（=100%）**、**不夹到 100%**
+    const ratePeak = Math.max(...rows.map((r) => r.rate));
+    const rateMax = Math.max(1, ratePeak * 1.15);
+    // ⚠ Token 轴：全 0 ⇒ 不画那条线也不画右刻度
+    const tokenPeak = Math.max(...rows.map((r) => r.tokens));
+    const hasTokens = tokenPeak > 0;
+    const tokenMax = hasTokens ? tokenPeak * 1.15 : 1;
+
+    const xAt = (i) => PADL + (n > 1 ? (plotW * i) / (n - 1) : plotW / 2);
+    const yRate = (v) => PADT + plotH - (plotH * v) / rateMax;
+    const yTok = (v) => PADT + plotH - (plotH * v) / tokenMax;
+    const fmtT = (v) => v >= 1e9 ? (v / 1e9).toFixed(1) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
+
+    const svg = [];
+    // 网格 + 双轴刻度（两条轴都等分 4 段 ⇒ 同一根横线两边各有读数 —— 照它那套）
+    // ⚠⚠ 刻度文字**必须染成与所属线同色**（2026-10-18 看图发现的问题）：
+    //   两条线共用同一批横线，若刻度都是灰的，人眼会把"橙色 Token 线爬到 75% 的高度"
+    //   读成"**命中率 75%**" —— 而真实情况可能完全相反（实测命中率全 0、Token 有量）。
+    //   染色后：左边一排蓝 % 归命中率线、右边一排琥珀数值归 Token 线，一眼分得清。
+    for (let i = 0; i <= 4; i++) {
+      const y = PADT + (plotH * i) / 4;
+      svg.push(`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W - PADR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`);
+      const rv = rateMax * (1 - i / 4);
+      svg.push(`<text class="ax" x="${PADL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="#58a6ff">${(rv * 100).toFixed(0)}%</text>`);
+      if (hasTokens) {
+        svg.push(`<text class="ax" x="${W - PADR + 6}" y="${(y + 3).toFixed(1)}" fill="var(--warn)">${fmtT(tokenMax * (1 - i / 4))}</text>`);
+      }
+    }
+    // ⚠ 命中率折线（蓝）—— 24 个整点全画（无请求的按 0% 落到底部，但它不写读数）
+    const ratePath = rows.map((r, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)},${yRate(r.rate).toFixed(1)}`).join(' ');
+    svg.push(`<path d="${ratePath}" fill="none" stroke="#58a6ff" stroke-width="1.6"/>`);
+    // ⚠ Token 折线（琥珀）—— 只在真的有量时画
+    if (hasTokens) {
+      const tokPath = rows.map((r, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)},${yTok(r.tokens).toFixed(1)}`).join(' ');
+      svg.push(`<path d="${tokPath}" fill="none" stroke="var(--warn)" stroke-width="1.4" opacity="0.9"/>`);
+    }
+    // ⚠ **读数只标在有请求的整点**（它那句"无请求的整点不标注"）+ 每 4 个整点标一个
+    //   （24 个全标会糊成一片 —— 照它"标注会互相避让：放不下就整条跳过"的取舍）
+    rows.forEach((r, i) => {
+      if (!r.has) return;                        // 补零出来的 0% ⇒ 不标
+      if (i % 4 !== 0 && i !== n - 1) return;    // 稀疏标注
+      svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${(yRate(r.rate) - 5).toFixed(1)}" text-anchor="middle" fill="#58a6ff">${(r.rate * 100).toFixed(0)}%</text>`);
+    });
+    // x 轴时间（首/中/末）
+    [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
+      if (!rows[i]) return;
+      svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(rows[i].ts.slice(11, 16))}</text>`);
+    });
+    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+  }
+
   // fmtTokensPlain 给 title 用的纯文本 token 数（⚠ 不引别的格式化器，避免依赖不确定的名字）。
   function fmtTokensPlain(v) {
     if (!v) return '0';
@@ -9324,6 +9450,8 @@ let multCatalogFailed = false;
     //   —— 我第一次就挂错了那边，结果页面加载时它从来不动、365 个格子一直是空的。
     // 内部有签名守卫：值没变就不重绘，所以刷新不会把 365 个格子重画一遍。
     try { loadHeatmap(); } catch { /* 热力图非关键 */ }
+    // ⚠ 缓存命中率趋势（双轴）也在这个时机 —— 它读的同样是 series（只是 range=24h）。
+    try { loadCacheTrend(); } catch { /* 缓存趋势非关键 */ }
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
     try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();
