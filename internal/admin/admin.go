@@ -304,9 +304,39 @@ type Handler struct {
 	// 缓存让「扫盘频率」与「轮询频率」解耦（见 statsCacheTTL）。
 	statsMu     sync.Mutex
 	statsCache  []logbuf.Entry
+	// ⚠⚠ 聚合产物的缓存（2026-10-18，治 `/admin/stats` 每次重算 28000 行那 ~3 秒）。
+	//
+	// 与上面 `statsCache` 的分工：
+	//   statsCache 缓存的是**原始行** ⇒ 省掉"读盘"，但**每次请求仍要把全部行重新聚合一遍**；
+	//   aggCache   缓存的是**聚合产物** ⇒ 连重算也省掉。
+	//
+	// ⚠⚠ 关键前提（打破它就会静默污染，见 statsAggCached 的注释）：
+	//   `aggCache` 里的 map **只读共享**；嵌套值（所有 `by_*` / `by_*_detail`）
+	//   **只被读、不被改**，所以调用方每次拿到的只需是**一层浅拷贝**。
+	aggMu       sync.Mutex
+	aggCache    map[string]any
+	aggAt       time.Time
+	aggCount    int   // ⚠ 建它时的 entries 条数：条数变了就必须重建（日志在追加/轮转）
+	aggErr      error
+	aggBuilding bool
 	statsSource string
 	statsErr    error
 	statsAt     time.Time
+
+	// multMu / multTbl / multAt / multBuilding：**全上游合并后的倍率表**的缓存。
+	//
+	// ⚠⚠ 这一套是为一个实测缺陷加的：`/admin/stats` 里 `modelMultipliers` 会
+	// **逐家上游**调 `ModelCatalog(id)`，而它可能同步回源（最多 MaxRotate 次上游请求）
+	// ⇒ 实测单次 `/admin/stats` **7 秒**、而前端一次 refresh 里调两次 ⇒ 界面卡 14 秒。
+	//
+	// ⚠ 与 `statsMu` 那套的关键不同：这里**过期时不在请求里重建**，而是丢给后台 goroutine
+	// 重建、本次先返回旧表。于是 requests 路径上永远只是"读一张内存表"（微秒级）。
+	// ⚠ 仍会调用 `ModelCatalog`（只是在后台）—— 这正是避开"自锁死循环"的那个坑：
+	// 若因为"怕慢"而**从不**调用它，目录缓存就永远不会被拉起来（见 modelMultipliers 的长注释）。
+	multMu       sync.Mutex
+	multTbl      map[string]float64
+	multAt       time.Time
+	multBuilding bool
 
 	// issuedMu / issuedAuth：本进程**签发过**的授权链接（值 = 签发时刻）。
 	//
@@ -413,6 +443,34 @@ func New(cfg Config) *Handler {
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
 	// 所以冲突时以先注册的为准（见 mountUpstreamRoutes）。
 	h.mountUpstreamRoutes()
+
+	// ⚠⚠ 启动预热（2026-10-18）。实测：`/admin/stats` **首次调用 4634ms**，
+	// 第二/三次 268ms / 248ms —— 那个 4.6 秒是**冷 IO**（`sink.LoadAll()` 读
+	// 28000 行 + 首次全量解析），而它正好落在**用户打开仪表盘的第一眼**上。
+	//
+	// ⇒ 在进程启动后**空闲时先把这一遍跑掉**，把代价从首屏挪走。
+	// ⚠ 这是本项目既有的做法，不是新发明：见 `config.go` 里
+	//   "续期往返（实测 1-3 秒）。后台预热把这个代价挪到空闲时间"，
+	//   以及 `main.go` 的 "预热能消掉『空闲后首个请求』"。
+	//
+	// ⚠ 三条约束（别改坏）：
+	//   1. **只填缓存、不改行为**：`statsItems()` 本就是带 TTL 缓存的取数函数，
+	//      这里调它一次等于把缓存先填好；后续请求走的是同一条路，看到的是同一份数据。
+	//   2. **失败/panic 绝不影响启动**：读盘失败或边界情况都不该让进程起不来 ——
+	//      出错时就当没预热过，下次请求自己会再试（有 `recover`）。
+	//   3. **不 await**：启动流程不能为它多等哪怕一毫秒。
+	go func() {
+		defer func() { _ = recover() }()
+		_, _, _ = h.statsItems()
+		// ⚠⚠ 这里**刻意不再预热聚合** —— 试过了，实测无效，别再加回来：
+		//   只预热取数：首屏 3078ms · 第二发 163ms
+		//   连聚合也预热：首屏 3156ms · 第二发 231ms   ← 没有改善（差异属噪声）
+		// ⇒ 结论：那 3 秒是**纯计算**（`aggregateChatLog` 逐行遍历 28000 条），
+		//   **不是**首次的内存分配 / map 扩容 / GC —— 所以"先算一遍"救不了它。
+		// ⇒ 真要把它降下来，只能**缓存聚合产物**（⚠ 而那会让
+		//   "调用方就地改那个 map"（`resp["source"]=…`、`resp["model_multipliers"]=…`）
+		//   变成污染问题，必须深拷贝 ⇒ 代价与风险都不小，**需要单独决定**）。
+	}()
 
 	return h
 }
@@ -2379,6 +2437,13 @@ func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
 // 聚合要扫整个落盘文件，而前端是轮询调用；缓存让「扫描频率」与「轮询频率」解耦。
 const statsCacheTTL = 5 * time.Second
 
+// multCacheTTL 倍率表（全上游合并）的缓存时长。
+//
+// ⚠ 为什么它比 statsCacheTTL 长得多：这张表来自各家上游的模型目录，**变化极慢**；
+// 而重建它要逐家调 `ModelCatalog`，实测会让 `/admin/stats` 卡 **7 秒**
+//（见 Handler 的 multMu 字段注释）。表本身与"本次统计窗口"无关 ⇒ 偶尔重建即可。
+const multCacheTTL = 10 * time.Minute
+
 // stats 汇总请求日志，给出「这个网关到底跑了多少、跑得怎么样」的只读视图。
 //
 // 数据源优先级：**落盘日志** > 内存环形缓冲。
@@ -2393,7 +2458,16 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items, source, err := h.statsItems()
-	resp := aggregateChatLog(items)
+	// ⚠⚠ 浅拷贝一层再就地写。
+	// 为什么可以只拷一层：`statsAggCached` 返回的那份是**只读共享**的，
+	// 而下面这十几处 `resp[...] = …` **全是顶层新键**；聚合出的嵌套结构（`by_*`）
+	// 在这条路径上只被读。⚠ 前提与后果写在 `statsAggCached` 的注释里 ——
+	// 谁要是开始改动嵌套 map 的内容，就得把这里升级成深拷贝。
+	agg := h.statsAggCached(items)
+	resp := make(map[string]any, len(agg)+16)
+	for k, v := range agg {
+		resp[k] = v
+	}
 	resp["source"] = source
 	resp["capacity"] = h.cfg.Ring.Cap()
 	resp["held"] = h.cfg.Ring.Len()
@@ -2496,20 +2570,14 @@ func (h *Handler) modelMultipliers(resp map[string]any) []ModelMultiplier {
 	// 只查默认上游会让其余上游被调用的模型倍率全部缺失。
 	// 键 = `provider/裸名`（同名模型跨上游互不覆盖）；默认上游额外保留裸名键，
 	// 兼容统计键为裸名的老形态。
-	tbl := map[string]float64{}
-	for _, id := range h.registeredProviderIDs() {
-		cat := h.cfg.ModelCatalog(id)
-		if cat == nil {
-			continue
-		}
-		for k, v := range cat.MultiplierTable() {
-			tbl[id+"/"+k] = v
-			if id == "" {
-				tbl[k] = v
-			}
-		}
-	}
+	//
+	// ⚠⚠ **这一张表现在是缓存来的**（`multTableCached`）。原先那段"逐家调
+	// ModelCatalog 建表"挪到了 `buildMultTable`，只在后台跑 —— 因为实测它会让
+	// 本接口卡 7 秒（详见 Handler 的 multMu 字段注释与 buildMultTable 的说明）。
+	tbl := h.multTableCached()
 	if len(tbl) == 0 {
+		// 表还没建好（冷启动第一次）或确实取不到：如实返回空 ——
+		// 前端据此显示"不知道"，而不是把它当成"免费"（见下面 `!ok` 那一支的注释）。
 		return out
 	}
 	// 按模型名排序输出：map 遍历顺序随机，固定顺序让响应可 diff（与目录排序同一动机）。
@@ -2532,6 +2600,83 @@ func (h *Handler) modelMultipliers(resp map[string]any) []ModelMultiplier {
 		out = append(out, ModelMultiplier{Model: id, Multiplier: m, Calls: byModel[id]})
 	}
 	return out
+}
+
+// multTableCached 取「全上游合并后的倍率表」，必要时**在后台**重建。
+//
+// # 为什么要有它（实测缺陷）
+//
+// 原先这段逻辑直接写在 `modelMultipliers` 里：逐家上游调 `ModelCatalog(id)`，
+// 而它会同步回源（最多 MaxRotate 次上游请求）⇒ 实测单次 `/admin/stats` **7 秒**，
+// 前端一次 refresh 调两次 ⇒ 界面卡 14 秒（用 Playwright 量出来的：26 个请求里
+// 两个 stats 占 14.6/15.9 秒，其余全是 10~391ms）。
+//
+// # 契约（三条，别改坏）
+//
+//  1. **请求路径上永远不重建**：只读 `h.multTbl`，微秒级返回。过期就丢给后台。
+//  2. ⚠ **仍然会调用 `ModelCatalog`**（在后台 goroutine 里）—— 这一点是刻意的：
+//     若为了"怕慢"而干脆不调，目录缓存就永远不会被拉起来，
+//     正好落进 `modelMultipliers` 长注释里记的那个**自锁死循环**（全绿但功能是死的）。
+//  3. **同一个时刻只允许一个重建在跑**（`multBuilding` 闸），否则每次请求都会
+//     起一个 goroutine，把上游打成一堆并发回源 —— 那比原来的同步阻塞更糟。
+func (h *Handler) multTableCached() map[string]float64 {
+	h.multMu.Lock()
+	tbl, at := h.multTbl, h.multAt
+	fresh := !at.IsZero() && time.Since(at) < multCacheTTL
+	needBuild := !fresh && !h.multBuilding && h.cfg.ModelCatalog != nil
+	if needBuild {
+		h.multBuilding = true
+	}
+	h.multMu.Unlock()
+
+	if needBuild {
+		// ⚠⚠ **首次必须同步建**（回归修复，2026-10-18）。
+		//
+		// 原来这里是"一律丢后台、本次先把现有表交出去"—— 那条对**过期**的表是对的，
+		// 但表为 **nil**（进程刚起来、还没建过）时，调用方会拿到**空表**。
+		// ⚠ 这不是"慢一点"，而是**错的**：`modelMultipliers` 是个**读接口**，
+		// 返回空意味着界面上"全模型都没有倍率标记"，而且两个单测直接红：
+		//   TestStatsModelMultipliersFilteredByByModel：`model_multipliers=[]`
+		//   TestStatsModelMultipliersOrderIsStable：   第 0 次顺序 `[]`
+		// ⚠ 那次改动是我做的，欠的账在这里补。
+		//
+		// 同步建只发生在**进程启动后的第一次**调用；之后每次都会走到上面的 fresh 分支，
+		// 或走下面的后台重建 ⇒ 请求路径依然是微秒级（这才是当初要治的东西）。
+		if tbl == nil {
+			t := h.buildMultTable()
+			h.multMu.Lock()
+			h.multTbl, h.multAt, h.multBuilding = t, time.Now(), false
+			h.multMu.Unlock()
+			return t
+		}
+		// ⚠ 表**已过期但仍非空**：这才是"先把旧表交出去、后台重建"的正确场景 ——
+		//   调用方拿到的是**上一个版本的真数据**，不是空。
+		go func() {
+			t := h.buildMultTable()
+			h.multMu.Lock()
+			h.multTbl, h.multAt, h.multBuilding = t, time.Now(), false
+			h.multMu.Unlock()
+		}()
+	}
+	return tbl
+}
+
+// buildMultTable 真去逐家上游取倍率并合并成一张表。**慢，只该在后台跑。**
+func (h *Handler) buildMultTable() map[string]float64 {
+	tbl := map[string]float64{}
+	for _, id := range h.registeredProviderIDs() {
+		cat := h.cfg.ModelCatalog(id)
+		if cat == nil {
+			continue
+		}
+		for k, v := range cat.MultiplierTable() {
+			tbl[id+"/"+k] = v
+			if id == "" {
+				tbl[k] = v
+			}
+		}
+	}
+	return tbl
 }
 
 // registeredProviderIDs 返回注册表里全部上游 id（按注册顺序）。
@@ -2591,8 +2736,71 @@ func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
 	return items, source, err
 }
 
-// cacheHitRate 缓存命中率 = 命中 / (命中 + 未命中)。
+// statsAggCached 返回**聚合产物**的缓存（照 multTableCached 那套写）。
 //
+// # 治的是什么
+//
+// 实测 `/admin/stats` 热态 163~337ms，而 `statsItems` 已经缓存了**原始行** ——
+// 所以那些毫秒几乎全花在 `aggregateChatLog` 逐行遍历上（28000 条）。
+// ⚠ "预热一遍"治不了它（实测 3078ms vs 3156ms，见 admin.New 里的注释）⇒ 它是**纯计算**。
+// ⇒ 只能真的把产物缓存起来。
+//
+// # ⚠⚠ 契约：返回给调用方的**必须**是浅拷贝，而缓存里那一份**只读**
+//
+// 为什么浅拷贝就够：`stats()` 在拿到产物之后就地写入的十几处
+//（`resp["source"]` / `resp["capacity"]` / `resp["model_multipliers"]` …）
+// **全部是顶层新键**；而聚合出来的嵌套结构（`by_model` / `by_uid` / `by_*_detail`）
+// 在这条路径上**只被读**。
+//
+// ⚠ **打破这个前提的后果是静默污染**：若将来有谁在这条路径上改动/删除嵌套 map 的内容
+//（例如 `delete(resp["by_model"], k)`、或往某个 `by_*` 里塞东西），
+// 那么下一次请求会拿到**被上一次改过**的那份 —— 而症状只是"数字偶尔不对"。
+// ⇒ 所以那条回归测试（见 docs/report/P2-design.md §5-3）是这条前提的**守门人**，
+//   改动这段代码时**必须**先看它。
+//
+// # 三条与 multTableCached 一致的行为（别改坏）
+//
+//  1. **过期时不在请求里重建**：丢给后台 goroutine，本次先把旧产物交出去
+//     （⚠ 旧数据 << 空数据：空会让界面上的卡片/榜/环整块消失）；
+//  2. ⚠ **条数变了立刻重建**（`aggCount != len(items)`）—— 日志在实时追加，
+//     若只看 TTL，`total` 会停在旧值，用户会看到"刚发的请求没被统计"；
+//  3. ⚠ **首次（缓存为 nil）同步建一次** —— 与 multTableCached 的修法同理：
+//     "返回上一个版本的真数据"可以接受，"返回空"不行。
+func (h *Handler) statsAggCached(items []logbuf.Entry) map[string]any {
+	h.aggMu.Lock()
+	cached, at, cnt := h.aggCache, h.aggAt, h.aggCount
+	fresh := cached != nil && at != zeroTime() && time.Since(at) < statsCacheTTL && cnt == len(items)
+	needBuild := !fresh && !h.aggBuilding
+	if needBuild {
+		h.aggBuilding = true
+	}
+	h.aggMu.Unlock()
+
+	if !needBuild {
+		return cached // ⚠ 调用方负责浅拷贝（本函数**不**替它拷）
+	}
+
+	build := func() map[string]any {
+		out := aggregateChatLog(items)
+		h.aggMu.Lock()
+		h.aggCache, h.aggAt, h.aggCount, h.aggBuilding = out, time.Now(), len(items), false
+		h.aggMu.Unlock()
+		return out
+	}
+
+	if cached == nil {
+		// ⚠ 首次：同步建（只有进程起来后的第一次付代价）—— 不能返回空。
+		return build()
+	}
+	// ⚠ 已有旧产物：先把旧的交出去，后台重建。
+	go func() { _ = build() }()
+	return cached
+}
+
+// zeroTime 只是把"零值时间"这个判断收在一处，免得各处自己写 time.Time{}。
+func zeroTime() time.Time { return time.Time{} }
+
+// cacheHitRate 缓存命中率 = 命中 / (命中 + 未命中)。//
 // 分母为 0 时返回 (0, false)：调用方据此决定「输出 0」还是「不输出该字段」。
 // 之所以必须显式挡掉 0/0，是因为 IEEE-754 下 float64(0)/float64(0) = NaN，
 // NaN 经 encoding/json 序列化成 JSON 字面量 `null`（Marshal 对 NaN/Inf 返回
@@ -2638,12 +2846,103 @@ type providerStat struct {
 // 归到一个明确的桶里既保住了总数，又如实说明"这些行不知道是哪个上游"。
 const unlabeledProvider = "(未标注)"
 
+// dimStat 富化维度（by_model_detail / by_uid_detail / by_provider_detail）里的一个桶。
+//
+// # 为什么是"再加一份"，而不是把旧映射就地改成对象
+//
+// by_model / by_uid / by_provider 这三个「名称 → 请求数」的映射**已经在被消费**：
+// 前端拿 by_model 去做倍率表过滤，`tools/verify_stats.py` 直接读 by_uid 的计数。
+// 就地改成对象会同时打断两边，所以富化一律走**新增字段**，旧字段一字不动。
+//
+// # 口径（与顶层标量逐条对齐，避免"同一个数两种算法"）
+//
+//   - req：窗口内该键的条数，**等于旧映射里那个数**（同一个循环里一起加）；
+//   - ok / fail：2xx 记 ok、>=400 记 fail，其余状态码（1xx/3xx）两个都不记 ——
+//     于是 ok+fail 可能小于 req，这是刻意与顶层 ok/fail 保持同一口径；
+//   - tokens：只在 Tokens>0 时累加（-1 = usage 缺失，不当 0 也不当负数扣）；
+//   - tokens_raw：**原始和**（含负数原样累加），只为让"脏数据到底差多少"可量化；
+//     它与 tokens 的差 = 该桶里所有负数 tokens 之和。⚠ 选 tokens 当主口径的理由：
+//     顶层标量 tokens 就是"跳过负数"，两个口径混用会出现"明细求和 ≠ 卡片上的总数"；
+//     tokens_raw 是附加观测，不参与任何推导。
+//   - think_tokens：只在 >0 时累加（与顶层同规则）；
+//   - avg_ttfb_ms：只按 TTFBMS>0 的样本求平均，**没有样本时不输出该键**。
+//     不输出 0 是刻意的：0ms 会被读成"快得离谱"，缺字段才是"不知道"
+//     （与顶层 avg_ttfb_ms、cache_hit_rate 的同一约定）。
+type dimStat struct {
+	Req         int64  `json:"req"`
+	OK          int64  `json:"ok"`
+	Fail        int64  `json:"fail"`
+	Tokens      int64  `json:"tokens"`
+	TokensRaw   int64  `json:"tokens_raw"`
+	ThinkTokens int64  `json:"think_tokens"`
+	AvgTTFBMS   *int64 `json:"avg_ttfb_ms,omitempty"`
+
+	ttfbSum int64 // 内部累加器：参与平均的 ttfb 之和
+	ttfbN   int64 // 内部累加器：参与平均的样本数
+}
+
+// add 把一条日志并入本桶。规则必须与顶层标量逐条一致（见类型注释）。
+func (d *dimStat) add(e logbuf.Entry) {
+	d.Req++
+	if e.Status >= 200 && e.Status < 300 {
+		d.OK++
+	} else if e.Status >= 400 {
+		d.Fail++
+	}
+	if e.Tokens > 0 {
+		d.Tokens += int64(e.Tokens)
+	}
+	d.TokensRaw += int64(e.Tokens) // 原始和：负数原样进
+	if e.ThinkTokens > 0 {
+		d.ThinkTokens += int64(e.ThinkTokens)
+	}
+	if e.TTFBMS > 0 {
+		d.ttfbSum += e.TTFBMS
+		d.ttfbN++
+	}
+}
+
+// finalize 结算派生量。除法**只在这里做一次**，且分母为 0 时直接不置 AvgTTFBMS
+// ⇒ 序列化后该键消失，前端显示"—"而不是一个 0（零除在这里就被挡掉了）。
+func (d *dimStat) finalize() {
+	if d.ttfbN > 0 {
+		v := d.ttfbSum / d.ttfbN
+		d.AvgTTFBMS = &v
+	}
+}
+
+// detailFor 取桶，没有就就地建一个（与 byProvider 的惰性建桶同一手法）。
+func detailFor(m map[string]*dimStat, k string) *dimStat {
+	d, ok := m[k]
+	if !ok {
+		d = &dimStat{}
+		m[k] = d
+	}
+	return d
+}
+
+// detailOut 把内部指针表结算成可直接序列化的值表（并触发 finalize）。
+func detailOut(m map[string]*dimStat) map[string]dimStat {
+	out := make(map[string]dimStat, len(m))
+	for k, v := range m {
+		v.finalize()
+		out[k] = *v
+	}
+	return out
+}
+
 // aggregateChatLog 把日志行聚合成 /admin/stats 的响应。
 func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	byModel := map[string]int{}
 	byStatus := map[string]int{}
 	byUID := map[string]int{}
 	byProvider := map[string]*providerStat{}
+
+	// 富化维度（纯新增，见 dimStat 的类型注释）：
+	// by_model_detail / by_uid_detail / by_provider_detail。
+	byModelDetail := map[string]*dimStat{}
+	byUIDDetail := map[string]*dimStat{}
+	byProviderDetail := map[string]*dimStat{}
 	var okN, failN, tokens int64
 	var ttfbSum, totalSum int64
 	var ttfbN int64
@@ -2657,6 +2956,13 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		if e.UID != "" {
 			byUID[e.UID]++
 		}
+		// 富化维度：与上面两行**同一次遍历**里加，保证口径不会漂。
+		// ⚠ uid 为空的条目不进 by_uid_detail —— 与 by_uid 的"跳过空 uid"完全一致，
+		// 否则两个键集不一样，前端对不上账。
+		detailFor(byModelDetail, e.Model).add(e)
+		if e.UID != "" {
+			detailFor(byUIDDetail, e.UID).add(e)
+		}
 
 		// 按上游累计。空 provider = 历史行 → 归入"未标注"桶（不丢弃）。
 		pk := e.Provider
@@ -2669,6 +2975,8 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 			byProvider[pk] = ps
 		}
 		ps.Calls++
+		// 富化维度：pk 与 ps 同一个键（含 "(未标注)" 桶），不另起口径。
+		detailFor(byProviderDetail, pk).add(e)
 
 		switch {
 		case e.Status >= 200 && e.Status < 300:
@@ -2737,6 +3045,11 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		}
 		resp["by_provider"] = out
 	}
+	// 三个富化维度**恒输出**（含空对象），与 by_model/by_uid/by_status 恒输出同一约定：
+	// 形状固定，前端不必为"键在不在"分两种分支渲染；空对象渲染出来就是空榜。
+	resp["by_model_detail"] = detailOut(byModelDetail)
+	resp["by_uid_detail"] = detailOut(byUIDDetail)
+	resp["by_provider_detail"] = detailOut(byProviderDetail)
 	if len(items) > 0 {
 		resp["avg_total_ms"] = totalSum / int64(len(items))
 	}

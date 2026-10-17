@@ -41,13 +41,14 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
-	start := now.Add(-span).Truncate(bucket)
+	// ⚠ 用 bucketStart 而不是 Truncate —— 天桶要按**本地自然日**对齐（见 bucketStart 的注释：F2）。
+	start := bucketStart(now.Add(-span), bucket)
 	buckets := int(span / bucket)
 	out := make([]statsSeriesItem, 0, buckets+1)
 	// 先铺满空桶（保证前端不需要补缺）
 	idx := make(map[int64]int, buckets+1)
 	for i := 0; i <= buckets; i++ {
-		ts := start.Add(bucket * time.Duration(i))
+		ts := bucketStart(start.Add(bucket*time.Duration(i)), bucket)
 		idx[ts.Unix()] = i
 		out = append(out, statsSeriesItem{TS: ts.Format(time.RFC3339)})
 	}
@@ -55,7 +56,7 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 		if e.At.Before(start) {
 			continue
 		}
-		i, ok := idx[e.At.Truncate(bucket).Unix()]
+		i, ok := idx[bucketStart(e.At, bucket).Unix()]
 		if !ok {
 			continue
 		}
@@ -83,10 +84,19 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 }
 
 // seriesSpan 解析 range/bucket 参数；非法回落 24h/hour。
+//
+// ⚠ 支持的范围：`24h`（小时桶）· `7d` / `30d` / `365d`（天桶）。
+// `365d` 是给**活跃热力图**（仪表盘那个 365 天日历阵）用的。
 func seriesSpan(r *http.Request) (time.Duration, time.Duration) {
 	span := 24 * time.Hour
 	bucket := time.Hour
 	switch r.URL.Query().Get("range") {
+	case "365d":
+		span = 365 * 24 * time.Hour
+		bucket = 24 * time.Hour
+	case "30d":
+		span = 30 * 24 * time.Hour
+		bucket = 24 * time.Hour
 	case "7d":
 		span = 7 * 24 * time.Hour
 		bucket = 24 * time.Hour
@@ -99,4 +109,24 @@ func seriesSpan(r *http.Request) (time.Duration, time.Duration) {
 		bucket = 24 * time.Hour
 	}
 	return span, bucket
+}
+
+// bucketStart **桶起点**：天桶按**本地自然日**对齐，小时桶按本地整点对齐。
+//
+// ⚠⚠ 这里为什么不能用 `t.Truncate(24*time.Hour)`（原来就是这么写的，已修）：
+// `time.Truncate` 以 **UTC 零时**为基准取整 ⇒ 天桶的起点会落在**本地 08:00**
+// （东八区），于是「7 天」会变成 **8 个桶 / 覆盖 189 小时**，
+// 而热力图上"10-17 那一格"实际代表的是 10-17 08:00 ～ 10-18 08:00 —— **格子与日期错位**。
+// ⚠ 这是 R1 复核抓到的 F2，在加 365 天热力图时顺手修掉（热力图正是它的放大版）。
+//
+// 小时桶保持"本地整点"：原来 `Truncate(time.Hour)` 在整小时区（东八区）本来就等于本地整点，
+// 这里用同一套写法统一掉，语义上更明确。
+func bucketStart(t time.Time, bucket time.Duration) time.Time {
+	local := t.Local()
+	if bucket >= 24*time.Hour {
+		y, m, d := local.Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, local.Location())
+	}
+	y, m, d := local.Date()
+	return time.Date(y, m, d, local.Hour(), 0, 0, 0, local.Location())
 }
