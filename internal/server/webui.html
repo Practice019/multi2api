@@ -787,6 +787,19 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
       </div>
     </div>
 
+    <!-- 2c) 缓存命中率四窗口 · 2026-10-18 照 agent2api 报表页那块加。
+         ⚠ 口径与它一字不差（见后端 `cacheWindowKeys`）：
+           命中率 = 缓存读取 Token / 输入 Token（输入 = 命中 + 未命中）
+           ⚠ 可能 > 100%（上游分开上报时合法）⇒ **不夹取值、如实展示**
+           ⚠ 某档分母为 0 ⇒ 后端**不输出该档** ⇒ 这里照它显示 `N/A`，而不是一个假的 0%
+         ⚠ 实测：我们日志里最近 24 小时这两个字段全是 0 ⇒ 三档会显示 N/A、只有 7 天档有数。 -->
+    <div class="boardsec">
+      <h3>缓存命中率 <span class="dim" style="font-weight:400;text-transform:none">按窗口 · 越短越贴近「此刻」</span></h3>
+      <div class="body">
+        <div class="cards" id="cacheCards"></div>
+      </div>
+    </div>
+
     <!-- 3) API 接入信息 -->
     <div class="boardsec">
       <h3>API 接入信息 <span class="dim" style="font-weight:400;text-transform:none">只读 · 本机自动注入</span>
@@ -8116,6 +8129,45 @@ let loginProvider = '';
     }
   }
 
+  // fillCacheRates 画「缓存命中率」四格（照 agent2api 报表页那块）。
+  //
+  // ⚠ 它那边的格子长这样（我照抄）：大百分比 + 一行「命中 N / 输入 N」。
+  // ⚠ 口径三个要点（与后端 `cacheRates` 一致，也与它 `report-page.tsx:124` 的 TIP 一致）：
+  //   1. 命中率 = 命中 / (命中 + 未命中)，其中「输入」= 命中 + 未命中；
+  //   2. ⚠ **不夹取值** —— 上游把「缓存读取」与「输入」分开上报时这个比值**合法地可能超过 100%**，
+  //      它的 TIP 明确要求"如实展示" ⇒ 这里**不写 Math.min(100, …)**；
+  //   3. ⚠ 后端**不输出分母为 0 的档** ⇒ 这里如实显示 `N/A`（不是 0% —— 那会被读成一个结论）。
+  // ⚠ 实测：我们日志里最近 24 小时这两个字段全是 0 ⇒ 三档显示 N/A、只有 7 天档有数。
+  function fillCacheRates(s) {
+    const host = $('cacheCards');
+    if (!host) return;
+    const LABEL = { last10m: '近 10 分钟', last1h: '近 1 小时', last24h: '近 24 小时', last7d: '近 7 天' };
+    const KEYS = ['last10m', 'last1h', 'last24h', 'last7d'];
+    const cr = (s && s.cache_rates) || {};
+    const fmtN = (v) => {
+      if (!v) return '0';
+      if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+      if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+      if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+      return String(v);
+    };
+    host.innerHTML = KEYS.map((k) => {
+      const v = cr[k];
+      const has = !!(v && typeof v === 'object' && typeof v.rate === 'number');
+      const rateTxt = has ? (v.rate * 100).toFixed(2) + '%' : 'N/A';
+      const hit = has ? v.hit : 0;
+      const den = has ? (v.hit + v.miss) : 0;
+      const sub = has ? ('命中 ' + fmtN(hit) + ' / 输入 ' + fmtN(den)) : '该窗口内无缓存数据';
+      // ⚠ 颜色只在"有数"时给；无数用 dim —— 不让 N/A 看起来像一个结论
+      const cls = has ? (v.rate >= 0.9 ? 'ok' : v.rate >= 0.5 ? 'warn' : 'err') : 'dim';
+      return `<div class="card" data-stat-key="cache-${esc(k)}">
+        <div class="k">${esc(LABEL[k])}</div>
+        <div class="v ${cls}" style="font-size:19px">${esc(rateTxt)}</div>
+        <div class="dim" style="font-size:11px;margin-top:2px">${esc(sub)}</div>
+      </div>`;
+    }).join('');
+  }
+
   // fmtTokensPlain 给 title 用的纯文本 token 数（⚠ 不引别的格式化器，避免依赖不确定的名字）。
   function fmtTokensPlain(v) {
     if (!v) return '0';
@@ -9220,7 +9272,7 @@ let multCatalogFailed = false;
     // ⚠ 这与本文件其它面板同一套做法（缓存优先 + 后台补），也是用户一贯的要求：
     //   "第一眼先出内容，不要为了拿最新数据先等一次网络往返"。
     admin('/admin/stats')
-      .then(d => { try { renderStats(d); renderCards(h, s); fillTopModel(d); } catch (e) { /* 非关键 */ } })
+      .then(d => { try { renderStats(d); renderCards(h, s); fillTopModel(d); fillCacheRates(d); } catch (e) { /* 非关键 */ } })
       .catch(() => { /* 统计非关键：拿不到就保持占位 */ });
     renderCards(h, s);
     // 上游契约要**最先**取：renderAccounts 依赖它把账号归到上游，
