@@ -145,3 +145,7 @@ strict_probe.py
 timing_probe*.py
 frontend_audit.py
 data/_snapshot-*.jsonl
+
+# ⚠ 交付文档要入库（docs/report/ 下的背景简报与复核报告）
+!docs/report/
+!docs/report/**
