@@ -120,3 +120,28 @@ data-test/
 
 # Import dumps with real phone/session (credentials)
 loomy-import.json
+
+# ⚠ 验收探测的产物（我自己起 7864 实测时留下的，不该进版本库）
+#   · `_shots*/` 是逐页截图（体积大、每次重跑都变）
+#   · `_timing*.png` 是探针画的时间线截图
+#   · `config-*-7864.json` 是"复制 config.json、只改 listen"的临时配置
+#   ⚠ 探测脚本本身（strict_probe.py / timing_probe*.py / frontend_audit.py）**要留着** ——
+#     它们是复核密度与"是否真显示"的工具，下次改动还要用。
+_shots*/
+_timing*.png
+config-*-7864.json
+config-7864.json
+data-*-7864/
+# ⚠ 探测脚本的临时产物（我的验证探针 —— 每次跑都重生成，不入库）
+#   ⚠ 但 `tools/` 下的**核对工具要入库**（`tools/verify_stats.py` /
+#      `tools/verify_byuid_detail.py`）—— 它们是可复用的验收手段，不是临时产物。
+probe_*.py
+probe_*.out.txt
+diag_*.py
+verify_f1.py
+span_days.py
+audit_tables.py
+strict_probe.py
+timing_probe*.py
+frontend_audit.py
+data/_snapshot-*.jsonl

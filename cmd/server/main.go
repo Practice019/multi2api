@@ -1109,11 +1109,11 @@ func main() {
 		Registry: registry,
 	})
 	// 历史落库经核心：格式跨上游统一，Nickname 由核心从账号池补。
-	wb.SetCore(schedulerAdapter{sch: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true})
+	wb.SetCore(schedulerAdapter{sch: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: cfg.Schedule.KeepaliveEnabled})
 	// 管理端点的核心依赖（/admin/schedule 的时点 + 与签到/保活共用的任务槽）。
 	// 后注入的理由就在这里：调度器在 Provider 之后构造。
 	wb.SetAdminEnv(workbuddy.AdminEnv{
-		Schedule: schedulerAdapter{sch: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true},
+		Schedule: schedulerAdapter{sch: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: cfg.Schedule.KeepaliveEnabled},
 		TaskSlot: newTaskSlotAdapter(sch),
 	})
 	switch {
@@ -1220,7 +1220,7 @@ func main() {
 		//
 		// 任务槽与 workbuddy 指向**同一个** sharedTaskSlot：
 		// "同一时刻只允许一个全量任务"是进程级语义，不分上游。
-		Scheduler: adminSchedulerAdapter{s: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: true},
+		Scheduler: adminSchedulerAdapter{s: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: cfg.Schedule.KeepaliveEnabled},
 		TaskSlot:  adminTaskSlotAdapter{sharedTaskSlot},
 		// 缺省上游：/admin/providers 标出它，前端据此把它的模型按**裸名**展示
 		DefaultProvider: func() string { id, _ := registry.First(); return id }(),

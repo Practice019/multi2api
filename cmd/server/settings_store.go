@@ -72,8 +72,20 @@ func (s *settingsStore) Snapshot() admin.Settings {
 	checkinH := s.sch.SlotHours(workbuddy.SlotCheckin)
 	keepaliveH := s.sch.SlotHours(workbuddy.SlotKeepalive)
 	return admin.Settings{
-		CheckinEnabled:   s.sch.SlotEnabled(workbuddy.SlotCheckin),
-		KeepaliveEnabled: s.sch.SlotEnabled(workbuddy.SlotKeepalive),
+		// ⚠⚠ **这两个值必须读 `cfg.Schedule`，不能读 `s.sch.SlotEnabled(...)`。**
+		//
+		// 原因（`schedulerAdapter` 的字段注释里也写着同一件事）：
+		// 签到/保活已统一成 `JobExt` 扫描，**槽位不再注册** ⇒ `SlotEnabled` **恒为 false**
+		// ⇒ 这里若读槽位，设置页就会**永远显示"已关闭"**，而配置文件里可能明明是 true。
+		//
+		// ⚠ 这是实测到的缺陷：`/admin/settings` 报 `签到=false 保活=false`，
+		// 而 `/admin/schedule` 报 `签到=true 保活=true`、`config.json` 里是 `签到=true 保活=false`
+		// —— **同一件事三个答案**，设置页顶部 chip 与下面正文互相打脸。
+		// 根因之一：`main.go` 里给 `adminSchedulerAdapter` 的 `keepaliveOn` 曾被**写死 `true`**
+		// （已改成读配置）；另一半就是这里读槽位恒 false。
+		// ⇒ 两处都改成**读配置**，这样 setting / schedule / config 三者同源。
+		CheckinEnabled:   c.Schedule.CheckinEnabled,
+		KeepaliveEnabled: c.Schedule.KeepaliveEnabled,
 		CheckinHours:     checkinH,
 		KeepaliveHours:   keepaliveH,
 

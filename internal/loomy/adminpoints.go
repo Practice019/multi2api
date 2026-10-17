@@ -91,6 +91,85 @@ func restrictToUID(accts []accountRef, uid string) []accountRef {
 	return nil
 }
 
+// panelFillConcurrency 「分块补数」（`?uids=`）这一条路的并发上限。
+//
+// # ⚠ 为什么它比 loomyPanelConcurrency 更小
+//
+// 共享层（webui.html 的 lazyFill）一次只发**一个块**，于是后端这条路的
+// 并发度就是**全局**在途账号数：每个账号 2 次上游请求 ⇒ 4 个账号并行
+// = 8 条在途上游请求。取 6 会到 12 条，正好压在实测出 502 的那条线上
+//（见 loomyPanelConcurrency 的说明）。取 4 = 留一半余量。
+//
+// # 它和"前端逐行取数"的区别（回归的根因）
+//
+// 旧模型是**前端**发 6 条并发 HTTP，每条只查 1 个账号 ⇒ 上游 12 条在途
+// ⇒ 502 ⇒ 整列「查询失败」。现在并发上限只有一个地方（这里），
+// 前端再也不可能把它乘掉。
+// ⚠⚠ 用户要求把并发提到 25（2026-10-18：「性能太差了 提高并发数25个」）。
+//
+// 权衡如实记在这里：本文件与 `points.go` 的注释都记着**实测「12 条并发打上游就出 502」**，
+// 而每个账号要 2 次上游请求 ⇒ 25 个账号并行 = **50 条在途**，是那条线的 4 倍。
+// ⇒ 如果面板又开始整列「查询失败」，**把本常量与 `points.go` 的 loomyPanelConcurrency
+//    一起退回 4**（退回即可恢复"8 条在途"的安全区），并把 `webui.html` 的
+//    `LAZY_CHUNK` 一并退回（块大小与这里配套）。
+//
+// ⚠ 另注：块大小（`LAZY_CHUNK`）与本常量要**配套**改 —— 块里只有 6 个 uid 时，
+// 本常量提到 25 也用不上（一块最多 6 个账号并行）。
+const panelFillConcurrency = 25
+
+// parseUIDList 解析 `?uids=a,b,c`。
+func parseUIDList(q string) []string {
+	if strings.TrimSpace(q) == "" {
+		return nil
+	}
+	raw := strings.Split(q, ",")
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// restrictToUIDs 支持 `?uids=a,b,c` 一次取**一小块**账号。
+//
+// 与 restrictToUID 同一条原则：**不认识的名字不进结果**（绝不退化成"查全部"，
+// 那会把别人的数据画进这一行）。缺的那几个由调用方补成 error 行 —— 见
+// fillMissing。
+func restrictToUIDs(accts []accountRef, uids []string) []accountRef {
+	want := make(map[string]bool, len(uids))
+	for _, u := range uids {
+		want[u] = true
+	}
+	out := make([]accountRef, 0, len(uids))
+	for _, a := range accts {
+		if want[a.UID] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// fillMissing 给"请求了但池子里没有"的 uid 各补一行 error。
+//
+// ⚠ 为什么必须补：前端按块替换行，块里少一个 uid 而它什么都不画，那一行就会
+// **永远停在「正在读取…」** —— 表现得像卡住。补成 ok=false 才是实话：
+// 「这个号不在凭证目录里」。
+func fillMissing[T any](uids []string, got []T, uidOf func(T) string, mk func(string) T) []T {
+	have := make(map[string]bool, len(got))
+	for _, v := range got {
+		have[uidOf(v)] = true
+	}
+	out := got
+	for _, u := range uids {
+		if !have[u] {
+			out = append(out, mk(u))
+		}
+	}
+	return out
+}
+
 // panelPageSize 两个面板每页固定行数（用户要求写死 25）。
 //
 // # 为什么固定、而不是可配
@@ -229,7 +308,46 @@ func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
 	totalN := len(all)
 	q := r.URL.Query()
 
-	// ── `?uid=` 只查这一个（面板逐行刷新用）并写进服务端缓存 ──
+	// ── `?uids=a,b,c` 一次取**一小块**（webui 共享层的分块懒加载用）──
+	//
+	// ⚠ 与下面 `?uid=` 的唯一区别是**粒度**。保留 `?uid=` 是为了不破坏老调用方；
+	// 但前端已经改成"一个块一条 HTTP" —— 逐行取数（前端自己叠 6 并发）
+	// 正是整列「查询失败」的成因，见 panelFillConcurrency。
+	if uids := parseUIDList(q.Get("uids")); len(uids) > 0 {
+		one := restrictToUIDs(all, uids)
+		out := make([]accountTasksView, len(one))
+		fanOutConcurrent(len(one), panelFillConcurrency, func(i int) {
+			out[i] = p.tasksViewFor(one[i])
+		})
+		out = fillMissing(uids, out,
+			func(v accountTasksView) string { return v.UID },
+			func(u string) accountTasksView {
+				v := accountTasksView{UID: u, Total: len(TaskDefs), Max: taskMaxPoints(),
+					Error: "这个账号不在凭证目录里"}
+				for _, a := range all {
+					if a.UID == u {
+						v.Nickname = maskDisplay(a.Nickname)
+						break
+					}
+				}
+				return v
+			})
+		var earned, mx int64
+		for _, v := range out {
+			earned += v.Earned
+			mx += v.Max
+		}
+		writeLoomyJSON(w, http.StatusOK, map[string]any{
+			"defs": TaskDefs, "accounts": out,
+			"page": 1, "pages": 1, "total": len(out), "size": panelPageSize,
+			"updated_at": p.tasksPanel().updatedAt(),
+			"summary": map[string]any{"accounts": len(out), "earned": earned,
+				"max": mx, "pending": countPending(out)},
+		})
+		return
+	}
+
+	// ── `?uid=` 只查这一个（老调用方；前端已不再用）并写进服务端缓存 ──
 	if uid := strings.TrimSpace(q.Get("uid")); uid != "" {
 		one := restrictToUID(all, uid)
 		out := make([]accountTasksView, len(one))
@@ -511,6 +629,34 @@ func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
 	all := p.accounts()
 	totalN := len(all)
 	q := r.URL.Query()
+
+	// `?uids=` 一次取一小块（见 handleTasksList 里的同款说明）。
+	if uids := parseUIDList(q.Get("uids")); len(uids) > 0 {
+		one := restrictToUIDs(all, uids)
+		out := make([]accountInviteView, len(one))
+		fanOutConcurrent(len(one), panelFillConcurrency, func(i int) {
+			out[i] = p.inviteViewFor(one[i])
+		})
+		out = fillMissing(uids, out,
+			func(v accountInviteView) string { return v.UID },
+			func(u string) accountInviteView {
+				v := accountInviteView{UID: u, Error: "这个账号不在凭证目录里"}
+				for _, a := range all {
+					if a.UID == u {
+						v.Nickname = maskDisplay(a.Nickname)
+						break
+					}
+				}
+				return v
+			})
+		writeLoomyJSON(w, http.StatusOK, map[string]any{
+			"accounts": out,
+			"page":     1, "pages": 1, "total": len(out), "size": panelPageSize,
+			"updated_at": p.invitePanel().updatedAt(),
+			"summary":    inviteSummary(out),
+		})
+		return
+	}
 
 	if uid := strings.TrimSpace(q.Get("uid")); uid != "" {
 		one := restrictToUID(all, uid)
