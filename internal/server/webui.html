@@ -8173,8 +8173,18 @@ let loginProvider = '';
       if (days[i].n > 0) streak++;
       else break;                       // ⚠ 断了就停（不是"最长连续"，是"当前连续"）
     }
-    setCard('活跃天数', activeN ? String(activeN) + ' 天' : '—', activeN ? '' : 'dim');
-    setCard('当前连续天数', streak ? String(streak) + ' 天' : '—', streak ? '' : 'dim');
+    // ⚠⚠ 这两格的值**同时存一份到模块变量**（2026-10-18 修）。
+    //   为什么：卡片是 `renderStats` 每次**重建**的（值清成 `null`），而本函数由
+    //   `loadHeatmap` 触发 —— 它读的是**固定 `range=365d`** ⇒ 它的 sig 在切档后不变
+    //   ⇒ **早返回** ⇒ 重建之后没人再填。实测：切一次档，这两格就永久变 `—`
+    //   （⚠ 而那 bug 在上一个 commit 里就存在，我上轮没量到）。
+    //   ⇒ 存下来，让 `applyDayCards()` 在**每次 renderStats 之后**无条件回填。
+    dayCardVals = {
+      active: activeN ? String(activeN) + ' 天' : null,
+      streak: streak ? String(streak) + ' 天' : null,
+    };
+    setCard('活跃天数', dayCardVals.active, activeN ? '' : 'dim');
+    setCard('当前连续天数', dayCardVals.streak, streak ? '' : 'dim');
     // ⚠ 「Top 模型」**不在这里填** —— 2026-10-18 实测踩到：
     //   本函数由 `loadHeatmap` 触发，而它可能在 `renderStats` **之前**跑
     //   ⇒ 那时 `window._statsCache` 还是 null ⇒ Top 模型显示成 `—`；
@@ -8615,6 +8625,27 @@ let loginProvider = '';
     const set = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
     set('h1', '≤' + fmtV(TH[0])); set('h2', '≤' + fmtV(TH[1]));
     set('h3', '≤' + fmtV(TH[2])); set('h4', '>' + fmtV(TH[2]));
+  }
+
+  // dayCardVals 「活跃天数 / 当前连续天数」两格的**最近一次算好的值**。
+  // ⚠ 必须存一份（理由见 fillDayCards 里那段）：卡片每次被 renderStats 重建，
+  //   而算它们的数据来自另一条异步线 ⇒ 重建之后必须有个东西能把值**无条件**填回去。
+  let dayCardVals = { active: null, streak: null };
+
+  // applyDayCards 把 dayCardVals 无条件填回那两格。
+  //
+  // ⚠ **不要给它加"值没变就跳过"的守卫** —— 它的调用时机正是"卡片刚被重建"，
+  //   那时格子里的显示值一定与要填的不同（被清成了 NODATA），守卫只会带来风险。
+  //   它很轻（只写两个 textContent），每次 refresh / 30 秒轮询都调也无所谓。
+  function applyDayCards() {
+    const put = (key, val) => {
+      const el = document.querySelector(`#statsCards .card[data-stat-key="${key}"] .v`);
+      if (!el) return;
+      el.textContent = val === null ? NODATA : String(val);
+      el.className = 'v ' + (val === null ? 'dim' : '');
+    };
+    put('活跃天数', dayCardVals.active);
+    put('当前连续天数', dayCardVals.streak);
   }
 
   // renderStatsModels 模型明细：一行一个模型，同时给出调用次数与成本系数。
@@ -9459,6 +9490,17 @@ let multCatalogFailed = false;
       val.textContent = fresh;
       val.className = 'v ' + (v === null ? 'dim' : (cls || ''));
     }
+    // ⚠⚠ 上面这个循环每 30 秒会把「活跃天数 / 当前连续天数」写回 `—`
+    //   —— 因为 `statsCardsEntries(d)` 里那两格的值**恒为 null**（它们的原料不在这份 `d` 里，
+    //   而在 series 那条线上）。⇒ 本轮之后必须紧接着回填，否则轮询每 30 秒擦掉一次。
+    //   ⚠ 这也解释了上一轮量到的现象："切一次档就永久变 —"（其实是每 30 秒被擦一次，
+    //   而填它的 loadHeatmap 读固定 365d、sig 不变、早返回 ⇒ 永远补不回来）。
+    try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
+    // ⚠ 「Top 模型」同理（2026-10-18 看图才发现）：`statsCardsEntries(d)` 里那张卡的值**恒为 null**
+    //   （它的原料是 `d.by_model_detail` —— 在响应里，但那套 entries 不读它）
+    //   ⇒ 上面那个循环每 30 秒把它擦回 `—`（⚠ 实测：不补的话，过一轮轮询它就没了）。
+    //   ⚠ 缓存四格在 `#cacheCards`（另一个容器），不受这个循环影响，不用补。
+    try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
     // ⚠⚠ 报表区（Top 榜 / 上游环）也必须跟着这轮一起更新（R2 抓到的"一页两个时刻"）。
     // 症状（实测）：卡片每 30 秒无感更新，而榜/环只随**整页 refresh** 才变 ⇒
     //   28 秒后卡片写"总请求 99"，榜还是旧的 a1 —— **同一屏上两个不同的时刻**。
@@ -9668,6 +9710,9 @@ let multCatalogFailed = false;
         try { fillDonuts(d); } catch (e) { console.error('fillDonuts 失败:', e && e.message); }
         try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
         try { fillCacheRates(d); } catch (e) { console.error('fillCacheRates 失败:', e && e.message); }
+        // ⚠ 最后无条件回填那两格 —— 它俩的值不在 `d` 里（来自 series），
+        //   而上面的 renderStats 刚重建过卡片把它们清空了（见 dayCardVals 的注释）。
+        try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
       })
       .catch(() => { /* 统计非关键：拿不到就保持占位 */ });
     renderCards(h, s);
