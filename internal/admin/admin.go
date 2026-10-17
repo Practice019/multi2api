@@ -2800,6 +2800,72 @@ func (h *Handler) statsAggCached(items []logbuf.Entry) map[string]any {
 // zeroTime 只是把"零值时间"这个判断收在一处，免得各处自己写 time.Time{}。
 func zeroTime() time.Time { return time.Time{} }
 
+// cacheWindowKeys / cacheWindowDur 四档缓存命中率窗口。
+//
+// ⚠ **口径照抄 agent2api 的 `CACHE_WINDOWS`**（见它 `report.rs:64`）：
+//
+//	("last10m", 10*60_000) · ("last1h", 60*60_000) · ("last24h", …) · ("last7d", …)
+//
+// ⚠ 键名也照抄（它前端读的就是 `cacheRates.last10m` 这些字段）。
+var cacheWindowKeys = []string{"last10m", "last1h", "last24h", "last7d"}
+
+var cacheWindowDur = []time.Duration{
+	10 * time.Minute, time.Hour, 24 * time.Hour, 7 * 24 * time.Hour,
+}
+
+// cacheRates 四档缓存命中率（每档含 rate / hit / miss）。
+//
+// # 口径（与它一字不差）
+//
+//   - 命中率 = 缓存读取 Token / 输入 Token（输入 = 命中 + 未命中）
+//   - ⚠ **不夹取值**：上游把「缓存读取」与「输入」分开上报时，这个比值**合法地可能超过 100%**，
+//     照它 `report-page.tsx:124` 的 TIP —— **如实展示**，不人为截到 100%。
+//   - ⚠ 某档分母为 0 ⇒ **不输出那一档**（与顶层 `cache_hit_rate` 同一约定）⇒ 前端如实显示 N/A。
+//
+// # 为什么写成独立函数而不是塞进 aggregateChatLog 的循环
+//
+// ⚠ 塞进去能少扫一遍，但那样**动的是最核心的那个聚合循环**（全站最热接口的算术全在那儿）。
+// 这里只是一次额外遍历（实测 28900 行 ≈ 几毫秒，而那个循环本身要 ~3 秒）——
+// 用几毫秒换"核心逻辑零改动"，值得。⚠ 而且独立函数可以直接单测（见同目录的测试）。
+//
+// ⚠ 实测记录（2026-10-18）：我们日志里这两个字段**每行都有，但最近 24 小时内全是 0**
+// （只有最早那批 2265 行有值）⇒ last10m/last1h/last24h 三档会如实显示 N/A，
+// 只有 last7d 有数（97.96%，与当时 /admin/stats 的 cache_hit_rate 一致）。
+// ⚠ 那说明**上游现在不再上报这两个字段** —— 不是本函数算错。
+func cacheRates(items []logbuf.Entry, now time.Time) map[string]any {
+	wins := make([]struct{ hit, miss int64 }, len(cacheWindowDur))
+	longest := cacheWindowDur[len(cacheWindowDur)-1]
+	for _, e := range items {
+		age := now.Sub(e.At)
+		if age < 0 || age > longest { // ⚠ age<0：时钟回拨/未来时间戳，跳过（不然它会落进所有档）
+			continue
+		}
+		h, m := int64(e.CacheHitTokens), int64(e.CacheMissTokens)
+		if h <= 0 && m <= 0 {
+			continue
+		}
+		for i, d := range cacheWindowDur {
+			if age <= d {
+				if h > 0 {
+					wins[i].hit += h
+				}
+				if m > 0 {
+					wins[i].miss += m
+				}
+			}
+		}
+	}
+	out := map[string]any{}
+	for i, k := range cacheWindowKeys {
+		r, ok := cacheHitRate(wins[i].hit, wins[i].miss)
+		if !ok {
+			continue // ⚠ 分母 0 ⇒ 不输出这一档（前端显示 N/A，而不是一个假的 0%）
+		}
+		out[k] = map[string]any{"rate": r, "hit": wins[i].hit, "miss": wins[i].miss}
+	}
+	return out
+}
+
 // cacheHitRate 缓存命中率 = 命中 / (命中 + 未命中)。//
 // 分母为 0 时返回 (0, false)：调用方据此决定「输出 0」还是「不输出该字段」。
 // 之所以必须显式挡掉 0/0，是因为 IEEE-754 下 float64(0)/float64(0) = NaN，
@@ -3035,6 +3101,10 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	if r, ok := cacheHitRate(cacheHitTokens, cacheMissTokens); ok {
 		resp["cache_hit_rate"] = r
 	}
+	// ⚠ 四档缓存命中率（照 agent2api 的 CACHE_WINDOWS 口径）——
+	//   顶层那个是"全部落盘历史"，这四档才是"近 10 分钟 / 1 小时 / 24 小时 / 7 天"。
+	//   ⚠ 独立遍历一遍，不动上面那个核心循环（理由见 cacheRates 的注释）。
+	resp["cache_rates"] = cacheRates(items, time.Now())
 	// by_provider 同样只在有数据时输出（与 cache_hit_rate 一致的约定）：
 	// 空集时给一个空对象会让前端把"没有数据"渲染成"所有上游都是 0"。
 	// 单上游部署下它仍会有一个桶 —— 那样前端不必分两种形态渲染。
