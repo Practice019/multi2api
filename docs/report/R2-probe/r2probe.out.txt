@@ -1,0 +1,68 @@
+### 初始（真接口，本实例日志可能为空）
+{
+ "rows": [],
+ "topRaw": "暂无数据",
+ "hint": "",
+ "legend": [],
+ "donutCenter": "",
+ "donutBg": "",
+ "trendCaption": "暂无趋势数据",
+ "trendL": 0,
+ "h3": "调用统计 （落盘日志为空） （趋势：请求数 + 成功率） 24h 7d",
+ "cardTotal": "总请求=0 | 成功=0 | 失败=0 | 成功率=— | 消耗 token=— | 输出 token=0 | 平均 TTFB=— | 平均总耗时=—",
+ "rangeBtns": [
+  "24h*",
+  "7d"
+ ]
+}
+
+### A1 by_uid={} by_provider={} → 零除面
+topRaw= "暂无数据" | donutCenter= "" | donutBg= "" | hint= ""
+
+### A2 by_provider 老形状裸数字 / by_uid {a1:5,b2:0}
+rows= [{"name":"a1","bar":"100%","val":"5","pct":"100.0%","title":"a1","attrs":[]},{"name":"b2","bar":"2%","val":"0","pct":"0.0%","title":"b2","attrs":[]}] 
+hint= "共 2 个账号有请求" donutCenter= 26012请求数 legend= [{"name":"loomy","val":"26012","pct":"100.0%","attrs":[]}] donutBg= conic-gradient(var(--acc) 0.000% 100.000%)
+
+### A3 全 0
+rows= [{"name":"a1","bar":"0%","val":"0","pct":"—%","title":"a1","attrs":[]},{"name":"b2","bar":"0%","val":"0","pct":"—%","title":"b2","attrs":[]}] 
+hint= "" | donutCenter= "" | legend= []
+
+### A4 负数
+rows= [{"name":"good","bar":"100%","val":"3","pct":"100.0%","title":"good","attrs":[]},{"name":"neg","bar":"2%","val":"0","pct":"0.0%","title":"neg","attrs":[]}] 
+legend= [{"name":"good","val":"4","pct":"100.0%","attrs":[]},{"name":"neg","val":"0","pct":"0.0%","attrs":[]}] | donutCenter= 4请求数
+
+### A5 形状兼容：by_provider {req:7} vs {calls:4}；by_uid {calls:9} vs {req:7}
+rows= [{"name":"u1","bar":"100%","val":"9","pct":"100.0%","title":"u1","attrs":[]},{"name":"u2","bar":"2%","val":"0","pct":"0.0%","title":"u2","attrs":[]}] 
+legend= [{"name":"p_calls","val":"4","pct":"100.0%","attrs":[]},{"name":"p_req","val":"0","pct":"0.0%","attrs":[]}] | donutCenter= 4请求数
+
+### A6 更深嵌套 {calls:{n:7}}
+rows= [{"name":"u1","bar":"0%","val":"0","pct":"—%","title":"u1","attrs":[]}] 
+legend= [] | donutCenter= "" | topRaw= "u1\n            \n            0\n            —%"
+
+### A7a 基线（by_provider 有数据 ⇒ hint 会落值）
+rows= 1 hint= "共 1 个账号有请求"
+### A7b 页内重渲染：by_uid 2 键 + by_provider={}（等 516ms，idleBefore=true）
+rows= 2 行名= ["a1","b2"] | hint= "共 1 个账号有请求" （若 rows=2 而 hint 仍是「共 1 个账号有请求」= 陈旧）
+
+### B esc() 属性上下文（uid/provider 带双引号与标签）
+rows= [{"name":"x\" onmouseov…","bar":"100%","val":"3","pct":"60.0%","title":"x","attrs":["onmouseover"]},{"name":"<img src=x o…","bar":"66.6667%","val":"2","pct":"40.0%","title":"<img src=x onerror=","attrs":["window.__xss2"]}] 
+legend= [{"name":"y\" onclick=\"wi…","val":"4","pct":"100.0%","attrs":["onclick"]}]
+XSS 探针= {"onmouseoverEls":1,"onclickEls":1,"imgEls":0,"uidRowHTML":"<div class=\"toprow\" title=\"x\" onmouseover=\"window.__XSS1=1\"> <span class=\"tname\">x\" onmouseov…</span> <span class=\"tbar\"><i style=\"width:100%\"></i></span> <span class=\"tval\">3</span> <span class=\"tpct\">60.0%</span> </div>"}
+
+### C range 竞态：7d 延迟 2500ms，中途点回 24h
+reload 后(24h): 最近 24 小时 · 逐小时 · 请求量 ● 成功率 ● 最新 10-18 05:00 · 请求 7 · 成功率 100% | L= 24 | 按钮= ["24h*","7d"]
+点回 24h 后 0.4s（7d 未回）: 最近 24 小时 · 逐小时 · 请求量 ● 成功率 ● 最新 10-18 05:00 · 请求 7 · 成功率 100% | L= 24
+7d 迟到落地后: 最近 24 小时 · 逐小时 · 请求量 ● 成功率 ● 最新 10-18 00:00 · 请求 999999 · 成功率 100% | L= 7 | 按钮= ["24h*","7d"]
+切 range 前后卡片/榜是否变了: 卡片同= true | 榜行数 1 → 1 | h3= "调用统计 （未启用日志） （趋势：请求数 + 成功率） 24h 7d"
+
+### D 30s 无感轮询：卡片 vs 报表区
+D1 卡片= 总请求=11 | 成功=11 | 失败=0 | 成功率=100% | 消耗 token=— | 输出 token=— | 平均 TTFB=— | 平均总耗时=— | 榜行= 1 | hint= "共 1 个账号有请求"
+轮询命中卡片更新= true （等 28s）卡片= 总请求=99 | 成功=99 | 失败=0 | 成功率=100% | 消耗 token=— | 输出 token=— | 平均 TTFB=— | 平均总耗时=—
+同一刻 榜行= ["a1"] | hint= "共 1 个账号有请求" | 环= "5请求数"
+
+### E 老版本 DOM 缺失
+删元素后新增 pageerror/console.error 数= 2 | 删元素前基线= 0
+明细= ["CONSOLE: Failed to load resource: the server responded with a status of 503 (Service Unavailable)","CONSOLE: Failed to load resource: the server responded with a status of 503 (Service Unavailable)","CONSOLE: Failed to load resource: the server responded with a status of 503 (Service Unavailable)","CONSOLE: Failed to load resource: the server responded with a status of 503 (Service Unavailable)"]
+
+### 全程 pageerror/console.error（去重）
+["CONSOLE: Failed to load resource: the server responded with a status of 503 (Service Unavailable)"]
