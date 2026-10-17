@@ -755,10 +755,24 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
             <div id="statsTopUid" class="toplist"></div>
           </div>
           <div class="panel">
-            <div class="panelhd">上游占比 <span class="dim" style="font-weight:400">按请求数</span></div>
+            <!-- ⚠ 标题从「按请求数」改成「按 Token」—— 2026-10-18 照 agent2api 的口径改的：
+                 它 `TIP_PROVIDERS` 写的是"**所选范围内每个提供商各消耗了多少 Token**，
+                 百分比按本区间的总 Token 数算（**这一块只看用量**，请求次数与成功率在概览）"。
+                 ⚠ 我们原来那版是"按请求数"，与它的口径不同 —— 已对齐。 -->
+            <div class="panelhd">上游用量 <span class="dim" style="font-weight:400">按 Token</span></div>
             <div class="donutwrap">
               <div id="statsDonut" class="donut"></div>
               <div id="statsDonutLegend" class="legend"></div>
+            </div>
+          </div>
+          <!-- ⚠ 模型用量环（它第 4 块 —— 9 块里我们最后没做的那个）。
+               ⚠ 与上面那个环是**同一份实现**（`renderDonutInto`）—— 照它的说法，
+                 它那边 `donutView` 本来就是"模型用量 / 提供商用量的**共用实现**"。 -->
+          <div class="panel">
+            <div class="panelhd">模型用量 <span class="dim" style="font-weight:400">按 Token</span></div>
+            <div class="donutwrap">
+              <div id="statsModelDonut" class="donut"></div>
+              <div id="statsModelLegend" class="legend"></div>
             </div>
           </div>
         </div>
@@ -7985,7 +7999,10 @@ let loginProvider = '';
     };
     const pad = calls;
     // ⚠ 每个环比色都走主题变量（切换深浅色时不能有"局部还是旧配色"的花脸）。
-    const COLORS = ['var(--acc)', 'var(--ok)', 'var(--warn)', 'var(--err)'];
+    // ⚠ `COLORS` 已提到**模块级**（见 `DONUT_COLORS`）—— 2026-10-18 的教训：
+    //   它原来定义在本函数内部，而抽出去的 `renderDonutInto` 也要用它
+    //   ⇒ 跨函数作用域直接是 `ReferenceError`，**而异常被空 catch 吞掉、console 干净**
+    //   ⇒ 我在那个盲区里盲改了四次。⚠ 共享函数要用的常量，必须放在共享函数够得着的地方。
 
     // ⚠⚠ digest 守卫：本函数由 `pollStatsCards` 每 30 秒调一次（让榜/环与卡片同步）。
     // 不判"值变没变"⇒ 榜与环每 30 秒整块重绘 ⇒ 肉眼可见的**闪**（尤其 `conic-gradient` 的环）。
@@ -8040,40 +8057,38 @@ let loginProvider = '';
         }).join('')
       : '<span class="dim" style="font-size:12px">暂无数据</span>';
 
-    // ---- 右栏：上游占比环（conic-gradient）----
-    const provs = Object.entries(s.by_provider || {}).map(([k, v]) => [k, pad(v)])
-      .sort((a, b) => b[1] - a[1]);
-    let psum = 0;
-    for (const [, n] of provs) psum += n;
-    if (!provs.length || psum <= 0) {                                        // ⚠ 防零除：没有数据就别画环
-      donutEl.style.background = '';
-      donutEl.innerHTML = '';
-      legendEl.innerHTML = '<span class="dim" style="font-size:12px">暂无数据</span>';
-      return;
-    }
-    // 把每个上游的占比累加成 conic-gradient 的色段。
-    let acc = 0;
-    const stops = [];
-    const legend = [];
-    provs.forEach(([name, n], i) => {
-      const pct = (n / psum) * 100;
-      const c = COLORS[i % COLORS.length];
-      stops.push(`${c} ${acc.toFixed(3)}% ${(acc + pct).toFixed(3)}%`);
-      acc += pct;
-      const label = name.length > 14 ? name.slice(0, 14) + '…' : name;
-      legend.push(`<div class="lgrow" title="${esc(name)}">
-        <span class="sw" style="background:${c}"></span>
-        <span class="lgname">${esc(label)}</span>
-        <span class="tval">${n}</span>
-        <span class="tpct">${pct.toFixed(1)}%</span>
-      </div>`);
-    });
-    donutEl.style.background = `conic-gradient(${stops.join(',')})`;
-    // 环心写总量（⚠ 口径写清楚：这是**请求数**，不是 token）。
-    donutEl.innerHTML = `<span class="dc"><b>${psum}</b><span>请求数</span></span>`;
-    legendEl.innerHTML = legend.join('');
+    // ⚠⚠ 两个环**不在这里画**（2026-10-18 实测踩到）。
+    //   根因与「Top 模型」那一处**同一个**：本函数会在多处被调，其中有的入参
+    //   不是 `/admin/stats` 的完整响应 ⇒ `by_provider_detail` / `by_model_detail` 取不到
+    //   ⇒ 环整块空；⚠ 而抛错被 try/catch 吞掉、`pageerror` 干净，只有看图/量 DOM 才发现。
+    //   ⇒ 已挪到 `fillDonuts(s)`，只在 `refresh` 那个确定是 `/admin/stats` 响应的地方调。
+    //
+    // ⚠ 同理：上面那个 **Top 账号榜**也读 `s.by_uid` —— 它留在本函数里，
+    //   所以它也有同一风险（只是实测里那次入参恰好完整）。⚠ 见 fillDonuts 的注释。
 
     // ⚠ 顶部提示已移到函数开头（见那里注释：原来放这儿会被空数据分支的 return 跳过）。
+  }
+
+  // fillDonuts 画两个环：**上游用量** 与 **模型用量**（它那边是第 4、5 块）。
+  //
+  // ⚠ 为什么单独一个函数、且只在 `refresh` 的 `.then(d => …)` 里调：
+  //   与 `fillTopModel` 同因 —— 那个 `d` 是**确定**的 `/admin/stats` 响应，
+  //   而 `renderStatsReport` 会被其它入参调用 ⇒ 在那里画会取不到 detail 字段。
+  //
+  // ⚠ 口径照 agent2api 的 `TIP_PROVIDERS` / `TIP_MODELS`：
+  //   · **按 Token 用量**从多到少排（不是请求数）；百分比按本区间**总 Token** 算；
+  //   · 环心 = **这一维的合计**；
+  //   · ⚠ 扇区内百分比它只在 ≥3% 时标 —— `conic-gradient` 画不出文字，
+  //     而它自己的 TIP 也说"**完整读数在右侧列表与悬停气泡里**" ⇒ 我们靠右侧图例给全量读数。
+  //   · ⚠ **全零的组不占号**（它 donutView 的做法）⇒ 颜色不因空组错位。
+  // ⚠ `by_provider_detail` / `by_model_detail` 的每个值形如 `{req,ok,fail,tokens,…}`。
+  function fillDonuts(s) {
+    const rows = (det) => Object.entries(det || {}).map(([k, v]) => {
+      const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;
+      return [k, tk];
+    }).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    renderDonutInto($('statsDonut'), $('statsDonutLegend'), rows(s && s.by_provider_detail), 'Token');
+    renderDonutInto($('statsModelDonut'), $('statsModelLegend'), rows(s && s.by_model_detail), 'Token');
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -8426,6 +8441,65 @@ let loginProvider = '';
       svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lbl)}</text>`);
     });
     host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // DONUT_COLORS 环的色板（⚠ 模块级：`fillDonuts` 与 `renderDonutInto` 都要用）。
+  // ⚠ 全部走主题变量 —— 切换深浅色时不能有"局部还是旧配色"的花脸。
+  // ⚠ 它原来是写在 `renderStatsReport` 内部的 `COLORS`，抽共享函数时忘了搬出来，
+  //   于是 `renderDonutInto` 一调就 `ReferenceError`（见上面那处注释）。
+  const DONUT_COLORS = ['var(--acc)', 'var(--ok)', 'var(--warn)', 'var(--err)'];
+
+  // renderDonutInto 环形图 + 右侧图例 —— **模型用量 / 上游用量的共用实现**
+  //
+  // ⚠ 为什么是共享函数：照 agent2api —— 它那边的 `donutView` 注释就写着
+  //   "环形图 + 右侧图例列表（**模型用量 / 提供商用量的共用实现**）"。
+  //   ⚠ 我原来把这段写死在 `renderStatsReport` 里、只画上游一个环 —— 加第二个环时
+  //     要么抄一遍、要么抽出来。**抽出来**（AGENTS.md 第 6 条：遇到同类实现就抽共享层）。
+  //
+  // ⚠ 口径（照它 `TIP_MODELS` / `TIP_PROVIDERS`）：
+  //   · 入参 `rows` 已按**用量从多到少**排好（调用方排，本函数不管排序口径）；
+  //   · 百分比按**本区间的合计**算（`unitLabel` 说明这一维是什么 —— 现在两处都是 Token）；
+  //   · 环心 = **这一维的合计**；
+  //   · ⚠ **全零/空的组由调用方过滤掉** —— 它与 `donutView` 的"同一套分配顺序、
+  //     tokens 全零的组不占号"一致（不占号 ⇒ 颜色不因空组而错位）。
+  //   · ⚠ 扇区内的百分比它只在 ≥3% 时标；`conic-gradient` **画不出文字**，
+  //     而它 TIP 里也说"完整读数在**右侧列表**与悬停气泡里" ⇒ 我们靠右侧图例给全量读数，
+  //     扇区只负责"一眼看出谁占大头"。
+  function renderDonutInto(donutEl, legendEl, rows, unitLabel) {
+    if (!donutEl || !legendEl) return;
+    const list = (rows || []).filter((r) => r && r[1] > 0);
+    let sum = 0;
+    for (const [, n] of list) sum += n;
+    if (!list.length || sum <= 0) {                    // ⚠ 防零除：没有数据就别画环
+      donutEl.style.background = '';
+      donutEl.innerHTML = '';
+      legendEl.innerHTML = '<span class="dim" style="font-size:12px">暂无用量数据</span>';
+      return;
+    }
+    const fmtV = (v) => v >= 1e9 ? (v / 1e9).toFixed(2) + 'B'
+      : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
+    let acc = 0;
+    const stops = [];
+    const legend = [];
+    list.forEach(([name, n], i) => {
+      const pct = (n / sum) * 100;
+      const c = DONUT_COLORS[i % DONUT_COLORS.length];
+      stops.push(`${c} ${acc.toFixed(3)}% ${(acc + pct).toFixed(3)}%`);
+      acc += pct;
+      const label = name.length > 16 ? name.slice(0, 16) + '…' : name;
+      legend.push(`<div class="lgrow" title="${esc(name)}">
+        <span class="sw" style="background:${c}"></span>
+        <span class="lgname">${esc(label)}</span>
+        <span class="tval">${esc(fmtV(n))}</span>
+        <span class="tpct">${pct.toFixed(1)}%</span>
+      </div>`);
+    });
+    donutEl.style.background = `conic-gradient(${stops.join(',')})`;
+    // ⚠ 环心写合计，并把**单位**写清楚（Token / 请求数）—— 不让读者靠猜。
+    donutEl.innerHTML = `<span class="dc"><b>${esc(fmtV(sum))}</b><span>${esc(unitLabel)}</span></span>`;
+    legendEl.innerHTML = legend.join('');
   }
 
   // fmtTokensPlain 给 title 用的纯文本 token 数（⚠ 不引别的格式化器，避免依赖不确定的名字）。
@@ -9535,7 +9609,19 @@ let multCatalogFailed = false;
     // ⚠ 这与本文件其它面板同一套做法（缓存优先 + 后台补），也是用户一贯的要求：
     //   "第一眼先出内容，不要为了拿最新数据先等一次网络往返"。
     admin('/admin/stats')
-      .then(d => { try { renderStats(d); renderCards(h, s); fillTopModel(d); fillCacheRates(d); } catch (e) { /* 非关键 */ } })
+      // ⚠⚠ 顺序很要紧：**`renderStats` 必须排第一**。
+      //   它内部的 `$('statsCards').innerHTML = …` 会**重建卡片** ⇒
+      //   若先填后画，刚填的值会被整块抹掉（实测：把 renderStats 放最后，
+      //   「Top 模型」就变回 `—` —— 而它填的值其实一直是正确的）。
+      // ⚠ 四条各用独立 try 且**把异常打出来**：原先它们串在同一 try 里、catch 是空的，
+      //   一处抛错会把后面全带掉，而 `pageerror`/console 都干净 ——
+      //   我曾在那个盲区里盲改四次（真因是 `COLORS is not defined`，一打出来就看到了）。
+      .then(d => {
+        try { renderStats(d); renderCards(h, s); } catch (e) { console.error('renderStats 失败:', e && e.message); }
+        try { fillDonuts(d); } catch (e) { console.error('fillDonuts 失败:', e && e.message); }
+        try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
+        try { fillCacheRates(d); } catch (e) { console.error('fillCacheRates 失败:', e && e.message); }
+      })
       .catch(() => { /* 统计非关键：拿不到就保持占位 */ });
     renderCards(h, s);
     // 上游契约要**最先**取：renderAccounts 依赖它把账号归到上游，
