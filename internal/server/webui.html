@@ -53,11 +53,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     /* 浅色下代码块用略深的底、遮罩更淡、阴影更轻 */
     --code-bg:#f0f2f7; --overlay:rgba(28,35,51,.42); --shadow:rgba(28,35,51,.16);
   }
+  /* ⚠⚠ 这一轮按用户要求整体**收紧留白**（「更紧凑、少空白、合理利用空间」）。
+     原则：**只动"每屏都吃"的值**（全局字号/行高、外框内边距、表格行高、卡片内边距），
+     不动配色、不动结构、不动交互 —— 所以风险低、改完立刻能看出来。
+     ⚠ 每一处的"原值"都写在行尾注释里，要回退按原值改回即可。 */
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--fg);
-    font:14px/1.55 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-  header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;
-    padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel);
+    font:13.5px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+    padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel);
     position:sticky;top:0;z-index:9}
   h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
   h1 small{color:var(--dim);font-weight:400;margin-left:8px;font-size:12px}
@@ -84,13 +88,19 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   button.primary:hover{filter:brightness(1.1)}
   button:disabled{opacity:.45;cursor:not-allowed}
   main{padding:0;display:block}
-  /* 左侧导航 + 内容区 */
-  .layout{display:grid;grid-template-columns:186px minmax(0,1fr);gap:18px;
-    max-width:1400px;margin:0 auto;padding:20px}
-  .sidebar{position:sticky;top:66px;align-self:start;display:flex;flex-direction:column;gap:2px;
-    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px}
+  /* 左侧导航 + 内容区
+     ⚠ 收紧（原值：186px 列宽 / gap:18px / max-width:1400px / padding:20px）：
+     · 列宽 186→176（导航是固定文案，176 够）
+     · gap 18→12、padding 20→12 16（外框四周的空白是**每屏都吃**的）
+     · max-width 1400→**1600**：⚠ 这条是"合理利用空间"的关键 ——
+       宽屏上原来内容被限在 1400，两侧白白空掉；放宽后内容区真正铺开。
+       （没有直接去掉限宽：完全铺满会让超宽屏上的表格行过长、视线横跨太大。） */
+  .layout{display:grid;grid-template-columns:168px minmax(0,1fr);gap:12px;
+    max-width:1800px;margin:0 auto;padding:12px 16px}
+  .sidebar{position:sticky;top:52px;align-self:start;display:flex;flex-direction:column;gap:2px;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px}
   .sidebar button{text-align:left;background:transparent;border:0;border-radius:8px;
-    padding:9px 11px 9px 15px;font-size:13px;color:var(--dim);cursor:pointer;transition:.12s;
+    padding:6px 9px 6px 12px;font-size:12.5px;color:var(--dim);cursor:pointer;transition:.12s;
     position:relative}
   .sidebar button:hover{background:var(--panel2);color:var(--fg)}
   .sidebar button.active{background:var(--acc);color:#fff;font-weight:600}
@@ -135,7 +145,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   /* 契约降级提示：manifest 拉不到时在导航里显示原因，而不是静默少几个面板 */
   .navdegraded{font-size:11px;line-height:1.5;color:var(--warn);
     border:1px dashed var(--line);border-radius:8px;padding:7px 9px}
-  .content{display:grid;gap:18px;min-width:0}
+  .content{display:grid;gap:12px;min-width:0}   /* 原 gap:18px */
   /* 账号表的上游分组标题行：整行跨列，作为该组账号的视觉分组线。
      用 <tr> 而不是额外表格 —— 保持单一 table 让列宽与主体一致。 */
   tr.grouprow > td{background:var(--panel2);border-top:1px solid var(--line);
@@ -244,7 +254,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     font-family:ui-monospace,Consolas,monospace;word-break:break-all}
   .gbad{padding:8px 11px;border-radius:9px;font-size:12px;color:var(--err);
     border:1px solid var(--err);background:transparent}
-  .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px 14px}
+  .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 12px}
   /* 嵌套对象（U2 的关键）：缩进 + 弱化标签，区分顶层与子项 */
   .kvs.nested{display:grid;grid-template-columns:1fr;padding:6px 10px;background:rgba(0,0,0,.04);border-radius:6px;margin-top:4px}
   .kvs .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;
@@ -276,7 +286,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      它与 .fieldgroup 的分工：.fieldgroup 表示「这一堆是同类控件」（纵向堆叠的语义），
      .formgrid 负责内部的 auto-fit 多列排布。两者分开是为了让「不交叉」由结构保证，
      而不是靠 DOM 书写顺序碰巧排对 —— 列数随视口在 2-4 之间流动，靠顺序排必然错位。 */
-  .formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+  .formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
   /* 复选框组：文本短，不需要 250px 那么宽，用更小的最小列宽避免大片空白。
      210px 是「自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）」这类
      长标签在 13px 字号下不至于折成三行的经验下界。 */
@@ -293,17 +303,23 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .field.chk.stack{display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:2px;align-items:start;padding:4px 0}
   .field.chk.stack .hint{grid-column:2;font-size:11px;color:var(--dim);margin-top:1px;line-height:1.4}
   .field.chk.stack label{line-height:1.5;align-self:start}
-  .fieldgroup{display:flex;flex-direction:column;gap:10px}
+  .fieldgroup{display:flex;flex-direction:column;gap:7px}
   .fieldgroup + .fieldgroup{margin-top:4px}
   .fieldgroup.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 14px}
   .field{display:flex;flex-direction:column;gap:5px}
   .field label{font-size:11px;color:var(--dim);letter-spacing:.3px}
   .field .hint{font-size:11px;color:var(--dim)}
-  .field input[type=text],.field input[type=number],.field select{width:100%}
+  /* ⚠ 文本 / 下拉：撑满所在列（它们的内容长度不可预知）。
+     ⚠ **数字输入框单独给窄宽** —— 用户指出「签历史保留天数」「请求日志保留天数」两个框
+     各占半屏，而值只是 `7`，纯属浪费。数字本来就短（1~4 位），120px 与
+     `.pair` 里那条先例（`width:120px`）一致。
+     ⚠ 需要宽数字框的地方用**内联** `style="width:100%"`（如 `akLimit`/`akRpm`）⇒ 内联优先，不受这条影响。 */
+  .field input[type=text],.field select{width:100%}
+  .field input[type=number]{width:120px}
   .field.chk{flex-direction:row;align-items:center;gap:8px}
   .field.chk input{width:auto}
   .field.chk label{font-size:13px;color:var(--fg)}
-  fieldset{border:1px solid var(--line);border-radius:10px;padding:14px;margin:0 0 16px}
+  fieldset{border:1px solid var(--line);border-radius:10px;padding:10px;margin:0 0 10px}
   legend{font-size:12px;color:var(--dim);padding:0 8px;letter-spacing:.4px}
   /* 设置页重设计（用户本轮要求）新增的呈现类：生效时机徽章 / 组内子块 / 信息条 */
   .badge{font-size:11px;font-family:var(--mono);padding:1px 7px;border-radius:999px;
@@ -323,15 +339,94 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .readonly dt{color:var(--dim);font-size:12px}
   .readonly dd{margin:0;font-family:var(--mono);font-size:12px;word-break:break-all}
   section{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
-  section>h2{margin:0;padding:11px 16px;font-size:12px;font-weight:650;letter-spacing:.6px;
+  section>h2{margin:0;padding:8px 14px;font-size:12px;font-weight:650;letter-spacing:.6px;
     text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
     display:flex;align-items:center;gap:10px}
-  .body{padding:16px}
-  .cards{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch}
-  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 14px;
-    display:flex;flex-direction:column;justify-content:center;min-height:66px;width:max-content;min-width:120px}
+  .body{padding:12px}   /* 原 16px */
+  /* ⚠⚠ 从 flex 改成 grid：**等分铺满**（用户要求"合理利用空间、少空白"）。
+     原来 `flex` + `.card{width:max-content}` ⇒ 每张卡只有内容那么宽，右侧留一大片空
+     （在「成长计划」页实测：6 张卡只占了半行宽）。
+     `auto-fit + minmax(140px,1fr)` ⇒ 按容器宽度**自动决定列数**，且**列等宽铺满**；
+     窄屏时自动退化成两列/一列，不需要写媒体查询。
+     ⚠ 卡片自己的宽度必须交出去（`width:auto`）—— grid 里再写 `max-content`
+       会让它不参与等分，等于没改。 */
+  /* ⚠ 卡片最小宽从 140 收到 118（2026-10-18 看图发现的）：
+     概览卡从 8 张加到 11 张后，140px 只能一行排下 8 张 ⇒ 剩下 3 张被挤到第二行、
+     而第二行右边**一大片空**。118px × 11 + gap ≈ 1340，正好一行铺满。
+     ⚠ 宽度上限仍由 `1fr` 均分决定，所以卡片不会被压扁 —— 只是换行点推迟了。 */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px;align-items:stretch}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 12px;
+    display:flex;flex-direction:column;justify-content:center;min-height:52px;width:auto;min-width:0}
   .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
-  .card .v{font-size:24px;font-weight:700;font-family:var(--mono);margin-top:4px}
+  /* ⚠ 「Top 模型」的值是模型名（`loomy/DeepSeek-V4.1-Flash` 那种很长）——
+     看图发现它把卡撑成两行、把整行都拉高了。⇒ 单行 + 截断，全文放 title。 */
+  .card .v{font-size:21px;font-weight:700;font-family:var(--mono);margin-top:2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+
+  /* ---- 报表区（2026-10-18）· 全部纯 CSS，零图表库 ----
+     ⚠ 这四条是"双栏"的基础：`.duo` 两列，窄屏自动退化成一列（auto-fit 搞定，不用写媒体查询）。 */
+  .duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:10px}
+  .panel{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;min-width:0}
+  .panelhd{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
+    letter-spacing:.3px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* Top 榜一行：名称 + 条形 + 值 + 占比。⚠ 条形的宽度由内联 style 给（`width:NN%`）——
+     那是**数据**不是样式，所以不进 CSS。 */
+  .toplist{display:flex;flex-direction:column;gap:3px}
+  .toprow{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1.4fr) auto auto;
+    align-items:center;gap:7px;font-size:12px;line-height:1.5}
+  .toprow .tname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
+  /* ⚠ 条形与数值三件套做成**共享类**（`.tbar`/`.tval`/`.tpct`），不加父级前缀 ——
+     因为 Top 榜（`.toprow`）与激活条的"按天用量"（`.hbrow`）**都要用它们**。
+     ⚠ 这里踩过一次：原来写的是 `.toprow .tbar`，`hbrow` 里写上 `tbar` 类名却匹配不到样式
+       ⇒ 页面上**条形整列是空的**（只有日期和数字），而 DOM 里类名一个不少 —— 只能看图发现。 */
+  .tbar{height:9px;background:color-mix(in srgb,var(--dim) 14%,transparent);
+    border-radius:5px;overflow:hidden}
+  .tbar i{display:block;height:100%;background:var(--acc);border-radius:5px;
+    transition:width .25s}
+  .tval{font-family:var(--mono);text-align:right;color:var(--fg)}
+  .tpct{font-family:var(--mono);text-align:right;color:var(--dim);min-width:46px}
+  /* 环形图：`conic-gradient` 画出来（⚠ 不用 canvas / 不用 svg 路径 / 不用图表库）。
+     ⚠ 中间那圈"挖空"用伪元素画一个跟底色相同的圆 —— 这是 CSS 环形的标准做法。 */
+  .donutwrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .donut{position:relative;width:118px;height:118px;border-radius:50%;flex:none}
+  .donut::after{content:'';position:absolute;inset:26px;border-radius:50%;background:var(--panel2)}
+  .donut .dc{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;z-index:1}
+  .donut .dc b{font-family:var(--mono);font-size:15px}
+  .donut .dc span{font-size:10px;color:var(--dim)}
+  .legend{display:flex;flex-direction:column;gap:3px;font-size:12px;min-width:0;flex:1}
+  .legend .lgrow{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:7px;align-items:center}
+  .legend .sw{width:9px;height:9px;border-radius:2px;flex:none}
+  .legend .lgname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* ---- 活跃热力图（365 天）· 照 agent2api 的 GitHub 贡献图布局 ----
+     ⚠ 它的形态要点（我从 `report-charts.ts` 的 `heatmapView` 抄的，不是自己发明的）：
+       · **53 列（周）× 7 行（星期）**，首列补齐到周一、末列不满也留空
+       · 格子**恰好填满可用宽度**（它是按量到的像素算；我们用 `1fr` 纯 CSS 达到同一效果）
+       · 左侧 20px 星期标签（只标一/三/五）· **上方月份标签**
+     ⚠ 我一度擅自把它改成"横条表"（因为 8 天数据铺 365 格几乎全空）——
+       但那是**偏离复用**：它自己也是空着就空着（见它截图），照它的形态才对。 */
+  .heatwrap{display:flex;gap:6px;align-items:flex-start}
+  .heatdays{display:grid;grid-template-rows:repeat(7,1fr);gap:2px;font-size:9px;
+    color:var(--dim);line-height:1;flex:none;width:20px;padding-top:0}
+  .heatdays span:nth-child(1){grid-row:1} /* 一 */
+  .heatdays span:nth-child(2){grid-row:3} /* 三 */
+  .heatdays span:nth-child(3){grid-row:5} /* 五 */
+  .heatmain{flex:1;min-width:0}
+  .heatmonths{display:grid;grid-auto-flow:column;font-size:10px;color:var(--dim);
+    margin-bottom:2px;letter-spacing:.2px}
+  /* ⚠ `grid-auto-columns:1fr` + 容器 100% 宽 ⇒ **列宽自动均分、铺满整行**
+     （它那边是量像素算格子尺寸；纯 CSS 这条更省，效果一样）。 */
+  .heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);
+    grid-auto-columns:1fr;gap:2px;width:100%}
+  .heatcell{aspect-ratio:1;min-width:0;border-radius:2px;background:var(--panel2)}
+  .heatcell.blank{background:transparent}
+  .heatcell.lv0{background:color-mix(in srgb,var(--dim) 12%,transparent)}
+  .heatcell.lv1{background:color-mix(in srgb,var(--acc) 25%,transparent)}
+  .heatcell.lv2{background:color-mix(in srgb,var(--acc) 45%,transparent)}
+  .heatcell.lv3{background:color-mix(in srgb,var(--acc) 70%,transparent)}
+  .heatcell.lv4{background:var(--acc)}
+  .heatfoot{display:flex;align-items:center;gap:5px;margin-top:6px;font-size:11px;flex-wrap:wrap}
   /* 仪表盘内的子段落：一块一个 h3，块间用分隔线切开。
      每个子段自己的 .body 有内边距，这里不再重复 padding。 */
   .boardsec + .boardsec{border-top:1px solid var(--line)}
@@ -340,8 +435,27 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .boardsec h3 .spacer{flex:1}
   .boardsec h3 button{font-weight:400}
   .v.ok{color:var(--ok)} .v.warn{color:var(--warn)} .v.err{color:var(--err)} .v.dim{color:var(--dim)}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  /* ⚠ 表格行高是"每屏吃得最多"的一处（一屏十几行 ⇒ padding 减 3px 就省半屏空白）。
+     原值：padding:8px 10px · font-size:13px。 */
+  /* ⚠⚠ 表格按**钉钉 / 飞书表格**那套默认做法（用户点名要的）：
+       ① 高度恒一行 —— `white-space:nowrap`，绝不换行；
+       ② 太宽就截断 —— `overflow:hidden` + `text-overflow:ellipsis`（显示 …）；
+       ③ 悬停看全文 —— 靠每个单元格自己的 `title`（现有渲染里大多已带：uid / 昵称 /
+          错误原因 / 任务 key 等）。⚠ 新写的单元格也要带 title，否则截断就成了信息丢失。
+     `max-width` 是"再宽也不超过"：让**长内容去截断**，而不是把这张表撑得把别的列挤扁。
+     ⚠ 为什么用 max-width 而不是给每列写死宽度：这里的列是**按上游能力位动态生成**的
+       （见 acctColumnsFor），写死宽度会在换上游时错位。 */
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+  /* ⚠⚠ **表格单元格里的 `<br>` 一律不换行**（用户要求「高度保证一行」）。
+     ⚠ 为什么必须是 CSS 这一刀：`white-space:nowrap` **拦不住 `<br>`**（那是显式换行），
+     而 `<br>` 散在**多处渲染函数**里 —— 实测抓出 4 处（连登列 2 处、任务明细、
+     猫猫旅行到站时间），我逐个删的时候**连续漏掉两轮**（用户两次指着表说"不符合要求"）。
+     放在这里 ⇒ 之后新写的渲染也自动生效，不需要再记得这件事。
+     ⚠ `br` 隐藏后，它后面那个 span 会**紧贴**前一段文字，所以给个左间距当分隔符用。 */
+  td br,th br{display:none}
+  td br+*,th br+*{margin-left:6px}
   th{color:var(--dim);font-weight:500;font-size:11px;letter-spacing:.4px;text-transform:uppercase}
   tr:last-child td{border-bottom:0}
   td.mono{font-family:var(--mono);font-size:12px}
@@ -367,11 +481,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .ggroup table{width:100%}
   /* 说明列会很长（最长约 50 个汉字），必须解除全局 nowrap 并限宽换行，
      否则整张表被撑开、右侧的「操作」按钮要横向滚动才看得到。 */
-  .ggroup td.gtask{white-space:normal;max-width:230px;line-height:1.5}
+  /* ⚠ 这一列原来 `white-space:normal`（会折成多行 ⇒ 那一行比别的高一大截）。
+     用户要求"**保证高度一行**" ⇒ 改成与全表一致的截断规则（悬停看全文靠 title）。 */
+  .ggroup td.gtask{max-width:230px}
   /* 到期列：内容短（"剩 18 天"/"9-30（剩 19 天）"），不换行以免行高被撑开。
      颜色语义由内层 span 的 warn/err 类负责，这里只管排版。 */
   .ggroup td.exp{white-space:nowrap;font-size:12px}
-  .ggroup td.gdesc{white-space:normal;max-width:440px;line-height:1.6;font-size:12px}
+  /* ⚠ 同上：这一列原来是 `white-space:normal` + `line-height:1.6` ⇒ 最长约 50 个汉字的
+     说明会把行撑成三四行。改成单行截断 —— 与用户说的"太宽可以截断"一致。 */
+  .ggroup td.gdesc{max-width:440px;font-size:12px}
   .ggroup td.gdesc .howto{color:var(--dim);font-size:11px;margin-top:5px}
   .chips{display:flex;flex-wrap:wrap;gap:7px}
   /* 任务进度条：细、无圆角感、与数值同列。
@@ -579,7 +697,24 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     <!-- 2) 调用统计 -->
     <div class="boardsec">
       <h3>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span>
-        <span class="dim" style="font-weight:400;text-transform:none;font-size:11px">（趋势：请求数 + 成功率，24h 逐小时）</span>
+        <span class="dim" style="font-weight:400;text-transform:none;font-size:11px">（趋势：请求数 + 成功率）</span>
+        <span class="spacer"></span>
+        <!-- ⚠ 趋势的时间范围切换（24h / 7d）。
+             ⚠ **只切趋势**：后端 `/admin/stats/series` 只认这两个 range（见 `seriesSpan`），
+             而 `/admin/stats`（上面那些卡片与下面的 Top 榜/环）**不支持时间入参** ⇒ 它永远是**全量窗口**。
+             ⚠ 所以这里的标签只能叫「趋势范围」，不能写成"统计范围" —— 否则用户会以为
+               下面的 Top 榜也跟着变了（那就成了"两个口径混着看"）。
+             样式复用已有的 `.tog button.on`（分段控件的既有画法）。 -->
+        <span class="tog" id="trendRange" style="font-weight:400">
+          <button data-range="24h" class="on">24h</button>
+          <button data-range="7d">7d</button>
+          <!-- ⚠ 30d/365d 是 2026-10-18 加的：后端 `seriesSpan` 已支持（`365d` 本来是为热力图加的，
+               顺带就能当趋势档用）。⚠ 它那边"统计概览"的 6 档（今天/7天/30天/本月/全部/自定义）
+               影响的是**所有卡**，那需要 `/admin/stats` 支持时间入参 —— ⚠ 我们还没有，
+               所以这里扩的是**趋势**的档，标签也只能叫「趋势范围」。 -->
+          <button data-range="30d">30d</button>
+          <button data-range="365d">365d</button>
+        </span>
       </h3>
       <div class="body">
         <!-- 趋势图（对标 one-api/new-api 仪表盘的第一屏形态）：
@@ -589,11 +724,65 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
         <!-- 模型维度：每行一个模型，列 = 调用次数 / 成本系数。
              系数来自上游 /v3/config（1h 缓存），拿不到时整块降级成一句说明 —— 
              不显示 「0 次调用」这种会被误读成真实数据的空表格。 -->
-        <div id="statsModelsWrap" style="margin-top:14px;display:none">
-          <div class="dim" style="font-size:11px;letter-spacing:.4px;margin-bottom:6px">
-            模型明细 <span id="statsCatalogHint" style="text-transform:none"></span>
+        <!-- ⚠ 「模型明细」chips 已按用户要求**删除**（2026-10-18：「这个可以删除不要了」）。
+             原来这里是一个 `#statsModelsWrap` + `#statsModels` 的 chips 块，
+             展示每个模型的调用次数与成本倍率（`x2` / `x0.11` 那种）。
+             ⚠ 连带 `renderStatsModels(s)` 的**调用**也停了（见 renderStats 里那处）。
+             ⚠ 倍率信息因此不再显示 —— 若以后要它回来，恢复这段 HTML 与那行调用即可
+             （`renderStatsModels` 的函数本体**保留未删**，就是为了这一手）。 -->
+
+        <!-- ⚠⚠ **报表区**（2026-10-18 新增 · 借鉴 agent2api 的报表页形态，但**不引图表库**）——
+             它那边是 ECharts（report-charts.ts 61KB），我们照本项目已有的先例走：
+             ⚠ 上面那条趋势图就是**内联 SVG 零依赖**的，所以这里也用纯 CSS：
+               · Top 榜   → `div` 宽度当条形（`width: pct%`）
+               · 环形图   → `conic-gradient` 画环（不用 canvas、不用 svg 路径）
+             ⚠ 双栏是为了治"宽屏右侧一大片空"（在此之前这里全是单列堆叠）。
+                窄屏由 `.duo` 自动退化成一列，不需要写媒体查询。
+             ⚠ 数据来源：Top 榜用 `/admin/stats` 的 `by_uid` / `by_provider`（⚠ 目前只有**请求数**；
+                带 tokens 的富化版由子代理在补，接口一到就直接换，不动这里的结构）。
+             ⚠ 每个数字都带**口径**（"请求数"还是"tokens"写在标题里）—— 与全站"不写假话"一致。 -->
+        <div class="duo" id="statsReport" style="margin-top:16px">
+          <div class="panel">
+            <div class="panelhd">Top 账号 <span class="dim" style="font-weight:400">按请求数</span>
+              <span class="spacer"></span><span class="dim" id="statsTopHint" style="font-weight:400;font-size:11px"></span>
+            </div>
+            <div id="statsTopUid" class="toplist"></div>
           </div>
-          <div class="chips" id="statsModels"></div>
+          <div class="panel">
+            <div class="panelhd">上游占比 <span class="dim" style="font-weight:400">按请求数</span></div>
+            <div class="donutwrap">
+              <div id="statsDonut" class="donut"></div>
+              <div id="statsDonutLegend" class="legend"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2b) 活跃热力图（365 天）· 2026-10-18 照 agent2api 报表页那块加。
+         ⚠ 它是那份设计里**最有辨识度**的一块，而我们此前完全没有等价物。
+         数据：`/admin/stats/series?range=365d`（⚠ 后端已支持；桶起点是**本地自然日 00:00** ——
+         那是为它顺手修的 F2：原先 Truncate 会让桶起点落在本地 08:00、格子与日期错位）。
+         ⚠ 画法零依赖：`grid` 7 行（周一~周日）× N 列（周），每格一个小方块。 -->
+    <div class="boardsec">
+      <h3>活跃热力图 <span class="dim" style="font-weight:400;text-transform:none">近 365 天 · 按天 Token 用量着色（档位按本窗口峰值自动定）</span></h3>
+      <div class="body">
+        <div class="heatwrap">
+          <div class="heatdays"><span>一</span><span>三</span><span>五</span></div>
+          <div class="heatmain">
+            <div id="statsHeatMonths" class="heatmonths"></div>
+            <div id="statsHeat" class="heatgrid"></div>
+          </div>
+        </div>
+        <div class="heatfoot">
+          <span class="dim">Token</span>
+          <span class="heatcell lv0"></span><span class="dim">0</span>
+          <span class="heatcell lv1"></span><span class="dim" id="h1">—</span>
+          <span class="heatcell lv2"></span><span class="dim" id="h2">—</span>
+          <span class="heatcell lv3"></span><span class="dim" id="h3">—</span>
+          <span class="heatcell lv4"></span><span class="dim" id="h4">—</span>
+          <span class="spacer"></span>
+          <span class="dim">方格为**本地自然日**，无请求显示为空槽</span>
         </div>
       </div>
     </div>
@@ -3126,13 +3315,36 @@ let loginProvider = '';
   // admin 端点只认回环地址、不要求凭证，所以这里一度只有 Content-Type ——
   // 远程放开后漏掉它 = 每个标签页都 403「管理接口仅允许本机直连…」。
   async function admin(path, opts = {}) {
-    const r = await fetch(path, Object.assign({}, opts, {
-      headers: Object.assign({ 'Content-Type': 'application/json' }, adminHdr(), opts.headers || {}),
-    }));
+    const m = String(opts.method || 'GET').toUpperCase();
+    let r;
+    try {
+      r = await fetch(path, Object.assign({}, opts, {
+        headers: Object.assign({ 'Content-Type': 'application/json' }, adminHdr(), opts.headers || {}),
+      }));
+    } catch (e) {
+      // ⚠ 网络层失败（服务没起来 / 断连）原来也是**静默 throw**，而调用方普遍 `catch {}` 吞掉
+      //   ⇒ 用户点了按钮，屏幕上什么都不发生。这里统一播一次。
+      if (!opts.silent) toast(`${m} 失败：${(e && e.message) || e}`, true);
+      throw e;
+    }
     const txt = await r.text();
     let j = null;
     try { j = txt ? JSON.parse(txt) : null; } catch { /* 非 JSON */ }
-    if (!r.ok) throw new Error((j && j.error) || txt.slice(0, 200) || ('HTTP ' + r.status));
+    if (!r.ok) {
+      const msg = (j && j.error) || txt.slice(0, 200) || ('HTTP ' + r.status);
+      // ⚠⚠ 用户原话：「前端的**按钮点击之后提示、弹出**都重新看看，怎样效果好一点」。
+      //
+      // 实测根因：`admin()` 失败时**只 throw**，而调用方里有大量 `catch {}`（静默吞掉）
+      // ⇒ 点按钮**屏幕上毫无反应** —— 用户只会读成"卡住了 / 这功能坏了"。
+      //（同一个病在 `busyRun` 的注释里已经记过一次："6.9 秒内 DOM 完全没有变化"。）
+      //
+      // 为什么放在这一层统一播报：**一次覆盖全部调用点**。
+      // ⚠ 逐个函数去套 `busyRun` 那种做法**一定会漏** —— 我在删表格 `<br>` 上已经漏过两轮，
+      //   被用户当场指着表说"不符合要求"。放在这里则**之后新写的调用也自动有反馈**。
+      // ⚠ 自己已经有播报的调用点传 `{ silent: true }` 即可（不改变它的现有行为）。
+      if (!opts.silent) toast(`${m} 失败：${msg}`, true);
+      throw new Error(msg);
+    }
     return j;
   }
 
@@ -3510,7 +3722,7 @@ let loginProvider = '';
     const el = $('gtask');
     const tick = async () => {
       let t;
-      try { t = await admin('/admin/task'); } catch { return; }
+      try { t = await sharedGet('ep:/admin/task', () => admin('/admin/task')); } catch { return; }
       el.hidden = false;
       el.className = 'notice progress';
       if (t.running) {
@@ -4058,7 +4270,7 @@ let loginProvider = '';
   // 避免出现「这里点一下只改内存、那里保存改 config.json」两条写路径互相覆盖。
   async function loadSchedule() {
     let s;
-    try { s = await admin('/admin/schedule'); } catch { $('schInfo').textContent = '读取失败'; return; }
+    try { s = await sharedGet('ep:/admin/schedule', () => admin('/admin/schedule')); } catch { $('schInfo').textContent = '读取失败'; return; }
     const cd = s.next_in_sec > 0 ? `${Math.floor(s.next_in_sec / 3600)}h${Math.floor((s.next_in_sec % 3600) / 60)}m 后` : '—';
     const on = v => v ? '<span class="pill ok">已启用</span>' : '<span class="pill dim">已关闭</span>';
     // 统一 30 分钟扫描后没有整点时点槽位：next_tasks 恒空，时点恒 []。
@@ -4289,6 +4501,12 @@ let loginProvider = '';
   }
 
   function showPanel(idx) {
+    // ④ 「离开页签即停」：先把**正显示着**的那个上游面板的懒加载令牌失效，
+    // 再切过去。不叫停的话，切走的那个面板会在后台把当页剩下的块全补完 ——
+    // 用户看不到结果，而上游被白打一轮（用户明确要求「离开页签即停」）。
+    const leaving = navSections.find(s => s.classList.contains('active'));
+    if (leaving && leaving !== navSections[idx]) panelStopLazyOf(leaving);
+
     navSections.forEach((sec, i) => sec.classList.toggle('active', i === idx));
     $('nav').querySelectorAll('button[data-nav]').forEach(b =>
       b.classList.toggle('active', Number(b.dataset.nav) === idx));
@@ -4586,6 +4804,372 @@ let loginProvider = '';
   }
 
   // ──────────────────────────────────────────────────────────────────────
+  // 共享层：**缓存 + 懒加载**（lazyCache / lazyFill）
+  //
+  // # 用户的要求（原话）
+  //
+  //	「现在有关于所有的加载东西，前端显示的，都要有一个缓存，然后再加上
+  //	  懒加载，缓存和懒加载结合在一起实现，并且把这两个抽成共享层，
+  //	  用在这整个项目里去。」
+  //
+  // # 契约（**只这一处**；所有"先出缓存、再按需补"的地方都走它）
+  //
+  //	lazyCache.get(key)            → { val, updatedAt } | null（同步、纯内存）
+  //	lazyCache.set(key, val, at)   → 写入（at 缺省 = 现在）
+  //	lazyCache.merge(key, fn, at)  → 在旧值上跑 fn 得到新值
+  //	lazyCache.updatedAt(key)      → 毫秒时间戳（0 = 从没写过）
+  //	lazyCache.drop(key)           → 删掉一个键
+  //	lazyCache.bump(key)           → **让这个键上正在跑的那一轮 lazyFill 立刻停**
+  //	lazyCache.epochOf(key)        → 当前令牌
+  //
+  //	lazyFill({ key, host, uids|chunks, chunkSize, fetchChunk, onChunk, onIdle })
+  //	  ① 画缓存  —— 由调用点自己先 `lazyCache.get(key)` 画（必须**同步**拿到，
+  //	               所以这一层是纯内存、不做任何 IO）
+  //	  ② 分块补  —— uids 按 chunkSize 切块；前端**全局**在途块数 ≤ LAZY_MAX_INFLIGHT
+  //	  ③ 每块回来即 `onChunk(res, err, chunk)` —— 调用点 merge 进缓存 + 重画那一块
+  //	  ④ 离开即停 —— `lazyCache.bump(key)` 之后，循环在下一次判活时退出
+  //
+  // # ⚠ 三条必须记住的坑（都是踩过的）
+  //
+  //	1. 「还没查」与「查失败」是**两种**显示：前者是占位（后端 `stale=true`，
+  //	   前端画「正在读取…」），后者才是红标「查询失败」+ 后端原文 error。
+  //	   混起来会让用户把一个正在加载的正常号当成坏号。
+  //	2. **判活不许看显示类**。register-machine 那次用 `contains('show')` 判
+  //	   "面板还在不在"，而那个类名在这份 CSS 里恒假 ⇒ 懒加载一启动就中止，
+  //	   一行都不补。这里只看 **isConnected + 令牌**。
+  //	3. **在途请求上限必须是全局的**。上游实测 12 条并发就开始 502；而
+  //	   "每个调用点各带 1 条在途"会在多面板同时加载时叠加（tasks 与 invite
+  //	   在页面初始化时都会被拉一次），所以下面用的是一个**共享队列**。
+  // ──────────────────────────────────────────────────────────────────────
+
+  // LAZY_CHUNK 每块默认几个 uid。
+  //
+  // ⚠ 块**不是**"一次上游请求"：块内扇出在后端做（那边才是实测得出的并发上限）。
+  // 块大一点只是少几次本地 HTTP；真正决定上游压力的是后端那一个上限。
+  // ⚠⚠ 用户要求把并发提到 25（2026-10-18「性能太差了 提高并发数25个」）⇒
+  // 块大小同时提到 25（**一整页一块**）：块太小时后端那个并发上限根本用不上
+  //（一块 6 个 uid ⇒ 最多 6 个账号并行）。
+  // ⚠ 风险：25 个账号并行 × 每账号 2 次上游请求 = **50 条在途**，而实测 12 条就打 502
+  // ⇒ 若面板开始整列「查询失败」，把本常量连同 `panelFillConcurrency` /
+  //    `loomyPanelConcurrency` 一起退回 4/6 那一档（安全区）。
+  const LAZY_CHUNK = 25;
+
+  // LAZY_MAX_INFLIGHT 前端**全局**在途块数上限。
+  //
+  // ⚠ 回归的成因正是"前端自己叠并发"：旧模型每行一条请求、并发 6，而每行要
+  // 2 次上游请求 ⇒ 上游 12 条在途 ⇒ 502 ⇒ 整列「查询失败」（而手动单查同一个
+  // 账号是好的）。现在前端一次只发一块，扇出只发生在后端一处。
+  const LAZY_MAX_INFLIGHT = 1;
+
+  // ⚠⚠ **这一层缓存要落到磁盘（localStorage）** —— 用户的要求是「读缓存毫秒级」，
+  // 而只放内存做不到：内存缓存**刷新/重开页面就空了**，第一眼必然要等一次网络往返
+  //（实测 `?page=` 热 7~10ms、冷 144ms —— 服务端已经够快，问题在"前端每次都得重新要"）。
+  //
+  // ⇒ 落盘之后：**刷新/重开/切回来，第一眼直接画上次的内容（0 次请求）**，
+  //    然后再由后台把新的补上（`lazyFill` 那一步照常跑）。
+  //
+  // ⚠ 为什么只改 `get`/`set`/`drop` 三个点：其余方法（`merge`/`updatedAt`/`epochOf`/
+  //    `bump`/`keys`）都建在它们之上 ⇒ 从这一处落盘，整层就都有了。
+  // ⚠ 落盘失败**一律不抛**（隐私模式、配额满都会抛）：宁可不落盘，也不能让面板崩。
+  const lazyCache = (function () {
+    const mem = new Map();     // key → { val, updatedAt }
+    const epochs = new Map();  // key → 令牌（bump 用来叫停在跑的那一轮）
+    const LS_PREFIX = 'wb2api.pcache.';
+
+    // persist 失败时清掉本前缀的全部键 —— 只可能发生在"配额满"上，
+    // 而清掉旧的面板缓存是这里唯一正确的选择（它本来就是可再生数据）。
+    function persist(key, e) {
+      try {
+        localStorage.setItem(LS_PREFIX + key, JSON.stringify(e));
+      } catch (err) {
+        try {
+          const doomed = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.indexOf(LS_PREFIX) === 0) doomed.push(k);
+          }
+          doomed.forEach(k => localStorage.removeItem(k));
+        } catch (e2) { /* 隐私模式：连清理也做不了，就算了 */ }
+      }
+    }
+
+    // restore 惰性读盘：第一次 get 某个键时才去读 —— 打开页面时**不为没用到的键付代价**。
+    function restore(key) {
+      const hit = mem.get(key);
+      if (hit) return hit;
+      try {
+        const raw = localStorage.getItem(LS_PREFIX + key);
+        if (!raw) return null;
+        const e = JSON.parse(raw);
+        if (!e || typeof e !== 'object' || !('val' in e)) return null;
+        mem.set(key, e);
+        return e;
+      } catch (err) { return null; }
+    }
+
+    function get(key) { return restore(key); }
+    function set(key, val, at) {
+      const e = { val: val, updatedAt: Number(at) || Date.now() };
+      mem.set(key, e);
+      persist(key, e);
+      return e;
+    }
+    function merge(key, fn, at) {
+      const cur = restore(key);
+      return set(key, fn(cur ? cur.val : null), at);
+    }
+    function updatedAt(key) { const e = restore(key); return e ? e.updatedAt : 0; }
+    function drop(key) {
+      mem.delete(key);
+      try { localStorage.removeItem(LS_PREFIX + key); } catch (err) { /* 隐私模式 */ }
+    }
+    function epochOf(key) { return epochs.get(key) || 0; }
+    function bump(key) {
+      const n = epochOf(key) + 1;
+      epochs.set(key, n);
+      return n;
+    }
+    function keys() { return Array.from(mem.keys()); }
+
+    return { get, set, merge, updatedAt, drop, epochOf, bump, keys };
+  })();
+
+  // lazyInFlight / lazyWaiters 共享队列（见 LAZY_MAX_INFLIGHT 的说明）。
+  let lazyInFlight = 0;
+  const lazyWaiters = [];
+
+  function lazyAcquire() {
+    if (lazyInFlight < LAZY_MAX_INFLIGHT) { lazyInFlight++; return Promise.resolve(); }
+    return new Promise(res => lazyWaiters.push(res));
+  }
+
+  // lazyRelease 释放一个额度。**优先把额度直接交给排队的那个**（不递减）——
+  // 否则会出现"队列里有人等着、计数器却已归零"⇒ 后来者同时挤进来。
+  function lazyRelease() {
+    const next = lazyWaiters.shift();
+    if (next) { next(); return; }
+    lazyInFlight = Math.max(0, lazyInFlight - 1);
+  }
+
+  // lazyChunks 把一个列表切成小块。
+  function lazyChunks(list, size) {
+    const n = Math.max(1, Number(size) || LAZY_CHUNK);
+    const out = [];
+    for (let i = 0; i < list.length; i += n) out.push(list.slice(i, i + n));
+    return out;
+  }
+
+  // lazyFill 缓存优先 + 分块懒加载（契约见本段开头）。
+  //
+  //	fetchChunk(chunk) → Promise<任意>（块里的第一个 await 才是真请求）
+  //	onChunk(res, err, chunk)  每块回来调一次；err 是这块**请求本身**失败的原因
+  //	onIdle()                  补完 / 被叫停时各调一次
+  //
+  // ⚠ 它返回的 Promise 会等到所有块跑完或被停，但调用点**不必** await ——
+  // 不 await 才是"懒"：页面先画出来，补数在后台逐块贴上。
+  async function lazyFill(o) {
+    const key = o.key;
+    const host = o.host;
+    const ep = lazyCache.bump(key);   // 新一轮 ⇒ 上一轮自然失效（换页 / 换筛选）
+    const chunks = o.chunks || lazyChunks((o.uids || []).filter(Boolean), o.chunkSize);
+
+    // alive 判活：只看**令牌 + 节点是否还在文档里**。绝不看显示类（见坑 2）。
+    const alive = () => lazyCache.epochOf(key) === ep && (!host || host.isConnected);
+
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        if (!alive()) return;
+        const at = next++;
+        if (at >= chunks.length) return;
+        await lazyAcquire();
+        let res = null, err = '';
+        try {
+          res = await o.fetchChunk(chunks[at]);
+        } catch (e) {
+          err = (e && e.message) || String(e);
+        } finally {
+          lazyRelease();
+        }
+        if (!alive()) return;
+        if (o.onChunk) o.onChunk(res, err, chunks[at]);
+      }
+    };
+    const n = Math.min(LAZY_MAX_INFLIGHT, chunks.length);
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    if (o.onIdle) o.onIdle();
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // panelPolls：**「后端补好了，前端怎么自己显示出来」**的兜底（用户实测反馈）
+  //
+  // # 用户的原话
+  //
+  //	「我发现这些加载完毕了，不会自动同步前端……要不就是你自动更新前端，
+  //	  加载一个更新一个，或者说用一个标记记录你是否正在加载，如果正在加载，
+  //	  然后按照时间计时，1 秒钟或者 2 秒钟就刷新一次前端。」
+  //
+  // # 为什么要它（根因）
+  //
+  // 面板的行替换**只在"某一块回来"时发生**。实测：后端缓存里那 19 行**全有数据**，
+  // 而页面还停在「正在读取…」—— 某一块的请求没回来 / 回来晚了，那一行就**永远**是占位。
+  //
+  // # 契约（两条，别改坏）
+  //
+  //	1. 判据是**"这一页还有几行占位"**，与"哪一块回来"无关 ⇒ 不会漏行；
+  //	2. ⚠ 重读**只调 `?page=`**（服务端只读缓存、零上游、毫秒级），
+  //	   **绝不**回头调整个加载函数 —— 那会每拍 `bump` 一次换代令牌，
+  //	   把正在跑的 `lazyFill` 补数一次次判死，永远补不完。
+  // ──────────────────────────────────────────────────────────────────────
+  // sharedGet：**同一个端点只发一次**的取数器 —— 「统一读缓存 + 懒加载」的唯一入口
+  //
+  // # 用户的要求（2026-10-18）
+  //
+  //	「将前端**所有的类似实现**抽共享层，然后**统一读缓存、懒加载**」
+  //
+  // # 为什么必须有它（实测，不是推测）
+  //
+  // 前端现在有 **67 处**各写各的 `await admin(...)` / `await api(...)`，而**同一个端点被反复取**：
+  //	· `/admin/accounts` —— 一次 `refresh()` 里被调 **2 次**；
+  //	· `/v1/models`     —— 主渲染与「刷新」按钮各调 **1 次**；
+  // ⚠ 这与之前 `/admin/stats` 那个「一次 refresh 调两遍、白等 14 秒」是**同一个病**。
+  //
+  // # 契约（三条，别改坏）
+  //
+  //	1. **单飞**：同一个 key 正在飞 ⇒ 后来者拿到**同一个 Promise**，不重复发请求；
+  //	2. **缓存**：命中且未过期 ⇒ **立刻返回缓存（0 请求）**；⚠ 缓存是落盘的
+  //	   （借 `lazyCache`，它已改写到 localStorage）⇒ 刷新/重开页面第一眼也是 0 请求；
+  //	3. **过期先给旧的、后台再刷**（`sharedGetStale`）：⚠ 绝不"等新数据到了才渲染"——
+  //	   那正是 `/admin/stats` 卡住首屏 7 秒的原因。
+  //
+  // ⚠ 只用于 **GET 语义**的取数。写操作照旧直接调 `admin`/`api`（不能被缓存）。
+  // ⚠ 失败也要**清掉在飞标记**：否则一次失败会把那个 key 永久卡住，后来者永远拿到那个
+  //    已失败的 Promise（表现为"这个面板再也刷不出来"）。
+  const SHARED_TTL_MS = 30 * 1000;
+  const sharedInflight = new Map();
+
+  function sharedGet(key, fetcher, ttlMs) {
+    const ttl = Number(ttlMs) || SHARED_TTL_MS;
+    const hit = lazyCache.get(key);
+    if (hit && (Date.now() - hit.updatedAt) < ttl) return Promise.resolve(hit.val);  // ① 命中：0 请求
+    const flying = sharedInflight.get(key);
+    if (flying) return flying;                                                      // ② 单飞
+    const p = Promise.resolve()
+      .then(fetcher)
+      .then(d => { lazyCache.set(key, d); sharedInflight.delete(key); return d; })
+      .catch(e => { sharedInflight.delete(key); throw e; });                        // ⚠ 失败清标记
+    sharedInflight.set(key, p);
+    return p;
+  }
+
+  // sharedGetStale 给"首屏绝不能等"的地方用：**先返回旧值（stale=true），后台再去刷**。
+  // 没缓存时才退化成一次真取（那时没有旧值可给）。返回 { val, stale }。
+  function sharedGetStale(key, fetcher, ttlMs) {
+    const ttl = Number(ttlMs) || SHARED_TTL_MS;
+    const hit = lazyCache.get(key);
+    if (hit && (Date.now() - hit.updatedAt) < ttl) return Promise.resolve({ val: hit.val, stale: false });
+    if (!hit) return sharedGet(key, fetcher, ttl).then(v => ({ val: v, stale: false }));
+    if (!sharedInflight.has(key)) {                     // 有旧值但过期 ⇒ 后台刷，不 await
+      const p = Promise.resolve().then(fetcher)
+        .then(d => { lazyCache.set(key, d); sharedInflight.delete(key); })
+        .catch(() => { sharedInflight.delete(key); });
+      sharedInflight.set(key, p);
+    }
+    return Promise.resolve({ val: hit.val, stale: true });
+  }
+
+  const panelPolls = {};
+
+  // schedulePanelPoll 只要 pendingCount() 还 > 0，就每 1.5 秒跑一次 reload。
+  // ⚠ 同一个 key 只允许一个表；占位清空 / host 离开文档 ⇒ 立刻停表（不后台空转）。
+  function schedulePanelPoll(key, host, pendingCount, reload) {
+    if (panelPolls[key]) return;
+    const timer = setInterval(async () => {
+      if (panelPolls[key] !== timer) { clearInterval(timer); return; }
+      if (!host || !host.isConnected) { clearInterval(timer); delete panelPolls[key]; return; }
+      if (pendingCount() <= 0) { clearInterval(timer); delete panelPolls[key]; return; }
+      try { await reload(); } catch (e) { /* 下一拍再试 */ }
+    }, 1500);
+    panelPolls[key] = timer;
+  }
+
+  // stopPanelPoll 换页 / 切面板时叫停（与 lazyCache 的换代同一时机）。
+  function stopPanelPoll(key) {
+    const t = panelPolls[key];
+    if (t) { clearInterval(t); delete panelPolls[key]; }
+  }
+
+  // parseServerTime 后端的 `updated_at`（RFC3339）→ 毫秒时间戳。
+  // 解不出来就当作"现在" —— 宁可说"刚更新过"，也别显示成 1970。
+  // hideEmptyCols **整列都是空/占位 ⇒ 把这一列藏掉**（钉钉 / 飞书表格的同款默认做法）。
+  //
+  // 用户的要求：「宽度可以用滑动条，也可以**显示部分字段**（如果字段太宽）」。
+  // 实测最直接的空间浪费就是它：Loomy 新手任务页的「待完成」列**整列都是 `—`**
+  //（因为那 44 个号都已全部完成，没有待办项）⇒ 白白占掉一整列的宽度。
+  //
+  // ⚠ 三条保险（缺一条就会藏错列）：
+  //	1. 判据是"**所有行**都已空" —— 只要有一行有真值就保留
+  //	   （像「余额」列里有几行是 `—`，那列**不能**藏）；
+  //	2. 「空」= 去掉空白与 `— – - …` 之后什么都不剩 —— 排除"只有占位符"的格子；
+  //	3. **少于 3 行不做判断** —— 一两行的样本不足以说明"这列一直是空的"，
+  //	   而且那种情况下表格本来也没占多少宽度。
+  function hideEmptyCols(table) {
+    if (!table) return;
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    if (rows.length < 3 || !ths.length) return;
+    // ⚠⚠ **前提（必须的，否则会藏错列）**：每一行的单元格数必须与表头列数**完全一致**。
+    //   为什么要这条：本函数按**下标**把 `ths[i]` 与 `r.children[i]` 对齐，
+    //   而表里只要有 **`colspan` 行**（成长计划/猫猫旅行都有"整行跨列"的那种），
+    //   下标就会错位 ⇒ 会把**有数据的列表头**判成"整列都空"而藏掉。
+    //
+    //   ⚠ 这是**实测踩到的回归**：用户发来截图 —— 表头从某列起**一大片空白**，
+    //     而那一列的数据明明还在行里。就是他这一句「列字段没东西呢？？」。
+    //   宁可**整表不处理**，也不能按错位的下标去藏。
+    if (rows.some(r => r.children.length !== ths.length)) return;
+    for (let i = ths.length - 1; i >= 0; i--) {
+      const isEmpty = rows.every(r => {
+        const td = r.children[i];
+        if (!td) return true;
+        return (td.textContent || '').replace(/[\s…—–\-]/g, '') === '';
+      });
+      if (!isEmpty) continue;
+      // ⚠ 用 inline style 而不是加 class：这些单元格是 innerHTML 一次性写进去的，
+      //   加 class 要再扫一遍且和"列设置"之类未来功能容易打架。
+      ths[i].style.display = 'none';
+      rows.forEach(r => { const td = r.children[i]; if (td) td.style.display = 'none'; });
+    }
+  }
+
+  // hideZeroTotals **把"合计类且值为 0"的卡片藏掉**（与 hideEmptyCols 同一个思路）。
+  //
+  // 用户的要求是"少空白、合理利用空间"。实测最典型的浪费：成长计划页的
+  // 「可领合计 **0 项 · +0**」—— 值是 0 时这张卡没有任何信息量，却和白占一格。
+  //
+  // ⚠⚠ 判据必须保守，两条缺一不可：
+  //	1. 卡片**名字里含「合计」** —— 只看这一类。⚠ 绝不能一刀切"值为 0 就藏"：
+  //	   「账号数 **0**」是**最重要**的信息（配了上游却没账号），藏掉就是掩盖故障；
+  //	2. 值里**除了 0、空格、`+`、`项`、`—` 之外什么都不剩** ——
+  //	   于是 `0 项 · +0` 会被藏，而 `0 / 78`、`6 任务 · +600` 不会。
+  function hideZeroTotals(root) {
+    const host = root || document;
+    host.querySelectorAll('.cards .card').forEach(c => {
+      const k = (c.querySelector('.k') || {}).textContent || '';
+      if (k.indexOf('合计') < 0) return;                       // ⚠ 只看合计类（见上面第 1 条）
+      const v = ((c.querySelector('.v') || {}).textContent || '').trim();
+      if (v === '') { c.style.display = 'none'; return; }
+      const stripped = v.replace(/[0\s+项·—–\-]/g, '');
+      c.style.display = stripped === '' ? 'none' : '';
+    });
+  }
+
+  function parseServerTime(s) {
+    if (!s) return Date.now();
+    const t = Date.parse(s);
+    return isNaN(t) ? Date.now() : t;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
   // 面板：**缓存优先 + 分页 25 行 + 懒加载当页**
   //
   // # 用户的设计（原话）
@@ -4605,11 +5189,12 @@ let loginProvider = '';
   // 没显示出来的页也查一遍。
   // ──────────────────────────────────────────────────────────────────────
 
-  // PANEL_ROW_CONCURRENCY 逐行刷新的并发。
-  //
-  // ⚠ 为什么是 6：实测 **12 条并发**打同一积分端点，上游就开始返回 502。
-  // 它同时是**上游在途请求数的上限** —— 比"后端一次扇出 35 个"温和得多。
-  const PANEL_ROW_CONCURRENCY = 6;
+  // ⚠ 这里曾经有一个 `PANEL_ROW_CONCURRENCY = 6`（前端逐行刷新时的并发）。
+  // 它已经**删掉**：前端不再逐行发请求，在途上限只由共享层的
+  // `LAZY_MAX_INFLIGHT` 与后端的分块并发（`panelFillConcurrency`）决定。
+  // 留着它最危险的地方不是死代码，而是**误导**：谁下次想加快补数，
+  // 会顺手把它调大 —— 而"前端 6 并发 × 每行 2 次上游 = 12 条在途"正是
+  // 整列「查询失败」的成因（上游实测 12 条并发就开始 502）。
 
   // panelPageState 每个面板当前停在第几页。
   //
@@ -4649,33 +5234,67 @@ let loginProvider = '';
       '</tr>';
   }
 
-  // panelFillRows 对**当页的 uid** 逐行刷新并替换那一行。
+  // panelLazyKey 一个面板的**令牌键**（共享层判活用；换页 / 离开页签时 bump）。
+  function panelLazyKey(providerId, cap) { return 'panel/' + providerId + '/' + cap; }
+
+  // panelCacheKey 一个面板**某一页**的缓存键。
+  function panelCacheKey(providerId, cap, page) {
+    return panelLazyKey(providerId, cap) + '/p' + Number(page || 1);
+  }
+
+  // lazyCachePutPage 把一页回执写进共享层缓存，并记下**数据**的时间戳。
   //
-  // rowFor(d, one) 返回 `<tr>` 开头的整行；d 是整份回执（行渲染要用它拿 defs
-  // 之类与账号无关的公共部分），one 是这个账号那一项。
-  async function panelFillRows(cap, uids, getPath, rowFor, onRow) {
-    if (!uids.length) return;
-    let next = 0;
-    const worker = async () => {
-      while (next < uids.length) {
-        const uid = uids[next++];
-        let html;
-        try {
-          const sep = getPath.indexOf('?') >= 0 ? '&' : '?';
-          const d = await admin(getPath + sep + 'uid=' + encodeURIComponent(uid));
-          const one = (d && Array.isArray(d.accounts) && d.accounts.length)
-            ? d.accounts[0] : { uid: uid };
-          html = withRowId(rowFor(d, one), cap, uid);
-        } catch (e) {
-          html = panelRowErr(cap, uid, '', e.message);
-        }
-        const tr = document.getElementById(panelRowId(cap, uid));
-        if (tr) tr.outerHTML = html;
-        if (onRow) onRow(uid);
-      }
-    };
-    const n = Math.min(PANEL_ROW_CONCURRENCY, uids.length);
-    await Promise.all(Array.from({ length: n }, () => worker()));
+  // ⚠ 时间戳随值一起存（`__at`）：重画时不该再去解析一次字符串，
+  // 更不该拿"这次请求的时刻"冒充"数据的时间"（那会让「更新于 …」说谎）。
+  function lazyCachePutPage(cacheKey, d) {
+    const at = parseServerTime(d && d.updated_at);
+    const val = Object.assign({}, d || {}, { __at: at });
+    lazyCache.set(cacheKey, val, at);
+    return val;
+  }
+
+  // mergePageRows 把新到的一小撮行按 uid 合并进**这一页的缓存**。
+  //
+  // ⚠ 不整页替换：块只带回它自己那几行，整页替换会把还没补的行打回"还没查"。
+  function mergePageRows(cacheKey, rows, at) {
+    const cur = lazyCache.get(cacheKey);
+    if (!cur || !cur.val) return;
+    const byUID = new Map((rows || []).map(a => [a.uid, a]));
+    const val = Object.assign({}, cur.val);
+    val.accounts = (cur.val.accounts || []).map(a => byUID.get(a.uid) || a);
+    lazyCache.set(cacheKey, val, Math.max(cur.updatedAt, Number(at) || 0));
+  }
+
+  // panelChunkPath 一个块一条请求的路径。
+  //
+  // ⚠ **不再是"一行一条"**（`?uid=`）：前端自己叠并发正是回归的成因
+  // （见 LAZY_MAX_INFLIGHT 与 adminpoints.go 的 panelFillConcurrency）。
+  function panelChunkPath(getPath, chunk) {
+    const sep = getPath.indexOf('?') >= 0 ? '&' : '?';
+    return getPath + sep + 'uids=' + encodeURIComponent(chunk.join(','));
+  }
+
+  // panelPatch 把一块回执补齐成"这一块里每个 uid 都有一行"。
+  //
+  // ⚠ 为什么必须补齐：块里少一个 uid 而前端什么都不画，那一行就会**永远停在
+  // 「正在读取…」**（表现得像卡住）。补成 ok=false 才是实话 —— 而且它与
+  // 「还没查」仍然是**两种**显示（见共享层的坑 1）。
+  function panelPatch(chunk, accts, err) {
+    const byUID = new Map();
+    (accts || []).forEach(a => { if (a && a.uid) byUID.set(a.uid, a); });
+    return (chunk || []).map(uid => byUID.get(uid) ||
+      { uid: uid, ok: false, error: err || '后端没有返回这一行' });
+  }
+
+  // panelStopLazyOf 让某个**正在显示的面板**上跑着的那一轮懒加载停下来。
+  //
+  // 由 showPanel 在切走时调用（用户要求「离开页签即停」）：不叫停的话，
+  // 切走的那个面板会在后台把当页剩下的块全补完 —— 用户看不到，而上游被白打。
+  function panelStopLazyOf(sec) {
+    if (!sec || !sec.dataset || !sec.dataset.provider) return;
+    const pid = sec.dataset.provider;
+    if (sec.dataset.cap) { lazyCache.bump(panelLazyKey(pid, sec.dataset.cap)); return; }
+    for (const c of panelCapsOf(pid)) lazyCache.bump(panelLazyKey(pid, c));
   }
 
   // panelPagerHTML 分页条（单页时不显示按钮，只报总数）。
@@ -4746,64 +5365,72 @@ let loginProvider = '';
     const k = panelPageKey(providerId, 'tasks');
     if (page == null) page = panelPageState[k] || 1;
 
-    // ① 取当页（服务端只读缓存 ⇒ 瞬时）。
-    let d;
-    try {
-      d = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
-    } catch (e) {
-      host.innerHTML = `<div class="gbad">任务查询失败：${esc(e.message)}</div>`;
-      return;
-    }
-    const defs = Array.isArray(d.defs) ? d.defs : [];
-    const labelOf = (kk) => { const t = defs.find(x => x.key === kk); return t ? t.label : kk; };
-    const accts = Array.isArray(d.accounts) ? d.accounts : [];
-    const pages = Number(d.pages) || 1;
-    const totalN = Number(d.total) || accts.length;
-    page = Number(d.page) || page;
-    panelPageState[k] = page;
+    // 共享层的两个键：**令牌键**（判活 / 叫停）与**页缓存键**（数据）。
+    const lazyKey = panelLazyKey(providerId, 'tasks');
+    let cacheKey = panelCacheKey(providerId, 'tasks', page);
 
-    if (!totalN) {
-      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
-      return;
-    }
-
-    // ② 立刻渲染。**占位行不计数**（见下面 sum 的说明）。
+    // ── 状态先声明 ─────────────────────────────────────────────────────
+    //
+    // ⚠ 必须排在**缓存那一笔渲染之前**：下面的 ① 是本次调用里最早的渲染，
+    // 那时这些绑定若还在 TDZ 里，整块面板会直接抛异常（一片空白）。
+    let defs = [];
     const sum = { earned: 0, max: 0, pending: 0 };
+    let totalN = 0, pagesNow = 1, serverAt = 0, stale = [];
+    const labelOf = (kk) => { const t = defs.find(x => x.key === kk); return t ? t.label : kk; };
+
     const rowHTML = (a) => {
       const pct = a.total ? Math.round((a.done / a.total) * 100) : 0;
       const pending = (a.pending || []).map(kk =>
         `<span class="pill dim" title="${esc(kk)}">${esc(labelOf(kk))}</span>`).join(' ');
-      const st = `<span class="pill ${a.done >= a.total ? 'ok' : 'warn'}">${a.done}/${a.total}</span>`;
+      // ⚠ 进度列**合成一行**（原来是 `8/8` 一行 + `100%` 另起一行 ⇒ 每行白多出约 20px，
+      //   一屏十几行就是半屏空白）。用户要求"高度也要紧凑" ⇒ 百分比改行内小字。
+      const st = `<span class="pill ${a.done >= a.total ? 'ok' : 'warn'}">${a.done}/${a.total}</span>`
+        + `<span class="dim" style="font-size:11px;margin-left:6px">${pct}%</span>`;
       const btn = (a.pending && a.pending.length)
         ? `<button data-ltask="${esc(a.uid)}" data-lpath="${esc(autoOne)}">一键完成（${a.pending.length}）</button>`
         : '<span class="dim" style="font-size:11px">已全部完成</span>';
       return `<tr>
         <td class="mono dim" title="${esc(a.uid)}">${esc((a.uid || '').slice(0, 8))}…</td>
         <td>${esc(a.nickname || '—')}</td>
-        <td>${st}<div class="dim" style="font-size:11px">${pct}%</div></td>
+        <td>${st}</td>
         <td class="mono">${esc(String(a.earned || 0))}/${esc(String(a.max || 0))}</td>
         <td class="mono">${a.balance ? esc(String(a.balance)) : '<span class="dim">—</span>'}</td>
         <td style="max-width:320px">${pending || '<span class="dim">—</span>'}</td>
         <td style="white-space:nowrap">${btn}</td>
       </tr>`;
     };
-    const failRow = (a) => `<tr>
-      <td class="mono dim" title="${esc(a.uid || '')}">${esc((a.uid || '').slice(0, 8))}…</td>
-      <td>${esc(a.nickname || '—')}</td>
-      <td><span class="pill err" title="${esc(a.error || '')}">查询失败</span></td>
-      <td colspan="99"></td></tr>`;
-    const body = accts.map(a => {
-      if (a.stale) return panelRowLoading('tasks', a.uid, a.nickname, 7);
-      if (!a.ok) return withRowId(failRow(a), 'tasks', a.uid);
-      // ⚠ **只有真数据才计入汇总**；占位行（stale）不计 —— 于是"刷新完成后
-      // 的数字"就是"缓存数字 + 新到的数字"，不需要再做一次减法（那正是
-      // 我第一次写这版时算错的地方：重复累加会得到翻倍的分数）。
-      sum.earned += (a.earned || 0);
-      sum.max += (a.max || 0);
-      sum.pending += (a.pending || []).length;
-      return withRowId(rowHTML(a), 'tasks', a.uid);
-    }).join('');
-    const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
+
+    const paintSum = (done, total) => {
+      const el = document.getElementById(`ltask-sum-${providerId}`);
+      if (el) {
+        el.textContent = `合计已得 ${sum.earned} / ${sum.max} 分 · 还有 ${sum.pending} 项待完成`;
+      }
+      panelUpdatedHint(`ltask-upd-${providerId}`, serverAt, done, total);
+    };
+
+    // renderPage 画一整页 —— **缓存与新鲜数据走同一条路**（这是"缓存优先"
+    // 能成立的前提：缓存里存的就是同一个回执形状）。
+    const renderPage = (d) => {
+      if (Array.isArray(d.defs) && d.defs.length) defs = d.defs;
+      const accts = Array.isArray(d.accounts) ? d.accounts : [];
+      pagesNow = Number(d.pages) || 1;
+      totalN = Number(d.total) || accts.length;
+      page = Number(d.page) || page;
+      panelPageState[k] = page;
+      serverAt = Number(d.__at) || serverAt;
+      // ⚠ 汇总**每次重画都从零重算**：只有真数据计入（占位行 stale 与失败行
+      // 都不计）。于是"刷新完成后的数字"就是"缓存数字 + 新到的数字"，不需要
+      // 再做一次减法（第一版在这里算错过：重复累加会得到翻倍的分数）。
+      sum.earned = 0; sum.max = 0; sum.pending = 0;
+      const body = accts.map(a => {
+        if (a.stale) return panelRowLoading('tasks', a.uid, a.nickname, 7);
+        if (!a.ok) return panelRowErr('tasks', a.uid, a.nickname, a.error || '查询失败');
+        sum.earned += (a.earned || 0);
+        sum.max += (a.max || 0);
+        sum.pending += (a.pending || []).length;
+        return withRowId(rowHTML(a), 'tasks', a.uid);
+      }).join('');
+      const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
       <button data-ltask-all="${esc(providerId)}" data-lpath="${esc(autoAll)}">一键完成全部账号</button>
       <span data-lpager="tasks" data-ltotal="${esc(String(totalN))}"></span>
       <span class="dim" style="font-size:12px" id="ltask-sum-${esc(providerId)}"></span>
@@ -4811,33 +5438,84 @@ let loginProvider = '';
       <span class="spacer" style="flex:1"></span>
       <span class="dim" style="font-size:11px">任务是一次性的：点一次入账一次，已完成的不再重复发分</span>
     </div>`;
-    host.innerHTML = head + `<table class="accttable"><thead><tr>
+      host.innerHTML = head + `<table class="accttable"><thead><tr>
       <th>UID</th><th>昵称</th><th>进度</th><th>已得积分</th><th>余额</th><th>待完成</th><th>操作</th>
     </tr></thead><tbody>${body}</tbody></table>`;
-    panelBindPager(host, 'tasks', page, pages, (n) => loadLoomyTasks(providerId, n));
-
-    const paintSum = (done, total) => {
-      const el = document.getElementById(`ltask-sum-${providerId}`);
-      if (el) {
-        el.textContent = `合计已得 ${sum.earned} / ${sum.max} 分 · 还有 ${sum.pending} 项待完成`;
-      }
-      panelUpdatedHint(`ltask-upd-${providerId}`, d.updated_at, done, total);
+      hideEmptyCols(host.querySelector('table'));
+      panelBindPager(host, 'tasks', page, pagesNow, (n) => loadLoomyTasks(providerId, n));
+      stale = accts.filter(a => a.stale).map(a => a.uid).filter(Boolean);
+      paintSum(0, stale.length);
     };
-    paintSum(0, accts.length);
 
-    // ③ 懒加载当页：只处理**占位行**（已缓存的行不用再查，刷新一次就够）。
-    const stale = accts.filter(a => a.stale).map(a => a.uid).filter(Boolean);
-    let done = 0;
-    await panelFillRows('tasks', stale, getPath, (dd, one) => {
-      if (Array.isArray(dd.defs) && dd.defs.length && !defs.length) defs.push(...dd.defs);
-      if (one && one.ok) {
-        sum.earned += (one.earned || 0);
-        sum.max += (one.max || 0);
-        sum.pending += (one.pending || []).length;
-      }
-      return (one && one.ok) ? rowHTML(one) : failRow(one);
-    }, () => { done++; paintSum(done, stale.length); });
-    if (stale.length) paintSum(stale.length, stale.length);
+    // ① 先画缓存（秒出）—— 打开页面 / 翻回上一页时**第一眼**就有数据。
+    const hit = lazyCache.get(cacheKey);
+    if (hit && hit.val) renderPage(hit.val);
+
+    // ② 再要一次"当页骨架"：服务端 `?page=` **只读缓存、零上游请求** ⇒ 瞬时。
+    //    它带回当页哪些行有缓存、哪些是占位（stale）。
+    let fresh = null;
+    try {
+      fresh = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+    } catch (e) {
+      if (!hit) { host.innerHTML = `<div class="gbad">任务查询失败：${esc(e.message)}</div>`; return; }
+      // 有缓存就继续用缓存：一次"刷新失败"不该把已经显示出来的数据抹掉。
+    }
+    if (fresh) {
+      const p2 = Number(fresh.page) || page;
+      if (p2 !== page) { page = p2; cacheKey = panelCacheKey(providerId, 'tasks', page); }
+      renderPage(lazyCachePutPage(cacheKey, fresh));
+    }
+
+    if (!totalN) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    if (!stale.length) return;
+
+    // ③ 懒加载当页缺的行 —— **一个块一条请求**（共享层；块内扇出在后端）。
+    //
+    // ⚠ 只补**占位行**：已经有过缓存的行不再重查，一次打开对上游只打一轮。
+    let doneN = 0;
+    lazyFill({
+      key: lazyKey,
+      host: host,
+      uids: stale,
+      fetchChunk: (chunk) => admin(panelChunkPath(getPath, chunk)),
+      onChunk: (res, err, chunk) => {
+        const accts = (res && Array.isArray(res.accounts)) ? res.accounts : [];
+        if (Array.isArray(res && res.defs) && res.defs.length) defs = res.defs;
+        const patch = panelPatch(chunk, accts, err);
+        // 先合并进缓存，再重画这一块 —— 顺序反了的话"重画那一刻缓存还是旧的"。
+        mergePageRows(cacheKey, patch, parseServerTime(res && res.updated_at));
+        for (const a of patch) {
+          const tr = document.getElementById(panelRowId('tasks', a.uid));
+          const html = a.ok ? withRowId(rowHTML(a), 'tasks', a.uid)
+                            : panelRowErr('tasks', a.uid, a.nickname, a.error || '查询失败');
+          if (tr) tr.outerHTML = html;
+          if (a.ok) {
+            sum.earned += (a.earned || 0);
+            sum.max += (a.max || 0);
+            sum.pending += (a.pending || []).length;
+          }
+        }
+        doneN += patch.length;
+        serverAt = Math.max(serverAt, parseServerTime(res && res.updated_at));
+        paintSum(doneN, stale.length);
+      },
+    });
+
+    // ⚠⚠ **补完之后还要把结果显示出来**（用户实测反馈：后端补好了、前端不自己同步）。
+    //
+    // 行替换只发生在"某一块回来"时；某块没回来，那一行就永远停在「正在读取…」。
+    // ⇒ 挂一个与"哪一块回来"无关的兜底：还有占位行就每 1.5 秒重读一次 `?page=`
+    //    （服务端只读缓存、零上游、毫秒级），把缓存里的新数据画出来。
+    // ⚠ **只读页、不重跑整个加载** —— 否则每拍换代令牌会把上面那个 lazyFill 判死，
+    //    补数就永远补不完了（这条是本文件里 `lazyFill` 的换代语义决定的）。
+    // ⚠ 两个面板（tasks / invite）这段代码逐字相同、变量名也同名，改一处要改两处。
+    schedulePanelPoll(lazyKey, host, () => stale.length, async () => {
+      const d = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+      renderPage(lazyCachePutPage(cacheKey, d));
+    });
   }
   async function loadLoomyInvite(providerId, page) {
     const host = panelSkeleton(providerId, 'invite');
@@ -4863,25 +5541,14 @@ let loginProvider = '';
     const k = panelPageKey(providerId, 'invite');
     if (page == null) page = panelPageState[k] || 1;
 
-    let d;
-    try {
-      d = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
-    } catch (e) {
-      host.innerHTML = `<div class="gbad">邀请码查询失败：${esc(e.message)}</div>`;
-      return;
-    }
-    const accts = Array.isArray(d.accounts) ? d.accounts : [];
-    const pages = Number(d.pages) || 1;
-    const totalN = Number(d.total) || accts.length;
-    page = Number(d.page) || page;
-    panelPageState[k] = page;
+    // 共享层的两个键（见 loadLoomyTasks 里的同一说明）。
+    const lazyKey = panelLazyKey(providerId, 'invite');
+    let cacheKey = panelCacheKey(providerId, 'invite', page);
 
-    if (!totalN) {
-      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
-      return;
-    }
-
+    // ⚠ 状态先声明：① 的缓存渲染是本次调用里最早的一次渲染（TDZ 会炸整块面板）。
     const sum = { activated: 0, known: 0 };
+    let totalN = 0, pagesNow = 1, serverAt = 0, stale = [];
+
     const rowHTML = (a) => {
       const st = a.activated
         ? `<span class="pill ok">已绑定${a.applied ? ' ' + esc(a.applied) : ''}</span>`
@@ -4913,51 +5580,111 @@ let loginProvider = '';
         <td style="white-space:nowrap">${ops}</td>
       </tr>`;
     };
-    const failRow = (a) => `<tr>
-      <td class="mono dim" title="${esc(a.uid || '')}">${esc((a.uid || '').slice(0, 8))}…</td>
-      <td>${esc(a.nickname || '—')}</td>
-      <td><span class="pill err" title="${esc(a.error || '')}">查询失败</span></td>
-      <td colspan="99"></td></tr>`;
-
-    const body = accts.map(a => {
-      if (a.stale) return panelRowLoading('invite', a.uid, a.nickname, 6);
-      if (!a.ok) return withRowId(failRow(a), 'invite', a.uid);
-      // 只有真数据计入汇总（占位行不计，见 loadLoomyTasks 里的同一说明）。
-      sum.known++;
-      if (a.activated) sum.activated++;
-      return withRowId(rowHTML(a), 'invite', a.uid);
-    }).join('');
-    const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
-      <span data-lpager="invite" data-ltotal="${esc(String(totalN))}"></span>
-      <span class="dim" style="font-size:12px" id="linv-sum-${esc(providerId)}"></span>
-      <span class="dim" style="font-size:11px" id="linv-upd-${esc(providerId)}"></span>
-      <span class="spacer" style="flex:1"></span>
-      <span class="dim" style="font-size:11px">邀请码实测 6 位（形如 E3HRN8），每个码只能用一次（maxUses=1）；绑定是双向奖励。⚠ 「我生成的码」是发给**别人**用的，不能用来绑自己 —— 绑自己请填**其他账号**的码</span>
-    </div>`;
-    host.innerHTML = head + `<table class="accttable"><thead><tr>
-      <th>UID</th><th>昵称</th><th>激活状态</th><th>余额</th><th>我生成的码</th><th>绑定别人的码</th>
-    </tr></thead><tbody>${body}</tbody></table>`;
-    panelBindPager(host, 'invite', page, pages, (n) => loadLoomyInvite(providerId, n));
 
     const paintSum = (done, total) => {
       const el = document.getElementById(`linv-sum-${providerId}`);
       if (el) {
         el.textContent = `共 ${totalN} 个账号 · 已读 ${sum.known} · 已绑定 ${sum.activated}`;
       }
-      panelUpdatedHint(`linv-upd-${providerId}`, d.updated_at, done, total);
+      panelUpdatedHint(`linv-upd-${providerId}`, serverAt, done, total);
     };
-    paintSum(0, accts.length);
 
-    const stale = accts.filter(a => a.stale).map(a => a.uid).filter(Boolean);
-    let done = 0;
-    await panelFillRows('invite', stale, getPath, (dd, one) => {
-      if (one && one.ok) {
+    // renderPage 画一整页（缓存与新鲜数据同一条路，见 loadLoomyTasks 的同一说明）。
+    const renderPage = (d) => {
+      const accts = Array.isArray(d.accounts) ? d.accounts : [];
+      pagesNow = Number(d.pages) || 1;
+      totalN = Number(d.total) || accts.length;
+      page = Number(d.page) || page;
+      panelPageState[k] = page;
+      serverAt = Number(d.__at) || serverAt;
+      // 汇总每次重画从零重算：只有真数据计入（占位行不计 —— 算进"未绑定"
+      // 会让界面在刷新的那几秒里显示一个假的"未绑定 N"，随后又跳变）。
+      sum.known = 0; sum.activated = 0;
+      const body = accts.map(a => {
+        if (a.stale) return panelRowLoading('invite', a.uid, a.nickname, 6);
+        if (!a.ok) return panelRowErr('invite', a.uid, a.nickname, a.error || '查询失败');
         sum.known++;
-        if (one.activated) sum.activated++;
-      }
-      return (one && one.ok) ? rowHTML(one) : failRow(one);
-    }, () => { done++; paintSum(done, stale.length); });
-    if (stale.length) paintSum(stale.length, stale.length);
+        if (a.activated) sum.activated++;
+        return withRowId(rowHTML(a), 'invite', a.uid);
+      }).join('');
+      const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
+      <span data-lpager="invite" data-ltotal="${esc(String(totalN))}"></span>
+      <span class="dim" style="font-size:12px" id="linv-sum-${esc(providerId)}"></span>
+      <span class="dim" style="font-size:11px" id="linv-upd-${esc(providerId)}"></span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="dim" style="font-size:11px">邀请码实测 6 位（形如 E3HRN8），每个码只能用一次（maxUses=1）；绑定是双向奖励。⚠ 「我生成的码」是发给**别人**用的，不能用来绑自己 —— 绑自己请填**其他账号**的码</span>
+    </div>`;
+      host.innerHTML = head + `<table class="accttable"><thead><tr>
+      <th>UID</th><th>昵称</th><th>激活状态</th><th>余额</th><th>我生成的码</th><th>绑定别人的码</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+      hideEmptyCols(host.querySelector('table'));
+      panelBindPager(host, 'invite', page, pagesNow, (n) => loadLoomyInvite(providerId, n));
+      stale = accts.filter(a => a.stale).map(a => a.uid).filter(Boolean);
+      paintSum(0, stale.length);
+    };
+
+    // ① 先画缓存（秒出）。
+    const hit = lazyCache.get(cacheKey);
+    if (hit && hit.val) renderPage(hit.val);
+
+    // ② 再要一次"当页骨架"（服务端只读缓存 ⇒ 零上游、瞬时）。
+    let fresh = null;
+    try {
+      fresh = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+    } catch (e) {
+      if (!hit) { host.innerHTML = `<div class="gbad">邀请码查询失败：${esc(e.message)}</div>`; return; }
+    }
+    if (fresh) {
+      const p2 = Number(fresh.page) || page;
+      if (p2 !== page) { page = p2; cacheKey = panelCacheKey(providerId, 'invite', page); }
+      renderPage(lazyCachePutPage(cacheKey, fresh));
+    }
+
+    if (!totalN) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    if (!stale.length) return;
+
+    // ③ 懒加载当页缺的行 —— **一个块一条请求**（共享层）。
+    let doneN = 0;
+    lazyFill({
+      key: lazyKey,
+      host: host,
+      uids: stale,
+      fetchChunk: (chunk) => admin(panelChunkPath(getPath, chunk)),
+      onChunk: (res, err, chunk) => {
+        const accts = (res && Array.isArray(res.accounts)) ? res.accounts : [];
+        const patch = panelPatch(chunk, accts, err);
+        mergePageRows(cacheKey, patch, parseServerTime(res && res.updated_at));
+        for (const a of patch) {
+          const tr = document.getElementById(panelRowId('invite', a.uid));
+          const html = a.ok ? withRowId(rowHTML(a), 'invite', a.uid)
+                            : panelRowErr('invite', a.uid, a.nickname, a.error || '查询失败');
+          if (tr) tr.outerHTML = html;
+          if (a.ok) {
+            sum.known++;
+            if (a.activated) sum.activated++;
+          }
+        }
+        doneN += patch.length;
+        serverAt = Math.max(serverAt, parseServerTime(res && res.updated_at));
+        paintSum(doneN, stale.length);
+      },
+    });
+
+    // ⚠⚠ **补完之后还要把结果显示出来**（用户实测反馈：后端补好了、前端不自己同步）。
+    //
+    // 行替换只发生在"某一块回来"时；某块没回来，那一行就永远停在「正在读取…」。
+    // ⇒ 挂一个与"哪一块回来"无关的兜底：还有占位行就每 1.5 秒重读一次 `?page=`
+    //    （服务端只读缓存、零上游、毫秒级），把缓存里的新数据画出来。
+    // ⚠ **只读页、不重跑整个加载** —— 否则每拍换代令牌会把上面那个 lazyFill 判死，
+    //    补数就永远补不完了（这条是本文件里 `lazyFill` 的换代语义决定的）。
+    // ⚠ 两个面板（tasks / invite）这段代码逐字相同、变量名也同名，改一处要改两处。
+    schedulePanelPoll(lazyKey, host, () => stale.length, async () => {
+      const d = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+      renderPage(lazyCachePutPage(cacheKey, d));
+    });
   }
 
   // loadGenericList 通用的"上游列表"渲染。
@@ -4978,16 +5705,38 @@ let loginProvider = '';
       host.innerHTML = '<div class="dim" style="font-size:12px">该能力没有可读端点。</div>';
       return;
     }
-    const blocks = [];
-    for (const r of routes) {
-      try {
-        const data = await admin(r.path);
-        blocks.push(renderGenericBlock(r, data, providerId));
-      } catch (e) {
-        blocks.push(`<div class="gbad">${esc(r.title || r.path)}：${esc(e.message)}</div>`);
-      }
-    }
-    host.innerHTML = blocks.join('');
+
+    // ── 走共享层：**缓存优先 + 分块懒加载** ─────────────────────────────
+    //
+    // 这里的"块"就是**一条端点**：它不是按行分页的表，而是几条独立回执拼成的
+    // 一块面板。每条回来只重画它自己那一格 —— 与两个 loomy 面板同一套语义：
+    // 先出能出的（有缓存立刻出），剩下的低并发慢慢补。
+    const cacheKey = 'generic/' + providerId + '/' + cap;
+    const cacheVal = lazyCache.get(cacheKey);
+    const parts = routes.map((r, i) => {
+      if (cacheVal && cacheVal.val && cacheVal.val[i]) return cacheVal.val[i];
+      return '<div class="dim" style="font-size:12px">正在读取…</div>';
+    });
+    const paint = () => {
+      host.innerHTML = parts.join('');
+      lazyCache.set(cacheKey, parts.slice());
+    };
+    if (cacheVal) paint();   // ① 先画缓存（秒出）
+
+    // ② 分块补：每块 = 一条端点（共享层负责低并发与「离开页签即停」）。
+    lazyFill({
+      key: cacheKey,
+      host: host,
+      chunks: routes.map((r, i) => [i]),
+      fetchChunk: (chunk) => admin(routes[chunk[0]].path),
+      onChunk: (res, err, chunk) => {
+        const r = routes[chunk[0]];
+        parts[chunk[0]] = err
+          ? `<div class="gbad">${esc(r.title || r.path)}：${esc(err)}</div>`
+          : renderGenericBlock(r, res, providerId);
+        paint();   // ③ 每块回来即重画
+      },
+    });
     // 不再在这里绑事件（评审 F2：那会导致监听器随刷新线性增长）。
     // 通用面板的动作委托在 installGenericActions() 里绑到 #content 上，
     // 全生命周期只绑一次 —— 见那里的注释。
@@ -5438,7 +6187,7 @@ let loginProvider = '';
 
   async function loadAPIKeys() {
     let d;
-    try { d = await admin('/admin/apikeys'); }
+    try { d = await sharedGet('ep:/admin/apikeys', () => admin('/admin/apikeys')); }
     catch { $('apiKeyRows').innerHTML = '<tr><td colspan="9" class="err">读取失败</td></tr>'; return; }
     // 两把钥匙各一行 —— 它们**互相独立**，且各自可轮换。
     //
@@ -5850,7 +6599,7 @@ let loginProvider = '';
     const sec = $('apiKeyRows');
     if (!sec || sec.offsetParent === null) return; // 面板不可见不刷
     let d;
-    try { d = await admin('/admin/apikeys'); }
+    try { d = await sharedGet('ep:/admin/apikeys', () => admin('/admin/apikeys')); }
     catch { return; }
     const list = (d && d.keys) || [];
     const digest = JSON.stringify(list.map(k => [k.id, k.enabled, k.used, k.requests, k.fails]));
@@ -5866,7 +6615,7 @@ let loginProvider = '';
 
   async function loadSettings() {
     try {
-      const r = await admin('/admin/settings');
+      const r = await sharedGet('ep:/admin/settings', () => admin('/admin/settings'));
       fillSettings(r.settings, r);
     } catch (e) {
       $('setReadonly').innerHTML = `<dt>错误</dt><dd class="err">${esc(e.message)}</dd>`;
@@ -5938,7 +6687,17 @@ let loginProvider = '';
       ['可领合计', `${sum.right_now_n} 项 · +${sum.right_now}`, sum.right_now_n ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
       ['能量合计', sum.energy, ''],
-    ].map(([k, v, c]) =>
+    ].filter(([k, v]) =>
+      // ⚠ 值为 0 的「合计类」卡**直接不生成**（用户要求"少空白、合理利用空间"）。
+      //   实测最典型的浪费是「可领合计 **0 项 · +0**」—— 值为 0 时它没有任何信息量。
+      // ⚠ 判据保守：**只过滤名字含「合计」的** —— 「账号数 0」是**最重要**的信息
+      //   （配了上游却没账号），一刀切会掩盖故障。
+      // ⚠⚠ 为什么"不生成"而不是"生成后再扫一遍藏掉"：我在 `refresh()` 里扫过一遍、
+      //   又加过 500ms 延时再扫一遍，**两次都没生效** —— 因为这几张卡要等
+      //   `loadGrowth()` 拿到上游数据才画，**扫描的时机永远赶不上**（看截图才发现）。
+      //   在生成处判掉，与时序无关。
+      !(k.indexOf('合计') >= 0 && /^[0\s+项·—–\-]*$/.test(String(v)))
+    ).map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
     if (!growthSnaps.length) {
       $('growthRows').innerHTML = rowPlaceholder(COLS.growth, '账号池为空');
@@ -5972,13 +6731,28 @@ let loginProvider = '';
       const quota = cr === null
         ? '<span class="dim" title="该账号不在账号池视图里，取不到额度">—</span>'
         : `<span class="mono">${cr}</span>`;
+      // ⚠⚠ 用户要求「**高度保证一行**」—— 这里原来有两处 `<br>`，把「连登」格撑成**三行**
+      //    （17 天 / 距 28d 还差 11 / 补签×2）⇒ 整行高度是别行的三倍。
+      //    ⚠ 注意：光靠全局的 `white-space:nowrap` **拦不住 `<br>`**（那是显式换行），
+      //    必须真的把它去掉 —— 用户当场指着这张表说「这个表格不符合要求」。
+      // 改法照钉钉 / 飞书表格：**一行内用 `·` 串起来 + 全文进 `title`**（悬停可看，
+      // 被截断成 `…` 也不丢信息），补签卡单独留一个小徽章（那是要点的信息）。
+      const streakFull = [
+        g.streak_days ? `${g.streak_days} 天` : '',
+        g.next_tier ? `距 ${g.next_tier} 还差 ${g.next_tier_remaining}` : '',
+        g.makeup_cards ? `补签×${g.makeup_cards}` : '',
+        (g.makeup_cards && g.makeup_dates && g.makeup_dates.length) ? `可补 ${g.makeup_dates.length}` : '',
+      ].filter(Boolean).join(' · ');
       const streak = g.streak_days
-        ? `${g.streak_days} 天${g.next_tier ? `<br><span class="dim" style="font-size:11px">距 ${esc(g.next_tier)} 还差 ${g.next_tier_remaining}</span>` : ''}`
+        ? `<span title="${esc(streakFull)}">${g.streak_days} 天`
+          + (g.makeup_cards
+              ? `<span class="pill warn" style="margin-left:6px">补签×${g.makeup_cards}</span>`
+              : '')
+          + `</span>`
         : '<span class="dim">—</span>';
-      // 连登列并入补签卡（有卡才显示徽章，盲盒/抽奖信息并入按钮的禁用态）。
-      const makeupHtml = g.makeup_cards
-        ? `<br><span class="dim" style="font-size:11px">补签×${g.makeup_cards}${g.makeup_dates && g.makeup_dates.length ? ` <span class="pill warn">可补${g.makeup_dates.length}</span>` : ''}</span>`
-        : '';
+      // ⚠ 补签那格**已经并入上面**（同一行的 span 里），所以这里留空 ——
+      //    保留变量名是为了不动下面拼接那一行的代码（少一处改动少一处风险）。
+      const makeupHtml = '';
       // 待完成 / 完成后可得：口径是"还没做完"（未接单+已接单+进行中），
       // 合并成一格：「5 +600」（+600 = 完成后可获得的额度）。
       const pendN = g.pending_count != null ? g.pending_count : (g.acceptable_count || 0);
@@ -6274,7 +7048,13 @@ let loginProvider = '';
   // 返回 true/false 而不是吞掉异常：调用方（busyRun）靠它决定是否再给提示。
   async function loadGrowth(refresh) {
     let r;
-    try { r = await admin('/admin/growth' + (refresh ? '?refresh=1' : '')); }
+    // ⚠ 与 travel 同一套语义：`?refresh=1` 绕开缓存（用户主动要新数据），
+    //   不带参数那次走共享缓存。
+    try {
+      r = refresh
+        ? await admin('/admin/growth?refresh=1')
+        : await sharedGet('ep:/admin/growth', () => admin('/admin/growth'));
+    }
     catch (e) { $('growthRows').innerHTML = rowPlaceholder(COLS.growth, e.message, 'err'); return false; }
     // 可自动化任务码：**首次一定取**（否则页面上永远没有「一键完成」按钮），
     // 之后只在手动「刷新」时重取 —— 它是静态能力表（17 条写死在
@@ -6285,7 +7065,7 @@ let loginProvider = '';
     // 按钮少一个远好过整块面板报错（后端没挂这条路由时正是这个分支）。
     if (!autoCodesLoaded || refresh) {
       try {
-        const a = await admin('/admin/growth/auto/actions');
+        const a = await sharedGet('ep:/admin/growth/auto/actions', () => admin('/admin/growth/auto/actions'));
         autoCodes = new Set((a.actions || []).map(x => x.task_code));
         autoCodesLoaded = true;
       } catch { /* 能力表拿不到：保留上一次的集合，行内按钮退化为「去客户端做」 */ }
@@ -6296,7 +7076,10 @@ let loginProvider = '';
     // 否则领完奖再点刷新，额度列还是旧值 —— 实测同一账号刷新前后能差 252 分。
     // 失败不影响成长数据展示，所以单独 try 且不改变返回值。
     if (refresh) {
-      try { renderAccounts((await admin('/admin/accounts')).accounts); } catch { /* 额度刷新失败不阻塞 */ }
+      // ⚠ 这里刻意**先清缓存**：注释上一行写着"领完奖再点刷新，额度列还是旧值 ——
+      //    实测同一账号刷新前后能差 252 分"。加了共享缓存之后，不清就会**把这个缺陷带回来**。
+      lazyCache.drop('ep:/admin/accounts');
+      try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts); } catch { /* 额度刷新失败不阻塞 */ }
     }
     return true;
   }
@@ -6502,7 +7285,9 @@ let loginProvider = '';
       const iv = setInterval(async () => {
         let idle = false;
         try {
-          const st = await admin('/admin/task');
+          // ⚠ 同一端点在本文件里还有一处调用（`/admin/task`）⇒ 走共享取数器，
+      //   两处共用同一 key，30 秒内只发一次。
+      const st = await sharedGet('ep:/admin/task', () => admin('/admin/task'));
           idle = !(st && st.running);
         } catch { /* 轮询失败继续等 */ }
         if (idle || Date.now() - t0 > timeoutMs) {
@@ -7006,6 +7791,11 @@ let loginProvider = '';
     //（renderCards 在 refresh 里先于 renderStats 调用）。
     window._statsCache = s;
     if (!s) return;
+    // ⚠⚠ **报表区在这里就画**（不能放在函数末尾 —— 我踩过）。
+    // 函数体里有一处 `return [`（提前返回卡片数组），我最初把调用插在它之后
+    // ⇒ **成了死代码，永远执行不到**：页面上"Top 账号 / 上游占比"两个面板一直空着，
+    // 而 `pageerror` 干干净净，让人误以为没事。放在这里最稳：拿到数据就画得到。
+    renderStatsReport(s);
     // 窗口文案必须如实说明数据来源：统计改为聚合落盘历史后，
     // 不再是「进程内窗口」，而落盘不可用时会回落到内存 —— 两种情况不能混为一谈。
     //
@@ -7047,11 +7837,20 @@ let loginProvider = '';
     //
     // 「累计消耗」改成 token（用户本轮要求）：不同上游的 credit 单位不同
     //（积分/额度/点），加起来没有可比性；而 token 是跨上游统一的口径。
-    // 消耗 token = 输出 token + 推理 token（usage 里记录的只有这两个）。
+    //
+    // ⚠⚠ **这里原来写的是「消耗 token = 输出 token + 推理 token（usage 里记录的只有这两个）」——
+    //   那个假设是错的，已于 2026-10-18 修掉（F1，由 R1 复核提出、主脑复验）：**
+    //   日志里的 `tokens` 就是 `completion_tokens`，而它**已经包含推理 token** ⇒ 再加一遍
+    //   `think_tokens` 等于把推理算两遍，会把「消耗 token」虚高约 **47%**。
+    //   复验方法（可重跑）：统计 `think_tokens > tokens` 的行数 —— **零反例**；
+    //   量级上 sum(think)/sum(tokens) ≈ 0.474。另有三处代码旁证：wire/usage.go 从
+    //   `completion_tokens_details.reasoning_tokens` 取、usage_test.go 的 fixture、
+    //   cline.go 的「思考 token 计入 completion_tokens」注释。
+    // ⇒ 现在展示为两张**各表一件事**的卡：「输出 token」= tokens（含推理的真值）、
+    //   「推理 token」= think_tokens（其中有多少是推理）。原先那处重复计算已删除。
     //
     // 计算抽成 statsCardsEntries：renderStats（整页渲染）与无感轮询
     // pollStatsCards（只改数值）共用同一份判据，杜绝两处漂移。
-    const totalTokens = (num(s.tokens) || 0) + (num(s.think_tokens) || 0);
 
     // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
     // data-stat-key 供无感轮询定位（见 pollStatsCards）。
@@ -7060,7 +7859,10 @@ let loginProvider = '';
 
     $('statsCards').innerHTML = statsCardsEntries(s).map(([k, v, c]) => card(k, v, c)).join('');
 
-    renderStatsModels(s);
+    // ⚠ 「模型明细」chips 已按用户要求删除（2026-10-18）⇒ 这里**不再调** renderStatsModels。
+    // ⚠ 函数本体保留未删：它里面还带着 `statsCatalogHint` 等挂载逻辑，
+    //   删函数的风险大于收益；而只要容器不存在，它本来就是空转（开头有 `if (!wrap) return`）。
+    // renderStatsModels(s);
   }
 
   // statsCardsEntries 统计卡的内容（renderStats 与无感轮询共用）。
@@ -7069,17 +7871,350 @@ let loginProvider = '';
     const total = num(s.total);
     const ok = num(s.ok);
     const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
-    const totalTokens = (num(s.tokens) || 0) + (num(s.think_tokens) || 0);
     return [
       ['总请求', fmtCount(s.total), ''],
       ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
       ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
       ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
-      ['消耗 token', totalTokens ? fmtTokens(totalTokens) : null, totalTokens ? '' : 'dim'],
+      // ⚠ F1 修复：不再 `tokens + think_tokens`（那会把推理算两遍）。两张卡各表一件事。
       ['输出 token', fmtTokens(s.tokens), num(s.tokens) ? '' : 'dim'],
+      ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
+      // ⚠ 下面三张照 agent2api 的概览卡补（2026-10-18）。⚠ 值**先给 null = 占位**：
+      //   它们的原料在两处不同的接口里 ——
+      //     · Top 模型    ⇒ 本响应里的 `by_model_detail`（⚠ 在下面 renderStatsReport 里回填）
+      //     · 活跃/连续天数 ⇒ `series?range=365d`（⚠ 由 loadHeatmap 回填，它本来就要取那份数据）
+      // ⚠ 为什么不在这里直接算：本函数只知道窗口总量，**不知道"哪些天有请求"**。
+      //   硬凑只会在没有 series 的时候显示错的数 —— 按本项目的立场，宁可先空着。
+      ['Top 模型', null, 'dim'],
+      ['活跃天数', null, 'dim'],
+      ['当前连续天数', null, 'dim'],
     ];
+  }
+
+  // renderStatsReport 报表区（2026-10-18 新增）：**Top 账号榜** + **上游占比环**。
+  //
+  // # 为什么要写它
+  //
+  // 实测发现：`by_uid` 与 `by_provider` 后端**早就在返回**，但前端此前**一处都没消费**
+  // （全文件 grep 为空）—— 数据一直在，只是没人画。这里把它画出来。
+  //
+  // # 零依赖（照本项目已有的立场）
+  //
+  // ⚠ 不引图表库。榜单的条形用 `div` 的 `width`，环用 `conic-gradient`；
+  // 上面那条趋势图也是**内联 SVG 零依赖**，风格统一。
+  //
+  // # 口径
+  //
+  // ⚠ 这两个字段现在**只有请求数**，所以标题写「按请求数」而不是含糊的"按用量"。
+  // 后端正在补带 tokens 的富化版；届时只换这里的取值，**不动结构与文案位置**。
+  //
+  // ⚠ 名字只用**已确认存在**的：`$` / `esc` / `numNonNeg`。
+  // （这一路栽过"用了不存在的函数名、跑起来才炸"，所以 uid 的截断在这里内联写，不猜 helper。）
+  function renderStatsReport(s) {
+    const topEl = $('statsTopUid'), donutEl = $('statsDonut'), legendEl = $('statsDonutLegend');
+    if (!topEl || !donutEl || !legendEl) return;      // 老版本页面没有这些容器 ⇒ 静默跳过
+    if (!s) return;
+    // ⚠ 取值要**同时认两种形状**：
+    //   · 老形状：`by_provider = { "loomy": 26012 }`（裸数字）
+    //   · 新形状（A 代理刚补的富化版）：`{ "loomy": { calls, ok, fail, credit } }`
+    // ⚠ 只认一种就会静默出 0 —— 实测：环形图当时整块不画（因为总和为 0 被防零除挡住），
+    //   而 `pageerror` 干干净净，不看图根本发现不了。
+    const calls = (v) => {
+      const raw = (v && typeof v === 'object') ? v.calls : v;
+      const n = numNonNeg(raw);
+      return n === null ? 0 : Math.round(n);
+    };
+    const pad = calls;
+    // ⚠ 每个环比色都走主题变量（切换深浅色时不能有"局部还是旧配色"的花脸）。
+    const COLORS = ['var(--acc)', 'var(--ok)', 'var(--warn)', 'var(--err)'];
+
+    // ⚠⚠ digest 守卫：本函数由 `pollStatsCards` 每 30 秒调一次（让榜/环与卡片同步）。
+    // 不判"值变没变"⇒ 榜与环每 30 秒整块重绘 ⇒ 肉眼可见的**闪**（尤其 `conic-gradient` 的环）。
+    // ⚠ digest 只取本函数真正消费的两个字段：`by_uid` 与 `by_provider`。
+    // ⚠⚠ 2026-10-18 踩坑记录：我一度以为这份守卫被早先的 edit 挤掉了、于是又加了一遍
+    //   ⇒ **变成重复声明**（`Identifier 'dg' has already been declared`）
+    //   ⇒ 整页内联 JS **一段都不执行**（`cards = 0`），而我当时**已经把坏二进制替换进去了**。
+    //   ⇒ 教训：**改完必须先跑门禁、红了就不许替换二进制**（我那次编了就直接换了，顺序反了）。
+
+    // ⚠ 顶部提示**先设**（R2 抓到的陈旧文案）。
+    // 症状：这段原来放在函数**末尾**，而"没有数据"的两条分支都比它早 `return`
+    // ⇒ 那些情况下它保留**上一次**的文案（实测 rows=2 时仍写「共 1 个账号有请求」）。
+    // ⇒ 挪到所有 return 之前；⚠ 空值也要**如实**改写，而不是留着旧句子。
+    const hint = $('statsTopHint');
+    if (hint) {
+      const uidN = Object.keys(s.by_uid || {}).length;
+      hint.textContent = uidN ? ('共 ' + uidN + ' 个账号有请求') : '窗口内没有请求';
+    }
+
+    // ⚠ 「Top 模型」卡**不在这里填**（2026-10-18 实测）：
+    //   本函数会在多处被调，其中有的入参不是 `/admin/stats` 的完整响应
+    //   ⇒ 在这里填完会被后面的调用覆盖掉（实测：数据/选择器/算法全对，卡片仍是 `—`）。
+    //   ⇒ 已挪到 `fillTopModel(s)`，只在 `refresh` 那个确定是 `/admin/stats` 响应的地方调。
+
+    // ⚠⚠ digest 守卫。为什么必须有：`pollStatsCards` 每 30 秒会调一次本函数
+    //（为了让榜/环与卡片同步 —— 否则同一屏出现两个时刻）。若不判"值变没变"，
+    // 榜与环每 30 秒就整块重绘一次 ⇒ ⚠ 肉眼可见的**闪**（尤其是 `conic-gradient` 的环）。
+    // ⚠ digest 只取本函数真正消费的两个字段：`by_uid` 与 `by_provider`。
+    //   别的字段变了但这两个没变 ⇒ **不该**重绘（本函数画的只有这两样）。
+    const dg = JSON.stringify(s.by_uid) + '|' + JSON.stringify(s.by_provider);
+    if (dg === renderStatsReport._last) return;
+    renderStatsReport._last = dg;
+
+    // ---- 左栏：Top 账号（按请求数降序取前 8）----
+    const uids = Object.entries(s.by_uid || {}).map(([k, v]) => [k, pad(v)])
+      .sort((a, b) => b[1] - a[1]).slice(0, 8);
+    const uidMax = uids.length ? uids[0][1] : 0;
+    let uidSum = 0;
+    for (const v of Object.values(s.by_uid || {})) uidSum += pad(v);
+    topEl.innerHTML = uids.length
+      ? uids.map(([uid, n]) => {
+          const w = uidMax > 0 ? Math.max(2, (n / uidMax) * 100) : 0;         // 最小 2% 才看得见
+          const pct = uidSum > 0 ? ((n / uidSum) * 100).toFixed(1) : '—';      // ⚠ 防零除
+          // uid 形如 UUID 或纯数字，都很长 ⇒ 截断显示，全文放 title（与表格列同一套做法）。
+          const label = uid.length > 12 ? uid.slice(0, 12) + '…' : uid;
+          return `<div class="toprow" title="${esc(uid)}">
+            <span class="tname">${esc(label)}</span>
+            <span class="tbar"><i style="width:${w}%"></i></span>
+            <span class="tval">${n}</span>
+            <span class="tpct">${pct}%</span>
+          </div>`;
+        }).join('')
+      : '<span class="dim" style="font-size:12px">暂无数据</span>';
+
+    // ---- 右栏：上游占比环（conic-gradient）----
+    const provs = Object.entries(s.by_provider || {}).map(([k, v]) => [k, pad(v)])
+      .sort((a, b) => b[1] - a[1]);
+    let psum = 0;
+    for (const [, n] of provs) psum += n;
+    if (!provs.length || psum <= 0) {                                        // ⚠ 防零除：没有数据就别画环
+      donutEl.style.background = '';
+      donutEl.innerHTML = '';
+      legendEl.innerHTML = '<span class="dim" style="font-size:12px">暂无数据</span>';
+      return;
+    }
+    // 把每个上游的占比累加成 conic-gradient 的色段。
+    let acc = 0;
+    const stops = [];
+    const legend = [];
+    provs.forEach(([name, n], i) => {
+      const pct = (n / psum) * 100;
+      const c = COLORS[i % COLORS.length];
+      stops.push(`${c} ${acc.toFixed(3)}% ${(acc + pct).toFixed(3)}%`);
+      acc += pct;
+      const label = name.length > 14 ? name.slice(0, 14) + '…' : name;
+      legend.push(`<div class="lgrow" title="${esc(name)}">
+        <span class="sw" style="background:${c}"></span>
+        <span class="lgname">${esc(label)}</span>
+        <span class="tval">${n}</span>
+        <span class="tpct">${pct.toFixed(1)}%</span>
+      </div>`);
+    });
+    donutEl.style.background = `conic-gradient(${stops.join(',')})`;
+    // 环心写总量（⚠ 口径写清楚：这是**请求数**，不是 token）。
+    donutEl.innerHTML = `<span class="dc"><b>${psum}</b><span>请求数</span></span>`;
+    legendEl.innerHTML = legend.join('');
+
+    // ⚠ 顶部提示已移到函数开头（见那里注释：原来放这儿会被空数据分支的 return 跳过）。
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 活跃热力图（365 天）· 照 agent2api 报表页那块做（零依赖）
+  //
+  // # 数据
+  //
+  // `/admin/stats/series?range=365d` —— ⚠ 后端为此顺手修了 F2：
+  // 原来天桶用 `time.Truncate(24h)`（以 UTC 零时为基准）⇒ 桶起点落在本地 **08:00**，
+  // 于是"10-17 那一格"实际是 10-17 08:00 ~ 10-18 08:00 ⇒ **格子与日期错位**。
+  // 现在桶起点是**本地自然日 00:00**，所以下面可以按 `ts` 的前 10 个字符直接分组。
+  //
+  // # 画法
+  //
+  // `grid-auto-flow:column` + 7 行 ⇒ **一列 = 一周**。所以只要起点对齐到周一，
+  // 格子就自然形成日历阵；⚠ 最后一天之后（本周剩余）画成 `blank` 透明格，不是"0 用量"。
+  //
+  // # 分档
+  //
+  // 按**本窗口峰值**分 4 档（照它那句"档位按本窗口峰值自动定"）——
+  // ⚠ 不写死绝对阈值：用量涨十倍时整片会变最深色、失去分辨力。
+  let heatSig = '';
+
+  async function loadHeatmap() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=365d'); }
+    catch { return; }
+    const list = (d && d.series) || [];
+    if (!list.length) return;
+    // ⚠ 签名只取"会改变画面的东西"：桶数 + 最后一天的量 + 总量。
+    //   否则 30 秒轮询会把 365 个格子整块重绘一遍（肉眼可见的闪）。
+    const sig = list.length + '|' + (list[list.length - 1].total || 0) + '|'
+      + list.reduce((a, p) => a + (p.total || 0), 0);
+    if (sig === heatSig) return;
+    heatSig = sig;
+    renderHeatmap(list);
+    fillDayCards(list);
+  }
+
+  // fillDayCards 用 series 的按天数据回填三张概览卡（⚠ 本函数是它们**唯一**的数据来源）。
+  //
+  //   · 活跃天数     = **有请求的天数**（⚠ 不是窗口天数 —— 8 天窗口里可能有几天是 0）
+  //   · 当前连续天数 = 从**最后一个桶**往前数，连续有请求的天数（⚠ "含今天在内往前数"）
+  //   · Top 模型     = 本响应 `by_model_detail` 里 **tokens 最多**的那个（⚠ 不是请求数最多）
+  //
+  // ⚠ 为什么连续天数从"最后一个桶"往前数、而不是从 `new Date()`：桶的边界由后端定，
+  //   用浏览器本地今天去比会在跨零点前后差一天（那一版曾经把"今天"算漏）。
+  function fillDayCards(list) {
+    const setCard = (key, val, cls) => {
+      const el = document.querySelector(`#statsCards .card[data-stat-key="${key}"] .v`);
+      if (!el) return;
+      el.textContent = val === null ? NODATA : String(val);
+      el.className = 'v ' + (val === null ? 'dim' : (cls || ''));
+    };
+
+    // 活跃天数 + 从末尾起算的连续段
+    const days = list.map(p => ({ d: String(p.ts || '').slice(0, 10), n: p.total || 0 }));
+    const activeN = days.filter(x => x.n > 0).length;
+    let streak = 0;
+    for (let i = days.length - 1; i >= 0; i--) {
+      if (days[i].n > 0) streak++;
+      else break;                       // ⚠ 断了就停（不是"最长连续"，是"当前连续"）
+    }
+    setCard('活跃天数', activeN ? String(activeN) + ' 天' : '—', activeN ? '' : 'dim');
+    setCard('当前连续天数', streak ? String(streak) + ' 天' : '—', streak ? '' : 'dim');
+    // ⚠ 「Top 模型」**不在这里填** —— 2026-10-18 实测踩到：
+    //   本函数由 `loadHeatmap` 触发，而它可能在 `renderStats` **之前**跑
+    //   ⇒ 那时 `window._statsCache` 还是 null ⇒ Top 模型显示成 `—`；
+    //   ⚠ 更糟的是本函数有 sig 守卫，之后数据到了**也不会再填**。
+    //   ⇒ 那一格改由 `renderStatsReport(s)` 填（它手里就是 `s`，时机必然对）。
+  }
+
+  // fillTopModel 填「Top 模型」卡。
+  //
+  // ⚠⚠ 为什么单独一个函数、而且**只在 `refresh()` 那个 `.then(d => …)` 里调**：
+  //   我试过两处都不行，最后测出来的事实是 ——
+  //     · 数据、选择器、算法**全对**（我在浏览器里手跑同一段逻辑，算出了正确结果）
+  //     · 但卡片一直是 `—` ⇒ 说明**我填完之后又被别的东西覆盖了**（`renderStats` 会在多处被调，
+  //       其中有的入参不是 `/admin/stats` 的完整响应）
+  //   ⇒ 那就绑到**唯一那个确定是 `/admin/stats` 响应**的变量上：`refresh` 里的 `d`。
+  //   ⚠ 这个函数**只认 `s.by_model_detail`**，拿不到就写 NODATA —— 不猜别的字段。
+  function fillTopModel(s) {
+    const el = document.querySelector('#statsCards .card[data-stat-key="Top 模型"] .v');
+    if (!el) return;
+    let bestK = null, bestV = -1;
+    for (const [k, v] of Object.entries((s && s.by_model_detail) || {})) {
+      const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;
+      if (tk > bestV) { bestV = tk; bestK = k; }
+    }
+    if (bestK) {
+      el.textContent = bestK;              // ⚠ 不在这里截断 —— 交给 CSS 的 ellipsis
+      el.title = bestK + ' · ' + fmtTokensPlain(bestV) + ' token';
+      el.className = 'v';
+    } else {
+      el.textContent = NODATA;
+      el.className = 'v dim';
+    }
+  }
+
+  // fmtTokensPlain 给 title 用的纯文本 token 数（⚠ 不引别的格式化器，避免依赖不确定的名字）。
+  function fmtTokensPlain(v) {
+    if (!v) return '0';
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+    return String(v);
+  }
+
+  function renderHeatmap(list) {
+    const host = $('statsHeat');
+    if (!host) return;
+
+    // ⚠⚠ 这里**按 agent2api 的形态画**：53 列（周）× 7 行（星期），空槽就空着。
+    // 我一度自作主张改成"天数少就用横条表" —— 那是**偏离复用**：它自己 8 天数据时
+    // 也是一整片空槽（见它截图），照它的形态才对。已改回。
+    const byDay = new Map();
+    for (const p of list) byDay.set(String(p.ts || '').slice(0, 10), p);
+
+    const lastKey = String(list[list.length - 1].ts || '').slice(0, 10);
+    const parts = lastKey.split('-').map(Number);
+    if (parts.length !== 3 || parts.some(isNaN)) { host.innerHTML = ''; return; }
+    const lastD = new Date(parts[0], parts[1] - 1, parts[2]);
+
+    // 起点 = 往前 364 天（共 365 格），再**回退到周一**补齐首列（与它 `pad` 那一步同义）
+    const startD = new Date(lastD.getTime());
+    startD.setDate(startD.getDate() - 364);
+    startD.setDate(startD.getDate() - ((startD.getDay() + 6) % 7));
+
+    // ⚠ 分档照抄它的 `HEAT_STEPS`（1 / 1.25 / 1.5 / 2 / 2.5 / 3 / 4 / 5 / 6 / 8 / 10 × 10^n）。
+    //   我原来那版用"峰值的百分比"分档 —— 不如它这套稳：它按数量级取整，
+    //   峰值涨十倍时档位边界也跟着走，不会出现"全落最深一档"。
+    const HEAT_STEPS = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+    const stepFloor = (v) => {
+      if (v <= 0) return 0;
+      const mag = Math.pow(10, Math.floor(Math.log10(v)));
+      const norm = v / mag;
+      let best = HEAT_STEPS[0];
+      for (const s of HEAT_STEPS) if (s <= norm + 1e-9) best = s;
+      return best * mag;
+    };
+    let peak = 0;
+    for (const p of list) if ((p.tokens || 0) > peak) peak = p.tokens || 0;
+    const step = Math.max(1, stepFloor(peak / 4));
+    const TH = [step, step * 2, step * 3, step * 4];      // 4 个阈值 ⇒ 5 档（0 是最浅那档）
+    const lvOf = (tk) => {
+      if (!tk) return 0;
+      if (tk <= TH[0]) return 1;
+      if (tk <= TH[1]) return 2;
+      if (tk <= TH[2]) return 3;
+      return 4;
+    };
+
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const cells = [];
+    const monthMarks = [];                                 // ⚠ 它有的**月份标签**（我原来漏了）
+    const cur = new Date(startD.getTime());
+    let lastMonth = -1, n = 0;
+    while (cur.getTime() <= lastD.getTime() && n < 400) {
+      const key = cur.getFullYear() + '-' + pad2(cur.getMonth() + 1) + '-' + pad2(cur.getDate());
+      const p = byDay.get(key);
+      const tk = p ? (p.tokens || 0) : 0;
+      const tip = key + ' · ' + (p ? (p.total + ' 请求 · ' + tk + ' token') : '无请求');
+      // ⚠ 只在**每月第一天所在的那一列**放月份文字，其余留空（那样月份才会对齐到列上）
+      const colIdx = Math.floor(n / 7);
+      if (cur.getDate() <= 7 && cur.getMonth() !== lastMonth) {
+        lastMonth = cur.getMonth();
+        monthMarks.push([colIdx, (cur.getMonth() + 1) + '月']);
+      }
+      cells.push(`<span class="heatcell lv${lvOf(tk)}" title="${esc(tip)}"></span>`);
+      cur.setDate(cur.getDate() + 1);
+      n++;
+    }
+    // ⚠ 末列不满也留空（与它"末列不满也留空"一致）
+    const tail = 6 - ((lastD.getDay() + 6) % 7);
+    for (let k = 0; k < tail; k++) cells.push('<span class="heatcell blank"></span>');
+    host.innerHTML = cells.join('');
+
+    // 月份标签：用一个与格子同列宽的 grid 承载，全列铺满、只有该列的格子里有字
+    const mh = $('statsHeatMonths');
+    if (mh) {
+      const cols = Math.ceil((cells.length) / 7);
+      const marks = new Array(cols).fill('');
+      for (const [ci, txt] of monthMarks) if (ci >= 0 && ci < cols) marks[ci] = txt;
+      mh.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      mh.innerHTML = marks.map((t) => `<span>${esc(t)}</span>`).join('');
+    }
+
+    // 图例四档的数值（⚠ 用它的 heatLevelText 口径：给出每档的上界）
+    const fmtV = (v) => {
+      if (!v) return '0';
+      if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+      if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+      if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+      return String(v);
+    };
+    const set = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+    set('h1', '≤' + fmtV(TH[0])); set('h2', '≤' + fmtV(TH[1]));
+    set('h3', '≤' + fmtV(TH[2])); set('h4', '>' + fmtV(TH[2]));
   }
 
   // renderStatsModels 模型明细：一行一个模型，同时给出调用次数与成本系数。
@@ -7224,7 +8359,11 @@ let loginProvider = '';
   async function loadTravel(refresh) {
     let r;
     try {
-      r = await admin('/admin/travel' + (refresh ? '?refresh=1' : ''));
+      // ⚠ `?refresh=1` 是**用户主动要新数据**（点「刷新」）⇒ **绕开缓存直连**；
+      //   不带参数的那次才是"打开页面顺手取一次"⇒ 走共享缓存（切回本页时秒出）。
+      r = refresh
+        ? await admin('/admin/travel?refresh=1')
+        : await sharedGet('ep:/admin/travel', () => admin('/admin/travel'));
     } catch (e) {
       $('travelRows').innerHTML = rowPlaceholder(COLS.travel, e.message, 'err');
       return false;
@@ -7307,7 +8446,12 @@ let multCatalogFailed = false;
 
   async function loadModelMultipliers() {
     try {
-      const r = await admin('/admin/models/preview');
+      // ⚠ 走共享取数器：这个函数在一次 `refresh()` 与「强制刷新目录」按钮里**各被调一次**，
+      //   冷启动实测两次合计 **5.4 秒**（2836ms + 2555ms）—— 第二次完全是重复回源。
+      //   走 `sharedGet` 后：同一 key 在飞只发一次，且 30 秒内直接命中缓存。
+      //   ⚠ 要强制取新值的调用点必须先 `lazyCache.drop('ep:/admin/models/preview')`
+      //     （见「强制刷新目录」按钮那一处），否则就是"点了没反应"。
+      const r = await sharedGet('ep:/admin/models/preview', () => admin('/admin/models/preview'));
       const next = {};
       for (const m of (r && r.models) || []) {
         // 保留 0：x0.00 是「免费」这个有意义的事实，不能用真值判断把它丢掉。
@@ -7782,7 +8926,7 @@ let multCatalogFailed = false;
   // 只取数据不渲染：真正的呈现发生在 renderGrowthGroups 的节头里。
   async function loadClientLogin() {
     try {
-      clientStatus = await admin('/admin/client-login');
+      clientStatus = await sharedGet('ep:/admin/client-login', () => admin('/admin/client-login'));
     } catch (e) {
       // 客户端没装或未启用时接口会失败，不该连带影响成长计划本身，
       // 只把控制条降级成「不可用」。
@@ -7893,7 +9037,11 @@ let multCatalogFailed = false;
   async function pollStatsCards() {
     if (document.hidden) return;
     let d;
-    try { d = await admin('/admin/stats'); }
+    // ⚠ 给**很短的** TTL（5 秒）而不是默认 30 秒：`/admin/stats` 有一条 **30 秒轮询**
+    //   （见文件里那句 `setInterval(..., 30000)`），若共用 30 秒缓存，
+    //   轮询会大量命中旧值 ⇒ **界面上统计数字会看起来"不刷新"**。
+    //   5 秒既消掉同一轮 refresh 里的重复请求，又不会让轮询读到过期数据。
+    try { d = await sharedGet('ep:/admin/stats', () => admin('/admin/stats'), 5000); }
     catch { return; }
     const entries = statsCardsEntries(d);
     for (const [k, v, cls] of entries) {
@@ -7906,6 +9054,12 @@ let multCatalogFailed = false;
       val.textContent = fresh;
       val.className = 'v ' + (v === null ? 'dim' : (cls || ''));
     }
+    // ⚠⚠ 报表区（Top 榜 / 上游环）也必须跟着这轮一起更新（R2 抓到的"一页两个时刻"）。
+    // 症状（实测）：卡片每 30 秒无感更新，而榜/环只随**整页 refresh** 才变 ⇒
+    //   28 秒后卡片写"总请求 99"，榜还是旧的 a1 —— **同一屏上两个不同的时刻**。
+    // ⚠ renderStatsReport 内部有 digest 守卫（值没变就不重绘），所以这里放心调，
+    //   不会让榜/环每 30 秒闪一次。
+    renderStatsReport(d);
   }
 
   // ---- 趋势图（对标 one-api/new-api 仪表盘的第一屏：请求量 + 成功率折线）----
@@ -7913,14 +9067,45 @@ let multCatalogFailed = false;
   // 数据来自 /admin/stats/series（服务端按小时桶聚合 request-log），
   // 内联 SVG 双折线：请求量（青）与成功率（绿，右轴）。零图表库依赖。
   let trendSeries = [];
+  // trendRange 当前选的范围。⚠ 只影响**趋势** —— 卡片与 Top 榜/环是全量窗口（见标题注释）。
+  let trendRange = '24h';
+  // 趋势范围切换的事件绑定。照本文件已有的分段控件写法（`growthView` 那处）：
+  // `dataset` 判等 + `classList.toggle('on', …)`，不自创新的画法。
+  // ⚠ 三个细节：
+  //   1. 点当前已选的那个 = 不重取（否则白刷一次）；
+  //   2. 切完**清掉 digest**（`trendSeries._last`）—— 否则新 range 若末尾桶恰好相同会被判"没变"而不重绘；
+  //   3. ⚠ **只切趋势**。卡片与 Top 榜/环的数据来自 `/admin/stats`，它**不支持时间入参** ⇒
+  //      永远是全量窗口。这个限制写在标题旁的注释里，也是标签叫「趋势范围」而不是"统计范围"的原因。
+  for (const b of document.querySelectorAll('#trendRange button')) {
+    b.addEventListener('click', () => {
+      if (b.dataset.range === trendRange) return;
+      trendRange = b.dataset.range;
+      for (const x of document.querySelectorAll('#trendRange button')) {
+        x.classList.toggle('on', x.dataset.range === trendRange);
+      }
+      trendSeries._last = '';
+      try { loadTrendSeries(); } catch { /* 趋势非关键 */ }
+      // ⚠ 热力图**不在这里**刷新：它读的是 `range=365d`，与上面的 24h/7d 无关。
+      //（我最初插在这里 —— 结果它只在"点按钮"时才跑，页面加载时从来不动、格子是空的。
+      //  ⚠ 教训：本文件里有**两处** `loadTrendSeries()`，注释只差一个"图"字，anchor 必须照抄全。）
+    });
+  }
 
   async function loadTrendSeries() {
     let d;
-    try { d = await admin('/admin/stats/series?range=24h'); }
+    // ⚠⚠ **取请求时的 range 快照**，回来时比对（R2 抓到的竞态）。
+    // 症状（实测）：点 7d ⇒ 它的响应要 2.5 秒才回；中途用户又点回 24h ⇒
+    //   7d 的响应**迟到落地**并照常重绘 ⇒ 于是 **caption/按钮说 24h，画面却是 7d 的日桶数据**。
+    // ⚠ 只靠 caption 读"当前" trendRange 是不够的 —— 那反而让画面与文案更不一致。
+    const reqRange = trendRange;
+    try { d = await admin('/admin/stats/series?range=' + reqRange); }
     catch { return; }
+    if (reqRange !== trendRange) return;   // ⚠ 迟到且期间用户改过选择 ⇒ 丢弃这次结果
     const list = (d && d.series) || [];
     // digest 比对：末尾桶数值变了才重绘（30s 轮询无感）。
-    const digest = JSON.stringify(list.slice(-6).map(p => [p.total, p.ok, p.fail]));
+    // ⚠ digest 里必须**带上 range** —— 否则从 24h 切到 7d 时，若末尾几个桶恰好相同，
+    //   就会被判成"没变"而不重绘（切换看起来没反应）。
+    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.total, p.ok, p.fail]));
     if (digest === trendSeries._last) return;
     trendSeries._last = digest;
     renderTrendSVG(list);
@@ -7952,7 +9137,7 @@ let multCatalogFailed = false;
     // 提供，不再画在图上（避免与面积填充重叠）。
     host.innerHTML =
       `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;font-size:11px" class="dim">
-        <span>最近 24h 逐小时 · 请求量 <span style="color:#3fb950">●</span> 成功率 <span style="color:#58a6ff">●</span></span>
+        <span>最近 ${trendRange === '365d' ? '365 天 · 逐日' : trendRange === '30d' ? '30 天 · 逐日' : trendRange === '7d' ? '7 天 · 逐日' : '24 小时 · 逐小时'} · 请求量 <span style="color:#3fb950">●</span> 成功率 <span style="color:#58a6ff">●</span></span>
         <span>最新 ${esc(last.day || '')} ${esc(last.label)} · 请求 <b style="color:var(--fg)">${esc(last.total)}</b> · 成功率 <b style="color:var(--fg)">${last.rate === null ? '—' : last.rate + '%'}</b></span>
       </div>
       <div style="position:relative">
@@ -8022,9 +9207,21 @@ let multCatalogFailed = false;
     showConsole();
     setDot(h.healthy > 0 ? 'ok' : 'bad',
       (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
-    // 网关卡读累计请求/成功率：先拉 stats 填缓存（renderStats 内部写
-    // window._statsCache；它必须在 renderCards 之前执行，否则卡片恒 —）。
-    try { renderStats(await admin('/admin/stats')); } catch { /* 统计非关键 */ }
+    // 网关卡读累计请求/成功率：拉 stats 填缓存（renderStats 内部写 window._statsCache；
+    // 卡片依赖它显示真值）。
+    //
+    // ⚠⚠ **改掉「先 await 拿 stats、再画卡片」这个顺序** —— 实测单次 `/admin/stats`
+    // 要 **7 秒**（它内部对每个已注册上游调一次 ModelCatalog、会同步回源；
+    // 见 `internal/admin/admin.go` 的 `stats`/`modelMultipliers`），于是**整屏白等 7 秒**。
+    //
+    // ⇒ 改成"先出页面、后台再补"：
+    //   ① 立刻画一遍卡片（统计数字这时是 `—`，但**页面已经出来了**）；
+    //   ② stats 回来后**再画一遍**，数字自动填上。
+    // ⚠ 这与本文件其它面板同一套做法（缓存优先 + 后台补），也是用户一贯的要求：
+    //   "第一眼先出内容，不要为了拿最新数据先等一次网络往返"。
+    admin('/admin/stats')
+      .then(d => { try { renderStats(d); renderCards(h, s); fillTopModel(d); } catch (e) { /* 非关键 */ } })
+      .catch(() => { /* 统计非关键：拿不到就保持占位 */ });
     renderCards(h, s);
     // 上游契约要**最先**取：renderAccounts 依赖它把账号归到上游，
     // 导航分组也依赖它。单独 try —— 拿不到 manifest 不该让账号表显示不出来
@@ -8047,20 +9244,67 @@ let multCatalogFailed = false;
     // 改名只需改后端配置，界面自动跟随。
     renderIdentity();
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
-    try { renderAccounts((await admin('/admin/accounts')).accounts); }
+    try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts); }
     catch { renderAccounts(s.accounts); }
     // 倍率要先取：renderModels 依赖它给每个模型加标记。
     // 单独 await 且自带 try —— 倍率拿不到不该让模型列表也显示不出来。
     await loadModelMultipliers();
-    try { renderModels((await api('/v1/models')).data); }
+    try { renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data); }
     catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     loadSchedule();
-    try { renderStats(await admin('/admin/stats')); } catch { /* 统计非关键 */ }
+    // ⚠⚠ **这里曾经又调了一次 `/admin/stats`** —— 删掉它。
+    //
+    // 那一次是**纯冗余**、代价还极大：实测单次 `/admin/stats` 要 **7 秒**
+    //（它内部对每个已注册上游调一次 `ModelCatalog`，会同步回源 ⇒ 最多 MaxRotate
+    // 次上游请求；见 `internal/admin/admin.go` 的 `stats` 与 `modelMultipliers`），
+    // 而本函数开头（`renderStats(await admin('/admin/stats'))`）**刚刚调过一次**
+    // 并写进了 `window._statsCache` —— 中间没有任何东西清它，
+    // 所以这一次的结果与上一次逐字节相同。
+    //
+    // ⇒ 删掉它，`refresh()` 里对 `/admin/stats` 的等待从 **2 次降到 1 次**
+    //（≈14s → ≈7s）。⚠ 真正的 7 秒还在后端（同步回源），那是下一步要处理的；
+    // 这一处是"不改变任何行为、只是不再重复做同一件慢事"。
+    // ⚠ 若以后需要在列表之后刷新统计，**不要**直接加回这一行 ——
+    // 统计每 30 秒有一次轮询（见 8235 附近），需要即时刷新应当先去掉轮询再加。
     try { loadTrendSeries(); } catch { /* 趋势图非关键 */ }
+    // ⚠ 热力图（365 天）随**整页刷新**加载。
+    // ⚠ 不是上面那个 `/* 趋势非关键 */`（那行在 24h/7d 的 click 回调里，只在点按钮时才走）
+    //   —— 我第一次就挂错了那边，结果页面加载时它从来不动、365 个格子一直是空的。
+    // 内部有签名守卫：值没变就不重绘，所以刷新不会把 365 个格子重画一遍。
+    try { loadHeatmap(); } catch { /* 热力图非关键 */ }
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
     try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();
     // 记下摘要供调用方（顶部「立即刷新」）提示用；轮询调用方不看这个字段。
+    // ⚠⚠ **统一**把所有表格里"整列全空"的列藏掉（钉钉 / 飞书表格同款做法）。
+    //
+    // 为什么放在这里、而不是逐张表各自挂：逐张挂**一定会漏** —— 我第一版只挂在
+    // Loomy 的两张面板表上，结果用户立刻指着「成长计划」那张表说"这个表格不符合要求"
+    //（那张表的「可领」列整列都是 `—`，白白占着一列宽度）。
+    // 放在 `refresh()` 收尾处扫一遍 `document.querySelectorAll('table')`
+    // ⇒ 之后**任何新加的表格都自动生效**，不需要再记得去挂。
+    document.querySelectorAll('table').forEach(t => hideEmptyCols(t));
+    // ⚠ 同理：**合计为 0 的卡片**也藏掉（判据保守，只看"名字含合计"的卡 —— 见函数注释）
+    //
+    // ⚠⚠ **必须扫两次**，这是实测出来的（第一次做时它没生效，我看截图才发现）：
+    //   成长计划那些卡片是 `loadGrowth()` **异步**画上去的，而本函数在它之前就跑到了这一行 ——
+    //   那一刻 `.cards .card` **还不存在**，于是什么都没藏，图上那张「可领合计 0 项 · +0」照旧。
+    //   ⇒ 立刻扫一次（覆盖同步渲染的），再延时扫一次（覆盖异步画上来的）。
+    //   ⚠⚠ **实测教训**：这个"扫一遍"的写法对**异步渲染**的面板（成长计划）**无效** ——
+    //     我在这里扫过一次、又加过 500ms 延时扫第二次，**两次都没生效**（看截图才发现），
+    //     因为那些卡要等 `loadGrowth()` 拿到上游数据才画，扫描时机永远赶不上。
+    //     ⇒ 成长计划已改成**在生成卡片时就判掉**（见 `growthCards` 的 `.filter`）。
+    //     这里保留：它对**同步渲染**的卡片区（仪表盘 / API 管理）仍然有效。
+    hideZeroTotals(document);
+    setTimeout(() => hideZeroTotals(document), 500);
+
+    // ⚠ 「Top 模型」**不在这里填**（2026-10-18 实测踩到）：
+    //   本函数（`refresh`）作用域里的 `s` 是 **`/status` 的响应**，而 `/admin/stats` 的响应名叫 `d`
+    //   （在下面 `.then(d => …)` 里）。我原来在这里写 `s.by_model_detail`
+    //   ⇒ 读的是 `/status`，那里面根本没这个字段 ⇒ `Object.entries(undefined || {})` 得空
+    //   ⇒ **显示成 `—`，而且不报错**（连 try/catch 都没动静，`pageerror` 干净）——
+    //   ⚠ 比"引用不存在的变量"更隐蔽。
+    //   ⇒ 已挪到 `renderStatsReport(s)`：那里入参名 `s` 就是 `/admin/stats` 的响应。
     refresh._last = { healthy: h.healthy || 0, total: h.total || 0 };
     return true;
   }
@@ -8567,8 +9811,14 @@ let multCatalogFailed = false;
       // 刷新按钮同时清掉两张缓存：模型列表（/v1/models）和倍率目录（/v3/config）。
       // 只清前者会让倍率停留在旧值，看起来像"刷新没生效"。
       await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
+      // ⚠ 用户点的是「刷新模型目录」⇒ 必须**清缓存**，否则下面那次会拿到 30 秒内的旧目录
+      //    ⇒ 表现就是"点了刷新，列表没变"（那正是用户之前抱怨过的"点了没反应"）。
+      lazyCache.drop('ep:/v1/models');
+      // ⚠ 倍率目录也要清 —— 否则下面那句 `loadModelMultipliers()` 会直接命中 30 秒缓存，
+      //   用户点的是「**强制**刷新目录」，结果什么都没变（"点了没反应"的老毛病）。
+      lazyCache.drop('ep:/admin/models/preview');
       await loadModelMultipliers();
-      renderModels((await api('/v1/models')).data);
+      renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data);
       return true;
     }, { label: '模型目录' });
 
