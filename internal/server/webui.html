@@ -358,6 +358,11 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 12px;
     display:flex;flex-direction:column;justify-content:center;min-height:52px;width:auto;min-width:0}
   .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
+  /* ⚠ 口径说明的 `?`（照 agent2api 的 TipQ 做法）。纯 CSS 画的圆点，不引图标。 */
+  .card .k .ctip{display:inline-flex;align-items:center;justify-content:center;
+    width:12px;height:12px;margin-left:4px;border-radius:50%;font-size:9px;
+    background:color-mix(in srgb,var(--dim) 28%,transparent);color:var(--fg);
+    cursor:help;vertical-align:middle}
   /* ⚠ 「Top 模型」的值是模型名（`loomy/DeepSeek-V4.1-Flash` 那种很长）——
      看图发现它把卡撑成两行、把整行都拉高了。⇒ 单行 + 截断，全文放 title。 */
   .card .v{font-size:21px;font-weight:700;font-family:var(--mono);margin-top:2px;
@@ -8648,6 +8653,45 @@ let loginProvider = '';
     put('当前连续天数', dayCardVals.streak);
   }
 
+  // CARD_TIPS 每张概览卡的**口径说明**（照 agent2api：它用 `?` 悬停而不是在卡上写小字）。
+  //
+  // ⚠ 为什么这样更好（它那边的选择）：小字要占版面、而且 11 张卡时每张一句会把卡片行撑高；
+  //   而口径这种东西"想知道的人才会问" ⇒ 放进悬停里最省地方。
+  // ⚠ 文案照它那几句的口径（"近 7 天"/"成功率 —"/"输入 + 输出"/"区间共 7 天"/"含今天在内往前数"）。
+  const CARD_TIPS = {
+    '总请求': '当前统计范围内收到的全部请求（含成功与失败）。',
+    '成功': 'HTTP 2xx 的请求数。',
+    '失败': '非 2xx 的请求数（含 4xx/5xx 与上游错误）。',
+    '成功率': '成功 / 总请求。⚠ 分母为 0 时显示 —。',
+    '输出 token': '上游 usage 里的 completion_tokens（⚠ 已含推理 token，不重复相加）。',
+    '推理 token': '输出 token 中属于推理（thinking）的部分 —— 它是上面那个数的子集。',
+    '平均 TTFB': '首字节平均耗时，只统计上报了该字段的请求（未上报的不计入分母）。',
+    '平均总耗时': '从收到请求到响应结束的平均耗时。',
+    'Top 模型': '本范围内**消耗 Token 最多**的模型（不是请求数最多）。',
+    '活跃天数': '本统计范围内**有请求的自然日**天数（补零的日子不算活跃）。',
+    '当前连续天数': '从今天往前数、连续有请求的天数（含今天在内往前数）。',
+  };
+
+  // attachCardTips 给每张概览卡的标题补一个 `?` 与悬停说明。
+  //
+  // ⚠ 必须是**幂等**的：它会在每次 refresh / 30 秒轮询之后被调（那次会重建卡片），
+  //   但重建后的卡片本来就没有 `?`；⚠ 而同一个标题**不该出现两个 `?`** —— 所以先查 marker。
+  function attachCardTips() {
+    for (const card of document.querySelectorAll('#statsCards .card')) {
+      const k = card.querySelector('.k');
+      if (!k || k.querySelector('.ctip')) continue;      // ⚠ 已加过就跳过
+      const name = k.textContent.trim();
+      const tip = CARD_TIPS[name];
+      if (!tip) continue;
+      const q = document.createElement('span');
+      q.className = 'ctip';
+      q.textContent = '?';
+      q.title = tip;
+      k.appendChild(q);
+      card.title = tip;                                  // ⚠ 整张卡也能悬停读到，更好点
+    }
+  }
+
   // renderStatsModels 模型明细：一行一个模型，同时给出调用次数与成本系数。
   //
   // 两个数据源各自可能缺失，必须分别降级：
@@ -9713,6 +9757,7 @@ let multCatalogFailed = false;
         // ⚠ 最后无条件回填那两格 —— 它俩的值不在 `d` 里（来自 series），
         //   而上面的 renderStats 刚重建过卡片把它们清空了（见 dayCardVals 的注释）。
         try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
+        try { attachCardTips(); } catch (e) { console.error('attachCardTips 失败:', e && e.message); }
       })
       .catch(() => { /* 统计非关键：拿不到就保持占位 */ });
     renderCards(h, s);
