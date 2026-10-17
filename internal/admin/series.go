@@ -20,6 +20,18 @@ type statsSeriesItem struct {
 	OK     int64  `json:"ok"`     // 成功数
 	Fail   int64  `json:"fail"`   // 失败数
 	Tokens int64  `json:"tokens"` // 消耗 token（usage 缺失不计）
+	// ⚠ 缓存命中率趋势要的两个量（2026-10-18 加，照 agent2api 的 `cache_trend_24h`）。
+	//
+	// ⚠ **一处刻意偏离它的口径**：它的 `rate = hit / input`，其中 `input` 取
+	// `prompt_tokens`。⚠ 我们的日志**没有 prompt_tokens 这个字段** ⇒ 这里只给
+	// 两个**原始量**，`rate` 由前端按 `hit / (hit + miss)` 算 —— 与顶层
+	// `cache_hit_rate` 和 `cache_rates` 四档**同一口径**，不会出现"同一个指标两个算法"。
+	//
+	// ⚠ 不给 rate 还有一个理由：它的前端明确要求"命中率纵轴上限按真实峰值抬、
+	// **不夹到 100%**"（上游分开上报时合法可超 100%）；把 rate 交给前端算，
+	// 前端才能在**同一个地方**决定轴上限与"整段无数据就不画这条线"。
+	CacheHit  int64 `json:"cache_hit"`
+	CacheMiss int64 `json:"cache_miss"`
 }
 
 // registerStatsSeries 注册趋势图端点。
@@ -68,6 +80,13 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.Tokens >= 0 {
 			out[i].Tokens += int64(e.Tokens)
+		}
+		// ⚠ 缓存两量与别处同一取法：>0 才累加（负数/负零属上游异常，丢了比算进去好解释）。
+		if e.CacheHitTokens > 0 {
+			out[i].CacheHit += int64(e.CacheHitTokens)
+		}
+		if e.CacheMissTokens > 0 {
+			out[i].CacheMiss += int64(e.CacheMissTokens)
 		}
 	}
 	// 去掉尾部全空桶（活跃窗口之外），保留从 start 起的连续段
