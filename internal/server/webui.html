@@ -431,6 +431,8 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      （它那边也有同样的顾虑：容器高度下限与 SVG 高度对齐）。 */
   .cachetrend{height:180px;position:relative}
   .cachetrend .ax{font-size:10px;fill:var(--dim)}
+  .dailytrend{height:200px;position:relative}
+  .dailytrend .ax{font-size:10px;fill:var(--dim)}
   /* 仪表盘内的子段落：一块一个 h3，块间用分隔线切开。
      每个子段自己的 .body 有内边距，这里不再重复 padding。 */
   .boardsec + .boardsec{border-top:1px solid var(--line)}
@@ -823,6 +825,22 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
           <span class="spacer"></span>
           <span class="dim">无请求的整点按 0% 计，但不写读数</span>
         </div>
+      </div>
+    </div>
+
+    <!-- 2e) 按天 Token 趋势 · 2026-10-18 照 agent2api 报表页第 9 块加。
+         ⚠ 口径照抄它 `dailyTrendView`（report-charts.ts:1054-1101）：
+           · **竖排柱状图**，柱顶**直接标当天读数**（不是只靠悬停）
+           · ⚠ 标注**三级排法**：横排 → 竖排（rotate -90，列宽 ≥13px 才够）→ 只标峰值
+           · `barW = min(28, step*0.68)` 且下限 1px（极长区间下柱子只有一两像素，不再压窄）
+           · ⚠ **全为 0 ⇒ 不画网格也不画柱子**，只给一句明确说明
+             （它原话："否则整块图空得像渲染失败"）
+         ⚠ 它这块**随"时间范围"变化** ⇒ 我们绑到上面那个趋势范围（24h/7d/30d/365d），
+           切换时两张图一起变（24h 是小时桶，其余是天桶 —— 标题会如实写出来）。 -->
+    <div class="boardsec">
+      <h3>按天 Token 趋势 <span class="dim" id="dailyTrendRange" style="font-weight:400;text-transform:none"></span></h3>
+      <div class="body">
+        <div id="dailyTrend" class="dailytrend"></div>
       </div>
     </div>
 
@@ -8087,12 +8105,19 @@ let loginProvider = '';
     if (!list.length) return;
     // ⚠ 签名只取"会改变画面的东西"：桶数 + 最后一天的量 + 总量。
     //   否则 30 秒轮询会把 365 个格子整块重绘一遍（肉眼可见的闪）。
+    // ⚠⚠ **填卡片必须在 sig 守卫之前**（2026-10-18 看图发现的回归）。
+    //   症状：概览卡的「活跃天数 / 当前连续天数」变成 `—`。
+    //   根因：卡片是 `renderStats` 每次**重建**的（值重置成 null），而填它们的
+    //   `fillDayCards` 原来放在下面那道 sig 守卫**之内** —— sig 没变就直接 return，
+    //   于是重建后**没人再填**。
+    //   ⇒ 拆开：`renderHeatmap`（重活）该被守卫挡住；**填卡片（轻活）每次都做**。
+    fillDayCards(list);
+
     const sig = list.length + '|' + (list[list.length - 1].total || 0) + '|'
       + list.reduce((a, p) => a + (p.total || 0), 0);
     if (sig === heatSig) return;
     heatSig = sig;
     renderHeatmap(list);
-    fillDayCards(list);
   }
 
   // fillDayCards 用 series 的按天数据回填三张概览卡（⚠ 本函数是它们**唯一**的数据来源）。
@@ -8290,6 +8315,115 @@ let loginProvider = '';
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
       if (!rows[i]) return;
       svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(rows[i].ts.slice(11, 16))}</text>`);
+    });
+    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 按天 Token 趋势（竖排柱状）· 照 agent2api 的 dailyTrendView
+  //
+  // ⚠ 三条照抄它的要点：
+  //   1. **柱顶直接标出当天读数**（不是只靠悬停 —— 它原话："柱顶标出当天的读数"）；
+  //   2. ⚠ **标注三级排法**：横排（相邻不重叠）→ 竖排（`rotate(-90)`，列宽 ≥13px）→
+  //      **只标峰值**（列宽只剩几像素时，任何排法都会糊成一片，索性让峰值一眼可见）；
+  //   3. ⚠ **全为 0 ⇒ 不画网格也不画柱子**，只留一句说明 ——
+  //      它原话："否则整块图空得像渲染失败"。
+  //
+  // ⚠ 它这块**随"时间范围"变化** ⇒ 这里读 `trendRange`，与上面那条趋势同步。
+  let dailyTrendSig = '';
+
+  async function loadDailyTrend() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=' + trendRange); }
+    catch { return; }
+    const list = (d && d.series) || [];
+    // ⚠ 签名里**必须带 trendRange**：否则切范围时若总量恰好相同就被判"没变"、不重画。
+    const sig = trendRange + '|' + list.length + '|' + list.reduce((a, p) => a + (p.tokens || 0), 0);
+    if (sig === dailyTrendSig) return;
+    dailyTrendSig = sig;
+    renderDailyTrendSVG(list);
+  }
+
+  function renderDailyTrendSVG(list) {
+    const host = $('dailyTrend');
+    if (!host) return;
+    const rl = $('dailyTrendRange');
+    // ⚠ 标题如实写出"这是哪个范围 / 什么桶" —— 24h 是小时桶、其余是天桶
+    if (rl) rl.textContent = list.length
+      ? ('· ' + trendRange + '（' + (trendRange === '24h' ? '小时桶' : '天桶') + '）· '
+         + String(list[0].ts || '').slice(0, 10) + ' ~ ' + String(list[list.length - 1].ts || '').slice(0, 10))
+      : '';
+
+    const vals = list.map((p) => p.tokens || 0);
+    const peak = vals.length ? Math.max(...vals) : 0;
+    // ⚠ 全为 0 ⇒ 不画网格也不画柱（照它那句"否则整块图空得像渲染失败"）
+    if (!list.length || peak <= 0) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">所选范围内暂无 Token 用量</div>';
+      return;
+    }
+
+    const W = 900, H = 200, PADL = 50, PADR = 14, PADB = 26;
+    const n = list.length;
+    const step = (W - PADL - PADR) / n;
+    const fmtT = (v) => v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
+    // ⚠ 读数文本先定，再决定排法与顶部留白（照它 1082-1090 的顺序：先算文本、再定版面）
+    const texts = vals.map((v) => (v > 0 ? fmtT(v) : ''));
+    const estW = (s) => s.length * 6;                       // ⚠ 粗估宽度（它有自己的 textWidth 估算器）
+    const widest = Math.max(0, ...texts.map(estW));
+    const allFit = widest + 4 <= step;                      // 横排能否放下
+    // ⚠ 判定"能不能竖排"要按**相邻有值柱的实际间距**，不能按均分 `step`。
+    //   看图发现的问题：30 天窗口里只有最后 8 天连着有量 ⇒ 8 根柱挤在右端 1/4 宽度里，
+    //   而按均分算出来的 `step`（900/30≈30px）**够 13px** ⇒ 误判成"可以竖排"
+    //   ⇒ 结果 8 串读数在那一小段里叠成一团。
+    //   ⇒ 用真实最小间距判：一旦不够就退回它第三级——**只标峰值**。
+    const idxs = vals.map((v, i) => (v > 0 ? i : -1)).filter((i) => i >= 0);
+    let minGap = Infinity;
+    for (let k = 1; k < idxs.length; k++) minGap = Math.min(minGap, (idxs[k] - idxs[k - 1]) * step);
+    if (!isFinite(minGap)) minGap = step;
+    const VERT_MIN_STEP = 13;                               // ⚠ 照它那个常量
+    const vertical = !allFit && minGap >= VERT_MIN_STEP;     // 竖排
+    // 三级排法：横排 / 竖排 / 只标峰值
+    const mode = allFit ? 'h' : (vertical ? 'v' : 'peak');
+
+    // ⚠ 顶部留白跟着排法走：竖排要从柱顶往上长出最长那一串
+    const PADT = vertical ? 10 + Math.ceil(widest * 1.25) : 26;
+    const plotH = H - PADT - PADB;
+    const yMax = peak * 1.06;                                // ⚠ 顶部留一点空，柱子不顶格
+    const yAt = (v) => PADT + plotH - (plotH * v) / yMax;
+    const barW = Math.max(1, Math.min(28, step * 0.68));     // ⚠ 照它：下限 1px
+
+    const svg = [];
+    // 网格 + 左轴刻度（5 等分）
+    for (let i = 0; i <= 4; i++) {
+      const y = PADT + (plotH * i) / 4;
+      svg.push(`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W - PADR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`);
+      svg.push(`<text class="ax" x="${PADL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${fmtT(yMax * (1 - i / 4))}</text>`);
+    }
+    // 柱子 + 读数
+    const cx = (i) => PADL + step * i + step / 2;
+    const peakIdx = vals.indexOf(peak);
+    for (let i = 0; i < n; i++) {
+      const v = vals[i];
+      if (v <= 0) continue;
+      const y = yAt(v);
+      svg.push(`<rect x="${(cx(i) - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(PADT + plotH - y).toFixed(1)}" fill="var(--acc)" rx="${Math.min(2, barW / 2).toFixed(1)}"/>`);
+      const t = texts[i];
+      if (!t) continue;
+      if (mode === 'h') {
+        svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle">${esc(t)}</text>`);
+      } else if (mode === 'v') {
+        // ⚠ 竖排：自下而上贴着柱顶（rotate -90 ⇒ 锚点在左下）
+        svg.push(`<text class="ax" x="${(cx(i) + 3).toFixed(1)}" y="${(y - 4).toFixed(1)}" text-anchor="start" transform="rotate(-90 ${(cx(i) + 3).toFixed(1)} ${(y - 4).toFixed(1)})">${esc(t)}</text>`);
+      } else if (i === peakIdx) {
+        svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle" fill="var(--acc)">${esc(t)}</text>`);
+      }
+    }
+    // x 轴：首/中/末（⚠ 桶多时全标会糊）
+    [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
+      const p = list[i]; if (!p) return;
+      const lbl = trendRange === '24h' ? String(p.ts || '').slice(11, 16) : String(p.ts || '').slice(5, 10);
+      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lbl)}</text>`);
     });
     host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
   }
@@ -9263,6 +9397,9 @@ let multCatalogFailed = false;
       }
       trendSeries._last = '';
       try { loadTrendSeries(); } catch { /* 趋势非关键 */ }
+      // ⚠ 按天 Token 趋势也跟着范围走（它同样读 `trendRange`）。
+      // 它内部签名含 trendRange ⇒ 切范围时自动判为"变了"、重画，不需要在这里清什么。
+      try { loadDailyTrend(); } catch { /* 按天趋势非关键 */ }
       // ⚠ 热力图**不在这里**刷新：它读的是 `range=365d`，与上面的 24h/7d 无关。
       //（我最初插在这里 —— 结果它只在"点按钮"时才跑，页面加载时从来不动、格子是空的。
       //  ⚠ 教训：本文件里有**两处** `loadTrendSeries()`，注释只差一个"图"字，anchor 必须照抄全。）
@@ -9452,6 +9589,8 @@ let multCatalogFailed = false;
     try { loadHeatmap(); } catch { /* 热力图非关键 */ }
     // ⚠ 缓存命中率趋势（双轴）也在这个时机 —— 它读的同样是 series（只是 range=24h）。
     try { loadCacheTrend(); } catch { /* 缓存趋势非关键 */ }
+    // ⚠ 按天 Token 趋势（它第 9 块）也在这里首次加载 —— 它读 `trendRange`，与上面那条同步。
+    try { loadDailyTrend(); } catch { /* 按天趋势非关键 */ }
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
     try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();
