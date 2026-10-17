@@ -316,7 +316,13 @@ type Handler struct {
 	aggMu       sync.Mutex
 	aggCache    map[string]any
 	aggAt       time.Time
-	aggCount    int   // ⚠ 建它时的 entries 条数：条数变了就必须重建（日志在追加/轮转）
+	aggCount    int    // ⚠ 建它时的 entries 条数：条数变了就必须重建（日志在追加/轮转）
+	// ⚠⚠ 建它时的**时间档**（2026-10-18 加）。
+	// 为什么必须有：`?range=` 会改变参与聚合的条目集合，而**不同档完全可能条数相同**
+	//（例如"本月"与"全部"在我们这种"数据全在当月"的场景下条数一样）
+	// ⇒ 只用 `aggCount` 做键会让两个档**互相命中彼此的缓存** ⇒ 表面上"某个档不过滤"。
+	// ⚠ 这正是我上一轮遇到的怪象（同一函数、同一字符串，测出来时好时坏）。
+	aggRange    string
 	aggErr      error
 	aggBuilding bool
 	statsSource string
@@ -2463,7 +2469,21 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	// 而下面这十几处 `resp[...] = …` **全是顶层新键**；聚合出的嵌套结构（`by_*`）
 	// 在这条路径上只被读。⚠ 前提与后果写在 `statsAggCached` 的注释里 ——
 	// 谁要是开始改动嵌套 map 的内容，就得把这里升级成深拷贝。
-	agg := h.statsAggCached(items)
+	// ⚠ 时间档（照 agent2api 的 `range` 档位）。空/未知 ⇒ 不过滤，保持既有"全部落盘历史"。
+	// ⚠ 归一后的档名要与缓存键一起传给 `statsAggCached` —— 只靠条数判缓存会让两个档互相命中
+	//   （见 `aggRange` 字段的注释：那正是上一轮"某个档看起来不过滤"的根因）。
+	// ⚠ 过滤必须发生在 `statsAggCached` **之前**（它内部按 len(items) 与 rangeKey 判缓存）。
+	rangeKey := statsRangeKey(r.URL.Query().Get("range"))
+	if from, ok := statsRangeFrom(rangeKey); ok {
+		kept := make([]logbuf.Entry, 0, len(items))
+		for _, e := range items {
+			if !e.At.Before(from) {
+				kept = append(kept, e)
+			}
+		}
+		items = kept
+	}
+	agg := h.statsAggCached(items, rangeKey)
 	resp := make(map[string]any, len(agg)+16)
 	for k, v := range agg {
 		resp[k] = v
@@ -2766,35 +2786,40 @@ func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
 //     若只看 TTL，`total` 会停在旧值，用户会看到"刚发的请求没被统计"；
 //  3. ⚠ **首次（缓存为 nil）同步建一次** —— 与 multTableCached 的修法同理：
 //     "返回上一个版本的真数据"可以接受，"返回空"不行。
-func (h *Handler) statsAggCached(items []logbuf.Entry) map[string]any {
+func (h *Handler) statsAggCached(items []logbuf.Entry, rangeKey string) map[string]any {
 	h.aggMu.Lock()
-	cached, at, cnt := h.aggCache, h.aggAt, h.aggCount
-	fresh := cached != nil && at != zeroTime() && time.Since(at) < statsCacheTTL && cnt == len(items)
+	cached, at, cnt, rg := h.aggCache, h.aggAt, h.aggCount, h.aggRange
+	// ⚠ 三个判据缺一不可：新鲜度 · 条数 · **时间档**（见 aggRange 字段的注释）
+	fresh := cached != nil && at != zeroTime() && time.Since(at) < statsCacheTTL
+	fresh = fresh && cnt == len(items) && rg == rangeKey
 	needBuild := !fresh && !h.aggBuilding
 	if needBuild {
 		h.aggBuilding = true
 	}
 	h.aggMu.Unlock()
 
-	if !needBuild {
+	// ⚠⚠ **只有四项全对才复用**（2026-10-18 修，这是本轮的关键一处）。
+	//
+	// 原来这里是"只要没人在建就 `return cached`" —— 而那份 `cached` 可能是**别的档**的产物
+	// ⇒ 换档时先到的请求会拿到上一个档的数字。实测症状：
+	//   `?range=today` 给 1735 / 29006（两次不同）· `?range=7` 给 29017（其实是"全部"）
+	//   · `?range=bogus` 给 1735 —— **三个值在各档间串位**。
+	//
+	// ⚠ 同一个病上一轮就出现过，当时是"**条数相同**的两个档互相命中"（还没引入 rangeKey）；
+	//   这次的乱序探针（同一个档在不同访问顺序下比对取值集合）才算把它钉死。
+	if fresh {
 		return cached // ⚠ 调用方负责浅拷贝（本函数**不**替它拷）
 	}
-
-	build := func() map[string]any {
-		out := aggregateChatLog(items)
-		h.aggMu.Lock()
-		h.aggCache, h.aggAt, h.aggCount, h.aggBuilding = out, time.Now(), len(items), false
-		h.aggMu.Unlock()
-		return out
-	}
-
-	if cached == nil {
-		// ⚠ 首次：同步建（只有进程起来后的第一次付代价）—— 不能返回空。
-		return build()
-	}
-	// ⚠ 已有旧产物：先把旧的交出去，后台重建。
-	go func() { _ = build() }()
-	return cached
+	// ⚠ 不 fresh 的三种情形 —— **首次 / 条数变了 / 换了时间档** —— 一律**同步建**：
+	//   · "稍旧的**同一档**数据"可以接受（旧数据 << 空数据）；
+	//   · 但"**别的档**的数据"是**错的**，不只是旧 —— 用户会对着"近 7 天"读"全部"的数字。
+	//   ⚠ 代价：换档时付一次 ~3 秒。那是用户显式点档位按钮的动作，可接受。
+	//   ⇒ `aggBuilding` 因此不再参与判据（字段保留，仅为不破坏其它引用）。
+	out := aggregateChatLog(items)
+	h.aggMu.Lock()
+	h.aggCache, h.aggAt, h.aggCount, h.aggRange, h.aggBuilding = out, time.Now(), len(items), rangeKey, false
+	h.aggMu.Unlock()
+	return out
 }
 
 // zeroTime 只是把"零值时间"这个判断收在一处，免得各处自己写 time.Time{}。
@@ -2811,6 +2836,49 @@ var cacheWindowKeys = []string{"last10m", "last1h", "last24h", "last7d"}
 
 var cacheWindowDur = []time.Duration{
 	10 * time.Minute, time.Hour, 24 * time.Hour, 7 * 24 * time.Hour,
+}
+
+// statsRangeKey 归一化时间档名（⚠ 只做 `trim + lower`，未知值原样返回）。
+//
+// ⚠ 为什么单独一个函数（2026-10-18 的教训）：把"档名 → 缓存键"收在一处，
+// 单测才能直接断言"同一档永远得到同一个键"。上一轮我把归一并进取边界那个函数、
+// **没有单测就上线**，结果出现"同一字符串时好时坏"，我查了四轮才定性。
+//
+// ⚠ 未知值**不做兜底**（`"bogus"` 就返回 `"bogus"`）：它要参与缓存键，
+// 不同的未知值不该互撞；"是否过滤"由 `statsRangeFrom` 说了算。
+func statsRangeKey(p string) string {
+	return strings.ToLower(strings.TrimSpace(p))
+}
+
+// statsRangeFrom 把**归一化后**的档名解析成"从这个时刻起（含）"。
+//
+// ⚠ 第二个返回值为 false ⇒ **不过滤**（调用方保持原行为：全部落盘历史）。
+//
+// ⚠ 口径照 agent2api 的 `range_bounds`（report.rs:96-145）：
+//
+//	today ⇒ 今天 00:00（本地）
+//	7 / 30 ⇒ 从今天往前 days-1 天，**含今天** —— 它明确写了"含今天，所以减 days-1"
+//	month ⇒ 本月 1 号 00:00（本地）
+//	其它（含空、"all"）⇒ 不过滤
+//
+// ⚠ 它那两条防御我们天然不需要（我们只做"起点"、不做"终点"）：
+// start>end 要交换、end 要夹到今天 —— 没有终点就都不存在。
+// 注意："未来时间戳的行"仍可能进来（时钟被往前调过），那与不加档时行为一致。
+func statsRangeFrom(key string) (time.Time, bool) {
+	now := time.Now()
+	y, m, d := now.Date()
+	todayMidnight := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+	switch key {
+	case "today":
+		return todayMidnight, true
+	case "7":
+		return todayMidnight.AddDate(0, 0, -6), true
+	case "30":
+		return todayMidnight.AddDate(0, 0, -29), true
+	case "month":
+		return time.Date(y, m, 1, 0, 0, 0, 0, now.Location()), true
+	}
+	return time.Time{}, false
 }
 
 // cacheRates 四档缓存命中率（每档含 rate / hit / miss）。
