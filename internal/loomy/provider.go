@@ -104,6 +104,13 @@ type Provider struct {
 	panelTasks  *panelRowCache[accountTasksView]
 	panelInvite *panelRowCache[accountInviteView]
 
+	// warmOnce 面板预热循环只启动一次（幂等）—— 与 freePool.sweepOnce 同一形态。
+	//
+	// ⚠ 为什么要有服务端预热（用户 2026-10-18："打开页面毫秒加载整个页面数据"）：
+	//   前端只请求当页，而 `?page=` 只读缓存 ⇒ 没进缓存的行永远 `stale`（「正在读取…」）。
+	//   把补数搬到服务端后，无论何时打开、开在第几页，缓存都是满的。
+	warmOnce sync.Once
+
 	client *Client
 	// authDir 凭证目录。供 AuthDirExt 使用 —— 核心据此按上游重载 auths。
 	authDir string
