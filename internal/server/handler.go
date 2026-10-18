@@ -1918,6 +1918,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.usage = usageOf(resp)
 		return
 	}
+	// ⚠⚠ **预算用尽留痕**（2026-10-18 加）。
+	//
+	// 走到这里说明重试循环**正常走完**了（不是 break 出来的）⇒ 换号预算用完仍没成功。
+	// 抄 new-api 的同义判决名：它的 `DecideRelayRetry` 在 `retryTimes <= 0` 时
+	// 返回 stop / `attempt_budget_exhausted`（service/relay_error.go:44-46）。
+	//
+	// ⚠ 只在**还没有更具体的留痕**时才写（`st.decision == ""`）：
+	// 前面那些判决点（sticky_unavailable / provider_breaker / convert_failed…）
+	// 说的都比"预算用尽"更具体，覆盖掉它们等于把证据换成结论。
+	//
+	// ⚠ 判据与紧邻的下面那段**同源**（那里按 lastKind 决定 msg 与状态码）：
+	// 吃过上游 5xx 说明是**上游**的问题，写 upstream_5xx；
+	// 否则是池子侧（号都试遍了/全在冷却），写 budget_exhausted。
+	if st.decision == "" {
+		if lastKind == gateway.ErrKindServer {
+			st.decision = "upstream_5xx:system"
+		} else {
+			st.decision = "budget_exhausted:global"
+		}
+	}
 	// 出口分两种语义（这是用户实测报的那个 503 的根因）：
 	//
 	//	上游 5xx（服务端故障） → 502 upstream_error：**客户端应该重试**，
