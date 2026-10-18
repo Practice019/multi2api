@@ -1460,6 +1460,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// （上游网关抖 / 该批号被限流），换档才有意义；而 4xx（请求本身的问题）
 	// 换到哪一档都一样失败，下沉只会白烧低档号。
 	tierOffset := 0
+	// ⚠⚠ **换上游**相关的两个变量（2026-10-18 加）。
+	//
+	// 背景（实测）：`deepseek-v41flash` 这个模型在 **loomy / workbuddy / workbuddy-intl** 三家都有
+	// （归一后同键，见 upstream_alt.go），而某一时段 loomy 失败率 15.22%、
+	// workbuddy 只有 0.13% —— 也就是说"我们要的东西就在隔壁那家"，只是请求被
+	// 模型前缀 `loomy/` 钉在了坏的那家上。
+	//
+	//	switchedUpstream ⚠ **只切一次**：切来切去会变成两个上游之间反复横跳，
+	//	  每一跳都要重新选号 + 打上游，比不切更慢。切过一次还没成就认了。
+	//	origModel 用户请求的**原始**模型名（带前缀）—— 用它去找"同模型的另一个上游"；
+	//	  ⚠ 不能用 reqModel：它会在切换后被改写成新上游的写法，再拿去匹配就找不回来了。
+	switchedUpstream := false
+	origModel := peek.Model
 	for i := 0; i < maxAttempts; i++ {
 		// 选号：粘性号优先（已校验 **provider + health + 在途未满**），否则普通轮换。
 		//
@@ -1490,6 +1503,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 绝不让 codearts 的请求落到 workbuddy 的账号上。
 			// reqProvider 为空（单上游模式 / 裸模型名）时池子按默认上游解释。
 			acct = h.cfg.Pool.PickForTier(reqProvider, reqModel, tried, tierOffset)
+		}
+		if acct == nil && !switchedUpstream {
+			// ⚠⚠ **换一个同模型的上游再试**（2026-10-18 加）。
+			//
+			// 这里才是"上游坏了"该有的动作：⚠ 不是更快地失败，而是**换一家**。
+			// 实测依据：`deepseekv41flash` 在 loomy / workbuddy / workbuddy-intl 三家都有，
+			// 而 loomy 15.22% 失败、workbuddy 0.13% ⇒ 换过去就是两个数量级的差别。
+			//
+			// ⚠ 只在"选不出号"时切，不在"上游熔断"时切：熔断是"这家现在不通"的证据，
+			//   而此刻选号往往还能成功（它只是刚被喂了失败）—— 那时切走会让流量在两家
+			//   之间来回跑，反而制造抖动。
+			//
+			// ⚠ 切过去之后：tierOffset 归零（新上游的档位与旧上游无关）、
+			//   tried 清空（那是"已试过的 uid"，换上游后那些 uid 不在候选里了）。
+			if alt, altModel := h.alternateUpstream(origModel, reqProvider); alt != "" {
+				st.decision = "switched_upstream:" + alt
+				reqProvider = alt
+				reqModel = altModel
+				tierOffset = 0
+				tried = map[string]bool{}
+				switchedUpstream = true
+				continue // ⚠ 用新上游重选号（本轮已消耗，但换来一个真候选集）
+			}
 		}
 		if acct == nil {
 			// ⚠ 出口语义（用户实测 503 的真正来源）：
