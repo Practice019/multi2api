@@ -205,7 +205,19 @@ func TestSweepTickerFires(t *testing.T) {
 	defer func() { freePoolSweepInterval = old }()
 
 	p, hits := sweepFixture(t, map[string]int64{sweepUIDHave1: 1434})
-	p.pool().noteQuota(sweepUIDHave1, 1434, true, time.Now().Add(-time.Hour))
+	// ⚠⚠ 时刻必须落在**同一天的过去**，且比 `freeRecheckEvery`(90s) 更早。
+	//
+	// 这个测试原来写 `time.Now().Add(-time.Hour)`，于是：
+	//   · 23:00–24:00 跑 ⇒ `now` 落到**昨天** ⇒ `noteQuota` 里 resetIfNewDay 清空池子 ⇒ 扫不到成员
+	//   · 改成"当天中午" ⇒ checkedAt 落在**未来** ⇒ `now.Sub(checkedAt)` 是负数
+	//     ⇒ 被 `now.Sub(at) < freeRecheckEvery` 判成"刚查过" ⇒ 同样扫不到
+	// 两条路都红，而**被测逻辑完全正确** —— 根因是"两个不同的 now"（见 sweepFreePoolAt）。
+	//
+	// ⚠ 现在用"2 分钟前"：2min > freeRecheckEvery(90s) 满足前置条件，
+	//   而它跨日的窗口只有 **每天 00:00:00–00:02:00**（而定时器那个循环本来
+	//   就要求 real time，这条无法完全消除）。⚠ 比"23:00 那一小时的窗口"小 30 倍。
+	const recent = 2 * time.Minute
+	p.pool().noteQuota(sweepUIDHave1, 1434, true, time.Now().Add(-recent))
 	p.StartFreePoolSweep()
 
 	deadline := time.Now().Add(2 * time.Second)

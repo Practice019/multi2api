@@ -119,10 +119,35 @@ func TestPoolResetsOnNewDay(t *testing.T) {
 }
 
 // ⚠ 失败不写池子，且要有退避（否则"越失败越查"）。
+// localNoon 把"当前时刻"钉到**当天中午**，给所有要 `now + 一段` 的用例当基准。
+//
+// ⚠⚠ 这是本文件**窗口型 flaky** 的解药，而那个窗口叫"午夜前 5 分钟"。
+//
+// # 机制（2026-10-18 实测，同一类坑踩了两次）
+//
+// 池子按**自然日**重置（`resetIfNewDay`）。所以任何"拿 `time.Now()` 再加一段时间"
+// 的断言，都在**隐含地断言"加完之后还在同一天"**。而这句话在 23:55 之后不成立：
+//
+//	now = 23:59:40  ⇒  now + freeFailBackoff(5min) + 1s = 次日 00:04:41
+//	⇒ dueForRecheck 里 resetIfNewDay 判定跨日 ⇒ **清空整个池子** ⇒ 返回 []
+//	⇒ "退避窗口过后应当挑出该重查的账号"失败，而**被测代码完全正确**
+//
+// ⚠ 各用例的红线窗口：`TestPoolFailBackoff` 是 **23:55:00–24:00:00**；
+//
+//	`TestPoolRecheckThrottled` 是 **23:58:30–24:00:00**（它是 90 秒）。
+//	即**每天有一个 5 分钟的窗口会红，而白天跑永远绿** —— 这正是它活得久的原因。
+//
+// ⚠ 钉到中午的余量：本文件的加时最长 2 小时，正午 ± 12 小时都还在当天之内。
+func localNoon(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, t.Location())
+}
+
+// ⚠ 退避的**实现细节**（noteFail 不删 needRecheck 标记，只靠 failAt 判窗口）
+// 由下面这个用例守着 —— 它是本文件里唯一会碰"午夜红线"的用例之一。
 func TestPoolFailBackoff(t *testing.T) {
 	p := NewWithConfig(Config{AuthDir: t.TempDir()})
 	po := p.pool()
-	now := time.Now()
+	now := localNoon(time.Now())
 	po.noteUsed("A", now)
 	po.noteFail("A", now)
 
@@ -141,7 +166,7 @@ func TestPoolFailBackoff(t *testing.T) {
 func TestPoolRecheckThrottled(t *testing.T) {
 	p := NewWithConfig(Config{AuthDir: t.TempDir()})
 	po := p.pool()
-	now := time.Now()
+	now := localNoon(time.Now())
 	po.noteQuota("A", 100, true, now) // 刚查过 ⇒ checkedAt = now
 	po.noteUsed("A", now)
 
@@ -169,7 +194,7 @@ func TestPoolNoRecheckForKnownZero(t *testing.T) {
 	//   实现是对的。⚠ 教训：**凡是要对时间做加减的测试，基准必须钉在"当天中间"**，
 	//   否则跑测试的钟点会变成一个隐形的输入。
 	midnight := time.Now()
-	now := time.Date(midnight.Year(), midnight.Month(), midnight.Day(), 12, 0, 0, 0, midnight.Location())
+	now := localNoon(midnight)
 	po.noteQuota("A", 0, true, now)
 	po.noteUsed("A", now.Add(time.Hour))
 	if got := po.dueForRecheck(4, now.Add(2*time.Hour)); len(got) != 0 {

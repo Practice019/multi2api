@@ -435,8 +435,29 @@ func (p *Provider) StartFreePoolSweep() {
 //
 // ⚠ 返回值只为测试 —— 生产代码不关心"这轮查了几个"。
 func (p *Provider) sweepFreePool() int {
+	return p.sweepFreePoolAt(time.Now())
+}
+
+// sweepFreePoolAt 与 sweepFreePool 相同，但**时刻由调用方给**。
+//
+// ⚠⚠ 为什么必须能注入（2026-10-18 实测，这是本文件第三次踩同一类坑）：
+//
+// `TestSweepTickerFires` 原来用"给 `noteQuota` 传 `time.Now().Add(-time.Hour)`"
+// 来造"该重查"的状态，而清扫内部用**自己的** `time.Now()` 判节流。于是：
+//
+//	在 23:00–24:00 之间跑：noteQuota 的 now = 昨天 ⇒ 跨日 ⇒ 池子被清空 ⇒ 扫不到成员
+//	把 noteQuota 改成"当天中午"跑：checkedAt = 11:00（**未来**）
+//	                            ⇒ swept 的 now.Sub(checkedAt) = **负数** ⇒ 被节流跳过
+//
+// 两条路都红，而**被测逻辑本身完全正确** —— 根因是"两个不同的 now"。
+// 注入时刻之后，夹具与清扫看到的是同一个 `now`，测试才有确定性。
+//
+// ⚠ 这不是"为测试改产品代码"：`FreePoolSweep` 那条路径本来就有 `now` 参数
+// （见 `dueForSweep(members, now)`、`members(now)`），这里只是把最外层的
+// `time.Now()` 提到函数签名上，让它和里面那几个**读的是同一个时刻** ——
+// 原来最外层读一次、里层各读一次，本身就是个（无害但没必要的）不一致。
+func (p *Provider) sweepFreePoolAt(now time.Time) int {
 	f := p.pool()
-	now := time.Now()
 	members := f.members(now)
 	if len(members) == 0 {
 		// 池子空了 = 所有已知账号的免费额度都用完了，我们正在用永久额度。
@@ -467,7 +488,7 @@ func (p *Provider) sweepFreePool() int {
 	}
 	// ⚠ 只在**池子大小变了**的时候打日志（= 有账号被移出去），
 	// 否则每分钟一行"查了 N 个"会变成噪音、把真正的信号淹掉。
-	if after := len(f.members(time.Now())); after != before {
+	if after := len(f.members(now)); after != before {
 		log.Printf("loomy: 免费额度池清扫 —— %d → %d 个账号（用完的已移出，不再参与轮询）",
 			before, after)
 	}
