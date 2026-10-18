@@ -77,13 +77,60 @@ func ParseUsageExtras(usage map[string]any) UsageExtras {
 		}
 	}
 
-	// 缓存命中：同上，prompt_cache_hit_tokens 存在就认它，缺席才回落简写键。
-	out.CacheHitTokens = usageInt(usage["prompt_cache_hit_tokens"])
-	if _, present := usage["prompt_cache_hit_tokens"]; !present {
-		out.CacheHitTokens = usageInt(usage["cached_tokens"])
+	// 缓存命中：**三级**取值（2026-10-18 修，取值并集照 Vercel AI SDK 各家实现 ——
+	// `@ai-sdk/deepseek` 认顶层 `prompt_cache_hit_tokens`、`@ai-sdk/openai` /
+	// `google-vertex` / `groq` / `openai-compatible` 都认**嵌套**的
+	// `prompt_tokens_details.cached_tokens`）。
+	//
+	// ⚠⚠ 为什么必须加嵌套那一级（实测证据，2026-10-18 打上游原始 usage）：
+	//
+	//	loomy/DeepSeek-V4.1-Flash 的真实 usage：
+	//	  {"prompt_tokens":651,
+	//	   "prompt_tokens_details":{"cached_tokens":640},   ← 命中数在这里
+	//	   "completion_tokens_details":{"reasoning_tokens":1}, …}
+	//
+	// 而本函数原来**只查顶层两个键** ⇒ `CacheHitTokens` 恒为 0。
+	// ⚠ 症状的完整链条：同一份 usage 里"推理 token 能读到、缓存 token 读不到"，
+	//   因为 `completion_tokens_details.reasoning_tokens` 那条**早就认了**（见上），
+	//   而嵌套的 cached_tokens 没人认 —— 于是日志里 think>0 占 59%、cache_hit>0 只占 7.6%
+	//   （且那 7.6% 全是最早那批 workbuddy，它恰好把 `cached_tokens` 放在**顶层**）。
+	//
+	// 取值顺序（**先到先得，且判据是「键存在」而不是「值非 0」** —— 与上面推理 token
+	// 那条同理：合法地为 0 与键不存在不能混为一谈）：
+	//
+	//	prompt_cache_hit_tokens          顶层显式名
+	//	→ cached_tokens                  顶层简写（workbuddy 用这个）
+	//	→ prompt_tokens_details.cached_tokens   **嵌套**（OpenAI 兼容的标准位置）
+	out.CacheHitTokens = 0
+	for _, probe := range []struct {
+		key  func() (any, bool)
+	}{
+		{func() (any, bool) { v, ok := usage["prompt_cache_hit_tokens"]; return v, ok }},
+		{func() (any, bool) { v, ok := usage["cached_tokens"]; return v, ok }},
+		{func() (any, bool) {
+			if d, ok := usage["prompt_tokens_details"].(map[string]any); ok && d != nil {
+				v, ok2 := d["cached_tokens"]
+				return v, ok2
+			}
+			return nil, false
+		}},
+	} {
+		if v, present := probe.key(); present {
+			out.CacheHitTokens = usageInt(v)
+			break
+		}
 	}
 
+	// 缓存未命中：显式键优先；⚠ 上游（loomy 实测）**根本不报** miss ⇒ 用
+	// `prompt_tokens − hit` 自己算。⚠ 只在**确实拿到了 hit** 时才推算 ——
+	// 否则"没有缓存信息"会被算成"全部未命中"，那是**编数据**（会把命中率恒报成 0%，
+	// 而 0% 会被读成一个结论 —— 与本文件顶部"缺失即 0"的语义相反）。
 	out.CacheMissTokens = usageInt(usage["prompt_cache_miss_tokens"])
+	if _, present := usage["prompt_cache_miss_tokens"]; !present && out.CacheHitTokens > 0 {
+		if pt := usageInt(usage["prompt_tokens"]); pt > out.CacheHitTokens {
+			out.CacheMissTokens = pt - out.CacheHitTokens
+		}
+	}
 	return out
 }
 
