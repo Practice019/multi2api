@@ -266,7 +266,18 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        （见 loadLoomyTasks / loadLoomyInvite 里的 `<table class="accttable">`），
        而它们**没有 colgroup** —— 对没有列宽的 fixed 表，浏览器会把宽度平分，
        那样反而比 auto 更糟。修饰类把影响面钉死在这一处。 */
-  .accttable--aligned{table-layout:fixed}
+  /* ⚠⚠ 2026-10-19 用户要求「所有的表格自适应列宽度」⇒ 这里**撤掉** `table-layout:fixed`。
+     上一步（列宽收归一处）当初是为了让同一列跨分组竖向对齐；但固定的代价是
+     每一列都被钉在**按最长样本估的**宽度上，短内容那几列就白白空着
+     （截图里 workbuddy-intl 的 UID 列占了 300+px，而 workbuddy 那组同样内容窄得多）。
+     用户看过之后要的是"按各自内容自适应"，以自适应为准。
+     ⚠ 撤掉 fixed 之后：
+       · 列宽拖拽**仍然有效** —— 它写的是 `<col>` 与表格 min-width，
+         auto 布局同样认这两个（拖过的列会成为固定宽，其余列按内容算）
+       · 列设置（显隐 / 顺序）不受影响，它只改列集
+       · `.accttable--aligned` 这个类**不删** —— 行高、内边距、单元格截断
+         那几条还挂在它上面；去掉的只是布局算法那一句。 */
+  .accttable--aligned{table-layout:auto}
   /* 账号表行高收到 40px（2026-10-19 照参考项目 Agent2API 移植，AGENTS 第 5 条
      「表格固定高度一行、尽可能紧凑少空白」）。
 
@@ -1028,7 +1039,12 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   <div id="toast" class="notice" hidden></div>
 </div>
 <header>
-  <img src="/favicon.svg" alt="" width="26" height="26" style="border-radius:7px;display:block">
+  <!-- ⚠ 顶栏原来这里有一个 <img src="/favicon.svg" width=26 height=26> 品牌图标。
+       2026-10-19 用户要求去掉（原话：「这是什么东西 黑色的去掉」）——
+       那个 SVG 是蓝紫渐变底 + 白气泡，26px 缩到边框里在深色主题下看着就是
+       一个突兀的深色小方块，与顶栏其它元素不成套。
+       ⚠ `/favicon.svg` 的**路由保留**（浏览器标签页 / 收藏夹还在用它，见
+         internal/server/webui.go 的 favicon 处理器），只是不再在页面里画一遍。 -->
   <h1 id="appTitle">网关 <small>本地控制台</small></h1>
   <span id="hdot" class="dot"></span>
   <span id="htxt" class="dim" style="font-size:12px">未连接</span>
@@ -3568,15 +3584,13 @@ let loginProvider = '';
   //     表格真实需要 1493px，1155 永远碰不到：**它没拦住任何东西**」
   // ⇒ 宽度必须**随列集一起生成**，才有"一处说了算"。
   //
-  // ⚠ 没给 w 的列（nickname）不写 width：fixed 布局会把它算成剩余空间，
-  //   这就是那个唯一的弹性列。
-  //
-  // ⚠ 2026-10-19 加 `providerId`：宽度要叠加用户的拖拽覆盖值（acctColWidthOf）。
-  //   覆盖值**优先于**列定义里的 w —— 但只有一处来源，不会漂移
-  //   （见列宽那一节的注释：绝不在 CSS 里再写一份默认宽度）。
+  // ⚠ 2026-10-19：宽度现在**只来自用户的拖拽覆盖值**（acctColWidthOf）——
+  //   没被拖过的列不写 width，交给 `table-layout:auto` 按各自内容算，
+  //   即用户要的"自适应"。列定义里的 `w` 不再参与渲染（见 acctColWidthOf 的注释）。
   function acctColgroupHTML(cols, providerId) {
+    if (!providerId) return '<colgroup>' + cols.map(() => '<col>').join('') + '</colgroup>';
     return '<colgroup>' + cols.map((id) => {
-      const w = providerId ? acctColWidthOf(providerId, id) : ((ACCT_COLUMN_DEFS[id] || {}).w || 0);
+      const w = acctColWidthOf(providerId, id);
       return w ? `<col style="width:${w}px">` : '<col>';
     }).join('') + '</colgroup>';
   }
@@ -3913,12 +3927,21 @@ let loginProvider = '';
   }
   function acctColWidthsDrop(providerId) { _acctColW.delete(providerId); }
 
-  // 某一列的**最终**宽度：覆盖值 → 列定义的 w → 0（0 = 让 fixed 布局去分剩余空间）。
+  // 某一列的宽度覆盖值（**只认用户拖过的**）。
+  //
+  // ⚠⚠ 2026-10-19 用户要求「所有的表格自适应列宽度」之后，这里**不再回落**到
+  //   `ACCT_COLUMN_DEFS[id].w` —— 那是当初为了让同一列跨分组竖向对齐而按
+  //   "最长样本"估的固定宽，代价是短内容那几列白白空着（截图里 workbuddy-intl
+  //   的 UID 列占 300+px，而 workbuddy 那组同样内容窄得多）。
+  //   现在没被拖过的列一律返回 0 = **不写宽度** ⇒ 交给 `table-layout:auto`
+  //   按各自内容算，这就是"自适应"。用户拖过的那一列才会有固定宽。
+  //
+  //   ⚠ `ACCT_COLUMN_DEFS` 里那些 `w` 字段**保留不删**：一是它们记录了每列的
+  //     设计意图（等宽数字列、双按钮操作列、状态药丸列各该多宽），二是
+  //     万一以后要恢复固定布局还能用。只是现在不参与渲染。
   function acctColWidthOf(providerId, id) {
     const ov = acctColWidthsFor(providerId);
-    if (ov[id]) return ov[id];
-    const d = ACCT_COLUMN_DEFS[id];
-    return (d && d.w) ? d.w : 0;
+    return ov[id] || 0;
   }
 
   // 表格的 min-width（参考的 rowSpanOf:379-389 的简化版）：
