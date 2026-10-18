@@ -292,6 +292,14 @@ type accountTasksView struct {
 	Earned   int64           `json:"earned"`
 	Max      int64           `json:"max"`
 	Balance  int64           `json:"balance"`
+	// BalanceKnown **缓存里有没有 balance 这个键**（2026-10-18 加）。
+	//
+	// ⚠ 与 LocalPoints.BalanceKnown 同源：int64 的零值**分不清**"确实是 0"
+	//   与"这一次没读到" ⇒ 前端只能把两者都画成 `0`，
+	//   ⚠ 而一个一直在成功发请求的号被显示成"额度 0"，用户会怀疑账号废了（实测报过）。
+	// ⚠ 三处结构（本结构 / accountTaskRunResult / accountInviteView）**必须都带上**它，
+	//   否则"运行任务后回填那一行"会把已知的值降级成未知。
+	BalanceKnown bool `json:"balance_known"`
 	Pending  []string        `json:"pending,omitempty"`
 	Error    string          `json:"error,omitempty"`
 	// Stale 这一行是**缓存占位**（还没读到），不是查询结果。
@@ -446,6 +454,8 @@ func (p *Provider) tasksViewFor(a accountRef) accountTasksView {
 		}
 		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
 			v.Balance = bal
+			// ⚠ 查到了 ⇒ 这一维是"已知"（见 accountTasksView.BalanceKnown）。
+			v.BalanceKnown = true
 		}
 	})
 	if v.OK {
@@ -498,6 +508,8 @@ type taskRunResult struct {
 	Already   []string `json:"already,omitempty"`
 	Failed    []string `json:"failed,omitempty"`
 	Balance   int64    `json:"balance"`
+	// BalanceKnown 见 accountTasksView.BalanceKnown（三处结构必须都带上）。
+	BalanceKnown bool `json:"balance_known"`
 	Error     string   `json:"error,omitempty"`
 }
 
@@ -541,11 +553,15 @@ func (p *Provider) runTasks(ctx context.Context, a accountRef) taskRunResult {
 		// 余额取**最后一次**成功回执里的值（它每次都会带回最新余额）。
 		if bal > 0 {
 			res.Balance = bal
+		// ⚠ 查到了 ⇒ 已知（见 accountTasksView.BalanceKnown）。
+		res.BalanceKnown = true
 		}
 	}
 	if res.Balance == 0 {
 		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
 			res.Balance = bal
+		// ⚠ 查到了 ⇒ 已知（见 accountTasksView.BalanceKnown）。
+		res.BalanceKnown = true
 		}
 	}
 	return res
@@ -618,6 +634,8 @@ type accountInviteView struct {
 	Activated bool         `json:"activated"`
 	Applied   string       `json:"applied,omitempty"`
 	Balance   int64        `json:"balance"`
+	// BalanceKnown 见 accountTasksView.BalanceKnown（三处结构必须都带上）。
+	BalanceKnown bool `json:"balance_known"`
 	Codes     []InviteCode `json:"codes,omitempty"`
 	Error     string       `json:"error,omitempty"`
 	// Stale 见 accountTasksView.Stale 的说明。
@@ -731,6 +749,8 @@ func (p *Provider) inviteViewFor(a accountRef) accountInviteView {
 		}
 		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
 			v.Balance = bal
+			// ⚠ 查到了 ⇒ 这一维是"已知"（见 accountTasksView.BalanceKnown）。
+			v.BalanceKnown = true
 		}
 	})
 	if v.OK {
