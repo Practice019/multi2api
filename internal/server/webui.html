@@ -8375,7 +8375,38 @@ let loginProvider = '';
       if (!rows[i]) return;
       svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(rows[i].ts.slice(11, 16))}</text>`);
     });
+    // ⚠⚠ 鼠标悬浮的**参考垂直线 + 跟随读数**（2026-10-18 按用户要求加）。
+    // ⚠ 机制照本文件既有的趋势图 hover（`trendCursor` 那段：mousemove → 找最近的桶 → 移动标记），
+    //   但那条只有高亮点；用户要的是**竖线可以对齐参考**。
+    // ⚠ 线与读数都**预置**在 SVG 里（默认 `display:none`）—— 本函数每次重写 `innerHTML`，
+    //   若在事件里现场 append，重绘一次就没了。
+    svg.push(`<line id="ctCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>`);
+    svg.push(`<text id="ctRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
     host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+
+    if (!host._ctBound) {                    // ⚠ 只绑一次（容器不被重绘，监听器能留住）
+      host._ctBound = true;
+      host.addEventListener('mousemove', (ev) => {
+        const el = host.querySelector('svg'), cur = host.querySelector('#ctCursor'), rd = host.querySelector('#ctRead');
+        if (!el || !cur || !rd) return;
+        const rect = el.getBoundingClientRect();
+        const xv = (ev.clientX - rect.left) / rect.width * W;
+        let best = -1, bd = 1e9;
+        for (let i = 0; i < n; i++) { const d = Math.abs(xAt(i) - xv); if (d < bd) { bd = d; best = i; } }
+        if (best < 0) return;
+        const r = rows[best];
+        cur.setAttribute('x1', xAt(best).toFixed(1)); cur.setAttribute('x2', xAt(best).toFixed(1));
+        cur.style.display = 'block';
+        rd.setAttribute('x', Math.min(Math.max(xAt(best), 60), W - 60).toFixed(1));
+        // ⚠ 读数字段：该整点的时间 · 命中率（无数据写 —）· 请求数 · token
+        rd.textContent = r.ts.slice(11, 16) + '  命中率 ' + (r.has ? (r.rate * 100).toFixed(1) + '%' : '—')
+          + '  · 请求 ' + r.total + ' · ' + fmtTokensPlain(r.tokens);
+        rd.style.display = 'block';
+      });
+      host.addEventListener('mouseleave', () => {
+        for (const id of ['#ctCursor', '#ctRead']) { const e = host.querySelector(id); if (e) e.style.display = 'none'; }
+      });
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -8444,11 +8475,13 @@ let loginProvider = '';
     let minGap = Infinity;
     for (let k = 1; k < idxs.length; k++) minGap = Math.min(minGap, (idxs[k] - idxs[k - 1]) * step);
     if (!isFinite(minGap)) minGap = step;
-    // ⚠ 每隔几根标一根（至少 1 = 全标）
-    const labelEvery = Math.max(1, Math.ceil((widest + 4) / Math.max(1, minGap)));
+    // ⚠⚠ 柱顶读数**全部标出**（2026-10-18 按用户要求改；原来是"放不下就每隔 k 根标一根"）。
+    //   用户的原话："所有的柱状图都需要显示数值"。
+    //   ⚠ 那些值短（`2.0M` / `178.1k`），24 根柱的间距足够；⚠ 真放不下时下面的
+    //     `textLength`+`font-size` 会兜住（见渲染处），不会再回到稀疏。
     const mode = 'h';
 
-    // ⚠ 顶部留白：水平读数只需一行的高度（竖排那种要往上长一串，已不需要）
+    // ⚠ 顶部留白：水平读数只需一行的高度
     const PADT = 26;
     const plotH = H - PADT - PADB;
     const yMax = peak * 1.06;                                // ⚠ 顶部留一点空，柱子不顶格
@@ -8472,9 +8505,8 @@ let loginProvider = '';
       svg.push(`<rect x="${(cx(i) - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(PADT + plotH - y).toFixed(1)}" fill="var(--acc)" rx="${Math.min(2, barW / 2).toFixed(1)}"/>`);
       const t = texts[i];
       if (!t) continue;
-      // ⚠ 一律**水平**（用户要求，见上面那段注释）；放不下时按 `labelEvery` 稀疏。
-      //   ⚠ 峰值那根**必标**（它是这条图的重点），并用强调色。
-      if (i % labelEvery !== 0 && i !== peakIdx) continue;
+      // ⚠ **每根柱都标**（用户要求）；⚠ 值短（2.0M/178.1k），24 根柱排得下。
+      //   峰值那根用强调色，其余常规色 —— 一眼仍能看出最高的那根。
       svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
     }
     // x 轴：首/中/末（⚠ 桶多时全标会糊）
@@ -8483,7 +8515,33 @@ let loginProvider = '';
       const lbl = trendRange === '24h' ? String(p.ts || '').slice(11, 16) : String(p.ts || '').slice(5, 10);
       svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lbl)}</text>`);
     });
+    // ⚠⚠ 同样的悬浮参考线 + 跟随读数（与上面那张双轴趋势同一套做法 —— 用户要求统一）。
+    svg.push(`<line id="dtCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>`);
+    svg.push(`<text id="dtRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
     host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+
+    if (!host._dtBound) {
+      host._dtBound = true;
+      host.addEventListener('mousemove', (ev) => {
+        const el = host.querySelector('svg'), cur = host.querySelector('#dtCursor'), rd = host.querySelector('#dtRead');
+        if (!el || !cur || !rd) return;
+        const rect = el.getBoundingClientRect();
+        const xv = (ev.clientX - rect.left) / rect.width * W;
+        let best = -1, bd = 1e9;
+        for (let i = 0; i < n; i++) { const d = Math.abs(cx(i) - xv); if (d < bd) { bd = d; best = i; } }
+        if (best < 0) return;
+        const p = list[best] || {};
+        const lbl2 = trendRange === '24h' ? String(p.ts || '').slice(11, 16) : String(p.ts || '').slice(5, 10);
+        cur.setAttribute('x1', cx(best).toFixed(1)); cur.setAttribute('x2', cx(best).toFixed(1));
+        cur.style.display = 'block';
+        rd.setAttribute('x', Math.min(Math.max(cx(best), 70), W - 70).toFixed(1));
+        rd.textContent = lbl2 + '  · 请求 ' + (p.total || 0) + ' · ' + fmtTokensPlain(p.tokens || 0) + ' token';
+        rd.style.display = 'block';
+      });
+      host.addEventListener('mouseleave', () => {
+        for (const id of ['#dtCursor', '#dtRead']) { const e = host.querySelector(id); if (e) e.style.display = 'none'; }
+      });
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────
