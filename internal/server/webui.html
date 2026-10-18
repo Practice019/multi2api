@@ -5367,6 +5367,37 @@ let loginProvider = '';
   // 的第 2 页弹回第 1 页** —— 表现为"翻页翻不住"。
   const panelPageState = {};
 
+  // warmOtherPages **把其余页也预热一遍**（2026-10-18 加）。
+  //
+  // # 为什么必须做（用户实测报的现象："还是有正在读取！！"）
+  //
+  // 打开面板时前端只请求 `?page=1`（当页），而 `?page=` 只从**服务端缓存**取 ——
+  // ⚠ 不在缓存里的行回 `stale: true`，前端据此画「正在读取…」（webui 的 renderPage 里那条），
+  //   而"让那些行进缓存"的唯一途径是**请求它所在的那一页**（服务端会顺手补那一页）。
+  // ⇒ ⚠ **其余页的号永远不会被补** ⇒ 它们**永远**停在「正在读取…」。
+  //
+  // 实测（7864 冷启动 · loomy 44 个号 · 每页 25）：tasks 表 25 行里 **15 行 stale**，
+  // 而第 2 页的 19 个号**一次都没被请求过**（playwright 抓包里只有 `?page=1`）。
+  //
+  // ⚠ 必须**顺序**请求：补数要打上游（每个号 2 次），而实测 **12 条并发就 502**
+  //   （见 LAZY_MAX_INFLIGHT 的注释）。所以一个一个来，且页与页之间留一口气。
+  // ⚠ 用 warmedPages 防重复：切页/轮询都会调到这里，不防就会反复预热同一批。
+  const warmedPages = new Set();
+  function warmOtherPages(getPath, curPage, pages) {
+    if (!pages || pages <= 1) return;
+    if (warmedPages.has(getPath)) return;
+    warmedPages.add(getPath);
+    (async () => {
+      for (let n = 1; n <= pages; n++) {
+        if (n === curPage) continue;
+        try { await admin(getPath + '?page=' + encodeURIComponent(String(n))); }
+        catch (e) { /* 某一页失败不该影响其余页 */ }
+        // ⚠ 给后端一点时间把这一页的补数跑完，别把上游打急
+        await new Promise(r => setTimeout(r, 800));
+      }
+    })();
+  }
+
   function panelPageKey(providerId, cap) { return providerId + '/' + cap; }
 
   // panelRowId 一行的 DOM id（刷新时按 id 定位替换）。
@@ -5629,6 +5660,9 @@ let loginProvider = '';
       const p2 = Number(fresh.page) || page;
       if (p2 !== page) { page = p2; cacheKey = panelCacheKey(providerId, 'tasks', page); }
       renderPage(lazyCachePutPage(cacheKey, fresh));
+      // ⚠⚠ **预热其余页**（2026-10-18 加）—— 见 warmOtherPages 的注释：
+      // 打开面板只请求当页，而"其余页的号"永远进不了缓存 ⇒ 永远停在「正在读取…」。
+      warmOtherPages(getPath, page, pagesNow);
     }
 
     if (!totalN) {
@@ -5803,6 +5837,9 @@ let loginProvider = '';
       const p2 = Number(fresh.page) || page;
       if (p2 !== page) { page = p2; cacheKey = panelCacheKey(providerId, 'invite', page); }
       renderPage(lazyCachePutPage(cacheKey, fresh));
+      // ⚠⚠ **预热其余页**（2026-10-18 加）—— 见 warmOtherPages 的注释：
+      // 打开面板只请求当页，而"其余页的号"永远进不了缓存 ⇒ 永远停在「正在读取…」。
+      warmOtherPages(getPath, page, pagesNow);
     }
 
     if (!totalN) {
