@@ -5877,10 +5877,17 @@ let loginProvider = '';
     if (body && !force && body.dataset.lpDone === '1') return;
     if (body) body.dataset.lpDone = '1';
     const fn = PROVIDER_PANEL_RENDERERS[cap];
-    if (typeof fn === 'function') { fn(providerId, cap); return; }
+    // ⚠ 2026-10-19：这两条**必须 return 出去** —— 渲染器（loadGenericList、
+    //   以及各条箭头函数渲染器）都是 async，返回值就是 Promise。
+    //   原来这里是"调一下就走"，调用方（「刷新」按钮）拿不到任何"干完了没"的信号，
+    //   于是按钮点击前后**长得一模一样**：用户点了、请求也确实发了、数据也确实刷新了，
+    //   但界面上没有任何变化 ⇒ 他的结论只能是"这按钮没用"。
+    //   参考项目把这条列为明确要避免的（settings-prompt-editor.tsx:151-153
+    //   「点得动却像没反应」），做法是 async 按钮换进行时措辞 + disabled。
+    if (typeof fn === 'function') return fn(providerId, cap);
     // 回落到通用列表渲染。它按 routesFor(provider, cap) 取该能力位的 GET 端点，
     // 逐个拉取并渲染 —— 与 welfare 走的是同一条路径。
-    loadGenericList(providerId, cap);
+    return loadGenericList(providerId, cap);
   }
 
   // PROVIDER_PANEL_RENDERERS 能力位 → 渲染函数。
@@ -6034,10 +6041,93 @@ let loginProvider = '';
   //   「`body.dataset.lpDone === '1'` 就跳过」的守卫（用来止住周期性重绘），
   //   而「刷新」按钮的**全部意义**就是绕过它重取一次 —— 不传 force 的话
   //   这个按钮修完还是"点了没反应"。
-  $('content').addEventListener('click', (ev) => {
+  // ⚠ 2026-10-19 加**可见反馈**（用户第二轮的原话还是「那个刷新按钮还是没用」）。
+  //
+  // 他重启过了、跑的是最新二进制、请求也确实发出去了 —— 我实测过：
+  //   点它 ⇒ `fetch /admin/loomy/invite?page=1`；连点两次 ⇒ 两次都发。
+  // 那"没用"是什么意思？看面板自己的状态文字就明白了：
+  //   「共 44 个账号 · 已读 25 · 已绑定 25」/「合计已得 250000 / 250000 分 · 还有 0 项待完成」
+  // —— 数据**已经是终态**，再刷也是同一份；而按钮点击前后**长得一模一样**，
+  // 用户无从判断它到底干没干活。所以"没用"= **没有可见的反馈**。
+  //
+  // 照参考项目的做法（它把这条列为明确要避免的：「点得动却像没反应」，
+  // settings-prompt-editor.tsx:151-153）：
+  //   · 点击即刻换措辞 + disabled（进行时），让"我收到了"这件事立刻可见
+  //   · 完成后 toast 一句带**时刻**的结果 —— 面板上的「更新于 …」也会跟着变，
+  //     但那个数字小、且只在面板顶部，容易被忽略；toast 是全局的，一定会看到
+  //   · `if (b.disabled) return` 兼作幂等守卫（参考的 `if (busy) return`）
+  //
+  // ⚠ 「刷新中…」可能一闪而过（实测服务端只要 4~24ms），所以不能只靠它 ——
+  //   真正让人确信的是那条 toast。
+  // ⚠⚠ 「刷新中…」必须有一个**最短停留时间**。
+  //
+  // 实测服务端处理一次 `/admin/loomy/invite` 只要 **10~14ms**（面板自己也写着
+  // 「服务端只要 4~24ms」）。也就是说如果只是"await 完就复原"，那个进行时措辞
+  // 会在**下一帧之前**就被换掉 —— 肉眼绝对看不见，等于没加。
+  //
+  // 参考项目对同一种情况的做法是给反馈一个**固定可见时长**
+  // （它的剪贴板按钮是点了变 `✓`、停 1200ms 再变回 `⧉`）。
+  // 这里取 380ms：足够让人看见"我点到了、它在干活"，又不至于让人觉得卡。
+  // 两个 Promise 一起等，所以总耗时 = max(请求, 380ms)，不是相加。
+  const REFRESH_MIN_FEEDBACK_MS = 380;
+
+  // ⚠⚠ 那颗按钮**会被面板重绘换掉**。
+  //
+  // 这是第三轮才抓到的一层：`loadGenericList` / 各渲染器渲染时会把 `<h2>` 整块
+  // 重写（面板骨架是 `panelSkeleton` 吐出来的），于是**触发点击的那个 DOM 节点
+  // 在 await 期间就已经不是文档里的那一个了**。
+  //
+  // 症状极具迷惑性 —— rAF 逐帧记录按钮文案，从头到尾只有「刷新」，
+  // 一次「刷新中…」都没有：
+  //     [[0,"刷新",false],[3,"刷新",false],[19,"刷新",false],…]
+  // 但同时又能量到"从点击到复原 390ms"、并看到 toast。
+  // ⇒ 因为它俩都没错：等待是真的、toast 是真的，只是**改的是孤儿节点**。
+  //
+  // ⇒ 所以进和出都按 `data-plist` / `data-pcap` **重新查一遍**当前那颗，
+  //   而不是抓住点击时拿到的引用不放。
+  const findRefreshBtn = (pid, cap) => document.querySelector(
+    'button[data-plist="' + CSS.escape(pid) + '"][data-pcap="' + CSS.escape(cap) + '"]');
+
+  $('content').addEventListener('click', async (ev) => {
     const b = ev.target.closest('button[data-plist]');
-    if (!b || b.disabled) return;
-    loadProviderPanel(b.dataset.plist, b.dataset.pcap, true);
+    if (!b || b.disabled) return;                 // 兼作幂等守卫（参考的 `if (busy) return`）
+    const { plist: pid, pcap: cap } = b.dataset;
+    const startedAt = new Date();
+
+    // ⚠ 用一帧一次的循环**保持**进行时。
+    //   原因同上：面板重绘会换掉节点，只在开头设一次的话，
+    //   请求 10~14ms 完成后重绘立刻把它盖回「刷新」—— 那个措辞等于没加。
+    //   `holding` 是唯一的停止条件，所以不会泄漏循环。
+    let holding = true;
+    const setBusy = () => {
+      const cur = findRefreshBtn(pid, cap);
+      if (!cur) return;
+      if (cur.textContent !== '刷新中…') cur.textContent = '刷新中…';
+      if (!cur.disabled) cur.disabled = true;
+    };
+    setBusy();
+    (function keepBusy() {
+      if (!holding) return;
+      setBusy();
+      requestAnimationFrame(keepBusy);
+    })();
+
+    try {
+      await Promise.all([
+        loadProviderPanel(pid, cap, true),
+        new Promise(r => setTimeout(r, REFRESH_MIN_FEEDBACK_MS)),
+      ]);
+      const took = Date.now() - startedAt.getTime();
+      toast('已刷新 · ' + startedAt.toLocaleTimeString('zh-CN', { hour12: false })
+        + '（' + took + 'ms）');
+    } catch (e) {
+      toast('刷新失败：' + (e && e.message ? e.message : e), true);
+    } finally {
+      holding = false;                       // 先停循环，再还原，避免被它盖回去
+      const cur = findRefreshBtn(pid, cap) || b;
+      cur.textContent = '刷新';
+      cur.disabled = false;
+    }
   });
 
   // sectionActive 报告某个 `data-key` 的面板当前是不是**正在显示**。
