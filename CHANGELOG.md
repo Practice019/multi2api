@@ -7,6 +7,98 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.9.1 — 2026-10-19
+
+> 本版主题：**修「导入之后删除不掉」**（你带着截图报的那条），以及它牵出来的
+> 界面侧两个并列缺陷。
+>
+> 值得单独说一句：这三条缺陷**各自都能独立造成同一个现象** —— 后端把文件留着、
+> 界面拿旧快照重画、成功提示被一条红条盖掉。只修一条，你点下去仍然会觉得
+> 「改了还是那样」。所以三条都修，并且都留下探针与回归测试。
+>
+> 全程用**合成数据**（临时目录里当场编凭证 + 真浏览器点按钮），没有碰你的账号池。
+
+### 缺陷一（后端）：loomy 漏传「凭证文件在哪」⇒ 删号删不掉文件
+
+现象：账号池点「移除」，回执 200、那一行也从池子里没了 —— 但**凭证文件还在盘上**，
+下次「重载 auths」或重启，`LoadDir` 又把它装回池子。读起来就是「删了又复活」。
+
+实测（`tests/frontend/verify_delete_flow_e2e.js`，合成凭证 / 临时目录 / 端口 7881）：
+
+    DELETE /admin/accounts/{uid}?purge_file=1
+    → 200 {"file":"","purged_file":"","removed":true}      服务端日志 deleted=""
+
+根因：`internal/loomy/provider.go` 的两条投影都只给了 `{Provider,UID,Nickname}`，
+**漏了 `FilePath`** —— 其余 9 个上游全带了。而装配层 `poolAuthsFromCreds` 只在
+「secret 恰好是 `*auth.Auth`」时直接用 secret 里那份（workbuddy 是这种），
+loomy 的 secret 是自己的 `*loomy.Auth` ⇒ 类型断言不成立 ⇒ **落到投影** ⇒
+池条目的 `FilePath` 恒空 ⇒ `purge_file` 静默空转。
+（`gateway.Credential.FilePath` 的注释里早就写着这条后果，只是没落到代码。）
+
+修法三条一起上：
+
+- 两条投影都带上 `FilePath`（并注释后果，防住下一个人顺手删掉）
+- `accountDelete` 加**兜底定位**：池条目路径为空时，用**上游自己的扫描器**
+  （`gateway.CredentialLoader`）重新定位一次；目录判据与导入 / 重载共用同一份实现
+  （新 `credentialdir.go`，原 `importDirFor` 正名为 `credentialDirFor`）。
+  这条兜底不只修 loomy：池子从旧 `state.json` 恢复、上游将来又漏传，都能救
+- 删不掉时**如实回执** `purge_error`（路径未知 / 越界拒绝 / 删失败），前端据此
+  把「已彻底删除」换成如实提示 —— 静默失败正是这条缺陷的核心
+
+### 缺陷二（界面）：写完了就刷新，可刷新读到的是 30 秒前的旧快照
+
+这是**真浏览器点按钮**才暴露的那条（HTTP 探针看不到）：`sharedGet` 的缓存 TTL 是
+30 秒，而且落 localStorage。删除走 `admin()`（不过缓存，这是对的），但紧跟着的
+`refresh()` 走 `sharedGet('ep:/admin/accounts')` ⇒ 命中旧快照 ⇒
+把刚删掉的那一行**原样画回来**。
+
+实测（`tests/frontend/verify_delete_buttons_ui_e2e.js`，真 Chrome、合成数据）：
+
+    点「移除」   → DELETE 10ms 就回了 200
+    表格那一行   → 20 秒不消失
+    apiKey 删除 → 后端已经空了，列表还显示那把 key
+
+修法：`writeInvalidate()` —— 写操作之后、刷新之前丢缓存（顺序不能反，反了等于没丢）。
+调用点覆盖账号池「移除」、`act()` 收尾（禁用 / 启用 / 清冷却 / 每日动作）、
+apikey 删除与重置。
+
+### 缺陷三（界面）：一条红条盖掉了成功提示
+
+`loadClientLogin()` 打 `/admin/client-login`，而本机登录管理是**可选功能**：
+未启用时回 503「本控制台未启用客户端登录管理」—— 那是正常状态，不是失败。
+但 `admin()` 默认把任何非 2xx 播成红色 toast：
+
+    +20ms   已彻底删除 xxx                          ← 用户该看到的
+    +130ms  GET 失败：本控制台未启用客户端登录管理    ← 把它盖掉了
+
+用户看到的是后者 ⇒ 读成「点了移除之后报失败」。修法：该调用传 `{silent:true}`
+（失败仍被 catch 降级成控制条「不可用」，只是不再播报）。
+
+### 检查范围（你要求的「检查一下所有的删除按钮」）
+
+全应用**只有两个销毁性按钮**，两个都实测过：
+
+    ① 账号池 · 移除   → DELETE /admin/accounts/{uid}?purge_file=1
+    ② API 管理 · 删除 → POST   /admin/apikeys/delete
+
+其余看着像删除的都**不是**销毁操作：`enable`/`disable` 只改状态、`cooldown/clear`
+只清冷却、`apikeys/reset` 是换 key 不删条目、「清空」是清选择。
+
+### 验证
+
+- 新增两个探针（合成数据）：`verify_delete_flow_e2e.js`（后端行为）、
+  `verify_delete_buttons_ui_e2e.js`（真浏览器点按钮，断言落在可观测量上：
+  请求 / 回执、**磁盘上文件在不在**、**表格行多久消失**、toast 时间轴含"谁盖了谁"）
+- 新增回归测试：`internal/loomy/credentialloader_test.go`（两条投影必须带 FilePath）、
+  `internal/admin/account_delete_test.go`（正常删 / **没路径时靠扫描找回** /
+  找不回必须报 `purge_error` / **拒绝删凭证树之外的文件** / 不带参数保持老语义 /
+  未知 uid → 404）
+- `tests/frontend/lib_cdp.js` 补对话框自动接受 —— 没有它，任何被 `confirm()`
+  守卫的按钮都测不了（headless 里没人处理对话框时页面会卡住，请求压根不发，
+  看起来像"按钮坏了"，那是测量假象）
+- 修前 6 条 FAIL → 修后全绿：行 2ms 消失（点击到消失 874ms）、成功提示在、
+  0 条失败提示、0 条未捕获异常；既有「全部按钮」套件与三个 Go 包全绿
+
 ## v1.9.0 — 2026-10-19
 
 > 本版主题：**控制台重做 + 支撑它的面板缓存分层**。
