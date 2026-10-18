@@ -76,6 +76,10 @@ type chatStat struct {
 	// ⚠ 只在**成功**请求上喂：失败时的耗时是"失败前的等待"，不能代表这家上游有多快。
 	noteLatency func(provider string, ms int64)
 
+	// preMs 从请求进入网关 → 调用 chatVia（真正发上游）之间的耗时。
+	// ⚠ 它是"我们自己花了多少时间"的唯一直接证据，见 logbuf.Entry.PreMs 的注释。
+	preMs time.Duration
+
 	logged bool
 }
 
@@ -103,7 +107,7 @@ func (s *chatStat) done() {
 		}
 		s.bump(toks, s.status >= 200 && s.status < 300)
 	}
-	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, s.decision)
+	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, s.decision, s.preMs.Milliseconds())
 
 	// ⚠ 喂上游级"首字节耗时"统计（2026-10-18 加）。
 	//
@@ -269,7 +273,7 @@ func uidPrefix(uid string) string {
 // 保留这个 8 参数签名是为了**向后兼容**：既有测试直接调它，
 // 且单上游部署下确实没有 provider 可标。多上游路径用 logChatRowProvider。
 func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int, usage map[string]any) {
-	logChatRowProvider(ttfb, total, model, mode, uid, "", status, toks, usage)
+	logChatRowProvider(ttfb, total, model, mode, uid, "", status, toks, usage, "", 0)
 }
 
 // logChatRowProvider 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
@@ -278,7 +282,7 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 // usage 为上游 usage 对象（nil = 缺失）。扩展字段（credit/推理 token/缓存命中未命中）
 // 由此处解析并写入环形缓冲：**只有 toks>=0（usage 存在）时才填**，
 // usage 缺失时保持 0 而不是 -1 —— 新字段没有哨兵语义，-1 会污染后续求和聚合。
-func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any, decision ...string) {
+func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any, decision string, preMs int64) {
 	if !chatLogEnabled {
 		return
 	}
@@ -296,10 +300,9 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 		Tokens:   toks,
 		TotalMS:  total.Milliseconds(),
 	}
-	// ⚠ 判决留痕（变参：老调用方不传就为空 ⇒ 测试不用改）。
-	if len(decision) > 0 {
-		entry.Decision = decision[0]
-	}
+	// ⚠ 判决留痕与"发上游之前的耗时"（见 logbuf.Entry 两个字段的注释）。
+	entry.Decision = decision
+	entry.PreMs = preMs
 	// tokens<0 是「usage 缺失」的哨兵；此时 usage 对象即使非 nil 也不可信
 	// （例如上游给了半截 usage），扩展字段一律留 0。
 	if toks >= 0 {
