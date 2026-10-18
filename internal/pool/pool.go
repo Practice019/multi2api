@@ -1064,6 +1064,37 @@ func (p *Pool) pickFor(provider string, tried map[string]bool, model string) *au
 	return p.pickForTier(provider, tried, model, 0)
 }
 
+// creditsExhausted 报告"**明确知道**这个账号在该模型上已经没有可用额度"。
+//
+// ⚠ 存在的唯一理由是**把"未知"与"确实没额度"分开** —— 二者在
+// `QuotaView.EffectiveFor` 眼里**都是 0**（见 quota.go:159：`!HasData` 与 per_model 缺键都返回 0），
+// 直接拿它判会让**新导入的账号永远选不中**：界面上明明在池里，却从来轮不到它 ——
+// 又是一次"只有看图或量数据才发现"的静默故障（本仓已栽过多次）。
+//
+// 判定表：
+//
+//	!HasData（从未探测过额度）            ⇒ false  ⚠ 未知 ≠ 零
+//	unlimited（不限额）                   ⇒ false
+//	credits 且 Remaining <= 0             ⇒ true
+//	per_model：**该模型键存在**且 <= 0     ⇒ true   ⚠ 缺键 = 没探测过那个模型 ⇒ false
+//	per_model 且 model == ""（无模型上下文）⇒ false ⚠ 与 healthyForModel 的折中同源
+//
+// ⚠ 调用方需已持 p.mu（本方法只读 e.quota，与 weightOf 同一约定）。
+func (p *Pool) creditsExhausted(e *entry, model string) bool {
+	q := e.quota
+	if !q.HasData || q.Kind == QuotaKindUnlimited {
+		return false
+	}
+	if q.Kind == QuotaKindPerModel {
+		if model == "" {
+			return false
+		}
+		v, ok := q.ByModel[model]
+		return ok && v <= 0
+	}
+	return q.Remaining <= 0 // credits 及未知形态（后者已被上面的 !HasData 挡住）
+}
+
 // pickForTier 是 pickFor 的档位感知版本：候选先按上游/健康/在途过滤，
 // 再由 CandidateTierExt 分档，**按 tierOffset 选档**后在该档内加权随机。
 func (p *Pool) pickForTier(provider string, tried map[string]bool, model string, tierOffset int) *auth.Auth {
@@ -1073,6 +1104,7 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 	want := p.normalizeProvider(provider)
 
 	var cands []*entry
+	var skipped []*entry // ⚠ 因"明确知道没额度"被跳过的号（兜底时要放回来）
 	for uid, e := range p.byUID {
 		if p.providerOf(e) != want {
 			continue // 别的上游的账号：本请求用不上
@@ -1088,7 +1120,32 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 		if p.inFlightFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
 		}
+		// ⚠⚠ **明确知道没额度的号不进候选**（2026-10-18 加）。
+		//
+		// 用户原话："我感觉他在尝试无额度的渠道或账号，这些都是可以避免的，
+		//           我希望可以让轮询变得和使用单个账号一样就行了"。
+		// ⚠ 而在此之前**额度完全不参与选号**（见 weightOf 的注释："只保留成功率 + 闲置"）
+		//   ⇒ 额度为 0 的号照旧被随机选中 ⇒ **打上去必然失败/空等**
+		//   ⇒ 这既抬高失败率，也解释"首字 18 秒"那种慢号（白等）。
+		//
+		// ⚠ 判据必须是"**明确知道**"而不是"算出来是 0"：
+		//   `QuotaView.EffectiveFor` 对 `!HasData`（**还没探测过**）和 `per_model` 缺键
+		//   都返回 0 —— 直接拿它判会把**新号永久排掉**（界面上明明在池里，却永远选不中）。
+		//   ⇒ 交给 creditsExhausted 去区分"未知"与"确实没额度"。
+		if p.creditsExhausted(e, model) {
+			skipped = append(skipped, e)
+			continue
+		}
 		cands = append(cands, e)
+	}
+	// ⚠ **兜底：全都被额度筛掉时，把那些号放回来**。
+	//
+	// 为什么必须有：排除之后若一个候选都不剩，就会走下面的 pickEarliestExpiryLocked，
+	// 而那**只从冷却号里挑** —— 于是"号都在、只是都没额度"会变成
+	// **503 no_healthy_account**（把"没额度"误报成"池子空了"，正是我们前几轮反复被误导的那种错）。
+	// ⇒ 宁可退回旧行为（照常选，打上去让上游拒绝），也不要制造一个新的 503。
+	if len(cands) == 0 && len(skipped) > 0 {
+		cands = skipped
 	}
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
