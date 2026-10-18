@@ -535,19 +535,43 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .heatdays span:nth-child(1){grid-row:1} /* 一 */
   .heatdays span:nth-child(2){grid-row:3} /* 三 */
   .heatdays span:nth-child(3){grid-row:5} /* 五 */
-  .heatmain{flex:none;width:792px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
-  .heatmain::-webkit-scrollbar{height:6px}
-  .heatmain::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+  /* ⚠⚠ 2026-10-19 改（用户："宽度大一点不要出现滑动条" + "空白太多"）。
+     上一轮为什么把格阵钉成 792px、容器也钉成 792px，注释（520-527）写了：
+       「只把格子钉死、没钉容器，于是 53 列固定后容器仍按 flex:1 伸缩，
+         两者算不到一起（实测 scrollWidth == clientWidth、滚动永不出现）」
+     —— 那是**为了避免"算不到一起"而钉死两处**的妥协。代价是容器钉在 792px，
+     而同级的 `.heatstats` 也是 `flex:1`，于是**两边各分一半**（实测各 636px）：
+     热力图右侧空掉一大片、内容又溢出 159px。
+     ⇒ 正解不是继续加宽那个常数，而是**让两边用同一套自适应**：
+       容器按 flex 分，格阵 `width:100%`，格子 `minmax(0,1fr)` 平分。
+       于是"算不到一起"从根上消失 —— 格子宽度**定义上**就是容器宽度除以列数。
+
+     `flex:1 1 795px` 的 basis 是"53 列 × 12px + 52 × 3px 间隙"这个理想格宽：
+     优先按 795px 起分，有富余就一起变宽（格子 >12px，用户要的"大一点"），
+     空间不够时才压缩（有 minmax 的下限兜着），**任何情况都不出现滚动条**。 */
+  .heatmain{flex:1 1 795px;min-width:0;overflow:hidden}
   .heatmonths{display:grid;grid-auto-flow:column;font-size:10px;color:var(--dim);
-    margin-bottom:2px;letter-spacing:.2px;width:max-content}
+    margin-bottom:2px;letter-spacing:.2px}
   /* ⚠ 列宽只有 15px，而"11月"约 28px ⇒ 必然溢出。**故意让它溢出**：
      相邻列大多是空的（月份之间隔 4-5 列），所以不会真的撞上；
      而 `overflow:hidden` 会把文字裁成"1…"，更糟。 */
   .heatmonths span{white-space:nowrap;overflow:visible}
-  /* ⚠ 固定格宽 12px + `width:max-content` ⇒ 53 列 = 792px，与 `.heatmain` 同宽。 */
+  /* ⚠ 格宽**自适应**。历史上这里反复来回，两个方向都被用户否过一次，所以写清楚：
+     · **不能** `grid-auto-columns:1fr` + 格宽跟着列宽 ⇒ 365 格被压进容器宽，
+       格子小到看不清、"有数据的那几天"挤在最右，一眼看过去整片是灰的
+       （见上面 504-510 那段，用户当时的截图就是这个）。
+     · **也不能** 格宽钉死 12px + `width:max-content` ⇒ 53 列算出来 795px，
+       容器只要不是恰好 795px 就必然出现横向滚动条（用户本轮报的
+       "宽度大一点不要出现滑动条"）。
+     ⇒ 两条都不走：**列数固定、格宽由容器宽度平分**（`width:100%` + `minmax(0,1fr)`），
+       格子本身不设宽（`.heatcell{width:auto}`）。这样 53 个格子**定义上**就铺满容器，
+       既不会被压扁、也不会有滚动条，窗口越宽容的格子越大。
+     ⚠⚠ 高度**必须保持 12px 不动** —— `.heatdays` 的 `height:102px`
+        （= 7×12 + 6×3）是按格高算死的，改格高就会让「一/三/五」与行错位
+        （那正是更早一轮用户报过的"位置不对"）。所以格子是"宽一点、略扁"。 */
   .heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);
-    grid-auto-columns:12px;gap:3px;width:max-content}
-  .heatcell{width:12px;height:12px;border-radius:2px;background:var(--panel2)}
+    grid-auto-columns:minmax(0,1fr);gap:3px;width:100%}
+  .heatcell{width:auto;height:12px;border-radius:2px;background:var(--panel2)}
   /* ⚠ 格子可点（2026-10-18 按用户要求）：左键点一下，那天的用量**留在页面上**。 */
   .heatcell{cursor:pointer}
   .heatcell:hover{outline:1px solid color-mix(in srgb,var(--acc) 60%,transparent)}
@@ -852,7 +876,22 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      因此不受「面板 section 显隐」影响 —— 这是修复「刷新按钮没提示」的关键。
      历史实现把提示写进 #taskbar，而 #taskbar 在账号池 section 内，
      一旦切到别的面板它就落在 display:none 的子树里，提示看不见。 */
-  .notices{position:fixed;top:14px;right:16px;z-index:50;
+  /* ⚠⚠ z-index 必须是**全站最高**（2026-10-19，照抄参考项目的层级阶梯）。
+     参考项目的阶梯（components.css:367-377 的注释原文）：
+        普通弹窗 30 → 浮层 / 气泡 35 → 确认框 38 → **toast 40**
+     它把**提示放在最上**，并记了教训原话：
+        「所有 .modal-mask 同为 30 —— 同档时谁在上面由 DOM 顺序决定，声明在后面的
+          弹窗会把确认框盖住：用户点了「终止请求」，界面看起来毫无反应，
+          实际确认框在底下等着。」
+     —— 这正是"点了按钮没反应"的经典成因。
+     我们原来是反的：`.notices` 是 50，而 #modal / #infoModal / #akModal 是
+     99 / 100 / 110 ⇒ 只要弹窗开着，所有提示（"已复制"/"签到成功"/出错）都被压在底下，
+     用户同样只会看到"点了没反应"。
+     ⇒ 提到 200，让阶梯变成
+        9(sticky) < 60(hovertip) < 99/100/110(各种弹窗) < **200(提示)**
+       即：**提示永远看得见**，而 hovertip 这种纯展示气泡仍然在弹窗之下（它不该浮在弹窗上）。
+     只改这一条：弹窗自身的值不动，避免动了它们的相互顺序（它们之间也可能有依赖）。 */
+  .notices{position:fixed;top:14px;right:16px;z-index:200;
     display:flex;flex-direction:column;gap:8px;align-items:flex-end;
     max-width:min(420px,42vw);pointer-events:none}
   .notice{pointer-events:auto;background:var(--panel2);border:1px solid var(--line);
@@ -2279,23 +2318,40 @@ let loginProvider = '';
   //   ② 用 `toggle`（已显示）而不是 `beforetoggle`（显示前）：显示前元素还是
   //      `display:none`，`getBoundingClientRect()` 返回全 0，算出来的位置没有意义。
   //      代价是理论上有一帧在原位 —— 实测看不到（下一帧就搬过去了）。
+  //   ③ 面板是 `position:fixed` 且位置是**算出来的**，所以它**不会跟着页面滚动** ——
+  //      用户一滚，浮层就留在原地、飘在内容外面，看着像"点开了关不掉"（实测过一次：
+  //      滚动前后 top 都是 953、left 都是 1419，纹丝不动）。
+  //      ⇒ 打开期间挂一个 scroll 监听重算位置，关闭时摘掉。
+  //      ⚠ `scroll` 同样**不冒泡** —— 也必须用捕获阶段，否则表格内部滚动容器
+  //        （.logwrap / 各种 overflow:auto）的滚动一条都收不到。
   document.addEventListener('toggle', (e) => {
     const p = e.target;
     if (!p || !p.classList || !p.classList.contains('ops-menu')) return;
-    if (e.newState !== 'open') return;
     const btn = document.querySelector('[popovertarget="' + CSS.escape(p.id) + '"]');
-    if (!btn) return;
-    const r = btn.getBoundingClientRect();
-    const pr = p.getBoundingClientRect();
-    // 默认贴按钮下方、与按钮右缘对齐；下方放不下就翻到按钮上方。
-    let top = r.bottom + 4;
-    if (top + pr.height > window.innerHeight - 8) {
-      top = Math.max(8, r.top - pr.height - 4);
+    if (e.newState !== 'open') {
+      if (p._opsReposition) {
+        window.removeEventListener('scroll', p._opsReposition, true);
+        p._opsReposition = null;
+      }
+      return;
     }
-    let left = r.right - pr.width;
-    left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
-    p.style.left = left + 'px';
-    p.style.top = top + 'px';
+    if (!btn) return;
+    const place = () => {
+      const r = btn.getBoundingClientRect();
+      const pr = p.getBoundingClientRect();
+      // 默认贴按钮下方、与按钮右缘对齐；下方放不下就翻到按钮上方。
+      let top = r.bottom + 4;
+      if (top + pr.height > window.innerHeight - 8) {
+        top = Math.max(8, r.top - pr.height - 4);
+      }
+      let left = r.right - pr.width;
+      left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
+      p.style.left = left + 'px';
+      p.style.top = top + 'px';
+    };
+    place();
+    p._opsReposition = place;
+    window.addEventListener('scroll', place, true);
   }, true);
 
   // applyTheme 写入 data-theme 并同步按钮选中态。
@@ -5303,6 +5359,33 @@ let loginProvider = '';
   function refreshNavSections() {
     navSections = Array.from(document.querySelectorAll('#content > section'));
   }
+
+  // ⚠⚠ 通用面板「刷新」按钮的委托（2026-10-19 修；用户实测报的
+  //    "刷新按钮需要可以手动更新前端"）。
+  //
+  // # 它原来是个**死按钮**
+  //
+  // providerPanelHTML（上面）给每个通用面板都生成了一个
+  // `<button data-plist=… data-pcap=…>刷新</button>`，
+  // 但**全文件没有一处监听它** —— 点了完全没有反应，也不报错。
+  // 与参考项目记的那条教训同型（components.css:367-377 的注释：
+  // 「用户点了「终止请求」，界面看起来毫无反应，实际确认框在底下等着」）：
+  // 都是"按钮在那儿、看着能点、什么也不发生"。
+  //
+  // # 为什么委托在 #content 上
+  //
+  // 面板是**动态生成**的（见上面 buildProviderPanels 的 insertAdjacentHTML），
+  // 逐面板绑监听会漏掉后生成的那些；#content 是它们的共同祖先，绑一次就够。
+  //
+  // ⚠ 必须传 force=true：loadProviderPanel 正常路径上有一条
+  //   「`body.dataset.lpDone === '1'` 就跳过」的守卫（用来止住周期性重绘），
+  //   而「刷新」按钮的**全部意义**就是绕过它重取一次 —— 不传 force 的话
+  //   这个按钮修完还是"点了没反应"。
+  $('content').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-plist]');
+    if (!b || b.disabled) return;
+    loadProviderPanel(b.dataset.plist, b.dataset.pcap, true);
+  });
 
   // sectionActive 报告某个 `data-key` 的面板当前是不是**正在显示**。
   //
