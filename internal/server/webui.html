@@ -310,9 +310,18 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      ⚠ popover 是顶层图层，不受 td 的 overflow:hidden 裁剪 —— 这是选它而不是
        绝对定位菜单的理由（详见 accountRow 里 opsMore 那段注释）。 */
   .ops-more{min-width:26px;padding:0 6px}
+  /* ⚠⚠ 2026-10-19 实测抓到的 bug：这里原来写的是 `display:flex`，而
+     **`display` 会覆盖 popover 关闭时 UA 给的 `display:none`** ——
+     于是页面上 12 个「⋯」菜单**全部可见**，且都堆在 (0,0)。
+     用户看到的"账号池左上角有一块黑色东西"就是它（只有账号池才有这些菜单，
+     所以只在切到账号池时出现）。
+     ⇒ `display` 只在**打开态**给：用 `:popover-open`。关闭时回到 UA 的 `display:none`。
+     ⚠ 同类写法检查过一遍：`.colset` 的规则里**没有** display，所以它不受影响
+       （实测关闭态 `display:none` 正常）。 */
   .ops-menu{position:fixed;margin:0;
     border:1px solid var(--line);border-radius:8px;background:var(--panel);
-    padding:6px;display:flex;gap:6px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+    padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  .ops-menu:popover-open{display:flex;gap:6px}
   .ops-menu button{height:25px;padding:0 8px;font-size:11.5px}
   /* ⚠ popover 默认带一个半透明遮罩（::backdrop），那会把整页压暗 ——
      它是一个"看着表格点一个动作"的小浮层，不该有模态感（参考项目同一理由：
@@ -2415,11 +2424,27 @@ let loginProvider = '';
   //      ⇒ 打开期间挂一个 scroll 监听重算位置，关闭时摘掉。
   //      ⚠ `scroll` 同样**不冒泡** —— 也必须用捕获阶段，否则表格内部滚动容器
   //        （.logwrap / 各种 overflow:auto）的滚动一条都收不到。
+  // ⚠⚠ 2026-10-19 追加：这段原来只处理 `.ops-menu`，`.colset` 被第一行的
+  //   `classList.contains('ops-menu')` 直接 return 掉了 ⇒ **列设置浮层从来没被算过位置**。
+  //
+  //   而 `.colset` 的 CSS 里写着 `margin:0`（抄参考的 `PopoverContent` 时带过来的），
+  //   它覆盖掉了 UA 用来把 popover 居中的 `margin:auto` ⇒ `inset:0 + margin:0`
+  //   ⇒ 浏览器把它**定位到 (0,0)**。用户看到的就是"账号池左上角有一块黑色东西"，
+  //   而且**只有打开列设置时才出现**（关着时是 display:none）——
+  //   在他的截图里就是顶栏左上角那个深色小方块，我一度误以为是品牌图标而删错了。
+  //
+  //   ⇒ 现在两个类共用同一套定位：贴触发按钮的下方，两侧各留 8px 不越界，
+  //     下方放不下就翻到按钮上方。`.colset` 是 336px 宽的左对齐面板，
+  //     `.ops-menu` 是窄的右对齐菜单 —— 只差 `left` 的算法，见下。
   document.addEventListener('toggle', (e) => {
     const p = e.target;
-    if (!p || !p.classList || !p.classList.contains('ops-menu')) return;
+    if (!p || !p.classList) return;
+    const isOps = p.classList.contains('ops-menu');
+    const isCols = p.classList.contains('colset');
+    if (!isOps && !isCols) return;
     const btn = document.querySelector('[popovertarget="' + CSS.escape(p.id) + '"]');
     if (e.newState !== 'open') {
+      // ⚠ 关闭时要摘掉滚动监听（打开期间挂着，见下）
       if (p._opsReposition) {
         window.removeEventListener('scroll', p._opsReposition, true);
         p._opsReposition = null;
@@ -2430,12 +2455,19 @@ let loginProvider = '';
     const place = () => {
       const r = btn.getBoundingClientRect();
       const pr = p.getBoundingClientRect();
-      // 默认贴按钮下方、与按钮右缘对齐；下方放不下就翻到按钮上方。
+      // 默认贴按钮下方；下方放不下就翻到按钮上方。
       let top = r.bottom + 4;
       if (top + pr.height > window.innerHeight - 8) {
         top = Math.max(8, r.top - pr.height - 4);
       }
-      let left = r.right - pr.width;
+      let left;
+      if (isOps) {
+        // 窄菜单：与按钮**右缘**对齐（它挂在操作列最右边）
+        left = r.right - pr.width;
+      } else {
+        // 列设置面板：与按钮**左缘**对齐（336px 宽，右对齐会左半边出屏）
+        left = r.left;
+      }
       left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
       p.style.left = left + 'px';
       p.style.top = top + 'px';
