@@ -1273,6 +1273,20 @@ func main() {
 		OpenAuthURL: loginBrowserOpener(cfg),
 	})
 
+	// ⚠⚠ **把凭证目录里的账号灌进账号池**（2026-10-18 实测发现的根因）。
+	//
+	// 实测：`data/state.json` 里 `accounts` **是空的**，而 `auths/loomy/` 下有 45 个真凭证。
+	// 启动路径原来只有 `pool.New(cfg.StateFile)` ⇒ 池子一直空着，而"灌池"那条路
+	// （`/admin/accounts/reload`）**只在有人点按钮时才跑**。
+	// ⇒ ⚠ 后果：`refreshQuotas` 靠 `Pool.Status(uid)` ⇒ 拿不到任何账号
+	//   ⇒ **额度无论如何都刷不进去**（不管刷新循环跑得多勤）——
+	//   这才是"前端额度永远是旧的"最上游的原因。
+	//
+	// ⚠⚠ **必须放在 `StartQuotaAutoRefresh` 之前**：那个循环刷的是池子里的账号，
+	//   池子还空的时候起它，第一轮就是空转（实测日志一个字都没有）。
+	// ⚠ 它内部每个上游各自 recover、失败只记日志 ⇒ 不该因为某个上游目录读不到而拒绝启动。
+	adminH.SyncPoolFromCredentials()
+
 	// ⚠⚠ **额度自动刷新**（2026-10-18，见 internal/admin/quota_autorefresh.go）。
 	//
 	// 它修的是用户报的那个现象：「前端显示的额度是过时的」。
