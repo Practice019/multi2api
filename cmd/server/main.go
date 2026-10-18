@@ -1273,6 +1273,23 @@ func main() {
 		OpenAuthURL: loginBrowserOpener(cfg),
 	})
 
+	// ⚠⚠ **额度自动刷新**（2026-10-18，见 internal/admin/quota_autorefresh.go）。
+	//
+	// 它修的是用户报的那个现象：「前端显示的额度是过时的」。
+	// 根因：⚠ chat 回执里**没有**余额字段 ⇒ 真实余额只能靠"有人去查"来更新，
+	// 而改造前**只有用户手点「刷新额度」**才查一次 ⇒ 界面上那个值就是"上次点按钮时的值"。
+	// ⇒ 这个循环让它**没人点也会查**（每 3 分钟一轮，与 loomy 的 TTLQuota 同值）。
+	//
+	// ⚠ 它必须在这里（核心侧）而不是 loomy 侧：余额的落账口是 `pool.Pool.SetQuota`，
+	//   loomy 拿不到它（试过，编译期就断：`p.pool().SetQuota undefined`）——
+	//   那是依赖方向问题，不是写法问题。
+	// ⚠ 不 await、自带 recover ⇒ 启动流程一毫秒都不为它多等，它崩了也不影响进程
+	//   （与上面 `lm.StartFreePoolFill/Sweep/PanelWarmup` 那三条同一个约束）。
+	// ⚠⚠ 这四条"启动动作"必须留在**注册成功之后**：它们曾经被放在
+	//   `if err := registry.Register(lm); err != nil { log.Fatalf(...) }` 的错误分支里，
+	//   于是**从来没执行过**（见 internal/loomy/panelwarmup.go 的教训记录）。
+	adminH.StartQuotaAutoRefresh()
+
 	h := server.NewHandler(server.Config{
 		Pool: p,
 		// ⚠ 两个注入是**成对**的，都为了同一个目标：让核心不认识

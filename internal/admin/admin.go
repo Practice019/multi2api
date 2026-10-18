@@ -300,10 +300,18 @@ type Handler struct {
 	// 漏记一条就等于那条可以被上游静默覆盖。
 	patterns []string
 
+	// quotaAutoRefreshOnce 额度自动刷新循环只启动一次（见 quota_autorefresh.go）。
+	//
+	// ⚠ 它解决的问题是**用户报的那个现象**：「前端显示的额度是过时的」——
+	//   因为 chat 回执里没有余额（client.go 的响应结构里确认过），
+	//   真实余额只能靠"有人去查"来更新，而原来**只有用户点按钮**才查。
+	//   ⇒ 这个 Once 保住的是那个"没人点也会查"的循环。
+	quotaAutoRefreshOnce sync.Once
+
 	// 统计聚合的短缓存：聚合要扫整个落盘文件，而前端按轮询节奏调用，
 	// 缓存让「扫盘频率」与「轮询频率」解耦（见 statsCacheTTL）。
-	statsMu     sync.Mutex
-	statsCache  []logbuf.Entry
+	statsMu    sync.Mutex
+	statsCache []logbuf.Entry
 	// ⚠⚠ 聚合产物的缓存（2026-10-18，治 `/admin/stats` 每次重算 28000 行那 ~3 秒）。
 	//
 	// 与上面 `statsCache` 的分工：
@@ -313,10 +321,10 @@ type Handler struct {
 	// ⚠⚠ 关键前提（打破它就会静默污染，见 statsAggCached 的注释）：
 	//   `aggCache` 里的 map **只读共享**；嵌套值（所有 `by_*` / `by_*_detail`）
 	//   **只被读、不被改**，所以调用方每次拿到的只需是**一层浅拷贝**。
-	aggMu       sync.Mutex
-	aggCache    map[string]any
-	aggAt       time.Time
-	aggCount    int    // ⚠ 建它时的 entries 条数：条数变了就必须重建（日志在追加/轮转）
+	aggMu    sync.Mutex
+	aggCache map[string]any
+	aggAt    time.Time
+	aggCount int // ⚠ 建它时的 entries 条数：条数变了就必须重建（日志在追加/轮转）
 	// ⚠⚠ 建它时的**时间档**（2026-10-18 加）。
 	// 为什么必须有：`?range=` 会改变参与聚合的条目集合，而**不同档完全可能条数相同**
 	//（例如"本月"与"全部"在我们这种"数据全在当月"的场景下条数一样）
