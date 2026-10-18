@@ -357,6 +357,27 @@ func (p *Provider) savePanelsSnapshot() {
 //	而缓存本来就不要求强一致（丢了顶多重查）。
 //
 // ⚠ 用单独一把锁而不是复用 panelMu：store 是 IO，不该把面板读写路径拖住。
+//
+// # ⚠⚠ 同步写（2026-10-19 改）—— 原来是 `go p.savePanelsSnapshot()`
+//
+// 那个 goroutine **没有任何人等它**，于是"在途写盘"会与调用方的收尾撞车。
+// 证据来自 CI（不是本地 —— 本地是 Windows，时序不同）：
+//
+//	--- FAIL: TestTasksViewForStampsFetchedAtOnSuccess
+//	testing.go:1231: TempDir RemoveAll cleanup:
+//	    unlinkat /tmp/TestTasksViewFor…/001: directory not empty
+//
+// `t.TempDir()` 的 RemoveAll 先列目录（当时是空的），随后那个 goroutine 才把
+// `.tmp` 落下 ⇒ rmdir 报"目录非空"。⚠ **这不是测试专属问题**：停机时最后一份
+// 缓存同样可能正在写、而没有任何人等它（进程直接退出 ⇒ 那份更新白丢）。
+//
+// 同步的代价可控，三条理由：
+//  1. 节流已经保证 **5 秒最多写一次**，不是每个号都写；
+//  2. 成员只有几十条（44 个号 × 2 个面板），序列化 + 原子写是毫秒级；
+//  3. `saveMu` 与面板读写用的 `panelMu` 是**两把锁** ⇒ 挡住的只是"另一次存盘"。
+//
+// ⚠ 不会自锁：调用方是 `panelRowCache.set` 的回调，而它刻意在**解锁之后**才回调
+// （见那里的注释 —— 它就是为了这条路才写成"捕获回调解引用、解锁后再调"）。
 func (p *Provider) throttledSavePanels() {
 	if p == nil {
 		return
@@ -367,7 +388,7 @@ func (p *Provider) throttledSavePanels() {
 		return
 	}
 	p.lastSaveAt = time.Now()
-	go p.savePanelsSnapshot()
+	p.savePanelsSnapshot()
 }
 
 // tasksPanel / invitePanel 两个面板的行缓存（惰性初始化）。
