@@ -4818,6 +4818,11 @@ let loginProvider = '';
       if (!confirm(`彻底删除账号「${a.nickname || uid.slice(0, 8)}」？\n\n· 移出账号池，并删除 auths 里的凭证文件（不可恢复）\n· 只是暂时停用？请用「禁用」，凭证保留、随时可启用`)) return;
       await busyRun(btn, async () => {
         const r = await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=1`, { method: 'DELETE' });
+        // ⚠ 先把这一屏的缓存丢掉再刷新 —— 否则 `refresh()` 里的
+        //   `sharedGet('ep:/admin/accounts')` 会命中 30s 内的旧快照，
+        //   把**刚删掉的这一行原样画回来**（真浏览器实测 20 秒不消失；
+        //   见 writeInvalidate 的长注释）。
+        writeInvalidate([EP_ACCOUNTS]);
         const who = a.nickname || uid.slice(0, 8);
         // ⚠ 回执里可能带 `purge_error`（2026-10-19 加）：账号出池了，但**凭证文件没删掉**。
         //   这时说「已彻底删除」就是骗人 —— 文件还在盘上，重载 auths 或重启就会
@@ -4899,6 +4904,10 @@ let loginProvider = '';
       } catch (e) {
         toast(`${label}失败：${e.message}`, true);
       }
+      // ⚠ 与 remove 分支同理：**先丢缓存再刷新**。这里是所有账号动作的收尾
+      //   （禁用 / 启用 / 清冷却 / 每日动作），写完不清快照的话，
+      //   表格会把刚改过的状态原样画回来 —— 用户看到的是"点了没反应"。
+      if (wrote) writeInvalidate([EP_ACCOUNTS]);
       await Promise.all([refresh(), loadHistory()]);
       return wrote ? true : undefined;
     }, { label, busyText: label + '中…' });
@@ -6547,6 +6556,34 @@ let loginProvider = '';
 
   const panelPolls = {};
 
+  // ── 写操作之后必须丢缓存（2026-10-19 加）────────────────────────────────
+  //
+  // # 为什么（用户实测报的「删除不掉」的**界面侧真因**）
+  //
+  // `sharedGet` 的缓存 TTL 是 30s，而且**落 localStorage**（整个单页共用）。
+  // 写操作本身走 `admin()`（不过缓存，这是对的），可**紧接着的刷新**走的是
+  // `sharedGet('ep:/admin/accounts')` —— 它命中 30 秒内的旧快照 ⇒
+  // `renderAccounts(旧数据)` 把**刚删掉的那一行原样画回来**。
+  //
+  // 真浏览器实测（tests/frontend/verify_delete_buttons_ui_e2e.js）：
+  //
+  //	点「移除」 → DELETE **10ms** 就回了 200，而表格里那一行 **20 秒不消失**
+  //	apiKey 删除 → 后端已空，列表还显示那把 key
+  //
+  // 用户读到的就是「点了移除没反应 / 删不掉」—— 它与后端那条 FilePath 缺陷
+  // **同时存在**，两条各自都能独立造成这个现象（所以两条都修）。
+  //
+  // ⚠ 顺序**不能反**：先丢缓存，再 refresh。反了等于没丢（这一轮刷新刚把
+  //   旧快照写回缓存，下一轮又要等 30s）。
+  // ⚠ 宁可多丢：多丢一次无非多发一次请求；少丢一次的代价是界面上留着已删的号。
+  const EP_ACCOUNTS = 'ep:/admin/accounts';
+  const EP_APIKEYS = 'ep:/admin/apikeys';
+
+  // writeInvalidate 在**写操作之后、刷新之前**调用（见上）。
+  function writeInvalidate(keys) {
+    (Array.isArray(keys) ? keys : [keys]).forEach(k => lazyCache.drop(k));
+  }
+
   // schedulePanelPoll 只要 pendingCount() 还 > 0，就每 1.5 秒跑一次 reload。
   // ⚠ 同一个 key 只允许一个表；占位清空 / host 离开文档 ⇒ 立刻停表（不后台空转）。
   function schedulePanelPoll(key, host, pendingCount, reload) {
@@ -8140,6 +8177,7 @@ let loginProvider = '';
         try {
           await admin('/admin/apikeys/reset', { method: 'POST', body: JSON.stringify({ id }) });
           toast('已重置');
+          writeInvalidate([EP_APIKEYS]);   // 同上：重置改了额度/失败数，别拿旧快照重画
           await loadAPIKeys(); return true;
         } catch (e) { toast('重置失败：' + e.message, true); return false; }
       }, { label: '重置', busyText: '…' });
@@ -8151,6 +8189,9 @@ let loginProvider = '';
         try {
           await admin('/admin/apikeys/delete', { method: 'POST', body: JSON.stringify({ id }) });
           toast('已删除');
+          // ⚠ 先丢缓存再拉列表：`loadAPIKeys()` 走 sharedGet（30s TTL），
+          //   不丢的话列表会把刚删掉的那把 key **原样画回来**（实测 20s 不消失）。
+          writeInvalidate([EP_APIKEYS]);
           await loadAPIKeys(); return true;
         } catch (e) { toast('删除失败：' + e.message, true); return false; }
       }, { label: '删除', busyText: '…' });
@@ -11258,7 +11299,17 @@ let multCatalogFailed = false;
   // 只取数据不渲染：真正的呈现发生在 renderGrowthGroups 的节头里。
   async function loadClientLogin() {
     try {
-      clientStatus = await sharedGet('ep:/admin/client-login', () => admin('/admin/client-login'));
+      // ⚠ 必须 `silent`（2026-10-19 加）：**本机登录管理是可选功能**，
+      //   未启用时接口回 503「本控制台未启用客户端登录管理」—— 那是**正常状态**，
+      //   不是失败。而 `admin()` 默认会把任何非 2xx 播成**红色 toast**，
+      //   于是每次 refresh 都冒一条「GET 失败：…」。
+      //
+      //   真浏览器实测的时序（tests/frontend/verify_delete_buttons_ui_e2e.js）：
+      //	+20ms   已彻底删除 xxx        ← 删除成功提示（用户该看到的）
+      //	+130ms  GET 失败：本控制台未启用客户端登录管理  ← 把它盖掉了
+      //   用户看到的是后者 ⇒ 读成「点了移除之后报失败 = 删不掉」。
+      clientStatus = await sharedGet('ep:/admin/client-login',
+        () => admin('/admin/client-login', { silent: true }));
     } catch (e) {
       // 客户端没装或未启用时接口会失败，不该连带影响成长计划本身，
       // 只把控制条降级成「不可用」。
