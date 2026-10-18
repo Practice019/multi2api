@@ -69,7 +69,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      不动配色、不动结构、不动交互 —— 所以风险低、改完立刻能看出来。
      ⚠ 每一处的"原值"都写在行尾注释里，要回退按原值改回即可。 */
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);
+  /* ⚠⚠ 全局禁用滚动锚定（2026-10-19 照参考项目 Agent2API 的 layout.css:527-531 抄）。
+     它的理由原话：「滚动锚定在这种重建下会把锚点算到被移除的节点上，补偿出一个
+     莫名的滚动位移 —— 用户点一个开关，页面自己跳一大截」。
+     这一条对本项目同样成立：任务调度换了卡片形态后是**整体重建**式重绘
+     （renderJobs 一次 innerHTML 替换），请求日志、账号池也都是这个套路。
+     禁用之后重绘不再改变视口，滚动位置严格保持。 */
+  body{margin:0;background:var(--bg);color:var(--fg);overflow-anchor:none;
     font:13.5px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
   header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
     padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel);
@@ -667,6 +673,46 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     margin:12px 0 0;white-space:pre-wrap;word-break:break-word;
     font-family:var(--mono);font-size:12.5px;max-height:340px;overflow:auto}
   .err{color:var(--err)} .dim{color:var(--dim)}
+
+  /* ---- 任务调度：卡片网格（2026-10-19 照参考项目 Agent2API 移植）----
+     形态抄自 `agent2api/desktop-tauri/ui/css/page-tasks.css`（186 行那份），
+     类名换成本项目的 `job-*`（不照搬它的 `.task-*`：本项目另有上游的 tasks
+     面板，同名会串）。**只抄布局形态，控件不动** —— 我们的任务面板是只读的，
+     所以它那套「开关 / 间隔输入 / 立即执行」一概不抄（理由见面板里的注释）。
+
+     ⚠ 它把第一条「凭证自动维护」整行铺开（LEAD_CARDS=1），是因为**那条有主次**：
+        其余几条是页面自刷新、执行者是页面自己。我们这里的任务没有主次之分，
+        所以**全部进 2 栏网格**，排布反而更整齐 —— 这是一处**刻意不抄**。
+
+     行优先（默认 `grid-auto-flow:row`）+ 卡片被拉伸（grid 默认 stretch）⇒
+     同一行两栏等高，卡片高度参差时也还是对齐的。 */
+  .job-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+    grid-auto-flow:row;gap:8px}
+  /* 窄窗口回落单栏：两栏各剩不到 400px 时，标题行与状态行会被挤成窄柱
+     （中文在窄柱里换行几乎无法阅读）。断点取它那边的 1120px。 */
+  @media (max-width:1120px){ .job-list{grid-template-columns:minmax(0,1fr)} }
+  .job-item{display:flex;flex-direction:column;gap:5px;min-width:0;
+    padding:9px 11px;border:1px solid var(--line);border-radius:8px;
+    background:var(--panel2)}
+  /* ⚠ 有任务报错时整张卡描红（原来是"整行标红"，换卡片后同样保留） */
+  .job-item.errrow{border-color:color-mix(in srgb,var(--err) 55%,var(--line));
+    background:color-mix(in srgb,var(--err) 7%,var(--panel2))}
+  .job-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+  .job-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 问号（任务说明）：抄参考项目的 `.tip-q` 做法 —— 说明挂在**问号**上而不是
+     整个标题上，这样"哪段文字有解释"是看得见的，不用满处乱悬停试。 */
+  .job-q{flex:none;display:inline-flex;align-items:center;justify-content:center;
+    width:14px;height:14px;border-radius:50%;font-size:10px;cursor:help;
+    color:var(--dim);border:1px solid var(--line);background:var(--panel)}
+  .job-q:hover{color:var(--fg);border-color:var(--dim)}
+  /* 状态行：等宽数字（扫一眼就能对齐比较），全角「·」分隔多段事实 */
+  .job-state{color:var(--dim);font-size:11.5px;line-height:1.6;
+    font-variant-numeric:tabular-nums;min-width:0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .job-state .cool{color:var(--warn)}
+  /* 空态/加载态：居中。列表成了 flex/grid 容器后，只有一条内容时会被顶在左上角 */
+  .job-empty{grid-column:1 / -1;text-align:center;color:var(--dim);
+    padding:18px 0;font-size:12px}
   .tog{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;user-select:none}
   /* 分段按钮的选中态。历史代码用内联 style 切换，这里补一条 class 规则，
      供新增的视图切换使用，避免再堆内联样式。 */
@@ -1207,11 +1253,8 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
       后台定时任务由各上游通过 <span class="mono">JobExt</span> 注册，核心调度器按间隔错峰执行。
       本页只读 —— 手动触发会与调度器并发跑同一任务，故不提供。
     </div>
-    <div class="body" style="padding:0">
-      <table><thead><tr>
-        <th>任务</th><th>上游</th><th>间隔</th><th>上次执行</th><th>距今</th><th>最近错误</th>
-      </tr></thead>
-      <tbody id="jobrows"><tr><td colspan="__COLS_JOBS__" class="dim">加载中…</td></tr></tbody></table>
+    <div class="body">
+      <div id="jobrows" class="job-list"><div class="job-empty">加载中…</div></div>
     </div>
   </section>
 
@@ -2576,7 +2619,8 @@ let loginProvider = '';
     travel: 8,   // 猫猫旅行
     growth: 6,   // 成长计划（精简：额度/能量、连登/补签、待完成/可得、可领 合并）
     logs: 10,    // 请求日志
-    jobs: 6,     // 任务调度
+    // ⚠ jobs 已移除（2026-10-19）：任务调度页从表格换成了卡片网格，不再有列数，
+    //   HTML 里的 `__COLS_JOBS__` 占位符也一并删了 ⇒ 留着就是死字段。
   };
 
   // rowPlaceholder 生成占满整行的提示行。
@@ -2748,21 +2792,64 @@ let loginProvider = '';
   //
   // 数据来自 manifest.jobs。**不额外发请求** —— 与顶栏状态条同一个理由：
   // 第二份事实来源会让两份数字不一致时无法判断谁对。
+  // relTime 把「某个时刻距今还有多久 / 已经多久」说成人话。
+  //
+  // 抄自参考项目 Agent2API 的 describeNext（`ui-islands/src/islands/tasks-panel.tsx:189-202`），
+  // 它那句注释说得很准：「比只给一个时刻更有用（用户关心的是还有多久）」。
+  //
+  // ⚠ 一边是未到、一边是已过，所以**两个方向分开说**（「3 分钟后」/「已过 3 分钟」）——
+  //   合并成「3 分钟」会看不出任务是在等我、还是早该跑了。
+  function relTime(ms) {
+    const diff = ms - Date.now();
+    const past = diff < 0;
+    const s = Math.round(Math.abs(diff) / 1000);
+    const say = (n, unit) => past ? `已过 ${n} ${unit}` : `${n} ${unit}后`;
+    if (s < 60) return past ? '刚刚' : `${s} 秒后`;
+    const m = Math.round(s / 60);
+    if (m < 60) return say(m, '分');
+    const h = Math.round(m / 60);
+    if (h < 24) return say(h, '小时');
+    return say(Math.round(h / 24), '天');
+  }
+
+  // renderJobs 渲染任务调度面板。
+  //
+  // # 为什么从表格换成卡片（2026-10-19 照参考项目 Agent2API 移植）
+  //
+  // 参考实现的形态在 `agent2api/desktop-tauri/ui/css/page-tasks.css`（186 行）
+  // 与 `ui-islands/src/islands/tasks-panel.tsx`。原来是张 6 列表格，
+  // **「最近错误」那一列必然被长文本撑破** —— 错误原文动辄上百字符，
+  // 表格里只能 `slice(0,50)` 截断 + title 悬停，等于把最重要的排障信息藏在鼠标后面。
+  // 卡片形态下错误独立一行、可以换行整段显示，这是换形态的主要理由。
+  //
+  // # 抄了什么 / 没抄什么
+  //
+  //   抄：2 栏网格（行优先·同行等高·1120px 断点回落单栏）、标题行 + 状态行两段结构、
+  //       问号 .job-q 承载说明（而不是把 title 挂在整块上）、状态行用全角「·」连接多段事实、
+  //       空态居中、错误卡描红。
+  //       ⚠ 参考项目把它的第一条整行铺开（LEAD_CARDS=1），是因为**那条有主次**
+  //         （其余几条是页面自刷新、执行者是页面自己）。我们这里没有主次之分，
+  //         所以**全部进 2 栏**——这是一处刻意不抄。
+  //   没抄：开关 / 间隔输入 / 「立即执行」按钮。本面板**只读**，理由见 HTML 里那段注释
+  //         （手动触发会与调度器并发跑同一任务）。
+  //
+  // 数据来自 manifest.jobs。**不额外发请求** —— 与顶栏状态条同一个理由：
+  // 第二份事实来源会让两份数字不一致时无法判断谁对。
   function renderJobs() {
-    const tb = $('jobrows');
-    if (!tb) return;
+    const host = $('jobrows');
+    if (!host) return;
     if (!MANIFEST.loaded) {
-      tb.innerHTML = TableState.error(COLS.jobs, '渲染契约未加载：' + (manifestError || '未知原因'));
+      host.innerHTML = `<div class="job-empty">渲染契约未加载：${esc(manifestError || '未知原因')}</div>`;
       $('jobMeta').textContent = '';
       return;
     }
     const jobs = MANIFEST.jobs || [];
     $('jobMeta').textContent = jobs.length ? `（${jobs.length} 个已注册任务）` : '';
     if (!jobs.length) {
-      tb.innerHTML = TableState.empty(COLS.jobs, '没有上游注册定时任务');
+      host.innerHTML = `<div class="job-empty">没有上游注册定时任务</div>`;
       return;
     }
-    // 稳定排序：先按上游，再按任务名。不排序会让行序随后端 map 遍历跳动。
+    // 稳定排序：先按上游，再按任务名。不排序会让卡片顺序随后端 map 遍历跳动。
     // 同样先滤掉 null / 非对象元素（CP3 评审 F1：a.provider 在 null 上会抛）。
     const sorted = jobs.filter(j => j && typeof j === 'object').sort((a, b) => {
       const pa = a.provider || '', pb = b.provider || '';
@@ -2770,48 +2857,62 @@ let loginProvider = '';
       const na = a.name || '', nb = b.name || '';
       return na < nb ? -1 : na > nb ? 1 : 0;
     });
-    tb.innerHTML = sorted.map(j => {
+    host.innerHTML = sorted.map(j => {
       // 间隔：毫秒转可读。小于 1 分钟显示秒，否则显示分钟。
       const ms = j.interval_ms || 0;
-      const itv = ms <= 0 ? '<span class="dim">—</span>'
-        : (ms < 60000 ? (ms / 1000) + ' 秒' : (ms / 60000) + ' 分');
-      // 上次执行：两列各有分工 ——
-      //  ·「上次执行」给**绝对时间**（排障时要跟日志对时刻）
-      //  ·「距今」给**相对时间**（判断这个任务还活着吗）
-      // 两者都需要，所以不合并成一列。
-      //
-      // 从未执行时显示「未执行」而不是 —：那个字面量会骗人 ——
-      // growth-watch 一直没跑过，显示 — 会被当成"正常但无关的信息"。
-      let last = '<span class="pill warn" title="该任务自进程启动以来尚未执行过">未执行</span>';
-      let ago = '<span class="dim">—</span>';
-      if (j.last_run) {
-        const t = new Date(j.last_run);
-        last = `<span class="mono">${esc(isNaN(t) ? j.last_run : t.toLocaleTimeString('zh-CN', { hour12: false }))}</span>`;
-        ago = esc(fmtTime(j.last_run));
-      }
-      const err = j.last_error
-        ? `<span class="err" title="${esc(j.last_error)}">${esc(j.last_error.slice(0, 50))}</span>`
-        : '<span class="dim">—</span>';
-      // 有错误的行整行标红：扫一眼就知道哪个任务出问题了。
-      const rowCls = j.last_error ? ' class="errrow"' : '';
+      const itv = ms <= 0 ? '—' : (ms < 60000 ? (ms / 1000) + ' 秒' : (ms / 60000) + ' 分');
+
       // ⚠⚠ 任务名显示成「中文 (英文)」（2026-10-18 按用户要求）：
       //   中文给人看、英文（放括号里）是排障时唯一能对照日志的标识 ⇒ 两者都要。
       //   `label` / `desc` 由后端查表给（见 internal/admin 的 jobLabels/jobDescs）；
       //   ⚠ **没登记就退回英文名**（不报错、也不显示空白）—— 与 capTitles 的约定一致。
-      //   ⚠ `desc` 挂在整格上（悬停整格都能读），不是挂在小字上。
       const en = j.name || '';
       const zh = j.label || '';
-      const nameCell = zh
-        ? `<span${j.desc ? ` title="${esc(j.desc)}"` : ''}>${esc(zh)} <span class="dim mono">(${esc(en)})</span></span>`
-        : `<span class="mono"${j.desc ? ` title="${esc(j.desc)}"` : ''}>${esc(en || '—')}</span>`;
-      return `<tr${rowCls}>
-        <td>${nameCell}</td>
-        <td><span class="pill dim">${esc(j.provider || '—')}</span></td>
-        <td>${itv}</td>
-        <td>${last}</td>
-        <td>${ago}</td>
-        <td>${err}</td>
-      </tr>`;
+      const nameHtml = zh
+        ? `${esc(zh)} <span class="dim mono">(${esc(en)})</span>`
+        : `<span class="mono">${esc(en || '—')}</span>`;
+      // ⚠ 说明挂到**问号**上（抄参考项目的 .tip-q）：这样"哪条有解释"是看得见的，
+      //   不用满处乱悬停去试。没有 desc 就不画问号（不留一个点了没反应的圆）。
+      const qHtml = j.desc
+        ? `<span class="job-q" title="${esc(j.desc)}">?</span>` : '';
+
+      // 状态行：多段事实用全角「·」连成一行（抄参考项目的 SEP = '　·　'）。
+      // ⚠ 三段各有分工，都要：
+      //   · 间隔 —— 这个任务该多久跑一次
+      //   · 上次执行 —— **绝对时刻**（排障时要跟日志对时刻）
+      //   · 下次执行 —— **相对说法**（判断这个任务还活着吗）
+      // ⚠ 后端没下发 next_run，这里由 `last_run + interval` 推算 —— 不为此改协议。
+      //   它和真实排期会在"用 Due 自定义到期"的任务上不一致（workbuddy 的守卫轮
+      //   是按账号错峰的），所以文案说「约」而不是断言。
+      const seg = [];
+      seg.push(`每 ${itv}`);
+      if (j.last_run) {
+        const d = new Date(j.last_run);
+        const abs = isNaN(d) ? j.last_run : d.toLocaleTimeString('zh-CN', { hour12: false });
+        seg.push(`上次 ${esc(abs)}`);
+        if (ms > 0 && !isNaN(d)) seg.push(`约 ${esc(relTime(d.getTime() + ms))}`);
+      } else {
+        // 从未执行时明说，而不是显示 —：那个字面量会骗人 —— growth-watch 一直没跑过，
+        // 显示 — 会被当成"正常但无关的信息"。
+        seg.push('还没有执行记录');
+      }
+      const stateHtml = seg.map((s, i) => i === 0 ? esc(s) : `<span class="dim">${s}</span>`).join('　·　');
+
+      // 错误独立一行、整段显示（可以换行）—— 这正是从表格换卡片的主要理由。
+      const errHtml = j.last_error
+        ? `<div class="job-state err" style="white-space:normal;word-break:break-word"
+             title="${esc(j.last_error)}">${esc(j.last_error)}</div>`
+        : '';
+      // 有错误的卡描红：扫一眼就知道哪个任务出问题了。
+      const cls = j.last_error ? 'job-item errrow' : 'job-item';
+      return `<div class="${cls}">
+        <div class="job-title">
+          <span class="job-name">${nameHtml}</span>${qHtml}
+          <span class="spacer"></span>
+          <span class="pill dim">${esc(j.provider || '—')}</span>
+        </div>
+        <div class="job-state">${stateHtml}</div>${errHtml}
+      </div>`;
     }).join('');
   }
 
