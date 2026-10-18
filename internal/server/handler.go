@@ -1519,7 +1519,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// reqProvider 为空（单上游模式 / 裸模型名）时池子按默认上游解释。
 			acct = h.cfg.Pool.PickForTier(reqProvider, reqModel, tried, tierOffset)
 		}
-		if acct == nil && !switchedUpstream {
+		// ⚠⚠ **换上游已停用**（2026-10-18，用户明确要求）：
+		//   "我调用的是这个模型，但是它优选，选到别的模型去了，别的上游去了。你别乱搞啊"
+		//   ⇒ ⚠ **客户端点的是 `loomy/DeepSeek-V4.1-Flash`，就只许在 loomy 的号里选** ——
+		//     不管什么理由（更慢、选不出号、熔断），都**不许**把请求发到别的上游去。
+		//     "换了上游"这件事对用户是不可见的，他只会看到"我要的模型结果变了"。
+		//
+		// ⚠ 代码保留（alternateUpstream 与它的单测），只断掉这个调用点：
+		//   写在这里的死代码是一份**明确的"当前不启用"记录**，比删掉函数更容易找回，
+		//   也避免以后有人凭印象重新接上它。
+		if false && acct == nil && !switchedUpstream {
 			// ⚠⚠ **换一个同模型的上游再试**（2026-10-18 加）。
 			//
 			// 这里才是"上游坏了"该有的动作：⚠ 不是更快地失败，而是**换一家**。
