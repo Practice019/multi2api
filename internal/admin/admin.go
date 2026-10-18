@@ -1421,49 +1421,8 @@ func (h *Handler) accountClearCooldown(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"uid": uid, "cleared": true})
 }
 
-// accountDelete 把账号移出池。默认只出池、保留 auths 文件；purge_file=1 才连文件一起删。
-func (h *Handler) accountDelete(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	purge := r.URL.Query().Get("purge_file") == "1"
-
-	var filePath string
-	if a := h.cfg.Pool.AuthByUID(uid); a != nil {
-		filePath = a.FilePath
-	}
-	if _, ok := h.cfg.Pool.Status(uid); !ok {
-		writeError(w, http.StatusNotFound, "账号不存在: "+uid)
-		return
-	}
-	h.cfg.Pool.Remove(uid)
-
-	deleted := ""
-	if purge && filePath != "" {
-		// 只允许删**凭证树**（AuthsBase = 各上游子目录的父目录）内的文件：
-		// 防止 FilePath 被构造成任意路径删除。早先用 h.cfg.AuthDir
-		// （默认上游子目录 auths/workbuddy）做前缀，于是 loomy/trae
-		// 的 auths/<上游>/ 文件永远前缀不匹配 → "拒绝删目录外文件" →
-		// 用户删号后重启复活（实测 bug）。父目录才是所有上游的合法根。
-		root := h.cfg.AuthsBase
-		if root == "" {
-			root = h.cfg.AuthDir
-		}
-		absDir, _ := filepath.Abs(root)
-		absFile, _ := filepath.Abs(filePath)
-		if strings.HasPrefix(absFile, absDir+string(os.PathSeparator)) {
-			if err := os.Remove(absFile); err != nil {
-				log.Printf("admin: delete %s pool 移除成功但删文件失败: %v", uid, err)
-			} else {
-				deleted = absFile
-			}
-		} else {
-			log.Printf("admin: delete %s 拒绝删目录外文件 %s", uid, absFile)
-		}
-	}
-	log.Printf("admin: remove %s (purge_file=%v deleted=%q)", uid, purge, deleted)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"uid": uid, "removed": true, "purged_file": deleted, "file": filePath,
-	})
-}
+// accountDelete 见 account_delete.go（2026-10-19 从本文件搬出去：那个缺陷值得
+// 一个独立文件把「为什么静默空转」讲清楚，而本文件已经太长）。
 
 // ---------------------------------------------------------------------------
 // 添加账号（OAuth 设备授权）

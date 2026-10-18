@@ -31,7 +31,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"workbuddy2api/internal/gateway"
@@ -101,7 +100,7 @@ func (h *Handler) accountsImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir := h.importDirFor(pid)
+	dir := h.credentialDirFor(pid)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建凭证目录失败: "+err.Error())
 		return
@@ -158,34 +157,8 @@ func (h *Handler) importOne(dir string, c gateway.ImportedCredential) error {
 	return err
 }
 
-// importDirFor 取该上游的凭证目录。
-//
-// 判据与 `accountsReload` **逐字一致**（照抄那边的顺序）：
-//
-//	上游自报的 AuthDir（实现 AuthDirExt 时）—— 目录是**上游的事实**
-//	否则回落 <AuthsBase>/<provider>
-//
-// ⚠ 必须与 reload 用同一个目录，否则会出现"导入写进了 A 目录、
-// 重载只扫 B 目录"→ 界面报"导入成功"但账号不出现。这类"两条路径各算
-// 一次目录"的缺陷在本项目出现过（见 codearts 的目录拼接注释），
-// 所以这里刻意复用同一个判据顺序而不是自己再写一遍。
-func (h *Handler) importDirFor(pid string) string {
-	base := strings.TrimSpace(h.cfg.AuthsBase)
-	if base == "" {
-		base = strings.TrimSpace(h.cfg.AuthDir)
-	}
-	if base == "" {
-		base = "auths"
-	}
-	if p, ok := h.providerByID(pid); ok {
-		if ax, ok := gateway.ExtOf[gateway.AuthDirExt](p); ok {
-			if d := strings.TrimSpace(ax.AuthDir()); d != "" {
-				return d
-			}
-		}
-	}
-	return filepath.Join(base, pid)
-}
+// （该上游的凭证目录由 `credentialDirFor` 给出 —— 见 credentialdir.go 的注释：
+// 导入 / 重载 / 删除三条路径共用同一个判据，各自写一遍的代价是"将来只改对一处"。）
 
 // 导入落盘时的三种"这条不可落盘"。分成三个值而不是一个笼统的 error：
 // 用户看到的原因不同（文件名空 = 上游的 bug；内容空 = 解析出了个空凭证）。
