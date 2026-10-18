@@ -151,7 +151,7 @@ func TestStaleTierReportsUnsure(t *testing.T) {
 
 	// 手工塞一个"已过期"的、写着"确认有免费额度"的档位。
 	p.tiers.mu.Lock()
-	p.tiers.m[fqUID] = tierEntry{tier: tierFree, at: time.Now().Add(-2 * tierCacheTTL)}
+	p.tiers.m[fqUID] = tierEntry{tier: tierFree, at: localNoon(time.Now()).Add(-2 * tierCacheTTL)}
 	p.tiers.mu.Unlock()
 
 	got := p.CandidateTiers("", []string{fqUID})
