@@ -28,6 +28,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -216,6 +218,20 @@ type panelRowCache[T any] struct {
 	mu sync.RWMutex
 	m  map[string]T
 	at time.Time
+	// onChange 每次写入后回调（2026-10-18 加）—— 用于**落盘**。
+	//
+	// # 为什么必须落盘（用户 2026-10-18 的原话）
+	//
+	//	"是不是本地文件里面有这些账号的额度等信息，前端只需要直接加载缓存就行了啊？
+	//	 还需要等待几分钟？一毫秒就行了啊"
+	//
+	// ⚠ 他说得对：`state.json` 是落盘的 ⇒ "账号池"的额度**一毫秒出**；
+	//   而这两个面板缓存**只是内存** ⇒ ⚠ **进程一重启就空** ⇒
+	//   只能重新查上游（每号 2 次请求）⇒ **"要等几分钟"的真正来源**。
+	// ⇒ 落盘之后：启动即读盘 ⇒ 前端**一毫秒**见到上次的数据，后台再慢慢刷新 ✓
+	//
+	// ⚠ 用回调而不是让本类型自己知道路径：它对"存哪、怎么存"一无所知（泛型缓存不该管磁盘）。
+	onChange func()
 }
 
 func newPanelRowCache[T any]() *panelRowCache[T] {
@@ -243,7 +259,15 @@ func (c *panelRowCache[T]) set(uid string, v T) {
 	c.mu.Lock()
 	c.m[uid] = v
 	c.at = time.Now()
+	cb := c.onChange
 	c.mu.Unlock()
+	// ⚠⚠ **回调必须在锁外调用**：
+	//   落盘那条路（throttledSavePanels → savePanelsSnapshot）会去 `RLock` 同一把锁，
+	//   而 Go 的 RWMutex **不允许同一个 goroutine 递归取读锁** ⇒ 在锁内调就是死锁。
+	// ⚠ 这也是"捕获回调解引用、解锁后再调"这个写法的唯一理由。
+	if cb != nil {
+		cb()
+	}
 }
 
 // updatedAt 最近一次写入的时刻（前端据此显示「更新于 …」）。
@@ -256,7 +280,91 @@ func (c *panelRowCache[T]) updatedAt() time.Time {
 	return c.at
 }
 
-// tasksPanel / invitePanel 两个面板的行缓存（惰性初始化）。
+// panelsFileName 面板缓存的落盘文件名（放在 authDir 下 —— 那是**网关自己**的目录，
+	// 不是本机 Loomy 客户端的 clientDataDir）。
+	const panelsFileName = "panels.json"
+
+	// panelsSnapshot 两个面板缓存的落盘形态。
+	//
+	// ⚠ 为什么整份存而不是逐条存：它只有几十条（44 个号 × 2 个面板），
+	//   整份序列化是最简单的正确选择 —— 逐条 append 会让"重启后读到半份"成为可能。
+	type panelsSnapshot struct {
+		Tasks   map[string]accountTasksView  `json:"tasks"`
+		Invite  map[string]accountInviteView `json:"invite"`
+		SavedAt time.Time                    `json:"saved_at"`
+	}
+
+	// loadPanelsSnapshot 启动时读一次落盘的面板缓存。
+	//
+	// ⚠ 文件不存在、读不动、JSON 坏了 —— **一律当空**（不是错误）：
+	//   它只是缓存，缺了顶多"第一次打开要查上游"，而**报错会让整个面板起不来**。
+	func (p *Provider) loadPanelsSnapshot() panelsSnapshot {
+		var s panelsSnapshot
+		if p == nil || p.authDir == "" {
+			return s
+		}
+		raw, err := os.ReadFile(filepath.Join(p.authDir, panelsFileName))
+		if err != nil {
+			return s
+		}
+		_ = json.Unmarshal(raw, &s)
+		return s
+	}
+
+	// savePanelsSnapshot 把两个面板缓存落盘（原子写：先写 .tmp 再 rename）。
+	//
+	// ⚠ 原子写是必须的：非原子写在写到一半时崩溃会留下**半份 JSON**，
+	//   下次启动读它解析失败 ⇒ 整份缓存白丢（而且静默）。
+	func (p *Provider) savePanelsSnapshot() {
+		if p == nil || p.authDir == "" {
+			return
+		}
+		s := panelsSnapshot{Tasks: map[string]accountTasksView{}, Invite: map[string]accountInviteView{}, SavedAt: time.Now()}
+		if c := p.panelTasks; c != nil {
+			c.mu.RLock()
+			for k, v := range c.m {
+				s.Tasks[k] = v
+			}
+			c.mu.RUnlock()
+		}
+		if c := p.panelInvite; c != nil {
+			c.mu.RLock()
+			for k, v := range c.m {
+				s.Invite[k] = v
+			}
+			c.mu.RUnlock()
+		}
+		raw, err := json.Marshal(s)
+		if err != nil {
+			return
+		}
+		dst := filepath.Join(p.authDir, panelsFileName)
+		tmp := dst + ".tmp"
+		if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+			return
+		}
+		_ = os.Rename(tmp, dst)
+	}
+
+	// throttledSavePanels 存盘的**节流**入口（每次补一个号都会写缓存 ⇒ 不能每次都落盘）。
+	//
+	// ⚠ 5 秒最多存一次：一轮 sweep 最多补 8 个号 ⇒ 不节流就是 8 次整份序列化写盘，
+	//   而缓存本来就不要求强一致（丢了顶多重查）。
+	// ⚠ 用单独一把锁而不是复用 panelMu：store 是 IO，不该把面板读写路径拖住。
+	func (p *Provider) throttledSavePanels() {
+		if p == nil {
+			return
+		}
+		p.saveMu.Lock()
+		defer p.saveMu.Unlock()
+		if time.Since(p.lastSaveAt) < 5*time.Second {
+			return
+		}
+		p.lastSaveAt = time.Now()
+		go p.savePanelsSnapshot()
+	}
+
+	// tasksPanel / invitePanel 两个面板的行缓存（惰性初始化）。
 //
 // ⚠ 惰性而不是在构造函数里建：Provider 有多个构造入口（New / NewWithConfig /
 // 测试夹具），漏一个就会出现"这个入口下缓存是 nil" —— 而 nil 接收者上的
@@ -266,6 +374,15 @@ func (p *Provider) tasksPanel() *panelRowCache[accountTasksView] {
 	defer p.panelMu.Unlock()
 	if p.panelTasks == nil {
 		p.panelTasks = newPanelRowCache[accountTasksView]()
+		// ⚠⚠ **启动即读盘**（AGENTS 第 9 条：本地文件缓存 ⇒ 前端读缓存 ⇒ 毫秒级）。
+		//
+		// 顺序必须是"先灌盘、后挂 onChange"：
+		// 灌盘走的也是 set()，那时若已挂上回调就会**在读盘过程中触发一串写盘**（纯浪费）。
+		for uid, v := range p.loadPanelsSnapshot().Tasks {
+			p.panelTasks.set(uid, v)
+		}
+		// ⚠ 落盘挂在 onChange 上（见 panelRowCache.onChange）：补一个号就（节流地）存一次。
+		p.panelTasks.onChange = p.throttledSavePanels
 	}
 	return p.panelTasks
 }
@@ -275,6 +392,11 @@ func (p *Provider) invitePanel() *panelRowCache[accountInviteView] {
 	defer p.panelMu.Unlock()
 	if p.panelInvite == nil {
 		p.panelInvite = newPanelRowCache[accountInviteView]()
+		// ⚠ 与 tasksPanel 同一处理：先灌盘、后挂 onChange（理由见那里）。
+		for uid, v := range p.loadPanelsSnapshot().Invite {
+			p.panelInvite.set(uid, v)
+		}
+		p.panelInvite.onChange = p.throttledSavePanels
 	}
 	return p.panelInvite
 }
