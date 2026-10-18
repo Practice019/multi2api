@@ -328,11 +328,16 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .field .hint{font-size:11px;color:var(--dim)}
   /* ⚠ 文本 / 下拉：撑满所在列（它们的内容长度不可预知）。
      ⚠ **数字输入框单独给窄宽** —— 用户指出「签历史保留天数」「请求日志保留天数」两个框
-     各占半屏，而值只是 `7`，纯属浪费。数字本来就短（1~4 位），120px 与
-     `.pair` 里那条先例（`width:120px`）一致。
-     ⚠ 需要宽数字框的地方用**内联** `style="width:100%"`（如 `akLimit`/`akRpm`）⇒ 内联优先，不受这条影响。 */
+     各占半屏，而值只是 `7`，纯属浪费。数字本来就短（1~4 位）。
+     ⚠ 需要宽数字框的地方用**内联** `style="width:100%"`（如 `akLimit`/`akRpm`）⇒ 内联优先，不受这条影响。
+     ⚠ 2026-10-19 照参考项目 Agent2API 的 page-settings.css 再收一档：120px → 88px
+     并**居中**。它的实测结论（照抄）：步进箭头在 Chromium 里是 hover/focus 时才占位的，
+     右对齐时箭头一出现就把数字整体往左推；**居中的基准是内容盒中心，数字的墨迹位置不动**。
+     本页值域固定是几位数（保留天数 1-3650、超时秒数三位），88px 够且不会随内容跳动。
+     `.field` 只在设置页使用（全文件 8 处全落在 settings 里），所以这条不波及其它面板。 */
   .field input[type=text],.field select{width:100%}
-  .field input[type=number]{width:120px}
+  .field input[type=number]{width:88px;max-width:88px;text-align:center;
+    font-variant-numeric:tabular-nums}
   .field.chk{flex-direction:row;align-items:center;gap:8px}
   .field.chk input{width:auto}
   .field.chk label{font-size:13px;color:var(--fg)}
@@ -346,7 +351,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .badge--ro{color:#8b949e}           /* 只读 */
   .subgroup{margin:16px 0 6px;font-size:12px;font-weight:600;color:var(--fg);
     padding-top:12px;border-top:1px dashed var(--line)}
-  .subgroup:first-child{margin-top:0;padding-top:0;border-top:0}
+  /* ⚠⚠ 紧跟 legend 的那个 subgroup 不该有上边框与上边距（2026-10-19 修）。
+     原来写的是 `.subgroup:first-child` —— **它从来没生效过**：fieldset 的
+     第一个子元素是 <legend>，`.subgroup` 永远排在第二个及以后，`:first-child`
+     匹配不到，于是那条虚线一直画在分组的头顶上、上面还悬着 16px 空白，
+     看着像"这里少了一块内容"。改用相邻兄弟选择器 `legend + .subgroup`，
+     把"它是这一组的开头"这件事表达准确。
+     ⇒ 这是"选择器语法正确但语义不成立"那类**静默失效**：CSS 不报错，只是不生效，
+       只有看图才看得出来（就是看图时发现的）。 */
+  legend + .subgroup{margin-top:0;padding-top:0;border-top:0}
   .info-line{font-size:12px;color:var(--dim);line-height:1.7;margin:0 0 12px}
   /* 开关 + 参数并排成一行（如：启用签到 [9,21]） */
   .pair{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
