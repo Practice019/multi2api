@@ -385,6 +385,15 @@ func (p *Provider) tasksPanel() *panelRowCache[accountTasksView] {
 		// 顺序必须是"先灌盘、后挂 onChange"：
 		// 灌盘走的也是 set()，那时若已挂上回调就会**在读盘过程中触发一串写盘**（纯浪费）。
 		for uid, v := range p.loadPanelsSnapshot().Tasks {
+			// ⚠⚠ **从旧版本落盘来的行没有 FetchedAt**（零值），而零值的语义是
+			//   「从来没读到过」—— 可它**明明有数据**（是从盘上读出来的旧值）。
+			//   照字面不动它，它就既不"未缓存"（缓存里明明有）也不"过期"（零值被排除）
+			//   ⇒ ⚠ **永远不会被刷新**，界面上一直显示那次落盘的旧值。
+			// ⇒ 给它一个"很久以前"的真实时刻：它是旧数据，**本来就该被刷**。
+			//   ⚠ 用 24 小时而不是 time.Now()：不能假装它是刚读到的。
+			if v.OK && v.FetchedAt.IsZero() {
+				v.FetchedAt = time.Now().Add(-24 * time.Hour)
+			}
 			p.panelTasks.set(uid, v)
 		}
 		// ⚠ 落盘挂在 onChange 上（见 panelRowCache.onChange）：补一个号就（节流地）存一次。
@@ -400,6 +409,11 @@ func (p *Provider) invitePanel() *panelRowCache[accountInviteView] {
 		p.panelInvite = newPanelRowCache[accountInviteView]()
 		// ⚠ 与 tasksPanel 同一处理：先灌盘、后挂 onChange（理由见那里）。
 		for uid, v := range p.loadPanelsSnapshot().Invite {
+			// ⚠ 与 tasksPanel 同一处理（理由见那里）：旧落盘数据没有 FetchedAt，
+			//   不补一个"很久以前"的就会**永远不被刷新**。
+			if v.OK && v.FetchedAt.IsZero() {
+				v.FetchedAt = time.Now().Add(-24 * time.Hour)
+			}
 			p.panelInvite.set(uid, v)
 		}
 		p.panelInvite.onChange = p.throttledSavePanels
