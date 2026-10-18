@@ -103,7 +103,7 @@ func ParseUsageExtras(usage map[string]any) UsageExtras {
 	//	→ prompt_tokens_details.cached_tokens   **嵌套**（OpenAI 兼容的标准位置）
 	out.CacheHitTokens = 0
 	for _, probe := range []struct {
-		key  func() (any, bool)
+		key func() (any, bool)
 	}{
 		{func() (any, bool) { v, ok := usage["prompt_cache_hit_tokens"]; return v, ok }},
 		{func() (any, bool) { v, ok := usage["cached_tokens"]; return v, ok }},

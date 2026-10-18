@@ -80,7 +80,7 @@ func TestParseUsageExtrasCacheKeyPrecedence(t *testing.T) {
 //
 // ⚠ 若哪天有人把 miss 改成"总是 prompt_tokens - hit"，那么**没有缓存信息的请求**
 // 会被算成"全部未命中" ⇒ 命中率被恒报为 0% ⇒ 前端会把那个 0% 读成一个结论
-//（而它其实该显示 N/A）。这条断言就是为了拦住那种"看起来更完整"的改动。
+// （而它其实该显示 N/A）。这条断言就是为了拦住那种"看起来更完整"的改动。
 func TestParseUsageExtrasMissNotFabricated(t *testing.T) {
 	var u map[string]any
 	if err := json.Unmarshal([]byte(`{"prompt_tokens":500,"completion_tokens":10}`), &u); err != nil {

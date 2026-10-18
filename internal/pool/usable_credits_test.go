@@ -77,7 +77,8 @@ func TestPickFallsBackWhenAllExhausted(t *testing.T) {
 //
 // 上游级熔断把"这个上游现在整体不通"变成**即时可知**的事实。
 // ⚠ 退避算法与账号级**同构**（照抄 recordBreakerFailureLocked），阈值/时长也复用同一组参数 ——
-//   避免出现"账号 3 次熔断、上游 5 次才熔断"这种第二个真相。
+//
+//	避免出现"账号 3 次熔断、上游 5 次才熔断"这种第二个真相。
 func TestProviderBreakerTripsAfterThreshold(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"}) // ⚠ 不给 provider ⇒ 归默认上游
@@ -116,7 +117,8 @@ func TestProviderBreakerTripsAfterThreshold(t *testing.T) {
 // TestProviderBreakerClearedByOneSuccess ⚠ 一次成功就该清掉上游的失败线。
 //
 // ⚠ 不这么做的话：跨天的无关抖动会一路攒到阈值，把**健康的上游**误判成熔断
-//   —— 账号级 NoteSuccess 的注释里为同一件事写过理由（"一次成功证明…"）。
+//
+//	—— 账号级 NoteSuccess 的注释里为同一件事写过理由（"一次成功证明…"）。
 func TestProviderBreakerClearedByOneSuccess(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
@@ -132,7 +134,8 @@ func TestProviderBreakerClearedByOneSuccess(t *testing.T) {
 // TestProviderBreakerIsPerProvider ⚠ 一个上游熔断**不能**影响另一个上游。
 //
 // ⚠ 这条是"多账号正常使用"的守门：若两家的计数混在一起，
-//   loomy 坏掉会把 workbuddy 一起停掉 —— 而那恰恰是**唯一健康的那家**（实测它失败率 0.13%）。
+//
+//	loomy 坏掉会把 workbuddy 一起停掉 —— 而那恰恰是**唯一健康的那家**（实测它失败率 0.13%）。
 func TestProviderBreakerIsPerProvider(t *testing.T) {
 	p := New("")
 	// ⚠ provider 是**池子侧的标签**，不在 auth.Auth 上（它没有 Provider 字段）——
