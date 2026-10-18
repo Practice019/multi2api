@@ -2287,6 +2287,42 @@ func (p *Pool) pickByUIDLocked(uid, provider string, checkProvider bool) *auth.A
 	return e.a
 }
 
+// ProviderState 上游级状态的**只读投影**（供 /status 与管理台展示）。
+//
+// ⚠ 存在的理由：上游级熔断（provState）此前只影响出口层的状态码与判决留痕，
+// **界面上完全看不到** ⇒ 用户遇到"整条上游不通"时，控制台里一切正常，
+// 只能靠日志反推。这与本项目反复出现的"实现了但看不见"是同一类问题。
+type ProviderState struct {
+	Provider     string    `json:"provider"`
+	Fails        int       `json:"fails"`       // 当前窗口内的连续失败数（达阈值即熔断）
+	RetryCount   int       `json:"retry_count"` // 已熔断次数（指数退避的指数）
+	BreakerUntil time.Time `json:"breaker_until,omitempty"`
+	Tripped      bool      `json:"tripped"` // 此刻是否处于熔断期
+}
+
+// ProviderStates 返回**所有有过失败记录的上游**的状态，按 provider 名排序（稳定输出）。
+//
+// ⚠ 没有失败记录的上游**不会出现**在这里 —— 那表示"一切正常"，
+// 而不是"未知"；调用方据此把"列表里的项"读作"当前有麻烦的上游"。
+// ⚠ 从未失败时返回**空切片**而不是 nil：JSON 里是 `[]`，避免前端拿到 null。
+func (p *Pool) ProviderStates() []ProviderState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]ProviderState, 0, len(p.provState))
+	now := time.Now()
+	for id, st := range p.provState {
+		out = append(out, ProviderState{
+			Provider:     id,
+			Fails:        st.fails,
+			RetryCount:   st.retryCount,
+			BreakerUntil: st.breakerUntil,
+			Tripped:      !st.breakerUntil.IsZero() && now.Before(st.breakerUntil),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	return out
+}
+
 // CountsDetailed 返回 total/healthy/cooling/disabled/inFlightFull 五类计数。
 // cooling 含常规冷却（until）与熔断期（breakerUntil）。
 // 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/until/breakerUntil）；
