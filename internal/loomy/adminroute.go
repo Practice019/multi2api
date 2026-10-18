@@ -218,7 +218,13 @@ type sessionView struct {
 // 今天的额度（服务端自动重置），而缓存里那个数不会自己变。
 // 不分青红皂白地展示它，等于把一个昨天的读数说成今天的。
 type pointsView struct {
-	Balance              int64  `json:"balance"`
+	Balance int64 `json:"balance"`
+	// BalanceKnown 缓存里**有没有** balance 这个键（false = 未知，界面该显示 `—` 而不是 0）。
+	// ⚠ 与 LocalPoints.BalanceKnown 同源 —— 没有它，前端只能靠 `balance === null` 判，
+	//   而 `int64` 永远给不出 null ⇒ 那一列**永远分不清"真 0"与"没读到"**。
+	BalanceKnown bool `json:"balance_known"`
+	// DailyKnown 同上（对比用：这一维早就有了，平衡下来看就知道缺的是 balance 那一维）。
+	DailyKnown           bool   `json:"daily_known"`
 	DailyBalance         int64  `json:"daily_balance"`
 	DailyConsumedPoints  int64  `json:"daily_consumed_points"`
 	DailyRemainingPoints int64  `json:"daily_remaining_points"`
@@ -294,6 +300,8 @@ func (p *Provider) handleClientStore(w http.ResponseWriter, r *http.Request) {
 	}
 	view.Points = &pointsView{
 		Balance:              pts.Balance,
+		BalanceKnown:         pts.BalanceKnown,
+		DailyKnown:           pts.DailyKnown,
 		DailyBalance:         pts.DailyBalance,
 		DailyConsumedPoints:  pts.DailyConsumedPoints,
 		DailyRemainingPoints: pts.DailyRemainingPoints,

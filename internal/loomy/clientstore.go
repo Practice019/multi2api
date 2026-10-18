@@ -155,6 +155,20 @@ type LocalPoints struct {
 	// 实测存在只写 balance 的部分更新（见 pointsWire 的注释），所以
 	// "没写过 dailyBalance"是**真实会发生**的形态，不是理论顾虑。
 	DailyKnown bool `json:"daily_known,omitempty"`
+
+	// BalanceKnown `balance` 这个键在**至少一条**记录里出现过（2026-10-18 加）。
+	//
+	// # 为什么它必须存在（用户报的真现象）
+	//
+	// 用户看到账号池里一批号的「额度」列显示 **0**，而那批号的成功次数是 616/701/746 ——
+	// ⚠ 一直在成功发请求的号，额度不可能是 0 ⇒ 那些 0 是"**缓存里没写这个字段**"，
+	// 被 int64 的零值压成了 0，而界面既不知道也没法区分。
+	//
+	// ⚠ 这与 `DailyKnown` 是**同一条纪律**（见上），也和 `Points.DailyKnown` /
+	// `Points.PermanentKnown` / `gateway.QuotaView.HasData` 一致 ——
+	// ⚠ **"未知"与"零"必须分开**，否则用户会据此得出一个"看起来合理但错误"的结论。
+	// 当时给 DailyBalance 加了这个标记，**唯独漏了 balance** ⇒ 于是它在界面上表现为 0。
+	BalanceKnown bool `json:"balance_known,omitempty"`
 }
 
 // pointsWire 是积分摘要的**逐字段可选**形态。
@@ -207,6 +221,11 @@ func pointsFold(list []pointsWire) *LocalPoints {
 		seen = true
 		if w.Balance != nil {
 			out.Balance = *w.Balance
+			// ⚠ 与下面 DailyBalance 那处**必须成对**：记下"这个键真的出现过"。
+			//   ⚠ 缺了这一行的后果（用户实测报的）：缓存里没写 balance 的记录
+			//     会被读成 `Balance = 0`，界面显示 `0` —— 而真相是"没读到"。
+			//     ⚠ 一个一直在成功发请求的号被显示成"额度 0"，用户只能怀疑"是不是账号废了"。
+			out.BalanceKnown = true
 		}
 		if w.DailyBalance != nil {
 			out.DailyBalance = *w.DailyBalance
