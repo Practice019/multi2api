@@ -1360,145 +1360,25 @@ func (h *Handler) accountsReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 兼容读的根：`h.cfg.AuthDir` 现在是默认上游的子目录
-	//（`auths/workbuddy/`），但迁移期凭证可能还在 `auths/` 根。
-	base := h.cfg.AuthsBase
-	if base == "" {
-		base = h.cfg.AuthDir
-	}
-
-	// 目录：**上游自报优先**（与 pollViaFlow 的落盘目录同一条判据）。
-	//
-	// 目录是**上游的事实**（它知道自己从哪读凭证），核心不该猜。
-	// 问的是 `p`（同一个上游的 Provider 面），不是 LoginFlow ——
-	// `ExtOf` 只接受 Provider，而且"手工拷凭证再重载"这条路径
-	// **根本不需要登录流程**（见 gateway.AuthDirExt 的注释）。
-	//
-	// 上游返回空串 = "我没有独立目录，用核心默认的"（单上游部署的旧形态）。
-	dir := ""
-	if p, ok := h.providerByID(provider); ok {
-		if ext, ok2 := gateway.ExtOf[gateway.AuthDirExt](p); ok2 {
-			dir = ext.AuthDir()
+	// 目录解析 + 扫凭证 + 灌池，全在 `reloadProviderInto` 里 ——
+	// ⚠ 与**启动时的同步共用同一份实现**（见 pool_sync.go 的注释）。
+	//   抽它的理由不是「好看」，而是：抄第二份的代价是**将来只改对一处**，
+	//   而本文件下面那段历史（LoadDirCompat 扫错上游）就是这么来的。
+	scanned, before, after, dir, err := h.reloadProviderInto(provider)
+	if err != nil {
+		switch {
+		case errors.Is(err, errNoCredentialLoader):
+			writeError(w, http.StatusNotImplemented,
+				"上游 "+provider+" 没有实现 gateway.CredentialLoader，"+
+					"无法按它自己的格式扫描凭证（核心不硬编码任何上游的凭证格式）")
+		default:
+			writeError(w, http.StatusInternalServerError, "读取凭证失败: "+err.Error())
 		}
-	}
-	if dir == "" {
-		// 回落也走 auth.UpstreamDir —— **不自己拼 filepath.Join**。
-		// "auths/<provider>/ 长什么样"这个判据只该写一份，
-		// 抄第二份就会在将来改命名规则时漏掉一处。
-		dir = auth.UpstreamDir(base, provider)
-	}
-
-	// ⚠ 扫描必须**只扫这个上游自己的文件夹**，并且用**它自己的解析器**。
-	//
-	// # 这里原来错得离谱（用户实测报的"添加了账号但重载扫不到"）
-	//
-	// 旧代码只有一行：
-	//
-	//	auths, err := auth.LoadDirCompat(scanBase, provider)
-	//
-	// `auth.LoadDirCompat` 是 **workbuddy 的解析器** ——
-	// 它的 Glob 前缀写死 `workbuddy*.json`：
-	//
-	//	func LoadDir(dir string) ([]*Auth, error) {
-	//	    files, _ := filepath.Glob(filepath.Join(dir, "workbuddy*.json"))
-	//
-	// 拿它去扫 codearts 目录，**一个 codearts 凭证都读不到**。
-	// 而 `LoadDirCompat` 还会**连同父目录（`auths/` 根）一起扫**，
-	// 于是它把根下遗留的 workbuddy 旧文件当成了结果：
-	//
-	//	LoadDirCompat("auths", "codearts") 返回 3 条 —— 全是 workbuddy 的：
-	//	    file=workbuddy-2e37e4f4-....json
-	//	    file=workbuddy-4e0fe0e9-....json
-	//	    file=workbuddy-ca19abfd-....json
-	//
-	// 而 `auths/codearts/` 里那个真的 codearts 凭证被完全忽略。
-	// 更糟：紧接着对 **codearts 域** `SyncToDirFor` 了那 3 个 workbuddy 账号
-	// —— **把 workbuddy 的凭证塞进了 codearts 的域**。
-	//
-	// # 正确判据（用户的原话，也正是本项目的设计）
-	//
-	//	**每个文件夹 = 一个上游的账号集合。不同上游扫各自的文件夹。**
-	//
-	// 所以：
-	//   1. **只扫 `dir`**（上游自报的那个目录），**不扫父目录** ——
-	//      根目录不该有凭证文件，那是迁移期遗留，已清理。
-	//   2. **用上游自己的解析器**（`gateway.CredentialLoader`）——
-	//      凭证格式是**上游的事实**，核心不该知道 `workbuddy*.json`
-	//      还是 `codearts*.json`。这也让"加新上游核心零改动"重新成立。
-	//
-	// 上游没实现 `CredentialLoader` 时**明确报错**，不回落成
-	// "用某个写死的解析器" —— 那正是这个 bug 的形态。
-	loaded, exists := h.credentialsOf(provider)
-	if !exists {
-		writeError(w, http.StatusNotImplemented,
-			"上游 "+provider+" 没有实现 gateway.CredentialLoader，"+
-				"无法按它自己的格式扫描凭证（核心不硬编码任何上游的凭证格式）")
 		return
 	}
-
-	// 优先用「带 secret」的扫描器（可选能力，见 gateway.CredentialSecretLoader）。
-	//
-	// # 为什么不能只用投影后的身份（评审 R2）
-	//
-	// `LoadCredentials` 只给出 uid/nickname，于是只能 `SyncToDirFor(provider, auths)`
-	// —— 那些池条目的 secret 是 nil。对 codearts 这种"凭证不在 *auth.Auth 里、
-	// 真凭证走池的不透明 secret 通道"的上游：
-	//
-	//	启动后新拷入/新登录的凭证 → 用户点「重载 auths」
-	//	→ 池里多出该 uid 但没有 secret
-	//	→ 该号被选中时取不到可用的 *codearts.Auth（类型不对）→ 必失败
-	//
-	// 而按 store 同步账号的路径只在启动时跑一次 → 得重启网关才恢复。
-	// 所以这里优先问上游要 secret，拿到就用 SyncToDirWithSecrets 一起装进池子。
-	var creds []gateway.Credential
-	var secrets map[string]any
-	if withSecrets, ok := h.credentialSecretsOf(provider); ok {
-		items, serr := withSecrets(dir)
-		if serr != nil {
-			writeError(w, http.StatusInternalServerError, "读取 "+dir+" 失败: "+serr.Error())
-			return
-		}
-		secrets = make(map[string]any, len(items))
-		for _, it := range items {
-			creds = append(creds, it.Credential)
-			if it.Secret != nil {
-				secrets[it.Credential.UID] = it.Secret
-			}
-		}
-	} else {
-		var cerr error
-		creds, cerr = loaded(dir)
-		if cerr != nil {
-			writeError(w, http.StatusInternalServerError, "读取 "+dir+" 失败: "+cerr.Error())
-			return
-		}
-	}
-	// 投影成账号池要的形状（uid + nickname）—— 见 poolAuthsFromCreds 的注释。
-	auths := poolAuthsFromCreds(creds, secrets)
-
-	// ⚠ 池子可能为 nil（本包其它地方都判了空，见 pollViaFlow 的注释）。
-	// 漏判的后果是 **nil pointer panic（进程级）**。
-	var before, after int
-	if h.cfg.Pool != nil {
-		before = len(h.cfg.Pool.List())
-		// 拿到了 secret 就走带 secret 的同步 —— 否则池里那些新 uid 会"没有凭证"。
-		if secrets != nil {
-			h.cfg.Pool.SyncToDirWithSecrets(provider, auths, secrets)
-		} else {
-			h.cfg.Pool.SyncToDirFor(provider, auths)
-		}
-		after = len(h.cfg.Pool.List())
-	} else {
-		log.Printf("admin: reload 扫描到 %d 个凭证，但没有账号池可同步", len(auths))
-	}
-	// 日志打 `dir=`（真正扫的目录）而不是 `h.cfg.AuthDir` ——
-	// 按上游重载之后两者不再是同一个值，打配置值等于没打。
-	log.Printf("admin: reload auths dir=%s provider=%s scanned=%d pool %d -> %d",
-		dir, provider, len(auths), before, after)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"scanned": len(auths), "before": before, "after": after, "provider": provider,
-		// dir 回执：排障时"我点的那个上游到底扫了哪个目录"一眼可见。
-		// 前端不依赖它做逻辑，但它是这条端点最容易被问的问题的答案。
+		"scanned": scanned, "before": before, "after": after, "provider": provider,
+		// dir 回执：排障时「我点的那个上游到底扫了哪个目录」一眼可见。
 		"dir": dir,
 	})
 }
@@ -2455,7 +2335,7 @@ const statsCacheTTL = 5 * time.Second
 //
 // ⚠ 为什么它比 statsCacheTTL 长得多：这张表来自各家上游的模型目录，**变化极慢**；
 // 而重建它要逐家调 `ModelCatalog`，实测会让 `/admin/stats` 卡 **7 秒**
-//（见 Handler 的 multMu 字段注释）。表本身与"本次统计窗口"无关 ⇒ 偶尔重建即可。
+// （见 Handler 的 multMu 字段注释）。表本身与"本次统计窗口"无关 ⇒ 偶尔重建即可。
 const multCacheTTL = 10 * time.Minute
 
 // stats 汇总请求日志，给出「这个网关到底跑了多少、跑得怎么样」的只读视图。
@@ -2776,15 +2656,16 @@ func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
 // # ⚠⚠ 契约：返回给调用方的**必须**是浅拷贝，而缓存里那一份**只读**
 //
 // 为什么浅拷贝就够：`stats()` 在拿到产物之后就地写入的十几处
-//（`resp["source"]` / `resp["capacity"]` / `resp["model_multipliers"]` …）
+// （`resp["source"]` / `resp["capacity"]` / `resp["model_multipliers"]` …）
 // **全部是顶层新键**；而聚合出来的嵌套结构（`by_model` / `by_uid` / `by_*_detail`）
 // 在这条路径上**只被读**。
 //
 // ⚠ **打破这个前提的后果是静默污染**：若将来有谁在这条路径上改动/删除嵌套 map 的内容
-//（例如 `delete(resp["by_model"], k)`、或往某个 `by_*` 里塞东西），
+// （例如 `delete(resp["by_model"], k)`、或往某个 `by_*` 里塞东西），
 // 那么下一次请求会拿到**被上一次改过**的那份 —— 而症状只是"数字偶尔不对"。
 // ⇒ 所以那条回归测试（见 docs/report/P2-design.md §5-3）是这条前提的**守门人**，
-//   改动这段代码时**必须**先看它。
+//
+//	改动这段代码时**必须**先看它。
 //
 // # 三条与 multTableCached 一致的行为（别改坏）
 //

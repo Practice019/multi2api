@@ -52,6 +52,8 @@ func (h *Handler) StartQuotaAutoRefresh() {
 		return
 	}
 	h.quotaAutoRefreshOnce.Do(func() {
+		log.Printf("loomy: 额度自动刷新循环已启动 —— 每 %v 一轮，首轮 %v 后",
+			quotaAutoRefreshEvery, quotaAutoRefreshFirstDelay)
 		go func() {
 			// ⚠ 这一层的 recover 是整个 goroutine 的兜底：一旦漏出去，
 			//   循环就**永久停摆**了，而症状是"额度又变回旧的" —— 靠日志才能发现。
