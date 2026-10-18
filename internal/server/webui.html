@@ -249,6 +249,34 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        而它们**没有 colgroup** —— 对没有列宽的 fixed 表，浏览器会把宽度平分，
        那样反而比 auto 更糟。修饰类把影响面钉死在这一处。 */
   .accttable--aligned{table-layout:fixed}
+  /* 账号表行高收到 40px（2026-10-19 照参考项目 Agent2API 移植，AGENTS 第 5 条
+     「表格固定高度一行、尽可能紧凑少空白」）。
+
+     # 45px 是怎么来的，40px 又是怎么算出来的
+
+     实测（行内按钮 34px、文字行高 18.125px）：
+       行高 = td padding 上下(5+5) + max(文字 18.125, **按钮 34**) + border-bottom 1 = 45px
+     ⇒ **按钮才是决定因素**，文字只占不到一半。而 34px 来自全局那条
+       `input,select,textarea,button{padding:7px 10px}`：7+7 + 18.125 + 1+1 = 34.1px。
+
+     参考项目的落点（page-accounts-table.css:157-161 与 1050-1062）正好凑成 40：
+       「让一行落在一个接近 40px 的高度上 —— 这是「能舒服点到里面的按钮」与
+         「一屏多放几行」之间的折中（卡片时代单卡约 96px）」
+       它的原话：「td 用 7px 内边距 + 行动作按钮定高 25px」⇒ 7+7 + 25 + 1 = 40px。
+
+     ⚠ 为什么按钮能压到 25px：25×25 仍在 WCAG 2.2.8「目标尺寸至少 24×24」之上，
+       而参考项目一行里塞了 4 个按钮（已签到 / 余额 / 设置 / ⋯）也是这个高度。
+     ⚠ 只作用于 `.accttable--aligned`：全局 `th,td{padding:5px 8px}` 与全局按钮
+       尺寸是别的表在用的，改它们会波及全站。 */
+  .accttable--aligned th,.accttable--aligned td{padding:7px 8px}
+  .accttable--aligned tbody button{height:25px;padding:0 8px;font-size:11.5px}
+  /* ⚠ 行的**最小高**统一到 40px。上面那条 padding + 按钮只让"有按钮的行"到 40px，
+     而空上游的**占位行**（「该上游暂无账号」那一行）没有按钮 ⇒ 只有 34px，
+     实测 76 行里就有 2 行是 34/35px、其余 74 行 40px —— 一屏里混着两种行高，
+     正是 AGENTS 第 5 条「固定高度一行」要避免的。
+     `tr` 上的 height 在表格里是**最小高**（不是定高），所以这一条只把矮的抬起来，
+     不会把已经 40px 的行撑高 —— 加完实测分布从 {34:1,35:1,40:74} 变成 {40:76}。 */
+  .accttable--aligned tbody tr{height:40px}
   /* ⚠ 这里**不能**有 tr.acctrow.collapsed{display:none} —— 加回来就是把回归带回来。
      折叠真正隐藏东西的地方是上面那条 `.acctgroup.collapsed > table`（整表隐藏）。
 
