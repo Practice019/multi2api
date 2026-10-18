@@ -629,8 +629,22 @@ func (p *Provider) AuthDir() string { return p.authDir }
 
 // LoadCredentials 读取 dir 下本上游的全部凭证（gateway.CredentialLoader）。
 //
-// 只把 uid / nickname 投影出去（核心要的就是这两个：池子主键与展示名），
-// **核心不解释凭证内容**。凭证本身走下面的 WithSecrets 版本。
+// 只把 uid / nickname / FilePath 投影出去（核心要的就是这三个：池子主键、
+// 展示名，以及"凭证文件在哪"—— 见下面 ⚠），**核心不解释凭证内容**。
+// 凭证本身走下面的 WithSecrets 版本。
+//
+// # ⚠⚠ FilePath 必须带上（用户实测报的"删了又复活"）
+//
+// 缺了它，`DELETE /admin/accounts/{uid}?purge_file=1` 会：
+//
+//	从池里把号删掉（HTTP 200 {"removed":true}）但**删不到凭证文件**
+//	（回执里 file="" / purged_file=""，日志 `deleted=""`）
+//	⇒ 文件还在盘上 ⇒ 下次「重载 auths」或重启，LoadDir 又把它装回池子
+//	⇒ 用户看到的现象就是「移除点了没反应 / 删不掉」。
+//
+// 本包原来正是唯一漏了它的上游（其余 9 个都带了），而 `LoadDir` **已经**把
+// 路径记在 `a.FilePath` 上了 —— 这里只是没往下传。
+// `gateway.Credential.FilePath` 的注释里早就写着这条后果，只是没落到代码。
 func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 	auths, err := LoadDir(p.effectiveDir(dir))
 	if err != nil {
@@ -642,6 +656,7 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 			Provider: providerID,
 			UID:      a.UID,
 			Nickname: a.Nickname,
+			FilePath: a.FilePath, // ⚠ 别删：删号要靠它删文件
 		})
 	}
 	return out, nil
@@ -661,6 +676,13 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 //
 // ⚠ "同源"是硬要求：本函数与 LoadCredentials 都必须走同一个 LoadDir，
 // 否则会造出两份 `*loomy.Auth`，池里那份与这里这份分叉。
+//
+// ⚠⚠ `FilePath` 也必须与 LoadCredentials 一样带上 —— 而且**更关键**：
+// 装配层（admin/`poolAuthsFromCreds`）在带 secret 的这条路上只在
+// "secret 恰好是 `*auth.Auth`"时才直接用 secret 里那份（workbuddy 是那种），
+// 而上游自己的凭证类型（这里是 `*loomy.Auth`）断言不成立 ⇒ **落到投影**。
+// 于是投影里没有 FilePath，池条目就永远拿不到文件路径，
+// 删号只能出池、删不掉文件（用户实测的"删了又复活"）。
 func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialSecret, error) {
 	auths, err := LoadDir(p.effectiveDir(dir))
 	if err != nil {
@@ -673,6 +695,7 @@ func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialS
 				Provider: providerID,
 				UID:      a.UID,
 				Nickname: a.Nickname,
+				FilePath: a.FilePath, // ⚠ 别删：删号要靠它删文件
 			},
 			Secret: a, // 不透明；核心只保管
 		})

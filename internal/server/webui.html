@@ -4817,8 +4817,17 @@ let loginProvider = '';
       // 这种半删除状态 —— 它只制造复活惊喜，不制造任何能力。
       if (!confirm(`彻底删除账号「${a.nickname || uid.slice(0, 8)}」？\n\n· 移出账号池，并删除 auths 里的凭证文件（不可恢复）\n· 只是暂时停用？请用「禁用」，凭证保留、随时可启用`)) return;
       await busyRun(btn, async () => {
-        await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=1`, { method: 'DELETE' });
-        toast(`已彻底删除 ${a.nickname || uid.slice(0, 8)}`);
+        const r = await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=1`, { method: 'DELETE' });
+        const who = a.nickname || uid.slice(0, 8);
+        // ⚠ 回执里可能带 `purge_error`（2026-10-19 加）：账号出池了，但**凭证文件没删掉**。
+        //   这时说「已彻底删除」就是骗人 —— 文件还在盘上，重载 auths 或重启就会
+        //   把它装回池子，用户下次看到的就是「删了又复活」（这正是他报的那条）。
+        //   宁可提示得刺眼，也不要成功得可疑。
+        if (r && r.purge_error) {
+          toast(`已移出账号池，但凭证文件没删掉：${r.purge_error}`, true);
+        } else {
+          toast(`已彻底删除 ${who}`);
+        }
         await Promise.all([refresh(), loadHistory()]);
         return undefined;
       }, { label: '移除账号', busyText: '删除中…' });
