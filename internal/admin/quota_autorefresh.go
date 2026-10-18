@@ -42,6 +42,46 @@ const quotaAutoRefreshEvery = 3 * time.Minute
 // "不 await" 的预热同一个约束）。
 const quotaAutoRefreshFirstDelay = 20 * time.Second
 
+// 自适应降速的**上限**。⚠ 上游不稳时最长让路 30 分钟，而不是无限退让 ——
+// 无限退让的后果是"上游恢复了、额度却再也不更新"，而这件事**没有别的信号**
+// （这条循环是唯一在刷额度的地方）。
+const quotaAutoRefreshMaxEvery = 30 * time.Minute
+
+// 连续多少轮"失败率过半"就退让一档。
+//
+// ⚠ 判据用**比例**而不是绝对数：实测 76 个号里失败 1 个（2026-10-18 的真实数据）
+// 是正常抖动；76 个里失败 40 个才说明上游/网络出问题了 —— 两者必须区分得开，
+// 否则一次偶发抖动就会让额度刷新**主动变慢**（那是在制造用户报的那个现象）。
+const quotaAutoRefreshFailRun = 2
+
+// quotaBackoffStep 自适应降速的**决策本身**，抽成纯函数。
+//
+// ⚠ 为什么不把它留在循环里：循环体带 `time.Sleep`，测它要真的等上一分钟；
+//
+//	而"退让的判据"是这条循环里**最容易错、错了又最不容易发现**的一段 ——
+//	判错的方向有两个（该退不退 ⇒ 猛撞上游；不该退却退 ⇒ 额度悄悄变慢），
+//	两个都不会报错。抽出来才能把每个方向都钉住。
+//
+// 语义：
+//   - 这一轮正常（bad=false）⇒ 连续计数归零、间隔**立刻**回到基准
+//     （退让是为了**让路**，不是为了惩罚上游；上游一好就该全速刷）
+//   - 连续 `quotaAutoRefreshFailRun` 轮不正常 ⇒ 间隔翻倍，封顶 `quotaAutoRefreshMaxEvery`
+//     ⚠ 封顶的意义：无限退让会让"上游恢复了、额度却再也不更新"变成一个**没有任何信号**
+//     的状态（这条循环是唯一在刷额度的地方）。
+func quotaBackoffStep(bad bool, badRuns int, every time.Duration) (int, time.Duration) {
+	if !bad {
+		return 0, quotaAutoRefreshEvery
+	}
+	badRuns++
+	if badRuns >= quotaAutoRefreshFailRun && every < quotaAutoRefreshMaxEvery {
+		every *= 2
+		if every > quotaAutoRefreshMaxEvery {
+			every = quotaAutoRefreshMaxEvery
+		}
+	}
+	return badRuns, every
+}
+
 // StartQuotaAutoRefresh 起后台循环，按 `quotaAutoRefreshEvery` 刷**全部账号**的额度。
 //
 // ⚠ 幂等（`sync.Once`）：重复调用不会起第二个循环。
@@ -63,16 +103,45 @@ func (h *Handler) StartQuotaAutoRefresh() {
 				}
 			}()
 			time.Sleep(quotaAutoRefreshFirstDelay)
+			// ⚠ **自适应降速**（设计第 5 节"全局预算"的最后一道闸门）。
+			//
+			// 判据是**失败比例**而不是绝对数：实测 76 个号里失败 1 个是正常抖动
+			//（那一天的上游就是这样），而 76 个里失败 40 个才是"上游/网络出问题了"。
+			// ⚠ 连续 `quotaAutoRefreshFailRun` 轮高失败 ⇒ 间隔翻倍，封顶
+			//   `quotaAutoRefreshMaxEvery`；任一**轮正常** ⇒ 立刻恢复原间隔。
+			//
+			// ⚠ 为什么"立刻恢复"而不是"慢慢恢复"：退让是为了**让路**，不是为了惩罚上游。
+			//   上游一好就该全速刷（额度是选号权重，慢了直接影响选号）。
+			// ⚠ 为什么封顶 30 分钟：无限退让会让"上游恢复了、额度却再也不更新"
+			//   变成一个**没有任何信号**的状态（这条循环是唯一在刷它的东西）。
+			every := quotaAutoRefreshEvery
+			badRuns := 0
 			for {
-				func() {
+				res := func() (r quotaRefresher) {
 					defer func() {
-						if r := recover(); r != nil {
-							log.Printf("loomy: 额度自动刷新**这一轮** panic 已被隔离：%v", r)
+						if rec := recover(); rec != nil {
+							log.Printf("loomy: 额度自动刷新**这一轮** panic 已被隔离：%v", rec)
 						}
 					}()
-					h.RefreshAllQuotasNow()
+					return h.RefreshAllQuotasNow()
 				}()
-				time.Sleep(quotaAutoRefreshEvery)
+
+				// 失败比例 > 一半视为"这一轮不正常"（分母含跳过/未知：
+				// 它们也是"没刷到"的账号，只是原因不同）。
+				considered := res.Updated + res.Unknown + res.Failed
+				bad := considered > 0 && res.Failed*2 > considered
+
+				prev := every
+				badRuns, every = quotaBackoffStep(bad, badRuns, every)
+				if every != prev {
+					if every > prev {
+						log.Printf("loomy: ⚠ 额度刷新连续 %d 轮失败偏多（本轮 %d/%d）⇒ 间隔退让到 %v",
+							badRuns, res.Failed, considered, every)
+					} else {
+						log.Printf("loomy: 额度刷新恢复正常 ⇒ 间隔回到 %v", every)
+					}
+				}
+				time.Sleep(every)
 			}
 		}()
 	})
