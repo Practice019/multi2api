@@ -82,10 +82,27 @@ async function withChrome(opts, fn) {
     let id = 0;
     const pend = new Map();
     const errs = [];
+    // dialogs 收集页面上弹出的原生对话框（alert/confirm/prompt）。
+    //
+    // # 为什么必须有（2026-10-19 加）
+    //
+    // 测**销毁性按钮**必然撞上 `confirm()`（本仓「移除账号」「删除 API Key」
+    // 都先弹一次确认）。headless 里没人处理这个对话框时它有两条坏结局：
+    //
+    //	· 页面**卡住**在 confirm 上 ⇒ 后面的请求一个都不发，看起来像"按钮坏了"
+    //	· 浏览器自动取消 ⇒ 请求同样不发，**同样是假象**
+    //
+    // 两种都会把"测量"变成"误判"——而按钮到底有没有坏，只有接受确认之后
+    // 看请求与回执才知道。所以这里默认**自动接受**，并把文案收集下来，
+    // 让调用方能直接断言「弹的是哪句确认」。
+    const dialogs = [];
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
       if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); return; }
-      if (m.method === 'Runtime.exceptionThrown') {
+      if (m.method === 'Page.javascriptDialogOpening') {
+        dialogs.push({ type: m.params.type, message: m.params.message || '' });
+        send('Page.handleJavaScriptDialog', { accept: true });
+      } else if (m.method === 'Runtime.exceptionThrown') {
         const d = m.params.exceptionDetails || {};
         errs.push('[异常] ' + (d.exception && d.exception.description ? d.exception.description : d.text));
       } else if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') {
@@ -124,7 +141,7 @@ async function withChrome(opts, fn) {
     }
     console.log('  骨架就绪（等待 ' + waited + 'ms）');
 
-    return await fn({ send, ev, errs, shot, sleep, outDir });
+    return await fn({ send, ev, errs, dialogs, shot, sleep, outDir });
   } finally {
     try { if (ws) ws.close(); } catch { }
     try { ch.kill(); } catch { }
