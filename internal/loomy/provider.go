@@ -111,6 +111,14 @@ type Provider struct {
 	//   把补数搬到服务端后，无论何时打开、开在第几页，缓存都是满的。
 	warmOnce sync.Once
 
+	// saveMu / lastSaveAt 面板缓存**落盘**的节流（见 adminpoints 的 throttledSavePanels）。
+	//
+	// ⚠ 与 panelMu 分开各一把：落盘是 IO，不该把面板读写路径拖住。
+	// ⚠ 节流的理由：一轮补数最多写 8 个号 ⇒ 不节流就是 8 次整份序列化写盘，
+	//   而缓存不要求强一致（丢了顶多重查一次上游）。
+	saveMu     sync.Mutex
+	lastSaveAt time.Time
+
 	client *Client
 	// authDir 凭证目录。供 AuthDirExt 使用 —— 核心据此按上游重载 auths。
 	authDir string
