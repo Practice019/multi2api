@@ -534,6 +534,28 @@ func (p *Provider) handleTasksList(w http.ResponseWriter, r *http.Request) {
 	// 没缓存的行带 stale=true，前端据此显示「正在读取…」并随后逐行刷新。
 	if q.Get("page") != "" {
 		page, pages, lo, hi := panelPage(q.Get("page"), totalN)
+		// ⚠⚠ 2026-10-19：`?refresh=1` 走**真查**这条路（见 refreshRows 的长注释）。
+		//   没有它的话，「刷新」按钮发的是同一个只读缓存的 URL，
+		//   于是界面永远不变 —— 用户的结论必然是"这个按钮没用"。
+		if q.Get("refresh") == "1" {
+			out := refreshRows(all[lo:hi], p.tasksViewFor)
+			var earned, mx int64
+			for _, v := range out {
+				if v.OK {
+					earned += v.Earned
+					mx += v.Max
+				}
+			}
+			writeLoomyJSON(w, http.StatusOK, map[string]any{
+				"defs": TaskDefs, "accounts": out,
+				"page": page, "pages": pages, "total": totalN, "size": panelPageSize,
+				"from_cache": false, "refreshed": true,
+				"updated_at": p.tasksPanel().updatedAt(),
+				"summary": map[string]any{"accounts": len(out), "earned": earned,
+					"max": mx, "pending": countPending(out)},
+			})
+			return
+		}
 		out := p.tasksCachedPage(all[lo:hi])
 		var earned, mx int64
 		for _, v := range out {
@@ -617,6 +639,35 @@ func (p *Provider) tasksViewFor(a accountRef) accountTasksView {
 		p.tasksPanel().set(a.UID, v)
 	}
 	return v
+}
+
+// refreshRows 对**给定的一批账号**真查上游（`?refresh=1` 的落点）。
+//
+// # 为什么需要它（用户原话：「为什么刷新了这些还没有？」）
+//
+// 面板的 `?page=` 分支是**只读缓存、零上游请求** —— 这是刻意的：打开页面先看到
+// 上一轮的数据，而不是空表等 20 秒。但前端的通用「刷新」按钮**也只能发那个 URL**，
+// 于是它拿到的永远是"缓存里有什么就还你什么"：界面一点变化都没有。
+//
+// 实测证据：那 5 行的 `fetched_at` 停在 23:38，用户 04:08 点了刷新**没变**，
+// 而 response 里 `from_cache: true`。
+//
+// 根因是 TTLInvite = 6 小时（见 panelttl.go）—— `expiredInvites(now, false)`
+// 在预热扫描里 force 恒为 false，所以 6 小时内压根不会重查；
+// 而 `force` 参数**当时没有任何 HTTP 入口**，前端无从表达"我就是要强制重查"。
+//
+// # 为什么是"只刷这一页"
+//
+// 一页 25 个号，每个号要打 3 个上游接口（Activation / InvitationCodes / Balance）。
+// 全量 44 个号一起刷会让上游 132 个并发请求砸过去 —— 而 `panelFillConcurrency`
+// 的存在正是因为"打太狠会让整列变成查询失败"（见它的说明）。所以按页刷：
+// 用户看到哪一页就刷哪一页，剩下的交给预热扫描。
+func refreshRows[T any](accts []accountRef, viewFor func(accountRef) T) []T {
+	out := make([]T, len(accts))
+	fanOutConcurrent(len(accts), panelFillConcurrency, func(i int) {
+		out[i] = viewFor(accts[i])
+	})
+	return out
 }
 
 // tasksCachedPage 从服务端缓存取一页。**零上游请求。**
@@ -866,6 +917,20 @@ func (p *Provider) handleInviteList(w http.ResponseWriter, r *http.Request) {
 
 	if q.Get("page") != "" {
 		page, pages, lo, hi := panelPage(q.Get("page"), totalN)
+		// ⚠⚠ 2026-10-19：与 tasks 同款 —— `?refresh=1` 真查这一页（见 refreshRows）。
+		//   用户的原始症状就在这里：那 5 行「余额 / 我生成的码」显示 `—`，
+		//   点刷新不变。JSON 里 `from_cache: true` 是铁证。
+		if q.Get("refresh") == "1" {
+			out := refreshRows(all[lo:hi], p.inviteViewFor)
+			writeLoomyJSON(w, http.StatusOK, map[string]any{
+				"accounts": out,
+				"page":     page, "pages": pages, "total": totalN, "size": panelPageSize,
+				"from_cache": false, "refreshed": true,
+				"updated_at": p.invitePanel().updatedAt(),
+				"summary":    inviteSummary(out),
+			})
+			return
+		}
 		out := p.inviteCachedPage(all[lo:hi])
 		writeLoomyJSON(w, http.StatusOK, map[string]any{
 			"accounts": out,
