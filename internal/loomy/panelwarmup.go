@@ -56,9 +56,12 @@ const (
 // StartPanelWarmup 起一个后台循环，**持续**把没进缓存的面板行补上。
 //
 // ⚠ 形状**照抄** StartFreePoolSweep（`sync.Once` + recover + Ticker）——
-//   本仓已有的后台任务都是这个形态，不新造（AGENTS 第 8 条：能抄则抄）。
+//
+//	本仓已有的后台任务都是这个形态，不新造（AGENTS 第 8 条：能抄则抄）。
+//
 // ⚠ 除了等第一个 tick，**启动时先立刻跑一轮**：冷启动后用户往往马上打开页面，
-//   等 60 秒才补第一轮太晚。
+//
+//	等 60 秒才补第一轮太晚。
 func (p *Provider) StartPanelWarmup() {
 	if p == nil {
 		return
@@ -90,9 +93,12 @@ func (p *Provider) StartPanelWarmup() {
 // sweepPanels 跑一轮：把"还没进缓存"的号补几个（限并发 panelWarmupConcurrency）。
 //
 // ⚠ tasks 与 invite **各补各的**：一条号可能 tasks 有缓存而 invite 没有，
-//   只判其中一个会让另一半永远空着（那正是"新手任务好了、邀请码还是正在读取"的形态）。
+//
+//	只判其中一个会让另一半永远空着（那正是"新手任务好了、邀请码还是正在读取"的形态）。
+//
 // ⚠ 返回值与日志都为**排障**而留 —— 没有它们，"预热有没有在动、为什么没补上"
-//   就只能靠猜（今天已经猜了很久）。
+//
+//	就只能靠猜（今天已经猜了很久）。
 func (p *Provider) sweepPanels() int {
 	accts := p.accounts()
 	if len(accts) == 0 {
@@ -100,28 +106,64 @@ func (p *Provider) sweepPanels() int {
 		return 0
 	}
 
-	// ① 先挑出这一轮要补谁（顺序扫，只读缓存）。
+	// ① 挑这一轮要处理的：**优先补"从没读到过"的**，有余量再刷**过期的**。
+	//
+	// ⚠ 次序是**有意**的，不是随便排的：从没读到过的行在前端就是「正在读取…」（空着），
+	//   而过期的行**至少还有旧值可看** ⇒ 补数比刷新更该优先。
+	// ⚠⚠ 第二类（过期）就是设计里"on-read / 定时兜底"**共同的落点**：
+	//   前端翻页时 `tasksCachedPage` 只读缓存、把过期行**顺手标出来**，
+	//   真正的刷新动作一律由这里发生 —— 于是请求路径上永远不发上游请求。
 	type job struct {
 		a     accountRef
 		which string // "tasks" | "invite"
 	}
+	byUID := make(map[string]accountRef, len(accts))
+	for _, a := range accts {
+		byUID[a.UID] = a
+	}
+
 	var jobs []job
+	inJobs := make(map[string]bool, panelWarmupBatch)
+	add := func(a accountRef, which string) {
+		key := a.UID + "|" + which
+		if inJobs[key] || len(jobs) >= panelWarmupBatch {
+			return
+		}
+		inJobs[key] = true
+		jobs = append(jobs, job{a, which})
+	}
+
 	todoT, todoI := 0, 0
 	for _, a := range accts {
 		if _, ok := p.tasksPanel().get(a.UID); !ok {
 			todoT++
-			if len(jobs) < panelWarmupBatch {
-				jobs = append(jobs, job{a, "tasks"})
-			}
+			add(a, "tasks")
 		} else if _, ok := p.invitePanel().get(a.UID); !ok {
 			todoI++
-			if len(jobs) < panelWarmupBatch {
-				jobs = append(jobs, job{a, "invite"})
-			}
+			add(a, "invite")
 		}
 	}
+
+	// ② 还有余量 ⇒ 把**过期的**补上（这是"刷新"那条路；TTL 见 panelttl.go）。
+	expT, expI := 0, 0
+	now := time.Now()
+	for _, uid := range p.expiredTasks(now, false) {
+		expT++
+		if a, ok := byUID[uid]; ok {
+			add(a, "tasks")
+		}
+	}
+	for _, uid := range p.expiredInvites(now, false) {
+		expI++
+		if a, ok := byUID[uid]; ok {
+			add(a, "invite")
+		}
+	}
+
+	// ⚠ 待办总数 = 没缓存的 + 过期的（调用方据此决定下一次扫描等 5 秒还是 5 分钟）。
+	left := todoT + todoI + expT + expI
 	if len(jobs) == 0 {
-		return 0
+		return left // ⚠ 返回 left 而不是 0：否则"有活但本轮配额已满"会被当成"没活了"
 	}
 
 	// ② 限并发跑（⚠ 顺序跑太慢：单号约 10 秒 ⇒ 12 个要 2 分钟，而 4 并发只要 30 秒）。
@@ -174,12 +216,15 @@ func (p *Provider) sweepPanels() int {
 	}
 	wg.Wait()
 
-	log.Printf("loomy: 面板预热一轮 —— 待补 tasks=%d invite=%d（共 %d 个号）· 本轮发起 %d 个 · 首个错误=%q",
-		todoT, todoI, len(accts), done, firstErr)
-	// ⚠ 返回**剩余待补数**（不是本轮发起数）—— 调用方据此决定"连着补"还是"歇一会儿"。
-	// ⚠ 用 todo（本轮开始时的缺口）减掉本轮的 done 是最稳的口径：
-	//   本轮成功后那些号就进缓存了，所以下一次 sweep 的 todo 自然会变小。
-	left := todoT + todoI - done
+	log.Printf("loomy: 面板预热一轮 —— 待办：未缓存(tasks=%d invite=%d) · 过期(tasks=%d invite=%d) · "+
+		"共 %d 个号 · 本轮发起 %d 个 · 首个错误=%q",
+		todoT, todoI, expT, expI, len(accts), done, firstErr)
+	// ⚠ 返回**剩余待办数**（不是本轮发起数）—— 调用方据此决定"连着刷"还是"歇一会儿"。
+	// ⚠ 口径：本轮开始时的待办总数（未缓存 + 过期）减掉本轮真正做完的。
+	//   本轮成功的号会进缓存并带上新的 FetchedAt ⇒ 下一次 sweep 的待办自然变小。
+	//   ⚠ 失败的号会**留下来**（不进缓存）⇒ 待办不减 ⇒ 会继续被排到 ——
+	//     这正是"偶发失败能被自动重试"的机制（配合 freeFailBackoff 式的退避）。
+	left -= done
 	if left < 0 {
 		left = 0
 	}
