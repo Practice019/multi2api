@@ -2,7 +2,9 @@ package admin
 
 import (
 	"log"
+	"sort"
 	"time"
+	"workbuddy2api/internal/pool"
 )
 
 // 本文件：**额度自动刷新**。设计见 docs/cache-refresh-design.md 第 2 节（定时兜底）。
@@ -53,6 +55,32 @@ const quotaAutoRefreshMaxEvery = 30 * time.Minute
 // 是正常抖动；76 个里失败 40 个才说明上游/网络出问题了 —— 两者必须区分得开，
 // 否则一次偶发抖动就会让额度刷新**主动变慢**（那是在制造用户报的那个现象）。
 const quotaAutoRefreshFailRun = 2
+
+// orderQuotaRefreshTargets 把待刷账号按"最近被用过"排前面，**原地**改 list 的顺序。
+//
+// # 为什么是"排序"而不是"只刷最近用过的"
+//
+//	只刷用过的 → 冷号的额度**永远旧**，而选号可能挑到它 ⇒ 基于错数决策 ✗
+//	排序       → **还是刷全部**（请求量不变），只是把"最可能已经变了"的排前面 ✓
+//
+// ⚠ 为什么"最近被选中"就等于"额度一定变了"：一次调用无论成功失败都会消耗额度
+//（所以用 `LastUsed` 而不是 `LastSuccessTime` —— 失败的调用同样花钱）。
+// ⚠ 这个次序只在**上游偶发失败**时才看得出来（先刷到的是最该刷的那批），
+//   而那是常态不是异常 —— 实测一轮 76 个号里失败 1 个。
+// ⚠ 用 `SliceStable`：`List()` 本身按 uid 有序，稳定排序能让"从没被用过"那些
+//   保持原有次序（它们全部是零值，比较结果相同）⇒ 行为可预测。
+//
+// # 为什么抽成独立函数
+//
+// ⚠ 我第一版把它内联在 `RefreshAllQuotasNow` 里，然后发现**变异测试抓不到它** ——
+// 把 `After` 改成 `Before`（也就是"每轮先刷从没用过的号"）时，**没有任何测试会红**。
+// 而那个错误的症状是：真正该刷的号被挤到一轮的后面，上游偶发失败时它们
+// 就一直是旧值 —— **不报错、不崩，只是数据慢慢变旧**，正是本仓最难发现的那类 bug。
+func orderQuotaRefreshTargets(list []pool.Status) {
+	sort.SliceStable(list, func(i, j int) bool {
+		return list[i].LastUsed.After(list[j].LastUsed)
+	})
+}
 
 // quotaBackoffStep 自适应降速的**决策本身**，抽成纯函数。
 //
@@ -162,6 +190,9 @@ func (h *Handler) RefreshAllQuotasNow() quotaRefresher {
 		return quotaRefresher{}
 	}
 	list := h.cfg.Pool.List()
+	// ⚠⚠ **事件驱动**（设计第 2 节第 ③ 条，也是目标里的第 ④ 项）：
+	// 把"最近被用过"的账号排前面 —— 而这是**排序**，不是"只刷用过的"。
+	orderQuotaRefreshTargets(list)
 	uids := make([]string, 0, len(list))
 	for _, st := range list {
 		if st.UID != "" {
