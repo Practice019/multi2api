@@ -116,6 +116,14 @@ func toGatewayKind(k upstream.ErrKind) gateway.ErrorKind {
 		// （每个账号背后是同一套内容策略），换号只会白烧 MaxRotate 次往返，
 		// 最后把"内容被拦"误报成"所有账号不可用"。
 		return gateway.ErrKindContentBlocked
+	case upstream.ErrFatalClient:
+		// 请求超出模型上下文窗口 —— 必须显式翻译，**不能**落 default。
+		//
+		// ⚠ default 是 gateway.ErrKindNone，而 None 在 core 侧是"只换号不惩罚"。
+		// 换号对上下文超限毫无用处（每个号收到的 body 一样长）⇒
+		// 会白烧 MaxRotate 次往返，最后把"这次请求太长"误报成"所有账号不可用"。
+		// 正确处置是**直接结束**（skip-retry），由 core 按这一档实现。
+		return gateway.ErrKindFatalClient
 	default:
 		return gateway.ErrKindNone
 	}

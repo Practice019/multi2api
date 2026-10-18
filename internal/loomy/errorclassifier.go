@@ -44,6 +44,28 @@ const (
 	markerModelUnsupported = "is not supported on this endpoint"
 	// markerModelClosed 生图模型被上游下架（404「该模型暂未开放」）。
 	markerModelClosed = "该模型暂未开放"
+	// markerInvalidRequest 请求体/参数不合法（实测原文，见下）。
+	//
+	// ⚠ 实测来源（2026-10-18，用一份结构不合法的 body 打网关时 loomy 回的原文）：
+	//
+	//	{"error":{"message":"请求参数错误","type":"invalid_request_error",
+	//	          "param":null,"code":400,"metadata":{"provider_name":"loomy"}}}
+	//
+	// ⚠ 加它的理由（真踩过）：它此前落到 `DefaultErrorKind` 的
+	// `status >= 400 → ErrKindClient`，而那一档的语义是"**只换号不罚**" ⇒
+	// 我们把 **44 个账号全试了一遍**（实测耗时 6.7s ~ 45s），
+	// 最后报成 `503 no_healthy_account —— 44 个账号：0 禁用、0 冷却` ——
+	// 把"这次请求的 body 不合法"误报成了"池子故障"。
+	//
+	// ⚠ 换号对它**毫无用处**：每个账号收到的是同一份 body。
+	// ⇒ 归 ErrKindFatalClient（不换号、直接结束），与 new-api 的
+	// `ErrOptionWithSkipRetry` 同一语义。
+	//
+	// ⚠ 两个形态都列：loomy 的报文里英文 type 与中文 message **同时出现**，
+	// 只匹配一个的话，上游哪天改掉另一个就会静默失效。
+	markerInvalidRequest = "invalid_request_error"
+	// markerInvalidRequestCN 同上（中文形态，loomy 报文里的 message 字段）。
+	markerInvalidRequestCN = "请求参数错误"
 )
 
 // Classify 按 (状态码, 响应体) 判定错误类别。
@@ -90,6 +112,14 @@ func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
 	case strings.Contains(low, markerModelUnsupported):
 		// 模型名不对。同样是客户端问题，不该记在账号头上。
 		return gateway.ErrKindClient
+
+	case strings.Contains(low, markerInvalidRequest) || strings.Contains(body, markerInvalidRequestCN):
+		// ⚠ 请求体/参数不合法 ⇒ **不换号、直接结束**（2026-10-18 加）。
+		//
+		// 与上面那条的区别：模型名不对**换个号其实能好**（不同账号挂的模型目录不同），
+		// 而"这份 body 本身不合法"换到哪个号都一样 ⇒ 归 FatalClient。
+		// 这一条把"44 个号全试一遍 + 误报池子故障"变成"立刻回 400"。
+		return gateway.ErrKindFatalClient
 	}
 
 	// 正文没有认识的东西 → 按状态码走通用兜底。

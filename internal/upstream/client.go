@@ -39,6 +39,26 @@ const (
 	// 处置见 gateway.ErrKindContentBlocked：core 据此触发提示词降级重试，
 	// 而**不是**换号 —— 换号对内容问题没有意义（每个号都被同一套策略拦）。
 	ErrContentBlocked
+
+	// ErrFatalClient **确定性的客户端错误**（参数错误 / 上下文超限等）→ **不换号、直接结束**。
+	//
+	// # 为什么必须单独一类（2026-10-18，知识库里点名的落点）
+	//
+	// 它此前落到 `status >= 400 → ErrClient`，而 ErrClient 的语义是"只换号不罚"。
+	// ⚠ 换号对这类错误**完全无效**：每个账号收到的是同一份 body，
+	// 换到哪家都是同样的 400 ⇒ 白试 MaxRotate 次往返，
+	// 最后报成"所有账号不可用"，把一个**确定性**错误误报成池子故障。
+	// 用户原话："反复尝试没有额度的渠道或账号" —— 实测它的真身就是这个。
+	//
+	// # 为什么"确定性"要按正文判，而不能按状态码
+	//
+	// 401/403 也是 4xx，但**换号确实可能有用**（不同账号凭证不同）⇒ 它们必须留在 ErrClient。
+	// 只有"换不换号结果都一样"的那些才属于本类，而那只能从正文看出来。
+	// ⚠ 所以它落在这里（上游自己的词汇表），**不能**加到 DefaultErrorKind ——
+	// 那个刻意不读正文（`_ = body`），否则所有上游都会被单一上游的词汇表解释。
+	//
+	// 处置见 gateway.ErrKindFatalClient。
+	ErrFatalClient
 )
 
 func (k ErrKind) String() string {
@@ -57,6 +77,8 @@ func (k ErrKind) String() string {
 		return "client"
 	case ErrContentBlocked:
 		return "content_blocked"
+	case ErrFatalClient:
+		return "fatal_client"
 	default:
 		return "none"
 	}
@@ -110,6 +132,45 @@ var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 // ⚠ 大小写：上游的文案大小写不完全稳定，因此比较统一走 ToLower。
 // 这是**上游自己的词汇表**，所以它必须留在本包（见 gateway 包注释的判据 1）——
 // 放进 gateway 的通用兜底就等于让每个上游被这套词汇解释。
+// fatalClientMarkers **确定性的客户端错误**的文案标记（2026-10-18 加）。
+//
+// ⚠ 判据只能来自正文 —— 与 contentBlockedMarkers 同一处境：HTTP 形态都是 400，
+// 与"客户端参数写错"完全一样，落到 ErrClient 就会被换号重试，
+// 而换号对"body 本身有问题"毫无用处（每个号收到的 body 一样）。
+//
+// ⚠ 实测来源：用一份结构不合法的 body 打网关时，loomy 回
+// `{"error":{"message":"请求参数错误",…}}`，而我们**把 44 个账号全试了一遍**
+// （耗时 6.7s ~ 45s），最后报成 `503 no_healthy_account —— 0 禁用、0 冷却`。
+// ⇒ 这份表就是为了让那件事不再发生。
+//
+// ⚠ 覆盖两类：
+//
+//	请求参数错误   → 请求参数错误 / invalid_request_error / invalid request
+//	上下文超限     → context_length_exceeded / maximum context length / too many tokens …
+//	                 （含 pi-ai 的 "context overflow" —— 用户截图里的原文）
+//
+// ⚠ **不要**把 401/403 的文案放进来：那两个换号**确实可能**有用（凭证按号不同）。
+// 宁可多列几条：漏一条的代价是"白试 MaxRotate 个号 + 误报池子故障"。
+var fatalClientMarkers = []string{
+	// 上下文超限
+	"context_length_exceeded",
+	"maximum context length",
+	"context overflow",
+	"context window",
+	"too many tokens",
+	"reduce the length of the messages",
+	"prompt is too long",
+	"exceeds the maximum",
+	"上下文长度",
+	"超出上下文",
+	// 请求参数错误
+	"请求参数错误",
+	"invalid_request_error",
+	"invalid request",
+	"参数错误",
+	"参数不合法",
+}
+
 var contentBlockedMarkers = []string{
 	"blocked by security policy",
 	"unapproved channel",
@@ -151,6 +212,15 @@ func Classify(status int, body string) ErrKind {
 	for _, m := range contentBlockedMarkers {
 		if strings.Contains(lowerBody, m) {
 			return ErrContentBlocked
+		}
+	}
+	// ⚠ 确定性客户端错误（参数错误 / 上下文超限）：同样必须在
+	// `status >= 400 → ErrClient` **之前**判（2026-10-18 加）。
+	// 它与内容拦截处境相同（都是 400），而处置不同：内容拦截换提示词重试有意义，
+	// 而"body 本身有问题"换号、换提示词都无意义 ⇒ 由 core 按 skip-retry 直接结束。
+	for _, m := range fatalClientMarkers {
+		if strings.Contains(lowerBody, m) {
+			return ErrFatalClient
 		}
 	}
 	if status == http.StatusTooManyRequests {

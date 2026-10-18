@@ -147,6 +147,10 @@ func probeFor(k upstream.ErrKind) (int, string) {
 		return 401, `{"code":9999,"msg":"bad token"}`
 	case upstream.ErrContentBlocked:
 		return 400, `blocked by security policy`
+	case upstream.ErrFatalClient:
+		// ⚠ 必须给能真正触发这一档的探针，否则落 default(500/"boom") ⇒
+		// 判成 ErrServer 而测试红 —— 注释里写着"这正是想要的效果"。
+		return 400, `{"error":{"code":"context_length_exceeded"}}`
 	}
 	// 未知档：给一个最普通的上游故障。
 	return 500, `boom`

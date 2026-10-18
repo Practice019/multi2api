@@ -127,6 +127,8 @@ func upstreamToGatewayForTest(k upstream.ErrKind) gateway.ErrorKind {
 		return gateway.ErrKindClient
 	case upstream.ErrContentBlocked:
 		return gateway.ErrKindContentBlocked
+	case upstream.ErrFatalClient:
+		return gateway.ErrKindFatalClient
 	default:
 		panic("测试镜像没有覆盖 upstream.ErrKind 的新取值 —— 生产翻译也要同步更新")
 	}
@@ -152,6 +154,7 @@ var knownUpstreamKinds = []upstream.ErrKind{
 	upstream.ErrServer,
 	upstream.ErrClient,
 	upstream.ErrContentBlocked,
+	upstream.ErrFatalClient,
 }
 
 // TestToGatewayKindCoversEveryUpstreamKind 每个合法取值都有显式翻译分支。

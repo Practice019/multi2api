@@ -155,6 +155,8 @@ func mirrorKind(k upstream.ErrKind) gateway.ErrorKind {
 		return gateway.ErrKindClient
 	case upstream.ErrContentBlocked:
 		return gateway.ErrKindContentBlocked
+	case upstream.ErrFatalClient:
+		return gateway.ErrKindFatalClient
 	default:
 		return gateway.ErrKindNone
 	}

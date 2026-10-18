@@ -188,6 +188,24 @@ const (
 	// 任何 `gateway.ErrorKind(n)` 形式的代码也会静默错位。
 	// 因此**只追加，不插入**。有测试钉住（TestErrorKindValuesAreStable）。
 	ErrKindContentBlocked
+
+	// ErrKindFatalClient **确定性的客户端错误**（参数错误 / 上下文超限等）→ **不换号、直接结束**。
+	//
+	// 映射：upstream.ErrContextOverflow。
+	//
+	// # 为什么它与 ErrKindClient 必须分开（2026-10-18 加）
+	//
+	// 它此前落进 ErrKindClient，而那一档的语义是"**只换号不罚**" ——
+	// 对 401/403 是对的（不同账号凭证不同，换号可能有用），
+	// 对上下文超限是错的：每个账号收到的 body 一模一样长，
+	// 换到哪家都是同样的 400 ⇒ 白试 MaxRotate 次往返，
+	// 最后报成"所有账号不可用"，把一个**确定性**错误误报成池子故障。
+	//
+	// ⚠ 这正是 new-api 用 `types.ErrOptionWithSkipRetry()` 显式声明的那件事
+	// （relay/convert_request_error.go：转换失败一律带 SkipRetry）。
+	//
+	// ⚠ 同样**只追加，不插入**（见上面那条注释）：值 9。
+	ErrKindFatalClient
 )
 
 // String 人类可读的分类名（与 upstream.ErrKind 的拼写**逐字一致**，
@@ -212,6 +230,8 @@ func (k ErrorKind) String() string {
 		return "client"
 	case ErrKindContentBlocked:
 		return "content_blocked"
+	case ErrKindFatalClient:
+		return "fatal_client"
 	default:
 		return "none"
 	}
