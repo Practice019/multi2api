@@ -767,12 +767,12 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
                 带 tokens 的富化版由子代理在补，接口一到就直接换，不动这里的结构）。
              ⚠ 每个数字都带**口径**（"请求数"还是"tokens"写在标题里）—— 与全站"不写假话"一致。 -->
         <div class="duo" id="statsReport" style="margin-top:16px">
-          <div class="panel">
-            <div class="panelhd">Top 账号 <span class="dim" style="font-weight:400">按请求数</span>
-              <span class="spacer"></span><span class="dim" id="statsTopHint" style="font-weight:400;font-size:11px"></span>
-            </div>
-            <div id="statsTopUid" class="toplist"></div>
-          </div>
+          <!-- ⚠⚠ 「Top 账号」整块**已按用户要求删除**（2026-10-18 截图批注："直接删除不需要这个"）。
+               原来这里有：`<div id="statsTopUid" class="toplist">` + `#statsTopHint`。
+               ⚠ 后端 `/admin/stats` 仍在算 `by_uid` / `by_uid_detail`（另外两处还要用它们），
+                 所以只删了这块展示，没动接口。
+               ⚠ `renderStatsReport(s)` 里原本往这块写数据的代码也一并去掉了 ——
+                 但保留它对 `#statsDonut` / `#statsModelDonut` 那两个环的容器守卫。 -->
           <div class="panel">
             <!-- ⚠ 标题从「按请求数」改成「按 Token」—— 2026-10-18 照 agent2api 的口径改的：
                  它 `TIP_PROVIDERS` 写的是"**所选范围内每个提供商各消耗了多少 Token**，
@@ -8004,7 +8004,10 @@ let loginProvider = '';
   // （这一路栽过"用了不存在的函数名、跑起来才炸"，所以 uid 的截断在这里内联写，不猜 helper。）
   function renderStatsReport(s) {
     const topEl = $('statsTopUid'), donutEl = $('statsDonut'), legendEl = $('statsDonutLegend');
-    if (!topEl || !donutEl || !legendEl) return;      // 老版本页面没有这些容器 ⇒ 静默跳过
+    // ⚠ 守卫**不再要求 `topEl`**（2026-10-18）：「Top 账号」那块已按用户要求删掉，
+    //   `$('statsTopUid')` 恒为 null —— 若还把它算进守卫，本函数会**每次早返回** ⇒
+    //   两个环一个都不画。⚠ 这类"删了容器忘了改守卫"是静默失败，只能靠看图发现。
+    if (!donutEl || !legendEl) return;
     if (!s) return;
     // ⚠ 取值要**同时认两种形状**：
     //   · 老形状：`by_provider = { "loomy": 26012 }`（裸数字）
@@ -8031,15 +8034,10 @@ let loginProvider = '';
     //   ⇒ 整页内联 JS **一段都不执行**（`cards = 0`），而我当时**已经把坏二进制替换进去了**。
     //   ⇒ 教训：**改完必须先跑门禁、红了就不许替换二进制**（我那次编了就直接换了，顺序反了）。
 
-    // ⚠ 顶部提示**先设**（R2 抓到的陈旧文案）。
-    // 症状：这段原来放在函数**末尾**，而"没有数据"的两条分支都比它早 `return`
-    // ⇒ 那些情况下它保留**上一次**的文案（实测 rows=2 时仍写「共 1 个账号有请求」）。
-    // ⇒ 挪到所有 return 之前；⚠ 空值也要**如实**改写，而不是留着旧句子。
-    const hint = $('statsTopHint');
-    if (hint) {
-      const uidN = Object.keys(s.by_uid || {}).length;
-      hint.textContent = uidN ? ('共 ' + uidN + ' 个账号有请求') : '窗口内没有请求';
-    }
+    // ⚠ 「Top 账号」那块已删（2026-10-18 用户要求"直接删除不需要这个"）⇒ 它那两行一并去掉：
+    //   原来这里设 `#statsTopHint`（"共 N 个账号有请求"），而那个容器已不存在。
+    //   ⚠ 保留这段注释是为了说明：**顶部提示那条约束仍然成立** —— 若将来又加回某个顶部提示，
+    //     仍必须放在**所有 return 之前**（R2 抓到的陈旧文案问题）。
 
     // ⚠ 「Top 模型」卡**不在这里填**（2026-10-18 实测）：
     //   本函数会在多处被调，其中有的入参不是 `/admin/stats` 的完整响应
@@ -8061,7 +8059,9 @@ let loginProvider = '';
     const uidMax = uids.length ? uids[0][1] : 0;
     let uidSum = 0;
     for (const v of Object.values(s.by_uid || {})) uidSum += pad(v);
-    topEl.innerHTML = uids.length
+    // ⚠ 这块的容器已删（见上面注释）⇒ 加 `if (topEl)` 保住这段代码不死；
+    //   等哪天又要 Top 榜，把容器加回来它就自动生效（⚠ 而不是留着一段必崩的语句）。
+    if (topEl) topEl.innerHTML = uids.length
       ? uids.map(([uid, n]) => {
           const w = uidMax > 0 ? Math.max(2, (n / uidMax) * 100) : 0;         // 最小 2% 才看得见
           const pct = uidSum > 0 ? ((n / uidSum) * 100).toFixed(1) : '—';      // ⚠ 防零除
@@ -8416,22 +8416,25 @@ let loginProvider = '';
     const estW = (s) => s.length * 6;                       // ⚠ 粗估宽度（它有自己的 textWidth 估算器）
     const widest = Math.max(0, ...texts.map(estW));
     const allFit = widest + 4 <= step;                      // 横排能否放下
-    // ⚠ 判定"能不能竖排"要按**相邻有值柱的实际间距**，不能按均分 `step`。
-    //   看图发现的问题：30 天窗口里只有最后 8 天连着有量 ⇒ 8 根柱挤在右端 1/4 宽度里，
-    //   而按均分算出来的 `step`（900/30≈30px）**够 13px** ⇒ 误判成"可以竖排"
-    //   ⇒ 结果 8 串读数在那一小段里叠成一团。
-    //   ⇒ 用真实最小间距判：一旦不够就退回它第三级——**只标峰值**。
+    // ⚠⚠ **按用户要求去掉竖排**（2026-10-18 批注："这个值垂直不好看 希望是水平"）。
+    //   原来这里是三级排法：横排 / **竖排（`rotate(-90)`）** / 只标峰值。
+    //   ⇒ 现在两级，**一律水平**：
+    //     · 放得下（`allFit`）⇒ 每根都标；
+    //     · 放不下 ⇒ **每隔 k 根标一根**（k 由"文本宽 + 缝"除以**真实最小间距**算出）。
+    //   ⚠ 为什么不退回它的第三级「只标峰值」：24 桶只标一根太稀疏，用户要的正是"能读到值"。
+    //     "每隔 k 根"既保住水平、又不会糊 —— 与中间那条命中率趋势的稀疏标注同一手法。
+    //   ⚠ 判定必须用**相邻有值柱的真实最小间距**（老账：按均分 `step` 算会误判 ——
+    //     30 天窗口里只有最后 8 天有量时，均分间距够、真实间距不够）。
     const idxs = vals.map((v, i) => (v > 0 ? i : -1)).filter((i) => i >= 0);
     let minGap = Infinity;
     for (let k = 1; k < idxs.length; k++) minGap = Math.min(minGap, (idxs[k] - idxs[k - 1]) * step);
     if (!isFinite(minGap)) minGap = step;
-    const VERT_MIN_STEP = 13;                               // ⚠ 照它那个常量
-    const vertical = !allFit && minGap >= VERT_MIN_STEP;     // 竖排
-    // 三级排法：横排 / 竖排 / 只标峰值
-    const mode = allFit ? 'h' : (vertical ? 'v' : 'peak');
+    // ⚠ 每隔几根标一根（至少 1 = 全标）
+    const labelEvery = Math.max(1, Math.ceil((widest + 4) / Math.max(1, minGap)));
+    const mode = 'h';
 
-    // ⚠ 顶部留白跟着排法走：竖排要从柱顶往上长出最长那一串
-    const PADT = vertical ? 10 + Math.ceil(widest * 1.25) : 26;
+    // ⚠ 顶部留白：水平读数只需一行的高度（竖排那种要往上长一串，已不需要）
+    const PADT = 26;
     const plotH = H - PADT - PADB;
     const yMax = peak * 1.06;                                // ⚠ 顶部留一点空，柱子不顶格
     const yAt = (v) => PADT + plotH - (plotH * v) / yMax;
@@ -8454,14 +8457,10 @@ let loginProvider = '';
       svg.push(`<rect x="${(cx(i) - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(PADT + plotH - y).toFixed(1)}" fill="var(--acc)" rx="${Math.min(2, barW / 2).toFixed(1)}"/>`);
       const t = texts[i];
       if (!t) continue;
-      if (mode === 'h') {
-        svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle">${esc(t)}</text>`);
-      } else if (mode === 'v') {
-        // ⚠ 竖排：自下而上贴着柱顶（rotate -90 ⇒ 锚点在左下）
-        svg.push(`<text class="ax" x="${(cx(i) + 3).toFixed(1)}" y="${(y - 4).toFixed(1)}" text-anchor="start" transform="rotate(-90 ${(cx(i) + 3).toFixed(1)} ${(y - 4).toFixed(1)})">${esc(t)}</text>`);
-      } else if (i === peakIdx) {
-        svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle" fill="var(--acc)">${esc(t)}</text>`);
-      }
+      // ⚠ 一律**水平**（用户要求，见上面那段注释）；放不下时按 `labelEvery` 稀疏。
+      //   ⚠ 峰值那根**必标**（它是这条图的重点），并用强调色。
+      if (i % labelEvery !== 0 && i !== peakIdx) continue;
+      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
     }
     // x 轴：首/中/末（⚠ 桶多时全标会糊）
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
