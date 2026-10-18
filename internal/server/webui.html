@@ -425,6 +425,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);
     grid-auto-columns:1fr;gap:2px;width:100%}
   .heatcell{aspect-ratio:1;min-width:0;border-radius:2px;background:var(--panel2)}
+  /* ⚠ 格子可点（2026-10-18 按用户要求）：左键点一下，那天的用量**留在页面上**。 */
+  .heatcell{cursor:pointer}
+  .heatcell:hover{outline:1px solid color-mix(in srgb,var(--acc) 60%,transparent)}
+  /* ⚠ 选中态要**与环境色不同**才看得出来：用对比色描边 + 外圈，而不是改填充
+     （改填充会与"用量深浅"这套语义打架 —— 用户就没法从颜色读用量了）。 */
+  .heatcell.sel{outline:2px solid var(--fg);outline-offset:1px;box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 35%,transparent)}
+  .heatpick{margin-top:6px;font-size:12px;min-height:18px}
   .heatcell.blank{background:transparent}
   .heatcell.lv0{background:color-mix(in srgb,var(--dim) 12%,transparent)}
   .heatcell.lv1{background:color-mix(in srgb,var(--acc) 25%,transparent)}
@@ -823,6 +830,10 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
           <span class="spacer"></span>
           <span class="dim">方格为**本地自然日**，无请求显示为空槽</span>
         </div>
+        <!-- ⚠ 「点击某格读那一天」的常显读数（2026-10-18 按用户要求加）：
+             原来只有 `title` 悬停能读，而用户要的是**左键点一下、值就留在页面上**。
+             ⚠ 读数写成一行固定高度，**不留白也不跳**（未选中时给一句引导语）。 -->
+        <div id="heatPick" class="heatpick dim">点格子可以看那一天的具体用量</div>
       </div>
     </div>
 
@@ -8130,6 +8141,10 @@ let loginProvider = '';
   // 按**本窗口峰值**分 4 档（照它那句"档位按本窗口峰值自动定"）——
   // ⚠ 不写死绝对阈值：用量涨十倍时整片会变最深色、失去分辨力。
   let heatSig = '';
+  // ⚠ heatPickDays 供"点击某格"回查当天的完整数据（2026-10-18 加）。
+  // ⚠ 为什么单独一张表而不是把数值写进格子的属性：格子的 `title` 是**给人看的一句话**，
+  //   而这里是**给代码取的结构**；两者混在一处，将来改文案就会把取值一起改坏。
+  const heatPickDays = new Map();
 
   async function loadHeatmap() {
     let d;
@@ -8548,6 +8563,15 @@ let loginProvider = '';
     // 也是一整片空槽（见它截图），照它的形态才对。已改回。
     const byDay = new Map();
     for (const p of list) byDay.set(String(p.ts || '').slice(0, 10), p);
+    // ⚠⚠ 同步填 `heatPickDays`（点击某格时回查当天数据用）。
+    //   ⚠ 我第一版漏了这一步 —— 只声明、只读、**从不填** ⇒ 点任何格子都显示"无请求"。
+    //     这类"声明了却没赋值"的错，`node --check` 与 `go build` 都抓不到（账本 E065），
+    //     只能靠"grep 定义/赋值/使用三处"或**实点一下**发现。
+    heatPickDays.clear();
+    for (const p of list) {
+      const k = String(p.ts || '').slice(0, 10);
+      heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: p.tokens || 0 });
+    }
 
     const lastKey = String(list[list.length - 1].ts || '').slice(0, 10);
     const parts = lastKey.split('-').map(Number);
@@ -8599,7 +8623,7 @@ let loginProvider = '';
         lastMonth = cur.getMonth();
         monthMarks.push([colIdx, (cur.getMonth() + 1) + '月']);
       }
-      cells.push(`<span class="heatcell lv${lvOf(tk)}" title="${esc(tip)}"></span>`);
+      cells.push(`<span class="heatcell lv${lvOf(tk)}" data-day="${esc(key)}" title="${esc(tip)}"></span>`);
       cur.setDate(cur.getDate() + 1);
       n++;
     }
@@ -8607,6 +8631,36 @@ let loginProvider = '';
     const tail = 6 - ((lastD.getDay() + 6) % 7);
     for (let k = 0; k < tail; k++) cells.push('<span class="heatcell blank"></span>');
     host.innerHTML = cells.join('');
+
+    // ⚠⚠ 点格子读那一天（2026-10-18 按用户要求加：左键点一下，值**留在页面上**）。
+    //
+    // 三个细节：
+    //   1. ⚠ **事件委托**绑在容器上（`host`），**不给每个格子单独绑** ——
+    //      本函数每次重绘会换掉全部 371 个格子，逐个绑等于每次泄漏 371 个监听器；
+    //      委托只需绑一次，且用 `_heatBound` 标记避免重复绑（它会随卡片重建被清）。
+    //   2. ⚠ 选中态用**描边**而不是改填充 —— 填充色是"用量深浅"的语义，改了就没法读用量。
+    //   3. ⚠ 读数从 `data-day` 回查 `byDay`，**不把文本塞进 title** 再解析（那会把展示和取值耦合）。
+    if (!host._heatBound) {
+      host._heatBound = true;
+      host.addEventListener('click', (ev) => {
+        const cell = ev.target && ev.target.closest ? ev.target.closest('.heatcell[data-day]') : null;
+        if (!cell) return;
+        const day = cell.getAttribute('data-day');
+        for (const c of host.querySelectorAll('.heatcell.sel')) c.classList.remove('sel');
+        cell.classList.add('sel');
+        const out = $('heatPick');
+        if (!out) return;
+        const p = heatPickDays.get(day);                 // ⚠ 由 renderHeatmap 填的"当天数据"表
+        if (!p) {
+          out.className = 'heatpick';
+          out.textContent = day + ' · 无请求';
+          return;
+        }
+        out.className = 'heatpick';
+        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(p.tokens)} token`
+          + `（成功 ${p.ok} · 失败 ${p.fail}）`;
+      });
+    }
 
     // 月份标签：用一个与格子同列宽的 grid 承载，全列铺满、只有该列的格子里有字
     const mh = $('statsHeatMonths');
