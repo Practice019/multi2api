@@ -50,6 +50,21 @@ type Entry struct {
 	ThinkTokens     int     `json:"think_tokens"`      // 推理（思维链）token 数
 	CacheHitTokens  int     `json:"cache_hit_tokens"`  // 命中缓存的 prompt token
 	CacheMissTokens int     `json:"cache_miss_tokens"` // 未命中缓存的 prompt token
+	// Decision 本请求的**重试/换号判决留痕**，形如 `reason:source`（空 = 成功，不出现在日志里）。
+	//
+	// ⚠ 抄自 new-api 的 `PolicyDecision{Action, Reason, Source}`（service/request_policy.go:19，
+	//   前端类型见 web/src/features/system-settings/request-policies/api.ts:7）——
+	//   它把每次"重试 / 不重试"的判决**连同原因**记进请求日志。
+	//
+	// ⚠ 我们的取舍（为什么只存 `reason:source` 两个而不是三个字段）：
+	//   · `Action`（retry / stop）**已经由 `Status` 体现**了 —— 重试成功就是 200、
+	//     预算用尽就是 502/503 ⇒ 再存一份是冗余；
+	//   · 而 `reason` 与 `source` 是**行为里看不出来的**（为什么重试、是谁决定的）
+	//     ⇒ 那才是排障时唯一需要而当前缺失的信息。
+	// ⚠ 加它的直接动机：2026-10-18 排 503 时，日志里只有"503"这一个事实，
+	//   我为此**反复猜了四轮**（额度 / 容量 / 重试策略全都猜错）——
+	//   有这一列的话，第一轮就能看到"upstream_5xx"还是"pool_unavailable"。
+	Decision string `json:"decision,omitempty"`
 }
 
 // Ring 定长环形缓冲。零值不可用，必须经 New 构造。

@@ -1479,6 +1479,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 粘性号当前不可用（别的上游/冷却/占满）→ 解绑，本次回落普通轮换。
 				h.cfg.Session.Unbind(sessKey)
 				stickyUID = ""
+				// ⚠ 判决留痕（抄 new-api 的 reason/source 命名，见 logbuf.Entry.Decision）。
+				// 它那边的同义判决叫 `strict_session` / source `session_rule`
+				//（service/relay_error.go:27）—— 这里沿用同样的取名，两边日志可对照。
+				st.decision = "sticky_unavailable:session_rule"
 			}
 		}
 		if acct == nil {
@@ -1503,6 +1507,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusServiceUnavailable
 			if lastKind == gateway.ErrKindServer {
 				st.status = http.StatusBadGateway
+			}
+			// ⚠⚠ **判决留痕**（抄 new-api 的 `PolicyDecision{Action, Reason, Source}`，
+			//   见 internal/logbuf/logbuf.go 的 `Decision` 字段注释）。
+			//
+			// 这一行是本次改动的**全部动机**：用户看到 503 时，日志里此前只有"503"这一个事实，
+			// 读者（包括我）只能猜 —— 2026-10-18 那天我为此猜了四轮（额度 / 容量 / 重试策略全错）。
+			// 现在这两条 `reason` 直接把"上游挂了"与"池子真空"分开，与上面两行的状态码判据同源。
+			if lastKind == gateway.ErrKindServer {
+				st.decision = "upstream_5xx:system"
+			} else {
+				st.decision = "pool_unavailable:global"
 			}
 			break
 		}
