@@ -100,7 +100,7 @@ func restrictToUID(accts []accountRef, uid string) []accountRef {
 // 共享层（webui.html 的 lazyFill）一次只发**一个块**，于是后端这条路的
 // 并发度就是**全局**在途账号数：每个账号 2 次上游请求 ⇒ 4 个账号并行
 // = 8 条在途上游请求。取 6 会到 12 条，正好压在实测出 502 的那条线上
-//（见 loomyPanelConcurrency 的说明）。取 4 = 留一半余量。
+// （见 loomyPanelConcurrency 的说明）。取 4 = 留一半余量。
 //
 // # 它和"前端逐行取数"的区别（回归的根因）
 //
@@ -112,8 +112,9 @@ func restrictToUID(accts []accountRef, uid string) []accountRef {
 // 权衡如实记在这里：本文件与 `points.go` 的注释都记着**实测「12 条并发打上游就出 502」**，
 // 而每个账号要 2 次上游请求 ⇒ 25 个账号并行 = **50 条在途**，是那条线的 4 倍。
 // ⇒ 如果面板又开始整列「查询失败」，**把本常量与 `points.go` 的 loomyPanelConcurrency
-//    一起退回 4**（退回即可恢复"8 条在途"的安全区），并把 `webui.html` 的
-//    `LAZY_CHUNK` 一并退回（块大小与这里配套）。
+//
+//	一起退回 4**（退回即可恢复"8 条在途"的安全区），并把 `webui.html` 的
+//	`LAZY_CHUNK` 一并退回（块大小与这里配套）。
 //
 // ⚠ 另注：块大小（`LAZY_CHUNK`）与本常量要**配套**改 —— 块里只有 6 个 uid 时，
 // 本常量提到 25 也用不上（一块最多 6 个账号并行）。
@@ -281,90 +282,95 @@ func (c *panelRowCache[T]) updatedAt() time.Time {
 }
 
 // panelsFileName 面板缓存的落盘文件名（放在 authDir 下 —— 那是**网关自己**的目录，
-	// 不是本机 Loomy 客户端的 clientDataDir）。
-	const panelsFileName = "panels.json"
+// 不是本机 Loomy 客户端的 clientDataDir）。
+const panelsFileName = "panels.json"
 
-	// panelsSnapshot 两个面板缓存的落盘形态。
-	//
-	// ⚠ 为什么整份存而不是逐条存：它只有几十条（44 个号 × 2 个面板），
-	//   整份序列化是最简单的正确选择 —— 逐条 append 会让"重启后读到半份"成为可能。
-	type panelsSnapshot struct {
-		Tasks   map[string]accountTasksView  `json:"tasks"`
-		Invite  map[string]accountInviteView `json:"invite"`
-		SavedAt time.Time                    `json:"saved_at"`
-	}
+// panelsSnapshot 两个面板缓存的落盘形态。
+//
+// ⚠ 为什么整份存而不是逐条存：它只有几十条（44 个号 × 2 个面板），
+//
+//	整份序列化是最简单的正确选择 —— 逐条 append 会让"重启后读到半份"成为可能。
+type panelsSnapshot struct {
+	Tasks   map[string]accountTasksView  `json:"tasks"`
+	Invite  map[string]accountInviteView `json:"invite"`
+	SavedAt time.Time                    `json:"saved_at"`
+}
 
-	// loadPanelsSnapshot 启动时读一次落盘的面板缓存。
-	//
-	// ⚠ 文件不存在、读不动、JSON 坏了 —— **一律当空**（不是错误）：
-	//   它只是缓存，缺了顶多"第一次打开要查上游"，而**报错会让整个面板起不来**。
-	func (p *Provider) loadPanelsSnapshot() panelsSnapshot {
-		var s panelsSnapshot
-		if p == nil || p.authDir == "" {
-			return s
-		}
-		raw, err := os.ReadFile(filepath.Join(p.authDir, panelsFileName))
-		if err != nil {
-			return s
-		}
-		_ = json.Unmarshal(raw, &s)
+// loadPanelsSnapshot 启动时读一次落盘的面板缓存。
+//
+// ⚠ 文件不存在、读不动、JSON 坏了 —— **一律当空**（不是错误）：
+//
+//	它只是缓存，缺了顶多"第一次打开要查上游"，而**报错会让整个面板起不来**。
+func (p *Provider) loadPanelsSnapshot() panelsSnapshot {
+	var s panelsSnapshot
+	if p == nil || p.authDir == "" {
 		return s
 	}
-
-	// savePanelsSnapshot 把两个面板缓存落盘（原子写：先写 .tmp 再 rename）。
-	//
-	// ⚠ 原子写是必须的：非原子写在写到一半时崩溃会留下**半份 JSON**，
-	//   下次启动读它解析失败 ⇒ 整份缓存白丢（而且静默）。
-	func (p *Provider) savePanelsSnapshot() {
-		if p == nil || p.authDir == "" {
-			return
-		}
-		s := panelsSnapshot{Tasks: map[string]accountTasksView{}, Invite: map[string]accountInviteView{}, SavedAt: time.Now()}
-		if c := p.panelTasks; c != nil {
-			c.mu.RLock()
-			for k, v := range c.m {
-				s.Tasks[k] = v
-			}
-			c.mu.RUnlock()
-		}
-		if c := p.panelInvite; c != nil {
-			c.mu.RLock()
-			for k, v := range c.m {
-				s.Invite[k] = v
-			}
-			c.mu.RUnlock()
-		}
-		raw, err := json.Marshal(s)
-		if err != nil {
-			return
-		}
-		dst := filepath.Join(p.authDir, panelsFileName)
-		tmp := dst + ".tmp"
-		if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-			return
-		}
-		_ = os.Rename(tmp, dst)
+	raw, err := os.ReadFile(filepath.Join(p.authDir, panelsFileName))
+	if err != nil {
+		return s
 	}
+	_ = json.Unmarshal(raw, &s)
+	return s
+}
 
-	// throttledSavePanels 存盘的**节流**入口（每次补一个号都会写缓存 ⇒ 不能每次都落盘）。
-	//
-	// ⚠ 5 秒最多存一次：一轮 sweep 最多补 8 个号 ⇒ 不节流就是 8 次整份序列化写盘，
-	//   而缓存本来就不要求强一致（丢了顶多重查）。
-	// ⚠ 用单独一把锁而不是复用 panelMu：store 是 IO，不该把面板读写路径拖住。
-	func (p *Provider) throttledSavePanels() {
-		if p == nil {
-			return
-		}
-		p.saveMu.Lock()
-		defer p.saveMu.Unlock()
-		if time.Since(p.lastSaveAt) < 5*time.Second {
-			return
-		}
-		p.lastSaveAt = time.Now()
-		go p.savePanelsSnapshot()
+// savePanelsSnapshot 把两个面板缓存落盘（原子写：先写 .tmp 再 rename）。
+//
+// ⚠ 原子写是必须的：非原子写在写到一半时崩溃会留下**半份 JSON**，
+//
+//	下次启动读它解析失败 ⇒ 整份缓存白丢（而且静默）。
+func (p *Provider) savePanelsSnapshot() {
+	if p == nil || p.authDir == "" {
+		return
 	}
+	s := panelsSnapshot{Tasks: map[string]accountTasksView{}, Invite: map[string]accountInviteView{}, SavedAt: time.Now()}
+	if c := p.panelTasks; c != nil {
+		c.mu.RLock()
+		for k, v := range c.m {
+			s.Tasks[k] = v
+		}
+		c.mu.RUnlock()
+	}
+	if c := p.panelInvite; c != nil {
+		c.mu.RLock()
+		for k, v := range c.m {
+			s.Invite[k] = v
+		}
+		c.mu.RUnlock()
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return
+	}
+	dst := filepath.Join(p.authDir, panelsFileName)
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, dst)
+}
 
-	// tasksPanel / invitePanel 两个面板的行缓存（惰性初始化）。
+// throttledSavePanels 存盘的**节流**入口（每次补一个号都会写缓存 ⇒ 不能每次都落盘）。
+//
+// ⚠ 5 秒最多存一次：一轮 sweep 最多补 8 个号 ⇒ 不节流就是 8 次整份序列化写盘，
+//
+//	而缓存本来就不要求强一致（丢了顶多重查）。
+//
+// ⚠ 用单独一把锁而不是复用 panelMu：store 是 IO，不该把面板读写路径拖住。
+func (p *Provider) throttledSavePanels() {
+	if p == nil {
+		return
+	}
+	p.saveMu.Lock()
+	defer p.saveMu.Unlock()
+	if time.Since(p.lastSaveAt) < 5*time.Second {
+		return
+	}
+	p.lastSaveAt = time.Now()
+	go p.savePanelsSnapshot()
+}
+
+// tasksPanel / invitePanel 两个面板的行缓存（惰性初始化）。
 //
 // ⚠ 惰性而不是在构造函数里建：Provider 有多个构造入口（New / NewWithConfig /
 // 测试夹具），漏一个就会出现"这个入口下缓存是 nil" —— 而 nil 接收者上的
@@ -422,8 +428,17 @@ type accountTasksView struct {
 	// ⚠ 三处结构（本结构 / accountTaskRunResult / accountInviteView）**必须都带上**它，
 	//   否则"运行任务后回填那一行"会把已知的值降级成未知。
 	BalanceKnown bool `json:"balance_known"`
-	Pending  []string        `json:"pending,omitempty"`
-	Error    string          `json:"error,omitempty"`
+	// FetchedAt 这一行**是什么时候被读到的**（2026-10-18 加，见 docs/cache-refresh-design.md）。
+	//
+	// ⚠⚠ 为什么必须**每行**记而不是整份记一个时刻：一页里有的号是 5 分钟前查的、
+	//   有的是 3 小时前查的 —— 用整份时刻判定会要么全刷（浪费上游）要么全不刷（过时）。
+	// ⚠ 它随落盘一起走（panels.json 的每个单元格里就带它）⇒ **重启后不丢**，
+	//   于是「刚重启」不会被误判成「全部过期」。
+	// ⚠⚠ 零值语义：`IsZero()` 为真 = 「**从来没读到过**」（与 Stale 占位同义），
+	//   绝不能当成「很久以前读的」—— 那会让一批从未查过的号被反复优先刷。
+	FetchedAt time.Time `json:"fetched_at,omitempty"`
+	Pending   []string  `json:"pending,omitempty"`
+	Error     string    `json:"error,omitempty"`
 	// Stale 这一行是**缓存占位**（还没读到），不是查询结果。
 	//
 	// ⚠ 与 OK=false 必须分开：OK=false + Error 是"查失败了"，
@@ -581,11 +596,14 @@ func (p *Provider) tasksViewFor(a accountRef) accountTasksView {
 		}
 	})
 	if v.OK {
+		// ⚠ 记下「这一行是**此刻**读到的」—— 分层的过期判定全靠它（见 FetchedAt 的注释）。
+		// ⚠⚠ 必须在这里（**写入缓存之前**）而不是读取路径：读取路径拿到的是副本，
+		//   改了也不会进缓存（我第一版就写错在那里，所以这张注释才写得这么啰嗦）。
+		v.FetchedAt = time.Now()
 		p.tasksPanel().set(a.UID, v)
 	}
 	return v
 }
-
 
 // tasksCachedPage 从服务端缓存取一页。**零上游请求。**
 //
@@ -633,7 +651,16 @@ type taskRunResult struct {
 	Balance   int64    `json:"balance"`
 	// BalanceKnown 见 accountTasksView.BalanceKnown（三处结构必须都带上）。
 	BalanceKnown bool `json:"balance_known"`
-	Error     string   `json:"error,omitempty"`
+	// FetchedAt 这一行**是什么时候被读到的**（2026-10-18 加，见 docs/cache-refresh-design.md）。
+	//
+	// ⚠⚠ 为什么必须**每行**记而不是整份记一个时刻：一页里有的号是 5 分钟前查的、
+	//   有的是 3 小时前查的 —— 用整份时刻判定会要么全刷（浪费上游）要么全不刷（过时）。
+	// ⚠ 它随落盘一起走（panels.json 的每个单元格里就带它）⇒ **重启后不丢**，
+	//   于是「刚重启」不会被误判成「全部过期」。
+	// ⚠⚠ 零值语义：`IsZero()` 为真 = 「**从来没读到过**」（与 Stale 占位同义），
+	//   绝不能当成「很久以前读的」—— 那会让一批从未查过的号被反复优先刷。
+	FetchedAt time.Time `json:"fetched_at,omitempty"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // runTasks 对一份凭证把还没完成的任务逐个点掉。
@@ -676,15 +703,15 @@ func (p *Provider) runTasks(ctx context.Context, a accountRef) taskRunResult {
 		// 余额取**最后一次**成功回执里的值（它每次都会带回最新余额）。
 		if bal > 0 {
 			res.Balance = bal
-		// ⚠ 查到了 ⇒ 已知（见 accountTasksView.BalanceKnown）。
-		res.BalanceKnown = true
+			// ⚠ 查到了 ⇒ 已知（见 accountTasksView.BalanceKnown）。
+			res.BalanceKnown = true
 		}
 	}
 	if res.Balance == 0 {
 		if bal, _, berr := p.Balance(ctx, a.Session); berr == nil {
 			res.Balance = bal
-		// ⚠ 查到了 ⇒ 已知（见 accountTasksView.BalanceKnown）。
-		res.BalanceKnown = true
+			// ⚠ 查到了 ⇒ 已知（见 accountTasksView.BalanceKnown）。
+			res.BalanceKnown = true
 		}
 	}
 	return res
@@ -751,14 +778,23 @@ func (p *Provider) handleTasksAutoAll(w http.ResponseWriter, r *http.Request) {
 
 // accountInviteView 一个账号的邀请码状态。
 type accountInviteView struct {
-	UID       string       `json:"uid"`
-	Nickname  string       `json:"nickname"`
-	OK        bool         `json:"ok"`
-	Activated bool         `json:"activated"`
-	Applied   string       `json:"applied,omitempty"`
-	Balance   int64        `json:"balance"`
+	UID       string `json:"uid"`
+	Nickname  string `json:"nickname"`
+	OK        bool   `json:"ok"`
+	Activated bool   `json:"activated"`
+	Applied   string `json:"applied,omitempty"`
+	Balance   int64  `json:"balance"`
 	// BalanceKnown 见 accountTasksView.BalanceKnown（三处结构必须都带上）。
 	BalanceKnown bool `json:"balance_known"`
+	// FetchedAt 这一行**是什么时候被读到的**（2026-10-18 加，见 docs/cache-refresh-design.md）。
+	//
+	// ⚠⚠ 为什么必须**每行**记而不是整份记一个时刻：一页里有的号是 5 分钟前查的、
+	//   有的是 3 小时前查的 —— 用整份时刻判定会要么全刷（浪费上游）要么全不刷（过时）。
+	// ⚠ 它随落盘一起走（panels.json 的每个单元格里就带它）⇒ **重启后不丢**，
+	//   于是「刚重启」不会被误判成「全部过期」。
+	// ⚠⚠ 零值语义：`IsZero()` 为真 = 「**从来没读到过**」（与 Stale 占位同义），
+	//   绝不能当成「很久以前读的」—— 那会让一批从未查过的号被反复优先刷。
+	FetchedAt time.Time    `json:"fetched_at,omitempty"`
 	Codes     []InviteCode `json:"codes,omitempty"`
 	Error     string       `json:"error,omitempty"`
 	// Stale 见 accountTasksView.Stale 的说明。
@@ -877,6 +913,8 @@ func (p *Provider) inviteViewFor(a accountRef) accountInviteView {
 		}
 	})
 	if v.OK {
+		// ⚠ 与 tasksViewFor 同一处：**写入缓存之前**记下读到的时刻。
+		v.FetchedAt = time.Now()
 		p.invitePanel().set(a.UID, v)
 	}
 	return v
