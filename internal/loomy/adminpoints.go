@@ -643,25 +643,46 @@ func (p *Provider) StartPanelWarmup() {
 func (p *Provider) sweepPanels() int {
 	accts := p.accounts()
 	if len(accts) == 0 {
+		log.Printf("loomy: 面板预热一轮 —— **credentials 目录里读不到账号**（authDir=%q）⇒ 什么都没做", p.authDir)
 		return 0
 	}
+	// ⚠ 先数清"还差多少"，再补 —— 这两行是**排障的入口**：
+	//   没有它们，"预热有没有在动、为什么没补上"就只能靠猜（今天已经猜了很久）。
+	todoT, todoI := 0, 0
+	for _, a := range accts {
+		if _, ok := p.tasksPanel().get(a.UID); !ok {
+			todoT++
+		}
+		if _, ok := p.invitePanel().get(a.UID); !ok {
+			todoI++
+		}
+	}
 	n := 0
+	var firstErr string
 	for _, a := range accts {
 		if n >= panelWarmupBatch {
 			break
 		}
 		if _, ok := p.tasksPanel().get(a.UID); !ok {
 			// ⚠ 这一步会打上游并**写进缓存**（`tasksViewFor` 末尾的 `if v.OK { set }`）
-			p.tasksViewFor(a)
+			// ⚠ 而**失败时它不写缓存**（那是对的：不把"没读到"固化成数据）——
+			//   但也意味着失败会被**静默跳过**，所以下面把首条错误打出来。
+			if v := p.tasksViewFor(a); !v.OK && firstErr == "" {
+				firstErr = v.Error
+			}
 			n++
 			continue
 		}
 		if _, ok := p.invitePanel().get(a.UID); !ok {
-			p.inviteViewFor(a)
+			if v := p.inviteViewFor(a); !v.OK && firstErr == "" {
+				firstErr = v.Error
+			}
 			n++
 			continue
 		}
 	}
+	log.Printf("loomy: 面板预热一轮 —— 待补 tasks=%d invite=%d（共 %d 个号）· 本轮补 %d 个 · 首个错误=%q",
+		todoT, todoI, len(accts), n, firstErr)
 	return n
 }
 
