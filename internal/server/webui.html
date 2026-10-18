@@ -1881,6 +1881,40 @@ let loginProvider = '';
         + '">上游 <b>—</b></span>');
     }
 
+    // 3.5) ⚠ 上游健康（2026-10-18 加）：熔断中的上游 + 最慢的那家。
+    //
+    // ⚠ 数据全部来自 /status 的 providers（后端已算好 EMA），**不额外发请求** ——
+    //    与本节"全部复用已有数据"的约定一致。
+    //
+    // ⚠ 这一项为什么必须有：
+    //   · 上游级熔断此前只写在**日志**里，控制台上一切正常 ⇒ 用户遇到"整条上游不通"
+    //     时无处可看（本项目反复出现的"实现了但看不见"）。
+    //   · "哪家最慢"是用户第三条要求（保证请求速度）的可视化 ——
+    //     实测 loomy 首字节中位 6.9s 而 workbuddy 3.4s，把最慢那家摆在眼前，
+    //     才谈得上"该换哪家"。
+    //
+    // ⚠ 样本不足 20 次时**不做快慢比较**（与后端 provTTFBMinN 同一约定）：
+    //    否则一次冷启动的 30 秒就会让顶栏报出"最慢上游"，那是噪声当信号。
+    if (s && Array.isArray(s.providers) && s.providers.length) {
+      const tripped = s.providers.filter(p => p.tripped);
+      if (tripped.length) {
+        const names = tripped.map(p => esc(p.provider)).join('、');
+        parts.push('<span class="ts err" title="这些上游当前整体不可用；请求会自动尝试同模型的其它上游">'
+          + '上游熔断 <b>' + names + '</b></span>');
+      } else {
+        const known = s.providers.filter(p => (p.ttfb_samples || 0) >= 20 && p.ttfb_ema_ms > 0);
+        if (known.length) {
+          const slow = known.slice().sort((a, b) => b.ttfb_ema_ms - a.ttfb_ema_ms)[0];
+          parts.push('<span class="ts warn" title="近期首字节耗时的指数移动平均（样本 '
+            + slow.ttfb_samples + ' 次）；只比较样本足够的上游">最慢上游 <b>'
+            + esc(slow.provider) + ' ' + (slow.ttfb_ema_ms / 1000).toFixed(1) + 's</b></span>');
+        } else {
+          parts.push('<span class="ts" title="样本不足 20 次时不比较快慢，避免把冷启动当常态">'
+            + '上游速度 <b>样本中</b></span>');
+        }
+      }
+    }
+
     // 4) 加载时刻：让"自动刷新到底有没有在跑"肉眼可见。
     //    用 HH:MM:SS 而不是"x 秒前"——后者需要自己再刷新才能变，
     //    反而让人怀疑是不是卡住了。
