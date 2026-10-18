@@ -85,6 +85,9 @@ tasks/
 # 没有它，后人会把同样的事再查一遍 —— 这一步已实际发生过：
 # 我先后以为"选号没抄""分类更粗"，都是**查了才知道我们其实更细**。
 !docs/newapi-parity.md
+# ⚠ 已知问题与未解项：那份文档记的是"试过什么、为什么没成" ——
+# 没有它，后人会把同样的三次失败再试一遍（这一步已实际发生过）。
+!docs/known-issues.md
 !docs/chat-tools.md
 
 # ⚠ 被 go:embed 内嵌的 md 必须**显式**豁免 —— 它不是文档，是编译输入。
@@ -153,3 +156,6 @@ data/_snapshot-*.jsonl
 # ⚠ 交付文档要入库（docs/report/ 下的背景简报与复核报告）
 !docs/report/
 !docs/report/**
+
+# ⚠ 我自己用的临时提交信息文件（git add -A 会顺手吞掉它 —— 实测已发生一次）。
+_commitmsg.txt
