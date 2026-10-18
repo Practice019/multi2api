@@ -56,6 +56,10 @@ type chatStat struct {
 	ttfb     time.Duration
 	toks     int // <0 表示 usage 缺失 → 显示 "-"
 	status   int
+	// decision 本请求的**重试/换号判决留痕**（`reason:source`，见 logbuf.Entry.Decision）。
+	// ⚠ 它由出口层在**每一个判决点**写（粘性命中失败 / 池子选不出 / 预算用尽…），
+	//   成功时留空。⚠ 这是排障时唯一需要而原来没有的信息。
+	decision string
 
 	// usage 上游 usage 对象的原样引用（流式来自末帧，同步来自聚合响应）；
 	// nil 表示上游没给 usage。扩展字段（credit/推理/缓存）在落盘时现场解析，
@@ -94,7 +98,7 @@ func (s *chatStat) done() {
 		}
 		s.bump(toks, s.status >= 200 && s.status < 300)
 	}
-	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage)
+	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, s.decision)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage 精确值（completion_tokens
@@ -252,7 +256,7 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 // usage 为上游 usage 对象（nil = 缺失）。扩展字段（credit/推理 token/缓存命中未命中）
 // 由此处解析并写入环形缓冲：**只有 toks>=0（usage 存在）时才填**，
 // usage 缺失时保持 0 而不是 -1 —— 新字段没有哨兵语义，-1 会污染后续求和聚合。
-func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any) {
+func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any, decision ...string) {
 	if !chatLogEnabled {
 		return
 	}
@@ -269,6 +273,10 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 		TTFBMS:   ttfb.Milliseconds(),
 		Tokens:   toks,
 		TotalMS:  total.Milliseconds(),
+	}
+	// ⚠ 判决留痕（变参：老调用方不传就为空 ⇒ 测试不用改）。
+	if len(decision) > 0 {
+		entry.Decision = decision[0]
 	}
 	// tokens<0 是「usage 缺失」的哨兵；此时 usage 对象即使非 nil 也不可信
 	// （例如上游给了半截 usage），扩展字段一律留 0。
