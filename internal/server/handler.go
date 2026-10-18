@@ -520,6 +520,11 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		"in_flight_full":  inFlightFull,
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
+		// ⚠ 上游维度（2026-10-18 加）：只有**有过失败记录**的上游会出现，
+		// 因此"列表为空"读作"一切正常"，而不是"未知"。
+		// ⚠ 加它的理由：上游级熔断此前只影响状态码，界面上看不到 ——
+		// 用户遇到"整条上游不通"时控制台一切正常，只能靠日志反推。
+		"providers": h.cfg.Pool.ProviderStates(),
 	})
 }
 
