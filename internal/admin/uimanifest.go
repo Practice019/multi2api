@@ -142,6 +142,78 @@ type uiJob struct {
 	IntervalMs int64  `json:"interval_ms"`
 	LastRun    string `json:"last_run,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
+	// Label 任务名的中文说法（如「CodeArts 福利领取」）；⚠ 空串 = 没登记，前端退回英文名。
+	Label string `json:"label,omitempty"`
+	// Desc 这个任务**做什么**的一句话说明（前端挂在悬停上）。
+	Desc string `json:"desc,omitempty"`
+}
+
+// jobLabels / jobDescs 任务名的中文说法与说明。
+//
+// # 为什么住在这里（与 capTitles 同一理由，见上）
+//
+// 中文名与说明是**展示层的词**，不是协议的一部分 —— `gateway` 只该知道任务叫什么
+// （`codearts-refresh` 这种 id 是日志与配置里的标识符）。放错层会让核心包背上一份
+// 随时要改的中文文案。⚠ 也正因如此，这里**不**按上游分支，只按任务名查表。
+//
+// # 加新任务时
+//
+// 必须同时往这两张表各加一行，否则那一列退回英文名（⚠ 前端为此做了兜底，
+// 所以"漏登记"是**显示不友好**，不是错误 —— 与 capTitles 的约定一致）。
+//
+// # 说明文案的依据（不凭名字猜）
+//
+//	· `*-refresh`  ⇒ 各 `runRefresh` 的注释："扫描（本地）凭证，把临近过期的刷掉"
+//	                 / "一趟后台续期：扫凭证目录，对将过期的账号串行续期"
+//	· `*-checkin`   ⇒ `checkin.RunAll` / `driver.go` 的注释："扫本上游全部账号签一遍"
+//	· `codearts-welfare` ⇒ `runWelfare` 的注释："一趟福利自动领取（签到语义）…记录历史"
+//	· `pool-health-check` ⇒ `cmd/server/main.go` 注册处注释：
+//	                 "账号池主动健康检查：探测冷却/熔断中的账号并提前恢复"
+//	· `workbuddy-activity` ⇒ `RunActivityNow` 的注释："对池内所有可用账号做一轮活跃上报"
+//	· `workbuddy-growth-watch` / `workbuddy-travel-watch` ⇒ 各自 `run*Job` 与
+//	                 `Job.Due` 的注释：按**每个账号的到期时刻**错峰推进
+var jobLabels = map[string]string{
+	"cline-refresh":                     "Cline 凭证刷新",
+	"codearts-refresh":                  "CodeArts 凭证刷新",
+	"codearts-welfare":                  "CodeArts 福利领取",
+	"pool-health-check":                 "账号池健康检查",
+	"lobsterai-checkin":                 "LobsterAI 每日签到",
+	"minimax-refresh":                   "MiniMax 凭证刷新",
+	"qoder-checkin":                     "Qoder 每日签到",
+	"qoder-refresh":                     "Qoder 凭证续期",
+	"qodercn-checkin":                   "Qoder CN 每日签到",
+	"qodercn-refresh":                   "Qoder CN 凭证续期",
+	"raccoon-refresh":                   "Raccoon 凭证刷新",
+	"trae-checkin":                      "Trae 每日签到",
+	"trae-refresh":                      "Trae 凭证续期",
+	"workbuddy-activity":                "WorkBuddy 活跃上报",
+	"workbuddy-checkin":                 "WorkBuddy 每日签到",
+	"workbuddy-growth-watch":            "WorkBuddy 成长计划守卫",
+	"workbuddy-refresh":                 "WorkBuddy 凭证刷新",
+	"workbuddy-travel-watch":            "WorkBuddy 猫猫旅行守卫",
+	"workbuddy-intl-workbuddy-refresh":  "WorkBuddy 国际版凭证刷新",
+}
+
+var jobDescs = map[string]string{
+	"cline-refresh":                    "扫描本地凭证，把临近过期的刷掉（刷的是池里持有的对象，不是磁盘副本）。",
+	"codearts-refresh":                 "扫描账号，把临近过期的凭证刷新。",
+	"codearts-welfare":                 "一趟福利自动领取（签到语义）：逐账号领取可领福利并记录历史。",
+	"pool-health-check":                "账号池主动健康检查：探测处于冷却/熔断中的账号并提前恢复（核心任务，不属于任何上游）。",
+	"lobsterai-checkin":                "扫本上游全部账号签一遍（全量端点与定时任务共用同一实现）。",
+	"minimax-refresh":                  "扫描本地凭证，把临近过期的刷掉。",
+	"qoder-checkin":                    "扫本上游全部账号签一遍。",
+	"qoder-refresh":                    "一趟后台续期：扫凭证目录，对将过期的账号串行续期（并因此拿到/更新过期时刻）。",
+	"qodercn-checkin":                  "扫本上游全部账号签一遍。",
+	"qodercn-refresh":                  "一趟后台续期：扫凭证目录，对将过期的账号串行续期。",
+	"raccoon-refresh":                  "扫描本地凭证，把临近过期的刷掉。",
+	"trae-checkin":                     "扫本上游全部账号签一遍。",
+	"trae-refresh":                     "扫描凭证，把临近过期的续期。",
+	"workbuddy-activity":               "对池内所有可用账号做一轮活跃上报（维持账号「在线」状态）。",
+	"workbuddy-checkin":                "扫本上游全部账号签一遍。",
+	"workbuddy-growth-watch":           "推进成长计划：按**每个账号各自的到期时刻**错峰执行，不是全局固定间隔。",
+	"workbuddy-refresh":                "扫描本地凭证，把临近过期的刷掉。",
+	"workbuddy-travel-watch":           "推进猫猫旅行：同样按每个账号的到期时刻错峰执行。",
+	"workbuddy-intl-workbuddy-refresh": "国际版（workbuddy-intl）的凭证刷新。",
 }
 
 // capTitles 能力位的中文标题。
@@ -389,6 +461,10 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 			IntervalMs: s.IntervalMs,
 			LastRun:    s.LastRun,
 			LastError:  s.LastError,
+			// ⚠ 中文名与说明在这里查表（不是从 Job 结构一路带下来）—— 见 jobLabels 的注释：
+			//   它们是**展示层的词**，只该在序列化这一步出现。
+			Label: jobLabels[s.Name],
+			Desc:  jobDescs[s.Name],
 		})
 	}
 

@@ -2657,8 +2657,18 @@ let loginProvider = '';
         : '<span class="dim">—</span>';
       // 有错误的行整行标红：扫一眼就知道哪个任务出问题了。
       const rowCls = j.last_error ? ' class="errrow"' : '';
+      // ⚠⚠ 任务名显示成「中文 (英文)」（2026-10-18 按用户要求）：
+      //   中文给人看、英文（放括号里）是排障时唯一能对照日志的标识 ⇒ 两者都要。
+      //   `label` / `desc` 由后端查表给（见 internal/admin 的 jobLabels/jobDescs）；
+      //   ⚠ **没登记就退回英文名**（不报错、也不显示空白）—— 与 capTitles 的约定一致。
+      //   ⚠ `desc` 挂在整格上（悬停整格都能读），不是挂在小字上。
+      const en = j.name || '';
+      const zh = j.label || '';
+      const nameCell = zh
+        ? `<span${j.desc ? ` title="${esc(j.desc)}"` : ''}>${esc(zh)} <span class="dim mono">(${esc(en)})</span></span>`
+        : `<span class="mono"${j.desc ? ` title="${esc(j.desc)}"` : ''}>${esc(en || '—')}</span>`;
       return `<tr${rowCls}>
-        <td class="mono">${esc(j.name || '—')}</td>
+        <td>${nameCell}</td>
         <td><span class="pill dim">${esc(j.provider || '—')}</span></td>
         <td>${itv}</td>
         <td>${last}</td>
@@ -8267,7 +8277,13 @@ let loginProvider = '';
       const rateTxt = has ? (v.rate * 100).toFixed(2) + '%' : 'N/A';
       const hit = has ? v.hit : 0;
       const den = has ? (v.hit + v.miss) : 0;
-      const sub = has ? ('命中 ' + fmtN(hit) + ' / 输入 ' + fmtN(den)) : '该窗口内无缓存数据';
+      // ⚠ 副标题带上**样本量**（`n` = 这个窗口里真的带缓存信息的行数）。
+      //   为什么：用户看到「近 10 分钟 82%」而「近 7 天 98%」会问"是不是不统一" ——
+      //   ⚠ 其实两个窗口的**样本完全不同**（几行 vs 几千行）。摆出样本量，
+      //   读者才能自己判断这个百分比有多可信，而不是把两个数当同一件事比。
+      const sub = has
+        ? ('命中 ' + fmtN(hit) + ' / 输入 ' + fmtN(den) + (typeof v.n === 'number' ? ' · ' + v.n + ' 次' : ''))
+        : '该窗口内无缓存数据';
       // ⚠ 颜色只在"有数"时给；无数用 dim —— 不让 N/A 看起来像一个结论
       const cls = has ? (v.rate >= 0.9 ? 'ok' : v.rate >= 0.5 ? 'warn' : 'err') : 'dim';
       return `<div class="card" data-stat-key="cache-${esc(k)}">
@@ -8328,7 +8344,14 @@ let loginProvider = '';
 
     // ⚠ 命中率轴：上限按真实峰值抬、**下限 1（=100%）**、**不夹到 100%**
     const ratePeak = Math.max(...rows.map((r) => r.rate));
-    const rateMax = Math.max(1, ratePeak * 1.15);
+    // ⚠⚠ 轴顶（2026-10-18 修，看图发现的）：原来写的是 `Math.max(1, ratePeak * 1.15)`，
+    //   于是**峰值接近 100% 时**轴顶被抬到 115% —— 曲线整条被压在下面 15% 的位置，
+    //   读起来像"命中率只有八成"（实测峰值 99.98% ⇒ 轴顶 115%）。
+    //   ⇒ 分两种情况：
+    //     · 峰值 **≤ 100%** ⇒ 轴顶就是 **100%**（那是这个量的自然上界，不该超）
+    //     · 峰值 **> 100%**（上游把"缓存读取"与"输入"分开上报时**合法**如此）⇒ 才让它超，
+    //       留 15% 余量 —— ⚠ 这与它那句"不夹取值、如实展示"一致：不夹的是**值**，不是**轴**。
+    const rateMax = ratePeak > 1 ? ratePeak * 1.15 : 1;
     // ⚠ Token 轴：全 0 ⇒ 不画那条线也不画右刻度
     const tokenPeak = Math.max(...rows.map((r) => r.tokens));
     const hasTokens = tokenPeak > 0;
