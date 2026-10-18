@@ -126,7 +126,25 @@ function get(u, h) {
         months: (document.getElementById('statsHeatMonths')||{}).children ? document.getElementById('statsHeatMonths').children.length : 0,
         stats: stats,
         firstDay: cells.length ? cells[0].getAttribute('data-day') : null,
-        lastDay: cells.length ? cells[cells.length-1].getAttribute('data-day') : null
+        lastDay: cells.length ? cells[cells.length-1].getAttribute('data-day') : null,
+        align: (function(){
+          var d = document.querySelector('.heatdays');
+          return d ? { daysH: Math.round(d.getBoundingClientRect().height), gridH: Math.round(host.getBoundingClientRect().height), daysMT: d.style.marginTop } : {err:'no .heatdays'};
+        })(),
+        legend: (function(){
+          var c = document.querySelector('.heatfoot .heatcell');
+          if (!c) return 'no legend cell';
+          var r = c.getBoundingClientRect();
+          return Math.round(r.width) + 'x' + Math.round(r.height);
+        })(),
+        colors: (function(){
+          var out = [];
+          ['lv0','lv1','lv2','lv3','lv4'].forEach(function(k){
+            var e = document.querySelector('#statsHeat .heatcell.' + k);
+            if (e) out.push(k + '=' + getComputedStyle(e).backgroundColor);
+          });
+          return out.join(' ');
+        })()
       });
     })()`);
     const D = JSON.parse(diag);
@@ -137,6 +155,11 @@ function get(u, h) {
     console.log('     scrollWidth=' + D.scroll.sw + ' · clientWidth=' + D.scroll.cw
       + ' · overflowX=' + D.scroll.ovx + ' · gridWidth=' + D.scroll.gw + ' · gridScrollW=' + D.scroll.gsw);
     console.log('  右侧统计卡 = ' + JSON.stringify(D.stats));
+    // ⚠ 周标签对齐：判据是"标签列的总高 == 格阵总高"（两边 gap 都是 2px，
+    //   总高一致 ⇒ 逐行对齐）。用户反馈过"位置不对"，所以这条要显式打出来。
+    console.log('  **周标签对齐 = 标签高 ' + D.align.daysH + ' / 格阵高 ' + D.align.gridH
+      + ' · marginTop=' + D.align.daysMT + '（两者相等才叫对齐）**');
+    console.log('  图例色块实测宽高 = ' + D.legend + '（0 宽 = 用户说的"没有示例图标"）');
 
     // ① 整页
     await shot('heat-1-full.png');
