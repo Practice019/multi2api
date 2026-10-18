@@ -1852,6 +1852,96 @@ type provState struct {
 	retryCount   int
 	breakerUntil time.Time
 	lastErr      time.Time
+	// ttfbEMA 该上游近期**首字节耗时**的指数移动平均（毫秒），ttfbN 是喂进来的样本数。
+	//
+	// ⚠ 为什么要它（用户的三条要求里的"保证请求速度"）：
+	// 实测（10-18）同一个模型 `deepseekv41flash` 在 loomy 与 workbuddy 都有，而
+	//   loomy      TTFB 中位 6093ms · p90 34232ms · 失败率 15.22%
+	//   workbuddy  TTFB 中位 3374ms · p90  4800ms · 失败率  0.13%
+	// ⚠ 但请求被模型前缀 `loomy/` 钉死在慢的那家上 ⇒ 没有这个数，出口层就**没有依据**换。
+	//
+	// ⚠ 用 EMA 而不是中位数：中位数要留一整段窗口（内存 + 排序），而上游速度是**漂移量**，
+	// 指数移动平均只留一个 float，且天然偏向近期 —— 正是"它现在快不快"要回答的问题。
+	ttfbEMA float64
+	ttfbN   int
+}
+
+// 上游 TTFB 的 EMA 系数与"可以拿来做比较"的最小样本数。
+//
+// ⚠ 最小样本存在的理由：刚起床的上游只有一个样本时，那个样本可能是冷启动的 30 秒，
+// 拿它去和跑了 2000 次的另一家比，会立刻把流量全切走 —— 那是**噪声当信号**。
+// 20 个样本之后 EMA 已经比较稳，再快再慢都反映真实水平。
+const (
+	provTTFBAlpha = 0.2
+	provTTFBMinN  = 20
+	// provTTFBSlowRas "明显更慢"的倍数。
+	//
+	// ⚠ 这个数是**按实测反推**的，不是拍的：loomy TTFB 中位 6093ms 对 workbuddy 3374ms
+	// ⇒ **1.81 倍**。第一版写成 2.0，于是**对真实数据永远不会触发** —— 那个功能等于没做
+	// （是单测把它抓出来的：6000 vs 3400 = 1.76 倍本该判"更慢"，却返回 false）。
+	// ⇒ 调到 1.5：既能覆盖真实差距（1.81），又不会被正常抖动（3300 vs 3400 = 1.03 倍）触发。
+	provTTFBSlowRas = 1.5
+)
+
+// NoteProviderLatency 喂一次该上游的首字节耗时（毫秒）。⚠ 出口层在每个成功响应上调用。
+//
+// ⚠ 它**懒建** provState —— 与 noteProviderFailureLocked 不同：这里是"成功"路径，
+// 一个从没失败过的上游同样需要被记录速度（⚠ 否则"哪家快"永远只有失败过的那几家有数）。
+func (p *Pool) NoteProviderLatency(provider string, ms int64) {
+	if ms <= 0 {
+		return // ⚠ 0 表示没测到首字节（如非流式、或上游没给）—— 别拿它污染 EMA
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	provider = p.normalizeProvider(provider)
+	if p.provState == nil {
+		p.provState = map[string]*provState{}
+	}
+	st := p.provState[provider]
+	if st == nil {
+		st = &provState{}
+		p.provState[provider] = st
+	}
+	x := float64(ms)
+	if st.ttfbN == 0 {
+		st.ttfbEMA = x // ⚠ 第一个样本直接作为初值，不要从 0 慢慢爬（那会长期低估）
+	} else {
+		st.ttfbEMA = st.ttfbEMA*(1-provTTFBAlpha) + x*provTTFBAlpha
+	}
+	st.ttfbN++
+}
+
+// ProviderLatency 返回该上游的近期首字节耗时中位估计（EMA，毫秒）。
+//
+// ⚠ ok=false 表示**样本不足**（少于 provTTFBMinN 次）⇒ 调用方**不要**据此比较快慢。
+// 这条约定是"别把噪声当信号"的落点：宁可继续用原来那家，也不要因为一次冷启动就切走。
+func (p *Pool) ProviderLatency(provider string) (ms float64, ok bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.provState == nil {
+		return 0, false
+	}
+	st := p.provState[p.normalizeProvider(provider)]
+	if st == nil || st.ttfbN < provTTFBMinN {
+		return 0, false
+	}
+	return st.ttfbEMA, true
+}
+
+// SlowerThan 报告 provider 是否**明显慢于** other（慢到 ProvTTFBSlowRas 倍以上）。
+//
+// ⚠ 两侧都必须样本足够（见 ProviderLatency 的 ok），否则一律返回 false ——
+// "不确定"时保持现状，这是本项目在选号上一贯的方向（宁可不切，也不乱切）。
+func (p *Pool) SlowerThan(provider, other string) bool {
+	if provider == other || other == "" {
+		return false
+	}
+	mine, ok1 := p.ProviderLatency(provider)
+	theirs, ok2 := p.ProviderLatency(other)
+	if !ok1 || !ok2 || theirs <= 0 {
+		return false
+	}
+	return mine > theirs*provTTFBSlowRas
 }
 
 // noteProviderFailureLocked 喂一次上游级失败（⚠ 调用方需已持 p.mu）。
@@ -2298,6 +2388,10 @@ type ProviderState struct {
 	RetryCount   int       `json:"retry_count"` // 已熔断次数（指数退避的指数）
 	BreakerUntil time.Time `json:"breaker_until,omitempty"`
 	Tripped      bool      `json:"tripped"` // 此刻是否处于熔断期
+	// TTFBEMA 近期首字节耗时的指数移动平均（毫秒，0 = 还没样本）。
+	// ⚠ 它让人能**看见"哪家上游快"** —— 这是"保证请求速度"能不能被验收的前提。
+	TTFBEMA float64 `json:"ttfb_ema_ms"`
+	TTFBN   int     `json:"ttfb_samples"`
 }
 
 // ProviderStates 返回**所有有过失败记录的上游**的状态，按 provider 名排序（稳定输出）。
@@ -2317,6 +2411,8 @@ func (p *Pool) ProviderStates() []ProviderState {
 			RetryCount:   st.retryCount,
 			BreakerUntil: st.breakerUntil,
 			Tripped:      !st.breakerUntil.IsZero() && now.Before(st.breakerUntil),
+			TTFBEMA:      st.ttfbEMA,
+			TTFBN:        st.ttfbN,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
