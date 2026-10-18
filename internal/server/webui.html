@@ -410,14 +410,40 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        · 格子**恰好填满可用宽度**（它是按量到的像素算；我们用 `1fr` 纯 CSS 达到同一效果）
        · 左侧 20px 星期标签（只标一/三/五）· **上方月份标签**
      ⚠ 我一度擅自把它改成"横条表"（因为 8 天数据铺 365 格几乎全空）——
-       但那是**偏离复用**：它自己也是空着就空着（见它截图），照它的形态才对。 */
-  .heatwrap{display:flex;gap:6px;align-items:flex-start}
+       但那是**偏离复用**：它自己也是空着就空着（见它截图），照它的形态才对。
+
+     ⚠⚠ 2026-10-19 按用户要求改了三处（参考项目是 `D:\project_GIT\openViking`，
+        组件 `web-studio/src/routes/home/-components/context-commits-heatmap.tsx`）：
+          1. **格子固定尺寸 + 横向滚动 + 默认滚到最新**
+             原来 `grid-auto-columns:1fr` 把 365 格压进容器宽 ⇒ 格子小到看不清、
+             而"有数据的那几天"挤在最右 ⇒ 一眼看过去**整片是灰的**（用户截图就是这个）。
+             现在照它的 `rectSize=11 / space=3`，并复刻它那段 `useEffect`：
+             布局完成后取**最后一格**的右边界，把容器滚到最右。
+          2. **悬停浮层**（原来只有浏览器原生 `title`，延迟约 1 秒且样式不可控）
+             复刻它 self-drawn tooltip 的意图：日期 + 分项读数；⚠ 复用页面级的
+             `#hoverTip`（见 `.hovertip`），不新造第二套浮层。
+          3. **右侧统计卡**（活跃天数 / 峰值单日 / 最近提交）—— 它右边那一列。
+      */
+  /* ⚠⚠ 格子尺寸**故意用回 `1fr` 自适应**（2026-10-19 实测后回退）。
+     我一度照 openViking 的 `rectSize=11` 把格子钉成固定 11px + 横向滚动，
+     但实测：53 列 × 14px = **739px**，而容器宽 **1157px** —— 根本装得下，
+     `scrollWidth == clientWidth` ⇒ 滚动条永远不出现，那条"滚到最新"的代码成了空转。
+     ⚠ 参考项目要滚动，是因为它的图被夹在 `minmax(820px,auto)` 那一列里、窄屏时会被压扁；
+     ⚠ 而**在宽屏下它同样是不滚的**。所以正确的增量不是"改格子尺寸"，而是
+     **保留 `1fr` 自适应 + 保留外层 `overflow-x:auto`**（窄屏时才真的滚）。
+     ⇒ 结论：格子这块回到原形态；本次真正新增的只有**悬停浮层**与**右侧统计卡**。 */
+  .heatwrap{display:flex;gap:10px;align-items:flex-start}
   .heatdays{display:grid;grid-template-rows:repeat(7,1fr);gap:2px;font-size:9px;
     color:var(--dim);line-height:1;flex:none;width:20px;padding-top:0}
   .heatdays span:nth-child(1){grid-row:1} /* 一 */
   .heatdays span:nth-child(2){grid-row:3} /* 三 */
   .heatdays span:nth-child(3){grid-row:5} /* 五 */
-  .heatmain{flex:1;min-width:0}
+  /* ⚠ 横向滚动容器：月份行与格阵**一起滚**（窄屏时才有实际效果 ——
+     宽屏下 53 列装得下，`scrollWidth == clientWidth`，这一层等于透明）。
+     保留它是因为**窄窗口/小屏**真的会溢出，那时"默认滚到最右"才起作用。 */
+  .heatmain{flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+  .heatmain::-webkit-scrollbar{height:6px}
+  .heatmain::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
   .heatmonths{display:grid;grid-auto-flow:column;font-size:10px;color:var(--dim);
     margin-bottom:2px;letter-spacing:.2px}
   /* ⚠ `grid-auto-columns:1fr` + 容器 100% 宽 ⇒ **列宽自动均分、铺满整行**
@@ -438,7 +464,31 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .heatcell.lv2{background:color-mix(in srgb,var(--acc) 45%,transparent)}
   .heatcell.lv3{background:color-mix(in srgb,var(--acc) 70%,transparent)}
   .heatcell.lv4{background:var(--acc)}
+  /* ---- 热力图右侧统计卡（2026-10-19 照 openViking 那一列加）----
+     三格：活跃天数 / 峰值单日 / 最近提交。⚠ 数值由 renderHeatmap 现算，
+     与顶部概览卡的「活跃天数」同源（都来自 series 的按天总量），口径一致、不会打架。 */
+  .heatstats{flex:none;width:132px;display:flex;flex-direction:column;gap:8px;
+    padding-left:2px;border-left:1px solid var(--line)}
+  .heatstats .hs{padding-left:8px}
+  .heatstats .hs .k{font-size:11px;color:var(--dim);line-height:1.3}
+  .heatstats .hs .v{font-size:15px;font-weight:600;line-height:1.35;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .heatstats .hs .v.dim{color:var(--dim);font-weight:400}
   .heatfoot{display:flex;align-items:center;gap:5px;margin-top:6px;font-size:11px;flex-wrap:wrap}
+  /* ---- 页面级悬停浮层（2026-10-19 抽共享）----
+     ⚠ 为什么用 `position:fixed` 而不是 `absolute`：热力图现在在一个
+       `overflow-x:auto` 的容器里，`absolute` 会被容器**裁剪**掉一半
+       （参考项目那边是用 `createPortal` 挂到 body 绕开同一件事，见它 219-241 行）。
+     ⚠ `pointer-events:none` 必须留着 —— 否则浮层会挡住下面的格子，
+       触发 `mouseout` 把浮层自己关掉（那会变成"一闪一闪"）。
+     ⚠ 视口 clamp 在 JS 里做（见 hoverTipShow），CSS 不参与。 */
+  .hovertip{position:fixed;z-index:60;pointer-events:none;display:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:6px;
+    padding:6px 9px;font-size:12px;line-height:1.55;white-space:nowrap;
+    box-shadow:0 6px 18px rgba(0,0,0,.38)}
+  .hovertip .ht-t{font-weight:600;margin-bottom:2px}
+  .hovertip .ht-r{display:flex;gap:10px;justify-content:space-between;color:var(--dim)}
+  .hovertip .ht-r b{color:var(--fg);font-weight:500}
   /* 缓存命中率趋势（双轴）—— 容器给个高度下限，免得数据没回来时整页往下跳一截
      （它那边也有同样的顾虑：容器高度下限与 SVG 高度对齐）。 */
   .cachetrend{height:180px;position:relative}
@@ -819,6 +869,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
             <div id="statsHeatMonths" class="heatmonths"></div>
             <div id="statsHeat" class="heatgrid"></div>
           </div>
+          <!-- ⚠ 右侧统计卡（2026-10-19 照参考项目 openViking 的
+               `web-studio/src/routes/home/-components/context-commits-heatmap.tsx` 加）：
+               它那块图的右边固定一列三格（活跃天数 / 峰值单日 / 最近提交）。
+               好处是**就近可读** —— 看完图不用回头找顶部概览卡。
+               ⚠ 三个值全部由 `renderHeatmap` 从**同一份** series 现算，不新开数据线、
+                 也不依赖 `renderStats` 的时机（那张表的教训见 `fillDayCards` 的注释）。 -->
+          <div class="heatstats" id="heatStats"></div>
         </div>
         <div class="heatfoot">
           <span class="dim">Token</span>
@@ -8245,7 +8302,102 @@ let loginProvider = '';
   // ⚠ heatPickDays 供"点击某格"回查当天的完整数据（2026-10-18 加）。
   // ⚠ 为什么单独一张表而不是把数值写进格子的属性：格子的 `title` 是**给人看的一句话**，
   //   而这里是**给代码取的结构**；两者混在一处，将来改文案就会把取值一起改坏。
+  // heatPickDays 供"点击某格"回查当天的完整数据（2026-10-18 加）。
+  //
+  // ⚠ 为什么单独一张表而不是把数值写进格子的属性：格子的 `title` 是**给人看的一句话**，
+  //   而这里是**给代码取的结构**；两者混在一处，将来改文案就会把取值一起改坏。
   const heatPickDays = new Map();
+
+  // ---- 页面级悬停浮层（2026-10-19 抽共享，参考 openViking 的 self-drawn tooltip）----
+  //
+  // # 为什么抽出来
+  //
+  // 页面里此前已有 `#trendTip`，但它是**内联在趋势图 innerHTML 模板里**的
+  // （见 `renderCacheTrend`），每次重绘都重建一份、且只在那一个函数的作用域里可用。
+  // 热力图要同样的东西时，第二条路就是再抄一份 —— 那会让"浮层长什么样"分裂成两处，
+  // 以后调样式要改两遍（账本里"同类型代码实现可以抽离"那条）。
+  //
+  // # 契约
+  //
+  //   hoverTipShow(title, rows, ev) —— rows = [[label, value], …]；用 ev 定初始位置
+  //   hoverTipMove(ev)              —— 跟随鼠标（调用方在 mousemove 里转调）
+  //   hoverTipHide()                —— 隐藏
+  //
+  // ⚠ 视口 clamp 在这里做（不在 CSS）：鼠标贴近右/下边缘时若不做，
+  //   浮层会被窗口裁掉一半。参考项目那边也是显式 clamp（它用 useLayoutEffect 量完再挪）。
+  function hoverTipEl() { return document.getElementById('hoverTip'); }
+
+  function hoverTipShow(title, rows, ev) {
+    const el = hoverTipEl();
+    if (!el) return;
+    // ⚠ 用 DOM 拼而不是 innerHTML + 模板字符串：这里的 label/value 都来自本地数据，
+    //   但仍走 textContent —— 一旦哪天 value 里带上上游的模型名（含 `<`），
+    //   模板字符串会把它当标签解析。这类"看起来安全"的插值最容易留下来。
+    el.textContent = '';
+    const t = document.createElement('div');
+    t.className = 'ht-t';
+    t.textContent = title;
+    el.appendChild(t);
+    for (const [k, v] of rows) {
+      const r = document.createElement('div');
+      r.className = 'ht-r';
+      const ks = document.createElement('span');
+      ks.textContent = k;
+      const vs = document.createElement('b');
+      vs.textContent = v;
+      r.appendChild(ks);
+      r.appendChild(vs);
+      el.appendChild(r);
+    }
+    el.style.display = 'block';
+    hoverTipMove(ev);
+  }
+
+  function hoverTipMove(ev) {
+    const el = hoverTipEl();
+    if (!el || el.style.display === 'none' || !ev) return;
+    const pad = 12;                                  // 离鼠标的距离
+    const r = el.getBoundingClientRect();
+    let x = ev.clientX + pad;
+    let y = ev.clientY + pad;
+    // ⚠ 超出右/下边缘就翻到另一侧（不是"夹到边缘" —— 夹住会让浮层压在手下面）
+    if (x + r.width > window.innerWidth - 4) x = ev.clientX - pad - r.width;
+    if (y + r.height > window.innerHeight - 4) y = ev.clientY - pad - r.height;
+    if (x < 4) x = 4;
+    if (y < 4) y = 4;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+  }
+
+  function hoverTipHide() {
+    const el = hoverTipEl();
+    if (el) el.style.display = 'none';
+  }
+
+  // weekdayCN 把 'YYYY-MM-DD' 变成 '周六'。
+  //
+  // ⚠ 用 `new Date(y, m-1, d)` 而不是 `new Date('YYYY-MM-DD')`：后者按 **UTC** 解析，
+  //   在 UTC+8 会把它读成前一天 08:00 —— 于是周五显示成周六。这类"差一天"的错
+  //   在日期类展示里最难发现（数字看着都对）。
+  function weekdayCN(day) {
+    const p = String(day || '').split('-').map(Number);
+    if (p.length !== 3 || p.some(isNaN)) return '';
+    return '周' + '日一二三四五六'[new Date(p[0], p[1] - 1, p[2]).getDay()];
+  }
+
+  // heatTipRows 把某一天的数据拼成浮层的行（⚠ 与"点击后的常显读数"同源、同口径）。
+  //
+  // ⚠ 空数据也要给一行明确结论（"无请求"），而不是显示一片 0 ——
+  //   0 在这里是"这天没有记录"，与"这天请求了但都是 0 token"不是一回事。
+  function heatTipRows(p) {
+    if (!p) return [['状态', '无请求']];
+    return [
+      ['请求', String(p.total)],
+      ['成功', String(p.ok)],
+      ['失败', String(p.fail)],
+      ['Token', fmtTokensPlain(p.tokens)],
+    ];
+  }
 
   async function loadHeatmap() {
     let d;
@@ -8814,9 +8966,35 @@ let loginProvider = '';
     //   3. ⚠ 读数从 `data-day` 回查 `byDay`，**不把文本塞进 title** 再解析（那会把展示和取值耦合）。
     if (!host._heatBound) {
       host._heatBound = true;
+      // ⚠⚠ 悬停浮层（2026-10-19 按用户要求加，参考 openViking 的 self-drawn tooltip）。
+      //   三个事件都用**委托**、也只绑一次，理由与上面 click 那段完全相同。
+      //   ⚠ 用 `mouseover`/`mouseout` 而不是 `mouseenter`/`mouseleave`：
+      //     后两者**不冒泡**，委托到容器上收不到（这是最容易写错的一处）。
+      //   ⚠ `relatedTarget` 判定：在同一格的子节点间移动时 mouseout 也会触发，
+      //     若直接隐藏会出现"在格子里轻轻一动浮层就闪"。所以只有真正离开**这一格**
+      //     才隐藏（`cell.contains(related)` 为真就当我们还在格内）。
+      const cellOf = (ev) => (ev.target && ev.target.closest ? ev.target.closest('.heatcell[data-day]') : null);
+      host.addEventListener('mouseover', (ev) => {
+        const cell = cellOf(ev);
+        if (!cell) return;
+        const day = cell.getAttribute('data-day');
+        hoverTipShow(day + ' · ' + weekdayCN(day), heatTipRows(heatPickDays.get(day)), ev);
+      });
+      host.addEventListener('mousemove', (ev) => hoverTipMove(ev));
+      host.addEventListener('mouseout', (ev) => {
+        const cell = cellOf(ev);
+        if (!cell) return;
+        const to = ev.relatedTarget;
+        if (to && cell.contains(to)) return;          // 还在同一格内动 ⇒ 不隐藏
+        hoverTipHide();
+      });
+      // ⚠ 滚动/离开视口时也要收起来：否则浮层会**留在原地**（它用 fixed 定位，
+      //   不随容器滚动而移动，看起来就像贴错了地方）。
+      host.parentElement && host.parentElement.addEventListener('scroll', hoverTipHide, { passive: true });
       host.addEventListener('click', (ev) => {
         const cell = ev.target && ev.target.closest ? ev.target.closest('.heatcell[data-day]') : null;
         if (!cell) return;
+        hoverTipHide();                              // ⚠ 点击时收起浮层：常显读数接管
         const day = cell.getAttribute('data-day');
         for (const c of host.querySelectorAll('.heatcell.sel')) c.classList.remove('sel');
         cell.classList.add('sel');
@@ -8835,6 +9013,10 @@ let loginProvider = '';
     }
 
     // 月份标签：用一个与格子同列宽的 grid 承载，全列铺满、只有该列的格子里有字
+    //
+    // ⚠ 列宽必须与格阵一致。格阵现在用 `1fr`（宽屏填满），所以这里也用 `1fr` ——
+    //   两边同源才对齐；⚠ 写死像素会在窗口尺寸变化时逐列累积偏移
+    //   （现象是"月份越往右偏得越多"，很容易误判成"月份算错了"）。
     const mh = $('statsHeatMonths');
     if (mh) {
       const cols = Math.ceil((cells.length) / 7);
@@ -8843,6 +9025,20 @@ let loginProvider = '';
       mh.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
       mh.innerHTML = marks.map((t) => `<span>${esc(t)}</span>`).join('');
     }
+
+    // ⚠⚠ 默认滚到**最右（最新）**（2026-10-19 加，复刻 openViking 那段 useEffect）。
+    //
+    //   为什么必须做：格子固定尺寸后总宽约 53 × 14 = 742px～更多，而"有数据的日子"
+    //   永远是**最近的那几天**（在最右端）。不滚动就等于默认展示最左边那半年 ——
+    //   那半年是我们上线前的空白，于是用户看到的是"整片灰"（这就是那张截图的形态）。
+    //
+    //   ⚠ 用 rAF 而不是同步设：此刻 `host.innerHTML` 刚换完，样式/布局还没算，
+    //     `scrollWidth` 可能仍是旧值（参考项目那里同样是 `requestAnimationFrame`）。
+    requestAnimationFrame(() => {
+      const sc = host.parentElement;                 // = .heatmain（overflow-x:auto 的那个）
+      if (!sc) return;
+      sc.scrollLeft = Math.max(0, sc.scrollWidth - sc.clientWidth);
+    });
 
     // 图例四档的数值（⚠ 用它的 heatLevelText 口径：给出每档的上界）
     const fmtV = (v) => {
@@ -8855,6 +9051,46 @@ let loginProvider = '';
     const set = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
     set('h1', '≤' + fmtV(TH[0])); set('h2', '≤' + fmtV(TH[1]));
     set('h3', '≤' + fmtV(TH[2])); set('h4', '>' + fmtV(TH[2]));
+
+    // 右侧统计卡：三格都是从**同一份** list 现算（活跃天数 / 峰值单日 / 最近提交）。
+    renderHeatStats(list);
+  }
+
+  // renderHeatStats 画热力图右侧那一列三格（2026-10-19 照 openViking 加）。
+  //
+  // ⚠ 口径（三处都必须能一句话解释，否则数字会被误读）：
+  //   · 活跃天数 = **有请求的天数**（不是窗口跨度；365 天窗口里可能只有 8 天有请求）
+  //   · 峰值单日 = 窗口内**单日 Token 用量**的最大值 —— ⚠ 跟整张图的着色口径一致
+  //     （图是按 Token 着色的，若这里改显示"请求数峰值"就会出现"图最深的那天
+  //      和峰值单日不是同一天"的困惑）
+  //   · 最近提交 = **最后一个有请求的日期**（MM/DD）—— 照参考项目那种写法；
+  //     想要当天的明细，悬停或点那一格都能看到
+  function renderHeatStats(list) {
+    const el = $('heatStats');
+    if (!el) return;
+    let activeN = 0, peakTokens = 0, peakDay = '', lastDay = '', lastTotal = 0;
+    for (const p of list) {
+      const d = String(p.ts || '').slice(0, 10);
+      const tk = p.tokens || 0;
+      const n = p.total || 0;
+      if (n > 0) {
+        activeN++;
+        lastDay = d;
+        lastTotal = n;
+      }
+      if (tk > peakTokens) { peakTokens = tk; peakDay = d; }
+    }
+    const md = (s) => (s && s.length >= 10 ? s.slice(5, 7) + '/' + s.slice(8, 10) : NODATA);
+    const rows = [
+      ['活跃天数', activeN ? activeN + ' 天' : NODATA],
+      ['峰值单日', peakTokens ? fmtTokensPlain(peakTokens) : NODATA],
+      ['最近提交', lastDay ? md(lastDay) : NODATA],
+    ];
+    el.innerHTML = rows.map(([k, v]) =>
+      `<div class="hs"><div class="k">${esc(k)}</div>`
+      + `<div class="v${v === NODATA ? ' dim' : ''}"${(k === '峰值单日' && peakDay) ? ` title="${esc(peakDay)}"` : ''}`
+      + `${(k === '最近提交' && lastDay) ? ` title="${esc(lastDay + ' · ' + lastTotal + ' 请求')}"` : ''}>${esc(v)}</div></div>`
+    ).join('');
   }
 
   // dayCardVals 「活跃天数 / 当前连续天数」两格的**最近一次算好的值**。
@@ -10869,5 +11105,14 @@ let multCatalogFailed = false;
   };
 })();
 </script>
+
+<!-- 页面级悬停浮层（2026-10-19 抽共享）。
+     ⚠ 为什么挂在 body 末尾、而不是写进各组件的 innerHTML：
+       热力图现在在一个 `overflow-x:auto` 的容器里，浮层若在容器内会被**裁剪**；
+       参考项目 openViking 那边是用 `createPortal` 挂到 body 绕开同一件事
+       （见它 `context-commits-heatmap.tsx` 219-241 行的视口 clamp）。
+       ⚠ 放在 body 末尾 + `position:fixed` 得到等价效果，且不需要框架。
+     ⚠ 它只有一份 ⇒ 页面里同时只会有一个浮层，不存在"两份各显示一半"的形态。 -->
+<div id="hoverTip" class="hovertip"></div>
 </body>
 </html>
