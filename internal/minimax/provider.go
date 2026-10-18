@@ -3,6 +3,7 @@ package minimax
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -163,7 +164,10 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	}
 	anthroBody, err := anthroconv.OpenAIToAnthropic(body)
 	if err != nil {
-		return gateway.ChatStream{}, fmt.Errorf("minimax: 请求体转换失败: %w", err)
+		// ⚠ 带上 gateway.ErrConvertFailed 哨兵：出口层据此**不换号**直接返回 400
+		//   （换号对转换失败无效 —— 见 internal/gateway/errors.go 的长注释）。
+		return gateway.ChatStream{}, fmt.Errorf("minimax: 请求体转换失败: %w",
+			errors.Join(err, gateway.ErrConvertFailed))
 	}
 	// 上游这个端点**只按 SSE 回**，所以恒发 stream:true。
 	anthroBody, err = forceStream(anthroBody)
