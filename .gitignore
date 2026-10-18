@@ -81,6 +81,10 @@ tasks/
 # 上面对 docs/ 的 `docs/*` + `!docs/xxx.md` 是**不够的**（先命中哪条看顺序）。
 !docs/loomy-local-toolchain.md
 !docs/image-generation.md
+# ⚠ 对照 new-api 的逐模块结论同样是**交付物**：它记录的是"**为什么不换**"。
+# 没有它，后人会把同样的事再查一遍 —— 这一步已实际发生过：
+# 我先后以为"选号没抄""分类更粗"，都是**查了才知道我们其实更细**。
+!docs/newapi-parity.md
 !docs/chat-tools.md
 
 # ⚠ 被 go:embed 内嵌的 md 必须**显式**豁免 —— 它不是文档，是编译输入。
