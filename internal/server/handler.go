@@ -1740,6 +1740,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//
 		// cfg.Provider == nil（单上游部署 / 既有测试）时逐字节回退到原行为，
 		// 见 chatVia 的注释。
+		// ⚠ 记下"到此刻为止我们花掉的时间"（纯观测，不改行为）。
+		//
+		// ⚠ 它回答的正是用户那个质疑："根本就不是号级速度的问题，而是后端代码调用有 bug"。
+		// `ttfb_ms` 把两段混在一起：我们这边（选号 / 取凭证 / 可能刷凭证 / 转换请求体）
+		// 加上上游首包。这一列把前者单独拿出来 ⇒ 一眼就能判"慢该怪谁"。
+		st.preMs = time.Since(st.start)
 		cr, status, terr := h.chatVia(ctx, reqProvider, acct, outBody)
 		if terr != nil {
 			// ⚠⚠ **本地转换失败**：换号**完全无效**（转换取决于请求体本身，

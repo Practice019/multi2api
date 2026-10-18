@@ -32,11 +32,17 @@ func TestLogRowCarriesDecision(t *testing.T) {
 	const uid = "decision-test-uid-1"
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy",
-			http.StatusServiceUnavailable, -1, nil, "pool_unavailable:global")
+			http.StatusServiceUnavailable, -1, nil, "pool_unavailable:global", 137)
 	})
 	got := findEntryByUID(t, uid)
 	if got.Decision != "pool_unavailable:global" {
 		t.Errorf("Decision = %q，想要 pool_unavailable:global", got.Decision)
+	}
+	// ⚠ pre_ms（发上游之前的耗时）也必须落盘：它是判断"慢该怪谁"的唯一直接证据，
+	//   用户 2026-10-18 的原话是"根本就不是号级速度的问题，而是后端代码调用有 bug"——
+	//   而那件事只能靠这一列回答。
+	if got.PreMs != 137 {
+		t.Errorf("PreMs = %d，想要 137（发上游前的耗时没落盘 ⇒ 没法回答「慢在哪一段」）", got.PreMs)
 	}
 	// ⚠ 序列化必须带上它（jsonl 落盘与 /admin/logs 都走这条）：
 	b, _ := json.Marshal(got)
@@ -51,8 +57,8 @@ func TestLogRowDecisionOmittedWhenEmpty(t *testing.T) {
 	withChatLog(t)
 	const uid = "decision-test-uid-2"
 	captureStdout(t, func() {
-		// ⚠ 老调用方（不传变参）—— 兼容性也在这里被钉住
-		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy", http.StatusOK, 1, nil)
+		// ⚠ 老调用方（不传 decision）：兼容性也在这里被钉住
+		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy", http.StatusOK, 1, nil, "", 0)
 	})
 	got := findEntryByUID(t, uid)
 	if got.Decision != "" {
