@@ -5539,7 +5539,7 @@ let loginProvider = '';
         <td>${esc(a.nickname || '—')}</td>
         <td>${st}</td>
         <td class="mono">${esc(String(a.earned || 0))}/${esc(String(a.max || 0))}</td>
-        <td class="mono">${a.balance ? esc(String(a.balance)) : '<span class="dim">—</span>'}</td>
+        <td class="mono">${a.balance === null || a.balance === undefined ? '<span class="dim">—</span>' : esc(String(a.balance))}</td>
         <td style="max-width:320px">${pending || '<span class="dim">—</span>'}</td>
         <td style="white-space:nowrap">${btn}</td>
       </tr>`;
@@ -5720,7 +5720,7 @@ let loginProvider = '';
         <td class="mono dim">${esc(a.uid)}</td>
         <td>${esc(a.nickname || '—')}</td>
         <td>${st}</td>
-        <td class="mono">${a.balance ? esc(String(a.balance)) : '<span class="dim">—</span>'}</td>
+        <td class="mono">${a.balance === null || a.balance === undefined ? '<span class="dim">—</span>' : esc(String(a.balance))}</td>
         <td>${codes}</td>
         <td style="white-space:nowrap">${ops}</td>
       </tr>`;
