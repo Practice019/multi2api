@@ -41,7 +41,7 @@ func (h *Handler) chatOnceNonStream(reqCtx context.Context, uid string, body []b
 	}
 	// 该 uid 的凭证：工具循环内不换号（已由出口层选好号），
 	// 所以这里拿不到凭证就是真错误。
-	acct := h.cfg.Pool.PickByUID(uid)
+	acct := h.cfg.Pool.AuthByUID(uid)
 	if acct == nil {
 		return nil, 0, fmt.Errorf("chatOnceNonStream: 账号 %s 不在池里（可能已被移除）", uid)
 	}
@@ -131,7 +131,7 @@ func (h *Handler) chatStreamOnce(reqCtx context.Context, uid string, body []byte
 	if h.cfg.Provider == nil {
 		return nil, 0, fmt.Errorf("chatStreamOnce: 未接线（cfg.Provider 为 nil）")
 	}
-	acct := h.cfg.Pool.PickByUID(uid)
+	acct := h.cfg.Pool.AuthByUID(uid)
 	if acct == nil {
 		return nil, 0, fmt.Errorf("chatStreamOnce: 账号 %s 不在池里（可能已被移除）", uid)
 	}
