@@ -435,33 +435,41 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
              `#hoverTip`（见 `.hovertip`），不新造第二套浮层。
           3. **右侧统计卡**（活跃天数 / 峰值单日 / 最近提交）—— 它右边那一列。
       */
-  /* ⚠⚠ 格子尺寸**故意用回 `1fr` 自适应**（2026-10-19 实测后回退）。
-     我一度照 openViking 的 `rectSize=11` 把格子钉成固定 11px + 横向滚动，
-     但实测：53 列 × 14px = **739px**，而容器宽 **1157px** —— 根本装得下，
-     `scrollWidth == clientWidth` ⇒ 滚动条永远不出现，那条"滚到最新"的代码成了空转。
-     ⚠ 参考项目要滚动，是因为它的图被夹在 `minmax(820px,auto)` 那一列里、窄屏时会被压扁；
-     ⚠ 而**在宽屏下它同样是不滚的**。所以正确的增量不是"改格子尺寸"，而是
-     **保留 `1fr` 自适应 + 保留外层 `overflow-x:auto`**（窄屏时才真的滚）。
-     ⇒ 结论：格子这块回到原形态；本次真正新增的只有**悬停浮层**与**右侧统计卡**。 */
-  .heatwrap{display:flex;gap:10px;align-items:flex-start}
-  .heatdays{display:grid;grid-template-rows:repeat(7,1fr);gap:2px;font-size:9px;
-    color:var(--dim);line-height:1;flex:none;width:20px;padding-top:0}
+  /* ⚠⚠ 尺寸**与参考项目对齐**（2026-10-19 用户要求"宽高和对标项目一致"）。
+     它那边的调用参数是：
+         <HeatMap width={820} height={128} rectSize={11} space={3}
+                  rectProps={{rx:2}} legendCellSize={0} />
+     其中 `rectSize=11` / `space=3` ⇒ **列宽 14px**，53 列 ⇒ 742px 画布；
+     `height=128` ⇒ 7 行 × 14 - 3 = 95px 格阵 + 月份行。
+     ⚠ 我上一轮**只把格子钉死、没钉容器**，于是 53 列固定后容器仍按 `flex:1` 伸缩，
+       两者算不到一起（实测 scrollWidth == clientWidth、滚动永不出现）。
+       这一轮**两边都钉**：格阵 792px（略宽于它的 742px，为的是让 12px 的格子
+       在本项目的字号下更清楚）+ 外层容器同宽。
+     ⚠ `overflow-x:auto` 保留：窄窗口时格阵不会被压扁，而是出现横向滚动。
+     用户同时要求"多的区域随便塞一点数据展示" ⇒ 右侧那一列不再只有三张小卡，
+     还接了一张**近 7 天明细表**（见 renderHeatStats）。 */
+  .heatwrap{display:flex;gap:12px;align-items:flex-start}
+  .heatdays{display:grid;grid-template-rows:repeat(7,1fr);gap:3px;font-size:9px;
+    color:var(--dim);line-height:1;flex:none;width:20px;padding-top:0;
+    /* ⚠ 高度必须等于格阵高度（7 格 × 12px + 6 × 3px 间隙 = 102px）——
+       否则"一/三/五"与行错位（这正是上一轮用户报的"位置不对"）。 */
+    height:102px}
   .heatdays span:nth-child(1){grid-row:1} /* 一 */
   .heatdays span:nth-child(2){grid-row:3} /* 三 */
   .heatdays span:nth-child(3){grid-row:5} /* 五 */
-  /* ⚠ 横向滚动容器：月份行与格阵**一起滚**（窄屏时才有实际效果 ——
-     宽屏下 53 列装得下，`scrollWidth == clientWidth`，这一层等于透明）。
-     保留它是因为**窄窗口/小屏**真的会溢出，那时"默认滚到最右"才起作用。 */
-  .heatmain{flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+  .heatmain{flex:none;width:792px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
   .heatmain::-webkit-scrollbar{height:6px}
   .heatmain::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
   .heatmonths{display:grid;grid-auto-flow:column;font-size:10px;color:var(--dim);
-    margin-bottom:2px;letter-spacing:.2px}
-  /* ⚠ `grid-auto-columns:1fr` + 容器 100% 宽 ⇒ **列宽自动均分、铺满整行**
-     （它那边是量像素算格子尺寸；纯 CSS 这条更省，效果一样）。 */
+    margin-bottom:2px;letter-spacing:.2px;width:max-content}
+  /* ⚠ 列宽只有 15px，而"11月"约 28px ⇒ 必然溢出。**故意让它溢出**：
+     相邻列大多是空的（月份之间隔 4-5 列），所以不会真的撞上；
+     而 `overflow:hidden` 会把文字裁成"1…"，更糟。 */
+  .heatmonths span{white-space:nowrap;overflow:visible}
+  /* ⚠ 固定格宽 12px + `width:max-content` ⇒ 53 列 = 792px，与 `.heatmain` 同宽。 */
   .heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);
-    grid-auto-columns:1fr;gap:2px;width:100%}
-  .heatcell{aspect-ratio:1;min-width:0;border-radius:2px;background:var(--panel2)}
+    grid-auto-columns:12px;gap:3px;width:max-content}
+  .heatcell{width:12px;height:12px;border-radius:2px;background:var(--panel2)}
   /* ⚠ 格子可点（2026-10-18 按用户要求）：左键点一下，那天的用量**留在页面上**。 */
   .heatcell{cursor:pointer}
   .heatcell:hover{outline:1px solid color-mix(in srgb,var(--acc) 60%,transparent)}
@@ -482,13 +490,30 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   /* ---- 热力图右侧统计卡（2026-10-19 照 openViking 那一列加）----
      三格：活跃天数 / 峰值单日 / 最近提交。⚠ 数值由 renderHeatmap 现算，
      与顶部概览卡的「活跃天数」同源（都来自 series 的按天总量），口径一致、不会打架。 */
-  .heatstats{flex:none;width:132px;display:flex;flex-direction:column;gap:8px;
-    padding-left:2px;border-left:1px solid var(--line)}
-  .heatstats .hs{padding-left:8px}
+  /* ⚠⚠ 右侧从"固定 132px 的三小格"改成**吃掉所有剩余宽度**（2026-10-19 用户要求
+     "多的区域随便塞一点数据展示"）。起因：格子按参考项目钉成固定 792px 之后，
+     右边会空出约 300px —— 只放三行字太浪费，而且那块空白在宽屏上很显眼。
+     现在这里放两层：**三格概览（横排）+ 近 7 天明细表**。 */
+  .heatstats{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px;
+    padding-left:12px;border-left:1px solid var(--line)}
+  .heatstats .hsrow{display:flex;gap:18px;flex-wrap:wrap}
+  .heatstats .hs{min-width:0}
   .heatstats .hs .k{font-size:11px;color:var(--dim);line-height:1.3}
   .heatstats .hs .v{font-size:15px;font-weight:600;line-height:1.35;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .heatstats .hs .v.dim{color:var(--dim);font-weight:400}
+  /* 近 7 天明细表。⚠ 行高钉死 22px —— 照本项目表格惯例（紧凑、且不因内容长度跳动），
+     数字用 `tabular-nums` 等宽对齐，否则每行的小数点会左右游移。 */
+  .heatstats .hdet{width:100%;max-width:420px;border-collapse:collapse;font-size:11px;
+    font-variant-numeric:tabular-nums;line-height:1}
+  .heatstats .hdet th{text-align:right;font-weight:400;color:var(--dim);
+    padding:0 0 3px;font-size:10px;border-bottom:1px solid var(--line);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .heatstats .hdet th:first-child{text-align:left}
+  .heatstats .hdet td{height:22px;text-align:right;padding:0;border-bottom:1px solid var(--line);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .heatstats .hdet td:first-child{text-align:left;color:var(--dim)}
+  .heatstats .hdet tr:last-child td{border-bottom:0}
   .heatfoot{display:flex;align-items:center;gap:5px;margin-top:6px;font-size:11px;flex-wrap:wrap}
   /* ⚠⚠ 图例里的色块**必须显式给尺寸**（2026-10-19 用户反馈"需要有示例图标"）。
      根因：格阵用的是 `grid-auto-columns:1fr`，每个 `.heatcell` 的宽度**由列宽决定**，
@@ -9048,15 +9073,18 @@ let loginProvider = '';
 
     // 月份标签：用一个与格子同列宽的 grid 承载，全列铺满、只有该列的格子里有字
     //
-    // ⚠ 列宽必须与格阵一致。格阵现在用 `1fr`（宽屏填满），所以这里也用 `1fr` ——
-    //   两边同源才对齐；⚠ 写死像素会在窗口尺寸变化时逐列累积偏移
-    //   （现象是"月份越往右偏得越多"，很容易误判成"月份算错了"）。
+    // ⚠⚠ 列宽**必须写死 15px**（= 格子 12 + 间隙 3），**不能用 `1fr`**（2026-10-19 踩到）：
+    //   `.heatmonths` 是 `width:max-content`，此时 `1fr` 会按**内容宽**算 ——
+    //   而"11月"这类文字约 28px，53 列直接撑成 1184px，把 792px 的格阵推偏了
+    //   （实测 scrollWidth 1184 vs 格阵 792，于是"滚到最右"滚到了标签的最右）。
+    //   ⚠ 两边同源才对齐；写死像素虽然要跟 `.heatgrid` 的 `12px`/`gap:3px` 手工保持一致，
+    //     但这是纯 CSS 里唯一能保证逐列对齐的办法（它那边是量像素算的，同一个道理）。
     const mh = $('statsHeatMonths');
     if (mh) {
       const cols = Math.ceil((cells.length) / 7);
       const marks = new Array(cols).fill('');
       for (const [ci, txt] of monthMarks) if (ci >= 0 && ci < cols) marks[ci] = txt;
-      mh.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      mh.style.gridTemplateColumns = `repeat(${cols}, 15px)`;
       mh.innerHTML = marks.map((t) => `<span>${esc(t)}</span>`).join('');
     }
 
@@ -9139,11 +9167,40 @@ let loginProvider = '';
       ['峰值单日', peakTokens ? fmtTokensPlain(peakTokens) : NODATA],
       ['最近提交', lastDay ? md(lastDay) : NODATA],
     ];
-    el.innerHTML = rows.map(([k, v]) =>
+    const hsHtml = `<div class="hsrow">` + rows.map(([k, v]) =>
       `<div class="hs"><div class="k">${esc(k)}</div>`
       + `<div class="v${v === NODATA ? ' dim' : ''}"${(k === '峰值单日' && peakDay) ? ` title="${esc(peakDay)}"` : ''}`
       + `${(k === '最近提交' && lastDay) ? ` title="${esc(lastDay + ' · ' + lastTotal + ' 请求')}"` : ''}>${esc(v)}</div></div>`
-    ).join('');
+    ).join('') + `</div>`;
+
+    // ⚠⚠ 「多的区域随便塞一点数据展示」（2026-10-19 用户要求）——
+    //   格子按参考项目钉成固定宽度后，右边空出约 300px，只放三个数字太空。
+    //   这里接一张**近 7 天明细表**，数据来自**同一份 series**：
+    //   每个桶本来就带 ok / fail / tokens / cache_hit / cache_miss，
+    //   只是之前只用了 total 与 tokens，其余字段被丢掉了。
+    //   ⇒ 不新增任何请求，也不新增数据线。
+    //   ⚠ 命中率口径与「缓存命中率」那张卡一致：hit / (hit + miss)；
+    //     **无请求的整天显示 `—` 而不是 0%** —— 否则会把"那天没有调用"
+    //     误读成"调用了但全部未命中"，这两个结论差得很远。
+    const recent = list.slice(-7).reverse();          // 最新的排最上面
+    const cells = recent.map((p) => {
+      const d = String(p.ts || '').slice(0, 10);
+      const hit = p.cache_hit || 0, miss = p.cache_miss || 0;
+      const tot = hit + miss;
+      const rate = tot > 0 ? (hit / tot * 100).toFixed(0) + '%' : '—';
+      const noReq = !(p.total || 0);
+      return `<tr${noReq ? ' title="这一天没有请求"' : ''}>`
+        + `<td>${esc(md(d))}</td>`
+        + `<td>${esc(noReq ? NODATA : String(p.total || 0))}</td>`
+        + `<td>${esc(noReq ? NODATA : String(p.ok || 0))}</td>`
+        + `<td>${esc(noReq ? NODATA : String(p.fail || 0))}</td>`
+        + `<td>${esc(noReq ? NODATA : fmtTokensPlain(p.tokens || 0))}</td>`
+        + `<td>${esc(rate)}</td></tr>`;
+    }).join('');
+    el.innerHTML = hsHtml
+      + `<table class="hdet"><thead><tr>`
+      + `<th>近 7 天</th><th>请求</th><th>成功</th><th>失败</th><th>Token</th><th>命中</th>`
+      + `</tr></thead><tbody>${cells}</tbody></table>`;
   }
 
   // dayCardVals 「活跃天数 / 当前连续天数」两格的**最近一次算好的值**。
