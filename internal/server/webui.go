@@ -56,9 +56,18 @@ const adminTokenPlaceholder = "__WB2API_ADMIN_TOKEN__"
 var colPlaceholders = []struct{ token, value string }{
 	{"__COLS_TRAVEL__", "8"},
 	{"__COLS_GROWTH__", "6"},
-	{"__COLS_LOGS__", "10"},
-	{"__COLS_JOBS__", "6"},
 }
+
+// ⚠ 2026-10-19：`jobs` / `logs` 两条已从上面删掉。
+//
+//	任务调度页换成**卡片网格**、请求日志页换成 **grid 表格**（照抄参考项目
+//	Agent2API 的 page-tasks.css / page-requests.css），两处都不再是 `<table>`，
+//	没有列数可跨。webui.html 里的 `__COLS_JOBS__` / `__COLS_LOGS__` 占位符与
+//	JS 的 `COLS` 常量**当时就同步删了**，只有这张 Go 表漏了 —— 于是
+//	TestColPlaceholdersMatchJSCols 在 CI 上变红（本地没跑测试就推了）。
+//
+//	⇒ 加减「有表格空态行的页面」时**三处**都要动：HTML 占位符、JS 的 COLS、
+//	  这张表。测试守得住后两者的漂移，但守住的前提是真的跑它。
 
 // renderUI 把页面里的占位符替换成运行时值。
 //
