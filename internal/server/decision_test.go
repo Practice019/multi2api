@@ -32,7 +32,7 @@ func TestLogRowCarriesDecision(t *testing.T) {
 	const uid = "decision-test-uid-1"
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy",
-			http.StatusServiceUnavailable, -1, nil, "pool_unavailable:global", 137)
+			http.StatusServiceUnavailable, -1, nil, "pool_unavailable:global", 137, "10.0.0.9", "probe/1.0")
 	})
 	got := findEntryByUID(t, uid)
 	if got.Decision != "pool_unavailable:global" {
@@ -43,6 +43,11 @@ func TestLogRowCarriesDecision(t *testing.T) {
 	//   而那件事只能靠这一列回答。
 	if got.PreMs != 137 {
 		t.Errorf("PreMs = %d，想要 137（发上游前的耗时没落盘 ⇒ 没法回答「慢在哪一段」）", got.PreMs)
+	}
+	// ⚠ 请求来源也要落盘：它用来指认"是谁在直连网关发非流式"（实测有 6256 条，
+	// 且不经过 new-api）—— 没有这两列就只能靠模型/token 规律猜。
+	if got.ClientIP != "10.0.0.9" || got.ClientUA != "probe/1.0" {
+		t.Errorf("客户端来源没落盘: ip=%q ua=%q", got.ClientIP, got.ClientUA)
 	}
 	// ⚠ 序列化必须带上它（jsonl 落盘与 /admin/logs 都走这条）：
 	b, _ := json.Marshal(got)
@@ -58,7 +63,7 @@ func TestLogRowDecisionOmittedWhenEmpty(t *testing.T) {
 	const uid = "decision-test-uid-2"
 	captureStdout(t, func() {
 		// ⚠ 老调用方（不传 decision）：兼容性也在这里被钉住
-		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy", http.StatusOK, 1, nil, "", 0)
+		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy", http.StatusOK, 1, nil, "", 0, "", "")
 	})
 	got := findEntryByUID(t, uid)
 	if got.Decision != "" {

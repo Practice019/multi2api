@@ -76,6 +76,17 @@ type Entry struct {
 	//	pre_ms 很大（几百毫秒以上）⇒ 网关自己花了时间，那才是该修的地方
 	// ⚠ 对"每次新会话的第一条"尤其要看这一列：它的 prompt 最短、本该最快。
 	PreMs int64 `json:"pre_ms,omitempty"`
+	// ClientIP / ClientUA 请求来源（2026-10-18 加）。
+	//
+	// ⚠ 加它的唯一原因：实测发现有 6256 条非流式请求（98% 用 loomy/DeepSeek-V4.1-Flash）
+	// **不经过 new-api**（那边 24 小时只见过 1 条非流式）⇒ 说明有**另一个客户端直连网关**。
+	// 而日志里没有来源信息 ⇒ 只能靠模式猜"是谁在非流式调用"。加这两列之后**一次就能点名**。
+	//
+	// ⚠ 为什么这件事重要：非流式请求必须等整段生成完才返回（实测 11~134 秒），
+	// 而流式的首字只要数百毫秒 ⇒ "第一条很慢"的体感很可能就是它的。
+	// 但要改掉它，先得知道是谁 —— 这就是这两列存在的理由。
+	ClientIP string `json:"client_ip,omitempty"`
+	ClientUA string `json:"client_ua,omitempty"`
 }
 
 // Ring 定长环形缓冲。零值不可用，必须经 New 构造。
