@@ -1377,6 +1377,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	st.provider = reqProvider
+	// ⚠ 请求来源（纯观测，见 logbuf.Entry.ClientIP 的注释）：
+	// 用来指认"是谁在直连网关发非流式" —— 那件事靠日志里的模型/token 规律只能猜，
+	// 而有了 IP + UA 就能一次点名。ExtractClientIP 是既有函数（往下 10 行就在用它建 ctx）。
+	st.clientIP = gateway.ExtractClientIP(r)
+	st.clientUA = r.UserAgent()
 	// ⚠ 把首字节耗时喂给上游级统计（2026-10-18 加，见 chatStat.noteLatency 的注释）。
 	//
 	// ⚠ 为什么在这里赋、在 done() 里调：done() 是**所有出口**的汇合点
