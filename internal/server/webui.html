@@ -5229,10 +5229,30 @@ let loginProvider = '';
   // ⚠ 同一个 key 只允许一个表；占位清空 / host 离开文档 ⇒ 立刻停表（不后台空转）。
   function schedulePanelPoll(key, host, pendingCount, reload) {
     if (panelPolls[key]) return;
+    // ⚠⚠ **轮次硬上限**（2026-10-18 加，用户报"打开页面一直很慢/一直正在读取"）。
+    //
+    // # 为什么要它（实测的死循环）
+    //
+    // 原来的退出条件只有 `pendingCount() <= 0`。而 `reload()` 会**重建整表** ⇒
+    // 重建时每行先画「正在读取…」占位 ⇒ **那一拍的 pendingCount() 又 > 0** ⇒
+    // 于是每 1.5 秒轮一次、永远轮 —— 用户看到的就是"页面一直在加载"。
+    //
+    // ⚠ 实测证据（playwright 抓包，9 秒内）：`/admin/loomy/tasks?page=1` 与
+    //   `/admin/loomy/invite?page=1` **各请求了 6 次**，而每次服务端只要 **4~24ms**；
+    //   同时页面上仍有 **169 个**单元格停在「正在读取…」。
+    // ⇒ ⚠ **慢不在服务端，在这个永不收敛的轮询**。
+    //
+    // ⚠ 上限取 10（≈15 秒）：足够把 44 个号的首轮补数跑完（实测一轮都在毫秒级），
+    //   又不会无限轮。轮完之后**已加载的行就留住了** —— 那才是用户要的"打开就出数据"。
+    // ⚠ 副作用：真没补到的行会停在占位。⚠ 那由 `panelRowErr` / `hideEmptyCols` 兜底，
+    //   比"整页一直闪占位"好得多（那会让用户以为整个网关坏了）。
+    let rounds = 0;
+    const MAX_ROUNDS = 10;
     const timer = setInterval(async () => {
       if (panelPolls[key] !== timer) { clearInterval(timer); return; }
       if (!host || !host.isConnected) { clearInterval(timer); delete panelPolls[key]; return; }
       if (pendingCount() <= 0) { clearInterval(timer); delete panelPolls[key]; return; }
+      if (++rounds > MAX_ROUNDS) { clearInterval(timer); delete panelPolls[key]; return; }
       try { await reload(); } catch (e) { /* 下一拍再试 */ }
     }, 1500);
     panelPolls[key] = timer;
