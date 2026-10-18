@@ -231,8 +231,26 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      在 flex 容器里把该元素及其后所有兄弟推到行尾。 */
   .acctgroup > .ghead > .gacts{margin-left:auto;display:inline-flex;align-items:center;gap:6px}
   .acctgroup > .ghead > .gacts .gact{padding:2px 8px;font-size:11px;font-weight:400}
-  .acctgroup > table{width:100%;border-collapse:collapse}
-  .acctgroup.collapsed > table{display:none}
+  /* ⚠⚠ 2026-10-19 加 `.acctwrap`（列宽拖拽之后必需）：
+     表格现在是 `min-width` 撑着的，把某列拖宽之后它的实际宽度会**超过卡片**。
+     而 `section{overflow:hidden}`（为了圆角）会**把右边裁掉** ——
+     实测截图里拖宽「上游」列之后，右侧「额度/状态/Token/今日签到/成功/操作」
+     整片消失，连「操作」列里的按钮都点不到。
+     参考的做法是"超出容器的部分交给**整张表横向滚动**"（table-columns.js:414-415
+     「超出容器的部分交给整张表横向滚动（与账号表同一条取舍：表格不压缩列宽）」），
+     所以这里补一个横向滚动容器。
+
+     ⚠⚠ 下面那两条原本是 `.acctgroup > table`（直接子选择器），
+       加一层 div 就**再也匹配不上** —— 尤其 235 那条 `.collapsed > table{display:none}`
+       是**折叠功能本身**，断了就是"点了折叠没反应"。
+       所以改成两条并列，旧结构（如果还有别处直挂 table）继续有效。
+       ⚠ 这个项目在 214-216 行吃过一次同类的亏，那里记着：
+         「⚠ 选择器必须是 `.acctgroup > .ghead > .gacts`（三层）…那条规则**从来没有匹配过**」 */
+  .acctwrap{overflow-x:auto}
+  .acctgroup > table,
+  .acctgroup > .acctwrap > table{width:100%;border-collapse:collapse}
+  .acctgroup.collapsed > table,
+  .acctgroup.collapsed > .acctwrap > table{display:none}
   /* 账号池主表：固定列宽布局（2026-10-19 照参考项目 Agent2API 移植）。
      配 acctColgroupHTML 生成的 <colgroup> 用 —— 每个上游一张自己的表，
      而 `table-layout:auto` 按**内容**算列宽 ⇒ 同一列在不同组里宽度不同，
@@ -331,7 +349,21 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .colset-foot{display:flex;align-items:center;gap:8px;
     padding:8px 12px 9px;border-top:1px solid var(--line);font-size:11px;color:var(--dim)}
   .colset-foot .spacer{flex:1}
-  .colset-empty{padding:14px 12px;font-size:12px;color:var(--dim)}
+  /* ── 列宽拖拽的把手（2026-10-19，照抄参考 ui/table-col-settings.css 的 .col-grip）──
+     贴在 th 右缘、7px 宽，**不占列内容的横向空间**。
+     ⚠ th 必须 `position:relative` 才能让它按 th 定位（下面那条）。
+     ⚠ 只改 `.accttable--aligned` 这一处：`.accttable` 还被 loomy 的两张表复用，
+       而它们没有 colgroup / 没有把手，全局改会波及它们（与列宽收归一处那条
+       经验里的红线是同一条）。 */
+  .accttable--aligned thead th{position:relative}
+  .colgrip{position:absolute;top:0;right:-3px;width:7px;height:100%;
+    cursor:col-resize;z-index:1;user-select:none}
+  .colgrip:hover{background:color-mix(in srgb,var(--acc) 55%,transparent)}
+  .colgrip.active{background:var(--acc)}
+  /* 拖动期间整页游标都是 col-resize，并且**禁掉文本选择** ——
+     否则从把手横向拖过去会把表头文字选成一片蓝色。 */
+  body.colresizing{cursor:col-resize}
+  body.colresizing *{user-select:none !important}
   /* ⚠ 顶部那个「Δ」定位是把 left/top 交给下面那段 JS 算（见 bindOpsPopover），
      所以这里**不能**写 inset/top/left —— 写了就把 UA 的默认定位覆盖成 0,0，
      面板会跑到页面左上角（实测过一次：getBoundingClientRect 返回 [0,0,102,39]）。 */
@@ -3538,10 +3570,14 @@ let loginProvider = '';
   //
   // ⚠ 没给 w 的列（nickname）不写 width：fixed 布局会把它算成剩余空间，
   //   这就是那个唯一的弹性列。
-  function acctColgroupHTML(cols) {
+  //
+  // ⚠ 2026-10-19 加 `providerId`：宽度要叠加用户的拖拽覆盖值（acctColWidthOf）。
+  //   覆盖值**优先于**列定义里的 w —— 但只有一处来源，不会漂移
+  //   （见列宽那一节的注释：绝不在 CSS 里再写一份默认宽度）。
+  function acctColgroupHTML(cols, providerId) {
     return '<colgroup>' + cols.map((id) => {
-      const d = ACCT_COLUMN_DEFS[id];
-      return d && d.w ? `<col style="width:${d.w}px">` : '<col>';
+      const w = providerId ? acctColWidthOf(providerId, id) : ((ACCT_COLUMN_DEFS[id] || {}).w || 0);
+      return w ? `<col style="width:${w}px">` : '<col>';
     }).join('') + '</colgroup>';
   }
 
@@ -3809,7 +3845,197 @@ let loginProvider = '';
     if (d.from !== d.over) acctColsetMove(d.pid, d.from, d.over);
   });
 
-  // ---------------------------------------------------------------- 列设置（前缀覆盖）
+  // ---------------------------------------------------------------- 列宽拖拽
+  //
+  // 2026-10-19，照抄参考项目的 ui/table-columns.js:341-511（"拖动"那一节）。
+  // 它的注释里带了好几处**失败案例的出处**，正是这些让"抄"比"造"划算：
+  //
+  // ① **绝对量模型**（:413-422）—— 这条被引了三遍，是整节的题眼：
+  //      「**只动被拖的那一列**，其余列一律保持各自宽度 …… 曾经把它写成"重排"：
+  //        拖动时按比例压缩其余列、把总宽维持在容器内。那样拖宽一列就得从别处扣，
+  //        拖前面的列后面的变窄、拖后面的列前面的变窄，两边互相牵制，
+  //        结果是**永远拖不宽**。列宽是绝对量，不是一份要按比例分完的预算。」
+  // ② **上限只做防呆**（:404-405）：`max(MIN_WIDTH, total*2, startWidth)`。
+  //      同一个注释里记着两处历史故障 ——「模型管理页「拖不动」就是这一条；
+  //      请求日志的「错误列拖不动」是同一个成因」。凡是把上限算成
+  //      "其余列按预留下限占完还剩多少"，上限就会小于当前宽度、拖动整个失效。
+  // ③ **必须写表级 min-width**（:370-389）：行与表头都拿它当 min-width，
+  //      否则"其余列会被压成 0、表头消失"。
+  //      ⚠ 而且**不能**改用 CSS 的 max-content 顶这件事 —— 原话：
+  //        「那是按内容的固有宽度算的，同一列在表头（「用量」两个字）和数据行
+  //         （两行读数）里会算出两个宽度，表头与数据直接错位；而且列被内容撑开
+  //         就不再触发省略号。」
+  // ④ **指针事件 + setPointerCapture**（:435-447）：「**松手必须收得到**。
+  //      鼠标事件只在窗口内派发 —— 指针拖出窗口再松手，那次 mouseup 会被浏览器
+  //      丢掉，拖动就永远不结束。此后鼠标一动列宽就跟着走，表现为
+  //      「一按住列就自己往后拓宽」，且把手一直亮着。」
+  //      再加两道兜底：`buttons === 0` 立即收尾、`window blur` 收尾。
+  // ⑤ **按列 key 而不是索引**（:446-447）：「列设置能换顺序、能藏列，索引随时会变，
+  //      而 key 是稳定的身份（宽度覆盖值也是按 key 存的，两处口径一致）」。
+  // ⑥ **双击把手还原**（:499-510）：删掉覆盖值 ⇒ 它回到列定义里的默认宽度。
+  //
+  // ⚠ 与列设置是**两套互不相干的机制**（键名、存储、入口都分开）：
+  //   列设置管"哪些列、什么顺序"，这里管"每列多宽"。
+  // ⚠ 宽度**只有一处来源**：覆盖值（存盘）优先，否则用 ACCT_COLUMN_DEFS[id].w。
+  //   绝不在 CSS 里再写一份默认宽度 —— 那会造成漂移，症状是
+  //   「双击把手还原之后列宽跳到了另一个值」。
+  const ACCT_COLW_PREFIX = 'wb2api.acctcolw.';
+  // 与参考的 MIN_WIDTH 同一个语义：再窄就点不准里面的控件了。
+  const ACCT_COL_MIN_W = 36;
+
+  function acctColWidthsLoad(providerId) {
+    try {
+      const raw = localStorage.getItem(ACCT_COLW_PREFIX + providerId);
+      if (!raw) return {};
+      const v = JSON.parse(raw);
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+      // 只认数字项（坏项丢掉比整份作废更好：用户至少还能保住其它列）
+      const out = {};
+      for (const k of Object.keys(v)) {
+        const n = Number(v[k]);
+        if (isFinite(n) && n > 0) out[k] = Math.round(n);
+      }
+      return out;
+    } catch (e) { return {}; }
+  }
+
+  function acctColWidthsSave(providerId, overrides) {
+    try { localStorage.setItem(ACCT_COLW_PREFIX + providerId, JSON.stringify(overrides)); }
+    catch (e) { /* 隐私模式 */ }
+  }
+
+  // 内存缓存：acctColWidths 被每张表每次重绘调用（同列偏好那条理由）。
+  const _acctColW = new Map();
+  function acctColWidthsFor(providerId) {
+    let w = _acctColW.get(providerId);
+    if (!w) { w = acctColWidthsLoad(providerId); _acctColW.set(providerId, w); }
+    return w;
+  }
+  function acctColWidthsDrop(providerId) { _acctColW.delete(providerId); }
+
+  // 某一列的**最终**宽度：覆盖值 → 列定义的 w → 0（0 = 让 fixed 布局去分剩余空间）。
+  function acctColWidthOf(providerId, id) {
+    const ov = acctColWidthsFor(providerId);
+    if (ov[id]) return ov[id];
+    const d = ACCT_COLUMN_DEFS[id];
+    return (d && d.w) ? d.w : 0;
+  }
+
+  // 表格的 min-width（参考的 rowSpanOf:379-389 的简化版）：
+  // 固定列按各自最终宽度累加，每列至少 ACCT_COL_MIN_W（这样弹性列被压到极限时
+  // 也还占得住一点，不会让表头塌掉）。⚠ 现存列定义里没有列间距与内边距要补 ——
+  // 我们是 table 布局（不是参考那种 grid + gap），所以只有两边的 8px 内边距。
+  function acctTableMinWidth(providerId, cols) {
+    let sum = 0;
+    for (const id of cols) sum += Math.max(ACCT_COL_MIN_W, acctColWidthOf(providerId, id));
+    return Math.round(sum + 16);
+  }
+
+  // acctColWidthRepaint 把当前宽度落到**已有的** DOM 上（拖动中每帧都调）。
+  //
+  // ⚠⚠ 拖动中**不重建**表格（不调 renderAccounts）：那样每移动一像素都要重排
+  //   几十行 76 个账号，卡到不能用，而且会丢掉正被拖的那个把手（事件会话还在它
+  //   身上）。参考的 paint 之所以能全量重画，是因为它的表是 grid + 节点很少；
+  //   我们这里只写**两个**地方：
+  //     ① 每个 `<col>` 的 width（fixed 布局的真正依据）
+  //     ② 表格的 min-width（另一半，见 acctTableMinWidth 的注释）
+  //   两者都是幂等的 style 写入，没有 childList 变动。
+  function acctColWidthRepaint(providerId, table) {
+    const colEls = table.querySelectorAll('colgroup > col');
+    const grips = table.querySelectorAll('thead th .colgrip');
+    const ids = [];
+    for (let i = 0; i < grips.length; i++) ids.push(grips[i].dataset.colgrip);
+    for (let i = 0; i < ids.length; i++) {
+      const c = colEls[i];
+      if (!c) continue;
+      const w = acctColWidthOf(providerId, ids[i]);
+      if (w) c.style.width = w + 'px'; else c.style.width = '';
+    }
+    table.style.minWidth = acctTableMinWidth(providerId, ids) + 'px';
+  }
+
+  // 列宽拖拽的委托（一次挂，覆盖所有上游的所有表）。
+  //
+  // ⚠ 挂在 document 而不是某张表上：表是每次 renderAccounts 重建的，
+  //   挂在表上的监听会随节点一起丢。委托 + 从祖先找 table 就没有这个问题。
+  // ⚠ 全程按 `data-acctpid`（上游）与 `data-colgrip`（列 id）定位，
+  //   不用索引 —— 列设置能换顺序、能藏列（参考 :446-447 同一条）。
+  let _colwDrag = null;
+
+  document.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;                    // 只接左键（右键要弹菜单）
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const grip = t.closest('.colgrip');
+    if (!grip) return;
+    const table = grip.closest('table[data-acctpid]');
+    if (!table) return;
+    const pid = table.dataset.acctpid;
+    const key = grip.dataset.colgrip;
+    if (!pid || !key) return;
+    ev.preventDefault();
+
+    const startX = ev.clientX;
+    const startWidth = grip.parentElement.getBoundingClientRect().width;
+    // ⚠ 上限只做防呆，取两倍可用宽度（照抄参考 limitOf:404-405）。
+    //   绝不写成"其余列按预留下限占完还剩多少" —— 那个式子会小于当前宽度，
+    //   拖动整个失效（参考注释里记着两处故障：「模型管理页「拖不动」」）。
+    const avail = table.parentElement ? table.parentElement.clientWidth : window.innerWidth;
+    const limit = Math.max(ACCT_COL_MIN_W, Math.round(avail * 2), Math.round(startWidth));
+
+    grip.classList.add('active');
+    document.body.classList.add('colresizing');
+    // ⚠ 捕获让"拖出窗口再松手"也能收到 pointerup（参考 :435-447 那段的主题）。
+    //   捕获失败（合成事件 / 老内核）不影响功能 —— 下面还有全局监听那条路。
+    try { grip.setPointerCapture(ev.pointerId); } catch (e) { /* 退回全局监听 */ }
+    _colwDrag = { pid: pid, key: key };
+
+    const move = (mv) => {
+      // 兜底一：没按住任何键就不是在拖（捕获失效时事件会漏到这里）
+      if (mv.buttons === 0) { up(); return; }
+      const w = Math.min(Math.max(startWidth + mv.clientX - startX, ACCT_COL_MIN_W), limit);
+      // ⚠ **只动被拖的那一列**（绝对量模型）—— 其余列一律保持各自宽度，
+      //   装不下的部分交给整张表横向滚动。
+      acctColWidthsFor(pid)[key] = Math.round(w);
+      acctColWidthRepaint(pid, table);
+    };
+    const up = () => {
+      grip.classList.remove('active');
+      document.body.classList.remove('colresizing');
+      // 指针抬起时浏览器已自动释放捕获，再释放一次会抛 NotFoundError
+      try { grip.releasePointerCapture(ev.pointerId); } catch (e) { /* 已自动释放 */ }
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      window.removeEventListener('blur', up);
+      // ⚠ 只在松手时写盘（拖动中每帧写 localStorage 是同步 IO，会拖慢拖动）
+      acctColWidthsSave(pid, acctColWidthsFor(pid));
+      _colwDrag = null;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    // 兜底二：拖到一半切窗口/切标签，收不到 pointerup 也要收尾
+    window.addEventListener('blur', up);
+  });
+
+  // 双击把手还原这一列（参考 :499-510）：删掉覆盖值 ⇒ 回到列定义里的默认宽度，
+  // 腾出的空间由弹性列按 fixed 布局的规则吃掉。
+  document.addEventListener('dblclick', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const grip = t.closest('.colgrip');
+    if (!grip) return;
+    const table = grip.closest('table[data-acctpid]');
+    if (!table) return;
+    const pid = table.dataset.acctpid;
+    const key = grip.dataset.colgrip;
+    const ov = acctColWidthsFor(pid);
+    if (!ov[key]) return;                       // 本来就没覆盖值，无需还原
+    delete ov[key];
+    acctColWidthsSave(pid, ov);
+    acctColWidthRepaint(pid, table);
+  });
   //
   // 2026-10-19，照抄参考项目的 table-col-settings（ui-islands/src/islands/
   // table-col-settings.tsx + ui/css/table-col-settings.css）。
@@ -4016,7 +4242,19 @@ let loginProvider = '';
       //   所以既不会被表格的 overflow 裁掉，也不会被 section 的 overflow:hidden 影响
       //   —— 与操作列那个 ⋯（.ops-menu）同一条理由。
       + acctColsetHTML(g.provider)
-      + `<table class="accttable accttable--aligned">${acctColgroupHTML(cols)}<thead>${thead}</thead><tbody>${rows}</tbody></table>`
+      // ⚠ `style="min-width:Npx"` 是列宽拖拽**必须有**的一半（照抄参考的
+      //   rowSpanOf:379-389）：行与表头都拿它当 min-width。
+      //   不写它的话，把某一列拖宽之后 fixed 布局会从**别的列**里扣空间 ——
+      //   其余列被压成 0、表头消失。写了它，超出部分交给整张表横向滚动，
+      //   与"列宽是绝对量"这条语义一致。
+      //   `acctTableMinWidth` 是**现算**的（按当前列集与当前覆盖值），
+      //   不写死常数 —— 写死常数正是 3535-3536 那段引文里记的失败模式
+      //   （「原先它是 CSS 里一条写死的 min-width…它没拦住任何东西」）。
+      + `<div class="acctwrap">`
+      + `<table class="accttable accttable--aligned" data-acctpid="${esc(g.provider)}"`
+      + ` style="min-width:${acctTableMinWidth(g.provider, cols)}px">`
+      + `${acctColgroupHTML(cols, g.provider)}<thead>${thead}</thead><tbody>${rows}</tbody></table>`
+      + `</div>`
       + `</section>`;
   }
 
@@ -4042,7 +4280,12 @@ let loginProvider = '';
       return '<th></th>';
     }
     const t = d.tip ? ` title="${esc(d.tip)}"` : '';
-    return `<th${t}>${esc(d.title)}</th>`;
+    // ⚠ 列宽拖拽的把手（照抄参考 table-columns.js 的 .col-grip）：
+    //   贴在 th 的右缘、只有 7px 宽，不占列内容的空间。
+    //   `data-colgrip="<列 id>"` 是**稳定的身份** —— 委托处理时按它找列，
+    //   绝不按索引（列设置能换顺序、能藏列，索引随时会变；参考 :446-447 同一条）。
+    return `<th${t}>${esc(d.title)}<span class="colgrip" data-colgrip="${esc(id)}"`
+      + ` title="拖动调整这一列的宽度；双击还原"></span></th>`;
   }
 
   // accountGroupOpen 读账号分组的折叠状态。未知时**默认展开** ——
