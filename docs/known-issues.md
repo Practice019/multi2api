@@ -37,8 +37,43 @@ HTTP 503  45.4 秒
 | # | 改法 | 结果 |
 |---|---|---|
 | ① | 在 `status >= 400` **开头**判 `status == 400` ⇒ break | ⚠ **跳过内容拦截的降级路径**（内容拦截也是 400）⇒ **五个 `TestContentBlock*` 当场变红** ⇒ 撤回 |
-| ② | 在 `classifyErr` **之后**判 `status == 400 && kind != ErrKindContentBlocked` | ⚠ **未拦住**（仍 503、仍试遍 44 个号）⇒ 说明 `kind` 落在 ContentBlocked（上游对那个坏 body 的报文命中了内容拦截标记）⇒ 撤回 |
-| ③ | 在 `terr != nil` 里 `errors.As(terr, &ce)` 取 `*chatError` 判 `ce.Status == 400` | ⚠ **未命中**（`terr` 的真实类型待确认）⇒ 撤回 |
+| ② | 在 `classifyErr` **之后**判 `status == 400 && kind != ErrKindContentBlocked` | ⚠ **未拦住**（仍 503、仍试遍 44 个号）⇒ 撤回 |
+| ③ | 在 `terr != nil` 里 `errors.As(terr, &ce)` 判 `ce.Status == 400` | ⚠ **未命中**（`terr` 的真实类型待确认）⇒ 撤回 |
+
+### ⚠ 后续进展（2026-10-18 晚，在同一晚继续做）
+
+**分类层已经修好了**（按知识库 `experiences/错误分类落点判定` 的落点：各上游自己的分类器）：
+
+- `upstream.ErrKind` / `gateway.ErrorKind` 各追加末位一类 `ErrFatalClient` / `ErrKindFatalClient`
+  （⚠ **只追加不插入** —— 两处都有测试钉住取值稳定，且两套枚举必须同序）。
+- `internal/loomy/errorclassifier.go`：加 `markerInvalidRequest`（`invalid_request_error`）
+  与 `markerInvalidRequestCN`（`请求参数错误`）⇒ 归 `ErrKindFatalClient`。
+  ⚠ 两个形态都列：loomy 的报文里英文 type 与中文 message **同时出现**。
+- `internal/upstream/client.go`：加 `fatalClientMarkers`（上下文超限 + 参数错误两类）。
+- 三处镜像/对齐测试同步（`workbuddy` 的 `knownUpstreamKinds` 与翻译、`defaultupstream_test.go`、
+  `upstream_kind_mirror_test.go` 的 `probeFor`）—— ⚠ 它们**会拦住只改一边**。
+- 出口层：`status >= 400` 段里加 `kind == ErrKindFatalClient` ⇒ 回 400 + decision `fatal_client:client`。
+
+**实测证据（新二进制起 7864 打坏 body）**：
+
+```
+HTTP 503（4.5s）… upstream **fatal_client** …      ← ⚠ 分类确实生效了（原来是 client）
+```
+
+⇒ ⚠ ⚠ **但请求仍试遍 44 个号** —— 说明**这条请求走的不是 `status >= 400` 段**，
+   而是 `terr != nil` 段（报文格式 `upstream fatal_client (http 400): …` 正是 `chatError.Error()`）。
+
+**⚠ 下一次该从这里继续（别再从零试）**：
+
+1. **先加一行诊断**：在 `terr != nil` 段里打印 `%T` 与 `ce.Kind`（若能 `errors.As` 到），
+   ⚠ 一眼就能确认这条路径上 `terr` 到底是什么、Kind 是什么 —— 我已经用 `ce.Kind` 判过一次
+   而**未命中**，所以"它是不是 `*chatError`"这件事必须先确认，不该再猜。
+2. 若 `terr` **不是** `*chatError`：查 `internal/loomy` 的 provider 在非 2xx 时把什么放进了 err
+   （`client.go` 那条 `return io.NopCloser(bytes.NewReader(raw)), status, raw, nil` 说明
+   **非 2xx 本该走 status**；⚠ 与实测"走 terr"矛盾 —— 这本身就是个待解释的观察）。
+3. ⚠ **不要**再用 `ce.Status` 判（③ 就是这么失败的）。
+
+⚠ 触发条件：只在**故意构造的不合法 body**上复现，正常请求不受影响 ⇒ 优先级可低于线上故障。
 
 ### 下一步该查什么（⚠ 别再从零试）
 

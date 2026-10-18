@@ -1747,6 +1747,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastKind = gateway.ErrKindClient
 				break
 			}
+			// ⚠⚠ **确定性的客户端错误也走这条路**（2026-10-18 加）。
+			//
+			// # 为什么必须在这里判（而不是上面的 status >= 400 段）
+			//
+			// 实测：loomy 把 400 包成 `*chatError` **从 err 返回**（不是走 status），
+			// 报文长这样：`upstream fatal_client (http 400): {"error":{…}}` ——
+			// 于是它落到下面那句"网络层抖动 ⇒ 换号"，44 个账号全试了一遍。
+			//
+			// ⚠ 判据用 **Kind** 而不是 Status：上一版用 `ce.Status == 400` 判过，
+			// **没命中**（说明这个 chatError 的 Status 不是 400）——
+			// 而 classifyErr 已经把种类算出来了，直接信它更稳。
+			//
+			// ⚠ 这类错误换号/换提示词都没用：每个账号收到的是同一份 body。
+			// 直接回 400 结束，对齐 new-api 的 ErrOptionWithSkipRetry。
+			var ce *chatError
+			if errors.As(terr, &ce) && ce.Kind == gateway.ErrKindFatalClient {
+				st.status = http.StatusBadRequest
+				st.decision = "fatal_client:client"
+				lastErr = terr
+				lastKind = gateway.ErrKindFatalClient
+				break
+			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
@@ -1791,6 +1813,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// （每个账号背后是同一套策略），正确的动作是换提示词。
 			// 因此这里刻意**不调** applyErrorPolicy —— 它会把账号冷却/熔断，
 			// 而账号在这件事上没有任何过错。
+			if kind == gateway.ErrKindFatalClient {
+				// ⚠⚠ **上下文超限：不换号、不降级提示词，直接结束**（2026-10-18 加）。
+				//
+				// # 为什么它必须与内容拦截分开处理
+				//
+				// 内容拦截（ErrKindContentBlocked）的动作是"换提示词重试一次" ——
+				// 因为换一份措辞**可能**就过了。而上下文超限换什么都没用：
+				// 它是"这次请求的 body 太长"，换号（每个号收到的 body 一样长）、
+				// 换提示词（只会更长）都不会改变结果。
+				//
+				// # 不这么做的实测后果
+				//
+				// 它此前落到 ErrKindClient（"只换号不罚"）⇒ 我们用一份结构不合法的 body
+				// 打网关时，44 个账号**全试了一遍**（耗时 6.7s ~ 45s），
+				// 最后报成 `503 no_healthy_account —— 0 禁用、0 冷却`，
+				// 把"请求太长"误报成"池子故障"。
+				//
+				// ⚠ 这也正是用户说的"反复尝试没有额度的渠道或账号"的真身
+				// （见知识库 preferences/上下文超限与可重试判定）。
+				//
+				// 动作对齐 new-api 的 `ErrOptionWithSkipRetry`：回 400 并结束。
+				st.status = http.StatusBadRequest
+				st.decision = "fatal_client:client"
+				lastErr = &chatError{
+					Kind:   kind,
+					Status: status,
+					Msg:    string(respBody),
+				}
+				lastKind = kind
+				break
+			}
 			if kind == gateway.ErrKindContentBlocked {
 				if h.retryWithDegradedPrompt(w, st, reqProvider, acct.UID, status, respBody, &degradedTried) {
 					// 内容问题**不是账号问题**，所以这一轮的动作刻意与其它错误不同：
