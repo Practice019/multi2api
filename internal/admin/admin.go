@@ -2901,7 +2901,10 @@ func statsRangeFrom(key string) (time.Time, bool) {
 // 只有 last7d 有数（97.96%，与当时 /admin/stats 的 cache_hit_rate 一致）。
 // ⚠ 那说明**上游现在不再上报这两个字段** —— 不是本函数算错。
 func cacheRates(items []logbuf.Entry, now time.Time) map[string]any {
-	wins := make([]struct{ hit, miss int64 }, len(cacheWindowDur))
+	// ⚠ wins 里多一个 `n`：该窗口里**真的带缓存信息的行数**（供前端显示样本量）。
+	wins := make([]struct {
+		hit, miss, n int64
+	}, len(cacheWindowDur))
 	longest := cacheWindowDur[len(cacheWindowDur)-1]
 	for _, e := range items {
 		age := now.Sub(e.At)
@@ -2920,6 +2923,7 @@ func cacheRates(items []logbuf.Entry, now time.Time) map[string]any {
 				if m > 0 {
 					wins[i].miss += m
 				}
+				wins[i].n++ // ⚠ 行数（这一行真的带缓存信息）
 			}
 		}
 	}
@@ -2929,7 +2933,11 @@ func cacheRates(items []logbuf.Entry, now time.Time) map[string]any {
 		if !ok {
 			continue // ⚠ 分母 0 ⇒ 不输出这一档（前端显示 N/A，而不是一个假的 0%）
 		}
-		out[k] = map[string]any{"rate": r, "hit": wins[i].hit, "miss": wins[i].miss}
+		// ⚠ `n` = 这个窗口里**真的带缓存信息的行数**（2026-10-18 加）。
+		//   为什么必须给前端：用户看到「近 10 分钟 82%」而「近 7 天 98%」会问"是不是不统一" ——
+		//   ⚠ 其实两个窗口的**样本完全不同**（几行 vs 几千行）。把样本量摆出来，
+		//   读者才能自己判断"这个百分比有多可信"，而不是把两者当同一件事比。
+		out[k] = map[string]any{"rate": r, "hit": wins[i].hit, "miss": wins[i].miss, "n": wins[i].n}
 	}
 	return out
 }
