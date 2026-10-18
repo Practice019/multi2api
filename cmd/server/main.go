@@ -499,6 +499,14 @@ func main() {
 			// 用尽单调缩小到零；池子空了一轮请求都不发。所以它不是旧那种"所有账号
 			// 每 30 秒一轮"的预热 —— 见 StartFreePoolSweep 的说明。
 			lm.StartFreePoolSweep()
+	// 面板补数：把"还没进缓存"的 tasks/invite 行**持续**补上（每 60s 一轮、每轮限量）。
+	//
+	// ⚠ 为什么必须在服务端做（用户 2026-10-18 的原话："打开页面毫秒加载整个页面数据"）：
+	//   前端只请求当页，而 `?page=` 只从缓存取 ⇒ 没进缓存的行回 `stale: true`，
+	//   前端据此画「正在读取…」。⚠ 实测：第 2 页那 19 个号**一次都没被请求过**
+	//   （抓包里只有 `?page=1`）⇒ 它们永远停在「正在读取…」。
+	//   搬到服务端后，缓存持续保持填满 ⇒ 前端无论何时打开都是毫秒。
+	lm.StartPanelWarmup()
 			log.Fatalf("注册 Loomy 上游失败: %v", err)
 		}
 		log.Printf("loomy: 已启用（凭证目录 %s，基址 %s）", cfg.LoomyAuthDir, cfg.LoomyBaseURL)
