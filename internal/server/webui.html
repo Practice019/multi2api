@@ -233,6 +233,22 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .acctgroup > .ghead > .gacts .gact{padding:2px 8px;font-size:11px;font-weight:400}
   .acctgroup > table{width:100%;border-collapse:collapse}
   .acctgroup.collapsed > table{display:none}
+  /* 账号池主表：固定列宽布局（2026-10-19 照参考项目 Agent2API 移植）。
+     配 acctColgroupHTML 生成的 <colgroup> 用 —— 每个上游一张自己的表，
+     而 `table-layout:auto` 按**内容**算列宽 ⇒ 同一列在不同组里宽度不同，
+     上下摞在一起时竖向是错开的（实测 9 列里 8 列错开，最坏差 717px）。
+     固定布局 + 显式列宽让"列宽"从"每组各自算"变成"一处说了算"。
+
+     ⚠ 弹性列：`nickname` 不给宽度，fixed 布局下它平分剩余空间 —— 这是刻意的，
+       参考项目的原话是「其余列装的是长度固定的控件…一起伸缩只会让同一列在不同
+       窗口下忽宽忽窄，**纵向对齐就失去意义**」，所以全表只留这一个弹性列。
+
+     ⚠⚠ **为什么用了一个独立的修饰类而不是直接写在 `.accttable` 上**：
+       `.accttable` 还被 loomy 的「新手任务」表与「邀请码」表用着
+       （见 loadLoomyTasks / loadLoomyInvite 里的 `<table class="accttable">`），
+       而它们**没有 colgroup** —— 对没有列宽的 fixed 表，浏览器会把宽度平分，
+       那样反而比 auto 更糟。修饰类把影响面钉死在这一处。 */
+  .accttable--aligned{table-layout:fixed}
   /* ⚠ 这里**不能**有 tr.acctrow.collapsed{display:none} —— 加回来就是把回归带回来。
      折叠真正隐藏东西的地方是上面那条 `.acctgroup.collapsed > table`（整表隐藏）。
 
@@ -3245,21 +3261,45 @@ let loginProvider = '';
   //
   // ⚠ 加一列要同时改三处：gateway 的列 id 常量、DefaultAccountColumns、
   // 以及这里的 defs。少改一处不会报错（会在上面那条 warn 里出现）。
+  //
+  // # `w` —— 列宽（2026-10-19 照参考项目 Agent2API 移植）
+  //
+  // 每个上游一张自己的 <table>（`.acctgroup` 各自带 thead），而 `table-layout:auto`
+  // 是按**内容**算列宽的 ⇒ 同一列在不同组里宽度不同、**竖向看是错开的**。
+  // 实测（tests/frontend/shot_acct_align.js）：9 列里 8 列跨组错开，最坏的一列
+  // 左右差 717px —— 上下两组摞在一起时列会对不齐，滚动起来像在跳。
+  //
+  // 参考项目的解法是：**把列轨道从"每组自己算"提到"一处说了算"**。
+  // 它的原话（accounts-columns.ts:120-127）说明了为什么**只留一个弹性列** ——
+  //   「只有账号列在这一组里：它是全表唯一内容长度不可控的列（昵称 / uid / 邮箱），
+  //     该跟着窗口伸缩；其余十列装的是长度固定的控件…一起伸缩只会让同一列在不同
+  //     窗口下忽宽忽窄，**纵向对齐就失去意义**」
+  // 它还记了一次错法：曾经给账号列也写了固定 300px，表格宽度被钉成一个常数、
+  // 横向滚动条常驻、最右的操作列永远被切掉一截。
+  //
+  // ⇒ 本项目的对应做法：`w` 给固定像素，**只有 nickname 不给** ——
+  //   `table-layout:fixed` 下没有宽度的列会平分剩余空间，这正好就是"弹性列"。
+  //   昵称是这一行里唯一给人看、长度还不定的东西（`1p***63` 这种脱敏串长度会变）。
+  //
+  // ⚠ 宽度按"这列装的是什么"定，不是凑数：
+  //   uid 是 18 位数字（等宽字体）⇒ 168px；ops 要放「保活 + 删除」两个按钮 ⇒ 136px；
+  //   token 装的是「354 天」这类药丸 ⇒ 96px。改宽度时要连 shot_acct_align 一起看。
   const ACCT_COLUMN_DEFS = {
-    provider: { title: '上游' },
+    provider: { title: '上游', w: 96 },
+    // ⚠ 不给 w：全表唯一的弹性列（见上）
     nickname: { title: '昵称' },
-    uid: { title: 'UID' },
-    quota: { title: '额度', tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
+    uid: { title: 'UID', w: 168 },
+    quota: { title: '额度', w: 72, tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
     free_quota: {
-      title: '免费额度',
+      title: '免费额度', w: 88,
       tip: '会按自然日重置的那部分额度（Loomy 的每日赠送）还剩多少；不用就浪费，'
         + '所以在它用完之前不该动永久积分。'
         + '「—」表示这个上游不区分这一项、或这次没读到 —— 那不等于"已经用完"。',
     },
-    status: { title: '状态' },
-    token: { title: 'Token' },
+    status: { title: '状态', w: 84 },
+    token: { title: 'Token', w: 96 },
     token_expiry: {
-      title: 'Token 到期',
+      title: 'Token 到期', w: 88,
       // 这一列与「Token」刻意分开：Token 列读的是 `has_token`/`token_expire_sec`
       //（workbuddy 的 Bearer 形态），而 codearts 的凭证是 AK/SK/STS 三元组、
       // accessToken 恒为空 → 它落到「Token」列会永远是 `—`。
@@ -3267,18 +3307,38 @@ let loginProvider = '';
       tip: '凭证剩余有效期（上游上报的过期时刻）。短效凭证（如约 2 小时一轮的 STS）'
         + '到点前会自动续期；显示「—」表示这个上游没提供过期时间。',
     },
-    checkin: { title: '今日签到' },
+    checkin: { title: '今日签到', w: 88 },
     welfare: {
-      title: '福利',
+      title: '福利', w: 72,
       // ⚠ 语义必须严格按数据（见 welfareCellHTML）。
       tip: '今天有没有领过福利（依据是我们自己的领取记录，不是猜上游状态）。'
         + '显示「—」表示今天还没领过、或拿不到结果 —— 那**不等于**"没得领"。',
     },
-    success: { title: '成功' },
-    breaker: { title: '熔断' },
-    in_flight: { title: '在途' },
-    ops: { title: '操作' },
+    success: { title: '成功', w: 80 },
+    breaker: { title: '熔断', w: 72 },
+    in_flight: { title: '在途', w: 72 },
+    ops: { title: '操作', w: 136 },
   };
+
+  // acctColgroupHTML 生成与列集对应的 <colgroup>。
+  //
+  // # 为什么要它（这是"跨组对齐"的关键一步）
+  //
+  // 光有 `table-layout:fixed` 不够 —— 固定布局下**宽度仍然按每张表自己算**
+  // （没有宽度的列平分**本表**的剩余空间）。而各组列集不同、表宽也不同，
+  // 于是同一列还是会对不齐。参考项目的原话（accounts-columns.ts:186-215）：
+  //   「原先它是 CSS 里一条写死的 min-width…而账号列同时被钉着 300px ——
+  //     表格真实需要 1493px，1155 永远碰不到：**它没拦住任何东西**」
+  // ⇒ 宽度必须**随列集一起生成**，才有"一处说了算"。
+  //
+  // ⚠ 没给 w 的列（nickname）不写 width：fixed 布局会把它算成剩余空间，
+  //   这就是那个唯一的弹性列。
+  function acctColgroupHTML(cols) {
+    return '<colgroup>' + cols.map((id) => {
+      const d = ACCT_COLUMN_DEFS[id];
+      return d && d.w ? `<col style="width:${d.w}px">` : '<col>';
+    }).join('') + '</colgroup>';
+  }
 
   // DEFAULT_ACCT_COLUMNS 上游**没自报列集**时用的那一套。
   //
@@ -3448,7 +3508,7 @@ let loginProvider = '';
       + `<span class="gfolded-hint dim">${esc(n ? '' : accountEmptyNote(g.provider))}</span>`
       + `<span class="gacts">${accountGroupActions(g.provider)}</span>`
       + `</div>`
-      + `<table class="accttable"><thead>${thead}</thead><tbody>${rows}</tbody></table>`
+      + `<table class="accttable accttable--aligned">${acctColgroupHTML(cols)}<thead>${thead}</thead><tbody>${rows}</tbody></table>`
       + `</section>`;
   }
 
