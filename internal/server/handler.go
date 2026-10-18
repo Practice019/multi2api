@@ -1514,7 +1514,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 这一行是本次改动的**全部动机**：用户看到 503 时，日志里此前只有"503"这一个事实，
 			// 读者（包括我）只能猜 —— 2026-10-18 那天我为此猜了四轮（额度 / 容量 / 重试策略全错）。
 			// 现在这两条 `reason` 直接把"上游挂了"与"池子真空"分开，与上面两行的状态码判据同源。
-			if lastKind == gateway.ErrKindServer {
+			// ⚠⚠ **上游级熔断优先判**（2026-10-18 加）。
+			//
+			// 账号级熔断的聚合效应是：某个上游整体坏了（实测 loomy 10-17 失败率 26%）时，
+			// 它 44 个号会被逐个喂 NoteError、逐个熔断 —— 在"全熔断"之前，
+			// 每个请求都要**白试若干个号**才失败。上游级熔断把"这个上游现在整体不通"
+			// 变成**即时可知**的事实（见 pool 的 provState 注释）。
+			//
+			// ⚠ 语义：这是**上游故障**（客户端该重试），所以回 502 而不是 503 ——
+			// 与下面 `lastKind == ErrKindServer` 那条同一口径，只是判据更早、更准。
+			// ⚠ 这条判断**必须在 `lastKind` 那条之前**：上游熔断时 lastKind 往往是 None
+			// （请求在选号阶段就失败了，还没打上游），落到 else 会被报成"池子空了"。
+			if _, tripped := h.cfg.Pool.ProviderTripped(reqProvider); tripped {
+				st.status = http.StatusBadGateway
+				st.decision = "provider_breaker:system"
+			} else if lastKind == gateway.ErrKindServer {
 				st.decision = "upstream_5xx:system"
 			} else {
 				st.decision = "pool_unavailable:global"

@@ -354,6 +354,21 @@ type snapshot struct {
 type Pool struct {
 	mu      sync.RWMutex
 	byUID   map[string]*entry
+	// provState 上游级熔断状态（2026-10-18 加）。⚠ 懒建（nil 表示"还没有失败过"）。
+	//
+	// # 为什么需要它（用户原话与实测数据）
+	//
+	// 用户："他在尝试无额度的渠道或账号…我希望可以让轮询变得和使用单个账号一样。"
+	// ⚠ 而账号级熔断的**聚合效应**是：某个上游整体坏了（实测 loomy 10-17 失败率 26%）
+	//   时，它 44 个号会被**逐个**喂 NoteError、逐个熔断 ⇒
+	//   在"全熔断"之前，每个请求都要**白试若干个号**才失败。
+	//   ⇒ 上游级熔断让"这个上游现在整体不通"变成一个**即时可知**的事实，
+	//     不必等 44 个号走完一遍。
+	//
+	// ⚠ 但**不改变对外语义**：它只提供"上游现在是否整体熔断"的查询，
+	//   由出口层据此决定状态码与判决留痕（⚠ 避免把"上游坏"报成"池子空了" ——
+	//   那正是我们前几轮反复修的那类语义错）。
+	provState map[string]*provState
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
 
@@ -1830,6 +1845,96 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.breakerUntil = time.Now().Add(d)
 }
 
+// provState 上游级熔断状态。形状与账号级（entry 的 fails/retryCount/breakerUntil）**同构**，
+// 退避算法也照抄 recordBreakerFailureLocked —— ⚠ 这样两级的"多久恢复"行为一致，不必记两套规则。
+type provState struct {
+	fails        int
+	retryCount   int
+	breakerUntil time.Time
+	lastErr      time.Time
+}
+
+// noteProviderFailureLocked 喂一次上游级失败（⚠ 调用方需已持 p.mu）。
+//
+// ⚠ 与账号级**同一套**判定：时间窗外的失败先清零（只累计突发）、达阈值才熔断、退避指数倍增。
+// ⚠ 阈值/时长直接复用 `p.breakerThreshold` / `p.breakerCooldown` / `p.breakerCooldownMax`
+// —— 上游级与账号级用同一组参数，避免出现"账号 3 次熔断、上游 5 次才熔断"这种第二个真相。
+func (p *Pool) noteProviderFailureLocked(provider string, now time.Time) {
+	// ⚠⚠ **不能**把 "" 当"没有上游上下文"的哨兵（2026-10-18 修，单测抓到的）。
+	//
+	// 起因：`const DefaultProvider = ""` —— **空串就是默认上游的标识**。
+	// 而这里第一版写的是 `if provider == "" { return }` ⇒
+	// ⚠ **默认上游永远不参与上游级熔断** ⇒ 单上游部署下这条功能**整个失效**
+	//   （而它恰恰是最需要这条功能的情形：只有一个上游，坏了就没别的可换）。
+	// ⇒ 归一化必须与 `providerOf` / `normalizeProvider` **同一口径**：空串 ⇒ 默认上游。
+	provider = p.normalizeProvider(provider)
+	if p.provState == nil {
+		p.provState = map[string]*provState{}
+	}
+	st := p.provState[provider]
+	if st == nil {
+		st = &provState{}
+		p.provState[provider] = st
+	}
+	// ⚠⚠ **只在"有上一次失败"时才做时间窗衰减**。
+	//
+	// 这里踩过一次：第一版与账号级同款写成 `time.Since(st.lastErr) > window`，
+	// 而 `st.lastErr` 的零值会让 `time.Since(零值)` 变成天文数字 ⇒ 每次进来都先清零
+	// ⇒ **计数永远到不了阈值**（单测 TestProviderBreakerTripsAfterThreshold 直接抓住）。
+	// ⚠ 账号级没有这个问题只是因为 `entry.lastErr` 在别处早被设过，不是它「对」。
+	if !st.lastErr.IsZero() && breakerFailureWindow > 0 && now.Sub(st.lastErr) > breakerFailureWindow {
+		st.fails = 0
+	}
+	st.lastErr = now
+	st.fails++
+	if st.fails < p.breakerThreshold {
+		return
+	}
+	d := p.breakerCooldown
+	for i := 0; i < st.retryCount; i++ {
+		d *= 2
+		if d >= p.breakerCooldownMax {
+			d = p.breakerCooldownMax
+			break
+		}
+	}
+	st.fails = 0
+	st.retryCount++
+	st.breakerUntil = now.Add(d)
+}
+
+// noteProviderSuccessLocked 一次成功清掉该上游的失败线。
+// ⚠ 与账号级 NoteSuccess 同一哲学（那里的注释写着"一次成功证明…"）：
+//   不清的话，跨天的无关抖动会一路攒到阈值，把健康的上游误判成熔断。
+func (p *Pool) noteProviderSuccessLocked(provider string) {
+	if p.provState == nil {
+		return
+	}
+	// ⚠ 同样归一化（空串 = 默认上游）—— 见 noteProviderFailureLocked 里那段教训。
+	if st := p.provState[p.normalizeProvider(provider)]; st != nil {
+		st.fails = 0
+		st.retryCount = 0
+		st.breakerUntil = time.Time{}
+	}
+}
+
+// ProviderTripped 报告某上游是否处于**整体熔断**期；ok=false 表示没有该上游的失败记录或已恢复。
+//
+// ⚠ 只读查询，供出口层在"选不出号"时区分"**上游整体不通**"与"**池子真的空了**" ——
+// 两者对外状态码与判决留痕都不同（见 handler 里那段 502/503 判据）。
+func (p *Pool) ProviderTripped(provider string) (time.Time, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.provState == nil {
+		return time.Time{}, false
+	}
+	st := p.provState[p.normalizeProvider(provider)]
+	if st == nil || st.breakerUntil.IsZero() || !time.Now().Before(st.breakerUntil) {
+		return time.Time{}, false
+	}
+	return st.breakerUntil, true
+}
+
 // CooldownUntilNextReset 冷却到调用方给出的"下次重置时刻"。
 //
 // # 为什么改成通用形式（Task 3c 的解耦收尾）
@@ -2005,6 +2110,9 @@ func (p *Pool) NoteError(uid string) {
 		}
 		e.lastErr = time.Now()
 		p.recordBreakerFailureLocked(e)
+		// ⚠ 上游级同样喂一次（2026-10-18 加）—— 见 noteProviderFailureLocked 的注释：
+		// 账号级熔断的聚合效应是"上游整体坏了也要等 44 个号逐个熔断"，上游级让它即时可知。
+		p.noteProviderFailureLocked(p.providerOf(e), e.lastErr)
 		p.dirty.Store(true)
 	}
 }
@@ -2030,6 +2138,8 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.sessionDeadStreak = 0
 		// 凭证续期失败计数同样清零（A2 移植，见 health.go）：一次成功说明 token 又活了。
 		e.refreshFails = 0
+		// ⚠ 上游级失败线同样清零：一次成功证明"这个上游现在是通的"。
+		p.noteProviderSuccessLocked(p.providerOf(e))
 		p.dirty.Store(true)
 	}
 }
