@@ -289,6 +289,49 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      它是一个"看着表格点一个动作"的小浮层，不该有模态感（参考项目同一理由：
      tsx:541「面板不该有遮罩、不该锁滚动」）。 */
   .ops-menu::backdrop{background:transparent}
+  /* ── 账号池「列设置」浮层（2026-10-19，照抄参考项目的 table-col-settings）────────
+     参考：ui-islands/src/islands/table-col-settings.tsx:538-634 +
+           ui/css/table-col-settings.css。
+     它的形态是：非模态浮层（无遮罩、不锁滚动），表头「列 / 显示」，行 = ⋮⋮手柄 +
+     列名 + 开关，页脚 = 拖动提示 + 恢复默认。我们零依赖，等价物是：
+       Popover      → 原生 `popover`（顶层图层，不被表格的 overflow 裁掉）
+       Switch       → <input type=checkbox>
+       PopoverContent 的 w-[336px] → .colset{width:336px}
+     对齐那一列**没抄**：参考的对齐是给"内容靠哪边"用的，而我们的列宽已经定死
+     （见 ACCT_COLUMN_DEFS 的 w），数字列天然右对齐，再加一层开关是多余动作。 */
+  .colset-btn{display:inline-flex;align-items:center;gap:4px}
+  .colset{position:fixed;margin:0;width:336px;padding:0;
+    border:1px solid var(--line);border-radius:10px;background:var(--panel);
+    box-shadow:0 10px 28px rgba(0,0,0,.42)}
+  /* ⚠ 与 .ops-menu 同一条理由：popover 默认的 ::backdrop 会把整页压暗，
+     而这是「看着表格调表格」的浮层（参考原话 tsx:541「面板不该有遮罩、
+     不该锁滚动」），所以遮罩必须透明。 */
+  .colset::backdrop{background:transparent}
+  .colset-head,.colset-row{display:grid;align-items:center;gap:8px;
+    grid-template-columns:16px minmax(84px,1fr) 40px}
+  .colset-head{padding:9px 12px 7px;border-bottom:1px solid var(--line);
+    font-size:10.5px;font-weight:600;letter-spacing:.05em;color:var(--dim)}
+  .colset-head span:nth-child(2),.colset-head span:nth-child(3){text-align:center}
+  /* 列多时面板不跟着长，行区自己滚（参考 tsx:581 的 min-h-0 overflow-y-auto） */
+  .colset-rows{max-height:min(52vh,420px);overflow-y:auto;padding:4px 12px}
+  .colset-row{padding:5px 0;border-radius:6px}
+  .colset-row:hover{background:color-mix(in srgb,var(--fg) 5%,transparent)}
+  .colset-row.dragging{opacity:.5}
+  .colset-grip{cursor:grab;color:var(--dim);opacity:.5;text-align:center;
+    user-select:none;line-height:1}
+  .colset-grip:hover{opacity:1}
+  .colset-grip:active{cursor:grabbing}
+  .colset-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:12px}
+  .colset-row input[type=checkbox]{justify-self:center;margin:0;cursor:pointer}
+  /* ⚠ 最后一列关不掉（照抄参考 tsx:476-479 的理由：
+     「全隐藏之后表格只剩空壳，用户得先想起「是我自己关的」才能从面板里找回来。
+       关不掉比关得掉再懊恼一次好」）—— 视觉上也禁掉，不只是拦逻辑。 */
+  .colset-row input[type=checkbox]:disabled{cursor:not-allowed;opacity:.35}
+  .colset-foot{display:flex;align-items:center;gap:8px;
+    padding:8px 12px 9px;border-top:1px solid var(--line);font-size:11px;color:var(--dim)}
+  .colset-foot .spacer{flex:1}
+  .colset-empty{padding:14px 12px;font-size:12px;color:var(--dim)}
   /* ⚠ 顶部那个「Δ」定位是把 left/top 交给下面那段 JS 算（见 bindOpsPopover），
      所以这里**不能**写 inset/top/left —— 写了就把 UA 的默认定位覆盖成 0,0，
      面板会跑到页面左上角（实测过一次：getBoundingClientRect 返回 [0,0,102,39]）。 */
@@ -3366,12 +3409,21 @@ let loginProvider = '';
     // ⚠ 每项**各自**按数据驱动决定出不出（全部签到要 batch+all_url、
     // 添加账号要 login、批量导入要 `import` 能力位、额度要 quota-probe）——
     // 次序固定，但"没有就不渲染"这条不变（那正是假按钮的防线）。
+    //
+    // ⚠ 「列设置」排在最末，与上面那五个**动作**分开看：前五个都对上游发请求
+    //   （会改数据），这一个只改**本机这台浏览器的显示**（不改任何上游状态）。
+    //   参考项目也是把它做成一枚独立的图标按钮、不在动作组里（tsx:505-536）。
+    //   我们零依赖没有图标体系，所以用文字按钮、并在 title 里说清"只影响本机"。
+    const colsBtn = `<button class="gact colset-btn" popovertarget="acctcols-${esc(providerId)}"`
+      + ` title="选择这张表显示哪些列、以及它们的顺序；设置只存在本机这台浏览器，不改上游数据">`
+      + `列设置</button>`;
     return gDailyAll
       + addBtn
       + noLoginNote
       + importBtn
       + gQuotaBtn
-      + reloadBtn;
+      + reloadBtn
+      + colsBtn;
   }
 
   // ---------------------------------------------------------------- 账号池列注册表
@@ -3503,7 +3555,11 @@ let loginProvider = '';
     'checkin', 'success', 'ops',
   ];
 
-  // acctColumnsFor 取某上游的列集（有序）。
+  // acctColumnsDeclared 上游**声明**的列集（后端 manifest 下发），不含用户偏好。
+  //
+  // 这段是原来 acctColumnsFor 的全部内容，抽出来是为了：
+  //   · 列设置面板要拿"声明顺序"当合并基准（见 acctColPrefNormalize 的规则②）
+  //   · 内存缓存的键要能随声明变化而自动失效（后端改了 manifest 不必手动清）
   //
   // 缺省（该上游没自报）= DEFAULT_ACCT_COLUMNS。
   // 这与"自报了一个空数组"是两件不同的事：后者是明确说"一列都不要"。
@@ -3512,7 +3568,7 @@ let loginProvider = '';
   //
   // 原先"跳过未知列"是**两处各自做**的：`acctThHTML` 遇到未知 id 返回 ''、
   // `accountRow` 的 `cells[id]` 查不到就 filter 掉。两条路径互不知情 ——
-  // 它们**恰好**用同一套规则，所以本次实测 th/td 都是 7、配平侥幸成立。
+  // 它们**恰好**用同一套规则，所以当时实测 th/td 都是 7、配平侥幸成立。
   //
   // 那不是不变量，是巧合：只要有人给 `acctThHTML` 补一个占位分支
   //（比如返回 `<th></th>`），th 就变 8 而 td 仍是 7，
@@ -3520,20 +3576,312 @@ let loginProvider = '';
   //
   // 所以"哪些列可见"只在这里判**一次**，thead 与 tbody 共用同一个数组 ——
   // 结构上不可能出现"表头跳了、单元格没跳"。
-  function acctColumnsFor(providerId) {
+  // ⚠ 加了列设置之后这条**更关键**了：用户拖动/勾选改的是 items，
+  //   而 items 经过 acctColItemsFor → acctColumnsFor 之后是**同一个数组**，
+  //   thead 与 tbody 不可能拿到两份不同的结果。
+  function acctColumnsDeclared(providerId) {
     const info = providerInfo(providerId);
     const raw = info && Array.isArray(info.accounts_columns) ? info.accounts_columns : null;
-    // 未自报（undefined）→ 默认列集。
-    // 自报空数组 → **照做**（"我一列都不要"），不回落默认
-    //（后端 gateway.AccountColumnsExt 的注释把这两件事分得很清楚，
-    //  前端以前把 `[]` 也折叠成默认，与那份契约不符）。
-    if (!raw) return DEFAULT_ACCT_COLUMNS;
+    if (!raw) return DEFAULT_ACCT_COLUMNS.slice();
     for (const id of raw) {
       if (!ACCT_COLUMN_DEFS[id]) {
         console.warn('账号池：未知的列 id ' + id + ' —— 已跳过该列（检查 manifest 与列注册表）');
       }
     }
     return raw.filter((id) => !!ACCT_COLUMN_DEFS[id]);
+  }
+
+  // _acctColItems 列偏好的**内存缓存**。
+  //
+  // ⚠ 为什么必须有：acctColumnsFor 在渲染时被**每个分组、每次重绘**调用，
+  //   而底层要读 localStorage（同步 IO）+ JSON.parse。账号池 12 个分组、
+  //   76 行，每重绘一次就是几十次同步读 —— 单看不出来，滚动时会明显卡。
+  //   缓存键带上"声明列集"，manifest 改了列之后键就变了、自动失效，
+  //   不需要任何手动的 invalidate 调用（少一个会忘记的地方）。
+  //   ⚠ 用户改列设置时**必须**调 acctColItemsDrop（见 toggleAcctCol 等）。
+  const _acctColItems = new Map();
+
+  function acctColItemsFor(providerId) {
+    const declared = acctColumnsDeclared(providerId);
+    const key = providerId + '|' + declared.join(',');
+    let items = _acctColItems.get(key);
+    if (!items) {
+      items = acctColPrefNormalize(providerId, declared);
+      _acctColItems.set(key, items);
+    }
+    return items;
+  }
+
+  function acctColItemsDrop(providerId) {
+    for (const k of Array.from(_acctColItems.keys())) {
+      if (k.indexOf(providerId + '|') === 0) _acctColItems.delete(k);
+    }
+  }
+
+  // acctColumnsFor 本组**当前要渲染的列 id**（顺序已含用户偏好）。
+  // thead 与 tbody 都用它。
+  function acctColumnsFor(providerId) {
+    return acctColPrefVisible(acctColItemsFor(providerId));
+  }
+
+  // ---------------------------------------------------------------- 列设置浮层
+  //
+  // 照抄参考的 table-col-settings.tsx:538-634，零依赖等价物：
+  //   Popover(modal=false)          → 原生 popover（::backdrop 透明 = 非模态）
+  //   PopoverContent w-[336px]      → .colset{width:336px}
+  //   表头「列 / 显示」+ 行 + 页脚   → 同
+  //   Switch                        → <input type=checkbox>
+  //   手柄 span onPointerDown       → .colset-grip（指针事件，见下）
+  //   「恢复默认」Button            → 同
+  //
+  // ⚠ 面板 HTML 放在**分组行内部**（紧跟那颗按钮），但正是因为它走的是 popover
+  //   顶层图层，放在哪里都不会被表格的 overflow 裁掉 —— 与操作列那个 ⋯ 同一条理由。
+  function acctColsetHTML(providerId) {
+    const items = acctColItemsFor(providerId);
+    const pid = esc(providerId);
+    const id = 'acctcols-' + pid;
+    // ⚠ 只有一个可见列时，那一列的开关**禁用**（参考 tsx:476-479 原话：
+    //   「全隐藏之后表格只剩空壳，用户得先想起「是我自己关的」才能从面板里找回来。
+    //     关不掉比关得掉再懊恼一次好」）。逻辑上也拦一道（见 toggleAcctCol），
+    //   视觉上禁掉是为了让用户**当场**知道原因，而不是点了没反应。
+    const onlyOne = items.filter(it => it.v).length <= 1;
+    const rows = items.map((it) => {
+      const d = ACCT_COLUMN_DEFS[it.k] || { title: it.k };
+      const lock = onlyOne && it.v;
+      return `<div class="colset-row" data-colsrow="${esc(it.k)}">
+        <span class="colset-grip" data-colsgrip="${esc(it.k)}" title="按住拖动调整列顺序">⋮⋮</span>
+        <span class="colset-name" title="${esc(d.title)}">${esc(d.title)}</span>
+        <input type="checkbox" data-colstoggle="${esc(it.k)}"${it.v ? ' checked' : ''}`
+        + `${lock ? ' disabled' : ''} title="${lock ? '至少要留一列' : (it.v ? '这一列正在显示' : '这一列已隐藏')}">`
+        + `</div>`;
+    }).join('');
+    return `<div id="${id}" popover class="colset">
+      <div class="colset-head"><span></span><span>列</span><span>显示</span></div>
+      <div class="colset-rows">${rows || '<div class="colset-empty">该上游没有可配置的列。</div>'}</div>
+      <div class="colset-foot">
+        <span>拖动 ⋮⋮ 调整顺序</span><span class="spacer"></span>
+        <button data-colsreset="${pid}" style="padding:2px 9px;font-size:11px">恢复默认</button>
+      </div>
+    </div>`;
+  }
+
+  // acctColRedraw 换列之后的重绘。
+  //
+  // ⚠⚠ 这里**不要**调 `refresh()`（11075）。那是个**全量**刷新：它内部会打
+  //    `/admin/stats`，而本文件 11164-11168 的注释记着实测数据 ——「单次
+  //    `/admin/stats` 要 **7 秒**（它内部对每个已注册上游调一次 ModelCatalog，
+  //    会同步回源）」。为了"换一列显示"付 7 秒、还顺带刷新一堆无关面板，
+  //    显然不合适。
+  //
+  // ⚠ 用 `sharedGet`（它自带本地缓存，AGENTS 第 9 条）而不是直接 `admin()`：
+  //   换列**不需要新数据** —— 同一份 accounts，只是挑哪几列画出来。
+  //   命中缓存时这次重绘是同步完成的，没有任何等待。
+  //
+  // ⚠⚠ 这段是本轮**实测抓到的 bug**：第一版我写的是 `loadAccounts()`，
+  //    而这个文件里**根本没有**这个函数（全文件唯一的账号表重绘入口是
+  //    `renderAccounts(list)`，它要数据）。后果是 acctColsetToggle 一路走到
+  //    `acctColsetApply` 就抛 `ReferenceError: loadAccounts is not defined`，
+  //    存盘成功、但**界面不动** —— 表现是"点了没反应"。
+  //    ⚠ 同一个坑这个项目**踩过一次**：4572 行的注释写着上一版某个按钮点下去
+  //      「必抛 `refreshAccounts is not defined`，界面只显示"刷新本上游额度失败：
+  //       refreshAccounts is not defined"」。所以这里除了修，还加了一条 console
+  //      兜底，让同类问题下次一眼可见。
+  async function acctColRedraw() {
+    try {
+      const r = await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'));
+      if (r && Array.isArray(r.accounts)) { renderAccounts(r.accounts); return; }
+    } catch (e) {
+      console.warn('列设置：重绘时取账号列表失败（列偏好已存下，下次刷新会生效）：', e);
+    }
+    // 拿不到数据也不该让开关白点：至少把当前这套偏好写进 DOM 一次。
+    // renderAccounts 是唯一的绘制入口，没有数据就跳过 —— 但给一句提示。
+    toast('列设置已保存，但这次没能重绘（拿不到账号列表）；刷新页面即可生效', true);
+  }
+
+  // acctColsetApply 写回偏好并重绘账号池。
+  //
+  // ⚠ 三件事的顺序不能错：
+  //   ① 先写 localStorage（唯一事实来源）
+  //   ② 再清内存缓存（否则下一个读到的还是旧 items）
+  //   ③ 最后才重绘 —— 重绘时 acctColumnsFor 会重算，表头与单元格同时更新
+  function acctColsetApply(providerId, items) {
+    acctColPrefSave(providerId, items);
+    acctColItemsDrop(providerId);
+    acctColRedraw();
+  }
+
+  function acctColsetToggle(providerId, key, next) {
+    const items = acctColItemsFor(providerId).map(it => ({ k: it.k, v: it.v }));
+    const it = items.find(x => x.k === key);
+    if (!it) return;
+    // ⚠ 拦"关掉最后一列"（面板里那颗开关也 disabled 了，这是第二道）
+    if (!next && items.filter(x => x.v).length <= 1) {
+      toast('至少要留一列 —— 全关了表格就只剩空壳', true);
+      return;
+    }
+    it.v = next;
+    acctColsetApply(providerId, items);
+  }
+
+  function acctColsetMove(providerId, fromKey, toKey) {
+    const items = acctColItemsFor(providerId).map(it => ({ k: it.k, v: it.v }));
+    const fi = items.findIndex(x => x.k === fromKey);
+    const ti = items.findIndex(x => x.k === toKey);
+    if (fi < 0 || ti < 0 || fi === ti) return;
+    const [moved] = items.splice(fi, 1);
+    // 移到"目标那一行"的位置：往下拖时插到它后面、往上拖时插到它前面
+    //（这样手感和拖放一致：松手时被拖的那行就落在目标行原本的位置上）
+    items.splice(fi < ti ? ti : ti, 0, moved);
+    acctColsetApply(providerId, items);
+  }
+
+  function acctColsetReset(providerId) {
+    try { localStorage.removeItem(ACCT_COLPREF_PREFIX + providerId); } catch (e) { /* 隐私模式 */ }
+    acctColItemsDrop(providerId);
+    acctColRedraw();
+  }
+
+  // 列设置浮层的**事件委托**（一次性挂，覆盖所有上游的所有面板）。
+  //
+  // ⚠ 全部用委托而不是逐面板绑定：面板是渲染时现拼的字符串，
+  //   每次 loadAccounts 都会换一批新节点，逐面板绑必然漏。
+  document.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const tog = t.closest('input[data-colstoggle]');
+    if (tog) {
+      const sec = tog.closest('[data-colsrow]');
+      const panel = tog.closest('.colset');
+      if (!sec || !panel) return;
+      // ⚠ 面板 id 形如 acctcols-<providerId>；providerId 里可能有冒号
+      //   （如 workbuddy:init），所以只切掉前缀、不做 split。
+      const pid = panel.id.replace(/^acctcols-/, '');
+      acctColsetToggle(pid, sec.dataset.colsrow, tog.checked);
+      return;
+    }
+    const rst = t.closest('button[data-colsreset]');
+    if (rst) { acctColsetReset(rst.dataset.colsreset); return; }
+  });
+
+  // 拖动排序：**不用 HTML5 拖放**，用指针事件。
+  //
+  // ⚠ 参考 tsx:49-53 记的原话：「HTML5 拖放的会话绑在**那个节点**上，一重画就断；
+  //   指针事件的状态只在 JS 变量里，节点换掉不影响会话」。
+  //   不过我们这里更简单 —— 松手即重排即重绘，会话期间不重画，
+  //   所以两边的坑都没踩到。
+  //
+  // ⚠ 只做"落点用 pointerenter 记录、pointerup 一次提交"：
+  //   拖动过程中**不写盘、不重绘**（参考 tsx:500-501 原话：
+  //   「每跨一行都重绘表格会很吵」）。
+  let _colsetDrag = null;
+
+  document.addEventListener('pointerdown', (ev) => {
+    const g = ev.target;
+    if (!g || !g.closest) return;
+    const grip = g.closest('[data-colsgrip]');
+    if (!grip || ev.button !== 0) return;
+    const panel = grip.closest('.colset');
+    if (!panel) return;
+    ev.preventDefault();
+    _colsetDrag = {
+      pid: panel.id.replace(/^acctcols-/, ''),
+      from: grip.dataset.colsgrip,
+      over: grip.dataset.colsgrip,
+      panel: panel,
+    };
+    const row = grip.closest('.colset-row');
+    if (row) row.classList.add('dragging');
+  });
+
+  document.addEventListener('pointermove', (ev) => {
+    if (!_colsetDrag) return;
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const row = el && el.closest ? el.closest('[data-colsrow]') : null;
+    if (row && row.dataset.colsrow) _colsetDrag.over = row.dataset.colsrow;
+  });
+
+  document.addEventListener('pointerup', () => {
+    if (!_colsetDrag) return;
+    const d = _colsetDrag;
+    _colsetDrag = null;
+    const row = d.panel.querySelector('.colset-row.dragging');
+    if (row) row.classList.remove('dragging');
+    if (d.from !== d.over) acctColsetMove(d.pid, d.from, d.over);
+  });
+
+  // ---------------------------------------------------------------- 列设置（前缀覆盖）
+  //
+  // 2026-10-19，照抄参考项目的 table-col-settings（ui-islands/src/islands/
+  // table-col-settings.tsx + ui/css/table-col-settings.css）。
+  //
+  // # 数据形状与为什么是 {key,visible} 而不是"只存可见的 key 数组"
+  //
+  // 参考用的是 `{key, visible, align}[]`，**数组顺序就是用户拖出来的顺序**；
+  // 列被隐藏时**留在数组里**、只是 visible=false。
+  // 这不是随手定的 —— 它解决的是"藏了再显示，那一列跑到最后去了"：
+  // 只存"可见的 key"的话，重新勾上时它在存盘里没有位置，只能追加到末尾。
+  // 参考的决策 10 记的是同一个坑的另一面（新增列要插到**声明位**而不是追加，
+  // 因为"列的位置有时是语义的"）。
+  //
+  // ⚠ 我们比参考**少一个 align**：我们的列宽是定死的（见 ACCT_COLUMN_DEFS 的 w），
+  //   数字列天然右对齐，再加一层"靠哪边"的开关是多余动作。
+  const ACCT_COLPREF_PREFIX = 'wb2api.acctcols.';
+
+  function acctColPrefLoad(providerId) {
+    try {
+      const raw = localStorage.getItem(ACCT_COLPREF_PREFIX + providerId);
+      if (!raw) return null;
+      const v = JSON.parse(raw);
+      if (!Array.isArray(v)) return null;
+      // 只认形状对的项；形状坏掉的整份当没存过（比半个配置更可预期）。
+      const ok = v.every(it => it && typeof it.k === 'string' && typeof it.v === 'boolean');
+      return ok ? v : null;
+    } catch (e) { return null; /* 隐私模式 / 坏 JSON */ }
+  }
+
+  function acctColPrefSave(providerId, items) {
+    try {
+      localStorage.setItem(ACCT_COLPREF_PREFIX + providerId, JSON.stringify(items));
+    } catch (e) { /* 隐私模式：不持久化，但本次会话内仍然按内存里的用 */ }
+  }
+
+  // acctColPrefNormalize 把「存盘的偏好」与「当前列集」合成一份可用的 items。
+  //
+  // 三条规则（前两条逐条对应参考的 normalize，tsx:170-226）：
+  //   ① 存盘里有、但**当前列集里已不存在**的 key → 丢弃
+  //      （上游改了 manifest、或列注册表删了某列时，存盘里会留下死键）
+  //   ② 当前列集里有、存盘里**没有**的 key（新加的列）→ 插到
+  //      「它在声明顺序里的前驱之后」，而不是一律追加到末尾
+  //      —— 参考 tsx:180-182 原话：「列的位置有时是语义的（账号表的代理列声明在
+  //      「账号」与「连接数」之间），追加到末尾会让已存过配置的老用户看到的
+  //      默认位置与预期不符」
+  //   ③ 顺序**以存盘为准**
+  function acctColPrefNormalize(providerId, declared) {
+    const saved = acctColPrefLoad(providerId);
+    if (!saved) return declared.map(k => ({ k: k, v: true }));
+    // ① 丢死键
+    const items = saved.filter(it => declared.indexOf(it.k) >= 0).map(it => ({ k: it.k, v: it.v }));
+    // ② 补新键（插到声明顺序里的前驱之后）
+    for (let di = 0; di < declared.length; di++) {
+      const k = declared[di];
+      if (items.some(it => it.k === k)) continue;
+      let at = 0;
+      for (let i = di - 1; i >= 0; i--) {
+        const j = items.findIndex(it => it.k === declared[i]);
+        if (j >= 0) { at = j + 1; break; }
+      }
+      items.splice(at, 0, { k: k, v: true });
+    }
+    return items;
+  }
+
+  // acctColPrefVisible 从 items 取"真正要渲染的列 id"（顺序同 items）。
+  // ⚠ 至少保留一列 —— 见下面 toggleAcctCol 的注释（参考 tsx:476-479 同一条理由）。
+  function acctColPrefVisible(items) {
+    const vis = items.filter(it => it.v).map(it => it.k);
+    if (vis.length) return vis;
+    // 兜底：全关时留第一列（正常路径下 toggle 会拦住"关最后一列"，这里是保险）
+    return items.length ? [items[0].k] : [];
   }
 
   // ACCT_COLS 保留为**默认列集**的列数。
@@ -3661,6 +4009,13 @@ let loginProvider = '';
       + `<span class="gfolded-hint dim">${esc(n ? '' : accountEmptyNote(g.provider))}</span>`
       + `<span class="gacts">${accountGroupActions(g.provider)}</span>`
       + `</div>`
+      // ⚠ 列设置浮层放在 .ghead **之外**（作为 section 的直接子节点）：
+      //   放在 .gacts 里面会被那个 `display:inline-flex` 的容器当 flex item
+      //   参与布局计算（即使 popover 关着不显现，开与关各算一次也让代码难读）。
+      //   它是 popover，无论 DOM 挂在哪都渲染在**顶层图层**，
+      //   所以既不会被表格的 overflow 裁掉，也不会被 section 的 overflow:hidden 影响
+      //   —— 与操作列那个 ⋯（.ops-menu）同一条理由。
+      + acctColsetHTML(g.provider)
       + `<table class="accttable accttable--aligned">${acctColgroupHTML(cols)}<thead>${thead}</thead><tbody>${rows}</tbody></table>`
       + `</section>`;
   }
