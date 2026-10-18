@@ -3435,7 +3435,7 @@ let loginProvider = '';
     const cells = {
       provider: `<td>${pinfo}</td>`,
       nickname: `<td title="${esc(a.nickname || '')}">${esc(maskNick(a.nickname))}</td>`,
-      uid: `<td class="mono dim" title="${esc(U)}">${esc(U.slice(0, 8))}…</td>`,
+      uid: `<td class="mono dim">${esc(U)}</td>`,
       quota: `<td data-quota-uid="${esc(U)}" title="额度「—」表示还没探测过（与额度为 0 是两件事）">${quotaCellHTML(a)}</td>`,
       free_quota: `<td data-free-quota-uid="${esc(U)}">${freeQuotaCellHTML(a)}</td>`,
       status: `<td data-status-uid="${esc(U)}">${st}</td>`,
@@ -5363,7 +5363,7 @@ let loginProvider = '';
   // 混起来会让用户把一个正常的加载中当成坏号。
   function panelRowLoading(cap, uid, nickname, cols) {
     const cells = [
-      '<td class="mono dim" title="' + esc(uid) + '">' + esc((uid || '').slice(0, 8)) + '…</td>',
+      '<td class="mono dim">' + esc(uid) + '</td>',
       '<td>' + esc(nickname || '—') + '</td>',
     ];
     for (let i = 2; i < cols; i++) cells.push('<td><span class="dim">正在读取…</span></td>');
@@ -5373,7 +5373,7 @@ let loginProvider = '';
   // panelRowErr 查失败的行（列数用 colspan 吃掉，两个面板通用）。
   function panelRowErr(cap, uid, nickname, msg) {
     return '<tr id="' + esc(panelRowId(cap, uid)) + '">' +
-      '<td class="mono dim" title="' + esc(uid) + '">' + esc((uid || '').slice(0, 8)) + '…</td>' +
+      '<td class="mono dim">' + esc(uid) + '</td>' +
       '<td>' + esc(nickname || '—') + '</td>' +
       '<td colspan="99"><span class="pill err" title="' + esc(msg) + '">查询失败</span></td>' +
       '</tr>';
@@ -5535,7 +5535,7 @@ let loginProvider = '';
         ? `<button data-ltask="${esc(a.uid)}" data-lpath="${esc(autoOne)}">一键完成（${a.pending.length}）</button>`
         : '<span class="dim" style="font-size:11px">已全部完成</span>';
       return `<tr>
-        <td class="mono dim" title="${esc(a.uid)}">${esc((a.uid || '').slice(0, 8))}…</td>
+        <td class="mono dim">${esc(a.uid)}</td>
         <td>${esc(a.nickname || '—')}</td>
         <td>${st}</td>
         <td class="mono">${esc(String(a.earned || 0))}/${esc(String(a.max || 0))}</td>
@@ -5717,7 +5717,7 @@ let loginProvider = '';
            <button data-linvite-bind="${esc(a.uid)}" data-lpath="${esc(bindPath)}">绑定</button>`
         : '<span class="dim" style="font-size:11px">—</span>';
       return `<tr>
-        <td class="mono dim" title="${esc(a.uid)}">${esc((a.uid || '').slice(0, 8))}…</td>
+        <td class="mono dim">${esc(a.uid)}</td>
         <td>${esc(a.nickname || '—')}</td>
         <td>${st}</td>
         <td class="mono">${a.balance ? esc(String(a.balance)) : '<span class="dim">—</span>'}</td>
@@ -7174,7 +7174,7 @@ let loginProvider = '';
     host.innerHTML = `<div class="ggroup">
       <div class="ghead">
         <span class="gname">${name}</span>
-        <span class="dim mono" style="font-size:11px">${esc((g.uid || '').slice(0, 8))}</span>
+        <span class="dim mono" style="font-size:11px">${esc(g.uid)}</span>
         <span class="dim" style="font-size:12px">待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done}</span>
         ${g.claimable_count
           ? `<span class="pill warn">${g.claimable_count} 个待领取 · ${g.claimable_credit} 分</span>
@@ -7732,7 +7732,7 @@ let loginProvider = '';
         <td class="mono">${esc(e.model)}</td>
         <td>${esc(e.mode)}</td>
         <td><span class="pill ${st}">${e.status}</span></td>
-        <td class="mono dim">${esc((e.uid || '').slice(0, 8) || '-')}</td>
+        <td class="mono dim">${esc(e.uid || '-')}</td>
         <td class="mono">${e.ttfb_ms ? e.ttfb_ms + 'ms' : '-'}</td>
         <td class="mono">${e.tokens >= 0 ? e.tokens : '-'}</td>
         <td class="mono">${tokPerSec(e.tokens, e.total_ms)}</td>
@@ -7790,7 +7790,7 @@ let loginProvider = '';
         : '<span class="dim">—</span>';
       return `<tr>
         <td class="dim">${new Date(x.at).toLocaleString('zh-CN', { hour12: false })}</td>
-        <td>${esc(x.nickname || (x.uid || '').slice(0, 8))}</td>
+        <td>${esc(x.uid || x.nickname)}</td>
         <td>${esc(x.kind)}</td>
         <td><span class="pill ${cls}">${esc(label)}</span></td>
         <td>${creditsCell}</td>
