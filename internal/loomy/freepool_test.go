@@ -158,7 +158,18 @@ func TestPoolRecheckThrottled(t *testing.T) {
 func TestPoolNoRecheckForKnownZero(t *testing.T) {
 	p := NewWithConfig(Config{AuthDir: t.TempDir()})
 	po := p.pool()
-	now := time.Now()
+	// ⚠⚠ **用"当天中午"而不是 time.Now()**（2026-10-18 修，本测试的 flaky 根因）。
+	//
+	// 原来用 `time.Now()`，而它后面要 +1h / +2h：
+	// 本地时间**22:00 之后**跑，`now+2h` 就跨过自然日 ⇒ `dueForRecheck` 里的
+	// `resetIfNewDay` 把池子整体清空（`zero` 集合没了）⇒ `zero[uid]` 不再是 true
+	// ⇒ A 被当成"待重查" ⇒ **本测试只在晚上红**。
+	//
+	// ⚠ 这不是实现的问题：`noteUsed` 早就对 `f.zero[uid]` 直接 return（跳过重查），
+	//   实现是对的。⚠ 教训：**凡是要对时间做加减的测试，基准必须钉在"当天中间"**，
+	//   否则跑测试的钟点会变成一个隐形的输入。
+	midnight := time.Now()
+	now := time.Date(midnight.Year(), midnight.Month(), midnight.Day(), 12, 0, 0, 0, midnight.Location())
 	po.noteQuota("A", 0, true, now)
 	po.noteUsed("A", now.Add(time.Hour))
 	if got := po.dueForRecheck(4, now.Add(2*time.Hour)); len(got) != 0 {
