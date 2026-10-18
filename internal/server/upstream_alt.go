@@ -59,9 +59,10 @@ func normModelKey(model string) string {
 // alternateUpstream 找一个"有同一个模型"的**其它**上游，返回它以及该上游的模型名。
 //
 // ⚠ 返回值第二个必须是**那个上游的真实模型名**：换上游之后请求体里的 model 也得换
-//   （`workbuddy/deepseek-v4.1-flash` 与 `loomy/DeepSeek-V4.1-Flash` 是两个不同的字符串）。
-//   带着别人的名字发过去，上游会按"未知模型"拒绝 —— 那正是 providerFor 的注释里
-//   记着的那类白跑（"带着前缀发过去，上游按未知模型拒绝，表现为一次白跑的 503 + 换号"）。
+//
+//	（`workbuddy/deepseek-v4.1-flash` 与 `loomy/DeepSeek-V4.1-Flash` 是两个不同的字符串）。
+//	带着别人的名字发过去，上游会按"未知模型"拒绝 —— 那正是 providerFor 的注释里
+//	记着的那类白跑（"带着前缀发过去，上游按未知模型拒绝，表现为一次白跑的 503 + 换号"）。
 //
 // ⚠ 找不到就返回空串对，调用方**保持原样**（不要瞎换一家不认识的）。
 func (h *Handler) alternateUpstream(model, current string) (string, string) {

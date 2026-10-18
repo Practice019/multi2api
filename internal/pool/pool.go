@@ -2006,7 +2006,8 @@ func (p *Pool) noteProviderFailureLocked(provider string, now time.Time) {
 
 // noteProviderSuccessLocked 一次成功清掉该上游的失败线。
 // ⚠ 与账号级 NoteSuccess 同一哲学（那里的注释写着"一次成功证明…"）：
-//   不清的话，跨天的无关抖动会一路攒到阈值，把健康的上游误判成熔断。
+//
+//	不清的话，跨天的无关抖动会一路攒到阈值，把健康的上游误判成熔断。
 func (p *Pool) noteProviderSuccessLocked(provider string) {
 	if p.provState == nil {
 		return

@@ -12,7 +12,8 @@ import "testing"
 //
 // 三家的差别**只在**大小写与 `.`/`-` ⇒ 归一后同一个键。
 // ⚠ 若哪天某家把模型名改得对不上，这条测试会红 —— 那是**该知道**的事
-//   （意味着自动降级对它失效，而不是静默不生效）。
+//
+//	（意味着自动降级对它失效，而不是静默不生效）。
 func TestNormModelKeyMatchesAcrossUpstreams(t *testing.T) {
 	same := []string{
 		"loomy/DeepSeek-V4.1-Flash",
@@ -46,7 +47,8 @@ func TestNormModelKeyKeepsModelSuffixAfterFirstSlash(t *testing.T) {
 // TestNormModelKeyEmptyOnGarbage 归一不出东西时返回空串 ⇒ 调用方放弃匹配。
 //
 // ⚠ 宁可"不动"，也不要"乱配"：把 `-` 这种垃圾名匹配到某个真模型上，
-//   会让我们把请求发到一个它并不支持的上游 —— 比不高可用更糟。
+//
+//	会让我们把请求发到一个它并不支持的上游 —— 比不高可用更糟。
 func TestNormModelKeyEmptyOnGarbage(t *testing.T) {
 	for _, m := range []string{"", "-", "/", "///", "---"} {
 		if got := normModelKey(m); got != "" {

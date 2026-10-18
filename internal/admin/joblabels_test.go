@@ -43,7 +43,7 @@ func TestJobLabelTablesConsistent(t *testing.T) {
 // TestUIManifestJobLabels 每个已注册任务都必须在两张表里登记。
 //
 // ⚠ 与本配置下"有没有注册任务"无关：没有任务时 `m.Jobs` 为空，循环自然不执行
-//（那是前置条件不满足，不是断言失败）—— 所以这里**不**用 Skip，
+// （那是前置条件不满足，不是断言失败）—— 所以这里**不**用 Skip，
 // 免得把"真的漏登记"与"本次没注册任务"混为一种结果。
 func TestUIManifestJobLabels(t *testing.T) {
 	m := manifestFor(t, New(Config{ListensLoopback: true}))

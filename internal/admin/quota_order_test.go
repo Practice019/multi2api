@@ -38,8 +38,9 @@ func TestOrderQuotaRefreshTargetsRecentlyUsedFirst(t *testing.T) {
 // TestOrderQuotaRefreshTargetsNeverUsedLast 「从没被选中过」的排在最后。
 //
 // ⚠ 这是整个排序依赖的唯一性质：零值（`time.Time{}`）是最小值，
-//   `After()` 比较天然把它排到最后。⚠ 若有人把判据换成"字段非零优先"之类，
-//   零值会跑到**最前面**，于是每轮都先刷一批从没用过的号。
+//
+//	`After()` 比较天然把它排到最后。⚠ 若有人把判据换成"字段非零优先"之类，
+//	零值会跑到**最前面**，于是每轮都先刷一批从没用过的号。
 func TestOrderQuotaRefreshTargetsNeverUsedLast(t *testing.T) {
 	t0 := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 	list := []pool.Status{
@@ -61,9 +62,10 @@ func TestOrderQuotaRefreshTargetsNeverUsedLast(t *testing.T) {
 // TestOrderQuotaRefreshTargetsStableForTies 时间相同（例如都是零值）时保持原次序。
 //
 // ⚠ 用 `SliceStable` 而不是 `Slice` 的理由就在这条：`List()` 本身按 uid 有序，
-//   稳定排序能让结果**可预测**（同一份输入永远同一个输出），
-//   而 `Slice` 在相等元素上的顺序是未定义的 —— 那会让"这一轮先刷谁"变成随机的，
-//   排障时无法复现。
+//
+//	稳定排序能让结果**可预测**（同一份输入永远同一个输出），
+//	而 `Slice` 在相等元素上的顺序是未定义的 —— 那会让"这一轮先刷谁"变成随机的，
+//	排障时无法复现。
 func TestOrderQuotaRefreshTargetsStableForTies(t *testing.T) {
 	list := []pool.Status{{UID: "a"}, {UID: "b"}, {UID: "c"}, {UID: "d"}}
 	orderQuotaRefreshTargets(list)
