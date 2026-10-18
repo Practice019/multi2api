@@ -713,6 +713,57 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   /* 空态/加载态：居中。列表成了 flex/grid 容器后，只有一条内容时会被顶在左上角 */
   .job-empty{grid-column:1 / -1;text-align:center;color:var(--dim);
     padding:18px 0;font-size:12px}
+
+  /* ---- 请求日志：grid 表格（2026-10-19 照参考项目 Agent2API 的 page-requests.css 移植）----
+     原来是 `<table>`。换成 div + grid 的理由（三条都是那 20 行旧实现的真实短板）：
+
+       ① **表头粘不住**。日志动辄几十上百行，用 `<table>` + 页面滚动时列名一滚就没了；
+          而且本项目的 `section` 带 `overflow:hidden`（为了圆角），
+          `position:sticky` 在它里面**根本不会生效** —— 所以必须先给日志区
+          一个自己的滚动容器（.logwrap），sticky 的参照物就是它。
+       ② **列宽失控**。`table-layout:auto` 会让长模型名把「模式」「状态」挤成窄柱。
+          参考项目用 `grid-template-columns: var(--req-cols, …)` 定轨，
+          并把用户拖过的列宽写在**容器**上靠继承作用到每一行 ——
+          ⚠ "表格是整体重绘的，变量不需要在渲染后再写一遍"。
+       ③ **窄屏会压没列**。参考的做法是横向滚动而不是压列，
+          但 `min-width` 必须由 `--req-row-min` 给（见下）。
+
+     ⚠⚠ **不要用 `max-content`**（参考项目的原话，抄过来当约束）：
+        "那是按内容的固有宽度算的，同一列在表头（「用量」两个字）和数据行
+        （两行读数）里会算出两个宽度，表头与数据直接错位，而且列被内容撑开
+        就不再触发省略号"。 */
+  .logwrap{max-height:calc(100vh - 260px);overflow:auto;
+    border-top:1px solid var(--line);overflow-anchor:none}
+  /* 表头 + 数据行共用同一套列轨道 —— 一处定义两处用，改列宽不会只改一半 */
+  .log-head,.log-row{display:grid;gap:10px;align-items:center;
+    grid-template-columns:
+      46px 92px minmax(0,1.3fr) 76px 76px minmax(0,1fr)
+      86px 72px 86px 86px;
+    padding:5px 14px;flex:none}
+  /* 表头粘在 .logwrap 顶部。sticky 的参照物是它（不是页面），所以 top 写 0。 */
+  .log-head{position:sticky;top:0;z-index:1;padding-top:7px;padding-bottom:7px;
+    background:var(--panel);border-bottom:1px solid var(--line);
+    color:var(--dim);font-size:11px;font-weight:600;letter-spacing:.02em}
+  .log-row{border-bottom:1px solid var(--line);font-size:12px;
+    font-variant-numeric:tabular-nums}
+  .log-row:last-child{border-bottom:0}
+  .log-row:hover{background:var(--panel2)}
+  /* 失败行的淡底（与「失败」药丸同一信息，但整行一眼可见）。
+     ⚠ 进行中的行**不上色** —— 红底是终态的颜色，进行中的信号交给状态药丸那一格。 */
+  .log-row.failed{background:color-mix(in srgb,var(--err) 7%,transparent)}
+  .log-row.failed:hover{background:color-mix(in srgb,var(--err) 12%,transparent)}
+  /* 数值列右对齐：TTFB / tok / tok/s / 耗时 四列竖向比对数时才齐 */
+  .log-head .r,.log-row .r{text-align:right}
+  /* ⚠ 无值占位：比正文淡一档。参考项目的原话 ——
+     "空着会被当成渲染缺失"，所以占位符必须画出来，只是要弱化。 */
+  .log-none{color:var(--dim)}
+  /* 长文本截断（模型名、UID 都可能很长）。⚠ 只给"内容能任意长"的列用 ——
+     截断的代价是看不见全值，所以必须配 title 把全值挂回去。 */
+  .log-tr{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .log-empty{padding:22px 14px;text-align:center;color:var(--dim);font-size:12px}
+  /* 窄窗口：列装不下就横向滚动（不压列）。⚠ 行与表头的宽度下限必须一致，
+     否则横向滚到右边时表头会缺一块、行底色只铺半截。 */
+  .log-head,.log-row{min-width:1040px}
   .tog{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;user-select:none}
   /* 分段按钮的选中态。历史代码用内联 style 切换，这里补一条 class 规则，
      供新增的视图切换使用，避免再堆内联样式。 */
@@ -1265,10 +1316,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     </h2>
     <div class="body" style="padding:0">
       <div id="logFileInfo" class="dim" style="display:none;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
-      <table><thead><tr>
-        <th>#</th><th>时间</th><th>模型</th><th>模式</th><th>状态</th>
-        <th>UID</th><th>TTFB</th><th>tok</th><th>tok/s</th><th>耗时</th></tr></thead>
-        <tbody id="logrows"><tr><td colspan="__COLS_LOGS__" class="dim">暂无请求</td></tr></tbody></table>
+      <div class="logwrap">
+        <div class="log-head">
+          <span>#</span><span>时间</span><span>模型</span><span>模式</span><span>状态</span>
+          <span>UID</span><span class="r">TTFB</span><span class="r">tok</span><span class="r">tok/s</span><span class="r">耗时</span>
+        </div>
+        <div id="logrows"><div class="log-empty">暂无请求</div></div>
+      </div>
       <div class="pager" id="logPager"></div>
     </div>
   </section>
@@ -2618,9 +2672,10 @@ let loginProvider = '';
   const COLS = {
     travel: 8,   // 猫猫旅行
     growth: 6,   // 成长计划（精简：额度/能量、连登/补签、待完成/可得、可领 合并）
-    logs: 10,    // 请求日志
-    // ⚠ jobs 已移除（2026-10-19）：任务调度页从表格换成了卡片网格，不再有列数，
-    //   HTML 里的 `__COLS_JOBS__` 占位符也一并删了 ⇒ 留着就是死字段。
+    // ⚠ jobs / logs 已移除（2026-10-19）：任务调度页换成卡片网格、请求日志页换成
+    //   grid 表格（照抄参考项目 Agent2API），两处都不再有 `<table>` 列数，
+    //   HTML 里的 `__COLS_JOBS__` / `__COLS_LOGS__` 占位符也一并删了 ⇒ 留着就是死字段。
+    //   剩下的三条仍被 rowPlaceholder 使用，别顺手删。
   };
 
   // rowPlaceholder 生成占满整行的提示行。
@@ -7710,9 +7765,15 @@ let loginProvider = '';
   // 但它与历史视图展示同一批请求、只是数据源不同，反而让人以为是两份数据。
   // 落盘历史已经覆盖「全部保留期内的请求」，实时视图没有独立价值，故移除。
 
-  // 日志区通用的占位行（colspan 与表头列数保持一致，改列数时只需改这里）。
+  // 日志区通用的占位块。
+  //
+  // ⚠ 从 `rowPlaceholder`（生成 `<tr><td colspan=…>`）改成 `.log-empty` 块
+  //   （2026-10-19）：日志区不再是 `<table>`，`<tr>` 塞进 div 容器会被 HTML
+  //   解析器丢弃或 foster-parent 到别处 —— 页面上就是"占位句不见了"，
+  //   而那正是最需要它出现的时刻（接口挂了的时候）。
+  //   这与账号池当时的 `rowPlaceholder` → `accountPlaceholder` 是同一条教训。
   function logPlaceholder(text, cls) {
-    return rowPlaceholder(COLS.logs, text, cls);
+    return `<div class="log-empty ${cls || ''}">${esc(text)}</div>`;
   }
 
   // ---------------------------------------------------------------- 每页条数（含持久化）
@@ -7981,24 +8042,44 @@ let loginProvider = '';
   }
 
   // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
+  // renderLogs 渲染落盘日志的表格体。
+  //
+  // # 从 `<tr>` 换成 grid 行（2026-10-19 照参考项目 Agent2API 的 page-requests.css）
+  //
+  // 旧的 20 行实现有四个真实短板，都在换形态时一并修掉：
+  //   ① **表头粘不住** —— 日志几十上百行，一滚就看不见列名了（sticky 见 .log-head）
+  //   ② **数值列左对齐** —— TTFB/tok/tok/s/耗时 四列竖向比对时数字参差不齐
+  //   ③ **空值直接写 `-`** —— 与真实值的字重相同，扫一眼分不清"没这个数"和"是 0"
+  //   ④ **空列表直接 return** —— 表格留着上一次的内容，看起来像加载失败
+  //      ⚠ 第 ④ 条尤其坏：它让"接口返回空"和"渲染没跑"在界面上完全一样。
+  //
+  // ⚠ 300 条上限保留：这是**渲染**上限（分页 limit 可能被用户调到更大），
+  //   超出的部分靠翻页看，不是数据被丢弃。
   function renderLogs(items) {
-    const tb = $('logrows');
+    const host = $('logrows');
+    if (!host) return;
     const list = normalizeDesc(items).slice(0, 300);
-    if (!list.length) return;
-    tb.innerHTML = list.map(e => {
+    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容
+    if (!list.length) { host.innerHTML = logPlaceholder('暂无请求'); return; }
+    host.innerHTML = list.map(e => {
       const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
-      return `<tr>
-        <td class="mono dim">${e.seq}</td>
-        <td class="dim">${new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false })}</td>
-        <td class="mono">${esc(e.model)}</td>
-        <td>${esc(e.mode)}</td>
-        <td><span class="pill ${st}">${e.status}</span></td>
-        <td class="mono dim">${esc(e.uid || '-')}</td>
-        <td class="mono">${e.ttfb_ms ? e.ttfb_ms + 'ms' : '-'}</td>
-        <td class="mono">${e.tokens >= 0 ? e.tokens : '-'}</td>
-        <td class="mono">${tokPerSec(e.tokens, e.total_ms)}</td>
-        <td class="mono">${e.total_ms}ms</td>
-      </tr>`;
+      // ② 数值列右对齐（.r）
+      // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
+      //    参考项目的原话"空着会被当成渲染缺失"。破折号用全角「—」与项目其它面板一致。
+      const dash = '<span class="log-none">—</span>';
+      const secs = new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false });
+      return `<div class="log-row${e.status >= 400 ? ' failed' : ''}">
+        <span class="mono log-none">${e.seq}</span>
+        <span class="log-none">${esc(secs)}</span>
+        <span class="mono log-tr" title="${esc(e.model || '')}">${esc(e.model || '—')}</span>
+        <span class="log-tr" title="${esc(e.mode || '')}">${esc(e.mode || '—')}</span>
+        <span><span class="pill ${st}">${e.status}</span></span>
+        <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
+        <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
+        <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
+        <span class="mono r">${tokPerSec(e.tokens, e.total_ms)}</span>
+        <span class="mono r">${e.total_ms}ms</span>
+      </div>`;
     }).join('');
   }
 
