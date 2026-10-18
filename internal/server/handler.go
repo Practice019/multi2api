@@ -631,6 +631,21 @@ const (
 	modelsFetchFailCooldown = 5 * time.Minute
 )
 
+// riskReasoningEfforts 本网关对客户端声明的**可选思考档位**。
+//
+// ⚠ 为什么是"统一给四档"而不是按模型区分：
+//   · 上游目录里确实带 `reasoning.supportedEfforts`（见 internal/cline/client.go:618），
+//     但**多数上游不下发**（cline.go:183 明确记着"远端不下发档位"）⇒ 按模型给会大部分为空；
+//   · 而**声明多了是安全的**：上游对不认识的档位**静默忽略**（cline.go:17 有实测记录：
+//     `reasoning_effort: 'banana'` 返回 200 且思考量为 0），不会报错；
+//   · 反过来**声明少了才是问题**：客户端会以为这个模型不支持某档。
+//   ⇒ 所以先"一律给全档"，等各上游真下发了再收窄。
+//
+// ⚠ 只给 **off/low/high/max 四档**：与 DSH 内置的那张表一致（dsh-llm-deepseek 的
+//   REASONING_EFFORTS）。⚠ 我们网关自己认得更多字面量（原样透传），但对外声明要与
+//   消费方能显示的集合对齐 —— 声明了它不认的档，等于在界面上给一个选了没反应的选项。
+var riskReasoningEfforts = []string{"off", "low", "high", "max"}
+
 // models 返回模型列表：优先动态（缓存 1h），失败回退静态表。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// 被限制的 key **只看到自己允许的模型**。
@@ -638,9 +653,28 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// 不这么做的话：列表里看得见几十个模型，调哪个都 403 ——
 	// 用户会读成"网关坏了"，而不是"这把 key 没这个权限"。
 	// 列表如实反映权限，权限才是可发现的。
+	data := h.filterModelsForRequest(r, h.modelList())
+	// ⚠⚠ 给每条**补上档位声明**（2026-10-18 加，用户要求："我们的项目也需要可以支持选择思考深度"）。
+	//
+	// 动机：我们**一直有** `reasoning_effort` 的透传与降级（internal/cline/payload.go 的
+	// PrepareBodyOptWithEfforts / normalizeReasoningEffort），但**从没告诉过客户端
+	// 这个模型支持哪些档** ⇒ DSH 与其它"从 /models 读档位"的客户端**看不到** ⇒ 选不了。
+	//
+	// ⚠ 为什么在这儿补而不是一路从上游带下来：那条链要穿 `gateway.ModelInfo` →
+	// `DefaultModel` → `entryOf`/`prefixed` → 响应共 4~5 处，而**上游本来就多数不下发**
+	// （见 riskReasoningEfforts 的注释）⇒ 一路带下来只为传一个常量，不值。
+	// ⚠ 等真按模型区分时，再把它并进 ModelInfo（那时这条注释就是"该改哪儿"的路标）。
+	//
+	// ⚠ 两个键名都给：`reasoning_efforts`（用户点名的那个第三方插件读它）与
+	//   同名驼峰都不发 —— 只发一个标准名下划线形式，避免同一语义出现两处真相。
+	for _, m := range data {
+		if _, ok := m["reasoning_efforts"]; !ok {
+			m["reasoning_efforts"] = riskReasoningEfforts
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.filterModelsForRequest(r, h.modelList()),
+		"data":   data,
 	})
 }
 
