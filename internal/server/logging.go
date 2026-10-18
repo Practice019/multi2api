@@ -71,6 +71,11 @@ type chatStat struct {
 	apikeyID string
 	bump     func(toks int, ok bool)
 
+	// noteLatency 把本次请求的首字节耗时喂给上游级统计（2026-10-18 加）。
+	// ⚠ 用回调而不是直接调 Pool：`chatStat` 拿不到 Handler（与 `bump` 同一取舍）。
+	// ⚠ 只在**成功**请求上喂：失败时的耗时是"失败前的等待"，不能代表这家上游有多快。
+	noteLatency func(provider string, ms int64)
+
 	logged bool
 }
 
@@ -99,6 +104,23 @@ func (s *chatStat) done() {
 		s.bump(toks, s.status >= 200 && s.status < 300)
 	}
 	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, s.decision)
+
+	// ⚠ 喂上游级"首字节耗时"统计（2026-10-18 加）。
+	//
+	// ⚠ 放在 done() 而不是成功路径的某一句：这里**覆盖所有出口**
+	// （同步、流式、工具循环、降级重试…），而只要漏一条，统计就会偏。
+	//
+	// ⚠ 非流式请求没有独立的"首字节"时刻（stats 的 TTFB 为 0）——
+	// 用**总耗时**代替：对它而言两者本来就是一回事（收完才拿到全部）。
+	// ⚠ 不做这个兜底的话，只发非流式的部署会永远拿不到速度数据
+	//（实测踩到：发 stream:false 两个请求后 /status 的 providers 是空列表）。
+	if s.noteLatency != nil && s.provider != "" && s.status >= 200 && s.status < 300 {
+		ms := s.ttfb.Milliseconds()
+		if ms <= 0 {
+			ms = time.Since(s.start).Milliseconds()
+		}
+		s.noteLatency(s.provider, ms)
+	}
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage 精确值（completion_tokens

@@ -1377,6 +1377,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	st.provider = reqProvider
+	// ⚠ 把首字节耗时喂给上游级统计（2026-10-18 加，见 chatStat.noteLatency 的注释）。
+	//
+	// ⚠ 为什么在这里赋、在 done() 里调：done() 是**所有出口**的汇合点
+	// （同步 / 流式 / 工具循环 / 降级重试都走它），而 chatStat 本身拿不到 Handler。
+	// 这与 st.bump 是同一种取舍（回调 + 出口统一调用）。
+	//
+	// ⚠⚠ 注意它**不改变路由** —— 只是让 pool 知道"这家上游现在有多快"，
+	// 供 /status 显示（用户要的"保证请求速度"此前没有可观测的量）与后续的
+	// "明显更慢就换一家"提供依据（那一步需要独立开关，见 pool.SlowerThan 的注释）。
+	st.noteLatency = h.cfg.Pool.NoteProviderLatency
 	// API key 用量记录：命中普通 key 时在出口把 token/成败记给该 key。
 	if kid, ok := r.Context().Value(apikeyCtxKey).(string); ok && kid != "" && h.cfg.APIKeys != nil {
 		st.apikeyID = kid
