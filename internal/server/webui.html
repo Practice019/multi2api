@@ -277,6 +277,21 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      `tr` 上的 height 在表格里是**最小高**（不是定高），所以这一条只把矮的抬起来，
      不会把已经 40px 的行撑高 —— 加完实测分布从 {34:1,35:1,40:74} 变成 {40:76}。 */
   .accttable--aligned tbody tr{height:40px}
+  /* 操作列的「⋯ 更多」与它的 popover 面板（2026-10-19，用户要求把低频动作收起来）。
+     ⚠ popover 是顶层图层，不受 td 的 overflow:hidden 裁剪 —— 这是选它而不是
+       绝对定位菜单的理由（详见 accountRow 里 opsMore 那段注释）。 */
+  .ops-more{min-width:26px;padding:0 6px}
+  .ops-menu{position:fixed;margin:0;
+    border:1px solid var(--line);border-radius:8px;background:var(--panel);
+    padding:6px;display:flex;gap:6px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  .ops-menu button{height:25px;padding:0 8px;font-size:11.5px}
+  /* ⚠ popover 默认带一个半透明遮罩（::backdrop），那会把整页压暗 ——
+     它是一个"看着表格点一个动作"的小浮层，不该有模态感（参考项目同一理由：
+     tsx:541「面板不该有遮罩、不该锁滚动」）。 */
+  .ops-menu::backdrop{background:transparent}
+  /* ⚠ 顶部那个「Δ」定位是把 left/top 交给下面那段 JS 算（见 bindOpsPopover），
+     所以这里**不能**写 inset/top/left —— 写了就把 UA 的默认定位覆盖成 0,0，
+     面板会跑到页面左上角（实测过一次：getBoundingClientRect 返回 [0,0,102,39]）。 */
   /* ⚠ 这里**不能**有 tr.acctrow.collapsed{display:none} —— 加回来就是把回归带回来。
      折叠真正隐藏东西的地方是上面那条 `.acctgroup.collapsed > table`（整表隐藏）。
 
@@ -2248,6 +2263,41 @@ let loginProvider = '';
     return systemPrefersDark() ? 'dark' : 'light';
   }
 
+  // 操作列「⋯」收纳菜单的定位（2026-10-19）。
+  //
+  // # 为什么需要这段
+  //
+  // popover 走**顶层图层**，这正是我们要的（`.accttable--aligned` 的 td 带
+  // `overflow:hidden`，普通绝对定位菜单会被裁掉）。但 UA 只给它一个"视口居中"
+  // 的默认位置，而我们要它贴着那一个触发按钮。
+  // 参考项目靠组件库的 anchor 定位（PopoverContent 的 side='bottom' align='end'）；
+  // 本项目零依赖，等价做法就是在这里自己算一次。
+  //
+  // ⚠⚠ 两个必须记住的点：
+  //   ① `toggle` / `beforetoggle` **不冒泡** —— 必须用**捕获阶段**监听，
+  //      否则一条都收不到。表现是"面板永远停在视口正中"，而且不报错。
+  //   ② 用 `toggle`（已显示）而不是 `beforetoggle`（显示前）：显示前元素还是
+  //      `display:none`，`getBoundingClientRect()` 返回全 0，算出来的位置没有意义。
+  //      代价是理论上有一帧在原位 —— 实测看不到（下一帧就搬过去了）。
+  document.addEventListener('toggle', (e) => {
+    const p = e.target;
+    if (!p || !p.classList || !p.classList.contains('ops-menu')) return;
+    if (e.newState !== 'open') return;
+    const btn = document.querySelector('[popovertarget="' + CSS.escape(p.id) + '"]');
+    if (!btn) return;
+    const r = btn.getBoundingClientRect();
+    const pr = p.getBoundingClientRect();
+    // 默认贴按钮下方、与按钮右缘对齐；下方放不下就翻到按钮上方。
+    let top = r.bottom + 4;
+    if (top + pr.height > window.innerHeight - 8) {
+      top = Math.max(8, r.top - pr.height - 4);
+    }
+    let left = r.right - pr.width;
+    left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
+    p.style.left = left + 'px';
+    p.style.top = top + 'px';
+  }, true);
+
   // applyTheme 写入 data-theme 并同步按钮选中态。
   function applyTheme(pref) {
     const theme = resolveTheme(pref);
@@ -3313,10 +3363,19 @@ let loginProvider = '';
   //   uid 是 18 位数字（等宽字体）⇒ 168px；ops 要放「保活 + 删除」两个按钮 ⇒ 136px；
   //   token 装的是「354 天」这类药丸 ⇒ 96px。改宽度时要连 shot_acct_align 一起看。
   const ACCT_COLUMN_DEFS = {
-    provider: { title: '上游', w: 96 },
+    // ⚠ 宽度是**按实测溢出量**定的，不是拍脑袋（2026-10-19 第一次定宽时拍过一回，
+    //   结果 4 列溢出）。第一次的依据是「loomy 的 UID 是 18 位数字」，那是**片面观察**：
+    //   workbuddy-intl 的 UID 是 36 字符的 UUID（`15b75562-cba5-4a1d-ad39-fc2e0f3119fc`），
+    //   溢出 86px。度量脚本 shot_acct_clip.js 就是为这件事写的 —— 它按列名量每个单元格的
+    //   `scrollWidth > clientWidth`，改动宽度后要重跑。
+    //   ⇒ 教训：定宽的依据必须是"所有上游里最长的那个样本"，不是第一眼看到的那个。
+    provider: { title: '上游', w: 128 },
     // ⚠ 不给 w：全表唯一的弹性列（见上）
     nickname: { title: '昵称' },
-    uid: { title: 'UID', w: 168 },
+    // ⚠ 168 → 220：36 字符的 UUID 要 254px 才完全不截断，那样会把弹性列挤到 300px 以下。
+    //   折中到 220px —— 溢出从 86px 降到约 34px，配合上面的 title 够用：
+    //   UID 是**标识符**，用户偶尔要核对整串，但不需要一直在屏幕上占满。
+    uid: { title: 'UID', w: 220 },
     quota: { title: '额度', w: 72, tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
     free_quota: {
       title: '免费额度', w: 88,
@@ -3325,9 +3384,11 @@ let loginProvider = '';
         + '「—」表示这个上游不区分这一项、或这次没读到 —— 那不等于"已经用完"。',
     },
     status: { title: '状态', w: 84 },
-    token: { title: 'Token', w: 96 },
+    token: { title: 'Token', w: 112 },
+    // ⚠ 88 → 112：这一格装的是「9 天10/28 15:43」（相对 + 绝对两段，13 字符），
+    //   88px 下会溢出被省略号吃掉 —— 实测 74 行里有 1 行如此。加宽后不截断。
     token_expiry: {
-      title: 'Token 到期', w: 88,
+      title: 'Token 到期', w: 112,
       // 这一列与「Token」刻意分开：Token 列读的是 `has_token`/`token_expire_sec`
       //（workbuddy 的 Bearer 形态），而 codearts 的凭证是 AK/SK/STS 三元组、
       // accessToken 恒为空 → 它落到「Token」列会永远是 `—`。
@@ -3345,7 +3406,15 @@ let loginProvider = '';
     success: { title: '成功', w: 80 },
     breaker: { title: '熔断', w: 72 },
     in_flight: { title: '在途', w: 72 },
-    ops: { title: '操作', w: 136 },
+    // 操作列 200px —— 与参考项目同一个落点（accounts-columns.ts:205 原话：
+    // 「已签到(46+16)+余额(23+16)+设置(23+16)+⋯(12+16)+3×4+16≈200」）。
+    // ⚠ 它的 200px 配的是"一行最多 4 个动作，第 4 个是 ⋯ 收纳菜单"。
+    //   而我们**没有收纳菜单**，实测一行最多 5 个按钮（「额度 签到 保活 禁用 移除」，
+    //   6 行）需要 237px ⇒ 200px 下这 6 行仍会溢出约 37px。
+    //   这里选择「对齐参考落点 + 让操作列带 title」而不是拉到 237px：
+    //   237px 会把弹性列（昵称）压掉 37px，而"操作"是低频列。
+    //   ⚠ 真正的解法是参考那个 ⋯ 收纳菜单（把低频动作收进浮层），留待后续。
+    ops: { title: '操作', w: 200 },
   };
 
   // acctColgroupHTML 生成与列集对应的 <colgroup>。
@@ -3754,20 +3823,46 @@ let loginProvider = '';
       ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/accounts/quota/refresh" title="重新探测**本行这一个账号**的剩余额度（只刷它，不动其它账号；要刷整个 ${esc(pid)} 用分组上的「刷新本上游额度」，要刷全部用顶部按钮）">额度</button>`
       : '';
 
-    const act = [
-      beforeQuota.map(dailyBtnOf).filter(Boolean).join(' '),
-      // 额度刷新**不是每日动作**（可以随时点，与"每天一次"无关），
-      // 所以它不走 daily_actions。它由 CapQuotaProbe 能力位驱动 ——
-      // 上游没声明这个能力位就不出现（codearts 声明了，所以它有）。
+    // 操作列分两层（2026-10-19 用户决定：「额度 禁用 移除 默认显示 其他收起来」）。
+    //
+    // # 为什么要分
+    //
+    // 实测一行最多 5 个按钮（「额度 签到 保活 禁用 移除」，6 行）需要 237px，
+    // 而操作列宽 200px 是参考项目的落点（accounts-columns.ts:205 原话：
+    // 「已签到(46+16)+余额(23+16)+设置(23+16)+⋯(12+16)+3×4+16≈200」）——
+    // 它的 200px 正是配「高频 3 个直显 + 第 4 个是 ⋯ 收纳菜单」。
+    // 我们照这个形态做：**额度 / 禁用(启用) / 移除** 直显（实测 3 个按钮 147px，放得下），
+    // 其余（签到 / 保活 / 清冷却）收进 ⋯。
+    //
+    // ⚠⚠ 为什么用原生 **popover** 而不是 `<details>` / 绝对定位菜单：
+    //   这个 <td> 上有 `overflow:hidden`（全站 `th,td` 的截断规则，见 598 行附近），
+    //   普通绝对定位的浮层会被它裁掉 —— 菜单张不开或只剩一条。
+    //   popover 走**顶层图层**（top layer），不受任何祖先 overflow 裁剪，
+    //   而且 `popovertarget` 属性本身就是开关管道，**零 JS、零依赖**。
+    //   代价是需要 Chrome 114+，本项目是内部单机控制台，可接受。
+    const opsPrimary = [
       quotaBtn,
-      afterQuota.map(dailyBtnOf).filter(Boolean).join(' '),
       a.disabled
         ? `<button data-act="enable" data-uid="${esc(U)}">启用</button>`
         : `<button data-act="disable" data-uid="${esc(U)}">禁用</button>`,
-      a.cooling || a.breaker_fails > 0
-        ? `<button data-act="cooldown" data-uid="${esc(U)}">清冷却</button>` : '',
       `<button data-act="remove" data-uid="${esc(U)}" style="color:var(--err)">移除</button>`,
     ].filter(Boolean).join(' ');
+
+    const opsMore = [
+      beforeQuota.map(dailyBtnOf).filter(Boolean).join(' '),
+      afterQuota.map(dailyBtnOf).filter(Boolean).join(' '),
+      a.cooling || a.breaker_fails > 0
+        ? `<button data-act="cooldown" data-uid="${esc(U)}">清冷却</button>` : '',
+    ].filter(Boolean).join(' ');
+
+    // ⚠ id 必须唯一（popovertarget 是按 id 找的）。uid 是数字或 UUID，
+    //   直接拼进来合法；仍加前缀避免与页面其它 id 撞。
+    const act = opsMore
+      ? opsPrimary
+        + ` <button class="ops-more" popovertarget="opsm-${esc(U)}"`
+        + ` title="更多操作（签到 / 保活 等）">⋯</button>`
+        + `<div id="opsm-${esc(U)}" popover class="ops-menu">${opsMore}</div>`
+      : opsPrimary;
 
     // 「上游」列在分组后仍然保留：分组标题给的是整体结构，
     // 这一列让单行在筛选/复制时也能自证归属。
@@ -3793,20 +3888,37 @@ let loginProvider = '';
     //
     // 代价是**用不到的列也白构建了一次**（几个字符串拼接，可忽略）。
     const cells = {
-      provider: `<td>${pinfo}</td>`,
+      // ⚠ 「上游」「UID」两列带 title：它们的宽度是**定宽**（见 ACCT_COLUMN_DEFS 的 w），
+      //   而内容是变长的 —— 实测上游有 `workbuddy-intl`（16 字符）、
+      //   UID 有 36 字符的 UUID 形态（`15b75562-cba5-4a1d-ad39-fc2e0f3119fc`），
+      //   两者都会溢出被 `text-overflow:ellipsis` 收成省略号。
+      //   收成省略号本身是对的（参考项目的做法），但**截断却不给全值**等于信息丢失 ——
+      //   这正是知识库里那条经验的 NEVER 项。原生 title 是我们的合理降级：
+      //   参考用的是 Portal Tooltip，理由（PN:1249-1251）是「原生 title 的出现时机
+      //   由浏览器决定（悬停约一秒才出，改不了）」，本项目零依赖，title 是能用的那一档。
+      provider: `<td title="${esc(providerOf(a) || '')}">${pinfo}</td>`,
       nickname: `<td title="${esc(a.nickname || '')}">${esc(maskNick(a.nickname))}</td>`,
-      uid: `<td class="mono dim">${esc(U)}</td>`,
+      uid: `<td class="mono dim" title="${esc(U)}">${esc(U)}</td>`,
       quota: `<td data-quota-uid="${esc(U)}" title="额度「—」表示还没探测过（与额度为 0 是两件事）">${quotaCellHTML(a)}</td>`,
       free_quota: `<td data-free-quota-uid="${esc(U)}">${freeQuotaCellHTML(a)}</td>`,
       status: `<td data-status-uid="${esc(U)}">${st}</td>`,
-      token: `<td>${tok}</td>`,
-      token_expiry: `<td>${tokenExpiryCellHTML(a)}</td>`,
+      token: `<td title="${a.has_token && typeof a.token_expire_sec === 'number'
+        ? esc(fmtTokenRemain(a.token_expire_sec)) : ''}">${tok}</td>`,
+      // ⚠ 与 token 列同样的处理：格内是"相对剩余 + 绝对时刻"两段拼成的 pill，
+      //   定宽下仍可能被吃掉尾巴，title 兜住全值。
+      token_expiry: `<td title="${typeof a.token_expire_sec === 'number'
+        ? esc(fmtTokenRemain(a.token_expire_sec)) : ''}">${tokenExpiryCellHTML(a)}</td>`,
       checkin: `<td>${ck}</td>`,
       welfare: `<td>${welfareCellHTML(a)}</td>`,
       success: `<td class="mono">${esc(a.success_count)}</td>`,
       breaker: `<td class="mono">${esc(a.breaker_fails)}</td>`,
       in_flight: `<td class="mono">${esc(a.in_flight)}</td>`,
-      ops: `<td style="white-space:nowrap">${act}</td>`,
+      // ⚠ 操作列带 title：一行最多 5 个动作时要 237px，而列宽是 200px（对齐参考落点），
+      //   所以最后那几个按钮会被省略号吃掉。title 用按钮文字拼出来 ——
+      //   从 `act` 的 HTML 里剥标签取文本，这样"这一行到底有哪些动作"永远可查。
+      //   参考项目在这里用的是 ⋯ 收纳菜单（把低频动作收进浮层），那是更好的形态，
+      //   但它要引入浮层；本项目零依赖，先用 title 保证信息不丢。
+      ops: `<td style="white-space:nowrap" title="${esc(act.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim())}">${act}</td>`,
     };
     const cols = acctColumnsFor(providerOf(a));
     const tds = cols.map(id => cells[id]).filter(Boolean).join('');
