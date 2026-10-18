@@ -5884,10 +5884,11 @@ let loginProvider = '';
     //   但界面上没有任何变化 ⇒ 他的结论只能是"这按钮没用"。
     //   参考项目把这条列为明确要避免的（settings-prompt-editor.tsx:151-153
     //   「点得动却像没反应」），做法是 async 按钮换进行时措辞 + disabled。
-    if (typeof fn === 'function') return fn(providerId, cap);
+    if (typeof fn === 'function') return fn(providerId, cap, force);
     // 回落到通用列表渲染。它按 routesFor(provider, cap) 取该能力位的 GET 端点，
     // 逐个拉取并渲染 —— 与 welfare 走的是同一条路径。
-    return loadGenericList(providerId, cap);
+    // ⚠ `force` 必须一路透下去：它最终决定 URL 上带不带 `refresh=1`（见 loadGenericList）。
+    return loadGenericList(providerId, cap, force);
   }
 
   // PROVIDER_PANEL_RENDERERS 能力位 → 渲染函数。
@@ -5922,15 +5923,29 @@ let loginProvider = '';
     // 其余能力位走**通用列表 + 领取**渲染。
     // 用户决策：codearts 的福利中心做到"上游给什么就渲染什么"即可，
     // 不为它写专属字段逻辑。
-    welfare: (pid) => loadGenericList(pid, 'welfare'),
-    'quota-probe': (pid) => loadGenericList(pid, 'quota-probe'),
+    welfare: (pid, _cap, force) => loadGenericList(pid, 'welfare', force),
+    'quota-probe': (pid, _cap, force) => loadGenericList(pid, 'quota-probe', force),
     // 本轮为 loomy 的两个专属标签页加的（见上面那两个渲染器）。
     // 键是**能力位名**，不是上游名 —— 任何上游声明它都会走这里。
-    tasks: (pid) => loadLoomyTasks(pid),
-    invite: (pid) => loadLoomyInvite(pid),
+    //
+    // ⚠⚠ `force` 必须往下一层传（2026-10-19）。这里原来写成 `(pid) => loadLoomyInvite(pid)`，
+    //   把「刷新」按钮传进来的 force **吃掉了** —— 于是按钮发出的请求和首次加载
+    //   **一字不差**，命中后端「只读缓存、零上游请求」那条分支：
+    //
+    //       /admin/loomy/invite?page=1            170ms    from_cache=true
+    //       /admin/loomy/invite?page=1&refresh=1  17110ms  from_cache=false
+    //
+    //   实测两条路的数据：余额未知 5 行 → **0 行**、有码 23 行 → **25 行**。
+    //   用户的「为什么刷新了这些还没有？」就是这么来的 —— 按钮一直"是活的"，
+    //   但**没有任何办法表达"我要强制重查"**。这条链路一共有三处会吃掉参数，
+    //   这是第二处（第一处是 loadProviderPanel 的 `fn(providerId, cap)`）。
+    //   ⚠ 这类 bug 静默得可怕：不报错、有请求、有回执，只是回执是旧的。
+    //   ⇒ 加新渲染器时**照抄这两行的签名**。
+    tasks: (pid, _cap, force) => loadLoomyTasks(pid, null, force),
+    invite: (pid, _cap, force) => loadLoomyInvite(pid, null, force),
     // core 保留在这里只作为"若将来有人给 core 放开通用面板"的兜底：
     // 当前 SPECIAL_PANEL_CAPS 已把 core 排除在生成之外，所以它不会被触发。
-    core: (pid) => loadGenericList(pid, CORE_CAP),
+    core: (pid, _cap, force) => loadGenericList(pid, CORE_CAP, force),
   };
 
   // buildProviderPanels 按 manifest 为每个上游生成能力面板容器。
@@ -6681,6 +6696,28 @@ let loginProvider = '';
   //   （见 LAZY_MAX_INFLIGHT 的注释）。所以一个一个来，且页与页之间留一口气。
   // ⚠ 用 warmedPages 防重复：切页/轮询都会调到这里，不防就会反复预热同一批。
   const warmedPages = new Set();
+  // panelPageURL 拼「某一页」的请求地址；`force` 为真时带上 `refresh=1`。
+  //
+  // ⚠⚠ 为什么单独抽一个函数（2026-10-19）：tasks 与 invite 两个面板**逐字相同**，
+  //   文件里已经有一条注释记着这件事（「改一处要改两处」）。而这次要加的东西
+  //   —— `refresh=1` —— 正是"改一处要改两处"最容易漏的那种：
+  //   漏掉任何一处，那个面板的「刷新」按钮就**静默地**退回"读缓存"，
+  //   不报错、有请求、有回执，只是回执是旧的。
+  //   ⇒ 抽成一处，两边都只能从这里拿 URL。
+  //
+  // # 为什么是 `refresh=1`
+  //
+  // 后端 `?page=` 分支是**只读缓存、零上游请求**（刻意的：先出上次的数据）。
+  // 于是「刷新」按钮如果发同一个 URL，拿到的永远是同一份 JSON，
+  // 点多少次界面都不变 —— 用户的结论必然是"这按钮没用"。
+  // 后端新增了 `?refresh=1` 走真查，前端负责把它带上。
+  function panelPageURL(getPath, page, force) {
+    const sep = getPath.indexOf('?') >= 0 ? '&' : '?';
+    return getPath + sep + 'page=' + encodeURIComponent(String(page))
+      + (force ? '&refresh=1' : '');
+  }
+
+  // warmOtherPages 后台预热相邻页（它们只读缓存，几乎零成本）。
   function warmOtherPages(getPath, curPage, pages) {
     if (!pages || pages <= 1) return;
     if (warmedPages.has(getPath)) return;
@@ -6839,7 +6876,7 @@ let loginProvider = '';
     return document.getElementById(`pbody-${providerId}-${cap}`);
   }
 
-  async function loadLoomyTasks(providerId, page) {
+  async function loadLoomyTasks(providerId, page, force) {
     const host = panelSkeleton(providerId, 'tasks');
     if (!host) return;
     const getPath = adminRouteFor(providerId, 'tasks', 'GET');
@@ -6949,7 +6986,7 @@ let loginProvider = '';
     //    它带回当页哪些行有缓存、哪些是占位（stale）。
     let fresh = null;
     try {
-      fresh = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+      fresh = await admin(panelPageURL(getPath, page, force));
     } catch (e) {
       if (!hit) { host.innerHTML = `<div class="gbad">任务查询失败：${esc(e.message)}</div>`; return; }
       // 有缓存就继续用缓存：一次"刷新失败"不该把已经显示出来的数据抹掉。
@@ -7010,11 +7047,11 @@ let loginProvider = '';
     //    补数就永远补不完了（这条是本文件里 `lazyFill` 的换代语义决定的）。
     // ⚠ 两个面板（tasks / invite）这段代码逐字相同、变量名也同名，改一处要改两处。
     schedulePanelPoll(lazyKey, host, () => stale.length, async () => {
-      const d = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+      const d = await admin(panelPageURL(getPath, page, force));
       renderPage(lazyCachePutPage(cacheKey, d));
     });
   }
-  async function loadLoomyInvite(providerId, page) {
+  async function loadLoomyInvite(providerId, page, force) {
     const host = panelSkeleton(providerId, 'invite');
     if (!host) return;
     const getPath = adminRouteFor(providerId, 'invite', 'GET');
@@ -7127,7 +7164,7 @@ let loginProvider = '';
     // ② 再要一次"当页骨架"（服务端只读缓存 ⇒ 零上游、瞬时）。
     let fresh = null;
     try {
-      fresh = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+      fresh = await admin(panelPageURL(getPath, page, force));
     } catch (e) {
       if (!hit) { host.innerHTML = `<div class="gbad">邀请码查询失败：${esc(e.message)}</div>`; return; }
     }
@@ -7182,7 +7219,7 @@ let loginProvider = '';
     //    补数就永远补不完了（这条是本文件里 `lazyFill` 的换代语义决定的）。
     // ⚠ 两个面板（tasks / invite）这段代码逐字相同、变量名也同名，改一处要改两处。
     schedulePanelPoll(lazyKey, host, () => stale.length, async () => {
-      const d = await admin(getPath + '?page=' + encodeURIComponent(String(page)));
+      const d = await admin(panelPageURL(getPath, page, force));
       renderPage(lazyCachePutPage(cacheKey, d));
     });
   }
@@ -7195,7 +7232,7 @@ let loginProvider = '';
   // 它把上游返回的 JSON 当成"一组条目"，每条渲染成一行，
   // 能识别的字段（标题、数量、是否可领）用语义化展示，
   // 认不出来的原样列出。这样新增上游不需要改前端。
-  async function loadGenericList(providerId, cap) {
+  async function loadGenericList(providerId, cap, force) {
     const host = document.getElementById(`pbody-${providerId}-${cap}`);
     if (!host) return;
     // 面板入口可能有多条 GET 路由（如 codearts 的 welfare 有
@@ -7205,6 +7242,25 @@ let loginProvider = '';
       host.innerHTML = '<div class="dim" style="font-size:12px">该能力没有可读端点。</div>';
       return;
     }
+
+    // ⚠⚠ 2026-10-19：`force` 要一路透到 URL 上，变成 `?refresh=1`。
+    //
+    // 用户的原话是「为什么刷新了这些还没有？」。排查结果：这一层原来是**断的** ——
+    // 「刷新」按钮确实重发了 HTTP，但发的是和首次加载**完全相同**的 URL，
+    // 而这个 URL 命中的是后端"只读缓存、零上游请求"的那条分支：
+    //
+    //     /admin/loomy/invite?page=1           170ms   from_cache=true   ← 刷新走的
+    //     /admin/loomy/invite?page=1&refresh=1  17110ms from_cache=false  ← 真查上游
+    //
+    // ⇒ 两条路拿到的数据天差地别（实测：余额未知 5 行 → **0 行**，有码 23 行 → **25 行**），
+    //   而前者会**原样**还你一份和上次一样的 JSON —— 点多少次都不会变。
+    //   所以按钮"是活的"但**语义上是死的**，用户的感觉完全正确。
+    //
+    // ⚠ 后端对不认识 `refresh` 的端点会直接忽略这个参数，所以对**所有**面板统一加它
+    //   是安全的（不需要前端知道哪个上游认它）。
+    const withRefresh = (p) => force
+      ? p + (p.indexOf('?') >= 0 ? '&' : '?') + 'refresh=1'
+      : p;
 
     // ── 走共享层：**缓存优先 + 分块懒加载** ─────────────────────────────
     //
@@ -7228,7 +7284,7 @@ let loginProvider = '';
       key: cacheKey,
       host: host,
       chunks: routes.map((r, i) => [i]),
-      fetchChunk: (chunk) => admin(routes[chunk[0]].path),
+      fetchChunk: (chunk) => admin(withRefresh(routes[chunk[0]].path)),
       onChunk: (res, err, chunk) => {
         const r = routes[chunk[0]];
         parts[chunk[0]] = err
