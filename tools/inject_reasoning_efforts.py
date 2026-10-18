@@ -28,6 +28,15 @@ import sys
 PATH = r"C:\Users\21877\.dsh\profiles\web\cordis.patch.yml"
 TARGET_PROVIDER = sys.argv[1] if len(sys.argv) > 1 else "test"
 LEVELS = ["off", "low", "high", "max"]
+# ⚠⚠ 这几个档要**显式声明不支持**（值写 null）。
+#
+# 起因（2026-10-18，用 pi-ai 的 getSupportedThinkingLevels 实测）：
+#   pi-ai 的规则是 —— `mapped === null` ⇒ 跳过该档；`xhigh`/`max` ⇒ 必须显式声明；
+#   **其余档 ⇒ 默认支持**。所以只写 off/low/high/max 时，它把
+#   `minimal` 与 `medium` 也算成"支持" ⇒ 界面上会出现 6 档，
+#   而那两个字面量上游并不认（只会静默忽略）⇒ 用户选了等于没选。
+#   ⇒ 要精确落到 DSH 内置的那 4 档，必须把多出来的档写成 null ✓
+NULL_LEVELS = ["minimal", "medium"]
 APPLY = "--apply" in sys.argv
 
 lines = io.open(PATH, encoding="utf-8").read().split("\n")
@@ -82,7 +91,9 @@ while i < len(lines):
             #   THINKING_LEVELS 里的**字符串** "off" ⇒ 校验会失败。
             #   ⚠ 这正是 dsh-model-meta-autofill 的 README 说"各供应商 wire 拼写不可移植、
             #     宁可不动"的一个具体实例 —— 连键名的引号都能决定 YAML 的类型。
-            block = [' ' * 12 + "reasoningEfforts:"] + [' ' * 16 + '"%s": "%s"' % (lv, lv) for lv in LEVELS]
+            block = ([' ' * 12 + "reasoningEfforts:"]
+                     + [' ' * 16 + '"%s": "%s"' % (lv, lv) for lv in LEVELS]
+                     + [' ' * 16 + '"%s": null' % lv for lv in NULL_LEVELS])
             item = item[:pos] + block + item[pos:]
             added += 1
         out.extend(item)
