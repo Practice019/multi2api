@@ -41,6 +41,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     /* 代码块底色 / 遮罩 / 阴影也必须走变量 ——
        否则浅色主题下 <pre> 会是深色块、模态遮罩会过重、阴影会显成脏边。 */
     --code-bg:#0a0d13; --overlay:rgba(0,0,0,.62); --shadow:rgba(0,0,0,.42);
+    /* 活跃热力图的 5 档色阶 —— **原样抄**参考项目 openViking 的
+       `web-studio/src/styles.css`（它的 `--heatmap-empty` / `--heatmap-level-1..4`）。
+       ⚠⚠ 用户明确要求"颜色不对 严格抄"，所以这 5 个值是**字面量照搬**，
+          不与本项目的 --acc 混色 —— 混出来的蓝阶和它那套 GitHub 绿阶不是一回事。
+       ⚠ 深色主题下档位顺序是**反的**（1 最暗 → 4 最亮）：暗底上"更多"应当更亮，
+          这是它那边的设计，照搬即可。 */
+    --hm0:#303033; --hm1:#0e4429; --hm2:#006d32; --hm3:#26a641; --hm4:#39d353;
     --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
   }
   /* 浅色主题。**不是把深色取反**：深色那套强调色在浅底上对比度不足，
@@ -52,6 +59,10 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     --fg:#1c2333; --dim:#5a6478; --acc:#1d5fd0; --ok:#0f7a54; --warn:#a35b00; --err:#c02626;
     /* 浅色下代码块用略深的底、遮罩更淡、阴影更轻 */
     --code-bg:#f0f2f7; --overlay:rgba(28,35,51,.42); --shadow:rgba(28,35,51,.16);
+    /* 浅色下的热力图色阶 —— 同样是**字面量照搬** openViking 的浅色那套
+       （`--heatmap-empty:#ebedf0` + L1..L4 由浅到深）。⚠ 与深色那套**不是取反关系**，
+       所以必须像其他颜色一样各写一份，不能在深色值上算。 */
+    --hm0:#ebedf0; --hm1:#9be9a8; --hm2:#40c463; --hm3:#30a14e; --hm4:#216e39;
   }
   /* ⚠⚠ 这一轮按用户要求整体**收紧留白**（「更紧凑、少空白、合理利用空间」）。
      原则：**只动"每屏都吃"的值**（全局字号/行高、外框内边距、表格行高、卡片内边距），
@@ -459,11 +470,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .heatcell.sel{outline:2px solid var(--fg);outline-offset:1px;box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 35%,transparent)}
   .heatpick{margin-top:6px;font-size:12px;min-height:18px}
   .heatcell.blank{background:transparent}
-  .heatcell.lv0{background:color-mix(in srgb,var(--dim) 12%,transparent)}
-  .heatcell.lv1{background:color-mix(in srgb,var(--acc) 25%,transparent)}
-  .heatcell.lv2{background:color-mix(in srgb,var(--acc) 45%,transparent)}
-  .heatcell.lv3{background:color-mix(in srgb,var(--acc) 70%,transparent)}
-  .heatcell.lv4{background:var(--acc)}
+  /* ⚠⚠ 5 档色阶**直接取主题变量**（值来自参考项目 openViking，见 :root 里的 `--hm0..--hm4`）。
+     2026-10-19 改：原来这里用 `color-mix(in srgb, var(--acc) …)` 调出蓝色阶 ——
+     ⚠ 用户要求"颜色不对 严格抄"，而混色**混不出**它那套特定的 GitHub 绿阶
+     （色相、饱和度都不成比例），所以改成 5 个字面量、按主题各给一份。 */
+  .heatcell.lv0{background:var(--hm0)}
+  .heatcell.lv1{background:var(--hm1)}
+  .heatcell.lv2{background:var(--hm2)}
+  .heatcell.lv3{background:var(--hm3)}
+  .heatcell.lv4{background:var(--hm4)}
   /* ---- 热力图右侧统计卡（2026-10-19 照 openViking 那一列加）----
      三格：活跃天数 / 峰值单日 / 最近提交。⚠ 数值由 renderHeatmap 现算，
      与顶部概览卡的「活跃天数」同源（都来自 series 的按天总量），口径一致、不会打架。 */
@@ -475,6 +490,12 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .heatstats .hs .v.dim{color:var(--dim);font-weight:400}
   .heatfoot{display:flex;align-items:center;gap:5px;margin-top:6px;font-size:11px;flex-wrap:wrap}
+  /* ⚠⚠ 图例里的色块**必须显式给尺寸**（2026-10-19 用户反馈"需要有示例图标"）。
+     根因：格阵用的是 `grid-auto-columns:1fr`，每个 `.heatcell` 的宽度**由列宽决定**，
+     自身只声明了 `aspect-ratio:1`。而图例里这些色块是 **flex 子项、没有列宽可继承**
+     ⇒ 宽度算成 0 ⇒ 只剩一个 1px 的竖条（甚至完全看不见）。
+     ⚠ 所以这里把尺寸钉住 —— 与格子的 `aspect-ratio` 并不冲突，是两种上下文各给各的宽度。 */
+  .heatfoot .heatcell{width:11px;height:11px;aspect-ratio:auto;flex:none;min-width:11px}
   /* ---- 页面级悬停浮层（2026-10-19 抽共享）----
      ⚠ 为什么用 `position:fixed` 而不是 `absolute`：热力图现在在一个
        `overflow-x:auto` 的容器里，`absolute` 会被容器**裁剪**掉一半
@@ -8988,9 +9009,22 @@ let loginProvider = '';
         if (to && cell.contains(to)) return;          // 还在同一格内动 ⇒ 不隐藏
         hoverTipHide();
       });
-      // ⚠ 滚动/离开视口时也要收起来：否则浮层会**留在原地**（它用 fixed 定位，
-      //   不随容器滚动而移动，看起来就像贴错了地方）。
-      host.parentElement && host.parentElement.addEventListener('scroll', hoverTipHide, { passive: true });
+      // ⚠ 滚动时收起浮层：它用 fixed 定位、不随容器滚动而移动，
+      //   不收起来就会**留在原地**（看起来像贴错了地方）。
+      //
+      //   ⚠⚠ 但**程序性滚动不算**（2026-10-19 踩到）：本函数上面那句
+      //   `sc.scrollLeft = …` 即使值没变（0 → 0）也会派发一次 `scroll`，
+      //   于是刚渲染完就把浮层关掉了 —— 实测表现是"浮层文本是对的，但 display:none"。
+      //   用一个标志位跳过自己触发的那次，只有**用户拖动**才收起。
+      const markProgScroll = () => {
+        host._progScroll = true;
+        requestAnimationFrame(() => { host._progScroll = false; });
+      };
+      host._markProgScroll = markProgScroll;
+      host.parentElement && host.parentElement.addEventListener('scroll', () => {
+        if (host._progScroll) return;
+        hoverTipHide();
+      }, { passive: true });
       host.addEventListener('click', (ev) => {
         const cell = ev.target && ev.target.closest ? ev.target.closest('.heatcell[data-day]') : null;
         if (!cell) return;
@@ -9036,8 +9070,27 @@ let loginProvider = '';
     //     `scrollWidth` 可能仍是旧值（参考项目那里同样是 `requestAnimationFrame`）。
     requestAnimationFrame(() => {
       const sc = host.parentElement;                 // = .heatmain（overflow-x:auto 的那个）
-      if (!sc) return;
-      sc.scrollLeft = Math.max(0, sc.scrollWidth - sc.clientWidth);
+      if (sc) {
+        if (host._markProgScroll) host._markProgScroll();   // ⚠ 标记：这次滚动是我们自己发的
+        sc.scrollLeft = Math.max(0, sc.scrollWidth - sc.clientWidth);
+      }
+
+      // ⚠⚠ 左侧"一 / 三 / 五"必须与格阵的**行**对上（2026-10-19 用户反馈"位置不对"）。
+      //
+      //   为什么必须用 JS 同步、而不是纯 CSS：
+      //     格阵行高不是固定值 —— 它是 `grid-auto-columns:1fr`（宽度随窗口变）+
+      //     格子 `aspect-ratio:1` ⇒ **行高 = 列宽**，是个算出来的数。
+      //     而 `.heatdays` 自己是 `repeat(7,1fr)` 的独立 grid，容器没有确定高度时
+      //     `1fr` 会塌成内容高度（7 行 × line-height ≈ 63px），于是三行标签整体上移、
+      //     与下面的行**错位**。给它一个与格阵相同的总高，两边 gap 又都是 2px，
+      //     逐行就自然对齐了。
+      //   ⚠ `marginTop` 补的是月份行的高度（标签行从月份行**下方**开始）。
+      const days = document.querySelector('.heatdays');
+      const months = $('statsHeatMonths');
+      if (days && months) {
+        days.style.marginTop = (months.offsetHeight + 2) + 'px';
+        days.style.height = host.offsetHeight + 'px';
+      }
     });
 
     // 图例四档的数值（⚠ 用它的 heatLevelText 口径：给出每档的上界）
