@@ -159,3 +159,6 @@ data/_snapshot-*.jsonl
 
 # ⚠ 我自己用的临时提交信息文件（git add -A 会顺手吞掉它 —— 实测已发生一次）。
 _commitmsg.txt
+
+# ⚠ 我自己用 playwright 截的验收图（临时产物，不入库）
+shot_*.png
