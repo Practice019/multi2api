@@ -25,17 +25,30 @@ import (
 //   盘上没数据时，前端打开还是会看到「正在读取…」。
 
 const (
-	// panelWarmupInterval 两轮之间的间隔。
-	panelWarmupInterval = 60 * time.Second
+	// panelWarmupIdleInterval **没有待补**时的间隔（稳定态）。
+	//
+	// ⚠ 稳定态下几乎不发请求 —— 这是本仓"不频繁查询上游"的一贯取舍
+	//   （见 StartFreePoolSweep 里那段：它不是"所有账号每 30 秒一轮"的预热）。
+	//   5 分钟只是"万一有号从缓存里掉出去、或上游那边状态变了"的兜底复查周期。
+	panelWarmupIdleInterval = 5 * time.Minute
+	// panelWarmupBusyInterval **还有待补**时的间隔（追赶态）。
+	//
+	// ⚠⚠ 这一个常量是"多久之后打开就是毫秒"的直接决定因素：
+	//   实测一轮（12 个 / 并发 4）约 **30 秒**跑完，而固定 60 秒间隔会让
+	//   一半的时间在空等 ⇒ 44 个号要 ~6 分钟。改成 5 秒之后：
+	//   44 个 ≈ 4 轮 × 30 秒 ≈ **2 分钟**（且轮间几乎不空等）。
+	// ⚠ 不会因此打急上游：并发仍是 panelWarmupConcurrency，每轮仍是
+	//   panelWarmupBatch 个上限 —— 缩短的只是"两轮之间干等的时间"。
+	panelWarmupBusyInterval = 5 * time.Second
 	// panelWarmupBatch 每轮最多补几个号。
 	//
-	// ⚠ 取 12 而不是 8：一轮的耗时 ≈ 批量 / 并发 × 单号耗时，批量太小会让
-	//   "轮与轮之间的 60 秒空等"占掉大头（8 个号 × 10s / 4 并发 = 20s，剩下 40s 在等）。
+	// ⚠ 取 12 而不是更小：一轮的耗时 ≈ 批量 / 并发 × 单号耗时，批量太小会让
+	//   "轮与轮之间的空等"占掉大头。
 	panelWarmupBatch = 12
 	// panelWarmupConcurrency 补数的并发度。
 	//
 	// ⚠⚠ **不能提高**：上游实测 **12 条并发就打 502**（见 adminpoints 里
-	//   LAZY_MAX_INFLIGHT 的注释，那是踩过的坑）。4 是"快 4 倍"与"不打急上游"的平衡点。
+	//   LAZY_MAX_INFLIGHT 的注释，那是踩过的坑）。4 是"更快"与"不打急上游"的平衡点。
 	// ⚠ 每个号要发 2 次上游请求（tasks + balance）⇒ 4 并发 = 8 条在途，仍在安全区。
 	panelWarmupConcurrency = 4
 )
@@ -57,14 +70,18 @@ func (p *Provider) StartPanelWarmup() {
 					log.Printf("loomy: 面板预热 panic（已忽略）: %v", r)
 				}
 			}()
-			// ⚠ 启动时连着跑两轮：第一轮把"最早的 12 个号"补上，第二轮接着往下
-			//（每轮各限 panelWarmupBatch，所以两轮不等于"一次补 24 个"导致的并发失控）。
-			p.sweepPanels()
-			p.sweepPanels()
-			t := time.NewTicker(panelWarmupInterval)
-			defer t.Stop()
-			for range t.C {
-				p.sweepPanels()
+			// ⚠⚠ **自己调度自己**，而不是固定 Ticker：
+			//   `sweepPanels` 返回**还剩多少待补**，于是间隔能跟着状态走 ——
+			//     · 还有待补（追赶态）⇒ 5 秒一轮 ⇒ 44 个号约 2 分钟补满
+			//     · 都补完了（稳定态）⇒ 5 分钟一轮 ⇒ 几乎不发请求
+			//   ⚠ 固定 60 秒的版本实测会浪费一半时间空等（一轮只要 30 秒）。
+			for {
+				left := p.sweepPanels()
+				if left > 0 {
+					time.Sleep(panelWarmupBusyInterval)
+					continue
+				}
+				time.Sleep(panelWarmupIdleInterval)
 			}
 		}()
 	})
@@ -142,5 +159,12 @@ func (p *Provider) sweepPanels() int {
 
 	log.Printf("loomy: 面板预热一轮 —— 待补 tasks=%d invite=%d（共 %d 个号）· 本轮发起 %d 个 · 首个错误=%q",
 		todoT, todoI, len(accts), done, firstErr)
-	return done
+	// ⚠ 返回**剩余待补数**（不是本轮发起数）—— 调用方据此决定"连着补"还是"歇一会儿"。
+	// ⚠ 用 todo（本轮开始时的缺口）减掉本轮的 done 是最稳的口径：
+	//   本轮成功后那些号就进缓存了，所以下一次 sweep 的 todo 自然会变小。
+	left := todoT + todoI - done
+	if left < 0 {
+		left = 0
+	}
+	return left
 }
