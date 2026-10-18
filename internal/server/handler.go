@@ -2537,7 +2537,7 @@ func poolUnavailableHintOf(list []pool.Status) string {
 		return "该上游池内暂无账号（先在控制台导入凭证或添加账号）"
 	}
 	if len(list) > 3 {
-		nDis, nCool := 0, 0
+		nDis, nCool, nBusy, maxFlight := 0, 0, 0, 0
 		for _, st := range list {
 			switch {
 			case st.Disabled:
@@ -2545,8 +2545,27 @@ func poolUnavailableHintOf(list []pool.Status) string {
 			case st.Cooling:
 				nCool++
 			}
+			// ⚠⚠ 在途也要数（2026-10-18 加，见下面那段注释）。
+			//   ⚠ 它**与 Cooling 正交**：账号可以既不冷却也没禁用，只是并发名额被占满 ——
+			//     那种情况下它照样选不出来。
+			//   ⚠ 这里**不判断"是否达上限"**（上限是 Pool 的私有字段，Status 不带它）——
+			//     改为报"有几个号在途、最大在途数"；⚠ 上限默认是 3，读者一眼就能对照 ✓。
+			if st.InFlight > 0 {
+				nBusy++
+			}
+			if st.InFlight > maxFlight {
+				maxFlight = st.InFlight
+			}
 		}
-		return fmt.Sprintf("%d 个账号：%d 禁用、%d 冷却", len(list), nDis, nCool)
+		// ⚠⚠ **为什么必须把"在途"报出来**（2026-10-18 实测踩到）：
+		//   用户看到的 503 原文是 "44 个账号：**0 禁用、0 冷却**" ——
+		//   ⚠ 那句话**把两个可能的原因排除掉了，却一个真原因都没给出**，读者只能猜"池子坏了"。
+		//   而真原因是**在途名额占满**：主路径 Acquire 后**整个请求期间**持有名额，
+		//   而工具循环内再按 uid 取号时**不换号**（见 chattool_send.go:42 的注释）
+		//   ⇒ 同一账号并发达到上限时，那条路径**必失败** ⇒ 503。
+		//   ⇒ 报错必须给出**真正的那一维**，否则排障只能从零猜（这次就猜了一轮）。
+		return fmt.Sprintf("%d 个账号：%d 禁用、%d 冷却、%d 个在途未结束（最大 %d）",
+			len(list), nDis, nCool, nBusy, maxFlight)
 	}
 	parts := make([]string, 0, len(list))
 	for _, st := range list {
