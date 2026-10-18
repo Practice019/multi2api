@@ -138,6 +138,31 @@ func (p *Provider) sweepPanels() int {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			var errMsg string
+			// ⚠⚠ **顺手把额度也刷回池里**（用户 2026-10-18 的核心问题）。
+			//
+			//	"我们的要求不是说我们调用一次调用一个账号一次请求，它会返回出额度吗？
+			//	 然后直接写回本地的磁盘文件缓存……但为什么会出现前端显示是过时的数据？"
+			//
+			// ⚠ 事实：**chat 回执里根本没有余额字段**（`client.go` 的响应结构里没有
+			//   Balance/remaining/quota 任何一个）⇒ "每次调用写回真实余额"做不到。
+			// ⚠ 而 `gateway/quota_consumed.go` 又明确禁止"拿过期值做减法"：
+			//   那样算出来的余额会让**选号权重**多扣，把一个还能用的号提前降权。
+			// ⇒ 唯一正确做法：**让刷新自动、持续地发生**（而不是只在用户点按钮时）。
+			//   ⚠ `RefreshQuota` 会写回池子（并置 dirty ⇒ 5 秒后落进 state.json）
+			//     以及档位缓存 —— 于是盘上的额度**跟着这个循环变新**。
+			// ⚠ 它同时是这个循环"本来就该做的一件事"：`tasksViewFor` 已经查过一次
+			//   积分接口，再问一次余额是重复劳动，但两者走的是不同端点
+			//   （/points/records vs 余额），合并的收益小于"两条独立失效"的风险。
+			// ⚠ 关键：**自己写回池子** —— 核心平时是靠"调 RefreshQuota 之后执行
+			//   SetQuota"来落这笔账的（见 gateway/quota_consumed.go 的说明），
+			//   而我们这里是 loomy 内部直接调，所以必须自己补上这一步。
+			//   ⚠ `SetQuota` 会 `dirty.Store(true)` ⇒ **5 秒后落进 state.json**
+			//     （`pool.flushInterval`）⇒ 前端读到的就是**这个循环刷新的值**。
+			// ⚠ `!HasData` 时**一律不写**：那是"没查到"，写成 0 会把一个还能用的号
+			//   显示成额度耗尽（本仓"未知 ≠ 零"的纪律，见 quota_ext.go 的注释）。
+			if view, ok := p.RefreshQuota(j.a.UID); ok && view.HasData {
+				p.pool().SetQuota(j.a.UID, view)
+			}
 			if j.which == "tasks" {
 				if v := p.tasksViewFor(j.a); !v.OK {
 					errMsg = v.Error
