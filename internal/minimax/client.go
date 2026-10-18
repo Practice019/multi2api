@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/anthroconv"
+	"workbuddy2api/internal/gateway"
 )
 
 // Config 本上游的构造配置。
@@ -437,7 +439,10 @@ func (c *Client) signinURL(path string) string {
 func (c *Client) chat(ctx context.Context, a *Auth, openAIBody []byte, w io.Writer) error {
 	anthroBody, err := anthroconv.OpenAIToAnthropic(openAIBody)
 	if err != nil {
-		return fmt.Errorf("minimax: 请求体转换失败: %w", err)
+		// ⚠ 带上 gateway.ErrConvertFailed 哨兵（与 provider.go 同一处理由）：
+		//   出口层据此**不换号**直接返回 400，而不是白试 N 个账号。
+		return fmt.Errorf("minimax: 请求体转换失败: %w",
+			errors.Join(err, gateway.ErrConvertFailed))
 	}
 	// 强制 stream:true —— 上游这个端点只按 SSE 回。
 	anthroBody, err = forceStream(anthroBody)

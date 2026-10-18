@@ -1718,6 +1718,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 见 chatVia 的注释。
 		cr, status, terr := h.chatVia(ctx, reqProvider, acct, outBody)
 		if terr != nil {
+			// ⚠⚠ **本地转换失败**：换号**完全无效**（转换取决于请求体本身，
+			//   每个账号背后是同一套转换代码）⇒ 不换号、不惩罚账号，直接回 400。
+			//
+			// ⚠ 这条必须排在下面的"网络抖动"之前 —— 两者此前共用同一条
+			//   `fail(acct.UID); continue`，于是转换失败会白试 N 个号，
+			//   最后还被报成"所有账号不可用"（把本地错误误报成池子故障）。
+			//   这正是 new-api 的 `ErrOptionWithSkipRetry` 显式声明的那件事。
+			if errors.Is(terr, gateway.ErrConvertFailed) {
+				st.status = http.StatusBadRequest
+				st.decision = "convert_failed:system"
+				lastErr = terr
+				lastKind = gateway.ErrKindClient
+				break
+			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
