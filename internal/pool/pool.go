@@ -118,6 +118,17 @@ type Status struct {
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
 	LastErrTime     time.Time `json:"last_err,omitempty"`
 
+	// LastUsed 最近一次**被选中去干活**的时刻（`pick` 里记的 `e.lastUsed`）。
+	//
+	// ⚠ 它一直是池子的内部状态（用来防并发撞号 + LRU 兜底），这里才导出到
+	//   `Status`。导出它的理由只有一个：**让"额度刷新"能先刷最该刷的那批** ——
+	//   刚被用过的账号，它的额度**一定**变了（见 admin 的 RefreshAllQuotasNow）。
+	//
+	// ⚠ 与 LastSuccessTime 的区别：后者是"最近一次**成功**"，而它记的是
+	//   "最近一次**被选中**"（成功失败都算）—— 一个失败的调用同样会消耗额度，
+	//   所以排队时该用它而不是 LastSuccessTime。
+	LastUsed time.Time `json:"last_used,omitempty"`
+
 	// 运行态（不持久化）：在途请求数 + 熔断器状态。
 	InFlight     int       `json:"in_flight"`
 	BreakerFails int       `json:"breaker_fails"`
@@ -352,8 +363,8 @@ type snapshot struct {
 
 // Pool 账号池。
 type Pool struct {
-	mu      sync.RWMutex
-	byUID   map[string]*entry
+	mu    sync.RWMutex
+	byUID map[string]*entry
 	// provState 上游级熔断状态（2026-10-18 加）。⚠ 懒建（nil 表示"还没有失败过"）。
 	//
 	// # 为什么需要它（用户原话与实测数据）
@@ -369,8 +380,8 @@ type Pool struct {
 	//   由出口层据此决定状态码与判决留痕（⚠ 避免把"上游坏"报成"池子空了" ——
 	//   那正是我们前几轮反复修的那类语义错）。
 	provState map[string]*provState
-	stateFp string
-	dirty   atomic.Bool // 内存有变更待落盘
+	stateFp   string
+	dirty     atomic.Bool // 内存有变更待落盘
 
 	// pickSeq 选号单调序号（每次成功 Pick 自增，仅在持有 mu 时写）。
 	// 给 entry.lastPickSeq 分配值，用于 lastUsed 撞平时的确定性破平。
@@ -2540,10 +2551,12 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		ErrTotal:        e.errTotal,
 		LastSuccessTime: e.lastSuccess,
 		LastErrTime:     e.lastErr,
-		Until:           e.until,
-		InFlight:        int(e.inFlight.Load()),
-		BreakerFails:    e.fails,
-		BreakerUntil:    e.breakerUntil,
+		// ⚠ 导出"最近被选中"的时刻（见 Status.LastUsed 的注释）：额度刷新靠它排队。
+		LastUsed:     e.lastUsed,
+		Until:        e.until,
+		InFlight:     int(e.inFlight.Load()),
+		BreakerFails: e.fails,
+		BreakerUntil: e.breakerUntil,
 	}
 	if st.Cooling {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。
