@@ -545,6 +545,7 @@ func withPointsTimeout(fn func(ctx context.Context)) {
 //	         （那条路是"分块补数"，一次一块；两条路都按"每账号 2 次请求"折算）。
 //
 // ⚠ 两个常量分工不同、口径相同：
+//
 //	· `panelFillConcurrency` —— `?uids=` 分块补数（共享层 `lazyFill` 走这条）；
 //	· `loomyPanelConcurrency` —— 不带参数的全量查（v1.7.2 的老模型）。
 //
