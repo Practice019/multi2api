@@ -9,15 +9,15 @@
 // ⚠ 权限判据刻意与 `/ui` **同一份实现**（h.uiIdentify）：渠道页能看见渠道的 key 掩码、
 // Base URL、映射关系 —— 它是管理面，不是公开页。另写一套判断等于给自己留一条
 // "两处判据哪天分叉了"的路。
+// ⚠ 内嵌指令与变量**刻意放在 webui.go**（与 webui.html / webui-login.html / favicon.svg 同处）：
+// 前端语法门禁（tests/frontend/verify_inline_script_syntax.js）的扫描清单就是从 webui.go 的
+// //go:embed 行推导出来的。放在这里的话，这一页会**静默逃过门禁** —— 门禁是全绿的，
+// 但根本没扫它。我上一轮正是这么写的，所以这轮把它挪过去了。
 package server
 
 import (
-	_ "embed"
 	"net/http"
 )
-
-//go:embed webui-channels.html
-var channelsUIPage []byte
 
 // channelsUI 提供渠道管理页。
 //
