@@ -249,8 +249,8 @@ func TestCaptchaGlyphTable(t *testing.T) {
 func TestCaptchaConcurrentIssueDistinctIDs(t *testing.T) {
 	const (
 		goroutines = 8
-		perG        = 25
-		total       = goroutines * perG
+		perG       = 25
+		total      = goroutines * perG
 	)
 	c := NewCaptcha(time.Minute, total)
 	now := baseTime()
