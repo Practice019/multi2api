@@ -72,12 +72,24 @@ func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 	// 而 admin_token 是管理台门禁凭据 —— 让成员知道它存在、长什么样没有任何
 	// 好处（他不能用，也不该用）。
 	adminMask, adminTokenMask := "", ""
+	// ⚠ 2026-10-20 用户口径：**登录 = 唯一门槛**；登录之后控制台要照旧"一切正常" ——
+	// 包括看得到、可复制完整凭据，以及模型目录直接用这把 api_key 自动取回来
+	//（不该再让用户在顶栏手粘一次）。
+	//
+	// 做法是在**会话鉴权之后**回吐完整值，而不是"把凭据注回页面 HTML"：
+	//   · 本请求要过 consoleAdminAuth ⇒ 未登录/错令牌拿不到（401）；
+	//   · 页面 HTML 里不留凭据 ⇒ 截图、另存为、浏览器缓存、扩展都带不出去。
+	// 两者对"登录之后"的体验完全一样（打开就能用、点一下就能复制/显示），
+	// 差别只在未授权时拿不拿得到 —— 那正是门禁该管的事。
+	adminKeyFull, adminTokenFull := "", ""
 	if p.IsAdmin() {
 		if h.cfg.APIKey != "" {
 			adminMask = apikey.MaskID(h.cfg.APIKey)
+			adminKeyFull = h.cfg.APIKey
 		}
 		if t := h.currentAdminToken(); t != "" {
 			adminTokenMask = apikey.MaskID(t)
+			adminTokenFull = t
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -85,6 +97,11 @@ func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 		"enabled":     true,
 		"admin_key":   adminMask,
 		"admin_token": adminTokenMask,
+		// 完整值（会话鉴权之后才可能走到这里 ⇒ 未登录拿不到）。
+		// 前端用 `admin_key_full` 自动填顶栏那个「对话密钥」⇒ 模型目录/对话测试
+		// 登录后开箱可用；`admin_token_full` 供仪表盘"显示/复制"管理令牌。
+		"admin_key_full":   adminKeyFull,
+		"admin_token_full": adminTokenFull,
 		// ⚠ 2026-10-19 用户新口径：`"member": !p.IsAdmin()` 字段**已删除**。
 		//
 		// 它的唯一用途是让前端把面板标题换成「我的 API Key」（成员看到的是

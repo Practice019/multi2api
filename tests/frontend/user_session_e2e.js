@@ -158,22 +158,75 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         '清屏后表格有明确状态（不是空白表格）');
     }
 
-    // ---- 3) 任务历史：翻页 ----
-    console.log('\n[3] 任务历史：翻到下一页');
-    await clickNav('任务历史');
+    // ---- 3) 请求日志：翻页 ----
+    //
+    // ⚠⚠ 载体换了（2026-10-19）：原来这一段测的是「**任务历史**」的翻页
+    //   （`#histPager` + `#histrows`）。用户本轮明确要求把「任务历史」标签页下线
+    //   （`webui.html:1583` 的 section 已删，`#histPager`/`#histrows` 随之不存在）。
+    //
+    //   ⇒ 整段从"元素找不到"变成必然红，而**这条红与产品好坏无关**。
+    //   判据的**意图**（"分页器能真的翻到下一页，且内容真的换了"）没有消失：
+    //   请求日志用的是**同一套**分页器 —— `renderPager`（`webui.html:9225`，
+    //   文件头原话："统一分页条：任务历史与请求日志共用同一套控件与语义"）
+    //   ⇒ 载体改成 `#logPager` + `#logrows .log-row`，**判据一字未松**：
+    //   仍然要求"下一页按钮存在"+"点了之后发出新请求"+"首行内容真的变了"。
+    //
+    //   ⚠ 前置：夹具里必须有**至少两页**数据（`lib_family3` 灌 80 条 / 每页默认 20 条）。
+    //     页数不足时下面的"下一页按钮存在"会红 —— 那是**夹具不足**，不是产品缺陷，
+    //     所以先把"共 N 条 / 第 x / y 页"打出来，归因一眼可判。
+    console.log('\n[3] 请求日志：翻到下一页');
+    await clickNav('请求日志');
     await sleep(2000);
     {
       const info = await ev(`(function(){
-        var pg = document.getElementById('histPager');
+        var pg = document.getElementById('logPager');
         if (!pg) return JSON.stringify({no:true});
         var btns = Array.from(pg.querySelectorAll('button')).map(function(b){
           return { t: (b.textContent || '').trim(), dis: b.disabled };
         });
-        return JSON.stringify(btns);
+        var no = pg.querySelector('.pageno');
+        return JSON.stringify({ btns: btns, pageno: no ? (no.textContent || '').trim() : '' });
       })()`);
       console.log('      分页按钮: ' + info);
+      // 先把"有几页"打出来：翻页红时，第一个要排除的就是"数据不够一页"
+      const pageInfo = await ev(`(function(){
+        var pg = document.getElementById('logPager');
+        var rows = document.querySelectorAll('#logrows .log-row').length;
+        return JSON.stringify({ rows: rows, text: pg ? (pg.textContent || '').replace(/\\s+/g,' ').trim() : '' });
+      })()`);
+      console.log('      前置: 当前页渲染行数/分页条全文 = ' + pageInfo);
+      // ⚠ 先把「每页条数」调小**再**判"下一页可点"。
+      //
+      // 为什么必须这一步（实测踩到）：夹具灌 80 条日志，而每页条数是**用户偏好**
+      // （`loadPageSize()` 读 localStorage，缺省 `DefaultPageSize`）——
+      // 缺省值 ≥ 80 时整批只够**一页**，「下一页」按钮存在但**被 disabled**
+      // ⇒ "翻页"这条判据根本没东西可测，而它红的样子像是分页器坏了。
+      //
+      // 两种解法：(a) 把夹具灌到几百条；(b) 用页面**自己的**每页条数输入框调小。
+      // 选 (b)：它不依赖夹具规模（夹具改了不会让这里静默失效），而且顺带**真的**
+      // 用了页面那个控件（`renderPager` 的 `input[data-page="size"]`，webui.html:9260）
+      // —— 走的是 `change` → `clampPageSize` → `savePageSize` → `state.onGo()` 的真路径。
+      await ev(`(function(){
+        var box = document.querySelector('#logPager input[data-page="size"]');
+        if (!box) return 'no-box';
+        box.value = '10';
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        return box.value;
+      })()`);
+      await sleep(2000);   // 等它按新页长重查一次
+      const after = await ev(`(function(){
+        var pg = document.getElementById('logPager');
+        var no = pg && pg.querySelector('.pageno');
+        var box = pg && pg.querySelector('input[data-page="size"]');
+        return JSON.stringify({
+          pageno: no ? (no.textContent || '').trim() : '',
+          size: box ? box.value : '',
+          rows: document.querySelectorAll('#logrows .log-row').length,
+        });
+      })()`);
+      console.log('      调小每页条数后: ' + after);
       const nextIdx = await ev(`(function(){
-        var pg = document.getElementById('histPager');
+        var pg = document.getElementById('logPager');
         if (!pg) return -1;
         var bs = Array.from(pg.querySelectorAll('button'));
         for (var i = 0; i < bs.length; i++) {
@@ -182,19 +235,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         return -1;
       })()`);
       ok(nextIdx >= 0, '找到「下一页」按钮');
-      if (nextIdx >= 0) {
+      // ⚠ 反向判据：按钮**在**但被 disabled，说明只有一页 —— 那是夹具不足，
+      //   必须与"按钮根本不存在"分开说，否则归因会飘到产品上。
+      const nextDisabled = await ev(`(function(){
+        var pg = document.getElementById('logPager');
+        if (!pg) return null;
+        var bs = Array.from(pg.querySelectorAll('button'));
+        for (var i = 0; i < bs.length; i++) {
+          if ((bs[i].textContent || '').indexOf('下一页') >= 0) return !!bs[i].disabled;
+        }
+        return null;
+      })()`);
+      ok(nextDisabled === false, '（前置）「下一页」是可点的 —— 否则说明日志不足一页，属夹具不足',
+        'disabled=' + JSON.stringify(nextDisabled));
+      if (nextIdx >= 0 && nextDisabled === false) {
         const before = requests.length;
         const firstBefore = await ev(`(function(){
-          var tr = document.querySelector('#histrows tr');
+          var tr = document.querySelector('#logrows .log-row');
           return tr ? (tr.textContent || '').replace(/\\s+/g,' ').trim().slice(0, 40) : '';
         })()`);
         await ev(`(function(){
-          var bs = Array.from(document.getElementById('histPager').querySelectorAll('button'));
+          var bs = Array.from(document.getElementById('logPager').querySelectorAll('button'));
           bs[${nextIdx}].click();
         })()`);
         await sleep(2000);
         const firstAfter = await ev(`(function(){
-          var tr = document.querySelector('#histrows tr');
+          var tr = document.querySelector('#logrows .log-row');
           return tr ? (tr.textContent || '').replace(/\\s+/g,' ').trim().slice(0, 40) : '';
         })()`);
         const newReqs = requests.slice(before);

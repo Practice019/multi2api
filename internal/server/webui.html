@@ -1610,6 +1610,12 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
           <option value="">全部上游</option>
         </select>
         <select id="model" style="min-width:240px"><option value="">— 先连接 —</option></select>
+        <!-- ⚠ 模型下拉为空时**必须给一句话说明为什么**（2026-10-19 用户实测反馈：
+             下拉空白 ⇒ "这个好像有bug"，而真相是"没粘对话密钥"或"目录还没拉"）。
+             三种空因分别给不同文案，见 syncModelSelect 里的 setModelHint。
+             原来只有 `#model` 一个空 select，填充函数一旦拿到空列表就把它清空，
+             用户看不到任何线索 —— 属"静默失败"。 -->
+        <span id="modelHint" class="dim" style="display:none;font-size:12px"></span>
         <label class="tog"><input id="stream" type="checkbox" checked> 流式</label>
         <div class="spacer"></div>
         <button id="send" class="primary">发送</button>
@@ -1783,6 +1789,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
 
       <div id="akPicker">
         <div class="row" style="gap:8px;margin-bottom:8px">
+          <!-- ⚠ 2026-10-20 用户要求：「我希望可以选择上游才能显示具体上游的模型，不要全部显示出来」。
+               原先这里把 670 个模型平铺在一个列表里（实测可用模型 670 个），找起来很费眼。
+               与「对话测试」的上游筛选同一个模式（见 #modelProvider 的注释）：
+               **只影响下面列出什么，不改最终存下来的模型 id**。
+               ⚠ 与 #modelProvider 是**两处独立的下拉**（一个在对话测试、一个在弹窗），
+               故各自持值；共用的只有"从模型 id 推断上游"那条规则（modelOwnerOf）。 -->
+          <select id="akProvider" style="min-width:150px" title="先选上游，只列出它的模型（不改存下来的模型 id）">
+            <option value="">全部上游</option>
+          </select>
           <input id="akSearch" type="text" placeholder="搜索模型名（支持部分匹配，例如 glm / deepseek）"
                  style="flex:1;box-sizing:border-box">
           <button id="akSelAll" style="padding:3px 10px;font-size:12px">全选当前</button>
@@ -8122,7 +8137,8 @@ let loginProvider = '';
   async function ensureAKCatalog() {
     if (akCatalog) return akCatalog;
     try {
-      const r = await api('/v1/models');
+      await ensureConsoleKey();
+    const r = await api('/v1/models');
       akCatalog = ((r && r.data) || []).map(m => ({
         id: String(m.id || ''),
         owner: String(m.owned_by || ''),
@@ -8134,20 +8150,46 @@ let loginProvider = '';
     return akCatalog;
   }
 
-  // renderAKModelList 按搜索词渲染可勾选列表；保留已勾选状态。
+  // syncAKProviders 用当前目录填充弹窗里的「上游」下拉（用户要求：先选上游再看模型）。
+  //
+  // 与 syncModelProviderOptions 同款坑：`<select>` 会把"不在 option 列表里的值"**当场归一成空串**，
+  // 所以恢复选择必须写在 innerHTML **之后**（否则选择会被浏览器悄悄清掉）。
+  function syncAKProviders() {
+    const sel = $('akProvider');
+    if (!sel) return;
+    const keep = sel.value;
+    const owners = [];
+    const seen = new Set();
+    for (const m of (akCatalog || [])) {
+      const o = modelOwnerOf(m.id, m.owner);
+      if (o && !seen.has(o)) { seen.add(o); owners.push(o); }
+    }
+    owners.sort();
+    sel.innerHTML = '<option value="">全部上游</option>' +
+      owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+    sel.value = owners.includes(keep) ? keep : '';
+  }
+
+  // renderAKModelList 按「上游 + 搜索词」渲染可勾选列表；保留已勾选状态。
   function renderAKModelList() {
     const host = $('akModelList'), empty = $('akEmpty');
     if (!host) return;
     const kw = ($('akSearch').value || '').trim().toLowerCase();
-    const list = (akCatalog || []).filter(m => !kw || m.id.toLowerCase().includes(kw));
+    // 上游筛选只决定"列出什么"，不改已勾选的 id（勾选状态由 stashAKChecked/akSelected 管）。
+    const wantP = ($('akProvider') && $('akProvider').value) || '';
+    const list = (akCatalog || []).filter(m =>
+      (!wantP || modelOwnerOf(m.id, m.owner) === wantP) &&
+      (!kw || m.id.toLowerCase().includes(kw)));
 
     // 记住当前的勾选（重渲染会丢掉 DOM）
     const checked = new Set(akSelected());
     if (!list.length) {
       host.innerHTML = '';
       empty.style.display = '';
-      empty.textContent = (akCatalog && akCatalog.length)
-        ? `没有匹配「${kw}」的模型` : '模型目录为空（上游可能都不可用；仍可先建 key，稍后再改模型）';
+      const hasCatalog = !!(akCatalog && akCatalog.length);
+      empty.textContent = wantP
+        ? `上游「${wantP}」下没有匹配「${kw}」的模型`
+        : (hasCatalog ? `没有匹配「${kw}」的模型` : '模型目录为空（上游可能都不可用；仍可先建 key，稍后再改模型）');
       return;
     }
     empty.style.display = 'none';
@@ -8231,7 +8273,7 @@ let loginProvider = '';
     $('akSave').disabled = false;
     // 目录拉取是异步的：先渲染一个占位，回来后重渲染。
     $('akModelList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取模型目录…</div>';
-    ensureAKCatalog().then(() => { stashAKChecked(); renderAKModelList(); })
+    ensureAKCatalog().then(() => { syncAKProviders(); stashAKChecked(); renderAKModelList(); })
       .catch(e => {
         $('akModelList').innerHTML =
           `<div class="dim" style="font-size:12px;padding:6px">读取模型目录失败：${esc(e.message)}</div>`;
@@ -11155,8 +11197,29 @@ let multCatalogFailed = false;
       seen.add(m.id);
       shown.push(m);
     }
-    sel.innerHTML = shown.map(m =>
-      `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+    // ⚠ 空列表**必须给"为什么空"的说明**（2026-10-19 用户实测反馈：下拉空白 ⇒「这个好像有bug」）。
+    // 原来这里无条件 `sel.innerHTML = shown.map(...)` ⇒ 列表为空时下拉被彻底清空，
+    // 连初始的「— 先连接 —」占位项都没了，用户看不到任何线索（静默失败）。
+    // 三种空因给三种不同的话 —— 这才是能直接照做的线索：
+    //   a) 没粘「对话密钥」 ⇒ /v1/models 会 401，目录本来就拉不到（控制台刻意不注入凭据）
+    //   b) 粘了但目录为空   ⇒ 去「可用模型」点右上角「强制刷新目录」
+    //   c) 上游筛选筛没了   ⇒ 把上面的「全部上游」选回来
+    const modelHintEl = $('modelHint');
+    if (shown.length) {
+      sel.innerHTML = shown.map(m =>
+        `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+      if (modelHintEl) { modelHintEl.textContent = ''; modelHintEl.style.display = 'none'; }
+    } else {
+      sel.innerHTML = '<option value="">— 没有可选模型 —</option>';
+      if (modelHintEl) {
+        modelHintEl.textContent = !KEY
+          ? '暂无模型：正在用会话自动取用配置里的 api_key …（若配置里没写 api_key，就在顶部「对话密钥」里粘一把）'
+          : (models.length === 0
+              ? '暂无模型：密钥已粘，但目录还是空的 —— 去「可用模型」页点右上角「强制刷新目录」'
+              : '当前上游筛选下没有模型 —— 把上面的「全部上游」选回来');
+        modelHintEl.style.display = '';
+      }
+    }
     // 保持原选择：若它不在筛选后的列表里，回落到 `auto`，再回落到第一个。
     //
     // ⚠ 比 `auto` 必须按**去前缀后的裸名**：目录收窄后这里只有 `workbuddy/auto`，
@@ -11892,7 +11955,7 @@ let multCatalogFailed = false;
         + '控制台刻意不把凭据注入页面（可以只读、不落盘）；/v1 那一路认的是 api_key，'
         + '管理控制台自己的登录身份对它是无效的。', 'dim');
     } else {
-      try { renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data); }
+      try { await ensureConsoleKey(); renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data); }
       catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     }
     loadSchedule();
@@ -12249,6 +12312,24 @@ let multCatalogFailed = false;
     }, { label: '登出', busyText: '登出中…' });
   }
 
+  // ⚠ 2026-10-20 用户口径：**登录 = 唯一门槛**。登录之后一切照旧 ——
+  // 模型目录/对话测试**不该**再让用户手粘一次密钥，仪表盘的凭据也该能显示、能复制。
+  //
+  // 做法：用**已有会话**向管理端取一次完整 api_key 填进 `KEY`（内存，不落 localStorage）。
+  // 为什么不是"把凭据注回页面 HTML"：注入的话，页面一旦被截图/另存为/进缓存/被扩展读，
+  // 凭据就跟着走了；而按需取只在"已登录"这一条路上发生，未登录时这个接口直接 401。
+  // 两者对登录后的体验完全一样，差别只在未授权时拿不拿得到 —— 那正是门禁该管的事。
+  //
+  // 兜底：取不到（如配置里没写 api_key）就保持空，顶栏手粘那条退路照旧可用。
+  async function ensureConsoleKey() {
+    if (KEY) return KEY;
+    try {
+      const r = await admin('/admin/apikeys');
+      if (r && r.admin_key_full) KEY = r.admin_key_full;
+    } catch (e) { /* 未登录 / 未配置 ⇒ 留空，由界面提示引导（不是故障） */ }
+    return KEY;
+  }
+
   function boot() {
     // 主题最先初始化：它决定第一帧的配色。
     initTheme();
@@ -12270,7 +12351,10 @@ let multCatalogFailed = false;
     //   · 其中 `localStorage.setItem(LS, …)` 正是用户报障 ② 的来源（轮换后页面
     //     还揣着旧令牌，表现成"必须重启"）。
     wireTopBar();
-    probeSession();
+      probeSession();
+  // 登录后自动取用配置里的 api_key（**不 await**：它是锦上添花，慢了不该拖住首屏；
+  // 真正依赖它的两处 —— 模型目录、对话测试 —— 各自会 await 一次，见各自调用点）。
+  ensureConsoleKey();
 
     // 点击任意可复制块即复制；块内的「显示/隐藏」按钮不触发复制。
     $('apiCards').addEventListener('click', ev => {
@@ -12649,7 +12733,7 @@ let multCatalogFailed = false;
       //   用户点的是「**强制**刷新目录」，结果什么都没变（"点了没反应"的老毛病）。
       lazyCache.drop('ep:/admin/models/preview');
       await loadModelMultipliers();
-      renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data);
+      await ensureConsoleKey(); renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data);
       return true;
     }, { label: '模型目录' });
 
@@ -12780,6 +12864,8 @@ let multCatalogFailed = false;
     $('akAll').onchange = syncAKPicker;
     // 搜索：把"即将被隐藏"的勾选先记下来（隐藏 ≠ 取消勾选，见 akHiddenChecked）。
     $('akSearch').oninput = () => { stashAKChecked(); renderAKModelList(); };
+  // 切上游：只重渲染列表（勾选状态由 stashAKChecked/akSelected 保住 ⇒ 换上游不会丢掉已勾的模型）。
+  if ($('akProvider')) $('akProvider').onchange = () => { stashAKChecked(); renderAKModelList(); };
     $('akSelAll').onclick = () => {
       document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = true; });
       stashAKChecked(); updateAKCount();

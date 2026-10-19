@@ -419,13 +419,21 @@ const DEFECTS = [
   'console_no_probe',               // 外壳里没有 probeSession（页面不再问"我是谁"）
   'ui_console_leaks_token',         // 外壳 HTML 里注入 admin_token（换了个地方泄密）
   'status_api_key_ok',              // /status 放行 api_key（账号池画像对客户端开放）
-  'status_no_role_check',           // /status 不做角色判定（成员也能读管理面数据）
-  // ---- T8 增量：API key 归属与角色分流的五个新缺陷 ----
-  'apikeys_list_unfiltered',          // 成员看到全部 key（归属过滤没了）
-  'apikeys_mutation_no_owner_check',  // 成员能改**别人的** key（越权面）
-  'rotate_allowed_for_member',        // 成员能轮换管理凭据（回执带完整新令牌 ⇒ 一次提权）
-  'member_can_read_stats',            // 成员能读 /admin/stats（管理面聚合外泄）
-  'apikeys_missing_member_flag',      // 不回 member 标志（前端分不清"我的"还是"全部"）
+  // ---- 2026-10-19 单账号管理员口径 ----
+  //
+  // ⚠ 这里**删掉了**成员期的 6 条（`status_no_role_check` / `apikeys_list_unfiltered` /
+  //   `apikeys_mutation_no_owner_check` / `rotate_allowed_for_member` /
+  //   `member_can_read_stats` / `apikeys_missing_member_flag`）：
+  //   用户新口径是"只要一个管理员、用户面取消" ⇒ **成员会话不存在** ⇒
+  //   那 6 条缺陷在新口径下**没有对应物**（留着会变成"永远为假的判据"，
+  //   后来人会以为还有成员分流要测）。
+  //   替换成单账号口径下的 6 条，每条都仍然"坏桩必红"：
+  'register_open_after_bootstrap', // 库非空还能注册（⇒ 会建出第二个账号）
+  'register_creates_member',       // bootstrap 建出来的不是管理员（role 1）
+  'legacy_member_accepted',        // 盘上的成员历史记录照样登录进来
+  'console_leaks_member_mode',     // 外壳里还带成员模式（applyMemberMode/memberBanner）
+  'login_shows_register',          // 登录页还带注册入口（"注册成员"/模式切换）
+  'apikeys_payload_member_field',  // /admin/apikeys 载荷里还有 member 字段
 ];
 
 // pickPort 找一个空闲端口。
@@ -476,9 +484,14 @@ async function startStub(opts) {
     });
   }
 
+  // role_name 口径（2026-10-19 单账号管理员）：**只有管理员这一种正常角色**。
+  //   10 = 管理员。其余值（老数据里的 1 = 退役成员）保留**名字**的唯一用途是
+  //   "认出来再拒"时的文案 —— 不是"以后可能还用得上"。
+  const ROLE_ADMIN = 10;
+  const ROLE_MEMBER_RETIRED = 1;
   const viewOf = (u) => ({
     id: u.id, username: u.username, role: u.role,
-    role_name: u.role === 10 ? '管理员' : '成员', enabled: u.enabled,
+    role_name: u.role === ROLE_ADMIN ? '管理员' : '成员（已取消）', enabled: u.enabled,
   });
 
   const cookieOf = (req, name) => {
@@ -638,12 +651,20 @@ async function startStub(opts) {
       // ui_leaks_key 的注入点**跟着"未认证时到底给哪个页面"走**：
       // 改造后未认证拿到的是登录页，若还往外壳里注入，这条缺陷就静默失效
       // —— verify_login_flow_e2e 的坏桩⑤ 会变成假绿。
+      // ⚠ 2026-10-19 用户新口径（单账号管理员）：
+      //   登录页**不含注册入口**（没有"注册成员"那一段、没有模式切换）。
+      //   缺陷开关 `login_shows_register` 把那段加回来 ⇒ 判别力来源。
       const loginPage = () => {
         if (d.ui_leaks_key && !leaked) leaked = 'mk-' + randToken(64);
+        const regEntry = d.login_shows_register
+          ? '<p class="switch" id="switchRow"><button class="link" id="switchLink">注册</button>'
+            + '<span>没有账号，注册成员</span></p>'
+          : '';
         return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录 · stub</title></head><body>'
           + '<form id="form" novalidate><input id="user" name="username" autocomplete="username">'
           + '<input id="pass" name="password" type="password" autocomplete="current-password">'
           + '<button id="submit" type="submit">登录</button></form>'
+          + regEntry
           + '<script>fetch("' + LOGIN_ENDPOINT + '", { method: "POST", body: "{}" });</script>'
           + (leaked ? '\n<script>window.__LEAK__ = "' + leaked + '";</script>\n' : '')
           + '</body></html>';
@@ -654,8 +675,15 @@ async function startStub(opts) {
         const injected = d.ui_console_leaks_token && o.adminToken ? o.adminToken : '';
         const probe = d.console_no_probe ? ''
           : '<script>\nasync function probeSession() { const r = await fetch("/admin/auth/session"); return r.status; }\nprobeSession();\n</script>';
+        // ⚠ 新口径：外壳里**不许**再有成员面（成员会话已不存在）。
+        //   `console_leaks_member_mode` 把残留加回来 ⇒ 判别力来源。
+        const memberFace = d.console_leaks_member_mode
+          ? '<div id="memberBanner" class="member-banner">当前登录：成员 —— 账号池读数仅管理员可见</div>'
+            + '<script>function applyMemberMode(){document.documentElement.classList.toggle("member-mode",true);}</script>'
+          : '';
         return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>网关控制台 · stub</title></head><body>'
           + '<main id="appMain">stub-console</main>'
+          + memberFace
           + (injected ? '<script>window.__STUB_INJECTED__ = "' + injected + '";</script>' : '')
           + probe + '</body></html>';
       };
@@ -692,14 +720,19 @@ async function startStub(opts) {
       if (!/^[A-Za-z0-9_.@-]{3,32}$/.test(u)) return send(400, { error: { code: 'bad_username' } });
       if (pw.length < 8 || pw.length > 128) return send(400, { error: { code: 'bad_password' } });
       if (users.has(u.toLowerCase())) return send(409, { error: { code: 'username_taken' } });
-      // ⚠ 空库的首个注册 ⇒ **管理员**（对齐真实实例的 CreateBootstrap，http.go:327）。
-      //
-      // 这不是"桩比真实实现更宽松"，而是刻意对齐：--start 起的就是空库，
-      // 首个注册必然建管理员，回执多一个 "bootstrap": true。桩若一律建成员，
-      // "管理员会话 → /status 200"这条断言在自检里就没有正例可跑，
-      // 好桩会假红 —— 而假红最容易被误读成"实现没做角色判定"。
+      // ⚠ 2026-10-19 新口径（单账号管理员）：注册只在**库空时**受理一次。
+      //   库非空 ⇒ 拒绝（明确状态码 + 明确文案）。
+      //   `register_open_after_bootstrap` 是老行为（库非空也能建）⇒ 判别力来源。
       const first = users.size === 0;
-      const nu = { id: 'u-' + randToken(16), username: u, password: pw, role: first ? 10 : 1, enabled: true };
+      if (!first && !d.register_open_after_bootstrap) {
+        return send(403, { error: {
+          code: 'register_closed',
+          message: '账号库非空：本机只允许一个管理员账号。请用管理员账号登录。',
+        } });
+      }
+      // ⚠ bootstrap 建出来的**必须是管理员**。
+      //   `register_creates_member` 把它建错（role 1）⇒ 判别力来源。
+      const nu = { id: 'u-' + randToken(16), username: u, password: pw, role: d.register_creates_member ? 1 : 10, enabled: true };
       users.set(u.toLowerCase(), nu);
       // captcha 开着（ignored 那条缺陷）时如实报告自己在校验 —— 探针正是靠
       // 这个字段发现"开了却没拦住"。
@@ -721,6 +754,18 @@ async function startStub(opts) {
         // 坏桩：错口令照样发会话（探针必须在这里变红）
       }
       if (!user.enabled) return send(403, { error: { code: 'disabled' } });
+      // ⚠ 2026-10-19 新口径：盘上若存在**非管理员的历史记录**（退役的成员），
+      //   不许把它当管理员放进来，也不许崩 —— 给明确文案 + 一条日志。
+      //   `legacy_member_accepted` 是老行为（照样放进来）⇒ 判别力来源。
+      //
+      // ⚠ 顺序要紧：**先验口令、再看角色**。反过来的话，"这个用户名存在且是退役成员"
+      //   会与"口令不对"回不同的东西 ⇒ 变成**用户名枚举口子**。
+      if (user.role !== 10 && !d.legacy_member_accepted) {
+        return send(403, { error: {
+          code: 'member_retired',
+          message: '成员账号已取消，请用管理员账号登录',
+        } });
+      }
       const sid = randToken(64);
       sessions.set(sid, key);
       return send(200, { ok: true, user: viewOf(user) }, { 'Set-Cookie': sidCookie(sid) });
@@ -785,8 +830,10 @@ async function startStub(opts) {
           admin_key: isAdmin ? maskId(o.apiKey) : '',
           admin_token: isAdmin ? maskId(o.adminToken) : '',
         };
-        // apikeys_missing_member_flag：不吐这个字段 ⇒ 前端分不清"我的"还是"全部"
-        if (!d.apikeys_missing_member_flag) body.member = !isAdmin;
+        // apikeys_payload_member_field：载荷里**还有** member 字段
+        // （2026-10-19 新口径：后端窗口正在删 `apikeys.go:90` 的 `"member": !p.IsAdmin()`）
+        // ⇒ 好桩**不吐**这个字段，坏桩才吐 ⇒ 判别力来源。
+        if (d.apikeys_payload_member_field) body.member = !isAdmin;
         return send(200, body);
       }
 
@@ -1070,7 +1117,7 @@ async function runCli(cfg) {
     console.log('探针异常: ' + ((e && e.stack) || e));
     return 1;
   } finally {
-    if (inst) { try { inst.stop(); } catch { } }
+    if (inst) { try { await inst.stop(); } catch { } }
   }
 }
 

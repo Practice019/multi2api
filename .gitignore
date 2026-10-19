@@ -166,3 +166,21 @@ shot_*.png
 
 # 截图/视觉证据产物（2026-10-19）—— 生成物，不进版本库；要看图直接在磁盘上开。
 shots/
+
+# ⚠ 临时产物统一归拢目录（2026-10-19 用户要求："临时文件太多，全部放到一个文件夹里"）。
+# 根目录原来散着 67 个 _shots_* 目录 + 76 个 probe_*.py + 18 个 diag_*.py + 8 张 shot_*.png
+# + 配置备份 + 19MB 的 server.exe —— 全部搬进 _scratch/（共 230 项 / 47.6MB）。
+#   _scratch/shots   逐页截图（原 _shots_*/、shots/、根上 shot_*.png）
+#   _scratch/probes  一次性探针脚本（probe_*/diag_*/timing_*/strict_probe/frontend_audit…）
+#   _scratch/backups config.json 的含密钥备份、auths.tmp、loomy-import.json（⚠ 含明文密钥，别提交）
+#   _scratch/gen     根目录的生成器副本（正品在 tests/frontend/）
+#   _scratch/build   散落的二进制与 __pycache__
+#   _scratch/notes   过程中的交接/交付草稿（handoff/DELIVERY/CLAUDE.md）
+# ⚠ 新写的临时产物请直接落到 _scratch/ 下，别再往根目录扔。
+_scratch/
+
+# ⚠ 搬动/清理时的教训（2026-10-19 实测踩到）：用通配符批量移动文件时，
+# 通配会**命中被版本库跟踪的文件** —— 我当时用 `config-*7864.json` 搬配置备份，
+# 它把**被跟踪**的 config-test-port7864.json 一起搬走了（git status 立刻报 D）。
+# 规矩：批量搬动前先 `git ls-files` 过一遍，或用 `git ls-files --error-unmatch` 逐个排除。
+
