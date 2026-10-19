@@ -64,7 +64,22 @@
   dialog { border:1px solid var(--bd); border-radius:10px; padding:0; width:560px; max-width:92vw; }
   dialog::backdrop { background:rgba(0,0,0,.35); }
   .dlg-h { padding:12px 16px; border-bottom:1px solid var(--bd); font-weight:600; }
-  .dlg-b { padding:12px 16px; display:grid; grid-template-columns:96px 1fr; gap:10px 12px; align-items:center; }
+  /* ⚠ 两列 grid（96px 标签 + 1fr 控件）。**任何宽内容都必须 class="full" 跨列** ——
+     否则会落进那 96px 的一列：模型勾选列表逐字换行、textarea 被压成一条竖缝。
+     这不是"样式微调"，是"内容看不见"级别的 bug（模型列表与 Key 区各踩过一次）。
+     max-height + overflow 也是必须的：自动发现会回填 20+ 个模型，没有内部滚动会把
+     弹窗撑出屏幕，底部「取消/保存」按钮直接够不着。 */
+  .dlg-b { padding:12px 16px; display:grid; grid-template-columns:96px 1fr; gap:10px 12px;
+           align-items:center; align-content:start; max-height:72vh; overflow-y:auto; }
+  .dlg-b .full { grid-column:1 / -1; }
+  .dlg-b .hint { grid-column:1 / -1; }
+  #f-vis { max-height:190px; overflow-y:auto; border:1px solid var(--bd); border-radius:6px; padding:6px 8px; }
+  /* ⚠ 只收窄"选项 label"，**绝不碰 #f-choices 容器本身** —— 它是 flex-wrap，
+     一旦被改成 display:block + 固定高度，20+ 个模型会被压成一行、整片看不见。
+     （我第一版就写了 `#f-vis div`，正好命中那个容器 —— 收窄选择器是必须的，不是洁癖。） */
+  #f-choices label { display:flex; align-items:center; gap:4px; height:22px; line-height:22px;
+                     max-width:100%; white-space:nowrap; overflow:hidden; }
+  #f-choices label span { overflow:hidden; text-overflow:ellipsis; }
   .dlg-b label { color:#4e5969; }
   .dlg-b .hint { grid-column:2; color:var(--dim); font-size:12px; margin-top:-6px; }
   .dlg-b textarea { min-height:64px; font-family:ui-monospace,Consolas,monospace; }
@@ -135,31 +150,35 @@
     <!-- 编辑态：已存 Key 列表（对标 new-api 的 Key 管理）—— 每行能单独启停/删除，只回掩码。
          为什么不能只用一个输入框：多 Key 渠道的日常操作是"加一把、停一把、删一把"，
          而表单不回显明文 ⇒ 单框整体覆盖会把用户看不见的那些 Key 抹掉。 -->
-    <div id="f-keys-box" style="display:none;margin:0 0 6px">
+    <div id="f-keys-box" class="full" style="display:none;margin:0 0 6px">
       <table style="width:100%;border-collapse:collapse;font-size:12px">
         <thead><tr style="color:#6b7280;text-align:left">
-          <th style="width:34px;padding:2px 4px;font-weight:500">#</th>
-          <th style="padding:2px 4px;font-weight:500">Key</th>
-          <th style="width:128px;padding:2px 4px;font-weight:500">状态</th>
-          <th style="width:132px;padding:2px 4px;font-weight:500">操作</th>
+          <th style="width:34px;padding:2px 4px;height:22px;line-height:22px;font-weight:500">#</th>
+          <th style="padding:2px 4px;height:22px;line-height:22px;font-weight:500">Key</th>
+          <th style="width:128px;padding:2px 4px;height:22px;line-height:22px;font-weight:500">状态</th>
+          <th style="width:132px;padding:2px 4px;height:22px;line-height:22px;font-weight:500">操作</th>
         </tr></thead>
         <tbody id="f-keys"></tbody>
       </table>
     </div>
-    <textarea id="f-key" rows="2" style="min-height:0" placeholder="sk-...（一行一个，可多填）"></textarea>
-    <label>Key 选择模式</label>
-    <select id="f-mode">
-      <option value="random">随机（默认）</option>
-      <option value="round_robin">轮询（依次使用）</option>
-    </select>
-    <div class="hint">多把 Key 时按这里的方式挑一把用。某把被上游判为无效（401/403）会**自动只禁用那一把**，不停整条渠道 —— 恢复在上面的表格里点「启用」。</div>
+    <textarea id="f-key" class="full" rows="2" style="min-height:0" placeholder="sk-...（一行一个，可多填）"></textarea>
+    <div class="full" style="display:flex;gap:8px;align-items:center">
+      <label style="margin:0;white-space:nowrap">Key 选择模式</label>
+      <select id="f-mode" style="width:190px">
+        <option value="random">随机（默认）</option>
+        <option value="round_robin">轮询（依次使用）</option>
+      </select>
+      <span class="muted" style="font-size:12px">某把被上游判无效（401/403）只自动禁那一把，不停整条渠道</span>
+    </div>
     <label>名称</label>
     <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
     <label>模型</label>
     <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4" oninput="renderChoices()">
-<button type="button" onclick="discover()" title="拿上面的 Base URL + key 去问上游有哪些模型，问完自动填进左边这一栏（不是保存）">自动发现</button>
-<div id="f-disc" class="dim" style="font-size:12px;margin:2px 0 0"></div>
-<div id="f-vis" style="margin:6px 0 0"></div>
+<div class="full" style="display:flex;gap:8px;align-items:center">
+  <button type="button" onclick="discover()" title="拿上面的 Base URL + key 去问上游有哪些模型，问完自动填进下面这一栏（不是保存）" style="white-space:nowrap">自动发现</button>
+  <div id="f-disc" class="dim" style="font-size:12px;flex:1;min-width:0"></div>
+</div>
+<div id="f-vis" class="full" style="margin:6px 0 0"></div>
     <div class="hint">这里写上游认识的名字；对外想换名字就用下面的映射。</div>
     <label>模型映射</label>
     <textarea id="f-map" placeholder='每行一条：公开名=上游名&#10;pub-y=real-x'></textarea>
@@ -213,7 +232,7 @@ function renderChoices() {
     + ' <a href="#" onclick="chooseAll(true);return false" style="font-size:12px;margin-left:6px">全选</a>'
     + ' <a href="#" onclick="chooseAll(false);return false" style="font-size:12px">全不选</a></div>'
     + '<div id="f-choices" style="display:flex;flex-wrap:wrap;gap:10px;font-size:13px">'
-    + uniq.map(n => '<label style="display:flex;align-items:center;gap:4px;height:22px"><input type="checkbox" checked onchange="toggleChoice(this)" data-m="' + esc(n) + '">' + esc(n) + '</label>').join('')
+    + uniq.map(n => '<label title="' + esc(n) + '"><input type="checkbox" checked onchange="toggleChoice(this)" data-m="' + esc(n) + '"><span>' + esc(n) + '</span></label>').join('')
     + '</div>';
 }
 
@@ -454,15 +473,18 @@ async function loadKeys(id) {
       else if (k.status === 3) { st = '<span style="color:#dc2626">自动禁用</span>'; }
       else { st = '<span style="color:#6b7280">手动停用</span>'; }
       const why = k.reason === 'upstream_auth' ? '<span style="color:#9ca3af"> 上游判无效</span>' : '';
+      // ⚠ 按钮必须压扁：全局 button 有 5px 上下 padding ⇒ 会把 26px 的行撑到 43px。
+      // 这是"紧凑"要求（AGENTS #5 固定行高一行）的具体落点，不是审美。
+      const bst = 'padding:0 6px;height:20px;line-height:18px;font-size:12px';
       const toggleBtn = k.status === 1
-        ? '<button type="button" onclick="keyStatus(\'' + kEsc(id) + '\',' + k.index + ',2)">禁用</button>'
-        : '<button type="button" onclick="keyStatus(\'' + kEsc(id) + '\',' + k.index + ',1)">启用</button>';
+        ? '<button type="button" style="' + bst + '" onclick="keyStatus(\'' + kEsc(id) + '\',' + k.index + ',2)">禁用</button>'
+        : '<button type="button" style="' + bst + '" onclick="keyStatus(\'' + kEsc(id) + '\',' + k.index + ',1)">启用</button>';
       return '<tr style="height:26px">'
-        + '<td style="padding:2px 4px;color:#9ca3af">' + k.index + '</td>'
-        + '<td style="padding:2px 4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">' + kEsc(k.mask) + '</td>'
-        + '<td style="padding:2px 4px">' + st + why + '</td>'
-        + '<td style="padding:2px 4px">' + toggleBtn
-        + ' <button type="button" onclick="keyDelete(\'' + kEsc(id) + '\',' + k.index + ')">删除</button></td>'
+        + '<td style="padding:2px 4px;height:26px;line-height:26px;color:#9ca3af">' + k.index + '</td>'
+        + '<td style="padding:2px 4px;height:26px;line-height:26px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">' + kEsc(k.mask) + '</td>'
+        + '<td style="padding:2px 4px;height:26px;line-height:26px">' + st + why + '</td>'
+        + '<td style="padding:2px 4px;height:26px;line-height:26px">' + toggleBtn
+        + ' <button type="button" style="' + bst + '" onclick="keyDelete(\'' + kEsc(id) + '\',' + k.index + ')">删除</button></td>'
         + '</tr>';
     }).join('');
   } catch (e) {
