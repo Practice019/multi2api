@@ -24,6 +24,7 @@ package channelstore
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -121,6 +122,10 @@ type Store struct {
 	channels  map[string]*Channel
 	abilities map[string]*Ability
 	now       func() time.Time // 便于测试注入
+	// rand 供选路（档内加权随机 / 多 key 随机挑选）使用；rr 是 round_robin 的游标。
+	// 测试在同包内直接改 s.rand = newRand(1) 拿确定性分布，不额外开 API。
+	rand *rand.Rand
+	rr   map[string]int
 }
 
 // New 从 path 载入；文件不存在视为空库（不报错 —— 首次使用就是这个状态）。
@@ -130,6 +135,8 @@ func New(path string) (*Store, error) {
 		channels:  map[string]*Channel{},
 		abilities: map[string]*Ability{},
 		now:       time.Now,
+		rand:      newRand(time.Now().UnixNano()),
+		rr:        map[string]int{},
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
