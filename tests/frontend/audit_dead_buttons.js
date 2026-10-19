@@ -87,13 +87,40 @@ const isTemplateId = (id) => /\$\{/.test(id);
 // 既不该被算作死按钮，也不该被算作活按钮 —— 它不存在。
 const stripCommentsEarly = (s) => {
   const lf = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  return lf
-    .replace(/<!--[\s\S]*?-->/g, '')          // HTML 注释
-    .replace(/\/\*[\s\S]*?\*\//g, '')          // 块注释
-    .split('\n')
-    .map(l => l.replace(/\/\/.*$/, ''))        // 行注释
-    .join('\n');
+  return stripCommentForms(lf);
 };
+
+// stripCommentForms —— 剥注释的**唯一实现**（两个调用方共用，见下）。
+//
+// # ⚠ 顺序不能换：必须先剥**行注释**，再剥块注释（2026-10-19 实测）
+//
+// 本仓库的注释里大量出现 `/v1/*`、`/admin/*` 这种写法（8 处）。若先跑块注释
+// 正则，那个 `/*` 会被当成块注释的**开头**，于是它和**很远之后**的某个 `*/`
+// 配成一对，中间整段真实代码被删掉。
+//
+// 实测症状（最危险的那种：**假绿**）：
+//
+//	本文件的 code 长度 241536（原文 534520）
+//	`function wireTopBar` 被吞掉（它守着 #conn 的绑定）
+//	⇒ 判据在那一整段上**空转**，报"无死按钮"却什么都没查
+//
+// 那次跨了 2801 字符、正好盖住顶栏的绑定函数。基线里同样的写法只是**恰好**
+// 没盖到绑定，属"运气"而非"正确"—— 顺序修好之后这类偶然不再有。
+//
+// 先剥行注释为什么安全：`// x /* y` 这一行本来就整行是注释，先删掉它，
+// 那个 `/*` 就不会再去和远处的 `*/` 配对。真正的跨行块注释仍由第二步处理。
+//
+// ⚠ 已知的代价（与改动前相同，不是新引入）：字符串里的 `//`（例如
+// `'http://x'`）会被行注释正则截断。本文件只判"有没有 onclick/addEventListener"
+// 这类绑定形状，字符串被截不影响结论。
+function stripCommentForms(lf) {
+  return lf
+    .split('\n')
+    .map((l) => l.replace(/\/\/.*$/, ''))      // ① 行注释（**必须在前**）
+    .join('\n')
+    .replace(/<!--[\s\S]*?-->/g, '')           // ② HTML 注释
+    .replace(/\/\*[\s\S]*?\*\//g, '');         // ③ 块注释
+}
 const markup = stripCommentsEarly(src);
 
 const buttons = [];
@@ -134,14 +161,30 @@ function stripComments(s) {
   // "剥注释"变成空操作。我最初没归一化，导致注释里提到的绑定被当成真绑定，
   // 变异测试（删掉绑定）抓不出来 —— 工具本身骗了我。
   const lf = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  return lf
-    .replace(/<!--[\s\S]*?-->/g, '')          // HTML 注释也剥（页面里有）
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .map(l => l.replace(/\/\/.*$/, ''))
-    .join('\n');
+  // 与 stripCommentsEarly **共用同一份实现**（顺序的坑见 stripCommentForms 注释）。
+  return stripCommentForms(lf);
 }
 const code = stripComments(src);
+
+// ⚠ 判据空转守卫 —— 剥注释把真实代码吃掉时，**必须响亮报错**。
+//
+// 这是一类"工具自己骗了自己"的缺陷：吞掉一整段代码后，扫描器在那段上什么都
+// 不查，于是"无死按钮"这个结论**看起来是绿的**，实际是空的。上面那次实测
+// （`// … /v1/*` 与远处的 `*/` 配对、跨 2801 字符吃掉 wireTopBar）就是它。
+//
+// 判据：几个**必须存在**的绑定锚点。少了任何一个，说明剥注释把代码吃掉了，
+// 而不是"这些按钮被删了"（删按钮会连带删锚点，但那属于产品改动，应当有人
+// 显式改这里的清单并说明）。
+const ANCHORS = ['function wireTopBar', '$(' + "'conn'" + ')', 'function renderWhoami'];
+for (const a of ANCHORS) {
+  if (!code.includes(a)) {
+    console.error('✗ 判据空转：剥注释后找不到锚点 ' + JSON.stringify(a));
+    console.error('  说明剥注释规则吃掉了真实代码（典型原因：行注释里出现 /*，');
+    console.error('  与远处的 */ 配成一对）。此时"无死按钮"是空结论，不能采信。');
+    console.error('  相关注释：audit_dead_buttons.js 的 stripCommentForms。');
+    process.exit(2);
+  }
+}
 
 const dead = [];
 const alive = [];
@@ -157,6 +200,40 @@ for (const b of buttons) {
   ];
   let how = null;
   for (const p of patterns) { if (p.test(code)) { how = '直接绑定'; break; } }
+
+  if (!how) {
+    // 别名绑定：先 `const x = $('id')`，再 `x.onclick = …`。
+    //
+    // # 为什么必须有这一条（假红，2026-10-19 实测）
+    //
+    // T7 把顶栏那段改写成"先取元素、判空、再绑"：
+    //
+    //	const keyEl = $('key'), conn = $('conn');
+    //	if (!keyEl || !conn) return;      // ← 缺一不可时才绑
+    //	conn.onclick = () => { … };
+    //
+    // 功能一字未丢，但审计报 `✗ #conn "应用"` —— 因为上面的 4 条正则只认
+    // `$('conn').onclick` 这种**紧邻**写法。这正是本文件开头警告的那类错误：
+    // 判"书写形式"而不是判"有没有接上"。
+    //
+    // # 为什么这样不会把死按钮判活
+    //
+    // 判据要求**两件同时成立**：存在 `某变量 = $('id')` 的赋值，**且**那个
+    // 变量上真的有 `.onclick`/`.addEventListener`。把绑定删掉后第二件不成立
+    // ⇒ 照样判死（自检 B/B2 仍然通过，见下方变异测试）。
+    //
+    // 支持多重声明的逗号形式（`const a = $('x'), b = $('y')`）：不要求前面
+    // 有 const/let/var，只要求 `<标识符> = $('id')` 这个形状。
+    //
+    // ⚠ 别名必须在**同一个** code 里出现（去看代码，代码是剥过注释的）。
+    const aliasRe = new RegExp(`([A-Za-z_$][\\w$]*)\\s*=\\s*(?:\\$|getElementById)\\(\\s*'${id}'\\s*\\)`, 'g');
+    let am;
+    while ((am = aliasRe.exec(code))) {
+      const alias = am[1];
+      const useRe = new RegExp(`\\b${alias}\\s*\\.\\s*(?:onclick|addEventListener)\\b`);
+      if (useRe.test(code)) { how = '别名绑定'; break; }
+    }
+  }
 
   // 批量绑定：id 出现在**数组字面量**里，且该数组附近有 onclick/addEventListener。
   //
