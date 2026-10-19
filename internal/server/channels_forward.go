@@ -48,6 +48,22 @@ type channelForward struct {
 	UpstreamModel string
 }
 
+// channelServes 纯内存判断"这个名字能不能被某条启用渠道服务"。
+//
+// ⚠ 为什么需要它：legacy 的 providerFor 会把 "csg/deepseek-v4.1-flash-1017" 读成
+// "上游前缀 csg"，判成未知上游并回 400 unknown_provider —— 而那是**前端建的渠道**给出的
+// 公开名。渠道公开名是另一个命名空间，必须在 providerFor **之前**先认领，
+// 否则这些名字永远走不到渠道转发这一步（实测现象：界面里模型选得好好的，一发就 400）。
+//
+// 不真发请求、无副作用 ⇒ 可以安全地"先问一句"。
+func (h *Handler) channelServes(model string) bool {
+	if h.cfg.Channels == nil || model == "" {
+		return false
+	}
+	_, err := channelroute.Plan(h.cfg.Channels, channelstore.DefaultGroup, model)
+	return err == nil
+}
+
 // forwardViaChannel 按渠道口径转发；未开启渠道模式时返回 errNoChannelMode。
 //
 // attempt=0 即"第一次尝试"。带重试的调用方用 forwardViaChannelAttempt 递增它换档 ——
