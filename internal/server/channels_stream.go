@@ -20,7 +20,14 @@ import (
 )
 
 // writeChannelStream 把一次渠道转发的流写回客户端。
-func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw channelForward) {
+//
+// cap 是**只读旁路**采集器（可为 nil）：每写出一块就顺手喂给它解析 usage。
+// ⚠ 顺序是 Write → Flush → Feed，不能调换：
+//   - Feed 里有 JSON 解析，放在 Write 之前会推迟客户端收到第一个字节；
+//   - 放在 Flush 之后则对客户端延迟**零影响**，而采集结果一样（这一块已经发出去了）。
+//
+// 这就是"旁路"的全部含义：采集器的任何开销都不进入客户端的等待路径。
+func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw channelForward, cap *streamUsage) {
 	defer fw.Stream.Body.Close()
 
 	// 上游给的 Content-Type 优先；没给就按 SSE 兜底（这条链路基本只有流式）。
@@ -50,6 +57,11 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 			}
 			if flusher != nil {
 				flusher.Flush()
+			}
+			// ★ 旁路采集：写出去的字节已经到客户端了，这里才开始解析。
+			// Feed 只读 buf[:n]（自己复制），不会改动转发内容。
+			if cap != nil {
+				cap.Feed(buf[:n])
 			}
 		}
 		if err != nil {

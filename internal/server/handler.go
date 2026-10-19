@@ -1533,13 +1533,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.writeChannelError(w, ferr)
 			return
 		}
-		h.writeChannelStream(w, r, fw)
+		// 旁路采集器：边转发边解析 SSE，拿 ttfb 与 usage（三级兜底见 stream_usage.go）。
+		// ⚠ 它只读不写，转发字节与上游完全一致 —— 这是本改造唯一的硬约束。
+		cap := newStreamUsage(chStart)
+		h.writeChannelStream(w, r, fw, cap)
 		// 成功也记：model 记**客户端发来的公开名**，渠道与上游模型各占一列 ⇒
 		// 「这条 csg 请求到底走了渠道还是账号池」在日志里一眼可判。
-		// ⚠ tokens 记 -1（= 未知）：这条链路是字节直通，我们不解析 SSE 里的 usage。
-		//   provider 列写成 "channel:<渠道名>" —— 与账号池的 provider（loomy/workbuddy…）区分开。
-		logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "channel:"+fw.ChannelName,
-			fw.Stream.Status, -1, nil, "", 0, "", "", fw.ChannelID, fw.UpstreamModel)
+		// tokens 现在来自采集器（末帧 usage → 倒数第二帧 → 文本估算）；
+		// 真的一无所获时才记 -1（"未知"哨兵，聚合会排除它）。
+		tok, ttfbMs, usageSrc := cap.Result()
+		if tok <= 0 {
+			tok = -1
+		}
+		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, "", "channel:"+fw.ChannelName,
+			fw.Stream.Status, tok, nil, "usage:"+string(usageSrc), 0, "", "", fw.ChannelID, fw.UpstreamModel)
 		return
 	}
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)
