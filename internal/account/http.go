@@ -78,6 +78,11 @@ type HTTPConfig struct {
 	CookieSecure string
 	// Limiter 可空（空 = 不限速）。
 	Limiter Limiter
+	// Captcha 可空（空 = 不启用人机校验）。
+	//
+	// ⚠ 与 Limiter 一样是**接口**而不是具体实现：本包不认识 authlimit。
+	// 见 captcha.go 的长注释（"接线错了 / 题算错了 / 端点忘了判"三件事分开可测）。
+	Captcha Captcha
 }
 
 // HTTP 是控制台登录端点的 http.Handler。
@@ -119,6 +124,8 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.session(w, r)
 	case PathPassword:
 		h.changePassword(w, r)
+	case PathCaptcha:
+		h.issueCaptcha(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "没有这个接口")
 	}
@@ -136,6 +143,14 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type credsBody struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	// 人机校验（T10）。两个字段都**可选**：未启用人机校验的部署上它们缺省
+	// 就是空的，端点行为与 T3 时逐字一致（不启用 = 这条支路根本不被走到）。
+	//
+	// ⚠ 解码是严格模式（DisallowUnknownFields）⇒ 字段名必须与这里一致。
+	// 自创别名（captcha_param 之类）会得到 400 bad_request 而不是
+	// captcha_required，排查时会以为是"题不对"。
+	CaptchaID     string `json:"captcha_id"`
+	CaptchaAnswer string `json:"captcha_answer"`
 }
 
 // apiError 统一错误体：`{"error":{"code":"...","message":"..."}}`。
@@ -321,6 +336,18 @@ func (h *HTTP) register(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// 人机校验（T10）。⚠ 放在"首启建管理员"**之前**：
+	//
+	//	· 批量注册的闸门正是这个端点，拦晚一步就等于没拦
+	//	· 更关键的是：首启那条路（库里没有账号）会把调用方**变成管理员**。
+	//	  把它放在题后面，是"加一道题"这件事唯一真正要紧的地方。
+	//
+	// 代价：部署后第一次打开控制台的人要答一道算术题才能建管理员。那道题
+	// 就在他眼前（本地 SVG），而他本来就要想一个口令 —— 可以接受。
+	// 确实不想要的话：配置里 `console.disable_captcha: true`。
+	if !h.checkCaptcha(w, r, body.CaptchaID, body.CaptchaAnswer) {
+		return
+	}
 	username := strings.TrimSpace(body.Username)
 
 	// ① 首启：建管理员（只可能成功一次）
@@ -401,6 +428,11 @@ func (h *HTTP) login(w http.ResponseWriter, r *http.Request) {
 	}
 	body, ok := decodeCreds(w, r)
 	if !ok {
+		return
+	}
+	// 人机校验（T10）。放在口令校验**之前**：反过来的话"答错题"与"口令错"
+	// 都能靠响应时间区分出账号是否存在（口令校验要跑一次 bcrypt，题不用）。
+	if !h.checkCaptcha(w, r, body.CaptchaID, body.CaptchaAnswer) {
 		return
 	}
 
