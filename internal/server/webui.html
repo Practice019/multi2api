@@ -6425,11 +6425,31 @@ let loginProvider = '';
     const epochs = new Map();  // key → 令牌（bump 用来叫停在跑的那一轮）
     const LS_PREFIX = 'wb2api.pcache.';
 
+    // ⚠⚠ scope = **当前身份的缓存命名空间**（2026-10-19 加）。
+    //
+    // # 为什么必须有它（视觉 E2E 实测抓到的跨身份串数据）
+    //
+    // 原先 key 只有逻辑名（如 `ep:/admin/apikeys`），而它**落 localStorage**、
+    // TTL 30s，且 localStorage **跨导航存活** ⇒ 同一浏览器换身份时会读到上一个
+    // 身份留下的快照。实测两个方向都撞到了：
+    //	· 成员会话 → 同一个浏览器改开 `/ui?token=`（管理员令牌）⇒ 「管理钥匙」区块
+    //	  按**成员**那份快照渲染成"属于管理员：当前账号看不到"，与同屏顶栏的
+    //	  「管理令牌／管理员」自相矛盾；
+    //	· 反方向更糟：管理员先登录、30 秒内成员登录 ⇒ 成员界面上会**画出管理员的
+    //	  key 列表**（服务端拦得住请求，但界面已经在显示别人的数据了 —— 人工几乎
+    //	  撞不到，因为窗口只有 30 秒）。
+    //
+    // 修法：把身份编进**落盘的 key**（`wb2api.pcache.<scope>.<key>`），于是换身份
+    // 时天然读不到对方那份；内存 Map 按裸 key 存，所以换 scope 时要清内存。
+    let scope = 'anon';
+
+    function lsKey(key) { return LS_PREFIX + scope + '.' + key; }
+
     // persist 失败时清掉本前缀的全部键 —— 只可能发生在"配额满"上，
     // 而清掉旧的面板缓存是这里唯一正确的选择（它本来就是可再生数据）。
     function persist(key, e) {
       try {
-        localStorage.setItem(LS_PREFIX + key, JSON.stringify(e));
+        localStorage.setItem(lsKey(key), JSON.stringify(e));
       } catch (err) {
         try {
           const doomed = [];
@@ -6447,7 +6467,7 @@ let loginProvider = '';
       const hit = mem.get(key);
       if (hit) return hit;
       try {
-        const raw = localStorage.getItem(LS_PREFIX + key);
+        const raw = localStorage.getItem(lsKey(key));
         if (!raw) return null;
         const e = JSON.parse(raw);
         if (!e || typeof e !== 'object' || !('val' in e)) return null;
@@ -6470,7 +6490,23 @@ let loginProvider = '';
     function updatedAt(key) { const e = restore(key); return e ? e.updatedAt : 0; }
     function drop(key) {
       mem.delete(key);
-      try { localStorage.removeItem(LS_PREFIX + key); } catch (err) { /* 隐私模式 */ }
+      try { localStorage.removeItem(lsKey(key)); } catch (err) { /* 隐私模式 */ }
+    }
+    // setScope 换身份：清内存（按裸 key 存的那份属于上一个身份），并把盘上
+    // **所有**命名空间的旧快照删掉 —— 它们本来就是可再生数据，留着只会占配额。
+    function setScope(s) {
+      const next = String(s || 'anon');
+      if (next === scope) return;
+      scope = next;
+      mem.clear();
+      try {
+        const doomed = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.indexOf(LS_PREFIX) === 0) doomed.push(k);
+        }
+        doomed.forEach(k => localStorage.removeItem(k));
+      } catch (err) { /* 隐私模式 */ }
     }
     function epochOf(key) { return epochs.get(key) || 0; }
     function bump(key) {
@@ -6480,7 +6516,7 @@ let loginProvider = '';
     }
     function keys() { return Array.from(mem.keys()); }
 
-    return { get, set, merge, updatedAt, drop, epochOf, bump, keys };
+    return { get, set, merge, updatedAt, drop, setScope, epochOf, bump, keys };
   })();
 
   // lazyInFlight / lazyWaiters 共享队列（见 LAZY_MAX_INFLIGHT 的说明）。
@@ -6596,6 +6632,12 @@ let loginProvider = '';
   //    已失败的 Promise（表现为"这个面板再也刷不出来"）。
   const SHARED_TTL_MS = 30 * 1000;
   const sharedInflight = new Map();
+
+  // setCacheScope(scope) —— 身份变了就切缓存命名空间（见 lazyCache 里 scope 那段）。
+  // 包一层是为了让调用点**不必知道闭包内部结构**，也让"什么时候该切"只有一处说法。
+  function setCacheScope(scope) {
+    try { lazyCache.setScope(scope); } catch (e) { /* 隐私模式/被禁用：内存那份照样清 */ }
+  }
 
   function sharedGet(key, fetcher, ttlMs) {
     const ttl = Number(ttlMs) || SHARED_TTL_MS;
@@ -8222,6 +8264,13 @@ let loginProvider = '';
           toast(all ? '已保存：全部模型可用' : `已保存：限制为 ${models.length} 个模型`);
         }
         closeAPIKeyModal();
+        // ⚠⚠ 必须**先丢缓存**再拉列表 —— 与删除（8279）/轮换（8265）那两处同一个理由：
+        //   `loadAPIKeys()` 走 sharedGet（30s TTL），不丢就会用**旧快照**重画。
+        //   实测（视觉 E2E，2026-10-19）：新建成功、服务端也确实回了完整 key，但界面里
+        //   3.2 秒时 DOM 的 key 数仍是 0；**重开面板** 10ms 内就能看到 ⇒ 不是建不上，
+        //   是界面不刷新。同一张表的删除因为丢了缓存，431ms 内就消失 —— 差异只在这一行。
+        //   这类"点了成功、列表里没有"最容易被读成"功能坏了"。
+        writeInvalidate([EP_APIKEYS]);
         await loadAPIKeys();
         return true;
       } catch (e) { toast('保存失败：' + e.message, true); return false; }
@@ -11799,13 +11848,42 @@ let multCatalogFailed = false;
     // 改名只需改后端配置，界面自动跟随。
     renderIdentity();
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
-    try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts); }
-    catch { renderAccounts(s.accounts); }
+    //
+    // ⚠⚠ **成员会话下原来的写法会抛两次**（实测：控制台里躺着
+    //   `TypeError: Cannot read properties of null (reading 'accounts')`）：
+    //   ① `/admin/accounts` 不在成员白名单 ⇒ `admin()` 抛 forbidden_role；
+    //   ② 回落那句用的是 `s.accounts`，而成员的 `s` 仍是 **null**
+    //      （`/status` 同样只给管理员，见上面 memberMode 那段）。
+    //   ⇒ catch 自身再抛 ⇒ **未捕获异常**（没有 try 罩着它）⇒ `refresh()` 整个中断
+    //   ⇒ 30s 轮询死掉 ⇒ **成员新建的 API key 永远不出现**（实测等 35s 仍是 0 条）。
+    //
+    // 所以这里两件事一起做：成员**跳过**那次注定 403 的请求（否则每 30 秒弹一次红条，
+    // 正是 `.member-mode` 那段注释想避免的"对着一屏 403 反复点"），并让回落对 null 免疫。
+    if (memberMode) {
+      renderAccounts((s && s.accounts) || []);
+    } else {
+      try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts || []); }
+      catch { renderAccounts((s && s.accounts) || []); }
+    }
     // 倍率要先取：renderModels 依赖它给每个模型加标记。
     // 单独 await 且自带 try —— 倍率拿不到不该让模型列表也显示不出来。
     await loadModelMultipliers();
-    try { renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data); }
-    catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    // ⚠ 没填「对话密钥」时走**明确空态**，而不是把 401 当故障打红。
+    //
+    // T5/T7 起控制台不再由服务端注入 api_key（安全改造的目标），而 `/v1/models`
+    // 是**对话面**、认的是 api_key ⇒ 没人粘钥匙时它必然回 401 `invalid_api_key`。
+    // 原先把这条预期内的 401 渲染成 `<span class="err">` ⇒ 每个新开的控制台在
+    // 「可用模型」上都挂着一条红字失败，看起来像坏了（视觉 E2E 实测抓到）。
+    // 判定"预期"的判据就是 `KEY` 这个前端态：它是空 ⇒ 401 是设计内的。
+    if (!KEY) {
+      $('models').innerHTML = accountPlaceholder(
+        '暂无可用模型 —— 先在顶部「对话密钥」里粘一把 API Key。'
+        + '控制台刻意不把凭据注入页面（可以只读、不落盘）；/v1 那一路认的是 api_key，'
+        + '管理控制台自己的登录身份对它是无效的。', 'dim');
+    } else {
+      try { renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data); }
+      catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    }
     loadSchedule();
     // ⚠⚠ **这里曾经又调了一次 `/admin/stats`** —— 删掉它。
     //
@@ -12049,6 +12127,16 @@ let multCatalogFailed = false;
       kind = d.kind || '';
     } catch { /* 形状不符时只影响名字显示 */ }
     showConsole();
+    // ⚠⚠ 身份一确定就切缓存的命名空间，**必须排在 refresh() 之前**。
+    //
+    // 面板数据走 lazyCache（落 localStorage、TTL 30s、跨导航存活），而缓存 key
+    // 原先只有 URL ⇒ 同一浏览器换身份时会拿上一个身份的快照画界面。实测（视觉 E2E）：
+    // 成员会话后改开 `/ui?token=`（管理员令牌），「管理钥匙」按成员那份快照渲染成
+    // "属于管理员：当前账号看不到"，与同屏顶栏的「管理令牌／管理员」自相矛盾；
+    // 反方向（管理员 → 成员，30 秒内）会把**管理员的 key 列表**画给成员看。
+    // 见 lazyCache 里 scope 那段。
+    setCacheScope(kind === 'token' ? 'token'
+      : (who ? ('u:' + (who.id || who.username || '?') + ':' + (who.role || 0)) : 'anon'));
     // 令牌身份（`?token=` 换来的 12 小时 cookie）没有"账号"这个主体：显示
     // 「管理令牌」而不是某个用户名，并且不给「改密码」（它没有口令可改，
     // 点了只会被服务端 401）—— 但「登出」要留（清掉浏览器上这把钥匙）。
@@ -12151,6 +12239,9 @@ let multCatalogFailed = false;
         toast('登出请求失败：' + e.message, true);
       }
       stopAuto();
+      // 登出即失去身份 ⇒ 缓存退回匿名命名空间（否则下一个身份在同一浏览器里
+      // 可能读到刚登出那个人留下的快照，见 lazyCache 的 scope 那段）。
+      setCacheScope('anon');
       toLogin('logout');
       return true;
     }, { label: '登出', busyText: '登出中…' });
