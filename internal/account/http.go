@@ -3,7 +3,6 @@ package account
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -21,6 +20,15 @@ const (
 	PathLogin    = "/admin/auth/login"
 	PathLogout   = "/admin/auth/logout"
 	PathSession  = "/admin/auth/session"
+	// PathPassword 自助改口令（T9）。
+	//
+	// 与上面几条同一批、同一理由挂在门禁之外：它得先能回答"我是谁"才谈得上
+	// 改口令，而"回答我是谁"正是这一批端点的职责（放在门禁里会变成
+	// "没身份就不许问自己有没有身份"）。
+	//
+	// ⚠ 它**只认会话 cookie**，不认 admin_token —— 令牌没有"账号"这个主体，
+	// 见 change_password.go 的长注释。
+	PathPassword = "/admin/auth/password"
 )
 
 // maxAuthBody 匿名端点的请求体上限（8KB：注册/登录的 JSON 用不到更多）。
@@ -109,6 +117,8 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.logout(w, r)
 	case PathSession:
 		h.session(w, r)
+	case PathPassword:
+		h.changePassword(w, r)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "没有这个接口")
 	}
@@ -154,24 +164,14 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 // decodeCreds 解析请求体；失败时自己写响应并返回 ok=false。
+// decodeCreds 注册与登录共用的请求体解码。
+//
+// ⚠ 解码纪律本体已抽到 httpbody.go 的 decodeBody（T9 起有第三个调用方
+// `changePassword`）：四个细节（大小上限 / 拒未知字段 / 单个 JSON 对象 /
+// 区分"太大"与"格式错"）必须只有一份实现，否则新端点会慢慢漏掉其中一条。
 func decodeCreds(w http.ResponseWriter, r *http.Request) (credsBody, bool) {
 	var body credsBody
-	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBody)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		// 区分"太大"与"格式错"：前者是攻击/误用，后者是调用方写错了，
-		// 给人看的信息不同，但都别把解析错误原文回吐（可能含请求内容片段）。
-		if strings.Contains(err.Error(), "http: request body too large") {
-			writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", "请求体过大")
-			return credsBody{}, false
-		}
-		writeError(w, http.StatusBadRequest, "bad_request", "请求体不是合法的 JSON")
-		return credsBody{}, false
-	}
-	// 只读一次：多给的字节意味着请求体里有别的东西，不接受。
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		writeError(w, http.StatusBadRequest, "bad_request", "请求体应当是单个 JSON 对象")
+	if !decodeBody(w, r, &body) {
 		return credsBody{}, false
 	}
 	return body, true
@@ -462,17 +462,9 @@ func (h *HTTP) session(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, u, err := h.cfg.Sessions.Lookup(sid, h.cfg.Accounts)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrSessionExpired):
-			writeError(w, http.StatusUnauthorized, "session_expired", "登录已过期，请重新登录")
-		case errors.Is(err, ErrSessionRevoked):
-			writeError(w, http.StatusUnauthorized, "session_revoked", "登录已失效（口令变更或被下线），请重新登录")
-		case errors.Is(err, ErrDisabled):
-			writeError(w, http.StatusForbidden, "disabled", "账号已被禁用，请联系管理员")
-		default:
-			// 含 ErrSessionNotFound：Cookie 是我们不认识的（伪造/已清理）
-			writeError(w, http.StatusUnauthorized, "auth_required", "请先登录")
-		}
+		// 映射本体抽在 autherr.go（T9 起改口令端点共用同一份）：
+		// 两处各写一份会漂移，前端对同一个失效原因就有了两种说法。
+		writeAuthError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
