@@ -1139,6 +1139,26 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
  <div class="layout">
   <nav class="sidebar" id="nav"><!-- 导航项由脚本按 .content > section 的 DOM 顺序生成 --></nav>
   <div class="content" id="content">
+  <!-- 渠道（中转站）：导航项**自动**生成 —— 本文件 5735 处的约定是"按 .content 下 section 的
+       DOM 顺序生成导航项"，所以这里加一个 section 就等于在左侧加一个入口，不必手改导航
+       （手改导航正是"加了面板忘了加入口"的来源）。
+
+       ⚠ 这里**刻意只放一个入口链接**，不把渠道界面搬进来：
+       ① 渠道页是独立页面（/ui/channels，与 /ui 同一套身份判据），它的表格与表单
+          有自己的状态与错误处理，塞进这个 SPA 只会让两边都更难维护；
+       ② 这个 section 不写一行 JS ⇒ 本文件的内联 script 段数保持不变（门禁①能当场验出
+          "我有没有顺手把主控制台的脚本改坏"）。
+
+       什么时候值得反过来（把渠道表改成 SPA 内面板）：等"渠道"带着实时状态（健康/耗时/失败率）
+       需要跟其它面板一起 5 秒轮询时。那时它就不再是一个独立页面，而是这一页的一部分。 -->
+  <section data-key="channels">
+    <h2>渠道</h2>
+    <p>中转站的渠道在这里配置：只填 <b>Base URL</b> 与 <b>API Key</b> 就能新增一条 OpenAI 兼容渠道，
+      不占账号池、不走选号。</p>
+    <p><a class="btn" href="/ui/channels">打开渠道管理页 →</a></p>
+    <p class="dim" style="font-size:12px">该页也包含「对外模型」视图：按免 key 视角列出当前对外可见的名字、
+      它们对应的上游真实名、以及由哪些渠道提供（按优先级）。</p>
+  </section>
   <!-- 仪表盘：网关状态 / 调用统计 / API 接入信息 三段合成一页。
        三段各有独立标题（h3.boardsec）与独立控制区；数值刷新统一走 30s
        无感轮询（额度/状态/统计/趋势/API key），整页「立即刷新」手动触发。
