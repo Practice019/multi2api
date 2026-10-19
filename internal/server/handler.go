@@ -363,7 +363,17 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui", http.StatusFound)
 	})
-	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	// ⚠ `/status` 走**控制台身份**（会话或 admin_token），不走 api_key。
+	//
+	// 它的回执是 `accounts: Pool.List()` + 上游状态 —— 即**账号池画像**
+	// （昵称、积分、上游熔断态）。改造前它挂在 withAuth 上（= 认 api_key），
+	// 而 api_key 是发给客户端/机器人的对话凭据 ⇒ "给某人一把对话钥匙"等于
+	// "把账号池的运营数据也给他看"。这与 T4 修掉的权限倒挂是同一个病，
+	// 只是换了入口，所以一并收口。
+	//
+	// ⚠ 破坏性变更：以前用 api_key 读 /status 的脚本要改用 admin_token
+	// （`Authorization: Bearer <admin_token>`）。记在 CHANGELOG 里。
+	h.mux.HandleFunc("GET /status", h.consoleAdminAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// 控制台登录端点（注册/登录/登出/读会话）。
 	//
@@ -507,6 +517,44 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		// panic → 可诊断的 500（而不是静默断连）。见 harden.go 的文件头。
 		// 放在 withAuth 里而不是各个注册点：加新端点时不会漏。
+		h.panicRecovery(next)(w, r)
+	}
+}
+
+// consoleAdminAuth 控制台**管理员**读数的门禁：会话或管理令牌，且角色够。
+//
+// # 与 withAuth 的分工（两把钥匙各管一段）
+//
+//	withAuth          /v1/*          用 api_key（发给客户端/机器人）
+//	consoleAdminAuth  /status 与 /admin/*  用控制台身份（人登录的会话，或脚本的 admin_token）
+//
+// 为什么 /status 属于后者：它回的是上游账号池画像（昵称/积分/上游熔断态），
+// 是管理面数据，不是"客户端该看到的自己那份配额"。
+//
+// 判据复用 account.Identify（与 /ui 和 /admin/* 同一份实现）：令牌 → 会话，
+// 会话必走 SessionStore.Lookup 的四道校验。角色判据是"必须管理员" —— 账号池
+// 相关读数属于管理员；成员自己的用量走 /admin/stats（在 admin 的 memberPaths 里）。
+//
+// 未认证回 401 + `code: auth_required`（与 admin 门禁同一个错误码契约，
+// 前端据此跳登录页而不是显示"没权限"）。
+func (h *Handler) consoleAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, ok := h.uiIdentify(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error": "该接口需要控制台身份：请在 /ui 登录，或用 Authorization: Bearer <admin_token>。",
+				"code":  "auth_required",
+			})
+			return
+		}
+		if !p.IsAdmin() {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "账号池读数仅管理员可见（成员请用 /admin/stats 看自己的用量）。",
+				"code":  "forbidden_role",
+				"role":  p.Role,
+			})
+			return
+		}
 		h.panicRecovery(next)(w, r)
 	}
 }

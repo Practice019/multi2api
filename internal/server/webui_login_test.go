@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"workbuddy2api/internal/account"
+	"workbuddy2api/internal/pool"
 )
 
 // 配置里的两把钥匙。故意做成一眼能认的形状：出现在响应体里就是泄露。
@@ -47,6 +48,9 @@ func newUIFixture(t *testing.T, withAccounts, registerOpen bool) *uiFixture {
 	t.Helper()
 	f := &uiFixture{}
 	cfg := Config{
+		// 真池子（空池）：/status 与 /admin/* 的处理器会读它，给 nil 会 panic
+		// 成 500 —— 那样断言就成了"没被门禁挡住"而不是"真的通了"，弱得多。
+		Pool:         pool.New(filepath.Join(t.TempDir(), "pool-state.json")),
 		APIKey:       testAPIKey,
 		AdminToken:   testAdminToken,
 		CookieSecure: account.CookieSecureNever, // 测试走明文 http
@@ -360,6 +364,7 @@ func newUIEmptyAccountsFixture(t *testing.T, registerOpen bool) *uiFixture {
 	}
 	return &uiFixture{
 		h: NewHandler(Config{
+			Pool:         pool.New(filepath.Join(dir, "pool-state.json")),
 			APIKey:       testAPIKey,
 			AdminToken:   testAdminToken,
 			CookieSecure: account.CookieSecureNever,

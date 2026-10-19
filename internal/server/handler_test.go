@@ -744,8 +744,8 @@ func TestAPIKeyAuth(t *testing.T) {
 func TestStatusEndpoint(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
 	p.SetCredits("u1", 42)
-	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
-	req := httptest.NewRequest("GET", "/status", nil)
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
+	req := statusReq(t)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -787,9 +787,9 @@ func TestStatusInFlightFull(t *testing.T) {
 	p.Acquire("full")
 	defer p.Release("full")
 
-	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	h.ServeHTTP(rec, statusReq(t))
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
@@ -812,9 +812,9 @@ func TestStatusPortraitFields(t *testing.T) {
 	p.NoteSuccess("u1")
 	p.NoteError("u1") // 记录 last_err + err_total（累计，不冷却）
 	p.Cooldown("u1", pool.CoolSoft, time.Hour, "429 rate limit")
-	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	h.ServeHTTP(rec, statusReq(t))
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
@@ -866,7 +866,7 @@ func TestHealthzEmptyPool(t *testing.T) {
 func TestHealthz503WhenNoHealthy(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 	p.Disable("u1", "session dead")
-	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -896,7 +896,7 @@ func TestHealthz503WhenAllInFlightFull(t *testing.T) {
 	if p.ServableNow() {
 		t.Fatal("servable should be false when the only healthy account is in-flight full")
 	}
-	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -915,7 +915,7 @@ func TestHealthz503WhenAllInFlightFull(t *testing.T) {
 // TestHealthz200WhenHealthy 有健康账号 → 200。
 func TestHealthz200WithHealthy(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
+	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 	if rec.Code != http.StatusOK {
@@ -946,7 +946,7 @@ func TestHealthzServiceIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
 			tc.setup(p)
-			h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New())})
+			h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest("GET", "/healthz", nil))
 			if rec.Code != tc.wantCode {
@@ -984,24 +984,47 @@ func TestHealthzServiceIdentityWithoutAuth(t *testing.T) {
 	}
 }
 
+// TestStatusRequiresAuth /status 的鉴权口径（T7 变更后的契约）。
+//
+// # ⚠ 这条测试的凭据在 T7 换过，理由要记住
+//
+// 改造前 /status 挂在 withAuth 上（认 **api_key**）。而它回的是账号池画像
+// （昵称 / 积分 / 上游熔断态）—— 等于"发给客户端的对话钥匙能读你的运营数据"。
+// 与 T4 修掉的权限倒挂同因，所以一并收口成**控制台身份**（会话或 admin_token）。
+//
+// 于是三个方向都要钉住：
+//
+//	无凭据      → 401
+//	api_key     → 401（不再是可读凭据）
+//	admin_token → 200
 func TestStatusRequiresAuth(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", Nickname: "nick", AccessToken: "at", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), APIKey: "secret"})
+	h := NewHandler(Config{
+		Pool: p, Upstream: wrapUpstream(upstream.New()),
+		APIKey: "secret", AdminToken: statusTestToken,
+	})
 
-	// 无 token → 401
+	// 无凭据 → 401
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
 	if rec.Code != 401 {
-		t.Errorf("no token: code=%d", rec.Code)
+		t.Errorf("no credential: code=%d", rec.Code)
 	}
 
-	// 带 token → 200
+	// ★ api_key → 401（账号池画像不对 /v1 客户端开放）
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/status", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	h.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("★ api_key 读 /status: code=%d，want 401", rec.Code)
+	}
+
+	// admin_token → 200
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, statusReq(t))
 	if rec.Code != 200 {
-		t.Errorf("with token: code=%d", rec.Code)
+		t.Errorf("admin_token: code=%d", rec.Code)
 	}
 
 	// /healthz 无鉴权仍 200

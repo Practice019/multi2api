@@ -1029,6 +1029,22 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .keyhint ul{margin:8px 0 0;padding-left:18px}
   .keyhint li{margin:3px 0}
   .keyhint b{color:var(--acc)}
+/* 顶栏的当前登录者（T7）。紧凑一行、不换行 —— 与顶栏其它元素同一行高，
+   名字过长时省略而不是把整行挤成两行（用户偏好：紧凑少空白）。 */
+.who{display:inline-flex;font-size:12px;max-width:260px;overflow:hidden}
+.who .who-name{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 成员模式（T7 最小降级）：只留下"成员真的能看"的面板。
+   ⚠ 隐藏不是安全边界（判据在服务端 memberPaths），只是别让人对着一屏 403 反复点。
+   允许集：仪表盘（/admin/stats，自己的用量）、API key（/admin/apikeys，自己名下的）、对话测试（/v1，自己粘的 key）。
+   隐藏集：账号池、模型目录、任务、日志、设置。 */
+.member-mode section[data-key="accounts"],
+.member-mode section[data-key="models"],
+.member-mode section[data-key="jobs"],
+.member-mode section[data-key="logs"],
+.member-mode section[data-key="settings"]{display:none!important}
+.member-banner{margin:0 18px 10px;padding:7px 12px;border-radius:8px;font-size:12px;
+  background:var(--panel2);color:var(--dim);border:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -1057,6 +1073,10 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   <h1 id="appTitle">网关 <small>本地控制台</small></h1>
   <span id="hdot" class="dot"></span>
   <span id="htxt" class="dim" style="font-size:12px">未连接</span>
+  <!-- 当前登录者（T7）：由 probeSession 拿到 /admin/auth/session 后填充。
+       显示角色不是装饰 —— 成员看到自己那一栏是「成员」时才不会把"某些页面
+       点不动"误判成系统坏了（那些是管理员专属）。未登录时本元素保持隐藏。 -->
+  <span id="whoami" class="who" style="display:none;align-items:center;gap:6px"></span>
   <div class="spacer"></div>
   <!-- 顶栏右侧的状态条：健康 / 账号数 / 上游数 / 每次刷新的时刻。
        借鉴 one-api 控制台的信息架构 —— 把"我现在处于什么状态"压缩成
@@ -1080,11 +1100,20 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
          config.admin_token → 「管理令牌」（进控制台，本页填这个）
          config.api_key     → 「对话密钥」（调 /v1 接口，给客户端/机器人）
          /admin/apikeys     → 「API Key」（sk- 开头，也是给调用方的） -->
+  <!-- 顶栏的「对话密钥」输入 —— 只用于 /v1/*（对话测试、模型目录回退）。
+
+       ⚠ 2026-10-19（T7）重做，两处语义变了：
+         · 它**不再**是本页的登录方式。管理面（/admin/* 与 /status）认的是
+           服务端下发的 HttpOnly 会话 cookie（wb2api_sid），同源请求自动携带，
+           所以这里填不填都不影响管理功能。
+         · 它**不再**被记住（旧实现在这里写了 localStorage 'wb2api.key'）。
+           那是用户报障 ② 的来源：令牌轮换后页面还揣着旧值，表现成"必须重启
+           才生效"。现在只存在内存里，刷新页面要重新粘一次 —— 代价是多粘一次，
+           换来的是"磁盘上没有任何长期凭据"。 -->
   <span id="keyFallback" style="display:none;align-items:center;gap:8px">
     <input id="key" class="key" type="password"
-           placeholder="管理令牌 admin_token（非本机访问需手填）" autocomplete="off">
-    <label class="tog"><input id="remember" type="checkbox" checked> 记住</label>
-    <button id="conn" class="primary">连接</button>
+           placeholder="对话密钥 api_key（只影响 /v1 测试与模型目录）" autocomplete="off">
+    <button id="conn" class="primary">应用</button>
   </span>
 </header>
 
@@ -1094,6 +1123,9 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
 <div id="keyHint" style="display:none" class="keyhint"></div>
 
 <main id="appMain">
+ <!-- 成员模式提示（T7）：由 applyMemberMode() 填字并显隐。放在 main 顶部而不是
+      顶栏里 —— 顶栏是横排的，塞一段会折行的说明会把布局挤坏。 -->
+ <div id="memberBanner" class="member-banner" style="display:none"></div>
  <div class="layout">
   <nav class="sidebar" id="nav"><!-- 导航项由脚本按 .content > section 的 DOM 顺序生成 --></nav>
   <div class="content" id="content">
@@ -1761,49 +1793,30 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
 <script>
 (() => {
   const $ = id => document.getElementById(id);
-  const LS = 'wb2api.key';
-  // 网关在 /ui 响应里注入凭据；仍是占位符则说明**本次访问未授权**。
+  // ---- 身份模型（2026-10-19，T7 重做）------------------------------------
   //
-  // ⚠⚠ 守卫的判据是「值**还是不是**那个占位符」。
+  // # 本页面里**没有任何凭据**
   //
-  // 页面顶部的初值就是占位符本身（见 <head> 里那两行赋值）。服务端注入时
-  // 只把**双引号**的那个字面量换成真实凭据（见 internal/server/webui.go 的
-  // injectPlaceholder —— 它匹配的是带引号的形式，不是裸 token）。
+  // 服务端不再往这个页面注入 api_key / admin_token（见 internal/server/webui.go
+  // 的 renderUI）；而且**未登录时根本不会拿到这个页面** —— 那时服务端给的是登录页。
+  // 于是"页面里有没有钥匙"这个问题不再存在，取而代之的是一个请求：
   //
-  // 所以这里的比较基准用**单引号**写：占位符加单引号那个形态服务端不认、
-  // 也不会去替换，两者因此互不干扰。
+  //	GET /admin/auth/session   →  200 = 知道我是谁 / 401 = 没登录（跳登录页）
   //
-  // ⚠ 本注释里刻意**不写**带双引号的占位符：服务端按双引号匹配，
-  // 写在注释里也会被一起替换成真实密钥（实测踩到过 —— 页面上密钥因此
-  // 多出现了一次，而"密钥只该出现一次"正是下面那条断言在守的性质）。
+  // 身份的载体是服务端下发的 **HttpOnly 会话 cookie**（wb2api_sid）：同源 fetch
+  // 自动携带，JS 读不到（XSS 偷不走）、跨站带不上（SameSite 挡 CSRF）。
   //
-  // # 这里曾经是一个真 bug（本次修掉）
+  // ⚠ 本次删掉的两样东西，都不是清理癖：
   //
-  // 旧代码比较的是**另一个**字符串（一个带 `_SENTINEL__` 后缀的名字），
-  // 而页面初值是上面那个占位符 —— 两者不相等，于是"未注入"时
-  // INJECTED 恒为那个占位符字符串（**真值**）⇒ 页面以为已经拿到钥匙，
-  // 直接跑 refresh()，而所有请求都拿占位符当 Bearer ⇒ 全部 401/403。
+  //  1. `INJECTED` / `ADMIN_INJECTED` 两个哨兵 + `ADMIN_TOKEN` 变量。
+  //     它们配合"服务端注入凭据"的旧模型工作，而现在服务端**不再替换**那两个
+  //     占位符 ⇒ 哨兵永远等于占位符 ⇒ 旧判据 `if (ADMIN_INJECTED || INJECTED)`
+  //     恒为假 ⇒ **已登录的人也会看到「本次访问未获授权」**。
   //
-  // 后果正是用户看到的现象：未授权时界面既没提示、也用不了，
-  // 而"手输钥匙"那条分支**从来没有运行过**（死代码）。
-  const INJECTED = (typeof window.__WB2API_KEY__ === 'string' && window.__WB2API_KEY__ !== '__WB2API_KEY__')
-    ? window.__WB2API_KEY__ : '';
-
-  // ADMIN_INJECTED 管理台门禁令牌（与 api_key **独立**的一把钥匙）。
-  //
-  // # 为什么页面需要两把（用户要求：门禁 token 不能和 api 一样）
-  //
-  //	/admin/*  → admin_token
-  //	/v1/*     → api_key
-  //
-  // 服务端只对**已授权**的请求注入（本机免令牌，或出示了正确的管理令牌）；
-  // 未授权时两个哨兵都保持占位符，前端据此显示登录框。
-  const ADMIN_INJECTED = (typeof window.__WB2API_ADMIN_TOKEN__ === 'string'
-    && window.__WB2API_ADMIN_TOKEN__ !== '__WB2API_ADMIN_TOKEN__')
-    ? window.__WB2API_ADMIN_TOKEN__ : '';
-  let KEY = '';
-  // ADMIN_TOKEN 管理台请求用的凭据。初始 = 服务端注入的那把（可能为空）。
-  let ADMIN_TOKEN = ADMIN_INJECTED;
+  //  2. `localStorage('wb2api.key')`。那是用户报障 ② 的来源：令牌轮换后页面
+  //     还揣着旧值，表现成"必须重启才生效"。现在磁盘上不存任何凭据 —— 代价是
+  //     刷新页面后要重新粘一次对话密钥（只影响 /v1 测试功能）。
+  let KEY = '';   // 仅内存：用户为 /v1 功能（对话测试、模型目录回退）手粘的 api_key
   let models = [];
   // 管理台状态
   let share = [];          // 最近一次 /admin/accounts 的账号视图（操作按钮按 uid 回查）
@@ -2111,30 +2124,49 @@ let loginProvider = '';
   }
 
   // hdr 对话接口（/v1/*）的鉴权头 —— 用 api_key。
-  const hdr = () => KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
-  // adminHdr 管理接口（/admin/*）的鉴权头 —— 用 **admin_token**。
   //
-  // ⚠ 两把钥匙必须分开用（用户要求：门禁 token 不能和 api 一样）：
-  // 管理面拿 api_key 会被 403，对话面拿 admin_token 会被 401，
-  // 而那种失败信息很像"服务坏了"，很难往"用错钥匙了"上想。
-  const adminHdr = () => ADMIN_TOKEN ? { 'Authorization': 'Bearer ' + ADMIN_TOKEN } : {};
+  // ⚠ T7 起 KEY 只能来自"用户在顶栏手动粘一次"（内存变量），页面里没有任何
+  // 注入的密钥与 localStorage 副本。没有它时 /v1/* 会 401，但那是**对话面**
+  // 的凭据缺失，与"能不能进控制台"无关。
+  const hdr = () => KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
+  // adminHdr 管理接口（/admin/* 与 /status）的额外请求头 —— **现在是空的**。
+  //
+  // # 为什么改成空（T7，用户报障 ③ 的收尾）
+  //
+  // 管理面的身份由服务端下发的 **HttpOnly 会话 cookie**（wb2api_sid）承担：
+  // 同源 fetch 自动携带，JS 读不到、跨站带不上。旧实现往这里塞
+  // `Authorization: Bearer <admin_token>`，而那把令牌是**明文注入页面**的
+  // —— 于是"打开页面"就等于拿到管理权限。
+  //
+  // 保留这个函数（而不是删掉几十处 `adminHdr()` 调用）：将来若要恢复某种
+  // 自定义头（例如 CSRF 双提交 token），改这一处即可。
+  const adminHdr = () => {};
 
   // showConsole 显示整个控制台（导航 + 内容）。
   //
-  // ⚠ 未授权时**必须**让它整块消失（用户要求）：
-  // 原话「我希望只显示红色，绿色全部不要」—— 红色是那句"本次访问未获授权"
-  // 的指路提示，绿色是导航 + 所有面板。未授权时留着面板只有坏处：
-  // 用户会以为"能看见就能改"，而每点一下都 403，看不出到底发生了什么。
+  // ⚠ 没有登录状态时**必须**让它整块消失（用户要求）：
+  // 原话「我希望只显示红色，绿色全部不要」—— 红色是那句"需要登录"的指路提示，
+  // 绿色是导航 + 所有面板。未授权时留着面板只有坏处：用户会以为"能看见就能改"，
+  // 而每点一下都 403，看不出到底发生了什么。
+  //
+  // ⚠ T7 起服务端不会再把未登录的人送到这个页面（送到登录页）—— 所以这里
+  // 只在**会话中途失效**（登出/改口令/禁用/超时）时生效：那一刻面板还在屏幕上，
+  // 必须收起来并把话说清楚。
   function showConsole() {
     const m = $('appMain'); if (m) m.style.display = '';
     const h = $('keyHint'); if (h) h.style.display = 'none';
     const kf = $('keyFallback'); if (kf) kf.style.display = 'none';
   }
 
-  // hideConsole 只留顶栏（主题 + 令牌输入 + 连接）与那句指路提示。
+  // hideConsole 只留顶栏与那句指路提示（T7 起提示是「去登录页」）。
+  //
+  // ⚠ 不再展开顶栏那个 api_key 输入框（旧实现在这里 `keyFallback` 显出来）：
+  // 走到这里的原因是**没有登录状态**，而 api_key 进不了控制台 —— 把它摆出来
+  // 会引导用户去填一把不管用的钥匙，然后对着 401 反复试。
   function hideConsole() {
     const m = $('appMain'); if (m) m.style.display = 'none';
-    const kf = $('keyFallback'); if (kf) kf.style.display = 'inline-flex';
+    const kf = $('keyFallback'); if (kf) kf.style.display = 'none';
+    const w = $('whoami'); if (w) { w.style.display = 'none'; w.innerHTML = ''; }
     showKeyHint();
   }
 
@@ -2143,13 +2175,46 @@ let loginProvider = '';
     $('htxt').textContent = txt;
   }
 
+  // redirecting 去登录页只跳一次：一次会话失效会同时打中多个并发请求。
+  let redirecting = false;
+
+  // toLogin 跳登录页（会话失效 / 凭据缺失时的唯一去处）。
+  //
+  // ⚠ 只对**控制台面**（/admin/* 与 /status）的认证失败调用。`/v1/*` 的 401
+  // 是"没有对话密钥"，那是另一条路（顶栏粘一把即可）：把它也当登录失效处理，
+  // 会把一个只是想试对话的已登录用户踢到登录页 —— 而他的会话好得很。
+  function toLogin(why) {
+    if (redirecting) return;
+    redirecting = true;
+    try { sessionStorage.setItem('wb2api.loginWhy', why || 'expired'); } catch { /* 隐私模式 */ }
+    location.replace('/ui');
+  }
+
   async function api(path, opt = {}) {
-    const r = await fetch(path, Object.assign({}, opt, { headers: Object.assign(hdr(), opt.headers || {}) }));
-    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+    const r = await fetch(path, Object.assign({}, opt, {
+      headers: Object.assign({}, adminHdr(), hdr(), opt.headers || {}),
+    }));
+    if (!r.ok) {
+      // ★ 控制台面的 401 ⇒ 会话失效，直接去登录页。
+      // 留在这里只有坏处：面板还在、每点一下都失败，用户看不出发生了什么。
+      if (r.status === 401 && (path.startsWith('/admin/') || path === '/status')) {
+        toLogin('expired');
+      }
+      throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+    }
     return r.json();
   }
 
   function renderCards(h, s) {
+    // 成员模式：没有账号池读数（/status 对成员 403）⇒ 这一排卡片换一句说明，
+    // 而不是渲染出一排 `—` 或直接抛异常（后者会在控制台留一条看不懂的报错）。
+    if (!s) {
+      $('cards').innerHTML = '<div class="card" style="grid-column:1/-1">'
+        + '<div class="k">账号池</div>'
+        + '<div class="v dim" style="font-size:13px">当前登录是<b>成员</b>，'
+        + '账号池读数仅管理员可见。你自己的用量看下面的统计卡。</div></div>';
+      return;
+    }
     // 网关状态卡：核心运营读数（对标 one-api 管理台"渠道健康 + 汇总"）。
     // 之前精简到 2 张后用户觉得太少 —— 这里加回排障/运营真正有用的维度：
     // 冷却中/已禁用/在途 来自 /status 的每账号画像；累计请求/成功率来自
@@ -2520,18 +2585,20 @@ let loginProvider = '';
     const host = $('keyHint');
     if (!host) return;
     const rows = [
-      ['最省事', '在地址后加 ?token=<管理令牌> 直接打开本页；本机打开一次，把地址存成书签即可。'],
-      ['填哪一把', '填**管理令牌** admin_token（不是对话用的 api_key）。'],
-      ['去哪拿', '打开跑网关那台机器上的 config.json，顶层 "admin_token" 字段就是它。'],
-      ['还没配？', 'admin_token 为空时没有远程管理面（只有本机可进）。'
-        + '在 config.json 里加一行 "admin_token": "<一串足够长的随机值>" 再重启即可。'],
-      ['⚠ 别填错', '本页「API 管理」里那些 sk- 开头的是给调用方的 api_key，'
-        + '它只能调 /v1 对话接口，**不能**登录控制台。'],
+      ['怎么进去', '打开 /ui，用**控制台账号**（用户名 + 口令）登录。'
+        + '首次部署时那一页会引导你创建第一个管理员。'],
+      ['想用令牌', '也可以带 ?token=<管理令牌> 打开 /ui：服务端校验通过后会把它换成'
+        + ' HttpOnly cookie 并跳回干净的 /ui（令牌因此不会留在地址栏与历史里）。'],
+      ['令牌在哪', 'config.json 顶层的 "admin_token" 字段。'],
+      ['⚠ 别填错', '「API 管理」里那些 sk- 开头的是给调用方的 api_key —— '
+        + '它只能调 /v1 对话接口，进不了控制台。'],
     ];
     host.innerHTML =
-      '<div class="khhead">本次访问未获授权</div>'
-      + '<div>你可能是<b>从别的机器</b>打开的 —— 服务端只对<b>本机直连</b>自动注入凭据。</div>'
-      + '<ul>' + rows.map(([k, v]) => `<li><b>${esc(k)}</b>：${esc(v)}</li>`).join('') + '</ul>';
+      '<div class="khhead">需要登录</div>'
+      + '<div>浏览器里没有有效的登录状态（会话可能已过期：登出、口令被改过、'
+      + '账号被禁用，或 cookie 到期）。</div>'
+      + '<ul>' + rows.map(([k, v]) => `<li><b>${esc(k)}</b>：${esc(v)}</li>`).join('') + '</ul>'
+      + '<div style="margin-top:6px"><a href="/ui">→ 去登录页</a></div>';
     host.style.display = '';
   }
 
@@ -4636,10 +4703,16 @@ let loginProvider = '';
 
   // ---------------------------------------------------------------- 管理台调用
   //
-  // ⚠ 必须带 hdr()（Bearer）：远程访问管理台时（/ui?token=<api_key> 或 SSH 隧道
-  // 之外的任何非回环访问），/admin/* 由服务端校验管理钥匙。历史上本机直连时
-  // admin 端点只认回环地址、不要求凭证，所以这里一度只有 Content-Type ——
-  // 远程放开后漏掉它 = 每个标签页都 403「管理接口仅允许本机直连…」。
+  // # 鉴权（T7 起）：靠 cookie，不靠请求头
+  //
+  // adminHdr() 现在恒为空对象 —— 管理面的身份是服务端下发的 HttpOnly 会话
+  // cookie（wb2api_sid），同源 fetch 自动携带。**不要再往这里加令牌头**：
+  // 页面里任何明文令牌都等于"打开页面就泄一把钥匙"（用户报障 ③）。
+  //
+  // 历史教训留在下面这段（改造前的形态）：本机直连曾免令牌，admin 端点只认
+  // 回环地址；远程放开后忘了带头 ⇒ 每个标签页都 403「仅允许本机直连…」。
+  // 现在回环地址**不是**凭据（见 internal/server/webui.go 的 ui），
+  // 所以那种"本机就能进"的隐含假设不会再回来。
   async function admin(path, opts = {}) {
     const m = String(opts.method || 'GET').toUpperCase();
     let r;
@@ -7802,15 +7875,15 @@ let loginProvider = '';
     if (ak) {
       const parts = [];
       if (d && d.admin_token) {
-        parts.push(`<div style="margin-bottom:6px">管理令牌（进控制台，<b>admin_token</b>）：`
+        parts.push(`<div style="margin-bottom:6px">管理令牌（登录控制台用，<b>admin_token</b>）：`
           + `<code class="mono">${esc(d.admin_token)}</code>`
           + ` <button id="btnRotateAdminToken" style="padding:2px 8px;font-size:12px">轮换</button>`
           + ` <span class="dim" style="font-size:12px">轮换后**立即生效**，无需重启</span></div>`);
       } else {
         parts.push('<div style="margin-bottom:6px">管理令牌（<b>admin_token</b>）：'
-          + '<span class="dim">未配置 —— 远程访问管理台需要它。'
+          + '<span class="dim">未配置 —— 没有它就只剩「账号口令登录」一条路。'
           + '在 config.json 里加一行 <code>"admin_token": "&lt;随机串&gt;"</code>；'
-          + '不配则只有本机可进控制台。</span></div>');
+          + '它用于脚本/一条链接免口令进控制台（<code>/ui?token=…</code>）。</span></div>');
       }
       if (d && d.admin_key) {
         parts.push(`<div>对话密钥（调 <b>/v1</b> 接口，<code>api_key</code>）：`
@@ -7839,7 +7912,7 @@ let loginProvider = '';
     if (!confirm('轮换管理令牌（admin_token）？\n\n'
       + '· 生成新令牌写入 config.json（admin_token 字段）\n'
       + '· **立即生效**：旧令牌作废，其它机器需要换新令牌\n'
-      + '· 本机直连不受影响\n'
+      + '· 不填令牌也能登录：用账号口令（/ui 的登录页）\n'
       + '· 新令牌仅此一次完整显示')) return;
     await busyRun(btn, async () => {
       try {
@@ -11609,32 +11682,56 @@ let multCatalogFailed = false;
     svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; cur.style.display = 'none'; });
   }
 
+  // memberMode：本次登录者是**成员**（不是管理员）。
+  //
+  // # 为什么要这个态（T7 的必然结果）
+  //
+  // `/status` 回的是上游账号池画像，T7 把它收成"仅管理员"（成员拿到 403）。
+  // 若不做区分，成员一登录就会看到「权限不足」且**整块控制台被收起** ——
+  // 那等于"成员登录后什么都没有"，比改造前（根本没有账号体系）更让人困惑。
+  //
+  // 所以这里做**最小降级**：成员保留能用的部分（manifest 导航、自己的用量
+  // `/admin/stats`、自己的 API key），把只有管理员能看的两块（账号池表格、
+  // 卡片里的账号维度）换成一句说明。完整的成员视图（只列自己名下的 key 等）
+  // 是 T8 的事 —— 这里只保证"不会看起来像坏了"。
+  let memberMode = false;
+
   async function refresh() {
     if (!KEY && $('key').value.trim()) KEY = $('key').value.trim();
-    let h, s;
+    let h, s = null;
     try {
       h = await (await fetch('/healthz')).json();       // healthz 恒无鉴权
-      s = await api('/status');
     } catch (e) {
-      if (e.message.startsWith('HTTP 401')) {
-        // 401 会被 5s 轮询无限复现，先把轮询停掉再提示，别刷控制台。
-        stopAuto();
-        // ⚠ 凭据失效（令牌被轮换/填错）时也要**收起控制台**：
-        // 否则界面上留着满屏面板、每点一下 403，而用户看不出是凭据的问题。
-        hideConsole();
-        setDot('bad', '鉴权失败 · 需要管理令牌');
-        refresh._last = null;
-        return false;
-      }
       setDot('bad', '请求失败');
       $('accts').innerHTML = accountPlaceholder(e.message, 'err');
       refresh._last = null;
       return false;
     }
-    // 到这里说明取数成功 ⇒ 凭据有效 ⇒ 确保控制台是展开的。
-    // （初始加载时已授权也会走这里，所以这一句同时覆盖"首次进入"与
-    // "连接后重载"两条路。）
+    try {
+      s = await api('/status');
+      memberMode = false;
+    } catch (e) {
+      // ⚠ 403 与 401 必须分开：403 是"你是成员，这个读数不给" —— 正常的；
+      // 401 是"你没有身份了" —— 要去登录页（api() 里已经跳了，这里只是兜底）。
+      if (e.message.startsWith('HTTP 403')) {
+        memberMode = true;
+        s = null;                       // 没有账号池读数，卡片走"未知"分支
+      } else if (e.message.startsWith('HTTP 401')) {
+        stopAuto();
+        hideConsole();
+        setDot('bad', '登录状态已失效 · 请重新登录');
+        refresh._last = null;
+        return false;
+      } else {
+        setDot('bad', '请求失败');
+        $('accts').innerHTML = accountPlaceholder(e.message, 'err');
+        refresh._last = null;
+        return false;
+      }
+    }
+    // 到这里说明**身份有效**（管理员拿全量，成员拿自己那份）⇒ 展开控制台。
     showConsole();
+    applyMemberMode();
     setDot(h.healthy > 0 ? 'ok' : 'bad',
       (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
     // 网关卡读累计请求/成功率：拉 stats 填缓存（renderStats 内部写 window._statsCache；
@@ -11844,52 +11941,125 @@ let multCatalogFailed = false;
     } finally { btn.disabled = false; }
   }
 
+  // wireTopBar 顶栏那个「对话密钥」输入框（只影响 /v1 功能）。
+  //
+  // ⚠ 它**不是**登录入口：管理面（/admin/* 与 /status）认的是服务端下发的
+  // HttpOnly 会话 cookie，同源 fetch 自动携带 —— 这里填不填都不影响管理功能。
+  // 它存在的唯一理由：控制台上的「对话测试」与「模型目录回退」打的是 /v1/*
+  // （那一路认 api_key），需要用户手粘一把。
+  //
+  // ⚠ 刻意不写 localStorage：刷新后要重新粘一次，换取"磁盘上没有长期凭据"。
+  function wireTopBar() {
+    const keyEl = $('key'), conn = $('conn');
+    if (!keyEl || !conn) return;
+    conn.onclick = () => {
+      const v = keyEl.value.trim();
+      if (!v) { toast('请先填入对话密钥（API key）', true); return; }
+      KEY = v;
+      // 只影响 /v1 那两处缓存：模型目录与倍率预览。
+      lazyCache.drop('ep:/v1/models');
+      refresh();
+    };
+    keyEl.addEventListener('keydown', e => { if (e.key === 'Enter') conn.click(); });
+  }
+
+  // probeSession 问服务端"我是谁"，据此决定进控制台还是去登录页。
+  //
+  // # 为什么不看页面里有没有注入的钥匙（那是改造前的做法）
+  //
+  // 旧模型的判据是"服务端渲染时有没有把凭据写进 HTML"。T5 起服务端**从不**
+  // 注入凭据，那条判据恒为假 ⇒ 已登录的人被告知"未获授权"。现在改成问一句
+  // `/admin/auth/session`：它的 200/401 是唯一真相来源，也顺带把当前登录的
+  // 账号名显示出来（成员看到的是自己的名字，管理员看到自己的）。
+  //
+  // ⚠ 401 与"网络不通"必须分开处理：后者（服务刚重启/断网）跳到登录页会让人
+  // 以为"登录状态丢了"，而其实只是这一瞬间连不上。
+  // applyMemberMode 成员模式下隐藏"注定 403"的面板（T7 最小降级）。
+  //
+  // # 为什么用根类 + CSS 而不是逐个 renderer 分支
+  //
+  // 面板有 8 个（账号/模型/任务/日志/设置/仪表盘/API key/对话测试），每个都由
+  // 自己的 renderer 画。逐个加"成员就跳过"的分支要改 8 处、且以后新增面板必然
+  // 漏改。这里只标一个根类，隐藏规则集中写在 CSS 里 —— 唯一的事实来源。
+  //
+  // ⚠ 隐藏**不是**安全边界：真正的判据在服务端 `internal/admin/admin.go` 的
+  // memberPaths（成员只放行 /admin/apikeys、/admin/stats、/admin/ui/manifest）。
+  // 这里只是"别让人对着一屏必然失败的面板反复点"。
+  //
+  // ⚠ 隐藏的 section 不会被导航切到：`buildNav`/切换逻辑本来就跳过 hidden 的
+  // section（见 navKey 那段注释："否则用户会落到一个 hidden 的 section 上、
+  // 看到空白内容区"）。
+  function applyMemberMode() {
+    const root = document.documentElement;
+    if (root) root.classList.toggle('member-mode', memberMode);
+    const host = $('memberBanner');
+    if (!host) return;
+    if (memberMode) {
+      host.textContent = '当前登录：成员 —— 只能看到自己名下的 API key 与自己的用量；账号池、模型目录、任务、日志、设置属于管理员。';
+      host.style.display = '';
+    } else {
+      host.textContent = '';
+      host.style.display = 'none';
+    }
+  }
+
+  async function probeSession() {
+    let r;
+    try {
+      r = await fetch('/admin/auth/session', { headers: { 'Accept': 'application/json' } });
+    } catch (e) {
+      hideConsole();
+      setDot('bad', '连不上服务端');
+      $('keyHint').innerHTML = '<div class="khhead">连不上服务端</div>'
+        + '<div>网关可能正在重启。稍后刷新本页即可；若一直如此，去看它的日志。</div>';
+      $('keyHint').style.display = '';
+      return;
+    }
+    if (r.status === 401) {
+      // 会话被撤销/过期（登出、改口令、管理员禁用、或 cookie 到期）。
+      toLogin('expired');
+      return;
+    }
+    let who = null;
+    try { who = (await r.json()).user || null; } catch { /* 形状不符时只影响名字显示 */ }
+    showConsole();
+    renderWhoami(who);
+    refresh();
+  }
+
+  // renderWhoami 顶栏显示当前登录者（成员会看到「成员」标记，避免他以为自己
+  // 点不动某些页面是"坏了"）。
+  function renderWhoami(u) {
+    const host = $('whoami');
+    if (!host || !u) return;
+    const isAdmin = u.role === 10;
+    host.innerHTML = `<span class="who-name" title="${esc(u.username)}">${esc(u.display_name || u.username)}</span>`
+      + `<span class="pill ${isAdmin ? 'ok' : ''}">${esc(u.role_name || (isAdmin ? '管理员' : '成员'))}</span>`;
+    host.style.display = '';
+  }
+
   function boot() {
     // 主题最先初始化：它决定第一帧的配色。
     initTheme();
 
-    // 本机访问：服务端已注入 Key，直接跑起来。顶栏不显示任何 API 信息，
-    // 查看/复制统一在「仪表盘 → API 接入信息」里完成。
-    //
     // 整页自动轮询（旧「每 5s 刷新」开关）已整体移除（用户要求）：
     // 额度/状态/统计卡/趋势/API key 全部由 30s **无感轮询**覆盖（只 diff
     // 数值不重绘），整页 refresh 只在初始加载与「立即刷新」/操作收尾时跑。
-    if (ADMIN_INJECTED || INJECTED) {
-      // 服务端注入了凭据 ⇒ 本次访问已被授权（本机免令牌，或远程带了管理令牌）。
-      // 两个哨兵任一被注入即说明服务端放行了这次请求。
-      KEY = INJECTED;
-      ADMIN_TOKEN = ADMIN_INJECTED || KEY;
-      showConsole();
-      refresh();
-    } else {
-      // 服务端**没有**注入任何凭据 ⇒ 本次访问未获授权。
-      //
-      // # ⚠ 未授权时整块控制台都不显示（用户要求）
-      //
-      // 原话：*「我希望只显示红色，绿色全部不要」* ——
-      // 红色是下面那句"本次访问未获授权"的指路提示，绿色是导航 + 所有面板。
-      //
-      // 未授权时留着面板只有坏处：用户会以为"能看见就能改"，而每点一下
-      // 都 403，看不出到底发生了什么。原来这里只加了一段提示、面板照常渲染，
-      // 用户看到的正是"提示说没授权，但设置页还在那里"。
-      hideConsole();
-      const saved = localStorage.getItem(LS);
-      if (saved) { $('key').value = saved; }
-      // 「连接」= 带 ?token= **重新加载本页**。
-      //
-      // ⚠ 为什么是重载而不是就地刷新：凭据由**服务端**在渲染页面时注入
-      // （见 internal/server/webui.go 的 ui）。就地改 ADMIN_TOKEN 只能让
-      // /admin/* 通，而 /v1/* 那一路（模型目录、对话测试）拿不到 api_key，
-      // 界面上会显示成"模型一个都没有"—— 那种残缺很难归因。
-      // 重载之后服务端认得这个令牌，两把凭据一起注入，页面就是完好的。
-      $('conn').onclick = () => {
-        const v = $('key').value.trim();
-        if (!v) { toast('请先填入管理令牌', true); return; }
-        if ($('remember').checked) localStorage.setItem(LS, v); else localStorage.removeItem(LS);
-        location.href = '/ui?token=' + encodeURIComponent(v);
-      };
-      $('key').addEventListener('keydown', e => { if (e.key === 'Enter') $('conn').click(); });
-    }
+    //
+    // ---- 身份判定（T7）：问服务端"我是谁"，而不是看页面里有没有注入的钥匙 ----
+    //
+    // 拿到这个页面的前提已经是"服务端认为你有身份"（没身份的话给的是登录页），
+    // 所以这里只需要把身份读出来显示，并把控制台展开。判据仍然落在**数据**上：
+    // probeSession 里的 401 是唯一的真相来源。
+    //
+    // ⚠ 已删除（T7）：`if (ADMIN_INJECTED || INJECTED) {...} else {...手输令牌 + 记住 + 重载...}`
+    //   · 那条判据读的两个哨兵**永远不再被替换** ⇒ 恒假 ⇒ 已登录的人也会被告知
+    //     "本次访问未获授权"，且控制台被整块藏起来（比不修还糟）。
+    //   · else 分支整体的前提也没了：未登录时根本拿不到这个页面（服务端给登录页）。
+    //   · 其中 `localStorage.setItem(LS, …)` 正是用户报障 ② 的来源（轮换后页面
+    //     还揣着旧令牌，表现成"必须重启"）。
+    wireTopBar();
+    probeSession();
 
     // 点击任意可复制块即复制；块内的「显示/隐藏」按钮不触发复制。
     $('apiCards').addEventListener('click', ev => {
