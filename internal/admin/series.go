@@ -79,7 +79,10 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 			out[i].Fail++
 		}
 		if e.Tokens >= 0 {
-			out[i].Tokens += int64(e.Tokens)
+			// 同 admin.go 的那条守卫：Tokens 的 -1 是"usage 缺失"哨兵，不能累加。
+			if e.Tokens > 0 {
+				out[i].Tokens += int64(e.Tokens)
+			}
 		}
 		// ⚠ 缓存两量与别处同一取法：>0 才累加（负数/负零属上游异常，丢了比算进去好解释）。
 		if e.CacheHitTokens > 0 {
