@@ -285,7 +285,12 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 // usage 为上游 usage 对象（nil = 缺失）。扩展字段（credit/推理 token/缓存命中未命中）
 // 由此处解析并写入环形缓冲：**只有 toks>=0（usage 存在）时才填**，
 // usage 缺失时保持 0 而不是 -1 —— 新字段没有哨兵语义，-1 会污染后续求和聚合。
-func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any, decision string, preMs int64, clientIP, clientUA string) {
+// logChatRowProvider 记一条请求日志。extra 是**可选**的渠道维度：
+// extra[0] = 渠道 id，extra[1] = 改写后的上游模型名（都没有 = 走的是账号池）。
+//
+// ⚠ 为什么用变参而不是加两个正式参数：这个函数有十来个调用点，而渠道是**后加**的维度。
+// 改签名会让每个调用点都来一遍"补两个空串"的机械改动 —— 那种改动最容易顺手改错一个。
+func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any, decision string, preMs int64, clientIP, clientUA string, extra ...string) {
 	if !chatLogEnabled {
 		return
 	}
@@ -308,6 +313,13 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 	entry.PreMs = preMs
 	entry.ClientIP = clientIP
 	entry.ClientUA = clientUA
+	// 渠道维度（没有 = 账号池路径，见 logbuf.Entry.Channel 的注释）
+	if len(extra) > 0 {
+		entry.Channel = extra[0]
+	}
+	if len(extra) > 1 {
+		entry.UpstreamModel = extra[1]
+	}
 	// tokens<0 是「usage 缺失」的哨兵；此时 usage 对象即使非 nil 也不可信
 	// （例如上游给了半截 usage），扩展字段一律留 0。
 	if toks >= 0 {

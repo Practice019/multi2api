@@ -1507,14 +1507,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if !h.modelAllowedForRequest(w, r, peek.Model) {
 			return
 		}
+		chStart := time.Now()
 		fw, ferr := h.forwardViaChannel(r.Context(), peek.Model, body)
 		if ferr != nil {
+			// ★ 渠道失败也写请求日志。改造前渠道分支**一行日志都没有**，后果是实测踩到的：
+			//   用户发 csg，日志里一条都搜不到，他只能看到另一个 Python 客户端的 loomy 流量，
+			//   于是合理地质问"我用的是 csg 呢不是 LOOMY"。没有日志 = 无法自证。
+			st := http.StatusBadGateway
+			if ue, ok := gateway.AsUpstreamHTTPError(ferr); ok {
+				st = ue.Status
+			}
+			logChatRowProvider(0, time.Since(chStart), peek.Model, "sync", "", "channel_error",
+				st, -1, nil, "channel_error:"+fw.ChannelName, 0, "", "", fw.ChannelID, fw.UpstreamModel)
 			// ⚠ 走 writeChannelError 而不是写死 502：上游的 429/401 要原样透传给客户端
 			// （见 channels_forward.go 里那段"实测踩过"的注释）。
 			h.writeChannelError(w, ferr)
 			return
 		}
 		h.writeChannelStream(w, r, fw)
+		// 成功也记：model 记**客户端发来的公开名**，渠道与上游模型各占一列 ⇒
+		// 「这条 csg 请求到底走了渠道还是账号池」在日志里一眼可判。
+		// ⚠ tokens 记 -1（= 未知）：这条链路是字节直通，我们不解析 SSE 里的 usage。
+		//   provider 列写成 "channel:<渠道名>" —— 与账号池的 provider（loomy/workbuddy…）区分开。
+		logChatRowProvider(0, time.Since(chStart), peek.Model, "sync", "", "channel:"+fw.ChannelName,
+			fw.Stream.Status, -1, nil, "", 0, "", "", fw.ChannelID, fw.UpstreamModel)
 		return
 	}
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)
