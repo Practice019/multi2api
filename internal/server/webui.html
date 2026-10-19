@@ -552,6 +552,11 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      而第二行右边**一大片空**。118px × 11 + gap ≈ 1340，正好一行铺满。
      ⚠ 宽度上限仍由 `1fr` 均分决定，所以卡片不会被压扁 —— 只是换行点推迟了。 */
   .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px;align-items:stretch}
+  /* ⚠ `#statsCards2` 是**第二个**卡片网格（模型归属 / 活跃度，见渲染处注释）：
+     两个 `.cards` 各自是一个独立的 grid，`gap` 只在网格**内部**生效 ——
+     两者上下相邻时若不给外边距，两行会**贴在一起**、看不出是两组。
+     所以只补这一条行间距，其余样式与 `.cards` 完全共用（不复制一套）。 */
+  #statsCards2{margin-top:8px}
   .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 12px;
     display:flex;flex-direction:column;justify-content:center;min-height:52px;width:auto;min-width:0}
   .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
@@ -1236,7 +1241,17 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
           </span>
         </div>
         <div id="statsTrend" class="trendchart" style="margin-bottom:12px;height:240px;position:relative"></div>
+        <!-- ⚠⚠ 概览卡**分成两个网格**（2026-10-20 修「第二行只剩 3 张、右侧空一片」）：
+             13 张塞进同一个 `auto-fit` 网格时，1400px 宽下第一行 10 张、第二行 3 张，
+             右侧空出 7 个卡位 —— 观感像"没做完"。
+             ⚠ 分组不是按"凑数"，是按**语义**：前 10 张是「流量与耗时」（本窗口的量），
+             后 3 张是「模型归属与活跃度」（Top 模型 / 活跃天数 / 当前连续天数）。
+             两组各自 `auto-fit` ⇒ 每行都铺满，且窄屏时自然退化成一列。
+             ⚠⚠ 后 3 张挪到 `#statsCards2` 之后，文件里所有 `#statsCards .card[data-stat-key=…]`
+             的选择器**都会失配** ⇒ 那 3 格永远停在占位符（页面不报错、只是数字再也不更新）。
+             ⇒ 定位卡片一律走 `statCardEl()` / `statCardValEl()`（同时匹配两个容器）。 -->
         <div class="cards" id="statsCards"></div>
+        <div class="cards" id="statsCards2"></div>
       <!-- 性能健康条（2026-10-20）：一行读结论，与上面那排"读总量"的指标卡分工 -->
       <div class="healthbar" id="healthBar"></div>
         <!-- 模型维度：每行一个模型，列 = 调用次数 / 成本系数。
@@ -9737,15 +9752,20 @@ let loginProvider = '';
     // ⇒ 现在展示为两张**各表一件事**的卡：「输出 token」= tokens（含推理的真值）、
     //   「推理 token」= think_tokens（其中有多少是推理）。原先那处重复计算已删除。
     //
-    // 计算抽成 statsCardsEntries：renderStats（整页渲染）与无感轮询
-    // pollStatsCards（只改数值）共用同一份判据，杜绝两处漂移。
+    // 计算抽成 statsCardsEntries（第 1 组）+ statsCardsEntries2（第 2 组）：
+    // renderStats（整页渲染）与无感轮询 pollStatsCards（只改数值）共用同一份判据，
+    // 杜绝两处漂移 —— 卡片清单**只有这两个函数**，别的地方不许再列一遍。
 
     // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
     // data-stat-key 供无感轮询定位（见 pollStatsCards）。
     const card = (k, v, cls) =>
       `<div class="card" data-stat-key="${esc(k)}"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
 
+    // ⚠ 两个容器各自渲染一组（分组理由见 HTML 里 `#statsCards2` 那段注释）：
+    //   第 1 组 = 流量与耗时，第 2 组 = 模型归属与活跃度。
+    //   ⚠ 两组**共用同一个 card()**（同一个 `data-stat-key` 约定），否则回填逻辑要认两种形状。
     $('statsCards').innerHTML = statsCardsEntries(s).map(([k, v, c]) => card(k, v, c)).join('');
+    $('statsCards2').innerHTML = statsCardsEntries2(s).map(([k, v, c]) => card(k, v, c)).join('');
     renderHealthBar(s);   // 与卡片同源（同一份 s），不会出现"卡对条错"
 
     // ⚠ 「模型明细」chips 已按用户要求删除（2026-10-18）⇒ 这里**不再调** renderStatsModels。
@@ -9797,7 +9817,36 @@ let loginProvider = '';
     el.innerHTML = parts.join('');
   }
 
-  // statsCardsEntries 统计卡的内容（renderStats 与无感轮询共用）。
+  // ---- 概览卡的**唯一定位入口**（2026-10-20 抽，防回归）----
+  //
+  // ⚠⚠ 为什么必须有这两个函数、而不许在别处再写 `document.querySelector('#statsCards …')`：
+  //   卡片现在分住在**两个**容器里 —— `#statsCards`（流量与耗时 10 张）
+  //   与 `#statsCards2`（模型归属与活跃度 3 张，2026-10-20 为治"第二行 3 张、右侧空一片"而拆）。
+  //   写死 `#statsCards` 的老选择器会**静默失配**：不抛错、不出 console，
+  //   只是那 3 格永远停在占位符（`—`）—— 页面看起来正常，数字再也更新不了。
+  //   ⇒ 凡是"按 key 找卡片 / 找它的 `.v`"的地方，一律走这里；
+  //     两处容器一起匹配，将来再加第三组也只需改 `STAT_CARD_HOSTS` 一行。
+  const STAT_CARD_HOSTS = ['#statsCards', '#statsCards2'];
+  // statCardEl 按 `data-stat-key` 找卡片元素（跨两个容器）。
+  // ⚠ 用逗号选择器一次查完；key 走 `CSS.escape`（key 里有中文与空格，如「Top 模型」）。
+  function statCardEl(key) {
+    const k = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key;
+    return document.querySelector(
+      STAT_CARD_HOSTS.map(h => `${h} .card[data-stat-key="${k}"]`).join(', ')
+    );
+  }
+  // statCardValEl 找卡片里那个显示数值的 `.v`。
+  function statCardValEl(key) {
+    const c = statCardEl(key);
+    return c ? c.querySelector('.v') : null;
+  }
+
+  // statsCardsEntries 第 1 组统计卡的内容（流量与耗时 · renderStats 与无感轮询共用）。
+  //
+  // ⚠ 与 `statsCardsEntries2` 的**分工是语义的、不是凑数**：这里全是"本窗口的量"，
+  //   而那 3 张是"这些量落到哪个模型 / 落在哪些天"。两组分别进两个 `.cards` 网格，
+  //   各自 `auto-fit` ⇒ 每行都铺满（拆之前 13 张挤一个网格，第二行只有 3 张）。
+  // ⚠ 两个函数都**直接返回数组**、由 renderStats 一处渲染，避免出现两份"卡片清单"。
   function statsCardsEntries(s) {
     if (!s) return [];
     const total = num(s.total);
@@ -9832,12 +9881,21 @@ let loginProvider = '';
       // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）
       ['平均 RPM', rpm === null ? null : (rpm >= 10 ? fmtCount(Math.round(rpm)) : rpm.toFixed(1)), 'dim'],
       ['平均 TPM', tpm === null ? null : fmtTokens(Math.round(tpm)), 'dim'],
-      // ⚠ 下面三张照 agent2api 的概览卡补（2026-10-18）。⚠ 值**先给 null = 占位**：
-      //   它们的原料在两处不同的接口里 ——
-      //     · Top 模型    ⇒ 本响应里的 `by_model_detail`（⚠ 在下面 renderStatsReport 里回填）
-      //     · 活跃/连续天数 ⇒ `series?range=365d`（⚠ 由 loadHeatmap 回填，它本来就要取那份数据）
-      // ⚠ 为什么不在这里直接算：本函数只知道窗口总量，**不知道"哪些天有请求"**。
-      //   硬凑只会在没有 series 的时候显示错的数 —— 按本项目的立场，宁可先空着。
+    ];
+  }
+
+  // statsCardsEntries2 第 2 组统计卡：**模型归属与活跃度**（Top 模型 / 活跃天数 / 当前连续天数）。
+  //
+  // ⚠ 三格的值**先给 null = 占位**：它们的原料都不在这份 `/admin/stats` 的通用量里 ——
+  //     · Top 模型      ⇒ 本响应里的 `by_model_detail`（由 `fillTopModel` 回填）
+  //     · 活跃/连续天数  ⇒ `series?range=365d`（由 `loadHeatmap → fillDayCards` 算出、`applyDayCards` 回填）
+  //   ⚠ 为什么不在这里直接算：本函数只知道窗口总量，**不知道"哪些天有请求"**；
+  //     硬凑只会在没有 series 的时候显示错的数 —— 按本项目的立场，宁可先空着。
+  // ⚠ 参数 `s` 目前不参与计算（值恒为 null），但**保留这个签名**：
+  //   与 `statsCardsEntries` 同形，renderStats / 将来要在这里补字段时不用改调用点。
+  function statsCardsEntries2(s) {
+    if (!s) return [];
+    return [
       ['Top 模型', null, 'dim'],
       ['活跃天数', null, 'dim'],
       ['当前连续天数', null, 'dim'],
@@ -10123,8 +10181,10 @@ let loginProvider = '';
   // ⚠ 为什么连续天数从"最后一个桶"往前数、而不是从 `new Date()`：桶的边界由后端定，
   //   用浏览器本地今天去比会在跨零点前后差一天（那一版曾经把"今天"算漏）。
   function fillDayCards(list) {
+    // ⚠ 定位走 `statCardValEl`（跨 `#statsCards` / `#statsCards2`）——
+    //   这两张卡在**第二组**容器里，写死 `#statsCards` 会静默失配、格子永远 `—`。
     const setCard = (key, val, cls) => {
-      const el = document.querySelector(`#statsCards .card[data-stat-key="${key}"] .v`);
+      const el = statCardValEl(key);
       if (!el) return;
       el.textContent = val === null ? NODATA : String(val);
       el.className = 'v ' + (val === null ? 'dim' : (cls || ''));
@@ -10167,7 +10227,9 @@ let loginProvider = '';
   //   ⇒ 那就绑到**唯一那个确定是 `/admin/stats` 响应**的变量上：`refresh` 里的 `d`。
   //   ⚠ 这个函数**只认 `s.by_model_detail`**，拿不到就写 NODATA —— 不猜别的字段。
   function fillTopModel(s) {
-    const el = document.querySelector('#statsCards .card[data-stat-key="Top 模型"] .v');
+    // ⚠⚠ 「Top 模型」现在住在 `#statsCards2`（第二组）—— 选择器必须跨两个容器，
+    //   否则这一格永远是 `—`，而且**没有任何报错**（这是本次拆容器最容易踩的坑）。
+    const el = statCardValEl('Top 模型');
     if (!el) return;
     let bestK = null, bestV = -1;
     for (const [k, v] of Object.entries((s && s.by_model_detail) || {})) {
@@ -10861,7 +10923,8 @@ let loginProvider = '';
   //   它很轻（只写两个 textContent），每次 refresh / 30 秒轮询都调也无所谓。
   function applyDayCards() {
     const put = (key, val) => {
-      const el = document.querySelector(`#statsCards .card[data-stat-key="${key}"] .v`);
+      // ⚠ 同上：这两格在第二组容器里，定位一律走 statCardValEl。
+      const el = statCardValEl(key);
       if (!el) return;
       el.textContent = val === null ? NODATA : String(val);
       el.className = 'v ' + (val === null ? 'dim' : '');
@@ -10894,7 +10957,9 @@ let loginProvider = '';
   // ⚠ 必须是**幂等**的：它会在每次 refresh / 30 秒轮询之后被调（那次会重建卡片），
   //   但重建后的卡片本来就没有 `?`；⚠ 而同一个标题**不该出现两个 `?`** —— 所以先查 marker。
   function attachCardTips() {
-    for (const card of document.querySelectorAll('#statsCards .card')) {
+    // ⚠ 遍历**两个**容器：第二组那 3 张（Top 模型 / 活跃天数 / 当前连续天数）
+    //   在 `#statsCards2` 里，只查 `#statsCards` 会让它们没有 `?` 悬停说明（同样静默）。
+    for (const card of document.querySelectorAll(STAT_CARD_HOSTS.map(h => `${h} .card`).join(', '))) {
       const k = card.querySelector('.k');
       if (!k || k.querySelector('.ctip')) continue;      // ⚠ 已加过就跳过
       const name = k.textContent.trim();
@@ -11752,11 +11817,13 @@ let multCatalogFailed = false;
     cell.innerHTML = freshHTML;
   }
 
-  // pollStatsCards 调用统计**无感**轮询：只更新 8 张卡的数值，不重绘整块。
+  // pollStatsCards 调用统计**无感**轮询：只更新第 1 组 10 张卡的数值，不重绘整块。
   //
   // /admin/stats 聚合的是本地请求日志（无上游调用），30 秒一次很便宜。
-  // 按 data-stat-key 定位卡片、diff 后原地更新数值；模型明细（行数会变）
-  // 仍走整页刷新，不在无感轮询范围。
+  // 按 data-stat-key 定位卡片（`statCardEl`，跨两个容器）、diff 后原地更新数值；
+  // 模型明细（行数会变）仍走整页刷新，不在无感轮询范围。
+  // ⚠ 第 2 组那 3 张的值不在 `statsCardsEntries(d)` 里（原料在 series / by_model_detail），
+  //   所以循环碰不到它们，改由下面 applyDayCards / fillTopModel 单独回填。
   async function pollStatsCards() {
     if (document.hidden) return;
     let d;
@@ -11773,7 +11840,10 @@ let multCatalogFailed = false;
     catch { return; }
     const entries = statsCardsEntries(d);
     for (const [k, v, cls] of entries) {
-      const el = document.querySelector(`#statsCards .card[data-stat-key="${CSS.escape ? CSS.escape(k) : k}"]`);
+      // ⚠ 定位走 `statCardEl`（同时匹配 `#statsCards` 与 `#statsCards2`）。
+      //   这里虽然只会命中第 1 组那些键，但**不能**改回写死 `#statsCards`：
+      //   一旦以后把某个键移组，写死容器的写法会静默失配、那格永远停在占位值。
+      const el = statCardEl(k);
       if (!el) continue;
       const val = el.querySelector('.v');
       if (!val) continue;
@@ -11782,15 +11852,15 @@ let multCatalogFailed = false;
       val.textContent = fresh;
       val.className = 'v ' + (v === null ? 'dim' : (cls || ''));
     }
-    // ⚠⚠ 上面这个循环每 30 秒会把「活跃天数 / 当前连续天数」写回 `—`
-    //   —— 因为 `statsCardsEntries(d)` 里那两格的值**恒为 null**（它们的原料不在这份 `d` 里，
-    //   而在 series 那条线上）。⇒ 本轮之后必须紧接着回填，否则轮询每 30 秒擦掉一次。
-    //   ⚠ 这也解释了上一轮量到的现象："切一次档就永久变 —"（其实是每 30 秒被擦一次，
-    //   而填它的 loadHeatmap 读固定 365d、sig 不变、早返回 ⇒ 永远补不回来）。
+    // ⚠ 回填「活跃天数 / 当前连续天数 / Top 模型」这三格（现在都在 `#statsCards2`）。
+    //   ⚠ 2026-10-20 拆容器后，上面那个循环**只遍历第 1 组**的键 ⇒ 已经不会擦这三格了；
+    //     但这两行**必须保留**：卡片是 `renderStats` 每次**重建**的（值重置成占位），
+    //     若这轮之前刚发生过重建（切档 / 整页 refresh），重建后的空格只能靠这里补回。
+    //     「轻活每次都做」是本文件一贯的取舍（见 fillDayCards 里那段 sig 守卫的注释）。
     try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
-    // ⚠ 「Top 模型」同理（2026-10-18 看图才发现）：`statsCardsEntries(d)` 里那张卡的值**恒为 null**
-    //   （它的原料是 `d.by_model_detail` —— 在响应里，但那套 entries 不读它）
-    //   ⇒ 上面那个循环每 30 秒把它擦回 `—`（⚠ 实测：不补的话，过一轮轮询它就没了）。
+    // ⚠ 「Top 模型」同理（2026-10-18 看图才发现）：它的原料是 `d.by_model_detail`
+    //   —— 数据就在本响应里，只是 `statsCardsEntries2` **不读它**（值恒为 null）。
+    //   ⇒ 每轮用 `d` 填一次（fillTopModel 内部的算法：取 tokens 最多的模型）。
     //   ⚠ 缓存四格在 `#cacheCards`（另一个容器），不受这个循环影响，不用补。
     try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
     // ⚠⚠ 报表区（Top 榜 / 上游环）也必须跟着这轮一起更新（R2 抓到的"一页两个时刻"）。
@@ -12227,7 +12297,7 @@ let multCatalogFailed = false;
     //   "第一眼先出内容，不要为了拿最新数据先等一次网络往返"。
     admin(statsURL())
       // ⚠⚠ 顺序很要紧：**`renderStats` 必须排第一**。
-      //   它内部的 `$('statsCards').innerHTML = …` 会**重建卡片** ⇒
+      //   它内部的 `$('statsCards') / $('statsCards2').innerHTML = …` 会**重建卡片** ⇒
       //   若先填后画，刚填的值会被整块抹掉（实测：把 renderStats 放最后，
       //   「Top 模型」就变回 `—` —— 而它填的值其实一直是正确的）。
       // ⚠ 四条各用独立 try 且**把异常打出来**：原先它们串在同一 try 里、catch 是空的，
