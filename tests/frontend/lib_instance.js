@@ -112,7 +112,30 @@ async function startInstance(opts) {
     state_file: './data/state.json',
     admin: { checkin_log_path: './data/checkin-log.json', client_login_enabled: false },
     login: { open_browser: false, isolated: true },
+    // ⚠ 探针起的实例一律**关掉人机校验**（T10 起它默认开）。
+    //
+    // 理由：算术题是给**人**看的（本地 SVG，答案不落在响应里），自动脚本答不了。
+    // 开着它，所有走"注册 → 登录"的探针都会停在第一条 400 captcha_required 上
+    // —— 那不是"实现坏了"，而是"尺子量错了对象"。
+    //
+    // 这不等于"人机校验没被验"：
+    //   · 它被拦住/放行的**端点契约**由 internal/account/captcha_test.go 的 6 条覆盖
+    //   · 它"默认真的骑着"由下面这条断言覆盖 —— 探针用**不关它**的实例验一次
+    //     400 captcha_required（见 verify_captcha_e2e.js 的 --captcha-on）
+    //   · 其余三层（限速/请求体/会话上限）在关了它的实例上照常生效，正是
+    //     计划里的验收口径："不开验证码时其余三层仍拦得住"
+    //
+    // 想验开着的那条路：`opts.config = { console: { disable_captcha: false } }`。
+    console: { disable_captcha: true },
   }, opts.config || {});
+  // 深一层地被 opts.config 覆盖：Object.assign 只做浅合并，调用方给
+  // `{console:{disable_captcha:false}}` 会把上面这行整个换掉 —— 这是想要的
+  // （调用方明确表态时以它为准），但**必须**知道：给 `console` 只写一半
+  // （例如只想设 cookie_secure）会顺手把"关掉人机校验"这半边丢掉。
+  // 所以合并显式做一次，两边的键都保住。
+  if (opts.config && opts.config.console) {
+    cfg.console = Object.assign({ disable_captcha: true }, opts.config.console);
+  }
   fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify(cfg, null, 2));
 
   const logPath = path.join(tmp, 'server.log');
