@@ -232,3 +232,26 @@ commit `50c10c2`（控制台加渠道入口 section）的信息里写着：
 
 该 commit 的**代码改动本身是对的**（section 确实写进了 `webui.html`，门禁①读同一份文件、
 段数仍是 3 ⇒ 只加了 HTML 没碰脚本；`go build` 通过 ⇒ 已内嵌）。错的只是那句"已实测"。
+## 活进程实测②：运行时新建渠道的完整闭环（2026-10-20）
+
+用**界面会发出的那份请求体**（`webui-channels.html` 的 save() 拼的）打真实接口，端到端走到底：
+
+    POST /admin/channels  ⇒ HTTP 200  {"channel":{"id":"ch-98f5ed6f",…,"key_masks":["sk-ui-made"]…}}
+    GET  /admin/channels  ⇒ 列表含新渠道（id=ch-98f5ed6f，key_count=1，key_masks=sk-ui-made）
+    GET  /admin/channels/public-models ⇒ 含 pub-2（upstream=real-2，渠道=界面建的渠道），公开总数=2
+    POST /v1/chat/completions (model=pub-2) ⇒ HTTP 200
+    假上游实收: {"url":"/v1/chat/completions","auth":"Bearer sk-ui-made","model":"real-2"}
+
+⇒ 一条**运行时新建**的渠道：进入对外目录用的是**映射后的公开名**（R1+R2）✓；
+请求打到它、上游拿到的是**上游名**与**该渠道自己的 key**（R2+R3）✓；全程无账号池参与 ✓。
+
+### 这一跑抓到两个界面缺陷（都已修）
+
+1. **新建必然 400**：`channelReq.Keys` 是 **`[]string`**（纯字符串数组），我的页面发的是
+   `[{"key":…,"status":1}]` ⇒ 服务端 JSON 解码失败 ⇒ 400「请求体不是合法 JSON」。
+2. **key 列永远显示「—」**：列表**不回** `keys` 明细，只回 `key_masks[] + key_count`；
+   我读的是 `c.keys[0].mask`。
+
+两条都**只在用真实接口跑一遍时**才暴露 —— 进程内测试（handler 级）与只读自己的代码都看不见：
+前者走的是 Go 结构体而不是 HTTP JSON，后者读的是我以为的契约。教训：**前后端跨的那条线，
+必须用真实请求验一次**，因为那里没有编译器。
