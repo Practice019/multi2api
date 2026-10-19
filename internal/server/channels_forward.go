@@ -99,7 +99,10 @@ func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel stri
 		return zero, err
 	}
 
-	key := pickEnabledKey(cand.Channel)
+	// ⚠ 挑 key 必须走存储层（PickKeyIdx）：那里才有 round_robin 游标与"只挑启用"的判定。
+	// 这里曾经自己实现了一个"取第一个启用的"（pickEnabledKey），结果是：界面上写着轮询，
+	// 实际永远打同一把 key。挑 key 的规则只允许有一份。
+	keyIdx, key := h.pickKeyFor(cand.Channel)
 	if key == "" {
 		return zero, fmt.Errorf("渠道 %s 没有可用 key（全部停用或为空）", cand.Channel.Name)
 	}
@@ -131,6 +134,8 @@ func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel stri
 	}
 	cs, err := p.Chat(ctx, cred, rewritten)
 	if err != nil {
+		// ★ 上游说"这把 key 无效/没权限" ⇒ 自动禁用它（只禁这一把，不停整条渠道）。
+		h.autoDisableKeyOnAuthError(cand.Channel.ID, keyIdx, err)
 		return zero, err
 	}
 	return channelForward{
@@ -233,20 +238,42 @@ func (h *Handler) writeChannelError(w http.ResponseWriter, err error) {
 	writeOpenAIError(w, http.StatusBadGateway, "channel_error", err.Error())
 }
 
-// pickEnabledKey 取一个启用状态的 key；空 = 没得用（不是"返回空字符串当 key 用"）。
+// pickKeyFor 用存储层的挑 key 规则（含 round_robin 轮询），并返回下标（供失败后自动禁用）。
 //
-// 与 channelstore 的 PickKey 区别：这里不做 round_robin（那属于"多 key 轮换"的运维语义，
-// 见 channelstore.PickKey）。先取**第一个启用的**，保证"能跑通"这件事先确定下来。
-func pickEnabledKey(ch *channelstore.Channel) string {
-	if ch == nil {
-		return ""
+// 下标是唯一可定位的坐标：用户可能填了两条完全相同的 key，靠字符串反查会禁错条目。
+func (h *Handler) pickKeyFor(ch *channelstore.Channel) (int, string) {
+	if h.cfg.Channels == nil || ch == nil {
+		return -1, ""
 	}
-	for _, k := range ch.Keys {
-		if k.Status == channelstore.StatusEnabled && k.Key != "" {
-			return k.Key
-		}
+	return h.cfg.Channels.PickKeyIdx(ch)
+}
+
+// autoDisableKeyOnAuthError 上游判定"这把 key 无效/没权限"时，自动禁用**这一个** key。
+//
+// # 只对 401/403 生效，其余一律不禁
+//
+//   - 401/403 是**确定性**错误：同一把 key 再打一万次还是 401。留着它只会让每次请求
+//     先白试一次（在轮询里就是 1/N 的请求注定失败），用户的体感是"时好时坏"。
+//   - 429（限流）绝不能禁：额度按分钟滚动，禁掉之后要人去管理页手动救回来 ——
+//     把"等一分钟自己好"变成"人工介入"，是更糟的体验。
+//   - 5xx（上游故障）也不能禁：换一把 key 可能就好了，禁了等于自己减员。
+//
+// ⚠ 全禁光之后渠道会变成"没有可用 key"（502 channel_error）。这是**对的**：
+// 与其拿一把已知无效的 key 反复打，不如明确报错让用户去换 key（管理页可一键重新启用）。
+// 我们仍在响应里保留上游原文（见 writeChannelError），用户能看见"上游说 key 无效"。
+func (h *Handler) autoDisableKeyOnAuthError(channelID string, keyIdx int, err error) {
+	if h.cfg.Channels == nil || keyIdx < 0 {
+		return
 	}
-	return ""
+	ue, ok := gateway.AsUpstreamHTTPError(err)
+	if !ok {
+		return
+	}
+	if ue.Status != http.StatusUnauthorized && ue.Status != http.StatusForbidden {
+		return
+	}
+	_ = h.cfg.Channels.SetKeyStatus(channelID, keyIdx,
+		channelstore.StatusAutoDisabled, channelstore.ReasonUpstreamAuth)
 }
 
 // withUpstreamModel 把请求体里的 model 换成上游名，其余字段**原样保留**。

@@ -183,30 +183,13 @@ func (s *Store) TierCount(group, model string) int {
 //
 // 语义：只挑 Status==Enabled 的 key；全坏了返回 ""（调用方据此把渠道判为不可用）。
 // mode: "" / "random" 走随机；"round_robin" 用游标。
+//
+// ⚠ 实现在 PickKeyIdx（keyops.go），这里只是不要下标的薄封装 —— 挑 key 的规则**只允许有一份**。
+// 曾经在两处各写一遍（这里一份、转发层 pickEnabledKey 一份），结果转发层那份"只取第一个"
+// 把轮询彻底架空了：界面上写着轮询，实际永远打同一把 key。
 func (s *Store) PickKey(ch *Channel) string {
-	if ch == nil || len(ch.Keys) == 0 {
-		return ""
-	}
-	usable := make([]ChannelKey, 0, len(ch.Keys))
-	for _, k := range ch.Keys {
-		if k.Status == StatusEnabled && k.Key != "" {
-			usable = append(usable, k)
-		}
-	}
-	if len(usable) == 0 {
-		return ""
-	}
-	if len(usable) == 1 {
-		return usable[0].Key
-	}
-	if ch.ChannelInfo.KeySelectionMode == "round_robin" {
-		s.mu.Lock()
-		idx := s.rr[ch.ID] % len(usable)
-		s.rr[ch.ID] = (idx + 1) % len(usable)
-		s.mu.Unlock()
-		return usable[idx].Key
-	}
-	return usable[s.rand.Intn(len(usable))].Key
+	_, key := s.PickKeyIdx(ch)
+	return key
 }
 
 // newRand 造一个选路用的随机源。测试用 NewWithRand 注入固定种子，保证分布判据可复现；
