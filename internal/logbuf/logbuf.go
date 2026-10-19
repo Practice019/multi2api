@@ -87,6 +87,20 @@ type Entry struct {
 	// 但要改掉它，先得知道是谁 —— 这就是这两列存在的理由。
 	ClientIP string `json:"client_ip,omitempty"`
 	ClientUA string `json:"client_ua,omitempty"`
+	// Channel / UpstreamModel 这条请求走的是哪条**渠道**、以及被改写成哪个上游模型名（2026-10-20 加）。
+	//
+	// ⚠ 加它的直接动机（用户原话："而且这个有问题我用的是csg呢不是LOOMY"）：
+	//   他发的是渠道公开名 csg/deepseek-v4.1-flash-1017，但日志里只有 model 与 provider 两列，
+	//   而 provider 是账号池路径的概念（provider=loomy）—— 于是**无法证明请求到底走了渠道
+	//   还是回落到了账号池**。他看到的那些 loomy 记录其实是另一个 Python 客户端（client_ua
+	//   写着 AsyncOpenAI）的流量，他自己的 csg 请求在这份日志里一条都没有
+	//   —— 因为渠道分支当时**根本没写日志**。
+	//
+	// ⚠ 这两列是排障的关键分界：同样一个 200，走渠道和走账号池是两条完全不同的路
+	//   （不同的 key、不同的计费口径、不同的上游），日志里必须能分开。
+	//   空 = 本次没走渠道（账号池路径，或渠道未命中而回落）。
+	Channel       string `json:"channel,omitempty"`
+	UpstreamModel string `json:"upstream_model,omitempty"`
 }
 
 // Ring 定长环形缓冲。零值不可用，必须经 New 构造。
