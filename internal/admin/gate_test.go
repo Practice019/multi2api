@@ -202,16 +202,42 @@ func TestGate_SessionRoleSplit(t *testing.T) {
 		}
 	}
 
-	// 成员：白名单内可进
-	for _, path := range []string{"/admin/ui/manifest", "/admin/stats"} {
+	// 成员：白名单内可进（T8 起清单收窄到 apikeys 与 manifest）
+	for _, path := range []string{"/admin/ui/manifest"} {
 		if code, body := f.probeAs(t, f.member, path); code != http.StatusOK {
 			t.Errorf("成员访问白名单内的 %s 应当 200，实际 %d: %s", path, code, body)
 		}
 	}
 	// /admin/apikeys 在白名单里，但夹具没接 cfg.APIKeys ⇒ 路由未挂载（404）。
-	// 这里要判的是**门禁不拦成员**，路由是否存在是 T8 的事 —— 所以断言"不是 403"。
+	// 这里要判的是**门禁不拦成员**，路由是否存在由 apikey_role_split_test.go 覆盖
+	// ⇒ 所以断言"不是 403"。
 	if code, _ := f.probeAs(t, f.member, "/admin/apikeys"); code == http.StatusForbidden {
-		t.Errorf("成员访问 /admin/apikeys 不该被门禁拦（它在 memberPaths 里），实际 %d", code)
+		t.Errorf("成员访问 /admin/apikeys 不该被门禁拦（它在 memberRules 里），实际 %d", code)
+	}
+
+	// ★ T8 新收窄：/admin/stats 与 /admin/stats/series 从成员白名单里**撤出**。
+	//
+	// 理由：它们回的是 by_uid / by_provider 这类**管理面**聚合（按上游账号与
+	// 上游排行），给成员看等于把上游账号的昵称与用量端出去。成员要的"自己的
+	// 用量"应当按 key 归属过滤后单独给（后续切片），不是把管理面报表原样放行。
+	for _, path := range []string{"/admin/stats", "/admin/stats/series"} {
+		code, body := f.probeAs(t, f.member, path)
+		if code != http.StatusForbidden {
+			t.Errorf("★ 成员访问 %s 应当 403（管理面聚合不该给成员），实际 %d: %s", path, code, body)
+		}
+	}
+
+	// ★★ T8 修掉的真洞：**前缀白名单**会让 /admin/apikeys/rotate-admin 也命中
+	// `/admin/apikeys` —— 成员据此可以轮换**管理令牌**，而那个端点的回执里带着
+	// **完整新令牌**（见 apikeys.go 的 apiKeysRotateAdmin）⇒ 一次提权。
+	// 现在改成精确的 (方法, 路径) 对，这两条必须 403。
+	for _, path := range []string{"/admin/apikeys/rotate-admin", "/admin/apikeys/rotate-api-key"} {
+		code, body := f.probeAs(t, f.member, path)
+		if code != http.StatusForbidden {
+			t.Errorf("★★ 成员访问 %s 必须 403 ——\n"+
+				"它是**轮换管理凭据**的端点且回执含明文新令牌；前缀白名单时代成员能调它，"+
+				"等于一次提权。实际 %d: %s", path, code, body)
+		}
 	}
 
 	// ★ 成员：管理员专属端点必须 403，且 code 与 401 区分开
@@ -226,9 +252,9 @@ func TestGate_SessionRoleSplit(t *testing.T) {
 	}
 }
 
-// ④b 前端白名单必须**默认拒绝**：不在表里的一律管理员专属。
+// ④b 前端白名单必须**默认拒绝**：不在表里的一律管理员专属（T8 起还要求配对其方法）。
 //
-// 这条钉住 memberPaths 的语义：它是白名单，不是黑名单 ——
+// 这条钉住 memberRules 的语义：它是白名单，不是黑名单 ——
 // 加新端点的人不需要记得来更新它（漏更新只会"成员进不去"，不会"越权"）。
 func TestGate_MemberWhitelistIsDenyByDefault(t *testing.T) {
 	f := newGateFixture(t, true)

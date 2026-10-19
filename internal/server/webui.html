@@ -7873,33 +7873,45 @@ let loginProvider = '';
     // 不该等于交出管理台。现在分开显示、分开轮换。
     const ak = $('apiAdminKey');
     if (ak) {
-      const parts = [];
-      if (d && d.admin_token) {
-        parts.push(`<div style="margin-bottom:6px">管理令牌（登录控制台用，<b>admin_token</b>）：`
-          + `<code class="mono">${esc(d.admin_token)}</code>`
-          + ` <button id="btnRotateAdminToken" style="padding:2px 8px;font-size:12px">轮换</button>`
-          + ` <span class="dim" style="font-size:12px">轮换后**立即生效**，无需重启</span></div>`);
+      // ★ 成员：整块"管理钥匙"都不显示（T8）。
+      //
+      // 服务端对成员**根本不回**这两个掩码（见 admin/apikeys.go 的 apiKeysList），
+      // 所以这里不判也不会渲染出真值 —— 但会渲染出"未配置 —— 在 config.json
+      // 里加一行…"那段**指路文案**，让成员以为"这东西该由我配"。更糟的是轮换
+      // 按钮：成员点了会 403（门禁按精确规则挡掉），而界面上留着一个必然失败的
+      // 按钮是最差的设计。
+      if (d && d.member) {
+        ak.innerHTML = '<div>管理钥匙（<b>admin_token</b> / <b>api_key</b>）'
+          + '与账号池、上游配置一样属于管理员：当前账号看不到、也不需要。</div>';
       } else {
-        parts.push('<div style="margin-bottom:6px">管理令牌（<b>admin_token</b>）：'
-          + '<span class="dim">未配置 —— 没有它就只剩「账号口令登录」一条路。'
-          + '在 config.json 里加一行 <code>"admin_token": "&lt;随机串&gt;"</code>；'
-          + '它用于脚本/一条链接免口令进控制台（<code>/ui?token=…</code>）。</span></div>');
+          const parts = [];
+        if (d && d.admin_token) {
+          parts.push(`<div style="margin-bottom:6px">管理令牌（登录控制台用，<b>admin_token</b>）：`
+            + `<code class="mono">${esc(d.admin_token)}</code>`
+            + ` <button id="btnRotateAdminToken" style="padding:2px 8px;font-size:12px">轮换</button>`
+            + ` <span class="dim" style="font-size:12px">轮换后**立即生效**，无需重启</span></div>`);
+        } else {
+          parts.push('<div style="margin-bottom:6px">管理令牌（<b>admin_token</b>）：'
+            + '<span class="dim">未配置 —— 没有它就只剩「账号口令登录」一条路。'
+            + '在 config.json 里加一行 <code>"admin_token": "&lt;随机串&gt;"</code>；'
+            + '它用于脚本/一条链接免口令进控制台（<code>/ui?token=…</code>）。</span></div>');
+        }
+        if (d && d.admin_key) {
+          parts.push(`<div>对话密钥（调 <b>/v1</b> 接口，<code>api_key</code>）：`
+            + `<code class="mono">${esc(d.admin_key)}</code>`
+            + ` <button id="btnRotateAPIKey" style="padding:2px 8px;font-size:12px">轮换</button>`
+            + ` <span class="dim" style="font-size:12px">不限额不限速；完整值见「仪表盘 → API 接入信息」</span></div>`);
+        }
+        if (!parts.length) {
+          parts.push('<span class="dim">既没有 admin_token 也没有 api_key —— '
+            + '请用下方新建的 key 调用 /v1 接口。</span>');
+        }
+        ak.innerHTML = parts.join('');
+        const rbT = $('btnRotateAdminToken');
+        if (rbT) rbT.onclick = () => apiKeyRotateAdminToken(rbT);
+        const rbK = $('btnRotateAPIKey');
+        if (rbK) rbK.onclick = () => apiKeyRotateAPIKey(rbK);
       }
-      if (d && d.admin_key) {
-        parts.push(`<div>对话密钥（调 <b>/v1</b> 接口，<code>api_key</code>）：`
-          + `<code class="mono">${esc(d.admin_key)}</code>`
-          + ` <button id="btnRotateAPIKey" style="padding:2px 8px;font-size:12px">轮换</button>`
-          + ` <span class="dim" style="font-size:12px">不限额不限速；完整值见「仪表盘 → API 接入信息」</span></div>`);
-      }
-      if (!parts.length) {
-        parts.push('<span class="dim">既没有 admin_token 也没有 api_key —— '
-          + '请用下方新建的 key 调用 /v1 接口。</span>');
-      }
-      ak.innerHTML = parts.join('');
-      const rbT = $('btnRotateAdminToken');
-      if (rbT) rbT.onclick = () => apiKeyRotateAdminToken(rbT);
-      const rbK = $('btnRotateAPIKey');
-      if (rbK) rbK.onclick = () => apiKeyRotateAPIKey(rbK);
     }
     renderAPIKeys(d && d.keys ? d.keys : []);
   }
