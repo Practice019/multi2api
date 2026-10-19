@@ -242,6 +242,8 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		//                   哪个模型、优先级/权重多少"，真正连上游的是 Provider。
 		//   modelmap     —— 模型映射（公开名↔上游名 + 环检测），纯函数包，同样不是上游。
 		"channelstore": true, "modelmap": true,
+		//   modelvis    —— 对外可见模型的计算（能力索引 ∩ 令牌白名单 ∩ 反向映射），纯函数、零依赖。
+		"modelvis": true,
 	}
 
 	entries, err := os.ReadDir("../../internal")
