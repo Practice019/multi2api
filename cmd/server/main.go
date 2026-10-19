@@ -1302,7 +1302,12 @@ func main() {
 		AuthDir:  cfg.AuthDir,
 		APIKeys:  apiKeysStore,  // /admin/apikeys 管理端点
 		Channels: channelsStore, // /admin/channels 管理端点（同样「未注入就不注册路由」）
-		APIKey:   cfg.APIKey,    // 管理钥匙掩码展示（与仪表盘统一）
+		// 同一份工厂也交给管理台：「模型自动发现」要用它问上游有哪些模型。
+		// 类型取自 gateway 契约（不是具体上游）——见 admin.go 里那段该用 gateway 扩展点的注释。
+		ChannelProvider: func(id, baseURL string) gateway.Provider {
+			return openaicompat.NewOpenAICompat(id, baseURL)
+		},
+		APIKey: cfg.APIKey, // 管理钥匙掩码展示（与仪表盘统一）
 		// ⚠ 门禁令牌与 api_key **独立**（用户要求：门禁 token 不能和 api 一样）。
 		// 见 internal/admin 的 adminTokenMatches 注释：改造前门禁认 api_key，
 		// 于是"给客户端配一把对话 key"等于"交出管理台"。
