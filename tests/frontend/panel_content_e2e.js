@@ -24,6 +24,9 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+// 探针自带夹具密钥：T5/T7 起产品不再把凭据注入页面（那是安全改造的目标之一），
+// 页内 fetch('/v1/models') 必须由探针自己带 key —— 见 lib_cdp.injectProbeKey。
+const { injectProbeKey: injectKey, pasteConsoleKey } = require('./lib_cdp.js');
 const PORT = 9260;
 const BASE = process.env.PANEL_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = require('os').tmpdir() + '/chrome-panelcontent';  // 绝对路径（原为相对 cwd，跨目录执行会串台）
@@ -104,12 +107,25 @@ const PANELS = [
     await send('Runtime.enable');
     await send('Page.navigate', { url: BASE });
     await sleep(4000);
+    // ⚠ 注入必须在新文档建立**之后**（紧跟 navigate 的赋值会被随后的导航冲掉）。
+    // 页内 fetch 用的密钥是**探针自己的夹具**：T5/T7 起产品不再注入凭据，见 lib_cdp.injectProbeKey。
+    if (!(await injectKey(send, undefined, BASE))) {
+      console.error('  ⚠ 环境没给探针密钥（WB2API_PROBE_KEY / WB2API_PROBE_TOKEN）⇒ 页内 /v1/models 是空目录，断言会假红');
+    }
+
 
     const ev = async (x) => {
       const r = await send('Runtime.evaluate', { expression: x, returnByValue: true, awaitPromise: true });
       if (r.result && r.result.exceptionDetails) throw new Error('页面异常: ' + JSON.stringify(r.result.exceptionDetails).slice(0, 200));
       return r.result && r.result.result ? r.result.result.value : undefined;
     };
+    // 像人一样把密钥粘进顶栏并点「应用」。
+    // ⚠ 必须做：T5/T7 起控制台不再由服务端注入 api_key（安全改造的目标之一），
+    // 于是依赖 /v1 的面板（模型目录 / 对话测试 / 倍率预览）默认是空的 —— 不粘就
+    // 断「面板有内容」会假红，而那个红是**契约变了**，不是产品坏了。
+    // 见 lib_cdp.pasteConsoleKey。
+    const pasted = await pasteConsoleKey(ev, undefined, BASE);
+    if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 下面依赖 /v1 的断言会假红');
 
     // 先确认实例可达（避免在死端口上得出"面板空白"的假结论）
     const alive = await ev('typeof window.__wb2api__ === "object"');
@@ -189,7 +205,7 @@ const PANELS = [
           var x = new XMLHttpRequest();
           try {
             x.open('GET', ${JSON.stringify(p.api)}, false);
-            x.setRequestHeader('Authorization', 'Bearer ' + (window.__WB2API_KEY__ || ''));
+            x.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
             x.send(null);
             if (x.status !== 200) return -1;
             var d = JSON.parse(x.responseText);

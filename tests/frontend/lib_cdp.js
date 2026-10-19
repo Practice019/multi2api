@@ -72,6 +72,171 @@ function withToken(url, token) {
   return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(tok);
 }
 
+// probeApiKey —— 探针**自己**的 api_key（页内 fetch 用），不是产品注入的凭据。
+//
+// # 为什么需要它
+//
+// 改造前控制台由服务端注入 `window.__WB2API_KEY__`，几个探针直接拿它在页内
+// `fetch('/v1/models')`。T5/T7 起服务端**从不**注入凭据（本次安全改造的目标之一）
+// ⇒ 那个变量恒为 undefined ⇒ 探针带着空 Bearer 打后端 ⇒ 401 ⇒ 0 条 ⇒ 报
+// "至少有一个上游分组（0）"。
+//
+// ⚠ 实测确认那是**探针前提过期**而非产品回归：同一批端点在改造前后回执逐字相同
+//   （/admin/ui/manifest、/admin/stats、/admin/accounts 全一致）。
+//
+// 取值顺序：
+//   ① opts.probeKey 显式给的字符串
+//   ② process.env.WB2API_PROBE_KEY   —— 探针脚本自己设的
+//   ③ process.env.WB2API_PROBE_TOKEN —— lib_instance 起实例时写的就是它，
+//      而探针实例里 `api_key` 与 `admin_token` 同值（见 lib_instance 的合成 config）
+//   ④ 空串（不注入；调用方自己想办法）
+//
+// ⚠ 变量名刻意**不复用** `__WB2API_KEY__`：产品一旦重新注入凭据就是安全事故，
+//   两个名字分开，代码审阅时"产品又注入了"一眼可见。
+// injectProbeKey(send) —— 给**自带 CDP 实现**的探针用的注入器。
+//
+// # 为什么需要（与 probeApiKey 同源，但是给另一族探针）
+//
+// 探针分两族：走 `withChrome` 的（共享层自动注入）与自带 CDP 引导段的
+// （`verify_models_grouped` / `verify_info_modal` / `verify_model_provider_filter`
+// / `panel_content_e2e` …）。后者在页内 `fetch('/v1/models')` 时读
+// `window.__WB2API_KEY__`，而 T5/T7 起产品**不再**注入它 ⇒ 空 Bearer ⇒ 401 ⇒
+// 0 条模型 ⇒ 报"至少有一个上游分组（0）"（实测：同一批端点回执逐字相同，
+// 所以那不是产品回归，是探针前提过期）。
+//
+// 这个函数把**探针自己的**夹具变量写进页面（名字刻意不同，见 probeApiKey 的注释）。
+// 用法（在 `Page.navigate` + 等待骨架之后、任何读模型的步骤之前）：
+//
+//	await injectProbeKey(send);          // 自带 send 的探针
+//
+// 返回 true 表示注入了（环境里没给密钥时返回 false，探针应把它当成硬失败，
+// 否则会静默地验一个空目录 —— 那正是本仓库反复出现过的"假绿"）。
+// pasteConsoleKey(ev, key) —— 像人一样把对话密钥粘进顶栏并点「应用」。
+//
+// # 为什么需要（T5/T7 之后控制台自己没有密钥了）
+//
+// 改造前控制台由服务端注入 api_key，`/v1/models` 随页面加载就自动有数据；
+// 现在按设计**必须有人粘一次**（顶部那个「对话密钥」框，刻意不写 localStorage）。
+// 于是"模型目录 / 对话测试 / 倍率"这些依赖 `/v1` 的面板，在新控制台上默认是
+// **空**的 —— 这不是坏，是契约变了：探针要么走人的路径（粘一次），要么就
+// 别断言"面板里有数据"。
+//
+// 本函数走人的路径：写 `#key.value` + 点 `#conn`（那正是 `wireTopBar` 接的
+// 那个按钮：它设内部 KEY、清 `/v1/models` 缓存、然后 refresh()）。
+//
+// ev 是探针自己的求值函数（`await ev(expr)`）。返回 'ok' / 'no-input' / 'no-btn'，
+// 探针应把非 ok 当硬失败（否则又是一次"量到空面板还以为绿了"的假绿）。
+// consoleSource(ev) —— 取**浏览器里那份**控制台源码（已认证，含内联脚本）。
+//
+// # 为什么不能用裸 `http.get('/ui')`
+//
+// T5 起未认证的 `/ui` 回 302 到登录页；而很多探针的静态检查是
+//
+//	const html = await get(BASE);        // get() 是 http.get，**不跟 302**
+//	ok(/function showInfo/.test(html), 'showInfo 已定义');
+//
+// 于是它们拿到的要么是空的 302 body、要么是登录页 —— 静态断言全红；更糟的是
+// 反向断言（`!/alert\(/`）会**空洞通过**：空字符串里当然没有 alert。这是本仓库
+// 反复吃过的那类亏（判据在空输入上恒真），所以这里既给正确来源，也顺手让调用方
+// 能自检来源不是空的（见下面的 assertConsole 用法）。
+//
+// 走浏览器取的好处：那份 HTML 是**实际渲染的**（cookie/重定向/注入都已完成），
+// 不需要探针自己重放鉴权。
+async function consoleSource(ev) {
+  const html = await ev('document.documentElement.outerHTML');
+  return typeof html === 'string' ? html : '';
+}
+async function pasteConsoleKey(ev, key, url) {
+  const k = key || probeApiKey(undefined, url);
+  if (!k) return 'no-key';
+  const r = await ev(`(function(){
+    var el = document.getElementById('key');
+    if (!el) return 'no-input';
+    el.value = ${JSON.stringify(k)};
+    var b = document.getElementById('conn');
+    if (!b) return 'no-btn';
+    b.click();
+    return 'ok';
+  })()`);
+  return r;
+}
+async function injectProbeKey(send, explicit, url) {
+  const pk = probeApiKey(explicit, url);
+  if (!pk) return false;
+  await send('Runtime.evaluate', {
+    expression: 'window.__PROBE_API_KEY__ = ' + JSON.stringify(pk),
+    returnByValue: true,
+  });
+  return true;
+}
+// consoleHtmlAuthed(url, token) —— 取控制台源码，**自己完成 token 换手**。
+//
+// # 为什么需要它（静态检查也过登录这关）
+//
+// 探针的"静态检查"段（读源码文本断 showInfo 在不在、有没有 alert(）跑在起浏览器
+// **之前**，所以拿不到浏览器里那份已认证的 HTML。它原先直接 `http.get('/ui')`，
+// 而 T5 起未认证的 /ui 回 **302 到登录页** ⇒ 静态断言全红；更糟的是反向断言
+// （`!/alert\(/`）会**空洞通过** —— 空字符串里当然没有 alert。
+//
+// 本函数按产品的真实路径走：带 `?token=` 请求 → 拿 `Set-Cookie` → 用该 Cookie
+// 再取干净的 /ui。⚠ 只跟**一次**，不递归（跟产品的 302 语义一致）。
+//
+// 返回 body 字符串；调用方**必须**自检"这真是控制台"（例如含 id="nav"），
+// 否则结论在空输入上恒真 —— 那是本仓库反复吃过的那类亏。
+async function consoleHtmlAuthed(url, token) {
+  const tok = token || probeApiKey(undefined, url);
+  let cookie = '';
+  const hasQ = url.indexOf('token=') >= 0;
+  if (hasQ || tok) {
+    const first = hasQ ? url
+      : url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(tok);
+    const r1 = await httpGetOnce(first, {});
+    for (const c of (r1.headers['set-cookie'] || [])) {
+      const m = String(c).match(/^(wb2api_admin_token=[^;]+)/);
+      if (m) cookie = m[1];
+    }
+  }
+  const clean = url.replace(/[?&]?token=[^&#]*/, '').replace(/\?$/, '');
+  const r2 = await httpGetOnce(clean, cookie ? { Cookie: cookie } : {});
+  return r2.body;
+}
+
+// httpGetOnce(u, headers) —— 单次 GET，**不跟重定向**，返回 {status, headers, body}。
+// （Node 的 http.get 默认就不跟；这里显式写出来是为了让"为什么能拿到 302 的
+//   Set-Cookie"这件事在代码里可读。）
+function httpGetOnce(u, headers) {
+  return new Promise((res, rej) => {
+    const req = http.get(u, { headers: headers || {} }, (r) => {
+      const c = [];
+      r.on('data', (x) => c.push(Buffer.isBuffer(x) ? x : Buffer.from(x)));
+      r.on('end', () => res({
+        status: r.statusCode,
+        headers: r.headers,
+        body: Buffer.concat(c).toString('utf8'),
+      }));
+    });
+    req.on('error', rej);
+  });
+}
+
+function probeApiKey(explicit, url) {
+  if (typeof explicit === 'string' && explicit) return explicit;
+  const env = process.env.WB2API_PROBE_KEY || process.env.WB2API_PROBE_TOKEN;
+  if (env) return env;
+  // ④ 从探针自己的 URL 里取 `token=`。
+  //
+  // 为什么这一步是安全的：探针实例（lib_instance 起的那种）里 `api_key` 与
+  // `admin_token` 写成**同一个值**，而 URL 上的 `?token=` 正是那个值 ⇒ 拿它当
+  // /v1 的 Bearer 是自洽的。⚠ 只用于探针夹具，产品代码里绝不允许这样互相顶替。
+  //
+  // 没有它的话，那些"自带 CDP、只认一个 *_URL"的探针在套件里（没人设环境变量时）
+  // 会退化成空 Bearer ⇒ 静默量到空目录 ⇒ 假红/假绿 —— 正是本仓库反复吃过的那类亏。
+  if (typeof url === 'string' && url) {
+    const m = url.match(/[?&]token=([^&#]+)/);
+    if (m) return decodeURIComponent(m[1]);
+  }
+  return '';
+}
 function httpGet(u) {
   return new Promise((res, rej) => {
     http.get(u, (r) => {
@@ -193,6 +358,29 @@ async function withChrome(opts, fn) {
     }
     console.log('  骨架就绪（等待 ' + waited + 'ms）');
 
+    // ③ 给页面注入**探针自己的** api_key 夹具。
+    //
+    // # 为什么需要（T5/T7 之后探针的旧前提失效）
+    //
+    // 改造前控制台由服务端注入 `window.__WB2API_KEY__`，于是好几个探针直接用它
+    // 在页内 `fetch('/v1/models')`（`Authorization: Bearer <那个变量>`）。
+    // T5/T7 起服务端**从不**注入凭据（这正是本次安全改造的目标之一）⇒ 那个变量
+    // 恒为 undefined ⇒ 探针带着空 Bearer 打后端 ⇒ 401 ⇒ 拿到 0 条 ⇒ 报
+    // "至少有一个上游分组（0）" 这类红。
+    //
+    // ⚠ 那是**探针的前提过期**，不是产品回归（实测：两边同一批端点回执逐字相同，
+    //   见 docs/newapi-parity.md）。修法不是把密钥塞回产品页，而是探针自己带夹具：
+    //   变量名刻意叫 `__PROBE_API_KEY__`（而不是复用旧名），这样"产品又注入凭据了"
+    //   与"探针自带了夹具"在代码里一眼可辨 —— 旧名一旦重新出现就是安全事故。
+    //
+    // ⚠ 只对 /ui 注入（与 withToken 同一范围）；取值顺序见 probeApiKey()。
+    if (opts.probeKey !== false) {
+      const pk = probeApiKey(opts.probeKey, navURL);
+      if (pk && /\/ui(\?|#|$)/.test(new URL(navURL).pathname + (new URL(navURL).search || ''))) {
+        await ev('window.__PROBE_API_KEY__ = ' + JSON.stringify(pk));
+      }
+    }
+
     return await fn({ send, ev, errs, dialogs, shot, sleep, outDir });
   } finally {
     try { if (ws) ws.close(); } catch { }
@@ -221,4 +409,9 @@ async function showPanel(ev, key, ms) {
   await sleep(ms || 900);
 }
 
-module.exports = { withChrome, until, showPanel, sleep, httpGet };
+module.exports = {
+  probeApiKey,
+  consoleHtmlAuthed,
+  consoleSource,
+  pasteConsoleKey,
+  injectProbeKey, withChrome, until, showPanel, sleep, httpGet };

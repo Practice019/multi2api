@@ -20,6 +20,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+// 探针自带夹具密钥：T5/T7 起产品不再把凭据注入页面（那是安全改造的目标之一），
+// 页内 fetch('/v1/models') 必须由探针自己带 key —— 见 lib_cdp.injectProbeKey。
+const { injectProbeKey: injectKey, pasteConsoleKey, consoleHtmlAuthed } = require('./lib_cdp.js');
 const PORT = 9296;
 const BASE = process.env.INFO_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = path.join(os.tmpdir(), 'chrome-info');
@@ -48,8 +51,14 @@ function stripComments(s) {
 
   // ---- 1) 静态：代码里不该有 alert( ----
   console.log('[1] 静态检查（剥注释）');
-  const html = await get(BASE);
+  // ⚠ 必须取**已认证**的控制台源码：T5 起未认证的 /ui 回 302 到登录页，而裸
+  // `http.get` 不跟重定向 ⇒ 静态断言会因拿到登录页而全红，反向断言（`!/alert\(/`）
+  // 还会**空洞通过**（空字符串里当然没有 alert）。见 lib_cdp.consoleHtmlAuthed。
+  const html = await consoleHtmlAuthed(BASE);
   const code = stripComments(html);
+  // 来源自检：拿到的必须真是控制台（而不是登录页/空体），否则后面的结论都不算数。
+  ok(/id="infoModal"/.test(code) || /function showInfo/.test(code),
+    '静态检查的来源是控制台本体（不是登录页/空体，长度 ' + code.length + '）');
   ok(!/\balert\s*\(/.test(code), '代码里没有 alert() 调用' +
     (/\balert\s*\(/.test(code) ? '（实际: ' + /\balert\s*\([^)]*\)/.exec(code)[0] + '）' : ''));
   ok(/function showInfo/.test(code), 'showInfo 已定义');
@@ -82,11 +91,24 @@ function stripComments(s) {
     await send('Page.enable'); await send('Runtime.enable');
     await send('Page.navigate', { url: BASE });
     await sleep(4000);
+    // ⚠ 注入必须在新文档建立**之后**（紧跟 navigate 的赋值会被随后的导航冲掉）。
+    // 页内 fetch 用的密钥是**探针自己的夹具**：T5/T7 起产品不再注入凭据，见 lib_cdp.injectProbeKey。
+    if (!(await injectKey(send, undefined, BASE))) {
+      console.error('  ⚠ 环境没给探针密钥（WB2API_PROBE_KEY / WB2API_PROBE_TOKEN）⇒ 页内 /v1/models 是空目录，断言会假红');
+    }
+
     const ev = async (x) => {
       const r = await send('Runtime.evaluate', { expression: x, returnByValue: true, awaitPromise: true });
       if (r.result && r.result.exceptionDetails) return 'EXC';
       return r.result && r.result.result ? r.result.result.value : undefined;
     };
+    // 像人一样把密钥粘进顶栏并点「应用」。
+    // ⚠ 必须做：T5/T7 起控制台不再由服务端注入 api_key（安全改造的目标之一），
+    // 于是依赖 /v1 的面板（模型目录 / 对话测试 / 倍率预览）默认是空的 —— 不粘就
+    // 断「面板有内容」会假红，而那个红是**契约变了**，不是产品坏了。
+    // 见 lib_cdp.pasteConsoleKey。
+    const pasted = await pasteConsoleKey(ev, undefined, BASE);
+    if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 下面依赖 /v1 的断言会假红');
 
     await ev(`(function(){
       var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
@@ -108,7 +130,7 @@ function stripComments(s) {
       return new Promise(function(resolve){
         var req = new XMLHttpRequest();
         req.open('GET', '/admin/accounts', false);
-        req.setRequestHeader('Authorization', 'Bearer ' + (window.__WB2API_KEY__ || ''));
+        req.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
         req.send(null);
         var accs = (JSON.parse(req.responseText).accounts || []);
         var good = [];
@@ -116,7 +138,7 @@ function stripComments(s) {
           var r2 = new XMLHttpRequest();
           try {
             r2.open('GET', '/admin/travel/status?uid=' + encodeURIComponent(a.uid), false);
-            r2.setRequestHeader('Authorization', 'Bearer ' + (window.__WB2API_KEY__ || ''));
+            r2.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
             r2.send(null);
             if (r2.status === 200) good.push(a.uid);
           } catch (e) {}
