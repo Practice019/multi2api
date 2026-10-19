@@ -99,7 +99,23 @@ R3 可注册 · R4 反批量防御。逐项对照（出处 = new-api 文件:行�
 |---|---|---|---|
 | `localExempt`：监听回环 + 上一跳回环 + 无转发头 ⇒ **直接放行** | `internal/admin/admin.go:644/669`（改造前） | "错令牌"与"不带令牌"是同一类请求 ⇒ 本机任何进程都是管理员（用户报障 ③） | ✅ **已删**（T4）：门禁改为「会话 或 admin_token」一律校验，按角色分流（`principalOf` / `memberPaths` / `canAccess`） |
 | `/ui` 把 `api_key` **明文注入页面 HTML** | `internal/server/webui.go:84`（`injectKey`，改造前） | 打开页面即拿到 /v1 钥匙 ⇒ leak 不需要"偷" | ✅ **已删**（T5）：渲染器不再接收任何凭据；未认证给登录页；`?token=` 换成 HttpOnly cookie 后 302（凭据不进 URL 历史） |
-| 前端把凭据存 localStorage（`wb2api.key`） | `internal/server/webui.html:1764/11876/11888` | 轮换后页面还用旧值 ⇒ 表现成"必须重启"（用户报障 ②） | ⏳ T7 |
+| 前端把凭据存 localStorage（`wb2api.key`） | `internal/server/webui.html:1764/11876/11888` | 轮换后页面还用旧值 ⇒ 表现成"必须重启"（用户报障 ②） | ✅ **已删**（T7）：页面不再持有任何凭据，身份走 HttpOnly 会话 cookie |
+| `GET /status` 用 **api_key** 鉴权却回账号池画像 | `internal/server/handler.go`（改造前 `withAuth(h.status)`） | 发给客户端的对话钥匙能读到昵称/积分/上游熔断态 | ✅ **已改**（T7）：改成控制台身份（会话或 admin_token）且必须**管理员**；api_key ⇒ 401，成员 ⇒ 403 `forbidden_role` |
+
+**T7 收口后的实测**（隔离实例 + 本次构建的探针二进制）：
+
+```
+首次注册                 → role=10 bootstrap=true（第一个账号是管理员）
+第二次注册               → role=1（成员）
+成员会话   GET /status   → 403 {"code":"forbidden_role"}          ★
+api_key    GET /status   → 401 {"code":"auth_required"}           ★（改造前是 200！）
+admin_token GET /status  → 200
+管理员会话 GET /status   → 200
+GET /ui        无凭据    → 200 登录页（10126 B，含 id="form"，不含 probeSession）
+GET /ui        管理员会话 → 200 控制台外壳（527506 B，含 probeSession，正文无密钥）
+GET /ui?token=<正确>     → 302 Location:/ui + Set-Cookie wb2api_admin_token（Path=/ Max-Age=43200 HttpOnly SameSite=Lax）+ Cache-Control: no-store
+GET /ui?token=<错误>     → 200 登录页（与"无凭据"逐字节相同）
+```
 
 **T5 收口后的实测**（隔离实例，真机 curl 等价调用）：
 

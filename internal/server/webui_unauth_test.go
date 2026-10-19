@@ -43,28 +43,55 @@ func TestUnauthorizedHidesWholeConsole(t *testing.T) {
 		t.Error("主容器（<main>）没有 id —— 脚本无从在未授权时把它收起来")
 	}
 
-	// ② 未授权分支必须**收起**控制台，而不是只加一段提示。
+	// ② 「没有身份时收起控制台」这件事必须**仍然存在于某处** —— 但载体变了。
 	//
-	// 判据：`hideConsole()` 调用必须存在；且未授权分支里要有它。
+	// ⚠ 2026-10-19（T7）：旧的载体是 boot() 里那个
+	//
+	//	} else {
+	//	  // 服务端**没有**注入任何凭据 ⇒ 本次访问未获授权
+	//	  hideConsole();
+	//
+	// 分支。T7 起这条路**走不到了**：服务端不再把未登录的人送到这个页面
+	// （送去登录页），所以"未授权也能看见面板"这个原始故障形态从根上消失。
+	//
+	// 但"会话中途失效"（登出 / 改口令 / 被禁用 / cookie 到期）时面板还在屏幕上
+	// —— 那一刻仍然必须收起控制台。所以判据改成：**会话失效的处置路径**里
+	// 必须调 hideConsole()，而不是只看某个特定分支还在不在。
 	if !strings.Contains(src, "function hideConsole()") {
-		t.Fatal("没有 hideConsole() —— 未授权时无法隐藏整块控制台")
+		t.Fatal("没有 hideConsole() —— 会话失效时无法隐藏整块控制台")
 	}
-	unauthIdx := strings.Index(src, "} else {\n      // 服务端**没有**注入任何凭据")
-	if unauthIdx < 0 {
-		t.Fatal("找不到未授权分支（注释被改了？）")
+	// probeSession 里 401 ⇒ 去登录页（而不是留一屏点不动的面板）；
+	// refresh 里 401/403 ⇒ 收起控制台 + 说清原因。
+	for _, anchor := range []string{
+		"async function probeSession()",
+		"toLogin('expired')",
+	} {
+		if !strings.Contains(src, anchor) {
+			t.Errorf("★ 找不到会话失效的处置路径（%q）——\n"+
+				"旧模型那条「未授权分支」已被 T7 删除，新模型必须有一条等价的\n"+
+				"「没有有效会话 ⇒ 别让用户面对一屏点不动的面板」路径。", anchor)
+		}
 	}
-	// 在未授权分支的前 60 行里必须出现 hideConsole()。
-	tail := src[unauthIdx:]
-	if end := strings.Index(tail, "\n    }\n"); end > 0 {
-		tail = tail[:end]
-	} else if len(tail) > 4000 {
-		tail = tail[:4000]
+	// refresh 的失败分支同样要收起控制台（probeSession 之外的兜底）。
+	//
+	// ⚠ 判据要在锚点的**两侧**找 hideConsole()：那条分支里 `hideConsole()`
+	// 在 `setDot(...)` **之前**（先收面板再报状态），只往后找必然找不到。
+	fi := strings.Index(src, "登录状态已失效 · 请重新登录")
+	if fi < 0 {
+		t.Fatal("refresh 的 401 分支不见了（它的文案是「登录状态已失效 · 请重新登录」）")
 	}
-	if !strings.Contains(tail, "hideConsole()") {
-		t.Error("★ 未授权分支里没有 hideConsole() ——\n" +
-			"用户报的正是" + "「token 没授权，设置页却还在那里」" + "：\n" +
-			"只加提示、不收起面板的话，用户会以为" + "「能看见就能改」" + "，\n" +
-			"而每点一下都 403，看不出到底发生了什么。")
+	winLo, winHi := fi-900, fi+220
+	if winLo < 0 {
+		winLo = 0
+	}
+	if winHi > len(src) {
+		winHi = len(src)
+	}
+	if !strings.Contains(src[winLo:winHi], "hideConsole()") {
+		t.Error("★ refresh 的认证失败分支没有收起控制台 ——\n" +
+			"用户报的正是「token 没授权，设置页却还在那里」：\n" +
+			"只加提示、不收起面板的话，用户会以为「能看见就能改」，\n" +
+			"而每点一下都失败，看不出到底发生了什么。")
 	}
 
 	// ③ hideConsole() 本身必须真的隐藏主容器。

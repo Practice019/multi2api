@@ -249,7 +249,7 @@ func TestChatLogsErrorRow(t *testing.T) {
 		return 402, `{"code":1,"msg":"余额不足"}`, false
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
-	h := NewHandler(Config{Pool: p, Upstream: up})
+	h := NewHandler(Config{Pool: p, Upstream: up, AdminToken: statusTestToken})
 	out := captureStdout(t, func() {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
@@ -280,7 +280,9 @@ func TestHealthzDoesNotLogTableRow(t *testing.T) {
 		rec2 := httptest.NewRecorder()
 		h.ServeHTTP(rec2, httptest.NewRequest("GET", "/v1/models", nil))
 		rec3 := httptest.NewRecorder()
-		h.ServeHTTP(rec3, httptest.NewRequest("GET", "/status", nil))
+		// ⚠ /status 在 T7 改成控制台身份（会话 / admin_token）；这条测试只关心
+		// 它的响应不进访问日志的表头，所以必须真的**通过**门禁再断言。
+		h.ServeHTTP(rec3, statusReq(t))
 	})
 	if strings.Contains(out, "| #") {
 		t.Errorf("healthz/models/status must not emit table rows:\n%s", out)
