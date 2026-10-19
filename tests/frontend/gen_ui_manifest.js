@@ -289,13 +289,18 @@ ok(extHits === 0, '没有外部 http(s) 资源引用（实际 ' + extHits + ' �
 
 // ============================== emoji：两层强度 ==============================
 //
-// # 规则原文与它的范围（出处不止原位注释那两行）
-//   webui.html:124   /* 选中指示条：纯 CSS 画，不引入任何图标字体或 emoji */
-//   webui.html:5709  // 纯文字 + CSS 选中指示条，不使用任何图标字体或 emoji。
-//   .task/frontend-decouple/protocol.md:27、两份 SOUL.md、docs/progress-log.md:606
-//   mutation-sweep-3.md:10 的 S2 变异（注入 ✅）就是照这条写的
-// ⇒ "无 emoji" 在本仓库是**全仓库**规则；既有三条分区级守卫
-//   （dashboard_gen / gen_settings_layout / nav_e2e）只是**覆盖面**没铺满，不是口径更窄。
+// # 规则原文：**两句，口径各归各的层**（别只引第一句）
+//   ① 图标位（本判据第 1 层）—— 原位注释：
+//      webui.html:124   /* 选中指示条：纯 CSS 画，不引入任何图标字体或 emoji */
+//      webui.html:5709  // 纯文字 + CSS 选中指示条，不使用任何图标字体或 emoji。
+//   ② 散文位（本判据第 2 层）—— .task/frontend-decouple/protocol.md:27 的原话是
+//      「无 emoji（**全仓库硬规则**）」；另有两份 SOUL.md、docs/progress-log.md:606、
+//      mutation-sweep-3.md:10 的 S2 变异（它注入 ✅，就是照这条写的）。
+// ⚠ 只引 ① 会被读成"**只要不在图标位就能用 emoji**" —— 这正是 262b796 那批派生物
+//   被注入时谁都没看出问题的原因（大家都以为规则只管图标位）。所以两条断言文案里
+//   两句都要在，且各自点到出处。
+// ⇒ 既有三条分区级守卫（dashboard_gen / gen_settings_layout / nav_e2e）只是**覆盖面**
+//   没铺满，不是口径更窄。
 //
 // # 两层强度，在同一份源码上同时跑
 //   第 1 层【图标位，无条件红】<nav> / <h1>-<h3> / <th> / <button> 的**可见文本**：
@@ -427,7 +432,8 @@ for (const z of zones) {
   }
 }
 ok(iconHits.length === 0,
-  '[icon位] 导航/分区标题/列头/按钮文本里没有 emoji（规则原文：不引入图标字体或 emoji）'
+  '[icon位] 导航/分区标题/列头/按钮文本里没有 emoji —— 依据原位规则 webui.html:124 / 5709「不引入任何图标字体或 emoji」。'
+  + '⚠ 这条**不是**"只要不在图标位就能用 emoji"：全仓库硬规则是「无 emoji」（.task/frontend-decouple/protocol.md:27），散文位约束见下一条'
   + (iconHits.length ? ' —— 命中 ' + iconHits.length + ' 处：' + describeHits(iconHits) : ''));
 
 // ===================== 第 2 层：散文位（必须来自登记表） =====================
@@ -462,7 +468,8 @@ ok(htmlProseText.length > 1000 && jsProseText.length > 1000,
 const registeredChars = new Set(Object.keys(RENDER_MARKER_EXEMPT));
 const unregistered = proseHits.filter(h => !registeredChars.has(h.ch));
 ok(unregistered.length === 0,
-  '[散文位] emoji 必须全部来自登记表（每字符带理由 + 仍在使用自检；登记表当前为空 ⇒ 任何 emoji 都红）'
+  '[散文位] emoji 必须全部来自登记表（每字符带理由 + 仍在使用自检）；登记表当前为空 ⇒ 任何 emoji 都红 —— '
+  + '依据 .task/frontend-decouple/protocol.md:27「无 emoji（全仓库硬规则）」、两份 SOUL.md、docs/progress-log.md:606'
   + (unregistered.length ? ' —— 未登记 ' + unregistered.length + ' 处：' + describeHits(unregistered) : ''));
 
 // 登记表自检：登记了却没人用 = 防线腐烂，同样红（表空时本循环不执行）
