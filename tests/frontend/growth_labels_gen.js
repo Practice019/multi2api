@@ -27,7 +27,7 @@ function creditsOf(uid) {
 
 const COLS = {
     travel: 8,   // 猫猫旅行
-    growth: 99,  // 成长计划（变异：列数漂移）
+    growth: 6,   // 成长计划（精简：额度/能量、连登/补签、待完成/可得、可领 合并）
     // ⚠ jobs / logs 已移除（2026-10-19）：任务调度页换成卡片网格、请求日志页换成
     //   grid 表格（照抄参考项目 Agent2API），两处都不再有 `<table>` 列数，
     //   HTML 里的 `__COLS_JOBS__` / `__COLS_LOGS__` 占位符也一并删了 ⇒ 留着就是死字段。
