@@ -341,6 +341,33 @@ function makeClient(base) {
     uiWithCookie(token) {
       return request(base, '/ui', { headers: { Cookie: ADMIN_COOKIE + '=' + token } });
     },
+
+    // ---- T8 增量：/admin/apikeys 系列与管理端点（全部新增，不动上面任何签名）----
+    //
+    // ⚠ 这一批都走 c.req（读 cookie 罐）：控制台身份就是同源会话 cookie，
+    //   角色分流验的正是"带着自己那条会话能做什么"。
+    apikeys() { return c.get('/admin/apikeys'); },
+    createKey(name, extra) { return c.post('/admin/apikeys', Object.assign({ name }, extra || {})); },
+    keyToggle(id, enabled) { return c.post('/admin/apikeys/toggle', { id, enabled: enabled !== false }); },
+    keyDelete(id) { return c.post('/admin/apikeys/delete', { id }); },
+    keyReset(id) { return c.post('/admin/apikeys/reset', { id }); },
+    keyUpdate(id, patch) { return c.post('/admin/apikeys/update', Object.assign({ id }, patch || {})); },
+    rotateAdmin() { return c.post('/admin/apikeys/rotate-admin', {}); },
+    rotateApiKey() { return c.post('/admin/apikeys/rotate-api-key', {}); },
+    adminGet(path) { return c.get(path); },
+    adminPost(path, body) { return c.post(path, body === undefined ? {} : body); },
+    // adminAsToken 以**脚本令牌**身份打管理端点（裸请求：一个 cookie 都不带）。
+    //
+    // 用途很具体：验"用 admin_token 建的 key，owner 为空 = 管理员所有"。
+    // 那条边界只能由**没有账号身份**的调用产生（会话身份永远带 UserID），
+    // 所以它必须走裸请求，否则测出来的其实是"管理员会话建的"。
+    adminAsToken(method, path, tok, body) {
+      return request(base, path, {
+        method: method || 'GET',
+        body: body === undefined ? {} : body,
+        headers: tok ? { Authorization: 'Bearer ' + tok } : {},
+      });
+    },
   };
   return c;
 }
@@ -393,6 +420,12 @@ const DEFECTS = [
   'ui_console_leaks_token',         // 外壳 HTML 里注入 admin_token（换了个地方泄密）
   'status_api_key_ok',              // /status 放行 api_key（账号池画像对客户端开放）
   'status_no_role_check',           // /status 不做角色判定（成员也能读管理面数据）
+  // ---- T8 增量：API key 归属与角色分流的五个新缺陷 ----
+  'apikeys_list_unfiltered',          // 成员看到全部 key（归属过滤没了）
+  'apikeys_mutation_no_owner_check',  // 成员能改**别人的** key（越权面）
+  'rotate_allowed_for_member',        // 成员能轮换管理凭据（回执带完整新令牌 ⇒ 一次提权）
+  'member_can_read_stats',            // 成员能读 /admin/stats（管理面聚合外泄）
+  'apikeys_missing_member_flag',      // 不回 member 标志（前端分不清"我的"还是"全部"）
 ];
 
 // pickPort 找一个空闲端口。
@@ -454,6 +487,73 @@ async function startStub(opts) {
       if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
     }
     return '';
+  };
+
+  // -------------------------------------------------------------------------
+  // T8：/admin/* 的角色分流 + API key 归属（对齐 internal/admin 与 internal/apikey）
+  // -------------------------------------------------------------------------
+
+  // MEMBER_RULES 是**精确的 (方法, 路径) 对**，不是前缀
+  // （`internal/admin/admin.go:709` 的 memberRules）。
+  //
+  // ⚠ T8 修掉的那个真洞就是前缀版：`/admin/apikeys` 前缀会让
+  //   `POST /admin/apikeys/rotate-admin` 也命中，而那个端点回执带**完整新
+  //   admin_token** ⇒ 成员一次调用即提权。桩必须照精确对实现，否则
+  //   "成员不能轮换令牌"这条断言在自检里没有对照物（坏桩永远绿 = 没判别力）。
+  const MEMBER_RULES = [
+    ['GET', '/admin/apikeys'],
+    ['POST', '/admin/apikeys'],
+    ['POST', '/admin/apikeys/toggle'],
+    ['POST', '/admin/apikeys/delete'],
+    ['POST', '/admin/apikeys/reset'],
+    ['POST', '/admin/apikeys/update'],
+    ['GET', '/admin/ui/manifest'],
+  ];
+
+  // apiKeys 是**进程级**的 key 库（不是每请求一份）。
+  //
+  // ⚠ 第一版把它写在 handle() 里，于是每个请求都拿到一份全新的空数组：
+  //   列表恒为 0 条、归属检查恒 false ⇒ "成员改不了别人的 key"看着是绿的，
+  //   其实测的是"库里根本没有这把 key"（假绿）。凡是有状态的桩，状态都必须在
+  //   startStub 这一层。
+  const apiKeys = [];
+
+  // maskId 复刻 apikey.MaskID 的形状（保留可辨认前缀，用于"我用的哪一把"）。
+  const maskId = (id) => (String(id).length > 12 ? String(id).slice(0, 7) + '…' + String(id).slice(-4) : String(id));
+
+  // viewOfKey 复刻 apikey.View：owner_id 是 `omitempty`
+  // ⇒ 空 owner（管理员所有）**整条字段不出现**，而不是出现一个空串。
+  const viewOfKey = (k) => {
+    const v = {
+      id: k.id, masked: maskId(k.id), name: k.name, enabled: k.enabled, limit: k.limit,
+      used: k.used, remain: k.limit ? Math.max(0, k.limit - k.used) : -1,
+      requests: k.requests, fails: k.fails, rpm: k.rpm, created_at: k.created_at,
+    };
+    if (k.owner) v.owner_id = k.owner;
+    if (k.models && k.models.length) v.models = k.models;
+    return v;
+  };
+
+  // listFor 复刻 apikey.Store.ListFor：**先判身份再看归属**。
+  //
+  // ⚠ 空 owner + 非管理员 = **空列表**（不是"列出所有 owner 为空的"）。
+  //   写成 `k.owner === owner` 的话两边都是空串时成立 ⇒ 任何让身份落到空串的
+  //   情况（未登录、会话失效、身份没接上）都会把管理员的 key 整列表端出去。
+  //   这是本改造最危险的一处，桩也要照最严那一档实现。
+  const listFor = (owner, isAdmin) => {
+    if (isAdmin) return apiKeys.slice();
+    const o = String(owner || '').trim();
+    if (o === '') return [];
+    return apiKeys.filter((k) => k.owner === o);
+  };
+
+  // canManage 复刻 apikey.Store.CanManage（能看见才谈得上管；不存在也 false）。
+  const canManage = (owner, isAdmin, id) => {
+    const o = String(owner || '').trim();
+    if (!isAdmin && o === '') return false;
+    const k = apiKeys.find((x) => x.id === id);
+    if (!k) return false;
+    return isAdmin ? true : k.owner === o;
   };
 
   // limited 计数并判定；no_rate_limit / rate_limit_from_first 两个开关在这里生效。
@@ -642,6 +742,131 @@ async function startStub(opts) {
       const sid = cookieOf(req, COOKIE);
       if (sid && !d.logout_no_revoke) sessions.delete(sid);
       return send(200, { ok: true }, { 'Set-Cookie': COOKIE + '=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax' });
+    }
+
+    // ---- 门禁与 API key 库（判据在 startStub 外层，见那里的注释）----
+    const canAccess = (who, method, path) => {
+      if (who.role >= 10) return true;
+      // 坏桩：把 /admin/stats 放给成员（管理面聚合不该给成员看）
+      if (d.member_can_read_stats && (path === '/admin/stats' || path === '/admin/stats/series')) return true;
+      // 坏桩：复刻 T8 修掉的那个真洞 —— 门禁把 rotate-* 也放行（前缀白名单时代）。
+      // 关掉的不只是门禁那一层：第二个开关由下面的 handler 消费，两层一起坏，
+      // 才复刻出"成员一次调用即拿到新管理令牌"的真实形态。
+      if (d.rotate_allowed_for_member && path.startsWith('/admin/apikeys/rotate-')) return true;
+      return MEMBER_RULES.some((r) => r[0] === method && r[1] === path);
+    };
+    const ownerOf = (who) => (who && who.user ? who.user.id : '');
+
+    if (p.startsWith('/admin/') && !p.startsWith('/admin/auth/')) {
+      let who = principal();
+      if (!who.kind) {
+        if (d.anon_open) {
+          // 旧缺陷 anon_open 的语义是"未登录也放行"（原本 /admin/* 不设防）
+          who = { kind: 'anon', role: 10, user: undefined };
+        } else {
+          return send(401, { error: '管理接口需要授权。', code: 'auth_required' });
+        }
+      }
+      if (!canAccess(who, req.method, p)) {
+        return send(403, {
+          error: '当前账号（' + (who.user ? who.user.username : 'admin_token') + '，角色 '
+            + (who.role >= 10 ? '管理员' : '成员') + '）无权访问 ' + p + '。该功能仅管理员可用。',
+          code: 'forbidden_role', role: who.role, scope: 'admin',
+        });
+      }
+      const isAdmin = who.role >= 10;
+
+      // GET /admin/apikeys —— 按身份过滤 + member 标志 + 管理钥匙掩码只给管理员
+      if (p === '/admin/apikeys' && req.method === 'GET') {
+        const keys = d.apikeys_list_unfiltered ? apiKeys.slice() : listFor(ownerOf(who), isAdmin);
+        const body = {
+          keys: keys.map(viewOfKey),
+          enabled: true,
+          admin_key: isAdmin ? maskId(o.apiKey) : '',
+          admin_token: isAdmin ? maskId(o.adminToken) : '',
+        };
+        // apikeys_missing_member_flag：不吐这个字段 ⇒ 前端分不清"我的"还是"全部"
+        if (!d.apikeys_missing_member_flag) body.member = !isAdmin;
+        return send(200, body);
+      }
+
+      // POST /admin/apikeys —— 新建，归属 = 当前身份（owner 为空 = 机器令牌那条路）
+      if (p === '/admin/apikeys' && req.method === 'POST') {
+        const name = String((body && body.name) || '').trim();
+        if (!name) return send(400, { error: '名称不能为空' });
+        const k = {
+          id: 'sk-' + randToken(16), name, enabled: true,
+          limit: Number((body && body.limit) || 0), rpm: Number((body && body.rpm) || 0),
+          models: (body && body.models) || null, owner: ownerOf(who),
+          created_at: new Date().toISOString(), used: 0, requests: 0, fails: 0,
+        };
+        apiKeys.push(k);
+        return send(200, {
+          id: k.id, masked: maskId(k.id), full: k.id, name: k.name, enabled: k.enabled,
+          limit: k.limit, rpm: k.rpm, models: k.models, created_at: k.created_at,
+        });
+      }
+
+      // 四个改 key 的端点：前置归属检查（越权一律 403，**不区分**"不存在"与"不是你的"）
+      const MUTS = ['toggle', 'delete', 'reset', 'update'];
+      const op = p.startsWith('/admin/apikeys/') ? p.slice('/admin/apikeys/'.length) : '';
+      if (req.method === 'POST' && MUTS.indexOf(op) >= 0) {
+        const id = String((body && body.id) || '');
+        const mine = canManage(ownerOf(who), isAdmin, id);
+        // apikeys_mutation_no_owner_check：跳过归属检查 ⇒ 成员能改别人的 key
+        if (!mine && !d.apikeys_mutation_no_owner_check) {
+          return send(403, {
+            error: '这把 API key 不属于当前账号（成员只能管理自己创建的 key）。',
+            code: 'forbidden_role', scope: 'apikey',
+          });
+        }
+        const k = apiKeys.find((x) => x.id === id);
+        if (!k) return send(404, { error: 'API key 不存在' });
+        if (op === 'delete') {
+          apiKeys.splice(apiKeys.indexOf(k), 1);
+          return send(200, { deleted: true });
+        }
+        if (op === 'toggle') {
+          k.enabled = !(body && body.enabled === false);
+          return send(200, { id: maskId(id), enabled: k.enabled });
+        }
+        if (op === 'reset') {
+          k.used = 0; k.fails = 0;
+          return send(200, { reset: true });
+        }
+        if (body && body.limit !== undefined && body.limit !== null) k.limit = Number(body.limit);
+        if (body && body.rpm !== undefined && body.rpm !== null) k.rpm = Number(body.rpm);
+        if (body && body.models) k.models = body.models;
+        return send(200, { updated: true });
+      }
+
+      // 轮换管理凭据：**仅管理员**。回执带完整明文新凭据 ⇒ 成员调通一次即提权。
+      if (req.method === 'POST' && (op === 'rotate-admin' || op === 'rotate-api-key')) {
+        // 第二层硬判（对齐 apikeys.go:344 / :392 的 IsAdmin 再判一次）。
+        // rotate_allowed_for_member 会把两层一起关掉 —— 那正是 T8 之前的形状。
+        if (!isAdmin && !d.rotate_allowed_for_member) {
+          return send(403, { error: '轮换管理凭据仅管理员可用。', code: 'forbidden_role', scope: 'admin' });
+        }
+        if (!isAdmin) {
+          // 坏桩：复刻"成员一次调用即拿到新管理令牌"的真洞
+          const full = 'mk-' + randToken(48);
+          return send(200, { full, masked: maskId(full), path: 'config.json', note: '旧管理令牌已立即失效。' });
+        }
+        const full = 'mk-' + randToken(48);
+        return send(200, {
+          full, masked: maskId(full), path: 'config.json',
+          note: op === 'rotate-admin' ? '旧管理令牌已立即失效。' : '这是**对话接口**的凭据。',
+        });
+      }
+
+      // 成员白名单的正例（否则"成员什么都不能"与"角色分流对了"分不开）
+      if (p === '/admin/ui/manifest' && req.method === 'GET') {
+        return send(200, { service: 'multi2api', member: !isAdmin });
+      }
+      // 管理面读数：管理员专属（成员在门禁就被挡下了）
+      if (req.method === 'GET' && ['/admin/settings', '/admin/logs', '/admin/providers', '/admin/stats', '/admin/stats/series'].indexOf(p) >= 0) {
+        return send(200, { ok: true, path: p });
+      }
     }
 
     if (p === '/admin/accounts' && req.method === 'GET') {
