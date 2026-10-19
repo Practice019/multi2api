@@ -93,6 +93,12 @@ type Config struct {
 	APIKeys   *apikey.Store
 	MaxRotate int // 单请求最多换号次数，默认 3
 
+	// AccountAuth 控制台登录端点（注册/登录/登出/读会话），由装配层注入。
+	//
+	// 挂在 `/admin/auth/`，即管理台门禁**之外** —— 理由见 New() 里挂载处的注释。
+	// nil = 不启用账号体系（旧行为：只有 admin_token 一条路）。
+	AccountAuth http.Handler
+
 	// MaxBodyMB 出站前允许的最大请求体（MiB），<=0 回落 8。
 	//
 	// 见 cmd/server/config.go 的 Server.MaxBodyMB 注释：这是把
@@ -335,6 +341,15 @@ func NewHandler(cfg Config) *Handler {
 	})
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 控制台登录端点（注册/登录/登出/读会话）。
+	//
+	// ⚠ 它必须挂在下面 `/admin/` 那条**之外**：那些端点是**取得凭据**的地方，
+	// 走管理台门禁会死锁（"没登录所以打不开登录接口"）。
+	// Go 1.22 的 ServeMux 按"更具体的前缀优先"选路，`/admin/auth/` 比
+	// `/admin/` 长 ⇒ 命中它，与注册顺序无关。
+	if cfg.AccountAuth != nil {
+		h.mux.Handle("/admin/auth/", cfg.AccountAuth)
+	}
 	// 管理台子树：自身做本机校验与鉴权，这里只做挂载（不带 withAuth，否则浏览器拿不到）。
 	if cfg.Admin != nil {
 		h.mux.Handle("/admin/", cfg.Admin)

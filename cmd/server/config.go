@@ -60,6 +60,37 @@ type Config struct {
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 
+	// Console 控制台账号体系的开关（抄 new-api 的登录系统）。
+	//
+	// # 与 auth_dir 的区别（名字容易混，先说清）
+	//
+	//	auth_dir  = **上游凭证**（workbuddy/codearts 的 accessToken 文件）
+	//	Console   = **控制台账号**（谁能进 /ui 与 /admin/*，什么角色）
+	//
+	// # 数据文件为什么不在配置里
+	//
+	// 账号库与会话库固定落在 data/accounts.json 与 data/sessions.json，
+	// 与 data/apikeys.json **同一惯例**（见 main.go 里 apikey.New 的注释）：
+	// 这些是"本机状态"，不是部署参数，多一个配置项就多一处能配错的地方。
+	Console struct {
+		// DisableRegister 关闭公开注册（缺省 false = 开放注册）。
+		//
+		// 命名与 Server.DisableChatTools 同一惯例（否定式字段 + 缺省开）。
+		//
+		// ⚠ 它**不**挡"首启建管理员"：库里一个账号都没有时，注册接口仍会
+		// 建出管理员 —— 否则"部署时关了注册又没建号"等于把控制台锁死，
+		// 只能删 data/accounts.json 重来。语义分开：
+		// 关掉的是"继续注册新成员"，不是"让自己进不去"。
+		DisableRegister bool `json:"disables_register"`
+		// CookieSecure 会话 Cookie 的 Secure 策略：auto（缺省）/ always / never。
+		//
+		// auto   = 请求本身走 TLS 时加 Secure
+		// always = 一律加。**反代/隧道场景用这个**：浏览器看到的页面是
+		//          https，但请求到达本进程时已是明文，auto 判不出来
+		// never  = 一律不加（本机 http 调试）
+		CookieSecure string `json:"session_cookie_secure"`
+	} `json:"console"`
+
 	// Server 出口层（HTTP 入站）行为。
 	Server struct {
 		// MaxBodyMB 单次请求体上限（MiB），缺省 8，<=0 回落 8。

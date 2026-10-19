@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
@@ -1182,6 +1183,37 @@ func main() {
 		log.Fatalf("load apikeys: %v", err)
 	}
 
+	// 控制台账号体系（抄 new-api 的登录系统）：账号库 + 会话库 + 登录端点。
+	//
+	// 路径与 apikeys.json 同一惯例（data/ 下、CWD 相对、不进配置）。
+	// 两个库的初始化失败**都必须**显式暴露：
+	//   账号库损坏 → 谁都登不进来（不能静默重建，否则等于把账号清空）
+	//   会话库损坏 → 只是要重新登录（NewSessionStore 内部删掉重建并打警告）
+	accountsStore, err := account.New(filepath.Join("data", "accounts.json"))
+	if err != nil {
+		log.Fatalf("load accounts: %v", err)
+	}
+	sessionsStore, err := account.NewSessionStore(filepath.Join("data", "sessions.json"))
+	if err != nil {
+		log.Fatalf("load sessions: %v", err)
+	}
+	// 启动时清一次过期会话（长期运行的话，之后由请求路径顺手清）。
+	if n := sessionsStore.Cleanup(); n > 0 {
+		log.Printf("账号: 已清理 %d 条过期会话", n)
+	}
+	accountHTTP, err := account.NewHTTP(account.HTTPConfig{
+		Accounts: accountsStore,
+		Sessions: sessionsStore,
+		// ⚠ 取反：配置里的字段是否定式（disables_register，缺省 false = 开放）
+		RegisterEnabled: !cfg.Console.DisableRegister,
+		CookieSecure:    strings.TrimSpace(cfg.Console.CookieSecure),
+	})
+	if err != nil {
+		log.Fatalf("装配登录端点: %v", err)
+	}
+	log.Printf("账号: 控制台账号体系已启用（注册%s，账号库 data/accounts.json）",
+		map[bool]string{true: "开放", false: "关闭"}[!cfg.Console.DisableRegister])
+
 	// 管理钥匙轮换的间接回调（见 admin.Config.OnAPIKeyRotated 注释：
 	// h 在 admin.New 的 Config 求值时尚未绑定，不能直接捕获，经此变量间接引用）。
 	var onRotate func(string) = func(string) {}
@@ -1319,6 +1351,9 @@ func main() {
 		DefaultClassifier: wb.Classify,
 		APIKey:            cfg.APIKey,
 		APIKeys:           apiKeysStore, // 多 API key 管理（普通 key 走它）
+		// 控制台登录端点：挂 /admin/auth/（管理台门禁之外，见 server.NewHandler 里
+		// 的挂载注释与 account 包的 PathXxx 常量）。
+		AccountAuth: accountHTTP,
 		// 管理台门禁令牌（与 api_key **独立**）与监听范围 —— 两者共同决定
 		// 「本机免令牌」是否成立，见 internal/server/webui.go 的 localExempt。
 		//

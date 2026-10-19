@@ -89,6 +89,11 @@ var (
 	// 但它的注册接口会直说"用户名已存在" —— 那种取舍在开放注册下无法避免，
 	// 登录这一侧则没必要再漏一次）。
 	ErrCredentials = errors.New("account: 用户名或口令不正确")
+
+	// ErrBootstrapDone 首个账号已存在，"创建管理员"这条路已经用过了。
+	//
+	// 它不是"错误"而是"状态"：首启建管理员的入口只允许成功一次。
+	ErrBootstrapDone = errors.New("account: 管理员已存在，创建入口已关闭")
 )
 
 // User 一个控制台账号（持久化字段）。
