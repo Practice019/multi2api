@@ -1056,6 +1056,19 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
    "永远为假"的分支（那会误导后来人以为还有成员）。
    判据在 tests/frontend/verify_single_admin.js 第 5 条：外壳 HTML 里不许有
    `applyMemberMode` / `member-mode` / 成员模式提示元素。 */
+  /* 性能健康条（2026-10-20 对标 new-api 的一行紧凑条）：成功率 · 平均延迟 · 吞吐 · 每模型成功率。
+     为什么单独一条而不是再塞进指标卡：这四项是**读结论**用的（网关现在健康吗），
+     指标卡是**读总量**用的。混在一排数字里，眼睛还得自己找哪几个代表健康。 */
+  .healthbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    padding:7px 12px;margin:8px 0 0;border:1px solid var(--line);border-radius:8px;
+    background:var(--panel);font-size:12px;min-height:34px}
+  .healthbar .hb-title{font-weight:600}
+  .healthbar .hb-item{display:inline-flex;align-items:center;gap:5px;color:var(--dim)}
+  .healthbar .hb-item b{color:var(--fg);font-weight:600}
+  .healthbar .hb-chip{display:inline-flex;align-items:center;gap:4px;padding:0 7px;height:20px;
+    border-radius:10px;background:var(--panel2);border:1px solid var(--line);max-width:250px;
+    overflow:hidden;white-space:nowrap}
+  .healthbar .hb-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
 </style>
 </head>
 <body>
@@ -1199,6 +1212,8 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
              内联 SVG 双折线（请求量 + 成功率），零图表库依赖。 -->
         <div id="statsTrend" style="margin-bottom:12px;height:110px;position:relative"></div>
         <div class="cards" id="statsCards"></div>
+      <!-- 性能健康条（2026-10-20）：一行读结论，与上面那排"读总量"的指标卡分工 -->
+      <div class="healthbar" id="healthBar"></div>
         <!-- 模型维度：每行一个模型，列 = 调用次数 / 成本系数。
              系数来自上游 /v3/config（1h 缓存），拿不到时整块降级成一句说明 —— 
              不显示 「0 次调用」这种会被误读成真实数据的空表格。 -->
@@ -9706,11 +9721,55 @@ let loginProvider = '';
       `<div class="card" data-stat-key="${esc(k)}"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
 
     $('statsCards').innerHTML = statsCardsEntries(s).map(([k, v, c]) => card(k, v, c)).join('');
+    renderHealthBar(s);   // 与卡片同源（同一份 s），不会出现"卡对条错"
 
     // ⚠ 「模型明细」chips 已按用户要求删除（2026-10-18）⇒ 这里**不再调** renderStatsModels。
     // ⚠ 函数本体保留未删：它里面还带着 `statsCatalogHint` 等挂载逻辑，
     //   删函数的风险大于收益；而只要容器不存在，它本来就是空转（开头有 `if (!wrap) return`）。
     // renderStatsModels(s);
+  }
+
+  // renderHealthBar 性能健康条（2026-10-20 对标 new-api「性能健康」那一行）。
+  //
+  // # 三项口径（照用户要求"数据准确"逐条交代）
+  //   · 成功率 = ok / total
+  //   · 平均延迟 = **总耗时**均值（不是首字）—— new-api 那个 17.94s 也是总耗时口径；
+  //     首字另有 TTFB 卡，两个数各表一件事，不要混。
+  //   · 吞吐   = tokens /（全部请求耗时之和）。后端只给 avg_total_ms，
+  //     所以用 avg × 条数近似 —— 这是**近似**，文案写"吞吐"不写"精确"。
+  //   · 每模型成功率 = by_model_detail[m].ok / .calls，按请求数取前 5（模型一多会撑成两行）。
+  function renderHealthBar(s) {
+    const el = $('healthBar');
+    if (!el) { return; }
+    if (!s) { el.innerHTML = ''; return; }
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = (total && ok !== null) ? (ok / total * 100) : null;
+    const avgMs = num(s.avg_total_ms);
+    const toks = num(s.tokens);
+    const tps = (avgMs && total && toks !== null && avgMs > 0)
+      ? toks / ((avgMs * total) / 1000) : null;
+    const parts = ['<span class="hb-title">性能健康</span>'];
+    parts.push(`<span class="hb-item">成功率 <b>${rate === null ? '—' : rate.toFixed(2) + '%'}</b></span>`);
+    parts.push(`<span class="hb-item">平均延迟 <b>${avgMs === null ? '—' : (avgMs / 1000).toFixed(2) + 's'}</b></span>`);
+    parts.push(`<span class="hb-item">吞吐 <b>${tps === null ? '—' : fmtTokens(Math.round(tps)) + ' t/s'}</b></span>`);
+    const detail = s.by_model_detail || {};
+    const rows = Object.keys(detail).map(k => {
+      const d = detail[k] || {};
+      const c = num(d.calls) || 0;
+      const o = num(d.ok) || 0;
+      return { model: k, calls: c, rate: c ? (o / c * 100) : null };
+    }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 5);
+    rows.forEach(r => {
+      const col = r.rate === null ? 'var(--dim)'
+        : r.rate >= 95 ? 'var(--ok)' : r.rate >= 80 ? 'var(--warn)' : 'var(--err)';
+      const txt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+      parts.push(`<span class="hb-chip" title="${esc(r.model)} · ${r.calls} 次 · ${txt}">`
+        + `<span class="hb-dot" style="background:${col}"></span>`
+        + `<span style="overflow:hidden;text-overflow:ellipsis">${esc(r.model)}</span>`
+        + `<b style="color:${col}">${txt}</b></span>`);
+    });
+    el.innerHTML = parts.join('');
   }
 
   // statsCardsEntries 统计卡的内容（renderStats 与无感轮询共用）。
