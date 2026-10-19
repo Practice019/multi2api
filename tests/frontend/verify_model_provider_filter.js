@@ -65,13 +65,79 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     const pasted = await pasteConsoleKey(ev, undefined, TARGET);
     if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 下面依赖 /v1 的断言会假红');
 
+    // openPanel(name)：**等到导航里真有这个按钮**再点。
+    //
+    // ⚠ 为什么不能直接点（实测抖动的另一半）：导航是 manifest 回来后才 buildNav()
+    //   画出来的，而探针在"页面加载 5.5s + 等模型"之后就去 `#nav button[data-nav]`
+    //   里找「对话测试」—— 列表还没建时那个查询返回 undefined，`if (b) b.click()`
+    //   于是**静默什么都不做**，面板压根没打开；随后的读到的就是"1 个空选项 +
+    //   上游只有「全部上游」"，判据把它读成"id 不是 provider/xxx / 上游没列出来"。
+    //   实测证据（连跑四次里那一次红）：`模型下拉: 1 项；当前=""`、`上游选项: ["全部上游"]`。
+    //   ⇒ 判据没错，是"点击落空"。等按钮出现（有界），点中即返回。
+    async function openPanel(name, ms) {
+      const lim = Number(ms) || 20000;
+      const t0 = Date.now();
+      let hit = false;
+      while (Date.now() - t0 < lim) {
+        hit = await ev(`(function(){
+          var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
+            .filter(function(x){ return x.textContent.indexOf(${JSON.stringify(name)}) >= 0; })[0];
+          if (!b) return false;
+          b.click(); return true;
+        })()`);
+        if (hit) return true;
+        await sleep(250);
+      }
+      return false;
+    }
+
+    // waitProviderValue(want, ms)：等「上游」下拉的**选中值**恢复成 want。
+    //
+    // ⚠ 为什么需要：刷新后选中值是从 localStorage 恢复的，而它依赖模型列表先回来
+    //   （选项由 /v1/models 生成）。实测连跑 6 次里有 1 次在"模型下拉已满"之后
+    //   读到的却是 `{"value":"","inOptions":true}` —— 模型面板画好了、上游那格的
+    //   选中值还停在默认。等（有界）再判：真恢复不了才是产品缺陷，读早了不算。
+    async function waitProviderValue(want, ms) {
+      const lim = Number(ms) || 15000;
+      const t0 = Date.now();
+      let v = null;
+      while (Date.now() - t0 < lim) {
+        v = await ev(`(function(){
+          var p = document.getElementById('modelProvider');
+          return p ? p.value : null;
+        })()`);
+        if (v === want) return v;
+        await sleep(250);
+      }
+      return v;
+    }
+    // waitModels：等模型下拉**真的画出来**，而不是"睡固定 2 秒碰运气"。
+    //
+    // ⚠ 为什么必须有它（实测抖动，非产品缺陷）：同一环境连跑三次得到 4/3、13/1、
+    //   14/0 三种结果，差的只是"睡醒时 `/v1/models` 回来了没有"。失败那次的证据是
+    //   `模型下拉: 1 项；当前=""`、`上游选项: ["全部上游"]` —— 那是**还没画完**的
+    //   空态，判据却把它读成"下拉里的 id 不是 provider/xxx"、"上游下拉没列出上游"。
+    //   ⇒ 判据没错，等待方式错了。改成有界轮询（默认 15s，命中即返回），
+    //   连跑三次稳定 14/0。
+    async function waitModels(min, ms) {
+      const lim = Number(ms) || 15000;
+      const t0 = Date.now();
+      let n = 0;
+      while (Date.now() - t0 < lim) {
+        n = Number(await ev(`(function(){
+          var m = document.getElementById('model');
+          if (!m) return 0;
+          return Array.from(m.options).filter(function(o){ return !!o.value; }).length;
+        })()`)) || 0;
+        if (n >= (min || 1)) return n;
+        await sleep(250);
+      }
+      return n;
+    }
+
     // 切到对话测试
-    await ev(`(function(){
-      var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
-        .filter(function(x){ return x.textContent.indexOf('对话测试') >= 0; })[0];
-      if (b) b.click();
-    })()`);
-    await sleep(2000);
+    if (!(await openPanel('对话测试'))) console.error('  ⚠ 20s 内导航里没出现「对话测试」⇒ 下面量的是没打开的面板，必假红');
+    await waitModels(1, 15000);   // 等模型下拉画出来（见 waitModels 的注释）
 
     // ---- 1) 控件存在 ----
     const s0 = JSON.parse(await ev(`JSON.stringify((function(){
@@ -216,12 +282,19 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
       // ---- 4) 刷新后保持 ----
       await send('Page.navigate', { url: TARGET });
       await sleep(5500);
-      await ev(`(function(){
-        var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
-          .filter(function(x){ return x.textContent.indexOf('对话测试') >= 0; })[0];
-        if (b) b.click();
-      })()`);
-      await sleep(2000);
+      // ⚠⚠ 刷新之后**必须重新粘一次密钥**。
+      //
+      // 控制台刻意不把 api_key 落盘（"可以只读、不落盘"，T5/T7 的安全改造），所以
+      // 一次导航就把它丢了。这条探针原先的前提是"服务端会把 key 注入页面"，于是
+      // 刷新后模型下拉自然还有内容；现在不重粘的话 `/v1/models` 回 401 ⇒ 选项里
+      // 没有 target ⇒ "刷新后仍选中 loomy" 会**时红时绿**（实测同一环境三次跑：
+      // 4/3、13/1、13/1 —— 差的就是这 5.5 秒里模型列表有没有回来）。
+      await injectKey(send, undefined, TARGET);
+      await pasteConsoleKey(ev, undefined, TARGET);
+      await sleep(1200);
+      if (!(await openPanel('对话测试'))) console.error('  ⚠ 刷新后 20s 内仍没出现「对话测试」⇒ 下面量的是没打开的面板');
+      await waitModels(1, 15000);   // 同上：等画完再判，别用固定睡眠
+      await waitProviderValue(target, 15000);   // 再等选中值从 localStorage 恢复（见 waitProviderValue）
       const s2 = JSON.parse(await ev(`JSON.stringify((function(){
         var p = document.getElementById('modelProvider');
         return { value: p ? p.value : null,
