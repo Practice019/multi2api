@@ -447,13 +447,16 @@ let loginProvider = '';
   }
 
   function renderCards(h, s) {
-    // 成员模式：没有账号池读数（/status 对成员 403）⇒ 这一排卡片换一句说明，
-    // 而不是渲染出一排 `—` 或直接抛异常（后者会在控制台留一条看不懂的报错）。
+    // ⚠ 2026-10-19 新口径：这里原来写"当前登录是<b>成员</b>，账号池读数仅管理员可见"。
+    //   成员已取消 ⇒ 走不到 `!s` 这一支了（`refresh()` 在 403/网络失败时**提前 return**，
+    //   根本不会调 renderCards 画这一排）。
+    //   留着这一支只为"真拿到 null 也不炸"，文案改成**不假设角色**的中性说明 ——
+    //   它现在表达的是"读数没拿到"，而不是"你是成员所以看不到"。
     if (!s) {
       $('cards').innerHTML = '<div class="card" style="grid-column:1/-1">'
         + '<div class="k">账号池</div>'
-        + '<div class="v dim" style="font-size:13px">当前登录是<b>成员</b>，'
-        + '账号池读数仅管理员可见。你自己的用量看下面的统计卡。</div></div>';
+        + '<div class="v dim" style="font-size:13px">本次没取到账号池读数'
+        + '（服务端未返回或请求失败）。上面的状态点与提示条里有具体原因。</div></div>';
       return;
     }
     // 网关状态卡：核心运营读数（对标 one-api 管理台"渠道健康 + 汇总"）。
@@ -6157,18 +6160,20 @@ let loginProvider = '';
     // 不该等于交出管理台。现在分开显示、分开轮换。
     const ak = $('apiAdminKey');
     if (ak) {
-      // ★ 成员：整块"管理钥匙"都不显示（T8）。
+      // ⚠ 2026-10-19 新口径（单账号管理员）：原来这里有一支
+      //   `if (d && d.member)` —— 判"当前登录是成员"，于是整块"管理钥匙"换成
+      //   一句"属于管理员，当前账号看不到"。
       //
-      // 服务端对成员**根本不回**这两个掩码（见 admin/apikeys.go 的 apiKeysList），
-      // 所以这里不判也不会渲染出真值 —— 但会渲染出"未配置 —— 在 config.json
-      // 里加一行…"那段**指路文案**，让成员以为"这东西该由我配"。更糟的是轮换
-      // 按钮：成员点了会 403（门禁按精确规则挡掉），而界面上留着一个必然失败的
-      // 按钮是最差的设计。
-      if (d && d.member) {
-        ak.innerHTML = '<div>管理钥匙（<b>admin_token</b> / <b>api_key</b>）'
-          + '与账号池、上游配置一样属于管理员：当前账号看不到、也不需要。</div>';
-      } else {
-          const parts = [];
+      //   删掉它的理由有两条，第二条更重要：
+      //     ① 新口径下**不存在成员会话** ⇒ 这一支永远为假；
+      //     ② 后端窗口正在删掉载荷里的 `member` 字段（`apikeys.go` 的
+      //        `"member": !p.IsAdmin()`）⇒ 依赖一个正在消失的字段，
+      //        等于把这条判据挂在别人的实现细节上（今天真、明天假）。
+      //   ⇒ 现在的口径是"**有就无所谓、没有也不炸**"：下面只按
+      //     `d.admin_token` / `d.admin_key` 有没有值决定渲染哪一段 ——
+      //     服务端给掩码就显示掩码，不给就显示"未配置 + 怎么配"的指路文案。
+      //     这条对两种后端都成立（字段在不在都走同一条路）。
+      const parts = [];
         if (d && d.admin_token) {
           parts.push(`<div style="margin-bottom:6px">管理令牌（登录控制台用，<b>admin_token</b>）：`
             + `<code class="mono">${esc(d.admin_token)}</code>`
@@ -6195,7 +6200,6 @@ let loginProvider = '';
         if (rbT) rbT.onclick = () => apiKeyRotateAdminToken(rbT);
         const rbK = $('btnRotateAPIKey');
         if (rbK) rbK.onclick = () => apiKeyRotateAPIKey(rbK);
-      }
     }
     renderAPIKeys(d && d.keys ? d.keys : []);
   }
@@ -6349,7 +6353,8 @@ let loginProvider = '';
   async function ensureAKCatalog() {
     if (akCatalog) return akCatalog;
     try {
-      const r = await api('/v1/models');
+      await ensureConsoleKey();
+    const r = await api('/v1/models');
       akCatalog = ((r && r.data) || []).map(m => ({
         id: String(m.id || ''),
         owner: String(m.owned_by || ''),
@@ -6361,20 +6366,46 @@ let loginProvider = '';
     return akCatalog;
   }
 
-  // renderAKModelList 按搜索词渲染可勾选列表；保留已勾选状态。
+  // syncAKProviders 用当前目录填充弹窗里的「上游」下拉（用户要求：先选上游再看模型）。
+  //
+  // 与 syncModelProviderOptions 同款坑：`<select>` 会把"不在 option 列表里的值"**当场归一成空串**，
+  // 所以恢复选择必须写在 innerHTML **之后**（否则选择会被浏览器悄悄清掉）。
+  function syncAKProviders() {
+    const sel = $('akProvider');
+    if (!sel) return;
+    const keep = sel.value;
+    const owners = [];
+    const seen = new Set();
+    for (const m of (akCatalog || [])) {
+      const o = modelOwnerOf(m.id, m.owner);
+      if (o && !seen.has(o)) { seen.add(o); owners.push(o); }
+    }
+    owners.sort();
+    sel.innerHTML = '<option value="">全部上游</option>' +
+      owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+    sel.value = owners.includes(keep) ? keep : '';
+  }
+
+  // renderAKModelList 按「上游 + 搜索词」渲染可勾选列表；保留已勾选状态。
   function renderAKModelList() {
     const host = $('akModelList'), empty = $('akEmpty');
     if (!host) return;
     const kw = ($('akSearch').value || '').trim().toLowerCase();
-    const list = (akCatalog || []).filter(m => !kw || m.id.toLowerCase().includes(kw));
+    // 上游筛选只决定"列出什么"，不改已勾选的 id（勾选状态由 stashAKChecked/akSelected 管）。
+    const wantP = ($('akProvider') && $('akProvider').value) || '';
+    const list = (akCatalog || []).filter(m =>
+      (!wantP || modelOwnerOf(m.id, m.owner) === wantP) &&
+      (!kw || m.id.toLowerCase().includes(kw)));
 
     // 记住当前的勾选（重渲染会丢掉 DOM）
     const checked = new Set(akSelected());
     if (!list.length) {
       host.innerHTML = '';
       empty.style.display = '';
-      empty.textContent = (akCatalog && akCatalog.length)
-        ? `没有匹配「${kw}」的模型` : '模型目录为空（上游可能都不可用；仍可先建 key，稍后再改模型）';
+      const hasCatalog = !!(akCatalog && akCatalog.length);
+      empty.textContent = wantP
+        ? `上游「${wantP}」下没有匹配「${kw}」的模型`
+        : (hasCatalog ? `没有匹配「${kw}」的模型` : '模型目录为空（上游可能都不可用；仍可先建 key，稍后再改模型）');
       return;
     }
     empty.style.display = 'none';
@@ -6458,7 +6489,7 @@ let loginProvider = '';
     $('akSave').disabled = false;
     // 目录拉取是异步的：先渲染一个占位，回来后重渲染。
     $('akModelList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取模型目录…</div>';
-    ensureAKCatalog().then(() => { stashAKChecked(); renderAKModelList(); })
+    ensureAKCatalog().then(() => { syncAKProviders(); stashAKChecked(); renderAKModelList(); })
       .catch(e => {
         $('akModelList').innerHTML =
           `<div class="dim" style="font-size:12px;padding:6px">读取模型目录失败：${esc(e.message)}</div>`;
@@ -9382,8 +9413,29 @@ let multCatalogFailed = false;
       seen.add(m.id);
       shown.push(m);
     }
-    sel.innerHTML = shown.map(m =>
-      `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+    // ⚠ 空列表**必须给"为什么空"的说明**（2026-10-19 用户实测反馈：下拉空白 ⇒「这个好像有bug」）。
+    // 原来这里无条件 `sel.innerHTML = shown.map(...)` ⇒ 列表为空时下拉被彻底清空，
+    // 连初始的「— 先连接 —」占位项都没了，用户看不到任何线索（静默失败）。
+    // 三种空因给三种不同的话 —— 这才是能直接照做的线索：
+    //   a) 没粘「对话密钥」 ⇒ /v1/models 会 401，目录本来就拉不到（控制台刻意不注入凭据）
+    //   b) 粘了但目录为空   ⇒ 去「可用模型」点右上角「强制刷新目录」
+    //   c) 上游筛选筛没了   ⇒ 把上面的「全部上游」选回来
+    const modelHintEl = $('modelHint');
+    if (shown.length) {
+      sel.innerHTML = shown.map(m =>
+        `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+      if (modelHintEl) { modelHintEl.textContent = ''; modelHintEl.style.display = 'none'; }
+    } else {
+      sel.innerHTML = '<option value="">— 没有可选模型 —</option>';
+      if (modelHintEl) {
+        modelHintEl.textContent = !KEY
+          ? '暂无模型：正在用会话自动取用配置里的 api_key …（若配置里没写 api_key，就在顶部「对话密钥」里粘一把）'
+          : (models.length === 0
+              ? '暂无模型：密钥已粘，但目录还是空的 —— 去「可用模型」页点右上角「强制刷新目录」'
+              : '当前上游筛选下没有模型 —— 把上面的「全部上游」选回来');
+        modelHintEl.style.display = '';
+      }
+    }
     // 保持原选择：若它不在筛选后的列表里，回落到 `auto`，再回落到第一个。
     //
     // ⚠ 比 `auto` 必须按**去前缀后的裸名**：目录收窄后这里只有 `workbuddy/auto`，
@@ -9985,19 +10037,14 @@ let multCatalogFailed = false;
     svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; cur.style.display = 'none'; });
   }
 
-  // memberMode：本次登录者是**成员**（不是管理员）。
+  // ⚠ 2026-10-19 新口径（单账号管理员）：原来的 `memberMode` 整块删除。
   //
-  // # 为什么要这个态（T7 的必然结果）
-  //
-  // `/status` 回的是上游账号池画像，T7 把它收成"仅管理员"（成员拿到 403）。
-  // 若不做区分，成员一登录就会看到「权限不足」且**整块控制台被收起** ——
-  // 那等于"成员登录后什么都没有"，比改造前（根本没有账号体系）更让人困惑。
-  //
-  // 所以这里做**最小降级**：成员保留能用的部分（manifest 导航、自己的用量
-  // `/admin/stats`、自己的 API key），把只有管理员能看的两块（账号池表格、
-  // 卡片里的账号维度）换成一句说明。完整的成员视图（只列自己名下的 key 等）
-  // 是 T8 的事 —— 这里只保证"不会看起来像坏了"。
-  let memberMode = false;
+  // 删除前的形态（保留供对照）：`/status` 拿到 403 时置 `memberMode = true`，
+  // 然后 `applyMemberMode()` 收起账号池/模型/任务/日志/设置五块，并显示一条
+  // "你是成员，只能看自己名下的 API key" 的说明条。
+  // 新口径下**不存在成员会话**，所以 403 不再有"正常的成员场景"这个解释 ——
+  // 它只能是"权限配置坏了"，那就**如实报错**，而不是静默降级成一个小控制台。
+  // （静默降级正是最坏的一种：用户看到的是"少了一半功能"，而真相是鉴权坏了。）
 
   async function refresh() {
     if (!KEY && $('key').value.trim()) KEY = $('key').value.trim();
@@ -10012,13 +10059,18 @@ let multCatalogFailed = false;
     }
     try {
       s = await api('/status');
-      memberMode = false;
     } catch (e) {
-      // ⚠ 403 与 401 必须分开：403 是"你是成员，这个读数不给" —— 正常的；
-      // 401 是"你没有身份了" —— 要去登录页（api() 里已经跳了，这里只是兜底）。
+      // ⚠ 403 与 401 必须分开：
+      //   401 是"你没有身份了" —— 要去登录页（api() 里已经跳了，这里只是兜底）。
+      //   403 在新口径下**没有正常场景**（成员已取消）⇒ 按真错误处理并说出来，
+      //   否则用户会以为"控制台只有这几块"，而真相是权限配置坏了。
       if (e.message.startsWith('HTTP 403')) {
-        memberMode = true;
-        s = null;                       // 没有账号池读数，卡片走"未知"分支
+        setDot('bad', '无权读取账号池（403）· 请确认当前账号是管理员');
+        $('accts').innerHTML = accountPlaceholder(
+          '服务端拒绝了账号池读数（403）。单账号口径下不存在"成员降级"，' +
+          '这条通常是权限配置问题：' + e.message, 'err');
+        refresh._last = null;
+        return false;
       } else if (e.message.startsWith('HTTP 401')) {
         stopAuto();
         hideConsole();
@@ -10032,9 +10084,8 @@ let multCatalogFailed = false;
         return false;
       }
     }
-    // 到这里说明**身份有效**（管理员拿全量，成员拿自己那份）⇒ 展开控制台。
+    // 到这里说明**身份有效**（管理员拿全量）⇒ 展开控制台。
     showConsole();
-    applyMemberMode();
     setDot(h.healthy > 0 ? 'ok' : 'bad',
       (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
     // 网关卡读累计请求/成功率：拉 stats 填缓存（renderStats 内部写 window._statsCache；
@@ -10091,22 +10142,19 @@ let multCatalogFailed = false;
     renderIdentity();
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
     //
-    // ⚠⚠ **成员会话下原来的写法会抛两次**（实测：控制台里躺着
-    //   `TypeError: Cannot read properties of null (reading 'accounts')`）：
-    //   ① `/admin/accounts` 不在成员白名单 ⇒ `admin()` 抛 forbidden_role；
-    //   ② 回落那句用的是 `s.accounts`，而成员的 `s` 仍是 **null**
-    //      （`/status` 同样只给管理员，见上面 memberMode 那段）。
-    //   ⇒ catch 自身再抛 ⇒ **未捕获异常**（没有 try 罩着它）⇒ `refresh()` 整个中断
-    //   ⇒ 30s 轮询死掉 ⇒ **成员新建的 API key 永远不出现**（实测等 35s 仍是 0 条）。
+    // ⚠⚠ 保留这里的 **try/catch + null 免疫**，但删掉 `memberMode` 那条分支
+    //   （新口径：单账号管理员，不存在成员会话）。
     //
-    // 所以这里两件事一起做：成员**跳过**那次注定 403 的请求（否则每 30 秒弹一次红条，
-    // 正是 `.member-mode` 那段注释想避免的"对着一屏 403 反复点"），并让回落对 null 免疫。
-    if (memberMode) {
-      renderAccounts((s && s.accounts) || []);
-    } else {
-      try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts || []); }
-      catch { renderAccounts((s && s.accounts) || []); }
-    }
+    // 为什么"成员那段没了"还要留着 try/catch —— 它防的不是成员，是**任何一次读数失败**：
+    //   ① `/admin/accounts` 因为任何原因抛（403/500/网络）；
+    //   ② 原写法回落那句直接用 `s.accounts`，而那条路径下 `s` 可能就是 **null**
+    //      ⇒ catch 自身再抛 ⇒ **未捕获异常**（没有 try 罩着它）⇒ `refresh()` 整个中断
+    //      ⇒ 30s 轮询死掉 ⇒ **新建的 API key 永远不出现**（实测等 35s 仍是 0 条）。
+    //   这个坑与"谁登录"无关，所以判据照旧；只是不再靠 `memberMode` 决定走哪一支。
+    // ⚠ 上一段（refresh 的 catch）现在把 403 当真错误处理后，`s` 为 null 时**根本走不到这里**
+    //   （403/401 已提前 return）。下面的 `(s && s.accounts) || []` 是纯防御，不是主路径。
+    try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts || []); }
+    catch { renderAccounts((s && s.accounts) || []); }
     // 倍率要先取：renderModels 依赖它给每个模型加标记。
     // 单独 await 且自带 try —— 倍率拿不到不该让模型列表也显示不出来。
     await loadModelMultipliers();
@@ -10123,7 +10171,7 @@ let multCatalogFailed = false;
         + '控制台刻意不把凭据注入页面（可以只读、不落盘）；/v1 那一路认的是 api_key，'
         + '管理控制台自己的登录身份对它是无效的。', 'dim');
     } else {
-      try { renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data); }
+      try { await ensureConsoleKey(); renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data); }
       catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
     }
     loadSchedule();
@@ -10304,34 +10352,18 @@ let multCatalogFailed = false;
   // `/admin/auth/session`：它的 200/401 是唯一真相来源，也顺带把当前登录的
   // 账号名显示出来（成员看到的是自己的名字，管理员看到自己的）。
   //
-  // applyMemberMode 成员模式下隐藏"注定 403"的面板（T7 最小降级）。
+  // ⚠ 2026-10-19 新口径（单账号管理员）：`applyMemberMode()` 整块删除。
   //
-  // # 为什么用根类 + CSS 而不是逐个 renderer 分支
-  //
-  // 面板有 8 个（账号/模型/任务/日志/设置/仪表盘/API key/对话测试），每个都由
-  // 自己的 renderer 画。逐个加"成员就跳过"的分支要改 8 处、且以后新增面板必然
-  // 漏改。这里只标一个根类，隐藏规则集中写在 CSS 里 —— 唯一的事实来源。
-  //
-  // ⚠ 隐藏**不是**安全边界：真正的判据在服务端 `internal/admin/admin.go` 的
-  // memberPaths（成员只放行 /admin/apikeys、/admin/stats、/admin/ui/manifest）。
-  // 这里只是"别让人对着一屏必然失败的面板反复点"。
-  //
-  // ⚠ 隐藏的 section 不会被导航切到：`buildNav`/切换逻辑本来就跳过 hidden 的
-  // section（见 navKey 那段注释："否则用户会落到一个 hidden 的 section 上、
-  // 看到空白内容区"）。
-  function applyMemberMode() {
-    const root = document.documentElement;
-    if (root) root.classList.toggle('member-mode', memberMode);
-    const host = $('memberBanner');
-    if (!host) return;
-    if (memberMode) {
-      host.textContent = '当前登录：成员 —— 只能看到自己名下的 API key 与自己的用量；账号池、模型目录、任务、日志、设置属于管理员。';
-      host.style.display = '';
-    } else {
-      host.textContent = '';
-      host.style.display = 'none';
-    }
-  }
+  // 删除前的形态（保留供对照，说明"它为什么曾经存在"）：
+  //   用根类 `.member-mode` + 一段 CSS 收起"成员注定 403"的五个面板
+  //   （账号/模型/任务/日志/设置），并填显 `#memberBanner` 说明条；
+  //   理由是"别让人对着一屏必然失败的面板反复点"（隐藏不是安全边界，
+  //   真正的判据在服务端 memberPaths）。
+  // 新口径下**不存在成员会话** ⇒ 这个函数永远没有"该生效"的时刻，
+  // 留着就是一条永远为假的分支（后来人会以为还有成员面）。
+  // 403 现在在 `refresh()` 的 catch 里被**如实报错**（见那段注释）。
+  // 判据：tests/frontend/verify_single_admin.js 第 5 条 —— 外壳 HTML 里
+  //      不许出现 `applyMemberMode` / `member-mode` / 成员模式提示元素。
 
   // probeSession 问服务端"我是谁"，据此决定进控制台还是去登录页。
   //
@@ -10406,9 +10438,16 @@ let multCatalogFailed = false;
       if (bl) bl.onclick = () => doLogout(bl);
       return;
     }
+    // ⚠ 2026-10-19 新口径：单账号管理员 ⇒ 这里**不再有"成员"这一支**。
+    //   原来写的是 `${isAdmin ? '管理员' : '成员'}` —— 保留一个"不是管理员就显示成员"
+    //   的兜底，在新口径下只会把"角色值异常"伪装成一个正常的角色名。
+    //   现在：服务端给了 `role_name` 就用它（它是唯一真相来源）；
+    //   没给就只在**确认是管理员**时显示「管理员」，否则显示**真实拿到的角色值**
+    //   —— 让"角色不对"这件事显示出来，而不是被一个好看的词盖住。
     const isAdmin = u.role === 10;
+    const roleText = u.role_name || (isAdmin ? '管理员' : ('未知角色(' + (u.role === undefined ? '无' : u.role) + ')'));
     host.innerHTML = `<span class="who-name" title="${esc(u.username)}">${esc(u.display_name || u.username)}</span>`
-      + `<span class="pill ${isAdmin ? 'ok' : ''}">${esc(u.role_name || (isAdmin ? '管理员' : '成员'))}</span>`
+      + `<span class="pill ${isAdmin ? 'ok' : ''}">${esc(roleText)}</span>`
       + `<button id="btnChpass" style="padding:2px 8px;font-size:12px">改密码</button>`
       + `<button id="btnLogout" style="padding:2px 8px;font-size:12px">登出</button>`;
     host.style.display = '';
@@ -10489,6 +10528,24 @@ let multCatalogFailed = false;
     }, { label: '登出', busyText: '登出中…' });
   }
 
+  // ⚠ 2026-10-20 用户口径：**登录 = 唯一门槛**。登录之后一切照旧 ——
+  // 模型目录/对话测试**不该**再让用户手粘一次密钥，仪表盘的凭据也该能显示、能复制。
+  //
+  // 做法：用**已有会话**向管理端取一次完整 api_key 填进 `KEY`（内存，不落 localStorage）。
+  // 为什么不是"把凭据注回页面 HTML"：注入的话，页面一旦被截图/另存为/进缓存/被扩展读，
+  // 凭据就跟着走了；而按需取只在"已登录"这一条路上发生，未登录时这个接口直接 401。
+  // 两者对登录后的体验完全一样，差别只在未授权时拿不拿得到 —— 那正是门禁该管的事。
+  //
+  // 兜底：取不到（如配置里没写 api_key）就保持空，顶栏手粘那条退路照旧可用。
+  async function ensureConsoleKey() {
+    if (KEY) return KEY;
+    try {
+      const r = await admin('/admin/apikeys');
+      if (r && r.admin_key_full) KEY = r.admin_key_full;
+    } catch (e) { /* 未登录 / 未配置 ⇒ 留空，由界面提示引导（不是故障） */ }
+    return KEY;
+  }
+
   function boot() {
     // 主题最先初始化：它决定第一帧的配色。
     initTheme();
@@ -10510,7 +10567,10 @@ let multCatalogFailed = false;
     //   · 其中 `localStorage.setItem(LS, …)` 正是用户报障 ② 的来源（轮换后页面
     //     还揣着旧令牌，表现成"必须重启"）。
     wireTopBar();
-    probeSession();
+      probeSession();
+  // 登录后自动取用配置里的 api_key（**不 await**：它是锦上添花，慢了不该拖住首屏；
+  // 真正依赖它的两处 —— 模型目录、对话测试 —— 各自会 await 一次，见各自调用点）。
+  ensureConsoleKey();
 
     // 点击任意可复制块即复制；块内的「显示/隐藏」按钮不触发复制。
     $('apiCards').addEventListener('click', ev => {
@@ -10889,7 +10949,7 @@ let multCatalogFailed = false;
       //   用户点的是「**强制**刷新目录」，结果什么都没变（"点了没反应"的老毛病）。
       lazyCache.drop('ep:/admin/models/preview');
       await loadModelMultipliers();
-      renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data);
+      await ensureConsoleKey(); renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models'))).data);
       return true;
     }, { label: '模型目录' });
 
@@ -11020,6 +11080,8 @@ let multCatalogFailed = false;
     $('akAll').onchange = syncAKPicker;
     // 搜索：把"即将被隐藏"的勾选先记下来（隐藏 ≠ 取消勾选，见 akHiddenChecked）。
     $('akSearch').oninput = () => { stashAKChecked(); renderAKModelList(); };
+  // 切上游：只重渲染列表（勾选状态由 stashAKChecked/akSelected 保住 ⇒ 换上游不会丢掉已勾的模型）。
+  if ($('akProvider')) $('akProvider').onchange = () => { stashAKChecked(); renderAKModelList(); };
     $('akSelAll').onclick = () => {
       document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = true; });
       stashAKChecked(); updateAKCount();
