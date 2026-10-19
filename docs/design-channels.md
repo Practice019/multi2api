@@ -359,3 +359,17 @@ commit `50c10c2`（控制台加渠道入口 section）的信息里写着：
 
 ⇒ 这条链路（界面按钮 → 管理端点 → gateway Provider → 上游 /v1/models → 覆盖写回渠道）全程打通，
 且**管理台始终不认识任何具体上游**（只经 gateway 契约拿 Provider）。
+## 活进程实测④：T6-② 的计划原话验收（2026-10-20）
+
+计划里的验收原文是：「取消勾选某模型 ⇒ 外部 `/v1/models` **立刻**看不见」。直测（临时实例 7881，
+挑一条已存在的渠道，动态取 id）：
+
+    ① 外部目录:  ant-1,bee-2,cat-3,pub-2,pub-y,stale-1,stale-2
+    ② 摘掉该渠道全部模型（= 把勾全去掉）  POST /admin/channels  ⇒ HTTP 200
+       外部目录:  ant-1,bee-2,cat-3,pub-2,pub-y            ← stale-1/stale-2 **立刻消失** ✓
+    ③ 放回（= 把勾重新点上）              POST /admin/channels  ⇒ HTTP 200
+       外部目录:  ant-1,bee-2,cat-3,pub-2,pub-y,stale-1,stale-2   ← 又看得见 ✓
+
+不需要重启、不需要改请求头、不需要等缓存过期 —— 因为"对外可见"在本设计里**就是**渠道 models 的
+成员资格（对外 = key 白名单 ∩ 已启用渠道声明的模型），没有第二份状态可以不同步。
+7863 全程未受影响。
