@@ -11984,8 +11984,6 @@ let multCatalogFailed = false;
   // `/admin/auth/session`：它的 200/401 是唯一真相来源，也顺带把当前登录的
   // 账号名显示出来（成员看到的是自己的名字，管理员看到自己的）。
   //
-  // ⚠ 401 与"网络不通"必须分开处理：后者（服务刚重启/断网）跳到登录页会让人
-  // 以为"登录状态丢了"，而其实只是这一瞬间连不上。
   // applyMemberMode 成员模式下隐藏"注定 403"的面板（T7 最小降级）。
   //
   // # 为什么用根类 + CSS 而不是逐个 renderer 分支
@@ -12015,6 +12013,17 @@ let multCatalogFailed = false;
     }
   }
 
+  // probeSession 问服务端"我是谁"，据此决定进控制台还是去登录页。
+  //
+  // # 为什么不看页面里有没有注入的钥匙（那是改造前的做法）
+  //
+  // 旧模型的判据是"服务端渲染时有没有把凭据写进 HTML"。T5 起服务端**从不**
+  // 注入凭据，那条判据恒为假 ⇒ 已登录的人被告知"未获授权"。现在改成问一句
+  // `/admin/auth/session`：它的 200/401 是唯一真相来源，也顺带把当前登录的
+  // 账号名显示出来（成员看到的是自己的名字，管理员看到自己的）。
+  //
+  // ⚠ 401 与"网络不通"必须分开处理：后者（服务刚重启/断网）跳到登录页会让人
+  // 以为"登录状态丢了"，而其实只是这一瞬间连不上。
   async function probeSession() {
     let r;
     try {
@@ -12040,14 +12049,93 @@ let multCatalogFailed = false;
   }
 
   // renderWhoami 顶栏显示当前登录者（成员会看到「成员」标记，避免他以为自己
-  // 点不动某些页面是"坏了"）。
+  // 点不动某些页面是"坏了"），并挂上「改密码」与「登出」。
+  //
+  // ⚠ 这两个按钮是 T9 补的：登录系统上线后，控制台里**没有**任何地方能改口令、
+  // 也没有任何地方能登出 —— 用户只能关标签页（会话还在），或者去翻 config.json
+  // （而那正是他报障"改完必须重启"的那条路）。凭据能改、能主动失效，是这个
+  // 功能算"可用"的最低要求。
   function renderWhoami(u) {
     const host = $('whoami');
     if (!host || !u) return;
     const isAdmin = u.role === 10;
     host.innerHTML = `<span class="who-name" title="${esc(u.username)}">${esc(u.display_name || u.username)}</span>`
-      + `<span class="pill ${isAdmin ? 'ok' : ''}">${esc(u.role_name || (isAdmin ? '管理员' : '成员'))}</span>`;
+      + `<span class="pill ${isAdmin ? 'ok' : ''}">${esc(u.role_name || (isAdmin ? '管理员' : '成员'))}</span>`
+      + `<button id="btnChpass" style="padding:2px 8px;font-size:12px">改密码</button>`
+      + `<button id="btnLogout" style="padding:2px 8px;font-size:12px">登出</button>`;
     host.style.display = '';
+    const bc = $('btnChpass');
+    if (bc) bc.onclick = () => changeOwnPassword(bc);
+    const bl = $('btnLogout');
+    if (bl) bl.onclick = () => doLogout(bl);
+  }
+
+  // changeOwnPassword 自助改口令（T9：改完**不刷新页面**继续用）。
+  //
+  // # 为什么用 prompt 而不是做个表单
+  //
+  // 这是低频操作，而这个文件里同类"一次性输入"都是 prompt（见 openImportModal）。
+  // 做成表单要连带处理 type=password、自动填充干扰、回车提交、清空时机四件事，
+  // 收益只有观感。
+  //
+  // # 改完之后刻意**不刷新、不跳登录页**
+  //
+  // 服务端会把**当前这条**会话就地升级到新版本号（AdvanceAuthVersion），所以
+  // 改完立刻还能用。这里再打一次 `/admin/auth/session` 确认这件事 —— 不是为了
+  // 好看，而是把"免重启"从承诺变成当场可见的事实（用户报障 ② 就是这一条：
+  // 改完必须重启才能继续用）。
+  async function changeOwnPassword(btn) {
+    const cur = window.prompt('当前口令（确认是你本人）：', '');
+    if (cur === null) return;
+    if (!cur) { toast('当前口令不能为空', true); return; }
+    const next = window.prompt('新口令（8–128 位）：', '');
+    if (next === null) return;
+    if (!next) { toast('新口令不能为空', true); return; }
+    const again = window.prompt('再输一次新口令：', '');
+    if (again === null) return;
+    if (again !== next) { toast('两次输入的新口令不一致', true); return; }
+    await busyRun(btn, async () => {
+      try {
+        const r = await admin('/admin/auth/password', {
+          method: 'POST',
+          body: JSON.stringify({ current_password: cur, new_password: next }),
+        });
+        const n = (r && r.revoked_others) || 0;
+        toast('口令已修改' + (n ? `；其它 ${n} 台设备的登录已失效` : '') + '。当前登录保持有效。');
+        try {
+          await admin('/admin/auth/session');
+          setDot('ok', '口令已更新 · 当前会话有效（无需重启）');
+        } catch (e) {
+          // 不改口令相关的失败原因（真失效时下一次操作会被 401 带走），
+          // 但要说出来 —— 静默会让用户以为"还在线"。
+          toast('改口令成功，但随后校验失败：' + e.message, true);
+        }
+        return true;
+      } catch (e) {
+        toast('改口令失败：' + e.message, true);
+        return false;
+      }
+    }, { label: '改密码', busyText: '提交中…' });
+  }
+
+  // doLogout 登出：撤销**服务端**那条会话（不只是清客户端 cookie）。
+  //
+  // ⚠ 这里必须等服务端回执再走：本地清 cookie 而服务端会话还在的话，那条
+  // cookie 被别人拿到（比如共享机器的备份/剪贴板）仍然能用 —— 这正是登录
+  // 探针里"拿登出前的旧 cookie 再打会话必须 401"那条断言挡住的形态。
+  async function doLogout(btn) {
+    if (!window.confirm('登出控制台？\n\n· 服务端会撤销当前会话（旧 cookie 立即失效）\n· 其它设备的登录不受影响')) return;
+    await busyRun(btn, async () => {
+      try {
+        await admin('/admin/auth/logout', { method: 'POST' });
+      } catch (e) {
+        // 登出失败也要把用户送走：本页不该留在"看起来还登录着"的状态。
+        toast('登出请求失败：' + e.message, true);
+      }
+      stopAuto();
+      toLogin('logout');
+      return true;
+    }, { label: '登出', busyText: '登出中…' });
   }
 
   function boot() {
