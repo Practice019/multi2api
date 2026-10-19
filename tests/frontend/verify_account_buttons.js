@@ -26,6 +26,10 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+// T5/T7 起控制台**不再**由服务端注入 api_key（安全改造的目标之一）。
+// 依赖 /v1 的面板（可用模型 / 对话测试）默认是**空目录** —— 探针必须像人一样
+// 自己把密钥粘一次，见 lib_cdp 的 probeApiKey / injectProbeKey / pasteConsoleKey。
+const { injectProbeKey: injectKey, pasteConsoleKey } = require('./lib_cdp.js');
 const PORT = 9304;
 const TARGET = process.env.ACC_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = path.join(os.tmpdir(), 'chrome-accbtn');
@@ -94,7 +98,20 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
     await send('Page.enable'); await send('Runtime.enable');
     await send('Page.navigate', { url: TARGET });
     await sleep(5000);
+    // ⚠ 注入必须在新文档建立**之后**（紧跟 navigate 的赋值会被随后的导航冲掉）。
+    if (!(await injectKey(send, undefined, TARGET))) {
+      console.error('  ⚠ 环境没给探针密钥（WB2API_PROBE_KEY / WB2API_PROBE_TOKEN / URL 上的 ?token=）' +
+        '⇒ 页内 /v1/models 是空目录，R4 的倍率气泡断言会假红');
+    }
     const ev = async (x) => { const r = await send('Runtime.evaluate', { expression: x, returnByValue: true, awaitPromise: true }); return r.result && r.result.result ? r.result.result.value : undefined; };
+    // 像人一样把密钥粘进顶栏并点「应用」（#key + #conn）。
+    // ⚠ 必须做：不粘的话「可用模型」是空面板 ⇒ 下面 R4 的
+    //   `#models .chip .mult.*` 全部 querySelector 到 null。那是**契约变了**，不是产品坏了。
+    const pasted = await pasteConsoleKey(ev, undefined, TARGET);
+    if (pasted !== 'ok') {
+      console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ R4 依赖 /v1 的断言会假红');
+    }
+    await sleep(2500);
 
     const btns = JSON.parse(await ev(`JSON.stringify((function(){
       var sec = document.querySelector('#content > section[data-key="accounts"]');
@@ -277,12 +294,79 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
     ok(urls.withoutUrl === 0,
       '每个动作按钮都带着 data-dayurl（否则点下去 act() 静默什么都不做 —— 正是"按钮在但没反应"那个缺陷形态）');
 
-    // 行内「保活」必须仍在（那是排障动作，与删掉的"全部保活"不同）
-    const inlineKeepalive = await ev(`(function(){
-      return document.querySelectorAll('#accts button[data-act="keepalive"]').length;
-    })()`);
-    console.log('  账号行内「保活」按钮数: ' + inlineKeepalive);
-    ok(inlineKeepalive > 0, '账号**行内**的「保活」仍在（' + inlineKeepalive + ' 个）—— 删的是顶部那个，不是这个');
+    // ---- 行内「保活」必须仍在（那是排障动作，与删掉的「全部保活」不同）----
+    //
+    // # 判据的意图一个字没变，改的是"数据从哪来"
+    //
+    // 原写法 `document.querySelectorAll('#accts button[data-act="keepalive"]').length > 0`
+    // 默认实例里**恰好有** workbuddy 账号。这只在"池子里有 workbuddy 号"时成立 ——
+    // 而 18080 这个合成实例里一个都没有（只装了 loomy 的合成凭证，见
+    // lib_instance 的 auths/loomy/loomy-synth*.json）⇒ 行内「保活」**在真数据上不存在**，
+    // 于是这条断言与它上面 T3 那几条一起落进"没有账号行，跳过"的境地。
+    //
+    // 那是**数据前置**，不是产品缺陷。按本仓的口径，数据不够就**把数据喂够**，
+    // 而不是把断言放宽成"没有数据也算过"。这里用页面自己的驱动缝
+    // `window.__wb2api__.renderAccounts()`（它本来就是给探针灌数据用的，
+    // 见 webui.html:12875-12881 的注释）喂一个**合成的 workbuddy 账号** ——
+    // 走的是 accountRow 的真实渲染路径：列集来自 manifest 的 accounts_columns、
+    // 每日动作来自 manifest 的 daily_actions、端点来自 routesFor，全都真跑。
+    //
+    // ⚠ 只驱动渲染，不写任何持久状态；紧接着下面立刻点一次 #refresh 还原真实数据。
+    const synth = JSON.parse(await ev(`JSON.stringify((function(){
+      var fake = {
+        provider: 'workbuddy', uid: 'PROBE-SYNTH-KEEPALIVE-UID', nickname: 'probe-synth',
+        quota: {}, credits: 0, disabled: false, cooling: false, has_token: true,
+        success_count: 0, in_flight: 0, breaker_fails: 0,
+      };
+      window.__wb2api__.renderAccounts([fake]);
+      var row = document.querySelector('#accts > section.acctgroup[data-acctgroup="workbuddy"] tr.acctrow');
+      var btns = row ? Array.prototype.slice.call(row.querySelectorAll('button[data-act][data-dayurl]'))
+        .map(function(b){ return { act: b.dataset.act, label: (b.textContent||'').trim(), url: b.dataset.dayurl }; })
+        : [];
+      return {
+        rows: document.querySelectorAll('#accts > section.acctgroup[data-acctgroup="workbuddy"] tr.acctrow').length,
+        rowProvider: row ? row.dataset.acctof : null,
+        acts: btns.map(function(b){ return b.act; }),
+        labels: btns.map(function(b){ return b.label; }),
+        urls: btns.map(function(b){ return b.act + '→' + b.url; }),
+      };
+    })())`));
+    console.log('    合成 workbuddy 行: 行数=' + synth.rows + ' 归属=' + JSON.stringify(synth.rowProvider) +
+      ' 动作=' + JSON.stringify(synth.acts) + ' 文案=' + JSON.stringify(synth.labels));
+    ok(synth.rows === 1 && synth.rowProvider === 'workbuddy',
+      '前置：合成 workbuddy 账号被渲染进 workbuddy 分区（行数 ' + synth.rows +
+      ' 归属 ' + JSON.stringify(synth.rowProvider) + '）');
+    ok(synth.acts.indexOf('keepalive') >= 0,
+      '账号**行内**的「保活」仍在（合成 workbuddy 行上有 ' + synth.acts.length +
+      ' 个每日动作）—— 删的是顶部那个「全部保活」，不是这个');
+    ok(synth.labels[synth.acts.indexOf('keepalive')] === '保活',
+      '行内保活的文案是「保活」（实际 ' +
+      JSON.stringify(synth.labels[synth.acts.indexOf('keepalive')]) + '）');
+    ok(synth.urls.length > 0 && synth.urls.every(u => /→\/admin\//.test(u)),
+      '合成行的每个每日动作都带着真实端点（否则点下去 act() 静默什么都不做）：' +
+      JSON.stringify(synth.urls));
+    // 还原真实数据（合成行不能被后面的断言当成事实）
+    //
+    // ⚠ 这里必须**有界轮询**而不是固定 sleep：refresh() 是全量回源（本实例实测 ~4s），
+    //   而页面自身还有一个 5 秒轮询 —— 两个回源叠在一起时固定 6s 会**偶尔**赶不上，
+    //   结果是下面 R3 找不到"有账号行的分组"（我实测踩到：target 拿到空串）。
+    //   轮询把"快慢"与"对错"解耦，不会把偶发时序问题伪装成产品缺陷。
+    await ev(`(function(){ var b=document.getElementById('refresh'); if(b){ b.click(); return 1; } return 0; })()`);
+    {
+      const deadline = Date.now() + 25000;
+      let n = 0;
+      while (Date.now() < deadline) {
+        n = await ev(`document.querySelectorAll('#accts > section.acctgroup[data-acctgroup="loomy"] tr.acctrow').length`);
+        if (n > 0) break;
+        await sleep(500);
+      }
+      console.log('    （还原后 loomy 账号行数: ' + n + '）');
+    }
+    const restored = await ev(`JSON.stringify(Array.prototype.slice.call(
+      document.querySelectorAll('#accts > section.acctgroup[data-acctgroup="workbuddy"] tr.acctrow'))
+      .map(function(r){ return r.dataset.acctof; }))`);
+    ok(JSON.parse(restored).length === 0,
+      '合成行已被清掉（workbuddy 分区回到 0 行真数据）—— 不给后面的断言留假事实');
 
     // ---------------------------------------------------------------- T10：分组行动作
     //
@@ -473,13 +557,41 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
         '上游 ' + p + ' 的说明讲清了"为什么没有"（含"暂无账号"）：' + JSON.stringify(r2.notes[p]));
     }
 
-    // 断言 3：空组排在有账号的**之后**（用户确认的排序）
+    // 断言 3：分组顺序 == **服务端 manifest 的顺序**（前端原样透传，不本地重排）
+    //
+    // # 判据为什么要改写（2026-10-19）
+    //
+    // 原判据是「空组（0 账号）全部排在非空组之后，没有交错」—— 那是本地重排时代的
+    // 用户要求。产品**刻意删掉了那次重排**：webui.html:3413-3427 的注释写着
+    //
+    //	"旧排序『有账号的在前 + 默认上游优先 + 组内字典序』曾把服务端显式顺序
+    //	 覆盖掉：workbuddy-intl（海外版，0 账号）被按字典序/空组规则挤到最后，
+    //	 用户要求的展示顺序（workbuddy-intl → workbuddy → codearts → loomy → trae）
+    //	 永远到不了前端。顺序的单一来源是服务端（admin/uimanifest.go 的
+    //	 prioritizeProviders），前端原样透传。"
+    //
+    // ⇒ "空组在后"这条**已经不是契约了**，实测池序就是 manifest 顺序
+    //   （workbuddy-intl 反而第一，中间夹着非空的 loomy）。
+    //
+    // 判据的**意图**是"分组顺序是一个被钉住的产品决策、不许无声漂移"。
+    // 它现在的正确表达是：**池序逐项等于 providerRegistryIds()（= manifest 顺序）**。
+    // 这比原判据**更强** —— 原判据在"没人排序"时恒真（池序随便怎样，只要空组在最后
+    // 就过），新判据能抓住"谁又在前端加了一次本地排序"这个真实回归形态。
     const firstEmpty = r2.seen.findIndex(p => (r2.counts[p] || 0) === 0);
+    const seqBad = [];
+    const wantSeq = r2.want;                 // providerRegistryIds()：服务端下发的顺序
+    for (let i = 0; i < r2.seen.length; i++) {
+      if (r2.seen[i] !== wantSeq[i]) { seqBad.push('第' + i + '位: 池=' + r2.seen[i] + ' manifest=' + wantSeq[i]); }
+    }
+    console.log('  池序 === manifest 序: ' + (seqBad.length === 0 ? '是' : JSON.stringify(seqBad)));
+    ok(r2.seen.length === wantSeq.length,
+      '池里分组数与 manifest 上游数一致（' + r2.seen.length + ' vs ' + wantSeq.length + '）');
+    ok(seqBad.length === 0,
+      '分组顺序**逐项等于 manifest 的顺序**（前端不本地重排）' +
+      (seqBad.length ? ' —— 漂移: ' + JSON.stringify(seqBad) : ''));
     if (firstEmpty >= 0) {
-      const after = r2.seen.slice(firstEmpty).every(p => (r2.counts[p] || 0) === 0);
-      ok(after, '空组（' + r2.seen.slice(firstEmpty).join(',') + '）全部排在非空组之后，没有交错');
-    } else {
-      console.log('    （没有空组，跳过排序断言）');
+      console.log('    （本实例有空组 ' + r2.seen.slice(firstEmpty).length +
+        ' 个；它们**不再**被要求排到最后 —— 顺序以服务端为准）');
     }
 
     // 断言 4：提前返回已经删掉 —— 池子 0 个号时**仍然**要渲染出所有上游
@@ -508,8 +620,19 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
 
     // 恢复真实数据：刚才把表清空了，点一次刷新把它拉回来。
     // 必须 await 足够久 —— refresh() 是全量回源，本实例实测约 4 秒。
+    // ⚠ 改成**有界轮询**（原为固定 sleep 6000）：与页面自带的 5 秒轮询叠在一起时
+    //   固定等待会偶发赶不上，下游 R3 就会拿不到"有账号行的分组"而假红。
     await ev(`(function(){ var b=document.getElementById('refresh'); if(b) b.click(); return 1 })()`);
-    await sleep(6000);
+    {
+      const deadline = Date.now() + 25000;
+      let n = 0;
+      while (Date.now() < deadline) {
+        n = await ev(`document.querySelectorAll('#accts > section.acctgroup[data-acctgroup="loomy"] tr.acctrow').length`);
+        if (n > 0) break;
+        await sleep(500);
+      }
+      console.log('  （R2 收尾还原后 loomy 账号行数: ' + n + '）');
+    }
 
     // ================================================================
     // R3：分组可收起展开
@@ -695,6 +818,28 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
     // R4：x无 与其它倍率气泡**同款**（计算值比对，不是字符串比对）
     // ================================================================
     console.log('\n[R4] x无 的气泡与其它倍率计算值相同');
+    // ⚠ 先切到「可用模型」并等它渲染。
+    //
+    // 不切也能 querySelector 到元素（隐藏面板的 DOM 还在），但**前提是它已经渲过**；
+    // 而模型面板的内容依赖 /v1/models —— 探针本轮才补上"粘密钥"这一步（见文件顶部），
+    // 渲染时机比旧版晚。这里显式切过去 + 有界轮询，避免在"还没画出来"时量到 null。
+    await ev(`(function(){
+      var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
+        .filter(function(x){ return x.textContent.indexOf('可用模型') >= 0; })[0];
+      if (b) { b.click(); return true; } return false;
+    })()`);
+    {
+      const deadline = Date.now() + 15000;
+      let n = 0;
+      while (Date.now() < deadline) {
+        n = await ev(`document.querySelectorAll('#models .chip .mult').length`);
+        if (n > 0) break;
+        await sleep(500);
+      }
+      console.log('  #models 里的倍率气泡数: ' + n);
+      ok(n > 0, '前置：模型面板渲染出了倍率气泡（' + n + ' 个）—— ' +
+        '否则下面那条会"在空集上"判红，分不清是没数据还是样式坏了');
+    }
     const bubbles = JSON.parse(await ev(`JSON.stringify((function(){
       function grab(sel){
         var el = document.querySelector('#models ' + sel);

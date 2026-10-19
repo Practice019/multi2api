@@ -24,6 +24,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+const { injectProbeKey: injectKey, pasteConsoleKey } = require('./lib_cdp.js');
+const fixtures = require('./lib_fixtures.js');
 const PORT = 9295;
 const BASE = process.env.DYN_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = path.join(os.tmpdir(), 'chrome-dyn');
@@ -75,17 +77,40 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
       if (b) { b.click(); return true; } return false;
     })()`);
 
+    // ⚠⚠ 前置：**必须确认页在控制台里**。
+    //
+    // 为什么补这一条：本探针的断言全是 `document.getElementById(...)` 取元素后再读属性，
+    // 而"元素不存在"与"属性读不到"在很多写法下**长得一样** —— 最典型的是
+    // `typeof document.getElementById('send') !== 'undefined'`：取不到时它是
+    // **null**，而 `typeof null === 'object'`，于是那条断言在**登录页上也会 PASS**。
+    // （实测就是这么发生的：整整四组断言里唯一 PASS 的那条，恰好是这个空洞断言。）
+    // 所以先钉死"页是控制台"，后面每一条红才有意义。
+    ok(!!(await ev(`typeof window.__wb2api__ === 'object' && !!document.getElementById('nav')`)),
+      '页面已加载且停在**控制台**（__wb2api__ 可用 + #nav 存在）—— 避免"停在登录页"被读成控件坏了');
+
+    // 像人一样粘密钥（T5/T7 起服务端不再注入 api_key）：对话测试的模型下拉依赖 /v1/models。
+    if (!(await injectKey(send, undefined, BASE))) {
+      console.error('  ⚠ 没拿到探针密钥（URL 上的 ?token= / WB2API_PROBE_*）⇒ /v1 相关面板会是空的，断言会假红');
+    }
+    const pasted = await pasteConsoleKey(ev, undefined, BASE);
+    if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 依赖 /v1 的断言会假红');
+
+    // ⚠ 装夹具**必须在第一次打开「猫猫旅行」/「成长计划」之前**。
+    // 本实例里 /admin/travel 与 /admin/growth 都是空的（没有上游账号），
+    // 而本探针要测的是"行内按钮/视图切换真的有效"——那是**渲染结果**，
+    // 没有数据就没有可点的东西。夹具只换回执，产品渲染与委托全真跑。
+    console.log('  (' + await fixtures.fixTravel(ev) + ' / ' + await fixtures.fixGrowth(ev) + ')');
+
     // ---- 1) 对话测试：模型下拉与流式开关真的被发送时读取 ----
     console.log('\n[1] 对话测试：#model / #stream 在发送时被读取');
     await nav('对话测试');
     await sleep(1800);
     {
-      // 静态看：send() 里读它们（用 CDP 取函数源码，绕开 shell 转义）
-      const has = await ev(`(function(){
-        var s = document.getElementById('send');
-        return typeof s !== 'undefined';
-      })()`);
-      ok(has === true, '发送按钮存在');
+      // ⚠ 这条原来是 `typeof s !== 'undefined'` —— **空洞断言**：
+      //   取不到元素时 getElementById 返回 null，而 `typeof null === 'object'`，
+      //   于是它在登录页/任何坏页面上都会 PASS。改成真正的存在性判断。
+      const sendExists = await ev(`!!document.getElementById('send')`);
+      ok(sendExists === true, '发送按钮存在（#send）');
 
       // 行为验证：改下拉值 → 点发送 → 请求体里的 model 应等于下拉值
       const r0 = reqs.length;
@@ -104,10 +129,14 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     // ---- 2) 猫猫旅行：行内「详情」真的能点开 ----
     console.log('\n[2] 猫猫旅行：行内「详情」');
     await nav('猫猫旅行');
-    await sleep(2200);
+    await sleep(1500);
+    // ⚠ 点一次面板自己的「刷新」，绕开 sharedGet 的 30 秒缓存（见 lib_fixtures.forceReload）
+    console.log('      夹具+刷新: ' + await fixtures.prepare(ev, 'travel',
+      `document.querySelectorAll('#travelRows button[data-tact="detail"]').length`, 1));
     {
       const n = await ev(`document.querySelectorAll('#travelRows button[data-tact="detail"]').length`);
-      ok(n > 0, '存在「详情」按钮（' + n + ' 个）');
+      ok(n > 0, '存在「详情」按钮（' + n + ' 个）—— 夹具喂了 3 个旅行账号；' +
+        '若这里是 0，说明夹具没生效（先看上面那行 prepare 的输出）');
       if (n > 0) {
         const r0 = reqs.length, e0 = errs.length;
         await ev(`document.querySelector('#travelRows button[data-tact="detail"]').click()`);

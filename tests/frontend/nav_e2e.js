@@ -195,9 +195,54 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     console.log('\n[3] 通用面板入口完整');
     const labels = JSON.parse(await evalJs(`JSON.stringify(Array.from(document.querySelectorAll('#nav button[data-nav]')).map(b=>b.textContent.replace(/\\s+/g,' ').trim()))`));
     console.log('    导航项: ' + labels.join(' | '));
-    for (const need of ['仪表盘', '账号池', '请求日志', '任务历史', '可用模型', '对话测试', '设置']) {
+
+    // ⚠ 2026-10-19：「任务历史」标签页**被用户要求删除**（连 data-key="workbuddy:history"
+    //   的 section 一起下线，见 webui.html 里那段说明）。所以它从"必须有的入口"
+    //   清单里移除，并**改成正向的删除守卫** —— 断言它不回来。
+    //
+    // 为什么不只是把它从数组里删掉：那样这条判据只剩"剩下 6 个还在"，
+    // 而"某个标签页被重新加回来"（用户明确不要的东西）没有任何东西会红。
+    // 判据的**意图原样保留**：导航要对通用面板的基本集合完整 —— 只是那个集合
+    // 现在少了一项，且那一项反过来成了不该有的东西。
+    for (const need of ['仪表盘', '账号池', '请求日志', '可用模型', '对话测试', '设置']) {
       ok(labels.some(l => l.indexOf(need) >= 0), '有「' + need + '」入口');
     }
+    ok(!labels.some(l => l.indexOf('任务历史') >= 0),
+      '导航里**没有**「任务历史」（用户本轮要求删除该标签页）' +
+      (labels.some(l => l.indexOf('任务历史') >= 0) ? ' —— 它又回来了' : ''));
+
+    // 入口完整性的**结构性**判据（不依赖硬编码清单）。
+    //
+    // # 为什么加这条
+    //
+    // 上面那张清单是手写的，它只证明"清单里的还在"，证明不了"没有面板没有入口"：
+    // 本轮实测 —— 导航里其实有「API 管理」「任务调度」两项，而旧清单里两个都没有，
+    // 也就是说一条**新加的面板忘了接导航**会静默通过。
+    //
+    // ⚠ 这里刻意用**计数相等**而不是按键名配对：`data-nav` 存的是 section 的
+    //   索引（webui.html:5893 `data-nav="${idx}"`），不是 data-key，
+    //   按键名配对本就做不到。计数相等 + 上面那份逐项清单合起来才是有意义的判据
+    //   （单用计数：换掉一个面板也能相等；单用清单：新增面板漏接看不见）。
+    const struct = JSON.parse(await evalJs(`JSON.stringify((function(){
+      var genSecs = Array.from(document.querySelectorAll('#content > section[data-key]'))
+        .filter(function(s){ return !s.dataset.provider; });
+      var genGroup = Array.from(document.querySelectorAll('#nav .navgroup'))
+        .filter(function(g){ return !g.dataset.pid; })[0];
+      return {
+        genericSections: genSecs.map(function(s){ return s.dataset.key; }),
+        navGenericCount: genGroup ? genGroup.querySelectorAll('button[data-nav]').length : -1,
+      };
+    })())`));
+    console.log('    通用 section: ' + struct.genericSections.join(' | '));
+    ok(struct.navGenericCount === struct.genericSections.length,
+      '通用 section 与「通用」分组里的导航项**一一对应**（section ' +
+      struct.genericSections.length + ' 个 vs 导航 ' + struct.navGenericCount + ' 项）' +
+      ' —— 新增面板漏接导航会在这里红');
+    // 反向：导航里不该有为已删除标签页留下的死入口（点了没反应的那种）
+    ok(struct.genericSections.indexOf('workbuddy:history') < 0,
+      '通用 section 里没有 workbuddy:history（该标签页已按用户要求下线）');
+    ok(!labels.some(l => l.indexOf('签到与保活') >= 0),
+      '导航里没有「签到与保活」（T3 起该面板不再生成）');
 
     // ---------------------------------------------------------------- 切换面板
     console.log('\n[4] 点击切换面板（data-key 生效）');

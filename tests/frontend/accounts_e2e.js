@@ -3,7 +3,7 @@
 // # 验证什么
 //
 //  T5 验收：账号表按上游分组，组标题显示「上游名 · N 个账号」
-//  B1   ：错误态整行提示与真实列数一致（11 列），不再露底色
+//  B1   ：错误态整行提示与真实列数一致（9 列，2026-10-19 起；原 11 列含已删的熔断/在途），不再露底色
 //  B5   ：/status 回落路径下账号仍能正确归属上游，且有"推断"标记
 //
 // # 为什么必须在真浏览器里做
@@ -19,7 +19,7 @@ const PORT = 9224;
 const URL_UNDER_TEST = process.env.ACC_TEST_URL || 'http://127.0.0.1:18099/ui';
 const PROFILE = require('os').tmpdir() + '/chrome-accprofile';  // 绝对路径（原为相对 cwd，跨目录执行会串台）
 
-// WORKBUDDY_HEADERS —— workbuddy 那 11 个表头，**硬编码**。
+// WORKBUDDY_HEADERS —— workbuddy 那 9 个表头，**硬编码**。
 //
 // # 为什么不从 `window.__wb2api__.DEFAULT_ACCT_COLUMNS` 取（那是循环论证）
 //
@@ -36,9 +36,17 @@ const PROFILE = require('os').tmpdir() + '/chrome-accprofile';  // 绝对路径�
 // 而不是来自被测页面。改文案要同时改这里和
 // `internal/server/webui_account_columns_test.go` 里那份 —— 两处都硬编码是
 // **故意的**：那正是"逐字不变"该有的摩擦。
+//
+// ⚠ 2026-10-19 更新：原来是 11 列（末尾「成功」之后还有「熔断」「在途」）。
+//   本轮用户**点名要求**把这两列从账号池删掉（workbuddy 与 loomy 都删，
+//   理由是排障用的计数器几乎不变却占两列宽）⇒ 现在是 9 列。
+//   这不是"为了让断言变绿而放宽"：同一变化已经落在 Go 侧契约测试
+//   `internal/gateway/account_columns_test.go` 的 TestDefaultAccountColumnsExact
+//   （它把 want 钉成同样的 9 列，并**反向断言** breaker/in_flight 不在其中）。
+//   两边仍各自硬编码、互不引用，摩擦照旧 —— 谁再悄悄加减一列，两处一起红。
 const WORKBUDDY_HEADERS = [
   '上游', '昵称', 'UID', '额度', '状态', 'Token',
-  '今日签到', '成功', '熔断', '在途', '操作',
+  '今日签到', '成功', '操作',
 ];
 
 function get(url) {
@@ -169,10 +177,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ok(colBad.length === 0, '每个上游的表头都等于它自报的列集（顺序也算）' +
       (colBad.length ? ' —— ' + JSON.stringify(colBad) : ''));
 
-    // ---- 上游**没自报**列集时（workbuddy）：表头必须逐字等于硬编码的 11 列 ----
+    // ---- 上游**没自报**列集时（workbuddy / lobsterai / qoder / qodercn）：表头必须逐字等于硬编码的 9 列 ----
     //
     // 上面那条对"自报列集"的上游是 manifest ↔ 渲染一致性；对没自报的上游，
     // 期望值必须来自本文件的 WORKBUDDY_HEADERS（用户要求），不能来自页面常量。
+    //
+    // ⚠ 实测（18080 的 manifest）：`accounts_columns` 为 `null` 的是
+    //   lobsterai / qoder / qodercn（外加 workbuddy 虽自报 9 列、但列集与默认一致）
+    //   —— 它们全走同一条回落，所以这条断言实际覆盖 4 个上游而不是 1 个。
     const notReported = colCheck.filter(c => !c.selfReported);
     ok(notReported.length >= 1,
       '存在"未自报列集"的上游（workbuddy 走回落）—— 否则下面这条空转（实际 ' +
@@ -229,7 +241,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       return JSON.stringify({
         sectionCount: secs.length,
         heads: secs.map(s => (s.querySelector('.ghead') || {}).textContent || '').map(t => t.replace(/\\s+/g,' ').trim()),
-        accountRows: document.querySelectorAll('#accts > section.acctgroup > table > tbody > tr.acctrow').length,
+        accountRows: document.querySelectorAll('#accts > section.acctgroup > .acctwrap > table > tbody > tr.acctrow').length,
       });
     })()`));
     console.log('    分区数=' + grouped.sectionCount + '  账号行=' + grouped.accountRows);
@@ -262,8 +274,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       });
       // 每个账号行**自己**的归属：data-acctof（渲染时写死的事实），
       // 不再靠"第 1 格文本"—— 那是列序的函数，而列序现在按上游不同了。
+      //
+      // ⚠ 选择器要用 "> .acctwrap > table"：2026-10-19 起表格被包进 .acctwrap
+      //   （列宽拖拽需要 overflow-x:auto 的容器，见 webui.html:247-266
+      //   与 renderAccounts 的 div.acctwrap）。写 "> table" 会**静默拿到 0 行**，
+      //   于是下面"每个账号行都在它自己上游的分区里"在空集上**恒真** ——
+      //   这正是本仓库反复吃过的那类亏（判据在空输入上通过）。
       const rowProviders = Array.from(new Set(
-        Array.from(document.querySelectorAll('#accts > section.acctgroup > table > tbody > tr.acctrow'))
+        Array.from(document.querySelectorAll('#accts > section.acctgroup > .acctwrap > table > tbody > tr.acctrow'))
           .map(r => r.dataset.acctof || '')
           .filter(Boolean)));
       return JSON.stringify({

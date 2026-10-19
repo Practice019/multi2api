@@ -110,58 +110,62 @@ function stripComments(s) {
     const pasted = await pasteConsoleKey(ev, undefined, BASE);
     if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 下面依赖 /v1 的断言会假红');
 
+    // ⚠ 装旅行夹具**必须在第一次打开「猫猫旅行」之前**。
+    //
+    // 为什么需要夹具：本探针要的是"点详情 → 弹窗里出现可读字段"这条**渲染**
+    // 判据，而 18080 合成实例里 `/admin/travel` 回 `{"accounts":[]}`（没有 workbuddy 凭证）
+    // ⇒ 连一个「详情」按钮都渲染不出来。
+    // 夹具只替换 `/admin/travel` 与 `/admin/travel/status` 两条回执，
+    // renderTravel / travelAct / showInfo / 事件委托 **全部真跑**（见 lib_fixtures 顶部）。
+    const fixtures = require('./lib_fixtures.js');
+    const fr = await fixtures.fixTravel(ev);
+    console.log('  (' + await fixtures.fixGrowth(ev) + ' / ' + fr + ')');
+    if (!String(fr).startsWith('installed') && !String(fr).startsWith('already')) {
+      console.error('  ⚠ 旅行夹具没装上（' + fr + '）⇒ 下面会报"没有详情按钮"，那是夹具问题');
+    }
+
     await ev(`(function(){
       var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
         .filter(function(x){ return x.textContent.indexOf('猫猫旅行') >= 0; })[0];
       if (b) b.click();
     })()`);
-    await sleep(2200);
+    await sleep(1500);
+    // ⚠ 夹具装上后还要**点一次面板自己的「刷新」**：loadTravel 的非刷新路径走
+    //   `sharedGet('ep:/admin/travel')`（30 秒 TTL），而夹具是页面加载**之后**才装的
+    //   —— 首次回源可能已把空结果写进缓存，于是"装了夹具面板还是空"。
+    //   「刷新」走 `?refresh=1`（直连、绕开缓存），正是用户看到空面板时会做的操作。
+    console.log('      夹具+刷新: ' + await fixtures.prepare(ev, 'travel',
+      `document.querySelectorAll('#travelRows tr').length`, 1));
+    await sleep(800);
 
     console.log('\n[2] 点「详情」应弹出 infoModal');
     const hasBtn = await ev(`document.querySelectorAll('#travelRows button[data-tact="detail"]').length`);
     ok(hasBtn > 0, '存在「详情」按钮（' + hasBtn + ' 个）');
 
-    // ⚠ 必须点**会返回 200 的那个账号**。
-    // 我第一版点第一行，而那行是 codearts 账号 —— 它的 travel/status 返回
-    // 404（无可用凭证），于是代码走 catch 分支显示 toast，弹窗自然不出现。
-    // 那是**测试选错了数据**，不是产品缺陷。
-    // 这里先探测每行的账号是否可用，再点可用的那一行。
-    const usable = await ev(`(function(){
-      return new Promise(function(resolve){
-        var req = new XMLHttpRequest();
-        req.open('GET', '/admin/accounts', false);
-        req.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
-        req.send(null);
-        var accs = (JSON.parse(req.responseText).accounts || []);
-        var good = [];
-        accs.forEach(function(a){
-          var r2 = new XMLHttpRequest();
-          try {
-            r2.open('GET', '/admin/travel/status?uid=' + encodeURIComponent(a.uid), false);
-            r2.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
-            r2.send(null);
-            if (r2.status === 200) good.push(a.uid);
-          } catch (e) {}
-        });
-        resolve(JSON.stringify(good));
+    // ⚠ 这条原来叫"至少有一个账号能返回旅行数据"，做法是**逐个 uid 打真后端**
+    //   （同步 XHR 探 200）。夹具装上以后那条探测本身就是错的：它打的是真后端，
+    //   而真后端对这个实例没有旅行数据（404）—— 于是"夹具装了却探测说没有"。
+    //   判据的意图是"待会儿要点的那个账号，它的 status 端点会返回可渲染的数据"；
+    //   在夹具模式下这由夹具自己保证，所以改成断言**夹具行渲染出来了**（结构），
+    //   并且把"端点真的返回了数据"交给下面那条弹窗内容断言去证（那是端到端的）。
+    const rendered = JSON.parse(await ev(`JSON.stringify((function(){
+      return Array.from(document.querySelectorAll('#travelRows tr')).map(function(tr){
+        var b = tr.querySelector('button[data-tact="detail"]');
+        return { uid: b ? b.dataset.uid : null, cells: tr.children.length };
       });
-    })()`);
-    const goodUids = JSON.parse(usable);
-    console.log('      有可用旅行数据的账号: ' + goodUids.length + ' 个');
-    ok(goodUids.length > 0, '至少有一个账号能返回旅行数据');
+    })())`));
+    console.log('      旅行面板渲染出的行: ' + JSON.stringify(rendered.map(r => r.uid)));
+    ok(rendered.length > 0 && rendered.every(r => r.uid),
+      '旅行面板渲染出带 uid 的夹具行（' + rendered.length + ' 行）—— 夹具生效');
 
-    // 点那一行的详情按钮
+    // 点第一行的详情按钮
     const clicked = await ev(`(function(){
-      var rows = Array.from(document.querySelectorAll('#travelRows tr'));
-      var good = ${JSON.stringify(goodUids)};
-      for (var i = 0; i < rows.length; i++) {
-        var b = rows[i].querySelector('button[data-tact="detail"]');
-        if (!b) continue;
-        if (good.indexOf(b.dataset.uid) >= 0) { b.click(); return b.dataset.uid; }
-      }
-      return false;
+      var b = document.querySelector('#travelRows button[data-tact="detail"]');
+      if (!b) return false;
+      b.click();
+      return b.dataset.uid;
     })()`);
-    ok(clicked !== false, '点击了有数据的账号的「详情」（uid=' + String(clicked).slice(0, 8) + '）');
+    ok(clicked !== false, '点击了「详情」（uid=' + String(clicked) + '）');
     await sleep(2000);
 
     const state = JSON.parse(await ev(`JSON.stringify((function(){

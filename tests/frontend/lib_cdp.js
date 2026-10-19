@@ -414,4 +414,18 @@ module.exports = {
   consoleHtmlAuthed,
   consoleSource,
   pasteConsoleKey,
+  // withToken —— 为什么把它也导出去（原先只在模块内部被 withChrome 用）
+  //
+  // 有一族探针**自带 CDP 引导段**（自己 `spawn(Chrome)` + `send('Page.navigate')`），
+  // 它们不走 `withChrome` ⇒ 漏掉了 `withChrome` 里那一行
+  // `const navURL = withToken(opts.url, opts.token)`（本文件 :269）⇒ **裸 /ui**
+  // ⇒ 拿到登录页 ⇒ `window.__wb2api__` 不存在 ⇒ 后面每条页面断言都是级联。
+  //
+  // 实测（2026-10-19）：`verify_all_buttons_e2e.js` / `verify_checkin_ui_e2e.js`
+  // 正是这样在**登录页**上做断言的（6 / 25 条级联红）。
+  // 而它们以前"绿"是靠被测二进制**早于登录门**（见那两个文件里 UI_URL 的长注释）。
+  //
+  // ⚠ 导出的是**同一份**实现：调用方别再就地写一份等价的（本仓已因"同源副本会漂"
+  //   交过一次学费 —— 判据/实现复制两份之后，改一处忘一处就变成两套行为）。
+  withToken,
   injectProbeKey, withChrome, until, showPanel, sleep, httpGet };

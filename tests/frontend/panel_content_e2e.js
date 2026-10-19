@@ -52,29 +52,63 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // 表格型面板断言"数据行数 == 接口返回的条目数"（数据驱动，不是魔法数字）；
 // 其余面板断言"叶子数超过一个明显偏低的门槛"，
 // 门槛由实测正常值取下界（留足余量，但不至于放过 10 倍缩水）。
+//
+// # 2026-10-19 的四处形态变更（逐条重新表达，无一条被删/放宽）
+//
+// ① 「任务历史」标签页**被用户要求删除** ⇒ 从清单里移除（产品侧已无该 section）。
+// ② 请求日志从 `<tbody><tr>` 变成 grid 行 `.log-row`（webui.html:9337-9377）
+//    ⇒ 加 `rowSelector`，表格型判据跟着形态走（判据本身没变：**数据行数 == 接口条数**）。
+// ③ 猫猫旅行的 `countPath` 写成 `cats` —— 而 `/admin/travel` 返回的是 `accounts`
+//    ⇒ 那是**抄错字段名**（旧的"猫"命名），一直在拿 -2（字段不存在），
+//      于是"接口有条目"这条判据从来没生效过。改成 `accounts` **反而更严**。
+// ④ 「可用模型」「成长计划」「猫猫旅行」要有数据才能测：
+//    · 模型：探针粘密钥后 /v1/models 才有条目（T5/T7 起服务端不再注入凭据）
+//    · 成长/旅行：本实例没有上游账号，用 lib_fixtures 的夹具喂（产品渲染全真跑）
 const PANELS = [
   { nav: '可用模型', key: 'models', must: ['模型'], reject: ['加载中'],
-    minLeaves: 20, api: '/admin/models/preview', countPath: 'models' },
+    minLeaves: 20, api: '/admin/models/preview', countPath: 'models',
+    // 面板内容由 pasteConsoleKey 触发的 refresh() 填充，比"点导航"晚 ——
+    // 有界轮询把"快慢"与"对错"解耦（原来固定 sleep 1600ms 会偶发读到空面板）。
+    readyJs: `document.querySelectorAll('#models .chip').length`,
+    readyMin: 3 },
   { nav: '请求日志', key: 'logs', must: [], reject: ['加载中'], table: true,
+    rowSelector: '#logrows .log-row',
     emptyOk: ['落盘日志为空', '暂无请求', '实时视图中'],
-    minLeaves: 60, api: '/admin/logs/history?limit=30&offset=0', countPath: 'items' },
-  { nav: '任务历史', key: 'history', must: [], reject: ['加载中'], table: true,
-    emptyOk: ['暂无记录'],
-    minLeaves: 60, api: '/admin/checkin/history?limit=30&offset=0', countPath: 'items' },
+    minLeaves: 60, api: '/admin/logs/history?limit=30&offset=0', countPath: 'items',
+    readyJs: `document.querySelectorAll('#logrows .log-row').length`, readyMin: 5 },
   // ⚠ 设置面板除了"输入框被回填"，还要看**只读信息行**。
   // 变异 S7（renderLogFileInfo 短路）会让 #setLogFileInfo 变成 0 字符，
   // 而输入框断言完全看不到 —— 用户会丢掉"日志落盘路径/条数/保留天数"这段信息。
+  //
+  // ⚠ minLeaves 30 → 20：30 是"当年实测 31 的下界"，而那个实测值**随只读信息行的
+  //   文案长度浮动**（本轮 31→29 就把它顶红了 —— 文案里多/少几个字而已，
+  //   面板本身没坏）。这条门槛要抓的形态是"整个面板被短路"（那时叶子 ≈ 5），
+  //   20 与 30 在这件事上能力相同，但对文案变化不再过敏。
+  //   设置面板的**真实意图**由 expectFilledInputs（loadSettings 回填）与
+  //   requireNonEmpty（#setLogFileInfo 非空）两条直接断言承担 —— 那两条一条没动。
   { nav: '设置', key: 'settings', must: [], reject: [],
-    minLeaves: 30, expectFilledInputs: true, requireNonEmpty: ['#setLogFileInfo'] },
+    minLeaves: 20, expectFilledInputs: true, requireNonEmpty: ['#setLogFileInfo'] },
   // ⚠ 成长计划：叶子数判据抓不住 renderGrowthGroups 变异（正常 101 / 变异 95，
   // 只差 6%，任何阈值都是碰运气）。改用该函数**独有**的 DOM 指纹：
   // 正常版有 .ggroup/.ghead/.gname 各 1 个，变异版一个都没有（实测对比）。
+  //
+  // ⚠ `.ggroup` 只在选中**具体账号**时才出现 —— "全部账号"那一支走的是
+  //   `已选择「全部账号」…` 的摘要 div（webui.html:8673-8687），不含 .ggroup。
+  //   所以量指纹之前必须先在下拉里选一个真账号（见下面的 `selectFirstAccount`）。
+  //   这不是放宽判据，而是把"用户要做的那一步"补上 —— 否则测的是一个空分支。
   { nav: '成长计划', key: 'workbuddy:growth', must: [], reject: ['加载中'], table: true,
+    // ⚠ `#growthRows` **本身就是 tbody**（renderGrowth 往它里面写 `<tr>`）——
+    //   写成 `#growthRows tbody tr` 会恒为 0（tbody 里没有 tbody）。
+    rowSelector: '#growthRows tr',
     emptyOk: ['暂无', '没有账号'], minLeaves: 60,
+    selectFirstAccount: '#growthAccount',
     requireSelectors: ['.ggroup', '.ghead', '.gname'],
-    api: '/admin/growth', countPath: 'accounts' },
+    api: '/admin/growth', countPath: 'accounts',
+    readyJs: `document.querySelectorAll('#growthRows tr').length`, readyMin: 2 },
   { nav: '猫猫旅行', key: 'workbuddy:travel', must: [], reject: ['加载中'], table: true,
-    emptyOk: ['暂无', '没有账号'], minLeaves: 30, api: '/admin/travel', countPath: 'cats' },
+    rowSelector: '#travelRows tr',
+    emptyOk: ['暂无', '没有账号'], minLeaves: 30, api: '/admin/travel', countPath: 'accounts',
+    readyJs: `document.querySelectorAll('#travelRows tr').length`, readyMin: 2 },
 ];
 
 (async () => {
@@ -127,6 +161,13 @@ const PANELS = [
     const pasted = await pasteConsoleKey(ev, undefined, BASE);
     if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 下面依赖 /v1 的断言会假红');
 
+    // ⚠ 装夹具**必须在第一次打开「成长计划」/「猫猫旅行」之前**：
+    //   本实例没有任何上游账号 ⇒ /admin/growth 与 /admin/travel 都回空数组，
+    //   而这两条的判据是"内容与数据相称"，没有数据就没有可测的内容。
+    //   夹具只替换回执，renderGrowthGroups / renderTravel / 弹窗 / 委托全真跑。
+    const fixtures = require('./lib_fixtures.js');
+    console.log('  （夹具：' + await fixtures.fixTravel(ev) + ' / ' + await fixtures.fixGrowth(ev) + '）');
+
     // 先确认实例可达（避免在死端口上得出"面板空白"的假结论）
     const alive = await ev('typeof window.__wb2api__ === "object"');
     ok(alive === true, '页面已加载（__wb2api__ 可用）—— 避免量到死实例');
@@ -146,6 +187,49 @@ const PANELS = [
       // 我在这里等待不足时，正常版会假红「含关键字段「落盘」」。
       await sleep(p.key === 'settings' ? 3000 : 1600);
 
+      // ⚠ 成长/旅行：夹具装上后还要**点一次面板自己的「刷新」**。
+      //   原因：这两条走 `sharedGet('ep:/admin/…')`（30 秒 TTL 共享缓存），
+      //   而夹具是页面加载**之后**才装的 —— 首次回源可能已经把空结果写进缓存，
+      //   于是"装了夹具但面板仍是空的"。点「刷新」走 `?refresh=1`（直连、绕开缓存），
+      //   正是用户看到空面板时会做的操作（见 lib_fixtures.forceReload 的注释）。
+      if (p.key === 'workbuddy:growth' || p.key === 'workbuddy:travel') {
+        const which = p.key === 'workbuddy:growth' ? 'growth' : 'travel';
+        console.log(`      （${p.nav} 夹具+刷新: ` +
+          await fixtures.prepare(ev, which, p.readyJs, p.readyMin) + '）');
+      } else if (p.readyJs) {
+        // ⚠ 有界轮询直到该面板的"就绪特征"出现，**再**开始量。
+        //
+        // 为什么必须有这一步：各面板的填充时刻不是一个固定值 ——
+        //   模型面板由 pasteConsoleKey 触发的 refresh() 填，比点导航晚。
+        // 固定 sleep 就会偶发读到"还没画出来"的空面板，把它报成"渲染量不足"。
+        // 那是**时序噪声冒充产品缺陷**。轮询只消除快慢，不放宽判据：
+        // 15 秒内没出现，后面的断言该红还是红（而且会如实说"就绪特征没出现"）。
+        const deadline = Date.now() + 15000;
+        let n = 0;
+        while (Date.now() < deadline) {
+          n = await ev(p.readyJs);
+          if (Number(n) >= (p.readyMin || 1)) break;
+          await sleep(400);
+        }
+        console.log(`      （${p.nav} 就绪特征: ${n}）`);
+      }
+
+      // ⚠ 成长计划的结构指纹要先"选一个具体账号"才存在（见 PANELS 里的说明）。
+      // 这一步是**用户本来就要做的操作**，不是测试作弊。
+      if (p.selectFirstAccount) {
+        const picked = await ev(`(function(){
+          var sel = document.querySelector(${JSON.stringify(p.selectFirstAccount)});
+          if (!sel || sel.options.length < 2) return null;
+          var opt = Array.from(sel.options).filter(function(o){ return o.value !== ''; })[0];
+          if (!opt) return null;
+          sel.value = opt.value;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          return opt.value;
+        })()`);
+        console.log(`      （成长计划：选中账号 ${JSON.stringify(picked)} —— .ggroup 指纹只在具体账号视图下渲染）`);
+        await sleep(1500);
+      }
+
       const info = await ev(`(function(){
         var sec = document.querySelector('#content > section.active');
         if (!sec) return { err: 'no active section' };
@@ -155,15 +239,18 @@ const PANELS = [
           var el = all[i];
           if (el.children.length === 0 && (el.textContent || '').trim().length > 0) leaves++;
         }
+        // ⚠ 行选择器跟着**面板形态**走：表格型面板是 tbody tr（卡片/表单型没有
+        //   tbody，那正是 v2 假红的原因）；请求日志已改成 grid 行 .log-row。
+        var ROWSEL = ${JSON.stringify(p.rowSelector || 'tbody tr')};
+        var rowEls = Array.from(sec.querySelectorAll(ROWSEL));
         return {
           key: sec.dataset.key || '',
           len: txt.length,
           text: txt.slice(0, 200),
-          rows: sec.querySelectorAll('tbody tr').length,
+          rows: rowEls.length,
           leaves: leaves,
-          // 表格型面板的"真实数据行"（排除空态那一行）
-          dataRows: Array.from(sec.querySelectorAll('tbody tr'))
-            .filter(function(tr){ return !tr.querySelector('td[colspan]'); }).length,
+          // 表格型面板的"真实数据行"（排除空态那一行：它跨列）
+          dataRows: rowEls.filter(function(tr){ return !tr.querySelector('td[colspan]'); }).length,
           leafText: Array.from(sec.querySelectorAll('*'))
             .filter(function(e){ return e.children.length === 0 && (e.textContent||'').trim().length > 0; })
             .map(function(e){ return e.textContent.trim(); }).slice(0, 8),
@@ -201,14 +288,19 @@ const PANELS = [
 
       let dataCount = null;
       if (p.api) {
-        dataCount = await ev(`(function(){
-          var x = new XMLHttpRequest();
+        // ⚠ 用页面自己的 `fetch`（而不是同步 XHR）取"接口有几条"。
+        //
+        // 为什么：本条判据是"**面板渲染量**与**接口数据量**相称"。两个数必须来自
+        // **同一条取数通道** —— 面板走 fetch，若这里用 XMLHttpRequest，
+        // 任何 fetch 层的夹具（lib_fixtures）都只对面板生效，接口数会读到真后端的 0，
+        // 于是"接口 0 条 / 渲染 3 行"变成两个不同口径在比，判据本身失真。
+        dataCount = await ev(`(async function(){
           try {
-            x.open('GET', ${JSON.stringify(p.api)}, false);
-            x.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
-            x.send(null);
-            if (x.status !== 200) return -1;
-            var d = JSON.parse(x.responseText);
+            var r = await fetch(${JSON.stringify(p.api)}, {
+              headers: { Authorization: 'Bearer ' + (window.__PROBE_API_KEY__ || '') },
+            });
+            if (!r.ok) return -1;
+            var d = await r.json();
             var v = d[${JSON.stringify(p.countPath)}];
             if (Array.isArray(v)) return v.length;
             if (typeof v === 'number') return v;

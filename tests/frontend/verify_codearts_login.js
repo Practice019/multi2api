@@ -42,13 +42,33 @@ function resolvePort() {
 }
 const PORT = resolvePort();
 
-// api_key 的来源：**从部署配置里读**，不硬编码。
+// api_key 的来源：**不硬编码**，按 T7 之后的真契约取。
 //
-// ⚠ 本项目因为这个栽过三次（真实 key 进了源码与 git 历史）。
-// 所以这里只认两条路径：环境变量，或配置文件的 api_key 字段。
-// 找不到就**直接失败并说明**，而不是回落到一个写死的值。
+// ⚠ 本项目因为这个栽过三次（真实 key 进了源码与 git 历史），
+//   所以来源仍必须是"运行期给的"，绝不能回落到一个写死的值。
+//
+// # 2026-10-19：加了一条**优先**来源（这就是它在套件里长期红的原因）
+//
+// 原版只认 `WB2API_KEY` 或配置文件（默认 `D:\tmp\run-<port>.json`）。
+// 而 `run_e2e.js` 只给每个套件传**一个 URL 环境变量**（这里是 LOGIN_URL），
+// 那个配置文件也不存在 ⇒ 每次都打印"无法获得 api_key"并 `exit 2`。
+// 那是**门/凭据来源过期**，不是产品缺陷（同一批端点在别处逐字相同）。
+//
+// T7 起控制台的门是 `?token=<admin_token>`，而探针实例里
+// `api_key` 与 `admin_token` **同值**（见 lib_instance 的合成 config）——
+// 所以 run_e2e 传进来的 URL 上就自带可用的 key（与 lib_cdp.probeApiKey 同源）。
+// URL 令牌优先于配置文件：套件里没人设 WB2API_CONFIG，而 URL 上总是有。
 function loadKey() {
   if (process.env.WB2API_KEY) return process.env.WB2API_KEY;
+  // ① URL 上的 ?token=（run_e2e 传的 LOGIN_URL 就带它）
+  const u = process.env.LOGIN_URL;
+  if (u) {
+    const m = u.match(/[?&]token=([^&#]+)/);
+    if (m) return decodeURIComponent(m[1]);
+  }
+  // ② 进程环境里探针实例写下的令牌（lib_instance 起实例时的约定名）
+  if (process.env.WB2API_PROBE_TOKEN) return process.env.WB2API_PROBE_TOKEN;
+  // ③ 显式部署配置（单独跑、且不想用 URL 令牌时）
   const cfgPath = process.env.WB2API_CONFIG || 'D:\\tmp\\run-' + PORT + '.json';
   try {
     const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
@@ -58,6 +78,7 @@ function loadKey() {
   }
   console.log('  无法获得 api_key：');
   console.log('    · 设 WB2API_KEY 环境变量，或');
+  console.log('    · 让 LOGIN_URL 带上 ?token=<admin_token>（run_e2e 的默认做法），或');
   console.log('    · 设 WB2API_CONFIG 指向部署配置（默认 D:\\tmp\\run-' + PORT + '.json）');
   process.exit(2);
 }

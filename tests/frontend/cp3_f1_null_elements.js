@@ -19,9 +19,41 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+const { probeApiKey } = require('./lib_cdp.js');
 const PORT = 9252;
 const URL_UT = process.env.F1N_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = require('os').tmpdir() + '/chrome-f1n';  // 绝对路径（原为相对 cwd，跨目录执行会串台）
+
+// 后端**权威**的渲染契约。改这一段的理由：
+//
+// # 为什么不再写死 "providers 数仍为 2 / jobs 数仍为 3"
+//
+// 那两个常数是这套夹具最初（只有 workbuddy + codearts 两个上游、三条任务）
+// 的快照。上游与任务此后一直在长（18080 实测：12 个上游 / 19 条任务），
+// 于是"合法 manifest 不受影响"这条判据**每次加一个上游就假红一次**——
+// 而修法绝不能是把 2 改成 12（下次还会过期）。
+//
+// 判据的**意图**是："applyManifest(合法 manifest) 之后，页面持有的
+// manifest 与后端下发的**同源**" —— 也就是"归一化没有丢字段、没有被截断"。
+// 所以期望值必须**从后端现取**，而不是写死：
+//   · 页面里的 providers/jobs/caps/routes 数量 == /admin/ui/manifest 的对应数量
+//   · 再配一条非零下限，避免"端点数到 0、页面也是 0"那种两边一起错的恒真。
+//
+// 取值与 lib_cdp.probeApiKey 同源：探针实例里 api_key == admin_token，
+// 而 run_e2e 传进来的 URL 上就带着 `?token=`（T7 之后的真契约）。
+const TOKEN = probeApiKey(undefined, URL_UT);
+function getJson(path) {
+  return new Promise((res) => {
+    const req = http.get({
+      host: '127.0.0.1', port: new URL(URL_UT).port || 80, path,
+      headers: TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {},
+    }, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => {
+      try { res({ code: r.statusCode, json: JSON.parse(d) }); }
+      catch { res({ code: r.statusCode, json: null }); }
+    }); });
+    req.on('error', e => res({ code: 0, json: null, err: e.message }));
+  });
+}
 
 function get(u) {
   return new Promise((res, rej) => {
@@ -124,8 +156,30 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     })()`);
     const s = JSON.parse(sane.result.value);
     console.log('    ' + JSON.stringify(s));
-    ok(s.providers === 2, '合法 providers 数仍为 2');
-    ok(s.jobs === 3, '合法 jobs 数仍为 3');
+
+    // 期望值来自后端现取（见文件顶部那段注释：写死常数每次加上游就假红）
+    const man = await getJson('/admin/ui/manifest');
+    console.log('    后端 /admin/ui/manifest: HTTP ' + man.code +
+      (man.json ? (' providers=' + (man.json.providers || []).length +
+        ' jobs=' + (man.json.jobs || []).length +
+        ' caps=' + (man.json.capabilities || []).length +
+        ' routes=' + (man.json.admin_routes || []).length) : ' （非 JSON）'));
+
+    // ⚠ 先确认"对照"本身拿到了 —— 否则下面的相等断言会在 null 上炸掉/空转
+    ok(man.code === 200 && !!man.json, '前置：拿得到后端权威 manifest（HTTP ' + man.code + '）');
+    if (man.json) {
+      ok(s.providers === (man.json.providers || []).length,
+        '合法 providers 数与后端一致（页面 ' + s.providers + ' vs 后端 ' + (man.json.providers || []).length + '）');
+      ok(s.jobs === (man.json.jobs || []).length,
+        '合法 jobs 数与后端一致（页面 ' + s.jobs + ' vs 后端 ' + (man.json.jobs || []).length + '）');
+      ok(s.caps === (man.json.capabilities || []).length,
+        '合法 capabilities 数与后端一致（页面 ' + s.caps + ' vs 后端 ' + (man.json.capabilities || []).length + '）');
+      ok(s.routes === (man.json.admin_routes || []).length,
+        '合法 admin_routes 数与后端一致（页面 ' + s.routes + ' vs 后端 ' + (man.json.admin_routes || []).length + '）');
+    }
+    // 下限：防"两边都数到 0"的恒真
+    ok(s.providers >= 3, '合法 providers 不是空集（实际 ' + s.providers + '）—— 防两边一起为 0');
+    ok(s.jobs >= 1, '合法 jobs 不是空集（实际 ' + s.jobs + '）');
     ok(s.groups >= 3, '分组仍正常（通用 + 2 上游）');
 
     console.log('\n[健康]');
