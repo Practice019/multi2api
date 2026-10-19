@@ -56,6 +56,23 @@ type Key struct {
 	RPM       int    `json:"rpm"`        // 每分钟请求上限，0 = 不限
 	CreatedAt string `json:"created_at"` // RFC3339
 
+	// OwnerID 归属账号 ID（`account.User.ID`，形如 u-xxxx）。**空 = 管理员所有**。
+	//
+	// # 为什么空值判成"管理员所有"，而不是"无主"
+	//
+	// 本仓既有的每一把 key 都是管理台建的（那时还没有登录体系，能建 key 的
+	// 只有 loopback 上的管理员），落盘的 apikeys.json 里根本没有这个字段。
+	// 若把空值当成"谁都不属于"，升级后这些 key 会从**每个人的**列表里消失 ——
+	// 用户看到的是"我的 key 全没了"，而数据其实一直在盘上。空 = 管理员所有，
+	// 与既成事实正好一致：管理员本来就该看得见它们。
+	//
+	// ⚠ 由此推出一条**不能反过来用**的判据：非管理员不能靠"我的归属也是空"
+	// 去匹配这些 key —— 那是把管理员的 key 交给成员，见 ListFor / CanManage。
+	//
+	// omitempty 让老 key 写回后**不多出**这个字段（"只是重启了一次"不该产生
+	// 整文件 diff），也让新文件里管理员建的 key 与老数据形态一致。
+	OwnerID string `json:"owner_id,omitempty"`
+
 	// Models 这把 key **允许调用的模型白名单**（空 = 不限制，全部可用）。
 	//
 	// # 语义（三态，与其它"空值"判据分开）
@@ -91,6 +108,9 @@ type View struct {
 	Fails     int64  `json:"fails"`
 	RPM       int    `json:"rpm"`
 	CreatedAt string `json:"created_at"`
+	// OwnerID 归属账号 ID；空 = 管理员所有（语义与 Key.OwnerID 同一处定义）。
+	// 前端据此显示"这把 key 是谁建的"，也是 ListFor 的过滤判据。
+	OwnerID string `json:"owner_id,omitempty"`
 	// Models 模型白名单（空 = 不限制）。管理界面据此展示"这把 key 能用什么"。
 	Models []string `json:"models,omitempty"`
 }
@@ -160,32 +180,14 @@ func (s *Store) saveLocked() error {
 	return os.Rename(tmp, s.path)
 }
 
-// Create 新建一把 key。limit=0 不限额度；rpm=0 不限速；models 为空则不限制模型。
+// Create 新建一把 key（**归管理员所有**）。limit=0 不限额度；rpm=0 不限速；
+// models 为空则不限制模型。
+//
+// 签名与行为保持不变（既有调用方 internal/admin/apikeys.go 与既有测试都据此
+// 断言），实现委托给 CreateOwned("", ...) —— owner 为空 = 管理员所有，
+// 与老数据同一语义。新增归属能力靠新增方法，不改这个签名。
 func (s *Store) Create(name string, limit int64, rpm int, models []string) (*Key, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil, errors.New("名称不能为空")
-	}
-	if limit < 0 || rpm < 0 {
-		return nil, errors.New("额度/限速不能为负数")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	k := &Key{
-		ID:        newID(),
-		Name:      name,
-		Enabled:   true,
-		Limit:     limit,
-		RPM:       rpm,
-		Models:    normalizeModels(models),
-		CreatedAt: time.Now().Format(time.RFC3339),
-	}
-	s.keys[k.ID] = k
-	if err := s.saveLocked(); err != nil {
-		delete(s.keys, k.ID)
-		return nil, err
-	}
-	return k, nil
+	return s.CreateOwned("", name, limit, rpm, models)
 }
 
 // normalizeModels 规整白名单：去空白、丢空项、去重（保序）。
@@ -274,7 +276,10 @@ func (s *Store) List() []View {
 			Fails:     k.Fails,
 			RPM:       k.RPM,
 			CreatedAt: k.CreatedAt,
-			Models:    append([]string(nil), k.Models...),
+			// OwnerID 必须带出来：ListFor 的成员过滤就是按它比的，漏掉这一行
+			// 会让每个成员都看到空表（"我的 key 不见了"），而接口仍回 200。
+			OwnerID: k.OwnerID,
+			Models:  append([]string(nil), k.Models...),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
