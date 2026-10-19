@@ -780,7 +780,7 @@ func acceptRejectionReason(msg string) (string, bool) {
 // `runFirstBuddy`：上报活跃 → 同意协议 → 领取 Buddy，+300 分 +8 能量）——
 // 也就是说网页**完全能代做**，而那句话把用户赶去了客户端。
 //
-// 实测（2026-10，账号 17005247808）：
+// 实测（2026-10，账号 170****7808）：
 //
 //	POST /admin/growth/auto {"uid":"…","task_code":"first_buddy"}
 //	→ {"ok":true,"message":"已领取 Buddy（+300 分 +8 能量）",
@@ -1134,7 +1134,7 @@ func (p *Provider) runGrowthAutoActions(snap *GrowthSnapshot) {
 		// 而**守卫轮里没有任何一步会做前置任务** —— 于是那位用户的两个账号
 		// 变成"每轮空转一次、17 个任务永远接不上"，界面看起来只是在等。
 		//
-		// 实测（2026-10，账号 17005247808）：
+		// 实测（2026-10，账号 170****7808）：
 		//
 		//	POST /admin/growth/auto {"task_code":"first_buddy"} → ok，+300 分 +8 能量
 		//	再 POST /admin/growth/accept → 接单成功，前置解除

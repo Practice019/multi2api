@@ -106,7 +106,7 @@ func fakeUpstream(t *testing.T, qrStatuses []string) (*httptest.Server, *fakeCal
 			_, _ = w.Write([]byte(`{"code":1,"message":"X-Org-Code must always be sent"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"id":"7445120","name":"RaccoonAva","office_identity":"personal","phone":"13800001100"}}`))
+		_, _ = w.Write([]byte(`{"code":0,"message":"success","data":{"id":"7445120","name":"RaccoonAva","office_identity":"personal","phone":"13800138000"}}`))
 	})
 
 	// ── 续期 ───────────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ func newContractCredential(uid string) gateway.Credential {
 		OfficeIdentity: "personal",
 		UserID:         uid,
 		Nickname:       "RaccoonAva",
-		Phone:          "13800001100",
+		Phone:          "13800138000",
 	}
 	return gateway.Credential{Provider: providerID, UID: uid, Nickname: a.DisplayUID(), Secret: a}
 }
@@ -520,7 +520,7 @@ func TestLoginEndToEnd(t *testing.T) {
 		t.Error("expires_at 未从 JWT exp 回填 —— finishLogin 没被走到")
 	}
 	// 展示名应含手机号后 4 位（服务端昵称不可区分多账号）
-	if !strings.Contains(cred.Nickname, "1100") {
+	if !strings.Contains(cred.Nickname, "8000") {
 		t.Errorf("展示名应含手机号后 4 位，实际 %q", cred.Nickname)
 	}
 }
@@ -582,7 +582,7 @@ func TestRefreshKeepsOldRefreshToken(t *testing.T) {
 		t.Errorf("expires_at 应由新 token 的 JWT exp 重算，old=%q new=%q", oldExp, a.ExpiresAt)
 	}
 	// 展示字段必须保留
-	if a.OfficeIdentity != "personal" || a.Phone != "13800001100" {
+	if a.OfficeIdentity != "personal" || a.Phone != "13800138000" {
 		t.Errorf("服务端不返回的字段必须保留: %+v", a)
 	}
 }
@@ -646,7 +646,7 @@ func TestExpiryFallsBackToJWT(t *testing.T) {
 
 // TestPhoneEncryption AES-128-CFB 加密手机号。
 func TestPhoneEncryption(t *testing.T) {
-	ct, err := EncryptPhone("13800001100")
+	ct, err := EncryptPhone("13800138000")
 	if err != nil {
 		t.Fatalf("加密失败: %v", err)
 	}
@@ -659,7 +659,7 @@ func TestPhoneEncryption(t *testing.T) {
 		t.Errorf("密文长度 = %d, want 27（16 iv + 11 明文）", len(raw))
 	}
 	// 两次加密的 iv 不同 → 密文不同
-	ct2, _ := EncryptPhone("13800001100")
+	ct2, _ := EncryptPhone("13800138000")
 	if ct == ct2 {
 		t.Error("两次加密应产生不同 iv（从而不同密文）")
 	}
@@ -845,7 +845,7 @@ func TestCredentialRoundTrip(t *testing.T) {
 	a := &Auth{
 		AccessToken: fixtureJWT(1790412721), RefreshToken: "rt",
 		ExpiresAt: "1790412721000", OfficeIdentity: "personal",
-		UserID: "7445120", Nickname: "RaccoonAva", Phone: "13800001100",
+		UserID: "7445120", Nickname: "RaccoonAva", Phone: "13800138000",
 		DeviceID: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
 	}
 	raw, err := MarshalAuthFile(a)

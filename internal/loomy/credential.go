@@ -178,7 +178,7 @@ func ParseCredential(raw []byte) (*Auth, error) {
 	// 昵称：**手机号优先**（用户要求：所有上游统一用手机号显示账号）。
 	// 顺序不能是 Nickname 字段在前 —— 批量导入的凭证里 nickname 往往是
 	// 登录态的名称（如 NK6952053），而同一份凭证里明明有 phone
-	//（19846952053，手机号登录的必然带）。修复前导入后显示名称、
+	//（198****2053，手机号登录的必然带）。修复前导入后显示名称、
 	// 手动登录显示手机号，两者不一致。
 	a.Nickname = firstNonEmpty(a.Phone, strings.TrimSpace(rs.Nickname), shortUID(a.UID))
 

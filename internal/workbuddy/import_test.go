@@ -391,7 +391,7 @@ func TestImportAcceptsNestedCredentialFormat(t *testing.T) {
 	refresh := makeJWT(t, map[string]any{"typ": "Offline"})
 	// 与本项目 SaveAtomic 的落盘形状逐字段一致（含空的 deviceToken/enterpriseId）。
 	body := fmt.Sprintf(`{
-	  "account": {"deviceToken":"","enterpriseId":"","nickname":"13858156740",
+	  "account": {"deviceToken":"","enterpriseId":"","nickname":"13800138000",
 	              "uid":"2e37e4f4-0e23-4710-9c69-07a5f5e8b313"},
 	  "auth": {"accessToken":%q,"refreshToken":%q,"expiresAt":1794994227,
 	           "channel":"cn","domain":"copilot.tencent.com"}
@@ -424,7 +424,7 @@ func TestImportAcceptsNestedCredentialFormat(t *testing.T) {
 	if a.UID != "2e37e4f4-0e23-4710-9c69-07a5f5e8b313" {
 		t.Errorf("嵌套层的 uid 未被导入: %q", a.UID)
 	}
-	if a.Nickname != "13858156740" {
+	if a.Nickname != "13800138000" {
 		t.Errorf("嵌套层的 nickname 未被导入: %q", a.Nickname)
 	}
 	if a.ExpiresAt != 1794994227 {

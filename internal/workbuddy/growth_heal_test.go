@@ -6,7 +6,7 @@
 //
 //	这个设置成循环任务 只要有一个账号有单可接 就执行"
 //
-// 他的账号（17005247808）实测：18 个任务里 17 个卡在 `not_accepted`，
+// 他的账号（170****7808）实测：18 个任务里 17 个卡在 `not_accepted`，
 // 而 `first_buddy` 是它们的**前置**。上游对接单的回应是
 //
 //	{"status":"error","message":"prerequisite not met: first_buddy"}
@@ -53,7 +53,7 @@ func TestGrowthWatchHealsBlockingPrerequisite(t *testing.T) {
 	if n := g.buddyFirstCalls.Load(); n == 0 {
 		t.Error("被 first_buddy 挡住时守卫轮没有去补前置（buddy/first 一次都没打）——\n" +
 			"这就是用户那个账号卡死的原因：「手工点一键完成能解开，循环里没人点」。\n" +
-			"实测账号 17005247808：17 个任务永远接不上，界面看起来只是在等。")
+			"实测账号 170****7808：17 个任务永远接不上，界面看起来只是在等。")
 	}
 	if n := g.buddyAgreementCalls.Load(); n == 0 {
 		t.Error("补前置必须先同意协议（buddy/agreement），实际一次都没打")

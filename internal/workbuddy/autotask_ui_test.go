@@ -181,7 +181,7 @@ func TestAutotaskWritePathsRefreshGrowthSnapshot(t *testing.T) {
 // 而 `first_buddy` **就在 autoActions 表里**（`runFirstBuddy`：上报活跃 →
 // 同意协议 → 领取 Buddy，+300 分 +8 能量）—— 网页**完全能代做**。
 //
-// 实测（2026-10，账号 17005247808）：
+// 实测（2026-10，账号 170****7808）：
 //
 //	POST /admin/growth/auto {"task_code":"first_buddy"} → ok=true，+300 分 +8 能量
 //	POST /admin/growth/accept {"task_code":"chat_5"}    → ok，前置确实解除
