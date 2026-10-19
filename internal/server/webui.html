@@ -9468,19 +9468,28 @@ let loginProvider = '';
   // 同一条请求在终端与网页上必须是同一个数，否则排障时会互相矛盾。
   //   tokens < 0 表示上游 usage 缺失 → 显示 -，绝不能拿 -1 去除时间；
   //   total_ms <= 0（时钟粒度内完成）→ 返回 0.0，避免除零得到 Inf/NaN。
-  // ⚠ 2026-10-20 改口径：分母必须是**纯输出** token（out_tokens），不是 tokens。
-  //   tokens 是 total（输入+输出），拿它除耗时会得出 15759 t/s 这种物理上不可能的值
-  //   （实测那条请求 2408ms / 37948 total）。
-  // ⚠ 且**只有流式才有速度**：非流式是一次性返回，`输出 token / 耗时` 不表示生成速度，
-  //   照 new-api 的做法（timing-metrics-cell.tsx：「仅 isStream 时显示 tokensPerSecond」）
-  //   在非流式行显示 —。少显示一个数字，好过显示一个语义不对的数字。
-  // ⚠ out_tokens=0 表示上游没给或旧版本没记，同样显示 —：
-  //   把"没有数据"显示成"速度很快"是最坏的失败方式。
-  function tokPerSec(outTokens, totalMs, mode) {
+  //
+  // ⚠ 2026-10-20 两次校正，第二次才是对的：
+  //   ① 分子：必须是**纯输出**（out_tokens），不是 tokens（total=输入+输出）。
+  //      拿 total 算会得出 15759 t/s 这种物理上不可能的值。
+  //   ② 分母：必须是**纯生成阶段**（total_ms − ttfb_ms），不是 total_ms。
+  //      首字等待期间模型还没开始吐字，把它算进分母会把速度系统性压小。
+  //
+  //   实测对照（同一条 csg 请求）：out=176、total=2256ms、ttfb=1262ms
+  //     · 我原来的算法  176 / 2.256s        = 78.0 t/s
+  //     · 正确算法      176 / (2.256−1.262) = 177.1 t/s
+  //   而客户端（DSH）自己显示的是 176 tok/s（176 / (2.4−1.4) = 176）⇒ 正确算法才对得上。
+  //
+  // ⚠ 非流式不显示：一次性返回没有"生成速度"概念（new-api 也是仅 isStream 才给）。
+  // ⚠ 生成阶段 <= 0（首字几乎等于整轮耗时）也返回 —：那时速度无从计算，
+  //   显示一个 0.0 会让人以为"极慢"，而真相是"全在等首字"。
+  function tokPerSec(outTokens, totalMs, ttfbMs, mode) {
     if (mode && mode !== 'stream') return '-';
     if (!outTokens || outTokens <= 0) return '-';
     if (!totalMs || totalMs <= 0) return '0.0';
-    return (outTokens / (totalMs / 1000)).toFixed(1);
+    const genMs = totalMs - (ttfbMs > 0 ? ttfbMs : 0); // 纯生成阶段
+    if (genMs <= 0) return '-';
+    return (outTokens / (genMs / 1000)).toFixed(1);
   }
 
   // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
@@ -9519,7 +9528,7 @@ let loginProvider = '';
         <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
         <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
         <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
-        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.mode)}</span>
+        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.ttfb_ms, e.mode)}</span>
         <span class="mono r">${e.total_ms}ms</span>
       </div>`;
     }).join('');
@@ -12526,7 +12535,7 @@ let multCatalogFailed = false;
     const total = (Number.isFinite(np) && np > 0 ? np : 0) + (Number.isFinite(nc) && nc > 0 ? nc : 0);
     const pt = Number.isFinite(np) ? np : '-';
     const ct = Number.isFinite(nc) ? nc : '-';
-    return ` · prompt ${pt} / completion ${ct} · 共 ${total} tokens · ${tokPerSec(ct, totalMs, e && e.mode)} tok/s`;
+    return ` · prompt ${pt} / completion ${ct} · 共 ${total} tokens · ${tokPerSec(ct, totalMs, e && e.ttfb_ms, e && e.mode)} tok/s`;
   }
 
   async function send() {
