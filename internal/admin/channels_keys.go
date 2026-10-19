@@ -42,12 +42,27 @@ func (h *Handler) channelsKeysList(w http.ResponseWriter, r *http.Request) {
 		mode = ch.ChannelInfo.KeySelectionMode
 		name = ch.Name
 	}
+	// reveal=1 ⇒ 用**明文**替换掩码。
+	//
+	// ⚠ 允许明文的前提是"这条路径不是轮询的"：本端点只在用户主动打开 Key 管理窗口时调一次，
+	// 而列表端点 /admin/channels 是每 30 秒轮询的（那里永远只给掩码）。
+	// 用户的原话是「直接展示全面了」—— 掩码 gk_B…4b2e 认不出是哪一把，而这个窗口的全部用途
+	// 就是"让我看清并管理这些 key"。会话门禁（管理员）就是这里的门槛。
+	reveal := r.URL.Query().Get("reveal") == "1"
+	if reveal && ch != nil {
+		for i := range views {
+			if i < len(ch.Keys) {
+				views[i].Mask = ch.Keys[i].Key
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                 id,
 		"name":               name,
 		"keys":               views,
 		"key_count":          len(views),
 		"key_selection_mode": mode,
+		"revealed":           reveal,
 	})
 }
 

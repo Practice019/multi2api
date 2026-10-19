@@ -97,10 +97,6 @@
     <div class="tab" id="tab-pub">对外模型</div>
   </div>
   <span style="flex:1"></span>
-  <label class="muted">服务地址</label>
-  <input id="base" style="width:220px" value="" placeholder="留空 = 本页所在服务">
-  <label class="muted">管理令牌</label>
-  <input id="token" type="password" style="width:170px" placeholder="admin_token（可选）">
   <button onclick="load()">刷新</button>
 </header>
 
@@ -146,6 +142,9 @@
 <dialog id="dlg">
   <div class="dlg-h" id="dlgTitle">新增渠道</div>
   <div class="dlg-b">
+    <!-- 名称放最上面：用户第一眼要确认"我在改哪条渠道"，而不是先看到一串 URL -->
+    <label class="req">名称</label>
+    <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
     <label class="req">Base URL</label>
     <input id="f-base" placeholder="https://api.example.com/v1">
     <label class="req">API Key</label>
@@ -161,8 +160,7 @@
       </select>
     </div>
     <textarea id="f-key" class="full" rows="2" style="min-height:0" placeholder="新增时必填，一行一个；编辑时留空 = 不改动现有 Key（要加 Key 点「管理 Key」）"></textarea>
-    <label>名称</label>
-    <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
+    <label>状态</label>
     <label>模型</label>
     <input id="f-models" class="full" placeholder="逗号分隔上游真实名 —— 或点「自动发现」，在候选里勾选后点「应用勾选」" oninput="renderCandidates()">
 <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -173,8 +171,15 @@
 <div id="f-vis" class="full" style="margin:6px 0 0"></div>
     <div class="hint">这里写上游认识的名字；对外想换名字就用下面的映射。</div>
     <label>模型映射</label>
-    <textarea id="f-map" placeholder='每行一条：公开名=上游名&#10;pub-y=real-x'></textarea>
-    <div class="hint">对外名字 = 左边（客户端写它），上游真实名 = 右边。留空即名字相同。</div>
+    <!-- 成对输入（对标 new-api 的 model_mapping 编辑器）：
+         用户的原话是「希望用户填写一对数据而不是填写这种文本」——
+         一行文本 "pub=upstream" 要求他会写语法、还要自己数等号，输错只能靠保存后的报错兜。
+         两个输入框各填一半，语法错误从根上不存在。 -->
+    <div class="full" id="f-map-rows" style="display:flex;flex-direction:column;gap:4px"></div>
+    <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button type="button" onclick="addMapRow('','')" style="white-space:nowrap;padding:0 10px;height:26px;font-size:12px">+ 添加一对</button>
+      <span class="muted" style="font-size:12px">左 = 对外公开名（客户端写它）· 右 = 上游真实名 · 右侧留空即同名</span>
+    </div>
     <label>优先级</label>
     <input id="f-prio" type="number" value="10" style="width:110px">
     <label>权重</label>
@@ -336,14 +341,14 @@ async function discover() {
 }
 
 function baseURL() {
-  const v = document.getElementById('base').value.trim();
-  return (v || location.origin).replace(/\/$/, '');
+  // 这个页面已经内嵌进控制台（iframe），鉴权走会话 cookie ⇒ 恒用当前 origin。
+  // 原来的"服务地址 / 管理令牌"两个输入框是**独立打开**这个页面时手填用的，
+  // 内嵌之后它们只会让用户困惑（"我还要填令牌吗？"），已删除。
+  return location.origin;
 }
 function headers() {
-  const t = document.getElementById('token').value.trim();
-  const h = { 'Content-Type': 'application/json' };
-  if (t) { h['Authorization'] = 'Bearer ' + t; h['X-Admin-Token'] = t; }
-  return h;
+  // 令牌输入框已去掉：内嵌使用时靠会话 cookie（管理员登录态）鉴权。
+  return { 'Content-Type': 'application/json' };
 }
 async function api(path, opt) {
   const r = await fetch(baseURL() + path, Object.assign({ headers: headers() }, opt || {}));
@@ -353,6 +358,37 @@ async function api(path, opt) {
   return j === null ? {} : j;
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+// ---- 模型映射：成对输入 ----
+// 为什么不用一行文本（pub=upstream）：那要求用户会写这套微语法、还要自己数等号，
+// 输错只有保存后的 400 能兜。两个框各填一半 ⇒ 语法错误从根上不存在。
+function addMapRow(k, v) {
+  const box = document.getElementById('f-map-rows');
+  if (!box) { return; }
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px;align-items:center';
+  row.innerHTML = '<input class="m-key" placeholder="对外公开名（客户端写这个）" style="flex:1;min-width:0" value="' + esc(k) + '">'
+    + '<span class="muted" style="flex:0 0 auto">→</span>'
+    + '<input class="m-val" placeholder="上游真实名（右留空 = 同名）" style="flex:1;min-width:0" value="' + esc(v) + '">'
+    + '<button type="button" onclick="this.parentNode.remove()" style="flex:0 0 auto;padding:0 8px;height:26px;font-size:12px">删除</button>';
+  box.appendChild(row);
+}
+function renderMapRows(obj) {
+  const box = document.getElementById('f-map-rows');
+  if (!box) { return; }
+  box.innerHTML = '';
+  const ks = Object.keys(obj || {});
+  if (!ks.length) { addMapRow('', ''); return; }   // 空的时候给一行空框，省得用户先点"添加"
+  ks.forEach(k => addMapRow(k, obj[k]));
+}
+function collectMap() {
+  const out = {};
+  document.querySelectorAll('#f-map-rows > div').forEach(r => {
+    const k = r.querySelector('.m-key').value.trim();
+    const v = r.querySelector('.m-val').value.trim();
+    if (k) { out[k] = v || k; }   // 右侧留空 = 同名（与后端"留空即名字相同"的约定一致）
+  });
+  return out;
+}
 function mapText(m) { return m && Object.keys(m).length ? Object.keys(m).map(k => esc(k) + '=' + esc(m[k])).join(', ') : '—'; }
 function maskKey(k) { return k ? (k.length > 12 ? k.slice(0, 6) + '…' + k.slice(-4) : '已配置') : '—'; }
 
@@ -446,8 +482,7 @@ function openForm(id) {
   if (c) { loadKeys(id); }
   document.getElementById('f-name').value = c ? (c.name || '') : '';
   document.getElementById('f-models').value = c ? (c.models || []).join(',') : '';
-  document.getElementById('f-map').value = c && c.model_mapping
-    ? Object.keys(c.model_mapping).map(k => k + '=' + c.model_mapping[k]).join('\n') : '';
+  renderMapRows(c ? c.model_mapping : {});
   document.getElementById('f-prio').value = c ? (c.priority != null ? c.priority : 10) : 10;
   document.getElementById('f-weight').value = c ? (c.weight != null ? c.weight : 1) : 1;
   document.getElementById('f-status').value = c ? String(c.status === 2 ? 2 : 1) : '1';
@@ -462,7 +497,7 @@ async function save() {
     name: document.getElementById('f-name').value.trim(),
     base_url: document.getElementById('f-base').value.trim(),
     models: document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean),
-    model_mapping: parseMap(document.getElementById('f-map').value),
+    model_mapping: collectMap(),
     priority: Number(document.getElementById('f-prio').value || 0),
     weight: Number(document.getElementById('f-weight').value || 0),
     status: Number(document.getElementById('f-status').value)
@@ -534,7 +569,9 @@ function updateKeyCount() {
 }
 async function loadKeys(id) {
   try {
-    const d = await api('/admin/channels/keys?id=' + encodeURIComponent(id));
+    // reveal=1：这个窗口不是轮询的（只在打开时请求一次），所以可以拿明文 ——
+    // 掩码 gk_B…4b2e 认不出是哪一把，而本窗口的用途就是"看清并管理这些 key"。
+    const d = await api('/admin/channels/keys?id=' + encodeURIComponent(id) + '&reveal=1');
     keysData = (d && d.keys) || [];
     // 选择模式以这个端点为准（列表接口不回 channel_info，从那儿读会是空值 ⇒ 用户以为没设成功）
     if (d && d.key_selection_mode) { document.getElementById('f-mode').value = d.key_selection_mode; }
@@ -565,12 +602,14 @@ function renderKeys() {
   // ⚠ 按钮必须压扁：全局 button 有 5px 上下 padding ⇒ 会把 26px 的行撑到 43px。
   const bst = 'padding:0 6px;height:20px;line-height:18px;font-size:12px';
   const td = 'padding:2px 4px;height:26px;line-height:26px;border-bottom:1px solid var(--bd)';
-  body.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">'
+  // Key 列要能显示**完整明文**（reveal=1 的场景），所以不能 table-layout:fixed 压死：
+  // 用 auto 让它按内容撑开，其余列定宽 + nowrap。
+  body.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:auto">'
     + '<thead><tr style="color:#6b7280;text-align:left">'
     + '<th style="width:34px;' + td + 'font-weight:500">#</th>'
     + '<th style="' + td + 'font-weight:500">Key</th>'
-    + '<th style="width:150px;' + td + 'font-weight:500">状态</th>'
-    + '<th style="width:140px;' + td + 'font-weight:500">操作</th>'
+    + '<th style="width:120px;' + td + 'font-weight:500;white-space:nowrap">状态</th>'
+    + '<th style="width:130px;' + td + 'font-weight:500;white-space:nowrap">操作</th>'
     + '</tr></thead><tbody>'
     + rows.map(k => {
         let st;
@@ -583,9 +622,10 @@ function renderKeys() {
           : '<button type="button" style="' + bst + '" onclick="keyStatus(' + k.index + ',1)">启用</button>';
         return '<tr>'
           + '<td style="' + td + 'color:#9ca3af">' + k.index + '</td>'
-          + '<td style="' + td + 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis">' + kEsc(k.mask) + '</td>'
+          // 完整展示：明文时用 11px 等宽字体也让它在 700px 窗口里放得下
+          + '<td style="' + td + 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0">' + kEsc(k.mask) + '</td>'
           + '<td style="' + td + '">' + st + why + '</td>'
-          + '<td style="' + td + '">' + tg
+          + '<td style="' + td + 'white-space:nowrap">' + tg
           + ' <button type="button" style="' + bst + '" onclick="keyDelete(' + k.index + ')">删除</button></td>'
           + '</tr>';
       }).join('')
