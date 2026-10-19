@@ -751,6 +751,9 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .cachetrend .ax{font-size:10px;fill:var(--dim)}
   .dailytrend{height:200px;position:relative}
   .dailytrend .ax{font-size:10px;fill:var(--dim)}
+  /* 消耗分布图（按模型堆叠）—— 同样只补刻度字样式。高度**不**在这里写：
+     它是 #statsTrend 的内联 240px，唯一出处一处写死，免得两处打架。 */
+  .trendchart .ax{font-size:10px;fill:var(--dim)}
   /* 仪表盘内的子段落：一块一个 h3，块间用分隔线切开。
      每个子段自己的 .body 有内边距，这里不再重复 padding。 */
   .boardsec + .boardsec{border-top:1px solid var(--line)}
@@ -1174,7 +1177,10 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     <!-- 2) 调用统计 -->
     <div class="boardsec">
       <h3>调用统计 <span class="dim" id="statsWindow" style="font-weight:400;text-transform:none"></span>
-        <span class="dim" style="font-weight:400;text-transform:none;font-size:11px">（趋势：请求数 + 成功率）</span>
+        <!-- ⚠ 这句小字必须跟着图走：2026-10-20 起这张图不再是「请求数 + 成功率」折线，
+             而是按模型堆叠的 token 消耗分布（柱状 / 面积可切）。文案不改的话，
+             用户会照着"成功率"去读一根柱子的高度 —— 那是两个完全不同的量。 -->
+        <span class="dim" style="font-weight:400;text-transform:none;font-size:11px">（消耗分布：按模型堆叠 · token）</span>
         <span class="spacer"></span>
         <!-- ⚠ 趋势的时间范围切换（24h / 7d）。
              ⚠ **只切趋势**：后端 `/admin/stats/series` 只认这两个 range（见 `seriesSpan`），
@@ -1208,9 +1214,28 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
         </span>
       </h3>
       <div class="body">
-        <!-- 趋势图（对标 one-api/new-api 仪表盘的第一屏形态）：
-             内联 SVG 双折线（请求量 + 成功率），零图表库依赖。 -->
-        <div id="statsTrend" style="margin-bottom:12px;height:110px;position:relative"></div>
+        <!-- 消耗分布图（对标 new-api 首页那张「按模型堆叠」的用量柱）：
+             内联 SVG、零图表库依赖 —— 本项目前端是单文件、离线可跑的，
+             引一个图表 CDN 就等于把首屏押在一个外部域名上。
+             ⚠ 2026-10-20 改造：原来是「请求量 + 成功率」双折线（110px 高）。
+               折线答不出"消耗花在哪个模型上"，而 /admin/stats/series 已经把
+               `by_model` 按桶算好了 ⇒ 换成按模型堆叠的消耗分布，柱状 / 面积可切。
+             ⚠ 高度 110 → 240：堆叠图每段至少要有 2~3px 才分得清，
+               24 小时窗口里小模型常常只占几千 token，110px 会把它压成一条缝。 -->
+        <!-- 峰值读数 + 柱状/面积切换**放在 #statsTrend 外面**：
+             ⚠ 容器里的 innerHTML 每次重绘都被整体替换（renderTrendSVG 的既有写法），
+               按钮放进去 ⇒ 每 30 秒轮询就重建一次按钮、监听全丢，只能补一层容器委托 ——
+               那会让"按钮在哪、怎么绑"分裂成两处。放外面只绑一次，重绘碰不到它。 -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;gap:10px">
+          <!-- 峰值参考：Y 轴不画刻度网格（240px 里再割一条网格就只剩骨架），
+               所以把"这幅图的天花板"用一行字如实写在左上角。 -->
+          <span id="trendPeak" class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+          <span class="tog" id="trendView" style="font-weight:400;flex:none">
+            <button data-view="bar" class="on">柱状</button>
+            <button data-view="area">面积</button>
+          </span>
+        </div>
+        <div id="statsTrend" class="trendchart" style="margin-bottom:12px;height:240px;position:relative"></div>
         <div class="cards" id="statsCards"></div>
       <!-- 性能健康条（2026-10-20）：一行读结论，与上面那排"读总量"的指标卡分工 -->
       <div class="healthbar" id="healthBar"></div>
@@ -10219,7 +10244,7 @@ let loginProvider = '';
   //   5. ⚠ 整段 Token 全 0 ⇒ **不画那条线、也不画右侧刻度** ——
   //      "画一条贴地的直线会让人以为『用量就是 0』，而事实是『这份数据里没有』"。
   //
-  // ⚠ 全部内联 SVG、零依赖（与上面那条"请求量 + 成功率"同一立场）。
+  // ⚠ 全部内联 SVG、零依赖（与上面那张"按模型堆叠的消耗分布"同一立场）。
   let cacheTrendSig = '';
 
   async function loadCacheTrend() {
@@ -11776,13 +11801,19 @@ let multCatalogFailed = false;
     renderStatsReport(d);
   }
 
-  // ---- 趋势图（对标 one-api/new-api 仪表盘的第一屏：请求量 + 成功率折线）----
+  // ---- 消耗分布图（对标 new-api 首页：按模型堆叠的 token 用量）----
   //
-  // 数据来自 /admin/stats/series（服务端按小时桶聚合 request-log），
-  // 内联 SVG 双折线：请求量（青）与成功率（绿，右轴）。零图表库依赖。
+  // 数据来自 /admin/stats/series（服务端按桶聚合 request-log），每桶还带 `by_model`。
+  // 内联 SVG、零图表库依赖：柱状 = 堆叠 rect，面积 = 堆叠 polygon。
+  // ⚠ 2026-10-20 之前这里是「请求量 + 成功率」双折线 —— 折线回答不了"消耗花在哪个模型上"。
   let trendSeries = [];
   // trendRange 当前选的范围。⚠ 只影响**趋势** —— 卡片与 Top 榜/环是全量窗口（见标题注释）。
   let trendRange = '24h';
+  // 消耗分布图的画法：'bar' = 堆叠柱，'area' = 堆叠面积。
+  // ⚠ 它**不进** loadTrendSeries 的 digest：视图只改画法不改数据，
+  //   把它塞进 digest 会让"同一份数据"被判成变了、白拉一次网络。
+  //   切视图走 renderTrendSVG(trendSeries._list) 直接重画（见下面那段绑定）。
+  let trendView = 'bar';
   // statsRange **统计范围**（2026-10-18 加）：它就是 agent2api 那排 `[今天|7天|30天|本月|全部]`，
   // 与 `trendRange` 不同 —— **它影响所有卡 / Top 榜 / 两个环 / 缓存四格**（它们都读 /admin/stats）。
   // ⚠ 空串 = 全部（= 本接口原来的行为，也是默认）。
@@ -11836,6 +11867,23 @@ let multCatalogFailed = false;
     });
   }
 
+  // 柱状 / 面积切换。
+  // ⚠ 它**不重新取数**：同一份 `trendSeries._list` 直接重画，切一下是毫秒级，
+  //   不像切时间档要等一轮网络。
+  // ⚠ 也**不能**转调 loadTrendSeries：那函数有 digest 守卫（数据没变就不重绘），
+  //   切视图时数据必然没变 ⇒ 会被判成"没变"、画面纹丝不动（切了像没切）。
+  for (const b of document.querySelectorAll('#trendView button')) {
+    b.addEventListener('click', () => {
+      if (b.dataset.view === trendView) return;      // ⚠ 点当前已选的不重画
+      trendView = b.dataset.view;
+      for (const x of document.querySelectorAll('#trendView button')) {
+        x.classList.toggle('on', x.dataset.view === trendView);
+      }
+      try { renderTrendSVG(trendSeries._list || []); }
+      catch (e) { console.error('切消耗分布视图失败:', e && e.message); }
+    });
+  }
+
   async function loadTrendSeries() {
     let d;
     // ⚠⚠ **取请求时的 range 快照**，回来时比对（R2 抓到的竞态）。
@@ -11847,81 +11895,271 @@ let multCatalogFailed = false;
     catch { return; }
     if (reqRange !== trendRange) return;   // ⚠ 迟到且期间用户改过选择 ⇒ 丢弃这次结果
     const list = (d && d.series) || [];
-    // digest 比对：末尾桶数值变了才重绘（30s 轮询无感）。
+    // digest 比对：**画面真正画的东西**变了才重绘（30s 轮询无感）。
     // ⚠ digest 里必须**带上 range** —— 否则从 24h 切到 7d 时，若末尾几个桶恰好相同，
     //   就会被判成"没变"而不重绘（切换看起来没反应）。
-    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.total, p.ok, p.fail]));
+    // ⚠ 比对字段也必须是这张图真画的东西：token 总量 + by_model。
+    //   改造前它比的是 total/ok/fail（那时画的是请求量折线）；如今画 token 分布，
+    //   继续比请求数就会出现"请求数没变、token 翻倍却不重绘"—— 画面停在旧值上。
+    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.tokens || 0, p.by_model || null]));
     if (digest === trendSeries._last) return;
     trendSeries._last = digest;
+    // 留一份最近数据：柱状 / 面积切换要重画同一份数据，不该再去拉一次网络。
+    trendSeries._list = list;
     renderTrendSVG(list);
   }
+
+  // ---- 消耗分布图：按模型堆叠（对标 new-api 首页那张用量柱）----
+  //
+  // 每根柱 = 一个时间桶，柱高 = 该桶 tokens 总量，柱内按模型分段堆叠；
+  // 面积视图是同一份数据的堆叠带。零图表库：全部是内联 SVG + DOM。
+  //
+  // 配色表（段下标 0 在最底 = 量最大的模型）。⚠ 颜色一律从 CSS 变量派生，
+  // **不写死十六进制**：本项目有深/浅两套主题（见 :root[data-theme]），写死的
+  // 色值在浅色底上要么糊进背景、要么对比度不够；color-mix 派生出来的色会跟着
+  // 主题一起走。前四个借四个语义色（页面别处也是这个对应关系），第 5、6 个混合。
+  const TREND_PALETTE = [
+    'var(--acc)', 'var(--ok)', 'var(--warn)', 'var(--err)',
+    'color-mix(in srgb, var(--acc) 55%, var(--err))',
+    'color-mix(in srgb, var(--ok) 55%, var(--acc))',
+  ];
+  // 「其他」用中性灰（--dim 派生）：它代表的不是某个模型，而是"第 7 名以后的一堆"，
+  // 借任何强调色都会让人以为它是某个具体模型。
+  const TREND_OTHER_COLOR = 'color-mix(in srgb, var(--dim) 80%, transparent)';
+  // 只取前 6 个模型，其余合并成「其他」。
+  // ⚠ 为什么是 6：240px 高的图里占比 1% 的一段只有 2.4px，再细就和相邻色带的边界
+  //   分不清了；而 6 段 + 「其他」共 7 个图例项，正好排得进一行（不换行、不挤别的）。
+  // ⚠ 为什么按**全窗口总量**排序、不让每根柱各排各的：逐柱重排会让同一个模型
+  //   在不同柱里换颜色（这根柱里蓝、下一根里绿），图例立刻失去意义 ⇒ 全局只排一次。
+  const TREND_TOP_N = 6;
+
+  // token 的紧凑写法（1.2k / 3.4M）。按天趋势那张图里有同名局部函数，但那是
+  // 函数内的局部常量（本文件既有做法就是各写一份）；这里提成模块级，为的是让
+  // 峰值那行与浮层明细共用同一套口径 —— 两处各写一份迟早出现 2.0M / 2.00M。
+  function trendFmt(v) {
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+    return String(Math.round(v));
+  }
+  // 属性值转义：`esc` 只负责文本节点（不转引号），而模型名来自上游、可能带 `"`，
+  // 直接拼进 title="…" 会把属性截断 ⇒ 图例的 title 走这条更严的。
+  const trendEscAttr = (s) => esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   function renderTrendSVG(list) {
     const host = $('statsTrend');
     if (!host) return;
-    if (!list || !list.length) { host.innerHTML = '<div class="dim" style="font-size:12px">暂无趋势数据</div>'; return; }
-    const W = 900, H = 92, PAD = 6;
-    const maxTotal = Math.max(1, ...list.map(p => p.total));
-    const rateOf = p => p.total ? Math.round(p.ok / p.total * 100) : null;
-    const pts = list.map((p, i) => ({
-      x: PAD + (W - PAD * 2) * i / Math.max(1, list.length - 1),
-      y: H - PAD - (H - PAD * 2) * p.total / maxTotal,
-      total: p.total, ok: p.ok, fail: p.fail, tokens: p.tokens, rate: rateOf(p),
-      label: p.ts.slice(11, 16),           // HH:MM
-      day: p.ts.slice(5, 10),              // MM-DD
-    }));
-    const line = (getY, cls) => pts.map((p, i) =>
-      `${i ? 'L' : 'M'}${p.x.toFixed(1)},${getY(p).toFixed(1)}`).join(' ');
-    const rateY = p => p.rate === null ? null : (H - PAD - (H - PAD * 2) * p.rate / 100);
-    const totalPath = line(p => p.y, '');
-    const ratePath = pts.filter(p => p.rate !== null).map((p, i) =>
-      `${i ? 'L' : 'M'}${p.x.toFixed(1)},${rateY(p).toFixed(1)}`).join(' ');
-    const areaPath = `${totalPath}L${pts[pts.length - 1].x.toFixed(1)},${H - PAD}L${pts[0].x.toFixed(1)},${H - PAD}Z`;
-    const last = pts[pts.length - 1];
-    // 布局：摘要/图例放**容器顶部一行**（不覆盖折线）；x 轴时间靠 hover tooltip
-    // 提供，不再画在图上（避免与面积填充重叠）。
-    host.innerHTML =
-      `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;font-size:11px" class="dim">
-        <span>最近 ${trendRange === '365d' ? '365 天 · 逐日' : trendRange === '30d' ? '30 天 · 逐日' : trendRange === '7d' ? '7 天 · 逐日' : '24 小时 · 逐小时'} · 请求量 <span style="color:#3fb950">●</span> 成功率 <span style="color:#58a6ff">●</span></span>
-        <span>最新 ${esc(last.day || '')} ${esc(last.label)} · 请求 <b style="color:var(--fg)">${esc(last.total)}</b> · 成功率 <b style="color:var(--fg)">${last.rate === null ? '—' : last.rate + '%'}</b></span>
-      </div>
-      <div style="position:relative">
-        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:88px;display:block" preserveAspectRatio="none">
-          <defs>
-            <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="var(--fg)" stop-opacity=".18"/>
-              <stop offset="100%" stop-color="var(--fg)" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <path d="${areaPath}" fill="url(#trendFill)"/>
-          <path d="${totalPath}" fill="none" stroke="#3fb950" stroke-width="1.6" opacity=".9"/>
-          ${ratePath ? `<path d="${ratePath}" fill="none" stroke="#58a6ff" stroke-width="1.4" opacity=".85"/>` : ''}
-          <circle cx="${last.x}" cy="${last.y}" r="2.6" fill="#3fb950"/>
-          <circle id="trendCursor" r="3.2" fill="none" stroke="#e3b341" stroke-width="1.6" style="display:none"/>
-        </svg>
-        <div id="trendTip" style="display:none;position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:11px;white-space:nowrap;z-index:5"></div>
-      </div>`;
-    // hover：移动到最近数据点 → tooltip 显示该桶的请求/成功/失败/token，并高亮。
-    const svg = host.querySelector('svg');
-    const tip = host.querySelector('#trendTip');
-    const cur = host.querySelector('#trendCursor');
-    const toXY = (p) => [p.x, p.y];
-    svg.addEventListener('mousemove', ev => {
-      const rect = svg.getBoundingClientRect();
-      const x = (ev.clientX - rect.left) / rect.width * W;
-      let best = pts[0], bd = 1e9;
-      for (const p of pts) { const d = Math.abs(p.x - x); if (d < bd) { bd = d; best = p; } }
-      tip.style.display = 'block';
-      const tipX = (ev.clientX - rect.left);
-      tip.style.left = Math.min(Math.max(tipX - 40, 2), rect.width - 110) + 'px';
-      tip.style.top = '2px';
-      tip.innerHTML = `<b>${esc(best.day || '')} ${esc(best.label)}</b>` +
-        `：请求 ${best.total} · 成功 ${best.ok} · 失败 ${best.fail} · token ${best.tokens}`;
-      const [cx, cy] = toXY(best);
-      cur.setAttribute('cx', cx); cur.setAttribute('cy', cy);
-      cur.style.display = 'block';
+    const peakEl = $('trendPeak');
+    const rows = Array.isArray(list) ? list : [];
+
+    // ── 1. 逐桶归一 ──
+    // ⚠ `by_model` 是 omitempty：该桶没有 token 用量时**整个键都不存在** ⇒ 一律 `|| {}`。
+    // ⚠ 柱高取 max(tokens, Σby_model)：两者本该相等，但 by_model 是后加的字段，
+    //   历史桶可能只有 tokens 没有明细（或反过来）—— 取大值才不会因为缺一边把柱画矮。
+    const buckets = rows.map((p) => {
+      const m = (p && p.by_model) || {};
+      let sum = 0;
+      for (const k of Object.keys(m)) { const v = Number(m[k]) || 0; if (v > 0) sum += v; }
+      return {
+        ts: String((p && p.ts) || ''), models: m, sum,
+        total: Math.max(Number(p && p.tokens) || 0, sum),
+      };
     });
-    svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; cur.style.display = 'none'; });
+    const peak = buckets.reduce((a, b) => Math.max(a, b.total), 0);
+
+    // ⚠ 空数据 / 全为 0 ⇒ **不画坐标系**，只留一句说明。
+    //   理由与按天趋势那张图同源：空网格看起来像"渲染坏了"，而不是"这段时间真没消耗"。
+    //   同时清掉峰值行 —— 否则 240px 高的一块空白上挂着"峰值 0"，两处互相打脸。
+    if (!buckets.length || peak <= 0) {
+      if (peakEl) peakEl.textContent = '';
+      host.innerHTML = '<div class="dim" style="font-size:12px">暂无数据（所选范围内没有 token 用量）</div>';
+      return;
+    }
+
+    // ── 2. 模型排名 → 前 6 + 其他 ──
+    const modelTotal = new Map();
+    for (const b of buckets) {
+      for (const k of Object.keys(b.models)) {
+        const v = Number(b.models[k]) || 0;
+        if (v > 0) modelTotal.set(k, (modelTotal.get(k) || 0) + v);
+      }
+    }
+    // 同量时按名字排（否则两个等量模型每次轮询都可能换位、连带换色）。
+    const ranked = [...modelTotal.entries()]
+      .sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0])));
+    const restNames = new Set(ranked.slice(TREND_TOP_N).map((e) => e[0]));
+    // 「其他」里还包括"残量"：tokens 有值但 by_model 缺失/不全（历史桶）时柱高按 tokens
+    // 走，差的这截必须归进去 —— 否则各段之和到不了柱顶，看起来像少画了一段。
+    const residual = buckets.reduce((a, b) => a + Math.max(0, b.total - b.sum), 0);
+    const segs = ranked.slice(0, TREND_TOP_N).map((e, i) => ({
+      name: String(e[0]), color: TREND_PALETTE[i % TREND_PALETTE.length], rest: false,
+    }));
+    if (restNames.size || residual > 0) {
+      segs.push({ name: '其他', color: TREND_OTHER_COLOR, rest: true });
+    }
+    const valOf = (b, s) => {
+      if (!s.rest) return Number(b.models[s.name]) || 0;
+      let v = 0;
+      for (const k of restNames) v += Number(b.models[k]) || 0;
+      return v + Math.max(0, b.total - b.sum);
+    };
+
+    // ── 3. 版面 ──
+    // Y 轴**不画刻度网格**：240px 里再割四条横线就只剩骨架，读不出柱形；
+    // 天花板改用容器左上角那行"峰值"如实交代。X 轴沿用原趋势图的口径：
+    // 24h 写 HH:MM、其余写 MM-DD，只标首/中/末（桶多时全标会糊成一片）。
+    const W = 900, H = 200, PADL = 4, PADR = 4, PADT = 6, PADB = 16;
+    const n = buckets.length;
+    const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
+    const step = plotW / n;
+    const barW = Math.max(1, Math.min(30, step * 0.66));
+    const yMax = peak * 1.04;                       // 顶部留一点空，最高的柱不顶格
+    const yAt = (v) => PADT + plotH - (plotH * Math.max(0, v)) / yMax;
+    const cx = (i) => PADL + step * i + step / 2;
+    const lblOf = (ts) => (trendRange === '24h' ? ts.slice(11, 16) : ts.slice(5, 10));
+    const sumAll = buckets.reduce((a, b) => a + b.total, 0);
+
+    const marks = [];
+    // 悬停高亮底带：**最先 push**（= 最底层），否则它会盖在色块上把颜色洗淡。
+    marks.push(`<rect id="trendHoverBand" x="0" y="${PADT}" width="0" height="${plotH}" fill="var(--fg)" opacity="0.07" style="display:none"/>`);
+
+    if (trendView === 'area') {
+      // ── 堆叠面积 ──
+      // ⚠ 每一段是"夹在两条累积线之间"的一条带，**不是**每段各自从 0 画起 ——
+      //   那样后画的段会把先画的整段盖掉，半透明叠加处颜色还会假性地变深。
+      // ⚠ 堆叠顺序与柱状**完全一致**（量最大的贴底）：切视图时同一个模型仍是
+      //   同一个高度位置、同一个颜色，不用重新认图。
+      // ⚠ 但**绘制顺序相反**（先画顶上那段、最后画最底那段）：相邻两段的半透明
+      //   填充在公共边界上总会压出一条更深的细线，让后画的带压住这条缝，边界才干净。
+      const cum = buckets.map(() => 0);
+      const bands = segs.map((s) => {
+        const top = [], bot = [];
+        buckets.forEach((b, i) => {
+          bot.push(yAt(cum[i]));
+          cum[i] += valOf(b, s);
+          top.push(yAt(cum[i]));
+        });
+        // 首尾各补一个贴边的点：否则带子只从第一根柱的中心开始、最后一根中心结束，
+        // 左右各缺半格，看起来像图被裁掉了一截。
+        const topPts = [`${PADL},${top[0].toFixed(1)}`]
+          .concat(top.map((y, i) => `${cx(i).toFixed(1)},${y.toFixed(1)}`))
+          .concat([`${(W - PADR).toFixed(1)},${top[n - 1].toFixed(1)}`]);
+        // 回程：先从右边缘下到该段的**下沿**，再沿各桶中心往回，最后落到左边缘 ——
+        // 少了这两个贴边点，带子的左右两端就是斜的（看起来像图被切了个角）。
+        const botPts = [`${(W - PADR).toFixed(1)},${bot[n - 1].toFixed(1)}`];
+        for (let i = n - 1; i >= 0; i--) botPts.push(`${cx(i).toFixed(1)},${bot[i].toFixed(1)}`);
+        botPts.push(`${PADL},${bot[0].toFixed(1)}`);
+        // ⚠ 填充用 <polygon>（首尾自动闭合）、上边界用 <polyline>：
+        //   这两个元素的语义就是"闭合/不闭合的一串点"，比手拼 path 的 d 串不容易写错；
+        //   顺带它们按元素名就能数出来（柱状是 rect、面积是 polygon），自测与探针都直接。
+        return { s, area: topPts.concat(botPts).join(' '), line: topPts.join(' ') };
+      });
+      for (const band of bands.slice().reverse()) {
+        marks.push(`<polygon points="${band.area}" fill="${band.s.color}" fill-opacity="0.55"/>`);
+        marks.push(`<polyline points="${band.line}" fill="none" stroke="${band.s.color}" stroke-opacity="0.85" stroke-width="0.8"/>`);
+      }
+    } else {
+      // ── 堆叠柱 ──
+      // 从 0 往上累加：下标 0（量最大的模型）贴底 —— 只有它有稳定基线，
+      // 相邻柱之间比它的高度是准的；浮在上面的小模型本来也比不准，贴顶反而更乱。
+      for (let i = 0; i < n; i++) {
+        const b = buckets[i];
+        if (b.total <= 0) continue;                 // 空桶不画（与柱顶一致：没有就不占位）
+        const x = (cx(i) - barW / 2).toFixed(1);
+        let cum = 0;
+        for (const s of segs) {
+          const v = valOf(b, s);
+          if (v <= 0) continue;
+          const y2 = yAt(cum);                      // 这段的下沿
+          cum += v;
+          const y1 = yAt(cum);                      // 这段的上沿
+          // ⚠ 薄段兜底 0.6px：某模型在该桶只占千分之几时真实高度可能只有 0.2px，
+          //   浏览器会画成"看不见"，那就正好抹掉了"它在这个桶里确实有量"这个事实。
+          marks.push(`<rect x="${x}" y="${y1.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0.6, y2 - y1).toFixed(1)}" fill="${s.color}"/>`);
+        }
+      }
+    }
+
+    // 悬停参考线（保留原 id：本文件另两处趋势图也是"竖虚线 + 浮层"这套做法）。
+    marks.push(`<line id="trendCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.45" style="display:none"/>`);
+
+    const xLabels = [];
+    [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
+      const b = buckets[i]; if (!b) return;
+      xLabels.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 5}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lblOf(b.ts))}</text>`);
+    });
+
+    // 图例：模型名 + 色块，**不显示数值**（7 项挤在一行里，再带数字就装不下；
+    // 数值一律走悬停浮层 —— 那里还带得出"该桶分模型明细"）。
+    const legend = segs.map((s) =>
+      `<span style="display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:170px">`
+      + `<i style="width:8px;height:8px;border-radius:2px;background:${s.color};flex:none"></i>`
+      + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${trendEscAttr(s.name)}">${esc(s.name)}</span>`
+      + `</span>`).join('');
+
+    if (peakEl) peakEl.textContent = `峰值 ${trendFmt(peak)} · 合计 ${trendFmt(sumAll)} tokens`;
+
+    host.innerHTML =
+      `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block">${marks.join('')}${xLabels.join('')}</svg>
+       <div class="dim" style="display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;font-size:11px;line-height:16px;margin-top:2px">${legend}</div>
+       <div id="trendTip" style="display:none;position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11px;white-space:nowrap;z-index:5;box-shadow:0 4px 14px var(--shadow);min-width:130px"></div>`;
+
+    // ── 4. 悬停浮层 ──
+    // ⚠ 监听器只绑**一次**（挂在不被重绘的 #statsTrend 上），当前几何与数据放进
+    //   `host._trendGeo`，每次重绘只换这份快照。否则 30 秒一轮的重绘每次都补一个
+    //   监听器，一分钟后就变成"鼠标一动弹三个浮层"。
+    host._trendGeo = { buckets, segs, valOf, cx, step, n, W, PADT, plotH, lblOf };
+    if (!host._trendBound) {
+      host._trendBound = true;
+      host.addEventListener('mousemove', (ev) => {
+        const g = host._trendGeo;
+        const svgEl = host.querySelector('svg');
+        const tip = host.querySelector('#trendTip');
+        const cur = host.querySelector('#trendCursor');
+        const band = host.querySelector('#trendHoverBand');
+        if (!g || !svgEl || !tip || !cur) return;
+        const rect = svgEl.getBoundingClientRect();
+        if (!rect.width) return;                    // 面板被收起时宽度为 0，按 X 估桶会全落在 0
+        const xv = (ev.clientX - rect.left) / rect.width * g.W;
+        let best = -1, bd = 1e9;
+        for (let i = 0; i < g.n; i++) { const d = Math.abs(g.cx(i) - xv); if (d < bd) { bd = d; best = i; } }
+        if (best < 0) return;
+        const b = g.buckets[best];
+        // 该桶的分模型明细：只看有量的，按量降序 —— 浮层第一行必须是最耗的那个模型。
+        const det = g.segs.map((s) => ({ s, v: g.valOf(b, s) }))
+          .filter((o) => o.v > 0).sort((p, q) => q.v - p.v);
+        tip.innerHTML =
+          `<div style="font-weight:600;margin-bottom:2px">${esc(b.ts.slice(5, 10))} ${esc(g.lblOf(b.ts))}</div>`
+          + `<div style="color:var(--dim);margin-bottom:2px">合计 <b style="color:var(--fg)">${trendFmt(b.total)}</b> tokens</div>`
+          + det.map((o) => `<div style="display:flex;align-items:center;gap:5px">`
+              + `<i style="width:7px;height:7px;border-radius:2px;background:${o.s.color};flex:none"></i>`
+              + `<span style="overflow:hidden;text-overflow:ellipsis;max-width:160px;color:var(--dim)">${esc(o.s.name)}</span>`
+              + `<b style="margin-left:auto;color:var(--fg);padding-left:8px">${trendFmt(o.v)}</b>`
+            + `</div>`).join('');
+        tip.style.display = 'block';
+        // 位置：横向跟手但按**实测**浮层宽度 clamp（贴右边缘时不翻到屏幕外），
+        // 纵向优先放在光标上方，贴顶时落到光标下方 —— 与页面级 #hoverTip 同一套思路。
+        const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+        const tw = tip.offsetWidth || 150, th = tip.offsetHeight || 90;
+        tip.style.left = Math.min(Math.max(mx + 12, 2), Math.max(2, rect.width - tw - 2)) + 'px';
+        const top = my - th - 10;
+        tip.style.top = (top >= 2 ? Math.min(top, Math.max(2, rect.height - th - 2)) : Math.min(my + 14, Math.max(2, rect.height - th - 2))) + 'px';
+        const x = g.cx(best);
+        cur.setAttribute('x1', x.toFixed(1)); cur.setAttribute('x2', x.toFixed(1));
+        cur.style.display = 'block';
+        if (band) {
+          const bw = Math.max(2, g.step * 0.9);
+          band.setAttribute('x', (x - bw / 2).toFixed(1));
+          band.setAttribute('width', bw.toFixed(1));
+          band.style.display = 'block';
+        }
+      });
+      host.addEventListener('mouseleave', () => {
+        for (const id of ['#trendTip', '#trendCursor', '#trendHoverBand']) {
+          const e = host.querySelector(id); if (e) e.style.display = 'none';
+        }
+      });
+    }
   }
 
   // ⚠ 2026-10-19 新口径（单账号管理员）：原来的 `memberMode` 整块删除。
