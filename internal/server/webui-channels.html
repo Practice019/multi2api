@@ -137,6 +137,8 @@
     <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
     <label>模型</label>
     <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4">
+<button type="button" onclick="discover()" title="拿上面的 Base URL + key 去问上游有哪些模型，问完自动填进左边这一栏（不是保存）">自动发现</button>
+<div id="f-disc" class="dim" style="font-size:12px;margin:2px 0 0"></div>
     <div class="hint">这里写上游认识的名字；对外想换名字就用下面的映射。</div>
     <label>模型映射</label>
     <textarea id="f-map" placeholder='每行一条：公开名=上游名&#10;pub-y=real-x'></textarea>
@@ -159,6 +161,35 @@
 <script>
 // ⚠ 本文件不引任何外部依赖：既能挂到服务端，也能直接用浏览器打开（填服务地址与令牌即可）。
 let editing = null;   // 正在编辑的渠道 id（null = 新增）
+
+// discover() 「模型自动发现」：拿当前表单里的 Base URL + key 去问上游有哪些模型，回填到 #f-models。
+//
+// ⚠ 两个刻意的行为：
+//   1. 它**不保存** —— 只填栏位。抄错上游模型名是这条链路最容易出的错，所以让用户先看到真名、
+//      再自己按保存，比"发现并直接落库"安全（后者会在 Base URL 写错时把错的列表写进渠道）。
+//   2. key 空着就**明确说清**，不静默发一个空 key 的请求（那会拿到 401，然后用户会以为功能坏了）。
+//      编辑已存在的渠道时可以不填 —— 服务端会用该渠道自己**启用中**的那个 key。
+async function discover() {
+  const box = document.getElementById('f-disc');
+  const base = document.getElementById('f-base').value.trim();
+  const key = document.getElementById('f-key').value.trim();
+  if (!base) { box.textContent = '先填 Base URL（OpenAI 兼容，通常以 /v1 结尾）'; return; }
+  if (!key) { box.textContent = '先填 API Key；若这是已保存的渠道、想用服务端存的那把 key，请在列表里点「编辑」后再点本按钮'; return; }
+  box.textContent = '正在问上游…';
+  try {
+    const d = await api('/admin/channels/discover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base_url: base, key: key }),
+    });
+    const ms = (d && d.models) || [];
+    if (!ms.length) { box.textContent = '上游返回 0 个模型：确认 Base URL 指向的是 OpenAI 兼容端点（/v1）'; return; }
+    document.getElementById('f-models').value = ms.join(',');
+    box.textContent = '已回填 ' + ms.length + ' 个模型（还没保存，确认无误后点「保存」）';
+  } catch (e) {
+    box.textContent = '自动发现失败：' + (e && e.message ? e.message : e);
+  }
+}
 
 function baseURL() {
   const v = document.getElementById('base').value.trim();
