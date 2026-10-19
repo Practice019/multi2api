@@ -3112,10 +3112,18 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		if e.ThinkTokens > 0 {
 			thinkTokens += int64(e.ThinkTokens)
 		}
-		if e.CacheHitTokens > 0 {
+		// ⚠⚠ 量纲守卫（与 cacheRates 里那条同一理由，但这里是**主累加**，漏了它整个
+		// cache_hit_tokens / cache_hit_rate 就还是错的）：有的上游把 cache_hit 按完全不同的
+		// 量纲报 —— 实测 7382 条记录里 hit 高达 100 万+，而同一行 tokens 只有几百（差 346~656 倍）。
+		// 这行的 hit 与 miss 出自**同一份 usage**，所以要么都信、要么都不信。
+		// 判据：hit > tokens*10 且 tokens>0 ⇒ 整行缓存字段丢弃。
+		// ⚠ 这条是**守卫单测抓出来的**：我上一轮只改了 cacheRates（多窗口那处），
+		//   主累加没改，于是命中率仍是 0.9987 —— 测试当场判红，不是靠看图发现的。
+		cacheRowTrusted := !(e.Tokens > 0 && int64(e.CacheHitTokens) > int64(e.Tokens)*10)
+		if cacheRowTrusted && e.CacheHitTokens > 0 {
 			cacheHitTokens += int64(e.CacheHitTokens)
 		}
-		if e.CacheMissTokens > 0 {
+		if cacheRowTrusted && e.CacheMissTokens > 0 {
 			cacheMissTokens += int64(e.CacheMissTokens)
 		}
 		totalSum += e.TotalMS
