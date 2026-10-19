@@ -188,6 +188,39 @@ func TestChannelsKeysDelete(t *testing.T) {
 	}
 }
 
+// ★ reveal 的边界：默认只有掩码，显式 reveal=1 才回明文。
+//
+// 这条守的是安全边界而不是功能：列表端点 /admin/channels 是每 30 秒轮询的，
+// 一旦明文混进默认响应，每次轮询都会把全部渠道的 key 发一遍。
+// Key 管理窗口不是轮询的（只在打开时请求一次），所以那里可以要明文 —— 用户要"看全"。
+func TestChannelsKeysRevealBoundary(t *testing.T) {
+	s := chanStore(t)
+	h := chanHandler(t, s)
+	id := chanKeysCreate(t, h, "")
+
+	code, resp := doJSON(t, h, http.MethodGet, "/admin/channels/keys?id="+id, "")
+	if code != http.StatusOK {
+		t.Fatalf("GET keys 应 200，实际 %d", code)
+	}
+	if strings.Contains(resp, "sk-first-0001") {
+		t.Fatalf("★ 默认响应不能带明文 key: %s", resp)
+	}
+	if !strings.Contains(resp, `"revealed":false`) {
+		t.Fatalf("默认应标 revealed:false: %s", resp)
+	}
+
+	code, resp = doJSON(t, h, http.MethodGet, "/admin/channels/keys?id="+id+"&reveal=1", "")
+	if code != http.StatusOK {
+		t.Fatalf("reveal=1 应 200，实际 %d", code)
+	}
+	if !strings.Contains(resp, "sk-first-0001") || !strings.Contains(resp, "sk-second-0002") {
+		t.Fatalf("reveal=1 应回完整明文: %s", resp)
+	}
+	if !strings.Contains(resp, `"revealed":true`) {
+		t.Fatalf("reveal=1 应标 revealed:true: %s", resp)
+	}
+}
+
 // 不存在的渠道 ⇒ 400/404，不崩。
 func TestChannelsKeysUnknownChannel(t *testing.T) {
 	s := chanStore(t)
