@@ -75,6 +75,12 @@ type Channel struct {
 type ChannelKey struct {
 	Key    string `json:"key"`
 	Status int    `json:"status"`
+	// Reason / DisabledAt 记"为什么、什么时候"被停用（对标 new-api 的 multi_key_info）。
+	//
+	// ⚠ 自动禁用必须留下原因：否则用户看到某个 key 自己变灰，只会以为程序坏了，
+	// 而不是"这把 key 上游说无效了"。理由取值见 keyops.go 的 Reason* 常量。
+	Reason     string `json:"reason,omitempty"`
+	DisabledAt int64  `json:"disabled_at,omitempty"`
 }
 
 // Overrides 渠道级覆盖（对标 new-api 的参数覆盖 / 头部覆盖）。

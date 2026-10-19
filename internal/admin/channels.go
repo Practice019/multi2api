@@ -36,6 +36,12 @@ func (h *Handler) registerChannels() {
 	h.register("POST /admin/channels/delete", h.channelsDelete)
 	h.register("POST /admin/channels/status", h.channelsStatus)
 	h.register("POST /admin/channels/reveal", h.channelsReveal)
+	// 多 key 运维（对标 new-api 的「Key 管理」）：加/删/启停都按**下标**动，不动别人。
+	// ⚠ 不能只靠 POST /admin/channels 整体覆盖 —— 表单不回显明文，覆盖会把前端不知道的 key 抹掉。
+	h.register("GET /admin/channels/keys", h.channelsKeysList)
+	h.register("POST /admin/channels/keys/add", h.channelsKeysAdd)
+	h.register("POST /admin/channels/keys/status", h.channelsKeysStatus)
+	h.register("POST /admin/channels/keys/delete", h.channelsKeysDelete)
 }
 
 // channelView 是对外的渠道视图：**key 只出掩码**（明文走 reveal）。
@@ -105,6 +111,8 @@ type channelReq struct {
 	Priority     int               `json:"priority"`
 	Weight       int               `json:"weight"`
 	Status       int               `json:"status"`
+	// KeySelectionMode 多 key 的选法（""/"random"/"round_robin"）。空 = 保持原值（新建时 = 随机）。
+	KeySelectionMode string `json:"key_selection_mode"`
 }
 
 // channelsUpsert POST /admin/channels —— 新建（无 id）或更新（带 id）。
@@ -145,19 +153,42 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 	if ch.ID == "" {
 		ch.ID = newChannelID()
 		created = true
-	} else if _, ok := s.Get(ch.ID); ok {
+	} else if old, ok := s.Get(ch.ID); ok {
 		// 更新：保留原 key（表单不回显明文 ⇒ 不回传 keys 就表示"不改 key"）
+		// 以及原 ChannelInfo（key 选择模式是既有设置，不能因为这次没传就被清掉）。
 		if len(req.Keys) == 0 {
-			old, _ := s.Get(ch.ID)
 			ch.Keys = old.Keys
-			ch.ChannelInfo = old.ChannelInfo
+		}
+		ch.ChannelInfo = old.ChannelInfo
+	}
+	// 追加 key，**按内容去重**：同一把 key 填两遍会让轮询连续选中同一个条目
+	// （界面上看是"轮询没生效"，实际是数据里有两份相同的 key）。
+	seen := make(map[string]bool, len(ch.Keys)+len(req.Keys))
+	for _, k := range ch.Keys {
+		seen[k.Key] = true
+	}
+	for _, raw := range req.Keys {
+		k := strings.TrimSpace(raw)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		ch.Keys = append(ch.Keys, channelstore.ChannelKey{Key: k, Status: channelstore.StatusEnabled})
+	}
+	// 选择模式：空 = 保持原值；显式给了才改（并且只认两个合法值，
+	// 因为第三个值会让 PickKeyIdx 静默落回随机 —— 用户以为设了轮询其实没设）。
+	if req.KeySelectionMode != "" {
+		switch req.KeySelectionMode {
+		case "random", "round_robin":
+			ch.ChannelInfo.KeySelectionMode = req.KeySelectionMode
+		default:
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "key_selection_mode 只能是 random / round_robin（空 = 保持原值）",
+			})
+			return
 		}
 	}
-	for _, k := range req.Keys {
-		if strings.TrimSpace(k) != "" {
-			ch.Keys = append(ch.Keys, channelstore.ChannelKey{Key: strings.TrimSpace(k), Status: channelstore.StatusEnabled})
-		}
-	}
+	ch.ChannelInfo.MultiKey = len(ch.Keys) > 1
 	if err := s.Upsert(ch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
