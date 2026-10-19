@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 	"workbuddy2api/internal/channelstore"
+	"workbuddy2api/internal/openaicompat"
 
 	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/admin"
@@ -1427,6 +1428,10 @@ func main() {
 		APIKey:            cfg.APIKey,
 		APIKeys:           apiKeysStore,  // 多 API key 管理（普通 key 走它）
 		Channels:          channelsStore, // 中转站口径的对外目录来源（nil = 走上游目录，既有行为）
+		// 组合根职责：核心只认 gateway.Provider，由这里把具体上游装进去。
+		ChannelProvider: func(id, baseURL string) gateway.Provider {
+			return openaicompat.NewOpenAICompat(id, baseURL)
+		},
 		// 控制台登录端点：挂 /admin/auth/（管理台门禁之外，见 server.NewHandler 里
 		// 的挂载注释与 account 包的 PathXxx 常量）。
 		AccountAuth: accountHTTP,
