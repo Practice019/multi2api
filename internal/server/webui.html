@@ -9719,6 +9719,22 @@ let loginProvider = '';
     const total = num(s.total);
     const ok = num(s.ok);
     const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
+    // ⚠⚠ 平均 RPM / TPM 的窗口（2026-10-20 加，对标 new-api 的指标卡）：
+    //   必须用**真实窗口跨度**（后端给的 window_from/window_to）去除，不能用固定的 24h ——
+    //   用户切 1h / 24h / 7d / 30d 档位时窗口差几十倍，写死就把 7 天摊成了 1 天。
+    //   ⚠ 跨度拿不到（老响应 / 只有一个点）⇒ 返回 null，卡片显示占位而不是编个数。
+    let winMin = null;
+    if (s.window_from && s.window_to) {
+      const a = new Date(s.window_from).getTime();
+      const b = new Date(s.window_to).getTime();
+      if (isFinite(a) && isFinite(b) && b > a) { winMin = (b - a) / 60000; }
+    }
+    const perMin = (v) => {
+      const n = num(v);
+      return (winMin && n !== null) ? n / winMin : null;
+    };
+    const rpm = perMin(s.total);
+    const tpm = perMin(s.tokens);
     return [
       ['总请求', fmtCount(s.total), ''],
       ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
@@ -9729,6 +9745,9 @@ let loginProvider = '';
       ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
+      // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）
+      ['平均 RPM', rpm === null ? null : (rpm >= 10 ? fmtCount(Math.round(rpm)) : rpm.toFixed(1)), 'dim'],
+      ['平均 TPM', tpm === null ? null : fmtTokens(Math.round(tpm)), 'dim'],
       // ⚠ 下面三张照 agent2api 的概览卡补（2026-10-18）。⚠ 值**先给 null = 占位**：
       //   它们的原料在两处不同的接口里 ——
       //     · Top 模型    ⇒ 本响应里的 `by_model_detail`（⚠ 在下面 renderStatsReport 里回填）
