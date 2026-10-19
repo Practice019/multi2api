@@ -79,7 +79,7 @@ function inlineScripts(html) {
     if (/\bsrc\s*=/.test(attrs)) continue;
     if (!body.trim()) continue;
     // 这段 script 在**整个文件**里的起始行（报错要能指回 HTML 行号）
-    const line = html.slice(0, m.index).split('\n').length + (attrs.match(/\n/g) || []).length;
+    const line = html.slice(0, m.index).split(/\r?\n/).length + (attrs.match(/\n/g) || []).length;
     out.push({ idx: i, body, line });
   }
   return out;
@@ -114,7 +114,7 @@ function check(files) {
         new vm.Script(s.body, { filename: relOf(rel) + '#' + s.idx });
       } catch (e) {
         const ln = Number((String(e.stack || '').match(/#\d+:(\d+)/) || [])[1] || 0);
-        const lines = s.body.split('\n');
+        const lines = s.body.split(/\r?\n/);
         const snippet = ln
           ? lines.slice(Math.max(0, ln - 3), Math.min(lines.length, ln + 2))
             .map((t, k) => (Math.max(0, ln - 3) + k + 1) + ': ' + t).join('\n')
@@ -202,7 +202,7 @@ if (bad.length) {
   console.log('\n失败明细：');
   bad.forEach((b) => {
     console.log('  ' + b.file + ' 内联 script #' + b.idx + '（约第 ' + b.line + ' 行）: ' + b.msg);
-    if (b.snippet) console.log('    ' + b.snippet.split('\n').join('\n    '));
+    if (b.snippet) console.log('    ' + b.snippet.split(/\r?\n/).join('\n    '));
   });
 }
 console.log('\n=== ' + (bad.length ? bad.length + ' 段语法错' : '全部通过（' + segs + ' 段）') + ' ===');
