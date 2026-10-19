@@ -278,8 +278,27 @@ func TestSessionLogoutFlow(t *testing.T) {
 		t.Fatalf("登出应当 200，得到 %d", code)
 	}
 	cleared := setCookies(hdr)
-	if len(cleared) != 1 || cleared[0].MaxAge >= 0 {
-		t.Errorf("★ 登出必须下发删除用的 Set-Cookie（MaxAge<0），得到 %+v", cleared)
+	// T12 起登出会清**两个** Cookie：会话（wb2api_sid）+ 管理令牌
+	// （wb2api_admin_token）。理由：用 `?token=` 换手进来的浏览器没有会话可撤销，
+	// 只清会话 Cookie 的话点「登出」等于什么都没发生（页面还是登录态）。
+	//
+	// 判据不变的部分：每个被清的 Cookie 都必须是 MaxAge<0（浏览器立刻删），
+	// 且**必须包含会话 Cookie**（漏了它就是"登出后旧 cookie 还能用"）。
+	clearedOK := len(cleared) >= 1
+	var sawSID bool
+	for _, c := range cleared {
+		if c.MaxAge >= 0 {
+			clearedOK = false
+		}
+		if c.Name == CookieName {
+			sawSID = true
+		}
+	}
+	if !clearedOK || !sawSID {
+		t.Errorf("★ 登出必须下发删除用的 Set-Cookie（MaxAge<0）且包含会话 Cookie，得到 %+v", cleared)
+	}
+	if len(cleared) > 2 {
+		t.Errorf("登出只该清会话与令牌两个 Cookie，得到 %+v", cleared)
 	}
 	code, body, _ = get(t, srv, PathSession, sid)
 	if code != http.StatusUnauthorized {

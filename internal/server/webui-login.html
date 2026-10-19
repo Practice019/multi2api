@@ -470,19 +470,32 @@
         applyMode();
       }
       showError(result.text);
-      if (result.code === 'captcha_required') {
-        // ★ 拿到这个 code 就说明手上这道题**已经作废**了（服务端一次性消费：
-        //   答对、答错、没答都算用过）。不换题的话用户会拿着废题反复失败 ——
-        //   这是这个功能最容易做错的一处。
-        //   quiet：顶部已经显示 captcha_required 了，别被"换题失败"盖掉。
-        askCaptcha({ quiet: true, focus: true });
-      } else if (result.code === 'captcha_disabled') {
+      if (result.code === 'captcha_disabled') {
         // 该部署没开（配置被改过）：按普通错误展示，并隐藏整块。
         // **不**自创重试逻辑 —— 重试与否由用户在页面上决定。
+        // 顺手把状态清干净：下面那条"顺手换题"因此不会发请求。
         captchaEnabled = false;
         captchaId = '';
         captchaRow.hidden = true;
       }
+      // ★ 本轮提交**没结束**（走到这里就都是 2xx 以外的结果）⇒ 顺手换一题。
+      //
+      // 为什么是"任何失败"而不只是 captcha_required：服务端的 checkCaptcha 在
+      // 口令校验**之前**跑（internal/account/http.go 的 login），所以一次提交
+      // 无论答对、答错、还是口令错，手上那道题**都已经作废**了。不换的后果实测
+      // 是这样：用户口令打错 → 401（题已废）→ 再点提交 → 先撞 captcha_required
+      // → 才换题 → 又要答一次 —— 每次打错口令都白费一轮往返。
+      //
+      // 三处刻意的边界：
+      //   · 成功（redirect）**不换**：页面马上跳走，换题是白发的请求；
+      //   · captcha_disabled 那条已把 captchaEnabled 置 false，这里自然不换；
+      //   · quiet:true ⇒ 换题失败**不会**盖掉真正的错误提示（用户最需要知道的
+      //     是"口令不对"，不是"换题失败"）。
+      //
+      // 二选一里的哪一支：**由这一条统一承担换题**，captcha_required 不再单独
+      // 处理。理由是两者本来就是同一件事 —— 这一轮用掉的题作废了（code 不同只
+      // 说明服务端在流程的哪一步拦下），写在两处反而要各自记得别再换一次。
+      if (captchaEnabled) askCaptcha({ quiet: true, focus: true });
     });
   });
 

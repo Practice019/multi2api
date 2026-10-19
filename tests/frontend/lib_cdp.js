@@ -28,6 +28,50 @@ const { spawn } = require('child_process');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// withToken —— 给控制台 URL 带上身份令牌（T7 加登录之后，所有开 /ui 的探针都需要）。
+//
+// # 为什么放在**共享层**而不是逐个探针改
+//
+// T7 起 `/ui` 需要登录（未登录只渲染一张登录页）。改动前，探针导航到
+// `http://127.0.0.1:PORT/ui` 就能看到控制台 —— 那靠的是"回环地址即凭据"那条
+// 已删除的判据。于是 `tests/frontend/` 下**60 多个**开 /ui 的探针会一起红，
+// 而它们绝大多数与登录无关（它们验的是表格列、按钮、面板切换）。
+//
+// 逐个改 60 个文件有两个坏处：改动面大到无法审阅；以后每加一个探针都要记得
+// 这件事（漏了就是"点了没反应"的假红）。所以在唯一的浏览器入口这里统一处理。
+//
+// # 令牌从哪来
+//
+// `lib_instance.js` 起实例时把它的 `admin_token` 写进 `WB2API_PROBE_TOKEN`
+// （探针起的实例本就是临时凭据，写在进程环境里不会外泄到别的地方）。
+// 所以"用 startInstance 起的实例 + withChrome 打开的浏览器"这条链路自动带上身份。
+//
+// # 服务端怎么处理 `?token=`
+//
+// `internal/server/webui.go`：校验通过 ⇒ `Set-Cookie`（12 小时）+ **302 到干净的
+// `/ui`**（令牌不留URL里，避免顺着历史记录 / Referer / 代理日志漏出去）。
+// 所以浏览器最终停在无令牌的地址上，cookie 已生效。
+//
+// # 三条刻意的例外
+//
+//	opts.token === false  明确不要令牌 —— 要验**登录页本身**的探针必须这样写
+//	                         （否则浏览器被自动登入，永远看不到登录页）
+//	opts.token === 'xxx'  用指定令牌 —— 验"错误令牌进不去"这类断言
+//	没有 WB2API_PROBE_TOKEN 环境变量  原样返回，行为与改动前完全一致
+//	                         （例如探针要打**外部的、已经登录好的**实例）
+function withToken(url, token) {
+  if (typeof url !== 'string' || !url) return url;
+  let tok;
+  if (token === false) return url;
+  if (typeof token === 'string' && token) tok = token;
+  else tok = process.env.WB2API_PROBE_TOKEN || '';
+  if (!tok) return url;
+  // 只给控制台页面加：探针人造的其它 URL（静态资源、/admin/* 直连）不该被改。
+  if (!/\/ui(\?|#|$)/.test(url)) return url;
+  if (url.indexOf('token=') >= 0) return url; // 调用方自己带了，别覆盖
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(tok);
+}
+
 function httpGet(u) {
   return new Promise((res, rej) => {
     http.get(u, (r) => {
@@ -46,13 +90,21 @@ function httpGet(u) {
 //   errs                  → 收集到的异常/console.error 文本数组
 //   shot(name)            → 截全页图写进 <repo>/shots/<name>，返回字节数
 //
-// opts = { port, url, width, height, readyExpr, outDir }
+// opts = { port, url, width, height, readyExpr, outDir, token }
 //   readyExpr  轮询表达式，返回真值即认为骨架就绪（默认等 document.body）
+//   token      控制台身份令牌（见下方 withToken 的长注释）。
+//              true/省略 ⇒ 自动取 process.env.WB2API_PROBE_TOKEN；
+//              false      ⇒ 明确不带令牌（要验登录页本身的探针用这个）；
+//              字符串      ⇒ 用这一把。
 async function withChrome(opts, fn) {
   const CHROME = require('./chrome_path.js').resolveChrome();
   const port = opts.port;
   const width = opts.width || 1600;
   const height = opts.height || 1200;
+  const navURL = withToken(opts.url, opts.token);
+  if (navURL !== opts.url) {
+    console.log('  身份：URL 带 ?token=（探针实例的 admin_token，换手后 302 到干净的 /ui）');
+  }
   const outDir = opts.outDir || path.resolve(__dirname, '..', '..', 'shots');
   const profile = path.join(os.tmpdir(), 'chrome-cdp-' + port + '-' + Date.now());
   fs.mkdirSync(outDir, { recursive: true });
@@ -130,7 +182,7 @@ async function withChrome(opts, fn) {
     // ① enable 先于 navigate
     await send('Runtime.enable');
     await send('Page.enable');
-    await send('Page.navigate', { url: opts.url });
+    await send('Page.navigate', { url: navURL });
 
     // ② 轮询等骨架
     const readyExpr = opts.readyExpr || 'document.body ? 1 : 0';
