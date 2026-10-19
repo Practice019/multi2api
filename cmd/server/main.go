@@ -1358,6 +1358,14 @@ func main() {
 		// 控制台登录端点：挂 /admin/auth/（管理台门禁之外，见 server.NewHandler 里
 		// 的挂载注释与 account 包的 PathXxx 常量）。
 		AccountAuth: accountHTTP,
+		// 控制台账号与会话：`/ui` 靠它们判断"这次请求是谁"。
+		//
+		// ⚠ 判据本身是 account.Identify（**一份**实现），admin 门禁与 /ui
+		// 都调它 —— 两处各写一份必然漂移（页面能开但接口敞开，或反之）。
+		Accounts:     accountsStore,
+		Sessions:     sessionsStore,
+		RegisterOpen: func() bool { return !cfg.Console.DisableRegister },
+		CookieSecure: cfg.Console.CookieSecure,
 		// 管理台门禁令牌（与 api_key **独立**）与监听范围 —— 两者共同决定
 		// 「本机免令牌」是否成立，见 internal/server/webui.go 的 localExempt。
 		//

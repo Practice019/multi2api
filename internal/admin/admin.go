@@ -184,7 +184,7 @@ type Config struct {
 	//
 	// 改造前门禁认的就是 APIKey，也就是对话接口那把 —— 后果是"给某个
 	// 客户端配一把 key 调对话"等于"把整个管理台交出去"。详见
-	// ServeHTTP / adminTokenMatches 的注释。
+	// ServeHTTP / adminTokenOK 的注释。
 	//
 	// 空 = 没有远程管理面（只有本机免令牌那条路，且要求监听在回环地址）。
 	AdminToken string
@@ -637,7 +637,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !p.canAccess(r.URL.Path) {
+	if !canAccess(p, r.URL.Path) {
 		// 403 与 401 分开：**有**身份但角色不够。前端据此显示"当前账号无权"
 		// 而不是再跳一次登录页（那会让成员以为自己的登录没生效）。
 		writeJSON(w, http.StatusForbidden, map[string]any{
@@ -650,17 +650,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mux.ServeHTTP(w, r)
-}
-
-// principal 一次请求的身份。零值 = 未认证（见 principalOf 的 ok）。
-//
-// Source 分开记是给日志与后续按来源分权留的缝："会话"来自人（有角色、
-// 可撤销），"令牌"来自脚本（等价管理员、无状态）。
-type principal struct {
-	Source   string // "token" | "session"
-	UserID   string // 会话来源才有
-	Username string
-	Role     int
 }
 
 // 成员可以访问的 /admin/* 前缀。
@@ -688,8 +677,8 @@ var memberPaths = []string{
 }
 
 // canAccess 角色分流：管理员全部放行；成员只放行白名单前缀。
-func (p principal) canAccess(path string) bool {
-	if p.Role >= account.RoleAdmin {
+func canAccess(p account.Principal, path string) bool {
+	if p.IsAdmin() {
 		return true
 	}
 	for _, prefix := range memberPaths {
@@ -700,36 +689,19 @@ func (p principal) canAccess(path string) bool {
 	return false
 }
 
-// principalOf 解析请求身份：① 管理令牌 → ② 浏览器会话 → 否则未认证。
+// principalOf 解析请求身份。
 //
-// # 顺序与"为什么两条路都要"
+// ⚠ 判据本身在 account.Identify（**唯一**一份）：`/ui` 在 internal/server、
+// `/admin/*` 在本包，两处必须对"谁是谁"给出完全一致的答案。在这里另写一份
+// 的后果是漂移 —— 而漂移的形态正是刚修完的那类漏洞（页面能开但接口敞开）。
 //
-// 令牌先判：它是一次字符串比较（无 IO、无锁），而会话要走 Lookup（查表 +
-// 可能落盘续期）。绝大多数管理端点是脚本/探针在打，先命中便宜的那条。
+// 本包只负责两件本包特有的决策：
 //
-// ⚠ 令牌那一支**等价于管理员**：它无状态、没有账号可归属，历史上就是
-// "root 钥匙"。这不是遗漏 —— 它是给脚本/CI 用的机器凭据，而机器没有
-// "成员"这种身份。角色的意义在于**区分人**。
-//
-// ⚠ 会话那一支必须走 Lookup 而不是自己读 Cookie 查表：Lookup 里带着
-// 过期/撤销/账号禁用/AuthVersion 四道校验（见 account.SessionStore.Lookup
-// 的注释）。绕过它等于"口令改了、账号禁了，旧 cookie 照样能进管理面"。
-func (h *Handler) principalOf(r *http.Request) (principal, bool) {
-	if h.adminTokenMatches(r) {
-		return principal{Source: "token", Username: "admin_token", Role: account.RoleAdmin}, true
-	}
-	if h.cfg.Sessions == nil || h.cfg.Accounts == nil {
-		return principal{}, false
-	}
-	sid := account.SIDFromRequest(r)
-	if sid == "" {
-		return principal{}, false
-	}
-	_, u, err := h.cfg.Sessions.Lookup(sid, h.cfg.Accounts)
-	if err != nil {
-		return principal{}, false
-	}
-	return principal{Source: "session", UserID: u.ID, Username: u.Username, Role: u.Role}, true
+//	h.adminTokenOK  传给 Identify 的 isToken 回调（读**当前**生效的令牌，
+//	                所以轮换立即生效、旧副本立即失效）
+//	canAccess       角色到端点的策略（那条 memberPaths 白名单）
+func (h *Handler) principalOf(r *http.Request) (account.Principal, bool) {
+	return account.Identify(r, h.adminTokenOK, h.cfg.Accounts, h.cfg.Sessions)
 }
 
 // cfgHasAccounts 本实例是否装了控制台账号体系（提示文案用）。
@@ -784,7 +756,7 @@ func forwarded(r *http.Request) bool {
 	return false
 }
 
-// adminTokenMatches 请求是否出示了正确的**管理令牌**。
+// adminTokenOK 给定凭据是否等于**当前**生效的管理令牌。
 //
 // # 与 api_key 的关系：**不认识**
 //
@@ -796,14 +768,28 @@ func forwarded(r *http.Request) bool {
 //
 // 未配置 admin_token（空串）时恒 false —— 维持"没有远程管理面"的安全默认，
 // 而**不是**回落到 api_key（那正是要修掉的权限倒挂）。
-func (h *Handler) adminTokenMatches(r *http.Request) bool {
+// adminTokenOK 给定凭据是否等于**当前**生效的管理令牌。
+//
+// # 与 api_key 的关系：**不认识**
+//
+// 这里刻意只比对 admin_token。改造前它比的是 config.api_key，
+// 于是"给客户端配一把对话 key"等于"交出管理台"。现在两把钥匙各管一段：
+//
+//	api_key     → /v1/chat/completions、/v1/images/generations、/v1/models
+//	admin_token → /admin/* 与 /ui 的远程访问
+//
+// 未配置 admin_token（空串）时恒 false —— 维持"没有管理面"的安全默认，
+// 而**不是**回落到 api_key（那正是要修掉的权限倒挂）。
+//
+// ⚠ 签名收的是**凭据字符串**而不是 *http.Request：取值（Bearer → ?token= →
+// 令牌 cookie）由 account.TokenFromRequest 统一负责，本函数只做比较。
+// 这样"哪些字段算凭据"的知识只有一处，而本函数可以直接当
+// account.Identify 的 isToken 回调传进去 —— 每次请求都读当前值，
+// 所以轮换立即生效、浏览器里的旧 cookie 副本立即失效。
+func (h *Handler) adminTokenOK(cred string) bool {
 	want := h.currentAdminToken()
 	if want == "" {
 		return false
-	}
-	cred := bearerOf(r)
-	if cred == "" {
-		cred = r.URL.Query().Get("token")
 	}
 	// 定长比较：避免按字节提前返回泄漏"前几位对了"的时序信息。
 	return subtleEqual(cred, want)
@@ -853,12 +839,9 @@ func subtleEqual(a, b string) bool {
 }
 
 // bearerOf 取出请求 Authorization 头里的 Bearer 凭据（无则空串）。
-func bearerOf(r *http.Request) string {
-	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
-		return strings.TrimPrefix(authz, "Bearer ")
-	}
-	return ""
-}
+// ⚠ 本地不再保留 bearerOf：取值逻辑统一在 account.TokenFromRequest
+// （Bearer → ?token= → 令牌 cookie）。本包若自己抄一份，就会出现
+// "门禁认的字段"与"cookie 换手认的字段"不一致的漂移。
 
 // ---------------------------------------------------------------------------
 // 账号视图
