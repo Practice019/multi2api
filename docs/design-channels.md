@@ -255,3 +255,36 @@ commit `50c10c2`（控制台加渠道入口 section）的信息里写着：
 两条都**只在用真实接口跑一遍时**才暴露 —— 进程内测试（handler 级）与只读自己的代码都看不见：
 前者走的是 Go 结构体而不是 HTTP JSON，后者读的是我以为的契约。教训：**前后端跨的那条线，
 必须用真实请求验一次**，因为那里没有编译器。
+## 悬置假设的验证：CRLF 检出下我的产物是否仍被正确保护（2026-10-20）
+
+起因：审计工具报出 1 处"危险用法"落在 **`verify_inline_script_syntax.js:205`**（我依赖的那道门禁自己），
+而 Git 每次提交都在警告"LF will be replaced by CRLF"。于是两个问题必须先答：
+门禁在 CRLF 副本上还准不准？我加的入口 section 会不会因行尾而消失？
+
+先测事实：
+
+    git check-attr text eol -- <各文件>   ⇒ 全部 unspecified（仓库**没有 .gitattributes**）
+    git config core.autocrlf              ⇒ true
+
+⇒ 本机工作树里所有文件都是 **CRLF**（Git 存 LF、检出给 CRLF）。所以"CRLF 下还能不能用"
+不是边角问题，而是**这台机器上的常态**。
+
+两个实验（都在 `D:\temp\crlf-check` 做，不碰仓库文件）：
+
+    LF  副本 webui-channels.html ⇒ 行尾=LF    段数=1  全部通过
+    CRLF 副本 webui-channels.html ⇒ 行尾=CRLF  段数=1  全部通过
+    CRLF 副本 webui.html         ⇒ 段数=3  全部通过；含 data-key="channels": True；含 /ui/channels: True
+
+结论：
+
+1. **门禁的行尾敏感性在这条路径上不成立**：它按 `<script>…</script>` 正则取段（不是按行处理），
+   LF/CRLF 两种副本给出同一结论 ✓。
+2. **我加的入口 section 在 CRLF 检出下依然可检出**（`data-key="channels"` 命中）✓，
+   控制台页面在 CRLF 下仍是 3 段且全过 ✓ ⇒ 上一轮担心的"门禁假绿 / 入口消失"两件事**都不成立**。
+3. 但审计那条 CRLF 敏感写法**依然存在**（`b.snippet.split('\n')`），只是它影响的是
+   **控制台输出的观感**（多一个 `\r`），不是判据本身 —— 与"剥注释静默失效"不是同一类。
+   仍标为**待修的小瑕疵**，不是缺陷。
+
+顺带记一条对后来者有用的事实：本仓**没有 `.gitattributes`**、`core.autocrlf=true` ⇒
+任何"按行处理文件内容"的代码都天生暴露在 CRLF 之下（仓库历史上两次 `stripComments` 静默失效
+正源于此）。写新代码时若按行处理，请显式用 `/\r?\n/` 或先归一化。
