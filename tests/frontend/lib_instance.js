@@ -124,7 +124,18 @@ async function startInstance(opts) {
   const deadline = Date.now() + (opts.readyMs || 12000);
   let up = false;
   while (Date.now() < deadline) {
-    try { const r = await httpGetText(base + '/healthz'); if (r.status === 200) { up = true; break; } } catch { }
+    try {
+      const r = await httpGetText(base + '/healthz');
+      // ⚠⚠ `/healthz` 在**没有健康账号**时回 **503**（body 是 {"healthy":0,…}）。
+      //
+      // 那不是"没起来"，而是"起来但池子是空的"。就绪判据若只认 200，
+      // 一个**故意不带凭证**的探针（例如只验令牌与鉴权的那个）会永远等下去，
+      // 报错说"实例未起来"，把探针自己的前提问题伪装成产品故障
+      //（实测踩到：token 安全探针起不来，日志里其实已经"multi2api 已启动"）。
+      //
+      // 所以判据是**服务开始应答**（200 或 503 都是应答），不是"healthy > 0"。
+      if (r.status === 200 || r.status === 503) { up = true; break; }
+    } catch { }
     await sleep(200);
   }
   const readLog = () => { try { return fs.readFileSync(logPath, 'utf8'); } catch { return ''; } };
