@@ -58,9 +58,15 @@ const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fai
 // ================================================================ T4
 console.log('\n[T4-1] 额度列的判据来自 `quota.has_data`，不是派生标量');
 ok(/function\s+quotaCellHTML\s*\(/.test(stripped), '存在 quotaCellHTML()（额度列的唯一渲染点）');
-// 额度列必须走 quotaCellHTML —— 写回 `${esc(a.credits)}` 就是改造前的缺陷形态
-ok(/<td>\$\{quotaCellHTML\(a\)\}<\/td>/.test(stripped),
-  '账号行的额度单元格调用 quotaCellHTML(a)（而不是直接渲染 a.credits）');
+// 额度列必须走 quotaCellHTML —— 写回 `${esc(a.credits)}` 就是改造前的缺陷形态。
+//
+// ⚠⚠ 2026-10-19 改锚点：原来是 `<td>\$\{quotaCellHTML\(a\)\}<\/td>`（`<td>` 必须是裸的）。
+//    产品后来给这一格加了两个属性（webui.html:4678）：
+//      `data-quota-uid`（增量打补丁用的定位钩子）+ `title="额度「—」表示还没探测过…"`
+//    于是锚点失配 —— 而失配的方向是"把产品做对的事判成红"（加 tooltip 是 T4 要求的一部分）。
+//    改成允许 `<td` 后带属性：**判据没变**（额度单元格必须调 quotaCellHTML、不得直接渲染 credits）。
+ok(/<td[^>]*>\$\{quotaCellHTML\(a\)\}<\/td>/.test(stripped),
+  '账号行的额度单元格调用 quotaCellHTML(a)（而不是直接渲染 a.credits；`<td>` 可以带属性）');
 // 反向守卫：旧的裸渲染必须消失
 ok(!/<td class="mono">\$\{esc\(a\.credits\)\}<\/td>/.test(stripped),
   '旧的 `<td class="mono">${esc(a.credits)}</td>` 已不存在（它就是"没查过也显示 0"的来源）');
@@ -100,13 +106,85 @@ stripped.split('\n').forEach((line, i) => {
 // KV_LABELS 是**上游字段名的映射表**，不是界面文案 —— 唯一的豁免。
 // 判据：这一行是 `Xxx: '...'` 形式的**字段名 → 中文**条目，且左边是上游字段标识符。
 const isFieldMap = (l) => /^\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*'[^']*积分[^']*',?\s*$/.test(l);
-const offenders = liveHits.filter(h => !isFieldMap(h.slice(h.indexOf(': ') + 2)));
-if (offenders.length) {
-  console.log('    非注释区仍含「积分」的行:');
-  offenders.forEach(h => console.log('      ' + h));
+
+// ⚠⚠ 2026-10-19 收窄这条判据（原来它判"剥掉注释后全文不得出现积分"）。
+//
+// 为什么必须收窄：原文把**不该改**的位置也判红了，而红线指向的动作恰好是改坏 ——
+//   · `<th>已得积分</th>`（Loomy 任务表表头，webui.html:7134）渲染的是**任务奖励发分**
+//     （同面板 7131 行写着「任务是一次性的：点一次入账一次，已完成的不再重复发分」），
+//     它和「额度」（上游额度/credits）是**两个概念**；
+// 产品自己写下的口径在 webui.html:7494：
+//     「**界面用语统一成「额度」，字段对照表保持「积分」**」
+// 也就是说 T4 要守的是**额度语义区不许自称「积分」**，不是全文禁用这个词。
+//
+// 改后分两层，判别力只增不减：
+//   a. **额度语义区**（`quota` / `free_quota` 列定义 + 两个额度渲染器函数体）里出现「积分」
+//      ⇒ 直接红（这才是 T4 的目标：额度列不许自称积分）；
+//   b. 其它用户可见位置的「积分」⇒ 必须在下面的**登记表**里，每条带理由；没登记的照红。
+// 登记表还自带"过期即红"：登记的文本在产品里**找不到了**也红（防止它变成永久橡皮章）。
+const JIFEN_ALLOW = [
+  { text: '已得积分', where: 'Loomy 任务表表头', why: '任务奖励发分 ≠ 额度（webui.html:7131「点一次入账一次…不再重复发分」）' },
+];
+
+// 额度语义区：列定义**整块**（花括号配平）+ 两个渲染器的函数体。
+//
+// ⚠ 为什么要按花括号配平而不是"取 key 那一行"：`free_quota` 是**多行对象字面量**，
+//   它的 tip 由三段字符串相加，续行**不含** `free_quota:` 前缀 ——
+//   按行取会把它整段漏掉，于是"额度区没有积分"会变成空跑假绿（我第一版就是这样，
+//   续行里的「永久积分」跑到了"未登记"那一桶里）。
+//   ⚠ 朴素配平不做词法分析：字符串里出现半角花括号会失准。本文件针对的两个对象字面量里
+//   只有中文引号（「」）没有半角花括号，且下面有"切片非空"断言兜底；将来若有人在这两块里
+//   写半角花括号，请把这里换成真词法。
+function sliceObjBlock(src, key) {
+  const m = new RegExp('(^|\\n)\\s*' + key + '\\s*:\\s*\\{').exec(src);
+  if (!m) return '';
+  const start = m.index + m[0].length - 1;   // 指向 '{'
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1); }
+  }
+  return src.slice(start);
 }
-ok(offenders.length === 0,
-  '剥掉注释后，源码里没有裸「积分」文案（' + offenders.length + ' 处；KV_LABELS 字段名映射已豁免）');
+// 渲染器的函数体（用与 replaceInFunction 同一套"两空格收尾"口径）
+function sliceFnForZone(src, anchor) {
+  const i = src.indexOf(anchor);
+  if (i < 0) return '';
+  const j = src.indexOf('\n  }\n', i);
+  return src.slice(i, j < 0 ? src.length : j);
+}
+const quotaZone = [
+  sliceObjBlock(stripped, 'quota'),
+  sliceObjBlock(stripped, 'free_quota'),
+  sliceFnForZone(stripped, 'function quotaCellHTML('),
+  sliceFnForZone(stripped, 'function freeQuotaCellHTML('),
+].join('\n');
+const zoneOffenders = quotaZone.split('\n').filter(l => l.includes('积分'));
+ok(zoneOffenders.length === 0,
+  '额度语义区（quota / free_quota 列定义 + 两个额度渲染器）里没有「积分」');
+if (zoneOffenders.length) zoneOffenders.forEach(l => console.log('      ' + l.trim()));
+// 防空跑：额度区必须真的被取到了（否则上面那条是"没内容所以绿"）
+ok(quotaZone.includes('quotaCellHTML') && quotaZone.includes('freeQuotaCellHTML'),
+  '额度语义区切片非空（取到了两个渲染器 —— 否则上一条是空跑假绿）');
+
+const offenders = liveHits.filter(h => !isFieldMap(h.slice(h.indexOf(': ') + 2)));
+// ⚠ 额度区里的命中**由上面那条判据负责**，这里要摘掉它，否则同一条根因会被报两次
+//   （本文件的哲学是"判据只写一处"；两处报同一条会让"还剩几处"读不准）。
+const hitText = (h) => h.slice(h.indexOf(': ') + 2).trim();
+const inQuotaZone = (h) => hitText(h).length > 0 && quotaZone.includes(hitText(h));
+const unregistered = offenders.filter(h => !inQuotaZone(h) && !JIFEN_ALLOW.some(a => h.includes(a.text)));
+if (unregistered.length) {
+  console.log('    非注释区仍含「积分」的行（未登记）:');
+  unregistered.forEach(h => console.log('      ' + h));
+}
+ok(unregistered.length === 0,
+  '剥掉注释后，用户可见区没有未登记的「积分」文案（' + unregistered.length + ' 处；'
+  + '已豁免 KV_LABELS 字段名映射与登记表里的 ' + JIFEN_ALLOW.length + ' 条）');
+// 登记表自检：登记的文本必须**仍然存在**，否则登记过期要删掉它（橡皮章会掩盖新的违规）
+for (const a of JIFEN_ALLOW) {
+  ok(stripped.includes(a.text),
+    '登记条目仍存在于源码: 「' + a.text + '」（' + a.where + '）—— ' + a.why);
+}
 // 豁免不是"放过" —— 单独确认豁免掉的那几行确实是字段映射表里的
 const mapHits = liveHits.filter(h => isFieldMap(h.slice(h.indexOf(': ') + 2)));
 if (mapHits.length) {
@@ -236,11 +314,19 @@ function replaceInFunction(src, fnAnchor, from, to) {
 // 产物仍是合法 HTML/JS。这一点很重要：一个语法坏掉的变异体让断言变红
 // 只能证明"文件坏了"，证明不了"守卫真的盯着这个行为"。
 if (!process.env.WB2API_MUTANT) {
+  // ⚠ 基线红条数要在**跑变异之前**记下来：`ok()` 会累加 fail，变异自己的结果会污染这个数。
+  const mainFails = fail;
   const mutants = [
     {
       name: 'M1：额度列改回 `${esc(a.credits)}`（T4 核心）',
-      html: normalized.replace('<td>${quotaCellHTML(a)}</td>', '<td class="mono">${esc(a.credits)}</td>'),
-      expect: '旧写法',
+      // ⚠⚠ 2026-10-19 改锚点：原来是 `'<td>${quotaCellHTML(a)}</td>'` 字面替换。
+      //   产品给这一格加了属性（`data-quota-uid` + tooltip）之后字面串不再命中 ⇒
+      //   这条变异**静默失效**（`m.html === normalized` 分支把它报成"变异没生效"）。
+      //   改用正则连属性一起换掉：变异体就是 T4 改造前那一行的样子（`<td class="mono">`），
+      //   于是 T4-1 的正向与反向守卫**两条**都会红。
+      html: normalized.replace(/<td[^>]*data-quota-uid="[^"]*"[^>]*>\$\{quotaCellHTML\(a\)\}<\/td>/,
+        '<td class="mono">${esc(a.credits)}</td>'),
+      expect: 'quotaCellHTML',
     },
     {
       name: 'M2：quotaCellHTML 改成 `credits ||` 兜底（把合法的 0 吞成缺数据）',
@@ -266,10 +352,24 @@ if (!process.env.WB2API_MUTANT) {
     ok(red, m.name + ' → 断言变红（证明守卫真的盯着它，不是空转）');
     if (!red) console.log('      变异体输出:\n' + out.split('\n').filter(l => /FAIL|PASS/.test(l)).map(l => '      ' + l).join('\n'));
   }
-  // 基线：未变异的副本必须**全绿** —— 否则上面的"红"说明不了任何事
-  //（一个恒红的守卫在变异时也是红的）。
+  // 基线：未变异副本必须与**真实源码**给出同一批红条。
+  //
+  // ⚠⚠ 2026-10-19 改判据：原来这里写的是"基线必须**全绿**"，理由是"一个恒红的守卫
+  //   在变异时也会红"。但本构建的真源码里本来就有既有红条（例如额度 tooltip 里那处
+  //   「积分」文案，属于产品侧文案待改），于是这条断言变成**恒红** ——
+  //   它把三条真变异的结果一起拖进噪声里，谁也看不出哪条红是变异造成的。
+  //   改成"红条**数**必须一致"：副本与真源码行为相同 ⇒ 变异体多出来的红就是变异造成的。
+  //   （同一个思路我在 verify_login_visual_e2e.js 的自检里用过：基线 + 增量比对。）
   const baseline = runStaticOn(normalized, 'baseline');
-  ok(!/FAIL/.test(baseline), '基线（未变异副本）全绿 —— 上面的"红"才有意义');
+  const baseFailLines = baseline.split('\n').filter(l => /FAIL/.test(l));
+  ok(baseFailLines.length === mainFails,
+    '基线（未变异副本）与真源码红条数一致（' + baseFailLines.length + ' == ' + mainFails + '）'
+    + '⇒ 上面各条"红"是变异造成的，不是继承来的');
+  if (baseFailLines.length !== mainFails) {
+    console.log('      副本 FAIL 行:\n' + baseFailLines.map(l => '      ' + l.trim()).join('\n'));
+  } else if (mainFails > 0) {
+    console.log('      （本构建既有红条 ' + mainFails + ' 条，不属变异 —— 见上面 [T4-4]/[T5] 段）');
+  }
 }
 
 console.log(fail === 0 ? '\n=== 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');

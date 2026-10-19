@@ -205,13 +205,28 @@ for (const t of tables) {
     // 拿去索引原文会切到完全不相干的区域（原文比剥后长 11 万字符）。
     // 第一版就是切错了对象，导致断言永远红。
     const head = codeHtml.slice(t.start, t.start + 120);
-    ok(/class="accttable"/.test(head),
-      '0 列的表只能是账号池那张动态表（实际头部 ' + JSON.stringify(head.slice(0, 60)) + '）');
+    // ⚠ 判据别写死成 class="accttable"（2026-10-19 修假红）：
+    //   动态表现在的开头是
+    //     <table class="accttable accttable--aligned" data-acctpid="${esc(g.provider)}" …
+    //   · `accttable--aligned`：1b05af3「所有表格改为自适应列宽」加的；
+    //   · `data-acctpid`：b8859e9「每上游一张表 + 横向滚动容器」加的。
+    //   旧写法要求 class 属性**恰好等于** accttable ⇒ 产品只要再挂一个修饰类就假红，
+    //   而"这张表是谁"其实由两个特征共同确定，比单看一个类名更准：
+    //     · class 以 accttable 起头（账号池家族）
+    //     · 带 data-acctpid=…（只有 JS 生成的那张每上游表才有；静态表没有）
+    ok(/^<table class="accttable[ "][^>]*data-acctpid=/.test(head),
+      '0 列的表只能是账号池那张动态表（accttable 前缀 + data-acctpid 两者都要有；实际头部 '
+      + JSON.stringify(head.slice(0, 80)) + '）');
     continue;
   }
   ok(t.cols >= 3 && t.cols <= 20, `表格列数在合理区间（实际 ${t.cols}）`);
 }
 ok(zeroColSeen <= 1, '最多只有一张动态表（实际 ' + zeroColSeen + '）');
+// 防空跑锚：上面那条"0 列的表只能是账号池动态表"只在**真扫到 0 列表**时才执行。
+// 哪天动态表被改成静态表（或扫描口径再变），zeroColSeen 会变成 0，
+// 那半段判据就成了一句空话 —— 而套件照样报绿。所以要求它必须 >= 1。
+ok(zeroColSeen >= 1,
+  '动态表（静态 0 列、列数由列集在运行期决定）仍被扫到 —— 否则上一条是空跑（实际 ' + zeroColSeen + '）');
 
 // ⚠ 账号池的表**不在静态 HTML 里**了（拆成"每上游一张表"后由 JS 生成），
 // 所以上面的静态扫描**看不到它** —— 这正是"守卫随重构静默变弱"的形态：
@@ -230,14 +245,41 @@ ok(zeroColSeen <= 1, '最多只有一张动态表（实际 ' + zeroColSeen + '�
     'ACCT_COLS 不再写死 11（它已收窄为"默认列集长度"，改回常量会让 codearts 的占位行跨错列数）');
 }
 
-// 全局 colspan 与列数的匹配检查：每个 colspan 值都必须能在**某个**表格的列数里找到
-const colspans = [...html.matchAll(/colspan="(\d+)"/g)].map(x => Number(x[1]));
+// 全局 colspan 与列数的匹配检查：每个 colspan 值都必须能在**某个**表格的列数里找到。
+//
+// ⚠ 必须在 codeHtml（剥过注释）上数，不能在原文上数（2026-10-19 修假红）：
+//   本节上面的注释早就写明"注释里的不算"，但这一行原先是在**原文**上 matchAll。
+//   实测：webui.html:8461 有一句说明文字「原先写死 colspan="11"，而那行只有 1 个
+//   前置 <td> + 11 = 12 格…」—— 那是文档，原文扫出来就变成一个凭空的可疑值 11。
+//   把文档当代码读 = 假红；本项目已经因为这类事吃过不止一次亏。
+const colspans = [...codeHtml.matchAll(/colspan="(\d+)"/g)].map(x => Number(x[1]));
 const tableCols = new Set(tables.map(t => t.cols));
-const orphan = colspans.filter(n => !tableCols.has(n) && !tableCols.has(n + 1));
+
+// 「占满整行」哨兵：colspan="99" 这类**故意超出列数**的写法。
+//
+// # 为什么它不是 B1/B2 那类缺陷（webui.html:6920-6925）
+//   panelRowErr 一行要在**两个列数不同的面板**里通用（查失败的行，见该函数注释
+//   "列数用 colspan 吃掉，两个面板通用"），于是作者用 colspan=99 一次吃掉剩余格数。
+//   它**不依赖列数**，所以不会随列数漂移 —— 而 B1/B2 的形态恰恰相反：写死的旧列数
+//   （11 / 8）在列数变化后跨错列，露底色或挤掉一列。
+//   ⇒ 必须豁免，但豁免要**显式 + 可自检**，不能靠"值很大就当没事"糊过去：
+//     ① 每个哨兵都必须真的还在源码里用着（否则这条豁免该删掉，而不是永不过期）；
+//     ② 哨兵必须大到不可能被误当成真实列数（列数区间是 3..20，见上面那条断言）。
+const COLSPAN_ALL_SENTINELS = [
+  { value: 99, why: '「占满整行」哨兵（panelRowErr，两个列数不同的面板通用 —— webui.html:6925）' },
+];
+const sentinelValues = new Set(COLSPAN_ALL_SENTINELS.map(s => s.value));
+const orphan = colspans.filter(n => !sentinelValues.has(n) && !tableCols.has(n) && !tableCols.has(n + 1));
 // colspan = 列数 或 列数-1（首列已占一格）都是合法的
 ok(orphan.length === 0,
-  '每个 colspan 都对应某个表格的列数' +
-  (orphan.length ? ` —— 可疑值 ${JSON.stringify([...new Set(orphan)])}，已知列数 ${JSON.stringify([...tableCols])}` : ''));
+  '每个 colspan 都对应某个表格的列数（或是已登记的行哨兵）' +
+  (orphan.length ? ` —— 可疑值 ${JSON.stringify([...new Set(orphan)])}，已知列数 ${JSON.stringify([...tableCols])}，已登记哨兵 ${JSON.stringify([...sentinelValues])}` : ''));
+for (const s of COLSPAN_ALL_SENTINELS) {
+  ok(colspans.includes(s.value), `行哨兵 colspan="${s.value}" 仍在使用（${s.why}）`);
+  ok(s.value > 20, `行哨兵 colspan="${s.value}" 大于列数上限 20 —— 它只表示"占满"，不能被当成真实列数`);
+}
+// 防空跑锚：colspans 为空时上面那条判据恒真
+ok(colspans.length > 0, '确实扫到了 colspan 字面量（否则上一条是空跑）—— 实际 ' + colspans.length + ' 处');
 
 // ---------------------------------------------------------------- 5. 零外部依赖 & 无 emoji
 console.log('\n[5] 零外部依赖与无 emoji');
@@ -245,26 +287,196 @@ const extRe = /(?:src|href)\s*=\s*["'](?:https?:)?\/\//gi;
 const extHits = [...html.matchAll(extRe)].length;
 ok(extHits === 0, '没有外部 http(s) 资源引用（实际 ' + extHits + ' 个）');
 
-// emoji 只检查**会渲染出来的文本**：标签之间的内容 + 字符串字面量。
+// ============================== emoji：两层强度 ==============================
 //
-// # 为什么不能全文件扫
+// # 规则原文与它的范围（出处不止原位注释那两行）
+//   webui.html:124   /* 选中指示条：纯 CSS 画，不引入任何图标字体或 emoji */
+//   webui.html:5709  // 纯文字 + CSS 选中指示条，不使用任何图标字体或 emoji。
+//   .task/frontend-decouple/protocol.md:27、两份 SOUL.md、docs/progress-log.md:606
+//   mutation-sweep-3.md:10 的 S2 变异（注入 ✅）就是照这条写的
+// ⇒ "无 emoji" 在本仓库是**全仓库**规则；既有三条分区级守卫
+//   （dashboard_gen / gen_settings_layout / nav_e2e）只是**覆盖面**没铺满，不是口径更窄。
 //
-// 注释里允许出现符号作为排版标记（本文件在告警说明里用了 U+26A0），
-// 它不会渲染，扫出来是假阳性 —— 而假阳性会让这条断言被当成噪声忽略，
-// 等真有 emoji 混进界面时就没人在意了。
-const emojiRe = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u;
+// # 两层强度，在同一份源码上同时跑
+//   第 1 层【图标位，无条件红】<nav> / <h1>-<h3> / <th> / <button> 的**可见文本**：
+//     出现 emoji 一律红，**不进任何登记表** —— 这些位置正是规则原文说的"图标位"。
+//     顺手把 nav_e2e 只扫导航的覆盖面补齐到 <th> / <h2>；静态标记与 JS 拼出来的标记都扫
+//     （本产品多数表头/按钮是 JS 拼的，只扫静态 HTML 等于没扫）。
+//   第 2 层【散文位，必须来自登记表】提示 / 说明 / toast / tooltip / 属性文本。
+//
+// # 为什么登记表**故意留空**（不是"还没填"）
+// 2026-10-19 产品侧已按这条规则清理干净（webui.html 18 处替换、语义不丢：
+//   '已复制 ✓'→'已复制'、'完成 ✅ 稍候…'→'完成，稍候…'、'⚠ 别填错'→'注意…'、
+//   '⚡${g.energy}'→'能量${g.energy}'、列头 title「⚡后是该账号的能量」→「「能量N」…」…）。
+// 此时开白名单**只会把规则放松**：一旦登记了 ⚡/✅，以后新写的散文位 emoji 就有了先例可援。
+// 空表 = 现在谁都进不来；而将来真有人登记，那条登记自己还要过"仍在使用"自检
+// （登记了却没人用 = 防线腐烂，同样红）⇒ 下一个人看到的是"规则 + 违规已清"，不是"规则 + 白名单"。
+const RENDER_MARKER_EXEMPT = {
+  // 空。要往里加，请写清"这个记号表达什么语义 / 为什么纯文字代替不了"，并保证源码里仍在使用。
+};
 
-// 渲染文本 = 去掉 <script>/<style>/注释后的标签间文本
-let rendered = html
-  .replace(/<script[\s\S]*?<\/script>/gi, '')
-  .replace(/<style[\s\S]*?<\/style>/gi, '')
-  .replace(/<!--[\s\S]*?-->/g, '')
-  .replace(/<[^>]+>/g, ' ');
-ok(!emojiRe.test(rendered), '渲染出的文本里没有 emoji');
+// ---- 等长挖空工具：保留每个字符的位置，行号才可信（见下面两条坑）----
+const blankOut = s => s.replace(/[^\n]/g, ' ');
+const maskRules = (src, rules) => rules.reduce((o, re) => o.replace(re, mm => blankOut(mm)), src);
+const blankRanges = (src, ranges) => ranges.reduce((o, r) => o.slice(0, r[0]) + blankOut(o.slice(r[0], r[1])) + o.slice(r[1]), src);
 
-// JS 里会写进 DOM 的字符串字面量也要查
-const jsStr = [...jsNoComments.matchAll(/'([^'\\]|\\.)*'|"([^"\\]|\\.)*"/g)].map(m => m[0]).join('\n');
-ok(!emojiRe.test(jsStr), '脚本的字符串字面量里没有 emoji');
+// 脚本正文（注释按原长度挖空）
+//
+// 坑 1：不能"剥掉"注释再算行号 —— 长度一变行号整体前移（📱 在 5368 会被报成 3694）。
+//       行号是给人去改产品的，错行号比没有行号更坏。
+// 坑 2：块注释的 `/*` 前不能是标识符字符。否则**注释散文里的路径**会被当成注释开始：
+//       注释里写着「（/admin/* 要鉴权）」⇒ `/admin/*` 的 `/*` 一路吃到几百行后的 `*/`，
+//       实测**吞掉 30KB 真代码**（html 8074..8811），连带把当时 8520 那行的 ⚡ 也吞了
+//       ⇒ 产品有 emoji 而套件**假绿**。这是判据自身的洞，比那十几处 emoji 严重得多。
+//       真代码里 `/*` 前几乎不可能是标识符字符（`a/*x*/b` 这种写法本项目没有），
+//       所以这条约束挡住路径、不误伤真注释（真注释要么在行首、要么前面是空白/括号/分号）。
+function maskComments(s) {
+  // 块注释：整段换成等长空格（保留其中的换行）；`/*` 前不得是 [A-Za-z0-9_$]
+  let out = s.replace(/(^|[^\w$])\/\*[\s\S]*?\*\//g,
+    (mm, p1) => p1 + mm.slice(p1.length).replace(/[^\n]/g, ' '));
+  // 行注释：逐行挖空（避开 http:// 这类带冒号的写法，与 stripComments 同一约定）
+  out = out.split('\n').map(l => {
+    const m = /(^|[^:])\/\//.exec(l);
+    if (!m) return l;
+    const at = m.index + (m[0].startsWith('/') ? 0 : 1);
+    return l.slice(0, at) + ' '.repeat(l.length - at);
+  }).join('\n');
+  return out;
+}
+const codeMasked = maskComments(js);
+ok(codeMasked.length === js.length,
+  '挖空注释不改变脚本长度（长度变了行号就会漂）—— ' + codeMasked.length + ' vs ' + js.length);
+
+// ---- 仪器自检：给上面"坑 2"那个假绿洞上锁 ----
+// 坏桩：注释散文里的 `/admin/*`，**它后面**是真代码里的 emoji。
+//   用朴素 /\*[\s\S]*?\*\// 跑这条桩，那个 `/*` 会被当成注释开始、一路吃到行尾的 `*/`，
+//   把中间的真代码连同 emoji 一起吞掉 ⇒ 桩里的 emoji 消失 = 假绿。
+//   ⚠ 桩里**必须存在一个更靠后的 `*/`**：否则朴素正则配不上对、根本吞不了东西，这条桩就废了。
+const STUB_BAD = 'const a = 1; // 见（/admin/* 要鉴权）\nconst b = `🔥`;\nconst c = 2; /* 后文某处的真注释 */';
+ok(/\u{1F525}/u.test(maskComments(STUB_BAD)),
+  '坏桩：注释里的 /admin/* 之后，真代码里的 emoji 必须留下来（否则就是那个吞 30KB 真代码的假绿洞）');
+const STUB_OK = '/* 真注释里的 🔥 不算数 */\nconst c = 1;';
+ok(!/\u{1F525}/u.test(maskComments(STUB_OK)),
+  '正桩：真块注释里的 emoji 必须被挖掉（注释不渲染，扫出来是假阳性）');
+
+const symGlobal = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu;
+// 记号 → 出现位置（带 webui.html 的真实行号）
+function symbolSites(text, baseOffset, origin) {
+  const out = [];
+  const re = new RegExp(symGlobal.source, 'gu');
+  let m;
+  while ((m = re.exec(text))) {
+    out.push({
+      cp: 'U+' + m[0].codePointAt(0).toString(16).toUpperCase(),
+      ch: m[0],
+      at: (baseOffset || 0) + m.index,
+      line: html.slice(0, (baseOffset || 0) + m.index).split('\n').length,
+      origin,
+    });
+  }
+  return out;
+}
+const describeHits = list => list.map(h => 'webui.html:' + h.line + ' ' + h.cp + ' ' + h.ch + ' [' + h.origin + ']').join('；');
+
+// ========================= 第 1 层：图标位（无条件红） =========================
+const ICON_TAGS = ['nav', 'h1', 'h2', 'h3', 'th', 'button'];
+function iconZones(src, base, origin) {
+  const out = [];
+  for (const tag of ICON_TAGS) {
+    const re = new RegExp('<' + tag + '\\b[^>]*>[\\s\\S]*?<\\/' + tag + '>', 'gi');
+    let m;
+    while ((m = re.exec(src))) {
+      out.push({
+        tag, origin, base,
+        srcStart: m.index,
+        srcEnd: m.index + m[0].length,
+        // 只留可见文本（把标签等长挖成空格 ⇒ 偏移仍与源对齐，行号照样准）
+        textMasked: m[0].replace(/<[^>]+>/g, mm => blankOut(mm)),
+      });
+    }
+  }
+  return out;
+}
+// 静态标记：先把 <script>/<style>/HTML 注释按长度挖空（保住偏移）
+const htmlStripped = maskRules(html, [
+  /<script[\s\S]*?<\/script>/gi,
+  /<style[\s\S]*?<\/style>/gi,
+  /<!--[\s\S]*?-->/g,
+]);
+const zones = [
+  ...iconZones(htmlStripped, 0, '静态标记'),
+  ...iconZones(codeMasked, scriptStart, 'JS 拼出来的标记'),
+];
+const zoneCount = {};
+for (const z of zones) zoneCount[z.tag] = (zoneCount[z.tag] || 0) + 1;
+// 防空跑锚：容器要真的扫到（扫不到 = 第 1 层是一句空话）
+ok(zoneCount.th > 0 && zoneCount.h2 > 0 && zoneCount.nav > 0 && zoneCount.button > 0,
+  '图标位容器确实扫到了（否则第 1 层是空跑）—— ' + JSON.stringify(zoneCount));
+// 仪器健康锚：单区跨度异常大 = 标签配对配错了（比如漏写 </h2> 一路吃到别的区块），
+// 那会让"图标位"把散文吸进来 ⇒ 先看配对，别急着改判据。（实测最长 2288，是账号池标题栏本身）
+const maxZone = zones.reduce((n, z) => Math.max(n, z.textMasked.length), 0);
+ok(maxZone < 4000, '图标位容器的最大跨度正常（异常大 = 标签配对配错了，先查 </h2>/</th> 是否漏写）—— 实际 ' + maxZone);
+
+const seenIcon = new Set();
+const iconHits = [];
+for (const z of zones) {
+  for (const h of symbolSites(z.textMasked, z.base + z.srcStart, '图标位<' + z.tag + '>/' + z.origin)) {
+    if (seenIcon.has(h.at)) continue;   // 嵌套容器（<button> 在 <th> 里）会重复命中，去重
+    seenIcon.add(h.at);
+    iconHits.push(h);
+  }
+}
+ok(iconHits.length === 0,
+  '[icon位] 导航/分区标题/列头/按钮文本里没有 emoji（规则原文：不引入图标字体或 emoji）'
+  + (iconHits.length ? ' —— 命中 ' + iconHits.length + ' 处：' + describeHits(iconHits) : ''));
+
+// ===================== 第 2 层：散文位（必须来自登记表） =====================
+// 三个来源：
+//   ① 静态可见文本（图标位容器整段挖掉，避免与第 1 层重复计数）
+//   ② JS 正文（注释已挖空；JS 里拼出来的图标位标记也挖掉）
+//   ③ 可渲染属性 title / placeholder / aria-label / alt
+//      ⚠ 属性归**散文位**：列头的 title 是**工具提示**、不是列头文本本身
+//        （1504 那处「…，⚡后是该账号的能量」就按散文位处理）。
+const htmlTextMasked = htmlStripped.replace(/<[^>]+>/g, mm => blankOut(mm));
+const htmlProseText = blankRanges(htmlTextMasked,
+  zones.filter(z => z.origin === '静态标记').map(z => [z.srcStart, z.srcEnd]));
+const jsProseText = blankRanges(codeMasked,
+  zones.filter(z => z.origin === 'JS 拼出来的标记').map(z => [z.srcStart, z.srcEnd]));
+
+function visibleAttrSites(src) {
+  const out = [];
+  const re = /\s(?:title|placeholder|aria-label|alt)="([^"]*)"/g;
+  let m;
+  while ((m = re.exec(src))) out.push(...symbolSites(m[1], m.index + m[0].indexOf(m[1]), '可渲染属性'));
+  return out;
+}
+const proseHits = [
+  ...symbolSites(htmlProseText, 0, '静态可见文本'),
+  ...symbolSites(jsProseText, scriptStart, 'JS 正文'),
+  ...visibleAttrSites(htmlStripped),
+];
+// 防空跑锚：两个文本来源都要真的扫到东西
+ok(htmlProseText.length > 1000 && jsProseText.length > 1000,
+  '散文位的两个文本来源确实扫到了（否则本层是空跑）—— 静态 ' + htmlProseText.length + ' 字符 / JS ' + jsProseText.length + ' 字符');
+
+const registeredChars = new Set(Object.keys(RENDER_MARKER_EXEMPT));
+const unregistered = proseHits.filter(h => !registeredChars.has(h.ch));
+ok(unregistered.length === 0,
+  '[散文位] emoji 必须全部来自登记表（每字符带理由 + 仍在使用自检；登记表当前为空 ⇒ 任何 emoji 都红）'
+  + (unregistered.length ? ' —— 未登记 ' + unregistered.length + ' 处：' + describeHits(unregistered) : ''));
+
+// 登记表自检：登记了却没人用 = 防线腐烂，同样红（表空时本循环不执行）
+for (const [ch, why] of Object.entries(RENDER_MARKER_EXEMPT)) {
+  const used = proseHits.some(h => h.ch === ch) || iconHits.some(h => h.ch === ch);
+  ok(used, `登记项 ${ch} (U+${ch.codePointAt(0).toString(16).toUpperCase()}) 仍在使用（${why}）—— 登记了却没人用同样是红`);
+}
+
+// 红了要红得能直接动手：把两层的命中逐条打出来
+if (iconHits.length || unregistered.length) {
+  console.log('    ⚠ emoji 命中明细（第 1 层无条件红；第 2 层必须来自登记表）：');
+  for (const h of iconHits) console.log('      [icon位·硬红]      webui.html:' + h.line + '  ' + h.cp + ' ' + h.ch + '  ' + h.origin);
+  for (const h of unregistered) console.log('      [散文位·未登记]    webui.html:' + h.line + '  ' + h.cp + ' ' + h.ch + '  ' + h.origin);
+}
 
 // ---------------------------------------------------------------- 6. manifest 是唯一数据源
 console.log('\n[6] manifest 是上游信息的唯一来源');
@@ -374,22 +586,44 @@ ok(/localStorage\.setItem\(LS_THEME/.test(js), '主题偏好真的写入 localSt
 ok(/MANIFEST\.service/.test(js) && !/return\s*'workbuddy2api'/.test(js),
   '服务名取自 MANIFEST.service（写死会被这条抓到）');
 
-// 任务表必须真的把行 map 出来（不是直接写空串/固定 HTML）。
-// 自审的注入形态是 `sorted.map(j => { if (true) return '';` ——
-// 它保留了 map 调用却让每行变成空。所以这里要求 map 的回调体里
-// 真的产出 <tr>，并且**不是**以常量短路开头。
-const jobMap = js.match(/tb\.innerHTML\s*=\s*sorted\.map\([\s\S]{0,120}/);
-ok(!!jobMap, '任务表走 sorted.map(...) 渲染（而不是固定 HTML）');
+// 任务列表必须真的把项 map 出来（不是直接写空串/固定 HTML）。
+//
+// ⚠ 锚点别绑在变量名上（2026-10-19 修假红）：
+//   旧版找的是 `tb.innerHTML = sorted.map(`，而 d720223（任务调度页从 6 列表格
+//   换成卡片网格）把接收者改叫 `host`（`const host = $('jobrows')`）——
+//   信号本身没变，名字变了就假红。所以先切出 renderJobs 的函数体，
+//   再在体里找"容器.innerHTML = sorted.map("这个形状。
+const jobsStart = js.indexOf('function renderJobs(');
+const jobsEnd = jobsStart < 0 ? -1 : js.indexOf('\n  function ', jobsStart + 10);
+const jobsBody = jobsStart < 0 ? '' : js.slice(jobsStart, jobsEnd > jobsStart ? jobsEnd : jobsStart + 4000);
+const jobMap = /\.innerHTML\s*=\s*sorted\.map\(/.exec(jobsBody);
+ok(!!jobMap, '任务列表走 sorted.map(...) 渲染（而不是固定 HTML）'
+  + (jobMap ? '' : ' —— renderJobs 体里找不到 `.innerHTML = sorted.map(`（起始偏移 ' + jobsStart + '）'));
 if (jobMap) {
-  ok(!/\{\s*if\s*\(\s*(true|1)\s*\)/.test(jobMap[0]),
-    '任务行的 map 回调没有以常量短路开头（自审注入形态）');
-  // 回调体里必须真的出现 <tr 模板。
-  // 窗口要取到该语句所在的**函数结束**，不能拍一个固定长度 ——
-  // 回调体里有大段注释，900 字符到不了 <tr>（第一版就是这么假红的）。
-  const start = js.indexOf('tb.innerHTML = sorted.map(');
-  const fnEnd = js.indexOf('function renderTopStats', start);
-  const seg = js.slice(start, fnEnd > start ? fnEnd : start + 4000);
-  ok(/<tr/.test(seg), '任务行的 map 回调里真的产出 <tr>');
+  const seg = jobsBody.slice(jobMap.index);
+  // ⚠ 反向锚必须跑在**剥过注释**的文本上（2026-10-19，我自己第一版就踩了）：
+  //   renderJobs 里有两处注释拿 <tr> 当例子讲历史
+  //   （webui.html:3330「原来是一行 <tr>」、3332「往里塞 <tr> 会被 HTML 解析器…」）——
+  //   直接在原文上找 <tr 会把**文档**当成代码，把一条正确的实现判红。
+  //   这与本文件第 152-162 行记的坑是同一类（注释被当成代码）。
+  const segCode = stripComments(seg);
+  // 反向锚要看**整个函数体**，不能只看 map 语句之后那一段 ——
+  // 变异自测抓到的：把 `<tr>` 塞在函数开头（比如 map 之前的一行常量）时，
+  // 窗口内找不到它、断言照样绿（等于给"半截改动"留了后门）。
+  const bodyCode = stripComments(jobsBody);
+  // 注入形态：`sorted.map(j => { if (true) return '';` —— 保留了 map 却让每项变空
+  ok(!/\{\s*if\s*\(\s*(true|1)\s*\)/.test(segCode.slice(0, 160)),
+    '任务项的 map 回调没有以常量短路开头（自审注入形态）');
+  // 回调体里必须真的产出**每一项的元素模板**。
+  // ⚠ 形状判据也从 <tr> 换成了卡片：d720223 把 6 列表格换成卡片网格，
+  //   理由写在 webui.html:3309（错误文本要整段换行显示，表格里只能截断）。
+  //   要守的性质没变："每一项真的产出一个元素"，不是空串也不是固定 HTML。
+  //   窗口取 map 语句之后的整段函数体（回调里有大段注释，固定长度会假红）。
+  ok(/job-item/.test(segCode), '任务项的 map 回调里真的产出 job-item 卡片（表格形态已换成卡片）');
+  ok(/<div class=/.test(segCode), '回调体里真的产出元素模板（不是空串/固定 HTML）');
+  ok(/\.join\(''\)/.test(segCode), 'map 的结果真的被 join 成一段 HTML 写进容器（漏 join 是半截改动）');
+  // 反向锚：换了形态之后就不该再往 #jobrows 里写 <tr>（写回去说明只换了一半）
+  ok(!/<tr[\s>]/.test(bodyCode), '整个 renderJobs 都不再产出 <tr>（卡片形态；半截改动会被这条抓到）');
 }
 
 // ---------------------------------------------------------------- 9. 账号池折叠（R3）的结构守卫
@@ -412,8 +646,28 @@ console.log('\n[9] 账号池折叠的形状（R3）');
 // 下面那条反向守卫要找的正是这串 CSS，而样式表旁边的警告注释里**逐字引用了它**
 // （"这里不能有 tr.acctrow.collapsed{display:none}"）。直接在原文上匹配的话，
 // 警告本身会把守卫判红 —— 守卫被自己的说明文字触发，是典型的自伤。
-ok(/\.acctgroup\.collapsed\s*>\s*table\s*\{\s*display\s*:\s*none/.test(codeHtml),
-  '有 .acctgroup.collapsed > table{display:none} —— 折叠真正隐藏整张表的地方');
+// ⚠ 不能只要求"存在一条 .acctgroup.collapsed … display:none"（2026-10-19 修假红）：
+//   现在的规则是**并列两条选择器**（webui.html:252-253）：
+//     .acctgroup.collapsed > table,
+//     .acctgroup.collapsed > .acctwrap > table{display:none}
+//   而 JS 生成的真实结构是 `div.acctwrap > table.accttable`（webui.html:4375 附近），
+//   所以**真正生效的只有第二条**；只留第一条会变成死选择器 ——
+//   这正是 webui.html:243-248 记着的同类教训（"选择器必须是三层…那条规则从来没匹配过"）。
+//   ⇒ 所以这里不只要求规则存在，还要求它**覆盖 JS 实际生成的那层包装**。
+const foldRule = /\.acctgroup\.collapsed[^{}]*\{[^}]*display\s*:\s*none[^}]*\}/.exec(codeHtml);
+ok(!!foldRule, '有 .acctgroup.collapsed …{display:none} —— 折叠真正隐藏整张表的地方'
+  + (foldRule ? '' : '（一条都没有：折叠会退化成只转三角的空动作）'));
+if (foldRule) {
+  const rule = foldRule[0].replace(/\s+/g, ' ');
+  ok(/\.acctgroup\.collapsed\s*>\s*(\.\w+\s*>\s*)?table\b/.test(rule),
+    '折叠规则里有匹配 table 的选择器（实际：' + JSON.stringify(rule.slice(0, 140)) + '）');
+  // 真实结构包了一层 .acctwrap ⇒ 规则里必须有 `> .acctwrap > table` 这一支
+  ok(/>\s*\.acctwrap\s*>\s*table\b/.test(rule),
+    '折叠规则覆盖 .acctwrap > table（JS 生成的真实结构；只写直挂 table 会变成死选择器）');
+}
+// 防空跑锚：上面那条"覆盖 .acctwrap"只有在 JS 真的生成 .acctwrap 时才有意义；
+// 反过来，如果结构不再有这层包装，这条判据就该跟着改，而不是留着一句空话。
+ok(/class="acctwrap"/.test(js), '账号池的表确实被 .acctwrap 包着（否则上一条是空条件）');
 
 // ⚠ 反向守卫：**不许**再出现行级的 tr.acctrow.collapsed{display:none}。
 //

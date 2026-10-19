@@ -26,6 +26,19 @@
 //   webui.html。没有这一步时，清单漏一个名字的后果只在**产物运行期**炸
 //   （ReferenceError: multKeyOf is not defined），而生成器 exit 0 —— 门禁 1 白设。
 //   ⚠ 它只在生成期查名字是否存在，不复制函数体：产物仍然是运行期实读。
+//
+// ⚠ 守卫 2 查的是「**清单里的名字在不在源码里**」，它**查不出**「源码里的函数**多了一个
+//   依赖**」—— 后者是反向的漂移：被抽取的函数体改了（新调了一个私有助手），清单没跟着加，
+//   于是实读进产物的函数一执行就 ReferenceError。
+//   实测形态（本轮修的那条）：commit b8693bb 给 groupModelsByOwner /
+//   syncModelProviderOptions 的排序换成 providerRank（组间按 manifest 顺序，替代旧的
+//   字典序 ids.sort()），本夹具清单没加 providerRank ⇒ 产物运行期
+//   「ReferenceError: providerRank is not defined」。
+//   ⚠ 而它**只在比较器真的被调用**时才炸：Array#sort 对 0/1 个元素根本不调比较器 ——
+//     上面 1~6 节只有一个 owner，全绿；到第 7 节（两个 owner）才红。
+//     「测试跑到一半才红」+「错误指向源码里明明存在的函数」正是这条缝的特征。
+//   所以清单的维护判据是：**被抽取的函数体里出现的每个自由标识符，都要在清单里**。
+//   第 [11] 节就是为它写的回归：造出两个 owner，真的把 providerRank 的比较器跑起来。
 
 const fs = require('fs');
 const path = require('path');
@@ -59,10 +72,19 @@ const BANNER = String.raw`// ===================================================
 //
 // 口径现状（用户要求「统一成 workbuddy/xxx 或 codearts/xxx，不要重复」）：
 //   · 后端 /v1/models 多上游模式只发 provider/model（39 条 → 23 条）；
-//   · chip 与下拉都显示**完整 id**；倍率表的键仍是**裸名**，靠 multKeyOf 归一；
-//   · 倍率表**只覆盖默认上游**的目录 —— 查表统一走 multTableKey：
-//     带前缀的 id 只有前缀 == DEFAULT_PROVIDER 时才查，别家上游一律显示 x无。
-//     （真 Chrome 实测过反例：codearts/glm-5.3-flash 曾继承 workbuddy 的 x0.06。）
+//   · chip 与下拉都显示**完整 id**；倍率表的键是 **provider/裸名 组合键**
+//     （后端 /admin/models/preview 每条带 provider，前端 loadModelMultipliers 拼键），
+//     查表统一走 multTableKey：带前缀的展示 id **原样**当组合键查（不去前缀），
+//     裸名原样查（单上游口径）。同名模型因此天然互不覆盖。
+//     （真 Chrome 实测过旧反例：codearts/glm-5.3-flash 曾无条件去前缀、
+//     继承 workbuddy 的 x0.06 —— 显示一个错的数字比 x无 有害得多。）
+//   · 倍率查表**不再依赖 DEFAULT_PROVIDER**：归属在键里，manifest 什么时候到都不影响。
+//   · 组间排序（chips 分组 + 上游下拉）走 providerRank：上游在 manifest 里的下标，
+//     manifest 外的排末尾。**不是字典序** —— 服务端排的展示顺序（海外版在前）优先。
+//
+// ⚠ SRC_FUNCS 必须覆盖被抽取函数的**全部依赖**（含新加的私有助手）：漏一个的表现是
+//   产物运行期 ReferenceError，而且只在那个助手**真的被调用到**时才炸
+//   （实测先例：Array#sort 的比较器在 0/1 个元素时根本不调用）。见第 [11] 节。
 // ============================================================================
 `;
 
@@ -87,10 +109,12 @@ function grab(marker) {
 
 const SRC_FUNCS = [
   'function multText(',
-  // 新口径的**唯一归一函数**：展示 id（「provider/xxx」）→ 倍率表的键（裸名）。
-  // 漏了它，multTag / multTagPlain / groupModelsByOwner 会一起炸。
+  // 展示 id（「provider/xxx」）→ **裸名** 的唯一归一函数。
+  // ⚠ 倍率表的键**不再是裸名**（见下一项）：它的消费点现在是 groupModelsByOwner
+  //   （组内按裸名去重）与 multTableKey 的**无前缀**分支。
+  // 漏了它，groupModelsByOwner 与 multTableKey 会一起炸。
   'function multKeyOf(',
-  // 倍率查表的**唯一入口**：在归一之上再判"这张表覆不覆盖这个上游"。
+  // 倍率查表的**唯一入口**：带前缀 → 原 id 就是 provider/裸名 组合键；无前缀 → 裸名。
   // 漏了它，multTag / multTagPlain 会一起炸（它们已经不再直接调 multKeyOf）。
   'function multTableKey(',
   'function multTag(',
@@ -104,6 +128,11 @@ const SRC_FUNCS = [
   'function syncModelProviderOptions(',
   'function providerInfo(',
   'function providerRegistryIds(',
+  // 组间排序的**唯一判据**：上游在 manifest 里的下标（旧的 ids.sort() 字典序实现已被
+  // b8693bb 换成它，见 providerRegistryIds 的注释）。
+  // groupModelsByOwner 与 syncModelProviderOptions 都直接调它 —— 漏了它，
+  // 产物运行期 ReferenceError（见本文件头部那条「反向漂移」的说明）。
+  'function providerRank(',
   'function emptyModelGroups(',
   'function renderModels(',
 ];
@@ -136,7 +165,7 @@ eval(SRC_FUNCS.map(grab).join('\n\n'));
 for (const n of ['multText', 'multKeyOf', 'multTableKey', 'multTag', 'multTagPlain', 'groupModelsByOwner',
   'renderModelGroup', 'modelGroupOpen', 'modelOwnerOf', 'modelProviderFilter',
   'setModelProviderFilter', 'syncModelProviderOptions', 'providerInfo', 'providerRegistryIds',
-  'emptyModelGroups', 'renderModels']) {
+  'providerRank', 'emptyModelGroups', 'renderModels']) {
   if (eval('typeof ' + n) !== 'function') {
     throw new Error('源码实读失败：' + n + ' 未生效（eval 没把声明泄漏出来？被包进严格模式了？）');
   }
@@ -171,10 +200,12 @@ let PROVIDERS = [];
 function setProviders(list) { PROVIDERS = list || []; }
 
 // DEFAULT_PROVIDER 是**模块级变量**（webui.html 里 「let DEFAULT_PROVIDER = '';」，
-// 只在 applyManifest 里、manifest 到达后才被赋值）。这里给一个桩：
-// 它决定"带前缀的 id 能不能查倍率表" —— 不是 workbuddy 的就一律不查。
-// 桩的初值刻意选 workbuddy（真部署里的默认上游），下面第 [10] 节还会临时
-// 改成 '' 来复现"manifest 尚未到达"的时机。
+// 只在 applyManifest 里、manifest 到达后才被赋值）。这里给一个桩。
+// ⚠ 它**不再参与倍率查表**：多上游改造后倍率表的键是 provider/裸名 组合键，
+//   归属在键里，不再靠"是不是默认上游"判断（旧口径那样判会把海外版整组打成 x无）。
+//   现在它的消费点是裸模型名走谁、以及倍率里那条**已不可达**的降级 title。
+// 桩的初值刻意选 workbuddy（真部署里的默认上游）；第 [10] 节末会临时改成 ''，
+// 用来证明倍率查表与 manifest 时机无关。
 let DEFAULT_PROVIDER = 'workbuddy';
 
 // localStorage 假实现（内存 Map）：折叠状态要走真实读写往返。
@@ -445,57 +476,76 @@ ok(texts8.length === 5,
 ok(texts8.filter(t => t === 'workbuddy/glm-5.2').length === 1,
   '② 同一分组内同名模型只渲染一次');
 
-// ---------- 9. 新口径：倍率表的键是裸名，带前缀的展示 id 仍要命中 ----------
+// ---------- 9. 倍率表的键是 provider/裸名 组合键，带前缀的展示 id 直接命中 ----------
 //
-// 这是本轮最容易退化的一条：面板显示 「workbuddy/glm-5.2」，而
-// /admin/models/preview 下发的 modelMultipliers **键是裸名 「glm-5.2」**。
-// 旧写法 「modelMultipliers[id]」 直查 → 全表落空 → 界面上满屏 「x无」。
-console.log('\n[9] 新口径：带前缀的 id 经 multTableKey 归一后仍能查到倍率');
-modelMultipliers = { 'glm-5.2': 0.51 };
+// 口径（多上游倍率改造后）：
+//   · 后端 /admin/models/preview 遍历**全部已注册上游**、每条带 provider
+//     （internal/admin/admin.go 的 modelsPreview 逐条填 ModelMultiplier.Provider）
+//   · 前端 loadModelMultipliers 把键拼成 provider + '/' + 裸名（webui.html:10966-10969）
+//   · 查表点原样把展示 id 当键：**带前缀不去前缀**，裸名原样（multTableKey）
+// ⚠ 旧口径（"表只有默认上游一份目录、键是裸名，带前缀要去前缀再查"）已被替换：
+//   去前缀正是旧缺陷（codearts/glm-5.3-flash 撞上 workbuddy 同名条目）的来源。
+//   本节的期望值必须跟着后端契约走，不能再按"裸名键 + 只查默认上游"写。
+// Go 侧的同一判据：internal/server/webui_models_unified_test.go:425-458
+//   （② 带前缀分支返回原 id、④ multKeyOf 只出现在无前缀分支、⑥ 表键拼接 provider/裸名）。
+console.log('\n[9] 新口径：倍率表的键是 provider/裸名，带前缀的展示 id 直接命中');
+modelMultipliers = { 'workbuddy/glm-5.2': 0.51 };    // 键 = 组合键（后端每条带 provider）
 renderModels([{ id: 'workbuddy/glm-5.2', owned_by: 'workbuddy' }]);
 const c9 = $('models').innerHTML;
 const o9 = $('model').innerHTML;
 const texts9 = chipTexts(c9);
 ok(multKeyOf('workbuddy/glm-5.2') === 'glm-5.2',
-  'multKeyOf：完整 id → 倍率表的键（去 「provider/」 前缀）');
+  'multKeyOf：完整 id → **裸名**（组内去重用它，见 groupModelsByOwner）');
 ok(multKeyOf('glm-5.2') === 'glm-5.2', 'multKeyOf：裸名原样返回（单上游口径不被破坏）');
+ok(multTableKey('workbuddy/glm-5.2') === 'workbuddy/glm-5.2',
+  'multTableKey：带前缀 → 原 id 就是组合键（**不去前缀**，去前缀会撞别家上游的同名条目）');
+ok(multTableKey('glm-5.2') === 'glm-5.2', 'multTableKey：无前缀 → 原样（单上游的表键就是裸名）');
 ok(texts9.length === 1 && texts9[0] === 'workbuddy/glm-5.2',
   '③ chip 文本仍是完整 id（「workbuddy/glm-5.2」）');
 ok(c9.includes('x0.51'),
-  '③ 带前缀的 id 命中倍率表 → 渲染出 x0.51（旧写法直查 modelMultipliers[id] 会得到 x无）');
-ok(!/x无/.test(c9), '③ 带前缀的 id 不落回 x无');
+  '③ 组合键命中 → 渲染出 x0.51（拿裸名查表只会得到 x无 —— 键口径必须一致）');
+ok(!/x无/.test(c9), '③ 表里有该上游的条目时不落回 x无');
 ok(o9.includes('(x0.51)'), '③ 下拉（multTagPlain）同样经归一命中');
 
-// 归一只有一处：静态确认两个查表点都经 multTableKey，而不是各写一遍去前缀/判归属。
+// 归一与键规则只有一处：静态确认两个查表点都经 multTableKey，
+// 且**带前缀分支不许去前缀**（去掉前缀 = 重新引入"借别家的数字"）。
 const multTagSrc = grab('function multTag(');
 const plainSrc = grab('function multTagPlain(');
 const resolverSrc = grab('function multTableKey(');
 ok(/multTableKey\(\s*id\s*\)/.test(multTagSrc), '③ multTag 经 multTableKey 取键（源码实读的正文里就有它）');
 ok(/multTableKey\(\s*id\s*\)/.test(plainSrc), '③ multTagPlain 经 multTableKey 取键（判据没有第二份实现）');
-ok(/multKeyOf\(\s*id\s*\)/.test(resolverSrc), '③ 去前缀的归一仍只有一处：multTableKey 内部调 multKeyOf');
+ok((resolverSrc.match(/multKeyOf\(/g) || []).length === 1,
+  '③ multTableKey 只在**无前缀**分支调 multKeyOf（实际 '
+  + (resolverSrc.match(/multKeyOf\(/g) || []).length + ' 次）—— 带前缀分支不许去前缀');
+ok(/return\s+String\(id\)\s*;/.test(resolverSrc),
+  '③ 带前缀分支 return String(id)：原 id 就是组合键');
 ok(!/indexOf\('\/'\)/.test(multTagSrc + plainSrc),
   '③ 两个查表点都没有自己写去前缀（判据只在 multTableKey 一处）');
 ok(!/hasOwnProperty\.call\(modelMultipliers,\s*id\)/.test(multTagSrc + plainSrc),
   '③ 两处都没有"直接拿展示 id 查表"的旧写法');
 
-// 有前缀 / 无前缀两种写法的结果必须一致（否则界面上会出现"同一个模型有的有倍率、有的没有"）
-ok(multTag('workbuddy/glm-5.2') === multTag('glm-5.2'),
-  '③ 带前缀与裸名的 multTag 输出逐字相同');
+// 带前缀与裸名查的是**不同的键**，因此输出不该逐字相同（旧口径要求"必须相同"，
+// 那正是"别家上游继承默认上游系数"的形态）：
+// 表里只有组合键时带前缀命中、裸名落空；反过来只有裸名键时裸名命中、带前缀落空。
+ok(multTag('workbuddy/glm-5.2').indexOf('x0.51') >= 0 && multTag('glm-5.2').indexOf('x0.51') < 0,
+  '③ 表里只有 provider/裸名 组合键时：带前缀命中、裸名不命中（实际裸名 → '
+  + multTag('glm-5.2') + '）');
+modelMultipliers = { 'glm-5.2': 0.51 };              // 表里只有裸名键（后端没带 provider 的形态）
+ok(multTag('glm-5.2').indexOf('x0.51') >= 0 && multTag('workbuddy/glm-5.2').indexOf('x0.51') < 0,
+  '③ 表里只有裸名键时：裸名命中、带前缀**不**命中（旧口径会把 0.51 借给 workbuddy）');
 
-// ---------- 10. 别家上游**不得继承**默认上游的系数 ----------
+// ---------- 10. 倍率按 (provider, 裸名) 分开：别家上游**不得继承**默认上游的系数 ----------
 //
-// 真 Chrome 实测过的缺陷形态：「/admin/models/preview」 的倍率表**只由默认上游的
-// 客户端构建**（键是那份目录里的裸名），而 「multKeyOf」 无条件去前缀 —— 于是
-// 「codearts/glm-5.3-flash」 命中 workbuddy 目录里同名模型的 0.06，
-// 被当成 codearts 的事实显示出来（同组另外 6 个模型显示 x无）。
+// 真 Chrome 实测过的缺陷形态：倍率表**只由默认上游的目录构建**（键是裸名），
+// 而查表点无条件去前缀 —— 于是 「codearts/glm-5.3-flash」 命中 workbuddy 目录里
+// 同名模型的 0.06，被当成 codearts 的事实显示出来（同组另外 6 个模型显示 x无）。
 // **显示一个错的数字，比显示 x无 有害得多。**
 //
-// 这一节就是那个反例：同一份 modelMultipliers（只有一条裸名键 「glm-5.3-flash」）
-// 同时喂默认上游与别家上游的同名模型 —— 前者必须是 x0.06，后者必须是 x无。
-// 回归守住的证明也在这一段：默认上游那一条仍然有数字。
-console.log('\n[10] 别家上游不得继承默认上游的系数（回归：默认上游仍有数字）');
-DEFAULT_PROVIDER = 'workbuddy';
-modelMultipliers = { 'glm-5.3-flash': 0.06 };
+// 多上游改造后的修法**不是**"禁止别家上游查表"（那会把海外版整组判成 x无），
+// 而是**键本身带上游**：后端每条倍率带 provider、前端表键 = provider/裸名、
+// 查表点原样用组合键（见第 [9] 节）。同名模型由此天然互不覆盖 —— 本节守这条。
+console.log('\n[10] 倍率按 (provider, 裸名) 分开：同名模型互不继承');
+modelMultipliers = { 'workbuddy/glm-5.3-flash': 0.06, 'codearts/glm-5.3-flash': 2.5 };
 renderModels([
   { id: 'workbuddy/glm-5.3-flash', owned_by: 'workbuddy' },
   { id: 'codearts/glm-5.3-flash', owned_by: 'codearts' },
@@ -504,47 +554,86 @@ const c10 = $('models').innerHTML;
 const chipBlocks10 = c10.split('<span class="chip"').slice(1);
 const wbBlock10 = chipBlocks10.find(b => b.indexOf('data-id="workbuddy/glm-5.3-flash"') >= 0);
 const caBlock10 = chipBlocks10.find(b => b.indexOf('data-id="codearts/glm-5.3-flash"') >= 0);
-ok((c10.match(/x0\.06/g) || []).length === 1,
-  '默认上游的 「workbuddy/glm-5.3-flash」 仍显示 x0.06（整块里只出现一次，实际 '
-  + ((c10.match(/x0\.06/g) || []).length) + ' 次）');
 ok(!!wbBlock10 && /x0\.06/.test(wbBlock10),
-  '**回归守住的证明**：默认上游那条 chip 上有数字（x0.06）—— 修复没有把默认上游一起打成 x无');
-ok(!!caBlock10 && /x无/.test(caBlock10),
-  '别家上游的 「codearts/glm-5.3-flash」 显示 x无（实际 ' + JSON.stringify(caBlock10 || '') + '）');
+  '默认上游那条 chip 拿到**自己的** 0.06（实际 ' + JSON.stringify(wbBlock10 || '') + '）');
+ok(!!caBlock10 && /x2\.5/.test(caBlock10),
+  '别家上游那条 chip 拿到**自己的** 2.5，不是 workbuddy 的 0.06（实际 '
+  + JSON.stringify(caBlock10 || '') + '）');
 ok(!!caBlock10 && !/x0\.06/.test(caBlock10),
-  '别家上游那条 chip 里**没有** x0.06 —— 它不再继承 workbuddy 目录里的系数');
+  '别家上游那条 chip 里**没有** x0.06 —— 它不继承 workbuddy 目录里的系数');
+ok((c10.match(/x0\.06/g) || []).length === 1,
+  '整块里 x0.06 只出现一次（只在 workbuddy 那条上，实际 '
+  + ((c10.match(/x0\.06/g) || []).length) + ' 次）');
 
-// 三个入口逐条直测（不只看渲染结果，避免被分组/去重掩盖）。
-ok(multTag('workbuddy/glm-5.3-flash').indexOf('x0.06') >= 0,
-  'multTag：默认上游 → x0.06');
+// 反例：表里**只有**默认上游的条目（别家目录没取到 / 别家没这个模型）。
+// 别家那条必须是 x无，且 title 说"上游未提供"—— 不能借用 0.06。
+modelMultipliers = { 'workbuddy/glm-5.3-flash': 0.06 };
 const caTag10 = multTag('codearts/glm-5.3-flash');
-ok(caTag10.indexOf('x无') >= 0, 'multTag：别家上游 → x无（实际 ' + caTag10 + '）');
+ok(multTag('workbuddy/glm-5.3-flash').indexOf('x0.06') >= 0,
+  'multTag：表里有该上游的条目 → x0.06');
+ok(caTag10.indexOf('x无') >= 0, 'multTag：别家上游在表里没有条目 → x无（实际 ' + caTag10 + '）');
 ok(caTag10.indexOf('x0.06') < 0, 'multTag：别家上游不出现 0.06');
-ok(caTag10.indexOf('倍率表只覆盖默认上游') >= 0,
-  'multTag：x无 的 title 说明原因（倍率表只覆盖默认上游）');
-ok(caTag10.indexOf('workbuddy') >= 0, 'multTag：title 里点名默认上游名 workbuddy');
+ok(caTag10.indexOf('上游未提供该模型的倍率') >= 0,
+  'multTag：x无 的 title 是"上游未提供该模型的倍率"（与"目录整体失败"那条可区分）');
 ok(multTagPlain('workbuddy/glm-5.3-flash') === ' (x0.06)', 'multTagPlain：默认上游 → " (x0.06)"');
-ok(multTagPlain('codearts/glm-5.3-flash') === '', 'multTagPlain：别家上游 → 不加倍率（实际 '
+ok(multTagPlain('codearts/glm-5.3-flash') === '',
+  'multTagPlain：表里没有该上游的条目 → 不加倍率（实际 '
   + JSON.stringify(multTagPlain('codearts/glm-5.3-flash')) + '）');
 
-// 裸名行为**完全不变**（单上游部署就是靠这一支）。
+// 裸名（无前缀）行为**完全不变**（单上游部署、后端没带 provider 的条目靠这一支）。
+modelMultipliers = { 'glm-5.3-flash': 0.06 };
 ok(multTag('glm-5.3-flash').indexOf('x0.06') >= 0, '裸名（无前缀）→ 原样查表，仍是 x0.06');
 ok(multTagPlain('glm-5.3-flash') === ' (x0.06)', '裸名 → 下拉仍带 (x0.06)');
-ok(multTag('codearts/glm-5.3-flash') !== multTag('glm-5.3-flash'),
-  '同一个裸名在"默认上游前缀 / 无前缀"下一致，在"别家前缀"下**不一致**（归属被尊重）');
-
-// manifest 未到达 / 取不到：DEFAULT_PROVIDER 是空串。
-// 那时**任何**带前缀的 id 都不查表 —— 宁可 x无，也不要在归属未知时错显别家的数字。
-DEFAULT_PROVIDER = '';
 ok(multTag('workbuddy/glm-5.3-flash').indexOf('x0.06') < 0,
-  '归属未知（manifest 未到达）时不查表：带前缀的 id 不显示 0.06');
-ok(/x无/.test(multTag('workbuddy/glm-5.3-flash')),
-  '归属未知时带前缀的 id 一律显示 x无（安全方向）');
-ok(multTag('glm-5.3-flash').indexOf('x0.06') >= 0,
-  '归属未知时**裸名**仍原样查表（单上游部署不被这次修复牵连）');
-ok(multTagPlain('workbuddy/glm-5.3-flash') === '',
-  '归属未知时下拉同样不加倍率（与 chips 同一判据）');
+  '表里只有裸名键时带前缀的 id **不**命中 —— 无条件去前缀正是"借别家数字"的来源');
+
+// ⚠ 倍率查表**不再依赖 DEFAULT_PROVIDER**（旧口径靠它判"表覆不覆盖这个上游"）。
+// 键里已经带了上游，manifest 什么时候到都不影响查表结果 —— 这一条同时是
+// "别把归属判据又加回来"的回归：加回来就会把海外版（workbuddy-intl）整组打成 x无。
+modelMultipliers = { 'workbuddy/glm-5.3-flash': 0.06 };
+DEFAULT_PROVIDER = '';
+ok(multTag('workbuddy/glm-5.3-flash').indexOf('x0.06') >= 0,
+  'DEFAULT_PROVIDER 为空（manifest 未到达）时，带前缀的 id 仍命中自己的组合键 → x0.06');
+ok(multTag('glm-5.3-flash').indexOf('x0.06') < 0,
+  '同一时刻裸名查不到（表里只有组合键）—— 证明两侧用的是不同的键，不是"归属未知就一律不查"');
 DEFAULT_PROVIDER = 'workbuddy';
+modelMultipliers = {};
+
+// ---------- 11. 组间排序走 manifest 顺序（providerRank），不是字典序 ----------
+//
+// 本节与被修的那条 ReferenceError 是同一件事的两半：
+//   · 上半是"清单要带上依赖"—— 不带上，groupModelsByOwner / syncModelProviderOptions
+//     一排序就 ReferenceError（比较器只在 >=2 个 owner 时被调用，见文件头说明）；
+//   · 下半是"带上之后要真的把它跑起来"—— 塞一个 owner 时比较器根本不被调用，
+//     清单里那个名字等于只被 typeof 检查过、从没被用过，假绿照旧。
+// 所以这里**刻意反着字典序**给 manifest：manifest 里 workbuddy 在前（字典序是
+// codearts < workbuddy），一旦有人把 providerRank 换回 ids.sort()，下面第一条立刻红。
+console.log('\n[11] 组间排序走 manifest 顺序（providerRank），未知上游排末尾');
+setProviders([{ id: 'workbuddy' }, { id: 'codearts' }]);
+const ORDERED = [
+  { id: 'codearts/deepseek', owned_by: 'codearts' },
+  { id: 'workbuddy/auto', owned_by: 'workbuddy' },
+  { id: 'ghost/x', owned_by: 'ghost' },          // 不在 manifest 里的上游 → 排末尾
+];
+const g11 = groupModelsByOwner(ORDERED.map(x => ({ ...x })), []);
+const owners11 = g11.map(g => g.owner);
+ok(owners11.join(',') === 'workbuddy,codearts,ghost',
+  '组间顺序 = manifest 顺序（workbuddy 在前，字典序会是 codearts 在前），manifest 外的上游排末尾（实际 '
+  + JSON.stringify(owners11) + '）');
+ok(providerRank('workbuddy') === 0 && providerRank('codearts') === 1,
+  'providerRank：命中 manifest 返回它的下标（实际 '
+  + JSON.stringify([providerRank('workbuddy'), providerRank('codearts')]) + '）');
+ok(providerRank('ghost') === providerRegistryIds().length,
+  'providerRank：manifest 外的 id 返回 length（排末尾，实际 ' + providerRank('ghost') + '）');
+// 上游下拉是 providerRank 的**第二个**消费点：同一条判据，两个面（chips 分组 + 下拉）。
+syncModelProviderOptions(ORDERED.map(x => ({ ...x })));
+const provVals11 = optionValues($('modelProvider').innerHTML);
+ok(JSON.stringify(provVals11) === JSON.stringify(['', 'workbuddy', 'codearts', 'ghost']),
+  '上游下拉的选项顺序同 providerRank（「全部上游」 + manifest 顺序 + 末尾兜底，实际 '
+  + JSON.stringify(provVals11) + '）');
+// 还原：本节造的 manifest 不能漏给后面的节（PROVIDERS 是桩里的模块变量）。
+setProviders([]);
+setModelProviderFilter('');
 modelMultipliers = {};
 
 console.log(fail === 0 ? '\n=== 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');

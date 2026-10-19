@@ -16,6 +16,7 @@ const fs = require('fs');
 // WB2API_REPO 可覆盖（变异扫描用它指向一次性副本）。
 
 const path = require('path');
+const os = require('os');
 const cp = require('child_process');
 
 const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
@@ -110,14 +111,43 @@ window.addEventListener('error', e => { window.__err = String(e.message || e.err
 <script>
 try {
   __REAL_SCRIPT__
-  document.title = 'SCRIPT_OK';
 } catch (e) {
-  document.title = 'SCRIPT_ERR:' + (e && e.message ? e.message : String(e));
+  // 执行期（运行时）异常先记下来，交给下面**独立的**判定块写进 title。
+  window.__err = window.__err || ('执行期异常: ' + (e && e.message ? e.message : String(e)));
 }
+</script>
+<script>
+// 判定块刻意放进**独立的** script 元素。
+//
+// 为什么：真实脚本一旦有**语法**错误，它所在的那个 script 元素整块都不会执行
+// —— 语法错误发生在编译期，同一个元素的 try/catch 捕不到。旧写法把
+// document.title = ... 写在同一元素里 ⇒ title 根本不会被创建 ⇒ 断言只能报
+// "(no title)"，看不到任何原因。实测（2026-10-19）就是这么栽的：探针注入被
+// $ 展开污染成语法错误，输出里完全看不出真因，白查了一轮。
+//
+// ⚠ 不弱化判据：只要有异常就写 SCRIPT_ERR 前缀，断言仍要求整串等于 SCRIPT_OK。
+// ⚠ 本段注释位于 JS 模板字面量内部，里面**不能出现反引号**（会截断模板字符串，
+//    2026-10-19 亲测：Node 直接 SyntaxError: Unexpected identifier）。
+document.title = window.__err ? ('SCRIPT_ERR:' + window.__err) : 'SCRIPT_OK';
 </script>
 </body></html>`;
 
-const page = probe.replace('__REAL_SCRIPT__', main);
+// ⚠ 注入必须用**函数形式**的替换（`() => main`），不能用字符串替换。
+//
+// 为什么：`String.prototype.replace` 的**字符串**替换串里 `$` 有特殊语义 ——
+//   $&  = 匹配到的整段（这里就是 '__REAL_SCRIPT__'）
+//   $`  = 匹配位置**之前**的全部文本（在这里＝整段模板前缀！）
+//   $'  = 匹配位置之后的全部文本
+//   $$  = 一个字面 $
+// 而产品脚本自带两处会命中的序列：
+//   · 约 156117 处  `String(s).replace(/["\\]/g, '\\$&')`  → $& 被展开成 '__REAL_SCRIPT__'
+//   · 约 307192 处  注释里写了「…的：`$` / `esc` / `numNonNeg`」，
+//                   其中「$ + 反引号」正好是 $`  → **整段模板前缀被插进 JS 中间**
+// 后果（实测 2026-10-19）：注入后的探针里模板前缀出现 2 次、script 元素变成 5 个、
+// 浏览器报 `SyntaxError: Unexpected token '<'`、断言以 "(no title)" 失败 ——
+// 而真因与产品代码毫无关系，纯粹是本文件注入方式的 bug。
+// 函数替换的返回值**不做任何 $ 展开**，是这里唯一正确的写法。
+const page = probe.replace('__REAL_SCRIPT__', () => main);
 // ⚠ 探针文件必须写在**本脚本所在目录**（而不是 cwd），并且 Chrome 要打开
 // 它的**绝对路径**。旧写法是 `fs.writeFileSync('tdz_probe.html', ...)`
 // 配 `file:///tdz_probe.html` —— 后者是根目录下的文件，永远打不开，
@@ -174,12 +204,26 @@ const DOM_STUB = `
   globalThis.addEventListener = () => {};
 `;
 
+// Chrome 每次都要给**独立的 user-data-dir**。
+//
+// 为什么（2026-10-19 实测）：不给的话新进程会去抢默认 profile；本机在这种状态下
+// `--dump-dom` **退出码 0、stdout 却是 0 字节** ⇒ 抓不到 title ⇒ 断言恒报
+// "(no title)"，看起来像"被测代码有问题"，实际是浏览器压根没输出。
+// 换成一个唯一的临时 profile 后稳定有输出（lib_cdp.js 用的是同一招）。
+// ⚠ 临时目录只落在 os.tmpdir() 下，跑完即删；不碰用户任何既有 profile。
+function tmpProfile(tag) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'wb2api-tdz-' + tag + '-'));
+}
+function rmProfile(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* 删不掉不影响判定 */ } }
+
 function chromeOk() {
+  const prof = tmpProfile('ping');
   try {
-    const r = cp.spawnSync(CHROME, ['--headless=new', '--disable-gpu', '--dump-dom',
-      'data:text/html,<title>PING</title>'], { encoding: 'utf8', timeout: 20000 });
+    const r = cp.spawnSync(CHROME, ['--headless=new', '--disable-gpu',
+      '--no-first-run', '--no-default-browser-check', '--user-data-dir=' + prof,
+      '--dump-dom', 'data:text/html,<title>PING</title>'], { encoding: 'utf8', timeout: 20000 });
     return r.stdout && r.stdout.includes('PING');
-  } catch { return false; }
+  } catch { return false; } finally { rmProfile(prof); }
 }
 
 // 用 Node 执行真实脚本：需要最小 DOM 桩。
@@ -209,17 +253,39 @@ if (chromeOk()) {
   // 用探针文件的**真实绝对路径**（含盘符 → file:///D:/... 形式）。
   // 旧代码写死 file:///tdz_probe.html，那是"根目录下的文件"，从未存在。
   const probeURL = 'file:///' + PROBE.replace(/\\/g, '/');
-  const args = ['--headless=new', '--disable-gpu', '--virtual-time-budget=2500',
-                '--dump-dom', probeURL];
-  const r = cp.spawnSync(CHROME, args, { encoding: 'utf8', timeout: 30000 });
-  const title = /<title>([\s\S]*?)<\/title>/.exec(r.stdout);
-  t = title ? title[1] : '(no title)';
+
+  // 跑一次探针，返回 { title, bytes }。title 为 null 表示 dump 里根本没有 title 元素
+  // —— 那属于"这次没能跑起来"，与"被测脚本报错"（会写出 SCRIPT_ERR:…）必须分开，
+  // 否则会把环境噪声误判成产品缺陷。
+  function dumpProbe() {
+    const prof = tmpProfile('run');
+    try {
+      const r = cp.spawnSync(CHROME, ['--headless=new', '--disable-gpu',
+        '--no-first-run', '--no-default-browser-check', '--user-data-dir=' + prof,
+        '--virtual-time-budget=4000', '--dump-dom', probeURL],
+        { encoding: 'utf8', timeout: 40000 });
+      const out = r.stdout || '';
+      const m = /<title>([\s\S]*?)<\/title>/.exec(out);
+      return { title: m ? m[1] : null, bytes: out.length };
+    } finally { rmProfile(prof); }
+  }
+
+  let dump = dumpProbe();
+  // 有界重试：**只在"连 title 元素都没有"时**重来一次（冷启动 / profile 创建竞态）。
+  // 已经拿到 title 就是确定性结果（哪怕它是 SCRIPT_ERR），**不重试** ——
+  // 重试会把真实失败盖成"第二次碰巧过了"，那正是本仓库反复吃过的假绿。
+  if (dump.title == null) dump = dumpProbe();
+  t = dump.title == null ? '(no title；Chrome dump 出 ' + dump.bytes + ' 字节)' : dump.title;
   how = 'Chrome';
 } else {
   t = runInNode(main);
   how = 'Node（Chrome 在本机不可用，已降级到同为 V8 的 Node 执行同一段脚本）';
 }
 console.log('\n整段脚本执行结果（' + how + '）: ' + t);
+// 失败时把探针抓到的**原始**异常文本再打一遍，免得只剩一行 "(no title)" 无从下手。
+if (t !== 'SCRIPT_OK') {
+  console.log('  原始异常文本（探针页 window.onerror / 执行期 catch 捕获）: ' + t);
+}
 ok(t === 'SCRIPT_OK', '真实脚本按原顺序执行无异常（TDZ / ReferenceError 已消除）');
 
 // 自检：这个门禁必须真的能抓到 TDZ。

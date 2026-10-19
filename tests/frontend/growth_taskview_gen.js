@@ -1,4 +1,9 @@
 
+// ⚠⚠ 这个模板里（**含注释**）绝不能出现裸反引号：本次修夹具时我在下面的注释里
+//    写了一个，generator 立刻 SyntaxError（Unexpected identifier）——
+//    而 run_frontend_suites.js 的**门禁 0**（findRawTemplateBacktick）就是为这个坑
+//    设的：generator 挂了但上一次的产物还在，直接跑产物照样全绿，
+//    于是"以为产品坏了，其实是测量工具坏了"。要引用代码片段就用「」括起来。
 const fs = require('fs');
 const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
 const els = {};
@@ -8,6 +13,12 @@ els.growthViews.querySelectorAll = () => [];
 const $ = id => els[id] || (els[id] = mkEl(id));
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let growthSnaps = [], growthView = 'all', growthViewPicked = true, growthUID = '';
+// autoCodes：可自动化任务码集合，产品里是 "let autoCodes = new Set();"。
+// 它是**声明语句**不是函数块，grabBlock 按花括号配平，抓不了它 ⇒ 在桩里给空集合。
+// ⚠ 空集合是有语义的：canAuto 因此恒为 false，行内按钮走「去客户端做」那一支 ——
+//   正是本夹具要判定的分支。想测「一键完成」按钮得先把集合填上（另一个夹具的事）。
+// ⚠ autoCodesLoaded 也一起给：产品里它跟着 autoCodes 成对出现，缺了会再次 ReferenceError。
+let autoCodes = new Set(), autoCodesLoaded = false;
 function creditsOf() { return null; }
 function buildGrowthAccountSelect() {}
 function syncGrowthViewButtons() {}
@@ -60,6 +71,15 @@ function fmtTaskExpiry(t) {
     return { text: m ? `${Number(m[2])}-${Number(m[3])}（剩 ${d} 天）` : '剩 ' + d + ' 天', cls: '' };
   }
 
+function maskNick(n) {
+    const s = String(n == null ? '' : n);
+    if (!s) return '—';
+    if (s.indexOf('*') >= 0) return s;
+    const rs = Array.from(s);
+    if (rs.length <= 4) return s;   // 太短全打码 = 不可辨认，原样
+    return rs.slice(0, 3).join('') + '*'.repeat(rs.length - 5) + rs.slice(-2).join('');
+  }
+
 function renderGrowthGroups() {
     const host = $('growthGroups');
     if (!host) return;
@@ -70,6 +90,24 @@ function renderGrowthGroups() {
     }
 
     buildGrowthAccountSelect();
+    // 「全部账号」选中时：任务表按账号铺开太长，显示提示 + 各账号待办摘要，
+    // 让"点一键完成 = 所有账号都执行"这个作用域一眼可见。
+    if (growthUID === '') {
+      const lines = growthSnaps.map(g => {
+        const c = growthCounts(g);
+        const name = esc(maskNick(g.nickname));
+        const left = c.acceptable + c.running;
+        const done = c.done;
+        return `<div style="padding:5px 0;font-size:12px">${name}
+          <span class="pill ${left ? 'warn' : 'dim'}">待完成 ${left}</span>
+          <span class="pill ${done ? 'ok' : 'dim'}">已完成 ${done}</span></div>`;
+      }).join('');
+      host.innerHTML = `<div class="dim" style="padding:12px 16px;font-size:12px">
+        已选择「全部账号」：点上方「一键完成」将对所有账号依次执行（成长待办+领奖 → 开学季）。
+        要查看/操作单个账号请在下拉框选择它。</div><div style="padding:0 16px">${lines}</div>`;
+      $('growthTaskMeta').textContent = '';
+      return;
+    }
     const g = growthSnaps.find(x => x.uid === growthUID) || growthSnaps[0];
     const c = growthCounts(g);
 
@@ -89,7 +127,7 @@ function renderGrowthGroups() {
     $('growthTaskMeta').textContent =
       `待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done} · 共 ${c.all}`;
 
-    const name = esc(g.nickname || (g.uid || '').slice(0, 8));
+    const name = esc(maskNick(g.nickname));
     if (g.error && !g.tasks_total) {
       host.innerHTML = `<div class="ggroup">
         <div class="ghead"><span class="gname">${name}</span>
@@ -117,15 +155,30 @@ function renderGrowthGroups() {
       const locked = t.locked ? ' <span class="pill warn">未解锁</span>' : '';
       // 领取优先于接单：completed 的任务已经做完了，唯一可做的就是领奖。
       //
-      // accepted / in_progress 给的不是按钮而是说明 —— 这两类任务**本网页无法代做**，
-      // 必须去 WorkBuddy 客户端里真正把动作做掉。留一个禁用按钮只会让人反复点。
+      // ⚠ 这一格原来对 accepted / in_progress 一律显示「去客户端做」，
+      // 注释写着"这两类任务**本网页无法代做**"。移植伪造遥测层之后该结论
+      // **不再成立**：autoActions 里那 17 条就是网关能直接做完的。
+      //
+      // 所以现在的判据是「该任务码在不在后端能力表里」：
+      //   在 → 「一键完成」（后端自己会处理"先接单"这一步）
+      //   不在 → 仍然退回说明文字 —— 对**确实**只能去客户端做的任务保留诚实提示
+      //
+      // ⚠ 必须排除**已做完**的任务（claimed）。claimed 的 claimable 为 false，
+      // 于是它会一路落到这个分支上 —— 只看能力表的话，「已领取」的任务行也会
+      // 长出一个「一键完成」按钮，点了只会回一句"已完成（1/1）"。
+      // 这里复用 GROWTH_VIEWS.done.test 而**不另写一遍** status 判断：
+      // "什么算做完"只有一处定义，否则两边必然会漂移（视图把它算已完成、
+      // 按钮却认为还能再做）。
+      const canAuto = autoCodes.has(t.task_code) && !GROWTH_VIEWS.done.test(t);
       const btn = t.claimable
         ? `<button data-gclaimreward="${esc(t.task_code)}" data-uid="${esc(g.uid)}">领取 ${t.reward_credit || 0} 分</button>`
-        : (t.status === 'not_accepted' && !t.locked)
-          ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost">接单</button>`
-          : (t.status === 'accepted' || t.status === 'in_progress')
-            ? '<span class="dim" style="font-size:11px">去客户端做</span>'
-            : '<span class="dim">—</span>';
+        : (canAuto && !t.locked)
+          ? `<button data-gauto="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost" title="网关直接把该任务做完并领奖（上报伪造的客户端行为遥测）；只做这一个任务">一键完成</button>`
+          : (t.status === 'not_accepted' && !t.locked)
+            ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost">接单</button>`
+            : (t.status === 'accepted' || t.status === 'in_progress')
+              ? '<span class="dim" style="font-size:11px">去客户端做</span>'
+              : '<span class="dim">—</span>';
       const tag = t.tag ? ` <span class="pill">${esc(t.tag)}</span>` : '';
       // 到期列：只有部分任务有期限（上游 18 个里 4 个），其余显示占位。
       // 已过期时即使有「领取」按钮也要同时给出提示 —— 那种情况下按钮点了会失败。
@@ -152,7 +205,7 @@ function renderGrowthGroups() {
     host.innerHTML = `<div class="ggroup">
       <div class="ghead">
         <span class="gname">${name}</span>
-        <span class="dim mono" style="font-size:11px">${esc((g.uid || '').slice(0, 8))}</span>
+        <span class="dim mono" style="font-size:11px">${esc(g.uid)}</span>
         <span class="dim" style="font-size:12px">待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done}</span>
         ${g.claimable_count
           ? `<span class="pill warn">${g.claimable_count} 个待领取 · ${g.claimable_credit} 分</span>
@@ -253,8 +306,22 @@ ok(h.includes('未解锁'), '显示「未解锁」标记');
 
 // ---------- 4. 静态：设置项说明与 CSS ----------
 console.log('\n[4] 设置项与样式');
-ok(/setGrowthAccept[\s\S]{0,200}官方前端没有接单按钮/.test(html),
-   '设置项注明了「官方前端没有接单按钮」');
+// ⚠ 这条断言原来是 /setGrowthAccept[\s\S]{0,200}官方前端没有接单按钮/ ——
+//   那个设置项**已经不在了**：commit e95b814「设置页再隐藏 3 个纯收益开关」
+//   把「自动领取奖励」「自动接单」从设置页拿掉了（用户决定；理由写在
+//   webui.html:1631-1632 的注释里，后端 key growth_auto_accept_tasks 仍在
+//   internal/workbuddy/settings.go:37，只是不再有 UI）。
+//   ⇒ 断言的**作用域**错了（守着一个被有意移除的 UI 元素），所以改成守**现在的决定**：
+//     纯收益开关不展示，而「接单」这个**动作**必须还在 —— 那才是本面板的能力。
+ok(!/id="setGrowthAccept"/.test(html), '设置页不再有「自动接单」开关（纯收益项不展示）');
+ok(!/id="setGrowthClaim"/.test(html), '设置页不再有「自动领取奖励」开关（同一批隐藏）');
+ok(/id="setGrowthMakeup"/.test(html) && /id="setGrowthRedeem"/.test(html)
+   && /id="setGrowthOpen"/.test(html) && /id="setGrowthDraw"/.test(html),
+   '四个「消耗资源」开关仍在（补签 / 连登兑换 / 开盲盒 / 抽奖）');
+ok(html.includes('全部接单'), '「全部接单」按钮仍在（隐藏的是开关，不是动作）');
+// 接单按钮为什么必须有：官方前端里根本没有这个状态（webui.html:8562）。
+// 这句注释是"当初为什么做它"的唯一记录，钉住它 —— 否则下次有人会把整个接单掰掉。
+ok(html.includes('官方前端没有这个状态'), '页面里保留了「官方前端没有接单状态」的理由');
 ok(/\.pbar\{/.test(html) && /\.pbar i\{/.test(html), '.pbar 样式已定义');
 ok(/\.ghost\{/.test(html), '.ghost 样式已定义');
 

@@ -6,18 +6,41 @@ function mkEl(id) { return { id, hidden: true, className: '', textContent: '', i
 for (const id of ['cards','gwHint']) els[id] = mkEl(id);
 const $ = id => els[id] || (els[id] = mkEl(id));
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-function resetEls() { for (const k of Object.keys(els)) { const e = els[k]; e.hidden = true; e.className=''; e.textContent=''; e.innerHTML=''; } }
+// window 是浏览器全局：renderCards 会读 window._statsCache（renderStats 在 webui.html:9558 写入）。
+// Node 里没有这个全局 —— 不补就是 "ReferenceError: window is not defined"，那是 stub 缺口，
+// 不是产品缺陷。形状照真实的来：平时 null，拿到 /admin/stats 后才是一个 {total, ok, ...} 对象。
+const window = { _statsCache: null };
+function resetEls() { for (const k of Object.keys(els)) { const e = els[k]; e.hidden = true; e.className=''; e.textContent=''; e.innerHTML=''; } window._statsCache = null; }
 
 function renderCards(h, s) {
+    // 成员模式：没有账号池读数（/status 对成员 403）⇒ 这一排卡片换一句说明，
+    // 而不是渲染出一排 `—` 或直接抛异常（后者会在控制台留一条看不懂的报错）。
+    if (!s) {
+      $('cards').innerHTML = '<div class="card" style="grid-column:1/-1">'
+        + '<div class="k">账号池</div>'
+        + '<div class="v dim" style="font-size:13px">当前登录是<b>成员</b>，'
+        + '账号池读数仅管理员可见。你自己的用量看下面的统计卡。</div></div>';
+      return;
+    }
+    // 网关状态卡：核心运营读数（对标 one-api 管理台"渠道健康 + 汇总"）。
+    // 之前精简到 2 张后用户觉得太少 —— 这里加回排障/运营真正有用的维度：
+    // 冷却中/已禁用/在途 来自 /status 的每账号画像；累计请求/成功率来自
+    // /admin/stats（stats 数据在 renderStats 里单独渲染，这里只读缓存值）。
+    const accts = (s && s.accounts) || [];
+    const cooling = accts.filter(a => a.cooling).length;
+    const disabled = accts.filter(a => a.disabled).length;
+    const inflight = accts.reduce((n, a) => n + (a.in_flight || 0), 0);
+    const st = window._statsCache;
+    const reqTotal = st ? st.total : '—';
+    const reqRate = (st && st.total) ? Math.round((st.ok / st.total) * 100) + '%' : '—';
     const cards = [
       ['账号总数', s.total, ''],
       ['健康', s.healthy, s.healthy > 0 ? 'ok' : 'err'],
-      ['冷却中', s.cooling, s.cooling > 0 ? 'warn' : 'dim'],
-      ['已禁用', s.disabled, s.disabled > 0 ? 'err' : 'dim'],
-      ['在途占满', s.in_flight_full, s.in_flight_full > 0 ? 'warn' : 'dim'],
-      ['粘性会话', s.sticky_sessions, ''],
-      ['Redis', s.redis_mode, s.redis_mode === 'upstash' ? 'ok' : 'dim'],
-      ['/healthz', h.healthy > 0 ? '200' : '503', h.healthy > 0 ? 'ok' : 'err'],
+      ['冷却中', cooling, cooling > 0 ? 'warn' : ''],
+      ['已禁用', disabled, disabled > 0 ? 'err' : ''],
+      ['在途请求', inflight, inflight > 0 ? 'warn' : ''],
+      ['累计请求', reqTotal, ''],
+      ['成功率', reqRate, (st && st.total) ? (st.ok / st.total >= 0.95 ? 'ok' : 'warn') : ''],
     ];
     $('cards').innerHTML = cards.map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
@@ -31,20 +54,55 @@ function renderCards(h, s) {
 let fail = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
 
-// 取出 .content 里每一个顶层 <section>，再抽出各自的 h2 首个文本节点。
-// 这正是 buildNav() 用的口径，所以这里断言的就是导航会显示什么。
+// markupOnly：只留下「浏览器初次解析时会变成 DOM 节点」的那部分文本。
+//
+// # 哪些文本不是节点（不剥掉，扫描器看到的就是假结构）
+//
+//   1. HTML 注释      —— T6 踩过：注释里举例写了标签名，扫描器把它当真实节点。
+//   2. script 正文    —— script data state 下里面的标签字样只是 JS 注释/字符串，
+//                        **不会**生成任何元素。
+//   3. style 正文     —— CSS 注释/选择器里同样可能出现标签名。
+//
+// # 第 2 条是本次的真实根因（不是 DOM stub 少元素/少属性）
+//
+// webui.html:3118 有一行 JS 注释，举例写了一个 section 开标签（带 class="acctgroup"）。
+// 它在 script 正文里，浏览器只当注释文本；本函数旧版只剥 HTML 注释，
+// 于是把它当成一个真实开标签 ⇒ 配平深度归不了零 ⇒ 内层 while 结束时 t 为 null
+// ⇒ 崩在 t.index 上，报出 "Cannot read properties of null (reading 'index')"。
+// 症状看起来像产品代码读了某个元素的 .index，其实是**测量工具自己**崩了 ——
+// 产品代码里唯一的 .index 读点在 webui.html:5672，读的是数组元素 x.index，与此无关。
+//
+// 反向也查过：4334 / 6112 是模板字面量里拼出来的 section 开标签（配 4380 / 6121
+// 的闭合标签），它们成对，只贡献"数量"不破坏"结构"；
+// 真正打破配平的只有 3118 那个孤立的开标签。
+//
+// 剥完之后的静态 section 应为 10 个（仪表盘/API 管理/账号池/…/设置），与真实页面一致。
+// 三种剥除顺序（注释先/脚本先/两轮）都实测过，结论相同。
+function markupOnly(src) {
+  // 两轮：注释里可能提到 <script>（被整段注释掉的脚本），
+  // 脚本里也可能出现 <!-- 字样。单轮剥除对这两种写法会留残渣。
+  // 顺序上脚本/样式先剥：在 script data state 里 HTML 注释规则不生效。
+  for (let pass = 0; pass < 2; pass++) {
+    src = src.replace(/<script[\s\S]*?<\/script>/gi, '');
+    src = src.replace(/<style[\s\S]*?<\/style>/gi, '');
+    src = src.replace(/<!--[\s\S]*?-->/g, '');
+  }
+  return src;
+}
+
 function sectionsOf(src) {
-  // 先剥掉 HTML 注释 —— 注释里出现的标签不算 DOM 结构。
-  //
-  // # 为什么必须剥（T6 踩到的真实崩溃）
-  //
-  // T6 在设置面板之后加了一段说明性注释，里面举例写了标签名。
-  // 扫描器把注释里的那个开标签当成真实节点，配平深度永远归不了零，
-  // 于是内层 while 结束时 t 仍是 null → "Cannot read properties of null"。
-  //
-  // 这不只是这一处的问题：任何注释里写标签都会踩到。
-  // 所以在入口统一剥注释，而不是在扫描逻辑里打补丁。
-  src = src.replace(/<!--[\s\S]*?-->/g, '');
+  src = markupOnly(src);
+
+  // 测量工具的前置自检：剥完之后 <section ...> 与 </section> 必须成对。
+  // 不成对说明"剥得不够"（又有新的非节点文本混进来了）—— 这里显式报错，
+  // 而不是让 t 变成 null 后崩在 t.index 上、把原因伪装成产品缺陷。
+  const opens = (src.match(/<section(?:\s[^>]*)?>/g) || []).length;
+  const closes = (src.match(/<\/section>/g) || []).length;
+  if (opens !== closes) {
+    throw new Error('扫描器口径失效：<section> 开标签 ' + opens + ' 个、闭合 ' + closes
+      + ' 个（不成对）。多半是 markupOnly 少剥了一类"不是节点"的文本；'
+      + '别去改产品代码。');
+  }
 
   const out = [];
   // 匹配带属性的 <section ...>，而不只是裸 <section>。
@@ -73,6 +131,9 @@ function sectionsOf(src) {
       depth += t[0].startsWith('</') ? -1 : 1;
       if (depth === 0) break;
     }
+    // 兜底：上面的成对自检已经拦住了这种情况，这里再留一句可读报错，
+    // 免得将来有人改动剥除逻辑后，报错又变回一条看不懂的 TypeError。
+    if (!t) throw new Error('section 未闭合，起始于第 ' + (src.slice(0, m.index).split('\n').length) + ' 行');
     out.push(src.slice(m.index, t.index + t[0].length));
   }
   return out;
@@ -99,10 +160,23 @@ ok(labels.filter(l => l === '仪表盘').length === 1, '「仪表盘」只出现
 // 三段内容必须在同一个 section 内 —— 用「同一 section 里同时含三个 h3」来判
 const dash = sections.find(s => navLabelOf(s) === '仪表盘');
 ok(!!dash, '能定位到仪表盘 section');
+// 定位不到就直接停在这里并说清原因：否则下一行 dash.includes 会抛 TypeError，
+// 看起来又像"产品读了 null 的属性"，其实只是面板被改名/删掉了（先看上面那条 FAIL）。
+if (!dash) throw new Error('定位不到「仪表盘」section：看上面那条 FAIL，面板或它的 h2 被改名/删除了。');
 for (const t of ['网关状态', '调用统计', 'API 接入信息']) {
   ok(dash.includes('<h3>' + t), '仪表盘内以 h3 呈现「' + t + '」');
 }
-ok((dash.match(/class="boardsec"/g) || []).length === 3, '仪表盘内恰好 3 个子段落 boardsec');
+ok((dash.match(/class="boardsec"/g) || []).length === 7, '仪表盘内恰好 7 个子段落 boardsec');
+// 子段落**集合与顺序**也钉住：只数个数的话，换掉一个子段落的名字（等于换了一块内容）
+// 依然是绿的 —— 那条判据就没有判别力。
+//
+// ⚠ 为什么是 7 而不是最初合并时的 3（历史口径，别当成"数字被改大了"）：
+//   f1d4326 把三段合并成 1 个面板 / 3 个子段落；
+//   df3693e、957a846、b7f4fe0、18e9278（融合 agent2api 报表页那批）陆续加到 7 个。
+//   再动这里 = 动了仪表盘的结构，应当复核导航标签与下面的容器断言。
+const titles = (dash.match(/<h3>([^<]*)/g) || []).map(x => x.slice(4).trim());
+ok(titles.join('/') === '网关状态/调用统计/活跃热力图/缓存命中率/近 24 小时缓存命中率趋势/按天 Token 趋势/API 接入信息',
+  '子段落标题与顺序符合当前契约（实际：' + titles.join('/') + '）');
 
 // 子段落的 h3 不能污染导航标签：h3 必须排在 h2 之后，且 h2 首个文本节点是「仪表盘」
 ok(dash.indexOf('<h2>') < dash.indexOf('<h3>'), 'h2 在 h3 之前');
@@ -110,28 +184,92 @@ ok(navLabelOf(dash) === '仪表盘', '导航标签解析结果为「仪表盘」
 
 // ---------- B. 三个宿主容器都还在且各只有一个 ----------
 console.log('\n[B] 承载容器唯一性（合并最易留下的错：id 重复或被误删）');
-for (const id of ['cards','statsCards','statsModels','apiCards','epRows','curlSample','rawstatus','gwHint','statsWindow']) {
+// ⚠ statsModels 已从本列表移出：2026-10-18 用户要求删掉「模型明细」chips
+//    （webui.html:1195-1200，renderStatsModels 函数体保留但不再被调用）
+//    ⇒ 它现在是"应为 0 次"的旧 id，见下面那组。替它占位的是缓存四格 #cacheCards（957a846）。
+for (const id of ['cards','statsCards','cacheCards','apiCards','epRows','curlSample','rawstatus','gwHint','statsWindow']) {
   const n = (html.match(new RegExp('id="' + id + '"', 'g')) || []).length;
   ok(n === 1, '#' + id + ' 恰好出现一次（实际 ' + n + '）');
 }
-// 控制器只保留一份：合并后不应再有第二套刷新开关
-for (const id of ['auto','refresh']) {
+// 控制器只保留一份：合并后不应再有第二套刷新开关。
+// #auto 是旧的「每 5s 刷新」勾选框，已由 aa2fc7f 整体移除（webui.html:12254 有说明）
+// ⇒ 断言 0 次：防的是"HTML 回来了但接线没回来"这种半截改动。
+for (const id of ['refresh']) {
   const n = (html.match(new RegExp('id="' + id + '"', 'g')) || []).length;
-  ok(n === 1, '#' + id + ' 恰好出现一次（刷新开关已收敛为一处，实际 ' + n + '）');
+  ok(n === 1, '#' + id + ' 恰好出现一次（刷新入口已收敛为手动一处，实际 ' + n + '）');
+}
+for (const id of ['auto','statsModels','statsModelsWrap']) {
+  const n = (html.match(new RegExp('id="' + id + '"', 'g')) || []).length;
+  ok(n === 0, '#' + id + ' 已整体移除（实际 ' + n + ' 次）');
 }
 
-// 网格容器：三段各有一处 .cards，且没有残留的旧 id
-ok((dash.match(/class="cards"/g) || []).length === 3, '仪表盘内 3 处 .cards（状态/统计/接入）');
+// 网格容器：仪表盘内 4 处 .cards（状态 / 统计 / 缓存四格 / 接入），且没有残留的旧 id
+ok((dash.match(/class="cards"/g) || []).length === 4, '仪表盘内 4 处 .cards（状态/统计/缓存四格/接入）');
 
-// ---------- C. renderCards 仍产出 8 张卡 + gwHint 三态 ----------
+// ---------- C. renderCards 的卡片集合 + gwHint 三态 ----------
 console.log('\n[C] renderCards 输出与网关判读文案');
-function cardCount(h, s) { resetEls(); renderCards(h, s); return ($('cards').innerHTML.match(/class="card"/g) || []).length; }
-ok(cardCount({ healthy: 2 }, { total: 2, healthy: 2, cooling: 0, disabled: 0, in_flight_full: 0, sticky_sessions: 0, redis_mode: 'noop' }) === 8,
-  '健康时有 8 张卡');
-// /healthz 卡：healthy>0 才是 200
+// 作者侧辅助：把卡片渲染结果解析成 { 标签: {cls, v} } 与"标签顺序"，
+// 这样断言的既不是一坨 HTML 字符串，也不只是个数。
+function cardMap(html) {
+  const out = {};
+  const re = /<div class="k">([^<]*)<\/div><div class="v ?([^"]*)">([^<]*)<\/div>/g;
+  let m;
+  while ((m = re.exec(html))) out[m[1]] = { cls: m[2].trim(), v: m[3] };
+  return out;
+}
+function cardLabels(html) { return (html.match(/<div class="k">[^<]*<\/div>/g) || []).map(x => x.replace(/<[^>]*>/g, '')); }
+function cardsOf(h, s) { resetEls(); renderCards(h, s); return $('cards').innerHTML; }
+
+// 管理员模式（s 有值）的卡片集合与顺序。
+//
+// ⚠ 历史口径：旧版是 8 张（账号总数/健康/冷却中/已禁用/在途占满/粘性会话/Redis//healthz），
+//   判据原文写的是"健康时有 8 张卡"。07d3f93 之后卡片换成了
+//   运营/排障口径的 7 张，且冷却/禁用/在途不再是 s 上的预聚合字段，
+//   而是从 s.accounts 的**每账号画像**现算（webui.html:2222-2225）。
+//   所以这里断言"7 张 + 标签顺序固定"，比原来的"数 8 张"更能抓住"卡片被换掉/漏掉"。
+const adminS = {
+  total: 5, healthy: 4,
+  accounts: [{ cooling: true }, { cooling: true }, { disabled: true }, { in_flight: 1 }, { in_flight: 2 }],
+};
+const cards = cardsOf({ healthy: 4, total: 5 }, adminS);
+ok(cardLabels(cards).join('/') === '账号总数/健康/冷却中/已禁用/在途请求/累计请求/成功率',
+  '管理员模式渲染 7 张卡且标签顺序固定（实际：' + cardLabels(cards).join('/') + '）');
+const cm = cardMap(cards);
+// 每账号画像聚合：冷却 2 / 禁用 1 / 在途 1+2=3，沿用各自的配色档位
+ok(cm['冷却中'].v === '2' && cm['冷却中'].cls === 'warn', '冷却中按每账号画像聚合为 2 且标 warn（实际：' + cm['冷却中'].v + '/' + cm['冷却中'].cls + '）');
+ok(cm['已禁用'].v === '1' && cm['已禁用'].cls === 'err', '已禁用按每账号画像聚合为 1 且标 err（实际：' + cm['已禁用'].v + '/' + cm['已禁用'].cls + '）');
+ok(cm['在途请求'].v === '3' && cm['在途请求'].cls === 'warn', '在途请求是各账号 in_flight 之和 3 且标 warn（实际：' + cm['在途请求'].v + '/' + cm['在途请求'].cls + '）');
+// 健康档位：healthy>0 ⇒ 绿。旧版这条由 /healthz 卡（200/503）承担，那张卡已删。
+ok(cm['健康'].v === '4' && cm['健康'].cls === 'ok', '健康>0 ⇒ 健康卡标 ok（实际：' + cm['健康'].v + '/' + cm['健康'].cls + '）');
+
+// 外部读数透出：旧版由「Redis 模式」卡（upstash/noop）与「/healthz=200」卡证明。
+// 两张卡都随 07d3f93 之后的改版删了（Redis 模式按 c1cb20f 隐藏），
+// 现在同一职责由「累计请求 / 成功率」承担 —— 它们读 window._statsCache
+// （renderStats 写入，见 webui.html:9558 与 2226-2228）。判据的**意图**不变：
+// "renderCards 真的把外部读数渲染进卡片，而不是恒渲染 —"。
 resetEls();
-renderCards({ healthy: 1 }, { total: 1, healthy: 1, redis_mode: 'upstash' });
-ok($('cards').innerHTML.includes('>200<') && $('cards').innerHTML.includes('upstash'), '健康时 /healthz=200 且 Redis 模式透出');
+window._statsCache = { total: 200, ok: 190 };
+renderCards({ healthy: 4, total: 5 }, adminS);
+const withStats = cardMap($('cards').innerHTML);
+ok(withStats['累计请求'].v === '200' && withStats['成功率'].v === '95%',
+  'stats 缓存透出：累计请求 200 / 成功率 95%（实际：' + withStats['累计请求'].v + ' / ' + withStats['成功率'].v + '）');
+ok($('cards').innerHTML.includes('>200<'), '累计请求以 >200< 的数值形状渲染（不是 undefined）');
+
+// 没有 stats 缓存时必须是 —，不是 undefined / NaN
+resetEls();
+renderCards({ healthy: 4, total: 5 }, adminS);
+const noStats = cardMap($('cards').innerHTML);
+ok(noStats['累计请求'].v === '—' && noStats['成功率'].v === '—',
+  '没有 stats 缓存时两项显示 —（实际：' + noStats['累计请求'].v + ' / ' + noStats['成功率'].v + '）');
+
+// 成员模式（/status 403 ⇒ s 为 null）：整块换成一句说明，既不抛异常也不渲染一排 —
+// （webui.html:2211-2217。这条是改版后新增的分支，旧夹具没有覆盖。）
+resetEls();
+let memberThrew = '';
+try { renderCards({ healthy: 0, total: 0 }, null); } catch (e) { memberThrew = String(e && e.message || e); }
+ok(!memberThrew, '成员模式下 renderCards 不抛异常（实际：' + (memberThrew || '未抛') + '）');
+ok((($('cards').innerHTML.match(/class="card"/g) || []).length === 1) && $('cards').innerHTML.includes('成员'),
+  '成员模式渲染 1 张说明卡并点明「成员」（实际：' + $('cards').innerHTML.slice(0, 80) + '）');
 
 console.log('\n[C2] #gwHint 三种分支');
 resetEls(); renderCards({ healthy: 2, total: 3 }, { total: 3, healthy: 2 });
