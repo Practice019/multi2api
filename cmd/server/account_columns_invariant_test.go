@@ -244,6 +244,9 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		"channelstore": true, "modelmap": true,
 		//   modelvis    —— 对外可见模型的计算（能力索引 ∩ 令牌白名单 ∩ 反向映射），纯函数、零依赖。
 		"modelvis": true,
+		//   channelroute —— 请求侧规划：公开名 → 该渠道的上游名（R2 请求侧）。它是查表+排序的纯逻辑，
+		//                   也不实现 gateway.Provider（真正连上游的仍是 Provider）。
+		"channelroute": true,
 	}
 
 	entries, err := os.ReadDir("../../internal")
