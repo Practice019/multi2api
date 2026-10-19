@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"workbuddy2api/internal/channelstore"
 
 	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/admin"
@@ -1184,6 +1185,14 @@ func main() {
 		log.Fatalf("load apikeys: %v", err)
 	}
 
+	// 渠道表（中转站方向，对标 new-api 的 channel 表 + ability 索引）。
+	// 同样是 data/ 下、CWD 相对、不进配置；损坏必须显式暴露 ——
+	// 静默重建等于把用户手工配的渠道和 key 全部清空。
+	channelsStore, err := channelstore.New(filepath.Join("data", "channels.json"))
+	if err != nil {
+		log.Fatalf("load channels: %v", err)
+	}
+
 	// 控制台账号体系（抄 new-api 的登录系统）：账号库 + 会话库 + 登录端点。
 	//
 	// 路径与 apikeys.json 同一惯例（data/ 下、CWD 相对、不进配置）。
@@ -1285,13 +1294,14 @@ func main() {
 	// func(k){ adminH.SetAdminToken(k) } })` 里的 adminH 此刻是 nil）。
 	// 所以先建实例、再挂回调。
 	adminH = admin.New(admin.Config{
-		Pool:    p,
-		OAuth:   oauth.New(cfg.OAuthBaseURL),
-		Log:     checkinLog,
-		Ring:    logRing,
-		AuthDir: cfg.AuthDir,
-		APIKeys: apiKeysStore, // /admin/apikeys 管理端点
-		APIKey:  cfg.APIKey,   // 管理钥匙掩码展示（与仪表盘统一）
+		Pool:     p,
+		OAuth:    oauth.New(cfg.OAuthBaseURL),
+		Log:      checkinLog,
+		Ring:     logRing,
+		AuthDir:  cfg.AuthDir,
+		APIKeys:  apiKeysStore,  // /admin/apikeys 管理端点
+		Channels: channelsStore, // /admin/channels 管理端点（同样「未注入就不注册路由」）
+		APIKey:   cfg.APIKey,    // 管理钥匙掩码展示（与仪表盘统一）
 		// ⚠ 门禁令牌与 api_key **独立**（用户要求：门禁 token 不能和 api 一样）。
 		// 见 internal/admin 的 adminTokenMatches 注释：改造前门禁认 api_key，
 		// 于是"给客户端配一把对话 key"等于"交出管理台"。
