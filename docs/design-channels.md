@@ -326,3 +326,36 @@ commit `50c10c2`（控制台加渠道入口 section）的信息里写着：
 安全说明（顺手钉死的一条事实）：7863 上跑的是 `bin\wb2api-server.exe`，与探针
 `bin\wb2api-server-probe.exe` 是**两个文件**；且 `bin/` 被 `.gitignore:28` 忽略 ⇒
 重建探针既不会碰到用户的实例，也不会进提交。
+## 活进程实测③：模型自动发现（T6-①）闭环（2026-10-20）
+
+临时实例（7881）+ 临时夹具（7901，`D:\temp\wb2api-live-e2e\fake_upstream_models.js`）。
+⚠ 为什么另起一个夹具：旧的 `fake_upstream.js` 是当年为验 chat 转发写的，对**任何**路径都回 SSE ——
+它对 `/v1/models` 也回 `data: {"choices":[...]}`，于是接口正确地报了 502 与"解析模型目录失败"。
+那不是产品缺陷，是夹具没实现模型目录。所以补一个**新夹具**（旧的不动），它实现：
+
+    GET /v1/models ⇒ {"object":"list","data":[{"id":"ant-1"},{"id":"bee-2"},{"id":"cat-3"}]}
+    其它路径       ⇒ SSE（照旧，保持 chat 转发那条链路可用）
+
+实测（两种入参形态都走通）：
+
+    POST /admin/channels/discover  {"base_url":"http://127.0.0.1:7901/v1","key":"sk-probe-live"}
+      ⇒ HTTP 200  {"count":3,"models":["ant-1","bee-2","cat-3"],"note":"ok","saved":false}
+
+    建渠道（models 故意写成 stale-1,stale-2）后：
+    POST /admin/channels/discover  {"id":"ch-…","save":true}
+      ⇒ HTTP 200  {"count":3,…,"saved":true}
+      列表里的 models = ant-1,bee-2,cat-3     ← 覆盖生效，stale 不残留 ✓
+
+    夹具实收两条请求（可见 key 的来源不同，这正是 firstEnabledKey 的作用）：
+      {"url":"/v1/models","auth":"Bearer sk-probe-live"}      ← ① 请求里带的 key
+      {"url":"/v1/models","auth":"Bearer sk-discover-live"}   ← ② 渠道自己**启用中**的那把 key
+
+### 顺带在活进程上验实的两条"失败路径"要求（先前只有进程内断言）
+
+1. **失败信息可读**：夹具不认 `/v1/models` 时，真实响应体是
+   `向上游查询模型失败: … 解析模型目录失败: invalid character 'd' looking for beginning of value（响应体片段：…）`
+   外加 `hint` —— 说清了"哪一步失败 + 上游返回了什么 + 该检查什么"。
+2. **错误里不含 key 明文**：整段 502 里只有路径与解析错误，`sk-probe-live` 一次都没出现。
+
+⇒ 这条链路（界面按钮 → 管理端点 → gateway Provider → 上游 /v1/models → 覆盖写回渠道）全程打通，
+且**管理台始终不认识任何具体上游**（只经 gateway 契约拿 Provider）。
