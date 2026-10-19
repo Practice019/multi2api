@@ -224,13 +224,24 @@ async function discover() {
   const base = document.getElementById('f-base').value.trim();
   const key = document.getElementById('f-key').value.trim();
   if (!base) { box.textContent = '先填 Base URL（OpenAI 兼容，通常以 /v1 结尾）'; return; }
-  if (!key) { box.textContent = '先填 API Key；若这是已保存的渠道、想用服务端存的那把 key，请在列表里点「编辑」后再点本按钮'; return; }
+  // ⚠ 编辑已保存的渠道时，API Key 栏是空的（那个栏的约定是"留空 = 不改动现有 key"）——
+  //   这时**不该**拒绝，而要带上渠道 id 让服务端用它自己存的那把 key 去问。
+  //   旧版这里直接要求"去列表里点编辑"，而用户**已经在编辑弹窗里** ⇒ 死循环提示，按钮永远点不动。
+  //   （服务端的 /admin/channels/discover 从 T6-① 起就支持 {id} 形态：id 取该渠道的 BaseURL 与
+  //    第一个**启用**状态的 key；请求里显式给的 base_url/key 优先 ⇒ 改了地址或换了 key 也照样准。）
+  if (!key && !editing) {
+    box.textContent = '先填 API Key（新增渠道时必填；已保存的渠道可以不填，服务端会用存着的那把）';
+    return;
+  }
   box.textContent = '正在问上游…';
   try {
+    const payload = { base_url: base };
+    if (key) { payload.key = key; }
+    if (editing) { payload.id = editing; }   // 编辑态：让服务端补上它存的 key
     const d = await api('/admin/channels/discover', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base_url: base, key: key }),
+      body: JSON.stringify(payload),
     });
     const ms = (d && d.models) || [];
     if (!ms.length) { box.textContent = '上游返回 0 个模型：确认 Base URL 指向的是 OpenAI 兼容端点（/v1）'; return; }
