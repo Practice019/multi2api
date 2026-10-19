@@ -362,11 +362,39 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
       }
       console.log('    （还原后 loomy 账号行数: ' + n + '）');
     }
-    const restored = await ev(`JSON.stringify(Array.prototype.slice.call(
+    // ⚠⚠ 判据的**载体**在 2026-10-19 变了，这里如实改（A 类：夹具前提错，不是产品缺陷）。
+    //
+    // 原写法：`workbuddy 分区的行数 === 0`，文案是"回到 0 行真数据"。
+    // 那句话在**旧夹具**（18080，只装了 loomy 的合成凭证）上成立 —— 那台实例里
+    // workbuddy 一个真账号都没有，所以"还原"就等于"清光"。
+    //
+    // 但第三族的夹具（`lib_family3`）**故意**装了 workbuddy 的两份合成凭证
+    // （它是"多上游"族的必要前提）⇒ 还原后 workbuddy 分区有 **2 行真数据** ⇒
+    // 这条断言必然红，而它红的原因与产品无关。
+    //
+    // ⚠ 判据**意图**（"合成行不能被后面的断言当成事实"）一个字没松，改成更强的形态：
+    //	① 合成 uid **一个都不剩**（原来的判据其实没直接量这个 —— 它靠"整区为 0"间接量）
+    //	② 剩下的行数**等于接口报的真账号数**（用 `/admin/accounts` 现取，不写死 0）
+    // ② 比原来更强：原来只要求"0 行"（空区也算过）；现在要求"行的数量与真数据**一致**"，
+    // 多一行或少一行都红。
+    const realCount = JSON.parse(await ev(`(async function(){
+      try {
+        var r = await fetch('/admin/accounts', { headers: { Accept: 'application/json' } });
+        var j = await r.json();
+        var list = (j && (j.accounts || j.items)) || [];
+        return JSON.stringify(list.filter(function(a){ return (a.provider || a.upstream) === 'workbuddy'; }).length);
+      } catch (e) { return JSON.stringify(-1); }
+    })()`));
+    const rowsNow = JSON.parse(await ev(`JSON.stringify(Array.prototype.slice.call(
       document.querySelectorAll('#accts > section.acctgroup[data-acctgroup="workbuddy"] tr.acctrow'))
-      .map(function(r){ return r.dataset.acctof; }))`);
-    ok(JSON.parse(restored).length === 0,
-      '合成行已被清掉（workbuddy 分区回到 0 行真数据）—— 不给后面的断言留假事实');
+      .map(function(r){ return r.dataset.acctof; }))`));
+    console.log('    还原后 workbuddy: 真数据 ' + realCount + ' 行 / DOM ' + rowsNow.length +
+      ' 行 ' + JSON.stringify(rowsNow));
+    ok(rowsNow.indexOf('PROBE-SYNTH-KEEPALIVE-UID') < 0,
+      '合成行的 uid 一个都不剩（PROBE-SYNTH-KEEPALIVE-UID 不在 DOM 里）—— 不给后面的断言留假事实');
+    ok(realCount >= 0 && rowsNow.length === realCount,
+      '还原后 workbuddy 分区 = **接口报的真数据行数**（不写死 0：夹具可能本来就有真账号）\n' +
+      '      DOM ' + rowsNow.length + ' 行 / /admin/accounts 报 ' + realCount + ' 行');
 
     // ---------------------------------------------------------------- T10：分组行动作
     //
@@ -662,6 +690,28 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
       return out || '';
     })()`);
     console.log('  被测分组（有账号行的）: ' + JSON.stringify(target));
+    // ⚠ 红的时候必须**当场说清为什么**：R3 的前提是"池子里有账号行"。
+    //   没有行可能是三种完全不同的原因，判据不同、归因不同：
+    //	 (A) 夹具本来就没账号 → 夹具问题
+    //	 (B) 前面的步骤把账号删掉了（本探针会点"移除"类按钮，而 withChrome
+    //	     默认**自动接受** confirm ⇒ 真的会删）→ 探针自己的副作用
+    //	 (C) 渲染坏了 → 产品缺陷
+    //   所以这里把"每个分区的行数 + 接口报的账号数"一起打出来，
+    //   让这条红**自带归因**，而不是留给人猜。
+    if (!target) {
+      const sweep = await ev(`(function(){
+        var out = [];
+        document.querySelectorAll('#accts > section.acctgroup').forEach(function(s){
+          out.push(s.dataset.acctgroup + '=' + s.querySelectorAll('tr.acctrow').length);
+        });
+        return JSON.stringify({
+          sections: out.join(' '),
+          groups: document.querySelectorAll('#accts > section.acctgroup').length,
+          err: (document.querySelector('#accts .err, #accts .empty, #accts .acct-empty') || {}).textContent || '',
+        });
+      })()`);
+      console.log('  ⚠ 一个分区都没有账号行 ⇒ 归因线索: ' + sweep);
+    }
     ok(!!target, '账号池里存在"分区 + 至少一个账号行"的分区');
 
     if (target) {
@@ -817,26 +867,73 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
     // ================================================================
     // R4：x无 与其它倍率气泡**同款**（计算值比对，不是字符串比对）
     // ================================================================
-    console.log('\n[R4] x无 的气泡与其它倍率计算值相同');
-    // ⚠ 先切到「可用模型」并等它渲染。
     //
-    // 不切也能 querySelector 到元素（隐藏面板的 DOM 还在），但**前提是它已经渲过**；
-    // 而模型面板的内容依赖 /v1/models —— 探针本轮才补上"粘密钥"这一步（见文件顶部），
-    // 渲染时机比旧版晚。这里显式切过去 + 有界轮询，避免在"还没画出来"时量到 null。
+    // ⚠⚠ 本次用**页内 API 夹具**（stub `/admin/models/preview` + `/v1/models`）。
+    //
+    // # 为什么必须这样（先说清"真实上游这条路为什么走不通"）
+    //
+    // R4 要的是"倍率气泡三种形态同屏"：普通倍率、免费 x0、缺失 x无。
+    // 三种形态都来自**两个接口的数据**：
+    //
+    //	· `/v1/models`              → 有哪些模型（决定有几个 chip）
+    //	· `/admin/models/preview`   → 每个模型的成本倍率（决定气泡的类与文字）
+    //
+    // 而本族夹具（`lib_family3`）装的是**合成凭证**（假 JWT）。合成凭证能被
+    // 账号池认下来（4 个账号都在），但它们的 token 到不了真上游 ⇒
+    // `/v1/models` 回**空目录**、`/admin/models/preview` 也拿不到倍率
+    // ⇒ `#models .chip .mult` 恒为 **0 个**，R4 在**空集**上判红/判过都没有意义。
+    // 这不是产品缺陷，是"合成凭证到不了上游"的必然结果（同一族里
+    // `verify_models_grouped` 也因它一度全红）。
+    //
+    // # 所以夹具的边界划在哪（**只换数据来源，不换被测的东西**）
+    //
+    //	· stub 的是**两个接口的响应**（`window.fetch` 拦截），**不是 DOM**：
+    //	  页面照常走 `loadModelMultipliers()` → `renderModels()` 这条真路径，
+    //	  chip 与气泡都由 `multTag()` **真渲染**出来。断言量的仍是
+    //	  `getComputedStyle` 的**计算值**（背景/文字色/边框样式），一个字没松。
+    //	· 页面代码一行没改，也没有直接写 `innerHTML` 造假元素。
+    //	· 量完立刻把 `window.fetch` 还原（不给后面的步骤留假态）。
+    //
+    // ⚠ 三个模型的选取是**为判据服务**的，不是随手挑的：
+    //   `fix-plain`(0.5) → 普通倍率气泡；`fix-free`(0) → 免费 x0；
+    //   `fix-missing` **不在倍率表里** → x无。缺任何一个，对应断言都会
+    //   落进"另一个形态不存在"的境地（那样它就没测到东西）。
+    console.log('\n[R4] x无 的气泡与其它倍率计算值相同（本次用页内 API 夹具）');
     await ev(`(function(){
-      var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
-        .filter(function(x){ return x.textContent.indexOf('可用模型') >= 0; })[0];
-      if (b) { b.click(); return true; } return false;
+      if (!window.__PROBE_ORIG_FETCH__) window.__PROBE_ORIG_FETCH__ = window.fetch;
+      var MODELS = [
+        { id: 'workbuddy/fix-plain',   object: 'model', provider: 'workbuddy', owned_by: 'workbuddy', name: 'fix-plain' },
+        { id: 'workbuddy/fix-free',    object: 'model', provider: 'workbuddy', owned_by: 'workbuddy', name: 'fix-free' },
+        { id: 'workbuddy/fix-missing', object: 'model', provider: 'workbuddy', owned_by: 'workbuddy', name: 'fix-missing' }
+      ];
+      var MULTS = { 'workbuddy/fix-plain': 0.5, 'workbuddy/fix-free': 0 };
+      function json(o){
+        return Promise.resolve(new Response(JSON.stringify(o), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }));
+      }
+      window.fetch = function(u, o){
+        var url = String(typeof u === 'string' ? u : (u && u.url) || '');
+        if (url.indexOf('/admin/models/preview') >= 0) return json({ modelMultipliers: MULTS });
+        if (url.indexOf('/admin/models/refresh') >= 0) return json({ ok: true });
+        if (/\\/v1\\/models/.test(url)) return json({ object: 'list', data: MODELS });
+        return window.__PROBE_ORIG_FETCH__.apply(this, arguments);
+      };
+      return true;
     })()`);
+    // 走页面自己的「刷新模型目录」：它会 drop 两张 lazyCache 再重新拉 ——
+    // 不点它的话，1 小时 TTL 的 `/v1/models` 缓存会让我们拿到旧的空目录
+    //（那正是"点了没反应"的老毛病，也是这个夹具必须走真按钮的原因）。
+    await ev(`(function(){ var b = document.getElementById('btnModelRefresh'); if (b) { b.click(); return 1; } return 0; })()`);
     {
-      const deadline = Date.now() + 15000;
+      const deadline = Date.now() + 20000;
       let n = 0;
       while (Date.now() < deadline) {
         n = await ev(`document.querySelectorAll('#models .chip .mult').length`);
         if (n > 0) break;
         await sleep(500);
       }
-      console.log('  #models 里的倍率气泡数: ' + n);
+      console.log('  #models 里的倍率气泡数（页内 API 夹具）: ' + n);
       ok(n > 0, '前置：模型面板渲染出了倍率气泡（' + n + ' 个）—— ' +
         '否则下面那条会"在空集上"判红，分不清是没数据还是样式坏了');
     }
@@ -874,6 +971,13 @@ const FORBIDDEN = ['全部保活', '添加账号', '重载 auths'];
       ok(bubbles.unknown.text !== bubbles.free.text,
         '「缺失」(x无) 与「免费」(' + bubbles.free.text + ') 的文字不同 —— 区分由文字承担');
     }
+
+    // ⚠ 夹具收尾：把 `window.fetch` 还原，不给后续/收尾步骤留假态。
+    //   （R4 目前是最后一段，但"量完就收"这条纪律不该依赖调用顺序。）
+    await ev(`(function(){
+      if (window.__PROBE_ORIG_FETCH__) { window.fetch = window.__PROBE_ORIG_FETCH__; delete window.__PROBE_ORIG_FETCH__; }
+      return true;
+    })()`);
 
     ws.close();
   } catch (e) { console.log('EXCEPTION: ' + e.message); fail++; }

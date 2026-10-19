@@ -15,6 +15,7 @@
 // 用法：node D:\tmp\run_e2e.js [base-url]
 // 默认 base-url = http://127.0.0.1:18080/ui
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const net = require('net');
 const { execFileSync, execSync } = require('child_process');

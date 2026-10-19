@@ -73,12 +73,17 @@ function parseReds(text) {
 }
 
 // 跑一轮：起夹具实例 → run_e2e → 收尾（**走 withFamily3，保证 finally 必收**）。
-function runOnce(port, keep) {
+function runOnce(port, keep, logdir) {
   return fam.withFamily3({ port }, async (fx) => {
     const runner = path.join(__dirname, 'run_e2e.js');
+    // ⚠ `--logdir` 必须**转发给 run_e2e.js**：本入口自己不认识它。
+    //   实测踩到：不转发时每条探针的完整日志落到 `os.tmpdir()/wb2api-e2e-logs`，
+    //   而调用方以为自己指定的目录里有 —— 找人要日志时会发现"那个目录是空的"。
+    const argv = [runner, fx.baseUrl];
+    if (logdir) argv.push('--logdir=' + logdir);
     let out = '';
     const code = await new Promise((resolve) => {
-      const ch = spawn(process.execPath, [runner, fx.baseUrl], {
+      const ch = spawn(process.execPath, argv, {
         cwd: __dirname,
         // 边跑边转发（人看的）+ 同时攒起来（机器比的）
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -117,13 +122,14 @@ function runOnce(port, keep) {
   const keep = argv.indexOf('--keep') >= 0;
   const repeat = Number((argv.find((a) => a.startsWith('--repeat=')) || '--repeat=1').split('=')[1]) || 1;
   const portArg = (argv.find((a) => a.startsWith('--port=')) || '').split('=')[1];
+  const logdir = (argv.find((a) => a.startsWith('--logdir=')) || '').split('=')[1] || '';
   const port = portArg ? Number(portArg) : await freePort(18100);
 
   const runs = [];
   for (let i = 1; i <= repeat; i++) {
     console.log('');
     console.log('################ 第 ' + i + ' / ' + repeat + ' 次（端口 ' + port + '）################');
-    runs.push(await runOnce(port, keep));
+    runs.push(await runOnce(port, keep, logdir));
   }
 
   let bad = runs.some((r) => r.code !== 0 || !r.seedOk) ? 1 : 0;

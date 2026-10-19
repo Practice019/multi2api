@@ -408,6 +408,9 @@ func ResetModelsCache() {
 	dynamicModelsCache.fetched = time.Time{}
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
+	// ⚠ 2026-10-20：「强制刷新目录」也必须清掉**这一层**（按上游取模型的缓存），
+	// 否则按钮点了却还回旧目录 —— 用户点它的意图就是"立刻看到最新目录"。
+	resetProviderModelsCache()
 
 	modelCatalogCache.Lock()
 	modelCatalogCache.entries = nil // 全上游一起清：刷新意图是"立刻看到最新目录"
@@ -848,7 +851,14 @@ func (h *Handler) modelList() []map[string]any {
 	// 未列入"能列模型"的上游在界面上会走空态并说明原因，而列出来的
 	// 却被当成"可以用"。
 	for _, id := range h.otherProviders(def) {
-		infos, ok := h.cfg.Provider.Models(context.Background(), id)
+		// ⚠ 2026-10-20：这里以前是 `h.cfg.Provider.Models(...)` **直连上游** ——
+		// 实测 /v1/models 连打 4 次是 36.2s / 2.8s / 5.2s / 23.8s（不收敛），
+		// 因为并发请求各拉一遍、且过期目录不能直接用。改走 modelsForProviderCached：
+		// 正缓存 1h + 单飞（同一上游只一个在取）+ 有旧目录就先给旧的（后台刷新）。
+		// 语义不变：拿不到仍是 (nil, false)，调用方照旧降级。
+		infos, ok := modelsForProviderCached(id, func() ([]gateway.ModelInfo, bool) {
+			return h.cfg.Provider.Models(context.Background(), id)
+		})
 		if !ok || len(infos) == 0 {
 			continue // 该上游暂时给不出目录：跳过，不拖垮整个 /v1/models
 		}
