@@ -12042,9 +12042,17 @@ let multCatalogFailed = false;
       return;
     }
     let who = null;
-    try { who = (await r.json()).user || null; } catch { /* 形状不符时只影响名字显示 */ }
+    let kind = '';
+    try {
+      const d = await r.json();
+      who = d.user || null;
+      kind = d.kind || '';
+    } catch { /* 形状不符时只影响名字显示 */ }
     showConsole();
-    renderWhoami(who);
+    // 令牌身份（`?token=` 换来的 12 小时 cookie）没有"账号"这个主体：显示
+    // 「管理令牌」而不是某个用户名，并且不给「改密码」（它没有口令可改，
+    // 点了只会被服务端 401）—— 但「登出」要留（清掉浏览器上这把钥匙）。
+    renderWhoami(kind === 'token' ? { token: true } : who);
     refresh();
   }
 
@@ -12058,6 +12066,16 @@ let multCatalogFailed = false;
   function renderWhoami(u) {
     const host = $('whoami');
     if (!host || !u) return;
+    // 令牌身份：没有用户名、没有角色、没有口令可改。顶栏只留「登出」。
+    if (u.token) {
+      host.innerHTML = `<span class="who-name" title="用 admin_token 换来的浏览器会话">管理令牌</span>`
+        + `<span class="pill ok">管理员</span>`
+        + `<button id="btnLogout" style="padding:2px 8px;font-size:12px">登出</button>`;
+      host.style.display = '';
+      const bl = $('btnLogout');
+      if (bl) bl.onclick = () => doLogout(bl);
+      return;
+    }
     const isAdmin = u.role === 10;
     host.innerHTML = `<span class="who-name" title="${esc(u.username)}">${esc(u.display_name || u.username)}</span>`
       + `<span class="pill ${isAdmin ? 'ok' : ''}">${esc(u.role_name || (isAdmin ? '管理员' : '成员'))}</span>`

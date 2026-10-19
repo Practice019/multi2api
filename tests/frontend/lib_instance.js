@@ -35,6 +35,19 @@ const EXE = process.env.WB2API_EXE
   ? path.resolve(REPO, process.env.WB2API_EXE)
   : path.join(REPO, 'bin', 'wb2api-server.exe');
 
+// EXE_AT_LOAD 记下"模块求值那一刻"的取值，用来抓一个**静默**的坑：
+//
+//	process.env.WB2API_EXE = 'bin/xxx-probe.exe';   // ← 写在 require 之后
+//	const { startInstance } = require('./lib_instance.js');
+//
+// 上面的顺序里，本模块早就求值完了，EXE 恒为缺省的 `bin/wb2api-server.exe`
+// —— 而那常常是**用户正在跑的旧构建**。症状极具误导性：探针会去起那个旧版本，
+// 于是"裸 /ui 吐控制台外壳 + 页面里有明文 __WB2API_KEY__"这类**上一世代**的
+// 行为被当成当前代码的 bug 来查（实测有人整轮断言作废）。
+//
+// 判据只能是"加载时的值 vs 用的时候的值"，所以两处都记下来比较。
+const EXE_AT_LOAD = EXE;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // httpJson 发一次请求并返回**状态码 + 原文**（不抛异常非 2xx）。
@@ -92,6 +105,24 @@ function httpGetText(u) {
 async function startInstance(opts) {
   const port = opts.port;
   if (!port) throw new Error('必须显式给端口（别用 7863/3080/3000）');
+  // 抓"require 之后才设 WB2API_EXE"那个静默坑（见 EXE_AT_LOAD 的注释）。
+  // ⚠ 只警告**不抛**：探针可能就是故意要打那个旧二进制（对照实验）。
+  const nowEXE = process.env.WB2API_EXE
+    ? path.resolve(REPO, process.env.WB2API_EXE)
+    : path.join(REPO, 'bin', 'wb2api-server.exe');
+  if (nowEXE !== EXE_AT_LOAD) {
+    console.log('⚠⚠ WB2API_EXE 是在 require(lib_instance) **之后**才设的 —— 本次仍用加载时那份：');
+    console.log('     ' + EXE_AT_LOAD);
+    console.log('     你想要的：' + nowEXE);
+    console.log('     改法：把 process.env.WB2API_EXE = ... 挪到 require 之前。');
+    console.log('     （否则验的是另一个二进制，现场表现极具误导性）');
+  }
+  if (!fs.existsSync(EXE)) {
+    console.log('⚠⚠ 探针二进制不存在：' + EXE);
+    console.log('     先构建：go build -o bin/wb2api-server-probe.exe ./cmd/server');
+    console.log('     ⚠ 改了 internal/server/*.html 也必须重建：那些页面走 //go:embed，');
+    console.log('       不重建的话浏览器拿到的是内嵌的**旧**页面（最容易误判成前端 bug）。');
+  }
   const tmp = path.join(os.tmpdir(), 'wb2api-inst-' + port + '-' + process.pid);
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(path.join(tmp, 'auths'), { recursive: true });
@@ -104,6 +135,14 @@ async function startInstance(opts) {
   }
 
   const key = opts.apiKey || ('probe-key-' + port);
+  // 让浏览器侧的共享层（lib_cdp.js 的 withToken）知道这把实例的身份令牌：
+  // T7 起 /ui 需要登录，探针若是"用 startInstance 起的实例 + 浏览器打开 /ui"，
+  // 就靠这一条环境变量自动带上 ?token=，不必逐个探针改（60 多个）。
+  //
+  // ⚠ 只覆盖，不清理：同一个进程里连起两个实例时以**最后**一个为准
+  // （探针的常规形态是"起一个实例 → 用浏览器验它"，符合这个假设）。
+  // 要明确不带：`withChrome({ token: false })`。
+  process.env.WB2API_PROBE_TOKEN = key;
   const cfg = Object.assign({
     listen: '127.0.0.1:' + port,
     api_key: key,

@@ -835,6 +835,22 @@ func (h *Handler) adminTokenOK(cred string) bool {
 	return subtleEqual(cred, want)
 }
 
+// AdminTokenOK 导出版的令牌校验（内部判据仍是上面那个函数，不是复制品）。
+//
+// # 为什么需要它（而不是让调用方自己比字符串）
+//
+// 管理令牌是**运行时可变**的（`SetAdminToken`，轮换端点用），且判据里带着
+// 定长比较（防时序侧信道）。如果 `account` 或 `cmd/server` 自己拿一个令牌值
+// 去比，就同时复刻了两个问题：轮换之后那个副本是旧的（正是用户报障"要重启
+// 才生效"的根因），以及比较退化成 `==`。
+//
+// 目前唯一的调用方是 `account.HTTPConfig.AdminTokenOK` —— 让 `session` 端点
+// 能回答"我是谁"，从而令牌身份也能看到控制台（见 internal/account/http.go
+// 里 session 那段"无限重载"的注释）。
+func (h *Handler) AdminTokenOK(cred string) bool {
+	return h.adminTokenOK(cred)
+}
+
 // SetAdminToken 运行时更新管理令牌（轮换端点用）。
 //
 // # 为什么必须有它（用户报障：轮换之后还要重启才有用）

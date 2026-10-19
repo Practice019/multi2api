@@ -1190,6 +1190,12 @@ func main() {
 	// 两个库的初始化失败**都必须**显式暴露：
 	//   账号库损坏 → 谁都登不进来（不能静默重建，否则等于把账号清空）
 	//   会话库损坏 → 只是要重新登录（NewSessionStore 内部删掉重建并打警告）
+	// 令牌校验的晚绑定入口（与下面 onRotateAdminToken 同一手法，理由也一样）：
+	// `account.NewHTTP` 要先于 `admin.New` 构造，而令牌判据活在 admin 实例里。
+	// 先给一个"一律不通过"的占位，adminH 建好后再指向它 —— 期间没有任何请求
+	// 会被处理（进程还在装配阶段）。
+	var adminTokenOKFn func(string) bool = func(string) bool { return false }
+
 	accountsStore, err := account.New(filepath.Join("data", "accounts.json"))
 	if err != nil {
 		log.Fatalf("load accounts: %v", err)
@@ -1230,6 +1236,9 @@ func main() {
 		RegisterEnabled: !cfg.Console.DisableRegister,
 		CookieSecure:    strings.TrimSpace(cfg.Console.CookieSecure),
 		Limiter:         authLimiter,
+		// 令牌身份也要能问"我是谁"（否则 `?token=` 进来的浏览器会被踢回登录页，
+		// 而且会无限重载 —— 见 account/session 的注释）。
+		AdminTokenOK: func(cred string) bool { return adminTokenOKFn(cred) },
 		// ⚠ 类型是接口：nil 的 *authlimit.Captcha 直接塞进去会变成"非 nil 的
 		// 接口"（Go 的经典坑），于是 disabled 也会被判成 enabled 并到处回
 		// "请完成人机校验"。所以上面先把变量声明成指针、这里显式判一次。
@@ -1338,6 +1347,14 @@ func main() {
 		// 受支持的浏览器）—— admin 会退回"只回授权链接"的旧行为。
 		OpenAuthURL: loginBrowserOpener(cfg),
 	})
+
+	// 令牌判据的晚绑定（上面那个占位换成真的）。放在这里而不是 admin.New 之后
+	// 立刻做也行，但**必须**早于第一个请求 —— 本行与 srv.ListenAndServe 之间
+	// 没有任何请求处理路径，所以安全。
+	//
+	// ⚠ 走 AdminTokenOK 而不是自己比字符串：令牌是运行时可变 + 定长比较，
+	// 自己比就同时丢了"轮换立即生效"与"防时序侧信道"。
+	adminTokenOKFn = adminH.AdminTokenOK
 
 	// ⚠⚠ **把凭证目录里的账号灌进账号池**（2026-10-18 实测发现的根因）。
 	//

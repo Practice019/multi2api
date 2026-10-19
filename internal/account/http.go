@@ -78,6 +78,14 @@ type HTTPConfig struct {
 	CookieSecure string
 	// Limiter 可空（空 = 不限速）。
 	Limiter Limiter
+	// AdminTokenOK 判"这个凭据是不是当前有效的管理令牌"。可空。
+	//
+	// 唯一用途是让 `session` 端点能回答"我是谁" —— 令牌身份要能看到控制台
+	// （见 session 里那段"无限重载"的注释）。空 = 不认令牌身份。
+	//
+	// ⚠ 是**回调**而不是令牌值：令牌支持运行时轮换，传值就把"轮换后要重启"
+	// 那个 bug 原样复制过来了（同一理由见 Identify 的长注释）。
+	AdminTokenOK func(cred string) bool
 	// Captcha 可空（空 = 不启用人机校验）。
 	//
 	// ⚠ 与 Limiter 一样是**接口**而不是具体实现：本包不认识 authlimit。
@@ -477,6 +485,14 @@ func (h *HTTP) logout(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Sessions.Revoke(sid)
 	}
 	h.clearSIDCookie(w, r)
+	// 令牌 Cookie 一并清掉：用 `?token=` 进来的浏览器没有会话可撤销，
+	// 只清会话 Cookie 的话点「登出」**什么都没发生**（页面还是登录态）——
+	// 用户会以为登出坏了。
+	//
+	// ⚠ 清 Cookie **不等于**令牌作废：那一串令牌本身仍然有效（别人手里的
+	// 副本、脚本里的副本都还能用）。要真正作废请去 API 管理页轮换它。
+	// 这里做的是"把这个浏览器上的那把钥匙拿走"。
+	ClearAdminTokenCookie(w, r, h.cfg.CookieSecure)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -488,7 +504,33 @@ func (h *HTTP) session(w http.ResponseWriter, r *http.Request) {
 	}
 	sid := SIDFromRequest(r)
 	if sid == "" {
-		// 没带 Cookie 不等于出错：这是"没登录"，前端据此显示登录页。
+		// 没带会话 Cookie 时还有**第二条路**要回答：管理令牌身份。
+		//
+		// # 为什么必须答（T12 的回归里挖出来的真 bug）
+		//
+		// `?token=<admin_token>` 会在 `/ui` 换成令牌 Cookie 并 302 到干净的 /ui
+		// （见 internal/server/webui.go）。那条路**能**进管理面（`/admin/*` 认它），
+		// 但控制台首屏问的正是本端点 —— 只认会话 Cookie ⇒ 令牌用户拿到 401 ⇒
+		// 前端判"会话失效" ⇒ `location.replace('/ui')` ⇒ 又拿到控制台外壳 ⇒
+		// **无限重载**。症状是"用带令牌的链接打开控制台，页面一直在闪"。
+		//
+		// 判据交给调用方（`AdminTokenOK` 回调），本包不持有令牌：令牌支持运行时
+		// 轮换，存快照就会重演"轮换后要重启"那个 bug（见 Identify 的长注释）。
+		if h.cfg.AdminTokenOK != nil {
+			if cred := TokenFromRequest(r); cred != "" && h.cfg.AdminTokenOK(cred) {
+				// user 为 null 是**有意的**：令牌没有"账号"这个主体
+				// （它不属于某个人、也没有口令可改）。前端据此显示「管理令牌」
+				// 而不是某个用户名，并隐藏「改密码」。
+				writeJSON(w, http.StatusOK, map[string]any{
+					"ok":          true,
+					"kind":        "token",
+					"user":        nil,
+					"admin_token": true,
+				})
+				return
+			}
+		}
+		// 既没有会话也没有有效令牌 ⇒ 这才叫"没登录"，前端据此显示登录页。
 		writeError(w, http.StatusUnauthorized, "auth_required", "请先登录")
 		return
 	}
@@ -501,6 +543,7 @@ func (h *HTTP) session(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":   true,
+		"kind": "session",
 		"user": u.view(),
 		"session": map[string]any{
 			"expires_at": stampOf(sess.ExpiresAt),
