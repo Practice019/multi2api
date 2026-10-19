@@ -151,8 +151,59 @@ GET /ui   Cookie: 陈旧令牌                    → 200  登录页 + 清掉那
 回环监听只保留为"少暴露一个端口"的部署建议，**不再当凭据用**。
 
 角色分流（抄 new-api 的 `RoleMember=1 / RoleAdmin=10` 定义，不抄它的 RBAC 引擎）：
-管理员全部放行；成员只放行 `memberPaths` 白名单（`/admin/apikeys`、`/admin/stats`、
-`/admin/ui/manifest`），其余默认拒绝 ⇒ 新增端点默认只有管理员能进。
+管理员全部放行；成员只放行 `memberPaths` 白名单（`/admin/apikeys`、`/admin/ui/manifest`），
+其余默认拒绝 ⇒ 新增端点默认只有管理员能进。
+
+⚠ 白名单从**前缀**改成**精确的 (方法, 路径) 对**（T8 实测发现的真洞）：
+`/admin/apikeys` 前缀会连带放行 `POST /admin/apikeys/rotate-admin` —— 而那个端点的
+回执里带**完整的新 admin_token**，成员调一次即可提权到管理员。现在两个 rotate
+端点另加一层管理员硬判。
+
+## 完工实测（T1–T12，2026-10-19）
+
+### T8 归属与角色（`verify_role_split_e2e.js`，`--self-test` 6/6，`--start` 40 PASS / 0 FAIL）
+
+	成员登录后：只见自己名下那 1 把 key（管理员建的那把看不见）
+	越权四条（toggle/delete/reset/update）对别人的 key 全 403 forbidden_role
+	★ 成员对"别人的 key"与"不存在的 id"回执**逐字节相同**（无存在性 oracle）
+	★ rotate-admin / rotate-api-key 对成员 403，且拒绝回执里没有任何凭据字段
+	★ 列表不回 member 标志（前端分不清"我的"还是"全部"）也有一条坏桩钉住
+
+坏桩实测红条数：①不过滤归属 → 6 条 ②不判归属 → 3 条 ③成员可轮换 → 4 条
+④成员可读 stats → 1 条 ⑤不回 member 标志 → 2 条（证明判别力来自断言本身）。
+
+### T9 改口令免重启（`change_password_test.go` 4 条 + `verify_token_security_e2e.js` ④⑤）
+
+	POST /admin/auth/password：验旧口令 → SetPassword（AuthVersion+1）
+	                          → AdvanceAuthVersion(自己的 sid, 新版本号)
+	★ 改完**当前**浏览器仍 200（用户报障"必须重启"的那一条）
+	★ 另一台设备 401 session_revoked；旧口令登不进、新口令登得进
+
+抄的是 new-api `model/user_session.go` 的 `AdvanceUserSessionAuthVersion` ——
+它的用途与我们完全相同（改密后只保留当前会话）。
+
+### T10 反批量四件套（实测）
+
+	① 限速   20 次/20 分钟/IP：注册 1–20 → 200，**第 21–23 次 → 429**（带 Retry-After）
+	         ⚠ 登录与注册是**两个独立桶**：打满注册额度不影响登录（实测 200）
+	② 请求体 8KB：20KB → 413 body_too_large；正常体 → 200
+	③ 人机校验（默认开）：未答/答错/复用同一题 → 400 captcha_required；
+	         未启用的部署上发题端点 → 404 captcha_disabled（前端据此隐藏整块）
+	         题面 SVG 只含 svg/rect/path（无 text/title/desc），答案不在响应里
+	④ 会话签发上限（SessionStore 自带）：短时间疯狂登录 → 429
+
+⚠ 探针起实例时**关掉**人机校验（算术题是给人看的，自动脚本答不了），
+"开着"那条路由不关闭它的实例覆盖 —— 口径与计划一致："不开验证码时其余三层仍拦得住"。
+
+### T12 回归挖出的真 bug（已修，`6e6bda1`）
+
+	/ui?token=K        → 302 + Set-Cookie ✓
+	/admin/*           → 200 ✓（管理面认令牌 Cookie）
+	/admin/auth/session→ **401** ✗ ← 根因：只认会话 Cookie
+
+令牌用户被前端判成"会话失效" ⇒ `location.replace('/ui')` ⇒ 又拿到控制台外壳 ⇒
+**无限重载**。修法：`session` 端点接受令牌身份（回 `kind:"token"`、`user:null`），
+`logout` 同时清令牌 Cookie。见 `internal/account/session_token_test.go` 的 6 条。
 
 ## 原则（写下来免得后人误读）
 
