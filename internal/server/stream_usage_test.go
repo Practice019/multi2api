@@ -30,13 +30,18 @@ func feedAll(s *streamUsage, chunks ...string) {
 }
 
 // TestStreamUsageLastFrame 形态①：末帧带完整 usage。
+//
+// ⚠ ttfb 断言必须**注入更早的 start**，不能拿 time.Now() 当基准等几微秒：
+// Windows 的 time.Now() 精度约 1ms，同一毫秒内 time.Since() 会返回 0，
+// 于是"ttfb > 0"变成碰运气的断言（第一次跑碰巧差值 > 0 就过，CI 上抖一下就红）。
+// 这不是产品问题 —— 真实网络请求的 TTFB 远大于 1ms，0 只可能出现在合成测试里。
 func TestStreamUsageLastFrame(t *testing.T) {
 	body := sseJoin(
 		`{"choices":[{"delta":{"content":"你好"}}]}`,
 		`{"choices":[{"delta":{"content":"世界"}}]}`,
 		`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`,
 	)
-	s := newStreamUsage(time.Now())
+	s := newStreamUsage(time.Now().Add(-5 * time.Millisecond))
 	feedAll(s, body)
 	tokens, ttfb, src := s.Result()
 	if src != usageFromLastFrame {
@@ -45,8 +50,8 @@ func TestStreamUsageLastFrame(t *testing.T) {
 	if tokens != 30 {
 		t.Fatalf("token 应为 total_tokens 30，实际 %d", tokens)
 	}
-	if ttfb <= 0 {
-		t.Fatalf("ttfb 应 > 0，实际 %v", ttfb)
+	if ttfb < 5*time.Millisecond {
+		t.Fatalf("ttfb 应 ≥ 注入的 5ms（说明首帧时刻确实按 start 计算），实际 %v", ttfb)
 	}
 }
 
