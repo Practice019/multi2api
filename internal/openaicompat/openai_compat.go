@@ -380,9 +380,16 @@ func (p *OpenAICompat) wrap(op string, err error) error {
 //
 // ⚠ 绝不能把请求头或 key 拼进来：这条 error 会被日志与界面消费，
 // 而 Code 型渠道的 key 是一把长期凭据（不是可刷新的 token）。
+//
+// ⚠ 2026-10-20 起返回**具名类型** gateway.UpstreamHTTPError：调用方（渠道出口）要能把
+// 上游的 429/401 原样透传给客户端，而不是一律包成 502。文案没变（Error() 逐字保持），
+// 这一步只是让状态码变成**可读出来的结构化字段**。
 func (p *OpenAICompat) statusErr(op string, status int, raw []byte) error {
-	return p.wrap(op, fmt.Errorf("上游返回 HTTP %d（响应体片段：%s）",
-		status, truncate(string(raw), compatErrSnippet)))
+	return p.wrap(op, &gw.UpstreamHTTPError{
+		Status: status,
+		Op:     op,
+		Body:   truncate(string(raw), compatErrSnippet),
+	})
 }
 
 // compatHTTPDefault 默认出站客户端。

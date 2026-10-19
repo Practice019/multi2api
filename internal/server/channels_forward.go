@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 
 	"workbuddy2api/internal/channelroute"
 	"workbuddy2api/internal/channelstore"
@@ -198,6 +199,38 @@ func pickCandidate(cands []channelroute.Candidate, attempt int) (channelroute.Ca
 		n -= w
 	}
 	return cands[t.from], nil // 兜底：不该到
+}
+
+// writeChannelError 把渠道转发的失败回报给客户端。
+//
+// # 核心规则：上游的状态码**原样透传**，不要把 429/401/400 包成 502
+//
+// 实测踩过（2026-10-20）：上游 OpenCSG 对 `deepseek-v4.1-flash-1017` 返回
+// 429 capacity_exceeded / tpm_exceeded（该模型每分钟 token 用尽），经网关后变成
+// 502 channel_error ⇒ 客户端当成"网关故障"于是**不按限流重试**，用户也去查网关。
+// 绕过网关直连上游验证过同样是 429 ⇒ 那是上游的事实，网关的职责是**如实转达**。
+//
+// 三类分支：
+//   - 上游给了状态码 ⇒ 透传它（429 另补一句中文，因为 tpm_exceeded 不是人话）
+//   - 状态码不在合法区间（上游乱给）⇒ 502，不让非法码流到客户端
+//   - 压根不是 HTTP 错误（没可用 key / 组合根漏接线）⇒ 502 channel_error
+func (h *Handler) writeChannelError(w http.ResponseWriter, err error) {
+	if ue, ok := gateway.AsUpstreamHTTPError(err); ok {
+		if ue.Status < 100 || ue.Status > 599 {
+			writeOpenAIError(w, http.StatusBadGateway, "channel_error",
+				fmt.Sprintf("上游返回了非法的 HTTP 状态码 %d：%s", ue.Status, ue.Error()))
+			return
+		}
+		msg := ue.Error()
+		if ue.Status == 429 {
+			// ⚠ 补在**同一条**消息里，而不是换掉上游原文：原文是上游的账，不替它改口径；
+			// 但 tpm_exceeded / rpd_exceeded 这些词对用户不是人话，所以要给可行动的解释。
+			msg += "；这是**上游**对该模型的频率/额度限制（tpm = 每分钟 token 数），稍后重试或换模型即可，与网关无关"
+		}
+		writeOpenAIError(w, ue.Status, "upstream_error", msg)
+		return
+	}
+	writeOpenAIError(w, http.StatusBadGateway, "channel_error", err.Error())
 }
 
 // pickEnabledKey 取一个启用状态的 key；空 = 没得用（不是"返回空字符串当 key 用"）。
