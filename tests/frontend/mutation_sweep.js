@@ -26,10 +26,16 @@
 //
 // # 判定口径：减基线（2026-10-19 新增）
 //
-// 有些套件**在基线上就是红的**（本轮实测：真仓库 25/29、副本 22/29 —— 副本少了 bin/ 与
-// .git，三个探针另有红法）。不减基线的话，任何静态变异都会被那几条基线红"抓住"：
-// S1..S5 全部显示"被抓住"，实际一条也没被区分出来 —— 与"锚点失效静默变存活"是同一类假信号。
-// 所以每轮先在未变异副本/实例上量一次基线，每条变异报"新增失败"，判定用新增口径。
+// 有些套件**在基线上就是红的**（2026-10-19 本轮开始时实测：真仓库 25/29、副本 22/29，4 个套件
+// 基线就红；收工时同一批套件已被别的修复带到 29/29 —— 所以基线**每轮现量**，别照抄这里的数字）。
+// 不减基线的话，任何静态变异都会被那几条基线红"抓住"：S1..S5 全部显示"被抓住"，
+// 实际一条也没被区分出来 —— 与"锚点失效静默变存活"是同一类假信号。
+// 所以每轮先在未变异副本/实例上量一次基线（静态组跑两次取**并集**，宁可少报"抓住"）。
+//
+// ⚠ 一致性判据也受同一件事影响：套件里混着依赖实例/Chrome/端口的探针，它们自己就会抖，
+//   所以"两次通过数全等"这种口径会把**无关抖动**判成"不给结论"（S2/S4 就这样被丢过）。
+//   现在用"**两次都新增的失败**"（交集）作判定，抖动的套件单独列出来。
+//
 // 跳过基线：MUT_NO_BASELINE=1（省一轮，但结论回到旧口径，可能假阳）。
 //
 // # 锚点失效时怎么办
@@ -38,14 +44,32 @@
 // 本该被哪个判据打死 / 最长的"还活着的前缀"及源码里命中它的行 / 该串最后一次变更的提交。
 // 照着重写锚点，**别删变异** —— 删掉就是丢一条覆盖。
 //
+// # 两条硬纪律（2026-10-19 的 262b796 事故换来的，别删）
+//
+//  ⚠ **跑别人的生成器/夹具时，`cwd` 与 `WB2API_REPO` 必须一起对齐 —— 只对齐一个就会"读 A 写 B"。**
+//    旧版本正是这样：`WB2API_REPO=副本` 但 `cwd=真仓库`，于是 html 读副本、**产物写进真仓库**。
+//    现在静态组连 cwd 一起放进副本（见 runStaticSuites）。
+//  ⚠ **变异跑在真仓库期间，`git status` 干净 ≠ 工作树没有变异值 —— 别提交。**
+//    产物既没被删也没换路径，`git status` 会显示"和索引一致"，它证明不了任何事：那段时间里
+//    父代理的一次 `git add` 就把注入值 `growth: 99` 提交进了 262b796。要判断有没有被注入，
+//    靠的是**内容级**检查（本文件的 `--restore-only` 变异标记物扫描 / 派生物与源码的逐字节比对），
+//    不是 `git status`。
+//
 // # 端口与目录（别和用户的活实例抢）
 //
 // 变异实例用 18101–18206、E2E 基线用 18100 —— 离用户的 7863 很远；
 // 工作目录 MUT_WORK（默认系统临时目录下的 wb2api-mutsweep）。
-// ⚠ E2E 组需要 `go` 在 PATH 上（构建实例）；Chrome 走 chrome_path.js 解析。
+// ⚠ **真仓库 cwd 零写入**：所有变异都在副本里注入、构建、跑套件 —— 所以本工具跑完，
+//   真仓库的 `git status` 不应该多出任何文件。
+// ⚠ **副本里的基线比真仓库低几项**（副本没有 `.git` ⇒ test_shape_scan 的 `git ls-files` 必红，
+//   真仓库是 29/29，副本约 27/29）。这不是谁坏了，是减基线口径要吸收的东西；
+//   两边的基线数**不能互相比较**。
+// ⚠ E2E 组需要 `go` 在 PATH 上（构建实例）；静态组里声明了 goTest 的变异也要（见 runGoTests）。
+//   Chrome 走 chrome_path.js 解析。
 // ⚠ E2E 组的实例必须自己配 admin_token 并在 URL 上带 `?token=<admin_token>` —— /ui 现在
 //   只认它（**回环地址不再是凭据**）。这是 2026-10-19 修掉的一个静默失效：此前拿到的
 //   永远是登录页，E1..E10 十条变异全部"无法确认服务端是变异版"而中止。
+//   实证：修前 E2E 基线脚本 panels_e2e.js FAIL；修后 PASS，E9 单点走完全程 exit 0。
 //
 // # 用法
 //
@@ -54,12 +78,17 @@
 //   node tests/frontend/mutation_sweep.js static       # 只跑静态套件那组
 //   node tests/frontend/mutation_sweep.js E9-logfileinfo  # 只跑一条（id 或 id 前缀，单点复现用）
 //   node tests/frontend/mutation_sweep.js --self-test  # 只验证扫描器自身（锚点唯一性 + 依赖存在）
+//   node tests/frontend/mutation_sweep.js --restore-only  # 只做复原：扫派生产物里的变异标记物，
+//                                                        # 有就按未变异源码重生成（怀疑工作树被注入时用）
+//   环境变量：MUT_WORK=工作目录｜MUT_NO_BASELINE=1 跳过基线（结论回落旧口径）｜
+//            WB2API_GO=<go 的绝对路径>（go 不在 PATH 时；本机一般是 D:\go-path\go\bin\go.exe）
 'use strict';
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const HERE = __dirname;
@@ -141,33 +170,41 @@ const MUTATIONS = [
   // ---- 静态契约 ----
   { id: 'S1-colspan-drift', kind: 'static',
     desc: 'JS 的 COLS.growth 漂移（与 Go 替换表 / 表头列数脱钩）',
-    // 锚的是哪个行为：`const COLS = { travel: 8, growth: 6, … }`（webui.html 的列数常量）。
+    // 锚的是哪个行为：`const COLS = { travel: 8, growth: 6 }`（webui.html:3038-3044 的列数常量）。
     //   动态空态/错误行用它推导 colspan（rowPlaceholder / 成长表错误行），静态空态行用
     //   __COLS_<区>__ 占位符（由 Go 的 colPlaceholders 替换）。同一个列数存在**两份** ⇒
     //   漂移就是 B1/B2 那一类：静态行跨 6 列、动态行跨 98 列，页面错位且不报任何错。
-    // 被哪个判据打死：
-    //   · 正主是 Go 的 internal/server/webui_cols_test.go（TestColPlaceholdersMatchJSCols），
-    //     但**不在本扫描器跑的套件集里**（这里只跑 tests/frontend/run_frontend_suites.js）。
-    //   · 静态集里**已经没有覆盖**了：实测 growth:99 与 travel:99 两个候选都不产生新的失败
-    //     套件。原先是 tokps 套件里 `COLS.logs === 10` 那条断言在抓它；2026-10-19 产品把
-    //     logs / jobs 从 COLS 与占位符里删掉，那条断言随之删除（见 tokps_gen.js:155-160）。
-    //   ⇒ 本变异在当前集合下会记成"存活"，那是 **A 类真缺口**（不是锚点问题、不是产品缺陷）。
-    //     恢复信号的两条路：把 `go test ./internal/server -run TestColPlaceholdersMatchJSCols`
-    //     接进套件集；或把这条改成 kind:'e2e'（topstats_e2e 逐表核对"每行是否恰好占满列数"）。
-    // 锚点历史：原锚点 'logs: 10,    // 请求日志' 随 2026-10-19 的 COLS 收敛失效（字段已删）。
+    // 被哪个判据打死：**Go 的 internal/server/webui_cols_test.go**（TestColPlaceholdersMatchJSCols）
+    //   —— 已用 `goTest` 把它接进本扫描器（2026-10-19，见 runGoTests 的 ENV 纪律）。
+    //   · 为什么要接：静态集里**已经没有任何覆盖**了。原先是 tokps 套件里
+    //     `COLS.logs === 10` 那条断言在抓它；2026-10-19 产品把 logs / jobs 从 COLS 与占位符里
+    //     删掉，那条断言随之删除（tokps_gen.js:155-160）⇒ 实测 growth:99 与 travel:99 两个候选
+    //     都不产生任何新增失败套件。不接 Go 判据时，本变异只能报"存活"，而读者会误读成
+    //     "测试有洞"（其实是 D 类：判据不在集合里）。
+    //   · go 不可用时（不在 PATH / WB2API_GO 指不到）：报 ENV，本变异**未计入** ——
+    //     既不算被抓住、也不算存活。别把 ENV 读成"存活"。
+    // 锚点历史：原锚点 'logs: 10,    // 请求日志' 随 2026-10-19 的 COLS 收敛失效（字段已删，
+    //   同一处注释 webui.html:3043 写着 `__COLS_JOBS__` / `__COLS_LOGS__` 占位符也一并删了）。
     find: '    growth: 6,   // 成长计划（精简：额度/能量、连登/补签、待完成/可得、可领 合并）',
     repl: '    growth: 99,  // 成长计划（变异：列数漂移）',
-    caughtBy: 'webui_cols_test.go（Go 测试，**不在本扫描器的套件集里**）；静态集自 2026-10-19 起无覆盖' },
+    // 静态组额外跑的 Go 判据（正主）。ENV 纪律见 runGoTests：不看退出码，只认 `--- PASS: <名字>`。
+    goTest: ['TestColPlaceholdersMatchJSCols'],
+    caughtBy: 'webui_cols_test.go 的 TestColPlaceholdersMatchJSCols（经 goTest 接进本扫描器，2026-10-19）' },
   { id: 'S2-emoji', kind: 'static',
     desc: '设置面板塞入 emoji（项目硬规则：无 emoji）',
     // 锚的是哪个行为：设置面板里那条 <legend>（分组标题 + 生效时机徽章）。它落在
     //   gen_settings_layout.js 按 DOM 结构切片出的设置面板 <section> 里。
-    // 被哪个判据打死：settings_layout_gen.js 的 [E] 节 `!emoji.test(sec)` —— **基线绿**，
-    //   实测：本变异把副本的通过数从 22/29 打到 21/29，唯一新增失败就是 settings_layout_gen.js。
-    //   ⚠ gen_ui_manifest.js 也有一条 emoji 断言，但它**基线就红**（脚本字符串字面量里已经有
-    //     emoji）⇒ 它抓不住这条变异，别把它当证据。
+    // 被哪个判据打死：**两条**（实测：static 扫描从基线 29/29 掉到 27/29，两次一致，
+    //   两条都是"新增失败"）
+    //   · settings_layout_gen.js 的 [E] 节 `!emoji.test(sec)`（gen_settings_layout.js:406-409）
+    //   · gen_ui_manifest.js 的 [5] 节「零外部依赖与无 emoji」（gen_ui_manifest.js:284+）
+    //   ⚠ 后者在本轮开始时**基线就红**（脚本字符串字面量里已经有 emoji）⇒ 那时它抓不住这条
+    //     变异、不能当证据；收工时它已被别的修复带到绿，实测两次都新增 ⇒ 现在才是有效判据。
+    //     教训：判据算不算"有效证据"要现量 —— 基线红名单会随别人的修复变动。
     // 锚点历史：原锚点 '<legend>调度（保存后立即生效）</legend>' 随设置页收敛消失
-    //   （现在的 legend 都是「基础文案 + 徽章」两段式，`调度` 那组已改成「日常调度」）。
+    //   （现在 legend 都是「基础文案 + 生效时机徽章」两段式：webui.html:1637 日常调度/自动执行、
+    //    1643 成长中心自动化/立即生效、1656 历史与日志、1667 网络与容错、1676 会话粘性、
+    //    1682 运行信息；`调度` 那组已改名「日常调度」）。
     // ⚠ repl 用码点拼 ✅（U+2705）而不是写 emoji 字面量：免得工具源码自己带 emoji，
     //   与"无 emoji"这条口径纠缠不清，也免了跨编码往返的风险。等价于
     //   '<legend>成长中心自动化 <span class="badge badge--hot">立即生效</span></legend>✅'。
@@ -204,9 +241,15 @@ function get(url, headers) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // 复制仓库。robocopy 的退出码 <8 都算成功（1=已复制，2=有额外文件）。
+//
+// 排除项只有 `.git`：4 个变异 × 每次 200MB+ 的 .git 不划算，而且副本里带一份"会自己动的索引"
+// 只会让"我以为在副本里"更难判断。`bin` 照拷（有探针按 REPO 相对路径找 bin\wb2api-server.exe）。
+// ⚠ **别指望副本基线等于真仓库基线**：副本没有 .git，`test_shape_scan` / `audit_tracked_content`
+//   这类"按 git 走"的判据在副本里必红，另有几条依赖真实检出/exe 的探针在副本里另有红法。
+//   两边的基线数**不能互相比较**；每轮跑出来的基线数都打印在"基线"那一行，减基线口径自动吸收。
 function copyRepo(dest) {
   rmrf(dest);
-  const rc = spawnSync('robocopy', [REPO, dest, '/E', '/XD', '.git', 'bin',
+  const rc = spawnSync('robocopy', [REPO, dest, '/E', '/XD', '.git',
     '/NFL', '/NDL', '/NJH', '/NJS', '/NC', '/NS'], { stdio: 'ignore' });
   if (rc.status !== null && rc.status >= 8) throw new Error('robocopy 退出码 ' + rc.status);
   if (!fs.existsSync(path.join(dest, 'go.mod'))) throw new Error('复制失败: ' + dest);
@@ -292,11 +335,60 @@ function selfCheck(muts) {
   return true;
 }
 
-// 静态套件：跑在副本上（generator 读 WB2API_REPO）
+// ---------------------------------------------------------------------------
+// 静态组的 Go 判据（2026-10-19 新增）
+//
+// 为什么需要它：有些契约的守卫**不在 tests/frontend 里**，而在 Go 测试里 —— 最典型的是
+// internal/server/webui_cols_test.go 的 TestColPlaceholdersMatchJSCols：它守"JS 的 COLS 常量
+// 与 Go 的 colPlaceholders 替换表逐项相等"，也就是 S1-colspan-drift 的**正主判据**。
+// 不把它接进来，S1 只能报"存活"，而那是 D 类（判据不在集合里），下一个人很容易误读成"测试有洞"。
+//
+// # ENV 纪律（抄 verify_sign_against_spec.js 那套）
+//   · go 不在默认 PATH 上是本机的常态（它在 D:\go-path\go\bin\go.exe，1.22.5）。
+//     用 WB2API_GO 覆盖，或把那个目录加进 PATH。
+//   · **找不到 go ⇒ 大声报 ENV、不并入任何计数**（既不算"被抓住"、也不算"存活"）：
+//     判据根本没跑成，静默当"存活"就是假绿 —— 比少一条判据严重得多。
+//   · 判据**不看退出码**：`go test -run <不存在的名字>` 也是 exit 0 ⇒ 必须 `-count=1 -v`
+//     并要求输出里有 `--- PASS: <名字>`。（这条踩坑记录在 verify_sign_against_spec.js 里。）
+// ---------------------------------------------------------------------------
+function goBin() { return process.env.WB2API_GO || 'go'; }
+function runGoTests(mut, dir) {
+  const names = mut.goTest || [];
+  if (!names.length) return { failed: [], env: null };
+  const failed = [];
+  for (const name of names) {
+    const r = spawnSync(goBin(), ['test', '-count=1', '-v', '-run', '^' + name + '$', './internal/server'],
+      { cwd: dir, encoding: 'utf8', env: Object.assign({}, process.env, { CGO_ENABLED: '0' }) });
+    if (r.error && r.error.code === 'ENOENT') {
+      return { failed: [], env: '找不到 go（试过 "' + goBin() + '"）。本机一般在 ' +
+        'D:\\go-path\\go\\bin\\go.exe（go1.22.5，不在默认 PATH）—— 用 WB2API_GO 指定它，' +
+        '或把那个目录加进 PATH' };
+    }
+    const out = String(r.stdout || '') + String(r.stderr || '');
+    if (!new RegExp('^\\s*--- PASS: ' + name + '\\b', 'm').test(out)) failed.push('go:' + name);
+  }
+  return { failed, env: null };
+}
+
+// 静态套件：**在副本里**跑（2026-10-19 改，这条是踩出来的，别改回去）
+//
+// ⚠ 为什么 cwd 也必须在副本里：
+//   旧版是 `spawnSync(node, HERE/run_frontend_suites.js, { cwd: HERE, env: WB2API_REPO=副本 })`——
+//   html 读副本，但 generator **按 cwd 写产物** ⇒ 注入值落进**真仓库**的 *_gen.js 与
+//   tdz_probe.html。更糟的是 `git status` 在那期间**会自己一致**（产物既没被删也没改路径），
+//   它证明不了任何事：父代理的一次 `git add` 就把 `growth: 99` 提交进了 262b796。
+//   一句话：**变异只要在真仓库的 cwd 上跑，工作树就不再是"人的工作树"。**
+//   现在 cwd = 副本的 tests/frontend ⇒ html 与产物都在副本，真仓库零写入。
+//
+// 代价（已实测并吸收）：副本没有 .git，于是 test_shape_scan / audit_tracked_content 这类
+//   "按 git 走"的判据在副本里另有红法 —— 副本基线因此比真仓库低几项（**两边的基线数不能互相
+//   比较**，每轮的基线数都打印在输出里）。但这些红**在基线里也有**，减基线口径正好抵消；
+//   真正抓变异的判据（settings_layout_gen / pagesize_persist_gen / gen_busy_feedback /
+//   gen_b5_normalize）在副本里照样能抓住。
 function runStaticSuites(dir) {
   const env = Object.assign({}, process.env, { WB2API_REPO: dir });
-  const r = spawnSync('node', [path.join(HERE, 'run_frontend_suites.js')],
-    { cwd: HERE, encoding: 'utf8', env });
+  const runner = path.join(dir, 'tests', 'frontend', 'run_frontend_suites.js');
+  const r = spawnSync('node', [runner], { cwd: path.dirname(runner), encoding: 'utf8', env });
   const out = (r.stdout || '') + (r.stderr || '');
   const m = out.match(/=== (\d+)\/(\d+) 通过 ===/);
   // 失败明细有两种后缀：「X 断言失败」与「X 失败」（后者是 generator 本身挂了）。
@@ -319,20 +411,103 @@ function runE2E(port) {
   return { passed: m ? +m[1] : null, total: m ? +m[2] : null, failed };
 }
 
-// 收尾：把**真仓库**里的派生产物按未变异源码重生成一次。
+// ---------------------------------------------------------------------------
+// 派生产物簿记 / 复原（2026-10-19，覆盖"被中断"这条路）
 //
-// 为什么必要：静态组的套件是跑在真仓库的 cwd 上（只把 WB2API_REPO 指向副本）—— 这样那几个
-// 依赖真实检出/实例/Chrome 的探针才能正常工作。但 generator 会把产物写到 cwd，于是**变异内容
-// 会被写进真仓库的产物**：大到 *_gen.js（夹具里嵌了被变异的片段），小到 tdz_probe.html
-// （它是整页 webui.html 的副本）。实测一轮静态扫描会留下 3 个这样的文件（growth_labels_gen.js /
-// growth_pending_ui_gen.js / tdz_probe.html，内容是 COLS.growth=99 那版）。
-// 产物是派生物、不许手改 ⇒ 唯一正确的收尾就是按**未变异**源码重生成一遍。
-function restoreDerived() {
-  console.log('=== 收尾：按未变异源码重生成派生产物（清掉扫描残留在真仓库的变异内容）===');
-  const r = runStaticSuites(REPO);
-  console.log('  重生成后 ' + r.passed + '/' + r.total + ' 通过；失败: ' +
-    (r.failed.join(', ') || '（无）') + '\n');
-  return r;
+// 为什么需要：`_gen.js` / `tdz_probe.html` 都是 **generator 的派生物**（不许手改）。
+// 只要变异在真仓库的 cwd 上跑过一轮，产物里就可能带着**变异内容**；更阴的是
+// `git status` 在那期间**会自己一致** —— 产物既没被删也没换路径，于是它显示"和索引一致"，
+// 而内容已经被换掉了。父代理就是这么把 `growth: 99` 一起提交进 262b796 的。
+// 一句话：**git status 干净 ≠ 工作树没有变异值。**
+//
+// 所以：
+//   · 主防线：静态组已经改成"在副本 cwd 里跑"（见 runStaticSuites）—— 真仓库零写入，从源头掐掉。
+//   · 兜底（这里）：启动时记下派生产物的哈希 + 扫一遍变异标记物；收尾比对，不一致就按
+//     **未变异源码**重生成再比对；真复原不了，就把"哪几个文件 + 一条复原命令"打到最显眼处
+//     （只说一句 warning 不够 —— 下一个人会在假状态上做结论）。
+//   · 整轮包 try/finally + 挂 SIGINT/SIGTERM：一轮 all 要 90 分钟，被 Ctrl-C / kill 掉是常态。
+//   · 单跑 `--restore-only`：只做这件事并打印两轮状态（任何人怀疑树被污染时都可以当体检用）。
+// ---------------------------------------------------------------------------
+const DERIVED_EXTRA = ['tdz_probe.html'];   // 不在 *_gen.js 里，但同样是派生物
+function derivedFiles() {
+  try {
+    return fs.readdirSync(HERE).filter(f => /_gen\.js$/.test(f)).concat(DERIVED_EXTRA)
+      .filter(f => fs.existsSync(path.join(HERE, f)));
+  } catch { return []; }
+}
+function hashFile(f) {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(path.join(HERE, f))).digest('hex').slice(0, 12); }
+  catch { return null; }
+}
+function hashDerived() {
+  const out = {};
+  for (const f of derivedFiles()) out[f] = hashFile(f);
+  return out;
+}
+// 变异"注入特征物"：取 find→repl 的**差集**（公共前后缀之外的那段），再加一条通用的 `// MUT`。
+// 例：S1 的差集是 '99,  // 成长计划（变异：列数漂移）'、S4/S5/E3 是 'Unused'、E1 是 ' return; // MUT'。
+// 用它扫产物：命中就是"这里被注入过"。（比"只看 git status"强得多，见上面那段。）
+function mutationMarkers() {
+  const out = [{ id: '(通用 // MUT)', s: '// MUT' }];
+  for (const m of MUTATIONS) {
+    const a = m.find || '', b = m.repl || '';
+    let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    let j = 0; while (j < a.length - i && j < b.length - i &&
+      a[a.length - 1 - j] === b[b.length - 1 - j]) j++;
+    const delta = b.slice(i, b.length - j);
+    if (delta.trim().length >= 4) out.push({ id: m.id, s: delta });
+  }
+  return out;
+}
+// 打印派生物状态；返回"带变异标记"的文件名数组。
+function derivedReport(label) {
+  const files = derivedFiles();
+  const markers = mutationMarkers();
+  const dirty = [];
+  console.log('  ' + label + '：' + files.length + ' 个派生产物');
+  for (const f of files) {
+    let txt = '';
+    try { txt = fs.readFileSync(path.join(HERE, f), 'utf8'); } catch { /* 读不到就当没标记 */ }
+    const hit = markers.filter(m => txt.includes(m.s)).map(m => m.id);
+    if (hit.length) dirty.push(f);
+    console.log('    ' + (hit.length ? '✗' : '✓') + ' ' + f.padEnd(30) + ' ' + (hashFile(f) || '(读不到)') +
+      (hit.length ? '   ← 含变异标记: ' + hit.join(', ') : ''));
+  }
+  return dirty;
+}
+let derivedBefore = null;
+let restoreDone = false;
+function finishAndRestore() {
+  if (restoreDone) return;
+  restoreDone = true;
+  if (!derivedBefore) return;
+  const before = derivedBefore;
+  const dirty = Object.keys(before).filter(k => hashFile(k) !== before[k]);
+  if (!dirty.length) {
+    console.log('\n收尾：' + Object.keys(before).length + ' 个派生产物与扫描前**逐字一致**（无需复原）');
+    return;
+  }
+  console.log('\n收尾：发现 ' + dirty.length + ' 个派生产物被改过 —— ' + dirty.join(', '));
+  console.log('      按未变异源码重生成一次…');
+  let r = null;
+  try { r = runStaticSuites(REPO); } catch (e) { console.log('      重生成失败: ' + String(e.message).slice(0, 120)); }
+  const still = dirty.filter(k => hashFile(k) !== before[k]);
+  if (!still.length) {
+    console.log('      ✓ 已复原（' + dirty.length + ' 个文件回到扫描前' +
+      (r ? '；重生成后 ' + r.passed + '/' + r.total + ' 通过' : '') + '）');
+    return;
+  }
+  // 最坏情况：别只说一句 warning —— 下一个人会在假状态上做结论
+  const marked = derivedReport('复原后状态');
+  console.log('');
+  console.log('  ✗✗✗ 复原失败：这些派生产物**还带着变异内容**（' + still.join(', ') + '）');
+  if (marked.length) console.log('      其中带变异标记的: ' + marked.join(', '));
+  console.log('      后果：下一个人跑全套时看到的是"变异后"的产物 ⇒ 假绿/假红。');
+  console.log('      手工复原（任一即可）：');
+  console.log('        node tests/frontend/run_frontend_suites.js          # 全套跑一遍，产物全部按源码重生成');
+  console.log('        node tests/frontend/<对应的 gen_*.js>               # 只重生成那一个');
+  console.log('        node tests/frontend/mutation_sweep.js --restore-only # 本工具只做复原');
+  console.log('');
 }
 // 起一个（变异版或基线版）实例，并**校验服务端内容确实是变异版**。
 // mut.noop = true 时只构建+启动，不注入 —— 用来量 E2E 组的基线红名单（见下）。
@@ -403,7 +578,7 @@ function newFailures(res, base) {
   const b = new Set((base && base.failed) || []);
   return res.failed.filter(x => !b.has(x));
 }
-function baselineStatic() {
+function baselineStatic(muts) {
   const dir = path.join(WORK, '_baseline_static');
   console.log('=== 基线（未变异副本 · 静态组，跑两次取并集）===');
   copyRepo(dir);
@@ -417,9 +592,26 @@ function baselineStatic() {
     console.log('  ⚠ 基线自己就抖: ' + flaky.join(', ') +
       '（依赖实例/Chrome/端口的探针）—— 取并集 ⇒ 宁可少报"抓住"，也不假阳');
   }
+  // 声明了 goTest 的变异：基线也量一次 Go 判据。否则"基线就红的 Go 测试"会让每条 goTest
+  // 变异都变成**假抓住**（它红的不是变异，是本来就红）。
+  const withGo = (muts || []).filter(m => m.kind === 'static' && (m.goTest || []).length);
+  let goFailed = [], goEnv = null;
+  if (withGo.length) {
+    const g = runGoTests(withGo[0], dir);
+    goEnv = g.env;
+    goFailed = g.failed;
+    if (goEnv) {
+      console.log('  ⚠ ENV: ' + goEnv);
+      console.log('    ⇒ 声明了 goTest 的变异本轮记"**未计入**"（既不算被抓住、也不算存活）');
+    } else {
+      console.log('  Go 判据（基线）: ' + (goFailed.length
+        ? '红 ' + goFailed.join(', ') + ' —— 先修它，否则 goTest 变异给不出结论'
+        : '全绿 ' + withGo[0].goTest.join(', ')));
+    }
+  }
   console.log('  ⇒ 下面每条变异的"抓住它的"是**减掉这份基线**之后的新增失败\n');
   rmrf(dir);
-  return { passed: Math.min(a.passed, b.passed), total: a.total, failed: red };
+  return { passed: Math.min(a.passed, b.passed), total: a.total, failed: red, goFailed, goEnv };
 }
 async function baselineE2E(port) {
   const dir = path.join(WORK, '_baseline_e2e');
@@ -458,23 +650,55 @@ async function baselineE2E(port) {
     console.log('run_e2e.js 存在: ' + fs.existsSync(path.join(HERE, 'run_e2e.js')));
     process.exit(okA ? 0 : 1);
   }
+  // 只做复原：怀疑"工作树里有没有变异值"时当体检用（变异标记物扫描 + 按源码重生成）。
+  // ⚠ 注意它能证明什么：只证明"没有我们的注入标记"；要证明"派生物 == 由当前源码重生成"，
+  //   那是逐字节的检查（跑 run_frontend_suites.js，或看 verify_derived_freshness）。
+  if (mode === '--restore-only') {
+    console.log('=== 只做复原：派生产物体检 ===');
+    const dirty = derivedReport('当前状态');
+    if (!dirty.length) {
+      console.log('  ⇒ 没有任何变异标记残留\n');
+      process.exit(0);
+    }
+    console.log('  ⇒ 有文件带变异标记，按未变异源码重生成一次…');
+    const r = runStaticSuites(REPO);
+    const after = derivedReport('重生成后');
+    console.log('  重生成 ' + r.passed + '/' + r.total + ' 通过；仍带标记 ' + after.length + ' 个' +
+      (after.length ? '（手工：node tests/frontend/run_frontend_suites.js）' : '') + '\n');
+    process.exit(after.length ? 1 : 0);
+  }
 
   fs.mkdirSync(WORK, { recursive: true });
-  // 选择器：'all' / 'static' / 'e2e' 按组；写成 id（或 id 前缀）则只跑那一条 —— 单点复现用，
-  // 免得为了验一条变异把整轮（静态 10 分钟 + E2E 一小时）跑一遍。
-  const byId = MUTATIONS.filter(m => m.id === mode || m.id.startsWith(mode));
-  const list = mode === 'all' ? MUTATIONS
-    : (byId.length ? byId : MUTATIONS.filter(m => m.kind === mode));
-  if (!list.length) { console.log('没有匹配的变异: ' + mode); process.exit(2); }
-  if (!selfCheck(list)) process.exit(2);
+  // 派生产物簿记 + 中断兜底：**先记哈希，再选变异**，整轮包 try/finally，另外挂 SIGINT/SIGTERM。
+  // 一轮 all 要 90 分钟，被 Ctrl-C / kill 掉是常态，收尾绝不能只写在"正常跑完"那条路径上；
+  // 边界要尽量靠前 —— 只要有可能写过产物，就必须已经在 try 里面（这条是被一个"插在 try 之外
+  // 的模拟中断"试出来的：那次 finally 没跑到，产物留在盘上）。
+  derivedBefore = hashDerived();
+  const onSignal = sig => {
+    console.log('\n⚠ 收到 ' + sig + '：先把派生产物复原再退出' +
+      '（否则仓库里留的是变异版产物，而 `git status` 还看不出来）');
+    finishAndRestore();
+    process.exit(sig === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', () => onSignal('SIGINT'));
+  process.on('SIGTERM', () => onSignal('SIGTERM'));
 
-  // 基线（只对本次要跑的组算；MUT_NO_BASELINE=1 跳过 —— 见上面的长注释）
-  let baseStatic = null, baseE2E = null;
-  if (!process.env.MUT_NO_BASELINE) {
-    if (list.some(m => m.kind === 'static')) baseStatic = baselineStatic();
-    // E2E 基线端口：18100（变异组用 18101+，留出隔壁一格，互不撞）
-    if (list.some(m => m.kind === 'e2e')) baseE2E = await baselineE2E(18100);
-  }
+  try {
+    // 选择器：'all' / 'static' / 'e2e' 按组；写成 id（或 id 前缀）则只跑那一条 —— 单点复现用，
+    // 免得为了验一条变异把整轮（静态 10 分钟 + E2E 一小时）跑一遍。
+    const byId = MUTATIONS.filter(m => m.id === mode || m.id.startsWith(mode));
+    const list = mode === 'all' ? MUTATIONS
+      : (byId.length ? byId : MUTATIONS.filter(m => m.kind === mode));
+    if (!list.length) { console.log('没有匹配的变异: ' + mode); process.exit(2); }
+    if (!selfCheck(list)) process.exit(2);
+
+    // 基线（只对本次要跑的组算；MUT_NO_BASELINE=1 跳过 —— 见上面的长注释）
+    let baseStatic = null, baseE2E = null;
+    if (!process.env.MUT_NO_BASELINE) {
+      if (list.some(m => m.kind === 'static')) baseStatic = baselineStatic(list);
+      // E2E 基线端口：18100（变异组用 18101+，留出隔壁一格，互不撞）
+      if (list.some(m => m.kind === 'e2e')) baseE2E = await baselineE2E(18100);
+    }
 
   console.log('=== 变异扫描（' + list.length + ' 个，kind=' + mode + '）===');
   console.log('对每个变异：注入 → 全量构建 → 跑套件 → 校验被测版本\n');
@@ -498,14 +722,42 @@ async function baselineE2E(port) {
         //   丢掉（本轮实测 S2/S4 就是这样被丢的），而"两次都新增的失败"才是这条变异自己的信号。
         const r1 = runStaticSuites(dir);
         const r2 = runStaticSuites(dir);
+
+        // Go 判据（该变异声明了 goTest 才跑）。ENV 缺失 / 基线就红都是**硬条件**：不给结论。
+        const hasGo = (mut.goTest || []).length > 0;
+        const g = runGoTests(mut, dir);
+        let goBlocked = null;
+        if (hasGo) {
+          if (g.env) goBlocked = 'ENV 缺失（go 不可用）—— Go 判据未计入';
+          else if (baseStatic && baseStatic.goFailed && baseStatic.goFailed.length) {
+            goBlocked = '基线就红的 Go 判据（' + baseStatic.goFailed.join(', ') + '）—— 先修它';
+          } else {
+            // 把 Go 判据并入失败清单：后面的"新增失败"口径自动把它算进去
+            for (const f of g.failed) {
+              if (!r1.failed.includes(f)) r1.failed.push(f);
+              if (!r2.failed.includes(f)) r2.failed.push(f);
+            }
+            console.log('   Go 判据 ' + mut.goTest.join(', ') + ': ' +
+              (g.failed.length ? 'FAIL → 并入失败清单 ' + g.failed.join(', ') : 'PASS（基线也 PASS）'));
+          }
+          if (g.env) console.log('   ⚠ ENV: ' + g.env);
+        }
+
         const nf1 = newFailures(r1, baseStatic) || [];
         const nf2 = newFailures(r2, baseStatic) || [];
         const both = nf1.filter(x => nf2.includes(x));
         const flaky = r1.failed.filter(x => !r2.failed.includes(x))
           .concat(r2.failed.filter(x => !r1.failed.includes(x)));
         const rec = { id: mut.id, desc: mut.desc, ...r1, passedRuns: [r1.passed, r2.passed],
-          newFailed: both, newFailedRuns: [nf1, nf2] };
-        if (both.length) {
+          newFailed: both, newFailedRuns: [nf1, nf2],
+          go: hasGo ? (g.env ? 'ENV' : (goBlocked ? 'BLOCKED' : (g.failed.length ? 'FAIL' : 'PASS'))) : undefined };
+        if (goBlocked) {
+          // 判据没跑成 ⇒ 既不算被抓住、也不算存活。别让读者把 ENV 读成"存活"。
+          rec.newFailed = [];
+          rec.skipped = goBlocked;
+          console.log('   ⚠ ' + goBlocked);
+          console.log('      ⇒ 本变异**未计入**（既不算被抓住、也不算存活）—— 判据没跑成，别读成"存活"');
+        } else if (both.length) {
           console.log('   静态 ' + r1.passed + '/' + r1.total + '（两次 ' + r1.passed + ' / ' + r2.passed + '）' +
             '；抓住它的（两次都新增）: ' + both.join(', '));
         } else if (!nf1.length && !nf2.length) {
@@ -566,9 +818,8 @@ async function baselineE2E(port) {
     console.log('');
   }
 
-  // 静态组跑完必须收尾：把真仓库的派生内容按未变异源码重生成（见 restoreDerived 的长注释）
-  if (list.some(m => m.kind === 'static')) restoreDerived();
-
+  // 静态组跑完必须收尾（清掉真仓库里的变异内容）—— 现在统一由下面的 finally 里的
+  // finishAndRestore() 负责：先比对哈希，不一致才重生成（见那段长注释）。
   console.log('=== 汇总 ===');
   // 判定口径：优先用**新增失败**（减掉基线红名单）；没跑基线时回落旧口径 r.failed。
   const failsOf = r => (r.newFailed || r.failed || null);
@@ -595,8 +846,18 @@ async function baselineE2E(port) {
   console.log('   A. 测试有洞   → 补断言（本轮 E9-logfileinfo 就是这种）');
   console.log('   B. 变异无效   → 换一个真正影响行为的注入');
   console.log('   C. 环境不可观测 → 不能算缺陷（如空日志实例）');
-  console.log('   D. 判据不在本扫描器跑的集合里 → 要么把它接进套件集，要么换一组（S1 就是这种：' +
-    '守卫在 Go 的 webui_cols_test.go 里）');
+  console.log('   D. 判据不在本扫描器跑的集合里 → 接进套件集（S1 的 Go 守卫就是这么接的：' +
+    '见 goTest / runGoTests）');
   console.log('结果: ' + path.join(WORK, 'results.json'));
-  process.exit(0);
-})();
+  } finally {
+    // 中断兜底：正常跑完 / 抛异常 / 被 kill（SIGINT/SIGTERM）都走这里
+    finishAndRestore();
+  }
+})().then(() => process.exit(0))
+  .catch(e => {
+    // 兜底之上再兜一层：给一句人话，而不是把栈丢给读者（栈里看不出"产物可能被注入"）
+    console.log('\n✗ 扫描器异常终止: ' + String(e && e.message || e).slice(0, 200));
+    console.log('  派生产物状态见上面的"收尾"那几行；怀疑有残留就用 ' +
+      '`node tests/frontend/mutation_sweep.js --restore-only` 体检一次。');
+    process.exit(1);
+  });
