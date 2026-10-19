@@ -70,6 +70,48 @@ new-api（`service/channel.go` 等）：
 ⇒ 唯一可借鉴的是"**按标签批量禁用 / 启用**"（`EnableChannelByTag` / `DisableChannelByTag`，
 `model/channel.go:819/828`）—— ⚠ 但那是**运维操作**、需要界面入口，不是核心逻辑。
 
+## 登录与账号（2026-10-19 起 · 用户要求"把 new-api 的登录系统抄过来"）
+
+用户原话：「直接把 newapi 的登录系统抄过来，但是实现可以最简单实现，也就是访问前端需要登录账号，
+然后需要区分管理员账号和普通成员账号，这些都可以注册，但是为了保证批量注册发送请求
+所以需要有一些防御 全部都抄 newapi。」⇒ 四条要求：R1 访问前端要登录 · R2 管理员/成员分级 ·
+R3 可注册 · R4 反批量防御。逐项对照（出处 = new-api 文件:行）：
+
+| new-api 的点 | 出处 | 我们的落地 | 抄/不抄与理由 |
+|---|---|---|---|
+| 角色 `RoleCommonUser=1` / `RoleAdminUser=10` | `common/constants.go:199-200` | `internal/account` 同值常量 | **抄**数值：将来加级别不用迁移，且 `myRole > targetRole` 判据天然一致 |
+| 注册**服务端写死**普通用户 | `controller/user.go:283`（注释："明确设置角色为普通用户"） | 注册 handler 只传 `RoleMember`，不透传请求体里的 role | **抄**：否则第一个请求就能把自己注册成管理员 |
+| 请求体字段约束 `min=8,max=128` | `model/user.go:82` | 口令 8–128；用户名额外白名单（3–32，字母数字与 `_-.@`） | **抄 + 收紧**：用户名会进日志与界面，放行 Unicode 会让零宽/全角变成看不见的冒充 |
+| bcrypt 口令哈希 | `common/crypto.go:26/34`（`x/crypto/bcrypt`，默认 cost 10） | 同库，**cost 12** | **抄库、调参**：安全清单要求 bcrypt ≥12；单机控制台登录频率极低，多几十毫秒换 ×4 破解成本 |
+| 会话是一条服务端记录（`SID/Version/UserAuthVersion/ExpiresAt/LastActiveAt/Status`） | `model/user_session.go` | `data/sessions.json` + HttpOnly cookie `wb2api_sid` | **抄模型、换存储**：它落 MySQL/Redis，我们 JSON 单文件（原则 2） |
+| `user.auth_version` 改凭据即让旧会话全失效 | `model/user.go` + `middleware/auth.go` | 同上：账号记 `AuthVersion`，会话校验时比对 | **抄**：比"遍历会话表逐个删"少一类竞态 |
+| ★ `AdvanceUserSessionAuthVersion`：提升版本踢掉别人，但**就地升级当前会话** | `model/user_session.go` | session.go 的同名语义 | **抄**：这是用户报障「轮换/改密后必须重启」的正解 |
+| 会话签发频率上限 → 429 | `service/auth_session.go:468`（`AUTH_SESSION_ISSUANCE_LIMIT`） | 抄进签发路径 | **抄**：防止拿正确口令无限刷会话 |
+| 路由级四件套：`CriticalRateLimit` + `anonymousRequestBodyLimit` + `TurnstileCheck` + `DisableCache` | `router/api-router.go:79/81` | 注册/登录端点同一套 | **抄结构**：Turnstile 默认关（要 CF 账号），另配**本地人机校验**默认开 |
+| 阈值：关键路径 20 次 / 20 分钟；全局 web 120 / 180s | `common/constants.go:230-232`、`common/init.go:129-131` | 直接采这组数 | **抄**：有实测依据的默认值，不自己拍 |
+| 401 稳定错误码 → 前端按码跳登录页 | `middleware/auth.go`（`writeDashboardAuthError`） | 错误体带 `code`：`auth_required`/`auth_invalid`/`session_expired` | **抄**：前端靠字符串判断会随文案漂移而失效 |
+| 邮箱验证 / OAuth / passkey / 2FA | `controller/login_verification.go` 等 | 只留开关位，标"无 SMTP 不启用" | **不抄**：单机控制台没有这些前提，硬抄是负债 |
+| PAT 的 scope 路由表、RBAC、多租户、额度订阅 | `middleware/auth.go`、`service/authz/` | 不做（三把钥匙已够分层） | **不抄**：那是多租户网关的复杂度 |
+
+### 对照现状（本次要替换掉的东西，实测证据）
+
+| 现状 | 位置 | 问题 |
+|---|---|---|
+| `localExempt`：监听回环 + 上一跳回环 + 无转发头 ⇒ **直接放行** | `internal/admin/admin.go:644/669` | "错令牌"与"不带令牌"是同一类请求 ⇒ 本机任何进程都是管理员（用户报障 ③） |
+| `/ui` 把 `api_key` **明文注入页面 HTML** | `internal/server/webui.go:84`（`injectKey`） | 打开页面即拿到 /v1 钥匙 ⇒ leak 不需要"偷" |
+| 前端把凭据存 localStorage（`wb2api.key`） | `internal/server/webui.html:1764/11876/11888` | 轮换后页面还用旧值 ⇒ 表现成"必须重启"（用户报障 ②） |
+
+### 三把钥匙的最终分工（本改造的骨架）
+
+```
+浏览器登录（人）  username + password → 会话 cookie wb2api_sid（HttpOnly/SameSite=Lax，24h 滑动）
+管理接口（脚本）  admin_token         → Authorization: Bearer / ?token=（一次性换 cookie）
+对话接口（客户端）api_key             → Authorization: Bearer（语义不变）
+```
+
+规则：只要配了任意凭据，`/ui` 与 `/admin/*` **一律校验**（含本机、含经反代）；
+回环监听只保留为"少暴露一个端口"的部署建议，**不再当凭据用**。
+
 ## 原则（写下来免得后人误读）
 
 1. ⚠ **不是所有东西都该换** —— 每项先**证伪我们是否早就有了**（第 1、2、3 项都证明了有，且有的更强）。
