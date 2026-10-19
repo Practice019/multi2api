@@ -7,6 +7,91 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v1.9.2 — 2026-10-19
+
+> 本版主题：**抄 new-api 的登录系统**（你原话：「直接把 newapi 的登录系统抄过来」），
+> 顺带把你早先报的三条旧障一起收口 —— 它们同根：控制台没有"你是谁"这个概念，
+> 凭据只有一把 `api_key`，它同时是对话钥匙、门禁、和写在页面里的那一行明文。
+>
+> 现在分三把：**账号口令**（浏览器，HttpOnly 会话 cookie）、**`admin_token`**
+> （脚本/CI 进管理面）、**`api_key`**（只给客户端调 `/v1`，进不了管理面）。
+>
+> ⚠ 一处**破坏性变更**：用 `api_key` 打 `/status` 或 `/admin/*` 现在会 401。
+> 有脚本这么用的，改成 `Authorization: Bearer <admin_token>`。
+
+### 三条旧报障的收口
+
+**① `config.example.json` 里没有 `admin_token`**（新部署照示例配，永远只拿到一把钥匙）
+
+`admin_token` 已写进示例文件并带中文说明（它为什么必须与 `api_key` 分开、
+留空是什么语义、怎么免重启轮换）。验收：
+
+    node tests/frontend/verify_token_security_e2e.js     # ⑥ 段：PASS config.example.json 写出了 admin_token
+
+**② 轮换/改密之后必须重启**（"轮换之后网页加载失败，必须重启"）
+
+三个动作全部**免重启、立即生效**：
+
+| 动作 | 在哪 | 立即生效的机制 |
+|---|---|---|
+| 轮换 `admin_token` | API 管理页 | 写回 config.json + 更新内存副本（`SetAdminToken`） |
+| 轮换 `api_key` | API 管理页 | 同上（`OnAPIKeyRotated` 回调） |
+| 改自己口令 | 顶栏「改密码」 | 账号 AuthVersion +1，**当前会话就地升级**（抄 new-api 的 `AdvanceUserSessionAuthVersion`）⇒ 本人不掉线、其它设备立即失效 |
+
+改口令那一条是本次新加的端点 `POST /admin/auth/password`：验旧口令 → 改 → 把
+**执行改动的这条**会话升到新版本号。验收：
+
+    node tests/frontend/verify_token_security_e2e.js     # ④⑤ 段：新旧令牌/密钥立即生效与失效
+    go test ./internal/account/ -run TestChangePassword -v
+        # ★★ 改完口令当前会话仍有效（用户报障的那一条）+ 另一台设备 401 session_revoked
+
+**③ 错误的管理令牌也能进控制台**（页面把钥匙注入 HTML，一打开就泄露）
+
+`/ui` 的响应体里**不再有任何凭据**（三种情形都实测搜过：未登录 / 已登录 /
+`?token=` 换手），登录状态改由 HttpOnly cookie 承载；控制台脚本里也不再有
+`wb2api.key` 这类 localStorage 记忆。验收：
+
+    node tests/frontend/verify_console_cookie_auth_e2e.js --start
+    node tests/frontend/verify_token_security_e2e.js
+
+### 登录系统（新）
+
+- **端点**：`/admin/auth/{register,login,logout,session,password,captcha}`，
+  挂在管理端门禁**之外**（否则"没登录所以打不开登录接口"死锁）。
+- **角色**：管理员 10 / 成员 1；注册一律成员（服务端写死，不接受调用方指定）；
+  成员只能看/管**自己名下**的 API key，其余管理面 403 `forbidden_role`。
+- **首启建管理员**：账号库为空时第一个注册成为管理员（关闭注册也**不**挡这一条，
+  否则"关了注册又没建号"会把控制台锁死）。
+- **反批量四层**：限速 20 次/20 分钟/IP（第 21 次 429）、请求体 8 KB（413）、
+  本地 SVG 人机校验（**默认开**，题一次性、答错也作废）、会话签发上限。
+  四层拦的形态不同（同 IP 高频 vs 多 IP 各几次），故而不是"开一层就够"。
+- **`/status` 收归控制台身份**：它回的是**账号池画像**（上游账号列表 + 熔断态），
+  以前 `api_key` 就能读 —— 那是"发给客户端的钥匙能看运营数据"。现在只认会话或
+  `admin_token`，且必须是管理员。
+- 控制台顶栏新增当前登录者 / 角色标记 / **改密码** / **登出**。
+
+### 验收（一条命令）
+
+    node tests/frontend/run_http_suites.js
+    # 4 条 HTTP 探针 × 2 遍（--self-test 判别力 + --start 真实例）= 8 次运行，全绿 17 秒
+    #   login_flow    登录流程正路
+    #   abuse         限速 429 / 请求体 413 / 人机校验
+    #   console_auth  /ui 三条路 + /status 四种身份 + 会话升级与撤销
+    #   role_split    key 归属过滤 + /admin/* 角色分流 + rotate 仅管理员
+
+    全仓 go test（37 包）全绿；gofmt 合规。
+
+⚠ 探针起实例时**关掉人机校验**（算术题是给人看的，自动脚本答不了）——
+`lib_instance.js` 里写明并留了"想验开着的那条路"的开关。
+
+### 顺带修掉的一个真洞
+
+管理面白名单原来是**前缀**匹配：`/admin/apikeys` 会连带放行
+`POST /admin/apikeys/rotate-admin` —— 而那个端点的回执里带**完整的新
+`admin_token`**。成员调一次即可提权到管理员。现改成精确的「方法 + 路径」对，
+两个 rotate 端点另加一层管理员硬判。回归测试把这条钉死了
+（`internal/admin/gate_test.go` 的 ★★ 断言 + `verify_role_split_e2e.js` 的坏桩③）。
+
 ## v1.9.1 — 2026-10-19
 
 > 本版主题：**修「导入之后删除不掉」**（你带着截图报的那条），以及它牵出来的
