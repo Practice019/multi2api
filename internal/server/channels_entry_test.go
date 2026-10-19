@@ -123,8 +123,10 @@ func TestEntryForwardsViaChannel(t *testing.T) {
 	}
 }
 
-// ② 能力索引外的名字 ⇒ 404，且假上游一次都没被打到（防"偷偷回落账号池"）。
-func TestEntryRejectsModelOutsideAbilityIndex(t *testing.T) {
+// ② 能力索引外的名字 ⇒ **回落既有账号池路径**（撤收紧后不再"明确拒绝"）。
+//
+// 仍要守住的那条：名字不属于任何渠道时**不该**打到渠道上游（渠道只服务它声明的名字）。
+func TestEntryFallsBackForModelOutsideAbilityIndex(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -135,19 +137,25 @@ func TestEntryRejectsModelOutsideAbilityIndex(t *testing.T) {
 	h := entryHandler(t, entryStore(t, srv.URL+"/v1", channelstore.StatusEnabled), &poolHits)
 
 	code, body := postEntryChat(t, h, `{"model":"not-in-index","messages":[]}`)
-	if code != http.StatusNotFound {
-		t.Fatalf("索引外的模型应 404（默认收紧），实际 %d: %s", code, body)
+	if strings.Contains(body, "未对当前渠道开放") {
+		t.Fatalf("撤收紧后不该再出现渠道口径的 404 文案: %s", body)
+	}
+	if code == http.StatusNotFound {
+		t.Fatalf("索引外的模型应回落既有路径（不该 404），实际 %d: %s", code, body)
+	}
+	// "确实落回了账号池"的直接证据：池自己的错误码。
+	// （这个假池里的号不健康 ⇒ 池在**取号阶段**就回 503 no_healthy_account，
+	// 根本走不到"发上游"那一步 —— 所以不能拿 poolHits>0 当证据，见 ① 的注释里的同一个坑。）
+	if !strings.Contains(body, "no_healthy_account") {
+		t.Fatalf("应交给账号池判断（期望池自己的 no_healthy_account），实际 %d: %s", code, body)
 	}
 	if hits != 0 {
-		t.Fatalf("★ 被拒的请求**不该**打到渠道上游，实际 %d 次", hits)
-	}
-	if n := atomic.LoadInt32(&poolHits); n != 0 {
-		t.Fatalf("★ 更不该回落到账号池，实际被调用 %d 次", n)
+		t.Fatalf("★ 名字不属于任何渠道时**不该**打到渠道上游，实际 %d 次", hits)
 	}
 }
 
-// ③ 渠道停用 ⇒ 404，且两条上游都没被打到。
-func TestEntryRejectsWhenChannelDisabled(t *testing.T) {
+// ③ 渠道停用 ⇒ 同样回落既有路径（停用的渠道不服务任何名字），渠道上游没被打到。
+func TestEntryFallsBackWhenChannelDisabled(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
@@ -158,11 +166,14 @@ func TestEntryRejectsWhenChannelDisabled(t *testing.T) {
 	h := entryHandler(t, entryStore(t, srv.URL+"/v1", channelstore.StatusManuallyDisabled), &poolHits)
 
 	code, body := postEntryChat(t, h, `{"model":"pub-y","messages":[]}`)
-	if code != http.StatusNotFound {
-		t.Fatalf("停用渠道应 404，实际 %d: %s", code, body)
+	if code == http.StatusNotFound {
+		t.Fatalf("停用渠道不该产生 404（应回落既有路径），实际 %d: %s", code, body)
 	}
-	if hits != 0 || atomic.LoadInt32(&poolHits) != 0 {
-		t.Fatalf("停用后两条上游都不该被打到（渠道 %d 次 / 池 %d 次）", hits, atomic.LoadInt32(&poolHits))
+	if !strings.Contains(body, "no_healthy_account") {
+		t.Fatalf("应交给账号池判断，实际 %d: %s", code, body)
+	}
+	if hits != 0 {
+		t.Fatalf("★ 停用的渠道不该被打到，实际 %d 次", hits)
 	}
 }
 

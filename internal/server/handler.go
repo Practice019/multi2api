@@ -775,13 +775,16 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// 不这么做的话：列表里看得见几十个模型，调哪个都 403 ——
 	// 用户会读成"网关坏了"，而不是"这把 key 没这个权限"。
 	// 列表如实反映权限，权限才是可发现的。
-	// ⚠ T5 接线（2026-10-20）：**配了渠道存储**时，对外目录由渠道能力索引决定
-	// （能力索引 ∩ 令牌白名单 → 反向映射成公开名，见 models_channels.go）；
-	// 没配 ⇒ 返回 nil，落回既有路径，一个字节都不变。
-	data := h.channelModelsForRequest(r)
-	if data == nil {
-		data = h.filterModelsForRequest(r, h.modelList())
-	}
+	// ⚠ 2026-10-20 按用户决定**撤掉渠道口径的收紧**：对外目录直接展示上游实时目录的全部模型。
+	//
+	// 原设计（T5）是「对外 = 已启用渠道声明的模型 ∩ 令牌白名单 → 反向映射成公开名」。
+	// 用户实测后看到的是「除新建的那条渠道有 1 个模型外，其余 12 个上游全是 0 个」——那正是
+	// 收紧的表现。用户的决定：**不要模型对外的那些修改，直接展示全部的，渠道的要保留**。
+	//
+	// ⇒ 目录回到既有口径（上游实时目录 + 令牌白名单，两者都是改造前就有的）；
+	//   渠道从此只是 chat 请求上的**额外一条路**（见下面 providerFor 之前那段），
+	//   不再决定目录里有什么。
+	data := h.filterModelsForRequest(r, h.modelList())
 	// ⚠⚠ 给每条**补上档位声明**（2026-10-18 加，用户要求："我们的项目也需要可以支持选择思考深度"）。
 	//
 	// 动机：我们**一直有** `reasoning_effort` 的透传与降级（internal/cline/payload.go 的
@@ -1475,6 +1478,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//
 	// 未知前缀立刻回 400：那是客户端写错了，让它马上知道，
 	// 而不是把 "codearts/GLM-5.2" 当模型名发给默认上游再收一个莫名的 400。
+	// ⚠⚠ 渠道口径（中转站模式）—— 接缝**必须**在 providerFor **之前**。
+	//
+	// # 为什么必须在之前（这是 2026-10-20 修的那个 bug）
+	//
+	// providerFor 把 "csg/deepseek-v4.1-flash-1017" 读成"上游前缀 csg"，判成未知上游并回
+	// 400 unknown_provider —— 而那是前端建的渠道给出的**公开名**。渠道公开名是另一个
+	// 命名空间，先过 legacy 的前缀解析就永远走不到渠道转发这一步
+	// （实测现象：界面里模型选得好好的，一发就 400「未知的上游前缀」）。
+	//
+	// # 顺序与回落（按用户 2026-10-20 的决定调整）
+	//
+	//   - 渠道只是**额外的一条路**，不是替代：名字不属于任何渠道 ⇒ 原样往下走 legacy
+	//     （用户要求「直接展示全部的」，原先"没有候选就 404 明确拒绝"的收紧已撤）。
+	//   - 渠道真失败（没可用 key / 上游报错）⇒ 如实上报，**不换路**。Key 型渠道与账号池的
+	//     根本区别就在这里：换号会让用户不知道请求走了哪条，身份与计费口径也都变了。
+	//   - 白名单照样判（对渠道而言公开名就是对外名）：权限不因为"走了渠道"而消失。
+	if h.channelServes(peek.Model) {
+		if !h.modelAllowedForRequest(w, r, peek.Model) {
+			return
+		}
+		fw, ferr := h.forwardViaChannel(r.Context(), peek.Model, body)
+		if ferr != nil {
+			writeOpenAIError(w, http.StatusBadGateway, "channel_error", ferr.Error())
+			return
+		}
+		h.writeChannelStream(w, r, fw)
+		return
+	}
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)
 	if perr != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "unknown_provider", perr.Error())
@@ -1487,34 +1518,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 结构化的模型名，再比，两处判据不会分叉。
 	if !h.modelAllowedForRequest(w, r, peek.Model) {
 		return
-	}
-	// ⚠⚠ 渠道口径（中转站模式）—— 接缝**必须**在这里：白名单判完、**任何取号之前**。
-	//
-	// 为什么不能在 chatVia（那里已有 acct）：到了那儿账号已经被选中，等于"先占了池里的号再退回"，
-	// 号已计数、且中途换路时流式响应无法干净撤回。
-	//
-	// 为什么"先问渠道、再问池"，而不是"先试池、失败再试渠道"：
-	// 后者会让**同一个模型名走哪条**取决于账号池当时的状态 —— 不稳定，且排查时说不清走了哪条。
-	if h.cfg.Channels != nil {
-		fw, ferr := h.forwardViaChannel(r.Context(), peek.Model, body)
-		switch {
-		case ferr == nil:
-			h.writeChannelStream(w, r, fw)
-			return
-		case errors.Is(ferr, errNoChannelMode):
-			// 没配渠道存储：落到既有账号池路径（不是错误）
-		case errors.Is(ferr, errChannelNoCandidate):
-			// 默认收紧：能力索引里没有这个模型名 ⇒ 明确拒绝，**不回落**账号池。
-			// 回落会让"我不想公开的模型"仍然能用池里的号跑起来 —— 那正是 R1 要防的。
-			writeOpenAIError(w, http.StatusNotFound, "model_not_available",
-				fmt.Sprintf("模型 %q 未对当前渠道开放（渠道能力索引里没有它；停用的渠道不计入）", peek.Model))
-			return
-		default:
-			// 渠道真实失败（没有可用 key / 上游返回错误）：如实上报，**不换路** ——
-			// Key 型渠道与账号池的根本区别就在这里，换号会让用户不知道请求到底走了哪条。
-			writeOpenAIError(w, http.StatusBadGateway, "channel_error", ferr.Error())
-			return
-		}
 	}
 	// 出站请求体里必须写回**剥掉前缀**的模型名：前缀是网关的路由记号，
 	// 上游不认识 "workbuddy/auto"（实测：带着前缀发过去，上游按未知模型拒绝，
