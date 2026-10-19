@@ -24,12 +24,12 @@ const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fai
 const info = (m) => console.log('  · ' + m);
 const short = (s, n) => (s === undefined || s === null ? '' : String(s).slice(0, n || 60));
 
-// 探针要看的端点清单（`secret: true` = 回执里含密钥，未授权看到即泄露）
+// 探针要看的端点清单（`secret: true` = 回执里含密钥或密钥线索，未授权看到即泄露）
 const ENDPOINTS = [
   { p: '/healthz', secret: false, what: '健康检查（设计上公开）' },
   { p: '/status', secret: false, what: '状态（账号视图）' },
-  { p: '/admin/settings', secret: true, what: '设置（回执里带 admin_key）' },
-  { p: '/admin/apikeys', secret: true, what: 'API Key 列表（掩码）' },
+  { p: '/admin/settings', secret: true, what: '设置（能改上游配置，管理员专属）' },
+  { p: '/admin/apikeys', secret: true, what: 'API Key 列表（回执带 admin_key / admin_token 的掩码）' },
   { p: '/admin/accounts', secret: false, what: '账号池' },
   { p: '/v1/models', secret: false, what: '模型列表（/v1 凭据）' },
 ];
@@ -81,10 +81,24 @@ async function prob(base, label, token) {
     ok(bad200Secret.length === 0, '★ 错误令牌访问带密钥端点必须 401/403，不能 200' +
       (bad200Secret.length ? '，实际 200：' + bad200Secret.map((r) => r.p).join(',') : ''));
 
-    console.log('\n=== ③ 正确令牌（对照组，必须能拿到自己的密钥）===');
+    console.log('\n=== ③ 正确令牌（对照组，必须能拿到自己的密钥线索）===');
     const good = await prob(inst.base, '正确令牌', T1);
     ok(good.find((r) => r.p === '/admin/settings').status === 200, '正确令牌能读 /admin/settings');
-    ok(good.find((r) => r.p === '/admin/settings').leaked, '正确令牌能看到自己的 admin_key（这是控制台该有的能力，不是泄露）');
+
+    // ⚠ 这条判据改过：原来断言的是 `/admin/settings` 的回执里出现**完整** admin_key。
+    //  两处都不成立：① settingsView() 从不含密钥字段（掩码在 /admin/apikeys 的
+    //  apiKeysList 里，见 internal/admin/apikeys.go:71-72）；② 那里回的是**掩码**
+    //  （mk-1d4e…bb27），`text.includes(完整令牌)` 恒为假 —— 那条断言从来没有
+    //  通过过，它红不是因为"权限不对"，而是因为**判据写错了对象**。
+    //  现在按实际来源判：管理员读 /admin/apikeys 应 200，且回执里有 admin_key /
+    //  admin_token 两个掩码字段（这是控制台的正当能力），而**完整**密钥不出现。
+    const keys = await httpJson(inst.base, '/admin/apikeys', { token: T1 });
+    ok(keys.status === 200, '正确令牌能读 /admin/apikeys（' + keys.status + '）');
+    const kb = keys.text || '';
+    ok(/"admin_key"\s*:/.test(kb) && /"admin_token"\s*:/.test(kb),
+      '回执里有 admin_key 与 admin_token 两个掩码字段（控制台要靠它显示"当前用的是哪把钥匙"）');
+    ok(kb.includes(T1.slice(0, 6)), '掩码保留了可辨认的前缀（' + T1.slice(0, 6) + '…）');
+    ok(!kb.includes(T1) && !kb.includes(K1), '★ 回执里没有**完整**密钥（掩码而非回显）');
 
     console.log('\n=== ④ 轮换管理令牌 admin_token（用户第②条）===');
     const rot = await httpJson(inst.base, '/admin/apikeys/rotate-admin', { method: 'POST', token: T1, body: {} });
@@ -119,9 +133,12 @@ async function prob(base, label, token) {
     const path = require('path');
     const { REPO } = require('./lib_instance.js');
     const ex = fs.readFileSync(path.join(REPO, 'config.example.json'), 'utf8');
-    const exj = JSON.parse(ex);
-    ok(Object.prototype.hasOwnProperty.call(exj, 'admin_token'), 'config.example.json 写出了 admin_token');
-    ok(Object.prototype.hasOwnProperty.call(exj, 'api_key'), 'config.example.json 写出了 api_key');
+    // ⚠ 不 JSON.parse：config.example.json 是 **JSONC**（带 // 注释，见 internal/…/jsonc.go），
+    // 直接 parse 会在第 2 行就抛 SyntaxError —— 那是"解析方式错了"，不是"字段缺失"。
+    // 这里按**键行**判存在性（行首即键名，注释里的同名字符串不算）。
+    const hasKey = (k) => new RegExp('^\\s*"' + k + '"\\s*:', 'm').test(ex);
+    ok(hasKey('admin_token'), 'config.example.json 写出了 admin_token');
+    ok(hasKey('api_key'), 'config.example.json 写出了 api_key');
   } catch (e) {
     console.log('  探针异常: ' + (e && e.stack ? e.stack : e));
     fail++;
