@@ -136,7 +136,7 @@
     <label>名称</label>
     <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
     <label>模型</label>
-    <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4" oninput="renderVisible()">
+    <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4" oninput="renderChoices()">
 <button type="button" onclick="discover()" title="拿上面的 Base URL + key 去问上游有哪些模型，问完自动填进左边这一栏（不是保存）">自动发现</button>
 <div id="f-disc" class="dim" style="font-size:12px;margin:2px 0 0"></div>
 <div id="f-vis" style="margin:6px 0 0"></div>
@@ -170,36 +170,53 @@ let editing = null;   // 正在编辑的渠道 id（null = 新增）
 //      再自己按保存，比"发现并直接落库"安全（后者会在 Base URL 写错时把错的列表写进渠道）。
 //   2. key 空着就**明确说清**，不静默发一个空 key 的请求（那会拿到 401，然后用户会以为功能坏了）。
 //      编辑已存在的渠道时可以不填 —— 服务端会用该渠道自己**启用中**的那个 key。
-// renderVisible() 「对外可见」勾选：把 #f-models 里的模型逐个渲染成复选框。
+// renderChoices() 渠道模型勾选：把 #f-models 里的模型逐个渲染成复选框，取消勾选即从这条渠道摘掉。
 //
-// 语义（R1）：对外 = API Key 白名单 ∩ **已启用渠道声明的模型** ⇒ 取消勾选 = 把该模型从这条渠道
-// 的 models 里摘掉 ⇒ 外部 /v1/models 立刻看不见它（不用改请求头、不用重启）。
-// 所以这个控件**没有独立状态**：它只是 #f-models 那一栏的另一种编辑方式（勾=在栏里，去勾=不在栏里）。
+// ⚠ 2026-10-20 语义变更后重写：原先这里叫 renderVisible，是「对外可见」开关，靠
+//   "对外 = 渠道声明 ∩ 令牌白名单"那层收紧实现。用户决定撤掉那层（改成直接展示全部）
+//   ⇒ 这个控件不再控制"外部看不看得见"，它只编辑**这条渠道声明并提供哪些模型**
+//   （= #f-models 那一栏的另一种编辑方式，没有独立状态）。
+//   取消勾选 ⇒ 请求不再走这条渠道；不再有"取消勾选后外部立刻看不见"那层含义（那层已撤）。
 //
-// ⚠ 自渲染而不是"打开对话框时填一次"：这样它不依赖任何对话框钩子，输入框手动敲、自动发现回填、
-//   勾选切换三条路径都会一致地反映出来 —— 少一个"状态不同步"的洞。
-function renderVisible() {
+// ⚠ 自渲染（输入框 oninput + 本函数）而不是"打开对话框时填一次"：这样它不依赖任何对话框钩子，
+//   手动敲、自动发现回填、勾选切换三条路径的显示始终一致 —— 少一个"状态不同步"的洞。
+function renderChoices() {
   const box = document.getElementById('f-vis');
   if (!box) return;
   const names = document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean);
-  if (!names.length) { box.innerHTML = '<div class="dim" style="font-size:12px">填了模型名之后，这里会出现可勾选的「对外可见」列表</div>'; return; }
+  if (!names.length) {
+    box.innerHTML = '<div class="dim" style="font-size:12px">点「自动发现」拉取上游模型，或在上面的「模型」栏手动填；填了之后这里会出现可勾选的列表。</div>';
+    return;
+  }
   const uniq = [...new Set(names)];
-  box.innerHTML = '<div class="dim" style="font-size:12px;margin-bottom:2px">对外可见（取消勾选即从本渠道摘掉该模型 ⇒ 外部 /v1/models 立刻看不见）</div>'
-    + '<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:13px">'
-    + uniq.map(n => '<label style="display:flex;align-items:center;gap:4px;height:22px"><input type="checkbox" checked onchange="toggleVisible(this)" data-m="' + esc(n) + '">' + esc(n) + '</label>').join('')
+  box.innerHTML = '<div class="dim" style="font-size:12px;margin-bottom:2px">本渠道提供的模型（取消勾选 = 从这条渠道摘掉，不影响别的渠道）'
+    + ' <a href="#" onclick="chooseAll(true);return false" style="font-size:12px;margin-left:6px">全选</a>'
+    + ' <a href="#" onclick="chooseAll(false);return false" style="font-size:12px">全不选</a></div>'
+    + '<div id="f-choices" style="display:flex;flex-wrap:wrap;gap:10px;font-size:13px">'
+    + uniq.map(n => '<label style="display:flex;align-items:center;gap:4px;height:22px"><input type="checkbox" checked onchange="toggleChoice(this)" data-m="' + esc(n) + '">' + esc(n) + '</label>').join('')
     + '</div>';
 }
 
-// toggleVisible() 去勾 ⇒ 从 #f-models 摘掉；勾回 ⇒ 追加回去（不改顺序语义，只增删）。
-// ⚠ 摘掉是**删除**不是隐藏标记：本设计里"对外可见"就是渠道 models 的成员资格，没有第二份状态
-//   （第二份状态迟早与第一份对不上，这正是"取消勾选后外部还看得见"这类 bug 的来源）。
-function toggleVisible(cb) {
+// toggleChoice() 去勾 ⇒ 从 #f-models 摘掉；勾回 ⇒ 追加回去。
+// ⚠ 摘掉是**删除**不是隐藏标记：一条渠道提供哪些模型就是 models 的成员资格，没有第二份状态
+//   （第二份状态迟早与第一份对不上，那正是这类界面最经典的 bug 来源）。
+function toggleChoice(cb) {
   const el = document.getElementById('f-models');
   const name = cb.getAttribute('data-m');
   const names = el.value.split(',').map(s => s.trim()).filter(Boolean);
   const next = cb.checked ? (names.includes(name) ? names : names.concat([name])) : names.filter(n => n !== name);
   el.value = next.join(',');
-  renderVisible();   // 自己重绘一次，保证"手动敲/自动发现/勾选"三条路径的显示始终一致
+  renderChoices();
+}
+
+// chooseAll() 全选 / 全不选：以**当前渲染出来的**那一批名字为准（不引入第三份状态）。
+function chooseAll(on) {
+  const keep = [];
+  document.querySelectorAll('#f-choices input[type=checkbox]').forEach(b => {
+    if (on) keep.push(b.getAttribute('data-m'));
+  });
+  document.getElementById('f-models').value = keep.join(',');
+  renderChoices();
 }
 
 async function discover() {
@@ -218,7 +235,8 @@ async function discover() {
     const ms = (d && d.models) || [];
     if (!ms.length) { box.textContent = '上游返回 0 个模型：确认 Base URL 指向的是 OpenAI 兼容端点（/v1）'; return; }
     document.getElementById('f-models').value = ms.join(',');
-    box.textContent = '已回填 ' + ms.length + ' 个模型（还没保存，确认无误后点「保存」）';
+    renderChoices();   // ⚠ JS 直接赋值**不会**触发 input 事件 ⇒ 必须手动重绘勾选列表
+    box.textContent = '已回填 ' + ms.length + ' 个模型（还没保存，确认无误后点「保存」；下面可逐项取消勾选）';
   } catch (e) {
     box.textContent = '自动发现失败：' + (e && e.message ? e.message : e);
   }
