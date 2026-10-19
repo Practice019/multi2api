@@ -120,7 +120,7 @@ func TestReloadInstallsOpaqueSecretIntoPool(t *testing.T) {
 	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
 	p.SetDefaultProvider("codearts")
 
-	h := New(Config{ListensLoopback: true,
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true,
 		Pool:            p,
 		Registry:        reg,
 		AuthDir:         caDir,
@@ -168,7 +168,7 @@ func TestReloadWithoutSecretLoaderLeavesNoSecret(t *testing.T) {
 	}
 	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
 	p.SetDefaultProvider("someup")
-	h := New(Config{ListensLoopback: true, Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "someup"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "someup"})
 
 	rec, resp := postReload(t, h, `{"provider":"someup"}`)
 	if rec.Code != http.StatusOK {
@@ -229,7 +229,7 @@ func TestReloadCarriesCredsWhenSecretIsAuth(t *testing.T) {
 	}
 	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
 	p.SetDefaultProvider("workbuddy")
-	h := New(Config{ListensLoopback: true, Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "workbuddy"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "workbuddy"})
 
 	rec, resp := postReload(t, h, `{"provider":"workbuddy"}`)
 	if rec.Code != http.StatusOK {
@@ -281,7 +281,7 @@ func TestReloadStillProjectsWhenSecretIsOpaque(t *testing.T) {
 	}
 	p := pool.New(filepath.Join(t.TempDir(), "state.json"))
 	p.SetDefaultProvider("codearts")
-	h := New(Config{ListensLoopback: true, Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "codearts"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, AuthDir: dir, AuthsBase: base, DefaultProvider: "codearts"})
 
 	rec, _ := postReload(t, h, `{"provider":"codearts"}`)
 	if rec.Code != http.StatusOK {

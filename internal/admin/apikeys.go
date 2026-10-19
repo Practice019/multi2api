@@ -248,9 +248,12 @@ func writeStoreError(w http.ResponseWriter, err error) {
 //
 // # 无令牌时的行为（不生成、而是引导配置）
 //
-// 部署可能根本没配 admin_token（那时只有本机免令牌可用）。此时**不应该**
+// 部署可能根本没配 admin_token。此时**不应该**
 // 偷偷生成一把并写盘 —— 那会改变"本部署有没有远程管理面"这个安全事实，
 // 而该事实应当由人在 config 里显式写定。所以这里明确报错并给出做法。
+//
+// ⚠ 注意：没配 admin_token 不等于"没有管理面" —— 控制台账号（浏览器会话）
+// 是另一条独立的路（见 admin.go 的 principalOf）。本端点管的是**令牌**这把机器钥匙。
 func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.ConfigPath == "" {
 		writeError(w, http.StatusBadRequest, "本部署不支持写回 config.json（未接线 ConfigPath），无法轮换")
@@ -279,7 +282,7 @@ func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
 		"masked": apikey.MaskID(newKey),
 		"path":   h.cfg.ConfigPath,
 		"note": "旧管理令牌已立即失效。请用新令牌重新登录控制台" +
-			"（本机直连不受影响）。",
+			"（**本机也要**凭据：会话或 admin_token 二选一；轮换后旧的那份不再放行）。",
 	})
 }
 

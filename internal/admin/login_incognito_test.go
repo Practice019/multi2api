@@ -53,7 +53,7 @@ func loginFlowHandler(t *testing.T, authURL string, open func(string) (string, e
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup", OpenAuthURL: open}), flow
+	return New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "flowup", OpenAuthURL: open}), flow
 }
 
 // postLogin 发一条 admin POST 并返回响应。
@@ -62,7 +62,7 @@ func postLogin(t *testing.T, h *Handler, path, body string) *httptest.ResponseRe
 	rec := httptest.NewRecorder()
 	req := localReq("POST", path)
 	req.Body = io.NopCloser(strings.NewReader(body))
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	return rec
 }
 

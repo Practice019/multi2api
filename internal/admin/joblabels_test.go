@@ -46,7 +46,7 @@ func TestJobLabelTablesConsistent(t *testing.T) {
 // （那是前置条件不满足，不是断言失败）—— 所以这里**不**用 Skip，
 // 免得把"真的漏登记"与"本次没注册任务"混为一种结果。
 func TestUIManifestJobLabels(t *testing.T) {
-	m := manifestFor(t, New(Config{ListensLoopback: true}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true}))
 	for _, j := range m.Jobs {
 		if j.Name == "" {
 			t.Error("manifest.jobs 里有一条没有 name")

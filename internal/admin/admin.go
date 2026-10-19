@@ -12,10 +12,14 @@
 // 本包在 New 里遍历已注册 Provider 挂载（见 mountUpstreamRoutes）。
 // **加新上游时本文件零改动。**
 //
-// 安全模型（方案①）：整个 /admin/* 子树只接受 loopback 直连，非本机一律 403。
-// 理由：这些接口能改账号池、能触发上游请求、能读到账号昵称与积分，
-// 而浏览器从别的设备打开时无法自动携带 Bearer，与其做半吊子鉴权，不如直接关在门外。
-// 需要远程操作时请走 SSH 隧道。
+// 安全模型：整个 /admin/* 子树**一律校验凭据**（浏览器会话 或 admin_token），
+// 并按角色分流（管理员全部放行；成员只放行 memberPaths 那几条前缀）。
+//
+// ⚠ 改造前这里写的（也是实现的）是「只接受 loopback 直连，非本机一律 403，
+// 本机免令牌」—— 那条路径把"能连上来"当成了"有权限"，于是本机任何进程
+// （含浏览器里的任意页面发起的请求）都能读到并改写管理面，包括轮换端点
+// 回吐完整 api_key。用户报障「填错 admin token 居然能进 UI」就是它。
+// 现在回环地址**不是凭据**：绑回环只让"少暴露一个端口"这一条成立。
 package admin
 
 import (
@@ -25,7 +29,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
@@ -185,14 +189,27 @@ type Config struct {
 	// 空 = 没有远程管理面（只有本机免令牌那条路，且要求监听在回环地址）。
 	AdminToken string
 
+	// Accounts / Sessions 控制台账号体系（由装配层注入；两者一起给或一起不给）。
+	//
+	// # 为什么要加它（用户要求：抄 new-api 的登录系统）
+	//
+	// 改造前管理面只有**一把令牌**一个身份：谁拿到 admin_token，谁就是管理员，
+	// 没有"成员"这个概念 —— 于是"给同事看一眼自己的用量"只能靠把管理令牌给他。
+	// 现在两条路并存（见 principalOf）：
+	//
+	//	浏览器：/ui 用账号口令登录 → 会话 cookie（有角色：管理员/成员）
+	//	脚本：  Authorization: Bearer <admin_token>（等价管理员，无会话状态）
+	//
+	// 菜单/端点的角色分流见 memberPaths。
+	Accounts *account.Store
+	Sessions *account.SessionStore
+
 	// ListensLoopback 本进程是否**只**监听回环地址。
 	//
-	// 装配层在启动时算一次（从 config.listen 解析，`:7863` 与 `0.0.0.0:7863`
-	// 都算"非回环"）。它是「本机免令牌」的前提之一 —— 见 localExempt。
-	//
-	// 为什么必须由装配层告知而不是这里自己判断：admin 包拿不到
-	// "进程监听到了哪些地址"（那是 net.Listener 的事实），而 config.listen
-	// 的字面值在装配层已经解析过一次（startup_addr.go）。
+	// ⚠ 它**不再参与放行判定**（改造前是「本机免令牌」的前提，见被删掉的
+	// localExempt —— 那条路径让本机任何进程都能进管理面，用户报障"错令牌
+	// 也能进 UI"就是指它）。现在它只用于**提示文案**：绑了非回环地址时
+	// 更该配凭据，启动提示与拒绝 hint 会据此说得更具体。
 	ListensLoopback bool
 
 	// ConfigPath config.json 路径（轮换管理钥匙时写回 api_key 字段）。
@@ -593,87 +610,165 @@ func (h *Handler) register(pattern string, fn http.HandlerFunc) {
 //	③ /ui 在本机访问时还会把 api_key **明文注入页面**（见 server/ui 的
 //	   injectKey 逻辑），所以那个"敞开的页面"自己就带着钥匙。
 //
-// 现在的判据把三件事分开：
+// 现在的判据是「任何请求都必须出示凭据」，两条路：
 //
-//	本机免令牌  只在「监听回环 且 上一跳是回环 且 请求不是经反代转发」时成立
-//	远程访问    必须出示 **admin_token**（独立令牌），api_key 不再解锁管理面
-//	无令牌      监听非回环却没有 admin_token ⇒ 拒绝一切非本机请求（安全默认）
+//	浏览器会话   /ui 用账号口令登录 → HttpOnly 会话 cookie（有角色：管理员/成员）
+//	admin_token  机器凭据（脚本/CI）→ Bearer 或 ?token=，等价管理员
 //
-// 第 3 条是刻意的安全兜底：不配 admin_token 就没有远程管理面，
-// 而不是"回落到用 api_key"（那正是要修掉的东西）。
+// 本机（含绑回环）**不再享受任何豁免**：回环地址只说明"上一跳是谁"，
+// 不说明"你有没有权限" —— 把它当凭据正是上面 ② 那条洞。
+// 没配任何凭据时不是"回落用 api_key"，而是"没有管理面"：去 /ui 建第一个
+// 管理员账号（该入口只在账号库为空时出现一次），而不是把 api_key 当钥匙。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r.Body != nil {
 			_, _ = io.Copy(io.Discard, r.Body)
 		}
 	}()
-	if !h.adminAllowed(r) {
+	p, ok := h.principalOf(r)
+	if !ok {
+		// 401 而不是 403：语义是"你没有（有效）凭据"，前端据此跳登录页。
+		// 改造前这里是 403（因为那时只有"令牌对不对"一种判据），而 403
+		// 会让前端去显示"你没权限"而不是"请登录"。
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": "管理接口需要授权。" + h.denyHint(r),
+			"code":  "auth_required",
+			"hint":  h.denyHint(r),
+		})
+		return
+	}
+	if !p.canAccess(r.URL.Path) {
+		// 403 与 401 分开：**有**身份但角色不够。前端据此显示"当前账号无权"
+		// 而不是再跳一次登录页（那会让成员以为自己的登录没生效）。
 		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error": "管理接口需要授权。请在 config.json 里配置 admin_token，" +
-				"并用 Authorization: Bearer <admin_token> 或 ?token=<admin_token> 访问。" +
-				"（admin_token 与 api_key 是**两把**不同的钥匙：api_key 只用于 /v1 对话接口。）",
-			"hint": h.denyHint(r),
+			"error": fmt.Sprintf("当前账号（%s，角色 %s）无权访问 %s。该功能仅管理员可用。",
+				p.Username, account.RoleName(p.Role), r.URL.Path),
+			"code":  "forbidden_role",
+			"role":  p.Role,
+			"scope": "admin",
 		})
 		return
 	}
 	h.mux.ServeHTTP(w, r)
 }
 
-// denyHint 给出一条**可执行**的说明，而不是让用户去猜。
+// principal 一次请求的身份。零值 = 未认证（见 principalOf 的 ok）。
 //
-// 三种拒绝理由的处置完全不同，混成一句话会让人反复试错的钥匙：
-//
-//	没配 admin_token 且监听非回环 → 去 config 加 admin_token（并重启）
-//	配了但没出示/出示错          → 检查你带的凭据
-//	经反代转发而来               → 本机免令牌不适用于转发请求
-func (h *Handler) denyHint(r *http.Request) string {
-	if h.currentAdminToken() == "" {
-		return "当前 config.json 里没有 admin_token。管理台远程访问需要独立配置它" +
-			"（可用控制台的「轮换管理密钥」生成，或自己填一串足够长的随机值）。"
-	}
-	if forwarded(r) {
-		return "本请求像是经反向代理转发而来（带 X-Forwarded-* / X-Real-IP 头）。" +
-			"「本机免令牌」只对**真正的**本机直连生效，经代理的请求必须带 admin_token。"
-	}
-	return "凭据不正确。管理台要的是 admin_token（不是 api_key）。"
+// Source 分开记是给日志与后续按来源分权留的缝："会话"来自人（有角色、
+// 可撤销），"令牌"来自脚本（等价管理员、无状态）。
+type principal struct {
+	Source   string // "token" | "session"
+	UserID   string // 会话来源才有
+	Username string
+	Role     int
 }
 
-// adminAllowed 管理面的总门禁。
+// 成员可以访问的 /admin/* 前缀。
 //
-// 顺序刻意如此：先判"本机免令牌"（最便宜、且要求最严），再判令牌。
-func (h *Handler) adminAllowed(r *http.Request) bool {
-	if h.localExempt(r) {
+// # 为什么是**白名单**（默认拒绝）而不是黑名单
+//
+// 管理面有几十个端点（账号池、上游、设置、日志、签到、额度……），黑名单
+// 要逐个列"成员不许看什么"，漏一个就是一次越权，而且**新端点默认是敞开的**
+// —— 加功能的人根本不会想到去更新一份黑名单。白名单反过来：新端点默认
+// 只有管理员能进，要放开必须显式加一行（那一步必然要过评审的眼睛）。
+//
+// 选进白名单的标准：成员自己就需要的、且不暴露他人/上游信息的。
+//
+//	/admin/apikeys     自己名下的 key（HTTP 层还要按 owner 过滤 → T8）
+//	/admin/stats       仪表盘聚合数字（自己的用量）
+//	/admin/ui/manifest 界面外壳必需的端点（否则成员连页面都渲染不出来）
+//
+// ⚠ /admin/accounts 不在里面，而且**必须**不在：它是**上游账号池**
+// （workbuddy/codearts 那些凭证），不是控制台账号。成员看到它等于拿到
+// 全部上游身份，"成员"这个角色就没有意义了。
+var memberPaths = []string{
+	"/admin/apikeys",
+	"/admin/stats",
+	"/admin/ui/manifest",
+}
+
+// canAccess 角色分流：管理员全部放行；成员只放行白名单前缀。
+func (p principal) canAccess(path string) bool {
+	if p.Role >= account.RoleAdmin {
 		return true
 	}
-	return h.adminTokenMatches(r)
+	for _, prefix := range memberPaths {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
-// localExempt 是否享受「本机免令牌」。
+// principalOf 解析请求身份：① 管理令牌 → ② 浏览器会话 → 否则未认证。
 //
-// # 三个条件必须**同时**成立（这是本次修复的核心）
+// # 顺序与"为什么两条路都要"
 //
-//	① 本进程**监听在回环地址**：如果它监听 0.0.0.0，那么"本机"这个词
-//	   就没有意义了 —— 任何人的请求都会以某个来源地址到达，而端口是公开的。
-//	   这条挡住"我绑了 0.0.0.0 但以为只有本机能访问"。
-//	② 上一跳（RemoteAddr）是回环。
-//	③ 请求**没有**经由反向代理转发（无 X-Forwarded-* / X-Real-IP 头）。
+// 令牌先判：它是一次字符串比较（无 IO、无锁），而会话要走 Lookup（查表 +
+// 可能落盘续期）。绝大多数管理端点是脚本/探针在打，先命中便宜的那条。
 //
-// 只判 ② 就是改造前的漏洞：nginx 从 127.0.0.1 连过来时 ② 恒成立。
-// 加上 ③ 之后，反代必须显式出示 admin_token —— 而反代是能设请求头的，
-// 所以这不影响正常的"我用 nginx 加个认证再暴露出去"的用法。
+// ⚠ 令牌那一支**等价于管理员**：它无状态、没有账号可归属，历史上就是
+// "root 钥匙"。这不是遗漏 —— 它是给脚本/CI 用的机器凭据，而机器没有
+// "成员"这种身份。角色的意义在于**区分人**。
 //
-// ⚠ 为什么不信任 X-Forwarded-For 来判"真实客户端是不是本机"：
-// 那些头是**客户端可以随便伪造**的。用它做"放行"判据等于把门禁交给攻击者
-// （伪造 `X-Forwarded-For: 127.0.0.1` 即可通过）。所以这里只用它做**收紧**
-// （出现即视为"经代理"，进而要求令牌），绝不用它做放宽。
-func (h *Handler) localExempt(r *http.Request) bool {
-	if !h.cfg.ListensLoopback {
-		return false
+// ⚠ 会话那一支必须走 Lookup 而不是自己读 Cookie 查表：Lookup 里带着
+// 过期/撤销/账号禁用/AuthVersion 四道校验（见 account.SessionStore.Lookup
+// 的注释）。绕过它等于"口令改了、账号禁了，旧 cookie 照样能进管理面"。
+func (h *Handler) principalOf(r *http.Request) (principal, bool) {
+	if h.adminTokenMatches(r) {
+		return principal{Source: "token", Username: "admin_token", Role: account.RoleAdmin}, true
 	}
-	if !isLoopback(r.RemoteAddr) {
-		return false
+	if h.cfg.Sessions == nil || h.cfg.Accounts == nil {
+		return principal{}, false
 	}
-	return !forwarded(r)
+	sid := account.SIDFromRequest(r)
+	if sid == "" {
+		return principal{}, false
+	}
+	_, u, err := h.cfg.Sessions.Lookup(sid, h.cfg.Accounts)
+	if err != nil {
+		return principal{}, false
+	}
+	return principal{Source: "session", UserID: u.ID, Username: u.Username, Role: u.Role}, true
+}
+
+// cfgHasAccounts 本实例是否装了控制台账号体系（提示文案用）。
+func (h *Handler) cfgHasAccounts() bool {
+	return h.cfg.Accounts != nil && h.cfg.Sessions != nil && h.cfg.Accounts.Count() > 0
+}
+
+// denyHint 给出一条**可执行**的说明，而不是让用户去猜。
+//
+// 四种情形的处置完全不同，混成一句话会让人反复试错的钥匙：
+//
+//	两样都没配      → 去 /ui 创建第一个管理员（该入口只出现一次）
+//	只有账号        → 去 /ui 用账号口令登录
+//	只有令牌        → 带 Bearer/query 令牌；浏览器登录需要先建账号
+//	两样都有        → 二选一，说清各自的适用场景
+//
+// ⚠ 这里**不**再提"本机免令牌"：那条路径已经不存在了。
+// 用户报障"错令牌也能进 UI"正是因为本机直连无条件放行 —— 现在回环地址
+// 不再是凭据，绑回环只让"少暴露一个端口"这一条成立。
+func (h *Handler) denyHint(r *http.Request) string {
+	hasToken := h.currentAdminToken() != ""
+	hasAccounts := h.cfgHasAccounts()
+	proxyNote := ""
+	if forwarded(r) {
+		proxyNote = "（本请求带 X-Forwarded-* / X-Real-IP 头，像是经反向代理转发而来 —— " +
+			"这不影响判定：无论直连还是经代理，凭据都必给。）"
+	}
+	switch {
+	case hasToken && hasAccounts:
+		return "浏览器请打开 /ui 用账号口令登录；脚本/CLI 用 Authorization: Bearer <admin_token>（或 ?token=<admin_token>）。" + proxyNote
+	case hasAccounts:
+		return "请打开 /ui 用账号口令登录（成员或管理员都从这里进）。本机没有配置 admin_token。" + proxyNote
+	case hasToken:
+		return "带 Authorization: Bearer <admin_token> 或 ?token=<admin_token> 访问。" +
+			"浏览器里的管理界面需要一个控制台账号：打开 /ui 创建第一个管理员。" + proxyNote
+	default:
+		return "本机既没有控制台账号也没有 admin_token：打开 /ui 创建第一个管理员账号" +
+			"（这个入口只在账号库为空时出现一次）。" + proxyNote
+	}
 }
 
 // forwarded 报告请求是否带有反向代理的转发痕迹。
@@ -755,15 +850,6 @@ func (h *Handler) currentAdminToken() string {
 // crypto/subtle 已经是标准库依赖，不引入新依赖树。
 func subtleEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
-
-func isLoopback(remoteAddr string) bool {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // bearerOf 取出请求 Authorization 头里的 Bearer 凭据（无则空串）。

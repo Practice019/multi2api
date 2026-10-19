@@ -45,7 +45,7 @@ func freeQuotaJSON(t *testing.T, h *Handler) map[string]any {
 	req := httptest.NewRequest(http.MethodGet, "/admin/accounts", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HTTP %d，want 200（body=%s）", rec.Code, rec.Body.String())
 	}
@@ -67,7 +67,7 @@ func newFreeQuotaHandler(t *testing.T, q pool.QuotaView) *Handler {
 	p := pool.New("")
 	p.AddFor("loomy", &auth.Auth{UID: "ly-1"}, nil)
 	p.SetQuota("ly-1", q)
-	return New(Config{ListensLoopback: true, Pool: p, DefaultProvider: "loomy"})
+	return New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, DefaultProvider: "loomy"})
 }
 
 // 有分项 ⇒ JSON 里出现 free_quota，值是那个数。
@@ -168,7 +168,7 @@ func TestFreeQuotaJSONKeyIsStable(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/accounts", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	body := rec.Body.String()
 	if !strings.Contains(body, `"free_quota"`) {

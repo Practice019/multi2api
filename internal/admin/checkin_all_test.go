@@ -146,7 +146,7 @@ func newCheckinAllHandler(t *testing.T, slot adminSlotForCheckin, provs ...gatew
 	for _, p := range provs {
 		reg.Register(p)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg, TaskSlot: slot})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, TaskSlot: slot})
 	return h
 }
 
@@ -269,7 +269,7 @@ func TestCheckinAllNeedsWritableTaskSlot(t *testing.T) {
 	a := &checkinFakeProvider{id: "fake-a", actions: checkinAction("fake-a")}
 	reg := gateway.NewRegistry()
 	reg.Register(a)
-	h := New(Config{ListensLoopback: true, Registry: reg, TaskSlot: readOnlySlot{}})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, TaskSlot: readOnlySlot{}})
 
 	rec := httptest.NewRecorder()
 	h.accountsCheckinAll(rec, httptest.NewRequest(http.MethodPost, "/admin/accounts/checkin/all", nil))
@@ -376,7 +376,7 @@ func TestCheckinAllSkipsInstanceWithoutCheckinAction(t *testing.T) {
 // 这边测"前端点的那个 URL 真的有东西接"。漏注册的形态是
 // 前端 404，而按钮看起来一切正常。
 func TestCheckinAllEndpointIsRegistered(t *testing.T) {
-	h := New(Config{ListensLoopback: true})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true})
 	rec := httptest.NewRecorder()
 	h.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/admin/accounts/checkin/all", nil))
 	if rec.Code == http.StatusNotFound {

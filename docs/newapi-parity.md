@@ -95,11 +95,22 @@ R3 可注册 · R4 反批量防御。逐项对照（出处 = new-api 文件:行�
 
 ### 对照现状（本次要替换掉的东西，实测证据）
 
-| 现状 | 位置 | 问题 |
-|---|---|---|
-| `localExempt`：监听回环 + 上一跳回环 + 无转发头 ⇒ **直接放行** | `internal/admin/admin.go:644/669` | "错令牌"与"不带令牌"是同一类请求 ⇒ 本机任何进程都是管理员（用户报障 ③） |
-| `/ui` 把 `api_key` **明文注入页面 HTML** | `internal/server/webui.go:84`（`injectKey`） | 打开页面即拿到 /v1 钥匙 ⇒ leak 不需要"偷" |
-| 前端把凭据存 localStorage（`wb2api.key`） | `internal/server/webui.html:1764/11876/11888` | 轮换后页面还用旧值 ⇒ 表现成"必须重启"（用户报障 ②） |
+| 现状 | 位置 | 问题 | 状态 |
+|---|---|---|---|
+| `localExempt`：监听回环 + 上一跳回环 + 无转发头 ⇒ **直接放行** | `internal/admin/admin.go:644/669`（改造前） | "错令牌"与"不带令牌"是同一类请求 ⇒ 本机任何进程都是管理员（用户报障 ③） | ✅ **已删**（T4）：门禁改为「会话 或 admin_token」一律校验，按角色分流（`principalOf` / `memberPaths` / `canAccess`） |
+| `/ui` 把 `api_key` **明文注入页面 HTML** | `internal/server/webui.go:84`（`injectKey`） | 打开页面即拿到 /v1 钥匙 ⇒ leak 不需要"偷" | ⏳ T5 |
+| 前端把凭据存 localStorage（`wb2api.key`） | `internal/server/webui.html:1764/11876/11888` | 轮换后页面还用旧值 ⇒ 表现成"必须重启"（用户报障 ②） | ⏳ T7 |
+
+**T4 收口后的实测**（`WB2API_EXE=bin/wb2api-server-probe.exe node tests/frontend/verify_token_security_e2e.js`）：
+
+```
+① 无令牌：/admin/settings /admin/apikeys /admin/accounts 全 401 auth_required   PASS（改造前 3 个全 200）
+② 错令牌：同样 401，且回执里不含任何密钥                                        PASS（改造前 200 + 掩码外泄）
+④ 轮换 admin_token：新令牌立即可用、旧令牌立即 401                              PASS（改造前旧令牌仍 200）
+剩余 2 红属后续任务：/ui HTML 仍注入密钥（T5）、config.example.json 缺 admin_token（T11）
+```
+
+轮换回执里那句「本机直连不受影响」也是旧语义，已随 T4 一并改掉（现在本机同样要凭据）。
 
 ### 三把钥匙的最终分工（本改造的骨架）
 
@@ -111,6 +122,10 @@ R3 可注册 · R4 反批量防御。逐项对照（出处 = new-api 文件:行�
 
 规则：只要配了任意凭据，`/ui` 与 `/admin/*` **一律校验**（含本机、含经反代）；
 回环监听只保留为"少暴露一个端口"的部署建议，**不再当凭据用**。
+
+角色分流（抄 new-api 的 `RoleMember=1 / RoleAdmin=10` 定义，不抄它的 RBAC 引擎）：
+管理员全部放行；成员只放行 `memberPaths` 白名单（`/admin/apikeys`、`/admin/stats`、
+`/admin/ui/manifest`），其余默认拒绝 ⇒ 新增端点默认只有管理员能进。
 
 ## 原则（写下来免得后人误读）
 

@@ -229,6 +229,10 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		// gateway.Provider —— 它是被上游 import 的，不是上游。
 		// 加它时这条守卫**确实红了**：这正是它的作用（新目录必须显式归类）。
 		"anthroconv": true,
+		// account 控制台账号体系（登录/会话/角色），authlimit 登录反滥用
+		// 工具箱（限速/人机校验/请求体上限）—— 都不实现 gateway.Provider，
+		// 是控制台侧的基础设施。
+		"account": true, "authlimit": true,
 	}
 
 	entries, err := os.ReadDir("../../internal")

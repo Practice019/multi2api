@@ -37,7 +37,7 @@ func manifestFor(t *testing.T, h *Handler) uiManifest {
 	req := httptest.NewRequest(http.MethodGet, "/admin/ui/manifest", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HTTP %d，want 200（body=%s）", rec.Code, rec.Body.String())
 	}
@@ -53,7 +53,7 @@ func manifestFor(t *testing.T, h *Handler) uiManifest {
 // 前端要能在"未配置任何上游"的部署下正常显示空页面。返回 500 会让整页崩，
 // 而那正是新装用户的首次体验。
 func TestUIManifestEmpty(t *testing.T) {
-	m := manifestFor(t, New(Config{ListensLoopback: true, ServiceName: "svc"}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, ServiceName: "svc"}))
 
 	if m.Service != "svc" {
 		t.Errorf("service=%q want %q", m.Service, "svc")
@@ -104,7 +104,7 @@ func TestUIManifestAggregatesEveryProvider(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	m := manifestFor(t, New(Config{ListensLoopback: true, Registry: reg}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg}))
 
 	// 1) providers 数必须等于注册数
 	if len(m.Providers) != len(want) {
@@ -154,7 +154,7 @@ func TestUIManifestFakeUpstream(t *testing.T) {
 	if err := reg.Register(up); err != nil {
 		t.Fatal(err)
 	}
-	m := manifestFor(t, New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "ghost"}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "ghost"}))
 
 	// 1) 上游本身出现，并被标为默认
 	var found bool
@@ -215,7 +215,7 @@ func TestUIManifestHiddenRoutePropagates(t *testing.T) {
 	if err := reg.Register(up); err != nil {
 		t.Fatal(err)
 	}
-	m := manifestFor(t, New(Config{ListensLoopback: true, Registry: reg}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg}))
 
 	got := map[string]uiAdminRoute{}
 	for _, rt := range m.AdminRoutes {
@@ -249,7 +249,7 @@ func TestUIManifestHiddenRoutePropagates(t *testing.T) {
 // 而不是「额度探测」）—— 页面不会报错，只是多了个英文导航项。
 // 那种缺陷只能靠这条断言抓住，所以它比"标题好不好看"重要得多。
 func TestUIManifestCapabilityTitles(t *testing.T) {
-	m := manifestFor(t, New(Config{ListensLoopback: true}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true}))
 
 	byID := map[string]string{}
 	for _, c := range m.Capabilities {
@@ -342,7 +342,7 @@ func TestUIManifestRoutesAreSorted(t *testing.T) {
 	if err := reg.Register(up); err != nil {
 		t.Fatal(err)
 	}
-	m := manifestFor(t, New(Config{ListensLoopback: true, Registry: reg}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg}))
 
 	if len(m.AdminRoutes) != 3 {
 		t.Fatalf("路由数=%d want 3", len(m.AdminRoutes))
@@ -372,7 +372,7 @@ func TestUIManifestCoreCapabilityForUndeclaredRoute(t *testing.T) {
 	if err := reg.Register(up); err != nil {
 		t.Fatal(err)
 	}
-	m := manifestFor(t, New(Config{ListensLoopback: true, Registry: reg}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg}))
 
 	if len(m.AdminRoutes) != 1 {
 		t.Fatalf("路由数=%d want 1", len(m.AdminRoutes))
@@ -403,7 +403,7 @@ func TestUIManifestAccountCount(t *testing.T) {
 	p.AddFor("wb", &auth.Auth{UID: "u2", Nickname: "二号"}, nil)
 	p.AddFor("other", &auth.Auth{UID: "c1", Nickname: "三号"}, nil)
 
-	m := manifestFor(t, New(Config{ListensLoopback: true, Registry: reg, Pool: p, DefaultProvider: "wb"}))
+	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, Pool: p, DefaultProvider: "wb"}))
 
 	counts := map[string]int{}
 	for _, pi := range m.Providers {

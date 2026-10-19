@@ -34,7 +34,7 @@ func TestProvidersEndpointListsAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "alpha"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "alpha"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
 
@@ -105,7 +105,7 @@ func contains(xs []string, v string) bool {
 // 前端要能在"未配置任何上游"的部署下正常渲染（显示空态），
 // 而不是拿到 500 后整页崩。
 func TestProvidersEndpointEmptyRegistry(t *testing.T) {
-	h := New(Config{ListensLoopback: true, Registry: gateway.NewRegistry()})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: gateway.NewRegistry()})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
 
@@ -125,7 +125,7 @@ func TestProvidersEndpointEmptyRegistry(t *testing.T) {
 
 // TestProvidersEndpointNilRegistry nil 注册表也要降级，不 panic。
 func TestProvidersEndpointNilRegistry(t *testing.T) {
-	h := New(Config{ListensLoopback: true})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true})
 	rec := httptest.NewRecorder()
 	// 不应 panic
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
@@ -134,15 +134,15 @@ func TestProvidersEndpointNilRegistry(t *testing.T) {
 	}
 }
 
-// localReq 造一个**本机**请求。
+// localReq 造一个带测试凭据的管理面请求。
 //
-// 管理端点有"仅允许本机直连"的校验（见 admin 的 403 分支），
-// httptest.NewRequest 默认给的 RemoteAddr 是 192.0.2.1（TEST-NET），
-// 会被拦成 403。既有测试（mount_test.go）同样显式设成 127.0.0.1。
+// ⚠ 名字里的 "local" 是历史：改造前管理端点"仅允许本机直连"，所以测试只要
+// 把 RemoteAddr 设成 127.0.0.1 就能进去。现在门禁**一律校验凭据**
+// （本机也一视同仁），RemoteAddr 不再影响放行 —— 凭据由 withTestAuth 带上。
 func localReq(method, target string) *http.Request {
 	req := httptest.NewRequest(method, target, nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	return req
+	return withTestAuth(req)
 }
 
 // stubProvider 测试用的最小 Provider。
@@ -228,7 +228,7 @@ func TestProvidersLoginReflectsLoginFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "with-login"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "with-login"})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localReq("GET", "/admin/providers"))
 	if rec.Code != http.StatusOK {
@@ -292,7 +292,7 @@ func TestProvidersLoginRequiresConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "impl-but-unconfigured"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "impl-but-unconfigured"})
 
 	// 两个构造点都要检查 —— 这是本轮踩到的第 3 个坑：
 	// `providerInfo` 在 /admin/providers（schedule.go）与

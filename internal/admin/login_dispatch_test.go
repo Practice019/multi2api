@@ -186,13 +186,13 @@ func TestLoginStartDispatchByProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
 
 	// ---- 1) 有 LoginFlow 的上游：走它自己的流程 ----
 	rec := httptest.NewRecorder()
 	req := localReq("POST", "/admin/login/start")
 	req.Body = io.NopCloser(strings.NewReader(`{"provider":"flowup"}`))
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("有 LoginFlow 的上游应 200，实际 %d body=%s", rec.Code, rec.Body)
 	}
@@ -219,7 +219,7 @@ func TestLoginStartDispatchByProvider(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	req2 := localReq("POST", "/admin/login/start")
 	req2.Body = io.NopCloser(strings.NewReader(`{"provider":"noflow"}`))
-	h.ServeHTTP(rec2, req2)
+	h.ServeHTTP(rec2, withTestAuth(req2))
 	if rec2.Code != http.StatusNotImplemented {
 		t.Errorf("没有 LoginFlow 的上游应 501，实际 %d body=%s —— "+
 			"**回落是最坏的**：用户以为在给 noflow 加账号，实际加进了别处",
@@ -233,7 +233,7 @@ func TestLoginStartDispatchByProvider(t *testing.T) {
 	rec3 := httptest.NewRecorder()
 	req3 := localReq("POST", "/admin/login/start")
 	req3.Body = io.NopCloser(strings.NewReader(`{"provider":"ghost"}`))
-	h.ServeHTTP(rec3, req3)
+	h.ServeHTTP(rec3, withTestAuth(req3))
 	if rec3.Code != http.StatusNotImplemented {
 		t.Errorf("不存在的上游应 501，实际 %d body=%s", rec3.Code, rec3.Body)
 	}
@@ -248,7 +248,7 @@ func TestLoginStartBackwardCompatible(t *testing.T) {
 	if err := reg.Register(&stubProvider{id: "plain", caps: gateway.CapChat}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "plain"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "plain"})
 
 	// 不带 provider，且**没有配 OAuth 客户端** → 应报错但**不能 panic**，
 	// 也不能因为"找不到上游的 LoginFlow"而返回 501。
@@ -263,7 +263,7 @@ func TestLoginStartBackwardCompatible(t *testing.T) {
 				"老客户端会整片用不了", r)
 		}
 	}()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	if rec.Code == http.StatusNotImplemented {
 		t.Errorf("不带 provider 时**不该**返回 501 —— 那是「这个上游不支持添加账号」的语义，"+
@@ -289,12 +289,12 @@ func TestLoginPollDispatchByProvider(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "flowup"})
 
 	rec := httptest.NewRecorder()
 	req := localReq("POST", "/admin/login/poll")
 	req.Body = io.NopCloser(strings.NewReader(`{"state":"ST-abc","provider":"flowup"}`))
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusAccepted {
 		t.Errorf("pending 时应 202，实际 %d body=%s", rec.Code, rec.Body)
 	}
@@ -307,11 +307,11 @@ func TestLoginPollDispatchByProvider(t *testing.T) {
 	if err := reg2.Register(&stubProvider{id: "noflow", caps: gateway.CapChat}); err != nil {
 		t.Fatal(err)
 	}
-	h2 := New(Config{ListensLoopback: true, Registry: reg2, DefaultProvider: "noflow"})
+	h2 := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg2, DefaultProvider: "noflow"})
 	rec2 := httptest.NewRecorder()
 	req2 := localReq("POST", "/admin/login/poll")
 	req2.Body = io.NopCloser(strings.NewReader(`{"state":"S","provider":"noflow"}`))
-	h2.ServeHTTP(rec2, req2)
+	h2.ServeHTTP(rec2, withTestAuth(req2))
 	if rec2.Code != http.StatusNotImplemented {
 		t.Errorf("poll 对没有 LoginFlow 的上游也应 501，实际 %d body=%s", rec2.Code, rec2.Body)
 	}
@@ -336,12 +336,12 @@ func TestLoginFlowSecretMustMarshal(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg, DefaultProvider: "flowup", AuthDir: t.TempDir()})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, DefaultProvider: "flowup", AuthDir: t.TempDir()})
 
 	rec := httptest.NewRecorder()
 	req := localReq("POST", "/admin/login/poll")
 	req.Body = io.NopCloser(strings.NewReader(`{"state":"S","provider":"flowup"}`))
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("Secret 不能序列化时应 501（明确失败），实际 %d body=%s", rec.Code, rec.Body)

@@ -121,7 +121,7 @@ func TestReloadScopesToConfiguredProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{ListensLoopback: true,
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true,
 		Registry:        reg,
 		Pool:            p,
 		AuthDir:         dir,
@@ -175,7 +175,7 @@ func TestReloadFallsBackButWorks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{ListensLoopback: true, Registry: reg, Pool: p, AuthDir: dir, AuthsBase: dir, DefaultProvider: "workbuddy"}) // 无 ReloadProvider
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, Pool: p, AuthDir: dir, AuthsBase: dir, DefaultProvider: "workbuddy"}) // 无 ReloadProvider
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, localPost("/admin/accounts/reload"))
 
@@ -192,9 +192,9 @@ func TestReloadFallsBackButWorks(t *testing.T) {
 	}
 }
 
-// localPost 造一个本机 POST 请求。
+// localPost 造一个带测试凭据的管理面 POST 请求（凭据见 authtest_test.go）。
 func localPost(target string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, target, nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	return req
+	return withTestAuth(req)
 }

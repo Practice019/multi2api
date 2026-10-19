@@ -235,8 +235,13 @@ func (h *HTTP) clearSIDCookie(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// sidFromRequest 读会话 Cookie 值。
-func sidFromRequest(r *http.Request) string {
+// SIDFromRequest 读会话 Cookie 值（秘密常量 CookieName 的唯一读取点）。
+//
+// 导出给 internal/admin 的管理面门禁用：门禁要"会话或 admin_token"两条路，
+// 而会话这条路必须与登录端点读**同一个** Cookie —— 抄一份常量或自己拼
+// Cookie 名，将来改名就会变成"登录成功但管理面永远说你没登录"。
+// 没带/空值都返回空串，调用方据此走"未登录"分支。
+func SIDFromRequest(r *http.Request) string {
 	c, err := r.Cookie(CookieName)
 	if err != nil || c == nil {
 		return ""
@@ -436,7 +441,7 @@ func (h *HTTP) logout(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if sid := sidFromRequest(r); sid != "" {
+	if sid := SIDFromRequest(r); sid != "" {
 		h.cfg.Sessions.Revoke(sid)
 	}
 	h.clearSIDCookie(w, r)
@@ -449,7 +454,7 @@ func (h *HTTP) session(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	sid := sidFromRequest(r)
+	sid := SIDFromRequest(r)
 	if sid == "" {
 		// 没带 Cookie 不等于出错：这是"没登录"，前端据此显示登录页。
 		writeError(w, http.StatusUnauthorized, "auth_required", "请先登录")

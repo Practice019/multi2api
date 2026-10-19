@@ -31,7 +31,7 @@ func TestModelsPreviewReturnsAllCatalogMultipliers(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/models/preview", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HTTP %d: %s", rec.Code, rec.Body.String())
 	}
@@ -79,7 +79,7 @@ func TestModelsPreviewNilCatalogIsEmptyNotError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/models/preview", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("未接线应返回 200 + 空表，得到 HTTP %d", rec.Code)
 	}
@@ -100,7 +100,7 @@ func TestModelsPreviewFetchFailureIsEmpty(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/models/preview", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HTTP %d", rec.Code)
 	}

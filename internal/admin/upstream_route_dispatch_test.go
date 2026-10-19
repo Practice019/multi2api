@@ -44,11 +44,11 @@ func TestUpstreamRoutesActuallyDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, stubPath, nil)
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	if rec.Code == http.StatusNotFound {
 		t.Fatalf("上游声明的 %s 返回 404 —— "+
