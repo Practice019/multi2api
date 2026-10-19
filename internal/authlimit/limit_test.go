@@ -173,8 +173,8 @@ func TestLimiterFailClosedOnBadParams(t *testing.T) {
 func TestLimiterConcurrentAllowIsExact(t *testing.T) {
 	const (
 		goroutines = 8
-		perG        = 50
-		maxPerWin   = 100
+		perG       = 50
+		maxPerWin  = 100
 	)
 	l := NewLimiter(time.Hour, maxPerWin)
 	now := baseTime()
