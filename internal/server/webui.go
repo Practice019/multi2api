@@ -18,6 +18,9 @@ var webuiHTML []byte
 //go:embed webui-login.html
 var loginHTML []byte
 
+//go:embed webui-channels.html
+var channelsUIPage []byte
+
 //go:embed favicon.svg
 var faviconSVG []byte
 
