@@ -175,6 +175,55 @@ func (s *Store) Create(username, password string, role int) (*User, error) {
 	return copyUser(u), nil
 }
 
+// CreateBootstrap 建**首个**账号，并把它建成管理员。
+//
+// # 为什么必须是一个原子操作（而不是"先 Count()==0 再 Create(admin)"）
+//
+// 两步写法有一个真实竞态：两个请求同时看到 Count()==0，于是**两个都**成为
+// 管理员。这不是理论问题 —— 首启的窗口（刚部署、还没建号）恰好是最可能在
+// 公网被扫到的时刻，而"多出来的那个管理员"没有任何迹象。
+//
+// 所以在同一把锁里做"检查空 + 建号"，第二个到达者得到 ErrBootstrapDone。
+//
+// # 与开放注册的关系
+//
+// 首启建管理员的**唯一**入口就是这里（对应计划里"首次访问控制台显示
+// 创建管理员"）。库非空之后，注册接口一律只建 RoleMember，绝不给管理员 ——
+// 否则第一个注册的人之后还能再"注册"出一个管理员。
+func (s *Store) CreateBootstrap(username, password string) (*User, error) {
+	if err := validateUsername(username); err != nil {
+		return nil, err
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(username)
+	key := normalizeUsername(name)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.users) > 0 {
+		return nil, ErrBootstrapDone
+	}
+	u := &User{
+		ID:           newID(),
+		Username:     name,
+		DisplayName:  name,
+		PasswordHash: hash,
+		Role:         RoleAdmin,
+		Enabled:      true,
+		AuthVersion:  1,
+		CreatedAt:    nowStamp(),
+	}
+	s.users[key] = u
+	if err := s.saveLocked(); err != nil {
+		delete(s.users, key)
+		return nil, err
+	}
+	return copyUser(u), nil
+}
+
 // ByUsername 按用户名取账号（含 PasswordHash，供登录校验）。
 //
 // 返回副本；调用方**不得**把它直接序列化给前端（用 Snapshot/List）。
