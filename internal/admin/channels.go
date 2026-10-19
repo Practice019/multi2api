@@ -29,6 +29,8 @@ func (h *Handler) channelsStore() *channelstore.Store { return h.cfg.Channels }
 // registerChannels 注册 /admin/channels 系列端点（New 里调用）。
 func (h *Handler) registerChannels() {
 	h.register("GET /admin/channels", h.channelsList)
+	// 管理端「对外模型」页签的数据：免 key 视角的"现在对外可见什么、谁提供的"。
+	h.register("GET /admin/channels/public-models", h.channelsPublicModels)
 	h.register("POST /admin/channels", h.channelsUpsert)
 	h.register("POST /admin/channels/delete", h.channelsDelete)
 	h.register("POST /admin/channels/status", h.channelsStatus)
