@@ -1508,6 +1508,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		chStart := time.Now()
+		// ★ mode 记**客户端意图**（请求体 stream 字段），不是网关实际怎么转（2026-10-20 修）。
+		//
+		// 改造前这里是硬编码字面量 "sync"，后果是用户截图问"应该不是非流式吧"：
+		// 渠道转发的流式请求在日志里**全部被误报成 sync**。而 peek.Stream 早在解析
+		// 请求体时就拿到了（handler.go:1473 的 `Stream bool`），只是从来没传进来。
+		//
+		// 语义口径与 new-api 的 `is_stream` 对齐：那一列记的也是客户端意图。
+		// 用户看日志要回答的是"我这个请求本来该是流式吗"，不是"网关内部怎么转的"。
+		chMode := channelLogMode(peek.Stream)
 		fw, ferr := h.forwardViaChannel(r.Context(), peek.Model, body)
 		if ferr != nil {
 			// ★ 渠道失败也写请求日志。改造前渠道分支**一行日志都没有**，后果是实测踩到的：
@@ -1517,7 +1526,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if ue, ok := gateway.AsUpstreamHTTPError(ferr); ok {
 				st = ue.Status
 			}
-			logChatRowProvider(0, time.Since(chStart), peek.Model, "sync", "", "channel_error",
+			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "channel_error",
 				st, -1, nil, "channel_error:"+fw.ChannelName, 0, "", "", fw.ChannelID, fw.UpstreamModel)
 			// ⚠ 走 writeChannelError 而不是写死 502：上游的 429/401 要原样透传给客户端
 			// （见 channels_forward.go 里那段"实测踩过"的注释）。
@@ -1529,7 +1538,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 「这条 csg 请求到底走了渠道还是账号池」在日志里一眼可判。
 		// ⚠ tokens 记 -1（= 未知）：这条链路是字节直通，我们不解析 SSE 里的 usage。
 		//   provider 列写成 "channel:<渠道名>" —— 与账号池的 provider（loomy/workbuddy…）区分开。
-		logChatRowProvider(0, time.Since(chStart), peek.Model, "sync", "", "channel:"+fw.ChannelName,
+		logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "channel:"+fw.ChannelName,
 			fw.Stream.Status, -1, nil, "", 0, "", "", fw.ChannelID, fw.UpstreamModel)
 		return
 	}
