@@ -26,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"workbuddy2api/internal/channelstore"
 
 	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/apikey"
@@ -91,7 +92,9 @@ type Config struct {
 	// APIKeys 多 API key 管理（对标 new-api 令牌体系）：config.api_key 是
 	// 管理钥匙（不限额），普通 key 走 apikey.Store 的额度/限速/用量。
 	// nil = 不启用多 key 管理（旧行为）。
-	APIKeys   *apikey.Store
+	APIKeys *apikey.Store
+	// Channels 渠道存储（中转站方向）。nil = 对外目录仍旧走上游目录（既有行为）。
+	Channels  *channelstore.Store
 	MaxRotate int // 单请求最多换号次数，默认 3
 
 	// AccountAuth 控制台登录端点（注册/登录/登出/读会话），由装配层注入。
@@ -764,7 +767,13 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// 不这么做的话：列表里看得见几十个模型，调哪个都 403 ——
 	// 用户会读成"网关坏了"，而不是"这把 key 没这个权限"。
 	// 列表如实反映权限，权限才是可发现的。
-	data := h.filterModelsForRequest(r, h.modelList())
+	// ⚠ T5 接线（2026-10-20）：**配了渠道存储**时，对外目录由渠道能力索引决定
+	// （能力索引 ∩ 令牌白名单 → 反向映射成公开名，见 models_channels.go）；
+	// 没配 ⇒ 返回 nil，落回既有路径，一个字节都不变。
+	data := h.channelModelsForRequest(r)
+	if data == nil {
+		data = h.filterModelsForRequest(r, h.modelList())
+	}
 	// ⚠⚠ 给每条**补上档位声明**（2026-10-18 加，用户要求："我们的项目也需要可以支持选择思考深度"）。
 	//
 	// 动机：我们**一直有** `reasoning_effort` 的透传与降级（internal/cline/payload.go 的

@@ -1425,7 +1425,8 @@ func main() {
 		Upstream:          defaultUpstream{c: up},
 		DefaultClassifier: wb.Classify,
 		APIKey:            cfg.APIKey,
-		APIKeys:           apiKeysStore, // 多 API key 管理（普通 key 走它）
+		APIKeys:           apiKeysStore,  // 多 API key 管理（普通 key 走它）
+		Channels:          channelsStore, // 中转站口径的对外目录来源（nil = 走上游目录，既有行为）
 		// 控制台登录端点：挂 /admin/auth/（管理台门禁之外，见 server.NewHandler 里
 		// 的挂载注释与 account 包的 PathXxx 常量）。
 		AccountAuth: accountHTTP,
