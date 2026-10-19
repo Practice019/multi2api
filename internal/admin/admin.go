@@ -2869,6 +2869,14 @@ func cacheRates(items []logbuf.Entry, now time.Time) map[string]any {
 			continue
 		}
 		h, m := int64(e.CacheHitTokens), int64(e.CacheMissTokens)
+		// ⚠ 量纲守卫（2026-10-20 实测）：有的上游把 cache_hit 按完全不同的量纲报 ——
+		// 实测 7382 条记录里 hit 高达 100 万+，而同一行的 tokens 只有几百（比值 346~656 倍）。
+		// 直接累加会得出"缓存命中 21 亿 token"这种明显荒谬的总量，并把命中率推到 99.9%。
+		// 判据：hit 远超该行 tokens（> tokens*10，且 tokens>0）⇒ 这行缓存数据不可信，不计入。
+		// 宁可少算 —— 不要给出一个看不出错、但完全失真的百分比。
+		if e.Tokens > 0 && h > int64(e.Tokens)*10 {
+			continue
+		}
 		if h <= 0 && m <= 0 {
 			continue
 		}
@@ -2989,7 +2997,14 @@ func (d *dimStat) add(e logbuf.Entry) {
 		d.Fail++
 	}
 	if e.Tokens > 0 {
-		d.Tokens += int64(e.Tokens)
+		// ⚠ 只累加**有效** token 数（2026-10-20 实测修的 bug）：
+		// Tokens 的 -1 是"上游没给 usage"的哨兵值（见 logbuf.Entry.Tokens 的约定），
+		// 无条件 += 会把它当成 -1 个 token 加进去 —— 实测 34945 条里有 4321 条（12%）是 -1，
+		// 于是按 provider 聚合出现了 `codearts tokens = -2` 这种负数，总量也被压低。
+		// 哨兵必须**排除**，不能当 0（那是"真有 0 token"，语义不同），更不能当 -1。
+		if e.Tokens > 0 {
+			d.Tokens += int64(e.Tokens)
+		}
 	}
 	d.TokensRaw += int64(e.Tokens) // 原始和：负数原样进
 	if e.ThinkTokens > 0 {
