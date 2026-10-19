@@ -25,8 +25,11 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+const { assertConsoleShell, consoleEntry } = require('./lib_cdp.js');
 const CDP_PORT = 9311;
-const TARGET = process.env.RELOAD_URL || 'http://127.0.0.1:18080/ui';
+// ⚠ `consoleEntry` 给裸 /ui 补上 `?token=`（T7 起的门）。
+//   不补的话本探针量到的是登录页 —— 而它全是正向断言，红在迷惑的地方。
+const TARGET = consoleEntry(process.env.RELOAD_URL || 'http://127.0.0.1:18080/ui');
 const PROFILE = path.join(os.tmpdir(), 'chrome-t3-reload');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(d)); }).on('error', rej); }); }
@@ -58,6 +61,19 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     // 注入点远早于任何用户点击（点击由本脚本在注入之后发起）。
     await send('Page.navigate', { url: TARGET });
     await sleep(5000);
+
+    // ⚠ 先正向自证"打开的是控制台外壳"，再装 fetch hook。
+    //   缺这一步时，入口不对（登录页/空体）会红在"请求体里没有 X"，
+    //   归因指向"重载没带 provider"，真因却是"页面根本不是控制台"。
+    //   入口已由 lib_cdp.consoleEntry 补上 `?token=`。
+    {
+      const ev0 = async (x) => {
+        const r = await send('Runtime.evaluate', { expression: x, returnByValue: true, awaitPromise: true });
+        return r.result && r.result.result ? r.result.result.value : undefined;
+      };
+      const shell = await assertConsoleShell(ev0, ok, TARGET);
+      if (!shell.ready) throw new Error('页面不是控制台外壳，后面每条断言都会级联：' + JSON.stringify(shell.info));
+    }
 
     // ---- 装 fetch hook：记录 path + 原始 body ----
     await send('Runtime.evaluate', { expression: `(function(){

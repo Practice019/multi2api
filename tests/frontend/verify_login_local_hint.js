@@ -129,7 +129,19 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
       fs.rmSync(prof, { recursive: true, force: true });
       const args = ['--headless=new', '--disable-gpu', '--no-first-run',
         '--no-default-browser-check', '--remote-debugging-port=' + CDP,
-        '--user-data-dir=' + prof, '--window-size=1440,1100'];
+        '--user-data-dir=' + prof, '--window-size=1440,1100',
+        // ⚠ `--no-proxy-server` 是**必需**的，不是保险。
+        //
+        // 实测（诊断字段抓到的）：用 `--host-resolver-rules` 造非本机 host 时，
+        // Chrome 报的是
+        //    url=chrome-error://chromewebdata/  title="gw.example.test"
+        //    正文 "该网页无法正常运作 … HTTP ERROR 503"
+        // 而**同一时刻**用 curl 打同一个 Host（带不带端口、带不带 cookie）都是 302/200
+        // —— 也就是说 503 **不是本服务返回的**。
+        // 唯一解释：本机配了 HTTP 代理，Chrome 对"非本机 host"走代理，代理回 503；
+        // 而 127.0.0.1 / localhost 走 bypass 列表所以前两条场景正常。
+        // 加上 `--no-proxy-server` 后，假域名同样直连到 127.0.0.1（resolver 规则生效）。
+        '--no-proxy-server'];
       if (sc.resolve) args.push('--host-resolver-rules=MAP ' + sc.host + ' 127.0.0.1');
       args.push('about:blank');
       const br = spawn(CHROME, args, { stdio: 'ignore' });
