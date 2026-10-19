@@ -130,3 +130,60 @@ being an upstream concern"。渠道状态必须是 enabled 才能被用。
 本轮决定：**两者并存** —— 账号型照旧不并入渠道表；Key 型渠道**不进 Pool**（没有"号"可换，
 进 Pool 会把"一个 key 被限流"误判成"账号坏了"）。将来统一时，账号池应当成为"渠道的一种凭据来源"，
 而不是反过来把渠道塞进 Pool。
+
+---
+
+# 附录：实现进度与"被守卫逼出来"的设计决定（2026-10-20）
+
+上文的蓝图都来自知识库里的 new-api（v1.30.0）。这一节记录**实现到哪、以及哪些决定不是设计出来的、
+是被本仓的架构守卫逼出来又反过来变成了正确设计**。后来者请先读这一节，能少走一遍弯路。
+
+## 已完成（按提交顺序，全部实测）
+
+| 切片 | 落地 | 测试 |
+| --- | --- | --- |
+| T1 设计文档 + 蓝图对照 | `docs/design-channels.md` | — |
+| T2 渠道存储 + 能力索引 | `internal/channelstore`（`data/channels.json`、`(group,model,channel_id)` 复合键、停用即不产生能力） | 10 |
+| T3 模型映射 | `internal/modelmap`（`ModelMap` 是**公开名→上游名**、解析到不动点、环检测、反向表） | 6 |
+| T4 Key 型渠道 | `internal/openaicompat`（独立包，已登记为上游；逐字节透传、空 key 不打上游、错误不含 key 明文） | 4 |
+| T4b 选路 | `internal/channelstore/select.go`（优先级阶梯 + 同档加权随机；`PickKey`） | 5 |
+| T5 可见性 | `internal/modelvis`（能力索引 ∩ 白名单 ∩ 反向映射，默认收紧）+ `/v1/models` 接线 | 8 + 3 |
+| T6 数据契约 | `GET /admin/channels`（CRUD、key 只回掩码 + 显式 reveal）· `GET /admin/channels/public-models` | 4 + 4 |
+| R2 请求侧 | `internal/channelroute`（公开名→上游名规划、环跳过、优先级稳定排序） | 5 |
+| R3 转发 + 入口 | `internal/server/channels_forward.go` / `channels_stream.go`，接进 `/v1/chat/completions` | 5 + 4 |
+
+## 五个设计决定（★ 都是守卫或测试先红了才定下来的）
+
+1. **渠道存储落地 `data/channels.json`**，与 `apikeys.json`/`accounts.json` 同惯例；损坏**显式 `log.Fatalf`** ——
+   静默重建等于把用户手工配的渠道与 key 全清空。
+2. **`internal/upstream` 不是上游，是上游共用的库**。把 Provider 实现放进那儿会同时踩两条守卫：
+   豁免名单要求"被豁免的包不得依赖 gateway"，而一旦当上游看，`internal/workbuddy` 依赖它又违反
+   "上游之间必须独立"。⇒ Key 型渠道必须住**自己的包**并显式登记进 `allUpstreams()`。
+3. **核心包不得依赖上游包**（`TestCoreDoesNotDependOnUpstreams`）。`internal/server` 直接 import
+   `openaicompat` 会红 ⇒ 改为经 `ChannelProvider` **工厂注入**，组合根 `cmd/server` 装具体实现。
+   好处是可验证的：再加一种 Key 型上游只需换组合根一个函数。
+4. **`ModelMap` 的方向是「公开名→上游名」**（与 new-api 的 `channel.model_mapping` 同向）。
+   方向写反**不编译报错**，只在"目录里的名字与用户填的对不上"时才暴露 —— 目录侧用 `Reverse()`，
+   请求侧用 `Resolve()`，两个方向必须来自同一份表。
+5. **Key 型渠道失败时绝不回落账号池**。这是它与账号上游的根本区别：key 全停用 / 上游 401 时
+   明确失败，而不是悄悄换一条池里的号（否则用户看到计费口径与身份都变了，却不知道走了哪条）。
+   ⇒ 为此"模式未开启"（`errNoChannelMode`）与"真实失败"是**两个不同的错误**，入口分别走
+   回落既有路径 / 404 明确拒绝 / 502 如实上报。
+
+## 未完成（下一轮从这里接）
+
+- `channelstore.Select` 的**优先级阶梯 + 同档加权随机 + 第 n 次重试走第 n 档**尚未接进转发
+  （`channels_forward.go` 里取首选候选，有 TODO 指路）。
+- **T6 界面**：`/admin/channels` 与 `/admin/channels/public-models` 只有 API，控制台还没有页签。
+  ⚠ `webui.html` 已 762.6 KB / 12373 行 ⇒ 渠道界面应做成**独立的内嵌资源文件**再挂载，不要往里塞。
+- **活进程端到端**尚未做：目前全部证据都是进程内（handler 级 + 假上游 httptest）。
+  做的时候用**临时实例 + 临时目录**，绝不碰 7863 / `config.json` / `auths/` / `data/`。
+- 前端套件里 `dashboard_gen.js`（成员模式断言，该模式已被 `9f5a503` 有意删除）等 5 条为**既存红**，
+  与本功能无关（本功能分支未改任何前端字节）；门禁①（内嵌 script 语法）当前 5/5 绿，
+  改前端时它才是硬门。
+
+## 两条操作纪律（本会话踩过）
+
+- **内嵌资源改完必须先过 `verify_inline_script_syntax.js` 再部署**：曾有一次语法错直接部署，
+  控制台空白约两分钟。
+- **测试红了先修再提交**：本会话有一次在全量回归有红的情况下提交，随后不得不 revert 重做。
