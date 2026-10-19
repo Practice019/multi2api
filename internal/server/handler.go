@@ -93,6 +93,12 @@ type Config struct {
 	// 管理钥匙（不限额），普通 key 走 apikey.Store 的额度/限速/用量。
 	// nil = 不启用多 key 管理（旧行为）。
 	APIKeys *apikey.Store
+	// ChannelProvider 由**组合根**（cmd/server）注入：给 (渠道id, BaseURL) 造一个 gateway.Provider。
+	//
+	// ⚠ 为什么是工厂而不是核心直接 import 具体上游：核心包不得依赖上游包
+	// （架构守卫 TestCoreDoesNotDependOnUpstreams）。有了它，"再加一种 Key 型上游"
+	// 只需在组合根换一个函数，核心一行都不用改。
+	ChannelProvider func(id, baseURL string) gateway.Provider
 	// Channels 渠道存储（中转站方向）。nil = 对外目录仍旧走上游目录（既有行为）。
 	Channels  *channelstore.Store
 	MaxRotate int // 单请求最多换号次数，默认 3
