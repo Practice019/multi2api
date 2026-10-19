@@ -54,7 +54,7 @@ func newScopeFixture(t *testing.T) (*Handler, *[]string) {
 	} {
 		p.AddFor(c.provider, &auth.Auth{UID: c.uid, Nickname: c.uid}, nil)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg, Pool: p, DefaultProvider: "alpha"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg, Pool: p, DefaultProvider: "alpha"})
 	return h, asked
 }
 
@@ -65,7 +65,7 @@ func doScope(t *testing.T, h *Handler, body string) map[string]any {
 	req.RemoteAddr = "127.0.0.1:12345" // 绕开本机校验（httptest 默认 192.0.2.1 会被 403）
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -155,7 +155,7 @@ func TestQuotaRefreshScopeQueryParams(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/admin/accounts/quota/refresh?uid=a2", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	if got := *asked; len(got) != 1 || got[0] != "a2" {
 		t.Errorf("query 形式被刷的 uid = %v，want [a2] —— "+
@@ -173,7 +173,7 @@ func TestQuotaRefreshUnknownUIDIs404(t *testing.T) {
 		strings.NewReader(`{"uid":"nope"}`))
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("HTTP %d，want 404（账号不存在）", rec.Code)
@@ -190,7 +190,7 @@ func TestQuotaRefreshUnknownProviderIs404(t *testing.T) {
 		strings.NewReader(`{"provider":"gamma"}`))
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("HTTP %d，want 404（该上游在池里没有账号）", rec.Code)

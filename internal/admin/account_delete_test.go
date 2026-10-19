@@ -85,7 +85,7 @@ func newDeleteFixture(t *testing.T, poolFilePath string, loaderKnowsPath bool) *
 	p.SetDefaultProvider("codearts")
 	p.SyncToDirFor("codearts", []*auth.Auth{{UID: delTestUID, FilePath: poolFilePath}})
 
-	h := New(Config{ListensLoopback: true,
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true,
 		Pool:            p,
 		Registry:        reg,
 		AuthDir:         dir,

@@ -81,7 +81,7 @@ func newQuotaTestHandler(t *testing.T, providers ...gateway.Provider) (*Handler,
 	p.AddFor("workbuddy", &auth.Auth{UID: "wb-1"}, nil)
 	p.AddFor("codearts", &auth.Auth{UID: "ca-1"}, nil)
 
-	h := New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "workbuddy"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "workbuddy"})
 	return h, p, reg
 }
 

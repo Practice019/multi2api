@@ -24,7 +24,7 @@ func TestProviderDisplayNameReachesManifest(t *testing.T) {
 	if err := reg.Register(namedProvider{id: "fakecn", name: "Fake (中国版)"}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/ui/manifest"))
@@ -57,7 +57,7 @@ func TestProviderWithoutDisplayNameOmitsField(t *testing.T) {
 	if err := reg.Register(plainNoNameProvider{id: "plain"}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/ui/manifest"))
@@ -87,7 +87,7 @@ func TestProviderEmptyDisplayNameFallsBackToOmit(t *testing.T) {
 	if err := reg.Register(namedProvider{id: "blank", name: "   "}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/ui/manifest"))
@@ -112,7 +112,7 @@ func TestProvidersEndpointAlsoCarriesDisplayName(t *testing.T) {
 	if err := reg.Register(namedProvider{id: "fakecn", name: "Fake (中国版)"}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, adminReq(http.MethodGet, "/admin/providers"))
@@ -132,12 +132,15 @@ func TestProvidersEndpointAlsoCarriesDisplayName(t *testing.T) {
 	}
 }
 
-// adminReq 造一个**本机**请求（httptest 默认的 192.0.2.1 会被 admin 的
-// 本机校验挡成 403，拿不到 manifest —— 那不是被测的事）。
+// adminReq 造一个带测试凭据的管理面请求。
+//
+// ⚠ 2026-10 门禁改造后，**本机直连不再免令牌**（那条 localExempt 正是用户
+// 报障「填错 admin token 也能进 UI」的根因），所以这里设 RemoteAddr 已经
+// 不管用了：必须真的带凭据（testAdminToken，见 authtest_test.go）。
 func adminReq(method, target string) *http.Request {
 	r := httptest.NewRequest(method, target, nil)
 	r.RemoteAddr = "127.0.0.1:12345"
-	return r
+	return withTestAuth(r)
 }
 
 // namedProvider 实现了 DisplayNameExt 的桩上游。

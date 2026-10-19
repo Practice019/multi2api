@@ -1,14 +1,14 @@
-// gate_test.go 管理台门禁的守卫。
+// gate_test.go 管理面门禁的守卫。
 //
-// # 这组测试是四件事的判据（用户报障「没授权却能改设置」）
+// # 这组测试是七件事的判据（用户报障「填错 admin token 居然能进 UI」）
 //
-//	① 远程无凭据          → 拒绝
-//	② 远程拿 **api_key**  → 拒绝（这是改造前的**权限倒挂**：对话钥匙能开管理台）
-//	③ 远程拿 admin_token  → 放行
-//	④ 本机免令牌          → **只在"进程只绑回环"时**成立
-//
-// 第 ④ 条拆成三个子用例（绑回环 / 绑全网卡 / 经反代），因为改造前的漏洞
-// 正是"只看 RemoteAddr 是回环"，而反代从 127.0.0.1 连过来时那条恒成立。
+//	① 无凭据（**含本机直连**）  → 401（改造前本机无条件放行，那就是报障的根因）
+//	② 拿 **api_key**            → 401（权限倒挂：对话钥匙不得解锁管理面）
+//	③ 拿 admin_token            → 放行（Bearer 与 ?token= 两条）
+//	④ 浏览器会话                → 放行，且按角色分流（管理员全部 / 成员白名单）
+//	⑤ 会话失效（改口令/被撤）    → 401
+//	⑥ 一个凭据都没配            → 一律 401（不是"回落用 api_key"）
+//	⑦ 轮换令牌                  → 立即生效，旧令牌立刻失效
 //
 // # 为什么每条都要有
 //
@@ -19,35 +19,80 @@ package admin
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+
+	"workbuddy2api/internal/account"
 )
 
-// gateFixture 门禁测试夹具：一个最小 Handler + 两把不同的钥匙。
+// gateFixture 门禁测试夹具：一个最小 Handler + 两把不同的钥匙 + 可选账号体系。
 type gateFixture struct {
 	h          *Handler
 	apiKey     string
 	adminToken string
+	accounts   *account.Store
+	sessions   *account.SessionStore
+	admin      *account.User // 管理员账号
+	member     *account.User // 成员账号
 }
 
-func newGateFixture(t *testing.T, listensLoopback bool) *gateFixture {
+// newGateFixture 造夹具。withAccounts=true 时另建账号体系（管理员 + 成员各一）。
+func newGateFixture(t *testing.T, withAccounts bool) *gateFixture {
 	t.Helper()
 	const (
 		apiKey     = "API-KEY-for-chat-only"
 		adminToken = "ADMIN-TOKEN-for-console"
 	)
-	h := New(Config{
-		ListensLoopback: listensLoopback,
+	cfg := Config{
+		ListensLoopback: true,
 		APIKey:          apiKey,
 		AdminToken:      adminToken,
+	}
+	f := &gateFixture{apiKey: apiKey, adminToken: adminToken}
+	if withAccounts {
+		dir := t.TempDir()
+		var err error
+		f.accounts, err = account.New(filepath.Join(dir, "accounts.json"))
+		if err != nil {
+			t.Fatalf("账号库: %v", err)
+		}
+		f.sessions, err = account.NewSessionStore(filepath.Join(dir, "sessions.json"))
+		if err != nil {
+			t.Fatalf("会话库: %v", err)
+		}
+		f.admin, err = f.accounts.Create("boss", "boss-password-001", account.RoleAdmin)
+		if err != nil {
+			t.Fatalf("建管理员: %v", err)
+		}
+		f.member, err = f.accounts.Create("staff", "staff-password-002", account.RoleMember)
+		if err != nil {
+			t.Fatalf("建成员: %v", err)
+		}
+		cfg.Accounts = f.accounts
+		cfg.Sessions = f.sessions
+	}
+	f.h = New(cfg)
+	// 测试专用端点：把「门禁判据」与「端点内部实现」解耦。
+	//
+	// /admin/accounts 这类真实端点在夹具里会因为没有 Pool 而 panic ——
+	// 那是**端点**的前置条件（它要读账号池），不是门禁的判据。
+	// 挂一个最小处理器后，200/403 只反映门禁的判定结果，
+	// 于是角色分流的断言不会被端点内部的接线问题干扰。
+	f.h.mux.HandleFunc("/admin/testonly", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
-	return &gateFixture{h: h, apiKey: apiKey, adminToken: adminToken}
+	return f
 }
 
-// probe 打一个**只读**的管理端点（GET /admin/ui/manifest，不需要任何接线），
-// 返回状态码。用它而不是真的去改设置：判据是"能不能进管理面"，
-// 而只读端点已经足够表达那件事，且不会产生副作用。
-func (f *gateFixture) probe(remoteAddr, bearer string, extraHeaders map[string]string) int {
-	req := httptest.NewRequest(http.MethodGet, "/admin/ui/manifest", nil)
+// probe 打一个**只读**的管理端点，返回状态码与响应体。
+//
+// 传 path="" 时用 /admin/ui/manifest（成员白名单内的端点，不需要任何接线）；
+// 要测"角色不够"就用 /admin/accounts（上游账号池，管理员专属）。
+func (f *gateFixture) probe(path, remoteAddr, bearer string, extraHeaders map[string]string) (int, string) {
+	if path == "" {
+		path = "/admin/ui/manifest"
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.RemoteAddr = remoteAddr
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
@@ -57,38 +102,79 @@ func (f *gateFixture) probe(remoteAddr, bearer string, extraHeaders map[string]s
 	}
 	rec := httptest.NewRecorder()
 	f.h.ServeHTTP(rec, req)
-	return rec.Code
+	return rec.Code, rec.Body.String()
 }
 
-// ① 远程无凭据 ⇒ 拒绝。
-func TestGate_RemoteWithoutCredentialDenied(t *testing.T) {
-	f := newGateFixture(t, false) // 绑全网卡（暴露）
-	if got := f.probe("203.0.113.9:5555", "", nil); got != http.StatusForbidden {
-		t.Errorf("远程无凭据应当 403，实际 %d ——\n"+
-			"这是本组最基本的判据：未授权不得访问任何管理面。", got)
+// probeAs 用某个账号的会话 cookie 打请求。
+func (f *gateFixture) probeAs(t *testing.T, u *account.User, path string) (int, string) {
+	t.Helper()
+	sess, err := f.sessions.Issue(u, "127.0.0.1", "probe/1.0")
+	if err != nil {
+		t.Fatalf("签发会话: %v", err)
+	}
+	return f.probeWithSID(path, sess.SID)
+}
+
+func (f *gateFixture) probeWithSID(path, sid string) (int, string) {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = "127.0.0.1:5555"
+	req.AddCookie(&http.Cookie{Name: account.CookieName, Value: sid})
+	rec := httptest.NewRecorder()
+	f.h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// ① ★ 无凭据 ⇒ 401 —— **包括来自回环地址的请求**。
+//
+// 这是用户报障「填错 admin token 居然能进 UI」的正解：改造前
+// `localExempt()` 对"监听回环 + 上一跳回环 + 无转发头"的请求**无条件放行**，
+// 于是本机任何进程（以及浏览器里任意页面发起的请求）都是管理员，
+// 连 /admin/apikeys 都能读到钥匙（掩码）。
+func TestGate_NoCredentialDenied(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		remoteAddr string
+		headers    map[string]string
+	}{
+		{"本机直连", "127.0.0.1:5555", nil},
+		{"本机 IPv6", "[::1]:5555", nil},
+		{"远程", "203.0.113.9:5555", nil},
+		{"经反代转发", "127.0.0.1:5555", map[string]string{"X-Forwarded-For": "203.0.113.9"}},
+	} {
+		f := newGateFixture(t, false)
+		code, body := f.probe("", tc.remoteAddr, "", tc.headers)
+		if code != http.StatusUnauthorized {
+			t.Errorf("%s 无凭据应当 401，实际 %d ——\n"+
+				"回环地址**不是凭据**。改造前这里 200（免令牌），"+
+				"于是「能连上来」被当成了「有权限」。", tc.name, code)
+		}
+		if !containsStr(body, "auth_required") {
+			t.Errorf("%s 的 401 应当带 code=auth_required（前端据此跳登录页），实际: %s", tc.name, body)
+		}
 	}
 }
 
-// ② 远程拿 **api_key** ⇒ 仍然拒绝。
-//
-// ⚠ 这一条是本次修复的**核心**。改造前门禁认的就是 api_key，
-// 于是"给某个客户端配一把 key 调对话"等于"把管理台交出去"。
-func TestGate_RemoteWithAPIKeyDenied(t *testing.T) {
+// ② 拿 **api_key** ⇒ 仍然拒绝（权限倒挂不得复活）。
+func TestGate_APIKeyDenied(t *testing.T) {
 	f := newGateFixture(t, false)
-	if got := f.probe("203.0.113.9:5555", f.apiKey, nil); got != http.StatusForbidden {
-		t.Errorf("远程拿 api_key 应当 403，实际 %d ——\n"+
+	code, body := f.probe("", "203.0.113.9:5555", f.apiKey, nil)
+	if code != http.StatusUnauthorized {
+		t.Errorf("拿 api_key 应当 401，实际 %d ——\n"+
 			"api_key 是**对话接口**的凭据（可能发给第三方客户端/机器人），"+
 			"它绝不能解锁管理台。改造前它们共用一把钥匙，那正是用户报的"+
-			"「没授权却能改设置」的根因之一。", got)
+			"「没授权却能改设置」的根因之一。", code)
+	}
+	if containsStr(body, f.apiKey) {
+		t.Error("★ 拒绝响应里不能回显任何凭据")
 	}
 }
 
-// ③ 远程拿 admin_token ⇒ 放行。
-func TestGate_RemoteWithAdminTokenAllowed(t *testing.T) {
+// ③ 拿 admin_token ⇒ 放行（远程也一样：它是机器凭据，与来源地址无关）。
+func TestGate_AdminTokenAllowed(t *testing.T) {
 	f := newGateFixture(t, false)
-	if got := f.probe("203.0.113.9:5555", f.adminToken, nil); got != http.StatusOK {
-		t.Errorf("远程拿 admin_token 应当放行，实际 %d ——\n"+
-			"这是管理台**唯一**的远程入口，它坏了等于没有远程管理面。", got)
+	if code, _ := f.probe("", "203.0.113.9:5555", f.adminToken, nil); code != http.StatusOK {
+		t.Errorf("拿 admin_token 应当放行，实际 %d ——"+
+			"它是脚本/CI 用的机器凭据，坏了等于没有远程管理面。", code)
 	}
 }
 
@@ -100,81 +186,119 @@ func TestGate_QueryTokenAccepted(t *testing.T) {
 	rec := httptest.NewRecorder()
 	f.h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Errorf("?token=<admin_token> 应当放行，实际 %d ——\n"+
+		t.Errorf("?token=<admin_token> 应当放行，实际 %d ——"+
 			"浏览器地址栏没办法自定义请求头，查询参数是它唯一能带凭据的地方。", rec.Code)
 	}
 }
 
-// ④a 绑回环 + 来自回环 ⇒ 免令牌放行。
-func TestGate_LoopbackExemptWhenBoundToLoopback(t *testing.T) {
+// ④ 浏览器会话 ⇒ 放行；★ 成员按白名单分流。
+func TestGate_SessionRoleSplit(t *testing.T) {
 	f := newGateFixture(t, true)
-	if got := f.probe("127.0.0.1:5555", "", nil); got != http.StatusOK {
-		t.Errorf("只绑回环时的本机访问应当免令牌放行，实际 %d ——\n"+
-			"这是用户明确要的便利（本机不该手填钥匙）。", got)
-	}
-}
 
-// ④b 绑**全网卡** ⇒ 即使来自回环也**不**免令牌。
-//
-// ⚠ 这条是本修复的关键一环。绑 0.0.0.0 时"本机"这个前提不成立：
-// 端口对所有人开放，而来源地址只说明"上一跳"。
-func TestGate_LoopbackNotExemptWhenExposed(t *testing.T) {
-	f := newGateFixture(t, false) // 绑 0.0.0.0:7863
-	if got := f.probe("127.0.0.1:5555", "", nil); got != http.StatusForbidden {
-		t.Errorf("绑全网卡时来自回环的请求应当**仍然要求令牌**，实际 %d ——\n"+
-			"绑 0.0.0.0 意味着端口对外公开，此时「本机」这个豁免不成立。\n"+
-			"（Docker 端口映射、本机反代都会让远程请求以 127.0.0.1 到达。）", got)
+	// 管理员：白名单内与**管理员专属**端点都能进
+	for _, path := range []string{"/admin/ui/manifest", "/admin/stats", "/admin/testonly"} {
+		if code, body := f.probeAs(t, f.admin, path); code != http.StatusOK {
+			t.Errorf("管理员访问 %s 应当 200，实际 %d: %s", path, code, body)
+		}
 	}
-}
 
-// ④c 带反代转发头 ⇒ 不免令牌（即使绑回环 + 来源回环）。
-//
-// ⚠ 这条专治**本机反代**：nginx/caddy/frp 从 127.0.0.1 连过来时，
-// RemoteAddr 恒为回环。改造前它因此被判成"本机"，管理台对全网敞开。
-func TestGate_ForwardedRequestNotExempt(t *testing.T) {
-	f := newGateFixture(t, true) // 绑回环（最容易出错的那种配置）
-	for _, hdr := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Real-Ip", "Forwarded"} {
-		if got := f.probe("127.0.0.1:5555", "", map[string]string{hdr: "203.0.113.9"}); got != http.StatusForbidden {
-			t.Errorf("带 %s 的请求应当要求令牌，实际 %d ——\n"+
-				"这个头说明链路上有反向代理，我们看到的来源是**代理**而不是真实客户端，"+
-				"所以「本机直连」这个前提不成立。", hdr, got)
+	// 成员：白名单内可进
+	for _, path := range []string{"/admin/ui/manifest", "/admin/stats"} {
+		if code, body := f.probeAs(t, f.member, path); code != http.StatusOK {
+			t.Errorf("成员访问白名单内的 %s 应当 200，实际 %d: %s", path, code, body)
+		}
+	}
+	// /admin/apikeys 在白名单里，但夹具没接 cfg.APIKeys ⇒ 路由未挂载（404）。
+	// 这里要判的是**门禁不拦成员**，路由是否存在是 T8 的事 —— 所以断言"不是 403"。
+	if code, _ := f.probeAs(t, f.member, "/admin/apikeys"); code == http.StatusForbidden {
+		t.Errorf("成员访问 /admin/apikeys 不该被门禁拦（它在 memberPaths 里），实际 %d", code)
+	}
+
+	// ★ 成员：管理员专属端点必须 403，且 code 与 401 区分开
+	for _, path := range []string{"/admin/accounts", "/admin/settings", "/admin/logs", "/admin/providers", "/admin/testonly"} {
+		code, body := f.probeAs(t, f.member, path)
+		if code != http.StatusForbidden {
+			t.Errorf("★ 成员访问 %s 应当 403（有身份但角色不够），实际 %d: %s", path, code, body)
+		}
+		if !containsStr(body, "forbidden_role") {
+			t.Errorf("★ 角色不足应当带 code=forbidden_role（前端据此显示「无权」而不是再跳登录页），实际: %s", body)
 		}
 	}
 }
 
-// 未配 admin_token ⇒ 无论来源一律拒绝（安全默认：没有远程管理面）。
-func TestGate_NoAdminTokenConfiguredDeniesAll(t *testing.T) {
+// ④b 前端白名单必须**默认拒绝**：不在表里的一律管理员专属。
+//
+// 这条钉住 memberPaths 的语义：它是白名单，不是黑名单 ——
+// 加新端点的人不需要记得来更新它（漏更新只会"成员进不去"，不会"越权"）。
+func TestGate_MemberWhitelistIsDenyByDefault(t *testing.T) {
+	f := newGateFixture(t, true)
+	for _, path := range []string{
+		"/admin/accounts/reload",
+		"/admin/accounts/checkin/all",
+		"/admin/settings/save",
+		"/admin/some/future/endpoint",
+	} {
+		if code, _ := f.probeAs(t, f.member, path); code != http.StatusForbidden {
+			t.Errorf("成员访问未列白名单的 %s 应当 403（默认拒绝），实际 %d", path, code)
+		}
+	}
+}
+
+// ⑤ 会话失效（口令变更/被撤销）⇒ 401，不能拿旧 cookie 进管理面。
+func TestGate_StaleSessionRejected(t *testing.T) {
+	f := newGateFixture(t, true)
+	sess, err := f.sessions.Issue(f.member, "127.0.0.1", "probe/1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := f.probeWithSID("/admin/ui/manifest", sess.SID); code != http.StatusOK {
+		t.Fatalf("前置条件不成立：刚签发的会话应当能进，实际 %d", code)
+	}
+	// 改口令 ⇒ 账号 AuthVersion +1 ⇒ 所有旧会话失效
+	if _, err := f.accounts.SetPassword(f.member.ID, "member-new-password-003"); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := f.probeWithSID("/admin/ui/manifest", sess.SID); code != http.StatusUnauthorized {
+		t.Errorf("★ 口令变更后旧会话必须 401，实际 %d: %s ——\n"+
+			"门禁必须走 SessionStore.Lookup 的四道校验（过期/撤销/禁用/AuthVersion），"+
+			"自己读 cookie 查表会漏掉全部四道。", code, body)
+	}
+	// 伪造 SID
+	if code, _ := f.probeWithSID("/admin/ui/manifest", "deadbeef"); code != http.StatusUnauthorized {
+		t.Errorf("伪造 SID 应当 401，实际 %d", code)
+	}
+}
+
+// ⑥ 一个凭据都没配 ⇒ 一律 401（安全默认），不得回落到 api_key。
+func TestGate_NothingConfiguredDeniesAll(t *testing.T) {
 	h := New(Config{ListensLoopback: true, APIKey: "some-api-key"})
 	for _, addr := range []string{"127.0.0.1:5555", "203.0.113.9:5555"} {
-		// 本机仍然走"绑回环 + 来源回环"那条豁免 —— 那是**设计**（本地部署无需令牌）。
-		// 远程则必须拒绝：它没有可用的令牌。
-		want := http.StatusOK
-		if addr != "127.0.0.1:5555" {
-			want = http.StatusForbidden
-		}
 		req := httptest.NewRequest(http.MethodGet, "/admin/ui/manifest", nil)
 		req.RemoteAddr = addr
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		if rec.Code != want {
-			t.Errorf("未配 admin_token 时 %s 应当 %d，实际 %d ——\n"+
-				"没配令牌就**没有远程管理面**（安全默认），"+
-				"而不是回落到用 api_key（那正是要修掉的权限倒挂）。", addr, want, rec.Code)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("没配任何凭据时 %s 应当 401，实际 %d ——\n"+
+				"没配就是**没有管理面**（用户可以去 /ui 建第一个管理员），"+
+				"而不是回落到 api_key（那正是要修掉的权限倒挂）。", addr, rec.Code)
 		}
 	}
-	// 反向：拿 api_key 冒充门禁令牌也要被拒（不能有隐式回落）。
+	// 拿 api_key 冒充门禁令牌也要被拒（不能有隐式回落）
 	req := httptest.NewRequest(http.MethodGet, "/admin/ui/manifest", nil)
 	req.RemoteAddr = "203.0.113.9:5555"
 	req.Header.Set("Authorization", "Bearer some-api-key")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("未配 admin_token 时拿 api_key 应当 403，实际 %d —— "+
-			"任何「api_key 能当门禁用」的隐式回落都是权限倒挂的复活。", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("未配任何凭据时拿 api_key 应当 401，实际 %d", rec.Code)
+	}
+	// 提示要指向"去 /ui 建管理员"这个可执行动作
+	if !containsStr(rec.Body.String(), "/ui") {
+		t.Errorf("一个凭据都没配时，拒绝提示应当指向 /ui（去创建第一个管理员），实际: %s", rec.Body.String())
 	}
 }
 
-// ⚠ 轮换门禁令牌后**立即生效**（用户报障：轮换之后还要重启才有用）。
+// ⑦ ⚠ 轮换门禁令牌后**立即生效**（用户报障：轮换之后还要重启才有用）。
 //
 // 根因是内存里有两份副本：server.Handler.apiKey（有 SetAPIKey）与
 // admin.Handler.cfg.APIKey（构造期快照）。门禁读后者 ⇒ 永不更新。
@@ -183,36 +307,43 @@ func TestGate_RotationTakesEffectImmediately(t *testing.T) {
 	f := newGateFixture(t, false)
 	const newToken = "ROTATED-ADMIN-TOKEN"
 
-	if got := f.probe("203.0.113.9:5555", newToken, nil); got != http.StatusForbidden {
-		t.Fatalf("前置条件不成立：新令牌在轮换前不该能用（实际 %d）", got)
+	if code, _ := f.probe("", "203.0.113.9:5555", newToken, nil); code != http.StatusUnauthorized {
+		t.Fatalf("前置条件不成立：新令牌在轮换前不该能用（实际 %d）", code)
 	}
 	f.h.SetAdminToken(newToken)
-	if got := f.probe("203.0.113.9:5555", newToken, nil); got != http.StatusOK {
+	if code, _ := f.probe("", "203.0.113.9:5555", newToken, nil); code != http.StatusOK {
 		t.Errorf("轮换后新令牌应当**立即**可用，实际 %d ——\n"+
 			"这正是用户报的「轮换之后还需要重启整个项目才有用」：\n"+
-			"门禁若读构造期快照（cfg.AdminToken），SetAdminToken 就白调了。", got)
+			"门禁若读构造期快照（cfg.AdminToken），SetAdminToken 就白调了。", code)
 	}
-	if got := f.probe("203.0.113.9:5555", f.adminToken, nil); got != http.StatusForbidden {
-		t.Errorf("轮换后**旧**令牌应当立即失效，实际 %d ——\n"+
-			"旧令牌还能进意味着「轮换」没有真正吊销凭据。", got)
+	if code, _ := f.probe("", "203.0.113.9:5555", f.adminToken, nil); code != http.StatusUnauthorized {
+		t.Errorf("轮换后**旧**令牌应当立即失效，实际 %d ——"+
+			"旧令牌还能进意味着「轮换」没有真正吊销凭据。", code)
 	}
 }
 
-// 门禁拒绝时返回的提示必须**可执行**（指出该配哪个字段），而不是空话。
+// 门禁拒绝时返回的提示必须**可执行**（指出下一步做什么），而不是空话。
 func TestGate_DenyHintIsActionable(t *testing.T) {
+	// 情形一：配了令牌没带 ⇒ 提示要说清怎么带令牌、浏览器怎么登录
 	f := newGateFixture(t, false)
-	req := httptest.NewRequest(http.MethodGet, "/admin/ui/manifest", nil)
-	req.RemoteAddr = "203.0.113.9:5555"
-	req.Header.Set("Authorization", "Bearer "+f.apiKey) // 拿错钥匙
-	rec := httptest.NewRecorder()
-	f.h.ServeHTTP(rec, req)
-	body := rec.Body.String()
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("应当 403，实际 %d", rec.Code)
-	}
-	for _, want := range []string{"admin_token", "api_key"} {
+	_, body := f.probe("", "203.0.113.9:5555", "", nil)
+	for _, want := range []string{"admin_token", "/ui"} {
 		if !containsStr(body, want) {
-			t.Errorf("拒绝响应里应当说明「%s」这个字段（用户才知道去哪配），实际: %s", want, body)
+			t.Errorf("拒绝提示里应当说明「%s」（用户才知道下一步做什么），实际: %s", want, body)
+		}
+	}
+
+	// 情形二：配了账号 ⇒ 提示要指向 /ui 登录
+	f2 := newGateFixture(t, true)
+	_, body2 := f2.probe("", "203.0.113.9:5555", "", nil)
+	if !containsStr(body2, "/ui") {
+		t.Errorf("有控制台账号时，提示应当指向 /ui 登录，实际: %s", body2)
+	}
+
+	// ⚠ 任何情形都不得再出现"本机免令牌"这类已经不成立的说明
+	for _, body := range []string{body, body2} {
+		if containsStr(body, "本机免令牌") || containsStr(body, "loopback") {
+			t.Errorf("提示里不该再提「本机免令牌」（该路径已删除），实际: %s", body)
 		}
 	}
 }

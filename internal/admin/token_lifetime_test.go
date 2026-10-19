@@ -91,7 +91,7 @@ func TestAccountsReportsNeverExpires(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("lmy", &auth.Auth{UID: "ly-1"}, "不透明的 secret")
 
-	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "lmy"}))[0]
+	v := accountsFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "lmy"}))[0]
 	if !v.TokenNeverExpires {
 		t.Fatal("★ 上游说「设计上不过期」，核心却没下发 token_never_expires —— " +
 			"界面只能显示 `—`，用户会读成「这功能没做」")
@@ -121,7 +121,7 @@ func TestAccountsNeverExpiresWinsOnlyWhenNoExpiry(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("both", &auth.Auth{UID: "b-1"}, "不透明的 secret")
 
-	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "both"}))[0]
+	v := accountsFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "both"}))[0]
 	if v.TokenExpireSec == nil {
 		t.Fatal("有到期时刻时必须以时刻为准")
 	}
@@ -147,7 +147,7 @@ func TestAccountsNeverExpiresFalseWhenNoSecret(t *testing.T) {
 	// secret 传 nil（= 手工拷凭证但没走 WithSecrets 那个缺口）
 	p.AddFor("ns", &auth.Auth{UID: "ns-1"}, nil)
 
-	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "ns"}))[0]
+	v := accountsFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "ns"}))[0]
 	if v.TokenNeverExpires {
 		t.Error("★ 拿不到凭证时说「永久」—— 那是替一个不存在的凭证做断言")
 	}
@@ -164,7 +164,7 @@ func TestAccountsPlainProviderHasNeither(t *testing.T) {
 	p := pool.New("")
 	p.AddFor("wb", &auth.Auth{UID: "wb-1"}, nil)
 
-	v := accountsFor(t, New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "wb"}))[0]
+	v := accountsFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "wb"}))[0]
 	if v.TokenNeverExpires {
 		t.Error("没实现任何过期扩展点时不该下发 token_never_expires")
 	}
@@ -188,7 +188,7 @@ func TestTokenNeverExpiresIsOmittedFromJSON(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/accounts", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "wb"}).ServeHTTP(rec, req)
+	New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "wb"}).ServeHTTP(rec, withTestAuth(req))
 
 	body := rec.Body.String()
 	if strings.Contains(body, "token_never_expires") {
@@ -208,7 +208,7 @@ func TestCredentialNeverExpiresRefusesUnknownProvider(t *testing.T) {
 	}
 	p := pool.New("")
 	p.AddFor("lmy", &auth.Auth{UID: "ly-1"}, "s")
-	h := New(Config{ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "lmy"})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Pool: p, Registry: reg, DefaultProvider: "lmy"})
 
 	cases := []struct{ name, uid, provider string }{
 		{"账号不存在", "没有这个 uid", "lmy"},

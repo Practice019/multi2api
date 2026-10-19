@@ -1243,6 +1243,10 @@ func main() {
 		// 见 internal/admin 的 adminTokenMatches 注释：改造前门禁认 api_key，
 		// 于是"给客户端配一把对话 key"等于"交出管理台"。
 		AdminToken: cfg.AdminToken,
+		// 控制台账号体系：管理面门禁因此有**两条**路（浏览器会话 / 脚本令牌），
+		// 并按角色分流（成员只放行 memberPaths 那几条，见 admin.go）。
+		Accounts: accountsStore,
+		Sessions: sessionsStore,
 		// 「本机免令牌」的前提之一：进程**只**监听回环地址。
 		// 绑 0.0.0.0 时这个为 false，本机豁免随之失效（见 localExempt）。
 		ListensLoopback: listensLoopback(cfg.Listen),

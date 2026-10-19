@@ -72,13 +72,13 @@ func TestMountUpstreamRoutes(t *testing.T) {
 	if err := reg.Register(up); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 
 	// 上游端点必须可达 —— 这是"挂载真的发生了"的唯一证据
 	req := httptest.NewRequest(http.MethodGet, "/admin/fake-probe", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("上游端点未挂上：HTTP %d（挂载逻辑提前退出了）", rec.Code)
 	}
@@ -90,7 +90,7 @@ func TestMountUpstreamRoutes(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodPost, "/admin/fake-probe", nil)
 	req2.RemoteAddr = "127.0.0.1:12345"
 	rec2 := httptest.NewRecorder()
-	h.ServeHTTP(rec2, req2)
+	h.ServeHTTP(rec2, withTestAuth(req2))
 	if rec2.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET 端点被 POST 命中（HTTP %d）—— 方法没进 pattern", rec2.Code)
 	}
@@ -98,11 +98,11 @@ func TestMountUpstreamRoutes(t *testing.T) {
 
 // TestMountUpstreamRoutesNilRegistry 未接线注册表时必须安全（测试路径与降级路径）。
 func TestMountUpstreamRoutesNilRegistry(t *testing.T) {
-	h := New(Config{ListensLoopback: true}) // Registry == nil
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true}) // Registry == nil
 	req := httptest.NewRequest(http.MethodGet, "/admin/stats", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("未接线注册表不该影响通用端点：HTTP %d", rec.Code)
 	}
@@ -125,12 +125,12 @@ func TestMountUpstreamRoutesSkipsConflict(t *testing.T) {
 	if err := reg.Register(up); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/stats", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HTTP %d", rec.Code)
 	}
@@ -159,11 +159,11 @@ func TestMountUpstreamRoutesSkipsIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 不 panic 即通过；这里再确认通用端点照常
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 	req := httptest.NewRequest(http.MethodGet, "/admin/logs", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withTestAuth(req))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("残留断言：HTTP %d", rec.Code)
 	}
@@ -178,7 +178,7 @@ func TestMountUpstreamWithoutAdminExt(t *testing.T) {
 	if err := reg.Register(&plainUpstream{id: "plain"}); err != nil {
 		t.Fatal(err)
 	}
-	h := New(Config{ListensLoopback: true, Registry: reg})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 	if h == nil {
 		t.Fatal("New 返回了 nil")
 	}
@@ -194,12 +194,12 @@ func TestMountUpstreamWithoutAdminExt(t *testing.T) {
 //
 // 这是"核心不依赖任何上游"的直接体现：拔掉所有上游，管理台仍可用。
 func TestGenericRoutesSurviveWithoutAnyUpstream(t *testing.T) {
-	h := New(Config{ListensLoopback: true, Registry: gateway.NewRegistry()})
+	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: gateway.NewRegistry()})
 	for _, path := range []string{"/admin/settings", "/admin/logs"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.RemoteAddr = "127.0.0.1:12345"
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, withTestAuth(req))
 		if rec.Code == http.StatusNotFound {
 			t.Errorf("通用端点 %s 在上游全拔掉后 404 了 —— 核心不该依赖上游", path)
 		}
