@@ -17,8 +17,11 @@
   ⚠ 表格按 AGENTS #5：固定行高、紧凑少空白、超长内容不撑高行。
 
   # 与后端的关系（全部走已有接口，前端不自己拼规则）
-    GET    /admin/channels                   列表（key 只回掩码）
-    POST   /admin/channels                   新增/更新
+    GET    /admin/channels                   列表（**不回** keys 明细 ⇒ 每行只给 key_masks[] + key_count）
+    POST   /admin/channels                   新建（无 id）/ 更新（带 id）
+                                             ⚠ keys 是**纯字符串数组** [\"sk-...\"]，不是对象数组
+                                             ⚠ name 与 base_url 必填（服务端 400 文案会点名）
+                                             ⚠ 更新时不传 keys = **不改动**现有 key（不是清空）
     POST   /admin/channels/delete            删除
     POST   /admin/channels/status            停用/启用
     POST   /admin/channels/reveal            显式取明文 key
@@ -192,7 +195,10 @@ async function load() {
       const on = c.status === 1;
       const tag = on ? '<span class="tag on-t">启用</span>'
         : (c.status === 2 ? '<span class="tag warn-t">手动停用</span>' : '<span class="tag off-t">自动停用</span>');
-      const key = (c.keys && c.keys.length) ? c.keys.length + ' 个 · ' + esc(maskKey(c.keys[0].mask || c.keys[0].key || '')) : '—';
+      // ⚠ 列表**不回** keys 明细（那会漏明文/掩码全集），只回 key_masks[] + key_count。
+      // 我第一版读 c.keys[0].mask ⇒ 这一列永远是「—」，而接口其实一直是好的。
+      const km = (c.key_masks && c.key_masks.length) ? c.key_masks[0] : '';
+      const key = c.key_count ? (c.key_count + ' 个 · ' + esc(maskKey(km) || '已配置')) : '—';
       const n = (c.models || []).length;
       return '<tr>'
         + '<td title="' + esc(c.name) + '">' + esc(c.name || c.id) + '</td>'
@@ -275,7 +281,11 @@ async function save() {
     status: Number(document.getElementById('f-status').value)
   };
   const key = document.getElementById('f-key').value.trim();
-  if (key) body.keys = [{ key: key, status: 1 }];
+  // ⚠ keys 是**纯字符串数组**（通道服务端 channelReq.Keys 是 []string）。
+  // 我第一版发的是 [{key:...,status:1}] ⇒ 服务端 JSON 解码失败 ⇒ 400「请求体不是合法 JSON」，
+  // 界面上表现为"点保存没反应/报错"，而日志里只有一条泛泛的解码错误。
+  // 这条是**用真实接口跑一遍**才暴露的 —— 进程内测试与只读自己的代码都看不见。
+  if (key) body.keys = [key];
   // ⚠ 只在**真的填了**的时候才发 keys —— 编辑时留空意味着"不改动"，
   // 而不是"把 key 清空"（清空会让渠道静默变成不可用）。
   if (!body.base_url) { err.textContent = 'Base URL 必填'; return; }
