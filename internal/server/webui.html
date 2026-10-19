@@ -52,11 +52,24 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   }
   /* 浅色主题。**不是把深色取反**：深色那套强调色在浅底上对比度不足，
      所以这里单独挑了一组更深的色值，正文对比度按 WCAG AA（>= 4.5:1）取值。
-     实算值：#1c2333 on #f6f7fa ≈ 14:1；--dim #5a6478 ≈ 6:1；
-     --acc #1d5fd0 ≈ 5.6:1；--ok #0f7a54 ≈ 4.9:1；--err #c02626 ≈ 5.7:1。 */
+
+     ⚠ 每个色值要按**两种**底色分别验，只算一种会漏（这里曾经就漏了第二种）：
+       ① 文字直接铺主题底色（--bg #f6f7fa）：`.v.ok` / `.notice.ok` 这类；
+       ② 文字铺**自己的 16% 淡染**：.pill.ok/.warn/.err 的底色是
+          `color-mix(in srgb, var(--X) 16%, transparent)` —— 底色被自己的色**提亮**了，
+          所以同一个色值在②里的对比度**低于**①。
+     实算值（①/②；2026-10-19 用 WCAG 公式复核，②按 16% 叠在 #fff 上算）：
+       #1c2333 14.0/—；--dim #5a6478 6.0/—；--acc #1d5fd0 5.6/—（--acc 不进胶囊，无②）；
+       --ok #0c6644 7.0/5.5；--warn #8a4b00 6.8/5.3；--err #b32222 6.6/5.1。
+     ⚠ 旧值 --ok #0f7a54（①5.3 / **②4.3 ✗**）、--warn #a35b00（①5.2 / **②4.2 ✗**）、
+       --err #c02626（②4.55，只高出 0.05，tint 比例一调就翻）—— ②这一栏没过 AA。
+       它一直没被发现，是因为 contrast_e2e 量的是「页面上第一个 .pill」，
+       在账号池里那个位置一直是 .pill.dim（①②都富余）；直到这一版前面多了 .pill.ok，
+       判据才开始量到真身。⇒ 别把"判据绿"当成"这一栏没问题"，
+       判据只量它够得着的那一个元素。 */
   :root[data-theme="light"]{
     --bg:#f6f7fa; --panel:#ffffff; --panel2:#eef0f6; --line:#d7dbe5;
-    --fg:#1c2333; --dim:#5a6478; --acc:#1d5fd0; --ok:#0f7a54; --warn:#a35b00; --err:#c02626;
+    --fg:#1c2333; --dim:#5a6478; --acc:#1d5fd0; --ok:#0c6644; --warn:#8a4b00; --err:#b32222;
     /* 浅色下代码块用略深的底、遮罩更淡、阴影更轻 */
     --code-bg:#f0f2f7; --overlay:rgba(28,35,51,.42); --shadow:rgba(28,35,51,.16);
     /* 浅色下的热力图色阶 —— 同样是**字面量照搬** openViking 的浅色那套
@@ -1501,7 +1514,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     <div class="body" style="padding:0">
       <table><thead><tr>
         <th>昵称</th>
-        <th title="账号剩余额度（网关本地缓存），⚡后是该账号的能量">额度</th>
+        <th title="账号剩余额度（网关本地缓存）；「能量N」是该账号的能量">额度</th>
         <th title="连续登录天数，补签×N 是可用的补签卡数">连登</th>
         <th title="还没做完的任务数，+N 是完成后可获得的额度">待完成</th>
         <th title="已完成、奖励还没领的部分（领取后到账）">可领</th>
@@ -2114,7 +2127,7 @@ let loginProvider = '';
   //	0          → `0`（确实用完了）
   //	N > 0      → `N`
   //
-  // ⚠ 把缺失渲染成 0 会让用户读成「免费额度已用完、账号正在烧永久积分」——
+  // ⚠ 把缺失渲染成 0 会让用户读成「免费额度已用完、账号正在烧永久额度」——
   // 一个**看起来完全合理但错误**的结论。这正是本列最容易骗人的形态，
   // 与 quotaCellHTML 靠 has_data 区分"没查过 / 查到 0"是同一条纪律。
   function freeQuotaCellHTML(a) {
@@ -2590,7 +2603,7 @@ let loginProvider = '';
       ['想用令牌', '也可以带 ?token=<管理令牌> 打开 /ui：服务端校验通过后会把它换成'
         + ' HttpOnly cookie 并跳回干净的 /ui（令牌因此不会留在地址栏与历史里）。'],
       ['令牌在哪', 'config.json 顶层的 "admin_token" 字段。'],
-      ['⚠ 别填错', '「API 管理」里那些 sk- 开头的是给调用方的 api_key —— '
+      ['注意别填错', '「API 管理」里那些 sk- 开头的是给调用方的 api_key —— '
         + '它只能调 /v1 对话接口，进不了控制台。'],
     ];
     host.innerHTML =
@@ -3635,7 +3648,7 @@ let loginProvider = '';
     free_quota: {
       title: '免费额度', w: 88,
       tip: '会按自然日重置的那部分额度（Loomy 的每日赠送）还剩多少；不用就浪费，'
-        + '所以在它用完之前不该动永久积分。'
+        + '所以在它用完之前不该动永久额度。'
         + '「—」表示这个上游不区分这一项、或这次没读到 —— 那不等于"已经用完"。',
     },
     status: { title: '状态', w: 84 },
@@ -4431,7 +4444,7 @@ let loginProvider = '';
   //	已经带 '*' 的（上游给的就是掩码形态，如 150****3411）→ 原样保留
   //	太短（≤4 字符）→ **原样保留** —— 全打码会变成不可辨认的 ***，
   //	  比如「妖精七七」→ 无法判断是哪个号（管理台本就可见原文，title 也有）
-  //	否则             → 留首 3 尾 2，中间打 *（13858156740 → 138*****740）
+  //	否则             → 留首 3 尾 2，中间打 *（掩码形态如 138*****740）
   //
   // 打码发生在**渲染层**：数据（/admin/accounts 的 nickname）不被动，
   // 排障时 title 里放原文（见 accountRow 的 nickname 单元格）。
@@ -5365,7 +5378,7 @@ let loginProvider = '';
         </div>
         <div style="display:flex;justify-content:center;margin:8px 0 4px">${qrSVG}</div>
         <div class="dim" style="font-size:12px;margin-bottom:8px;text-align:center">
-          📱 用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
+          用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
           扫完后本窗口会自动检测并落盘凭证（无需回来点任何按钮）。
         </div>
         ${manualBox}
@@ -5374,7 +5387,7 @@ let loginProvider = '';
       if (btnCopyQR) {
         btnCopyQR.onclick = () => {
           copyText(r.auth_url);
-          btnCopyQR.textContent = '已复制 ✓';
+          btnCopyQR.textContent = '已复制';
           setTimeout(() => { btnCopyQR.textContent = '复制链接'; }, 1500);
         };
       }
@@ -5387,7 +5400,7 @@ let loginProvider = '';
           $('loginState').textContent = '已提交，正在解密收号…';
           try {
             await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
-            $('loginState').textContent = '完成 ✅ 稍候账号会自动出现在池子里';
+            $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
           } catch (e) {
             $('loginState').textContent = '失败：' + e.message;
             btnManualQR.disabled = false;
@@ -5419,11 +5432,11 @@ let loginProvider = '';
       </div>`;
     if (r.browser) {
       openNote = `<div id="loginOpenNote" class="ok" style="font-size:12px;margin-bottom:8px">
-        ✅ 已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
+        已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
       </div>`;
     } else if (r.browser_error) {
       openNote = `<div id="loginOpenNote" class="err" style="font-size:12px;margin-bottom:8px">
-        ⚠ 未能自动打开浏览器（${esc(r.browser_error)}）——
+        未能自动打开浏览器（${esc(r.browser_error)}）——
         请点「复制链接」，粘贴到<b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
       </div>`;
     }
@@ -5443,7 +5456,7 @@ let loginProvider = '';
       ${openNote}
       ${manualBox}
       <div class="dim" style="font-size:12px;margin-bottom:8px">
-        💡 无痕窗口可避免浏览器里已登录的账号把会话串到别的账号上。
+        无痕窗口可避免浏览器里已登录的账号把会话串到别的账号上。
       </div>
       <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
     const btnManual = $('btnManualComplete');
@@ -5455,7 +5468,7 @@ let loginProvider = '';
         $('loginState').textContent = '已提交，正在解密收号…';
         try {
           await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
-          $('loginState').textContent = '完成 ✅ 稍候账号会自动出现在池子里';
+          $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
         } catch (e) {
           $('loginState').textContent = '失败：' + e.message;
           btnManual.disabled = false;
@@ -5474,7 +5487,7 @@ let loginProvider = '';
         try {
           const o = await admin('/admin/login/open',
             { method: 'POST', body: JSON.stringify({ url: r.auth_url }) });
-          btnReopen.textContent = '已打开 ✓';
+          btnReopen.textContent = '已打开';
           if (o && o.browser) {
             // 按 **id** 定位提示行，不用 querySelector('.dim') ——
             // 同一块 DOM 里的 #loginState 也是 .dim 且在文档序更靠前，
@@ -5484,7 +5497,7 @@ let loginProvider = '';
               first.className = 'ok';
               first.style.fontSize = '12px';
               first.style.marginBottom = '8px';
-              first.innerHTML = `✅ 已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
+              first.innerHTML = `已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
             }
           }
         } catch (e) {
@@ -5501,7 +5514,7 @@ let loginProvider = '';
       btnCopy.onclick = async () => {
         try {
           await navigator.clipboard.writeText(r.auth_url);
-          btnCopy.textContent = '已复制 ✓';
+          btnCopy.textContent = '已复制';
         } catch {
           // 剪贴板 API 不可用（http 非 https / 权限）时回落选中文本提示。
           const tmp = document.createElement('textarea');
@@ -5510,7 +5523,7 @@ let loginProvider = '';
           tmp.select();
           document.execCommand('copy');
           tmp.remove();
-          btnCopy.textContent = '已复制 ✓';
+          btnCopy.textContent = '已复制';
         }
         setTimeout(() => { btnCopy.textContent = '复制链接'; }, 2000);
       };
@@ -6000,16 +6013,17 @@ let loginProvider = '';
   const PROVIDER_PANEL_RENDERERS = {
     growth: () => loadGrowth(false),
     travel: () => loadTravel(false),
-    // 任务历史（T4 归位到 workbuddy 的 checkin 能力位）。
+    // checkin 能力位：**它已经没有面板了**（见本文件上方 1573 处那条删除说明 ——
+    // 「任务历史」标签页按用户要求下线，连 `data-key="workbuddy:history"` 的 section
+    // 一起删了；`loadHistory()` 函数本身仍在，被其它动作的 refresh 链调用）。
     //
-    // # 为什么这里要显式列一条，而不是让它走通用列表
+    // ⚠ 那为什么还留这一条？留的**不是**"静态面板的渲染器"，而是一道**兜底**：
+    // 哪天有上游重新声明 checkin 并因此长出一个面板，不列这一条就会走 loadGenericList，
+    // 被塞进 `#pbody-workbuddy-checkin` —— 而按 R1 的结论 checkin **不再生成通用面板**，
+    // 那个容器根本不存在 ⇒ 面板点开是空的（"面板存在、导航可点、没有报错、只是不出内容"）。
+    // 列这一条至少让它走 loadHistory()（该函数自带 `histrows` 元素守卫，元素不在就安静返回）。
     //
-    // 通用列表会把 /admin/checkin/history 的 {items,total} 原样铺成一堆行，
-    // 而「任务历史」是**已经存在**的静态面板（有 kind 筛选、分页、保留期提示）。
-    // 不列这一条的话，切到该面板会走 loadGenericList 并被塞进
-    // `#pbody-workbuddy-checkin` —— 而那个容器根本不存在（R1 已让 checkin
-    // 不再生成通用面板），于是面板点开是空的。
-    // 这正是本函数注释里说的"面板存在、导航可点、没有报错、只是不出内容"。
+    // ⚠ 别照着这段把注释当"面板还在"的证据：面板**不在**，section 已在 1573 那轮删除。
     checkin: () => loadHistory(),
     // 其余能力位走**通用列表 + 领取**渲染。
     // 用户决策：codearts 的福利中心做到"上游给什么就渲染什么"即可，
@@ -7307,7 +7321,7 @@ let loginProvider = '';
       <span class="dim" style="font-size:12px" id="linv-sum-${esc(providerId)}"></span>
       <span class="dim" style="font-size:11px" id="linv-upd-${esc(providerId)}"></span>
       <span class="spacer" style="flex:1"></span>
-      <span class="dim" style="font-size:11px">邀请码实测 6 位（形如 E3HRN8），每个码只能用一次（maxUses=1）；绑定是双向奖励。⚠ 「我生成的码」是发给**别人**用的，不能用来绑自己 —— 绑自己请填**其他账号**的码</span>
+      <span class="dim" style="font-size:11px">邀请码实测 6 位（形如 E3HRN8），每个码只能用一次（maxUses=1）；绑定是双向奖励。注意「我生成的码」是发给**别人**用的，不能用来绑自己 —— 绑自己请填**其他账号**的码</span>
     </div>`;
       host.innerHTML = head + `<table class="accttable"><thead><tr>
       <th>UID</th><th>昵称</th><th>激活状态</th><th>余额</th><th>我生成的码</th><th>绑定别人的码</th>
@@ -8515,8 +8529,8 @@ let loginProvider = '';
         `<button data-gact="draw"   data-uid="${U}"${g.lottery_chances ? '' : ' disabled'}>抽奖</button>`,
       ].join(' ');
 
-      // 额度/能量合并成一格：额度 + ⚡能量（能量 >0 才显示）。
-      const quotaEnergy = `${quota}${g.energy ? ` <span class="dim" style="font-size:11px">⚡${g.energy}</span>` : ''}`;
+      // 额度/能量合并成一格：额度 + 「能量N」（能量 >0 才显示，纯文字，不用 ⚡）。
+      const quotaEnergy = `${quota}${g.energy ? ` <span class="dim" style="font-size:11px">能量${g.energy}</span>` : ''}`;
 
       return `<tr>
         <td>${name}</td>
@@ -10694,8 +10708,8 @@ let loginProvider = '';
     '总请求': '当前统计范围内收到的全部请求（含成功与失败）。',
     '成功': 'HTTP 2xx 的请求数。',
     '失败': '非 2xx 的请求数（含 4xx/5xx 与上游错误）。',
-    '成功率': '成功 / 总请求。⚠ 分母为 0 时显示 —。',
-    '输出 token': '上游 usage 里的 completion_tokens（⚠ 已含推理 token，不重复相加）。',
+    '成功率': '成功 / 总请求。分母为 0 时显示 —。',
+    '输出 token': '上游 usage 里的 completion_tokens（已含推理 token，不重复相加）。',
     '推理 token': '输出 token 中属于推理（thinking）的部分 —— 它是上面那个数的子集。',
     '平均 TTFB': '首字节平均耗时，只统计上报了该字段的请求（未上报的不计入分母）。',
     '平均总耗时': '从收到请求到响应结束的平均耗时。',
