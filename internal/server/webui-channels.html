@@ -62,6 +62,8 @@
   .muted { color:var(--dim); }
   .err { color:#d83931; }
   dialog { border:1px solid var(--bd); border-radius:10px; padding:0; width:560px; max-width:92vw; }
+  /* Key 管理独立窗口比主编辑窗宽：要同时容纳 # / 掩码 / 状态 / 两个按钮，560 会挤成一团 */
+  #keysDlg { width:760px; }
   dialog::backdrop { background:rgba(0,0,0,.35); }
   .dlg-h { padding:12px 16px; border-bottom:1px solid var(--bd); font-weight:600; }
   /* ⚠ 两列 grid（96px 标签 + 1fr 控件）。**任何宽内容都必须 class="full" 跨列** ——
@@ -147,35 +149,25 @@
     <label class="req">Base URL</label>
     <input id="f-base" placeholder="https://api.example.com/v1">
     <label class="req">API Key</label>
-    <!-- 编辑态：已存 Key 列表（对标 new-api 的 Key 管理）—— 每行能单独启停/删除，只回掩码。
-         为什么不能只用一个输入框：多 Key 渠道的日常操作是"加一把、停一把、删一把"，
-         而表单不回显明文 ⇒ 单框整体覆盖会把用户看不见的那些 Key 抹掉。 -->
-    <div id="f-keys-box" class="full" style="display:none;margin:0 0 6px">
-      <table style="width:100%;border-collapse:collapse;font-size:12px">
-        <thead><tr style="color:#6b7280;text-align:left">
-          <th style="width:34px;padding:2px 4px;height:22px;line-height:22px;font-weight:500">#</th>
-          <th style="padding:2px 4px;height:22px;line-height:22px;font-weight:500">Key</th>
-          <th style="width:128px;padding:2px 4px;height:22px;line-height:22px;font-weight:500">状态</th>
-          <th style="width:132px;padding:2px 4px;height:22px;line-height:22px;font-weight:500">操作</th>
-        </tr></thead>
-        <tbody id="f-keys"></tbody>
-      </table>
-    </div>
-    <textarea id="f-key" class="full" rows="2" style="min-height:0" placeholder="sk-...（一行一个，可多填）"></textarea>
-    <div class="full" style="display:flex;gap:8px;align-items:center">
-      <label style="margin:0;white-space:nowrap">Key 选择模式</label>
-      <select id="f-mode" style="width:190px">
+    <!-- Key 表格搬到**独立窗口**（#keysDlg）：key 一多，塞在编辑弹窗里会把整页占满 ——
+         用户明确要求"避免这种情况"。这里只留三件事：有多少把、进管理窗、新增时直接填。 -->
+    <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 2px">
+      <span id="f-keycount" class="muted" style="font-size:12px">—</span>
+      <button type="button" onclick="openKeys()" style="white-space:nowrap">管理 Key</button>
+      <span class="muted" style="font-size:12px">选择模式</span>
+      <select id="f-mode" style="width:180px">
         <option value="random">随机（默认）</option>
         <option value="round_robin">轮询（依次使用）</option>
       </select>
-      <span class="muted" style="font-size:12px">某把被上游判无效（401/403）只自动禁那一把，不停整条渠道</span>
     </div>
+    <textarea id="f-key" class="full" rows="2" style="min-height:0" placeholder="新增时必填，一行一个；编辑时留空 = 不改动现有 Key（要加 Key 点「管理 Key」）"></textarea>
     <label>名称</label>
     <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
     <label>模型</label>
-    <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4" oninput="renderChoices()">
-<div class="full" style="display:flex;gap:8px;align-items:center">
-  <button type="button" onclick="discover()" title="拿上面的 Base URL + key 去问上游有哪些模型，问完自动填进下面这一栏（不是保存）" style="white-space:nowrap">自动发现</button>
+    <input id="f-models" class="full" placeholder="逗号分隔上游真实名 —— 或点「自动发现」，在候选里勾选后点「应用勾选」" oninput="renderCandidates()">
+<div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+  <button type="button" onclick="discover()" title="问上游有哪些模型。拿回来先放**候选池**，不直接写入模型栏 —— 由你勾选后应用" style="white-space:nowrap">自动发现</button>
+  <input id="f-filter" placeholder="搜索候选模型…" style="width:200px" oninput="renderCandidates()">
   <div id="f-disc" class="dim" style="font-size:12px;flex:1;min-width:0"></div>
 </div>
 <div id="f-vis" class="full" style="margin:6px 0 0"></div>
@@ -198,6 +190,29 @@
   </div>
 </dialog>
 
+<!-- Key 管理独立窗口：key 数量多时主编辑弹窗会被撑爆，所以单独一个窗、自己滚动、自己搜索 -->
+<dialog id="keysDlg">
+  <div class="dlg-h">
+    <span id="keysTitle">Key 管理</span>
+    <span class="muted" id="keysStat" style="font-weight:400;font-size:12px;margin-left:8px"></span>
+  </div>
+  <div class="dlg-b" style="grid-template-columns:1fr;gap:8px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input id="keysFilter" placeholder="搜索（按掩码）" style="width:200px" oninput="renderKeys()">
+      <span class="muted" style="font-size:12px">明文不回显；某把被上游判无效会标红，可一键恢复</span>
+    </div>
+    <div id="keysBody" style="max-height:52vh;overflow:auto"></div>
+    <div style="display:flex;gap:8px;align-items:flex-start">
+      <textarea id="keysAdd" rows="2" placeholder="一行一个 Key，追加到上面列表（重复的会自动跳过）" style="flex:1;min-height:0"></textarea>
+      <button class="primary" onclick="addKeys()" style="white-space:nowrap">追加</button>
+    </div>
+  </div>
+  <div class="dlg-f">
+    <span class="err" id="keysErr" style="margin-right:auto"></span>
+    <button onclick="closeKeys()">关闭</button>
+  </div>
+</dialog>
+
 <script>
 // ⚠ 本文件不引任何外部依赖：既能挂到服务端，也能直接用浏览器打开（填服务地址与令牌即可）。
 let editing = null;   // 正在编辑的渠道 id（null = 新增）
@@ -209,7 +224,8 @@ let editing = null;   // 正在编辑的渠道 id（null = 新增）
 //      再自己按保存，比"发现并直接落库"安全（后者会在 Base URL 写错时把错的列表写进渠道）。
 //   2. key 空着就**明确说清**，不静默发一个空 key 的请求（那会拿到 401，然后用户会以为功能坏了）。
 //      编辑已存在的渠道时可以不填 —— 服务端会用该渠道自己**启用中**的那个 key。
-// renderChoices() 渠道模型勾选：把 #f-models 里的模型逐个渲染成复选框，取消勾选即从这条渠道摘掉。
+// renderCandidates() 候选池渲染：把上游返回（或手填）的候选逐个渲染成复选框，
+// **勾选后点"应用"才写入模型栏** —— 默认什么都不接受，而不是默认全接受再删。
 //
 // ⚠ 2026-10-20 语义变更后重写：原先这里叫 renderVisible，是「对外可见」开关，靠
 //   "对外 = 渠道声明 ∩ 令牌白名单"那层收紧实现。用户决定撤掉那层（改成直接展示全部）
@@ -219,43 +235,63 @@ let editing = null;   // 正在编辑的渠道 id（null = 新增）
 //
 // ⚠ 自渲染（输入框 oninput + 本函数）而不是"打开对话框时填一次"：这样它不依赖任何对话框钩子，
 //   手动敲、自动发现回填、勾选切换三条路径的显示始终一致 —— 少一个"状态不同步"的洞。
-function renderChoices() {
+// ---- 模型候选池：自动发现的结果先放这里，**勾选后**才写进模型栏 ----
+//
+// # 为什么改成"候选池 + 勾选 + 应用"，而不是"全部填入再取消勾选"
+//
+// 旧实现把上游返回的 25 个一次性写进模型栏，再用勾选去"摘掉不要的"。用户的原话是
+// 「勾选哪些要不要然后填入，不是全部填入」。差别很实际：
+//   全部填入 = 默认接受一切（删除是例外操作，漏了就全开）
+//   候选勾选 = 默认什么都不接受（添加是显式操作，漏了只是少一个模型）
+// 后者才是"我挑哪些提供服务"的正确默认值。
+let discovered = [];          // 上游返回的候选（不动 #f-models）
+const picked = new Set();     // 候选里被勾选的
+function currentModels() {
+  return document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean);
+}
+function filteredCandidates() {
+  const q = (document.getElementById('f-filter').value || '').trim().toLowerCase();
+  return q ? discovered.filter(n => n.toLowerCase().indexOf(q) >= 0) : discovered;
+}
+function renderCandidates() {
   const box = document.getElementById('f-vis');
-  if (!box) return;
-  const names = document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean);
-  if (!names.length) {
-    box.innerHTML = '<div class="dim" style="font-size:12px">点「自动发现」拉取上游模型，或在上面的「模型」栏手动填；填了之后这里会出现可勾选的列表。</div>';
+  if (!box) { return; }
+  const cur = currentModels();
+  if (!discovered.length) {
+    box.innerHTML = '<div class="dim" style="font-size:12px">点「自动发现」拉取上游候选模型（拿到后由你勾选）。'
+      + '这条渠道当前声明了 ' + cur.length + ' 个模型'
+      + (cur.length ? '：' + esc(cur.slice(0, 8).join(', ')) + (cur.length > 8 ? ' …' : '') : '')
+      + '。也可以直接在「模型」栏手填。</div>';
     return;
   }
-  const uniq = [...new Set(names)];
-  box.innerHTML = '<div class="dim" style="font-size:12px;margin-bottom:2px">本渠道提供的模型（取消勾选 = 从这条渠道摘掉，不影响别的渠道）'
-    + ' <a href="#" onclick="chooseAll(true);return false" style="font-size:12px;margin-left:6px">全选</a>'
-    + ' <a href="#" onclick="chooseAll(false);return false" style="font-size:12px">全不选</a></div>'
-    + '<div id="f-choices" style="display:flex;flex-wrap:wrap;gap:10px;font-size:13px">'
-    + uniq.map(n => '<label title="' + esc(n) + '"><input type="checkbox" checked onchange="toggleChoice(this)" data-m="' + esc(n) + '"><span>' + esc(n) + '</span></label>').join('')
+  const shown = filteredCandidates();
+  const q = (document.getElementById('f-filter').value || '').trim();
+  box.innerHTML = '<div class="dim" style="font-size:12px;margin-bottom:3px">'
+    + '候选 ' + discovered.length + ' 个' + (q ? '（筛出 ' + shown.length + '）' : '')
+    + ' · 已勾选 <b>' + picked.size + '</b>'
+    + ' <a href="#" onclick="pickAll(true);return false" style="font-size:12px;margin-left:6px">全选' + (q ? '筛选结果' : '') + '</a>'
+    + ' <a href="#" onclick="pickAll(false);return false" style="font-size:12px">全不选</a>'
+    + ' <button type="button" style="padding:0 8px;height:20px;line-height:18px;font-size:12px;margin-left:6px"'
+    + ' onclick="applyPicked()">应用勾选 → 写入模型栏</button></div>'
+    + '<div id="f-choices" style="display:flex;flex-wrap:wrap;gap:8px;font-size:13px">'
+    + shown.map(n => '<label title="' + esc(n) + '"><input type="checkbox" ' + (picked.has(n) ? 'checked' : '')
+      + ' onchange="pickOne(this)" data-m="' + esc(n) + '"><span>' + esc(n) + '</span></label>').join('')
     + '</div>';
 }
-
-// toggleChoice() 去勾 ⇒ 从 #f-models 摘掉；勾回 ⇒ 追加回去。
-// ⚠ 摘掉是**删除**不是隐藏标记：一条渠道提供哪些模型就是 models 的成员资格，没有第二份状态
-//   （第二份状态迟早与第一份对不上，那正是这类界面最经典的 bug 来源）。
-function toggleChoice(cb) {
-  const el = document.getElementById('f-models');
-  const name = cb.getAttribute('data-m');
-  const names = el.value.split(',').map(s => s.trim()).filter(Boolean);
-  const next = cb.checked ? (names.includes(name) ? names : names.concat([name])) : names.filter(n => n !== name);
-  el.value = next.join(',');
-  renderChoices();
+function pickOne(cb) {
+  const n = cb.getAttribute('data-m');
+  if (cb.checked) { picked.add(n); } else { picked.delete(n); }
+  renderCandidates();
 }
-
-// chooseAll() 全选 / 全不选：以**当前渲染出来的**那一批名字为准（不引入第三份状态）。
-function chooseAll(on) {
-  const keep = [];
-  document.querySelectorAll('#f-choices input[type=checkbox]').forEach(b => {
-    if (on) keep.push(b.getAttribute('data-m'));
-  });
-  document.getElementById('f-models').value = keep.join(',');
-  renderChoices();
+// 全选/全不选只作用于**当前筛选出来的**那批（搜索后点全选，不该把看不见的也选中）
+function pickAll(on) {
+  filteredCandidates().forEach(n => { if (on) { picked.add(n); } else { picked.delete(n); } });
+  renderCandidates();
+}
+function applyPicked() {
+  document.getElementById('f-models').value = [...picked].join(',');
+  document.getElementById('f-disc').textContent = '已把 ' + picked.size + ' 个模型写入模型栏（还没保存，记得点「保存」）';
+  renderCandidates();
 }
 
 async function discover() {
@@ -284,9 +320,16 @@ async function discover() {
     });
     const ms = (d && d.models) || [];
     if (!ms.length) { box.textContent = '上游返回 0 个模型：确认 Base URL 指向的是 OpenAI 兼容端点（/v1）'; return; }
-    document.getElementById('f-models').value = ms.join(',');
-    renderChoices();   // ⚠ JS 直接赋值**不会**触发 input 事件 ⇒ 必须手动重绘勾选列表
-    box.textContent = '已回填 ' + ms.length + ' 个模型（还没保存，确认无误后点「保存」；下面可逐项取消勾选）';
+    // ★ 只放进候选池，**不**写模型栏 —— 用户要的是"挑完再填"，不是"全塞进去再删"。
+    discovered = ms;
+    picked.clear();
+    // 默认勾上"这条渠道已经声明的"：重新发现时不该把已有配置悄悄丢掉；新发现的默认不勾。
+    const cur = new Set(currentModels());
+    ms.forEach(n => { if (cur.has(n)) { picked.add(n); } });
+    document.getElementById('f-filter').value = '';
+    renderCandidates();
+    box.textContent = '拿到 ' + ms.length + ' 个候选（默认只勾了已声明的 ' + picked.size
+      + ' 个）；挑好后点「应用勾选 → 写入模型栏」';
   } catch (e) {
     box.textContent = '自动发现失败：' + (e && e.message ? e.message : e);
   }
@@ -389,13 +432,17 @@ function openForm(id) {
   document.getElementById('f-base').value = c ? (c.base_url || '') : '';
   document.getElementById('f-key').value = '';
   document.getElementById('f-key').placeholder = c
-    ? '留空 = 不改动现有 Key；要加就在这填（一行一个）'
+    ? '留空 = 不改动现有 Key；要加 Key 点上面「管理 Key」'
     : 'sk-...（一行一个，可多填）';
-  // Key 管理表格只在编辑态出现（新增时还没有 key 可管），并由 loadKeys 回填选择模式
-  const keysBox = document.getElementById('f-keys-box');
-  keysBox.style.display = c ? '' : 'none';
-  document.getElementById('f-keys').innerHTML = '';
+  // 候选池与 Key 状态每次打开都重置 —— 上一次的发现结果留到下一次是最典型的脏状态
+  discovered = [];
+  picked.clear();
+  keysData = [];
+  keysFor = c ? id : '';
   document.getElementById('f-mode').value = 'random';
+  document.getElementById('f-filter').value = '';
+  document.getElementById('f-keycount').textContent = c ? '读取中…' : '新增渠道：Key 填在下面（一行一个）';
+  renderCandidates();
   if (c) { loadKeys(id); }
   document.getElementById('f-name').value = c ? (c.name || '') : '';
   document.getElementById('f-models').value = c ? (c.models || []).join(',') : '';
@@ -451,58 +498,127 @@ async function reveal(id) {
   } catch (e) { alert(e.message); }
 }
 
-// ---- Key 管理（多 key 运维）----
-// 对标 new-api 的 Key 面板：每行一个 key，可单独启停/删除；只给掩码，明文走「显示」。
+// ---- Key 管理（独立窗口）----
+// 为什么独立成窗：key 会攒到几十把，表格塞在编辑弹窗里会把整页占满 —— 用户的明确要求。
+// 这里只给掩码（明文走列表页的「显示」），每行可单独启停/删除。
 function kEsc(s) {
   return String(s == null ? '' : s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 }
+let keysData = [];   // 当前窗口的数据（本地缓存，搜索在它上面过滤）
+let keysFor = '';    // 正在管理哪个渠道
+function openKeys() {
+  const err = document.getElementById('keysErr');
+  keysFor = editing || '';
+  err.textContent = keysFor
+    ? ''
+    : '这条渠道还没保存 ⇒ 保存后再点「管理 Key」。新增时要填的 Key 直接写在编辑窗口下面的输入框里。';
+  document.getElementById('keysTitle').textContent = 'Key 管理'
+    + (keysFor ? ' · ' + (document.getElementById('f-name').value || keysFor) : '');
+  document.getElementById('keysStat').textContent = '';
+  document.getElementById('keysFilter').value = '';
+  document.getElementById('keysAdd').value = '';
+  document.getElementById('keysBody').innerHTML = '';
+  document.getElementById('keysDlg').showModal();
+  if (keysFor) { loadKeys(keysFor); }
+}
+function closeKeys() {
+  document.getElementById('keysDlg').close();
+  load();   // 列表页的"key 数"可能变了
+}
+function updateKeyCount() {
+  const el = document.getElementById('f-keycount');
+  if (!el) { return; }
+  if (!keysFor) { el.textContent = '新增渠道：Key 填在下面（一行一个）'; return; }
+  const on = keysData.filter(k => k.status === 1).length;
+  el.textContent = '已存 ' + keysData.length + ' 把（启用 ' + on + '）';
+}
 async function loadKeys(id) {
-  const tb = document.getElementById('f-keys');
   try {
     const d = await api('/admin/channels/keys?id=' + encodeURIComponent(id));
+    keysData = (d && d.keys) || [];
     // 选择模式以这个端点为准（列表接口不回 channel_info，从那儿读会是空值 ⇒ 用户以为没设成功）
     if (d && d.key_selection_mode) { document.getElementById('f-mode').value = d.key_selection_mode; }
-    const keys = (d && d.keys) || [];
-    if (!keys.length) {
-      tb.innerHTML = '<tr><td colspan="4" style="padding:4px;color:#6b7280">还没有 Key</td></tr>';
-      return;
-    }
-    tb.innerHTML = keys.map(k => {
-      let st;
-      if (k.status === 1) { st = '<span style="color:#059669">启用</span>'; }
-      else if (k.status === 3) { st = '<span style="color:#dc2626">自动禁用</span>'; }
-      else { st = '<span style="color:#6b7280">手动停用</span>'; }
-      const why = k.reason === 'upstream_auth' ? '<span style="color:#9ca3af"> 上游判无效</span>' : '';
-      // ⚠ 按钮必须压扁：全局 button 有 5px 上下 padding ⇒ 会把 26px 的行撑到 43px。
-      // 这是"紧凑"要求（AGENTS #5 固定行高一行）的具体落点，不是审美。
-      const bst = 'padding:0 6px;height:20px;line-height:18px;font-size:12px';
-      const toggleBtn = k.status === 1
-        ? '<button type="button" style="' + bst + '" onclick="keyStatus(\'' + kEsc(id) + '\',' + k.index + ',2)">禁用</button>'
-        : '<button type="button" style="' + bst + '" onclick="keyStatus(\'' + kEsc(id) + '\',' + k.index + ',1)">启用</button>';
-      return '<tr style="height:26px">'
-        + '<td style="padding:2px 4px;height:26px;line-height:26px;color:#9ca3af">' + k.index + '</td>'
-        + '<td style="padding:2px 4px;height:26px;line-height:26px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">' + kEsc(k.mask) + '</td>'
-        + '<td style="padding:2px 4px;height:26px;line-height:26px">' + st + why + '</td>'
-        + '<td style="padding:2px 4px;height:26px;line-height:26px">' + toggleBtn
-        + ' <button type="button" style="' + bst + '" onclick="keyDelete(\'' + kEsc(id) + '\',' + k.index + ')">删除</button></td>'
-        + '</tr>';
-    }).join('');
+    renderKeys();
+    updateKeyCount();
   } catch (e) {
-    tb.innerHTML = '<tr><td colspan="4" style="padding:4px;color:#dc2626">' + kEsc(e.message) + '</td></tr>';
+    document.getElementById('keysErr').textContent = e.message;
+    document.getElementById('keysBody').innerHTML = '';
+    keysData = [];
+    updateKeyCount();
   }
 }
-async function keyStatus(id, idx, status) {
-  try {
-    await api('/admin/channels/keys/status', { method: 'POST', body: JSON.stringify({ id: id, index: idx, status: status }) });
-    await loadKeys(id); load();
-  } catch (e) { alert(e.message); }
+function renderKeys() {
+  const body = document.getElementById('keysBody');
+  const stat = document.getElementById('keysStat');
+  const q = (document.getElementById('keysFilter').value || '').trim().toLowerCase();
+  const rows = q ? keysData.filter(k => (k.mask || '').toLowerCase().indexOf(q) >= 0) : keysData;
+  const on = keysData.filter(k => k.status === 1).length;
+  stat.textContent = keysData.length
+    ? '共 ' + keysData.length + ' 把 · 启用 ' + on + (q ? ' · 筛出 ' + rows.length : '')
+    : '';
+  if (!rows.length) {
+    body.innerHTML = '<div class="muted" style="font-size:12px;padding:6px 2px">'
+      + (keysData.length ? '没有匹配的 Key' : '还没有 Key —— 在下面一行一个填进去，点「追加」')
+      + '</div>';
+    return;
+  }
+  // ⚠ 按钮必须压扁：全局 button 有 5px 上下 padding ⇒ 会把 26px 的行撑到 43px。
+  const bst = 'padding:0 6px;height:20px;line-height:18px;font-size:12px';
+  const td = 'padding:2px 4px;height:26px;line-height:26px;border-bottom:1px solid var(--bd)';
+  body.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed">'
+    + '<thead><tr style="color:#6b7280;text-align:left">'
+    + '<th style="width:34px;' + td + 'font-weight:500">#</th>'
+    + '<th style="' + td + 'font-weight:500">Key</th>'
+    + '<th style="width:150px;' + td + 'font-weight:500">状态</th>'
+    + '<th style="width:140px;' + td + 'font-weight:500">操作</th>'
+    + '</tr></thead><tbody>'
+    + rows.map(k => {
+        let st;
+        if (k.status === 1) { st = '<span style="color:#059669">启用</span>'; }
+        else if (k.status === 3) { st = '<span style="color:#dc2626">自动禁用</span>'; }
+        else { st = '<span style="color:#6b7280">手动停用</span>'; }
+        const why = k.reason === 'upstream_auth' ? '<span style="color:#9ca3af"> 上游判无效</span>' : '';
+        const tg = k.status === 1
+          ? '<button type="button" style="' + bst + '" onclick="keyStatus(' + k.index + ',2)">禁用</button>'
+          : '<button type="button" style="' + bst + '" onclick="keyStatus(' + k.index + ',1)">启用</button>';
+        return '<tr>'
+          + '<td style="' + td + 'color:#9ca3af">' + k.index + '</td>'
+          + '<td style="' + td + 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis">' + kEsc(k.mask) + '</td>'
+          + '<td style="' + td + '">' + st + why + '</td>'
+          + '<td style="' + td + '">' + tg
+          + ' <button type="button" style="' + bst + '" onclick="keyDelete(' + k.index + ')">删除</button></td>'
+          + '</tr>';
+      }).join('')
+    + '</tbody></table>';
 }
-async function keyDelete(id, idx) {
-  if (!confirm('删除第 ' + idx + ' 个 Key？（只删这一把，其余不动）')) return;
+async function keyStatus(idx, status) {
   try {
-    await api('/admin/channels/keys/delete', { method: 'POST', body: JSON.stringify({ id: id, index: idx }) });
-    await loadKeys(id); load();
-  } catch (e) { alert(e.message); }
+    await api('/admin/channels/keys/status', { method: 'POST', body: JSON.stringify({ id: keysFor, index: idx, status: status }) });
+    document.getElementById('keysErr').textContent = '';
+    await loadKeys(keysFor); load();
+  } catch (e) { document.getElementById('keysErr').textContent = e.message; }
+}
+async function keyDelete(idx) {
+  if (!confirm('删除第 ' + idx + ' 把 Key？（只删这一把，其余不动）')) { return; }
+  try {
+    await api('/admin/channels/keys/delete', { method: 'POST', body: JSON.stringify({ id: keysFor, index: idx }) });
+    document.getElementById('keysErr').textContent = '';
+    await loadKeys(keysFor); load();
+  } catch (e) { document.getElementById('keysErr').textContent = e.message; }
+}
+async function addKeys() {
+  const ta = document.getElementById('keysAdd');
+  const err = document.getElementById('keysErr');
+  const keys = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!keys.length) { err.textContent = '先填 Key（一行一个）'; return; }
+  try {
+    const d = await api('/admin/channels/keys/add', { method: 'POST', body: JSON.stringify({ id: keysFor, keys: keys }) });
+    ta.value = '';
+    err.textContent = '';
+    document.getElementById('keysStat').textContent = '已追加 ' + ((d && d.added) || 0) + ' 把'
+      + (d && d.added === 0 ? '（都与已有重复，跳过了）' : '');
+    await loadKeys(keysFor); load();
+  } catch (e) { err.textContent = e.message; }
 }
 
 // ---- 页签切换 + 首屏 ----
