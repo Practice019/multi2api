@@ -343,6 +343,31 @@ async function startInstance(opts) {
   }
   fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify(cfg, null, 2));
 
+  // ③ `prepareTmp(tmp)`：**进程起来之前**的最后一次落盘机会。
+  //
+  // # 为什么必须有这个钩子（2026-10-19 实测踩到）
+  //
+  // 有些状态是**启动时一次性读进内存**的：`checkinlog.New(path, keepDays)`
+  // 在 `cmd/server/main.go:156` 被调一次，把 `data/checkin-log.json` 读进
+  // `Log.records`，之后 `PageAll()` 只读内存（写回才会重写文件）。
+  //
+  // 于是"实例起来之后再写那个文件"**完全没有效果**：内存里还是空的，
+  // 而端点回的是内存。夹具实测：文件里 30 条，`/admin/checkin/history`
+  // 回 `total=4` —— 那 4 条是**产品自己的**被动扫描刚写进去的
+  // （2 个账号 × checkin/keepalive）。这个数字看起来像"过滤把 30 条砍成 4 条"，
+  // 极容易被当成产品缺陷；真因是"灌晚了"。
+  //
+  // 所以给一个钩子，让调用方在 spawn 之前把这类"启动即读"的数据放好。
+  if (typeof opts.prepareTmp === 'function') {
+    try {
+      opts.prepareTmp(tmp);
+    } catch (e) {
+      // 前置数据放不进去必须出声：后面所有断言的归因都会错。
+      console.error('  ⚠ prepareTmp 抛了：' + (e && e.message ? e.message : e));
+      throw e;
+    }
+  }
+
   const logPath = path.join(tmp, 'server.log');
   const out = fs.openSync(logPath, 'a');
   const readLog = () => { try { return fs.readFileSync(logPath, 'utf8'); } catch { return ''; } };

@@ -13,7 +13,13 @@
 // **加新上游时本文件零改动。**
 //
 // 安全模型：整个 /admin/* 子树**一律校验凭据**（浏览器会话 或 admin_token），
-// 并按角色分流（管理员全部放行；成员只放行 memberRules 里精确列出的那几条）。
+// 且身份只有一种 —— **管理员**（`canAccess`）。
+//
+// ⚠ 2026-10-19 用户新口径：登录系统收成单账号管理员，"成员"角色已取消。
+// 原先的成员白名单（memberRules）连同它那套角色分流**整张删掉**：没有任何
+// 请求能带着非管理员身份走到门禁（非管理员的历史记录在 Authenticate /
+// SessionStore.Lookup 就被拒，见 internal/account），留着它就是一条永远为假
+// 的角色判据 —— 下一个人读代码时会以为成员还有身份。
 //
 // ⚠ 改造前这里写的（也是实现的）是「只接受 loopback 直连，非本机一律 403，
 // 本机免令牌」—— 那条路径把"能连上来"当成了"有权限"，于是本机任何进程
@@ -193,14 +199,15 @@ type Config struct {
 	//
 	// # 为什么要加它（用户要求：抄 new-api 的登录系统）
 	//
-	// 改造前管理面只有**一把令牌**一个身份：谁拿到 admin_token，谁就是管理员，
-	// 没有"成员"这个概念 —— 于是"给同事看一眼自己的用量"只能靠把管理令牌给他。
-	// 现在两条路并存（见 principalOf）：
+	// 改造前管理面只有**一把令牌**一个身份：谁拿到 admin_token，谁就是管理员。
+	// 现在两条路并存（见 principalOf），但**身份只有一种**：
 	//
-	//	浏览器：/ui 用账号口令登录 → 会话 cookie（有角色：管理员/成员）
+	//	浏览器：/ui 用账号口令登录 → 会话 cookie
 	//	脚本：  Authorization: Bearer <admin_token>（等价管理员，无会话状态）
 	//
-	// 菜单/端点的角色分流见 memberRules。
+	// ⚠ 这两条路都只通向管理员：控制台只有一个账号，且那个账号就是管理员
+	// （成员角色已取消，见 account 包）。原来这里写的"按角色分流见 memberRules"
+	// 随 memberRules 一起删掉了。
 	Accounts *account.Store
 	Sessions *account.SessionStore
 
@@ -612,8 +619,11 @@ func (h *Handler) register(pattern string, fn http.HandlerFunc) {
 //
 // 现在的判据是「任何请求都必须出示凭据」，两条路：
 //
-//	浏览器会话   /ui 用账号口令登录 → HttpOnly 会话 cookie（有角色：管理员/成员）
+//	浏览器会话   /ui 用账号口令登录 → HttpOnly 会话 cookie
 //	admin_token  机器凭据（脚本/CI）→ Bearer 或 ?token=，等价管理员
+//
+// ⚠ 两条路都只通向**管理员**：控制台只有一个账号，且它就是管理员
+// （2026-10-19 用户新口径：成员角色已取消，见 canAccess 的注释）。
 //
 // 本机（含绑回环）**不再享受任何豁免**：回环地址只说明"上一跳是谁"，
 // 不说明"你有没有权限" —— 把它当凭据正是上面 ② 那条洞。
@@ -637,9 +647,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !canAccess(p, r) {
-		// 403 与 401 分开：**有**身份但角色不够。前端据此显示"当前账号无权"
-		// 而不是再跳一次登录页（那会让成员以为自己的登录没生效）。
+	if !canAccess(p) {
+		// 403 与 401 分开：**有**身份但角色不够。
+		//
+		// ⚠ 2026-10-19 单账号口径下这条分支**不可达**（非管理员身份在
+		// account 那层就被拒了 ⇒ 上面那段 401 先返回）。保留而不删：
+		// 它是 fail-closed 的那一半 —— 万一将来有别的身份来源接进
+		// Identify，这里仍然只放行管理员，而不是"没写就默认放行"。
+		// 文案里不再提"成员"：那个角色已经不存在了。
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error": fmt.Sprintf("当前账号（%s，角色 %s）无权访问 %s。该功能仅管理员可用。",
 				p.Username, account.RoleName(p.Role), r.URL.Path),
@@ -652,81 +667,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-// 成员可以访问的 /admin/* 前缀。
+// canAccess 门禁的角色判据：**只有管理员放行**。
 //
-// # 为什么是**白名单**（默认拒绝）而不是黑名单
+// # ⚠ 2026-10-19 用户新口径：原先那张"成员白名单"（memberRules）已整张删除
 //
-// 管理面有几十个端点（账号池、上游、设置、日志、签到、额度……），黑名单
-// 要逐个列"成员不许看什么"，漏一个就是一次越权，而且**新端点默认是敞开的**
-// —— 加功能的人根本不会想到去更新一份黑名单。白名单反过来：新端点默认
-// 只有管理员能进，要放开必须显式加一行（那一步必然要过评审的眼睛）。
+// 删掉的那张表是"精确 (方法, 路径) 对"白名单，放行 /admin/apikeys* 与
+// /admin/ui/manifest 给**成员**。单账号口径下它不可达：
 //
-// 选进白名单的标准：成员自己就需要的、且不暴露他人/上游信息的。
+//	控制台只有一个账号，且那个账号是管理员（建号只有 CreateBootstrap 一条路，
+//	写死 RoleAdmin）；非管理员的历史记录在 Authenticate 与
+//	SessionStore.Lookup 就被回 ErrMemberRetired ⇒ account.Identify 拿不到身份
+//	⇒ 请求在上一层的 401 分支就结束了，**走不到** canAccess。
 //
-//	/admin/apikeys     自己名下的 key（HTTP 层还要按 owner 过滤 → T8）
-//	/admin/stats       仪表盘聚合数字（自己的用量）
-//	/admin/ui/manifest 界面外壳必需的端点（否则成员连页面都渲染不出来）
+// # 为什么删而不是留着（"反正为假"）
 //
-// ⚠ /admin/accounts 不在里面，而且**必须**不在：它是**上游账号池**
-// （workbuddy/codearts 那些凭证），不是控制台账号。成员看到它等于拿到
-// 全部上游身份，"成员"这个角色就没有意义了。
-// ⚠ 2026-10-19（T8）：从"前缀白名单"改成**精确的「方法 + 路径」对**。
+//	① 它是**角色分裂的残留**：留着会被读成"成员还有身份、只是端点少了几个"，
+//	   而那正是本次要消掉的概念；
+//	② 白名单是"默认拒绝"的，删掉它**没有放宽任何一条通行判据** —— 反而更严：
+//	   唯一身份是管理员，能过门禁就是全放行，非管理员一律 false。
 //
-// # 为什么必须改（这是一个真洞，不是洁癖）
-//
-// 旧的判据是 `path == prefix || strings.HasPrefix(path, prefix+"/")`，白名单里
-// 只写了一个 `/admin/apikeys`。于是 **`POST /admin/apikeys/rotate-admin` 也命中** ——
-// 成员可以轮换**管理令牌**，而那个端点的回执里带着**完整的新令牌**
-// （见 apikeys.go 的 apiKeysRotateAdmin）。转一次，成员就拿到了管理员那条路
-// （`Authorization: Bearer <新 admin_token>`）。同理 `/rotate-api-key` 也是。
-//
-// 前缀白名单的通病：**加一个子路径就自动被放行**，而"轮换/重置/危险操作"恰恰
-// 都挂在已有的名字下面。所以这里逐个列出允许的 (方法, 路径)，新端点默认不放行。
-//
-// # 选进白名单的标准
-//
-// 成员自己就需要的、且不暴露他人/上游信息的：
-//
-//	GET  /admin/apikeys        自己名下的 key（HTTP 层再按 owner 过滤 → T8）
-//	POST /admin/apikeys        建一把自己的 key
-//	POST /admin/apikeys/{toggle,delete,reset,update}
-//	                           管自己的 key（逐把再判 CanManage → T8）
-//	GET  /admin/ui/manifest    界面外壳必需（否则成员连页面都渲染不出来）
-//
-// ⚠ **不在**里面的（每一条都是刻意的）：
-//
-//	rotate-admin / rotate-api-key  回执里含**明文新凭据** ⇒ 成员不得调用
-//	/admin/stats(/series)          T8 决定**先不给成员**：它回的是 by_uid /
-//	                               by_provider 这类**管理面**聚合（按**上游账号**
-//	                               与上游排行），给成员看等于把上游账号的昵称与
-//	                               用量端出去。成员要的"自己的用量"应当按
-//	                               key 归属过滤后单独给（留给后续切片），
-//	                               而不是把管理面报表原样放行。
-//	/admin/accounts*               那是**上游账号池**（workbuddy/codearts 凭证），
-//	                               不是控制台账号。成员看到它等于拿到全部上游身份
-//	/admin/settings|logs|providers|schedule|task|models/preview
-//	                               管理面读数，与成员无关
-var memberRules = []struct{ method, path string }{
-	{http.MethodGet, "/admin/apikeys"},
-	{http.MethodPost, "/admin/apikeys"},
-	{http.MethodPost, "/admin/apikeys/toggle"},
-	{http.MethodPost, "/admin/apikeys/delete"},
-	{http.MethodPost, "/admin/apikeys/reset"},
-	{http.MethodPost, "/admin/apikeys/update"},
-	{http.MethodGet, "/admin/ui/manifest"},
-}
-
-// canAccess 角色分流：管理员全部放行；成员只放行 memberRules 里精确列出的那些。
-func canAccess(p account.Principal, r *http.Request) bool {
-	if p.IsAdmin() {
-		return true
-	}
-	for _, rule := range memberRules {
-		if r.Method == rule.method && r.URL.Path == rule.path {
-			return true
-		}
-	}
-	return false
+// 判据不用删：`p.IsAdmin()` 是 fail-closed 的那一半（万一将来有别的身份
+// 来源接进 Identify，这里仍然只放行管理员）。对应 admin.go 的 403 分支
+// （code=forbidden_role）同样保留 —— 它是"有身份但角色不够"的唯一出口。
+func canAccess(p account.Principal) bool {
+	return p.IsAdmin()
 }
 
 // principalOf 解析请求身份。
@@ -739,7 +703,7 @@ func canAccess(p account.Principal, r *http.Request) bool {
 //
 //	h.adminTokenOK  传给 Identify 的 isToken 回调（读**当前**生效的令牌，
 //	                所以轮换立即生效、旧副本立即失效）
-//	canAccess       角色到端点的策略（那条 memberRules 精确白名单）
+//	canAccess       「必须是管理员」这一条（见上，成员白名单已删）
 func (h *Handler) principalOf(r *http.Request) (account.Principal, bool) {
 	return account.Identify(r, h.adminTokenOK, h.cfg.Accounts, h.cfg.Sessions)
 }
@@ -773,7 +737,7 @@ func (h *Handler) denyHint(r *http.Request) string {
 	case hasToken && hasAccounts:
 		return "浏览器请打开 /ui 用账号口令登录；脚本/CLI 用 Authorization: Bearer <admin_token>（或 ?token=<admin_token>）。" + proxyNote
 	case hasAccounts:
-		return "请打开 /ui 用账号口令登录（成员或管理员都从这里进）。本机没有配置 admin_token。" + proxyNote
+		return "请打开 /ui 用**管理员**账号口令登录（本部署只有一个账号，就是它）。本机没有配置 admin_token。" + proxyNote
 	case hasToken:
 		return "带 Authorization: Bearer <admin_token> 或 ?token=<admin_token> 访问。" +
 			"浏览器里的管理界面需要一个控制台账号：打开 /ui 创建第一个管理员。" + proxyNote

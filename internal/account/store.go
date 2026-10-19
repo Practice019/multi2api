@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -74,7 +75,13 @@ func New(path string) (*Store, error) {
 		if u == nil || u.ID == "" || strings.TrimSpace(u.Username) == "" {
 			continue // 跳过残缺行，不让一条坏记录卡住整个库
 		}
-		// 兼容手写的账号文件：角色/状态缺省时给最小权限，而不是给管理员。
+		// 兼容手写的账号文件：角色/状态缺省时给**最小**权限，而不是给管理员。
+		//
+		// ⚠ 2026-10-19 单账号口径：这里落到 RoleMember 是**"认出来再拒掉"**，
+		// 不是"给他一个成员身份" —— 成员角色已取消，Authenticate / Lookup 对
+		// 任何非管理员一律回 ErrMemberRetired（明确文案 + 日志）。所以这条分支
+		// 的作用是：让畸形/旧记录**可被准确命名**，且永远不会被当成管理员放进来。
+		// 反过来（缺省给管理员）等于让一个手写坏了的文件凭空造出管理员。
 		if !ValidRole(u.Role) {
 			u.Role = RoleMember
 		}
@@ -83,7 +90,33 @@ func New(path string) (*Store, error) {
 		}
 		s.users[normalizeUsername(u.Username)] = u
 	}
+
+	// 非管理员的历史记录（改造前建出来的成员，或角色字段缺失/手写成别的值）。
+	//
+	// 只在**启动时**记一条日志：这类记录无法登录（Authenticate 拒），但运维需要
+	// 知道盘上有它们 —— 否则"我的成员账号怎么登不上了"只能靠猜。
+	// 刻意不逐条打、也不在每次登录尝试时重复打：那会把日志刷成噪音。
+	if retired := retiredUsernames(s.users); len(retired) > 0 {
+		log.Printf("account: 账号库 %s 里有 %d 条**非管理员**历史记录（%s）：单账号管理员模式下"+
+			"它们不再构成身份，登录会被拒并提示「成员账号已取消，请用管理员账号」；"+
+			"要彻底清掉可先备份、再删掉这些行。",
+			s.path, len(retired), strings.Join(retired, ", "))
+	}
 	return s, nil
+}
+
+// retiredUsernames 列出库里的非管理员记录（仅用于启动日志）。
+//
+// 判据用 IsAdminRole（**唯一**一份"什么算能构成身份的角色"）。
+func retiredUsernames(users map[string]*User) []string {
+	out := make([]string, 0)
+	for _, u := range users {
+		if !IsAdminRole(u.Role) {
+			out = append(out, fmt.Sprintf("%s(%s)", u.Username, RoleName(u.Role)))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // saveLocked 原子写盘（临时文件 + rename）。调用方必须持锁。
@@ -131,49 +164,17 @@ func (s *Store) Count() int {
 	return len(s.users)
 }
 
-// Create 建号。role 必须是 ValidRole 的值。
+// ⚠ 2026-10-19：`Create(username, password, role)` **已删除**。
 //
-// ⚠ role 由**服务端**决定：注册接口一律传 RoleAdmin=false 的 RoleMember，
-// 绝不把请求体里的 role 透传进来（new-api controller/user.go:283 就是
-// 显式写死普通用户，注释还专门写了一句"明确设置角色为普通用户"）。
-func (s *Store) Create(username, password string, role int) (*User, error) {
-	if !ValidRole(role) {
-		return nil, ErrBadRole
-	}
-	name := strings.TrimSpace(username)
-	if err := validateUsername(name); err != nil {
-		return nil, err
-	}
-	hash, err := HashPassword(password)
-	if err != nil {
-		return nil, err
-	}
-	key := normalizeUsername(name)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.users[key]; exists {
-		return nil, ErrUsernameTaken
-	}
-	u := &User{
-		ID:           newID(),
-		Username:     name,
-		DisplayName:  name,
-		PasswordHash: hash,
-		Role:         role,
-		Enabled:      true,
-		AuthVersion:  1,
-		CreatedAt:    nowStamp(),
-	}
-	s.users[key] = u
-	if err := s.saveLocked(); err != nil {
-		// 落盘失败就把内存里的新账号撤回：否则会出现"这个进程里能登录、
-		// 重启后账号不存在"的幽灵账号。
-		delete(s.users, key)
-		return nil, err
-	}
-	return copyUser(u), nil
-}
+// 它是"角色分裂"的残留：一个带 role 参数的建号口子，注册路径传 RoleMember。
+// 单账号口径下它有两个不可接受之处 ——
+//
+//	① 它是一条**能建出非管理员账号**的代码路径（要求 1 明说不许有）；
+//	② 它的存在让"库非空之后还能建号"成为可能，而那正是要求 2 要关掉的门。
+//
+// 现在**唯一**的建号路径是 CreateBootstrap（见下）。测试要造第二个账号时
+// 不再有 API 可用 —— 那是对的：那个面不存在了（要造历史数据就直接写
+// accounts.json，那才是"旧数据兼容"的真实形态）。
 
 // CreateBootstrap 建**首个**账号，并把它建成管理员。
 //
@@ -185,11 +186,12 @@ func (s *Store) Create(username, password string, role int) (*User, error) {
 //
 // 所以在同一把锁里做"检查空 + 建号"，第二个到达者得到 ErrBootstrapDone。
 //
-// # 与开放注册的关系
+// # 与"注册接口"的关系（2026-10-19 单账号口径）
 //
-// 首启建管理员的**唯一**入口就是这里（对应计划里"首次访问控制台显示
-// 创建管理员"）。库非空之后，注册接口一律只建 RoleMember，绝不给管理员 ——
-// 否则第一个注册的人之后还能再"注册"出一个管理员。
+// 这是**唯一**的建号入口，且它写死 RoleAdmin。库非空之后注册接口整体关闭
+// （http.go 的 register 回 403 register_closed）—— 不再有"继续注册出
+// 成员"这回事。所以第一个建号的人之后，**再没有任何**代码路径能建出账号
+// （更不用说非管理员账号）。
 func (s *Store) CreateBootstrap(username, password string) (*User, error) {
 	if err := validateUsername(username); err != nil {
 		return nil, err
@@ -274,6 +276,19 @@ func (s *Store) List() []View {
 // 成功返回账号副本（含 Role/AuthVersion，供签发会话用）。
 // 失败一律 ErrCredentials；账号被禁用返回 ErrDisabled；账号不存在时
 // **也走一遍 bcrypt**（对着占位哈希）以对齐耗时，见 VerifyPassword 的注释。
+//
+// # ⚠ 2026-10-19 单账号口径：非管理员一律拒（ErrMemberRetired）
+//
+// 判据是 IsAdminRole（唯一一份）。顺序刻意排成"**先验口令，再看角色**"：
+//
+//	· 角色判定若排在口令之前，"这个用户名存在吗"就有了一个**不需要口令**
+//	  的探测信号（回 member_retired 还是 bad_credentials）⇒ 用户名枚举。
+//	· 排在之后则拿不到口令的人区分不出来，而口令正确的本人会拿到那句
+//	  明确文案（这正是要求 3 想要的：告诉他该用管理员账号，而不是让他
+//	  一遍遍试口令）。
+//
+// 拒绝时**不**返回账号（连 Enabled 的答案都不给）：调用方不该拿到任何
+// 关于这条历史记录的东西，否则"它是不是还存在"会顺着响应形状漏出去。
 func (s *Store) Authenticate(username, password string) (*User, error) {
 	u := s.ByUsername(username)
 	if u == nil {
@@ -286,6 +301,10 @@ func (s *Store) Authenticate(username, password string) (*User, error) {
 	}
 	if !u.Enabled {
 		return nil, ErrDisabled
+	}
+	if !IsAdminRole(u.Role) {
+		// 成员的旧记录（或手写成别的角色值的记录）：口令对也没用。
+		return nil, ErrMemberRetired
 	}
 	return u, nil
 }
@@ -328,20 +347,14 @@ func (s *Store) BumpAuthVersion(id string) (int64, error) {
 	return u.AuthVersion, nil
 }
 
-// SetRole 改角色（只有管理员能调到；校验在 HTTP 层）。
-func (s *Store) SetRole(id string, role int) error {
-	if !ValidRole(role) {
-		return ErrBadRole
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u := s.findLocked(id)
-	if u == nil {
-		return ErrNotFound
-	}
-	u.Role = role
-	return s.saveLocked()
-}
+// ⚠ 2026-10-19：`SetRole(id, role)` **已删除**。
+//
+// 理由与 Create 的删除同源，而且更直接：它是**第四条**能造出非管理员账号的
+// 路径（管理员被降级成成员 = 盘上多出一条非管理员记录），而单账号口径下
+// 角色根本不是可配置项 —— 只有管理员，没有"改成别的角色"。
+//
+// 生产代码从来没有调用过它（只有测试在用）；留着它就是留一个"想变绿就
+// 降个级"的口子。要造历史数据请直接写 accounts.json（那才是真实形态）。
 
 // SetEnabled 启用/禁用账号。禁用**不**删号（保留其 key 与历史）。
 func (s *Store) SetEnabled(id string, enabled bool) error {

@@ -23,6 +23,12 @@ import (
 //	ErrSessionRevoked   被撤销，或**账号 AuthVersion 变了**（改口令/被下线）
 //	                    ⇒ 401 session_revoked，文案点明原因，用户才知道该重登
 //	ErrDisabled         账号被管理员禁用 ⇒ 403（不是 401：重登也没用）
+//	ErrMemberRetired    ★ 单账号口径：这条会话属于**非管理员**的历史记录
+//	                    （改造前签发的成员会话，或账号文件被回滚/手改过）
+//	                    ⇒ 401 member_retired，文案点明"用管理员账号"
+//	                    ⚠ 走 401 而不是 403：前端对 401 的统一处置是回登录页，
+//	                    那正是它的归宿（他没有可用的账号），而 403 会被当成
+//	                    "已登录但无权"，用户会以为自己还在线。
 func writeAuthError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrSessionExpired):
@@ -30,6 +36,8 @@ func writeAuthError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrSessionRevoked):
 		writeError(w, http.StatusUnauthorized, "session_revoked",
 			"登录已失效（口令变更或被下线），请重新登录")
+	case errors.Is(err, ErrMemberRetired):
+		writeError(w, http.StatusUnauthorized, "member_retired", "成员账号已取消，请用管理员账号登录")
 	case errors.Is(err, ErrDisabled):
 		writeError(w, http.StatusForbidden, "disabled", "账号已被禁用，请联系管理员")
 	default:

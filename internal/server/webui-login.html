@@ -111,7 +111,8 @@
   }
   button.primary:hover:not(:disabled) { filter: brightness(1.06); }
   button.primary:disabled { opacity: .7; cursor: default; }
-  .switch { margin: 10px 0 0; font-size: 12.5px; text-align: center; }
+  /* ⚠ `.switch`（原来给「没有账号，注册成员 ⇄ 已有账号，去登录」那一行用的）
+   已随注册入口删除 —— 单账号口径下没有可切换的两边，留着是无主样式。 */
   button.link {
     padding: 0;
     font: inherit;
@@ -170,10 +171,11 @@
     <button class="primary" id="submit" type="submit">登录</button>
   </form>
 
-  <p class="switch" id="switchRow" hidden>
-    <button class="link" id="switchLink" type="button">注册</button>
-  </p>
-
+  <!-- ⚠ 2026-10-19 用户新口径：登录系统收成**单账号管理员**（"只要一个管理员就行了，
+       只要一个账号。用户其实可以不用。"）⇒ 这里**不再有注册入口**。
+       保留下来的只有一条线：账号库为空时创建**那一个**管理员（bootstrap）。
+       §契约：未认证 /ui 的 HTML 里不许出现「注册」/「注册成员」/模式切换那一段
+       —— 判据在 tests/frontend/verify_single_admin.js 第 4 条。 -->
   <details>
     <summary>脚本用户：用管理令牌访问</summary>
     <p>管理令牌 <code>admin_token</code> 可带 <code>Authorization: Bearer &lt;admin_token&gt;</code> 调管理接口；也可在浏览器打开 <code>/ui?token=&lt;admin_token&gt;</code> 换取一次性登录。</p>
@@ -182,8 +184,7 @@
 
 <script>
   window.__WB2API_LOGIN_FLAGS__ = {
-    bootstrap: "__WB2API_LOGIN_BOOTSTRAP__",
-    register: "__WB2API_LOGIN_REGISTER__"
+    bootstrap: "__WB2API_LOGIN_BOOTSTRAP__"
   };
 </script>
 <script>
@@ -191,17 +192,23 @@
   'use strict';
 
   var FLAGS = window.__WB2API_LOGIN_FLAGS__ || {};
+  // ⚠ 只有 bootstrap 一个标志了（新口径：单账号管理员）。
+  //   原来还有 `register`（库非空也能注册）与由它派生的 `CAN_SWITCH`（模式切换）
+  //   —— 两条都在新口径下没有对应物：注册入口只在**首次**出现，就是 bootstrap 本身。
   var BOOTSTRAP = FLAGS.bootstrap === true;
-  var REGISTER = FLAGS.register === true;
-  var CAN_SWITCH = REGISTER && !BOOTSTRAP;
 
   var TEXT = {
     bad_credentials: '用户名或口令不对',
+    // ⚠ 只可能来自 bootstrap 的并发竞争（两个人同时开首次引导）：
+    //   库非空之后就不再允许注册，所以这条文案不再是"注册"的错误文案，
+    //   而是"这个首次创建被别人抢先了"。
     username_taken: '用户名已被占用',
     invalid_username: '用户名不合法（3–32 位，可用字母、数字与 _ - . @）',
     invalid_password: '口令不合法（8–128 位）',
     rate_limited: '请求太频繁（请稍后再试）',
-    register_disabled: '本机已关闭注册',
+    // ⚠ 新口径：成员账号已取消 ⇒ 登录被拒时的文案要指向"用管理员账号"。
+    //   后端把退役账号归为 member_retired / bad_credentials，两种都落到这里。
+    member_retired: '成员账号已取消，请用管理员账号登录',
     body_too_large: '请求过大',
     auth_required: '会话已失效，请重新登录',
     // 人机校验（T10）。服务端把"没带 / 答错 / 题过期"**都**回成同一个 code，
@@ -221,14 +228,20 @@
   var hintEl = document.getElementById('hint');
   var alertEl = document.getElementById('alert');
   var btn = document.getElementById('submit');
-  var switchRow = document.getElementById('switchRow');
-  var switchLink = document.getElementById('switchLink');
+  // ⚠ switchRow/switchLink 已随注册入口一起删除（新口径：单账号管理员）。
+  //   `applyMode` 里原来靠 `switchRow.hidden = !CAN_SWITCH` 控制它 —— 现在没有它了。
   var captchaRow = document.getElementById('captchaRow');
   var captchaSvg = document.getElementById('captchaSvg');
   var captchaEl = document.getElementById('captcha');
   var captchaRefresh = document.getElementById('captchaRefresh');
 
-  var mode = BOOTSTRAP ? 'register' : 'login';
+  // ⚠ 只有两种**形态**，不是一个"模式开关"：
+  //   bootstrap —— 账号库为空时的**一次性**引导（创建那一个管理员）
+  //   login     —— 管理员登录
+  // 原来的 'register'（库非空也能注册出成员）在新口径下不存在，
+  // 所以这里的取值改名为 'bootstrap'：名字必须与"它到底是什么"一致，
+  // 否则下一个人看到 'register' 会以为还能注册。
+  var mode = BOOTSTRAP ? 'bootstrap' : 'login';
   var busy = false;
 
   // 人机校验（T10）的两份状态，刻意分开：
@@ -242,8 +255,7 @@
   var captchaBusy = false;
 
   function labelOf(m) {
-    if (m === 'register') return BOOTSTRAP ? '创建第一个管理员' : '注册';
-    return '登录';
+    return m === 'bootstrap' ? '创建第一个管理员' : '登录';
   }
 
   function showError(text) {
@@ -257,22 +269,18 @@
   }
 
   function applyMode() {
-    if (mode === 'register') {
-      titleEl.textContent = BOOTSTRAP ? '创建第一个管理员' : '注册成员账号';
-      subEl.textContent = BOOTSTRAP
-        ? '账号库为空，这个入口只在此时出现一次；创建后立即以该账号登录。'
-        : '注册成功后会自动登录；成员只能看到并管理自己名下的 API key。';
+    if (mode === 'bootstrap') {
+      titleEl.textContent = '创建第一个管理员';
+      subEl.textContent = '账号库为空，这个入口只在此时出现一次；创建后立即以该账号登录。';
       hintEl.textContent = '用户名 3–32 位，可用字母、数字与 _ - . @；口令 8–128 位。';
     } else {
       titleEl.textContent = '登录控制台';
-      subEl.textContent = '使用账号口令登录，管理你的 API key。';
+      subEl.textContent = '使用管理员账号口令登录，管理上游账号与 API key。';
       hintEl.textContent = '用户名 3–32 位；口令 8–128 位。';
     }
     btn.textContent = labelOf(mode);
-    switchRow.hidden = !CAN_SWITCH;
-    if (CAN_SWITCH) {
-      switchLink.textContent = mode === 'register' ? '已有账号，去登录' : '没有账号，注册成员';
-    }
+    // ⚠ 这里原来还有 `switchRow.hidden = !CAN_SWITCH` + 切换文案 ——
+    //   注册入口已按用户新口径删除，没有可切换的另一边了。
   }
 
   function setBusy(on) {
@@ -433,18 +441,25 @@
     };
   }
 
+  // attempt 发一次提交。
+  //
+  // ⚠ 新口径（单账号管理员）下只剩两条路：
+  //   'bootstrap' —— 账号库为空时创建**那一个**管理员（服务端同一端点
+  //                  `/admin/auth/register`，但只在库空时受理）；
+  //   'login'     —— 管理员登录。
+  // 原来的第三种（库非空还能注册出成员）连同注册入口一起删除。
   async function attempt(action, username, password) {
-    var path = action === 'register' ? '/admin/auth/register' : '/admin/auth/login';
+    var path = action === 'bootstrap' ? '/admin/auth/register' : '/admin/auth/login';
     var res = await request(path, credsBody(username, password));
     if (!res.ok) return { text: messageOf(res), code: res.code };
     if (action === 'login') return { redirect: true };
-    // 注册成功后的自动登录。⚠ 人机校验开着时，这道题**已经被注册那一步用掉了**
+    // 首次创建成功后的自动登录。⚠ 人机校验开着时，这道题**已经被创建那一步用掉了**
     //（服务端一次性消费），所以这里多半会拿到 captcha_required —— 不特判，
     // 交给调用方按"换个新题、请用户重登"处理（见提交处的 code 分支）。
     var login = await request('/admin/auth/login', credsBody(username, password));
     if (login.ok) return { redirect: true };
     return {
-      text: '注册成功，但自动登录未通过：' + messageOf(login) + '。请改用登录。',
+      text: '管理员创建成功，但自动登录未通过：' + messageOf(login) + '。请改用登录。',
       code: login.code,
       toLogin: true
     };
@@ -504,17 +519,10 @@
     askCaptcha({ quiet: false, focus: true });
   });
 
-  switchLink.addEventListener('click', function (ev) {
-    ev.preventDefault();
-    if (busy) return;
-    mode = mode === 'register' ? 'login' : 'register';
-    clearError();
-    applyMode();
-    // 换一题：上一道题很可能已经被上一次提交用掉了（服务端一次性消费），
-    // 两种模式共用同一道人机校验。
-    if (captchaEnabled) askCaptcha({ quiet: true });
-    userEl.focus();
-  });
+  // ⚠ 这里原来有 `switchLink` 的点击处理（登录 ⇄ 注册 切换）。
+  //   注册入口已按用户新口径（单账号管理员）删除 ⇒ 没有可切换的另一边，整块删掉。
+  //   删掉的是**入口**，不是能力：首次引导那条线由 `BOOTSTRAP` 直接决定 mode，
+  //   不依赖用户点任何开关。
 
   applyMode();
   userEl.focus();

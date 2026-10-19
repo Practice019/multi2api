@@ -32,7 +32,7 @@ func newIDFixture(t *testing.T) *idFixture {
 	if err != nil {
 		t.Fatalf("会话库: %v", err)
 	}
-	admin, err := store.Create("boss", "boss-password-001", RoleAdmin)
+	admin, err := store.CreateBootstrap("boss", "boss-password-001")
 	if err != nil {
 		t.Fatalf("建管理员: %v", err)
 	}
@@ -126,11 +126,10 @@ func TestTokenFromRequestPrecedence(t *testing.T) {
 // ★ 令牌赢过会话（两条路都在时以令牌为准），且令牌来源恒为管理员。
 func TestIdentifyTokenWinsOverSession(t *testing.T) {
 	f := newIDFixture(t)
-	member, err := f.store.Create("staff", "staff-password-002", RoleMember)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess, err := f.sessions.Issue(member, "127.0.0.1", "probe/1.0")
+	// ⚠ 语义变更（2026-10-19 单账号口径）：这里原先给一个**成员**账号签会话。
+	// 成员角色已取消（盘上的成员记录连 Authenticate/Lookup 都过不去），
+	// 所以换成给唯一那个管理员签会话 —— 测的仍是"两条路都在时令牌优先"。
+	sess, err := f.sessions.Issue(f.admin, "127.0.0.1", "probe/1.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,14 +153,21 @@ func TestIdentifyTokenWinsOverSession(t *testing.T) {
 	}
 }
 
-// 会话来源带出账号与角色（成员就是成员，不得被抬成管理员）。
-func TestIdentifySessionCarriesRole(t *testing.T) {
+// ★★ 会话来源带出账号与角色；**非管理员的历史记录不构成身份**。
+//
+// ⚠ 语义变更（2026-10-19 单账号口径）：这条测试原先叫
+// TestIdentifySessionCarriesRole，断言"成员会话被认出来、且角色是成员、
+// 不得被判成管理员"。那个面（成员会话可以存在）**已经不存在** ——
+// 按用户新口径，盘上的成员记录不许构成任何身份。
+//
+// 所以改成语义相反的**更强**判据：同样一条成员记录、同样一条有效会话
+// （直接签发，模拟改造前留下的那条），Identify 必须返回 ok=false。
+// 正面的一半（会话带出账号与角色）改由管理员会话来钉。
+func TestIdentifySessionOfLegacyMemberIsNotAnIdentity(t *testing.T) {
 	f := newIDFixture(t)
-	member, err := f.store.Create("staff", "staff-password-002", RoleMember)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess, err := f.sessions.Issue(member, "127.0.0.1", "probe/1.0")
+
+	// 正面：管理员的会话能构成身份，角色就是管理员
+	sess, err := f.sessions.Issue(f.admin, "127.0.0.1", "probe/1.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,11 +178,35 @@ func TestIdentifySessionCarriesRole(t *testing.T) {
 	if !ok {
 		t.Fatal("有效会话应当被认出来")
 	}
-	if p.Kind != KindSession || p.UserID != member.ID || p.Role != RoleMember {
-		t.Errorf("会话身份 = %+v，want Kind=%s UserID=%s Role=%d", p, KindSession, member.ID, RoleMember)
+	if p.Kind != KindSession || p.UserID != f.admin.ID || p.Role != RoleAdmin || !p.IsAdmin() {
+		t.Errorf("会话身份 = %+v，want Kind=%s UserID=%s Role=%d", p, KindSession, f.admin.ID, RoleAdmin)
 	}
-	if p.IsAdmin() {
-		t.Error("★ 成员不得被判成管理员")
+
+	// 反面：盘上的成员历史记录 —— 即便会话是有效的，也不构成身份
+	dir := t.TempDir()
+	path := filepath.Join(dir, "accounts.json")
+	seedAccountsFile(t, path, accountRow(t, "staff", "staff-password-002", RoleMember))
+	legacy, err := New(path)
+	if err != nil {
+		t.Fatalf("★ 有成员历史记录时 New 不得报错：%v", err)
+	}
+	legacySessions, err := NewSessionStore(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := legacy.ByUsername("staff")
+	if member == nil {
+		t.Fatal("前置：成员记录应当被加载")
+	}
+	msess, err := legacySessions.Issue(member, "127.0.0.1", "probe/1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := reqWith(t, "/ui", func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: CookieName, Value: msess.SID})
+	})
+	if p2, ok2 := Identify(r2, onlyToken("nobody"), legacy, legacySessions); ok2 {
+		t.Errorf("★ 成员历史记录不得构成身份（成员账号已取消），却认出了 %+v", p2)
 	}
 }
 

@@ -20,7 +20,7 @@ const { spawn } = require('child_process');
 const CHROME = require('./chrome_path.js').resolveChrome();
 // 探针自带夹具密钥：T5/T7 起产品不再把凭据注入页面（那是安全改造的目标之一），
 // 页内 fetch('/v1/models') 必须由探针自己带 key —— 见 lib_cdp.injectProbeKey。
-const { injectProbeKey: injectKey, pasteConsoleKey } = require('./lib_cdp.js');
+const { injectProbeKey: injectKey, pasteConsoleKey, until } = require('./lib_cdp.js');
 const PORT = 9306;
 const TARGET = process.env.MODELS_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = path.join(os.tmpdir(), 'chrome-models');
@@ -72,6 +72,34 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
       if (b) b.click();
     })()`);
     await sleep(2500);
+
+    // ⚠⚠ 有界等**真实就绪信号**，别靠睡固定时间（2026-10-19 补）。
+    //
+    // # 为什么必须有（实测抖动，非产品缺陷）
+    //
+    // 同一份代码、同一条命令连跑：一次 `exit 0`，下一次 **10 项失败**
+    // （`分组: []`、`分组标题: []`、`默认展开（—）`）。差的只是
+    // "睡醒时 `/v1/models` 回来了没有"。
+    //
+    // 这正是主脑那条口径的活例子：**判据必须靠真信号，不能靠时间**
+    //  —— `verify_model_provider_filter.js` 里那个 `waitModels(1)` 是**恒真**的
+    //     假等待（`auto` 项永远在），所以我把它换成了 `waitProviderOptions`。
+    //     这里同理：要等的是"**至少一个 chip 画出来了**"，
+    //     那才是"模型目录回来了 + renderModels 跑过了"的唯一外部信号。
+    //
+    // 15 秒内没出现，后面的断言该红还是红（而且会如实说明"就绪信号没出现"）。
+    if (typeof until === 'function') {
+      // ⚠ `until` **不抛**（超时就把最后一次的值返回）—— 所以判据是"它返回的值够不够"，
+      //   不能写成 `.then(()=>true)`（那样里面超时了外面也是 true，等于没等）。
+      const readyN = await until(ev, `document.querySelectorAll('#models .chip').length`,
+        (v) => Number(v) >= 1, 15000);
+      const n = Number(readyN) || 0;
+      console.log('  就绪信号: #models .chip = ' + n + (n >= 1 ? '' : '（15s 内没等到）'));
+      if (n < 1) {
+        console.error('  ⚠ 15s 内模型面板没画出任何 chip ⇒ /v1/models 没回来' +
+          '（先看上面有没有"粘密钥失败"的告警），下面的分组/去重断言会假红');
+      }
+    }
 
     // ---- 1) 去重 ----
     //

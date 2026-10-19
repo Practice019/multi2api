@@ -1232,10 +1232,18 @@ func main() {
 	accountHTTP, err := account.NewHTTP(account.HTTPConfig{
 		Accounts: accountsStore,
 		Sessions: sessionsStore,
-		// ⚠ 取反：配置里的字段是否定式（disables_register，缺省 false = 开放）
-		RegisterEnabled: !cfg.Console.DisableRegister,
-		CookieSecure:    strings.TrimSpace(cfg.Console.CookieSecure),
-		Limiter:         authLimiter,
+		// ⚠ 2026-10-19 用户新口径：这里原先传 `RegisterEnabled:
+		// !cfg.Console.DisableRegister` —— 那个字段已从 HTTPConfig 删除。
+		//
+		// 单账号管理员模式下"是否开放注册"这个概念不存在了：建号只有
+		// "账号库为空时建第一个管理员"这一次，库非空后端点整体回
+		// 403 register_closed。所以**没有**开关可传，也不该有
+		// （留一个开关＝让人以为打开它能再注册）。
+		//
+		// `console.disables_register` 仍被解析（不动既有配置文件与文档），
+		// 但不再影响任何行为 —— 下面那句启动日志会如实说明，不静默忽略。
+		CookieSecure: strings.TrimSpace(cfg.Console.CookieSecure),
+		Limiter:      authLimiter,
 		// 令牌身份也要能问"我是谁"（否则 `?token=` 进来的浏览器会被踢回登录页，
 		// 而且会无限重载 —— 见 account/session 的注释）。
 		AdminTokenOK: func(cred string) bool { return adminTokenOKFn(cred) },
@@ -1248,8 +1256,14 @@ func main() {
 		log.Fatalf("装配登录端点: %v", err)
 	}
 	// 定时清理（Prune / Cleanup）挂在 ctx 之后，见下面 startAuthLimitPruner 的调用。
-	log.Printf("账号: 控制台账号体系已启用（注册%s，限速 %d 次/%s，人机校验%s，账号库 data/accounts.json）",
-		map[bool]string{true: "开放", false: "关闭"}[!cfg.Console.DisableRegister],
+	//
+	// ⚠ 这句日志必须与**实际行为**一致（它曾写着"注册开放/关闭"，而那个开关
+	// 现在已经不改变行为了）。照实说三件事：唯一账号怎么建、之后能不能再建、
+	// 配置里那个开关是否还起作用。
+	log.Printf("账号: 控制台为**单账号管理员**模式（唯一账号 = 账号库为空时在 /ui 创建的那个管理员；"+
+		"账号库非空后 /admin/auth/register 一律 403 register_closed）；"+
+		"`console.disables_register`=%v 在本版本已不改变行为；限速 %d 次/%s，人机校验%s，账号库 data/accounts.json",
+		cfg.Console.DisableRegister,
 		authRateLimit(cfg), authWindow,
 		map[bool]string{true: "开", false: "关"}[!cfg.Console.DisableCaptcha])
 
@@ -1411,8 +1425,12 @@ func main() {
 		// 都调它 —— 两处各写一份必然漂移（页面能开但接口敞开，或反之）。
 		Accounts:     accountsStore,
 		Sessions:     sessionsStore,
-		RegisterOpen: func() bool { return !cfg.Console.DisableRegister },
 		CookieSecure: cfg.Console.CookieSecure,
+		// ⚠ 2026-10-19 单账号口径：这里原先传 `RegisterOpen:
+		// func() bool { return !cfg.Console.DisableRegister }`，那个字段
+		// 已从 server.Config 删除 —— 登录页的注册入口现在**直接由
+		// "账号库空不空"推出**（见 webui.go 的 renderLoginPage 调用处），
+		// 与 `/admin/auth/register` 的 403 register_closed 同源。
 		// 管理台门禁令牌（与 api_key **独立**）与监听范围 —— 两者共同决定
 		// 「本机免令牌」是否成立，见 internal/server/webui.go 的 localExempt。
 		//

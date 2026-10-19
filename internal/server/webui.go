@@ -77,22 +77,27 @@ func renderUI(page []byte) []byte {
 	return out
 }
 
-// 登录页的两个标志位占位符（webui-login.html 里以**带双引号的字面量**出现）。
+// 登录页的标志位占位符（webui-login.html 里以**带双引号的字面量**出现）。
 //
 //	bootstrap  账号库为空（首次部署）⇒ 主 CTA 是「创建第一个管理员」
-//	register   开放注册 ⇒ 显示注册入口（成员只能用自己名下的 API key）
-const (
-	loginBootstrapPlaceholder = "__WB2API_LOGIN_BOOTSTRAP__"
-	loginRegisterPlaceholder  = "__WB2API_LOGIN_REGISTER__"
-)
+//
+// ⚠ 2026-10-19 用户新口径：这里原先还有第二个占位符 `register`
+// （由配置开关 `console.disables_register` 提供），现在**两个一起没了**：
+//
+//	· 语义上：单账号口径下"能不能建号"只有一个答案 —— 账号库空不空，
+//	  也就是 bootstrap 那一个条件（两个来源必然有一天互相矛盾：
+//	  配置说开、库里已有账号 ⇒ 页面给出一个点了必然 403 的入口）。
+//	· 载体上：`webui-login.html` 的 `__WB2API_LOGIN_FLAGS__` 里已经不再有
+//	  `register` 这一项（由前端那一侧删除）。继续注入一个页面上不存在的
+//	  占位符只会留下"这里好像还有个开关"的死代码。
+const loginBootstrapPlaceholder = "__WB2API_LOGIN_BOOTSTRAP__"
 
-// renderLoginPage 把两个标志位替换成真实布尔值。
+// renderLoginPage 把标志位替换成真实布尔值。
 //
 // 为什么用"带引号的字面量"做替换锚点：裸占位符在页面上还会出现在注释与
 // 属性名里，ReplaceAll 会改坏它们（旧 renderUI 的注释里记着这个坑）。
-func renderLoginPage(page []byte, bootstrap, registerOpen bool) []byte {
-	out := injectBool(page, loginBootstrapPlaceholder, bootstrap)
-	return injectBool(out, loginRegisterPlaceholder, registerOpen)
+func renderLoginPage(page []byte, bootstrap bool) []byte {
+	return injectBool(page, loginBootstrapPlaceholder, bootstrap)
 }
 
 // injectBool 把 `"<TOKEN>"` 换成 JSON 布尔字面量（true / false）。
@@ -133,17 +138,6 @@ func (h *Handler) uiIdentify(r *http.Request) (account.Principal, bool) {
 // loginBootstrap 账号库是否为空（首次部署 ⇒ 登录页显示「创建第一个管理员」）。
 func (h *Handler) loginBootstrap() bool {
 	return h.cfg.Accounts != nil && h.cfg.Accounts.Count() == 0
-}
-
-// loginRegisterOpen 登录页要不要显示注册入口。
-//
-// 取不到判定（装配层没接线）时按**关闭**处理：宁可不显示入口，
-// 也不要显示一个点了必然失败的按钮。
-func (h *Handler) loginRegisterOpen() bool {
-	if h.cfg.RegisterOpen == nil {
-		return false
-	}
-	return h.cfg.RegisterOpen()
 }
 
 // ui 提供内嵌控制台。
@@ -209,7 +203,11 @@ func (h *Handler) ui(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(account.AdminTokenCookie); err == nil && c != nil && c.Value != "" {
 		account.ClearAdminTokenCookie(w, r, h.cfg.CookieSecure)
 	}
-	writeHTML(w, renderLoginPage(loginHTML, h.loginBootstrap(), h.loginRegisterOpen()))
+	// 标志位与端点判据**同源**：能不能建号 = 账号库空不空（见
+	// renderLoginPage 的注释）。库非空 ⇒ 页面不显示「创建第一个管理员」，
+	// 与 `/admin/auth/register` 的 403 register_closed 判据逐字一致。
+	bootstrap := h.loginBootstrap()
+	writeHTML(w, renderLoginPage(loginHTML, bootstrap))
 }
 
 // writeHTML 写一段内嵌页面。

@@ -107,7 +107,23 @@ function run(file, env) {
 
 (async () => {
   console.log('=== 浏览器 E2E（串行 + 端口隔离）===');
-  console.log('目标: ' + BASE + '\n');
+  console.log('目标: ' + BASE);
+
+  // ⚠ 每条探针的**完整** stdout+stderr 都落文件。
+  //
+  // # 为什么必须有（2026-10-19 加）
+  //
+  // 之前只在失败时打**最后 6 行**（`tail`）⇒ 真正的 `FAIL xxx` 行往往被截掉，
+  // 拿着"失败明细"根本没法归因（实测：5 条红里 4 条看不到是哪条断言）。
+  // 而每条红都要被定性 A/B/C —— 没有完整输出，定性就是猜。
+  //
+  // ⚠ 默认目录在**系统临时目录**下，不在仓库里（本仓不许出现机器绝对路径）；
+  //   要指到别处用 `--logdir=<dir>`。
+  const logArg = (process.argv.slice(2).find((a) => a.startsWith('--logdir=')) || '').split('=')[1];
+  const LOGDIR = logArg || path.join(os.tmpdir(), 'wb2api-e2e-logs');
+  try { fs.mkdirSync(LOGDIR, { recursive: true }); } catch { /* 已存在 */ }
+  console.log('完整日志目录: ' + LOGDIR);
+  console.log('');
 
   // 起始先清一次
   killStaleChrome();
@@ -115,6 +131,7 @@ function run(file, env) {
 
   let pass = 0;
   const failures = [];
+  const results = [];
 
   for (const [file, envVar] of TESTS) {
     // 跑之前确认端口都空了
@@ -127,6 +144,19 @@ function run(file, env) {
     env[envVar] = BASE;
     const r = run(file, env);
 
+    // 全文落盘（成功也落：成功的东西"为什么绿"同样需要可查）
+    const logPath = path.join(LOGDIR, file.replace(/\.js$/, '') + '.log');
+    try {
+      fs.writeFileSync(logPath, '### ' + file + '  (env ' + envVar + ')\n' +
+        '### exit=' + r.code + '  ok=' + r.ok + '\n' +
+        '### 命令: node tests/frontend/' + file + '    # ' + envVar + ' = ' + BASE + '\n\n' +
+        (r.out || '(无输出)') + '\n');
+    } catch (e) {
+      console.error('  ⚠ 写日志失败 ' + logPath + ': ' + (e && e.message));
+    }
+
+    results.push({ file, ok: !!r.ok });
+
     if (r.ok) {
       pass++;
       const last = (r.out || '').trim().split('\n').pop() || '';
@@ -134,8 +164,13 @@ function run(file, env) {
     } else {
       const tail = (r.out || '').trim().split('\n').slice(-6).join('\n         ');
       // 区分"启动失败"与"断言失败"：前者是基础设施问题，后者才是产品问题
-      const isStartup = /EXCEPTION: Chrome 未启动|Cannot find module|EADDRINUSE/.test(r.out || '');
-      failures.push({ file, isStartup, tail });
+      const isStartup = /EXCEPTION: Chrome 未启动|Cannot find module|EADDRINUSE|端口 \d+ 被占用/.test(r.out || '');
+      // ⚠ 明细里**印出全部 FAIL 行**（不再只留 6 行尾部）—— 归因靠的就是它们。
+      const failLines = (r.out || '').split(/\r?\n/)
+        .filter((l) => /^\s*FAIL\s/.test(l))
+        .map((l) => l.trim())
+        .slice(0, 12);
+      failures.push({ file, isStartup, tail, failLines, logPath });
       console.log(`  ${isStartup ? 'ENV   ' : 'FAIL  '}${file}`);
     }
 
@@ -149,8 +184,24 @@ function run(file, env) {
     console.log('\n失败明细：');
     for (const f of failures) {
       console.log(`\n  ${f.file}（${f.isStartup ? '环境/启动问题' : '断言失败'}）`);
-      console.log('         ' + f.tail);
+      if (f.failLines.length) {
+        f.failLines.forEach((l) => console.log('         ' + l));
+      } else {
+        console.log('         ' + f.tail);
+      }
+      console.log('         全文: ' + f.logPath);
     }
   }
+
+  // ---- 机器可比的"红集合"（"两跑一致"唯一能自动判的形式）----
+  //
+  // 红可以留着，但**不许飘**：连跑两次这一行必须逐字相同。
+  const reds = failures.map((f) => f.file).sort();
+  const envOnly = failures.filter((f) => f.isStartup).map((f) => f.file).sort();
+  console.log('');
+  console.log('REDS=' + reds.join(','));
+  console.log('REDS_COUNT=' + reds.length + '  PASS=' + pass + '  TOTAL=' + TESTS.length);
+  if (envOnly.length) console.log('REDS_ENV=' + envOnly.join(','));
+
   process.exit(failures.length ? 1 : 0);
 })();

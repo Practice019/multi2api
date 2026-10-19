@@ -21,7 +21,14 @@
 //
 // # 单机简化（用户要求"实现可以最简单实现"）
 //
-//	两级角色、JSON 落盘、进程内会话表；不引数据库、不做多租户/RBAC/2FA。
+//	**单角色**（只有管理员，且只有一个账号）、JSON 落盘、进程内会话表；
+//	不引数据库、不做多租户/RBAC/2FA。
+//
+// # ⚠ 2026-10-19 收口径：用户面取消
+//
+// 曾经的"管理员/成员两级"已收成**单账号管理员**：建号只剩首启那一次
+// （CreateBootstrap），注册接口在库非空后关闭，成员留下的历史记录不构成身份。
+// 详见 account.go 的角色常量注释、store.go 的 New/Authenticate 与 http.go 的 register。
 package account
 
 import (
@@ -36,10 +43,24 @@ import (
 // 角色。数值照抄 new-api（common/constants.go:199-200）而不是自己编号：
 // 将来若真要加"超管/只读"这类级别，不用做数据迁移，且与参考实现的判据
 // `myRole > targetRole` 语义天然一致（见 canManageTargetRole 那类写法）。
+//
+// # ⚠ 2026-10-19（用户新口径）：登录系统收成**单账号管理员**
+//
+// 用户原话：「我觉得可以只要一个管理员就行了，只要一个账号。用户其实可以不用。」
+// ⇒ 成员（RoleMember）这个角色**不再存在**：没有任何代码路径会**创建**出
+// 非管理员账号（建号只有 Store.CreateBootstrap 一条路，它写死 RoleAdmin），
+// 且任何非管理员的历史记录都**不构成身份**（Authenticate / Lookup 都拒）。
+//
+// 常量本身保留为**只读兼容值**，理由有二（都不是"以后可能还要用"）：
+//
+//	① 盘上可能有改造前建出来的成员行 —— 必须能**认出**它（拒绝时给出准确
+//	   文案与日志），而不是把它当成"未知角色"糊过去（见 store.go 的 New）。
+//	② 界面/日志里那句「成员账号已取消，请用管理员账号」需要一个名字。
 const (
-	// RoleMember 普通成员：能登录控制台，只看得到**自己**的东西。
+	// RoleMember 【历史值 · 已取消】普通成员。别再建它，也别把有它的记录
+	// 当成可用账号 —— 它只是一个"我们认得的旧值"，不是一种权限。
 	RoleMember = 1
-	// RoleAdmin 管理员：账号池、上游、系统设置等全套管理能力。
+	// RoleAdmin 管理员：唯一还能被创建、也是唯一能构成身份的角色。
 	RoleAdmin = 10
 )
 
@@ -47,17 +68,28 @@ const (
 func RoleName(role int) string {
 	switch role {
 	case RoleMember:
-		return "成员"
+		return "成员（已取消）"
 	case RoleAdmin:
 		return "管理员"
 	}
 	return fmt.Sprintf("未知角色(%d)", role)
 }
 
-// ValidRole 报告 role 是不是我们认识的角色值。
-// 用于写入前的校验：`SetRole(user, 12345)` 这类误用应当**当场报错**，
-// 而不是写进文件、等到鉴权时才表现成"谁都不是"。
+// ValidRole 报告 role 是不是我们**认识**的角色值。
+//
+// ⚠ 它现在是**只读判据**（唯一调用点是 store.go 读盘时的归一化），不再是
+// "能不能写进去"的校验 —— 写入侧的角色参数已经不存在了：建号只有
+// CreateBootstrap（写死管理员），没有 SetRole 这种改角色的口子。
+//
+// 认识 RoleMember 是刻意的：旧数据要被**认出来再拒掉**（明确文案 + 日志），
+// 而不是落到"未知角色"那条含混的路上。
 func ValidRole(role int) bool { return role == RoleMember || role == RoleAdmin }
+
+// IsAdminRole 报告 role 是不是"能构成身份"的角色。
+//
+// 全仓只有这一个判据，且**必须**被身份链路（Authenticate / Lookup）调用：
+// 单账号模式下"角色不是管理员"就等于"这个账号不存在"。
+func IsAdminRole(role int) bool { return role == RoleAdmin }
 
 // 用户名字符集与长度：与 new-api 的 `min=8,max=128` 只约束口令不同，
 // 我们对用户名也给定界 —— 用户名会出现在日志、界面与 Cookie 之外的
@@ -94,6 +126,20 @@ var (
 	//
 	// 它不是"错误"而是"状态"：首启建管理员的入口只允许成功一次。
 	ErrBootstrapDone = errors.New("account: 管理员已存在，创建入口已关闭")
+
+	// ErrMemberRetired 这条记录是**非管理员**（成员的旧数据，或角色字段
+	// 缺失/手写成别的值）⇒ 单账号管理员模式下**不构成任何身份**。
+	//
+	// # 为什么它必须与 ErrCredentials 分开
+	//
+	// 用户新口径要的是"明确文案 + 一条日志"：告诉拿着成员账号的人
+	// 「成员账号已取消，请用管理员账号」，而不是让他对着"用户名或口令不正确"
+	// 反复重试（他会以为是自己记错了口令，而那个账号在改造前是好的）。
+	//
+	// ⚠ 但这**不是**用户名枚举口子：它只在**口令校验通过之后**才可能返回
+	// （见 Store.Authenticate 的顺序），所以拿不到口令的人区分不出
+	// "这个用户名被取消了"与"用户名不存在"。
+	ErrMemberRetired = errors.New("account: 成员账号已取消")
 )
 
 // User 一个控制台账号（持久化字段）。

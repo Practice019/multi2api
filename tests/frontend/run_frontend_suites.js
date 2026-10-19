@@ -199,6 +199,26 @@ const PROBES = [
   // ⚠ 与 `run_e2e.js` 的**动态**判据**互补，不许互替**：本判据证明"它**有能力**进控制台"，
   //   动态判据证明"它**真的**进了控制台"。两条都留。
   'verify_probe_console_loaded.js',
+  // 内嵌 HTML 的内联 <script> **语法门禁**（本轮新增）。
+  //
+  // # 为什么是一条真空白（不是"多测一点"）
+  //
+  // `webui.html` / `webui-login.html` 是 `//go:embed` 的（`internal/server/webui.go:15,18`）
+  // ⇒ **Go 编译不校验里面的 JS 语法**：一段语法错的 JS 会被安静编进二进制，
+  //   `go build` / 单测 / `go vet` 全绿，直到浏览器打开页面 ——
+  //   表现成"页面少了一半功能"，而报错（`renderXxx is not defined`）也要等真点一次。
+  // `webui.html` 有 **11000+ 行**内联 JS，改一行注释里的括号就可能把整块打断。
+  // 本仓已有同族事故：generator 的 `String.raw` 模板里一个反引号 ⇒ 模板提前终止
+  // ⇒ 陈旧的产物照旧全绿（见上面"门禁 0"）。这次防的是同一件事的另一个容器。
+  //
+  // 判据：`new vm.Script` 逐段**解析**（不执行）⇒ 毫秒级、不需要实例/浏览器。
+  // 覆盖清单**从 `//go:embed` 现取**，不写死文件名（写死的清单在新增页面时会静默漏掉）。
+  // ⚠ 它只证明"能被解析"，**证明不了行为** —— 行为在 `run_e2e.js` 的 25 条里，两条互补。
+  //
+  // 判别力自带验证：`node verify_inline_script_syntax.js --self-test` ⇒
+  // 好样本绿 / 注入 `function broken( {` 必红且**给出行号**（实测 webui.html:12937）/
+  // 覆盖度非零（"全绿"不能是因为"什么都没查"）。
+  'verify_inline_script_syntax.js',
 ];
 
 function run(file) {
