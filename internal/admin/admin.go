@@ -43,6 +43,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"workbuddy2api/internal/channelstore"
 
 	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/apikey"
@@ -176,6 +177,9 @@ type Config struct {
 	// APIKeys 多 API key 管理存储（对标 new-api 令牌体系）。
 	// nil = 不注册 /admin/apikeys 路由（未启用该功能，与旧行为一致）。
 	APIKeys *apikey.Store
+	// Channels 渠道存储（中转站方向：能力索引 + 每渠道模型映射）。
+	// nil = 不注册 /admin/channels 路由（未启用该功能，与 APIKeys 同一条判据）。
+	Channels *channelstore.Store
 	// APIKey 管理钥匙（config.api_key 原值）：/admin/apikeys 返回它的掩码，
 	// 让管理页与仪表盘「API 接入信息」显示同一把钥匙（一个事实来源）。
 	// 空 = 未配置管理钥匙。
@@ -476,6 +480,7 @@ func New(cfg Config) *Handler {
 	// API key 管理（对标 new-api 令牌体系）：未注入 Store 时不注册路由。
 	if h.cfg.APIKeys != nil {
 		h.registerAPIKeys()
+		h.registerChannels()
 	}
 
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
