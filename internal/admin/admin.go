@@ -72,10 +72,18 @@ type Config struct {
 	// 若将来管理台真的需要某个上游的能力，正确入口是 gateway 的扩展点
 	// （AdminExt 或新加一个），而不是把某个具体上游的客户端塞进来 ——
 	// 后者会让管理台长出只对某一个上游成立的行为。
-	OAuth   *oauth.Client
-	Log     *checkinlog.Log
-	Ring    *logbuf.Ring
-	AuthDir string
+	OAuth *oauth.Client
+	// ChannelProvider 给 (渠道id, BaseURL) 造一个 gateway.Provider —— 供「模型自动发现」
+	// 等"管理台要用某个上游的能力"的场景使用。
+	//
+	// ⚠ 为什么是 `gateway.Provider` 而不是 `*openaicompat.OpenAICompat`：本结构体上方那段
+	// 注释（曾经的 Upstream 字段被删的理由）已经把规矩写死了 —— 管理台若直接认识某个具体上游，
+	// 就会长出"只对某一个上游成立的行为"，并打破「加新上游核心零改动」。用 gateway 的契约做
+	// 注入点，管理台只认 `Models()` / `Chat()` 这些方法，换任何 Key 型上游都不用改这一层。
+	ChannelProvider func(id, baseURL string) gateway.Provider
+	Log             *checkinlog.Log
+	Ring            *logbuf.Ring
+	AuthDir         string
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里 auth_dir 的原值）。
 	//
 	// 与 AuthDir 的关系：`AuthDir = AuthsBase/<默认上游>`。
