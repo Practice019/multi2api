@@ -32,6 +32,14 @@ type statsSeriesItem struct {
 	// 前端才能在**同一个地方**决定轴上限与"整段无数据就不画这条线"。
 	CacheHit  int64 `json:"cache_hit"`
 	CacheMiss int64 `json:"cache_miss"`
+	// ByModel 本桶内按**模型名**的 token 用量（2026-10-20 加，供 new-api 那种"按模型堆叠"的消耗分布）。
+	//
+	// ⚠ 为什么放进桶里而不是另开一个端点：堆叠柱要的是「(时间桶, 模型) → token」这个二维矩阵。
+	//   在下面那次遍历里顺手累积即可；另开端点等于把同一批日志再扫一遍。
+	// ⚠ 只放 token、不放请求数：柱高就代表用量，图例只讲一件事 ——
+	//   混进次数会让"这根柱到底代表什么"变含糊。
+	// ⚠ 只统计 Tokens > 0 的条目（与 Tokens 同一条守卫）：-1 是"usage 缺失"哨兵，不能进分子。
+	ByModel map[string]int64 `json:"by_model,omitempty"`
 }
 
 // registerStatsSeries 注册趋势图端点。
@@ -82,6 +90,13 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 			// 同 admin.go 的那条守卫：Tokens 的 -1 是"usage 缺失"哨兵，不能累加。
 			if e.Tokens > 0 {
 				out[i].Tokens += int64(e.Tokens)
+				// 顺手累积"按模型"（懒建 map：空桶不占内存，天桶 × 模型数在 365d 档才几百个条目）
+				if e.Model != "" {
+					if out[i].ByModel == nil {
+						out[i].ByModel = map[string]int64{}
+					}
+					out[i].ByModel[e.Model] += int64(e.Tokens)
+				}
 			}
 		}
 		// ⚠ 缓存两量与别处同一取法：>0 才累加（负数/负零属上游异常，丢了比算进去好解释）。
