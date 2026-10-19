@@ -19,6 +19,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+// 探针自带夹具密钥：T5/T7 起产品不再把凭据注入页面（那是安全改造的目标之一），
+// 页内 fetch('/v1/models') 必须由探针自己带 key —— 见 lib_cdp.injectProbeKey。
+const { injectProbeKey: injectKey, pasteConsoleKey } = require('./lib_cdp.js');
 const PORT = 9307;
 const TARGET = process.env.CHAT_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = path.join(os.tmpdir(), 'chrome-t7');
@@ -47,7 +50,20 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     await send('Page.enable'); await send('Runtime.enable');
     await send('Page.navigate', { url: TARGET });
     await sleep(5500);
+    // ⚠ 注入必须在新文档建立**之后**（紧跟 navigate 的赋值会被随后的导航冲掉）。
+    // 页内 fetch 用的密钥是**探针自己的夹具**：T5/T7 起产品不再注入凭据，见 lib_cdp.injectProbeKey。
+    if (!(await injectKey(send, undefined, TARGET))) {
+      console.error('  ⚠ 环境没给探针密钥（WB2API_PROBE_KEY / WB2API_PROBE_TOKEN）⇒ 页内 /v1/models 是空目录，断言会假红');
+    }
+
     const ev = async (x) => { const r = await send('Runtime.evaluate', { expression: x, returnByValue: true, awaitPromise: true }); return r.result && r.result.result ? r.result.result.value : undefined; };
+    // 像人一样把密钥粘进顶栏并点「应用」。
+    // ⚠ 必须做：T5/T7 起控制台不再由服务端注入 api_key（安全改造的目标之一），
+    // 于是依赖 /v1 的面板（模型目录 / 对话测试 / 倍率预览）默认是空的 —— 不粘就
+    // 断「面板有内容」会假红，而那个红是**契约变了**，不是产品坏了。
+    // 见 lib_cdp.pasteConsoleKey。
+    const pasted = await pasteConsoleKey(ev, undefined, TARGET);
+    if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 下面依赖 /v1 的断言会假红');
 
     // 切到对话测试
     await ev(`(function(){
@@ -92,7 +108,7 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
       return new Promise(function(resolve){
         var req = new XMLHttpRequest();
         req.open('GET', '/v1/models', true);
-        req.setRequestHeader('Authorization', 'Bearer ' + (window.__WB2API_KEY__ || ''));
+        req.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
         req.onload = function(){
           try { resolve(JSON.stringify((JSON.parse(req.responseText).data || []).map(function(m){ return { id: m.id, owned_by: m.owned_by }; }))); }
           catch (e) { resolve('null'); }

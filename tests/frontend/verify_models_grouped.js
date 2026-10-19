@@ -18,6 +18,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const CHROME = require('./chrome_path.js').resolveChrome();
+// 探针自带夹具密钥：T5/T7 起产品不再把凭据注入页面（那是安全改造的目标之一），
+// 页内 fetch('/v1/models') 必须由探针自己带 key —— 见 lib_cdp.injectProbeKey。
+const { injectProbeKey: injectKey, pasteConsoleKey } = require('./lib_cdp.js');
 const PORT = 9306;
 const TARGET = process.env.MODELS_URL || 'http://127.0.0.1:18080/ui';
 const PROFILE = path.join(os.tmpdir(), 'chrome-models');
@@ -46,7 +49,21 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     await send('Page.enable'); await send('Runtime.enable');
     await send('Page.navigate', { url: TARGET });
     await sleep(5500);
+    // ⚠ 注入必须在新文档建立**之后**（紧跟 navigate 的赋值会被随后的导航冲掉，
+    // 表现为 __PROBE_API_KEY__ 仍 undefined ⇒ 空 Bearer ⇒ 假红）。
+    // 页内 fetch 用的密钥是**探针自己的夹具**：T5/T7 起产品不再把凭据注入页面
+    // （那是本次安全改造的目标），探针得自带 key —— 见 lib_cdp.injectProbeKey。
+    if (!(await injectKey(send, undefined, TARGET))) {
+      console.error('  ⚠ 环境没给探针密钥（WB2API_PROBE_KEY / WB2API_PROBE_TOKEN）⇒ 页内 /v1/models 是空目录，断言会假红');
+    }
     const ev = async (x) => { const r = await send('Runtime.evaluate', { expression: x, returnByValue: true, awaitPromise: true }); return r.result && r.result.result ? r.result.result.value : undefined; };
+
+    // 像人一样把密钥粘进顶栏并点「应用」。
+    // ⚠ 必须做：T5/T7 起控制台**不再**由服务端注入 api_key（安全改造的目标），
+    // 于是「可用模型」这些依赖 /v1 的面板默认是空的 —— 不粘就断"有分组"会假红，
+    // 而那个红是**契约变了**，不是产品坏了。见 lib_cdp.pasteConsoleKey。
+    const pasted = await pasteConsoleKey(ev, undefined, TARGET);
+    if (pasted !== 'ok') console.error('  ⚠ 粘密钥失败（' + pasted + '）⇒ 下面的模型断言会假红');
 
     // 切到可用模型
     await ev(`(function(){
@@ -71,7 +88,7 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
       return new Promise(function(resolve){
         var req = new XMLHttpRequest();
         req.open('GET', '/v1/models', true);
-        req.setRequestHeader('Authorization', 'Bearer ' + (window.__WB2API_KEY__ || ''));
+        req.setRequestHeader('Authorization', 'Bearer ' + (window.__PROBE_API_KEY__ || ''));
         req.onload = function(){
           try { resolve(JSON.stringify((JSON.parse(req.responseText).data || []).map(function(m){ return { id: m.id, owned_by: m.owned_by }; }))); }
           catch (e) { resolve('null'); }
