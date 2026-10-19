@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>登录 · 控制台</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --fg: #1b1f24;
+    --muted: #6b7280;
+    --line: #e4e7eb;
+    --accent: #2563eb;
+    --accent-fg: #ffffff;
+    --input-bg: #ffffff;
+    --err-bg: #fdf2f2;
+    --err-fg: #b42318;
+    --err-line: #f3c3c0;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116;
+      --card: #161a21;
+      --fg: #e6e8eb;
+      --muted: #98a1ab;
+      --line: #262c35;
+      --accent: #3b82f6;
+      --accent-fg: #ffffff;
+      --input-bg: #0f1319;
+      --err-bg: #2a1618;
+      --err-fg: #f3a6a1;
+      --err-line: #5a2626;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .card {
+    width: 100%;
+    max-width: 336px;
+    padding: 16px 16px 12px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 1px 2px rgba(0,0,0,.05);
+  }
+  .head { display: flex; align-items: center; gap: 8px; }
+  .logo { flex: none; color: var(--accent); }
+  h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+  .sub { margin: 6px 0 12px; font-size: 12.5px; color: var(--muted); }
+  .field { display: block; margin: 0 0 9px; }
+  .field > span { display: block; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+  input {
+    width: 100%;
+    padding: 7px 9px;
+    font: inherit;
+    color: var(--fg);
+    background: var(--input-bg);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    outline: none;
+  }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.16); }
+  input:disabled { opacity: .6; }
+  .hint { margin: 0 0 10px; font-size: 11.5px; color: var(--muted); }
+  .alert {
+    margin: 0 0 9px;
+    padding: 7px 9px;
+    font-size: 12.5px;
+    color: var(--err-fg);
+    background: var(--err-bg);
+    border: 1px solid var(--err-line);
+    border-radius: 7px;
+    white-space: pre-wrap;
+  }
+  button.primary {
+    width: 100%;
+    padding: 8px 10px;
+    font: inherit;
+    font-weight: 600;
+    color: var(--accent-fg);
+    background: var(--accent);
+    border: 0;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  button.primary:hover:not(:disabled) { filter: brightness(1.06); }
+  button.primary:disabled { opacity: .7; cursor: default; }
+  .switch { margin: 10px 0 0; font-size: 12.5px; text-align: center; }
+  button.link {
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    background: none;
+    border: 0;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+  details { margin-top: 12px; padding-top: 9px; border-top: 1px dashed var(--line); }
+  summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+  details p { margin: 7px 0 0; font-size: 11.5px; color: var(--muted); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="head">
+    <svg class="logo" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="2" y="2" width="20" height="20" rx="6" fill="currentColor" opacity=".12"/>
+      <path d="M8.4 11.4V9.2a3.6 3.6 0 0 1 7.2 0v2.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      <rect x="6.6" y="11.4" width="10.8" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    </svg>
+    <h1 id="title">登录控制台</h1>
+  </div>
+  <p class="sub" id="sub">使用账号口令登录。</p>
+
+  <form id="form" novalidate>
+    <label class="field" for="username">
+      <span>用户名</span>
+      <input id="username" name="username" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="64" required aria-describedby="hint">
+    </label>
+    <label class="field" for="password">
+      <span>口令</span>
+      <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required aria-describedby="hint">
+    </label>
+    <p class="hint" id="hint">用户名 3–32 位，可用字母、数字与 _ - . @；口令 8–128 位。</p>
+    <div class="alert" id="alert" role="alert" hidden></div>
+    <button class="primary" id="submit" type="submit">登录</button>
+  </form>
+
+  <p class="switch" id="switchRow" hidden>
+    <button class="link" id="switchLink" type="button">注册</button>
+  </p>
+
+  <details>
+    <summary>脚本用户：用管理令牌访问</summary>
+    <p>管理令牌 <code>admin_token</code> 可带 <code>Authorization: Bearer &lt;admin_token&gt;</code> 调管理接口；也可在浏览器打开 <code>/ui?token=&lt;admin_token&gt;</code> 换取一次性登录。</p>
+  </details>
+</main>
+
+<script>
+  window.__WB2API_LOGIN_FLAGS__ = {
+    bootstrap: "__WB2API_LOGIN_BOOTSTRAP__",
+    register: "__WB2API_LOGIN_REGISTER__"
+  };
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var FLAGS = window.__WB2API_LOGIN_FLAGS__ || {};
+  var BOOTSTRAP = FLAGS.bootstrap === true;
+  var REGISTER = FLAGS.register === true;
+  var CAN_SWITCH = REGISTER && !BOOTSTRAP;
+
+  var TEXT = {
+    bad_credentials: '用户名或口令不对',
+    username_taken: '用户名已被占用',
+    invalid_username: '用户名不合法（3–32 位，可用字母、数字与 _ - . @）',
+    invalid_password: '口令不合法（8–128 位）',
+    rate_limited: '请求太频繁（请稍后再试）',
+    register_disabled: '本机已关闭注册',
+    body_too_large: '请求过大',
+    auth_required: '会话已失效，请重新登录'
+  };
+  var FALLBACK = '请求失败，请稍后再试';
+  var OFFLINE = '连不上服务端，请确认服务已启动后重试';
+
+  var form = document.getElementById('form');
+  var titleEl = document.getElementById('title');
+  var subEl = document.getElementById('sub');
+  var userEl = document.getElementById('username');
+  var passEl = document.getElementById('password');
+  var hintEl = document.getElementById('hint');
+  var alertEl = document.getElementById('alert');
+  var btn = document.getElementById('submit');
+  var switchRow = document.getElementById('switchRow');
+  var switchLink = document.getElementById('switchLink');
+
+  var mode = BOOTSTRAP ? 'register' : 'login';
+  var busy = false;
+
+  function labelOf(m) {
+    if (m === 'register') return BOOTSTRAP ? '创建第一个管理员' : '注册';
+    return '登录';
+  }
+
+  function showError(text) {
+    alertEl.textContent = text;
+    alertEl.hidden = false;
+  }
+
+  function clearError() {
+    alertEl.textContent = '';
+    alertEl.hidden = true;
+  }
+
+  function applyMode() {
+    if (mode === 'register') {
+      titleEl.textContent = BOOTSTRAP ? '创建第一个管理员' : '注册成员账号';
+      subEl.textContent = BOOTSTRAP
+        ? '账号库为空，这个入口只在此时出现一次；创建后立即以该账号登录。'
+        : '注册成功后会自动登录；成员只能看到并管理自己名下的 API key。';
+      hintEl.textContent = '用户名 3–32 位，可用字母、数字与 _ - . @；口令 8–128 位。';
+    } else {
+      titleEl.textContent = '登录控制台';
+      subEl.textContent = '使用账号口令登录，管理你的 API key。';
+      hintEl.textContent = '用户名 3–32 位；口令 8–128 位。';
+    }
+    btn.textContent = labelOf(mode);
+    switchRow.hidden = !CAN_SWITCH;
+    if (CAN_SWITCH) {
+      switchLink.textContent = mode === 'register' ? '已有账号，去登录' : '没有账号，注册成员';
+    }
+  }
+
+  function setBusy(on) {
+    busy = on;
+    btn.disabled = on;
+    userEl.disabled = on;
+    passEl.disabled = on;
+    btn.textContent = on ? '请稍候…' : labelOf(mode);
+  }
+
+  function messageOf(res) {
+    if (res.network) return OFFLINE;
+    var code = res.code || '';
+    if (code === 'rate_limited' && res.retryAfter) {
+      return '请求太频繁（请稍后再试，' + res.retryAfter + ' 秒后可重试）';
+    }
+    if (TEXT[code]) return TEXT[code];
+    if (res.message) return res.message;
+    var tail = res.status ? '（HTTP ' + res.status + '）' : '';
+    return FALLBACK + tail;
+  }
+
+  async function request(path, username, password) {
+    var res;
+    try {
+      res = await fetch(path, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password })
+      });
+    } catch (err) {
+      return { ok: false, network: true };
+    }
+    var retryAfter = res.headers ? res.headers.get('Retry-After') : null;
+    var data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (res.ok && data && data.ok === true) return { ok: true };
+    var e = (data && data.error) || {};
+    return {
+      ok: false,
+      status: res.status,
+      code: e.code || '',
+      message: e.message || '',
+      retryAfter: retryAfter
+    };
+  }
+
+  async function attempt(action, username, password) {
+    var path = action === 'register' ? '/admin/auth/register' : '/admin/auth/login';
+    var res = await request(path, username, password);
+    if (!res.ok) return { text: messageOf(res) };
+    if (action === 'login') return { redirect: true };
+    var login = await request('/admin/auth/login', username, password);
+    if (login.ok) return { redirect: true };
+    return { text: '注册成功，但自动登录未通过：' + messageOf(login) + '。请改用登录。', toLogin: true };
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    if (busy) return;
+    var username = userEl.value.trim();
+    var password = passEl.value;
+    if (!username) { showError('请填写用户名'); userEl.focus(); return; }
+    if (!password) { showError('请填写口令'); passEl.focus(); return; }
+    clearError();
+    setBusy(true);
+    attempt(mode, username, password).then(function (result) {
+      setBusy(false);
+      if (result.redirect) {
+        location.replace('/ui');
+        return;
+      }
+      if (result.toLogin && mode !== 'login') {
+        mode = 'login';
+        applyMode();
+      }
+      showError(result.text);
+    });
+  });
+
+  switchLink.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    if (busy) return;
+    mode = mode === 'register' ? 'login' : 'register';
+    clearError();
+    applyMode();
+    userEl.focus();
+  });
+
+  applyMode();
+  userEl.focus();
+})();
+</script>
+</body>
+</html>

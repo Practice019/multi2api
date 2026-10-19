@@ -101,7 +101,7 @@ func TestColPlaceholdersMatchJSCols(t *testing.T) {
 // 只测"表里有"不够 —— 替换代码漏了一个 token，表现是页面上出现
 // `colspan="__COLS_LOGS__"` 这种字面量（真实发生过的缺陷）。
 func TestRenderUIReplacesEveryPlaceholder(t *testing.T) {
-	out := string(renderUI([]byte(webuiHTML), "test-key", true, "", false))
+	out := string(renderUI(webuiHTML))
 	for _, p := range colPlaceholders {
 		if strings.Contains(out, p.token) {
 			t.Errorf("renderUI 输出里仍残留占位符 %s —— 该空态行的 colspan 会变成非法值", p.token)
@@ -115,75 +115,55 @@ func TestRenderUIReplacesEveryPlaceholder(t *testing.T) {
 	}
 }
 
-// TestRenderUIKeyInjection 密钥注入的**精确**语义。
+// TestRenderUINoTouchesCredentialPlaceholders 控制台外壳里那两处凭据哨兵
+// **必须原样留着**，而且渲染器不得再往页面里塞任何凭据。
 //
-// # 为什么单独测这条
+// # 这条是本轮安全的**核心判据**（用户报障 ③）
 //
-// 这是一个真实的、差点成真的失效模式：
+// 改造前 renderUI 的签名是
 //
-// 页面上 `__WB2API_KEY__` 出现在三类位置：
+//	renderUI(page, apiKey, injectKey bool, adminToken, injectAdminToken bool)
 //
-//  1. 赋值语句的**值**：`window.__WB2API_KEY__ = "__WB2API_KEY__"`
-//     —— 这一处**要**被替换
-//  2. JS 属性名：`window.__WB2API_KEY__`
-//     —— 替换会直接把代码改坏（`window."SECRET"` 是语法错误）
-//  3. 注释文字
-//     —— 替换会污染说明
+// 它把 config 的 api_key 与 admin_token **明文写进页面 HTML**，而那时门禁
+// 也认 api_key ⇒ "打开控制台页面"本身就等于拿到两把钥匙。用户报障的形态是：
+// 填错令牌也能进 UI，于是 api_key 就泄了。
 //
-// 再叠加一个隐患：判断"是否已注入"需要对比基准。旧实现让基准与赋值
-// 用**同一个**字面量，于是正确性依赖于 `Replace(..., 1)` 只改第一处这个
-// **看不出来的巧合** —— 谁把它改成"替换全部"，自动连接就静默死掉。
+// 现在页面里没有任何密钥（身份改走 HttpOnly 会话 cookie），但页面**仍保留**
+// 那两处自赋值语句 —— 它们是 JS 侧的"未注入"基准：
 //
-// 现在基准改为独立哨兵 `__WB2API_KEY_SENTINEL__`，本测试把这三类位置
-// 与两个开关状态全部钉住。
-func TestRenderUIKeyInjection(t *testing.T) {
-	out := string(renderUI([]byte(webuiHTML), "SECRET-AAA", true, "", false))
+//	window.__WB2API_KEY__ = "__WB2API_KEY__"
+//
+// 保留而不是删掉的理由：删了会让 JS 里的 `typeof window.__WB2API_KEY__`
+// 判据变成"undefined ≠ 占位符"⇒ 页面以为自己拿到了钥匙。T7 会把这段 JS
+// 换成"凭据缺失就跳登录页"，在那之前保留它是**最小改动**。
+//
+// ⚠ 本测试不断言"页面上没有 mk-"：那是**密钥形状**的猜测（掩码示例、
+// 提示文案里都可能出现）。真正的判据在 HTTP 层：见 webui_login_test.go 的
+// TestUIHTTPNeverLeaksSecrets —— 它拿真的配置密钥去比对响应体。
+func TestRenderUINoTouchesCredentialPlaceholders(t *testing.T) {
+	out := string(renderUI(webuiHTML))
 
-	// (1) 值被替换
-	if !strings.Contains(out, `window.__WB2API_KEY__ = "SECRET-AAA"`) {
-		t.Error("开启注入时，赋值语句的值没有被换成真实密钥")
-	}
-	// (2) JS 属性名必须原样保留 —— 否则代码直接坏掉
-	if !strings.Contains(out, `window.__WB2API_KEY__`) {
-		t.Error("JS 属性名 window.__WB2API_KEY__ 被替换了 —— 这会让页面脚本变成语法错误")
-	}
-	// (3) 不能把裸哨兵替换进属性名位置
-	if strings.Contains(out, `window."SECRET-AAA"`) || strings.Contains(out, `window.SECRET-AAA`) {
-		t.Error("属性名位置被注入了密钥 —— window.\"SECRET-AAA\" 是非法 JS")
-	}
-	// (4) 守卫基准必须与页面初值**相等** —— 这是本次修掉的真 bug。
-	//
-	// 旧代码比较的是另一个字符串（`__WB2API_KEY_SENTINEL__`），而页面初值是
-	// `__WB2API_KEY__`：两者不相等 ⇒ "未注入"时 INJECTED 恒为真值 ⇒
-	// 页面以为已拿到钥匙、直接 refresh()，而每个请求都拿占位符当 Bearer
-	// ⇒ 全部 401/403；"手输钥匙"那条分支**从未运行过**。
-	//
-	// 判据：把注入关掉之后，页面里的守卫必须**认得出**初值就是占位符。
-	off := string(renderUI([]byte(webuiHTML), "SECRET-AAA", false, "", false))
-	if strings.Contains(off, "__WB2API_KEY_SENTINEL__") {
-		t.Error("页面里仍有 __WB2API_KEY_SENTINEL__ —— 那个哨兵是**旧的、错的**基准：" +
-			"它与页面初值不相等，会让「未注入」被判成「已注入」")
-	}
-	if !strings.Contains(off, `!== '__WB2API_KEY__'`) {
-		t.Error("JS 守卫的比较基准必须是与页面初值相同的占位符（单引号形态）——" +
-			"否则 INJECTED 在未授权时恒为真值")
-	}
-	// (5) 密钥只出现在赋值那一处，不得泄漏到别处
-	//
-	// ⚠ 这条也是"注释里不能写带双引号的占位符"的守卫：服务端按双引号匹配，
-	// 写在注释里会被一起替换成密钥（实测踩到过）。
-	if n := strings.Count(out, "SECRET-AAA"); n != 1 {
-		t.Errorf("密钥在页面里出现 %d 次，期望恰好 1 次（赋值处）——\n"+
-			"多出来的那些通常来自**注释里的带双引号占位符**：服务端按双引号匹配替换，"+
-			"注释里的也会被换成明文密钥。", n)
+	// ① 两处自赋值原样保留（JS 的"未注入"基准）
+	for _, want := range []string{
+		`window.__WB2API_KEY__ = "__WB2API_KEY__"`,
+		`window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("控制台外壳里应当保留 JS 的「未注入」基准：%s ——\n"+
+				"删掉它会让 typeof 判据失效（页面以为自己拿到了钥匙）。", want)
+		}
 	}
 
-	// 注入关闭（未授权访问）：页面按"需手输 Key"处理，且不得出现明文
-	if !strings.Contains(off, `window.__WB2API_KEY__ = "__WB2API_KEY__"`) {
-		t.Error("关闭注入时，赋值语句不应被替换")
+	// ② JS 属性名不得被替换（`window."X"` 是语法错误）
+	if strings.Contains(out, `window."`) {
+		t.Error("JS 属性名位置被替换了 —— window.\"…\" 是非法 JS，脚本会整体不执行")
 	}
-	if strings.Contains(off, "SECRET-AAA") {
-		t.Error("关闭注入时页面上不应出现密钥明文")
+
+	// ③ ★ 渲染器不接收任何凭据 ⇒ 输出里不可能有密钥。
+	//    这条是"签名层面"的守卫：若有人把注入参数加回来，编译期就会让
+	//    webui_login_test.go 的调用点对不上（那里用的是两参数版本）。
+	if n := len(colPlaceholders); n == 0 {
+		t.Fatal("列数占位符表空了 —— 空态行的 colspan 会变成非法值")
 	}
 }
 

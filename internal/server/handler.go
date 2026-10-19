@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
@@ -98,6 +99,29 @@ type Config struct {
 	// 挂在 `/admin/auth/`，即管理台门禁**之外** —— 理由见 New() 里挂载处的注释。
 	// nil = 不启用账号体系（旧行为：只有 admin_token 一条路）。
 	AccountAuth http.Handler
+
+	// Accounts / Sessions 控制台账号与会话（`/ui` 判断"这次请求是谁"）。
+	//
+	// # 为什么 server 包也要这两个（与 admin 包各持一份是**故意**的）
+	//
+	// 两处问的是同一个问题、答案也必须一致，但判据的实现只有**一份**：
+	// account.Identify（见 internal/account/identify.go）。这里传的是数据源，
+	// 不是判据 —— 判据若在两处各写一遍就会漂移，而漂移的形态是
+	// "页面能打开但每个标签页 401"或反过来"页面打不开但接口敞开"。
+	//
+	// nil = 不启用账号体系：`/ui` 未认证时只显示登录页，登录页会因为端点
+	// 不存在而报错（部署没接线时这是**设计**：宁可见到登录页也不要一个
+	// 静默放行的控制台）。
+	Accounts *account.Store
+	Sessions *account.SessionStore
+
+	// RegisterOpen 登录页是否显示注册入口（装配层按 config 的
+	// console.disables_register 提供）。nil = 不显示（fail-closed）。
+	RegisterOpen func() bool
+
+	// CookieSecure 会话/令牌 cookie 的 Secure 策略（account.CookieSecureAuto
+	// / Always / Never）。空串按 Auto。
+	CookieSecure string
 
 	// MaxBodyMB 出站前允许的最大请求体（MiB），<=0 回落 8。
 	//

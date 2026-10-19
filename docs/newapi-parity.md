@@ -98,8 +98,19 @@ R3 可注册 · R4 反批量防御。逐项对照（出处 = new-api 文件:行�
 | 现状 | 位置 | 问题 | 状态 |
 |---|---|---|---|
 | `localExempt`：监听回环 + 上一跳回环 + 无转发头 ⇒ **直接放行** | `internal/admin/admin.go:644/669`（改造前） | "错令牌"与"不带令牌"是同一类请求 ⇒ 本机任何进程都是管理员（用户报障 ③） | ✅ **已删**（T4）：门禁改为「会话 或 admin_token」一律校验，按角色分流（`principalOf` / `memberPaths` / `canAccess`） |
-| `/ui` 把 `api_key` **明文注入页面 HTML** | `internal/server/webui.go:84`（`injectKey`） | 打开页面即拿到 /v1 钥匙 ⇒ leak 不需要"偷" | ⏳ T5 |
+| `/ui` 把 `api_key` **明文注入页面 HTML** | `internal/server/webui.go:84`（`injectKey`，改造前） | 打开页面即拿到 /v1 钥匙 ⇒ leak 不需要"偷" | ✅ **已删**（T5）：渲染器不再接收任何凭据；未认证给登录页；`?token=` 换成 HttpOnly cookie 后 302（凭据不进 URL 历史） |
 | 前端把凭据存 localStorage（`wb2api.key`） | `internal/server/webui.html:1764/11876/11888` | 轮换后页面还用旧值 ⇒ 表现成"必须重启"（用户报障 ②） | ⏳ T7 |
+
+**T5 收口后的实测**（隔离实例，真机 curl 等价调用）：
+
+```
+GET /ui                        无凭据          → 200  登录页（10125 B）
+GET /ui?token=<正确>                          → 302  Location: /ui + Set-Cookie wb2api_admin_token（HttpOnly/Lax/Path=/）
+GET /ui?token=<错误>                          → 200  登录页（与"无凭据"逐字节相同 ⇒ 不是判定 oracle）
+GET /ui   Cookie: 令牌                       → 200  控制台外壳（523958 B）
+GET /ui   Cookie: 陈旧令牌                    → 200  登录页 + 清掉那个 cookie
+四类访问者的响应正文里：api_key / admin_token 出现次数 = 0
+```
 
 **T4 收口后的实测**（`WB2API_EXE=bin/wb2api-server-probe.exe node tests/frontend/verify_token_security_e2e.js`）：
 
