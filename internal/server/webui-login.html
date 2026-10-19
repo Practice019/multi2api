@@ -77,6 +77,17 @@
   input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.16); }
   input:disabled { opacity: .6; }
   .hint { margin: 0 0 10px; font-size: 11.5px; color: var(--muted); }
+  /* 人机校验（T10）—— 一行高度固定：SVG 只许在这个高度里缩，不许把表单推走。
+     沿用本项目既定口味（表单/表格一行高度固定、少留白），也沿用已有的
+     --line / --muted / --input-bg 变量，不新增配色。 */
+  .cap { margin-bottom: 9px; }
+  .cap > label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+  .cap-line { display: flex; align-items: center; gap: 6px; }
+  .cap-svg { flex: none; display: flex; align-items: center; height: 34px; }
+  .cap-svg svg { display: block; height: 34px; width: auto; max-width: 148px; border: 1px solid var(--line); border-radius: 7px; background: var(--input-bg); }
+  .cap-line input { width: 72px; flex: none; }
+  .cap-line button.link { flex: none; white-space: nowrap; }
+  .cap .hint { margin: 4px 0 0; }
   .alert {
     margin: 0 0 9px;
     padding: 7px 9px;
@@ -138,6 +149,23 @@
       <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required aria-describedby="hint">
     </label>
     <p class="hint" id="hint">用户名 3–32 位，可用字母、数字与 _ - . @；口令 8–128 位。</p>
+
+    <!-- 人机校验（T10）。默认 hidden：服务端没开（404 captcha_disabled）或探不到
+         就一直是隐藏的 —— **不留空框**。开了才由脚本显示出来并填上题面。 -->
+    <div class="field cap" id="captchaRow" hidden>
+      <label for="captcha">人机校验</label>
+      <div class="cap-line">
+        <!-- 题面是服务端生成的 SVG 字符串，由脚本用 innerHTML 插入这里。
+             aria-hidden：读屏读不出算式字形，题面说明由下面的 captchaHint 给。 -->
+        <span class="cap-svg" id="captchaSvg" aria-hidden="true"></span>
+        <input id="captcha" name="captcha" type="text" inputmode="numeric" autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false"
+               pattern="[0-9]*" maxlength="6" aria-describedby="captchaHint">
+        <button class="link" id="captchaRefresh" type="button">换一题</button>
+      </div>
+      <p class="hint" id="captchaHint">请输入图中算式的结果（只填数字）。</p>
+    </div>
+
     <div class="alert" id="alert" role="alert" hidden></div>
     <button class="primary" id="submit" type="submit">登录</button>
   </form>
@@ -175,7 +203,12 @@
     rate_limited: '请求太频繁（请稍后再试）',
     register_disabled: '本机已关闭注册',
     body_too_large: '请求过大',
-    auth_required: '会话已失效，请重新登录'
+    auth_required: '会话已失效，请重新登录',
+    // 人机校验（T10）。服务端把"没带 / 答错 / 题过期"**都**回成同一个 code，
+    // 所以这里不能写成"答案不对"那种区分 —— 那是服务端刻意不给的信息
+    //（给了就等于告诉调用方"这个题号存在，只是答错了"）。
+    captcha_required: '请完成人机校验后再试',
+    captcha_disabled: '本部署未启用人机校验'
   };
   var FALLBACK = '请求失败，请稍后再试';
   var OFFLINE = '连不上服务端，请确认服务已启动后重试';
@@ -190,9 +223,23 @@
   var btn = document.getElementById('submit');
   var switchRow = document.getElementById('switchRow');
   var switchLink = document.getElementById('switchLink');
+  var captchaRow = document.getElementById('captchaRow');
+  var captchaSvg = document.getElementById('captchaSvg');
+  var captchaEl = document.getElementById('captcha');
+  var captchaRefresh = document.getElementById('captchaRefresh');
 
   var mode = BOOTSTRAP ? 'register' : 'login';
   var busy = false;
+
+  // 人机校验（T10）的两份状态，刻意分开：
+  //   captchaId      当前题号。**空串 = 手上没题** ⇒ 提交时两个字段都不带。
+  //                  它会因为"答过/答错/过期"作废（服务端一次性消费）。
+  //   captchaEnabled 已知这个部署**开着**人机校验（探测成功过）。
+  //                  答错之后靠它决定"要不要接着换题"，而不是靠 captchaId
+  //                  （那时 captchaId 恰好还在，但题已经是废的）。
+  var captchaId = '';
+  var captchaEnabled = false;
+  var captchaBusy = false;
 
   function labelOf(m) {
     if (m === 'register') return BOOTSTRAP ? '创建第一个管理员' : '注册';
@@ -233,6 +280,10 @@
     btn.disabled = on;
     userEl.disabled = on;
     passEl.disabled = on;
+    // 人机校验的两个控件也一起冻结（与其余输入框同一手势）：提交期间再点
+    // 「换一题」会把刚提交的那道题换掉，而请求已经在路上了。
+    captchaEl.disabled = on;
+    captchaRefresh.disabled = on;
     btn.textContent = on ? '请稍候…' : labelOf(mode);
   }
 
@@ -248,14 +299,122 @@
     return FALLBACK + tail;
   }
 
-  async function request(path, username, password) {
+  // -------------------------------------------------------------------------
+  // 人机校验（T10）
+  // -------------------------------------------------------------------------
+
+  // fetchCaptcha 取一道新题。只负责"发请求 + 把回执归一化"，
+  // **不碰** DOM、不碰状态 —— 它有两个调用者（探测与换题），
+  // 请求形状与判据只写一份。
+  async function fetchCaptcha() {
+    var res;
+    try {
+      res = await fetch('/admin/auth/captcha', {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      });
+    } catch (err) {
+      return { ok: false, network: true };
+    }
+    var data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    // 三个字段都得像样才算拿到题：只判 res.ok 的话，一个 200 + 空 id 的
+    // 服务端会让页面显示一块空图 + 一个永远失败的问题。
+    if (res.ok && data && data.ok === true &&
+        typeof data.id === 'string' && data.id &&
+        typeof data.svg === 'string' && data.svg) {
+      return { ok: true, id: data.id, svg: data.svg };
+    }
+    var e = (data && data.error) || {};
+    return { ok: false, status: res.status, code: e.code || '', message: e.message || '' };
+  }
+
+  // loadCaptcha 取一道新题并换到页面上的**唯一**入口。
+  //
+  // opts.quiet  true  = 失败不占用顶部错误条（首次探测、自动换题用）
+  //             false = 失败给用户一条提示（用户点「换一题」时用），
+  //                     但**不破坏页面**：题面留着、按钮恢复、可继续操作
+  // opts.focus  拿到新题后把光标放进答案框
+  //
+  // 返回 true = 换到了新题。
+  async function loadCaptcha(opts) {
+    var o = opts || {};
+    if (captchaBusy) return false;      // 防连点：同一时刻只允许一次换题
+    captchaBusy = true;
+    captchaRefresh.disabled = true;     // 钮先禁用，拿到新题/失败恢复
+    var res = await fetchCaptcha();
+    captchaBusy = false;
+    captchaRefresh.disabled = false;
+
+    if (res.ok) {
+      captchaEnabled = true;
+      captchaId = res.id;
+      // ⚠⚠ 这里是**信任服务端**：`svg` 由服务端用字模自己拼出来，不含任何
+      //    用户输入（见 internal/authlimit/captcha.go 的 drawQuestion）。
+      //    所以直接 innerHTML（用 textContent 会把标签当文本显示出来）。
+      //    将来若有人把 `svg` 改成用户可控的内容（例如允许管理员上传题目图
+      //    片、或允许上游返回题面），这一行立刻变成 XSS 入口 —— 到那时必须
+      //    改成白名单解析：DOMParser 解析后只放行 svg/rect/path 等允许的标签
+      //    与属性，其余丢弃。
+      captchaSvg.innerHTML = res.svg;
+      captchaRow.hidden = false;
+      captchaEl.value = '';
+      if (o.focus) { try { captchaEl.focus(); } catch (err) {} }
+      return true;
+    }
+
+    if (res.code === 'captcha_disabled') {
+      // 这个部署没开人机校验：**整块隐藏**（不留空框），并且把状态清干净，
+      // 让后续提交不带 captcha_* 字段。
+      captchaEnabled = false;
+      captchaId = '';
+      captchaRow.hidden = true;
+      if (!o.quiet) showError(messageOf(res));
+      return false;
+    }
+
+    // 网络失败 / 其他状态：**不阻断登录** —— 登录本身可能还是通的
+    //（服务端可能压根没开；真开着的话提交会拿到 captcha_required，
+    //  那时再把它显示出来并换题）。
+    if (!o.quiet) showError(messageOf(res));
+    captchaRow.hidden = !captchaId;  // 手上有题就留着（可能还有效），没有就藏起来
+    return false;
+  }
+
+  // askCaptcha 给"不关心返回值"的换题点用（探测 / 换一题 / 自动换题）：
+  // loadCaptcha 内部已经处理了每一种失败，这里只是不让一个意外异常冒成
+  // 未处理的 Promise 拒绝（那会表现为 console 报错 + 页面看起来卡住）。
+  function askCaptcha(opts) {
+    loadCaptcha(opts).catch(function () {});
+  }
+
+  // credsBody 组装注册/登录请求体。
+  //
+  // 人机校验字段的取舍（二选一并说明）：**有题号才带这两个字段**。
+  //   · 没题时带 `captcha_id: ""` 只是把"没有题"伪装成"题号为空"，
+  //     让服务端多一种要处理的输入；而这两个字段在服务端是**可选**的，
+  //     "缺席"本来就是它认得的正常状态（严格解码只约束"字段名不能自创"）。
+  //   · 有题时答案为空**照样带空串**：服务端对"缺失"与"答错"回同一个
+  //     code（captcha_required），前端替它做"空 = 缺失"的推断只会掩盖
+  //     "题号有效但答案是空"这种真实输入。
+  function credsBody(username, password) {
+    var body = { username: username, password: password };
+    if (captchaId) {
+      body.captcha_id = captchaId;
+      body.captcha_answer = captchaEl.value.trim();
+    }
+    return body;
+  }
+
+  async function request(path, body) {
     var res;
     try {
       res = await fetch(path, {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username, password: password })
+        body: JSON.stringify(body)
       });
     } catch (err) {
       return { ok: false, network: true };
@@ -276,12 +435,19 @@
 
   async function attempt(action, username, password) {
     var path = action === 'register' ? '/admin/auth/register' : '/admin/auth/login';
-    var res = await request(path, username, password);
-    if (!res.ok) return { text: messageOf(res) };
+    var res = await request(path, credsBody(username, password));
+    if (!res.ok) return { text: messageOf(res), code: res.code };
     if (action === 'login') return { redirect: true };
-    var login = await request('/admin/auth/login', username, password);
+    // 注册成功后的自动登录。⚠ 人机校验开着时，这道题**已经被注册那一步用掉了**
+    //（服务端一次性消费），所以这里多半会拿到 captcha_required —— 不特判，
+    // 交给调用方按"换个新题、请用户重登"处理（见提交处的 code 分支）。
+    var login = await request('/admin/auth/login', credsBody(username, password));
     if (login.ok) return { redirect: true };
-    return { text: '注册成功，但自动登录未通过：' + messageOf(login) + '。请改用登录。', toLogin: true };
+    return {
+      text: '注册成功，但自动登录未通过：' + messageOf(login) + '。请改用登录。',
+      code: login.code,
+      toLogin: true
+    };
   }
 
   form.addEventListener('submit', function (ev) {
@@ -304,7 +470,25 @@
         applyMode();
       }
       showError(result.text);
+      if (result.code === 'captcha_required') {
+        // ★ 拿到这个 code 就说明手上这道题**已经作废**了（服务端一次性消费：
+        //   答对、答错、没答都算用过）。不换题的话用户会拿着废题反复失败 ——
+        //   这是这个功能最容易做错的一处。
+        //   quiet：顶部已经显示 captcha_required 了，别被"换题失败"盖掉。
+        askCaptcha({ quiet: true, focus: true });
+      } else if (result.code === 'captcha_disabled') {
+        // 该部署没开（配置被改过）：按普通错误展示，并隐藏整块。
+        // **不**自创重试逻辑 —— 重试与否由用户在页面上决定。
+        captchaEnabled = false;
+        captchaId = '';
+        captchaRow.hidden = true;
+      }
     });
+  });
+
+  captchaRefresh.addEventListener('click', function () {
+    // 用户主动换题：失败要给提示（quiet:false），但不破坏页面。
+    askCaptcha({ quiet: false, focus: true });
   });
 
   switchLink.addEventListener('click', function (ev) {
@@ -313,11 +497,20 @@
     mode = mode === 'register' ? 'login' : 'register';
     clearError();
     applyMode();
+    // 换一题：上一道题很可能已经被上一次提交用掉了（服务端一次性消费），
+    // 两种模式共用同一道人机校验。
+    if (captchaEnabled) askCaptcha({ quiet: true });
     userEl.focus();
   });
 
   applyMode();
   userEl.focus();
+  // 探一次人机校验，决定那块显不显示：
+  //   200            → 显示题面
+  //   404 disabled   → 整块隐藏（quiet：不当错误）
+  //   网络失败/其他   → 整块隐藏，但**不阻断登录**（提交时服务端真要题，
+  //                    会回 captcha_required，那时再显示出来并换题）
+  askCaptcha({ quiet: true });
 })();
 </script>
 </body>
