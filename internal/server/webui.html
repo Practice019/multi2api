@@ -1580,7 +1580,18 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
       本页只读 —— 手动触发会与调度器并发跑同一任务，故不提供。
     </div>
     <div class="body">
-      <div id="jobrows" class="job-list"><div class="job-empty">加载中…</div></div>
+      <!-- 表格形态（用户要求还原）：一行一个任务，纵向一眼扫完 19 个；
+           错误列单行截断 + title 悬停看全文 —— 卡片"整段可换行"的收益不值那份纵向开销。 -->
+      <table class="accttable" id="jobtbl">
+        <colgroup>
+          <col style="width:300px"><col style="width:100px"><col style="width:80px">
+          <col style="width:110px"><col style="width:120px"><col style="width:70px"><col>
+        </colgroup>
+        <thead><tr>
+          <th>任务</th><th>上游</th><th>间隔</th><th>上次执行</th><th>下次（约）</th><th>状态</th><th>最近错误</th>
+        </tr></thead>
+        <tbody id="jobrows"><tr><td colspan="7" class="dim" style="padding:12px 16px">加载中…</td></tr></tbody>
+      </table>
     </div>
   </section>
 
@@ -3297,14 +3308,14 @@ let loginProvider = '';
     const host = $('jobrows');
     if (!host) return;
     if (!MANIFEST.loaded) {
-      host.innerHTML = `<div class="job-empty">渲染契约未加载：${esc(manifestError || '未知原因')}</div>`;
+      host.innerHTML = `<tr><td colspan="7" class="dim" style="padding:12px 16px">渲染契约未加载：${esc(manifestError || '未知原因')}</td></tr>`;
       $('jobMeta').textContent = '';
       return;
     }
     const jobs = MANIFEST.jobs || [];
     $('jobMeta').textContent = jobs.length ? `（${jobs.length} 个已注册任务）` : '';
     if (!jobs.length) {
-      host.innerHTML = `<div class="job-empty">没有上游注册定时任务</div>`;
+      host.innerHTML = `<tr><td colspan="7" class="dim" style="padding:12px 16px">没有上游注册定时任务</td></tr>`;
       return;
     }
     // 稳定排序：先按上游，再按任务名。不排序会让卡片顺序随后端 map 遍历跳动。
@@ -3334,43 +3345,35 @@ let loginProvider = '';
       const qHtml = j.desc
         ? `<span class="job-q" title="${esc(j.desc)}">?</span>` : '';
 
-      // 状态行：多段事实用全角「·」连成一行（抄参考项目的 SEP = '　·　'）。
-      // ⚠ 三段各有分工，都要：
-      //   · 间隔 —— 这个任务该多久跑一次
-      //   · 上次执行 —— **绝对时刻**（排障时要跟日志对时刻）
-      //   · 下次执行 —— **相对说法**（判断这个任务还活着吗）
+      // 上次/下次：绝对时刻（跟日志对时间用）+ 相对说法（判断任务还活着吗）。
       // ⚠ 后端没下发 next_run，这里由 `last_run + interval` 推算 —— 不为此改协议。
-      //   它和真实排期会在"用 Due 自定义到期"的任务上不一致（workbuddy 的守卫轮
-      //   是按账号错峰的），所以文案说「约」而不是断言。
-      const seg = [];
-      seg.push(`每 ${itv}`);
+      //   它和真实排期会在"用 Due 自定义到期"的任务上不一致，所以文案说「约」而不是断言。
+      let lastAbs = '';
+      let nextRel = '';
       if (j.last_run) {
         const d = new Date(j.last_run);
-        const abs = isNaN(d) ? j.last_run : d.toLocaleTimeString('zh-CN', { hour12: false });
-        seg.push(`上次 ${esc(abs)}`);
-        if (ms > 0 && !isNaN(d)) seg.push(`约 ${esc(relTime(d.getTime() + ms))}`);
-      } else {
-        // 从未执行时明说，而不是显示 —：那个字面量会骗人 —— growth-watch 一直没跑过，
-        // 显示 — 会被当成"正常但无关的信息"。
-        seg.push('还没有执行记录');
+        lastAbs = isNaN(d) ? esc(j.last_run) : d.toLocaleTimeString('zh-CN', { hour12: false });
+        if (ms > 0 && !isNaN(d)) { nextRel = '约 ' + relTime(d.getTime() + ms); }
       }
-      const stateHtml = seg.map((s, i) => i === 0 ? esc(s) : `<span class="dim">${s}</span>`).join('　·　');
-
-      // 错误独立一行、整段显示（可以换行）—— 这正是从表格换卡片的主要理由。
-      const errHtml = j.last_error
-        ? `<div class="job-state err" style="white-space:normal;word-break:break-word"
-             title="${esc(j.last_error)}">${esc(j.last_error)}</div>`
-        : '';
-      // 有错误的卡描红：扫一眼就知道哪个任务出问题了。
-      const cls = j.last_error ? 'job-item errrow' : 'job-item';
-      return `<div class="${cls}">
-        <div class="job-title">
-          <span class="job-name">${nameHtml}</span>${qHtml}
-          <span class="spacer"></span>
-          <span class="pill dim">${esc(j.provider || '—')}</span>
-        </div>
-        <div class="job-state">${stateHtml}</div>${errHtml}
-      </div>`;
+      const lastCell = lastAbs || '<span class="dim">还没有执行记录</span>';
+      // 状态：出错 / 正常 / 从未执行。三态要说清，不能都画成"—"。
+      const stateCell = j.last_error
+        ? '<span class="err">出错</span>'
+        : (j.last_run ? '<span style="color:#0f8a4d">正常</span>' : '<span class="dim">—</span>');
+      // 错误列：单行截断 + title 悬停看全文（表格形态下这是"整段可见"的替代方案）。
+      const errCell = j.last_error
+        ? `<td class="err" title="${esc(j.last_error)}">${esc(j.last_error)}</td>`
+        : '<td class="dim">—</td>';
+      const cls = j.last_error ? 'errrow' : '';
+      return `<tr class="${cls}">
+        <td>${nameHtml}${qHtml}</td>
+        <td><span class="pill dim">${esc(j.provider || '—')}</span></td>
+        <td>${ms > 0 ? '每 ' + esc(itv) : '—'}</td>
+        <td>${lastCell}</td>
+        <td class="dim">${nextRel || '—'}</td>
+        <td>${stateCell}</td>
+        ${errCell}
+      </tr>`;
     }).join('');
   }
 
