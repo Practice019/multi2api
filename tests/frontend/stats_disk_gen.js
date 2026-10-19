@@ -271,15 +271,22 @@ function renderStats(s) {
     // ⇒ 现在展示为两张**各表一件事**的卡：「输出 token」= tokens（含推理的真值）、
     //   「推理 token」= think_tokens（其中有多少是推理）。原先那处重复计算已删除。
     //
-    // 计算抽成 statsCardsEntries：renderStats（整页渲染）与无感轮询
-    // pollStatsCards（只改数值）共用同一份判据，杜绝两处漂移。
+    // 计算抽成 statsCardsEntries（第 1 组）+ statsCardsEntries2（第 2 组）：
+    // renderStats（整页渲染）与无感轮询 pollStatsCards（只改数值）共用同一份判据，
+    // 杜绝两处漂移 —— 卡片清单**只有这两个函数**，别的地方不许再列一遍。
 
     // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
     // data-stat-key 供无感轮询定位（见 pollStatsCards）。
     const card = (k, v, cls) =>
       `<div class="card" data-stat-key="${esc(k)}"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
 
+    // ⚠ 两个容器各自渲染一组（分组理由见 HTML 里 `#statsCards2` 那段注释）：
+    //   第 1 组 = 流量与耗时，第 2 组 = 模型归属与活跃度。
+    //   ⚠ 两组**共用同一个 card()**（同一个 `data-stat-key` 约定），否则回填逻辑要认两种形状。
     $('statsCards').innerHTML = statsCardsEntries(s).map(([k, v, c]) => card(k, v, c)).join('');
+    $('statsCards2').innerHTML = statsCardsEntries2(s).map(([k, v, c]) => card(k, v, c)).join('');
+    renderHealthBar(s);   // 与卡片同源（同一份 s），不会出现"卡对条错"
+    renderModelRank(s);   // 次数排行同源，同样只读这一份响应
 
     // ⚠ 「模型明细」chips 已按用户要求删除（2026-10-18）⇒ 这里**不再调** renderStatsModels。
     // ⚠ 函数本体保留未删：它里面还带着 `statsCatalogHint` 等挂载逻辑，
@@ -292,6 +299,22 @@ function statsCardsEntries(s) {
     const total = num(s.total);
     const ok = num(s.ok);
     const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
+    // ⚠⚠ 平均 RPM / TPM 的窗口（2026-10-20 加，对标 new-api 的指标卡）：
+    //   必须用**真实窗口跨度**（后端给的 window_from/window_to）去除，不能用固定的 24h ——
+    //   用户切 1h / 24h / 7d / 30d 档位时窗口差几十倍，写死就把 7 天摊成了 1 天。
+    //   ⚠ 跨度拿不到（老响应 / 只有一个点）⇒ 返回 null，卡片显示占位而不是编个数。
+    let winMin = null;
+    if (s.window_from && s.window_to) {
+      const a = new Date(s.window_from).getTime();
+      const b = new Date(s.window_to).getTime();
+      if (isFinite(a) && isFinite(b) && b > a) { winMin = (b - a) / 60000; }
+    }
+    const perMin = (v) => {
+      const n = num(v);
+      return (winMin && n !== null) ? n / winMin : null;
+    };
+    const rpm = perMin(s.total);
+    const tpm = perMin(s.tokens);
     return [
       ['总请求', fmtCount(s.total), ''],
       ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
@@ -302,15 +325,9 @@ function statsCardsEntries(s) {
       ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
-      // ⚠ 下面三张照 agent2api 的概览卡补（2026-10-18）。⚠ 值**先给 null = 占位**：
-      //   它们的原料在两处不同的接口里 ——
-      //     · Top 模型    ⇒ 本响应里的 `by_model_detail`（⚠ 在下面 renderStatsReport 里回填）
-      //     · 活跃/连续天数 ⇒ `series?range=365d`（⚠ 由 loadHeatmap 回填，它本来就要取那份数据）
-      // ⚠ 为什么不在这里直接算：本函数只知道窗口总量，**不知道"哪些天有请求"**。
-      //   硬凑只会在没有 series 的时候显示错的数 —— 按本项目的立场，宁可先空着。
-      ['Top 模型', null, 'dim'],
-      ['活跃天数', null, 'dim'],
-      ['当前连续天数', null, 'dim'],
+      // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）
+      ['平均 RPM', rpm === null ? null : (rpm >= 10 ? fmtCount(Math.round(rpm)) : rpm.toFixed(1)), 'dim'],
+      ['平均 TPM', tpm === null ? null : fmtTokens(Math.round(tpm)), 'dim'],
     ];
   }
 
