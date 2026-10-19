@@ -23,6 +23,13 @@ import (
 // 零值即「全部缺失」，因此调用方只需判断返回值是否为零值就能决定是否写 0，
 // 不需要额外的 ok 标志。所有整数字段保证 >= 0；Credit 保证为有限非负值。
 type UsageExtras struct {
+	// CompletionTokens 纯**输出** token 数（2026-10-20 加）。
+	//
+	// ⚠ 为什么必须单独存：日志原有的 Tokens 字段记的是 total（输入+输出），
+	// 而「tok/s」语义上是**生成速度** —— 拿 total 除耗时会把输入也算成生成量。
+	// 实测后果：一条 2408ms 的请求显示 15759 t/s（37948 total / 2.4s），物理上不可能。
+	// 同一列里混着"纯输出"与"输入+输出"两种口径，比单纯算错更误导。
+	CompletionTokens int
 	// Credit 本次请求实际消耗的额度，对应上游 usage.credit。
 	Credit float64
 	// ThinkTokens 推理（思维链）token 数。
@@ -62,6 +69,10 @@ func ParseUsageExtras(usage map[string]any) UsageExtras {
 	}
 
 	out.Credit = usageFloat(usage["credit"])
+	// 纯输出 token（2026-10-20）：tok/s 的分母依据。
+	// ⚠ 不从 total 反推（total - prompt 在上游字段缺失时会得出负数或 0），
+	// 只认上游显式给的 completion_tokens；缺失就留 0，前端据此显示 "—" 而不是硬算。
+	out.CompletionTokens = usageInt(usage["completion_tokens"])
 
 	// 推理 token：顶层显式键**存在就认它**（哪怕为 0），只在它缺席时才看 details。
 	//

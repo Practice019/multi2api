@@ -327,6 +327,9 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 		entry.Credit = x.Credit
 		entry.ThinkTokens = x.ThinkTokens
 		entry.CacheHitTokens = x.CacheHitTokens
+		// 纯输出 token：tok/s 的分子。上游没给 completion_tokens 时这里为 0，
+		// 前端据此显示 "—" 而不是拿 total 硬算（见 logbuf.Entry.OutTokens 的注释）。
+		entry.OutTokens = x.CompletionTokens
 		entry.CacheMissTokens = x.CacheMissTokens
 	}
 	chatLogRing.Push(entry)

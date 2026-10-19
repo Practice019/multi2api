@@ -225,6 +225,34 @@ func frameUsage(frame string) *sseUsage {
 	return f.Usage
 }
 
+// Completion 返回**纯输出** token 数与来源（0 = 无从得知）。
+//
+// 与 Result() 分开是为了让 tok/s 的口径独立：Result() 的 tokens 是 total
+// （输入+输出，用于统计消耗），而速度必须只算输出。两者混用会让
+// "2408ms 生成 37948 token" 这种物理上不可能的数字出现在页面上。
+//
+// ⚠ 估算分支同样返回估算值（estimted 的就是输出文本量），这是可接受的 ——
+// 估算的本来就是输出；但来源会标 estimated，不与上游真实值混淆。
+func (s *streamUsage) Completion() (int, usageSource) {
+	if u := frameUsage(s.lastFrame); u.valid() {
+		if u.CompletionTokens > 0 {
+			return u.CompletionTokens, usageFromLastFrame
+		}
+		// 上游给了 total 但没给 completion：仍然算"上游数据"，只是输出侧缺失
+		return 0, usageFromLastFrame
+	}
+	if u := frameUsage(s.secondLastFrame); u.valid() {
+		if u.CompletionTokens > 0 {
+			return u.CompletionTokens, usageFromSecondLast
+		}
+		return 0, usageFromSecondLast
+	}
+	if est := estimateTokens(s.text.String(), s.toolCalls); est > 0 {
+		return est, usageEstimated
+	}
+	return 0, usageUnavailable
+}
+
 // Result 返回（token 总数, 首帧耗时, 来源）。
 //
 // token 为 0 时调用方应记 -1（"未知"），**不要**把 0 当真实用量写盘 ——

@@ -1545,8 +1545,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if tok <= 0 {
 			tok = -1
 		}
+		// 纯输出 token（tok/s 的分母依据）。走 usage map 传给 logChatRowProvider，
+		// 由 wire.ParseUsageExtras 统一提取 —— 这样账号池路径与渠道路径
+		// 用**同一条**提取链路，不会出现两条路径口径分叉。
+		outTok, _ := cap.Completion()
+		var usageMap map[string]any
+		if outTok > 0 {
+			usageMap = map[string]any{"completion_tokens": outTok}
+		}
 		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, "", "channel:"+fw.ChannelName,
-			fw.Stream.Status, tok, nil, "usage:"+string(usageSrc), 0, "", "", fw.ChannelID, fw.UpstreamModel)
+			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), 0, "", "", fw.ChannelID, fw.UpstreamModel)
 		return
 	}
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)

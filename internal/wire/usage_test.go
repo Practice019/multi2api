@@ -16,7 +16,7 @@ func TestParseUsageExtrasExplicitKeys(t *testing.T) {
 		"prompt_cache_hit_tokens":    64.0,
 		"prompt_cache_miss_tokens":   36.0,
 	})
-	want := UsageExtras{Credit: 1.25, ThinkTokens: 42, CacheHitTokens: 64, CacheMissTokens: 36}
+	want := UsageExtras{Credit: 1.25, ThinkTokens: 42, CacheHitTokens: 64, CacheMissTokens: 36, CompletionTokens: 100}
 	if got != want {
 		t.Errorf("显式键: got %+v want %+v", got, want)
 	}
@@ -324,7 +324,7 @@ func TestParseUsageExtrasFromRealJSON(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	got := ParseUsageExtras(chunk.Usage)
-	want := UsageExtras{Credit: 0.85, ThinkTokens: 64, CacheHitTokens: 128, CacheMissTokens: 32}
+	want := UsageExtras{CompletionTokens: 133, Credit: 0.85, ThinkTokens: 64, CacheHitTokens: 128, CacheMissTokens: 32}
 	if got != want {
 		t.Errorf("real JSON: got %+v want %+v", got, want)
 	}

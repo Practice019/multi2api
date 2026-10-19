@@ -27,12 +27,20 @@ const DefaultCapacity = 2000
 //   - 这些字段是按请求累加的量（credit 是消费额度、其余是 token 计数），
 //     永远不会是负数；解析层已保证非负。
 type Entry struct {
-	Seq    int64     `json:"seq"`
-	At     time.Time `json:"at"`
-	Model  string    `json:"model"`
-	Mode   string    `json:"mode"`   // stream | sync
-	Status int       `json:"status"` // 对客户端返回的状态码
-	UID    string    `json:"uid"`    // 完整 uid，展示层自行截断
+	// OutTokens 纯**输出** token（2026-10-20 加）：tok/s 的正确分子。
+	//
+	// ⚠ 为什么不复用 Tokens：Tokens 是 total（输入+输出），拿它算 tok/s 会把输入
+	// 当成生成量。实测一条 2408ms 的请求显示 15759 t/s（37948/2.4s）——
+	// 数学没错，物理不可能。两个语义必须分开存。
+	// ⚠ 0 = 上游没给 completion_tokens 或旧版本没记录（历史行全为 0），
+	// 前端据此显示 "—"，绝不拿它算速度（那会把"没有数据"变成"速度很快"）。
+	OutTokens int       `json:"out_tokens,omitempty"`
+	Seq       int64     `json:"seq"`
+	At        time.Time `json:"at"`
+	Model     string    `json:"model"`
+	Mode      string    `json:"mode"`   // stream | sync
+	Status    int       `json:"status"` // 对客户端返回的状态码
+	UID       string    `json:"uid"`    // 完整 uid，展示层自行截断
 	// Provider 本次请求走的上游标识（与 gateway.Provider.ID() 对应）。
 	//
 	// 加它只花一个字段：统计按上游分组（/admin/stats 的 by_provider）是
