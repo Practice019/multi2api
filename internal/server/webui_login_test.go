@@ -16,7 +16,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -44,7 +43,11 @@ type uiFixture struct {
 }
 
 // newUIFixture 造一个最小 /ui 夹具。withAccounts=false 模拟"没接账号体系"。
-func newUIFixture(t *testing.T, withAccounts, registerOpen bool) *uiFixture {
+//
+// ⚠ 2026-10-19：参数 `registerOpen bool` 已删除 —— 那个开关
+// （Config.RegisterOpen / config.console.disables_register）随"开放注册"
+// 这个概念一起没了。注册入口现在只由**账号库空不空**决定（见 webui.go）。
+func newUIFixture(t *testing.T, withAccounts bool) *uiFixture {
 	t.Helper()
 	f := &uiFixture{}
 	cfg := Config{
@@ -54,7 +57,6 @@ func newUIFixture(t *testing.T, withAccounts, registerOpen bool) *uiFixture {
 		APIKey:       testAPIKey,
 		AdminToken:   testAdminToken,
 		CookieSecure: account.CookieSecureNever, // 测试走明文 http
-		RegisterOpen: func() bool { return registerOpen },
 	}
 	if withAccounts {
 		dir := t.TempDir()
@@ -65,7 +67,8 @@ func newUIFixture(t *testing.T, withAccounts, registerOpen bool) *uiFixture {
 		if f.sessions, err = account.NewSessionStore(filepath.Join(dir, "sessions.json")); err != nil {
 			t.Fatalf("会话库: %v", err)
 		}
-		if f.user, err = f.accounts.Create("boss", "boss-password-001", account.RoleAdmin); err != nil {
+		// 唯一建号路径：空库 ⇒ 建出那个管理员
+		if f.user, err = f.accounts.CreateBootstrap("boss", "boss-password-001"); err != nil {
 			t.Fatalf("建管理员: %v", err)
 		}
 		cfg.Accounts = f.accounts
@@ -116,7 +119,7 @@ func cookieValue(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 // （浏览器必须拿到它才能继续用管理台）。所以这里只查**响应体**，不查头 ——
 // 而"头部与体部的区别"正是设计的一部分：body 会进缓存、进日志、进截图。
 func TestUIHTTPNeverLeaksSecrets(t *testing.T) {
-	f := newUIFixture(t, true, true)
+	f := newUIFixture(t, true)
 	good := f.sessionCookie(t)
 
 	cases := []struct {
@@ -152,7 +155,7 @@ func TestUIHTTPNeverLeaksSecrets(t *testing.T) {
 
 // 未认证 ⇒ 拿到**登录页**，而不是控制台外壳。
 func TestUILoginPageWhenUnauthenticated(t *testing.T) {
-	f := newUIFixture(t, true, false)
+	f := newUIFixture(t, true)
 	rec := f.get(t, "/ui")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("未认证访问 /ui 应当 200（给一张能填账号口令的页面），实际 %d", rec.Code)
@@ -174,7 +177,7 @@ func TestUILoginPageWhenUnauthenticated(t *testing.T) {
 
 // 会话说得通 ⇒ 控制台外壳。
 func TestUIConsoleWhenSessionValid(t *testing.T) {
-	f := newUIFixture(t, true, false)
+	f := newUIFixture(t, true)
 	rec := f.get(t, "/ui", f.sessionCookie(t))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("带有效会话访问 /ui 应当 200，实际 %d", rec.Code)
@@ -193,7 +196,7 @@ func TestUIConsoleWhenSessionValid(t *testing.T) {
 // 判据必须走 SessionStore.Lookup（四道校验），自己读 cookie 查表会漏掉它们
 // —— 表现成"登出之后旧 cookie 还能打开控制台"。
 func TestUILoginPageWhenSessionRevoked(t *testing.T) {
-	f := newUIFixture(t, true, false)
+	f := newUIFixture(t, true)
 	c := f.sessionCookie(t)
 	if rec := f.get(t, "/ui", c); !strings.Contains(rec.Body.String(), consolePageMarker) {
 		t.Fatal("前置条件不成立：刚签发的会话应当能打开控制台")
@@ -211,7 +214,7 @@ func TestUILoginPageWhenSessionRevoked(t *testing.T) {
 // ② 令牌留在 URL 会顺着历史/Referer/代理日志漏出去；
 // ③ 换到 cookie 之后才可能是 HttpOnly（JS 读不到 ⇒ XSS 偷不走）。
 func TestUITokenQuerySetsCookieAndRedirects(t *testing.T) {
-	f := newUIFixture(t, true, false)
+	f := newUIFixture(t, true)
 	rec := f.get(t, "/ui?token="+url.QueryEscape(testAdminToken))
 
 	if rec.Code != http.StatusFound {
@@ -248,7 +251,7 @@ func TestUITokenQuerySetsCookieAndRedirects(t *testing.T) {
 //
 // 否则这个端点就成了"给我一个令牌，我告诉你对不对"的离线试错口。
 func TestUIBadTokenQueryIsNotAnOracle(t *testing.T) {
-	f := newUIFixture(t, true, false)
+	f := newUIFixture(t, true)
 	plain := f.get(t, "/ui")
 	bad := f.get(t, "/ui?token=wrong-token-xyz")
 
@@ -266,7 +269,7 @@ func TestUIBadTokenQueryIsNotAnOracle(t *testing.T) {
 
 // 令牌 cookie 能直接进控制台（换手之后的正常状态）。
 func TestUITokenCookieAuthorizesConsole(t *testing.T) {
-	f := newUIFixture(t, true, false)
+	f := newUIFixture(t, true)
 	rec := f.get(t, "/ui", &http.Cookie{Name: account.AdminTokenCookie, Value: testAdminToken})
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), consolePageMarker) {
 		t.Errorf("带合法令牌 cookie 应当直接进控制台，实际 %d", rec.Code)
@@ -278,7 +281,7 @@ func TestUITokenCookieAuthorizesConsole(t *testing.T) {
 // 这条同时守住"轮换立即生效"（用户报障 ②）：判定每次都读**当前**令牌，
 // 所以旧副本不需要任何额外清理动作就不匹配了。
 func TestUIStaleTokenCookieIsRejectedAndCleared(t *testing.T) {
-	f := newUIFixture(t, true, false)
+	f := newUIFixture(t, true)
 	const rotated = "ROTATED-ADMIN-TOKEN-CCC333"
 	f.h.SetAdminToken(rotated)
 
@@ -296,62 +299,22 @@ func TestUIStaleTokenCookieIsRejectedAndCleared(t *testing.T) {
 	}
 }
 
-// 登录页的两个标志位按真实状态渲染（bootstrap / 注册开关）。
-func TestUILoginPageFlags(t *testing.T) {
-	boolFlag := func(rec *httptest.ResponseRecorder, key string) string {
-		re := regexp.MustCompile(key + `:\s*(true|false)`)
-		if m := re.FindStringSubmatch(rec.Body.String()); m != nil {
-			return m[1]
-		}
-		return ""
-	}
-
-	// ① 账号库**有账号** ⇒ bootstrap=false
-	f1 := newUIFixture(t, true, false)
-	if got := boolFlag(f1.get(t, "/ui"), "bootstrap"); got != "false" {
-		t.Errorf("账号库非空时 bootstrap 应为 false，实际 %q", got)
-	}
-
-	// ② ★ 账号体系已接线但**一个账号都没有**（首次部署）⇒ bootstrap=true
-	f2 := newUIEmptyAccountsFixture(t, false)
-	rec := f2.get(t, "/ui")
-	if got := boolFlag(rec, "bootstrap"); got != "true" {
-		t.Errorf("★ 账号库为空时 bootstrap 应为 true（页面给出「创建第一个管理员」），实际 %q", got)
-	}
-	if got := boolFlag(rec, "register"); got != "false" {
-		t.Errorf("注册开关关闭时 register 应为 false，实际 %q", got)
-	}
-
-	// ③ 开放注册 ⇒ register=true
-	f3 := newUIFixture(t, true, true)
-	if got := boolFlag(f3.get(t, "/ui"), "register"); got != "true" {
-		t.Errorf("开放注册时 register 应为 true，实际 %q", got)
-	}
-
-	// ④ 没接账号体系（Accounts=nil）⇒ bootstrap **必须**为 false。
-	//
-	// 这不是"没账号所以该显示创建入口"：没接线时 `/admin/auth/register`
-	// 根本没挂载，页面给一个"创建第一个管理员"的按钮点了必然 404。
-	// 宁可不显示入口，也不要显示一个点了就错的按钮。
-	f4 := newUIFixture(t, false, false)
-	if got := boolFlag(f4.get(t, "/ui"), "bootstrap"); got != "false" {
-		t.Errorf("没接账号体系时 bootstrap 应为 false（创建入口此时不可用），实际 %q", got)
-	}
-
-	// ⑤ 两个占位符都不得残留（否则页面上的标志位是字符串而非布尔）
-	body := rec.Body.String()
-	for _, ph := range []string{loginBootstrapPlaceholder, loginRegisterPlaceholder} {
-		if strings.Contains(body, `"`+ph+`"`) {
-			t.Errorf("登录页里仍残留占位符字面量 %s —— 标志位没被替换成布尔", ph)
-		}
-	}
-}
+// ⚠ TestUILoginPageFlags 已移到 webui_login_flags_test.go（单账号口径重写）。
+//
+// 移出去的理由：它测的是"页面上的开关与服务端断定**同源**"，与这个文件里
+// 另外那些"密钥不许进 HTML / 302 换 cookie / 令牌轮换立刻生效"不是同一类判据。
+//
+// 它的语义也变了（这正是必须改它的原因）：原先还断言一个 `register` 开关，
+// 而那个开关随"开放注册"这个概念一起删除 —— 现在判据是"标志位对象里
+// **只有 bootstrap**，页面不存在任何注册/角色开关"。见新文件顶部的说明。
 
 // newUIEmptyAccountsFixture 账号体系已接线但账号库为空（首次部署的真实形态）。
 //
-// 与 newUIFixture(t, false, …) 的区别：那个是"压根没接线"（Accounts=nil），
+// 与 newUIFixture(t, false) 的区别：那个是"压根没接线"（Accounts=nil），
 // 两者在登录页上应给出**不同**的标志位 —— 前者能创建管理员，后者不能。
-func newUIEmptyAccountsFixture(t *testing.T, registerOpen bool) *uiFixture {
+//
+// ⚠ 2026-10-19：参数 `registerOpen bool` 已删除（那个开关不存在了）。
+func newUIEmptyAccountsFixture(t *testing.T) *uiFixture {
 	t.Helper()
 	dir := t.TempDir()
 	accounts, err := account.New(filepath.Join(dir, "accounts.json"))
@@ -368,7 +331,6 @@ func newUIEmptyAccountsFixture(t *testing.T, registerOpen bool) *uiFixture {
 			APIKey:       testAPIKey,
 			AdminToken:   testAdminToken,
 			CookieSecure: account.CookieSecureNever,
-			RegisterOpen: func() bool { return registerOpen },
 			Accounts:     accounts,
 			Sessions:     sessions,
 		}),

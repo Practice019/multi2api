@@ -5,7 +5,7 @@
 //	① 无凭据（**含本机直连**）  → 401（改造前本机无条件放行，那就是报障的根因）
 //	② 拿 **api_key**            → 401（权限倒挂：对话钥匙不得解锁管理面）
 //	③ 拿 admin_token            → 放行（Bearer 与 ?token= 两条）
-//	④ 浏览器会话                → 放行，且按角色分流（管理员全部 / 成员白名单）
+//	④ 浏览器会话                → 放行；★ 非管理员的历史记录**不构成身份**（401）
 //	⑤ 会话失效（改口令/被撤）    → 401
 //	⑥ 一个凭据都没配            → 一律 401（不是"回落用 api_key"）
 //	⑦ 轮换令牌                  → 立即生效，旧令牌立刻失效
@@ -14,11 +14,18 @@
 //
 // 这类缺陷的形态是"**静默放行**"——它不报错、不影响正常使用，
 // 只在有人恶意访问时才显形。少一条断言就少一层可被静默绕过的前提。
+//
+// ⚠ 2026-10-19 用户新口径：登录系统收成单账号管理员，"成员"角色已取消。
+// 原先的 ④ 是"按角色分流（管理员全部 / 成员白名单 memberRules）"，
+// 那张白名单连同它的测试**已删**（见 admin.go 的 canAccess 注释）——
+// 换成了更强的 ④：盘上的成员历史记录连**身份**都拿不到。
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -32,11 +39,15 @@ type gateFixture struct {
 	adminToken string
 	accounts   *account.Store
 	sessions   *account.SessionStore
-	admin      *account.User // 管理员账号
-	member     *account.User // 成员账号
+	admin      *account.User // 唯一那个管理员
+	legacy     *account.User // 盘上的**成员历史记录**（改造前留下的，不构成身份）
 }
 
-// newGateFixture 造夹具。withAccounts=true 时另建账号体系（管理员 + 成员各一）。
+// newGateFixture 造夹具。withAccounts=true 时另建账号体系。
+//
+// ⚠ 单账号口径：管理员走 CreateBootstrap（唯一建号路径），而那条
+// "成员历史记录"是**手写进账号文件的** —— 没有 API 能造出它（那正是目标态 1），
+// 而目标态 3 要测的恰恰是"盘上有这么一条"的旧数据形态。
 func newGateFixture(t *testing.T, withAccounts bool) *gateFixture {
 	t.Helper()
 	const (
@@ -52,7 +63,9 @@ func newGateFixture(t *testing.T, withAccounts bool) *gateFixture {
 	if withAccounts {
 		dir := t.TempDir()
 		var err error
-		f.accounts, err = account.New(filepath.Join(dir, "accounts.json"))
+		accPath := filepath.Join(dir, "accounts.json")
+		seedLegacyMemberFile(t, accPath, "boss", "boss-password-001", "staff", "staff-password-002")
+		f.accounts, err = account.New(accPath)
 		if err != nil {
 			t.Fatalf("账号库: %v", err)
 		}
@@ -60,13 +73,11 @@ func newGateFixture(t *testing.T, withAccounts bool) *gateFixture {
 		if err != nil {
 			t.Fatalf("会话库: %v", err)
 		}
-		f.admin, err = f.accounts.Create("boss", "boss-password-001", account.RoleAdmin)
-		if err != nil {
-			t.Fatalf("建管理员: %v", err)
+		if f.admin = f.accounts.ByUsername("boss"); f.admin == nil {
+			t.Fatal("前置：管理员记录应当被加载")
 		}
-		f.member, err = f.accounts.Create("staff", "staff-password-002", account.RoleMember)
-		if err != nil {
-			t.Fatalf("建成员: %v", err)
+		if f.legacy = f.accounts.ByUsername("staff"); f.legacy == nil {
+			t.Fatal("前置：成员历史记录应当被加载")
 		}
 		cfg.Accounts = f.accounts
 		cfg.Sessions = f.sessions
@@ -82,6 +93,40 @@ func newGateFixture(t *testing.T, withAccounts bool) *gateFixture {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
 	return f
+}
+
+// seedLegacyMemberFile 手写一个账号文件：一个管理员 + 一条**成员**历史记录。
+//
+// 口令用真 bcrypt 哈希（account.HashPassword）—— 这样"口令对但角色不是
+// 管理员"这条反例在 HTTP 层也真的走到角色判定，而不是被口令校验挡下。
+func seedLegacyMemberFile(t *testing.T, path, adminName, adminPass, memberName, memberPass string) {
+	t.Helper()
+	row := func(name, plain string, role int) map[string]any {
+		h, err := account.HashPassword(plain)
+		if err != nil {
+			t.Fatalf("HashPassword: %v", err)
+		}
+		return map[string]any{
+			"id":            "u-" + name,
+			"username":      name,
+			"display_name":  name,
+			"password_hash": h,
+			"role":          role,
+			"enabled":       true,
+			"auth_version":  1,
+			"created_at":    "2026-01-01T00:00:00Z",
+		}
+	}
+	raw, err := json.MarshalIndent([]map[string]any{
+		row(adminName, adminPass, account.RoleAdmin),
+		row(memberName, memberPass, account.RoleMember),
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("写账号库: %v", err)
+	}
 }
 
 // probe 打一个**只读**的管理端点，返回状态码与响应体。
@@ -191,81 +236,69 @@ func TestGate_QueryTokenAccepted(t *testing.T) {
 	}
 }
 
-// ④ 浏览器会话 ⇒ 放行；★ 成员按白名单分流。
-func TestGate_SessionRoleSplit(t *testing.T) {
+// ④ 浏览器会话 ⇒ 放行；★ 成员历史记录**不构成身份**（401，不是 403）。
+//
+// ⚠ 语义变更（2026-10-19 单账号口径）：这条测试原先叫 TestGate_SessionRoleSplit，
+// 断言"管理员全部放行 / 成员按 memberRules 白名单分流（白名单内的 200、
+// 管理员专属的 403 forbidden_role）"。
+//
+// 那个面**已经不存在**：用户新口径是"只要一个账号，用户其实可以不用"，
+// memberRules 白名单连同 forbidden_role 的**可达路径**一起删了
+// （见 admin.go 的 canAccess）⇒ 成员既不能进白名单，也不会撞 403，
+// 它在**身份**这一层就结束了（401 auth_required）。
+//
+// 所以断言换成了语义相反、但更强的一组：
+//
+//	① 管理员会话：白名单内与管理员专属端点**都**能进（不再有"成员能进的子集"）
+//	② 盘上的成员历史记录：连一条有效会话都换不到身份 ⇒ 401 auth_required
+//	③ 那条会话对**任何**管理端点都是 401（包括改造前白名单里的那几个）
+func TestGate_SingleAdminSession(t *testing.T) {
 	f := newGateFixture(t, true)
 
-	// 管理员：白名单内与**管理员专属**端点都能进
+	// ① 管理员：所有管理端点都能进
 	for _, path := range []string{"/admin/ui/manifest", "/admin/stats", "/admin/testonly"} {
 		if code, body := f.probeAs(t, f.admin, path); code != http.StatusOK {
 			t.Errorf("管理员访问 %s 应当 200，实际 %d: %s", path, code, body)
 		}
 	}
 
-	// 成员：白名单内可进（T8 起清单收窄到 apikeys 与 manifest）
-	for _, path := range []string{"/admin/ui/manifest"} {
-		if code, body := f.probeAs(t, f.member, path); code != http.StatusOK {
-			t.Errorf("成员访问白名单内的 %s 应当 200，实际 %d: %s", path, code, body)
+	// ②③ 成员历史记录：会话有效也换不到身份 ⇒ 一律 401
+	for _, path := range []string{
+		"/admin/ui/manifest", // 改造前它在这个白名单里
+		"/admin/apikeys",     // 同上
+		"/admin/stats",
+		"/admin/accounts",
+		"/admin/testonly",
+	} {
+		code, body := f.probeAs(t, f.legacy, path)
+		if code != http.StatusUnauthorized {
+			t.Errorf("★ 成员历史记录访问 %s 应当 401（成员账号已取消，它不构成身份），实际 %d: %s",
+				path, code, body)
 		}
-	}
-	// /admin/apikeys 在白名单里，但夹具没接 cfg.APIKeys ⇒ 路由未挂载（404）。
-	// 这里要判的是**门禁不拦成员**，路由是否存在由 apikey_role_split_test.go 覆盖
-	// ⇒ 所以断言"不是 403"。
-	if code, _ := f.probeAs(t, f.member, "/admin/apikeys"); code == http.StatusForbidden {
-		t.Errorf("成员访问 /admin/apikeys 不该被门禁拦（它在 memberRules 里），实际 %d", code)
-	}
-
-	// ★ T8 新收窄：/admin/stats 与 /admin/stats/series 从成员白名单里**撤出**。
-	//
-	// 理由：它们回的是 by_uid / by_provider 这类**管理面**聚合（按上游账号与
-	// 上游排行），给成员看等于把上游账号的昵称与用量端出去。成员要的"自己的
-	// 用量"应当按 key 归属过滤后单独给（后续切片），不是把管理面报表原样放行。
-	for _, path := range []string{"/admin/stats", "/admin/stats/series"} {
-		code, body := f.probeAs(t, f.member, path)
-		if code != http.StatusForbidden {
-			t.Errorf("★ 成员访问 %s 应当 403（管理面聚合不该给成员），实际 %d: %s", path, code, body)
-		}
-	}
-
-	// ★★ T8 修掉的真洞：**前缀白名单**会让 /admin/apikeys/rotate-admin 也命中
-	// `/admin/apikeys` —— 成员据此可以轮换**管理令牌**，而那个端点的回执里带着
-	// **完整新令牌**（见 apikeys.go 的 apiKeysRotateAdmin）⇒ 一次提权。
-	// 现在改成精确的 (方法, 路径) 对，这两条必须 403。
-	for _, path := range []string{"/admin/apikeys/rotate-admin", "/admin/apikeys/rotate-api-key"} {
-		code, body := f.probeAs(t, f.member, path)
-		if code != http.StatusForbidden {
-			t.Errorf("★★ 成员访问 %s 必须 403 ——\n"+
-				"它是**轮换管理凭据**的端点且回执含明文新令牌；前缀白名单时代成员能调它，"+
-				"等于一次提权。实际 %d: %s", path, code, body)
-		}
-	}
-
-	// ★ 成员：管理员专属端点必须 403，且 code 与 401 区分开
-	for _, path := range []string{"/admin/accounts", "/admin/settings", "/admin/logs", "/admin/providers", "/admin/testonly"} {
-		code, body := f.probeAs(t, f.member, path)
-		if code != http.StatusForbidden {
-			t.Errorf("★ 成员访问 %s 应当 403（有身份但角色不够），实际 %d: %s", path, code, body)
-		}
-		if !containsStr(body, "forbidden_role") {
-			t.Errorf("★ 角色不足应当带 code=forbidden_role（前端据此显示「无权」而不是再跳登录页），实际: %s", body)
+		if !containsStr(body, "auth_required") {
+			t.Errorf("★ 应当是 auth_required（=「没有有效身份」），不是角色不足；实际: %s", body)
 		}
 	}
 }
 
-// ④b 前端白名单必须**默认拒绝**：不在表里的一律管理员专属（T8 起还要求配对其方法）。
+// ④b 非管理员身份的会话**默认拒绝**：任何路径都进不去（不是"只挡白名单外的"）。
 //
-// 这条钉住 memberRules 的语义：它是白名单，不是黑名单 ——
-// 加新端点的人不需要记得来更新它（漏更新只会"成员进不去"，不会"越权"）。
-func TestGate_MemberWhitelistIsDenyByDefault(t *testing.T) {
+// ⚠ 语义变更：这条原先叫 TestGate_MemberWhitelistIsDenyByDefault，钉的是
+// "memberRules 是白名单不是黑名单（漏登记只会让成员进不去，不会越权）"。
+// 白名单没了，但**默认拒绝**这条判据必须留下来 —— 它现在是"盘上的成员记录
+// 在任何路径上都不构成身份"，覆盖面比原版更宽（原版只查白名单外的路径）。
+func TestGate_NonAdminSessionDeniedEverywhere(t *testing.T) {
 	f := newGateFixture(t, true)
 	for _, path := range []string{
+		"/admin/ui/manifest",
+		"/admin/apikeys",
 		"/admin/accounts/reload",
 		"/admin/accounts/checkin/all",
 		"/admin/settings/save",
 		"/admin/some/future/endpoint",
 	} {
-		if code, _ := f.probeAs(t, f.member, path); code != http.StatusForbidden {
-			t.Errorf("成员访问未列白名单的 %s 应当 403（默认拒绝），实际 %d", path, code)
+		if code, _ := f.probeAs(t, f.legacy, path); code != http.StatusUnauthorized {
+			t.Errorf("非管理员身份访问 %s 应当 401（默认拒绝），实际 %d", path, code)
 		}
 	}
 }
@@ -273,7 +306,7 @@ func TestGate_MemberWhitelistIsDenyByDefault(t *testing.T) {
 // ⑤ 会话失效（口令变更/被撤销）⇒ 401，不能拿旧 cookie 进管理面。
 func TestGate_StaleSessionRejected(t *testing.T) {
 	f := newGateFixture(t, true)
-	sess, err := f.sessions.Issue(f.member, "127.0.0.1", "probe/1.0")
+	sess, err := f.sessions.Issue(f.admin, "127.0.0.1", "probe/1.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +314,7 @@ func TestGate_StaleSessionRejected(t *testing.T) {
 		t.Fatalf("前置条件不成立：刚签发的会话应当能进，实际 %d", code)
 	}
 	// 改口令 ⇒ 账号 AuthVersion +1 ⇒ 所有旧会话失效
-	if _, err := f.accounts.SetPassword(f.member.ID, "member-new-password-003"); err != nil {
+	if _, err := f.accounts.SetPassword(f.admin.ID, "admin-new-password-003"); err != nil {
 		t.Fatal(err)
 	}
 	if code, body := f.probeWithSID("/admin/ui/manifest", sess.SID); code != http.StatusUnauthorized {

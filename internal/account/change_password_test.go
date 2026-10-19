@@ -44,11 +44,11 @@ func newCPFixture(t *testing.T) *cpFixture {
 	if err != nil {
 		t.Fatalf("会话库: %v", err)
 	}
-	h, err := NewHTTP(HTTPConfig{Accounts: acc, Sessions: sess, RegisterEnabled: true})
+	h, err := NewHTTP(HTTPConfig{Accounts: acc, Sessions: sess})
 	if err != nil {
 		t.Fatalf("端点: %v", err)
 	}
-	u, err := acc.Create("boss", "boss-password-001", RoleAdmin)
+	u, err := acc.CreateBootstrap("boss", "boss-password-001")
 	if err != nil {
 		t.Fatalf("建号: %v", err)
 	}

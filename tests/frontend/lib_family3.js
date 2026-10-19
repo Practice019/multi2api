@@ -155,13 +155,21 @@ async function startFamily3(opts) {
     apiKey: o.apiKey || ('probe-key-' + o.port),
     auths: FAMILY3_AUTHS,
     config: FAMILY3_CONFIG,
+    // ⚠ 签到历史必须**在进程起来之前**落盘 —— 见 lib_instance 里
+    //   `prepareTmp` 的长注释（`checkinlog.New` 启动时一次性读进内存，
+    //   起来之后再写文件毫无效果，而端点回的是内存）。
+    //   实测踩到：文件里 30 条、端点回 `total=4`（那 4 条是产品自己刚写的），
+    //   看起来像"过滤砍到只剩 4 条"，真因是"灌晚了"。
+    prepareTmp: (tmp) => {
+      seedCheckinLog(tmp, seed.checkinLog, workbuddyUIDsFromAuths());
+    },
   });
 
   // ⚠ 前置数据的顺序无关，但**必须在跑探针之前**：
   //   verify_clearscreen 的前置断言写着"若这里是 0，先跑 seed_traffic"——
   //   那就是"夹具没灌"被当成产品缺陷的形态。这里一次性做掉。
   let traffic = { want: 0, ok: 0, fail: 0 };
-  let checkin = { count: 0, path: '' };
+  let checkin = { count: seed.checkinLog, path: path.join(inst.tmp, 'data', 'checkin-log.json') };
   let accounts = { total: 0, byProvider: {}, uids: [] };
   let verified = null;   // 回读结果（这才是"证明"，见下面 verifySeed 的注释）
   try {
@@ -171,11 +179,6 @@ async function startFamily3(opts) {
     accounts = await readAccounts(inst.base, inst.key);
 
     traffic = await seedTraffic(inst.base, inst.key, seed.traffic);
-    // 从 /admin/accounts 取 workbuddy 的 uid（合成凭证也会被列出来），
-    // 让签到历史里的 uid 与账号池**同源** —— 否则 verify_t3_t4 的
-    // "历史端点只返回本上游账号的记录"会因为 uid 对不上而红，
-    // 而那是夹具自己造出来的红。
-    checkin = seedCheckinLog(inst.tmp, seed.checkinLog, accounts.uids);
 
     // ⚠⚠ 回读一次，把**真值**当判据 —— 这是本层的核心纪律：
     //     "灌了 80 次"（意图）≠"落盘 80 行"（结果）。
@@ -210,6 +213,20 @@ async function startFamily3(opts) {
     fx.seedMismatch = verified.problems;
   }
   return fx;
+}
+
+/** 从 FAMILY3_AUTHS 里解析出 workbuddy 的 uid（启动前就要知道，见 prepareTmp）。 */
+function workbuddyUIDsFromAuths() {
+  const out = [];
+  for (const [rel, body] of Object.entries(FAMILY3_AUTHS)) {
+    if (!/^workbuddy[\\/]/.test(rel)) continue;
+    try {
+      const j = JSON.parse(body);
+      const uid = (j && j.account && j.account.uid) || (j && j.uid) || '';
+      if (uid) out.push(uid);
+    } catch { /* 形态不对就跳过，下面的回读会红 */ }
+  }
+  return out;
 }
 
 /** 读账号池：总数 + 按上游分布 + workbuddy 的 uid 列表（供签到历史同源）。 */
@@ -248,12 +265,20 @@ async function verifySeed(base, key, seed) {
   if (fileCount === null) problems.push('/admin/stats 没给出 file.count（status=' + stats.status + '）');
   else if (fileCount < wantTraffic) problems.push('落盘 file.count=' + fileCount + ' < 意图 ' + wantTraffic);
 
-  // 签到历史：文件是我们直接写的，回读端点确认它真被读出来了
+  // 签到历史：文件是我们**启动前**写的，回读端点确认它真被读出来了。
+  //
+  // ⚠ 判据是 `>= want`，不是 `== want`：产品自己的被动扫描（每 30 分钟一次，
+  //   起实例后立刻跑首轮）会**追加**几条真实记录（2 个账号 × checkin/keepalive）。
+  //   要求严格相等等于要求"产品别写自己的日志"，那是错的。
+  //   判别力没丢：文件被忽略时 total 只剩产品自己那几条（实测 4）
+  //   ⇒ 4 >= 30 不成立 ⇒ 照样红。
   const chk = await instLib.httpJson(base, '/admin/checkin/history?limit=1&offset=0', { token: key });
   const chkTotal = (chk.json && typeof chk.json.total === 'number') ? chk.json.total : null;
   if (wantCheckin > 0) {
     if (chkTotal === null) problems.push('/admin/checkin/history 没给出 number 类型的 total（status=' + chk.status + '）');
-    else if (chkTotal !== wantCheckin) problems.push('签到历史 total=' + chkTotal + ' ≠ 写的 ' + wantCheckin + ' 条（格式或路径不对）');
+    else if (chkTotal < wantCheckin) problems.push('签到历史 total=' + chkTotal + ' < 写的 ' + wantCheckin +
+      ' 条 —— 文件很可能**没在进程启动前**放好（见 lib_instance.prepareTmp；' +
+      'checkinlog.New 是启动时一次性读进内存的）');
   }
 
   return {

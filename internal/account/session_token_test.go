@@ -37,9 +37,8 @@ func tokenFixture(t *testing.T, adminToken string) *HTTP {
 	// 用可变变量模拟"运行时轮换"：回调每次读当前值（与 admin.Handler 同一形状）。
 	live := adminToken
 	h, err := NewHTTP(HTTPConfig{
-		Accounts:        acc,
-		Sessions:        sess,
-		RegisterEnabled: true,
+		Accounts: acc,
+		Sessions: sess,
 		AdminTokenOK: func(cred string) bool {
 			if live == "" {
 				return false
@@ -144,7 +143,7 @@ func TestSessionRejectsBadOrAbsentToken(t *testing.T) {
 	dir := t.TempDir()
 	acc, _ := New(filepath.Join(dir, "accounts.json"))
 	sess, _ := NewSessionStore(filepath.Join(dir, "sessions.json"))
-	h2, err := NewHTTP(HTTPConfig{Accounts: acc, Sessions: sess, RegisterEnabled: true})
+	h2, err := NewHTTP(HTTPConfig{Accounts: acc, Sessions: sess})
 	if err != nil {
 		t.Fatalf("端点: %v", err)
 	}
@@ -161,7 +160,7 @@ func TestSessionTokenFollowsRotation(t *testing.T) {
 	sess, _ := NewSessionStore(filepath.Join(dir, "sessions.json"))
 	var live = "old-token"
 	h, err := NewHTTP(HTTPConfig{
-		Accounts: acc, Sessions: sess, RegisterEnabled: true,
+		Accounts: acc, Sessions: sess,
 		AdminTokenOK: func(cred string) bool { return cred != "" && cred == live },
 	})
 	if err != nil {
@@ -220,7 +219,7 @@ func TestSessionReportsKindSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("会话库: %v", err)
 	}
-	h, err := NewHTTP(HTTPConfig{Accounts: acc, Sessions: sess, RegisterEnabled: true})
+	h, err := NewHTTP(HTTPConfig{Accounts: acc, Sessions: sess})
 	if err != nil {
 		t.Fatalf("端点: %v", err)
 	}

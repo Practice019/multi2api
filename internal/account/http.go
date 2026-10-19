@@ -3,6 +3,7 @@ package account
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -80,14 +81,15 @@ const (
 type HTTPConfig struct {
 	Accounts *Store
 	Sessions *SessionStore
-	// RegisterEnabled 是否开放注册（对应 new-api 的 common.RegisterEnabled）。
+	// ⚠ 2026-10-19 用户新口径：`RegisterEnabled` 字段**已删除**。
 	//
-	// ⚠ 关掉它**不会**关掉"首启建管理员"：库里一个账号都没有时，
-	// 注册接口仍会建出管理员。否则"部署时忘了先建号 + 关闭注册"会让控制台
-	// 永久进不去（用户只能删 data/accounts.json 重来）。两种语义分开：
-	// 关闭的是"继续注册新成员"，不是"让自己进不去"。
-	RegisterEnabled bool
-	// CookieSecure 取 CookieSecure* 之一，空值按 auto。
+	// 它曾经表示"是否开放注册"（库非空时还允许继续注册出成员）。单账号
+	// 口径下这个概念不存在了：建号**只有**"库为空时建第一个管理员"这一次，
+	// 库非空之后注册接口整体关闭（见 register）。留一个开关字段会让读者
+	// 以为"打开它能再注册"，而那正是本次要删掉的东西。
+	//
+	// 配置里的 `console.disables_register` 因此不再影响本端点行为
+	// （cmd/server 启动日志会如实说明这一点，不做静默忽略）。
 	CookieSecure string
 	// Limiter 可空（空 = 不限速）。
 	Limiter Limiter
@@ -336,15 +338,23 @@ func itoa(n int) string {
 // 注册
 // ---------------------------------------------------------------------------
 
-// register 建号。
+// register 建号：**只有首启那一次**。
 //
-// # 首启建管理员（bootstrap）与普通注册是**两个**语义
+// # 2026-10-19 用户新口径：注册只在"首次"
 //
-//	库里一个账号都没有 → 建管理员（CreateBootstrap，原子，只成功一次）
-//	已有账号            → 只建 RoleMember（哪怕调用方在请求体里写了 role）
+// 用户原话：「我们那个用户和管理员，我觉得可以只要一个管理员就行了，
+// 只要一个账号。用户其实可以不用。」
 //
-// 判定顺序必须是"先看库空不空"，而不是"先看开放注册开关"：否则部署时
-// 关了注册 + 没建号 = 永远进不去（详见 HTTPConfig.RegisterEnabled 的注释）。
+//	库里一个账号都没有  → 建出**唯一**的管理员（CreateBootstrap，原子，只得手一次）
+//	库非空              → 接口**整体关闭**（403 register_closed），没有第二种结果
+//
+// 判定顺序仍然是"**先看库空不空**"而不是"先看某个开关"：否则部署时
+// 关了注册 + 没建号 = 永远进不去（用户只能删 data/accounts.json 重来）。
+//
+// 竞态：Count()==0 与 CreateBootstrap 之间可能有人抢先（两个请求同时到）。
+// CreateBootstrap 自己在锁里做"检查空 + 建号"，第二个到达者得到
+// ErrBootstrapDone ⇒ **落到关闭分支**（回 403），不会被当成成功。
+// 这正是"只有一个账号"在并发下也成立的原因。
 func (h *HTTP) register(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, http.MethodPost)
@@ -359,19 +369,19 @@ func (h *HTTP) register(w http.ResponseWriter, r *http.Request) {
 	}
 	// 人机校验（T10）。⚠ 放在"首启建管理员"**之前**：
 	//
-	//	· 批量注册的闸门正是这个端点，拦晚一步就等于没拦
-	//	· 更关键的是：首启那条路（库里没有账号）会把调用方**变成管理员**。
-	//	  把它放在题后面，是"加一道题"这件事唯一真正要紧的地方。
+	//	· 这条路是**唯一**能把调用方变成管理员的入口，把它放在题后面，
+	//	  是"加一道题"这件事唯一真正要紧的地方
+	//	· 反批量五层属于**保留不动**的管理员面（见计划 §目标态 5）
 	//
-	// 代价：部署后第一次打开控制台的人要答一道算术题才能建管理员。那道题
-	// 就在他眼前（本地 SVG），而他本来就要想一个口令 —— 可以接受。
+	// 代价：部署后第一次打开控制台的人要答一道算术题。那道题就在他眼前
+	// （本地 SVG），而他本来就要想一个口令 —— 可以接受。
 	// 确实不想要的话：配置里 `console.disable_captcha: true`。
 	if !h.checkCaptcha(w, r, body.CaptchaID, body.CaptchaAnswer) {
 		return
 	}
 	username := strings.TrimSpace(body.Username)
 
-	// ① 首启：建管理员（只可能成功一次）
+	// ① 首启：建这**唯一**一个管理员（只可能成功一次）
 	if h.cfg.Accounts.Count() == 0 {
 		u, err := h.cfg.Accounts.CreateBootstrap(username, body.Password)
 		if err == nil {
@@ -379,7 +389,7 @@ func (h *HTTP) register(w http.ResponseWriter, r *http.Request) {
 				"ok":        true,
 				"bootstrap": true,
 				"user":      u.view(),
-				"message":   "已创建管理员账号 " + u.Username + "，请用它与口令登录",
+				"message":   "已创建管理员账号 " + u.Username + "，请用它与口令登录（本部署只此一个账号）",
 			})
 			return
 		}
@@ -387,20 +397,30 @@ func (h *HTTP) register(w http.ResponseWriter, r *http.Request) {
 			writeAccountError(w, err)
 			return
 		}
-		// 竞态：刚好被别人抢先建了 ⇒ 落到下面的普通注册路径
+		// 竞态：刚好被别人抢先建了 ⇒ 落到下面"关闭"那条路
 	}
 
-	// ② 普通注册：只在开放注册时
-	if !h.cfg.RegisterEnabled {
-		writeError(w, http.StatusForbidden, "register_disabled", "本机已关闭注册，请联系管理员建号")
-		return
-	}
-	u, err := h.cfg.Accounts.Create(username, body.Password, RoleMember)
-	if err != nil {
-		writeAccountError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": u.view()})
+	// ② 库非空 ⇒ 注册关闭。**没有第三个分支** —— 尤其没有"建成员"。
+	//    状态码与 code 都是稳定判据：403 + register_closed。
+	writeRegisterClosed(w)
+}
+
+// registerClosedCode 注册接口关闭时的稳定错误码。
+//
+// ⚠ 刻意**不沿用**旧的 `register_disabled`：那个 code 的语义是"管理员在配置里
+// 关掉了公开注册"，而那时库非空仍可能继续建成员 —— 与现在的"规矩本身：
+// 单账号部署不存在继续注册"不是同一件事。沿用旧 code 会让前端、探针与
+// 后续排查把两种语义混成一条。
+const registerClosedCode = "register_closed"
+
+// writeRegisterClosed 注册接口的关闭回执（403 + 明确文案）。
+//
+// 文案要能让"全新部署的人"与"想再注册一个的人"都看懂：前者需要知道
+// 什么时候这条路是开的（库为空时），后者需要知道该用什么进控制台。
+func writeRegisterClosed(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, registerClosedCode,
+		"本部署为单账号管理员模式：注册只在账号库为空时开放（用于建第一个管理员），"+
+			"账号已存在则注册入口关闭。请用管理员账号登录。")
 }
 
 // writeAccountError 把 account 包的哨兵错误映射成状态码 + 稳定 code。
@@ -464,6 +484,22 @@ func (h *HTTP) login(w http.ResponseWriter, r *http.Request) {
 			// 同一个 code、同一句话：不区分"用户不存在"与"口令错"，
 			// 否则登录接口本身就变成用户名枚举器。
 			writeError(w, http.StatusUnauthorized, "bad_credentials", "用户名或口令不正确")
+		case errors.Is(err, ErrMemberRetired):
+			// ★ 2026-10-19 单账号口径（要求 3）：盘上的成员历史记录。
+			//
+			// 不是"口令错"（口令是对的，我们在 Authenticate 里验过才会走到这），
+			// 所以给一句能照做的文案，并**留一条日志** —— 运维要能发现
+			// "这条旧记录还有人在用"，否则只会收到一句"我登不上了"。
+			//
+			// ⚠ 401 而不是 403：前端对 401 的统一处置是"留在/回到登录页"
+			// 并显示服务端文案 —— 这正是我们要的（他没有可用的账号）。
+			// 403 会被某些前端当成"已登录但无权"，反而不提示重新登录。
+			//
+			// 日志只打用户名与来源 IP（用户名不是口令）；%q 引号包裹，
+			// 免得手写文件里的怪字符串把日志排版搅乱。
+			log.Printf("account: 拒绝非管理员历史记录登录 username=%q ip=%s —— "+
+				"成员账号已取消，请用管理员账号", strings.TrimSpace(body.Username), clientIP(r))
+			writeError(w, http.StatusUnauthorized, "member_retired", "成员账号已取消，请用管理员账号登录")
 		case errors.Is(err, ErrDisabled):
 			writeError(w, http.StatusForbidden, "disabled", "账号已被禁用，请联系管理员")
 		default:

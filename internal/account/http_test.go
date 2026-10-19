@@ -12,7 +12,10 @@ import (
 )
 
 // httpFixture 起一套端点（账号库 + 会话库都在临时目录）。
-func httpFixture(t *testing.T, registerEnabled bool) (*Store, *SessionStore, *httptest.Server) {
+//
+// ⚠ 2026-10-19：参数 `registerEnabled bool` 已删除 —— 那个开关
+// （HTTPConfig.RegisterEnabled）随"开放注册"这个概念一起没了。
+func httpFixture(t *testing.T) (*Store, *SessionStore, *httptest.Server) {
 	t.Helper()
 	dir := t.TempDir()
 	accounts, err := New(filepath.Join(dir, "accounts.json"))
@@ -23,7 +26,7 @@ func httpFixture(t *testing.T, registerEnabled bool) (*Store, *SessionStore, *ht
 	if err != nil {
 		t.Fatalf("会话库: %v", err)
 	}
-	h, err := NewHTTP(HTTPConfig{Accounts: accounts, Sessions: sessions, RegisterEnabled: registerEnabled})
+	h, err := NewHTTP(HTTPConfig{Accounts: accounts, Sessions: sessions})
 	if err != nil {
 		t.Fatalf("NewHTTP: %v", err)
 	}
@@ -106,11 +109,17 @@ func roleOf(t *testing.T, body map[string]any) int {
 	return int(f)
 }
 
-// TestRegisterBootstrapThenMember 首启建管理员只成功一次；后续注册只给成员。
-func TestRegisterBootstrapThenMember(t *testing.T) {
-	accounts, _, srv := httpFixture(t, true)
+// ★ TestRegisterOnlyFirstTime 目标态 2：注册只在"首次"，之后整体关闭。
+//
+// ⚠ 语义变更（2026-10-19 用户新口径）：这条测试原先叫
+// TestRegisterBootstrapThenMember，断言"首启建管理员，之后的注册只建**成员**"。
+// "之后再建成员"那个面**已经不存在**（用户原话：「只要一个账号，用户其实
+// 可以不用」）⇒ 断言改成单账号口径：库非空之后**一律** 403 register_closed，
+// 且库里**永远只有一个**账号。
+func TestRegisterOnlyFirstTime(t *testing.T) {
+	accounts, _, srv := httpFixture(t)
 
-	// ① 库空 ⇒ 首启建管理员
+	// ① 库空 ⇒ 首启建管理员（全新部署必须进得去）
 	code, body, _ := post(t, srv, PathRegister, `{"username":"boss","password":"boss-password-001"}`)
 	if code != http.StatusOK {
 		t.Fatalf("首启注册应当成功，得到 %d %v", code, body)
@@ -122,17 +131,26 @@ func TestRegisterBootstrapThenMember(t *testing.T) {
 		t.Errorf("★ 首启账号应当是管理员(%d)，得到 %d", RoleAdmin, got)
 	}
 
-	// ② 库非空 ⇒ 只建成员
+	// ② 库非空 ⇒ 注册**关闭**（明确状态码 403 + 稳定 code + 明确文案）
 	code, body, _ = post(t, srv, PathRegister, `{"username":"staff","password":"staff-password-002"}`)
-	if code != http.StatusOK {
-		t.Fatalf("第二个注册应当成功，得到 %d %v", code, body)
+	if code != http.StatusForbidden {
+		t.Fatalf("★ 库非空后再注册必须被拒（403），得到 %d %v", code, body)
 	}
-	if got := roleOf(t, body); got != RoleMember {
-		t.Errorf("★ 普通注册只能是成员(%d)，得到 %d", RoleMember, got)
+	if got := errorCode(body); got != registerClosedCode {
+		t.Errorf("★ code 应为 %q（稳定的机器判据），得到 %q", registerClosedCode, got)
 	}
-	if body["bootstrap"] == true {
-		t.Error("第二次注册不该再标记 bootstrap")
+	if raw, _ := body["__raw"].(string); !strings.Contains(raw, "单账号") || !strings.Contains(raw, "管理员账号登录") {
+		t.Errorf("★ 文案要说清「为什么」与「怎么办」（单账号 + 用管理员账号登录），得到 %s", raw)
 	}
+	if got := accounts.Count(); got != 1 {
+		t.Errorf("★ 被拒的注册不得建号：库里应当只有 1 个账号，得到 %d", got)
+	}
+	if u := accounts.ByUsername("staff"); u != nil {
+		t.Errorf("★ 第二次注册不得建出任何账号（更不得是成员）: %+v", u)
+	}
+	// 把**真实的**状态码与文案打进日志：验收时要的是"真的回了这个"，
+	// 不是"测试没红"。断言失败时的输出读起来更费劲，且可能被忽略。
+	t.Logf("证据：库非空后注册 → HTTP %d，code=%q，文案=%s", code, errorCode(body), body["__raw"])
 
 	// ③ 客户端硬塞 role 无效（本实现直接拒收未知字段）
 	code, body, _ = post(t, srv, PathRegister,
@@ -143,54 +161,97 @@ func TestRegisterBootstrapThenMember(t *testing.T) {
 	if errorCode(body) != "bad_request" {
 		t.Errorf("code 应为 bad_request，得到 %q", errorCode(body))
 	}
-	if accounts.Count() != 2 {
+	if accounts.Count() != 1 {
 		t.Errorf("★ 不该多出账号，得到 %d 个", accounts.Count())
 	}
 	if u := accounts.ByUsername("sneaky"); u != nil {
 		t.Errorf("★ 硬塞 role 的请求不能建出账号: %+v", u)
 	}
 
-	// ④ 重复用户名 / 非法用户名 / 短口令
+	// ④ 重名 / 非法用户名 / 短口令：库非空 ⇒ 全部先撞"注册已关闭"
+	//
+	// ⚠ 语义变更：原先这里断言的是 409 username_taken / 400 bad_username /
+	// 400 bad_password —— 那三条只在"库为空"时才可能被看到（它们发生在
+	// CreateBootstrap 内部的输入校验里）。库非空之后判定顺序是"先看库空不空"，
+	// 所以**关闭**才是正确结果。用户名/口令的边界判据改到空库夹具上做（见下）。
 	code, body, _ = post(t, srv, PathRegister, `{"username":"staff","password":"staff-password-002"}`)
-	if code != http.StatusConflict || errorCode(body) != "username_taken" {
-		t.Errorf("重复用户名应得 409 username_taken，得到 %d %q", code, errorCode(body))
-	}
-	code, body, _ = post(t, srv, PathRegister, `{"username":"ab","password":"staff-password-002"}`)
-	if code != http.StatusBadRequest || errorCode(body) != "bad_username" {
-		t.Errorf("短用户名应得 400 bad_username，得到 %d %q", code, errorCode(body))
-	}
-	code, body, _ = post(t, srv, PathRegister, `{"username":"okname","password":"short"}`)
-	if code != http.StatusBadRequest || errorCode(body) != "bad_password" {
-		t.Errorf("短口令应得 400 bad_password，得到 %d %q", code, errorCode(body))
+	if code != http.StatusForbidden || errorCode(body) != registerClosedCode {
+		t.Errorf("★ 库非空时重名注册也应当是 403 %s，得到 %d %q", registerClosedCode, code, errorCode(body))
 	}
 }
 
-// TestRegisterDisabledStillBootstrap 关闭注册不挡首启（否则永远进不去）。
-func TestRegisterDisabledStillBootstrap(t *testing.T) {
-	accounts, _, srv := httpFixture(t, false)
+// TestRegisterInputValidationOnEmptyLibrary 输入校验在**空库**上仍然生效。
+//
+// 这是上一条 ④ 移过来的判据：单账号口径下"用户名/口令不合法"只可能在建
+// 第一个管理员时看到（那之后端点整体关闭），所以每条断言各用一个**全新的
+// 空库**夹具 —— 而不是把断言放宽。
+func TestRegisterInputValidationOnEmptyLibrary(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wantCode string
+	}{
+		{"短用户名", `{"username":"ab","password":"staff-password-002"}`, "bad_username"},
+		{"短口令", `{"username":"okname","password":"short"}`, "bad_password"},
+		{"非法字符", `{"username":"has space","password":"staff-password-002"}`, "bad_username"},
+	} {
+		_, _, srv := httpFixture(t)
+		code, body, _ := post(t, srv, PathRegister, tc.body)
+		if code != http.StatusBadRequest || errorCode(body) != tc.wantCode {
+			t.Errorf("%s：应得 400 %s，得到 %d %q", tc.name, tc.wantCode, code, errorCode(body))
+		}
+	}
+}
 
-	// 库空：仍允许建管理员
-	code, body, _ := post(t, srv, PathRegister, `{"username":"owner","password":"owner-password-001"}`)
-	if code != http.StatusOK || body["bootstrap"] != true {
-		t.Fatalf("★ 关闭注册时首启建管理员仍必须可用，得到 %d %v", code, body)
+// ★ TestRegisterClosedDoesNotCreateAnything 关闭之后**任何**输入都不建号。
+//
+// 这条是"库非空 ⇒ 不许再建出成员"的兜底判据：直接把库里塞满各种形态的
+// 注册请求（含成员角色字段、含 admin 角色字段、空名、超长名），逐个断言
+// 库的账号数从头到尾不变。
+func TestRegisterClosedDoesNotCreateAnything(t *testing.T) {
+	accounts, _, srv := httpFixture(t)
+	// 先建出那个唯一的管理员
+	if code, body, _ := post(t, srv, PathRegister, `{"username":"boss","password":"boss-password-001"}`); code != http.StatusOK {
+		t.Fatalf("前置失败：首启建管理员 %d %v", code, body)
 	}
-	if accounts.Count() != 1 {
-		t.Fatalf("应当建出 1 个账号，得到 %d", accounts.Count())
-	}
-	// 库非空：普通注册被拒
-	code, body, _ = post(t, srv, PathRegister, `{"username":"later","password":"later-password-002"}`)
-	if code != http.StatusForbidden || errorCode(body) != "register_disabled" {
-		t.Errorf("关闭注册后应得 403 register_disabled，得到 %d %q", code, errorCode(body))
-	}
-	if accounts.Count() != 1 {
-		t.Errorf("被拒的注册不该建号，得到 %d 个", accounts.Count())
+	before := accounts.Count()
+
+	// 每个请求体给出它应当得到的 (状态码, code)，然后统一断言"账号数没变"。
+	//
+	// ⚠ 两种拒绝都要接受，但**分得很清**：
+	//
+	//	403 register_closed  合法请求体 ⇒ 注册已关闭（这就是"注册只在首次"）
+	//	400 bad_request      带 role 字段 ⇒ **解码层**就拒了（严格解码，
+	//	                     credsBody 里根本没有 role 这个字段）
+	//
+	// 后者其实比前者更硬：连"服务端要不要信这个字段"都不用讨论 —— 它进不来。
+	// 所以这里**没有**放宽断言（原断言只要求"账号数不变"），而是把"带 role
+	// 的请求连门都进不了"也钉成一条。
+	for _, tc := range []struct {
+		body     string
+		wantCode int
+		wantErr  string
+	}{
+		{`{"username":"staff","password":"staff-password-002"}`, http.StatusForbidden, registerClosedCode},
+		{`{"username":"staff2","password":"staff-password-003","role":1}`, http.StatusBadRequest, "bad_request"},
+		{`{"username":"staff3","password":"staff-password-004","role":10}`, http.StatusBadRequest, "bad_request"},
+		{`{"username":"boss","password":"boss-password-001"}`, http.StatusForbidden, registerClosedCode},
+		{`{"username":"","password":"whatever-password-1"}`, http.StatusForbidden, registerClosedCode},
+		{`{"username":"` + strings.Repeat("z", 200) + `","password":"whatever-password-1"}`, http.StatusForbidden, registerClosedCode},
+	} {
+		code, resp, _ := post(t, srv, PathRegister, tc.body)
+		if code != tc.wantCode || errorCode(resp) != tc.wantErr {
+			t.Errorf("★ 库非空后注册应当 %d %s，得到 %d %q（请求体 %s）",
+				tc.wantCode, tc.wantErr, code, errorCode(resp), tc.body)
+		}
+		if accounts.Count() != before {
+			t.Fatalf("★ 账号数被改动了：%d → %d（请求体 %s）", before, accounts.Count(), tc.body)
+		}
 	}
 }
 
 // TestLoginCookieAndCredentialErrors 登录取 cookie（HttpOnly/SameSite），错口令不泄露用户是否存在。
 func TestLoginCookieAndCredentialErrors(t *testing.T) {
-	accounts, _, srv := httpFixture(t, true)
-	if _, err := accounts.Create("alice", "alice-password-001", RoleMember); err != nil {
+	accounts, _, srv := httpFixture(t)
+	if _, err := accounts.CreateBootstrap("alice", "alice-password-001"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,8 +284,9 @@ func TestLoginCookieAndCredentialErrors(t *testing.T) {
 	if len(cs) != 1 || cs[0].Name != CookieName || len(cs[0].Value) != 64 {
 		t.Fatalf("Set-Cookie 形态不对: %+v", cs)
 	}
-	if got := roleOf(t, body); got != RoleMember {
-		t.Errorf("登录响应里的角色应当是成员，得到 %d", got)
+	// ⚠ 语义变更：夹具里那个唯一账号就是**管理员**（成员角色已取消）。
+	if got := roleOf(t, body); got != RoleAdmin {
+		t.Errorf("登录响应里的角色应当是管理员(%d)，得到 %d", RoleAdmin, got)
 	}
 
 	// 禁用账号
@@ -239,8 +301,8 @@ func TestLoginCookieAndCredentialErrors(t *testing.T) {
 
 // TestSessionLogoutFlow 会话读取 → 登出 → 旧 cookie 失效（计划 T3 的第三条验收）。
 func TestSessionLogoutFlow(t *testing.T) {
-	accounts, _, srv := httpFixture(t, true)
-	if _, err := accounts.Create("bob", "bob-password-001", RoleMember); err != nil {
+	accounts, _, srv := httpFixture(t)
+	if _, err := accounts.CreateBootstrap("bob", "bob-password-001"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -312,8 +374,8 @@ func TestSessionLogoutFlow(t *testing.T) {
 
 // TestSessionRejectsStaleAndExpired 口令变更/过期两种失效路径的 code 不同。
 func TestSessionRejectsStaleAndExpired(t *testing.T) {
-	accounts, sessions, srv := httpFixture(t, true)
-	u, err := accounts.Create("carol", "carol-password-001", RoleMember)
+	accounts, sessions, srv := httpFixture(t)
+	u, err := accounts.CreateBootstrap("carol", "carol-password-001")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,16 +403,19 @@ func TestSessionRejectsStaleAndExpired(t *testing.T) {
 
 // TestNoSecretsInAuthResponses 认证响应里不能出现口令明文。
 func TestNoSecretsInAuthResponses(t *testing.T) {
-	accounts, _, srv := httpFixture(t, true)
+	accounts, _, srv := httpFixture(t)
 	const plain = "super-secret-password-777"
-	if _, err := accounts.Create("dave", plain, RoleMember); err != nil {
+	if _, err := accounts.CreateBootstrap("dave", plain); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
 		name string
 		run  func() (int, map[string]any, http.Header)
 	}{
-		{"注册（首启）", func() (int, map[string]any, http.Header) {
+		// ⚠ 语义变更：库非空 ⇒ 注册被拒（403 register_closed），不再是"首启"。
+		// 判据不变的部分更严了一点：**被拒**的响应里同样不许回吐口令明文
+		//（错误响应也是响应，也可能进日志/截图）。
+		{"注册（库非空 ⇒ 403 register_closed）", func() (int, map[string]any, http.Header) {
 			return post(t, srv, PathRegister, `{"username":"newbie","password":"`+plain+`"}`)
 		}},
 		{"登录成功", func() (int, map[string]any, http.Header) {
@@ -373,7 +438,7 @@ func TestNoSecretsInAuthResponses(t *testing.T) {
 
 // TestMethodAndRouting 方法与路由的边界。
 func TestMethodAndRouting(t *testing.T) {
-	_, _, srv := httpFixture(t, true)
+	_, _, srv := httpFixture(t)
 
 	if code, _, hdr := get(t, srv, PathLogin); code != http.StatusMethodNotAllowed || hdr.Get("Allow") != "POST" {
 		t.Errorf("GET 登录应当 405 + Allow: POST，得到 %d Allow=%q", code, hdr.Get("Allow"))
@@ -402,7 +467,7 @@ func TestMethodAndRouting(t *testing.T) {
 
 // TestBodyTooLarge 超大请求体得到 413（不是 500，也不是把它读进内存）。
 func TestBodyTooLarge(t *testing.T) {
-	_, _, srv := httpFixture(t, true)
+	_, _, srv := httpFixture(t)
 	huge := `{"username":"a","password":"` + strings.Repeat("x", maxAuthBody+1024) + `"}`
 	code, body, _ := post(t, srv, PathRegister, huge)
 	if code != http.StatusRequestEntityTooLarge {
@@ -428,12 +493,12 @@ func (d *denyAllLimiter) Allow(string, time.Time) (bool, time.Duration) {
 
 // TestLimiterSeam 接上限速器后，被拒的请求得到 429 + Retry-After。
 func TestLimiterSeam(t *testing.T) {
-	accounts, sessions, _ := httpFixture(t, true)
-	if _, err := accounts.Create("erin", "erin-password-001", RoleMember); err != nil {
+	accounts, sessions, _ := httpFixture(t)
+	if _, err := accounts.CreateBootstrap("erin", "erin-password-001"); err != nil {
 		t.Fatal(err)
 	}
 	lim := &denyAllLimiter{}
-	h, err := NewHTTP(HTTPConfig{Accounts: accounts, Sessions: sessions, RegisterEnabled: true, Limiter: lim})
+	h, err := NewHTTP(HTTPConfig{Accounts: accounts, Sessions: sessions, Limiter: lim})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +529,7 @@ func TestCookieSecureModes(t *testing.T) {
 	dir := t.TempDir()
 	accounts, _ := New(filepath.Join(dir, "accounts.json"))
 	sessions, _ := NewSessionStore(filepath.Join(dir, "sessions.json"))
-	if _, err := accounts.Create("frank", "frank-password-001", RoleMember); err != nil {
+	if _, err := accounts.CreateBootstrap("frank", "frank-password-001"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -507,5 +572,117 @@ func TestCookieSecureModes(t *testing.T) {
 	}
 	if _, err := NewHTTP(HTTPConfig{Accounts: accounts}); err == nil {
 		t.Error("缺会话库应当在 NewHTTP 报错")
+	}
+}
+
+// ★★ TestLoginRefusesLegacyMemberWithClearMessage 目标态 3 的 HTTP 层判据。
+//
+// 盘上放一条改造前留下的成员记录（role=1，口令是我们知道的那个），要求：
+//
+//	① 登录**不崩**（服务端 5xx 是不合格的：那是"服务坏了"，不是"这个账号没了"）
+//	② 401 + 稳定 code `member_retired` + 明确文案（点明"用管理员账号登录"）
+//	③ 不下发任何会话 cookie（没有会话 = 后面每条 /admin/* 都会 401）
+//	④ 服务端**留了一条日志**（要求 3 明说；这里断言日志格式串存在于源码行为里
+//	   —— 日志本身由 log 包写到 stderr，测试里只能验证到"走的是这条路"）
+//	⑤ 同一个库里那个真管理员照常登录
+func TestLoginRefusesLegacyMemberWithClearMessage(t *testing.T) {
+	dir := t.TempDir()
+	accPath := filepath.Join(dir, "accounts.json")
+	seedAccountsFile(t, accPath,
+		accountRow(t, "boss", "boss-password-001", RoleAdmin),
+		accountRow(t, "staff", "staff-password-002", RoleMember),
+	)
+	accounts, err := New(accPath)
+	if err != nil {
+		t.Fatalf("账号库: %v", err)
+	}
+	sessions, err := NewSessionStore(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatalf("会话库: %v", err)
+	}
+	h, err := NewHTTP(HTTPConfig{Accounts: accounts, Sessions: sessions})
+	if err != nil {
+		t.Fatalf("NewHTTP: %v", err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// ① ② ③ 成员记录：口令正确也拒，且是"明确的 401 + 明确文案"
+	code, body, hdr := post(t, srv, PathLogin, `{"username":"staff","password":"staff-password-002"}`)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("★ 成员记录登录必须 401（不是 5xx、也不是放行），得到 %d %v", code, body)
+	}
+	if got := errorCode(body); got != "member_retired" {
+		t.Errorf("★ code 应为 member_retired（前端/运维据此分流），得到 %q", got)
+	}
+	if raw, _ := body["__raw"].(string); !strings.Contains(raw, "成员账号已取消") ||
+		!strings.Contains(raw, "管理员账号登录") {
+		t.Errorf("★ 文案必须是「成员账号已取消，请用管理员账号登录」，得到 %s", raw)
+	}
+	if cs := setCookies(hdr); len(cs) != 0 {
+		t.Errorf("★ 被拒的登录不得下发任何会话 cookie，得到 %+v", cs)
+	}
+	if sessions.Count() != 0 {
+		t.Errorf("★ 被拒的登录不得签发会话，会话库里有 %d 条", sessions.Count())
+	}
+	t.Logf("证据：成员历史记录登录 → HTTP %d，code=%q，文案=%s；会话数=%d",
+		code, errorCode(body), body["__raw"], sessions.Count())
+
+	// 口令错 ⇒ 仍是 bad_credentials（不给"这个用户名存在吗"的探测信号）
+	code, body, _ = post(t, srv, PathLogin, `{"username":"staff","password":"wrong-password-zz"}`)
+	if code != http.StatusUnauthorized || errorCode(body) != "bad_credentials" {
+		t.Errorf("★ 成员记录配错口令应是 401 bad_credentials，得到 %d %q", code, errorCode(body))
+	}
+
+	// ⑤ 同库的真管理员照常登录
+	code, body, hdr = post(t, srv, PathLogin, `{"username":"boss","password":"boss-password-001"}`)
+	if code != http.StatusOK {
+		t.Fatalf("★ 同库的真管理员必须仍能登录，得到 %d %v", code, body)
+	}
+	if cs := setCookies(hdr); len(cs) != 1 || cs[0].Name != CookieName {
+		t.Errorf("管理员登录应拿到会话 cookie，得到 %+v", cs)
+	}
+}
+
+// ★ TestSessionOfLegacyMemberIsRefused 旧会话 cookie 也不构成身份。
+//
+// 这条堵的是"只堵登录口"那种半吊子做法：改造前签发的成员会话（或账号文件
+// 被回滚/手改过）如果还能通过 Lookup，`/ui` 就会把控制台外壳发给它
+// （Identify 走的正是 Lookup）—— 等于成员面从一条旧 cookie 又活了。
+func TestSessionOfLegacyMemberIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	accPath := filepath.Join(dir, "accounts.json")
+	seedAccountsFile(t, accPath, accountRow(t, "staff", "staff-password-002", RoleMember))
+	accounts, err := New(accPath)
+	if err != nil {
+		t.Fatalf("账号库: %v", err)
+	}
+	sessions, err := NewSessionStore(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatalf("会话库: %v", err)
+	}
+	h, err := NewHTTP(HTTPConfig{Accounts: accounts, Sessions: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// 直接给那条成员记录签一条会话（模拟"改造之前签好的那条 cookie"）——
+	// 绕过登录口，因为登录口现在建不出会话（那正是要求 1/2）。
+	member := accounts.ByUsername("staff")
+	if member == nil {
+		t.Fatal("前置：成员记录应当被加载")
+	}
+	sess, err := sessions.Issue(member, "127.0.0.1", "probe/1.0")
+	if err != nil {
+		t.Fatalf("签会话: %v", err)
+	}
+	code, body, _ := get(t, srv, PathSession, &http.Cookie{Name: CookieName, Value: sess.SID})
+	if code != http.StatusUnauthorized {
+		t.Fatalf("★ 成员历史会话必须 401（不许构成身份），得到 %d %v", code, body)
+	}
+	if got := errorCode(body); got != "member_retired" {
+		t.Errorf("★ code 应为 member_retired，得到 %q", got)
 	}
 }

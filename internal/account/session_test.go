@@ -19,7 +19,7 @@ func newSessionFixture(t *testing.T) (*Store, *SessionStore, *User) {
 	if err != nil {
 		t.Fatalf("会话库: %v", err)
 	}
-	u, err := accounts.Create("tester", "tester-password-001", RoleMember)
+	u, err := accounts.CreateBootstrap("tester", "tester-password-001")
 	if err != nil {
 		t.Fatalf("建号: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestSessionsSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := accounts.Create("keeper", "keeper-password-003", RoleAdmin)
+	u, err := accounts.CreateBootstrap("keeper", "keeper-password-003")
 	if err != nil {
 		t.Fatal(err)
 	}

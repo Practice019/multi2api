@@ -115,9 +115,15 @@ type Config struct {
 	Accounts *account.Store
 	Sessions *account.SessionStore
 
-	// RegisterOpen 登录页是否显示注册入口（装配层按 config 的
-	// console.disables_register 提供）。nil = 不显示（fail-closed）。
-	RegisterOpen func() bool
+	// ⚠ 2026-10-19 用户新口径：原先的 `RegisterOpen func() bool` 字段**已删除**。
+	//
+	// 它由装配层按 config 的 `console.disables_register` 提供，决定登录页要不要
+	// 显示注册入口。单账号口径下"能不能建号"只有一个答案（账号库空不空），
+	// 而那个答案 `webui.go` 的 loginBootstrap() 已经查得到 —— 两个来源必然
+	// 有一天互相矛盾（配置说开、库里已有账号 ⇒ 页面给出一个点了 403 的入口）。
+	//
+	// 配置里的 `console.disables_register` 仍然被解析（不动既有配置文件），
+	// 但不再影响门禁与登录页；cmd/server 启动日志会如实说明（不静默忽略）。
 
 	// CookieSecure 会话/令牌 cookie 的 Secure 策略（account.CookieSecureAuto
 	// / Always / Never）。空串按 Auto。
@@ -532,8 +538,14 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 // 是管理面数据，不是"客户端该看到的自己那份配额"。
 //
 // 判据复用 account.Identify（与 /ui 和 /admin/* 同一份实现）：令牌 → 会话，
-// 会话必走 SessionStore.Lookup 的四道校验。角色判据是"必须管理员" —— 账号池
-// 相关读数属于管理员；成员自己的用量走 /admin/stats（在 admin 的 memberPaths 里）。
+// 会话必走 SessionStore.Lookup 的四道校验。角色判据是"必须管理员" ——
+// 账号池相关读数属于管理面数据。
+//
+// ⚠ 2026-10-19 单账号口径：控制台只有一个账号（就是管理员），"成员"角色
+// 已取消 ⇒ 这条 `p.IsAdmin()` 判据**不可达**（非管理员身份在 account 那层
+// 就被回 ErrMemberRetired，Identify 拿不到身份 ⇒ 上面 401 先返回）。
+// 保留它：它是 fail-closed 的那一半，且与 admin.canAccess 同一条口径
+// （那边也一样保留判据、删掉成员白名单）。
 //
 // 未认证回 401 + `code: auth_required`（与 admin 门禁同一个错误码契约，
 // 前端据此跳登录页而不是显示"没权限"）。
@@ -548,8 +560,10 @@ func (h *Handler) consoleAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if !p.IsAdmin() {
+			// 文案不再提"成员请用 /admin/stats 看自己的用量"：那条路随成员
+			// 角色一起取消了，留着会让人去找一个不存在的面板。
 			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error": "账号池读数仅管理员可见（成员请用 /admin/stats 看自己的用量）。",
+				"error": "账号池读数仅管理员可见。",
 				"code":  "forbidden_role",
 				"role":  p.Role,
 			})

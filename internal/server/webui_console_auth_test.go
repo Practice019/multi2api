@@ -9,13 +9,17 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	"workbuddy2api/internal/account"
+	"workbuddy2api/internal/pool"
 )
 
 // ★ 控制台脚本里不得再出现被删除的旧模型符号。
@@ -144,14 +148,15 @@ func TestConsoleJSWritesNoCredentialsToStorage(t *testing.T) {
 //
 //	api_key            ⇒ 401（不再是可读凭据）
 //	会话（管理员）      ⇒ 200
-//	会话（成员）        ⇒ 403
+//	非管理员历史记录    ⇒ 401（成员账号已取消，它不构成身份）
 //	admin_token        ⇒ 200
+//
+// ⚠ 语义变更（2026-10-19 单账号口径）：原先那条是「会话（成员）⇒ 403 +
+// code=forbidden_role」。成员身份取消后，非管理员在**身份层**就被拒了
+// （account.Lookup 不认它）⇒ 连不到 403 那一层。所以断言从 403 改成 401：
+// 这不是放宽，而是"它现在更早、更彻底地被挡住了"。
 func TestStatusRequiresConsoleAdmin(t *testing.T) {
-	f := newUIFixture(t, true, false)
-	member, err := f.accounts.Create("staff", "staff-password-002", account.RoleMember)
-	if err != nil {
-		t.Fatalf("建成员: %v", err)
-	}
+	f := newUIFixture(t, true)
 
 	// 夹具带一个空池子 ⇒ 过门禁之后是 200（而不是"不是 403 就算过"）。
 	get := func(t *testing.T, mutate func(*http.Request)) *httptest.ResponseRecorder {
@@ -185,22 +190,6 @@ func TestStatusRequiresConsoleAdmin(t *testing.T) {
 		}
 	})
 
-	t.Run("★ 成员会话 → 403 forbidden_role", func(t *testing.T) {
-		sess, err := f.sessions.Issue(member, "127.0.0.1", "probe/1.0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := get(t, func(r *http.Request) {
-			r.AddCookie(&http.Cookie{Name: account.CookieName, Value: sess.SID})
-		})
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("成员读 /status = %d，want 403", rec.Code)
-		}
-		if !strings.Contains(rec.Body.String(), "forbidden_role") {
-			t.Errorf("回执里的 code 应为 forbidden_role，实际 %s", rec.Body.String())
-		}
-	})
-
 	t.Run("管理员会话 → 过门禁", func(t *testing.T) {
 		rec := get(t, func(r *http.Request) {
 			r.AddCookie(&http.Cookie{Name: account.CookieName, Value: f.sessionCookieFrom(t, f.user)})
@@ -218,54 +207,136 @@ func TestStatusRequiresConsoleAdmin(t *testing.T) {
 			t.Errorf("admin_token 读 /status = %d，want 200：%s", rec.Code, rec.Body.String())
 		}
 	})
+
+	// ★ 非管理员的历史记录：另起一个夹具（账号库里有一条改造前留下的成员记录）。
+	//
+	// 为什么要另起夹具：`newUIFixture` 用 CreateBootstrap 建**唯一**那个账号，
+	// 而 CreateBootstrap 只认空库（那正是"单账号"的实现）⇒ 想造出"盘上有一条
+	// 成员记录"的形态，只能**手写文件**（也就是目标态 3 说的那种旧数据）。
+	t.Run("★ 成员历史记录的会话 → 401（成员账号已取消，不构成身份）", func(t *testing.T) {
+		lf, member := newUILegacyMemberFixture(t)
+		if member == nil {
+			t.Fatal("前置：成员历史记录应当被加载（New 不得把它丢掉）")
+		}
+		sess, err := lf.sessions.Issue(member, "127.0.0.1", "probe/1.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/status", nil)
+		req.AddCookie(&http.Cookie{Name: account.CookieName, Value: sess.SID})
+		rec := httptest.NewRecorder()
+		lf.h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("★ 成员历史记录读 /status = %d，want 401 ——\n"+
+				"成员账号已取消：它在 account.Lookup 那层就换不到身份，\n"+
+				"根本走不到「角色不足」那一步。", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "forbidden_role") {
+			t.Errorf("不该再出现 forbidden_role（成员口径已取消），实际 %s", rec.Body.String())
+		}
+	})
 }
 
-// ★ 成员模式（T7 最小降级）的允许/隐藏划分。
+// legacyMemberFileRows 一个账号文件的内容：唯一的管理员 + 一条成员历史记录。
 //
-// `/status` 在 T7 变成管理员专属后，成员一登录就会撞 403。若不区分，成员看到的
-// 是「权限不足」+ 整块控制台被收起 = "登录了但什么都没有"。这条测试钉住三件事：
-//
-//	① 成员能看的三块（仪表盘 / API key / 对话测试）**不得**在隐藏名单里
-//	② 五个管理员专属面板必须在隐藏名单里
-//	③ 403 的处置是"进入成员模式"，**不是** hideConsole()
-//
-// ⚠ 划分口径必须与服务端一致：`internal/admin/admin.go` 的 memberPaths
-// （/admin/apikeys、/admin/stats、/admin/ui/manifest）。改一边就要改另一边 ——
-// 这正是这条测试存在的理由。
-func TestConsoleMemberModeHidesAdminOnlyPanels(t *testing.T) {
-	src := string(webuiHTML)
-
-	adminOnly := []string{"accounts", "models", "jobs", "logs", "settings"}
-	memberOK := []string{"dashboard", "apikeys", "chat"}
-
-	for _, k := range adminOnly {
-		rule := `.member-mode section[data-key="` + k + `"]`
-		if !strings.Contains(src, rule) {
-			t.Errorf("★ 成员模式没有隐藏 %q 面板 —— 它对成员是 403，留着只会让人点到一片红。\n"+
-				"期望有 CSS 规则：%s", k, rule)
+// 口令用真 bcrypt 哈希（account.HashPassword）—— 这样"口令对但角色不是管理员"
+// 这条反例在 HTTP 层也真的走到角色判定，而不是被口令校验挡下。
+func writeLegacyMemberFile(t *testing.T, path string) {
+	t.Helper()
+	row := func(id, name, plain string, role int) map[string]any {
+		h, err := account.HashPassword(plain)
+		if err != nil {
+			t.Fatalf("HashPassword: %v", err)
+		}
+		return map[string]any{
+			"id":            id,
+			"username":      name,
+			"display_name":  name,
+			"password_hash": h,
+			"role":          role,
+			"enabled":       true,
+			"auth_version":  1,
+			"created_at":    "2026-01-01T00:00:00Z",
 		}
 	}
-	for _, k := range memberOK {
-		rule := `.member-mode section[data-key="` + k + `"]`
-		if strings.Contains(src, rule) {
-			t.Errorf("★ 成员模式把 %q 面板藏掉了，但成员是**能**看它的（memberPaths 白名单）——\n"+
-				"这会让成员登录后看不到自己的用量/密钥，比不做降级更糟。", k)
-		}
+	raw, err := json.MarshalIndent([]map[string]any{
+		row("u-boss", "boss", "boss-password-001", account.RoleAdmin),
+		row("u-staff", "staff", "staff-password-002", account.RoleMember),
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// ③ 403 要走成员模式，而不是收起控制台
-	fi := strings.Index(src, "async function refresh()")
-	if fi < 0 {
-		t.Fatal("找不到 refresh()")
-	}
-	body := src[fi : fi+4000]
-	if !strings.Contains(body, "memberMode = true") {
-		t.Error("★ refresh() 里没有把 403 当作成员模式 —— 成员会被当作'权限不足'赶出控制台")
-	}
-	if !strings.Contains(src, "function applyMemberMode()") {
-		t.Error("applyMemberMode() 未定义 —— 根类不会被设置，CSS 规则永不生效")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("写账号库: %v", err)
 	}
 }
+
+// newUILegacyMemberFixture 起一个 /ui 夹具，账号库由**手写文件**构成
+// （一个管理员 + 一条成员历史记录），返回夹具与那条成员记录。
+func newUILegacyMemberFixture(t *testing.T) (*uiFixture, *account.User) {
+	t.Helper()
+	dir := t.TempDir()
+	accPath := filepath.Join(dir, "accounts.json")
+	writeLegacyMemberFile(t, accPath)
+	accounts, err := account.New(accPath)
+	if err != nil {
+		t.Fatalf("★ 盘上有成员历史记录时 New 不得报错（不许崩）：%v", err)
+	}
+	sessions, err := account.NewSessionStore(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatalf("会话库: %v", err)
+	}
+	f := &uiFixture{
+		h: NewHandler(Config{
+			Pool:         pool.New(filepath.Join(dir, "pool-state.json")),
+			APIKey:       testAPIKey,
+			AdminToken:   testAdminToken,
+			CookieSecure: account.CookieSecureNever,
+			Accounts:     accounts,
+			Sessions:     sessions,
+		}),
+		accounts: accounts,
+		sessions: sessions,
+		user:     accounts.ByUsername("boss"),
+	}
+	return f, accounts.ByUsername("staff")
+}
+
+// ⚠⚠ 已删除：TestConsoleMemberModeHidesAdminOnlyPanels。
+//
+// # 它原来测什么
+//
+// 前端"成员模式"（T7 的最小降级）的三件事：
+//
+//	① 成员能看的三块（dashboard/apikeys/chat）不得在 `.member-mode` 隐藏名单里
+//	② 五个管理员专属面板必须在隐藏名单里（accounts/models/jobs/logs/settings）
+//	③ 403 的处置是"进入成员模式"（applyMemberMode()），**不是** hideConsole()
+//
+// 判据的载体是 `webui.html` 里的 CSS 规则与 refresh() 里的 `memberMode = true`。
+//
+// # 为什么它必须消失（不是"改成红的"）
+//
+// 2026-10-19 用户新口径：「只要一个管理员就行了，只要一个账号。用户其实可以不用。」
+// ⇒ **成员这个身份不存在了**，服务端那边 memberRules 白名单与 403 的
+// forbidden_role 路径已删（见 internal/admin/admin.go 的 canAccess），
+// `/status` 对非管理员也不再回 403（它在身份层就是 401）。
+//
+// 因此 ③ 那句话已经**没有对应的服务端行为**：不会再有"403 触发的成员模式"。
+// ①② 测的那份隐藏名单，是"前端要迁就服务端的分角色授权"的产物 ——
+// 授权不分角色之后它没有存在理由；窗口 B 负责把 `.member-mode` 与
+// `applyMemberMode()` 从 `webui.html` / `webui-login.html` 里删掉。
+//
+// # 它留下的空缺由谁接管
+//
+// 服务端这一侧（本窗口能管的部分）：
+//
+//	· 非管理员不构成身份 ⇒ `TestStatusRequiresConsoleAdmin` 的成员子用例（401）
+//	· 门禁不再有"角色不足"这一档 ⇒ `internal/admin` 的
+//	  TestGate_SingleAdminSession / TestGate_NonAdminSessionDeniedEverywhere
+//	· 回执里不再有分角色字段 ⇒ TestAPIKeysPayloadHasNoMemberFlag
+//
+// 前端那一侧的判据（"页面里不许再出现成员模式的残留"）归属窗口 B 的文件，
+// 由那边的测试负责 —— 本窗口不写、也不假装验证 `webui.html`。
 
 // sessionCookieFrom 给任意账号签一条会话并返回 SID。
 //
@@ -282,7 +353,7 @@ func (f *uiFixture) sessionCookieFrom(t *testing.T, u *account.User) string {
 
 // 装配层忘了接线时 /status 不得静默放行（fail-closed）。
 func TestStatusWithoutAccountsConfiguredDeniesAll(t *testing.T) {
-	f := newUIFixture(t, false, false) // Accounts/Sessions 均为 nil
+	f := newUIFixture(t, false) // Accounts/Sessions 均为 nil
 	rec := httptest.NewRecorder()
 	f.h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status", nil))
 	if rec.Code != http.StatusUnauthorized {

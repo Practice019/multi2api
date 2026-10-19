@@ -354,6 +354,19 @@ func (s *SessionStore) Lookup(sid string, accounts *Store) (*Session, *User, err
 	if !u.Enabled {
 		return nil, nil, ErrDisabled
 	}
+	if !IsAdminRole(u.Role) {
+		// ⚠ 2026-10-19 单账号口径（第 ③ 步的一部分）：
+		//
+		// 成员角色已取消 ⇒ 它的会话**不构成身份**。放在这里而不是只放在
+		// Authenticate：改造前签发的会话可能还躺在 data/sessions.json 里
+		// （或者账号文件回滚、被人为编辑过），只堵登录口的话，那条 cookie
+		// 仍能打开 `/ui`（`Identify` 走的就是 Lookup）—— 那就等于"成员面
+		// 通过一条旧 cookie 又活了"。
+		//
+		// 顺手把它撤掉：让这条 cookie 下次不再被当成"还在试"，也不必等过期。
+		s.Revoke(sid)
+		return nil, nil, ErrMemberRetired
+	}
 	if u.AuthVersion != snapshot.AuthVersion {
 		return nil, nil, ErrSessionRevoked
 	}

@@ -85,9 +85,20 @@ func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 		"enabled":     true,
 		"admin_key":   adminMask,
 		"admin_token": adminTokenMask,
-		// member=true：前端据此把面板标题换成「我的 API Key」。
-		// 成员看到的是过滤后的子集，标题不点明会让他以为"别人的 key 都不见了"。
-		"member": !p.IsAdmin(),
+		// ⚠ 2026-10-19 用户新口径：`"member": !p.IsAdmin()` 字段**已删除**。
+		//
+		// 它的唯一用途是让前端把面板标题换成「我的 API Key」（成员看到的是
+		// 过滤后的子集，不点明会让人以为"别人的 key 都不见了"）。单账号口径
+		// 下没有成员会话 ⇒ 这个标志**恒为 false**，留着就是一条永远为假的
+		// 角色判据，下一个人会据此以为成员还有身份。
+		//
+		// 载荷的其余字段一个都不动（keys / enabled / admin_key / admin_token）：
+		// 删掉"成员的标记"**不等于**少给数据 —— 对唯一的身份（管理员）来说
+		// 这三条掩码与整份 key 列表照旧。
+		//
+		// 前端如果还在读 `json.member`，一律得到 undefined（falsy）⇒ 走
+		// "管理员面板"那条渲染路径，正是它应有的样子；前端文件由另一个窗口
+		// 清理（本窗口只写 *.go）。
 	})
 }
 
@@ -334,13 +345,15 @@ func writeStoreError(w http.ResponseWriter, err error) {
 // ⚠ 注意：没配 admin_token 不等于"没有管理面" —— 控制台账号（浏览器会话）
 // 是另一条独立的路（见 admin.go 的 principalOf）。本端点管的是**令牌**这把机器钥匙。
 func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
-	// ★ 硬判管理员（T8）。门禁的 memberRules 已经把这两个端点排除在成员白名单
-	// 之外，为什么还要在这里再判一次？
+	// ★ 硬判管理员（T8）。为什么在门禁之外再判一次？
 	//
 	// 因为这两个端点的回执里带**完整的明文新凭据**（新 admin_token / 新 api_key），
-	// 而"轮换"是**改整个部署的钥匙**：一旦成员能调，他就直接拿到管理员那条路。
-	// 这类"越权一次即全失守"的端点不该只靠一层判据 —— 判据写错、白名单被后人
-	// 放宽、端点被挪到别处挂载，任何一处都够。第二层判据只有三行，代价可忽略。
+	// 而"轮换"是**改整个部署的钥匙**：越权一次即全失守。
+	//
+	// ⚠ 2026-10-19 单账号口径：门禁侧那张成员白名单已整张删掉（admin.go 的
+	// canAccess）—— 非管理员身份在 account 那层就被拒。这条二次判据因此更该
+	// 留着：它是这类端点上唯一还能独立失败的那层（门禁写错、端点被挪到别处
+	// 挂载，任何一处都够）。三行，代价可忽略。
 	if !h.principalFrom(r).IsAdmin() {
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error": "轮换管理凭据仅管理员可用。",
@@ -382,13 +395,15 @@ func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
 
 // apiKeysRotateAPIKey 轮换**对话接口的 api_key**（与门禁令牌无关）。
 func (h *Handler) apiKeysRotateAPIKey(w http.ResponseWriter, r *http.Request) {
-	// ★ 硬判管理员（T8）。门禁的 memberRules 已经把这两个端点排除在成员白名单
-	// 之外，为什么还要在这里再判一次？
+	// ★ 硬判管理员（T8）。为什么在门禁之外再判一次？
 	//
 	// 因为这两个端点的回执里带**完整的明文新凭据**（新 admin_token / 新 api_key），
-	// 而"轮换"是**改整个部署的钥匙**：一旦成员能调，他就直接拿到管理员那条路。
-	// 这类"越权一次即全失守"的端点不该只靠一层判据 —— 判据写错、白名单被后人
-	// 放宽、端点被挪到别处挂载，任何一处都够。第二层判据只有三行，代价可忽略。
+	// 而"轮换"是**改整个部署的钥匙**：越权一次即全失守。
+	//
+	// ⚠ 2026-10-19 单账号口径：门禁侧那张成员白名单已整张删掉（admin.go 的
+	// canAccess）—— 非管理员身份在 account 那层就被拒。这条二次判据因此更该
+	// 留着：它是这类端点上唯一还能独立失败的那层（门禁写错、端点被挪到别处
+	// 挂载，任何一处都够）。三行，代价可忽略。
 	if !h.principalFrom(r).IsAdmin() {
 		writeJSON(w, http.StatusForbidden, map[string]any{
 			"error": "轮换管理凭据仅管理员可用。",

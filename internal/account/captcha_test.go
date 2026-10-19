@@ -82,7 +82,7 @@ func newCapFixture(t *testing.T, withCaptcha bool) *capFixture {
 	if err != nil {
 		t.Fatalf("会话库: %v", err)
 	}
-	cfg := HTTPConfig{Accounts: acc, Sessions: sess, RegisterEnabled: true}
+	cfg := HTTPConfig{Accounts: acc, Sessions: sess}
 	f := &capFixture{}
 	if withCaptcha {
 		f.cp = newFakeCaptcha()
