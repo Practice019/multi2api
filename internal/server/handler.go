@@ -367,6 +367,8 @@ func NewHandler(cfg Config) *Handler {
 	// 单数别名：部分客户端/探针按 /v1/model 探测，与 /v1/models 同源同响应。
 	h.mux.HandleFunc("GET /v1/model", h.withAuth(h.models))
 	// 内嵌本地控制台（同源，无需 CORS）。
+	// 渠道管理页：与 /ui 同一套身份判据（管理面，不是公开页）。
+	h.mux.HandleFunc("GET /ui/channels", h.channelsUI)
 	h.mux.HandleFunc("GET /ui", h.ui)
 	// 带尾斜杠的 /ui/ 也接受（用户习惯打 `http://host:port/ui/?token=...`）：
 	// 302 到无斜杠的规范路径，查询参数（如 ?token=）原样保留。
