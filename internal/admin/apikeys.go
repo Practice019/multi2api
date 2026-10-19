@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 
+	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/apikey"
 )
 
@@ -57,19 +58,36 @@ func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 为什么必须都回：前端要能分别显示"我用的是哪一把、轮换的是哪一把"。
 	// 改造前只有 admin_key，而那时它同时是门禁 —— 一个字段承担两个语义，
 	// 正是用户报的"门禁 token 不能和 api 一样"。
-	adminMask := ""
-	if h.cfg.APIKey != "" {
-		adminMask = apikey.MaskID(h.cfg.APIKey)
-	}
-	adminTokenMask := ""
-	if t := h.currentAdminToken(); t != "" {
-		adminTokenMask = apikey.MaskID(t)
+	// T8：**按身份取列表** —— 成员只看得到自己名下的 key。
+	//
+	// 判据住在存储层（apikey.ListFor）：它先判身份再看归属，空 owner + 非管理员
+	// 直接回空表。见那里的长注释 —— 那个"空 owner 也是空串"的坑是本次最危险的
+	// 一处（写反了就把管理员的 key 整列表端给成员）。
+	p := h.principalFrom(r)
+	keys := s.ListFor(p.UserID, p.IsAdmin())
+
+	// 两把**管理**钥匙的掩码只回给管理员。
+	//
+	// ⚠ 成员连掩码都不该看到：掩码带可辨认前缀（用于"我现在用的是哪一把"），
+	// 而 admin_token 是管理台门禁凭据 —— 让成员知道它存在、长什么样没有任何
+	// 好处（他不能用，也不该用）。
+	adminMask, adminTokenMask := "", ""
+	if p.IsAdmin() {
+		if h.cfg.APIKey != "" {
+			adminMask = apikey.MaskID(h.cfg.APIKey)
+		}
+		if t := h.currentAdminToken(); t != "" {
+			adminTokenMask = apikey.MaskID(t)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"keys":        s.List(),
+		"keys":        keys,
 		"enabled":     true,
 		"admin_key":   adminMask,
 		"admin_token": adminTokenMask,
+		// member=true：前端据此把面板标题换成「我的 API Key」。
+		// 成员看到的是过滤后的子集，标题不点明会让他以为"别人的 key 都不见了"。
+		"member": !p.IsAdmin(),
 	})
 }
 
@@ -93,7 +111,11 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	k, err := s.Create(body.Name, body.Limit, body.RPM, body.Models)
+	// T8：新 key 的归属 = 当前身份。
+	//   · 成员建的 ⇒ 归他（此后他只能看见/管这一把）
+	//   · 管理员建的 ⇒ owner="" （存量语义：空 = 管理员所有）
+	//   · 用 admin_token 的脚本建的 ⇒ UserID 为空 ⇒ 同样落进"管理员所有"
+	k, err := s.CreateOwned(h.principalFrom(r).UserID, body.Name, body.Limit, body.RPM, body.Models)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -112,6 +134,51 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiKeysToggle POST /admin/apikeys/toggle —— body {"id":"...","enabled":bool}。
+// principalFrom 取**已过门禁**请求的身份（供 handler 判断归属用）。
+//
+// # 为什么取不到时回零值而不是拒绝
+//
+// 门禁（admin.go 的 ServeHTTP）已经保证"到这里的人有身份"；能走到 handler 的
+// 只有两条路：管理员，或成员白名单里的端点。所以这里的 `!ok` 是"不该发生"的
+// 情况（例如将来有人把 handler 挂到门禁之外）。
+//
+// 零值 = `IsAdmin()==false` + `UserID==""`，而 apikey 的归属判据对
+// "空 owner + 非管理员"是**空列表 / 不能管**（见 apikey.ListFor 的注释）
+// ⇒ 恰好是**最严**的那一档。所以这里不必再写一次拒绝：包一层只会掩盖门禁
+// 真正失效的事实。
+func (h *Handler) principalFrom(r *http.Request) account.Principal {
+	p, ok := h.principalOf(r)
+	if !ok {
+		return account.Principal{}
+	}
+	return p
+}
+
+// requireKeyAccess 管某把 key 之前的越权检查；false = 已经写过响应。
+//
+// 口径：管理员管全部；成员只管自己名下的（`apikey.Store.CanManage`，与
+// `ListFor` 同一套判据的另一种形态 —— 能看见才谈得上管）。
+//
+// ⚠ 不区分"key 不存在"与"不是你的"：都回 403。区分开就给了成员一个探测器
+// ——"这个 id 存在吗？"（拿 id 枚举 + 响应差异）。他不需要知道别人的 id 是否有效。
+func (h *Handler) requireKeyAccess(w http.ResponseWriter, r *http.Request, id string) bool {
+	s := h.apiKeysStore()
+	if s == nil {
+		writeError(w, http.StatusNotImplemented, "API key 管理未启用")
+		return false
+	}
+	p := h.principalFrom(r)
+	if s.CanManage(p.UserID, p.IsAdmin(), id) {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]any{
+		"error": "这把 API key 不属于当前账号（成员只能管理自己创建的 key）。",
+		"code":  "forbidden_role",
+		"scope": "apikey",
+	})
+	return false
+}
+
 func (h *Handler) apiKeysToggle(w http.ResponseWriter, r *http.Request) {
 	s := h.apiKeysStore()
 	if s == nil {
@@ -124,6 +191,9 @@ func (h *Handler) apiKeysToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return
+	}
+	if !h.requireKeyAccess(w, r, body.ID) {
 		return
 	}
 	on, err := s.Toggle(body.ID, body.Enabled)
@@ -148,6 +218,9 @@ func (h *Handler) apiKeysDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
+	if !h.requireKeyAccess(w, r, body.ID) {
+		return
+	}
 	if err := s.Delete(body.ID); err != nil {
 		writeStoreError(w, err)
 		return
@@ -167,6 +240,9 @@ func (h *Handler) apiKeysReset(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return
+	}
+	if !h.requireKeyAccess(w, r, body.ID) {
 		return
 	}
 	if err := s.Reset(body.ID); err != nil {
@@ -201,6 +277,9 @@ func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return
+	}
+	if !h.requireKeyAccess(w, r, body.ID) {
 		return
 	}
 	if err := s.Update(body.ID, body.Limit, body.RPM, body.Models); err != nil {
@@ -255,6 +334,21 @@ func writeStoreError(w http.ResponseWriter, err error) {
 // ⚠ 注意：没配 admin_token 不等于"没有管理面" —— 控制台账号（浏览器会话）
 // 是另一条独立的路（见 admin.go 的 principalOf）。本端点管的是**令牌**这把机器钥匙。
 func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
+	// ★ 硬判管理员（T8）。门禁的 memberRules 已经把这两个端点排除在成员白名单
+	// 之外，为什么还要在这里再判一次？
+	//
+	// 因为这两个端点的回执里带**完整的明文新凭据**（新 admin_token / 新 api_key），
+	// 而"轮换"是**改整个部署的钥匙**：一旦成员能调，他就直接拿到管理员那条路。
+	// 这类"越权一次即全失守"的端点不该只靠一层判据 —— 判据写错、白名单被后人
+	// 放宽、端点被挪到别处挂载，任何一处都够。第二层判据只有三行，代价可忽略。
+	if !h.principalFrom(r).IsAdmin() {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "轮换管理凭据仅管理员可用。",
+			"code":  "forbidden_role",
+			"scope": "admin",
+		})
+		return
+	}
 	if h.cfg.ConfigPath == "" {
 		writeError(w, http.StatusBadRequest, "本部署不支持写回 config.json（未接线 ConfigPath），无法轮换")
 		return
@@ -288,6 +382,21 @@ func (h *Handler) apiKeysRotateAdmin(w http.ResponseWriter, r *http.Request) {
 
 // apiKeysRotateAPIKey 轮换**对话接口的 api_key**（与门禁令牌无关）。
 func (h *Handler) apiKeysRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	// ★ 硬判管理员（T8）。门禁的 memberRules 已经把这两个端点排除在成员白名单
+	// 之外，为什么还要在这里再判一次？
+	//
+	// 因为这两个端点的回执里带**完整的明文新凭据**（新 admin_token / 新 api_key），
+	// 而"轮换"是**改整个部署的钥匙**：一旦成员能调，他就直接拿到管理员那条路。
+	// 这类"越权一次即全失守"的端点不该只靠一层判据 —— 判据写错、白名单被后人
+	// 放宽、端点被挪到别处挂载，任何一处都够。第二层判据只有三行，代价可忽略。
+	if !h.principalFrom(r).IsAdmin() {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "轮换管理凭据仅管理员可用。",
+			"code":  "forbidden_role",
+			"scope": "admin",
+		})
+		return
+	}
 	if h.cfg.APIKey == "" {
 		writeError(w, http.StatusBadRequest, "当前未配置 api_key（config 里没有），无需轮换")
 		return

@@ -13,7 +13,7 @@
 // **加新上游时本文件零改动。**
 //
 // 安全模型：整个 /admin/* 子树**一律校验凭据**（浏览器会话 或 admin_token），
-// 并按角色分流（管理员全部放行；成员只放行 memberPaths 那几条前缀）。
+// 并按角色分流（管理员全部放行；成员只放行 memberRules 里精确列出的那几条）。
 //
 // ⚠ 改造前这里写的（也是实现的）是「只接受 loopback 直连，非本机一律 403，
 // 本机免令牌」—— 那条路径把"能连上来"当成了"有权限"，于是本机任何进程
@@ -200,7 +200,7 @@ type Config struct {
 	//	浏览器：/ui 用账号口令登录 → 会话 cookie（有角色：管理员/成员）
 	//	脚本：  Authorization: Bearer <admin_token>（等价管理员，无会话状态）
 	//
-	// 菜单/端点的角色分流见 memberPaths。
+	// 菜单/端点的角色分流见 memberRules。
 	Accounts *account.Store
 	Sessions *account.SessionStore
 
@@ -637,7 +637,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if !canAccess(p, r.URL.Path) {
+	if !canAccess(p, r) {
 		// 403 与 401 分开：**有**身份但角色不够。前端据此显示"当前账号无权"
 		// 而不是再跳一次登录页（那会让成员以为自己的登录没生效）。
 		writeJSON(w, http.StatusForbidden, map[string]any{
@@ -670,19 +670,59 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ⚠ /admin/accounts 不在里面，而且**必须**不在：它是**上游账号池**
 // （workbuddy/codearts 那些凭证），不是控制台账号。成员看到它等于拿到
 // 全部上游身份，"成员"这个角色就没有意义了。
-var memberPaths = []string{
-	"/admin/apikeys",
-	"/admin/stats",
-	"/admin/ui/manifest",
+// ⚠ 2026-10-19（T8）：从"前缀白名单"改成**精确的「方法 + 路径」对**。
+//
+// # 为什么必须改（这是一个真洞，不是洁癖）
+//
+// 旧的判据是 `path == prefix || strings.HasPrefix(path, prefix+"/")`，白名单里
+// 只写了一个 `/admin/apikeys`。于是 **`POST /admin/apikeys/rotate-admin` 也命中** ——
+// 成员可以轮换**管理令牌**，而那个端点的回执里带着**完整的新令牌**
+// （见 apikeys.go 的 apiKeysRotateAdmin）。转一次，成员就拿到了管理员那条路
+// （`Authorization: Bearer <新 admin_token>`）。同理 `/rotate-api-key` 也是。
+//
+// 前缀白名单的通病：**加一个子路径就自动被放行**，而"轮换/重置/危险操作"恰恰
+// 都挂在已有的名字下面。所以这里逐个列出允许的 (方法, 路径)，新端点默认不放行。
+//
+// # 选进白名单的标准
+//
+// 成员自己就需要的、且不暴露他人/上游信息的：
+//
+//	GET  /admin/apikeys        自己名下的 key（HTTP 层再按 owner 过滤 → T8）
+//	POST /admin/apikeys        建一把自己的 key
+//	POST /admin/apikeys/{toggle,delete,reset,update}
+//	                           管自己的 key（逐把再判 CanManage → T8）
+//	GET  /admin/ui/manifest    界面外壳必需（否则成员连页面都渲染不出来）
+//
+// ⚠ **不在**里面的（每一条都是刻意的）：
+//
+//	rotate-admin / rotate-api-key  回执里含**明文新凭据** ⇒ 成员不得调用
+//	/admin/stats(/series)          T8 决定**先不给成员**：它回的是 by_uid /
+//	                               by_provider 这类**管理面**聚合（按**上游账号**
+//	                               与上游排行），给成员看等于把上游账号的昵称与
+//	                               用量端出去。成员要的"自己的用量"应当按
+//	                               key 归属过滤后单独给（留给后续切片），
+//	                               而不是把管理面报表原样放行。
+//	/admin/accounts*               那是**上游账号池**（workbuddy/codearts 凭证），
+//	                               不是控制台账号。成员看到它等于拿到全部上游身份
+//	/admin/settings|logs|providers|schedule|task|models/preview
+//	                               管理面读数，与成员无关
+var memberRules = []struct{ method, path string }{
+	{http.MethodGet, "/admin/apikeys"},
+	{http.MethodPost, "/admin/apikeys"},
+	{http.MethodPost, "/admin/apikeys/toggle"},
+	{http.MethodPost, "/admin/apikeys/delete"},
+	{http.MethodPost, "/admin/apikeys/reset"},
+	{http.MethodPost, "/admin/apikeys/update"},
+	{http.MethodGet, "/admin/ui/manifest"},
 }
 
-// canAccess 角色分流：管理员全部放行；成员只放行白名单前缀。
-func canAccess(p account.Principal, path string) bool {
+// canAccess 角色分流：管理员全部放行；成员只放行 memberRules 里精确列出的那些。
+func canAccess(p account.Principal, r *http.Request) bool {
 	if p.IsAdmin() {
 		return true
 	}
-	for _, prefix := range memberPaths {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+	for _, rule := range memberRules {
+		if r.Method == rule.method && r.URL.Path == rule.path {
 			return true
 		}
 	}
@@ -699,7 +739,7 @@ func canAccess(p account.Principal, path string) bool {
 //
 //	h.adminTokenOK  传给 Identify 的 isToken 回调（读**当前**生效的令牌，
 //	                所以轮换立即生效、旧副本立即失效）
-//	canAccess       角色到端点的策略（那条 memberPaths 白名单）
+//	canAccess       角色到端点的策略（那条 memberRules 精确白名单）
 func (h *Handler) principalOf(r *http.Request) (account.Principal, bool) {
 	return account.Identify(r, h.adminTokenOK, h.cfg.Accounts, h.cfg.Sessions)
 }
