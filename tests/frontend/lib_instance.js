@@ -106,14 +106,26 @@ function describeBuild() {
 /**
  * 判"实际要启动的那个 exe 的 mtime ≥ internal/server/webui.html 的 mtime"。
  *
+ * # 为什么**没有** bypass 开关（2026-10-19 定：删掉了原先的 `opt.fatal`）
+ *
+ * 原先的签名是 `assertBuildFresh(warn, { fatal: false })`，而 `startInstance` 把它接成
+ * `opts.allowStaleBuild`。当时全仓没有任何调用方传它 —— 也就是说它是一个**潜伏的绕过口**：
+ * 将来谁想让红变绿，加一个布尔就够。而"要放行只能换一个新鲜 exe"是本仓的红线。
+ *
+ * 那"故意对**旧构建**做对照"怎么办？——**不要在 startInstance 里做**：
+ * 那种对照只能放在**不经过本库**的独立脚本里，并且结论必须写明产品世代
+ * （"这是在 04:17 那份构建上量的"）。本仓吃过这个亏：一整套探针在**已不复存在的产品世代**上取绿，
+ * 直到换到当前构建才暴露（见 `verify_probe_console_loaded.js` 的文件头）。
+ * 想让旧构建的页面能被量到，正确做法是**重建一个新的对照 exe**，而不是让判据闭嘴。
+ * （视觉探针 `verify_login_visual_e2e.js:419-431` 的"只报不判"是它**自己**的两值比较，
+ *   不受本判据约束；它同样要求当前构建，跑旧构建时它会明说。）
+ *
  * @param {(msg: string) => void} [warn] 打印器；不给就 console.log
- * @param {{fatal?: boolean}} [opt] fatal=false 时只警告不抛（默认**抛**，
- *        因为 startInstance 的调用方都在拿这个构建做断言）
  * @returns {ReturnType<typeof describeBuild>}
+ * @throws 构建过期 / 无法判断（取不到 mtime）时**一律抛**，没有第二条路
  */
-function assertBuildFresh(warn, opt) {
+function assertBuildFresh(warn) {
   const say = warn || ((m) => console.log(m));
-  const fatal = !opt || opt.fatal !== false;
   const b = describeBuild();
   const rebuild = 'go build -o ' + path.relative(REPO, b.exe).replace(/\\/g, '/') + ' ./cmd/server';
   say('  本次起的构建: ' + b.exe);
@@ -123,7 +135,7 @@ function assertBuildFresh(warn, opt) {
   if (b.fresh === null) {
     say('  ⚠ 无法判断构建是否新鲜（exe 不存在或源文件 mtime 取不到）—— ' +
       '此时**不当作绿**：后面所有断言的归因都不成立，先修构建。');
-    if (fatal) throw new Error('无法判断构建新鲜度：exe=' + b.exe);
+    throw new Error('无法判断构建新鲜度：exe=' + b.exe);
     return b;
   }
   if (!b.fresh) {
@@ -136,7 +148,7 @@ function assertBuildFresh(warn, opt) {
     say('       重建命令: ' + rebuild);
     say('       （口径与 tests/frontend/verify_login_visual_e2e.js:419-431 那段一致；' +
       '那边只报不判，因为要能验旧构建做对照）');
-    if (fatal) throw new Error('构建过期，拒绝在旧页面上断言：' + b.exe + ' < ' + b.newestRel);
+    throw new Error('构建过期，拒绝在旧页面上断言：' + b.exe + ' < ' + b.newestRel);
   } else {
     say('    ⇒ 新鲜（exe 不早于 ' + b.newestRel + '）✓');
   }
@@ -257,8 +269,9 @@ async function startInstance(opts) {
     console.log('       不重建的话浏览器拿到的是内嵌的**旧**页面（最容易误判成前端 bug）。');
   }
   // ① 构建新鲜度：**在起实例之前**判，因为它是后面所有断言的前提。
-  //    fatal:false = 只报不判（想故意验旧构建做对照时用）。
-  assertBuildFresh(console.log, { fatal: opts.allowStaleBuild !== true });
+  //    ⚠ 没有 bypass：opts.allowStaleBuild 已删（2026-10-19）。要对旧构建做对照，
+  //      只能走不经过本库的独立脚本并写明产品世代 —— 见 assertBuildFresh 的长注释。
+  assertBuildFresh(console.log);
 
   // ② 端口预检：占用 ⇒ 大声红 + 点名 pid。**不静默继续、不自动换端口**。
   //    理由见 assertPortFree 上面的长注释（同端口并发 ⇒ 探针串台）。
@@ -364,7 +377,74 @@ async function startInstance(opts) {
     if (!up) {
       throw new Error('实例未在 ' + base + ' 起来（pid=' + srv.pid + '）\n--- server.log ---\n' + readLog().slice(-2000));
     }
-    const stop = () => { try { srv.kill(); } catch { } };
+
+    // ④ stop() **必须等端口真的空出来**再返回（2026-10-19 加，C 段的收口）。
+    //
+    // # 为什么"kill 完就返回"是错的（决定性实验）
+    //
+    //	起实例前        绑定=free
+    //	起实例后        绑定=busy:EADDRINUSE   监听者=pid 31444
+    //	stop() 返回耗时 1 ms                    ← 只 1 毫秒就返回了
+    //	  +  0 ms       绑定=busy:EADDRINUSE   监听者=(无监听者)  ← 进程已死，socket 还没让出
+    //	  +200 ms       绑定=free              监听者=(无监听者)  ← 真正空出来
+    //
+    // ⇒ "stop() 完立刻同端口再起"会撞上本层**自己的**端口预检，报红说
+    //   "端口被占用" —— 而那一刻**根本没有监听者**（连 pid 都点不出来）。
+    //   真泄漏其实没有（200ms 内必然让出），是**时序**。
+    //
+    // ⚠ 两种"看起来能过"的绕过法都被本仓明确否掉：
+    //   · 让调用方自己 sleep 200ms ⇒ 把时序竞态散进 60 多个调用点，
+    //     漏一个就是随机红，且没人知道为什么。
+    //   · 自动换端口 ⇒ 把一次真实碰撞藏起来（见 assertPortFree 的注释）。
+    //   所以修在**这一处**：stop 等到"这个端口真能 bind"或子进程 exit 为止，
+    //   有界（默认 5s）；**超时大声红**（进程没退干净），绝不静默放过。
+    const stop = async () => {
+      try { srv.kill(); } catch { /* 已退出 */ }
+
+      const killDeadline = Date.now() + (opts.stopMs || 5000);
+      // 先等进程真的退出（exit 事件比轮询端口更直接；已退出则立刻返回）
+      await new Promise((resolve) => {
+        if (srv.exitCode !== null || srv.signalCode !== null) return resolve();
+        let done = false;
+        const fin = () => { if (!done) { done = true; resolve(); } };
+        srv.once('exit', fin);
+        setTimeout(fin, Math.max(0, killDeadline - Date.now()));
+      });
+
+      // 再等"端口真能 bind" —— 进程死了但 socket 让出来还要一点点时间。
+      let freed = false;
+      while (Date.now() < killDeadline) {
+        const pf2 = await assertPortFree(port);
+        if (pf2.free) { freed = true; break; }
+        await sleep(50);
+      }
+      if (!freed) {
+        // 最后一搏：强杀一次，再多给一小段（Windows 上 SIGTERM 不一定立刻生效）
+        try { srv.kill('SIGKILL'); } catch { /* 已退出 */ }
+        const hard = Date.now() + 2000;
+        while (Date.now() < hard) {
+          const pf3 = await assertPortFree(port);
+          if (pf3.free) { freed = true; break; }
+          await sleep(50);
+        }
+      }
+      if (!freed) {
+        const owner = whoOwnsPort(port);
+        console.error('');
+        console.error('  ✗✗✗ stop() 之后端口 ' + port + ' **没能空出来**（等了 ' +
+          ((opts.stopMs || 5000) + 2000) + 'ms）' + (owner ? '，占用者 pid=' + owner : ''));
+        console.error('       实例进程没退干净 ⇒ 下一条探针会在自己的端口预检上撞红，');
+        console.error('       而那看起来像"环境脏"，真因是这里泄漏了。');
+        console.error('       这不静默放过：请查 pid ' + (srv.pid || '?') + ' 的 server.log。');
+        console.error('');
+        throw new Error('stop() 未能释放端口 ' + port + (owner ? '（pid ' + owner + '）' : ''));
+      }
+      if (opts.quietStop !== true) {
+        // 只报事实，不报时间（避免变成"看起来像在等"的伪信号）
+        console.log('  stop(): 端口 ' + port + ' 已确认空出（pid=' + srv.pid + '）');
+      }
+    };
+
     return { base, tmp, key, logPath, stop, readLog, pid: srv.pid };
   } catch (e) {
     // 到这里说明异常已经发生：**必须**把子进程收掉再往上抛。

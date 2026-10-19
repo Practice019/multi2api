@@ -45,8 +45,41 @@ const REF = (process.env.WB2API_FRESH_REF || REPO).replace(/[\\/]+$/, '');
 // ⚠ 副本目录选在 `D:\temp`（不是系统 tmp）：本仓库的约定是临时物件都放这里，
 //   而且这个副本是**复用**的（不是每轮新建）—— 只有 1 个目录，不会像早先那些
 //   `chrome-*` 那样堆出上百个残留（那条教训见 `lib_cdp.js` 那个跨文件发现）。
+//
+// ⚠⚠ 但"复用 = 固定名"带来一个**并发缺陷**（2026-10-19 实测踩到，我自己修的）：
+//   本探针会被**嵌套**跑 —— `mutation_sweep.js` 的静态腿在副本里跑整套套件，
+//   那一轮里本探针也会被跑一次，而它的**比对基准**变成了外层副本、**副本目录**却仍是这个
+//   固定名 ⇒ 两个实例同时删产物、同时跑生成器、同时哈希 ⇒ 结果随机（我实测到一次
+//   "原生栈 + 生成器非零退出"的红，而真因是**两个我在抢同一个目录**，不是产品/源码问题）。
+//   ⇒ 修法不是"别嵌套跑"，而是**加所有权戳**：目录里放 `owner.json`（pid + 启动时间）；
+//     若发现**另一个活着的进程**正持有它 ⇒ 报 ENV 并 exit 2（**不冒充**绿也不冒充红），
+//     由人决定是等它跑完还是用 `WB2API_FRESH_COPY=<另开目录>` 错开。
+//     想要并行/隔离跑的调用方，直接给 `WB2API_FRESH_COPY` 指一个自己的目录即可。
 const DEFAULT_COPY = fs.existsSync('D:\\temp') ? 'D:\\temp\\wb2api-freshness-copy' : path.join(os.tmpdir(), 'wb2api-freshness-copy');
 const COPY = (process.env.WB2API_FRESH_COPY || DEFAULT_COPY).replace(/[\\/]+$/, '');
+const OWNER_FILE = path.join(COPY, 'owner.json');
+
+// 取所有权：活着的其它进程正持有 ⇒ 返回它（调用方报 ENV、exit 2）。
+function claimCopy() {
+  try {
+    if (fs.existsSync(OWNER_FILE)) {
+      const o = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8'));
+      if (o && o.pid && o.pid !== process.pid) {
+        let alive = false;
+        try { process.kill(o.pid, 0); alive = true; } catch (e) { alive = e.code === 'EPERM'; }
+        if (alive) return { busy: true, owner: o };
+      }
+    }
+  } catch (e) { /* 戳文件损坏/不可读 ⇒ 当作可接管 */ }
+  try {
+    fs.mkdirSync(COPY, { recursive: true });
+    fs.writeFileSync(OWNER_FILE, JSON.stringify({ pid: process.pid, since: new Date().toISOString(), argv: process.argv.slice(1) }));
+  } catch (e) { /* 写不了戳不影响校验（老环境/只读盘），下一段 robocopy 会自己报错 */ }
+  return { busy: false };
+}
+function releaseCopy() {
+  try { if (fs.existsSync(OWNER_FILE)) fs.rmSync(OWNER_FILE, { force: true }); } catch (e) { /* 收尾失败不改变判定 */ }
+}
 const SELF_TEST = process.argv.includes('--self-test');
 
 // 生成器 → 产物 的配对表（与 run_frontend_suites.js 的配对表一致；加新对时**两边都要改**）
@@ -181,6 +214,16 @@ console.log('  比对基准: ' + REF);
 console.log('  副本: ' + COPY + '（复用；robocopy 增量）');
 
 // 1) 准备副本：**只在副本里**删产物，逼它们只能由生成器重新产出
+const claim = claimCopy();
+if (claim.busy) {
+  console.log('  ENV: 副本目录正被另一个进程使用（pid=' + claim.owner.pid + '，自 ' + claim.owner.since + '）');
+  console.log('       ' + COPY);
+  console.log('       ⇒ 本判据未运行、不计数、不冒充 PASS/红。');
+  console.log('       两个实例抢同一个副本会让结果随机（删产物/跑生成器/哈希互相踩）。');
+  console.log('       要么等它跑完，要么换目录： WB2API_FRESH_COPY=D:\\temp\\fresh-<你的名字>');
+  process.exit(2);
+}
+process.on('exit', releaseCopy);
 const prep = prepareCopy(REPO, COPY);
 if (!prep.ok) {
   // 与 S1 的 ENV 纪律一致：**缺工具 ⇒ 大声报 ENV、不计数、不冒充 PASS**，
