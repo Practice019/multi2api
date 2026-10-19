@@ -50,6 +50,139 @@ const EXE_AT_LOAD = EXE;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// describeBuild / assertBuildFresh —— "本次起的是哪个构建"（2026-10-19 加）
+//
+// # 为什么要成为 startInstance 的**内置**步骤
+//
+// `internal/server/*.html` 走 //go:embed：**HTML 改了不重建，浏览器拿到的就是
+// 内嵌的旧页面**。而这里的失败形态极其误导 —— 它看起来永远像"前端没生效"，
+// 于是整轮排查都花在前端代码上（本仓吃过这个亏；`verify_login_visual_e2e.js`
+// 的 :419-431 就是为了这个场景写的"⓪ 本次验的是哪个构建"）。
+//
+// 那个探针是**只报不判**（它要能验旧构建做对照）。这里是**判**：`startInstance`
+// 是"起实例"的唯一入口，从这里起来的一定是"要拿来做断言"的那个 ——
+// 所以它必须是新的，否则后面所有断言的归因都是错的。
+//
+// # 三条刻意不做的
+//
+//   ① **不兜底到 `-probe.exe`**：EXE 缺省就是 `bin/wb2api-server.exe`，
+//      静默换成别的会让"验的是哪个二进制"变成猜的（正是上面那个坑）。
+//   ② **不做入口自动 `go build`**：构建是有副作用的动作（还会和正在跑的实例
+//      抢文件锁），不该藏在"起实例"里。报清楚 + 给命令行，让人自己决定。
+//   ③ **不在模块加载时判**：加载时还没有"这次要起什么"的上下文，
+//      而且会让 require 本身抛错（一堆只 require 不做事的工具会集体炸）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 参与新鲜度比较的**源**文件（改了它们就必须重建二进制）。
+// 只列会进 //go:embed 或影响页面内容的；列太多会把"无关的小改"也判成红。
+const BUILD_SOURCES = ['internal/server/webui.html', 'internal/server/webui-login.html'];
+
+/**
+ * 报"本次要起的是哪个构建"：exe 路径 + mtime + 最新源文件 mtime + 是否新鲜。
+ * 只收集事实，不打印、不抛。
+ * @returns {{exe: string, exeMtime: Date|null, newestRel: string, newestMtime: Date|null, fresh: boolean|null}}
+ */
+function describeBuild() {
+  let exeMtime = null;
+  try { exeMtime = fs.statSync(EXE).mtime; } catch { /* 不存在，交给 assert 分支 */ }
+  let newest = null;
+  for (const rel of BUILD_SOURCES) {
+    try {
+      const m = fs.statSync(path.join(REPO, rel)).mtime;
+      if (!newest || m > newest.mtime) newest = { rel, mtime: m };
+    } catch { /* 该源文件不在这份工作树里：跳过 */ }
+  }
+  return {
+    exe: EXE,
+    exeMtime,
+    newestRel: newest ? newest.rel : '(无源文件可比)',
+    newestMtime: newest ? newest.mtime : null,
+    // fresh === null 表示"无从判断"（取不到 mtime），此时调用方**不许**当成绿。
+    fresh: (exeMtime && newest) ? (exeMtime >= newest.mtime) : null,
+  };
+}
+
+/**
+ * 判"实际要启动的那个 exe 的 mtime ≥ internal/server/webui.html 的 mtime"。
+ *
+ * @param {(msg: string) => void} [warn] 打印器；不给就 console.log
+ * @param {{fatal?: boolean}} [opt] fatal=false 时只警告不抛（默认**抛**，
+ *        因为 startInstance 的调用方都在拿这个构建做断言）
+ * @returns {ReturnType<typeof describeBuild>}
+ */
+function assertBuildFresh(warn, opt) {
+  const say = warn || ((m) => console.log(m));
+  const fatal = !opt || opt.fatal !== false;
+  const b = describeBuild();
+  const rebuild = 'go build -o ' + path.relative(REPO, b.exe).replace(/\\/g, '/') + ' ./cmd/server';
+  say('  本次起的构建: ' + b.exe);
+  say('    exe mtime      : ' + (b.exeMtime ? String(b.exeMtime) : '(文件不存在)'));
+  say('    ' + b.newestRel.replace(/^/, '').padEnd(15, ' ') + ' mtime: ' +
+    (b.newestMtime ? String(b.newestMtime) : '(取不到)'));
+  if (b.fresh === null) {
+    say('  ⚠ 无法判断构建是否新鲜（exe 不存在或源文件 mtime 取不到）—— ' +
+      '此时**不当作绿**：后面所有断言的归因都不成立，先修构建。');
+    if (fatal) throw new Error('无法判断构建新鲜度：exe=' + b.exe);
+    return b;
+  }
+  if (!b.fresh) {
+    say('  ✗✗ 构建**过期**：' + b.exe);
+    say('       exe       mtime = ' + String(b.exeMtime));
+    say('       ' + b.newestRel + ' mtime = ' + String(b.newestMtime) +
+      '  （比 exe 新 ' + Math.round((b.newestMtime - b.exeMtime) / 1000) + ' 秒）');
+    say('       ⇒ 浏览器拿到的是 //go:embed 进去的**旧**页面，' +
+      '症状看起来永远像"前端没生效"（本仓吃过这个亏）');
+    say('       重建命令: ' + rebuild);
+    say('       （口径与 tests/frontend/verify_login_visual_e2e.js:419-431 那段一致；' +
+      '那边只报不判，因为要能验旧构建做对照）');
+    if (fatal) throw new Error('构建过期，拒绝在旧页面上断言：' + b.exe + ' < ' + b.newestRel);
+  } else {
+    say('    ⇒ 新鲜（exe 不早于 ' + b.newestRel + '）✓');
+  }
+  return b;
+}
+
+// 端口预检：**占用就大声红，不静默继续、不自动换端口**（2026-10-19 加）
+//
+// # 为什么"自动换端口"是错的
+//
+// 换端口看似友好，实则把一次**真实的碰撞**藏起来：探针 A 起了实例占着 P、
+// 探针 B 以为自己在 P 上跑，实际量到的是 A 的实例 ⇒ 两条探针的结论互相污染，
+// 而现场没有任何提示。本仓已记过一次这个亏（同端口并发 ⇒ 探针串台，
+// 症状完全像产品缺陷）。
+//
+// 判据：能不能 bind。用 node 自己试一次，比解析 netstat 可靠（跨平台、无解析歧义）。
+function assertPortFree(port) {
+  const net = require('net');
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', (e) => {
+      const busy = e && (e.code === 'EADDRINUSE' || e.code === 'EACCES');
+      resolve({ free: false, reason: (e && e.code) || String(e && e.message) });
+    });
+    srv.once('listening', () => { srv.close(() => resolve({ free: true, reason: '' })); });
+    srv.listen(port, '127.0.0.1');
+  });
+}
+
+// 占用端口的进程（Windows 上点名 pid；非 Windows 尽力而为）。
+// 只是为了报错信息能直接指向"谁占着"，拿不到就跳过。
+function whoOwnsPort(port) {
+  try {
+    const { execFileSync } = require('child_process');
+    if (process.platform === 'win32') {
+      const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+        '(Get-NetTCPConnection -LocalPort ' + port + ' -State Listen -ErrorAction SilentlyContinue ' +
+        '| Select-Object -First 1 -ExpandProperty OwningProcess)'], { encoding: 'utf8', timeout: 8000 });
+      const pid = String(out || '').trim();
+      return pid ? pid : '';
+    }
+    const out = execFileSync('sh', ['-c', 'lsof -nP -iTCP:' + port + ' -sTCP:LISTEN 2>/dev/null | awk \'NR==2{print $2}\''], { encoding: 'utf8', timeout: 8000 });
+    return String(out || '').trim();
+  } catch { return ''; }
+}
+
 // httpJson 发一次请求并返回**状态码 + 原文**（不抛异常非 2xx）。
 //
 // ⚠ 不用 r.json()：本仓的 admin() 是 `r.text()` + `JSON.parse`，
@@ -123,6 +256,26 @@ async function startInstance(opts) {
     console.log('     ⚠ 改了 internal/server/*.html 也必须重建：那些页面走 //go:embed，');
     console.log('       不重建的话浏览器拿到的是内嵌的**旧**页面（最容易误判成前端 bug）。');
   }
+  // ① 构建新鲜度：**在起实例之前**判，因为它是后面所有断言的前提。
+  //    fatal:false = 只报不判（想故意验旧构建做对照时用）。
+  assertBuildFresh(console.log, { fatal: opts.allowStaleBuild !== true });
+
+  // ② 端口预检：占用 ⇒ 大声红 + 点名 pid。**不静默继续、不自动换端口**。
+  //    理由见 assertPortFree 上面的长注释（同端口并发 ⇒ 探针串台）。
+  const pf = await assertPortFree(port);
+  if (!pf.free) {
+    const owner = whoOwnsPort(port);
+    console.error('');
+    console.error('  ✗✗✗ 端口 ' + port + ' 已被占用（' + pf.reason + '）' +
+      (owner ? '，占用者 pid=' + owner : ''));
+    console.error('       拒绝继续：同端口并发会让两条探针互相读到对方实例的数据，');
+    console.error('       现场表现完全是"产品缺陷"，但排查方向全错（本仓记过这个亏）。');
+    console.error('       ⚠ 本层**不会**替你换端口 —— 换掉就把这次真实碰撞藏起来了。');
+    console.error('       处理：等下一条跑完再跑，或给一个空闲端口。');
+    console.error('');
+    throw new Error('端口 ' + port + ' 被占用' + (owner ? '（pid ' + owner + '）' : '（' + pf.reason + '）'));
+  }
+
   const tmp = path.join(os.tmpdir(), 'wb2api-inst-' + port + '-' + process.pid);
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(path.join(tmp, 'auths'), { recursive: true });
@@ -179,34 +332,55 @@ async function startInstance(opts) {
 
   const logPath = path.join(tmp, 'server.log');
   const out = fs.openSync(logPath, 'a');
-  // ⚠ cwd=tmp：config 里的相对路径（./auths、./data）**全部**落在临时目录。
-  const srv = spawn(EXE, ['-config', 'config.json'], { cwd: tmp, stdio: ['ignore', out, out] });
-
-  const base = 'http://127.0.0.1:' + port;
-  const deadline = Date.now() + (opts.readyMs || 12000);
-  let up = false;
-  while (Date.now() < deadline) {
-    try {
-      const r = await httpGetText(base + '/healthz');
-      // ⚠⚠ `/healthz` 在**没有健康账号**时回 **503**（body 是 {"healthy":0,…}）。
-      //
-      // 那不是"没起来"，而是"起来但池子是空的"。就绪判据若只认 200，
-      // 一个**故意不带凭证**的探针（例如只验令牌与鉴权的那个）会永远等下去，
-      // 报错说"实例未起来"，把探针自己的前提问题伪装成产品故障
-      //（实测踩到：token 安全探针起不来，日志里其实已经"multi2api 已启动"）。
-      //
-      // 所以判据是**服务开始应答**（200 或 503 都是应答），不是"healthy > 0"。
-      if (r.status === 200 || r.status === 503) { up = true; break; }
-    } catch { }
-    await sleep(200);
-  }
   const readLog = () => { try { return fs.readFileSync(logPath, 'utf8'); } catch { return ''; } };
-  if (!up) {
-    try { srv.kill(); } catch { }
-    throw new Error('实例未在 ' + base + ' 起来（pid=' + srv.pid + '）\n--- server.log ---\n' + readLog().slice(-2000));
+
+  // ③ 子进程收尾一律走 finally：起不来 / 就绪超时 / 中途抛异常，
+  //    **三种情况都必须 kill**。漏一种就留下一个占着端口的孤儿进程，
+  //    下一次运行的第一条断言就会是"端口被占用"—— 而那正是为了防串台才加的检查，
+  //    于是"泄漏"会被误读成"环境脏"。
+  let srv = null;
+  try {
+    // ⚠ cwd=tmp：config 里的相对路径（./auths、./data）**全部**落在临时目录。
+    srv = spawn(EXE, ['-config', 'config.json'], { cwd: tmp, stdio: ['ignore', out, out] });
+
+    const base = 'http://127.0.0.1:' + port;
+    const deadline = Date.now() + (opts.readyMs || 12000);
+    let up = false;
+    while (Date.now() < deadline) {
+      try {
+        const r = await httpGetText(base + '/healthz');
+        // ⚠⚠ `/healthz` 在**没有健康账号**时回 **503**（body 是 {"healthy":0,…}）。
+        //
+        // 那不是"没起来"，而是"起来但池子是空的"。就绪判据若只认 200，
+        // 一个**故意不带凭证**的探针（例如只验令牌与鉴权的那个）会永远等下去，
+        // 报错说"实例未起来"，把探针自己的前提问题伪装成产品故障
+        //（实测踩到：token 安全探针起不来，日志里其实已经"multi2api 已启动"）。
+        //
+        // 所以判据是**服务开始应答**（200 或 503 都是应答），不是"healthy > 0"。
+        if (r.status === 200 || r.status === 503) { up = true; break; }
+      } catch { }
+      await sleep(200);
+    }
+    if (!up) {
+      throw new Error('实例未在 ' + base + ' 起来（pid=' + srv.pid + '）\n--- server.log ---\n' + readLog().slice(-2000));
+    }
+    const stop = () => { try { srv.kill(); } catch { } };
+    return { base, tmp, key, logPath, stop, readLog, pid: srv.pid };
+  } catch (e) {
+    // 到这里说明异常已经发生：**必须**把子进程收掉再往上抛。
+    try { if (srv) srv.kill(); } catch { }
+    throw e;
+  } finally {
+    // 无论走哪条分支都关掉日志句柄（Windows 上不关会锁着文件，
+    // 下一次 rmSync(tmp) 会失败）。
+    try { fs.closeSync(out); } catch { }
   }
-  const stop = () => { try { srv.kill(); } catch { } };
-  return { base, tmp, key, logPath, stop, readLog, pid: srv.pid };
 }
 
-module.exports = { startInstance, httpJson, httpGetText, sleep, REPO, EXE };
+module.exports = {
+  startInstance, httpJson, httpGetText, sleep, REPO, EXE,
+  // B 段：构建新鲜度（口径与 verify_login_visual_e2e.js:419-431 一致，那边只报不判）
+  describeBuild, assertBuildFresh, BUILD_SOURCES,
+  // C 段：端口预检（占用即红，不换端口）
+  assertPortFree, whoOwnsPort,
+};

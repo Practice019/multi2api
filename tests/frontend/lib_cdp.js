@@ -428,4 +428,74 @@ module.exports = {
   // ⚠ 导出的是**同一份**实现：调用方别再就地写一份等价的（本仓已因"同源副本会漂"
   //   交过一次学费 —— 判据/实现复制两份之后，改一处忘一处就变成两套行为）。
   withToken,
-  injectProbeKey, withChrome, until, showPanel, sleep, httpGet };
+  injectProbeKey, withChrome, until, showPanel, sleep, httpGet,
+  // assertConsoleShell / consoleEntry —— 见下面那段的说明（自带 CDP 的探针共用）。
+  assertConsoleShell,
+  consoleEntry,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// assertConsoleShell / consoleEntry —— "自带 CDP 引导段"的探针共用的两个小件
+//
+// # 为什么要有它们（2026-10-19，第三族"硬红体检"）
+//
+// 有些探针自己 `spawn(Chrome)` + `send('Page.navigate', {url: TARGET})`，
+// 而 `TARGET = process.env.XXX_URL || 'http://127.0.0.1:18080/ui'` —— **裸 /ui**。
+//
+// 于是当环境里没人设那个变量时，它们量到的是**登录页**（或空体），
+// 而它们的断言**全是正向的**（"下拉里显示 15"、"请求体里有 X"）⇒
+// 红是红了（不是静默假绿），但**归因指错了地方**：
+// 报的是"分页默认值不对"，真因是"页面根本不是控制台"。
+// 排查时会先去翻产品代码 —— 这是本仓最贵的一类亏。
+//
+// 两条修法（都能用，建议都上）：
+//   ① `consoleEntry(url)`：给入口补上 `?token=`，让页面**真的**是控制台；
+//   ② `assertConsoleShell(ev, ok, url)`：开页后先**正向自证**外壳在，
+//      把"页面不对"这件事在第一条断言里就大声说出来。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 给控制台入口补 `?token=`（已有就不动）。
+ *
+ * 令牌来源与 `probeApiKey` 同源：环境变量 → URL 上的 `?token=`。
+ * 探针实例里 `api_key` 与 `admin_token` 是**同一个值**（见 probeApiKey 的注释），
+ * 所以这里用 api_key 环境变量补 admin 门是自洽的。
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function consoleEntry(url) {
+  if (typeof url !== 'string' || !url) return url;
+  // 只处理"控制台入口"这种 URL（路径以 /ui 结尾或含 /ui?），别给 /v1 之类乱加。
+  if (!/\/ui(\?|$)/.test(url)) return url;
+  if (/[?&]token=/.test(url)) return url;
+  const tok = probeApiKey('', url) || process.env.WB2API_API_KEY || '';
+  if (!tok) return url;
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(tok);
+}
+
+/**
+ * 正向自证"打开的是控制台外壳"，并把结论作为一条断言记入。
+ *
+ * 返回一个对象，调用方可据此决定后续要不要继续（页面不对时继续跑没意义）。
+ *
+ * @param {(expr: string) => Promise<any>} ev  页内求值器
+ * @param {(cond: any, msg: string) => void} ok 断言记录器
+ * @param {string} url 入口 URL（仅用于报错时点名，令牌会被打码）
+ * @returns {Promise<{ready: boolean, info: object}>}
+ */
+async function assertConsoleShell(ev, ok, url) {
+  const info = JSON.parse(await ev(`JSON.stringify({
+    hasApi: typeof window.__wb2api__ === 'object' && !!window.__wb2api__,
+    hasNav: !!document.getElementById('nav'),
+    hasContent: !!document.getElementById('content'),
+    isLoginPage: !!document.getElementById('form') && !document.getElementById('nav'),
+    bytes: document.documentElement ? document.documentElement.outerHTML.length : 0,
+  })`));
+  const shown = String(url || '').replace(/token=[^&]*/, 'token=***');
+  ok(info.hasApi && info.hasNav && info.hasContent,
+    '打开的是控制台外壳（__wb2api__ + #nav + #content 都在）' +
+    ' —— 入口 ' + shown + '，实际 ' + JSON.stringify(info) +
+    (info.isLoginPage ? ' ⇒ **停在登录页**：入口缺 ?token= 或令牌不对，下面每条页面断言都会级联' : ''));
+  return { ready: !!(info.hasApi && info.hasNav && info.hasContent), info };
+}

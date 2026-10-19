@@ -135,9 +135,46 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
       return n;
     }
 
+    // waitProviderOptions：等**上游下拉**出现 `min` 个选项。
+    //
+    // # 为什么这才是"模型目录回来了"的正确信号
+    //
+    // 下面的 `waitModels(1, …)` 是**恒真**的：下拉里那个 `auto` 项永远在，
+    // 所以"至少有 1 项"在 `/v1/models` 还没回来时就满足了 —— 等于没等。
+    // 而 `#modelProvider` 的选项由 `syncModelProviderOptions(models)` 生成，
+    // 它只在 `renderModels` 拿到**非空** models 时才加出「全部上游」以外的项。
+    //
+    // T5/T7 之前服务端把 api_key 注入页面，模型在 boot 就加载好了，这个等待不急；
+    // 现在凭据由探针自己粘（见本文件顶部与 lib_cdp.pasteConsoleKey），
+    // 加载时刻整体后移到"粘完密钥之后" ⇒ 必须显式等这个信号，
+    // 否则读到的就是"还没画完"的空态（实测：13 个 id 在页内拿到了，
+    // 而下拉只有 1 项 —— 那是**读早了**，不是产品缺陷）。
+    async function waitProviderOptions(min, ms) {
+      const lim = Number(ms) || 20000;
+      const t0 = Date.now();
+      let n = 0;
+      while (Date.now() - t0 < lim) {
+        n = Number(await ev(`(function(){
+          var p = document.getElementById('modelProvider');
+          if (!p) return 0;
+          return Array.from(p.options).filter(function(o){ return !!o.value; }).length;
+        })()`)) || 0;
+        if (n >= (min || 2)) return n;
+        await sleep(300);
+      }
+      return n;
+    }
+
     // 切到对话测试
     if (!(await openPanel('对话测试'))) console.error('  ⚠ 20s 内导航里没出现「对话测试」⇒ 下面量的是没打开的面板，必假红');
-    await waitModels(1, 15000);   // 等模型下拉画出来（见 waitModels 的注释）
+    // ⚠ 先等**上游下拉**出现真实上游（那才是"模型目录回来了"的信号），再等模型下拉。
+    const providerOpts = await waitProviderOptions(2, 20000);
+    console.log('  就绪信号：上游下拉选项数 = ' + providerOpts);
+    if (providerOpts < 2) {
+      console.error('  ⚠ 上游下拉 20s 内只有 ' + providerOpts + ' 项 ⇒ /v1/models 没回来' +
+        '（先看上面有没有"粘密钥失败"的告警），下面的下拉条数断言会假红');
+    }
+    await waitModels(2, 15000);   // 再等模型下拉画出来（见 waitModels 的注释）
 
     // ---- 1) 控件存在 ----
     const s0 = JSON.parse(await ev(`JSON.stringify((function(){
