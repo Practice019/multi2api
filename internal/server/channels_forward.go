@@ -33,6 +33,12 @@ import (
 // errNoChannelMode：没配渠道存储 ⇒ 调用方按既有路径处理（不是错误，是一种"模式未开启"）。
 var errNoChannelMode = errors.New("channel_mode_disabled")
 
+// errChannelNoCandidate：能力索引里没有这个模型名 —— 与"模式未开启"是**两件不同的事**。
+//
+// 在 handler.go 里用它判"明确拒绝、绝不回落账号池"；特意做成同包别名，
+// 这样 handler.go 不必 import channelroute（核心层少一个依赖，也少一处口径分叉）。
+var errChannelNoCandidate = channelroute.ErrNoCandidate
+
 // channelForward 一次渠道转发的结果。
 type channelForward struct {
 	Stream        gateway.ChatStream
