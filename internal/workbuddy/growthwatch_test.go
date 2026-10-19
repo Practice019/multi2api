@@ -889,7 +889,7 @@ func TestGrowthAcceptAllBlockedByPrerequisiteIsSkip(t *testing.T) {
 	//	**不说明那件事真的要在客户端做**。
 	//
 	// 而 first_buddy 其实就在 autoActions 表里（runFirstBuddy：上报活跃 →
-	// 同意协议 → 领取 Buddy）。用户实测指出这一点（2026-10，账号 17005247808）：
+	// 同意协议 → 领取 Buddy）。用户实测指出这一点（2026-10，账号 170****7808）：
 	//
 	//	POST /admin/growth/auto {"task_code":"first_buddy"}
 	//	→ {"ok":true,"message":"已领取 Buddy（+300 分 +8 能量）"}

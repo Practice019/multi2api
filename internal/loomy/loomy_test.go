@@ -55,7 +55,7 @@ func TestParseClientShapedCredential(t *testing.T) {
 // 凭证同时带 phone 与 nickname 时，昵称必须取 phone（批量导入后也显示手机号）。
 func TestParseCredentialPhoneTakesPrecedenceOverNickname(t *testing.T) {
 	a, err := ParseCredential([]byte(`{
-      "phone": "19846952053",
+      "phone": "13800138000",
       "nickname": "NK6952053",
       "session": "0123456789abcdef0123456789abcdef",
       "userid": "260825101823357254",
@@ -64,8 +64,8 @@ func TestParseCredentialPhoneTakesPrecedenceOverNickname(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	if a.Nickname != "19846952053" {
-		t.Errorf("nickname = %q，期望取手机号 19846952053（而不是 nickname 字段 %q）", a.Nickname, "NK6952053")
+	if a.Nickname != "13800138000" {
+		t.Errorf("nickname = %q，期望取手机号 13800138000（而不是 nickname 字段 %q）", a.Nickname, "NK6952053")
 	}
 }
 

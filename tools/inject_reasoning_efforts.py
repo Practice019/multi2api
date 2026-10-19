@@ -22,10 +22,18 @@
 ⚠ 幂等：已有 reasoningEfforts 的条目会跳过（重跑不会加两遍）。
 """
 import io
+import os
 import re
 import sys
 
-PATH = r"C:\Users\21877\.dsh\profiles\web\cordis.patch.yml"
+# 目标文件：优先环境变量，否则按「用户主目录/.dsh/profiles/web/…」推导。
+#
+# ⚠ 原先这里写死了 `C:\Users\21877\...` —— 换个机器、换个用户名就失效，
+#   而且把作者本机的用户名泄进了仓库（内容审计 tools/**.py 的 abspath 一栏）。
+#   现在默认值与原来**等价**（同一台机器上解析到同一个文件），但跟着 $HOME 走。
+PATH = os.environ.get("DSH_CORDIS_PATCH") or os.path.join(
+    os.path.expanduser("~"), ".dsh", "profiles", "web", "cordis.patch.yml")
+
 TARGET_PROVIDER = sys.argv[1] if len(sys.argv) > 1 else "test"
 LEVELS = ["off", "low", "high", "max"]
 # ⚠⚠ 这几个档要**显式声明不支持**（值写 null）。
