@@ -64,8 +64,58 @@ func (h *Handler) channelReverseMapping() map[string]string {
 	return out
 }
 
+// appendChannelModels 把渠道声明的公开名**并进**上游目录（只增不减、按 id 去重）。
+//
+// # 它为什么存在（两次反馈的差别）
+//
+// 第一次用户看到的是「除新建渠道外其余上游全是 0 个」⇒ 那是收紧（目录只由渠道决定）；
+// 第二次用户看到的是「可用模型 674 个里没有我那条渠道」⇒ 那是收紧撤过头（目录只看上游）。
+// 两次都不是"要不要渠道"，而是**并集**：上游照旧全量，渠道声明的也进来。
+//
+// 名字排序：已在上游目录里的同名**不重复添加**（上游那份为准，它的 owned_by 更准确）。
+//
+// ⚠ 为什么要先复制再追加：data 可能来自 h.modelList() 的缓存切片（共享底层数组）。
+// 就地 append 会写进缓存底层数组 —— 后续请求会看到"幽灵模型"，并发下更是数据竞争。
+// 这个坑在单请求测试里完全看不出来，所以我在这里显式复制。
+func (h *Handler) appendChannelModels(r *http.Request, data []map[string]any) []map[string]any {
+	names, ok := h.channelPublicNames(r)
+	if !ok || len(names) == 0 {
+		return data
+	}
+	seen := make(map[string]bool, len(data)+len(names))
+	for _, m := range data {
+		if id, _ := m["id"].(string); id != "" {
+			seen[id] = true
+		}
+	}
+	extra := make([]string, 0, len(names))
+	for _, n := range names {
+		if n != "" && !seen[n] {
+			seen[n] = true
+			extra = append(extra, n)
+		}
+	}
+	if len(extra) == 0 {
+		return data
+	}
+	out := make([]map[string]any, len(data), len(data)+len(extra))
+	copy(out, data)
+	owner := h.channelOwnerByModel()
+	for _, n := range extra {
+		out = append(out, map[string]any{
+			"id":       n,
+			"object":   "model",
+			"owned_by": owner[n],
+		})
+	}
+	return out
+}
+
 // channelModelsForRequest 返回对外目录（OpenAI 形状的 data 数组）。
 // 没有渠道存储时返回 nil ⇒ 调用方回落既有路径。
+//
+// ⚠ 现在**不再**被 /v1/models 调用（撤收紧后用 appendChannelModels 做并集）；
+// 保留它是给"只要渠道视角"的调用方（以及它的测试）用的，语义没变。
 func (h *Handler) channelModelsForRequest(r *http.Request) []map[string]any {
 	names, ok := h.channelPublicNames(r)
 	if !ok {
