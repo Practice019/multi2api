@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/authlimit"
 )
 
 // 端点路径。集中一处：前端、探针、文档都照这里写，避免三处各写一遍写岔。
@@ -31,11 +33,22 @@ const (
 	PathPassword = "/admin/auth/password"
 )
 
-// maxAuthBody 匿名端点的请求体上限（8KB：注册/登录的 JSON 用不到更多）。
+// maxAuthBody 匿名端点的请求体上限。
 //
-// ⚠ 这里只做"别把内存读爆"的兜底；真正的反批量上限（413 + code）
-// 在 T10 接上 internal/authlimit.EnforceBodyLimit 后统一（同一数值）。
-const maxAuthBody = 8 << 10
+// ⚠ **唯一来源在 `internal/authlimit.MaxAnonymousBody`**，这里只是引用。
+//
+// 原先这里是独立的 `8 << 10`，与 authlimit 那份**各写一遍**。两份独立常量总有
+// "改了一处忘了另一处"的风险，而这两处**必须相等**：
+//
+//	· 限流层（`authlimit.EnforceBodyLimit`）先判 413 —— 它若**小于**读取层，
+//	  就会出现"读取层已经把更大的体读进来了、限流层才说超限"，白读一遍；
+//	· 它若**大于**读取层，`http.MaxBytesReader` 会先返回 `MaxBytesError`，
+//	  而那个错误不是限流层的 413 信封（code `body_too_large`）⇒ 同一个越界
+//	  请求会因为"谁先撞上"而得到两种不同回执。
+//
+// 所以不是"加一条钉住两份常量的测试"（那只是把漂移变成红灯），而是**让漂移
+// 结构上不可能**：只有一处能改，改了两边一起变。
+const maxAuthBody = authlimit.MaxAnonymousBody
 
 // Limiter 限速接缝。
 //
