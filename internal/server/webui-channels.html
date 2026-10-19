@@ -136,9 +136,10 @@
     <label>名称</label>
     <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
     <label>模型</label>
-    <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4">
+    <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4" oninput="renderVisible()">
 <button type="button" onclick="discover()" title="拿上面的 Base URL + key 去问上游有哪些模型，问完自动填进左边这一栏（不是保存）">自动发现</button>
 <div id="f-disc" class="dim" style="font-size:12px;margin:2px 0 0"></div>
+<div id="f-vis" style="margin:6px 0 0"></div>
     <div class="hint">这里写上游认识的名字；对外想换名字就用下面的映射。</div>
     <label>模型映射</label>
     <textarea id="f-map" placeholder='每行一条：公开名=上游名&#10;pub-y=real-x'></textarea>
@@ -169,6 +170,38 @@ let editing = null;   // 正在编辑的渠道 id（null = 新增）
 //      再自己按保存，比"发现并直接落库"安全（后者会在 Base URL 写错时把错的列表写进渠道）。
 //   2. key 空着就**明确说清**，不静默发一个空 key 的请求（那会拿到 401，然后用户会以为功能坏了）。
 //      编辑已存在的渠道时可以不填 —— 服务端会用该渠道自己**启用中**的那个 key。
+// renderVisible() 「对外可见」勾选：把 #f-models 里的模型逐个渲染成复选框。
+//
+// 语义（R1）：对外 = API Key 白名单 ∩ **已启用渠道声明的模型** ⇒ 取消勾选 = 把该模型从这条渠道
+// 的 models 里摘掉 ⇒ 外部 /v1/models 立刻看不见它（不用改请求头、不用重启）。
+// 所以这个控件**没有独立状态**：它只是 #f-models 那一栏的另一种编辑方式（勾=在栏里，去勾=不在栏里）。
+//
+// ⚠ 自渲染而不是"打开对话框时填一次"：这样它不依赖任何对话框钩子，输入框手动敲、自动发现回填、
+//   勾选切换三条路径都会一致地反映出来 —— 少一个"状态不同步"的洞。
+function renderVisible() {
+  const box = document.getElementById('f-vis');
+  if (!box) return;
+  const names = document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!names.length) { box.innerHTML = '<div class="dim" style="font-size:12px">填了模型名之后，这里会出现可勾选的「对外可见」列表</div>'; return; }
+  const uniq = [...new Set(names)];
+  box.innerHTML = '<div class="dim" style="font-size:12px;margin-bottom:2px">对外可见（取消勾选即从本渠道摘掉该模型 ⇒ 外部 /v1/models 立刻看不见）</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:10px;font-size:13px">'
+    + uniq.map(n => '<label style="display:flex;align-items:center;gap:4px;height:22px"><input type="checkbox" checked onchange="toggleVisible(this)" data-m="' + esc(n) + '">' + esc(n) + '</label>').join('')
+    + '</div>';
+}
+
+// toggleVisible() 去勾 ⇒ 从 #f-models 摘掉；勾回 ⇒ 追加回去（不改顺序语义，只增删）。
+// ⚠ 摘掉是**删除**不是隐藏标记：本设计里"对外可见"就是渠道 models 的成员资格，没有第二份状态
+//   （第二份状态迟早与第一份对不上，这正是"取消勾选后外部还看得见"这类 bug 的来源）。
+function toggleVisible(cb) {
+  const el = document.getElementById('f-models');
+  const name = cb.getAttribute('data-m');
+  const names = el.value.split(',').map(s => s.trim()).filter(Boolean);
+  const next = cb.checked ? (names.includes(name) ? names : names.concat([name])) : names.filter(n => n !== name);
+  el.value = next.join(',');
+  renderVisible();   // 自己重绘一次，保证"手动敲/自动发现/勾选"三条路径的显示始终一致
+}
+
 async function discover() {
   const box = document.getElementById('f-disc');
   const base = document.getElementById('f-base').value.trim();
