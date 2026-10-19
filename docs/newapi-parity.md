@@ -205,6 +205,22 @@ GET /ui   Cookie: 陈旧令牌                    → 200  登录页 + 清掉那
 **无限重载**。修法：`session` 端点接受令牌身份（回 `kind:"token"`、`user:null`），
 `logout` 同时清令牌 Cookie。见 `internal/account/session_token_test.go` 的 6 条。
 
+### 无头浏览器视觉 E2E 挖出的三条真缺陷（已修，`a53bb2b`）
+
+新增 `tests/frontend/verify_login_visual_e2e.js`（自带 CDP + 截图 + 几何判据，带判别力
+自检：好桩 0 红 + 三个坏桩各自让目标判据变红）。它一次跑出三条**静态阅读看不见**的缺陷 ——
+三条都只在特定身份/时间窗里出现：
+
+| # | 现象（探针实测） | 真因 | 修法 |
+|---|---|---|---|
+| ① | 成员会话里 `TypeError: Cannot read properties of null (reading 'accounts')` ⇒ 面板保持开着等 35s 也不刷新 | `/admin/accounts` 对成员 403（`admin()` 抛），而回落那句 `s.accounts` 里 `s` **也是 null**（`/status` 同样只给管理员）⇒ catch 自身再抛，**没有外层 try** ⇒ `refresh()` 整段中断，含 30s 轮询注册 | 成员**跳过**那次注定 403 的请求；回落改 `(s && s.accounts) \|\| []` |
+| ② | 新建 API key 后 3.2s 列表仍是 0 条；**重开面板** 10ms 就看到 | 创建路径漏了 `writeInvalidate([EP_APIKEYS])`（删除/轮换都有，注释里还写着这条的代价）⇒ `loadAPIKeys()` 用 30s 旧快照重画 | 创建/更新后先丢缓存再拉列表 |
+| ③ | 同一浏览器换身份后，「管理钥匙」按**上一个身份**的快照渲染（成员→令牌时文案自相矛盾；反方向会把管理员的 key 列表画给成员看） | `lazyCache` 的 key 只有逻辑名（`ep:/admin/apikeys`），却**落 localStorage 且跨导航存活**、TTL 30s ⇒ 键里没有身份 | 缓存加身份命名空间 `wb2api.pcache.<scope>.<key>`（`token` / `u:<id>:<role>` / `anon`），身份一确定就切，登出退回 anon |
+
+修完该探针 **95 PASS / 0 FAIL**，自检 4/4 PASS；`console.error` / 未捕获异常 /
+`Network.loadingFailed` 三条硬判据全空。第 ③ 条的反方向（管理员 → 成员）窗口只有 30 秒，
+**人工几乎撞不到** —— 这是"必须有无头浏览器验收"的最好论据之一。
+
 ## 原则（写下来免得后人误读）
 
 1. ⚠ **不是所有东西都该换** —— 每项先**证伪我们是否早就有了**（第 1、2、3 项都证明了有，且有的更强）。
