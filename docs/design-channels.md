@@ -288,3 +288,41 @@ commit `50c10c2`（控制台加渠道入口 section）的信息里写着：
 顺带记一条对后来者有用的事实：本仓**没有 `.gitattributes`**、`core.autocrlf=true` ⇒
 任何"按行处理文件内容"的代码都天生暴露在 CRLF 之下（仓库历史上两次 `stripComments` 静默失效
 正源于此）。写新代码时若按行处理，请显式用 `/\r?\n/` 或先归一化。
+## 前端套件从 29/32 到 32/32：一个只有改内嵌资源时才会撞上的操作陷阱（2026-10-20）
+
+起因：我给 `webui.html` 加了渠道入口 section，之后套件里三条真前端 e2e 一起变红。它们**不是**先报
+"前端坏了"，而是**拒绝在旧产品上断言**：
+
+    ✗✗ 构建**过期**：bin\wb2api-server-probe.exe
+       exe mtime 比 internal/server/webui.html 旧 15033 秒
+       ⇒ 浏览器拿到的是 //go:embed 进去的**旧**页面
+       ⚠ 隔离实例未起来: 构建过期，拒绝在旧页面上断言
+
+为什么"重建探针"只救活了其中一条 —— 三条脚本的默认 exe **不一致**：
+
+| 脚本 | 默认用的 exe | 修法 |
+| --- | --- | --- |
+| `verify_accts_delegation.js` | `bin/wb2api-server-probe.exe`（报错时会打印"本次起的构建"） | 重建探针即可 ⇒ 转绿 |
+| `verify_checkin_ui_e2e.js` | 取 `WB2API_EXE`（未设时是别的构建） | 必须 `WB2API_EXE=bin/wb2api-server-probe.exe` |
+| `verify_all_buttons_e2e.js` | 同上 | 同上 |
+
+正确姿势（两条都做，别只做一半）：
+
+    go build -o bin/wb2api-server-probe.exe ./cmd/server
+    WB2API_EXE=bin/wb2api-server-probe.exe E2E_PORT=7887 node tests/frontend/verify_checkin_ui_e2e.js
+    WB2API_EXE=bin/wb2api-server-probe.exe E2E_PORT=7888 node tests/frontend/verify_all_buttons_e2e.js
+
+结果（实测）：
+
+    verify_checkin_ui_e2e.js  ⇒ exit=0，页面未捕获异常: []       「全部签到」前端 e2e 全部通过
+    verify_all_buttons_e2e.js ⇒ exit=0，累计未捕获异常: []       全部按钮 e2e 通过
+    run_frontend_suites.js    ⇒ === 32/32 通过 ===
+
+**为什么这是好事**：这些守卫拒绝在旧页面上给结论 —— 与"门禁假绿"是同一族纪律的另一面。
+改了 `internal/server/*.html`（内嵌资源）**必须重建二进制**，否则浏览器看到的是旧页面，
+"前端没生效"这类误判全都由此而来。本功能新增的 `webui-channels.html` 同样在 embed 清单里 ⇒
+改它之后**同样要重建**（门禁①只验证语法，验证不了"你部署的是新版"）。
+
+安全说明（顺手钉死的一条事实）：7863 上跑的是 `bin\wb2api-server.exe`，与探针
+`bin\wb2api-server-probe.exe` 是**两个文件**；且 `bin/` 被 `.gitignore:28` 忽略 ⇒
+重建探针既不会碰到用户的实例，也不会进提交。
