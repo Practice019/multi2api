@@ -1509,7 +1509,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		fw, ferr := h.forwardViaChannel(r.Context(), peek.Model, body)
 		if ferr != nil {
-			writeOpenAIError(w, http.StatusBadGateway, "channel_error", ferr.Error())
+			// ⚠ 走 writeChannelError 而不是写死 502：上游的 429/401 要原样透传给客户端
+			// （见 channels_forward.go 里那段"实测踩过"的注释）。
+			h.writeChannelError(w, ferr)
 			return
 		}
 		h.writeChannelStream(w, r, fw)
