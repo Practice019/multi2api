@@ -13,13 +13,16 @@ const window = { _statsCache: null };
 function resetEls() { for (const k of Object.keys(els)) { const e = els[k]; e.hidden = true; e.className=''; e.textContent=''; e.innerHTML=''; } window._statsCache = null; }
 
 function renderCards(h, s) {
-    // 成员模式：没有账号池读数（/status 对成员 403）⇒ 这一排卡片换一句说明，
-    // 而不是渲染出一排 `—` 或直接抛异常（后者会在控制台留一条看不懂的报错）。
+    // ⚠ 2026-10-19 新口径：这里原来写"当前登录是<b>成员</b>，账号池读数仅管理员可见"。
+    //   成员已取消 ⇒ 走不到 `!s` 这一支了（`refresh()` 在 403/网络失败时**提前 return**，
+    //   根本不会调 renderCards 画这一排）。
+    //   留着这一支只为"真拿到 null 也不炸"，文案改成**不假设角色**的中性说明 ——
+    //   它现在表达的是"读数没拿到"，而不是"你是成员所以看不到"。
     if (!s) {
       $('cards').innerHTML = '<div class="card" style="grid-column:1/-1">'
         + '<div class="k">账号池</div>'
-        + '<div class="v dim" style="font-size:13px">当前登录是<b>成员</b>，'
-        + '账号池读数仅管理员可见。你自己的用量看下面的统计卡。</div></div>';
+        + '<div class="v dim" style="font-size:13px">本次没取到账号池读数'
+        + '（服务端未返回或请求失败）。上面的状态点与提示条里有具体原因。</div></div>';
       return;
     }
     // 网关状态卡：核心运营读数（对标 one-api 管理台"渠道健康 + 汇总"）。
@@ -267,9 +270,9 @@ ok(noStats['累计请求'].v === '—' && noStats['成功率'].v === '—',
 resetEls();
 let memberThrew = '';
 try { renderCards({ healthy: 0, total: 0 }, null); } catch (e) { memberThrew = String(e && e.message || e); }
-ok(!memberThrew, '成员模式下 renderCards 不抛异常（实际：' + (memberThrew || '未抛') + '）');
-ok((($('cards').innerHTML.match(/class="card"/g) || []).length === 1) && $('cards').innerHTML.includes('成员'),
-  '成员模式渲染 1 张说明卡并点明「成员」（实际：' + $('cards').innerHTML.slice(0, 80) + '）');
+ok(!memberThrew, 's 为 null 时 renderCards 不抛异常（实际：' + (memberThrew || '未抛') + '）');
+ok((($('cards').innerHTML.match(/class="card"/g) || []).length === 1) && $('cards').innerHTML.includes('本次没取到账号池读数'),
+  '读取异常时渲染 1 张说明卡（文案不假设角色）（实际：' + $('cards').innerHTML.slice(0, 80) + '）');
 
 console.log('\n[C2] #gwHint 三种分支');
 resetEls(); renderCards({ healthy: 2, total: 3 }, { total: 3, healthy: 2 });

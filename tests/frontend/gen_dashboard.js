@@ -263,9 +263,9 @@ ok(noStats['累计请求'].v === '—' && noStats['成功率'].v === '—',
 resetEls();
 let memberThrew = '';
 try { renderCards({ healthy: 0, total: 0 }, null); } catch (e) { memberThrew = String(e && e.message || e); }
-ok(!memberThrew, '成员模式下 renderCards 不抛异常（实际：' + (memberThrew || '未抛') + '）');
-ok((($('cards').innerHTML.match(/class="card"/g) || []).length === 1) && $('cards').innerHTML.includes('成员'),
-  '成员模式渲染 1 张说明卡并点明「成员」（实际：' + $('cards').innerHTML.slice(0, 80) + '）');
+ok(!memberThrew, 's 为 null 时 renderCards 不抛异常（实际：' + (memberThrew || '未抛') + '）');
+ok((($('cards').innerHTML.match(/class="card"/g) || []).length === 1) && $('cards').innerHTML.includes('本次没取到账号池读数'),
+  '读取异常时渲染 1 张说明卡（文案不假设角色）（实际：' + $('cards').innerHTML.slice(0, 80) + '）');
 
 console.log('\n[C2] #gwHint 三种分支');
 resetEls(); renderCards({ healthy: 2, total: 3 }, { total: 3, healthy: 2 });
