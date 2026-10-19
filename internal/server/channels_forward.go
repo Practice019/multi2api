@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 
 	"workbuddy2api/internal/channelroute"
 	"workbuddy2api/internal/channelstore"
@@ -48,7 +49,15 @@ type channelForward struct {
 }
 
 // forwardViaChannel 按渠道口径转发；未开启渠道模式时返回 errNoChannelMode。
+//
+// attempt=0 即"第一次尝试"。带重试的调用方用 forwardViaChannelAttempt 递增它换档 ——
+// 之所以分两个函数：既有调用点（入口 + 各测试）都只关心"发一次"，不该被迫传一个恒为 0 的参数。
 func (h *Handler) forwardViaChannel(ctx context.Context, publicModel string, body []byte) (channelForward, error) {
+	return h.forwardViaChannelAttempt(ctx, publicModel, body, 0)
+}
+
+// forwardViaChannelAttempt attempt 递增即换下一优先级档（new-api 的"第 n 次重试走第 n 档"）。
+func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel string, body []byte, attempt int) (channelForward, error) {
 	var zero channelForward
 	if h.cfg.Channels == nil {
 		return zero, errNoChannelMode
@@ -60,10 +69,18 @@ func (h *Handler) forwardViaChannel(ctx context.Context, publicModel string, bod
 		return zero, err
 	}
 
-	// TODO(下一轮)：这里换成 channelstore.Select(group, cands[0].UpstreamModel, attempt) ——
-	// 它的"优先级阶梯 + 同档加权随机 + 第 n 次重试走第 n 档"才是 new-api 的完整语义。
-	// 本轮先取首选，把链路（规划→取key→改写model→打上游）先钉住并测通。
-	cand := cands[0]
+	// 选路：**优先级阶梯 + 同档加权随机 + 重试换档**（new-api 的语义）。
+	//
+	// ⚠ 为什么这里不直接调 channelstore.Select：它以能力索引的 (group, model, channel_id)
+	// 为键，只知道"哪个渠道能服务哪个**上游模型名**"；而这条路径需要的是**已解析出上游名的候选**
+	// （映射之后的名字，R2 请求侧），也就是 channelroute.Plan 的产物。两者输入不同，
+	// 硬把 Plan 的结果塞回 Select 反而要再造一次键。语义保持一致，输入各用各的。
+	//
+	// 档位 = 优先级；重试时 attempt 递增即换下一档（与 new-api 的"第 n 次重试走第 n 档"同构）。
+	cand, err := pickCandidate(cands, attempt)
+	if err != nil {
+		return zero, err
+	}
 
 	key := pickEnabledKey(cand.Channel)
 	if key == "" {
@@ -103,6 +120,68 @@ func (h *Handler) forwardViaChannel(ctx context.Context, publicModel string, bod
 		Stream: cs, ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
 		UpstreamModel: cand.UpstreamModel,
 	}, nil
+}
+
+// pickCandidate 按 new-api 的选路语义从候选里挑一条。
+//
+//   - 档位按**优先级**划分：优先用最高档；attempt 递增 ⇒ 往下一档（重试换档）
+//   - 同档内按**权重**加权随机（权重 <=0 视为 1，避免"权重没填 ⇒ 永远选不中"）
+//   - 候选按 (优先级 desc, 渠道 id asc) 稳定排序（channelroute.Plan 保证）⇒ 同档顺序确定
+//
+// 返回错误时调用方应把它当"这条请求失败"上报，**不回落账号池**（Key 型渠道的分界）。
+func pickCandidate(cands []channelroute.Candidate, attempt int) (channelroute.Candidate, error) {
+	if len(cands) == 0 {
+		return channelroute.Candidate{}, errChannelNoCandidate
+	}
+	// 分出档位（Plan 已按优先级降序 ⇒ 相邻相等即为同一档）
+	type tier struct {
+		prio int
+		from int
+		to   int // 半开区间 [from, to)
+	}
+	var tiers []tier
+	for i := 0; i < len(cands); {
+		j := i
+		for j < len(cands) && cands[j].Priority == cands[i].Priority {
+			j++
+		}
+		tiers = append(tiers, tier{prio: cands[i].Priority, from: i, to: j})
+		i = j
+	}
+	ti := attempt
+	if ti < 0 {
+		ti = 0
+	}
+	if ti >= len(tiers) {
+		// 档位用尽：重试次数超过"不同优先级档数" ⇒ 明确失败。
+		// ⚠ 这里**不**回退到最后一档：那会让"重试"变成"无限重试同一条渠道"，
+		// 上游真故障时表现为请求挂很久最后仍失败，而日志里看不出在重试什么。
+		return channelroute.Candidate{}, fmt.Errorf("渠道候选档位已用尽（attempt=%d，档数=%d）", attempt, len(tiers))
+	}
+	t := tiers[ti]
+	sum := 0
+	for k := t.from; k < t.to; k++ {
+		w := cands[k].Weight
+		if w <= 0 {
+			w = 1
+		}
+		sum += w
+	}
+	if sum <= 0 { // 理论上到不了（权重下限为 1），防御性保留
+		return cands[t.from], nil
+	}
+	n := rand.Intn(sum)
+	for k := t.from; k < t.to; k++ {
+		w := cands[k].Weight
+		if w <= 0 {
+			w = 1
+		}
+		if n < w {
+			return cands[k], nil
+		}
+		n -= w
+	}
+	return cands[t.from], nil // 兜底：不该到
 }
 
 // pickEnabledKey 取一个启用状态的 key；空 = 没得用（不是"返回空字符串当 key 用"）。
