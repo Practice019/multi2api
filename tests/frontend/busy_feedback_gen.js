@@ -67,11 +67,19 @@ async function busyRun(btn, fn, opts) {
     const t0 = Date.now();
     // 阈值从 SLOW_HINT_MS 推导，不写字面量 2 —— 否则改常量时这里会悄悄漂移。
     const slowSec = Math.ceil(SLOW_HINT_MS / 1000);
+    // 进度文案：默认"正在刷新界面"，但**等后台任务**的调用方必须能覆盖它。
+    //
+    // 为什么：`growthOneClick`（一键完成）等的是"成长待办后台跑完"，
+    // 单账号实测约 15s（专家链 8 次 × 6s 节流 + 事件上报间隔 1.05s），
+    // 4 个账号串行约 1 分钟。而默认文案写的是"正在刷新界面" ——
+    // 用户看到的是一句与事实无关的话，自然读成"卡住了 / 这功能坏了"。
+    // 传 progress 后显示"正在等待上游执行"，等待性质一目了然。
+    const progress = o.progress || '正在刷新界面';
     const render = () => {
       const sec = Math.floor((Date.now() - t0) / 1000);
       g.textContent = sec >= slowSec
-        ? `${label}：正在刷新界面…（上游较慢，已等 ${sec}s）`
-        : `${label}：正在刷新界面…`;
+        ? `${label}：${progress}…（上游较慢，已等 ${sec}s）`
+        : `${label}：${progress}…`;
     };
     render();
     g.hidden = false;

@@ -10,10 +10,32 @@ const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'
 let share = [], growthSnaps = [];
 function renderGrowthGroups() {}
 
+function maskNick(n) {
+    const s = String(n == null ? '' : n);
+    if (!s) return '—';
+    if (s.indexOf('*') >= 0) return s;
+    const rs = Array.from(s);
+    if (rs.length <= 4) return s;   // 太短全打码 = 不可辨认，原样
+    return rs.slice(0, 3).join('') + '*'.repeat(rs.length - 5) + rs.slice(-2).join('');
+  }
+
 function creditsOf(uid) {
     const a = share.find(x => x.uid === uid);
     if (!a || typeof a.credits !== 'number') return null;
     return a.credits;
+  }
+
+const COLS = {
+    travel: 8,   // 猫猫旅行
+    growth: 99,  // 成长计划（变异：列数漂移）
+    // ⚠ jobs / logs 已移除（2026-10-19）：任务调度页换成卡片网格、请求日志页换成
+    //   grid 表格（照抄参考项目 Agent2API），两处都不再有 `<table>` 列数，
+    //   HTML 里的 `__COLS_JOBS__` / `__COLS_LOGS__` 占位符也一并删了 ⇒ 留着就是死字段。
+    //   剩下的三条仍被 rowPlaceholder 使用，别顺手删。
+  }
+
+function rowPlaceholder(cols, text, cls) {
+    return `<tr><td colspan="${cols}" class="${cls || 'dim'}">${esc(text)}</td></tr>`;
   }
 
 function renderGrowth(list) {
@@ -39,19 +61,25 @@ function renderGrowth(list) {
 
     $('growthCards').innerHTML = [
       ['账号数', growthSnaps.length, ''],
-      // 额度排在「现在可领」前面：先看家底，再看还能拿多少。
+      // 额度排在「可领」前面：先看家底，再看还能拿多少。
       ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
-      ['现在可领额度', sum.right_now, sum.right_now ? 'ok' : 'dim'],
-      ['待领取任务', sum.right_now_n, sum.right_now_n ? 'warn' : 'dim'],
-      // 「待完成 / 完成后可获得」的口径是**还没做完的任务**：
-      // 未接单 + 已接单 + 进行中三种状态都算（见后端 GrowthTask.Pending）。
-      // 不含 completed（那属于「待领取」，领奖是另一步）。
-      // 措辞强调"完成"而不是"接单"：接单只是开始计进度，不发任何奖励。
-      ['待完成任务', sum.claim, sum.claim ? 'ok' : 'dim'],
-      ['完成后可获得的额度', sum.credit, sum.credit ? 'ok' : 'dim'],
+      // 待办合计 = 待完成任务 + 完成后可得（合并：「5 任务 · +600」）。
+      ['待办合计', `${sum.claim} 任务 · +${sum.credit}`, sum.claim ? 'warn' : 'dim'],
+      // 可领合计 = 待领取任务 + 现在可领额度（合并：「2 项 · +300」）。
+      ['可领合计', `${sum.right_now_n} 项 · +${sum.right_now}`, sum.right_now_n ? 'ok' : 'dim'],
       ['最长连登', sum.streak + ' 天', ''],
       ['能量合计', sum.energy, ''],
-    ].map(([k, v, c]) =>
+    ].filter(([k, v]) =>
+      // ⚠ 值为 0 的「合计类」卡**直接不生成**（用户要求"少空白、合理利用空间"）。
+      //   实测最典型的浪费是「可领合计 **0 项 · +0**」—— 值为 0 时它没有任何信息量。
+      // ⚠ 判据保守：**只过滤名字含「合计」的** —— 「账号数 0」是**最重要**的信息
+      //   （配了上游却没账号），一刀切会掩盖故障。
+      // ⚠⚠ 为什么"不生成"而不是"生成后再扫一遍藏掉"：我在 `refresh()` 里扫过一遍、
+      //   又加过 500ms 延时再扫一遍，**两次都没生效** —— 因为这几张卡要等
+      //   `loadGrowth()` 拿到上游数据才画，**扫描的时机永远赶不上**（看截图才发现）。
+      //   在生成处判掉，与时序无关。
+      !(k.indexOf('合计') >= 0 && /^[0\s+项·—–\-]*$/.test(String(v)))
+    ).map(([k, v, c]) =>
       `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
     if (!growthSnaps.length) {
       $('growthRows').innerHTML = rowPlaceholder(COLS.growth, '账号池为空');
@@ -65,7 +93,7 @@ function renderGrowth(list) {
       const stale = g.stale
         ? ` <span class="pill warn" title="本次刷新失败，展示的是 ${new Date(g.observed_at).toLocaleTimeString('zh-CN', { hour12: false })} 的数据：${esc(g.error || '')}">可能过期</span>`
         : '';
-      const name = esc(g.nickname || (g.uid || '').slice(0, 8)) + stale;
+      const name = esc(maskNick(g.nickname)) + stale;
       const U = esc(g.uid);
       if (g.error && !g.tasks_total) {
         // 「昵称」列已占 1 格，余下 COLS.growth - 1 格由错误信息占满。
@@ -85,34 +113,38 @@ function renderGrowth(list) {
       const quota = cr === null
         ? '<span class="dim" title="该账号不在账号池视图里，取不到额度">—</span>'
         : `<span class="mono">${cr}</span>`;
+      // ⚠⚠ 用户要求「**高度保证一行**」—— 这里原来有两处 `<br>`，把「连登」格撑成**三行**
+      //    （17 天 / 距 28d 还差 11 / 补签×2）⇒ 整行高度是别行的三倍。
+      //    ⚠ 注意：光靠全局的 `white-space:nowrap` **拦不住 `<br>`**（那是显式换行），
+      //    必须真的把它去掉 —— 用户当场指着这张表说「这个表格不符合要求」。
+      // 改法照钉钉 / 飞书表格：**一行内用 `·` 串起来 + 全文进 `title`**（悬停可看，
+      // 被截断成 `…` 也不丢信息），补签卡单独留一个小徽章（那是要点的信息）。
+      const streakFull = [
+        g.streak_days ? `${g.streak_days} 天` : '',
+        g.next_tier ? `距 ${g.next_tier} 还差 ${g.next_tier_remaining}` : '',
+        g.makeup_cards ? `补签×${g.makeup_cards}` : '',
+        (g.makeup_cards && g.makeup_dates && g.makeup_dates.length) ? `可补 ${g.makeup_dates.length}` : '',
+      ].filter(Boolean).join(' · ');
       const streak = g.streak_days
-        ? `${g.streak_days} 天${g.next_tier ? `<br><span class="dim" style="font-size:11px">距 ${esc(g.next_tier)} 还差 ${g.next_tier_remaining}</span>` : ''}`
+        ? `<span title="${esc(streakFull)}">${g.streak_days} 天`
+          + (g.makeup_cards
+              ? `<span class="pill warn" style="margin-left:6px">补签×${g.makeup_cards}</span>`
+              : '')
+          + `</span>`
         : '<span class="dim">—</span>';
-      const cards = g.makeup_cards
-        ? `${g.makeup_cards}${g.makeup_dates && g.makeup_dates.length ? ` <span class="pill warn">可补${g.makeup_dates.length}</span>` : ''}`
-        : '<span class="dim">—</span>';
+      // ⚠ 补签那格**已经并入上面**（同一行的 span 里），所以这里留空 ——
+      //    保留变量名是为了不动下面拼接那一行的代码（少一处改动少一处风险）。
+      const makeupHtml = '';
       // 待完成 / 完成后可得：口径是"还没做完"（未接单+已接单+进行中），
-      // 与「接单」按钮的可用性（acceptable_count，只数未接单）是两件事。
+      // 合并成一格：「5 +600」（+600 = 完成后可获得的额度）。
       const pendN = g.pending_count != null ? g.pending_count : (g.acceptable_count || 0);
       const pendC = g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0);
-      const claim = pendN
-        ? `<span class="pill ok">${pendN}</span>`
+      const pendCell = pendN
+        ? `<span class="pill ok">${pendN}</span>${pendC ? `<span class="dim" style="font-size:11px"> +${pendC}</span>` : ''}`
         : '<span class="dim">—</span>';
-      const credit = pendC
-        ? `<span class="pill ok">${pendC}</span>`
-        : '<span class="dim">—</span>';
-      // 待领取 / 现在可领：来自 completed 的任务，领了就到账。
-      const pendingN = g.claimable_count
-        ? `<span class="pill warn">${g.claimable_count}</span>`
-        : '<span class="dim">—</span>';
-      const pendingC = g.claimable_credit
-        ? `<span class="pill warn">${g.claimable_credit}</span>`
-        : '<span class="dim">—</span>';
-      const box = g.blind_box_affordable
-        ? `<span class="pill ok">${g.blind_box_affordable}</span>`
-        : '<span class="dim">—</span>';
-      const draw = g.lottery_chances
-        ? `<span class="pill ok">${g.lottery_chances}</span>`
+      // 可领：已完成但奖励还没领（合并待领取 + 现在可领）：「2 +300」。
+      const claimCell = g.claimable_count
+        ? `<span class="pill warn">${g.claimable_count}</span>${g.claimable_credit ? `<span class="dim" style="font-size:11px"> +${g.claimable_credit}</span>` : ''}`
         : '<span class="dim">—</span>';
 
       const act = [
@@ -125,18 +157,15 @@ function renderGrowth(list) {
         `<button data-gact="draw"   data-uid="${U}"${g.lottery_chances ? '' : ' disabled'}>抽奖</button>`,
       ].join(' ');
 
+      // 额度/能量合并成一格：额度 + 「能量N」（能量 >0 才显示，纯文字，不用 ⚡）。
+      const quotaEnergy = `${quota}${g.energy ? ` <span class="dim" style="font-size:11px">能量${g.energy}</span>` : ''}`;
+
       return `<tr>
         <td>${name}</td>
-        <td>${quota}</td>
-        <td>${streak}</td>
-        <td class="mono">${cards}</td>
-        <td class="mono">${esc(g.energy)}</td>
-        <td>${box}</td>
-        <td>${draw}</td>
-        <td>${pendingN}</td>
-        <td>${pendingC}</td>
-        <td>${claim}</td>
-        <td>${credit}</td>
+        <td>${quotaEnergy}</td>
+        <td>${streak}${makeupHtml}</td>
+        <td>${pendCell}</td>
+        <td>${claimCell}</td>
         <td style="white-space:nowrap">${act}</td>
       </tr>`;
     }).join('');
@@ -163,8 +192,15 @@ function renderWith(claim, credit) {
 // ---------- 1. 卡片文案 ----------
 console.log('\n[1] 卡片标签');
 const cards = renderWith(17, 2150);
-ok(cards.includes('待完成任务'), '含「待完成任务」');
-ok(cards.includes('完成后可获得的额度'), '含「完成后可获得的额度」');
+// ⚠ 形状变了、意图没变（2026-10 订正）。
+//
+// 产品把「待完成任务」+「完成后可获得的额度」两张卡**合并**成一张
+// 「待办合计 17 任务 · +2150」（webui.html:8424-8425，commit f32624a
+// 「成长计划精简 —— 12 列/8 卡合并为 6 列/6 卡」，用户要求少空白）。
+// 所以这里断言的不再是两张卡的名字，而是**合并后那张卡的两个数**：
+// 任务数来自 pending_count、额度来自 pending_credit（口径还是"没做完的"）。
+ok(cards.includes('待办合计'), '含「待办合计」（待完成 + 完成后可得的合并卡）');
+ok(cards.includes('17 任务 · +2150'), '待办合计 = 「17 任务 · +2150」（任务数 + 完成后可得的额度）');
 ok(!cards.includes('待接单任务'), '不再有「待接单任务」');
 ok(!cards.includes('接单后可得积分'), '不再有「接单后可得积分」');
 // ⚠ T4 订正：这条原来断言「统一用**积分**」。T4 把界面用词统一到了
@@ -174,9 +210,16 @@ ok(!cards.includes('接单后可得积分'), '不再有「接单后可得积分�
 // 改造前是"两个词里挑一个"，现在是"页面上不该再有第二个词"。
 ok(!cards.includes('信用分'), '不再出现「信用分」（已废弃的第三种叫法）');
 ok(!cards.includes('现在可领积分'), '不再有「现在可领积分」（T4 已统一为「现在可领额度」）');
-// 数值仍然正确渲染
-ok(cards.includes('>17<'), '待完成数量 17 正常渲染');
-ok(cards.includes('>2150<'), '完成后可得 2150 正常渲染');
+// 0 值的「合计」卡不生成（webui.html:8430-8439）：claimable 全 0 时它是
+// 「0 项 · +0」，占一格却没有任何信息量。本夹具这次把它一起钉住 ——
+// 它是合并折腾之后最容易被下一次改动带回来的那张卡。
+ok(!cards.includes('可领合计'), '可领合计为 0 时不生成该卡（少空白）');
+ok(cards.includes('账号数'), '「账号数」卡不受 0 值过滤影响');
+// ⚠ 过滤规则本身也要钉住**作用域**：只过滤名字含「合计」的卡。
+// 「账号数 0」是"配了上游却没账号"的最重要信号，一刀切会掩盖真故障。
+// 这条读的是产品源码里的判据（精确到一处表达式），不是对整篇做全文匹配 ——
+// 全文匹配正是本文件上一次假红的成因（见 [2] 的表头断言）。
+ok(/indexOf\('合计'\) >= 0/.test(html), '0 值过滤只作用于名字含「合计」的卡（账号数 0 必须留着）');
 
 // ---------- 2. 静态检查：HTML 里也不该残留旧措辞 ----------
 console.log('\n[2] 全局无残留旧措辞');
@@ -187,9 +230,17 @@ ok(!html.includes('<th>接单后可得</th>'), '表头不再是「接单后可�
 // T4：用户可见区域不该再出现「积分」。见 tests/frontend/verify_t4_t5.js
 // 那条更精确的判据（它剥注释后按**渲染结果**判，不在源码上做全文匹配）。
 ok(!html.includes('<th>积分</th>'), '表头不再是「积分」（T4 已统一为「额度」）');
-// 表格新表头
-ok(html.includes('<th>待完成</th>') && html.includes('<th>完成后可得</th>'),
-   '表头已改为「待完成 / 完成后可得」');
+// 表格新表头：合并成 6 列后是「待完成 / 可领」，口径解释搬进了 title
+// （webui.html:1506-1507）。
+//
+// ⚠ 这里踩过一次假红：原来断言写的是 '<th>待完成</th>' —— 表头**加了 title
+//   属性**之后就匹配不上了，看起来像"产品把表头改回旧词了"，其实一个字符都
+//   没丢。字面量断言必须跟着**实际标记**走，或者只用得上名字的部分。
+//   用 title 里的口径解释当锚点反而更强：它同时钉住"表头叫什么"和
+//   "界面必须解释 +N 是什么意思"。
+ok(/<th title="[^"]*\+N 是完成后可获得的额度">待完成<\/th>/.test(html),
+   '表头「待完成」带口径说明（+N = 完成后可获得的额度）');
+ok(/<th title="[^"]*">可领<\/th>/.test(html), '表头「可领」带口径说明');
 
 // ---------- 3. 「接单」作为动作词仍保留（不是要删掉它） ----------
 console.log('\n[3] 动作词「接单」保留');
@@ -247,6 +298,25 @@ if (benignRe) {
   ];
   for (const m of failMsgs) ok(!re.test(m), '打红：' + m);
 }
+
+// ---------- 7. 空池路径（静态自检逼出来的一条真分支） ----------
+//
+// 这条分支原来**一次都没跑过**：抽取列表里没有 rowPlaceholder / COLS，
+// 测试体也从没喂过空列表 ⇒ "渲染空池"这条路从生成到现在没有任何覆盖，
+// 一跑就是 ReferenceError。lib_extract_check.js 在生成阶段把它点了出来。
+// 现在"两条都补"：抽真函数 + 真的跑一次。
+console.log('\n[7] 空池占位');
+for (const k in els) { els[k].innerHTML = ''; els[k].textContent = ''; }
+share = [];
+renderGrowth([]);
+const emptyCards = $('growthCards').innerHTML;
+const emptyRows = $('growthRows').innerHTML;
+ok(emptyCards.includes('账号数'), '空池时仍画「账号数」卡');
+ok(!emptyCards.includes('可领合计'), '空池时不画「可领合计」（0 值合计卡不生成）');
+ok(emptyRows.includes('账号池为空'), '空池时表格给出占位文案');
+// colspan 必须跟着 COLS.growth 走，不能写死 —— 成长表精简过一次列数（12 → 6），
+// 写死的数字不会跟着变（本条与 gen_ui_manifest 的 colspan 漂移守卫同类，只是就地）。
+ok(emptyRows.includes('colspan="' + COLS.growth + '"'), '空池占位的 colspan == COLS.growth（' + COLS.growth + '，不写死）');
 
 console.log(fail === 0 ? '\n=== 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');
 process.exit(fail ? 1 : 0);

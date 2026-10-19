@@ -26,36 +26,61 @@ function tokPerSec(tokens, totalMs) {
     if (!totalMs || totalMs <= 0) return '0.0';
     return (tokens / (totalMs / 1000)).toFixed(1);
   }
+function logPlaceholder(text, cls) {
+    return `<div class="log-empty ${cls || ''}">${esc(text)}</div>`;
+  }
 function renderLogs(items) {
-    const tb = $('logrows');
+    const host = $('logrows');
+    if (!host) return;
     const list = normalizeDesc(items).slice(0, 300);
-    if (!list.length) return;
-    tb.innerHTML = list.map(e => {
+    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容
+    if (!list.length) { host.innerHTML = logPlaceholder('暂无请求'); return; }
+    host.innerHTML = list.map(e => {
       const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
-      return `<tr>
-        <td class="mono dim">${e.seq}</td>
-        <td class="dim">${new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false })}</td>
-        <td class="mono">${esc(e.model)}</td>
-        <td>${esc(e.mode)}</td>
-        <td><span class="pill ${st}">${e.status}</span></td>
-        <td class="mono dim">${esc((e.uid || '').slice(0, 8) || '-')}</td>
-        <td class="mono">${e.ttfb_ms ? e.ttfb_ms + 'ms' : '-'}</td>
-        <td class="mono">${e.tokens >= 0 ? e.tokens : '-'}</td>
-        <td class="mono">${tokPerSec(e.tokens, e.total_ms)}</td>
-        <td class="mono">${e.total_ms}ms</td>
-      </tr>`;
+      // ② 数值列右对齐（.r）
+      // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
+      //    参考项目的原话"空着会被当成渲染缺失"。破折号用全角「—」与项目其它面板一致。
+      const dash = '<span class="log-none">—</span>';
+      const secs = new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false });
+      return `<div class="log-row${e.status >= 400 ? ' failed' : ''}">
+        <span class="mono log-none">${e.seq}</span>
+        <span class="log-none">${esc(secs)}</span>
+        <span class="mono log-tr" title="${esc(e.model || '')}">${esc(e.model || '—')}</span>
+        <span class="log-tr" title="${esc(e.mode || '')}">${esc(e.mode || '—')}</span>
+        <span><span class="pill ${st}">${e.status}</span></span>
+        <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
+        <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
+        <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
+        <span class="mono r">${tokPerSec(e.tokens, e.total_ms)}</span>
+        <span class="mono r">${e.total_ms}ms</span>
+      </div>`;
     }).join('');
   }
 
 let fail = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
 
-// 从渲染出的 HTML 里按行取出 seq，用于断言视觉顺序
+// 从渲染出的 HTML 里按行取出 seq，用于断言视觉顺序。
+//
+// ⚠ 2026-10-19 产品把日志行从 <tr><td> 换成 <div class="log-row"> 的 grid 行
+//   （webui.html:9350；列宽由 .log-head/.log-row 共用的 grid-template-columns
+//   定义，DOM 顺序即视觉列顺序）。所以"第几列"现在由**行内顶层 span 的顺序**
+//   决定，本函数取每行的**第一个单元格**（seq 列）来还原视觉顺序。
+//
+// 判据一个字没动：顶行必须是最新、整列必须严格递减。改的只是"按什么形状解析"。
+//
+// ⚠ 解析不出来时记 NaN，而不是把这一行悄悄丢掉：上一版按 <td class="mono dim">
+//   解析，换成 div 后一条都匹配不上却返回空数组 —— 失败信息只剩 "seq=undefined"，
+//   看不出"渲染了几行、少了哪行"。NaN 让行数如实暴露出来。
 function renderedSeqs() {
+  const rows = $('logrows').innerHTML.split('<div class="log-row').slice(1);
   const out = [];
-  const re = /<td class="mono dim">(\d+)<\/td>/g;
-  let m;
-  while ((m = re.exec($('logrows').innerHTML)) !== null) out.push(Number(m[1]));
+  for (const r of rows) {
+    // 行的开标签之后第一个 span 就是 seq 列（.log-row 的 DOM 顺序 = 列顺序）
+    const m = /^[^>]*>\s*<span[^>]*>([\s\S]*?)<\/span>/.exec(r);
+    const txt = m ? m[1].replace(/<[^>]+>/g, '').trim() : '';
+    out.push(/^\d+$/.test(txt) ? Number(txt) : NaN);
+  }
   return out;
 }
 
@@ -142,7 +167,17 @@ console.log('\n[6] 缓冲上限：不无限增长');
   for (let i = 1; i <= 500; i++) many.push({ seq: i, at: t(i % 60), status: 200 });
   mergeLogEntries(many, 300);
   ok(logEntries.length === 300, '上限 300 生效，实际=' + logEntries.length);
-  ok(logEntries[0].seq === logEntries[0].seq, '顶部仍是最新');
+  // ⚠ 这里原先是 logEntries[0].seq === logEntries[0].seq —— 自比恒真，是一条
+  //   **假绿**：产品里删掉任何一行它都照样 PASS，等于没有判据。改成真正要守的
+  //   性质：截断必须发生在排序**之后** —— 留下的 300 条都不早于被丢掉的任何一条
+  //   （去掉 normalizeDesc 或把 slice 挪到排序之前，这条立刻红）。
+  const keptSeqs = new Set(logEntries.map(e => e.seq));
+  const dropped = many.filter(e => !keptSeqs.has(e.seq));
+  const whenOf = e => new Date(e.at).getTime();
+  ok(dropped.length === 200, '被截断的条数=200，实际=' + dropped.length);
+  ok(dropped.every(d => logEntries.every(k =>
+    whenOf(k) > whenOf(d) || (whenOf(k) === whenOf(d) && k.seq >= d.seq)
+  )), '留下的 300 条都不早于被丢弃的 200 条（截断在排序之后，顶部仍是最新）');
 }
 
 console.log('\n[7] 静态校验：旧的顺序处理方式已清除');
