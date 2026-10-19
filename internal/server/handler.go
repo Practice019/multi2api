@@ -1486,6 +1486,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !h.modelAllowedForRequest(w, r, peek.Model) {
 		return
 	}
+	// ⚠⚠ 渠道口径（中转站模式）—— 接缝**必须**在这里：白名单判完、**任何取号之前**。
+	//
+	// 为什么不能在 chatVia（那里已有 acct）：到了那儿账号已经被选中，等于"先占了池里的号再退回"，
+	// 号已计数、且中途换路时流式响应无法干净撤回。
+	//
+	// 为什么"先问渠道、再问池"，而不是"先试池、失败再试渠道"：
+	// 后者会让**同一个模型名走哪条**取决于账号池当时的状态 —— 不稳定，且排查时说不清走了哪条。
+	if h.cfg.Channels != nil {
+		fw, ferr := h.forwardViaChannel(r.Context(), peek.Model, body)
+		switch {
+		case ferr == nil:
+			h.writeChannelStream(w, r, fw)
+			return
+		case errors.Is(ferr, errNoChannelMode):
+			// 没配渠道存储：落到既有账号池路径（不是错误）
+		case errors.Is(ferr, errChannelNoCandidate):
+			// 默认收紧：能力索引里没有这个模型名 ⇒ 明确拒绝，**不回落**账号池。
+			// 回落会让"我不想公开的模型"仍然能用池里的号跑起来 —— 那正是 R1 要防的。
+			writeOpenAIError(w, http.StatusNotFound, "model_not_available",
+				fmt.Sprintf("模型 %q 未对当前渠道开放（渠道能力索引里没有它；停用的渠道不计入）", peek.Model))
+			return
+		default:
+			// 渠道真实失败（没有可用 key / 上游返回错误）：如实上报，**不换路** ——
+			// Key 型渠道与账号池的根本区别就在这里，换号会让用户不知道请求到底走了哪条。
+			writeOpenAIError(w, http.StatusBadGateway, "channel_error", ferr.Error())
+			return
+		}
+	}
 	// 出站请求体里必须写回**剥掉前缀**的模型名：前缀是网关的路由记号，
 	// 上游不认识 "workbuddy/auto"（实测：带着前缀发过去，上游按未知模型拒绝，
 	// 表现为一次白跑的 503 + 换号）。这一条与"按前缀选号"是一体两面 ——
