@@ -1077,6 +1077,17 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     border-radius:10px;background:var(--panel2);border:1px solid var(--line);max-width:250px;
     overflow:hidden;white-space:nowrap}
   .healthbar .hb-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+  /* 次数排行（2026-10-20）：名次 · 名字 · 条形 · 次数 · 成功率，一行一个，固定行高。
+     条形用 div 宽度（零依赖，照本项目已有的榜单做法），宽度以**第一名为基准**，
+     这样"第一名满格"能一眼看出量级的落差。 */
+  .rankrow{display:flex;align-items:center;gap:8px;height:24px;line-height:24px;font-size:12px}
+  .rankrow:hover{background:var(--hover)}
+  .rankidx{width:18px;text-align:right;color:var(--dim);flex:0 0 auto}
+  .rankname{flex:0 0 250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rankbar{flex:1 1 auto;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden;min-width:40px}
+  .rankbar i{display:block;height:100%;border-radius:4px}
+  .rankval{width:62px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto}
+  .rankrate{width:56px;text-align:right;flex:0 0 auto}
 </style>
 </head>
 <body>
@@ -1252,6 +1263,12 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
              ⇒ 定位卡片一律走 `statCardEl()` / `statCardValEl()`（同时匹配两个容器）。 -->
         <div class="cards" id="statsCards"></div>
         <div class="cards" id="statsCards2"></div>
+      <!-- 次数排行（2026-10-20，对标 new-api 下部 tab 的「调用次数排行」）：
+           数据就是 /admin/stats 里已有的 by_model_detail，不额外发请求。
+           ⚠ 与环图的区别：环图看"占比"，这里看"绝对名次 + 各模型成功率" ——
+           排障时想知道的是"谁在扛量、它健康吗"，不是百分比。 -->
+      <h3>次数排行 <span class="dim" style="font-weight:400;text-transform:none">按请求数 · 前 10</span></h3>
+      <div class="body"><div id="modelRank"></div></div>
       <!-- 性能健康条（2026-10-20）：一行读结论，与上面那排"读总量"的指标卡分工 -->
       <div class="healthbar" id="healthBar"></div>
         <!-- 模型维度：每行一个模型，列 = 调用次数 / 成本系数。
@@ -9767,11 +9784,52 @@ let loginProvider = '';
     $('statsCards').innerHTML = statsCardsEntries(s).map(([k, v, c]) => card(k, v, c)).join('');
     $('statsCards2').innerHTML = statsCardsEntries2(s).map(([k, v, c]) => card(k, v, c)).join('');
     renderHealthBar(s);   // 与卡片同源（同一份 s），不会出现"卡对条错"
+    renderModelRank(s);   // 次数排行同源，同样只读这一份响应
 
     // ⚠ 「模型明细」chips 已按用户要求删除（2026-10-18）⇒ 这里**不再调** renderStatsModels。
     // ⚠ 函数本体保留未删：它里面还带着 `statsCatalogHint` 等挂载逻辑，
     //   删函数的风险大于收益；而只要容器不存在，它本来就是空转（开头有 `if (!wrap) return`）。
     // renderStatsModels(s);
+  }
+
+  // renderModelRank 次数排行（2026-10-20，对标 new-api 下部 tab 的「调用次数排行」）。
+  //
+  // # 为什么用 by_model_detail 而不是 by_model
+  //   `by_model` 只有请求数（`{model: N}`），算不了成功率；
+  //   `by_model_detail` 带 calls/ok/fail，能同时给出"扛量多少"和"健不健康"。
+  //
+  // # 为什么按绝对名次而不是百分比
+  //   环图回答"占比"，这里回答"谁在扛量、它健康吗"。排障时后者才是要的 ——
+  //   一个占 3% 但成功率 40% 的模型，看占比根本发现不了它坏了。
+  function renderModelRank(s) {
+    const host = $('modelRank');
+    if (!host) { return; }
+    if (!s) { host.innerHTML = ''; return; }
+    const detail = s.by_model_detail || {};
+    const rows = Object.keys(detail).map(k => {
+      const d = detail[k] || {};
+      const calls = num(d.calls) || 0;
+      const ok = num(d.ok) || 0;
+      return { model: k, calls, ok, rate: calls ? (ok / calls * 100) : null };
+    }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 10);
+    if (!rows.length) {
+      host.innerHTML = '<div class="dim" style="padding:6px 2px;font-size:12px">所选范围内没有请求</div>';
+      return;
+    }
+    const max = rows[0].calls;   // 用第一名的量作 100% 基准，条形才有可比性
+    host.innerHTML = rows.map((r, i) => {
+      const pct = max ? (r.calls / max * 100) : 0;
+      const col = r.rate === null ? 'var(--dim)'
+        : r.rate >= 95 ? 'var(--ok)' : r.rate >= 80 ? 'var(--warn)' : 'var(--err)';
+      const rateTxt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+      return `<div class="rankrow" title="${esc(r.model)} · ${r.calls} 次 · 成功率 ${rateTxt}">`
+        + `<span class="rankidx">${i + 1}</span>`
+        + `<span class="rankname mono">${esc(r.model)}</span>`
+        + `<span class="rankbar"><i style="width:${pct.toFixed(1)}%;background:var(--acc)"></i></span>`
+        + `<span class="rankval">${fmtCount(r.calls)}</span>`
+        + `<span class="rankrate" style="color:${col}">${rateTxt}</span>`
+        + `</div>`;
+    }).join('');
   }
 
   // renderHealthBar 性能健康条（2026-10-20 对标 new-api「性能健康」那一行）。
