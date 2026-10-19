@@ -89,6 +89,25 @@ type Config struct {
 		//          https，但请求到达本进程时已是明文，auto 判不出来
 		// never  = 一律不加（本机 http 调试）
 		CookieSecure string `json:"session_cookie_secure"`
+		// DisableCaptcha 关闭登录/注册的人机校验（缺省 false = **开启**）。
+		//
+		// 与 DisableRegister 同一惯例（否定式字段）。默认开是刻意的：
+		// 注册端点是唯一"不登录就能在他的机器上建东西"的入口（首启那一次
+		// 甚至直接建成管理员），而本地 SVG 算术题对真人只多两秒。
+		//
+		// ⚠ 三重否定容易读错：`disable_captcha: false` ⇒ 人机校验**开着**。
+		// 想关就写 `"console": { "disable_captcha": true }`。
+		//
+		// 关掉之后剩下的三层仍在（限速 20 次/20 分钟/IP、请求体上限、
+		// 会话签发上限）—— 四层各自独立，不是"关了验证码就全没了"。
+		DisableCaptcha bool `json:"disable_captcha"`
+		// AuthRateLimit 注册/登录的限速额度（次/窗口），缺省 20。
+		//
+		// <=0 表示用缺省值；**不**表示"不限速"（想关掉请改代码里那个常量，
+		// 而不是把配置写成 0 —— "0 = 不限速"和"0 = 没配"会让一个笔误变成敞门）。
+		AuthRateLimit int `json:"auth_rate_limit"`
+		// AuthRateWindowSeconds 上面那个额度的窗口长度（秒），缺省 1200（20 分钟）。
+		AuthRateWindowSeconds int `json:"auth_rate_window_seconds"`
 	} `json:"console"`
 
 	// Server 出口层（HTTP 入站）行为。

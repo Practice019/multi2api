@@ -20,6 +20,7 @@ import (
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/authlimit"
 	"workbuddy2api/internal/browseropen"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/clientlogin"
@@ -1201,18 +1202,47 @@ func main() {
 	if n := sessionsStore.Cleanup(); n > 0 {
 		log.Printf("账号: 已清理 %d 条过期会话", n)
 	}
+	// 反批量防御（T10，抄 new-api 的注册/登录风控）：四层各自独立 ——
+	//
+	//	① 限速    20 次/20 分钟/IP（本变量）⇒ 第 21 次 429 + Retry-After
+	//	② 请求体  8KB 上限（account.maxAuthBody，MaxBytesReader）⇒ 413
+	//	③ 人机校验 本地 SVG 算术题（默认开；题一次性，答错也作废）
+	//	④ 会话上限 SessionStore 自带（"1 小时内签发次数过多" ⇒ 429）
+	//
+	// ⚠ 为什么四层而不是一层：它们拦的是**不同**的滥用形态。限速拦"同一个 IP
+	// 打很多次"，人机校验拦"很多 IP 各打几次"（这也是为什么要默认开着 ——
+	// 单机部署一旦映射到公网，注册端点就是"陌生人在你机器上建账号"的入口，
+	// 而首个账号还是**管理员**）。只留限速的话，换个 IP 就绕过；只留验证码的话，
+	// 同一道题可以被无限次试（题是一次性的，但可以无限取题）。
+	authWindow := time.Duration(authRateWindowSeconds(cfg)) * time.Second
+	authLimiter := authlimit.NewLimiter(authWindow, authRateLimit(cfg))
+	authCaptcha := (*authlimit.Captcha)(nil)
+	if !cfg.Console.DisableCaptcha {
+		// maxPending 必须给正数：取题动作在匿名端点上，不设上限就能被
+		// "一直取题不作答"把内存撑起来（见 NewCaptcha 的注释）。
+		authCaptcha = authlimit.NewCaptcha(authWindow, 512)
+	}
+
 	accountHTTP, err := account.NewHTTP(account.HTTPConfig{
 		Accounts: accountsStore,
 		Sessions: sessionsStore,
 		// ⚠ 取反：配置里的字段是否定式（disables_register，缺省 false = 开放）
 		RegisterEnabled: !cfg.Console.DisableRegister,
 		CookieSecure:    strings.TrimSpace(cfg.Console.CookieSecure),
+		Limiter:         authLimiter,
+		// ⚠ 类型是接口：nil 的 *authlimit.Captcha 直接塞进去会变成"非 nil 的
+		// 接口"（Go 的经典坑），于是 disabled 也会被判成 enabled 并到处回
+		// "请完成人机校验"。所以上面先把变量声明成指针、这里显式判一次。
+		Captcha: captchaOrNil(authCaptcha),
 	})
 	if err != nil {
 		log.Fatalf("装配登录端点: %v", err)
 	}
-	log.Printf("账号: 控制台账号体系已启用（注册%s，账号库 data/accounts.json）",
-		map[bool]string{true: "开放", false: "关闭"}[!cfg.Console.DisableRegister])
+	// 定时清理（Prune / Cleanup）挂在 ctx 之后，见下面 startAuthLimitPruner 的调用。
+	log.Printf("账号: 控制台账号体系已启用（注册%s，限速 %d 次/%s，人机校验%s，账号库 data/accounts.json）",
+		map[bool]string{true: "开放", false: "关闭"}[!cfg.Console.DisableRegister],
+		authRateLimit(cfg), authWindow,
+		map[bool]string{true: "开", false: "关"}[!cfg.Console.DisableCaptcha])
 
 	// 管理钥匙轮换的间接回调（见 admin.Config.OnAPIKeyRotated 注释：
 	// h 在 admin.New 的 Config 求值时尚未绑定，不能直接捕获，经此变量间接引用）。
@@ -1442,6 +1472,9 @@ func main() {
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	// 风控的定时清理（限速表 / 过期题）。必须在 ctx 之后起 —— 它靠 ctx.Done() 收尾。
+	startAuthLimitPruner(ctx, authLimiter, authCaptcha)
 	defer stop()
 	// 账号池主动健康检查（A2 移植）：探测冷却/熔断中的账号并提前恢复。
 	// 它是**核心**任务（不属于任何上游），由装配层注册，provider 标 core。
