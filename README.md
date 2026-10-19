@@ -300,7 +300,53 @@ cp:你的Key.secretKey           标记为 Coding Plan 的 Key
 
 ## 🖥️ 管理控制台
 
-访问 `http://127.0.0.1:7863/ui`（本机访问自动注入 Key，顶栏可复制 curl 示例）。
+访问 `http://127.0.0.1:7863/ui`。**需要登录**（见下）。
+
+### 首次登录怎么做（三步）
+
+1. 启动程序，浏览器打开 `http://127.0.0.1:7863/ui`；
+2. 因为账号库还是空的，页面会让你**创建管理员**：填用户名 + 口令（8–128 位）、
+   答一道人机校验题（本地 SVG 算术题）。这一步建出来的是**管理员**（角色 10），
+   **只可能成功一次**；
+3. 之后再打开 `/ui` 就是登录页。想再要账号，点页面上的「注册」——
+   注册建出来的一律是**成员**（角色 1），且注册接口**不接受**调用方指定角色。
+
+账号与口令落在 `data/accounts.json`（bcrypt 哈希，明文不落盘），会话落在
+`data/sessions.json`。这两份都在 `data/` 下、已 gitignore。
+
+### 三种凭据分工（别混用）
+
+| 凭据 | 用在哪 | 怎么给 |
+|---|---|---|
+| **账号口令** | 你自己用浏览器进控制台 | 登录页 → HttpOnly 会话 cookie（页面里**不存**任何凭据） |
+| `admin_token` | 脚本/CI 打 `/admin/*`、或 `?token=` 一条链接免口令进控制台 | `Authorization: Bearer <admin_token>`；`http://127.0.0.1:7863/ui?token=<admin_token>` |
+| `api_key` | 调 `/v1/*`（给调用方） | `Authorization: Bearer <api_key>` |
+
+> ⚠ **破坏性变更**：`api_key` **不再**能进管理面。以前它同时是门禁，于是
+> "给客户端配一把对话 key"等于"交出管理台"。现在 `GET /status` 与 `/admin/*`
+> 只认「会话」或 `admin_token`。若你有脚本用 `api_key` 打 `/status`，改成
+> `admin_token`。用 `api_key` 打这些接口会拿到 **401 `auth_required`**；
+> 成员账号拿到的是 **403 `forbidden_role`**（两者刻意分开，前端据此分别
+> 提示"请登录"与"权限不足"）。
+
+### 角色
+
+- **管理员**（10）：全部面板与端点。
+- **成员**（1）：只能看/管**自己名下**的 API key，以及界面外壳本身。
+  账号池、上游、模型目录、任务、日志、设置对成员一律 `403`。
+
+### 反批量（默认全开，四层各自独立）
+
+| 层 | 缺省 | 表现 | 关掉/调整 |
+|---|---|---|---|
+| 限速 | 20 次 / 20 分钟 / IP | 第 21 次 `429 rate_limited`（带 `Retry-After`） | `console.auth_rate_limit` / `auth_rate_window_seconds` |
+| 请求体上限 | 8 KB | 超了 `413 body_too_large` | 固定值（改代码） |
+| 人机校验 | **开** | 未答/答错 `400 captcha_required`；未启用时发题端点 `404 captcha_disabled` | `console.disable_captcha: true` |
+| 会话签发上限 | 开 | 短时间疯狂登录 → `429` | 固定值（改代码） |
+
+注册端点还能用 `console.disables_register: true` 整个关掉（**不挡**首次建管理员）。
+
+### 面板
 
 - **仪表盘**：网关状态（账号总数 / 健康）+ 调用统计（总请求 / 成功率 / 消耗 token /
   平均 TTFB 等）+ API 接入信息。
@@ -309,6 +355,10 @@ cp:你的Key.secretKey           标记为 Coding Plan 的 Key
 - **Loomy 专属标签页**：新手任务（一键完成单账号 / 全部账号）、邀请码（绑定别人的码、
   查看自己生成的码，含 active/exhausted 状态）。
 - **模型 / 对话测试 / 请求日志 / 设置**：日常排障所需都在页面上。
+- 顶栏：当前登录者 + 角色标记 + **改密码** + **登出**。
+  ⚠ 改口令**不需要重启**：当前这个浏览器当场继续可用，其它设备的登录立即失效
+  （要改别人的口令、或改部署级凭据，走 API 管理页的两个「轮换」按钮 ——
+  同样免重启、立即生效）。
 
 ## 🔌 API
 
@@ -321,12 +371,17 @@ curl http://127.0.0.1:7863/v1/chat/completions \
 - 模型名带上游前缀：`loomy/xxx`、`workbuddy/xxx`、`codearts/xxx`…；裸模型名走默认上游。
 - `GET /v1/models`：各上游目录合并（含生图模型，带 `capabilities` 标注）。
 - `POST /v1/images/generations`：OpenAI 兼容生图。
-- 健康检查：`GET /healthz`（**无鉴权**，负载均衡友好）；`GET /status`（需鉴权，带详情）。
-- 管理 API：`/admin/*`（默认只建议本机使用）。
+- `GET /healthz`（**无鉴权**，负载均衡友好）；`GET /status`（需**控制台身份**且必须是管理员）。
+- 管理 API：`/admin/*`（默认只建议本机使用，**需要会话或 `admin_token`**）。
 
 ## 🛡️ 安全与合规
 
 - 网关默认只绑本机；对外暴露请自行加反向代理与更严格的鉴权。
+  ⚠ 一旦映射到公网，注册端点就是"陌生人在你机器上建账号"的入口，而**首个账号
+  还是管理员** —— 所以反批量四层默认全开（见上），需要的话再用
+  `console.disables_register: true` 关掉公开注册。
+- 控制台的登录凭据只以 **HttpOnly cookie** 形式存在浏览器里，页面源码与
+  `localStorage` 里都没有任何钥匙；`/ui` 的响应体搜不到 `api_key`/`admin_token`。
 - 凭证按上游分目录存于 `auths/`（已 gitignore）；控制台昵称自动打码。
 - Loomy 短信登录的签名 key 随官方安装包分发（官方注释自述"混淆而非加密"），可通过
   `loomy.sms_*` 覆盖。
