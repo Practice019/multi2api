@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>渠道管理 · 中转站</title>
+<!--
+  webui-channels.html —— 渠道管理页（T6）。
+
+  # 为什么是一个独立文件，而不是塞进 webui.html
+  webui.html 已经 762 KB / 12373 行。往里塞渠道界面，等于把"新功能有没有写坏主控制台"
+  这个问题交给运气。独立文件的好处是可验证的：改坏了只影响这一页。
+  代价是暂时要单独访问（/ui/channels），导航入口随后补。
+
+  # 为什么用原生 JS 而不是引 amis 之类
+  这一页只有一张表 + 一个表单，零依赖单文件可以直接用浏览器打开（也能挂到服务端）。
+  引框架要先解决离线 SDK、构建、CSP 一堆事，收益在这一页的复杂度上体现不出来。
+  ⚠ 表格按 AGENTS #5：固定行高、紧凑少空白、超长内容不撑高行。
+
+  # 与后端的关系（全部走已有接口，前端不自己拼规则）
+    GET    /admin/channels                   列表（key 只回掩码）
+    POST   /admin/channels                   新增/更新
+    POST   /admin/channels/delete            删除
+    POST   /admin/channels/status            停用/启用
+    POST   /admin/channels/reveal            显式取明文 key
+    GET    /admin/channels/public-models     对外模型（R1 的对外视角）
+
+  # 两条与需求直接对应的取舍
+  ① 新增渠道的表单里**只有** Base URL + API Key 是必填 —— R3 的原话就是"只填这两个"。
+     模型、映射、优先级都是"可以之后再补"的可选项，不让它们挡住第一步。
+  ② 「对外模型」页签显示的是**免 key 视角**（后端 /public-models 不叠令牌白名单），
+     因为管理页问的是"我配的渠道让外面看见什么"，不该取决于手里那把 key。
+-->
+<style>
+  :root { --bd:#e3e6eb; --fg:#1f2329; --dim:#8a9099; --bg:#fff; --hover:#f6f7f9; --accent:#3370ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; color:var(--fg); background:#f5f6f7; }
+  header { background:var(--bg); border-bottom:1px solid var(--bd); padding:10px 16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0 12px 0 0; font-weight:600; }
+  .tabs { display:flex; gap:2px; }
+  .tab { padding:6px 14px; border:1px solid transparent; border-radius:6px; cursor:pointer; color:var(--dim); }
+  .tab.on { background:#eef3ff; color:var(--accent); border-color:#d3e0ff; font-weight:600; }
+  main { padding:12px 16px 40px; }
+  .bar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  input, select, textarea, button { font:inherit; border:1px solid var(--bd); border-radius:6px; padding:5px 8px; background:var(--bg); color:inherit; }
+  input:focus, select:focus, textarea:focus { outline:2px solid #d3e0ff; outline-offset:0; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:#d83931; }
+  table { width:100%; border-collapse:collapse; background:var(--bg); border:1px solid var(--bd); border-radius:8px; overflow:hidden; table-layout:fixed; }
+  th, td { padding:0 10px; height:34px; line-height:34px; text-align:left; border-bottom:1px solid var(--bd); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  th { background:#fafbfc; font-weight:600; color:#4e5969; }
+  tbody tr:hover { background:var(--hover); }
+  tbody tr:last-child td { border-bottom:none; }
+  .wrap { overflow-x:auto; }
+  .tag { display:inline-block; padding:0 6px; height:20px; line-height:20px; border-radius:4px; font-size:12px; }
+  .on-t { background:#e8f6ee; color:#0f8a4d; }
+  .off-t { background:#f2f3f5; color:#8a9099; }
+  .warn-t { background:#fff3e8; color:#d4780e; }
+  .muted { color:var(--dim); }
+  .err { color:#d83931; }
+  dialog { border:1px solid var(--bd); border-radius:10px; padding:0; width:560px; max-width:92vw; }
+  dialog::backdrop { background:rgba(0,0,0,.35); }
+  .dlg-h { padding:12px 16px; border-bottom:1px solid var(--bd); font-weight:600; }
+  .dlg-b { padding:12px 16px; display:grid; grid-template-columns:96px 1fr; gap:10px 12px; align-items:center; }
+  .dlg-b label { color:#4e5969; }
+  .dlg-b .hint { grid-column:2; color:var(--dim); font-size:12px; margin-top:-6px; }
+  .dlg-b textarea { min-height:64px; font-family:ui-monospace,Consolas,monospace; }
+  .dlg-f { padding:12px 16px; border-top:1px solid var(--bd); display:flex; justify-content:flex-end; gap:8px; }
+  .req::after { content:" *"; color:#d83931; }
+</style>
+</head>
+<body>
+<header>
+  <h1>渠道管理</h1>
+  <div class="tabs">
+    <div class="tab on" id="tab-ch">渠道</div>
+    <div class="tab" id="tab-pub">对外模型</div>
+  </div>
+  <span style="flex:1"></span>
+  <label class="muted">服务地址</label>
+  <input id="base" style="width:220px" value="" placeholder="留空 = 本页所在服务">
+  <label class="muted">管理令牌</label>
+  <input id="token" type="password" style="width:170px" placeholder="admin_token（可选）">
+  <button onclick="load()">刷新</button>
+</header>
+
+<main>
+  <!-- 渠道页签 -->
+  <section id="pane-ch">
+    <div class="bar">
+      <button class="primary" onclick="openForm(null)">+ 新增渠道（只填 Base URL + API Key）</button>
+      <span class="muted" id="stat"></span>
+    </div>
+    <div class="wrap"><table>
+      <colgroup>
+        <col style="width:150px"><col style="width:250px"><col style="width:170px">
+        <col style="width:90px"><col style="width:210px"><col style="width:80px"><col style="width:160px">
+      </colgroup>
+      <thead><tr>
+        <th>名称</th><th>Base URL</th><th>Key</th><th>模型数</th><th>映射</th><th>状态</th><th>操作</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+    <p class="muted" style="margin-top:8px">
+      停用的渠道**不产生对外能力** —— 它声明的模型会立刻从对外目录消失，但配置留着。
+      「全部 key 停用」与「渠道停用」是两件事：前者是自动进入的状态，后者是你手动关的。
+    </p>
+  </section>
+
+  <!-- 对外模型页签 -->
+  <section id="pane-pub" style="display:none">
+    <div class="bar"><span class="muted" id="pubstat"></span></div>
+    <div class="wrap"><table>
+      <colgroup><col style="width:260px"><col style="width:260px"><col></colgroup>
+      <thead><tr><th>对外名字（客户端写这个）</th><th>上游真实名</th><th>提供它的渠道（按优先级）</th></tr></thead>
+      <tbody id="prows"></tbody>
+    </table></div>
+    <p class="muted" style="margin-top:8px">
+      这一页是**免 key 视角**：它回答"我配的渠道现在让外面看见什么"。某个模型看不见的原因通常在这里就能定位 ——
+      渠道没声明它、渠道停用了、或者它其实以另一个（映射后的）名字对外。
+    </p>
+  </section>
+</main>
+
+<!-- 表单：R3 的字面要求 —— 只填 Base URL + API Key 就能建 -->
+<dialog id="dlg">
+  <div class="dlg-h" id="dlgTitle">新增渠道</div>
+  <div class="dlg-b">
+    <label class="req">Base URL</label>
+    <input id="f-base" placeholder="https://api.example.com/v1">
+    <label class="req">API Key</label>
+    <input id="f-key" placeholder="sk-...（保存后只回掩码，可随时点「显示」取回）">
+    <label>名称</label>
+    <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
+    <label>模型</label>
+    <input id="f-models" placeholder="逗号分隔，填**上游真实名**，如 gpt-4o-mini,glm-4">
+    <div class="hint">这里写上游认识的名字；对外想换名字就用下面的映射。</div>
+    <label>模型映射</label>
+    <textarea id="f-map" placeholder='每行一条：公开名=上游名&#10;pub-y=real-x'></textarea>
+    <div class="hint">对外名字 = 左边（客户端写它），上游真实名 = 右边。留空即名字相同。</div>
+    <label>优先级</label>
+    <input id="f-prio" type="number" value="10" style="width:110px">
+    <label>权重</label>
+    <input id="f-weight" type="number" value="1" style="width:110px">
+    <div class="hint">优先级高的先用；同一优先级内按权重随机（权重只影响"同档选谁"）。</div>
+    <label>状态</label>
+    <select id="f-status"><option value="1">启用</option><option value="2">手动停用</option></select>
+  </div>
+  <div class="dlg-f">
+    <span class="err" id="dlgErr" style="margin-right:auto"></span>
+    <button onclick="closeForm()">取消</button>
+    <button class="primary" onclick="save()">保存</button>
+  </div>
+</dialog>
+
+<script>
+// ⚠ 本文件不引任何外部依赖：既能挂到服务端，也能直接用浏览器打开（填服务地址与令牌即可）。
+let editing = null;   // 正在编辑的渠道 id（null = 新增）
+
+function baseURL() {
+  const v = document.getElementById('base').value.trim();
+  return (v || location.origin).replace(/\/$/, '');
+}
+function headers() {
+  const t = document.getElementById('token').value.trim();
+  const h = { 'Content-Type': 'application/json' };
+  if (t) { h['Authorization'] = 'Bearer ' + t; h['X-Admin-Token'] = t; }
+  return h;
+}
+async function api(path, opt) {
+  const r = await fetch(baseURL() + path, Object.assign({ headers: headers() }, opt || {}));
+  const text = await r.text();
+  let j = null; try { j = JSON.parse(text); } catch (e) {}
+  if (!r.ok) throw new Error((j && (j.error || j.message)) || text.slice(0, 160) || ('HTTP ' + r.status));
+  return j === null ? {} : j;
+}
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+function mapText(m) { return m && Object.keys(m).length ? Object.keys(m).map(k => esc(k) + '=' + esc(m[k])).join(', ') : '—'; }
+function maskKey(k) { return k ? (k.length > 12 ? k.slice(0, 6) + '…' + k.slice(-4) : '已配置') : '—'; }
+
+// ---- 渠道页签 ----
+async function load() {
+  const tbody = document.getElementById('rows');
+  tbody.innerHTML = '<tr><td colspan="7" class="muted">加载中…</td></tr>';
+  try {
+    const d = await api('/admin/channels');
+    const list = d.channels || d.data || [];
+    document.getElementById('stat').textContent =
+      '共 ' + list.length + ' 条 · 启用 ' + list.filter(c => c.status === 1).length + ' 条';
+    if (!list.length) { tbody.innerHTML = '<tr><td colspan="7" class="muted">还没有渠道 —— 点左上「新增渠道」，只填 Base URL + API Key 即可</td></tr>'; return; }
+    tbody.innerHTML = list.map(c => {
+      const on = c.status === 1;
+      const tag = on ? '<span class="tag on-t">启用</span>'
+        : (c.status === 2 ? '<span class="tag warn-t">手动停用</span>' : '<span class="tag off-t">自动停用</span>');
+      const key = (c.keys && c.keys.length) ? c.keys.length + ' 个 · ' + esc(maskKey(c.keys[0].mask || c.keys[0].key || '')) : '—';
+      const n = (c.models || []).length;
+      return '<tr>'
+        + '<td title="' + esc(c.name) + '">' + esc(c.name || c.id) + '</td>'
+        + '<td title="' + esc(c.base_url) + '">' + esc(c.base_url) + '</td>'
+        + '<td>' + key + ' <button style="padding:0 6px;height:22px;line-height:20px" onclick="reveal(\'' + esc(c.id) + '\')">显示</button></td>'
+        + '<td>' + n + '</td>'
+        + '<td title="' + esc(mapText(c.model_mapping)) + '">' + mapText(c.model_mapping) + '</td>'
+        + '<td>' + tag + '</td>'
+        + '<td>'
+        + '<button style="padding:0 8px;height:22px" onclick="openForm(\'' + esc(c.id) + '\')">编辑</button> '
+        + '<button style="padding:0 8px;height:22px" onclick="toggle(\'' + esc(c.id) + '\',' + (on ? 2 : 1) + ')">' + (on ? '停用' : '启用') + '</button> '
+        + '<button class="danger" style="padding:0 8px;height:22px" onclick="del(\'' + esc(c.id) + '\')">删除</button>'
+        + '</td></tr>';
+    }).join('');
+    window.__channels = list;   // 供表单读原值（避免为编辑再打一次接口）
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="7" class="err">' + esc(e.message) + '</td></tr>';
+  }
+}
+
+// ---- 对外模型页签 ----
+async function loadPublic() {
+  const tbody = document.getElementById('prows');
+  tbody.innerHTML = '<tr><td colspan="3" class="muted">加载中…</td></tr>';
+  try {
+    const d = await api('/admin/channels/public-models');
+    document.getElementById('pubstat').textContent =
+      '对外 ' + d.public_count + ' 条 · 能力索引 ' + d.ability_count + ' 条 · 渠道 ' + d.enabled_channels + '/' + d.total_channels + ' 启用';
+    const ms = d.models || [];
+    tbody.innerHTML = ms.length ? ms.map(m =>
+      '<tr><td>' + esc(m.public) + '</td><td class="muted">' + esc(m.upstream) + '</td><td>' + esc((m.channels || []).join(' → ')) + '</td></tr>'
+    ).join('') : '<tr><td colspan="3" class="muted">对外没有任何模型 —— 先建渠道并启用，或检查它的模型列表</td></tr>';
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="3" class="err">' + esc(e.message) + '</td></tr>';
+  }
+}
+
+// ---- 表单 ----
+function parseMap(text) {
+  const out = {};
+  String(text || '').split(/\n+/).forEach(line => {
+    const s = line.trim();
+    if (!s || s[0] === '#') return;
+    const i = s.indexOf('=');
+    if (i < 0) { out[s] = s; return; }             // 只写一个名字：原样（不改变名字）
+    const k = s.slice(0, i).trim(), v = s.slice(i + 1).trim();
+    if (k) out[k] = v;
+  });
+  return out;
+}
+function openForm(id) {
+  editing = id;
+  const c = id ? (window.__channels || []).find(x => x.id === id) : null;
+  document.getElementById('dlgTitle').textContent = id ? '编辑渠道' : '新增渠道';
+  document.getElementById('dlgErr').textContent = '';
+  document.getElementById('f-base').value = c ? (c.base_url || '') : '';
+  document.getElementById('f-key').value = '';
+  document.getElementById('f-key').placeholder = c ? '留空 = 不改动现有 key' : 'sk-...';
+  document.getElementById('f-name').value = c ? (c.name || '') : '';
+  document.getElementById('f-models').value = c ? (c.models || []).join(',') : '';
+  document.getElementById('f-map').value = c && c.model_mapping
+    ? Object.keys(c.model_mapping).map(k => k + '=' + c.model_mapping[k]).join('\n') : '';
+  document.getElementById('f-prio').value = c ? (c.priority != null ? c.priority : 10) : 10;
+  document.getElementById('f-weight').value = c ? (c.weight != null ? c.weight : 1) : 1;
+  document.getElementById('f-status').value = c ? String(c.status === 2 ? 2 : 1) : '1';
+  document.getElementById('dlg').showModal();
+}
+function closeForm() { document.getElementById('dlg').close(); }
+async function save() {
+  const err = document.getElementById('dlgErr');
+  err.textContent = '';
+  const body = {
+    id: editing || undefined,
+    name: document.getElementById('f-name').value.trim(),
+    base_url: document.getElementById('f-base').value.trim(),
+    models: document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean),
+    model_mapping: parseMap(document.getElementById('f-map').value),
+    priority: Number(document.getElementById('f-prio').value || 0),
+    weight: Number(document.getElementById('f-weight').value || 0),
+    status: Number(document.getElementById('f-status').value)
+  };
+  const key = document.getElementById('f-key').value.trim();
+  if (key) body.keys = [{ key: key, status: 1 }];
+  // ⚠ 只在**真的填了**的时候才发 keys —— 编辑时留空意味着"不改动"，
+  // 而不是"把 key 清空"（清空会让渠道静默变成不可用）。
+  if (!body.base_url) { err.textContent = 'Base URL 必填'; return; }
+  if (!editing && !key) { err.textContent = 'API Key 必填（新增时）'; return; }
+  try { await api('/admin/channels', { method: 'POST', body: JSON.stringify(body) }); closeForm(); load(); }
+  catch (e) { err.textContent = e.message; }
+}
+async function toggle(id, status) {
+  try { await api('/admin/channels/status', { method: 'POST', body: JSON.stringify({ id: id, status: status }) }); load(); }
+  catch (e) { alert(e.message); }
+}
+async function del(id) {
+  if (!confirm('删除渠道 ' + id + ' ？它的 key 与映射会一并删除')) return;
+  try { await api('/admin/channels/delete', { method: 'POST', body: JSON.stringify({ id: id }) }); load(); }
+  catch (e) { alert(e.message); }
+}
+async function reveal(id) {
+  try {
+    const d = await api('/admin/channels/reveal', { method: 'POST', body: JSON.stringify({ id: id }) });
+    alert('Key:\n' + (d.key || d.keys || JSON.stringify(d)));
+  } catch (e) { alert(e.message); }
+}
+
+// ---- 页签切换 + 首屏 ----
+document.getElementById('tab-ch').onclick = () => { tab(true); };
+document.getElementById('tab-pub').onclick = () => { tab(false); };
+function tab(isCh) {
+  document.getElementById('tab-ch').classList.toggle('on', isCh);
+  document.getElementById('tab-pub').classList.toggle('on', !isCh);
+  document.getElementById('pane-ch').style.display = isCh ? '' : 'none';
+  document.getElementById('pane-pub').style.display = isCh ? 'none' : '';
+  if (isCh) load(); else loadPublic();
+}
+load();
+</script>
+</body>
+</html>
