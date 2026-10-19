@@ -30,6 +30,26 @@
 //	GET  /admin/accounts       401 未登录 / 403 成员 / 200 管理员
 //	GET  /ui                   未登录时 HTML 里**不含**任何密钥（mk- 前缀）
 //
+// # 2026-10-19 T7 增量：控制台鉴权改成「HttpOnly 会话 cookie」后的新契约
+//
+//	GET  /ui                   三条路（internal/server/webui.go:180 的 ui()）
+//	    ?token=<admin_token>   合法 ⇒ 302 Location: /ui + `Set-Cookie: wb2api_admin_token=…`
+//	                           带 HttpOnly / SameSite=Lax / Path=/
+//	    ?token=<错误>           ⇒ 200 **登录页**，且与"压根没带令牌"逐字节相同
+//	                           （真实实现刻意的：单独报错会把这个端点变成
+//	                             "令牌对不对"的判定 oracle，见 webui.go:197）
+//	    已认证（会话/令牌 cookie）⇒ 200 **控制台外壳**（含 `async function probeSession()`）
+//	    未认证                   ⇒ 200 **登录页**（含 `id="form"` 与 `/admin/auth/login`）
+//	GET  /status               控制台身份 + **必须管理员**（handler.go:540 consoleAdminAuth）
+//	    管理员会话 → 200 / 成员会话 → 403 forbidden_role
+//	    Bearer admin_token → 200 / Bearer api_key → 401 auth_required
+//	POST /admin/auth/register  库空 ⇒ 建**管理员**（bootstrap，回执多 `"bootstrap":true`）；
+//	                           库非空 ⇒ 只建**成员**（http.go:327）
+//
+// ⚠ `/status` 的错误信封是**扁平**的：`{"error":"…","code":"auth_required"}`（writeJSON
+//   直接接 map），而 /admin/* 是嵌套的 `{"error":{"code":…}}`。所以本层给探针加了
+//   `resCode()` 两种都认 —— 判据是 code 本身，不是信封形状。
+//
 // # 一条老规矩（README 第 2 条：断言要与数据对照）
 //
 // 本层所有断言都对着**真实字节**：HttpOnly 是解析 `Set-Cookie` 属性得到的，
@@ -52,6 +72,32 @@ const SID_RE = /^[0-9a-f]{64}$/;
 // 会话端点的 401 code 集合（契约里列了四个，测试只认这四个）。
 const SESSION_401_CODES = ['auth_required', 'session_expired', 'session_revoked', 'auth_invalid'];
 const DEFAULT_BASE = 'http://127.0.0.1:7885';
+
+// ADMIN_COOKIE 是 `internal/account/identify.go:43` 的 AdminTokenCookie。
+//
+// 与会话 cookie（wb2api_sid）**刻意两个名字**：前者是机器令牌的浏览器副本
+// （`/ui?token=` 换手来的，无账号、等价管理员），后者是人登录出来的会话。
+// 探针要分别验证"哪一条能进控制台"，所以名字必须各自成立。
+const ADMIN_COOKIE = 'wb2api_admin_token';
+
+// 登录页与外壳的**稳定标记**：桩与探针共用同一份，避免两边各写一遍后漂移
+// （桩按 B 写、探针按 A 判 ⇒ 好桩也变红，而那种红查起来最费时间）。
+//
+//	LOGIN_FORM_MARKER  `id="form"`            internal/server/webui-login.html:131
+//	LOGIN_ENDPOINT     `/admin/auth/login`    同文件 :278（页面上真的会打这个端点）
+//	SHELL_MARKER_RE    `async function probeSession()`  internal/server/webui.html
+//	                   （webui_unauth_test.go:66 也钉着这个锚点）
+const LOGIN_FORM_MARKER = 'id="form"';
+const LOGIN_ENDPOINT = '/admin/auth/login';
+const SHELL_MARKER_RE = /async\s+function\s+probeSession\s*\(/;
+
+// 桩的两把固定测试令牌：**必须互不相等**。
+//
+// 理由很硬：`/status` 的新口径就是"api_key 不再是控制台凭据"。若桩把它们设成
+// 同一个值，"拿 api_key 读 /status 必须 401"这条断言就永远测不出真假
+// —— 那正好是这次改造要防的静默退化。
+const STUB_ADMIN_TOKEN = 'stub-admin-token-0001';
+const STUB_API_KEY = 'stub-api-key-0001';
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -88,6 +134,19 @@ function hist(codes) {
 
 function errCode(res) {
   return res && res.json && res.json.error ? res.json.error.code : undefined;
+}
+
+// resCode 取"稳定错误码"，**两种信封都认**：
+//
+//	嵌套  {"error":{"code":"auth_required"}}         /admin/*（admin 门禁）
+//	扁平  {"error":"一句人话","code":"auth_required"}  /status（handler.go 的 consoleAdminAuth）
+//
+// 为什么不直接把 errCode 改成两种都认：那会**改动已有导出的语义**，三个老探针
+// 都按"嵌套"在判，改共享函数等于在它们脚下换地板。所以新增一个，老的照旧。
+function resCode(res) {
+  const nested = errCode(res);
+  if (nested) return nested;
+  return res && res.json && typeof res.json.code === 'string' ? res.json.code : undefined;
 }
 
 const isRateLimited = (res) => !!res && res.status === 429;
@@ -254,6 +313,34 @@ function makeClient(base) {
     logout() { return c.post('/admin/auth/logout'); },
     accounts() { return c.get('/admin/accounts'); },
     ui() { return c.get('/ui'); },
+
+    // ---- T7 增量：/status 与"带令牌的 /ui"（都是新增方法，不动上面任何签名）----
+    //
+    // ⚠ 下面三个 /ui 辅助**刻意不读 cookie 罐**（走裸 request，不走 c.req）：
+    //
+    //   · `uiAnon()` 要的是"**一个 cookie 都不带**"的基线。若走 c.req，罐里
+    //     有会话时会自动回放 ⇒ 那条请求已经不是"未登录"了，而 `?token=<错误>`
+    //     与它逐字节相同的断言就会退化成"两个已登录请求长得一样"。
+    //   · `uiWith()` 要的是"只凭 URL 里那个令牌换手"，有没有别的 cookie 会把
+    //     "换手失败"掩盖成"其实靠会话进来了"。
+    //   · `uiWithCookie()` 要的是"只有令牌 cookie、没有会话 cookie"，
+    //     混进会话就分不清是哪一条在放行。
+    status(opt) { return c.get('/status', opt); },
+    // statusAnon / statusBearer 走**裸 request**（不带 cookie 罐）—— 必须这样。
+    //
+    // 实测踩到：拿"已登录管理员"的同一个客户端去发 `Bearer <api_key>`，罐里的
+    // 会话 cookie 会同时被回放 ⇒ `Identify` 的会话那条命中 ⇒ 200。于是
+    // "拿 api_key 读 /status 必须 401"这条断言会**假绿**（它测的其实是会话）。
+    // 这条判据要成立，前提就是"本次只出示 api_key，别的凭据一个都不带"。
+    statusAnon() { return request(base, '/status', {}); },
+    statusBearer(tok) {
+      return request(base, '/status', { headers: tok ? { Authorization: 'Bearer ' + tok } : {} });
+    },
+    uiAnon() { return request(base, '/ui', {}); },
+    uiWith(token) { return request(base, '/ui?token=' + encodeURIComponent(token === undefined || token === null ? '' : token), {}); },
+    uiWithCookie(token) {
+      return request(base, '/ui', { headers: { Cookie: ADMIN_COOKIE + '=' + token } });
+    },
   };
   return c;
 }
@@ -294,12 +381,18 @@ const DEFECTS = [
   'cookie_missing_httponly',  // Set-Cookie 少了 HttpOnly
   'anon_open',                // 未登录也回 200（会话与 /admin/accounts 都不设防）
   'logout_no_revoke',         // 登出只清客户端，服务端会话还在
-  'ui_leaks_key',             // /ui 的 HTML 里混进 mk- 密钥
+  'ui_leaks_key',             // /ui 的 HTML 里混进 mk- 密钥（未认证时那条 = 登录页）
   'no_rate_limit',            // 注册/登录永不 429
   'rate_limit_from_first',    // 第一次请求就 429
   'no_413',                   // 超长 body 照常处理，不回 413
   'captcha_ignored',          // 开着人机校验却不拦无答案注册
   'rate_limited_wrong_code',  // 429 但 code 不是 rate_limited
+  // ---- T7 增量：控制台 cookie 化的五个新缺陷 ----
+  'console_serves_shell_when_anon', // 未登录也吐**控制台外壳**（门禁从根上没了）
+  'console_no_probe',               // 外壳里没有 probeSession（页面不再问"我是谁"）
+  'ui_console_leaks_token',         // 外壳 HTML 里注入 admin_token（换了个地方泄密）
+  'status_api_key_ok',              // /status 放行 api_key（账号池画像对客户端开放）
+  'status_no_role_check',           // /status 不做角色判定（成员也能读管理面数据）
 ];
 
 // pickPort 找一个空闲端口。
@@ -327,11 +420,14 @@ async function pickPort(preferred) {
 //   defects   上面 DEFECTS 里的开关
 //   maxBody   body 上限，超过回 413（no_413 时无效）
 //   users     预置账号 [{username,password,role,enabled}]
+//   adminToken 管理令牌（缺省 STUB_ADMIN_TOKEN）—— `/ui?token=` 换手与 Bearer 用它
+//   apiKey     对话密钥（缺省 STUB_API_KEY）—— /status 错误的凭据用它作对照组
 //
-// 返回 { base, port, stop, requests, secrets, counts }
+// 返回 { base, port, stop, requests, secrets, counts, adminToken, apiKey, leakedKey }
 async function startStub(opts) {
   const o = Object.assign({
     port: 0, limits: { register: 8, login: 6 }, captcha: false, maxBody: 4096, defects: {}, users: [],
+    adminToken: STUB_ADMIN_TOKEN, apiKey: STUB_API_KEY,
   }, opts || {});
   const d = o.defects || {};
   const users = new Map();
@@ -397,19 +493,89 @@ async function startStub(opts) {
       res.writeHead(code, headers);
       res.end(buf);
     };
-    const sendHtml = (code, html) => {
+    const sendHtml = (code, html, extra) => {
       const buf = Buffer.from(html, 'utf8');
       rec(code);
-      res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': buf.length });
+      res.writeHead(code, Object.assign({ 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': buf.length }, extra || {}));
       res.end(buf);
+    };
+    const sendRedirect = (loc, extra) => {
+      rec(302);
+      res.writeHead(302, Object.assign({ Location: loc, 'Content-Length': 0 }, extra || {}));
+      res.end();
+    };
+
+    // bearerOf 取 Authorization: Bearer <cred>（无则空串），与 Go 侧 bearerCred 同口径。
+    const bearerOf = () => {
+      const v = String(req.headers.authorization || '').trim();
+      return v.length >= 7 && v.slice(0, 7).toLowerCase() === 'bearer ' ? v.slice(7).trim() : '';
+    };
+    // principal 解析本轮请求的身份（令牌 → 会话），与 account.Identify 同一顺序。
+    const principal = () => {
+      const bearer = bearerOf();
+      const tokCookie = cookieOf(req, ADMIN_COOKIE);
+      const tokenOK = Boolean(o.adminToken)
+        && ((bearer && bearer === o.adminToken) || (tokCookie && tokCookie === o.adminToken));
+      if (tokenOK) return { kind: 'token', role: 10, user: undefined, bearer };
+      const sid = cookieOf(req, COOKIE);
+      const key = sid ? sessions.get(sid) : undefined;
+      const user = key ? users.get(key) : undefined;
+      return { kind: user ? 'session' : '', role: user ? user.role : 0, user, bearer };
     };
 
     if (p === '/healthz') return send(200, { healthy: 0 });
+
+    // ---- /ui：三条路（对齐 internal/server/webui.go:180 的 ui()）----
+    //
+    //	① `?token=<admin_token>` 合法 → 302 回 /ui + 下发令牌 cookie（URL 里不再留令牌）
+    //	② 已认证（会话 cookie 或令牌 cookie）→ 控制台外壳
+    //	③ 未认证 → 登录页（200，不是 401：这是给**人**的入口）
+    //
+    // ⚠ 登录页必须与外壳**互斥且可判**：探针靠"含不含 probeSession"分辨两者，
+    //   所以外壳里必须有 probeSession、登录页里必须没有。
     if (p === '/' || p === '/ui' || p === '/ui/') {
-      if (d.ui_leaks_key) leaked = 'mk-' + randToken(64);
-      const leak = leaked ? '\n<script>window.__LEAK__ = "' + leaked + '";</script>\n' : '';
-      return sendHtml(200, '<!doctype html><html><head><meta charset="utf-8"><title>stub ui</title></head>'
-        + '<body><div id="app">stub</div>' + leak + '</body></html>');
+      const q = String(new URL(String(req.url || '/ui'), 'http://stub.local').searchParams.get('token') || '').trim();
+      // ui_leaks_key 的注入点**跟着"未认证时到底给哪个页面"走**：
+      // 改造后未认证拿到的是登录页，若还往外壳里注入，这条缺陷就静默失效
+      // —— verify_login_flow_e2e 的坏桩⑤ 会变成假绿。
+      const loginPage = () => {
+        if (d.ui_leaks_key && !leaked) leaked = 'mk-' + randToken(64);
+        return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>登录 · stub</title></head><body>'
+          + '<form id="form" novalidate><input id="user" name="username" autocomplete="username">'
+          + '<input id="pass" name="password" type="password" autocomplete="current-password">'
+          + '<button id="submit" type="submit">登录</button></form>'
+          + '<script>fetch("' + LOGIN_ENDPOINT + '", { method: "POST", body: "{}" });</script>'
+          + (leaked ? '\n<script>window.__LEAK__ = "' + leaked + '";</script>\n' : '')
+          + '</body></html>';
+      };
+      const shell = () => {
+        // ui_console_leaks_token 注入的是**真实令牌值**（不是形状像令牌的假串）：
+        // 判据因此落在"页面里有没有已知令牌"上，与 mk- 形状判据互补。
+        const injected = d.ui_console_leaks_token && o.adminToken ? o.adminToken : '';
+        const probe = d.console_no_probe ? ''
+          : '<script>\nasync function probeSession() { const r = await fetch("/admin/auth/session"); return r.status; }\nprobeSession();\n</script>';
+        return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>网关控制台 · stub</title></head><body>'
+          + '<main id="appMain">stub-console</main>'
+          + (injected ? '<script>window.__STUB_INJECTED__ = "' + injected + '";</script>' : '')
+          + probe + '</body></html>';
+      };
+      if (q) {
+        if (o.adminToken && q === o.adminToken) {
+          return sendRedirect('/ui', {
+            'Cache-Control': 'no-store',
+            'Set-Cookie': ADMIN_COOKIE + '=' + q + '; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200',
+          });
+        }
+        // ⚠ 无效令牌**不单独报错**：那会把这个端点变成"令牌对不对"的判定 oracle。
+        // 与"压根没带令牌"走同一条路 ⇒ 响应体**逐字节相同**（探针按字节比）。
+      }
+      const who = principal();
+      if (who.kind) {
+        // 已认证就给外壳。console_serves_shell_when_anon 只影响下面那条未认证分支。
+        return sendHtml(200, shell(), { 'Cache-Control': 'no-store' });
+      }
+      if (d.console_serves_shell_when_anon) return sendHtml(200, shell(), { 'Cache-Control': 'no-store' });
+      return sendHtml(200, loginPage(), { 'Cache-Control': 'no-store' });
     }
     // 超长 body：契约说 413。放在路由之前（真实实现通常也在 HTTP 层拦）。
     if (rawBuf.length > o.maxBody && !d.no_413) return send(413, { error: { code: 'payload_too_large' } });
@@ -426,10 +592,22 @@ async function startStub(opts) {
       if (!/^[A-Za-z0-9_.@-]{3,32}$/.test(u)) return send(400, { error: { code: 'bad_username' } });
       if (pw.length < 8 || pw.length > 128) return send(400, { error: { code: 'bad_password' } });
       if (users.has(u.toLowerCase())) return send(409, { error: { code: 'username_taken' } });
-      users.set(u.toLowerCase(), { id: 'u-' + randToken(16), username: u, password: pw, role: 1, enabled: true });
+      // ⚠ 空库的首个注册 ⇒ **管理员**（对齐真实实例的 CreateBootstrap，http.go:327）。
+      //
+      // 这不是"桩比真实实现更宽松"，而是刻意对齐：--start 起的就是空库，
+      // 首个注册必然建管理员，回执多一个 "bootstrap": true。桩若一律建成员，
+      // "管理员会话 → /status 200"这条断言在自检里就没有正例可跑，
+      // 好桩会假红 —— 而假红最容易被误读成"实现没做角色判定"。
+      const first = users.size === 0;
+      const nu = { id: 'u-' + randToken(16), username: u, password: pw, role: first ? 10 : 1, enabled: true };
+      users.set(u.toLowerCase(), nu);
       // captcha 开着（ignored 那条缺陷）时如实报告自己在校验 —— 探针正是靠
       // 这个字段发现"开了却没拦住"。
-      return send(200, o.captcha ? { ok: true, captcha_required: true } : { ok: true });
+      const capFlag = o.captcha ? { captcha_required: true } : {};
+      if (first) {
+        return send(200, Object.assign({ ok: true, bootstrap: true, user: viewOf(nu), message: '已创建管理员账号 ' + nu.username + '，请用它与口令登录' }, capFlag));
+      }
+      return send(200, Object.assign({ ok: true, user: viewOf(nu) }, capFlag));
     }
 
     if (p === '/admin/auth/login' && req.method === 'POST') {
@@ -478,6 +656,36 @@ async function startStub(opts) {
       return send(200, { ok: true, accounts: [...users.values()].map(viewOf) });
     }
 
+    // ---- /status：控制台身份 + **必须管理员**（handler.go:540 consoleAdminAuth）----
+    //
+    // 改造前它挂在 withAuth 上（认 api_key）⇒ "给某人一把对话钥匙"等于
+    // "把账号池画像也给他看"。所以这里钉死四条：
+    //
+    //	管理员会话 → 200 / 成员会话 → 403 forbidden_role
+    //	Bearer admin_token → 200 / Bearer api_key（或别的）→ 401 auth_required
+    //
+    // ⚠ 错误信封用**扁平**形状（`{"error":"一句人话","code":"…"}`），与真实实现
+    //   的 writeJSON(map) 一致 —— 不是 /admin/* 的 {"error":{"code":…}} 嵌套形状。
+    if (p === '/status' && req.method === 'GET') {
+      const who = principal();
+      const pool = { ok: true, accounts: [], total: 0, healthy: 0 };
+      if (who.kind === 'token') return send(200, pool);
+      if (who.kind === 'session') {
+        if (who.role === 10 || d.status_no_role_check) return send(200, pool);
+        return send(403, {
+          error: '账号池读数仅管理员可见（成员请用 /admin/stats 看自己的用量）。',
+          code: 'forbidden_role',
+          role: who.role,
+        });
+      }
+      // 坏桩：把 api_key 也当控制台凭据（正是这次改造要禁止的那条回流路径）
+      if (d.status_api_key_ok && who.bearer && o.apiKey && who.bearer === o.apiKey) return send(200, pool);
+      return send(401, {
+        error: '该接口需要控制台身份：请在 /ui 登录，或用 Authorization: Bearer <admin_token>。',
+        code: 'auth_required',
+      });
+    }
+
     return send(404, { error: { code: 'not_found' } });
   }
 
@@ -492,6 +700,10 @@ async function startStub(opts) {
     base: 'http://127.0.0.1:' + real,
     requests,
     counts,
+    // 本桩的两把令牌：探针必须知道它们才能断言"哪一把能进控制台"。
+    // 回传给调用方（runSelfTest 也会把它塞进 ctx），**不改**上面的既有字段。
+    adminToken: o.adminToken,
+    apiKey: o.apiKey,
     // /ui 里**不该出现**的已知令牌：本次没有配置任何真令牌，故为空数组
     // （缺陷 ui_leaks_key 靠形状判据抓，见 secretHits）。
     secrets: [],
@@ -532,6 +744,10 @@ async function runSelfTest(cfg) {
         fresh: true,          // 桩每次都是全新的桶 ⇒ "第 N 次"的断言必须有确定性
         stub: true,
         captchaParam: 'self-test-captcha-answer',
+        // 桩的两把令牌也要进 ctx：探针要判"哪一把能进控制台"，而"哪一把"是
+        // 桩才知道的事实（真实模式下这两个字段来自 --start 起的实例 / 环境变量）。
+        adminToken: stub.adminToken,
+        apiKey: stub.apiKey,
       });
       fails = rep.fails.length;
       lines = rep.lines;
@@ -574,8 +790,12 @@ function portFromBase(base) {
 
 // runCli 统一入口：默认打 WB2API_BASE，`--start` 起隔离实例，`--self-test` 打本地桩。
 //
-// cfg: { title, runProbe, cases, apiKey }
-// runProbe 收到 ctx = { base, reporter, secrets, fresh, captchaParam, stub }
+// cfg: { title, runProbe, cases, apiKey, instanceConfig }
+//
+//	instanceConfig  仅 --start 生效：额外合并进隔离实例 config.json 的键。
+//	                存在的理由见下面 admin_token 那段（两把钥匙必须不等）。
+//
+// runProbe 收到 ctx = { base, reporter, secrets, fresh, captchaParam, stub, apiKey, adminToken }
 async function runCli(cfg) {
   const argv = process.argv.slice(2);
   const self = argv.includes('--self-test');
@@ -589,12 +809,20 @@ async function runCli(cfg) {
       return bad ? 1 : 0;
     }
     let base = baseFromArgv();
+    let apiKey = process.env.WB2API_API_KEY || '';
+    let adminToken = process.env.WB2API_ADMIN_TOKEN || '';
     if (start) {
       const port = portFromBase(base);
+      const extra = cfg.instanceConfig || {};
       // 复用 lib_instance 的隔离实例：cwd=临时目录、只写探针自己的 config。
-      inst = await startInstance({ port, auths: {}, apiKey: cfg.apiKey || ('probe-key-' + port) });
+      inst = await startInstance({ port, auths: {}, apiKey: cfg.apiKey || ('probe-key-' + port), config: extra });
       base = inst.base;
       console.log('已起隔离实例（空账号库）: ' + base + '  pid=' + inst.pid);
+      // ⚠ startInstance 缺省把 admin_token 设成 **同一个** api_key。要验
+      // "/status 不认 api_key"就必须让两把不相等 —— 否则那条断言是在拿同一把
+      // 钥匙比对自身，必然 200，测出来的结论是假的。
+      apiKey = inst.key;
+      adminToken = extra.admin_token || inst.key;
     }
     const rep = makeReporter({});
     console.log('=== ' + cfg.title + ' ===');
@@ -607,6 +835,8 @@ async function runCli(cfg) {
       fresh: start,
       argv,
       captchaParam: process.env.WB2API_CAPTCHA_PARAM || '',
+      apiKey,
+      adminToken,
     });
     console.log('\n结果: ' + (rep.fails.length ? rep.fails.length + ' 条 FAIL' : '全绿')
       + (rep.skipped ? '（SKIP ' + rep.skipped + ' 项，见上面每条的说明）' : ''));
@@ -623,9 +853,10 @@ module.exports = {
   // 原样复用 lib_instance 的三件套（本层不重实现"起实例"与"不带头的请求"）
   httpJson, startInstance, sleep: sleepMs,
   // 常量
-  COOKIE, SID_RE, SESSION_401_CODES, DEFAULT_BASE, DEFECTS,
+  COOKIE, ADMIN_COOKIE, SID_RE, SESSION_401_CODES, DEFAULT_BASE, DEFECTS,
+  LOGIN_FORM_MARKER, LOGIN_ENDPOINT, SHELL_MARKER_RE, STUB_ADMIN_TOKEN, STUB_API_KEY,
   // 工具
-  randToken, freshUsername, short, hist, errCode, isRateLimited, hugeBody, missingReason, missingHint, secretHits, secretsFromEnv,
+  randToken, freshUsername, short, hist, errCode, resCode, isRateLimited, hugeBody, missingReason, missingHint, secretHits, secretsFromEnv,
   // HTTP 客户端
   request, parseSetCookie, findCookie, makeClient,
   // 报告
