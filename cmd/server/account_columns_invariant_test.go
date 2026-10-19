@@ -233,6 +233,13 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		// 工具箱（限速/人机校验/请求体上限）—— 都不实现 gateway.Provider，
 		// 是控制台侧的基础设施。
 		"account": true, "authlimit": true,
+	// 中转站方向的包（2026-10-20 新增，加它们时这条守卫**确实红了** —— 正如上面那段注释所说，
+	// 新目录必须显式归类，否则「每个上游都要有成功列」这条断言管不到它而测试全绿）：
+	//   channelstore —— 渠道表 + 能力索引（(group,model,channel_id) 的 join 记录，对标 new-api
+	//                   的 ability 索引）。它**不实现 gateway.Provider**：它回答"哪个渠道能服务
+	//                   哪个模型、优先级/权重多少"，真正连上游的是 Provider。
+	//   modelmap     —— 模型映射（公开名↔上游名 + 环检测），纯函数包，同样不是上游。
+	"channelstore": true, "modelmap": true,
 	}
 
 	entries, err := os.ReadDir("../../internal")

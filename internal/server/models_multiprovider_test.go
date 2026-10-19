@@ -223,6 +223,11 @@ func resetDynamicCache() {
 	dynamicModelsCache.fetched = time.Time{}
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
+	// ⚠ 2026-10-20：**按上游分域的模型目录缓存**（models_flight.go）也要一起清。
+	// 它是包级变量 ⇒ 不清就会跨用例串：前一个用例把某个上游 id 填进缓存，
+	// 后一个用例（比如断"某个上游失败时只剩 16 条"）就会吃到缓存而崩。
+	// 这不是测试写错，是"同一个测试里必须把两份缓存看成一体"这条不变量之前没被写下来。
+	resetProviderModelsCache()
 }
 
 // modelIDs 取 /v1/models 的 id 列表（已排序）。
