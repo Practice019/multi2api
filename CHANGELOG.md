@@ -92,6 +92,45 @@
 两个 rotate 端点另加一层管理员硬判。回归测试把这条钉死了
 （`internal/admin/gate_test.go` 的 ★★ 断言 + `verify_role_split_e2e.js` 的坏桩③）。
 
+### 发版前：无头浏览器视觉验收又挖出三条（同一批修掉）
+
+新探针 `tests/frontend/verify_login_visual_e2e.js`（自带 CDP + 30 张截图 + 几何判据 +
+**判别力自检**：好桩 0 红、三个坏桩各自让目标判据变红）在真实例上跑出三条**静态阅读
+看不见**的缺陷 —— 三条都只在特定身份或特定时间窗里出现：
+
+| # | 现象（探针实测） | 真因 | 
+|---|---|---|
+| ① | 成员会话里 `TypeError: Cannot read properties of null (reading 'accounts')`，面板保持开着等 35s 也不刷新 | `/admin/accounts` 对成员 403，而 catch 回落那句 `s.accounts` 的 `s` **也是 null**（`/status` 同样只给管理员）⇒ catch 自身再抛、且**没有外层 try** ⇒ `refresh()` 整段中断（含 30s 轮询） |
+| ② | 新建 API key 后 3.2s 列表仍是 0 条；**重开面板 10ms** 就看到 | 创建路径漏了 `writeInvalidate([EP_APIKEYS])`（删除/轮换都有）⇒ `loadAPIKeys()` 用 30s 旧快照重画 |
+| ③ | 同一浏览器换身份后，「管理钥匙」按**上一个身份**的快照渲染 | 面板缓存（落 localStorage、TTL 30s、跨导航存活）的 key 只有 URL、**没有身份** |
+
+③ 的反方向是：**管理员先登录、30 秒内成员登录 ⇒ 成员界面上会画出管理员的 key 列表**
+（服务端拦得住请求，界面已经在显示别人的数据）。窗口只有 30 秒，**人工几乎撞不到** ——
+这是"视觉验收不能省"的最硬证据。修法：缓存加身份命名空间
+`wb2api.pcache.<scope>.<key>`（`token` / `u:<id>:<role>` / `anon`），身份一确定就切。
+
+修完该探针 **95 PASS / 0 FAIL**、自检 4/4，`console.error` / 未捕获异常 /
+`Network.loadingFailed` 三条硬判据全空。
+
+### 发版前回归实测（2026-10-19）
+
+    go build ./...                                                 ok
+    go test（37 包，排除未跟踪的 docs/）                            0 FAIL / 34 ok
+    go vet / go mod tidy 后 git diff                               ok / 无改动
+    node tests/frontend/run_http_suites.js                         8 次运行全绿
+    node tests/frontend/verify_login_visual_e2e.js [--self-test]    95/0  ·  4/0
+    node tests/frontend/verify_models_grouped.js                    43 / 0
+    node tests/frontend/verify_model_provider_filter.js             14 / 0（连跑 6 次稳定）
+    node tests/frontend/verify_delete_buttons_ui_e2e.js             19 / 0
+    node tests/frontend/verify_all_buttons_e2e.js                   42 / 0
+    node tests/frontend/audit_dead_buttons.js                       6/6 自检 + 40 绑定 / 0 死按钮
+
+⚠ 探针层的"假红"也一并清了（那些不是产品问题，是探针前提过期）：产品自 T5 起不再把
+凭据注入页面 ⇒ 探针自己带 key（`lib_cdp.probeApiKey` / `injectProbeKey`）并像人一样
+粘一次（`pasteConsoleKey`）；静态检查段改走**已认证**取源码（`consoleHtmlAuthed`，
+裸 `http.get` 不跟 302 会拿到登录页，反向断言在空串上还会空洞通过）；固定 `sleep`
+一律换成有界轮询（同环境曾出现 4/3、13/1、14/0 三种结果）。
+
 ## v1.9.1 — 2026-10-19
 
 > 本版主题：**修「导入之后删除不掉」**（你带着截图报的那条），以及它牵出来的
