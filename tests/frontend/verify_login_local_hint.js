@@ -35,6 +35,38 @@ function resolvePort() {
   return Number(process.env.HINT_PORT || 18081);
 }
 const PORT = resolvePort();
+
+// 控制台身份令牌。取值顺序：URL 上的 `?token=`（run_e2e 传的就是它）→ 进程环境变量。
+//
+// # ⚠ 2026-10-19：这条探针此前**打错了页面**（诊断纠正）
+//
+// 原版把场景 URL 拼成裸的 `http://<host>:<port>/ui`，以为 `#loginLocalHint`
+// 在**登录页**上。实测证否：
+//
+//	未认证 /ui      = 17864 字节，`loginLocalHint` **0** 处（那是登录页，只有 id="form"）
+//	带 token 换手的 /ui = 539097 字节，`loginLocalHint` **2** 处
+//
+// 它其实在**控制台**的「添加账号」弹窗里（webui.html:1723 的
+// `<p id="loginLocalHint">`，由 renderLoginLocalHint() 按 location.hostname 显隐，
+// 见 5225-5252 与 renderLoginIntro 那一段）。浏览器停在登录页时那个元素**根本不存在**
+// ⇒ 三条场景全报"页面上没有 #loginLocalHint 元素"（HEAD/基线同样红）。
+//
+// 所以正确做法是**两个条件同时满足**：
+//   ① 带 `?token=` 进控制台（元素才在 DOM 里）
+//   ② 用非本机 host 打开（location.hostname 才不是 127.0.0.1）
+// 而 host 仍然只能靠 `--host-resolver-rules` 真解析（location.hostname 覆写不了，
+// 那段实测记录见下面 scenarios 的注释）。
+//
+// 令牌与 lib_cdp.probeApiKey 同源：探针实例里 api_key == admin_token，
+// 而 run_e2e 传进来的 URL 上就带着 `?token=`。
+function resolveToken() {
+  const u = process.env.HINT_URL;
+  if (u) { const m = u.match(/[?&]token=([^&#]+)/); if (m) return decodeURIComponent(m[1]); }
+  return process.env.WB2API_PROBE_TOKEN || process.env.WB2API_PROBE_KEY || '';
+}
+const TOKEN = resolveToken();
+// withToken 给控制台 URL 挂上身份（与 lib_cdp.withToken 同一语义，本文件自带 CDP 引导段故就地实现）
+const withToken = (u) => (TOKEN ? u + (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : u);
 const PROFILE = path.join(os.tmpdir(), 'chrome-hint');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(d)); }).on('error', rej); }); }
@@ -73,13 +105,19 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     //
     // 每个场景要**重启浏览器**（resolver 规则是启动参数）。
     const scenarios = [
-      { host: '127.0.0.1', url: 'http://127.0.0.1:' + PORT + '/ui',
+      // ⚠ 三个场景都必须带 ?token=（见文件顶部 resolveToken 那段）：
+      //   `#loginLocalHint` 在**控制台**的添加账号弹窗里，不在登录页上。
+      { host: '127.0.0.1', url: withToken('http://127.0.0.1:' + PORT + '/ui'),
         expectShown: false, why: '本机访问：没有回调问题' },
-      { host: 'localhost', url: 'http://localhost:' + PORT + '/ui',
+      { host: 'localhost', url: withToken('http://localhost:' + PORT + '/ui'),
         expectShown: false, why: '本机访问（等价写法）' },
-      { host: 'gw.example.test', url: 'http://gw.example.test:' + PORT + '/ui',
+      { host: 'gw.example.test', url: withToken('http://gw.example.test:' + PORT + '/ui'),
         resolve: true, expectShown: true, why: '域名：回调会打到用户自己那台' },
     ];
+    if (!TOKEN) {
+      console.log('  ⚠ 没有拿到令牌（HINT_URL 上没有 ?token=、也没有 WB2API_PROBE_TOKEN）' +
+        ' ⇒ 浏览器会停在登录页，三条场景都会报"没有 #loginLocalHint 元素"');
+    }
 
     for (const sc of scenarios) {
       // 每个场景一个独立浏览器（resolver 规则只能启动时给）
@@ -115,7 +153,18 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
 
       const state = JSON.parse(await ev2(`JSON.stringify((function(){
         var el = document.getElementById('loginLocalHint');
-        if (!el) return { missing: true };
+        if (!el) return {
+          missing: true,
+          // ⚠ 诊断字段：这一条红了必须能一眼看出"停在登录页"还是"压根没打开"。
+          // 本探针吃过一次亏 —— 原版把三条场景都拼成裸 /ui，全都停在登录页，
+          // 报出来只有一句"没有 #loginLocalHint 元素"，看不出真因。
+          url: String(location.href), hostSeen: String(location.hostname),
+          title: (document.title || ''),
+          bytes: document.documentElement.outerHTML.length,
+          isLoginPage: !!document.getElementById('form'),
+          isConsole: !!document.getElementById('nav'),
+          raw: (document.body ? document.body.textContent || '' : '').replace(/\\s+/g, ' ').slice(0, 120),
+        };
         var seenBefore = String(location.hostname);
         if (typeof window.__wb2api__ !== 'undefined' && window.__wb2api__.renderLoginLocalHint) {
           window.__wb2api__.renderLoginLocalHint();
@@ -128,7 +177,18 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
         };
       })())`));
 
-      if (state.missing) { ok(false, '页面上没有 #loginLocalHint 元素'); continue; }
+      if (state.missing) {
+        console.log('  ' + sc.host + ' 诊断: url=' + state.url + ' host=' + state.hostSeen +
+          ' title=' + JSON.stringify(state.title) + ' bytes=' + state.bytes +
+          ' 登录页=' + state.isLoginPage + ' 控制台=' + state.isConsole);
+        console.log('    正文片段: ' + JSON.stringify(state.raw));
+        ok(false, '页面上没有 #loginLocalHint 元素（host=' + sc.host + '，' +
+          (state.isLoginPage ? '停在**登录页** —— 令牌没生效' :
+            (state.isConsole ? '是控制台但元素缺失 —— 产品侧真的删掉了 #loginLocalHint' : '页面不是控制台也不是登录页')) + '）');
+        ws2.close();
+        try { br.kill(); } catch { }
+        continue;
+      }
       ok(state.hostSeen === sc.host,
         '浏览器确实用 ' + sc.host + ' 打开了（实际 ' + state.hostSeen + '）—— ' +
         '这条先确认，否则下面的显隐断言测的是同一个 host');

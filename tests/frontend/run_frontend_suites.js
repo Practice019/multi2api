@@ -26,6 +26,50 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const DIR = __dirname;
+const REPO = path.resolve(DIR, '..', '..');
+
+// ---------------------------------------------------------------------------
+// 本套件的**默认二进制**：探针构建（可用 WB2API_EXE 覆盖）
+//
+// # 为什么要在这里定默认值（2026-10-19 的事故）
+//
+// 本套件里有若干项会**启动 exe**。原先它们各自解析二进制，默认落到
+// `bin/wb2api-server.exe` —— 而那个文件通常是**用户正在跑的那份**（见
+// `lib_instance.js:32` 的原话），实测它就是一份 **11 小时前的旧构建**：
+//
+//   bin/wb2api-server.exe        2026/10/19 04:17:47   ← 旧（没有登录门那一代）
+//   bin/wb2api-server-probe.exe  2026/10/19 15:01:59   ← 当前构建
+//   internal/server/webui.html   2026/10/19 15:01:47   ← 产品（**编译期内嵌进 exe**）
+//
+// 后果实测：两条 e2e 探针在旧构建上**是绿的**，因为裸 `/ui` 在那个世代直接吐控制台；
+// 换成当前构建就红了（登录门之后裸 `/ui` 给登录页）⇒ 那个"绿"是**在已不复存在的
+// 产品世代上的绿灯**。⇒ 默认必须指向**当前构建**，否则一次 `node run_frontend_suites.js`
+// 的结果不可解释。
+//
+// ⚠ 这不是"绕过新鲜度判据"：判据（`lib_instance.js` 的 `assertBuildFresh`，以及两条
+//   e2e 探针里的同源实现）比的是"**实际要启动的那个 exe** 是否比 webui.html 新" ——
+//   本默认值只是让"实际要启动的那个"是当前构建；**若连 probe 构建也旧，照样红**。
+// ⚠ 必须在**任何 require 之后、任何子进程之前**设：`lib_instance.js:38-49` 记着这个坑
+//   （模块求值时就把 EXE 定下了，require 之后再设 env 会静默回落）。
+// ---------------------------------------------------------------------------
+if (!process.env.WB2API_EXE) {
+  process.env.WB2API_EXE = 'bin/wb2api-server-probe.exe';
+  console.log('前置：未指定 WB2API_EXE，本套件默认用 ' + process.env.WB2API_EXE + '（当前构建）；可用同名环境变量覆盖\n');
+}
+// 前置条件自证：一次跑必须能说清"我在什么前提上得出的结论"
+(function printPreconditions() {
+  const exe = path.resolve(REPO, process.env.WB2API_EXE);
+  const html = path.join(REPO, 'internal', 'server', 'webui.html');
+  // ⚠ 必须打**本地时间**（`sv-SE` 给出 `YYYY-MM-DD HH:MM:SS`）：用 toISOString 会打出 UTC，
+  //   于是 15:01 的 exe 显示成 07:01、与文件管理器/探针报错里的时间对不上 ——
+  //   一个"自证前提"的打印如果时间对不上，就等于没证。
+  const mt = (p) => { try { return fs.statSync(p).mtime.toLocaleString('sv-SE'); } catch (e) { return '（不存在）'; } };
+  console.log('前置：exe  = ' + exe);
+  console.log('前置：      exe mtime=' + mt(exe) + '   webui.html mtime=' + mt(html));
+  console.log('前置：.git  = ' + (fs.existsSync(path.join(REPO, '.git')) ? '有（两项审计按 git ls-files 扫）' : '**没有** ⇒ 依赖它的项会红'));
+  console.log('前置：Chrome= ' + (() => { try { return require(path.join(DIR, 'chrome_path.js')).resolveChrome(); } catch (e) { return '**解析失败**：' + e.message; } })());
+  console.log('');
+})();
 
 // 全部套件：[generator, 产物]。
 // 顺序保持与历史一致（数字稳定便于对照旧输出）。

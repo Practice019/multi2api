@@ -79,20 +79,55 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const listenerCount = async (selector) => {
       const doc = await send('DOM.getDocument', { depth: -1 });
       const node = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector });
+      // ⚠ 选择器不存在时 `DOM.querySelector` 回 nodeId=0，而给 0 调
+      //   `DOM.resolveNode` 的返回值里**没有** `.result.object` ⇒
+      //   `(await send(...)).result.object.objectId` 抛
+      //   "Cannot read properties of undefined"。
+      //   那就是本探针长期红在 F2-1 的**真因**：它挑的容器在实例里不存在。
+      //   这里先把"元素不存在"如实报成 -1（而不是抛异常），由调用方断言 —— 
+      //   否则一个"选择器过期"会伪装成"监听器泄漏"。
       if (!node.result || !node.result.nodeId) return -1;
-      const l = await send('DOMDebugger.getEventListeners', { objectId: (await send('DOM.resolveNode', { nodeId: node.result.nodeId })).result.object.objectId });
+      const resolved = await send('DOM.resolveNode', { nodeId: node.result.nodeId });
+      if (!resolved.result || !resolved.result.object) return -1;
+      const l = await send('DOMDebugger.getEventListeners', { objectId: resolved.result.object.objectId });
       return (l.result && l.result.listeners ? l.result.listeners.length : 0);
     };
+
+    // ---- 面板容器**从 manifest 现取**，不再写死 codearts ----
+    //
+    // # 为什么必须改
+    //
+    // 原判据写死 `#pbody-codearts-welfare`。那个容器只在**codearts 声明了 welfare
+    // 能力且有可渲染内容**时才生成（panelCapsOf / syncProviderPanels），
+    // 而 18080 这个合成实例里一个 codearts 账号都没有 ⇒ 容器根本不存在 ⇒
+    // F2-1 直接抛异常、F2-3 的注入也无处可落。
+    //
+    // 判据的**意图**与"是哪个上游"无关：**任何一个长期存在的面板容器**
+    // 都不该被反复 addEventListener（F2 的形态是监听器线性增长）。
+    // 所以改成"取当前页里真实存在的第一个 provider 面板容器" ——
+    // 这样它在任何实例构成下都有东西可测，而且比写死一个上游**更贴判据**。
+    const hostId = await evalJs(`(function(){
+      var els = Array.from(document.querySelectorAll('[id^="pbody-"]'));
+      // 优先取"看起来是生成出来的"那个（有子节点），否则退回第一个存在的
+      var filled = els.filter(function(e){ return e.childElementCount > 0; })[0];
+      return (filled || els[0] || {}).id || '';
+    })()`);
+    // ⚠ 必须拼成 `#id` 再交给 DOM.querySelector —— 传裸 id 时它按**标签名**解析，
+    //   匹配不到任何元素 ⇒ 回 nodeId=0 ⇒ listenerCount 得到 -1。
+    //   （实测踩到：容器明明在 DOM 里，"被测容器在 DOM 里"却红。）
+    const hostSel = hostId ? '#' + hostId : '';
+    console.log('    被测面板容器（从当前页现取）: ' + JSON.stringify(hostSel));
+    ok(!!hostSel, '页面上存在至少一个 provider 面板容器（#pbody-*）—— 否则本判据无处落点');
+    if (!hostSel) throw new Error('没有任何 #pbody-* 容器：实例的上游面板一个都没生成');
 
     console.log('\n[F2-1] 反复 syncProviderPanels 后监听器数不增长');
     const counts = [];
     for (let i = 0; i < 25; i++) {
       await evalJs('window.__wb2api__.syncProviderPanels()');
     }
-    // 面板容器
-    const hostSel = '#pbody-codearts-welfare';
     const hostCount = await listenerCount(hostSel);
     console.log('    ' + hostSel + ' 上的监听器数: ' + hostCount);
+    ok(hostCount !== -1, '被测容器在 DOM 里（listenerCount 拿到了真实值）');
     ok(hostCount === 0, '面板容器上**没有**监听器（改为委托到 #content 后应为 0）');
 
     const contentCount = await listenerCount('#content');
@@ -110,24 +145,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await sleep(12000);   // 跨过 2 个自动刷新周期
     const c1 = await listenerCount('#content');
     console.log('    12 秒后 #content 监听器: ' + c0 + ' → ' + c1);
-    ok(c1 === c0, '自动刷新 12 秒后监听器数不变（F2 的原始形态是 +1/次）');
+    ok(c0 !== -1 && c1 === c0, '自动刷新 12 秒后监听器数不变（F2 的原始形态是 +1/次）');
 
     console.log('\n[F2-3] 一次点击只产生一个 POST');
-    // 注入一个可领取的条目，模拟上游真的返回可领福利
+    // 注入一个可领取的条目，模拟上游真的返回可领福利。
+    //
+    // ⚠ 注入到**上面现取的那个容器**里（原来写死 #pbody-codearts-welfare，实例里没有）。
+    //   委托判据（data-gclaim 走 #content 上的委托）与"注入到哪个容器"无关 ——
+    //   这正是本判据要证的事：按钮在**面板容器**里，而监听器在 #content 上。
     await evalJs(`(() => {
       const W = window.__wb2api__;
-      const host = document.getElementById('pbody-codearts-welfare');
+      const host = document.getElementById(${JSON.stringify(hostId)});
       if (!host) return;
       host.innerHTML = '<div class="glist"><div class="gitem">'
         + '<span class="gname">测试福利</span>'
         + '<button data-gclaim="codearts" data-gcampaign="999" data-gpath="/admin/welfare/claim">领取</button>'
         + '</div></div>';
-      // 屏蔽确认框与真实写操作，只数请求
+      // 屏蔽确认框，只数请求
       window.confirm = () => true;
       window.__origAdmin = window.fetch;
     })()`);
     requests.length = 0;
-    await evalJs(`document.querySelector('#pbody-codearts-welfare button[data-gclaim]').click()`);
+    await evalJs(`document.querySelector('#${hostId} button[data-gclaim]').click()`);
     await sleep(1500);
     const posts = requests.filter(r => r.method === 'POST' && /\/admin\/welfare\/claim/.test(r.url));
     console.log('    一次点击产生的 claim POST 数: ' + posts.length);
