@@ -480,6 +480,13 @@ func New(cfg Config) *Handler {
 	// API key 管理（对标 new-api 令牌体系）：未注入 Store 时不注册路由。
 	if h.cfg.APIKeys != nil {
 		h.registerAPIKeys()
+	}
+
+	// 渠道管理（中转站方向：能力索引 + 每渠道模型映射）：**各自的判据**，同样"未注入就不注册"。
+	// ⚠ 不能挂在上面那个 if 里 —— 渠道功能与 API key 体系是两件独立的事，
+	// 共用一个门会让"只配了渠道、没配多 key 存储"的部署**静默看不到渠道管理**（路由 404，
+	// 而前端按 manifest 只会觉得"这个功能不存在"，完全没有报错线索）。
+	if h.cfg.Channels != nil {
 		h.registerChannels()
 	}
 
