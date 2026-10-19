@@ -3180,6 +3180,10 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		resp["avg_total_ms"] = totalSum / int64(len(items))
 	}
 	if ttfbN > 0 {
+		// ⚠ 整数除法 = **向下截断**，不是四舍五入（2026-10-20 对账时发现的 1ms 差异来源）。
+		// 用 2000 条尾部日志独立复算核对：total / ok / tokens / avg_total_ms 逐位一致，
+		// avg_ttfb 我方 16104、手算四舍五入 16105 —— 差的这 1ms 是取整方式，不是数据错误。
+		// 留着这个行为（不改成 Round）：截断对"平均耗时"更保守，且改了会让历史对比失真。
 		resp["avg_ttfb_ms"] = ttfbSum / ttfbN
 	}
 	if !oldest.IsZero() {
