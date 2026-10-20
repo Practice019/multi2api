@@ -12,6 +12,8 @@ package session
 import (
 	"encoding/json"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -273,6 +275,18 @@ func hashIndex(key string, n int) int {
 //  1. metadata.conversation_id
 //  2. conversation_id
 //  3. metadata.user_id
+//  4. **对话前缀指纹**（兜底，2026-10-20 加，见 issue #2）
+//
+// ⚠ 第 4 级为什么必须有：OpenAI 兼容客户端（DSH / Cline / Continue 等绝大多数）
+// **从不发送上面那三个字段**。只有 OpenRouter 那类才会带 x-session-affinity 头，
+// 而 OpenAI 官方 SDK 只在 baseUrl 含 api.openai.com 时才写 prompt_cache_key。
+//
+// 后果（issue #2 实测）：sessKey 恒为空 ⇒ Resolve 从未被调用 ⇒ 粘性层退化为纯轮换。
+//   · /status 的 sticky_sessions 在 6927 个请求下恒为 0
+//   · 同会话相邻两轮的账号转移矩阵 ≈ 20/20/20/20/20（5 个号纯随机）
+//   · 上游 prompt cache 按账号隔离 ⇒ 每次换号 = 整段对话重新预填充
+//     长对话单笔换号损失实测 2.8 ~ 6.0 credit（正常请求 0.1~0.3）
+//   · 受控对照：不带会话标识时缓存命中 19.8%；带 conversation_id 时 98.7%
 func ExtractKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -289,7 +303,97 @@ func ExtractKey(body []byte) string {
 			return v
 		}
 	}
-	return strOrEmpty(obj["conversation_id"])
+	if v := strOrEmpty(obj["conversation_id"]); v != "" {
+		return v
+	}
+	// ④ 三条显式键都落空 ⇒ 用对话前缀指纹兜底
+	return PrefixKey(obj)
+}
+
+// PrefixKey 返回「对话前缀指纹」，用作会话键。
+//
+// # 为什么这是对的不变量
+//
+// 多轮对话的 messages 是**前缀增长**的：第 1 轮 [system, user1]，
+// 第 2 轮 [system, user1, asst1, user2]，第 3 轮 …… 前面永远不变。
+// ⇒ 只取前两条，指纹在整段对话里恒定 —— 这正是"缓存亲和"需要的东西。
+//
+// # 为什么只取前两条
+//
+// 全量哈希会随每轮增长而变，指纹每轮都不同 = 等于没有粘性。
+//
+// # 为什么 system 截 512 字符
+//
+// 有的客户端往 system 里塞时间戳 / 请求号 / 当前日期，全取会让指纹漂移。
+// 截前 512 字符足够区分不同会话，又不会被尾巴上的易变内容影响。
+//
+// # ⚠ 形态不认识时返回空
+//
+// 宁可退回随机轮换，也不要算出一个**会漂移**的键 —— 后者会让同一会话
+// 在表里生成大量一次性条目，既占内存又让 GC 白跑。
+func PrefixKey(obj map[string]any) string {
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return ""
+	}
+	var b []byte
+	b = append(b, "prefix:v1|"...)
+	b = append(b, strOrEmpty(obj["model"])...)
+	n := 2
+	if len(msgs) < n {
+		n = len(msgs)
+	}
+	for i := 0; i < n; i++ {
+		m, ok := msgs[i].(map[string]any)
+		if !ok {
+			return "" // 形态不认识：宁可退回轮换
+		}
+		b = append(b, '|')
+		b = append(b, strOrEmpty(m["role"])...)
+		b = append(b, ':')
+		text := contentText(m["content"])
+		if len(text) > 512 {
+			text = text[:512]
+		}
+		b = append(b, text...)
+	}
+	if len(b) == len("prefix:v1|") {
+		return "" // 只有前缀没有实质内容
+	}
+	// FNV-1a 32 位：够区分会话，且比 crypto 快得多（每请求都要算）
+	var h uint32 = 2166136261
+	for _, c := range b {
+		h ^= uint32(c)
+		h *= 16777619
+	}
+	return "pfx:" + strconv.FormatUint(uint64(h), 16)
+}
+
+// contentText 把 message.content 折平成纯文本。
+//
+// OpenAI 的 content 有两种形态：
+//   - 纯字符串："你好"
+//   - 内容块数组：[{"type":"text","text":"你好"}, {"type":"image_url",...}]
+//
+// 只取 text 块的文本，其余（图片、音频）跳过 —— 它们不影响"这是哪个会话"。
+func contentText(v any) string {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []any:
+		var sb strings.Builder
+		for _, item := range c {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t := strOrEmpty(m["text"]); t != "" {
+				sb.WriteString(t)
+			}
+		}
+		return sb.String()
+	}
+	return ""
 }
 
 // strOrEmpty 把 JSON 字符串字段安全转 string（非字符串类型返回空）。
