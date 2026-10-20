@@ -8502,14 +8502,42 @@ let loginProvider = '';
     if (!b || b.disabled) return;
     const id = b.dataset.apikey, act = b.dataset.act;
     if (act === 'toggle') {
+      // ⚠⚠ 2026-10-21 修：**不能**用按钮文案判断当前状态。
+      //
+      // 原写法：
+      //     await busyRun(b, async () => {
+      //       const on = b.textContent === '启用';    // ← 此时已经不是「启用」了
+      //       ...
+      //     }, { label: '切换', busyText: '…' });
+      //
+      // `busyRun` 一进入（busyRun 内 L4926）就把按钮文案改成 busyText，
+      // 然后才调 fn()。所以 fn 里读到的 textContent 恒为 `'…'`，
+      // `'…' === '启用'` **永远 false** ⇒ 永远发送 `enabled:false`
+      // ⇒ **只能禁用、永远启用不了**。
+      //
+      // 用户报的现象正是这个：「这个 apikey 启用禁用有 bug」——
+      // 界面上状态显示「禁用」、按钮显示「启用」，点一下后端又收到 false，
+      // 于是什么也没变，看起来像"点了没反应"。
+      //
+      // ⇒ 改成从**列表缓存**读状态。和下面 edit 分支同一数据源（那里也是
+      //   从 _apikeysCache 找 cur），所以"看到的状态"与"据以取反的状态"
+      //   必然是同一个值 —— 不会再出现"界面一套、判断另一套"。
+      const cur = (window._apikeysCache || []).find(x => x.id === id);
+      if (!cur) {
+        // 缓存里找不到就别猜：猜错方向会把用户本来想启用的 key 再禁一次。
+        toast('列表已变化，请刷新后重试', true);
+        return;
+      }
+      const on = !cur.enabled;   // 点击后要落到的状态
       await busyRun(b, async () => {
         try {
-          const on = b.textContent === '启用';
           await admin('/admin/apikeys/toggle', { method: 'POST', body: JSON.stringify({ id, enabled: on }) });
           toast(on ? '已启用' : '已禁用');
           await loadAPIKeys(); return true;
         } catch (e) { toast('操作失败：' + e.message, true); return false; }
-      }, { label: '切换', busyText: '…' });
+        // 文案跟着**目标状态**走（启用/停用），不是无信息量的"切换" ——
+        // 用户点的是"启用"，进度条上就该写"启用中…"。
+      }, { label: on ? '启用' : '停用', busyText: on ? '启用中…' : '停用中…' });
       return;
     }
     if (act === 'edit') {
