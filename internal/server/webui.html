@@ -9996,7 +9996,17 @@ let loginProvider = '';
     //   那不叫统一口径，叫丢信息。
     ['总处理量', num(s.tokens) ? fmtTokens(s.tokens) : null, ''],
     ['输出 token', num(s.out_tokens) ? fmtTokens(s.out_tokens) : null, ''],
-      ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
+      // ⚠ 2026-10-20：用 `think_tokens_with_out`（与输出 token **同期**）而不是 `think_tokens`。
+    //
+    //   实测矛盾（用户报"数据不太准"）：输出 token 1.2M 而推理 token 32.1M —— 推理大 27 倍。
+    //   推理是输出的**子集**，物理上不可能。全库取证（35,620 行）发现：
+    //     Σ think_tokens            = 32,147,395   （覆盖 62% 的行，早就有这个字段）
+    //     Σ think_tokens_with_out   = 与 out 同期    （out_tokens 今天才加，只覆盖 0.6%）
+    //   ⇒ 两个数覆盖的时间窗差 100 倍，并列显示就是自相矛盾的读数。
+    //
+    //   后端两个字段都给（全历史 + 同期）：这里用同期版，才能与「输出 token」并列比较。
+    //   ⚠ 别改回 s.think_tokens：那会让面板重新出现"推理比输出大"的荒谬数字。
+    ['推理 token', fmtTokens(num(s.think_tokens_with_out) ? s.think_tokens_with_out : null), ''],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
       // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）
@@ -11119,7 +11129,9 @@ function renderDailyTrendSVG(list) {
     '成功率': '成功 / 总请求。分母为 0 时显示 —。',
     '总处理量': '输入 + 输出（缓存写入不重复计入）—— 这条请求总共处理了多少 token，包含把上下文读一遍的成本。口径照 DSH 的 token-ledger-panel.js。',
 '输出 token': '上游 usage 里的 completion_tokens（已含推理 token，不重复相加）—— AI **实际生成**了多少 token。缓存读取的上下文不计入这里，所以它通常远小于「总处理量」。',
-    '推理 token': '输出 token 中属于推理（thinking）的部分 —— 它是上面那个数的子集。',
+    '推理 token': '输出 token 中属于推理（thinking）的部分 —— 它是上面那个数的子集，所以永远不大于它。'
+    + '⚠ 只统计同时有输出记录的请求（与「输出 token」同一批样本），否则不可比：'
+    + '历史日志早就有推理量、却没有输出量记录，跨期相加会得出「推理比输出多 27 倍」这种自相矛盾的数。',
     '平均 TTFB': '首字节平均耗时，只统计上报了该字段的请求（未上报的不计入分母）。',
     '平均总耗时': '从收到请求到响应结束的平均耗时。',
     'Top 模型': '本范围内**消耗 Token 最多**的模型（不是请求数最多）。',
