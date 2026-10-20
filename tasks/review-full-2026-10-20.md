@@ -234,3 +234,58 @@ L63  sanitizeMessages
 
 ⚠ 唯一够得上 Critical 的是 `a0fcaf0` 里的 `Revoke` ——
 用户点"退出登录"看到成功，而那个 token 在进程重启后又能用了。
+---
+
+## 八、第六轮：前端 `webui.html`（13500 行内联脚本）
+
+### ① XSS / 注入 —— 判定不是问题
+
+```
+innerHTML 赋值 119 处
+esc() 辅助存在（L1967）：const esc = s => String(s == null ? '' : s)
+用模板串拼 innerHTML 但整行没走 esc 的：2 处
+```
+
+那 2 处逐行看过，**都是 SVG 拼接，内容全是数字格式化**：
+
+```
+L10560  <line x1="${PADL}" y1="${y.toFixed(1)}" ...>     坐标
+L10562  <text ...>${(rv * 100).toFixed(1)}%</text>        百分比
+L10564  <text ...>${fmtT(tokenMax * (1 - i / 4))}</text>  格式化后的 token 数
+L10729  <rect x="${(cx(i) - barW / 2).toFixed(1)}" ...>   柱状图坐标
+```
+
+时间标签来自后端 series 的 `ts` 字段（后端生成），不是用户输入。
+
+⇒ **没有用户数据流入 innerHTML，XSS 判定不是问题。**
+
+### ② `setInterval` 重复注册 —— 判定不是问题
+
+```
+L13123  setInterval(() => { pollPoolValues(); pollStatsCards(); loadTrendSeries(); pollAPIKeys(); }, 30000)
+L13526  setInterval(() => { if (sectionActive('logs')) loadLogHistory(); }, 10000)
+```
+
+**关键判据：它们在函数内还是顶层？** 若在渲染函数内，每次重绘都会注册一个新 interval ⇒ 泄漏。
+
+用大括号配平算过：`renderDailyTrendSVG` 是 **L10658 → L10792**，
+而这两处 interval 在 L13123 / L13526 ⇒ **函数外、顶层** ⇒ 只注册一次 ✓
+
+⚠ 我第一版的作用域检测（"向上找最近的 function 声明"）**误判**成
+`renderDailyTrendSVG` 内部 —— 因为它只往上找最近的 `function`，
+没有确认那个函数是否已经闭合。改用配平才看对。
+
+### ③ `panelPolls` 的轮询守卫 —— 写得好，留档作为正例
+
+```
+L6857  const timer = setInterval(async () => {
+L6858    if (panelPolls[key] !== timer) { clearInterval(timer); return; }   ← 防重复注册
+L6859    if (!host || !host.isConnected) { clearInterval(timer); delete panelPolls[key]; return; }  ← 防已卸载
+L6860    if (pendingCount() <= 0) { clearInterval(timer); delete panelPolls[key]; return; }        ← 任务完成即停
+L6861    if (++rounds > MAX_ROUNDS) { clearInterval(timer); delete panelPolls[key]; return; }       ← 防无限
+```
+
+四条退出条件一个不缺。这是本项目里**唯一**完整的轮询生命周期管理 ——
+其他几处 `setInterval` 都靠"顶层只执行一次"这个隐含前提。
+
+⇒ 不是缺陷，但值得记：**如果将来有人把这些 interval 挪进函数，就会立刻泄漏。**
