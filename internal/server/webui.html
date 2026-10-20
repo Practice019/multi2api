@@ -9871,7 +9871,12 @@ let loginProvider = '';
     const ok = num(s.ok);
     const rate = (total && ok !== null) ? (ok / total * 100) : null;
     const avgMs = num(s.avg_total_ms);
-    const toks = num(s.tokens);
+    // ⚠ 2026-10-20 改口径：吞吐用**纯输出**（s.out_tokens）。
+    //   用 total 会把输入/缓存读取也算成"生成速度" —— 实测同一份数据
+    //   total 版 10490 t/s、输出版 250 t/s，前者是假的速度。
+    //   ⚠ 上一轮我改过一次但没生效：old_string 匹配到了文件里另一处同名行
+    //   （`const toks = num(s.tokens);` 不止一处）。这次用「紧跟 tps 计算」作锚点。
+    const toks = num(s.out_tokens);
     const tps = (avgMs && total && toks !== null && avgMs > 0)
       ? toks / ((avgMs * total) / 1000) : null;
     const parts = ['<span class="hb-title">性能健康</span>'];
