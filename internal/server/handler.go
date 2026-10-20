@@ -1674,7 +1674,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Session != nil {
 		sessKey = session.ExtractKey(body)
 		if sessKey != "" {
-			if uid, ok := h.cfg.Session.Resolve(sessKey); ok {
+			// ⚠ 必须带 reqProvider：粘性是**池内**概念，只按全池分配会把本会话绑到别的上游的号上（见 session.Config.AvailableFor）
+			if uid, ok := h.cfg.Session.Resolve(sessKey, reqProvider); ok {
 				stickyUID = uid
 			}
 		}

@@ -33,6 +33,14 @@ type Config struct {
 	GCInterval time.Duration
 	Store      redisstore.Store
 	Available  func() []string
+	// AvailableFor 返回**指定上游**的可用 uid 列表（healthy 且未占满在途）。
+	//
+	// ⚠ 2026-10-20 加：粘性是**池内**概念，而池子是多上游共用的。
+	// 只按「全池可用号」分配会把 loomy 的会话绑到 workbuddy 的号上 ——
+	// 那种绑定对本次请求毫无意义（凭证结构不同），handler 的 PickByUIDFor 会返回 nil，
+	// 于是每轮都「解绑 + 重新分配」，粘性永远不生效。
+	// 由 pool.AvailableUIDsFor 提供。
+	AvailableFor func(provider string) []string
 }
 
 // Router 会话粘性路由器。
@@ -117,9 +125,9 @@ func (r *Router) LoadFromStore() {
 
 // Resolve 返回会话 key 应绑定的账号 uid，ok=false 表示当前无可用账号。
 // 命中且账号可用 → 滚动 lastActive 并直接返回；否则（lazy 异常情况）走重新分配。
-func (r *Router) Resolve(key string) (string, bool) {
+func (r *Router) Resolve(key string, provider string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet()
+	available := r.availableSet(provider)
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
@@ -146,7 +154,7 @@ func (r *Router) Resolve(key string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice()
+	uids := r.availableSlice(provider)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -240,8 +248,8 @@ func (r *Router) gcOnce(now time.Time) int {
 }
 
 // availableSet 把 Available() 的有序列表转集合（快路径命中校验用）。
-func (r *Router) availableSet() map[string]bool {
-	uids := r.availableSlice()
+func (r *Router) availableSet(provider string) map[string]bool {
+	uids := r.availableSlice(provider)
 	set := make(map[string]bool, len(uids))
 	for _, u := range uids {
 		set[u] = true
@@ -250,7 +258,10 @@ func (r *Router) availableSet() map[string]bool {
 }
 
 // availableSlice 安全调用 Available（nil 函数视空池）。
-func (r *Router) availableSlice() []string {
+func (r *Router) availableSlice(provider string) []string {
+	if r.cfg.AvailableFor != nil {
+		return r.cfg.AvailableFor(provider)
+	}
 	if r.cfg.Available == nil {
 		return nil
 	}
