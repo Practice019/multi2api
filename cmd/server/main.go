@@ -1203,10 +1203,40 @@ func main() {
 	// 22 个管理端点已经由 workbuddy 自己通过 AdminExt 注册，不再经核心转发。
 	upSettings := newUpstreamSettingsAdapter(wb, cfg)
 
+	// ── 凭据根（authsRoot）───────────────────────────────────────────────
+	//
+	// ⚠ 2026-10-20：所有**凭据**统一放这一个目录，目的是「复制 auths/ 一个文件夹
+	//   到新机器就能跑」（用户原话：「Auths 下面存储所有凭据、账号凭据以及
+	//   API key 的配置」）。
+	//
+	// 回落链与 admin.credentialDirFor 逐字同源：AuthsBase → AuthDir → "auths"。
+	// ⚠ 与它必须一致 —— 两条路径算出不同的根，会让"账号在 A、渠道在 B"，
+	//   正是这次要消除的问题。
+	authsRoot := strings.TrimSpace(cfg.AuthsBase)
+	if authsRoot == "" {
+		authsRoot = strings.TrimSpace(cfg.AuthDir)
+	}
+	if authsRoot == "" {
+		authsRoot = "auths"
+	}
+	// auths/console/ 放控制台自己的用户与会话。
+	//
+	// ⚠ 为什么要单独一层：`auths/loomy/` 那些是**上游服务账号**（拿来调 loomy），
+	//   而控制台账号是**登录我们自己面板**的用户。两者都叫"账号"，混在同一层
+	//   目录里会让人以为数据重复了（用户就问了"为什么 data 里面有重复的数据"）。
+	//   物理分层 + 命名里带 console，一眼能分清。
+	consoleDir := filepath.Join(authsRoot, "console")
+
 	// API key 管理（对标 new-api 令牌体系）：config.api_key 是管理钥匙，
-	// 普通 key 走 data/apikeys.json（与 state.json 同级，CWD 相对）。
+	// 普通 key 走 <凭据根>/apikeys.json（2026-10-20 从 data/ 迁入：它是对外发的凭据，
+	// 应与账号凭证同处一个可整体搬走的文件夹）。
 	// 初始化失败必须显式暴露（数据文件损坏不该静默重建丢 key）。
-	apiKeysStore, err := apikey.New(filepath.Join("data", "apikeys.json"))
+	// 一次性迁移：旧位置 data/apikeys.json → 新位置 <凭据根>/apikeys.json
+	// ⚠ 只复制不删除（保留回滚路径），幂等（目标存在就不动）。
+	if err := migrateFileIfAbsent(filepath.Join("data", "apikeys.json"), filepath.Join(authsRoot, "apikeys.json")); err != nil {
+		log.Printf("[apikeys] ⚠ 迁移失败（%v）—— 继续用新位置启动", err)
+	}
+	apiKeysStore, err := apikey.New(filepath.Join(authsRoot, "apikeys.json"))
 	if err != nil {
 		log.Fatalf("load apikeys: %v", err)
 	}
@@ -1234,13 +1264,6 @@ func main() {
 	//   必须与 Channels **原子地**存在同一个文件里，拆开就有不一致窗口。
 	//
 	// 损坏必须显式暴露 —— 静默重建等于把用户手工配的渠道和 key 全部清空。
-	authsRoot := strings.TrimSpace(cfg.AuthsBase)
-	if authsRoot == "" {
-		authsRoot = strings.TrimSpace(cfg.AuthDir)
-	}
-	if authsRoot == "" {
-		authsRoot = "auths"
-	}
 	channelsPath := filepath.Join(authsRoot, "channels.json")
 	// 一次性迁移：新位置还没有、旧位置（data/channels.json）有 ⇒ 复制过去。
 	// ⚠ 只复制不删除旧文件：保留回滚路径，且旧版本 exe 回退时仍能读到自己的数据。
@@ -1265,11 +1288,23 @@ func main() {
 	// 会被处理（进程还在装配阶段）。
 	var adminTokenOKFn func(string) bool = func(string) bool { return false }
 
-	accountsStore, err := account.New(filepath.Join("data", "accounts.json"))
+	// 一次性迁移：控制台的用户库与会话库从 data/ 迁到 <凭据根>/console/。
+	//
+	// ⚠ 为什么单独一层 console/：auths/<provider>/ 是**上游服务账号**
+	//   （拿来调 loomy / workbuddy），而这里是**登录我们自己面板的用户**。
+	//   两者都叫「账号」，混在同一层目录里会让人以为数据重复
+	//   —— 用户就问了「为什么 data 里面有重复的数据」。
+	if err := migrateFileIfAbsent(filepath.Join("data", "accounts.json"), filepath.Join(consoleDir, "accounts.json")); err != nil {
+		log.Printf("[account] ⚠ 迁移控制台账号库失败（%v）", err)
+	}
+	if err := migrateFileIfAbsent(filepath.Join("data", "sessions.json"), filepath.Join(consoleDir, "sessions.json")); err != nil {
+		log.Printf("[account] ⚠ 迁移控制台会话库失败（%v）—— 所有人需要重新登录", err)
+	}
+	accountsStore, err := account.New(filepath.Join(consoleDir, "accounts.json"))
 	if err != nil {
 		log.Fatalf("load accounts: %v", err)
 	}
-	sessionsStore, err := account.NewSessionStore(filepath.Join("data", "sessions.json"))
+	sessionsStore, err := account.NewSessionStore(filepath.Join(consoleDir, "sessions.json"))
 	if err != nil {
 		log.Fatalf("load sessions: %v", err)
 	}
@@ -1331,7 +1366,7 @@ func main() {
 	// 配置里那个开关是否还起作用。
 	log.Printf("账号: 控制台为**单账号管理员**模式（唯一账号 = 账号库为空时在 /ui 创建的那个管理员；"+
 		"账号库非空后 /admin/auth/register 一律 403 register_closed）；"+
-		"`console.disables_register`=%v 在本版本已不改变行为；限速 %d 次/%s，人机校验%s，账号库 data/accounts.json",
+		"`console.disables_register`=%v 在本版本已不改变行为；限速 %d 次/%s，人机校验%s，账号库 <凭据根>/console/accounts.json",
 		cfg.Console.DisableRegister,
 		authRateLimit(cfg), authWindow,
 		map[bool]string{true: "开", false: "关"}[!cfg.Console.DisableCaptcha])
