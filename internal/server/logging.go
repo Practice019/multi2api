@@ -203,7 +203,20 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	// completion_tokens 缺失时保持 0（与原有「末帧 usage 覆盖前值」的行为一致）。
 	// 用 wire.UsageInt 而不是裸 float64 断言：与 completionTokens 同因 ——
 	// 该值门控着扩展字段，不该因为"数字被字符串化"就把 credit 一起丢掉。
-	s.tokens = wire.UsageInt(chunk.Usage["completion_tokens"])
+	// ⚠ 2026-10-20 修：原来这里是
+	//     s.tokens = wire.UsageInt(chunk.Usage["completion_tokens"])
+	// 即**流式账号池路径也只取输出**，prompt 全丢。
+	//
+	// 实测后果（2026-10-20 11:13，重启到 5efd4b9 之后仍复现）：
+	//   tokens=2   out=2   hit=640  miss=13   ← 真实处理量应是 655
+	//   tokens=20  out=20  hit=640  miss=13   ← 真实应是 673
+	// 而同一时刻 csg（走渠道）是 tokens=530751 out=1147 ✓ 对 ——
+	// 因为渠道路径用的是 sseUsage.total()（f46cdcd 修过）。
+	//
+	// ⇒ 加上 5efd4b9 修的非流式那处，这是**同一个 bug 的第三个副本**。
+	//   三条路（渠道 / 账号池流式 / 账号池非流式）必须共用一个算法，
+	//   所以这里也走 totalTokens()，不再各自解析字段。
+	s.tokens = totalTokens(map[string]any{"usage": chunk.Usage})
 }
 
 // Read 返回原始数据，同时解析统计 TTFB/token。
