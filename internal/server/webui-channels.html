@@ -188,7 +188,11 @@
   /* 字体：零外部请求（本仓铁律「Release 下载即用」）。
      展示字优先 Windows / macOS 自带的超重黑体；中文落到系统黑体，
      靠 font-weight 900 + 负字距撑出海报感。 */
-  --font-display:'Anton','Archivo Black','Impact','Haettenschweiler','Arial Black',
+  /* ⚠ 顺序有意义（2026-10-21 实测返工）：'Impact' 字形极窄，在 12~15px 上
+     字母会互相咬住（用户截图里 "workbuddy-int" 连成一团、读不出来）。
+     Arial Black 同属超重展示字但**字面更宽**，小字号也能分辨。
+     ⇒ 展示字族一律把 Arial Black 放第一，Impact 只在没有它的机器上兜底。 */
+  --font-display:'Arial Black','Archivo Black','Anton','Impact','Haettenschweiler',
                  'PingFang SC','Microsoft YaHei',sans-serif;
   --font-ui:system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
   --font-serif-max:Georgia,'Times New Roman','Songti SC',serif;
@@ -1162,6 +1166,43 @@ tr.grouprow > td .gname{color:var(--gh-fg)}
 .acctgroup > .ghead .gact:hover{background:var(--cream);color:#120F0D;filter:contrast(1.12)}
 /* 折叠三角沿用 currentColor（现在 = 奶油白） */
 .acctgroup > .ghead .acaret, .acctgroup > .ghead .ghead-btn .acaret{border-right-color:currentColor}
+/* ── 15. 字距与字号下限：小字号**不许**用窄展示字 ───────────────────────
+   # 为什么改（用户反馈："不是颜色的问题，是字母太近了"）
+   上一轮把页面头和分组头都交给了 --font-display，而那套字体在 Windows 上
+   实际命中 **Impact**：它是为"大字号海报"设计的窄体，每个字母的侧边距很小。
+   12~15px 时相邻字母的笔画几乎相接 —— 放大看是"字"，正常看是一团。
+   这不是对比度问题（白字 16.4:1 达标），是**字形 + 字距**问题，对比度判据
+   天生量不出来。所以：
+     · 展示字只留给 >=19px 的大标题（Arial Black 首选的宽厚超重字）
+     · <=15px 的一律退回系统 UI 字，层级改由 字重 800 + 字距 表达
+     · 分组头、分区标题带再加 1~2px 的 gap（原来 6/10px 挤在一起） */
+section > h2,
+.ghead .gname,
+.acctgroup > .ghead .ghead-btn,
+.ghead .dim,
+#modal h3, #infoModal h3, #akModal h3,
+.keyhint .khhead,
+button.primary,
+body > .card button.primary,
+.maxmarq {
+  font-family: var(--font-ui);
+  font-weight: 800;
+  letter-spacing: .05em;
+}
+/* 分组头：名字与"0 个账号 · N 项能力"之间要留出气口 */
+.ghead{gap:12px;padding:8px 14px}
+.ghead .ghead-btn{gap:9px;letter-spacing:.03em;font-weight:700}
+.ghead .gname{letter-spacing:.03em;font-size:13px;font-weight:700}
+/* 次要说明（"0 个账号 · N 项能力"）不要跟着 800 —— 层级靠字重与字号，
+   不是靠挤在一起。 */
+.ghead .dim{letter-spacing:.03em;font-weight:500}
+/* 分区标题带同样是 13~14px：改 UI 800 后不用再靠字距硬撑 */
+section > h2{letter-spacing:.08em}
+/* 大标题（>=19px）保留展示字，但把 Impact 那套的负字距收掉，避免词内粘连 */
+.boardsec h3{letter-spacing:0;font-family:var(--font-display);font-weight:900}
+header h1{letter-spacing:0}
+/* 跑马灯 13px：等宽更稳（字母间距由字族本身保证，不靠 letter-spacing 硬凑） */
+.maxmarq{font-family:var(--font-mono);font-weight:700;letter-spacing:.14em}
 /* ==== WB2API:MAXIMALISM:END ==== */
 </style>
 </head>
