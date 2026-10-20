@@ -187,3 +187,11 @@ _scratch/
 # 它把**被跟踪**的 config-test-port7864.json 一起搬走了（git status 立刻报 D）。
 # 规矩：批量搬动前先 `git ls-files` 过一遍，或用 `git ls-files --error-unmatch` 逐个排除。
 
+# 2026-10-20：凭据包（auths 的打包备份）绝不能进版本库。
+# ⚠ 实测曾在仓库根出现 auths.zip（98 个条目、含 loomy/codearts/workbuddy 的
+#   token 与 session），只是碰巧没被 git add。这类文件一旦推上去就是凭据泄漏，
+#   而且 git 历史里删不干净。所以在这里显式挡掉，不只依赖 `auths/` 那条目录规则。
+auths.zip
+auths-*.zip
+auths.tmp
+*.zip
