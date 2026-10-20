@@ -3062,6 +3062,16 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	var ttfbN int64
 	var credit float64
 	var thinkTokens, cacheHitTokens, cacheMissTokens int64
+	// outTokens / byModelOut：**纯输出** token 汇总（2026-10-20 加）。
+	//
+	// ⚠ 与 tokens / byModel 并存而不是替换它们：tokens 是 total（输入+输出），
+	// 它的用途是回答"这条请求碰了多少上下文"（含缓存读取）；而用户要的"消耗"
+	// 定义是**AI 生成了多少 token**。两者差几十倍（实测 total=37938 / 输出=176），
+	// 挤在一个字段里必然有一个是错的。
+	// ⚠ 旧日志没有 OutTokens ⇒ 这两个值对历史区间为 0，前端应显示"无数据"，
+	// 绝不回退成 total —— 那正是"一小时 2.9M"这个误读的来源。
+	var outTokens int64
+	byModelOut := map[string]int64{}
 	var oldest, newest time.Time
 
 	for _, e := range items {
@@ -3102,6 +3112,13 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		}
 		if e.Tokens > 0 {
 			tokens += int64(e.Tokens)
+		}
+		// 纯输出 token（2026-10-20）：用户定义的"消耗"就是它。
+		if e.OutTokens > 0 {
+			outTokens += int64(e.OutTokens)
+			if e.Model != "" {
+				byModelOut[e.Model] += int64(e.OutTokens)
+			}
 		}
 		// Credit 用 >0 而不是 !=0：负数/负零属于上游异常数据，
 		// 让它进入累加会把「累计消耗」变成负值，比丢弃它更难解释。
@@ -3147,6 +3164,8 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		"by_status":         byStatus,
 		"by_uid":            byUID,
 		"tokens":            tokens,
+		"out_tokens":        outTokens,
+		"by_model_out":      byModelOut,
 		"credit_total":      credit,
 		"think_tokens":      thinkTokens,
 		"cache_hit_tokens":  cacheHitTokens,
