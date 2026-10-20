@@ -44,23 +44,63 @@ const (
 	usageUnavailable    usageSource = "none"                 // 空流/纯错误体，无可估内容
 )
 
-// sseUsage 上游 usage 块（只取我们日志要的三个数）。
+// sseUsage 上游 usage 块（日志要的字段）。
+//
+// ⚠ 2026-10-20 加缓存两项：实测 loomy 上游只发
+// `{"completion_tokens":483,"prompt_cache_hit_tokens":63360,"prompt_cache_miss_tokens":722}`
+// —— **既没有 total_tokens 也没有 prompt_tokens**。旧实现因此两处都错：
+//
+//	· valid() 要求 PromptTokens>0 ⇒ 整帧判"无效"被丢弃，total 退化成估算/输出
+//	· total() 兜底只有 Prompt+Completion ⇒ 63360 的缓存读取凭空消失
+//
+// 现象（用户报"数据全都不对"）：日志里 toks=483 而 out=483 完全相等，
+// 同时 cache_hit_tokens=63360 —— 缓存量是"总量"的 131 倍，一眼就能看出矛盾。
 type sseUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// 缓存命中/未命中（命中读取不算"新输入"，但它是上下文的一部分，
+	// 必须计入 total —— 否则"这条请求碰了多少上下文"这个数就是错的）。
+	CacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+	CacheMissTokens int `json:"prompt_cache_miss_tokens"`
+}
+
+// promptTotal 返回"总输入"，兼容三种上游形态：
+//  1. 给 prompt_tokens（OpenAI 标准）⇒ 直接用，它已含缓存
+//  2. 只给缓存两项（缓存命中 + 未命中是互斥的输入划分）⇒ 两者相加
+//  3. 都不给 ⇒ 0（调用方按未知处理，不要瞎猜）
+func (u *sseUsage) promptTotal() int {
+	if u == nil {
+		return 0
+	}
+	if u.PromptTokens > 0 {
+		return u.PromptTokens
+	}
+	// ⚠ 只有两项都 >0 才认定"这是完整的输入划分"。缺一项时相加会低估，
+	// 例如只给 hit 不给 miss 时 sum=hit，会把未命中那部分当不存在。
+	if u.CacheHitTokens > 0 && u.CacheMissTokens > 0 {
+		return u.CacheHitTokens + u.CacheMissTokens
+	}
+	return 0
 }
 
 // valid 判定这个 usage 是否"看起来是真数据"。
 //
-// ⚠ 判据照 new-api：PromptTokens > 0 且（CompletionTokens > 0 或 TotalTokens > 0）。
-// 为什么要这种组合而不是"非零即可"：不少兼容网关会发 `{"usage":{"prompt_tokens":123}}`
-// 这种只有输入的半截快照，直接采用会把输出当 0 —— 那比没有更糟，因为看不出来错。
+// ⚠ 判据照 new-api 的意图（要有输出，不能是半截快照），但**输入侧放宽**：
+//
+//	· 标准上游：PromptTokens > 0
+//	· 只发缓存的网关：promptTotal() > 0（缓存两项能还原出总输入）
+//
+// 放宽的原因：原判据把"只发缓存不给 prompt_tokens"的整帧扔掉，
+// 结果 total 退化成估算，而缓存量又照实记了 —— 两者拼在一起就是矛盾数据。
 func (u *sseUsage) valid() bool {
 	if u == nil {
 		return false
 	}
-	return u.PromptTokens > 0 && (u.CompletionTokens > 0 || u.TotalTokens > 0)
+	if u.CompletionTokens <= 0 {
+		return false
+	}
+	return u.promptTotal() > 0 || u.TotalTokens > 0
 }
 
 // total 取总 token（优先 total_tokens，缺失时用 输入+输出 兜底）。
@@ -71,7 +111,7 @@ func (u *sseUsage) total() int {
 	if u.TotalTokens > 0 {
 		return u.TotalTokens
 	}
-	return u.PromptTokens + u.CompletionTokens
+	return u.promptTotal() + u.CompletionTokens
 }
 
 // sseFrame 一帧 SSE data 里我们要的两个字段。
