@@ -143,6 +143,37 @@ func (s *Store) saveLocked() error {
 	return os.Rename(tmp, s.path)
 }
 
+// saveOrLog 落盘并**记录失败**，不把错误静默丢掉（2026-10-20，review 抓到）。
+//
+// # 缺陷
+//
+// 原来 7 处调用一律 `_ = s.saveLocked()`。而 `saveLocked` 真的会失败：
+// `os.WriteFile` / `os.Rename` 在磁盘满、权限不足、Windows 下文件被占用时都会返回错误。
+//
+// 吞掉错误的后果按调用点不同，最严重的一处是**安全问题**：
+//
+//	Revoke(sid) → 内存里删了 session，但磁盘没写
+//	⇒ 进程重启后从磁盘恢复 ⇒ **刚被注销的 session 复活了**
+//	用户看到"已退出登录"，实际上那个 token 还能用。
+//
+// # 为什么是"记日志"而不是"改签名返回 error"
+//
+// 7 处里只有 3 处（Lookup×2 / AdvanceAuthVersion）的签名能返回 error，
+// 另外 4 处（Revoke / RevokeOthers / Cleanup / TouchLogin）返回的是 bool/int/void，
+// 改签名会连带改所有上游调用点 —— 那是更大的改动面，与"最小修复"冲突。
+//
+// 所以分两档：
+//   - 能传播的（那个函数自己调 saveOrLogReturn）→ 把错误交给调用方决定
+//   - 不能传播的（这里）→ **至少留下一行明确的错误日志**，让"落盘失败"这件事可查
+//
+// ⚠ 这类修复的价值不在于"错误变少了"，而在于**失败不再无声**。
+// 之前的形态是：磁盘满了半个月，用户改的密码一次次丢失，日志里一个字都没有。
+func (s *Store) saveOrLog(scene string) {
+	if err := s.saveLocked(); err != nil {
+		log.Printf("[account] ⚠ 落盘失败（%s）: %v —— 内存已生效但磁盘未写入，重启会丢失这次修改", scene, err)
+	}
+}
+
 // copyUser 返回一份副本。
 //
 // ⚠ 所有读方法都必须返回副本，不能返回内部指针：调用方拿到指针后会在
@@ -380,7 +411,7 @@ func (s *Store) TouchLogin(id, ip string) {
 	}
 	u.LastLoginAt = nowStamp()
 	u.LastLoginIP = strings.TrimSpace(ip)
-	_ = s.saveLocked()
+	s.saveOrLog("TouchLogin")
 }
 
 // findLocked 按 ID 查内部指针（调用方必须持锁）。
