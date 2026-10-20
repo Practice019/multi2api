@@ -903,3 +903,61 @@ dialog{
   letter-spacing:.1em;
   text-transform:uppercase;
 }
+/* ── 13. 可读性地基：亮色块上的一切文字（含次要说明）一律墨色 ─────────────
+   # 为什么必须单独写这一段（这是全页对比度巡检抓出来的真缺陷）
+   把粉 / 黄 / 酸绿 / 橙铺到分组头、分区标题带、统计卡之后，容器**自己**的颜色
+   确实是墨（10:1 以上），但里面的次要文字仍带着 --dim：
+     粉底 #FF3CAC 上的 --dim(#5C4636) = 2.7:1   ← 看不清
+     酸绿底 #00FF85 上的 --dim(#C7B4A0) = 1.49:1 ← 几乎看不见
+   这两处**不在** contrast_e2e 的 5 个抽样里，所以抽样判据一路绿着交付。
+   ⇒ 规则：亮底容器内的文字只允许墨色；层级改用**字号 / 字重 / 字距**表达，
+     不再用"降低对比度"表达（那在亮底上等于把字擦掉）。
+   判据：tests/frontend/audit_contrast_pages.js（全量逐元素，浅深两套主题）。 */
+.ghead, .ghead .dim, .ghead .gfolded-hint, .ghead .gname, .ghead .dim *,
+section > h2, section > h2 .dim, section > h2 .dim *,
+.navgroup .navgrouphd, .navgroup .navgrouphd .dim,
+#jobMeta, #mcount, #travelAutoHint {
+  color:#120F0D;
+}
+/* 亮底卡片里的"--"占位：同样改墨，别用 --dim（粉底上只有 2.72:1）
+   ⚠ 但深色主题下统计卡是**深底**（守卫①：`.card` 必须仍是深色），墨字在深底上
+     只有 1.07:1 —— 所以这里必须**按主题分开写**，"亮底=墨字"不是无条件成立的。
+     实测：无条件写死墨色时，深色仪表盘一口气冒出 12 处 1.07:1（全页巡检逮到的）。 */
+.cards .card .dim, .cards .card .v.dim, .cards .card .dim *{color:#120F0D}
+:root[data-theme="dark"] .card .dim,
+:root[data-theme="dark"] .card .v.dim,
+:root[data-theme="dark"] .card .dim *{color:var(--dim)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme]) .card .dim,
+  :root:not([data-theme]) .card .v.dim,
+  :root:not([data-theme]) .card .dim *{color:var(--dim)}
+}
+/* 分组头里的按钮保持自己的"奶油纸 + 墨字"，别被上面那条染成透明 */
+.ghead .gact, .ghead .gact:hover{color:#120F0D}
+.ghead .gact:hover{background:var(--ink);color:var(--cream)}
+
+/* 侧栏分组头：必须压过 .sidebar button{background:transparent}（(0,1,1) > (0,1,0)）——
+   # 为什么原来"看着是粉的、量出来是透明的"
+   首次注入时只写了 .navgrouphd（(0,1,0)），被 .sidebar button 的 transparent 拍平；
+   实测 computed backgroundColor = rgba(0,0,0,0)，于是里面的"0"徽章（墨字）直接落在
+   深色侧栏底色上 = 1.07:1。这里提到 (0,2,1) 把粉色真正落到像素上。 */
+.sidebar button.navgrouphd,
+.sidebar .navgrouphd,
+.sidebar button.navgrouphd:hover,
+.sidebar .navgrouphd:hover{
+  background:var(--pink);
+  color:#120F0D;
+}
+.sidebar .navgrouphd .navgcount{background:var(--ink);color:var(--cream);border-radius:0}
+.sidebar .navgrouphd .navgcount.zero{background:transparent;color:#120F0D}
+.sidebar .navgrouphd .navgdef{border-color:var(--ink);color:#120F0D}
+
+/* 旧页面里写死的 GitHub 蓝/绿（JS 拼的 SVG 属性与内联 style）——
+   它们是 v2 色板的残留：浅色下 #58a6ff 铺奶油纸只有 2.24:1、#0f8a4d 3.9:1。
+   用**属性选择器**接住这些字面量，换成主题变量，页面 JS 一个字不用改。
+   ⚠ 之所以不改 JS：那几处是 SVG presentation attribute（fill/stroke），
+     属性里不认 var()，改了反而变黑；CSS 规则能稳过属性。 */
+[fill="#58a6ff"]{fill:var(--acc)}
+[stroke="#58a6ff"]{stroke:var(--acc)}
+[style*="color:#58a6ff"]{color:var(--acc) !important}
+[style*="color:#0f8a4d"]{color:var(--ok) !important}

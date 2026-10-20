@@ -34,6 +34,22 @@
 - 新增 `tests/frontend/shot_maximalism.js`：一拍四屏两主题 + 登录页，产物在
   `.task/maximalism-v3/shots/`（不进版本库）。
 
+- **可读性判据升级：抽样 5 点 → 全量逐元素。** 新增
+  `tests/frontend/audit_contrast_pages.js`（+ `lib_contrast_audit.js`）：
+  遍历 13 个面板 × 浅/深两套主题的每个可见文本元素，先按 alpha 合成真实底色再算
+  WCAG 对比度，正文阈值 4.5、大字号 3，不达标点名 CSS 路径 + 文本 + 比值，非零退出。
+  它直接抓出了抽样判据够不着的真缺陷：分组头的次要文字在粉底上 2.72:1、
+  酸绿底上 1.49:1。修复后 **104 处 → 0 处**。
+- **亮底文字规则**：亮色块（分组头 / 分区标题带 / 统计卡 / 侧栏分组头）内部
+  文字一律墨色，层级改用字号/字重/字距表达；深色主题下 `.card` 仍是深底，
+  该处的次要文字回到 `--dim`（1.07:1 的坑就是这么踩出来的）。
+- **修好侧栏分组头从未生效的粉色**：`.navgrouphd`(0,1,0) 被
+  `.sidebar button{background:transparent}`(0,1,1) 拍平（computed 透明），
+  提到 `.sidebar button.navgrouphd` 后才是真的粉底，里面"0"徽章随之达标。
+- **清掉 v2 残留写死色**：`#58a6ff`（2.24:1）与 `#0f8a4d`（3.9:1）用属性选择器
+  接到 `--acc` / `--ok`；那几处是 SVG presentation attribute，属性里不认 `var()`，
+  所以不动 JS。
+
 ### 未改动（刻意）
 
 - 类名、DOM 结构、JS 逻辑、热力图 5 档色阶（`--hm0..--hm4` 仍严格照抄 openViking 的绿阶）、
