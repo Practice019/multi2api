@@ -111,15 +111,38 @@ func (u *sseUsage) valid() bool {
 	return u.promptTotal() > 0 || u.TotalTokens > 0
 }
 
-// total 取总 token（优先 total_tokens，缺失时用 输入+输出 兜底）。
+// total 取总 token。
+//
+// ⚠ 2026-10-20 改成**照 new-api 的算法**：自己加，不信上游的 total_tokens。
+//
+//	出处：model/log.go:395
+//	  TokenUsed: params.PromptTokens + params.CompletionTokens
+//
+// 为什么必须改：上游的 `total_tokens` 不可靠。实测 loomy 一条请求：
+//
+//	prompt_cache_hit_tokens = 63,360     缓存读取的上下文
+//	prompt_cache_miss_tokens =    722     新读的输入
+//	completion_tokens        =    483     输出
+//	total_tokens             =    483     ← ⚠ 只报了输出！漏掉 6.4 万输入
+//
+// 用 total_tokens 的话这条只算 483，而真实处理量是 64,565 —— 差 133 倍。
+// 全库复算：Σ tokens（信 total_tokens）= 1.84 亿，而对照面板显示 7.84 亿，
+// 差 4.3 倍，就是这类"上游 total 漏算"累积出来的。
+//
+// 现在：能还原出总输入（prompt_tokens 或缓存两项）时，一律 promptTotal + completion。
+// 只有**完全无法还原输入**时才回退 total_tokens —— 那种情况下它是唯一线索。
 func (u *sseUsage) total() int {
 	if u == nil {
 		return 0
 	}
+	if pt := u.promptTotal(); pt > 0 {
+		return pt + u.CompletionTokens
+	}
+	// 输入无从得知时，total_tokens 是唯一剩下的线索（哪怕它可能漏算缓存）
 	if u.TotalTokens > 0 {
 		return u.TotalTokens
 	}
-	return u.promptTotal() + u.CompletionTokens
+	return u.CompletionTokens
 }
 
 // sseFrame 一帧 SSE data 里我们要的两个字段。
