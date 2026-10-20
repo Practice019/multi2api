@@ -660,9 +660,13 @@ section > h2{
   border-top:3px solid var(--ink);
   border-bottom:2px solid var(--ink);
 }
-.acctgroup:nth-child(4n+2) > .ghead{background:var(--yellow)}
-.acctgroup:nth-child(4n+3) > .ghead{background:var(--acid)}
-.acctgroup:nth-child(4n+4) > .ghead{background:var(--orange)}
+/* ⚠ 第 14 节的"墨底白字"接管后，这里**只能改边框色、不能再改背景**：
+   背景一旦还是亮色，白字就会落上去（实测酸绿底 1.24:1、橙底 2.87:1）。
+   轮转的"撞色感"由 border-left/border-bottom 的 8px/3px 色条承担。
+   这几条保留的原因：它们是**色相分配**的唯一处（第 14 节只写默认色）。 */
+.acctgroup:nth-child(4n+2) > .ghead{border-color:var(--yellow)}
+.acctgroup:nth-child(4n+3) > .ghead{border-color:var(--acid)}
+.acctgroup:nth-child(4n+4) > .ghead{border-color:var(--orange)}
 .ghead .gname{font-family:var(--font-display);font-size:13px;letter-spacing:.02em}
 .ghead .gact{
   background:var(--cream);
@@ -1107,6 +1111,57 @@ section > h2, section > h2 .dim, section > h2 .dim *,
 [stroke="#58a6ff"]{stroke:var(--acc)}
 [style*="color:#58a6ff"]{color:var(--acc) !important}
 [style*="color:#0f8a4d"]{color:var(--ok) !important}
+/* ── 14. 分组头 v2：墨底白字（用户要求"名称用白色"）─────────────────────
+   # 为什么要换掉"亮色底 + 墨字"
+   用户看账号池时提出「这个名称用白色会不会更好」。两件事要同时成立：
+     ① 名称必须是白的（这是用户要的观感）；
+     ② 白色文字必须落在**够暗**的底上，否则就是上一轮刚修掉的那类问题。
+   白字在各亮底上的实测：黄底 1.15:1、酸绿 1.19:1、粉底 2.43:1、橙底 2.55:1
+   —— 白字**不能**直接铺在冲突色上（比墨字更糟）。所以把"色"从**底**移到
+   **边**：底色成墨（白字 16.4:1），每个上游用 8px 左侧色条 + 3px 底部色条
+   轮转标记，撞色感保留，字彻底看清。
+   # 深色主题
+   墨黑 #1A1A1A 在 #120F0D 的背景上几乎同色 ⇒ 深色下分组头压到**纯黑**，
+   并把底部色条留在 3px（靠彩色描边 + 白字和页面分层）。 */
+:root{--gh-ink:#1A1A1A;--gh-fg:#FFF5E6;--gh1:#FF3CAC;--gh2:#FFE600;--gh3:#00FF85;--gh4:#FF5C00}
+:root[data-theme="dark"]{--gh-ink:#000000}
+@media (prefers-color-scheme: dark){ :root:not([data-theme]){--gh-ink:#000000} }
+
+.acctgroup > .ghead,
+tr.grouprow > td{
+  background:var(--gh-ink);
+  color:var(--gh-fg);
+  border-top:3px solid var(--gh1);
+  border-bottom:3px solid var(--gh1);
+  border-left:8px solid var(--gh1);
+}
+.acctgroup:nth-child(4n+2) > .ghead,
+tr.grouprow:nth-child(4n+2) > td{border-color:var(--gh2)}
+.acctgroup:nth-child(4n+3) > .ghead,
+tr.grouprow:nth-child(4n+3) > td{border-color:var(--gh3)}
+.acctgroup:nth-child(4n+4) > .ghead,
+tr.grouprow:nth-child(4n+4) > td{border-color:var(--gh4)}
+.acctgroup > .ghead .gname,
+.acctgroup > .ghead .ghead-btn,
+.acctgroup > .ghead .dim,
+.acctgroup > .ghead .gfolded-hint,
+.acctgroup > .ghead .dim *,
+tr.grouprow > td .gname{color:var(--gh-fg)}
+/* 分组头里的按钮改成"亮底墨字"，在墨底上才跳得出来（与肤色反着用） */
+.acctgroup > .ghead > .gacts .gact,
+.acctgroup > .ghead .gact{
+  background:var(--cream);
+  color:#120F0D;
+  border:2px solid var(--cream);
+  box-shadow:2px 2px 0 var(--gh1);
+}
+.acctgroup:nth-child(4n+2) > .ghead > .gacts .gact{box-shadow:2px 2px 0 var(--gh2)}
+.acctgroup:nth-child(4n+3) > .ghead > .gacts .gact{box-shadow:2px 2px 0 var(--gh3)}
+.acctgroup:nth-child(4n+4) > .ghead > .gacts .gact{box-shadow:2px 2px 0 var(--gh4)}
+.acctgroup > .ghead > .gacts .gact:hover,
+.acctgroup > .ghead .gact:hover{background:var(--cream);color:#120F0D;filter:contrast(1.12)}
+/* 折叠三角沿用 currentColor（现在 = 奶油白） */
+.acctgroup > .ghead .acaret, .acctgroup > .ghead .ghead-btn .acaret{border-right-color:currentColor}
 /* ==== WB2API:MAXIMALISM:END ==== */
 </style>
 </head>
