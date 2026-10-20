@@ -10632,6 +10632,29 @@ let loginProvider = '';
       //   峰值那根用强调色，其余常规色 —— 一眼仍能看出最高的那根。
       svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
     }
+    // ⚠ 2026-10-20：在柱状之上叠加一条**折线**（用户明确要"折线图"）。
+    // # 为什么是叠加而不是切换
+    //   柱状给"每天多少"的绝对量（能比高低），折线给"走势"（能看出涨跌趋势）。
+    //   两者看的是同一件事的不同侧面，**同时显示比让用户切来切去更好** ——
+    //   而且不引入视图状态，少一处可能出错的地方。
+    // # 坐标复用已有变量，不自己算
+    //   cx(i) 与 yAt(v) 就是柱子的中心线与顶点，折线必须过它们，
+    //   否则线和柱会对不上（看起来像两个数据源）。
+    // ⚠ 只用有值的点连（v<=0 跳过）：把 0 也连进去会在"没数据的日子"画出
+    //   一条贴底的折线，让人误以为那天几乎没生成 —— 而真相是没有记录。
+    const linePts = [];
+    for (let i = 0; i < n; i++) {
+      if (vals[i] > 0) linePts.push(cx(i).toFixed(1) + ',' + yAt(vals[i]).toFixed(1));
+    }
+    if (linePts.length >= 2) {
+      svg.push(`<polyline points="${linePts.join(' ')}" fill="none" stroke="var(--acc)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>`);
+      // 数据点小圆：单点也能看见（折线至少要两点才成形，圆点补上这个缺口）
+      for (let i = 0; i < n; i++) {
+        if (vals[i] > 0) {
+          svg.push(`<circle cx="${cx(i).toFixed(1)}" cy="${yAt(vals[i]).toFixed(1)}" r="2.2" fill="var(--acc)" opacity="0.9"/>`);
+        }
+      }
+    }
     // x 轴：首/中/末（⚠ 桶多时全标会糊）
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
       const p = list[i]; if (!p) return;
