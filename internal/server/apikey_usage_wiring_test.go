@@ -97,3 +97,50 @@ func TestBumpKeyUsageGuardsEmptyKey(t *testing.T) {
 	}()
 	h.bumpKeyUsage(nil, 100, true)
 }
+
+// TestLogModelUsesInternalName ★ 请求日志的 model 列必须是**内部名**。
+//
+// # 用户的要求（2026-10-21）
+//
+//	「不希望请求日志出现对外名称 请求日志显示原本的就行」
+//
+// # 两条路径的取值来源不同，所以两处都要查
+//
+//	渠道分支：本来就用 peek.Model（L1524 已替换成内部名）✓
+//	账号池 ：`newChatStat(..., body, ...)` 内部用 `parseModelFromBody(body)` ——
+//	        而 body 是**客户端原始请求体**，里面有对外名 ⇒ 会被原样写进日志 ✗
+//
+// 修法是 newChatStat 之后覆盖 `st.model = peek.Model`。
+//
+// ⚠ 为什么这条必须用源码断言：日志是**旁路观测**，写错不会报错、不会 500，
+//
+//	只是那列显示了一个对不上渠道的名字 —— 而用户正是靠它排障。
+func TestLogModelUsesInternalName(t *testing.T) {
+	src := readHandlerSrc(t)
+
+	// ① newChatStat 之后必须紧跟 st.model = peek.Model
+	idx := strings.Index(src, "st := newChatStat(")
+	if idx < 0 {
+		t.Fatal("找不到 `st := newChatStat(`")
+	}
+	// 取它后面 1200 字节（够覆盖那段注释 + 赋值）
+	tail := src[idx:]
+	if len(tail) > 1400 {
+		tail = tail[:1400]
+	}
+	if !strings.Contains(tail, "st.model = peek.Model") {
+		t.Errorf("★ newChatStat 之后没有 `st.model = peek.Model`\n" +
+			"   ⇒ 账号池路径的日志会用 body 里的**对外名**（parseModelFromBody），\n" +
+			"     而用户要求显示原本的内部名")
+	}
+
+	// ② 别名替换必须发生在 newChatStat **之前**（否则 peek.Model 还是对外名）
+	aliasIdx := strings.Index(src, "peek.Model = alias")
+	if aliasIdx < 0 {
+		t.Fatal("找不到 `peek.Model = alias` —— 别名替换那一段被改了？")
+	}
+	if aliasIdx > idx {
+		t.Errorf("★ 别名替换（peek.Model = alias）在 newChatStat **之后**\n" +
+			"   ⇒ 覆盖 st.model 时拿到的还是对外名，日志照样显示别名")
+	}
+}

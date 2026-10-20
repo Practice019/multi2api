@@ -1635,6 +1635,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	// ⚠⚠ 2026-10-21：日志里的 model 必须用**内部名**，不是客户端发来的对外名。
+	//
+	// `newChatStat` 内部用 `parseModelFromBody(body)` —— 而 body 里是**原始请求体**，
+	// 也就是客户端发来的名字。若那把 API key 配了对外名映射，body 里就是
+	// `002/DeepSeek-V4.1-Flash` 这类别名，而它会被原样写进请求日志。
+	//
+	// 用户的要求：「不希望请求日志出现对外名称 请求日志显示原本的就行」。
+	// 理由也成立：日志是**排障证据**，要对得上渠道/上游；别名只是付款方看到的叫法。
+	//
+	// 渠道分支那边不用改 —— 它本来就用 `peek.Model`（L1524 已替换过）。
+	// 两条路径现在口径一致：model 列 = 内部名，别名只出现在客户端那一侧。
+	st.model = peek.Model
 	st.provider = reqProvider
 	// ⚠ 请求来源（纯观测，见 logbuf.Entry.ClientIP 的注释）：
 	// 用来指认"是谁在直连网关发非流式" —— 那件事靠日志里的模型/token 规律只能猜，
