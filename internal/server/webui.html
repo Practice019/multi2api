@@ -1196,7 +1196,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
         <!-- ⚠ 这句小字必须跟着图走：2026-10-20 起这张图不再是「请求数 + 成功率」折线，
              而是按模型堆叠的 token 消耗分布（柱状 / 面积可切）。文案不改的话，
              用户会照着"成功率"去读一根柱子的高度 —— 那是两个完全不同的量。 -->
-        <span class="dim" style="font-weight:400;text-transform:none;font-size:11px">（消耗分布：按模型堆叠 · token）</span>
+        <span class="dim" style="font-weight:400;text-transform:none;font-size:11px">（消耗分布：按模型堆叠 · 输出 token）</span>
         <span class="spacer"></span>
         <!-- ⚠ 趋势的时间范围切换（24h / 7d）。
              ⚠ **只切趋势**：后端 `/admin/stats/series` 只认这两个 range（见 `seriesSpan`），
@@ -12047,7 +12047,7 @@ let multCatalogFailed = false;
     // ⚠ 比对字段也必须是这张图真画的东西：token 总量 + by_model。
     //   改造前它比的是 total/ok/fail（那时画的是请求量折线）；如今画 token 分布，
     //   继续比请求数就会出现"请求数没变、token 翻倍却不重绘"—— 画面停在旧值上。
-    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.tokens || 0, p.by_model || null]));
+    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.tokens || 0, p.by_model_out || null]));
     if (digest === trendSeries._last) return;
     trendSeries._last = digest;
     // 留一份最近数据：柱状 / 面积切换要重画同一份数据，不该再去拉一次网络。
@@ -12099,16 +12099,21 @@ let multCatalogFailed = false;
     const rows = Array.isArray(list) ? list : [];
 
     // ── 1. 逐桶归一 ──
-    // ⚠ `by_model` 是 omitempty：该桶没有 token 用量时**整个键都不存在** ⇒ 一律 `|| {}`。
-    // ⚠ 柱高取 max(tokens, Σby_model)：两者本该相等，但 by_model 是后加的字段，
-    //   历史桶可能只有 tokens 没有明细（或反过来）—— 取大值才不会因为缺一边把柱画矮。
+    // ⚠ 用 `by_model_out`（**纯输出** token），不是 `by_model`（total=输入+输出）。
+    //   用户的判断是对的：按 total 画时"一小时消耗 2.9M"，而其中真正生成的只有约 1.3 万
+    //   （其余是缓存读取的上下文）。那种图会让人以为模型每小时吐 290 万字。
+    // ⚠ 它是 omitempty：没有输出用量的桶**整个键都不存在** ⇒ 一律 `|| {}`。
+    // ⚠ 柱高**只**取 Σby_model_out，不再与 tokens 取 max：
+    //   tokens 是 total，两者数量级差几十倍，取 max 等于把 total 又画回来。
+    //   历史桶没有 out_tokens（字段 2026-10-20 才加）⇒ 柱高 0 ⇒ 那部分不显示，
+    //   这是诚实的：那时确实没记录输出量。
     const buckets = rows.map((p) => {
-      const m = (p && p.by_model) || {};
+      const m = (p && p.by_model_out) || {};
       let sum = 0;
       for (const k of Object.keys(m)) { const v = Number(m[k]) || 0; if (v > 0) sum += v; }
       return {
         ts: String((p && p.ts) || ''), models: m, sum,
-        total: Math.max(Number(p && p.tokens) || 0, sum),
+        total: sum,
       };
     });
     const peak = buckets.reduce((a, b) => Math.max(a, b.total), 0);
