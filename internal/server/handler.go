@@ -1542,7 +1542,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				detail = fw.ChannelName + ": " + detail
 			}
 			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "",
-				st, -1, nil, "channel_error: "+detail, 0, "", "", fw.ChannelID, fw.UpstreamModel)
+				st, -1, nil, "channel_error: "+detail, 0,
+				gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 			// ⚠ 走 writeChannelError 而不是写死 502：上游的 429/401 要原样透传给客户端
 			// （见 channels_forward.go 里那段"实测踩过"的注释）。
 			h.writeChannelError(w, ferr)
@@ -1568,8 +1569,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if outTok > 0 {
 			usageMap = map[string]any{"completion_tokens": outTok}
 		}
+		// ⚠ 2026-10-20 修：原来这里传 `0, "", ""`（preMs / clientIP / clientUA 全空），
+		//   后果是渠道请求的 client_ip 与 client_ua 在日志里**永远为空**
+		//   （实测 500 条里 0 条有 client_ip）。而 loomy/csg 都走这条路径 ⇒
+		//   用户问"loomy 那些非流式请求是谁发的"时，日志无法回答。
+		//   账号池路径（L1610 st.clientIP）是取了的，渠道路径漏了 —— 两条路的观测能力不该不同。
 		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, fw.KeyMask, "channel:"+fw.ChannelName,
-			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), 0, "", "", fw.ChannelID, fw.UpstreamModel)
+			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), 0,
+			gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 		return
 	}
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)
