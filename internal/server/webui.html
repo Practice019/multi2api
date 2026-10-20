@@ -12629,6 +12629,12 @@ let multCatalogFailed = false;
   const numT = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
   const promptTok = numT(usage.prompt_tokens);
   const outTok = numT(usage.completion_tokens);
+    // ⚠ 必须区分「输出 0」与「没上报输出」。上游没给 completion_tokens 时，
+    //   numT 会返回 0，直接显示"输出 0"会让人以为这条请求没生成任何内容 ——
+    //   而真相是这个字段缺失。约束里写死了：缺字段显示空，不回退成别的数。
+    const hasOut = ('completion_tokens' in usage)
+      && Number.isFinite(Number(usage.completion_tokens))
+      && Number(usage.completion_tokens) >= 0;
   const cachedTok = numT(usage.prompt_cache_hit_tokens)
     || numT(usage.cached_tokens)
     || numT((usage.prompt_tokens_details || {}).cached_tokens);
@@ -12645,9 +12651,12 @@ let multCatalogFailed = false;
   //   对话测试这条链路没有 ttfb 上报，所以第 3 参传 0（速度会略偏低，但比抛异常好）；
   //   第 4 参传 'stream'（这是流式对话测试，非流式不适用）。
   const tps = tokPerSec(outTok, totalMs, 0, 'stream');
+  // 缺输出字段时，总量与输出都显示 —（总量 = 输入 + 输出，输出未知则总量也未知）
+  const outLabel = hasOut ? String(outTok) : '—';
+  const totalLabel = hasOut ? String(totalTok) : '—';
   const lines = [
-    '总处理量 ' + totalTok + '（输入 ' + promptTok + ' + 输出 ' + outTok + '）',
-    '↑ 输出 ' + outTok,
+    '总处理量 ' + totalLabel + (hasOut ? '（输入 ' + promptTok + ' + 输出 ' + outTok + '）' : '（输出未上报）'),
+    '↑ 输出 ' + outLabel,
   ];
   if (cachedTok > 0) lines.push('⚡ 缓存命中 ' + cachedTok);
   if (reasoningTok > 0) lines.push('🧠 推理 ' + reasoningTok + '（已包含在输出中）');
