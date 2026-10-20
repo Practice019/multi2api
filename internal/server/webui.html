@@ -10564,7 +10564,10 @@ let loginProvider = '';
          + String(list[0].ts || '').slice(0, 10) + ' ~ ' + String(list[list.length - 1].ts || '').slice(0, 10))
       : '';
 
-    const vals = list.map((p) => p.tokens || 0);
+    // ⚠ 2026-10-20 改口径：用**纯输出**（Σ by_model_out），不是 p.tokens（total）。
+    //   与热力图同一理由：标题写 "Token 趋势"，用户看的是"每天生成了多少"。
+    //   偏差同热力图：无模型名的行不计入（极少）。
+    const vals = list.map((p) => Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0));
     const peak = vals.length ? Math.max(...vals) : 0;
     // ⚠ 全为 0 ⇒ 不画网格也不画柱（照它那句"否则整块图空得像渲染失败"）
     if (!list.length || peak <= 0) {
@@ -10748,7 +10751,12 @@ let loginProvider = '';
     heatPickDays.clear();
     for (const p of list) {
       const k = String(p.ts || '').slice(0, 10);
-      heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: p.tokens || 0 });
+      // ⚠ 2026-10-20 改口径：着色用**纯输出**（Σ by_model_out），不是 p.tokens（total）。
+      //   热力图标题写「按天 Token 用量着色」，用户理解成"这天生成了多少字"。
+      //   用 total 会让"整天在跑长上下文"的日子被染成最深的颜色，而它实际生成极少。
+      //   ⚠ 用 Σ by_model_out 而不是新增顶层字段：series 桶里已有它，合计即输出总量。
+      //   已知偏差：无模型名的行不计入 by_model_out（极少），所以略低于真实输出量。
+      heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: Object.values(p.by_model_out || {}).reduce((a, b) => a + (Number(b) || 0), 0) });
     }
 
     const lastKey = String(list[list.length - 1].ts || '').slice(0, 10);
