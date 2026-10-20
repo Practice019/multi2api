@@ -9980,10 +9980,21 @@ let loginProvider = '';
       ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
       ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
       // ⚠ F1 修复：不再 `tokens + think_tokens`（那会把推理算两遍）。两张卡各表一件事。
-      // ⚠ 2026-10-20 改口径：用户定义的"消耗"= AI **生成**的 token（s.out_tokens），
-    //   不是 s.tokens（total 含输入与缓存读取）。实测同一份数据 total 64.3M 而
-    //   真实生成量小得多 —— 用 total 展示会让人以为模型吐了几千万字。
-    //   out_tokens 缺失（旧日志没有该字段）时显示 —，绝不回退成 tokens。
+      // ⚠ 2026-10-20 加回「总处理量」（2026-10-20 用户授权推翻"只显示输出"的做法）。
+    //
+    //   出处：DSH 的 token-ledger-panel.js
+    //     total = inputTokens + cacheReadTokens + outputTokens   // 缓存写入不重复计入
+    //     lines.push('总处理量 = 输入 + 输出；缓存写入不重复计入')
+    //
+    //   我们的 s.tokens 就是上游 usage 的 total_tokens，而 total_tokens = prompt + completion
+    //   （prompt 已含 cached tokens）⇒ 与 DSH 那个式子**等价**，直接复用不必新算。
+    //
+    //   为什么必须两张卡并存（不能只有一张）：
+    //     · 总处理量 = 这条请求干了多少活（含把上下文读一遍的成本）
+    //     · 输出 token = AI 生成多少字（用户最初要的"消耗"）
+    //   我上一版把所有 total 从面板抹掉，等于把"干了多少活"这个视角也抹掉了 ——
+    //   那不叫统一口径，叫丢信息。
+    ['总处理量', num(s.tokens) ? fmtTokens(s.tokens) : null, ''],
     ['输出 token', num(s.out_tokens) ? fmtTokens(s.out_tokens) : null, ''],
       ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
