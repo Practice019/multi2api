@@ -10329,7 +10329,7 @@ function renderModelRank(s) {
       ['请求', String(p.total)],
       ['成功', String(p.ok)],
       ['失败', String(p.fail)],
-      ['Token', fmtTokensPlain(outOf(p))],
+      ['Token', fmtTokensPlain(p.tokens || 0)],
     ];
   }
 
@@ -10653,6 +10653,11 @@ function renderModelRank(s) {
 //   所以这个值会略低于真实输出量。实测这类行占比很低。
 //   要彻底消掉偏差得让后端给 series 加顶层 out_tokens —— 那要动协议，留待以后。
 function outOf(p) {
+  // ⚠ 2026-10-20 用户要求「全部都用总 Token 展示，不是输出 Token，就和 NewAPI 一样」
+  //   ⇒ 所有调用点已改成 `p.tokens`（series 桶的顶层总 Token）。
+  //   这个函数**保留但不再被调用**：留着是因为将来若要恢复"纯输出"视角，
+  //   改调用点比重新写函数便宜；直接删掉会让历史注释里的引用断掉。
+  //   ⚠ 不要因为它是死代码就删 —— 它记录了 by_model_out 的求和方式。
   return Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0);
 }
 function renderDailyTrendSVG(list) {
@@ -10668,7 +10673,7 @@ function renderDailyTrendSVG(list) {
     // ⚠ 2026-10-20 改口径：用**纯输出**（Σ by_model_out），不是 p.tokens（total）。
     //   与热力图同一理由：标题写 "Token 趋势"，用户看的是"每天生成了多少"。
     //   偏差同热力图：无模型名的行不计入（极少）。
-    const vals = list.map((p) => Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0));
+    const vals = list.map((p) => p.tokens || 0);   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
     const peak = vals.length ? Math.max(...vals) : 0;
     // ⚠ 全为 0 ⇒ 不画网格也不画柱（照它那句"否则整块图空得像渲染失败"）
     if (!list.length || peak <= 0) {
@@ -10782,7 +10787,7 @@ function renderDailyTrendSVG(list) {
         cur.setAttribute('x1', cx(best).toFixed(1)); cur.setAttribute('x2', cx(best).toFixed(1));
         cur.style.display = 'block';
         rd.setAttribute('x', Math.min(Math.max(cx(best), 70), W - 70).toFixed(1));
-        rd.textContent = lbl2 + '  · 请求 ' + (p.total || 0) + ' · ' + fmtTokensPlain(outOf(p)) + ' token';
+        rd.textContent = lbl2 + '  · 请求 ' + (p.total || 0) + ' · ' + fmtTokensPlain(p.tokens || 0) + ' token';
         rd.style.display = 'block';
       });
       host.addEventListener('mouseleave', () => {
@@ -10875,12 +10880,12 @@ function renderDailyTrendSVG(list) {
     heatPickDays.clear();
     for (const p of list) {
       const k = String(p.ts || '').slice(0, 10);
-      // ⚠ 2026-10-20 改口径：着色用**纯输出**（Σ by_model_out），不是 p.tokens（total）。
-      //   热力图标题写「按天 Token 用量着色」，用户理解成"这天生成了多少字"。
-      //   用 total 会让"整天在跑长上下文"的日子被染成最深的颜色，而它实际生成极少。
-      //   ⚠ 用 Σ by_model_out 而不是新增顶层字段：series 桶里已有它，合计即输出总量。
-      //   已知偏差：无模型名的行不计入 by_model_out（极少），所以略低于真实输出量。
-      heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: Object.values(p.by_model_out || {}).reduce((a, b) => a + (Number(b) || 0), 0) });
+    // ⚠ 2026-10-20 二次改口径：着色用 `p.tokens`（total），与「总 Token」一致。
+    //   曾经用过 Σ by_model_out（纯输出），理由是"着色该反映生成了多少"；
+    //   但用户要求全部统一到总 Token，且柱状图已改，热力图必须同口径 ——
+    //   否则"柱子高但格子浅"会让人以为数据错位。
+    //   ⚠ 用户原话：「全部都用总 Token 展示，不是输出 Token，就和 NewAPI 一样」。
+    heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: p.tokens || 0 });   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
     }
 
     const lastKey = String(list[list.length - 1].ts || '').slice(0, 10);
@@ -10906,7 +10911,7 @@ function renderDailyTrendSVG(list) {
       return best * mag;
     };
     let peak = 0;
-    for (const p of list) if (outOf(p) > peak) peak = outOf(p);
+    for (const p of list) if ((p.tokens || 0) > peak) peak = p.tokens || 0;
     const step = Math.max(1, stepFloor(peak / 4));
     const TH = [step, step * 2, step * 3, step * 4];      // 4 个阈值 ⇒ 5 档（0 是最浅那档）
     const lvOf = (tk) => {
@@ -10925,7 +10930,7 @@ function renderDailyTrendSVG(list) {
     while (cur.getTime() <= lastD.getTime() && n < 400) {
       const key = cur.getFullYear() + '-' + pad2(cur.getMonth() + 1) + '-' + pad2(cur.getDate());
       const p = byDay.get(key);
-      const tk = p ? outOf(p) : 0;
+      const tk = p ? (p.tokens || 0) : 0;
       const tip = key + ' · ' + (p ? (p.total + ' 请求 · ' + tk + ' token') : '无请求');
       // ⚠ 只在**每月第一天所在的那一列**放月份文字，其余留空（那样月份才会对齐到列上）
       const colIdx = Math.floor(n / 7);
@@ -11006,7 +11011,7 @@ function renderDailyTrendSVG(list) {
           return;
         }
         out.className = 'heatpick';
-        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(outOf(p))} token`
+        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(p.tokens || 0)} token`
           + `（成功 ${p.ok} · 失败 ${p.fail}）`;
       });
     }
@@ -11092,7 +11097,7 @@ function renderDailyTrendSVG(list) {
     let activeN = 0, peakTokens = 0, peakDay = '', lastDay = '', lastTotal = 0;
     for (const p of list) {
       const d = String(p.ts || '').slice(0, 10);
-      const tk = outOf(p);
+      const tk = p.tokens || 0;
       const n = p.total || 0;
       if (n > 0) {
         activeN++;
@@ -11134,7 +11139,7 @@ function renderDailyTrendSVG(list) {
         + `<td>${esc(noReq ? NODATA : String(p.total || 0))}</td>`
         + `<td>${esc(noReq ? NODATA : String(p.ok || 0))}</td>`
         + `<td>${esc(noReq ? NODATA : String(p.fail || 0))}</td>`
-        + `<td>${esc(noReq ? NODATA : fmtTokensPlain(outOf(p)))}</td>`
+        + `<td>${esc(noReq ? NODATA : fmtTokensPlain(p.tokens || 0))}</td>`
         + `<td>${esc(rate)}</td></tr>`;
     }).join('');
     el.innerHTML = hsHtml
@@ -12263,7 +12268,7 @@ let multCatalogFailed = false;
     //   历史桶没有 out_tokens（字段 2026-10-20 才加）⇒ 柱高 0 ⇒ 那部分不显示，
     //   这是诚实的：那时确实没记录输出量。
     const buckets = rows.map((p) => {
-      const m = (p && p.by_model_out) || {};
+      const m = (p && p.by_model) || {};   // ⚠ 2026-10-20 改：by_model 是 total（输入+输出），与「总 Token」一致
       let sum = 0;
       for (const k of Object.keys(m)) { const v = Number(m[k]) || 0; if (v > 0) sum += v; }
       return {
