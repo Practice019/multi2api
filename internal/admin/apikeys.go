@@ -134,6 +134,9 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		Limit  int64    `json:"limit"`
 		RPM    int      `json:"rpm"`
 		Models []string `json:"models"`
+		// ModelMap 模型对外名映射（对外名 → 内部名）。
+		// 省略 / null ⇒ 不做映射（与 models 的三态一致）。
+		ModelMap map[string]string `json:"model_map"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
@@ -143,7 +146,7 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 	//   · 成员建的 ⇒ 归他（此后他只能看见/管这一把）
 	//   · 管理员建的 ⇒ owner="" （存量语义：空 = 管理员所有）
 	//   · 用 admin_token 的脚本建的 ⇒ UserID 为空 ⇒ 同样落进"管理员所有"
-	k, err := s.CreateOwned(h.principalFrom(r).UserID, body.Name, body.Limit, body.RPM, body.Models)
+	k, err := s.CreateOwned(h.principalFrom(r).UserID, body.Name, body.Limit, body.RPM, body.Models, body.ModelMap)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -157,6 +160,7 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		"limit":      k.Limit,
 		"rpm":        k.RPM,
 		"models":     k.Models,
+		"model_map":  k.ModelMap,
 		"created_at": k.CreatedAt,
 	})
 }
@@ -302,6 +306,9 @@ func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 		Limit  *int64   `json:"limit"`
 		RPM    *int     `json:"rpm"`
 		Models []string `json:"models"`
+		// ModelMap 模型对外名映射（对外名 → 内部名）。
+		// nil（字段缺失）⇒ 不改；{} ⇒ 清空映射；非空 ⇒ 整体替换。
+		ModelMap map[string]string `json:"model_map"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
@@ -310,7 +317,7 @@ func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.requireKeyAccess(w, r, body.ID) {
 		return
 	}
-	if err := s.Update(body.ID, body.Limit, body.RPM, body.Models); err != nil {
+	if err := s.Update(body.ID, body.Limit, body.RPM, body.Models, body.ModelMap); err != nil {
 		writeStoreError(w, err)
 		return
 	}

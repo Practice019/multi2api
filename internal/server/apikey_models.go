@@ -132,12 +132,38 @@ func (h *Handler) filterModelsForRequest(r *http.Request, list []map[string]any)
 	if !restricted {
 		return list
 	}
+	modelMap := h.modelMapForRequest(r)
 	out := make([]map[string]any, 0, len(list))
+	// 已输出的对外名（去重用）。两个内部模型映射到同一个对外名是配置错误，
+	// 但**不能**让它在列表里出现两次 —— 客户端建模型索引时会把第二条当重复项丢掉，
+	// 而丢掉哪一条取决于它的实现，我们没法预测。
+	seenPub := make(map[string]bool, len(list))
 	for _, m := range list {
 		id, _ := m["id"].(string)
-		if modelAllowed(allowed, id) {
-			out = append(out, m)
+		if !modelAllowed(allowed, id) {
+			continue
 		}
+		// ⚠ 2026-10-21：输出**对外名**，不是内部名。
+		//   这里必须与请求侧反向：调用方在列表里看到什么名字，就用什么名字发请求，
+		//   而请求进来会被 resolveModelAlias 换回内部名。两边不一致的话，
+		//   用户复制列表里的名字去调用会得到一个"未知模型"。
+		pub := publicNameFor(modelMap, id)
+		if pub == "" || seenPub[pub] {
+			continue
+		}
+		seenPub[pub] = true
+		if pub == id {
+			out = append(out, m)
+			continue
+		}
+		// 要改名：复制一份，不能就地改 m —— list 可能是别处共享的切片，
+		// 改了会让"另一个 key 看到的列表"也被改名（越权泄漏别名的形态）。
+		cp := make(map[string]any, len(m))
+		for k, v := range m {
+			cp[k] = v
+		}
+		cp["id"] = pub
+		out = append(out, cp)
 	}
 	return out
 }
@@ -151,4 +177,115 @@ func joinLimited(list []string, n int) string {
 		return strings.Join(list, "、")
 	}
 	return strings.Join(list[:n], "、") + "…（共 " + strconv.Itoa(len(list)) + " 个）"
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 模型对外名映射（2026-10-21）
+// ──────────────────────────────────────────────────────────────────────────
+
+// 用户的需求（原话）：
+//
+//	「这些模型，开放的模型，对于这个 API key 开放的模型，我觉得需要有一个
+//	 模型映射，就是对外的模型应该叫什么」
+//
+// # 为什么这是 key 维度而不是渠道维度
+//
+// 渠道层已经有 `Channel.ModelMap`（公开名 → 上游名），它解决的是
+// 「同一个上游模型，在这个渠道里叫什么」。而这里解决的是
+// 「同一把 key 的调用方，看到的是哪套名字」—— 两件事正交：
+//
+//	渠道层负责「怎么打到上游」，key 层负责「对外怎么称呼」
+//
+// 换一把 key 可以换一套对外名，而渠道配置不用动。这才是中转站该有的形态：
+// 发给 A 客户的一套名字、发给 B 客户的另一套，后端是同一批模型。
+//
+// # 方向：对外名 → 内部名
+//
+// 请求路径每一跳都要查它（每次对话请求 + /v1/models），方向必须是
+// "进来的名字 → 内部的名字"。反过来存就得遍历全表找 value。
+// 与 `Channel.ModelMap` 同向，读代码时不用在两套约定之间来回切。
+
+// modelMapForRequest 取本次请求命中的 API key 的映射表。
+//
+// 返回 nil 表示"不做映射"，包括三种情况（都对）：
+//   - 没命中普通 key（走管理钥匙）—— 管理钥匙永远不做别名替换
+//   - key 存在但没有配映射
+//   - APIKeys 存储未启用
+func (h *Handler) modelMapForRequest(r *http.Request) map[string]string {
+	if h.cfg.APIKeys == nil {
+		return nil
+	}
+	kid, _ := r.Context().Value(apikeyCtxKey).(string)
+	if kid == "" {
+		return nil
+	}
+	m, _ := h.cfg.APIKeys.ModelMapOf(kid)
+	return m
+}
+
+// resolveModelAlias 把客户端发来的**对外名**换成**内部模型名**。
+//
+// 没有命中映射 ⇒ **原样返回**。这条很重要：映射是增量能力，不是白名单。
+// 若把未命中的名字判成非法，那配一张映射表就等于把所有老调用方式打死 ——
+// 而老调用方看到的会是"以前能用的模型突然 404 了"。
+//
+// ⚠ 必须在**判白名单之前**调用：白名单里存的是内部名，拿对外名去比会 403，
+// 而那个对外名恰恰是我们发布出去让人用的名字。
+//
+// ⚠ 返回替换后的名字，但**不**改写 body —— body 交给下游重写：
+// 渠道分支由 `forwardViaChannel` 用（model 参数 + body）重新写 model 字段，
+// legacy 分支同理。只改 peek.Model 一处，所有消费方自动一致。
+func (h *Handler) resolveModelAlias(r *http.Request, model string) string {
+	m := h.modelMapForRequest(r)
+	if len(m) == 0 {
+		return model
+	}
+	name := strings.TrimSpace(model)
+	if name == "" {
+		return model
+	}
+	if target, ok := m[name]; ok && strings.TrimSpace(target) != "" {
+		return strings.TrimSpace(target)
+	}
+	// ⚠ 再试一次裸名（剥掉 provider/ 前缀）：客户端可能发 `deepseek-v4-pro`，
+	//   而映射表里存的是 `csg/deepseek-v4-pro` 这种带前缀的键。
+	//   两处都试，才能让"用户填了带前缀的名字"也生效 —— 与白名单的裸名比较同一考虑。
+	if _, bare, _ := gateway.SplitModel(name); bare != "" && bare != name {
+		if target, ok := m[bare]; ok && strings.TrimSpace(target) != "" {
+			return strings.TrimSpace(target)
+		}
+	}
+	return model
+}
+
+// publicNameFor 把一个**内部**模型名换成它对外的名字（/v1/models 用）。
+//
+// 没有反向映射 ⇒ 返回原值（内部名就当对外名用，与"不配映射"的行为一致）。
+//
+// ⚠ 这里必须遍历 value 找键 —— 存储方向是为请求路径优化的（对外名 → 内部名），
+//   而 /v1/models 是低频管理路径（每客户端首次连接一次），遍历成本可忽略。
+//   两张表各存一份反而会引入"改了一边忘改另一边"的不一致。
+func publicNameFor(modelMap map[string]string, internal string) string {
+	if len(modelMap) == 0 {
+		return internal
+	}
+	name := strings.TrimSpace(internal)
+	if name == "" {
+		return internal
+	}
+	// 精确命中优先
+	for alias, target := range modelMap {
+		if strings.TrimSpace(target) == name {
+			return alias
+		}
+	}
+	// 裸名命中（映射表里可能写的是带前缀的内部名）
+	if _, bare, _ := gateway.SplitModel(name); bare != "" {
+		for alias, target := range modelMap {
+			if _, tb, _ := gateway.SplitModel(strings.TrimSpace(target)); tb != "" && tb == bare {
+				return alias
+			}
+		}
+	}
+	return internal
 }

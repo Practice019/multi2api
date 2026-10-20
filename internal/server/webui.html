@@ -1916,6 +1916,19 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
         </div>
         <div id="akModelList" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px"></div>
         <div id="akEmpty" class="dim" style="font-size:12px;padding:8px;display:none"></div>
+        <!-- 模型对外名映射（2026-10-21）· 用户要求：「开放的模型需要有一个模型映射，
+             就是对外的模型应该叫什么」。 -->
+        <div style="margin-top:10px">
+          <div class="dim" style="font-size:12px;margin-bottom:4px">
+            模型对外名（可选）· 每行 <code>内部模型名 = 对外显示名</code>，不填则对外就是内部名
+          </div>
+          <textarea id="akModelMap" rows="3" spellcheck="false"
+            style="width:100%;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;font-size:12px"
+            placeholder="csg/deepseek-v4.1-flash-1017 = deepseek-v4-pro"></textarea>
+          <div class="dim" style="font-size:11px;margin-top:3px">
+            改完后调用方看到的模型名就是右边那个；请求进来会换回左边去上游。
+          </div>
+        </div>
       </div>
     </div>
 
@@ -8314,6 +8327,38 @@ let loginProvider = '';
   // 「DOM 里当前勾着的」+「已勾但被搜索隐藏的（存在 akHiddenChecked 里）」。
   let akHiddenChecked = new Set();
 
+  // ── 模型对外名映射（2026-10-21）──
+  //
+  // ⚠ 注意**方向**：存储里是 `对外名 → 内部名`（请求进来查一次就够），
+  //   而界面上让人写的是 `内部名 = 对外名`（从左读到右，符合"这个模型对外叫什么"）。
+  //   两处方向相反，所以进出各要转置一次 —— 这里就是那两次转置。
+  //   写错方向的表现很隐蔽：保存成功、列表也显示，但调用方拿到的名字对不上。
+
+  // akModelMapToText 把 `{对外名: 内部名}` 转成界面文本 `内部名 = 对外名`。
+  function akModelMapToText(m) {
+    if (!m || typeof m !== 'object') return '';
+    return Object.keys(m).map(alias => `${m[alias]} = ${alias}`).join('\n');
+  }
+
+  // akParseModelMap 把界面文本解析成 `{对外名: 内部名}`。
+  //
+  // 容错：允许 `=` 前后多空格、允许空行与 `#` 开头的注释行、允许用全角＝。
+  // 丢掉的条目不静默 —— 返回时带上 invalid 列表，调用方提示用户（见 saveAPIKeyModal）。
+  function akParseModelMap(text) {
+    const map = {}, invalid = [];
+    for (const raw of String(text || '').split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const parts = line.split(/[=＝]/);
+      if (parts.length < 2) { invalid.push(line + '（缺少 =）'); continue; }
+      const target = parts[0].trim();          // 内部模型名
+      const alias = parts.slice(1).join('=').trim();  // 对外名（允许右边含 = 的极端情况）
+      if (!target || !alias) { invalid.push(line + '（某一边为空）'); continue; }
+      if (target === alias) continue;          // 等价于不映射，后端也会丢掉
+      map[alias] = target;
+    }
+    return { map, invalid };
+  }
   function akSelected() {
     const out = new Set(akHiddenChecked);
     document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => {
@@ -8371,6 +8416,8 @@ let loginProvider = '';
     $('akAll').checked = !hasList;      // 默认「全部允许」= 不限制
     $('akSearch').value = '';
     if (hasList) akHiddenChecked = new Set(k.models);
+    // 模型对外名映射：编辑时回填，新建时清空。
+    $('akModelMap').value = akMode === 'edit' ? akModelMapToText(k && k.model_map) : '';
 
     $('akModal').style.display = 'flex';
     $('akSave').disabled = false;
@@ -8399,6 +8446,17 @@ let loginProvider = '';
       toast('要么勾「全部允许」，要么至少选一个模型', true);
       return;
     }
+    // 解析模型对外名映射。
+    // ⚠ 只在"限制模型"时才有意义：勾了「全部允许」的 key 不限制模型，
+    //   映射表也就无从对应（对外名换回内部名之后仍要过白名单，而白名单是空的
+    //   ⇒ 任何名字都放行，映射反而是多余的）。所以 
+    //   all=true 时提交空表，让后端清掉可能残留的旧映射。
+    const mmParsed = all ? { map: {}, invalid: [] } : akParseModelMap($('akModelMap').value);
+    if (mmParsed.invalid.length) {
+      toast('模型映射格式不对：' + mmParsed.invalid[0], true);
+      return;
+    }
+    const modelMap = mmParsed.map;
     const limit = parseInt($('akLimit').value, 10);
     const rpm = parseInt($('akRpm').value, 10);
     if (isNaN(limit) || limit < 0 || isNaN(rpm) || rpm < 0) {
@@ -8412,14 +8470,14 @@ let loginProvider = '';
           const name = ($('akName').value || '').trim();
           if (!name) { toast('名称不能为空', true); return false; }
           const r = await admin('/admin/apikeys', {
-            method: 'POST', body: JSON.stringify({ name, limit, rpm, models }),
+            method: 'POST', body: JSON.stringify({ name, limit, rpm, models, model_map: modelMap }),
           });
           if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
           toast(`已创建 ${r.name || name}（完整 key 下面直接复制）\n${r.full}`, false, 15000);
           copyText(r.full, 'API Key');
         } else {
           await admin('/admin/apikeys/update', {
-            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, models }),
+            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, models, model_map: modelMap }),
           });
           toast(all ? '已保存：全部模型可用' : `已保存：限制为 ${models.length} 个模型`);
         }
