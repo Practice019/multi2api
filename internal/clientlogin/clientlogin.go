@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -635,7 +636,18 @@ func (m *Manager) syncArchive() error {
 				continue
 			}
 		}
-		_ = os.WriteFile(dst, raw, 0o600)
+		// ⚠ 2026-10-20 修（review 抓到）：原来是 `_ = os.WriteFile(dst, raw, 0o600)`。
+		//
+		// 这是本轮 review 的第四例"沉默的失败"（前三例见 logbuf / account / loomy）。
+		// 后果：账号归档没写进 archiveDir，但上面那个 `continue` 已经跳过了旧文件比较
+		// ⇒ 用户以为"这次同步把 N 个号都归档了"，实际上磁盘上少了几个，
+		// 下次登录还得重新导入一遍，而日志里一个字都没有。
+		//
+		// ⚠ 不致命（不覆盖已有数据、不丢凭证），但属于"失败无痕"，
+		// 与"磁盘满时静默丢数据"是同一类问题。
+		if err := os.WriteFile(dst, raw, 0o600); err != nil {
+			log.Printf("[clientlogin] ⚠ 归档凭证写入失败（%s）: %v —— 该账号本次未归档", dst, err)
+		}
 	}
 	return nil
 }

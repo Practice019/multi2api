@@ -340,14 +340,32 @@ func (p *Provider) savePanelsSnapshot() {
 	}
 	raw, err := json.Marshal(s)
 	if err != nil {
+		// ⚠ 2026-10-20 修（review 抓到）：原来是裸 `return`，静默吞掉。
+		//
+		// 这是本轮 review 发现的**第三例"沉默的失败"**：
+		//   logbuf   Scanner 未检查 sc.Err()      → 日志静默截断
+		//   account  saveLocked 的 err 被 _ = 吞  → 落盘静默失败
+		//   loomy    这个函数的三处早退全静默     → 面板缓存静默不更新
+		//
+		// 共同点：失败时**一个字都不留**，用户只会觉得"数据莫名其妙不对"。
+		//
+		// ⚠ 严重性低于 account 那处：面板快照是**缓存**（丢了顶多重查上游），
+		// 不是账本。所以这里加日志就够，不需要改成返回 error 让调用方回滚。
+		log.Printf("[loomy] ⚠ 面板快照序列化失败: %v —— 本次不写盘，缓存将保持旧值", err)
 		return
 	}
 	dst := filepath.Join(p.authDir, panelsFileName)
 	tmp := dst + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		log.Printf("[loomy] ⚠ 面板快照写临时文件失败: %v（目标 %s）—— 本次不更新缓存文件", err, tmp)
 		return
 	}
-	_ = os.Rename(tmp, dst)
+	// ⚠ 原子替换的最后一步。这一步失败最隐蔽：临时文件写成功了，
+	// 但目标文件还是旧的 —— 从外面看"什么都没发生"。
+	if err := os.Rename(tmp, dst); err != nil {
+		log.Printf("[loomy] ⚠ 面板快照改名失败: %v（%s → %s）—— 磁盘上仍是旧快照", err, tmp, dst)
+		_ = os.Remove(tmp) // 清掉半成品，避免下次 WriteFile 覆盖不到时留下垃圾
+	}
 }
 
 // throttledSavePanels 存盘的**节流**入口（每次补一个号都会写缓存 ⇒ 不能每次都落盘）。
