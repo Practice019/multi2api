@@ -10637,24 +10637,31 @@ function renderModelRank(s) {
     svg.push(`<text id="ctRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
     host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
 
+    // ⚠ 2026-10-20 修（第二个隐患）：监听器用 host._ctBound **只绑一次**，
+    //   所以它闭包捕获的 rows / n / xAt 永远是**第一次渲染**那一份 ——
+    //   数据刷新后 hover 读到的还是旧值（不报错，只是数字不更新）。
+    //   这里每次重绘都把当次数据挂到 host 上，监听器通过 host 读，永远拿到当前值。
+    host._ctData = { rows, n, xAt, W, PADT, plotH };
     if (!host._ctBound) {                    // ⚠ 只绑一次（容器不被重绘，监听器能留住）
       host._ctBound = true;
       host.addEventListener('mousemove', (ev) => {
+        const d = host._ctData;   // ⚠ 当次渲染的数据（不是闭包快照）
         const el = host.querySelector('svg'), cur = host.querySelector('#ctCursor'), rd = host.querySelector('#ctRead');
-        if (!el || !cur || !rd) return;
+        if (!d || !el || !cur || !rd) return;
         const rect = el.getBoundingClientRect();
         const xv = (ev.clientX - rect.left) / rect.width * W;
         let best = -1, bd = 1e9;
-        for (let i = 0; i < n; i++) { const d = Math.abs(xAt(i) - xv); if (d < bd) { bd = d; best = i; } }
+        for (let i = 0; i < d.n; i++) { const dist = Math.abs(d.xAt(i) - xv); if (dist < bd) { bd = dist; best = i; } }   // ⚠ 内层变量不能叫 d（会遮蔽 host._ctData）
         if (best < 0) return;
-        const r = rows[best];
-        cur.setAttribute('x1', xAt(best).toFixed(1)); cur.setAttribute('x2', xAt(best).toFixed(1));
+        const r = d.rows[best];
+        cur.setAttribute('x1', d.xAt(best).toFixed(1)); cur.setAttribute('x2', d.xAt(best).toFixed(1));
         cur.style.display = 'block';
-        rd.setAttribute('x', Math.min(Math.max(xAt(best), 60), W - 60).toFixed(1));
+        rd.setAttribute('x', Math.min(Math.max(d.xAt(best), 60), W - 60).toFixed(1));
         // ⚠ 读数字段：时间 · 当日累计命中率 · 本小时命中率 · 请求数 · 总 Token
         // ⚠ 2026-10-20：曲线画的是**当日累计**（与 7 天表格/卡片同口径），
         //   但鼠标点上同时给出"这一小时本身"的比例 —— 两个数都给，读者才不会被
         //   "累计 89% 但这一小时只有 43%"搞糊涂。
+        rd.textContent = r.ts.slice(11, 16)
         + '  累计 ' + (r.has ? (r.rate * 100).toFixed(1) + '%' : '—')
         + (r.hasHour ? '  ·  本小时 ' + (r.hourRate * 100).toFixed(1) + '%' : '')
         + '  ·  请求 ' + r.total
