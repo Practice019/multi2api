@@ -12622,12 +12622,39 @@ let multCatalogFailed = false;
   // 复用 tokPerSec（与请求日志表格同口径：tokens<0 视为缺失显示 -）。
   function testUsageLine(usage, totalMs) {
     if (!usage || typeof usage !== 'object') return '';
+  // ⚠ 2026-10-20 照 DSH 的 token-ledger-panel.js 改成分项结构：
+  //     total = inputTokens + cacheReadTokens + outputTokens（缓存写入不重复计入）
+  //   缓存命中按 wire.ParseUsageExtras 的三级取值（顶层显式 → 顶层简写 → 嵌套），
+  //   与后端同一套口径 —— 否则前后端对同一条请求会算出不同的缓存量。
+  const numT = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
+  const promptTok = numT(usage.prompt_tokens);
+  const outTok = numT(usage.completion_tokens);
+  const cachedTok = numT(usage.prompt_cache_hit_tokens)
+    || numT(usage.cached_tokens)
+    || numT((usage.prompt_tokens_details || {}).cached_tokens);
+  const reasoningTok = ('completion_thinking_tokens' in usage)
+    ? numT(usage.completion_thinking_tokens)
+    : numT((usage.completion_tokens_details || {}).reasoning_tokens);
+  // 总处理量 = 输入 + 输出（缓存写入不重复计入）—— 与指标卡「总处理量」同一口径
+  const totalTok = promptTok + outTok;
     const p = usage.prompt_tokens, c = usage.completion_tokens;
     const np = Number(p), nc = Number(c);
     const total = (Number.isFinite(np) && np > 0 ? np : 0) + (Number.isFinite(nc) && nc > 0 ? nc : 0);
     const pt = Number.isFinite(np) ? np : '-';
     const ct = Number.isFinite(nc) ? nc : '-';
-    return ` · prompt ${pt} / completion ${ct} · 共 ${total} tokens · ${tokPerSec(ct, totalMs, e && e.ttfb_ms, e && e.mode)} tok/s`;
+    // ⚠ 原这里是 `tokPerSec(ct, totalMs, e && e.ttfb_ms, e && e.mode)` —— `e` 在本函数里
+  //   **根本不存在**（是别处的作用域变量），调用即 ReferenceError。
+  //   对话测试这条链路没有 ttfb 上报，所以第 3 参传 0（速度会略偏低，但比抛异常好）；
+  //   第 4 参传 'stream'（这是流式对话测试，非流式不适用）。
+  const tps = tokPerSec(outTok, totalMs, 0, 'stream');
+  const lines = [
+    '总处理量 ' + totalTok + '（输入 ' + promptTok + ' + 输出 ' + outTok + '）',
+    '↑ 输出 ' + outTok,
+  ];
+  if (cachedTok > 0) lines.push('⚡ 缓存命中 ' + cachedTok);
+  if (reasoningTok > 0) lines.push('🧠 推理 ' + reasoningTok + '（已包含在输出中）');
+  lines.push('输出速度 ' + tps + ' tok/s');
+  return ' · ' + lines.join(' · ');
   }
 
   async function send() {
