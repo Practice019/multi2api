@@ -282,11 +282,12 @@ func hashIndex(key string, n int) int {
 // 而 OpenAI 官方 SDK 只在 baseUrl 含 api.openai.com 时才写 prompt_cache_key。
 //
 // 后果（issue #2 实测）：sessKey 恒为空 ⇒ Resolve 从未被调用 ⇒ 粘性层退化为纯轮换。
-//   · /status 的 sticky_sessions 在 6927 个请求下恒为 0
-//   · 同会话相邻两轮的账号转移矩阵 ≈ 20/20/20/20/20（5 个号纯随机）
-//   · 上游 prompt cache 按账号隔离 ⇒ 每次换号 = 整段对话重新预填充
-//     长对话单笔换号损失实测 2.8 ~ 6.0 credit（正常请求 0.1~0.3）
-//   · 受控对照：不带会话标识时缓存命中 19.8%；带 conversation_id 时 98.7%
+//
+//	· /status 的 sticky_sessions 在 6927 个请求下恒为 0
+//	· 同会话相邻两轮的账号转移矩阵 ≈ 20/20/20/20/20（5 个号纯随机）
+//	· 上游 prompt cache 按账号隔离 ⇒ 每次换号 = 整段对话重新预填充
+//	  长对话单笔换号损失实测 2.8 ~ 6.0 credit（正常请求 0.1~0.3）
+//	· 受控对照：不带会话标识时缓存命中 19.8%；带 conversation_id 时 98.7%
 func ExtractKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
