@@ -1391,7 +1391,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
            5. ⚠ 整段区间 Token 全 0 ⇒ **不画那条线、也不画右侧刻度** ——
               画一条贴地的直线会被读成"用量就是 0"，而事实是"这份数据里没有" -->
     <div class="boardsec">
-      <h3>近 24 小时缓存命中率趋势 <span class="dim" style="font-weight:400;text-transform:none">按本地整点 · 无请求的整点不标注</span></h3>
+      <h3>近 24 小时缓存命中率趋势 <span class="dim" style="font-weight:400;text-transform:none">当日累计到该整点（与「近 7 天」同一口径）· 无请求的整点不标注</span></h3>
       <div class="body">
         <div id="cacheTrend" class="cachetrend"></div>
         <div class="heatfoot" style="margin-top:4px">
@@ -10518,15 +10518,59 @@ function renderModelRank(s) {
     const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
     const n = list.length;
 
-    // ⚠ 命中率：分母 0 ⇒ 记成 null（**不写读数**，但仍按 0% 画线 —— 它那句"按 0% 计"）
+    // ⚠ 2026-10-20 改（用户要求「统一」）：24h 趋势的命中率改为**当日累计到该整点**。
+    //
+    // # 改之前面板上有两个数并列，看起来自相矛盾
+    //     近 7 天表格  10/20 → 89%   （按**天**累加：Σhit / Σ(hit+miss)）
+    //     近 24h 趋势  18时  → 43%   （按**小时**独立：该小时的 Σhit / Σ(hit+miss)）
+    //   两者算法**完全相同**，差的只是桶粒度；但站在两个数前面的用户不会知道，
+    //   他只会觉得"同一份数据给了两个答案"。用户原话：
+    //     「这个缓存命中率有点低吧？这不对吧？这个能统一起来吗？」
+    //     「因为我们前端有很多缓存命中率的展示啊，那他展示一个，你展示一个，
+    //      都展示的不是同一个东西啊」
+    //
+    // ⇒ 现在每个点 = 从当日 0 点累计到该整点的比例。
+    //   于是 最后一个点 == 表格里今天的值 == 卡片上的值，三处永远是同一个数。
+    //
+    // # ⚠ 代价（写在这里，免得将来有人以为是 bug）
+    //   曲线会变单调平滑（累计量只增不减、分母同时变大），"某一小时质量差"被摊平。
+    //   但那个信息更适合用柱子看（Token 量），不适合用累计比例看。
+    //
+    // # ⚠ has 的语义保持"该整点有没有请求"
+    //   无请求的整点仍不标注读数（与原来一致），但它的 rate 仍是**累计值**（不是 0）
+    //   —— 否则曲线会因为"某小时没请求"掉到 0% 再弹回，被误读成"缓存突然全失效"。
     const rateOf = (p) => {
+      // 单点比例（非累计）：留给 tooltip 说明"这一小时本身"是多少
       const h = p.cache_hit || 0, m = p.cache_miss || 0;
       const den = h + m;
-      return { rate: den > 0 ? h / den : 0, has: den > 0 };
+      return { rate: den > 0 ? h / den : 0, has: den > 0, hit: h, miss: m };
     };
-    const rows = list.map((p) => ({
-      ts: String(p.ts || ''), total: p.total || 0, tokens: p.tokens || 0, ...rateOf(p),
-    }));
+    // 累计器：**按天重置**，得到"当日内累计到该整点"的比例。
+    //
+    // ⚠ 必须按天重置：这个 list 是"近 24 小时"的桶，**跨天**
+    //   （截图 x 轴就是 昨天19:00 → 今天07:00 → 今天19:00）。
+    //   若不重置，最后一个点 = 昨天19点到今天19点的累计，
+    //   而 7 天表格里 10/20 是**今天全天** —— 又变成两个不同的数了，
+    //   正是这次要消除的那个问题。
+    //   所以累计器遇到日期变化就清零，每个点只代表**它自己那天**的累计。
+    let cumHit = 0, cumMiss = 0, cumDay = '';
+    const rows = list.map((p) => {
+      const one = rateOf(p);
+      const day = String(p.ts || '').slice(0, 10);   // ts 是 RFC3339，前 10 字符是日期
+      if (day !== cumDay) { cumHit = 0; cumMiss = 0; cumDay = day; }   // ← 跨天重置
+      cumHit += one.hit;
+      cumMiss += one.miss;
+      const cden = cumHit + cumMiss;
+      return {
+        ts: String(p.ts || ''),
+        total: p.total || 0,
+        tokens: p.tokens || 0,
+        rate: cden > 0 ? cumHit / cden : 0,   // 画线：当日累计到该整点
+        has: one.has,                          // 读数是否标注：该整点有没有请求
+        hourRate: one.rate,                    // tooltip：该小时自身比例
+        hasHour: one.has,                      // tooltip：该小时有没有请求
+      };
+    });
 
     // ⚠ 命中率轴：上限按真实峰值抬、**下限 1（=100%）**、**不夹到 100%**
     const ratePeak = Math.max(...rows.map((r) => r.rate));
@@ -10607,9 +10651,14 @@ function renderModelRank(s) {
         cur.setAttribute('x1', xAt(best).toFixed(1)); cur.setAttribute('x2', xAt(best).toFixed(1));
         cur.style.display = 'block';
         rd.setAttribute('x', Math.min(Math.max(xAt(best), 60), W - 60).toFixed(1));
-        // ⚠ 读数字段：该整点的时间 · 命中率（无数据写 —）· 请求数 · token
-        rd.textContent = r.ts.slice(11, 16) + '  命中率 ' + (r.has ? (r.rate * 100).toFixed(1) + '%' : '—')
-          + '  · 请求 ' + r.total + ' · ' + fmtTokensPlain(r.tokens);
+        // ⚠ 读数字段：时间 · 当日累计命中率 · 本小时命中率 · 请求数 · 总 Token
+        // ⚠ 2026-10-20：曲线画的是**当日累计**（与 7 天表格/卡片同口径），
+        //   但鼠标点上同时给出"这一小时本身"的比例 —— 两个数都给，读者才不会被
+        //   "累计 89% 但这一小时只有 43%"搞糊涂。
+        + '  累计 ' + (r.has ? (r.rate * 100).toFixed(1) + '%' : '—')
+        + (r.hasHour ? '  ·  本小时 ' + (r.hourRate * 100).toFixed(1) + '%' : '')
+        + '  ·  请求 ' + r.total
+        + '  ·  总 Token ' + fmtTokensPlain(r.tokens);
         rd.style.display = 'block';
       });
       host.addEventListener('mouseleave', () => {
