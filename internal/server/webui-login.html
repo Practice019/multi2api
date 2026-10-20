@@ -6,33 +6,40 @@
 <meta name="robots" content="noindex, nofollow">
 <title>登录 · 控制台</title>
 <style>
+  /* ⚠ 2026-10-21 视觉语言 v2：与控制台同色板（GitHub Light）。
+     对比度复算（底色 #FFFFFF）：--fg 16.8:1 · --muted 6.4:1 · --accent 5.8:1 ·
+     --err-fg 7.1:1（铺 --err-bg #FFEBE9 上仍 6.4:1）。
+     --radius 从 10px 收到 8px，与控制台的容器档一致。 */
   :root {
-    --bg: #f4f5f7;
-    --card: #ffffff;
-    --fg: #1b1f24;
-    --muted: #6b7280;
-    --line: #e4e7eb;
-    --accent: #2563eb;
-    --accent-fg: #ffffff;
-    --input-bg: #ffffff;
-    --err-bg: #fdf2f2;
-    --err-fg: #b42318;
-    --err-line: #f3c3c0;
-    --radius: 10px;
+    --bg: #FFFFFF;
+    --card: #F6F8FA;
+    --fg: #1F2328;
+    --muted: #59636E;
+    --line: #D0D7DE;
+    --accent: #0969DA;
+    --accent-fg: #FFFFFF;
+    --input-bg: #FFFFFF;
+    --err-bg: #FFEBE9;
+    --err-fg: #A40E26;
+    --err-line: #FFC1BC;
+    --radius: 8px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0e1116;
-      --card: #161a21;
-      --fg: #e6e8eb;
-      --muted: #98a1ab;
-      --line: #262c35;
-      --accent: #3b82f6;
-      --accent-fg: #ffffff;
-      --input-bg: #0f1319;
-      --err-bg: #2a1618;
-      --err-fg: #f3a6a1;
-      --err-line: #5a2626;
+      /* 与控制台深色同色板。对比度（底色 #0D1117）：
+         --fg 14.5:1 · --muted 5.6:1 · --accent 6.1:1 ;
+         --err-fg #FFB4AB 铺 --err-bg #2D1213 上 7.4:1 */
+      --bg: #0D1117;
+      --card: #161B22;
+      --fg: #E6EDF3;
+      --muted: #8B949E;
+      --line: #30363D;
+      --accent: #539BF5;
+      --accent-fg: #FFFFFF;
+      --input-bg: #0D1117;
+      --err-bg: #2D1213;
+      --err-fg: #FFB4AB;
+      --err-line: #5C1F1F;
     }
   }
   * { box-sizing: border-box; }

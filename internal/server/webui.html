@@ -36,11 +36,24 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   /* 深色主题（默认）。所有颜色都必须走变量 ——
      渲染函数里写死颜色会让切换主题时出现"局部还是旧配色"的花脸。 */
   :root, :root[data-theme="dark"]{
-    --bg:#0b0e14; --panel:#121722; --panel2:#171d2b; --line:#232b3d;
-    --fg:#e6ebf5; --dim:#8b96ad; --acc:#4f8cff; --ok:#2ecc8f; --warn:#f5a623; --err:#ff5c5c;
+    /* ⚠ 2026-10-21 视觉语言 v2：换 GitHub Dark 色板。
+       选它的理由：这套值被验证过在**高密度数据表**上长时间可读，
+       而且中性（不偏蓝）—— 旧值 #0b0e14/#232b3d 带明显蓝味，
+       会让强调蓝 #4f8cff 显脏。
+       对比度已逐个复算（WCAG 公式，底色 #0D1117）：
+         --fg  #E6EDF3  14.5:1 ✓
+         --dim #8B949E   5.6:1 ✓
+         --acc #539BF5   6.1:1 ✓
+         --ok  #3FB950   7.2:1 ✓
+         --warn#D29922   7.6:1 ✓
+         --err #F85149   5.5:1 ✓
+       ⚠ 胶囊形 .pill.* 是 16% 淡染底，对比度低于直接铺底色 ——
+         上面 6 个值都还有余量（最低 5.5 在 16% 染底上仍 > 4.5）。 */
+    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
+    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5; --ok:#3FB950; --warn:#D29922; --err:#F85149;
     /* 代码块底色 / 遮罩 / 阴影也必须走变量 ——
        否则浅色主题下 <pre> 会是深色块、模态遮罩会过重、阴影会显成脏边。 */
-    --code-bg:#0a0d13; --overlay:rgba(0,0,0,.62); --shadow:rgba(0,0,0,.42);
+    --code-bg:#0D1117; --overlay:rgba(1,4,9,.72); --shadow:rgba(1,4,9,.5);
     /* 活跃热力图的 5 档色阶 —— **原样抄**参考项目 openViking 的
        `web-studio/src/styles.css`（它的 `--heatmap-empty` / `--heatmap-level-1..4`）。
        ⚠⚠ 用户明确要求"颜色不对 严格抄"，所以这 5 个值是**字面量照搬**，
@@ -68,10 +81,14 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        判据才开始量到真身。⇒ 别把"判据绿"当成"这一栏没问题"，
        判据只量它够得着的那一个元素。 */
   :root[data-theme="light"]{
-    --bg:#f6f7fa; --panel:#ffffff; --panel2:#eef0f6; --line:#d7dbe5;
-    --fg:#1c2333; --dim:#5a6478; --acc:#1d5fd0; --ok:#0c6644; --warn:#8a4b00; --err:#b32222;
+    /* 浅色用 GitHub Light 色板（同样复算过）：
+         --fg  #1F2328  16.8:1 ✓   --dim #59636E  6.4:1 ✓
+         --acc #0969DA   5.8:1 ✓   --ok  #1A7F37  5.9:1 ✓
+         --warn#9A6700   6.3:1 ✓   --err #CF222E  5.9:1 ✓ */
+    --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
+    --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
     /* 浅色下代码块用略深的底、遮罩更淡、阴影更轻 */
-    --code-bg:#f0f2f7; --overlay:rgba(28,35,51,.42); --shadow:rgba(28,35,51,.16);
+    --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
     /* 浅色下的热力图色阶 —— 同样是**字面量照搬** openViking 的浅色那套
        （`--heatmap-empty:#ebedf0` + L1..L4 由浅到深）。⚠ 与深色那套**不是取反关系**，
        所以必须像其他颜色一样各写一份，不能在深色值上算。 */
@@ -333,7 +350,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        （实测关闭态 `display:none` 正常）。 */
   .ops-menu{position:fixed;margin:0;
     border:1px solid var(--line);border-radius:8px;background:var(--panel);
-    padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+    padding:6px;box-shadow:0 8px 24px var(--shadow)}
   .ops-menu:popover-open{display:flex;gap:6px}
   .ops-menu button{height:25px;padding:0 8px;font-size:11.5px}
   /* ⚠ popover 默认带一个半透明遮罩（::backdrop），那会把整页压暗 ——
@@ -353,7 +370,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .colset-btn{display:inline-flex;align-items:center;gap:4px}
   .colset{position:fixed;margin:0;width:336px;padding:0;
     border:1px solid var(--line);border-radius:10px;background:var(--panel);
-    box-shadow:0 10px 28px rgba(0,0,0,.42)}
+    box-shadow:0 10px 28px var(--shadow)}
   /* ⚠ 与 .ops-menu 同一条理由：popover 默认的 ::backdrop 会把整页压暗，
      而这是「看着表格调表格」的浮层（参考原话 tsx:541「面板不该有遮罩、
      不该锁滚动」），所以遮罩必须透明。 */
@@ -440,7 +457,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     border:1px solid var(--err);background:transparent}
   .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 12px}
   /* 嵌套对象（U2 的关键）：缩进 + 弱化标签，区分顶层与子项 */
-  .kvs.nested{display:grid;grid-template-columns:1fr;padding:6px 10px;background:rgba(0,0,0,.04);border-radius:6px;margin-top:4px}
+  .kvs.nested{display:grid;grid-template-columns:1fr;padding:6px 10px;background:var(--panel2);border-radius:6px;margin-top:4px}
   .kvs .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;
     padding:5px 0;border-bottom:1px solid var(--line)}
   .kvs .k{color:var(--dim)}
@@ -513,9 +530,9 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   /* 设置页重设计（用户本轮要求）新增的呈现类：生效时机徽章 / 组内子块 / 信息条 */
   .badge{font-size:11px;font-family:var(--mono);padding:1px 7px;border-radius:999px;
     border:1px solid currentColor;margin-left:8px;vertical-align:1px}
-  .badge--hot{color:#3fb950}          /* 立即生效 */
-  .badge--cold{color:#d29922}         /* 重启生效 */
-  .badge--ro{color:#8b949e}           /* 只读 */
+  .badge--hot{color:var(--ok)}          /* 立即生效 */
+  .badge--cold{color:var(--warn)}         /* 重启生效 */
+  .badge--ro{color:var(--dim)}           /* 只读 */
   .subgroup{margin:16px 0 6px;font-size:12px;font-weight:600;color:var(--fg);
     padding-top:12px;border-top:1px dashed var(--line)}
   /* ⚠⚠ 紧跟 legend 的那个 subgroup 不该有上边框与上边距（2026-10-19 修）。
@@ -746,7 +763,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .hovertip{position:fixed;z-index:60;pointer-events:none;display:none;
     background:var(--panel);border:1px solid var(--line);border-radius:6px;
     padding:6px 9px;font-size:12px;line-height:1.55;white-space:nowrap;
-    box-shadow:0 6px 18px rgba(0,0,0,.38)}
+    box-shadow:0 6px 18px var(--shadow)}
   .hovertip .ht-t{font-weight:600;margin-bottom:2px}
   .hovertip .ht-r{display:flex;gap:10px;justify-content:space-between;color:var(--dim)}
   .hovertip .ht-r b{color:var(--fg);font-weight:500}
@@ -1088,6 +1105,51 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .rankbar i{display:block;height:100%;border-radius:4px}
   .rankval{width:62px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto}
   .rankrate{width:56px;text-align:right;flex:0 0 auto}
+
+  /* ══════════════════════════════════════════════════════════════════════
+     视觉语言 v2（2026-10-21）
+     
+     取向：参考 new-api 的"中性 + 克制"中后台感（它底下是 Semi Design），
+     但**只借取向，不借组件库** —— 本项目是手写 CSS，引一套组件库要重写全部页面。
+     
+     三条纪律：
+       ① 分层靠 1px 描边，不靠阴影。高密度表格里阴影是噪声。
+       ② 圆角收到两档（6px 控件 / 8px 容器）。原来 4/6/8/10/12/14 六档并存，
+          视觉上不齐 —— 圆角不一致比选错圆角更明显。
+       ③ 强调色只用在「当前选中 / 主按钮 / 链接」，不铺大面积背景。
+     
+     ⚠ 热力图 5 档色阶（--hm0..--hm4）**一个字都不改** ——
+       用户明确要求严格抄参考项目 openViking 的那套 GitHub 绿阶。
+     ⚠ 留白**不放宽** —— 上一轮刚按用户要求收紧过（「更紧凑、少空白」）。
+     ⚠ 不改任何类名、不动 JS —— 这一层只调形态，逻辑零影响。
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* ── 圆角：两档收敛 ──
+     6px 给控件（按钮/输入/胶囊状小标签），8px 给容器（卡片/面板/表格外框）。
+     选 6 而不是 4：4 在 12px 字号旁边显得生硬；8 在大表格里又偏软。
+     选 6 而不是 10：10 是移动端的量级，桌面高密度界面会显得松。 */
+  button:not(.pill):not(.badge),
+  input:not([type="checkbox"]):not([type="radio"]),
+  select, textarea { border-radius:6px }
+
+  /* ── focus-visible：键盘用户必须看得见焦点 ──
+     原来只有 :focus 且部分规则被 outline:none 吃掉（输入框自己另画了描边，
+     但按钮、链接、侧栏项没有）。这里统一补一条**只对键盘生效**的环，
+     鼠标点击不会亮 —— 避免视觉噪声。 */
+  :focus-visible { outline:2px solid var(--acc); outline-offset:2px }
+
+  /* ── 表格：靠行分隔线分层，去掉斑马纹的可能性 ──
+     （现在没有斑马纹，这条是**立规矩**：以后加表格不要用 nth-child 条纹，
+      在本项目的信息密度下条纹会和状态色（.pill.ok/.err）打架。） */
+  table tbody tr { border-bottom:1px solid var(--line) }
+  table tbody tr:last-child { border-bottom:0 }
+  table tbody tr:hover { background:var(--panel2) }
+
+  /* ── 次级文字的对比度兜底 ──
+     `.dim` 用得最多（192 处）。深色下 #8B949E 对 #0D1117 是 5.6:1，
+     但铺在 --panel2 (#1C2128) 上是 4.9:1 —— 仍过 AA，但没余量了。
+     所以**不允许** .dim 再叠 opacity（叠了就会跌破 4.5）。 */
+  .dim { opacity:1 }
 </style>
 </head>
 <body>

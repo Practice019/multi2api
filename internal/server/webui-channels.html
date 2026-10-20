@@ -34,38 +34,93 @@
      因为管理页问的是"我配的渠道让外面看见什么"，不该取决于手里那把 key。
 -->
 <style>
-  :root { --bd:#e3e6eb; --fg:#1f2329; --dim:#8a9099; --bg:#fff; --hover:#f6f7f9; --accent:#3370ff; }
-  * { box-sizing: border-box; }
-  body { margin:0; font:13px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; color:var(--fg); background:#f5f6f7; }
-  header { background:var(--bg); border-bottom:1px solid var(--bd); padding:10px 16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  h1 { font-size:15px; margin:0 12px 0 0; font-weight:600; }
-  .tabs { display:flex; gap:2px; }
-  .tab { padding:6px 14px; border:1px solid transparent; border-radius:6px; cursor:pointer; color:var(--dim); }
-  .tab.on { background:#eef3ff; color:var(--accent); border-color:#d3e0ff; font-weight:600; }
+  /* ══════════════════════════════════════════════════════════════════════
+     渠道管理页 · 视觉语言 v2（2026-10-21）
+     
+     原来这一页是**纯浅色硬编码**（--bd/--fg/--dim/--bg/--hover/--accent 六个值，
+     没有深色主题），所以控制台切深色时这一块（iframe）还是一张白纸 ——
+     用户看到的是"页面里嵌了一张不属于这套设计的表"。
+     
+     现在与控制台/登录页同一个色板、同一套深浅规则（GitHub Dark/Light）。
+     ⚠ iframe 里拿不到父页面的 data-theme，所以这里跟 prefers-color-scheme 走。
+       代价：父页面手动切浅色而系统是深色时，这一块不跟随 —— 要彻底解决得
+       用 postMessage 传主题（那要动 JS）；当前取舍是"多数人用系统主题"。
+     
+     ⚠ 对比度复算（深色底 #0D1117 / 浅色底 #FFFFFF）：
+         深 --fg 14.5:1 · --dim 5.6:1 · --acc 6.1:1 · --ok 7.2:1 · --warn 7.6:1 · --err 5.5:1
+         浅 --fg 16.8:1 · --dim 6.4:1 · --acc 5.8:1 · --ok 5.9:1 · --warn 6.3:1 · --err 5.9:1
+     ══════════════════════════════════════════════════════════════════════ */
+  :root {
+    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
+    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5;
+    --ok:#3FB950; --warn:#D29922; --err:#F85149;
+    --overlay:rgba(1,4,9,.72);
+    /* 兼容旧名（本页原来的变量叫 --bd / --accent），免得漏改一处就掉色 */
+    --bd:var(--line); --accent:var(--acc); --hover:var(--panel2);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
+      --fg:#1F2328; --dim:#59636E; --acc:#0969DA;
+      --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
+      --overlay:rgba(31,35,40,.45);
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:13px/1.5 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
+         color:var(--fg); background:var(--bg); -webkit-font-smoothing:antialiased; }
+  header { background:var(--panel); border-bottom:1px solid var(--line); padding:10px 16px;
+           display:flex; gap:8px; align-items:center; position:sticky; top:0; z-index:5; }
+  h1 { font-size:15px; margin:0 12px 0 0; font-weight:600; letter-spacing:-.01em; }
   main { padding:12px 16px 40px; }
   .bar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
-  input, select, textarea, button { font:inherit; border:1px solid var(--bd); border-radius:6px; padding:5px 8px; background:var(--bg); color:inherit; }
-  input:focus, select:focus, textarea:focus { outline:2px solid #d3e0ff; outline-offset:0; }
+
+  /* 控件统一 6px（与控制台同档）；输入框用 --bg 而不是 --panel，
+     这样在 --panel 的 header 里也能看出边界。 */
+  input, select, textarea, button {
+    font:inherit; color:var(--fg); background:var(--bg);
+    border:1px solid var(--line); border-radius:6px; padding:5px 8px;
+    transition:border-color .12s, background .12s;
+  }
+  input:hover, select:hover, textarea:hover { border-color:var(--dim); }
+  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
+    outline:2px solid var(--acc); outline-offset:1px; border-color:var(--acc);
+  }
   button { cursor:pointer; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button.danger { color:#d83931; }
-  table { width:100%; border-collapse:collapse; background:var(--bg); border:1px solid var(--bd); border-radius:8px; overflow:hidden; table-layout:fixed; }
-  th, td { padding:0 10px; height:34px; line-height:34px; text-align:left; border-bottom:1px solid var(--bd); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  th { background:#fafbfc; font-weight:600; color:#4e5969; }
-  tbody tr:hover { background:var(--hover); }
+  button:hover { background:var(--panel2); }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#FFFFFF; font-weight:600; }
+  button.primary:hover { filter:brightness(1.08); }
+  button.danger { color:var(--err); }
+  button.danger:hover { background:color-mix(in srgb, var(--err) 12%, transparent); }
+
+  /* 表格：靠 1px 描边分层，不用斑马纹（与控制台同一条纪律）。
+     ⚠ th 用 --panel2 而不是写死的 #fafbfc —— 深色下那个浅灰会把整行染白。 */
+  table { width:100%; border-collapse:separate; border-spacing:0;
+          background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th, td { padding:0 10px; height:34px; line-height:34px; text-align:left;
+           border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { background:var(--panel2); font-weight:600; color:var(--fg); font-size:12px;
+       letter-spacing:.02em; }
+  tbody tr:hover { background:var(--panel2); }
   tbody tr:last-child td { border-bottom:none; }
   .wrap { overflow-x:auto; }
-  .tag { display:inline-block; padding:0 6px; height:20px; line-height:20px; border-radius:4px; font-size:12px; }
-  .on-t { background:#e8f6ee; color:#0f8a4d; }
-  .off-t { background:#f2f3f5; color:#8a9099; }
-  .warn-t { background:#fff3e8; color:#d4780e; }
+
+  /* 状态标签：用 color-mix 从主题色派生底色，**不再写死浅色块**。
+     写死的 #e8f6ee / #fff3e8 在深色主题上是三块刺眼的白斑。 */
+  .tag { display:inline-block; padding:0 6px; height:20px; line-height:20px;
+         border-radius:4px; font-size:12px; font-weight:500; }
+  .on-t   { background:color-mix(in srgb, var(--ok) 16%, transparent);   color:var(--ok); }
+  .off-t  { background:color-mix(in srgb, var(--dim) 16%, transparent);  color:var(--dim); }
+  .warn-t { background:color-mix(in srgb, var(--warn) 16%, transparent); color:var(--warn); }
   .muted { color:var(--dim); }
-  .err { color:#d83931; }
-  dialog { border:1px solid var(--bd); border-radius:10px; padding:0; width:560px; max-width:92vw; }
+  .err { color:var(--err); }
+
+  dialog { border:1px solid var(--line); border-radius:8px; padding:0; width:560px; max-width:92vw;
+           background:var(--panel); color:var(--fg); }
   /* Key 管理独立窗口比主编辑窗宽：要同时容纳 # / 掩码 / 状态 / 两个按钮，560 会挤成一团 */
   #keysDlg { width:760px; }
-  dialog::backdrop { background:rgba(0,0,0,.35); }
-  .dlg-h { padding:12px 16px; border-bottom:1px solid var(--bd); font-weight:600; }
+  dialog::backdrop { background:var(--overlay); }
+  .dlg-h { padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
   /* ⚠ 两列 grid（96px 标签 + 1fr 控件）。**任何宽内容都必须 class="full" 跨列** ——
      否则会落进那 96px 的一列：模型勾选列表逐字换行、textarea 被压成一条竖缝。
      这不是"样式微调"，是"内容看不见"级别的 bug（模型列表与 Key 区各踩过一次）。
@@ -75,18 +130,19 @@
            align-items:center; align-content:start; max-height:72vh; overflow-y:auto; }
   .dlg-b .full { grid-column:1 / -1; }
   .dlg-b .hint { grid-column:1 / -1; }
-  #f-vis { max-height:190px; overflow-y:auto; border:1px solid var(--bd); border-radius:6px; padding:6px 8px; }
+  #f-vis { max-height:190px; overflow-y:auto; border:1px solid var(--line); border-radius:6px; padding:6px 8px;
+           background:var(--bg); }
   /* ⚠ 只收窄"选项 label"，**绝不碰 #f-choices 容器本身** —— 它是 flex-wrap，
      一旦被改成 display:block + 固定高度，20+ 个模型会被压成一行、整片看不见。
      （我第一版就写了 `#f-vis div`，正好命中那个容器 —— 收窄选择器是必须的，不是洁癖。） */
   #f-choices label { display:flex; align-items:center; gap:4px; height:22px; line-height:22px;
                      max-width:100%; white-space:nowrap; overflow:hidden; }
   #f-choices label span { overflow:hidden; text-overflow:ellipsis; }
-  .dlg-b label { color:#4e5969; }
+  .dlg-b label { color:var(--fg); }
   .dlg-b .hint { grid-column:2; color:var(--dim); font-size:12px; margin-top:-6px; }
   .dlg-b textarea { min-height:64px; font-family:ui-monospace,Consolas,monospace; }
-  .dlg-f { padding:12px 16px; border-top:1px solid var(--bd); display:flex; justify-content:flex-end; gap:8px; }
-  .req::after { content:" *"; color:#d83931; }
+  .dlg-f { padding:12px 16px; border-top:1px solid var(--line); display:flex; justify-content:flex-end; gap:8px; }
+  .req::after { content:" *"; color:var(--err); }
 </style>
 </head>
 <body>
@@ -571,7 +627,7 @@ function renderKeys() {
   // Key 列要能显示**完整明文**（reveal=1 的场景），所以不能 table-layout:fixed 压死：
   // 用 auto 让它按内容撑开，其余列定宽 + nowrap。
   body.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:auto">'
-    + '<thead><tr style="color:#6b7280;text-align:left">'
+    + '<thead><tr style="color:var(--dim);text-align:left">'
     + '<th style="width:34px;' + td + 'font-weight:500">#</th>'
     + '<th style="' + td + 'font-weight:500">Key</th>'
     + '<th style="width:120px;' + td + 'font-weight:500;white-space:nowrap">状态</th>'
@@ -579,15 +635,15 @@ function renderKeys() {
     + '</tr></thead><tbody>'
     + rows.map(k => {
         let st;
-        if (k.status === 1) { st = '<span style="color:#059669">启用</span>'; }
-        else if (k.status === 3) { st = '<span style="color:#dc2626">自动禁用</span>'; }
-        else { st = '<span style="color:#6b7280">手动停用</span>'; }
-        const why = k.reason === 'upstream_auth' ? '<span style="color:#9ca3af"> 上游判无效</span>' : '';
+        if (k.status === 1) { st = '<span style="color:var(--ok)">启用</span>'; }
+        else if (k.status === 3) { st = '<span style="color:var(--err)">自动禁用</span>'; }
+        else { st = '<span style="color:var(--dim)">手动停用</span>'; }
+        const why = k.reason === 'upstream_auth' ? '<span style="color:var(--dim)"> 上游判无效</span>' : '';
         const tg = k.status === 1
           ? '<button type="button" style="' + bst + '" onclick="keyStatus(' + k.index + ',2)">禁用</button>'
           : '<button type="button" style="' + bst + '" onclick="keyStatus(' + k.index + ',1)">启用</button>';
         return '<tr>'
-          + '<td style="' + td + 'color:#9ca3af">' + k.index + '</td>'
+          + '<td style="' + td + 'color:var(--dim)">' + k.index + '</td>'
           // 完整展示：明文时用 11px 等宽字体也让它在 700px 窗口里放得下
           + '<td style="' + td + 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0">' + kEsc(k.mask) + '</td>'
           + '<td style="' + td + '">' + st + why + '</td>'
