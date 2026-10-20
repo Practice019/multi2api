@@ -1212,11 +1212,45 @@ func main() {
 	}
 
 	// 渠道表（中转站方向，对标 new-api 的 channel 表 + ability 索引）。
-	// 同样是 data/ 下、CWD 相对、不进配置；损坏必须显式暴露 ——
-	// 静默重建等于把用户手工配的渠道和 key 全部清空。
-	channelsStore, err := channelstore.New(filepath.Join("data", "channels.json"))
+	//
+	// ⚠ 2026-10-20 改：存储位置从 `data/channels.json` 迁到 **`<凭据根>/channels.json`**
+	// （凭据根 = AuthsBase → AuthDir → "auths"，与 credentialDirFor 同一条回落链）。
+	//
+	// # 为什么搬（用户原话）
+	//
+	//	「Auths 下面存储所有凭据、账号凭据以及 API key 的配置。那么我将另一个电脑
+	//	 里面没有凭据的，只要把这个文件夹复制过去，就可以加载所有账号，像这样正常使用了。」
+	//
+	// ⇒ 目标是把 `auths/` 变成**可整体搬走的凭据包**：复制这一个文件夹到新机器，
+	//   账号凭证 + 渠道 API key + 渠道定义都在里面，起来就能用。
+	//
+	// 原来 key 在 `data/channels.json`、账号在 `auths/<provider>/`，两处分开 ——
+	// 只搬 auths 过去会得到「有账号但没渠道」，发请求时不知道该往哪个 base_url 发。
+	//
+	// ⚠ 为什么整个 snapshot 一起搬、而不是只抽 keys：
+	//   `Channel.BaseURL` / `Models` / `ModelMap` / `Group` / `Priority` / `Weight`
+	//   与 keys 是**同一条路由决策**的两半 —— 光有 key 没有 base_url，那个 key 是废的。
+	//   而 `Abilities`（(group, model, channel_id) 复合主键）是从 Channels 派生的索引，
+	//   必须与 Channels **原子地**存在同一个文件里，拆开就有不一致窗口。
+	//
+	// 损坏必须显式暴露 —— 静默重建等于把用户手工配的渠道和 key 全部清空。
+	authsRoot := strings.TrimSpace(cfg.AuthsBase)
+	if authsRoot == "" {
+		authsRoot = strings.TrimSpace(cfg.AuthDir)
+	}
+	if authsRoot == "" {
+		authsRoot = "auths"
+	}
+	channelsPath := filepath.Join(authsRoot, "channels.json")
+	// 一次性迁移：新位置还没有、旧位置（data/channels.json）有 ⇒ 复制过去。
+	// ⚠ 只复制不删除旧文件：保留回滚路径，且旧版本 exe 回退时仍能读到自己的数据。
+	// ⚠ 幂等：只在目标不存在时动手，重复启动不会覆盖新位置后来的修改。
+	if err := migrateFileIfAbsent(filepath.Join("data", "channels.json"), channelsPath); err != nil {
+		log.Printf("[channels] ⚠ 迁移旧渠道文件失败（%v）—— 继续用新位置启动；若新位置也是空的，渠道列表会是空的", err)
+	}
+	channelsStore, err := channelstore.New(channelsPath)
 	if err != nil {
-		log.Fatalf("load channels: %v", err)
+		log.Fatalf("load channels (%s): %v", channelsPath, err)
 	}
 
 	// 控制台账号体系（抄 new-api 的登录系统）：账号库 + 会话库 + 登录端点。
