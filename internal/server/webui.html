@@ -12637,11 +12637,9 @@ let multCatalogFailed = false;
     : numT((usage.completion_tokens_details || {}).reasoning_tokens);
   // 总处理量 = 输入 + 输出（缓存写入不重复计入）—— 与指标卡「总处理量」同一口径
   const totalTok = promptTok + outTok;
-    const p = usage.prompt_tokens, c = usage.completion_tokens;
-    const np = Number(p), nc = Number(c);
-    const total = (Number.isFinite(np) && np > 0 ? np : 0) + (Number.isFinite(nc) && nc > 0 ? nc : 0);
-    const pt = Number.isFinite(np) ? np : '-';
-    const ct = Number.isFinite(nc) ? nc : '-';
+    // ⚠ 上一版的 p / np / total / pt / ct 五个变量已随改写失效，在此清掉。
+    //   留着不报错（JS 允许未使用变量、门禁只查语法），但它们是噪音 ——
+    //   下一个人读到 `total` 会以为它还在参与计算，实际早已无人引用。
     // ⚠ 原这里是 `tokPerSec(ct, totalMs, e && e.ttfb_ms, e && e.mode)` —— `e` 在本函数里
   //   **根本不存在**（是别处的作用域变量），调用即 ReferenceError。
   //   对话测试这条链路没有 ttfb 上报，所以第 3 参传 0（速度会略偏低，但比抛异常好）；
