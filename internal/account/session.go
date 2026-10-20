@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -193,6 +194,21 @@ func NewSessionStore(path string) (*SessionStore, error) {
 }
 
 // saveLocked 原子写盘。调用方必须持锁。
+// saveOrLog 落盘并记录失败（2026-10-20，review 抓到）。
+//
+// ⚠ 这里最严重的一处是 Revoke：内存里删了 session、磁盘没写
+// ⇒ 进程重启后从磁盘恢复 ⇒ **刚被注销的 session 复活了**。
+// 用户看到"已退出登录"，实际上那个 token 还能用 —— 这是安全问题，不是可用性问题。
+//
+// ⚠ Revoke / RevokeOthers / Cleanup 的签名返回 bool/int/void，改签名会连带改所有
+// 上游调用点；所以这里**至少留下明确的错误日志**，让"落盘失败"可查。
+// 之前的形态是：磁盘满了半个月，用户注销了一次次失效，日志里一个字都没有。
+func (s *SessionStore) saveOrLog(scene string) {
+	if err := s.saveLocked(); err != nil {
+		log.Printf("[account] ⚠ session 落盘失败（%s）: %v —— 内存已生效但磁盘未写入。"+
+			"若这是 Revoke，重启后该 session 会复活，务必排查磁盘/权限", scene, err)
+	}
+}
 func (s *SessionStore) saveLocked() error {
 	arr := make([]*Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
@@ -327,7 +343,7 @@ func (s *SessionStore) Lookup(sid string, accounts *Store) (*Session, *User, err
 	}
 	if sess.ExpiresAt <= now || (sess.HardExpiresAt > 0 && sess.HardExpiresAt <= now) {
 		delete(s.sessions, sid)
-		_ = s.saveLocked()
+		s.saveOrLog("Lookup-expired")
 		s.mu.Unlock()
 		return nil, nil, ErrSessionExpired
 	}
@@ -340,7 +356,7 @@ func (s *SessionStore) Lookup(sid string, accounts *Store) (*Session, *User, err
 	sess.ExpiresAt = next
 	sess.LastActiveAt = now
 	if needSave {
-		_ = s.saveLocked()
+		s.saveOrLog("Lookup")
 	}
 	snapshot := copySession(sess)
 	s.mu.Unlock()
@@ -393,7 +409,7 @@ func (s *SessionStore) AdvanceAuthVersion(sid string, nextAuthVersion int64) (*S
 	now := time.Now().Unix()
 	if sess.ExpiresAt <= now || (sess.HardExpiresAt > 0 && sess.HardExpiresAt <= now) {
 		delete(s.sessions, sid)
-		_ = s.saveLocked()
+		s.saveOrLog("AdvanceAuthVersion")
 		return nil, ErrSessionExpired
 	}
 	if nextAuthVersion < sess.AuthVersion {
@@ -420,7 +436,7 @@ func (s *SessionStore) Revoke(sid string) bool {
 		return false
 	}
 	delete(s.sessions, sid)
-	_ = s.saveLocked()
+	s.saveOrLog("Revoke")
 	return true
 }
 
@@ -436,7 +452,7 @@ func (s *SessionStore) RevokeOthers(userID, keepSID string) int {
 		}
 	}
 	if n > 0 {
-		_ = s.saveLocked()
+		s.saveOrLog("RevokeOthers")
 	}
 	return n
 }
@@ -475,7 +491,7 @@ func (s *SessionStore) Cleanup() int {
 		}
 	}
 	if n > 0 {
-		_ = s.saveLocked()
+		s.saveOrLog("Cleanup")
 	}
 	return n
 }
