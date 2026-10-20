@@ -128,6 +128,14 @@ const $ = id => els[id] || (els[id] = mkEl(id));
 let modelMultipliers = {};
 let models = [];
 
+// KEY：源码里是模块级的 let KEY = ''（「对话密钥」），renderModels 的空态提示
+// 按"有没有粘密钥"给不同的话。桩成空串 —— 本夹具只测目录渲染，不测那段文案分支。
+//
+// ⚠ 这就是生成器文件头写的那条纪律的实例：清单/桩必须覆盖被抽取函数体里的**每个自由
+//   标识符**。KEY 是漏网的一条 —— 它在 HEAD 上就缺，只是"渲染到空态分支"才炸，
+//   所以在有空数据之前一直没被触发（实测：本次跑第 [7] 节时 ReferenceError）。
+let KEY = '';
+
 // LS_MODELGROUP / LS_MODELPROVIDER 从源码取，不硬编码 —— 抄常量等于没测它。
 const lsKeyMatch = /const\s+LS_MODELGROUP\s*=\s*'([^']+)'/.exec(html);
 if (!lsKeyMatch) throw new Error('源码里找不到 LS_MODELGROUP —— 抽取失败，测试装置失效');
