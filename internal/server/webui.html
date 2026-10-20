@@ -9845,7 +9845,49 @@ let loginProvider = '';
   // # 为什么按绝对名次而不是百分比
   //   环图回答"占比"，这里回答"谁在扛量、它健康吗"。排障时后者才是要的 ——
   //   一个占 3% 但成功率 40% 的模型，看占比根本发现不了它坏了。
-  function renderModelRank(s) {
+  // hideRemovedBlocks 隐藏用户要求删掉的三块（2026-10-20）。
+//
+// # 用户要求
+//   勾选删除：次数排行 / 上游+模型环图 / 缓存命中率四窗
+//   另附 custom：「保留近 24 小时缓存命中率趋势折线图」
+//
+// # ⚠ 为什么用 display:none 而不是删 HTML
+//   环图那块的闭合是三个连续 </div>（panel → duo → 外层），删错一个就会毁掉
+//   整个「调用统计」boardsec 的嵌套；而次数排行的 h3 与 #modelRank 是**兄弟**，
+//   单独删 #modelRank 会留下一个孤零零的标题。
+//   display:none 的代价是多几个死节点，收益是结构不动（不可能破坏嵌套）、
+//   JS 的 $('modelRank') 等调用照旧命中、想恢复只要删掉这里的 id（一行回退）。
+//
+// ⚠ 必须幂等：它在每次 refresh 后都可能被调。
+function hideRemovedBlocks() {
+  if (window.__dashHid) return;
+  const hide = (el) => { if (el) el.style.display = 'none'; };
+  const byId = (id) => document.getElementById(id);
+
+  // ① 次数排行：容器 + 它前面那个 h3（兄弟关系）
+  const rank = byId('modelRank');
+  if (rank) {
+    hide(rank);
+    const title = rank.closest('.body') ? rank.closest('.body').previousElementSibling : null;
+    if (title && title.tagName === 'H3') hide(title);
+  }
+
+  // ② 上游用量 + 模型用量环图（同在一个 .duo 里，整块隐藏）
+  hide(byId('statsReport'));
+
+  // ③ 缓存命中率四窗：容器 + 所在 boardsec 的 h3
+  //    ⚠ 24 小时趋势在**另一个** boardsec 里，不受影响（用户明确要保留）
+  const cc = byId('cacheCards');
+  if (cc) {
+    hide(cc);
+    const sec = cc.closest('.boardsec');
+    if (sec) hide(sec.querySelector('h3'));
+  }
+
+  window.__dashHid = true;
+}
+
+function renderModelRank(s) {
     const host = $('modelRank');
     if (!host) { return; }
     if (!s) { host.innerHTML = ''; return; }
@@ -12506,6 +12548,7 @@ let multCatalogFailed = false;
         try { fillDonuts(d); } catch (e) { console.error('fillDonuts 失败:', e && e.message); }
         try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
         try { fillCacheRates(d); } catch (e) { console.error('fillCacheRates 失败:', e && e.message); }
+    try { hideRemovedBlocks(); } catch (e) { console.error('hideRemovedBlocks 失败:', e && e.message); }
         // ⚠ 最后无条件回填那两格 —— 它俩的值不在 `d` 里（来自 series），
         //   而上面的 renderStats 刚重建过卡片把它们清空了（见 dayCardVals 的注释）。
         try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
