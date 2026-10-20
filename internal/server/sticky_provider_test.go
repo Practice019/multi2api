@@ -128,7 +128,7 @@ func TestStickyCrossProviderNotReused(t *testing.T) {
 	}
 
 	// 4) 绑定应收敛到 workbuddy 的号（跨上游的旧绑定被解绑 + 跟随成功号重绑）。
-	if uid, ok := h.cfg.Session.Resolve("conv-1"); !ok || uid != "wb-1" {
+	if uid, ok := h.cfg.Session.Resolve("conv-1", ""); !ok || uid != "wb-1" {
 		t.Errorf("粘性绑定应收敛到 wb-1，得到 %q ok=%v —— 跨上游的旧绑定没被替换", uid, ok)
 	}
 }
@@ -216,7 +216,7 @@ func TestStickySameProviderStillReused(t *testing.T) {
 	}
 
 	// 绑定保持不变（成功号 == 粘性号，不该被改写）。
-	if uid, ok := h.cfg.Session.Resolve("conv-3"); !ok || uid != "ca-2" {
+	if uid, ok := h.cfg.Session.Resolve("conv-3", ""); !ok || uid != "ca-2" {
 		t.Errorf("绑定应保持 ca-2，得到 %q ok=%v", uid, ok)
 	}
 }

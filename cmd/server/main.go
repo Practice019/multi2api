@@ -114,6 +114,10 @@ func main() {
 			GCInterval: cfg.SessionGCInterval,
 			Store:      store,
 			Available:  p.AvailableUIDs,
+			// ⚠ 2026-10-20：粘性必须按 request 的上游分配，不能只给默认上游的号。
+			// AvailableUIDs() 等价于 AvailableUIDsFor(DefaultProvider) —— 那样 loomy 的会话
+			// 会被绑到 workbuddy 的号上，PickByUIDFor 返回 nil，每轮解绑重分配，粘性永不生效。
+			AvailableFor: p.AvailableUIDsFor,
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()

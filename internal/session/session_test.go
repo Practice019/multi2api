@@ -53,8 +53,8 @@ func routerWith(store redisstore.Store, avail []string, ttl time.Duration) *Rout
 
 func TestSameKeySameAccount(t *testing.T) {
 	r := routerWith(newCountingStore(), []string{"a1", "a2"}, time.Minute)
-	u1, ok1 := r.Resolve("c1")
-	u2, ok2 := r.Resolve("c1")
+	u1, ok1 := r.Resolve("c1", "")
+	u2, ok2 := r.Resolve("c1", "")
 	if !ok1 || !ok2 || u1 != u2 {
 		t.Fatalf("same key should map to same account: %s vs %s", u1, u2)
 	}
@@ -66,9 +66,9 @@ func TestSameKeySameAccount(t *testing.T) {
 func TestTTLExpiryReassigns(t *testing.T) {
 	st := newCountingStore()
 	r := routerWith(st, []string{"a1", "a2"}, 10*time.Millisecond)
-	u1, _ := r.Resolve("c1")
+	u1, _ := r.Resolve("c1", "")
 	time.Sleep(20 * time.Millisecond)
-	u2, ok := r.Resolve("c1")
+	u2, ok := r.Resolve("c1", "")
 	if !ok {
 		t.Fatal("resolve after expiry should still succeed")
 	}
@@ -82,13 +82,13 @@ func TestTTLExpiryReassigns(t *testing.T) {
 
 func TestBoundAccountCooldownReassigns(t *testing.T) {
 	r := routerWith(newCountingStore(), []string{"a1"}, time.Minute)
-	u1, _ := r.Resolve("c1")
+	u1, _ := r.Resolve("c1", "")
 	if u1 != "a1" {
 		t.Fatalf("initial bind=%s want a1", u1)
 	}
 	// a1 冷却 → 可用列表只剩 a2 → 重新分配必须换到 a2。
 	r.cfg.Available = func() []string { return []string{"a2"} }
-	u2, ok := r.Resolve("c1")
+	u2, ok := r.Resolve("c1", "")
 	if !ok {
 		t.Fatal("resolve should succeed with fallback account")
 	}
@@ -137,7 +137,7 @@ func TestConcurrentSameKeyAssignsOnce(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			u, ok := r.Resolve("same-key")
+			u, ok := r.Resolve("same-key", "")
 			if ok {
 				uids[idx] = u
 			}
@@ -239,8 +239,8 @@ func TestBindThenUnbindLifecycle(t *testing.T) {
 func TestRedisMirrorSetBindCount(t *testing.T) {
 	st := newCountingStore()
 	r := routerWith(st, []string{"a1", "a2"}, time.Minute)
-	r.Resolve("c1")
-	r.Resolve("c1") // 快路径 touch → 又镜像一次
+	r.Resolve("c1", "")
+	r.Resolve("c1", "") // 快路径 touch → 又镜像一次
 	if st.setBinds < 1 {
 		t.Errorf("SetBind mirror count=%d want >=1", st.setBinds)
 	}
@@ -253,8 +253,8 @@ func TestRedisMirrorSetBindCount(t *testing.T) {
 func TestGCCleansExpired(t *testing.T) {
 	st := newCountingStore()
 	r := routerWith(st, []string{"a1"}, 10*time.Millisecond)
-	r.Resolve("c1")
-	r.Resolve("c2")
+	r.Resolve("c1", "")
+	r.Resolve("c2", "")
 	time.Sleep(20 * time.Millisecond)
 	removed := r.gcOnce(time.Now())
 	if removed != 2 {
@@ -274,7 +274,7 @@ func TestLoadFromStoreRestores(t *testing.T) {
 	if r.Count() != 2 {
 		t.Fatalf("restored count=%d want 2", r.Count())
 	}
-	u, ok := r.Resolve("c1")
+	u, ok := r.Resolve("c1", "")
 	if !ok || u != "a1" {
 		t.Errorf("restored c1 -> %s want a1", u)
 	}
