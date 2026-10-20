@@ -21,7 +21,15 @@ import (
 )
 
 func TestSeriesByModelAggregation(t *testing.T) {
-	now := time.Now()
+	// ⚠ 基准必须钉在**整点后 30 分钟**，不能直接用 time.Now()。
+	//
+	//   夹具里有 -10 ~ -6 分钟的偏移；若测试恰好在整点前 10 分钟内运行
+	//   （比如 09:05:00），这些时刻会跨过 09:00 落进**不同的小时桶**，
+	//   于是"同一桶合计 427"变成"分两桶各算一部分" —— 实测踩到过：
+	//   同一份测试第一次 ok=39、第二次 350≠427，代码一行没改。
+	//
+	//   钉在 HH:30 后，±10 分钟必然仍在同一个 HH 桶内，与真实时钟无关。
+	now := time.Now().Truncate(time.Hour).Add(30 * time.Minute)
 	items := []logbuf.Entry{
 		{At: now.Add(-10 * time.Minute), Model: "m-a", Provider: "p", Status: 200, Tokens: 100},
 		{At: now.Add(-9 * time.Minute), Model: "m-a", Provider: "p", Status: 200, Tokens: 200},
