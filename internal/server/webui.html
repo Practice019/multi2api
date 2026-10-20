@@ -10102,11 +10102,16 @@ let loginProvider = '';
   // ⚠ `by_provider_detail` / `by_model_detail` 的每个值形如 `{req,ok,fail,tokens,…}`。
   function fillDonuts(s) {
     const rows = (det) => Object.entries(det || {}).map(([k, v]) => {
-      const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.out_tokens || 0) : 0;
       return [k, tk];
     }).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
-    renderDonutInto($('statsDonut'), $('statsDonutLegend'), rows(s && s.by_provider_detail), 'Token');
-    renderDonutInto($('statsModelDonut'), $('statsModelLegend'), rows(s && s.by_model_detail), 'Token');
+    renderDonutInto($('statsDonut'), $('statsDonutLegend'), rows(s && s.by_provider_detail), '输出 Token');
+    renderDonutInto($('statsModelDonut'), $('statsModelLegend'), rows(s && s.by_model_detail), '输出 Token');
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -10313,7 +10318,12 @@ let loginProvider = '';
     if (!el) return;
     let bestK = null, bestV = -1;
     for (const [k, v] of Object.entries((s && s.by_model_detail) || {})) {
-      const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.out_tokens || 0) : 0;
       if (tk > bestV) { bestV = tk; bestK = k; }
     }
     if (bestK) {
