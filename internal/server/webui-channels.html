@@ -25,12 +25,12 @@
     POST   /admin/channels/delete            删除
     POST   /admin/channels/status            停用/启用
     POST   /admin/channels/reveal            显式取明文 key
-    GET    /admin/channels/public-models     对外模型（R1 的对外视角）
+   （2026-10-21：「对外模型」页签与 /admin/channels/public-models 已按用户要求删除 ——
+     它回答的问题现在由 API Key 的模型白名单 + 对外名映射回答，两处重复且后者才是对外真相）
 
   # 两条与需求直接对应的取舍
   ① 新增渠道的表单里**只有** Base URL + API Key 是必填 —— R3 的原话就是"只填这两个"。
      模型、映射、优先级都是"可以之后再补"的可选项，不让它们挡住第一步。
-  ② 「对外模型」页签显示的是**免 key 视角**（后端 /public-models 不叠令牌白名单），
      因为管理页问的是"我配的渠道让外面看见什么"，不该取决于手里那把 key。
 -->
 <style>
@@ -92,10 +92,6 @@
 <body>
 <header>
   <h1>渠道管理</h1>
-  <div class="tabs">
-    <div class="tab on" id="tab-ch">渠道</div>
-    <div class="tab" id="tab-pub">对外模型</div>
-  </div>
   <span style="flex:1"></span>
   <button onclick="load()">刷新</button>
 </header>
@@ -123,19 +119,6 @@
     </p>
   </section>
 
-  <!-- 对外模型页签 -->
-  <section id="pane-pub" style="display:none">
-    <div class="bar"><span class="muted" id="pubstat"></span></div>
-    <div class="wrap"><table>
-      <colgroup><col style="width:260px"><col style="width:260px"><col></colgroup>
-      <thead><tr><th>对外名字（客户端写这个）</th><th>上游真实名</th><th>提供它的渠道（按优先级）</th></tr></thead>
-      <tbody id="prows"></tbody>
-    </table></div>
-    <p class="muted" style="margin-top:8px">
-      这一页是**免 key 视角**：它回答"我配的渠道现在让外面看见什么"。某个模型看不见的原因通常在这里就能定位 ——
-      渠道没声明它、渠道停用了、或者它其实以另一个（映射后的）名字对外。
-    </p>
-  </section>
 </main>
 
 <!-- 表单：R3 的字面要求 —— 只填 Base URL + API Key 就能建 -->
@@ -430,23 +413,6 @@ async function load() {
   }
 }
 
-// ---- 对外模型页签 ----
-async function loadPublic() {
-  const tbody = document.getElementById('prows');
-  tbody.innerHTML = '<tr><td colspan="3" class="muted">加载中…</td></tr>';
-  try {
-    const d = await api('/admin/channels/public-models');
-    document.getElementById('pubstat').textContent =
-      '对外 ' + d.public_count + ' 条 · 能力索引 ' + d.ability_count + ' 条 · 渠道 ' + d.enabled_channels + '/' + d.total_channels + ' 启用';
-    const ms = d.models || [];
-    tbody.innerHTML = ms.length ? ms.map(m =>
-      '<tr><td>' + esc(m.public) + '</td><td class="muted">' + esc(m.upstream) + '</td><td>' + esc((m.channels || []).join(' → ')) + '</td></tr>'
-    ).join('') : '<tr><td colspan="3" class="muted">对外没有任何模型 —— 先建渠道并启用，或检查它的模型列表</td></tr>';
-  } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="3" class="err">' + esc(e.message) + '</td></tr>';
-  }
-}
-
 // ---- 表单 ----
 function parseMap(text) {
   const out = {};
@@ -661,16 +627,12 @@ async function addKeys() {
   } catch (e) { err.textContent = e.message; }
 }
 
-// ---- 页签切换 + 首屏 ----
-document.getElementById('tab-ch').onclick = () => { tab(true); };
-document.getElementById('tab-pub').onclick = () => { tab(false); };
-function tab(isCh) {
-  document.getElementById('tab-ch').classList.toggle('on', isCh);
-  document.getElementById('tab-pub').classList.toggle('on', !isCh);
-  document.getElementById('pane-ch').style.display = isCh ? '' : 'none';
-  document.getElementById('pane-pub').style.display = isCh ? 'none' : '';
-  if (isCh) load(); else loadPublic();
-}
+// ⚠ 2026-10-21：页签切换与「对外模型」页已删除（用户要求）。
+//   原来这里是 `tab(true)` / `tab(false)` 两个页签 —— 删页签后若留下
+//   `document.getElementById('tab-ch').onclick = ...`，那行会因元素不存在抛
+//   TypeError ⇒ **整个 script 停摆** ⇒ 渠道列表一条都不加载。
+//   所以不是"把 tab 藏起来"，而是把切换逻辑整段去掉。
+//   页面现在直接就是渠道列表（原来 tab-ch 的默认视图）。
 load();
 </script>
 </body>
