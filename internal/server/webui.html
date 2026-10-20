@@ -9483,13 +9483,33 @@ let loginProvider = '';
   // ⚠ 非流式不显示：一次性返回没有"生成速度"概念（new-api 也是仅 isStream 才给）。
   // ⚠ 生成阶段 <= 0（首字几乎等于整轮耗时）也返回 —：那时速度无从计算，
   //   显示一个 0.0 会让人以为"极慢"，而真相是"全在等首字"。
+  // ⚠ 2026-10-20 第三次校正：**显示精牌照 DSH 官方双分支规则**。
+  //
+  //   出处（本地源码，可复核）：
+  //     D:\project_GIT\test\deepseek-harness-codearts\plugin-src\client\tokens-per-second.js
+  //   它自己引用的是 @deepseek-ai/dsh-client-ui-chat 的 lib/client.js：
+  //
+  //     function formatTokensPerSecond(tps) {
+  //       const clamped = Math.max(0, tps);
+  //       return clamped >= 10 ? String(Math.round(clamped))
+  //                            : String(Math.round(clamped * 10) / 10);
+  //     }
+  //
+  //   ⇒ **≥10 取整、<10 保留一位小数**（两套精度，不是统一 toFixed）。
+  //   官方意图是「大数不需要小数位，小数才需要」。
+  //   ⚠ 别改成统一 toFixed(1)：那会让 177 tok/s 显示成 177.1，与客户端对不上。
+  function fmtTps(v) {
+    const c = Math.max(0, v);
+    return c >= 10 ? String(Math.round(c)) : String(Math.round(c * 10) / 10);
+  }
+
   function tokPerSec(outTokens, totalMs, ttfbMs, mode) {
     if (mode && mode !== 'stream') return '-';
     if (!outTokens || outTokens <= 0) return '-';
     if (!totalMs || totalMs <= 0) return '0.0';
-    const genMs = totalMs - (ttfbMs > 0 ? ttfbMs : 0); // 纯生成阶段
+    const genMs = totalMs - (ttfbMs > 0 ? ttfbMs : 0); // 纯生成阶段 = DSH 的 decodeMs
     if (genMs <= 0) return '-';
-    return (outTokens / (genMs / 1000)).toFixed(1);
+    return fmtTps(outTokens / (genMs / 1000));
   }
 
   // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
