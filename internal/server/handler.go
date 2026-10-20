@@ -794,6 +794,10 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	//   第二次「可用模型 674 个里没有我那条渠道」⇒ 问题在"渠道没进来"。
 	// 两次都不是"要不要渠道"，而是**并集**：上游的照旧，渠道的也进来。
 	data = h.appendChannelModels(r, data)
+	// ⚠ 2026-10-21：必须在 append **之后**再改一次名 —— append 进来的渠道模型
+	//   用的是渠道声明的内部名，绕过了 filterModelsForRequest 那一遍映射。
+	//   见 applyPublicNames 的注释（有实测日志证据）。
+	data = h.applyPublicNames(r, data)
 	// ⚠⚠ 给每条**补上档位声明**（2026-10-18 加，用户要求："我们的项目也需要可以支持选择思考深度"）。
 	//
 	// 动机：我们**一直有** `reasoning_effort` 的透传与降级（internal/cline/payload.go 的

@@ -256,6 +256,22 @@ func firstModelMap(m ...map[string]string) map[string]string {
 	return normalizeModelMap(m[0])
 }
 
+// cloneStringMap 复制一份 map（nil → nil）。
+//
+// ⚠ View 是**对外形态**，必须与 store 内部数据彻底隔离 —— 调用方拿到
+// 内部 map 后随手改一个键，就污染了权威数据，而它下一次 saveLocked 就落盘了。
+// Models 那里用 `append([]string(nil), ...)`，这里用同样的语义。
+func cloneStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 // normalizeModelMap 规整映射表：去空白、丢掉"键或值为空"的项、键值相同则省略。
 //
 // ⚠ 键值相同要**删掉**而不是保留：`{"deepseek-v4-pro": "deepseek-v4-pro"}`
@@ -380,6 +396,19 @@ func (s *Store) List() []View {
 			// 会让每个成员都看到空表（"我的 key 不见了"），而接口仍回 200。
 			OwnerID: k.OwnerID,
 			Models:  append([]string(nil), k.Models...),
+			// ⚠ 2026-10-21 修：原来这里**没有** ModelMap —— List 构造 View 时漏了它，
+			//   View.ModelMap 恒为 nil，于是前端拿到 `k.model_map === undefined`，
+			//   编辑弹窗回填成 0 行。
+			//
+			//   用户报的现象正是：「设置了之后在编辑打开没有了 不会持久化？？」
+			//   —— 数据其实好好地存在盘上（apikeys.json 里 model_map 就在），
+			//   只是 List 这一个字段忘了带出来。这是"存了但读不出来"，
+			//   最容易被误判成"没保存"。
+			//
+			//   同一个坑本文件已经踩过一次：OwnerID 那里就写着
+			//   「漏掉这一行会让每个成员都看到空表」。字段多了就会漏 ——
+			//   所以新加字段时**必须同时改 Key、View、List、saveLocked 四处**。
+			ModelMap: cloneStringMap(k.ModelMap),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })

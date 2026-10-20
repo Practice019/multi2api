@@ -168,6 +168,61 @@ func (h *Handler) filterModelsForRequest(r *http.Request, list []map[string]any)
 	return out
 }
 
+// applyPublicNames 把列表里**仍是内部名**的条目的 id 换成对外名。
+//
+// # 为什么需要第二遍（2026-10-21 修，用户报「设置了对外名称 csg 还是原来的名字」）
+//
+// `/v1/models` 的组装顺序是：
+//
+//	h.filterModelsForRequest(r, h.modelList())   ← 上游目录，这里已经改过名
+//	data = h.appendChannelModels(r, data)        ← ⚠ 追加渠道声明的**原模型名**
+//
+// 而渠道声明的名字（如 `csg/deepseek-v4.1-flash-1017`）**不在上游目录里**
+// （csg 是渠道，不是 gateway 的 provider），所以它绕过了第一遍的改名，
+// 以内部名直接出现在列表里。
+//
+// 实测证据（临时日志）：
+//
+//	（只有这一条 —— csg 那条压根没进过滤循环）
+//
+// ⇒ 所以改名要做两遍，或者干脆把它抽出来在**最后**做一次。
+//
+//	选后者：先由前两步决定"列表里有哪些模型"，最后统一改名。
+//
+// ⚠ 幂等：对已经是对外名的条目，publicNameFor 找不到匹配会原样返回。
+//
+//	（`001/DeepSeek-V4.1-Flash` 的裸名与 `loomy/DeepSeek-V4.1-Flash` 相同，
+//	 所以可能"再命中一次"得到同一个值 —— 那也是幂等的。）
+//
+// ⚠ 没有映射表时直接返回原切片，不复制：这条路径每个客户端都会走。
+func (h *Handler) applyPublicNames(r *http.Request, list []map[string]any) []map[string]any {
+	modelMap := h.modelMapForRequest(r)
+	if len(modelMap) == 0 {
+		return list
+	}
+	seen := make(map[string]bool, len(list))
+	out := make([]map[string]any, 0, len(list))
+	for _, m := range list {
+		id, _ := m["id"].(string)
+		pub := publicNameFor(modelMap, id)
+		if pub == "" || seen[pub] {
+			continue
+		}
+		seen[pub] = true
+		if pub == id {
+			out = append(out, m)
+			continue
+		}
+		cp := make(map[string]any, len(m))
+		for k, v := range m {
+			cp[k] = v
+		}
+		cp["id"] = pub
+		out = append(out, cp)
+	}
+	return out
+}
+
 // joinLimited 用中文顿号连接，超过 n 个就加"…（共 N 个）"。
 //
 // 为什么限个数：白名单可能有几十项，整串塞进错误体后前端弹窗会变成一堵墙，
