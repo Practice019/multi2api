@@ -12661,7 +12661,11 @@ let multCatalogFailed = false;
   if (cachedTok > 0) lines.push('⚡ 缓存命中 ' + cachedTok);
   if (reasoningTok > 0) lines.push('🧠 推理 ' + reasoningTok + '（已包含在输出中）');
   lines.push('输出速度 ' + tps + ' tok/s');
-  return ' · ' + lines.join(' · ');
+  // ⚠ 每条独占一行（`\n` 而非 ` · ` 连接）。
+  //   这里的结果是塞进 out.textContent（纯文本输出区），`\n` 一定生效；
+  //   而用 ` · ` 连成一行时，真实数据那条有 94 个字符 —— 在窄容器里会拖成一长条，
+  //   用户得横向扫读才能对上"哪个数是哪个"。DSH 的 token-ledger-panel 也是分行的。
+  return '\n' + lines.join('\n');
   }
 
   async function send() {
