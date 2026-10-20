@@ -2159,6 +2159,48 @@ section > h2{letter-spacing:.08em}
 header h1{letter-spacing:0}
 /* 跑马灯 13px：等宽更稳（字母间距由字族本身保证，不靠 letter-spacing 硬凑） */
 .maxmarq{font-family:var(--font-mono);font-weight:700;letter-spacing:.14em}
+/* ── 16. 渠道页的操作列：按钮必须"看得出是三个按钮" ──────────────────────
+   # 用户报的现象（截图红框）
+   「编辑 / 停用 / 删除」三个按钮**贴在一起**、底色与行底色只差一点点，
+   远看像一整块灰条；字其实很黑（实测 13:1）、按钮也没被禁用（opacity 1）。
+   所以这既不是对比度问题也不是 disabled —— 是**间距与描边**问题：
+   相邻两按钮的 1px 边框重合，形成一条连续竖线，边界消失了。
+   ⇒ 表格内按钮：补 2px 墨线描边 + 相邻按钮 6px 间距 + 悬停反色（亮→墨底奶油字），
+     让"一个按钮"与"一串按钮"在低分辨率下也能区分。
+   ⚠ 只作用于渠道页（#pane-ch / #pane-keys）：账号池那张高密度表一行 3~5 个按钮，
+     那里加间距会把列宽挤走（行高 40px 是硬约束，有几何判据盯着）。 */
+#pane-ch td button,
+#pane-keys td button{
+  padding:2px 10px;
+  border:2px solid var(--line);
+  border-radius:0;
+  background:var(--panel);
+  color:var(--fg);
+  font-family:var(--font-ui);
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:.02em;
+}
+#pane-ch td button + button,
+#pane-keys td button + button{margin-left:6px}
+#pane-ch td button:hover:not(:disabled),
+#pane-keys td button:hover:not(:disabled){
+  background:var(--invert-bg);
+  color:var(--invert-fg);
+  border-color:var(--line);
+}
+#pane-ch td button.danger,
+#pane-keys td button.danger{color:var(--err)}
+#pane-ch td button.danger:hover:not(:disabled),
+#pane-keys td button.danger:hover:not(:disabled){
+  background:var(--err);
+  color:var(--cream);
+  border-color:var(--ink);
+}
+/* KEY 列那个「显示」紧贴在掩码后面，也给它一个气口 */
+#pane-ch td .keycell button, #pane-ch td button.show-btn{margin-left:6px}
+/* 操作列不要被内容压扁：给一个下限，避免三个按钮挤成一条 */
+#pane-ch td:last-child{min-width:190px;white-space:nowrap}
 /* ==== WB2API:MAXIMALISM:END ==== */
 </style>
 </head>
