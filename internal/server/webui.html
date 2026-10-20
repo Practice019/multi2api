@@ -12715,7 +12715,7 @@ let multCatalogFailed = false;
   const reasoningTok = ('completion_thinking_tokens' in usage)
     ? numT(usage.completion_thinking_tokens)
     : numT((usage.completion_tokens_details || {}).reasoning_tokens);
-  // 总处理量 = 输入 + 输出（缓存写入不重复计入）—— 与指标卡「总处理量」同一口径
+  // 总 Token = 输入 + 输出（缓存写入不重复计入）—— 与指标卡「总 Token」同一口径
   const totalTok = promptTok + outTok;
     // ⚠ 上一版的 p / np / total / pt / ct 五个变量已随改写失效，在此清掉。
     //   留着不报错（JS 允许未使用变量、门禁只查语法），但它们是噪音 ——
@@ -12729,7 +12729,7 @@ let multCatalogFailed = false;
   const outLabel = hasOut ? String(outTok) : '—';
   const totalLabel = hasOut ? String(totalTok) : '—';
   const lines = [
-    '总处理量 ' + totalLabel + (hasOut ? '（输入 ' + promptTok + ' + 输出 ' + outTok + '）' : '（输出未上报）'),
+    '总 Token ' + totalLabel + (hasOut ? '（输入 ' + promptTok + ' + 输出 ' + outTok + '）' : '（输出未上报）'),
     '↑ 输出 ' + outLabel,
   ];
   if (cachedTok > 0) lines.push('⚡ 缓存命中 ' + cachedTok);
