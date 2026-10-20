@@ -2976,11 +2976,17 @@ const unlabeledProvider = "(未标注)"
 //     不输出 0 是刻意的：0ms 会被读成"快得离谱"，缺字段才是"不知道"
 //     （与顶层 avg_ttfb_ms、cache_hit_rate 的同一约定）。
 type dimStat struct {
-	Req         int64  `json:"req"`
-	OK          int64  `json:"ok"`
-	Fail        int64  `json:"fail"`
-	Tokens      int64  `json:"tokens"`
-	TokensRaw   int64  `json:"tokens_raw"`
+	Req       int64 `json:"req"`
+	OK        int64 `json:"ok"`
+	Fail      int64 `json:"fail"`
+	Tokens    int64 `json:"tokens"`
+	TokensRaw int64 `json:"tokens_raw"`
+	// OutTokens 本维度下的**纯输出** token（2026-10-20 加）。
+	//
+	// ⚠ 与 Tokens 的区别是本轮改造的核心：Tokens 是 total（输入+输出，含缓存读取），
+	// 实测一条请求 total=37938 而输出仅 176。用户定义的"消耗"是后者。
+	// 环图与排行要显示"用量"时取这个字段，不是 Tokens。
+	OutTokens   int64  `json:"out_tokens"`
 	ThinkTokens int64  `json:"think_tokens"`
 	AvgTTFBMS   *int64 `json:"avg_ttfb_ms,omitempty"`
 
@@ -3004,6 +3010,10 @@ func (d *dimStat) add(e logbuf.Entry) {
 		// 哨兵必须**排除**，不能当 0（那是"真有 0 token"，语义不同），更不能当 -1。
 		if e.Tokens > 0 {
 			d.Tokens += int64(e.Tokens)
+			// 纯输出同步累加到本维度（环图/排行要用它，不能用 Tokens）
+			if e.OutTokens > 0 {
+				d.OutTokens += int64(e.OutTokens)
+			}
 		}
 	}
 	d.TokensRaw += int64(e.Tokens) // 原始和：负数原样进

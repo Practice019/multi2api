@@ -9950,7 +9950,11 @@ let loginProvider = '';
       ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
       ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
       // ⚠ F1 修复：不再 `tokens + think_tokens`（那会把推理算两遍）。两张卡各表一件事。
-      ['输出 token', fmtTokens(s.tokens), num(s.tokens) ? '' : 'dim'],
+      // ⚠ 2026-10-20 改口径：用户定义的"消耗"= AI **生成**的 token（s.out_tokens），
+    //   不是 s.tokens（total 含输入与缓存读取）。实测同一份数据 total 64.3M 而
+    //   真实生成量小得多 —— 用 total 展示会让人以为模型吐了几千万字。
+    //   out_tokens 缺失（旧日志没有该字段）时显示 —，绝不回退成 tokens。
+    ['输出 token', num(s.out_tokens) ? fmtTokens(s.out_tokens) : null, ''],
       ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
