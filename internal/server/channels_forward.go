@@ -47,6 +47,14 @@ type channelForward struct {
 	ChannelID     string
 	ChannelName   string
 	UpstreamModel string
+	// KeyMask 本次实际用到的 API key 的**中间打码**形式（2026-10-20 加）。
+	//
+	// ⚠ 为什么需要它：请求日志的 UID 列对渠道请求一直是空的 —— 渠道用渠道凭据，
+	// 没有账号池那种 uid。用户要求"没 uid 就填缺省的 key"，而且要打码。
+	// 有了它，多 key 轮询时能从日志看出这条走了哪一把（换 key 排障不必再猜）。
+	// ⚠ 必须是打码值：完整 key 落盘等于把凭据写进日志文件，那是另一类事故。
+	// 打码由 channelstore.MaskKey 负责（保留前 4 + 后 4，中间省略）。
+	KeyMask string
 }
 
 // channelServes 纯内存判断"这个名字能不能被某条启用渠道服务"。
@@ -141,6 +149,8 @@ func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel stri
 	return channelForward{
 		Stream: cs, ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
 		UpstreamModel: cand.UpstreamModel,
+		// 打码后的 key 填进日志 UID 列（完整 key 绝不落盘）
+		KeyMask: channelstore.MaskKey(key),
 	}, nil
 }
 

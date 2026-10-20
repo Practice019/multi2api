@@ -1553,7 +1553,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if outTok > 0 {
 			usageMap = map[string]any{"completion_tokens": outTok}
 		}
-		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, "", "channel:"+fw.ChannelName,
+		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, fw.KeyMask, "channel:"+fw.ChannelName,
 			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), 0, "", "", fw.ChannelID, fw.UpstreamModel)
 		return
 	}
