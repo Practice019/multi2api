@@ -10271,7 +10271,7 @@ let loginProvider = '';
       ['请求', String(p.total)],
       ['成功', String(p.ok)],
       ['失败', String(p.fail)],
-      ['Token', fmtTokensPlain(p.tokens)],
+      ['Token', fmtTokensPlain(outOf(p))],
     ];
   }
 
@@ -10585,7 +10585,19 @@ let loginProvider = '';
     renderDailyTrendSVG(list);
   }
 
-  function renderDailyTrendSVG(list) {
+  // outOf(p) 一个 series 桶的**纯输出** token（Σ by_model_out）。
+//
+// ⚠ 2026-10-20 统一口径：热力图与近 7 天表格原来用 `p.tokens`（total，含缓存读取），
+//   而全局「输出 token」卡用的是 out_tokens ⇒ 同一天出现 102.3M vs 1.2M 的 85 倍冲突
+//   （用户报"数据不太准"）。现在所有**展示**都用这个函数取值。
+//
+// ⚠ 已知偏差（不是 bug，是数据边界）：无模型名的行不计入 by_model_out，
+//   所以这个值会略低于真实输出量。实测这类行占比很低。
+//   要彻底消掉偏差得让后端给 series 加顶层 out_tokens —— 那要动协议，留待以后。
+function outOf(p) {
+  return Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+}
+function renderDailyTrendSVG(list) {
     const host = $('dailyTrend');
     if (!host) return;
     const rl = $('dailyTrendRange');
@@ -10712,7 +10724,7 @@ let loginProvider = '';
         cur.setAttribute('x1', cx(best).toFixed(1)); cur.setAttribute('x2', cx(best).toFixed(1));
         cur.style.display = 'block';
         rd.setAttribute('x', Math.min(Math.max(cx(best), 70), W - 70).toFixed(1));
-        rd.textContent = lbl2 + '  · 请求 ' + (p.total || 0) + ' · ' + fmtTokensPlain(p.tokens || 0) + ' token';
+        rd.textContent = lbl2 + '  · 请求 ' + (p.total || 0) + ' · ' + fmtTokensPlain(outOf(p)) + ' token';
         rd.style.display = 'block';
       });
       host.addEventListener('mouseleave', () => {
@@ -10836,7 +10848,7 @@ let loginProvider = '';
       return best * mag;
     };
     let peak = 0;
-    for (const p of list) if ((p.tokens || 0) > peak) peak = p.tokens || 0;
+    for (const p of list) if (outOf(p) > peak) peak = outOf(p);
     const step = Math.max(1, stepFloor(peak / 4));
     const TH = [step, step * 2, step * 3, step * 4];      // 4 个阈值 ⇒ 5 档（0 是最浅那档）
     const lvOf = (tk) => {
@@ -10855,7 +10867,7 @@ let loginProvider = '';
     while (cur.getTime() <= lastD.getTime() && n < 400) {
       const key = cur.getFullYear() + '-' + pad2(cur.getMonth() + 1) + '-' + pad2(cur.getDate());
       const p = byDay.get(key);
-      const tk = p ? (p.tokens || 0) : 0;
+      const tk = p ? outOf(p) : 0;
       const tip = key + ' · ' + (p ? (p.total + ' 请求 · ' + tk + ' token') : '无请求');
       // ⚠ 只在**每月第一天所在的那一列**放月份文字，其余留空（那样月份才会对齐到列上）
       const colIdx = Math.floor(n / 7);
@@ -10936,7 +10948,7 @@ let loginProvider = '';
           return;
         }
         out.className = 'heatpick';
-        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(p.tokens)} token`
+        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(outOf(p))} token`
           + `（成功 ${p.ok} · 失败 ${p.fail}）`;
       });
     }
@@ -11022,7 +11034,7 @@ let loginProvider = '';
     let activeN = 0, peakTokens = 0, peakDay = '', lastDay = '', lastTotal = 0;
     for (const p of list) {
       const d = String(p.ts || '').slice(0, 10);
-      const tk = p.tokens || 0;
+      const tk = outOf(p);
       const n = p.total || 0;
       if (n > 0) {
         activeN++;
@@ -11064,7 +11076,7 @@ let loginProvider = '';
         + `<td>${esc(noReq ? NODATA : String(p.total || 0))}</td>`
         + `<td>${esc(noReq ? NODATA : String(p.ok || 0))}</td>`
         + `<td>${esc(noReq ? NODATA : String(p.fail || 0))}</td>`
-        + `<td>${esc(noReq ? NODATA : fmtTokensPlain(p.tokens || 0))}</td>`
+        + `<td>${esc(noReq ? NODATA : fmtTokensPlain(outOf(p)))}</td>`
         + `<td>${esc(rate)}</td></tr>`;
     }).join('');
     el.innerHTML = hsHtml
