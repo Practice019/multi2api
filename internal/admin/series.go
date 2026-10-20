@@ -40,6 +40,15 @@ type statsSeriesItem struct {
 	//   混进次数会让"这根柱到底代表什么"变含糊。
 	// ⚠ 只统计 Tokens > 0 的条目（与 Tokens 同一条守卫）：-1 是"usage 缺失"哨兵，不能进分子。
 	ByModel map[string]int64 `json:"by_model,omitempty"`
+	// ByModelOut 本桶内按模型的**纯输出** token（2026-10-20 加）。
+	//
+	// ⚠ 为什么要与 ByModel 分开：ByModel 是 total（输入+输出），而用户看"消耗分布"
+	// 时以为是"模型生成了多少字"。实测差距极大 —— 某条请求 total=37938 而输出仅 176
+	// （其余是缓存读取的上下文），于是"一小时消耗 2.9M"里真正生成的只有约 1.3 万。
+	// 两个数语义不同，必须分开存，前端才能按需取用。
+	// ⚠ 旧日志行没有 out_tokens（字段是 2026-10-20 才加的）⇒ 历史桶的这个 map 为空，
+	// 前端据此显示"无输出数据"，而不是把 total 当输出（那正是之前的错）。
+	ByModelOut map[string]int64 `json:"by_model_out,omitempty"`
 }
 
 // registerStatsSeries 注册趋势图端点。
@@ -96,6 +105,13 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 						out[i].ByModel = map[string]int64{}
 					}
 					out[i].ByModel[e.Model] += int64(e.Tokens)
+					// 同一遍遍历顺手累积"纯输出"（只有新日志行有 out_tokens）
+					if e.OutTokens > 0 {
+						if out[i].ByModelOut == nil {
+							out[i].ByModelOut = map[string]int64{}
+						}
+						out[i].ByModelOut[e.Model] += int64(e.OutTokens)
+					}
 				}
 			}
 		}
