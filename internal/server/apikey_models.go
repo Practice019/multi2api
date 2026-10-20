@@ -234,6 +234,42 @@ func joinLimited(list []string, n int) string {
 	return strings.Join(list[:n], "、") + "…（共 " + strconv.Itoa(len(list)) + " 个）"
 }
 
+// bumpKeyUsage 把一次请求的用量记给命中的 API key（**渠道分支**专用）。
+//
+// # 为什么需要它（2026-10-21 修，用户报「请求/失败一直是 0」）
+//
+// 账号池路径在 `handler.go` 的 `st.bump` 回调里记（chatStat.done 统一出口）。
+// 但**渠道分支在那之前就 return 了**：
+//
+//	L1506  if h.channelServes(peek.Model) { ... return }   ← 渠道请求在这里结束
+//	L1632  st := newChatStat(...)                          ← 用量记录从这里才开始
+//	L1652  st.bump = ...
+//
+// ⇒ 走渠道的请求（如 `csg/...`）**一条都不会被记**，界面上「请求」「失败」恒为 0。
+//
+// 实测佐证：磁盘上 `requests=0 fails=0 used=0`，而同一把 key 当天发过大量 csg 请求。
+//
+// # 为什么不做成"把渠道分支也套进 chatStat"
+//
+// 渠道分支有自己的收尾（logChatRowProvider + writeChannelStream），
+// 硬套 chatStat 要改两处出口的结构，风险大于收益。
+// 这里只补**缺的那一件事**（记 key 用量），日志仍走它原来的路。
+//
+// ⚠ toks <= 0 时不累加 Used（BumpUsage 内部有 `if tokens > 0`）——
+//
+//	渠道失败时没有 token 数，传 0；成功但 usage 拿不到时传 -1（未知哨兵），
+//	两者都不该污染已用量。
+func (h *Handler) bumpKeyUsage(r *http.Request, toks int, ok bool) {
+	if h.cfg.APIKeys == nil {
+		return
+	}
+	kid, _ := r.Context().Value(apikeyCtxKey).(string)
+	if kid == "" {
+		return
+	}
+	h.cfg.APIKeys.BumpUsage(kid, int64(toks), ok)
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // 模型对外名映射（2026-10-21）
 // ──────────────────────────────────────────────────────────────────────────

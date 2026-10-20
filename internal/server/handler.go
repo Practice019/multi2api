@@ -1564,6 +1564,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "",
 				st, -1, nil, "channel_error: "+detail, 0,
 				gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
+			// ⚠ 2026-10-21：渠道分支在 chatStat 之前就 return，所以 key 用量要在这里记。
+			//   不记的话界面上「请求」「失败」恒为 0（用户报的那个现象）。
+			h.bumpKeyUsage(r, 0, false)
 			// ⚠ 走 writeChannelError 而不是写死 502：上游的 429/401 要原样透传给客户端
 			// （见 channels_forward.go 里那段"实测踩过"的注释）。
 			h.writeChannelError(w, ferr)
@@ -1597,6 +1600,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, fw.KeyMask, "channel:"+fw.ChannelName,
 			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), 0,
 			gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
+		// ⚠ 2026-10-21：成功也记（tok 可能是 -1「未知」哨兵，BumpUsage 内部只在 >0 时累加）。
+		h.bumpKeyUsage(r, tok, true)
 		return
 	}
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)
