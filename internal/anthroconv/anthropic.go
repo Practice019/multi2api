@@ -261,7 +261,24 @@ func convertMessages(list []map[string]any) ([]map[string]any, error) {
 			// 上一条就是 user 且**已经有 tool_result** 才合并；
 			// 否则新建一条（避免把普通用户消息和工具结果混在一起）。
 			if n := len(out); n > 0 && out[n-1]["role"] == "user" && hasToolResult(out[n-1]) {
-				out[n-1]["content"] = append(out[n-1]["content"].([]any), block)
+				// ⚠ 2026-10-20 改（review）：原来的写法是
+				//     out[n-1]["content"] = append(out[n-1]["content"].([]any), block)
+				// 那个 `.([]any)` 是**裸断言**，靠上一行 `hasToolResult` 返回 true
+				// 来保证 content 确实是 []any。
+				//
+				// 逻辑上没错（hasToolResult 内部已 `m["content"].([]any)` 做过类型检查，
+				// 不是 []any 就返回 false），但它建立了一条**隐式契约**：
+				// 「改 hasToolResult 时必须记得这里依赖它对 content 的类型保证」。
+				// 跨行的隐式依赖是 panic 的温床 —— 网关 panic = 所有客户端同时断连。
+				//
+				// 改成 comma-ok，把契约显式化：即使将来 hasToolResult 改了语义，
+				// 最坏也只是"没合并、新建一条"（上游可能 400），而不是崩掉进程。
+				cur, ok := out[n-1]["content"].([]any)
+				if !ok {
+					out = append(out, map[string]any{"role": "user", "content": []any{block}})
+					continue
+				}
+				out[n-1]["content"] = append(cur, block)
 			} else {
 				out = append(out, map[string]any{"role": "user", "content": []any{block}})
 			}
