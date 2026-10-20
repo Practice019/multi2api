@@ -236,7 +236,14 @@ func TestChatLogsSyncRowTTFBDash(t *testing.T) {
 			t.Fatalf("code=%d", rec.Code)
 		}
 	})
-	for _, want := range []string{"| sync |", "| 200 |", "TTFB=-", "tok=1"} {
+	// ⚠ 2026-10-20 期望值从 `tok=1` 改成 `tok=2`：算法改了，不是判据松了。
+	//
+	//   这里的上游 usage 是 prompt_tokens=1 + completion_tokens=1。
+	//   旧算法（completionTokens）只取 completion ⇒ 显示 1；那正是"总 token 只等于输出"
+	//   这个 bug 的表现（实测 loomy 一条：hit=640 miss=16 out=3 却记 tokens=3）。
+	//   新算法（totalTokens）照 new-api 自己加 ⇒ 1+1 = 2。
+	//   ⇒ 断言跟着改，否则测试反而在固守旧的错误行为。
+	for _, want := range []string{"| sync |", "| 200 |", "TTFB=-", "tok=2"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("sync row missing %q:\n%s", want, out)
 		}
