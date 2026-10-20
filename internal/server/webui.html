@@ -9826,7 +9826,11 @@ let loginProvider = '';
     const detail = s.by_model_detail || {};
     const rows = Object.keys(detail).map(k => {
       const d = detail[k] || {};
-      const calls = num(d.calls) || 0;
+      // ⚠ 字段名必须是 `req`，不是 `calls`：后端 dimStat 的 JSON tag 是
+      //   `Req int64 \`json:"req"\``（internal/admin/admin.go）。我最初写这个函数时
+      //   凭印象用了 `calls`，结果次数排行永远是"所选范围内没有请求" —— 静默失败：
+      //   页面不报错，只是永远空着。
+      const calls = num(d.req) || 0;
       const ok = num(d.ok) || 0;
       return { model: k, calls, ok, rate: calls ? (ok / calls * 100) : null };
     }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 10);
@@ -9877,7 +9881,8 @@ let loginProvider = '';
     const detail = s.by_model_detail || {};
     const rows = Object.keys(detail).map(k => {
       const d = detail[k] || {};
-      const c = num(d.calls) || 0;
+      // ⚠ 同样是 `req` 不是 `calls`（见 renderModelRank 里的同一条注释）
+      const c = num(d.req) || 0;
       const o = num(d.ok) || 0;
       return { model: k, calls: c, rate: c ? (o / c * 100) : null };
     }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 5);
