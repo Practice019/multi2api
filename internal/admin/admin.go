@@ -3072,6 +3072,9 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	var ttfbN int64
 	var credit float64
 	var thinkTokens, cacheHitTokens, cacheMissTokens int64
+	// thinkTokensWithOut 只在**有输出记录**的行上累加的推理量（与 out_tokens 同期可比）。
+	// 见下面累加处那段注释：think 是 out 的子集，跨期并列会得到自相矛盾的读数。
+	var thinkTokensWithOut int64
 	// outTokens / byModelOut：**纯输出** token 汇总（2026-10-20 加）。
 	//
 	// ⚠ 与 tokens / byModel 并存而不是替换它们：tokens 是 total（输入+输出），
@@ -3136,8 +3139,26 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 			credit += e.Credit
 			ps.Credit += e.Credit
 		}
+		// ⚠ 2026-10-20：两个累加器，因为「全部历史」与「同期可比」是两个不同的问题。
+		//
+		//   thinkTokens（原有语义，不动）：所有有推理记录的行。
+		//     实测 2026-10-20 全库 35,620 行 ⇒ Σ = 32,147,395。
+		//     它覆盖 62% 的行（think_tokens 早就存在）。
+		//
+		//   thinkTokensWithOut（新增）：只在**有输出记录**的行上累加。
+		//     实测 Σ out_tokens = 1,188,551，但 out_tokens 是 10-20 才引入的，
+		//     只覆盖 0.6% 的行 ⇒ 同期 think 只有很小一部分。
+		//
+		//   为什么需要两个：推理是输出的**子集**，把 32M 与 1.2M 并列显示
+		//   就是"推理比输出大 27 倍"这种自相矛盾的读数（用户报的"数据不准"）。
+		//   但直接改掉 thinkTokens 的语义会让历史推理量凭空消失 ——
+		//   那是另一种失真。所以保留原值，另给一个可比的值，让前端自己选。
+		//   ⚠ 单行永远正常（0 行 think > out），问题只在聚合范围，别去查解析层。
 		if e.ThinkTokens > 0 {
 			thinkTokens += int64(e.ThinkTokens)
+			if e.OutTokens > 0 {
+				thinkTokensWithOut += int64(e.ThinkTokens)
+			}
 		}
 		// ⚠⚠ 量纲守卫（与 cacheRates 里那条同一理由，但这里是**主累加**，漏了它整个
 		// cache_hit_tokens / cache_hit_rate 就还是错的）：有的上游把 cache_hit 按完全不同的
@@ -3167,19 +3188,20 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 	}
 
 	resp := map[string]any{
-		"total":             len(items),
-		"ok":                okN,
-		"fail":              failN,
-		"by_model":          byModel,
-		"by_status":         byStatus,
-		"by_uid":            byUID,
-		"tokens":            tokens,
-		"out_tokens":        outTokens,
-		"by_model_out":      byModelOut,
-		"credit_total":      credit,
-		"think_tokens":      thinkTokens,
-		"cache_hit_tokens":  cacheHitTokens,
-		"cache_miss_tokens": cacheMissTokens,
+		"total":                 len(items),
+		"ok":                    okN,
+		"fail":                  failN,
+		"by_model":              byModel,
+		"by_status":             byStatus,
+		"by_uid":                byUID,
+		"tokens":                tokens,
+		"out_tokens":            outTokens,
+		"by_model_out":          byModelOut,
+		"credit_total":          credit,
+		"think_tokens":          thinkTokens,
+		"think_tokens_with_out": thinkTokensWithOut,
+		"cache_hit_tokens":      cacheHitTokens,
+		"cache_miss_tokens":     cacheMissTokens,
 	}
 	// cache_hit_rate 只在分母 >0 时输出（空集、全为旧格式行、或只有 miss 也为 0 时都不输出）：
 	// 前端据此显示「—」而不是一个 0%，避免把「没有数据」读成「命中率真的是 0」。
