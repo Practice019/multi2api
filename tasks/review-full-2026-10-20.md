@@ -289,3 +289,59 @@ L6861    if (++rounds > MAX_ROUNDS) { clearInterval(timer); delete panelPolls[ke
 其他几处 `setInterval` 都靠"顶层只执行一次"这个隐含前提。
 
 ⇒ 不是缺陷，但值得记：**如果将来有人把这些 interval 挪进函数，就会立刻泄漏。**
+---
+
+## 九、第七轮：并发证据（`-race` 替代方案）
+
+### `-race` 确实跑不了 —— 已尽力验证
+
+```
+gcc / cc / clang / x86_64-w64-mingw32-gcc  全部 ✗
+go env CGO_ENABLED = 0, CC = gcc
+go test -race ./internal/wire/
+  → cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in %PATH%
+```
+
+这是**环境限制**，不是跳过。要跑起来需要装 MinGW-w64 或 TDM-GCC。
+
+### 替代方案：`go vet` 全绿
+
+`go vet` 的 `copylocks` 与 `loopclosure` 检查覆盖了两类最常见的竞态近亲：
+
+```
+go vet ./...              exit=0  ✓ 无告警
+go vet -copylocks ./...   exit=0  ✓ 无锁按值拷贝
+go vet -loopclosure ./... exit=0  ✓ 无循环变量捕获
+Go 1.22.5（loopvar 语义已按迭代变量）
+```
+
+**这能证明的**：没有 `sync.Mutex` 被按值拷贝（那会让两把锁保护同一份数据）、
+没有经典的 `for` 循环变量捕获。
+
+**这不能证明的**：逻辑层面的竞态（两个 goroutine 用同一把锁但更新顺序错、
+读-改-写之间释放了锁）。那类只有 `-race` 或人工推理能发现。
+
+### 顺带修了一个本地工作区污染
+
+```
+go vet ./... 原本 exit=1：
+  docs\agent2api-repo\...\login_vectors_test.go:19
+    no required module provides package github.com/mmqz/cpa-multi-plugins/...
+```
+
+`docs/` 下有 2 个从参考项目移植来的 `_test.go`（41 KB），引用不存在的模块。
+它们**不在 git 里**（`.gitignore: docs/*`），所以**别人克隆不会有这问题** ——
+但在我本地，`go test ./...` 和 `go vet ./...` 会失败，看起来像项目坏了。
+
+**已修**：给这两个文件加 `//go:build ignore` + 说明注释，留在磁盘作参考但不参与编译。
+
+**修后**：
+
+```
+go build ./...  exit=0
+go test ./...   exit=0   ok=39 FAIL=0
+go vet ./...    exit=0
+```
+
+⚠ 这个修复**不进 git**（文件本身不被跟踪），只在本地生效。
+将来若有人在本地也放了参考代码副本，会遇到同样症状，届时按同样办法处理。
