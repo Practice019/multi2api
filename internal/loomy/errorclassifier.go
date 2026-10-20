@@ -66,6 +66,38 @@ const (
 	markerInvalidRequest = "invalid_request_error"
 	// markerInvalidRequestCN 同上（中文形态，loomy 报文里的 message 字段）。
 	markerInvalidRequestCN = "请求参数错误"
+
+	// markerContextExceeded 上下文超限（2026-10-20 加，issue #2 观察②）。
+	//
+	// ⚠ 加它的理由（真踩过，与上面 markerInvalidRequest 同一类误判）：
+	// issue #2 实测原文是
+	//
+	//	"prompt is too long: 100001 tokens > 100000 maximum"
+	//
+	// 而 loomy 的 classifier **此前完全没有上下文超限判定** ——
+	// 它落到 `DefaultErrorKind(status, body)` 的 `status >= 400 → ErrKindClient`，
+	// 而那一档的语义是"只换号不罚"。
+	//
+	// ⇒ 一次"这次请求太长"会把 loomy 的 **46 个号**全轮一遍（每个号收到的 body
+	//   一样长，换到哪都必然超限），最后报成笼统的 503 `budget_exhausted:global`，
+	//   客户端看不到"你的 prompt 太长"这个真正要处理的事。
+	//   报告者原话："最后返回笼统的 503，客户端看不到上游原因"。
+	//
+	// ⇒ 归 ErrKindFatalClient：不换号、直接结束，由 core 回 400 并透传上游原文。
+	//
+	// ⚠ 为什么这里比 upstream/client.go 列得多：
+	// 那边是 workbuddy 的词汇表（有真实报文样本），这边是给 loomy 补的**预防性**
+	// 覆盖 —— 我手上没有 loomy 的上下文超限真实报文，所以宁可把常见形态都列上。
+	// 漏一条的代价是"白烧 46 个号"，多列一条的代价只是"某条别的 400 被提前结束"，
+	// 后者远比前者轻。
+	markerContextExceeded   = "context_length_exceeded"
+	markerContextTooLong    = "prompt is too long"
+	markerContextMaxLen     = "maximum context length"
+	markerContextExceedsMax = "exceeds the maximum"
+	markerContextOverflow   = "context overflow"
+	markerContextTooManyTok = "too many tokens"
+	markerContextCN         = "超出上下文"
+	markerContextLenCN      = "上下文长度"
 )
 
 // Classify 按 (状态码, 响应体) 判定错误类别。
@@ -113,6 +145,17 @@ func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
 		// 模型名不对。同样是客户端问题，不该记在账号头上。
 		return gateway.ErrKindClient
 
+	// ⚠ 2026-10-20 加（issue #2 观察②）：上下文超限 ⇒ 不换号、直接结束。
+	//
+	// 必须放在 markerInvalidRequest **之前**判？不 —— 两者不重叠（超限报文里
+	// 通常不带 invalid_request_error），顺序无所谓。但**必须**在
+	// `DefaultErrorKind` 兜底之前，否则会先被 `status >= 400 → ErrKindClient` 吃掉。
+	case isContextExceeded(low, body):
+		// 一次"这次请求太长"此前会把 loomy 的 46 个号全轮一遍 ——
+		// 每个号收到的 body 一样长，换到哪都必然超限，纯白烧 46 次往返，
+		// 最后报成笼统的 503，客户端看不到"prompt 太长"这个真正的原因。
+		return gateway.ErrKindFatalClient
+
 	case strings.Contains(low, markerInvalidRequest) || strings.Contains(body, markerInvalidRequestCN):
 		// ⚠ 请求体/参数不合法 ⇒ **不换号、直接结束**（2026-10-18 加）。
 		//
@@ -127,6 +170,29 @@ func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
 	// 刻意**不**在这里发明关键词：兜底只映射 RFC 语义（402/429/404/5xx/4xx），
 	// 那是唯一跨上游真的有共识的东西。
 	return gateway.DefaultErrorKind(status, body)
+}
+
+// isContextExceeded 判断是否为「上下文超限」。见 markerContextExceeded 的注释。
+//
+// ⚠ 单独抽成函数而不是在 case 里写一长串 ||：八条 marker 塞进 case 表达式后
+// 那一行会超过 300 字符，读的人得横向滚动才能看全 —— 而这条判定恰恰是
+// 「漏一条就白烧 46 个号」的地方，不该难读。
+func isContextExceeded(low, body string) bool {
+	for _, m := range []string{
+		markerContextExceeded, markerContextTooLong, markerContextMaxLen,
+		markerContextExceedsMax, markerContextOverflow, markerContextTooManyTok,
+	} {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	// 中文形态大小写无关，直接匹配原文
+	for _, m := range []string{markerContextCN, markerContextLenCN} {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // ResetAt 返回额度耗尽的号什么时候能再用。

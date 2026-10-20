@@ -84,7 +84,28 @@ func main() {
 		len(auths), cfg.AuthDir, cfg.AuthsBase)
 
 	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
-	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
+	//
+	// ⚠ 2026-10-20 修（issue #2 观察①）：Noop 之下**粘性绑定纯内存，重启即丢** ——
+	// 长会话重新分配账号 ⇒ 上游 prompt cache 按账号隔离 ⇒ 整段对话重新预填充。
+	// 实测两笔：msgs=1146 花 5.59 credit、msgs=753 花 1.76 credit，仅仅因为重启了一次
+	// （正常请求 0.1~0.3 credit）。
+	//
+	// 所以 Noop 时改用**本地文件兜底**（data/sticky-bindings.json，原子写 + 启动恢复）。
+	// 这不改变"Redis 可选"这个设计 —— 只是让"防重启丢粘性"这条意图在默认配置下
+	// 也真的生效（此前它只写在 session.go 顶部注释里，而默认跑的就是 Noop）。
+	var store redisstore.Store
+	var closeStore func()
+	raw := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
+	if _, isNoop := raw.(redisstore.Noop); isNoop {
+		lf := redisstore.NewLocalFile(filepath.Join("data", "sticky-bindings.json"))
+		store = lf
+		closeStore = lf.Close
+	} else {
+		store = raw
+	}
+	if closeStore != nil {
+		defer closeStore()
+	}
 
 	p := pool.New(cfg.StateFile)
 	defer p.Flush() // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
