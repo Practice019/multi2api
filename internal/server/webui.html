@@ -1238,20 +1238,10 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
                `by_model` 按桶算好了 ⇒ 换成按模型堆叠的消耗分布，柱状 / 面积可切。
              ⚠ 高度 110 → 240：堆叠图每段至少要有 2~3px 才分得清，
                24 小时窗口里小模型常常只占几千 token，110px 会把它压成一条缝。 -->
-        <!-- 峰值读数 + 柱状/面积切换**放在 #statsTrend 外面**：
-             ⚠ 容器里的 innerHTML 每次重绘都被整体替换（renderTrendSVG 的既有写法），
-               按钮放进去 ⇒ 每 30 秒轮询就重建一次按钮、监听全丢，只能补一层容器委托 ——
-               那会让"按钮在哪、怎么绑"分裂成两处。放外面只绑一次，重绘碰不到它。 -->
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;gap:10px">
-          <!-- 峰值参考：Y 轴不画刻度网格（240px 里再割一条网格就只剩骨架），
-               所以把"这幅图的天花板"用一行字如实写在左上角。 -->
-          <span id="trendPeak" class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
-          <span class="tog" id="trendView" style="font-weight:400;flex:none">
-            <button data-view="bar" class="on">柱状</button>
-            <button data-view="area">面积</button>
-          </span>
-        </div>
-        <div id="statsTrend" class="trendchart" style="margin-bottom:12px;height:240px;position:relative"></div>
+        <!-- ⚠ 2026-10-20 布局重排（用户要求）：
+             「其他图表全部放到下面；这个信息和网关状态放到最上面，图表统一放到最下面，依次排布」
+             趋势图整组已移到指标卡之后（见 statsCards2 下面那段）。
+             原来它在这里 = 图在上、数在下，与用户要的顺序相反。 -->
         <!-- ⚠⚠ 概览卡**分成两个网格**（2026-10-20 修「第二行只剩 3 张、右侧空一片」）：
              13 张塞进同一个 `auto-fit` 网格时，1400px 宽下第一行 10 张、第二行 3 张，
              右侧空出 7 个卡位 —— 观感像"没做完"。
@@ -1263,6 +1253,22 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
              ⇒ 定位卡片一律走 `statCardEl()` / `statCardValEl()`（同时匹配两个容器）。 -->
         <div class="cards" id="statsCards"></div>
         <div class="cards" id="statsCards2"></div>
+      <!-- ⚠ 2026-10-20 布局重排（用户要求「图表统一放到最下面」）：
+           趋势图整组从指标卡**之前**挪到**之后**。原来那位置是"图在上、数在下"，
+           与用户要的顺序相反。
+           ⚠ 控制条（峰值读数 + 柱状/面积切换）必须留在 #statsTrend **外面**：
+             容器 innerHTML 每次重绘都被整体替换，按钮放进去会每 30 秒轮询重建一次、
+             监听全丢。放外面只绑一次，重绘碰不到它。 -->
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;gap:10px;margin-top:14px">
+        <!-- 峰值参考：Y 轴不画刻度网格（240px 里再割一条网格就只剩骨架），
+             所以把"这幅图的天花板"用一行字如实写在左上角。 -->
+        <span id="trendPeak" class="dim" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+        <span class="tog" id="trendView" style="font-weight:400;flex:none">
+          <button data-view="bar" class="on">柱状</button>
+          <button data-view="area">面积</button>
+        </span>
+      </div>
+      <div id="statsTrend" class="trendchart" style="margin-bottom:12px;height:240px;position:relative"></div>
       <!-- 次数排行（2026-10-20，对标 new-api 下部 tab 的「调用次数排行」）：
            数据就是 /admin/stats 里已有的 by_model_detail，不额外发请求。
            ⚠ 与环图的区别：环图看"占比"，这里看"绝对名次 + 各模型成功率" ——
