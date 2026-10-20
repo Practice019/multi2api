@@ -2236,7 +2236,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
-		st.toks = completionTokens(resp)
+		st.toks = totalTokens(resp) // ⚠ 2026-10-20：原来用 completionTokens（只算输出，prompt 全丢）
 		st.usage = usageOf(resp)
 		return
 	}

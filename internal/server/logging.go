@@ -254,6 +254,45 @@ func completionTokens(resp map[string]any) int {
 	return wire.UsageInt(v)
 }
 
+// totalTokens 一条非流式响应的**总 token**（照 new-api 的算法自己加）。
+//
+// ⚠ 2026-10-20 修：账号池的非流式路径原来用 `completionTokens(resp)` 当 toks，
+// 那**只取 completion_tokens，把 prompt 全丢了**。实测后果（2026-10-20 11:05 两条
+// loomy 请求）：
+//
+//	tokens=3  out=3  hit=640  miss=16      ← toks 等于输出，而真实处理量是 659
+//
+// 渠道路径早就在用采集器算（`cap.Result()` → `sseUsage.total()`，已按 new-api 改成
+// promptTotal + completion），但账号池非流式这条路漏了 —— 两条路的算法必须一致，
+// 否则同一条上游、同样一次调用，走渠道和走账号池会记出差几十倍的数。
+//
+// 算法与 `sseUsage.total()` 逐条对应：
+//  1. 能还原总输入（prompt_tokens，或缓存命中+未命中）⇒ promptTotal + completion
+//  2. 输入完全无从得知 ⇒ 退回 total_tokens（那种情况下它是唯一线索）
+//  3. 连 total_tokens 都没有 ⇒ 只有 completion（下界，但至少不是 -1）
+func totalTokens(resp map[string]any) int {
+	u, ok := resp["usage"].(map[string]any)
+	if !ok {
+		return -1 // usage 缺失：保留 -1 哨兵，与 completionTokens 一致
+	}
+	x := wire.ParseUsageExtras(u)
+
+	// ① 总输入：优先上游给的 prompt_tokens（它已含缓存，不能再加缓存）
+	pt := wire.UsageInt(u["prompt_tokens"])
+	// ② 只有缓存两项时才用它们还原（互斥的输入划分）
+	if pt <= 0 && x.CacheHitTokens > 0 && x.CacheMissTokens > 0 {
+		pt = x.CacheHitTokens + x.CacheMissTokens
+	}
+	if pt > 0 {
+		return pt + x.CompletionTokens
+	}
+	// ③ 输入无从得知
+	if t := wire.UsageInt(u["total_tokens"]); t > 0 {
+		return t
+	}
+	return x.CompletionTokens
+}
+
 // usageOf 从 Aggregate 返回的响应中取 usage 对象；缺失返回 nil。
 func usageOf(resp map[string]any) map[string]any {
 	u, _ := resp["usage"].(map[string]any)
