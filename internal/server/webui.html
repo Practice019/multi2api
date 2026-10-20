@@ -12897,23 +12897,38 @@ let multCatalogFailed = false;
     //      （改造前实测过 32 条 = 16 个模型 × 2 种写法），界面也不会重复。
     //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
     //   3. **可折叠**：状态存 localStorage，刷新后保持。
-    const groups = groupModelsByOwner(models, emptyModelGroups());
-    // 顶栏口径：**不能**无条件写"上游实时目录"。
+    const allGroups = groupModelsByOwner(models, emptyModelGroups());
+    // ⚠ 用户口径（2026-10-21，第二次追问后定案）：**没有可用账号的上游整组不显示**，
+    // 连内置声明也不显示。
     //
-    // # 这是用户报的那个"没账号却有模型"的真因
-    // 实测（本机空池实例）：/v1/models 只有 3 条，全是 loomy 的**生图模型**，
-    // 它们来自上游内置的手册快照（internal/loomy/imagegen_ext.go 的 imageModelIDs），
-    // 不是随时拉到的实时目录 —— 而 12 个上游里其余 11 个（真·目录）一条都没有。
-    // 于是界面写着"（3 个，上游实时目录）"，实际上 3 条全是**内置声明且当前不可调用**。
-    // 数据没错，错在**没标来源**：把"内置快照"说成"实时目录"就是在骗读者。
-    // ⇒ 有内置项就点名个数，纯实时才敢写"上游实时目录"。
+    // # 为什么要过滤，而不是"标来源"就够了
+    // 上一版给内置声明加了「N 项内置声明 · 无可用账号」的标注，用户仍然追问
+    // 「为什么有这三个」—— 说明在"能调用什么"这个面板里，**不可调用的条目本身就是噪声**：
+    // 读者不会去读小字说明，他只会看到模型名并以为能用。
+    // 数据来源是 `internal/loomy/imagegen_ext.go` 的 `imageModelIDs`（生图模型的内置声明，
+    // 不带账号也在 /v1/models 里），API 那一层不动（客户端仍能据此知道上游支持生图），
+    // 只在**这个面板**按"有没有可用账号"过滤。
+    //
+    // # 空白仍要能自我解释（本项目既有纪律）
+    // 过滤后如果一组都不剩，不是把页面留白，而是给一句能照做的话。
+    // ⚠ 判据必须是"**明确知道** 0 个账号"，不是"不 > 0"：
+    // 未知（manifest 还没到 / 上游没报 account_count）一律照旧显示 ——
+    // 否则页面在 manifest 到达前会先闪一次"没有可用账号"，那是最糟的空态。
+    const groups = allGroups.filter(g => !(g.accountCount === 0));
+    // 被藏起来的上游集合：下拉（对话测试）也要一起隐藏，否则"面板藏了、下拉还在"。
+    const noAcctOwners = new Set(allGroups.filter(g => g.accountCount === 0).map(g => g.owner));
+    const visibleModels = models.filter(m => !noAcctOwners.has(modelOwnerOf(m.id, m.owned_by)));
+    // 顶栏口径：只统计**真正显示出来**的条目，数字必须与 chips 一致。
+    // （默认全是实时目录；仍保留"内置声明"分支 —— 有账号但目录来自内置表的场景将来会出现。）
     const builtinCount = groups.reduce((n, g) => n + ((g.accountCount === 0) ? g.items.length : 0), 0);
-    $('mcount').textContent = '（' + models.length + ' 个'
-      + (builtinCount
-        ? ' · ' + builtinCount + ' 项内置声明，无可用账号'
-        : '，上游实时目录')
-      + '）';
-    $('models').innerHTML = groups.map(renderModelGroup).join('');
+    $('mcount').textContent = visibleModels.length
+      ? '（' + visibleModels.length + ' 个'
+        + (builtinCount ? ' · ' + builtinCount + ' 项内置声明，无可用账号' : '，上游实时目录')
+        + '）'
+      : '';
+    $('models').innerHTML = groups.length
+      ? groups.map(renderModelGroup).join('')
+      : '<span class="dim">没有可用账号，无法获取模型目录。先在「账号池」添加账号。</span>';
     const sel = $('model'), keep = sel.value;
     // T7：模型下拉按上游筛选，并按 id **去重**。
     //
@@ -12928,11 +12943,13 @@ let multCatalogFailed = false;
     // 两边都显示**完整 id**，两边都去重（chip 区按裸名去重、这里按 id 去重）。
     //
     // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
-    syncModelProviderOptions(models);
+    // 上游下拉与模型下拉都用**过滤后**的列表：面板里藏起来的上游，
+    // 下拉里也不该还能选到（否则"选一个不可调用的模型"是纯粹的坑）。
+    syncModelProviderOptions(visibleModels);
     const wantP = modelProviderFilter();
     const filtered = wantP
-      ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
-      : models;
+      ? visibleModels.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
+      : visibleModels;
     // 去重：同一个 id 只留第一条（保留上游返回的原始顺序，选择行为可预期）。
     const seen = new Set();
     const shown = [];
@@ -13086,7 +13103,11 @@ let multCatalogFailed = false;
       const p = providerInfo(id);
       if (!p) continue;
       if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
-      out.push({ owner: id, accountCount: Number(p.account_count) || 0 });
+      out.push({
+        owner: id,
+        accountCount: (p.account_count === undefined || p.account_count === null)
+          ? null : (Number(p.account_count) || 0),
+      });
     }
     return out;
   }
@@ -13115,7 +13136,13 @@ let multCatalogFailed = false;
       // 缺这个字段时 accountCount 恒为 undefined ⇒ 那三种"没有"又分不开了。
       if (!byOwner.has(owner)) {
         const pi = providerInfo(owner);
-        byOwner.set(owner, { owner: owner, items: [], seen: new Set(), accountCount: Number(pi && pi.account_count) || 0 });
+        // accountCount 三态：数字 = 真实账号数；**null = 未知**（manifest 未到 / 上游没报）。
+        // 不能把"未知"折成 0 —— 那会让"没账号的上游隐藏"这条规则在 manifest 到达前误伤全部上游。
+        byOwner.set(owner, {
+          owner: owner, items: [], seen: new Set(),
+          accountCount: (pi && pi.account_count !== undefined && pi.account_count !== null)
+            ? (Number(pi.account_count) || 0) : null,
+        });
       }
       const g = byOwner.get(owner);
       if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
