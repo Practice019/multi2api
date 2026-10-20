@@ -30,8 +30,6 @@ func (h *Handler) channelsStore() *channelstore.Store { return h.cfg.Channels }
 func (h *Handler) registerChannels() {
 	h.register("GET /admin/channels", h.channelsList)
 	h.register("POST /admin/channels/discover", h.channelsDiscover) // 「模型自动发现」：编辑时一键回填上游模型名
-	// 管理端「对外模型」页签的数据：免 key 视角的"现在对外可见什么、谁提供的"。
-	h.register("GET /admin/channels/public-models", h.channelsPublicModels)
 	h.register("POST /admin/channels", h.channelsUpsert)
 	h.register("POST /admin/channels/delete", h.channelsDelete)
 	h.register("POST /admin/channels/status", h.channelsStatus)
