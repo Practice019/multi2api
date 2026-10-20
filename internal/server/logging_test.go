@@ -47,8 +47,12 @@ func TestChatStatsReaderTokensFromUsage(t *testing.T) {
 		t.Fatalf("copy: %v", err)
 	}
 	toks, ok := r.Tokens()
-	if !ok || toks != 1 {
-		t.Fatalf("tokens=%d ok=%v, want 1/true (from usage, not rune count)", toks, ok)
+	// ⚠ 2026-10-20 判据从 `toks != 1` 改成 `toks != 2`：算法改了，不是松判据。
+	//   夹具 sseOK 的 usage 是 prompt_tokens=1 + completion_tokens=1。
+	//   旧算法只取 completion ⇒ 1（正是"总 token 只等于输出"的 bug）；
+	//   新算法照 new-api 自己加 ⇒ 2。断言跟着改，否则测试在固守旧行为。
+	if !ok || toks != 2 {
+		t.Fatalf("tokens=%d ok=%v, want 2/true (from usage, not rune count)", toks, ok)
 	}
 	if r.TTFB() <= 0 {
 		t.Errorf("ttfb=%v want >0", r.TTFB())
@@ -209,13 +213,14 @@ func TestChatLogsStreamRow(t *testing.T) {
 			t.Fatalf("code=%d", rec.Code)
 		}
 	})
-	for _, want := range []string{"| stream |", "| 200 |", "uid=u1", "TTFB=", "tok=1"} {
+	for _, want := range []string{"| stream |", "| 200 |", "uid=u1", "TTFB=", "tok=2"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stream row missing %q:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "tok=1") {
-		t.Errorf("tok: want precise usage completion_tokens: %s", out)
+	// ⚠ 2026-10-20：判据从 `tok=1` 改成 `tok=2`，与上面那条同理（算法改了）。
+	if !strings.Contains(out, "tok=2") {
+		t.Errorf("tok: want total (prompt+completion, 见 totalTokens): %s", out)
 	}
 }
 
