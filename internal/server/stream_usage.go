@@ -63,12 +63,20 @@ type sseUsage struct {
 	// 必须计入 total —— 否则"这条请求碰了多少上下文"这个数就是错的）。
 	CacheHitTokens  int `json:"prompt_cache_hit_tokens"`
 	CacheMissTokens int `json:"prompt_cache_miss_tokens"`
+	// ⚠ hasCacheHit / hasCacheMiss 记录**键是否出现过**，用来区分
+	//   「miss 真的是 0」（全命中）与「上游压根没给 miss」（未知）。
+	//   光看数值分不开这两种情况 —— 都是 0。
+	//   不区分会犯两类错，方向相反：
+	//     · 当成未知 ⇒ 全命中的合法请求被判"输入未知"，整帧丢弃（比没修更糟）
+	//     · 当成 0    ⇒ 只给 hit 的上游被当成"全命中"，未命中那部分凭空消失
+	hasCacheHit  bool
+	hasCacheMiss bool
 }
 
 // promptTotal 返回"总输入"，兼容三种上游形态：
 //  1. 给 prompt_tokens（OpenAI 标准）⇒ 直接用，它已含缓存
-//  2. 只给缓存两项（缓存命中 + 未命中是互斥的输入划分）⇒ 两者相加
-//  3. 都不给 ⇒ 0（调用方按未知处理，不要瞎猜）
+//  2. 缓存两项齐备（键都存在，值是 0 也算）⇒ 相加（命中/未命中是互斥的输入划分）
+//  3. 都不给或只给一项 ⇒ 0（调用方按未知处理，不要瞎猜）
 func (u *sseUsage) promptTotal() int {
 	if u == nil {
 		return 0
@@ -76,9 +84,9 @@ func (u *sseUsage) promptTotal() int {
 	if u.PromptTokens > 0 {
 		return u.PromptTokens
 	}
-	// ⚠ 只有两项都 >0 才认定"这是完整的输入划分"。缺一项时相加会低估，
-	// 例如只给 hit 不给 miss 时 sum=hit，会把未命中那部分当不存在。
-	if u.CacheHitTokens > 0 && u.CacheMissTokens > 0 {
+	// ⚠ 判据是**键存在**而不是**值 >0**：全命中（miss=0）与全未命中（hit=0）
+	//   都是合法且常见的请求，用值做判据会把它们整帧丢掉。
+	if u.hasCacheHit && u.hasCacheMiss {
 		return u.CacheHitTokens + u.CacheMissTokens
 	}
 	return 0
@@ -261,6 +269,24 @@ func frameUsage(frame string) *sseUsage {
 	var f sseFrame
 	if err := json.Unmarshal([]byte(frame), &f); err != nil {
 		return nil
+	}
+	if f.Usage == nil {
+		return nil
+	}
+	// ⚠ 记录缓存两项的键**是否出现过**（不是值是否 >0）。
+	//   解析成 struct 之后就分不开「缺失」与「0」了，所以这里再解析一次 usage 原始键。
+	//   代价是每帧多一次 unmarshal 到 map —— 只在携带 usage 的帧上发生（流的最末一两帧），
+	//   不在逐 chunk 的热路径上。
+	var raw struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(frame), &raw); err == nil {
+		if _, ok := raw.Usage["prompt_cache_hit_tokens"]; ok {
+			f.Usage.hasCacheHit = true
+		}
+		if _, ok := raw.Usage["prompt_cache_miss_tokens"]; ok {
+			f.Usage.hasCacheMiss = true
+		}
 	}
 	return f.Usage
 }
