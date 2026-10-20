@@ -1667,9 +1667,13 @@ section > h2{
   border-top:3px solid var(--ink);
   border-bottom:2px solid var(--ink);
 }
-.acctgroup:nth-child(4n+2) > .ghead{background:var(--yellow)}
-.acctgroup:nth-child(4n+3) > .ghead{background:var(--acid)}
-.acctgroup:nth-child(4n+4) > .ghead{background:var(--orange)}
+/* ⚠ 第 14 节的"墨底白字"接管后，这里**只能改边框色、不能再改背景**：
+   背景一旦还是亮色，白字就会落上去（实测酸绿底 1.24:1、橙底 2.87:1）。
+   轮转的"撞色感"由 border-left/border-bottom 的 8px/3px 色条承担。
+   这几条保留的原因：它们是**色相分配**的唯一处（第 14 节只写默认色）。 */
+.acctgroup:nth-child(4n+2) > .ghead{border-color:var(--yellow)}
+.acctgroup:nth-child(4n+3) > .ghead{border-color:var(--acid)}
+.acctgroup:nth-child(4n+4) > .ghead{border-color:var(--orange)}
 .ghead .gname{font-family:var(--font-display);font-size:13px;letter-spacing:.02em}
 .ghead .gact{
   background:var(--cream);
@@ -2114,6 +2118,57 @@ section > h2, section > h2 .dim, section > h2 .dim *,
 [stroke="#58a6ff"]{stroke:var(--acc)}
 [style*="color:#58a6ff"]{color:var(--acc) !important}
 [style*="color:#0f8a4d"]{color:var(--ok) !important}
+/* ── 14. 分组头 v2：墨底白字（用户要求"名称用白色"）─────────────────────
+   # 为什么要换掉"亮色底 + 墨字"
+   用户看账号池时提出「这个名称用白色会不会更好」。两件事要同时成立：
+     ① 名称必须是白的（这是用户要的观感）；
+     ② 白色文字必须落在**够暗**的底上，否则就是上一轮刚修掉的那类问题。
+   白字在各亮底上的实测：黄底 1.15:1、酸绿 1.19:1、粉底 2.43:1、橙底 2.55:1
+   —— 白字**不能**直接铺在冲突色上（比墨字更糟）。所以把"色"从**底**移到
+   **边**：底色成墨（白字 16.4:1），每个上游用 8px 左侧色条 + 3px 底部色条
+   轮转标记，撞色感保留，字彻底看清。
+   # 深色主题
+   墨黑 #1A1A1A 在 #120F0D 的背景上几乎同色 ⇒ 深色下分组头压到**纯黑**，
+   并把底部色条留在 3px（靠彩色描边 + 白字和页面分层）。 */
+:root{--gh-ink:#1A1A1A;--gh-fg:#FFF5E6;--gh1:#FF3CAC;--gh2:#FFE600;--gh3:#00FF85;--gh4:#FF5C00}
+:root[data-theme="dark"]{--gh-ink:#000000}
+@media (prefers-color-scheme: dark){ :root:not([data-theme]){--gh-ink:#000000} }
+
+.acctgroup > .ghead,
+tr.grouprow > td{
+  background:var(--gh-ink);
+  color:var(--gh-fg);
+  border-top:3px solid var(--gh1);
+  border-bottom:3px solid var(--gh1);
+  border-left:8px solid var(--gh1);
+}
+.acctgroup:nth-child(4n+2) > .ghead,
+tr.grouprow:nth-child(4n+2) > td{border-color:var(--gh2)}
+.acctgroup:nth-child(4n+3) > .ghead,
+tr.grouprow:nth-child(4n+3) > td{border-color:var(--gh3)}
+.acctgroup:nth-child(4n+4) > .ghead,
+tr.grouprow:nth-child(4n+4) > td{border-color:var(--gh4)}
+.acctgroup > .ghead .gname,
+.acctgroup > .ghead .ghead-btn,
+.acctgroup > .ghead .dim,
+.acctgroup > .ghead .gfolded-hint,
+.acctgroup > .ghead .dim *,
+tr.grouprow > td .gname{color:var(--gh-fg)}
+/* 分组头里的按钮改成"亮底墨字"，在墨底上才跳得出来（与肤色反着用） */
+.acctgroup > .ghead > .gacts .gact,
+.acctgroup > .ghead .gact{
+  background:var(--cream);
+  color:#120F0D;
+  border:2px solid var(--cream);
+  box-shadow:2px 2px 0 var(--gh1);
+}
+.acctgroup:nth-child(4n+2) > .ghead > .gacts .gact{box-shadow:2px 2px 0 var(--gh2)}
+.acctgroup:nth-child(4n+3) > .ghead > .gacts .gact{box-shadow:2px 2px 0 var(--gh3)}
+.acctgroup:nth-child(4n+4) > .ghead > .gacts .gact{box-shadow:2px 2px 0 var(--gh4)}
+.acctgroup > .ghead > .gacts .gact:hover,
+.acctgroup > .ghead .gact:hover{background:var(--cream);color:#120F0D;filter:contrast(1.12)}
+/* 折叠三角沿用 currentColor（现在 = 奶油白） */
+.acctgroup > .ghead .acaret, .acctgroup > .ghead .ghead-btn .acaret{border-right-color:currentColor}
 /* ==== WB2API:MAXIMALISM:END ==== */
 </style>
 </head>
@@ -12836,8 +12891,11 @@ let multCatalogFailed = false;
 
   function renderModels(list) {
     models = list || [];
-    $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
-    if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
+    if (!models.length) {
+      $('mcount').textContent = '';
+      $('models').innerHTML = '<span class="dim">无可用模型</span>';
+      return;
+    }
 
     // 按上游分组渲染（T5）。三件事一起做：
     //   1. **去重**：按去掉前缀后的**裸名**去重（见 groupModelsByOwner），
@@ -12850,6 +12908,21 @@ let multCatalogFailed = false;
     //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
     //   3. **可折叠**：状态存 localStorage，刷新后保持。
     const groups = groupModelsByOwner(models, emptyModelGroups());
+    // 顶栏口径：**不能**无条件写"上游实时目录"。
+    //
+    // # 这是用户报的那个"没账号却有模型"的真因
+    // 实测（本机空池实例）：/v1/models 只有 3 条，全是 loomy 的**生图模型**，
+    // 它们来自上游内置的手册快照（internal/loomy/imagegen_ext.go 的 imageModelIDs），
+    // 不是随时拉到的实时目录 —— 而 12 个上游里其余 11 个（真·目录）一条都没有。
+    // 于是界面写着"（3 个，上游实时目录）"，实际上 3 条全是**内置声明且当前不可调用**。
+    // 数据没错，错在**没标来源**：把"内置快照"说成"实时目录"就是在骗读者。
+    // ⇒ 有内置项就点名个数，纯实时才敢写"上游实时目录"。
+    const builtinCount = groups.reduce((n, g) => n + ((g.accountCount === 0) ? g.items.length : 0), 0);
+    $('mcount').textContent = '（' + models.length + ' 个'
+      + (builtinCount
+        ? '，其中 ' + builtinCount + ' 个来自内置声明（无可用账号，未拉取实时目录）'
+        : '，上游实时目录')
+      + '）';
     $('models').innerHTML = groups.map(renderModelGroup).join('');
     const sel = $('model'), keep = sel.value;
     // T7：模型下拉按上游筛选，并按 id **去重**。
@@ -13047,7 +13120,13 @@ let multCatalogFailed = false;
       const bare = multKeyOf(m.id);
       // 归属：前缀优先（它就是显式指定的上游），否则用 owned_by。
       const owner = prefix || m.owned_by || '（未标注）';
-      if (!byOwner.has(owner)) byOwner.set(owner, { owner: owner, items: [], seen: new Set() });
+      // accountCount 对**所有**组都要有（原来只有空组带它）：
+      // 渲染层要用它区分"实时目录"与"内置声明下但无账号" ——
+      // 缺这个字段时 accountCount 恒为 undefined ⇒ 那三种"没有"又分不开了。
+      if (!byOwner.has(owner)) {
+        const pi = providerInfo(owner);
+        byOwner.set(owner, { owner: owner, items: [], seen: new Set(), accountCount: Number(pi && pi.account_count) || 0 });
+      }
       const g = byOwner.get(owner);
       if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
       g.seen.add(bare);
@@ -13084,23 +13163,30 @@ let multCatalogFailed = false;
     // 改为一句能自我解释的说明 —— 见 emptyModelGroups 的注释：
     // **空白必须能自我解释**，否则用户只会以为功能坏了。
     let body;
+    // "有模型但是 0 个账号"是最容易骗人的一格：模型来自**内置手册快照**
+    // （不是上游实时目录），当前根本调不动。所以它必须与"实时目录"长得不一样：
+    // 分组标题写"内置 N 项 · 无可用账号"，正文上方再压一行说明。
+    const builtin = g.items.length > 0 && g.accountCount === 0;
     if (!g.items.length) {
       const why = (g.accountCount === 0)
         ? '没有可用账号，无法获取模型目录。先在「账号池」添加账号。'
         : '上游没有返回模型目录（账号可用但目录为空）。可用「强制刷新目录」重试。';
       body = `<div class="chips"><span class="dim" style="font-size:12px">${esc(why)}</span></div>`;
     } else {
-      body = `<div class="chips">${g.items.map(m =>
+      const note = builtin
+        ? `<div class="dim" style="font-size:11.5px;margin:0 0 6px">无可用账号：以下 ${g.items.length} 项来自<b>内置手册快照</b>，不是上游实时目录，当前不可调用。添加到「账号池」后才会拉取实时目录。</div>`
+        : '';
+      body = note + `<div class="chips">${g.items.map(m =>
         `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
         + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>`;
     }
     return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
       <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
               aria-expanded="${open ? 'true' : 'false'}"
-              title="${esc(g.owner)} · ${g.items.length} 个模型（点标题折叠/展开）">
+              title="${esc(g.owner)} · ${builtin ? ('内置声明 ' + g.items.length + ' 项，无可用账号（不是实时目录）') : (g.items.length + ' 个模型')}（点标题折叠/展开）">
         <span class="mcaret"></span>
         <span class="mowner">${esc(g.owner)}</span>
-        <span class="mcount2">${g.items.length} 个模型</span>
+        <span class="mcount2">${builtin ? (g.items.length + ' 项内置声明 · 无可用账号') : (g.items.length + ' 个模型')}</span>
       </button>
       ${body}
     </div>`;
