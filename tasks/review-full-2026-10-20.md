@@ -163,3 +163,74 @@ func (c *cancelReadCloser) Close() error { c.cancel(); return c.rc.Close() }
 ⇒ 这是**诚实的**（旧数据确实不可信），但界面上看不出来。
 **建议**（未实施）：命中率卡片加一行小字「样本 N 条（已排除 M 条量纲异常的历史行）」，
 让"为什么两个数不一样"在界面上自解释，而不是留给人猜。
+---
+
+## 七、第四~五轮：`wire/payload.go` 的字段白名单 + 全仓 `_ =` 扫描
+
+### ① `supportedFields` 白名单（24 个字段）—— 判定不是问题
+
+```go
+"model", "messages", "stream", "tools", "tool_choice", "temperature", "top_p",
+"max_tokens", "frequency_penalty", "presence_penalty", "parallel_tool_calls",
+"stop", "seed", "user", "n", "logprobs", "top_logprobs", "response_format",
+"reasoning_effort", "reasoningEffort", "thinking", "functions", "function_call"
+```
+
+**处理顺序（`prepareBodyOptWithLimits`）**：
+
+```
+L39  obj["stream"] = true
+L50  injectThinking            ← 必须在 whitelist 之前（否则刚注入就被剔）
+L58  normalizeMaxTokens        ← max_completion_tokens → max_tokens
+L61  applyFieldWhitelist       ← 剔除未知字段
+L63  sanitizeMessages
+```
+
+**为什么白名单而不是"透传+清洗"**（原注释已说明，这里留档）：
+上游对未知字段**直接 400**，而网关会把参数错误误判成账号故障去冷却账号 ⇒
+**一个客户端带的新字段就能毒化整个账号池**，表现为所有客户端都 503。
+
+### ⚠ 一个值得记的"疑似缺口"，但我判定不改
+
+**`stream_options` 不在白名单**，而它是 `include_usage: true` 的载体 ——
+被剔除意味着**客户端要求"流末返回 usage"这件事被吞了**。
+
+看起来像一个真缺口（少了 usage ⇒ token 只能估算），但**证据否掉了**：
+
+1. 真实日志里 `tokens` 有精确值（`tokens=49367` / `hit=24576`）⇒ 上游确实返回了 usage
+2. `internal/upstream/desktop.go:448` 那条路径**网关自己注入** `stream_options.include_usage=true`，
+   而它**不经过** `prepareBodyOptWithLimits` ⇒ 该有的地方有
+
+**为什么仍然不把它加进白名单**：原注释记录过一个真踩过的坑 ——
+`stream_options` 是让账号池被毒化的三兄弟之一（`max_completion_tokens` + `store` + `stream_options`）。
+盲目加进白名单，等于把"某个上游不认它就 400"的风险放回来，
+而那类 400 会被误判成账号故障。
+
+⇒ **这是设计权衡，不是缺陷**。要改它需要先知道"每个上游是否认这个字段"，
+那需要真机逐上游验证，收益（精确 usage）与现状（已经能拿到 usage）不成比例。
+
+### ② 全仓 `_ =` 扫描（146 处，逐个人工判断）
+
+```
+明显可吞 62 处（Body.Close / Encode / Flush / Print / SetDeadline…）
+需人工判断 84 处：
+  ✓ 判定可吞 8 处
+  ✓ 已修 2 处（loomy 面板快照 / clientlogin 归档凭证，commit 8e98b9a）
+  ⬜ 低价值未修 4 处：
+      clientlogin:864/1083  writeFileAtomic 写备份文件 —— 备份失败不影响主流程
+      pool.go:2642 / settings_store.go:437  os.MkdirAll —— 后续 WriteFile 会报错
+```
+
+### ③ 「沉默的失败」—— 本轮 review 的主线发现（四例）
+
+| commit | 位置 | 症状 | 严重度 |
+|---|---|---|---|
+| `4223728` | `logbuf/sink.go` | Scanner 未检查 `sc.Err()` → 日志静默截断 | Major |
+| `a0fcaf0` | `account/session.go` | `saveLocked` 的 err 被吞 7 处 → **Revoke 重启后复活** | **Critical（安全）** |
+| `8e98b9a` | `loomy/adminpoints.go` | 面板快照三处早退全静默 → 缓存静默不更新 | Minor |
+| `8e98b9a` | `clientlogin/clientlogin.go` | 归档写入失败被吞 → 账号静默未归档 | Minor |
+
+**共同点：失败时一个字都不留，用户只会觉得"数据莫名其妙不对"。**
+
+⚠ 唯一够得上 Critical 的是 `a0fcaf0` 里的 `Revoke` ——
+用户点"退出登录"看到成功，而那个 token 在进程重启后又能用了。
