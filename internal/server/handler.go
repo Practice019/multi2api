@@ -1526,8 +1526,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if ue, ok := gateway.AsUpstreamHTTPError(ferr); ok {
 				st = ue.Status
 			}
-			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "channel_error",
-				st, -1, nil, "channel_error:"+fw.ChannelName, 0, "", "", fw.ChannelID, fw.UpstreamModel)
+			// ⚠ 2026-10-20 修：失败时 `fw` 是**零值**（forwardViaChannel 返回 nil 语义），
+			//   而下面仍用 fw.ChannelName / fw.ChannelID / fw.UpstreamModel ⇒ 全空。
+			//   实测后果（用户报"又怎么回事啊"，2026-10-20 09:36 那条 429）：
+			//     status=429  provider=channel_error  error=(空)  decision="channel_error:"  channel=(空)
+			//   既看不出哪个渠道、也看不出为什么失败 —— 只剩一个状态码，排障等于从零开始。
+			//
+			//   provider 参数原来传字面量 "channel_error"（那是错误类型，不是 provider），
+			//   于是 provider 列对渠道失败毫无信息量。改传空串，由 model 列与 decision 说明。
+			//
+			//   TODO：根因修法是让 forwardViaChannel 失败时也回填部分 fw
+			//   （ChannelID/ChannelName/UpstreamModel），那要动它的返回语义，单独一步做。
+			detail := ferr.Error()
+			if fw.ChannelName != "" {
+				detail = fw.ChannelName + ": " + detail
+			}
+			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "",
+				st, -1, nil, "channel_error: "+detail, 0, "", "", fw.ChannelID, fw.UpstreamModel)
 			// ⚠ 走 writeChannelError 而不是写死 502：上游的 429/401 要原样透传给客户端
 			// （见 channels_forward.go 里那段"实测踩过"的注释）。
 			h.writeChannelError(w, ferr)
