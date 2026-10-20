@@ -7,6 +7,48 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## 未发布 — 2026-10-21
+
+> 本版主题：**前端视觉语言 v3 · MAXIMALISM（霓虹油墨）**。用户要求
+> 「用 designforai.dev 的 maximalism 风格重构前端」。三个页面（控制台 / 登录 /
+> 渠道）换成同一套：奶油纸底 + 墨线 + 五个冲突色 + 硬投影 + 零圆角 +
+> 颗粒纹理 + 跑马灯 + 旋转贴纸。
+
+### 变更
+
+- **新增 `internal/server/theme-max.css`（唯一真相）** + `tools/theme_sync.js`：
+  把设计系统内联进 `webui.html` / `webui-login.html` / `webui-channels.html`
+  的 `<style>` 末尾（幂等，`--check` 可进 CI）。三个页面仍是单文件、零外部依赖。
+- **外壳吵、数据静**：页头 / 侧栏 / 分区标题带 / 统计卡 / 分组头 / 按钮 / 空态 /
+  弹窗走冲突色与硬投影；表格内容区、表单、日志行、代码块只留墨线与等宽字。
+- **字体零外部请求**：展示字用系统超重黑体栈（Anton → Arial Black/Impact/PingFang SC），
+  标签与数字走等宽，正文仍是系统 UI 字。**没有**引 Google Fonts（会被
+  「零外部依赖」判据判红，离线部署也会退化成 Arial）。
+- **分组头四色轮转**（粉 / 黄 / 酸绿 / 橙）：账号池一屏 12 个上游，同一个粉色
+  重复 12 遍会糊成一片；轮转既够吵，又让"换了一组"一眼可见。墨字在四种亮底上 >= 5.4:1。
+- **新增装饰**：页头旋转贴纸（`maxsticker`）、全宽跑马灯（`maxmarq`，40s 线性循环，
+  hover 暂停、`prefers-reduced-motion` 静止）、空态半调网点、整页颗粒纹理
+  （`body::after`，pointer-events:none，压在通知区之下）。
+- **深色主题不套亮卡**：`.card` 在深色下仍是深底（否则 `final_visual` 的亮度方向判据红），
+  改成深底 + 亮描边；浅色下统计卡四张四色。
+- 新增 `tests/frontend/shot_maximalism.js`：一拍四屏两主题 + 登录页，产物在
+  `.task/maximalism-v3/shots/`（不进版本库）。
+
+### 未改动（刻意）
+
+- 类名、DOM 结构、JS 逻辑、热力图 5 档色阶（`--hm0..--hm4` 仍严格照抄 openViking 的绿阶）、
+  留白紧度（上一轮刚按"更紧凑"收紧过）、任何后端代码。
+
+### 复验
+
+    node tools/theme_sync.js --check
+    go test ./internal/server/... -count=1
+    node tests/frontend/shot_maximalism.js
+    # 需真实例：contrast_e2e（AA 实算）/ final_visual（亮度方向）/ theme_e2e（三态 + 对比度）
+
+对照度实算（浅 / 深）：thead 14.1/15.0 · tbody 15.4/16.5 · .pill 14.2/14.2 ·
+.pill.dim 12.7/12.6 · pre 7.8/9.9 —— 全部 >= 4.5:1（AA）。
+
 ## 未发布 — 2026-10-19
 
 > 本版主题：**登录系统收成单账号管理员**。用户原话：「我们那个用户和管理员，

@@ -133,6 +133,913 @@
   summary { font-size: 12px; color: var(--muted); cursor: pointer; }
   details p { margin: 7px 0 0; font-size: 11.5px; color: var(--muted); }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+/* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
+/* ══════════════════════════════════════════════════════════════════════
+   视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
+   风格来源：https://designforai.dev/style/maximalism
+     · 冲突色（粉 / 黄 / 电蓝 / 酸绿 / 橙）+ 奶油纸底 + 墨线
+     · 硬投影（6px 6px 0）+ 零圆角 + 3px 描边
+     · 混合字体：重体展示字（标题）/ 等宽（标签与数字）/ 衬线斜体（副标题）
+     · 颗粒纹理压在整页之上，把互相打架的层粘在一起
+     · 但**必须留一块安静区**：数据表内部不放色块、不放阴影，只留墨线
+
+   # 为什么"外壳吵闹、数据安静"
+   这一页是**高密度中后台**（账号池 76 行、请求日志整屏），maximalism 的
+   全套铺满会把状态胶囊和黄底表头混成一片，读不出哪一行出错。所以：
+     · 吵：页头 / 侧栏 / 分区标题带 / 统计卡 / 按钮 / 空态 / 提示 / 弹窗
+     · 静：表格内容区、表单控件、日志行、代码块
+   配色、字体、描边、纹理一律统一 —— 吵与静是同一套语言的两个音量。
+
+   # 守卫（这些不是注释，是判据，改代码前先读）
+   ① 浅色主题下 body / .card / pre / .sidebar 的**实际亮度必须 > 0.5**，
+      深色 < 0.5（tests/frontend/final_visual.js）。⇒ 统计卡在深色主题下
+      **不能**铺亮色底，只能用深底 + 亮描边。
+   ② .pill / thead th / tbody td / pre 的文字对比度按 WCAG AA >= 4.5:1
+      （tests/frontend/contrast_e2e.js，浅深两套主题都量）。
+      ⇒ 亮色块（粉/黄/酸绿）上的文字一律用墨 #120F0D，不用白色。
+   ③ 侧栏 active 按钮的徽章底色必须是 --acc 的 22% 混合，且**同色相**
+      （tests/frontend/p4_badge_check.js）。⇒ active 按钮的底色只能是 --acc
+      本身，换成墨黑会让 composite 的色相跑掉。
+   ④ 所有 .pill 变体的 border-style 必须一致（verify_account_buttons.js）。
+   ⑤ 无 emoji、无外部资源（gen_ui_manifest.js）；圆角统一 0。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. 调色板：五个冲突色 + 奶油纸 + 墨 ─────────────────────────────── */
+:root{
+  /* 字面色（任何主题下都一样，只当**填充**用，文字仍走语义色） */
+  --ink:#1A1A1A;
+  --cream:#FFF5E6;
+  --pink:#FF3CAC;
+  --yellow:#FFE600;
+  --blue:#2B00FF;
+  --acid:#00FF85;
+  --orange:#FF5C00;
+
+  /* 字体：零外部请求（本仓铁律「Release 下载即用」）。
+     展示字优先 Windows / macOS 自带的超重黑体；中文落到系统黑体，
+     靠 font-weight 900 + 负字距撑出海报感。 */
+  --font-display:'Anton','Archivo Black','Impact','Haettenschweiler','Arial Black',
+                 'PingFang SC','Microsoft YaHei',sans-serif;
+  --font-ui:system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+  --font-serif-max:Georgia,'Times New Roman','Songti SC',serif;
+
+  /* 硬投影与描边（maximalism 的签名） */
+  --hard:#1A1A1A;
+  --shadow-hard:6px 6px 0 var(--hard);
+  --shadow-hard-sm:3px 3px 0 var(--hard);
+  --edge:2px solid var(--ink);
+  --edge-3:3px solid var(--ink);
+
+  /* 反色对（hover / active 用）：亮主题反成墨底奶油字，暗主题反成黄底墨字 */
+  --invert-bg:#1A1A1A;
+  --invert-fg:#FFF5E6;
+
+  /* 语义角色 —— 浅色（奶油纸）。对比度均按 #FFF5E6 复算：
+     --fg 16:1 · --dim 8.1:1 · --acc 7.6:1 · --ok 5.6:1 · --warn 6.1:1 · --err 5.5:1 */
+  --bg:#FFF5E6;
+  --panel:#FFEFD8;
+  --panel2:#FFE3BE;
+  --line:#1A1A1A;
+  --fg:#1A1A1A;
+  --dim:#5C4636;
+  --acc:#2B00FF;
+  --on-acc:#FFF5E6;
+  --ok:#0A6B2E;
+  --warn:#A83600;
+  --err:#C6004B;
+  --code-bg:#FFF0CF;
+  --overlay:rgba(26,26,26,.56);
+  --shadow:rgba(26,26,26,.28);
+
+  /* 分区标题带（浅色 = 黄底墨字） */
+  --band-bg:#FFE600;
+  --band-fg:#120F0D;
+  --band-line:#1A1A1A;
+
+  /* 统计卡：浅色下四张卡四种底色（吵），深色下改成深底 + 亮描边（守卫①） */
+  --card1:#FFE600;
+  --card2:#00FF85;
+  --card3:#FFF5E6;
+  --card4:#FF3CAC;
+  --card-border1:#1A1A1A;
+  --card-border2:#1A1A1A;
+  --card-border3:#1A1A1A;
+  --card-border4:#1A1A1A;
+
+  /* 登录页 / 渠道页的旧变量名 —— 两个页面各有一套，在这里收口成别名，
+     免得同一个"面板底色"在三个页面里各说各话。 */
+  --card:var(--panel);
+  --muted:var(--dim);
+  --accent:var(--acc);
+  --accent-fg:#FFF5E6;
+  --input-bg:var(--bg);
+  --err-bg:#FFDDE6;
+  --err-fg:#9E0033;
+  --err-line:#1A1A1A;
+  --radius:0;
+  --hover:var(--panel2);
+}
+
+/* 暗色（系统偏好）—— 只对**没有 data-theme** 的页面生效（登录页 / 渠道页）。
+   控制台由 <head> 里的同步脚本显式写 data-theme，所以永远不会命中这一段。 */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme]){
+    --bg:#120F0D;
+    --panel:#1C1714;
+    --panel2:#271F1A;
+    --line:#FFE600;
+    --fg:#FFF5E6;
+    --dim:#C7B4A0;      /* 9.5:1 on #120F0D */
+    --acc:#FF3CAC;      /* 5.9:1 */
+    --on-acc:#120F0D;
+    --ok:#00FF85;
+    --warn:#FFD400;
+    --err:#FF5470;      /* 6.1:1 */
+    --code-bg:#0B0908;
+    --overlay:rgba(0,0,0,.74);
+    --shadow:rgba(0,0,0,.62);
+    --hard:#FF3CAC;
+    --invert-bg:#FFE600;
+    --invert-fg:#120F0D;
+    --band-bg:#FF3CAC;
+    --band-fg:#120F0D;
+    --card1:#271F1A; --card2:#1C1714; --card3:#271F1A; --card4:#1C1714;
+    --card-border1:#FFE600; --card-border2:#00FF85;
+    --card-border3:#FF3CAC; --card-border4:#2B00FF;
+    --card:var(--panel);
+    --muted:var(--dim);
+    --accent:var(--acc);
+    --accent-fg:#120F0D;
+    --input-bg:#0B0908;
+    --err-bg:#2A0A12;
+    --err-fg:#FFB4C2;
+    --err-line:#FFE600;
+    --hover:var(--panel2);
+  }
+}
+/* 控制台：显式 data-theme 优先（与上一段同样的值，不改口径） */
+:root[data-theme="dark"]{
+  --bg:#120F0D;
+  --panel:#1C1714;
+  --panel2:#271F1A;
+  --line:#FFE600;
+  --fg:#FFF5E6;
+  --dim:#C7B4A0;
+  --acc:#FF3CAC;
+  --on-acc:#120F0D;
+  --ok:#00FF85;
+  --warn:#FFD400;
+  --err:#FF5470;
+  --code-bg:#0B0908;
+  --overlay:rgba(0,0,0,.74);
+  --shadow:rgba(0,0,0,.62);
+  --hard:#FF3CAC;
+  --invert-bg:#FFE600;
+  --invert-fg:#120F0D;
+  --band-bg:#FF3CAC;
+  --band-fg:#120F0D;
+  --card1:#271F1A; --card2:#1C1714; --card3:#271F1A; --card4:#1C1714;
+  --card-border1:#FFE600; --card-border2:#00FF85;
+  --card-border3:#FF3CAC; --card-border4:#2B00FF;
+  --card:var(--panel);
+  --muted:var(--dim);
+  --accent:var(--acc);
+  --accent-fg:#120F0D;
+  --input-bg:#0B0908;
+  --err-bg:#2A0A12;
+  --err-fg:#FFB4C2;
+  --err-line:#FFE600;
+  --hover:var(--panel2);
+}
+/* 控制台：显式 light（覆盖文件前面那套 GitHub Light 值） */
+:root[data-theme="light"]{
+  --bg:#FFF5E6;
+  --panel:#FFEFD8;
+  --panel2:#FFE3BE;
+  --line:#1A1A1A;
+  --fg:#1A1A1A;
+  --dim:#5C4636;
+  --acc:#2B00FF;
+  --on-acc:#FFF5E6;
+  --ok:#0A6B2E;
+  --warn:#A83600;
+  --err:#C6004B;
+  --code-bg:#FFF0CF;
+  --overlay:rgba(26,26,26,.56);
+  --shadow:rgba(26,26,26,.28);
+  --hard:#1A1A1A;
+  --invert-bg:#1A1A1A;
+  --invert-fg:#FFF5E6;
+  --band-bg:#FFE600;
+  --band-fg:#120F0D;
+  --card1:#FFE600; --card2:#00FF85; --card3:#FFF5E6; --card4:#FF3CAC;
+  --card-border1:#1A1A1A; --card-border2:#1A1A1A;
+  --card-border3:#1A1A1A; --card-border4:#1A1A1A;
+  --card:var(--panel);
+  --muted:var(--dim);
+  --accent:var(--acc);
+  --accent-fg:#FFF5E6;
+  --input-bg:var(--bg);
+  --err-bg:#FFDDE6;
+  --err-fg:#9E0033;
+  --err-line:#1A1A1A;
+  --hover:var(--panel2);
+}
+
+/* ── 2. 字体与标题层级 ───────────────────────────────────────────────── */
+body{
+  font-family:var(--font-ui);
+  background-image:none;
+}
+/* 颗粒纹理：压在整页之上（pointer-events:none），把互相打架的色块粘成一张纸。
+   z-index 取 50 —— 在内容之上、通知区（200）与原生 popover 之下，
+   于是提示仍然清晰可读。mix-blend-mode 让暗底上不糊。 */
+body::after{
+  content:'';
+  position:fixed;
+  inset:0;
+  z-index:50;
+  pointer-events:none;
+  opacity:.14;
+  mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme]) body::after{opacity:.10;mix-blend-mode:screen}
+}
+:root[data-theme="dark"] body::after{opacity:.10;mix-blend-mode:screen}
+
+h1{
+  font-family:var(--font-display);
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:-.02em;
+}
+h2,h3{
+  font-family:var(--font-display);
+  font-weight:900;
+  letter-spacing:-.01em;
+}
+
+/* ── 3. 报头：贴纸 + 跑马灯 ──────────────────────────────────────────── */
+header{
+  border-bottom:3px solid var(--ink);
+  background:var(--panel);
+  box-shadow:0 5px 0 var(--hard);
+}
+header h1{font-size:20px;line-height:1.1}
+header h1 small{
+  display:inline-block;
+  margin-left:8px;
+  padding:1px 6px;
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:#120F0D;
+  background:var(--pink);
+  border:2px solid var(--ink);
+  vertical-align:3px;
+}
+/* 贴纸：maximalism 的签名元素 —— 旋转 -6deg、硬投影、亮底墨字。
+   放在页头的弹性流里（不用绝对定位），所以永远不会盖住读数条。 */
+.maxsticker{
+  display:inline-flex;
+  align-items:center;
+  padding:2px 9px;
+  transform:rotate(-6deg);
+  background:var(--yellow);
+  color:#120F0D;
+  border:2px solid var(--ink);
+  box-shadow:3px 3px 0 var(--hard);
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+/* 跑马灯：整幅黄带 + 墨字 + 3px 墨线，40s 线性循环。
+   两段相同文本 ⇒ translateX(-50%) 正好接上（无缝）。
+   hover 暂停、reduced-motion 停止 —— 动效只给"重复元素"。 */
+.maxmarq{
+  display:flex;
+  align-items:center;
+  overflow:hidden;
+  height:26px;
+  background:var(--yellow);
+  color:#120F0D;
+  border-bottom:3px solid var(--ink);
+  font-family:var(--font-display);
+  font-size:13px;
+  letter-spacing:.18em;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+.maxmarq-track{
+  display:flex;
+  flex:none;
+  animation:wb-marq 46s linear infinite;
+}
+.maxmarq-track span{
+  flex:none;
+  padding:0 24px;
+}
+@keyframes wb-marq{
+  from{transform:translateX(0)}
+  to{transform:translateX(-50%)}
+}
+.maxmarq:hover .maxmarq-track{animation-play-state:paused}
+@media (prefers-reduced-motion: reduce){
+  .maxmarq-track{animation:none}
+  *{transition:none !important;animation:none !important}
+}
+
+/* 页头读数条：等宽、上排、墨线分隔 */
+.topstats .ts{
+  border-left:2px solid var(--line);
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.02em;
+}
+.topstats .ts b{font-family:var(--font-mono);font-weight:700}
+.dot{border:2px solid var(--ink)}
+.who{font-family:var(--font-mono);font-size:11px}
+
+/* ── 4. 侧栏（导航）───────────────────────────────────────────────────── */
+.layout{gap:14px}
+.sidebar{
+  border:3px solid var(--ink);
+  background:var(--panel);
+  box-shadow:6px 6px 0 var(--hard);
+  padding:9px 7px;
+  gap:1px;
+}
+.sidebar button{
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:var(--fg);
+  font-family:var(--font-mono);
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:.02em;
+  padding:5px 9px 5px 13px;
+}
+.sidebar button:hover{
+  background:var(--panel2);
+  color:var(--fg);
+  box-shadow:inset 3px 0 0 var(--pink);
+}
+/* 守卫③：active 底色只能是 --acc 本身（徽章复合色的色相靠它） */
+.sidebar button.active{
+  background:var(--acc);
+  color:var(--on-acc);
+  box-shadow:3px 3px 0 var(--hard);
+}
+.sidebar button.active::before{
+  content:'';
+  position:absolute;
+  left:0;
+  top:0;
+  bottom:0;
+  width:4px;
+  height:auto;
+  transform:none;
+  background:var(--yellow);
+  border-radius:0;
+}
+.sidebar .badge{
+  margin-left:8px;
+  padding:0 5px;
+  font-family:var(--font-mono);
+  font-size:10px;
+  color:var(--invert-fg);
+  background:var(--invert-bg);
+  border:0;
+  border-radius:0;
+}
+.sidebar button.active .badge{
+  color:#120F0D;
+  background:color-mix(in srgb, var(--acc) 22%, transparent);
+  border:2px solid var(--ink);
+  border-radius:0;
+}
+.navgroup + .navgroup{
+  margin-top:9px;
+  padding-top:9px;
+  border-top:3px solid var(--ink);
+}
+.navgrouphd{
+  padding:3px 7px;
+  background:var(--pink);
+  color:#120F0D;
+  border:0;
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+}
+.navgrouphd:hover{color:#120F0D}
+.navgrouphd .navgcount{
+  background:var(--ink);
+  color:var(--cream);
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-weight:700;
+}
+.navgrouphd .navgcount.zero{background:transparent;color:#120F0D}
+.navgrouphd .navgdef{
+  border:2px solid var(--ink);
+  border-radius:0;
+  font-family:var(--font-mono);
+  letter-spacing:.08em;
+}
+.navitems{gap:1px}
+.navitems button{border-bottom:1px solid color-mix(in srgb, var(--fg) 22%, transparent)}
+
+/* ── 5. 页面容器与分区 ──────────────────────────────────────────────── */
+.content{gap:14px}
+section{
+  border:3px solid var(--ink);
+  border-radius:0;
+  background:var(--panel);
+}
+/* 分区标题带：maximalism 里最省力的"吵"——一条实色横带。
+   浅色黄底墨字（13.5:1），暗色粉底墨字（5.4:1）。 */
+section > h2{
+  padding:6px 14px;
+  background:var(--band-bg);
+  color:var(--band-fg);
+  border-bottom:3px solid var(--band-line);
+  font-family:var(--font-display);
+  font-size:14px;
+  font-weight:900;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+.boardsec + .boardsec{border-top:3px solid var(--ink)}
+.boardsec h3{
+  padding:14px 16px 2px;
+  font-size:19px;
+  letter-spacing:-.01em;
+}
+.boardsec h3 button{
+  font-family:var(--font-mono);
+  font-size:11px;
+  box-shadow:var(--shadow-hard-sm);
+}
+.body{padding:12px 14px}
+
+/* ── 6. 统计卡 / 面板 ──────────────────────────────────────────────── */
+/* 统计卡：只有**仪表盘那组**（.cards）铺亮底色。别把 .card 一律染色 ——
+   登录页的那张卡也叫 .card，一律染色会让登录卡变成黄块（实测踩过）。 */
+.card{
+  background:var(--panel2);
+  border:2px solid var(--ink);
+  border-radius:0;
+  box-shadow:4px 4px 0 var(--hard);
+}
+.cards .card{background:var(--card1);border-color:var(--card-border1)}
+.cards .card:nth-child(4n+2){background:var(--card2);border-color:var(--card-border2)}
+.cards .card:nth-child(4n+3){background:var(--card3);border-color:var(--card-border3)}
+.cards .card:nth-child(4n+4){background:var(--card4);border-color:var(--card-border4)}
+.card .k{
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--fg);
+}
+/* 数字用等宽 + 负字距，是这一层的"展示字" */
+.card .v{
+  font-family:var(--font-mono);
+  font-size:21px;
+  font-weight:700;
+  letter-spacing:-.03em;
+}
+.card .k .ctip{
+  background:var(--ink);
+  color:var(--cream);
+  border-radius:0;
+}
+.panel,.gitem,.job-item,.healthbar,.keyhint,.notice,.hovertip,.ops-menu,.colset{
+  border-radius:0;
+}
+.panel,.gitem,.job-item{
+  border:2px solid var(--ink);
+  background:var(--panel2);
+}
+.job-item{box-shadow:4px 4px 0 var(--hard)}
+.panelhd,.ghead2,.mgrouphead,.log-head{
+  font-family:var(--font-mono);
+  font-weight:700;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+/* 分组头：**四种底色轮转**。账号池一屏有 12 个上游 ⇒ 同一个粉色重复 12 遍
+   会糊成一片、反而分不出组；轮转既够吵，又让"换了一组"一眼可见。
+   墨字在所有四种亮底上都 >= 5.4:1。 */
+.ghead{
+  background:var(--pink);
+  color:#120F0D;
+  border-top:3px solid var(--ink);
+  border-bottom:2px solid var(--ink);
+}
+.acctgroup:nth-child(4n+2) > .ghead{background:var(--yellow)}
+.acctgroup:nth-child(4n+3) > .ghead{background:var(--acid)}
+.acctgroup:nth-child(4n+4) > .ghead{background:var(--orange)}
+.ghead .gname{font-family:var(--font-display);font-size:13px;letter-spacing:.02em}
+.ghead .gact{
+  background:var(--cream);
+  color:#120F0D;
+  border:2px solid var(--ink);
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-size:11px;
+  font-weight:700;
+  box-shadow:2px 2px 0 var(--hard);
+}
+.ghead .gact:hover{background:var(--ink);color:var(--cream)}
+.tbar,.pbar,.rankbar{background:color-mix(in srgb, var(--fg) 16%, transparent);border-radius:0}
+.tbar i,.pbar i,.rankbar i{border-radius:0;background:var(--acc)}
+.heatcell{border-radius:0}
+
+/* ── 7. 控件 ───────────────────────────────────────────────────────── */
+button,input,select,textarea{border-radius:0}
+input,select,textarea{
+  border:2px solid var(--line);
+  background:var(--panel2);
+  color:var(--fg);
+}
+input:focus,select:focus,textarea:focus{
+  border-color:var(--acc);
+  outline:3px solid var(--acc);
+  outline-offset:1px;
+}
+input[type="checkbox"],input[type="radio"]{
+  accent-color:var(--acc);
+  width:14px;
+  height:14px;
+}
+button{
+  border:2px solid var(--line);
+  background:var(--panel2);
+  color:var(--fg);
+  font-family:var(--font-mono);
+  font-weight:700;
+}
+button:hover:not(:disabled){
+  background:var(--invert-bg);
+  color:var(--invert-fg);
+  border-color:var(--line);
+}
+button:active:not(:disabled){transform:translate(1px,1px)}
+button.primary{
+  background:var(--acc);
+  border-color:var(--ink);
+  color:var(--on-acc);
+  font-family:var(--font-display);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  box-shadow:3px 3px 0 var(--hard);
+}
+button.primary:hover:not(:disabled){
+  background:var(--acc);
+  color:var(--on-acc);
+  filter:contrast(1.15);
+}
+button:disabled{opacity:.45;cursor:not-allowed}
+/* 高密度区（表格行 / 日志 / 分页 / 浮层菜单）里按钮退到 1px 描边、无投影 ——
+   数据区保持安静，这也是本仓既有的"表格内不叠阴影"纪律。 */
+td button, .log-row button, .ops-menu button, .pager button, .minibtn, .colset button,
+.field button, .gact, .heatfoot button, .pager .pagesize{
+  border-width:1px;
+  box-shadow:none;
+  font-family:var(--font-mono);
+}
+.pager .pagesize{background:var(--panel2);color:var(--fg);border:2px solid var(--line)}
+.tog button.on{background:var(--acc);color:var(--on-acc)}
+.field label,.field .hint,.info-line,.heatstats .k,.kvs .k,.card .k,.pager,.log-head{
+  letter-spacing:.04em;
+}
+.field label{
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  font-weight:700;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--dim);
+}
+fieldset{border:2px solid var(--ink);border-radius:0}
+legend{
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  font-weight:700;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+}
+.subgroup{
+  border-top:3px solid var(--ink);
+  font-family:var(--font-mono);
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  font-size:11px;
+}
+
+/* ── 8. 表格：外壳有线条，内容只有墨线 ──────────────────────────────── */
+table{font-size:12.5px}
+/* 表头退回"安静"：账号池一屏有 12 张表 ⇒ 12 条黄带会把分组头的轮转盖掉。
+   一条墨线 + 等宽大写就够认；吵的地方留给分区标题带与分组头。 */
+thead th{
+  background:var(--panel2);
+  color:var(--fg);
+  border-bottom:2px solid var(--fg);
+  font-family:var(--font-mono);
+  font-weight:700;
+  font-size:10.5px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+th,td{border-bottom:1px solid color-mix(in srgb, var(--fg) 30%, transparent)}
+tbody tr:hover{background:var(--panel2)}
+tr.grouprow > td{
+  background:var(--pink);
+  color:#120F0D;
+  border-top:2px solid var(--ink);
+  font-family:var(--font-mono);
+  font-weight:700;
+  letter-spacing:.04em;
+}
+.acctgroup{border-top:3px solid var(--ink)}
+.acctgroup > .ghead{background:var(--pink);color:#120F0D}
+.acctgroup > .ghead .ghead-btn{font-family:var(--font-display);font-size:13px}
+.acctgroup > .ghead > .gacts .gact{
+  background:var(--cream);
+  color:#120F0D;
+  border:2px solid var(--ink);
+  box-shadow:2px 2px 0 var(--hard);
+}
+.acctgroup > .ghead > .gacts .gact:hover{background:var(--ink);color:var(--cream)}
+.accttable--aligned tbody tr:hover{background:var(--panel2)}
+
+/* ── 9. 状态胶囊 / 徽章 / chip：实底墨字（亮底上不出现白字）──────────── */
+/* 守卫④：所有变体的 border-style 必须一致（solid） */
+.pill{
+  padding:1px 7px;
+  border:2px solid var(--ink);
+  border-radius:0;
+  background:var(--panel2);
+  color:var(--fg);
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  line-height:1.4;
+}
+.pill.ok{background:var(--acid);color:#120F0D}
+.pill.warn{background:var(--yellow);color:#120F0D}
+.pill.err{background:var(--pink);color:#120F0D}
+.pill.dim{
+  background:color-mix(in srgb, var(--fg) 10%, transparent);
+  color:var(--fg);
+  border-color:var(--line);
+}
+.badge{
+  border:0;
+  border-radius:0;
+  background:var(--invert-bg);
+  color:var(--invert-fg);
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:1px 6px;
+}
+.badge--hot{background:var(--acid);color:#120F0D}
+.badge--cold{background:var(--yellow);color:#120F0D}
+.badge--ro{background:var(--panel2);color:var(--dim);border:2px solid var(--line)}
+.chip{
+  background:var(--panel2);
+  border:2px solid var(--line);
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-weight:700;
+}
+.chip:hover{background:var(--acc);color:var(--on-acc);border-color:var(--ink)}
+.chip .mult{border-radius:0;background:var(--ink);color:var(--cream)}
+.chip .mult.free{background:var(--acid);color:#120F0D}
+.chip .mult.hi{background:var(--yellow);color:#120F0D}
+.healthbar{
+  border:2px solid var(--ink);
+  background:var(--panel);
+  box-shadow:var(--shadow-hard-sm);
+}
+.healthbar .hb-chip{
+  border:2px solid var(--line);
+  border-radius:0;
+  background:var(--panel2);
+  font-family:var(--font-mono);
+}
+.heatfoot .heatcell,.legend .sw{border-radius:0}
+
+/* ── 10. 代码块 / 提示 / 浮层 ──────────────────────────────────────── */
+pre{
+  background:var(--code-bg);
+  border:3px solid var(--ink);
+  border-radius:0;
+  box-shadow:5px 5px 0 var(--hard);
+  color:var(--fg);
+  font-family:var(--font-mono);
+}
+pre.copyable:hover{border-color:var(--acc)}
+.copyhint{font-family:var(--font-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--acc)}
+.notice{
+  border:2px solid var(--ink);
+  border-radius:0;
+  background:var(--panel2);
+  box-shadow:5px 5px 0 var(--hard);
+  font-family:var(--font-mono);
+  font-size:12px;
+}
+.notice.progress{border-left:6px solid var(--acc)}
+.notice.warn{border-left:6px solid var(--warn);color:var(--fg)}
+.notice.ok{color:var(--ok)}
+.notice.bad{color:var(--err)}
+.keyhint{
+  border:3px solid var(--ink);
+  border-left:8px solid var(--yellow);
+  background:var(--panel2);
+  box-shadow:5px 5px 0 var(--hard);
+}
+.keyhint .khhead{font-family:var(--font-display);font-size:15px;letter-spacing:.02em}
+.keyhint b{color:var(--acc)}
+.hovertip{
+  border:2px solid var(--ink);
+  background:var(--panel);
+  box-shadow:4px 4px 0 var(--hard);
+  font-family:var(--font-mono);
+  font-size:11.5px;
+}
+.ops-menu,.colset{
+  border:3px solid var(--ink);
+  background:var(--panel);
+  box-shadow:7px 7px 0 var(--hard);
+}
+.colset-head{background:var(--band-bg);color:var(--band-fg);border-bottom:2px solid var(--band-line);
+  font-family:var(--font-mono);font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.colset-row:hover{background:var(--panel2)}
+.colset-grip{color:var(--fg)}
+/* 弹窗：三块 #modal 的内层 div 有内联圆角/描边，只能 !important 压过 */
+#modal > div,#infoModal > div,#akModal > div{
+  border:3px solid var(--ink) !important;
+  border-radius:0 !important;
+  box-shadow:10px 10px 0 var(--hard) !important;
+  background:var(--panel) !important;
+}
+#modal h3,#infoModal h3,#akModal h3{
+  font-family:var(--font-display) !important;
+  font-weight:900 !important;
+  text-transform:uppercase;
+  letter-spacing:-.01em !important;
+}
+
+/* ── 11. 空态 / 分页 / 日志行 ─────────────────────────────────────── */
+.logwrap{border-top:3px solid var(--ink)}
+/* 空态铺半调网点（halftone）：maximalism 的纹理层，也顺手给"这里没有内容"
+   一个可辨认的材质。低透明度墨点，不影响任何文字。 */
+.log-empty,.job-empty{
+  background-image:radial-gradient(rgba(26,26,26,.13) 1px, transparent 1.1px);
+  background-size:6px 6px;
+}
+:root[data-theme="dark"] .log-empty,
+:root[data-theme="dark"] .job-empty{
+  background-image:radial-gradient(rgba(255,245,230,.13) 1px, transparent 1.1px);
+}
+.log-head{
+  background:var(--band-bg);
+  color:var(--band-fg);
+  border-bottom:2px solid var(--band-line);
+  font-size:10.5px;
+}
+.log-row{font-family:var(--font-mono);font-size:11.5px}
+.log-row:hover{background:var(--panel2)}
+.log-empty,.job-empty{
+  font-family:var(--font-mono);
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  font-size:11px;
+}
+.pager{border-top:3px solid var(--ink)}
+.pager .pageno{font-family:var(--font-mono);font-weight:700}
+.rankrow:hover{background:var(--panel2)}
+.kvs .kv{border-bottom:1px dashed color-mix(in srgb, var(--fg) 28%, transparent)}
+.readonly dd{font-family:var(--font-mono)}
+.heatmonths,.heatdays{font-family:var(--font-mono);letter-spacing:.06em}
+.donut::after{background:var(--panel2)}
+.donut .dc b{font-family:var(--font-mono);font-weight:700}
+
+/* ── 12. 登录页 / 渠道页（各自的内联样式在注入点之前）───────────────── */
+/* 登录页：奶油纸 + 硬投影卡片 + 巨型主按钮；贴纸与颗粒由上面的通用规则给。
+   ⚠ 登录页的 .card 是 <body> 的直接子节点，控制台的不是 ⇒ 用 body > .card
+     精确分开，别让"统计卡的染色规则"漏到登录卡上。 */
+body > .card{
+  max-width:404px;
+  padding:22px 22px 18px;
+  border:3px solid var(--line);
+  border-radius:0;
+  background:var(--panel);
+  box-shadow:10px 10px 0 var(--hard);
+}
+body > .card .head{gap:10px}
+body > .card h1{font-size:22px;line-height:1.05}
+body > .card .sub{
+  margin:8px 0 16px;
+  font-size:12px;
+  color:var(--dim);
+}
+body > .card input{padding:9px 11px;border:2px solid var(--line);background:var(--input-bg)}
+body > .card fieldset,body > .card .field > span{color:var(--dim)}
+body > .card button.primary{
+  margin-top:4px;
+  padding:11px 14px;
+  font-family:var(--font-display);
+  font-size:15px;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  background:var(--acc);
+  color:var(--on-acc);
+  border:3px solid var(--ink);
+  box-shadow:6px 6px 0 var(--hard);
+}
+body > .card button.primary:hover:not(:disabled){filter:contrast(1.15)}
+/* 登录页底部的跑马灯：与页面同宽，压在最下（登录页没有滚动容器，fixed 安全） */
+.maxmarq--foot{
+  position:fixed;
+  left:0;
+  right:0;
+  bottom:0;
+  border-top:3px solid var(--ink);
+  border-bottom:0;
+}
+.head h1{
+  font-family:var(--font-display);
+  font-size:20px;
+  font-weight:900;
+  letter-spacing:-.02em;
+  text-transform:uppercase;
+}
+.sub,.hint,.field > span,summary,details p{font-family:var(--font-mono);letter-spacing:.02em}
+button.primary{
+  border:3px solid var(--ink);
+  box-shadow:5px 5px 0 var(--hard);
+  font-weight:700;
+}
+button.link{color:var(--acc);text-decoration:underline wavy var(--pink);text-underline-offset:3px}
+.alert{border:2px solid var(--ink);border-radius:0;background:var(--err-bg);color:var(--err-fg)}
+details{border-top:3px solid var(--ink);border-style:solid solid none}
+code{font-family:var(--font-mono)}
+/* 渠道页（iframe）：跟随系统主题，同一套色板与"吵外壳 + 静表格"分层 */
+body > header{border-bottom:3px solid var(--ink);box-shadow:0 5px 0 var(--hard)}
+.tag{
+  border-radius:0;
+  border:2px solid var(--ink);
+  font-family:var(--font-mono);
+  font-weight:700;
+  font-size:10.5px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:0 6px;
+  height:20px;
+  line-height:16px;
+  color:#120F0D;
+}
+.on-t{background:var(--acid);color:#120F0D}
+.off-t{background:var(--panel2);color:var(--fg)}
+.warn-t{background:var(--yellow);color:#120F0D}
+dialog{
+  border:3px solid var(--ink);
+  border-radius:0;
+  box-shadow:10px 10px 0 var(--hard);
+  background:var(--panel);
+  color:var(--fg);
+}
+.dlg-h{
+  background:var(--band-bg);
+  color:var(--band-fg);
+  border-bottom:2px solid var(--band-line);
+  font-family:var(--font-mono);
+  font-weight:700;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+/* ==== WB2API:MAXIMALISM:END ==== */
 </style>
 </head>
 <body>
@@ -144,6 +1051,9 @@
       <rect x="6.6" y="11.4" width="10.8" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>
     </svg>
     <h1 id="title">登录控制台</h1>
+    <!-- 旋转贴纸（maximalism 签名元素）。纯装饰 ⇒ aria-hidden；
+         用弹性流内元素而不是绝对定位，窄屏不会盖住标题。 -->
+    <span class="maxsticker" aria-hidden="true">本地优先</span>
   </div>
   <p class="sub" id="sub">使用账号口令登录。</p>
 
@@ -188,6 +1098,15 @@
     <p>管理令牌 <code>admin_token</code> 可带 <code>Authorization: Bearer &lt;admin_token&gt;</code> 调管理接口；也可在浏览器打开 <code>/ui?token=&lt;admin_token&gt;</code> 换取一次性登录。</p>
   </details>
 </main>
+
+<!-- 底部跑马灯（与控制台同一条黄带，登录页只有这一处以"动"出现）：
+     两段相同文本 ⇒ 位移 -50% 无缝接上；reduced-motion 下静止。 -->
+<div class="maxmarq maxmarq--foot" aria-hidden="true">
+  <div class="maxmarq-track">
+    <span>本地网关控制台 · 零外部依赖 · 单账号管理员 · 上游即插即用 · 凭证只留在本机 ·</span>
+    <span>本地网关控制台 · 零外部依赖 · 单账号管理员 · 上游即插即用 · 凭证只留在本机 ·</span>
+  </div>
+</div>
 
 <script>
   window.__WB2API_LOGIN_FLAGS__ = {
