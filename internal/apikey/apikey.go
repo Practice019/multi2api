@@ -91,6 +91,37 @@ type Key struct {
 	// 所以比对时都剥掉上游前缀再比（见 ModelAllowed）。
 	// 于是用户填 `glm-5.2` 就同时放行了两种写法，不需要他填两遍。
 	Models []string `json:"models,omitempty"`
+
+	// ModelMap 这把 key 的**模型对外名映射**：`对外名 → 内部模型名`（2026-10-21 加）。
+	//
+	// # 用户的需求（原话）
+	//
+	//	「这些模型，开放的模型，对于这个 API key 开放的模型，我觉得需要有一个
+	//	 模型映射，就是对外的模型应该叫什么」
+	//
+	// 背景：`Models` 白名单里填的是**内部**模型名（如 `csg/deepseek-v4.1-flash-1017`），
+	// 而那是我们的内部命名 —— 直接暴露给调用方既难记、也把渠道结构漏了出去。
+	// 有了这张表，可以对外只讲 `deepseek-v4-pro`，请求进来再换回内部名。
+	//
+	// # 方向：对外名 → 内部名（与渠道层的 Channel.ModelMap 同构）
+	//
+	// 请求路径每一跳都要查它，方向必须是"进来的名字 → 内部的名字"。
+	// 反过来存（内部名 → 对外名）就得在每次请求里遍历全表找 value，
+	// 而这张表在 /v1/models 和每次对话请求上都会用到。
+	//
+	// # 与 Models 白名单的关系：先映射、再判白名单
+	//
+	//   · 客户端发 `deepseek-v4-pro` → 映射成 `csg/deepseek-...` → 判白名单 ✓
+	//   · 若先判白名单，对外名不在 `Models` 里，会被 403 —— 而它明明是发布的那个名字。
+	//
+	// # 空值语义
+	//
+	//	nil / 空表 → 不做映射（老 key 与"不需要别名"的 key 都是这个状态）
+	//	非空       → 表里有的名字按表换，没有的**原样保留**
+	//
+	// ⚠ 「没有的原样保留」是刻意的：映射是**增量**能力，不是白名单。
+	//   若把未命中的名字判成非法，那加一张映射表就等于把所有老调用方式打死。
+	ModelMap map[string]string `json:"model_map,omitempty"`
 }
 
 // View 列表/管理端点的对外形态。
@@ -113,6 +144,9 @@ type View struct {
 	OwnerID string `json:"owner_id,omitempty"`
 	// Models 模型白名单（空 = 不限制）。管理界面据此展示"这把 key 能用什么"。
 	Models []string `json:"models,omitempty"`
+	// ModelMap 模型对外名映射（对外名 → 内部名，空 = 不做映射）。
+	// 管理界面据此展示"这个内部模型对外叫什么"。
+	ModelMap map[string]string `json:"model_map,omitempty"`
 }
 
 // Store 是 API key 的进程内权威 + JSON 持久化。
@@ -186,8 +220,8 @@ func (s *Store) saveLocked() error {
 // 签名与行为保持不变（既有调用方 internal/admin/apikeys.go 与既有测试都据此
 // 断言），实现委托给 CreateOwned("", ...) —— owner 为空 = 管理员所有，
 // 与老数据同一语义。新增归属能力靠新增方法，不改这个签名。
-func (s *Store) Create(name string, limit int64, rpm int, models []string) (*Key, error) {
-	return s.CreateOwned("", name, limit, rpm, models)
+func (s *Store) Create(name string, limit int64, rpm int, models []string, modelMap ...map[string]string) (*Key, error) {
+	return s.CreateOwned("", name, limit, rpm, models, modelMap...)
 }
 
 // normalizeModels 规整白名单：去空白、丢空项、去重（保序）。
@@ -211,6 +245,44 @@ func normalizeModels(in []string) []string {
 	return out
 }
 
+// firstModelMap 从变参里取第一份映射表并规整（nil → nil = 不映射）。
+//
+// 变参只是为了让老调用点（Create / CreateOwned 的既有用法）不必改动，
+// 语义上它最多一个元素。
+func firstModelMap(m ...map[string]string) map[string]string {
+	if len(m) == 0 || m[0] == nil {
+		return nil
+	}
+	return normalizeModelMap(m[0])
+}
+
+// normalizeModelMap 规整映射表：去空白、丢掉"键或值为空"的项、键值相同则省略。
+//
+// ⚠ 键值相同要**删掉**而不是保留：`{"deepseek-v4-pro": "deepseek-v4-pro"}`
+// 与"不映射"完全等价，留着只会让 /v1/models 的输出去重逻辑多绕一圈，
+// 而且用户在界面上看到自己填了个毫无作用的别名，会以为没生效。
+//
+// 返回 nil（而不是空 map）表示"不映射"，与 Models 的 nil 语义保持一致：
+// 两者都为 nil 时 JSON 里根本不出现这个字段，老文件写回不产生 diff。
+func normalizeModelMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for alias, target := range in {
+		alias = strings.TrimSpace(alias)
+		target = strings.TrimSpace(target)
+		if alias == "" || target == "" || alias == target {
+			continue
+		}
+		out[alias] = target
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // ModelsOf 返回一把 key 的模型白名单，以及这把 key 是否存在。
 //
 // 空切片 = 不限制。调用方（出口层）用它做准入判断 —— 见 ModelAllowed。
@@ -230,6 +302,34 @@ func (s *Store) ModelsOf(id string) ([]string, bool) {
 	}
 	out := make([]string, len(k.Models))
 	copy(out, k.Models)
+	return out, true
+}
+
+// ModelMapOf 返回一把 key 的模型对外名映射（对外名 → 内部名），以及 key 是否存在。
+//
+// 空表 = 不做映射。调用方（出口层）用它在**判白名单之前**把对外名换成内部名 ——
+// 见 server.resolveModelAlias。
+//
+// ⚠ 返回副本。调用方拿到内部 map 后可能会改它（映射换算是就地替换 model 变量，
+// 很容易顺手写成 `for k, v := range` 之外还 `delete(m, k)`），那会污染 store 里的
+// 权威数据 —— 而这份数据下一次保存就被写进盘了。
+func (s *Store) ModelMapOf(id string) (map[string]string, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, false
+	}
+	if len(k.ModelMap) == 0 {
+		return nil, true
+	}
+	out := make(map[string]string, len(k.ModelMap))
+	for alias, target := range k.ModelMap {
+		out[alias] = target
+	}
 	return out, true
 }
 
@@ -334,7 +434,7 @@ func (s *Store) Delete(id string) error {
 // 反过来若把 models 的缺失当成"清空"，改一次配额就把模型限制**静默解开**。
 // 两条都是"用户没动过的字段被悄悄改掉"，而界面上看不出任何异常。
 // 与 settings 里"漏带字段 = 重置"同型（本仓在 disabledModels 上踩过）。
-func (s *Store) Update(id string, limit *int64, rpm *int, models []string) error {
+func (s *Store) Update(id string, limit *int64, rpm *int, models []string, modelMap ...map[string]string) error {
 	if limit != nil && *limit < 0 {
 		return errors.New("额度不能为负数")
 	}
@@ -355,6 +455,13 @@ func (s *Store) Update(id string, limit *int64, rpm *int, models []string) error
 	}
 	if models != nil {
 		k.Models = normalizeModels(models)
+	}
+	// modelMap 用变参表达三态：
+	//   不传 / 传 nil  → 不改（老调用点）
+	//   传空 map       → 清空映射
+	//   传非空 map     → 整体替换
+	if len(modelMap) > 0 && modelMap[0] != nil {
+		k.ModelMap = normalizeModelMap(modelMap[0])
 	}
 	return s.saveLocked()
 }

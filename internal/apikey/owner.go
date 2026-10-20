@@ -35,7 +35,7 @@ import (
 //
 // owner 只做去空白，不校验格式：账号 ID 的合法性由 account 包负责，这里再判
 // 一次只会多出第二份可能分叉的判据。
-func (s *Store) CreateOwned(owner, name string, limit int64, rpm int, models []string) (*Key, error) {
+func (s *Store) CreateOwned(owner, name string, limit int64, rpm int, models []string, modelMap ...map[string]string) (*Key, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("名称不能为空")
@@ -54,6 +54,7 @@ func (s *Store) CreateOwned(owner, name string, limit int64, rpm int, models []s
 		RPM:       rpm,
 		OwnerID:   owner,
 		Models:    normalizeModels(models),
+		ModelMap:  firstModelMap(modelMap...),
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
 	s.keys[k.ID] = k

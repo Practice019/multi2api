@@ -1503,6 +1503,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   - 渠道真失败（没可用 key / 上游报错）⇒ 如实上报，**不换路**。Key 型渠道与账号池的
 	//     根本区别就在这里：换号会让用户不知道请求走了哪条，身份与计费口径也都变了。
 	//   - 白名单照样判（对渠道而言公开名就是对外名）：权限不因为"走了渠道"而消失。
+	// ⚠⚠ 2026-10-21：**在任何路由/白名单判断之前**，先把 API key 的对外名换成内部名。
+	//
+	// 顺序不能挪，三条理由：
+	//   ① 白名单里存的是**内部**名。拿对外名去判会 403 —— 而那个对外名
+	//      恰恰是我们发布给调用方的名字，用户会觉得"列表里有、调了却不行"。
+	//   ② `channelServes` / `providerFor` / `forwardViaChannel` 全部按内部名工作，
+	//      放在它们之后换就已经走错路了（渠道匹配发生在更早）。
+	//   ③ body 里的 model 不需要在这里改：渠道分支由 forwardViaChannel 用
+	//      (model 参数, body) 重新写；legacy 分支同理。只改 peek.Model 一处，
+	//      所有消费方自动一致 —— 分两处改必然有一天只改了一处。
+	if alias := h.resolveModelAlias(r, peek.Model); alias != peek.Model {
+		la := strings.TrimSpace(alias)
+		orig := strings.TrimSpace(peek.Model)
+		log.Printf("[apikey] 模型别名替换 %q → %q", orig, la)
+		peek.Model = alias
+	}
 	if h.channelServes(peek.Model) {
 		if !h.modelAllowedForRequest(w, r, peek.Model) {
 			return
