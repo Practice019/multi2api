@@ -263,8 +263,9 @@ func (h *Handler) resolveModelAlias(r *http.Request, model string) string {
 // 没有反向映射 ⇒ 返回原值（内部名就当对外名用，与"不配映射"的行为一致）。
 //
 // ⚠ 这里必须遍历 value 找键 —— 存储方向是为请求路径优化的（对外名 → 内部名），
-//   而 /v1/models 是低频管理路径（每客户端首次连接一次），遍历成本可忽略。
-//   两张表各存一份反而会引入"改了一边忘改另一边"的不一致。
+//
+//	而 /v1/models 是低频管理路径（每客户端首次连接一次），遍历成本可忽略。
+//	两张表各存一份反而会引入"改了一边忘改另一边"的不一致。
 func publicNameFor(modelMap map[string]string, internal string) string {
 	if len(modelMap) == 0 {
 		return internal
