@@ -13,7 +13,10 @@
 #   .\scripts\github-direct.ps1 release list --limit 3
 #   .\scripts\github-direct.ps1 release create v1.9.18 --title "..." --notes-file notes.md
 #   .\scripts\github-direct.ps1 api rate_limit
-param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+# ⚠ 必须是 [string[]]：只写 $Rest 时 PowerShell 会把它当**单值**，
+#   于是 'gh run view <id> --json ...' 这种三参调用直接报
+#   "accepts at most 1 arg(s), received 3"（2026-10-21 实测踩过一次）。
+param([Parameter(ValueFromRemainingArguments = $true)][string[]] $Rest)
 
 $saved = @{}
 foreach ($n in 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy') {
