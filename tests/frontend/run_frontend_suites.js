@@ -198,6 +198,9 @@ const PROBES = [
   //
   // ⚠ 与 `run_e2e.js` 的**动态**判据**互补，不许互替**：本判据证明"它**有能力**进控制台"，
   //   动态判据证明"它**真的**进了控制台"。两条都留。
+  // 渠道页「新增 → 保存」必须真的发得出请求（v1.9.15 的 ReferenceError: key is not defined，
+  // 语法门禁查不出、静态断言查不出，只有真点一次才知道）。自己起隔离实例（7899）。
+  'verify_channels_save.js',
   'verify_probe_console_loaded.js',
   // 内嵌 HTML 的内联 <script> **语法门禁**（本轮新增）。
   //
@@ -258,69 +261,3 @@ function findRawTemplateBacktick(file) {
 for (const [gen, artifact] of SUITES) {
   const odd = findRawTemplateBacktick(gen);
   if (odd) {
-    failures.push(`${gen} 的反引号数量为奇数（${odd}）—— String.raw 模板被提前终止`);
-    console.log(`  TICK    ${gen} 反引号不成对，模板被提前终止（注释里写了反引号？）`);
-    continue;
-  }
-  const aPath = path.join(DIR, artifact);
-  const before = fs.existsSync(aPath) ? fs.statSync(aPath).mtimeMs : 0;
-
-  // ---- 门禁 1：generator 必须成功 ----
-  const g = run(gen);
-  if (!g.ok) {
-    failures.push(`${gen} 生成失败（产物 ${artifact} 是否陈旧未验证）`);
-    console.log(`  GENFAIL ${gen}`);
-    console.log('    ' + (g.out || g.err || '').split('\n').slice(0, 3).join('\n    '));
-    continue;
-  }
-
-  // ---- 门禁 2：产物必须被重新写过 ----
-  const after = fs.existsSync(aPath) ? fs.statSync(aPath).mtimeMs : 0;
-  if (after <= before) {
-    failures.push(`${gen} 没有重写 ${artifact}（产物可能是陈旧的）`);
-    console.log(`  STALE   ${artifact} 未被 ${gen} 更新`);
-    continue;
-  }
-
-  // ---- 跑产物 ----
-  const r = run(artifact);
-  if (r.ok) {
-    pass++;
-    console.log(`  ok      ${artifact}`);
-  } else {
-    failures.push(`${artifact} 断言失败`);
-    console.log(`  FAIL    ${artifact}`);
-    console.log('    ' + (r.out || '').split('\n').filter(l => /FAIL|Error/.test(l)).slice(0, 4).join('\n    '));
-  }
-}
-
-console.log('\n=== 独立探针 ===');
-for (const p of PROBES) {
-  const r = run(p);
-  if (r.ok) {
-    pass++;
-    console.log(`  ok      ${p}`);
-  } else {
-    failures.push(`${p} 失败`);
-    console.log(`  FAIL    ${p}`);
-    console.log('    ' + (r.out || '').split('\n').slice(-3).join('\n    '));
-  }
-}
-
-const total = SUITES.length + PROBES.length;
-console.log(`\n=== ${pass}/${total} 通过 ===`);
-console.log(`（${SUITES.length} 个 generator 对 + ${PROBES.length} 个独立探针）`);
-console.log('\n浏览器 E2E 不在本脚本内（它们需要真实网关 + Chrome）：');
-console.log('  node panels_e2e.js   上游面板按能力位生成');
-console.log('  node nav_e2e.js      导航分组 + 组头徽章（以 manifest 为对照）');
-console.log('  node accounts_e2e.js 账号池分组 + 列数一致');
-console.log('  node topstats_e2e.js 顶栏状态条 + 表格三态');
-console.log('  node jobs_e2e.js     任务调度面板');
-console.log('  node theme_e2e.js    深色/浅色三态主题 + 对比度实算');
-console.log('  node verify_cp2_f1.js 组头 title 不自相矛盾');
-console.log('  node verify_cp2_f2.js 监听器不泄漏 / 一次点击一个请求');
-if (failures.length) {
-  console.log('\n失败明细：');
-  failures.forEach(f => console.log('  - ' + f));
-}
-process.exit(failures.length ? 1 : 0);

@@ -86,6 +86,12 @@
   不被占用的文件名 —— 上一轮 `go build` 因 7863 正在运行该 exe 而**失败**，验证用的是旧
   二进制，等于没测。现改为 `bin\wb2api-server-next.exe`，验证通过后再替换。
 
+- **修「新增渠道 → 保存」没反应**：`webui-channels.html` 的 `save()` 判了一个从未声明过的
+  `key`（应为 `rawKeys`），新建渠道时必抛 `ReferenceError`，请求一条都不发。编辑已有渠道时
+  该行被短路，所以自 T6 起一直没被发现；语法门禁也查不出（语法本身是对的）。
+- **新增回归判据** `tests/frontend/verify_channels_save.js`（进 `run_frontend_suites`）：
+  真点一次「新增 → 保存」，断言零未捕获异常 + 空态行被真实行替换 + 后端真的多了一条。
+
 ### 未改动（刻意）
 
 - 类名、DOM 结构、JS 逻辑、热力图 5 档色阶（`--hm0..--hm4` 仍严格照抄 openViking 的绿阶）、
