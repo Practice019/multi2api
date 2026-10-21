@@ -1592,7 +1592,12 @@ async function save() {
   // ⚠ 只在**真的填了**的时候才发 keys —— 编辑时留空意味着"不改动"，
   // 而不是"把 key 清空"（清空会让渠道静默变成不可用）。
   if (!body.base_url) { err.textContent = 'Base URL 必填'; return; }
-  if (!editing && !key) { err.textContent = 'API Key 必填（新增时）'; return; }
+  // ⚠ 必须判 **rawKeys**（上面刚解析出来的数组），不是 `key`。
+  // 这里从 29bb9c4（T6 首次落地）起就写着 `!key` —— 那个标识符**从来没声明过**，
+  // 于是「新增渠道 → 保存」必抛 ReferenceError、请求一个都不发（用户看到的
+  // 就是"点了保存没反应"）。之所以一直没被发现：编辑已有渠道时
+  // `!editing` 短路为 false，那一行根本不会执行。
+  if (!editing && !rawKeys.length) { err.textContent = 'API Key 必填（新增时）'; return; }
   try { await api('/admin/channels', { method: 'POST', body: JSON.stringify(body) }); closeForm(); load(); }
   catch (e) { err.textContent = e.message; }
 }
