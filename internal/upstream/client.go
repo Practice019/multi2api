@@ -602,6 +602,12 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 // 不在本次改造范围内。需要取消传播的调用方走 gateway.Provider.Chat(ctx, ...)，
 // 那里有显式的 ctx.Err() 前置检查（见 workbuddy/provider.go）。
 func (c *Client) ChatStreamWithIP(a *auth.Auth, body []byte, clientIP string) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	// 国际版上游要求**第一条消息是 system**（实测：不满足时 11128 的
+	// msg 会变成 "first message is not system prompt"）。国内不吃这条，
+	// 所以只在 intl 域名上补，不改变 cn 的出站字节。
+	if IsIntlDomain(a.Domain) {
+		body = EnsureSystemFirst(body)
+	}
 	url := c.chatBase(a) + "/v2/chat/completions"
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(c.prepareBody(body)))
 	if err != nil {
