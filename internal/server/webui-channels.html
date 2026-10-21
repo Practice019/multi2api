@@ -1214,12 +1214,18 @@ header h1{letter-spacing:0}
       <span class="muted" id="stat"></span>
     </div>
     <div class="wrap"><table>
+      <!-- ⚠ 2026-10-21 用户要求：**删掉「映射」这一列**（原话「不要这一列！！」）。
+           映射改成表单里**自动生成**（见 refreshMapRows），列表里再摊一长串
+           `a=b, c=d` 既占宽度又要横向滚动，还看不出重点。
+           ⚠ 删列时四处一起改：colgroup / thead / 行模板 / 三处 colspan（7 → 6）。
+           ⚠ 别用 PowerShell 的 -replace 批量改这个文件：它会把整个文件写成一行
+             （本仓已踩过两次，见 docs/progress-log.md）—— 用 edit 逐处改。 -->
       <colgroup>
         <col style="width:150px"><col style="width:250px"><col style="width:170px">
-        <col style="width:90px"><col style="width:210px"><col style="width:80px"><col style="width:160px">
+        <col style="width:90px"><col style="width:80px"><col style="width:160px">
       </colgroup>
       <thead><tr>
-        <th>名称</th><th>Base URL</th><th>Key</th><th>模型数</th><th>映射</th><th>状态</th><th>操作</th>
+        <th>名称</th><th>Base URL</th><th>Key</th><th>模型数</th><th>状态</th><th>操作</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table></div>
@@ -1238,6 +1244,15 @@ header h1{letter-spacing:0}
     <!-- 名称放最上面：用户第一眼要确认"我在改哪条渠道"，而不是先看到一串 URL -->
     <label class="req">名称</label>
     <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
+    <!-- 渠道前缀（2026-10-21 用户要求）：自动生成对外模型名用的命名空间。
+         用户原话：「多一个输入框填写渠道名称 —— 自动映射为 (渠道名称)/上游真实名称」。 -->
+    <label>渠道前缀</label>
+    <!-- ⚠ 前缀变化一律**强制**重算（refreshMapRows(true)）：前缀是命名空间，
+         改它就意味着"整张表的左列都要换"，这里再尊重"手改保护"只会留下半新半旧的表。
+         模型栏的变化则相反 —— 尊重手改（见 f-models 的 oninput）。 -->
+    <input id="f-slug" placeholder="例如 qiniuyun / csg（留空 = 不自动改名，对外用上游原名）" oninput="refreshMapRows(true)">
+    <div class="hint">对外模型名 = <b>前缀/上游真实名</b>。上游真实名取模型栏里每个名字**最后一个 / 之后**的部分；
+      找不到 / 就用原样。下面的映射表会自动生成，不用手填。</div>
     <label class="req">Base URL</label>
     <input id="f-base" placeholder="https://api.example.com/v1">
     <label class="req">API Key</label>
@@ -1255,22 +1270,25 @@ header h1{letter-spacing:0}
     <textarea id="f-key" class="full" rows="2" style="min-height:0" placeholder="新增时必填，一行一个；编辑时留空 = 不改动现有 Key（要加 Key 点「管理 Key」）"></textarea>
     <label>状态</label>
     <label>模型</label>
-    <input id="f-models" class="full" placeholder="逗号分隔上游真实名 —— 或点「自动发现」，在候选里勾选后点「应用勾选」" oninput="renderCandidates()">
+    <input id="f-models" class="full" placeholder="逗号分隔上游真实名 —— 或点「自动发现」，在候选里勾选后点「应用勾选」" oninput="renderCandidates();refreshMapRows()">
 <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
   <button type="button" onclick="discover()" title="问上游有哪些模型。拿回来先放**候选池**，不直接写入模型栏 —— 由你勾选后应用" style="white-space:nowrap">自动发现</button>
   <input id="f-filter" placeholder="搜索候选模型…" style="width:200px" oninput="renderCandidates()">
   <div id="f-disc" class="dim" style="font-size:12px;flex:1;min-width:0"></div>
 </div>
 <div id="f-vis" class="full" style="margin:6px 0 0"></div>
-    <div class="hint">这里写上游认识的名字；对外想换名字就用下面的映射。</div>
+    <div class="hint">这里写上游认识的名字；对外名字由上面的「渠道前缀」自动生成。</div>
     <label>模型映射</label>
     <!-- 成对输入（对标 new-api 的 model_mapping 编辑器）：
          用户的原话是「希望用户填写一对数据而不是填写这种文本」——
          一行文本 "pub=upstream" 要求他会写语法、还要自己数等号，输错只能靠保存后的报错兜。
          两个输入框各填一半，语法错误从根上不存在。 -->
-    <div class="full" id="f-map-rows" style="display:flex;flex-direction:column;gap:4px"></div>
+    <!-- 自动生成 + 可手改：手改过（oninput → markMapDirty）之后就不再自动覆盖，
+         避免"我改了一行，结果下一次敲模型又被冲掉"。要恢复自动就点「按前缀重算」。 -->
+    <div class="full" id="f-map-rows" style="display:flex;flex-direction:column;gap:4px" oninput="markMapDirty()"></div>
     <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button type="button" onclick="addMapRow('','')" style="white-space:nowrap;padding:0 10px;height:26px;font-size:12px">+ 添加一对</button>
+      <button type="button" onclick="refreshMapRows(true)" style="white-space:nowrap;padding:0 10px;height:26px;font-size:12px">按前缀重算</button>
+      <button type="button" onclick="addMapRow('','');markMapDirty()" style="white-space:nowrap;padding:0 10px;height:26px;font-size:12px">+ 添加一对</button>
       <span class="muted" style="font-size:12px">左 = 对外公开名（客户端写它）· 右 = 上游真实名 · 右侧留空即同名</span>
     </div>
     <label>优先级</label>
@@ -1473,6 +1491,71 @@ function renderMapRows(obj) {
   if (!ks.length) { addMapRow('', ''); return; }   // 空的时候给一行空框，省得用户先点"添加"
   ks.forEach(k => addMapRow(k, obj[k]));
 }
+
+// ---- 自动映射（2026-10-21 用户要求）----
+//
+// 用户原话：「自动映射为 (渠道名称)/上游真实名称；例如 deepseek/deepseek-v4.1-flash →
+// (渠道名称)/deepseek-v4.1-flash；真实名称从后往前找第一个 / 往后的内容；没有找到就用
+// 原始的字段，这样就不用用户自己设置映射了」。
+//
+// 规则（全部按这句话实现，别自己加戏）：
+//   real  = 模型名里**最后一个 /** 之后的部分；没有 / 就取整个名字
+//   pub   = 前缀 ? 前缀 + '/' + real : 名字原样
+//   map[pub] = real        （pub 与 real 相同则不写 —— 无意义映射只会把表撑满）
+//
+// 边界：前缀可以带结尾的 /（有人会顺手写 `csg/`），这里统一去掉再拼；
+//      前缀留空 ⇒ 不生成任何映射（对外就用上游原名，这是最不容易出事的默认）。
+let mapDirty = false;   // true = 用户手改过映射行，别再用自动值覆盖
+
+function mapSlugOf(m) {
+  // 从已有映射里反推前缀：第一个键的 / 之前那一段（编辑已有渠道时用它回显输入框）
+  const ks = Object.keys(m || {});
+  if (!ks.length) { return ''; }
+  const i = ks[0].indexOf('/');
+  return i > 0 ? ks[0].slice(0, i) : '';
+}
+
+function autoMapFromForm() {
+  const slugEl = document.getElementById('f-slug');
+  const slug = (slugEl ? slugEl.value : '').trim().replace(/\/+$/, '');
+  const models = (document.getElementById('f-models').value || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const out = {};
+  // ⚠ 前缀为空 ⇒ **一条映射都不生成**。曾经的写法是 pub = id（原样）再比较 pub !== real，
+  // 那会让"带斜杠的上游名"也生成一条"原 id → 裸名"的映射 —— 那等于偷偷改名，
+  // 而上游认的很可能就是完整 id。没前缀就保持原样，这是最不容易出事的默认。
+  if (!slug) { return out; }
+  models.forEach(id => {
+    const i = id.lastIndexOf('/');
+    const real = i >= 0 ? id.slice(i + 1) : id;
+    if (!real) { return; }
+    out[slug + '/' + real] = real;
+  });
+  return out;
+}
+
+// refreshMapRows(force)：force=true 时即使手改过也重算（「按前缀重算」按钮）
+function refreshMapRows(force) {
+  if (!force && mapDirty) { return; }
+  // force 的语义是"重算并**解除**手改保护"：之前手改过、现在按前缀重算，
+  // 说明用户回到了自动口径 —— 之后改模型栏就该继续自动跟。
+  if (force) { mapDirty = false; }
+  const box = document.getElementById('f-map-rows');
+  if (!box) { return; }
+  const auto = autoMapFromForm();
+  const ks = Object.keys(auto);
+  box.innerHTML = '';
+  if (!ks.length) {
+    // 没有可生成的映射时给一行空框（保持"可以手填"的能力），但**不**把它当手改
+    addMapRow('', '');
+    mapDirty = false;
+    return;
+  }
+  ks.forEach(k => addMapRow(k, auto[k]));
+  mapDirty = false;
+}
+
+function markMapDirty() { mapDirty = true; }
 function collectMap() {
   const out = {};
   document.querySelectorAll('#f-map-rows > div').forEach(r => {
@@ -1482,19 +1565,20 @@ function collectMap() {
   });
   return out;
 }
-function mapText(m) { return m && Object.keys(m).length ? Object.keys(m).map(k => esc(k) + '=' + esc(m[k])).join(', ') : '—'; }
+// mapText 已随「映射」列一起删除（2026-10-21 用户要求不要那一列）——
+// 留着它就是死代码，下一个人会以为列表还在用。
 function maskKey(k) { return k ? (k.length > 12 ? k.slice(0, 6) + '…' + k.slice(-4) : '已配置') : '—'; }
 
 // ---- 渠道页签 ----
 async function load() {
   const tbody = document.getElementById('rows');
-  tbody.innerHTML = '<tr><td colspan="7" class="muted">加载中…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
   try {
     const d = await api('/admin/channels');
     const list = d.channels || d.data || [];
     document.getElementById('stat').textContent =
       '共 ' + list.length + ' 条 · 启用 ' + list.filter(c => c.status === 1).length + ' 条';
-    if (!list.length) { tbody.innerHTML = '<tr><td colspan="7" class="muted">还没有渠道 —— 点左上「新增渠道」，只填 Base URL + API Key 即可</td></tr>'; return; }
+    if (!list.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">还没有渠道 —— 点左上「新增渠道」，只填 Base URL + API Key 即可</td></tr>'; return; }
     tbody.innerHTML = list.map(c => {
       const on = c.status === 1;
       const tag = on ? '<span class="tag on-t">启用</span>'
@@ -1512,7 +1596,6 @@ async function load() {
         //   全吃掉了）。按钮尺寸与间距统一由 theme-max.css 第 16 节按 #pane-ch 作用域给。
         + '<td>' + key + ' <button class="ch-act" onclick="reveal(\'' + esc(c.id) + '\')">显示</button></td>'
         + '<td>' + n + '</td>'
-        + '<td title="' + esc(mapText(c.model_mapping)) + '">' + mapText(c.model_mapping) + '</td>'
         + '<td>' + tag + '</td>'
         + '<td>'
         + '<button class="ch-act" onclick="openForm(\'' + esc(c.id) + '\')">编辑</button>'
@@ -1522,7 +1605,7 @@ async function load() {
     }).join('');
     window.__channels = list;   // 供表单读原值（避免为编辑再打一次接口）
   } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="7" class="err">' + esc(e.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="err">' + esc(e.message) + '</td></tr>';
   }
 }
 
@@ -1561,7 +1644,14 @@ function openForm(id) {
   if (c) { loadKeys(id); }
   document.getElementById('f-name').value = c ? (c.name || '') : '';
   document.getElementById('f-models').value = c ? (c.models || []).join(',') : '';
-  renderMapRows(c ? c.model_mapping : {});
+  // 前缀从前缀字段或已有映射反推；映射先按原样回显
+  const existMap = (c && c.model_mapping) || {};
+  document.getElementById('f-slug').value = mapSlugOf(existMap);
+  renderMapRows(existMap);
+  // 编辑已有渠道：视为"已手改"（保护他既有的映射，不因改模型栏而自动覆盖）；
+  // 新增：自动生成一版，省掉手填。
+  mapDirty = Object.keys(existMap).length > 0;
+  if (!mapDirty) { refreshMapRows(true); }
   document.getElementById('f-prio').value = c ? (c.priority != null ? c.priority : 10) : 10;
   document.getElementById('f-weight').value = c ? (c.weight != null ? c.weight : 1) : 1;
   document.getElementById('f-status').value = c ? String(c.status === 2 ? 2 : 1) : '1';
