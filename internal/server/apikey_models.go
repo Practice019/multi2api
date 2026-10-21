@@ -365,18 +365,39 @@ func publicNameFor(modelMap map[string]string, internal string) string {
 	if name == "" {
 		return internal
 	}
-	// 精确命中优先
+	// ① 幂等：name 自己就是某个**对外名** ⇒ 原样返回，不要再改名。
+	//
+	// ⚠ 2026-10-21 用户报「配了 006/deepseek-v4.1-flash，列表里却没有」的真根因就在这里。
+	// /v1/models 的组装是 filterModelsForRequest（**已改名**）→ appendChannelModels
+	// → applyPublicNames（**又改名一遍**）。第二遍拿到的 id 是 006/…，精确匹配不命中
+	// （map 的键是 alias、值是内部名），于是掉进下面的裸名兜底：004/005/006 三个
+	// 对外名的 target 裸名全是 deepseek-v4.1-flash ⇒ 随机挑中 004 ⇒ 006 被改名成
+	// 004，随后 seen[pub] 去重把它整条丢掉。用户看到的就是"配了三条，列表只剩两条"。
+	if _, isAlias := modelMap[name]; isAlias {
+		return name
+	}
+	// ② 精确命中（值是内部名）
 	for alias, target := range modelMap {
 		if strings.TrimSpace(target) == name {
 			return alias
 		}
 	}
-	// 裸名命中（映射表里可能写的是带前缀的内部名）
+	// ③ 裸名兜底（映射表里可能写的是带前缀的内部名）——**只在唯一命中时**使用。
+	//   多个别名共享同一裸名时（同一模型挂在多个上游）不猜：返回原值，
+	//   否则列表里的名字会随 map 遍历顺序漂移，同一个 key 两次请求看到不同的名字。
 	if _, bare, _ := gateway.SplitModel(name); bare != "" {
+		hit, n := "", 0
 		for alias, target := range modelMap {
 			if _, tb, _ := gateway.SplitModel(strings.TrimSpace(target)); tb != "" && tb == bare {
-				return alias
+				hit = alias
+				n++
+				if n > 1 {
+					break
+				}
 			}
+		}
+		if n == 1 {
+			return hit
 		}
 	}
 	return internal
