@@ -102,6 +102,11 @@
   applyPublicNames 又改一遍），第二遍掉进裸名兜底，而 004/005/006 三个对外名的 target 裸名相同
   ⇒ 随机选中别人的名字、再被 seen 去重吃掉。修 publicNameFor：① 幂等（已是外部名就原样返回）
   ② 裸名兜底只在唯一命中时使用。新增 apikey_publicname_test.go + verify_key_alias_models.js。
+- **打通 workbuddy-intl（国际版）**：上游 2026-10 起对对话请求做「渠道校验」，缺会话头族就
+  400/11128。抄 Agent2API 的抓包结论补齐三层：客户端身份头（UA `WorkBuddy/5.8.4 workbuddy-ai/5.8.4
+  CLI/2.161.0`、X-IDE-Version 5.8.4 等）+ 会话头族（X-Conversation-ID / -Request-ID / -Message-ID /
+  X-Root-Request-ID / X-Request-ID）+ 首条 system 消息。新增 `internal/upstream/intl_identity.go`，
+  按 domain 分支，**国内路径一个字节不改**。实测：17 个 intl 账号从「全部 503」变为 200。
 ### 未改动（刻意）
 
 - 类名、DOM 结构、JS 逻辑、热力图 5 档色阶（`--hm0..--hm4` 仍严格照抄 openViking 的绿阶）、

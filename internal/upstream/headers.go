@@ -211,6 +211,12 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP, model st
 	c.injectClientIP(req, clientIP)
 	// 设备风控头：每号 > config 全局 > 文件兜底；空则不注入。
 	c.injectDeviceToken(req, a)
+
+	// 国际版（www.workbuddy.ai）2026-10 起有渠道校验：缺会话头族就 400/11128。
+	// 只对 intl 域名生效，国内路径一个字节不改（见 intl_identity.go 文件头）。
+	if IsIntlDomain(a.Domain) {
+		ApplyIntlChatHeaders(req, a.Domain)
+	}
 }
 
 // injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product / X-Product-Code）。
