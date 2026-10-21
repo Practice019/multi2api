@@ -98,6 +98,10 @@
   另有「按前缀重算」按钮。列表去掉那一列后不再需要横向滚动。
 - `verify_channels_save.js` 扩到 20 条断言（含"保存后后端存下的就是自动生成的那张表"）。
 
+- **修「配了对外名却取不到模型」**：/v1/models 会改名两遍（filter 已改成对外名 →
+  applyPublicNames 又改一遍），第二遍掉进裸名兜底，而 004/005/006 三个对外名的 target 裸名相同
+  ⇒ 随机选中别人的名字、再被 seen 去重吃掉。修 publicNameFor：① 幂等（已是外部名就原样返回）
+  ② 裸名兜底只在唯一命中时使用。新增 apikey_publicname_test.go + verify_key_alias_models.js。
 ### 未改动（刻意）
 
 - 类名、DOM 结构、JS 逻辑、热力图 5 档色阶（`--hm0..--hm4` 仍严格照抄 openViking 的绿阶）、
