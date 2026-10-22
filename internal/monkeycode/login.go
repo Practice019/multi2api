@@ -79,30 +79,22 @@ type loginSession struct {
 // 而 `oauth/{platform}/login` 是**显式端点**，回的是 JSON 里的 auth_url ——
 // 两站语义一致，且能选平台。
 func (p *Provider) Start() (state, authURL string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer cancel()
-
-	state, err = randomState()
+	// 走**浏览器登录**（复刻 register-machine 的 browser-login.mjs）：
+	// 起一个有头浏览器让用户自己登录，然后 CDP 读 cookie。
+	//
+	// authURL 回空串 —— 前端据此走"轮询等结果"分支（而不是"打开链接"）。
+	// ⚠ 这与 workbuddy 的"本机客户端拾取"分支长得一样，但语义不同：
+	// 那条读本机客户端 leveldb，我们这条读**我们自己起的浏览器**。
+	id, err := p.StartBrowserLogin(RegionCN, 10*time.Minute)
 	if err != nil {
 		return "", "", err
 	}
+	return id, "", nil
+}
 
-	// ① 国际站 GitHub（首选：协议化程度最高，且我们有 GitHub 池）
-	if u, rerr := p.oauthLoginURL(ctx, RegionIntl, "github"); rerr == nil && u != "" {
-		p.rememberLogin(state, RegionIntl)
-		return state, u, nil
-	}
-	// ② 国际站 Google
-	if u, rerr := p.oauthLoginURL(ctx, RegionIntl, "google"); rerr == nil && u != "" {
-		p.rememberLogin(state, RegionIntl)
-		return state, u, nil
-	}
-	// ③ 国内站百智云授权页
-	if u, rerr := p.baizhiAuthorizeURL(ctx); rerr == nil && u != "" {
-		p.rememberLogin(state, RegionCN)
-		return state, u, nil
-	}
-	return "", "", fmt.Errorf("monkeycode: 三条件登录入口都没拿到授权地址（国际站 GitHub/Google、国内站百智云）")
+// StartBrowserLoginFlow 带区域与超时的版本（管理端点用）。
+func (p *Provider) StartBrowserLoginFlow(region string, timeout time.Duration) (string, error) {
+	return p.StartBrowserLogin(region, timeout)
 }
 
 // rememberLogin 记下这次登录会话。
@@ -218,6 +210,28 @@ func firstNonEmptyStr(list ...string) string {
 //
 // 恒回 ErrLoginPending 是**正确语义**：流程没完成，而且不会自动完成。
 func (p *Provider) Poll(state string) (gateway.Credential, error) {
+	st := p.BrowserLoginStatusOf(state)
+	if st == nil {
+		return gateway.Credential{}, gateway.ErrLoginPending
+	}
+	if !st.OK {
+		return gateway.Credential{}, gateway.ErrLoginPending
+	}
+	// 登录完成：从凭证目录把它找出来交给核心。
+	list, err := LoadDir(p.authDir)
+	if err != nil {
+		return gateway.Credential{}, err
+	}
+	for _, a := range list {
+		if a.UserID == st.UserID || a.UID() == st.UserID {
+			return gateway.Credential{
+				Provider: providerID,
+				UID:      a.UID(),
+				Nickname: a.DisplayName(),
+				Secret:   a,
+			}, nil
+		}
+	}
 	return gateway.Credential{}, gateway.ErrLoginPending
 }
 

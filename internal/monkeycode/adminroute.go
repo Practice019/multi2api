@@ -29,6 +29,9 @@ const (
 	// 由 ManualLogin() 报给前端（见 login.go），前端把
 	// {state, code} POST 到这里。
 	adminManualCompletePath = "/admin/monkeycode/login/complete"
+	// 浏览器登录的进度查询与取消（前端轮询用）。
+	adminLoginStatusPath = "/admin/monkeycode/login/status"
+	adminLoginCancelPath = "/admin/monkeycode/login/cancel"
 )
 
 // AdminRoutes 本上游的管理端点。
@@ -80,6 +83,24 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Handler:    p.handleCheckinOne,
 			Capability: gateway.CapCheckin,
 			Title:      "单账号签到",
+			Hidden:     true,
+		},
+		{
+			// 浏览器登录进度（前端每 2 秒轮询）。
+			Method:     http.MethodGet,
+			Path:       adminLoginStatusPath,
+			Handler:    p.handleLoginStatus,
+			Capability: gateway.CapImport,
+			Title:      "登录进度",
+			Hidden:     true,
+		},
+		{
+			// 取消浏览器登录（关掉窗口 + 删临时 profile）。
+			Method:     http.MethodPost,
+			Path:       adminLoginCancelPath,
+			Handler:    p.handleLoginCancel,
+			Capability: gateway.CapImport,
+			Title:      "取消登录",
 			Hidden:     true,
 		},
 		{
@@ -254,4 +275,39 @@ func (p *Provider) handleCheckinAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.checkin.HandlerAll(w, r)
+}
+
+// handleLoginStatus 浏览器登录进度（前端轮询）。
+func (p *Provider) handleLoginStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "缺少 id"})
+		return
+	}
+	st := p.BrowserLoginStatusOf(id)
+	if st == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "会话不存在或已过期"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": st})
+}
+
+// handleLoginCancel 取消浏览器登录。
+func (p *Provider) handleLoginCancel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	_ = jsonDecode(r, &body)
+	if body.ID == "" {
+		body.ID = r.URL.Query().Get("id")
+	}
+	if body.ID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "缺少 id"})
+		return
+	}
+	if !p.CancelBrowserLogin(body.ID) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "会话不存在"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

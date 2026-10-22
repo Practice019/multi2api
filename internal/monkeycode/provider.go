@@ -71,6 +71,9 @@ type Provider struct {
 	// 放在 Provider 上而不是全局：登录是**上游专属**的，
 	// 两个上游的 state 空间互不相干；放全局还要加前缀防撞。
 	logins map[string]*loginSession
+
+	// browserLogins 浏览器登录会话表（见 browserlogin.go）。
+	browserLogins map[string]*browserSession
 }
 
 // Config 构造参数。
