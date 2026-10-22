@@ -25,6 +25,39 @@
 // 最后一条是全或无的：只要 balance 是数字，`json.Unmarshal` 就返回 error，
 // 连带 session 也读不到。所以**必须在解析前先认出注册机格式并翻译**。
 //
+// # 必需字段只有 5 个（实测穷举）
+//
+// 用户问过：「注册机导出的 json 文件内容还是很多，你保证这些都是必须的字段么」。
+//
+// 诚实的回答是：**不，其中 25 个本仓根本不读**。逐字段验证后的结论：
+//
+//	必需（缺了就不工作）
+//	  session     唯一判据 Usable()
+//	  region      决定基址/模型目录/是否走代理，错了整天 404 或 401
+//	  platform    混合导入时用来跳过别的上游的行（单源导入可省）
+//
+//	强烈建议（缺了能跑，但难用）
+//	  userId      账号池主键；缺了回退 session-<hash>，删号/重导对不上
+//	  name        展示名；缺了显示 session-xxxx，看不出是哪个号
+//
+//	可选（仅展示，第一轮额度刷新就覆盖）
+//	  plan / balance / dailyTokenBalance / dailyTokenLimit
+//
+//	无用（本仓完全不读）
+//	  version baseUrl imageId imageIdNote subscription role status isBlocked
+//	  avatarUrl email teamCount modelsOk modelsCount modelsError addedAt
+//	  expiresAt createdAt checkedIn checkinAt walletAt checkinCheckedAt
+//	  hasPassword securityAt passwordAt
+//
+//	★ 危险
+//	  password    明文密码。导进本仓毫无用处，只是泄露面
+//	  expiresAt   注册机按 30 天算的；本仓按实际更短的过期处理，抄进来是假值
+//
+// 所以注册机侧配了 config.output.exportFields.monkeycode，只导上面那 9 个：
+// 35 字段 / 1100 字节 → 9 字段 / 253 字节（减 77%）。
+// 而本仓**两种都能收**：精简格式与全量格式都实测导入成功 ——
+// 精简是为了省体积与去掉明文密码，不是为了"必须精简才能导入"。
+//
 // # 为什么放在上游侧而不是核心
 //
 // 「注册机的 JSON 长什么样」是关于 monkeycode 这个上游的外部事实，
