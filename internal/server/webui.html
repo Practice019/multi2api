@@ -6544,375 +6544,435 @@ let loginProvider = '';
     }
   }
 
+// renderAfter 拿到 /admin/login/start 的回执之后的**全部**渲染与轮询。
+
   async function addAccount(providerId, btn) {
     openModal();
     const want = providerId || '';
     $('loginTitle').textContent = want ? ('添加 ' + providerTitle(want) + ' 账号') : '添加账号';
     renderLoginLocalHint();
     renderLoginIntro('browser'); // 申请期间的占位；拿到回执后按形态改写
-    $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
-    let r;
-    try {
-      r = await admin('/admin/login/start', { method: 'POST', body: JSON.stringify({ provider: want }) });
-    } catch (e) {
-      $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
-      return;
+
+    // ---- 登录选项（上游自报 → 前端渲染，判据是**数据**不是上游名）----
+    //
+    // 用户要求：「添加账号需要用户选择国内或者国际啊」。
+    //
+    // ⚠ 这里**不写任何上游名**：选项来自 manifest 的 `login.options`，
+    // 由上游自己声明（gateway.LoginOptionsExt）。没有选项的上游走原来的
+    // 路径，一个字节都不变。
+    const optEntry = (MANIFEST.providers || []).find(x => x && x.id === want) || {};
+    const loginOpts = (optEntry.login && optEntry.login.options) || [];
+    const chosen = {};
+    for (const o of loginOpts) chosen[o.key] = o.default || (o.values[0] || {}).value || '';
+    if (loginOpts.length) {
+      $('loginBody').innerHTML = loginOpts.map(o => {
+        const opts = (o.values || []).map(v =>
+          `<option value="${esc(v.value)}"${v.value === chosen[o.key] ? ' selected' : ''}>${esc(v.label || v.value)}</option>`
+        ).join('');
+        return `<div class="row" style="gap:8px;align-items:center;margin:8px 0">`
+          + `<label class="dim" style="font-size:12px;min-width:56px">${esc(o.label || o.key)}</label>`
+          + `<select data-loginopt="${esc(o.key)}" style="flex:1">${opts}</select></div>`
+          + (o.hint ? `<div class="dim" style="font-size:11px;margin:-4px 0 8px 64px">${esc(o.hint)}</div>` : '');
+      }).join('') + '<div class="row" style="gap:8px;margin-top:10px"><button id="btnLoginGo" type="button">开始登录</button></div>';
+      // 有选项：等用户点「开始登录」。把它接到**同一个** doStart 上。
+      $('btnLoginGo').onclick = () => { doStart(); };
     }
-    // 后端认了哪个上游：优先用它回传的，否则用点进来的那个。
-    loginProvider = r.provider || want;
-
-    const state = r.state;
-    loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
-    // ---- 两种登录形态：**要不要浏览器**由后端回执决定 ----
-    //
-    // `auth_url` 非空  → 设备码/授权码流程：要用户去浏览器完成授权
-    // `auth_url` 为空  → **本机凭证拾取**流程（登录态就在本机那个桌面客户端的
-    //                     Local Storage 里，没有可打开的授权页）
-    //
-    // ⚠ 判据必须是**数据**（auth_url 空不空），不能是上游名 ——
-    //   写成 `if (provider === '<某个上游名>')` 就等于把上游名搬进渲染层，
-    //   加第四个上游时又要改前端（本项目最硬的判据）。
-    //
-    //    上面那句刻意**没有写出任何具体上游名**。这样"这段代码里有没有
-    //    上游名"本身就成了一条可以被断言检查的性质（见
-    //    webui_token_lifetime_test.go 的 TestWebUIAddAccountHandlesEmptyAuthURL）。
-    //    连注释里也不写，是因为那条守卫读的是**字节**，分不出注释与代码；
-    //    而让守卫去解析 JS 注释是更糟的复杂度。
-    //
-    // 原来的写法是无条件渲染那个 `<a>`，于是空 auth_url 会渲染成
-    // `<a href="">打开授权页面</a>` —— 点了只是把当前页重新加载一遍，
-    // 用户完全无法判断发生了什么。
-    // 服务器部署逃生路径（数据驱动）：上游在 manifest 里自报
-    // login.manual = {path, instructions} 时，渲染"粘贴回跳 URL 完成"输入框。
-    // 回调口打在浏览器那台机器上（127.0.0.1）永远进不了服务器 —— 用户把
-    // 地址栏里的完整回跳 URL 粘进来，POST 到上游自报的完成端点即可收号。
-    const mEntry = (MANIFEST.providers || []).find(x => x && x.id === (loginProvider || '')) || {};
-    const mLogin = (mEntry.login || {}).manual;
-    const manualBox = mLogin && mLogin.path ? `
-      <div style="margin:10px 0 8px">
-        <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
-        <div class="row" style="gap:8px">
-          <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
-          <button id="btnManualComplete" type="button">粘贴完成</button>
-        </div>
-      </div>` : '';
-
-    const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
-
-    // ---- 扫码流程：后端给了二维码就渲染它，**不**渲染"打开链接" ----
-    //
-    // raccoon（微信扫码）那类上游的 auth_url 是**要扫的内容**，不是网页：
-    // 它在屏幕上，手机扫不了同一块屏幕。此前对所有上游都渲染
-    // 「打开授权页 / 复制链接」，于是那种上游的「＋ 添加账号」等于不可用
-    //（用户报的缺陷）。
-    //
-    // ⚠ 判据是**数据**（后端有没有下发 qr_svg），不是上游名，也不是
-    //   "链接长得像不像二维码 URL" —— 后者要求前端认识上游或 URL 形态，
-    //   而"加一个上游时前端一行都不改"是本项目最硬的禁忌。
-    //
-    // ⚠ qr_svg 是**后端生成的** SVG 字符串（上游自报要不要扫码，
-    //   见 gateway.QRLoginExt）。直接 innerHTML 插进来 ——
-    //   它是我们自己后端产出的固定形态（只有 svg/rect/path 与数字），
-    //   不含任何用户输入，不存在注入面。
-    const qrSVG = typeof r.qr_svg === 'string' ? r.qr_svg.trim() : '';
-    if (qrSVG && !hasAuthURL) {
-      // 理论到不了（后端只在有 auth_url 时才给 qr_svg）——
-      // 但两个字段自相矛盾时宁可说清，也不要渲染半截界面。
-      $('loginBody').innerHTML = `<span class="err">后端回执异常：给了二维码但没有授权链接</span>`;
-      return;
+    if (!loginOpts.length) {
+      $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
+      setTimeout(() => doStart(), 0);
     }
-    if (qrSVG) {
-      renderLoginIntro('qr');
-      // ⚠ 这里**不提供**任何"在浏览器打开"的入口（用户明确要求）。
+
+    // doStart 申请一次登录并渲染结果。
+    //
+    // # 为什么写成函数声明而不是提前 return 两段
+    //
+    // 守卫测试按 `function addAccount(` 截到第一个顶格 `  }`，
+    // 因此渲染逻辑必须留在 addAccount 体内。用"两段 return"会把后半段
+    // 变成**死代码**，守卫就静默失效（它读的是字节，不看控制流）。
+    async function doStart() {
+      for (const o of loginOpts) {
+        const el = $('loginBody').querySelector('select[data-loginopt="' + o.key + '"]');
+        if (el) chosen[o.key] = el.value;
+      }
+      let r;
+      try {
+        r = await admin('/admin/login/start', { method: 'POST', body: JSON.stringify({ provider: want, options: chosen }) });
+      } catch (e) {
+        $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
+        return;
+      }
+      const state = r.state;
+      loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
+      // ---- 两种登录形态：**要不要浏览器**由后端回执决定 ----
       //
-      // 扫码类上游的 auth_url 是**给手机扫的内容**，在电脑浏览器里打开它
-      // 只会看到一个"请在微信中打开"之类的页面 —— 不是登录路径，
-      // 照着点会让人以为流程就是这样。所以这个分支只有：
+      // `auth_url` 非空  → 设备码/授权码流程：要用户去浏览器完成授权
+      // `auth_url` 为空  → **本机凭证拾取**流程（登录态就在本机那个桌面客户端的
+      //                     Local Storage 里，没有可打开的授权页）
       //
-      //	二维码（主路径）+ 「复制链接」（给"想换个设备扫"的人）+ 轮询状态
+      // ⚠ 判据必须是**数据**（auth_url 空不空），不能是上游名 ——
+      //   写成 `if (provider === '<某个上游名>')` 就等于把上游名搬进渲染层，
+      //   加第四个上游时又要改前端（本项目最硬的判据）。
       //
-      // 「复制链接」保留但改了说明：它是"把链接复制到别的设备去扫"，
-      // 不是"复制到浏览器打开"。文案里刻意不出现"浏览器"三个字。
+      //    上面那句刻意**没有写出任何具体上游名**。这样"这段代码里有没有
+      //    上游名"本身就成了一条可以被断言检查的性质（见
+      //    webui_token_lifetime_test.go 的 TestWebUIAddAccountHandlesEmptyAuthURL）。
+      //    连注释里也不写，是因为那条守卫读的是**字节**，分不出注释与代码；
+      //    而让守卫去解析 JS 注释是更糟的复杂度。
+      //
+      // 原来的写法是无条件渲染那个 `<a>`，于是空 auth_url 会渲染成
+      // `<a href="">打开授权页面</a>` —— 点了只是把当前页重新加载一遍，
+      // 用户完全无法判断发生了什么。
+      // 服务器部署逃生路径（数据驱动）：上游在 manifest 里自报
+      // login.manual = {path, instructions} 时，渲染"粘贴回跳 URL 完成"输入框。
+      // 回调口打在浏览器那台机器上（127.0.0.1）永远进不了服务器 —— 用户把
+      // 地址栏里的完整回跳 URL 粘进来，POST 到上游自报的完成端点即可收号。
+      const mEntry = (MANIFEST.providers || []).find(x => x && x.id === (loginProvider || '')) || {};
+      const mLogin = (mEntry.login || {}).manual;
+      const manualBox = mLogin && mLogin.path ? `
+        <div style="margin:10px 0 8px">
+          <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
+          <div class="row" style="gap:8px">
+            <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
+            <button id="btnManualComplete" type="button">粘贴完成</button>
+          </div>
+        </div>` : '';
+
+      const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
+
+      // ---- 扫码流程：后端给了二维码就渲染它，**不**渲染"打开链接" ----
+      //
+      // raccoon（微信扫码）那类上游的 auth_url 是**要扫的内容**，不是网页：
+      // 它在屏幕上，手机扫不了同一块屏幕。此前对所有上游都渲染
+      // 「打开授权页 / 复制链接」，于是那种上游的「＋ 添加账号」等于不可用
+      //（用户报的缺陷）。
+      //
+      // ⚠ 判据是**数据**（后端有没有下发 qr_svg），不是上游名，也不是
+      //   "链接长得像不像二维码 URL" —— 后者要求前端认识上游或 URL 形态，
+      //   而"加一个上游时前端一行都不改"是本项目最硬的禁忌。
+      //
+      // ⚠ qr_svg 是**后端生成的** SVG 字符串（上游自报要不要扫码，
+      //   见 gateway.QRLoginExt）。直接 innerHTML 插进来 ——
+      //   它是我们自己后端产出的固定形态（只有 svg/rect/path 与数字），
+      //   不含任何用户输入，不存在注入面。
+      const qrSVG = typeof r.qr_svg === 'string' ? r.qr_svg.trim() : '';
+      if (qrSVG && !hasAuthURL) {
+        // 理论到不了（后端只在有 auth_url 时才给 qr_svg）——
+        // 但两个字段自相矛盾时宁可说清，也不要渲染半截界面。
+        $('loginBody').innerHTML = `<span class="err">后端回执异常：给了二维码但没有授权链接</span>`;
+        return;
+      }
+      if (qrSVG) {
+        renderLoginIntro('qr');
+        // ⚠ 这里**不提供**任何"在浏览器打开"的入口（用户明确要求）。
+        //
+        // 扫码类上游的 auth_url 是**给手机扫的内容**，在电脑浏览器里打开它
+        // 只会看到一个"请在微信中打开"之类的页面 —— 不是登录路径，
+        // 照着点会让人以为流程就是这样。所以这个分支只有：
+        //
+        //	二维码（主路径）+ 「复制链接」（给"想换个设备扫"的人）+ 轮询状态
+        //
+        // 「复制链接」保留但改了说明：它是"把链接复制到别的设备去扫"，
+        // 不是"复制到浏览器打开"。文案里刻意不出现"浏览器"三个字。
+        $('loginBody').innerHTML = `
+          <div class="row" style="margin-bottom:10px">
+            <button id="btnCopyAuth" type="button"
+               style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
+               title="复制二维码里的链接（供在另一台设备上生成二维码再扫）">复制链接</button>
+            <span id="loginState" class="dim" style="font-size:12px">等待扫码…（state ${esc(state.slice(0, 8))}…）</span>
+          </div>
+          <div style="display:flex;justify-content:center;margin:8px 0 4px">${qrSVG}</div>
+          <div class="dim" style="font-size:12px;margin-bottom:8px;text-align:center">
+            用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
+            扫完后本窗口会自动检测并落盘凭证（无需回来点任何按钮）。
+          </div>
+          ${manualBox}
+          <pre id="loginOut" class="dim" style="max-height:120px">扫码完成后，本窗口会自动检测并落盘凭证。</pre>`;
+        const btnCopyQR = $('btnCopyAuth');
+        if (btnCopyQR) {
+          btnCopyQR.onclick = () => {
+            copyText(r.auth_url);
+            btnCopyQR.textContent = '已复制';
+            setTimeout(() => { btnCopyQR.textContent = '复制链接'; }, 1500);
+          };
+        }
+        const btnManualQR = $('btnManualComplete');
+        if (btnManualQR) {
+          btnManualQR.onclick = async () => {
+            const code = ($('manualCode').value || '').trim();
+            if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
+            btnManualQR.disabled = true;
+            $('loginState').textContent = '已提交，正在解密收号…';
+            try {
+              await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
+              $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
+            } catch (e) {
+              $('loginState').textContent = '失败：' + e.message;
+              btnManualQR.disabled = false;
+            }
+          };
+        }
+      } else if (hasAuthURL) {
+      renderLoginIntro('browser');
+      // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
+      //
+      // 用户要求：默认打开的就是无痕模式。打开动作由**后端**完成
+      // （点「添加账号」时自动开一次，见 admin 的 openAuthBrowser /
+      // internal/browseropen），因为前端 target=_blank 打开的窗口
+      // 属于用户当前的浏览器状态 —— OAuth 会拿那边已登录的账号完成授权，
+      // 于是"加新号"变成"把老号再加一遍"，而且它**成功**了，没有报错。
+      //
+      // 三种回执要区分开，不能糊成一句"请打开授权页"：
+      //   r.browser       后端已开成 → 告诉用户去那个无痕窗口
+      //   r.browser_error 后端没开成 → 明确说"没开成"并突出复制链接
+      //   两者都空        未接线    → 说清是部署没启用，别让用户干等
+      // ⚠ 这段刻意**只用** else-if 收尾，不写最后那个 else 关键字加花括号：
+      // 下面那条「无授权页分支不许出现 <a href=」的守卫是按**第一处**
+      // else 块切分函数体的（它读的是**字节**，分不出注释与代码），
+      // 在这里插一个 else 块会把切分点提前，让守卫去检查错误的区域
+      //（fail-open 地失去判别力 —— 而不是报错，所以特别难发现）。
+      let openNote = `<div id="loginOpenNote" class="dim" style="font-size:12px;margin-bottom:8px">
+          本部署未启用自动打开浏览器：请点「复制链接」，粘贴到
+          <b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+        </div>`;
+      if (r.browser) {
+        openNote = `<div id="loginOpenNote" class="ok" style="font-size:12px;margin-bottom:8px">
+          已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
+        </div>`;
+      } else if (r.browser_error) {
+        openNote = `<div id="loginOpenNote" class="err" style="font-size:12px;margin-bottom:8px">
+          未能自动打开浏览器（${esc(r.browser_error)}）——
+          请点「复制链接」，粘贴到<b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+        </div>`;
+      }
       $('loginBody').innerHTML = `
         <div class="row" style="margin-bottom:10px">
+          <button id="btnReopenAuth" type="button" class="primary"
+             style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:#fff;cursor:pointer;font-weight:600"
+             title="用无痕窗口重新打开本次授权链接">重新无痕打开</button>
           <button id="btnCopyAuth" type="button"
              style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
-             title="复制二维码里的链接（供在另一台设备上生成二维码再扫）">复制链接</button>
-          <span id="loginState" class="dim" style="font-size:12px">等待扫码…（state ${esc(state.slice(0, 8))}…）</span>
+             title="复制授权链接，粘贴到无痕/隐私窗口">复制链接</button>
+          <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer"
+             style="padding:8px 12px;border-radius:8px;color:var(--dim);font-size:12px"
+             title="在普通窗口打开（不推荐：可能用浏览器里已登录的账号完成授权）">普通窗口打开</a>
+          <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
         </div>
-        <div style="display:flex;justify-content:center;margin:8px 0 4px">${qrSVG}</div>
-        <div class="dim" style="font-size:12px;margin-bottom:8px;text-align:center">
-          用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
-          扫完后本窗口会自动检测并落盘凭证（无需回来点任何按钮）。
-        </div>
+        ${openNote}
         ${manualBox}
-        <pre id="loginOut" class="dim" style="max-height:120px">扫码完成后，本窗口会自动检测并落盘凭证。</pre>`;
-      const btnCopyQR = $('btnCopyAuth');
-      if (btnCopyQR) {
-        btnCopyQR.onclick = () => {
-          copyText(r.auth_url);
-          btnCopyQR.textContent = '已复制';
-          setTimeout(() => { btnCopyQR.textContent = '复制链接'; }, 1500);
-        };
-      }
-      const btnManualQR = $('btnManualComplete');
-      if (btnManualQR) {
-        btnManualQR.onclick = async () => {
+        <div class="dim" style="font-size:12px;margin-bottom:8px">
+          无痕窗口可避免浏览器里已登录的账号把会话串到别的账号上。
+        </div>
+        <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
+      const btnManual = $('btnManualComplete');
+      if (btnManual) {
+        btnManual.onclick = async () => {
           const code = ($('manualCode').value || '').trim();
           if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
-          btnManualQR.disabled = true;
+          btnManual.disabled = true;
           $('loginState').textContent = '已提交，正在解密收号…';
           try {
             await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
             $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
           } catch (e) {
             $('loginState').textContent = '失败：' + e.message;
-            btnManualQR.disabled = false;
+            btnManual.disabled = false;
           }
         };
       }
-    } else if (hasAuthURL) {
-    renderLoginIntro('browser');
-    // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
-    //
-    // 用户要求：默认打开的就是无痕模式。打开动作由**后端**完成
-    // （点「添加账号」时自动开一次，见 admin 的 openAuthBrowser /
-    // internal/browseropen），因为前端 target=_blank 打开的窗口
-    // 属于用户当前的浏览器状态 —— OAuth 会拿那边已登录的账号完成授权，
-    // 于是"加新号"变成"把老号再加一遍"，而且它**成功**了，没有报错。
-    //
-    // 三种回执要区分开，不能糊成一句"请打开授权页"：
-    //   r.browser       后端已开成 → 告诉用户去那个无痕窗口
-    //   r.browser_error 后端没开成 → 明确说"没开成"并突出复制链接
-    //   两者都空        未接线    → 说清是部署没启用，别让用户干等
-    // ⚠ 这段刻意**只用** else-if 收尾，不写最后那个 else 关键字加花括号：
-    // 下面那条「无授权页分支不许出现 <a href=」的守卫是按**第一处**
-    // else 块切分函数体的（它读的是**字节**，分不出注释与代码），
-    // 在这里插一个 else 块会把切分点提前，让守卫去检查错误的区域
-    //（fail-open 地失去判别力 —— 而不是报错，所以特别难发现）。
-    let openNote = `<div id="loginOpenNote" class="dim" style="font-size:12px;margin-bottom:8px">
-        本部署未启用自动打开浏览器：请点「复制链接」，粘贴到
-        <b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
-      </div>`;
-    if (r.browser) {
-      openNote = `<div id="loginOpenNote" class="ok" style="font-size:12px;margin-bottom:8px">
-        已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
-      </div>`;
-    } else if (r.browser_error) {
-      openNote = `<div id="loginOpenNote" class="err" style="font-size:12px;margin-bottom:8px">
-        未能自动打开浏览器（${esc(r.browser_error)}）——
-        请点「复制链接」，粘贴到<b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
-      </div>`;
-    }
-    $('loginBody').innerHTML = `
-      <div class="row" style="margin-bottom:10px">
-        <button id="btnReopenAuth" type="button" class="primary"
-           style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:#fff;cursor:pointer;font-weight:600"
-           title="用无痕窗口重新打开本次授权链接">重新无痕打开</button>
-        <button id="btnCopyAuth" type="button"
-           style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
-           title="复制授权链接，粘贴到无痕/隐私窗口">复制链接</button>
-        <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer"
-           style="padding:8px 12px;border-radius:8px;color:var(--dim);font-size:12px"
-           title="在普通窗口打开（不推荐：可能用浏览器里已登录的账号完成授权）">普通窗口打开</a>
-        <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
-      </div>
-      ${openNote}
-      ${manualBox}
-      <div class="dim" style="font-size:12px;margin-bottom:8px">
-        无痕窗口可避免浏览器里已登录的账号把会话串到别的账号上。
-      </div>
-      <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
-    const btnManual = $('btnManualComplete');
-    if (btnManual) {
-      btnManual.onclick = async () => {
-        const code = ($('manualCode').value || '').trim();
-        if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
-        btnManual.disabled = true;
-        $('loginState').textContent = '已提交，正在解密收号…';
-        try {
-          await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
-          $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
-        } catch (e) {
-          $('loginState').textContent = '失败：' + e.message;
-          btnManual.disabled = false;
-        }
-      };
-    }
 
-    // 重开：后端只认「本进程刚签发过的链接」（见 /admin/login/open），
-    // 所以这里回传的必须是本次 start 拿到的那条 r.auth_url。
-    // 手滑关掉无痕窗口时用它 —— 比重走一遍 start 好：不会作废当前 state。
-    const btnReopen = $('btnReopenAuth');
-    if (btnReopen) {
-      btnReopen.onclick = async () => {
-        btnReopen.disabled = true;
-        btnReopen.textContent = '正在打开…';
-        try {
-          const o = await admin('/admin/login/open',
-            { method: 'POST', body: JSON.stringify({ url: r.auth_url }) });
-          btnReopen.textContent = '已打开';
-          if (o && o.browser) {
-            // 按 **id** 定位提示行，不用 querySelector('.dim') ——
-            // 同一块 DOM 里的 #loginState 也是 .dim 且在文档序更靠前，
-            // 按类查会命中它，把"等待授权…"覆盖成"已打开"（状态就丢了）。
-            const first = $('loginOpenNote');
-            if (first) {
-              first.className = 'ok';
-              first.style.fontSize = '12px';
-              first.style.marginBottom = '8px';
-              first.innerHTML = `已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
+      // 重开：后端只认「本进程刚签发过的链接」（见 /admin/login/open），
+      // 所以这里回传的必须是本次 start 拿到的那条 r.auth_url。
+      // 手滑关掉无痕窗口时用它 —— 比重走一遍 start 好：不会作废当前 state。
+      const btnReopen = $('btnReopenAuth');
+      if (btnReopen) {
+        btnReopen.onclick = async () => {
+          btnReopen.disabled = true;
+          btnReopen.textContent = '正在打开…';
+          try {
+            const o = await admin('/admin/login/open',
+              { method: 'POST', body: JSON.stringify({ url: r.auth_url }) });
+            btnReopen.textContent = '已打开';
+            if (o && o.browser) {
+              // 按 **id** 定位提示行，不用 querySelector('.dim') ——
+              // 同一块 DOM 里的 #loginState 也是 .dim 且在文档序更靠前，
+              // 按类查会命中它，把"等待授权…"覆盖成"已打开"（状态就丢了）。
+              const first = $('loginOpenNote');
+              if (first) {
+                first.className = 'ok';
+                first.style.fontSize = '12px';
+                first.style.marginBottom = '8px';
+                first.innerHTML = `已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
+              }
             }
+          } catch (e) {
+            // 失败必须说出来：静默失败会显示成"点了没反应"。
+            btnReopen.textContent = '打开失败';
+            const out = $('loginOut');
+            if (out) out.textContent = '重新打开失败：' + (e && e.message ? e.message : e);
           }
-        } catch (e) {
-          // 失败必须说出来：静默失败会显示成"点了没反应"。
-          btnReopen.textContent = '打开失败';
-          const out = $('loginOut');
-          if (out) out.textContent = '重新打开失败：' + (e && e.message ? e.message : e);
-        }
-        setTimeout(() => { btnReopen.textContent = '重新无痕打开'; btnReopen.disabled = false; }, 2000);
-      };
-    }
-    const btnCopy = $('btnCopyAuth');
-    if (btnCopy) {
-      btnCopy.onclick = async () => {
-        try {
-          await navigator.clipboard.writeText(r.auth_url);
-          btnCopy.textContent = '已复制';
-        } catch {
-          // 剪贴板 API 不可用（http 非 https / 权限）时回落选中文本提示。
-          const tmp = document.createElement('textarea');
-          tmp.value = r.auth_url;
-          document.body.appendChild(tmp);
-          tmp.select();
-          document.execCommand('copy');
-          tmp.remove();
-          btnCopy.textContent = '已复制';
-        }
-        setTimeout(() => { btnCopy.textContent = '复制链接'; }, 2000);
-      };
-    }
-    } else {
-      // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
-      renderLoginIntro('local');
-      $('loginBody').innerHTML = `
-      <div class="row" style="margin-bottom:10px">
-        <span id="loginState" class="dim" style="font-size:12px">正在从本机读取登录态…（state ${esc(state.slice(0, 8))}…）</span>
-      </div>
-      <pre id="loginOut" class="dim" style="max-height:120px">该上游的登录态保存在本机客户端里，网关直接读取，无需打开授权页面。</pre>`;
-    }
+          setTimeout(() => { btnReopen.textContent = '重新无痕打开'; btnReopen.disabled = false; }, 2000);
+        };
+      }
+      const btnCopy = $('btnCopyAuth');
+      if (btnCopy) {
+        btnCopy.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(r.auth_url);
+            btnCopy.textContent = '已复制';
+          } catch {
+            // 剪贴板 API 不可用（http 非 https / 权限）时回落选中文本提示。
+            const tmp = document.createElement('textarea');
+            tmp.value = r.auth_url;
+            document.body.appendChild(tmp);
+            tmp.select();
+            document.execCommand('copy');
+            tmp.remove();
+            btnCopy.textContent = '已复制';
+          }
+          setTimeout(() => { btnCopy.textContent = '复制链接'; }, 2000);
+        };
+      }
+      } else {
+        // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
+        renderLoginIntro('local');
+        $('loginBody').innerHTML = `
+        <div class="row" style="margin-bottom:10px">
+          <span id="loginState" class="dim" style="font-size:12px">正在从本机读取登录态…（state ${esc(state.slice(0, 8))}…）</span>
+        </div>
+        <pre id="loginOut" class="dim" style="max-height:120px">该上游的登录态保存在本机客户端里，网关直接读取，无需打开授权页面。</pre>`;
+      }
 
-    if (loginPoll) clearInterval(loginPoll);
-    loginPoll = setInterval(async () => {
-      if (Date.now() > loginDeadline) {
-        clearInterval(loginPoll); loginPoll = null;
-        $('loginState').innerHTML = '<span class="err">授权已超时，请关闭后重试</span>';
-        return;
-      }
-      let p;
-      // ⚠ 必须带上 provider —— 与 start 用**同一条**分派规则。
-      //
-      // 这里曾经只传 `{ state }`，于是后端按"不带 provider"处理，
-      // 走了**默认上游（workbuddy）**的 OAuth 去认 codearts 的 state。
-      //
-      // 表现极具误导性：弹窗标题对（start 带了 provider）、
-      // 跳转的授权页也对（CodeArts 站点），**只有轮询走错了上游** ——
-      // 于是界面报 `oauth: state 不存在或已超期，请重新发起授权`。
-      //
-      // 那句文案是 **workbuddy 的 OAuth** 定义的（internal/oauth/oauth.go），
-      // codearts 根本不会有它 —— 这就是"用 A 的 state 去问 B"的典型症状。
-      // 后端 loginPoll 的注释里正好写了要避免这件事，但**前端漏了**。
-      try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state, provider: loginProvider }) }); }
-      catch (e) {
-        // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
-        clearInterval(loginPoll); loginPoll = null;
-        $('loginState').innerHTML = `<span class="err">${esc(e.message)}</span>`;
-        return;
-      }
-      if (p && p.status === 'pending') {
-        $('loginOut').textContent = '仍在等待浏览器完成登录…';
-        return;
-      }
-      clearInterval(loginPoll); loginPoll = null;
-      if (p && p.status === 'ok') {
-        $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
-        // ⚠ 三处都用**后端回执**，并且**缺失字段显示 `—` 而不是 `undefined`**。
-        //
-        // 这三行曾经是：
-        //   `域: ${p.domain}` / `有效期: ${Math.floor((p.expires_in||0)/86400)} 天`
-        //   / `凭证文件 : auths/${p.file}`
-        //
-        // 三个问题（用户实测报的）：
-        //
-        //  1. **`凭证文件` 路径是错的** —— 硬编码 `auths/`，而 `p.file` 只有 basename。
-        //     按上游分子目录之后实际是 `auths/codearts/codearts-xxx.json`，
-        //     界面显示成 `auths/codearts-xxx.json` —— **少了一整个上游目录**。
-        //     用户会照着这句去找文件、往那儿放，**那是错的地方**。
-        //     现在用回执的 `dir`（后端实际落盘目录）。
-        //
-        //  2. **`域` 显示 `undefined`** —— codearts 走的 flow 回执**根本不返回** domain
-        //    （`gateway.Credential` 没有这个字段：各上游凭证结构不同）。
-        //     显示 `undefined` 会让人以为拿到了数据。
-        //
-        //  3. **`有效期` 显示 `0 天`** —— 同源：flow 回执原来不返回有效期。
-        //     现在回执带 `expires_at`；上游不提供时它是零值 → 显示 `—`。
-        //
-        // **缺失就显示 `—`**：`undefined` / `0 天` 都是"没处理缺失"的信号，
-        // 而且会伪装成有效数据（`0 天` 看起来像一个真实的过期天数）。
-        const dash = '—';
-        const dirTxt = p.dir ? p.dir.replace(/\\/g, '/') : dash;
-        const fileTxt = p.file ? `${dirTxt}/${p.file}` : dash;
-        const expTxt = (() => {
-          // ---- 第三态：设计上不过期（与账号表那一列**同一个**判据）----
-          //
-          // 判据来自回执的 `token_never_expires`（后端走
-          // gateway.CredentialLifetimeExt）。必须排在 `!p.expires_at` 之前：
-          // 后端现在在零值时**不下发** expires_at 了，但万一将来又有人把零值
-          // 发回来，`!p.expires_at` 会为假（那是个非空字符串），
-          // `Date.parse("0001-01-01T00:00:00Z")` 得到约 -6.2e13（truthy，
-          // 连 `!t` 那道也过不去），days 远小于 0 → 渲染成「已过期」。
-          //
-          // 用户实测报的就是这个：loomy 弹窗在「授权成功」下面写着
-          // **`有效期: 已过期`**，而**同一份凭证**在账号表里写着「永久」。
-          // 两处渲染点自相矛盾，且用户第一眼看到的是那句错的。
-          if (p.token_never_expires === true) return '永久（无 TTL）';
-          if (!p.expires_at) return dash;
-          const t = Date.parse(p.expires_at);
-          if (!t) return dash;                       // 零值/坏值一律 `—`
-          const days = (t - Date.now()) / 86400000;
-          if (days <= 0) return '已过期';
-          return days < 1 ? `${Math.floor(days * 24)} 小时` : `${Math.floor(days)} 天`;
-        })();
-        $('loginOut').textContent =
-          `uid      : ${p.uid}\n` +
-          `昵称     : ${p.nickname || dash}\n` +
-          `域       : ${p.domain || dash}\n` +
-          `有效期   : ${expTxt}\n` +
-          `凭证文件 : ${fileTxt}`;
-        // ⚠ 本机拾取这条路上，"加进来的是哪个号"必须**显式说一句**。
-        //
-        // 原因是一个真实的时序陷阱：客户端把登录态**异步**刷进 leveldb，
-        // 用户刚在客户端里登录完、立刻回来点添加，读到的很可能**还是上一个号**。
-        // 实测就是这个：新号在客户端里 00:50:09 登录，00:50:15 点添加时
-        // 磁盘上最新的那条记录仍是旧号（旧号的 loggedInAt 反而更早）。
-        //
-        // 那时弹窗一切"正常"、uid 也照实写在下面 —— 但用户不会去比对那串
-        // 十六进制，于是"添加成功"与"加错了号"在界面上长得一模一样。
-        // 一句提示把这个静默失败变成**可核对的事实**。
-        //
-        // 判据用 hasAuthURL（本机拾取）而不是某个上游名 ——
-        // 任何走本机拾取的上游都适用，加新上游时这里零改动。
-        if (!hasAuthURL) {
-          toast(`已从本机读取账号 ${p.nickname || p.uid.slice(0, 8)}；` +
-            `若这不是你刚登录的那个号，请在客户端里确认登录状态后重试`);
-          await refreshAfterAccountChange();
+      if (loginPoll) clearInterval(loginPoll);
+      loginPoll = setInterval(async () => {
+        if (Date.now() > loginDeadline) {
+          clearInterval(loginPoll); loginPoll = null;
+          $('loginState').innerHTML = '<span class="err">授权已超时，请关闭后重试</span>';
           return;
         }
-        toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
-        await refreshAfterAccountChange();
-      }
-    }, 2500);
+        let p;
+        // ⚠ 必须带上 provider —— 与 start 用**同一条**分派规则。
+        //
+        // 这里曾经只传 `{ state }`，于是后端按"不带 provider"处理，
+        // 走了**默认上游（workbuddy）**的 OAuth 去认 codearts 的 state。
+        //
+        // 表现极具误导性：弹窗标题对（start 带了 provider）、
+        // 跳转的授权页也对（CodeArts 站点），**只有轮询走错了上游** ——
+        // 于是界面报 `oauth: state 不存在或已超期，请重新发起授权`。
+        //
+        // 那句文案是 **workbuddy 的 OAuth** 定义的（internal/oauth/oauth.go），
+        // codearts 根本不会有它 —— 这就是"用 A 的 state 去问 B"的典型症状。
+        // 后端 loginPoll 的注释里正好写了要避免这件事，但**前端漏了**。
+        try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state, provider: loginProvider }) }); }
+        catch (e) {
+          // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
+          clearInterval(loginPoll); loginPoll = null;
+          $('loginState').innerHTML = `<span class="err">${esc(e.message)}</span>`;
+          return;
+        }
+        if (p && p.status === 'pending') {
+          $('loginOut').textContent = '仍在等待浏览器完成登录…';
+          return;
+        }
+        clearInterval(loginPoll); loginPoll = null;
+        if (p && p.status === 'ok') {
+          $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
+          // ⚠ 三处都用**后端回执**，并且**缺失字段显示 `—` 而不是 `undefined`**。
+          //
+          // 这三行曾经是：
+          //   `域: ${p.domain}` / `有效期: ${Math.floor((p.expires_in||0)/86400)} 天`
+          //   / `凭证文件 : auths/${p.file}`
+          //
+          // 三个问题（用户实测报的）：
+          //
+          //  1. **`凭证文件` 路径是错的** —— 硬编码 `auths/`，而 `p.file` 只有 basename。
+          //     按上游分子目录之后实际是 `auths/codearts/codearts-xxx.json`，
+          //     界面显示成 `auths/codearts-xxx.json` —— **少了一整个上游目录**。
+          //     用户会照着这句去找文件、往那儿放，**那是错的地方**。
+          //     现在用回执的 `dir`（后端实际落盘目录）。
+          //
+          //  2. **`域` 显示 `undefined`** —— codearts 走的 flow 回执**根本不返回** domain
+          //    （`gateway.Credential` 没有这个字段：各上游凭证结构不同）。
+          //     显示 `undefined` 会让人以为拿到了数据。
+          //
+          //  3. **`有效期` 显示 `0 天`** —— 同源：flow 回执原来不返回有效期。
+          //     现在回执带 `expires_at`；上游不提供时它是零值 → 显示 `—`。
+          //
+          // **缺失就显示 `—`**：`undefined` / `0 天` 都是"没处理缺失"的信号，
+          // 而且会伪装成有效数据（`0 天` 看起来像一个真实的过期天数）。
+          const dash = '—';
+          const dirTxt = p.dir ? p.dir.replace(/\\/g, '/') : dash;
+          const fileTxt = p.file ? `${dirTxt}/${p.file}` : dash;
+          const expTxt = (() => {
+            // ---- 第三态：设计上不过期（与账号表那一列**同一个**判据）----
+            //
+            // 判据来自回执的 `token_never_expires`（后端走
+            // gateway.CredentialLifetimeExt）。必须排在 `!p.expires_at` 之前：
+            // 后端现在在零值时**不下发** expires_at 了，但万一将来又有人把零值
+            // 发回来，`!p.expires_at` 会为假（那是个非空字符串），
+            // `Date.parse("0001-01-01T00:00:00Z")` 得到约 -6.2e13（truthy，
+            // 连 `!t` 那道也过不去），days 远小于 0 → 渲染成「已过期」。
+            //
+            // 用户实测报的就是这个：loomy 弹窗在「授权成功」下面写着
+            // **`有效期: 已过期`**，而**同一份凭证**在账号表里写着「永久」。
+            // 两处渲染点自相矛盾，且用户第一眼看到的是那句错的。
+            if (p.token_never_expires === true) return '永久（无 TTL）';
+            if (!p.expires_at) return dash;
+            const t = Date.parse(p.expires_at);
+            if (!t) return dash;                       // 零值/坏值一律 `—`
+            const days = (t - Date.now()) / 86400000;
+            if (days <= 0) return '已过期';
+            return days < 1 ? `${Math.floor(days * 24)} 小时` : `${Math.floor(days)} 天`;
+          })();
+          $('loginOut').textContent =
+            `uid      : ${p.uid}\n` +
+            `昵称     : ${p.nickname || dash}\n` +
+            `域       : ${p.domain || dash}\n` +
+            `有效期   : ${expTxt}\n` +
+            `凭证文件 : ${fileTxt}`;
+          // ⚠ 本机拾取这条路上，"加进来的是哪个号"必须**显式说一句**。
+          //
+          // 原因是一个真实的时序陷阱：客户端把登录态**异步**刷进 leveldb，
+          // 用户刚在客户端里登录完、立刻回来点添加，读到的很可能**还是上一个号**。
+          // 实测就是这个：新号在客户端里 00:50:09 登录，00:50:15 点添加时
+          // 磁盘上最新的那条记录仍是旧号（旧号的 loggedInAt 反而更早）。
+          //
+          // 那时弹窗一切"正常"、uid 也照实写在下面 —— 但用户不会去比对那串
+          // 十六进制，于是"添加成功"与"加错了号"在界面上长得一模一样。
+          // 一句提示把这个静默失败变成**可核对的事实**。
+          //
+          // 判据用 hasAuthURL（本机拾取）而不是某个上游名 ——
+          // 任何走本机拾取的上游都适用，加新上游时这里零改动。
+          if (!hasAuthURL) {
+            toast(`已从本机读取账号 ${p.nickname || p.uid.slice(0, 8)}；` +
+              `若这不是你刚登录的那个号，请在客户端里确认登录状态后重试`);
+            await refreshAfterAccountChange();
+            return;
+          }
+          toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
+          await refreshAfterAccountChange();
+        }
+      }, 2500);
+  
+  
+    }
   }
+
+
+
+
+
+
+  //
+  // # 为什么单独成函数（而不是留在 addAccount 里）
+  //
+  // 用户要求「添加账号需要用户选择国内或者国际」之后，addAccount 多了一段
+  // 「先渲染选项 → 用户点开始登录 → 才真的申请」。而选项为空的上游要
+  // 跳过这段直接走后半程。
+  //
+  // 拆出来还有一个好处：守卫测试（TestWebUIQRBranchOffersNoBrowserEntry）
+  // 按 `function addAccount(` 截函数体，若把渲染逻辑塞在它里面会被
+  // "选项为空直接申请" 的 return 挡住，守卫就静默失效了。
+  
 
   // ---------------------------------------------------------------- 批量导入（账号池分组行）
   //

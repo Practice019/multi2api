@@ -78,23 +78,65 @@ type loginSession struct {
 // 那条路只有国内站成立（国际站回的是相对路径且 client_id 为空）。
 // 而 `oauth/{platform}/login` 是**显式端点**，回的是 JSON 里的 auth_url ——
 // 两站语义一致，且能选平台。
+// 编译期断言：本上游需要用户先选站点，所以额外实现 LoginFlowWithOptions。
+var _ gateway.LoginFlowWithOptions = (*Provider)(nil)
+
+// 编译期断言：自报登录选项。
+var _ gateway.LoginOptionsExt = (*Provider)(nil)
+
+// loginRegionKey 登录选项的键名（"站点"）。
+const loginRegionKey = "region"
+
+// LoginOptions 自报登录前要用户选的选项。
+//
+// # 为什么必须让用户选（用户报的）
+//
+// 用户原话：「添加账号需要用户选择国内或者国际啊」。
+//
+// 两站是**完全独立的账号体系**：
+//
+//	国内站 monkeycode-ai.com   45 个模型   ← 百智云 OAuth
+//	国际站 monkeycode-ai.net   11 个模型   ← GitHub / Google OAuth
+//
+// 且 cookie **互不通用**（拿国际站的 session 打国内站回 401 未授权）。
+// 所以必须在开始登录**之前**就知道要去哪个站 —— 那时候用户还没登录，
+// 我们无从探测。
+func (p *Provider) LoginOptions() []gateway.LoginOption {
+	return []gateway.LoginOption{{
+		Key:   loginRegionKey,
+		Label: "站点",
+		Values: []gateway.LoginOptionValue{
+			{Value: RegionCN, Label: "国内站（monkeycode-ai.com，45 个模型）"},
+			{Value: RegionIntl, Label: "国际站（monkeycode-ai.net，11 个模型，GitHub 登录）"},
+		},
+		Default: RegionCN,
+		Hint:    "两站账号不通用：国内站走百智云授权，国际站走 GitHub/Google。选错登录后账号也读不到额度。",
+	}}
+}
+
+// Start 无选项入口（向后兼容）。
+//
+// 一些老调用方（以及契约测试）只认 LoginFlow.Start，所以这里按默认值走。
 func (p *Provider) Start() (state, authURL string, err error) {
-	// 走**浏览器登录**（复刻 register-machine 的 browser-login.mjs）：
-	// 起一个有头浏览器让用户自己登录，然后 CDP 读 cookie。
-	//
-	// authURL 回空串 —— 前端据此走"轮询等结果"分支（而不是"打开链接"）。
-	// ⚠ 这与 workbuddy 的"本机客户端拾取"分支长得一样，但语义不同：
-	// 那条读本机客户端 leveldb，我们这条读**我们自己起的浏览器**。
-	id, err := p.StartBrowserLogin(RegionCN, 10*time.Minute)
+	return p.StartWith(nil)
+}
+
+// StartWith 按用户选的站点启动浏览器登录。
+//
+// opts 里没有 region（或值不认识）时用国内站 —— 它是主站。
+func (p *Provider) StartWith(opts map[string]string) (state, authURL string, err error) {
+	region := RegionCN
+	if v := strings.TrimSpace(opts[loginRegionKey]); v != "" {
+		if v == RegionIntl {
+			region = RegionIntl
+		}
+	}
+	id, err := p.StartBrowserLogin(region, 10*time.Minute)
 	if err != nil {
 		return "", "", err
 	}
+	// authURL 回空串 —— 前端据此走"轮询等结果"分支（而不是"打开链接"）。
 	return id, "", nil
-}
-
-// StartBrowserLoginFlow 带区域与超时的版本（管理端点用）。
-func (p *Provider) StartBrowserLoginFlow(region string, timeout time.Duration) (string, error) {
-	return p.StartBrowserLogin(region, timeout)
 }
 
 // rememberLogin 记下这次登录会话。
