@@ -24,6 +24,11 @@ const (
 	adminQuotaPath  = "/admin/monkeycode/quota"
 	adminModelsPath = "/admin/monkeycode/models"
 	adminIssuePath  = "/admin/monkeycode/issue-key"
+	// adminManualCompletePath 页内「添加账号」的粘贴完成端点。
+	//
+	// 由 ManualLogin() 报给前端（见 login.go），前端把
+	// {state, code} POST 到这里。
+	adminManualCompletePath = "/admin/monkeycode/login/complete"
 )
 
 // AdminRoutes 本上游的管理端点。
@@ -75,6 +80,18 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Handler:    p.handleCheckinOne,
 			Capability: gateway.CapCheckin,
 			Title:      "单账号签到",
+			Hidden:     true,
+		},
+		{
+			// 页内「添加账号」的粘贴完成端点。
+			//
+			// Hidden：它不是导航页 —— 入口是分组行上的「添加账号」按钮，
+			// 那个按钮由 manifest 的 login 字段驱动（见 login.go 的 Configured）。
+			Method:     http.MethodPost,
+			Path:       adminManualCompletePath,
+			Handler:    p.handleManualComplete,
+			Capability: gateway.CapImport,
+			Title:      "粘贴 session 完成添加账号",
 			Hidden:     true,
 		},
 		{
