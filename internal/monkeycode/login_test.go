@@ -1,6 +1,7 @@
 package monkeycode
 
 import (
+	"strings"
 	"testing"
 
 	"workbuddy2api/internal/gateway"
@@ -45,11 +46,22 @@ func TestManualLoginDiscoverable(t *testing.T) {
 	}
 }
 
-// TestStartReturnsEmptyAuthURL authURL 必须为空串。
+// TestStartReturnsAuthorizeURL Start 必须返回**真实的授权 URL**。
 //
-// 前端对空串有专门分支（不渲染「打开授权页」）；编一个假链接会让
-// 用户点开一个 404，而且不报错。
-func TestStartReturnsEmptyAuthURL(t *testing.T) {
+// # 为什么这条判据反过来了
+//
+// 上一版把 authURL 写成空串，想表达"本上游没有授权页"。那是错的：
+//
+//  ① MonkeyCode 的登录**就是**百智云 OAuth 授权页（client_id=monkeycode-ai）；
+//  ② 本仓前端对空 authURL 有专门分支 —— 会显示
+//     「登录态就在本机那个桌面客户端里，网关直接读取」，那是在读本机
+//     workbuddy 客户端，与本上游无关（用户实测报的缺陷）。
+//
+// 所以现在必须返回上游 302 出的那条 authorize URL。
+func TestStartReturnsAuthorizeURL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("-short 跳过联网测试（Start 要打上游 login 入口取 302）")
+	}
 	p := New(Config{})
 	state, authURL, err := p.Start()
 	if err != nil {
@@ -58,9 +70,17 @@ func TestStartReturnsEmptyAuthURL(t *testing.T) {
 	if state == "" {
 		t.Error("state 为空")
 	}
-	if authURL != "" {
-		t.Errorf("authURL 应为空（本上游没有授权页），实际 %q", authURL)
+	if authURL == "" {
+		t.Fatal("authURL 为空 —— 前端会显示「读本机客户端登录态」那条错误分支")
 	}
+	// 必须是一条 http(s) 授权地址，且带 response_type=code。
+	if !strings.HasPrefix(authURL, "http") {
+		t.Errorf("authURL 不是 http 地址: %q", authURL)
+	}
+	if !strings.Contains(authURL, "response_type=code") {
+		t.Errorf("authURL 缺 response_type=code: %q", authURL)
+	}
+	t.Logf("state=%s authURL=%s", state, authURL)
 }
 
 // TestPollAlwaysPending Poll 恒回 ErrLoginPending。
