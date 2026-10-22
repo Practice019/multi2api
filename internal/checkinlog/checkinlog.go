@@ -87,7 +87,7 @@ func New(path string, keepDays int) *Log {
 	if keepDays <= 0 {
 		keepDays = 30
 	}
-	l := &Log{path: path, keepDays: keepDays, limit: 5000}
+	l := &Log{path: path, keepDays: keepDays, limit: 8000}
 	l.load()
 	return l
 }
@@ -108,17 +108,84 @@ func (l *Log) load() {
 // pruneLocked 去掉超期与超量的记录（保留最近的 limit 条）。调用方需持有 l.mu。
 func (l *Log) pruneLocked(recs []Record) []Record {
 	cut := time.Now().AddDate(0, 0, -l.keepDays)
-	out := recs[:0]
+	kept := recs[:0]
 	for _, r := range recs {
 		if r.At.After(cut) {
-			out = append(out, r)
+			kept = append(kept, r)
 		}
 	}
-	if len(out) > l.limit {
-		out = out[len(out)-l.limit:]
+	if len(kept) <= l.limit {
+		return kept
 	}
+
+	// ---- 超量时：按类型裁剪，而不是一刀切尾部 ----
+	//
+	// # 用户报的 bug（实测复现）
+	//
+	// 原实现是 out = out[len(out)-limit:] —— 无差别丢掉最早的。
+	// 而各类记录的产出速率差两个数量级。实测 5000 条只覆盖 9.5 小时：
+	//
+	//	credits   4013 条   每号每轮都写，把窗口挤满
+	//	keepalive  446 条
+	//	growth     341 条
+	//	checkin     83 条   用户真正要看的那一类
+	//
+	// 于是「今日签到」列的数据存在率取决于别的类型写了多少：
+	// 早上签过的号，下午 credits 一多就被挤出窗口 → 界面那格变空。
+	// 这就是「签到字段有时有、有时消失」的直接原因。
+	//
+	// 它看起来像随机抖动（同一台机器同一个号，有时显示有时不显示），
+	// 实际是保留策略与数据分布不匹配的确定结果。
+	//
+	// 修法：先按类型分桶，高频类型只保留自己的配额，
+	// 让「每天一次」的类型（checkin/welfare/travel）不被别人的噪声淘汰。
+	buckets := map[string][]Record{}
+	for _, r := range kept {
+		buckets[r.Kind] = append(buckets[r.Kind], r)
+	}
+	out := make([]Record, 0, l.limit)
+	for kind, rs := range buckets {
+		quota, ok := partitionQuota[kind]
+		if !ok {
+			// 未列出的类型（未来的新 Kind）：用 defaultQuota 兜底，
+			// 而不是「不限量」—— 不限量会让一个新类型重新挤垮整个窗口。
+			quota = defaultQuota
+		}
+		if len(rs) > quota {
+			rs = rs[len(rs)-quota:]
+		}
+		out = append(out, rs...)
+	}
+	// 重新按时间排序：分桶打乱了顺序，而 Since / LastByUID 都依赖时序。
+	sort.Slice(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
 	return out
 }
+
+// partitionQuota 每类记录在内存里最多保留的条数（只在超总上限时生效）。
+//
+// # 配额怎么定
+//
+// 依据是「用户要看什么」与「写的频率」：
+//
+//	checkin    每天每号 1 条  → 1500 条够 30 天 × 50 个号
+//	welfare    同上           → 500
+//	travel     同上           → 500
+//	growth     每周几次       → 500
+//	keepalive  每轮一次       → 1000（只用于排障）
+//	activity   每天每号 1 条  → 300
+//	credits    每轮都写，最吵 → 1500（数量大但信息量最低）
+var partitionQuota = map[string]int{
+	KindCheckin:   1500,
+	KindWelfare:   500,
+	KindTravel:    500,
+	KindGrowth:    500,
+	KindKeepalive: 1000,
+	KindActivity:  300,
+	KindCredits:   1500,
+}
+
+// defaultQuota 未列出的 Kind 的兜底配额（防止新类型挤垮窗口）。
+const defaultQuota = 300
 
 // Append 追加一条并落盘。落盘失败不返回错误给调用方（签到流程不应因日志写失败而中断），
 // 但会在内存里标记 dirty，下次成功时一并补写。
