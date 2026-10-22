@@ -3402,7 +3402,45 @@ let loginProvider = '';
   function freeQuotaCellHTML(a) {
     const v = a && a.free_quota;
     if (typeof v !== 'number') return '<span class="dim">—</span>';
-    return `<span class="mono">${esc(v)}</span>`;
+    const lim = a && a.free_quota_limit;
+    // 没有上限就只报剩余（上游只给余额时）。
+    if (typeof lim !== 'number' || lim <= 0) return `<span class="mono">${esc(fmtTokens(v))}</span>`;
+    // 有上限 → 「剩余 / 上限」+ 按**已用**比例上色。
+    //
+    // 与注册机的「今日 Token」列同一形态：读者要知道"今天还能跑多少"，
+    // 而单独的剩余量看不出这一点。
+    //
+    // ⚠ 配色按 used/limit（已用比例），不是按剩余 —— 快用完时该警示，
+    // 剩得多时反而用"危险色"是不对的。
+    const used = Math.max(0, lim - v);
+    const pct = Math.round(used / lim * 100);
+    const cls = pct >= 95 ? 'err' : pct >= 80 ? 'warn' : 'ok';
+    return `<span class="mono ${cls}" title="已用 ${esc(String(used))} / ${esc(String(lim))}（${pct}%）">`
+      + `${esc(fmtTokens(v))} / ${esc(fmtTokens(lim))}</span>`;
+  }
+
+  // fmtTokens 把大数字压成便于阅读的形态（10000000 → 10M）。
+  //
+  // # 为什么必须压缩
+  //
+  // 每日 token 上限是 1000 万量级，原样写出来是「9944867 / 10000000」——
+  // 11 个字符再加分隔符，88px 的列宽里必然被省略号吃掉（本仓已有
+  // 度量脚本 shot_acct_clip.js 专门查这类溢出）。
+  //
+  // 单位与注册机一致：K / M / B，保留一位小数并去掉多余的 .0。
+  function fmtTokens(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '—';
+    const abs = Math.abs(n);
+    const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (const [div, suf] of units) {
+      if (abs >= div) {
+        const v = n / div;
+        // 保留一位小数，但整数就别写成 "10.0M"。
+        const t = Math.round(v * 10) / 10;
+        return (Number.isInteger(t) ? String(t) : t.toFixed(1)) + suf;
+      }
+    }
+    return String(n);
   }
 
   // hdr 对话接口（/v1/*）的鉴权头 —— 用 api_key。
@@ -4910,9 +4948,12 @@ let loginProvider = '';
     uid: { title: 'UID', w: 220 },
     quota: { title: '额度', w: 72, tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
     free_quota: {
-      title: '免费额度', w: 88,
-      tip: '会按自然日重置的那部分额度（Loomy 的每日赠送）还剩多少；不用就浪费，'
-        + '所以在它用完之前不该动永久额度。'
+      // ⚠ 88 → 120：有上限时这一格装的是「10M / 10M」（9 字符），
+      //   88px 下会被省略号吃掉。宽度依据是"所有上游里最长的那个样本"，
+      //   不是第一眼看到的那个 —— 只报余额时它很短，加了分母就翻倍。
+      title: '今日额度', w: 120,
+      tip: '会按周期重置的那部分额度还剩多少（可用完就清零，不用就浪费）。'
+        + '有上限时显示「剩余 / 上限」，并按已用比例上色。'
         + '「—」表示这个上游不区分这一项、或这次没读到 —— 那不等于"已经用完"。',
     },
     status: { title: '状态', w: 84 },
