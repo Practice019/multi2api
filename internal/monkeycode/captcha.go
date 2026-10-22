@@ -50,17 +50,41 @@ const maxNonce = int64(50_000_000)
 
 // capI cap.js 的伪随机函数（逐字照抄线上实现）。
 //
-// # 为什么写法这么怪
+// # ⚠ 必须用 float64 累加，不能用 uint32 —— 这是签到一直失败的根因
 //
-// 它原本是 JS，而 JS 的位运算会把操作数截成有符号 32 位。
-// 这里用 uint32 复刻同一语义 —— 换成 int64 会得到完全不同的序列。
+// JS 原版：
+//
+//	p = (p | 0) ^ str.charCodeAt(i);
+//	p = p + (((p << 1)|0) + ((p << 4)|0) + ((p << 7)|0) + ((p << 8)|0) + ((p << 24)|0));
+//
+// 关键：**加法那一步不截断**。JS 里 p 是 Number(float64)，溢出 32 位后
+// 只是变成更大的数；只有 `<<` 才 ToInt32。
+//
+// 实测中间值（str="abc"）：
+//
+//	i=0  p0=-2128831068  shifted=-2635101304  p=-4763932372   ← 已超 32 位
+//	i=1  p0=-468965042   shifted=1763236988   p=1294271946
+//	i=2  p0=1294271913   shifted=-5148318878  p=-3854046965
+//	最终 p >>> 0 = 440920331
+//
+// 我第一版把 p 写成 uint32，等于每一步都对加法结果取模 2^32 ——
+// 序列从第二个字符起就与官方分叉，于是 PoW 算出的 nonce **永远不被接受**，
+// 而 redeem 只回一句 `success:false`，指不到这里。
 func capI(str string, length int) string {
-	var p uint32 = 2166136261
+	p := float64(2166136261)
 	for i := 0; i < len(str); i++ {
-		p = p ^ uint32(str[i])
-		p = p + (p << 1) + (p << 4) + (p << 7) + (p << 8) + (p << 24)
+		// (p | 0) ^ charCode：先 ToInt32 再异或。
+		p0 := toInt32(p) ^ int32(str[i])
+		// 五个子项各自 ToInt32，然后按 float64 相加（**不截断**）。
+		shifted := float64(toInt32f(float64(p0) * 2))
+		shifted += float64(toInt32f(float64(p0) * 16))
+		shifted += float64(toInt32f(float64(p0) * 128))
+		shifted += float64(toInt32f(float64(p0) * 256))
+		shifted += float64(toInt32f(float64(p0) * 16777216))
+		p = float64(p0) + shifted
 	}
-	u := p
+	// p >>> 0：取低 32 位当无符号。
+	u := uint32(uint64(int64(p)) & 0xFFFFFFFF)
 	next := func() uint32 {
 		u = u ^ (u << 13)
 		u = u ^ (u >> 17)
@@ -69,13 +93,28 @@ func capI(str string, length int) string {
 	}
 	out := make([]byte, 0, length+8)
 	for len(out) < length {
-		s := strconv.FormatUint(uint64(next()), 16)
-		for len(s) < 8 {
-			s = "0" + s
+		v := strconv.FormatUint(uint64(next()), 16)
+		for len(v) < 8 {
+			v = "0" + v
 		}
-		out = append(out, s...)
+		out = append(out, v...)
 	}
 	return string(out[:length])
+}
+
+// toInt32 复刻 JS 的 ToInt32。
+func toInt32(x float64) int32 { return toInt32f(x) }
+
+// toInt32f 把 float64 截成有符号 32 位（JS ToInt32 的语义）。
+//
+// ⚠ 不能用 int32(x)：Go 的转换在溢出时是实现定义（amd64 上是截断，
+// 但语言规范不保证）。也**不能**先转 int64 再截 —— x 可能超 int64 范围
+// （乘 16777216 之后可达 1e17，仍在 int64 内，但为稳妥走 float→int64 的显式路径）。
+func toInt32f(x float64) int32 {
+	if x >= 9223372036854775808.0 || x < -9223372036854775808.0 {
+		return 0 // 超出 int64：JS 会给 0（ToInt32 对 ±Inf/NaN 回 0）
+	}
+	return int32(uint32(int64(x) & 0xFFFFFFFF))
 }
 
 // solveOne 解一个子挑战，返回命中的 nonce。
