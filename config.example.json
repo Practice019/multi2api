@@ -238,6 +238,26 @@
   //                       "account_base": "",
   //                       "api_base": "" }
 
+  //   // MonkeyCode（长亭科技）—— 唯一需要**请求签名**的上游。
+  //   //
+  //   // 模型网关要 X-OhMyAgent-Signature：
+  //   //   v1=HMAC-SHA256(signing_secret, instructions)
+  //   // 签名对象是请求里的静态提示词（Responses 的 instructions /
+  //   // Anthropic 的 system），与 input/tools/model 全都无关。
+  //   // 推导过程见 docs/reports/monkeycode/monkeycode-client-reverse.md。
+  //   //
+  //   // ⚠ 两站的网络前提**相反**：
+  //   //   国内站必须**直连**（走代理会 EOF，表现为「账号不健康」）
+  //   //   国际站必须**走代理**（否则连不上）
+  //   // 所以 proxy 只作用于国际站，国内站恒直连。
+  //   //
+  //   // 凭证三把：session / api_key / signing_secret
+  //   // 后两把用 session 调 POST /api/v1/users/ohmyagent/api-keys 换取
+  //   // （可无限重签；管理端点 /admin/monkeycode/issue-key 可代办）。
+  //   "monkeycode":     { "auth_dir": "./auths/monkeycode",
+  //                       "proxy": "http://127.0.0.1:10808",
+  //                       "pool_accounts": true }
+
   // ---- 跨实例共享会话状态（可选）------------------------------------------
   //
   // 多实例部署才需要 —— 让几个网关实例共享会话粘性状态。

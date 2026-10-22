@@ -7,6 +7,49 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## 未发布 — 2026-10-23
+
+> 本版主题：**新增第十三个上游 MonkeyCode（长亭科技）** —— 本仓第一个需要
+> **请求签名**的上游，也是第一个**国内/国际双站按账号自动分流**的上游。
+
+### 新增上游：MonkeyCode
+
+- **协议签名**：模型网关要 `X-OhMyAgent-Signature`，公式为
+  `v1=HMAC-SHA256(signing_secret, instructions)` —— 签名对象是请求里的
+  **静态提示词**（Responses 的 `instructions` / Anthropic 的 `system`），
+  与 `input`/`tools`/`model` 全都无关。逆向过程见
+  `docs/reports/monkeycode/monkeycode-client-reverse.md`。
+- **双协议路由**：同一上游的模型分属 `openai_responses`（`/v1/responses`）
+  与 `anthropic`（`/v1/messages`），**走错是 404「路由不存在」而不是 403**。
+  按 `interface_type` 逐模型路由，远端目录学到的归属优先于内置兜底表。
+- **双站自动分流**：`cn` 与 `intl` 的网络前提**相反** —— 国内站必须直连，
+  国际站必须走代理。Client 持有两个 `http.Client`，按凭证的 `region` 选。
+  配错的表现极具误导性：都报 `EOF` → 核心显示「账号不健康」。
+- **能力位**：`CapChat | CapModels | CapQuotaProbe | CapImport`。
+  刻意**不声明** `CapCheckin`：签到要解 cap.js 的 PoW（bit 级比对），
+  没做完就不画按钮（声明即承诺，契约测试会抓）。
+- **管理端点**：`/admin/monkeycode/quota`、`/admin/monkeycode/models`、
+  `/admin/monkeycode/issue-key`。
+
+### 修的两个真 bug（都是"静默错误"，实测才发现）
+
+1. **非流式回空 content**：客户端发 `stream:false` 时，转换保留它发给上游，
+   而上游 anthropic 端点于是回 **JSON**，我们的转换链按 **SSE** 解析 ——
+   结果 `HTTP 200 + content:""`，不报错、不中断，只是回答为空。
+   修法照 minimax：上游侧**恒发 `stream:true`**，非流式由出口层聚合。
+2. **额度恒为未知**：没实现 `QuotaExt` 时启动日志明确警告
+   「额度刷新跳过上游 monkeycode」。补上后 `balance` / `daily_token` 正常显示。
+
+### 测试
+
+- `internal/monkeycode`：25 条用例（签名向量、逐字敏感性、协议转换形状、
+  契约测试 + 假上游）。契约测试的假上游**校验签名** —— 签名错了它会精确指出
+  「你应该签 system/instructions 字段」，而真实上游只会回一句
+  `invalid ohmyagent request`。
+- 真机验证：`TestLiveBothRegions` 分别打国内站与国际站，各拉目录 + 额度 + 一条对话。
+
+---
+
 ## 未发布 — 2026-10-21
 
 > 本版主题：**前端视觉语言 v3 · MAXIMALISM（霓虹油墨）**。用户要求
