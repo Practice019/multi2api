@@ -85,6 +85,19 @@ type QuotaView struct {
 
 	// FreeKnown 上面那个 Free 是不是真的拿到了（见 Free 的说明）。
 	FreeKnown bool `json:"free_known,omitempty"`
+
+	// FreeLimit 上面那个 Free 的**周期上限**（每周期重置到这么多）。
+	//
+	// # 为什么需要它（用户要的「今日 Token」列）
+	//
+	// 只报 Free（剩余）时界面只能显示一个孤零零的数，读者不知道"总共多少"。
+	// 有了上限才能显示「剩余 / 上限」，一眼看出今天用了多少。
+	//
+	// # 0 是"未知"的哨兵
+	//
+	// 不引入独立的 Known 标志：周期额度不可能上限为 0 却仍有余额，
+	// 所以 0 天然表示"上游没给上限"。
+	FreeLimit int64 `json:"free_limit,omitempty"`
 }
 
 // 额度形态常量。

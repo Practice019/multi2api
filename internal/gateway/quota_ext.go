@@ -127,6 +127,19 @@ type QuotaView struct {
 	// FreeKnown 上面那个 Free 是不是**真的**拿到了（见 Free 的说明）。
 	FreeKnown bool `json:"free_known,omitempty"`
 
+	// FreeLimit 上面那个 Free 的**周期上限**（每周期重置到这么多）。
+	//
+	// # 为什么需要它（用户要的「今日 Token」列）
+	//
+	// 只报 Free（剩余）时界面只能显示一个孤零零的数，读者不知道"总共多少"。
+	// 有了上限才能显示「剩余 / 上限」，一眼看出今天用了多少。
+	//
+	// # 0 是"未知"的哨兵
+	//
+	// 不引入独立的 Known 标志：周期额度不可能上限为 0 却仍有余额，
+	// 所以 0 天然表示"上游没给上限"。
+	FreeLimit int64 `json:"free_limit,omitempty"`
+
 	// HasData 上游是否**真的**给出了额度数据。
 	//
 	// # 这个字段是整个扩展点的关键
@@ -194,6 +207,29 @@ func (q QuotaView) WithFree(free int64) QuotaView {
 	}
 	q.Free = free
 	q.FreeKnown = true
+	return q
+}
+
+// WithFreeLimit 给额度的"周期重置分项"补上**上限**（见 FreeLimit 的说明）。
+//
+// 用法（MonkeyCode）：
+//
+//	q := CreditsQuota(balance).WithFreeLimit(dailyBalance, dailyLimit)
+//
+// 与 WithFree 的分工：
+//
+//	WithFree      只知道剩余多少（上游只报余额）
+//	WithFreeLimit 还知道上限（上游报 balance + limit 两个数）
+//
+// 后者会同时设置 Free/FreeKnown/FreeLimit —— 免得调用方写三行还漏一个。
+//
+// ⚠ limit <= 0 时**只设剩余**、不设上限：那代表上游没给上限，
+// 而不是"上限是 0"（见 FreeLimit 里关于哨兵的说明）。
+func (q QuotaView) WithFreeLimit(free, limit int64) QuotaView {
+	q = q.WithFree(free)
+	if limit > 0 {
+		q.FreeLimit = limit
+	}
 	return q
 }
 

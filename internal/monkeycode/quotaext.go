@@ -61,6 +61,15 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 		Kind:      gateway.QuotaKindCredits,
 		Remaining: wallet.Balance,
 		Free:      wallet.DailyTokenBalance,
+		// FreeLimit 是每日 token 的**上限** —— 有了它界面才能显示
+		// 「剩余 / 上限」（用户在注册机那边看到的「今日 Token」列就是这形态）。
+		// 只报剩余的话读者不知道今天总共能跑多少。
+		FreeLimit: wallet.DailyTokenLimit,
+		// FreeKnown 必须显式置 true —— 漏了它界面上的「今日 Token」列
+		// 会恒显示破折号，尽管 Free 已经有值。core 只认 FreeKnown
+		// （见 admin.accountViews 的 "只在 FreeKnown 时才取址"）。
+		// 写了 Free 却没写 FreeKnown 等于把数据算出来又扔掉，且不报错。
+		FreeKnown: true,
 		// HasData 是**有值**的判据：balance 的 0 是合法值（免费模型走
 		// daily_token），所以这里判"接口有没有给，而不是数字是不是非零"。
 		// 走到这一行就说明接口给了 —— 恒 true。

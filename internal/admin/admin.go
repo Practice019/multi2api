@@ -1029,6 +1029,16 @@ type AccountView struct {
 	// 来源：`pool.Status.Quota` 的 Free/FreeKnown ——
 	// 即上游通过 `QuotaExt.RefreshQuota` 报上来的那部分。
 	FreeQuota *int64 `json:"free_quota,omitempty"`
+
+	// FreeQuotaLimit 「免费额度」这一项的**周期上限**（与 FreeQuota 配对下发）。
+	//
+	// # 为什么与 FreeQuota 分开两个字段而不是打包成一个对象
+	//
+	// FreeQuota 已经上线并被前端 `freeQuotaCellHTML` 读取。改成对象会让
+	// 那一处（以及它的契约测试）全部失效 —— 而这里要表达的只是"再加一个数"。
+	//
+	// 三态：nil = 上游没给上限；非 nil = 显示「剩余 / 上限」。
+	FreeQuotaLimit *int64 `json:"free_quota_limit,omitempty"`
 }
 
 // credentialExpiryOf 问**拥有这份凭证的上游**：它什么时候过期。
@@ -1173,6 +1183,12 @@ func (h *Handler) accountViews() []AccountView {
 		if st.Quota.FreeKnown {
 			free := st.Quota.Free
 			v.FreeQuota = &free
+			// 上限只在**上游真的给了**（>0）时才下发，与 FreeQuota 同一条纪律：
+			// 造一个 0 出来会让前端渲染成「剩余 / 0」，那是把未知说成事实。
+			if st.Quota.FreeLimit > 0 {
+				limit := st.Quota.FreeLimit
+				v.FreeQuotaLimit = &limit
+			}
 		}
 		if a := h.cfg.Pool.AuthByUID(st.UID); a != nil {
 			v.HasToken = a.AccessToken != ""

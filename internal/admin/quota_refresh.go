@@ -200,6 +200,10 @@ func toPoolQuota(q gateway.QuotaView) pool.QuotaView {
 		// 而那正是本列最容易骗人的形态（看起来完全合理）。
 		Free:      q.Free,
 		FreeKnown: q.FreeKnown,
+		// 分项的周期上限（MonkeyCode 的每日 token 上限）。
+		// 有了它界面才能显示「剩余 / 上限」；漏搬就只显示孤立的剩余量，
+		// 读者看不出"今天总共能跑多少"。0 = 上游没给上限，前端不显示分母。
+		FreeLimit: q.FreeLimit,
 	}
 	if len(q.ByModel) > 0 {
 		// 深拷贝：pool 会把这份 map 存进 entry，之后可能被其它 goroutine 读。
