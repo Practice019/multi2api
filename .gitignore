@@ -73,6 +73,14 @@ tasks/
 
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
+
+# MonkeyCode 客户端逆向报告 —— 上游接入的唯一依据（签名公式、双协议入口、档位矩阵）。
+# ⚠ 两条都必须在 `*.md` 之后：gitignore 后匹配者胜，放前面会被 *.md 吃掉（实测）。
+# ⚠ 还要先放行**目录**：`docs/*` 排除了 reports/monkeycode/ 这个目录本身，
+#   目录被排除后里面的文件无法用 `!` 单独挽回 —— 这是 git 的规则。
+!docs/reports/
+!docs/reports/**
+
 !README.md
 !SECURITY.md
 !CHANGELOG.md
