@@ -203,6 +203,65 @@ type providerLogin struct {
 	// Manual 服务器部署逃生路径（上游实现了 gateway.ManualLoginExt 时才有）：
 	// 前端据此在登录弹窗里渲染「粘贴回跳 URL 完成」输入框。
 	Manual *manualLogin `json:"manual,omitempty"`
+
+	// Options 登录前要用户先选的选项（上游实现了 gateway.LoginOptionsExt 时才有）。
+	//
+	// # 为什么放在 login 下而不是 providerInfo 顶层
+	//
+	// 它是**登录流程的一部分**：只有要点「添加账号」时才需要它，
+	// 而账号池表格渲染时完全用不到。放顶层会让每个读 providerInfo 的地方
+	// 都得跳过它。
+	//
+	// # 前端据此渲染的规则（用户要的"添加账号要能选国内/国际"）
+	//
+	//	有 options → 弹窗里先渲染选择器，用户选完再申请登录
+	//	没有        → 与以前逐字节一致（不留空白、不显示空下拉）
+	Options []loginOption `json:"options,omitempty"`
+}
+
+// loginOption 一个登录选项在 UI 契约里的样子。
+//
+// 字段与 gateway.LoginOption **一一对应**，刻意不改名：同一条契约的两个投影。
+type loginOption struct {
+	Key     string              `json:"key"`
+	Label   string              `json:"label"`
+	Values  []loginOptionValue  `json:"values"`
+	Default string              `json:"default,omitempty"`
+	Hint    string              `json:"hint,omitempty"`
+}
+
+// loginOptionValue 选项的一个取值。
+type loginOptionValue struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
+// fillLoginOptions 把上游自报的登录选项填进登录声明。
+//
+// 与 fillManualLogin 同款：上游自报、核心搬运、前端只读。
+func fillLoginOptions(login *providerLogin, p gateway.Provider) {
+	if login == nil || p == nil {
+		return
+	}
+	ext, ok := gateway.ExtOf[gateway.LoginOptionsExt](p)
+	if !ok {
+		return
+	}
+	specs := gateway.LoginOptionSpecs(ext.LoginOptions())
+	if len(specs) == 0 {
+		return
+	}
+	out := make([]loginOption, 0, len(specs))
+	for _, o := range specs {
+		vals := make([]loginOptionValue, 0, len(o.Values))
+		for _, v := range o.Values {
+			vals = append(vals, loginOptionValue{Value: v.Value, Label: v.Label})
+		}
+		out = append(out, loginOption{
+			Key: o.Key, Label: o.Label, Values: vals, Default: o.Default, Hint: o.Hint,
+		})
+	}
+	login.Options = out
 }
 
 // manualLogin 手动完成登录的端点与指引文案（上游自报，核心不造）。
@@ -243,6 +302,7 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
 				info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
 				fillManualLogin(info.Login, p)
+		fillLoginOptions(info.Login, p)
 			}
 			// 账号池列集：上游自报（未实现 = nil = 用默认 11 列）。
 			info.AccountColumns = accountColumnsOf(p)

@@ -1564,6 +1564,10 @@ func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
 	// provider 可选：不带就走旧的硬接线路径（向后兼容）。
 	var body struct {
 		Provider string `json:"provider"`
+		// Options 用户在弹窗里选的登录选项（上游自报 LoginOptionsExt 时才有）。
+		//
+		// 形状：{"region":"intl"}。没有选项的上游会收到 nil，行为不变。
+		Options map[string]string `json:"options"`
 	}
 	// 解析失败不算错误 —— 老客户端发的可能是 `{}` 或空体。
 	_ = json.NewDecoder(r.Body).Decode(&body)
@@ -1576,7 +1580,29 @@ func (h *Handler) loginStart(w http.ResponseWriter, r *http.Request) {
 				"上游 "+body.Provider+" 不支持在页面内添加账号（未实现登录流程）")
 			return
 		}
-		state, authURL, err := flow.Start()
+		// ⚠ 优先走「带选项」的入口（如果该上游实现了它）。
+		//
+		// 两个接口的分工：
+		//
+		//	LoginFlow.Start()                     无参数，老上游照旧
+		//	gateway.LoginFlowWithOptions.StartWith()  带用户选的选项
+		//
+		// 用**两个**而不是把 Start 改成带参数：后者要动 12 个上游的签名，
+		// 而它们都不需要选项 —— 那是一次纯粹的连带改动。
+		var state, authURL string
+		var err error
+
+		// 优先问**同一个 Provider 实例**有没有带选项的入口。
+		// （不能对 flow 做断言：ExtOf 要的是 Provider，而 flow 只是 LoginFlow。）
+		if prov, pok := h.providerByID(body.Provider); pok {
+			if wf, ook := gateway.ExtOf[gateway.LoginFlowWithOptions](prov); ook {
+				state, authURL, err = wf.StartWith(body.Options)
+			} else {
+				state, authURL, err = flow.Start()
+			}
+		} else {
+			state, authURL, err = flow.Start()
+		}
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "向上游申请授权链接失败: "+err.Error())
 			return
