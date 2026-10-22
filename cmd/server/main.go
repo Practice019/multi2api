@@ -33,6 +33,7 @@ import (
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/loomy"
 	"workbuddy2api/internal/minimax"
+	"workbuddy2api/internal/monkeycode"
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
@@ -1023,6 +1024,42 @@ func main() {
 		}
 	}
 
+	// ---- 第十三／十四个上游：MonkeyCode（长亭科技）----
+	//
+	// 它是本仓**唯一需要请求签名**的上游：
+	//
+	//	sig = "v1=" + hex(HMAC-SHA256(signing_secret, instructions))
+	//
+	// 签名对象是请求里的静态提示词，与 input/tools/model 无关。
+	// 推导过程见 docs/reports/monkeycode/monkeycode-client-reverse.md。
+	//
+	// 它同时支持两种协议（openai_responses / anthropic），按模型的
+	// interface_type 逐条路由 —— 走错在真实上游是 404「路由不存在」，
+	// 不是 403，很容易被误判成"账号问题"。
+	var mk *monkeycode.Provider
+	if cfg.MonkeyCodeEnabled {
+		mk = monkeycode.New(monkeycode.Config{
+			AuthDir: cfg.MonkeyCodeAuthDir,
+			Proxy:   cfg.MonkeyCodeProxy,
+		})
+		mk.SetCredentialSource(monkeycodeCredSource(p))
+		// 诊断端点要**列出全部账号**，而 credSrc 只能按名查 ——
+		// 没这个枚举器时那些端点会返回空数组（看起来「没有账号」）。
+		mk.SetUIDEnumerator(monkeycodeUIDEnumerator(p))
+		if err := registry.Register(mk); err != nil {
+			log.Fatalf("注册 MonkeyCode 上游失败: %v", err)
+		}
+		log.Printf("monkeycode: 已启用（凭证目录 %s，国际站出口 %s）",
+			cfg.MonkeyCodeAuthDir,
+			firstNonEmpty(cfg.MonkeyCodeProxy, "直连（国内站必须直连）"))
+	} else {
+		log.Printf("monkeycode: 未启用（config 里 monkeycode.enabled 缺省为 true）")
+		if list, err := monkeycode.LoadDir(cfg.MonkeyCodeAuthDir); err == nil && len(list) > 0 {
+			log.Printf("monkeycode: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
+				"它们不会并入账号池", cfg.MonkeyCodeAuthDir, len(list))
+		}
+	}
+
 	// 并池（与其余上游同款：目录为空也要对账剔删，否则删掉文件后账号变幽灵）。
 	if mm != nil && cfg.MiniMaxPoolAccounts {
 		if n := syncMiniMaxAccounts(p, cfg.MiniMaxAuthDir); n > 0 {
@@ -1038,6 +1075,16 @@ func main() {
 		} else {
 			log.Printf("zcode: 账号池中暂无账号（凭证目录 %s 里没有 zcode*.json）", cfg.ZCodeAuthDir)
 		}
+	}
+
+	if mk != nil && cfg.MonkeyCodePoolAccounts {
+		if n := syncMonkeyCodeAccounts(p, cfg.MonkeyCodeAuthDir); n > 0 {
+			log.Printf("monkeycode: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("monkeycode: 账号池中暂无账号（凭证目录 %s 里没有 monkeycode*.json）", cfg.MonkeyCodeAuthDir)
+		}
+	} else if mk != nil {
+		log.Printf("monkeycode: 未并入账号池（monkeycode.pool_accounts=false），只能通过其管理端点使用")
 	}
 
 	// "已注册上游"必须打在**所有**上游注册完之后。

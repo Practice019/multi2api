@@ -1,0 +1,174 @@
+// adminroute.go 本上游的管理端点。
+//
+// # 为什么必须有（不是"锦上添花"）
+//
+// 契约测试有一条硬判据：声明了 Caps 里的 CapModels / CapQuotaProbe / CapImport
+// 就必须实现 AdminExt —— 因为这些能力的**可操作性**只能通过管理端点暴露。
+// 不实现时契约测试直接判不合格（「声明了能力但没实现 AdminExt」）。
+//
+// # 只读优先
+//
+// 打开面板是高频路径，绝不碰写端点 —— Loomy 上踩过：
+// 「打开面板即意外触发签到」。所以这里两条都是 GET。
+package monkeycode
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"workbuddy2api/internal/gateway"
+)
+
+// 管理端点路径。
+const (
+	adminQuotaPath  = "/admin/monkeycode/quota"
+	adminModelsPath = "/admin/monkeycode/models"
+	adminIssuePath  = "/admin/monkeycode/issue-key"
+)
+
+// AdminRoutes 本上游的管理端点。
+func (p *Provider) AdminRoutes() []gateway.AdminRoute {
+	return []gateway.AdminRoute{
+		{
+			Method:     http.MethodGet,
+			Path:       adminQuotaPath,
+			Handler:    p.handleQuota,
+			Capability: gateway.CapQuotaProbe,
+			Title:      "额度",
+		},
+		{
+			Method:     http.MethodGet,
+			Path:       adminModelsPath,
+			Handler:    p.handleModels,
+			Capability: gateway.CapModels,
+			Title:      "模型目录",
+		},
+		{
+			// ⚠ POST 是写操作，所以 Hidden：它不该在左侧导航占一个标签页。
+			// 照网关统一约定的「纯动作端点」处理。
+			Method:     http.MethodPost,
+			Path:       adminIssuePath,
+			Handler:    p.handleIssueKey,
+			Capability: gateway.CapImport,
+			Title:      "签发模型网关 key（用 session 换 api_key/signing_secret）",
+			Hidden:     true,
+		},
+	}
+}
+
+// resolveAuth 从请求里取 uid 并解析出凭证。
+//
+// 支持两种入口：`?uid=xxx` 查询参数，或 JSON body 里的 `uid`。
+// 与 raccoon 的 resolveCred 同款（前端两种调用方式都在用）。
+func (p *Provider) resolveAuth(r *http.Request) (*Auth, string, bool) {
+	uid := r.URL.Query().Get("uid")
+	if uid == "" && r.Body != nil {
+		var body struct {
+			UID string `json:"uid"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			uid = body.UID
+		}
+	}
+	if uid == "" {
+		return nil, "", false
+	}
+	a := p.cred(uid)
+	if a == nil {
+		return nil, uid, false
+	}
+	return a, uid, true
+}
+
+// handleQuota 查额度。
+//
+// 单号（`?uid=`）或多号（不带 uid = 全部）都可。
+// 多号走 uidEnumerator —— 没有它就是空数组（zcode 上踩过的"看起来没账号"）。
+func (p *Provider) handleQuota(w http.ResponseWriter, r *http.Request) {
+	type row struct {
+		UID               string `json:"uid"`
+		Nickname          string `json:"nickname,omitempty"`
+		Region            string `json:"region"`
+		Balance           int64  `json:"balance"`
+		DailyTokenBalance int64  `json:"daily_token_balance"`
+		DailyTokenLimit   int64  `json:"daily_token_limit"`
+		Error             string `json:"error,omitempty"`
+	}
+
+	var uids []string
+	if one := r.URL.Query().Get("uid"); one != "" {
+		uids = []string{one}
+	} else if p.uidEnumerator != nil {
+		uids = p.uidEnumerator()
+	}
+
+	rows := make([]row, 0, len(uids))
+	for _, uid := range uids {
+		a := p.cred(uid)
+		if a == nil {
+			rows = append(rows, row{UID: uid, Error: "凭证不存在"})
+			continue
+		}
+		out := row{UID: uid, Nickname: a.DisplayName(), Region: a.RegionOrDefault()}
+		wallet, err := p.client.FetchWallet(r.Context(), a)
+		if err != nil {
+			out.Error = err.Error()
+		} else {
+			out.Balance = wallet.Balance
+			out.DailyTokenBalance = wallet.DailyTokenBalance
+			out.DailyTokenLimit = wallet.DailyTokenLimit
+		}
+		rows = append(rows, out)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": rows})
+}
+
+// handleModels 拉远端模型目录（含 interface_type，便于排查协议路由）。
+func (p *Provider) handleModels(w http.ResponseWriter, r *http.Request) {
+	a, uid, ok := p.resolveAuth(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少或找不到 uid"})
+		return
+	}
+	list, err := p.client.FetchModels(r.Context(), a)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "uid": uid})
+		return
+	}
+	learnInterfaces(list)
+	writeJSON(w, http.StatusOK, map[string]any{"uid": uid, "models": list})
+}
+
+// handleIssueKey 用 session 签一把模型网关 key，并就地更新内存里的凭证。
+//
+// ⚠ 只改内存，**不落盘**：落盘要经过凭证目录的原子写，
+// 那是导入流程的责任。这里返回新 key，由调用方决定是否写回。
+func (p *Provider) handleIssueKey(w http.ResponseWriter, r *http.Request) {
+	a, uid, ok := p.resolveAuth(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少或找不到 uid"})
+		return
+	}
+	name := r.URL.Query().Get("name")
+	pk, err := p.client.CreateAPIKey(r.Context(), a, name)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "uid": uid})
+		return
+	}
+	p.mu.Lock()
+	a.APIKey = pk.APIKey
+	a.SigningSecret = pk.SigningSecret
+	p.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"uid": uid, "api_key": pk.APIKey, "signing_secret": pk.SigningSecret,
+		"note": "已更新内存中的凭证；如需持久化请写回凭证目录",
+	})
+}
+
+// writeJSON 统一的 JSON 响应。
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}

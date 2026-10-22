@@ -894,6 +894,44 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"minimax"`
 
+	// MonkeyCode MonkeyCode（长亭科技）上游。
+	//
+	// # 与其它上游最大的不同：需要**请求签名**
+	//
+	// 模型网关要一个 `X-OhMyAgent-Signature` 头：
+	//
+	//	sig = "v1=" + hex(HMAC-SHA256(key=signing_secret, msg=instructions))
+	//
+	// 签名对象是请求里的**静态提示词**（Responses 的 instructions /
+	// Anthropic 的 system），与 input/tools/model 全都无关。
+	// 完整推导见 docs/reports/monkeycode/monkeycode-client-reverse.md。
+	//
+	// # 三把凭据
+	//
+	//	session         查额度/目录/状态（30 天硬过期，**无续期接口**）
+	//	api_key         模型网关 Bearer
+	//	signing_secret  签名密钥
+	//
+	// 后两把由 session 换出来（可无限重签），落盘时一并存。
+	//
+	// # 两个站点
+	//
+	//	cn     monkeycode-ai.com    proxy.monkeycode-ai.com
+	//	intl   monkeycode-ai.net    proxy.monkeycode-ai.net
+	//
+	// 两站**模型目录不同**（国内 45 / 国际 11），按凭证里的 region 逐账号选。
+	MonkeyCode struct {
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/monkeycode`。
+		AuthDir string `json:"auth_dir"`
+		// Proxy 国际站出口（国内站恒直连）。
+		//
+		// ⚠ 国内站**必须直连**：走海外代理既慢又容易触发风控。
+		// 国际站则必须走代理，否则连不上。
+		Proxy string `json:"proxy"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"monkeycode"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -1045,6 +1083,10 @@ type Config struct {
 	MiniMaxAPIBase      string `json:"-"`
 	MiniMaxTimezoneID   string `json:"-"`
 	MiniMaxPoolAccounts bool   `json:"-"`
+	MonkeyCodeEnabled      bool   `json:"-"`
+	MonkeyCodeAuthDir      string `json:"-"`
+	MonkeyCodeProxy        string `json:"-"`
+	MonkeyCodePoolAccounts bool   `json:"-"`
 	ZCodePoolAccounts   bool   `json:"-"`
 	ZCodeJWTCaptcha     bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
@@ -1638,6 +1680,18 @@ func (c *Config) normalize() error {
 	// 没有 minimax 段 —— 无条件置 true 会让升级后凭空多出一个上游。
 	// 判据与 ZCodePoolAccounts 逐字一致。
 	c.MiniMaxPoolAccounts = c.MiniMaxEnabled && boolOr(c.MiniMax.PoolAccounts, true)
+
+	// ---- MonkeyCode（第十三上游，长亭科技）----
+	//
+	// ⚠ 缺省语义与其余上游一致：**段缺席 = 启用**（upstreamEnableDefault = true）。
+	c.MonkeyCodeEnabled = true
+	c.MonkeyCodeProxy = strings.TrimSpace(c.MonkeyCode.Proxy)
+	// 凭证目录：留空则用 `<auth_dir>/monkeycode`（与其余上游同款回落）。
+	c.MonkeyCodeAuthDir = strings.TrimSpace(c.MonkeyCode.AuthDir)
+	if c.MonkeyCodeAuthDir == "" {
+		c.MonkeyCodeAuthDir = filepath.Join(c.AuthsBase, "monkeycode")
+	}
+	c.MonkeyCodePoolAccounts = c.MonkeyCodeEnabled && boolOr(c.MonkeyCode.PoolAccounts, true)
 	// ⚠ 与 Enabled 取"与"：上游关着时 jwt_captcha=true 也不该去起浏览器，
 	// 否则会出现"没启用上游却在后台弹验证码窗口"的鬼影。
 	c.ZCodeJWTCaptcha = c.ZCodeEnabled && c.ZCode.JWTCaptcha
