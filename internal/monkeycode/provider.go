@@ -65,6 +65,12 @@ type Provider struct {
 	checkinLog *checkinlog.Log
 	// checkinInterval 自动签到间隔（<=0 = 只给按钮，不自动跑）。
 	checkinInterval time.Duration
+
+	// logins 页内添加账号的 state 表（见 login.go）。
+	//
+	// 放在 Provider 上而不是全局：登录是**上游专属**的，
+	// 两个上游的 state 空间互不相干；放全局还要加前缀防撞。
+	logins map[string]*loginSession
 }
 
 // Config 构造参数。
