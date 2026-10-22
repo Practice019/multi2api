@@ -123,11 +123,42 @@ func (h *Handler) accountsImport(w http.ResponseWriter, r *http.Request) {
 		}
 		results = append(results, res)
 	}
+	// ⚠ 落盘之后**必须灌池** —— 否则用户看到「导入成功 3 个」，
+	// 而账号列表里一个新行都没有。
+	//
+	// # 这是用户报的断点（链路的最后一段）
+	//
+	// 本函数此前只写文件、完全不碰池。于是「批量导入」的完整体验是：
+	//
+	//	点导入 → 200 {imported:3} → 表格里一个新行都没有
+	//
+	// 用户只能再去点一次「重载 auths」。那一步可以省掉：池与文件的同步
+	// 逻辑本来就在 reloadProviderInto 里，与启动时、与重载端点**共用同一份
+	// 实现**（见 pool_sync.go 的注释 —— 抄第二份的代价是将来只改对一处）。
+	//
+	// # 为什么失败不回滚、也不 500
+	//
+	// 文件已经落盘了，那是既成事实。同步失败不该删文件 —— 那会让
+	// 「重试导入」变成「先去目录里手工清理」。所以只把结果**如实回执**。
+	sync := map[string]any{}
+	if okN > 0 {
+		scanned, before, after, dir, serr := h.reloadProviderInto(pid)
+		if serr != nil {
+			sync["error"] = serr.Error()
+		} else {
+			sync["scanned"] = scanned
+			sync["before"] = before
+			sync["after"] = after
+			sync["dir"] = dir
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       okN == len(creds),
 		"imported": okN,
 		"failed":   len(creds) - okN,
 		"results":  results,
+		// sync 是"落盘后有没有真的进池"的回执（字段同名于重载端点）。
+		"sync":     sync,
 	})
 }
 
