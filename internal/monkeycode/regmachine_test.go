@@ -176,6 +176,65 @@ func TestIsRegMachineDocRejectsOwnFormat(t *testing.T) {
 	_ = json.Valid
 }
 
+
+// TestImportMinimalRegMachineRow 极简行（只有 session+region+platform）必须能导入。
+//
+// # 为什么这条要单独钉
+//
+// 用户问过：「注册机导出的 json 文件内容还是很多，你保证这些都是必须的字段么」。
+// 实测穷举的答案是：35 个字段里**只有 3 个是必需的**（session/region/platform），
+// 另外 25 个本仓完全不读。
+//
+// 所以注册机侧配了 exportFields 精简到 9 个字段。
+// 而本仓必须**同时收得下**极简与全量两种 ——
+// 若只认全量，用户哪天手删字段就导不进去了；
+// 若只认极简，注册机的老文件又导不进来。
+func TestImportMinimalRegMachineRow(t *testing.T) {
+	minimal := `{"platform":"monkeycode","session":"c3184876-a445-434a-84e4-15c73c5b3440","region":"intl"}`
+
+	p := New(Config{})
+	creds, err := p.ImportCredentials(minimal)
+	if err != nil {
+		t.Fatalf("极简行导入失败: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("期望 1 条，实际 %d", len(creds))
+	}
+
+	// session 与 region 必须落到盘上（那是唯二影响行为的字段）。
+	var a *Auth
+	if err := json.Unmarshal(creds[0].Raw, &struct{ A **Auth `json:"auth"` }{&a}); err != nil {
+		t.Fatalf("解析落盘内容失败: %v", err)
+	}
+	if a == nil {
+		t.Fatal("落盘内容里没有 auth 对象")
+	}
+	if a.Session == "" {
+		t.Error("session 没落盘")
+	}
+	if a.Region != RegionIntl {
+		t.Errorf("region: got %q want intl", a.Region)
+	}
+}
+
+// TestImportFullRegMachineRowStillWorks 全量行（35 字段）也必须仍然能导入。
+//
+// 精简是**优化**，不是新契约。老文件（含明文 password、expiresAt 等）
+// 在用户机器上已经存在，导入路径不能因此失效。
+func TestImportFullRegMachineRowStillWorks(t *testing.T) {
+	p := New(Config{})
+	creds, err := p.ImportCredentials(compactJSON(t, regMachineSample))
+	if err != nil {
+		t.Fatalf("全量行导入失败: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("期望 1 条，实际 %d", len(creds))
+	}
+	if creds[0].Nickname != "blackwellaudrey12" {
+		t.Errorf("昵称: got %q", creds[0].Nickname)
+	}
+}
+
 // compactJSON 把带缩进的 JSON 压成单行（模拟真实 JSONL 的每行形态）。
 func compactJSON(t *testing.T, s string) string {
 	t.Helper()
