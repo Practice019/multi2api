@@ -176,8 +176,29 @@ func (p *Provider) CheckinAll(ctx context.Context) gateway.DailyCheckinReport {
 //
 // ⚠ 只读、不发网络请求（它是列表渲染路径，每账号调一次）。
 func (p *Provider) HasToken(cred gateway.Credential) bool {
-	a, err := p.authOf(cred)
-	if err != nil || a == nil {
+	// 两条路径都要覆盖：
+	//
+	//	① 池里带 secret（LoadCredentialsWithSecrets / 导入时写入）→ 直接用
+	//	② 只有投影（启动时 LoadCredentials 给的，Secret 为 nil）→ 按 uid 回查
+	//
+	// # 为什么必须有 ②（实测）
+	//
+	// 启动装载走的是不带 secret 的投影，于是 cred.Secret == nil，
+	// authOf 直接报「凭证为空」→ HasToken 恒 false。
+	// 表现是：注册机导入的账号在界面上永远显示「无 Token」，
+	// 而它其实能对话（首次对话会自动补签）。
+	//
+	// ⚠ 判据必须与「能不能对话」一致：ChatUsable 要求三把齐。
+	//   若改成只判 session，界面会显示成有 Token 但一对话就补签失败 ——
+	//   那种假的有比显示没有更糟（用户不会去点对话，也就不触发补签）。
+	a := p.cred(cred.UID)
+	if a == nil {
+		// 兜底：secret 里带了一份完整的 *Auth（导入路径）。
+		if got, err := p.authOf(cred); err == nil {
+			a = got
+		}
+	}
+	if a == nil {
 		return false
 	}
 	return a.ChatUsable()

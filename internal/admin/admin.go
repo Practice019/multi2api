@@ -1191,7 +1191,42 @@ func (h *Handler) accountViews() []AccountView {
 			}
 		}
 		if a := h.cfg.Pool.AuthByUID(st.UID); a != nil {
-			v.HasToken = a.AccessToken != ""
+		// 必须问**上游**，不能直接读 a.AccessToken。
+		//
+		// # 这是一个真实的断点（实测）
+		//
+		// 上一版写的是 v.HasToken = a.AccessToken != "" —— 直接读通用凭证的
+		// Bearer 字段。而只有 workbuddy 系的上游用那个形态：
+		//
+		//	monkeycode  session cookie + 自签密钥  → AccessToken 恒空 → 显示「无 Token」
+		//	codearts    AK/SK/STS 三元组            → 同上
+		//
+		// 于是这些上游的账号在界面上全都像「凭证坏了」，尽管它们能正常对话。
+		// 而 credentialHasToken（问上游）早就写好了、CredentialTokenExt 也早就
+		// 定义了 —— 只是**这一行没调用它**。定义在、实现在、没人调，
+		// 是本仓反复出现的一类失效。
+		// ★ 顺序：**投影优先，上游兜底**。
+		//
+		// # 为什么不能直接问上游（第一版那样改，被测试拦住）
+		//
+		// 默认上游（workbuddy 系）的 token 一直在通用投影里（*auth.Auth.AccessToken）。
+		// 若先问上游、而那个上游的 HasToken 恰好回 false，就会把投影里正确的
+		// true 覆盖成 false —— 那是一次可见的回归（好号显示成无凭据）。
+		//
+		// # 为什么还要问上游（原来的写法只有前半句）
+		//
+		// 原来只读 a.AccessToken，于是不用 Bearer 形态的上游全都显示「无 Token」：
+		//
+		//	monkeycode  session cookie + 自签密钥   → AccessToken 恒空
+		//	codearts    AK/SK/STS 三元组            → 同上
+		//
+		// 它们的账号在界面上像「凭证坏了」，尽管能正常对话 —— 实测用户会因此
+		// 以为注册机导入失败，反复重导。
+		v.HasToken = a.AccessToken != ""
+		if !v.HasToken {
+				// 投影里没有 → 问拥有这份凭证的上游（它自己才知道 secret 里有什么）。
+				v.HasToken = h.credentialHasToken(st.UID, st.Provider)
+		}
 			// ⚠ 只在**上游真的给了**过期时间（ExpiresAt > 0）时才填指针。
 			//
 			// ExpiresAt == 0 的含义是"这个凭证没有可读的过期时间"
