@@ -262,10 +262,20 @@ func LoadFile(path string) (*Auth, error) {
 // ⚠ 形态应当是 `{"auth":{…}}`，但**容忍**扁平形（直接把字段放顶层）：
 // 用户手工拼的、或从别处导来的文件常是扁平的，拒绝它只会让人以为导入坏了。
 func parseAuth(raw []byte) (*Auth, error) {
+	// ① 先认**注册机导出的格式**。
+	//
+	// ⚠ 必须排在原生格式之前：注册机的 balance 是数字而本仓是 string，
+	// 直接 Unmarshal 会因类型冲突**整条失败**（连 session 都读不到）。
+	// 见 regmachine.go 的字段对照表。
+	if isRegMachineDoc(raw) {
+		return fromRegMachine(raw)
+	}
+	// ② 本仓落盘形态 {"auth":{…},"remark":"…"}
 	var f authFile
 	if err := json.Unmarshal(raw, &f); err == nil && f.A != nil && f.A.Usable() {
 		return f.A, nil
 	}
+	// ③ 扁平形态 {"session":"…","api_key":"…"}
 	var flat Auth
 	if err := json.Unmarshal(raw, &flat); err == nil && flat.Usable() {
 		return &flat, nil

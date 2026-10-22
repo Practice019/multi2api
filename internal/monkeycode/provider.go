@@ -224,8 +224,26 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if err != nil {
 		return gateway.ChatStream{}, err
 	}
+	// ★ 缺 key 时**现场补签一次**，而不是直接报错。
+	//
+	// # 为什么必须在这里做（用户报的断点）
+	//
+	// 注册机（register-machine）导出的 JSON 里**只有 session**，没有
+	// api_key/signing_secret —— 那两把是本仓独有、要调签发接口才有的。
+	// 于是"导入成功 → 列表里有 → 一对话就 no_healthy_account"这个链条
+	// 在本行断掉，而错误文案（"先调签发接口"）没有告诉用户**谁去调**。
+	//
+	// 补签是幂等的（同一个账号重复签发只会多一把 key，旧的仍有效），
+	// 所以放在首次对话的路径上是安全的：签完写回磁盘，下次直接用。
+	//
+	// ⚠ 失败仍然如实报错 —— 不能吞掉。补签要求 session 有效，
+	//   过期 session 会在这里得到一个明确的 401，那正是该让用户看到的。
 	if !a.ChatUsable() {
-		return gateway.ChatStream{}, fmt.Errorf("monkeycode: 凭证缺 api_key/signing_secret（先调签发接口）")
+		signed, serr := p.signCredentials(ctx, a)
+		if serr != nil {
+			return gateway.ChatStream{}, fmt.Errorf("monkeycode: 自动签发模型密钥失败：%w", serr)
+		}
+		a = signed
 	}
 
 	model := modelOf(body)
@@ -344,3 +362,43 @@ func toModelInfo(list []ModelEntry) []gateway.ModelInfo {
 }
 
 var _ = http.StatusOK
+
+// signCredentials 用 session 签一对模型密钥，并**写回磁盘 + 池**。
+//
+// # 为什么要写回池
+//
+// 池里存的是 *Auth 的副本（或指针，取决于实现）。只改本地变量的话，
+// 下一次对话拿到的仍是池里那份"没有 key"的凭证 —— 于是每轮都要重签一次，
+// 既慢又会在上游堆一堆无用的 key。
+//
+// 实现上先写盘（那是持久的、进程重启后仍在），再更新池里的那份。
+func (p *Provider) signCredentials(ctx context.Context, a *Auth) (*Auth, error) {
+	if a == nil {
+		return nil, fmt.Errorf("凭证为空")
+	}
+	pk, err := p.client.CreateAPIKey(ctx, a, "multi2api")
+	if err != nil {
+		return nil, err
+	}
+	// 拷贝一份再改：调用方手里的 a 可能是池里的共享对象，
+	// 就地改会让并发的其它请求读到半写状态。
+	out := *a
+	out.APIKey = pk.APIKey
+	out.SigningSecret = pk.SigningSecret
+
+	// 写回磁盘：失败**不阻断本次对话**（key 已经在内存里，这次能跑），
+	// 但要记日志 —— 否则重启后又变回"没 key"，且没人知道原因。
+	if _, serr := SaveFile(p.authDir, &out); serr != nil {
+		logf("monkeycode: 签发成功但写盘失败（本次可用，重启后需重签）：%v", serr)
+	}
+	// 写回池内缓存。
+	p.mu.Lock()
+	if p.creds == nil {
+		p.creds = map[string]*Auth{}
+	}
+	p.creds[out.UID()] = &out
+	p.mu.Unlock()
+
+	logf("monkeycode: 已为 %s 自动签发模型密钥", out.DisplayName())
+	return &out, nil
+}
