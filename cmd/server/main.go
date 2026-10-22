@@ -1041,6 +1041,14 @@ func main() {
 		mk = monkeycode.New(monkeycode.Config{
 			AuthDir: cfg.MonkeyCodeAuthDir,
 			Proxy:   cfg.MonkeyCodeProxy,
+			// 签到历史 + 自动签到节奏：与 workbuddy / lobsterai **同一个**
+			// checkinLog 与同一个间隔（用户要求所有上游统一）。
+			//
+			// ⚠ 不传 Log 的直接后果：界面「今日签到」列恒为空
+			//（那一列读 checkinlog 的 KindCheckin 记录），
+			// 而用户看到的是"签到按钮点了、列还是空"。
+			CheckinLog:      checkinLog,
+			CheckinInterval: cfg.ScheduleCheckinInterval,
 		})
 		mk.SetCredentialSource(monkeycodeCredSource(p))
 		// 诊断端点要**列出全部账号**，而 credSrc 只能按名查 ——
