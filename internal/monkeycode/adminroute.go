@@ -53,6 +53,27 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Title:      "签发模型网关 key（用 session 换 api_key/signing_secret）",
 			Hidden:     true,
 		},
+		{
+			// 单账号签到：前端行内按钮 POST 它，body 带 uid。
+			//
+			// 走共享驱动的 HandlerOne —— 它负责"已签则早退 / 写历史 / 回结果"，
+			// 本上游只管怎么签（见 checkin.go 的 Claim）。
+			Method:     http.MethodPost,
+			Path:       checkinDescriptor.OneURL,
+			Handler:    p.handleCheckinOne,
+			Capability: gateway.CapCheckin,
+			Title:      "单账号签到",
+			Hidden:     true,
+		},
+		{
+			// 全量签到：分组标题上的「全部签到」按钮 POST 它，无参数。
+			Method:     http.MethodPost,
+			Path:       checkinDescriptor.AllURL,
+			Handler:    p.handleCheckinAll,
+			Capability: gateway.CapCheckin,
+			Title:      "全部签到",
+			Hidden:     true,
+		},
 	}
 }
 
@@ -171,4 +192,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleCheckinOne 单账号签到（转给共享驱动）。
+func (p *Provider) handleCheckinOne(w http.ResponseWriter, r *http.Request) {
+	if p.checkin == nil || !p.checkin.Ready() {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "签到驱动未就绪"})
+		return
+	}
+	p.checkin.HandlerOne(w, r)
+}
+
+// handleCheckinAll 全量签到（转给共享驱动）。
+func (p *Provider) handleCheckinAll(w http.ResponseWriter, r *http.Request) {
+	if p.checkin == nil || !p.checkin.Ready() {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "签到驱动未就绪"})
+		return
+	}
+	p.checkin.HandlerAll(w, r)
 }

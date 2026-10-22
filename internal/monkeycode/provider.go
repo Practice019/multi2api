@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"workbuddy2api/internal/anthroconv"
+	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/dailycheckin"
 	"workbuddy2api/internal/gateway"
 )
 
@@ -32,9 +35,9 @@ const displayName = "MonkeyCode"
 //	CapQuotaProbe  /users/wallet（balance + daily_token）
 //	CapImport      粘贴导入 session
 //
-// 刻意**不声明** CapCheckin：签到要解 cap.js 的 PoW（bit 级比对），
-// 那是另一个完整实现，没做完就别画按钮（声明即承诺，契约测试会抓）。
-const caps = gateway.CapChat | gateway.CapModels | gateway.CapQuotaProbe | gateway.CapImport
+
+const caps = gateway.CapChat | gateway.CapModels | gateway.CapQuotaProbe | gateway.CapImport |
+	gateway.CapCheckin
 
 // Provider MonkeyCode 上游实例。
 type Provider struct {
@@ -55,6 +58,13 @@ type Provider struct {
 	// ⚠ 不能只读 p.creds：生产上凭证由注入的凭证源提供，p.creds 只有测试会填。
 	// zcode 上踩过这个坑（端点返回 200 + 空列表，看起来像"没有账号"）。
 	uidEnumerator func() []string
+
+	// checkin 签到共享驱动（懒构造，见 initCheckin）。
+	checkin *dailycheckin.Driver
+	// checkinLog 签到历史（nil = 只打日志不落盘，界面上那列会空）。
+	checkinLog *checkinlog.Log
+	// checkinInterval 自动签到间隔（<=0 = 只给按钮，不自动跑）。
+	checkinInterval time.Duration
 }
 
 // Config 构造参数。
@@ -65,6 +75,10 @@ type Config struct {
 	AuthDir string
 	// Proxy 出口。空 = 直连。
 	Proxy string
+	// CheckinLog 签到历史（nil = 不落盘，界面「今日签到」列会空）。
+	CheckinLog *checkinlog.Log
+	// CheckinInterval 自动签到间隔（<=0 = 只给按钮，不自动跑）。
+	CheckinInterval time.Duration
 }
 
 // New 构造 Provider。
@@ -73,11 +87,15 @@ func New(cfg Config) *Provider {
 	if c == nil {
 		c = NewClientWithProxy(cfg.Proxy)
 	}
-	return &Provider{
-		client:  c,
-		authDir: strings.TrimSpace(cfg.AuthDir),
-		creds:   map[string]*Auth{},
+	p := &Provider{
+		client:          c,
+		authDir:         strings.TrimSpace(cfg.AuthDir),
+		creds:           map[string]*Auth{},
+		checkinLog:      cfg.CheckinLog,
+		checkinInterval: cfg.CheckinInterval,
 	}
+	p.initCheckin()
+	return p
 }
 
 // NewProvider 契约测试入口。
