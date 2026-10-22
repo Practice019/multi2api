@@ -30,18 +30,30 @@ const (
 func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 	return []gateway.AdminRoute{
 		{
+			// 额度：账号池表格里已经有一列显示（QuotaExt），
+			// 再单开一个导航页只是重复 —— 而且它渲染成原始 JSON 文本，
+			// 用户实际不需要看这个形态。所以 Hidden。
+			//
+			// ⚠ Hidden **不影响端点可用**：路由照挂，能力位照留。
+			// 它只回答"要不要为它生成一个左侧导航标签"。
 			Method:     http.MethodGet,
 			Path:       adminQuotaPath,
 			Handler:    p.handleQuota,
 			Capability: gateway.CapQuotaProbe,
 			Title:      "额度",
+			Hidden:     true,
 		},
 		{
+			// 模型目录：`/v1/models` 与「可用模型」页已经列全了 45 条，
+			// 这里再开一个页只是重复同一份数据（同样渲染成原始 JSON）。
+			// 但端点要留 —— 排查"某个模型该走哪个协议"时它是唯一入口
+			//（返回里有 interface_type）。
 			Method:     http.MethodGet,
 			Path:       adminModelsPath,
 			Handler:    p.handleModels,
 			Capability: gateway.CapModels,
 			Title:      "模型目录",
+			Hidden:     true,
 		},
 		{
 			// ⚠ POST 是写操作，所以 Hidden：它不该在左侧导航占一个标签页。
@@ -92,7 +104,22 @@ func (p *Provider) resolveAuth(r *http.Request) (*Auth, string, bool) {
 		}
 	}
 	if uid == "" {
-		return nil, "", false
+		// ⚠ 不带 uid 时**回落到第一个账号**，而不是报错。
+		//
+		// # 为什么（实测）
+		//
+		// 前端打开这类只读面板时**不带 uid**，于是端点回 400
+		// "缺少或找不到 uid"，界面上弹一条红字 —— 而模型目录本来
+		// 就是上游级的东西（所有账号看到的是同一份），根本不需要
+		// 指定账号。报错只会让人以为功能坏了。
+		if p.uidEnumerator != nil {
+			if all := p.uidEnumerator(); len(all) > 0 {
+				uid = all[0]
+			}
+		}
+		if uid == "" {
+			return nil, "", false
+		}
 	}
 	a := p.cred(uid)
 	if a == nil {
@@ -149,7 +176,7 @@ func (p *Provider) handleQuota(w http.ResponseWriter, r *http.Request) {
 func (p *Provider) handleModels(w http.ResponseWriter, r *http.Request) {
 	a, uid, ok := p.resolveAuth(r)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少或找不到 uid"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "账号池里没有 monkeycode 账号（先把凭证放进 auths/monkeycode）"})
 		return
 	}
 	list, err := p.client.FetchModels(r.Context(), a)
