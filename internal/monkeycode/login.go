@@ -1,39 +1,36 @@
-// login.go 页内「添加账号」：粘贴 session 的流程。
+// login.go 页内「添加账号」—— 走**客户端登录流程**（浏览器授权 → 回调）。
 //
-// # 本上游为什么没有 OAuth
+// # MonkeyCode 的登录是百智云 OAuth
 //
-// MonkeyCode 的凭证是浏览器里的一条 cookie（`monkeycode_ai_session`）。
-// 它**没有** OAuth 授权页 —— 登录本身走 GitHub/微信，而那个流程拿到的
-// 是 MonkeyCode 自己的 cookie，不是可换的 code。
+// 逆向客户端（monkeycode-desktop.exe）得到的事实：
 //
-// 所以「添加账号」的形态只能是**粘贴**：用户从 DevTools 复制 cookie 值，
-// 粘进来，我们校验后落盘。
+//	GET /api/v1/users/login?redirect=&inviter_id=
+//	  → 302 https://baizhi.cloud/oauth/authorize?client_id=monkeycode-ai
+//	       &redirect_uri=https://monkeycode-ai.com/api/v1/users/baizhi/callback
+//	       &response_type=code&scope=user+phone&state=…
 //
-// # 怎么把它接进 LoginFlow
+// 也就是说 **MonkeyCode 是百智云的一个 OAuth 应用**（client_id=monkeycode-ai）。
+// 登录地址栏里看到的是百智云的授权页，而那个页面支持 GitHub / 密码 / 微信
+// 等多种登录方式 —— 用户选一种完成授权，百智云回调 MonkeyCode，
+// MonkeyCode 种下 `monkeycode_ai_session` cookie。
 //
-// LoginFlow 的三件套对"没有授权页"的上游仍然成立，只是语义平移：
+// # 为什么这才是"客户端登录流程"
 //
-//	Start     生成一个 state（用于把"这一次粘贴"与后续校验对上）
-//	          authURL 返回**空串**（没有可打开的授权页）
-//	Poll      恒回 ErrLoginPending —— 本流程不靠轮询完成，靠 Manual 端点
-//	Manual    {path, instructions}：前端据此渲染粘贴框
+// 上一版实现成"读本机客户端的登录态"，那是错的：本仓的 LoginFlow 语义是
+// **打开授权页让用户登录**，而"本机拾取"是 workbuddy 那条 auth_url 为空的分支。
+// 混用会让界面显示「登录态就在本机那个桌面客户端里」—— 用户看到那句话
+// 会以为网关在偷偷读他的客户端。
 //
-// ⚠ authURL 必须回空串而不是随便编一个：前端对空串有专门分支
-//（不渲染「打开授权页」），编一个会让用户点开一个 404。
-//
-// # Configured
-//
-// 恒 true —— 粘贴不需要任何部署侧配置（不像 OAuth 要 client_id）。
-// 这正是 Configured 存在的意义：它回答"这份部署真的能走这个流程吗"。
+// 所以这里 authURL 给**真实的授权 URL**，与其余上游同款。
 package monkeycode
 
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
-	"io"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -42,76 +39,159 @@ import (
 	"workbuddy2api/internal/gateway"
 )
 
-// 编译期断言：让 *Provider 直接满足 gateway.LoginFlow。
+// 编译期断言：让 *Provider 直接满足 gateway.LoginFlow 与 ManualLoginExt。
 //
-// ⚠ 这三个方法**必须挂在 *Provider 上**（不能用访问器返回）：
-// 核心用 ExtOf[LoginFlow](p) 做**类型断言**，访问器的返回值不参与
-// 方法集匹配。少了它们，测试可能全绿而 manifest 下发 login:null ——
-// 界面上就没有「添加账号」按钮（raccoon 实测踩过这个形态）。
+// ⚠ 这些方法**必须挂在 *Provider 上**（不能用访问器返回）：
+// 核心用 ExtOf[LoginFlow](p) 做类型断言，访问器的返回值不参与方法集匹配。
+// 少了它们，manifest 会下发 login:null —— 界面上没有「添加账号」按钮
+//（raccoon 实测踩过这个形态）。
 var _ gateway.LoginFlow = (*Provider)(nil)
-
-// 编译期断言：粘贴完成端点。
 var _ gateway.ManualLoginExt = (*Provider)(nil)
 
-// loginStateTTL 一次粘贴会话的有效期。
-//
-// 用户从"点添加账号"到"复制 cookie 粘进来"通常是几十秒，
-// 给 10 分钟足够，同时避免 state 表无限增长。
-const loginStateTTL = 10 * time.Minute
+// loginStateTTL 一次登录会话的有效期。
+const loginStateTTL = 15 * time.Minute
 
-// loginSession 一次待完成的粘贴会话。
+// loginSession 一次待完成的登录。
 type loginSession struct {
 	created time.Time
 	region  string
 }
 
-// Start 生成一次粘贴会话，返回 (state, authURL)。
+// Start 申请一次登录，返回 (state, 授权URL)。
 //
-// authURL 恒空：本上游没有可打开的授权页（见文件头）。
+// # 授权 URL 是**上游自己签发的**，不是我们拼的
+//
+// 我们只打 `GET /api/v1/users/login`，让上游 302 出它自己的 authorize URL。
+// 自己拼 client_id/redirect_uri 会在上游换 OAuth 应用时静默失效。
 func (p *Provider) Start() (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
 	state, err := randomState()
 	if err != nil {
 		return "", "", err
 	}
-	p.mu.Lock()
-	if p.logins == nil {
-		p.logins = map[string]*loginSession{}
-	}
-	// 顺手清掉过期的，避免表无限增长。
-	now := time.Now()
-	for k, v := range p.logins {
-		if now.Sub(v.created) > loginStateTTL {
-			delete(p.logins, k)
+
+	// 两站都试（用户没说要从哪个站登录；国内站优先 —— 它是主站）。
+	var lastErr error
+	for _, region := range []string{RegionCN, RegionIntl} {
+		authURL, rerr := p.fetchAuthorizeURL(ctx, region)
+		if rerr != nil {
+			lastErr = rerr
+			continue
 		}
+		p.mu.Lock()
+		if p.logins == nil {
+			p.logins = map[string]*loginSession{}
+		}
+		// 清理过期的，避免表无限增长。
+		now := time.Now()
+		for k, v := range p.logins {
+			if now.Sub(v.created) > loginStateTTL {
+				delete(p.logins, k)
+			}
+		}
+		p.logins[state] = &loginSession{created: now, region: region}
+		p.mu.Unlock()
+		return state, authURL, nil
 	}
-	p.logins[state] = &loginSession{created: now}
-	p.mu.Unlock()
-	return state, "", nil
+	if lastErr == nil {
+		lastErr = fmt.Errorf("两个站点都没给出授权地址")
+	}
+	return "", "", lastErr
 }
 
-// Poll 恒回 ErrLoginPending —— 本流程不靠轮询完成。
+// fetchAuthorizeURL 打上游的 login 入口，取它 302 出的 authorize URL。
+func (p *Provider) fetchAuthorizeURL(ctx context.Context, region string) (string, error) {
+	host := hostCN
+	if region == RegionIntl {
+		host = hostIntl
+	}
+	url := host + pathLoginEntry + "?redirect=&inviter_id="
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("Accept", "text/html,application/json,*/*")
+
+	// 用本包 Client 的 transport（按 region 选直连/代理），
+	// 只覆盖 CheckRedirect —— 我们要的就是 302 的 Location。
+	baseClient := p.client.httpFor(&Auth{Region: region})
+	client := &http.Client{
+		Transport: baseClient.Transport,
+		Timeout:   20 * time.Second,
+		// ⚠ **不跟随重定向**：跟了会被带到授权页 HTML，拿不到 URL 本身。
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("monkeycode: %s login 入口请求失败: %v", region, err)
+		return "", err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		log.Printf("monkeycode: %s login 入口返回 %d", region, resp.StatusCode)
+		return "", fmt.Errorf("%s: login 入口返回 %d（期望 3xx）", region, resp.StatusCode)
+	}
+	loc := strings.TrimSpace(resp.Header.Get("Location"))
+	if loc == "" {
+		return "", fmt.Errorf("%s: 302 没有 Location", region)
+	}
+	// ⚠ Location 可能是**相对路径**：国际站实测回的是
+	// `/oauth/authorize?client_id=&redirect_uri=…`（没有 host）。
+	// 直接把它交给浏览器会打开一个 404 —— 必须补全成绝对地址。
+	if strings.HasPrefix(loc, "/") {
+		loc = host + loc
+	}
+	if !strings.HasPrefix(loc, "http://") && !strings.HasPrefix(loc, "https://") {
+		return "", fmt.Errorf("%s: Location 不是可用地址：%q", region, loc)
+	}
+	return loc, nil
+}
+
+// Poll 查授权结果。
 //
-// 真正的收号发生在 ManualComplete（粘贴之后）。前端在 authURL 为空时
-// 会渲染粘贴框而不是轮询倒计时，所以这里返回 pending 不会被反复调用。
+// # 本上游为什么只能"等用户粘回来"
+//
+// OAuth 的 code 是回调打到 `monkeycode-ai.com/api/v1/users/baizhi/callback`
+// 之后由**上游**换 cookie 的，我们拿不到那个 code —— 除非登录页把浏览器
+// 导到一个我们能拦的地址。所以真正的收号走 ManualLogin 的粘贴框
+//（用户把回调后地址栏里那条 `/?ic=…` 或直接 cookie 粘回来）。
+//
+// 恒回 ErrLoginPending 是**正确语义**：流程没完成，而且不会自动完成。
 func (p *Provider) Poll(state string) (gateway.Credential, error) {
 	return gateway.Credential{}, gateway.ErrLoginPending
 }
 
-// Configured 恒 true：粘贴流程不需要任何部署侧配置。
+// Configured 恒 true：登录不需要任何部署侧配置。
 func (p *Provider) Configured() bool { return true }
 
-// ManualLogin 告诉前端"粘贴完成打哪个端点、文案怎么说"。
+// ManualLogin 粘贴完成端点与指引。
 func (p *Provider) ManualLogin() (string, string) {
 	return adminManualCompletePath,
-		"把浏览器 DevTools 里 monkeycode_ai_session 的值粘贴到这里。" +
-			"取法：登录 monkeycode-ai.com → F12 → Application → Cookies → " +
-			"monkeycode_ai_session → 复制 Value。" +
-			"可以一行一个批量粘贴，也可以直接粘 JSON。"
+		"在打开的授权页里完成登录（GitHub / 密码 / 微信任选）。" +
+			"登录成功后浏览器会跳回 MonkeyCode；此时按 F12 → Application → Cookies → " +
+			"monkeycode_ai_session，把 Value 粘到下面。" +
+			"也可以直接粘贴 cookie 那一整行，或一行一个批量粘贴。"
 }
 
-// handleManualComplete 粘贴完成端点。
-//
-// 请求体：{ state, code }。code 是用户粘贴的 session（或 JSON / 多行）。
+// randomState 生成随机 state（16 字节 hex）。
+func randomState() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// handleManualComplete 粘贴完成端点：{state, code} → 校验 → 补签 → 落盘。
 func (p *Provider) handleManualComplete(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		State string `json:"state"`
@@ -126,23 +206,17 @@ func (p *Provider) handleManualComplete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 校验 state（不强制：有些客户端不带。带了就必须是签发过的）。
+	region := ""
 	if s := strings.TrimSpace(body.State); s != "" {
 		p.mu.Lock()
 		sess, ok := p.logins[s]
 		if ok {
 			delete(p.logins, s)
+			region = sess.region
 		}
 		p.mu.Unlock()
-		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"ok": false, "error": "登录会话已过期（重新点「添加账号」）"})
-			return
-		}
-		_ = sess
 	}
 
-	// 解析出可落盘的凭证。
 	creds, err := p.ImportCredentials(body.Code)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -153,17 +227,16 @@ func (p *Provider) handleManualComplete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 原地校验并补签 key（用户粘贴的通常只有 session）。
 	imported := 0
 	var notes []string
 	for _, c := range creds {
-		a, perr := p.preparePasted(c)
+		a, perr := p.preparePasted(c, region)
 		if perr != nil {
-			notes = append(notes, c.Nickname+": "+perr.Error())
+			notes = append(notes, shortErr(perr))
 			continue
 		}
 		if _, serr := SaveFile(p.authDir, a); serr != nil {
-			notes = append(notes, a.DisplayName()+": 落盘失败 "+serr.Error())
+			notes = append(notes, "落盘失败 "+serr.Error())
 			continue
 		}
 		p.mu.Lock()
@@ -173,6 +246,7 @@ func (p *Provider) handleManualComplete(w http.ResponseWriter, r *http.Request) 
 		p.creds[a.UID()] = a
 		p.mu.Unlock()
 		imported++
+		log.Printf("monkeycode: 已添加账号 %s（region=%s）", a.DisplayName(), a.RegionOrDefault())
 	}
 
 	if imported == 0 {
@@ -183,35 +257,24 @@ func (p *Provider) handleManualComplete(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": msg})
 		return
 	}
-	log.Printf("monkeycode: 页内添加账号成功 %d 个", imported)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imported": imported, "notes": notes})
 }
 
 // preparePasted 校验一份刚粘贴的凭证，并在缺 api_key 时自动补签。
-//
-// # 为什么自动补签
-//
-// 用户从 DevTools 只能复制到 session（api_key/signing_secret 是我们调接口
-// 换出来的，浏览器里没有）。若不补签，导入的账号**不能对话** ——
-// 用户会看到"添加成功了但一发消息就 403"，而那个 403 的文案是
-// invalid ohmyagent request，指不到"还没签 key"这一步。
-func (p *Provider) preparePasted(c gateway.ImportedCredential) (*Auth, error) {
+func (p *Provider) preparePasted(c gateway.ImportedCredential, regionHint string) (*Auth, error) {
 	a, err := parseAuth(c.Raw)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := contextWithTimeout(30 * time.Second)
+	if a.Region == "" && regionHint != "" {
+		a.Region = regionHint
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 校验 session 真的有效（顺带取到 user.id 与昵称）。
-	//
-	// ⚠ **区域未指定时必须自动探测**：用户粘贴的是裸 session，
-	// 里面没有"我属于哪个站"的信息。默认按国内站打会得到
-	// `401 未授权` —— 而那个错看起来像"session 复制错了"，
-	// 实际只是站点选错（实测踩到：国际站 session 被判成无效）。
 	st, err := p.probeStatus(ctx, a)
 	if err != nil {
-		return nil, fmt.Errorf("session 校验失败（复制错了吗？）：%w", err)
+		return nil, fmt.Errorf("session 校验失败：%w", err)
 	}
 	if strings.TrimSpace(st.User.ID) != "" {
 		a.UserID = st.User.ID
@@ -222,7 +285,6 @@ func (p *Provider) preparePasted(c gateway.ImportedCredential) (*Auth, error) {
 	if a.AddedAt == "" {
 		a.AddedAt = time.Now().Format(time.RFC3339)
 	}
-	// 缺 key 就补签（已有则保留，不重签 —— 重签会产生无用 key 堆积）。
 	if strings.TrimSpace(a.APIKey) == "" || strings.TrimSpace(a.SigningSecret) == "" {
 		pk, kerr := p.client.CreateAPIKey(ctx, a, "multi2api")
 		if kerr != nil {
@@ -244,43 +306,25 @@ func (p *Provider) preparePasted(c gateway.ImportedCredential) (*Auth, error) {
 //	国际站 session → cn   站回 401 未授权
 //
 // 而 401 的文案是"未授权"，看起来像"复制错了"，实际只是站点不对。
-// 所以这里：显式配了 region 就直接用；没配就**两个站都试一次**，
-// 谁通了就记住谁。
 func (p *Provider) probeStatus(ctx context.Context, a *Auth) (*StatusPayload, error) {
-	// 显式指定了区域：只试那一个（用户明确说了，不要自作聪明）。
 	if strings.TrimSpace(a.Region) != "" {
 		return p.client.FetchStatus(ctx, a)
 	}
-	// 未指定：先试国内站（主站），失败再试国际站。
-	type attempt struct {
-		region string
-		st     *StatusPayload
-		err    error
-	}
-	var results []attempt
+	var msgs []string
 	for _, region := range []string{RegionCN, RegionIntl} {
 		probe := *a
 		probe.Region = region
 		st, err := p.client.FetchStatus(ctx, &probe)
-		results = append(results, attempt{region: region, st: st, err: err})
 		if err == nil {
-			// 命中：写回区域，后续所有请求都走对的站。
 			a.Region = region
 			return st, nil
 		}
-	}
-	// 两个站都不通：把**两边的**错误都带上 —— 只说一边会让人以为
-	// "换个站就好了"，而实际可能 session 真的错了。
-	var msgs []string
-	for _, r := range results {
-		if r.err != nil {
-			msgs = append(msgs, r.region+": "+shortErr(r.err))
-		}
+		msgs = append(msgs, region+": "+shortErr(err))
 	}
 	return nil, fmt.Errorf("国内站与国际站都不认这个 session（%s）", strings.Join(msgs, "; "))
 }
 
-// shortErr 把错误压成一句话（错误体可能很长）。
+// shortErr 把错误压成一句话。
 func shortErr(err error) string {
 	if err == nil {
 		return ""
@@ -292,23 +336,9 @@ func shortErr(err error) string {
 	return s
 }
 
-// randomState 生成一个随机 state（16 字节 hex）。
-func randomState() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// jsonDecode 解请求体（带上限，避免一个巨大的坏 body 灌进内存）。
+// jsonDecode 解请求体（带上限）。
 func jsonDecode(r *http.Request, v any) error {
 	defer r.Body.Close()
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	return dec.Decode(v)
+	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
 
-// contextWithTimeout 造一个带超时的 ctx（页面交互路径用）。
-func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), d)
-}

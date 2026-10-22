@@ -45,6 +45,8 @@ const (
 	pathWallet    = "/api/v1/users/wallet"
 	pathCheckin   = "/api/v1/users/wallet/checkin"
 	pathAPICreate = "/api/v1/users/ohmyagent/api-keys"
+	// pathLoginEntry 登录入口。它 302 到上游自己的 OAuth authorize URL。
+	pathLoginEntry = "/api/v1/users/login"
 	pathResponses = "/responses"
 	pathMessages  = "/messages"
 )
