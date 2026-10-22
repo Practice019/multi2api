@@ -59,56 +59,109 @@ type loginSession struct {
 
 // Start 申请一次登录，返回 (state, 授权URL)。
 //
-// # 授权 URL 是**上游自己签发的**，不是我们拼的
+// # 三条路，按站点与优先级选
 //
-// 我们只打 `GET /api/v1/users/login`，让上游 302 出它自己的 authorize URL。
-// 自己拼 client_id/redirect_uri 会在上游换 OAuth 应用时静默失效。
-func (p *Provider) Start() (string, string, error) {
+// 逆向 `monkeycode-ai.net/login` 的 SPA（`assets/index-*.js`）得出的完整事实：
+//
+//	国际站(global)  choices.github / choices.google → 都用
+//	                GET /api/v1/users/oauth/{platform}/login?redirect_url=…
+//	                → {data:{auth_url}} → 跳到 GitHub / Google 授权页
+//	
+//	国内站(cn)      该登录方式暂未启用（实测两者都回这句话）
+//	                只有 choices.baizhi → GET /api/v1/users/login → 302 百智云授权页
+//	                与 choices.password → POST /api/v1/users/password-login
+//
+// 所以：国际站优先给 GitHub，国内站给百智云。
+//
+// # 为什么不再用"打 login 入口取 302"
+//
+// 那条路只有国内站成立（国际站回的是相对路径且 client_id 为空）。
+// 而 `oauth/{platform}/login` 是**显式端点**，回的是 JSON 里的 auth_url ——
+// 两站语义一致，且能选平台。
+func (p *Provider) Start() (state, authURL string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	state, err := randomState()
+	state, err = randomState()
 	if err != nil {
 		return "", "", err
 	}
 
-	// 两站都试（用户没说要从哪个站登录；国内站优先 —— 它是主站）。
-	var lastErr error
-	for _, region := range []string{RegionCN, RegionIntl} {
-		authURL, rerr := p.fetchAuthorizeURL(ctx, region)
-		if rerr != nil {
-			lastErr = rerr
-			continue
-		}
-		p.mu.Lock()
-		if p.logins == nil {
-			p.logins = map[string]*loginSession{}
-		}
-		// 清理过期的，避免表无限增长。
-		now := time.Now()
-		for k, v := range p.logins {
-			if now.Sub(v.created) > loginStateTTL {
-				delete(p.logins, k)
-			}
-		}
-		p.logins[state] = &loginSession{created: now, region: region}
-		p.mu.Unlock()
-		return state, authURL, nil
+	// ① 国际站 GitHub（首选：协议化程度最高，且我们有 GitHub 池）
+	if u, rerr := p.oauthLoginURL(ctx, RegionIntl, "github"); rerr == nil && u != "" {
+		p.rememberLogin(state, RegionIntl)
+		return state, u, nil
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("两个站点都没给出授权地址")
+	// ② 国际站 Google
+	if u, rerr := p.oauthLoginURL(ctx, RegionIntl, "google"); rerr == nil && u != "" {
+		p.rememberLogin(state, RegionIntl)
+		return state, u, nil
 	}
-	return "", "", lastErr
+	// ③ 国内站百智云授权页
+	if u, rerr := p.baizhiAuthorizeURL(ctx); rerr == nil && u != "" {
+		p.rememberLogin(state, RegionCN)
+		return state, u, nil
+	}
+	return "", "", fmt.Errorf("monkeycode: 三条件登录入口都没拿到授权地址（国际站 GitHub/Google、国内站百智云）")
 }
 
-// fetchAuthorizeURL 打上游的 login 入口，取它 302 出的 authorize URL。
-func (p *Provider) fetchAuthorizeURL(ctx context.Context, region string) (string, error) {
+// rememberLogin 记下这次登录会话。
+func (p *Provider) rememberLogin(state, region string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.logins == nil {
+		p.logins = map[string]*loginSession{}
+	}
+	now := time.Now()
+	for k, v := range p.logins {
+		if now.Sub(v.created) > loginStateTTL {
+			delete(p.logins, k)
+		}
+	}
+	p.logins[state] = &loginSession{created: now, region: region}
+}
+
+// oauthLoginURL 取某个平台的授权地址（`GET /api/v1/users/oauth/{platform}/login`）。
+//
+// 回 `{code:0,data:{auth_url:"…"}}`；平台没启用时 code 非 0 且 message 是
+// 「该登录方式暂未启用」—— 那种情况按错误返回，让 Start 换下一个。
+func (p *Provider) oauthLoginURL(ctx context.Context, region, platform string) (string, error) {
 	host := hostCN
 	if region == RegionIntl {
 		host = hostIntl
 	}
-	url := host + pathLoginEntry + "?redirect=&inviter_id="
+	url := host + "/api/v1/users/oauth/" + platform + "/login?redirect_url=/console/tasks"
+	code, raw, err := p.client.doJSON(ctx, &Auth{Region: region}, http.MethodGet, url, http.Header{
+		"Accept":     []string{"application/json"},
+		"User-Agent": []string{defaultUserAgent},
+	}, nil)
+	if err != nil {
+		return "", err
+	}
+	if code != http.StatusOK {
+		return "", fmt.Errorf("%s/%s 返回 %d", region, platform, code)
+	}
+	var env struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			AuthURL string `json:"auth_url"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", err
+	}
+	if env.Code != 0 || strings.TrimSpace(env.Data.AuthURL) == "" {
+		return "", fmt.Errorf("%s/%s: %s", region, platform, firstNonEmptyStr(env.Message, "没有 auth_url"))
+	}
+	return env.Data.AuthURL, nil
+}
 
+// baizhiAuthorizeURL 取国内站的百智云授权地址。
+//
+// 打 `GET /api/v1/users/login`，**不跟随重定向**，取 302 的 Location。
+func (p *Provider) baizhiAuthorizeURL(ctx context.Context) (string, error) {
+	url := hostCN + pathLoginEntry + "?redirect=&inviter_id="
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -116,44 +169,42 @@ func (p *Provider) fetchAuthorizeURL(ctx context.Context, region string) (string
 	req.Header.Set("User-Agent", defaultUserAgent)
 	req.Header.Set("Accept", "text/html,application/json,*/*")
 
-	// 用本包 Client 的 transport（按 region 选直连/代理），
-	// 只覆盖 CheckRedirect —— 我们要的就是 302 的 Location。
-	baseClient := p.client.httpFor(&Auth{Region: region})
+	base := p.client.httpFor(&Auth{Region: RegionCN})
 	client := &http.Client{
-		Transport: baseClient.Transport,
+		Transport: base.Transport,
 		Timeout:   20 * time.Second,
-		// ⚠ **不跟随重定向**：跟了会被带到授权页 HTML，拿不到 URL 本身。
+		// ⚠ 不跟随：跟了会被带到授权页 HTML，拿不到 URL 本身。
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("monkeycode: %s login 入口请求失败: %v", region, err)
 		return "", err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-
 	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
-		log.Printf("monkeycode: %s login 入口返回 %d", region, resp.StatusCode)
-		return "", fmt.Errorf("%s: login 入口返回 %d（期望 3xx）", region, resp.StatusCode)
+		return "", fmt.Errorf("国内站 login 入口返回 %d", resp.StatusCode)
 	}
 	loc := strings.TrimSpace(resp.Header.Get("Location"))
 	if loc == "" {
-		return "", fmt.Errorf("%s: 302 没有 Location", region)
+		return "", fmt.Errorf("国内站 302 没有 Location")
 	}
-	// ⚠ Location 可能是**相对路径**：国际站实测回的是
-	// `/oauth/authorize?client_id=&redirect_uri=…`（没有 host）。
-	// 直接把它交给浏览器会打开一个 404 —— 必须补全成绝对地址。
 	if strings.HasPrefix(loc, "/") {
-		loc = host + loc
-	}
-	if !strings.HasPrefix(loc, "http://") && !strings.HasPrefix(loc, "https://") {
-		return "", fmt.Errorf("%s: Location 不是可用地址：%q", region, loc)
+		loc = hostCN + loc
 	}
 	return loc, nil
+}
+
+// firstNonEmptyStr 取第一个非空字符串。
+func firstNonEmptyStr(list ...string) string {
+	for _, s := range list {
+		if v := strings.TrimSpace(s); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // Poll 查授权结果。
