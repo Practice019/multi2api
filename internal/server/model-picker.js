@@ -1,97 +1,90 @@
-// model-picker.js —— 模型候选选择器（分组页与渠道页共用）。
+// model-picker.js —— 模型候选选择器（分组页用；与 API 管理页同一套规则）。
 //
-// # 为什么要有这个文件（抽共享层）
+// # 这个文件解决什么
 //
-// 两个页面都要「从几百个模型里挑一部分」：
-//   · 分组页：挑出这个分组包含哪些模型
-//   · 渠道页：挑出这条渠道声明能服务哪些模型
-// 而候选项有 699 个、分属 15 个上游（实测），**不按上游筛就是没法用** ——
-// cline 一家就占 497 个，其余全被压在滚动区深处。
+// 分组页要从**全站目录**（实测 699 个模型、15 个上游，cline 一家占 497）里
+// 挑一部分。平分铺开等于大海捞针，所以必须「先选上游，再看它的模型」。
 //
-// 这段逻辑（切上游前缀 / 按上游过滤 / 面板渲染 / 勾选状态）两边各写一遍必然漂移：
-// 会长成「分组页能按上游筛、渠道页不能」这种无从解释的差异。所以抽到这里。
+// # ⚠ 这是一次「本该复用却重造」的教训，写在这里防复发
 //
-// # 为什么不做成 <script src> 外部文件
+// API 管理页**早就实现了**同样的东西（webui.html 的 #akProvider + modelOwnerOf
+// + renderAKModelList），而且注释里明确记着用户的原话：
 //
-// 前端语法门禁（tests/frontend/verify_inline_script_syntax.js）只扫**内联** <script>，
-// 且扫描清单取自 webui.go 的 //go:embed 行。做成外部 .js 会让这段代码
-// **静默逃过门禁** —— 门禁全绿，但根本没扫它。
+//   「我希望可以选择上游才能显示具体上游的模型，不要全部显示出来」
 //
-// 所以本文件是**源文件**，由 tools/model_picker_sync.js 注入到各页面的
-// <script> 里（与 theme-max.css 由 theme_sync.js 注入同一套手法）。
-// 改这里 → 跑同步脚本 → 各页面同时更新。
+// 我第一版在分组页用「一排 chip 按钮」重写了一遍 —— 形态与 API 页不一致
+// （那边是 <select> 下拉），而且**漏了 owned_by 兜底**。用户一眼看出不对：
+//
+//   「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享」
+//
+// 所以现在这份共享层是**照 API 页的规则复刻**的：
+//   · 上游取自 modelOwnerOf（切第一个 / ，回退 owned_by）
+//   · 控件形态是 <select> 下拉（与 API 页视觉一致）
+// 以后新增页面要选模型，直接用这里，不要再写第三遍。
 
-// 从模型名取上游：'cline/openai/gpt-5' → 'cline'。
+// mpOwnerOf 推断一个模型属于哪个上游。
 //
-// ⚠ 只切**第一个**斜杠。模型名本身可能还有斜杠（cline 的一堆都是
-// 'cline/anthropic/claude-sonnet-5.5' 这种），按最后一个切会得到 'anthropic'
-// —— 那是个模型厂牌不是我们的上游，筛出来对不上渠道配置。
-function mpProviderOf(model) {
-  var i = model.indexOf('/');
-  return i < 0 ? '' : model.slice(0, i);
+// 与 webui.html 的 modelOwnerOf **逐字同构**（含 owned_by 兜底）。
+//
+// 为什么优先切 id 而不是只用 owned_by：id 的前缀是**我们的**上游 id
+//（与 channels.json 的 name / 注册表 id 对齐），而 owned_by 是上游自己
+// 报的厂商名（可能是 'openai'、'system' 这种），未必是我们的上游。
+// 只有 id 里没有前缀时（单上游部署会这样）才退回 owned_by。
+function mpOwnerOf(id, ownedBy) {
+  var s = String(id || '').indexOf('/');
+  return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
 }
 
-// 把模型列表按上游归组，按数量降序（常用的上游排在前面）。
+// mpOwners 从目录里取出所有上游 id（去重、字典序）。
 //
-// 返回 [{provider, models}]，provider 为 '' 的那组是「没有上游前缀」的模型
-// （单上游部署、或上游 id 为空时会这样）—— 它**必须**单独成组，
-// 否则那些模型会从筛选面板里彻底消失。
-function mpGroupByProvider(models) {
-  var byProv = Object.create(null);
-  for (var i = 0; i < models.length; i++) {
-    var m = models[i];
-    var p = mpProviderOf(m);
-    (byProv[p] || (byProv[p] = [])).push(m);
-  }
+// 字典序而不是按数量：下拉框的顺序要稳定 —— 按数量排会让「用了几天之后
+// 某个上游涨上去了，位置突然变了」，用户按记忆点第二项会点错。
+function mpOwners(catalog) {
+  var seen = Object.create(null);
   var out = [];
-  for (var k in byProv) { out.push({ provider: k, models: byProv[k] }); }
-  out.sort(function (a, b) {
-    // 无前缀的那组排最后：它不是「一个上游」，视觉上单独放更好认。
-    if (a.provider === '') { return 1; }
-    if (b.provider === '') { return -1; }
-    return b.models.length - a.models.length;
-  });
+  for (var i = 0; i < catalog.length; i++) {
+    var o = mpOwnerOf(catalog[i].id, catalog[i].owner);
+    if (o && !seen[o]) { seen[o] = 1; out.push(o); }
+  }
+  out.sort();
   return out;
 }
 
-// 按上游 + 关键字过滤。
+// mpFilter 按「上游 + 关键字」过滤目录条目（条目形如 {id, owner}）。
 //
-// provider 为空串表示「全部上游」；关键字只比模型名（含上游前缀，
-// 这样输 'cline/' 也能筛）。
-function mpFilter(models, provider, query) {
+// provider 为空串 = 全部上游。
+//
+// ⚠ 上游筛选只决定**列出什么**，绝不改已勾选的 id ——
+// 否则「切一下上游」就等于「把之前选的都取消」，用户会莫名其妙丢配置。
+function mpFilter(catalog, provider, query) {
   var q = (query || '').trim().toLowerCase();
-  return models.filter(function (m) {
-    if (provider && mpProviderOf(m) !== provider) { return false; }
-    if (q && m.toLowerCase().indexOf(q) < 0) { return false; }
+  return catalog.filter(function (m) {
+    if (provider && mpOwnerOf(m.id, m.owner) !== provider) { return false; }
+    if (q && m.id.toLowerCase().indexOf(q) < 0) { return false; }
     return true;
   });
 }
 
-// 渲染上游筛选条：每个上游一个按钮 + 数量。
+// mpFillProviderSelect 用当前目录填充上游下拉。
 //
-// onPick(provider) 由调用方处理 —— 本函数只管画，不管状态。
-// 空 provider 表示「全部」。
-function mpRenderProviderBar(host, groups, active, totalAll, onPick) {
-  if (!host) { return; }
-  var items = [{ provider: '', label: '全部', count: totalAll }];
-  for (var i = 0; i < groups.length; i++) {
-    var g = groups[i];
-    items.push({
-      provider: g.provider,
-      label: g.provider === '' ? '（无前缀）' : g.provider,
-      count: g.models.length
-    });
+// ⚠ 恢复选中值必须写在 innerHTML **之后**：
+// <select> 会把「不在 option 列表里的值」当场归一成空串，先设值会被清掉。
+// （webui.html 的 syncAKProviders 里记着同一个坑。）
+function mpFillProviderSelect(sel, catalog, allLabel) {
+  if (!sel) { return; }
+  var keep = sel.value;
+  var owners = mpOwners(catalog);
+  var html = '<option value="">' + (allLabel || '全部上游') + '</option>';
+  for (var i = 0; i < owners.length; i++) {
+    html += '<option value="' + mpHtmlEsc(owners[i]) + '">' + mpHtmlEsc(owners[i]) + '</option>';
   }
-  host.innerHTML = items.map(function (it) {
-    var on = (it.provider === active) ? ' mp-on' : '';
-    return '<button type="button" class="mp-chip' + on + '" data-p="' + it.provider + '">'
-      + it.label + ' <span class="mp-n">' + it.count + '</span></button>';
-  }).join('');
-  // 事件委托：筛选条会整块重渲染，逐个绑监听会在重渲染后失效。
-  host.onclick = function (ev) {
-    var el = ev.target;
-    while (el && el !== host && !el.getAttribute('data-p')) { el = el.parentNode; }
-    if (!el || el === host) { return; }
-    onPick(el.getAttribute('data-p') || '');
-  };
+  sel.innerHTML = html;
+  sel.value = owners.indexOf(keep) >= 0 ? keep : '';
+}
+
+// mpHtmlEsc 最小 HTML 转义（上游 id 理论上是 slugs，但不该赌它）。
+function mpHtmlEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }

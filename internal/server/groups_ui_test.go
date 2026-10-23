@@ -289,12 +289,12 @@ func TestChannelsUIExtractsErrorMessageFromObject(t *testing.T) {
 func TestGroupsUIModelPickerIsInjected(t *testing.T) {
 	ui := readGroupsUI(t)
 	for _, n := range []struct{ what, needle string }{
-		{"上游解析", "function mpProviderOf("},
-		{"按上游归组", "function mpGroupByProvider("},
+		{"上游解析（带 ownedBy 兜底）", "function mpOwnerOf(id, ownedBy)"},
+		{"上游清单", "function mpOwners("},
 		{"两级过滤", "function mpFilter("},
-		{"筛选条渲染", "function mpRenderProviderBar("},
-		{"筛选条容器", `id="gProvBar"`},
-		{"页面包装", "function renderProvBar("},
+		{"上游下拉填充", "function mpFillProviderSelect("},
+		{"上游下拉容器（select，与 API 页同形态）", `id="gProvider"`},
+		{"全部上游 选项", "全部上游"},
 	} {
 		if !strings.Contains(ui, n.needle) {
 			t.Errorf("★ 分组页缺少%s（%q）—— 上游筛选不可用，699 个模型要靠滚动翻", n.what, n.needle)
@@ -333,10 +333,53 @@ func TestGroupsUIModelPickerIsInSync(t *testing.T) {
 // 他会静默选进两百个自己没看见的模型。
 func TestGroupsUIPickAllRespectsProviderFilter(t *testing.T) {
 	src := sliceFuncBody(t, readGroupsUI(t), "function pickAll(")
-	if !strings.Contains(src, "provActive") {
-		t.Error("★ pickAll 没考虑上游筛选 —— 「全选当前」会选进用户看不见的模型")
+	// 用标识符而不是完整调用串：Go 源码里嵌 JS 的引号/括号转义容易让
+	// Contains 判据本身出错（我在这里踩过一次），只认标识符更稳。
+	if !strings.Contains(src, "gProvider") {
+		t.Error("★ pickAll 没读上游下拉 —— 「全选当前」会选进用户看不见的模型")
 	}
 	if !strings.Contains(src, "mpFilter(") {
 		t.Error("★ pickAll 必须用与列表相同的共享过滤（否则两处范围会漂移）")
+	}
+	if !strings.Contains(src, ".map(function (e) { return e.id; })") {
+		t.Error("★ pickAll 必须把 catalog 条目映射成 id（catalog 现在是 {id,owner} 结构）")
+	}
+}
+
+// 分组页的上游规则必须与 API 管理页**同构**（用户指出过形态不一致）。
+//
+// 用户原话：「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享
+//            这个不是已经实现了么 按照上游筛选等等」
+//
+// API 管理页早就实现了 #akProvider + modelOwnerOf，我第一版却在分组页
+// 用按钮条重写了一遍。这条测试把两边钉在一起：
+//   · 上游推断都要「切第一个 / ，回退 owned_by」
+//   · 控件都是 <select> 下拉（不是按钮条）
+func TestGroupsUIMatchesAPIKeyPageProviderRule(t *testing.T) {
+	// API 管理页的规则（基准）。
+	console, err := os.ReadFile(filepath.Join("webui.html"))
+	if err != nil {
+		t.Fatalf("读 webui.html: %v", err)
+	}
+	if !strings.Contains(string(console), `id="akProvider"`) {
+		t.Fatal("基准变了：webui.html 里找不到 #akProvider")
+	}
+	// 分组页的规则（应当同构）。
+	ui := readGroupsUI(t)
+	if !strings.Contains(ui, `id="gProvider"`) {
+		t.Error("★ 分组页的上游筛选不是 <select> 下拉 —— 与 API 管理页形态不一致")
+	}
+	// 二者都必须有 owned_by 兜底。
+	for _, f := range []struct{ name, src string }{
+		{"API 管理页", string(console)},
+		{"分组页", ui},
+	} {
+		src := sliceFuncBody(t, f.src, "function modelOwnerOf(")
+		if src == "" {
+			src = sliceFuncBody(t, f.src, "function mpOwnerOf(")
+		}
+		if !strings.Contains(src, "ownedBy") {
+			t.Errorf("★ %s 的上游推断没有 owned_by 兜底（无前缀的模型会丢掉上游）", f.name)
+		}
 	}
 }

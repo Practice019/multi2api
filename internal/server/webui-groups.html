@@ -1197,115 +1197,100 @@ header h1{letter-spacing:0}
 #pane-keys td:last-child{min-width:200px;white-space:nowrap}
 /* ==== WB2API:MAXIMALISM:END ==== */
 
-/* 上游筛选条（model-picker.js 的 mpRenderProviderBar 用这些类） */
-.mp-provbar{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0 2px}
-.mp-chip{font-size:12px;padding:2px 9px;border-radius:10px;cursor:pointer;
-  border:1px solid var(--line,#bbb);background:transparent;color:inherit;
-  font-family:inherit;line-height:1.6}
-.mp-chip:hover{background:rgba(128,128,128,.18)}
-.mp-chip.mp-on{background:var(--acc,#fe0);border-color:var(--acc,#fe0);color:#000;font-weight:600}
-.mp-chip .mp-n{opacity:.65;font-size:11px;margin-left:2px}
 </style>
 </head>
 <body>
 <script>
 // ==== WB2API:MODEL-PICKER:START（由 tools/model_picker_sync.js 生成，勿手改）====
-// model-picker.js —— 模型候选选择器（分组页与渠道页共用）。
+// model-picker.js —— 模型候选选择器（分组页用；与 API 管理页同一套规则）。
 //
-// # 为什么要有这个文件（抽共享层）
+// # 这个文件解决什么
 //
-// 两个页面都要「从几百个模型里挑一部分」：
-//   · 分组页：挑出这个分组包含哪些模型
-//   · 渠道页：挑出这条渠道声明能服务哪些模型
-// 而候选项有 699 个、分属 15 个上游（实测），**不按上游筛就是没法用** ——
-// cline 一家就占 497 个，其余全被压在滚动区深处。
+// 分组页要从**全站目录**（实测 699 个模型、15 个上游，cline 一家占 497）里
+// 挑一部分。平分铺开等于大海捞针，所以必须「先选上游，再看它的模型」。
 //
-// 这段逻辑（切上游前缀 / 按上游过滤 / 面板渲染 / 勾选状态）两边各写一遍必然漂移：
-// 会长成「分组页能按上游筛、渠道页不能」这种无从解释的差异。所以抽到这里。
+// # ⚠ 这是一次「本该复用却重造」的教训，写在这里防复发
 //
-// # 为什么不做成 <script src> 外部文件
+// API 管理页**早就实现了**同样的东西（webui.html 的 #akProvider + modelOwnerOf
+// + renderAKModelList），而且注释里明确记着用户的原话：
 //
-// 前端语法门禁（tests/frontend/verify_inline_script_syntax.js）只扫**内联** <script>，
-// 且扫描清单取自 webui.go 的 //go:embed 行。做成外部 .js 会让这段代码
-// **静默逃过门禁** —— 门禁全绿，但根本没扫它。
+//   「我希望可以选择上游才能显示具体上游的模型，不要全部显示出来」
 //
-// 所以本文件是**源文件**，由 tools/model_picker_sync.js 注入到各页面的
-// <script> 里（与 theme-max.css 由 theme_sync.js 注入同一套手法）。
-// 改这里 → 跑同步脚本 → 各页面同时更新。
+// 我第一版在分组页用「一排 chip 按钮」重写了一遍 —— 形态与 API 页不一致
+// （那边是 <select> 下拉），而且**漏了 owned_by 兜底**。用户一眼看出不对：
+//
+//   「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享」
+//
+// 所以现在这份共享层是**照 API 页的规则复刻**的：
+//   · 上游取自 modelOwnerOf（切第一个 / ，回退 owned_by）
+//   · 控件形态是 <select> 下拉（与 API 页视觉一致）
+// 以后新增页面要选模型，直接用这里，不要再写第三遍。
 
-// 从模型名取上游：'cline/openai/gpt-5' → 'cline'。
+// mpOwnerOf 推断一个模型属于哪个上游。
 //
-// ⚠ 只切**第一个**斜杠。模型名本身可能还有斜杠（cline 的一堆都是
-// 'cline/anthropic/claude-sonnet-5.5' 这种），按最后一个切会得到 'anthropic'
-// —— 那是个模型厂牌不是我们的上游，筛出来对不上渠道配置。
-function mpProviderOf(model) {
-  var i = model.indexOf('/');
-  return i < 0 ? '' : model.slice(0, i);
+// 与 webui.html 的 modelOwnerOf **逐字同构**（含 owned_by 兜底）。
+//
+// 为什么优先切 id 而不是只用 owned_by：id 的前缀是**我们的**上游 id
+//（与 channels.json 的 name / 注册表 id 对齐），而 owned_by 是上游自己
+// 报的厂商名（可能是 'openai'、'system' 这种），未必是我们的上游。
+// 只有 id 里没有前缀时（单上游部署会这样）才退回 owned_by。
+function mpOwnerOf(id, ownedBy) {
+  var s = String(id || '').indexOf('/');
+  return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
 }
 
-// 把模型列表按上游归组，按数量降序（常用的上游排在前面）。
+// mpOwners 从目录里取出所有上游 id（去重、字典序）。
 //
-// 返回 [{provider, models}]，provider 为 '' 的那组是「没有上游前缀」的模型
-// （单上游部署、或上游 id 为空时会这样）—— 它**必须**单独成组，
-// 否则那些模型会从筛选面板里彻底消失。
-function mpGroupByProvider(models) {
-  var byProv = Object.create(null);
-  for (var i = 0; i < models.length; i++) {
-    var m = models[i];
-    var p = mpProviderOf(m);
-    (byProv[p] || (byProv[p] = [])).push(m);
-  }
+// 字典序而不是按数量：下拉框的顺序要稳定 —— 按数量排会让「用了几天之后
+// 某个上游涨上去了，位置突然变了」，用户按记忆点第二项会点错。
+function mpOwners(catalog) {
+  var seen = Object.create(null);
   var out = [];
-  for (var k in byProv) { out.push({ provider: k, models: byProv[k] }); }
-  out.sort(function (a, b) {
-    // 无前缀的那组排最后：它不是「一个上游」，视觉上单独放更好认。
-    if (a.provider === '') { return 1; }
-    if (b.provider === '') { return -1; }
-    return b.models.length - a.models.length;
-  });
+  for (var i = 0; i < catalog.length; i++) {
+    var o = mpOwnerOf(catalog[i].id, catalog[i].owner);
+    if (o && !seen[o]) { seen[o] = 1; out.push(o); }
+  }
+  out.sort();
   return out;
 }
 
-// 按上游 + 关键字过滤。
+// mpFilter 按「上游 + 关键字」过滤目录条目（条目形如 {id, owner}）。
 //
-// provider 为空串表示「全部上游」；关键字只比模型名（含上游前缀，
-// 这样输 'cline/' 也能筛）。
-function mpFilter(models, provider, query) {
+// provider 为空串 = 全部上游。
+//
+// ⚠ 上游筛选只决定**列出什么**，绝不改已勾选的 id ——
+// 否则「切一下上游」就等于「把之前选的都取消」，用户会莫名其妙丢配置。
+function mpFilter(catalog, provider, query) {
   var q = (query || '').trim().toLowerCase();
-  return models.filter(function (m) {
-    if (provider && mpProviderOf(m) !== provider) { return false; }
-    if (q && m.toLowerCase().indexOf(q) < 0) { return false; }
+  return catalog.filter(function (m) {
+    if (provider && mpOwnerOf(m.id, m.owner) !== provider) { return false; }
+    if (q && m.id.toLowerCase().indexOf(q) < 0) { return false; }
     return true;
   });
 }
 
-// 渲染上游筛选条：每个上游一个按钮 + 数量。
+// mpFillProviderSelect 用当前目录填充上游下拉。
 //
-// onPick(provider) 由调用方处理 —— 本函数只管画，不管状态。
-// 空 provider 表示「全部」。
-function mpRenderProviderBar(host, groups, active, totalAll, onPick) {
-  if (!host) { return; }
-  var items = [{ provider: '', label: '全部', count: totalAll }];
-  for (var i = 0; i < groups.length; i++) {
-    var g = groups[i];
-    items.push({
-      provider: g.provider,
-      label: g.provider === '' ? '（无前缀）' : g.provider,
-      count: g.models.length
-    });
+// ⚠ 恢复选中值必须写在 innerHTML **之后**：
+// <select> 会把「不在 option 列表里的值」当场归一成空串，先设值会被清掉。
+// （webui.html 的 syncAKProviders 里记着同一个坑。）
+function mpFillProviderSelect(sel, catalog, allLabel) {
+  if (!sel) { return; }
+  var keep = sel.value;
+  var owners = mpOwners(catalog);
+  var html = '<option value="">' + (allLabel || '全部上游') + '</option>';
+  for (var i = 0; i < owners.length; i++) {
+    html += '<option value="' + mpHtmlEsc(owners[i]) + '">' + mpHtmlEsc(owners[i]) + '</option>';
   }
-  host.innerHTML = items.map(function (it) {
-    var on = (it.provider === active) ? ' mp-on' : '';
-    return '<button type="button" class="mp-chip' + on + '" data-p="' + it.provider + '">'
-      + it.label + ' <span class="mp-n">' + it.count + '</span></button>';
-  }).join('');
-  // 事件委托：筛选条会整块重渲染，逐个绑监听会在重渲染后失效。
-  host.onclick = function (ev) {
-    var el = ev.target;
-    while (el && el !== host && !el.getAttribute('data-p')) { el = el.parentNode; }
-    if (!el || el === host) { return; }
-    onPick(el.getAttribute('data-p') || '');
-  };
+  sel.innerHTML = html;
+  sel.value = owners.indexOf(keep) >= 0 ? keep : '';
+}
+
+// mpHtmlEsc 最小 HTML 转义（上游 id 理论上是 slugs，但不该赌它）。
+function mpHtmlEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 // ==== WB2API:MODEL-PICKER:END ====
 </script>
@@ -1366,9 +1351,15 @@ function mpRenderProviderBar(host, groups, active, totalAll, onPick) {
       <button type="button" onclick="pickAll(true)" style="white-space:nowrap">全选当前</button>
       <button type="button" onclick="pickAll(false)" style="white-space:nowrap">清空</button>
     </div>
-    <!-- 上游筛选条：699 个模型分属 15 个上游，不筛就是没法用（cline 一家占 497）。
-     由 mpRenderProviderBar 渲染（共享组件，见 injection 块里的 model-picker.js）。 -->
-<div id="gProvBar" class="full mp-provbar"></div>
+    
+<!-- 上游筛选（与 API 管理页的 #akProvider 同一形态：<select> 下拉，不是按钮条）。
+     ⚠ 只决定"下面列出什么"，不改已选中的模型。 -->
+<div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+<select id="gProvider" style="min-width:150px" title="先选上游，只列出它的模型（不改已选中的模型）" onchange="renderChoices()">
+<option value="">全部上游</option>
+</select>
+<span class="muted" style="font-size:11px" id="gProvHint"></span>
+</div>
 
 <input id="f-manual" class="full" placeholder="也可以直接粘：逗号或换行分隔的内部模型名（回车/失焦后并入已选）" onchange="mergeManual()">
 
@@ -1401,8 +1392,8 @@ let editing = null;     // 正在编辑的分组 id（null = 新增）
 let catalog = [];       // 候选模型（内部名，来自 /v1/models）
 let catalogOK = false;  // 目录是否真的取到了（false ⇒ 不能把"没拉到"当成"没有模型"）
 let catalogIncomplete = [];
-let provActive = '';        // 当前筛选的上游（'' = 全部）
-let provGroups = [];        // 按上游归组后的候选（由 model-picker.js 计算）  // 本次没查成的来源（上游 id），只用于如实提示
+// catalog 的条目形如 {id, owner}（owner 来自 /admin/groups/catalog 的 owned_by，可能为空）。
+// 上游推断走共享的 mpOwnerOf（与 API 管理页同一规则）。  // 本次没查成的来源（上游 id），只用于如实提示
 let picked = new Set(); // 已勾选的模型
 
 function $(id) { return document.getElementById(id); }
@@ -1527,11 +1518,20 @@ async function ensureCatalog() {
     // /admin/groups/catalog 与「一致性检查」共用同一份快照 —— 两处若用不同来源，
     // 会出现「编辑器里选得到 / 检查说它陈旧」这种自相矛盾。
     const r = await api('/admin/groups/catalog');
-    catalog = ((r && r.models) || []).slice().sort();
+    // 优先用 entries（带 owner），退回 models（纯名字，owner 留空由前端切前缀）。
+    // ⚠ owner 的作用是「模型名没有上游前缀时」的兜底（单上游部署会这样）。
+    // 与 API 管理页的 modelOwnerOf(id, ownedBy) 同一口径。
+    var src = (r && r.entries && r.entries.length) ? r.entries
+      : ((r && r.models) || []).map(function (m) {
+          return (typeof m === 'string') ? { id: m, owner: '' } : { id: String(m.id || ''), owner: String(m.owner || '') };
+        });
+    catalog = src.map(function (m) {
+      return { id: String(m.id || ''), owner: String(m.owner || '') };
+    }).filter(function (m) { return m.id; }).sort(function (a, b) { return a.id.localeCompare(b.id); });
     catalogIncomplete = (r && r.incomplete) || [];
     catalogOK = true;
-    provGroups = mpGroupByProvider(catalog);
-    renderProvBar();
+    // 填充上游下拉（与 API 管理页同一个共享函数）。
+    mpFillProviderSelect($('gProvider'), catalog, '全部上游');
     if (!catalog.length) {
       // 目录一份都没拿到：明说"未就绪"，不能显示成"这个网关没有模型"。
       $('gChoices').innerHTML = '<span class="err" style="font-size:12px">'
@@ -1547,23 +1547,6 @@ async function ensureCatalog() {
   }
 }
 
-// renderProvBar 画上游筛选条。
-//
-// 为什么单独一个函数：筛选条在打开弹窗、目录加载完成、点某个上游时都要重画，
-// 而重画时机与"候选列表重画"不完全一致（点上游会同时重画两者）。
-function renderProvBar() {
-  if (!provGroups.length) {
-    $('gProvBar').innerHTML = '';
-    return;
-  }
-  mpRenderProviderBar($('gProvBar'), provGroups, provActive, catalog.length, function (p) {
-    // 再点一次同一个上游 = 回到全部（省一个"清除筛选"按钮）。
-    provActive = (provActive === p) ? '' : p;
-    renderProvBar();
-    renderChoices();
-  });
-}
-
 function renderChoices() {
   const host = $('gChoices');
   const hint = $('gChoicesHint');
@@ -1572,8 +1555,9 @@ function renderChoices() {
     return;
   }
   const q = ($('f-search').value || '').trim();
-  // 上游 + 关键字两级过滤，逻辑在共享组件里（渠道页用同一份）。
-  const shown = mpFilter(catalog, provActive, q);
+  // 上游 + 关键字两级过滤，规则与 API 管理页同一份（共享组件 mpFilter）。
+  const prov = ($('gProvider') && $('gProvider').value) || '';
+  const shown = mpFilter(catalog, prov, q);
   if (!catalog.length) {
     host.innerHTML = '<span class="muted" style="font-size:12px">目录里没有任何模型。' +
       '（这通常意味着还没有可用渠道或上游目录没拉到。）</span>';
@@ -1581,8 +1565,9 @@ function renderChoices() {
     return;
   }
   if (!shown.length) {
+    const prov2 = ($('gProvider') && $('gProvider').value) || '';
     const scope = [];
-    if (provActive) { scope.push('上游 ' + esc(provActive)); }
+    if (prov2) { scope.push('上游 ' + esc(prov2)); }
     if (q) { scope.push('关键字「' + esc(q) + '」'); }
     host.innerHTML = '<span class="muted" style="font-size:12px">没有匹配 '
       + (scope.length ? scope.join(' + ') : '条件') + ' 的模型。</span>';
@@ -1599,7 +1584,8 @@ function renderChoices() {
   const incom = (typeof catalogIncomplete !== 'undefined' && catalogIncomplete && catalogIncomplete.length)
     ? '；未检查的来源：' + catalogIncomplete.join('、')
     : '';
-  const prefix = provActive ? ('上游 ' + provActive + '：' + shown.length + ' 个')
+  const prov3 = ($('gProvider') && $('gProvider').value) || '';
+  const prefix = prov3 ? ('上游 ' + prov3 + '：' + shown.length + ' 个')
     : ('目录 ' + catalog.length + ' 个模型' + (q ? '，筛出 ' + shown.length + ' 个' : ''));
   hint.textContent = prefix + incom;
 }
@@ -1616,10 +1602,11 @@ function pickOne(cb) {
 function pickAll(on) {
   // ⚠ 范围必须与 renderChoices 完全一致（含上游筛选）。
   //
-  // 若这里漏掉 provActive，"全选当前"会把**所有上游**的同名匹配都选上，
+  // 若这里漏掉上游筛选，"全选当前"会把**所有上游**的同名匹配都选上，
   // 而用户看到的是"只筛了 cline"—— 于是他会选进几百个自己没看见的模型。
   const q = ($('f-search').value || '').trim();
-  const scope = mpFilter(catalog, provActive, q);
+  const prov = ($('gProvider') && $('gProvider').value) || '';
+  const scope = mpFilter(catalog, prov, q).map(function (e) { return e.id; });
   scope.forEach(function (m) {
     if (on) { picked.add(m); } else { picked.delete(m); }
   });

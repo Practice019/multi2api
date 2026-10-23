@@ -1524,7 +1524,11 @@ func main() {
 				return admin.ModelCatalogSnapshot{}
 			}
 			snap := modelNamesFn()
-			return admin.ModelCatalogSnapshot{Names: snap.Names, Unavailable: snap.Unavailable}
+			entries := make([]admin.ModelCatalogEntry, 0, len(snap.Entries))
+			for _, e := range snap.Entries {
+				entries = append(entries, admin.ModelCatalogEntry{ID: e.ID, Owner: e.Owner})
+			}
+			return admin.ModelCatalogSnapshot{Names: snap.Names, Unavailable: snap.Unavailable, Entries: entries}
 		},
 		// 同一份工厂也交给管理台：「模型自动发现」要用它问上游有哪些模型。
 		// 类型取自 gateway 契约（不是具体上游）——见 admin.go 里那段该用 gateway 扩展点的注释。

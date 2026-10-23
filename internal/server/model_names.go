@@ -35,6 +35,23 @@ type ModelNameSnapshot struct {
 	// ⚠ 非空只说明「这份快照不完整」，**不能**据此判定某个模型已下线 ——
 	// 那个模型可能恰好来自没查成的那个来源。
 	Unavailable []string
+
+	// Entries 模型名 + 它的上游（owner）。
+	//
+	// # 为什么除了 Names 还要这个
+	//
+	// 前端要「先选上游，再看模型」。绝大多数情况下模型名自带前缀
+	// （"cline/xxx"），切第一个斜杠就得到上游；但**不能赌**这一点 ——
+	// 单上游部署、或上游 id 为空时模型名没有前缀，那时只能靠 owner。
+	// 这与 webui.html 的 modelOwnerOf(id, ownedBy) 同一口径：
+	// 有前缀用前缀，没有才回退 owned_by。
+	Entries []ModelNameEntry
+}
+
+// ModelNameEntry 目录里的一条：模型名 + 它来自哪个上游。
+type ModelNameEntry struct {
+	ID    string
+	Owner string
 }
 
 // CachedModelNames 返回当前缓存里的模型目录（内部名）。
@@ -57,22 +74,23 @@ func (h *Handler) CachedModelNamesSnapshot() ModelNameSnapshot {
 	def := h.defaultProvider()
 
 	seen := make(map[string]bool, 1024)
-	add := func(name string) {
+	add := func(name, owner string) {
 		if name == "" || seen[name] {
 			return
 		}
 		seen[name] = true
 		snap.Names = append(snap.Names, name)
+		snap.Entries = append(snap.Entries, ModelNameEntry{ID: name, Owner: owner})
 	}
 
 	// ① 默认上游（含对话模型）。与 /v1/models 一致：有前缀就带前缀。
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
 		for _, mi := range infos {
 			if def == "" {
-				add(mi.ID)
+				add(mi.ID, def)
 				continue
 			}
-			add(def + "/" + mi.ID)
+			add(def+"/"+mi.ID, def)
 		}
 	} else {
 		snap.Unavailable = append(snap.Unavailable, def)
@@ -86,7 +104,7 @@ func (h *Handler) CachedModelNamesSnapshot() ModelNameSnapshot {
 			continue
 		}
 		for _, mi := range cached {
-			add(id + "/" + mi.ID)
+			add(id+"/"+mi.ID, id)
 		}
 	}
 
@@ -102,8 +120,9 @@ func (h *Handler) CachedModelNamesSnapshot() ModelNameSnapshot {
 	// allowedModelsForRequest 对 nil request 会安全返回不受限（见它的实现）。
 	if h.cfg.Channels != nil {
 		names, _ := h.channelPublicNames(nil)
+		// 渠道模型：owner 用渠道名（它是「这类模型由谁提供」的答案）。
 		for _, n := range names {
-			add(n)
+			add(n, "")
 		}
 	}
 

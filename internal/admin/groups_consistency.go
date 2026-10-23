@@ -97,6 +97,17 @@ type catalogFunc func() ModelCatalogSnapshot
 type ModelCatalogSnapshot struct {
 	Names       []string
 	Unavailable []string
+	// Entries 模型名 + 上游（供编辑器的「先选上游」下拉）。
+	//
+	// 与 Names 冗余是刻意的：Names 给一致性检查做集合比对（快），
+	// Entries 给界面拿 owner（慢一点但信息全）。两者由装配层一次投影同时填。
+	Entries []ModelCatalogEntry
+}
+
+// ModelCatalogEntry 目录里的一条：模型名 + 它来自哪个上游。
+type ModelCatalogEntry struct {
+	ID    string `json:"id"`
+	Owner string `json:"owner"`
 }
 
 // buildGroupConsistency 算一致性报告（只读：不改任何存储）。

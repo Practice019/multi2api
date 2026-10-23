@@ -42,12 +42,21 @@ func (h *Handler) groupCatalog(w http.ResponseWriter, r *http.Request) {
 	if models == nil {
 		models = []string{}
 	}
+	entries := snap.Entries
+	if entries == nil {
+		// 老装配层没填 Entries 时，按 Name 兜底（owner 留空，前端会切前缀）。
+		entries = make([]ModelCatalogEntry, 0, len(models))
+		for _, n := range models {
+			entries = append(entries, ModelCatalogEntry{ID: n})
+		}
+	}
 	inc := snap.Unavailable
 	if inc == nil {
 		inc = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"models":     models,
+		"entries":    entries,
 		"incomplete": inc,
 		"ready":      len(models) > 0,
 	})
