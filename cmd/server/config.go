@@ -2,6 +2,7 @@
 package main
 
 import (
+	"workbuddy2api/internal/timeouts"
 	"fmt"
 	"log"
 	"os"
@@ -84,6 +85,13 @@ type Config struct {
 	//
 	// nil = 不隐藏，行为与改造前逐字节一致（向后兼容）。
 	ProviderAlias map[string]string `json:"provider_alias"`
+
+	// Timeouts 出站超时集中配置（internal/timeouts）。
+	//
+	// 空结构体 = 全部走默认值（relay 0=不限 / streaming 300s / idle 90s /
+	// response_header 0）。字段用 *int：必须能区分「没写」与「写了 0」
+	// —— 前者取默认，后者明确表示不限。用 int 两者都是 0，只能二选一。
+	Timeouts timeouts.Config `json:"timeouts"`
 
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json

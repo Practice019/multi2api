@@ -66,6 +66,50 @@ func runPoolHealthCheck(ctx context.Context, p *pool.Pool, reg *gateway.Registry
 	if okN > 0 || failN > 0 {
 		log.Printf("pool: 健康检查完成 —— 提前恢复 %d，仍不可用 %d", okN, failN)
 	}
+
+	// ── 第二段：自动禁用账号的恢复探测 ──
+	//
+	// # 为什么必须有这一段
+	//
+	// 自动禁用把号从候选集摘掉，而解除禁用依赖「这个号请求成功一次」——
+	// 它已经选不中了，所以**永远不会有那一次成功**。这是自动禁用机制的
+	// 经典死锁（new-api 靠定期 channel test 打破它）。
+	//
+	// 探测成功调 RecordAutoDisableSuccess：清连败计数并解除**本机制置的**禁用
+	//（人工禁用的号用 owned 标记排除，不会被探测翻案）。
+	autoCands := p.AutoDisabledRecoverables(healthCheckMinAge)
+	if len(autoCands) > 0 {
+		autoOK, autoFail := 0, 0
+		for _, c := range autoCands {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			pv, ok := reg.Get(c.Provider)
+			if !ok {
+				continue
+			}
+			hp, ok := gateway.ExtOf[gateway.HealthProbeExt](pv)
+			if !ok {
+				continue
+			}
+			cred, ok := registryCredential(p, reg, c.Provider, c.UID)
+			if !ok {
+				continue
+			}
+			if err := hp.ProbeHealth(ctx, cred); err != nil {
+				autoFail++
+				continue
+			}
+			if p.RecordAutoDisableSuccess(c.UID) {
+				log.Printf("pool: 健康检查通过，解除自动禁用 uid=%s provider=%s（原原因：%s）",
+					c.UID, c.Provider, c.Reason)
+				autoOK++
+			}
+		}
+		if autoOK > 0 || autoFail > 0 {
+			log.Printf("pool: 自动禁用恢复检查完成 —— 解除 %d，仍不可用 %d", autoOK, autoFail)
+		}
+	}
 	return nil
 }
 
