@@ -55,6 +55,7 @@ SPEC.md
 docs/*
 !docs/loomy-local-toolchain.md
 !docs/image-generation.md
+!docs/channel-token-design.md
 !docs/chat-tools.md
 !docs/cache-refresh-design.md
 
