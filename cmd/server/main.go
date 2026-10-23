@@ -29,6 +29,7 @@ import (
 	"workbuddy2api/internal/cline"
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/groupstore"
 	"workbuddy2api/internal/lobsterai"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/loomy"
@@ -1323,6 +1324,16 @@ func main() {
 		log.Fatalf("load channels (%s): %v", channelsPath, err)
 	}
 
+	// 分组存储（PLAN-groups.md P1）。
+	//
+	// 路径与 channels.json 同一惯例：auths/ 下（那是"配置"的目录，data/ 是"运行态"）。
+	// 分组是配置，重启后必须还在，且**损坏必须显式报错** —— 静默重建等于
+	// 把用户辛苦分的组全部清空（与 channels.json 同一条纪律）。
+	groupsStore, err := groupstore.New(filepath.Join(authsRoot, "groups.json"))
+	if err != nil {
+		log.Fatalf("load groups: %v", err)
+	}
+
 	// 控制台账号体系（抄 new-api 的登录系统）：账号库 + 会话库 + 登录端点。
 	//
 	// 路径与 apikeys.json 同一惯例（data/ 下、CWD 相对、不进配置）。
@@ -1431,6 +1442,7 @@ func main() {
 		AuthDir:  cfg.AuthDir,
 		APIKeys:  apiKeysStore,  // /admin/apikeys 管理端点
 		Channels: channelsStore, // /admin/channels 管理端点（同样「未注入就不注册路由」）
+		Groups:   groupsStore,   // /admin/groups 管理端点（分组：这把 key 能用哪些模型）
 		// 同一份工厂也交给管理台：「模型自动发现」要用它问上游有哪些模型。
 		// 类型取自 gateway 契约（不是具体上游）——见 admin.go 里那段该用 gateway 扩展点的注释。
 		ChannelProvider: func(id, baseURL string) gateway.Provider {

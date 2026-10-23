@@ -251,6 +251,9 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		//                   零第三方依赖，不实现 gateway.Provider。
 		//                   加它时这条守卫**确实红了** —— 正是它的作用：新目录必须显式归类。
 		"timeouts": true,
+		//   groupstore  —— 分组存储（PLAN-groups.md）：分组是「这把 key 能用哪些模型」
+		//                   的独立实体。纯存储包，不实现 gateway.Provider。
+		"groupstore": true,
 		//   channelroute —— 请求侧规划：公开名 → 该渠道的上游名（R2 请求侧）。它是查表+排序的纯逻辑，
 		//                   也不实现 gateway.Provider（真正连上游的仍是 Provider）。
 		"channelroute": true,

@@ -29,6 +29,7 @@
 package admin
 
 import (
+	"workbuddy2api/internal/groupstore"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -188,6 +189,13 @@ type Config struct {
 	// Channels 渠道存储（中转站方向：能力索引 + 每渠道模型映射）。
 	// nil = 不注册 /admin/channels 路由（未启用该功能，与 APIKeys 同一条判据）。
 	Channels *channelstore.Store
+
+	// Groups 分组存储（PLAN-groups.md P1）。nil = 未启用分组功能。
+	//
+	// 分组是**独立实体**（计划 Q1）：它持有「这个分组包含哪些模型」，
+	// 供 ApiKey 引用。与 Channels 的区别：渠道回答「谁提供这个模型」，
+	// 分组回答「这把 key 能用哪些模型」。
+	Groups *groupstore.Store
 	// APIKey 管理钥匙（config.api_key 原值）：/admin/apikeys 返回它的掩码，
 	// 让管理页与仪表盘「API 接入信息」显示同一把钥匙（一个事实来源）。
 	// 空 = 未配置管理钥匙。
@@ -496,6 +504,14 @@ func New(cfg Config) *Handler {
 	// 而前端按 manifest 只会觉得"这个功能不存在"，完全没有报错线索）。
 	if h.cfg.Channels != nil {
 		h.registerChannels()
+	}
+
+	// 分组管理（PLAN-groups.md P1）。同样是**独立判据**：没配分组存储就不注册。
+	//
+	// 为什么与渠道分开：分组是「这把 key 能用哪些模型」，渠道是「谁提供这个模型」，
+	// 两件事可以单独启用。挂在一起会让「只有分组、没有渠道」的部署 404。
+	if h.cfg.Groups != nil {
+		h.registerGroups()
 	}
 
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
