@@ -160,12 +160,13 @@ func (h *Handler) groupsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	// *[]string → []string 的转换：nil 指针保持 nil（= 不改），
 	// 非 nil 指针即使指向空切片也照样传出（= 清空）。
+	//
+	// ⚠ JSON 里写 "models": null 与**不写**等价（encoding/json 把 null 解到指针
+	// 就是置 nil），所以"清空"必须写 []。这条不写清楚，前端会以为 null 能清空，
+	// 提交后界面提示成功、模型却还在。
 	var models []string
 	if req.Models != nil {
 		models = *req.Models
-		if models == nil {
-			models = []string{} // JSON 里的 null 也当成"清空"，与 [] 同义
-		}
 	}
 	g, err := s.Update(req.ID, req.Name, req.Description, models)
 	if err != nil {
