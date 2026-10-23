@@ -106,6 +106,34 @@ func modelsForProviderCached(id string, fetch func() ([]gateway.ModelInfo, bool)
 }
 
 // storeProviderModels 写入缓存（拷贝一层切片，避免调用方后续改动影响缓存）。
+// peekProviderModelsCached 只读缓存，**绝不**发起上游请求。
+//
+// # 与 modelsForProviderCached 的区别
+//
+// 后者是给请求路径用的：缓存过期就拉、有旧目录就先给旧的、单飞刷新。
+// 本函数是给**管理台轮询**用的：目录没预热就返回 ok=false，让调用方
+// 自己决定「这次先不说」。
+//
+// # 为什么必须有它
+//
+// 分组一致性检查要判断「分组里的模型还在不在目录里」。若用带拉取的版本：
+//   · 页面每轮询一次就可能打一次上游（消耗账号配额）
+//   · 上游抖动时检查端点跟着变慢/失败
+// 而用它的后果更糟：一旦「拿不到目录」被当成「目录为空」，
+// 检查会把分组里**全部**模型报成陈旧，建议用户清空分组。
+//
+// 返回值第二项 ok 的语义是「这个上游的目录缓存已就绪」。
+// 未就绪时调用方**应当放弃整个结果**，而不是把它当成空集合。
+func peekProviderModelsCached(id string) ([]gateway.ModelInfo, bool) {
+	providerModelsCache.RLock()
+	defer providerModelsCache.RUnlock()
+	e, ok := providerModelsCache.entries[id]
+	if !ok || len(e.infos) == 0 {
+		return nil, false
+	}
+	return e.infos, true
+}
+
 func storeProviderModels(id string, infos []gateway.ModelInfo) {
 	cp := make([]gateway.ModelInfo, len(infos))
 	copy(cp, infos)

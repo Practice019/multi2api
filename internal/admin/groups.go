@@ -48,7 +48,7 @@ func (h *Handler) groupsStore() *groupstore.Store { return h.cfg.Groups }
 // TODO(接线，由主脑完成)：
 //
 //	admin.Config 加一个字段：ModelNames func() []string
-//	本函数体改成：return catalogFunc(h.cfg.ModelNames)
+//	本函数体改成：return catalogFunc(catalogFunc(h.cfg.ModelNames))
 //	cmd/server/main.go 注入一个取当前目录的函数（内部名，含上游 + 渠道并集）。
 //
 // 未接线时返回 nil ⇒ 一致性报告里 StaleCheckable=false（前端据此显示

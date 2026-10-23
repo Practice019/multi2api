@@ -124,6 +124,14 @@ func (h *Handler) allowedModelsForRequest(r *http.Request) ([]string, bool) {
 	if h.cfg.APIKeys == nil {
 		return nil, false
 	}
+	// ⚠ nil request = 「问全量目录」，不是「某个调用方」。
+	//
+	// 管理台的一致性检查要拿「所有渠道能对外提供哪些模型名」，它与任何
+	// 具体的 key 无关。调用方传 nil 表达这件事。若在这里 r.Context() 直接
+	// 解引用会 panic —— 而那是从管理台点一下按钮就触发的崩溃。
+	if r == nil {
+		return nil, false
+	}
 	kid, _ := r.Context().Value(apikeyCtxKey).(string)
 	if kid == "" {
 		// 没命中普通 key ⇒ 是管理钥匙（或未启用鉴权）⇒ 不限制。

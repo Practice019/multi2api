@@ -209,7 +209,7 @@ type Config struct {
 	//
 	// ⚠ 未接线时**不能**退化成"空目录"：空目录会让每一分组里的每个模型都被判成陈旧。
 	// 所以 nil 与"返回空切片"必须分开 —— 前者是"没查"，后者是"查了，什么都没有"。
-	ModelNames func() []string
+	ModelNames func() ModelCatalogSnapshot
 	// APIKey 管理钥匙（config.api_key 原值）：/admin/apikeys 返回它的掩码，
 	// 让管理页与仪表盘「API 接入信息」显示同一把钥匙（一个事实来源）。
 	// 空 = 未配置管理钥匙。

@@ -35,7 +35,27 @@ import (
 //
 // owner 只做去空白，不校验格式：账号 ID 的合法性由 account 包负责，这里再判
 // 一次只会多出第二份可能分叉的判据。
+// CreateOwned 建一把归属于 owner 的 key。
 func (s *Store) CreateOwned(owner, name string, limit int64, rpm int, models []string, modelMap ...map[string]string) (*Key, error) {
+	return s.CreateOwnedWithGroups(owner, name, limit, rpm, models, nil, modelMap...)
+}
+
+// CreateOwnedWithGroups 与 CreateOwned 相同，但可以同时指定分组。
+//
+// # 为什么要单独一个名字而不是给 CreateOwned 加参数
+//
+// CreateOwned 的 modelMap 是变参（三态表达），后面无法再加一个 []string 位置参数。
+// 改成三个变参会让调用点自己都说不清传的是哪个。所以显式分开，老调用点一行不用改。
+//
+// # groups 的语义
+//
+//	nil / 空  → 不限制（与改造前一致）
+//	非空      → 这把 key 只能用这些分组里的模型
+//
+// ⚠ 这里**不校验**分组 ID 是否存在 —— apikey 层不依赖 groupstore（分层要求）。
+// 传了不存在的 ID 的后果是「该分组不贡献模型」，而 P2 的判定链对
+// 「受限且并集为空」是**拒绝**（安全方向），不是放开。
+func (s *Store) CreateOwnedWithGroups(owner, name string, limit int64, rpm int, models, groups []string, modelMap ...map[string]string) (*Key, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("名称不能为空")
@@ -54,6 +74,7 @@ func (s *Store) CreateOwned(owner, name string, limit int64, rpm int, models []s
 		RPM:       rpm,
 		OwnerID:   owner,
 		Models:    normalizeModels(models),
+		Groups:    normalizeGroups(groups),
 		ModelMap:  firstModelMap(modelMap...),
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
