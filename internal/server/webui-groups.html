@@ -1196,9 +1196,119 @@ header h1{letter-spacing:0}
 #pane-ch td:last-child,
 #pane-keys td:last-child{min-width:200px;white-space:nowrap}
 /* ==== WB2API:MAXIMALISM:END ==== */
+
+/* 上游筛选条（model-picker.js 的 mpRenderProviderBar 用这些类） */
+.mp-provbar{display:flex;flex-wrap:wrap;gap:5px;margin:6px 0 2px}
+.mp-chip{font-size:12px;padding:2px 9px;border-radius:10px;cursor:pointer;
+  border:1px solid var(--line,#bbb);background:transparent;color:inherit;
+  font-family:inherit;line-height:1.6}
+.mp-chip:hover{background:rgba(128,128,128,.18)}
+.mp-chip.mp-on{background:var(--acc,#fe0);border-color:var(--acc,#fe0);color:#000;font-weight:600}
+.mp-chip .mp-n{opacity:.65;font-size:11px;margin-left:2px}
 </style>
 </head>
 <body>
+<script>
+// ==== WB2API:MODEL-PICKER:START（由 tools/model_picker_sync.js 生成，勿手改）====
+// model-picker.js —— 模型候选选择器（分组页与渠道页共用）。
+//
+// # 为什么要有这个文件（抽共享层）
+//
+// 两个页面都要「从几百个模型里挑一部分」：
+//   · 分组页：挑出这个分组包含哪些模型
+//   · 渠道页：挑出这条渠道声明能服务哪些模型
+// 而候选项有 699 个、分属 15 个上游（实测），**不按上游筛就是没法用** ——
+// cline 一家就占 497 个，其余全被压在滚动区深处。
+//
+// 这段逻辑（切上游前缀 / 按上游过滤 / 面板渲染 / 勾选状态）两边各写一遍必然漂移：
+// 会长成「分组页能按上游筛、渠道页不能」这种无从解释的差异。所以抽到这里。
+//
+// # 为什么不做成 <script src> 外部文件
+//
+// 前端语法门禁（tests/frontend/verify_inline_script_syntax.js）只扫**内联** <script>，
+// 且扫描清单取自 webui.go 的 //go:embed 行。做成外部 .js 会让这段代码
+// **静默逃过门禁** —— 门禁全绿，但根本没扫它。
+//
+// 所以本文件是**源文件**，由 tools/model_picker_sync.js 注入到各页面的
+// <script> 里（与 theme-max.css 由 theme_sync.js 注入同一套手法）。
+// 改这里 → 跑同步脚本 → 各页面同时更新。
+
+// 从模型名取上游：'cline/openai/gpt-5' → 'cline'。
+//
+// ⚠ 只切**第一个**斜杠。模型名本身可能还有斜杠（cline 的一堆都是
+// 'cline/anthropic/claude-sonnet-5.5' 这种），按最后一个切会得到 'anthropic'
+// —— 那是个模型厂牌不是我们的上游，筛出来对不上渠道配置。
+function mpProviderOf(model) {
+  var i = model.indexOf('/');
+  return i < 0 ? '' : model.slice(0, i);
+}
+
+// 把模型列表按上游归组，按数量降序（常用的上游排在前面）。
+//
+// 返回 [{provider, models}]，provider 为 '' 的那组是「没有上游前缀」的模型
+// （单上游部署、或上游 id 为空时会这样）—— 它**必须**单独成组，
+// 否则那些模型会从筛选面板里彻底消失。
+function mpGroupByProvider(models) {
+  var byProv = Object.create(null);
+  for (var i = 0; i < models.length; i++) {
+    var m = models[i];
+    var p = mpProviderOf(m);
+    (byProv[p] || (byProv[p] = [])).push(m);
+  }
+  var out = [];
+  for (var k in byProv) { out.push({ provider: k, models: byProv[k] }); }
+  out.sort(function (a, b) {
+    // 无前缀的那组排最后：它不是「一个上游」，视觉上单独放更好认。
+    if (a.provider === '') { return 1; }
+    if (b.provider === '') { return -1; }
+    return b.models.length - a.models.length;
+  });
+  return out;
+}
+
+// 按上游 + 关键字过滤。
+//
+// provider 为空串表示「全部上游」；关键字只比模型名（含上游前缀，
+// 这样输 'cline/' 也能筛）。
+function mpFilter(models, provider, query) {
+  var q = (query || '').trim().toLowerCase();
+  return models.filter(function (m) {
+    if (provider && mpProviderOf(m) !== provider) { return false; }
+    if (q && m.toLowerCase().indexOf(q) < 0) { return false; }
+    return true;
+  });
+}
+
+// 渲染上游筛选条：每个上游一个按钮 + 数量。
+//
+// onPick(provider) 由调用方处理 —— 本函数只管画，不管状态。
+// 空 provider 表示「全部」。
+function mpRenderProviderBar(host, groups, active, totalAll, onPick) {
+  if (!host) { return; }
+  var items = [{ provider: '', label: '全部', count: totalAll }];
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i];
+    items.push({
+      provider: g.provider,
+      label: g.provider === '' ? '（无前缀）' : g.provider,
+      count: g.models.length
+    });
+  }
+  host.innerHTML = items.map(function (it) {
+    var on = (it.provider === active) ? ' mp-on' : '';
+    return '<button type="button" class="mp-chip' + on + '" data-p="' + it.provider + '">'
+      + it.label + ' <span class="mp-n">' + it.count + '</span></button>';
+  }).join('');
+  // 事件委托：筛选条会整块重渲染，逐个绑监听会在重渲染后失效。
+  host.onclick = function (ev) {
+    var el = ev.target;
+    while (el && el !== host && !el.getAttribute('data-p')) { el = el.parentNode; }
+    if (!el || el === host) { return; }
+    onPick(el.getAttribute('data-p') || '');
+  };
+}
+// ==== WB2API:MODEL-PICKER:END ====
+</script>
 <header>
   <h1>分组管理</h1>
   <span class="maxsticker" aria-hidden="true">分组即模型集合</span>
@@ -1256,7 +1366,11 @@ header h1{letter-spacing:0}
       <button type="button" onclick="pickAll(true)" style="white-space:nowrap">全选当前</button>
       <button type="button" onclick="pickAll(false)" style="white-space:nowrap">清空</button>
     </div>
-    <input id="f-manual" class="full" placeholder="也可以直接粘：逗号或换行分隔的内部模型名（回车/失焦后并入已选）" onchange="mergeManual()">
+    <!-- 上游筛选条：699 个模型分属 15 个上游，不筛就是没法用（cline 一家占 497）。
+     由 mpRenderProviderBar 渲染（共享组件，见 injection 块里的 model-picker.js）。 -->
+<div id="gProvBar" class="full mp-provbar"></div>
+
+<input id="f-manual" class="full" placeholder="也可以直接粘：逗号或换行分隔的内部模型名（回车/失焦后并入已选）" onchange="mergeManual()">
 
     <!-- 已选清单置顶：列表有几百个模型，只报数量等于不可核对。 -->
     <div id="gPickedBox" class="full">
@@ -1286,7 +1400,9 @@ let groups = [];        // 当前列表（编辑时从这儿取原值，不额�
 let editing = null;     // 正在编辑的分组 id（null = 新增）
 let catalog = [];       // 候选模型（内部名，来自 /v1/models）
 let catalogOK = false;  // 目录是否真的取到了（false ⇒ 不能把"没拉到"当成"没有模型"）
-let catalogIncomplete = [];  // 本次没查成的来源（上游 id），只用于如实提示
+let catalogIncomplete = [];
+let provActive = '';        // 当前筛选的上游（'' = 全部）
+let provGroups = [];        // 按上游归组后的候选（由 model-picker.js 计算）  // 本次没查成的来源（上游 id），只用于如实提示
 let picked = new Set(); // 已勾选的模型
 
 function $(id) { return document.getElementById(id); }
@@ -1414,6 +1530,8 @@ async function ensureCatalog() {
     catalog = ((r && r.models) || []).slice().sort();
     catalogIncomplete = (r && r.incomplete) || [];
     catalogOK = true;
+    provGroups = mpGroupByProvider(catalog);
+    renderProvBar();
     if (!catalog.length) {
       // 目录一份都没拿到：明说"未就绪"，不能显示成"这个网关没有模型"。
       $('gChoices').innerHTML = '<span class="err" style="font-size:12px">'
@@ -1429,6 +1547,23 @@ async function ensureCatalog() {
   }
 }
 
+// renderProvBar 画上游筛选条。
+//
+// 为什么单独一个函数：筛选条在打开弹窗、目录加载完成、点某个上游时都要重画，
+// 而重画时机与"候选列表重画"不完全一致（点上游会同时重画两者）。
+function renderProvBar() {
+  if (!provGroups.length) {
+    $('gProvBar').innerHTML = '';
+    return;
+  }
+  mpRenderProviderBar($('gProvBar'), provGroups, provActive, catalog.length, function (p) {
+    // 再点一次同一个上游 = 回到全部（省一个"清除筛选"按钮）。
+    provActive = (provActive === p) ? '' : p;
+    renderProvBar();
+    renderChoices();
+  });
+}
+
 function renderChoices() {
   const host = $('gChoices');
   const hint = $('gChoicesHint');
@@ -1436,8 +1571,9 @@ function renderChoices() {
     // 目录没拉到：不动 innerHTML（ensureCatalog 已经写了提示），只更新 hint。
     return;
   }
-  const q = ($('f-search').value || '').trim().toLowerCase();
-  const shown = q ? catalog.filter(function (m) { return m.toLowerCase().indexOf(q) >= 0; }) : catalog;
+  const q = ($('f-search').value || '').trim();
+  // 上游 + 关键字两级过滤，逻辑在共享组件里（渠道页用同一份）。
+  const shown = mpFilter(catalog, provActive, q);
   if (!catalog.length) {
     host.innerHTML = '<span class="muted" style="font-size:12px">目录里没有任何模型。' +
       '（这通常意味着还没有可用渠道或上游目录没拉到。）</span>';
@@ -1445,7 +1581,11 @@ function renderChoices() {
     return;
   }
   if (!shown.length) {
-    host.innerHTML = '<span class="muted" style="font-size:12px">没有匹配「' + esc(q) + '」的模型。</span>';
+    const scope = [];
+    if (provActive) { scope.push('上游 ' + esc(provActive)); }
+    if (q) { scope.push('关键字「' + esc(q) + '」'); }
+    host.innerHTML = '<span class="muted" style="font-size:12px">没有匹配 '
+      + (scope.length ? scope.join(' + ') : '条件') + ' 的模型。</span>';
     hint.textContent = '';
     return;
   }
@@ -1459,9 +1599,9 @@ function renderChoices() {
   const incom = (typeof catalogIncomplete !== 'undefined' && catalogIncomplete && catalogIncomplete.length)
     ? '；未检查的来源：' + catalogIncomplete.join('、')
     : '';
-  hint.textContent = (q
-    ? ('目录 ' + catalog.length + ' 个模型，筛出 ' + shown.length + ' 个')
-    : ('目录 ' + catalog.length + ' 个模型')) + incom;
+  const prefix = provActive ? ('上游 ' + provActive + '：' + shown.length + ' 个')
+    : ('目录 ' + catalog.length + ' 个模型' + (q ? '，筛出 ' + shown.length + ' 个' : ''));
+  hint.textContent = prefix + incom;
 }
 
 // pickOne 只改 picked 集合，**不重渲染整个列表** ——
@@ -1474,8 +1614,12 @@ function pickOne(cb) {
 
 // pickAll 只作用于**当前筛选出来的**那批：搜索后点全选，不该把看不见的也选中。
 function pickAll(on) {
-  const q = ($('f-search').value || '').trim().toLowerCase();
-  const scope = q ? catalog.filter(function (m) { return m.toLowerCase().indexOf(q) >= 0; }) : catalog;
+  // ⚠ 范围必须与 renderChoices 完全一致（含上游筛选）。
+  //
+  // 若这里漏掉 provActive，"全选当前"会把**所有上游**的同名匹配都选上，
+  // 而用户看到的是"只筛了 cline"—— 于是他会选进几百个自己没看见的模型。
+  const q = ($('f-search').value || '').trim();
+  const scope = mpFilter(catalog, provActive, q);
   scope.forEach(function (m) {
     if (on) { picked.add(m); } else { picked.delete(m); }
   });
