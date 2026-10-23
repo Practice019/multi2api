@@ -2210,6 +2210,99 @@ header h1{letter-spacing:0}
 </style>
 </head>
 <body>
+<script>
+// ==== WB2API:MODEL-PICKER:START（由 tools/model_picker_sync.js 生成，勿手改）====
+// model-picker.js —— 「按上游挑模型」的共享实现。
+//
+// # 这个文件是**从 webui.html 抽出来的**，不是新写的
+//
+// API 管理页早就有这套逻辑（modelOwnerOf + syncAKProviders + renderAKModelList，
+// 注释里记着用户原话「我希望可以选择上游才能显示具体上游的模型」）。
+// 我做分组页时没读那段，重写了一遍，于是：
+//
+//   · 形态不一致（那边 select 下拉，我这边一排按钮）
+//   · 规则不一致（那边有 owned_by 兜底，我这边只切斜杠）
+//   · 还引入了 [object Object]（catalog 条目是 {id,owner}，我按字符串渲染）
+//
+// 用户连问两次：「这个不是已经实现了么 抽共享」「直接共享层使用啊」。
+//
+// 所以现在：**webui.html 自己也用这里**（tools/model_picker_sync.js 注入），
+// 三处（API 管理页 / 对话测试 / 分组页）跑的是同一份函数。
+// 改这里 = 三处同时改，不可能再漂移。
+
+// mpOwnerOf 从模型 id 推断上游归属。
+//
+// 有前缀用前缀（那是**我们的**上游 id，与 channels.json / 注册表对齐），
+// 没有才回退 owned_by（那是上游自己报的厂商名，未必是我们的上游）。
+function mpOwnerOf(id, ownedBy) {
+  var s = String(id || '').indexOf('/');
+  return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
+}
+
+// mpOwners 取一组模型里出现过的上游 id（去重）。
+//
+// rank 可选：给定排序函数就用它（webui.html 按 manifest 顺序排），
+// 否则按字典序（分组页没有 manifest 上下文）。
+function mpOwners(list, rank) {
+  var seen = Object.create(null);
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var m = list[i];
+    var owned = (m.owned_by !== undefined) ? m.owned_by : m.owner;
+    var o = mpOwnerOf(m.id, owned);
+    if (o && !seen[o]) { seen[o] = 1; out.push(o); }
+  }
+  out.sort(rank || function (a, b) { return a < b ? -1 : (a > b ? 1 : 0); });
+  return out;
+}
+
+// mpFillProviderSelect 填充「上游」下拉并尽量保留当前选中值。
+//
+// ⚠ 恢复选中值必须写在 innerHTML **之后**：
+// select 会把「不在 option 列表里的值」当场归一成空串，先设值会被清掉。
+// （webui.html 的 syncAKProviders 注释里记着同一个坑。）
+//
+// 返回实际生效的值（不在列表里时回落空串 = 全部上游）。
+function mpFillProviderSelect(sel, list, rank, allLabel) {
+  if (!sel) { return ''; }
+  var keep = sel.value;
+  var owners = mpOwners(list, rank);
+  var esc = mpEsc;
+  var html = '<option value="">' + (allLabel || '全部上游') + '</option>';
+  for (var i = 0; i < owners.length; i++) {
+    html += '<option value="' + esc(owners[i]) + '">' + esc(owners[i]) + '</option>';
+  }
+  sel.innerHTML = html;
+  var want = owners.indexOf(keep) >= 0 ? keep : '';
+  sel.value = want;
+  return want;
+}
+
+// mpFilter 按「上游 + 关键字」过滤（条目形如 {id, owned_by} 或 {id, owner}）。
+//
+// ⚠ 上游筛选只决定**列出什么**，绝不改已勾选的 id ——
+// 否则「切一下上游」就等于「把之前选的都取消」，用户会莫名其妙丢配置。
+function mpFilter(list, provider, query) {
+  var q = String(query || '').trim().toLowerCase();
+  return list.filter(function (m) {
+    var owned = (m.owned_by !== undefined) ? m.owned_by : m.owner;
+    if (provider && mpOwnerOf(m.id, owned) !== provider) { return false; }
+    if (q && String(m.id).toLowerCase().indexOf(q) < 0) { return false; }
+    return true;
+  });
+}
+
+// mpEsc 最小 HTML 转义。
+//
+// 各页面都有自己的 esc()（实现略有差异），这里自带一份，
+// 免得共享函数依赖宿主的同名函数 —— 那样「抽出来」就成了假共享。
+function mpEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+// ==== WB2API:MODEL-PICKER:END ====
+</script>
 <!-- 全局通知区：必须挂在 body 下（不在 .content 内），否则会被面板显隐规则连带隐藏。
      #toast  瞬时消息（5s 自消）
      #gtask  后台全量任务的进度与完成摘要
@@ -9576,19 +9669,9 @@ let loginProvider = '';
   // 与 syncModelProviderOptions 同款坑：`<select>` 会把"不在 option 列表里的值"**当场归一成空串**，
   // 所以恢复选择必须写在 innerHTML **之后**（否则选择会被浏览器悄悄清掉）。
   function syncAKProviders() {
-    const sel = $('akProvider');
-    if (!sel) return;
-    const keep = sel.value;
-    const owners = [];
-    const seen = new Set();
-    for (const m of (akCatalog || [])) {
-      const o = modelOwnerOf(m.id, m.owner);
-      if (o && !seen.has(o)) { seen.add(o); owners.push(o); }
-    }
-    owners.sort();
-    sel.innerHTML = '<option value="">全部上游</option>' +
-      owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
-    sel.value = owners.includes(keep) ? keep : '';
+    // 实现走共享层（mpFillProviderSelect）：restore-after-innerHTML 那个坑
+    // 只在一处记着就够了，三处各写一遍必然有一处写反。
+    mpFillProviderSelect($('akProvider'), (akCatalog || []), null, '全部上游');
   }
 
   // renderAKModelList 按「上游 + 搜索词」渲染可勾选列表；保留已勾选状态。
@@ -13306,12 +13389,14 @@ let multCatalogFailed = false;
 
   // modelOwnerOf 从模型 id 推断上游归属（T7）。
   //
-  // 与 groupModelsByOwner 用同一条规则：前缀优先，否则 owned_by。
-  // 抽出来共用是为了**两处判据只有一份** —— 否则筛选与分组会漂移
-  // （典型表现：分组里算 workbuddy，筛选时却算成别的）。
+  // ⚠ 实现已抽到**共享层** internal/server/model-picker.js（mpOwnerOf），
+  // 由 tools/model_picker_sync.js 注入到本页顶部。这里保留一层薄委托，
+  // 为的是不动本文件里 7 处既有调用点（改签名/改名会牵一大片）。
+  //
+  // 为什么必须真共享而不是各写一份：分组页第一版就重写了一遍，结果
+  // 形态与规则双双漂移（按钮条 vs 下拉、无 owned_by 兜底），用户当场指出。
   function modelOwnerOf(id, ownedBy) {
-    const s = String(id || '').indexOf('/');
-    return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
+    return mpOwnerOf(id, ownedBy);
   }
 
   // modelProviderFilter 当前选中的上游（空串 = 全部）。
@@ -13361,19 +13446,12 @@ let multCatalogFailed = false;
   function syncModelProviderOptions(list) {
     const el = $('modelProvider');
     if (!el) return;
-    const owners = [];
-    for (const m of list) {
-      const o = modelOwnerOf(m.id, m.owned_by);
-      if (o && owners.indexOf(o) < 0) owners.push(o);
-    }
-    owners.sort((a, b) => providerRank(a) - providerRank(b));
-    const keep = modelProviderWanted;
-    el.innerHTML = '<option value="">全部上游</option>'
-      + owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
-    // 选项就绪后把「想要的」写回 DOM。
-    // 不在列表里（上游被移除）则回落「全部」——
-    // 留着一个不存在的值会让 select 显示空、而内层 value 还是旧的。
-    setModelProviderFilter(owners.indexOf(keep) >= 0 ? keep : '');
+    // 排序用 providerRank（manifest 顺序），但**去重/兜底/回填**全走共享层。
+    // 回填必须发生在 innerHTML 之后（select 会把不存在的值归一成空串），
+    // 这一步由 mpFillProviderSelect 内部保证。
+    const got = mpFillProviderSelect(el, list, providerRank, '全部上游');
+    // 模块变量与 DOM 的同步是本页特有的（对话测设要按它选模型），共享层不管。
+    setModelProviderFilter(got);
   }
 
   // groupModelsByOwner 把模型列表按上游归组并去重。
