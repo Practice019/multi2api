@@ -318,7 +318,9 @@ func fmtStr(v any) string {
 // 注入 ModelNames 而不是让端点自己去取 —— 这也验证了注入点是可用的。
 func TestConsistencyReportsStaleModels(t *testing.T) {
 	f := newPruneFixture(t)
-	f.h.cfg.ModelNames = func() []string { return []string{"m-live"} } // 只有 m-live 还活着
+	f.h.cfg.ModelNames = func() ModelCatalogSnapshot {
+		return ModelCatalogSnapshot{Names: []string{"m-live"}} // 只有 m-live 还活着
+	}
 	g, err := f.groups.Create("g", "", []string{"m-live", "m-retired"})
 	if err != nil {
 		t.Fatal(err)
@@ -353,7 +355,9 @@ func TestConsistencyReportsStaleModels(t *testing.T) {
 // 目录里全都在 ⇒ 没有陈旧模型，ok=true。
 func TestConsistencyCleanWhenCatalogCoversGroups(t *testing.T) {
 	f := newPruneFixture(t)
-	f.h.cfg.ModelNames = func() []string { return []string{"m-a", "m-b"} }
+	f.h.cfg.ModelNames = func() ModelCatalogSnapshot {
+		return ModelCatalogSnapshot{Names: []string{"m-a", "m-b"}}
+	}
 	_, _ = f.groups.Create("g", "", []string{"m-a"})
 	_, out := f.call(t, http.MethodGet, "/admin/groups/consistency", "")
 	if stale, _ := out["stale_models"].([]any); len(stale) != 0 {
@@ -364,28 +368,57 @@ func TestConsistencyCleanWhenCatalogCoversGroups(t *testing.T) {
 	}
 }
 
-// ★ 目录**真的为空**（查了但什么都没有）⇒ 全部模型都算陈旧，ok=false。
+// ★ 目录**真的为空**（查了但一条都没有）⇒ **不能**判定任何模型陈旧。
 //
-// 这与"未接线"必须区分开：两者的 stale_models 内容不同（这个非空、那个空），
-// 而 stale_checkable 也相反。若实现把 nil 与"返回空"混为一谈，
-// 这条会红。
-func TestConsistencyEmptyCatalogMeansEverythingStale(t *testing.T) {
+// # 这条是我改过一个 bug 后重写的
+//
+// 原语义是「空目录 ⇒ 分组里每个模型都陈旧」。实测后果：CachedModelNames
+// 第一版只读默认上游的缓存，把 csg/loomy/qiniuyun/senseaudio 这些渠道模型
+// 全报成陈旧（702 个里报 9 个中的 8 个）—— 而界面会把结论呈现成
+// 「你分组里全是废名字，清空吧」。那是个会毁配置的建议。
+//
+// 正确口径：**查不到 ≠ 不存在**。目录为空时宁可说「未就绪」。
+func TestConsistencyEmptyCatalogIsNotTreatedAsAllStale(t *testing.T) {
 	f := newPruneFixture(t)
-	f.h.cfg.ModelNames = func() []string { return []string{} } // 查了，但目录是空的
+	f.h.cfg.ModelNames = func() ModelCatalogSnapshot {
+		return ModelCatalogSnapshot{Names: []string{}} // 查了，但目录是空的
+	}
 	_, _ = f.groups.Create("g", "", []string{"m-a"})
 
 	_, out := f.call(t, http.MethodGet, "/admin/groups/consistency", "")
-	if out["stale_checkable"] != true {
-		t.Errorf("★ 查过了就该是 true（与未接线区分），实际 %v", out["stale_checkable"])
+	if out["stale_checkable"] != false {
+		t.Errorf("★ 空目录时 stale_checkable 必须是 false（把「没查到」当成「不存在」会建议用户清空分组），实际 %v", out["stale_checkable"])
+	}
+	if stale, _ := out["stale_models"].([]any); len(stale) != 0 {
+		t.Errorf("★ 空目录不该报任何陈旧模型，实际 %v", stale)
 	}
 	if out["catalog_size"] != float64(0) {
-		t.Errorf("catalog_size 应为 0，实际 %v", out["catalog_size"])
+		t.Errorf("catalog_size 应如实报 0，实际 %v", out["catalog_size"])
 	}
+}
+
+// ★ 部分来源未就绪时：已查的部分照常判陈旧，但要把没查成的来源报出来。
+//
+// 破了会怎样：用户看到「无陈旧模型」以为全干净，而那个模型恰好来自
+// 没查成的上游 —— 于是问题被一个「全绿」的报告盖住。
+func TestConsistencyReportsIncompleteCatalog(t *testing.T) {
+	f := newPruneFixture(t)
+	f.h.cfg.ModelNames = func() ModelCatalogSnapshot {
+		return ModelCatalogSnapshot{
+			Names:       []string{"m-live"},
+			Unavailable: []string{"minimax"},
+		}
+	}
+	_, _ = f.groups.Create("g", "", []string{"m-live", "m-gone"})
+
+	_, out := f.call(t, http.MethodGet, "/admin/groups/consistency", "")
+	inc, _ := out["catalog_incomplete"].([]any)
+	if len(inc) != 1 || inc[0] != "minimax" {
+		t.Errorf("★ 必须如实报出没查成的来源，实际 %v", out["catalog_incomplete"])
+	}
+	// 已查的部分仍然可信：m-gone 确实不在 m-live 那一份里。
 	if stale, _ := out["stale_models"].([]any); len(stale) != 1 {
-		t.Errorf("空目录时分组里每个模型都是陈旧的，应报 1 条，实际 %v", stale)
-	}
-	if out["ok"] != false {
-		t.Errorf("ok 应为 false，实际 %v", out["ok"])
+		t.Errorf("已查部分应照常判陈旧，实际 %v", stale)
 	}
 }
 
@@ -393,7 +426,9 @@ func TestConsistencyEmptyCatalogMeansEverythingStale(t *testing.T) {
 func TestGroupsPruneDoesNotTouchStaleModels(t *testing.T) {
 	f := newPruneFixture(t)
 	// 目录是空的（模拟上游抖动），但分组里有模型
-	f.h.cfg.ModelNames = func() []string { return []string{} }
+	f.h.cfg.ModelNames = func() ModelCatalogSnapshot {
+		return ModelCatalogSnapshot{Names: []string{}}
+	}
 	g, err := f.groups.Create("g", "", []string{"m-a"})
 	if err != nil {
 		t.Fatal(err)

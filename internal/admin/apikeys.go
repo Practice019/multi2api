@@ -134,6 +134,10 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		Limit  int64    `json:"limit"`
 		RPM    int      `json:"rpm"`
 		Models []string `json:"models"`
+		// Groups 这把 key 可用的分组 ID 列表（PLAN-groups Q2：多选）。
+		//
+		// 空 ⇒ 不限制（与改造前一致）。非空 ⇒ 只能用这些分组里的模型。
+		Groups []string `json:"groups"`
 		// ModelMap 模型对外名映射（对外名 → 内部名）。
 		// 省略 / null ⇒ 不做映射（与 models 的三态一致）。
 		ModelMap map[string]string `json:"model_map"`
@@ -146,7 +150,7 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 	//   · 成员建的 ⇒ 归他（此后他只能看见/管这一把）
 	//   · 管理员建的 ⇒ owner="" （存量语义：空 = 管理员所有）
 	//   · 用 admin_token 的脚本建的 ⇒ UserID 为空 ⇒ 同样落进"管理员所有"
-	k, err := s.CreateOwned(h.principalFrom(r).UserID, body.Name, body.Limit, body.RPM, body.Models, body.ModelMap)
+	k, err := s.CreateOwnedWithGroups(h.principalFrom(r).UserID, body.Name, body.Limit, body.RPM, body.Models, body.Groups, body.ModelMap)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -160,6 +164,7 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		"limit":      k.Limit,
 		"rpm":        k.RPM,
 		"models":     k.Models,
+		"groups":     k.Groups,
 		"model_map":  k.ModelMap,
 		"created_at": k.CreatedAt,
 	})

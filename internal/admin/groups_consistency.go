@@ -72,6 +72,12 @@ type groupConsistency struct {
 	StaleCheckable bool `json:"stale_checkable"`
 	// CatalogSize 本次比对用的目录规模（0 且 checkable=false 就是"没拿到"）。
 	CatalogSize int `json:"catalog_size"`
+	// CatalogIncomplete 本次**没能检查**的来源（上游 id 等）。
+	//
+	// ⚠ 非空时 stale_models 依然可信（已查的部分是准的），但结论要打折：
+	// 某个模型可能是从没查成的那个来源来的。界面上应显示"部分来源未就绪"，
+	// 而不是让用户以为"列表是完整的"。
+	CatalogIncomplete []string `json:"catalog_incomplete,omitempty"`
 
 	// OK 两项都干净（且目录确实查过）。
 	OK bool `json:"ok"`
@@ -82,7 +88,16 @@ type groupConsistency struct {
 // nil = 未接线 ⇒ 陈旧模型这一项不可检查（StaleCheckable=false）。
 // 用函数值而不是直接调某个包：admin 不该认识"目录从哪来"（它可能是上游 +
 // 渠道并集，那是 server 侧的事）。
-type catalogFunc func() []string
+type catalogFunc func() ModelCatalogSnapshot
+
+// ModelCatalogSnapshot「当前对外模型目录」的一份快照（由装配层投影）。
+//
+// ⚠ Unavailable 非空只说明快照不完整，**不能**据此判定某个模型已下线 ——
+// 它可能恰好来自没查成的那个来源。界面上要区分这两件事。
+type ModelCatalogSnapshot struct {
+	Names       []string
+	Unavailable []string
+}
 
 // buildGroupConsistency 算一致性报告（只读：不改任何存储）。
 //
@@ -150,31 +165,41 @@ func (h *Handler) buildGroupConsistency(groups *groupstore.Store, catalog catalo
 
 	// ---- ② 陈旧模型 ----
 	if catalog != nil {
-		names := catalog()
-		rep.StaleCheckable = true
-		rep.CatalogSize = len(names)
-		exist := make(map[string]bool, len(names))
-		for _, n := range names {
-			if n != "" {
-				exist[n] = true
-			}
-		}
-		for _, g := range groups.List() {
-			for _, m := range g.Models {
-				if exist[m] {
-					continue
+		snap := catalog()
+		rep.CatalogSize = len(snap.Names)
+		rep.CatalogIncomplete = snap.Unavailable
+
+		// ⚠ 目录为空 ⇒ **不能**判定任何模型陈旧。
+		//
+		// 那是把「没查成」当成「不存在」，结论是「你分组里全是废名字，清空吧」——
+		// 灾难性的建议。宁可不报，让它显示成「未就绪」。
+		if len(snap.Names) == 0 {
+			rep.StaleCheckable = false
+		} else {
+			rep.StaleCheckable = true
+			exist := make(map[string]bool, len(snap.Names))
+			for _, n := range snap.Names {
+				if n != "" {
+					exist[n] = true
 				}
-				rep.StaleModels = append(rep.StaleModels, groupStaleModel{
-					GroupID: g.ID, GroupName: g.Name, Model: m,
-				})
 			}
+			for _, g := range groups.List() {
+				for _, m := range g.Models {
+					if exist[m] {
+						continue
+					}
+					rep.StaleModels = append(rep.StaleModels, groupStaleModel{
+						GroupID: g.ID, GroupName: g.Name, Model: m,
+					})
+				}
+			}
+			sort.Slice(rep.StaleModels, func(i, j int) bool {
+				if rep.StaleModels[i].GroupID != rep.StaleModels[j].GroupID {
+					return rep.StaleModels[i].GroupID < rep.StaleModels[j].GroupID
+				}
+				return rep.StaleModels[i].Model < rep.StaleModels[j].Model
+			})
 		}
-		sort.Slice(rep.StaleModels, func(i, j int) bool {
-			if rep.StaleModels[i].GroupID != rep.StaleModels[j].GroupID {
-				return rep.StaleModels[i].GroupID < rep.StaleModels[j].GroupID
-			}
-			return rep.StaleModels[i].Model < rep.StaleModels[j].Model
-		})
 	}
 
 	// ---- ③ 总结论 ----

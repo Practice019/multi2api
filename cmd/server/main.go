@@ -1496,6 +1496,18 @@ func main() {
 	// 还没绑定（`adminH = admin.New(admin.Config{ ... OnAdminTokenRotated:
 	// func(k){ adminH.SetAdminToken(k) } })` 里的 adminH 此刻是 nil）。
 	// 所以先建实例、再挂回调。
+	// 模型目录的**延迟绑定**入口（给分组一致性检查用）。
+	//
+	// # 为什么是变量而不是直接传 h.CachedModelNames
+	//
+	// admin 在 h **之前**构造（它要注册路由，而 h 要引用 admin 的回调），
+	// 所以此刻还没有 h 可指。用闭包捕获这个变量，等 h 构造完再填上：
+	// 端点被调用时读的是**当时**的值，不是构造时的 nil。
+	//
+	// ⚠ 不能在 h 就绪前调用该端点 —— 那时 modelNamesFn 是 nil，
+	//   一致性报告会显示「模型目录未检查」，而不是崩溃或谎报。
+	var modelNamesFn func() server.ModelNameSnapshot
+
 	adminH = admin.New(admin.Config{
 		Pool:     p,
 		OAuth:    oauth.New(cfg.OAuthBaseURL),
@@ -1505,6 +1517,15 @@ func main() {
 		APIKeys:  apiKeysStore,  // /admin/apikeys 管理端点
 		Channels: channelsStore, // /admin/channels 管理端点（同样「未注入就不注册路由」）
 		Groups:   groupsStore,   // /admin/groups 管理端点（分组：这把 key 能用哪些模型）
+		// 一致性检查用：分组里「陈旧模型」的判据来源。只读缓存，不打上游。
+		// 投影成 admin 自己的中立类型（admin 不认识 server.ModelNameSnapshot）。
+		ModelNames: func() admin.ModelCatalogSnapshot {
+			if modelNamesFn == nil {
+				return admin.ModelCatalogSnapshot{}
+			}
+			snap := modelNamesFn()
+			return admin.ModelCatalogSnapshot{Names: snap.Names, Unavailable: snap.Unavailable}
+		},
 		// 同一份工厂也交给管理台：「模型自动发现」要用它问上游有哪些模型。
 		// 类型取自 gateway 契约（不是具体上游）——见 admin.go 里那段该用 gateway 扩展点的注释。
 		ChannelProvider: func(id, baseURL string) gateway.Provider {
@@ -1716,6 +1737,11 @@ func main() {
 	//
 	// ⚠ 必须在 h 构造完成后调用（它要问这个 Handler 的模型缓存）。
 	h.RegisterAnthroOutputLimit()
+	// 把模型目录的读缓存入口填上（上面对 modelNamesFn 的延迟绑定）。
+	//
+	// 放在这里是因为 h 此刻才存在。之后 admin 的 /admin/groups/consistency
+	// 就能判断「分组里哪些模型已经不在目录里了」。
+	modelNamesFn = h.CachedModelNamesSnapshot
 
 	// 轮换管理钥匙：h 构造完成后把「更新内存」接上（闭包经 onRotate 间接引用）。
 	onRotate = func(newKey string) {
