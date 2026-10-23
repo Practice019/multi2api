@@ -62,7 +62,7 @@ func modelAllowed(models []string, model string) bool {
 	wantProv, want, wantHas := gateway.SplitModel(strings.TrimSpace(model))
 	if want == "" {
 		// 空模型名：白名单生效时不放行，让 403 发生在这里。
-	// 放上去的话上游回 400，而 400 更容易被读成「网关坏了」。
+		// 放上去的话上游回 400，而 400 更容易被读成「网关坏了」。
 		return false
 	}
 	for _, m := range models {
@@ -83,8 +83,8 @@ func modelAllowed(models []string, model string) bool {
 		// 根因：旧实现只比剥过前缀的裸名。SplitModel 按第一个 / 切，
 		// 于是这两个是同一个裸名：
 		//
-	//			workbuddy/deepseek-v4.1-flash      → (workbuddy,      deepseek-v4.1-flash)
-	//			workbuddy-intl/deepseek-v4.1-flash → (workbuddy-intl, deepseek-v4.1-flash)
+		//			workbuddy/deepseek-v4.1-flash      → (workbuddy,      deepseek-v4.1-flash)
+		//			workbuddy-intl/deepseek-v4.1-flash → (workbuddy-intl, deepseek-v4.1-flash)
 		//
 		// 但它们**是两个独立上游**（不同账号池、不同额度、不同模型目录），
 		// 路由时按前缀分派 —— 于是「白名单放行」与「实际打到哪个上游」分叉：
@@ -129,6 +129,34 @@ func (h *Handler) allowedModelsForRequest(r *http.Request) ([]string, bool) {
 		// 没命中普通 key ⇒ 是管理钥匙（或未启用鉴权）⇒ 不限制。
 		return nil, false
 	}
+
+	// ── ① 分组优先（P2）：key.Groups 非空 ⇒ 允许范围 = 这些分组的模型并集 ──
+	//
+	// # 为什么分组排在白名单前面
+	//
+	// 白名单已废弃（PLAN-groups.md Q3：两者语义完全重复，必然不一致）。
+	// 升级后的正确形态是「分组非空、白名单为空」；而**迁移之前**两种形态
+	// 都可能出现（老 key 只有白名单，新 key 只有分组）。
+	//
+	// 顺序定成"分组优先"而不是"交集"，是因为交集要多维护一处配置 ——
+	// 那正是 Q3 否决方案 A 的理由。分组非空时白名单**不参与判定**。
+	groups, groupModels, ok := h.cfg.APIKeys.GroupModelsOf(kid)
+	if !ok {
+		// key 在鉴权之后被删掉了（并发窗口）。按"不限制"处理而不是拒绝 ——
+		// 鉴权那一步刚放行过这次请求，这里再拒会表现成"偶发 403"，
+		// 而那就成了一个没人能复现的故障。
+		return nil, false
+	}
+	if len(groups) > 0 && h.cfg.APIKeys.HasGroupResolver() {
+		// ⚠ HasGroupResolver 这一条不能省。装配层忘了注入解析函数时
+		//   groupModels 恒为空 —— 若照直当成"分组里没有模型"，这把 key 会
+		//   **一个模型都不许用**，而 403 只会说"不允许调用模型 X"，
+		//   排查方向直接跑偏。所以未接线时降级到白名单路径（存量行为不变）。
+		return groupModels, true
+	}
+	// groups 非空但解析函数未接线 ⇒ 落到下面的白名单分支。
+
+	// ── ② 白名单兜底（存量兼容，P3.5 迁移完成后这条会自然走空）──
 	models, ok := h.cfg.APIKeys.ModelsOf(kid)
 	if !ok || len(models) == 0 {
 		return nil, false
@@ -160,6 +188,21 @@ func (h *Handler) modelAllowedForRequest(w http.ResponseWriter, r *http.Request,
 	allowed, restricted := h.allowedModelsForRequest(r)
 	if !restricted {
 		return true
+	}
+	// ⚠ restricted 但 allowed 为空 = **一个模型都不许**，不是"不限制"。
+	//
+	// modelAllowed 把空列表读成"不限制"（空白名单的语义），那条语义对**白名单**
+	// 是对的：白名单为空本来就是"没设限"。但分组路径能产出另一种"空" ——
+	// 这把 key 指向的分组里一个模型都没有（分组被清空了、或者全被删了）。
+	// 那不是"没设限"，那是"限到了空集"。照直走 modelAllowed 会让权限**被放大**
+	// 成不限制，而界面上完全看不出异常（用户以为自己只是删了个分组）。
+	//
+	// 所以这里显式拦一道。它不复制任何分组判定 —— 只是把"受限且为空"这个
+	// 状态说清楚，两个入口（准入 / 目录）各判一次。
+	if len(allowed) == 0 {
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+			"这把 API key 被分配的分组里没有任何模型（分组可能已被删除或尚未加入模型）")
+		return false
 	}
 	m := strings.TrimSpace(model)
 	if m == "" {
@@ -207,6 +250,12 @@ func (h *Handler) filterModelsForRequest(r *http.Request, list []map[string]any)
 	allowed, restricted := h.allowedModelsForRequest(r)
 	if !restricted {
 		return list
+	}
+	// 受限且为空 ⇒ 一个都不给（理由同 modelAllowedForRequest 里那段）。
+	// 返回空切片而不是原列表：把列表原样发出去等于告诉客户端"这些你都能调"，
+	// 而实际每个都会 403 —— 那正是"列表里看得见、调了却 403"的来源。
+	if len(allowed) == 0 {
+		return []map[string]any{}
 	}
 	modelMap := h.modelMapForRequest(r)
 	out := make([]map[string]any, 0, len(list))
@@ -489,7 +538,7 @@ func publicNameFor(modelMap map[string]string, internal string) string {
 // 让 chatcmpl-gw-* 改写与 model 别名回填那套脱敏完全失效。
 //
 // 没配别名的 key 不拦：那种 key 本来就不脱敏
-//（用户说「对话密钥按原来的上游即可」），对它拦真名是过度限制。
+// （用户说「对话密钥按原来的上游即可」），对它拦真名是过度限制。
 func (h *Handler) keyUsesAliases(r *http.Request) bool {
 	return len(h.modelMapForRequest(r)) > 0
 }
