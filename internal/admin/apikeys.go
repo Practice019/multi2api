@@ -306,6 +306,13 @@ func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 		Limit  *int64   `json:"limit"`
 		RPM    *int     `json:"rpm"`
 		Models []string `json:"models"`
+		// Groups 这把 key 可用的分组 ID 列表（PLAN-groups P2/Q2：多选）。
+		//
+		// 三态与 Models 一致：nil（字段缺失）⇒ 不改；[] ⇒ 清空（= 不限制）；
+		// 非空 ⇒ 整体替换。
+		//
+		// ⚠ 存 ID 不存名字：分组可以改名，存名字等于改名即断链。
+		Groups []string `json:"groups"`
 		// ModelMap 模型对外名映射（对外名 → 内部名）。
 		// nil（字段缺失）⇒ 不改；{} ⇒ 清空映射；非空 ⇒ 整体替换。
 		ModelMap map[string]string `json:"model_map"`
@@ -317,7 +324,7 @@ func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 	if !h.requireKeyAccess(w, r, body.ID) {
 		return
 	}
-	if err := s.Update(body.ID, body.Limit, body.RPM, body.Models, body.ModelMap); err != nil {
+	if err := s.UpdateWithGroups(body.ID, body.Limit, body.RPM, body.Models, body.Groups, body.ModelMap); err != nil {
 		writeStoreError(w, err)
 		return
 	}

@@ -1361,6 +1361,41 @@ func main() {
 		return g.Models
 	})
 
+	// 存量迁移（P3.5）：把老 key 的 Models 白名单变成分组。
+	//
+	// # 为什么放在这里跑
+	//
+	// 迁移要依赖两件事：分组存储已就绪（上一段）、GroupModelsFunc 已注入
+	//（上一段）。两者都满足后跑一次，之后新逻辑才走得通。
+	//
+	// ⚠ 迁移失败**不能**阻断启动：最坏结果是"老 key 继续走白名单路径"
+	//（allowedModelsForRequest 的兜底分支），功能不受影响。
+	// 让一个可降级的迁移把服务打不开，是取舍反了。
+	if migRes, migErr := apikey.MigrateModelsToGroups(apiKeysStore, func(name string, models []string) (string, error) {
+		g, cerr := groupsStore.Create(name, "由存量 API key 白名单自动迁移", models)
+		if cerr != nil {
+			// ⚠ 撞名必须翻译成 apikey 自己的哨兵，**不能原样透传**。
+			//
+			// 为什么：apikey 包不 import groupstore（分层要求），它靠比对这个
+			// 哨兵决定「加 -2 后缀重试」。原样透传的话，第二把同名 key 迁移
+			// 会被当成普通错误直接失败 —— 而用户看到的是"某几把 key 没迁过去"，
+			// 没有任何线索指向"名字撞了"。
+			if errors.Is(cerr, groupstore.ErrNameExists) {
+				return "", apikey.ErrGroupNameExists
+			}
+			return "", cerr
+		}
+		return g.ID, nil
+	}); migErr != nil {
+		log.Printf("[groups] ⚠ 存量 Models 迁移失败（老 key 继续走白名单路径，功能不受影响）: %v", migErr)
+	} else if migRes.KeysMigrated > 0 {
+		log.Printf("[groups] 存量迁移完成：%d 把 key 的白名单已转成分组（新建 %d 个分组，跳过 %d 把，失败 %d 把）",
+			migRes.KeysMigrated, migRes.GroupsCreated, migRes.Skipped, migRes.Failed)
+		for _, d := range migRes.Details {
+			log.Printf("[groups]   迁移失败详情: %s", d)
+		}
+	}
+
 	// 控制台账号体系（抄 new-api 的登录系统）：账号库 + 会话库 + 登录端点。
 	//
 	// 路径与 apikeys.json 同一惯例（data/ 下、CWD 相对、不进配置）。
