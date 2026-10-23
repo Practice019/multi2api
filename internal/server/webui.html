@@ -9665,9 +9665,21 @@ let loginProvider = '';
       box.innerHTML = '<span class="dim" style="font-size:12px">（未选 —— 这把 key 不限制模型）</span>';
       return;
     }
+    // ⚠ 用 .pill + 内联 all:unset 的按钮，与原来 API 页那版模型 chip 同一形态。
+    //
+    // 我第一版用 .chip 且没重置按钮样式，结果按钮保留浏览器默认外观
+    // （带边框的方块），把 chip 撑成两块 —— 截图里「已选分组」整行被挤歪。
+    // .chip 那套样式是给「模型名 + 倍率标记」设计的（.chip span 有 margin-left），
+    // 塞一个 <button> 进去不在它的设计范围内。
     box.innerHTML = picked.map(function (g) {
-      return '<span class="chip" title="' + esc(g.name) + '">' + esc(g.name) +
-        '<button type="button" data-akgunpick="' + esc(g.id) + '" title="取消">×</button></span>';
+      return '<span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px"'
+        + ' title="' + esc(g.name) + '">'
+        + '<span class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+        + esc(g.name) + '</span>'
+        + '<button type="button" data-akgunpick="' + esc(g.id) + '"'
+        + ' style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 2px"'
+        + ' title="取消选择这个分组">×</button>'
+        + '</span>';
     }).join('');
   }
 

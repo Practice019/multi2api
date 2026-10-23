@@ -1668,9 +1668,17 @@ function renderPicked() {
     box.innerHTML = '<span class="muted" style="font-size:12px">还没有选中任何模型 —— 这样的分组会让引用它的 key 一个模型都用不了。</span>';
     return;
   }
+  // ⚠ chip 里塞 <button> 必须重置按钮样式，否则它保留浏览器默认外观
+  //（带边框的方块）把 chip 撑成两块。用 .pill + all:unset，与 API 页那版同一形态。
   box.innerHTML = list.map(function (m) {
-    return '<span class="chip" title="' + esc(m) + '">' + esc(m)
-      + '<button type="button" data-unpick="' + esc(m) + '" title="取消">×</button></span>';
+    return '<span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px"'
+      + ' title="' + esc(m) + '">'
+      + '<span class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+      + esc(m) + '</span>'
+      + '<button type="button" data-unpick="' + esc(m) + '"'
+      + ' style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 2px"'
+      + ' title="取消">×</button>'
+      + '</span>';
   }).join('');
 }
 
