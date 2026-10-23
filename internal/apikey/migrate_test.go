@@ -48,6 +48,20 @@ func (f *fakeGroupStore) create(name string, models []string) (string, error) {
 
 func (f *fakeGroupStore) count() int { return len(f.byName) }
 
+// modelsOf 按**分组 ID** 取模型清单（"g-1" → f.byName 里的第一项，按创建顺序）。
+//
+// 为什么需要它：断言要与"谁先被迁移"解耦 —— 见 TestMigrateRetriesOnNameCollision 的注释。
+func (f *fakeGroupStore) modelsOf(id string) []string {
+	idx := 0
+	for _, name := range f.ids {
+		idx++
+		if "g-"+itoa(idx) == id {
+			return f.byName[name]
+		}
+	}
+	return nil
+}
+
 // itoa 避免为了一条测试引入 strconv。
 func itoa(n int) string {
 	if n == 0 {
@@ -198,14 +212,31 @@ func TestMigrateRetriesOnNameCollision(t *testing.T) {
 	if gs.ids[0] != "app 的模型" || gs.ids[1] != "app 的模型-2" {
 		t.Errorf("后缀应形如 -2，实际 %v", gs.ids)
 	}
-	// 两把 key 指向**不同**分组，各自的模型也对
+	// 两把 key 指向**不同**分组
 	g1, _ := s.GroupsOf(k1.ID)
 	g2, _ := s.GroupsOf(k2.ID)
 	if len(g1) != 1 || len(g2) != 1 || g1[0] == g2[0] {
-		t.Errorf("两把 key 应指向不同分组，实际 %v / %v", g1, g2)
+		t.Fatalf("两把 key 应指向不同分组，实际 %v / %v", g1, g2)
 	}
-	if !equalStrings(gs.byName["app 的模型"], []string{"m-1"}) || !equalStrings(gs.byName["app 的模型-2"], []string{"m-2"}) {
-		t.Errorf("分组的模型应各归各的，实际 %v", gs.byName)
+	// ⚠ 断言必须**与遍历顺序无关**：两把 key 都叫 "app"，谁先被迁移是
+	// map 遍历顺序决定的（每次跑都可能不同），所以不能假定 k1 拿到无后缀的那个名字。
+	//
+	// 真正要守的是**内容对应**：每把 key 指向的那个分组，里面的模型必须是
+	// 它自己原来的白名单。写成"名字-2 一定属于 k2"会间歇性变红，
+	// 而红的时候实现其实是对的 —— 那种测试比没有更糟。
+	if got := gs.modelsOf(g1[0]); !equalStrings(got, []string{"m-1"}) {
+		t.Errorf("key %s 的分组 %s 应含它自己的模型 [m-1]，实际 %v", k1.ID, g1[0], got)
+	}
+	if got := gs.modelsOf(g2[0]); !equalStrings(got, []string{"m-2"}) {
+		t.Errorf("key %s 的分组 %s 应含它自己的模型 [m-2]，实际 %v", k2.ID, g2[0], got)
+	}
+	// 名字本身：一个无后缀、一个带 -2（顺序不定，但两种形态都必须出现）
+	names := map[string]bool{}
+	for n := range gs.byName {
+		names[n] = true
+	}
+	if !names["app 的模型"] || !names["app 的模型-2"] {
+		t.Errorf("撞名应加后缀 -2，实际建了 %v", gs.ids)
 	}
 }
 

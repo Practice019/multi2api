@@ -27,6 +27,24 @@ import (
 type PruneResult struct {
 	KeysTouched int      `json:"keys_touched"`
 	ModelsGone  []string `json:"models_gone"`
+
+	// GroupsGone 被移除的分组 ID（PruneGroups 用；按字典序）。
+	GroupsGone []string `json:"groups_gone,omitempty"`
+
+	// KeysUnrestricted 因这次清理而**变成「不限制」**的 key ID 列表。
+	//
+	// # ⚠ 这个字段是本文件最重要的输出，不是"附带的统计"
+	//
+	// 「Groups 清空」在语义上是**权限放大**：这把 key 从"只能用这几个分组的模型"
+	// 变成"什么模型都能用"。而用户的操作是「删掉一个分组」—— 他完全不会预期
+	// 某把 key 的权限被放开。
+	//
+	// 所以必须**如实回报**，让管理端在响应里明说"这几把 key 现在没有分组限制了"。
+	// 静默处理等于把一次删配置变成一次安全事件，而且在界面上完全看不出来。
+	//
+	// ⚠ 与 Models 的空白语义一致：空 = 不限制（不是"一个都不许"）。
+	// 那个决定是在 apikey.go 的 Key.Models 注释里做的，这里不能改口径。
+	KeysUnrestricted []string `json:"keys_unrestricted,omitempty"`
 }
 
 // PruneModels 从**所有** key 的白名单与别名映射里移除指定模型名。
@@ -97,5 +115,79 @@ func (s *Store) PruneModels(models []string) (PruneResult, error) {
 		res.ModelsGone = append(res.ModelsGone, m)
 	}
 	sort.Strings(res.ModelsGone)
+	return res, s.saveLocked()
+}
+
+// PruneGroups 从**所有** key 的 Groups 里移除指定分组 ID（删除分组时的级联清理）。
+//
+// # 为什么必须做（这是「删分组」最容易忽略的一半）
+//
+// key.Groups 存的是分组 **ID**。删掉分组之后，那些 ID 就指向了不存在的对象。
+// P2/P3 的判定链对「受限且并集为空」的处理是**拒绝**（安全，见
+// server.apikey_models.go 的拦截）—— 于是那把 key 会变成「什么模型都不能用」，
+// 而用户看到的现象只是「调用全 403」，错误信息只会说「分组里没有任何模型」，
+// 他得自己去猜是不是刚才删的那个分组。
+//
+// 所以删除动作要**连带清干净**：与删渠道时清 key 里的模型引用（PruneModels）
+// 是同一套口径 —— 用户删了一个东西，指向它的残留就该一起消失。
+//
+// # ⚠ 清理会让某些 key 变成「不限制」（权限放大），必须回报
+//
+// 一把 key 如果只属于这一个分组，清理后 Groups 变空 ⇒ 语义从「受限」跳到
+// 「不限制」。**这不是 bug，是既有语义决定的**（空 = 不限制，见 Key.Groups 的注释），
+// 但不能悄悄发生：结果里逐把列出 KeysUnrestricted，让管理端明说。
+//
+// 另一种可选做法是「把这种 key 直接禁用」，但那更糟 —— 用户删一个分组
+// 把几把 key 停掉，同样是没预期的事故，而且更难恢复（要回管理页逐把启用）。
+func (s *Store) PruneGroups(groupIDs []string) (PruneResult, error) {
+	var res PruneResult
+	want := map[string]bool{}
+	for _, g := range groupIDs {
+		if g != "" {
+			want[g] = true
+		}
+	}
+	if len(want) == 0 {
+		return res, nil // 空输入：什么都不动（与 PruneModels 的同一条守卫）
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	gone := map[string]bool{}
+	for _, k := range s.keys {
+		if k == nil || len(k.Groups) == 0 {
+			continue
+		}
+		kept := make([]string, 0, len(k.Groups))
+		changed := false
+		for _, g := range k.Groups {
+			if want[g] {
+				gone[g] = true
+				changed = true
+				continue
+			}
+			kept = append(kept, g)
+		}
+		if !changed {
+			continue
+		}
+		// ⚠ 变空要记下来：这是权限放大，调用方必须能告诉用户。
+		if len(kept) == 0 {
+			res.KeysUnrestricted = append(res.KeysUnrestricted, k.ID)
+		}
+		// normalizeGroups 在空输入时返回 nil（而不是空切片）—— 与「不限制」的
+		// 规范表达一致，也让 omitempty 在落盘时不产生这个字段。
+		k.Groups = normalizeGroups(kept)
+		res.KeysTouched++
+	}
+	if res.KeysTouched == 0 {
+		return res, nil
+	}
+	for g := range gone {
+		res.GroupsGone = append(res.GroupsGone, g)
+	}
+	sort.Strings(res.GroupsGone)
+	sort.Strings(res.KeysUnrestricted)
 	return res, s.saveLocked()
 }
