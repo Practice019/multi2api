@@ -20,13 +20,13 @@
 package server
 
 import (
-	"strings"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
+	"strings"
 
 	"workbuddy2api/internal/channelroute"
 	"workbuddy2api/internal/channelstore"
@@ -124,18 +124,67 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 		return zero, err
 	}
 
-	// 选路：**优先级阶梯 + 同档加权随机 + 重试换档**（new-api 的语义）。
+	// # P4.5：同档内失败换人
 	//
-	// ⚠ 为什么这里不直接调 channelstore.Select：它以能力索引的 (group, model, channel_id)
-	// 为键，只知道"哪个渠道能服务哪个**上游模型名**"；而这条路径需要的是**已解析出上游名的候选**
-	// （映射之后的名字，R2 请求侧），也就是 channelroute.Plan 的产物。两者输入不同，
-	// 硬把 Plan 的结果塞回 Select 反而要再造一次键。语义保持一致，输入各用各的。
+	// 改造前这里只挑**一条**就发：随机挑到渠道 A，A 挂了（502/429）就
+	// 直接把错误丢给客户端 —— 同一档里明明还有渠道 B 却没有机会。
+	// 而账号池路径一直是有轮转的（maxAttempts + fail(uid); continue），
+	// 于是"渠道模式反而比账号模式更脆"，这是本仓一个真实的容错缺口。
 	//
-	// 档位 = 优先级；重试时 attempt 递增即换下一档（与 new-api 的"第 n 次重试走第 n 档"同构）。
-	cand, err := pickCandidate(cands, attempt)
-	if err != nil {
-		return zero, err
+	// ⚠ 只在**同一档内**换，不跨档：
+	//
+	//	同档换人 = 这条渠道坏了，换同级别的另一条（服务水平不变）
+	//	跨档     = 整档不可用，降级（可能更差/更贵）—— 那是另一件事，
+	//	           由 attempt 递增表达，不是这里的 retry。
+	//
+	// 所以这里**不**递增 attempt，而是维护一个"已试过的渠道 ID"集合。
+	// 把两者混起来是本任务最容易犯的错（见 pickCandidateExcluding 的注释）。
+	tried := make(map[string]bool, len(cands))
+	var lastErr error
+	for {
+		cand, _, ok := pickCandidateExcluding(cands, attempt, tried)
+		if !ok {
+			// 该档没有未试过的候选了。
+			//
+			// ⚠ 一条都没试过就 ok=false ⇒ 是"档位用尽"（attempt 超出档数），
+			//   要让 pickCandidate 报出那个具体错误（调用方按它区分 404/502）。
+			//   试过若干条才耗尽 ⇒ 把**最后一个**错误带回去：那是用户真正该看到的原因。
+			if len(tried) == 0 {
+				_, perr := pickCandidate(cands, attempt)
+				return zero, perr
+			}
+			return zero, lastErr
+		}
+		tried[cand.Channel.ID] = true
+
+		fw, ferr := h.tryChannelOnce(ctx, cand, matchName, displayName, body)
+		if ferr == nil {
+			return fw, nil
+		}
+		lastErr = ferr
+
+		// ⚠ 只有"上游明确说这次请求不行"才值得换人。Key 型渠道有几类错误
+		//   换一条渠道也是同一个结果，换人只会把一次失败变成 N 次耗时：
+		//
+		//	请求体本身不合法（400 且不是上游的自定义拒绝）—— 但那也可能只是
+		//	"这条渠道的上游不认这个参数"，所以仍然换人试，见下面的白名单判定。
+		//
+		// 这里采取"+白名单"而不是"黑名单"：只有明确不该换的才不换。
+		// 否则新出现的错误类型会一律不换人，而"不换人"正是本次要修的缺陷。
+		if !worthSwitching(ferr) {
+			return fw, ferr
+		}
 	}
+}
+
+// tryChannelOnce 对**一条**候选渠道做一次完整的转发尝试（挑 key / 改写 body / 打上游）。
+//
+// 单独抽出来的理由：P4.5 要在同档内换渠道重试，而"发一次"这件事本身
+// 有 9 个不同的失败出口（没有可用 key、body 改写失败、工厂没接线、上游 4xx/5xx…），
+// 它们**各自都该触发换人**。把它抽成一个函数，外层循环就只需关心"换谁"，
+// 而不必在 9 个 return 上各挂一次重试逻辑（那样必然漏掉一两个）。
+func (h *Handler) tryChannelOnce(ctx context.Context, cand channelroute.Candidate, matchName, displayName string, body []byte) (channelForward, error) {
+	var zero channelForward
 
 	// ⚠ 挑 key 必须走存储层（PickKeyIdx）：那里才有 round_robin 游标与"只挑启用"的判定。
 	// 这里曾经自己实现了一个"取第一个启用的"（pickEnabledKey），结果是：界面上写着轮询，
@@ -191,6 +240,34 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 		fw.PublicModel = displayName
 	}
 	return fw, nil
+}
+
+// worthSwitching 报告"这次失败换一条同档渠道还有没有意义"。
+//
+// # 为什么用白名单式（只挡明确不该换的），而不是黑名单式
+//
+// 黑名单（"只有 5xx 才换"）会漏掉将来的新错误类型，而漏掉的表现正是本次要修的
+// 那个缺陷：同档明明有健康渠道，一个偶发失败就把请求打死。
+// 白名单只挡**换人不可能改变结果**的那几类：
+//
+//	· 组合根漏接线（ChannelProvider 为 nil）—— 所有渠道都会同一个报错
+//	· 请求上下文已取消（客户端断开）—— 再试只是浪费一次上游调用
+//
+// 其余（没可用 key、上游 4xx/5xx、body 改写失败）**都换**：
+// 没可用 key 是这条渠道自己的问题；上游 4xx 常常是"这条渠道的上游不认这个参数"；
+// 5xx 与 429 更是典型的"换一条就好"。
+func worthSwitching(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// 组合根漏接线：换多少条都是同一个错，换人只会让日志出现 N 条同样的话。
+	if strings.Contains(err.Error(), "没有注入 ChannelProvider 工厂") {
+		return false
+	}
+	return true
 }
 
 // pickCandidate 按 new-api 的选路语义从候选里挑一条。
@@ -253,6 +330,99 @@ func pickCandidate(cands []channelroute.Candidate, attempt int) (channelroute.Ca
 		n -= w
 	}
 	return cands[t.from], nil // 兜底：不该到
+}
+
+// pickCandidateExcluding 在**同一档**内挑一条候选，跳过 alreadyTried 里的渠道。
+//
+// ⚠ 这是 P4.5 最容易搞错的地方，所以把语义写死在这里：
+//
+//	attempt 是**档位**（第几优先级档），不是"同档内第几条"。
+//	同档内换人是**另一个维度** —— 用 exclude 集合表达，绝不能靠递增 attempt。
+//
+// 为什么不能靠递增 attempt：那会把"同档内重试"变成"降级到下一档"。
+// 两件事的语义完全不同 ——
+//
+//	同档内换人 = 这条渠道坏了，换同级别的另一条（用户拿到的还是同一档的服务）
+//	跨档          = 这条档位整体不可用，降级（可能更贵/更慢/更差）
+//
+// 混起来的后果：一条渠道偶发 502 就把全部流量降到低优先级档，而日志里
+// 看起来像是"重试了 3 次"，实际上是"静默降级了"。
+//
+// 返回：
+//
+//	候选      挑中的那条
+//	tierLeft  该档**还剩几条没试过**（含本次挑中的这条之外）—— 调用方据此决定还要不要继续
+//	ok        false = 该档已经没有未试过的候选了（调用方应当换档或放弃）
+func pickCandidateExcluding(cands []channelroute.Candidate, attempt int, tried map[string]bool) (channelroute.Candidate, int, bool) {
+	if len(cands) == 0 {
+		return channelroute.Candidate{}, 0, false
+	}
+	tier := candidatesOfTier(cands, attempt)
+	if len(tier) == 0 {
+		return channelroute.Candidate{}, 0, false
+	}
+	left := make([]channelroute.Candidate, 0, len(tier))
+	for _, c := range tier {
+		if tried[c.Channel.ID] {
+			continue
+		}
+		left = append(left, c)
+	}
+	if len(left) == 0 {
+		return channelroute.Candidate{}, 0, false
+	}
+	picked := weightedPick(left)
+	return picked, len(left) - 1, true
+}
+
+// candidatesOfTier 取第 attempt 档的全部候选（Plan 已按优先级降序 ⇒ 相邻相等即同档）。
+//
+// 档位用尽时返回空（调用方按"没得试"处理）。负 attempt 按 0。
+func candidatesOfTier(cands []channelroute.Candidate, attempt int) []channelroute.Candidate {
+	ti := attempt
+	if ti < 0 {
+		ti = 0
+	}
+	idx := 0
+	for i := 0; i < len(cands); {
+		j := i
+		for j < len(cands) && cands[j].Priority == cands[i].Priority {
+			j++
+		}
+		if idx == ti {
+			return cands[i:j]
+		}
+		idx++
+		i = j
+	}
+	return nil
+}
+
+// weightedPick 同档内按权重加权随机（权重 <=0 视为 1，与 pickCandidate 同一口径）。
+func weightedPick(tier []channelroute.Candidate) channelroute.Candidate {
+	sum := 0
+	for _, c := range tier {
+		w := c.Weight
+		if w <= 0 {
+			w = 1
+		}
+		sum += w
+	}
+	if sum <= 0 { // 理论上到不了（权重下限为 1）
+		return tier[0]
+	}
+	n := rand.Intn(sum)
+	for _, c := range tier {
+		w := c.Weight
+		if w <= 0 {
+			w = 1
+		}
+		if n < w {
+			return c
+		}
+		n -= w
+	}
+	return tier[0] // 兜底
 }
 
 // writeChannelError 把渠道转发的失败回报给客户端。

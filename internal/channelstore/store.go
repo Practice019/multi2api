@@ -56,19 +56,39 @@ const DefaultGroup = "default"
 //	（overrides）                     Overrides
 //	（channel info）                  ChannelInfo
 type Channel struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Type        int               `json:"type"`          // 渠道类型（OpenAI 兼容 = TypeOpenAICompat）
-	BaseURL     string            `json:"base_url"`      // R3：手填
-	Keys        []ChannelKey      `json:"keys"`          // R3：手填（支持多 key）
-	Models      []string          `json:"models"`        // 该渠道**声明**能服务的模型（上游原名）
-	ModelMap    map[string]string `json:"model_mapping"` // R2：公开名 → 上游名
-	Group       string            `json:"group"`
-	Priority    int               `json:"priority"` // 越大越先用；重试第 n 次走第 n 档
-	Weight      int               `json:"weight"`   // 同一档内加权随机的权重
-	Status      int               `json:"status"`
-	Overrides   Overrides         `json:"overrides"`
-	ChannelInfo ChannelInfo       `json:"channel_info"`
+	ID       string            `json:"id"`
+	Name     string            `json:"name"`
+	Type     int               `json:"type"`          // 渠道类型（OpenAI 兼容 = TypeOpenAICompat）
+	BaseURL  string            `json:"base_url"`      // R3：手填
+	Keys     []ChannelKey      `json:"keys"`          // R3：手填（支持多 key）
+	Models   []string          `json:"models"`        // 该渠道**声明**能服务的模型（上游原名）
+	ModelMap map[string]string `json:"model_mapping"` // R2：公开名 → 上游名
+	// Group 主分组（**兼容字段**，多分组下等于 Groups[0]）。
+	//
+	// # 为什么保留而不删
+	//
+	// 存量 channels.json 里只有这个字段，而且旧版 exe 回退时要能读懂新文件。
+	// 读入时若 Groups 为空，就用 [Group] 或 [DefaultGroup] 补齐（见 normalizeChannel）；
+	// 写出时把它同步成 Groups[0]，于是旧版读到的是"这条渠道属于哪个组"。
+	//
+	// ⚠ 新代码**不要**再直接读它做判定 —— 那是"只看第一个分组"的老语义。
+	// 表示"这条渠道属于哪些组"的唯一入口是 EffectiveGroups()。
+	Group string `json:"group"`
+	// Groups 这条渠道所属的分组（多值，对齐 new-api 的逗号分隔 Group）。
+	//
+	// # 为什么渠道可以属于多个分组
+	//
+	// 一个上游模型常常同时属于"默认"和"VIP"两档：不是复制两条渠道（那要维护两份
+	// base_url/key，改一个漏一个），而是同一条渠道进两个组。选路时按组过滤，
+	// 能力索引对 (models × groups) 做笛卡尔积 —— 与 new-api 的 AddAbilities 同一做法。
+	//
+	// 空 = 用 Group / DefaultGroup 补齐（存量文件就是这个形态）。
+	Groups      []string    `json:"groups,omitempty"`
+	Priority    int         `json:"priority"` // 越大越先用；重试第 n 次走第 n 档
+	Weight      int         `json:"weight"`   // 同一档内加权随机的权重
+	Status      int         `json:"status"`
+	Overrides   Overrides   `json:"overrides"`
+	ChannelInfo ChannelInfo `json:"channel_info"`
 }
 
 // ChannelKey 一个 key 及其状态（multi-key 渠道：某个 key 坏了不该停掉整条渠道）。
@@ -202,9 +222,14 @@ func New(path string) (*Store, error) {
 
 // normalizeChannel 补齐缺省值（Group 空 ⇒ default；Status 0 ⇒ Enabled；Weight 0 保留 0 语义）。
 func normalizeChannel(ch *Channel) {
-	if ch.Group == "" {
-		ch.Group = DefaultGroup
-	}
+	// Groups 与 Group 双向补齐（见 Channel.Groups 的注释）：
+	//
+	//	Groups 非空 ⇒ 以它为准，Group 同步成 Groups[0]（旧版 exe 读得懂）
+	//	Groups 为空 ⇒ 用 [Group] 或 [DefaultGroup] 补上
+	//
+	// 两个方向都要归一化（去空白/去空/去重），因为手改文件时很容易写成 ["a", ""]。
+	ch.Groups = effectiveGroupsOf(ch.Groups, ch.Group)
+	ch.Group = ch.Groups[0]
 	if ch.Status == 0 {
 		ch.Status = StatusEnabled
 	}
@@ -228,22 +253,67 @@ func (s *Store) rebuildAbilitiesLocked(ch *Channel) {
 	if ch.Status != StatusEnabled {
 		return // 停用的渠道不产生能力（new-api：状态必须是 enabled 才可用）
 	}
-	for _, m := range ch.Models {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			continue
+	// ⚠ 这里是 (models × groups) 的**笛卡尔积**，不是"models 加一个 group 字段"。
+	//
+	// 对齐 new-api 的 AddAbilities：一条渠道进两个组、声明三个模型 ⇒ 六条能力记录。
+	// 主键 (group, model, channel_id) 因此**不会**冲突 —— 每个组合都是独立一行。
+	//
+	// 写成"只发 ch.Group 那一个组"是本文件最容易犯的错：界面上把渠道加进 VIP 组之后，
+	// 目录与选路里都看不见它，而渠道本身看起来完全正常（列表里 Groups 明明写着 vip）。
+	for _, g := range ch.EffectiveGroups() {
+		for _, m := range ch.Models {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			ab := &Ability{
+				Group:     g,
+				Model:     m,
+				ChannelID: ch.ID,
+				Enabled:   true,
+				Priority:  ch.Priority,
+				Weight:    ch.Weight,
+				Tag:       ch.Name,
+			}
+			s.abilities[abilityKey(ab.Group, ab.Model, ab.ChannelID)] = ab
 		}
-		ab := &Ability{
-			Group:     ch.Group,
-			Model:     m,
-			ChannelID: ch.ID,
-			Enabled:   true,
-			Priority:  ch.Priority,
-			Weight:    ch.Weight,
-			Tag:       ch.Name,
-		}
-		s.abilities[abilityKey(ab.Group, ab.Model, ab.ChannelID)] = ab
 	}
+}
+
+// EffectiveGroups 这条渠道实际所属的分组（已归一化，**至少一个**）。
+//
+// 这是"这条渠道属于哪些组"的唯一入口。任何按组过滤的地方（选路、目录）都必须调它，
+// 不要直接读 ch.Group —— 那是"只看第一个组"的老语义，多分组渠道会被静默漏掉。
+func (ch *Channel) EffectiveGroups() []string {
+	if ch == nil {
+		return []string{DefaultGroup}
+	}
+	return effectiveGroupsOf(ch.Groups, ch.Group)
+}
+
+// effectiveGroupsOf 合并 Groups 与 Group 得到一个确定的分组清单（**至少一个**）。
+//
+// 返回的切片总是新的：调用方可能把它 append 到别处，共用一个底层数组会让
+// "改返回值"静默污染渠道对象（本包在 cloneChannel 上踩过同一类问题）。
+func effectiveGroupsOf(groups []string, group string) []string {
+	out := make([]string, 0, len(groups)+1)
+	seen := map[string]bool{}
+	add := func(g string) {
+		g = strings.TrimSpace(g)
+		if g == "" || seen[g] {
+			return
+		}
+		seen[g] = true
+		out = append(out, g)
+	}
+	for _, g := range groups {
+		add(g)
+	}
+	add(group)
+	if len(out) == 0 {
+		out = append(out, DefaultGroup)
+	}
+	return out
 }
 
 // List 返回全部渠道（按 ID 排序，稳定输出便于前端与测试）。返回的是**深拷贝**，调用方随便改。
@@ -417,6 +487,9 @@ func cloneChannel(ch *Channel) *Channel {
 	cp := *ch
 	cp.Keys = append([]ChannelKey(nil), ch.Keys...)
 	cp.Models = append([]string(nil), ch.Models...)
+	// Groups 是切片：不复制的话调用方改一下返回值就改到了缓存，
+	// 而那份缓存下一次 saveLocked 就把污染落盘了。
+	cp.Groups = append([]string(nil), ch.Groups...)
 	if ch.ModelMap != nil {
 		cp.ModelMap = make(map[string]string, len(ch.ModelMap))
 		for k, v := range ch.ModelMap {
