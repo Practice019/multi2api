@@ -236,10 +236,26 @@ func TestHardCreditCooldownDispatchesPerProvider(t *testing.T) {
 			"  codearts 没有签到恢复机制，次日 04:00 不是它的任何事实。",
 			d, caSt.Until.Format(time.RFC3339))
 	}
-	// 更直白的一条：绝不能正好落在 workbuddy 的那个 04:00 上。
+	// 更直白的一条：绝不能落在 workbuddy 的那个 04:00 上。
+	//
+	// ⚠ 必须排除「恰好是通用值算出来的」这种巧合。
+	//
+	// 这条判据有一小时窗口会**无辜变红**：codearts 的通用硬冷却是 now+1h，
+	// 而 now+1h 在 03:00~04:00 之间运行时正好落在次日 04:00 附近 ——
+	// 于是「撞上 workbuddy 的 04:00」被误报成「套用了它的策略」。
+	// 实测：2026-10-24 03:00:59 连跑 3 次全红。
+	//
+	// 判据的本意是「codearts 用了 workbuddy 的策略」，不是「两个时刻碰巧接近」。
+	// 所以先算出它**本该是**什么（通用值），只有偏离通用值时才怀疑被套了别人的策略。
 	if wb := wbNext4AM(); caSt.Until.Sub(wb).Abs() < time.Minute {
-		t.Errorf("★ codearts 的冷却截止 %s 就是 workbuddy 的次日 04:00 —— "+
-			"上游的策略被硬编码到了另一个上游身上", caSt.Until.Format(time.RFC3339))
+		// 通用保守值的量级由上面 50~70 分钟那条判据保证。若它本身与 04:00
+		// 撞车（now+1h 恰好落在 03:00~04:00 之间），这条判据不适用。
+		if d := time.Until(caSt.Until); d >= 50*time.Minute && d <= 70*time.Minute {
+			// 落在通用保守值区间内 ⇒ 是巧合，不是硬编码（上面那条已判过时长）。
+		} else {
+			t.Errorf("★ codearts 的冷却截止 %s 就是 workbuddy 的次日 04:00 —— "+
+				"上游的策略被硬编码到了另一个上游身上", caSt.Until.Format(time.RFC3339))
+		}
 	}
 
 	// ---- 判据 2：workbuddy 必须**仍然**是次日 04:00（回归，逐字不变）----

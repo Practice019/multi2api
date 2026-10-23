@@ -1465,7 +1465,24 @@ async function api(path, opt) {
   const r = await fetch(baseURL() + path, Object.assign({ headers: headers() }, opt || {}));
   const text = await r.text();
   let j = null; try { j = JSON.parse(text); } catch (e) {}
-  if (!r.ok) throw new Error((j && (j.error || j.message)) || text.slice(0, 160) || ('HTTP ' + r.status));
+  // ⚠ j.error 可能是**对象**（OpenAI 错误格式是 {"error":{"code":..,"message":..}}）。
+  // 直接塞进 new Error() 会渲染成 "[object Object]"，真实原因就丢了。
+  // 与 webui-groups.html 的 api() 同一处理（同一个坑不留两处）。
+  if (!r.ok) {
+    let msg = '';
+    if (j) {
+      if (typeof j.error === 'string') {
+        msg = j.error;
+      } else if (j.error && typeof j.error === 'object') {
+        msg = j.error.message || j.error.code || '';
+        if (j.error.code && j.error.message) { msg = j.error.code + ': ' + j.error.message; }
+      }
+      if (!msg && typeof j.message === 'string') { msg = j.message; }
+    }
+    if (!msg) { msg = text.slice(0, 160); }
+    if (!msg) { msg = 'HTTP ' + r.status; }
+    throw new Error(msg);
+  }
   return j === null ? {} : j;
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }

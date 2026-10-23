@@ -72,6 +72,8 @@ func (h *Handler) registerGroups() {
 	// ⚠ 清理**不自动跑**：陈旧模型那项依赖模型目录，而目录会因上游抖动短暂为空，
 	// 自动清理会把用户配好的分组内容一次删光（apikey.PruneModels 的注释里记过同一坑）。
 	h.register("GET /admin/groups/consistency", h.groupsConsistency)
+	// 编辑弹窗的候选模型（与一致性检查同一份来源，避免两边判断不一致）。
+	h.register("GET /admin/groups/catalog", h.groupCatalog)
 	h.register("POST /admin/groups/prune", h.groupsPrune)
 }
 
