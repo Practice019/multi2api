@@ -58,14 +58,50 @@ func modelAllowed(models []string, model string) bool {
 	if len(models) == 0 {
 		return true // 不限制
 	}
-	_, want, _ := gateway.SplitModel(strings.TrimSpace(model))
+	wantProv, want, wantHas := gateway.SplitModel(strings.TrimSpace(model))
 	if want == "" {
 		// 空模型名：白名单生效时不放行，让 403 发生在这里。
-		// 放上去的话上游回 400，而 400 更容易被读成"网关坏了"。
+	// 放上去的话上游回 400，而 400 更容易被读成「网关坏了」。
 		return false
 	}
 	for _, m := range models {
-		if _, got, _ := gateway.SplitModel(strings.TrimSpace(m)); got == want {
+		gotProv, got, gotHas := gateway.SplitModel(strings.TrimSpace(m))
+		if got != want {
+			continue
+		}
+		// ⚠ 白名单条目带上游前缀时，前缀必须一起比。
+		//
+		// # 用户报的 bug（实测复现）
+		//
+		// 白名单 9 条、别名映射 9 条，但 DSH 的模型列表里出现第 10 个：
+		//
+		//	workbuddy-intl/deepseek-v4.1-flash     ← 多出来的
+		//
+		// 而白名单里只有 workbuddy/deepseek-v4.1-flash，没有 -intl。
+		//
+		// 根因：旧实现只比剥过前缀的裸名。SplitModel 按第一个 / 切，
+		// 于是这两个是同一个裸名：
+		//
+	//			workbuddy/deepseek-v4.1-flash      → (workbuddy,      deepseek-v4.1-flash)
+	//			workbuddy-intl/deepseek-v4.1-flash → (workbuddy-intl, deepseek-v4.1-flash)
+		//
+		// 但它们**是两个独立上游**（不同账号池、不同额度、不同模型目录），
+		// 路由时按前缀分派 —— 于是「白名单放行」与「实际打到哪个上游」分叉：
+		// 用户能在列表里看到 -intl 那条、也能调通，但那是他没授权的上游。
+		//
+		// ⇒ 规则：**白名单条目写了前缀就精确匹配前缀；没写前缀才按裸名放行。**
+		//
+		// 这条规则保住了原来的灵活性：用户填 `glm-5.2`（裸名）仍然匹配
+		// 任意上游的 glm-5.2 —— 那是他明确表达的「哪个上游都行」。
+		if !wantHas {
+			// 请求是裸名（不指定上游）：白名单任何一条同名都算匹配。
+			return true
+		}
+		if !gotHas {
+			// 白名单条目是裸名：表示不限上游，同样放行。
+			return true
+		}
+		if gotProv == wantProv {
 			return true
 		}
 	}
