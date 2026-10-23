@@ -507,3 +507,91 @@ func TestAPIKeyModalSelectsGroupsNotModels(t *testing.T) {
 		t.Error("★ 提交体还在发 models —— 后端虽然有兼容，但界面不该再产生它")
 	}
 }
+
+// 页面里**被调用但没有定义**的项目内函数必须为 0。
+//
+// # 这条测试是因为一个真实事故加的（2026-10-24）
+//
+// 我替换「模型选择器」那一整段 JS 时，把三个不相干的函数一起删掉了
+// （akAddMapRow / akRenderMap / akCollectMap —— 别名映射用的），
+// 但调用点还在。后果不是"映射坏了"，而是 **ReferenceError 打断整个 IIFE**：
+// 之后所有 addEventListener 都没执行 ⇒ 界面上每个按钮都点不动。
+//
+// 用户报的是「按钮没用」，而语法门禁全绿 —— 因为语法确实合法，
+// 未定义符号要到运行时才炸。所以需要这条**静态**检查。
+//
+// 判据只查项目内命名习惯的函数（驼峰、ak/render/sync/update/ensure/close/open/save/mp 前缀），
+// 不查浏览器内置（setTimeout/parseInt）与方法调用（.closest/.slice）。
+func TestWebUINoUndefinedFunctionCalls(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("webui.html"))
+	if err != nil {
+		t.Fatalf("读 webui.html: %v", err)
+	}
+	src := string(raw)
+
+	// 收集全部 <script> 块，按出现顺序累积"已定义"集合
+	// （前面的 script 定义的全局函数对后面的可见）。
+	type blk struct{ body string }
+	var blocks []blk
+	idx := 0
+	for {
+		a := strings.Index(src[idx:], "<script>")
+		if a < 0 {
+			break
+		}
+		a += idx
+		b := strings.Index(src[a:], "</script>")
+		if b < 0 {
+			break
+		}
+		b += a
+		blocks = append(blocks, blk{body: src[a+8 : b]})
+		idx = b + 9
+	}
+	if len(blocks) == 0 {
+		t.Fatal("webui.html 里没有 <script> 块")
+	}
+
+	// 浏览器内置 / DOM 方法：不是项目内函数，跳过。
+	skip := map[string]bool{
+		"setTimeout": true, "setInterval": true, "clearTimeout": true, "clearInterval": true,
+		"requestAnimationFrame": true, "parseInt": true, "parseFloat": true,
+		"isNaN": true, "isFinite": true, "encodeURIComponent": true, "decodeURIComponent": true,
+		"querySelector": true, "querySelectorAll": true, "closest": true, "actionPath": true,
+		"fetchChunk": true, "onChunk": true, "onIdle": true, "dailyBalance": true,
+		"pendingCount": true, "reloadProvider": true, "toFixed": true, "slice": true,
+	}
+
+	defined := map[string]bool{}
+	for i, b := range blocks {
+		local := map[string]bool{}
+		for _, m := range regexp.MustCompile(`function\s+([A-Za-z_$][\w$]*)\s*\(`).FindAllStringSubmatch(b.body, -1) {
+			local[m[1]] = true
+		}
+		for _, m := range regexp.MustCompile(`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=`).FindAllStringSubmatch(b.body, -1) {
+			local[m[1]] = true
+		}
+		// 只查项目内命名习惯：ak*/render*/sync*/update*/ensure*/close*/open*/save*/mp*
+		//
+		// ⚠ Go 的 regexp 是 RE2，**不支持 lookbehind**（(?<!...) 会 panic）。
+		// 所以把「前一个字符」显式吃进捕获组，用第 2 组拿函数名。
+		// 前缀 (^|[^.\w$]) 保证不会把 obj.method( 里的 method 算进来。
+		callRe := regexp.MustCompile(`(^|[^.\w$])((?:ak|render|sync|update|ensure|close|open|save|mp)[A-Za-z0-9]*)\s*\(`)
+		var missing []string
+		seen := map[string]bool{}
+		for _, m := range callRe.FindAllStringSubmatch(b.body, -1) {
+			n := m[2]
+			if seen[n] || skip[n] || local[n] || defined[n] {
+				continue
+			}
+			seen[n] = true
+			missing = append(missing, n)
+		}
+		if len(missing) > 0 {
+			t.Errorf("★ script[%d] 调用了未定义的函数 %v —— 运行时 ReferenceError 会打断整个 IIFE，界面上所有按钮都会失效", i, missing)
+		}
+		for d := range local {
+			defined[d] = true
+		}
+	}
+}
