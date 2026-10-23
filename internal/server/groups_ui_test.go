@@ -632,3 +632,72 @@ func TestModelsEndpointSetsServiceHeader(t *testing.T) {
 		t.Error("★ /v1/models 没打 X-Service 头 —— 代理 503 与网关 503 将无法区分")
 	}
 }
+
+// 模型对外名必须是「每个已选模型自动一行、左右默认相同、不可删除」。
+//
+// # 用户要求的原话（2026-10-24 第二次明确）
+//
+//   「每一个我选择的模型，对外模型都需要有一行，而且这个是自动的……
+//    左边右边都是一样的，就是这个模型原来的，然后用户再根据这个去进行一些修改……
+//    而且是固定必须有的，然后也不能删除」
+//
+// # 为什么要守
+//
+// 我第一版做成了自由编辑表（+ 新增一行 / × 删除 / 左右都手填）。那是"通用映射编辑器"，
+// 而用户要的是"当前对外名的全貌"：每个模型都在列表里，想改哪个改哪个。
+// 前者会让用户不知道"没列出来的模型对外叫什么"。
+func TestGroupsAliasRowsAreModelDriven(t *testing.T) {
+	ui := readGroupsUI(t)
+
+	// ① 不能有「新增一行」按钮 —— 行由模型集合决定。
+	if strings.Contains(ui, "addMapRow()") || strings.Contains(ui, "新增一行") {
+		t.Error("★ 别名表还有「新增一行」入口 —— 它应当是模型驱动的，不能手工加行")
+	}
+	// ② 不能有删除按钮。
+	if strings.Contains(ui, "gmap-x") || strings.Contains(ui, "删除这行") {
+		t.Error("★ 别名表还有删除按钮 —— 用户明确要求不可删除")
+	}
+
+	// ③ renderMapRows 必须遍历 picked（= 已选模型），而不是遍历已保存的 map。
+	src := sliceFuncBody(t, ui, "function renderMapRows(")
+	if src == "" {
+		t.Fatal("找不到 renderMapRows")
+	}
+	if !strings.Contains(src, "Array.from(picked)") {
+		t.Error("★ renderMapRows 没有按「已选模型」生成行 —— 用户选中的模型不会出现在表里")
+	}
+
+	// ④ 左侧必须只读（它的值由模型决定，不是用户填的）。
+	add := sliceFuncBody(t, ui, "function addMapRow(")
+	if !strings.Contains(add, "readonly") {
+		t.Error("★ 左侧内部名不是只读 —— 用户改它等于改分组内容，那是上面模型选择器的事")
+	}
+	// ⑤ 右侧默认等于左侧（用户：「左边右边都是一样的」）。
+	if !strings.Contains(add, "esc(right || left || '')") && !strings.Contains(add, "right || left") {
+		t.Error("★ 右侧没有默认填成左侧 —— 用户要求默认左右相同")
+	}
+
+	// ⑥ 勾选模型后要重建（否则新选的模型没有对应行）。
+	if !strings.Contains(ui, "renderMapRows(currentMapSnapshot())") {
+		t.Error("★ 勾选模型后没有重建别名表 —— 新选的模型不会自动出现一行")
+	}
+	// ⑦ 重建前要快照，否则用户改好的对外名会被清掉。
+	if !strings.Contains(ui, "function currentMapSnapshot(") {
+		t.Error("★ 缺少 currentMapSnapshot —— 每次勾选模型都会把已改的对外名清空")
+	}
+}
+
+// 恒等映射（左右相同）不写进 model_map。
+//
+// 为什么：它是无信息的重复项。写进去会让 model_map 里堆一堆 X→X，
+// 而 publicNameFor 每次查表都多命中一次（结果不变但白查）。
+// 后端 normalizeModelMap 也会丢，两道防线。
+func TestGroupsAliasSkipsIdentityMapping(t *testing.T) {
+	src := sliceFuncBody(t, readGroupsUI(t), "function collectMap(")
+	if src == "" {
+		t.Fatal("找不到 collectMap")
+	}
+	if !strings.Contains(src, "pub === internal") {
+		t.Error("★ collectMap 没有跳过「右侧等于左侧」的行 —— model_map 会堆满恒等映射")
+	}
+}

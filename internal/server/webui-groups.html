@@ -1381,16 +1381,13 @@ function mpEsc(s) {
          为什么跟着分组走：别名的语义是"这个模型对外叫什么"，而"哪些模型"
          本来就是分组定义的。放 key 上会导致同一模型被两把 key 引用时要配两遍，
          而且配了但模型不在分组里时永远不生效（判定链先过分组）。 -->
-    <label>模型对外名（可选）</label>
+    <label>模型对外名</label>
     <div class="full">
       <div class="muted" style="font-size:12px;margin-bottom:4px">
-        左边内部模型名 → 右边对外显示名。不填则对外就是内部名。
+        每个已选模型自动一行。左边是内部模型名（固定），右边是对外显示名 ——
+        默认与左边相同，改右边就能改对外叫法。
       </div>
       <div id="gMapRows"></div>
-      <datalist id="gMapModelOpts"></datalist>
-      <div style="margin-top:6px">
-        <button type="button" onclick="addMapRow()" style="padding:2px 10px;font-size:12px">+ 新增一行</button>
-      </div>
     </div>
   </div>
   <div class="dlg-f">
@@ -1619,6 +1616,8 @@ function renderChoices() {
 function pickOne(cb) {
   const m = cb.getAttribute('data-m');
   if (cb.checked) { picked.add(m); } else { picked.delete(m); }
+  // 已选集合变了 ⇒ 别名表跟着重建（行数由模型数决定）。
+  renderMapRows(currentMapSnapshot());
   renderPicked();
 }
 
@@ -1633,6 +1632,8 @@ function pickAll(on) {
   const scope = mpFilter(catalog, prov, q).map(function (e) { return e.id; });
   scope.forEach(function (m) {
     if (on) { picked.add(m); } else { picked.delete(m); }
+  // 已选集合变了 ⇒ 别名表跟着重建（行数由模型数决定）。
+  renderMapRows(currentMapSnapshot());
   });
   renderChoices();
   renderPicked();
@@ -1649,6 +1650,8 @@ function mergeManual() {
   raw.split(/[,\n\r]+/).forEach(function (s) {
     const m = s.trim();
     if (m) { picked.add(m); }
+  // 已选集合变了 ⇒ 别名表跟着重建（行数由模型数决定）。
+  renderMapRows(currentMapSnapshot());
   });
   el.value = '';
   renderChoices();
@@ -1687,6 +1690,8 @@ $('gPickedChips').addEventListener('click', function (ev) {
   if (!btn) { return; }
   const m = btn.getAttribute('data-unpick');
   picked.delete(m);
+  // 已选集合变了 ⇒ 别名表跟着重建（行数由模型数决定）。
+  renderMapRows(currentMapSnapshot());
   renderChoices();
   renderPicked();
 });
@@ -1703,8 +1708,8 @@ async function openForm(id) {
   $('f-manual').value = '';
   // 编辑时把已有模型放进已选集合；新增时从空开始。
   picked = new Set(g ? (g.models || []) : []);
-  // 别名回填：编辑时按 model_map 生成行；新增时 0 行（用户要「一开始是没有的」）。
-  renderMapRows(g ? g.model_map : null);
+  // 别名表按已选模型自动生成（每个模型一行，右侧默认=内部名）。
+  // 编辑时用已保存的 model_map 回填右侧 —— 那些是用户改过的对外名。
   renderPicked();
   $('gChoices').innerHTML = '<span class="muted" style="font-size:12px">正在读取模型目录…</span>';
   $('dlg').showModal();
@@ -1726,61 +1731,115 @@ function closeForm() { $('dlg').close(); }
 // ⚠ 右侧（对外名）必须**唯一**：两个内部名映射到同一个对外名，调用方发出那
 // 个名字时我们无法决定该走哪个上游。收集时发现重复就报错，不静默取其一。
 
+// ---- 模型对外名（别名）-----------------------------------------------
+//
+// # 用户要的形态（2026-10-24，第二次明确）
+//
+//   「每一个我选择的模型，对外模型都需要有一行，而且这个是自动的……
+//    左边右边都是一样的，就是这个模型原来的，然后用户再根据这个去进行一些修改……
+//    而且是固定必须有的，然后也不能删除。因为有没有已经无所谓了嘛，
+//    自动生成的也是左边右边都一样的嘛，有没有其实无所谓的，但是用户可以修改」
+//
+// 所以这里**不是**一个自由编辑的表：
+//   · 行由「已选模型」自动派生 —— 选了几个模型就有几行，顺序一致
+//   · 左侧固定显示模型名（只读），右侧可改（改成你想对外显示的名字）
+//   · 不能新增、不能删除 —— 行数只由模型集合决定
+//
+// # 为什么不干脆不要这张表
+//
+// 因为**有没有这一行在语义上是有区别的**，而用户要的正是消除这个区别：
+//   · 没有行 = 对外就是这个内部名
+//   · 有行且左右相同 = 同上（等价）
+// 把每一行都自动建出来、右侧默认填内部名，用户看到的就是"当前对外名"的全貌，
+// 想改哪个改哪个。若只列出"已经改过名的"，用户就得先猜"没列出来的是什么"。
+//
+// ⚠ 提交时**左右相同的那行不写进 model_map**：
+//   恒等映射没有信息量，写进去只会让 model_map 里堆一堆 X→X，
+//   而 publicNameFor 每次查表都会多命中一次（虽然结果不变）。
+//   后端 normalizeModelMap 也会主动丢掉这类项，两道防线。
+
+// addMapRow 建一行。left 是内部名（只读），right 是对外名（可编辑）。
 function addMapRow(left, right) {
   const host = $('gMapRows');
   if (!host) return;
   const row = document.createElement('div');
   row.className = 'gmap-row';
+  row.setAttribute('data-internal', left);
   row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:5px';
+  // 左侧只读：它由「已选模型」决定，用户改它等于改分组内容 —— 那是上面那个模型选择器的事。
+  // 用 input readonly 而不是纯文本：长名字需要能横向滚动/选中复制。
   row.innerHTML =
-    '<input class="gmap-l" list="gMapModelOpts" spellcheck="false" placeholder="内部模型名"' +
-    ' value="' + esc(left || '') + '" style="flex:1;font-size:12px">' +
+    '<input class="gmap-l" readonly spellcheck="false"' +
+    ' value="' + esc(left || '') + '"' +
+    ' title="内部模型名（由上面的已选模型决定，不可改）"' +
+    ' style="flex:1;font-size:12px;opacity:.75;cursor:default">' +
     '<span class="muted">→</span>' +
-    '<input class="gmap-r" spellcheck="false" placeholder="对外显示名"' +
-    ' value="' + esc(right || '') + '" style="flex:1;font-size:12px">' +
-    '<button type="button" class="gmap-x" title="删除这行" style="padding:1px 8px;font-size:12px">×</button>';
+    '<input class="gmap-r" spellcheck="false" placeholder="对外显示名（默认同上）"' +
+    ' value="' + esc(right || left || '') + '"' +
+    ' title="改成你想对外的名字；清空或与左侧相同 = 不修改"' +
+    ' style="flex:1;font-size:12px">';
   host.appendChild(row);
-  const btn = row.querySelector('.gmap-x');
-  if (btn) btn.onclick = () => row.remove();
 }
 
-// renderMapRows 用 map 重建整个列表（编辑回填 / 新建清空）。
+// currentMapSnapshot 取当前表里**用户已改过**的映射（对外名 → 内部名）。
+//
+// # 为什么重建前要先快照
+//
+// 别名表会在"勾选模型"时重建（模型数变了行数就要变）。若直接 renderMapRows(null)，
+// 用户刚改好的对外名会被一起清掉 —— 勾一个模型就把前面的编辑全丢了。
+//
+// 所以重建时把当前表读回来当回填值：已有的保留，新勾的用默认（= 内部名）。
+function currentMapSnapshot() {
+  const out = {};
+  const rows = document.querySelectorAll('#gMapRows .gmap-row');
+  rows.forEach(function (row) {
+    const internal = row.getAttribute('data-internal') || '';
+    const r = row.querySelector('.gmap-r');
+    const pub = ((r && r.value) || '').trim();
+    if (internal && pub && pub !== internal) out[pub] = internal;
+  });
+  return out;
+}
+
+// renderMapRows 按「已选模型」重建整张表。
+//
+// 这是本表唯一的渲染入口 —— 模型勾选变化、编辑回填、目录加载完成都走它。
+// 参数 m 是已保存的 model_map（对外名 → 内部名），用来回填右侧。
 function renderMapRows(m) {
   const host = $('gMapRows');
   if (!host) return;
+  const saved = m || {};
+  // 反查表：内部名 → 已配的对外名（saved 的方向是 对外名 → 内部名）
+  const pubOf = {};
+  for (const pub in saved) {
+    const internal = saved[pub];
+    if (internal) pubOf[internal] = pub;
+  }
   host.innerHTML = '';
-  const pairs = Object.entries(m || {});
-  // 一开始 0 行是刻意的（用户要「一开始是没有的」）：给空行会被误读成"必须填"。
-  for (const [pub, internal] of pairs) addMapRow(internal, pub);
-  syncMapDatalist();
+  const models = Array.from(picked).sort();
+  if (!models.length) {
+    host.innerHTML = '<div class="muted" style="font-size:12px;padding:4px 0">' +
+      '先在上面选模型 —— 每个已选模型会自动在这里出现一行，右侧可以改对外显示的名字。</div>';
+    return;
+  }
+  for (const internal of models) addMapRow(internal, pubOf[internal]);
 }
 
-// syncMapDatalist 左侧候选 = 当前已选的模型（别名只能给已选的模型起）。
-function syncMapDatalist() {
-  const dl = $('gMapModelOpts');
-  if (!dl) return;
-  dl.innerHTML = Array.from(picked).sort().map(function (m) {
-    return '<option value="' + esc(m) + '"></option>';
-  }).join('');
-}
-
-// collectMap 收集成 { map, invalid }。invalid 非空时调用方应拦下保存。
+// collectMap 收集成 { map, invalid }。
+//
+// 只收**改过的**（右侧与左侧不同）—— 恒等映射没有信息量，写进去只是噪音。
 function collectMap() {
   const rows = document.querySelectorAll('#gMapRows .gmap-row');
   const map = {};
   const invalid = [];
   const seenPub = new Set();
   rows.forEach(function (row) {
-    const l = row.querySelector('.gmap-l');
+    const internal = row.getAttribute('data-internal') || '';
     const r = row.querySelector('.gmap-r');
-    const internal = ((l && l.value) || '').trim();
-    const pub = ((r && r.value) || '').trim();
-    if (!internal && !pub) return;              // 整行空 = 忽略
-    if (!internal || !pub) {
-      invalid.push('内部名和对外名要么都填、要么都空（当前不完整）');
-      return;
-    }
-    if (internal === pub) return;               // 恒等映射无意义，跳过
+    let pub = ((r && r.value) || '').trim();
+    if (!internal) return;
+    // 右侧清空 = 对外用内部名（等价于不配别名）。
+    if (!pub || pub === internal) return;
     if (seenPub.has(pub)) {
       invalid.push('对外名 "' + pub + '" 重复了 —— 同一个名字不能指向两个模型');
       return;
