@@ -9708,6 +9708,67 @@ let loginProvider = '';
     if (hint) hint.textContent = '';
   }
 
+  // ---- 模型对外名映射（内部名 ↔ 对外名）---------------------------------
+  //
+  // ⚠ 这三个函数是从 git 历史恢复回来的（2026-10-24）。
+  //
+  // 我上一轮替换整段 JS 时把它们**一起删掉了**，但调用点还在
+  // （akRenderMap 在弹窗打开时、akCollectMap 在保存时、akAddMapRow 在按钮上）。
+  // 后果不是"映射功能坏了"，而是 **ReferenceError 打断整个 IIFE** ——
+  // 之后所有事件绑定都没执行，界面上每个按钮都点不动。
+  //
+  // 教训：替换"一大段"之前先列出这一段里定义了哪些符号，替换后核对
+  // 「还有谁在调它们」。语法门禁只查能不能解析，查不出未定义符号。
+
+  function akAddMapRow(left, right) {
+      const host = $('akMapRows');
+      if (!host) return;
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.cssText = 'gap:6px;margin-bottom:4px;align-items:center';
+      row.innerHTML =
+        `<input class="akmap-l" list="akMapModelOpts" spellcheck="false" placeholder="内部模型名"` +
+        ` value="${esc(left || '')}"` +
+        ` style="flex:1;min-width:0;font-size:12px;font-family:ui-monospace,Consolas,monospace">` +
+        `<span class="dim" style="font-size:12px;flex:none">&rarr;</span>` +
+        `<input class="akmap-r" spellcheck="false" placeholder="对外显示名"` +
+        ` value="${esc(right || '')}"` +
+        ` style="flex:1;min-width:0;font-size:12px;font-family:ui-monospace,Consolas,monospace">` +
+        `<button type="button" class="akmap-del" style="padding:2px 8px;font-size:12px;flex:none;color:var(--err)">&times;</button>`;
+      row.querySelector('.akmap-del').onclick = () => row.remove();
+      host.appendChild(row);
+      // 左侧候选要跟着当前的勾选更新
+      syncAKMapDatalist();
+    }
+
+  function akRenderMap(m) {
+      const host = $('akMapRows');
+      if (!host) return;
+      host.innerHTML = '';
+      const pairs = Object.keys(m || {}).map(alias => [String(m[alias] || ''), String(alias)]);
+      // 按内部名排序：编辑一个已有 key 时，行的顺序稳定可预期（不是哈希序）
+      pairs.sort((a, b) => a[0].localeCompare(b[0]));
+      for (const [left, right] of pairs) akAddMapRow(left, right);
+      syncAKMapDatalist();
+    }
+
+  function akCollectMap() {
+      const map = {}, invalid = [];
+      document.querySelectorAll('#akMapRows .akmap-l').forEach(inp => {
+        const row = inp.parentElement;
+        const left = String(inp.value || '').trim();          // 内部模型名
+        const right = String(row.querySelector('.akmap-r').value || '').trim();  // 对外名
+        if (!left && !right) return;                          // 整行空 ⇒ 忽略
+        if (!left || !right) {
+          invalid.push('「' + (left || '空') + ' → ' + (right || '空') + '」只填了一半');
+          return;
+        }
+        if (left === right) return;                           // 等价于不映射
+        map[right] = left;                                    // ⚠ 转置：对外名 → 内部名
+      });
+      return { map, invalid };
+    }
+
   function syncAKMapDatalist() {
     // 别名映射的左侧候选 = 已选分组里的模型并集。
     // 以前取「已勾选的模型」，现在取「已选分组的模型」。
