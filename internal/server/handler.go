@@ -388,6 +388,8 @@ func NewHandler(cfg Config) *Handler {
 	// 内嵌本地控制台（同源，无需 CORS）。
 	// 渠道管理页：与 /ui 同一套身份判据（管理面，不是公开页）。
 	h.mux.HandleFunc("GET /ui/channels", h.channelsUI)
+	// 分组管理页：与 /ui/channels 同一套身份判据（同为管理面）。
+	h.mux.HandleFunc("GET /ui/groups", h.groupsUI)
 	h.mux.HandleFunc("GET /ui", h.ui)
 	// 带尾斜杠的 /ui/ 也接受（用户习惯打 `http://host:port/ui/?token=...`）：
 	// 302 到无斜杠的规范路径，查询参数（如 ?token=）原样保留。
@@ -1805,7 +1807,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 宁可让上游按原样拒绝并给出它的错误，也不要在这里造一个假错误。
 	}
 
-
 	// 出站前归一化 reasoning_effort（缺陷 1：off 在 workbuddy 系必挂 400）。
 	//
 	// # 用户实测
@@ -2173,7 +2174,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if peek.Stream {
 				done, loopStats, werr = h.runToolLoopStream(w, toolLoopParams{
 					ext:        ext,
-						scrub:      loopScrub,
+					scrub:      loopScrub,
 					providerID: reqProvider,
 					uid:        acct.UID,
 					body:       outBody,
@@ -2184,7 +2185,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			} else {
 				done, loopStats, werr = h.runToolLoop(w, toolLoopParams{
 					ext:        ext,
-						scrub:      loopScrub,
+					scrub:      loopScrub,
 					providerID: reqProvider,
 					uid:        acct.UID,
 					body:       outBody,
@@ -2235,13 +2236,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if done {
 				// 已经写过响应了（含状态码），直接收工。
 				h.cfg.Pool.NoteSuccess(acct.UID)
-					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
-					//
-					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
-					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
-					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
-					//   否则"成功即恢复"是条死条款。
-					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
+				// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+				//
+				// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+				//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+				//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+				//   否则"成功即恢复"是条死条款。
+				h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 				if sessKey != "" && h.cfg.Session != nil {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
@@ -2464,13 +2465,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// `200 + 一帧没有 choices 的空壳 + [DONE]` —— 正是"外部调用 api
 			// 只有 codearts 报错"的形态。
 			stats := newChatStatsReaderSince(rc, st.start)
-					// 脱敏回调：只在客户端用配了别名的普通 API Key 时生效。
-		// 管理密钥传 nil ⇒ 帧原样转发（用户要求「对话密钥按原来的上游即可」）。
-		var streamScrub wire.StreamScrubber
-		if scrubResp {
-			streamScrub = func(obj map[string]any) { scrubObject(obj, publicModel) }
-		}
-		serr := wire.StreamScrubbed(w, stats, streamScrub)
+			// 脱敏回调：只在客户端用配了别名的普通 API Key 时生效。
+			// 管理密钥传 nil ⇒ 帧原样转发（用户要求「对话密钥按原来的上游即可」）。
+			var streamScrub wire.StreamScrubber
+			if scrubResp {
+				streamScrub = func(obj map[string]any) { scrubObject(obj, publicModel) }
+			}
+			serr := wire.StreamScrubbed(w, stats, streamScrub)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
 			st.usage = stats.Usage()
@@ -2520,13 +2521,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 到这里才是真正的成功流（serr 非 nil 的情形只有"上游空流"，
 			// 那一帧 error + [DONE] 已由 Stream 写出，状态码必须保持 200）。
 			h.cfg.Pool.NoteSuccess(acct.UID)
-					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
-					//
-					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
-					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
-					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
-					//   否则"成功即恢复"是条死条款。
-					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
+			// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+			//
+			// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+			//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+			//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+			//   否则"成功即恢复"是条死条款。
+			h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 			// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 			if sessKey != "" && h.cfg.Session != nil {
 				h.cfg.Session.Bind(sessKey, acct.UID)
@@ -2559,13 +2560,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
-					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
-					//
-					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
-					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
-					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
-					//   否则"成功即恢复"是条死条款。
-					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
+		// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+		//
+		// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+		//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+		//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+		//   否则"成功即恢复"是条死条款。
+		h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 		if sessKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}

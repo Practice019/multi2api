@@ -2590,6 +2590,27 @@ header h1{letter-spacing:0}
       border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
   </section>
 
+  <!-- 分组（PLAN-groups P6）：分组是「一批模型」的具名集合，API Key 引用它来决定
+       "这把 key 能用哪些模型"。
+
+       ⚠ 为什么用 <iframe> 而不是把表格搬进来（与渠道页同一条理由）：
+       那一页自带表格状态、一致性检查报告与删除时的权限放大告知，搬进来要在这份
+       SPA 里重建一遍，且会给本文件新增内联脚本段（前端语法门禁用现成的更稳）。
+       iframe 与 /ui 同一套身份判据（同一 cookie），无需额外凭据。
+
+       ⚠ 位置：紧邻「渠道」——两者是同一件事的两半（渠道回答"谁提供模型"，
+       分组回答"这组 key 能用哪些模型"），隔着放会让人以为它们无关。 -->
+  <section data-key="groups">
+    <h2>分组
+      <span class="spacer"></span>
+      <button onclick="document.getElementById('grpFrame').src='/ui/groups?t='+Date.now()" style="padding:3px 10px;font-size:12px">刷新</button>
+    </h2>
+    <p class="dim" style="font-size:12px;margin:2px 0 6px">分组是「一批模型」的集合。给 API Key
+      分配分组后，那把 key 只看得见、只调得动分组里的模型。</p>
+    <iframe id="grpFrame" src="/ui/groups" style="width:100%;height:calc(100vh - 190px);min-height:460px;
+      border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
+  </section>
+
   <!-- API 管理（对标 new-api 令牌体系）：放在仪表盘之后 —— 网关的"调用凭据"
        紧跟"网关状态"，是运维最先想看的两个面。 -->
   <section data-key="apikeys">
