@@ -112,7 +112,7 @@ func TestChannelStreamByteIdentity(t *testing.T) {
 			w := newCaptureWriter()
 			cap := newStreamUsage(time.Now().Add(-3 * time.Millisecond))
 			h := &Handler{}
-			h.writeChannelStream(w, &http.Request{}, mkForward(body), cap)
+			h.writeChannelStream(w, &http.Request{}, mkForward(body), cap, false)
 
 			// ★ 核心断言：字节完全一致
 			if got := w.body.String(); got != c.input {
@@ -146,7 +146,7 @@ func TestChannelStreamNilCapture(t *testing.T) {
 	input := sseJoin(`{"choices":[{"delta":{"content":"x"}}]}`)
 	w := newCaptureWriter()
 	h := &Handler{}
-	h.writeChannelStream(w, &http.Request{}, mkForward(bytes.NewReader([]byte(input))), nil)
+	h.writeChannelStream(w, &http.Request{}, mkForward(bytes.NewReader([]byte(input))), nil, false)
 	if got := w.body.String(); got != input {
 		t.Fatalf("nil 采集器下转发字节应完全一致，got %q", got)
 	}

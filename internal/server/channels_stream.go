@@ -28,7 +28,11 @@ import (
 //   - 放在 Flush 之后则对客户端延迟**零影响**，而采集结果一样（这一块已经发出去了）。
 //
 // 这就是"旁路"的全部含义：采集器的任何开销都不进入客户端的等待路径。
-func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw channelForward, cap *streamUsage) {
+// writeChannelStream 把渠道响应写回客户端。
+//
+// scrub=true 时按 fw.PublicModel 改写 model、并把 id 换成 chatcmpl-gw-*；
+// scrub=false（管理密钥）时字节原样透传 —— 用户要求「对话密钥按原来的上游即可」。
+func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw channelForward, cap *streamUsage, scrub bool) {
 	defer fw.Stream.Body.Close()
 
 	if ct := upstreamContentType(fw); ct != "" {
@@ -67,7 +71,7 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 				cap.Feed(buf[:n])
 			}
 			pending = append(pending, buf[:n]...)
-			out, rest := h.scrubSSELines(pending, publicModel)
+			out, rest := h.scrubSSELines(pending, publicModel, scrub)
 			pending = rest
 			if len(out) > 0 {
 				if _, werr := w.Write(out); werr != nil {
@@ -87,12 +91,12 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 			// 实测 chat 响应里 model=monkeycode-basic/deepseek-flash 原样回给了客户端。
 			if len(pending) > 0 {
 				trimmed := bytes.TrimSpace(pending)
-				if len(trimmed) > 0 && trimmed[0] == 0x7b {
+				if len(trimmed) > 0 && trimmed[0] == 0x7b && scrub {
 					// 整块 JSON：脱敏后写。
 					_, _ = w.Write(scrubChatResponse(trimmed, publicModel))
 				} else {
 					// SSE 尾巴：按行脱敏后写。
-					if out2, _ := h.scrubSSELines(append(pending, '\n'), publicModel); len(out2) > 0 {
+					if out2, _ := h.scrubSSELines(append(pending, '\n'), publicModel, scrub); len(out2) > 0 {
 						_, _ = w.Write(out2)
 					} else {
 						_, _ = w.Write(pending)
@@ -114,7 +118,7 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 //
 // 非 SSE（非流式的整块 JSON）也走这里：它没有换行分隔，整块会留在 rest 里，
 // 由收尾那段原样发出去。那条路径由调用方在写之前用 scrubChatResponse 处理。
-func (h *Handler) scrubSSELines(pending []byte, publicModel string) (out, rest []byte) {
+func (h *Handler) scrubSSELines(pending []byte, publicModel string, scrub bool) (out, rest []byte) {
 	if len(pending) == 0 {
 		return nil, pending
 	}
@@ -137,6 +141,14 @@ func (h *Handler) scrubSSELines(pending []byte, publicModel string) (out, rest [
 		}
 		payload := bytes.TrimSpace(trimmed[len("data:"):])
 		if len(payload) == 0 || payload[0] != 0x7b {
+			out = append(out, line...)
+			continue
+		}
+		if !scrub {
+			// 管理密钥：字节原样透传（不解析、不重编码）。
+			//
+			// ⚠ 连"解析后重新序列化"都不做：那会改变键顺序与数字格式，
+			// 而用户要的是"按原来的上游即可"—— 包括它的字节形态。
 			out = append(out, line...)
 			continue
 		}

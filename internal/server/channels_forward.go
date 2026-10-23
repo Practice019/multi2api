@@ -20,6 +20,7 @@
 package server
 
 import (
+	"strings"
 	"context"
 	"encoding/json"
 	"errors"
@@ -82,18 +83,42 @@ func (h *Handler) channelServes(model string) bool {
 //
 // attempt=0 即"第一次尝试"。带重试的调用方用 forwardViaChannelAttempt 递增它换档 ——
 // 之所以分两个函数：既有调用点（入口 + 各测试）都只关心"发一次"，不该被迫传一个恒为 0 的参数。
+// forwardViaChannel 保留原签名：publicModel 同时用作「匹配名」与「对外名」。
+//
+// 只在两者**不同**时才需要 forwardViaChannelAs（配了别名的场景：
+// 匹配用内部名、对外回显用别名）。
 func (h *Handler) forwardViaChannel(ctx context.Context, publicModel string, body []byte) (channelForward, error) {
-	return h.forwardViaChannelAttempt(ctx, publicModel, body, 0)
+	return h.forwardViaChannelAs(ctx, publicModel, publicModel, body)
 }
 
-// forwardViaChannelAttempt attempt 递增即换下一优先级档（new-api 的"第 n 次重试走第 n 档"）。
+// forwardViaChannelAs 分别指定「匹配名」与「对外回显名」。
+//
+// matchName   用于 channelroute.Plan 查渠道（必须是渠道声明的上游名 / 别名）
+// displayName 填进 fw.PublicModel，脱敏时回填到响应 model 字段
+//
+// 为什么需要分开：配了 model_map 之后，客户端发 `007/xxx`（公开名），
+// resolveModelAlias 会把它换成内部名再交给渠道匹配；而响应该回显
+// 客户端发来的 `007/xxx`，不是内部名。
+func (h *Handler) forwardViaChannelAs(ctx context.Context, matchName, displayName string, body []byte) (channelForward, error) {
+	return h.forwardViaChannelAttemptAs(ctx, matchName, displayName, body, 0)
+}
+
+// forwardViaChannelAttempt 保留原签名（匹配名 = 对外名）。
 func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel string, body []byte, attempt int) (channelForward, error) {
+	return h.forwardViaChannelAttemptAs(ctx, publicModel, publicModel, body, attempt)
+}
+
+// forwardViaChannelAttemptAs attempt 递增即换下一优先级档（new-api 的「第 n 次重试走第 n 档」）。
+//
+// matchName   渠道匹配用的名字（渠道声明的上游名 / 别名）
+// displayName 对外回显名（填进 fw.PublicModel，脱敏时回填响应 model 字段）
+func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, displayName string, body []byte, attempt int) (channelForward, error) {
 	var zero channelForward
 	if h.cfg.Channels == nil {
 		return zero, errNoChannelMode
 	}
 	group := channelstore.DefaultGroup
-	cands, err := channelroute.Plan(h.cfg.Channels, group, publicModel)
+	cands, err := channelroute.Plan(h.cfg.Channels, group, matchName)
 	if err != nil {
 		// 默认收紧：没有任何启用渠道能服务这个名字 ⇒ 明确失败（不回落、不猜）
 		return zero, err
@@ -151,13 +176,21 @@ func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel stri
 		h.autoDisableKeyOnAuthError(cand.Channel.ID, keyIdx, err)
 		return zero, err
 	}
-	return channelForward{
+	fw := channelForward{
 		Stream: cs, ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
 		UpstreamModel: cand.UpstreamModel,
-		PublicModel:   publicModel,
+		PublicModel:   matchName,
 		// 打码后的 key 填进日志 UID 列（完整 key 绝不落盘）
 		KeyMask: channelstore.MaskKey(key),
-	}, nil
+	}
+	// 对外回显名：匹配用的是 matchName，但客户端要看到自己发来的名字。
+	//
+	// ⚠ 这是 001 泄露 csg/ 的根因：原实现把匹配名同时当对外名，
+	//   于是配了别名之后响应 model 回填的还是上游内部名。
+	if strings.TrimSpace(displayName) != "" {
+		fw.PublicModel = displayName
+	}
+	return fw, nil
 }
 
 // pickCandidate 按 new-api 的选路语义从候选里挑一条。

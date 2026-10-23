@@ -116,11 +116,11 @@ func TestScrubSSELinesHandlesSplitFrames(t *testing.T) {
 	full := []byte("data: {\"model\":\"upstream-real\",\"id\":\"chatcmpl-x\"}\n\n")
 	// 从中间切开。
 	cut := len(full) / 2
-	out1, rest := h.scrubSSELines(full[:cut], "pub")
+	out1, rest := h.scrubSSELines(full[:cut], "pub", true)
 	if len(out1) != 0 {
 		t.Error("未构成完整行时不该输出任何字节")
 	}
-	out2, _ := h.scrubSSELines(append(rest, full[cut:]...), "pub")
+	out2, _ := h.scrubSSELines(append(rest, full[cut:]...), "pub", true)
 	joined := string(out1) + string(out2)
 	if !strings.Contains(joined, "pub") {
 		t.Errorf("拆帧后没脱敏，输出: %q", joined)
