@@ -28,6 +28,7 @@ const PAGES = [
   'internal/server/webui.html',
   'internal/server/webui-login.html',
   'internal/server/webui-channels.html',
+  'internal/server/webui-groups.html',
 ];
 
 function eolOf(text) {
