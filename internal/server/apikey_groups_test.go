@@ -182,3 +182,80 @@ func TestMultipleGroupsUnion(t *testing.T) {
 		t.Errorf("目录应剩 2 条（m-a / m-b），实际 %v", got)
 	}
 }
+
+// TestModelsListNarrowedByGroups P3：/v1/models 只剩分组内的模型。
+//
+// 走的是**真实组装链**（filterModelsForRequest → applyPublicNames），
+// 而不是只调 filter —— 目录有两个改名的出口，只测其中一个会漏掉
+// "过滤对了但改名后名字变了"这种形态（本仓踩过一次）。
+func TestModelsListNarrowedByGroups(t *testing.T) {
+	h := groupFixture(t, map[string][]string{
+		"g-a": {"x", "y"},
+	})
+	k, _ := h.cfg.APIKeys.Create("app", 0, 0, nil)
+	if err := h.cfg.APIKeys.UpdateWithGroups(k.ID, nil, nil, nil, []string{"g-a"}); err != nil {
+		t.Fatal(err)
+	}
+	r := reqAs(t, k.ID)
+
+	// 真实目录里有 x / y / z
+	catalog := []map[string]any{
+		{"id": "x", "object": "model"},
+		{"id": "y", "object": "model"},
+		{"id": "z", "object": "model"},
+	}
+	got := h.applyPublicNames(r, h.filterModelsForRequest(r, catalog))
+	names := make([]string, 0, len(got))
+	for _, m := range got {
+		names = append(names, m["id"].(string))
+	}
+	if len(names) != 2 || names[0] != "x" || names[1] != "y" {
+		t.Fatalf("★ 目录应只剩分组里的 x/y，实际 %v", names)
+	}
+	for _, n := range names {
+		if n == "z" {
+			t.Error("不在分组里的 z 不该出现在列表中")
+		}
+	}
+}
+
+// TestModelsListSkipsGroupsModelsAbsentFromCatalog P3 边界：
+// 分组里写了、但目录里**不存在**的模型不该出现。
+//
+// 分组是「允许范围」不是「保证可用」（PLAN 3.4）。若按分组清单直接生成列表，
+// 客户端会看到一堆调了必 404 的名字 —— 那比"看不到"更糟。
+func TestModelsListSkipsGroupsModelsAbsentFromCatalog(t *testing.T) {
+	h := groupFixture(t, map[string][]string{
+		"g-a": {"x", "y"},
+	})
+	k, _ := h.cfg.APIKeys.Create("app", 0, 0, nil)
+	if err := h.cfg.APIKeys.UpdateWithGroups(k.ID, nil, nil, nil, []string{"g-a"}); err != nil {
+		t.Fatal(err)
+	}
+	r := reqAs(t, k.ID)
+
+	// y 在分组里，但没有任何上游/渠道提供它
+	catalog := []map[string]any{
+		{"id": "x", "object": "model"},
+		{"id": "z", "object": "model"},
+	}
+	got := h.applyPublicNames(r, h.filterModelsForRequest(r, catalog))
+	if len(got) != 1 || got[0]["id"] != "x" {
+		t.Fatalf("★ 目录里不存在的 y 不该凭空出现（分组是允许范围，不是保证可用），实际 %v", got)
+	}
+}
+
+// TestModelsListEmptyGroupGivesEmptyCatalog 分组为空 ⇒ 目录为空（不是全量）。
+func TestModelsListEmptyGroupGivesEmptyCatalog(t *testing.T) {
+	h := groupFixture(t, map[string][]string{"g-empty": {}})
+	k, _ := h.cfg.APIKeys.Create("app", 0, 0, nil)
+	if err := h.cfg.APIKeys.UpdateWithGroups(k.ID, nil, nil, nil, []string{"g-empty"}); err != nil {
+		t.Fatal(err)
+	}
+	r := reqAs(t, k.ID)
+	catalog := []map[string]any{{"id": "x"}, {"id": "y"}}
+	got := h.applyPublicNames(r, h.filterModelsForRequest(r, catalog))
+	if len(got) != 0 {
+		t.Fatalf("空分组应给空目录（而不是全量），实际 %v", got)
+	}
+}
