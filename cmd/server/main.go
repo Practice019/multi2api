@@ -1334,6 +1334,33 @@ func main() {
 		log.Fatalf("load groups: %v", err)
 	}
 
+	// 把「按分组 ID 取模型列表」注入 API key 存储。
+	//
+	// # 为什么要注入而不是让 apikey 直接依赖 groupstore
+	//
+	// apikey 是**凭据与授权的数据层**，groupstore 是**配置层**。让前者 import
+	// 后者会把两层绑死：以后分组存储换实现（比如加缓存、换成 DB），apikey
+	// 也得跟着改。用一个函数值隔开，依赖方向就只剩「装配层同时认识两边」。
+	//
+	// # 未注入时的行为（这条很重要）
+	//
+	// apikey.HasGroupResolver() 会返回 false，于是 allowedModelsForRequest
+	// 降级到**白名单路径**。也就是说装配层漏了这行代码时，行为退化成升级前
+	// 的样子（group 字段被忽略），而不是「一把 key 一个模型都不许用」。
+	// 后者是最难排查的失效形态，所以降级方向必须是"更宽松"而不是"更严格"。
+	apiKeysStore.SetGroupModels(func(groupID string) []string {
+		g, ok := groupsStore.Get(groupID)
+		if !ok || g == nil {
+			// 分组被删了：返回 nil（该分组不贡献任何模型）。
+			//
+			// ⚠ 不在这里清理 key.Groups —— 那是 P5（引用完整性）的事。
+			// 这里只回答"这个分组现在有哪些模型"，删除的清理是独立动作，
+			// 两者分开才能各自重试。
+			return nil
+		}
+		return g.Models
+	})
+
 	// 控制台账号体系（抄 new-api 的登录系统）：账号库 + 会话库 + 登录端点。
 	//
 	// 路径与 apikeys.json 同一惯例（data/ 下、CWD 相对、不进配置）。

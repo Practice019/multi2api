@@ -90,7 +90,39 @@ type Key struct {
 	// `workbuddy/glm-5.2`（带上游前缀）。两者是**同一个模型**，
 	// 所以比对时都剥掉上游前缀再比（见 ModelAllowed）。
 	// 于是用户填 `glm-5.2` 就同时放行了两种写法，不需要他填两遍。
+	//
+	// # ⚠ 已废弃（PLAN-groups.md Q3）：改由 Key.Groups 表达
+	//
+	// 白名单与分组问的是**同一个问题** ——「这把 key 能用哪些模型」。两套配置并存
+	// 必然不一致（改了分组忘改白名单、或反过来），而排查时要查两处。所以收敛到分组：
+	//
+	//	· 读：仍然照旧生效（存量 key 只有 Models、没有 Groups，升级后行为必须不变）
+	//	· 写：P3.5 的迁移会把存量 Models 转成一个分组并清空本字段；此后新写入不再产生
+	//	· 优先级：Groups 非空时本字段**不参与判定**（见 server.allowedModelsForRequest）
+	//
+	// 在迁移完成前**不要**删这个字段：存量 apikeys.json 里它还在，删了等于
+	// 一次升级把所有老 key 的限制静默解开。
 	Models []string `json:"models,omitempty"`
+
+	// Groups 这把 key 可用的**分组 ID 列表**（空 = 不限制，与 Models 的三态同构）。
+	//
+	// # 为什么存 ID 而不是分组名
+	//
+	// 名字是给人看的，ID 是给引用用的。存名字的话，改一次分组名就会让所有
+	// 引用它的 key **静默断链**（key 还能用，但分组没了 → 变成"不限制"，
+	// 于是权限被放大）。ID 在创建后不变（见 groupstore.Group.ID）。
+	//
+	// # 空值语义：空 = 不限制（**不是**一个都不许）
+	//
+	// 与 Models 同一条理由：存量 key 全都没有这个字段，把空读成"一个都不许"
+	// 会一次升级把所有调用方打死。要"一个都不许"的正确表达是
+	// 「指向一个模型清单为空的分组」或直接禁用这把 key。
+	//
+	// # 与 Models 的关系：Groups 非空时以 Groups 为准
+	//
+	// Models 已废弃（见上），两者并存只发生在 P3.5 迁移之前。
+	// 判定入口只有一处：server.allowedModelsForRequest。
+	Groups []string `json:"groups,omitempty"`
 
 	// ModelMap 这把 key 的**模型对外名映射**：`对外名 → 内部模型名`（2026-10-21 加）。
 	//
@@ -144,6 +176,12 @@ type View struct {
 	OwnerID string `json:"owner_id,omitempty"`
 	// Models 模型白名单（空 = 不限制）。管理界面据此展示"这把 key 能用什么"。
 	Models []string `json:"models,omitempty"`
+	// Groups 这把 key 可用的分组 ID 列表（空 = 不限制）。管理界面据此回填分组多选器。
+	//
+	// ⚠ 与 Models 一样：**List 里漏掉这一行，前端就永远回填不出来**。
+	//   本文件已经踩过一次（ModelMap 曾漏在这里，用户报"设置了但编辑时是空的"）。
+	//   新加字段时必须同时改 Key / View / List / saveLocked 四处。
+	Groups []string `json:"groups,omitempty"`
 	// ModelMap 模型对外名映射（对外名 → 内部名，空 = 不做映射）。
 	// 管理界面据此展示"这个内部模型对外叫什么"。
 	ModelMap map[string]string `json:"model_map,omitempty"`
@@ -160,6 +198,18 @@ type Store struct {
 
 	// rateHits 限速滑动窗口：id → 最近 60s 的请求时刻（进程内，不持久化）。
 	rateHits map[string][]time.Time
+
+	// groupModels 按分组 ID 取模型清单（由装配层注入，见 groups_resolve.go）。
+	//
+	// # 为什么是函数值而不是 *groupstore.Store
+	//
+	// 本包要守住"零内部依赖"（见下面 ModelAllowed 那段注释）：认识 groupstore
+	// 就等于把它拖进核心的依赖图，而依赖方向一旦长出来就再也收不回去。
+	// 一个函数值把"分组里有哪些模型"这件事变成**外部事实**，本包只管拿它与
+	// key.Groups 求并集。
+	//
+	// nil = 未接线（测试路径 / 分组功能未启用）⇒ 见 GroupModelsOf 的降级行为。
+	groupModels GroupModelsFunc
 }
 
 // New 加载（或初始化）路径上的存储。目录不存在时自动创建。
@@ -321,6 +371,60 @@ func (s *Store) ModelsOf(id string) ([]string, bool) {
 	return out, true
 }
 
+// GroupsOf 返回一把 key 的分组 ID 列表，以及这把 key 是否存在。
+//
+// 空切片 = 不限制（与 ModelsOf 的三态完全一致）。
+//
+// ⚠ 第二个返回值不能省：调用方必须能区分「这把 key 没有分组限制」与
+// 「根本没有这把 key」。只看切片长度会把两者混成一个 —— 而前者应当放行、
+// 后者应当 401，混起来的后果取决于谁先判断，属于"偶尔放行一把已删除的 key"
+// 这种最难复现的故障。
+//
+// ⚠ 返回副本：调用方 append 一下就写到我们的底层数组上了。
+func (s *Store) GroupsOf(id string) ([]string, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, false
+	}
+	if len(k.Groups) == 0 {
+		return nil, true
+	}
+	out := make([]string, len(k.Groups))
+	copy(out, k.Groups)
+	return out, true
+}
+
+// normalizeGroups 规整分组 ID 列表：去空白、丢空项、去重（**保序**）。
+//
+// 与 normalizeModels 的唯一区别是**不排序**：分组的顺序对用户有意义
+// （他在界面上按自己的顺序勾的），而且这个顺序将来可能用来表达「优先用哪个
+// 分组」。排序会把这个信息抹掉，却没有任何收益 —— 判定用的是并集。
+//
+// 丢掉空串是必要的：`["g-1", ""]` 若原样存下，len>0 会让这把 key 进入
+// 「受限」分支，而那个空串取不到任何分组 ⇒ 并集为空 ⇒ 一个模型都不许用，
+// 用户却以为自己配了 g-1。
+//
+// 返回 nil 表示"不限制"（与 normalizeModels 同一约定：nil 而非空切片，
+// 让 omitempty 在落盘时不产生这个字段，老文件写回不产生 diff）。
+func normalizeGroups(in []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, g := range in {
+		g = strings.TrimSpace(g)
+		if g == "" || seen[g] {
+			continue
+		}
+		seen[g] = true
+		out = append(out, g)
+	}
+	return out
+}
+
 // ModelMapOf 返回一把 key 的模型对外名映射（对外名 → 内部名），以及 key 是否存在。
 //
 // 空表 = 不做映射。调用方（出口层）用它在**判白名单之前**把对外名换成内部名 ——
@@ -396,6 +500,7 @@ func (s *Store) List() []View {
 			// 会让每个成员都看到空表（"我的 key 不见了"），而接口仍回 200。
 			OwnerID: k.OwnerID,
 			Models:  append([]string(nil), k.Models...),
+			Groups:  append([]string(nil), k.Groups...),
 			// ⚠ 2026-10-21 修：原来这里**没有** ModelMap —— List 构造 View 时漏了它，
 			//   View.ModelMap 恒为 nil，于是前端拿到 `k.model_map === undefined`，
 			//   编辑弹窗回填成 0 行。
@@ -464,6 +569,34 @@ func (s *Store) Delete(id string) error {
 // 两条都是"用户没动过的字段被悄悄改掉"，而界面上看不出任何异常。
 // 与 settings 里"漏带字段 = 重置"同型（本仓在 disabledModels 上踩过）。
 func (s *Store) Update(id string, limit *int64, rpm *int, models []string, modelMap ...map[string]string) error {
+	return s.UpdateWithGroups(id, limit, rpm, models, nil, modelMap...)
+}
+
+// UpdateWithGroups 与 Update 完全相同，**多一个** groups（P2，分组机制）。
+//
+// # 为什么是另一个方法，而不是给 Update 再加一个参数
+//
+// Go 只允许一个变参且必须在最后，而 modelMap 已经占着那个位置。要把 groups
+// 塞进去只有两条路，都更差：
+//
+//	① 把 modelMap 改成 ...any —— 调用点写的还是 map，但类型安全性没了，
+//	   而且下一个可选字段又要往 any 里塞（很快就会出现 any 里到底是什么）
+//	② 改签名要求调用方传 groups —— 那会动 internal/admin/apikeys.go 与
+//	   三个既有测试文件，而它们不在本次改动的范围内（接线由主脑做）
+//
+// 所以：**老方法原样保留、语义不变**，新方法一次把全部字段写完（单次落盘，
+// 不会出现"额度改了、分组没改"的半成功状态）。
+//
+// # groups 的三态（与 models 同一个约定）
+//
+//	nil      → 不改（字段缺失 / 显式 null）
+//	[]string{} → **清空** = 恢复"不限制"
+//	非空     → 设为这些分组 ID
+//
+// ⚠ 清空 groups 等于**放大权限**（从"只这几个分组"变成"不限制"），
+// 与"清空白名单"同一个风险等级。前端必须让它是显式动作，不能因为
+// 表单没带这个字段就落到"清空"—— 那正是用 nil 表达"不改"的原因。
+func (s *Store) UpdateWithGroups(id string, limit *int64, rpm *int, models, groups []string, modelMap ...map[string]string) error {
 	if limit != nil && *limit < 0 {
 		return errors.New("额度不能为负数")
 	}
@@ -484,6 +617,9 @@ func (s *Store) Update(id string, limit *int64, rpm *int, models []string, model
 	}
 	if models != nil {
 		k.Models = normalizeModels(models)
+	}
+	if groups != nil {
+		k.Groups = normalizeGroups(groups)
 	}
 	// modelMap 用变参表达三态：
 	//   不传 / 传 nil  → 不改（老调用点）
