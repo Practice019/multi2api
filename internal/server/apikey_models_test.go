@@ -196,3 +196,57 @@ func TestJoinLimitedTruncates(t *testing.T) {
 		t.Errorf("不超长时应原样连接，实际 %q", got)
 	}
 }
+
+// TestModelAllowedRespectsProviderPrefix 白名单带前缀时必须精确匹配上游。
+//
+// # 用户报的 bug（实测复现）
+//
+// 白名单 9 条、别名映射 9 条，但客户的模型列表里出现**第 10 个**：
+//
+//	workbuddy-intl/deepseek-v4.1-flash     ← 多出来的
+//
+// 而白名单里只有 workbuddy/deepseek-v4.1-flash。
+//
+// 根因：旧实现只比剥过前缀的裸名。SplitModel 按**第一个** / 切，
+// 于是 workbuddy 与 workbuddy-intl 得到同一个裸名 deepseek-v4.1-flash，
+// 被当成「同一个模型」放行 —— 可它们是两个独立上游（不同账号池、
+// 不同额度）。用户在列表里看到 -intl 那条还能调通，那是他没授权的上游。
+func TestModelAllowedRespectsProviderPrefix(t *testing.T) {
+	allowed := []string{"workbuddy/deepseek-v4.1-flash"}
+
+	// 同上游：放行。
+	if !modelAllowed(allowed, "workbuddy/deepseek-v4.1-flash") {
+		t.Error("同上游同名模型应当放行")
+	}
+	// ★ 不同上游、同裸名：**必须拒绝**（这就是那个多出来的第 10 个）。
+	if modelAllowed(allowed, "workbuddy-intl/deepseek-v4.1-flash") {
+		t.Error("★ workbuddy-intl 与 workbuddy 是两个上游，白名单只授权了前者 —— " +
+			"放行会让客户的模型列表多出一条他没授权的条目（用户实测报的 bug）")
+	}
+	// 白名单是裸名时表示不限上游：仍然放行任意前缀。
+	if !modelAllowed([]string{"deepseek-v4.1-flash"}, "workbuddy-intl/deepseek-v4.1-flash") {
+		t.Error("白名单写裸名时应匹配任意上游（用户明确表达了「哪个上游都行」）")
+	}
+	// 请求是裸名时也不限定上游。
+	if !modelAllowed(allowed, "deepseek-v4.1-flash") {
+		t.Error("请求发裸名时应匹配白名单里的同名条目")
+	}
+}
+
+// TestModelAllowedMultiLevelProvider 两级前缀（monkeycode/monkeycode-basic/x）也要对。
+//
+// # 为什么单独测
+//
+// SplitModel 只切**第一个** /，所以 providerID 可能是 `monkeycode`、
+// 而模型名是 `monkeycode-basic/deepseek-flash`。前缀比较必须用完整的
+// providerID，不能把模型名里的 / 也算进上游。
+func TestModelAllowedMultiLevelProvider(t *testing.T) {
+	allowed := []string{"monkeycode/monkeycode-basic/deepseek-flash"}
+	if !modelAllowed(allowed, "monkeycode/monkeycode-basic/deepseek-flash") {
+		t.Error("两级模型名应当精确匹配通过")
+	}
+	// 同 provider、不同档位：不应当放行。
+	if modelAllowed(allowed, "monkeycode/monkeycode-pro/deepseek-flash") {
+		t.Error("monkeycode-basic 与 monkeycode-pro 是不同模型，不该互相放行")
+	}
+}
