@@ -246,6 +246,11 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		"channelstore": true, "modelmap": true,
 		//   modelvis    —— 对外可见模型的计算（能力索引 ∩ 令牌白名单 ∩ 反向映射），纯函数、零依赖。
 		"modelvis": true,
+		//   timeouts    —— 超时配置的集中定义与 http.Client/Transport 应用（对标 new-api 的
+		//                   RELAY_TIMEOUT / STREAMING_TIMEOUT 一套环境变量）。纯配置包，
+		//                   零第三方依赖，不实现 gateway.Provider。
+		//                   加它时这条守卫**确实红了** —— 正是它的作用：新目录必须显式归类。
+		"timeouts": true,
 		//   channelroute —— 请求侧规划：公开名 → 该渠道的上游名（R2 请求侧）。它是查表+排序的纯逻辑，
 		//                   也不实现 gateway.Provider（真正连上游的仍是 Provider）。
 		"channelroute": true,

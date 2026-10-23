@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"workbuddy2api/internal/auth"
 )
@@ -40,6 +41,14 @@ func autoReasonOf(t *testing.T, p *Pool, uid string) string {
 		t.Fatalf("账号 %s 不在池里", uid)
 	}
 	return st.Reason
+}
+
+// thresholdOf 把"测试里填 0 表示用默认"翻译成实际生效的阈值（断言用）。
+func thresholdOf(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return DefaultAutoDisableThreshold
 }
 
 // TestAutoDisableThresholdTable 表驱动：只有"连败达阈值"那一步才禁用。
@@ -73,9 +82,13 @@ func TestAutoDisableThresholdTable(t *testing.T) {
 			// 让"禁用"与"熔断"两条线互不干扰（这正是两个机制解耦的验证）。
 			p.SetBreaker(1000, time.Hour, time.Hour)
 
-			var lastEvent bool
+			// 记录"哪一次失败造成了跃迁"：禁用事件只在**状态跃迁**那一次为 true，
+			// 之后继续失败必须返回 false（否则调用方会每次都打一条禁用日志）。
+			var eventAt []int
 			for i := 0; i < c.failures; i++ {
-				lastEvent = p.RecordAutoDisableFailure("u1", "upstream 500")
+				if p.RecordAutoDisableFailure("u1", "upstream 500") {
+					eventAt = append(eventAt, i+1)
+				}
 			}
 
 			st, ok := p.AutoDisableStatus("u1")
@@ -88,10 +101,17 @@ func TestAutoDisableThresholdTable(t *testing.T) {
 			if st.Streak != c.failures {
 				t.Errorf("streak=%d want %d", st.Streak, c.failures)
 			}
-			// "禁用事件"只在**状态跃迁**那一次为 true。
-			wantEvent := c.want
-			if lastEvent != wantEvent {
-				t.Errorf("最后一次 RecordAutoDisableFailure 返回 %v want %v", lastEvent, wantEvent)
+			// "禁用事件"恰好发生一次，且发生在**第一次达到阈值**的那次失败上。
+			wantEventAt := -1
+			if c.want {
+				wantEventAt = thresholdOf(c.threshold)
+			}
+			if wantEventAt < 0 {
+				if len(eventAt) != 0 {
+					t.Errorf("未达阈值不该报告禁用事件，实得在第 %v 次", eventAt)
+				}
+			} else if len(eventAt) != 1 || eventAt[0] != wantEventAt {
+				t.Errorf("禁用事件应在第 %d 次失败恰好发生一次，实得 %v", wantEventAt, eventAt)
 			}
 
 			// 达阈值必须是**禁用**而非冷却：Pick 选不到它。
@@ -275,7 +295,7 @@ func TestAutoDisableReasonTruncated(t *testing.T) {
 		t.Errorf("截断后应带省略号: %q", st.Reason[max(0, len(st.Reason)-8):])
 	}
 	// 多字节安全：必须仍是合法 UTF-8（不能被按字节切断）。
-	if !utf8Valid(st.Reason) {
+	if !utf8.ValidString(st.Reason) {
 		t.Error("截断把多字节字符切坏了（应按 rune 截断）")
 	}
 }
@@ -681,5 +701,54 @@ func TestAutoDisableSeparateFromBreaker(t *testing.T) {
 	p.NoteSuccess("u1")
 	if !p.IsAutoDisabled("u1") {
 		t.Error("NoteSuccess 不该解除自动禁用（它只负责熔断线）")
+	}
+}
+
+// TestAutoDisableOwnershipTransferredToManual 自动禁用后被人工再次禁用 → 成功不得撤销人工的。
+//
+// # 这条为什么必须存在（它是 owned 单一布尔挡不住的洞）
+//
+//  1. 连败 5 次 → 我们禁用它（entry.reason = 我们的文案）
+//  2. 操作员在管理台又按了一次「禁用」，填了自己的原因 → entry.reason 被改写
+//  3. 探测成功
+//
+// 若只看 owned=true，第 3 步会把**操作员刚按下的禁用**撤销 ——
+// 那正是"自动探测不该推翻人的决定"的另一种形态。判据因此是对账 entry.reason
+// （见 ownsDisableLocked 的注释）。
+func TestAutoDisableOwnershipTransferredToManual(t *testing.T) {
+	p := newAutoDisablePool(t)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetBreaker(1000, time.Hour, time.Hour)
+	p.SetAutoDisable(2, DefaultAutoDisableWindow)
+
+	p.RecordAutoDisableFailure("u1", "boom")
+	p.RecordAutoDisableFailure("u1", "boom")
+	if !p.IsAutoDisabled("u1") {
+		t.Fatal("应处于自动禁用")
+	}
+
+	// 操作员改写了禁用原因（= 重新表态）。
+	p.Disable("u1", "操作员手工停用")
+
+	if p.IsAutoDisabled("u1") {
+		t.Error("人工重新表态后，不该再声称这是自动禁用")
+	}
+	if got := autoReasonOf(t, p, "u1"); got != "操作员手工停用" {
+		t.Errorf("Reason=%q", got)
+	}
+	if recovered := p.RecordAutoDisableSuccess("u1"); recovered {
+		t.Error("成功不该撤销操作员的禁用")
+	}
+	if st, _ := p.AutoDisableStatus("u1"); !st.Disabled {
+		t.Error("账号应保持禁用")
+	}
+	if got := p.AutoDisabledCandidates(); len(got) != 0 {
+		t.Errorf("归属已转移的号不该进探测集: %+v", got)
+	}
+	if p.ResetAutoDisable("u1") {
+		t.Error("ResetAutoDisable 不该解除归属已转移的禁用")
+	}
+	if st, _ := p.AutoDisableStatus("u1"); !st.Disabled {
+		t.Error("ResetAutoDisable 后人工禁用应仍在")
 	}
 }
