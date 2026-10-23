@@ -30,20 +30,17 @@ import (
 
 // groupsStore 取分组存储；nil = 未启用该功能。
 //
-// TODO(接线，由主脑完成，本文件不改逻辑)：
+// 接线位置（已完成，改动时别漏）：
 //
-//	① admin.Config 里加一个字段：Groups *groupstore.Store
-//	② 本函数体改成：return h.cfg.Groups
-//	③ admin.New 里在 registerChannels 那一块旁边加：
-//	     if h.cfg.Groups != nil { h.registerGroups() }
-//	   ⚠ 必须是**独立**的 if，不能并进 APIKeys / Channels 那两处 ——
-//	     分组与它们是三件独立的事，共用门会让"只配了分组"的部署静默看不到这个功能
-//	     （路由 404，前端按 manifest 只会觉得功能不存在，没有任何报错线索）。
-//	④ cmd/server/main.go 里 groupstore.New(filepath.Join(authsRoot, "groups.json"))
-//	   并注入 admin.Config.Groups。
+//	① admin.Config.Groups *groupstore.Store
+//	② admin.New 里独立一段：if h.cfg.Groups != nil { h.registerGroups() }
+//	   ⚠ 必须是**独立**的 if，不能并进 APIKeys / Channels 两处 —— 分组与它们是
+//	     三件独立的事，共用门会让「只配了分组」的部署静默看不到这个功能
+//	     （路由 404，而前端按 manifest 只会觉得功能不存在，没有任何报错线索）。
+//	③ cmd/server/main.go：groupstore.New(filepath.Join(authsRoot, "groups.json")) 并注入。
 //
-// 在那之前本函数恒返回 nil ⇒ 四个端点回 enabled=false / 404，不影响既有功能。
-func (h *Handler) groupsStore() *groupstore.Store { return nil }
+// 未接线时本函数返回 nil ⇒ 列表回 enabled=false、其余端点 404，不影响既有功能。
+func (h *Handler) groupsStore() *groupstore.Store { return h.cfg.Groups }
 
 // registerGroups 注册 /admin/groups 系列端点（接线后在 New 里调用）。
 func (h *Handler) registerGroups() {
