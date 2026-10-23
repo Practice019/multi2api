@@ -3025,6 +3025,29 @@ header h1{letter-spacing:0}
         <span id="akCount" class="dim" style="font-size:12px;margin-left:auto"></span>
       </div>
 
+      <!-- 已选模型清单（**置顶**，不用滚动）。
+           #
+           # 用户报的问题
+           #
+           # 「这选择的模型需要显示在一个额外的地方 不然用户看不见呢 要么置顶」
+           #
+           # 原来「已选 9 个模型」只报了个**数量**，具体是哪 9 个要滚进下面那个
+           # 280px 的滚动列表里逐个找勾 —— 而列表有 670 个模型，
+           # 勾过的项散落在不同位置，实际上不可能核对。
+           #
+           # 这不是"显示得不够好看"，是**配置不可验证**：
+           # 用户改完白名单后无法确认自己到底授权了什么，
+           # 只能相信那行数字。而偏偏这个配置决定"谁能调什么模型"。
+           #
+           # 所以这里给一份**独立的、置顶的**清单：
+           #   · 每个已选项一个可点掉的 chip（点 × 取消勾选，与下方列表联动）
+           #   · 只在「限制模型」模式下显示（勾了全部允许时它没意义）
+           #   · 空时显示明确提示，而不是一片空白 -->
+      <div id="akSelectedBox" style="display:none;margin-bottom:10px">
+        <div class="dim" style="font-size:12px;margin-bottom:4px">已选模型（点 × 取消）</div>
+        <div id="akSelectedChips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+
       <div id="akPicker">
         <div class="row" style="gap:8px;margin-bottom:8px">
           <!-- ⚠ 2026-10-20 用户要求：「我希望可以选择上游才能显示具体上游的模型，不要全部显示出来」。
@@ -9667,6 +9690,64 @@ let loginProvider = '';
     if (!c) return;
     c.textContent = all ? '全部允许（不限制模型）' : (n ? `已选 ${n} 个模型` : '未选任何模型 —— 保存后这把 key 将无法调用任何模型');
     c.style.color = (!all && n === 0) ? 'var(--err)' : '';
+    renderAKSelectedChips(all);
+  }
+
+  // renderAKSelectedChips 把**已选模型**渲染成置顶的 chip 清单。
+  //
+  // # 用户报的问题
+  //
+  // 「这选择的模型需要显示在一个额外的地方 不然用户看不见呢 要么置顶」
+  //
+  // 原来只有一个「已选 9 个模型」的**数量**。具体是哪 9 个，要滚进下面
+  // 那个 280px 的滚动列表里逐个找勾 —— 而列表有 670 个模型，
+  // 勾过的项散落在不同位置，实际上不可能核对。
+  //
+  // 这不只是"不好看"，是**配置不可验证**：改完白名单无法确认授权了什么，
+  // 只能相信那行数字。而这个配置恰好决定"谁能调什么模型"。
+  //
+  // # 为什么 chip 可点
+  //
+  // 让"取消某个模型"不必回到列表里去找它 —— 已选区本身就是操作入口。
+  // 点 × 会同时取消下方列表里对应的勾（通过 akSetChecked 单向同步），
+  // 所以不存在"清单里没了但列表里还勾着"的分叉。
+  function renderAKSelectedChips(all) {
+    const box = $('akSelectedBox');
+    const wrap = $('akSelectedChips');
+    if (!box || !wrap) return;
+    // 勾了「全部允许」时不显示：那时"已选"这个概念不适用，
+    // 显示一个空清单会让人以为"没选任何模型"（与全部允许矛盾）。
+    if (all) { box.style.display = 'none'; return; }
+    const models = akSelected();
+    if (!models.length) {
+      // 空清单必须说清后果，而不是留一片空白。
+      box.style.display = '';
+      wrap.innerHTML = '<span class="dim" style="font-size:12px">未选任何模型 —— 保存后这把 key 将无法调用任何模型</span>';
+      return;
+    }
+    box.style.display = '';
+    wrap.innerHTML = models.map(m => `
+      <span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px"
+            title="${esc(m)}">
+        <span class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m)}</span>
+        <button type="button" data-akunchk="${esc(m)}"
+                style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 2px"
+                title="取消选择这个模型">×</button>
+      </span>`).join('');
+  }
+
+  // akSetChecked 把某个模型的勾选状态改掉，并做一次统一刷新。
+  //
+  // 抽出来是为了让"下方列表的勾"与"上方 chip 的 ×"走**同一段**代码 ——
+  // 两处各写一遍的话，迟早有一处忘了调 updateAKCount。
+  function akSetChecked(model, on) {
+    if (on) akHiddenChecked.add(model);
+    else akHiddenChecked.delete(model);
+    document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => {
+      if (cb.dataset.akm === model) cb.checked = on;
+    });
+    updateAKCount();
+    syncAKMapDatalist();
   }
 
   // syncAKPicker 让"全部允许"与选择器互斥：勾了全部就把列表置灰并清空选择。
@@ -15073,6 +15154,16 @@ let multCatalogFailed = false;
     // 勾选变化 → 更新计数。委托在容器上，列表重渲染后依然有效。
     $('akModelList').addEventListener('change', ev => {
       if (ev.target.matches('input[data-akm]')) { stashAKChecked(); updateAKCount(); syncAKMapDatalist(); }
+    });
+    // 「已选模型」里的 × —— 直接取消勾选。
+    //
+    // ⚠ 用事件委托而不是给每个 chip 绑 onclick：chip 的 innerHTML 每次
+    // updateAKCount 都会重建，绑在元素上的处理器会被一起丢掉
+    //（表现是"第一次能点、之后点了没反应"，且不报错）。
+    $('akSelectedChips').addEventListener('click', ev => {
+      const btn = ev.target.closest('button[data-akunchk]');
+      if (!btn) return;
+      akSetChecked(btn.dataset.akunchk, false);
     });
     // 点遮罩关闭（点面板内部不关）。
     $('akModal').addEventListener('click', ev => { if (ev.target.id === 'akModal') closeAPIKeyModal(); });
