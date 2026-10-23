@@ -465,6 +465,33 @@ func TestConcurrentCreateSameNameOnlyOneWins(t *testing.T) {
 	}
 }
 
+// TestCreateAvoidsIDCollision 已有 ID 不能被新的 Create 静默覆盖。
+//
+// 随机 ID 撞车不可控地复现，所以这里验证的是**不变量**：大量 Create 之后，
+// 最早那条的每个字段都还是原值，且总数一条不少（少了 = 被覆盖）。
+func TestCreateNeverOverwritesExisting(t *testing.T) {
+	s := newTestStore(t)
+	first, err := s.Create("first", "原值", []string{"m-a"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for i := 0; i < 200; i++ {
+		if _, err := s.Create("g"+itoa(i), "", nil); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	back, ok := s.Get(first.ID)
+	if !ok {
+		t.Fatal("第一条分组消失了（被同 ID 覆盖）")
+	}
+	if back.Name != "first" || back.Description != "原值" || len(back.Models) != 1 {
+		t.Errorf("第一条分组被改写了: %+v", back)
+	}
+	if got := len(s.List()); got != 201 {
+		t.Errorf("期望 201 条，实际 %d", got)
+	}
+}
+
 // TestListIsDeepCopy 调用方改 List 的返回值不能污染存储。
 func TestListIsDeepCopy(t *testing.T) {
 	s := newTestStore(t)

@@ -37,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -184,7 +185,6 @@ func (s *Store) Create(name, desc string, models []string) (*Group, error) {
 		return nil, ErrNameEmpty
 	}
 	g := &Group{
-		ID:          newID(),
 		Name:        name,
 		Description: strings.TrimSpace(desc),
 		Models:      normalizeModels(models),
@@ -195,6 +195,9 @@ func (s *Store) Create(name, desc string, models []string) (*Group, error) {
 	if s.nameTakenLocked(g.Name, "") {
 		return nil, fmt.Errorf("%w: %q", ErrNameExists, g.Name)
 	}
+	// ID 在锁内才生成：4 字节随机（1/2^32）虽罕见，但撞了就会**静默覆盖**一个已有
+	// 分组 —— 而那个 ID 可能已经被某把 key 引用。重试比"报告一个百万分之一的事故"便宜。
+	g.ID = s.newIDLocked()
 	s.groups[g.ID] = g
 	if err := s.saveLocked(); err != nil {
 		delete(s.groups, g.ID)
@@ -283,14 +286,14 @@ func (s *Store) Upsert(g *Group) error {
 	}
 	cp.Description = strings.TrimSpace(cp.Description)
 	cp.Models = normalizeModels(cp.Models)
-	if strings.TrimSpace(cp.ID) == "" {
-		cp.ID = newID()
-	}
 	if strings.TrimSpace(cp.CreatedAt) == "" {
 		cp.CreatedAt = s.now().UTC().Format(time.RFC3339)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.TrimSpace(cp.ID) == "" {
+		cp.ID = s.newIDLocked() // 同 Create：ID 必须在锁内生成，且不能撞已有的
+	}
 	if s.nameTakenLocked(cp.Name, cp.ID) {
 		return fmt.Errorf("%w: %q", ErrNameExists, cp.Name)
 	}
@@ -305,6 +308,37 @@ func (s *Store) Upsert(g *Group) error {
 		return err
 	}
 	return nil
+}
+
+// newIDLocked 生成一个当前未被占用的 ID（调用方持锁）。
+//
+// 为什么不能直接复用 newID() 的返回值：随机 4 字节有碰撞概率，而这里赋值
+// 是 map 写入 —— 撞上就会把旧分组**原地替换**掉，连报错都没有。
+func (s *Store) newIDLocked() string {
+	for i := 0; i < 8; i++ {
+		id := newID()
+		if id == "g-fallback" {
+			// crypto/rand 失败：退化成"g-fallback-N" 仍要保证唯一，
+			// 否则每次建分组都写同一个 ID，只剩最后一条。
+			for n := 1; ; n++ {
+				cand := id + "-" + strconv.Itoa(n)
+				if _, used := s.groups[cand]; !used {
+					return cand
+				}
+			}
+		}
+		if _, used := s.groups[id]; !used {
+			return id
+		}
+	}
+	// 连续 8 次都撞（实际上不可能）：宁可返回一个带后缀的确定唯一值，
+	// 也不要让"建分组"失败 —— 调用方没有任何手段影响这件事。
+	for n := 0; ; n++ {
+		cand := "g-" + strconv.Itoa(n)
+		if _, used := s.groups[cand]; !used {
+			return cand
+		}
+	}
 }
 
 // nameTakenLocked 名字是否已被「别的分组」占用（调用方持锁）。excludeID 用于改名时排除自己。
