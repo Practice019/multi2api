@@ -2216,7 +2216,7 @@ header h1{letter-spacing:0}
 //
 // # 这个文件是**从 webui.html 抽出来的**，不是新写的
 //
-// API 管理页早就有这套逻辑（modelOwnerOf + syncAKProviders + renderAKModelList，
+// API 管理页早就有这套逻辑（modelOwnerOf + syncModelProviderOptions，
 // 注释里记着用户原话「我希望可以选择上游才能显示具体上游的模型」）。
 // 我做分组页时没读那段，重写了一遍，于是：
 //
@@ -2260,7 +2260,7 @@ function mpOwners(list, rank) {
 //
 // ⚠ 恢复选中值必须写在 innerHTML **之后**：
 // select 会把「不在 option 列表里的值」当场归一成空串，先设值会被清掉。
-// （webui.html 的 syncAKProviders 注释里记着同一个坑。）
+// （webui.html 的 syncModelProviderOptions 注释里记着同一个坑。）
 //
 // 返回实际生效的值（不在列表里时回落空串 = 全部上游）。
 function mpFillProviderSelect(sel, list, rank, allLabel) {
@@ -3136,56 +3136,38 @@ function mpEsc(s) {
       </div>
     </div>
 
-    <!-- 可用模型：不限 / 白名单 二选一 + 可搜索的多选列表 -->
-    <div style="border:1px solid var(--line);border-radius:10px;padding:12px">
-      <div class="row" style="align-items:center;gap:8px;margin-bottom:8px">
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-          <input id="akAll" type="checkbox"> <b>全部允许</b>（不限制模型）
-        </label>
-        <span id="akCount" class="dim" style="font-size:12px;margin-left:auto"></span>
-      </div>
+        <!-- 可用分组：这把 key 能用哪些模型 = 它的分组并集。
 
-      <!-- 已选模型清单（**置顶**，不用滚动）。
-           #
-           # 用户报的问题
-           #
-           # 「这选择的模型需要显示在一个额外的地方 不然用户看不见呢 要么置顶」
-           #
-           # 原来「已选 9 个模型」只报了个**数量**，具体是哪 9 个要滚进下面那个
-           # 280px 的滚动列表里逐个找勾 —— 而列表有 670 个模型，
-           # 勾过的项散落在不同位置，实际上不可能核对。
-           #
-           # 这不是"显示得不够好看"，是**配置不可验证**：
-           # 用户改完白名单后无法确认自己到底授权了什么，
-           # 只能相信那行数字。而偏偏这个配置决定"谁能调什么模型"。
-           #
-           # 所以这里给一份**独立的、置顶的**清单：
-           #   · 每个已选项一个可点掉的 chip（点 × 取消勾选，与下方列表联动）
-           #   · 只在「限制模型」模式下显示（勾了全部允许时它没意义）
-           #   · 空时显示明确提示，而不是一片空白 -->
-      <div id="akSelectedBox" style="display:none;margin-bottom:10px">
-        <div class="dim" style="font-size:12px;margin-bottom:4px">已选模型（点 × 取消）</div>
-        <div id="akSelectedChips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
-      </div>
+             # 为什么这里选分组而不是模型（用户要求）
 
-      <div id="akPicker">
-        <div class="row" style="gap:8px;margin-bottom:8px">
-          <!-- ⚠ 2026-10-20 用户要求：「我希望可以选择上游才能显示具体上游的模型，不要全部显示出来」。
-               原先这里把 670 个模型平铺在一个列表里（实测可用模型 670 个），找起来很费眼。
-               与「对话测试」的上游筛选同一个模式（见 #modelProvider 的注释）：
-               **只影响下面列出什么，不改最终存下来的模型 id**。
-               ⚠ 与 #modelProvider 是**两处独立的下拉**（一个在对话测试、一个在弹窗），
-               故各自持值；共用的只有"从模型 id 推断上游"那条规则（modelOwnerOf）。 -->
-          <select id="akProvider" style="min-width:150px" title="先选上游，只列出它的模型（不改存下来的模型 id）">
-            <option value="">全部上游</option>
-          </select>
-          <input id="akSearch" type="text" placeholder="搜索模型名（支持部分匹配，例如 glm / deepseek）"
-                 style="flex:1;box-sizing:border-box">
-          <button id="akSelAll" style="padding:3px 10px;font-size:12px">全选当前</button>
-          <button id="akSelNone" style="padding:3px 10px;font-size:12px">清空</button>
-        </div>
-        <div id="akModelList" style="max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px"></div>
-        <div id="akEmpty" class="dim" style="font-size:12px;padding:8px;display:none"></div>
+             「这里API 不要设置模型了只能设置分组 因为分组已经设置了模型」
+
+             模型范围本来就该在**分组**里定义一次：分组回答「有哪些模型」，
+             key 只需要回答「用哪些分组」。两处都能选模型的话，同一件事就有两个
+             真相来源 —— 改分组里的模型，key 上那份不会跟着变（这正是我们反复踩的
+             悬空问题的根源，见 PLAN-groups.md Q3）。
+
+             ⚠ 空选 = 不限制（全部模型可用）。这与改造前的「全部允许」等价，
+               也是存量的默认形态，不能改成「空 = 一个都不许」。 -->
+        <div style="border:1px solid var(--line);border-radius:10px;padding:12px">
+          <div class="row" style="align-items:center;gap:8px;margin-bottom:8px">
+            <b style="font-size:13px">可用分组</b>
+            <span id="akGroupHint" class="dim" style="font-size:12px"></span>
+            <span id="akCount" class="dim" style="font-size:12px;margin-left:auto"></span>
+          </div>
+
+          <!-- 已选分组（置顶，不用滚动）。 -->
+          <div id="akGroupPickedBox" style="margin-bottom:10px">
+            <div class="dim" style="font-size:12px;margin-bottom:4px">已选分组（点 × 取消）</div>
+            <div id="akGroupChips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+          </div>
+
+          <div id="akGroupList" style="max-height:200px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px">
+          </div>
+          <div id="akGroupEmpty" class="dim" style="font-size:12px;padding:8px;display:none"></div>
+          <div class="dim" style="font-size:11px;margin-top:6px">
+            一个都不选 = 不限制（这把 key 可用全部模型）。要限定范围，先到「分组」页建好分组。
+          </div>
         <!-- 模型对外名映射（2026-10-21，行式编辑）·
              用户要求：「我希望是左边一个名字，右边一个名字，自己填。然后可以新增行，
              一开始是没有的。」所以不是 textarea，是「左侧内部名 → 右侧对外名」的成对行。
@@ -9648,257 +9630,103 @@ let loginProvider = '';
   // ⚠ 用 /v1/models 而不是别的目录端点：那是**调用方真正能发**的模型名集合。
   // 白名单里的名字必须能对上这个集合里的名字 —— 用另一个来源会造出
   // "列表里选得到、实际调不通"。
-  async function ensureAKCatalog() {
-    if (akCatalog) return akCatalog;
-    try {
-      await ensureConsoleKey();
-    const r = await api('/v1/models');
-      akCatalog = ((r && r.data) || []).map(m => ({
-        id: String(m.id || ''),
-        owner: String(m.owned_by || ''),
-      })).filter(m => m.id).sort((a, b) => a.id.localeCompare(b.id));
-    } catch (e) {
-      akCatalog = [];
-      throw e;
-    }
-    return akCatalog;
-  }
-
-  // syncAKProviders 用当前目录填充弹窗里的「上游」下拉（用户要求：先选上游再看模型）。
+  // ---- 可用分组（取代原来的模型白名单）-----------------------------------
   //
-  // 与 syncModelProviderOptions 同款坑：`<select>` 会把"不在 option 列表里的值"**当场归一成空串**，
-  // 所以恢复选择必须写在 innerHTML **之后**（否则选择会被浏览器悄悄清掉）。
-  function syncAKProviders() {
-    // 实现走共享层（mpFillProviderSelect）：restore-after-innerHTML 那个坑
-    // 只在一处记着就够了，三处各写一遍必然有一处写反。
-    mpFillProviderSelect($('akProvider'), (akCatalog || []), null, '全部上游');
+  // # 为什么 key 只选分组、不再选模型（用户要求，2026-10-24）
+  //
+  //   「这里API 不要设置模型了只能设置分组 因为分组已经设置了模型」
+  //
+  // 模型范围在**分组**里定义一次就够了。key 再选一遍模型，等于同一件事有
+  // 两个真相来源 —— 改分组里的模型，key 上那份不会跟着变。那正是我们反复
+  // 踩的悬空问题的根源（见 PLAN-groups.md Q3：两者语义重复，白名单并入分组）。
+  //
+  // ⚠ 空选 = 不限制。这是存量 key 的默认形态，也是改造前「全部允许」的等价物，
+  //   绝不能改成「空 = 一个都不许」（那会把所有没配过分组的 key 打死）。
+  let akGroups = [];        // /admin/groups 的缓存
+  let akPickedGroups = new Set();
+
+  async function ensureAKGroups() {
+    if (akGroups && akGroups.length) return akGroups;
+    const r = await admin('/admin/groups');
+    akGroups = ((r && r.groups) || []);
+    return akGroups;
   }
 
-  // renderAKModelList 按「上游 + 搜索词」渲染可勾选列表；保留已勾选状态。
-  function renderAKModelList() {
-    const host = $('akModelList'), empty = $('akEmpty');
+  // renderAKGroupList 画可勾选的分组列表。
+  function renderAKGroupList() {
+    const host = $('akGroupList'), empty = $('akGroupEmpty');
     if (!host) return;
-    const kw = ($('akSearch').value || '').trim().toLowerCase();
-    // 上游筛选只决定"列出什么"，不改已勾选的 id（勾选状态由 stashAKChecked/akSelected 管）。
-    const wantP = ($('akProvider') && $('akProvider').value) || '';
-    const list = (akCatalog || []).filter(m =>
-      (!wantP || modelOwnerOf(m.id, m.owner) === wantP) &&
-      (!kw || m.id.toLowerCase().includes(kw)));
-
-    // 记住当前的勾选（重渲染会丢掉 DOM）
-    const checked = new Set(akSelected());
-    if (!list.length) {
+    if (!akGroups.length) {
       host.innerHTML = '';
       empty.style.display = '';
-      const hasCatalog = !!(akCatalog && akCatalog.length);
-      empty.textContent = wantP
-        ? `上游「${wantP}」下没有匹配「${kw}」的模型`
-        : (hasCatalog ? `没有匹配「${kw}」的模型` : '模型目录为空（上游可能都不可用；仍可先建 key，稍后再改模型）');
+      empty.textContent = '还没有分组。先到「分组」页建一个，回来就能选。';
       return;
     }
     empty.style.display = 'none';
-    host.innerHTML = list.map(m => {
-      const on = checked.has(m.id) ? ' checked' : '';
-      return `<label style="display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:12px;cursor:pointer">
-        <input type="checkbox" data-akm="${esc(m.id)}"${on}>
-        <span class="mono">${esc(m.id)}</span>
-        ${m.owner ? `<span class="dim" style="margin-left:auto">${esc(m.owner)}</span>` : ''}
-      </label>`;
+    host.innerHTML = akGroups.map(function (g) {
+      const on = akPickedGroups.has(g.id) ? ' checked' : '';
+      const n = (g.models && g.models.length) || g.model_count || 0;
+      return '<label style="display:flex;align-items:center;gap:8px;padding:4px;font-size:12px;cursor:pointer">' +
+        '<input type="checkbox" data-akg="' + esc(g.id) + '"' + on + '>' +
+        '<span>' + esc(g.name) + '</span>' +
+        '<span class="dim" style="font-size:11px;margin-left:auto">' + n + ' 个模型</span>' +
+        '</label>';
     }).join('');
+    renderAKGroupChips();
     updateAKCount();
-    // 左侧候选来自「已勾选的模型」，所以勾选或目录一变就要同步。
-    syncAKMapDatalist();
   }
 
-  // akSelected 当前勾选的模型 id（只算**当前可见**的那些吗？不算 —— 见下）。
-  //
-  // ⚠ 搜索会隐藏一部分行，但**隐藏不等于取消勾选**：用户搜"glm"勾两个、
-  // 再搜"deepseek"勾一个，期望是 3 个都在白名单里。所以这里的判据是
-  // 「DOM 里当前勾着的」+「已勾但被搜索隐藏的（存在 akHiddenChecked 里）」。
-  let akHiddenChecked = new Set();
-
-  // ── 模型对外名映射：行式编辑（2026-10-21）──
-  //
-  // 用户要求（原话）：「我希望是左边一个名字，右边一个名字，自己填。然后可以新增行，
-  // 一开始是没有的。然后你可以点新增一个行，然后填左边的，填右边的。」
-  // 以及：「左边和右边它可以有一个下拉框，可以进行选择。当然，不选择这个下拉框的也可以。
-  // 选择的话，就是我们选择的模型里边是下拉框、下拉列表。」
-  //
-  // ⇒ 每行两个 input + datalist（能选能填），左侧候选 = **已勾选的模型**。
-  //
-  // ⚠ 存储方向仍是 `{对外名: 内部名}`（后端请求路径按这个方向查），
-  //   界面上的左右顺序是「内部名 → 对外名」—— 与用户"这个模型对外叫什么"的读法一致。
-  //   收集时转置一次（见 akCollectMap），回填时再转回（见 akRenderMap）。
-
-  // akAddMapRow 追加一行。left=内部模型名，right=对外显示名。
-  //
-  // ⚠ 用 createElement + 单独绑 onclick，不用字符串拼 onclick:
-  //   模型名里可能带引号（如某些上游的 alias），拼进 onclick 属性会破坏语句。
-  function akAddMapRow(left, right) {
-    const host = $('akMapRows');
-    if (!host) return;
-    const row = document.createElement('div');
-    row.className = 'row';
-    row.style.cssText = 'gap:6px;margin-bottom:4px;align-items:center';
-    row.innerHTML =
-      `<input class="akmap-l" list="akMapModelOpts" spellcheck="false" placeholder="内部模型名"` +
-      ` value="${esc(left || '')}"` +
-      ` style="flex:1;min-width:0;font-size:12px;font-family:ui-monospace,Consolas,monospace">` +
-      `<span class="dim" style="font-size:12px;flex:none">&rarr;</span>` +
-      `<input class="akmap-r" spellcheck="false" placeholder="对外显示名"` +
-      ` value="${esc(right || '')}"` +
-      ` style="flex:1;min-width:0;font-size:12px;font-family:ui-monospace,Consolas,monospace">` +
-      `<button type="button" class="akmap-del" style="padding:2px 8px;font-size:12px;flex:none;color:var(--err)">&times;</button>`;
-    row.querySelector('.akmap-del').onclick = () => row.remove();
-    host.appendChild(row);
-    // 左侧候选要跟着当前的勾选更新
-    syncAKMapDatalist();
-  }
-
-  // akRenderMap 用 `{对外名: 内部名}` 填充行；传空则清成 0 行（用户要"一开始是没有的"）。
-  function akRenderMap(m) {
-    const host = $('akMapRows');
-    if (!host) return;
-    host.innerHTML = '';
-    const pairs = Object.keys(m || {}).map(alias => [String(m[alias] || ''), String(alias)]);
-    // 按内部名排序：编辑一个已有 key 时，行的顺序稳定可预期（不是哈希序）
-    pairs.sort((a, b) => a[0].localeCompare(b[0]));
-    for (const [left, right] of pairs) akAddMapRow(left, right);
-    syncAKMapDatalist();
-  }
-
-  // akCollectMap 把行收集成 `{对外名: 内部名}`。
-  //
-  // 返回 invalid 而不是静默丢弃：用户填了一半（只有左边）时必须报出来，
-  // 否则保存后那条映射凭空消失，他会以为"设上了但没生效"。
-  function akCollectMap() {
-    const map = {}, invalid = [];
-    document.querySelectorAll('#akMapRows .akmap-l').forEach(inp => {
-      const row = inp.parentElement;
-      const left = String(inp.value || '').trim();          // 内部模型名
-      const right = String(row.querySelector('.akmap-r').value || '').trim();  // 对外名
-      if (!left && !right) return;                          // 整行空 ⇒ 忽略
-      if (!left || !right) {
-        invalid.push('「' + (left || '空') + ' → ' + (right || '空') + '」只填了一半');
-        return;
-      }
-      if (left === right) return;                           // 等价于不映射
-      map[right] = left;                                    // ⚠ 转置：对外名 → 内部名
-    });
-    return { map, invalid };
-  }
-
-  // syncAKMapDatalist 把**已勾选的模型**塞进左侧候选。
-  //
-  // ⚠ 候选来源是 akSelected()（当前勾选），不是全量目录 —— 用户原话：
-  //   「选择的话，就是我们选择的模型里边是下拉框、下拉列表」。
-  //   给全量目录会把没勾的模型也列出来，选它等于配一条永远不会生效的映射。
-  function syncAKMapDatalist() {
-    const dl = $('akMapModelOpts');
-    if (!dl) return;
-    let models = [];
-    try { models = akSelected(); } catch (_) { models = []; }
-    dl.innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join('');
-  }
-  function akSelected() {
-    const out = new Set(akHiddenChecked);
-    document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => {
-      if (cb.checked) out.add(cb.dataset.akm);
-      else out.delete(cb.dataset.akm);
-    });
-    return [...out];
-  }
-
-  // stashAKChecked 把"即将被搜索隐藏"的勾选记下来，重渲染后再并回去。
-  function stashAKChecked() {
-    akHiddenChecked = new Set(akSelected());
+  // renderAKGroupChips 画「已选分组」置顶清单（点 × 取消）。
+  function renderAKGroupChips() {
+    const box = $('akGroupChips');
+    if (!box) return;
+    const picked = akGroups.filter(function (g) { return akPickedGroups.has(g.id); });
+    if (!picked.length) {
+      box.innerHTML = '<span class="dim" style="font-size:12px">（未选 —— 这把 key 不限制模型）</span>';
+      return;
+    }
+    box.innerHTML = picked.map(function (g) {
+      return '<span class="chip" title="' + esc(g.name) + '">' + esc(g.name) +
+        '<button type="button" data-akgunpick="' + esc(g.id) + '" title="取消">×</button></span>';
+    }).join('');
   }
 
   function updateAKCount() {
-    const n = akSelected().length;
-    const all = $('akAll') && $('akAll').checked;
     const c = $('akCount');
+    const hint = $('akGroupHint');
     if (!c) return;
-    c.textContent = all ? '全部允许（不限制模型）' : (n ? `已选 ${n} 个模型` : '未选任何模型 —— 保存后这把 key 将无法调用任何模型');
-    c.style.color = (!all && n === 0) ? 'var(--err)' : '';
-    renderAKSelectedChips(all);
-  }
-
-  // renderAKSelectedChips 把**已选模型**渲染成置顶的 chip 清单。
-  //
-  // # 用户报的问题
-  //
-  // 「这选择的模型需要显示在一个额外的地方 不然用户看不见呢 要么置顶」
-  //
-  // 原来只有一个「已选 9 个模型」的**数量**。具体是哪 9 个，要滚进下面
-  // 那个 280px 的滚动列表里逐个找勾 —— 而列表有 670 个模型，
-  // 勾过的项散落在不同位置，实际上不可能核对。
-  //
-  // 这不只是"不好看"，是**配置不可验证**：改完白名单无法确认授权了什么，
-  // 只能相信那行数字。而这个配置恰好决定"谁能调什么模型"。
-  //
-  // # 为什么 chip 可点
-  //
-  // 让"取消某个模型"不必回到列表里去找它 —— 已选区本身就是操作入口。
-  // 点 × 会同时取消下方列表里对应的勾（通过 akSetChecked 单向同步），
-  // 所以不存在"清单里没了但列表里还勾着"的分叉。
-  function renderAKSelectedChips(all) {
-    const box = $('akSelectedBox');
-    const wrap = $('akSelectedChips');
-    if (!box || !wrap) return;
-    // 勾了「全部允许」时不显示：那时"已选"这个概念不适用，
-    // 显示一个空清单会让人以为"没选任何模型"（与全部允许矛盾）。
-    if (all) { box.style.display = 'none'; return; }
-    const models = akSelected();
-    if (!models.length) {
-      // 空清单必须说清后果，而不是留一片空白。
-      box.style.display = '';
-      wrap.innerHTML = '<span class="dim" style="font-size:12px">未选任何模型 —— 保存后这把 key 将无法调用任何模型</span>';
+    const picked = akGroups.filter(function (g) { return akPickedGroups.has(g.id); });
+    if (!picked.length) {
+      c.textContent = '';
+      if (hint) hint.textContent = '（不限制）';
       return;
     }
-    box.style.display = '';
-    wrap.innerHTML = models.map(m => `
-      <span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px"
-            title="${esc(m)}">
-        <span class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m)}</span>
-        <button type="button" data-akunchk="${esc(m)}"
-                style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 2px"
-                title="取消选择这个模型">×</button>
-      </span>`).join('');
+    // 并集去重后的模型数（两个分组可能有重叠）。
+    const seen = new Set();
+    picked.forEach(function (g) { (g.models || []).forEach(function (m) { seen.add(m); }); });
+    c.textContent = picked.length + ' 个分组 · 共 ' + seen.size + ' 个模型';
+    if (hint) hint.textContent = '';
   }
 
-  // akSetChecked 把某个模型的勾选状态改掉，并做一次统一刷新。
-  //
-  // 抽出来是为了让"下方列表的勾"与"上方 chip 的 ×"走**同一段**代码 ——
-  // 两处各写一遍的话，迟早有一处忘了调 updateAKCount。
-  function akSetChecked(model, on) {
-    if (on) akHiddenChecked.add(model);
-    else akHiddenChecked.delete(model);
-    document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => {
-      if (cb.dataset.akm === model) cb.checked = on;
+  function syncAKMapDatalist() {
+    // 别名映射的左侧候选 = 已选分组里的模型并集。
+    // 以前取「已勾选的模型」，现在取「已选分组的模型」。
+    const dl = $('akMapModelOpts');
+    if (!dl) return;
+    const seen = new Set();
+    akGroups.forEach(function (g) {
+      if (akPickedGroups.has(g.id)) (g.models || []).forEach(function (m) { seen.add(m); });
     });
-    updateAKCount();
-    syncAKMapDatalist();
+    dl.innerHTML = Array.from(seen).sort().map(function (m) {
+      return '<option value="' + esc(m) + '"></option>';
+    }).join('');
   }
 
-  // syncAKPicker 让"全部允许"与选择器互斥：勾了全部就把列表置灰并清空选择。
-  function syncAKPicker() {
-    const all = $('akAll').checked;
-    $('akPicker').style.opacity = all ? '0.45' : '1';
-    $('akPicker').style.pointerEvents = all ? 'none' : 'auto';
-    if (all) akHiddenChecked = new Set();
-    updateAKCount(); syncAKMapDatalist();
-  }
-
-  // openAPIKeyModal 打开弹窗。mode='create' 或 'edit'。
   function openAPIKeyModal(mode, k) {
     akMode = mode === 'edit' ? 'edit' : 'create';
     akEditingID = (k && k.id) || '';
-    akHiddenChecked = new Set();
 
     $('akTitle').textContent = akMode === 'edit' ? '编辑 API Key' : '新建 API Key';
-    // 名称：新建可填，编辑只读（后端 Update 不支持改名 —— 与其给一个
-    // 存不下去的输入框，不如明说）。
     if (akMode === 'edit') {
       $('akNameRow').style.display = 'none';
       $('akNameRO').style.display = '';
@@ -9909,26 +9737,22 @@ let loginProvider = '';
       $('akName').value = '';
     }
 
-    const hasList = !!(k && Array.isArray(k.models) && k.models.length);
     $('akLimit').value = k ? (k.limit || 0) : 0;
     $('akRpm').value = k ? (k.rpm || 0) : 0;
-    $('akAll').checked = !hasList;      // 默认「全部允许」= 不限制
-    $('akSearch').value = '';
-    if (hasList) akHiddenChecked = new Set(k.models);
-    // 模型对外名映射：编辑时回填，新建时清空。
-    // 行式回填：编辑时按 model_map 生成行，新建时 0 行（用户要「一开始是没有的」）。
+    // 分组：编辑时回填，新建时空（= 不限制）。
+    akPickedGroups = new Set((k && Array.isArray(k.groups)) ? k.groups : []);
     akRenderMap(akMode === 'edit' ? (k && k.model_map) : null);
 
     $('akModal').style.display = 'flex';
     $('akSave').disabled = false;
-    // 目录拉取是异步的：先渲染一个占位，回来后重渲染。
-    $('akModelList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取模型目录…</div>';
-    ensureAKCatalog().then(() => { syncAKProviders(); stashAKChecked(); renderAKModelList(); })
-      .catch(e => {
-        $('akModelList').innerHTML =
-          `<div class="dim" style="font-size:12px;padding:6px">读取模型目录失败：${esc(e.message)}</div>`;
-      });
-    syncAKPicker();
+    $('akGroupList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取分组…</div>';
+    ensureAKGroups().then(function () {
+      renderAKGroupList();
+      syncAKMapDatalist();
+    }).catch(function (e) {
+      $('akGroupList').innerHTML =
+        '<div class="dim" style="font-size:12px;padding:6px">读取分组失败：' + esc(e.message) + '</div>';
+    });
   }
 
   function closeAPIKeyModal() {
@@ -9937,21 +9761,11 @@ let loginProvider = '';
 
   // saveAPIKeyModal 保存（新建 / 编辑）。
   async function saveAPIKeyModal(btn) {
-    const all = $('akAll').checked;
-    const models = all ? [] : akSelected();
-    if (!all && models.length === 0) {
-      // 明确拦下而不是静默存一个空名单 —— 空名单等于"不限制"，与用户此刻的
-      // 意图（他刚选了"不是全部允许"）恰好相反。这种"看起来设了限制其实没设"
-      // 是白名单最危险的失败形态。
-      toast('要么勾「全部允许」，要么至少选一个模型', true);
-      return;
-    }
-    // 解析模型对外名映射。
-    // ⚠ 只在"限制模型"时才有意义：勾了「全部允许」的 key 不限制模型，
-    //   映射表也就无从对应（对外名换回内部名之后仍要过白名单，而白名单是空的
-    //   ⇒ 任何名字都放行，映射反而是多余的）。所以 
-    //   all=true 时提交空表，让后端清掉可能残留的旧映射。
-    const mmParsed = all ? { map: {}, invalid: [] } : akCollectMap();
+    // 提交的分组 ID（空 = 不限制）。
+    const groups = Array.from(akPickedGroups);
+    // 别名映射：分组非空时才有意义（不限制的 key 没有「哪些模型」的概念，
+    // 映射表也就无从对应）。空分组时提交空表，让后端清掉可能残留的旧映射。
+    const mmParsed = groups.length ? akCollectMap() : { map: {}, invalid: [] };
     if (mmParsed.invalid.length) {
       toast('模型映射格式不对：' + mmParsed.invalid[0], true);
       return;
@@ -9970,16 +9784,16 @@ let loginProvider = '';
           const name = ($('akName').value || '').trim();
           if (!name) { toast('名称不能为空', true); return false; }
           const r = await admin('/admin/apikeys', {
-            method: 'POST', body: JSON.stringify({ name, limit, rpm, models, model_map: modelMap }),
+            method: 'POST', body: JSON.stringify({ name, limit, rpm, groups, model_map: modelMap }),
           });
           if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
           toast(`已创建 ${r.name || name}（完整 key 下面直接复制）\n${r.full}`, false, 15000);
           copyText(r.full, 'API Key');
         } else {
           await admin('/admin/apikeys/update', {
-            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, models, model_map: modelMap }),
+            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, groups, model_map: modelMap }),
           });
-          toast(all ? '已保存：全部模型可用' : `已保存：限制为 ${models.length} 个模型`);
+          toast(groups.length ? `已保存：限制为 ${groups.length} 个分组的模型` : '已保存：不限制模型');
         }
         closeAPIKeyModal();
         // ⚠⚠ 必须**先丢缓存**再拉列表 —— 与删除（8279）/轮换（8265）那两处同一个理由：
@@ -15307,7 +15121,8 @@ let multCatalogFailed = false;
     // ── API Key 弹窗的控件接线 ────────────────────────────────────────────
     $('akCancel').onclick = closeAPIKeyModal;
     $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
-    $('akAll').onchange = syncAKPicker;
+  $('akCancel').onclick = closeAPIKeyModal;
+  $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
   // 「+ 新增一行」：模型对外名映射的入口。
   // ⚠ 一开始是 **0 行**（用户要求「一开始是没有的」）—— 不给空行占位，
   //   因为空行会被误读成"这里必须填"。点一下才出现一行。
@@ -15316,32 +15131,29 @@ let multCatalogFailed = false;
     const rows = document.querySelectorAll("#akMapRows .akmap-l");
     if (rows.length) rows[rows.length - 1].focus();
   };
-    // 搜索：把"即将被隐藏"的勾选先记下来（隐藏 ≠ 取消勾选，见 akHiddenChecked）。
-    $('akSearch').oninput = () => { stashAKChecked(); renderAKModelList(); };
-  // 切上游：只重渲染列表（勾选状态由 stashAKChecked/akSelected 保住 ⇒ 换上游不会丢掉已勾的模型）。
-  if ($('akProvider')) $('akProvider').onchange = () => { stashAKChecked(); renderAKModelList(); };
-    $('akSelAll').onclick = () => {
-      document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = true; });
-      stashAKChecked(); updateAKCount(); syncAKMapDatalist();
-    };
-    $('akSelNone').onclick = () => {
-      document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = false; });
-      akHiddenChecked = new Set(); updateAKCount(); syncAKMapDatalist();
-    };
-    // 勾选变化 → 更新计数。委托在容器上，列表重渲染后依然有效。
-    $('akModelList').addEventListener('change', ev => {
-      if (ev.target.matches('input[data-akm]')) { stashAKChecked(); updateAKCount(); syncAKMapDatalist(); }
-    });
-    // 「已选模型」里的 × —— 直接取消勾选。
-    //
-    // ⚠ 用事件委托而不是给每个 chip 绑 onclick：chip 的 innerHTML 每次
-    // updateAKCount 都会重建，绑在元素上的处理器会被一起丢掉
-    //（表现是"第一次能点、之后点了没反应"，且不报错）。
-    $('akSelectedChips').addEventListener('click', ev => {
-      const btn = ev.target.closest('button[data-akunchk]');
-      if (!btn) return;
-      akSetChecked(btn.dataset.akunchk, false);
-    });
+
+  // 勾选分组 → 更新计数与别名候选。委托在容器上，列表重渲染后依然有效。
+  $('akGroupList').addEventListener('change', ev => {
+    const cb = ev.target.closest('input[data-akg]');
+    if (!cb) return;
+    if (cb.checked) { akPickedGroups.add(cb.dataset.akg); }
+    else { akPickedGroups.delete(cb.dataset.akg); }
+    renderAKGroupChips();
+    updateAKCount();
+    syncAKMapDatalist();
+  });
+  // 「已选分组」里的 × —— 取消该分组（同时把列表里的勾去掉）。
+  //
+  // ⚠ 用事件委托而不是给每个 chip 绑 onclick：chip 的 innerHTML 每次重画
+  //   都会重建，绑在元素上的处理器会被一起丢掉（表现是"第一次能点、之后没反应"，
+  //   且不报错）。
+  $('akGroupChips').addEventListener('click', ev => {
+    const btn = ev.target.closest('button[data-akgunpick]');
+    if (!btn) return;
+    akPickedGroups.delete(btn.dataset.akgunpick);
+    renderAKGroupList();
+    syncAKMapDatalist();
+  });
     // 点遮罩关闭（点面板内部不关）。
     $('akModal').addEventListener('click', ev => { if (ev.target.id === 'akModal') closeAPIKeyModal(); });
     // Esc 关闭。

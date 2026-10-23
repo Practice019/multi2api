@@ -16,6 +16,7 @@
 package server
 
 import (
+	"regexp"
 	"path/filepath"
 	"net/http"
 	"net/http/httptest"
@@ -346,32 +347,31 @@ func TestGroupsUIPickAllRespectsProviderFilter(t *testing.T) {
 	}
 }
 
-// 分组页的上游规则必须与 API 管理页**同构**（用户指出过形态不一致）。
+// 分组页的上游规则必须与 webui.html **同构**（用户指出过形态不一致）。
 //
-// 用户原话：「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享
-//            这个不是已经实现了么 按照上游筛选等等」
+// 用户原话：「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享」
 //
-// API 管理页早就实现了 #akProvider + modelOwnerOf，我第一版却在分组页
-// 用按钮条重写了一遍。这条测试把两边钉在一起：
-//   · 上游推断都要「切第一个 / ，回退 owned_by」
-//   · 控件都是 <select> 下拉（不是按钮条）
-func TestGroupsUIMatchesAPIKeyPageProviderRule(t *testing.T) {
-	// API 管理页的规则（基准）。
+// ⚠ 2026-10-24 更新：API Key 弹窗里的模型选择器已被移除（key 只选分组），
+// 所以那边的 #akProvider 不在了。但**对话测试**仍有 #modelProvider，
+// 它用的还是同一条上游推断规则 —— 基准换成它。
+func TestGroupsUIMatchesConsoleProviderRule(t *testing.T) {
 	console, err := os.ReadFile(filepath.Join("webui.html"))
 	if err != nil {
 		t.Fatalf("读 webui.html: %v", err)
 	}
-	if !strings.Contains(string(console), `id="akProvider"`) {
-		t.Fatal("基准变了：webui.html 里找不到 #akProvider")
+	cs := string(console)
+	// 基准：对话测试的上游下拉还在。
+	if !strings.Contains(cs, `id="modelProvider"`) {
+		t.Fatal("基准变了：webui.html 里找不到 #modelProvider（对话测试的上游筛选）")
 	}
-	// 分组页的规则（应当同构）。
+	// 分组页的上游筛选同样是 select 下拉。
 	ui := readGroupsUI(t)
 	if !strings.Contains(ui, `id="gProvider"`) {
-		t.Error("★ 分组页的上游筛选不是 <select> 下拉 —— 与 API 管理页形态不一致")
+		t.Error("★ 分组页的上游筛选不是 select 下拉 —— 与对话测试形态不一致")
 	}
-	// 二者都必须有 owned_by 兜底。
+	// 两边都必须有 owned_by 兜底。
 	for _, f := range []struct{ name, src string }{
-		{"API 管理页", string(console)},
+		{"webui.html", cs},
 		{"分组页", ui},
 	} {
 		src := sliceFuncBody(t, f.src, "function modelOwnerOf(")
@@ -384,7 +384,7 @@ func TestGroupsUIMatchesAPIKeyPageProviderRule(t *testing.T) {
 	}
 }
 
-// 共享层必须**三处同一份**：API 管理页 / 对话测试 / 分组页。
+// 共享层必须**多页同一份**：webui.html（对话测试）与分组页。
 //
 // # 这是用户连问两次才做对的事
 //
@@ -393,6 +393,10 @@ func TestGroupsUIMatchesAPIKeyPageProviderRule(t *testing.T) {
 //
 // 第一版我把代码"复刻"到分组页 —— 那是**第二个副本**，不是共享。
 // 真正的判据是：webui.html 自己也调用这里，而不是各留一份。
+//
+// ⚠ 2026-10-24：API Key 弹窗的模型选择器移除后，webui.html 里
+// 仍在用共享层的是 **对话测试**（modelOwnerOf + syncModelProviderOptions）。
+// 所以断言它俩，而不是已删除的 syncAKProviders。
 func TestModelPickerIsSharedAcrossPages(t *testing.T) {
 	console, err := os.ReadFile(filepath.Join("webui.html"))
 	if err != nil {
@@ -435,15 +439,71 @@ func TestModelPickerIsSharedAcrossPages(t *testing.T) {
 		t.Error("★ webui.html 的 modelOwnerOf 没有委托到共享层 —— 判据会有两份，早晚漂移")
 	}
 
-	// ③ 填充逻辑同理。
-	for _, fn := range []string{"syncAKProviders", "syncModelProviderOptions"} {
-		f := sliceFuncBody(t, string(console), "function "+fn+"(")
-		if f == "" {
-			t.Errorf("webui.html 里找不到 %s", fn)
-			continue
+	// ③ 仍在用的填充逻辑必须走共享的 mpFillProviderSelect。
+	f := sliceFuncBody(t, string(console), "function syncModelProviderOptions(")
+	if f == "" {
+		t.Fatal("webui.html 里找不到 syncModelProviderOptions（对话测试的上游下拉）")
+	}
+	if !strings.Contains(f, "mpFillProviderSelect(") {
+		t.Error("★ syncModelProviderOptions 没有用共享的 mpFillProviderSelect —— 各写一遍必然有一处写反")
+	}
+}
+
+// API Key 弹窗只能选**分组**，不能再选模型。
+//
+// # 用户要求（2026-10-24）
+//
+//   「这里API 不要设置模型了只能设置分组 因为分组已经设置了模型」
+//
+// # 为什么这条必须守
+//
+// 模型范围在分组里定义一次就够了。key 再选一遍模型 = 同一件事两个真相来源：
+// 改分组里的模型，key 上那份不会跟着变 —— 那正是我们反复踩的悬空问题
+// （见 PLAN-groups.md Q3：两者语义重复，白名单并入分组）。
+//
+// 判据分两半：**旧控件必须消失** + **新控件必须存在且在提交体里**。
+func TestAPIKeyModalSelectsGroupsNotModels(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("webui.html"))
+	if err != nil {
+		t.Fatalf("读 webui.html: %v", err)
+	}
+	src := string(raw)
+	start := strings.Index(src, `<div id="akModal"`)
+	if start < 0 {
+		t.Fatal("找不到 API Key 弹窗")
+	}
+	modal := src[start:]
+
+	// ① 旧模型选择控件必须都不在弹窗里了。
+	for _, gone := range []string{
+		`id="akAll"`,        // 「全部允许」勾选框
+		`id="akModelList"`,  // 模型多选列表
+		`id="akProvider"`,   // 上游下拉
+		`id="akSearch"`,     // 模型搜索
+		`id="akSelectedChips"`,
+		`id="akPicker"`,
+	} {
+		if strings.Contains(modal, gone) {
+			t.Errorf("★ API Key 弹窗里还有 %s —— 模型应该在分组里选，不该在这里再选一遍", gone)
 		}
-		if !strings.Contains(f, "mpFillProviderSelect(") {
-			t.Errorf("★ %s 没有用共享的 mpFillProviderSelect —— 三处各写一遍必然有一处写反", fn)
+	}
+
+	// ② 新分组控件必须在。
+	for _, want := range []string{
+		`id="akGroupList"`,
+		`id="akGroupChips"`,
+		`id="akGroupEmpty"`,
+	} {
+		if !strings.Contains(modal, want) {
+			t.Errorf("★ API Key 弹窗缺少分组选择控件 %s", want)
 		}
+	}
+
+	// ③ 提交体必须带 groups（而不是 models）。
+	if !strings.Contains(src, "limit, rpm, groups, model_map: modelMap") {
+		t.Error("★ 提交体没有带 groups —— 界面上选了也不生效")
+	}
+	if regexp.MustCompile(`rpm, models, model_map`).MatchString(src) {
+		t.Error("★ 提交体还在发 models —— 后端虽然有兼容，但界面不该再产生它")
 	}
 }
