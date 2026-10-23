@@ -600,3 +600,35 @@ func TestWebUINoUndefinedFunctionCalls(t *testing.T) {
 		}
 	}
 }
+
+// /v1/models 必须打 X-Service 头 —— 用来区分「响应来自网关」还是「来自反向代理」。
+//
+// # 起因（2026-10-24，用户报障）
+//
+// 他在公网部署上看到：
+//
+//	http://8.148.203.162:7868/v1/models answered 503
+//
+// 而本 handler **源码里只有一个状态码 http.StatusOK**，不可能返回 503 ——
+// 那是前面的反向代理在"后端不可达"时回的。可客户端报错看不出这个区别，
+// 于是故障被读成"网关坏了"，而真相在代理/监听地址那一层。
+//
+// 有了这个头，curl -i 一眼定责：有 = 到了网关，没有 = 根本没到。
+func TestModelsEndpointSetsServiceHeader(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("handler.go"))
+	if err != nil {
+		t.Fatalf("读 handler.go: %v", err)
+	}
+	src := sliceFuncBody(t, string(raw), "func (h *Handler) models(")
+	if src == "" {
+		t.Fatal("找不到 models handler")
+	}
+	// ① 它只能回 200（这是"503 不可能来自这里"的证据）。
+	if strings.Contains(src, "StatusServiceUnavailable") {
+		t.Error("★ models handler 里出现了 503 —— 若真加了，上面那段注释与判据要一起改")
+	}
+	// ② 必须打身份头。
+	if !strings.Contains(src, `Set("X-Service"`) {
+		t.Error("★ /v1/models 没打 X-Service 头 —— 代理 503 与网关 503 将无法区分")
+	}
+}

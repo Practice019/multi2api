@@ -825,6 +825,20 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	//   用的是渠道声明的内部名，绕过了 filterModelsForRequest 那一遍映射。
 	//   见 applyPublicNames 的注释（有实测日志证据）。
 	data = h.applyPublicNames(r, data)
+	// ⚠ 打上身份头，用来区分「这个响应是网关给的」还是「反向代理给的」。
+	//
+	// 起因（2026-10-24）：用户在一个公网部署上看到
+	// 「http://8.148.203.162:7868/v1/models answered 503」，而本函数
+	// **源码里只有 http.StatusOK**（唯一的状态码），根本不可能返回 503 ——
+	// 那是它前面的反向代理在「后端不可达」时回的。
+	//
+	// 但光看客户端报错分不出来：代理的 503 与网关自身故障的 503 在用户眼里一样。
+	// 加上这个头之后，curl -i 有没有 X-Service 一眼就能定责：
+	//   有   → 请求确实到了网关（状态码是网关给的）
+	//   没有 → 请求根本没到网关（查代理 / 监听地址 / 防火墙）
+	//
+	// 与 /healthz 的同一个头同名同义（那边注释写着「身份靠 service 字段 + X-Service 头双保险」）。
+	w.Header().Set("X-Service", h.serviceName())
 	// ⚠⚠ 给每条**补上档位声明**（2026-10-18 加，用户要求："我们的项目也需要可以支持选择思考深度"）。
 	//
 	// 动机：我们**一直有** `reasoning_effort` 的透传与降级（internal/cline/payload.go 的
