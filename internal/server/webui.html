@@ -858,6 +858,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      同时用颜色区分"免费"与"贵"，但**不只靠颜色**（各自带 x 前缀的数字，色盲也可读）。 */
   .chip .mult{margin-left:6px;padding:1px 6px;border-radius:999px;
     background:color-mix(in srgb,var(--dim) 14%,transparent);color:var(--dim);font-size:11px}
+/* 上下文窗口标注：与倍率标记并列，但视觉更弱 ——
+   它是参考信息，而倍率是选哪个模型的决策依据，两者不该抢同样的注意力。
+   未知时显示 ctx ? 并用虚线边框区分于真实数字（不只靠颜色）。 */
+.chip .ctx{margin-left:6px;padding:1px 5px;border-radius:4px;font-size:10.5px;
+  font-variant-numeric:tabular-nums;background:#f1f5f9;color:#475569;
+  border:1px solid #e2e8f0;cursor:help}
+.chip .ctx.unknown{background:transparent;color:#94a3b8;border-style:dashed}
   .chip .mult.free{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
   .chip .mult.hi{color:var(--warn);background:color-mix(in srgb,var(--warn) 17%,transparent)}
   /* 「上游未提供倍率」（x无）**没有**自己的样式规则（R4）。
@@ -1326,7 +1333,6 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   --muted:var(--dim);
   --accent:var(--acc);
   --accent-fg:#120F0D;
-  --input-bg:#0B0908;
   --err-bg:#2A0A12;
   --err-fg:#FFB4C2;
   --err-line:#FFE600;
@@ -13102,6 +13108,48 @@ let multCatalogFailed = false;
     return `<span class="mult${cls}" title="每次调用消耗 ${txt} 倍基础额度">x${esc(txt)}</span>`;
   }
 
+  // ── 上下文窗口标注（用户要求：能拿到的填，拿不到的不写/占位，且写清楚）──
+  //
+  // # 口径（两句话）
+  //
+  //	能拿到 → 显示「ctx 1M」这样的数字
+  //	拿不到 → 显示「ctx ?」，title 里写明这是上游没报，不是 0
+  //
+  // # 为什么不直接不显示
+  //
+  // 完全不显示时，用户分不清「这个模型窗口很小」和「我们不知道它多大」——
+  // 前者会影响他选哪个模型，后者不影响。两种都留白等于把这两种情况混成一团。
+  //
+  // 但也**不能**编一个数字：ctx 决定客户端要不要提前压缩历史，
+  // 报大了会让它塞太多然后被上游截断，报小了会让它过早 compact。
+  // 所以占位用「?」而不是任何数字。
+  function fmtCtx(n) {
+    // 显示成 1M / 200K / 131072 三档。
+    //
+    // 1M/200K 这类整数近似只用于**一眼可比**；精确值放 title，
+    // 需要精确的客户端会读 /v1/models 的原始字段，不靠这个标注。
+    if (!Number.isFinite(n) || n <= 0) return '';
+    if (n >= 1000000 && n % 100000 === 0) return (n / 1000000) + 'M';
+    if (n >= 1000 && n % 1000 === 0) return (n / 1000) + 'K';
+    return String(n);
+  }
+  
+  // ctxTag 生成 chip 上的窗口标注。
+  //
+  // 拿不到时返回占位「ctx ?」—— 而不是空串。理由见上方注释：
+  // 留白会让「窗口小」与「不知道」看起来一样。
+  function ctxTag(m) {
+    const c = fmtCtx(m && m.ctx);
+    if (!c) return '<span class="ctx unknown" title="上游没有提供这个模型的上下文窗口大小；'
+      + '这不代表它是 0，只代表我们不知道。需要精确值时请查上游文档">ctx ?</span>';
+    const out = fmtCtx(m && m.maxOut);
+    const title = '上下文窗口 ' + (m.ctx) + ' token'
+      + (out ? '；单次最大输出 ' + m.maxOut + ' token' : '；单次最大输出：上游未提供');
+    return '<span class="ctx" title="' + esc(title) + '">ctx ' + esc(c) + '</span>';
+  }
+  
+
+  
   function renderModels(list) {
     models = list || [];
     if (!models.length) {
@@ -13377,11 +13425,20 @@ let multCatalogFailed = false;
       // ⚠ 去重仍按**裸名**（上面的 g.seen 用的就是 bare）：`auto` 与
       // `workbuddy/auto` 指的是同一个模型，只按完整 id 去重会让它们在同一组里
       // 各占一条 —— 名字看起来一模一样，用户看到的仍然是"重复"。
-      // 按裸名去重才是他要的"不要重复"。
+        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
       //
       // 倍率查表不受影响：multTag 内部经 multTableKey 归一后再查
       //（倍率表的键是上游目录里的裸名，且只覆盖默认上游，见 multTableKey 的注释）。
-      g.items.push({ id: m.id, fullId: m.id, owner: owner });
+      // 带上窗口元数据：chip 上要显示「ctx 1M」这类标注，
+      // 不给它就没法显示（之前只留 id/fullId/owner，元数据在这一步丢失）。
+      //
+      // ⚠ 上游没报时这两个字段**不存在**（后端按"未知就不写"输出），
+      //   所以这里刻意不写默认值 —— undefined 会在渲染层变成"不显示"，
+      //   而写 0 会变成"窗口大小为 0"这个确切的假事实。
+      g.items.push({
+        id: m.id, fullId: m.id, owner: owner,
+        ctx: m.context_length, maxOut: m.max_output_tokens,
+      });
     }
     // 组间按 manifest 上游顺序排序（providerRank）；组内按名字排序（顺序稳定，便于扫读）。
     const out = Array.from(byOwner.values());
@@ -13418,7 +13475,7 @@ let multCatalogFailed = false;
         : '';
       body = note + `<div class="chips">${g.items.map(m =>
         `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
-        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>`;
+        + `${esc(m.id)}${multTag(m.id)}${ctxTag(m)}</span>`).join('')}</div>`;
     }
     return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
       <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
