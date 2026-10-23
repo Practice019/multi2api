@@ -253,7 +253,7 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if iface == ifaceAnthropic {
 		// OpenAI chat/completions → Anthropic Messages。
 		// 走共享的 internal/anthroconv，与 zcode / minimax 同一份判据。
-		anthro, cerr := anthroconv.OpenAIToAnthropic(body)
+		anthro, cerr := anthroconv.OpenAIToAnthropicWithLimit(body, anthroconv.MaxOutputFor(model))
 		if cerr != nil {
 			// ⚠ 带 ErrConvertFailed 哨兵：出口层据此**不换号**直接回 400。
 			// 换号对转换失败无效（每个号都会以同样方式失败）。

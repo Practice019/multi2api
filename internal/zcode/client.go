@@ -20,6 +20,7 @@
 package zcode
 
 import (
+	"encoding/json"
 	"bytes"
 	"context"
 	"fmt"
@@ -211,7 +212,7 @@ func (c *Client) buildBody(a *Auth, openaiBody []byte) ([]byte, error) {
 	if !a.UsesJWT() {
 		return openaiBody, nil
 	}
-	return anthroconv.OpenAIToAnthropic(openaiBody)
+	return anthroconv.OpenAIToAnthropicWithLimit(openaiBody, anthroconv.MaxOutputFor(modelOfBody(openaiBody)))
 }
 
 // attachCaptcha 给 JWT 通道的请求挂上验证码参数。
@@ -356,4 +357,19 @@ func EscapeQuery(kv map[string]string) string {
 		q.Set(k, v)
 	}
 	return q.Encode()
+}
+
+// modelOfBody 从 OpenAI 请求体里取 model 字段（空串 = 取不到）。
+//
+// 用于查该模型的输出上限（Anthropic 协议的 max_tokens 必填，缺省时要填一个
+// 有依据的值，而不是任意小值）。解析失败返回空串 —— 调用方会用兜底值，
+// 不因取不到模型名而中断转换。
+func modelOfBody(body []byte) string {
+	var probe struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return ""
+	}
+	return probe.Model
 }

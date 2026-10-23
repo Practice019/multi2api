@@ -2,6 +2,7 @@
 package minimax
 
 import (
+	"encoding/json"
 	"context"
 	"errors"
 	"fmt"
@@ -162,7 +163,7 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 	if err != nil {
 		return gateway.ChatStream{}, err
 	}
-	anthroBody, err := anthroconv.OpenAIToAnthropic(body)
+	anthroBody, err := anthroconv.OpenAIToAnthropicWithLimit(body, anthroconv.MaxOutputFor(modelOfBody(body)))
 	if err != nil {
 		// ⚠ 带上 gateway.ErrConvertFailed 哨兵：出口层据此**不换号**直接返回 400
 		//   （换号对转换失败无效 —— 见 internal/gateway/errors.go 的长注释）。
@@ -293,4 +294,19 @@ func fallbackModels() []modelEntry {
 			ThinkingMode: thinkingModeForcedOn,
 		},
 	}
+}
+
+// modelOfBody 从 OpenAI 请求体里取 model 字段（空串 = 取不到）。
+//
+// 用于查该模型的输出上限（Anthropic 协议的 max_tokens 必填，缺省时要填一个
+// 有依据的值，而不是任意小值）。解析失败返回空串 —— 调用方会用兜底值，
+// 不因取不到模型名而中断转换。
+func modelOfBody(body []byte) string {
+	var probe struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return ""
+	}
+	return probe.Model
 }
