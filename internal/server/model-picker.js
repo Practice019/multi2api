@@ -2,7 +2,7 @@
 //
 // # 这个文件是**从 webui.html 抽出来的**，不是新写的
 //
-// API 管理页早就有这套逻辑（modelOwnerOf + syncAKProviders + renderAKModelList，
+// API 管理页早就有这套逻辑（modelOwnerOf + syncModelProviderOptions，
 // 注释里记着用户原话「我希望可以选择上游才能显示具体上游的模型」）。
 // 我做分组页时没读那段，重写了一遍，于是：
 //
@@ -46,7 +46,7 @@ function mpOwners(list, rank) {
 //
 // ⚠ 恢复选中值必须写在 innerHTML **之后**：
 // select 会把「不在 option 列表里的值」当场归一成空串，先设值会被清掉。
-// （webui.html 的 syncAKProviders 注释里记着同一个坑。）
+// （webui.html 的 syncModelProviderOptions 注释里记着同一个坑。）
 //
 // 返回实际生效的值（不在列表里时回落空串 = 全部上游）。
 function mpFillProviderSelect(sel, list, rank, allLabel) {

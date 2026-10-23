@@ -39,84 +39,21 @@ func readWebUI(t *testing.T) string {
 //
 // 手打的失败形态是"设了限制却一个都调不了"，而保存时**完全看不出来**
 // （保存成功、列表里也显示着那个拼错的模型名）。
-func TestAPIKeyModelsUIIsWired(t *testing.T) {
-	src := readWebUI(t)
-
-	need := []struct {
-		what   string
-		needle string
-	}{
-		{"表头「可用模型」", "<th>可用模型</th>"},
-		{"列渲染函数", "function apiKeyModelsCell("},
-		{"单元格里调用它", "${apiKeyModelsCell(k)}"},
-
-		// 弹窗本体
-		{"弹窗容器", `id="akModal"`},
-		{"名称输入", `id="akName"`},
-		{"额度输入", `id="akLimit"`},
-		{"限速输入", `id="akRpm"`},
-		{"「全部允许」开关", `id="akAll"`},
-		{"搜索框", `id="akSearch"`},
-		{"模型列表容器", `id="akModelList"`},
-		{"全选/清空", `id="akSelAll"`},
-
-		// 行为
-		{"打开弹窗", "function openAPIKeyModal("},
-		{"保存", "function saveAPIKeyModal("},
-		{"拉模型目录", "async function ensureAKCatalog("},
-		{"目录来源是 /v1/models", "api('/v1/models')"},
-		{"渲染可勾选列表", "function renderAKModelList("},
-		{"搜索过滤", "includes(kw)"},
-		{"新建按钮打开弹窗", "$('btnApiKeyNew').onclick = () => openAPIKeyModal('create')"},
-		{"行内「编辑」打开弹窗", "openAPIKeyModal('edit', cur)"},
-	}
-	for _, n := range need {
-		if !strings.Contains(src, n.needle) {
-			t.Errorf("webui.html 缺少%s（%q）—— 后端会照发，而那一列/那个按钮不会出现，"+
-				"且**没有任何报错**", n.what, n.needle)
-		}
-	}
-
-	// 不允许再回到 prompt 那条路（它会同时丢掉搜索、回显与"取消 ≠ 0"）。
-	if strings.Contains(src, "function apiKeyCreate(") {
-		t.Error("apiKeyCreate（prompt 四连问）应当已被弹窗取代 —— " +
-			"它同时丢掉了搜索、字段回显，以及「取消 ≠ 输入 0」这条判据")
-	}
-}
-
-// 「隐藏 ≠ 取消勾选」：搜着勾两个、再搜别的勾一个，三个都该留下。
+// ---- 模型选择器相关的守卫已删除 ----
 //
-// 这是搜索式多选最容易写错的地方 —— 重渲染时把被过滤掉的那些
-// 从选择集里丢掉了，而用户完全看不出来（他以为自己勾了三个）。
-func TestAPIKeyPickerKeepsHiddenSelections(t *testing.T) {
-	src := readWebUI(t)
-	if !strings.Contains(src, "akHiddenChecked") {
-		t.Fatal("弹窗缺少 akHiddenChecked —— 搜索会隐藏部分行，" +
-			"而「隐藏」**不等于**「取消勾选」：把隐藏的那些从选择集里丢掉，" +
-			"用户会得到一个比他勾的少得多的白名单，且看不出来")
-	}
-	if !strings.Contains(src, "function stashAKChecked(") {
-		t.Error("重渲染前必须先 stash 当前勾选（否则隐藏行会被丢掉）")
-	}
-}
-
-// 「不是全部允许、又没选任何模型」必须在保存前拦下。
+// 原来的四条（TestAPIKeyModelsUIIsWired / TestAPIKeyPickerKeepsHiddenSelections /
+// TestAPIKeyPickerRejectsEmptySelection，以及 webui_apikey_selected_test.go 里的两条）
+// 守的都是「API Key 弹窗里的模型多选器」—— 那个控件已被移除。
 //
-// 不拦的话会存成一个**空名单**，而后端把空名单读作"不限制" ——
-// 与用户此刻的意图（他刚取消勾选"全部允许"）恰好相反。
-// 这种"看起来设了限制其实没设"是白名单最危险的失败形态。
-func TestAPIKeyPickerRejectsEmptySelection(t *testing.T) {
-	src := readWebUI(t)
-	if !strings.Contains(src, "要么勾「全部允许」，要么至少选一个模型") {
-		t.Error("空选择必须在保存前拦下 —— 后端把空名单读作「不限制」，" +
-			"与用户取消勾选「全部允许」的意图相反")
-	}
-}
-
-// API key **永久可看**：默认打码、点一下显示完整值并自动复制。
+// 为什么整体删掉而不是改断言：
 //
-// 用户原话：「我不要那个 API key 只在第一次创建的时候显示，
-// 它永久都可以显示。但是默认的时候…中间部分是要屏蔽一下，就打个码。
+// 它们守的语义在新设计下**不存在了**。比如「取消勾选全部允许但一个都不选 ⇒ 拦下」——
+// 那是白名单时代的危险（空名单 = 不限制，与用户意图相反）。现在 key 只选分组，
+// 「一个分组都不选」就是明确的「不限制」，没有歧义可守。
+//
+// 新的守卫在 groups_ui_test.go 的 TestAPIKeyModalSelectsGroupsNotModels：
+// 它断言旧控件确实消失、分组控件确实存在、提交体确实带 groups。
+
 // 但是你可以再点击一下那个 API key，点击之后它就显示出来了，
 // 并且自动复制到那个剪切板里面去。」
 func TestAPIKeyRevealAndCopyWired(t *testing.T) {
