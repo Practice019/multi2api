@@ -12,6 +12,7 @@
 package admin
 
 import (
+	"log"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -208,11 +209,48 @@ func (h *Handler) channelsDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id 必填"})
 		return
 	}
+	// 先记下这条渠道**声明过哪些模型** —— 删除之后 ch 就查不到了，
+	// 而这些名字正是要清理的引用。
+	//
+	// 为什么用「渠道声明的模型」而不是「目录快照」：渠道声明的名字是
+	// 删除这一刻的确切事实；目录快照可能因为上游抖动而暂时为空，
+	// 拿它做清理会误删用户精心挑的白名单（见 apikey.PruneModels 的注释）。
+	var declared []string
+	var channelName string
+	if ch, ok := s.Get(req.ID); ok && ch != nil {
+		declared = append(declared, ch.Models...)
+		// 渠道的 model_mapping 值也是内部名，同样要清。
+		for _, internal := range ch.ModelMap {
+			declared = append(declared, internal)
+		}
+		channelName = ch.Name
+	}
+
 	if err := s.Delete(req.ID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+	// ── 级联清理：删渠道 ⇒ 该渠道的模型在 API key 里也不该再出现 ──
+	//
+	// 用户的原话：「删除之后有关这个渠道的都不要了，语义不就是这样么」。
+	// 对 —— 留着一个指向已不存在模型的别名，比没有更糟：用户看到它、
+	// 复制它发请求，得到的却是 unknown_provider。
+	out := map[string]any{"ok": true}
+	if ks := h.apiKeysStore(); ks != nil && len(declared) > 0 {
+		if res, perr := ks.PruneModels(declared); perr != nil {
+			// 清理失败**不**回滚渠道删除：渠道已经删掉了，回滚会让用户
+			// 看到"删了又回来"。如实报告哪一步没做干净即可。
+			log.Printf("admin: 渠道 %s 已删除，但清理 API key 引用失败: %v", channelName, perr)
+			out["prune_error"] = perr.Error()
+		} else if res.KeysTouched > 0 {
+			log.Printf("admin: 渠道 %s 已删除，连带清理 %d 把 API key 里的 %d 个模型引用: %v",
+				channelName, res.KeysTouched, len(res.ModelsGone), res.ModelsGone)
+			out["pruned_keys"] = res.KeysTouched
+			out["pruned_models"] = res.ModelsGone
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // channelsStatus POST /admin/channels/status  {"id": "...", "status": 1|2|3}
