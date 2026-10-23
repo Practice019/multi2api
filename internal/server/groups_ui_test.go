@@ -54,8 +54,10 @@ func TestGroupsUIRedirectsWhenUnauthenticated(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "/ui" {
 		t.Errorf("应跳 /ui，实际 %q", loc)
 	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("未授权时不该回页面内容（%d 字节）", rec.Body.Len())
+	// ⚠ 不能断言"响应体为空"：http.Redirect 会写一小段说明 HTML（约 26 字节）。
+	//   要守的是"**没有把页面本身发出去**" —— 用页面标题判定。
+	if strings.Contains(rec.Body.String(), "分组管理") {
+		t.Error("未授权时泄漏了分组页内容")
 	}
 }
 
@@ -133,7 +135,7 @@ func TestGroupsUIPicksModelsFromCatalog(t *testing.T) {
 		{"搜索框", `id="f-search"`},
 		{"拉目录", "/v1/models"},
 		{"全选当前", "function pickAll("},
-		{"取消已选（事件委托）", "gPickedChips\").addEventListener("},
+		{"取消已选（事件委托）", "gPickedChips').addEventListener("},
 	} {
 		if !strings.Contains(src, n.needle) {
 			t.Errorf("分组页缺少%s（%q）", n.what, n.needle)
@@ -163,4 +165,61 @@ func TestConsoleHasGroupsPanel(t *testing.T) {
 	if !strings.Contains(src, "<h2>分组") {
 		t.Error("分组面板缺少 <h2>分组 —— 侧栏导航项由 h2 文本生成，缺了它入口就没有名字")
 	}
+}
+
+// ★ API Key 列表的「可用模型」列必须反映**分组**（P2 之后真正的判据）。
+//
+// # 这条守的是一个会骗人的显示
+//
+// 分组非空时判定链用分组并集，`k.models` 完全不参与。而那一列原来只看 `k.models` ——
+// 于是 P3.5 迁移之后的 key（只配分组、白名单为空）会显示成「全部」，
+// 与事实**恰好相反**：它其实被限制在分组里的少数模型上。
+//
+// 用户拿这一列回答「这把 key 能用什么」，看反了就等于以为没限制。
+func TestAPIKeyModelsColumnShowsGroups(t *testing.T) {
+	src := readWebUI(t)
+	fn := sliceFuncBody(t, src, "function apiKeyModelsCell(k) {")
+	if fn == "" {
+		t.Fatal("找不到 apiKeyModelsCell —— 锚点改名了，这条守卫会**静默失效**")
+	}
+	if !strings.Contains(fn, "k.groups") {
+		t.Error("★ 「可用模型」列没读 k.groups —— 配了分组的 key 会显示成「全部」，" +
+			"而它实际只被允许用分组里的模型（意思正好相反）")
+	}
+	if !strings.Contains(fn, "个分组") {
+		t.Error("有分组时应显示「N 个分组」而不是空白/全部")
+	}
+	// 存量白名单那条路不能丢（P3.5 之前建的 key 只有 models）。
+	if !strings.Contains(fn, "k.models") {
+		t.Error("存量白名单（k.models）那条显示分支不该被删 —— 没配分组的 key 还在用它")
+	}
+}
+
+// sliceFuncBody 截出某个函数体（从签名到配平的 `}`）。
+//
+// # 为什么需要它
+//
+// 直接对整个 webui.html 做 strings.Contains 判"有没有 k.groups"太弱：
+// 那个字符串在别处也出现（渲染分组页的逻辑、注释里），于是断言会**假通过**。
+// 截到函数体再判，才是"这一列真的读了它"。
+func sliceFuncBody(t *testing.T, src, sig string) string {
+	t.Helper()
+	i := strings.Index(src, sig)
+	if i < 0 {
+		return ""
+	}
+	depth := 0
+	for j := i; j < len(src); j++ {
+		switch src[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[i : j+1]
+			}
+		}
+	}
+	t.Fatalf("%s 的大括号没配平 —— 文件被改坏了", sig)
+	return ""
 }

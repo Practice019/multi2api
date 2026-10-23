@@ -9444,8 +9444,29 @@ let loginProvider = '';
   //
   // ⚠ 「全部」不能写成一个空白格：用户看到空白会以为是"还没加载"，
   // 于是去刷新页面；而"没设限制"是个**明确的状态**，得说出来。
+  // apiKeyModelsCell 「可用模型」列的单元格。
+  //
+  // # ⚠ 2026-10 P2 之后的真相来源变了（这一列曾经会骗人）
+  //
+  // 分组（Key.Groups）非空时，判定链用的是**分组里模型的并集**，`k.models`
+  // 完全不参与。而这一列原来只看 `k.models` —— 于是「只配了分组、白名单为空」的
+  // key（P3.5 迁移之后这几乎是全部）会显示成「全部」，**恰好是相反的意思**：
+  // 那把 key 其实被限制在分组内的少数模型上。
+  //
+  // 用户会拿这一列来回答「这把 key 能用什么」，看反了的后果是他以为没限制。
+  // 所以有分组时优先显示分组（分组名由后端随 View 下发不了 —— 这里只有 ID），
+  // 用「N 个分组」+ title 里列 ID 表达：ID 是可点进去核对的（分组页里就有）。
   function apiKeyModelsCell(k) {
+    const groups = Array.isArray(k.groups) ? k.groups.filter(Boolean) : [];
     const list = Array.isArray(k.models) ? k.models.filter(Boolean) : [];
+    // ① 分组优先：这是 P2 之后真正生效的判据。
+    if (groups.length) {
+      const title = '按分组限制（' + groups.length + ' 个分组）：' + groups.join('\n')
+        + '\n\n分组里有哪些模型请到「分组」页核对。';
+      return '<span class="mono" style="font-size:11px" title="' + esc(title) + '">'
+        + groups.length + ' 个分组</span>';
+    }
+    // ② 没有分组 ⇒ 存量白名单（P3.5 迁移前的形态，仍然生效）。
     if (!list.length) return '<span class="dim">全部</span>';
     const shown = list.slice(0, 3).map(esc).join('、');
     const more = list.length > 3 ? `<span class="dim"> +${list.length - 3}</span>` : '';
