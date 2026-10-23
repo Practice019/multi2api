@@ -22,6 +22,7 @@ package admin
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -42,12 +43,36 @@ import (
 // 未接线时本函数返回 nil ⇒ 列表回 enabled=false、其余端点 404，不影响既有功能。
 func (h *Handler) groupsStore() *groupstore.Store { return h.cfg.Groups }
 
+// groupCatalogFunc 取"当前对外模型目录"（内部名），供一致性检查判断分组内容是否陈旧。
+//
+// TODO(接线，由主脑完成)：
+//
+//	admin.Config 加一个字段：ModelNames func() []string
+//	本函数体改成：return catalogFunc(h.cfg.ModelNames)
+//	cmd/server/main.go 注入一个取当前目录的函数（内部名，含上游 + 渠道并集）。
+//
+// 未接线时返回 nil ⇒ 一致性报告里 StaleCheckable=false（前端据此显示
+// "未检查"而不是"全部干净"）。这条降级是刻意的：**空** 与 **没查** 必须能分开，
+// 否则界面会把"没查过"显示成"一切正常"。
+func (h *Handler) groupCatalogFunc() catalogFunc {
+	if h.cfg.ModelNames == nil {
+		return nil
+	}
+	return catalogFunc(h.cfg.ModelNames)
+}
+
 // registerGroups 注册 /admin/groups 系列端点（接线后在 New 里调用）。
 func (h *Handler) registerGroups() {
 	h.register("GET /admin/groups", h.groupsList)
 	h.register("POST /admin/groups", h.groupsCreate)
 	h.register("POST /admin/groups/update", h.groupsUpdate)
 	h.register("POST /admin/groups/delete", h.groupsDelete)
+	// 引用完整性（P5）：检查只读、清理显式触发。
+	//
+	// ⚠ 清理**不自动跑**：陈旧模型那项依赖模型目录，而目录会因上游抖动短暂为空，
+	// 自动清理会把用户配好的分组内容一次删光（apikey.PruneModels 的注释里记过同一坑）。
+	h.register("GET /admin/groups/consistency", h.groupsConsistency)
+	h.register("POST /admin/groups/prune", h.groupsPrune)
 }
 
 // groupView 是对外的分组视图。
@@ -187,15 +212,44 @@ func (h *Handler) groupsDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id 必填"})
 		return
 	}
-	// ⚠ 这里**不做**级联清理（key 里对该分组的引用）。理由：
-	//   · 级联要跨到 apikey 存储，admin 现在的依赖里没有它（P5 才接）
-	//   · 更要紧的是语义：删分组与清 key 必须是**两次可分别重试**的操作。
-	//     塞进一个请求里，一旦清理失败，用户看到的是"删除失败"，但分组其实已经没了。
+	// 先记下这个分组叫什么（删完就查不到了），日志与响应里要用。
+	name := req.ID
+	if g, ok := s.Get(req.ID); ok && g != nil {
+		name = g.Name
+	}
+
 	if err := s.Delete(req.ID); err != nil {
 		writeGroupErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+	// ── 级联清理（P5）：删分组 ⇒ 所有 key 里指向它的引用一起消失 ──
+	//
+	// 与删渠道时清 key 里的模型引用（apikey.PruneModels）是同一套口径：
+	// 用户删了一个东西，指向它的残留就该一起消失。
+	//
+	// 不清理的后果是可控但不友好：P2/P3 的判定链把"受限且并集为空"处理成
+	// **拒绝**（安全），于是那些 key 调用全 403，而错误只说"分组里没有任何模型"。
+	out := map[string]any{"ok": true, "id": req.ID, "name": name}
+	if ks := h.apiKeysStore(); ks != nil {
+		res, perr := ks.PruneGroups([]string{req.ID})
+		if perr != nil {
+			// ⚠ 清理失败**不**回滚分组删除：分组已经删掉了，回滚会让用户看到
+			//   "删了又回来"。如实报告哪一步没做干净即可（与 channelsDelete 同处理）。
+			log.Printf("admin: 分组 %s（%s）已删除，但清理 API key 引用失败: %v", req.ID, name, perr)
+			out["prune_error"] = perr.Error()
+		} else if res.KeysTouched > 0 {
+			log.Printf("admin: 分组 %s（%s）已删除，连带清理 %d 把 API key 的分组引用", req.ID, name, res.KeysTouched)
+			out["pruned_keys"] = res.KeysTouched
+			// ⚠ 权限放大必须显式告诉调用方 —— 这是这次操作最需要用户知晓的后果。
+			if len(res.KeysUnrestricted) > 0 {
+				out["keys_unrestricted"] = res.KeysUnrestricted
+				out["warning"] = "下列 key 的分组引用被清空，它们现在**不受模型限制**了（可用全部模型）：" +
+					joinLimited(res.KeysUnrestricted, 5)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // writeGroupErr 把 groupstore 的错误哨兵映射成状态码。
