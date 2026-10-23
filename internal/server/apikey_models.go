@@ -246,6 +246,32 @@ func (h *Handler) modelAllowedForRequest(w http.ResponseWriter, r *http.Request,
 //
 // ⚠ 判据用的是与准入**同一个** apikey.ModelAllowed：两处若各写一套，
 // 会出现"列表里看得见、调了却 403"这种最难解释的形态。
+//
+// # P3：分组不需要在这里单独判
+//
+// 分组对目录的收窄**已经生效**，但不在这段代码里 —— 它在 allowedModelsForRequest
+// 的返回值上：分组非空时那里返回的就是「这些分组的模型并集」，本函数拿到的
+// 就是那个并集。
+//
+// 所以我**没有**在这里再加一段 groups 判断。理由就是本仓反复踩过的那条：
+// 同一判据两处实现必然分叉。这里若再查一次分组，就会出现
+//
+//	准入（modelAllowedForRequest）看分组并集
+//	目录（本函数）看分组并集 ∩ 白名单
+//
+// 而两者不一致的表现是"列表里没有、调用却成功"（或反过来），
+// 且只在"分组与白名单同时非空"的 key 上出现 —— 那正是 P3.5 迁移前
+// 短暂存在的形态，测试最难覆盖、用户最难报障。
+//
+// # 一个必须成立的语义：分组里的模型目录里有才出现
+//
+// 分组是「**允许范围**」，不是「保证可用」（PLAN 3.4）。本函数遍历的是
+// **真实目录**（上游 + 渠道），分组只负责从中筛，因此：
+//
+//	分组里有 q、但没有任何渠道/上游提供 q ⇒ 列表里没有 q
+//
+// 这是对的：列出来的东西必须真能调通。反过来若按分组清单直接生成列表，
+// 客户端会看到一堆调了必 404 的模型名。
 func (h *Handler) filterModelsForRequest(r *http.Request, list []map[string]any) []map[string]any {
 	allowed, restricted := h.allowedModelsForRequest(r)
 	if !restricted {

@@ -124,6 +124,21 @@ type Key struct {
 	// 判定入口只有一处：server.allowedModelsForRequest。
 	Groups []string `json:"groups,omitempty"`
 
+	// MigratedToGroups 这把 key 的 Models 白名单是否已经迁移到分组（P3.5，幂等标记）。
+	//
+	// # 为什么"Groups 非空就不迁"这个天然条件还不够
+	//
+	// 迁移完成后 Groups 非空、Models 为空，两个条件都拦得住重复跑。但有一次
+	// **只做了一半**的窗口：分组建好了、写回 key 时落盘失败 —— 那时 Groups
+	// 还是空的、Models 还在，下次启动就会再建一个同名分组（还会撞名）。
+	// 这个标记让"已经动过这把 key"这件事本身可查，不必再从字段形状去猜。
+	//
+	// # 为什么**不**放进 View
+	//
+	// 它是迁移状态、不是管理界面要看的东西。View 是"给人看的形态"，
+	// 往里塞内部记账字段会让前端多一个永远不该渲染的列。
+	MigratedToGroups bool `json:"migrated_to_groups,omitempty"`
+
 	// ModelMap 这把 key 的**模型对外名映射**：`对外名 → 内部模型名`（2026-10-21 加）。
 	//
 	// # 用户的需求（原话）
