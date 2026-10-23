@@ -47,6 +47,11 @@ type channelForward struct {
 	ChannelID     string
 	ChannelName   string
 	UpstreamModel string
+	// PublicModel 客户端请求时用的名字（别名或公开名）。
+	//
+	// 脱敏时回填到响应的 model 字段 —— 客户端认的是自己发出去的那个名字，
+	// 而上游原名属于身份指纹（monkeycode-basic/deepseek-flash 点名了上游）。
+	PublicModel string
 	// KeyMask 本次实际用到的 API key 的**中间打码**形式（2026-10-20 加）。
 	//
 	// ⚠ 为什么需要它：请求日志的 UID 列对渠道请求一直是空的 —— 渠道用渠道凭据，
@@ -149,6 +154,7 @@ func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel stri
 	return channelForward{
 		Stream: cs, ChannelID: cand.Channel.ID, ChannelName: cand.Channel.Name,
 		UpstreamModel: cand.UpstreamModel,
+		PublicModel:   publicModel,
 		// 打码后的 key 填进日志 UID 列（完整 key 绝不落盘）
 		KeyMask: channelstore.MaskKey(key),
 	}, nil

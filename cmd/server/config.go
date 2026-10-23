@@ -57,6 +57,34 @@ type Config struct {
 	// 详见 internal/admin 的门禁实现与 startup 的提示。
 	AdminToken string `json:"admin_token"`
 
+	// ProviderAlias 上游 ID -> 对外代号（不希望暴露后端身份时配）。
+	//
+	// # 用户的要求
+	//
+	// 「owned_by 我不希望让别人知道上游」
+	//
+	// 实测一条响应能泄露的指纹有 5 类，配了这张表后全部换成代号：
+	//
+	//	1) /v1/models 的 owned_by        workbuddy-intl
+	//	2) /v1/models 的 id 前缀          workbuddy-intl/deepseek-v4.1-flash
+	//	3) chat 响应的 model 字段          monkeycode-basic/deepseek-flash
+	//	4) chat 响应的 id 前缀             chatcmpl-... / 0217927502...
+	//	5) chat 响应的 usage 私有字段      points_consumed（loomy 独有）
+	//
+	// # 形状
+	//
+	//	"provider_alias": {
+	//	  "workbuddy":      "ch-a",
+	//	  "workbuddy-intl": "ch-b",
+	//	  "monkeycode":     "ch-c"
+	//	}
+	//
+	// 未列出的上游用 channel-<hash> 兜底（**不回落成真名** —— 那会让
+	// 「已经隐藏了」的假设在新增上游时静默失效）。
+	//
+	// nil = 不隐藏，行为与改造前逐字节一致（向后兼容）。
+	ProviderAlias map[string]string `json:"provider_alias"`
+
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 

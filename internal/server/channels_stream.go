@@ -15,7 +15,8 @@
 package server
 
 import (
-	"io"
+	"strings"
+	"bytes"
 	"net/http"
 )
 
@@ -30,16 +31,18 @@ import (
 func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw channelForward, cap *streamUsage) {
 	defer fw.Stream.Body.Close()
 
-	// 上游给的 Content-Type 优先；没给就按 SSE 兜底（这条链路基本只有流式）。
 	if ct := upstreamContentType(fw); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	} else {
 		w.Header().Set("Content-Type", "text/event-stream")
 	}
 	w.Header().Set("Cache-Control", "no-cache")
-	// 渠道信息回给调用方：排查"这条请求走了哪条渠道、上游模型叫什么"时不必翻日志。
+	// 渠道 ID 回给调用方：排查「这条请求走了哪条渠道」时不必翻日志。
+	//
+	// 不再回 X-Upstream-Model：那是上游的原生模型名，属于身份指纹
+	//（monkeycode-basic/deepseek-flash 直接点名了上游）。
+	// 客户需要知道走了哪条渠道，不需要知道那一头是谁。
 	w.Header().Set("X-Channel-Id", fw.ChannelID)
-	w.Header().Set("X-Upstream-Model", fw.UpstreamModel)
 
 	status := fw.Stream.Status
 	if status == 0 {
@@ -47,32 +50,102 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 	}
 	w.WriteHeader(status)
 
+	publicModel := strings.TrimSpace(fw.PublicModel)
+
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 16<<10)
+	// SSE 是按行的：脱敏必须以行为单位，不能跨块。
+	//
+	// 一帧 SSE 可能被拆成两次 Read（`data: {"mod` + `el":"x"}` + 空行）。
+	// 若按块脱敏，两块都解析不成 JSON，于是静默不脱敏 ——
+	// 表现是「有时泄露有时不漏」，取决于网络切片。
+	var pending []byte
 	for {
 		n, err := fw.Stream.Body.Read(buf)
 		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return // 客户端断了：正常结束，不要报错刷屏
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-			// ★ 旁路采集：写出去的字节已经到客户端了，这里才开始解析。
-			// Feed 只读 buf[:n]（自己复制），不会改动转发内容。
 			if cap != nil {
 				cap.Feed(buf[:n])
 			}
+			pending = append(pending, buf[:n]...)
+			out, rest := h.scrubSSELines(pending, publicModel)
+			pending = rest
+			if len(out) > 0 {
+				if _, werr := w.Write(out); werr != nil {
+					return
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 		}
 		if err != nil {
-			if err != io.EOF {
-				// 上游中途出错：我们**无法**再改状态码（头已经发出去了），
-				// 所以只能静默结束 —— 客户端会因为流提前结束而发现异常。
-				return
+			// 收尾：remaining 里可能是**非流式的整块 JSON**（没有换行分隔），
+			// 也可能是 SSE 最后一帧没有结尾换行。
+			//
+			// ⚠ 这里必须区分：非流式响应整块就是一个 JSON 对象，
+			// 上一版只处理 `data:` 行，于是**非流式整体不脱敏** ——
+			// 实测 chat 响应里 model=monkeycode-basic/deepseek-flash 原样回给了客户端。
+			if len(pending) > 0 {
+				trimmed := bytes.TrimSpace(pending)
+				if len(trimmed) > 0 && trimmed[0] == 0x7b {
+					// 整块 JSON：脱敏后写。
+					_, _ = w.Write(scrubChatResponse(trimmed, publicModel))
+				} else {
+					// SSE 尾巴：按行脱敏后写。
+					if out2, _ := h.scrubSSELines(append(pending, '\n'), publicModel); len(out2) > 0 {
+						_, _ = w.Write(out2)
+					} else {
+						_, _ = w.Write(pending)
+					}
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
 			}
 			return
 		}
 	}
+}
+
+// scrubSSELines 对完整的 SSE 行做脱敏，返回（要写出去的字节, 未完成的尾巴）。
+//
+// 为什么按行而不是按块：SSE 的帧边界是空行。按块处理时一帧可能跨两次 Read，
+// 两块都解析不成 JSON 就静默不脱敏 —— 那种失效随网络切片变化，最难查。
+//
+// 非 SSE（非流式的整块 JSON）也走这里：它没有换行分隔，整块会留在 rest 里，
+// 由收尾那段原样发出去。那条路径由调用方在写之前用 scrubChatResponse 处理。
+func (h *Handler) scrubSSELines(pending []byte, publicModel string) (out, rest []byte) {
+	if len(pending) == 0 {
+		return nil, pending
+	}
+	lastNL := bytes.LastIndexByte(pending, '\n')
+	if lastNL < 0 {
+		return nil, pending
+	}
+	complete := pending[:lastNL+1]
+	rest = pending[lastNL+1:]
+
+	out = make([]byte, 0, len(complete))
+	for _, line := range bytes.SplitAfter(complete, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		trimmed := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			out = append(out, line...)
+			continue
+		}
+		payload := bytes.TrimSpace(trimmed[len("data:"):])
+		if len(payload) == 0 || payload[0] != 0x7b {
+			out = append(out, line...)
+			continue
+		}
+		scrubbed := scrubChatResponse(payload, publicModel)
+		out = append(out, []byte("data: ")...)
+		out = append(out, scrubbed...)
+		out = append(out, '\n')
+	}
+	return out, rest
 }
 
 // upstreamContentType 取上游响应的 Content-Type。
