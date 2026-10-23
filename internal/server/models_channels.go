@@ -101,10 +101,11 @@ func (h *Handler) appendChannelModels(r *http.Request, data []map[string]any, sc
 	out := make([]map[string]any, len(data), len(data)+len(extra))
 	copy(out, data)
 	owner := h.channelOwnerByModel()
+	meta := h.channelModelMeta()
 	for _, n := range extra {
 		// scrub=true（普通 API Key 配了别名）时不标来源渠道：
-		// 渠道名（csg / 七牛云）同样是"这个模型从哪来"的信息，
-		// 与 owned_by 泄露上游是同一类问题。用户口径是"设置了别名就按别名处理"。
+		// 渠道名（csg / 七牛云）同样是「这个模型从哪来」的信息，
+		// 与 owned_by 泄露上游是同一类问题。用户口径是「设置了别名就按别名处理」。
 		ownedBy := owner[n]
 		if scrub {
 			ownedBy = ""
@@ -115,6 +116,18 @@ func (h *Handler) appendChannelModels(r *http.Request, data []map[string]any, sc
 		}
 		if ownedBy != "" {
 			item["owned_by"] = ownedBy
+		}
+		// ctx / max_output 与上游目录**同形**：有值才写。
+		//
+		// 没有这一段时，同一个 /v1/models 里渠道条目缺这两个键、
+		// 上游条目有 —— 客户端按统一 schema 解析会得到 0 或 undefined。
+		if mi, ok := meta[n]; ok {
+			if mi.ContextLength > 0 {
+				item["context_length"] = mi.ContextLength
+			}
+			if mi.MaxOutputTokens > 0 {
+				item["max_output_tokens"] = mi.MaxOutputTokens
+			}
 		}
 		out = append(out, item)
 	}
@@ -172,4 +185,50 @@ func (h *Handler) channelOwnerByModel() map[string]string {
 		}
 	}
 	return out
+}
+
+// channelModelMeta 公开名 → 渠道声明的模型元数据（ctx / max_output）。
+//
+// 与 channelOwnerByModel 同一手法：一个公开名可能被多条渠道提供，
+// 取**优先级最高**的那条（与选路顺序一致 —— 目录里显示的元数据应当是
+// 请求实际会走的那条，否则用户按它算预算会算错）。
+//
+// 元数据在渠道上（ChannelInfo），不在 map 上：同一个公开名换成别的上游
+// 名字时窗口大小不变，它描述的是「这条渠道背后那个模型」的能力。
+func (h *Handler) channelModelMeta() map[string]channelModelMetaInfo {
+	s := h.cfg.Channels
+	if s == nil {
+		return nil
+	}
+	out := map[string]channelModelMetaInfo{}
+	best := map[string]int{}
+	for _, ch := range s.List() {
+		if ch.Status != channelstore.StatusEnabled {
+			continue
+		}
+		if ch.ChannelInfo.ContextLength <= 0 && ch.ChannelInfo.MaxOutputTokens <= 0 {
+			continue
+		}
+		rev, _ := modelmap.Mapping(ch.ModelMap).Reverse()
+		for _, real := range ch.Models {
+			pub := real
+			if p, ok := rev[real]; ok && p != "" {
+				pub = p
+			}
+			if old, seen := best[pub]; !seen || ch.Priority > old {
+				best[pub] = ch.Priority
+				out[pub] = channelModelMetaInfo{
+					ContextLength:   ch.ChannelInfo.ContextLength,
+					MaxOutputTokens: ch.ChannelInfo.MaxOutputTokens,
+				}
+			}
+		}
+	}
+	return out
+}
+
+// channelModelMetaInfo 一个渠道模型的元数据（0 = 未知）。
+type channelModelMetaInfo struct {
+	ContextLength   int64
+	MaxOutputTokens int64
 }

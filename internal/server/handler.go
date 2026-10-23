@@ -1076,11 +1076,29 @@ func (h *Handler) singleProviderModelList(owned string, scrub bool) []map[string
 // 用 int，int64 是两者的公共超集，调用处各自隐式提升即可。
 func (h *Handler) entryOf(id string, ctxWindow, maxTokens int64, owned string) map[string]any {
 	entry := map[string]any{
-		"id":                id,
-		"object":            "model",
-		"created":           1753600000,
-		"context_length":    ctxWindow,
-		"max_output_tokens": maxTokens,
+		"id":      id,
+		"object":  "model",
+		"created": 1753600000,
+	}
+	// context_length / max_output_tokens **只在有值时写**。
+	//
+	// # 为什么 0 不该写出来（用户报的第 1、3 条）
+	//
+	// 旧实现无条件写，于是上游没报 ctx 时输出 "context_length": 0，
+	// 客户端读到的意思是「这个模型上下文长度为 0」—— 一个确切的假事实。
+	//
+	// 实测两个形态：
+	//
+	//	004/deepseek-v4.1-flash-1017  "max_output_tokens": 0
+	//	001/deepseek-v4.1-flash-1017  两个字段都缺（走渠道路径，压根没填）
+	//
+	// 前者是「上游没报」，后者是「代码没填」。两种都不该被读成 0。
+	// 分不清就**别断言** —— 与全仓「未知不等于零」同一条纪律。
+	if ctxWindow > 0 {
+		entry["context_length"] = ctxWindow
+	}
+	if maxTokens > 0 {
+		entry["max_output_tokens"] = maxTokens
 	}
 	// owned_by 只在**有值**时才写。
 	//
@@ -1091,9 +1109,6 @@ func (h *Handler) entryOf(id string, ctxWindow, maxTokens int64, owned string) m
 	// 用户的要求是「按别名处理，不能暴露别的」⇒ 连字段都不给。
 	if owned != "" {
 		entry["owned_by"] = owned
-	}
-	if ctxWindow == 0 {
-		entry["context_length"] = 131072 // 兜底
 	}
 	return entry
 }
@@ -1602,7 +1617,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 语义口径与 new-api 的 `is_stream` 对齐：那一列记的也是客户端意图。
 		// 用户看日志要回答的是"我这个请求本来该是流式吗"，不是"网关内部怎么转的"。
 		chMode := channelLogMode(peek.Stream)
-		fw, ferr := h.forwardViaChannel(r.Context(), peek.Model, body)
+		// ⚠ 传 publicModel（客户端原始名）而不是 peek.Model（已换成内部名）：
+		//   forwardViaChannel 用它填 fw.PublicModel，脱敏时回填到响应 model 字段。
+		//   传内部名的话脱敏等于没做 —— 实测就是那样：
+		//   001 的响应 model 仍然是 csg/deepseek-v4.1-flash-1017。
+		//
+		// ⚠ 但渠道匹配必须用**内部名**：channelroute.Plan 按渠道声明的上游名查表。
+		//   所以这里传两个：匹配用内部名，对外回显用公开名。
+		fw, ferr := h.forwardViaChannelAs(r.Context(), peek.Model, publicModel, body)
 		if ferr != nil {
 			// ★ 渠道失败也写请求日志。改造前渠道分支**一行日志都没有**，后果是实测踩到的：
 			//   用户发 csg，日志里一条都搜不到，他只能看到另一个 Python 客户端的 loomy 流量，
@@ -1640,7 +1662,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 旁路采集器：边转发边解析 SSE，拿 ttfb 与 usage（三级兜底见 stream_usage.go）。
 		// ⚠ 它只读不写，转发字节与上游完全一致 —— 这是本改造唯一的硬约束。
 		cap := newStreamUsage(chStart)
-		h.writeChannelStream(w, r, fw, cap)
+		h.writeChannelStream(w, r, fw, cap, scrubResp)
 		// 成功也记：model 记**客户端发来的公开名**，渠道与上游模型各占一列 ⇒
 		// 「这条 csg 请求到底走了渠道还是账号池」在日志里一眼可判。
 		// tokens 现在来自采集器（末帧 usage → 倒数第二帧 → 文本估算）；

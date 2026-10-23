@@ -93,6 +93,24 @@ type Overrides struct {
 type ChannelInfo struct {
 	MultiKey         bool   `json:"multi_key"`
 	KeySelectionMode string `json:"key_selection_mode"` // "" / "random" / "round_robin"
+
+	// ContextLength 本渠道模型的上下文窗口（0 = 未知）。
+	//
+	// # 为什么需要（用户报的第 1 条）
+	//
+	// 实测 /v1/models 里渠道模型（001/deepseek-v4.1-flash-1017）的
+	// context_length 与 max_output_tokens **两个字段都没有**，
+	// 而同表里其它五个模型都有值。
+	//
+	// 根因：渠道的模型是"公开名 → 上游名"的映射，本身不带任何元数据；
+	// appendChannelModels 只写了 {id, object}。于是同一个列表里
+	// 有的条目有 ctx、有的是空的 —— 客户端做上下文预算时无法处理。
+	//
+	// 0 = 未知 ⇒ 输出时**整个字段不写**（不是写 0）。
+	ContextLength int64 `json:"context_length,omitempty"`
+
+	// MaxOutputTokens 本渠道模型的单次最大输出（0 = 未知）。
+	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
 }
 
 // Ability 是"某个组里的某个模型，可以被某个渠道服务"这条 join 记录。
