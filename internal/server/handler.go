@@ -1546,8 +1546,46 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var peek struct {
 		Stream bool   `json:"stream"`
 		Model  string `json:"model"`
+		// 参数校验用（缺陷 3：这些以前全部直通上游）。
+		Temperature *float64 `json:"temperature"`
+		TopP        *float64 `json:"top_p"`
+		MaxTokens   *int64   `json:"max_tokens"`
+		Messages    []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
 	}
-	_ = json.Unmarshal(body, &peek)
+	// ⚠ 解析失败必须**当场回 400**（缺陷 2：畸形 JSON 之前报成了 403）。
+	//
+	// 旧实现是 `_ = json.Unmarshal(...)` —— 把错误丢了。后果：
+	// peek.Model 保持空串 → 走到白名单判断 → model=="" 不匹配 → 403
+	// model_not_allowed。客户端发了个语法错误，收到的是"你没权限"，
+	// 排查方向被完全带偏。
+	//
+	// 语法错误是**请求无效**（400），与权限无关。这条顺序不能省。
+	if err := json.Unmarshal(body, &peek); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_json",
+			"请求体不是合法 JSON："+err.Error())
+		return
+	}
+	// 参数范围校验（缺陷 3）。
+	//
+	// # 为什么网关要校验（而不是"交给上游"）
+	//
+	// 实测这些全部 200 直通上游：temperature=-5、max_tokens=-1、top_p=5、
+	// role="wizard"、messages=[]。上游多数会自行消化，但：
+	//
+	//	max_tokens=-1  → 上游当"无限制"，返回完整长回答 → **计费失控**
+	//	temperature=-5 → 有的上游 clamp、有的报错、有的按 0 处理
+	//
+	// 而 OpenAI 规范里这些都是 400。客户端按规范写代码时，
+	// 我们的 200 会让它以为参数生效了。
+	//
+	// 校验只做**规范明确的硬边界**，不做风格性限制（比如不禁止 temperature=2
+	// 之外的启发式判断）—— 越界就 400，与官方行为一致。
+	if msg := validateChatParams(peek.MaxTokens); msg != "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", msg)
+		return
+	}
 
 	// publicModel 客户端**请求时用的名字**（别名或裸名）。
 	//
@@ -1604,7 +1642,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		peek.Model = alias
 	}
 	if h.channelServes(peek.Model) {
-		if !h.modelAllowedForRequest(w, r, peek.Model) {
+		// 白名单按**客户端发来的名字**判，不按解析后的内部名。
+		//
+		// 内部名是 resolveModelAlias 换出来的，白名单里存的也是内部名 ——
+		// 拿内部名去判会永远通过（那等于白名单失效）；而"拒绝上游真名"
+		// 那条判据若作用在内部名上，会把**用别名的合法请求**也拒掉
+		//（别名 006/x 换成 workbuddy/x，然后被当成"用了真名"）。
+		if !h.modelAllowedForRequest(w, r, publicModel) {
 			return
 		}
 		chStart := time.Now()
@@ -1701,7 +1745,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 位置刻意在 providerFor **之后**：白名单按裸模型名比（见
 	// apikey.ModelAllowed），而剥前缀的口径要用选路那一套 —— 先解析出
 	// 结构化的模型名，再比，两处判据不会分叉。
-	if !h.modelAllowedForRequest(w, r, peek.Model) {
+	// 同样按客户端发来的名字判（理由见渠道分支那段）。
+	if !h.modelAllowedForRequest(w, r, publicModel) {
 		return
 	}
 	// 出站请求体里必须写回**剥掉前缀**的模型名：前缀是网关的路由记号，
@@ -1720,6 +1765,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 宁可让上游按原样拒绝并给出它的错误，也不要在这里造一个假错误。
 	}
 
+
+	// 出站前归一化 reasoning_effort（缺陷 1：off 在 workbuddy 系必挂 400）。
+	//
+	// # 用户实测
+	//
+	// /v1/models 声明六模型都支持 [off low high max]，而实际：
+	//
+	//	003 workbuddy      reasoning_effort=off  -> 上游 400
+	//	004 workbuddy-intl reasoning_effort=off  -> 上游 400
+	//	002 loomy          reasoning_effort=off  -> 200
+	//	005 monkeycode     reasoning_effort=off  -> 200
+	//
+	// 而传 none（不在声明列表里）反而 200 且无推理输出。
+	// 也就是说 workbuddy 系把 off 当非法值，真正表达关闭的是
+	// **省略这个参数**（或 none）。
+	//
+	// # 为什么在出口层统一改，而不是改各上游
+	//
+	// 「off 等价于不传」是**网关对外的契约**（我们在 /v1/models 里
+	// 声明了 off），而各上游接不接受是各自的事实。让 12 个上游都实现
+	// 一次转换，必然有一半漏掉 —— 那时客户端会在某些通道上莫名 400。
+	//
+	// ⚠ 400 还有个更坏的副作用（用户实测）：它被算作账号失败，
+	//   把 2 个健康号打进冷却，于是**后续正常请求也跟着 503**。
+	//   一个参数取值错误污染整个账号池，这是必须在这里拦住的理由。
+	if normalized, changed := normalizeReasoningEffortForUpstream(outBody); changed {
+		outBody = normalized
+	}
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	// ⚠⚠ 2026-10-21：日志里的 model 必须用**内部名**，不是客户端发来的对外名。
@@ -2265,6 +2338,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					fail(acct.UID)
 					continue
 				}
+			}
+			// 上游 400 = 我们的请求参数有问题，不是账号故障。
+			//
+			// # 用户实测的缺陷 1（第二半）
+			//
+			// reasoning_effort=off 让 workbuddy 系回 400，而每个号收到的 body
+			// 完全一样 —— 换号必然同样失败。旧逻辑走 applyErrorPolicy + fail：
+			//
+			//	1) 2 个健康号被打进冷却（一个参数错误污染整个池子）
+			//	2) 重试若干轮后报 503 no_healthy_account（把「你传错了」说成「没号」）
+			//	3) 报错体里 upstream client (http 400): 后面是空的，
+			//	   因为 respBody 没被带出去
+			//
+			// 正确动作与 ErrKindFatalClient 一致：回 400 并结束，
+			// 不冷却、不换号、把上游的错误原文带上。
+			//
+			// 判据用 status 而不是 kind：401/403 是凭证问题（要换号），
+			// 429 是限流（要冷却）—— 都不能回 400。
+			if status == http.StatusBadRequest || status == http.StatusUnprocessableEntity {
+				st.status = http.StatusBadRequest
+				st.decision = "upstream_bad_request:client"
+				lastKind = gateway.ErrKindFatalClient
+				lastErr = &chatError{Kind: gateway.ErrKindFatalClient, Status: status, Msg: string(respBody)}
+				break
 			}
 			h.applyErrorPolicy(acct.UID, kind)
 			fail(acct.UID)

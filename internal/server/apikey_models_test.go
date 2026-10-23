@@ -115,11 +115,28 @@ func TestModelAllowedForRequestRejectsWithHelpfulBody(t *testing.T) {
 		t.Errorf("状态码 = %d，want 403", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "glm-5.2") {
-		t.Errorf("403 必须写明**允许的模型**（调用方最需要知道的就是这个），实际: %s", body)
+	// 这条断言**反过来了**（用户实测的泄露 1）。
+	//
+	// 原断言要求 403 列出白名单里的模型名。而白名单里存的是内部名
+	//（workbuddy/glm-5.2、loomy/...），列出来等于公布上游身份：
+	//
+	//	这把 API key 不允许调用模型 ；允许的模型：csg/deepseek-v4.1-flash-1017、
+	//	loomy/DeepSeek-V4.1-Flash、workbuddy/deepseek-v4.1-flash、...
+	//
+	// 而且客户端拿到这份清单后可以**直接用真名调用**（真名是全局可用的，
+	// 别名只是按 key 的虚拟命名空间），整套脱敏被一步绕过。
+	//
+	// 现在只回数量，不回名字。要看具体能调什么走 /v1/models（那里回别名）。
+	for _, leak := range []string{"glm-5.2", "deepseek-v4-flash"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("★ 403 泄露了白名单模型名 %q（等于公布上游身份），实际: %s", leak, body)
+		}
 	}
 	if !strings.Contains(body, "model_not_allowed") {
 		t.Errorf("应带稳定的错误码 model_not_allowed，实际: %s", body)
+	}
+	if !strings.Contains(body, "2 个模型") {
+		t.Errorf("应当回数量让用户知道是权限问题，实际: %s", body)
 	}
 
 	// 白名单内（带前缀写法）放行，且不写错误体。

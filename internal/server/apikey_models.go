@@ -25,6 +25,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -143,16 +144,55 @@ func (h *Handler) allowedModelsForRequest(r *http.Request) ([]string, bool) {
 // 错误体带上**允许的模型清单**（截断到前若干个）：调用方拿到 403 时最需要
 // 知道的就是"那我到底能用什么"，否则他只能去问发 key 的人。
 // 这不是信息泄漏 —— 这是他自己那把 key 的权限。
+// modelAllowedForRequest 判断本次请求是否允许调用 model。
+//
+// 不允许时自己写好错误并返回 false —— 调用方只需 `if !ok { return }`，
+// 免得三处入口各写一遍错误体。
+//
+// # model 参数应当是**客户端发来的名字**（别名或裸名），不是解析后的内部名
+//
+// 用户实测过一个复合 bug：传别名 006/x 时，resolveModelAlias 先把它换成
+// 内部名 workbuddy/x，然后「拒绝上游真名」那条判据把内部名当成真名拒掉 ——
+// 用别名的合法请求反而 403。
+//
+// 所以调用点传 publicModel；而白名单里存的是内部名，这里要**反查一次**。
 func (h *Handler) modelAllowedForRequest(w http.ResponseWriter, r *http.Request, model string) bool {
 	allowed, restricted := h.allowedModelsForRequest(r)
 	if !restricted {
 		return true
 	}
-	if modelAllowed(allowed, model) {
+	m := strings.TrimSpace(model)
+	if m == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "missing_model",
+			"请求体缺少 model 字段；可用模型请查 GET /v1/models")
+		return false
+	}
+	// 泄露 2：别名 key 拒绝「上游真名」。
+	//
+	// 真名是全局可用的（不属于任何 key 的虚拟命名空间），别名 key 放行它
+	// 等于给了绕过脱敏的路：客户端拿到真名就能直接调，响应 model 回显真名。
+	//
+	// 判据看**客户端发来的形态**：白名单里有别名映射的 key，只接受别名形式。
+	if h.keyUsesAliases(r) && !isAliasForm(m) {
+		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+			fmt.Sprintf("这把 API key 只接受 GET /v1/models 里列出的别名；%q 看起来是上游原名", m))
+		return false
+	}
+	// 白名单里存的是内部名，客户端发的是别名 —— 先换回内部名再比。
+	if resolved := h.resolveModelAlias(r, m); resolved != m {
+		m = resolved
+	}
+	if modelAllowed(allowed, m) {
 		return true
 	}
+	// ⚠ 错误体**不能**列出允许的模型名（用户实测的泄露 1）。
+	//
+	// 白名单里存的是内部名（workbuddy/...），列出来等于公布上游身份；
+	// 而客户端拿到清单后可以直接用真名调用。只回数量，不回名字。
+	//
+	// 要看具体能调什么走 /v1/models —— 那里回的是别名（且已脱敏）。
 	writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
-		"这把 API key 不允许调用模型 "+strings.TrimSpace(model)+"；允许的模型："+joinLimited(allowed, 12))
+		fmt.Sprintf("这把 API key 不允许调用模型 %q（本 key 授权了 %d 个模型，清单请查 GET /v1/models）", strings.TrimSpace(model), len(allowed)))
 	return false
 }
 
@@ -437,4 +477,36 @@ func publicNameFor(modelMap map[string]string, internal string) string {
 		}
 	}
 	return internal
+}
+
+// keyUsesAliases 报告本次请求的 key 是不是「用别名对外」的那种。
+//
+// 判据：该 key 配了 model_map（有别名映射）。
+//
+// 别名 key 的白名单里存的是内部名（workbuddy/deepseek-v4.1-flash），
+// 而内部名 / 上游真名是全局可用的 —— 不属于任何 key 的虚拟命名空间。
+// 于是客户端拿到真名就能绕过别名直接调，响应 model 回显真名，
+// 让 chatcmpl-gw-* 改写与 model 别名回填那套脱敏完全失效。
+//
+// 没配别名的 key 不拦：那种 key 本来就不脱敏
+//（用户说「对话密钥按原来的上游即可」），对它拦真名是过度限制。
+func (h *Handler) keyUsesAliases(r *http.Request) bool {
+	return len(h.modelMapForRequest(r)) > 0
+}
+
+// isAliasForm 报告 model 是否是「别名形式」（形如 008/xxx 的数字前缀）。
+//
+// 本项目里别名统一用三位数字前缀（001/ 002/ ...），上游真名的前缀是字母。
+// 这条判据只用于出错时的提示文案，不用于放行 —— 放行仍由白名单决定。
+func isAliasForm(model string) bool {
+	prov, _, has := gateway.SplitModel(strings.TrimSpace(model))
+	if !has || prov == "" {
+		return false
+	}
+	for i := 0; i < len(prov); i++ {
+		if prov[i] < '0' || prov[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
