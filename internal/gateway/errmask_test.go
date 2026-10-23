@@ -12,6 +12,11 @@
 //
 // 每个「不改」的用例都对应实现在某处刻意的克制（TLD 白名单、net.ParseIP 复核），
 // 谁把这些克制删掉，表里就会有对应用例变红。
+//
+// # 表为什么放在包级而不是函数内
+//
+// 因为还有第二条测试要用同一份输入：幂等检查（TestMaskErrorTextIdempotent）。
+// 若各写一份，加用例的人只会加一处，另一处静默失守。
 package gateway
 
 import (
@@ -19,238 +24,322 @@ import (
 	"testing"
 )
 
+// maskCase 表里的一行。
+type maskCase struct {
+	name string
+	in   string
+	want string
+	// why 记录**这条期望值为什么是这个**。表驱动测试最常见的腐化是
+	// 「有人改了实现顺手改期望值」，写清理由才能让这种改动变得显眼。
+	why string
+}
+
+// maskCases 主表。
+var maskCases = []maskCase{
+	// ── 带 scheme 的 URL ────────────────────────────────────────────
+	{
+		name: "https_主机与路径",
+		in:   `Post "https://api.opencsg.com/v1/chat/completions": dial tcp: connection refused`,
+		want: `Post "https://***.com/***/***/***": dial tcp: connection refused`,
+		why:  "引号是定界符，必须原样留下（下游会把它拼进 JSON 或日志）",
+	},
+	{
+		name: "https_保留端口",
+		in:   `GET https://api.example.com:8443/v1/models: 502`,
+		want: `GET https://***.com:8443/***/***: 502`,
+		why:  "端口是第一排障信息：8443 说明没走标准 TLS 端口，是配置问题而非网络问题",
+	},
+	{
+		name: "https_无路径",
+		in:   `base url https://example.com rejected`,
+		want: `base url https://***.com rejected`,
+		why:  "只有 host 时不能多造出一个斜杠，否则拼出来的错误文案会变形",
+	},
+	{
+		name: "query_保名打值",
+		in:   `GET https://api.example.com/v1/models?key=secret&alt=sse`,
+		want: `GET https://***.com/***/***?key=***&alt=***`,
+		why:  "alt=sse 这个名字解释了「为什么是流式请求失败」，值才是秘密",
+	},
+	{
+		name: "query_无值参数保留",
+		in:   `GET https://api.example.com/health?verbose`,
+		want: `GET https://***.com/***?verbose`,
+		why:  "无值参数不携带内容，改名是自找麻烦",
+	},
+	{
+		name: "query_顺序不重排",
+		in:   `https://api.example.com/x?z=1&a=2`,
+		want: `https://***.com/***?z=***&a=***`,
+		why:  "url.ParseQuery 会按字母排序；对比日志时会让人以为参数集合变了",
+	},
+	{
+		name: "query_连字符参数名",
+		in:   `https://api.example.com/v1/models?x-api-key=ABCDEF123456&page=2`,
+		want: `https://***.com/***/***?x-api-key=***&page=***`,
+		why:  "带连字符的参数名是常态（x-api-key / anthropic-version），不许被值规则吃掉",
+	},
+	{
+		name: "userinfo_抹掉凭据",
+		in:   `https://user:pass@api.example.com/v1/token`,
+		want: `https://***@***.com/***/***`,
+		why:  "userinfo 是 basic auth 凭据，与 host 是否是上游无关",
+	},
+	{
+		name: "userinfo_带端口",
+		in:   `https://admin:s3cr3t@gw.example.io:7868/admin/login`,
+		want: `https://***@***.io:7868/***/***`,
+		why:  "userinfo + 端口 + 路径同时出现时三者各自按规则处理，不要互相吞",
+	},
+	{
+		name: "fragment_是凭据不是路径",
+		in:   `https://auth.example.com/token#access_token=abc123def`,
+		want: `https://***.com/***#***`,
+		why:  "OAuth 隐式流把 token 放在 # 后面，整体抹掉最省事也最安全",
+	},
+	{
+		name: "二级后缀整体保留",
+		in:   `https://api.vendor.co.uk:443/v1/x`,
+		want: `https://***.co.uk:443/***/***`,
+		why:  "***.uk 会把 co 误当成子域，等于制造假信息",
+	},
+	{
+		name: "ws_也打码",
+		in:   `wss://stream.example.com/v1/realtime failed`,
+		want: `wss://***.com/***/*** failed`,
+		why:  "流式重连错误里出现 wss 是常态",
+	},
+	{
+		name: "括号包裹的URL",
+		in:   `(see https://api.example.com:8080/v1/errors)`,
+		want: `(see https://***.com:8080/***/***)`,
+		why:  "括号是标点，不该被吃进路径；路径里的合法括号要保留（见 trimURLSuffix 的配对判断）",
+	},
+	{
+		name: "中文全角括号收尾",
+		in:   `上游返回 HTTP 502（响应体片段：Post "https://api.opencsg.com/v1/x": EOF）`,
+		want: `上游返回 HTTP 502（响应体片段：Post "https://***.com/***/***": EOF）`,
+		why:  "本仓错误文案是中文；全角括号是合法 UTF-8 字节，不被排除集挡住时会跟着进 path 然后凭空消失",
+	},
+	{
+		name: "中文顿号收尾",
+		in:   `失败于 https://api.example.com/v1/x、请重试`,
+		want: `失败于 https://***.com/***/***、请重试`,
+		why:  "顿号是最常见的枚举分隔符，吃进去会把两句粘成一句",
+	},
+	{
+		name: "句尾句号",
+		in:   `connect to https://api.example.com/v1/x.`,
+		want: `connect to https://***.com/***/***.`,
+		why:  "句号是句子的，不是 URL 的",
+	},
+	{
+		name: "URL里的IPv6主机",
+		in:   `https://[2001:db8::1]:8443/v1/x`,
+		want: `https://[***]:8443/***/***`,
+		why:  "IPv6 必须用方括号形态，url.Port() 才解析得出来",
+	},
+
+	// ── IP ──────────────────────────────────────────────────────────
+	{
+		name: "IPv4_带端口",
+		in:   `dial tcp 192.168.1.10:8443: connect: connection refused`,
+		want: `dial tcp ***.***.***.***:8443: connect: connection refused`,
+		why:  "端口保留，地址打码 —— 内网拓扑不对外",
+	},
+	{
+		name: "IPv6_方括号",
+		in:   `dial tcp [2001:db8::1]:443: connect: no route to host`,
+		want: `dial tcp [***]:443: connect: no route to host`,
+		why:  "Go 网络错误对 IPv6 统一用方括号",
+	},
+	{
+		name: "IPv6_带zone",
+		in:   `dial tcp [fe80::1%eth0]:80: connect: invalid argument`,
+		want: `dial tcp [***]:80: connect: invalid argument`,
+		why:  "网卡名（eth0）也是内网拓扑，跟着一起抹",
+	},
+	{
+		name: "IPv6_裸形态",
+		in:   `lookup 2001:db8::1: no such host`,
+		want: `lookup [***]: no such host`,
+		why:  "DNS 错误里 IPv6 常不带方括号；句尾冒号要留在外面",
+	},
+	{
+		name: "IPv6_回环方括号",
+		in:   `proxyconnect tcp: dial tcp [::1]:7890: connect: connection refused`,
+		want: `proxyconnect tcp: dial tcp [***]:7890: connect: connection refused`,
+		why:  "代理地址常是 ::1 —— 它同样暴露「网关本机有代理」",
+	},
+
+	// ── 裸域名 ──────────────────────────────────────────────────────
+	{
+		name: "裸域名_DNS错误",
+		in:   `dial tcp: lookup api.opencsg.com on 10.0.0.1:53: no such host`,
+		want: `dial tcp: lookup ***.com on ***.***.***.***:53: no such host`,
+		why:  "DNS 解析失败时地址以裸域名出现，没有 scheme 可依赖",
+	},
+	{
+		name: "裸域名_二级后缀",
+		in:   `dial tcp: lookup api.vendor.co.uk: no such host`,
+		want: `dial tcp: lookup ***.co.uk: no such host`,
+		why:  "co.uk 整体保留，见 maskDomainTail",
+	},
+	{
+		name: "裸域名_com点cn",
+		in:   `dial tcp: lookup auth.vendor.com.cn: no such host`,
+		want: `dial tcp: lookup ***.com.cn: no such host`,
+		why:  "com.cn 是二级后缀；***.cn 会让「哪国供应商」这条信息失真",
+	},
+	{
+		name: "裸域名_子域层级不保留",
+		in:   `dial tcp: lookup internal-auth.corp.example.com: no such host`,
+		want: `dial tcp: lookup ***.com: no such host`,
+		why:  "internal-auth 这类子域比域名本身更能定位内网结构，不能留",
+	},
+	{
+		name: "裸域名_带端口",
+		in:   `TLS handshake with api.example.com:443 failed`,
+		want: `TLS handshake with ***.com:443 failed`,
+		why:  "裸域名 + 端口共存时只抹域名，端口必须留下",
+	},
+	{
+		name: "证书通配域名",
+		in:   `x509: certificate is valid for *.example.com, not api.example.com`,
+		want: `x509: certificate is valid for *.***.com, not ***.com`,
+		why:  "Go 的 x509 错误文案固定是这个形状，日志里天天见",
+	},
+	{
+		name: "localhost",
+		in:   `dial tcp localhost:7868: connect: connection refused`,
+		want: `dial tcp ***:7868: connect: connection refused`,
+		why:  "localhost 没有点，裸域名规则碰不到；但它暴露「错误出在网关自身」",
+	},
+
+	// ── 凭据形态 ────────────────────────────────────────────────────
+	{
+		name: "api_key_冒号形态",
+		in:   `api_key:AIzaSyAAAaUooTUni8AdaOkSRMda30n_Q4vrV70`,
+		want: `api_key:***`,
+		why:  "与 new-api 的 mask.go 输出逐字一致，便于两边日志对照",
+	},
+	{
+		name: "api_key_JSON形态",
+		in:   `{"error":{"message":"invalid key","api_key":"sk-live-abcdefghijklmnop123456"}}`,
+		want: `{"error":{"message":"invalid key","api_key":"***"}}`,
+		why:  "上游错误体常把出站凭据回显一遍；引号与冒号必须留着，否则体就不合法了",
+	},
+	{
+		name: "client_secret",
+		in:   `{"error":"invalid_client","error_description":"client_secret: abcdef123456"}`,
+		want: `{"error":"invalid_client","error_description":"client_secret: ***"}`,
+		why:  "OAuth 交换令牌失败时 client_secret 就在错误体里",
+	},
+	{
+		name: "bearer头",
+		in:   `Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def rejected`,
+		want: `Authorization: Bearer *** rejected`,
+		why:  "只抹 token，保留 Authorization 与 Bearer 两个词 —— 它们说明「凭证被拒」",
+	},
+	{
+		name: "sk形态",
+		in:   `invalid key sk-proj-abcdefghijklmnopqrstuvwx`,
+		want: `invalid key ***`,
+		why:  "没有键名的裸 key 靠前缀 + 长度识别；门槛 16 位是为了不碰 sk-learn",
+	},
+
+	// ── 不该动的 ────────────────────────────────────────────────────
+	{
+		name: "普通文本_行号",
+		in:   `error at line 3: unexpected EOF`,
+		want: `error at line 3: unexpected EOF`,
+		why:  "验收用例本身：普通文本一个字都不许动",
+	},
+	{
+		name: "普通文本_超时文案",
+		in:   `context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
+		want: `context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
+		why:  "Client.Timeout 形如域名，但 TLD 不在白名单 —— 这正是白名单存在的理由",
+	},
+	{
+		name: "普通文本_时间戳",
+		in:   `timeout at 12:30:45.123 elapsed`,
+		want: `timeout at 12:30:45.123 elapsed`,
+		why:  "冒号串像 IPv6，net.ParseIP 复核后放行",
+	},
+	{
+		name: "普通文本_RFC3339时间",
+		in:   `build 2026-10-23T13:15:08Z`,
+		want: `build 2026-10-23T13:15:08Z`,
+		why:  "日志时间戳里的冒号比任何 IPv6 都常见，错一次就毁掉全部可读性",
+	},
+	{
+		name: "普通文本_文件名与行号",
+		in:   `open internal/gateway/handler.go:42: no such file or directory`,
+		want: `open internal/gateway/handler.go:42: no such file or directory`,
+		why:  ".go 刻意不在 TLD 白名单里：错误文本里它几乎总是文件名",
+	},
+	{
+		name: "普通文本_配置文件名",
+		in:   `parse config.yaml: unexpected end of JSON input`,
+		want: `parse config.yaml: unexpected end of JSON input`,
+		why:  "同 .go：.yaml/.mod/.sh 这类后缀一律不收",
+	},
+	{
+		name: "普通文本_Windows路径",
+		in:   `open C:\Users\app\.workbuddy\config.json: permission denied`,
+		want: `open C:\Users\app\.workbuddy\config.json: permission denied`,
+		why:  "路径里的点不被当成域名分隔符（TLD json 不在白名单）",
+	},
+	{
+		name: "普通文本_OpenSSL错误串",
+		in:   `upstream connect error: TLS error: 268435703:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER`,
+		want: `upstream connect error: TLS error: 268435703:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER`,
+		why:  "OpenSSL 的错误串里全是冒号；裸 IPv6 规则不复核就会把它打成 [***]",
+	},
+	{
+		name: "普通文本_监听地址无主机",
+		in:   `listen tcp :7868: bind: address already in use`,
+		want: `listen tcp :7868: bind: address already in use`,
+		why:  "只有端口没有主机时不该被当成 IPv6 候选",
+	},
+	{
+		name: "普通文本_中文",
+		in:   `上游返回 HTTP 429（响应体片段：model capacity exceeded: tpm_exceeded）`,
+		want: `上游返回 HTTP 429（响应体片段：model capacity exceeded: tpm_exceeded）`,
+		why:  "我们的错误文案是中文，脱敏必须对中文无损",
+	},
+	{
+		name: "普通文本_短值不当凭据",
+		in:   `api_key: not set`,
+		want: `api_key: not set`,
+		why:  "值只有 3 个字符时不是凭据；打成 *** 会让人以为这里本来有个 key",
+	},
+
+	// ── 混合 ────────────────────────────────────────────────────────
+	{
+		name: "混合_多目标一次打完",
+		in:   `Post "https://api.a.example.com:8443/v1/chat?key=k1": proxyconnect tcp: dial tcp 10.1.2.3:3128: connect: connection refused; retry via https://user:pw@b.example.io/x`,
+		want: `Post "https://***.com:8443/***/***?key=***": proxyconnect tcp: dial tcp ***.***.***.***:3128: connect: connection refused; retry via https://***@***.io/***`,
+		why:  "真实错误链里 URL、代理地址、userinfo 会同时出现；一轮要全部处理掉",
+	},
+	{
+		name: "混合_真实net零依赖错误",
+		in:   `dial tcp 142.250.77.209:443: connectex: A connection attempt failed because the connected party did not properly respond`,
+		want: `dial tcp ***.***.***.***:443: connectex: A connection attempt failed because the connected party did not properly respond`,
+		why:  "这条是从本机 go build 失败的原样输出抄的 —— 最贴近真实的一种形态",
+	},
+	{
+		name: "空串",
+		in:   "",
+		want: "",
+		why:  "边界：出口层可能拿着空错误文本调用",
+	},
+}
+
 // TestMaskErrorText 主表：逐条钉住输入与期望输出。
 func TestMaskErrorText(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want string
-		why  string
-	}{
-		// ── 带 scheme 的 URL ────────────────────────────────────────────
-		{
-			name: "https_主机与路径",
-			in:   `Post "https://api.opencsg.com/v1/chat/completions": dial tcp: connection refused`,
-			want: `Post "https://***.com/***/***/***": dial tcp: connection refused`,
-			why:  "引号是定界符，必须原样留下（下游会把它拼进 JSON 或日志）",
-		},
-		{
-			name: "https_保留端口",
-			in:   `GET https://api.example.com:8443/v1/models: 502`,
-			want: `GET https://***.com:8443/***/***: 502`,
-			why:  "端口是第一排障信息：8443 说明没走标准 TLS 端口，是配置问题而非网络问题",
-		},
-		{
-			name: "query_保名打值",
-			in:   `GET https://api.example.com/v1/models?key=secret&alt=sse`,
-			want: `GET https://***.com/***/***?key=***&alt=***`,
-			why:  "alt=sse 这个名字解释了「为什么是流式请求失败」，值才是秘密",
-		},
-		{
-			name: "query_无值参数保留",
-			in:   `GET https://api.example.com/health?verbose`,
-			want: `GET https://***.com/***?verbose`,
-			why:  "无值参数不携带内容，改名是自找麻烦",
-		},
-		{
-			name: "query_顺序不重排",
-			in:   `https://api.example.com/x?z=1&a=2`,
-			want: `https://***.com/***?z=***&a=***`,
-			why:  "url.ParseQuery 会按字母排序；对比日志时会让人以为参数集合变了",
-		},
-		{
-			name: "userinfo_抹掉凭据",
-			in:   `https://user:pass@api.example.com/v1/token`,
-			want: `https://***@***.com/***/***`,
-			why:  "userinfo 是 basic auth 凭据，与 host 是否是上游无关",
-		},
-		{
-			name: "userinfo_带端口",
-			in:   `https://admin:s3cr3t@gw.example.io:7868/admin/login`,
-			want: `https://***@***.io:7868/***/***`,
-			why:  "userinfo + 端口 + 路径同时出现时三者各自按规则处理，不要互相吞",
-		},
-		{
-			name: "fragment_是凭据不是路径",
-			in:   `https://auth.example.com/token#access_token=abc123def`,
-			want: `https://***.com/***#***`,
-			why:  "OAuth 隐式流把 token 放在 # 后面，整体抹掉最省事也最安全",
-		},
-		{
-			name: "二级后缀整体保留",
-			in:   `https://api.vendor.co.uk:443/v1/x`,
-			want: `https://***.co.uk:443/***/***`,
-			why:  "***.uk 会把 co 误当成子域，等于制造假信息",
-		},
-		{
-			name: "ws_也打码",
-			in:   `wss://stream.example.com/v1/realtime failed`,
-			want: `wss://***.com/***/*** failed`,
-			why:  "流式重连错误里出现 wss 是常态",
-		},
-		{
-			name: "括号包裹的URL",
-			in:   `(see https://api.example.com:8080/v1/errors)`,
-			want: `(see https://***.com:8080/***/***)`,
-			why:  "括号是标点，不该被吃进路径；但路径里的合法括号要保留（见 trimURLSuffix 的配对判断）",
-		},
-		{
-			name: "句尾句号",
-			in:   `connect to https://api.example.com/v1/x.`,
-			want: `connect to https://***.com/***/***.`,
-			why:  "句号是句子的，不是 URL 的",
-		},
-		{
-			name: "URL里的IPv6主机",
-			in:   `https://[2001:db8::1]:8443/v1/x`,
-			want: `https://[***]:8443/***/***`,
-			why:  "IPv6 必须用方括号形态，url.Port() 才解析得出来",
-		},
-
-		// ── IP ──────────────────────────────────────────────────────────
-		{
-			name: "IPv4_带端口",
-			in:   `dial tcp 192.168.1.10:8443: connect: connection refused`,
-			want: `dial tcp ***.***.***.***:8443: connect: connection refused`,
-			why:  "端口保留，地址打码 —— 内网拓扑不对外",
-		},
-		{
-			name: "IPv6_方括号",
-			in:   `dial tcp [2001:db8::1]:443: connect: no route to host`,
-			want: `dial tcp [***]:443: connect: no route to host`,
-			why:  "Go 网络错误对 IPv6 统一用方括号",
-		},
-		{
-			name: "IPv6_带zone",
-			in:   `dial tcp [fe80::1%eth0]:80: connect: invalid argument`,
-			want: `dial tcp [***]:80: connect: invalid argument`,
-			why:  "网卡名（eth0）也是内网拓扑，跟着一起抹",
-		},
-		{
-			name: "IPv6_裸形态",
-			in:   `lookup 2001:db8::1: no such host`,
-			want: `lookup [***]: no such host`,
-			why:  "DNS 错误里 IPv6 常不带方括号；句尾冒号要留在外面",
-		},
-
-		// ── 裸域名 ──────────────────────────────────────────────────────
-		{
-			name: "裸域名_DNS错误",
-			in:   `dial tcp: lookup api.opencsg.com on 10.0.0.1:53: no such host`,
-			want: `dial tcp: lookup ***.com on ***.***.***.***:53: no such host`,
-			why:  "DNS 解析失败时地址以裸域名出现，没有 scheme 可依赖",
-		},
-		{
-			name: "裸域名_二级后缀",
-			in:   `dial tcp: lookup api.vendor.co.uk: no such host`,
-			want: `dial tcp: lookup ***.co.uk: no such host`,
-			why:  "co.uk 整体保留，见 maskDomainTail",
-		},
-		{
-			name: "裸域名_子域层级不保留",
-			in:   `dial tcp: lookup internal-auth.corp.example.com: no such host`,
-			want: `dial tcp: lookup ***.com: no such host`,
-			why:  "internal-auth 这类子域比域名本身更能定位内网结构，不能留",
-		},
-		{
-			name: "localhost",
-			in:   `dial tcp localhost:7868: connect: connection refused`,
-			want: `dial tcp ***:7868: connect: connection refused`,
-			why:  "localhost 没有点，裸域名规则碰不到；但它暴露「错误出在网关自身」",
-		},
-
-		// ── 凭据形态 ────────────────────────────────────────────────────
-		{
-			name: "api_key_冒号形态",
-			in:   `api_key:AIzaSyAAAaUooTUni8AdaOkSRMda30n_Q4vrV70`,
-			want: `api_key:***`,
-			why:  "与 new-api 的 mask.go 输出逐字一致，便于两边日志对照",
-		},
-		{
-			name: "api_key_JSON形态",
-			in:   `{"error":{"message":"invalid key","api_key":"sk-live-abcdefghijklmnop123456"}}`,
-			want: `{"error":{"message":"invalid key","api_key":"***"}}`,
-			why:  "上游错误体常把出站凭据回显一遍；引号与冒号必须留着，否则体就不合法了",
-		},
-		{
-			name: "bearer头",
-			in:   `Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def rejected`,
-			want: `Authorization: Bearer *** rejected`,
-			why:  "只抹 token，保留 Authorization 与 Bearer 两个词 —— 它们说明「凭证被拒」",
-		},
-		{
-			name: "sk形态",
-			in:   `invalid key sk-proj-abcdefghijklmnopqrstuvwx`,
-			want: `invalid key ***`,
-			why:  "没有键名的裸 key 靠前缀 + 长度识别；门槛 16 位是为了不碰 sk-learn",
-		},
-
-		// ── 不该动的 ────────────────────────────────────────────────────
-		{
-			name: "普通文本_行号",
-			in:   `error at line 3: unexpected EOF`,
-			want: `error at line 3: unexpected EOF`,
-			why:  "验收用例本身：普通文本一个字都不许动",
-		},
-		{
-			name: "普通文本_超时文案",
-			in:   `context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
-			want: `context deadline exceeded (Client.Timeout exceeded while awaiting headers)`,
-			why:  "Client.Timeout 形如域名，但 TLD 不在白名单 —— 这正是白名单存在的理由",
-		},
-		{
-			name: "普通文本_时间戳",
-			in:   `timeout at 12:30:45.123 elapsed`,
-			want: `timeout at 12:30:45.123 elapsed`,
-			why:  "冒号串像 IPv6，net.ParseIP 复核后放行",
-		},
-		{
-			name: "普通文本_文件名与行号",
-			in:   `open internal/gateway/handler.go:42: no such file or directory`,
-			want: `open internal/gateway/handler.go:42: no such file or directory`,
-			why:  ".go 刻意不在 TLD 白名单里：错误文本里它几乎总是文件名",
-		},
-		{
-			name: "普通文本_配置文件名",
-			in:   `parse config.yaml: unexpected end of JSON input`,
-			want: `parse config.yaml: unexpected end of JSON input`,
-			why:  "同 .go：.yaml/.mod/.sh 这类后缀一律不收",
-		},
-		{
-			name: "普通文本_OpenSSL错误串",
-			in:   `upstream connect error: TLS error: 268435703:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER`,
-			want: `upstream connect error: TLS error: 268435703:SSL routines:OPENSSL_internal:WRONG_VERSION_NUMBER`,
-			why:  "OpenSSL 的错误串里全是冒号；裸 IPv6 规则不复核就会把它打成 [***]",
-		},
-		{
-			name: "普通文本_中文",
-			in:   `上游返回 HTTP 429（响应体片段：model capacity exceeded: tpm_exceeded）`,
-			want: `上游返回 HTTP 429（响应体片段：model capacity exceeded: tpm_exceeded）`,
-			why:  "我们的错误文案是中文，脱敏必须对中文无损",
-		},
-		{
-			name: "普通文本_短值不当凭据",
-			in:   `api_key: not set`,
-			want: `api_key: not set`,
-			why:  "值只有 3 个字符时不是凭据；打成 *** 会让人以为这里本来有个 key",
-		},
-
-		// ── 混合 ────────────────────────────────────────────────────────
-		{
-			name: "混合_多目标一次打完",
-			in:   `Post "https://api.a.example.com:8443/v1/chat?key=k1": proxyconnect tcp: dial tcp 10.1.2.3:3128: connect: connection refused; retry via https://user:pw@b.example.io/x`,
-			want: `Post "https://***.com:8443/***/***?key=***": proxyconnect tcp: dial tcp ***.***.***.***:3128: connect: connection refused; retry via https://***@***.io/***`,
-			why:  "真实错误链里 URL、代理地址、userinfo 会同时出现；一轮要全部处理掉",
-		},
-		{
-			name: "空串",
-			in:   "",
-			want: "",
-			why:  "边界：出口层可能拿着空错误文本调用",
-		},
-	}
-
-	for _, tc := range cases {
+	for _, tc := range maskCases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := MaskErrorText(tc.in)
 			if got != tc.want {
@@ -269,26 +358,22 @@ func TestMaskErrorText(t *testing.T) {
 //
 //	一次：***.co.uk    两次：***.***.co.uk
 //
-// 这类 bug 极难从现象上认出来（文案看着"也很像打码了"），只能靠测试钉住。
+// 这类 bug 极难从现象上认出来（看着"也很像打码了"），只能靠测试钉住。
+//
+// # 为什么直接复用主表
+//
+// 主表的 want 就是「脱敏后的样子」。拿它再喂一次函数，等于对所有已知形态
+// 做一遍不动点检查 —— 新增用例自动获得幂等覆盖，不会有人漏写。
 func TestMaskErrorTextIdempotent(t *testing.T) {
-	inputs := []string{
-		`dial tcp: lookup api.vendor.co.uk: no such host`,
-		`https://api.example.com:8443/v1/x?key=1`,
-		`https://user:pass@api.example.com/x`,
-		`https://api.a.example.co.uk/x`,
-		`dial tcp [2001:db8::1]:443: refused`,
-		`dial tcp 192.168.1.10:443: refused`,
-		`api_key:AIzaSyAAAaUooTUni8AdaOkSRMda30n_Q4vrV70`,
-		`Authorization: Bearer abcdefghijkl`,
-		`token sk-proj-abcdefghijklmnopqrstuvwx`,
-		`dial tcp localhost:7868: refused`,
-		`https://[2001:db8::1]:8443/v1/x`,
-	}
-	for _, in := range inputs {
-		once := MaskErrorText(in)
+	for _, tc := range maskCases {
+		once := MaskErrorText(tc.in)
 		twice := MaskErrorText(once)
 		if once != twice {
-			t.Errorf("不幂等：%q\n  一次: %q\n  两次: %q", in, once, twice)
+			t.Errorf("%s 不幂等\n  一次: %q\n  两次: %q", tc.name, once, twice)
+		}
+		// 期望值本身也必须是不动点：否则实现与期望可能"一起错"，表就失去了判据作用。
+		if again := MaskErrorText(tc.want); again != tc.want {
+			t.Errorf("%s 的期望值不是不动点\n  want:  %q\n  again: %q", tc.name, tc.want, again)
 		}
 	}
 }
@@ -304,7 +389,7 @@ func TestMaskErrorTextIdempotent(t *testing.T) {
 func TestMaskErrorTextLeavesNoIdentity(t *testing.T) {
 	seeds := []string{
 		"opencsg", "openai", "example", "corp", "vendor", "internal-auth",
-		"192.168", "10.0.0.5", "10.1.2.3", "2001:db8", "fe80::",
+		"192.168", "10.0.0.5", "10.1.2.3", "142.250", "2001:db8", "fe80::",
 		"AIzaSy", "sk-live", "sk-proj", "eyJhbGciOiJIUzI1NiJ9", "s3cr3t", "hunter2",
 		"localhost",
 	}
@@ -320,6 +405,7 @@ func TestMaskErrorTextLeavesNoIdentity(t *testing.T) {
 		`https://admin:s3cr3t@gw.vendor.co.uk:7868/admin/login failed`,
 		`dial tcp localhost:7868: connect: connection refused`,
 		`bad key sk-proj-abcdefghijklmnopqrstuvwx`,
+		`dial tcp 142.250.77.209:443: connectex: connection attempt failed`,
 	}
 	for _, in := range inputs {
 		out := MaskErrorText(in)
@@ -341,6 +427,7 @@ func TestMaskErrorTextKeepsPorts(t *testing.T) {
 		{`dial tcp 192.168.1.10:8443: refused`, ":8443"},
 		{`dial tcp [2001:db8::1]:443: refused`, ":443"},
 		{`dial tcp localhost:7868: refused`, ":7868"},
+		{`x509 host api.example.com:443 mismatch`, ":443"},
 	}
 	for _, tc := range cases {
 		out := MaskErrorText(tc.in)

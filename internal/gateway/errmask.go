@@ -55,6 +55,19 @@
 //
 // `user@example.com` 的域名会被裸域名规则打掉（-> user@***.com），这是顺带的；
 // 但本地部分保留：它不是上游身份，抹掉只会让「哪个账号被限流」这类信息消失。
+//
+// # 已知边界（写在这里，免得后来者以为是 bug 去"修"）
+//
+//  1. **无 scheme 的 userinfo 不处理**（"user:pass@host" 这种裸形态）。
+//     它与「凭据字段」和「邮箱」三者形状重叠，硬判会误伤 `--flag=a@b` 这类参数。
+//  2. **单标签主机名不处理**（"dial tcp buildbox:8080"）。
+//     `word:数字` 太像 `retry:3` / `step:2`，误伤率高；只对 localhost 开了特例。
+//  3. **第三方模块路径会被一起打掉**（"github.com/x/y: not found" -> "***.com/x/y"）。
+//     这是「不打码已知上游、而是打码所有域名」的必然代价 —— 我们选择了不漏打。
+//     运行期错误里出现模块路径的机会极少（那是编译期的事）。
+//  4. **URL 里的 percent-encoded 段不还原**：path 一律按段换成 ***，
+//     所以 `/v1/%E4%B8%AD` 与 `/v1/abc` 打出来的结果一样。这没关系 ——
+//     段内容本来就是我们要抹掉的东西。
 package gateway
 
 import (
@@ -62,14 +75,31 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
 	// maskURLPattern 匹配带 scheme 的绝对 URL。
 	//
-	// 排除引号/尖括号/花括号/反引号/竖线/反斜杠/插入符：它们在错误文本里是**定界符**，
-	// 不属于 URL —— 吃进去会把 Markdown 定界符或紧随的冒号一起吞掉，输出就变形了。
-	maskURLPattern = regexp.MustCompile(`(?i)\b(?:https?|wss?)://[^\s"'<>{}|\\^]+`)
+	// 排除三类字符，每一类都是实测踩出来的：
+	//  1. 引号/尖括号/花括号/反引号/竖线/反斜杠/插入符 —— 错误文本里的**定界符**，
+	//     吃进去会把 Markdown 定界符或紧随的冒号一起吞掉，输出就变形了。
+	//  2. 空白。
+	//  3. **所有非 ASCII**（\x{0080} 到 \x{10FFFF}）。本仓错误文案是中文：
+	//     "失败于 https://a.com/x、请重试" 里的顿号与后面的中文会被当成 URL 的一部分，
+	//     于是整句后半截凭空消失（实测：只剩 "失败于 https://***.com/***/***"）。
+	//     URL 里的非 ASCII 本该 percent-encode，真出现在错误里的概率远低于中文标点。
+	//     ⚠ 排除**非 ASCII 整段**而不只是标点：中文正文本身也不能进 URL。
+	//
+	// ⚠⚠ 大小写开关只作用于 scheme（写成内联组 (?i:...)），**不能**是全局 (?i)：
+	// Go 的字符类在 case-insensitive 下会做大小写折叠，而 \x{0080}-\x{10FFFF}
+	// 这个区间里含 U+017F（长 s）与 U+212A（开尔文符号），它们分别与 s、k 折叠 ——
+	// 于是全局 (?i) 会把 ASCII 的 s 和 k 也排除掉。实测后果：
+	//
+	//	".../v1/models: 502"  ->  ".../v1/model"   ← 尾部 s 被切掉，"s:" 留在 URL 外
+	//
+	// 这个 bug 只在带 s/k 的路径上出现，测试表里恰好有 models，才没漏过去。
+	maskURLPattern = regexp.MustCompile(`(?i:\b(?:https?|wss?)://)[^\s"'<>{}|\\^\x{0080}-\x{10FFFF}]+`)
 
 	// maskBracketedIPv6Pattern 匹配 Go 网络错误里的方括号 IPv6：
 	// "dial tcp [2001:db8::1]:443"，允许带 zone（fe80::1%eth0）。
@@ -228,9 +258,20 @@ func maskOneURL(match string) string {
 //
 // 错误文本里的 URL 通常被引号或句号包围（connect to https://a.com/x.），
 // 这些字符本身也是合法 URL 字符，不剥掉就会变成路径的一部分。
+//
+// ⚠ **全角标点必须一起剥**：本仓的错误文案是中文，形如
+// 「上游返回 HTTP 502（响应体片段：Post "https://x/v1": ...）」。
+// 全角括号是合法 UTF-8 字节，不会被 URL 正则的排除集挡住 —— 它会跟着进 path，
+// 再被整段换成 *** 而**凭空消失**。少一个右括号不会报错，只会让文案看着被截断。
 func trimURLSuffix(s string) (body, suffix string) {
 	end := len(s)
 	for end > 0 {
+		// 先试全角（多字节），再试 ASCII 单字节 —— 顺序不能反，
+		// 否则 s[end-1] 会命中全角字符的某个尾字节并把它当成标点切掉半截。
+		if r, size := utf8.DecodeLastRuneInString(s[:end]); size > 0 && strings.ContainsRune(maskURLTrailingPunct, r) {
+			end -= size
+			continue
+		}
 		c := s[end-1]
 		if strings.IndexByte(".,;:!?'", c) >= 0 {
 			end--
@@ -246,6 +287,12 @@ func trimURLSuffix(s string) (body, suffix string) {
 	}
 	return s[:end], s[end:]
 }
+
+// maskURLTrailingPunct URL 后紧跟的中文标点。
+//
+// 只收**收尾类**标点（右括号、句号、逗号、顿号、分号、冒号、问感叹号），
+// 不收「（」这类开头标点 —— 它们出现在 URL 前面，本来就不在匹配范围内。
+var maskURLTrailingPunct = "）】，。、；：？！》」』"
 
 // maskHostValue 打码单个 host（不含 port）。IP 抹成定长占位，域名保留后缀尾巴。
 func maskHostValue(host string) string {
@@ -308,13 +355,12 @@ func isMaskableDomain(cand string) bool {
 	return true
 }
 
-// maskURLPath 按段打码，保留段数（/v1/chat/completions -> /***/***/***）。
-// maskURLPath 逐段打码，**保留段数**。
+// maskURLPath 逐段打码，**保留段数**（/v1/chat/completions -> /***/***/***）。
 //
 // # 为什么保留段数（测试钉住的口径）
 //
 // 段数本身**不是**敏感信息 —— 泄漏身份的是 host（哪家上游）与路径段名
-//（"/v2/enterprises/personal/models" 直接点名了产品）。把段名换成 ***
+// （"/v2/enterprises/personal/models" 直接点名了产品）。把段名换成 ***
 // 之后，"/***/***/***" 只说明"这里原本有三层路径"，排障时还能看出
 // 客户端请求的是 v1 风格还是嵌套 API，而看不出是谁。
 //
