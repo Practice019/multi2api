@@ -903,19 +903,42 @@ func (h *Handler) modelListWithScrub(scrub bool) []map[string]any {
 	// 未列入"能列模型"的上游在界面上会走空态并说明原因，而列出来的
 	// 却被当成"可以用"。
 	for _, id := range h.otherProviders(def) {
-		// ⚠ 2026-10-20：这里以前是 `h.cfg.Provider.Models(...)` **直连上游** ——
+		// ⚠ 2026-10-20：这里以前是 `h.cfg.Provider.Models(...)` 直连上游 ——
 		// 实测 /v1/models 连打 4 次是 36.2s / 2.8s / 5.2s / 23.8s（不收敛），
 		// 因为并发请求各拉一遍、且过期目录不能直接用。改走 modelsForProviderCached：
-		// 正缓存 1h + 单飞（同一上游只一个在取）+ 有旧目录就先给旧的（后台刷新）。
-		// 语义不变：拿不到仍是 (nil, false)，调用方照旧降级。
+		// 正缓存 1h + 单飞 + 有旧目录就先给旧的（后台刷新）。
 		infos, ok := modelsForProviderCached(id, func() ([]gateway.ModelInfo, bool) {
 			return h.cfg.Provider.Models(context.Background(), id)
 		})
 		if !ok || len(infos) == 0 {
 			continue // 该上游暂时给不出目录：跳过，不拖垮整个 /v1/models
 		}
+
+		// 先把本上游**已有元数据**的条目收成一张表，供下面的众数推断用。
+		//
+		// 为什么需要（用户报的缺陷 4）：上游的 data.models 只有 18 条，
+		// 而 agents[].models 声明的名字更多 —— 后者能调通（实测 200）
+		// 但没有元数据。对它们用本上游的典型值兜底，比留空更有用。
+		known := make(map[string][2]int64, len(infos))
 		for _, mi := range infos {
-			out = append(out, h.prefixed(h.entryOf(mi.ID, int64(mi.ContextWindow), int64(mi.MaxOutputTokens), h.ownedByFor(id, scrub)), id))
+			if mi.ContextWindow > 0 || mi.MaxOutputTokens > 0 {
+				known[mi.ID] = [2]int64{int64(mi.ContextWindow), int64(mi.MaxOutputTokens)}
+			}
+		}
+		fallbackCtx, fallbackOut := inferMetaFor(known)
+
+		for _, mi := range infos {
+			ctx, maxOut := int64(mi.ContextWindow), int64(mi.MaxOutputTokens)
+			// ⚠ 只在**本上游确实有其它元数据**时才推断。
+			// 一个上游一条都没报的话，fallback 会是 0 —— 那就不写字段，
+			// 保持「未知」而不是编一个值。
+			if ctx == 0 && fallbackCtx > 0 {
+				ctx = fallbackCtx
+			}
+			if maxOut == 0 && fallbackOut > 0 {
+				maxOut = fallbackOut
+			}
+			out = append(out, h.prefixed(h.entryOf(mi.ID, ctx, maxOut, h.ownedByFor(id, scrub)), id))
 		}
 	}
 
@@ -1047,9 +1070,26 @@ func (h *Handler) singleProviderModelList(owned string, scrub bool) []map[string
 		return nil
 	}
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
+		// 与「其余上游」分支同一套兜底（见 models_meta_fallback.go）：
+		// 上游的 data.models 与 agents[].models 是两个数组，后者声明的名字
+		// 能调通但没有元数据。用本上游的众数补，比留空更有用。
+		known := make(map[string][2]int64, len(infos))
+		for _, mi := range infos {
+			if mi.ContextWindow > 0 || mi.MaxTokens > 0 {
+				known[mi.ID] = [2]int64{mi.ContextWindow, mi.MaxTokens}
+			}
+		}
+		fallbackCtx, fallbackOut := inferMetaFor(known)
 		out := make([]map[string]any, 0, len(infos))
 		for _, mi := range infos {
-			out = append(out, h.entryOf(mi.ID, mi.ContextWindow, mi.MaxTokens, owned))
+			ctx, maxOut := mi.ContextWindow, mi.MaxTokens
+			if ctx == 0 && fallbackCtx > 0 {
+				ctx = fallbackCtx
+			}
+			if maxOut == 0 && fallbackOut > 0 {
+				maxOut = fallbackOut
+			}
+			out = append(out, h.entryOf(mi.ID, ctx, maxOut, owned))
 		}
 		return out
 	}
