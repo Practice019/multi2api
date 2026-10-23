@@ -36,6 +36,10 @@ const END = '// ==== WB2API:MODEL-PICKER:END ====';
 // 分组页不同：它的候选是**全站目录**（699 个、15 个真上游），
 // 按 "/" 切第一个正好得到上游 id（与 channels.json 的 name 对齐）。
 const PAGES = [
+  // ⚠ webui.html 也在列：它的 modelOwnerOf / syncAKProviders /
+  // syncModelProviderOptions 全部委托到这里。共享层若只给分组页用，
+  // 那就不是共享，是第二个副本。
+  'internal/server/webui.html',
   'internal/server/webui-groups.html',
 ];
 

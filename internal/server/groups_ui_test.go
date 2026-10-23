@@ -383,3 +383,67 @@ func TestGroupsUIMatchesAPIKeyPageProviderRule(t *testing.T) {
 		}
 	}
 }
+
+// 共享层必须**三处同一份**：API 管理页 / 对话测试 / 分组页。
+//
+// # 这是用户连问两次才做对的事
+//
+//   「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享」
+//   「不是api管理里面已经实现了1吗直接共享层使用啊」
+//
+// 第一版我把代码"复刻"到分组页 —— 那是**第二个副本**，不是共享。
+// 真正的判据是：webui.html 自己也调用这里，而不是各留一份。
+func TestModelPickerIsSharedAcrossPages(t *testing.T) {
+	console, err := os.ReadFile(filepath.Join("webui.html"))
+	if err != nil {
+		t.Fatalf("读 webui.html: %v", err)
+	}
+	ui := readGroupsUI(t)
+
+	// ① 两个页面都必须有同一份注入块。
+	const startMark = "// ==== WB2API:MODEL-PICKER:START"
+	const endMark = "// ==== WB2API:MODEL-PICKER:END ===="
+	blockOf := func(src string) string {
+		a := strings.Index(src, startMark)
+		b := strings.Index(src, endMark)
+		if a < 0 || b < a {
+			return ""
+		}
+		body := src[a:b]
+		if i := strings.Index(body, "\n"); i >= 0 {
+			body = body[i+1:]
+		}
+		return strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
+	}
+	cb, gb := blockOf(string(console)), blockOf(ui)
+	if cb == "" {
+		t.Fatal("★ webui.html 里没有共享块 —— 它仍在用自己的私有实现（那就不是共享）")
+	}
+	if gb == "" {
+		t.Fatal("★ webui-groups.html 里没有共享块")
+	}
+	if cb != gb {
+		t.Errorf("★ 两页的共享块不一致（%d vs %d 字节）—— 跑 node tools/model_picker_sync.js", len(cb), len(gb))
+	}
+
+	// ② webui.html 的 modelOwnerOf 必须是**委托**，不能自己再实现一遍。
+	src := sliceFuncBody(t, string(console), "function modelOwnerOf(")
+	if src == "" {
+		t.Fatal("webui.html 里找不到 modelOwnerOf")
+	}
+	if !strings.Contains(src, "mpOwnerOf(") {
+		t.Error("★ webui.html 的 modelOwnerOf 没有委托到共享层 —— 判据会有两份，早晚漂移")
+	}
+
+	// ③ 填充逻辑同理。
+	for _, fn := range []string{"syncAKProviders", "syncModelProviderOptions"} {
+		f := sliceFuncBody(t, string(console), "function "+fn+"(")
+		if f == "" {
+			t.Errorf("webui.html 里找不到 %s", fn)
+			continue
+		}
+		if !strings.Contains(f, "mpFillProviderSelect(") {
+			t.Errorf("★ %s 没有用共享的 mpFillProviderSelect —— 三处各写一遍必然有一处写反", fn)
+		}
+	}
+}
