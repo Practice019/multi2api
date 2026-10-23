@@ -15,6 +15,7 @@
 package server
 
 import (
+	"encoding/json"
 	"strings"
 	"bytes"
 	"net/http"
@@ -91,7 +92,7 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 			// 实测 chat 响应里 model=monkeycode-basic/deepseek-flash 原样回给了客户端。
 			if len(pending) > 0 {
 				trimmed := bytes.TrimSpace(pending)
-				if len(trimmed) > 0 && trimmed[0] == 0x7b && scrub {
+			if len(trimmed) > 0 && trimmed[0] == 0x7b && scrub {
 					// 整块 JSON：脱敏后写。
 					_, _ = w.Write(scrubChatResponse(trimmed, publicModel))
 				} else {
@@ -120,6 +121,29 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 // 由收尾那段原样发出去。那条路径由调用方在写之前用 scrubChatResponse 处理。
 func (h *Handler) scrubSSELines(pending []byte, publicModel string, scrub bool) (out, rest []byte) {
 	if len(pending) == 0 {
+		return nil, pending
+	}
+	// ⚠ 先判**是不是 SSE**：非流式响应是一整块 JSON，里面可能**含换行**
+	//（上游的 json.MarshalIndent 或人工拼的响应都会）。若直接按行切，
+	// 整块 JSON 会被当成"N 行没有 data: 前缀的普通文本"原样输出 ——
+	// 于是非流式渠道**一个字段都不脱敏**（实测 senseaudio 的 model 与 id
+	// 原样回给了客户端，而同一把 key 走别的上游是脱敏的）。
+	//
+	// 判据：整块里**没有任何** data: 行 ⇒ 它不是 SSE，按整体 JSON 处理。
+	// 这个判据比"首字节是 {"更宽：SSE 的首行是 "data: {"，不会误判。
+	if !bytes.Contains(pending, []byte("data:")) {
+		// 非 SSE：整块留给调用方（收尾处用 scrubChatResponse 处理）。
+		//
+		// 但如果它已经是**完整 JSON**（能被解码），就**当场**处理并输出 ——
+		// 否则一个在流中途读完的整块 JSON 会一直压在 pending 里，
+		// 直到 EOF 才发出去，等于把非流式变成"延迟到最后"。
+		trimmed := bytes.TrimSpace(pending)
+		if len(trimmed) > 0 && trimmed[0] == 0x7b && json.Valid(trimmed) {
+			if scrub {
+				return scrubChatResponse(trimmed, publicModel), nil
+			}
+			return pending, nil
+		}
 		return nil, pending
 	}
 	lastNL := bytes.LastIndexByte(pending, '\n')

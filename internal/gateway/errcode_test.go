@@ -220,8 +220,15 @@ func TestIsKnownRejectsHandwritten(t *testing.T) {
 		{CodeContentBlocked, true},
 		{CodeModelNotFound, true},
 		{CodeUnknown, true},
-		// 改造前散落在出站路径上的手写字面量：都不在契约表里。
-		{"upstream_error", false},
+		// ⚠ "upstream_error" 从"手写字面量"升级为**契约值**了（主脑集成时定的）。
+		//
+		// 原计划是让 CodeUpstreamUnavailable 的线上值就叫 "upstream_unavailable"，
+		// 但那是**已发布出去的**契约值 —— 既有客户端的 switch 里写的是
+		// "upstream_error"，改它等于静默破坏它们的分支判断。
+		//
+		// 所以常量名保留 UpstreamUnavailable（语义更准），线上值回退成
+		// "upstream_error"。这条测试随之更新：它现在**是**契约值。
+		{"upstream_error", true},
 		{"internal_error", false},
 		{"", false},
 		{"Invalid_Request", false},

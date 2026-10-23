@@ -34,6 +34,19 @@ type toolLoopParams struct {
 	// 这类"取消不生效"的代价是钱，不是体验，所以不能省。
 	ctx context.Context
 
+	// scrub 出站脱敏回调（nil = 不脱敏）。
+	//
+	// # 为什么工具循环必须单独接一次
+	//
+	// 工具循环**自己写 w**（它要把多轮工具调用的结果合成一次响应），
+	// 因此绕过了 chatCompletions 里那两处脱敏（非流式 writeJSON / 流式
+	// wire.StreamScrubbed）。实测后果：loomy 的模型名与 id 原样透出，
+	// 而同一把 key 走别的上游是脱敏的 —— 用户看到"有的通道脱了有的没脱"。
+	//
+	// 判据与其它出口一致：普通 API Key 配了别名才脱敏
+	//（由调用方传入 scrubObject(obj, publicModel) 的闭包，这里不判）。
+	scrub func(obj map[string]any)
+
 	// start 请求进入 handler 的时刻 —— TTFB 的计时起点。
 	//
 	// 必须由调用方给（而不是循环自己 time.Now()）：TTFB 的语义是
@@ -223,6 +236,16 @@ func (h *Handler) runToolLoop(w http.ResponseWriter, p toolLoopParams) (bool, *t
 
 	if aerr := appendArtifactsToResponse(final, collected); aerr != nil {
 		return false, stats, aerr
+	}
+
+	// 出站脱敏（与 chatCompletions 的两个出口同一判据，由调用方决定要不要）。
+	//
+	// ⚠ 必须在 appendArtifactsToResponse **之后**：artifacts 会往 final 里塞内容，
+	//   脱敏放在前面会被它重新引入 model/id 之外的东西吗？不会 —— 但它会改
+	//   usage，而脱敏要删的就是 usage 里的私有字段（points_consumed）。
+	//   放在最后一步保证「客户端看到的已是最终形态」。
+	if p.scrub != nil {
+		p.scrub(final)
 	}
 
 	// 按客户端要的形态发射。

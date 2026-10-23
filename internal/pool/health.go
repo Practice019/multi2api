@@ -78,6 +78,55 @@ func (p *Pool) RecoverableCandidates(minAge time.Duration) []Recoverable {
 	return out
 }
 
+// AutoDisabledRecoverables 返回**被自动禁用**、值得探测恢复的账号。
+//
+// # 为什么必须单独一条通道（否则「成功即恢复」是死条款）
+//
+// 自动禁用的动作是把这个号从候选集里摘掉。而「成功即恢复」依赖该号被再选中
+// 一次 —— 它已经被摘掉了，**永远不会有下一次成功**。这条死锁是自动禁用
+// 这类机制的经典死法（new-api 用定期 channel test 打破它，见
+// controller/channel-test.go）。
+//
+// 所以恢复必须由**主动探测**触发：健康检查循环取本函数的列表，逐个探一次，
+// 探通了调 RecordAutoDisableSuccess（它会解除本机制置的禁用）。
+//
+// # 与 RecoverableCandidates 的分工
+//
+//	RecoverableCandidates  冷却/熔断中的号（**不含** disabled）
+//	本函数                 自动禁用中的号（**只含**本机制置的 disabled）
+//
+// 两者都探会让同一个号被探两次；都不探则禁区永不解除。
+// 人工禁用的号**不在**本函数里 —— 那是操作员的明确决定，探测成功不该翻案
+// （依据 new-api 的 ShouldEnableChannel：只对 AutoDisabled 自动放行）。
+func (p *Pool) AutoDisabledRecoverables(minAge time.Duration) []Recoverable {
+	auto := p.AutoDisabledCandidates()
+	if len(auto) == 0 {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	out := make([]Recoverable, 0, len(auto))
+	for _, a := range auto {
+		e := p.byUID[a.UID]
+		if e == nil {
+			continue
+		}
+		// 刚禁用的号先别急着探：它多半还是坏的，白探一轮只是噪声。
+		if minAge > 0 && !a.DisabledAt.IsZero() && now.Sub(a.DisabledAt) < minAge {
+			continue
+		}
+		out = append(out, Recoverable{UID: a.UID, Provider: e.provider, Reason: a.Reason})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Provider != out[j].Provider {
+			return out[i].Provider < out[j].Provider
+		}
+		return out[i].UID < out[j].UID
+	})
+	return out
+}
+
 // NoteRefreshFailure 记录一次凭证续期失败；连续失败达上限返回 true（该禁用）。
 //
 // # 为什么由 pool 管而不是各上游自己管

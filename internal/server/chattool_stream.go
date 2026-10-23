@@ -57,6 +57,14 @@ type sseWriter struct {
 	headersSet bool
 	// committed 记录"是否已向客户端写过任何字节"（决定状态码还能不能改）。
 	committed bool
+
+	// scrub 出站脱敏回调（nil = 不脱敏）。
+	//
+	// 与 chatCompletions 那两处出口同一判据：普通 API Key 配了别名才脱敏。
+	// 为什么挂在 frame 上而不是 data 上：frame 拿到的已经是**结构化**对象
+	// （f.Normalized），可以直接改字段；data 收到的是一串序列化后的 JSON，
+	// 在那里还得解析回来再编码，多一次往返且会改键序。
+	scrub func(obj map[string]any)
 }
 
 func newSSEWriter(w http.ResponseWriter) *sseWriter {
@@ -97,6 +105,10 @@ func (s *sseWriter) data(payload string) error {
 // frame 写一帧上游数据（用**规范化后**的对象，剥掉上游的额外字段）。
 func (s *sseWriter) frame(f *wire.Frame) error {
 	if f.Normalized != nil {
+		// ⚠ 脱敏在 Marshal 之前：改的是结构，不是序列化后的字符串。
+		if s.scrub != nil {
+			s.scrub(f.Normalized)
+		}
 		if b, err := json.Marshal(f.Normalized); err == nil {
 			return s.data(string(b))
 		}
@@ -246,6 +258,8 @@ func (h *Handler) runToolLoopStream(w http.ResponseWriter, p toolLoopParams, too
 	}
 
 	sw := newSSEWriter(w)
+	// 把脱敏回调传下去：工具循环的流式响应也走同一个判据。
+	sw.scrub = p.scrub
 	collected := make([]gateway.Artifact, 0)
 
 	for round := 1; round <= maxToolRounds; round++ {

@@ -1830,8 +1830,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 400 还有个更坏的副作用（用户实测）：它被算作账号失败，
 	//   把 2 个健康号打进冷却，于是**后续正常请求也跟着 503**。
 	//   一个参数取值错误污染整个账号池，这是必须在这里拦住的理由。
-	if normalized, changed := normalizeReasoningEffortForUpstream(outBody); changed {
-		outBody = normalized
+	// 出站参数覆盖（internal/server/param_override.go，对标 new-api 的 override）。
+	//
+	// reasoning_effort 的 off→删除 是这套机制的**第一条内置规则**
+	//（ReasoningOffOverrideRules），渠道还能追加自己的规则。把它降级成一条
+	// 数据规则而不是写死一段代码，是因为「网关要改客户端参数」这件事不止
+	// 这一个场景：某个上游要把 max_tokens 改名叫 max_completion_tokens、
+	// 某个渠道要强制 temperature、某个要删掉它不认的字段 —— 每来一个就加
+	// 一段 if，出口会变成一堵补丁墙。
+	//
+	// ⚠ 必须用**客户端原始 body** 做输入，不能拿上一轮 attempt 的输出：
+	//   渠道 A 的 set 若被带进换到渠道 B 的那一轮，B 的 default 规则就永远
+	//   看不到「客户端没传」。outBody 每轮从 body 重新派生（见上面的赋值）。
+	overrideRules := ReasoningOffOverrideRules()
+	if chOverrides := h.channelParamOverrides(reqProvider); len(chOverrides) > 0 {
+		// 内置规则放最前，渠道规则在后 —— 渠道能覆盖内置行为
+		//（比如某渠道就是要显式 set reasoning_effort: low）。
+		overrideRules = append(overrideRules, chOverrides...)
+	}
+	if res := ApplyParamOverrides(outBody, overrideRules); res.Changed {
+		outBody = res.Body
+		if len(res.Problems) > 0 {
+			// 覆盖规则只对**能应用的那几条**生效，失败的跳过并留痕。
+			// 不因一条坏规则拒掉整个请求 —— 那会让一条配置笔误变成渠道不可用。
+			log.Printf("[override] 部分规则未生效 provider=%s: %s", reqProvider, res.Problems[0].Error())
+		}
 	}
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
@@ -2125,7 +2148,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//
 		// 客户端自己带了 tools 时**不接管**：那说明它懂协议、要自己驱动
 		// 工具循环，网关再插一脚会两边打架（见 shouldRunToolLoop）。
-		if ext, yes := h.shouldRunToolLoop(reqProvider, outBody); yes {
+		// 工具循环自己写 w，必须把脱敏回调传进去 —— 否则走工具的上游
+		//（loomy 等）会绕过所有脱敏，用户看到"有的通道脱了有的没脱"。
+		var loopScrub func(obj map[string]any)
+		if scrubResp {
+			loopScrub = func(obj map[string]any) { scrubObject(obj, publicModel) }
+		}
+		if tlExt, tlYes := h.shouldRunToolLoop(reqProvider, outBody); tlYes {
+			ext := tlExt
 			// 流式与**非流式**走两条实现（见 chattool_stream.go 的文件头）：
 			//
 			//	流式    逐帧转发，只在真调我们的工具时才拦 —— 保住打字机效果
@@ -2143,6 +2173,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if peek.Stream {
 				done, loopStats, werr = h.runToolLoopStream(w, toolLoopParams{
 					ext:        ext,
+						scrub:      loopScrub,
 					providerID: reqProvider,
 					uid:        acct.UID,
 					body:       outBody,
@@ -2153,6 +2184,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			} else {
 				done, loopStats, werr = h.runToolLoop(w, toolLoopParams{
 					ext:        ext,
+						scrub:      loopScrub,
 					providerID: reqProvider,
 					uid:        acct.UID,
 					body:       outBody,
@@ -2180,6 +2212,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					// 账号不算失败：这轮错误是"上游在后续轮次回了 400"，
 					// 而非凭证/额度问题 —— 计失败会误伤一个健康的账号。
 					h.cfg.Pool.NoteSuccess(acct.UID)
+					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+					//
+					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+					//   否则"成功即恢复"是条死条款。
+					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 					if sessKey != "" && h.cfg.Session != nil {
 						h.cfg.Session.Bind(sessKey, acct.UID)
 					}
@@ -2196,6 +2235,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if done {
 				// 已经写过响应了（含状态码），直接收工。
 				h.cfg.Pool.NoteSuccess(acct.UID)
+					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+					//
+					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+					//   否则"成功即恢复"是条死条款。
+					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 				if sessKey != "" && h.cfg.Session != nil {
 					h.cfg.Session.Bind(sessKey, acct.UID)
 				}
@@ -2439,6 +2485,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					log.Printf("chat stream uid=%s provider=%s: 上游流内错误（状态码已提交）: %s",
 						acct.UID, reqProvider, inband.Message)
 					h.cfg.Pool.NoteSuccess(acct.UID)
+					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+					//
+					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+					//   否则"成功即恢复"是条死条款。
+					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 					if sessKey != "" && h.cfg.Session != nil {
 						h.cfg.Session.Bind(sessKey, acct.UID)
 					}
@@ -2467,6 +2520,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 到这里才是真正的成功流（serr 非 nil 的情形只有"上游空流"，
 			// 那一帧 error + [DONE] 已由 Stream 写出，状态码必须保持 200）。
 			h.cfg.Pool.NoteSuccess(acct.UID)
+					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+					//
+					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+					//   否则"成功即恢复"是条死条款。
+					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 			// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 			if sessKey != "" && h.cfg.Session != nil {
 				h.cfg.Session.Bind(sessKey, acct.UID)
@@ -2499,12 +2559,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
+					// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
+					//
+					// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
+					//   永远拿不到下一次成功 —— 恢复通道靠健康检查循环的
+					//   AutoDisabledCandidates() 探测（见 admin/health 接线），
+					//   否则"成功即恢复"是条死条款。
+					h.cfg.Pool.RecordAutoDisableSuccess(acct.UID)
 		if sessKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(sessKey, acct.UID)
 		}
 		// 脱敏（只在客户端用的是配了别名的普通 API Key 时生效）。
 		//
 		// 管理密钥不受影响 —— 用户明确要求「对话密钥不用管，按原来的上游即可」。
+		// DBG
 		if scrubResp {
 			resp = scrubChatMap(resp, publicModel)
 		}
@@ -2552,14 +2620,41 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg += " —— " + hint
 	}
 	if lastErr != nil {
-		msg += ": " + lastErr.Error()
+		// ⚠ 脱敏后再拼进 msg（用户实测的泄露：上游错误原文把 host / IP / base_url
+		// 全带出来了，等于向客户端公布后端是谁）。
+		//
+		// 为什么在**这里**脱敏而不是在 writeOpenAIError 里统一做：
+		// writeOpenAIError 还承担本仓自己写的文案（"max_tokens 不能为负"这类），
+		// 那些不该过脱敏 —— 它们含 "https://..." 形态字样时会莫名变成 ***。
+		// 只在拼入**上游原文**这一处脱敏，判据最清楚。
+		//
+		// ⚠ 日志里保持原文（logbuf 记的是排障用的证据），只有出站这份要脱敏。
+		msg += ": " + gateway.MaskError(lastErr)
+	}
+	// 用契约错误码，不用内部 kind 字面量（internal/gateway/errcode.go）。
+	//
+	// 旧代码把 "upstream_error" 写死在这里 —— 那是内部词汇泄漏到契约层。
+	// ErrorCodeForKind 是唯一映射点，改词只需改那一张表。
+	code := gateway.ErrorCodeForKind(lastKind)
+	// ⚠ 这三个 kind 必须回 no_healthy_account，不能用映射表的默认值。
+	//
+	//	ErrKindNone        —— 池子真空 / 全部冷却（重试无用，得去控制台处理）
+	//	ErrKindSessionDead —— 会话失效（要人工重登）
+	//	ErrKindAuth        —— 凭证无效
+	//
+	// 映射表把 None 也叫 upstream_error 是错的：它会把"池里没有账号"报成
+	// "上游服务异常"，用户据此去查上游，而问题在自己的账号池。
+	// 这条语义在 upstream5xx_test 与 handler_test 里都有断言钉着。
+	switch lastKind {
+	case gateway.ErrKindNone, gateway.ErrKindSessionDead, gateway.ErrKindAuth:
+		code = gateway.CodeNoHealthyAccount
 	}
 	if lastKind == gateway.ErrKindServer {
-		writeOpenAIError(w, http.StatusBadGateway, "upstream_error", msg)
+		writeOpenAIError(w, http.StatusBadGateway, string(code), msg)
 		st.status = http.StatusBadGateway
 		return
 	}
-	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+	writeOpenAIError(w, http.StatusServiceUnavailable, string(code), msg)
 	st.status = http.StatusServiceUnavailable
 }
 
@@ -3169,6 +3264,31 @@ func refreshDueAt(acct *auth.Auth, cred gateway.Credential, within time.Duration
 }
 
 func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
+	// 自动禁用计数（internal/pool/autodisable.go）：与下面每种策略**并列**累加。
+	//
+	// # 为什么只在这几种 kind 上计（而不是所有失败）
+	//
+	// 自动禁用是「这个号持续不好用」的判决，代价是丢一份产能。所以只统计
+	// **确实是账号问题**的失败：
+	//
+	//	HardCredit / SoftRate / SessionDead / NotFound / Server  → 计
+	//	Auth / Client / None                                     → 不计
+	//
+	// 后三种是"换号就能好，但号本身没毛病"（凭证边界、请求问题、分类未知）——
+	// 把它们计进去会让一次客户端发错参数的行为，在连发 5 次后禁掉一个健康号。
+	//
+	// ⚠ 与 NoteError 的关系：并存，不替代。NoteError 喂的是**熔断线**
+	//   （3 次短暂歇息），这里喂的是**禁用线**（5 次长期摘除）。两条线判据
+	//   不同、动作不同，所以不能合并 —— 合并会让熔断的"短暂"语义被禁用覆盖。
+	switch kind {
+	case gateway.ErrKindHardCredit, gateway.ErrKindSoftRate,
+		gateway.ErrKindSessionDead, gateway.ErrKindNotFound, gateway.ErrKindServer:
+		if h.cfg.Pool.RecordAutoDisableFailure(uid, "upstream "+kind.String()) {
+			// 刚跨过阈值：记一条明确日志。运维看到"某号自己变灰"时，
+			// 这一行是唯一的线索（否则只能猜）。
+			log.Printf("[pool] 账号 %s 连续失败达阈值，已自动禁用（原因：%s）", uid, kind.String())
+		}
+	}
 	switch kind {
 	case gateway.ErrKindHardCredit:
 		// 402 + 额度耗尽关键词：冷却到**上游给出的下次重置时刻**，立即换号。
