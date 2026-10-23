@@ -463,7 +463,23 @@ func normalizeFrame(obj map[string]any) map[string]any {
 // 返回后再决定状态码（见 handler.chatCompletions 的流式分支）。
 //
 // 流式策略：逐帧透传（规范化已剥空 content 噪声），恢复与上游一致的平滑流式。
+// StreamScrubber 脱敏一个已解析的响应帧（就地改 obj）。
+//
+// # 为什么是回调而不是在本包里判断
+//
+// 「要不要脱敏」取决于**这把 API Key 有没有配别名** —— 那是出口层的配置，
+// wire 包不该知道。这里只提供接缝，判据留在 server。
+//
+// obj 是该帧解析后的 map；函数可以就地改它。返回 false 表示不脱敏。
+type StreamScrubber func(obj map[string]any)
+
+// Stream 保留原签名（不脱敏）—— 既有调用点与测试逐字节不变。
 func Stream(w http.ResponseWriter, r io.Reader) error {
+	return StreamScrubbed(w, r, nil)
+}
+
+// StreamScrubbed 带脱敏回调的流式转发。
+func StreamScrubbed(w http.ResponseWriter, r io.Reader, scrub StreamScrubber) error {
 	// headersSet 让 SSE 响应头**延迟到第一次真正写出时**才设置。
 	//
 	// 为什么不能在这里直接 h.Set(...)：本函数可能在"首帧即流内错误"时
@@ -535,6 +551,12 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 				// 标记状态码已提交：调用方不得再去改它。
 				ib.Committed = true
 				return 0, ib
+			}
+			// ⚠ 脱敏必须在 normalizeFrame **之前**：
+			// normalizeFrame 会按白名单重建帧，脱敏放在之后的话
+			// 改动的字段可能已被它裁掉（白名单里没有 model 就白改了）。
+			if scrub != nil {
+				scrub(obj)
 			}
 			if raw, err := json.Marshal(normalizeFrame(obj)); err == nil {
 				payload = string(raw)

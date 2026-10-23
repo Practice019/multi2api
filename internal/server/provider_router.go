@@ -366,11 +366,24 @@ type modelEntry = map[string]any
 
 // prefixed 给一条模型记录加 provider 前缀（复制而不是原地改，
 // 因为同一条记录可能同时以"带前缀"与"裸"两种形态出现）。
-func prefixed(e modelEntry, provider string) modelEntry {
+func (h *Handler) prefixed(e modelEntry, provider string) modelEntry {
 	out := make(modelEntry, len(e))
 	for k, v := range e {
 		out[k] = v
 	}
+	// 前缀用**真实上游 ID**，不用代号。
+	//
+	// # 为什么不做成代号（我第一版那样改，实测不对）
+	//
+	// 模型 id 的前缀是**路由依据**：客户端从列表里复制这个 id 发回来，
+	// 请求侧按它选上游。改成代号（ch-a/xxx）会让那条路径全部 400
+	// unknown_provider —— 而客户端完全不知道为什么。
+	//
+	// 用户的口径是「设置了别名就按别名处理」，别名机制是 model_map：
+	// 配了映射的 key，列表里显示的是映射后的对外名（001/xxx），
+	// 本来就不含上游；没配映射就不需要隐藏（没有别名可用）。
+	//
+	// 所以这里只做前缀拼接，脱敏交给 model_map 与 owned_by。
 	out["id"] = provider + "/" + asString(e["id"])
 	return out
 }

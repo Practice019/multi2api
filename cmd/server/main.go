@@ -1625,6 +1625,8 @@ func main() {
 		// /v1/models 的 owned_by 由装配层注入（核心不再硬编码上游名）。
 		// 多上游之后它是**默认上游**的 owned_by，其余上游按各自 ID 填。
 		OwnedBy: wb.ID(),
+		// 上游代号表：配了就隐藏后端身份（owned_by / 模型 ID 前缀 / 响应字段）。
+		ProviderAlias: cfg.ProviderAlias,
 		// 多上游路由：出口层只按 ID 问，不认识任何具体上游。
 		// 注册表 + 账号池在这一层合并成出口层要的那个小接口。
 		Provider:        registryRouter{reg: registry, p: p},

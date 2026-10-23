@@ -77,7 +77,7 @@ func (h *Handler) channelReverseMapping() map[string]string {
 // ⚠ 为什么要先复制再追加：data 可能来自 h.modelList() 的缓存切片（共享底层数组）。
 // 就地 append 会写进缓存底层数组 —— 后续请求会看到"幽灵模型"，并发下更是数据竞争。
 // 这个坑在单请求测试里完全看不出来，所以我在这里显式复制。
-func (h *Handler) appendChannelModels(r *http.Request, data []map[string]any) []map[string]any {
+func (h *Handler) appendChannelModels(r *http.Request, data []map[string]any, scrub bool) []map[string]any {
 	names, ok := h.channelPublicNames(r)
 	if !ok || len(names) == 0 {
 		return data
@@ -102,11 +102,21 @@ func (h *Handler) appendChannelModels(r *http.Request, data []map[string]any) []
 	copy(out, data)
 	owner := h.channelOwnerByModel()
 	for _, n := range extra {
-		out = append(out, map[string]any{
-			"id":       n,
-			"object":   "model",
-			"owned_by": owner[n],
-		})
+		// scrub=true（普通 API Key 配了别名）时不标来源渠道：
+		// 渠道名（csg / 七牛云）同样是"这个模型从哪来"的信息，
+		// 与 owned_by 泄露上游是同一类问题。用户口径是"设置了别名就按别名处理"。
+		ownedBy := owner[n]
+		if scrub {
+			ownedBy = ""
+		}
+		item := map[string]any{
+			"id":     n,
+			"object": "model",
+		}
+		if ownedBy != "" {
+			item["owned_by"] = ownedBy
+		}
+		out = append(out, item)
 	}
 	return out
 }

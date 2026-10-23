@@ -219,6 +219,25 @@ type Config struct {
 	// 填（见 Provider 字段与 modelEntries）。
 	OwnedBy string
 
+	// ProviderAlias 上游 ID -> 对外代号（用户要求：不希望别人知道上游）。
+	//
+	// # 为什么需要（实测 5 处泄露）
+	//
+	//	1) /v1/models 的 owned_by      -> workbuddy-intl
+	//	2) /v1/models 的 id 前缀        -> workbuddy-intl/deepseek-v4.1-flash
+	//	3) 响应的 model 字段            -> monkeycode-basic/deepseek-flash
+	//	4) 响应的 id 前缀               -> chatcmpl-... / 0217927502...
+	//	5) usage 私有字段               -> points_consumed（loomy 独有）
+	//
+	// 3)4)5) 是上游原始响应透传出来的，同样是身份指纹：
+	// 各调一次就能按响应格式把通道分出组来。
+	//
+	// # nil = 不隐藏（向后兼容）
+	//
+	// 既有部署行为逐字节不变。配了表之后**所有**上游都走代号，
+	// 漏配的用 channel-<hash> 兜底（不能回落成真名，见 aliasFor）。
+	ProviderAlias map[string]string
+
 	// Provider 多上游路由的接缝（可选；nil = 单上游模式，行为与改造前一致）。
 	//
 	// # 为什么做成接口而不是直接持有 gateway.Registry
@@ -784,7 +803,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	// ⇒ 目录回到既有口径（上游实时目录 + 令牌白名单，两者都是改造前就有的）；
 	//   渠道从此只是 chat 请求上的**额外一条路**（见下面 providerFor 之前那段），
 	//   不再决定目录里有什么。
-	data := h.filterModelsForRequest(r, h.modelList())
+	data := h.filterModelsForRequest(r, h.modelListWithScrub(h.scrubEnabledForRequest(r)))
 	// ⚠ 撤收紧 ≠ 渠道的模型消失（2026-10-20 用户第二轮反馈后修的）：
 	// 上游目录照旧**全量**展示，同时把**渠道声明的公开名并进来**（只增不减）。
 	//
@@ -793,7 +812,7 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	//   第一次「除新建渠道外其余 12 个上游全是 0 个」⇒ 问题在"上游被清空"；
 	//   第二次「可用模型 674 个里没有我那条渠道」⇒ 问题在"渠道没进来"。
 	// 两次都不是"要不要渠道"，而是**并集**：上游的照旧，渠道的也进来。
-	data = h.appendChannelModels(r, data)
+	data = h.appendChannelModels(r, data, h.scrubEnabledForRequest(r))
 	// ⚠ 2026-10-21：必须在 append **之后**再改一次名 —— append 进来的渠道模型
 	//   用的是渠道声明的内部名，绕过了 filterModelsForRequest 那一遍映射。
 	//   见 applyPublicNames 的注释（有实测日志证据）。
@@ -855,10 +874,10 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 //
 // 完全退化成改造前的单上游行为：**只有裸名，没有任何前缀记录**。
 // 这是既有测试与既有部署的路径，字节级不变。
-func (h *Handler) modelList() []map[string]any {
+func (h *Handler) modelListWithScrub(scrub bool) []map[string]any {
 	// 单上游模式：与改造前逐字节一致（除账号判据，见 singleProviderModelList）。
 	if h.cfg.Provider == nil {
-		return h.singleProviderModelList(h.ownedBy())
+		return h.singleProviderModelList(h.ownedBy(), scrub)
 	}
 
 	def := h.defaultProvider()
@@ -868,12 +887,12 @@ func (h *Handler) modelList() []map[string]any {
 	//    否则同一个模型会在目录里出现两次（用户报的就是这个重复）。
 	//    def == "" 是边界：拼前缀只会得到 "/glm-5.2"，
 	//    所以此时保持裸名 —— 每个模型仍然只有一条，只是没有上游前缀。
-	for _, e := range h.singleProviderModelList(h.ownedByFor(def)) {
+	for _, e := range h.singleProviderModelList(h.ownedByFor(def, scrub), scrub) {
 		if def == "" {
 			out = append(out, e)
 			continue
 		}
-		out = append(out, prefixed(e, def))
+		out = append(out, h.prefixed(e, def))
 	}
 
 	// 2. 其余上游：只有带前缀的一份。
@@ -896,7 +915,7 @@ func (h *Handler) modelList() []map[string]any {
 			continue // 该上游暂时给不出目录：跳过，不拖垮整个 /v1/models
 		}
 		for _, mi := range infos {
-			out = append(out, prefixed(h.entryOf(mi.ID, int64(mi.ContextWindow), int64(mi.MaxOutputTokens), h.ownedByFor(id)), id))
+			out = append(out, h.prefixed(h.entryOf(mi.ID, int64(mi.ContextWindow), int64(mi.MaxOutputTokens), h.ownedByFor(id, scrub)), id))
 		}
 	}
 
@@ -914,14 +933,14 @@ func (h *Handler) modelList() []map[string]any {
 	imageIDs := append([]string{def}, h.otherProviders(def)...)
 	for _, id := range imageIDs {
 		for _, im := range h.imageModelsOf(id) {
-			e := h.entryOf(im.ID, 0, 0, h.ownedByFor(id))
+			e := h.entryOf(im.ID, 0, 0, h.ownedByFor(id, scrub))
 			// 标出生图能力：调用方据此判断"这个模型要用
 			// /v1/images/generations，不是 chat/completions"。
 			// 非标准字段（OpenAI 没有这个概念），但**不标就无法区分**
 			// —— 目录里两个模型看名字都知道是生图，但程序不该靠名字猜。
 			e["capabilities"] = []string{"image_generation"}
 			if id != "" {
-				out = append(out, prefixed(e, id))
+				out = append(out, h.prefixed(e, id))
 				continue
 			}
 			out = append(out, e)
@@ -981,7 +1000,7 @@ func (h *Handler) imageModelEntries(id, owned string) []map[string]any {
 			e["name"] = name
 		}
 		if id != "" {
-			e = prefixed(e, id)
+			e = h.prefixed(e, id)
 		}
 		out = append(out, e)
 	}
@@ -1016,7 +1035,7 @@ func (h *Handler) imageModelEntries(id, owned string) []map[string]any {
 //
 // 其余上游（非默认）不走这里：它们经 `registryRouter.Models`，那条路径
 // 自己按**具体上游 id** 判账号（见 cmd/server/multiprovider.go）。
-func (h *Handler) singleProviderModelList(owned string) []map[string]any {
+func (h *Handler) singleProviderModelList(owned string, scrub bool) []map[string]any {
 	// 没有可用账号 ⇒ 这个上游的目录**必然**给不出来（动态要凭证、
 	// 静态表也与真实可用性无关），所以这里直接空，不再回落。
 	//
@@ -1060,9 +1079,18 @@ func (h *Handler) entryOf(id string, ctxWindow, maxTokens int64, owned string) m
 		"id":                id,
 		"object":            "model",
 		"created":           1753600000,
-		"owned_by":          owned,
 		"context_length":    ctxWindow,
 		"max_output_tokens": maxTokens,
+	}
+	// owned_by 只在**有值**时才写。
+	//
+	// scrub=true（普通 API Key 配了别名）时上游传进来的是空串 ——
+	// 那个情形下这个键**整个不该出现**：
+	// 一个 "owned_by": "" 仍然在说"这里有个来源字段，只是我没填"，
+	// 客户端按它的存在与否分组时照样能分出"这两类是同一组"。
+	// 用户的要求是「按别名处理，不能暴露别的」⇒ 连字段都不给。
+	if owned != "" {
+		entry["owned_by"] = owned
 	}
 	if ctxWindow == 0 {
 		entry["context_length"] = 131072 // 兜底
@@ -1104,7 +1132,7 @@ func (h *Handler) providerIDs() []string {
 //
 // 未注入时给 "local" —— 一个**不假装知道**是哪个上游的中性值。
 func (h *Handler) ownedBy() string {
-	return h.ownedByFor(h.defaultProvider())
+	return h.ownedByFor(h.defaultProvider(), false)
 }
 
 // ownedByFor 返回指定上游的 owned_by：用它自己的 ID ——
@@ -1113,7 +1141,34 @@ func (h *Handler) ownedBy() string {
 // 默认上游且装配层显式给了 OwnedBy 时以 OwnedBy 为准
 // （那是改造前就存在的注入点，行为要保持）。
 // 没有上游上下文时回落 "local"。
-func (h *Handler) ownedByFor(id string) string {
+// ownedByFor 返回指定上游的 owned_by。
+//
+// scrub=true 时返回**代号**（普通 API Key 配了别名映射的情形）；
+// scrub=false 时返回上游真名（管理密钥 / 没配别名的情形）。
+//
+// # 为什么按钥匙分而不是全局开关（用户三次澄清后的口径）
+//
+//	管理密钥 config.api_key   → 保持上游原名（运维自用，不需要藏）
+//	普通 API Key（配了别名）  → 用代号，不暴露上游
+//
+// 全局开关满足不了这个区分：同一个部署里两种钥匙同时在用。
+// ownedByFor 返回指定上游的 owned_by。
+//
+// scrub=true（普通 API Key 配了别名）时返回**空**：不标来源。
+// scrub=false 时返回上游真名（管理密钥 / 没配别名的情形）。
+//
+// # 为什么 scrub 时是空而不是代号
+//
+// 我第一版返回代号（ch-a / ch-b）。实测下来那不是用户要的：
+// 代号虽然不含上游名，但**仍然是一个来源标注** —— 客户端照样能把
+// 9 个别名分成 4 组，答出「这 4 个模型来自同一处」。
+//
+// 用户的口径是「设置了就按别名处理，不能暴露别的」。
+// 按别名处理 = 只给别名，不给来源。所以这里留空。
+func (h *Handler) ownedByFor(id string, scrub bool) string {
+	if scrub {
+		return ""
+	}
 	if id == "" {
 		if h.cfg.OwnedBy != "" {
 			return h.cfg.OwnedBy
@@ -1478,6 +1533,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Model  string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &peek)
+
+	// publicModel 客户端**请求时用的名字**（别名或裸名）。
+	//
+	// 脱敏时回填到响应的 model 字段 —— 客户端认的是自己发出去的那个名字，
+	// 而上游原名属于身份指纹（monkeycode-basic/deepseek-flash 点名了上游）。
+	//
+	// ⚠ 必须在 resolveModelAlias **之前**取：那一步会把它换成内部名。
+	// 管理密钥不配别名 ⇒ scrub 恒 false ⇒ 响应保持上游原名（用户明确要求）。
+	publicModel := strings.TrimSpace(peek.Model)
+	scrubResp := h.scrubEnabledForRequest(r)
 
 	// 选号要按**请求的模型**取额度（见 pool.PickForModel），
 	// 并按 **provider 前缀**限定上游（见 pool.PickFor）。
@@ -2194,7 +2259,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// `200 + 一帧没有 choices 的空壳 + [DONE]` —— 正是"外部调用 api
 			// 只有 codearts 报错"的形态。
 			stats := newChatStatsReaderSince(rc, st.start)
-			serr := wire.Stream(w, stats)
+					// 脱敏回调：只在客户端用配了别名的普通 API Key 时生效。
+		// 管理密钥传 nil ⇒ 帧原样转发（用户要求「对话密钥按原来的上游即可」）。
+		var streamScrub wire.StreamScrubber
+		if scrubResp {
+			streamScrub = func(obj map[string]any) { scrubObject(obj, publicModel) }
+		}
+		serr := wire.StreamScrubbed(w, stats, streamScrub)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
 			st.usage = stats.Usage()
@@ -2271,6 +2342,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		if sessKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(sessKey, acct.UID)
+		}
+		// 脱敏（只在客户端用的是配了别名的普通 API Key 时生效）。
+		//
+		// 管理密钥不受影响 —— 用户明确要求「对话密钥不用管，按原来的上游即可」。
+		if scrubResp {
+			resp = scrubChatMap(resp, publicModel)
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
