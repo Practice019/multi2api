@@ -19,6 +19,8 @@
 package server
 
 import (
+	"path/filepath"
+	"workbuddy2api/internal/groupstore"
 	"testing"
 )
 
@@ -72,15 +74,25 @@ func TestPublicNameForBareNameNeedsUniqueHit(t *testing.T) {
 }
 
 // 端到端：filter → applyPublicNames 两遍之后，三条对外名都得在，且不重复。
+// 端到端：filter → applyPublicNames 两遍之后，三条对外名都得在，且不重复。
+//
+// ⚠ 2026-10-24 更新：别名从 API Key 移到了**分组**（用户要求
+// 「对外模型不要在这里设置 在分组里面设置」）。所以这里要把别名配在分组上、
+// 让 key 引用那个分组 —— 判据本身（两遍改名不能吃掉别名）一个字没变。
 func TestModelsListSurvivesDoubleRename(t *testing.T) {
 	keys := newKeyStore(t)
+	gs := newGroupStore(t)
 	mm := aliasFixture()
 	allow := []string{"qiniuyun/deepseek-v4.1-flash", "senseaudio/deepseek-v4.1-flash", "workbuddy/deepseek-v4.1-flash"}
-	k, err := keys.Create("666", 0, 0, allow, mm)
+	g, err := gs.Create("别名组", "", allow, mm)
+	if err != nil {
+		t.Fatalf("建分组: %v", err)
+	}
+	k, err := keys.CreateOwnedWithGroups("", "666", 0, 0, nil, []string{g.ID})
 	if err != nil {
 		t.Fatalf("建 key: %v", err)
 	}
-	h := &Handler{cfg: Config{APIKeys: keys}}
+	h := &Handler{cfg: Config{APIKeys: keys, Groups: gs}}
 	r := reqAs(t, k.ID)
 
 	list := []map[string]any{
@@ -96,10 +108,20 @@ func TestModelsListSurvivesDoubleRename(t *testing.T) {
 	}
 	for _, want := range []string{"004/deepseek-v4.1-flash", "005/deepseek-v4.1-flash", "006/deepseek-v4.1-flash"} {
 		if !seen[want] {
-			t.Errorf("列表里缺少 %q（实际 %v）—— 两遍改名把用户配的对外名吃掉了", want, got)
+			t.Errorf("列表里缺少 %q（实际 %v）—— 两遍改名把分组配的对外名吃掉了", want, got)
 		}
 	}
 	if len(got) != 3 {
 		t.Errorf("应有 3 条，实际 %d 条: %v", len(got), got)
 	}
+}
+
+// newGroupStore 建一个临时分组存储（测试用）。
+func newGroupStore(t *testing.T) *groupstore.Store {
+	t.Helper()
+	gs, err := groupstore.New(filepath.Join(t.TempDir(), "groups.json"))
+	if err != nil {
+		t.Fatalf("建分组存储: %v", err)
+	}
+	return gs
 }

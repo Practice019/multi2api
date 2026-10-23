@@ -500,8 +500,13 @@ func TestAPIKeyModalSelectsGroupsNotModels(t *testing.T) {
 	}
 
 	// ③ 提交体必须带 groups（而不是 models）。
-	if !strings.Contains(src, "limit, rpm, groups, model_map: modelMap") {
+	//
+	// ⚠ 2026-10-24：model_map 已移到分组，提交体不再带它。
+	if !strings.Contains(src, "limit, rpm, groups }") {
 		t.Error("★ 提交体没有带 groups —— 界面上选了也不生效")
+	}
+	if regexp.MustCompile(`groups, model_map`).MatchString(src) {
+		t.Error("★ 提交体还在发 model_map —— 别名已移到分组，key 上配的永远不会生效")
 	}
 	if regexp.MustCompile(`rpm, models, model_map`).MatchString(src) {
 		t.Error("★ 提交体还在发 models —— 后端虽然有兼容，但界面不该再产生它")

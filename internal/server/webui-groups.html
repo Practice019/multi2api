@@ -1372,6 +1372,26 @@ function mpEsc(s) {
       <div id="gChoices"></div>
       <div class="muted" style="font-size:11px;margin-top:4px" id="gChoicesHint"></div>
     </div>
+
+    <!-- 模型对外名（别名）：对外名 → 内部名。
+
+         用户要求：「对外模型不要在这里设置 在分组里面设置」—— 所以它从
+         API Key 弹窗搬到了这里。
+
+         为什么跟着分组走：别名的语义是"这个模型对外叫什么"，而"哪些模型"
+         本来就是分组定义的。放 key 上会导致同一模型被两把 key 引用时要配两遍，
+         而且配了但模型不在分组里时永远不生效（判定链先过分组）。 -->
+    <label>模型对外名（可选）</label>
+    <div class="full">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">
+        左边内部模型名 → 右边对外显示名。不填则对外就是内部名。
+      </div>
+      <div id="gMapRows"></div>
+      <datalist id="gMapModelOpts"></datalist>
+      <div style="margin-top:6px">
+        <button type="button" onclick="addMapRow()" style="padding:2px 10px;font-size:12px">+ 新增一行</button>
+      </div>
+    </div>
   </div>
   <div class="dlg-f">
     <span class="err" id="dlgErr" style="margin-right:auto"></span>
@@ -1675,6 +1695,8 @@ async function openForm(id) {
   $('f-manual').value = '';
   // 编辑时把已有模型放进已选集合；新增时从空开始。
   picked = new Set(g ? (g.models || []) : []);
+  // 别名回填：编辑时按 model_map 生成行；新增时 0 行（用户要「一开始是没有的」）。
+  renderMapRows(g ? g.model_map : null);
   renderPicked();
   $('gChoices').innerHTML = '<span class="muted" style="font-size:12px">正在读取模型目录…</span>';
   $('dlg').showModal();
@@ -1689,16 +1711,96 @@ async function openForm(id) {
 
 function closeForm() { $('dlg').close(); }
 
+// ---- 模型对外名（别名）-----------------------------------------------
+//
+// 结构化存成 map：对外名 → 内部名。方向与后端 groupstore.Group.ModelMap 一致。
+//
+// ⚠ 右侧（对外名）必须**唯一**：两个内部名映射到同一个对外名，调用方发出那
+// 个名字时我们无法决定该走哪个上游。收集时发现重复就报错，不静默取其一。
+
+function addMapRow(left, right) {
+  const host = $('gMapRows');
+  if (!host) return;
+  const row = document.createElement('div');
+  row.className = 'gmap-row';
+  row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:5px';
+  row.innerHTML =
+    '<input class="gmap-l" list="gMapModelOpts" spellcheck="false" placeholder="内部模型名"' +
+    ' value="' + esc(left || '') + '" style="flex:1;font-size:12px">' +
+    '<span class="muted">→</span>' +
+    '<input class="gmap-r" spellcheck="false" placeholder="对外显示名"' +
+    ' value="' + esc(right || '') + '" style="flex:1;font-size:12px">' +
+    '<button type="button" class="gmap-x" title="删除这行" style="padding:1px 8px;font-size:12px">×</button>';
+  host.appendChild(row);
+  const btn = row.querySelector('.gmap-x');
+  if (btn) btn.onclick = () => row.remove();
+}
+
+// renderMapRows 用 map 重建整个列表（编辑回填 / 新建清空）。
+function renderMapRows(m) {
+  const host = $('gMapRows');
+  if (!host) return;
+  host.innerHTML = '';
+  const pairs = Object.entries(m || {});
+  // 一开始 0 行是刻意的（用户要「一开始是没有的」）：给空行会被误读成"必须填"。
+  for (const [pub, internal] of pairs) addMapRow(internal, pub);
+  syncMapDatalist();
+}
+
+// syncMapDatalist 左侧候选 = 当前已选的模型（别名只能给已选的模型起）。
+function syncMapDatalist() {
+  const dl = $('gMapModelOpts');
+  if (!dl) return;
+  dl.innerHTML = Array.from(picked).sort().map(function (m) {
+    return '<option value="' + esc(m) + '"></option>';
+  }).join('');
+}
+
+// collectMap 收集成 { map, invalid }。invalid 非空时调用方应拦下保存。
+function collectMap() {
+  const rows = document.querySelectorAll('#gMapRows .gmap-row');
+  const map = {};
+  const invalid = [];
+  const seenPub = new Set();
+  rows.forEach(function (row) {
+    const l = row.querySelector('.gmap-l');
+    const r = row.querySelector('.gmap-r');
+    const internal = ((l && l.value) || '').trim();
+    const pub = ((r && r.value) || '').trim();
+    if (!internal && !pub) return;              // 整行空 = 忽略
+    if (!internal || !pub) {
+      invalid.push('内部名和对外名要么都填、要么都空（当前不完整）');
+      return;
+    }
+    if (internal === pub) return;               // 恒等映射无意义，跳过
+    if (seenPub.has(pub)) {
+      invalid.push('对外名 "' + pub + '" 重复了 —— 同一个名字不能指向两个模型');
+      return;
+    }
+    seenPub.add(pub);
+    map[pub] = internal;
+  });
+  return { map: map, invalid: invalid };
+}
+
+
 async function save() {
   const err = $('dlgErr');
   err.textContent = '';
   const name = ($('f-name').value || '').trim();
   if (!name) { err.textContent = '名称必填'; return; }
   const models = Array.from(picked).sort();
+  // 别名一并提交（跟着分组走，见 Group.ModelMap 的注释）。
+  const mm = collectMap();
+  if (mm.invalid.length) {
+    err.textContent = '模型对外名有问题：' + mm.invalid[0];
+    return;
+  }
   const body = {
     name: name,
     description: ($('f-desc').value || '').trim(),
-    models: models
+    models: models,
+    model_map: mm.map
   };
   try {
     if (editing) {

@@ -3168,26 +3168,6 @@ function mpEsc(s) {
           <div class="dim" style="font-size:11px;margin-top:6px">
             一个都不选 = 不限制（这把 key 可用全部模型）。要限定范围，先到「分组」页建好分组。
           </div>
-        <!-- 模型对外名映射（2026-10-21，行式编辑）·
-             用户要求：「我希望是左边一个名字，右边一个名字，自己填。然后可以新增行，
-             一开始是没有的。」所以不是 textarea，是「左侧内部名 → 右侧对外名」的成对行。
-             ⚠ 两侧都用 input+datalist：能选也能手填 ——
-             左侧的候选是**已勾选的模型**（用户原话），右侧是新起的对外名，通常靠手填。 -->
-        <div style="margin-top:10px">
-          <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:4px">
-            <div class="dim" style="font-size:12px">
-              模型对外名（可选）· 左边内部模型名 → 右边对外显示名，不填则对外就是内部名
-            </div>
-            <button id="akMapAdd" type="button" style="padding:2px 10px;font-size:12px">+ 新增一行</button>
-          </div>
-          <div id="akMapRows"></div>
-          <!-- 左侧候选：已勾选的模型。渲染时同步更新（见 syncAKMapDatalist）。 -->
-          <datalist id="akMapModelOpts"></datalist>
-          <div class="dim" style="font-size:11px;margin-top:3px">
-            改完后调用方看到的模型名就是右边那个；请求进来会换回左边去上游。
-          </div>
-        </div>
-      </div>
     </div>
 
     <div class="row" style="margin-top:16px;justify-content:flex-end;gap:8px">
@@ -9720,68 +9700,9 @@ let loginProvider = '';
   // 教训：替换"一大段"之前先列出这一段里定义了哪些符号，替换后核对
   // 「还有谁在调它们」。语法门禁只查能不能解析，查不出未定义符号。
 
-  function akAddMapRow(left, right) {
-      const host = $('akMapRows');
-      if (!host) return;
-      const row = document.createElement('div');
-      row.className = 'row';
-      row.style.cssText = 'gap:6px;margin-bottom:4px;align-items:center';
-      row.innerHTML =
-        `<input class="akmap-l" list="akMapModelOpts" spellcheck="false" placeholder="内部模型名"` +
-        ` value="${esc(left || '')}"` +
-        ` style="flex:1;min-width:0;font-size:12px;font-family:ui-monospace,Consolas,monospace">` +
-        `<span class="dim" style="font-size:12px;flex:none">&rarr;</span>` +
-        `<input class="akmap-r" spellcheck="false" placeholder="对外显示名"` +
-        ` value="${esc(right || '')}"` +
-        ` style="flex:1;min-width:0;font-size:12px;font-family:ui-monospace,Consolas,monospace">` +
-        `<button type="button" class="akmap-del" style="padding:2px 8px;font-size:12px;flex:none;color:var(--err)">&times;</button>`;
-      row.querySelector('.akmap-del').onclick = () => row.remove();
-      host.appendChild(row);
-      // 左侧候选要跟着当前的勾选更新
-      syncAKMapDatalist();
-    }
 
-  function akRenderMap(m) {
-      const host = $('akMapRows');
-      if (!host) return;
-      host.innerHTML = '';
-      const pairs = Object.keys(m || {}).map(alias => [String(m[alias] || ''), String(alias)]);
-      // 按内部名排序：编辑一个已有 key 时，行的顺序稳定可预期（不是哈希序）
-      pairs.sort((a, b) => a[0].localeCompare(b[0]));
-      for (const [left, right] of pairs) akAddMapRow(left, right);
-      syncAKMapDatalist();
-    }
 
-  function akCollectMap() {
-      const map = {}, invalid = [];
-      document.querySelectorAll('#akMapRows .akmap-l').forEach(inp => {
-        const row = inp.parentElement;
-        const left = String(inp.value || '').trim();          // 内部模型名
-        const right = String(row.querySelector('.akmap-r').value || '').trim();  // 对外名
-        if (!left && !right) return;                          // 整行空 ⇒ 忽略
-        if (!left || !right) {
-          invalid.push('「' + (left || '空') + ' → ' + (right || '空') + '」只填了一半');
-          return;
-        }
-        if (left === right) return;                           // 等价于不映射
-        map[right] = left;                                    // ⚠ 转置：对外名 → 内部名
-      });
-      return { map, invalid };
-    }
 
-  function syncAKMapDatalist() {
-    // 别名映射的左侧候选 = 已选分组里的模型并集。
-    // 以前取「已勾选的模型」，现在取「已选分组的模型」。
-    const dl = $('akMapModelOpts');
-    if (!dl) return;
-    const seen = new Set();
-    akGroups.forEach(function (g) {
-      if (akPickedGroups.has(g.id)) (g.models || []).forEach(function (m) { seen.add(m); });
-    });
-    dl.innerHTML = Array.from(seen).sort().map(function (m) {
-      return '<option value="' + esc(m) + '"></option>';
-    }).join('');
-  }
 
   function openAPIKeyModal(mode, k) {
     akMode = mode === 'edit' ? 'edit' : 'create';
@@ -9802,14 +9723,13 @@ let loginProvider = '';
     $('akRpm').value = k ? (k.rpm || 0) : 0;
     // 分组：编辑时回填，新建时空（= 不限制）。
     akPickedGroups = new Set((k && Array.isArray(k.groups)) ? k.groups : []);
-    akRenderMap(akMode === 'edit' ? (k && k.model_map) : null);
+    // 别名（model_map）已移到分组：这里不再处理。
 
     $('akModal').style.display = 'flex';
     $('akSave').disabled = false;
     $('akGroupList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取分组…</div>';
     ensureAKGroups().then(function () {
       renderAKGroupList();
-      syncAKMapDatalist();
     }).catch(function (e) {
       $('akGroupList').innerHTML =
         '<div class="dim" style="font-size:12px;padding:6px">读取分组失败：' + esc(e.message) + '</div>';
@@ -9824,14 +9744,10 @@ let loginProvider = '';
   async function saveAPIKeyModal(btn) {
     // 提交的分组 ID（空 = 不限制）。
     const groups = Array.from(akPickedGroups);
-    // 别名映射：分组非空时才有意义（不限制的 key 没有「哪些模型」的概念，
-    // 映射表也就无从对应）。空分组时提交空表，让后端清掉可能残留的旧映射。
-    const mmParsed = groups.length ? akCollectMap() : { map: {}, invalid: [] };
-    if (mmParsed.invalid.length) {
-      toast('模型映射格式不对：' + mmParsed.invalid[0], true);
-      return;
-    }
-    const modelMap = mmParsed.map;
+    // 别名（model_map）已移到分组：这里不再收集，提交体也不带它。
+    //
+    // 为什么不保留"兼容"：key 上的别名永远不可能生效 —— 判定链先过分组，
+    // 不认识不在分组里的名字。留着只会让用户配了却查不出为什么没用。
     const limit = parseInt($('akLimit').value, 10);
     const rpm = parseInt($('akRpm').value, 10);
     if (isNaN(limit) || limit < 0 || isNaN(rpm) || rpm < 0) {
@@ -9845,14 +9761,14 @@ let loginProvider = '';
           const name = ($('akName').value || '').trim();
           if (!name) { toast('名称不能为空', true); return false; }
           const r = await admin('/admin/apikeys', {
-            method: 'POST', body: JSON.stringify({ name, limit, rpm, groups, model_map: modelMap }),
+            method: 'POST', body: JSON.stringify({ name, limit, rpm, groups }),
           });
           if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
           toast(`已创建 ${r.name || name}（完整 key 下面直接复制）\n${r.full}`, false, 15000);
           copyText(r.full, 'API Key');
         } else {
           await admin('/admin/apikeys/update', {
-            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, groups, model_map: modelMap }),
+            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, groups }),
           });
           toast(groups.length ? `已保存：限制为 ${groups.length} 个分组的模型` : '已保存：不限制模型');
         }
@@ -15184,14 +15100,6 @@ let multCatalogFailed = false;
     $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
   $('akCancel').onclick = closeAPIKeyModal;
   $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
-  // 「+ 新增一行」：模型对外名映射的入口。
-  // ⚠ 一开始是 **0 行**（用户要求「一开始是没有的」）—— 不给空行占位，
-  //   因为空行会被误读成"这里必须填"。点一下才出现一行。
-  $('akMapAdd').onclick = () => {
-    akAddMapRow("", "");
-    const rows = document.querySelectorAll("#akMapRows .akmap-l");
-    if (rows.length) rows[rows.length - 1].focus();
-  };
 
   // 勾选分组 → 更新计数与别名候选。委托在容器上，列表重渲染后依然有效。
   $('akGroupList').addEventListener('change', ev => {
@@ -15201,7 +15109,6 @@ let multCatalogFailed = false;
     else { akPickedGroups.delete(cb.dataset.akg); }
     renderAKGroupChips();
     updateAKCount();
-    syncAKMapDatalist();
   });
   // 「已选分组」里的 × —— 取消该分组（同时把列表里的勾去掉）。
   //
@@ -15213,7 +15120,6 @@ let multCatalogFailed = false;
     if (!btn) return;
     akPickedGroups.delete(btn.dataset.akgunpick);
     renderAKGroupList();
-    syncAKMapDatalist();
   });
     // 点遮罩关闭（点面板内部不关）。
     $('akModal').addEventListener('click', ev => { if (ev.target.id === 'akModal') closeAPIKeyModal(); });
