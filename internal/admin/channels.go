@@ -12,10 +12,10 @@
 package admin
 
 import (
-	"log"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -54,6 +54,7 @@ type channelView struct {
 	Models       []string          `json:"models"`
 	ModelMapping map[string]string `json:"model_mapping"`
 	Group        string            `json:"group"`
+	Groups       []string          `json:"groups"`
 	Priority     int               `json:"priority"`
 	Weight       int               `json:"weight"`
 	Status       int               `json:"status"`
@@ -64,6 +65,9 @@ func viewOf(ch *channelstore.Channel, models []string) channelView {
 	v := channelView{
 		ID: ch.ID, Name: ch.Name, Type: ch.Type, BaseURL: ch.BaseURL,
 		Models: models, ModelMapping: ch.ModelMap, Group: ch.Group,
+		// Groups 用 EffectiveGroups()：一条只写了 Group 的存量渠道也要回 ["default"]，
+		// 否则前端的分组多选器回填成空，用户一保存就把渠道从所有组里摘掉了。
+		Groups:   ch.EffectiveGroups(),
 		Priority: ch.Priority, Weight: ch.Weight, Status: ch.Status,
 		Enabled:  ch.Status == channelstore.StatusEnabled,
 		KeyMasks: make([]string, 0, len(ch.Keys)), KeyCount: len(ch.Keys),
@@ -107,9 +111,12 @@ type channelReq struct {
 	Models       []string          `json:"models"`
 	ModelMapping map[string]string `json:"model_mapping"`
 	Group        string            `json:"group"`
-	Priority     int               `json:"priority"`
-	Weight       int               `json:"weight"`
-	Status       int               `json:"status"`
+	// Groups 多分组（P4）。空 = 沿用 Group（再空则 default）。
+	// 与 Group 同时给时**以 Groups 为准**（Group 由存储层同步成 Groups[0]）。
+	Groups   []string `json:"groups"`
+	Priority int      `json:"priority"`
+	Weight   int      `json:"weight"`
+	Status   int      `json:"status"`
 	// KeySelectionMode 多 key 的选法（""/"random"/"round_robin"）。空 = 保持原值（新建时 = 随机）。
 	KeySelectionMode string `json:"key_selection_mode"`
 }
@@ -142,7 +149,7 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 
 	ch := &channelstore.Channel{
 		ID: req.ID, Name: req.Name, Type: req.Type, BaseURL: strings.TrimRight(req.BaseURL, "/"),
-		Models: req.Models, ModelMap: req.ModelMapping, Group: req.Group,
+		Models: req.Models, ModelMap: req.ModelMapping, Group: req.Group, Groups: req.Groups,
 		Priority: req.Priority, Weight: req.Weight, Status: req.Status,
 	}
 	if ch.Status == 0 {

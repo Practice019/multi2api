@@ -41,7 +41,8 @@ type Candidate struct {
 
 // Plan 算出所有能服务 publicModel 的候选，按 (优先级 desc, 渠道名 asc) 排序。
 //
-// group 目前固定 channelstore.DefaultGroup（多分组留到以后）。
+// group 是这个请求要用的分组（调用方目前固定传 channelstore.DefaultGroup；
+// P4 之后渠道可以属于多个分组，所以这里按 ch.EffectiveGroups() 判）。
 //
 // 匹配规则（与目录侧**对称**，这是关键）：
 //
@@ -67,7 +68,12 @@ func Plan(s *channelstore.Store, group, publicModel string) ([]Candidate, error)
 		if ch == nil || ch.Status != channelstore.StatusEnabled {
 			continue // 停用 ⇒ 不参与（默认收紧）
 		}
-		if ch.Group != "" && ch.Group != group {
+		// 多分组（P4）：渠道属于哪些组由 EffectiveGroups 决定。
+		//
+		// ⚠ 不能写 `ch.Group != group` —— 那是"只看第一个分组"的老语义，
+		//   一条同时属于 default 和 vip 的渠道会在 vip 组里**静默消失**，
+		//   而渠道列表里 Groups 明明写着 vip。
+		if !slicesContains(ch.EffectiveGroups(), group) {
 			continue
 		}
 		up, err := upstreamName(ch, publicModel)
@@ -109,6 +115,16 @@ func upstreamName(ch *channelstore.Channel, publicModel string) (string, error) 
 		return publicModel, nil
 	}
 	return resolved, nil
+}
+
+// slicesContains 分组清单里有没有 want（渠道的分组数是个位数，线性扫即可）。
+func slicesContains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // declares 该渠道是否声明了这个上游模型。
