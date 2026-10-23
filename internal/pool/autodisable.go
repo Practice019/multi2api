@@ -120,6 +120,20 @@ const autoDisableCauseMaxRunes = 200
 //
 // 生命期：随账号存在于池中；uid 从池里消失时被自动清理（见 RecordAutoDisableFailure）。
 type autoDisableState struct {
+	// owner 这份状态属于哪一个 entry（账号实例）。
+	//
+	// # 为什么必须钉住实例而不是只用 uid（一次真实的测试失败）
+	//
+	// "删号 → 重新导入同名 uid"是**正常运维操作**（凭证文件被替换、账号被
+	// 重新登录）。此时旧 entry 连同它的禁用一起消失，但本表以 uid 为键，
+	// 旧进度会原样留下来 —— 表现是"刚重新导入的号带着 4/5 的进度上台，
+	// 下一次失败立刻被秒禁"。测试 TestAutoDisableUnknownUID 正是这样红的。
+	//
+	// 所以状态在读取时校验实例身份：不一致即视为"另一个账号"，旧状态作废。
+	// 这比在 Remove 时清理更稳 —— 删除路径可能来自 SyncToDir、快照恢复等多处，
+	// 而"实例变了"是所有路径的共同终点。
+	owner *entry
+
 	// streak 连续失败次数（**本机制独占**，不是 e.fails —— 见文件头的坑）。
 	streak int
 	// lastFail 最近一次失败时刻（衰减窗口的判据）。
@@ -142,7 +156,29 @@ type autoDisableState struct {
 
 // reset 清空计数与判定（保留 owned/reason 的清零也一并做）。
 func (s *autoDisableState) reset() {
-	*s = autoDisableState{}
+	owner := s.owner
+	*s = autoDisableState{owner: owner}
+}
+
+// ownsDisableLocked 报告"账号此刻的禁用仍然是**我们置的那个**"。调用方必须持 p.mu。
+//
+// # 判据为什么是比较 reason 而不是只用 owned（一个真实的语义洞）
+//
+// 场景：账号被自动禁用（owned=true, entry.reason=我们的文案）后，操作员在管理台
+// 又按了一次「禁用」并填了自己的原因。此时 entry.reason 被改写，但 owned 仍为 true
+// —— 若只看 owned，一次探测成功就会把**操作员刚刚按下的禁用**一并撤销。
+//
+// 这正是文件头讲的"自动探测不该推翻人的决定"的第二种形态：不是从来没被禁过，
+// 而是**人重新表过态**。entry.reason 是那次表态的唯一痕迹（pool 只有一个 string，
+// 无法区分"谁写的"），所以用它做对账：我们的文案与它不一致 ⇒ 归属已转移。
+//
+// 代价：若另一个机制碰巧写出一模一样的字符串，这里会误判为我们置的。
+// 那句文案里带"连续失败 N 次（阈值 M）"与具体上游原因，实际不可能撞上。
+func ownsDisableLocked(st *autoDisableState, e *entry) bool {
+	if st == nil || e == nil {
+		return false
+	}
+	return st.disabled && st.owned && e.disabled && e.reason == st.reason
 }
 
 // autoDisableBook 单个 Pool 的自动禁用配置 + 全量状态。
@@ -155,14 +191,32 @@ type autoDisableBook struct {
 	states    map[string]*autoDisableState
 }
 
-// stateOfLocked 取（或惰性建）某 uid 的状态。调用方必须持 p.mu。
-func (b *autoDisableBook) stateOfLocked(uid string) *autoDisableState {
-	if s, ok := b.states[uid]; ok {
+// stateForLocked 取（或惰性建）某账号的状态。调用方必须持 p.mu。
+//
+// 实例身份不一致（uid 被删掉后重新导入）时**丢弃旧状态重建**（见 owner 字段）。
+func (b *autoDisableBook) stateForLocked(uid string, e *entry) *autoDisableState {
+	if s, ok := b.existingLocked(uid, e); ok {
 		return s
 	}
-	s := &autoDisableState{}
+	s := &autoDisableState{owner: e}
 	b.states[uid] = s
 	return s
+}
+
+// existingLocked 取**属于当前实例**的既有状态；没有则返回 false（并顺手清掉陈旧条目）。
+//
+// 只读语义：调用方不打算建状态时用它（成功路径不应该给健康号留空记录）。
+func (b *autoDisableBook) existingLocked(uid string, e *entry) (*autoDisableState, bool) {
+	s, ok := b.states[uid]
+	if !ok {
+		return nil, false
+	}
+	if s.owner != e {
+		// 属于上一个 entry 的残留：直接删除再报"没有"。
+		delete(b.states, uid)
+		return nil, false
+	}
+	return s, true
 }
 
 // autoDisableBooks *Pool → *autoDisableBook 的包级注册表。
@@ -276,7 +330,7 @@ func (p *Pool) RecordAutoDisableFailure(uid, reason string) (disabled bool) {
 	}
 
 	b := p.autoBookLocked()
-	st := b.stateOfLocked(uid)
+	st := b.stateForLocked(uid, e)
 	now := time.Now()
 
 	// ① 状态自愈：表说"已禁用"，但账号实际没被禁 —— 说明那次禁用已被人工撤销
@@ -308,7 +362,7 @@ func (p *Pool) RecordAutoDisableFailure(uid, reason string) (disabled bool) {
 	//   streak 继续累加（它反映真实情况），但禁用时刻与 reason 保留**首次**的 ——
 	//   "什么时候坏掉的"比"最后一次失败说了什么"对排查更有价值。
 	//   返回 false：没有发生新的状态跃迁。
-	if st.disabled && st.owned && e.disabled {
+	if ownsDisableLocked(st, e) {
 		p.dirty.Store(true)
 		return false
 	}
@@ -368,7 +422,7 @@ func (p *Pool) RecordAutoDisableSuccess(uid string) (recovered bool) {
 	}
 
 	b := p.autoBookLocked()
-	st, exists := b.states[uid]
+	st, exists := b.existingLocked(uid, e)
 	if !exists {
 		// 从没失败过：无事可做（连表都不建，避免给每个成功过的号留一条空记录）。
 		return false
@@ -382,7 +436,7 @@ func (p *Pool) RecordAutoDisableSuccess(uid string) (recovered bool) {
 	}
 
 	// 清掉本机制的判定状态。无论能否解禁，判定都结束（下次失败从 1 开始）。
-	wasOwned := st.owned
+	wasOwned := ownsDisableLocked(st, e)
 	st.disabled = false
 	st.owned = false
 	st.disabledAt = time.Time{}
@@ -459,12 +513,12 @@ func (p *Pool) AutoDisableStatus(uid string) (AutoDisableStatus, bool) {
 		Disabled:  e.disabled,
 		Reason:    "",
 	}
-	if st, ok := b.states[uid]; ok {
+	if st, ok := b.existingLocked(uid, e); ok {
 		out.Streak = st.streak
 		out.LastFail = st.lastFail
 		// AutoOwned 要求"我们还认这次禁用"（disabled）且账号确实还禁着：
 		// 人工 Enable 之后表示已被撤销，不该继续声称是我们禁的。
-		out.AutoOwned = st.disabled && st.owned && e.disabled
+		out.AutoOwned = ownsDisableLocked(st, e)
 		out.DisabledAt = st.disabledAt
 		if out.AutoOwned {
 			// 只有由本机制置位的禁用才把我们的 reason 暴露为"禁用原因"，
@@ -483,8 +537,12 @@ func (p *Pool) AutoDisableStatus(uid string) (AutoDisableStatus, bool) {
 func (p *Pool) AutoDisableStreak(uid string) int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok || e == nil {
+		return 0
+	}
 	if b, ok := autoDisableBooks.Load(p); ok {
-		if st, ok := b.(*autoDisableBook).states[uid]; ok {
+		if st, ok := b.(*autoDisableBook).existingLocked(uid, e); ok {
 			return st.streak
 		}
 	}
@@ -535,11 +593,8 @@ func (p *Pool) AutoDisabledCandidates() []AutoDisabledAccount {
 	b := p.autoBookLocked()
 	out := make([]AutoDisabledAccount, 0, len(b.states))
 	for uid, st := range b.states {
-		if !st.disabled || !st.owned {
-			continue
-		}
 		e, ok := p.byUID[uid]
-		if !ok || e == nil || !e.disabled {
+		if !ok || e == nil || st.owner != e || !ownsDisableLocked(st, e) {
 			// 表里有、池里没有或已被人放宽：不是探测对象（它们会在下一次
 			// 记录时自愈，不必在这里顺手改状态 —— 本方法只读）。
 			continue
@@ -591,8 +646,8 @@ func (p *Pool) ResetAutoDisable(uid string) bool {
 	}
 
 	b := p.autoBookLocked()
-	st, exists := b.states[uid]
-	clearedDisable := exists && st.disabled && st.owned && e.disabled
+	st, exists := b.existingLocked(uid, e)
+	clearedDisable := exists && ownsDisableLocked(st, e)
 
 	if exists {
 		st.reset()
