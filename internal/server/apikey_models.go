@@ -25,6 +25,7 @@
 package server
 
 import (
+	"sort"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -223,11 +224,29 @@ func (h *Handler) modelAllowedForRequest(w http.ResponseWriter, r *http.Request,
 	// 真名是全局可用的（不属于任何 key 的虚拟命名空间），别名 key 放行它
 	// 等于给了绕过脱敏的路：客户端拿到真名就能直接调，响应 model 回显真名。
 	//
-	// 判据看**客户端发来的形态**：白名单里有别名映射的 key，只接受别名形式。
-	if h.keyUsesAliases(r) && !isAliasForm(m) {
-		writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
-			fmt.Sprintf("这把 API key 只接受 GET /v1/models 里列出的别名；%q 看起来是上游原名", m))
-		return false
+	// ⚠ 2026-10-24 修：判据从「形如 001/xxx」改成「**在不在这张别名表里**」。
+	//
+	// 原来用 isAliasForm（要求数字前缀）当放行判据，但那条规则只对内置的
+	// 001/002/… 成立。用户自定义别名可以是任意字符串（my-flash、kimi-x），
+	// 于是只要配了自己的别名，**所有**请求都被这条判据拒掉 —— 包括合法的。
+	//
+	// isAliasForm 自己的注释早就写明「只用于出错时的提示文案，不用于放行」，
+	// 是这里的用法写错了。现在改成查表：表里有 = 是别名，放行去换真名；
+	// 表里没有 = 客户端发的是上游真名（或胡写的），拒。
+	if h.keyUsesAliases(r) {
+		mm := h.modelMapForRequest(r)
+		_, isAlias := mm[m]
+		if !isAlias {
+			// 再试裸名：客户端可能发 `my-flash`、而表里存的是带前缀的键。
+			if _, bare, _ := gateway.SplitModel(m); bare != "" && bare != m {
+				_, isAlias = mm[bare]
+			}
+		}
+		if !isAlias {
+			writeOpenAIError(w, http.StatusForbidden, "model_not_allowed",
+				fmt.Sprintf("这把 API key 只接受 GET /v1/models 里列出的名字；%q 不在其中", m))
+			return false
+		}
 	}
 	// 白名单里存的是内部名，客户端发的是别名 —— 先换回内部名再比。
 	if resolved := h.resolveModelAlias(r, m); resolved != m {
@@ -461,16 +480,65 @@ func (h *Handler) bumpKeyUsage(r *http.Request, toks int, ok bool) {
 //   - 没命中普通 key（走管理钥匙）—— 管理钥匙永远不做别名替换
 //   - key 存在但没有配映射
 //   - APIKeys 存储未启用
+// modelMapForRequest 取本次请求生效的「对外名 → 内部名」映射。
+//
+// # 2026-10-24：来源从 API Key 改为**分组**
+//
+// 用户要求：「对外模型不要在这里设置 在分组里面设置」。
+//
+// 别名的语义是"这个模型对外叫什么"，而**哪些模型**也是分组定义的 ——
+// 两件事本来就绑在一起。放在 key 上有两个问题：
+//
+//	① 同一个模型被两把 key 引用时要配两遍，改一个漏一个
+//	② key 上配了别名但模型不在任何分组里 ⇒ 那个别名永远不生效
+//	   （判定链先过分组，根本不认识这个名字），而界面上看不出矛盾
+//
+// 所以现在把该 key 所有分组的 ModelMap **合并**起来。多分组时若同一个
+// 对外名指向不同内部名，按分组 ID 字典序先到先得（见 mergeGroupMaps 注释）。
 func (h *Handler) modelMapForRequest(r *http.Request) map[string]string {
-	if h.cfg.APIKeys == nil {
+	if h.cfg.APIKeys == nil || h.cfg.Groups == nil {
+		return nil
+	}
+	if r == nil {
 		return nil
 	}
 	kid, _ := r.Context().Value(apikeyCtxKey).(string)
 	if kid == "" {
 		return nil
 	}
-	m, _ := h.cfg.APIKeys.ModelMapOf(kid)
-	return m
+	groups, _ := h.cfg.APIKeys.GroupsOf(kid)
+	if len(groups) == 0 {
+		return nil
+	}
+	return h.mergeGroupMaps(groups)
+}
+
+// mergeGroupMaps 把多个分组的别名表合并成一张。
+//
+// 冲突处理：**按分组 ID 字典序先到先得**。
+//
+// 为什么是字典序而不是"谁的模型多用谁的"：后者会让结果随分组内容变化而跳变
+// （改一个分组的模型，另一处的别名突然换了指向）。字典序是一个与内容无关的
+// 稳定判据 —— 同样的两组分组，永远得到同样的结果。
+func (h *Handler) mergeGroupMaps(groupIDs []string) map[string]string {
+	ids := append([]string(nil), groupIDs...)
+	sort.Strings(ids)
+	var out map[string]string
+	for _, gid := range ids {
+		g, ok := h.cfg.Groups.Get(gid)
+		if !ok || g == nil || len(g.ModelMap) == 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, 8)
+		}
+		for pub, internal := range g.ModelMap {
+			if _, exists := out[pub]; !exists {
+				out[pub] = internal
+			}
+		}
+	}
+	return out
 }
 
 // resolveModelAlias 把客户端发来的**对外名**换成**内部模型名**。

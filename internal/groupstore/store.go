@@ -63,6 +63,21 @@ type Group struct {
 	Name        string   `json:"name"`        // 展示名，全局唯一
 	Description string   `json:"description"` // 备注
 	Models      []string `json:"models"`      // 该分组包含的内部模型名
+	// ModelMap 模型对外名映射：对外名 → 内部名（2026-10-24 从 API Key 移到这里）。
+	//
+	// # 为什么别名该跟着分组走，而不是跟着 key 走
+	//
+	// 用户原话：「对外模型不要在这里设置 在分组里面设置」。
+	//
+	// 别名的语义是"这个模型对外叫什么"。而**哪些模型**也是分组定义的 ——
+	// 两件事本来就绑在一起。放在 key 上会有两个问题：
+	//   ① 同一个模型被两把 key 引用时要重复配两遍，改一个漏一个
+	//   ② key 上配了别名、但它不在任何分组里 ⇒ 那个别名永远不可能生效
+	//      （判定链先过分组，根本不认识这个名字），而界面上看不出矛盾
+	//
+	// ⚠ 方向与 apikey 的旧字段一致：对外名 → 内部名。
+	//    请求进来每一跳都要查它，方向必须是"进来的名字 → 内部的名字"。
+	ModelMap map[string]string `json:"model_map,omitempty"`
 	CreatedAt   string   `json:"created_at"`  // RFC3339
 }
 
@@ -179,7 +194,7 @@ func (s *Store) GetByName(name string) (*Group, bool) {
 //
 // 失败时**不留半改状态**：落盘失败会把刚放进内存的那条撤掉，否则内存里
 // 有一个「盘上没有」的分组，重启后凭空消失。
-func (s *Store) Create(name, desc string, models []string) (*Group, error) {
+func (s *Store) Create(name, desc string, models []string, modelMap ...map[string]string) (*Group, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, ErrNameEmpty
@@ -188,6 +203,7 @@ func (s *Store) Create(name, desc string, models []string) (*Group, error) {
 		Name:        name,
 		Description: strings.TrimSpace(desc),
 		Models:      normalizeModels(models),
+		ModelMap:    normalizeModelMap(firstMap(modelMap...)),
 		CreatedAt:   s.now().UTC().Format(time.RFC3339),
 	}
 	s.mu.Lock()
@@ -216,7 +232,7 @@ func (s *Store) Create(name, desc string, models []string) (*Group, error) {
 // 「nil = 不改、空切片 = 清空」是 Go/JSON 里唯一能同时表达这两件事的组合。
 // 若把空切片也当成「不改」，用户就永远没法把分组清空；反过来把 nil 当清空，
 // 一次只想改名字的表单提交就会顺手抹掉模型。
-func (s *Store) Update(id string, name, desc *string, models []string) (*Group, error) {
+func (s *Store) Update(id string, name, desc *string, models []string, modelMap ...map[string]string) (*Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, ok := s.groups[id]
@@ -240,6 +256,13 @@ func (s *Store) Update(id string, name, desc *string, models []string) (*Group, 
 	}
 	if models != nil {
 		next.Models = normalizeModels(models)
+	}
+	// ModelMap 三态（与 models 一致）：
+	//   不传 / 传 nil  → 不改
+	//   传空 map       → 清空映射
+	//   传非空 map     → 整体替换
+	if len(modelMap) > 0 && modelMap[0] != nil {
+		next.ModelMap = normalizeModelMap(modelMap[0])
 	}
 	s.groups[id] = next
 	if err := s.saveLocked(); err != nil {
@@ -414,6 +437,42 @@ func writeFileAtomic(path string, data []byte) error {
 //
 // 返回值**总是非 nil**（空输入得到空切片）：这样 JSON 里写出来是 []，
 // 而不是 null —— 前端不必为 null 单独写一条分支。
+// firstMap 取变参里的第一个 map（省略 ⇒ nil）。
+//
+// 为什么用变参而不是直接加位置参数：Create 已有多个调用点（含迁移与测试），
+// 加第 4 个位置参数会让它们全部要改一遍，而它们**都不关心**别名。
+func firstMap(m ...map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	return m[0]
+}
+
+// normalizeModelMap 归一化「对外名 → 内部名」映射。
+//
+// 去掉空键/空值/首尾空格。返回 nil 表示"没有映射"，而不是空 map ——
+// 调用方用 len()==0 判断，两者等价但 nil 更省。
+func normalizeModelMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		// k == v 是恒等映射，丢掉：留着会让界面上出现一行 "X → X"，
+		// 看起来像配错了，而它其实什么也没做。
+		if k == "" || v == "" || k == v {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func normalizeModels(models []string) []string {
 	out := make([]string, 0, len(models))
 	seen := make(map[string]bool, len(models))
@@ -461,6 +520,15 @@ func cloneGroup(g *Group) *Group {
 	cp.Models = append([]string(nil), g.Models...)
 	if cp.Models == nil {
 		cp.Models = []string{}
+	}
+	// ModelMap 必须**深拷贝**：它是 map，浅拷贝会让副本与原对象共享同一个底层数组。
+	// 后果：Update 在副本上改映射，原对象（正在被请求读取的那份）跟着变 ——
+	// 一次失败的保存能污染线上的别名表，而测试里看不出来（都通过了，只是内容错了）。
+	if g.ModelMap != nil {
+		cp.ModelMap = make(map[string]string, len(g.ModelMap))
+		for k, v := range g.ModelMap {
+			cp.ModelMap[k] = v
+		}
 	}
 	return &cp
 }

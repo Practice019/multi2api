@@ -1661,6 +1661,7 @@ func main() {
 		APIKey:            cfg.APIKey,
 		APIKeys:           apiKeysStore,  // 多 API key 管理（普通 key 走它）
 		Channels:          channelsStore, // 中转站口径的对外目录来源（nil = 走上游目录，既有行为）
+		Groups:            groupsStore,   // 分组：key → 分组 → 模型/别名（PLAN-groups）
 		// 组合根职责：核心只认 gateway.Provider，由这里把具体上游装进去。
 		ChannelProvider: func(id, baseURL string) gateway.Provider {
 			return openaicompat.NewOpenAICompat(id, baseURL)
