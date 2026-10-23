@@ -1286,6 +1286,7 @@ let groups = [];        // 当前列表（编辑时从这儿取原值，不额�
 let editing = null;     // 正在编辑的分组 id（null = 新增）
 let catalog = [];       // 候选模型（内部名，来自 /v1/models）
 let catalogOK = false;  // 目录是否真的取到了（false ⇒ 不能把"没拉到"当成"没有模型"）
+let catalogIncomplete = [];  // 本次没查成的来源（上游 id），只用于如实提示
 let picked = new Set(); // 已勾选的模型
 
 function $(id) { return document.getElementById(id); }
@@ -1304,7 +1305,22 @@ async function api(path, opt) {
   try { j = JSON.parse(text); } catch (e) { /* 非 JSON：下面按 text 报错 */ }
   if (!r.ok) {
     // 后端的 error 文案是给人看的（重名/不存在都会点名），原样透出。
-    throw new Error((j && (j.error || j.message)) || text.slice(0, 200) || ('HTTP ' + r.status));
+    // ⚠ j.error 可能是**对象**（OpenAI 错误格式是 {"error":{"code":..,"message":..}}）。
+    // 直接塞进 new Error() 会渲染成 "[object Object]" —— 用户什么都看不到，
+    // 而真实原因（比如 401 invalid_api_key）就在那个对象里。
+    let msg = '';
+    if (j) {
+      if (typeof j.error === 'string') {
+        msg = j.error;
+      } else if (j.error && typeof j.error === 'object') {
+        msg = j.error.message || j.error.code || '';
+        if (j.error.code && j.error.message) { msg = j.error.code + ': ' + j.error.message; }
+      }
+      if (!msg && typeof j.message === 'string') { msg = j.message; }
+    }
+    if (!msg) { msg = text.slice(0, 200); }
+    if (!msg) { msg = 'HTTP ' + r.status; }
+    throw new Error(msg);
   }
   return j === null ? {} : j;
 }
@@ -1387,10 +1403,22 @@ async function ensureCatalog() {
   if (catalogOK) { return; }
   $('gChoices').innerHTML = '<span class="muted" style="font-size:12px">正在读取模型目录…</span>';
   try {
-    const r = await api('/v1/models');
-    catalog = ((r && r.data) || []).map(function (m) { return String(m.id || ''); })
-      .filter(Boolean).sort();
+    // ⚠ 用 /admin/groups/catalog，**不是** /v1/models。
+    //
+    // /v1/models 是调用方端点，要 API key；管理台拿的是 admin token，
+    // 于是它稳定 401（这个 bug 实测过，界面显示"读取模型目录失败"）。
+    //
+    // /admin/groups/catalog 与「一致性检查」共用同一份快照 —— 两处若用不同来源，
+    // 会出现「编辑器里选得到 / 检查说它陈旧」这种自相矛盾。
+    const r = await api('/admin/groups/catalog');
+    catalog = ((r && r.models) || []).slice().sort();
+    catalogIncomplete = (r && r.incomplete) || [];
     catalogOK = true;
+    if (!catalog.length) {
+      // 目录一份都没拿到：明说"未就绪"，不能显示成"这个网关没有模型"。
+      $('gChoices').innerHTML = '<span class="err" style="font-size:12px">'
+        + '模型目录尚未就绪（可能刚启动，上游还没拉完）。可以先用下面的输入框直接粘模型名。</span>';
+    }
   } catch (e) {
     catalog = [];
     catalogOK = false;
@@ -1426,9 +1454,14 @@ function renderChoices() {
     return '<label title="' + esc(m) + '"><input type="checkbox" data-m="' + esc(m) + '"' + on
       + ' onchange="pickOne(this)"><span>' + esc(m) + '</span></label>';
   }).join('');
-  hint.textContent = q
+  // ⚠ 目录不完整时要**明说**，不能让用户以为候选池是全集：
+  // 他会以为自己想选的模型「不存在」，而其实只是那个上游这次没查到。
+  const incom = (typeof catalogIncomplete !== 'undefined' && catalogIncomplete && catalogIncomplete.length)
+    ? '；未检查的来源：' + catalogIncomplete.join('、')
+    : '';
+  hint.textContent = (q
     ? ('目录 ' + catalog.length + ' 个模型，筛出 ' + shown.length + ' 个')
-    : ('目录 ' + catalog.length + ' 个模型');
+    : ('目录 ' + catalog.length + ' 个模型')) + incom;
 }
 
 // pickOne 只改 picked 集合，**不重渲染整个列表** ——

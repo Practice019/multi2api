@@ -16,6 +16,7 @@
 package server
 
 import (
+	"path/filepath"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -133,7 +134,7 @@ func TestGroupsUIPicksModelsFromCatalog(t *testing.T) {
 		{"候选容器", `id="gChoices"`},
 		{"已选清单置顶", `id="gPickedChips"`},
 		{"搜索框", `id="f-search"`},
-		{"拉目录", "/v1/models"},
+		{"拉目录（管理端，不是 /v1/models）", "/admin/groups/catalog"},
 		{"全选当前", "function pickAll("},
 		{"取消已选（事件委托）", "gPickedChips').addEventListener("},
 	} {
@@ -222,4 +223,52 @@ func sliceFuncBody(t *testing.T, src, sig string) string {
 	}
 	t.Fatalf("%s 的大括号没配平 —— 文件被改坏了", sig)
 	return ""
+}
+
+// 候选目录必须走**管理端**端点，不能用 /v1/models。
+//
+// # 这是实测踩到的 bug（用户截图：弹窗里显示「读取模型目录失败：[object Object]」）
+//
+// /v1/models 是调用方端点，要 API key；管理台页面拿的是 admin token ⇒ 稳定 401。
+// 而错误体是 {"error":{"code":..,"message":..}}（对象），前端把它塞进
+// new Error() 就渲染成 "[object Object]" —— 真实原因（invalid_api_key）被吞掉。
+//
+// 两条判据都必须成立，缺一个都会退回那个形态：
+//  ① 不调用 /v1/models
+//  ② 错误对象要取 message/code，不能整体当字符串
+func TestGroupsUICatalogUsesAdminEndpoint(t *testing.T) {
+	src := sliceFuncBody(t, readGroupsUI(t), "async function ensureCatalog()")
+	if strings.Contains(src, "'/v1/models'") || strings.Contains(src, "\"/v1/models\"") {
+		t.Error("★ 候选目录不能用 /v1/models —— 那是调用方端点，管理台会 401")
+	}
+	if !strings.Contains(src, "/admin/groups/catalog") {
+		t.Error("★ 候选目录必须走 /admin/groups/catalog（与一致性检查同一份快照）")
+	}
+}
+
+// 错误文案不能渲染成 [object Object]。
+//
+// 后端错误体是 {"error":{"code":..,"message":..}}；前端若写
+// new Error(j.error) 就把一个对象转成了字符串 —— 用户只看到
+// "[object Object]"，真实原因完全丢失。
+func TestGroupsUIExtractsErrorMessageFromObject(t *testing.T) {
+	src := sliceFuncBody(t, readGroupsUI(t), "async function api(")
+	if !strings.Contains(src, "typeof j.error === 'object'") {
+		t.Error("★ api() 必须处理 j.error 是对象的情形，否则显示 [object Object]")
+	}
+	if !strings.Contains(src, "j.error.message") {
+		t.Error("★ 必须从错误对象里取 message")
+	}
+}
+
+// 同样的错误提取逻辑，渠道页也要有（同一个坑不留两处）。
+func TestChannelsUIExtractsErrorMessageFromObject(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("webui-channels.html"))
+	if err != nil {
+		t.Fatalf("读 webui-channels.html: %v", err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "typeof j.error === 'object'") {
+		t.Error("★ webui-channels.html 的 api() 也有 [object Object] 的问题，必须一并修")
+	}
 }
