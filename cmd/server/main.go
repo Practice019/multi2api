@@ -1633,6 +1633,15 @@ func main() {
 		DefaultProvider: func() string { id, _ := registry.First(); return id }(),
 		Admin:           adminH, // 已在上方构造（回调需要引用它，见那段注释）
 	})
+	// 把「模型输出上限」的查询注入 Anthropic 转换层。
+	//
+	// Anthropic 协议的 max_tokens 必填，而 OpenAI 请求可以不传。填补时
+	// 要用**模型真能输出的上限**（目录里就有），不能用「够用就好」的小值 ——
+	// 写死 4096 会让长输出被静默截断，而推理模型的 reasoning 也算进
+	// completion_tokens，表现为「想了很久、正文为空」。
+	//
+	// ⚠ 必须在 h 构造完成后调用（它要问这个 Handler 的模型缓存）。
+	h.RegisterAnthroOutputLimit()
 
 	// 轮换管理钥匙：h 构造完成后把「更新内存」接上（闭包经 onRotate 间接引用）。
 	onRotate = func(newKey string) {

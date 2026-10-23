@@ -312,27 +312,64 @@ func TestRequestToolChoiceMapping(t *testing.T) {
 	}
 }
 
-// max_tokens 必填：缺省时补默认值，且优先 max_completion_tokens。
+// max_tokens 必填：缺省时补**模型输出上限**（完全开放），且优先 max_completion_tokens。
+//
+// # 为什么断言「上限」而不是某个固定小值
+//
+// 这里原来断言 4096。而 4096 是个「够用就好」的猜值，后果是长输出被静默截断 ——
+// 对推理模型尤其致命：reasoning 也算 completion_tokens，于是
+// 「想了 4000 token、正文一个字没轮到」，客户端看到 200 + content 为空。
+//
+// 现在的口径是「模型真能输出多少就给多少」（用户要求完全开放）。
 func TestRequestMaxTokensIsAlwaysPresent(t *testing.T) {
-	// 完全没给 → 补默认值（Anthropic 必填，缺了上游 400）。
+	// ① 完全没给、且不知道模型上限 → 用 fallbackMaxTokens 兜底（Anthropic 必填）。
 	out := mustReq(t,
 		`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
-	if n, ok := toFloat(out["max_tokens"]); !ok || n != defaultMaxTokens {
-		t.Errorf("缺 max_tokens 时应补 %d，实际 %#v", defaultMaxTokens, out["max_tokens"])
+	if n, ok := toFloat(out["max_tokens"]); !ok || n != fallbackMaxTokens {
+		t.Errorf("缺 max_tokens 且无模型上限时应补兜底值 %d，实际 %#v", fallbackMaxTokens, out["max_tokens"])
 	}
 
-	// 给了 max_tokens → 用它。
+	// ② 知道模型上限 → 补**上限**（这是用户要的「完全开放」）。
+	withLimit, err := OpenAIToAnthropicWithLimit(
+		[]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), 384000)
+	if err != nil {
+		t.Fatalf("转换失败: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(withLimit, &obj); err != nil {
+		t.Fatalf("结果不是合法 JSON: %v", err)
+	}
+	if n, _ := toFloat(obj["max_tokens"]); n != 384000 {
+		t.Errorf("★ 知道模型上限时应补满 384000（完全开放），实际 %v", obj["max_tokens"])
+	}
+
+	// ③ 给了 max_tokens → 用它，且**不被模型上限改动**。
 	out = mustReq(t,
 		`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":123}`)
 	if n, _ := toFloat(out["max_tokens"]); n != 123 {
 		t.Errorf("应使用请求里的 max_tokens=123，实际 %v", out["max_tokens"])
 	}
 
-	// 两个都给 → max_completion_tokens 优先（OpenAI 的新字段语义更准）。
+	// ④ 两个都给 → max_completion_tokens 优先（OpenAI 的新字段语义更准）。
 	out = mustReq(t,
 		`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":123,"max_completion_tokens":456}`)
 	if n, _ := toFloat(out["max_tokens"]); n != 456 {
 		t.Errorf("max_completion_tokens 应优先，实际 %v", out["max_tokens"])
+	}
+
+	// ⑤ 客户端给的值**超过**模型上限时也不裁剪 ——
+	//    那是上游该报的错；猜一个上限把合理请求改小，比让上游拒绝更糟。
+	overLimit, err := OpenAIToAnthropicWithLimit(
+		[]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":999999}`), 32000)
+	if err != nil {
+		t.Fatalf("转换失败: %v", err)
+	}
+	var obj2 map[string]any
+	if err := json.Unmarshal(overLimit, &obj2); err != nil {
+		t.Fatalf("结果不是合法 JSON: %v", err)
+	}
+	if n, _ := toFloat(obj2["max_tokens"]); n != 999999 {
+		t.Errorf("客户端显式值不应被裁剪（交给上游判断），实际 %v", obj2["max_tokens"])
 	}
 }
 

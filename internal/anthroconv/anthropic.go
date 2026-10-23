@@ -44,16 +44,29 @@ import (
 	"time"
 )
 
-// defaultMaxTokens Anthropic 的 max_tokens 是**必填**，而 OpenAI 请求
-// 里可以不带。缺省时用这个值。
+// defaultMaxTokens 是 Anthropic 协议要求 max_tokens **必填**、而 OpenAI 请求
+// 可以不带时，用来兜底的值。
 //
-// ⚠ 为什么是 4096 而不是"用满模型的 128000"：max_tokens 是**上限声明**，
-// 不是"要生成这么多"。声明一个很大的值有两个代价：
-//   - 上游可能按它预留配额（订阅额度的计量会变难看）
-//   - 有些上游版本会直接拒绝超过某个阈值的请求
+// # 为什么不再写死 4096（用户实测的截断）
 //
-// 4096 足够绝大多数对话，且远低于 GLM-5.3 的 128000 输出上限。
-const defaultMaxTokens = 4096
+// 原来这里恒为 4096，后果是：客户端不传 max_tokens 时，长输出被静默截断在
+// 4096 个 completion token —— 而推理模型的 reasoning 也算在里面，于是
+// 「想了 4000 个 token、正文一个字没轮到」，客户端看到 200 + content 为空。
+//
+// # 现在的口径：**取模型上限，完全开放**
+//
+// 用户的诉求是「我不希望去限制模型的输出上限」。所以不传时给模型的
+// max_output_tokens 上限（由调用方按模型查表传入），而不是任何「够用就好」
+// 的小值。传了就用客户端的值，一律不改。
+//
+// 对齐 new-api 的做法：它把默认值做成**可配置映射**（setting/model_setting
+// 的 DefaultMaxTokens，按模型名查、带 "default" 兜底），而不是写死一个数。
+// 我们进一步简化为「查模型上限」，因为我们的模型目录本来就带 max_output_tokens
+//（/v1/models 里就有），没有理由再维护第二份数字。
+//
+// ⚠ 兜底：查不到模型上限时用 fallbackMaxTokens，而不是 4096。
+//   8192 与 new-api 的 "default" 一致 —— 但**只在查不到上限时**才用它。
+const fallbackMaxTokens = 8192
 
 // ---- 请求转换：OpenAI → Anthropic ----
 
@@ -69,6 +82,14 @@ const defaultMaxTokens = 4096
 //	max_tokens     Anthropic **必填**
 //	stop           Anthropic 叫 `stop_sequences`，且必须是**数组**
 func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
+	return OpenAIToAnthropicWithLimit(openAIBody, 0)
+}
+
+// OpenAIToAnthropicWithLimit 同 OpenAIToAnthropic，但知道模型的输出上限。
+//
+// modelMaxOutput <= 0 表示未知 —— 此时用 fallbackMaxTokens 兜底。
+// 调用方（各上游的 Provider）从模型目录里取 max_output_tokens 传进来。
+func OpenAIToAnthropicWithLimit(openAIBody []byte, modelMaxOutput int) ([]byte, error) {
 	var src map[string]any
 	if err := json.Unmarshal(openAIBody, &src); err != nil {
 		return nil, fmt.Errorf("zcode: 请求体不是合法 JSON: %w", err)
@@ -86,9 +107,22 @@ func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
 	// 优先 max_completion_tokens（OpenAI 的新字段，语义更准），
 	// 回落 max_tokens（老字段，仍然广泛使用）。
 	if v, ok := firstNumber(src, "max_completion_tokens", "max_tokens"); ok {
+		// 客户端显式给了 —— **一律不改**。
+		//
+		// 哪怕它超过模型上限也不在这里裁：那是上游该报的错，
+		// 而猜一个上限把合理请求改小，比让上游拒绝更糟。
 		out["max_tokens"] = v
 	} else {
-		out["max_tokens"] = defaultMaxTokens
+		// 客户端没给：给模型上限，完全开放。
+		//
+		// ⚠ 这里**不能**用 4096 这类"够用就好"的小值：长输出会被静默截断，
+		//   而推理模型的 reasoning 也算进 completion_tokens，
+		//   结果就是「想了很久、正文为空」。用户实测踩过这个坑。
+		limit := modelMaxOutput
+		if limit <= 0 {
+			limit = fallbackMaxTokens
+		}
+		out["max_tokens"] = limit
 	}
 
 	// 采样参数原样透传（两家同名同义）。
