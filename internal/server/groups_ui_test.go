@@ -272,3 +272,71 @@ func TestChannelsUIExtractsErrorMessageFromObject(t *testing.T) {
 		t.Error("★ webui-channels.html 的 api() 也有 [object Object] 的问题，必须一并修")
 	}
 }
+
+// ---- 上游筛选（共享组件 model-picker.js）----
+//
+// # 为什么需要它（用户实测的痛点）
+//
+// 候选池是**全站目录**：699 个模型、15 个上游，其中 cline 一家占 497 个。
+// 不按上游筛，其余 14 个上游全被压在滚动区深处 —— 选模型等于大海捞针。
+//
+// # 为什么要守「共享」这件事
+//
+// 这段逻辑（切上游 / 归组 / 过滤）如果两个页面各写一遍，必然漂移成
+// 「分组页能筛、渠道页不能」这种无从解释的差异。所以它被抽成
+// internal/server/model-picker.js，由 tools/model_picker_sync.js 注入。
+// 注入产物**必须与源文件一致**，否则就是"改了源码但页面没更新"。
+func TestGroupsUIModelPickerIsInjected(t *testing.T) {
+	ui := readGroupsUI(t)
+	for _, n := range []struct{ what, needle string }{
+		{"上游解析", "function mpProviderOf("},
+		{"按上游归组", "function mpGroupByProvider("},
+		{"两级过滤", "function mpFilter("},
+		{"筛选条渲染", "function mpRenderProviderBar("},
+		{"筛选条容器", `id="gProvBar"`},
+		{"页面包装", "function renderProvBar("},
+	} {
+		if !strings.Contains(ui, n.needle) {
+			t.Errorf("★ 分组页缺少%s（%q）—— 上游筛选不可用，699 个模型要靠滚动翻", n.what, n.needle)
+		}
+	}
+}
+
+// 注入产物必须与源文件逐字节一致（改了源码忘了跑同步脚本 ⇒ 这里红）。
+func TestGroupsUIModelPickerIsInSync(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("model-picker.js"))
+	if err != nil {
+		t.Fatalf("读 model-picker.js: %v", err)
+	}
+	want := strings.TrimSpace(strings.ReplaceAll(string(src), "\r\n", "\n"))
+	ui := readGroupsUI(t)
+	start := strings.Index(ui, "// ==== WB2API:MODEL-PICKER:START")
+	end := strings.Index(ui, "// ==== WB2API:MODEL-PICKER:END ====")
+	if start < 0 || end < start {
+		t.Fatalf("页面里找不到注入标记（start=%d end=%d）", start, end)
+	}
+	// 去掉 START 那行本身，取中间正文。
+	body := ui[start:end]
+	if i := strings.Index(body, "\n"); i >= 0 {
+		body = body[i+1:]
+	}
+	got := strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n"))
+	if got != want {
+		t.Error("★ 页面里的 model-picker 与源文件不一致 —— 跑 node tools/model_picker_sync.js 同步")
+		t.Logf("源文件 %d 字节，页面内 %d 字节", len(want), len(got))
+	}
+}
+
+// 「全选当前」必须与列表用**同一套筛选**。
+//
+// 破了会怎样：用户筛了 cline 看到 497 个，点「全选当前」却把 699 个全选上 ——
+// 他会静默选进两百个自己没看见的模型。
+func TestGroupsUIPickAllRespectsProviderFilter(t *testing.T) {
+	src := sliceFuncBody(t, readGroupsUI(t), "function pickAll(")
+	if !strings.Contains(src, "provActive") {
+		t.Error("★ pickAll 没考虑上游筛选 —— 「全选当前」会选进用户看不见的模型")
+	}
+	if !strings.Contains(src, "mpFilter(") {
+		t.Error("★ pickAll 必须用与列表相同的共享过滤（否则两处范围会漂移）")
+	}
+}
