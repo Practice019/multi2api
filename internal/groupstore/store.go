@@ -29,6 +29,7 @@
 package groupstore
 
 import (
+	"log"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -141,6 +142,21 @@ func New(path string) (*Store, error) {
 		// 先按旧格式解一遍；成功就转换并继续，失败才报"文件损坏"。
 		if converted, ok := tryLegacySnapshot(b); ok {
 			snap = converted
+			// ★ 留一份**原始字节**副本，再让新格式写回去。
+			//
+			// 为什么必须在这里做（不能靠用户手工备份）：
+			//
+			//   model_map 从 map[string]string 改成 map[string][]string 后，
+			//   新代码写盘是数组格式。而**旧 exe 的旧类型读不了数组**
+			//   （实测：json: cannot unmarshal array into ... of type string），
+			//   New() 直接返回 error ⇒ 回滚后网关起不来。
+			//
+			//   所以升级那一刻的原始文件是回滚的唯一依靠。自动留一份，
+			//   比"希望用户记得备份"可靠得多。
+			//
+			// ⚠ 只留一次（文件已存在就跳过）：每次启动都覆盖的话，
+			//   用户跑了一周之后那份备份早被同化成新格式了，回滚仍然失败。
+			backupLegacyFile(s.path, b)
 		} else {
 			return nil, fmt.Errorf("解析分组存储 %s（文件已损坏，未做任何重建）: %w", path, err)
 		}
@@ -507,6 +523,23 @@ func normalizeModelMap(in map[string][]string) map[string][]string {
 		return nil
 	}
 	return out
+}
+
+// backupLegacyFile 把升级前的原始文件另存一份（幂等：已存在就不覆盖）。
+//
+// 文件名固定为 <path>.pre-onetomany.bak，方便回滚时一眼找到。
+func backupLegacyFile(path string, raw []byte) {
+	dst := path + ".pre-onetomany.bak"
+	if _, err := os.Stat(dst); err == nil {
+		return // 已经有了，别覆盖（见调用处注释：覆盖会让备份失效）
+	}
+	if err := os.WriteFile(dst, raw, 0o644); err != nil {
+		// 备份失败不阻断启动：这是个"锦上添花"的保护，
+		// 为它让网关起不来是本末倒置。日志留痕即可。
+		log.Printf("[groups] 警告：升级备份写入失败 %s: %v", dst, err)
+		return
+	}
+	log.Printf("[groups] 已保留升级前的旧格式备份：%s（回滚旧版本时用它替换 groups.json）", dst)
 }
 
 // tryLegacySnapshot 尝试按**旧格式**（model_map 值 = 字符串）解析整份文件。
