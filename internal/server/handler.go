@@ -3345,8 +3345,23 @@ func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
 	// ⚠ 与 NoteError 的关系：并存，不替代。NoteError 喂的是**熔断线**
 	//   （3 次短暂歇息），这里喂的是**禁用线**（5 次长期摘除）。两条线判据
 	//   不同、动作不同，所以不能合并 —— 合并会让熔断的"短暂"语义被禁用覆盖。
+	// ⚠ 自动禁用**不收 SoftRate（429 限流）**（2026-10-24 改）。
+	//
+	// 用户实测报障：workbuddy 上游 6 个号里 3 个被禁用，reason 全是
+	// 「429 rate limit」，而它们的 credits 分别是 1309 / 280 / 1591 —— **有额度**。
+	//
+	// 原判据把 SoftRate 计进了禁用线：连续 5 次 429 就永久摘除一个号。
+	// 但 429 的语义是「你打太快了，等一会儿」，不是「这个号坏了」：
+	//
+	//	· 它下面（3371 行）**已经**做了软冷却（CoolSoft + 指数退避），
+	//	  这才是对 429 的正确动作 —— 冷却到窗口结束就能再用。
+	//	· 再叠加禁用等于**双重惩罚**：冷却本该是"暂时"，禁用是"长期摘除"。
+	//	  一个限流就把产能永久打掉，而界面上只显示"已禁用"，看不出是限流引起的。
+	//
+	// ⇒ 保留 HardCredit / SessionDead / NotFound / Server 四条：
+	//   那些是"这个号确实不能用了"（额度耗尽 / 会话失效 / 模型不存在 / 上游持续 5xx）。
 	switch kind {
-	case gateway.ErrKindHardCredit, gateway.ErrKindSoftRate,
+	case gateway.ErrKindHardCredit,
 		gateway.ErrKindSessionDead, gateway.ErrKindNotFound, gateway.ErrKindServer:
 		if h.cfg.Pool.RecordAutoDisableFailure(uid, "upstream "+kind.String()) {
 			// 刚跨过阈值：记一条明确日志。运维看到"某号自己变灰"时，
