@@ -212,3 +212,7 @@ auths.zip
 auths-*.zip
 auths.tmp
 *.zip
+
+# 分组升级备份（回滚旧 exe 用，本地保留即可）
+*.pre-onetomany.bak
+*.legacy-for-rollback.bak
