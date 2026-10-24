@@ -38,7 +38,8 @@ import (
 // dashChartBody 取 webui.html 里被注入的那段共享层正文（START/END 之间）。
 //
 // ⚠ 取"页面里那份"而不是只读 dash-chart.js：用户真正运行的是页面里这份。
-//   源文件与页面的一致性由 TestDashChartIsInSync 单独守。
+//
+//	源文件与页面的一致性由 TestDashChartIsInSync 单独守。
 func dashChartBody(t *testing.T) string {
 	t.Helper()
 	ui := readWebUI(t)
@@ -181,7 +182,8 @@ func TestDashChartGridLinesAreEvenlyDivided(t *testing.T) {
 //	趋势        → 迷你折线（hbSpark 里 dcLine 画的那条）
 //
 // ⚠ 判据取"渲染出来的结构"，不取文案：文案改一个字不该让守卫变红，
-//   但**图形消失**必须变红。
+//
+//	但**图形消失**必须变红。
 func TestHealthBarShowsBarsAndSparkline(t *testing.T) {
 	ui := readWebUI(t)
 
