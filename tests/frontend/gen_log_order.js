@@ -30,6 +30,14 @@ const tokpsSrc = grabBlock('function tokPerSec(');
 // 把它一起抽进来，产物才是"渲染依赖完整"的 —— 否则空列表时会报
 // logPlaceholder is not defined，把一条真断言变成一次噪声崩溃。
 const logPhSrc = grabBlock('function logPlaceholder(');
+// renderLogs 现在还会：① 统计当前页的状态码分布、② 按 logStatus 过滤、
+// ③ 调 renderLogStatusBar / hideLogStatusBar 画卡片条。
+// 这几个依赖一起抽进来，产物才是"渲染依赖完整"的 —— 否则一进 renderLogs
+// 就报 logStatusOf is not defined，把一条真断言变成一次噪声崩溃
+// （与上面 logPlaceholder 那条同一个理由）。
+const statusOfSrc = grabBlock('function logStatusOf(');
+const statusBarSrc = grabBlock('function renderLogStatusBar(');
+const statusHideSrc = grabBlock('function hideLogStatusBar(');
 const renderSrc = grabBlock('function renderLogs(');
 
 const header = `
@@ -37,9 +45,15 @@ const fs = require('fs');
 const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let logEntries = [];
+// logStatus：状态码筛选（null = 全部）。真实产品里它是 webui.html 的模块级 let，
+// 这里按同一语义复刻一份 —— 抽出的函数读的就是这个绑定。
+let logStatus = null;
+// logPage.total：卡片条尾的「共 M 条」读它。本套件只关心排序契约，给 0 即可。
+const logPage = { total: 0 };
 const els = {};
-function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', querySelector:()=>null }; }
+function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', style:{}, querySelector:()=>null }; }
 els.logrows = mkEl('logrows');
+els.logStatusBar = mkEl('logStatusBar');
 const $ = id => els[id] || (els[id] = mkEl(id));
 `;
 
@@ -191,6 +205,7 @@ console.log(fail === 0 ? '\\n=== 全部通过 ===' : '\\n=== ' + fail + ' 项失
 process.exit(fail ? 1 : 0);
 `;
 
-const out = header + '\n' + normalizeSrc + '\n' + mergeSrc + '\n' + tokpsSrc + '\n' + logPhSrc + '\n' + renderSrc + '\n' + tail;
+const out = header + '\n' + normalizeSrc + '\n' + mergeSrc + '\n' + tokpsSrc + '\n' + logPhSrc + '\n'
+  + statusOfSrc + '\n' + statusBarSrc + '\n' + statusHideSrc + '\n' + renderSrc + '\n' + tail;
 fs.writeFileSync('log_order_gen.js', out);
 console.log('生成: log_order_gen.js (' + out.length + ' 字节)');

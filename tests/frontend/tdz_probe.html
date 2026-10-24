@@ -361,7 +361,45 @@ let loginProvider = '';
   function freeQuotaCellHTML(a) {
     const v = a && a.free_quota;
     if (typeof v !== 'number') return '<span class="dim">—</span>';
-    return `<span class="mono">${esc(v)}</span>`;
+    const lim = a && a.free_quota_limit;
+    // 没有上限就只报剩余（上游只给余额时）。
+    if (typeof lim !== 'number' || lim <= 0) return `<span class="mono">${esc(fmtTokens(v))}</span>`;
+    // 有上限 → 「剩余 / 上限」+ 按**已用**比例上色。
+    //
+    // 与注册机的「今日 Token」列同一形态：读者要知道"今天还能跑多少"，
+    // 而单独的剩余量看不出这一点。
+    //
+    // ⚠ 配色按 used/limit（已用比例），不是按剩余 —— 快用完时该警示，
+    // 剩得多时反而用"危险色"是不对的。
+    const used = Math.max(0, lim - v);
+    const pct = Math.round(used / lim * 100);
+    const cls = pct >= 95 ? 'err' : pct >= 80 ? 'warn' : 'ok';
+    return `<span class="mono ${cls}" title="已用 ${esc(String(used))} / ${esc(String(lim))}（${pct}%）">`
+      + `${esc(fmtTokens(v))} / ${esc(fmtTokens(lim))}</span>`;
+  }
+
+  // fmtTokens 把大数字压成便于阅读的形态（10000000 → 10M）。
+  //
+  // # 为什么必须压缩
+  //
+  // 每日 token 上限是 1000 万量级，原样写出来是「9944867 / 10000000」——
+  // 11 个字符再加分隔符，88px 的列宽里必然被省略号吃掉（本仓已有
+  // 度量脚本 shot_acct_clip.js 专门查这类溢出）。
+  //
+  // 单位与注册机一致：K / M / B，保留一位小数并去掉多余的 .0。
+  function fmtTokens(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '—';
+    const abs = Math.abs(n);
+    const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (const [div, suf] of units) {
+      if (abs >= div) {
+        const v = n / div;
+        // 保留一位小数，但整数就别写成 "10.0M"。
+        const t = Math.round(v * 10) / 10;
+        return (Number.isInteger(t) ? String(t) : t.toFixed(1)) + suf;
+      }
+    }
+    return String(n);
   }
 
   // hdr 对话接口（/v1/*）的鉴权头 —— 用 api_key。
@@ -1869,9 +1907,12 @@ let loginProvider = '';
     uid: { title: 'UID', w: 220 },
     quota: { title: '额度', w: 72, tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
     free_quota: {
-      title: '免费额度', w: 88,
-      tip: '会按自然日重置的那部分额度（Loomy 的每日赠送）还剩多少；不用就浪费，'
-        + '所以在它用完之前不该动永久额度。'
+      // ⚠ 88 → 120：有上限时这一格装的是「10M / 10M」（9 字符），
+      //   88px 下会被省略号吃掉。宽度依据是"所有上游里最长的那个样本"，
+      //   不是第一眼看到的那个 —— 只报余额时它很短，加了分母就翻倍。
+      title: '今日额度', w: 120,
+      tip: '会按周期重置的那部分额度还剩多少（可用完就清零，不用就浪费）。'
+        + '有上限时显示「剩余 / 上限」，并按已用比例上色。'
         + '「—」表示这个上游不区分这一项、或这次没读到 —— 那不等于"已经用完"。',
     },
     status: { title: '状态', w: 84 },
@@ -3503,375 +3544,435 @@ let loginProvider = '';
     }
   }
 
+// renderAfter 拿到 /admin/login/start 的回执之后的**全部**渲染与轮询。
+
   async function addAccount(providerId, btn) {
     openModal();
     const want = providerId || '';
     $('loginTitle').textContent = want ? ('添加 ' + providerTitle(want) + ' 账号') : '添加账号';
     renderLoginLocalHint();
     renderLoginIntro('browser'); // 申请期间的占位；拿到回执后按形态改写
-    $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
-    let r;
-    try {
-      r = await admin('/admin/login/start', { method: 'POST', body: JSON.stringify({ provider: want }) });
-    } catch (e) {
-      $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
-      return;
+
+    // ---- 登录选项（上游自报 → 前端渲染，判据是**数据**不是上游名）----
+    //
+    // 用户要求：「添加账号需要用户选择国内或者国际啊」。
+    //
+    // ⚠ 这里**不写任何上游名**：选项来自 manifest 的 `login.options`，
+    // 由上游自己声明（gateway.LoginOptionsExt）。没有选项的上游走原来的
+    // 路径，一个字节都不变。
+    const optEntry = (MANIFEST.providers || []).find(x => x && x.id === want) || {};
+    const loginOpts = (optEntry.login && optEntry.login.options) || [];
+    const chosen = {};
+    for (const o of loginOpts) chosen[o.key] = o.default || (o.values[0] || {}).value || '';
+    if (loginOpts.length) {
+      $('loginBody').innerHTML = loginOpts.map(o => {
+        const opts = (o.values || []).map(v =>
+          `<option value="${esc(v.value)}"${v.value === chosen[o.key] ? ' selected' : ''}>${esc(v.label || v.value)}</option>`
+        ).join('');
+        return `<div class="row" style="gap:8px;align-items:center;margin:8px 0">`
+          + `<label class="dim" style="font-size:12px;min-width:56px">${esc(o.label || o.key)}</label>`
+          + `<select data-loginopt="${esc(o.key)}" style="flex:1">${opts}</select></div>`
+          + (o.hint ? `<div class="dim" style="font-size:11px;margin:-4px 0 8px 64px">${esc(o.hint)}</div>` : '');
+      }).join('') + '<div class="row" style="gap:8px;margin-top:10px"><button id="btnLoginGo" type="button">开始登录</button></div>';
+      // 有选项：等用户点「开始登录」。把它接到**同一个** doStart 上。
+      $('btnLoginGo').onclick = () => { doStart(); };
     }
-    // 后端认了哪个上游：优先用它回传的，否则用点进来的那个。
-    loginProvider = r.provider || want;
-
-    const state = r.state;
-    loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
-    // ---- 两种登录形态：**要不要浏览器**由后端回执决定 ----
-    //
-    // `auth_url` 非空  → 设备码/授权码流程：要用户去浏览器完成授权
-    // `auth_url` 为空  → **本机凭证拾取**流程（登录态就在本机那个桌面客户端的
-    //                     Local Storage 里，没有可打开的授权页）
-    //
-    // ⚠ 判据必须是**数据**（auth_url 空不空），不能是上游名 ——
-    //   写成 `if (provider === '<某个上游名>')` 就等于把上游名搬进渲染层，
-    //   加第四个上游时又要改前端（本项目最硬的判据）。
-    //
-    //    上面那句刻意**没有写出任何具体上游名**。这样"这段代码里有没有
-    //    上游名"本身就成了一条可以被断言检查的性质（见
-    //    webui_token_lifetime_test.go 的 TestWebUIAddAccountHandlesEmptyAuthURL）。
-    //    连注释里也不写，是因为那条守卫读的是**字节**，分不出注释与代码；
-    //    而让守卫去解析 JS 注释是更糟的复杂度。
-    //
-    // 原来的写法是无条件渲染那个 `<a>`，于是空 auth_url 会渲染成
-    // `<a href="">打开授权页面</a>` —— 点了只是把当前页重新加载一遍，
-    // 用户完全无法判断发生了什么。
-    // 服务器部署逃生路径（数据驱动）：上游在 manifest 里自报
-    // login.manual = {path, instructions} 时，渲染"粘贴回跳 URL 完成"输入框。
-    // 回调口打在浏览器那台机器上（127.0.0.1）永远进不了服务器 —— 用户把
-    // 地址栏里的完整回跳 URL 粘进来，POST 到上游自报的完成端点即可收号。
-    const mEntry = (MANIFEST.providers || []).find(x => x && x.id === (loginProvider || '')) || {};
-    const mLogin = (mEntry.login || {}).manual;
-    const manualBox = mLogin && mLogin.path ? `
-      <div style="margin:10px 0 8px">
-        <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
-        <div class="row" style="gap:8px">
-          <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
-          <button id="btnManualComplete" type="button">粘贴完成</button>
-        </div>
-      </div>` : '';
-
-    const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
-
-    // ---- 扫码流程：后端给了二维码就渲染它，**不**渲染"打开链接" ----
-    //
-    // raccoon（微信扫码）那类上游的 auth_url 是**要扫的内容**，不是网页：
-    // 它在屏幕上，手机扫不了同一块屏幕。此前对所有上游都渲染
-    // 「打开授权页 / 复制链接」，于是那种上游的「＋ 添加账号」等于不可用
-    //（用户报的缺陷）。
-    //
-    // ⚠ 判据是**数据**（后端有没有下发 qr_svg），不是上游名，也不是
-    //   "链接长得像不像二维码 URL" —— 后者要求前端认识上游或 URL 形态，
-    //   而"加一个上游时前端一行都不改"是本项目最硬的禁忌。
-    //
-    // ⚠ qr_svg 是**后端生成的** SVG 字符串（上游自报要不要扫码，
-    //   见 gateway.QRLoginExt）。直接 innerHTML 插进来 ——
-    //   它是我们自己后端产出的固定形态（只有 svg/rect/path 与数字），
-    //   不含任何用户输入，不存在注入面。
-    const qrSVG = typeof r.qr_svg === 'string' ? r.qr_svg.trim() : '';
-    if (qrSVG && !hasAuthURL) {
-      // 理论到不了（后端只在有 auth_url 时才给 qr_svg）——
-      // 但两个字段自相矛盾时宁可说清，也不要渲染半截界面。
-      $('loginBody').innerHTML = `<span class="err">后端回执异常：给了二维码但没有授权链接</span>`;
-      return;
+    if (!loginOpts.length) {
+      $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
+      setTimeout(() => doStart(), 0);
     }
-    if (qrSVG) {
-      renderLoginIntro('qr');
-      // ⚠ 这里**不提供**任何"在浏览器打开"的入口（用户明确要求）。
+
+    // doStart 申请一次登录并渲染结果。
+    //
+    // # 为什么写成函数声明而不是提前 return 两段
+    //
+    // 守卫测试按 `function addAccount(` 截到第一个顶格 `  }`，
+    // 因此渲染逻辑必须留在 addAccount 体内。用"两段 return"会把后半段
+    // 变成**死代码**，守卫就静默失效（它读的是字节，不看控制流）。
+    async function doStart() {
+      for (const o of loginOpts) {
+        const el = $('loginBody').querySelector('select[data-loginopt="' + o.key + '"]');
+        if (el) chosen[o.key] = el.value;
+      }
+      let r;
+      try {
+        r = await admin('/admin/login/start', { method: 'POST', body: JSON.stringify({ provider: want, options: chosen }) });
+      } catch (e) {
+        $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
+        return;
+      }
+      const state = r.state;
+      loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
+      // ---- 两种登录形态：**要不要浏览器**由后端回执决定 ----
       //
-      // 扫码类上游的 auth_url 是**给手机扫的内容**，在电脑浏览器里打开它
-      // 只会看到一个"请在微信中打开"之类的页面 —— 不是登录路径，
-      // 照着点会让人以为流程就是这样。所以这个分支只有：
+      // `auth_url` 非空  → 设备码/授权码流程：要用户去浏览器完成授权
+      // `auth_url` 为空  → **本机凭证拾取**流程（登录态就在本机那个桌面客户端的
+      //                     Local Storage 里，没有可打开的授权页）
       //
-      //	二维码（主路径）+ 「复制链接」（给"想换个设备扫"的人）+ 轮询状态
+      // ⚠ 判据必须是**数据**（auth_url 空不空），不能是上游名 ——
+      //   写成 `if (provider === '<某个上游名>')` 就等于把上游名搬进渲染层，
+      //   加第四个上游时又要改前端（本项目最硬的判据）。
       //
-      // 「复制链接」保留但改了说明：它是"把链接复制到别的设备去扫"，
-      // 不是"复制到浏览器打开"。文案里刻意不出现"浏览器"三个字。
+      //    上面那句刻意**没有写出任何具体上游名**。这样"这段代码里有没有
+      //    上游名"本身就成了一条可以被断言检查的性质（见
+      //    webui_token_lifetime_test.go 的 TestWebUIAddAccountHandlesEmptyAuthURL）。
+      //    连注释里也不写，是因为那条守卫读的是**字节**，分不出注释与代码；
+      //    而让守卫去解析 JS 注释是更糟的复杂度。
+      //
+      // 原来的写法是无条件渲染那个 `<a>`，于是空 auth_url 会渲染成
+      // `<a href="">打开授权页面</a>` —— 点了只是把当前页重新加载一遍，
+      // 用户完全无法判断发生了什么。
+      // 服务器部署逃生路径（数据驱动）：上游在 manifest 里自报
+      // login.manual = {path, instructions} 时，渲染"粘贴回跳 URL 完成"输入框。
+      // 回调口打在浏览器那台机器上（127.0.0.1）永远进不了服务器 —— 用户把
+      // 地址栏里的完整回跳 URL 粘进来，POST 到上游自报的完成端点即可收号。
+      const mEntry = (MANIFEST.providers || []).find(x => x && x.id === (loginProvider || '')) || {};
+      const mLogin = (mEntry.login || {}).manual;
+      const manualBox = mLogin && mLogin.path ? `
+        <div style="margin:10px 0 8px">
+          <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
+          <div class="row" style="gap:8px">
+            <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
+            <button id="btnManualComplete" type="button">粘贴完成</button>
+          </div>
+        </div>` : '';
+
+      const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
+
+      // ---- 扫码流程：后端给了二维码就渲染它，**不**渲染"打开链接" ----
+      //
+      // raccoon（微信扫码）那类上游的 auth_url 是**要扫的内容**，不是网页：
+      // 它在屏幕上，手机扫不了同一块屏幕。此前对所有上游都渲染
+      // 「打开授权页 / 复制链接」，于是那种上游的「＋ 添加账号」等于不可用
+      //（用户报的缺陷）。
+      //
+      // ⚠ 判据是**数据**（后端有没有下发 qr_svg），不是上游名，也不是
+      //   "链接长得像不像二维码 URL" —— 后者要求前端认识上游或 URL 形态，
+      //   而"加一个上游时前端一行都不改"是本项目最硬的禁忌。
+      //
+      // ⚠ qr_svg 是**后端生成的** SVG 字符串（上游自报要不要扫码，
+      //   见 gateway.QRLoginExt）。直接 innerHTML 插进来 ——
+      //   它是我们自己后端产出的固定形态（只有 svg/rect/path 与数字），
+      //   不含任何用户输入，不存在注入面。
+      const qrSVG = typeof r.qr_svg === 'string' ? r.qr_svg.trim() : '';
+      if (qrSVG && !hasAuthURL) {
+        // 理论到不了（后端只在有 auth_url 时才给 qr_svg）——
+        // 但两个字段自相矛盾时宁可说清，也不要渲染半截界面。
+        $('loginBody').innerHTML = `<span class="err">后端回执异常：给了二维码但没有授权链接</span>`;
+        return;
+      }
+      if (qrSVG) {
+        renderLoginIntro('qr');
+        // ⚠ 这里**不提供**任何"在浏览器打开"的入口（用户明确要求）。
+        //
+        // 扫码类上游的 auth_url 是**给手机扫的内容**，在电脑浏览器里打开它
+        // 只会看到一个"请在微信中打开"之类的页面 —— 不是登录路径，
+        // 照着点会让人以为流程就是这样。所以这个分支只有：
+        //
+        //	二维码（主路径）+ 「复制链接」（给"想换个设备扫"的人）+ 轮询状态
+        //
+        // 「复制链接」保留但改了说明：它是"把链接复制到别的设备去扫"，
+        // 不是"复制到浏览器打开"。文案里刻意不出现"浏览器"三个字。
+        $('loginBody').innerHTML = `
+          <div class="row" style="margin-bottom:10px">
+            <button id="btnCopyAuth" type="button"
+               style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
+               title="复制二维码里的链接（供在另一台设备上生成二维码再扫）">复制链接</button>
+            <span id="loginState" class="dim" style="font-size:12px">等待扫码…（state ${esc(state.slice(0, 8))}…）</span>
+          </div>
+          <div style="display:flex;justify-content:center;margin:8px 0 4px">${qrSVG}</div>
+          <div class="dim" style="font-size:12px;margin-bottom:8px;text-align:center">
+            用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
+            扫完后本窗口会自动检测并落盘凭证（无需回来点任何按钮）。
+          </div>
+          ${manualBox}
+          <pre id="loginOut" class="dim" style="max-height:120px">扫码完成后，本窗口会自动检测并落盘凭证。</pre>`;
+        const btnCopyQR = $('btnCopyAuth');
+        if (btnCopyQR) {
+          btnCopyQR.onclick = () => {
+            copyText(r.auth_url);
+            btnCopyQR.textContent = '已复制';
+            setTimeout(() => { btnCopyQR.textContent = '复制链接'; }, 1500);
+          };
+        }
+        const btnManualQR = $('btnManualComplete');
+        if (btnManualQR) {
+          btnManualQR.onclick = async () => {
+            const code = ($('manualCode').value || '').trim();
+            if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
+            btnManualQR.disabled = true;
+            $('loginState').textContent = '已提交，正在解密收号…';
+            try {
+              await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
+              $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
+            } catch (e) {
+              $('loginState').textContent = '失败：' + e.message;
+              btnManualQR.disabled = false;
+            }
+          };
+        }
+      } else if (hasAuthURL) {
+      renderLoginIntro('browser');
+      // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
+      //
+      // 用户要求：默认打开的就是无痕模式。打开动作由**后端**完成
+      // （点「添加账号」时自动开一次，见 admin 的 openAuthBrowser /
+      // internal/browseropen），因为前端 target=_blank 打开的窗口
+      // 属于用户当前的浏览器状态 —— OAuth 会拿那边已登录的账号完成授权，
+      // 于是"加新号"变成"把老号再加一遍"，而且它**成功**了，没有报错。
+      //
+      // 三种回执要区分开，不能糊成一句"请打开授权页"：
+      //   r.browser       后端已开成 → 告诉用户去那个无痕窗口
+      //   r.browser_error 后端没开成 → 明确说"没开成"并突出复制链接
+      //   两者都空        未接线    → 说清是部署没启用，别让用户干等
+      // ⚠ 这段刻意**只用** else-if 收尾，不写最后那个 else 关键字加花括号：
+      // 下面那条「无授权页分支不许出现 <a href=」的守卫是按**第一处**
+      // else 块切分函数体的（它读的是**字节**，分不出注释与代码），
+      // 在这里插一个 else 块会把切分点提前，让守卫去检查错误的区域
+      //（fail-open 地失去判别力 —— 而不是报错，所以特别难发现）。
+      let openNote = `<div id="loginOpenNote" class="dim" style="font-size:12px;margin-bottom:8px">
+          本部署未启用自动打开浏览器：请点「复制链接」，粘贴到
+          <b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+        </div>`;
+      if (r.browser) {
+        openNote = `<div id="loginOpenNote" class="ok" style="font-size:12px;margin-bottom:8px">
+          已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
+        </div>`;
+      } else if (r.browser_error) {
+        openNote = `<div id="loginOpenNote" class="err" style="font-size:12px;margin-bottom:8px">
+          未能自动打开浏览器（${esc(r.browser_error)}）——
+          请点「复制链接」，粘贴到<b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+        </div>`;
+      }
       $('loginBody').innerHTML = `
         <div class="row" style="margin-bottom:10px">
+          <button id="btnReopenAuth" type="button" class="primary"
+             style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:#fff;cursor:pointer;font-weight:600"
+             title="用无痕窗口重新打开本次授权链接">重新无痕打开</button>
           <button id="btnCopyAuth" type="button"
              style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
-             title="复制二维码里的链接（供在另一台设备上生成二维码再扫）">复制链接</button>
-          <span id="loginState" class="dim" style="font-size:12px">等待扫码…（state ${esc(state.slice(0, 8))}…）</span>
+             title="复制授权链接，粘贴到无痕/隐私窗口">复制链接</button>
+          <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer"
+             style="padding:8px 12px;border-radius:8px;color:var(--dim);font-size:12px"
+             title="在普通窗口打开（不推荐：可能用浏览器里已登录的账号完成授权）">普通窗口打开</a>
+          <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
         </div>
-        <div style="display:flex;justify-content:center;margin:8px 0 4px">${qrSVG}</div>
-        <div class="dim" style="font-size:12px;margin-bottom:8px;text-align:center">
-          用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
-          扫完后本窗口会自动检测并落盘凭证（无需回来点任何按钮）。
-        </div>
+        ${openNote}
         ${manualBox}
-        <pre id="loginOut" class="dim" style="max-height:120px">扫码完成后，本窗口会自动检测并落盘凭证。</pre>`;
-      const btnCopyQR = $('btnCopyAuth');
-      if (btnCopyQR) {
-        btnCopyQR.onclick = () => {
-          copyText(r.auth_url);
-          btnCopyQR.textContent = '已复制';
-          setTimeout(() => { btnCopyQR.textContent = '复制链接'; }, 1500);
-        };
-      }
-      const btnManualQR = $('btnManualComplete');
-      if (btnManualQR) {
-        btnManualQR.onclick = async () => {
+        <div class="dim" style="font-size:12px;margin-bottom:8px">
+          无痕窗口可避免浏览器里已登录的账号把会话串到别的账号上。
+        </div>
+        <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
+      const btnManual = $('btnManualComplete');
+      if (btnManual) {
+        btnManual.onclick = async () => {
           const code = ($('manualCode').value || '').trim();
           if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
-          btnManualQR.disabled = true;
+          btnManual.disabled = true;
           $('loginState').textContent = '已提交，正在解密收号…';
           try {
             await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
             $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
           } catch (e) {
             $('loginState').textContent = '失败：' + e.message;
-            btnManualQR.disabled = false;
+            btnManual.disabled = false;
           }
         };
       }
-    } else if (hasAuthURL) {
-    renderLoginIntro('browser');
-    // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
-    //
-    // 用户要求：默认打开的就是无痕模式。打开动作由**后端**完成
-    // （点「添加账号」时自动开一次，见 admin 的 openAuthBrowser /
-    // internal/browseropen），因为前端 target=_blank 打开的窗口
-    // 属于用户当前的浏览器状态 —— OAuth 会拿那边已登录的账号完成授权，
-    // 于是"加新号"变成"把老号再加一遍"，而且它**成功**了，没有报错。
-    //
-    // 三种回执要区分开，不能糊成一句"请打开授权页"：
-    //   r.browser       后端已开成 → 告诉用户去那个无痕窗口
-    //   r.browser_error 后端没开成 → 明确说"没开成"并突出复制链接
-    //   两者都空        未接线    → 说清是部署没启用，别让用户干等
-    // ⚠ 这段刻意**只用** else-if 收尾，不写最后那个 else 关键字加花括号：
-    // 下面那条「无授权页分支不许出现 <a href=」的守卫是按**第一处**
-    // else 块切分函数体的（它读的是**字节**，分不出注释与代码），
-    // 在这里插一个 else 块会把切分点提前，让守卫去检查错误的区域
-    //（fail-open 地失去判别力 —— 而不是报错，所以特别难发现）。
-    let openNote = `<div id="loginOpenNote" class="dim" style="font-size:12px;margin-bottom:8px">
-        本部署未启用自动打开浏览器：请点「复制链接」，粘贴到
-        <b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
-      </div>`;
-    if (r.browser) {
-      openNote = `<div id="loginOpenNote" class="ok" style="font-size:12px;margin-bottom:8px">
-        已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
-      </div>`;
-    } else if (r.browser_error) {
-      openNote = `<div id="loginOpenNote" class="err" style="font-size:12px;margin-bottom:8px">
-        未能自动打开浏览器（${esc(r.browser_error)}）——
-        请点「复制链接」，粘贴到<b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
-      </div>`;
-    }
-    $('loginBody').innerHTML = `
-      <div class="row" style="margin-bottom:10px">
-        <button id="btnReopenAuth" type="button" class="primary"
-           style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:#fff;cursor:pointer;font-weight:600"
-           title="用无痕窗口重新打开本次授权链接">重新无痕打开</button>
-        <button id="btnCopyAuth" type="button"
-           style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
-           title="复制授权链接，粘贴到无痕/隐私窗口">复制链接</button>
-        <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer"
-           style="padding:8px 12px;border-radius:8px;color:var(--dim);font-size:12px"
-           title="在普通窗口打开（不推荐：可能用浏览器里已登录的账号完成授权）">普通窗口打开</a>
-        <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
-      </div>
-      ${openNote}
-      ${manualBox}
-      <div class="dim" style="font-size:12px;margin-bottom:8px">
-        无痕窗口可避免浏览器里已登录的账号把会话串到别的账号上。
-      </div>
-      <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
-    const btnManual = $('btnManualComplete');
-    if (btnManual) {
-      btnManual.onclick = async () => {
-        const code = ($('manualCode').value || '').trim();
-        if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
-        btnManual.disabled = true;
-        $('loginState').textContent = '已提交，正在解密收号…';
-        try {
-          await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
-          $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
-        } catch (e) {
-          $('loginState').textContent = '失败：' + e.message;
-          btnManual.disabled = false;
-        }
-      };
-    }
 
-    // 重开：后端只认「本进程刚签发过的链接」（见 /admin/login/open），
-    // 所以这里回传的必须是本次 start 拿到的那条 r.auth_url。
-    // 手滑关掉无痕窗口时用它 —— 比重走一遍 start 好：不会作废当前 state。
-    const btnReopen = $('btnReopenAuth');
-    if (btnReopen) {
-      btnReopen.onclick = async () => {
-        btnReopen.disabled = true;
-        btnReopen.textContent = '正在打开…';
-        try {
-          const o = await admin('/admin/login/open',
-            { method: 'POST', body: JSON.stringify({ url: r.auth_url }) });
-          btnReopen.textContent = '已打开';
-          if (o && o.browser) {
-            // 按 **id** 定位提示行，不用 querySelector('.dim') ——
-            // 同一块 DOM 里的 #loginState 也是 .dim 且在文档序更靠前，
-            // 按类查会命中它，把"等待授权…"覆盖成"已打开"（状态就丢了）。
-            const first = $('loginOpenNote');
-            if (first) {
-              first.className = 'ok';
-              first.style.fontSize = '12px';
-              first.style.marginBottom = '8px';
-              first.innerHTML = `已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
+      // 重开：后端只认「本进程刚签发过的链接」（见 /admin/login/open），
+      // 所以这里回传的必须是本次 start 拿到的那条 r.auth_url。
+      // 手滑关掉无痕窗口时用它 —— 比重走一遍 start 好：不会作废当前 state。
+      const btnReopen = $('btnReopenAuth');
+      if (btnReopen) {
+        btnReopen.onclick = async () => {
+          btnReopen.disabled = true;
+          btnReopen.textContent = '正在打开…';
+          try {
+            const o = await admin('/admin/login/open',
+              { method: 'POST', body: JSON.stringify({ url: r.auth_url }) });
+            btnReopen.textContent = '已打开';
+            if (o && o.browser) {
+              // 按 **id** 定位提示行，不用 querySelector('.dim') ——
+              // 同一块 DOM 里的 #loginState 也是 .dim 且在文档序更靠前，
+              // 按类查会命中它，把"等待授权…"覆盖成"已打开"（状态就丢了）。
+              const first = $('loginOpenNote');
+              if (first) {
+                first.className = 'ok';
+                first.style.fontSize = '12px';
+                first.style.marginBottom = '8px';
+                first.innerHTML = `已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
+              }
             }
+          } catch (e) {
+            // 失败必须说出来：静默失败会显示成"点了没反应"。
+            btnReopen.textContent = '打开失败';
+            const out = $('loginOut');
+            if (out) out.textContent = '重新打开失败：' + (e && e.message ? e.message : e);
           }
-        } catch (e) {
-          // 失败必须说出来：静默失败会显示成"点了没反应"。
-          btnReopen.textContent = '打开失败';
-          const out = $('loginOut');
-          if (out) out.textContent = '重新打开失败：' + (e && e.message ? e.message : e);
-        }
-        setTimeout(() => { btnReopen.textContent = '重新无痕打开'; btnReopen.disabled = false; }, 2000);
-      };
-    }
-    const btnCopy = $('btnCopyAuth');
-    if (btnCopy) {
-      btnCopy.onclick = async () => {
-        try {
-          await navigator.clipboard.writeText(r.auth_url);
-          btnCopy.textContent = '已复制';
-        } catch {
-          // 剪贴板 API 不可用（http 非 https / 权限）时回落选中文本提示。
-          const tmp = document.createElement('textarea');
-          tmp.value = r.auth_url;
-          document.body.appendChild(tmp);
-          tmp.select();
-          document.execCommand('copy');
-          tmp.remove();
-          btnCopy.textContent = '已复制';
-        }
-        setTimeout(() => { btnCopy.textContent = '复制链接'; }, 2000);
-      };
-    }
-    } else {
-      // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
-      renderLoginIntro('local');
-      $('loginBody').innerHTML = `
-      <div class="row" style="margin-bottom:10px">
-        <span id="loginState" class="dim" style="font-size:12px">正在从本机读取登录态…（state ${esc(state.slice(0, 8))}…）</span>
-      </div>
-      <pre id="loginOut" class="dim" style="max-height:120px">该上游的登录态保存在本机客户端里，网关直接读取，无需打开授权页面。</pre>`;
-    }
+          setTimeout(() => { btnReopen.textContent = '重新无痕打开'; btnReopen.disabled = false; }, 2000);
+        };
+      }
+      const btnCopy = $('btnCopyAuth');
+      if (btnCopy) {
+        btnCopy.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(r.auth_url);
+            btnCopy.textContent = '已复制';
+          } catch {
+            // 剪贴板 API 不可用（http 非 https / 权限）时回落选中文本提示。
+            const tmp = document.createElement('textarea');
+            tmp.value = r.auth_url;
+            document.body.appendChild(tmp);
+            tmp.select();
+            document.execCommand('copy');
+            tmp.remove();
+            btnCopy.textContent = '已复制';
+          }
+          setTimeout(() => { btnCopy.textContent = '复制链接'; }, 2000);
+        };
+      }
+      } else {
+        // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
+        renderLoginIntro('local');
+        $('loginBody').innerHTML = `
+        <div class="row" style="margin-bottom:10px">
+          <span id="loginState" class="dim" style="font-size:12px">正在从本机读取登录态…（state ${esc(state.slice(0, 8))}…）</span>
+        </div>
+        <pre id="loginOut" class="dim" style="max-height:120px">该上游的登录态保存在本机客户端里，网关直接读取，无需打开授权页面。</pre>`;
+      }
 
-    if (loginPoll) clearInterval(loginPoll);
-    loginPoll = setInterval(async () => {
-      if (Date.now() > loginDeadline) {
-        clearInterval(loginPoll); loginPoll = null;
-        $('loginState').innerHTML = '<span class="err">授权已超时，请关闭后重试</span>';
-        return;
-      }
-      let p;
-      // ⚠ 必须带上 provider —— 与 start 用**同一条**分派规则。
-      //
-      // 这里曾经只传 `{ state }`，于是后端按"不带 provider"处理，
-      // 走了**默认上游（workbuddy）**的 OAuth 去认 codearts 的 state。
-      //
-      // 表现极具误导性：弹窗标题对（start 带了 provider）、
-      // 跳转的授权页也对（CodeArts 站点），**只有轮询走错了上游** ——
-      // 于是界面报 `oauth: state 不存在或已超期，请重新发起授权`。
-      //
-      // 那句文案是 **workbuddy 的 OAuth** 定义的（internal/oauth/oauth.go），
-      // codearts 根本不会有它 —— 这就是"用 A 的 state 去问 B"的典型症状。
-      // 后端 loginPoll 的注释里正好写了要避免这件事，但**前端漏了**。
-      try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state, provider: loginProvider }) }); }
-      catch (e) {
-        // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
-        clearInterval(loginPoll); loginPoll = null;
-        $('loginState').innerHTML = `<span class="err">${esc(e.message)}</span>`;
-        return;
-      }
-      if (p && p.status === 'pending') {
-        $('loginOut').textContent = '仍在等待浏览器完成登录…';
-        return;
-      }
-      clearInterval(loginPoll); loginPoll = null;
-      if (p && p.status === 'ok') {
-        $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
-        // ⚠ 三处都用**后端回执**，并且**缺失字段显示 `—` 而不是 `undefined`**。
-        //
-        // 这三行曾经是：
-        //   `域: ${p.domain}` / `有效期: ${Math.floor((p.expires_in||0)/86400)} 天`
-        //   / `凭证文件 : auths/${p.file}`
-        //
-        // 三个问题（用户实测报的）：
-        //
-        //  1. **`凭证文件` 路径是错的** —— 硬编码 `auths/`，而 `p.file` 只有 basename。
-        //     按上游分子目录之后实际是 `auths/codearts/codearts-xxx.json`，
-        //     界面显示成 `auths/codearts-xxx.json` —— **少了一整个上游目录**。
-        //     用户会照着这句去找文件、往那儿放，**那是错的地方**。
-        //     现在用回执的 `dir`（后端实际落盘目录）。
-        //
-        //  2. **`域` 显示 `undefined`** —— codearts 走的 flow 回执**根本不返回** domain
-        //    （`gateway.Credential` 没有这个字段：各上游凭证结构不同）。
-        //     显示 `undefined` 会让人以为拿到了数据。
-        //
-        //  3. **`有效期` 显示 `0 天`** —— 同源：flow 回执原来不返回有效期。
-        //     现在回执带 `expires_at`；上游不提供时它是零值 → 显示 `—`。
-        //
-        // **缺失就显示 `—`**：`undefined` / `0 天` 都是"没处理缺失"的信号，
-        // 而且会伪装成有效数据（`0 天` 看起来像一个真实的过期天数）。
-        const dash = '—';
-        const dirTxt = p.dir ? p.dir.replace(/\\/g, '/') : dash;
-        const fileTxt = p.file ? `${dirTxt}/${p.file}` : dash;
-        const expTxt = (() => {
-          // ---- 第三态：设计上不过期（与账号表那一列**同一个**判据）----
-          //
-          // 判据来自回执的 `token_never_expires`（后端走
-          // gateway.CredentialLifetimeExt）。必须排在 `!p.expires_at` 之前：
-          // 后端现在在零值时**不下发** expires_at 了，但万一将来又有人把零值
-          // 发回来，`!p.expires_at` 会为假（那是个非空字符串），
-          // `Date.parse("0001-01-01T00:00:00Z")` 得到约 -6.2e13（truthy，
-          // 连 `!t` 那道也过不去），days 远小于 0 → 渲染成「已过期」。
-          //
-          // 用户实测报的就是这个：loomy 弹窗在「授权成功」下面写着
-          // **`有效期: 已过期`**，而**同一份凭证**在账号表里写着「永久」。
-          // 两处渲染点自相矛盾，且用户第一眼看到的是那句错的。
-          if (p.token_never_expires === true) return '永久（无 TTL）';
-          if (!p.expires_at) return dash;
-          const t = Date.parse(p.expires_at);
-          if (!t) return dash;                       // 零值/坏值一律 `—`
-          const days = (t - Date.now()) / 86400000;
-          if (days <= 0) return '已过期';
-          return days < 1 ? `${Math.floor(days * 24)} 小时` : `${Math.floor(days)} 天`;
-        })();
-        $('loginOut').textContent =
-          `uid      : ${p.uid}\n` +
-          `昵称     : ${p.nickname || dash}\n` +
-          `域       : ${p.domain || dash}\n` +
-          `有效期   : ${expTxt}\n` +
-          `凭证文件 : ${fileTxt}`;
-        // ⚠ 本机拾取这条路上，"加进来的是哪个号"必须**显式说一句**。
-        //
-        // 原因是一个真实的时序陷阱：客户端把登录态**异步**刷进 leveldb，
-        // 用户刚在客户端里登录完、立刻回来点添加，读到的很可能**还是上一个号**。
-        // 实测就是这个：新号在客户端里 00:50:09 登录，00:50:15 点添加时
-        // 磁盘上最新的那条记录仍是旧号（旧号的 loggedInAt 反而更早）。
-        //
-        // 那时弹窗一切"正常"、uid 也照实写在下面 —— 但用户不会去比对那串
-        // 十六进制，于是"添加成功"与"加错了号"在界面上长得一模一样。
-        // 一句提示把这个静默失败变成**可核对的事实**。
-        //
-        // 判据用 hasAuthURL（本机拾取）而不是某个上游名 ——
-        // 任何走本机拾取的上游都适用，加新上游时这里零改动。
-        if (!hasAuthURL) {
-          toast(`已从本机读取账号 ${p.nickname || p.uid.slice(0, 8)}；` +
-            `若这不是你刚登录的那个号，请在客户端里确认登录状态后重试`);
-          await refreshAfterAccountChange();
+      if (loginPoll) clearInterval(loginPoll);
+      loginPoll = setInterval(async () => {
+        if (Date.now() > loginDeadline) {
+          clearInterval(loginPoll); loginPoll = null;
+          $('loginState').innerHTML = '<span class="err">授权已超时，请关闭后重试</span>';
           return;
         }
-        toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
-        await refreshAfterAccountChange();
-      }
-    }, 2500);
+        let p;
+        // ⚠ 必须带上 provider —— 与 start 用**同一条**分派规则。
+        //
+        // 这里曾经只传 `{ state }`，于是后端按"不带 provider"处理，
+        // 走了**默认上游（workbuddy）**的 OAuth 去认 codearts 的 state。
+        //
+        // 表现极具误导性：弹窗标题对（start 带了 provider）、
+        // 跳转的授权页也对（CodeArts 站点），**只有轮询走错了上游** ——
+        // 于是界面报 `oauth: state 不存在或已超期，请重新发起授权`。
+        //
+        // 那句文案是 **workbuddy 的 OAuth** 定义的（internal/oauth/oauth.go），
+        // codearts 根本不会有它 —— 这就是"用 A 的 state 去问 B"的典型症状。
+        // 后端 loginPoll 的注释里正好写了要避免这件事，但**前端漏了**。
+        try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state, provider: loginProvider }) }); }
+        catch (e) {
+          // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
+          clearInterval(loginPoll); loginPoll = null;
+          $('loginState').innerHTML = `<span class="err">${esc(e.message)}</span>`;
+          return;
+        }
+        if (p && p.status === 'pending') {
+          $('loginOut').textContent = '仍在等待浏览器完成登录…';
+          return;
+        }
+        clearInterval(loginPoll); loginPoll = null;
+        if (p && p.status === 'ok') {
+          $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
+          // ⚠ 三处都用**后端回执**，并且**缺失字段显示 `—` 而不是 `undefined`**。
+          //
+          // 这三行曾经是：
+          //   `域: ${p.domain}` / `有效期: ${Math.floor((p.expires_in||0)/86400)} 天`
+          //   / `凭证文件 : auths/${p.file}`
+          //
+          // 三个问题（用户实测报的）：
+          //
+          //  1. **`凭证文件` 路径是错的** —— 硬编码 `auths/`，而 `p.file` 只有 basename。
+          //     按上游分子目录之后实际是 `auths/codearts/codearts-xxx.json`，
+          //     界面显示成 `auths/codearts-xxx.json` —— **少了一整个上游目录**。
+          //     用户会照着这句去找文件、往那儿放，**那是错的地方**。
+          //     现在用回执的 `dir`（后端实际落盘目录）。
+          //
+          //  2. **`域` 显示 `undefined`** —— codearts 走的 flow 回执**根本不返回** domain
+          //    （`gateway.Credential` 没有这个字段：各上游凭证结构不同）。
+          //     显示 `undefined` 会让人以为拿到了数据。
+          //
+          //  3. **`有效期` 显示 `0 天`** —— 同源：flow 回执原来不返回有效期。
+          //     现在回执带 `expires_at`；上游不提供时它是零值 → 显示 `—`。
+          //
+          // **缺失就显示 `—`**：`undefined` / `0 天` 都是"没处理缺失"的信号，
+          // 而且会伪装成有效数据（`0 天` 看起来像一个真实的过期天数）。
+          const dash = '—';
+          const dirTxt = p.dir ? p.dir.replace(/\\/g, '/') : dash;
+          const fileTxt = p.file ? `${dirTxt}/${p.file}` : dash;
+          const expTxt = (() => {
+            // ---- 第三态：设计上不过期（与账号表那一列**同一个**判据）----
+            //
+            // 判据来自回执的 `token_never_expires`（后端走
+            // gateway.CredentialLifetimeExt）。必须排在 `!p.expires_at` 之前：
+            // 后端现在在零值时**不下发** expires_at 了，但万一将来又有人把零值
+            // 发回来，`!p.expires_at` 会为假（那是个非空字符串），
+            // `Date.parse("0001-01-01T00:00:00Z")` 得到约 -6.2e13（truthy，
+            // 连 `!t` 那道也过不去），days 远小于 0 → 渲染成「已过期」。
+            //
+            // 用户实测报的就是这个：loomy 弹窗在「授权成功」下面写着
+            // **`有效期: 已过期`**，而**同一份凭证**在账号表里写着「永久」。
+            // 两处渲染点自相矛盾，且用户第一眼看到的是那句错的。
+            if (p.token_never_expires === true) return '永久（无 TTL）';
+            if (!p.expires_at) return dash;
+            const t = Date.parse(p.expires_at);
+            if (!t) return dash;                       // 零值/坏值一律 `—`
+            const days = (t - Date.now()) / 86400000;
+            if (days <= 0) return '已过期';
+            return days < 1 ? `${Math.floor(days * 24)} 小时` : `${Math.floor(days)} 天`;
+          })();
+          $('loginOut').textContent =
+            `uid      : ${p.uid}\n` +
+            `昵称     : ${p.nickname || dash}\n` +
+            `域       : ${p.domain || dash}\n` +
+            `有效期   : ${expTxt}\n` +
+            `凭证文件 : ${fileTxt}`;
+          // ⚠ 本机拾取这条路上，"加进来的是哪个号"必须**显式说一句**。
+          //
+          // 原因是一个真实的时序陷阱：客户端把登录态**异步**刷进 leveldb，
+          // 用户刚在客户端里登录完、立刻回来点添加，读到的很可能**还是上一个号**。
+          // 实测就是这个：新号在客户端里 00:50:09 登录，00:50:15 点添加时
+          // 磁盘上最新的那条记录仍是旧号（旧号的 loggedInAt 反而更早）。
+          //
+          // 那时弹窗一切"正常"、uid 也照实写在下面 —— 但用户不会去比对那串
+          // 十六进制，于是"添加成功"与"加错了号"在界面上长得一模一样。
+          // 一句提示把这个静默失败变成**可核对的事实**。
+          //
+          // 判据用 hasAuthURL（本机拾取）而不是某个上游名 ——
+          // 任何走本机拾取的上游都适用，加新上游时这里零改动。
+          if (!hasAuthURL) {
+            toast(`已从本机读取账号 ${p.nickname || p.uid.slice(0, 8)}；` +
+              `若这不是你刚登录的那个号，请在客户端里确认登录状态后重试`);
+            await refreshAfterAccountChange();
+            return;
+          }
+          toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
+          await refreshAfterAccountChange();
+        }
+      }, 2500);
+  
+  
+    }
   }
+
+
+
+
+
+
+  //
+  // # 为什么单独成函数（而不是留在 addAccount 里）
+  //
+  // 用户要求「添加账号需要用户选择国内或者国际」之后，addAccount 多了一段
+  // 「先渲染选项 → 用户点开始登录 → 才真的申请」。而选项为空的上游要
+  // 跳过这段直接走后半程。
+  //
+  // 拆出来还有一个好处：守卫测试（TestWebUIQRBranchOffersNoBrowserEntry）
+  // 按 `function addAccount(` 截函数体，若把渲染逻辑塞在它里面会被
+  // "选项为空直接申请" 的 return 挡住，守卫就静默失效了。
+  
 
   // ---------------------------------------------------------------- 批量导入（账号池分组行）
   //
@@ -6252,8 +6353,29 @@ let loginProvider = '';
   //
   // ⚠ 「全部」不能写成一个空白格：用户看到空白会以为是"还没加载"，
   // 于是去刷新页面；而"没设限制"是个**明确的状态**，得说出来。
+  // apiKeyModelsCell 「可用模型」列的单元格。
+  //
+  // # ⚠ 2026-10 P2 之后的真相来源变了（这一列曾经会骗人）
+  //
+  // 分组（Key.Groups）非空时，判定链用的是**分组里模型的并集**，`k.models`
+  // 完全不参与。而这一列原来只看 `k.models` —— 于是「只配了分组、白名单为空」的
+  // key（P3.5 迁移之后这几乎是全部）会显示成「全部」，**恰好是相反的意思**：
+  // 那把 key 其实被限制在分组内的少数模型上。
+  //
+  // 用户会拿这一列来回答「这把 key 能用什么」，看反了的后果是他以为没限制。
+  // 所以有分组时优先显示分组（分组名由后端随 View 下发不了 —— 这里只有 ID），
+  // 用「N 个分组」+ title 里列 ID 表达：ID 是可点进去核对的（分组页里就有）。
   function apiKeyModelsCell(k) {
+    const groups = Array.isArray(k.groups) ? k.groups.filter(Boolean) : [];
     const list = Array.isArray(k.models) ? k.models.filter(Boolean) : [];
+    // ① 分组优先：这是 P2 之后真正生效的判据。
+    if (groups.length) {
+      const title = '按分组限制（' + groups.length + ' 个分组）：' + groups.join('\n')
+        + '\n\n分组里有哪些模型请到「分组」页核对。';
+      return '<span class="mono" style="font-size:11px" title="' + esc(title) + '">'
+        + groups.length + ' 个分组</span>';
+    }
+    // ② 没有分组 ⇒ 存量白名单（P3.5 迁移前的形态，仍然生效）。
     if (!list.length) return '<span class="dim">全部</span>';
     const shown = list.slice(0, 3).map(esc).join('、');
     const more = list.length > 3 ? `<span class="dim"> +${list.length - 3}</span>` : '';
@@ -6342,124 +6464,117 @@ let loginProvider = '';
   // ⚠ 用 /v1/models 而不是别的目录端点：那是**调用方真正能发**的模型名集合。
   // 白名单里的名字必须能对上这个集合里的名字 —— 用另一个来源会造出
   // "列表里选得到、实际调不通"。
-  async function ensureAKCatalog() {
-    if (akCatalog) return akCatalog;
-    try {
-      await ensureConsoleKey();
-    const r = await api('/v1/models');
-      akCatalog = ((r && r.data) || []).map(m => ({
-        id: String(m.id || ''),
-        owner: String(m.owned_by || ''),
-      })).filter(m => m.id).sort((a, b) => a.id.localeCompare(b.id));
-    } catch (e) {
-      akCatalog = [];
-      throw e;
-    }
-    return akCatalog;
-  }
-
-  // syncAKProviders 用当前目录填充弹窗里的「上游」下拉（用户要求：先选上游再看模型）。
+  // ---- 可用分组（取代原来的模型白名单）-----------------------------------
   //
-  // 与 syncModelProviderOptions 同款坑：`<select>` 会把"不在 option 列表里的值"**当场归一成空串**，
-  // 所以恢复选择必须写在 innerHTML **之后**（否则选择会被浏览器悄悄清掉）。
-  function syncAKProviders() {
-    const sel = $('akProvider');
-    if (!sel) return;
-    const keep = sel.value;
-    const owners = [];
-    const seen = new Set();
-    for (const m of (akCatalog || [])) {
-      const o = modelOwnerOf(m.id, m.owner);
-      if (o && !seen.has(o)) { seen.add(o); owners.push(o); }
-    }
-    owners.sort();
-    sel.innerHTML = '<option value="">全部上游</option>' +
-      owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
-    sel.value = owners.includes(keep) ? keep : '';
+  // # 为什么 key 只选分组、不再选模型（用户要求，2026-10-24）
+  //
+  //   「这里API 不要设置模型了只能设置分组 因为分组已经设置了模型」
+  //
+  // 模型范围在**分组**里定义一次就够了。key 再选一遍模型，等于同一件事有
+  // 两个真相来源 —— 改分组里的模型，key 上那份不会跟着变。那正是我们反复
+  // 踩的悬空问题的根源（见 PLAN-groups.md Q3：两者语义重复，白名单并入分组）。
+  //
+  // ⚠ 空选 = 不限制。这是存量 key 的默认形态，也是改造前「全部允许」的等价物，
+  //   绝不能改成「空 = 一个都不许」（那会把所有没配过分组的 key 打死）。
+  let akGroups = [];        // /admin/groups 的缓存
+  let akPickedGroups = new Set();
+
+  async function ensureAKGroups() {
+    if (akGroups && akGroups.length) return akGroups;
+    const r = await admin('/admin/groups');
+    akGroups = ((r && r.groups) || []);
+    return akGroups;
   }
 
-  // renderAKModelList 按「上游 + 搜索词」渲染可勾选列表；保留已勾选状态。
-  function renderAKModelList() {
-    const host = $('akModelList'), empty = $('akEmpty');
+  // renderAKGroupList 画可勾选的分组列表。
+  function renderAKGroupList() {
+    const host = $('akGroupList'), empty = $('akGroupEmpty');
     if (!host) return;
-    const kw = ($('akSearch').value || '').trim().toLowerCase();
-    // 上游筛选只决定"列出什么"，不改已勾选的 id（勾选状态由 stashAKChecked/akSelected 管）。
-    const wantP = ($('akProvider') && $('akProvider').value) || '';
-    const list = (akCatalog || []).filter(m =>
-      (!wantP || modelOwnerOf(m.id, m.owner) === wantP) &&
-      (!kw || m.id.toLowerCase().includes(kw)));
-
-    // 记住当前的勾选（重渲染会丢掉 DOM）
-    const checked = new Set(akSelected());
-    if (!list.length) {
+    if (!akGroups.length) {
       host.innerHTML = '';
       empty.style.display = '';
-      const hasCatalog = !!(akCatalog && akCatalog.length);
-      empty.textContent = wantP
-        ? `上游「${wantP}」下没有匹配「${kw}」的模型`
-        : (hasCatalog ? `没有匹配「${kw}」的模型` : '模型目录为空（上游可能都不可用；仍可先建 key，稍后再改模型）');
+      empty.textContent = '还没有分组。先到「分组」页建一个，回来就能选。';
       return;
     }
     empty.style.display = 'none';
-    host.innerHTML = list.map(m => {
-      const on = checked.has(m.id) ? ' checked' : '';
-      return `<label style="display:flex;align-items:center;gap:8px;padding:3px 4px;font-size:12px;cursor:pointer">
-        <input type="checkbox" data-akm="${esc(m.id)}"${on}>
-        <span class="mono">${esc(m.id)}</span>
-        ${m.owner ? `<span class="dim" style="margin-left:auto">${esc(m.owner)}</span>` : ''}
-      </label>`;
+    host.innerHTML = akGroups.map(function (g) {
+      const on = akPickedGroups.has(g.id) ? ' checked' : '';
+      const n = (g.models && g.models.length) || g.model_count || 0;
+      return '<label style="display:flex;align-items:center;gap:8px;padding:4px;font-size:12px;cursor:pointer">' +
+        '<input type="checkbox" data-akg="' + esc(g.id) + '"' + on + '>' +
+        '<span>' + esc(g.name) + '</span>' +
+        '<span class="dim" style="font-size:11px;margin-left:auto">' + n + ' 个模型</span>' +
+        '</label>';
     }).join('');
+    renderAKGroupChips();
     updateAKCount();
   }
 
-  // akSelected 当前勾选的模型 id（只算**当前可见**的那些吗？不算 —— 见下）。
-  //
-  // ⚠ 搜索会隐藏一部分行，但**隐藏不等于取消勾选**：用户搜"glm"勾两个、
-  // 再搜"deepseek"勾一个，期望是 3 个都在白名单里。所以这里的判据是
-  // 「DOM 里当前勾着的」+「已勾但被搜索隐藏的（存在 akHiddenChecked 里）」。
-  let akHiddenChecked = new Set();
-
-  function akSelected() {
-    const out = new Set(akHiddenChecked);
-    document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => {
-      if (cb.checked) out.add(cb.dataset.akm);
-      else out.delete(cb.dataset.akm);
-    });
-    return [...out];
-  }
-
-  // stashAKChecked 把"即将被搜索隐藏"的勾选记下来，重渲染后再并回去。
-  function stashAKChecked() {
-    akHiddenChecked = new Set(akSelected());
+  // renderAKGroupChips 画「已选分组」置顶清单（点 × 取消）。
+  function renderAKGroupChips() {
+    const box = $('akGroupChips');
+    if (!box) return;
+    const picked = akGroups.filter(function (g) { return akPickedGroups.has(g.id); });
+    if (!picked.length) {
+      box.innerHTML = '<span class="dim" style="font-size:12px">（未选 —— 这把 key 不限制模型）</span>';
+      return;
+    }
+    // ⚠ 用 .pill + 内联 all:unset 的按钮，与原来 API 页那版模型 chip 同一形态。
+    //
+    // 我第一版用 .chip 且没重置按钮样式，结果按钮保留浏览器默认外观
+    // （带边框的方块），把 chip 撑成两块 —— 截图里「已选分组」整行被挤歪。
+    // .chip 那套样式是给「模型名 + 倍率标记」设计的（.chip span 有 margin-left），
+    // 塞一个 <button> 进去不在它的设计范围内。
+    box.innerHTML = picked.map(function (g) {
+      return '<span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px"'
+        + ' title="' + esc(g.name) + '">'
+        + '<span class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+        + esc(g.name) + '</span>'
+        + '<button type="button" data-akgunpick="' + esc(g.id) + '"'
+        + ' style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 2px"'
+        + ' title="取消选择这个分组">×</button>'
+        + '</span>';
+    }).join('');
   }
 
   function updateAKCount() {
-    const n = akSelected().length;
-    const all = $('akAll') && $('akAll').checked;
     const c = $('akCount');
+    const hint = $('akGroupHint');
     if (!c) return;
-    c.textContent = all ? '全部允许（不限制模型）' : (n ? `已选 ${n} 个模型` : '未选任何模型 —— 保存后这把 key 将无法调用任何模型');
-    c.style.color = (!all && n === 0) ? 'var(--err)' : '';
+    const picked = akGroups.filter(function (g) { return akPickedGroups.has(g.id); });
+    if (!picked.length) {
+      c.textContent = '';
+      if (hint) hint.textContent = '（不限制）';
+      return;
+    }
+    // 并集去重后的模型数（两个分组可能有重叠）。
+    const seen = new Set();
+    picked.forEach(function (g) { (g.models || []).forEach(function (m) { seen.add(m); }); });
+    c.textContent = picked.length + ' 个分组 · 共 ' + seen.size + ' 个模型';
+    if (hint) hint.textContent = '';
   }
 
-  // syncAKPicker 让"全部允许"与选择器互斥：勾了全部就把列表置灰并清空选择。
-  function syncAKPicker() {
-    const all = $('akAll').checked;
-    $('akPicker').style.opacity = all ? '0.45' : '1';
-    $('akPicker').style.pointerEvents = all ? 'none' : 'auto';
-    if (all) akHiddenChecked = new Set();
-    updateAKCount();
-  }
+  // ---- 模型对外名映射（内部名 ↔ 对外名）---------------------------------
+  //
+  // ⚠ 这三个函数是从 git 历史恢复回来的（2026-10-24）。
+  //
+  // 我上一轮替换整段 JS 时把它们**一起删掉了**，但调用点还在
+  // （akRenderMap 在弹窗打开时、akCollectMap 在保存时、akAddMapRow 在按钮上）。
+  // 后果不是"映射功能坏了"，而是 **ReferenceError 打断整个 IIFE** ——
+  // 之后所有事件绑定都没执行，界面上每个按钮都点不动。
+  //
+  // 教训：替换"一大段"之前先列出这一段里定义了哪些符号，替换后核对
+  // 「还有谁在调它们」。语法门禁只查能不能解析，查不出未定义符号。
 
-  // openAPIKeyModal 打开弹窗。mode='create' 或 'edit'。
+
+
+
+
   function openAPIKeyModal(mode, k) {
     akMode = mode === 'edit' ? 'edit' : 'create';
     akEditingID = (k && k.id) || '';
-    akHiddenChecked = new Set();
 
     $('akTitle').textContent = akMode === 'edit' ? '编辑 API Key' : '新建 API Key';
-    // 名称：新建可填，编辑只读（后端 Update 不支持改名 —— 与其给一个
-    // 存不下去的输入框，不如明说）。
     if (akMode === 'edit') {
       $('akNameRow').style.display = 'none';
       $('akNameRO').style.display = '';
@@ -6470,23 +6585,21 @@ let loginProvider = '';
       $('akName').value = '';
     }
 
-    const hasList = !!(k && Array.isArray(k.models) && k.models.length);
     $('akLimit').value = k ? (k.limit || 0) : 0;
     $('akRpm').value = k ? (k.rpm || 0) : 0;
-    $('akAll').checked = !hasList;      // 默认「全部允许」= 不限制
-    $('akSearch').value = '';
-    if (hasList) akHiddenChecked = new Set(k.models);
+    // 分组：编辑时回填，新建时空（= 不限制）。
+    akPickedGroups = new Set((k && Array.isArray(k.groups)) ? k.groups : []);
+    // 别名（model_map）已移到分组：这里不再处理。
 
     $('akModal').style.display = 'flex';
     $('akSave').disabled = false;
-    // 目录拉取是异步的：先渲染一个占位，回来后重渲染。
-    $('akModelList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取模型目录…</div>';
-    ensureAKCatalog().then(() => { syncAKProviders(); stashAKChecked(); renderAKModelList(); })
-      .catch(e => {
-        $('akModelList').innerHTML =
-          `<div class="dim" style="font-size:12px;padding:6px">读取模型目录失败：${esc(e.message)}</div>`;
-      });
-    syncAKPicker();
+    $('akGroupList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取分组…</div>';
+    ensureAKGroups().then(function () {
+      renderAKGroupList();
+    }).catch(function (e) {
+      $('akGroupList').innerHTML =
+        '<div class="dim" style="font-size:12px;padding:6px">读取分组失败：' + esc(e.message) + '</div>';
+    });
   }
 
   function closeAPIKeyModal() {
@@ -6495,15 +6608,12 @@ let loginProvider = '';
 
   // saveAPIKeyModal 保存（新建 / 编辑）。
   async function saveAPIKeyModal(btn) {
-    const all = $('akAll').checked;
-    const models = all ? [] : akSelected();
-    if (!all && models.length === 0) {
-      // 明确拦下而不是静默存一个空名单 —— 空名单等于"不限制"，与用户此刻的
-      // 意图（他刚选了"不是全部允许"）恰好相反。这种"看起来设了限制其实没设"
-      // 是白名单最危险的失败形态。
-      toast('要么勾「全部允许」，要么至少选一个模型', true);
-      return;
-    }
+    // 提交的分组 ID（空 = 不限制）。
+    const groups = Array.from(akPickedGroups);
+    // 别名（model_map）已移到分组：这里不再收集，提交体也不带它。
+    //
+    // 为什么不保留"兼容"：key 上的别名永远不可能生效 —— 判定链先过分组，
+    // 不认识不在分组里的名字。留着只会让用户配了却查不出为什么没用。
     const limit = parseInt($('akLimit').value, 10);
     const rpm = parseInt($('akRpm').value, 10);
     if (isNaN(limit) || limit < 0 || isNaN(rpm) || rpm < 0) {
@@ -6517,16 +6627,16 @@ let loginProvider = '';
           const name = ($('akName').value || '').trim();
           if (!name) { toast('名称不能为空', true); return false; }
           const r = await admin('/admin/apikeys', {
-            method: 'POST', body: JSON.stringify({ name, limit, rpm, models }),
+            method: 'POST', body: JSON.stringify({ name, limit, rpm, groups }),
           });
           if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
           toast(`已创建 ${r.name || name}（完整 key 下面直接复制）\n${r.full}`, false, 15000);
           copyText(r.full, 'API Key');
         } else {
           await admin('/admin/apikeys/update', {
-            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, models }),
+            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, groups }),
           });
-          toast(all ? '已保存：全部模型可用' : `已保存：限制为 ${models.length} 个模型`);
+          toast(groups.length ? `已保存：限制为 ${groups.length} 个分组的模型` : '已保存：不限制模型');
         }
         closeAPIKeyModal();
         // ⚠⚠ 必须**先丢缓存**再拉列表 —— 与删除（8279）/轮换（8265）那两处同一个理由：
@@ -6549,14 +6659,51 @@ let loginProvider = '';
     if (!b || b.disabled) return;
     const id = b.dataset.apikey, act = b.dataset.act;
     if (act === 'toggle') {
+      // ⚠⚠ 2026-10-21 修：**不能**用按钮文案判断当前状态。
+      //
+      // 原写法：
+      //     await busyRun(b, async () => {
+      //       const on = b.textContent === '启用';    // ← 此时已经不是「启用」了
+      //       ...
+      //     }, { label: '切换', busyText: '…' });
+      //
+      // `busyRun` 一进入（busyRun 内 L4926）就把按钮文案改成 busyText，
+      // 然后才调 fn()。所以 fn 里读到的 textContent 恒为 `'…'`，
+      // `'…' === '启用'` **永远 false** ⇒ 永远发送 `enabled:false`
+      // ⇒ **只能禁用、永远启用不了**。
+      //
+      // 用户报的现象正是这个：「这个 apikey 启用禁用有 bug」——
+      // 界面上状态显示「禁用」、按钮显示「启用」，点一下后端又收到 false，
+      // 于是什么也没变，看起来像"点了没反应"。
+      //
+      // ⇒ 改成从**列表缓存**读状态。和下面 edit 分支同一数据源（那里也是
+      //   从 _apikeysCache 找 cur），所以"看到的状态"与"据以取反的状态"
+      //   必然是同一个值 —— 不会再出现"界面一套、判断另一套"。
+      const cur = (window._apikeysCache || []).find(x => x.id === id);
+      if (!cur) {
+        // 缓存里找不到就别猜：猜错方向会把用户本来想启用的 key 再禁一次。
+        toast('列表已变化，请刷新后重试', true);
+        return;
+      }
+      const on = !cur.enabled;   // 点击后要落到的状态
       await busyRun(b, async () => {
         try {
-          const on = b.textContent === '启用';
           await admin('/admin/apikeys/toggle', { method: 'POST', body: JSON.stringify({ id, enabled: on }) });
           toast(on ? '已启用' : '已禁用');
+          // ⚠ 2026-10-21 修：**先丢缓存再拉列表**。
+          //
+          // `loadAPIKeys()` 走 sharedGet（30s TTL），不丢就会拿旧快照重画 ——
+          // 用户看到的是「点了按钮，提示说已启用，但那一行状态没变」。
+          //
+          // save（saveAPIKeyModal）/ reset / delete 三处都有这一行，就 toggle 漏了。
+          // 这是「改成功了但界面不刷新」的同一形状，本仓已经踩过两次
+          // （新建 key 后列表里没有，见 saveAPIKeyModal 那段注释）。
+          writeInvalidate([EP_APIKEYS]);
           await loadAPIKeys(); return true;
         } catch (e) { toast('操作失败：' + e.message, true); return false; }
-      }, { label: '切换', busyText: '…' });
+        // 文案跟着**目标状态**走（启用/停用），不是无信息量的"切换" ——
+        // 用户点的是"启用"，进度条上就该写"启用中…"。
+      }, { label: on ? '启用' : '停用', busyText: on ? '启用中…' : '停用中…' });
       return;
     }
     if (act === 'edit') {
@@ -7421,6 +7568,12 @@ let loginProvider = '';
 
     // 每次拉取前先给一句「正在读取」，避免翻页时旧内容一直挂着让人以为没反应。
     $('logrows').innerHTML = logPlaceholder('正在读取落盘日志…');
+    // 状态码卡片先撤掉：下面任何一条提前 return 的分支（未启用/取数失败/空文件）
+    // 都不会再调 renderLogStatusBar，留着上一页的卡片就会**指着另一页的数字**。
+    // ⚠ 只清 DOM、不动 logStatus：筛选是用户的意图，翻页/轮询时不该被静默清掉
+    //   （清掉的表现是"点着 429 翻一页，筛选自己没了"）。真正的重置只在
+    //   用户点「全部」或那一页里再也没有该状态码时发生（见 renderLogs 的注释）。
+    hideLogStatusBar();
     let r;
     try { r = await admin(`/admin/logs/history?limit=${logPage.limit}&offset=${logPage.offset}`); }
     catch (e) { $('logrows').innerHTML = logPlaceholder(e.message, 'err'); return; }
@@ -7441,6 +7594,8 @@ let loginProvider = '';
     if (!r.items || !r.items.length) {
       $('logrows').innerHTML = logPlaceholder('落盘日志为空');
       $('logMeta').textContent = '';
+      // 真的没有行 ⇒ 没有状态码可统计，筛选也无从谈起
+      logStatus = null;
       renderPager(logPage);
       return;
     }
@@ -7556,6 +7711,82 @@ let loginProvider = '';
   // 本包有 TDZ 守卫（gen_tdz_guard.js）专门防这类问题。
   let logViewSuspended = false;
 
+  // logStatus：请求日志的**状态码筛选**（null = 不筛，全部）。
+  //
+  // # 为什么存在模块变量而不是 DOM 里
+  //
+  // 照 modelProviderWanted 的同一条教训：本文件有过 select 把不存在的值
+  // 归一成空串、于是"选了却等于没选"的缺陷。筛选状态是**用户意图**，
+  // 卡片只是它的投影 —— 重绘卡片时从它读，不从 class 列表反推。
+  //
+  // # ⚠ 它只筛**当前页**
+  //
+  // /admin/logs/history 只接受 limit/offset（internal/admin/admin.go 的
+  // logsHistory → Sink.Page(offset, limit)），**没有 status 入参**。
+  // 要做全局筛选得改后端分页契约（过滤后再分页），不在本次范围。
+  // 所以卡片的数字是「本页」的，条尾那句范围声明是硬要求，不许删。
+  let logStatus = null;
+
+  // logStatusOf 把一条日志的状态码收敛成"可比较的值"。
+  //   · 0 / 缺失 / 非数字 ⇒ null（不归入任何卡片；画出来的话会出现一张「null」卡）
+  //   · 其余原样返回，包括 0 以外的怪值 —— 显示原值总比显示猜测好
+  function logStatusOf(e) {
+    const n = Number(e && e.status);
+    return isFinite(n) && n > 0 ? n : null;
+  }
+
+  // renderLogStatusBar 画「本页状态码」卡片条。
+  //
+  // # 为什么数字必须带范围说明
+  //
+  // 用户看到「200 ×13」很自然会读成"全部日志里只有 13 个 200"，
+  // 而落盘日志可能有 13077 条、这一页只是 15 条。数字不带范围就是在骗人 ——
+  // 本项目的既有纪律：空白与数字都必须能自我解释。
+  // 所以条尾常驻「本页 N 条 · 共 M 条 · 卡片只统计当前页」。
+  //
+  // # 排序
+  //
+  // 按状态码数值升序（200 < 401 < 429）；「全部」永远排最前 —— 它是"取消筛选"，
+  // 不属于状态码序列。用数值而不是字符串比较，否则 "1000" 会排在 "200" 前面。
+  function renderLogStatusBar(counts, pageLen) {
+    const box = $('logStatusBar');
+    if (!box) return;
+    const codes = Array.from(counts.keys()).sort((a, b) => a - b);
+    if (!codes.length) { hideLogStatusBar(); return; }
+    const total = logPage.total || 0;
+    const chip = (val, label, num, on, hint) =>
+      `<button type="button" class="chip${on ? ' on' : ''}" data-logst="${val}"
+               aria-pressed="${on ? 'true' : 'false'}" title="${esc(hint)}">${label}<span>${num}</span></button>`;
+    const cards = [
+      chip('', '全部', pageLen, logStatus === null, '不筛选，显示本页全部 ' + pageLen + ' 条'),
+    ].concat(codes.map(c => chip(String(c), String(c), counts.get(c), logStatus === c,
+      '只看本页状态码 ' + c + ' 的 ' + counts.get(c) + ' 条')));
+    // 「本页 N 条」里的 N 是**渲染出来的行数**，不是每页条数设置 ——
+    // 末页往往不足一页，用设置值会与实际行数对不上。
+    box.innerHTML = cards.join('') +
+      `<span class="dim" style="font-size:11px;margin-left:4px">`
+      + `本页 ${pageLen} 条 · 共 ${total} 条 · 卡片只统计当前页</span>`;
+    box.style.display = 'flex';
+  }
+
+  // hideLogStatusBar 只清卡片（不动 logStatus，理由见 loadLogHistory 里的注释）。
+  function hideLogStatusBar() {
+    const box = $('logStatusBar');
+    if (!box) return;
+    box.innerHTML = '';
+    box.style.display = 'none';
+  }
+
+  // setLogStatus 是筛选状态的唯一写入口。
+  //   点了当前已选的那张 ⇒ 不重复渲染（与 statsRange / trendView 的写法一致）。
+  //   ⚠ 重绘必须走 renderLogs(logEntries)：只改 class 不改表格 = 卡片亮着、
+  //     下面的行没变，比不做筛选更让人困惑。
+  function setLogStatus(v) {
+    if (v === logStatus) return;
+    logStatus = v;
+    renderLogs(logEntries);
+  }
+
   // 归一化：时间倒序；时间相同按 seq 倒序，保证顺序稳定可复现。
   function normalizeDesc(items) {
     return (items || []).slice().sort((a, b) => {
@@ -7579,10 +7810,48 @@ let loginProvider = '';
   // 同一条请求在终端与网页上必须是同一个数，否则排障时会互相矛盾。
   //   tokens < 0 表示上游 usage 缺失 → 显示 -，绝不能拿 -1 去除时间；
   //   total_ms <= 0（时钟粒度内完成）→ 返回 0.0，避免除零得到 Inf/NaN。
-  function tokPerSec(tokens, totalMs) {
-    if (tokens < 0) return '-';
+  //
+  // ⚠ 2026-10-20 两次校正，第二次才是对的：
+  //   ① 分子：必须是**纯输出**（out_tokens），不是 tokens（total=输入+输出）。
+  //      拿 total 算会得出 15759 t/s 这种物理上不可能的值。
+  //   ② 分母：必须是**纯生成阶段**（total_ms − ttfb_ms），不是 total_ms。
+  //      首字等待期间模型还没开始吐字，把它算进分母会把速度系统性压小。
+  //
+  //   实测对照（同一条 csg 请求）：out=176、total=2256ms、ttfb=1262ms
+  //     · 我原来的算法  176 / 2.256s        = 78.0 t/s
+  //     · 正确算法      176 / (2.256−1.262) = 177.1 t/s
+  //   而客户端（DSH）自己显示的是 176 tok/s（176 / (2.4−1.4) = 176）⇒ 正确算法才对得上。
+  //
+  // ⚠ 非流式不显示：一次性返回没有"生成速度"概念（new-api 也是仅 isStream 才给）。
+  // ⚠ 生成阶段 <= 0（首字几乎等于整轮耗时）也返回 —：那时速度无从计算，
+  //   显示一个 0.0 会让人以为"极慢"，而真相是"全在等首字"。
+  // ⚠ 2026-10-20 第三次校正：**显示精牌照 DSH 官方双分支规则**。
+  //
+  //   出处（本地源码，可复核）：
+  //     D:\project_GIT\test\deepseek-harness-codearts\plugin-src\client\tokens-per-second.js
+  //   它自己引用的是 @deepseek-ai/dsh-client-ui-chat 的 lib/client.js：
+  //
+  //     function formatTokensPerSecond(tps) {
+  //       const clamped = Math.max(0, tps);
+  //       return clamped >= 10 ? String(Math.round(clamped))
+  //                            : String(Math.round(clamped * 10) / 10);
+  //     }
+  //
+  //   ⇒ **≥10 取整、<10 保留一位小数**（两套精度，不是统一 toFixed）。
+  //   官方意图是「大数不需要小数位，小数才需要」。
+  //   ⚠ 别改成统一 toFixed(1)：那会让 177 tok/s 显示成 177.1，与客户端对不上。
+  function fmtTps(v) {
+    const c = Math.max(0, v);
+    return c >= 10 ? String(Math.round(c)) : String(Math.round(c * 10) / 10);
+  }
+
+  function tokPerSec(outTokens, totalMs, ttfbMs, mode) {
+    if (mode && mode !== 'stream') return '-';
+    if (!outTokens || outTokens <= 0) return '-';
     if (!totalMs || totalMs <= 0) return '0.0';
-    return (tokens / (totalMs / 1000)).toFixed(1);
+    const genMs = totalMs - (ttfbMs > 0 ? ttfbMs : 0); // 纯生成阶段 = DSH 的 decodeMs
+    if (genMs <= 0) return '-';
+    return fmtTps(outTokens / (genMs / 1000));
   }
 
   // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
@@ -7599,13 +7868,54 @@ let loginProvider = '';
   //
   // ⚠ 300 条上限保留：这是**渲染**上限（分页 limit 可能被用户调到更大），
   //   超出的部分靠翻页看，不是数据被丢弃。
+  //
+  // # 状态码卡片与它的筛选（2026-10-25 用户要求）
+  //
+  // 卡片统计的是 `list`（**当前页、排序后、300 条上限内**）—— 与表格里
+  // 实际画出来的行一一对应。⚠ 必须先截断再统计：先统计后截断会让卡片说
+  // "本页 320 条"，而屏幕上只有 300 行，数字当场自相矛盾。
+  //
+  // 筛选在**本页内**做，因为后端 /admin/logs/history 没有 status 入参。
+  // 这也意味着筛完可能一行都不剩（比如切页后这一页没有 429）—— 那时
+  // 要把筛选自动放下并说明原因，而不是留一张亮着的卡片配一句"暂无请求"：
+  // 用户会以为日志真的没了，而真相只是这一页没有该状态码。
   function renderLogs(items) {
     const host = $('logrows');
     if (!host) return;
     const list = normalizeDesc(items).slice(0, 300);
-    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容
-    if (!list.length) { host.innerHTML = logPlaceholder('暂无请求'); return; }
-    host.innerHTML = list.map(e => {
+
+    // 统计当前页的状态码分布（未筛选的全集）。
+    const counts = new Map();
+    for (const e of list) {
+      const code = logStatusOf(e);
+      if (code !== null) counts.set(code, (counts.get(code) || 0) + 1);
+    }
+
+    // 筛选值若已不在这一页 ⇒ 自动放开并告知。**先判再画卡片**，
+    // 否则会出现"卡片显示全部、表格却是空的"这种一闪而过的自相矛盾。
+    let autoCleared = null;
+    if (logStatus !== null && !counts.has(logStatus)) {
+      autoCleared = logStatus;
+      logStatus = null;
+    }
+
+    const shown = logStatus === null ? list : list.filter(e => logStatusOf(e) === logStatus);
+
+    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容。
+    // ⚠ 自动放开筛选这条分支下 list 非空、shown 为空 —— 不是"暂无请求"，
+    //   是"这一页没有该状态码"，两者必须用不同的字说，否则等于骗人。
+    if (!list.length) {
+      host.innerHTML = logPlaceholder('暂无请求');
+      hideLogStatusBar();
+      return;
+    }
+    renderLogStatusBar(counts, list.length);
+    if (!shown.length) {
+      host.innerHTML = logPlaceholder(
+        '本页 ' + list.length + ' 条里没有状态码 ' + autoCleared + '（已取消该筛选；翻页可看其它页）');
+      return;
+    }
+    host.innerHTML = shown.map(e => {
       const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
       // ② 数值列右对齐（.r）
       // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
@@ -7621,7 +7931,7 @@ let loginProvider = '';
         <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
         <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
         <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
-        <span class="mono r">${tokPerSec(e.tokens, e.total_ms)}</span>
+        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.ttfb_ms, e.mode)}</span>
         <span class="mono r">${e.total_ms}ms</span>
       </div>`;
     }).join('');
@@ -7912,14 +8222,60 @@ let loginProvider = '';
   // # 为什么按绝对名次而不是百分比
   //   环图回答"占比"，这里回答"谁在扛量、它健康吗"。排障时后者才是要的 ——
   //   一个占 3% 但成功率 40% 的模型，看占比根本发现不了它坏了。
-  function renderModelRank(s) {
+  // hideRemovedBlocks 隐藏用户要求删掉的三块（2026-10-20）。
+//
+// # 用户要求
+//   勾选删除：次数排行 / 上游+模型环图 / 缓存命中率四窗
+//   另附 custom：「保留近 24 小时缓存命中率趋势折线图」
+//
+// # ⚠ 为什么用 display:none 而不是删 HTML
+//   环图那块的闭合是三个连续 </div>（panel → duo → 外层），删错一个就会毁掉
+//   整个「调用统计」boardsec 的嵌套；而次数排行的 h3 与 #modelRank 是**兄弟**，
+//   单独删 #modelRank 会留下一个孤零零的标题。
+//   display:none 的代价是多几个死节点，收益是结构不动（不可能破坏嵌套）、
+//   JS 的 $('modelRank') 等调用照旧命中、想恢复只要删掉这里的 id（一行回退）。
+//
+// ⚠ 必须幂等：它在每次 refresh 后都可能被调。
+function hideRemovedBlocks() {
+  if (window.__dashHid) return;
+  const hide = (el) => { if (el) el.style.display = 'none'; };
+  const byId = (id) => document.getElementById(id);
+
+  // ① 次数排行：容器 + 它前面那个 h3（兄弟关系）
+  const rank = byId('modelRank');
+  if (rank) {
+    hide(rank);
+    const title = rank.closest('.body') ? rank.closest('.body').previousElementSibling : null;
+    if (title && title.tagName === 'H3') hide(title);
+  }
+
+  // ② 上游用量 + 模型用量环图（同在一个 .duo 里，整块隐藏）
+  hide(byId('statsReport'));
+
+  // ③ 缓存命中率四窗：容器 + 所在 boardsec 的 h3
+  //    ⚠ 24 小时趋势在**另一个** boardsec 里，不受影响（用户明确要保留）
+  const cc = byId('cacheCards');
+  if (cc) {
+    hide(cc);
+    const sec = cc.closest('.boardsec');
+    if (sec) hide(sec.querySelector('h3'));
+  }
+
+  window.__dashHid = true;
+}
+
+function renderModelRank(s) {
     const host = $('modelRank');
     if (!host) { return; }
     if (!s) { host.innerHTML = ''; return; }
     const detail = s.by_model_detail || {};
     const rows = Object.keys(detail).map(k => {
       const d = detail[k] || {};
-      const calls = num(d.calls) || 0;
+      // ⚠ 字段名必须是 `req`，不是 `calls`：后端 dimStat 的 JSON tag 是
+      //   `Req int64 \`json:"req"\``（internal/admin/admin.go）。我最初写这个函数时
+      //   凭印象用了 `calls`，结果次数排行永远是"所选范围内没有请求" —— 静默失败：
+      //   页面不报错，只是永远空着。
+      const calls = num(d.req) || 0;
       const ok = num(d.ok) || 0;
       return { model: k, calls, ok, rate: calls ? (ok / calls * 100) : null };
     }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 10);
@@ -7960,7 +8316,12 @@ let loginProvider = '';
     const ok = num(s.ok);
     const rate = (total && ok !== null) ? (ok / total * 100) : null;
     const avgMs = num(s.avg_total_ms);
-    const toks = num(s.tokens);
+    // ⚠ 2026-10-20 改口径：吞吐用**纯输出**（s.out_tokens）。
+    //   用 total 会把输入/缓存读取也算成"生成速度" —— 实测同一份数据
+    //   total 版 10490 t/s、输出版 250 t/s，前者是假的速度。
+    //   ⚠ 上一轮我改过一次但没生效：old_string 匹配到了文件里另一处同名行
+    //   （`const toks = num(s.tokens);` 不止一处）。这次用「紧跟 tps 计算」作锚点。
+    const toks = num(s.out_tokens);
     const tps = (avgMs && total && toks !== null && avgMs > 0)
       ? toks / ((avgMs * total) / 1000) : null;
     const parts = ['<span class="hb-title">性能健康</span>'];
@@ -7970,7 +8331,8 @@ let loginProvider = '';
     const detail = s.by_model_detail || {};
     const rows = Object.keys(detail).map(k => {
       const d = detail[k] || {};
-      const c = num(d.calls) || 0;
+      // ⚠ 同样是 `req` 不是 `calls`（见 renderModelRank 里的同一条注释）
+      const c = num(d.req) || 0;
       const o = num(d.ok) || 0;
       return { model: k, calls: c, rate: c ? (o / c * 100) : null };
     }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 5);
@@ -8043,8 +8405,33 @@ let loginProvider = '';
       ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
       ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
       // ⚠ F1 修复：不再 `tokens + think_tokens`（那会把推理算两遍）。两张卡各表一件事。
-      ['输出 token', fmtTokens(s.tokens), num(s.tokens) ? '' : 'dim'],
-      ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
+      // ⚠ 2026-10-20 加回「总处理量」（2026-10-20 用户授权推翻"只显示输出"的做法）。
+    //
+    //   出处：DSH 的 token-ledger-panel.js
+    //     total = inputTokens + cacheReadTokens + outputTokens   // 缓存写入不重复计入
+    //     lines.push('总处理量 = 输入 + 输出；缓存写入不重复计入')
+    //
+    //   我们的 s.tokens 就是上游 usage 的 total_tokens，而 total_tokens = prompt + completion
+    //   （prompt 已含 cached tokens）⇒ 与 DSH 那个式子**等价**，直接复用不必新算。
+    //
+    // ⚠ 2026-10-20 用户要求：三张卡合并成**一张「总 Token」**，与 new-api 一致。
+    //
+    //   改前：总处理量 / 输出 token / 推理 token 三张并列
+    //   改后：只有「总 Token」
+    //
+    // # 为什么是总 Token
+    //
+    //   new-api 的「Total Tokens」= Σ token_used = Σ(prompt_tokens + completion_tokens)
+    //   （model/log.go:395），它整个面板只有这一个 token 口径。
+    //   用户原话：「前端展示的全部都是总Token，不要输出Token了」。
+    //
+    // # ⚠ 哪些地方**不能**改成总 Token
+    //
+    //   tok/s（生成速度）必须继续用**输出** token —— 那是物理定义
+    //   （"生成 N 个字用了 T 秒"）。改用总 Token 会得出"每秒 40 万 token"这种荒谬读数，
+    //   因为输入里含几万到几十万的缓存上下文。
+    //   所以 fmtTps / tokPerSec 那一族仍然吃 out_tokens，不在本次改动范围。
+    ['总 Token', num(s.tokens) ? fmtTokens(s.tokens) : null, ''],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
       // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）
@@ -8191,11 +8578,16 @@ let loginProvider = '';
   // ⚠ `by_provider_detail` / `by_model_detail` 的每个值形如 `{req,ok,fail,tokens,…}`。
   function fillDonuts(s) {
     const rows = (det) => Object.entries(det || {}).map(([k, v]) => {
-      const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
       return [k, tk];
     }).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
-    renderDonutInto($('statsDonut'), $('statsDonutLegend'), rows(s && s.by_provider_detail), 'Token');
-    renderDonutInto($('statsModelDonut'), $('statsModelLegend'), rows(s && s.by_model_detail), 'Token');
+    renderDonutInto($('statsDonut'), $('statsDonutLegend'), rows(s && s.by_provider_detail), '总 Token');
+    renderDonutInto($('statsModelDonut'), $('statsModelLegend'), rows(s && s.by_model_detail), '总 Token');
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -8314,7 +8706,7 @@ let loginProvider = '';
       ['请求', String(p.total)],
       ['成功', String(p.ok)],
       ['失败', String(p.fail)],
-      ['Token', fmtTokensPlain(p.tokens)],
+      ['Token', fmtTokensPlain(p.tokens || 0)],
     ];
   }
 
@@ -8402,7 +8794,12 @@ let loginProvider = '';
     if (!el) return;
     let bestK = null, bestV = -1;
     for (const [k, v] of Object.entries((s && s.by_model_detail) || {})) {
-      const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
       if (tk > bestV) { bestV = tk; bestK = k; }
     }
     if (bestK) {
@@ -8498,15 +8895,59 @@ let loginProvider = '';
     const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
     const n = list.length;
 
-    // ⚠ 命中率：分母 0 ⇒ 记成 null（**不写读数**，但仍按 0% 画线 —— 它那句"按 0% 计"）
+    // ⚠ 2026-10-20 改（用户要求「统一」）：24h 趋势的命中率改为**当日累计到该整点**。
+    //
+    // # 改之前面板上有两个数并列，看起来自相矛盾
+    //     近 7 天表格  10/20 → 89%   （按**天**累加：Σhit / Σ(hit+miss)）
+    //     近 24h 趋势  18时  → 43%   （按**小时**独立：该小时的 Σhit / Σ(hit+miss)）
+    //   两者算法**完全相同**，差的只是桶粒度；但站在两个数前面的用户不会知道，
+    //   他只会觉得"同一份数据给了两个答案"。用户原话：
+    //     「这个缓存命中率有点低吧？这不对吧？这个能统一起来吗？」
+    //     「因为我们前端有很多缓存命中率的展示啊，那他展示一个，你展示一个，
+    //      都展示的不是同一个东西啊」
+    //
+    // ⇒ 现在每个点 = 从当日 0 点累计到该整点的比例。
+    //   于是 最后一个点 == 表格里今天的值 == 卡片上的值，三处永远是同一个数。
+    //
+    // # ⚠ 代价（写在这里，免得将来有人以为是 bug）
+    //   曲线会变单调平滑（累计量只增不减、分母同时变大），"某一小时质量差"被摊平。
+    //   但那个信息更适合用柱子看（Token 量），不适合用累计比例看。
+    //
+    // # ⚠ has 的语义保持"该整点有没有请求"
+    //   无请求的整点仍不标注读数（与原来一致），但它的 rate 仍是**累计值**（不是 0）
+    //   —— 否则曲线会因为"某小时没请求"掉到 0% 再弹回，被误读成"缓存突然全失效"。
     const rateOf = (p) => {
+      // 单点比例（非累计）：留给 tooltip 说明"这一小时本身"是多少
       const h = p.cache_hit || 0, m = p.cache_miss || 0;
       const den = h + m;
-      return { rate: den > 0 ? h / den : 0, has: den > 0 };
+      return { rate: den > 0 ? h / den : 0, has: den > 0, hit: h, miss: m };
     };
-    const rows = list.map((p) => ({
-      ts: String(p.ts || ''), total: p.total || 0, tokens: p.tokens || 0, ...rateOf(p),
-    }));
+    // 累计器：**按天重置**，得到"当日内累计到该整点"的比例。
+    //
+    // ⚠ 必须按天重置：这个 list 是"近 24 小时"的桶，**跨天**
+    //   （截图 x 轴就是 昨天19:00 → 今天07:00 → 今天19:00）。
+    //   若不重置，最后一个点 = 昨天19点到今天19点的累计，
+    //   而 7 天表格里 10/20 是**今天全天** —— 又变成两个不同的数了，
+    //   正是这次要消除的那个问题。
+    //   所以累计器遇到日期变化就清零，每个点只代表**它自己那天**的累计。
+    let cumHit = 0, cumMiss = 0, cumDay = '';
+    const rows = list.map((p) => {
+      const one = rateOf(p);
+      const day = String(p.ts || '').slice(0, 10);   // ts 是 RFC3339，前 10 字符是日期
+      if (day !== cumDay) { cumHit = 0; cumMiss = 0; cumDay = day; }   // ← 跨天重置
+      cumHit += one.hit;
+      cumMiss += one.miss;
+      const cden = cumHit + cumMiss;
+      return {
+        ts: String(p.ts || ''),
+        total: p.total || 0,
+        tokens: p.tokens || 0,
+        rate: cden > 0 ? cumHit / cden : 0,   // 画线：当日累计到该整点
+        has: one.has,                          // 读数是否标注：该整点有没有请求
+        hourRate: one.rate,                    // tooltip：该小时自身比例
+        hasHour: one.has,                      // tooltip：该小时有没有请求
+      };
+    });
 
     // ⚠ 命中率轴：上限按真实峰值抬、**下限 1（=100%）**、**不夹到 100%**
     const ratePeak = Math.max(...rows.map((r) => r.rate));
@@ -8573,23 +9014,35 @@ let loginProvider = '';
     svg.push(`<text id="ctRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
     host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
 
+    // ⚠ 2026-10-20 修（第二个隐患）：监听器用 host._ctBound **只绑一次**，
+    //   所以它闭包捕获的 rows / n / xAt 永远是**第一次渲染**那一份 ——
+    //   数据刷新后 hover 读到的还是旧值（不报错，只是数字不更新）。
+    //   这里每次重绘都把当次数据挂到 host 上，监听器通过 host 读，永远拿到当前值。
+    host._ctData = { rows, n, xAt, W, PADT, plotH };
     if (!host._ctBound) {                    // ⚠ 只绑一次（容器不被重绘，监听器能留住）
       host._ctBound = true;
       host.addEventListener('mousemove', (ev) => {
+        const d = host._ctData;   // ⚠ 当次渲染的数据（不是闭包快照）
         const el = host.querySelector('svg'), cur = host.querySelector('#ctCursor'), rd = host.querySelector('#ctRead');
-        if (!el || !cur || !rd) return;
+        if (!d || !el || !cur || !rd) return;
         const rect = el.getBoundingClientRect();
         const xv = (ev.clientX - rect.left) / rect.width * W;
         let best = -1, bd = 1e9;
-        for (let i = 0; i < n; i++) { const d = Math.abs(xAt(i) - xv); if (d < bd) { bd = d; best = i; } }
+        for (let i = 0; i < d.n; i++) { const dist = Math.abs(d.xAt(i) - xv); if (dist < bd) { bd = dist; best = i; } }   // ⚠ 内层变量不能叫 d（会遮蔽 host._ctData）
         if (best < 0) return;
-        const r = rows[best];
-        cur.setAttribute('x1', xAt(best).toFixed(1)); cur.setAttribute('x2', xAt(best).toFixed(1));
+        const r = d.rows[best];
+        cur.setAttribute('x1', d.xAt(best).toFixed(1)); cur.setAttribute('x2', d.xAt(best).toFixed(1));
         cur.style.display = 'block';
-        rd.setAttribute('x', Math.min(Math.max(xAt(best), 60), W - 60).toFixed(1));
-        // ⚠ 读数字段：该整点的时间 · 命中率（无数据写 —）· 请求数 · token
-        rd.textContent = r.ts.slice(11, 16) + '  命中率 ' + (r.has ? (r.rate * 100).toFixed(1) + '%' : '—')
-          + '  · 请求 ' + r.total + ' · ' + fmtTokensPlain(r.tokens);
+        rd.setAttribute('x', Math.min(Math.max(d.xAt(best), 60), W - 60).toFixed(1));
+        // ⚠ 读数字段：时间 · 当日累计命中率 · 本小时命中率 · 请求数 · 总 Token
+        // ⚠ 2026-10-20：曲线画的是**当日累计**（与 7 天表格/卡片同口径），
+        //   但鼠标点上同时给出"这一小时本身"的比例 —— 两个数都给，读者才不会被
+        //   "累计 89% 但这一小时只有 43%"搞糊涂。
+        rd.textContent = r.ts.slice(11, 16)
+        + '  累计 ' + (r.has ? (r.rate * 100).toFixed(1) + '%' : '—')
+        + (r.hasHour ? '  ·  本小时 ' + (r.hourRate * 100).toFixed(1) + '%' : '')
+        + '  ·  请求 ' + r.total
+        + '  ·  总 Token ' + fmtTokensPlain(r.tokens);
         rd.style.display = 'block';
       });
       host.addEventListener('mouseleave', () => {
@@ -8623,7 +9076,24 @@ let loginProvider = '';
     renderDailyTrendSVG(list);
   }
 
-  function renderDailyTrendSVG(list) {
+  // outOf(p) 一个 series 桶的**纯输出** token（Σ by_model_out）。
+//
+// ⚠ 2026-10-20 统一口径：热力图与近 7 天表格原来用 `p.tokens`（total，含缓存读取），
+//   而全局「输出 token」卡用的是 out_tokens ⇒ 同一天出现 102.3M vs 1.2M 的 85 倍冲突
+//   （用户报"数据不太准"）。现在所有**展示**都用这个函数取值。
+//
+// ⚠ 已知偏差（不是 bug，是数据边界）：无模型名的行不计入 by_model_out，
+//   所以这个值会略低于真实输出量。实测这类行占比很低。
+//   要彻底消掉偏差得让后端给 series 加顶层 out_tokens —— 那要动协议，留待以后。
+function outOf(p) {
+  // ⚠ 2026-10-20 用户要求「全部都用总 Token 展示，不是输出 Token，就和 NewAPI 一样」
+  //   ⇒ 所有调用点已改成 `p.tokens`（series 桶的顶层总 Token）。
+  //   这个函数**保留但不再被调用**：留着是因为将来若要恢复"纯输出"视角，
+  //   改调用点比重新写函数便宜；直接删掉会让历史注释里的引用断掉。
+  //   ⚠ 不要因为它是死代码就删 —— 它记录了 by_model_out 的求和方式。
+  return Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+}
+function renderDailyTrendSVG(list) {
     const host = $('dailyTrend');
     if (!host) return;
     const rl = $('dailyTrendRange');
@@ -8633,7 +9103,10 @@ let loginProvider = '';
          + String(list[0].ts || '').slice(0, 10) + ' ~ ' + String(list[list.length - 1].ts || '').slice(0, 10))
       : '';
 
-    const vals = list.map((p) => p.tokens || 0);
+    // ⚠ 2026-10-20 改口径：用**纯输出**（Σ by_model_out），不是 p.tokens（total）。
+    //   与热力图同一理由：标题写 "Token 趋势"，用户看的是"每天生成了多少"。
+    //   偏差同热力图：无模型名的行不计入（极少）。
+    const vals = list.map((p) => p.tokens || 0);   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
     const peak = vals.length ? Math.max(...vals) : 0;
     // ⚠ 全为 0 ⇒ 不画网格也不画柱（照它那句"否则整块图空得像渲染失败"）
     if (!list.length || peak <= 0) {
@@ -8697,6 +9170,29 @@ let loginProvider = '';
       // ⚠ **每根柱都标**（用户要求）；⚠ 值短（2.0M/178.1k），24 根柱排得下。
       //   峰值那根用强调色，其余常规色 —— 一眼仍能看出最高的那根。
       svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
+    }
+    // ⚠ 2026-10-20：在柱状之上叠加一条**折线**（用户明确要"折线图"）。
+    // # 为什么是叠加而不是切换
+    //   柱状给"每天多少"的绝对量（能比高低），折线给"走势"（能看出涨跌趋势）。
+    //   两者看的是同一件事的不同侧面，**同时显示比让用户切来切去更好** ——
+    //   而且不引入视图状态，少一处可能出错的地方。
+    // # 坐标复用已有变量，不自己算
+    //   cx(i) 与 yAt(v) 就是柱子的中心线与顶点，折线必须过它们，
+    //   否则线和柱会对不上（看起来像两个数据源）。
+    // ⚠ 只用有值的点连（v<=0 跳过）：把 0 也连进去会在"没数据的日子"画出
+    //   一条贴底的折线，让人误以为那天几乎没生成 —— 而真相是没有记录。
+    const linePts = [];
+    for (let i = 0; i < n; i++) {
+      if (vals[i] > 0) linePts.push(cx(i).toFixed(1) + ',' + yAt(vals[i]).toFixed(1));
+    }
+    if (linePts.length >= 2) {
+      svg.push(`<polyline points="${linePts.join(' ')}" fill="none" stroke="var(--acc)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>`);
+      // 数据点小圆：单点也能看见（折线至少要两点才成形，圆点补上这个缺口）
+      for (let i = 0; i < n; i++) {
+        if (vals[i] > 0) {
+          svg.push(`<circle cx="${cx(i).toFixed(1)}" cy="${yAt(vals[i]).toFixed(1)}" r="2.2" fill="var(--acc)" opacity="0.9"/>`);
+        }
+      }
     }
     // x 轴：首/中/末（⚠ 桶多时全标会糊）
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
@@ -8817,7 +9313,12 @@ let loginProvider = '';
     heatPickDays.clear();
     for (const p of list) {
       const k = String(p.ts || '').slice(0, 10);
-      heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: p.tokens || 0 });
+    // ⚠ 2026-10-20 二次改口径：着色用 `p.tokens`（total），与「总 Token」一致。
+    //   曾经用过 Σ by_model_out（纯输出），理由是"着色该反映生成了多少"；
+    //   但用户要求全部统一到总 Token，且柱状图已改，热力图必须同口径 ——
+    //   否则"柱子高但格子浅"会让人以为数据错位。
+    //   ⚠ 用户原话：「全部都用总 Token 展示，不是输出 Token，就和 NewAPI 一样」。
+    heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: p.tokens || 0 });   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
     }
 
     const lastKey = String(list[list.length - 1].ts || '').slice(0, 10);
@@ -8943,7 +9444,7 @@ let loginProvider = '';
           return;
         }
         out.className = 'heatpick';
-        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(p.tokens)} token`
+        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(p.tokens || 0)} token`
           + `（成功 ${p.ok} · 失败 ${p.fail}）`;
       });
     }
@@ -9112,8 +9613,7 @@ let loginProvider = '';
     '成功': 'HTTP 2xx 的请求数。',
     '失败': '非 2xx 的请求数（含 4xx/5xx 与上游错误）。',
     '成功率': '成功 / 总请求。分母为 0 时显示 —。',
-    '输出 token': '上游 usage 里的 completion_tokens（已含推理 token，不重复相加）。',
-    '推理 token': '输出 token 中属于推理（thinking）的部分 —— 它是上面那个数的子集。',
+    '总 Token': 'prompt_tokens + completion_tokens = 这次请求总共处理了多少 token（含上下文）。与 new-api 的 Total Tokens 同一口径（它的 token_used 就是这个加法，见 model/log.go:395）。',
     '平均 TTFB': '首字节平均耗时，只统计上报了该字段的请求（未上报的不计入分母）。',
     '平均总耗时': '从收到请求到响应结束的平均耗时。',
     'Top 模型': '本范围内**消耗 Token 最多**的模型（不是请求数最多）。',
@@ -9515,10 +10015,55 @@ let multCatalogFailed = false;
     return `<span class="mult${cls}" title="每次调用消耗 ${txt} 倍基础额度">x${esc(txt)}</span>`;
   }
 
+  // ── 上下文窗口标注（用户要求：能拿到的填，拿不到的不写/占位，且写清楚）──
+  //
+  // # 口径（两句话）
+  //
+  //	能拿到 → 显示「ctx 1M」这样的数字
+  //	拿不到 → 显示「ctx ?」，title 里写明这是上游没报，不是 0
+  //
+  // # 为什么不直接不显示
+  //
+  // 完全不显示时，用户分不清「这个模型窗口很小」和「我们不知道它多大」——
+  // 前者会影响他选哪个模型，后者不影响。两种都留白等于把这两种情况混成一团。
+  //
+  // 但也**不能**编一个数字：ctx 决定客户端要不要提前压缩历史，
+  // 报大了会让它塞太多然后被上游截断，报小了会让它过早 compact。
+  // 所以占位用「?」而不是任何数字。
+  function fmtCtx(n) {
+    // 显示成 1M / 200K / 131072 三档。
+    //
+    // 1M/200K 这类整数近似只用于**一眼可比**；精确值放 title，
+    // 需要精确的客户端会读 /v1/models 的原始字段，不靠这个标注。
+    if (!Number.isFinite(n) || n <= 0) return '';
+    if (n >= 1000000 && n % 100000 === 0) return (n / 1000000) + 'M';
+    if (n >= 1000 && n % 1000 === 0) return (n / 1000) + 'K';
+    return String(n);
+  }
+  
+  // ctxTag 生成 chip 上的窗口标注。
+  //
+  // 拿不到时返回占位「ctx ?」—— 而不是空串。理由见上方注释：
+  // 留白会让「窗口小」与「不知道」看起来一样。
+  function ctxTag(m) {
+    const c = fmtCtx(m && m.ctx);
+    if (!c) return '<span class="ctx unknown" title="上游没有提供这个模型的上下文窗口大小；'
+      + '这不代表它是 0，只代表我们不知道。需要精确值时请查上游文档">ctx ?</span>';
+    const out = fmtCtx(m && m.maxOut);
+    const title = '上下文窗口 ' + (m.ctx) + ' token'
+      + (out ? '；单次最大输出 ' + m.maxOut + ' token' : '；单次最大输出：上游未提供');
+    return '<span class="ctx" title="' + esc(title) + '">ctx ' + esc(c) + '</span>';
+  }
+  
+
+  
   function renderModels(list) {
     models = list || [];
-    $('mcount').textContent = models.length ? '（' + models.length + ' 个，上游实时目录）' : '';
-    if (!models.length) { $('models').innerHTML = '<span class="dim">无可用模型</span>'; return; }
+    if (!models.length) {
+      $('mcount').textContent = '';
+      $('models').innerHTML = '<span class="dim">无可用模型</span>';
+      return;
+    }
 
     // 按上游分组渲染（T5）。三件事一起做：
     //   1. **去重**：按去掉前缀后的**裸名**去重（见 groupModelsByOwner），
@@ -9530,8 +10075,38 @@ let multCatalogFailed = false;
     //      （改造前实测过 32 条 = 16 个模型 × 2 种写法），界面也不会重复。
     //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
     //   3. **可折叠**：状态存 localStorage，刷新后保持。
-    const groups = groupModelsByOwner(models, emptyModelGroups());
-    $('models').innerHTML = groups.map(renderModelGroup).join('');
+    const allGroups = groupModelsByOwner(models, emptyModelGroups());
+    // ⚠ 用户口径（2026-10-21，第二次追问后定案）：**没有可用账号的上游整组不显示**，
+    // 连内置声明也不显示。
+    //
+    // # 为什么要过滤，而不是"标来源"就够了
+    // 上一版给内置声明加了「N 项内置声明 · 无可用账号」的标注，用户仍然追问
+    // 「为什么有这三个」—— 说明在"能调用什么"这个面板里，**不可调用的条目本身就是噪声**：
+    // 读者不会去读小字说明，他只会看到模型名并以为能用。
+    // 数据来源是 `internal/loomy/imagegen_ext.go` 的 `imageModelIDs`（生图模型的内置声明，
+    // 不带账号也在 /v1/models 里），API 那一层不动（客户端仍能据此知道上游支持生图），
+    // 只在**这个面板**按"有没有可用账号"过滤。
+    //
+    // # 空白仍要能自我解释（本项目既有纪律）
+    // 过滤后如果一组都不剩，不是把页面留白，而是给一句能照做的话。
+    // ⚠ 判据必须是"**明确知道** 0 个账号"，不是"不 > 0"：
+    // 未知（manifest 还没到 / 上游没报 account_count）一律照旧显示 ——
+    // 否则页面在 manifest 到达前会先闪一次"没有可用账号"，那是最糟的空态。
+    const groups = allGroups.filter(g => !(g.accountCount === 0));
+    // 被藏起来的上游集合：下拉（对话测试）也要一起隐藏，否则"面板藏了、下拉还在"。
+    const noAcctOwners = new Set(allGroups.filter(g => g.accountCount === 0).map(g => g.owner));
+    const visibleModels = models.filter(m => !noAcctOwners.has(modelOwnerOf(m.id, m.owned_by)));
+    // 顶栏口径：只统计**真正显示出来**的条目，数字必须与 chips 一致。
+    // （默认全是实时目录；仍保留"内置声明"分支 —— 有账号但目录来自内置表的场景将来会出现。）
+    const builtinCount = groups.reduce((n, g) => n + ((g.accountCount === 0) ? g.items.length : 0), 0);
+    $('mcount').textContent = visibleModels.length
+      ? '（' + visibleModels.length + ' 个'
+        + (builtinCount ? ' · ' + builtinCount + ' 项内置声明，无可用账号' : '，上游实时目录')
+        + '）'
+      : '';
+    $('models').innerHTML = groups.length
+      ? groups.map(renderModelGroup).join('')
+      : '<span class="dim">没有可用账号，无法获取模型目录。先在「账号池」添加账号。</span>';
     const sel = $('model'), keep = sel.value;
     // T7：模型下拉按上游筛选，并按 id **去重**。
     //
@@ -9546,11 +10121,13 @@ let multCatalogFailed = false;
     // 两边都显示**完整 id**，两边都去重（chip 区按裸名去重、这里按 id 去重）。
     //
     // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
-    syncModelProviderOptions(models);
+    // 上游下拉与模型下拉都用**过滤后**的列表：面板里藏起来的上游，
+    // 下拉里也不该还能选到（否则"选一个不可调用的模型"是纯粹的坑）。
+    syncModelProviderOptions(visibleModels);
     const wantP = modelProviderFilter();
     const filtered = wantP
-      ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
-      : models;
+      ? visibleModels.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
+      : visibleModels;
     // 去重：同一个 id 只留第一条（保留上游返回的原始顺序，选择行为可预期）。
     const seen = new Set();
     const shown = [];
@@ -9594,12 +10171,14 @@ let multCatalogFailed = false;
 
   // modelOwnerOf 从模型 id 推断上游归属（T7）。
   //
-  // 与 groupModelsByOwner 用同一条规则：前缀优先，否则 owned_by。
-  // 抽出来共用是为了**两处判据只有一份** —— 否则筛选与分组会漂移
-  // （典型表现：分组里算 workbuddy，筛选时却算成别的）。
+  // ⚠ 实现已抽到**共享层** internal/server/model-picker.js（mpOwnerOf），
+  // 由 tools/model_picker_sync.js 注入到本页顶部。这里保留一层薄委托，
+  // 为的是不动本文件里 7 处既有调用点（改签名/改名会牵一大片）。
+  //
+  // 为什么必须真共享而不是各写一份：分组页第一版就重写了一遍，结果
+  // 形态与规则双双漂移（按钮条 vs 下拉、无 owned_by 兜底），用户当场指出。
   function modelOwnerOf(id, ownedBy) {
-    const s = String(id || '').indexOf('/');
-    return s > 0 ? String(id).slice(0, s) : (ownedBy || '');
+    return mpOwnerOf(id, ownedBy);
   }
 
   // modelProviderFilter 当前选中的上游（空串 = 全部）。
@@ -9649,19 +10228,12 @@ let multCatalogFailed = false;
   function syncModelProviderOptions(list) {
     const el = $('modelProvider');
     if (!el) return;
-    const owners = [];
-    for (const m of list) {
-      const o = modelOwnerOf(m.id, m.owned_by);
-      if (o && owners.indexOf(o) < 0) owners.push(o);
-    }
-    owners.sort((a, b) => providerRank(a) - providerRank(b));
-    const keep = modelProviderWanted;
-    el.innerHTML = '<option value="">全部上游</option>'
-      + owners.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
-    // 选项就绪后把「想要的」写回 DOM。
-    // 不在列表里（上游被移除）则回落「全部」——
-    // 留着一个不存在的值会让 select 显示空、而内层 value 还是旧的。
-    setModelProviderFilter(owners.indexOf(keep) >= 0 ? keep : '');
+    // 排序用 providerRank（manifest 顺序），但**去重/兜底/回填**全走共享层。
+    // 回填必须发生在 innerHTML 之后（select 会把不存在的值归一成空串），
+    // 这一步由 mpFillProviderSelect 内部保证。
+    const got = mpFillProviderSelect(el, list, providerRank, '全部上游');
+    // 模块变量与 DOM 的同步是本页特有的（对话测设要按它选模型），共享层不管。
+    setModelProviderFilter(got);
   }
 
   // groupModelsByOwner 把模型列表按上游归组并去重。
@@ -9704,7 +10276,11 @@ let multCatalogFailed = false;
       const p = providerInfo(id);
       if (!p) continue;
       if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
-      out.push({ owner: id, accountCount: Number(p.account_count) || 0 });
+      out.push({
+        owner: id,
+        accountCount: (p.account_count === undefined || p.account_count === null)
+          ? null : (Number(p.account_count) || 0),
+      });
     }
     return out;
   }
@@ -9728,7 +10304,19 @@ let multCatalogFailed = false;
       const bare = multKeyOf(m.id);
       // 归属：前缀优先（它就是显式指定的上游），否则用 owned_by。
       const owner = prefix || m.owned_by || '（未标注）';
-      if (!byOwner.has(owner)) byOwner.set(owner, { owner: owner, items: [], seen: new Set() });
+      // accountCount 对**所有**组都要有（原来只有空组带它）：
+      // 渲染层要用它区分"实时目录"与"内置声明下但无账号" ——
+      // 缺这个字段时 accountCount 恒为 undefined ⇒ 那三种"没有"又分不开了。
+      if (!byOwner.has(owner)) {
+        const pi = providerInfo(owner);
+        // accountCount 三态：数字 = 真实账号数；**null = 未知**（manifest 未到 / 上游没报）。
+        // 不能把"未知"折成 0 —— 那会让"没账号的上游隐藏"这条规则在 manifest 到达前误伤全部上游。
+        byOwner.set(owner, {
+          owner: owner, items: [], seen: new Set(),
+          accountCount: (pi && pi.account_count !== undefined && pi.account_count !== null)
+            ? (Number(pi.account_count) || 0) : null,
+        });
+      }
       const g = byOwner.get(owner);
       if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
       g.seen.add(bare);
@@ -9739,11 +10327,20 @@ let multCatalogFailed = false;
       // ⚠ 去重仍按**裸名**（上面的 g.seen 用的就是 bare）：`auto` 与
       // `workbuddy/auto` 指的是同一个模型，只按完整 id 去重会让它们在同一组里
       // 各占一条 —— 名字看起来一模一样，用户看到的仍然是"重复"。
-      // 按裸名去重才是他要的"不要重复"。
+        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
       //
       // 倍率查表不受影响：multTag 内部经 multTableKey 归一后再查
       //（倍率表的键是上游目录里的裸名，且只覆盖默认上游，见 multTableKey 的注释）。
-      g.items.push({ id: m.id, fullId: m.id, owner: owner });
+      // 带上窗口元数据：chip 上要显示「ctx 1M」这类标注，
+      // 不给它就没法显示（之前只留 id/fullId/owner，元数据在这一步丢失）。
+      //
+      // ⚠ 上游没报时这两个字段**不存在**（后端按"未知就不写"输出），
+      //   所以这里刻意不写默认值 —— undefined 会在渲染层变成"不显示"，
+      //   而写 0 会变成"窗口大小为 0"这个确切的假事实。
+      g.items.push({
+        id: m.id, fullId: m.id, owner: owner,
+        ctx: m.context_length, maxOut: m.max_output_tokens,
+      });
     }
     // 组间按 manifest 上游顺序排序（providerRank）；组内按名字排序（顺序稳定，便于扫读）。
     const out = Array.from(byOwner.values());
@@ -9765,23 +10362,30 @@ let multCatalogFailed = false;
     // 改为一句能自我解释的说明 —— 见 emptyModelGroups 的注释：
     // **空白必须能自我解释**，否则用户只会以为功能坏了。
     let body;
+    // "有模型但是 0 个账号"是最容易骗人的一格：模型来自**内置手册快照**
+    // （不是上游实时目录），当前根本调不动。所以它必须与"实时目录"长得不一样：
+    // 分组标题写"内置 N 项 · 无可用账号"，正文上方再压一行说明。
+    const builtin = g.items.length > 0 && g.accountCount === 0;
     if (!g.items.length) {
       const why = (g.accountCount === 0)
         ? '没有可用账号，无法获取模型目录。先在「账号池」添加账号。'
         : '上游没有返回模型目录（账号可用但目录为空）。可用「强制刷新目录」重试。';
       body = `<div class="chips"><span class="dim" style="font-size:12px">${esc(why)}</span></div>`;
     } else {
-      body = `<div class="chips">${g.items.map(m =>
+      const note = builtin
+        ? `<div class="dim" style="font-size:11.5px;margin:0 0 6px">无可用账号：以下 ${g.items.length} 项来自<b>内置手册快照</b>，不是上游实时目录，当前不可调用。添加到「账号池」后才会拉取实时目录。</div>`
+        : '';
+      body = note + `<div class="chips">${g.items.map(m =>
         `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
-        + `${esc(m.id)}${multTag(m.id)}</span>`).join('')}</div>`;
+        + `${esc(m.id)}${multTag(m.id)}${ctxTag(m)}</span>`).join('')}</div>`;
     }
     return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
       <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
               aria-expanded="${open ? 'true' : 'false'}"
-              title="${esc(g.owner)} · ${g.items.length} 个模型（点标题折叠/展开）">
+              title="${esc(g.owner)} · ${builtin ? ('内置声明 ' + g.items.length + ' 项，无可用账号（不是实时目录）') : (g.items.length + ' 个模型')}（点标题折叠/展开）">
         <span class="mcaret"></span>
         <span class="mowner">${esc(g.owner)}</span>
-        <span class="mcount2">${g.items.length} 个模型</span>
+        <span class="mcount2">${builtin ? (g.items.length + ' 项内置声明 · 无可用账号') : (g.items.length + ' 个模型')}</span>
       </button>
       ${body}
     </div>`;
@@ -10140,7 +10744,7 @@ let multCatalogFailed = false;
     // ⚠ 比对字段也必须是这张图真画的东西：token 总量 + by_model。
     //   改造前它比的是 total/ok/fail（那时画的是请求量折线）；如今画 token 分布，
     //   继续比请求数就会出现"请求数没变、token 翻倍却不重绘"—— 画面停在旧值上。
-    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.tokens || 0, p.by_model || null]));
+    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.tokens || 0, p.by_model_out || null]));
     if (digest === trendSeries._last) return;
     trendSeries._last = digest;
     // 留一份最近数据：柱状 / 面积切换要重画同一份数据，不该再去拉一次网络。
@@ -10192,16 +10796,21 @@ let multCatalogFailed = false;
     const rows = Array.isArray(list) ? list : [];
 
     // ── 1. 逐桶归一 ──
-    // ⚠ `by_model` 是 omitempty：该桶没有 token 用量时**整个键都不存在** ⇒ 一律 `|| {}`。
-    // ⚠ 柱高取 max(tokens, Σby_model)：两者本该相等，但 by_model 是后加的字段，
-    //   历史桶可能只有 tokens 没有明细（或反过来）—— 取大值才不会因为缺一边把柱画矮。
+    // ⚠ 用 `by_model_out`（**纯输出** token），不是 `by_model`（total=输入+输出）。
+    //   用户的判断是对的：按 total 画时"一小时消耗 2.9M"，而其中真正生成的只有约 1.3 万
+    //   （其余是缓存读取的上下文）。那种图会让人以为模型每小时吐 290 万字。
+    // ⚠ 它是 omitempty：没有输出用量的桶**整个键都不存在** ⇒ 一律 `|| {}`。
+    // ⚠ 柱高**只**取 Σby_model_out，不再与 tokens 取 max：
+    //   tokens 是 total，两者数量级差几十倍，取 max 等于把 total 又画回来。
+    //   历史桶没有 out_tokens（字段 2026-10-20 才加）⇒ 柱高 0 ⇒ 那部分不显示，
+    //   这是诚实的：那时确实没记录输出量。
     const buckets = rows.map((p) => {
-      const m = (p && p.by_model) || {};
+      const m = (p && p.by_model) || {};   // ⚠ 2026-10-20 改：by_model 是 total（输入+输出），与「总 Token」一致
       let sum = 0;
       for (const k of Object.keys(m)) { const v = Number(m[k]) || 0; if (v > 0) sum += v; }
       return {
         ts: String((p && p.ts) || ''), models: m, sum,
-        total: Math.max(Number(p && p.tokens) || 0, sum),
+        total: sum,
       };
     });
     const peak = buckets.reduce((a, b) => Math.max(a, b.total), 0);
@@ -10477,6 +11086,7 @@ let multCatalogFailed = false;
         try { fillDonuts(d); } catch (e) { console.error('fillDonuts 失败:', e && e.message); }
         try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
         try { fillCacheRates(d); } catch (e) { console.error('fillCacheRates 失败:', e && e.message); }
+    try { hideRemovedBlocks(); } catch (e) { console.error('hideRemovedBlocks 失败:', e && e.message); }
         // ⚠ 最后无条件回填那两格 —— 它俩的值不在 `d` 里（来自 series），
         //   而上面的 renderStats 刚重建过卡片把它们清空了（见 dayCardVals 的注释）。
         try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
@@ -10623,12 +11233,50 @@ let multCatalogFailed = false;
   // 复用 tokPerSec（与请求日志表格同口径：tokens<0 视为缺失显示 -）。
   function testUsageLine(usage, totalMs) {
     if (!usage || typeof usage !== 'object') return '';
-    const p = usage.prompt_tokens, c = usage.completion_tokens;
-    const np = Number(p), nc = Number(c);
-    const total = (Number.isFinite(np) && np > 0 ? np : 0) + (Number.isFinite(nc) && nc > 0 ? nc : 0);
-    const pt = Number.isFinite(np) ? np : '-';
-    const ct = Number.isFinite(nc) ? nc : '-';
-    return ` · prompt ${pt} / completion ${ct} · 共 ${total} tokens · ${tokPerSec(total, totalMs)} tok/s`;
+  // ⚠ 2026-10-20 照 DSH 的 token-ledger-panel.js 改成分项结构：
+  //     total = inputTokens + cacheReadTokens + outputTokens（缓存写入不重复计入）
+  //   缓存命中按 wire.ParseUsageExtras 的三级取值（顶层显式 → 顶层简写 → 嵌套），
+  //   与后端同一套口径 —— 否则前后端对同一条请求会算出不同的缓存量。
+  const numT = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
+  const promptTok = numT(usage.prompt_tokens);
+  const outTok = numT(usage.completion_tokens);
+    // ⚠ 必须区分「输出 0」与「没上报输出」。上游没给 completion_tokens 时，
+    //   numT 会返回 0，直接显示"输出 0"会让人以为这条请求没生成任何内容 ——
+    //   而真相是这个字段缺失。约束里写死了：缺字段显示空，不回退成别的数。
+    const hasOut = ('completion_tokens' in usage)
+      && Number.isFinite(Number(usage.completion_tokens))
+      && Number(usage.completion_tokens) >= 0;
+  const cachedTok = numT(usage.prompt_cache_hit_tokens)
+    || numT(usage.cached_tokens)
+    || numT((usage.prompt_tokens_details || {}).cached_tokens);
+  const reasoningTok = ('completion_thinking_tokens' in usage)
+    ? numT(usage.completion_thinking_tokens)
+    : numT((usage.completion_tokens_details || {}).reasoning_tokens);
+  // 总 Token = 输入 + 输出（缓存写入不重复计入）—— 与指标卡「总 Token」同一口径
+  const totalTok = promptTok + outTok;
+    // ⚠ 上一版的 p / np / total / pt / ct 五个变量已随改写失效，在此清掉。
+    //   留着不报错（JS 允许未使用变量、门禁只查语法），但它们是噪音 ——
+    //   下一个人读到 `total` 会以为它还在参与计算，实际早已无人引用。
+    // ⚠ 原这里是 `tokPerSec(ct, totalMs, e && e.ttfb_ms, e && e.mode)` —— `e` 在本函数里
+  //   **根本不存在**（是别处的作用域变量），调用即 ReferenceError。
+  //   对话测试这条链路没有 ttfb 上报，所以第 3 参传 0（速度会略偏低，但比抛异常好）；
+  //   第 4 参传 'stream'（这是流式对话测试，非流式不适用）。
+  const tps = tokPerSec(outTok, totalMs, 0, 'stream');
+  // 缺输出字段时，总量与输出都显示 —（总量 = 输入 + 输出，输出未知则总量也未知）
+  const outLabel = hasOut ? String(outTok) : '—';
+  const totalLabel = hasOut ? String(totalTok) : '—';
+  const lines = [
+    '总 Token ' + totalLabel + (hasOut ? '（输入 ' + promptTok + ' + 输出 ' + outTok + '）' : '（输出未上报）'),
+    '↑ 输出 ' + outLabel,
+  ];
+  if (cachedTok > 0) lines.push('⚡ 缓存命中 ' + cachedTok);
+  if (reasoningTok > 0) lines.push('🧠 推理 ' + reasoningTok + '（已包含在输出中）');
+  lines.push('输出速度 ' + tps + ' tok/s');
+  // ⚠ 每条独占一行（`\n` 而非 ` · ` 连接）。
+  //   这里的结果是塞进 out.textContent（纯文本输出区），`\n` 一定生效；
+  //   而用 ` · ` 连成一行时，真实数据那条有 94 个字符 —— 在窄容器里会拖成一长条，
+  //   用户得横向扫读才能对上"哪个数是哪个"。DSH 的 token-ledger-panel 也是分行的。
+  return '\n' + lines.join('\n');
   }
 
   async function send() {
@@ -10979,7 +11627,33 @@ let multCatalogFailed = false;
         hd.setAttribute('aria-expanded', next ? 'true' : 'false');
         return;
       }
-      const c = e.target.closest('.chip'); if (c) $('model').value = c.dataset.id;
+      // 模型卡片（chip）：点一下**复制完整模型名**，同时仍填进对话测试的下拉。
+      //
+      // # 为什么复制是主行为（2026-10-25 用户要求）
+      //
+      // 这一整块是「看有哪些模型」的全景面板。用户点它的目的绝大多数是
+      // 「把这个模型名拿去用」—— 贴到 curl、贴到别的客户端、贴给同事。
+      // 原来只把值塞进下面的下拉，等于逼用户从面板上**手抄**模型名，
+      // 而卡片上的名字是截断显示的（长名字放不下），手抄必然抄错。
+      //
+      // 保留填下拉：那是既有行为，删掉会让「先点模型再点对话测试」这条路径断掉。
+      // 两件事不冲突 —— 复制是副作用，填下拉是状态变更。
+      //
+      // ⚠ 复制用 data-id（完整 id），不用卡片上的可见文字：
+      //   可见文字经过 esc() 且可能被截断，data-id 才是原值。
+      //   这正是「复制完整模型名」的字面要求。
+      const c = e.target.closest('.chip');
+      if (c) {
+        const id = c.dataset.id || '';
+        if (id) {
+          copyText(id, '模型名');
+          // 填下拉只在选项里真的存在时做 —— 面板里的模型未必在当前筛选的
+          // 下拉里（下拉按上游筛过）。直接赋值会得到「选了但看不到」的状态，
+          // 比不填更让人困惑。
+          const sel = $('model');
+          if (sel && Array.from(sel.options || []).some(o => o.value === id)) sel.value = id;
+        }
+      }
     });
     // T7：切换上游筛选 → 重填模型下拉 → 记住选择。
     //
@@ -11374,6 +12048,25 @@ let multCatalogFailed = false;
     // logViewSuspended 的声明在上方（与 logEntries 一起），不在这里 ——
     // 放这里会造成 TDZ（loadLogHistory 定义在前、首次调用更早）。
 
+    // 状态码卡片：事件委托挂在**容器**上。
+    //
+    // 为什么必须委托：卡片是 renderLogStatusBar 每次整块重绘出来的，
+    // 挂到卡片自己身上会在第一次重绘后全部失效（本文件模型 chip 那处
+    // 踩过同形的坑）。容器本身是静态 HTML，一生只绑一次。
+    //
+    // ⚠ data-logst="" 表示「全部」，与 data-logst="200" 必须能区分开 ——
+    //   用 dataset.logst === '' 判，不能靠真假值（'0' 也是真值，0 状态码
+    //   目前不会出现，但别把判断写成依赖这一点）。
+    const logStBox = $('logStatusBar');
+    if (logStBox) {
+      logStBox.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-logst]');
+        if (!b) return;
+        const raw = b.dataset.logst;
+        setLogStatus(raw === '' ? null : Number(raw));
+      });
+    }
+
     // 初始绑定：按钮此时是"清屏"形态
     $('btnLogClear').onclick = () => {
       logEntries = [];
@@ -11381,6 +12074,8 @@ let multCatalogFailed = false;
       $('logrows').innerHTML = logPlaceholder(
         '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
       $('logPager').innerHTML = '';
+      // 卡片条同样清掉：屏幕已经清空，留着一排统计数字会让人以为下面还有内容。
+      hideLogStatusBar();
       // 把清屏按钮换成"恢复显示"，让用户有明确的回头路
       setLogClearButton(true);
     };
@@ -11400,6 +12095,7 @@ let multCatalogFailed = false;
                                 $('logrows').innerHTML = logPlaceholder(
                                   '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
                                 $('logPager').innerHTML = '';
+                                hideLogStatusBar();
                                 setLogClearButton(true);
                               };
     }
@@ -11441,23 +12137,29 @@ let multCatalogFailed = false;
     // ── API Key 弹窗的控件接线 ────────────────────────────────────────────
     $('akCancel').onclick = closeAPIKeyModal;
     $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
-    $('akAll').onchange = syncAKPicker;
-    // 搜索：把"即将被隐藏"的勾选先记下来（隐藏 ≠ 取消勾选，见 akHiddenChecked）。
-    $('akSearch').oninput = () => { stashAKChecked(); renderAKModelList(); };
-  // 切上游：只重渲染列表（勾选状态由 stashAKChecked/akSelected 保住 ⇒ 换上游不会丢掉已勾的模型）。
-  if ($('akProvider')) $('akProvider').onchange = () => { stashAKChecked(); renderAKModelList(); };
-    $('akSelAll').onclick = () => {
-      document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = true; });
-      stashAKChecked(); updateAKCount();
-    };
-    $('akSelNone').onclick = () => {
-      document.querySelectorAll('#akModelList input[data-akm]').forEach(cb => { cb.checked = false; });
-      akHiddenChecked = new Set(); updateAKCount();
-    };
-    // 勾选变化 → 更新计数。委托在容器上，列表重渲染后依然有效。
-    $('akModelList').addEventListener('change', ev => {
-      if (ev.target.matches('input[data-akm]')) { stashAKChecked(); updateAKCount(); }
-    });
+  $('akCancel').onclick = closeAPIKeyModal;
+  $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
+
+  // 勾选分组 → 更新计数与别名候选。委托在容器上，列表重渲染后依然有效。
+  $('akGroupList').addEventListener('change', ev => {
+    const cb = ev.target.closest('input[data-akg]');
+    if (!cb) return;
+    if (cb.checked) { akPickedGroups.add(cb.dataset.akg); }
+    else { akPickedGroups.delete(cb.dataset.akg); }
+    renderAKGroupChips();
+    updateAKCount();
+  });
+  // 「已选分组」里的 × —— 取消该分组（同时把列表里的勾去掉）。
+  //
+  // ⚠ 用事件委托而不是给每个 chip 绑 onclick：chip 的 innerHTML 每次重画
+  //   都会重建，绑在元素上的处理器会被一起丢掉（表现是"第一次能点、之后没反应"，
+  //   且不报错）。
+  $('akGroupChips').addEventListener('click', ev => {
+    const btn = ev.target.closest('button[data-akgunpick]');
+    if (!btn) return;
+    akPickedGroups.delete(btn.dataset.akgunpick);
+    renderAKGroupList();
+  });
     // 点遮罩关闭（点面板内部不关）。
     $('akModal').addEventListener('click', ev => { if (ev.target.id === 'akModal') closeAPIKeyModal(); });
     // Esc 关闭。
