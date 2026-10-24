@@ -9911,7 +9911,21 @@ let loginProvider = '';
     renderAPIKeys(list);
   }
 
+  // settingsSaving 保存请求在途。
+  //
+  // # 为什么需要它（同一条报障的另一半）
+  //
+  // 点「保存设置」时若焦点还在某个数字框里，浏览器会先给那个框派发 `change`
+  // （blur 提交），再派发按钮的 `click`。这条 change 会走 `#content` 的委托
+  // ⇒ `markDirty(true)`。正常时序下它发生在 PUT 之前、随后被 `fillSettings`
+  // 清掉；但只要有任何一次事件落在 PUT 返回**之后**（慢请求、或用户在等待期间
+  // 又碰了一下控件），顶部就会重新挂上「有未保存的修改」—— 而那一刻服务端
+  // 其实已经存好了，用户看到的是一个**说反话**的提示。
+  // ⇒ 保存在途期间一律不标脏；收尾时由 fillSettings 统一清一次。
+  let settingsSaving = false;
+
   function markDirty(on) {
+    if (on && settingsSaving) return;   // 保存途中不标脏（见 settingsSaving）
     $('settingsDirty').textContent = on ? '（有未保存的修改）' : '';
     $('settingsDirty').style.color = on ? 'var(--warn)' : '';
   }
@@ -9931,15 +9945,19 @@ let loginProvider = '';
     // body 里不再有这两个键，原来的"时点不能为空"校验随之删除。
     const btn = $('btnSettingsSave');
     btn.disabled = true;
+    settingsSaving = true;
     try {
       const r = await admin('/admin/settings', { method: 'PUT', body: JSON.stringify(body) });
+      // fillSettings 末尾会 markDirty(false) —— 保存成功 = 界面与磁盘一致 = 不脏。
       fillSettings(r.settings, r);
       const nr = (r.need_restart || []).length;
       toast(`设置已保存并写入 config.json：${(r.applied || []).length} 项立即生效`
         + (nr ? `，另有 ${nr} 项需重启网关才生效` : ''), false);
     } catch (e) {
       toast('保存失败：' + e.message, true);
+      // 保存失败**保持脏**：界面上的值确实还没落盘，这时候清掉提示才是骗人。
     } finally {
+      settingsSaving = false;
       btn.disabled = false;
     }
   }
@@ -15029,8 +15047,27 @@ let multCatalogFailed = false;
     });
     $('btnSettingsSave').onclick = saveSettings;
     $('btnSettingsReload').onclick = () => { loadSettings(); toast('已放弃未保存的修改'); };
-    $('content').addEventListener('input', () => markDirty(true));
-    $('content').addEventListener('change', () => markDirty(true));
+    // 只有**设置页里**的控件改动才算「有未保存的修改」。
+    //
+    // # 为什么必须限定范围（2026-10-25 用户报障「保存后仍显示有未保存的修改」）
+    //
+    // 这两条委托原先挂在 `#content`（**整个**内容区）上，而且回调**不看事件源**：
+    //
+    //     $('content').addEventListener('input',  () => markDirty(true));
+    //     $('content').addEventListener('change', () => markDirty(true));
+    //
+    // 而 `#content` 里装着**所有**面板 —— 对话测试的输入框、成长计划的下拉、
+    // API Key 弹窗、日志筛选…… 于是在任何一个面板动一下控件都会把**设置页**标脏；
+    // 而清脏只有一条路（`fillSettings` 末尾那次 `markDirty(false)`，它只在
+    // 「进入设置页 / 保存成功」时跑）。用户读到的是「设置页顶部一直挂着未保存的修改」，
+    // 可是设置根本没动过 —— 保存一百次也不会消失，因为下一次在别处动控件又把它标回来。
+    //
+    // 判据用 `closest('section[data-key="settings"]')`：设置页就是 HTML 里那块
+    // `<section data-key="settings">`，它的可编辑控件全在它内部。
+    // ⚠ 不能用 `#setPanel` 之类的新 id —— 那要改 HTML 结构；data-key 是既有锚点。
+    const inSettingsPanel = (t) => !!(t && t.closest && t.closest('section[data-key="settings"]'));
+    $('content').addEventListener('input', (ev) => { if (inSettingsPanel(ev.target)) markDirty(true); });
+    $('content').addEventListener('change', (ev) => { if (inSettingsPanel(ev.target)) markDirty(true); });
     // 通用上游面板的写操作委托：在 #content 上**只绑一次**（评审 F2）。
     // 放在 boot 里而不是 loadGenericList 里 —— 后者每 5 秒都会跑一次，
     // 在里面绑就退回了原来那个"监听器随刷新增长"的 bug。
