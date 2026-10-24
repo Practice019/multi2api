@@ -51,6 +51,18 @@ type uiManifest struct {
 	AdminRoutes []uiAdminRoute `json:"admin_routes"`
 	// Jobs 已注册的定时任务运行状态。
 	Jobs []uiJob `json:"jobs"`
+	// JobCoverage 任务覆盖检查：哪些上游**有能力**做每日签到 / 凭据续期，
+	// 但**没有注册**对应定时任务。
+	//
+	// # 为什么单独下发（真实故障）
+	//
+	// 2026-10-25 monkeycode 的签到驱动早就实现好了（按钮能点、手动能签、历史会写），
+	// 但没实现 gateway.JobExt 的 Jobs()，调度器**静默跳过**它 —— 于是永远不自动跑。
+	// 补上 Jobs() 就好，但下一个上游还会踩：这是契约的一环没人守。
+	// 本字段把它变成运行期可见，缺的标红，不用等用户发现。
+	//
+	// 判据见 jobcover.go 的 jobCoverageOf（分「有能力 / 注册了 / 配对正确」三层）。
+	JobCoverage []jobCoverage `json:"job_coverage"`
 	// DailyActions 上游自报的"每日动作"（签到 / 保活 / 领取福利…）。
 	//
 	// # 为什么它必须**单独**下发，而不是让前端从 AdminRoutes 里推
@@ -307,6 +319,7 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 		Capabilities: []capabilityInfo{},
 		AdminRoutes:  []uiAdminRoute{},
 		Jobs:         []uiJob{},
+		JobCoverage:  []jobCoverage{},
 		DailyActions: []uiDailyAction{},
 	}
 
@@ -468,6 +481,13 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 			Desc:  jobDescs[s.Name],
 		})
 	}
+
+	// ---- 任务覆盖检查 ----
+	//
+	// ⚠ 必须放在 jobs 收集**之后**：它要读 m.Jobs 判断「注册了没有」。
+	// 放前面会拿到空表，于是每个有能力做签到的上游都被报成「缺」——
+	// 页面全红，真正的缺口反而看不见。
+	m.JobCoverage = jobCoverageOf(m.Providers, m.Jobs, h.cfg.Registry)
 
 	writeJSON(w, http.StatusOK, m)
 }
