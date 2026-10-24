@@ -240,7 +240,17 @@ func maskOneURL(match string) string {
 		// userinfo 是凭据（basic auth、client_id:secret），与 host 无关，一律抹掉。
 		b.WriteString("***@")
 	}
-	b.WriteString(maskHostValue(u.Hostname()))
+	// ⚠ net/url 的 Hostname() 会把方括号 IPv6 的括号**剥掉**
+	//（"[2001:db8::1]" → "2001:db8::1"），而本仓的 IPv6 占位符是**带**方括号的
+	// "[***]"。若不把括号补回去，二次打码时 "[***]" 会被当成裸域名抹成 "***" ——
+	// 同一串文本打两次得到不同结果，破坏幂等契约
+	//（TestMaskErrorTextIdempotent 正是钉这个的：错误文本会经多层包装，
+	//  同一段被打码两次是常态，不是假设）。
+	host := u.Hostname()
+	if strings.HasPrefix(u.Host, "[") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	b.WriteString(maskHostValue(host))
 	if port := u.Port(); port != "" {
 		b.WriteString(":")
 		b.WriteString(port)
@@ -299,6 +309,27 @@ func maskHostValue(host string) string {
 	if host == "" {
 		return "***"
 	}
+	// 方括号形态（IPv6 字面量，或**已经打码过**的 "[***]"）。
+	//
+	// # 为什么单独一支（幂等契约）
+	//
+	// 打码不是"跑一次"：上游错误会拼进网关错误，再写进日志/日志缓冲，
+	// 同一段文本被打码两次是常态。因此本函数的输出必须是不动点。
+	// 踩过的坑：URL 里的方括号 IPv6 一次打成 "[***]"，而第二次进来时
+	// net/url 已把括号剥掉、只剩 "***"，于是被当成裸域名又抹了一遍 ——
+	// 两次结果不同（见 TestMaskErrorTextIdempotent 的 "URL里的IPv6主机"）。
+	//
+	// zone（fe80::1%eth0）不参与 IP 判定，且网卡名属于内网拓扑，一并抹掉
+	// —— 与 maskBracketedIPv6 的口径一致。
+	if inner, ok := strings.CutPrefix(host, "["); ok && strings.HasSuffix(inner, "]") {
+		inner = strings.TrimSuffix(inner, "]")
+		if i := strings.IndexByte(inner, '%'); i >= 0 {
+			inner = inner[:i]
+		}
+		if inner == "***" || isIPv6Literal(inner) {
+			return "[***]"
+		}
+	}
 	if ip := net.ParseIP(strings.TrimSuffix(host, ".")); ip != nil {
 		if ip.To4() != nil {
 			return "***.***.***.***"
@@ -306,6 +337,15 @@ func maskHostValue(host string) string {
 		return "[***]"
 	}
 	return maskDomain(host)
+}
+
+// isIPv6Literal 报告 s 是不是 IPv6 字面量（IPv4 不算）。
+//
+// 与 net.ParseIP 的区别：后者对 IPv4 也返回非 nil，而 IPv4 的占位符形态
+// 与 IPv6 不同（"***.***.***.***" vs "[***]"），必须分开判。
+func isIPv6Literal(s string) bool {
+	ip := net.ParseIP(s)
+	return ip != nil && ip.To4() == nil
 }
 
 // maskDomain 把 api.openai.com 打成 ***.com、sub.domain.co.uk 打成 ***.co.uk。
