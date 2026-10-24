@@ -3,9 +3,15 @@ const fs = require('fs');
 const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let logEntries = [];
+// logStatus：状态码筛选（null = 全部）。真实产品里它是 webui.html 的模块级 let，
+// 这里按同一语义复刻一份 —— 抽出的函数读的就是这个绑定。
+let logStatus = null;
+// logPage.total：卡片条尾的「共 M 条」读它。本套件只关心排序契约，给 0 即可。
+const logPage = { total: 0 };
 const els = {};
-function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', querySelector:()=>null }; }
+function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', style:{}, querySelector:()=>null }; }
 els.logrows = mkEl('logrows');
+els.logStatusBar = mkEl('logStatusBar');
 const $ = id => els[id] || (els[id] = mkEl(id));
 
 function normalizeDesc(items) {
@@ -21,21 +27,84 @@ function mergeLogEntries(incoming, cap) {
     for (const e of (incoming || [])) bySeq.set(e.seq, e);
     logEntries = normalizeDesc(Array.from(bySeq.values())).slice(0, cap);
   }
-function tokPerSec(tokens, totalMs) {
-    if (tokens < 0) return '-';
+function tokPerSec(outTokens, totalMs, ttfbMs, mode) {
+    if (mode && mode !== 'stream') return '-';
+    if (!outTokens || outTokens <= 0) return '-';
     if (!totalMs || totalMs <= 0) return '0.0';
-    return (tokens / (totalMs / 1000)).toFixed(1);
+    const genMs = totalMs - (ttfbMs > 0 ? ttfbMs : 0); // 纯生成阶段 = DSH 的 decodeMs
+    if (genMs <= 0) return '-';
+    return fmtTps(outTokens / (genMs / 1000));
   }
 function logPlaceholder(text, cls) {
     return `<div class="log-empty ${cls || ''}">${esc(text)}</div>`;
+  }
+function logStatusOf(e) {
+    const n = Number(e && e.status);
+    return isFinite(n) && n > 0 ? n : null;
+  }
+function renderLogStatusBar(counts, pageLen) {
+    const box = $('logStatusBar');
+    if (!box) return;
+    const codes = Array.from(counts.keys()).sort((a, b) => a - b);
+    if (!codes.length) { hideLogStatusBar(); return; }
+    const total = logPage.total || 0;
+    const chip = (val, label, num, on, hint) =>
+      `<button type="button" class="chip${on ? ' on' : ''}" data-logst="${val}"
+               aria-pressed="${on ? 'true' : 'false'}" title="${esc(hint)}">${label}<span>${num}</span></button>`;
+    const cards = [
+      chip('', '全部', pageLen, logStatus === null, '不筛选，显示本页全部 ' + pageLen + ' 条'),
+    ].concat(codes.map(c => chip(String(c), String(c), counts.get(c), logStatus === c,
+      '只看本页状态码 ' + c + ' 的 ' + counts.get(c) + ' 条')));
+    // 「本页 N 条」里的 N 是**渲染出来的行数**，不是每页条数设置 ——
+    // 末页往往不足一页，用设置值会与实际行数对不上。
+    box.innerHTML = cards.join('') +
+      `<span class="dim" style="font-size:11px;margin-left:4px">`
+      + `本页 ${pageLen} 条 · 共 ${total} 条 · 卡片只统计当前页</span>`;
+    box.style.display = 'flex';
+  }
+function hideLogStatusBar() {
+    const box = $('logStatusBar');
+    if (!box) return;
+    box.innerHTML = '';
+    box.style.display = 'none';
   }
 function renderLogs(items) {
     const host = $('logrows');
     if (!host) return;
     const list = normalizeDesc(items).slice(0, 300);
-    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容
-    if (!list.length) { host.innerHTML = logPlaceholder('暂无请求'); return; }
-    host.innerHTML = list.map(e => {
+
+    // 统计当前页的状态码分布（未筛选的全集）。
+    const counts = new Map();
+    for (const e of list) {
+      const code = logStatusOf(e);
+      if (code !== null) counts.set(code, (counts.get(code) || 0) + 1);
+    }
+
+    // 筛选值若已不在这一页 ⇒ 自动放开并告知。**先判再画卡片**，
+    // 否则会出现"卡片显示全部、表格却是空的"这种一闪而过的自相矛盾。
+    let autoCleared = null;
+    if (logStatus !== null && !counts.has(logStatus)) {
+      autoCleared = logStatus;
+      logStatus = null;
+    }
+
+    const shown = logStatus === null ? list : list.filter(e => logStatusOf(e) === logStatus);
+
+    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容。
+    // ⚠ 自动放开筛选这条分支下 list 非空、shown 为空 —— 不是"暂无请求"，
+    //   是"这一页没有该状态码"，两者必须用不同的字说，否则等于骗人。
+    if (!list.length) {
+      host.innerHTML = logPlaceholder('暂无请求');
+      hideLogStatusBar();
+      return;
+    }
+    renderLogStatusBar(counts, list.length);
+    if (!shown.length) {
+      host.innerHTML = logPlaceholder(
+        '本页 ' + list.length + ' 条里没有状态码 ' + autoCleared + '（已取消该筛选；翻页可看其它页）');
+      return;
+    }
+    host.innerHTML = shown.map(e => {
       const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
       // ② 数值列右对齐（.r）
       // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
@@ -51,7 +120,7 @@ function renderLogs(items) {
         <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
         <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
         <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
-        <span class="mono r">${tokPerSec(e.tokens, e.total_ms)}</span>
+        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.ttfb_ms, e.mode)}</span>
         <span class="mono r">${e.total_ms}ms</span>
       </div>`;
     }).join('');
