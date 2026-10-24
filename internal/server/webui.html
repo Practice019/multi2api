@@ -1862,6 +1862,11 @@ tr.grouprow > td{
   font-family:var(--font-mono);
   font-weight:700;
 }
+/* 模型卡片可点（点击复制完整模型名）—— 必须给出可点的视觉线索。
+   cursor:pointer 让手型出现；active 位移让「按下去了」有反馈 ——
+   复制是无声操作，没有任何反馈时用户会怀疑没点到。 */
+.chips .chip{cursor:pointer}
+.chips .chip:active{transform:translateY(1px)}
 .chip:hover{background:var(--acc);color:var(--on-acc);border-color:var(--ink)}
 .chip .mult{border-radius:0;background:var(--ink);color:var(--cream)}
 .chip .mult.free{background:var(--acid);color:#120F0D}
@@ -14648,7 +14653,33 @@ let multCatalogFailed = false;
         hd.setAttribute('aria-expanded', next ? 'true' : 'false');
         return;
       }
-      const c = e.target.closest('.chip'); if (c) $('model').value = c.dataset.id;
+      // 模型卡片（chip）：点一下**复制完整模型名**，同时仍填进对话测试的下拉。
+      //
+      // # 为什么复制是主行为（2026-10-25 用户要求）
+      //
+      // 这一整块是「看有哪些模型」的全景面板。用户点它的目的绝大多数是
+      // 「把这个模型名拿去用」—— 贴到 curl、贴到别的客户端、贴给同事。
+      // 原来只把值塞进下面的下拉，等于逼用户从面板上**手抄**模型名，
+      // 而卡片上的名字是截断显示的（长名字放不下），手抄必然抄错。
+      //
+      // 保留填下拉：那是既有行为，删掉会让「先点模型再点对话测试」这条路径断掉。
+      // 两件事不冲突 —— 复制是副作用，填下拉是状态变更。
+      //
+      // ⚠ 复制用 data-id（完整 id），不用卡片上的可见文字：
+      //   可见文字经过 esc() 且可能被截断，data-id 才是原值。
+      //   这正是「复制完整模型名」的字面要求。
+      const c = e.target.closest('.chip');
+      if (c) {
+        const id = c.dataset.id || '';
+        if (id) {
+          copyText(id, '模型名');
+          // 填下拉只在选项里真的存在时做 —— 面板里的模型未必在当前筛选的
+          // 下拉里（下拉按上游筛过）。直接赋值会得到「选了但看不到」的状态，
+          // 比不填更让人困惑。
+          const sel = $('model');
+          if (sel && Array.from(sel.options || []).some(o => o.value === id)) sel.value = id;
+        }
+      }
     });
     // T7：切换上游筛选 → 重填模型下拉 → 记住选择。
     //
