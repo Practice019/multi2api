@@ -203,5 +203,51 @@ func (p *Provider) HasToken(cred gateway.Credential) bool {
 	}
 	return a.ChatUsable()
 }
+
+// ---- gateway 扩展点：定时任务 ----
+
+// 编译期断言：本上游向调度器自报定时任务。
+var _ gateway.JobExt = (*Provider)(nil)
+
+// Jobs 自动签到任务（gateway.JobExt）。
+//
+// # 为什么必须实现它（这是「monkeycode 不自动签到」的根因）
+//
+// 本包的签到驱动 internal/dailycheckin **早就实现好了**，按钮也能点、
+// 历史也会写 —— 但调度器发现任务的方式是构造期遍历注册表、
+// 对每个 Provider 做 gateway.ExtOf[gateway.JobExt] 类型断言。
+// 没实现这个接口的上游被**静默跳过**（scheduler/job.go 里那行是 continue，
+// 不是 error），所以：
+//
+//	编译通过 · 按钮可用 · 手动签到成功 · 但永远不会自动跑
+//
+// 症状就是「没有设置任务调度，定时每日对每个账号签到」。
+// 它和 lobsterai 当初漏写 Log 是同一类问题：**契约的一环没人守**。
+//
+// # 判据
+//
+// AutoEnabled() 同时要求 Ready() && enabled && interval > 0，
+// 即：驱动已构造 + 配置开了自动签到 + 间隔为正。
+// 三者缺一就返回 nil —— 返回 nil 是**合法**的（只保留手动按钮）。
+//
+// ⚠ 不要写成 `if p.checkin == nil { return nil }` 就完事：
+// CheckinInterval 配成 0 或负数时驱动仍然存在（按钮还在），
+// 此时若照样注册任务，会得到一个 Interval<=0 的 Job —— 调度器按
+// 「没到期」处理，看起来正常但永远不跑，比不注册更难查。
+// 用驱动自己的 AutoEnabled 判，口径只有一处。
+func (p *Provider) Jobs() []gateway.Job {
+	if p == nil || p.checkin == nil || !p.checkin.AutoEnabled() {
+		return nil
+	}
+	return []gateway.Job{{
+		Name:     p.checkin.Descriptor().ID,
+		Interval: p.checkin.Interval(),
+		// RunAll 扫本上游全部账号、逐号签到并写历史。
+		// 定时任务与「全部签到」按钮走**同一个** RunAll，
+		// 所以两条路径的历史口径一致（见 dailycheckin/driver.go）。
+		Run: p.checkin.RunAll,
+	}}
+}
+
 // errNoAuth 驱动里取不到凭证时的错误。
 var errNoAuth = errors.New("monkeycode: 取不到凭证")
