@@ -1101,6 +1101,39 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     border-radius:10px;background:var(--panel2);border:1px solid var(--line);max-width:250px;
     overflow:hidden;white-space:nowrap}
   .healthbar .hb-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+  /* ⚠ 2026-10-25 健康条**图形化**（用户原话：「上面的表格看起来很简单」
+     「我喜欢下面的表格柱状图 折线图还有等分线等等」）。
+     取向是**照下面抄**，不是发明新样式：
+       · 成功率 / 分项成功率 → 横向条形，底下垫 0/25/50/75/100% 的等分线
+         （与 #cacheTrend 同一套网格，绘制函数来自共享层 dash-chart.js）；
+       · 近 24 小时成功率 → 迷你折线（同共享层）。
+     ⚠ 上面那两条 .hb-chip / .hb-dot 是旧「纯文字 chip」的样式，现在**没有调用方**了；
+       保留是因为 theme-max.css 里对 .hb-chip 还有一条覆盖（四个页面共用那份主题），
+       删这里会留下"主题里改一个不存在的选择器"的更坏形态。 */
+  .healthbar .hb-k{color:var(--dim)}
+  .healthbar .hb-meter{display:inline-block;width:104px;height:10px;flex:0 0 auto;
+    border-radius:3px;overflow:hidden;background:var(--panel2)}
+  .healthbar .hb-meter svg{display:block}
+  .healthbar .hb-spark{display:inline-block;width:150px;height:30px;flex:0 0 auto}
+  .healthbar .hb-spark svg{display:block}
+  /* 分项成功率：flex-basis 100% ⇒ 整组独占一行（与上面那排读数分开） */
+  .healthbar .hb-models{flex:1 1 100%;display:flex;flex-direction:column;gap:2px;margin-top:2px}
+  .healthbar .hb-row{display:flex;align-items:center;gap:8px;height:15px;line-height:15px;font-size:11.5px}
+  .healthbar .hb-mname{flex:0 0 220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+  .healthbar .hb-row .hb-meter{flex:1 1 auto;width:auto;min-width:80px}
+  .healthbar .hb-mval{flex:0 0 52px;text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  /* 刻度行：与条形**同一个盒子**（左名字列 / 中条形列 / 右数值列），所以 0/25/50/75/100%
+     正好落在网格线上。⚠ 刻意用 HTML 文本 + 绝对定位而不是 SVG 文本：SVG 外壳带
+     preserveAspectRatio="none"，文字会被横向拉伸成变形字；而绝对定位的 left:%
+     与 dcGridCols 画线的 (plotW*i/segs) 是同一套百分比 ⇒ 刻度必然压在线上。 */
+  .healthbar .hb-axis{position:relative;flex:1 1 auto;height:12px;min-width:80px;font-size:10px;color:var(--dim)}
+  .healthbar .hb-axis i{position:absolute;top:0;font-style:normal;transform:translateX(-50%)}
+  .healthbar .hb-axis i:first-child{transform:none}
+  .healthbar .hb-axis i:last-child{transform:translateX(-100%)}
+  .healthbar .hb-sparkitem{align-items:center}
+  /* 刻度行：与条形同一行高，不额外占位 */
+  .healthbar .hb-axisrow{height:12px;line-height:12px}
+  .healthbar .hb-axisrow .hb-mval{flex:0 0 52px}
   /* 次数排行（2026-10-20）：名次 · 名字 · 条形 · 次数 · 成功率，一行一个，固定行高。
      条形用 div 宽度（零依赖，照本项目已有的榜单做法），宽度以**第一名为基准**，
      这样"第一名满格"能一眼看出量级的落差。 */
@@ -2215,6 +2248,226 @@ header h1{letter-spacing:0}
 </style>
 </head>
 <body>
+<script>
+// ==== WB2API:DASH-CHART:START（由 tools/dash_chart_sync.js 生成，勿手改）====
+// dash-chart.js —— 仪表盘图表的**共享绘制层**（内联 SVG、零依赖）。
+//
+// # 为什么有这个文件（用户原话）
+//
+//   「上面的表格看起来很简单」
+//   「下面的实现可以抽共享一起用」
+//   「我喜欢下面的表格柱状图 折线图还有等分线等等」
+//
+// ⇒ 顶部「性能健康」那排 chip 要**照下面抄**：同一套等分网格线、同一套柱子、
+//   同一套折线、同一套配色。而下面那几张图此前是**各自内联画**的：
+//   renderCacheTrendSVG 抄了一遍网格线 + 折线 + 悬浮参考线，
+//   renderDailyTrendSVG 又抄了一遍网格线 + 柱子 + 折线 + 悬浮参考线。
+//   健康条再抄一遍就是**第三份副本** —— 于是抽到这里，几处跑同一份实现。
+//
+// # 载体（照本项目既有做法）
+//
+// 唯一真相是本文件；由 `tools/dash_chart_sync.js` 注入 `webui.html` 顶部那段
+// <script>（与 `model-picker.js` 完全同一套手法）。
+// ⚠ 为什么是注入而不是 <script src>：前端语法门禁只扫**内联** <script>
+//   （扫描清单取自 webui.go 的 //go:embed），外链 .js 会静默逃过门禁 ——
+//   门禁全绿却根本没扫它。
+//
+// # 契约
+//
+//   dcGrid(svg, o)       横等分网格线 + 左（可右）刻度   ← cacheTrend / dailyTrend / 成功率条
+//   dcGridCols(svg, o)   竖等分网格线 + 底部刻度         ← 横向条形（成功率 / 分项成功率）
+//   dcRects(svg, rs, o)  柱子（竖柱与横条共用）
+//   dcLine(svg, pts, o)  折线（可带数据点圆）
+//   dcCursor(svg, id, o) 悬浮参考垂线 + 跟随读数（预置 display:none）
+//   dcSvgTag(W, H, parts) / dcSvg(host, W, H, parts)   统一包 <svg viewBox>
+//
+// ⚠ 本文件**不依赖宿主的任何函数**（自带 dcEsc）：否则"抽出来"就成了假共享
+//   —— `model-picker.js` 里记着同一条理由。
+
+// DC_SEGS 网格等分段数：4 段 = 5 条线 ⇒ 0 / 25 / 50 / 75 / 100%。
+// ⚠ 这个数字是**视觉语言的一部分**（用户点名要"等分线"），改它等于改全部图。
+var DC_SEGS = 4;
+
+// 配色**只有这一处**：与 cacheTrend 的命中率线同色（#58a6ff），柱子/折线走主题变量
+// （写死色值会在浅色主题下糊进背景 —— 见 webui.html 顶部那段注释）。
+var DC_RATE_COLOR = '#58a6ff';
+var DC_BAR_COLOR = 'var(--acc)';
+
+// dcEsc 最小 HTML 转义（自带一份，不依赖宿主）。
+function dcEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// dcNum 把任意输入收敛成有限数（NaN / undefined / 字符串数字都兜住）。
+//
+// ⚠ 这不是洁癖：后端字段缺失时 undefined * 100 会得到 NaN，而 NaN 进了
+//   SVG 属性就变成 x="NaN" —— 浏览器**静默丢弃**那个元素，图看起来"少画了一块"，
+//   控制台一个字都不报。所有几何计算一律先过这里。
+function dcNum(v) {
+  var n = Number(v);
+  return isFinite(n) ? n : 0;
+}
+
+// dcGrid 横等分网格线 + 刻度（**下方两张趋势图的网格线唯一出处**）。
+//
+// o = {
+//   W, PADL, PADR, PADT, plotH,   // 版面
+//   max,                          // 左轴上限（顶部那条线 = max，底部 = 0）
+//   fmt(v) -> string,             // 左刻度文本（不给就只画线、不标数）
+//   fill,                         // 左刻度颜色（双轴时必须与所属线同色）
+//   rightMax, rightFmt(v),        // 右轴（可选；不给就不画右刻度）
+//   segs,                         // 段数（默认 DC_SEGS = 4）
+//   labelEvery                    // 每几段标一个数（默认 1；矮图用 2 防糊）
+// }
+function dcGrid(svg, o) {
+  var segs = o.segs || DC_SEGS;
+  var padr = o.PADR == null ? 0 : o.PADR;
+  var max = dcNum(o.max);
+  var every = o.labelEvery || 1;
+  for (var i = 0; i <= segs; i++) {
+    var y = o.PADT + (o.plotH * i) / segs;
+    svg.push('<line x1="' + o.PADL + '" y1="' + y.toFixed(1) + '" x2="' + (o.W - padr) +
+      '" y2="' + y.toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>');
+    if (o.fmt && i % every === 0) {
+      svg.push('<text class="ax" x="' + (o.PADL - 6) + '" y="' + (y + 3).toFixed(1) +
+        '" text-anchor="end"' + (o.fill ? ' fill="' + o.fill + '"' : '') + '>' +
+        dcEsc(o.fmt(max * (1 - i / segs))) + '</text>');
+    }
+    if (o.rightFmt && i % every === 0) {
+      svg.push('<text class="ax" x="' + (o.W - padr + 6) + '" y="' + (y + 3).toFixed(1) +
+        '" fill="var(--warn)">' + dcEsc(o.rightFmt(dcNum(o.rightMax) * (1 - i / segs))) + '</text>');
+    }
+  }
+}
+
+// dcGridCols 竖等分网格线 + 底部百分比刻度（**横向条形图的网格线唯一出处**）。
+//
+// 为什么横向条要用**竖**网格线：条越长 = 百分比越大，等分线只能垂直于条。
+// 段数与颜色沿用 dcGrid（同一套视觉语言），刻度固定按 0/25/50/75/100% 标。
+//
+// o = { W, PADL, PADR, PADT, plotH, fmt, fill, segs, labelY }
+function dcGridCols(svg, o) {
+  var segs = o.segs || DC_SEGS;
+  var padr = o.PADR == null ? 0 : o.PADR;
+  var plotW = o.W - o.PADL - padr;
+  for (var i = 0; i <= segs; i++) {
+    var x = o.PADL + (plotW * i) / segs;
+    svg.push('<line x1="' + x.toFixed(1) + '" y1="' + o.PADT + '" x2="' + x.toFixed(1) +
+      '" y2="' + (o.PADT + o.plotH) + '" stroke="var(--line)" stroke-width="1"/>');
+    if (o.fmt) {
+      svg.push('<text class="ax" x="' + x.toFixed(1) + '" y="' + (o.labelY || (o.PADT + o.plotH + 9)) +
+        '" text-anchor="' + (i === 0 ? 'start' : i === segs ? 'end' : 'middle') + '"' +
+        (o.fill ? ' fill="' + o.fill + '"' : '') + '>' + dcEsc(o.fmt((100 * i) / segs)) + '</text>');
+    }
+  }
+}
+
+// dcRects 画柱子（竖柱 / 横条共用）。
+//
+// rs = [{x, y, w, h}, …]；o = {fill, rx, opacity}
+// ⚠ 宽或高 <= 0 的**跳过**：0% 的条不该留下一条 1px 的"有值"痕迹。
+function dcRects(svg, rs, o) {
+  var opt = o || {};
+  for (var i = 0; i < (rs || []).length; i++) {
+    var r = rs[i];
+    var w = dcNum(r.w), h = dcNum(r.h);
+    if (w <= 0 || h <= 0) continue;
+    svg.push('<rect x="' + dcNum(r.x).toFixed(1) + '" y="' + dcNum(r.y).toFixed(1) +
+      '" width="' + w.toFixed(1) + '" height="' + h.toFixed(1) +
+      '" fill="' + (r.fill || opt.fill || DC_BAR_COLOR) + '"' +
+      (opt.rx ? ' rx="' + dcNum(opt.rx).toFixed(1) + '"' : '') +
+      (opt.opacity == null ? '' : ' opacity="' + opt.opacity + '"') + '/>');
+  }
+}
+
+// dcLine 画折线（可带数据点圆）。
+//
+// pts = [[x, y], …]；o = {stroke, width, opacity, dots, dotR, dotFill}
+// ⚠ 少于 2 点**不画线**（一个点连不成线），但仍可画圆点 —— 所以 dots 单独判。
+function dcLine(svg, pts, o) {
+  var opt = o || {};
+  var list = pts || [];
+  var stroke = opt.stroke || DC_BAR_COLOR;
+  if (list.length >= 2) {
+    var d = [];
+    for (var i = 0; i < list.length; i++) {
+      d.push((i ? 'L' : 'M') + dcNum(list[i][0]).toFixed(1) + ',' + dcNum(list[i][1]).toFixed(1));
+    }
+    svg.push('<path d="' + d.join(' ') + '" fill="none" stroke="' + stroke +
+      '" stroke-width="' + (opt.width || 1.6) + '"' +
+      (opt.opacity == null ? '' : ' opacity="' + opt.opacity + '"') +
+      ' stroke-linejoin="round" stroke-linecap="round"/>');
+  }
+  if (opt.dots) {
+    for (var k = 0; k < list.length; k++) {
+      svg.push('<circle cx="' + dcNum(list[k][0]).toFixed(1) + '" cy="' + dcNum(list[k][1]).toFixed(1) +
+        '" r="' + (opt.dotR || 2.2) + '" fill="' + (opt.dotFill || stroke) + '" opacity="0.9"/>');
+    }
+  }
+}
+
+// dcCursor 预置"悬浮参考垂线 + 跟随读数"（cacheTrend / dailyTrend 同一套）。
+//
+// ⚠ 必须**预置**在 SVG 里（默认 display:none）：渲染函数每次重写 innerHTML，
+//   在事件里现场 append 的元素重绘一次就没了。
+// id 传前缀：'ct' → #ctCursor / #ctRead，'dt' → #dtCursor / #dtRead。
+function dcCursor(svg, id, o) {
+  var y1 = dcNum(o.PADT), y2 = dcNum(o.PADT) + dcNum(o.plotH);
+  svg.push('<line id="' + id + 'Cursor" x1="0" y1="' + y1 + '" x2="0" y2="' + y2 +
+    '" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>');
+  svg.push('<text id="' + id + 'Read" class="ax" x="0" y="' + (o.readY || 12) +
+    '" text-anchor="middle" fill="var(--fg)" style="display:none"></text>');
+}
+
+// dcSvgTag 拼出 <svg> 外壳（返回字符串，供 innerHTML 里内联嵌图表用）。
+//
+// o 可选：{style, label} —— 顶部健康条要在**同一段字符串**里同时给出"一行字 +
+// 一张迷你图"，所以允许覆盖 style（默认 100% 宽高 = 填满下方趋势图的容器）
+// 并允许带一段 label 文本（SVG 里的 <text> 也能显示，但字号/换行不如 HTML 可控）。
+function dcSvgTag(W, H, parts, o) {
+  var opt = o || {};
+  var style = opt.style || 'width:100%;height:100%';
+  return '<svg viewBox="0 0 ' + dcNum(W) + ' ' + dcNum(H) +
+    '" preserveAspectRatio="none" style="' + style + '">' + (parts || []).join('') + '</svg>';
+}
+
+// dcSvg 把拼好的元素装进 host，并返回同一段 HTML。
+//
+// ⚠ host 为假值时不写 DOM、只返回字符串（顶部健康条要的是字符串，
+//   下方趋势图要的是写 DOM —— 两种用法共用这一个外壳）。
+function dcSvg(host, W, H, parts, o) {
+  var html = dcSvgTag(W, H, parts, o);
+  if (host) host.innerHTML = html;
+  return html;
+}
+
+// dcPct 百分比条的**唯一换算入口**：value/den → 0..100 的百分比。
+//
+// ⚠ 三处必须一致（顶部成功率条 / 分项成功率条组 / 下方命中率趋势）：
+//   · 分母 <= 0 ⇒ 返回 null（**不是 0**）—— "没有请求"与"成功率 0%"是两件事，
+//     渲染成 0% 会让人以为网关全挂了；
+//   · 不夹到 100（上游分开上报时命中率合法可超 100%，见 cacheTrend 的注释），
+//     夹取值等于谎报数据；
+//   · 负数（后端异常）按 0 处理，避免条子反向画。
+function dcPct(v, den) {
+  var d = dcNum(den);
+  if (d <= 0) return null;
+  var r = (dcNum(v) / d) * 100;
+  return r < 0 ? 0 : r;
+}
+
+// dcTier 按百分比分档取色（**与下方图表同一套语义色**）。
+//
+// 阈值沿用页面既有口径（renderHealthBar / renderModelRank 里那两处同值）：
+//   >= 95 绿（--ok） · >= 80 琥珀（--warn） · 其余 红（--err） · 无数 灰（--dim）
+function dcTier(pct) {
+  if (pct == null) return 'var(--dim)';
+  return pct >= 95 ? 'var(--ok)' : pct >= 80 ? 'var(--warn)' : 'var(--err)';
+}
+// ==== WB2API:DASH-CHART:END ====
+</script>
 <script>
 // ==== WB2API:MODEL-PICKER:START（由 tools/model_picker_sync.js 生成，勿手改）====
 // model-picker.js —— 「按上游挑模型」的共享实现。
@@ -11333,7 +11586,23 @@ function renderModelRank(s) {
   //     首字另有 TTFB 卡，两个数各表一件事，不要混。
   //   · 吞吐   = tokens /（全部请求耗时之和）。后端只给 avg_total_ms，
   //     所以用 avg × 条数近似 —— 这是**近似**，文案写"吞吐"不写"精确"。
-  //   · 每模型成功率 = by_model_detail[m].ok / .calls，按请求数取前 5（模型一多会撑成两行）。
+  //   · 每模型成功率 = by_model_detail[m].ok / .req，按请求数取前 5。
+  //
+  // # ⚠⚠ 2026-10-25 图形化（用户原话）
+  //
+  //   「上面的表格看起来很简单」
+  //   「下面的实现可以抽共享一起用」
+  //   「我喜欢下面的表格柱状图 折线图还有等分线等等」
+  //
+  // ⇒ 这一条**照下面抄**，不是发明新样式：
+  //   · 成功率 → 横向条形 + 0/25/50/75/100% 等分网格线（dcGridCols，与 #cacheTrend 同段数同配色）；
+  //   · 每模型成功率 → 同一套条形组，带百分比标签、按高低分档配色（dcTier）；
+  //   · 近 24 小时成功率 → 迷你折线（dcLine，数据来自 series 桶的 ok/total）；
+  //   · 网格线 / 柱子 / 折线 / 外壳全部来自共享层 dash-chart.js —— 与下方两张趋势图
+  //     **同一份实现**，改一处三处一起变（这正是用户要的"抽共享"）。
+  //
+  // ⚠ 没有趋势数据（series 还没回来 / 全 0 请求）时**不画空折线**，只在 title 里说明 ——
+  //   与 cacheTrend 第 5 条同一立场：画一条贴底的线会被读成"成功率就是 0"。
   function renderHealthBar(s) {
     const el = $('healthBar');
     if (!el) { return; }
@@ -11351,27 +11620,114 @@ function renderModelRank(s) {
     const tps = (avgMs && total && toks !== null && avgMs > 0)
       ? toks / ((avgMs * total) / 1000) : null;
     const parts = ['<span class="hb-title">性能健康</span>'];
-    parts.push(`<span class="hb-item">成功率 <b>${rate === null ? '—' : rate.toFixed(2) + '%'}</b></span>`);
+    // 成功率：**条形**（不是纯文字）。旁边仍保留精确读数 —— 条给"一眼什么水平"，
+    // 数字给"到底多少"，两者不互相替代。
+    parts.push(`<span class="hb-item hb-rate" title="成功 / 总请求 · 条长 = 成功率 · 底色等分线为 0/25/50/75/100%">`
+      + `<span class="hb-k">成功率</span>`
+      + `<span class="hb-meter">${hbMeter(rate)}</span>`
+      + `<b style="color:${dcTier(rate)}">${rate === null ? '—' : rate.toFixed(2) + '%'}</b></span>`);
     parts.push(`<span class="hb-item">平均延迟 <b>${avgMs === null ? '—' : (avgMs / 1000).toFixed(2) + 's'}</b></span>`);
     parts.push(`<span class="hb-item">吞吐 <b>${tps === null ? '—' : fmtTokens(Math.round(tps)) + ' t/s'}</b></span>`);
+    // 近 24 小时成功率迷你折线（与下面两张趋势图同一个数据源、同一套绘制函数）
+    const trend = healthTrend();
+    if (trend.length >= 2) {
+      const first = trend[0], last = trend[trend.length - 1];
+      parts.push(`<span class="hb-item hb-sparkitem" title="近 24 小时逐桶成功率（首 ${first.v.toFixed(1)}% → 末 ${last.v.toFixed(1)}%）">`
+        + `<span class="hb-k">24h</span>`
+        + `<span class="hb-spark">${hbSpark(trend)}</span>`
+        + `<b style="color:${dcTier(last.v)}">${last.v.toFixed(1)}%</b></span>`);
+    }
     const detail = s.by_model_detail || {};
     const rows = Object.keys(detail).map(k => {
       const d = detail[k] || {};
       // ⚠ 同样是 `req` 不是 `calls`（见 renderModelRank 里的同一条注释）
       const c = num(d.req) || 0;
       const o = num(d.ok) || 0;
-      return { model: k, calls: c, rate: c ? (o / c * 100) : null };
+      return { model: k, calls: c, rate: dcPct(o, c) };
     }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 5);
-    rows.forEach(r => {
-      const col = r.rate === null ? 'var(--dim)'
-        : r.rate >= 95 ? 'var(--ok)' : r.rate >= 80 ? 'var(--warn)' : 'var(--err)';
-      const txt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
-      parts.push(`<span class="hb-chip" title="${esc(r.model)} · ${r.calls} 次 · ${txt}">`
-        + `<span class="hb-dot" style="background:${col}"></span>`
-        + `<span style="overflow:hidden;text-overflow:ellipsis">${esc(r.model)}</span>`
-        + `<b style="color:${col}">${txt}</b></span>`);
-    });
+    // 分项成功率：条形组（每条带百分比标签、按高低分档配色），底下垫同一套等分网格。
+    if (rows.length) {
+      parts.push(`<span class="hb-models">` + rows.map(r => {
+        const txt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+        const col = dcTier(r.rate);
+        return `<span class="hb-row" title="${esc(r.model)} · ${r.calls} 次 · 成功率 ${txt}">`
+          + `<span class="hb-mname mono">${esc(r.model)}</span>`
+          + `<span class="hb-meter">${hbMeter(r.rate)}</span>`
+          + `<span class="hb-mval" style="color:${col}">${txt}</span></span>`;
+      }).join('')
+        + `<span class="hb-row hb-axisrow"><span class="hb-mname"></span>`
+        + `<span class="hb-axis">${hbAxis()}</span><span class="hb-mval"></span></span>`
+        + `</span>`);
+    }
     el.innerHTML = parts.join('');
+  }
+
+  // hbAxis 0/25/50/75/100% 的刻度文字（**横向条形的等分线**）
+  //
+  // ⚠ 为什么刻度用 HTML 而不是 SVG：网格线由 dcGridCols 画在 SVG 里，而那个 SVG
+  //   外壳带 preserveAspectRatio="none"（横向拉伸填满）—— 文字进去会被拉成变形字。
+  //   这里用绝对定位的 left:% 与之对齐（同一套 (100*i/segs) 百分比）。
+  // ⚠ 段数取共享层的 DC_SEGS，不写字面量 4：改共享层时刻度自动跟着变。
+  function hbAxis() {
+    const out = [];
+    for (let i = 0; i <= DC_SEGS; i++) {
+      out.push(`<i style="left:${(100 * i / DC_SEGS).toFixed(1)}%">${Math.round(100 * i / DC_SEGS)}%</i>`);
+    }
+    return out.join('');
+  }
+
+  // hbMeter 一根横向条形（成功率 / 分项成功率共用）。
+  //
+  // ⚠ 网格线 + 柱子都来自共享层：dcGridCols 画 0/25/50/75/100% 五条竖线，
+  //   dcRects 画那根条 —— 与下方 #cacheTrend 的等分线是**同一个函数**。
+  // ⚠ rate 为 null（无请求）⇒ **不画条**（但网格线照画）：那格的读数是 `—`，
+  //   与"成功率 0%"必须能分开 —— 0% 画出来的是一根长度 0 的条 + 红色读数，
+  //   null 连条都没有。
+  // ⚠ 百分比 > 100 时**读数照实显示**（与 cacheTrend 的"不夹取值、如实展示"一致），
+  //   只有**条的几何长度**夹到 100（否则会画到 SVG 视口外，反而看不出"超了"）。
+  function hbMeter(rate) {
+    const W = 100, H = 10, PADT = 1, plotH = H - 2;
+    const svg = [];
+    dcGridCols(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, segs: DC_SEGS });
+    if (rate !== null) {
+      const w = Math.max(0, Math.min(100, rate));
+      dcRects(svg, [{ x: 0, y: PADT, w: (W * w) / 100, h: plotH }], { fill: dcTier(rate), rx: 2 });
+    }
+    return dcSvgTag(W, H, svg);
+  }
+
+  // hbSpark 近 24 小时成功率的迷你折线（**折线图**，与下方两张趋势图同一个 dcLine）。
+  //
+  // ⚠ 纵轴固定 0~100%：这是比率，自带自然上下界；按峰值自适应会让"95% 和 97%"
+  //   的差异被放大成一条剧烈起伏的线，读起来像"成功率在崩"。
+  // ⚠ 网格线只画 0 / 50 / 100 三条（segs:2）—— 30px 高的迷你图里 5 条线会糊成一片。
+  function hbSpark(rows) {
+    const W = 150, H = 30, PADT = 3, PADB = 3, plotH = H - PADT - PADB;
+    const n = rows.length;
+    const svg = [];
+    dcGrid(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, max: 100, segs: 2 });
+    const xAt = (i) => (n > 1 ? (W * i) / (n - 1) : W / 2);
+    const yAt = (v) => PADT + plotH - (plotH * Math.max(0, Math.min(100, v))) / 100;
+    dcLine(svg, rows.map((r, i) => [xAt(i), yAt(r.v)]), { stroke: DC_RATE_COLOR, width: 1.4, dots: n <= 12 });
+    return dcSvgTag(W, H, svg);
+  }
+
+  // healthTrend 近 24 小时的**逐桶成功率**（供健康条画迷你折线）。
+  //
+  // 数据来自 `window._healthSeries`（由 loadHealthSeries 从 /admin/stats/series 填），
+  // ⚠ 与下方两张趋势图**同一个端点**，但**不复用它们的变量** —— 那两张图各自带
+  //   digest 守卫与「只画当前 trendRange」的语义，健康条要的是**固定的近 24 小时**
+  //   （用户看的是"现在健不健康"，不该跟着趋势范围切换而变）。
+  // ⚠ 分母为 0 的桶**跳过**（不是按 0% 计）：那小时没请求，画成 0% 等于说"全失败"。
+  function healthTrend() {
+    const list = window._healthSeries || [];
+    const out = [];
+    for (const p of list) {
+      const v = dcPct(p && p.ok, p && p.total);
+      if (v === null) continue;
+      out.push({ v: v });
+    }
+    return out;
   }
 
   // ---- 概览卡的**唯一定位入口**（2026-10-20 抽，防回归）----
@@ -11884,6 +12240,32 @@ function renderModelRank(s) {
   }
 
   // ──────────────────────────────────────────────────────────────────────
+  // 近 24 小时成功率（健康条的迷你折线数据源）
+  //
+  // ⚠ 为什么单独拉一次 series，而不是复用上面/下面那两张趋势图的结果：
+  //   它们各自带 digest 守卫、而且 `dailyTrend` 跟着 `trendRange` 变（24h/7d/30d/365d）——
+  //   健康条要的是**固定的近 24 小时**（"此刻健不健康"），不能跟着用户切范围而变。
+  //   代价是多一次 /admin/stats/series?range=24h 请求 —— 与 cacheTrend 完全同参，
+  //   浏览器/HTTP 层会复用连接；换来的是两条曲线语义各自独立、不会互相污染。
+  //
+  // ⚠ 有签名守卫：值没变就不重画（30s 轮询不会把这条折线抖一遍）。
+  let healthSeriesSig = '';
+
+  async function loadHealthSeries() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=24h'); }
+    catch { return; }   // 非关键：拿不到就保持上一份（首次则没有折线）
+    const list = (d && d.series) || [];
+    const sig = list.length + '|' + list.reduce((a, p) => a + (p.ok || 0) + (p.total || 0), 0);
+    if (sig === healthSeriesSig) return;
+    healthSeriesSig = sig;
+    window._healthSeries = list;
+    // ⚠ 用 `window._statsCache` 重画：它由 renderStats 写入，是**同一份 /admin/stats 响应**。
+    //   拿不到（stats 还没回来）就什么都不做 —— 等 renderStats 那一路带着 s 调过来。
+    try { renderHealthBar(window._statsCache); } catch (e) { console.error('renderHealthBar 失败:', e && e.message); }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
   // 近 24 小时缓存命中率趋势（双轴）· 照 agent2api 的 cacheTrendView
   //
   // ⚠ 五条口径照抄它（见 report-charts.ts:862-918 的注释与 report-page.tsx 的 TIP）：
@@ -12002,22 +12384,25 @@ function renderModelRank(s) {
     //   两条线共用同一批横线，若刻度都是灰的，人眼会把"橙色 Token 线爬到 75% 的高度"
     //   读成"**命中率 75%**" —— 而真实情况可能完全相反（实测命中率全 0、Token 有量）。
     //   染色后：左边一排蓝 % 归命中率线、右边一排琥珀数值归 Token 线，一眼分得清。
-    for (let i = 0; i <= 4; i++) {
-      const y = PADT + (plotH * i) / 4;
-      svg.push(`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W - PADR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`);
-      const rv = rateMax * (1 - i / 4);
-      svg.push(`<text class="ax" x="${PADL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="#58a6ff">${(rv * 100).toFixed(0)}%</text>`);
-      if (hasTokens) {
-        svg.push(`<text class="ax" x="${W - PADR + 6}" y="${(y + 3).toFixed(1)}" fill="var(--warn)">${fmtT(tokenMax * (1 - i / 4))}</text>`);
-      }
-    }
+    //
+    // ⚠⚠ 2026-10-25：这 5 条等分线 + 双轴刻度**已抽到共享层**（dcGrid）。
+    //   抽的理由就是用户那句「下面的实现可以抽共享一起用」—— 顶部成功率条要的
+    //   正是这一模一样的 0/25/50/75/100% 网格。段数/配色/画法一个字没改，
+    //   只是从"在这里内联 for 循环"变成"调一次 dcGrid"。
+    dcGrid(svg, {
+      W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH,
+      max: rateMax,
+      fmt: (v) => (v * 100).toFixed(0) + '%',
+      fill: DC_RATE_COLOR,
+      // 右侧 Token 轴：只在真的有量时给（全 0 时连刻度都不画 —— 见上面第 5 条）
+      rightMax: tokenMax,
+      rightFmt: hasTokens ? fmtT : null,
+    });
     // ⚠ 命中率折线（蓝）—— 24 个整点全画（无请求的按 0% 落到底部，但它不写读数）
-    const ratePath = rows.map((r, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)},${yRate(r.rate).toFixed(1)}`).join(' ');
-    svg.push(`<path d="${ratePath}" fill="none" stroke="#58a6ff" stroke-width="1.6"/>`);
+    dcLine(svg, rows.map((r, i) => [xAt(i), yRate(r.rate)]), { stroke: DC_RATE_COLOR, width: 1.6 });
     // ⚠ Token 折线（琥珀）—— 只在真的有量时画
     if (hasTokens) {
-      const tokPath = rows.map((r, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)},${yTok(r.tokens).toFixed(1)}`).join(' ');
-      svg.push(`<path d="${tokPath}" fill="none" stroke="var(--warn)" stroke-width="1.4" opacity="0.9"/>`);
+      dcLine(svg, rows.map((r, i) => [xAt(i), yTok(r.tokens)]), { stroke: 'var(--warn)', width: 1.4, opacity: 0.9 });
     }
     // ⚠ **读数只标在有请求的整点**（它那句"无请求的整点不标注"）+ 每 4 个整点标一个
     //   （24 个全标会糊成一片 —— 照它"标注会互相避让：放不下就整条跳过"的取舍）
@@ -12036,9 +12421,8 @@ function renderModelRank(s) {
     //   但那条只有高亮点；用户要的是**竖线可以对齐参考**。
     // ⚠ 线与读数都**预置**在 SVG 里（默认 `display:none`）—— 本函数每次重写 `innerHTML`，
     //   若在事件里现场 append，重绘一次就没了。
-    svg.push(`<line id="ctCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>`);
-    svg.push(`<text id="ctRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
-    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+    dcCursor(svg, 'ct', { PADT: PADT, plotH: plotH });
+    dcSvg(host, W, H, svg);
 
     // ⚠ 2026-10-20 修（第二个隐患）：监听器用 host._ctBound **只绑一次**，
     //   所以它闭包捕获的 rows / n / xAt 永远是**第一次渲染**那一份 ——
@@ -12178,24 +12562,24 @@ function renderDailyTrendSVG(list) {
 
     const svg = [];
     // 网格 + 左轴刻度（5 等分）
-    for (let i = 0; i <= 4; i++) {
-      const y = PADT + (plotH * i) / 4;
-      svg.push(`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W - PADR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`);
-      svg.push(`<text class="ax" x="${PADL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${fmtT(yMax * (1 - i / 4))}</text>`);
-    }
+    // ⚠⚠ 2026-10-25：与上面那张双轴趋势**同一份实现**（dcGrid）。原来这里是
+    //   第二份内联的 for 循环 —— 用户要求「抽共享一起用」，于是并入共享层。
+    dcGrid(svg, { W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH, max: yMax, fmt: fmtT });
     // 柱子 + 读数
     const cx = (i) => PADL + step * i + step / 2;
     const peakIdx = vals.indexOf(peak);
+    // ⚠⚠ 2026-10-25：柱子改走共享层（dcRects）。原来这里是第三份"拼 <rect>"的代码 ——
+    //   顶部成功率条要画横条，正好同一件事，于是抽成"给矩形数组"这一层。
+    //   ⚠ 高度 <= 0 的柱由 dcRects 统一跳过（与原来 `if (v <= 0) continue` 等价）。
+    dcRects(svg, vals.map((v, i) => ({
+      x: cx(i) - barW / 2, y: yAt(v), w: barW, h: PADT + plotH - yAt(v),
+    })), { fill: 'var(--acc)', rx: Math.min(2, barW / 2) });
+    // 读数（⚠ 每根柱都标 —— 用户要求；值短（2.0M/178.1k），24 根柱排得下）
     for (let i = 0; i < n; i++) {
-      const v = vals[i];
-      if (v <= 0) continue;
-      const y = yAt(v);
-      svg.push(`<rect x="${(cx(i) - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(PADT + plotH - y).toFixed(1)}" fill="var(--acc)" rx="${Math.min(2, barW / 2).toFixed(1)}"/>`);
       const t = texts[i];
-      if (!t) continue;
-      // ⚠ **每根柱都标**（用户要求）；⚠ 值短（2.0M/178.1k），24 根柱排得下。
-      //   峰值那根用强调色，其余常规色 —— 一眼仍能看出最高的那根。
-      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
+      if (!t || vals[i] <= 0) continue;
+      // 峰值那根用强调色，其余常规色 —— 一眼仍能看出最高的那根。
+      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(yAt(vals[i]) - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
     }
     // ⚠ 2026-10-20：在柱状之上叠加一条**折线**（用户明确要"折线图"）。
     // # 为什么是叠加而不是切换
@@ -12207,19 +12591,11 @@ function renderDailyTrendSVG(list) {
     //   否则线和柱会对不上（看起来像两个数据源）。
     // ⚠ 只用有值的点连（v<=0 跳过）：把 0 也连进去会在"没数据的日子"画出
     //   一条贴底的折线，让人误以为那天几乎没生成 —— 而真相是没有记录。
-    const linePts = [];
-    for (let i = 0; i < n; i++) {
-      if (vals[i] > 0) linePts.push(cx(i).toFixed(1) + ',' + yAt(vals[i]).toFixed(1));
-    }
-    if (linePts.length >= 2) {
-      svg.push(`<polyline points="${linePts.join(' ')}" fill="none" stroke="var(--acc)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>`);
-      // 数据点小圆：单点也能看见（折线至少要两点才成形，圆点补上这个缺口）
-      for (let i = 0; i < n; i++) {
-        if (vals[i] > 0) {
-          svg.push(`<circle cx="${cx(i).toFixed(1)}" cy="${yAt(vals[i]).toFixed(1)}" r="2.2" fill="var(--acc)" opacity="0.9"/>`);
-        }
-      }
-    }
+    // ⚠⚠ 2026-10-25：折线 + 数据点圆改走共享层（dcLine，与上面双轴趋势同一条实现）。
+    //   ⚠ 只连有值的点（vals[i] > 0）：把 0 也连进去会在"没数据的日子"画出
+    //     一条贴底的折线，让人误以为那天几乎没生成 —— 而真相是没有记录。
+    dcLine(svg, vals.map((v, i) => (v > 0 ? [cx(i), yAt(v)] : null)).filter(Boolean),
+      { stroke: 'var(--acc)', width: 1.8, opacity: 0.85, dots: true });
     // x 轴：首/中/末（⚠ 桶多时全标会糊）
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
       const p = list[i]; if (!p) return;
@@ -12227,9 +12603,8 @@ function renderDailyTrendSVG(list) {
       svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lbl)}</text>`);
     });
     // ⚠⚠ 同样的悬浮参考线 + 跟随读数（与上面那张双轴趋势同一套做法 —— 用户要求统一）。
-    svg.push(`<line id="dtCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>`);
-    svg.push(`<text id="dtRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
-    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+    dcCursor(svg, 'dt', { PADT: PADT, plotH: plotH });
+    dcSvg(host, W, H, svg);
 
     if (!host._dtBound) {
       host._dtBound = true;
@@ -14197,6 +14572,9 @@ let multCatalogFailed = false;
     try { loadHeatmap(); } catch { /* 热力图非关键 */ }
     // ⚠ 缓存命中率趋势（双轴）也在这个时机 —— 它读的同样是 series（只是 range=24h）。
     try { loadCacheTrend(); } catch { /* 缓存趋势非关键 */ }
+    // 健康条的迷你折线（近 24 小时成功率）—— 同一个端点、同样 range=24h，
+    // ⚠ 但它有自己的签名与固定的 24h 口径（不跟 trendRange 走），见 loadHealthSeries。
+    try { loadHealthSeries(); } catch { /* 成功率折线非关键 */ }
     // ⚠ 按天 Token 趋势（它第 9 块）也在这里首次加载 —— 它读 `trendRange`，与上面那条同步。
     try { loadDailyTrend(); } catch { /* 按天趋势非关键 */ }
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
