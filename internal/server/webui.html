@@ -2923,6 +2923,40 @@ function mpEsc(s) {
         <tbody id="jobrows"><tr><td colspan="7" class="dim" style="padding:12px 16px">加载中…</td></tr></tbody>
       </table>
     </div>
+
+    <!-- 任务覆盖检查（2026-10-25）
+
+         用户报障：「检测一下任务调度是否有上游平台的每日签到或凭据续期 没有进行注册?」
+
+         起因是 monkeycode 的签到驱动**早就实现好了**（按钮能点、手动能签、历史会写），
+         但它没实现 gateway.JobExt 的 Jobs()，调度器**静默跳过**它（scheduler/job.go
+         里那行是 continue 不是 error）—— 于是永远不自动跑，而且编译通过、界面正常。
+
+         补上 Jobs() 就好了，但**下一个上游还会踩**：这是契约的一环没人守。
+         所以这里把它变成运行期可见：缺的标红，不用等用户自己发现。
+
+         ⚠ 三态而不是两态：有能力且注册（✓）/ 有能力但未注册（✗ 红）/
+           本来就没这个能力（— 灰）。只做两态会让「没有签到能力的上游」
+           全被标红，真正的缺口被噪声埋掉。 -->
+    <div class="body">
+      <h3 style="margin:14px 0 6px">覆盖检查
+        <span class="dim" id="jobCoverMeta" style="font-weight:400;text-transform:none"></span>
+      </h3>
+      <div class="dim" style="font-size:12px;line-height:1.8;margin-bottom:8px">
+        哪些上游<b>有能力</b>做每日签到 / 凭据续期，却<b>没有注册</b>对应定时任务。
+        标 <span class="badge badge--hot">✗ 未注册</span> 的那一行就是缺口 ——
+        该上游的手动按钮能用，但永远不会自动跑。
+      </div>
+      <table class="accttable" id="jobcovtbl">
+        <colgroup>
+          <col style="width:200px"><col style="width:170px"><col style="width:170px"><col>
+        </colgroup>
+        <thead><tr>
+          <th>上游</th><th>每日签到</th><th>凭据续期</th><th>说明</th>
+        </tr></thead>
+        <tbody id="jobcovrows"><tr><td colspan="4" class="dim" style="padding:12px 16px">加载中…</td></tr></tbody>
+      </table>
+    </div>
   </section>
 
   <section data-key="logs">
@@ -4746,6 +4780,77 @@ let loginProvider = '';
         <td>${stateCell}</td>
         ${errCell}
       </tr>`;
+    }).join('');
+  }
+
+  // renderJobCoverage 渲染任务覆盖检查表。
+  //
+  // 数据来自 manifest.job_coverage（后端 internal/admin/jobcover.go 算好）。
+  // **前端不做判据** —— 「有没有能力」是编译期事实（能力位 / 接口实现），
+  // 前端拿不到；在这里重算一份必然与后端漂移。
+  //
+  // # 三态而不是两态
+  //
+  //   有能力 + 已注册  → ✓ 已注册（绿）
+  //   有能力 + 未注册  → ✗ 未注册（红，这是缺口）
+  //   本来就没能力     → — 不适用（灰）
+  //
+  // 只做两态（注册了 / 没注册）会让绝大多数本来没有签到能力的上游全被标红，
+  // 真正的缺口反而被噪声埋掉 —— 那比不做这个功能更糟。
+  function renderJobCoverage() {
+    const host = $('jobcovrows');
+    if (!host) return;
+    const meta = $('jobCoverMeta');
+    if (!MANIFEST.loaded) {
+      host.innerHTML = '<tr><td colspan="4" class="dim" style="padding:12px 16px">渲染契约未加载：' + esc(manifestError || '未知原因') + '</td></tr>';
+      if (meta) meta.textContent = '';
+      return;
+    }
+    const list = (MANIFEST.job_coverage || []).filter(c => c && typeof c === 'object');
+    if (!list.length) {
+      host.innerHTML = '<tr><td colspan="4" class="dim" style="padding:12px 16px">没有上游自报任务能力</td></tr>';
+      if (meta) meta.textContent = '';
+      return;
+    }
+    // 稳定排序：缺口排最前（用户最需要看的），其余按上游名。
+    // 不排序会让行顺序随后端 map 遍历跳动。
+    const gaps = c => (c.missing_checkin ? 1 : 0) + (c.missing_refresh ? 1 : 0);
+    const sorted = list.slice().sort((a, b) => {
+      const ga = gaps(a), gb = gaps(b);
+      if (ga !== gb) return gb - ga;
+      const pa = a.provider || '', pb = b.provider || '';
+      return pa < pb ? -1 : pa > pb ? 1 : 0;
+    });
+    // 缺口总数进标题 —— 一进这个页就要能看见「有几个要处理」。
+    const totalGaps = sorted.reduce((n, c) => n + gaps(c), 0);
+    if (meta) {
+      meta.textContent = totalGaps
+        ? '（' + totalGaps + ' 处缺口）'
+        : '（无缺口）';
+      meta.style.color = totalGaps ? 'var(--warn)' : '';
+    }
+    // cell 三态渲染。can=有能力吗 has=注册了吗 kind='签到'/'续期'（写进提示语）。
+    const cell = (can, has, kind) => {
+      if (!can) return '<td class="dim">— 不适用</td>';
+      if (has) return '<td><span class="badge">✓ 已注册</span></td>';
+      return '<td><span class="badge badge--hot" title="该上游有' + kind + '能力，但没注册定时任务 —— '
+        + '手动按钮能用，却永远不会自动跑">✗ 未注册</span></td>';
+    };
+    host.innerHTML = sorted.map(c => {
+      const id = c.provider || '';
+      // 说明列：只对缺口给「怎么办」，正常行留空 —— 每行都写一句会把表撑满噪声。
+      const hints = [];
+      if (c.missing_checkin) hints.push('补实现 <span class="mono">gateway.JobExt.Jobs()</span> 并注册 <span class="mono">' + esc(id) + '-checkin</span>');
+      if (c.missing_refresh) hints.push('补实现 <span class="mono">gateway.JobExt.Jobs()</span> 并注册 <span class="mono">' + esc(id) + '-refresh</span>');
+      const note = hints.length
+        ? '<span class="err">' + hints.join('；') + '</span>'
+        : (c.can_checkin || c.can_refresh ? '<span class="dim">正常</span>' : '<span class="dim">该上游没有这两类能力</span>');
+      return '<tr>'
+        + '<td class="mono">' + esc(id) + '</td>'
+        + cell(c.can_checkin, c.has_checkin, '签到')
+        + cell(c.can_refresh, c.has_refresh, '续期')
+        + '<td>' + note + '</td>'
+        + '</tr>';
     }).join('');
   }
 
@@ -14156,6 +14261,10 @@ let multCatalogFailed = false;
     // 任务调度面板同样复用 manifest.jobs，不额外发请求。
     renderJobs();
     // 服务名同样来自 manifest（B8）：清掉前端硬编码后，
+    // 覆盖检查同样来自 manifest（job_coverage），不额外发请求。
+    // 必须跟 renderJobs 一起调：两者读同一份 manifest，分开调会出现
+    // 「任务表更新了、覆盖检查还是上一轮」的不一致。
+    renderJobCoverage();
     // 改名只需改后端配置，界面自动跟随。
     renderIdentity();
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
@@ -14977,6 +15086,7 @@ let multCatalogFailed = false;
     $('btnJobRefresh').onclick = () => busyRun($('btnJobRefresh'), async () => {
       await loadManifest();
       renderJobs();
+      renderJobCoverage();
     }, { label: '任务调度' });
     // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
     $('growthViews').addEventListener('click', ev => {
