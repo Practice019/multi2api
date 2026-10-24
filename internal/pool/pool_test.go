@@ -958,9 +958,12 @@ func TestFallbackPicksEarliestExpiry(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "late"})
 	p.Add(&auth.Auth{UID: "early"})
-	// 两个都软冷却；early 更早到期 → 兜底选 early。
-	p.Cooldown("late", CoolSoft, 2*time.Hour, "x")
-	p.Cooldown("early", CoolSoft, time.Hour, "x")
+	// ⚠ 2026-10-24：软冷却不再兜底，改用熔断（见 pickEarliestExpiryLocked 的注释）。
+	// 两个都熔断；early 更早到期 → 兜底选 early。
+	p.SetBreaker(1, 2*time.Hour, 2*time.Hour)
+	p.NoteError("late")
+	p.SetBreaker(1, time.Hour, time.Hour)
+	p.NoteError("early")
 	got := p.Pick()
 	if got == nil || got.UID != "early" {
 		t.Fatalf("fallback should pick earliest expiry (early), got %+v", got)
@@ -971,7 +974,9 @@ func TestFallbackSkipsDisabled(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "cooled"})
 	p.Add(&auth.Auth{UID: "dead"})
-	p.Cooldown("cooled", CoolSoft, time.Hour, "x")
+	// ⚠ 2026-10-24：兜底触发条件从软冷却改成熔断（软冷却不再兜底）。
+	p.SetBreaker(1, time.Hour, time.Hour)
+	p.NoteError("cooled")
 	p.Disable("dead", "session dead") // 禁用不参与兜底
 	got := p.Pick()
 	if got == nil || got.UID != "cooled" {

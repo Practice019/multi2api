@@ -264,14 +264,19 @@ func TestCooldownFallbackScopedByProvider(t *testing.T) {
 	p.SyncToDirFor("alpha", []*auth.Auth{{UID: "a1"}})
 	p.SyncToDirFor("beta", []*auth.Auth{{UID: "b1"}})
 
-	// alpha 的号软冷却（仍可兜底），beta 的号健康。
-	p.Cooldown("a1", CoolSoft, time.Minute, "test")
-	// beta 的号也软冷却，且到期更晚 —— 若兜底不隔离，会选到 b1。
-	p.Cooldown("b1", CoolSoft, time.Hour, "test")
+	// ⚠ 2026-10-24 改：软冷却（429 限流）现在**不参与兜底**了
+	//（用户实测：全部软冷却时仍白试 1.3-1.6 秒）。
+	// 兜底的触发条件改用**熔断**（连续失败推断出来的，可能已恢复）。
+	//
+	// 这条测试原本守的是"兜底不跨上游"，那个语义没变 —— 只是换了触发方式。
+	p.SetBreaker(1, time.Minute, time.Minute)
+	p.NoteError("a1")
+	// beta 的号也熔断，且到期更晚 —— 若兜底不隔离，会选到 b1。
+	p.NoteError("b1")
 
 	a := p.PickFor("alpha", "", nil)
 	if a == nil {
-		t.Fatal("alpha 处于软冷却兜底范围内，应返回 a1")
+		t.Fatal("alpha 处于熔断兜底范围内，应返回 a1")
 	}
 	if a.UID != "a1" {
 		t.Errorf("alpha 的兜底拿到了 %q —— 兜底跨上游了", a.UID)
