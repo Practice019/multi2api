@@ -1,7 +1,6 @@
 package monkeycode
 
 import (
-	"strings"
 	"testing"
 
 	"workbuddy2api/internal/gateway"
@@ -46,41 +45,47 @@ func TestManualLoginDiscoverable(t *testing.T) {
 	}
 }
 
-// TestStartReturnsAuthorizeURL Start 必须返回**真实的授权 URL**。
+// TestStartReturnsEmptyAuthURL Start 返回空 authURL 是**设计如此**，不是缺陷。
 //
-// # 为什么这条判据反过来了
+// # 为什么判据又反回来了（第二次反转，两次都有实测依据）
 //
-// 上一版把 authURL 写成空串，想表达"本上游没有授权页"。那是错的：
+// 这条判据改过两次，方向相反，每次都是被真实缺陷推动的：
 //
-//  ① MonkeyCode 的登录**就是**百智云 OAuth 授权页（client_id=monkeycode-ai）；
-//  ② 本仓前端对空 authURL 有专门分支 —— 会显示
-//     「登录态就在本机那个桌面客户端里，网关直接读取」，那是在读本机
-//     workbuddy 客户端，与本上游无关（用户实测报的缺陷）。
+//	第 1 版：authURL 必须为空
+//	  —— 理由「本上游没有授权页，登录态在本机桌面客户端里」。
+//	  错在：MonkeyCode 的登录确实有授权页，前端见到空串会走
+//	  「读本机 workbuddy 客户端」那条分支，与本上游无关（用户实测报的缺陷）。
 //
-// 所以现在必须返回上游 302 出的那条 authorize URL。
-func TestStartReturnsAuthorizeURL(t *testing.T) {
+//	第 2 版：authURL 必须是真实 authorize URL（本用例的上一版）
+//	  —— 理由「Start 打上游 login 入口取 302」。
+//	  错在：5baef8d 之后登录整体改成**浏览器登录**（StartBrowserLogin），
+//	  由服务端起 Chromium 打开登录页、CDP 读 cookie，不再需要把 URL 交给前端。
+//	  此时返回空串是**正确**的：前端据空串走「轮询等结果」分支，
+//	  而不是「打开链接」分支 —— 两者是不同语义，不能混。
+//
+// 所以现在钉的是：**state 非空（可用于轮询）+ authURL 为空（走轮询分支）+ 不报错**。
+//
+// ⚠ 这条用例会真的起浏览器（StartBrowserLogin），所以必须能在无头/CI 环境跳过。
+//
+//	它不是纯逻辑用例，别把它当单元测试用。
+func TestStartReturnsEmptyAuthURL(t *testing.T) {
 	if testing.Short() {
-		t.Skip("-short 跳过联网测试（Start 要打上游 login 入口取 302）")
+		t.Skip("-short 跳过：Start 会真起浏览器（StartBrowserLogin）")
 	}
 	p := New(Config{})
 	state, authURL, err := p.Start()
 	if err != nil {
 		t.Fatalf("Start 失败: %v", err)
 	}
+	// state 是轮询句柄，必须有 —— 否则前端无法查登录结果。
 	if state == "" {
-		t.Error("state 为空")
+		t.Error("state 为空 —— 前端拿不到轮询句柄，登录结果永远查不到")
 	}
-	if authURL == "" {
-		t.Fatal("authURL 为空 —— 前端会显示「读本机客户端登录态」那条错误分支")
+	// authURL 必须为空：这是「浏览器登录」与「把链接交给用户点」的语义分界。
+	// 非空会让前端走「打开链接」分支，与服务端已经起好的浏览器冲突（开两个窗口）。
+	if authURL != "" {
+		t.Errorf("authURL 应为空（浏览器登录由服务端起，前端只轮询），实得: %q", authURL)
 	}
-	// 必须是一条 http(s) 授权地址，且带 response_type=code。
-	if !strings.HasPrefix(authURL, "http") {
-		t.Errorf("authURL 不是 http 地址: %q", authURL)
-	}
-	if !strings.Contains(authURL, "response_type=code") {
-		t.Errorf("authURL 缺 response_type=code: %q", authURL)
-	}
-	t.Logf("state=%s authURL=%s", state, authURL)
 }
 
 // TestPollAlwaysPending Poll 恒回 ErrLoginPending。
