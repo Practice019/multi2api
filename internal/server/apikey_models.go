@@ -25,6 +25,7 @@
 package server
 
 import (
+	"log"
 	"sync"
 	"sort"
 	"fmt"
@@ -685,10 +686,31 @@ var aliasRR struct {
 
 // pickAliasTarget 从候选里按**轮询**挑一个，返回 (内部名, 本轮尝试顺序)。
 //
-// 返回的第二个值是**完整的尝试顺序**（从被选中的那个开始绕一圈），
-// 调用方失败时按这个顺序换下一个 —— 见 P3 的 failover。
+// # 只轮询「有健康账号」的候选（2026-10-24 加）
 //
-// 例：候选 [a b c]，游标落在 1 ⇒ 返回 ("b", [b c a])。
+// 用户原话：
+//   「右边有三个我设置一样的 所以请求右边一样的模型需要有三个上游对应
+//     上游有可用健康模型才进去发请求」
+//
+// 也就是说：一个对外名背后有 3 个上游，但只有 2 个当前有健康账号 ——
+// 那就**只在这 2 个之间轮询**，第 3 个连试都不试。
+//
+// 这解决了实测踩到的浪费：workbuddy 上游 6 个号全被 429 冷却时，
+// 网关仍要花 1.2-2.5 秒（逐个号打上去、每个吃一次 429、试满预算才放弃），
+// 而同一时刻 workbuddy-intl / loomy 是健康的。
+//
+// # 判定用「有没有健康账号」，不是「上游是否熔断」
+//
+// 熔断是"连续失败推断出来的"，滞后；而 AvailableUIDsFor 是**当下**的事实：
+// 这个上游现在有没有一个能用的号。用它做筛选，判据更直接。
+//
+// ⚠ 渠道（channel）不是账号池，不走这个判据 —— 它的可用性由渠道自己的
+//   key 状态决定（channelroute.Plan 会过滤掉没有可用 key 的渠道）。
+//   所以这里对"渠道型候选"一律保留，不误杀。
+//
+// ⚠ 全部候选都没有健康账号时**保留原顺序**（不清空）：
+//   那样调用方会走完整的失败路径并给出准确错误（"6 个账号全部冷却"比
+//   "没有候选"更有信息量）。宁可慢一点，也不要丢掉排障证据。
 func (h *Handler) pickAliasTarget(public string, cands []string) (string, []string) {
 	n := len(cands)
 	if n == 0 {
@@ -697,19 +719,99 @@ func (h *Handler) pickAliasTarget(public string, cands []string) (string, []stri
 	if n == 1 {
 		return cands[0], cands
 	}
+	// 只保留"有健康账号"的候选。
+	healthy := h.healthyAliasCandidates(cands)
+	pool := cands
+	if len(healthy) > 0 {
+		pool = healthy
+	}
+	// 诊断：候选筛选结果（排障时能直接看出"为什么选了没号的那家"）。
+	if len(healthy) != len(cands) {
+		log.Printf("[apikey] 别名 %q 候选 %d 个，其中有健康账号的 %d 个: %v",
+			public, len(cands), len(healthy), healthy)
+	}
+	m := len(pool)
 	aliasRR.mu.Lock()
 	if aliasRR.next == nil {
 		aliasRR.next = make(map[string]uint64, 8)
 	}
-	idx := int(aliasRR.next[public] % uint64(n))
+	idx := int(aliasRR.next[public] % uint64(m))
 	aliasRR.next[public]++
 	aliasRR.mu.Unlock()
 
-	order := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		order = append(order, cands[(idx+i)%n])
+	order := make([]string, 0, m)
+	for i := 0; i < m; i++ {
+		order = append(order, pool[(idx+i)%m])
 	}
 	return order[0], order
+}
+
+// nextAliasUpstream 按别名候选顺序找下一个"有健康账号且没试过"的上游。
+//
+// 返回 (上游ID, 该上游的模型名)；找不到返回 ("", "")。
+//
+// # 与 alternateUpstream 的区别（关键）
+//
+// alternateUpstream 用 normModelKey 猜"同一个模型"：去前缀 → 小写 → 只留字母数字。
+// 实测它的误判率不可接受 —— 目录里 4 组模型被它判成同一个：
+//
+//	nvidia/nemotron-3.5-lightning-free  vs  nvidia/nemotron-3.5-lightning:free
+//	qwen3.8-max                          vs  qwen-3.8-max
+//
+// 那是**两个不同的模型**，换过去等于偷偷换了用户要的东西（正是 2026-10-18
+// 用户否决换上游时的原话：「我调用的是这个模型，但是它优选，选到别的模型去了」）。
+//
+// 本函数不猜：只走 aliasOrder —— 那是用户在分组里**显式**配的对应关系
+//（"这三个内部模型对外都叫 X"），语义确定。
+func (h *Handler) nextAliasUpstream(order []string, tried map[string]bool) (string, string) {
+	if h.cfg.Pool == nil || h.cfg.Provider == nil {
+		return "", ""
+	}
+	for _, m := range order {
+		prov, _, has := gateway.SplitModel(strings.TrimSpace(m))
+		if !has || prov == "" {
+			continue
+		}
+		if tried != nil && tried[prov] {
+			continue
+		}
+		if !h.cfg.Provider.Has(prov) {
+			continue // 渠道前缀：不归账号池管
+		}
+		if len(h.cfg.Pool.AvailableUIDsFor(prov)) == 0 {
+			continue // 这家没号了，跳过
+		}
+		return prov, m
+	}
+	return "", ""
+}
+
+// healthyAliasCandidates 筛出「当前有健康账号」的候选（保持原顺序）。
+//
+// 判定口径与 pickForTier 一致：healthyForModel 用的就是 e.healthy + 在途未满，
+// 而 AvailableUIDsFor 正是那个判据的批量版（见它的实现）。
+//
+// ⚠ 渠道型候选（走 channelstore 的那条路）不参与筛选：
+//   它们不在账号池里，AvailableUIDsFor 会返回空 —— 若照此过滤会把
+//   所有渠道候选误杀。判据用「这个候选是不是池里的上游」来区分。
+func (h *Handler) healthyAliasCandidates(cands []string) []string {
+	if h.cfg.Pool == nil || h.cfg.Provider == nil {
+		return nil
+	}
+	out := make([]string, 0, len(cands))
+	for _, m := range cands {
+		prov, _, hasPrefix := gateway.SplitModel(strings.TrimSpace(m))
+		if !hasPrefix || prov == "" {
+			continue // 裸名 / 渠道：不参与筛选
+		}
+		if !h.cfg.Provider.Has(prov) {
+			continue // 不是注册过的上游（可能是渠道前缀）：不参与筛选
+		}
+		if len(h.cfg.Pool.AvailableUIDsFor(prov)) > 0 {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // resetAliasRoundRobin 清空游标（测试用；也让配置变更后能重新开始）。
