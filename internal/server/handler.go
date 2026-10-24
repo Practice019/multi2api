@@ -2052,6 +2052,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//	origModel 用户请求的**原始**模型名（带前缀）—— 用它去找"同模型的另一个上游"；
 	//	  ⚠ 不能用 reqModel：它会在切换后被改写成新上游的写法，再拿去匹配就找不回来了。
 	switchedUpstream := false
+	// switchedFrom 记录本轮已经试过的上游（跨上游切换用，见 nextAliasUpstream）。
+	// 用它防止两个上游都没号时来回横跳：那是无限循环，不是重试。
+	switchedFrom := map[string]bool{}
 	origModel := peek.Model
 	for i := 0; i < maxAttempts; i++ {
 		// 选号：粘性号优先（已校验 **provider + health + 在途未满**），否则普通轮换。
@@ -2115,6 +2118,41 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				switchedUpstream = true
 				continue // ⚠ 用新上游重选号（本轮已消耗，但换来一个真候选集）
 			}
+		}
+		if acct == nil {
+			// ★★ 跨上游切换（2026-10-24 加）—— 用户要求的核心行为：
+			//
+			//	「请求到网关直接不尝试请求这个上游 直接切换有健康账号的上游去发请求啊」
+			//	「右边有三个我设置一样的 所以请求右边一样的模型需要有三个上游对应
+			//	  上游有可用健康模型才进去发请求」
+			//
+			// # 为什么必须在这里切
+			//
+			// 下面那段（acct == nil ⇒ 503）只会"更快地失败"。而别名一对多的全部意义
+			// 是"这个模型在别家也有"——既然本轮已经试不出号（全冷却/全熔断），
+			// 就该去下一家有健康账号的上游，而不是把失败回给客户端。
+			//
+			// 实测：workbuddy 6 个号全被 429 冷却时，原实现直接 503；
+			// 而同一时刻 workbuddy-intl 的 17 个号全部健康、提供同一个模型。
+			//
+			// ⚠ 只在别名候选里切，**不**用 alternateUpstream 做模糊匹配：
+			//   后者靠 normModelKey（去前缀+小写+只留字母数字）猜"同一个模型"，
+			//   实测会把 qwen3.8-max 与 qwen-3.8-max 判成同一个 —— 那是两个模型。
+			//   别名候选是用户**显式**指定的对应关系，没有猜测空间。
+			//
+			// ⚠ 已经试过的上游不再试（switchedFrom 记录）：避免两个上游都没号时来回横跳。
+			if next, nextModel := h.nextAliasUpstream(aliasOrder, switchedFrom); next != "" {
+				log.Printf("[apikey] 别名 %q：上游 %q 无可用账号，切到 %q（模型 %q）",
+					publicModel, reqProvider, next, nextModel)
+				switchedFrom[next] = true
+				reqProvider = next
+				reqModel = nextModel
+				tierOffset = 0
+				tried = map[string]bool{}
+				st.decision = "switched_upstream:" + next
+				continue
+			}
+			// ⚠ 没有可切的就按原逻辑报错（下面那些 503/502 判决）。
 		}
 		if acct == nil {
 			// ⚠ 出口语义（用户实测 503 的真正来源）：

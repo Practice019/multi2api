@@ -155,3 +155,13 @@ func TestLogModelUsesInternalName(t *testing.T) {
 			"   ⇒ 覆盖 st.model 时拿到的还是对外名，日志照样显示别名")
 	}
 }
+
+// readFileSrc 读 internal/server 下的一个源文件（按需读，避免重复读 handler.go）。
+func readFileSrc(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("读 %s: %v", name, err)
+	}
+	return string(b)
+}
