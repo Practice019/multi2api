@@ -16,11 +16,11 @@
 package server
 
 import (
-	"regexp"
-	"path/filepath"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -235,8 +235,9 @@ func sliceFuncBody(t *testing.T, src, sig string) string {
 // new Error() 就渲染成 "[object Object]" —— 真实原因（invalid_api_key）被吞掉。
 //
 // 两条判据都必须成立，缺一个都会退回那个形态：
-//  ① 不调用 /v1/models
-//  ② 错误对象要取 message/code，不能整体当字符串
+//
+//	① 不调用 /v1/models
+//	② 错误对象要取 message/code，不能整体当字符串
 func TestGroupsUICatalogUsesAdminEndpoint(t *testing.T) {
 	src := sliceFuncBody(t, readGroupsUI(t), "async function ensureCatalog()")
 	if strings.Contains(src, "'/v1/models'") || strings.Contains(src, "\"/v1/models\"") {
@@ -388,8 +389,8 @@ func TestGroupsUIMatchesConsoleProviderRule(t *testing.T) {
 //
 // # 这是用户连问两次才做对的事
 //
-//   「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享」
-//   「不是api管理里面已经实现了1吗直接共享层使用啊」
+//	「这个实现和api管理里面的实现不一样啊 直接复刻啊抽共享」
+//	「不是api管理里面已经实现了1吗直接共享层使用啊」
 //
 // 第一版我把代码"复刻"到分组页 —— 那是**第二个副本**，不是共享。
 // 真正的判据是：webui.html 自己也调用这里，而不是各留一份。
@@ -453,7 +454,7 @@ func TestModelPickerIsSharedAcrossPages(t *testing.T) {
 //
 // # 用户要求（2026-10-24）
 //
-//   「这里API 不要设置模型了只能设置分组 因为分组已经设置了模型」
+//	「这里API 不要设置模型了只能设置分组 因为分组已经设置了模型」
 //
 // # 为什么这条必须守
 //
@@ -476,10 +477,10 @@ func TestAPIKeyModalSelectsGroupsNotModels(t *testing.T) {
 
 	// ① 旧模型选择控件必须都不在弹窗里了。
 	for _, gone := range []string{
-		`id="akAll"`,        // 「全部允许」勾选框
-		`id="akModelList"`,  // 模型多选列表
-		`id="akProvider"`,   // 上游下拉
-		`id="akSearch"`,     // 模型搜索
+		`id="akAll"`,       // 「全部允许」勾选框
+		`id="akModelList"`, // 模型多选列表
+		`id="akProvider"`,  // 上游下拉
+		`id="akSearch"`,    // 模型搜索
 		`id="akSelectedChips"`,
 		`id="akPicker"`,
 	} {
@@ -637,9 +638,9 @@ func TestModelsEndpointSetsServiceHeader(t *testing.T) {
 //
 // # 用户要求的原话（2026-10-24 第二次明确）
 //
-//   「每一个我选择的模型，对外模型都需要有一行，而且这个是自动的……
-//    左边右边都是一样的，就是这个模型原来的，然后用户再根据这个去进行一些修改……
-//    而且是固定必须有的，然后也不能删除」
+//	「每一个我选择的模型，对外模型都需要有一行，而且这个是自动的……
+//	 左边右边都是一样的，就是这个模型原来的，然后用户再根据这个去进行一些修改……
+//	 而且是固定必须有的，然后也不能删除」
 //
 // # 为什么要守
 //
@@ -706,8 +707,8 @@ func TestGroupsAliasSkipsIdentityMapping(t *testing.T) {
 //
 // # 这个 bug 真实发生过两次同类形态
 //
-//   · 第一次：替换整段 JS 时把 akAddMapRow 等三个函数删了（调用还在）→ ReferenceError
-//   · 第二次（本条）：替换 openForm 里的调用时把 renderMapRows 一起吞了 → 只有注释、没有调用
+//	· 第一次：替换整段 JS 时把 akAddMapRow 等三个函数删了（调用还在）→ ReferenceError
+//	· 第二次（本条）：替换 openForm 里的调用时把 renderMapRows 一起吞了 → 只有注释、没有调用
 //
 // 第二次更隐蔽：语法完全合法、其它测试全绿，界面上只是"那一块空白"——
 // 用户看到的是"模型对外名：每个已选模型自动一行"，然后下面什么都没有。

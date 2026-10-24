@@ -223,11 +223,11 @@ type providerLogin struct {
 //
 // 字段与 gateway.LoginOption **一一对应**，刻意不改名：同一条契约的两个投影。
 type loginOption struct {
-	Key     string              `json:"key"`
-	Label   string              `json:"label"`
-	Values  []loginOptionValue  `json:"values"`
-	Default string              `json:"default,omitempty"`
-	Hint    string              `json:"hint,omitempty"`
+	Key     string             `json:"key"`
+	Label   string             `json:"label"`
+	Values  []loginOptionValue `json:"values"`
+	Default string             `json:"default,omitempty"`
+	Hint    string             `json:"hint,omitempty"`
 }
 
 // loginOptionValue 选项的一个取值。
@@ -302,7 +302,7 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			if lf, ok := gateway.ExtOf[gateway.LoginFlow](p); ok && lf.Configured() {
 				info.Login = &providerLogin{Kind: "device", Label: "添加账号"}
 				fillManualLogin(info.Login, p)
-		fillLoginOptions(info.Login, p)
+				fillLoginOptions(info.Login, p)
 			}
 			// 账号池列集：上游自报（未实现 = nil = 用默认 11 列）。
 			info.AccountColumns = accountColumnsOf(p)

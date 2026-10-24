@@ -35,10 +35,10 @@ var offValues = map[string]bool{
 //
 // 为什么是删除而不是改成某个值：
 
-//   实测 workbuddy 系不传 reasoning_effort 时**完全不思考**（thinking 为 0），
-//   而 none 也不在它接受的字面量里。删除是唯一在所有上游都安全表达。
-//   loomy / monkeycode 接受 off，但删除对它们同样等价于关闭 ——
-//   所以统一删除，不按上游分支。
+//	实测 workbuddy 系不传 reasoning_effort 时**完全不思考**（thinking 为 0），
+//	而 none 也不在它接受的字面量里。删除是唯一在所有上游都安全表达。
+//	loomy / monkeycode 接受 off，但删除对它们同样等价于关闭 ——
+//	所以统一删除，不按上游分支。
 //
 // 返回 changed=false 表示 body 无需改动（**不重新编码**）。
 //

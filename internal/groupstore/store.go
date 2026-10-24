@@ -29,12 +29,12 @@
 package groupstore
 
 import (
-	"log"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,8 +90,8 @@ type Group struct {
 	//
 	// ⚠ 方向仍是「对外名 → 内部名」。请求进来每一跳都要查它，
 	//    方向必须是"进来的名字 → 内部的名字"。
-	ModelMap map[string][]string `json:"model_map,omitempty"`
-	CreatedAt   string   `json:"created_at"`  // RFC3339
+	ModelMap  map[string][]string `json:"model_map,omitempty"`
+	CreatedAt string              `json:"created_at"` // RFC3339
 }
 
 // snapshot 是落盘形状（一个文件一段，便于人工查看、备份与 diff）。

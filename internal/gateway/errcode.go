@@ -108,13 +108,13 @@ const (
 	// 新名字把语义写明（unavailable = 暂时性，可重试）。两套词汇不要混用 ——
 	// 内部诊断仍用 kind.String()（那里 server 就叫 "server"）。
 	// CodeUpstreamUnavailable 上游故障（重试无用或已重试仍失败）。
-//
-// ⚠ 线上值刻意保持 "upstream_error" 而不是跟常量名一致的 "upstream_unavailable"：
-// 这是**已经发布出去的契约值**，改它会让既有客户端的分支判断失配
-// （它们的 switch/case 里写的是 upstream_error）。
-// 常量名用 UpstreamUnavailable 是因为语义更准（5xx 与"连不上"都归它），
-// 但对外词不跟着改 —— 契约稳定优先于命名一致性。
-CodeUpstreamUnavailable ErrorCode = "upstream_error"
+	//
+	// ⚠ 线上值刻意保持 "upstream_error" 而不是跟常量名一致的 "upstream_unavailable"：
+	// 这是**已经发布出去的契约值**，改它会让既有客户端的分支判断失配
+	// （它们的 switch/case 里写的是 upstream_error）。
+	// 常量名用 UpstreamUnavailable 是因为语义更准（5xx 与"连不上"都归它），
+	// 但对外词不跟着改 —— 契约稳定优先于命名一致性。
+	CodeUpstreamUnavailable ErrorCode = "upstream_error"
 
 	// CodeNoHealthyAccount 池子里没有可用账号（全冷却 / 全禁用 / 凭证失效）。
 	//

@@ -101,12 +101,12 @@ type Config struct {
 	// 只需在组合根换一个函数，核心一行都不用改。
 	ChannelProvider func(id, baseURL string) gateway.Provider
 	// Channels 渠道存储（中转站方向）。nil = 对外目录仍旧走上游目录（既有行为）。
-	Channels  *channelstore.Store
+	Channels *channelstore.Store
 	// Groups 分组存储（PLAN-groups）—— 出口层要用它把「key → 分组 → 模型/别名」
 	// 这条链算出来。
 	//
 	// nil = 未启用分组：判定链退回白名单路径（存量行为不变）。
-	Groups *groupstore.Store
+	Groups    *groupstore.Store
 	MaxRotate int // 单请求最多换号次数，默认 3
 
 	// AccountAuth 控制台登录端点（注册/登录/登出/读会话），由装配层注入。

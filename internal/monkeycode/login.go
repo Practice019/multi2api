@@ -44,7 +44,7 @@ import (
 // ⚠ 这些方法**必须挂在 *Provider 上**（不能用访问器返回）：
 // 核心用 ExtOf[LoginFlow](p) 做类型断言，访问器的返回值不参与方法集匹配。
 // 少了它们，manifest 会下发 login:null —— 界面上没有「添加账号」按钮
-//（raccoon 实测踩过这个形态）。
+// （raccoon 实测踩过这个形态）。
 var _ gateway.LoginFlow = (*Provider)(nil)
 var _ gateway.ManualLoginExt = (*Provider)(nil)
 
@@ -66,7 +66,7 @@ type loginSession struct {
 //	国际站(global)  choices.github / choices.google → 都用
 //	                GET /api/v1/users/oauth/{platform}/login?redirect_url=…
 //	                → {data:{auth_url}} → 跳到 GitHub / Google 授权页
-//	
+//
 //	国内站(cn)      该登录方式暂未启用（实测两者都回这句话）
 //	                只有 choices.baizhi → GET /api/v1/users/login → 302 百智云授权页
 //	                与 choices.password → POST /api/v1/users/password-login
@@ -248,7 +248,7 @@ func firstNonEmptyStr(list ...string) string {
 // OAuth 的 code 是回调打到 `monkeycode-ai.com/api/v1/users/baizhi/callback`
 // 之后由**上游**换 cookie 的，我们拿不到那个 code —— 除非登录页把浏览器
 // 导到一个我们能拦的地址。所以真正的收号走 ManualLogin 的粘贴框
-//（用户把回调后地址栏里那条 `/?ic=…` 或直接 cookie 粘回来）。
+// （用户把回调后地址栏里那条 `/?ic=…` 或直接 cookie 粘回来）。
 //
 // 恒回 ErrLoginPending 是**正确语义**：流程没完成，而且不会自动完成。
 func (p *Provider) Poll(state string) (gateway.Credential, error) {
@@ -448,4 +448,3 @@ func jsonDecode(r *http.Request, v any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
-

@@ -12,8 +12,8 @@ package server
 
 import (
 	"encoding/json"
-	"testing"
 	"strings"
+	"testing"
 )
 
 // TestAliasForMapsKnownProvider 配了映射的上游必须返回代号。

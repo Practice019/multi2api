@@ -176,7 +176,6 @@ func TestIsRegMachineDocRejectsOwnFormat(t *testing.T) {
 	_ = json.Valid
 }
 
-
 // TestImportMinimalRegMachineRow 极简行（只有 session+region+platform）必须能导入。
 //
 // # 为什么这条要单独钉
@@ -203,7 +202,9 @@ func TestImportMinimalRegMachineRow(t *testing.T) {
 
 	// session 与 region 必须落到盘上（那是唯二影响行为的字段）。
 	var a *Auth
-	if err := json.Unmarshal(creds[0].Raw, &struct{ A **Auth `json:"auth"` }{&a}); err != nil {
+	if err := json.Unmarshal(creds[0].Raw, &struct {
+		A **Auth `json:"auth"`
+	}{&a}); err != nil {
 		t.Fatalf("解析落盘内容失败: %v", err)
 	}
 	if a == nil {

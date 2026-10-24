@@ -55,7 +55,7 @@ func monkeycodeUIDEnumerator(p *pool.Pool) func() []string {
 		out := make([]string, 0, len(list))
 		for _, st := range list {
 			out = append(out, st.UID)
-}
+		}
 		return out
 	}
 }

@@ -34,7 +34,7 @@ var OutputLimitLookup func(model string) int
 //
 // 转换是**每请求**发生的，而模型上限几乎不变 —— 每请求穿透到目录层
 // 是白花钱（目录层可能带锁）。缓存键是模型名，值 0 也缓存
-//（表示「查过、确实未知」，避免反复回源）。
+// （表示「查过、确实未知」，避免反复回源）。
 var lookupCache sync.Map // string -> int
 
 // SetOutputLimitLookup 装配层注入查询函数（nil = 关闭，走兜底值）。

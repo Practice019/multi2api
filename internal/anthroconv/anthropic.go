@@ -62,10 +62,11 @@ import (
 // 对齐 new-api 的做法：它把默认值做成**可配置映射**（setting/model_setting
 // 的 DefaultMaxTokens，按模型名查、带 "default" 兜底），而不是写死一个数。
 // 我们进一步简化为「查模型上限」，因为我们的模型目录本来就带 max_output_tokens
-//（/v1/models 里就有），没有理由再维护第二份数字。
+// （/v1/models 里就有），没有理由再维护第二份数字。
 //
 // ⚠ 兜底：查不到模型上限时用 fallbackMaxTokens，而不是 4096。
-//   8192 与 new-api 的 "default" 一致 —— 但**只在查不到上限时**才用它。
+//
+//	8192 与 new-api 的 "default" 一致 —— 但**只在查不到上限时**才用它。
 const fallbackMaxTokens = 8192
 
 // ---- 请求转换：OpenAI → Anthropic ----

@@ -102,7 +102,7 @@ func (s *browserSession) snapshot() BrowserLoginStatus {
 // StartBrowserLogin 起一次浏览器登录，立即返回会话 ID。
 //
 // 进度用 BrowserLoginStatusOf(id) 轮询 —— 与 register-machine 同款
-//（那边是 startMonkeyCodeLogin + getMonkeyCodeLoginStatus）。
+// （那边是 startMonkeyCodeLogin + getMonkeyCodeLoginStatus）。
 func (p *Provider) StartBrowserLogin(region string, timeout time.Duration) (string, error) {
 	if strings.TrimSpace(region) == "" {
 		region = RegionCN
@@ -404,4 +404,3 @@ func (p *Provider) profileRoot() string {
 
 // 编译期小工具：确认 http 包仍被使用（handler 在别处）。
 var _ = http.MethodGet
-

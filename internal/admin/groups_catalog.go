@@ -31,7 +31,7 @@ func (h *Handler) groupCatalog(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.ModelNames == nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"models":     []string{},
-			"incomplete": []string{}, 
+			"incomplete": []string{},
 			"ready":      false,
 			"error":      "模型目录未接线（装配层未注入 ModelNames）",
 		})

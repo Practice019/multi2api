@@ -3,11 +3,11 @@
 // 数据来源：渠道结构里已有 Overrides.Param（channelstore/store.go），
 // 那是 new-api 的 param_override 对应物。本文件只做两件事：
 //
-//	1. 把一个渠道的 Param 解析成规则表（带缓存，配置变了才重解析）
-//	2. 按本次请求命中的上游取出规则
+//  1. 把一个渠道的 Param 解析成规则表（带缓存，配置变了才重解析）
+//  2. 按本次请求命中的上游取出规则
 //
 // 为什么按 provider 取而不是按渠道 ID：出口层在这一点上只知道 provider
-//（渠道选路发生在 forwardViaChannel 内部，那时 body 早被改写）。
+// （渠道选路发生在 forwardViaChannel 内部，那时 body 早被改写）。
 // 所以取的是「该上游所有启用渠道的规则并集」，按优先级升序拼接。
 package server
 

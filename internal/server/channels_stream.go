@@ -15,10 +15,10 @@
 package server
 
 import (
-	"encoding/json"
-	"strings"
 	"bytes"
+	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // writeChannelStream 把一次渠道转发的流写回客户端。
@@ -92,7 +92,7 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 			// 实测 chat 响应里 model=monkeycode-basic/deepseek-flash 原样回给了客户端。
 			if len(pending) > 0 {
 				trimmed := bytes.TrimSpace(pending)
-			if len(trimmed) > 0 && trimmed[0] == 0x7b && scrub {
+				if len(trimmed) > 0 && trimmed[0] == 0x7b && scrub {
 					// 整块 JSON：脱敏后写。
 					_, _ = w.Write(scrubChatResponse(trimmed, publicModel))
 				} else {

@@ -20,8 +20,8 @@ package server
 
 import (
 	"path/filepath"
-	"workbuddy2api/internal/groupstore"
 	"testing"
+	"workbuddy2api/internal/groupstore"
 )
 
 // aliasFixture 单值表：给 publicNameFor 这类"只要一个答案"的测试用。
