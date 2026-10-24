@@ -701,3 +701,44 @@ func TestGroupsAliasSkipsIdentityMapping(t *testing.T) {
 		t.Error("★ collectMap 没有跳过「右侧等于左侧」的行 —— model_map 会堆满恒等映射")
 	}
 }
+
+// 打开分组弹窗时**必须**先渲染别名表 —— 否则那一块永远是空的。
+//
+// # 这个 bug 真实发生过两次同类形态
+//
+//   · 第一次：替换整段 JS 时把 akAddMapRow 等三个函数删了（调用还在）→ ReferenceError
+//   · 第二次（本条）：替换 openForm 里的调用时把 renderMapRows 一起吞了 → 只有注释、没有调用
+//
+// 第二次更隐蔽：语法完全合法、其它测试全绿，界面上只是"那一块空白"——
+// 用户看到的是"模型对外名：每个已选模型自动一行"，然后下面什么都没有。
+//
+// 判据：openForm 函数体里**必须出现** renderMapRows 的调用（不是注释里的提及）。
+func TestGroupsOpenFormRendersAliasRows(t *testing.T) {
+	src := sliceFuncBody(t, readGroupsUI(t), "function openForm(")
+	if src == "" {
+		t.Fatal("找不到 openForm")
+	}
+	// 去掉注释行再找调用，避免"注释里有、代码里没有"被误判为通过。
+	var code []string
+	for _, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		code = append(code, line)
+	}
+	body := strings.Join(code, "\n")
+	if !strings.Contains(body, "renderMapRows(") {
+		t.Error("★ openForm 里没有调用 renderMapRows —— 打开弹窗时「模型对外名」那一块会是空白的")
+	}
+}
+
+// 勾选模型后必须重建别名表（否则新选的模型没有对应行）。
+//
+// 与上一条互补：上一条守"打开时渲染"，这一条守"勾选后渲染"。
+func TestGroupsPickTriggersAliasRebuild(t *testing.T) {
+	ui := readGroupsUI(t)
+	if !strings.Contains(ui, "renderMapRows(currentMapSnapshot())") {
+		t.Error("★ 勾选模型后没有重建别名表 —— 新选的模型不会自动出现一行")
+	}
+}

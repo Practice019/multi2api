@@ -1710,6 +1710,7 @@ async function openForm(id) {
   picked = new Set(g ? (g.models || []) : []);
   // 别名表按已选模型自动生成（每个模型一行，右侧默认=内部名）。
   // 编辑时用已保存的 model_map 回填右侧 —— 那些是用户改过的对外名。
+  renderMapRows(g ? g.model_map : null);
   renderPicked();
   $('gChoices').innerHTML = '<span class="muted" style="font-size:12px">正在读取模型目录…</span>';
   $('dlg').showModal();
@@ -1720,6 +1721,8 @@ async function openForm(id) {
     // ensureCatalog 已经把提示写进 #gChoices；这里不再重复报错。
   }
   renderPicked();
+  // 目录加载完再渲染一次：此刻已选的模型集合才最终确定。
+  renderMapRows(g ? g.model_map : null);
 }
 
 function closeForm() { $('dlg').close(); }
