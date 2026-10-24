@@ -1004,6 +1004,12 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   /* 分段按钮的选中态。历史代码用内联 style 切换，这里补一条 class 规则，
      供新增的视图切换使用，避免再堆内联样式。 */
   .tog button.on{background:var(--acc);color:#fff;font-weight:600}
+  /* 请求日志「状态码卡片」的选中态。
+     画法照抄上一行 .tog button.on（选中 = 强调色底 + 强调色前景），不新造视觉。
+     ⚠ 作用域限定在 #logStatusBar：.chip 同时被模型面板用着（.chips .chip），
+       一条全局 .chip.on 会在那边将来加 on 类时莫名变色 —— 一处样式影响两个面板
+       正是本文件反复踩过的形态。 */
+  #logStatusBar .chip.on{background:var(--acc);color:var(--on-acc);border-color:var(--ink)}
   .tog input{width:auto;padding:0}
   /* 可点击复制的内容块：整块可点，鼠标悬停给明确反馈 */
   .copyable{cursor:pointer;position:relative;transition:.15s}
@@ -3219,6 +3225,15 @@ function mpEsc(s) {
     </h2>
     <div class="body" style="padding:0">
       <div id="logFileInfo" class="dim" style="display:none;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px"></div>
+      <!-- 状态码卡片条（用户要求：列出日志里出现过的状态码，点一下只看该码，方便查错误）。
+           ⚠ 口径：/admin/logs/history 只接受 limit/offset（见 internal/admin/admin.go 的
+             logsHistory），**不支持按状态码过滤** ⇒ 这里的统计与筛选都只覆盖**当前页**。
+             条尾那句「本页 N 条 · 共 M 条 · 卡片只统计当前页」必须留着：它是范围的
+             自我声明，不能让「200 ×13」被读成"全部 13077 条里只有 13 个 200"。
+           容器常驻（不随空态删 DOM），内容由 renderLogStatusBar 整块重绘；
+           无数据 / 清屏 / 取数失败时由 hideLogStatusBar 清空并隐藏。 -->
+      <div id="logStatusBar" class="chips"
+           style="display:none;padding:8px 16px;border-bottom:1px solid var(--line);align-items:center"></div>
       <div class="logwrap">
         <div class="log-head">
           <span>#</span><span>时间</span><span>模型</span><span>模式</span><span>状态</span>
@@ -11095,6 +11110,12 @@ let loginProvider = '';
 
     // 每次拉取前先给一句「正在读取」，避免翻页时旧内容一直挂着让人以为没反应。
     $('logrows').innerHTML = logPlaceholder('正在读取落盘日志…');
+    // 状态码卡片先撤掉：下面任何一条提前 return 的分支（未启用/取数失败/空文件）
+    // 都不会再调 renderLogStatusBar，留着上一页的卡片就会**指着另一页的数字**。
+    // ⚠ 只清 DOM、不动 logStatus：筛选是用户的意图，翻页/轮询时不该被静默清掉
+    //   （清掉的表现是"点着 429 翻一页，筛选自己没了"）。真正的重置只在
+    //   用户点「全部」或那一页里再也没有该状态码时发生（见 renderLogs 的注释）。
+    hideLogStatusBar();
     let r;
     try { r = await admin(`/admin/logs/history?limit=${logPage.limit}&offset=${logPage.offset}`); }
     catch (e) { $('logrows').innerHTML = logPlaceholder(e.message, 'err'); return; }
@@ -11115,6 +11136,8 @@ let loginProvider = '';
     if (!r.items || !r.items.length) {
       $('logrows').innerHTML = logPlaceholder('落盘日志为空');
       $('logMeta').textContent = '';
+      // 真的没有行 ⇒ 没有状态码可统计，筛选也无从谈起
+      logStatus = null;
       renderPager(logPage);
       return;
     }
@@ -11230,6 +11253,82 @@ let loginProvider = '';
   // 本包有 TDZ 守卫（gen_tdz_guard.js）专门防这类问题。
   let logViewSuspended = false;
 
+  // logStatus：请求日志的**状态码筛选**（null = 不筛，全部）。
+  //
+  // # 为什么存在模块变量而不是 DOM 里
+  //
+  // 照 modelProviderWanted 的同一条教训：本文件有过 select 把不存在的值
+  // 归一成空串、于是"选了却等于没选"的缺陷。筛选状态是**用户意图**，
+  // 卡片只是它的投影 —— 重绘卡片时从它读，不从 class 列表反推。
+  //
+  // # ⚠ 它只筛**当前页**
+  //
+  // /admin/logs/history 只接受 limit/offset（internal/admin/admin.go 的
+  // logsHistory → Sink.Page(offset, limit)），**没有 status 入参**。
+  // 要做全局筛选得改后端分页契约（过滤后再分页），不在本次范围。
+  // 所以卡片的数字是「本页」的，条尾那句范围声明是硬要求，不许删。
+  let logStatus = null;
+
+  // logStatusOf 把一条日志的状态码收敛成"可比较的值"。
+  //   · 0 / 缺失 / 非数字 ⇒ null（不归入任何卡片；画出来的话会出现一张「null」卡）
+  //   · 其余原样返回，包括 0 以外的怪值 —— 显示原值总比显示猜测好
+  function logStatusOf(e) {
+    const n = Number(e && e.status);
+    return isFinite(n) && n > 0 ? n : null;
+  }
+
+  // renderLogStatusBar 画「本页状态码」卡片条。
+  //
+  // # 为什么数字必须带范围说明
+  //
+  // 用户看到「200 ×13」很自然会读成"全部日志里只有 13 个 200"，
+  // 而落盘日志可能有 13077 条、这一页只是 15 条。数字不带范围就是在骗人 ——
+  // 本项目的既有纪律：空白与数字都必须能自我解释。
+  // 所以条尾常驻「本页 N 条 · 共 M 条 · 卡片只统计当前页」。
+  //
+  // # 排序
+  //
+  // 按状态码数值升序（200 < 401 < 429）；「全部」永远排最前 —— 它是"取消筛选"，
+  // 不属于状态码序列。用数值而不是字符串比较，否则 "1000" 会排在 "200" 前面。
+  function renderLogStatusBar(counts, pageLen) {
+    const box = $('logStatusBar');
+    if (!box) return;
+    const codes = Array.from(counts.keys()).sort((a, b) => a - b);
+    if (!codes.length) { hideLogStatusBar(); return; }
+    const total = logPage.total || 0;
+    const chip = (val, label, num, on, hint) =>
+      `<button type="button" class="chip${on ? ' on' : ''}" data-logst="${val}"
+               aria-pressed="${on ? 'true' : 'false'}" title="${esc(hint)}">${label}<span>${num}</span></button>`;
+    const cards = [
+      chip('', '全部', pageLen, logStatus === null, '不筛选，显示本页全部 ' + pageLen + ' 条'),
+    ].concat(codes.map(c => chip(String(c), String(c), counts.get(c), logStatus === c,
+      '只看本页状态码 ' + c + ' 的 ' + counts.get(c) + ' 条')));
+    // 「本页 N 条」里的 N 是**渲染出来的行数**，不是每页条数设置 ——
+    // 末页往往不足一页，用设置值会与实际行数对不上。
+    box.innerHTML = cards.join('') +
+      `<span class="dim" style="font-size:11px;margin-left:4px">`
+      + `本页 ${pageLen} 条 · 共 ${total} 条 · 卡片只统计当前页</span>`;
+    box.style.display = 'flex';
+  }
+
+  // hideLogStatusBar 只清卡片（不动 logStatus，理由见 loadLogHistory 里的注释）。
+  function hideLogStatusBar() {
+    const box = $('logStatusBar');
+    if (!box) return;
+    box.innerHTML = '';
+    box.style.display = 'none';
+  }
+
+  // setLogStatus 是筛选状态的唯一写入口。
+  //   点了当前已选的那张 ⇒ 不重复渲染（与 statsRange / trendView 的写法一致）。
+  //   ⚠ 重绘必须走 renderLogs(logEntries)：只改 class 不改表格 = 卡片亮着、
+  //     下面的行没变，比不做筛选更让人困惑。
+  function setLogStatus(v) {
+    if (v === logStatus) return;
+    logStatus = v;
+    renderLogs(logEntries);
+  }
+
   // 归一化：时间倒序；时间相同按 seq 倒序，保证顺序稳定可复现。
   function normalizeDesc(items) {
     return (items || []).slice().sort((a, b) => {
@@ -11311,13 +11410,54 @@ let loginProvider = '';
   //
   // ⚠ 300 条上限保留：这是**渲染**上限（分页 limit 可能被用户调到更大），
   //   超出的部分靠翻页看，不是数据被丢弃。
+  //
+  // # 状态码卡片与它的筛选（2026-10-25 用户要求）
+  //
+  // 卡片统计的是 `list`（**当前页、排序后、300 条上限内**）—— 与表格里
+  // 实际画出来的行一一对应。⚠ 必须先截断再统计：先统计后截断会让卡片说
+  // "本页 320 条"，而屏幕上只有 300 行，数字当场自相矛盾。
+  //
+  // 筛选在**本页内**做，因为后端 /admin/logs/history 没有 status 入参。
+  // 这也意味着筛完可能一行都不剩（比如切页后这一页没有 429）—— 那时
+  // 要把筛选自动放下并说明原因，而不是留一张亮着的卡片配一句"暂无请求"：
+  // 用户会以为日志真的没了，而真相只是这一页没有该状态码。
   function renderLogs(items) {
     const host = $('logrows');
     if (!host) return;
     const list = normalizeDesc(items).slice(0, 300);
-    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容
-    if (!list.length) { host.innerHTML = logPlaceholder('暂无请求'); return; }
-    host.innerHTML = list.map(e => {
+
+    // 统计当前页的状态码分布（未筛选的全集）。
+    const counts = new Map();
+    for (const e of list) {
+      const code = logStatusOf(e);
+      if (code !== null) counts.set(code, (counts.get(code) || 0) + 1);
+    }
+
+    // 筛选值若已不在这一页 ⇒ 自动放开并告知。**先判再画卡片**，
+    // 否则会出现"卡片显示全部、表格却是空的"这种一闪而过的自相矛盾。
+    let autoCleared = null;
+    if (logStatus !== null && !counts.has(logStatus)) {
+      autoCleared = logStatus;
+      logStatus = null;
+    }
+
+    const shown = logStatus === null ? list : list.filter(e => logStatusOf(e) === logStatus);
+
+    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容。
+    // ⚠ 自动放开筛选这条分支下 list 非空、shown 为空 —— 不是"暂无请求"，
+    //   是"这一页没有该状态码"，两者必须用不同的字说，否则等于骗人。
+    if (!list.length) {
+      host.innerHTML = logPlaceholder('暂无请求');
+      hideLogStatusBar();
+      return;
+    }
+    renderLogStatusBar(counts, list.length);
+    if (!shown.length) {
+      host.innerHTML = logPlaceholder(
+        '本页 ' + list.length + ' 条里没有状态码 ' + autoCleared + '（已取消该筛选；翻页可看其它页）');
+      return;
+    }
+    host.innerHTML = shown.map(e => {
       const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
       // ② 数值列右对齐（.r）
       // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
@@ -15599,6 +15739,25 @@ let multCatalogFailed = false;
     // logViewSuspended 的声明在上方（与 logEntries 一起），不在这里 ——
     // 放这里会造成 TDZ（loadLogHistory 定义在前、首次调用更早）。
 
+    // 状态码卡片：事件委托挂在**容器**上。
+    //
+    // 为什么必须委托：卡片是 renderLogStatusBar 每次整块重绘出来的，
+    // 挂到卡片自己身上会在第一次重绘后全部失效（本文件模型 chip 那处
+    // 踩过同形的坑）。容器本身是静态 HTML，一生只绑一次。
+    //
+    // ⚠ data-logst="" 表示「全部」，与 data-logst="200" 必须能区分开 ——
+    //   用 dataset.logst === '' 判，不能靠真假值（'0' 也是真值，0 状态码
+    //   目前不会出现，但别把判断写成依赖这一点）。
+    const logStBox = $('logStatusBar');
+    if (logStBox) {
+      logStBox.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-logst]');
+        if (!b) return;
+        const raw = b.dataset.logst;
+        setLogStatus(raw === '' ? null : Number(raw));
+      });
+    }
+
     // 初始绑定：按钮此时是"清屏"形态
     $('btnLogClear').onclick = () => {
       logEntries = [];
@@ -15606,6 +15765,8 @@ let multCatalogFailed = false;
       $('logrows').innerHTML = logPlaceholder(
         '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
       $('logPager').innerHTML = '';
+      // 卡片条同样清掉：屏幕已经清空，留着一排统计数字会让人以为下面还有内容。
+      hideLogStatusBar();
       // 把清屏按钮换成"恢复显示"，让用户有明确的回头路
       setLogClearButton(true);
     };
@@ -15625,6 +15786,7 @@ let multCatalogFailed = false;
                                 $('logrows').innerHTML = logPlaceholder(
                                   '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
                                 $('logPager').innerHTML = '';
+                                hideLogStatusBar();
                                 setLogClearButton(true);
                               };
     }
