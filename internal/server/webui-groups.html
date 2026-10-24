@@ -1320,7 +1320,7 @@ function mpEsc(s) {
       <col style="width:420px"><col style="width:160px"><col style="width:130px">
     </colgroup>
     <thead><tr>
-      <th>名称</th><th>描述</th><th>模型数</th><th>模型</th><th>创建时间</th><th>操作</th>
+      <th>名称</th><th>描述</th><th>模型数</th><th>创建时间</th><th>操作</th>
     </tr></thead>
     <tbody id="rows"></tbody>
   </table></div>
@@ -1451,7 +1451,7 @@ async function api(path, opt) {
 // ---- 列表 ----
 async function load() {
   const tbody = $('rows');
-  tbody.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="5" class="muted">加载中…</td></tr>';
   try {
     const d = await api('/admin/groups');
     groups = (d && d.groups) || [];
@@ -1460,7 +1460,7 @@ async function load() {
       ? ('共 ' + groups.length + ' 个分组')
       : '分组功能未启用（后端没有注入分组存储）';
     if (!groups.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="muted">还没有分组 —— 点左上「+ 新增分组」。' +
+      tbody.innerHTML = '<tr><td colspan="5" class="muted">还没有分组 —— 点左上「+ 新增分组」。' +
         '建好后到「API 管理」里把分组分配给 key，那把 key 就只看得见这些模型了。</td></tr>';
       return;
     }
@@ -1470,7 +1470,6 @@ async function load() {
         + '<td title="' + esc(g.name) + '">' + esc(g.name) + '</td>'
         + '<td title="' + esc(g.description) + '">' + (g.description ? esc(g.description) : '<span class="muted">—</span>') + '</td>'
         + '<td>' + (g.model_count != null ? g.model_count : models.length) + '</td>'
-        + '<td class="models">' + chipsHTML(models) + '</td>'
         + '<td class="muted">' + esc(fmtTime(g.created_at)) + '</td>'
         + '<td>'
         + '<button onclick="openForm(\'' + esc(g.id) + '\')" style="padding:0 8px;height:22px;line-height:20px;font-size:12px">编辑</button> '
@@ -1479,27 +1478,11 @@ async function load() {
     }).join('');
     window.__groups = groups;
   } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="6" class="err">' + esc(e.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="err">' + esc(e.message) + '</td></tr>';
     $('stat').textContent = '';
   }
 }
 
-// chipsHTML 把模型清单渲染成 chips（超 12 个折叠成一个「+N」）。
-//
-// 为什么折叠：一个分组可能有几十上百个模型，全铺开会把行撑成两屏，
-// 而列表里真正要看的是「这个分组是不是我以为的那个」。计数在单独一列，
-// 想核对全量就点「+N」展开（在 title 里给完整清单，浏览器原生 tooltip 够用）。
-function chipsHTML(models) {
-  if (!models.length) { return '<span class="muted">（空 —— 这个分组的 key 一个模型都不能用）</span>'; }
-  const LIMIT = 12;
-  const shown = models.slice(0, LIMIT);
-  let html = '<div class="chips">'
-    + shown.map(function (m) { return '<span class="chip" title="' + esc(m) + '">' + esc(m) + '</span>'; }).join('');
-  if (models.length > LIMIT) {
-    html += '<span class="chip more" title="' + esc(models.join('\n')) + '">+' + (models.length - LIMIT) + ' 个（悬停看全部）</span>';
-  }
-  return html + '</div>';
-}
 
 // fmtTime 只做"能读"的格式化，不做时区换算（后端存的是 RFC3339 UTC）。
 //
