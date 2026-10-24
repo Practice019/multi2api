@@ -47,8 +47,8 @@ const (
 	pathAPICreate = "/api/v1/users/ohmyagent/api-keys"
 	// pathLoginEntry 登录入口。它 302 到上游自己的 OAuth authorize URL。
 	pathLoginEntry = "/api/v1/users/login"
-	pathResponses = "/responses"
-	pathMessages  = "/messages"
+	pathResponses  = "/responses"
+	pathMessages   = "/messages"
 )
 
 // 协议类型（模型目录里 interface_type 的取值）。

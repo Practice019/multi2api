@@ -8,11 +8,11 @@
 //
 // 用远端网关实测，客户端从公开接口能看到的上游身份：
 //
-//	1) /v1/models 的 owned_by        -> workbuddy / workbuddy-intl / csg / loomy
-//	2) /v1/models 的 id 前缀          -> workbuddy-intl/deepseek-v4.1-flash
-//	3) chat 响应的 model 字段          -> monkeycode-basic/deepseek-flash
-//	4) chat 响应的 id 前缀             -> chatcmpl-... / 0217927502...
-//	5) chat 响应的 usage 私有字段      -> points_consumed（loomy 独有）
+//  1. /v1/models 的 owned_by        -> workbuddy / workbuddy-intl / csg / loomy
+//  2. /v1/models 的 id 前缀          -> workbuddy-intl/deepseek-v4.1-flash
+//  3. chat 响应的 model 字段          -> monkeycode-basic/deepseek-flash
+//  4. chat 响应的 id 前缀             -> chatcmpl-... / 0217927502...
+//  5. chat 响应的 usage 私有字段      -> points_consumed（loomy 独有）
 //
 // 3)4)5) 来自上游原始响应，是透传的产物。它们同样是指纹：
 // 每档各调一次，就能按响应格式把 6 条通道分出组来。

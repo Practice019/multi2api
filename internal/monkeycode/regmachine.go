@@ -124,7 +124,7 @@ func fromRegMachine(raw []byte) (*Auth, error) {
 		return nil, fmt.Errorf("monkeycode: 解析注册机记录失败：%w", err)
 	}
 	if strings.TrimSpace(d.Session) == "" {
-		return nil, fmt.Errorf("monkeycode: 注册机记录里没有 session");
+		return nil, fmt.Errorf("monkeycode: 注册机记录里没有 session")
 	}
 
 	a := &Auth{
@@ -168,7 +168,7 @@ func normalizeRegion(s string) string {
 // # 为什么要这个函数（而不是直接 json.Unmarshal 到 string）
 //
 // 注册机的 balance 是**数字**（200000），而本仓 Auth.Balance 是 **string**
-//（因为它只用于展示、且要能表达"未知"）。直接把数字解进 string 会让
+// （因为它只用于展示、且要能表达"未知"）。直接把数字解进 string 会让
 // 整个 Unmarshal 失败 —— 那正是导入一直报"没有可用的 session"的根因。
 //
 // 空 RawMessage / null / 解析不出数字 → 返回空串（= 未知），

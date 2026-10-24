@@ -88,8 +88,8 @@ type groupView struct {
 	Models      []string `json:"models"`
 	ModelCount  int      `json:"model_count"`
 	// ModelMap 对外名 → 内部名（别名跟着分组走，见 groupstore.Group.ModelMap）。
-	ModelMap   map[string][]string `json:"model_map,omitempty"`
-	CreatedAt   string   `json:"created_at"`
+	ModelMap  map[string][]string `json:"model_map,omitempty"`
+	CreatedAt string              `json:"created_at"`
 }
 
 func groupViewOf(g *groupstore.Group) groupView {

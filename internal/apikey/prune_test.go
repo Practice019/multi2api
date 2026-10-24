@@ -27,7 +27,7 @@ func TestPruneModelsRemovesWhitelistAndAlias(t *testing.T) {
 		[]string{"shusheng/intern-latest", "loomy/DeepSeek-V4.1-Flash"},
 		map[string]string{
 			"003/intern-latest": "shusheng/intern-latest",
-			"001/deepseek":       "loomy/DeepSeek-V4.1-Flash",
+			"001/deepseek":      "loomy/DeepSeek-V4.1-Flash",
 		})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

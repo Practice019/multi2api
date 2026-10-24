@@ -44,12 +44,13 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 			UID:      a.UID(),
 			Nickname: a.DisplayName(),
 			// ⚠ 刻意**不填** ExpiresAt：投影是启动快照，
-//			// 而 session 有 30 天硬过期且无续期接口 —— 抄进来只会是个过期的假值。
+			//			// 而 session 有 30 天硬过期且无续期接口 —— 抄进来只会是个过期的假值。
 			FilePath: a.FilePath,
 		})
 	}
 	return out, nil
 }
+
 // LoadCredentialsWithSecrets 与上面同源，但把活 secret 一起给出。
 //
 // 没有它，池里那些账号"没有凭证" —— 被选中时取不到 api_key/signing_secret，

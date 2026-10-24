@@ -80,7 +80,7 @@ func TestPruneKeepsTimeOrder(t *testing.T) {
 	kept := l.pruneLocked(l.records)
 	for i := 1; i < len(kept); i++ {
 		if kept[i].At.Before(kept[i-1].At) {
-			t.Fatalf("裁剪破坏了时序：第 %d 条 (%v) 早于第 %d 条 (%v) —— " +
+			t.Fatalf("裁剪破坏了时序：第 %d 条 (%v) 早于第 %d 条 (%v) —— "+
 				"Since/LastByUID 都会答错且不报错",
 				i, kept[i].At, i-1, kept[i-1].At)
 		}

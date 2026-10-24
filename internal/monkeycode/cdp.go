@@ -55,8 +55,8 @@ type cdpVersion struct {
 
 // cdpTarget GET /json/list 的一项。
 type cdpTarget struct {
-	Type             string `json:"type"`
-	URL              string `json:"url"`
+	Type              string `json:"type"`
+	URL               string `json:"url"`
 	WebSocketDebugger string `json:"webSocketDebuggerUrl"`
 }
 
@@ -237,8 +237,8 @@ func cdpReadCookies(ctx context.Context, wsURL string) ([]cdpCookie, error) {
 		switch opcode {
 		case 0x1: // 文本
 			var resp struct {
-				ID     int    `json:"id"`
-				Error  *struct {
+				ID    int `json:"id"`
+				Error *struct {
 					Message string `json:"message"`
 				} `json:"error"`
 				Result struct {

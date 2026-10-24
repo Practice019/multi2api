@@ -25,13 +25,13 @@
 package server
 
 import (
-	"log"
-	"sync"
-	"sort"
 	"fmt"
+	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -543,8 +543,9 @@ func (h *Handler) aliasTableForRequest(r *http.Request) map[string][]string {
 // modelMapForRequest 取「对外名 → 首个内部名」的单值表。
 //
 // ⚠ 这个函数**只保留给历史调用方**（少数地方只需要一个代表值）。
-//   目录脱敏必须用 publicNameForMulti —— 一对多时单值表会漏掉其余内部名，
-//   后果是上游真名泄露到 /v1/models（2026-10-24 端到端实测踩到过）。
+//
+//	目录脱敏必须用 publicNameForMulti —— 一对多时单值表会漏掉其余内部名，
+//	后果是上游真名泄露到 /v1/models（2026-10-24 端到端实测踩到过）。
 func (h *Handler) modelMapForRequest(r *http.Request) map[string]string {
 	tbl := h.aliasTableForRequest(r)
 	if len(tbl) == 0 {
@@ -568,8 +569,9 @@ func (h *Handler) modelMapForRequest(r *http.Request) map[string]string {
 // 脱敏就失效了（实测：/v1/models 里 3 个上游真名全露出来）。
 //
 // 这里用一对多原表直接查，语义清晰：
-//   · 键 = 对外名，值 = 内部名列表
-//   · 反查时遍历值，命中即返回对应键
+//
+//	· 键 = 对外名，值 = 内部名列表
+//	· 反查时遍历值，命中即返回对应键
 func publicNameForMulti(tbl map[string][]string, internal string) string {
 	name := strings.TrimSpace(internal)
 	if name == "" || len(tbl) == 0 {
@@ -588,7 +590,7 @@ func publicNameForMulti(tbl map[string][]string, internal string) string {
 		}
 	}
 	// ③ 裸名兜底：**唯一命中**才用（多个对外名共享同一裸名时不猜，
-		//   否则列表里的名字会随 map 遍历顺序漂移）。
+	//   否则列表里的名字会随 map 遍历顺序漂移）。
 	if _, bare, _ := gateway.SplitModel(name); bare != "" {
 		hit, n := "", 0
 		for pub, internals := range tbl {
@@ -617,8 +619,9 @@ func publicNameForMulti(tbl map[string][]string, internal string) string {
 //   - 未命中   ⇒ 原样返回单元素列表（没有别名就走原名，行为与改造前一致）
 //
 // ⚠ 裸名兜底只在**唯一命中**时使用：客户端可能发 deepseek-v4.1-flash，
-//   而映射表里的键是 csg/deepseek-v4.1-flash。多个别名共享同一裸名时不猜，
-//   否则同一个请求两次可能走不同上游 —— 那对排障是灾难。
+//
+//	而映射表里的键是 csg/deepseek-v4.1-flash。多个别名共享同一裸名时不猜，
+//	否则同一个请求两次可能走不同上游 —— 那对排障是灾难。
 func (h *Handler) aliasCandidates(r *http.Request, model string) []string {
 	tbl := h.aliasTableForRequest(r)
 	name := strings.TrimSpace(model)
@@ -646,7 +649,8 @@ func (h *Handler) aliasCandidates(r *http.Request, model string) []string {
 // 为空时退化成"只试当前这一个"，行为与改造前一致。
 //
 // ⚠ 去重：同一个内部名可能在多个分组里重复出现，重复尝试只会把
-//   同一个上游的同一个错误再打一遍，白等一轮超时。
+//
+//	同一个上游的同一个错误再打一遍，白等一轮超时。
 func aliasAttempts(order []string, current string) []string {
 	if len(order) == 0 {
 		return []string{current}
@@ -678,7 +682,8 @@ func aliasAttempts(order []string, current string) []string {
 // 「额度没变但就是不走那条」，而轮询不会。均匀性也更直观。
 //
 // ⚠ 全局共享一个游标（按对外名分桶），不是每请求独立：
-//   每请求独立就等于"每次都从第一个开始"，那不成轮询。
+//
+//	每请求独立就等于"每次都从第一个开始"，那不成轮询。
 var aliasRR struct {
 	mu   sync.Mutex
 	next map[string]uint64
@@ -689,8 +694,9 @@ var aliasRR struct {
 // # 只轮询「有健康账号」的候选（2026-10-24 加）
 //
 // 用户原话：
-//   「右边有三个我设置一样的 所以请求右边一样的模型需要有三个上游对应
-//     上游有可用健康模型才进去发请求」
+//
+//	「右边有三个我设置一样的 所以请求右边一样的模型需要有三个上游对应
+//	  上游有可用健康模型才进去发请求」
 //
 // 也就是说：一个对外名背后有 3 个上游，但只有 2 个当前有健康账号 ——
 // 那就**只在这 2 个之间轮询**，第 3 个连试都不试。
@@ -705,12 +711,14 @@ var aliasRR struct {
 // 这个上游现在有没有一个能用的号。用它做筛选，判据更直接。
 //
 // ⚠ 渠道（channel）不是账号池，不走这个判据 —— 它的可用性由渠道自己的
-//   key 状态决定（channelroute.Plan 会过滤掉没有可用 key 的渠道）。
-//   所以这里对"渠道型候选"一律保留，不误杀。
+//
+//	key 状态决定（channelroute.Plan 会过滤掉没有可用 key 的渠道）。
+//	所以这里对"渠道型候选"一律保留，不误杀。
 //
 // ⚠ 全部候选都没有健康账号时**保留原顺序**（不清空）：
-//   那样调用方会走完整的失败路径并给出准确错误（"6 个账号全部冷却"比
-//   "没有候选"更有信息量）。宁可慢一点，也不要丢掉排障证据。
+//
+//	那样调用方会走完整的失败路径并给出准确错误（"6 个账号全部冷却"比
+//	"没有候选"更有信息量）。宁可慢一点，也不要丢掉排障证据。
 func (h *Handler) pickAliasTarget(public string, cands []string) (string, []string) {
 	n := len(cands)
 	if n == 0 {
@@ -762,7 +770,7 @@ func (h *Handler) pickAliasTarget(public string, cands []string) (string, []stri
 // 用户否决换上游时的原话：「我调用的是这个模型，但是它优选，选到别的模型去了」）。
 //
 // 本函数不猜：只走 aliasOrder —— 那是用户在分组里**显式**配的对应关系
-//（"这三个内部模型对外都叫 X"），语义确定。
+// （"这三个内部模型对外都叫 X"），语义确定。
 func (h *Handler) nextAliasUpstream(order []string, tried map[string]bool) (string, string) {
 	if h.cfg.Pool == nil || h.cfg.Provider == nil {
 		return "", ""
@@ -792,8 +800,9 @@ func (h *Handler) nextAliasUpstream(order []string, tried map[string]bool) (stri
 // 而 AvailableUIDsFor 正是那个判据的批量版（见它的实现）。
 //
 // ⚠ 渠道型候选（走 channelstore 的那条路）不参与筛选：
-//   它们不在账号池里，AvailableUIDsFor 会返回空 —— 若照此过滤会把
-//   所有渠道候选误杀。判据用「这个候选是不是池里的上游」来区分。
+//
+//	它们不在账号池里，AvailableUIDsFor 会返回空 —— 若照此过滤会把
+//	所有渠道候选误杀。判据用「这个候选是不是池里的上游」来区分。
 func (h *Handler) healthyAliasCandidates(cands []string) []string {
 	if h.cfg.Pool == nil || h.cfg.Provider == nil {
 		return nil
@@ -824,7 +833,8 @@ func resetAliasRoundRobin() {
 // resolveModelAlias 取**第一个**候选内部名。
 //
 // ⚠ 这个函数保留给「只需要一个答案」的调用方（目录展示、白名单比较）。
-//   真正要发请求的地方必须用 pickAliasTarget —— 那里才做轮询。
+//
+//	真正要发请求的地方必须用 pickAliasTarget —— 那里才做轮询。
 func (h *Handler) resolveModelAlias(r *http.Request, model string) string {
 	c := h.aliasCandidates(r, model)
 	if len(c) == 0 {

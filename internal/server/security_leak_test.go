@@ -117,8 +117,8 @@ func TestIsAliasForm(t *testing.T) {
 		"001/x":                        true,
 		"workbuddy/x":                  false,
 		"monkeycode/monkeycode-basic/deepseek-flash": false,
-		"glm-5.2":   false,
-		"":          false,
+		"glm-5.2": false,
+		"":        false,
 	}
 	for in, want := range cases {
 		if got := isAliasForm(in); got != want {

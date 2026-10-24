@@ -55,7 +55,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	//
 	//	balance            积分（签到/邀请获得，不重置）
 	//	daily_token_balance 每日 token（每天重置到 limit）
-//
+	//
 	// 所以 Free 报 daily_token_balance，Remaining 报 balance。
 	return gateway.QuotaView{
 		Kind:      gateway.QuotaKindCredits,

@@ -158,7 +158,7 @@ func (h *Handler) accountsImport(w http.ResponseWriter, r *http.Request) {
 		"failed":   len(creds) - okN,
 		"results":  results,
 		// sync 是"落盘后有没有真的进池"的回执（字段同名于重载端点）。
-		"sync":     sync,
+		"sync": sync,
 	})
 }
 

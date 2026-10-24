@@ -52,7 +52,7 @@ func TestInferMetaForEmptyGivesZero(t *testing.T) {
 // TestInferMetaForTiePicksLarger 并列时取较大值。
 //
 // 并列取大：宁可给宽松预算，也不要让客户端按偏小的值提前截断
-//（那种失败看起来像模型质量差，实际是我们报错了窗口）。
+// （那种失败看起来像模型质量差，实际是我们报错了窗口）。
 func TestInferMetaForTiePicksLarger(t *testing.T) {
 	existing := map[string][2]int64{
 		"a": {131072, 16384},

@@ -12,9 +12,9 @@
 //
 // # 三个关键点（每个写错都会静默算出永不命中）
 //
-//	1. capI 是 FNV-1a 播种 + xorshift32，每一步都走 32 位截断
-//	2. salt 构造：capI(token+b, s) 与 capI(token+b+"d", d)
-//	3. **位级比较**：目标是 4*target.length 个比特，不是逐字节全等
+//  1. capI 是 FNV-1a 播种 + xorshift32，每一步都走 32 位截断
+//  2. salt 构造：capI(token+b, s) 与 capI(token+b+"d", d)
+//  3. **位级比较**：目标是 4*target.length 个比特，不是逐字节全等
 package monkeycode
 
 import (

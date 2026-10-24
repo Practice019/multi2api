@@ -25,15 +25,15 @@ import (
 //
 // 判据顺序（每条对应一次实测或一个明确的语义）：
 //
-//	1. 200-ish 不进这里（调用方只在 >=400 时问）
-//	2. 签名/协议类文案 → FatalClient（**不换号**，直接结束：换号也还是错）
-//	3. 403 且非签名类     → Client（只换号，不罚）
-//	4. 404                → NotFound（短冷却，不累计错误）
-//	5. 401                → Auth（session 过期，可换号）
-//	6. 402 / 余额类       → HardCredit（长冷却到下次重置）
-//	7. 429                → SoftRate（短冷却）
-//	8. 5xx                → Server（喂熔断）
-//	9. 其余 4xx           → Client
+//  1. 200-ish 不进这里（调用方只在 >=400 时问）
+//  2. 签名/协议类文案 → FatalClient（**不换号**，直接结束：换号也还是错）
+//  3. 403 且非签名类     → Client（只换号，不罚）
+//  4. 404                → NotFound（短冷却，不累计错误）
+//  5. 401                → Auth（session 过期，可换号）
+//  6. 402 / 余额类       → HardCredit（长冷却到下次重置）
+//  7. 429                → SoftRate（短冷却）
+//  8. 5xx                → Server（喂熔断）
+//  9. 其余 4xx           → Client
 func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
 	lower := strings.ToLower(body)
 

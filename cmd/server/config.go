@@ -2,7 +2,6 @@
 package main
 
 import (
-	"workbuddy2api/internal/timeouts"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"workbuddy2api/internal/timeouts"
 
 	"workbuddy2api/internal/clientlogin"
 	"workbuddy2api/internal/codearts"
@@ -1108,23 +1108,23 @@ type Config struct {
 	QoderPoolAccounts bool   `json:"-"`
 
 	// ZCode（第十一上游，Z.ai / 智谱 GLM）解析后。
-	ZCodeEnabled        bool   `json:"-"`
-	ZCodeAuthDir        string `json:"-"`
-	ZCodeOrigin         string `json:"-"`
-	ZCodeOAuthBase      string `json:"-"`
-	ZCodeBillingOrigin  string `json:"-"`
-	MiniMaxEnabled      bool   `json:"-"`
-	MiniMaxAuthDir      string `json:"-"`
-	MiniMaxAccountBase  string `json:"-"`
-	MiniMaxAPIBase      string `json:"-"`
-	MiniMaxTimezoneID   string `json:"-"`
-	MiniMaxPoolAccounts bool   `json:"-"`
+	ZCodeEnabled           bool   `json:"-"`
+	ZCodeAuthDir           string `json:"-"`
+	ZCodeOrigin            string `json:"-"`
+	ZCodeOAuthBase         string `json:"-"`
+	ZCodeBillingOrigin     string `json:"-"`
+	MiniMaxEnabled         bool   `json:"-"`
+	MiniMaxAuthDir         string `json:"-"`
+	MiniMaxAccountBase     string `json:"-"`
+	MiniMaxAPIBase         string `json:"-"`
+	MiniMaxTimezoneID      string `json:"-"`
+	MiniMaxPoolAccounts    bool   `json:"-"`
 	MonkeyCodeEnabled      bool   `json:"-"`
 	MonkeyCodeAuthDir      string `json:"-"`
 	MonkeyCodeProxy        string `json:"-"`
 	MonkeyCodePoolAccounts bool   `json:"-"`
-	ZCodePoolAccounts   bool   `json:"-"`
-	ZCodeJWTCaptcha     bool   `json:"-"`
+	ZCodePoolAccounts      bool   `json:"-"`
+	ZCodeJWTCaptcha        bool   `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
 	// # 为什么保留它
