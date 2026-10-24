@@ -24,12 +24,25 @@ import (
 	"testing"
 )
 
+// aliasFixture 单值表：给 publicNameFor 这类"只要一个答案"的测试用。
 func aliasFixture() map[string]string {
 	return map[string]string{
 		"004/deepseek-v4.1-flash": "qiniuyun/deepseek-v4.1-flash",
 		"005/deepseek-v4.1-flash": "senseaudio/deepseek-v4.1-flash",
 		"006/deepseek-v4.1-flash": "workbuddy/deepseek-v4.1-flash",
 	}
+}
+
+// aliasFixtureMulti 一对多表：给 groupstore.Create 用（2026-10-24 起分组存列表）。
+//
+// 与 aliasFixture 内容等价，只是每个对外名包成单元素列表 —— 这个测试关心的是
+// "三个别名各自独立"，不是合并，所以每条一个内部名。
+func aliasFixtureMulti() map[string][]string {
+	out := make(map[string][]string, 3)
+	for pub, in := range aliasFixture() {
+		out[pub] = []string{in}
+	}
+	return out
 }
 
 // publicNameFor 必须是幂等的：传进去已经是对外名，就原样返回。
@@ -82,7 +95,7 @@ func TestPublicNameForBareNameNeedsUniqueHit(t *testing.T) {
 func TestModelsListSurvivesDoubleRename(t *testing.T) {
 	keys := newKeyStore(t)
 	gs := newGroupStore(t)
-	mm := aliasFixture()
+	mm := aliasFixtureMulti()
 	allow := []string{"qiniuyun/deepseek-v4.1-flash", "senseaudio/deepseek-v4.1-flash", "workbuddy/deepseek-v4.1-flash"}
 	g, err := gs.Create("别名组", "", allow, mm)
 	if err != nil {

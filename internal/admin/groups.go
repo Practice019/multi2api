@@ -88,7 +88,7 @@ type groupView struct {
 	Models      []string `json:"models"`
 	ModelCount  int      `json:"model_count"`
 	// ModelMap 对外名 → 内部名（别名跟着分组走，见 groupstore.Group.ModelMap）。
-	ModelMap   map[string]string `json:"model_map,omitempty"`
+	ModelMap   map[string][]string `json:"model_map,omitempty"`
 	CreatedAt   string   `json:"created_at"`
 }
 
@@ -127,7 +127,7 @@ type groupCreateReq struct {
 	Models      []string `json:"models"`
 	// ModelMap 对外名 → 内部名。**别名跟着分组走**（用户要求：模型在分组里定义，
 	// 那"它对外叫什么"也该在这里定义）。
-	ModelMap map[string]string `json:"model_map"`
+	ModelMap map[string][]string `json:"model_map"`
 }
 
 // groupsCreate POST /admin/groups
@@ -170,7 +170,7 @@ type groupUpdateReq struct {
 	Description *string   `json:"description"`
 	Models      *[]string `json:"models"`
 	// ModelMap 三态：不传/null = 不改；{} = 清空；非空 = 整体替换。
-	ModelMap *map[string]string `json:"model_map"`
+	ModelMap *map[string][]string `json:"model_map"`
 }
 
 // groupsUpdate POST /admin/groups/update
@@ -203,7 +203,7 @@ func (h *Handler) groupsUpdate(w http.ResponseWriter, r *http.Request) {
 	//
 	// ⚠ 与 models 同一个坑：JSON 里写 "model_map": null 等价于**不写**，
 	// 要清空必须写 {}。
-	var mm map[string]string
+	var mm map[string][]string
 	if req.ModelMap != nil {
 		mm = *req.ModelMap
 	}

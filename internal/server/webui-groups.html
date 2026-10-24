@@ -1385,7 +1385,9 @@ function mpEsc(s) {
     <div class="full">
       <div class="muted" style="font-size:12px;margin-bottom:4px">
         每个已选模型自动一行。左边是内部模型名（固定），右边是对外显示名 ——
-        默认与左边相同，改右边就能改对外叫法。
+        默认与左边相同，改右边就能改对外叫法。<br>
+        <b>多个模型可以填同一个对外名</b>：那样对外只出现一个名字，
+        调用时在这些上游之间<b>轮询</b>，某个失败自动换下一个。
       </div>
       <div id="gMapRows"></div>
     </div>
@@ -1765,24 +1767,31 @@ function addMapRow(left, right) {
     ' title="改成你想对外的名字；清空或与左侧相同 = 不修改"' +
     ' style="flex:1;font-size:12px">';
   host.appendChild(row);
+  // 右侧一改就刷新合并提示（同一个对外名被多行填了 ⇒ 高亮 + 说明）。
+  const rightInput = row.querySelector('.gmap-r');
+  if (rightInput) rightInput.addEventListener('input', refreshMergeHints);
 }
 
-// currentMapSnapshot 取当前表里**用户已改过**的映射（对外名 → 内部名）。
+// currentMapSnapshot 取当前表里**用户已改过**的映射（对外名 → 内部名列表）。
 //
 // # 为什么重建前要先快照
 //
-// 别名表会在"勾选模型"时重建（模型数变了行数就要变）。若直接 renderMapRows(null)，
+// 别名表会在「勾选模型」时重建（模型数变了行数就要变）。若直接 renderMapRows(null)，
 // 用户刚改好的对外名会被一起清掉 —— 勾一个模型就把前面的编辑全丢了。
 //
-// 所以重建时把当前表读回来当回填值：已有的保留，新勾的用默认（= 内部名）。
+// ⚠ 与 collectMap 的差别：这里**不校验**，只负责把界面上现在的样子读回来。
+//   校验是保存时的事（collectMap 会给出 invalid）。若这里也校验，
+//   用户正在输入中间态（比如刚清空准备重填）就会被清掉。
 function currentMapSnapshot() {
-  const out = {};
   const rows = document.querySelectorAll('#gMapRows .gmap-row');
+  const out = {};
   rows.forEach(function (row) {
     const internal = row.getAttribute('data-internal') || '';
     const r = row.querySelector('.gmap-r');
     const pub = ((r && r.value) || '').trim();
-    if (internal && pub && pub !== internal) out[pub] = internal;
+    if (!internal || !pub || pub === internal) return;
+    if (!out[pub]) out[pub] = [];
+    if (out[pub].indexOf(internal) < 0) out[pub].push(internal);
   });
   return out;
 }
@@ -1790,16 +1799,24 @@ function currentMapSnapshot() {
 // renderMapRows 按「已选模型」重建整张表。
 //
 // 这是本表唯一的渲染入口 —— 模型勾选变化、编辑回填、目录加载完成都走它。
-// 参数 m 是已保存的 model_map（对外名 → 内部名），用来回填右侧。
+// 参数 m 是已保存的 model_map（对外名 → 内部名**列表**），用来回填右侧。
 function renderMapRows(m) {
   const host = $('gMapRows');
   if (!host) return;
   const saved = m || {};
-  // 反查表：内部名 → 已配的对外名（saved 的方向是 对外名 → 内部名）
+  // 反查表：内部名 → 对外名。
+  //
+  // ⚠ 2026-10-24 一对多：一个对外名可以对应多个内部名，所以反向映射天然是
+  //   「多个内部名 → 同一个对外名」。同一个内部名理论上只属于一个对外名，
+  //   所以内层循环直接覆盖 —— 真出现重名以最后一条为准（配置本身有歧义，
+  //   但渲染不能因此崩掉）。
   const pubOf = {};
   for (const pub in saved) {
-    const internal = saved[pub];
-    if (internal) pubOf[internal] = pub;
+    const list = saved[pub];
+    const arr = Array.isArray(list) ? list : (list ? [list] : []);
+    for (const internal of arr) {
+      if (internal) pubOf[internal] = pub;
+    }
   }
   host.innerHTML = '';
   const models = Array.from(picked).sort();
@@ -1809,16 +1826,27 @@ function renderMapRows(m) {
     return;
   }
   for (const internal of models) addMapRow(internal, pubOf[internal]);
+  refreshMergeHints();
 }
 
-// collectMap 收集成 { map, invalid }。
+// collectMap 收集成 { map, invalid }。map 的方向是 对外名 → 内部名列表。
 //
-// 只收**改过的**（右侧与左侧不同）—— 恒等映射没有信息量，写进去只是噪音。
+// # 2026-10-24：重复的对外名**不再报错**，而是合并成列表
+//
+// 用户原话：「我希望可以重复别名，这样我外面调用这一个模型的时候，
+//           它不是有几个上游吗？那就轮询就行了」。
+//
+// 所以两个模型都填 deepseek-v4.1-flash ⇒
+//   {"deepseek-v4.1-flash": ["csg/...", "workbuddy/..."]}
+// 调用时网关按这个顺序轮询，失败自动换下一个。
+//
+// 仍然会报错的情况：
+//   · 同一个内部名被填到**两个不同的**对外名下（一个模型不能有两个对外身份）
 function collectMap() {
   const rows = document.querySelectorAll('#gMapRows .gmap-row');
   const map = {};
   const invalid = [];
-  const seenPub = new Set();
+  const pubOf = {};   // 内部名 → 它被填的对外名（用于查"一个模型两个身份"）
   rows.forEach(function (row) {
     const internal = row.getAttribute('data-internal') || '';
     const r = row.querySelector('.gmap-r');
@@ -1826,14 +1854,46 @@ function collectMap() {
     if (!internal) return;
     // 右侧清空 = 对外用内部名（等价于不配别名）。
     if (!pub || pub === internal) return;
-    if (seenPub.has(pub)) {
-      invalid.push('对外名 "' + pub + '" 重复了 —— 同一个名字不能指向两个模型');
+    if (pubOf[internal] && pubOf[internal] !== pub) {
+      invalid.push('内部模型 "' + internal + '" 被填了两个对外名（"' +
+        pubOf[internal] + '" 和 "' + pub + '"）—— 一个模型只能有一个对外身份');
       return;
     }
-    seenPub.add(pub);
-    map[pub] = internal;
+    pubOf[internal] = pub;
+    if (!map[pub]) map[pub] = [];
+    // 同一个内部名在同一对外名下只记一次。
+    if (map[pub].indexOf(internal) < 0) map[pub].push(internal);
   });
   return { map: map, invalid: invalid };
+}
+
+// refreshMergeHints 给「被合并的」对外名加视觉标记 + 说明有几个上游。
+//
+// 为什么需要：合并之后界面上会出现两行右侧一模一样，用户看不出
+// "这两行其实是一个对外名、会轮询"。不提示的话他会以为填错了。
+function refreshMergeHints() {
+  const rows = document.querySelectorAll('#gMapRows .gmap-row');
+  const counts = {};
+  const vals = [];
+  rows.forEach(function (row) {
+    const internal = row.getAttribute('data-internal') || '';
+    const r = row.querySelector('.gmap-r');
+    const pub = ((r && r.value) || '').trim() || internal;
+    vals.push({ row: row, pub: pub, internal: internal });
+    counts[pub] = (counts[pub] || 0) + 1;
+  });
+  vals.forEach(function (x) {
+    const r = x.row.querySelector('.gmap-r');
+    if (!r) return;
+    const n = counts[x.pub] || 0;
+    if (n > 1 && x.pub !== x.internal) {
+      r.style.borderColor = 'var(--ok, #16a34a)';
+      r.title = '这个对外名对应 ' + n + ' 个上游，调用时轮询（失败自动换下一个）';
+    } else {
+      r.style.borderColor = '';
+      r.title = '改成你想对外的名字；清空或与左侧相同 = 不修改';
+    }
+  });
 }
 
 

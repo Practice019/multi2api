@@ -135,12 +135,23 @@ func TestLogModelUsesInternalName(t *testing.T) {
 	}
 
 	// ② 别名替换必须发生在 newChatStat **之前**（否则 peek.Model 还是对外名）
-	aliasIdx := strings.Index(src, "peek.Model = alias")
+	//
+	// ⚠ 2026-10-24 改：别名解析改成一対多 + 轮询后，代码从
+	//   `if alias := h.resolveModelAlias(...); alias != peek.Model { peek.Model = alias }`
+	//   变成了 `peek.Model = chosen`（chosen 来自 pickAliasTarget）。
+	//   判据从"找那行字面量"改成"找任何一个对 peek.Model 的赋值点" ——
+	//   守的语义没变（日志要显示内部名），只是不再绑死实现写法。
+	aliasIdx := -1
+	for _, marker := range []string{"peek.Model = chosen", "peek.Model = cands[0]", "peek.Model = alias"} {
+		if k := strings.Index(src, marker); k >= 0 && (aliasIdx < 0 || k < aliasIdx) {
+			aliasIdx = k
+		}
+	}
 	if aliasIdx < 0 {
-		t.Fatal("找不到 `peek.Model = alias` —— 别名替换那一段被改了？")
+		t.Fatal("找不到任何别名替换赋值（peek.Model = ...）—— 别名替换那一段被改了？")
 	}
 	if aliasIdx > idx {
-		t.Errorf("★ 别名替换（peek.Model = alias）在 newChatStat **之后**\n" +
+		t.Errorf("★ 别名替换在 newChatStat **之后**\n" +
 			"   ⇒ 覆盖 st.model 时拿到的还是对外名，日志照样显示别名")
 	}
 }

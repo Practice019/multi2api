@@ -63,7 +63,7 @@ type Group struct {
 	Name        string   `json:"name"`        // 展示名，全局唯一
 	Description string   `json:"description"` // 备注
 	Models      []string `json:"models"`      // 该分组包含的内部模型名
-	// ModelMap 模型对外名映射：对外名 → 内部名（2026-10-24 从 API Key 移到这里）。
+	// ModelMap 模型对外名映射：对外名 → **一组**内部名（2026-10-24 改为一对多）。
 	//
 	// # 为什么别名该跟着分组走，而不是跟着 key 走
 	//
@@ -75,9 +75,21 @@ type Group struct {
 	//   ② key 上配了别名、但它不在任何分组里 ⇒ 那个别名永远不可能生效
 	//      （判定链先过分组，根本不认识这个名字），而界面上看不出矛盾
 	//
-	// ⚠ 方向与 apikey 的旧字段一致：对外名 → 内部名。
-	//    请求进来每一跳都要查它，方向必须是"进来的名字 → 内部的名字"。
-	ModelMap map[string]string `json:"model_map,omitempty"`
+	// # 为什么是「一组」内部名（2026-10-24 第二次改）
+	//
+	// 用户原话：「我希望可以重复别名，这样我外面调用这一个模型的时候，
+	//           它不是有几个上游吗？那就轮询就行了」。
+	//
+	// 一个对外名背后有多个上游是常态（同一个模型可能同时在 csg、workbuddy、
+	// workbuddy-intl 上）。原来是 map[string]string，重复键直接报错 ——
+	// 等于逼用户为同一件事起三个对外名，而客户端只想发一个名字。
+	//
+	// 现在存成列表：调用时**轮询**取一个（见 server 侧的 pickAliasTarget），
+	// 失败自动换下一个。列表顺序就是用户看到的行顺序，稳定可预期。
+	//
+	// ⚠ 方向仍是「对外名 → 内部名」。请求进来每一跳都要查它，
+	//    方向必须是"进来的名字 → 内部的名字"。
+	ModelMap map[string][]string `json:"model_map,omitempty"`
 	CreatedAt   string   `json:"created_at"`  // RFC3339
 }
 
@@ -119,7 +131,19 @@ func New(path string) (*Store, error) {
 	}
 	var snap snapshot
 	if err := json.Unmarshal(b, &snap); err != nil {
-		return nil, fmt.Errorf("解析分组存储 %s（文件已损坏，未做任何重建）: %w", path, err)
+		// ⚠ 升级兼容（2026-10-24）：model_map 从「对外名 → 单个内部名」改成了
+		// 「对外名 → 内部名列表」。老文件里 model_map 的值是**字符串**，直接解到
+		// 新类型会报 `cannot unmarshal string into Go struct field ... of type []string`。
+		//
+		// 这里**必须**兜住，不能直接返回错误：分组文件解析失败是 fatal，
+		// 会让升级后的网关起不来 —— 而用户只是升级了个二进制，配置并没有坏。
+		//
+		// 先按旧格式解一遍；成功就转换并继续，失败才报"文件损坏"。
+		if converted, ok := tryLegacySnapshot(b); ok {
+			snap = converted
+		} else {
+			return nil, fmt.Errorf("解析分组存储 %s（文件已损坏，未做任何重建）: %w", path, err)
+		}
 	}
 	names := make(map[string]string, len(snap.Groups))
 	for i, g := range snap.Groups {
@@ -194,7 +218,7 @@ func (s *Store) GetByName(name string) (*Group, bool) {
 //
 // 失败时**不留半改状态**：落盘失败会把刚放进内存的那条撤掉，否则内存里
 // 有一个「盘上没有」的分组，重启后凭空消失。
-func (s *Store) Create(name, desc string, models []string, modelMap ...map[string]string) (*Group, error) {
+func (s *Store) Create(name, desc string, models []string, modelMap ...map[string][]string) (*Group, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, ErrNameEmpty
@@ -232,7 +256,7 @@ func (s *Store) Create(name, desc string, models []string, modelMap ...map[strin
 // 「nil = 不改、空切片 = 清空」是 Go/JSON 里唯一能同时表达这两件事的组合。
 // 若把空切片也当成「不改」，用户就永远没法把分组清空；反过来把 nil 当清空，
 // 一次只想改名字的表单提交就会顺手抹掉模型。
-func (s *Store) Update(id string, name, desc *string, models []string, modelMap ...map[string]string) (*Group, error) {
+func (s *Store) Update(id string, name, desc *string, models []string, modelMap ...map[string][]string) (*Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, ok := s.groups[id]
@@ -429,48 +453,126 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmpName, path)
 }
 
-// normalizeModels 归一化模型清单：去首尾空白、丢空串、去重、排序。
-//
-// 为什么要做：同一批模型从表单（一行一个，随手带空格）、JSON 数组、以及
-// 迁移脚本三个来源进来，形状必然不同。不归一化的话「分组里到底有几个模型」
-// 会随输入写法变化，而前端的计数、diff 与去重判断全都建立在这个数字上。
-//
-// 返回值**总是非 nil**（空输入得到空切片）：这样 JSON 里写出来是 []，
-// 而不是 null —— 前端不必为 null 单独写一条分支。
 // firstMap 取变参里的第一个 map（省略 ⇒ nil）。
 //
 // 为什么用变参而不是直接加位置参数：Create 已有多个调用点（含迁移与测试），
 // 加第 4 个位置参数会让它们全部要改一遍，而它们**都不关心**别名。
-func firstMap(m ...map[string]string) map[string]string {
+func firstMap(m ...map[string][]string) map[string][]string {
 	if len(m) == 0 {
 		return nil
 	}
 	return m[0]
 }
 
-// normalizeModelMap 归一化「对外名 → 内部名」映射。
+// normalizeModelMap 归一化「对外名 → 内部名列表」。
 //
-// 去掉空键/空值/首尾空格。返回 nil 表示"没有映射"，而不是空 map ——
-// 调用方用 len()==0 判断，两者等价但 nil 更省。
-func normalizeModelMap(in map[string]string) map[string]string {
+// 规则：
+//   - 去掉空键/空值/首尾空格
+//   - 列表内去重，**保持首次出现的顺序**（那是用户在界面上排的顺序）
+//   - 某个对外名的列表里如果只有「与对外名相同」的那一项，整条丢掉：
+//     那是恒等映射，没有信息量，写进去只会让查表多命中一次
+//   - 列表为空 ⇒ 整条丢掉
+//
+// 返回 nil 表示"没有映射"，而不是空 map —— 调用方用 len()==0 判断。
+func normalizeModelMap(in map[string][]string) map[string][]string {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
+	out := make(map[string][]string, len(in))
+	for k, vs := range in {
 		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		// k == v 是恒等映射，丢掉：留着会让界面上出现一行 "X → X"，
-		// 看起来像配错了，而它其实什么也没做。
-		if k == "" || v == "" || k == v {
+		if k == "" {
 			continue
 		}
-		out[k] = v
+		seen := make(map[string]bool, len(vs))
+		var kept []string
+		for _, v := range vs {
+			v = strings.TrimSpace(v)
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			kept = append(kept, v)
+		}
+		// 只剩「自己映射到自己」一项 ⇒ 恒等，丢掉。
+		if len(kept) == 1 && kept[0] == k {
+			continue
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		out[k] = kept
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// tryLegacySnapshot 尝试按**旧格式**（model_map 值 = 字符串）解析整份文件。
+//
+// 成功返回转换后的快照；失败返回 ok=false（调用方据此报"文件损坏"）。
+//
+// 为什么整份文件重解一遍而不是逐条兼容：encoding/json 的类型错误发生在
+// 解码中途，拿不到"部分成功"的结果。要么整份按新格式解开，要么整份按旧格式
+// 解开再转换 —— 后者只在升级那一次发生，代价可以忽略。
+func tryLegacySnapshot(b []byte) (snapshot, bool) {
+	type legacyGroup struct {
+		ID          string            `json:"id"`
+		Name        string            `json:"name"`
+		Description string            `json:"description"`
+		Models      []string          `json:"models"`
+		ModelMap    map[string]string `json:"model_map"`
+		CreatedAt   string            `json:"created_at"`
+	}
+	var old struct {
+		Groups []*legacyGroup `json:"groups"`
+	}
+	if err := json.Unmarshal(b, &old); err != nil {
+		return snapshot{}, false
+	}
+	out := snapshot{Groups: make([]*Group, 0, len(old.Groups))}
+	for _, g := range old.Groups {
+		if g == nil {
+			return snapshot{}, false
+		}
+		out.Groups = append(out.Groups, &Group{
+			ID:          g.ID,
+			Name:        g.Name,
+			Description: g.Description,
+			Models:      g.Models,
+			ModelMap:    convertLegacyModelMap(g.ModelMap),
+			CreatedAt:   g.CreatedAt,
+		})
+	}
+	return out, true
+}
+
+// legacyModelMap 把旧的一对一格式（对外名 → 单个内部名）转成新的一对多。
+//
+// # 为什么需要它
+//
+// 落盘的 groups.json 里 model_map 是 {\"别名\":\"内部名\"}（字符串值）。
+// 新代码期望 {\"别名\":[\"内部名\"]}（数组）。encoding/json 直接解到新类型会**报错**
+// 而不是静默降级 —— 那会让升级后网关起不来（分组文件解析失败 = fatal）。
+//
+// 所以先按旧格式解一遍，成功就转换。两种格式都试，谁成功用谁。
+type legacyGroupModelMap struct {
+	ModelMap map[string]string `json:"model_map"`
+}
+
+func convertLegacyModelMap(old map[string]string) map[string][]string {
+	if len(old) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(old))
+	for k, v := range old {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		out[k] = []string{v}
+	}
+	return normalizeModelMap(out)
 }
 
 func normalizeModels(models []string) []string {
@@ -525,9 +627,12 @@ func cloneGroup(g *Group) *Group {
 	// 后果：Update 在副本上改映射，原对象（正在被请求读取的那份）跟着变 ——
 	// 一次失败的保存能污染线上的别名表，而测试里看不出来（都通过了，只是内容错了）。
 	if g.ModelMap != nil {
-		cp.ModelMap = make(map[string]string, len(g.ModelMap))
-		for k, v := range g.ModelMap {
-			cp.ModelMap[k] = v
+		cp.ModelMap = make(map[string][]string, len(g.ModelMap))
+		for k, vs := range g.ModelMap {
+			// 值也要拷：[]string 是引用类型，只拷 map 的话两个 Group 会共享
+			// 同一个底层数组 —— 往副本里 append 会改到原对象，而 append 的
+			// 扩容行为还取决于容量，等于埋一个「有时才出错」的雷。
+			cp.ModelMap[k] = append([]string(nil), vs...)
 		}
 	}
 	return &cp

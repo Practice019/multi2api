@@ -25,6 +25,7 @@
 package server
 
 import (
+	"sync"
 	"sort"
 	"fmt"
 	"net/http"
@@ -310,7 +311,7 @@ func (h *Handler) filterModelsForRequest(r *http.Request, list []map[string]any)
 	if len(allowed) == 0 {
 		return []map[string]any{}
 	}
-	modelMap := h.modelMapForRequest(r)
+	tbl := h.aliasTableForRequest(r)
 	out := make([]map[string]any, 0, len(list))
 	// 已输出的对外名（去重用）。两个内部模型映射到同一个对外名是配置错误，
 	// 但**不能**让它在列表里出现两次 —— 客户端建模型索引时会把第二条当重复项丢掉，
@@ -325,7 +326,7 @@ func (h *Handler) filterModelsForRequest(r *http.Request, list []map[string]any)
 		//   这里必须与请求侧反向：调用方在列表里看到什么名字，就用什么名字发请求，
 		//   而请求进来会被 resolveModelAlias 换回内部名。两边不一致的话，
 		//   用户复制列表里的名字去调用会得到一个"未知模型"。
-		pub := publicNameFor(modelMap, id)
+		pub := publicNameForMulti(tbl, id)
 		if pub == "" || seenPub[pub] {
 			continue
 		}
@@ -374,15 +375,16 @@ func (h *Handler) filterModelsForRequest(r *http.Request, list []map[string]any)
 //
 // ⚠ 没有映射表时直接返回原切片，不复制：这条路径每个客户端都会走。
 func (h *Handler) applyPublicNames(r *http.Request, list []map[string]any) []map[string]any {
-	modelMap := h.modelMapForRequest(r)
-	if len(modelMap) == 0 {
+	// ⚠ 用一对多原表：单值表会漏掉同一对外名下的其余内部名 ⇒ 上游真名泄露。
+	tbl := h.aliasTableForRequest(r)
+	if len(tbl) == 0 {
 		return list
 	}
 	seen := make(map[string]bool, len(list))
 	out := make([]map[string]any, 0, len(list))
 	for _, m := range list {
 		id, _ := m["id"].(string)
-		pub := publicNameFor(modelMap, id)
+		pub := publicNameForMulti(tbl, id)
 		if pub == "" || seen[pub] {
 			continue
 		}
@@ -474,28 +476,26 @@ func (h *Handler) bumpKeyUsage(r *http.Request, toks int, ok bool) {
 // "进来的名字 → 内部的名字"。反过来存就得遍历全表找 value。
 // 与 `Channel.ModelMap` 同向，读代码时不用在两套约定之间来回切。
 
-// modelMapForRequest 取本次请求命中的 API key 的映射表。
+// aliasTableForRequest 取本次请求生效的「对外名 → 内部名列表」表。
 //
-// 返回 nil 表示"不做映射"，包括三种情况（都对）：
-//   - 没命中普通 key（走管理钥匙）—— 管理钥匙永远不做别名替换
-//   - key 存在但没有配映射
-//   - APIKeys 存储未启用
-// modelMapForRequest 取本次请求生效的「对外名 → 内部名」映射。
+// # 2026-10-24：来源从 API Key 改为**分组**，且支持一对多
 //
-// # 2026-10-24：来源从 API Key 改为**分组**
+// 用户要求：「对外模型不要在这里设置 在分组里面设置」，随后又要求
+// 「希望可以重复别名……它不是有几个上游吗？那就轮询就行了」。
 //
-// 用户要求：「对外模型不要在这里设置 在分组里面设置」。
-//
-// 别名的语义是"这个模型对外叫什么"，而**哪些模型**也是分组定义的 ——
+// 别名的语义是「这个模型对外叫什么」，而「哪些模型」也是分组定义的 ——
 // 两件事本来就绑在一起。放在 key 上有两个问题：
 //
 //	① 同一个模型被两把 key 引用时要配两遍，改一个漏一个
 //	② key 上配了别名但模型不在任何分组里 ⇒ 那个别名永远不生效
 //	   （判定链先过分组，根本不认识这个名字），而界面上看不出矛盾
 //
-// 所以现在把该 key 所有分组的 ModelMap **合并**起来。多分组时若同一个
-// 对外名指向不同内部名，按分组 ID 字典序先到先得（见 mergeGroupMaps 注释）。
-func (h *Handler) modelMapForRequest(r *http.Request) map[string]string {
+// 多分组时同名对外名的列表**按分组 ID 字典序拼接**。
+//
+// 为什么是字典序而不是「谁的模型多用谁的」：后者会让结果随分组内容变化而跳变
+// （改一个分组的模型，另一处的别名突然换了指向）。字典序是一个与内容无关的
+// 稳定判据 —— 同样的两组分组，永远得到同样的列表顺序。
+func (h *Handler) aliasTableForRequest(r *http.Request) map[string][]string {
 	if h.cfg.APIKeys == nil || h.cfg.Groups == nil {
 		return nil
 	}
@@ -510,70 +510,225 @@ func (h *Handler) modelMapForRequest(r *http.Request) map[string]string {
 	if len(groups) == 0 {
 		return nil
 	}
-	return h.mergeGroupMaps(groups)
-}
-
-// mergeGroupMaps 把多个分组的别名表合并成一张。
-//
-// 冲突处理：**按分组 ID 字典序先到先得**。
-//
-// 为什么是字典序而不是"谁的模型多用谁的"：后者会让结果随分组内容变化而跳变
-// （改一个分组的模型，另一处的别名突然换了指向）。字典序是一个与内容无关的
-// 稳定判据 —— 同样的两组分组，永远得到同样的结果。
-func (h *Handler) mergeGroupMaps(groupIDs []string) map[string]string {
-	ids := append([]string(nil), groupIDs...)
+	ids := append([]string(nil), groups...)
 	sort.Strings(ids)
-	var out map[string]string
+	var out map[string][]string
+	seen := map[string]map[string]bool{} // 对外名 → 已收的内部名集合（跨分组去重）
 	for _, gid := range ids {
 		g, ok := h.cfg.Groups.Get(gid)
 		if !ok || g == nil || len(g.ModelMap) == 0 {
 			continue
 		}
 		if out == nil {
-			out = make(map[string]string, 8)
+			out = make(map[string][]string, 8)
 		}
-		for pub, internal := range g.ModelMap {
-			if _, exists := out[pub]; !exists {
-				out[pub] = internal
+		for pub, internals := range g.ModelMap {
+			if seen[pub] == nil {
+				seen[pub] = map[string]bool{}
+			}
+			for _, in := range internals {
+				in = strings.TrimSpace(in)
+				if in == "" || seen[pub][in] {
+					continue
+				}
+				seen[pub][in] = true
+				out[pub] = append(out[pub], in)
 			}
 		}
 	}
 	return out
 }
 
-// resolveModelAlias 把客户端发来的**对外名**换成**内部模型名**。
+// modelMapForRequest 取「对外名 → 首个内部名」的单值表。
 //
-// 没有命中映射 ⇒ **原样返回**。这条很重要：映射是增量能力，不是白名单。
-// 若把未命中的名字判成非法，那配一张映射表就等于把所有老调用方式打死 ——
-// 而老调用方看到的会是"以前能用的模型突然 404 了"。
-//
-// ⚠ 必须在**判白名单之前**调用：白名单里存的是内部名，拿对外名去比会 403，
-// 而那个对外名恰恰是我们发布出去让人用的名字。
-//
-// ⚠ 返回替换后的名字，但**不**改写 body —— body 交给下游重写：
-// 渠道分支由 `forwardViaChannel` 用（model 参数 + body）重新写 model 字段，
-// legacy 分支同理。只改 peek.Model 一处，所有消费方自动一致。
-func (h *Handler) resolveModelAlias(r *http.Request, model string) string {
-	m := h.modelMapForRequest(r)
-	if len(m) == 0 {
-		return model
+// ⚠ 这个函数**只保留给历史调用方**（少数地方只需要一个代表值）。
+//   目录脱敏必须用 publicNameForMulti —— 一对多时单值表会漏掉其余内部名，
+//   后果是上游真名泄露到 /v1/models（2026-10-24 端到端实测踩到过）。
+func (h *Handler) modelMapForRequest(r *http.Request) map[string]string {
+	tbl := h.aliasTableForRequest(r)
+	if len(tbl) == 0 {
+		return nil
 	}
-	name := strings.TrimSpace(model)
-	if name == "" {
-		return model
-	}
-	if target, ok := m[name]; ok && strings.TrimSpace(target) != "" {
-		return strings.TrimSpace(target)
-	}
-	// ⚠ 再试一次裸名（剥掉 provider/ 前缀）：客户端可能发 `deepseek-v4-pro`，
-	//   而映射表里存的是 `csg/deepseek-v4-pro` 这种带前缀的键。
-	//   两处都试，才能让"用户填了带前缀的名字"也生效 —— 与白名单的裸名比较同一考虑。
-	if _, bare, _ := gateway.SplitModel(name); bare != "" && bare != name {
-		if target, ok := m[bare]; ok && strings.TrimSpace(target) != "" {
-			return strings.TrimSpace(target)
+	out := make(map[string]string, len(tbl))
+	for pub, internals := range tbl {
+		if len(internals) > 0 {
+			out[pub] = internals[0]
 		}
 	}
-	return model
+	return out
+}
+
+// publicNameForMulti 是一对多版的 publicNameFor：内部名 → 对外名。
+//
+// # 为什么单独写一个而不是把 modelMapForRequest 展开
+//
+// publicNameFor 的第 ① 步判「name 自己是不是某个对外名」用来做幂等。
+// 若把内部名也塞进那张表的**键**里，① 会先命中内部名并原样返回 ——
+// 脱敏就失效了（实测：/v1/models 里 3 个上游真名全露出来）。
+//
+// 这里用一对多原表直接查，语义清晰：
+//   · 键 = 对外名，值 = 内部名列表
+//   · 反查时遍历值，命中即返回对应键
+func publicNameForMulti(tbl map[string][]string, internal string) string {
+	name := strings.TrimSpace(internal)
+	if name == "" || len(tbl) == 0 {
+		return internal
+	}
+	// ① 幂等：name 自己就是某个对外名 ⇒ 原样返回。
+	if _, isAlias := tbl[name]; isAlias {
+		return name
+	}
+	// ② 精确反查：某个对外名的列表里包含 name。
+	for pub, internals := range tbl {
+		for _, in := range internals {
+			if strings.TrimSpace(in) == name {
+				return pub
+			}
+		}
+	}
+	// ③ 裸名兜底：**唯一命中**才用（多个对外名共享同一裸名时不猜，
+		//   否则列表里的名字会随 map 遍历顺序漂移）。
+	if _, bare, _ := gateway.SplitModel(name); bare != "" {
+		hit, n := "", 0
+		for pub, internals := range tbl {
+			for _, in := range internals {
+				if _, ib, _ := gateway.SplitModel(strings.TrimSpace(in)); ib != "" && ib == bare {
+					hit = pub
+					n++
+					break
+				}
+			}
+			if n > 1 {
+				break
+			}
+		}
+		if n == 1 {
+			return hit
+		}
+	}
+	return internal
+}
+
+// aliasCandidates 把客户端发来的名字解析成**候选内部名列表**（可能多个）。
+//
+// 返回值语义：
+//   - 命中别名 ⇒ 该别名的全部内部名（按配置顺序，供轮询）
+//   - 未命中   ⇒ 原样返回单元素列表（没有别名就走原名，行为与改造前一致）
+//
+// ⚠ 裸名兜底只在**唯一命中**时使用：客户端可能发 deepseek-v4.1-flash，
+//   而映射表里的键是 csg/deepseek-v4.1-flash。多个别名共享同一裸名时不猜，
+//   否则同一个请求两次可能走不同上游 —— 那对排障是灾难。
+func (h *Handler) aliasCandidates(r *http.Request, model string) []string {
+	tbl := h.aliasTableForRequest(r)
+	name := strings.TrimSpace(model)
+	if name == "" {
+		return []string{model}
+	}
+	if len(tbl) == 0 {
+		return []string{name}
+	}
+	if hit, ok := tbl[name]; ok && len(hit) > 0 {
+		return hit
+	}
+	// 裸名兜底：唯一命中才用。
+	if _, bare, _ := gateway.SplitModel(name); bare != "" && bare != name {
+		if hit, ok := tbl[bare]; ok && len(hit) > 0 {
+			return hit
+		}
+	}
+	return []string{name}
+}
+
+// aliasAttempts 返回本轮要依次尝试的内部名。
+//
+// aliasOrder 由 pickAliasTarget 给出（已按轮询起点排好顺序）；
+// 为空时退化成"只试当前这一个"，行为与改造前一致。
+//
+// ⚠ 去重：同一个内部名可能在多个分组里重复出现，重复尝试只会把
+//   同一个上游的同一个错误再打一遍，白等一轮超时。
+func aliasAttempts(order []string, current string) []string {
+	if len(order) == 0 {
+		return []string{current}
+	}
+	seen := make(map[string]bool, len(order))
+	out := make([]string, 0, len(order))
+	for _, m := range order {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return []string{current}
+	}
+	return out
+}
+
+// aliasRR 轮询游标：对外名 → 上次选到的下标。
+//
+// # 为什么用轮询而不是随机
+//
+// 用户原话：「它不是有几个上游吗？那就轮询就行了」。
+//
+// 轮询是**可预测**的：N 个上游就严格按 1,2,3,...,N,1,2,... 分发。
+// 随机在高并发下会出现「某个上游 5 分钟内一次没轮到」，排查时看到的现象是
+// 「额度没变但就是不走那条」，而轮询不会。均匀性也更直观。
+//
+// ⚠ 全局共享一个游标（按对外名分桶），不是每请求独立：
+//   每请求独立就等于"每次都从第一个开始"，那不成轮询。
+var aliasRR struct {
+	mu   sync.Mutex
+	next map[string]uint64
+}
+
+// pickAliasTarget 从候选里按**轮询**挑一个，返回 (内部名, 本轮尝试顺序)。
+//
+// 返回的第二个值是**完整的尝试顺序**（从被选中的那个开始绕一圈），
+// 调用方失败时按这个顺序换下一个 —— 见 P3 的 failover。
+//
+// 例：候选 [a b c]，游标落在 1 ⇒ 返回 ("b", [b c a])。
+func (h *Handler) pickAliasTarget(public string, cands []string) (string, []string) {
+	n := len(cands)
+	if n == 0 {
+		return "", nil
+	}
+	if n == 1 {
+		return cands[0], cands
+	}
+	aliasRR.mu.Lock()
+	if aliasRR.next == nil {
+		aliasRR.next = make(map[string]uint64, 8)
+	}
+	idx := int(aliasRR.next[public] % uint64(n))
+	aliasRR.next[public]++
+	aliasRR.mu.Unlock()
+
+	order := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		order = append(order, cands[(idx+i)%n])
+	}
+	return order[0], order
+}
+
+// resetAliasRoundRobin 清空游标（测试用；也让配置变更后能重新开始）。
+func resetAliasRoundRobin() {
+	aliasRR.mu.Lock()
+	aliasRR.next = nil
+	aliasRR.mu.Unlock()
+}
+
+// resolveModelAlias 取**第一个**候选内部名。
+//
+// ⚠ 这个函数保留给「只需要一个答案」的调用方（目录展示、白名单比较）。
+//   真正要发请求的地方必须用 pickAliasTarget —— 那里才做轮询。
+func (h *Handler) resolveModelAlias(r *http.Request, model string) string {
+	c := h.aliasCandidates(r, model)
+	if len(c) == 0 {
+		return model
+	}
+	return c[0]
 }
 
 // publicNameFor 把一个**内部**模型名换成它对外的名字（/v1/models 用）。

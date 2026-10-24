@@ -1697,12 +1697,36 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   ③ body 里的 model 不需要在这里改：渠道分支由 forwardViaChannel 用
 	//      (model 参数, body) 重新写；legacy 分支同理。只改 peek.Model 一处，
 	//      所有消费方自动一致 —— 分两处改必然有一天只改了一处。
-	if alias := h.resolveModelAlias(r, peek.Model); alias != peek.Model {
-		la := strings.TrimSpace(alias)
-		orig := strings.TrimSpace(peek.Model)
-		log.Printf("[apikey] 模型别名替换 %q → %q", orig, la)
-		peek.Model = alias
+	// ★ 别名 → 候选内部名列表（2026-10-24 改为一对多 + 轮询）
+	//
+	// 用户要求：「希望可以重复别名……它不是有几个上游吗？那就轮询就行了」。
+	//
+	// 一个对外名背后可能有多个上游（同一个模型同时在 csg / workbuddy / workbuddy-intl）。
+	// 这里按轮询取一个作为首选，**其余保留在 aliasOrder 里作为失败备选** ——
+	// 首选打不通时不必让整个请求失败，换下一个上游往往就好了。
+	//
+	// ⚠ 只改 peek.Model 一处：
+	//   ① 白名单判定用的是 publicModel（客户端原名），在下面单独取，不受影响；
+	//   ② channelServes / providerFor / forwardViaChannel 全部按内部名工作，
+	//      放在它们之后换就已经走错路了（渠道匹配发生在更早）。
+	//   ③ body 里的 model 不需要在这里改：两个分支都会用 (model 参数, body) 重写。
+	var aliasOrder []string // 本轮可尝试的内部名顺序（首个 = 已选中的）
+	if cands := h.aliasCandidates(r, peek.Model); len(cands) > 0 {
+		if len(cands) > 1 {
+			chosen, order := h.pickAliasTarget(publicModel, cands)
+			aliasOrder = order
+			log.Printf("[apikey] 模型别名 %q → %d 个候选，本轮选 %q（顺序 %v）",
+				publicModel, len(cands), chosen, order)
+			peek.Model = chosen
+		} else if strings.TrimSpace(cands[0]) != strings.TrimSpace(peek.Model) {
+			log.Printf("[apikey] 模型别名替换 %q → %q", peek.Model, cands[0])
+			peek.Model = cands[0]
+			aliasOrder = cands
+		} else {
+			aliasOrder = cands
+		}
 	}
+	_ = aliasOrder // 失败切换在 P3 接入（先把轮询跑通）
 	if h.channelServes(peek.Model) {
 		// 白名单按**客户端发来的名字**判，不按解析后的内部名。
 		//
@@ -1730,7 +1754,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//
 		// ⚠ 但渠道匹配必须用**内部名**：channelroute.Plan 按渠道声明的上游名查表。
 		//   所以这里传两个：匹配用内部名，对外回显用公开名。
-		fw, ferr := h.forwardViaChannelAs(r.Context(), peek.Model, publicModel, body)
+		// ★ 按 aliasOrder 依次尝试（P3 失败切换，2026-10-24）。
+		//
+		// 别名一对多时，首选只是轮询挑出来的一个。它打不通（渠道 5xx / 429 / 网络错）
+		// 不代表这个对外名不可用 —— 换下一个上游往往就好了，而让整个请求失败
+		// 等于把「多上游」这个能力白配了。
+		//
+		// ⚠ 只对**渠道分支**做切换：走账号池的 legacy 分支自带换号重试
+		//   （handler 里那套 fail(acct.UID) 循环），在那里再套一层会重复计失败次数。
+		var fw channelForward
+		var ferr error
+		for _, target := range aliasAttempts(aliasOrder, peek.Model) {
+			peek.Model = target
+			fw, ferr = h.forwardViaChannelAs(r.Context(), target, publicModel, body)
+			if ferr == nil {
+				break
+			}
+			// 有下一个候选时先记一条，让"切过了"这件事在日志里可见。
+			if len(aliasOrder) > 1 {
+				log.Printf("[apikey] 别名 %q 走 %q 失败（%v），换下一个候选", publicModel, target, ferr)
+			}
+		}
 		if ferr != nil {
 			// ★ 渠道失败也写请求日志。改造前渠道分支**一行日志都没有**，后果是实测踩到的：
 			//   用户发 csg，日志里一条都搜不到，他只能看到另一个 Python 客户端的 loomy 流量，
