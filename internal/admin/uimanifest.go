@@ -184,6 +184,24 @@ type uiJob struct {
 //	· `workbuddy-activity` ⇒ `RunActivityNow` 的注释："对池内所有可用账号做一轮活跃上报"
 //	· `workbuddy-growth-watch` / `workbuddy-travel-watch` ⇒ 各自 `run*Job` 与
 //	                 `Job.Due` 的注释：按**每个账号的到期时刻**错峰推进
+//
+// JobLabelOf / JobDescOf 是这两张表的**只读查询口**，给包外守卫用。
+//
+// # 为什么需要导出（实测踩过）
+//
+// 守门测试 joblabels_test.go 里那条「每个已注册任务都必须登记」的断言，
+// 用的是 admin.New(...) 在**测试夹具**下拿到的 manifest —— 而那个夹具
+// **一个上游都没装配**，m.Jobs 恒为空，循环从不执行。它于是常年绿着，
+// 却在真实漏登记（monkeycode-checkin）时一声不吭。
+//
+// 能枚举**全部真实上游**的地方是 cmd/server 的 allUpstreams（14 个真 Provider）。
+// 守卫要搬到那儿去，就得能从包外按任务名查这两张表 —— 于是有这两个函数。
+// 只导出查询，不外泄 map 本体（外面改不了它）。
+func JobLabelOf(name string) string { return jobLabels[name] }
+
+// JobDescOf 见 JobLabelOf。
+func JobDescOf(name string) string { return jobDescs[name] }
+
 var jobLabels = map[string]string{
 	"cline-refresh":                    "Cline 凭证刷新",
 	"codearts-refresh":                 "CodeArts 凭证刷新",
@@ -191,6 +209,7 @@ var jobLabels = map[string]string{
 	"pool-health-check":                "账号池健康检查",
 	"lobsterai-checkin":                "LobsterAI 每日签到",
 	"minimax-refresh":                  "MiniMax 凭证刷新",
+	"monkeycode-checkin":               "MonkeyCode 每日签到",
 	"qoder-checkin":                    "Qoder 每日签到",
 	"qoder-refresh":                    "Qoder 凭证续期",
 	"qodercn-checkin":                  "Qoder CN 每日签到",
@@ -213,6 +232,7 @@ var jobDescs = map[string]string{
 	"pool-health-check":                "账号池主动健康检查：探测处于冷却/熔断中的账号并提前恢复（核心任务，不属于任何上游）。",
 	"lobsterai-checkin":                "扫本上游全部账号签一遍（全量端点与定时任务共用同一实现）。",
 	"minimax-refresh":                  "扫描本地凭证，把临近过期的刷掉。",
+	"monkeycode-checkin":               "扫本上游全部账号签一遍（单账号签到要过 cap.js 工作量证明）。",
 	"qoder-checkin":                    "扫本上游全部账号签一遍。",
 	"qoder-refresh":                    "一趟后台续期：扫凭证目录，对将过期的账号串行续期（并因此拿到/更新过期时刻）。",
 	"qodercn-checkin":                  "扫本上游全部账号签一遍。",
