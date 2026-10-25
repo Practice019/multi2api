@@ -91,7 +91,9 @@ func TestDashChartUsedByBothTrendsAndHealthBar(t *testing.T) {
 	if cache == "" {
 		t.Fatal("webui.html 里找不到 renderCacheTrendSVG")
 	}
-	for _, n := range []string{"dcGrid(", "dcLine(", "dcCursor(", "dcSvg("} {
+	// ⚠ 是 dcSvgTag 不是 dcSvg：本图要一次写"图 + 悬浮卡片"两段 HTML，
+	//   而 dcSvg 会把 host.innerHTML 整段替换掉（卡片会被一起冲掉）。
+	for _, n := range []string{"dcGrid(", "dcLine(", "dcCursor(", "dcSvgTag(", "dcTipTag("} {
 		if !strings.Contains(cache, n) {
 			t.Errorf("★ renderCacheTrendSVG 没有调用共享层的 %s —— 它还在自己画一套", n)
 		}
@@ -231,6 +233,74 @@ func TestBarChartLabelsEveryBarTop(t *testing.T) {
 		if !strings.Contains(body, "PADT = 26") {
 			t.Errorf("★ %s 的 PADT 不是 26 —— 那是给柱顶读数留的一行高度；"+
 				"两张图同值才不会出现「上面那张被压扁」的错觉", fn)
+		}
+	}
+}
+
+// TestBothTrendsUseSharedHoverCard 两张趋势图的悬浮提示必须走**同一张卡片**。
+//
+// # 判据来自用户
+//
+//	「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」
+//
+// 当时 #statsTrend 有一张富卡片（时间头 + 合计 + 分模型明细 + 色点），
+// 而 #cacheTrend 只有 dcCursor 生成的单行 text 读数 —— 并排看是两种组件。
+//
+// # 为什么要把「不许再用旧读数」也钉住
+//
+// 光断言「两张图都调了 dcTipRows」挡不住漂移：有人可以**同时**调卡片与旧读数，
+// 或者给新图抄旧样式。所以还要求 dcCursor 的读数文本**不存在** ——
+// 它已随本次改造删掉（没有调用方了），留着就是一份可抄的旧样本。
+//
+// ⚠ 四个函数必须一起用：只用 dcTipTag 不用 dcTipPlace ⇒ 定位算法又各写一套，
+//
+//	而那正是「看起来像两个组件」最容易发生的地方。
+func TestBothTrendsUseSharedHoverCard(t *testing.T) {
+	ui := readWebUI(t)
+
+	// ① 共享层里五个函数一个不少（缺任何一个，调用处就是 ReferenceError）
+	body := dashChartBody(t)
+	for _, n := range []string{"function dcTipTag(", "function dcTipHead(", "function dcTipRows(", "function dcTipPlace(", "function dcTipHide("} {
+		if !strings.Contains(body, n) {
+			t.Errorf("★ 共享层缺少 %s —— 调用处会 ReferenceError，整页按钮失效", n)
+		}
+	}
+
+	// ② 两张趋势图都得用整套卡片
+	for _, fn := range []string{"function renderTrendSVG(", "function renderCacheTrendSVG("} {
+		fnBody := sliceFuncBody(t, ui, fn)
+		if fnBody == "" {
+			t.Fatalf("webui.html 里找不到 %s", fn)
+		}
+		for _, n := range []struct{ what, needle string }{
+			{"卡片外壳", "dcTipTag("},
+			{"卡片首行", "dcTipHead("},
+			{"卡片明细行", "dcTipRows("},
+			{"卡片定位", "dcTipPlace("},
+		} {
+			if !strings.Contains(fnBody, n.needle) {
+				t.Errorf("★ %s 没有用共享的%s（%q）—— 它还在自己拼一套悬浮提示",
+					fn, n.what, n.needle)
+			}
+		}
+		// ⚠ 用卡片就必须给容器留位置：dcSvg 会把 host.innerHTML 整段替换掉，
+		//   卡片 div 会被一起冲掉（表现是「悬浮没反应」，且不报错）。
+		if strings.Contains(fnBody, "dcSvg(host") && !strings.Contains(fnBody, "dcSvgTag(") {
+			t.Errorf("★ %s 用了 dcSvg(host,...) 又挂卡片 —— 它会把 host.innerHTML 整段替换掉、"+
+				"卡片 div 被一起冲掉（表现是「悬浮没反应」，且不报错）。改用 dcSvgTag + 手工拼两段", fn)
+		}
+	}
+
+	// ③ 旧的单行读数必须**已经不存在**（留着就是一份可抄的旧样式）。
+	//    判据取那段代码的**形状**：拼出 id + "Read" 的 <text class="ax">。
+	//    ⚠ 不按"Read"这个单词判 —— 页面里 'setReadonly' 等无关 id 也含它。
+	if strings.Contains(body, "Read\" class=\"ax\"") {
+		t.Error("★ dcCursor 还在生成单行读数（<text ... Read class=\"ax\">）—— " +
+			"它已无调用方，留着就等于给下一张图留了一份旧样式的样本")
+	}
+	for _, bad := range []string{"#trendRead", "#ctRead", "#dtRead"} {
+		if strings.Contains(ui, bad) {
+			t.Errorf("★ webui.html 里还有 %s 的引用 —— 那个元素已不再生成", bad)
 		}
 	}
 }

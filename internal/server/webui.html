@@ -2415,17 +2415,26 @@ function dcLine(svg, pts, o) {
   }
 }
 
-// dcCursor 预置"悬浮参考垂线 + 跟随读数"（cacheTrend / dailyTrend 同一套）。
+// dcCursor 预置**悬浮参考垂线**（各趋势图同一套）。
 //
 // ⚠ 必须**预置**在 SVG 里（默认 display:none）：渲染函数每次重写 innerHTML，
 //   在事件里现场 append 的元素重绘一次就没了。
-// id 传前缀：'ct' → #ctCursor / #ctRead，'dt' → #dtCursor / #dtRead。
+// id 传前缀：'ct' → #ctCursor，'trend' → #trendCursor。
+//
+// ⚠⚠ 2026-10-26：**读数文本（#..Read）已删除**，因为已经没有调用方要它了 ——
+//   原先它给的是"一行监控台风格"的读数（时间 · 累计 x% · 请求 n · Token m），
+//   而两张图现在都改用共享的**悬浮卡片**（dcTipTag + dcTipHead + dcTipRows）。
+//
+// # 为什么不留着那个参数
+//
+//   留着就等于给下一张图留了一份"旧样式"的样本 —— 抄它的人会做出一张
+//   与其它图**格式不同**的悬浮提示，而那正是用户这次点名的那个问题
+//   （「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」）。
+//   少一个可选项，就少一次漂移的机会。
 function dcCursor(svg, id, o) {
   var y1 = dcNum(o.PADT), y2 = dcNum(o.PADT) + dcNum(o.plotH);
   svg.push('<line id="' + id + 'Cursor" x1="0" y1="' + y1 + '" x2="0" y2="' + y2 +
     '" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>');
-  svg.push('<text id="' + id + 'Read" class="ax" x="0" y="' + (o.readY || 12) +
-    '" text-anchor="middle" fill="var(--fg)" style="display:none"></text>');
 }
 
 // dcBand 预置"悬停高亮底带"（默认 display:none），与 dcCursor 配套。
@@ -2480,6 +2489,95 @@ function dcPct(v, den) {
   if (d <= 0) return null;
   var r = (dcNum(v) / d) * 100;
   return r < 0 ? 0 : r;
+}
+
+// ── 悬浮卡片（三块：外壳 / 明细行 / 定位）────────────────────────────────
+//
+// # 为什么要抽（用户原话）
+//
+//   「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」
+//
+//   当时 #statsTrend 有一张**富卡片**（时间头 + 合计 + 分模型明细 + 色点），
+//   而 #cacheTrend 只有 dcCursor 生成的**单行 text 读数**。两张图并排看，
+//   一个是卡片、一个是行字 —— 又是「两处慢慢漂移」的同一形态。
+//
+// # 抽的是哪一层
+//
+//   抽**外形**（外壳样式、行的排法、定位算法），**不抽内容**：
+//   各图要显示的字段本来就不同（趋势图是分模型、缓存图是双轴口径），
+//   强行统一字段只会逼出一堆 if。调用方自己拼 innerHTML，用下面三块拼。
+//
+// ⚠ 三块必须**一起**用，否则外形会重新漂移：
+//   只用 dcTipTag 不用 dcTipPlace ⇒ 定位算法又是各写一套。
+
+// dcTipTag 悬浮卡片的**外壳**（一个默认隐藏的绝对定位 div）。
+//
+// ⚠ 必须是**预置在 HTML 里**的（不是事件里现场 append）：渲染函数每次重写
+//   innerHTML，现场 append 的元素重绘一次就没了 —— 与 dcCursor 同一理由。
+function dcTipTag(id) {
+  return '<div id="' + id + '" style="display:none;position:absolute;pointer-events:none;' +
+    'background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;' +
+    'font-size:11px;white-space:nowrap;z-index:5;box-shadow:0 4px 14px var(--shadow);' +
+    'min-width:130px"></div>';
+}
+
+// dcTipHead 卡片的**首行**（时间 + 可选副标题）。
+//
+// ⚠ 抽它的理由：两张图的首行都是「粗体时间」，字号/间距必须一致 ——
+//   那正是「看起来像两个组件」最容易发生的地方。
+function dcTipHead(title, sub) {
+  return '<div style="font-weight:600;margin-bottom:2px">' + dcEsc(title) + '</div>' +
+    (sub ? '<div style="color:var(--dim);margin-bottom:2px">' + sub + '</div>' : '');
+}
+
+// dcTipRows 卡片的**明细行**：色点 + 名字 + 右对齐数值。
+//
+// items = [{color, name, value, dim}]
+//   · color 传 CSS 色值 —— 惯例是**与该行对应的那条线同色**，
+//     这样「卡片里的这一行」与「图上那条线」一眼对得上。
+//   · value 已经是**格式化好的字符串**（各图量纲不同，本函数不管格式）。
+//   · dim=true ⇒ 整行压暗，用于次要口径（如「本小时」对「累计」）。
+//
+// ⚠ 名字要 dcEsc（模型名来自上游，可能带尖括号）。value 由调用方保证安全。
+function dcTipRows(items) {
+  return (items || []).map(function (o) {
+    var muted = o.dim ? 'opacity:.7' : '';
+    var vcolor = o.dim ? 'var(--dim)' : 'var(--fg)';
+    return '<div style="display:flex;align-items:center;gap:5px;' + muted + '">' +
+      '<i style="width:7px;height:7px;border-radius:2px;background:' + (o.color || 'var(--dim)') + ';flex:none"></i>' +
+      '<span style="overflow:hidden;text-overflow:ellipsis;max-width:160px;color:var(--dim)">' + dcEsc(o.name) + '</span>' +
+      '<b style="margin-left:auto;color:' + vcolor + ';padding-left:8px">' + o.value + '</b>' +
+      '</div>';
+  }).join('');
+}
+
+// dcTipPlace 把卡片摆到光标附近（横向跟手 + 纵向优先上方）。
+//
+// 三条约束（都是实拍调出来的，别随手改）：
+//   · 横向 mx+12 跟手，但按**实测** offsetWidth clamp ⇒ 贴右边缘时不翻到屏幕外；
+//   · 纵向优先放光标**上方**（不挡正在看的数据），贴顶时落到下方；
+//   · 最后再 clamp 一次到 rect 内 —— 小图里「上方也放不下、下方也放不下」时
+//     不至于把卡片丢到面板外面。
+//
+// ⚠ offsetWidth/Height 在 display:none 时是 0 ⇒ **先 display:block 再量**，
+//   量不到（首帧）才退回 fallback。顺序反了的话卡片每次按 fallback 定位、会跳一下。
+function dcTipPlace(tip, ev, rect, o) {
+  var opt = o || {};
+  tip.style.display = 'block';
+  var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  var tw = tip.offsetWidth || opt.fallbackW || 150, th = tip.offsetHeight || opt.fallbackH || 90;
+  tip.style.left = Math.min(Math.max(mx + 12, 2), Math.max(2, rect.width - tw - 2)) + 'px';
+  var top = my - th - 10, maxTop = Math.max(2, rect.height - th - 2);
+  tip.style.top = (top >= 2 ? Math.min(top, maxTop) : Math.min(my + 14, maxTop)) + 'px';
+}
+
+// dcTipHide 收起若干卡片/游标（鼠标离开时调）。ids 传 id 或 id 数组。
+function dcTipHide(host, ids) {
+  var list = typeof ids === 'string' ? [ids] : (ids || []);
+  for (var i = 0; i < list.length; i++) {
+    var e = host.querySelector('#' + list[i]);
+    if (e) e.style.display = 'none';
+  }
 }
 
 // dcTier 按百分比分档取色（**与下方图表同一套语义色**）。
@@ -12719,8 +12817,14 @@ function renderModelRank(s) {
     //   但那条只有高亮点；用户要的是**竖线可以对齐参考**。
     // ⚠ 线与读数都**预置**在 SVG 里（默认 `display:none`）—— 本函数每次重写 `innerHTML`，
     //   若在事件里现场 append，重绘一次就没了。
+    // ⚠⚠ 2026-10-26：悬浮提示改用**共享卡片**（与 #statsTrend 同一份实现）。
+    //   用户原话：「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」
+    //   —— 原先本图只有 dcCursor 那行"监控台风格"的单行读数，与趋势图的卡片并存。
     dcCursor(svg, 'ct', { PADT: PADT, plotH: plotH });
-    dcSvg(host, W, H, svg);
+    // ⚠ 这里**不能用 dcSvg**：它把 host.innerHTML 整段替换掉，卡片 div 会被冲掉。
+    //   与 #statsTrend 同一处理 —— 用 dcSvgTag 拼"图 + 卡片"两段。
+    host.innerHTML = dcSvgTag(W, H, svg, { style: 'width:100%;height:' + H + 'px;display:block' })
+      + dcTipTag('ctTip');
 
     // ⚠ 2026-10-20 修（第二个隐患）：监听器用 host._ctBound **只绑一次**，
     //   所以它闭包捕获的 rows / n / xAt 永远是**第一次渲染**那一份 ——
@@ -12731,9 +12835,10 @@ function renderModelRank(s) {
       host._ctBound = true;
       host.addEventListener('mousemove', (ev) => {
         const d = host._ctData;   // ⚠ 当次渲染的数据（不是闭包快照）
-        const el = host.querySelector('svg'), cur = host.querySelector('#ctCursor'), rd = host.querySelector('#ctRead');
-        if (!d || !el || !cur || !rd) return;
+        const el = host.querySelector('svg'), cur = host.querySelector('#ctCursor'), tip = host.querySelector('#ctTip');
+        if (!d || !el || !cur || !tip) return;
         const rect = el.getBoundingClientRect();
+        if (!rect.width) return;                 // 面板收起时宽度为 0，按 X 估点会全落在 0
         const xv = (ev.clientX - rect.left) / rect.width * W;
         let best = -1, bd = 1e9;
         for (let i = 0; i < d.n; i++) { const dist = Math.abs(d.xAt(i) - xv); if (dist < bd) { bd = dist; best = i; } }   // ⚠ 内层变量不能叫 d（会遮蔽 host._ctData）
@@ -12741,20 +12846,24 @@ function renderModelRank(s) {
         const r = d.rows[best];
         cur.setAttribute('x1', d.xAt(best).toFixed(1)); cur.setAttribute('x2', d.xAt(best).toFixed(1));
         cur.style.display = 'block';
-        rd.setAttribute('x', Math.min(Math.max(d.xAt(best), 60), W - 60).toFixed(1));
-        // ⚠ 读数字段：时间 · 当日累计命中率 · 本小时命中率 · 请求数 · 总 Token
+        // ⚠ 卡片字段：时间 · **累计**命中率（曲线画的就是它）· **本小时**命中率 · 请求 · Token
         // ⚠ 2026-10-20：曲线画的是**当日累计**（与 7 天表格/卡片同口径），
         //   但鼠标点上同时给出"这一小时本身"的比例 —— 两个数都给，读者才不会被
         //   "累计 89% 但这一小时只有 43%"搞糊涂。
-        rd.textContent = r.ts.slice(11, 16)
-        + '  累计 ' + (r.has ? (r.rate * 100).toFixed(1) + '%' : '—')
-        + (r.hasHour ? '  ·  本小时 ' + (r.hourRate * 100).toFixed(1) + '%' : '')
-        + '  ·  请求 ' + r.total
-        + '  ·  总 Token ' + fmtTokensPlain(r.tokens);
-        rd.style.display = 'block';
+        //   ⇒ 本小时那一行标 dim（次要口径），主次一眼可分。
+        // ⚠ 色点与图上的线同色：命中率两条都是蓝、Token 是琥珀、请求无对应线故用灰 ——
+        //   这样"卡片里的这一行"和"图上那条线"能对上（dcTipRows 的约定）。
+        tip.innerHTML = dcTipHead(r.ts.slice(5, 10) + ' ' + r.ts.slice(11, 16))
+          + dcTipRows([
+              { color: DC_RATE_COLOR, name: '累计命中率', value: r.has ? (r.rate * 100).toFixed(1) + '%' : '—' },
+              { color: DC_RATE_COLOR, name: '本小时命中率', value: r.hasHour ? (r.hourRate * 100).toFixed(1) + '%' : '—', dim: true },
+              { color: 'var(--warn)', name: '总 Token', value: fmtTokensPlain(r.tokens) },
+              { color: 'var(--dim)', name: '请求', value: String(r.total) },
+            ]);
+        dcTipPlace(tip, ev, rect, { fallbackH: 96 });
       });
       host.addEventListener('mouseleave', () => {
-        for (const id of ['#ctCursor', '#ctRead']) { const e = host.querySelector(id); if (e) e.style.display = 'none'; }
+        dcTipHide(host, ['ctCursor', 'ctTip']);
       });
     }
   }
@@ -14584,7 +14693,9 @@ let multCatalogFailed = false;
     // 悬停参考线（保留原 id：本文件另两处趋势图也是"竖虚线 + 浮层"这套做法）。
     // ⚠⚠ 2026-10-26：悬浮参考垂线改走共享层（dcCursor）—— 与 #cacheTrend / #dailyTrend
     //   同一份实现。id 传 "trend" ⇒ 生成 #trendCursor（沿用原有 id，事件绑定不用改）。
-    //   共享层同时预置 #trendRead 跟随读数（本图浮层信息更全，暂不使用，保持隐藏）。
+    //   悬浮提示走共享卡片（dcTipTag/dcTipHead/dcTipRows/dcTipPlace）—— 见下面那段。
+    //   ⚠ 早先这里还提过「共享层预置跟随读数、本图不用」—— 那个单行读数
+    //     已随 dcCursor 一起删掉了（没有调用方了，留着就是旧样式的样本）。
     dcCursor(marks, "trend", { PADT: PADT, plotH: plotH });
 
     const xLabels = [];
@@ -14609,7 +14720,7 @@ let multCatalogFailed = false;
     host.innerHTML =
       dcSvgTag(W, H, marks.concat(xLabels), { style: 'width:100%;height:' + H + 'px;display:block' }) +
       `<div class="dim" style="display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;font-size:11px;line-height:16px;margin-top:2px">${legend}</div>
-       <div id="trendTip" style="display:none;position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11px;white-space:nowrap;z-index:5;box-shadow:0 4px 14px var(--shadow);min-width:130px"></div>`;
+       ${dcTipTag('trendTip')}`;
 
     // ── 4. 悬停浮层 ──
     // ⚠ 监听器只绑**一次**（挂在不被重绘的 #statsTrend 上），当前几何与数据放进
@@ -14635,22 +14746,14 @@ let multCatalogFailed = false;
         // 该桶的分模型明细：只看有量的，按量降序 —— 浮层第一行必须是最耗的那个模型。
         const det = g.segs.map((s) => ({ s, v: g.valOf(b, s) }))
           .filter((o) => o.v > 0).sort((p, q) => q.v - p.v);
+        // ⚠⚠ 2026-10-26：卡片改走共享层（dcTipHead + dcTipRows + dcTipPlace）——
+        //   与 #cacheTrend 同一份实现（用户：「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」）。
+        //   抽的是**外形**，不是内容：本图给分模型明细、缓存图给双轴口径，字段本就不同。
         tip.innerHTML =
-          `<div style="font-weight:600;margin-bottom:2px">${esc(b.ts.slice(5, 10))} ${esc(g.lblOf(b.ts))}</div>`
-          + `<div style="color:var(--dim);margin-bottom:2px">合计 <b style="color:var(--fg)">${trendFmt(b.total)}</b> tokens</div>`
-          + det.map((o) => `<div style="display:flex;align-items:center;gap:5px">`
-              + `<i style="width:7px;height:7px;border-radius:2px;background:${o.s.color};flex:none"></i>`
-              + `<span style="overflow:hidden;text-overflow:ellipsis;max-width:160px;color:var(--dim)">${esc(o.s.name)}</span>`
-              + `<b style="margin-left:auto;color:var(--fg);padding-left:8px">${trendFmt(o.v)}</b>`
-            + `</div>`).join('');
-        tip.style.display = 'block';
-        // 位置：横向跟手但按**实测**浮层宽度 clamp（贴右边缘时不翻到屏幕外），
-        // 纵向优先放在光标上方，贴顶时落到光标下方 —— 与页面级 #hoverTip 同一套思路。
-        const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-        const tw = tip.offsetWidth || 150, th = tip.offsetHeight || 90;
-        tip.style.left = Math.min(Math.max(mx + 12, 2), Math.max(2, rect.width - tw - 2)) + 'px';
-        const top = my - th - 10;
-        tip.style.top = (top >= 2 ? Math.min(top, Math.max(2, rect.height - th - 2)) : Math.min(my + 14, Math.max(2, rect.height - th - 2))) + 'px';
+          dcTipHead(b.ts.slice(5, 10) + ' ' + g.lblOf(b.ts),
+            '合计 <b style="color:var(--fg)">' + trendFmt(b.total) + '</b> tokens')
+          + dcTipRows(det.map((o) => ({ color: o.s.color, name: o.s.name, value: trendFmt(o.v) })));
+        dcTipPlace(tip, ev, rect, { fallbackH: 90 });
         const x = g.cx(best);
         cur.setAttribute('x1', x.toFixed(1)); cur.setAttribute('x2', x.toFixed(1));
         cur.style.display = 'block';
@@ -14662,9 +14765,7 @@ let multCatalogFailed = false;
         }
       });
       host.addEventListener('mouseleave', () => {
-        for (const id of ['#trendTip', '#trendCursor', '#trendHoverBand']) {
-          const e = host.querySelector(id); if (e) e.style.display = 'none';
-        }
+        dcTipHide(host, ['trendTip', 'trendCursor', 'trendHoverBand']);
       });
     }
   }
