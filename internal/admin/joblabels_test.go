@@ -4,18 +4,29 @@ import (
 	"testing"
 )
 
-// ⚠ 本文件是 `jobLabels` / `jobDescs` 两张表的**守门测试**（2026-10-18 新建）。
+// ⚠ 本文件守的是 `jobLabels` / `jobDescs` 两张表的**互相一致**。
 //
-// # 为什么需要它（照 TestUIManifestCapabilityTitles 那条的理由）
+// # 为什么这里不再守"每个已注册任务都登记了"
 //
-// 前端在拿不到 `label` 时会**静默退回英文名** —— 页面不报错，只是任务那一列
-// 变回 `codearts-refresh` 这种裸英文。⚠ 那种缺陷**不会自我暴露**，
-// 只能靠断言抓住。这与 capTitles 漏登记时"静默退回 id"是同一个问题。
+// 原来这里有一条 TestUIManifestJobLabels，遍历 admin.New(...) 在**测试夹具**下
+// 取到的 manifest.Jobs，断言每条都有 Label/Desc。它看着对，实际是一条**永远为真**
+// 的断言 —— 本包的夹具里一个上游都没装配，m.Jobs 恒为空，循环从不执行。
+// 它自己的日志把这件事写在脸上：
 //
-// 分两条：
-//  1. 两张表必须**互相一致**（只加一张 = 出现"有中文名但悬停空"或反之）；
-//  2. manifest 里每个已注册任务都必须**两样都有** —— 这条在运行期生效，
-//     是真正能抓住"新任务忘了登记"的那一条。
+//	joblabels_test.go: 本配置下没有注册任务（前置不满足：没有上游装配），
+//	                    本用例本轮只验证到「无数据时不报错」
+//
+// 2026-10-26 的真实后果：`monkeycode-checkin` 在两张表里**一起漏登记**，
+// 任务调度表那一行只有裸英文 key（用户报障），而这条守卫全程绿着。
+//
+// ⇒ 那条断言已**搬到能看见全部任务名的地方**：`cmd/server/job_labels_test.go` 的
+//   TestEveryJobNameLiteralHasLabelAndDesc（扫生产代码里的任务名字面量，
+//   与"有没有被配置、有没有在夹具里装配"无关）。
+//   它经过变异验证：注释掉 jobLabels 里的一行，它会红并指出定义处。
+//
+// 本文件只留下夹具里**真能守住**的那条：两张表互相一致
+// （只加一张 = "有中文名但悬停空" 或反之）。⚠ 注意它**查不出"两张一起漏"**——
+// 那正是上面那条搬走的守卫的职责。
 
 // TestJobLabelTablesConsistent 两张表键集合一致，且值都非空。
 func TestJobLabelTablesConsistent(t *testing.T) {
@@ -37,30 +48,5 @@ func TestJobLabelTablesConsistent(t *testing.T) {
 		if _, ok := jobLabels[k]; !ok {
 			t.Errorf("jobDescs 有 %q 但 jobLabels 没有 ⇒ 有说明却显示裸英文名", k)
 		}
-	}
-}
-
-// TestUIManifestJobLabels 每个已注册任务都必须在两张表里登记。
-//
-// ⚠ 与本配置下"有没有注册任务"无关：没有任务时 `m.Jobs` 为空，循环自然不执行
-// （那是前置条件不满足，不是断言失败）—— 所以这里**不**用 Skip，
-// 免得把"真的漏登记"与"本次没注册任务"混为一种结果。
-func TestUIManifestJobLabels(t *testing.T) {
-	m := manifestFor(t, New(Config{AdminToken: testAdminToken, ListensLoopback: true}))
-	for _, j := range m.Jobs {
-		if j.Name == "" {
-			t.Error("manifest.jobs 里有一条没有 name")
-			continue
-		}
-		if j.Label == "" {
-			t.Errorf("任务 %q 没有中文名（前端会显示成裸英文）—— 往 jobLabels 加一行", j.Name)
-		}
-		if j.Desc == "" {
-			t.Errorf("任务 %q 没有说明（悬停会是空的）—— 往 jobDescs 加一行", j.Name)
-		}
-	}
-	// ⚠ 本配置下若真的注册了任务，上面两条才是有效守门；一个都没有时如实说明。
-	if len(m.Jobs) == 0 {
-		t.Log("本配置下没有注册任务（前置不满足：没有上游装配），本用例本轮只验证到「无数据时不报错」")
 	}
 }
