@@ -3358,6 +3358,20 @@ function mpEsc(s) {
         <div class="info-line" style="margin-bottom:0">指纹脱敏：<span id="setSanitizeRO">…</span></div>
       </fieldset>
 
+      <fieldset>
+        <legend>账号解封探测 <span class="badge badge--cold">重启生效</span></legend>
+        <!-- 为什么单独一块、为什么不与上面的「主动健康检查」合并：
+             那是 10 分钟一轮的冷却/熔断探活（30 分钟量级就恢复），而本项是**天级**
+             的解封探活（被上游风控 / 连败禁用的号）。两者节奏差一个数量级，
+             合成一个旋钮必然有一方节奏错 —— 所以是两个独立间隔。 -->
+        <div class="formgrid">
+          <div class="field"><label>探测间隔（小时）</label>
+            <input type="number" id="setReviveHours" min="0" max="8760">
+            <span class="hint">每 N 小时给<b>被自动禁用</b>的账号发一个便宜请求（模型目录/额度等，不消耗对话额度）探活，通了即解除禁用。<b>0 = 关闭</b>（被禁的号只能人工恢复）。默认 24。<br>
+              由人工禁用、或凭证死亡导致的禁用<b>不会</b>被探测翻案 —— 那是操作员的明确决定。</span></div>
+        </div>
+      </fieldset>
+
       <fieldset class="readonly">
         <legend>会话粘性 <span class="badge badge--ro">只读</span></legend>
         <div class="info-line" style="margin-bottom:0">会话粘性让同一会话尽量落在同一账号上（避免多账号轮转把对话拆散）。<br>
@@ -9697,6 +9711,10 @@ let loginProvider = '';
     ['setCheckinLogDays', 'checkin_log_keep_days', 'int'],
     ['setReqLogDays', 'request_log_keep_days', 'int'],
     ['setUpTimeout', 'upstream_timeout_seconds', 'int'],
+    // 账号解封探测（天级）。⚠ 加这一行**同时**要在后端补三处，缺一处就是
+    // "页面能填、保存静默丢弃"：admin.Settings 的字段、settings_store 的
+    // parse/persist 清单、Pool 结构体上的 json tag。
+    ['setReviveHours', 'pool_revive_probe_hours', 'int'],
   ];
   let savedSettings = null;
 

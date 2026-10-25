@@ -60,10 +60,15 @@ type Settings struct {
 	BreakerThreshold      int    `json:"pool_breaker_threshold"`
 	BreakerCooldown       string `json:"pool_breaker_cooldown"`
 	BreakerCooldownMax    string `json:"pool_breaker_cooldown_max"`
-	SanitizeFingerprints  bool   `json:"sanitize_blacklist_fingerprints"`
-	UpstashURL            string `json:"upstash_url"`
-	SessionStickyEnabled  bool   `json:"session_sticky_enabled"`
-	SessionStickyTTL      string `json:"session_sticky_ttl"`
+	// ReviveProbeHours 「解封探测」周期，单位**小时**（对外用小时，config 里存秒）。
+	//
+	// 语义：每 N 小时给**被自动禁用**的账号发一个便宜请求探活，通了即解除禁用。
+	// 默认 24 小时；0 = 关闭（被禁的号只能人工恢复）。
+	ReviveProbeHours     int    `json:"pool_revive_probe_hours"`
+	SanitizeFingerprints bool   `json:"sanitize_blacklist_fingerprints"`
+	UpstashURL           string `json:"upstash_url"`
+	SessionStickyEnabled bool   `json:"session_sticky_enabled"`
+	SessionStickyTTL     string `json:"session_sticky_ttl"`
 
 	// ---- 只读展示 ----
 	Listen     string `json:"listen"`
@@ -212,6 +217,12 @@ var runtimeFields = []string{
 }
 
 // restartRequiredFields 需重启的字段名清单（通用段）。
+//
+// ⚠⚠ 2026-10-26：**这是唯一一份**。cmd/server 的 settingsStore.needRestart 原先
+// 自己又抄了一份同样的清单 —— 于是加一个"需重启"字段要改两处，漏一处的表现是：
+// PUT 的响应说"需重启"，GET /admin/settings 的 restart_fields 里却没有它，
+// 前端提示自相矛盾（实测踩到：pool_revive_probe_hours 只加了一边）。
+// 现在 store 直接调 RestartRequiredFields() 取这份，不再各自维护。
 var restartRequiredFields = []string{
 	"cooldown_soft_rate",
 	"upstream_timeout_seconds",
@@ -221,10 +232,22 @@ var restartRequiredFields = []string{
 	"pool_breaker_threshold",
 	"pool_breaker_cooldown",
 	"pool_breaker_cooldown_max",
+	"pool_revive_probe_hours",
 	"sanitize_blacklist_fingerprints",
 	"upstash_url",
 	"session_sticky_enabled",
 	"session_sticky_ttl",
+}
+
+// RestartRequiredFields 返回"需重启"的通用段字段名（**副本**）。
+//
+// 给包外（cmd/server 的 settingsStore）复用同一份清单用 —— 它原先自己维护了
+// 一份等价的，两边漂移过一次（见上面 restartRequiredFields 的注释）。
+// 返回副本而不是暴露包级切片：调用方 append 一下就会把包级状态改坏。
+func RestartRequiredFields() []string {
+	out := make([]string, len(restartRequiredFields))
+	copy(out, restartRequiredFields)
+	return out
 }
 
 // runtimeFields 返回通用段 + 上游段里"运行时生效"的键。

@@ -190,7 +190,7 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 | `api_key` | — | 调用方 Bearer 鉴权；为空则不鉴权（不建议） |
 | `auth_dir` | `./auths` | 凭证根目录，各上游分子目录存放 |
 | `server.*` | — | `max_body_mb`（请求体上限）、`disables_chat_tools`（关工具注入） |
-| `pool.*` | — | 账号池：熔断阈值、在途上限、冷却时长、`health_check_interval_seconds` |
+| `pool.*` | — | 账号池：熔断阈值、在途上限、冷却时长、`health_check_interval_seconds`（冷却探活，默认 600s）、`revive_probe_interval_seconds`（解封探活，默认 86400s / 24 小时，设置页可改） |
 | `schedule.*` | — | 签到 / 保活的间隔与开关（**统一 30 分钟被动扫描**） |
 | `session_sticky.*` | `enabled=true` / `ttl=30m` / `gc_interval=5m` | 会话粘性：同一会话固定用同一账号 |
 | `upstream.*` | 内嵌默认 | 出站身份（UA / 客户端版本 / 设备 token / IP 透传） |

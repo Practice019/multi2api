@@ -894,3 +894,35 @@ func TestPoolHealthCheckDefaults(t *testing.T) {
 		t.Errorf("显式 0 应保持 0（关闭主动探测），得到 %d", c2.Pool.HealthCheckIntervalSeconds)
 	}
 }
+
+// TestPoolReviveProbeDefaults 解封探测配置：默认 24 小时（86400s），0 = 关闭。
+//
+// ⚠ 默认值必须是 24 小时而不是跟着上面那个 600s：两者的合适节奏差一个数量级
+//（冷却是"歇一会儿"、被禁是"等天级恢复"）。这条断言把那个决定钉住 ——
+// 谁把它改成 600，等于让被禁的号每 10 分钟白打一次上游。
+func TestPoolReviveProbeDefaults(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "a.json")
+	os.WriteFile(fp, []byte("{}"), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.ReviveProbeIntervalSeconds != 86400 {
+		t.Errorf("缺省 revive_probe_interval_seconds = %d，want 86400（24 小时）",
+			c.Pool.ReviveProbeIntervalSeconds)
+	}
+	if c.Pool.ReviveProbeIntervalSeconds == c.Pool.HealthCheckIntervalSeconds {
+		t.Error("解封探测与主动健康检查的间隔不能相同 —— 两者是不同量级的节奏" +
+			"（前者天级、后者分钟级），相等说明有一方被复制粘贴带偏了")
+	}
+	fp2 := filepath.Join(dir, "b.json")
+	os.WriteFile(fp2, []byte("{\"pool\":{\"revive_probe_interval_seconds\":0}}"), 0o600)
+	c2, err := Load(fp2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Pool.ReviveProbeIntervalSeconds != 0 {
+		t.Errorf("显式 0 应保持 0（关闭解封探测），得到 %d", c2.Pool.ReviveProbeIntervalSeconds)
+	}
+}

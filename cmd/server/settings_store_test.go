@@ -153,6 +153,7 @@ func TestCurrentSettingsCoversAllWritableFields(t *testing.T) {
 		BreakerThreshold:      105,
 		BreakerCooldown:       "106s",
 		BreakerCooldownMax:    "107s",
+		ReviveProbeHours:      108,
 		SanitizeFingerprints:  true,
 		UpstashURL:            "https://upstash.example",
 		SessionStickyEnabled:  true,
@@ -190,6 +191,7 @@ func TestCurrentSettingsCoversAllWritableFields(t *testing.T) {
 	check("BreakerThreshold", src.BreakerThreshold, got.BreakerThreshold)
 	check("BreakerCooldown", src.BreakerCooldown, got.BreakerCooldown)
 	check("BreakerCooldownMax", src.BreakerCooldownMax, got.BreakerCooldownMax)
+	check("ReviveProbeHours", src.ReviveProbeHours, got.ReviveProbeHours)
 	check("SanitizeFingerprints", src.SanitizeFingerprints, got.SanitizeFingerprints)
 	check("UpstashURL", src.UpstashURL, got.UpstashURL)
 	check("SessionStickyEnabled", src.SessionStickyEnabled, got.SessionStickyEnabled)

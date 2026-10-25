@@ -1792,6 +1792,28 @@ func main() {
 	} else {
 		log.Printf("pool: 主动健康检查已关闭（pool.health_check_interval_seconds=0，冷却到期自然恢复）")
 	}
+	// 「解封探测」：给**被自动禁用**的账号定时发一个便宜请求探活，通了就解除禁用。
+	//
+	// # 为什么与上面那条分开（不是把两段塞进同一个任务）
+	//
+	// 两者的**合适节奏差一个数量级**：冷却是 30 分钟量级（10 分钟探一次划算），
+	// 而被禁/被上游封是**天级**恢复。挂在 10 分钟那条上等于每 10 分钟白打一次
+	// 上游 —— 既浪费，又会持续在对方风控日志里留下"这个号在反复试"的痕迹。
+	//
+	// 它是**核心**任务（不属于任何上游），provider 标 core。
+	if cfg.Pool.ReviveProbeIntervalSeconds > 0 {
+		iv := time.Duration(cfg.Pool.ReviveProbeIntervalSeconds) * time.Second
+		sch.AddJob("core", gateway.Job{
+			Name:     "pool-revive-probe",
+			Interval: iv,
+			Run: func(ctx context.Context) error {
+				return runPoolReviveProbe(ctx, p, registry)
+			},
+		})
+		log.Printf("pool: 解封探测已开启（每 %v 对被禁用的账号探活一次，通了即解除禁用）", iv)
+	} else {
+		log.Printf("pool: 解封探测已关闭（pool.revive_probe_interval_seconds=0，被禁账号只能人工恢复）")
+	}
 	// 核心调度循环：整点签到/保活 + 各上游通过 gateway.JobExt 注册的守卫任务
 	// （workbuddy 的成长/旅行守卫轮就在其中）。核心**不认识**具体任务名。
 	go sch.Run(ctx)
