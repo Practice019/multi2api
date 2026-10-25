@@ -135,6 +135,53 @@ func TestDashChartUsedByBothTrendsAndHealthBar(t *testing.T) {
 	}
 }
 
+// TestTopTrendChartUsesSharedLayerWithLine 顶部那张（#statsTrend）必须与下方**同款**。
+//
+// # 为什么单独一条（它此前**不在**上面那条守卫的覆盖范围内）
+//
+// 上面那条查了三处（cacheTrend / dailyTrend / healthBar），**漏了 renderTrendSVG** ——
+// 而那正是用户两次点着看的那张：
+//
+//	第一次「上面的太简洁了，我希望统一用下面的实现」  → 补了网格线
+//	第二次「上面的没有折线呢」                        → 补了折线（本条就是为它加的）
+//
+// 一条守卫没覆盖到的地方，缺陷就会反复回到那里 —— 所以先把它纳入覆盖，
+// 再谈补折线。顺序反过来的话，下次还会在同一个地方漏。
+func TestTopTrendChartUsesSharedLayerWithLine(t *testing.T) {
+	ui := readWebUI(t)
+	body := sliceFuncBody(t, ui, "function renderTrendSVG(")
+	if body == "" {
+		t.Fatal("webui.html 里找不到 renderTrendSVG（#statsTrend 那张图的绘制函数）")
+	}
+	for _, n := range []struct{ what, needle string }{
+		{"等分网格线 + 左轴刻度", "dcGrid("},
+		{"柱子", "dcRects("},
+		{"折线（用户点名：上面的没有折线）", "dcLine("},
+		{"悬浮参考线", "dcCursor("},
+		{"悬停高亮底带", "dcBand("},
+		{"SVG 外壳", "dcSvgTag("},
+	} {
+		if !strings.Contains(body, n.needle) {
+			t.Errorf("★ renderTrendSVG 没有调用共享层的 %s（%q）—— "+
+				"它还在自己画一套，与下方两张趋势图早晚漂移", n.what, n.needle)
+		}
+	}
+
+	// ⚠ 折线必须在**柱之后**：SVG 后画的盖先画的，反过来的话堆叠柱会把线的中段吃掉
+	//   （表现是"折线断断续续"，而不是完全不画 —— 更难发现）。
+	iRect := strings.Index(body, "dcRects(")
+	iLine := strings.Index(body, "dcLine(")
+	if iRect >= 0 && iLine >= 0 && iLine < iRect {
+		t.Error("renderTrendSVG 里 dcLine 画在 dcRects **之前** —— 堆叠柱会盖住折线中段，" +
+			"看起来像「折线断断续续」")
+	}
+	// 同理，折线必须在**网格线之后**（否则线的中段被网格压掉一截）。
+	iGrid := strings.Index(body, "dcGrid(")
+	if iGrid >= 0 && iLine >= 0 && iLine < iGrid {
+		t.Error("renderTrendSVG 里 dcLine 画在 dcGrid **之前** —— 网格线会压在折线上")
+	}
+}
+
 // TestDashChartGridLinesAreEvenlyDivided 等分线必须在。
 //
 // 用户点名要的就是这个（「等分线」）。判据取**几何写法**而不是注释：
