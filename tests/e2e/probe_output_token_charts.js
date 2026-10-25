@@ -65,8 +65,11 @@ const STATS = JSON.stringify({
     out.heatCells = cells.length;
     out.heatColorVariants = Object.keys(colors).length;
     out.heatColors = Object.entries(colors).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,v]) => k + '×' + v);
-    // 按天趋势：柱子高度分布
-    const trend = document.querySelector('#dailyTrend') || [...document.querySelectorAll('[id*="aily"]')][0];
+    // Token 趋势：柱子高度分布
+    // ⚠ 这里原来看的是 #dailyTrend，那张图已于 2026-10-26 删除
+    //   （它与 #statsTrend 同数据同范围、是后者的严格子集）。
+    //   改看保留下来的 #statsTrend —— 它现在就是"那张 token 趋势图"。
+    const trend = document.querySelector('#statsTrend') || [...document.querySelectorAll('[id*="rend"]')][0];
     if (trend) {
       const rects = [...trend.querySelectorAll('rect')].map(r => Math.round(parseFloat(r.getAttribute('height') || '0')));
       out.trendId = trend.id;

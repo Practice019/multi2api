@@ -144,12 +144,19 @@ function fmtCredit(v) {
     return String(Number(n.toFixed(4)));
   }
 
-function fmtTokens(v) {
-    const n = numNonNeg(v);
-    if (n === null) return null;
-    if (n < 1000) return String(Math.round(n));
-    if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
-    return (n / 1000000).toFixed(1) + 'M';
+function fmtTokens(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '—';
+    const abs = Math.abs(n);
+    const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (const [div, suf] of units) {
+      if (abs >= div) {
+        const v = n / div;
+        // 保留一位小数，但整数就别写成 "10.0M"。
+        const t = Math.round(v * 10) / 10;
+        return (Number.isInteger(t) ? String(t) : t.toFixed(1)) + suf;
+      }
+    }
+    return String(n);
   }
 
 function fmtRate(v) {
@@ -321,8 +328,33 @@ function statsCardsEntries(s) {
       ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
       ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
       // ⚠ F1 修复：不再 `tokens + think_tokens`（那会把推理算两遍）。两张卡各表一件事。
-      ['输出 token', fmtTokens(s.tokens), num(s.tokens) ? '' : 'dim'],
-      ['推理 token', fmtTokens(s.think_tokens), num(s.think_tokens) ? 'dim' : 'dim'],
+      // ⚠ 2026-10-20 加回「总处理量」（2026-10-20 用户授权推翻"只显示输出"的做法）。
+    //
+    //   出处：DSH 的 token-ledger-panel.js
+    //     total = inputTokens + cacheReadTokens + outputTokens   // 缓存写入不重复计入
+    //     lines.push('总处理量 = 输入 + 输出；缓存写入不重复计入')
+    //
+    //   我们的 s.tokens 就是上游 usage 的 total_tokens，而 total_tokens = prompt + completion
+    //   （prompt 已含 cached tokens）⇒ 与 DSH 那个式子**等价**，直接复用不必新算。
+    //
+    // ⚠ 2026-10-20 用户要求：三张卡合并成**一张「总 Token」**，与 new-api 一致。
+    //
+    //   改前：总处理量 / 输出 token / 推理 token 三张并列
+    //   改后：只有「总 Token」
+    //
+    // # 为什么是总 Token
+    //
+    //   new-api 的「Total Tokens」= Σ token_used = Σ(prompt_tokens + completion_tokens)
+    //   （model/log.go:395），它整个面板只有这一个 token 口径。
+    //   用户原话：「前端展示的全部都是总Token，不要输出Token了」。
+    //
+    // # ⚠ 哪些地方**不能**改成总 Token
+    //
+    //   tok/s（生成速度）必须继续用**输出** token —— 那是物理定义
+    //   （"生成 N 个字用了 T 秒"）。改用总 Token 会得出"每秒 40 万 token"这种荒谬读数，
+    //   因为输入里含几万到几十万的缓存上下文。
+    //   所以 fmtTps / tokPerSec 那一族仍然吃 out_tokens，不在本次改动范围。
+    ['总 Token', num(s.tokens) ? fmtTokens(s.tokens) : null, ''],
       ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
       ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
       // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）

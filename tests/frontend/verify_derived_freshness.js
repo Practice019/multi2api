@@ -107,7 +107,34 @@ const SKIP_DIRS = ['.git', 'node_modules', 'docs', '.task', 'bin', 'auths', 'log
 
 let fail = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
-const sha = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+// ⚠⚠ 2026-10-26：比对前**必须归一化行尾** —— 上一版没有，于是这条门禁
+//   在任何干净检出上都是红的（17 项里 14 项假失败）。
+//
+// # 为什么会假失败
+//
+// · 生成器写的是 **LF**；
+// · 本机 `core.autocrlf=true` ⇒ 签出时把已提交的产物变成 **CRLF**；
+// · 而这里原先哈希的是**原始字节** ⇒ 副本里重生成(LF) 与 工作树(CRLF)
+//   必然不等 —— 明明内容一模一样。
+//
+// 实测证据（不是推测）：
+//   busy_feedback_gen.js  工作树 10630 字节 / CRLF 212 行
+//                         HEAD   10418 字节         差 = 212 = CRLF 行数
+//   dashboard_gen.js      工作树 19604 字节 / CRLF 299 行
+//                         HEAD   19305 字节         差 = 299 = CRLF 行数
+//   而 `git diff` 对这两个文件报**无改动**（autocrlf 在读时已归一化）。
+//
+// # 判据本身是什么
+//
+// 这条门禁问的是"产物内容是否等于由当前源码重生成"—— **行尾不属于内容**。
+// git 自己也是这么看的（上面那两个文件 git status 甚至不显示为修改）。
+// 所以归一化不是"放宽"，是把口径对齐到判据本身。
+//
+// ⚠ 反过来要注意：#stats_disk_gen.js / #tdz_probe.html 那类**真内容**差异
+//   依然会被抓到（它们差的不是行尾），这条修改不会让真问题漏过去。
+const sha = (p) => crypto.createHash('sha256')
+  .update(fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n'))
+  .digest('hex');
 
 function tryRobocopy(src, dst) {
   try { execFileSync('robocopy', [src, dst, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/XD'].concat(SKIP_DIRS), { stdio: 'ignore' }); return { ok: true }; }

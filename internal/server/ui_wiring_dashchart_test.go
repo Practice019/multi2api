@@ -20,7 +20,7 @@ import (
 // ⇒ 顶部「性能健康」那排要**照下面抄**：同一套等分网格线、同一套柱子、
 // 同一套折线。做法是把下方两张趋势图里各自内联的绘制代码抽成
 // internal/server/dash-chart.js（由 tools/dash_chart_sync.js 注入 webui.html），
-// 然后三处（顶部健康条 / #cacheTrend / #dailyTrend）都调它。
+// 然后各处（#statsTrend / #cacheTrend / 顶部健康条）都调它。
 //
 // # 为什么这些断言必须是**字符串**断言
 //
@@ -97,18 +97,12 @@ func TestDashChartUsedByBothTrendsAndHealthBar(t *testing.T) {
 		}
 	}
 
-	// ② 下方：按天 Token 趋势（柱状 + 折线）
-	daily := sliceFuncBody(t, ui, "function renderDailyTrendSVG(")
-	if daily == "" {
-		t.Fatal("webui.html 里找不到 renderDailyTrendSVG")
-	}
-	for _, n := range []string{"dcGrid(", "dcRects(", "dcLine(", "dcCursor(", "dcSvg("} {
-		if !strings.Contains(daily, n) {
-			t.Errorf("★ renderDailyTrendSVG 没有调用共享层的 %s —— 它还在自己画一套", n)
-		}
-	}
+	// ⚠ 这里原来还有 ②「按天 Token 趋势」（renderDailyTrendSVG）—— 那张图
+	//   2026-10-26 删掉了（它与 #statsTrend 同数据同范围，是后者的严格子集）。
+	//   所以本测试现在覆盖三处：#statsTrend / #cacheTrend / 健康条，
+	//   恰好是"顶上那张 + 下方两张"，与用户"统一用下面的实现"的意图一致。
 
-	// ③ 顶部：健康条（成功率横条 + 分项条组 + 迷你折线）
+	// ② 顶部：健康条（成功率横条 + 分项条组 + 迷你折线）
 	hb := sliceFuncBody(t, ui, "function renderHealthBar(")
 	if hb == "" {
 		t.Fatal("webui.html 里找不到 renderHealthBar")
@@ -139,11 +133,13 @@ func TestDashChartUsedByBothTrendsAndHealthBar(t *testing.T) {
 //
 // # 为什么单独一条（它此前**不在**上面那条守卫的覆盖范围内）
 //
-// 上面那条查了三处（cacheTrend / dailyTrend / healthBar），**漏了 renderTrendSVG** ——
-// 而那正是用户两次点着看的那张：
+// 上面那条当时查了三处（cacheTrend / dailyTrend / healthBar），**漏了 renderTrendSVG** ——
+// 而那正是用户点着看的那张：
 //
 //	第一次「上面的太简洁了，我希望统一用下面的实现」  → 补了网格线
 //	第二次「上面的没有折线呢」                        → 补了折线（本条就是为它加的）
+//	第三次「每一个柱状图顶部没有显示数值」            → 补了柱顶读数
+//	  （⚠ 第三次之后，dailyTrend 因为与这张完全重复而被删除 ⇒ 见下面那条测试）
 //
 // 一条守卫没覆盖到的地方，缺陷就会反复回到那里 —— 所以先把它纳入覆盖，
 // 再谈补折线。顺序反过来的话，下次还会在同一个地方漏。
@@ -182,21 +178,27 @@ func TestTopTrendChartUsesSharedLayerWithLine(t *testing.T) {
 	}
 }
 
-// TestBothBarChartsLabelEveryBarTop 两张柱状图都必须在**柱顶标数值**。
+// TestBarChartLabelsEveryBarTop 柱状图的柱顶必须**每根都标数值**。
 //
-// # 为什么单独一条（用户两次点着看同一个缺口）
+// # 判据来自用户（2026-10-18 定的口径，2026-10-26 又点了一次）
 //
-// 用户原话：「每一个柱状图顶部没有显示数值 你再对比一下」。
-// 下方 #dailyTrend 一直有柱顶读数，上方 #statsTrend 没有 —— 又是"两处慢慢漂移"。
+//	「所有的柱状图都需要显示数值」
+//	「每一个柱状图顶部没有显示数值 你再对比一下」
+//
+// ⚠ 名字从 TestBothBarChartsLabelEveryBarTop 改成单数：原先要同时钉两张
+//
+//	（#statsTrend 与 #dailyTrend），后者因为与前者完全重复已于 2026-10-26 删除。
+//	⇒ 现在全站只有一张柱状图，判据改成"**每一张**柱状图"而不是"这两张"。
+//	  将来再加柱状图，把它加进下面的 fn 列表 —— 那正是这条测试存在的意义。
 //
 // 判据取的是**读数那段代码的形状**（class="ax" + yAt(...) - 5 + 居中锚点），
 // 不是注释：注释里写着"标数值"、代码里没标的假通过是真实可能发生的
 // （本仓在 dcGrid 那条上已经吃过一次同款）。
 //
-// ⚠ 顺带钉住 PADT=26：那是给读数留的那一行高度。两张图必须同值 ——
+// ⚠ 顺带钉住 PADT=26：那是给读数留的那一行高度。没有它，第一行读数会顶出
 //
-//	不然并排看时可用绘图高度不同，看起来像"上面那张被压扁了"。
-func TestBothBarChartsLabelEveryBarTop(t *testing.T) {
+//	SVG 上边界被裁掉 —— 这类"改了 A 忘了配套的 B"是本仓的常见形态。
+func TestBarChartLabelsEveryBarTop(t *testing.T) {
 	ui := readWebUI(t)
 
 	// barsReportValues 判断一个绘图函数有没有"柱顶读数"。
@@ -207,7 +209,7 @@ func TestBothBarChartsLabelEveryBarTop(t *testing.T) {
 			strings.Contains(body, "text-anchor=\"middle\"")
 	}
 
-	for _, fn := range []string{"function renderTrendSVG(", "function renderDailyTrendSVG("} {
+	for _, fn := range []string{"function renderTrendSVG("} {
 		body := sliceFuncBody(t, ui, fn)
 		if body == "" {
 			t.Fatalf("webui.html 里找不到 %s", fn)
@@ -220,11 +222,11 @@ func TestBothBarChartsLabelEveryBarTop(t *testing.T) {
 
 	// PADT 必须都留出读数那一行的高度（26）。
 	//
-	// ⚠ 两种写法都要认：renderTrendSVG 是"和 W/H/PADL… 挤在一行"的
-	//   「PADT = 26,」，而 renderDailyTrendSVG 是单独一行的「PADT = 26;」。
-	//   第一版只写了带逗号的那种，结果这条断言在**正确的实现**上误报了 ——
-	//   守卫自己也是会错的，所以要按"共同子串"判，不按某一种排版判。
-	for _, fn := range []string{"function renderTrendSVG(", "function renderDailyTrendSVG("} {
+	// ⚠ 认的是**共同子串**「PADT = 26」，不认某一种排版。
+	//   教训：第一版只写了「PADT = 26,」（挤在 W/H/PADL 那一行的写法），
+	//   而当时另一张图写的是单独一行的「PADT = 26;」—— 那条断言于是在
+	//   **正确的实现**上误报了。守卫自己也是会错的：按值判，别按排版判。
+	for _, fn := range []string{"function renderTrendSVG("} {
 		body := sliceFuncBody(t, ui, fn)
 		if !strings.Contains(body, "PADT = 26") {
 			t.Errorf("★ %s 的 PADT 不是 26 —— 那是给柱顶读数留的一行高度；"+
