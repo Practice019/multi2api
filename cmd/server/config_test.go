@@ -898,7 +898,7 @@ func TestPoolHealthCheckDefaults(t *testing.T) {
 // TestPoolReviveProbeDefaults 解封探测配置：默认 24 小时（86400s），0 = 关闭。
 //
 // ⚠ 默认值必须是 24 小时而不是跟着上面那个 600s：两者的合适节奏差一个数量级
-// （冷却是"歇一会儿"、被禁是"等天级恢复"）。这条断言把那个决定钉住 ——
+//（冷却是"歇一会儿"、被禁是"等天级恢复"）。这条断言把那个决定钉住 ——
 // 谁把它改成 600，等于让被禁的号每 10 分钟白打一次上游。
 func TestPoolReviveProbeDefaults(t *testing.T) {
 	dir := t.TempDir()
