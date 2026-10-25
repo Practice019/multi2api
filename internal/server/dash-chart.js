@@ -27,6 +27,7 @@
 //   dcRects(svg, rs, o)  柱子（竖柱与横条共用）
 //   dcLine(svg, pts, o)  折线（可带数据点圆）
 //   dcCursor(svg, id, o) 悬浮参考垂线 + 跟随读数（预置 display:none）
+//   dcBand(svg, id, o)   悬停高亮底带（预置 display:none，与 dcCursor 配套）
 //   dcSvgTag(W, H, parts) / dcSvg(host, W, H, parts)   统一包 <svg viewBox>
 //
 // ⚠ 本文件**不依赖宿主的任何函数**（自带 dcEsc）：否则"抽出来"就成了假共享
@@ -167,6 +168,23 @@ function dcCursor(svg, id, o) {
     '" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>');
   svg.push('<text id="' + id + 'Read" class="ax" x="0" y="' + (o.readY || 12) +
     '" text-anchor="middle" fill="var(--fg)" style="display:none"></text>');
+}
+
+// dcBand 预置"悬停高亮底带"（默认 display:none），与 dcCursor 配套。
+//
+// # 为什么也放进共享层
+//   加上它之后，**仪表盘里所有 SVG 元素的构造都在本文件里**：
+//   网格线 / 刻度 / 柱子 / 折线 / 参考垂线 / 高亮底带 / 外壳。
+//   之前 #statsTrend 那张图自己 push 了一段 <rect>，于是"拼 SVG 元素"
+//   这件事在共享层之外还剩一份 —— 用户的要求是"不要不同的地方不同的实现"，
+//   留一处就等于下次还有人照抄它。
+//
+// id 传前缀：'trend' → #trendHoverBand（沿用 webui.html 里既有的 id）。
+// ⚠ 底带必须**最先 push**（= 最底层），否则会盖在色块上把颜色洗淡 ——
+//   调用方负责顺序，本函数只负责"长什么样"。
+function dcBand(svg, id, o) {
+  svg.push('<rect id="' + id + 'HoverBand" x="0" y="' + dcNum(o.PADT) + '" width="0" height="' +
+    dcNum(o.plotH) + '" fill="var(--fg)" opacity="0.07" style="display:none"/>');
 }
 
 // dcSvgTag 拼出 <svg> 外壳（返回字符串，供 innerHTML 里内联嵌图表用）。
