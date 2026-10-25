@@ -157,17 +157,26 @@ function dcLine(svg, pts, o) {
   }
 }
 
-// dcCursor 预置"悬浮参考垂线 + 跟随读数"（cacheTrend / dailyTrend 同一套）。
+// dcCursor 预置**悬浮参考垂线**（各趋势图同一套）。
 //
 // ⚠ 必须**预置**在 SVG 里（默认 display:none）：渲染函数每次重写 innerHTML，
 //   在事件里现场 append 的元素重绘一次就没了。
-// id 传前缀：'ct' → #ctCursor / #ctRead，'dt' → #dtCursor / #dtRead。
+// id 传前缀：'ct' → #ctCursor，'trend' → #trendCursor。
+//
+// ⚠⚠ 2026-10-26：**读数文本（#..Read）已删除**，因为已经没有调用方要它了 ——
+//   原先它给的是"一行监控台风格"的读数（时间 · 累计 x% · 请求 n · Token m），
+//   而两张图现在都改用共享的**悬浮卡片**（dcTipTag + dcTipHead + dcTipRows）。
+//
+// # 为什么不留着那个参数
+//
+//   留着就等于给下一张图留了一份"旧样式"的样本 —— 抄它的人会做出一张
+//   与其它图**格式不同**的悬浮提示，而那正是用户这次点名的那个问题
+//   （「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」）。
+//   少一个可选项，就少一次漂移的机会。
 function dcCursor(svg, id, o) {
   var y1 = dcNum(o.PADT), y2 = dcNum(o.PADT) + dcNum(o.plotH);
   svg.push('<line id="' + id + 'Cursor" x1="0" y1="' + y1 + '" x2="0" y2="' + y2 +
     '" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>');
-  svg.push('<text id="' + id + 'Read" class="ax" x="0" y="' + (o.readY || 12) +
-    '" text-anchor="middle" fill="var(--fg)" style="display:none"></text>');
 }
 
 // dcBand 预置"悬停高亮底带"（默认 display:none），与 dcCursor 配套。
@@ -222,6 +231,95 @@ function dcPct(v, den) {
   if (d <= 0) return null;
   var r = (dcNum(v) / d) * 100;
   return r < 0 ? 0 : r;
+}
+
+// ── 悬浮卡片（三块：外壳 / 明细行 / 定位）────────────────────────────────
+//
+// # 为什么要抽（用户原话）
+//
+//   「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」
+//
+//   当时 #statsTrend 有一张**富卡片**（时间头 + 合计 + 分模型明细 + 色点），
+//   而 #cacheTrend 只有 dcCursor 生成的**单行 text 读数**。两张图并排看，
+//   一个是卡片、一个是行字 —— 又是「两处慢慢漂移」的同一形态。
+//
+// # 抽的是哪一层
+//
+//   抽**外形**（外壳样式、行的排法、定位算法），**不抽内容**：
+//   各图要显示的字段本来就不同（趋势图是分模型、缓存图是双轴口径），
+//   强行统一字段只会逼出一堆 if。调用方自己拼 innerHTML，用下面三块拼。
+//
+// ⚠ 三块必须**一起**用，否则外形会重新漂移：
+//   只用 dcTipTag 不用 dcTipPlace ⇒ 定位算法又是各写一套。
+
+// dcTipTag 悬浮卡片的**外壳**（一个默认隐藏的绝对定位 div）。
+//
+// ⚠ 必须是**预置在 HTML 里**的（不是事件里现场 append）：渲染函数每次重写
+//   innerHTML，现场 append 的元素重绘一次就没了 —— 与 dcCursor 同一理由。
+function dcTipTag(id) {
+  return '<div id="' + id + '" style="display:none;position:absolute;pointer-events:none;' +
+    'background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;' +
+    'font-size:11px;white-space:nowrap;z-index:5;box-shadow:0 4px 14px var(--shadow);' +
+    'min-width:130px"></div>';
+}
+
+// dcTipHead 卡片的**首行**（时间 + 可选副标题）。
+//
+// ⚠ 抽它的理由：两张图的首行都是「粗体时间」，字号/间距必须一致 ——
+//   那正是「看起来像两个组件」最容易发生的地方。
+function dcTipHead(title, sub) {
+  return '<div style="font-weight:600;margin-bottom:2px">' + dcEsc(title) + '</div>' +
+    (sub ? '<div style="color:var(--dim);margin-bottom:2px">' + sub + '</div>' : '');
+}
+
+// dcTipRows 卡片的**明细行**：色点 + 名字 + 右对齐数值。
+//
+// items = [{color, name, value, dim}]
+//   · color 传 CSS 色值 —— 惯例是**与该行对应的那条线同色**，
+//     这样「卡片里的这一行」与「图上那条线」一眼对得上。
+//   · value 已经是**格式化好的字符串**（各图量纲不同，本函数不管格式）。
+//   · dim=true ⇒ 整行压暗，用于次要口径（如「本小时」对「累计」）。
+//
+// ⚠ 名字要 dcEsc（模型名来自上游，可能带尖括号）。value 由调用方保证安全。
+function dcTipRows(items) {
+  return (items || []).map(function (o) {
+    var muted = o.dim ? 'opacity:.7' : '';
+    var vcolor = o.dim ? 'var(--dim)' : 'var(--fg)';
+    return '<div style="display:flex;align-items:center;gap:5px;' + muted + '">' +
+      '<i style="width:7px;height:7px;border-radius:2px;background:' + (o.color || 'var(--dim)') + ';flex:none"></i>' +
+      '<span style="overflow:hidden;text-overflow:ellipsis;max-width:160px;color:var(--dim)">' + dcEsc(o.name) + '</span>' +
+      '<b style="margin-left:auto;color:' + vcolor + ';padding-left:8px">' + o.value + '</b>' +
+      '</div>';
+  }).join('');
+}
+
+// dcTipPlace 把卡片摆到光标附近（横向跟手 + 纵向优先上方）。
+//
+// 三条约束（都是实拍调出来的，别随手改）：
+//   · 横向 mx+12 跟手，但按**实测** offsetWidth clamp ⇒ 贴右边缘时不翻到屏幕外；
+//   · 纵向优先放光标**上方**（不挡正在看的数据），贴顶时落到下方；
+//   · 最后再 clamp 一次到 rect 内 —— 小图里「上方也放不下、下方也放不下」时
+//     不至于把卡片丢到面板外面。
+//
+// ⚠ offsetWidth/Height 在 display:none 时是 0 ⇒ **先 display:block 再量**，
+//   量不到（首帧）才退回 fallback。顺序反了的话卡片每次按 fallback 定位、会跳一下。
+function dcTipPlace(tip, ev, rect, o) {
+  var opt = o || {};
+  tip.style.display = 'block';
+  var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  var tw = tip.offsetWidth || opt.fallbackW || 150, th = tip.offsetHeight || opt.fallbackH || 90;
+  tip.style.left = Math.min(Math.max(mx + 12, 2), Math.max(2, rect.width - tw - 2)) + 'px';
+  var top = my - th - 10, maxTop = Math.max(2, rect.height - th - 2);
+  tip.style.top = (top >= 2 ? Math.min(top, maxTop) : Math.min(my + 14, maxTop)) + 'px';
+}
+
+// dcTipHide 收起若干卡片/游标（鼠标离开时调）。ids 传 id 或 id 数组。
+function dcTipHide(host, ids) {
+  var list = typeof ids === 'string' ? [ids] : (ids || []);
+  for (var i = 0; i < list.length; i++) {
+    var e = host.querySelector('#' + list[i]);
+    if (e) e.style.display = 'none';
+  }
 }
 
 // dcTier 按百分比分档取色（**与下方图表同一套语义色**）。
