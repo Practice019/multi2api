@@ -835,26 +835,6 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"lobsterai"`
 
-	// Verdent 第十一个上游（verdent.ai）。
-	//
-	// # 与其余上游的关键差别：**没有可自动化的登录协议**
-	//
-	// 它的 access token（JWT）只在桌面端主进程内存里，不落盘、也没有可脚本化的
-	// 登录端点（Cookies / LocalStorage / vault / auth.json 全查过，都是空的）。
-	// 所以本上游**不实现 LoginFlow** —— 那不是漏了，是没有可自动化的面。
-	//
-	// 账号来源是**手工投放**：把 token 写成 auths/verdent/verdent-<uid>.json
-	// （register-machine 那类工具导出的扁平格式也认），再点「重载 auths」。
-	// ⚠ 没有 enabled 字段 —— 本仓约定上游**恒开**（用户明确要求删掉那个开关，
-	// 见 default_on_upstreams_test.go 的注释：留着它会出现"配了 false 但照常跑"
-	// 这种最难查的状态）。段缺席 = 启用。
-	Verdent struct {
-		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/verdent`。
-		AuthDir string `json:"auth_dir"`
-		// PoolAccounts 是否并入核心账号池（默认 true）。
-		PoolAccounts *bool `json:"pool_accounts"`
-	} `json:"verdent"`
-
 	// Qoder 第九/十个上游（阿里系，国际版 + 中国版）。
 	//
 	// 与其它上游同律：**启用是显式的**（qoder.enabled=true），段缺席=不加载。
@@ -1133,11 +1113,6 @@ type Config struct {
 	LobsteraiPortalBase   string `json:"-"`
 	LobsteraiVersionAPI   string `json:"-"`
 	LobsteraiPoolAccounts bool   `json:"-"`
-
-	// Verdent（第十一上游）解析后。
-	VerdentEnabled      bool   `json:"-"`
-	VerdentAuthDir      string `json:"-"`
-	VerdentPoolAccounts bool   `json:"-"`
 	// Qoder（第九/十上游）解析后。
 	QoderEnabled      bool   `json:"-"`
 	QoderCNActive     bool   `json:"-"`
@@ -1281,7 +1256,6 @@ func enableDefaults(c *Config) {
 	c.QoderEnabled = on
 	c.ZCodeEnabled = on
 	c.MiniMaxEnabled = on
-	c.VerdentEnabled = on
 }
 
 // Load 从文件读，再用 WB2A_* env 覆盖。
@@ -1719,18 +1693,6 @@ func (c *Config) normalize() error {
 	c.LobsteraiPortalBase = strings.TrimSpace(c.Lobsterai.PortalBase)
 	c.LobsteraiVersionAPI = strings.TrimSpace(c.Lobsterai.VersionAPI)
 	c.LobsteraiPoolAccounts = c.LobsteraiEnabled && boolOr(c.Lobsterai.PoolAccounts, true)
-
-	// ---- verdent（第十一上游）----
-	// ⚠ 这里**不设** VerdentEnabled —— 上游恒开，它已经在 enableDefaults 里
-	// 被赋成常量 on（见那段注释）。在这里再写一次会让"启用求值只有一处"失效：
-	// 两处写法一旦分叉（一处 true 一处 on），谁是真的就说不清了。
-	c.VerdentAuthDir = strings.TrimSpace(c.Verdent.AuthDir)
-	if c.VerdentAuthDir == "" {
-		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
-		//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
-		c.VerdentAuthDir = filepath.Join(c.AuthsBase, "verdent")
-	}
-	c.VerdentPoolAccounts = c.VerdentEnabled && boolOr(c.Verdent.PoolAccounts, true)
 
 	// ---- qoder（第九、十上游，国际版 + 中国版）----
 	c.QoderEnabled = true
