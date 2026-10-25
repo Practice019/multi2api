@@ -58,7 +58,9 @@ const SERIES = JSON.stringify({
   await sleep(7000);
 
   const probe = `(() => {
-    const ids = ['cards','statsCards','statsCards2','trendView','statsTrend','modelRank','healthBar','statsReport','statsHeat','cacheCards','dailyTrend'];
+    // ⚠ 'dailyTrend' 已于 2026-10-26 从页面删除（它与 #statsTrend 同数据同范围，
+    //   是后者的严格子集 —— 见 webui.html 里那块被替换掉的 HTML 注释）。
+    const ids = ['cards','statsCards','statsCards2','trendView','statsTrend','modelRank','healthBar','statsReport','statsHeat','cacheCards'];
     const rows = ids.map(id => {
       const el = document.getElementById(id);
       if (!el) return { id, ok: false };

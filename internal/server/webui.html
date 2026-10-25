@@ -2911,21 +2911,20 @@ function mpEsc(s) {
       </div>
     </div>
 
-    <!-- 2e) 按天 Token 趋势 · 2026-10-18 照 agent2api 报表页第 9 块加。
-         ⚠ 口径照抄它 `dailyTrendView`（report-charts.ts:1054-1101）：
-           · **竖排柱状图**，柱顶**直接标当天读数**（不是只靠悬停）
-           · ⚠ 标注**三级排法**：横排 → 竖排（rotate -90，列宽 ≥13px 才够）→ 只标峰值
-           · `barW = min(28, step*0.68)` 且下限 1px（极长区间下柱子只有一两像素，不再压窄）
-           · ⚠ **全为 0 ⇒ 不画网格也不画柱子**，只给一句明确说明
-             （它原话："否则整块图空得像渲染失败"）
-         ⚠ 它这块**随"时间范围"变化** ⇒ 我们绑到上面那个趋势范围（24h/7d/30d/365d），
-           切换时两张图一起变（24h 是小时桶，其余是天桶 —— 标题会如实写出来）。 -->
-    <div class="boardsec">
-      <h3>按天 Token 趋势 <span class="dim" id="dailyTrendRange" style="font-weight:400;text-transform:none"></span></h3>
-      <div class="body">
-        <div id="dailyTrend" class="dailytrend"></div>
-      </div>
-    </div>
+    <!-- 2e) 「按天 Token 趋势」那块**已删除**（2026-10-26）。
+         用户对照后问："这个是不是不需要了重复了功能" —— 是。
+
+         # 它是 #statsTrend 的严格子集，证据是数据源与范围变量都相同
+           loadDailyTrend   → admin('/admin/stats/series?range=' + trendRange)
+           loadTrendSeries  → 同一个 URL、同一个 trendRange ⇒ 永远同数据同范围
+         而 #statsTrend 还多出：按模型堆叠配色、图例、分模型悬停浮层、
+         柱状/面积切换、峰值行。所以删掉它**不丢任何信息**。
+
+         # 为什么会变成重复（这轮改造的副作用，值得记一笔）
+           这张图原本是"丰富的那个"，而 #statsTrend 是"简洁的那个"——
+           用户连点三次（太简洁 → 没折线 → 没读数）要求把后者对齐到前者，
+           对齐完之后前者反而成了后者的子集。
+           ⇒ 教训：把 A 对齐到 B 之后要回头看一眼 B 还剩下什么独有价值。 -->
 
     <!-- 3) API 接入信息 -->
     <div class="boardsec">
@@ -12761,29 +12760,22 @@ function renderModelRank(s) {
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // 按天 Token 趋势（竖排柱状）· 照 agent2api 的 dailyTrendView
+  // 「按天 Token 趋势」（loadDailyTrend / renderDailyTrendSVG）**已删除**。
   //
-  // ⚠ 三条照抄它的要点：
-  //   1. **柱顶直接标出当天读数**（不是只靠悬停 —— 它原话："柱顶标出当天的读数"）；
-  //   2. ⚠ **标注三级排法**：横排（相邻不重叠）→ 竖排（`rotate(-90)`，列宽 ≥13px）→
-  //      **只标峰值**（列宽只剩几像素时，任何排法都会糊成一片，索性让峰值一眼可见）；
-  //   3. ⚠ **全为 0 ⇒ 不画网格也不画柱子**，只留一句说明 ——
-  //      它原话："否则整块图空得像渲染失败"。
+  // # 为什么（用户问："这个是不是不需要了重复了功能"）
   //
-  // ⚠ 它这块**随"时间范围"变化** ⇒ 这里读 `trendRange`，与上面那条趋势同步。
-  let dailyTrendSig = '';
-
-  async function loadDailyTrend() {
-    let d;
-    try { d = await admin('/admin/stats/series?range=' + trendRange); }
-    catch { return; }
-    const list = (d && d.series) || [];
-    // ⚠ 签名里**必须带 trendRange**：否则切范围时若总量恰好相同就被判"没变"、不重画。
-    const sig = trendRange + '|' + list.length + '|' + list.reduce((a, p) => a + (p.tokens || 0), 0);
-    if (sig === dailyTrendSig) return;
-    dailyTrendSig = sig;
-    renderDailyTrendSVG(list);
-  }
+  // 它与 #statsTrend 取的是**同一个接口、同一个范围变量**：
+  //     admin('/admin/stats/series?range=' + trendRange)
+  // 所以两张图永远显示同一份数据、同一个时间范围 —— 而 #statsTrend 还多出
+  // 按模型堆叠配色 / 图例 / 分模型悬停浮层 / 柱状-面积切换 / 峰值行。
+  // ⇒ 它是 #statsTrend 的**严格子集**，删掉不丢任何信息。
+  //
+  // ⚠ 但它有两条**判据**值得留在这里（那两条是拿它当"丰富的那一个"抄过来的，
+  //   现在那些写法已经落在 #statsTrend 自己身上）：
+  //   · 柱顶**每根都标读数**（用户 2026-10-18："所有的柱状图都需要显示数值"）
+  //   · **全为 0 ⇒ 不画网格也不画柱子**，只留一句说明
+  //     （原话："否则整块图空得像渲染失败"）—— #statsTrend 里也守着这一条。
+  //   守卫见 ui_wiring_dashchart_test.go 的 TestBothBarChartsLabelEveryBarTop。
 
   // outOf(p) 一个 series 桶的**纯输出** token（Σ by_model_out）。
 //
@@ -12802,132 +12794,20 @@ function outOf(p) {
   //   ⚠ 不要因为它是死代码就删 —— 它记录了 by_model_out 的求和方式。
   return Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0);
 }
-function renderDailyTrendSVG(list) {
-    const host = $('dailyTrend');
-    if (!host) return;
-    const rl = $('dailyTrendRange');
-    // ⚠ 标题如实写出"这是哪个范围 / 什么桶" —— 24h 是小时桶、其余是天桶
-    if (rl) rl.textContent = list.length
-      ? ('· ' + trendRange + '（' + (trendRange === '24h' ? '小时桶' : '天桶') + '）· '
-         + String(list[0].ts || '').slice(0, 10) + ' ~ ' + String(list[list.length - 1].ts || '').slice(0, 10))
-      : '';
-
-    // ⚠ 2026-10-20 改口径：用**纯输出**（Σ by_model_out），不是 p.tokens（total）。
-    //   与热力图同一理由：标题写 "Token 趋势"，用户看的是"每天生成了多少"。
-    //   偏差同热力图：无模型名的行不计入（极少）。
-    const vals = list.map((p) => p.tokens || 0);   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
-    const peak = vals.length ? Math.max(...vals) : 0;
-    // ⚠ 全为 0 ⇒ 不画网格也不画柱（照它那句"否则整块图空得像渲染失败"）
-    if (!list.length || peak <= 0) {
-      host.innerHTML = '<div class="dim" style="font-size:12px">所选范围内暂无 Token 用量</div>';
-      return;
-    }
-
-    const W = 900, H = 200, PADL = 50, PADR = 14, PADB = 26;
-    const n = list.length;
-    const step = (W - PADL - PADR) / n;
-    const fmtT = (v) => v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
-      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
-    // ⚠ 读数文本先定，再决定排法与顶部留白（照它 1082-1090 的顺序：先算文本、再定版面）
-    const texts = vals.map((v) => (v > 0 ? fmtT(v) : ''));
-    const estW = (s) => s.length * 6;                       // ⚠ 粗估宽度（它有自己的 textWidth 估算器）
-    const widest = Math.max(0, ...texts.map(estW));
-    const allFit = widest + 4 <= step;                      // 横排能否放下
-    // ⚠⚠ **按用户要求去掉竖排**（2026-10-18 批注："这个值垂直不好看 希望是水平"）。
-    //   原来这里是三级排法：横排 / **竖排（`rotate(-90)`）** / 只标峰值。
-    //   ⇒ 现在两级，**一律水平**：
-    //     · 放得下（`allFit`）⇒ 每根都标；
-    //     · 放不下 ⇒ **每隔 k 根标一根**（k 由"文本宽 + 缝"除以**真实最小间距**算出）。
-    //   ⚠ 为什么不退回它的第三级「只标峰值」：24 桶只标一根太稀疏，用户要的正是"能读到值"。
-    //     "每隔 k 根"既保住水平、又不会糊 —— 与中间那条命中率趋势的稀疏标注同一手法。
-    //   ⚠ 判定必须用**相邻有值柱的真实最小间距**（老账：按均分 `step` 算会误判 ——
-    //     30 天窗口里只有最后 8 天有量时，均分间距够、真实间距不够）。
-    const idxs = vals.map((v, i) => (v > 0 ? i : -1)).filter((i) => i >= 0);
-    let minGap = Infinity;
-    for (let k = 1; k < idxs.length; k++) minGap = Math.min(minGap, (idxs[k] - idxs[k - 1]) * step);
-    if (!isFinite(minGap)) minGap = step;
-    // ⚠⚠ 柱顶读数**全部标出**（2026-10-18 按用户要求改；原来是"放不下就每隔 k 根标一根"）。
-    //   用户的原话："所有的柱状图都需要显示数值"。
-    //   ⚠ 那些值短（`2.0M` / `178.1k`），24 根柱的间距足够；⚠ 真放不下时下面的
-    //     `textLength`+`font-size` 会兜住（见渲染处），不会再回到稀疏。
-    const mode = 'h';
-
-    // ⚠ 顶部留白：水平读数只需一行的高度
-    const PADT = 26;
-    const plotH = H - PADT - PADB;
-    const yMax = peak * 1.06;                                // ⚠ 顶部留一点空，柱子不顶格
-    const yAt = (v) => PADT + plotH - (plotH * v) / yMax;
-    const barW = Math.max(1, Math.min(28, step * 0.68));     // ⚠ 照它：下限 1px
-
-    const svg = [];
-    // 网格 + 左轴刻度（5 等分）
-    // ⚠⚠ 2026-10-25：与上面那张双轴趋势**同一份实现**（dcGrid）。原来这里是
-    //   第二份内联的 for 循环 —— 用户要求「抽共享一起用」，于是并入共享层。
-    dcGrid(svg, { W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH, max: yMax, fmt: fmtT });
-    // 柱子 + 读数
-    const cx = (i) => PADL + step * i + step / 2;
-    const peakIdx = vals.indexOf(peak);
-    // ⚠⚠ 2026-10-25：柱子改走共享层（dcRects）。原来这里是第三份"拼 <rect>"的代码 ——
-    //   顶部成功率条要画横条，正好同一件事，于是抽成"给矩形数组"这一层。
-    //   ⚠ 高度 <= 0 的柱由 dcRects 统一跳过（与原来 `if (v <= 0) continue` 等价）。
-    dcRects(svg, vals.map((v, i) => ({
-      x: cx(i) - barW / 2, y: yAt(v), w: barW, h: PADT + plotH - yAt(v),
-    })), { fill: 'var(--acc)', rx: Math.min(2, barW / 2) });
-    // 读数（⚠ 每根柱都标 —— 用户要求；值短（2.0M/178.1k），24 根柱排得下）
-    for (let i = 0; i < n; i++) {
-      const t = texts[i];
-      if (!t || vals[i] <= 0) continue;
-      // 峰值那根用强调色，其余常规色 —— 一眼仍能看出最高的那根。
-      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(yAt(vals[i]) - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
-    }
-    // ⚠ 2026-10-20：在柱状之上叠加一条**折线**（用户明确要"折线图"）。
-    // # 为什么是叠加而不是切换
-    //   柱状给"每天多少"的绝对量（能比高低），折线给"走势"（能看出涨跌趋势）。
-    //   两者看的是同一件事的不同侧面，**同时显示比让用户切来切去更好** ——
-    //   而且不引入视图状态，少一处可能出错的地方。
-    // # 坐标复用已有变量，不自己算
-    //   cx(i) 与 yAt(v) 就是柱子的中心线与顶点，折线必须过它们，
-    //   否则线和柱会对不上（看起来像两个数据源）。
-    // ⚠ 只用有值的点连（v<=0 跳过）：把 0 也连进去会在"没数据的日子"画出
-    //   一条贴底的折线，让人误以为那天几乎没生成 —— 而真相是没有记录。
-    // ⚠⚠ 2026-10-25：折线 + 数据点圆改走共享层（dcLine，与上面双轴趋势同一条实现）。
-    //   ⚠ 只连有值的点（vals[i] > 0）：把 0 也连进去会在"没数据的日子"画出
-    //     一条贴底的折线，让人误以为那天几乎没生成 —— 而真相是没有记录。
-    dcLine(svg, vals.map((v, i) => (v > 0 ? [cx(i), yAt(v)] : null)).filter(Boolean),
-      { stroke: 'var(--acc)', width: 1.8, opacity: 0.85, dots: true });
-    // x 轴：首/中/末（⚠ 桶多时全标会糊）
-    [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
-      const p = list[i]; if (!p) return;
-      const lbl = trendRange === '24h' ? String(p.ts || '').slice(11, 16) : String(p.ts || '').slice(5, 10);
-      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lbl)}</text>`);
-    });
-    // ⚠⚠ 同样的悬浮参考线 + 跟随读数（与上面那张双轴趋势同一套做法 —— 用户要求统一）。
-    dcCursor(svg, 'dt', { PADT: PADT, plotH: plotH });
-    dcSvg(host, W, H, svg);
-
-    if (!host._dtBound) {
-      host._dtBound = true;
-      host.addEventListener('mousemove', (ev) => {
-        const el = host.querySelector('svg'), cur = host.querySelector('#dtCursor'), rd = host.querySelector('#dtRead');
-        if (!el || !cur || !rd) return;
-        const rect = el.getBoundingClientRect();
-        const xv = (ev.clientX - rect.left) / rect.width * W;
-        let best = -1, bd = 1e9;
-        for (let i = 0; i < n; i++) { const d = Math.abs(cx(i) - xv); if (d < bd) { bd = d; best = i; } }
-        if (best < 0) return;
-        const p = list[best] || {};
-        const lbl2 = trendRange === '24h' ? String(p.ts || '').slice(11, 16) : String(p.ts || '').slice(5, 10);
-        cur.setAttribute('x1', cx(best).toFixed(1)); cur.setAttribute('x2', cx(best).toFixed(1));
-        cur.style.display = 'block';
-        rd.setAttribute('x', Math.min(Math.max(cx(best), 70), W - 70).toFixed(1));
-        rd.textContent = lbl2 + '  · 请求 ' + (p.total || 0) + ' · ' + fmtTokensPlain(p.tokens || 0) + ' token';
-        rd.style.display = 'block';
-      });
-      host.addEventListener('mouseleave', () => {
-        for (const id of ['#dtCursor', '#dtRead']) { const e = host.querySelector(id); if (e) e.style.display = 'none'; }
-      });
-    }
-  }
+// renderDailyTrendSVG（「按天 Token 趋势」那张图）**已于 2026-10-26 删除**。
+//
+// 删它的理由写在 loadDailyTrend 原处那段注释里（它是 #statsTrend 的严格子集：
+// 同一个 /admin/stats/series?range=<trendRange>、同一个范围变量，而 #statsTrend
+// 还多出按模型堆叠 / 图例 / 分模型浮层 / 柱状-面积切换 / 峰值行）。
+//
+// ⚠ 它带走的两个**行为**没有丢，都落在 #statsTrend 里了：
+//   · 柱顶每根都标读数（用户 2026-10-18 的判据）
+//   · 全为 0 ⇒ 不画网格也不画柱子，只留一句说明
+//   守卫：ui_wiring_dashchart_test.go 的 TestBothBarChartsLabelEveryBarTop 与
+//         TestDashChartEmptyDataDoesNotCrash。
+//
+// ⚠ 别再"照它对另一张图"——它对标的那张（agent2api 的 dailyTrendView）已经并完了。
+//   新的图表判据请写进 ui_wiring_dashchart_test.go 的字段表，而不是散落的注释。
 
   // ──────────────────────────────────────────────────────────────────────
   // DONUT_COLORS 环的色板（⚠ 模块级：`fillDonuts` 与 `renderDonutInto` 都要用）。
@@ -14401,9 +14281,9 @@ let multCatalogFailed = false;
       }
       trendSeries._last = '';
       try { loadTrendSeries(); } catch { /* 趋势非关键 */ }
-      // ⚠ 按天 Token 趋势也跟着范围走（它同样读 `trendRange`）。
-      // 它内部签名含 trendRange ⇒ 切范围时自动判为"变了"、重画，不需要在这里清什么。
-      try { loadDailyTrend(); } catch { /* 按天趋势非关键 */ }
+      // ⚠ 这里**曾经**还要刷「按天 Token 趋势」—— 那张图已于 2026-10-26 删除
+      //（它是 #statsTrend 的严格子集，见 loadDailyTrend 原处的说明）。
+      // 现在切范围只需要刷上面那一张，页面少一次重复的 /admin/stats/series 请求。
       // ⚠ 热力图**不在这里**刷新：它读的是 `range=365d`，与上面的 24h/7d 无关。
       //（我最初插在这里 —— 结果它只在"点按钮"时才跑，页面加载时从来不动、格子是空的。
       //  ⚠ 教训：本文件里有**两处** `loadTrendSeries()`，注释只差一个"图"字，anchor 必须照抄全。）
@@ -14957,8 +14837,8 @@ let multCatalogFailed = false;
     // 健康条的迷你折线（近 24 小时成功率）—— 同一个端点、同样 range=24h，
     // ⚠ 但它有自己的签名与固定的 24h 口径（不跟 trendRange 走），见 loadHealthSeries。
     try { loadHealthSeries(); } catch { /* 成功率折线非关键 */ }
-    // ⚠ 按天 Token 趋势（它第 9 块）也在这里首次加载 —— 它读 `trendRange`，与上面那条同步。
-    try { loadDailyTrend(); } catch { /* 按天趋势非关键 */ }
+    // ⚠ 「按天 Token 趋势」（原第 9 块）**已删除** —— 它与 #statsTrend 同数据同范围，
+    //   是后者的严格子集。所以这里不再有第二次 /admin/stats/series 请求。
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
     try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();

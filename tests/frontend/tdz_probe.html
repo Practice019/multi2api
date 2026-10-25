@@ -1598,6 +1598,77 @@ let loginProvider = '';
     }).join('');
   }
 
+  // renderJobCoverage 渲染任务覆盖检查表。
+  //
+  // 数据来自 manifest.job_coverage（后端 internal/admin/jobcover.go 算好）。
+  // **前端不做判据** —— 「有没有能力」是编译期事实（能力位 / 接口实现），
+  // 前端拿不到；在这里重算一份必然与后端漂移。
+  //
+  // # 三态而不是两态
+  //
+  //   有能力 + 已注册  → ✓ 已注册（绿）
+  //   有能力 + 未注册  → ✗ 未注册（红，这是缺口）
+  //   本来就没能力     → — 不适用（灰）
+  //
+  // 只做两态（注册了 / 没注册）会让绝大多数本来没有签到能力的上游全被标红，
+  // 真正的缺口反而被噪声埋掉 —— 那比不做这个功能更糟。
+  function renderJobCoverage() {
+    const host = $('jobcovrows');
+    if (!host) return;
+    const meta = $('jobCoverMeta');
+    if (!MANIFEST.loaded) {
+      host.innerHTML = '<tr><td colspan="4" class="dim" style="padding:12px 16px">渲染契约未加载：' + esc(manifestError || '未知原因') + '</td></tr>';
+      if (meta) meta.textContent = '';
+      return;
+    }
+    const list = (MANIFEST.job_coverage || []).filter(c => c && typeof c === 'object');
+    if (!list.length) {
+      host.innerHTML = '<tr><td colspan="4" class="dim" style="padding:12px 16px">没有上游自报任务能力</td></tr>';
+      if (meta) meta.textContent = '';
+      return;
+    }
+    // 稳定排序：缺口排最前（用户最需要看的），其余按上游名。
+    // 不排序会让行顺序随后端 map 遍历跳动。
+    const gaps = c => (c.missing_checkin ? 1 : 0) + (c.missing_refresh ? 1 : 0);
+    const sorted = list.slice().sort((a, b) => {
+      const ga = gaps(a), gb = gaps(b);
+      if (ga !== gb) return gb - ga;
+      const pa = a.provider || '', pb = b.provider || '';
+      return pa < pb ? -1 : pa > pb ? 1 : 0;
+    });
+    // 缺口总数进标题 —— 一进这个页就要能看见「有几个要处理」。
+    const totalGaps = sorted.reduce((n, c) => n + gaps(c), 0);
+    if (meta) {
+      meta.textContent = totalGaps
+        ? '（' + totalGaps + ' 处缺口）'
+        : '（无缺口）';
+      meta.style.color = totalGaps ? 'var(--warn)' : '';
+    }
+    // cell 三态渲染。can=有能力吗 has=注册了吗 kind='签到'/'续期'（写进提示语）。
+    const cell = (can, has, kind) => {
+      if (!can) return '<td class="dim">— 不适用</td>';
+      if (has) return '<td><span class="badge">✓ 已注册</span></td>';
+      return '<td><span class="badge badge--hot" title="该上游有' + kind + '能力，但没注册定时任务 —— '
+        + '手动按钮能用，却永远不会自动跑">✗ 未注册</span></td>';
+    };
+    host.innerHTML = sorted.map(c => {
+      const id = c.provider || '';
+      // 说明列：只对缺口给「怎么办」，正常行留空 —— 每行都写一句会把表撑满噪声。
+      const hints = [];
+      if (c.missing_checkin) hints.push('补实现 <span class="mono">gateway.JobExt.Jobs()</span> 并注册 <span class="mono">' + esc(id) + '-checkin</span>');
+      if (c.missing_refresh) hints.push('补实现 <span class="mono">gateway.JobExt.Jobs()</span> 并注册 <span class="mono">' + esc(id) + '-refresh</span>');
+      const note = hints.length
+        ? '<span class="err">' + hints.join('；') + '</span>'
+        : (c.can_checkin || c.can_refresh ? '<span class="dim">正常</span>' : '<span class="dim">该上游没有这两类能力</span>');
+      return '<tr>'
+        + '<td class="mono">' + esc(id) + '</td>'
+        + cell(c.can_checkin, c.has_checkin, '签到')
+        + cell(c.can_refresh, c.has_refresh, '续期')
+        + '<td>' + note + '</td>'
+        + '</tr>';
+    }).join('');
+  }
+
   // renderAccounts 渲染账号表。
   // accountPlaceholder 账号池的整块占位（加载中 / 出错 / 无上游）。
   //
@@ -6155,6 +6226,10 @@ let loginProvider = '';
     ['setCheckinLogDays', 'checkin_log_keep_days', 'int'],
     ['setReqLogDays', 'request_log_keep_days', 'int'],
     ['setUpTimeout', 'upstream_timeout_seconds', 'int'],
+    // 账号解封探测（天级）。⚠ 加这一行**同时**要在后端补三处，缺一处就是
+    // "页面能填、保存静默丢弃"：admin.Settings 的字段、settings_store 的
+    // parse/persist 清单、Pool 结构体上的 json tag。
+    ['setReviveHours', 'pool_revive_probe_hours', 'int'],
   ];
   let savedSettings = null;
 
@@ -6760,7 +6835,21 @@ let loginProvider = '';
     renderAPIKeys(list);
   }
 
+  // settingsSaving 保存请求在途。
+  //
+  // # 为什么需要它（同一条报障的另一半）
+  //
+  // 点「保存设置」时若焦点还在某个数字框里，浏览器会先给那个框派发 `change`
+  // （blur 提交），再派发按钮的 `click`。这条 change 会走 `#content` 的委托
+  // ⇒ `markDirty(true)`。正常时序下它发生在 PUT 之前、随后被 `fillSettings`
+  // 清掉；但只要有任何一次事件落在 PUT 返回**之后**（慢请求、或用户在等待期间
+  // 又碰了一下控件），顶部就会重新挂上「有未保存的修改」—— 而那一刻服务端
+  // 其实已经存好了，用户看到的是一个**说反话**的提示。
+  // ⇒ 保存在途期间一律不标脏；收尾时由 fillSettings 统一清一次。
+  let settingsSaving = false;
+
   function markDirty(on) {
+    if (on && settingsSaving) return;   // 保存途中不标脏（见 settingsSaving）
     $('settingsDirty').textContent = on ? '（有未保存的修改）' : '';
     $('settingsDirty').style.color = on ? 'var(--warn)' : '';
   }
@@ -6780,15 +6869,19 @@ let loginProvider = '';
     // body 里不再有这两个键，原来的"时点不能为空"校验随之删除。
     const btn = $('btnSettingsSave');
     btn.disabled = true;
+    settingsSaving = true;
     try {
       const r = await admin('/admin/settings', { method: 'PUT', body: JSON.stringify(body) });
+      // fillSettings 末尾会 markDirty(false) —— 保存成功 = 界面与磁盘一致 = 不脏。
       fillSettings(r.settings, r);
       const nr = (r.need_restart || []).length;
       toast(`设置已保存并写入 config.json：${(r.applied || []).length} 项立即生效`
         + (nr ? `，另有 ${nr} 项需重启网关才生效` : ''), false);
     } catch (e) {
       toast('保存失败：' + e.message, true);
+      // 保存失败**保持脏**：界面上的值确实还没落盘，这时候清掉提示才是骗人。
     } finally {
+      settingsSaving = false;
       btn.disabled = false;
     }
   }
@@ -8307,7 +8400,23 @@ function renderModelRank(s) {
   //     首字另有 TTFB 卡，两个数各表一件事，不要混。
   //   · 吞吐   = tokens /（全部请求耗时之和）。后端只给 avg_total_ms，
   //     所以用 avg × 条数近似 —— 这是**近似**，文案写"吞吐"不写"精确"。
-  //   · 每模型成功率 = by_model_detail[m].ok / .calls，按请求数取前 5（模型一多会撑成两行）。
+  //   · 每模型成功率 = by_model_detail[m].ok / .req，按请求数取前 5。
+  //
+  // # ⚠⚠ 2026-10-25 图形化（用户原话）
+  //
+  //   「上面的表格看起来很简单」
+  //   「下面的实现可以抽共享一起用」
+  //   「我喜欢下面的表格柱状图 折线图还有等分线等等」
+  //
+  // ⇒ 这一条**照下面抄**，不是发明新样式：
+  //   · 成功率 → 横向条形 + 0/25/50/75/100% 等分网格线（dcGridCols，与 #cacheTrend 同段数同配色）；
+  //   · 每模型成功率 → 同一套条形组，带百分比标签、按高低分档配色（dcTier）；
+  //   · 近 24 小时成功率 → 迷你折线（dcLine，数据来自 series 桶的 ok/total）；
+  //   · 网格线 / 柱子 / 折线 / 外壳全部来自共享层 dash-chart.js —— 与下方两张趋势图
+  //     **同一份实现**，改一处三处一起变（这正是用户要的"抽共享"）。
+  //
+  // ⚠ 没有趋势数据（series 还没回来 / 全 0 请求）时**不画空折线**，只在 title 里说明 ——
+  //   与 cacheTrend 第 5 条同一立场：画一条贴底的线会被读成"成功率就是 0"。
   function renderHealthBar(s) {
     const el = $('healthBar');
     if (!el) { return; }
@@ -8325,27 +8434,114 @@ function renderModelRank(s) {
     const tps = (avgMs && total && toks !== null && avgMs > 0)
       ? toks / ((avgMs * total) / 1000) : null;
     const parts = ['<span class="hb-title">性能健康</span>'];
-    parts.push(`<span class="hb-item">成功率 <b>${rate === null ? '—' : rate.toFixed(2) + '%'}</b></span>`);
+    // 成功率：**条形**（不是纯文字）。旁边仍保留精确读数 —— 条给"一眼什么水平"，
+    // 数字给"到底多少"，两者不互相替代。
+    parts.push(`<span class="hb-item hb-rate" title="成功 / 总请求 · 条长 = 成功率 · 底色等分线为 0/25/50/75/100%">`
+      + `<span class="hb-k">成功率</span>`
+      + `<span class="hb-meter">${hbMeter(rate)}</span>`
+      + `<b style="color:${dcTier(rate)}">${rate === null ? '—' : rate.toFixed(2) + '%'}</b></span>`);
     parts.push(`<span class="hb-item">平均延迟 <b>${avgMs === null ? '—' : (avgMs / 1000).toFixed(2) + 's'}</b></span>`);
     parts.push(`<span class="hb-item">吞吐 <b>${tps === null ? '—' : fmtTokens(Math.round(tps)) + ' t/s'}</b></span>`);
+    // 近 24 小时成功率迷你折线（与下面两张趋势图同一个数据源、同一套绘制函数）
+    const trend = healthTrend();
+    if (trend.length >= 2) {
+      const first = trend[0], last = trend[trend.length - 1];
+      parts.push(`<span class="hb-item hb-sparkitem" title="近 24 小时逐桶成功率（首 ${first.v.toFixed(1)}% → 末 ${last.v.toFixed(1)}%）">`
+        + `<span class="hb-k">24h</span>`
+        + `<span class="hb-spark">${hbSpark(trend)}</span>`
+        + `<b style="color:${dcTier(last.v)}">${last.v.toFixed(1)}%</b></span>`);
+    }
     const detail = s.by_model_detail || {};
     const rows = Object.keys(detail).map(k => {
       const d = detail[k] || {};
       // ⚠ 同样是 `req` 不是 `calls`（见 renderModelRank 里的同一条注释）
       const c = num(d.req) || 0;
       const o = num(d.ok) || 0;
-      return { model: k, calls: c, rate: c ? (o / c * 100) : null };
+      return { model: k, calls: c, rate: dcPct(o, c) };
     }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 5);
-    rows.forEach(r => {
-      const col = r.rate === null ? 'var(--dim)'
-        : r.rate >= 95 ? 'var(--ok)' : r.rate >= 80 ? 'var(--warn)' : 'var(--err)';
-      const txt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
-      parts.push(`<span class="hb-chip" title="${esc(r.model)} · ${r.calls} 次 · ${txt}">`
-        + `<span class="hb-dot" style="background:${col}"></span>`
-        + `<span style="overflow:hidden;text-overflow:ellipsis">${esc(r.model)}</span>`
-        + `<b style="color:${col}">${txt}</b></span>`);
-    });
+    // 分项成功率：条形组（每条带百分比标签、按高低分档配色），底下垫同一套等分网格。
+    if (rows.length) {
+      parts.push(`<span class="hb-models">` + rows.map(r => {
+        const txt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+        const col = dcTier(r.rate);
+        return `<span class="hb-row" title="${esc(r.model)} · ${r.calls} 次 · 成功率 ${txt}">`
+          + `<span class="hb-mname mono">${esc(r.model)}</span>`
+          + `<span class="hb-meter">${hbMeter(r.rate)}</span>`
+          + `<span class="hb-mval" style="color:${col}">${txt}</span></span>`;
+      }).join('')
+        + `<span class="hb-row hb-axisrow"><span class="hb-mname"></span>`
+        + `<span class="hb-axis">${hbAxis()}</span><span class="hb-mval"></span></span>`
+        + `</span>`);
+    }
     el.innerHTML = parts.join('');
+  }
+
+  // hbAxis 0/25/50/75/100% 的刻度文字（**横向条形的等分线**）
+  //
+  // ⚠ 为什么刻度用 HTML 而不是 SVG：网格线由 dcGridCols 画在 SVG 里，而那个 SVG
+  //   外壳带 preserveAspectRatio="none"（横向拉伸填满）—— 文字进去会被拉成变形字。
+  //   这里用绝对定位的 left:% 与之对齐（同一套 (100*i/segs) 百分比）。
+  // ⚠ 段数取共享层的 DC_SEGS，不写字面量 4：改共享层时刻度自动跟着变。
+  function hbAxis() {
+    const out = [];
+    for (let i = 0; i <= DC_SEGS; i++) {
+      out.push(`<i style="left:${(100 * i / DC_SEGS).toFixed(1)}%">${Math.round(100 * i / DC_SEGS)}%</i>`);
+    }
+    return out.join('');
+  }
+
+  // hbMeter 一根横向条形（成功率 / 分项成功率共用）。
+  //
+  // ⚠ 网格线 + 柱子都来自共享层：dcGridCols 画 0/25/50/75/100% 五条竖线，
+  //   dcRects 画那根条 —— 与下方 #cacheTrend 的等分线是**同一个函数**。
+  // ⚠ rate 为 null（无请求）⇒ **不画条**（但网格线照画）：那格的读数是 `—`，
+  //   与"成功率 0%"必须能分开 —— 0% 画出来的是一根长度 0 的条 + 红色读数，
+  //   null 连条都没有。
+  // ⚠ 百分比 > 100 时**读数照实显示**（与 cacheTrend 的"不夹取值、如实展示"一致），
+  //   只有**条的几何长度**夹到 100（否则会画到 SVG 视口外，反而看不出"超了"）。
+  function hbMeter(rate) {
+    const W = 100, H = 10, PADT = 1, plotH = H - 2;
+    const svg = [];
+    dcGridCols(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, segs: DC_SEGS });
+    if (rate !== null) {
+      const w = Math.max(0, Math.min(100, rate));
+      dcRects(svg, [{ x: 0, y: PADT, w: (W * w) / 100, h: plotH }], { fill: dcTier(rate), rx: 2 });
+    }
+    return dcSvgTag(W, H, svg);
+  }
+
+  // hbSpark 近 24 小时成功率的迷你折线（**折线图**，与下方两张趋势图同一个 dcLine）。
+  //
+  // ⚠ 纵轴固定 0~100%：这是比率，自带自然上下界；按峰值自适应会让"95% 和 97%"
+  //   的差异被放大成一条剧烈起伏的线，读起来像"成功率在崩"。
+  // ⚠ 网格线只画 0 / 50 / 100 三条（segs:2）—— 30px 高的迷你图里 5 条线会糊成一片。
+  function hbSpark(rows) {
+    const W = 150, H = 30, PADT = 3, PADB = 3, plotH = H - PADT - PADB;
+    const n = rows.length;
+    const svg = [];
+    dcGrid(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, max: 100, segs: 2 });
+    const xAt = (i) => (n > 1 ? (W * i) / (n - 1) : W / 2);
+    const yAt = (v) => PADT + plotH - (plotH * Math.max(0, Math.min(100, v))) / 100;
+    dcLine(svg, rows.map((r, i) => [xAt(i), yAt(r.v)]), { stroke: DC_RATE_COLOR, width: 1.4, dots: n <= 12 });
+    return dcSvgTag(W, H, svg);
+  }
+
+  // healthTrend 近 24 小时的**逐桶成功率**（供健康条画迷你折线）。
+  //
+  // 数据来自 `window._healthSeries`（由 loadHealthSeries 从 /admin/stats/series 填），
+  // ⚠ 与下方两张趋势图**同一个端点**，但**不复用它们的变量** —— 那两张图各自带
+  //   digest 守卫与「只画当前 trendRange」的语义，健康条要的是**固定的近 24 小时**
+  //   （用户看的是"现在健不健康"，不该跟着趋势范围切换而变）。
+  // ⚠ 分母为 0 的桶**跳过**（不是按 0% 计）：那小时没请求，画成 0% 等于说"全失败"。
+  function healthTrend() {
+    const list = window._healthSeries || [];
+    const out = [];
+    for (const p of list) {
+      const v = dcPct(p && p.ok, p && p.total);
+      if (v === null) continue;
+      out.push({ v: v });
+    }
+    return out;
   }
 
   // ---- 概览卡的**唯一定位入口**（2026-10-20 抽，防回归）----
@@ -8858,6 +9054,32 @@ function renderModelRank(s) {
   }
 
   // ──────────────────────────────────────────────────────────────────────
+  // 近 24 小时成功率（健康条的迷你折线数据源）
+  //
+  // ⚠ 为什么单独拉一次 series，而不是复用上面/下面那两张趋势图的结果：
+  //   它们各自带 digest 守卫、而且 `dailyTrend` 跟着 `trendRange` 变（24h/7d/30d/365d）——
+  //   健康条要的是**固定的近 24 小时**（"此刻健不健康"），不能跟着用户切范围而变。
+  //   代价是多一次 /admin/stats/series?range=24h 请求 —— 与 cacheTrend 完全同参，
+  //   浏览器/HTTP 层会复用连接；换来的是两条曲线语义各自独立、不会互相污染。
+  //
+  // ⚠ 有签名守卫：值没变就不重画（30s 轮询不会把这条折线抖一遍）。
+  let healthSeriesSig = '';
+
+  async function loadHealthSeries() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=24h'); }
+    catch { return; }   // 非关键：拿不到就保持上一份（首次则没有折线）
+    const list = (d && d.series) || [];
+    const sig = list.length + '|' + list.reduce((a, p) => a + (p.ok || 0) + (p.total || 0), 0);
+    if (sig === healthSeriesSig) return;
+    healthSeriesSig = sig;
+    window._healthSeries = list;
+    // ⚠ 用 `window._statsCache` 重画：它由 renderStats 写入，是**同一份 /admin/stats 响应**。
+    //   拿不到（stats 还没回来）就什么都不做 —— 等 renderStats 那一路带着 s 调过来。
+    try { renderHealthBar(window._statsCache); } catch (e) { console.error('renderHealthBar 失败:', e && e.message); }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
   // 近 24 小时缓存命中率趋势（双轴）· 照 agent2api 的 cacheTrendView
   //
   // ⚠ 五条口径照抄它（见 report-charts.ts:862-918 的注释与 report-page.tsx 的 TIP）：
@@ -8976,22 +9198,25 @@ function renderModelRank(s) {
     //   两条线共用同一批横线，若刻度都是灰的，人眼会把"橙色 Token 线爬到 75% 的高度"
     //   读成"**命中率 75%**" —— 而真实情况可能完全相反（实测命中率全 0、Token 有量）。
     //   染色后：左边一排蓝 % 归命中率线、右边一排琥珀数值归 Token 线，一眼分得清。
-    for (let i = 0; i <= 4; i++) {
-      const y = PADT + (plotH * i) / 4;
-      svg.push(`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W - PADR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`);
-      const rv = rateMax * (1 - i / 4);
-      svg.push(`<text class="ax" x="${PADL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end" fill="#58a6ff">${(rv * 100).toFixed(0)}%</text>`);
-      if (hasTokens) {
-        svg.push(`<text class="ax" x="${W - PADR + 6}" y="${(y + 3).toFixed(1)}" fill="var(--warn)">${fmtT(tokenMax * (1 - i / 4))}</text>`);
-      }
-    }
+    //
+    // ⚠⚠ 2026-10-25：这 5 条等分线 + 双轴刻度**已抽到共享层**（dcGrid）。
+    //   抽的理由就是用户那句「下面的实现可以抽共享一起用」—— 顶部成功率条要的
+    //   正是这一模一样的 0/25/50/75/100% 网格。段数/配色/画法一个字没改，
+    //   只是从"在这里内联 for 循环"变成"调一次 dcGrid"。
+    dcGrid(svg, {
+      W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH,
+      max: rateMax,
+      fmt: (v) => (v * 100).toFixed(0) + '%',
+      fill: DC_RATE_COLOR,
+      // 右侧 Token 轴：只在真的有量时给（全 0 时连刻度都不画 —— 见上面第 5 条）
+      rightMax: tokenMax,
+      rightFmt: hasTokens ? fmtT : null,
+    });
     // ⚠ 命中率折线（蓝）—— 24 个整点全画（无请求的按 0% 落到底部，但它不写读数）
-    const ratePath = rows.map((r, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)},${yRate(r.rate).toFixed(1)}`).join(' ');
-    svg.push(`<path d="${ratePath}" fill="none" stroke="#58a6ff" stroke-width="1.6"/>`);
+    dcLine(svg, rows.map((r, i) => [xAt(i), yRate(r.rate)]), { stroke: DC_RATE_COLOR, width: 1.6 });
     // ⚠ Token 折线（琥珀）—— 只在真的有量时画
     if (hasTokens) {
-      const tokPath = rows.map((r, i) => `${i ? 'L' : 'M'}${xAt(i).toFixed(1)},${yTok(r.tokens).toFixed(1)}`).join(' ');
-      svg.push(`<path d="${tokPath}" fill="none" stroke="var(--warn)" stroke-width="1.4" opacity="0.9"/>`);
+      dcLine(svg, rows.map((r, i) => [xAt(i), yTok(r.tokens)]), { stroke: 'var(--warn)', width: 1.4, opacity: 0.9 });
     }
     // ⚠ **读数只标在有请求的整点**（它那句"无请求的整点不标注"）+ 每 4 个整点标一个
     //   （24 个全标会糊成一片 —— 照它"标注会互相避让：放不下就整条跳过"的取舍）
@@ -9010,9 +9235,8 @@ function renderModelRank(s) {
     //   但那条只有高亮点；用户要的是**竖线可以对齐参考**。
     // ⚠ 线与读数都**预置**在 SVG 里（默认 `display:none`）—— 本函数每次重写 `innerHTML`，
     //   若在事件里现场 append，重绘一次就没了。
-    svg.push(`<line id="ctCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>`);
-    svg.push(`<text id="ctRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
-    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
+    dcCursor(svg, 'ct', { PADT: PADT, plotH: plotH });
+    dcSvg(host, W, H, svg);
 
     // ⚠ 2026-10-20 修（第二个隐患）：监听器用 host._ctBound **只绑一次**，
     //   所以它闭包捕获的 rows / n / xAt 永远是**第一次渲染**那一份 ——
@@ -9052,29 +9276,22 @@ function renderModelRank(s) {
   }
 
   // ──────────────────────────────────────────────────────────────────────
-  // 按天 Token 趋势（竖排柱状）· 照 agent2api 的 dailyTrendView
+  // 「按天 Token 趋势」（loadDailyTrend / renderDailyTrendSVG）**已删除**。
   //
-  // ⚠ 三条照抄它的要点：
-  //   1. **柱顶直接标出当天读数**（不是只靠悬停 —— 它原话："柱顶标出当天的读数"）；
-  //   2. ⚠ **标注三级排法**：横排（相邻不重叠）→ 竖排（`rotate(-90)`，列宽 ≥13px）→
-  //      **只标峰值**（列宽只剩几像素时，任何排法都会糊成一片，索性让峰值一眼可见）；
-  //   3. ⚠ **全为 0 ⇒ 不画网格也不画柱子**，只留一句说明 ——
-  //      它原话："否则整块图空得像渲染失败"。
+  // # 为什么（用户问："这个是不是不需要了重复了功能"）
   //
-  // ⚠ 它这块**随"时间范围"变化** ⇒ 这里读 `trendRange`，与上面那条趋势同步。
-  let dailyTrendSig = '';
-
-  async function loadDailyTrend() {
-    let d;
-    try { d = await admin('/admin/stats/series?range=' + trendRange); }
-    catch { return; }
-    const list = (d && d.series) || [];
-    // ⚠ 签名里**必须带 trendRange**：否则切范围时若总量恰好相同就被判"没变"、不重画。
-    const sig = trendRange + '|' + list.length + '|' + list.reduce((a, p) => a + (p.tokens || 0), 0);
-    if (sig === dailyTrendSig) return;
-    dailyTrendSig = sig;
-    renderDailyTrendSVG(list);
-  }
+  // 它与 #statsTrend 取的是**同一个接口、同一个范围变量**：
+  //     admin('/admin/stats/series?range=' + trendRange)
+  // 所以两张图永远显示同一份数据、同一个时间范围 —— 而 #statsTrend 还多出
+  // 按模型堆叠配色 / 图例 / 分模型悬停浮层 / 柱状-面积切换 / 峰值行。
+  // ⇒ 它是 #statsTrend 的**严格子集**，删掉不丢任何信息。
+  //
+  // ⚠ 但它有两条**判据**值得留在这里（那两条是拿它当"丰富的那一个"抄过来的，
+  //   现在那些写法已经落在 #statsTrend 自己身上）：
+  //   · 柱顶**每根都标读数**（用户 2026-10-18："所有的柱状图都需要显示数值"）
+  //   · **全为 0 ⇒ 不画网格也不画柱子**，只留一句说明
+  //     （原话："否则整块图空得像渲染失败"）—— #statsTrend 里也守着这一条。
+  //   守卫见 ui_wiring_dashchart_test.go 的 TestBothBarChartsLabelEveryBarTop。
 
   // outOf(p) 一个 series 桶的**纯输出** token（Σ by_model_out）。
 //
@@ -9093,141 +9310,20 @@ function outOf(p) {
   //   ⚠ 不要因为它是死代码就删 —— 它记录了 by_model_out 的求和方式。
   return Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0);
 }
-function renderDailyTrendSVG(list) {
-    const host = $('dailyTrend');
-    if (!host) return;
-    const rl = $('dailyTrendRange');
-    // ⚠ 标题如实写出"这是哪个范围 / 什么桶" —— 24h 是小时桶、其余是天桶
-    if (rl) rl.textContent = list.length
-      ? ('· ' + trendRange + '（' + (trendRange === '24h' ? '小时桶' : '天桶') + '）· '
-         + String(list[0].ts || '').slice(0, 10) + ' ~ ' + String(list[list.length - 1].ts || '').slice(0, 10))
-      : '';
-
-    // ⚠ 2026-10-20 改口径：用**纯输出**（Σ by_model_out），不是 p.tokens（total）。
-    //   与热力图同一理由：标题写 "Token 趋势"，用户看的是"每天生成了多少"。
-    //   偏差同热力图：无模型名的行不计入（极少）。
-    const vals = list.map((p) => p.tokens || 0);   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
-    const peak = vals.length ? Math.max(...vals) : 0;
-    // ⚠ 全为 0 ⇒ 不画网格也不画柱（照它那句"否则整块图空得像渲染失败"）
-    if (!list.length || peak <= 0) {
-      host.innerHTML = '<div class="dim" style="font-size:12px">所选范围内暂无 Token 用量</div>';
-      return;
-    }
-
-    const W = 900, H = 200, PADL = 50, PADR = 14, PADB = 26;
-    const n = list.length;
-    const step = (W - PADL - PADR) / n;
-    const fmtT = (v) => v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
-      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
-    // ⚠ 读数文本先定，再决定排法与顶部留白（照它 1082-1090 的顺序：先算文本、再定版面）
-    const texts = vals.map((v) => (v > 0 ? fmtT(v) : ''));
-    const estW = (s) => s.length * 6;                       // ⚠ 粗估宽度（它有自己的 textWidth 估算器）
-    const widest = Math.max(0, ...texts.map(estW));
-    const allFit = widest + 4 <= step;                      // 横排能否放下
-    // ⚠⚠ **按用户要求去掉竖排**（2026-10-18 批注："这个值垂直不好看 希望是水平"）。
-    //   原来这里是三级排法：横排 / **竖排（`rotate(-90)`）** / 只标峰值。
-    //   ⇒ 现在两级，**一律水平**：
-    //     · 放得下（`allFit`）⇒ 每根都标；
-    //     · 放不下 ⇒ **每隔 k 根标一根**（k 由"文本宽 + 缝"除以**真实最小间距**算出）。
-    //   ⚠ 为什么不退回它的第三级「只标峰值」：24 桶只标一根太稀疏，用户要的正是"能读到值"。
-    //     "每隔 k 根"既保住水平、又不会糊 —— 与中间那条命中率趋势的稀疏标注同一手法。
-    //   ⚠ 判定必须用**相邻有值柱的真实最小间距**（老账：按均分 `step` 算会误判 ——
-    //     30 天窗口里只有最后 8 天有量时，均分间距够、真实间距不够）。
-    const idxs = vals.map((v, i) => (v > 0 ? i : -1)).filter((i) => i >= 0);
-    let minGap = Infinity;
-    for (let k = 1; k < idxs.length; k++) minGap = Math.min(minGap, (idxs[k] - idxs[k - 1]) * step);
-    if (!isFinite(minGap)) minGap = step;
-    // ⚠⚠ 柱顶读数**全部标出**（2026-10-18 按用户要求改；原来是"放不下就每隔 k 根标一根"）。
-    //   用户的原话："所有的柱状图都需要显示数值"。
-    //   ⚠ 那些值短（`2.0M` / `178.1k`），24 根柱的间距足够；⚠ 真放不下时下面的
-    //     `textLength`+`font-size` 会兜住（见渲染处），不会再回到稀疏。
-    const mode = 'h';
-
-    // ⚠ 顶部留白：水平读数只需一行的高度
-    const PADT = 26;
-    const plotH = H - PADT - PADB;
-    const yMax = peak * 1.06;                                // ⚠ 顶部留一点空，柱子不顶格
-    const yAt = (v) => PADT + plotH - (plotH * v) / yMax;
-    const barW = Math.max(1, Math.min(28, step * 0.68));     // ⚠ 照它：下限 1px
-
-    const svg = [];
-    // 网格 + 左轴刻度（5 等分）
-    for (let i = 0; i <= 4; i++) {
-      const y = PADT + (plotH * i) / 4;
-      svg.push(`<line x1="${PADL}" y1="${y.toFixed(1)}" x2="${W - PADR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`);
-      svg.push(`<text class="ax" x="${PADL - 6}" y="${(y + 3).toFixed(1)}" text-anchor="end">${fmtT(yMax * (1 - i / 4))}</text>`);
-    }
-    // 柱子 + 读数
-    const cx = (i) => PADL + step * i + step / 2;
-    const peakIdx = vals.indexOf(peak);
-    for (let i = 0; i < n; i++) {
-      const v = vals[i];
-      if (v <= 0) continue;
-      const y = yAt(v);
-      svg.push(`<rect x="${(cx(i) - barW / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${(PADT + plotH - y).toFixed(1)}" fill="var(--acc)" rx="${Math.min(2, barW / 2).toFixed(1)}"/>`);
-      const t = texts[i];
-      if (!t) continue;
-      // ⚠ **每根柱都标**（用户要求）；⚠ 值短（2.0M/178.1k），24 根柱排得下。
-      //   峰值那根用强调色，其余常规色 —— 一眼仍能看出最高的那根。
-      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(y - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(t)}</text>`);
-    }
-    // ⚠ 2026-10-20：在柱状之上叠加一条**折线**（用户明确要"折线图"）。
-    // # 为什么是叠加而不是切换
-    //   柱状给"每天多少"的绝对量（能比高低），折线给"走势"（能看出涨跌趋势）。
-    //   两者看的是同一件事的不同侧面，**同时显示比让用户切来切去更好** ——
-    //   而且不引入视图状态，少一处可能出错的地方。
-    // # 坐标复用已有变量，不自己算
-    //   cx(i) 与 yAt(v) 就是柱子的中心线与顶点，折线必须过它们，
-    //   否则线和柱会对不上（看起来像两个数据源）。
-    // ⚠ 只用有值的点连（v<=0 跳过）：把 0 也连进去会在"没数据的日子"画出
-    //   一条贴底的折线，让人误以为那天几乎没生成 —— 而真相是没有记录。
-    const linePts = [];
-    for (let i = 0; i < n; i++) {
-      if (vals[i] > 0) linePts.push(cx(i).toFixed(1) + ',' + yAt(vals[i]).toFixed(1));
-    }
-    if (linePts.length >= 2) {
-      svg.push(`<polyline points="${linePts.join(' ')}" fill="none" stroke="var(--acc)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>`);
-      // 数据点小圆：单点也能看见（折线至少要两点才成形，圆点补上这个缺口）
-      for (let i = 0; i < n; i++) {
-        if (vals[i] > 0) {
-          svg.push(`<circle cx="${cx(i).toFixed(1)}" cy="${yAt(vals[i]).toFixed(1)}" r="2.2" fill="var(--acc)" opacity="0.9"/>`);
-        }
-      }
-    }
-    // x 轴：首/中/末（⚠ 桶多时全标会糊）
-    [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
-      const p = list[i]; if (!p) return;
-      const lbl = trendRange === '24h' ? String(p.ts || '').slice(11, 16) : String(p.ts || '').slice(5, 10);
-      svg.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lbl)}</text>`);
-    });
-    // ⚠⚠ 同样的悬浮参考线 + 跟随读数（与上面那张双轴趋势同一套做法 —— 用户要求统一）。
-    svg.push(`<line id="dtCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>`);
-    svg.push(`<text id="dtRead" class="ax" x="0" y="12" text-anchor="middle" fill="var(--fg)" style="display:none"></text>`);
-    host.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%">${svg.join('')}</svg>`;
-
-    if (!host._dtBound) {
-      host._dtBound = true;
-      host.addEventListener('mousemove', (ev) => {
-        const el = host.querySelector('svg'), cur = host.querySelector('#dtCursor'), rd = host.querySelector('#dtRead');
-        if (!el || !cur || !rd) return;
-        const rect = el.getBoundingClientRect();
-        const xv = (ev.clientX - rect.left) / rect.width * W;
-        let best = -1, bd = 1e9;
-        for (let i = 0; i < n; i++) { const d = Math.abs(cx(i) - xv); if (d < bd) { bd = d; best = i; } }
-        if (best < 0) return;
-        const p = list[best] || {};
-        const lbl2 = trendRange === '24h' ? String(p.ts || '').slice(11, 16) : String(p.ts || '').slice(5, 10);
-        cur.setAttribute('x1', cx(best).toFixed(1)); cur.setAttribute('x2', cx(best).toFixed(1));
-        cur.style.display = 'block';
-        rd.setAttribute('x', Math.min(Math.max(cx(best), 70), W - 70).toFixed(1));
-        rd.textContent = lbl2 + '  · 请求 ' + (p.total || 0) + ' · ' + fmtTokensPlain(p.tokens || 0) + ' token';
-        rd.style.display = 'block';
-      });
-      host.addEventListener('mouseleave', () => {
-        for (const id of ['#dtCursor', '#dtRead']) { const e = host.querySelector(id); if (e) e.style.display = 'none'; }
-      });
-    }
-  }
+// renderDailyTrendSVG（「按天 Token 趋势」那张图）**已于 2026-10-26 删除**。
+//
+// 删它的理由写在 loadDailyTrend 原处那段注释里（它是 #statsTrend 的严格子集：
+// 同一个 /admin/stats/series?range=<trendRange>、同一个范围变量，而 #statsTrend
+// 还多出按模型堆叠 / 图例 / 分模型浮层 / 柱状-面积切换 / 峰值行）。
+//
+// ⚠ 它带走的两个**行为**没有丢，都落在 #statsTrend 里了：
+//   · 柱顶每根都标读数（用户 2026-10-18 的判据）
+//   · 全为 0 ⇒ 不画网格也不画柱子，只留一句说明
+//   守卫：ui_wiring_dashchart_test.go 的 TestBothBarChartsLabelEveryBarTop 与
+//         TestDashChartEmptyDataDoesNotCrash。
+//
+// ⚠ 别再"照它对另一张图"——它对标的那张（agent2api 的 dailyTrendView）已经并完了。
+//   新的图表判据请写进 ui_wiring_dashchart_test.go 的字段表，而不是散落的注释。
 
   // ──────────────────────────────────────────────────────────────────────
   // DONUT_COLORS 环的色板（⚠ 模块级：`fillDonuts` 与 `renderDonutInto` 都要用）。
@@ -10701,9 +10797,9 @@ let multCatalogFailed = false;
       }
       trendSeries._last = '';
       try { loadTrendSeries(); } catch { /* 趋势非关键 */ }
-      // ⚠ 按天 Token 趋势也跟着范围走（它同样读 `trendRange`）。
-      // 它内部签名含 trendRange ⇒ 切范围时自动判为"变了"、重画，不需要在这里清什么。
-      try { loadDailyTrend(); } catch { /* 按天趋势非关键 */ }
+      // ⚠ 这里**曾经**还要刷「按天 Token 趋势」—— 那张图已于 2026-10-26 删除
+      //（它是 #statsTrend 的严格子集，见 loadDailyTrend 原处的说明）。
+      // 现在切范围只需要刷上面那一张，页面少一次重复的 /admin/stats/series 请求。
       // ⚠ 热力图**不在这里**刷新：它读的是 `range=365d`，与上面的 24h/7d 无关。
       //（我最初插在这里 —— 结果它只在"点按钮"时才跑，页面加载时从来不动、格子是空的。
       //  ⚠ 教训：本文件里有**两处** `loadTrendSeries()`，注释只差一个"图"字，anchor 必须照抄全。）
@@ -10853,10 +10949,21 @@ let multCatalogFailed = false;
     };
 
     // ── 3. 版面 ──
-    // Y 轴**不画刻度网格**：240px 里再割四条横线就只剩骨架，读不出柱形；
-    // 天花板改用容器左上角那行"峰值"如实交代。X 轴沿用原趋势图的口径：
-    // 24h 写 HH:MM、其余写 MM-DD，只标首/中/末（桶多时全标会糊成一片）。
-    const W = 900, H = 200, PADL = 4, PADR = 4, PADT = 6, PADB = 16;
+    // ⚠⚠ 2026-10-26：**不再是"太简洁"那一版**。原来这里写的是
+    //   「Y 轴不画刻度网格：240px 里再割四条横线就只剩骨架」，于是这张图成了
+    //   全页唯一没有等分网格线、没有左轴刻度的图 —— 用户对照下面两张趋势图
+    //   点出来："上面的太简洁了，我希望统一用下面的实现"。
+    //   ⇒ 现在与下方两张趋势图**同一套视觉语言**：
+    //     · dcGrid    等分网格线 + 左轴刻度（0/25/50/75/100% 五条）
+    //     · dcRects   柱子
+    //     · dcCursor  悬浮参考垂线
+    //   PADL 从 4 放到 50 就是为了给左轴刻度文本腾位置（与 renderDailyTrendSVG 同值）。
+    //   X 轴口径不变：24h 写 HH:MM、其余写 MM-DD，只标首/中/末（桶多时全标会糊）。
+    // ⚠⚠ 2026-10-26：PADT 从 6 放到 26 —— 给**柱顶读数**腾一行的高度。
+    //   用户点出来：「每一个柱状图顶部没有显示数值」。
+    //   下方 #dailyTrend 用的就是 26（它一直是带读数的），这里对齐它的值，
+    //   否则两图并排时柱子的可用高度不一样，看起来像"上面被压扁了"。
+    const W = 900, H = 200, PADL = 50, PADR = 14, PADT = 26, PADB = 20;
     const n = buckets.length;
     const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
     const step = plotW / n;
@@ -10869,7 +10976,16 @@ let multCatalogFailed = false;
 
     const marks = [];
     // 悬停高亮底带：**最先 push**（= 最底层），否则它会盖在色块上把颜色洗淡。
-    marks.push(`<rect id="trendHoverBand" x="0" y="${PADT}" width="0" height="${plotH}" fill="var(--fg)" opacity="0.07" style="display:none"/>`);
+    // ⚠⚠ 2026-10-26：改走共享层（dcBand）。至此仪表盘里**所有 SVG 元素的构造**
+    //   都在 dash-chart.js：网格线 / 刻度 / 柱子 / 折线 / 参考垂线 / 高亮底带 / 外壳。
+    //   原来这里是共享层之外唯一一处"自己 push <rect>"，留着等于给下次照抄留样本。
+      dcBand(marks, 'trend', { PADT: PADT, plotH: plotH });
+
+    // ⚠⚠ 2026-10-26：等分网格线 + 左轴刻度改走共享层（dcGrid）——
+    //   原来是"干脆不画"，用户点名要与下方两张趋势图统一。
+    //   必须**在柱子之前** push：SVG 后画的盖先画的，网格要在柱之下。
+    //   fmt 用 trendFmt（1.2k / 3.4M），与峰值那行、浮层明细同一套口径。
+    dcGrid(marks, { W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH, max: yMax, fmt: trendFmt });
 
     if (trendView === 'area') {
       // ── 堆叠面积 ──
@@ -10910,10 +11026,13 @@ let multCatalogFailed = false;
       // ── 堆叠柱 ──
       // 从 0 往上累加：下标 0（量最大的模型）贴底 —— 只有它有稳定基线，
       // 相邻柱之间比它的高度是准的；浮在上面的小模型本来也比不准，贴顶反而更乱。
+      // ⚠⚠ 2026-10-26：柱子改走共享层（dcRects）—— 与下方 #dailyTrend 的柱、
+      //   顶部成功率条是**同一份"给矩形数组"的实现**。逐段颜色通过 r.fill 传入
+      //   （dcRects 的契约就是 r.fill || opt.fill）。
+      const rects = [];
       for (let i = 0; i < n; i++) {
         const b = buckets[i];
         if (b.total <= 0) continue;                 // 空桶不画（与柱顶一致：没有就不占位）
-        const x = (cx(i) - barW / 2).toFixed(1);
         let cum = 0;
         for (const s of segs) {
           const v = valOf(b, s);
@@ -10923,13 +11042,66 @@ let multCatalogFailed = false;
           const y1 = yAt(cum);                      // 这段的上沿
           // ⚠ 薄段兜底 0.6px：某模型在该桶只占千分之几时真实高度可能只有 0.2px，
           //   浏览器会画成"看不见"，那就正好抹掉了"它在这个桶里确实有量"这个事实。
-          marks.push(`<rect x="${x}" y="${y1.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0.6, y2 - y1).toFixed(1)}" fill="${s.color}"/>`);
+          rects.push({ x: cx(i) - barW / 2, y: y1, w: barW, h: Math.max(0.6, y2 - y1), fill: s.color });
         }
       }
+      dcRects(marks, rects);
     }
 
+    // ⚠⚠ 2026-10-26：**补上柱顶读数**。用户对比下方 #dailyTrend 点出来的：
+    //   「每一个柱状图顶部没有显示数值」。
+    //
+    // # 为什么每根都标（而不是"放不下就每隔 k 根标一根"）
+    //   与下方那张同一条判据 —— 用户 2026-10-18 的原话：
+    //   「所有的柱状图都需要显示数值」。
+    //   ⚠ 值短（1.2k / 3.4M），24 桶的间距排得下；真挤的时候由字号兜住，
+    //     不退回稀疏模式（那会让"能读到值"这件事时有时无）。
+    //
+    // # 标的是**该桶合计**（b.total），不是单段
+    //   这是堆叠柱：每段是某个模型的量，而"这根柱多高"才是读者要的数。
+    //   分模型明细走悬停浮层（那里带得出每一项）。
+    //
+    // # 峰值那根用强调色
+    //   与下方那张同一个手法 —— 一眼仍能看出最高的那根是哪个桶。
+    const peakIdx = buckets.findIndex((b) => b.total === peak);
+    for (let i = 0; i < n; i++) {
+      const b = buckets[i];
+      if (!b || b.total <= 0) continue;   // 空桶不标（标一个 0 会占位又没信息）
+      marks.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(yAt(b.total) - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(trendFmt(b.total))}</text>`);
+    }
+
+    // ⚠⚠ 2026-10-26：**补上折线**。用户对比下方 #dailyTrend 点出来的：
+    //   「上面的没有折线呢」—— 那张图有柱 + 折线 + 数据点，这张只有柱。
+    //
+    // # 为什么柱与线要同时显示（照 renderDailyTrendSVG 里那段注释的同一理由）
+    //   柱状给"每个桶多少"的绝对量（能比高低），折线给"走势"（能看出涨跌）。
+    //   两者看的是同一件事的不同侧面，**同时显示比让用户切视图更好** ——
+    //   而且不引入额外视图状态，少一处可能出错的地方。
+    //
+    // # 坐标复用已有变量，不自己算
+    //   必须过 cx(i) 与 yAt(b.total)（柱子的中心线与柱顶）——
+    //   否则线与柱对不上，看起来像两个数据源。这与下方那张**逐字相同**。
+    //
+    // # ⚠ 只在有值的桶上连点（total > 0）
+    //   把空桶也连进去会在"没有记录的小时"画出一条贴底的折线，
+    //   让人误以为那小时几乎没生成 —— 而真相是没有记录。
+    //   （dcLine 内部跳过 null，所以这里 filter(Boolean) 之后才交给它。）
+    //
+    // # 为什么放在柱/面积**之后**（而不是之前）
+    //   SVG 后画的盖先画的。折线要在最上层 —— 否则堆叠柱会把线的中段吃掉。
+    //
+    // # 两种视图都加
+    //   面积视图的上沿本来就是这个总和的轮廓，折线叠上去是"给轮廓描一道实线 +
+    //   数据点"，仍然读得清楚；只在柱状加会让两个视图的语言不一致。
+    dcLine(marks,
+      buckets.map((b, i) => (b.total > 0 ? [cx(i), yAt(b.total)] : null)).filter(Boolean),
+      { stroke: 'var(--acc)', width: 1.8, opacity: 0.85, dots: true });
+
     // 悬停参考线（保留原 id：本文件另两处趋势图也是"竖虚线 + 浮层"这套做法）。
-    marks.push(`<line id="trendCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.45" style="display:none"/>`);
+    // ⚠⚠ 2026-10-26：悬浮参考垂线改走共享层（dcCursor）—— 与 #cacheTrend / #dailyTrend
+    //   同一份实现。id 传 "trend" ⇒ 生成 #trendCursor（沿用原有 id，事件绑定不用改）。
+    //   共享层同时预置 #trendRead 跟随读数（本图浮层信息更全，暂不使用，保持隐藏）。
+    dcCursor(marks, "trend", { PADT: PADT, plotH: plotH });
 
     const xLabels = [];
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
@@ -10947,9 +11119,12 @@ let multCatalogFailed = false;
 
     if (peakEl) peakEl.textContent = `峰值 ${trendFmt(peak)} · 合计 ${trendFmt(sumAll)} tokens`;
 
+    // ⚠⚠ 2026-10-26：<svg> 外壳也走共享层（dcSvgTag）—— 与下方两张趋势图同一份外壳。
+    //   这里用 dcSvgTag 而不用 dcSvg：本图要一次写"图 + 图例 + 浮层"三段 HTML，
+    //   直接把 SVG 塞进 host.innerHTML 会顺带清掉后两段。
     host.innerHTML =
-      `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block">${marks.join('')}${xLabels.join('')}</svg>
-       <div class="dim" style="display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;font-size:11px;line-height:16px;margin-top:2px">${legend}</div>
+      dcSvgTag(W, H, marks.concat(xLabels), { style: 'width:100%;height:' + H + 'px;display:block' }) +
+      `<div class="dim" style="display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;font-size:11px;line-height:16px;margin-top:2px">${legend}</div>
        <div id="trendTip" style="display:none;position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11px;white-space:nowrap;z-index:5;box-shadow:0 4px 14px var(--shadow);min-width:130px"></div>`;
 
     // ── 4. 悬停浮层 ──
@@ -11112,6 +11287,10 @@ let multCatalogFailed = false;
     // 任务调度面板同样复用 manifest.jobs，不额外发请求。
     renderJobs();
     // 服务名同样来自 manifest（B8）：清掉前端硬编码后，
+    // 覆盖检查同样来自 manifest（job_coverage），不额外发请求。
+    // 必须跟 renderJobs 一起调：两者读同一份 manifest，分开调会出现
+    // 「任务表更新了、覆盖检查还是上一轮」的不一致。
+    renderJobCoverage();
     // 改名只需改后端配置，界面自动跟随。
     renderIdentity();
     // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
@@ -11171,8 +11350,11 @@ let multCatalogFailed = false;
     try { loadHeatmap(); } catch { /* 热力图非关键 */ }
     // ⚠ 缓存命中率趋势（双轴）也在这个时机 —— 它读的同样是 series（只是 range=24h）。
     try { loadCacheTrend(); } catch { /* 缓存趋势非关键 */ }
-    // ⚠ 按天 Token 趋势（它第 9 块）也在这里首次加载 —— 它读 `trendRange`，与上面那条同步。
-    try { loadDailyTrend(); } catch { /* 按天趋势非关键 */ }
+    // 健康条的迷你折线（近 24 小时成功率）—— 同一个端点、同样 range=24h，
+    // ⚠ 但它有自己的签名与固定的 24h 口径（不跟 trendRange 走），见 loadHealthSeries。
+    try { loadHealthSeries(); } catch { /* 成功率折线非关键 */ }
+    // ⚠ 「按天 Token 趋势」（原第 9 块）**已删除** —— 它与 #statsTrend 同数据同范围，
+    //   是后者的严格子集。所以这里不再有第二次 /admin/stats/series 请求。
     // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
     try { await loadClientLogin(); } catch { /* 非关键 */ }
     renderApi();
@@ -11933,6 +12115,7 @@ let multCatalogFailed = false;
     $('btnJobRefresh').onclick = () => busyRun($('btnJobRefresh'), async () => {
       await loadManifest();
       renderJobs();
+      renderJobCoverage();
     }, { label: '任务调度' });
     // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
     $('growthViews').addEventListener('click', ev => {
@@ -12003,8 +12186,27 @@ let multCatalogFailed = false;
     });
     $('btnSettingsSave').onclick = saveSettings;
     $('btnSettingsReload').onclick = () => { loadSettings(); toast('已放弃未保存的修改'); };
-    $('content').addEventListener('input', () => markDirty(true));
-    $('content').addEventListener('change', () => markDirty(true));
+    // 只有**设置页里**的控件改动才算「有未保存的修改」。
+    //
+    // # 为什么必须限定范围（2026-10-25 用户报障「保存后仍显示有未保存的修改」）
+    //
+    // 这两条委托原先挂在 `#content`（**整个**内容区）上，而且回调**不看事件源**：
+    //
+    //     $('content').addEventListener('input',  () => markDirty(true));
+    //     $('content').addEventListener('change', () => markDirty(true));
+    //
+    // 而 `#content` 里装着**所有**面板 —— 对话测试的输入框、成长计划的下拉、
+    // API Key 弹窗、日志筛选…… 于是在任何一个面板动一下控件都会把**设置页**标脏；
+    // 而清脏只有一条路（`fillSettings` 末尾那次 `markDirty(false)`，它只在
+    // 「进入设置页 / 保存成功」时跑）。用户读到的是「设置页顶部一直挂着未保存的修改」，
+    // 可是设置根本没动过 —— 保存一百次也不会消失，因为下一次在别处动控件又把它标回来。
+    //
+    // 判据用 `closest('section[data-key="settings"]')`：设置页就是 HTML 里那块
+    // `<section data-key="settings">`，它的可编辑控件全在它内部。
+    // ⚠ 不能用 `#setPanel` 之类的新 id —— 那要改 HTML 结构；data-key 是既有锚点。
+    const inSettingsPanel = (t) => !!(t && t.closest && t.closest('section[data-key="settings"]'));
+    $('content').addEventListener('input', (ev) => { if (inSettingsPanel(ev.target)) markDirty(true); });
+    $('content').addEventListener('change', (ev) => { if (inSettingsPanel(ev.target)) markDirty(true); });
     // 通用上游面板的写操作委托：在 #content 上**只绑一次**（评审 F2）。
     // 放在 boot 里而不是 loadGenericList 里 —— 后者每 5 秒都会跑一次，
     // 在里面绑就退回了原来那个"监听器随刷新增长"的 bug。
