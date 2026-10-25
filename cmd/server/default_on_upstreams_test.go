@@ -44,6 +44,7 @@ var providers = []struct {
 	{"qoder", "QoderEnabled"},
 	{"zcode", "ZCodeEnabled"},
 	{"minimax", "MiniMaxEnabled"},
+	{"verdent", "VerdentEnabled"},
 }
 
 // ⚠ 核心判据：**配置段整段缺席**时，每个上游都必须被启用。

@@ -52,6 +52,7 @@ import (
 	"workbuddy2api/internal/qoder"
 	"workbuddy2api/internal/raccoon"
 	"workbuddy2api/internal/trae"
+	"workbuddy2api/internal/verdent"
 	"workbuddy2api/internal/workbuddy"
 	"workbuddy2api/internal/zcode"
 )
@@ -95,6 +96,7 @@ func allUpstreams(t *testing.T) []upstreamCase {
 		{"zcode", "zcode", zcode.New(zcode.Config{})},
 		{"minimax", "minimax", minimax.New(minimax.Config{})},
 		{"monkeycode", "monkeycode", monkeycode.NewProvider()},
+		{"verdent", "verdent", verdent.NewProvider()},
 		{"openaicompat", "openaicompat", openaicompat.NewOpenAICompat("openaicompat", "http://127.0.0.1:1/v1")},
 	}
 }

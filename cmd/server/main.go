@@ -46,6 +46,7 @@ import (
 	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/trae"
 	"workbuddy2api/internal/upstream"
+	"workbuddy2api/internal/verdent"
 	"workbuddy2api/internal/wire"
 	"workbuddy2api/internal/workbuddy"
 	"workbuddy2api/internal/zcode"
@@ -790,6 +791,35 @@ func main() {
 			log.Printf("lobsterai: 注意 —— 凭证目录 %s 里有 %d 份凭证，但本次未启用该上游："+
 				"它们不会并入账号池", cfg.LobsteraiAuthDir, len(list))
 		}
+	}
+
+	// ---- 第十一个上游：Verdent（verdent.ai）----
+	//
+	// ⚠ 与其余账号型上游的关键差别：**没有可自动化的登录协议**。
+	// 它的 JWT 只在桌面端主进程内存里（见 internal/verdent/auth.go），
+	// 所以账号只能手工投放 + 点「重载 auths」，不是漏了 LoginFlow。
+	//
+	// 我们**没有** Qoder 式 WASM、也不需要浏览器驱动：协议已被完整逆向
+	// （AES-256-GCM 加密的两个字段 + 一个版本握手头），调用是纯 HTTP。
+	var vd *verdent.Provider
+	if cfg.VerdentEnabled {
+		vd = verdent.New(cfg.VerdentAuthDir)
+		if err := registry.Register(vd); err != nil {
+			log.Fatalf("注册 Verdent 上游失败: %v", err)
+		}
+		log.Printf("verdent: 已启用（凭证目录 %s）", cfg.VerdentAuthDir)
+	} else {
+		log.Printf("verdent: 未启用（config 里 verdent.enabled=false）")
+	}
+	if vd != nil && cfg.VerdentPoolAccounts {
+		if n := syncVerdentAccounts(p, cfg.VerdentAuthDir); n > 0 {
+			log.Printf("verdent: 已并入账号池 %d 个账号", n)
+		} else {
+			log.Printf("verdent: 账号池中暂无账号（把 token 写成 %s/verdent-<uid>.json 后点「重载 auths」）",
+				cfg.VerdentAuthDir)
+		}
+	} else if vd != nil {
+		log.Printf("verdent: 未并入账号池（verdent.pool_accounts=false）")
 	}
 
 	if lb != nil && cfg.LobsteraiPoolAccounts {
