@@ -2285,6 +2285,7 @@ header h1{letter-spacing:0}
 //   dcRects(svg, rs, o)  柱子（竖柱与横条共用）
 //   dcLine(svg, pts, o)  折线（可带数据点圆）
 //   dcCursor(svg, id, o) 悬浮参考垂线 + 跟随读数（预置 display:none）
+//   dcBand(svg, id, o)   悬停高亮底带（预置 display:none，与 dcCursor 配套）
 //   dcSvgTag(W, H, parts) / dcSvg(host, W, H, parts)   统一包 <svg viewBox>
 //
 // ⚠ 本文件**不依赖宿主的任何函数**（自带 dcEsc）：否则"抽出来"就成了假共享
@@ -2425,6 +2426,23 @@ function dcCursor(svg, id, o) {
     '" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.5" style="display:none"/>');
   svg.push('<text id="' + id + 'Read" class="ax" x="0" y="' + (o.readY || 12) +
     '" text-anchor="middle" fill="var(--fg)" style="display:none"></text>');
+}
+
+// dcBand 预置"悬停高亮底带"（默认 display:none），与 dcCursor 配套。
+//
+// # 为什么也放进共享层
+//   加上它之后，**仪表盘里所有 SVG 元素的构造都在本文件里**：
+//   网格线 / 刻度 / 柱子 / 折线 / 参考垂线 / 高亮底带 / 外壳。
+//   之前 #statsTrend 那张图自己 push 了一段 <rect>，于是"拼 SVG 元素"
+//   这件事在共享层之外还剩一份 —— 用户的要求是"不要不同的地方不同的实现"，
+//   留一处就等于下次还有人照抄它。
+//
+// id 传前缀：'trend' → #trendHoverBand（沿用 webui.html 里既有的 id）。
+// ⚠ 底带必须**最先 push**（= 最底层），否则会盖在色块上把颜色洗淡 ——
+//   调用方负责顺序，本函数只负责"长什么样"。
+function dcBand(svg, id, o) {
+  svg.push('<rect id="' + id + 'HoverBand" x="0" y="' + dcNum(o.PADT) + '" width="0" height="' +
+    dcNum(o.plotH) + '" fill="var(--fg)" opacity="0.07" style="display:none"/>');
 }
 
 // dcSvgTag 拼出 <svg> 外壳（返回字符串，供 innerHTML 里内联嵌图表用）。
@@ -14517,10 +14535,17 @@ let multCatalogFailed = false;
     };
 
     // ── 3. 版面 ──
-    // Y 轴**不画刻度网格**：240px 里再割四条横线就只剩骨架，读不出柱形；
-    // 天花板改用容器左上角那行"峰值"如实交代。X 轴沿用原趋势图的口径：
-    // 24h 写 HH:MM、其余写 MM-DD，只标首/中/末（桶多时全标会糊成一片）。
-    const W = 900, H = 200, PADL = 4, PADR = 4, PADT = 6, PADB = 16;
+    // ⚠⚠ 2026-10-26：**不再是"太简洁"那一版**。原来这里写的是
+    //   「Y 轴不画刻度网格：240px 里再割四条横线就只剩骨架」，于是这张图成了
+    //   全页唯一没有等分网格线、没有左轴刻度的图 —— 用户对照下面两张趋势图
+    //   点出来："上面的太简洁了，我希望统一用下面的实现"。
+    //   ⇒ 现在与下方两张趋势图**同一套视觉语言**：
+    //     · dcGrid    等分网格线 + 左轴刻度（0/25/50/75/100% 五条）
+    //     · dcRects   柱子
+    //     · dcCursor  悬浮参考垂线
+    //   PADL 从 4 放到 50 就是为了给左轴刻度文本腾位置（与 renderDailyTrendSVG 同值）。
+    //   X 轴口径不变：24h 写 HH:MM、其余写 MM-DD，只标首/中/末（桶多时全标会糊）。
+    const W = 900, H = 200, PADL = 50, PADR = 14, PADT = 6, PADB = 20;
     const n = buckets.length;
     const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
     const step = plotW / n;
@@ -14533,7 +14558,16 @@ let multCatalogFailed = false;
 
     const marks = [];
     // 悬停高亮底带：**最先 push**（= 最底层），否则它会盖在色块上把颜色洗淡。
-    marks.push(`<rect id="trendHoverBand" x="0" y="${PADT}" width="0" height="${plotH}" fill="var(--fg)" opacity="0.07" style="display:none"/>`);
+    // ⚠⚠ 2026-10-26：改走共享层（dcBand）。至此仪表盘里**所有 SVG 元素的构造**
+    //   都在 dash-chart.js：网格线 / 刻度 / 柱子 / 折线 / 参考垂线 / 高亮底带 / 外壳。
+    //   原来这里是共享层之外唯一一处"自己 push <rect>"，留着等于给下次照抄留样本。
+      dcBand(marks, 'trend', { PADT: PADT, plotH: plotH });
+
+    // ⚠⚠ 2026-10-26：等分网格线 + 左轴刻度改走共享层（dcGrid）——
+    //   原来是"干脆不画"，用户点名要与下方两张趋势图统一。
+    //   必须**在柱子之前** push：SVG 后画的盖先画的，网格要在柱之下。
+    //   fmt 用 trendFmt（1.2k / 3.4M），与峰值那行、浮层明细同一套口径。
+    dcGrid(marks, { W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH, max: yMax, fmt: trendFmt });
 
     if (trendView === 'area') {
       // ── 堆叠面积 ──
@@ -14574,10 +14608,13 @@ let multCatalogFailed = false;
       // ── 堆叠柱 ──
       // 从 0 往上累加：下标 0（量最大的模型）贴底 —— 只有它有稳定基线，
       // 相邻柱之间比它的高度是准的；浮在上面的小模型本来也比不准，贴顶反而更乱。
+      // ⚠⚠ 2026-10-26：柱子改走共享层（dcRects）—— 与下方 #dailyTrend 的柱、
+      //   顶部成功率条是**同一份"给矩形数组"的实现**。逐段颜色通过 r.fill 传入
+      //   （dcRects 的契约就是 r.fill || opt.fill）。
+      const rects = [];
       for (let i = 0; i < n; i++) {
         const b = buckets[i];
         if (b.total <= 0) continue;                 // 空桶不画（与柱顶一致：没有就不占位）
-        const x = (cx(i) - barW / 2).toFixed(1);
         let cum = 0;
         for (const s of segs) {
           const v = valOf(b, s);
@@ -14587,13 +14624,17 @@ let multCatalogFailed = false;
           const y1 = yAt(cum);                      // 这段的上沿
           // ⚠ 薄段兜底 0.6px：某模型在该桶只占千分之几时真实高度可能只有 0.2px，
           //   浏览器会画成"看不见"，那就正好抹掉了"它在这个桶里确实有量"这个事实。
-          marks.push(`<rect x="${x}" y="${y1.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0.6, y2 - y1).toFixed(1)}" fill="${s.color}"/>`);
+          rects.push({ x: cx(i) - barW / 2, y: y1, w: barW, h: Math.max(0.6, y2 - y1), fill: s.color });
         }
       }
+      dcRects(marks, rects);
     }
 
     // 悬停参考线（保留原 id：本文件另两处趋势图也是"竖虚线 + 浮层"这套做法）。
-    marks.push(`<line id="trendCursor" x1="0" y1="${PADT}" x2="0" y2="${PADT + plotH}" stroke="var(--fg)" stroke-width="1" stroke-dasharray="3 3" opacity="0.45" style="display:none"/>`);
+    // ⚠⚠ 2026-10-26：悬浮参考垂线改走共享层（dcCursor）—— 与 #cacheTrend / #dailyTrend
+    //   同一份实现。id 传 "trend" ⇒ 生成 #trendCursor（沿用原有 id，事件绑定不用改）。
+    //   共享层同时预置 #trendRead 跟随读数（本图浮层信息更全，暂不使用，保持隐藏）。
+    dcCursor(marks, "trend", { PADT: PADT, plotH: plotH });
 
     const xLabels = [];
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
@@ -14611,9 +14652,12 @@ let multCatalogFailed = false;
 
     if (peakEl) peakEl.textContent = `峰值 ${trendFmt(peak)} · 合计 ${trendFmt(sumAll)} tokens`;
 
+    // ⚠⚠ 2026-10-26：<svg> 外壳也走共享层（dcSvgTag）—— 与下方两张趋势图同一份外壳。
+    //   这里用 dcSvgTag 而不用 dcSvg：本图要一次写"图 + 图例 + 浮层"三段 HTML，
+    //   直接把 SVG 塞进 host.innerHTML 会顺带清掉后两段。
     host.innerHTML =
-      `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block">${marks.join('')}${xLabels.join('')}</svg>
-       <div class="dim" style="display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;font-size:11px;line-height:16px;margin-top:2px">${legend}</div>
+      dcSvgTag(W, H, marks.concat(xLabels), { style: 'width:100%;height:' + H + 'px;display:block' }) +
+      `<div class="dim" style="display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;font-size:11px;line-height:16px;margin-top:2px">${legend}</div>
        <div id="trendTip" style="display:none;position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11px;white-space:nowrap;z-index:5;box-shadow:0 4px 14px var(--shadow);min-width:130px"></div>`;
 
     // ── 4. 悬停浮层 ──
