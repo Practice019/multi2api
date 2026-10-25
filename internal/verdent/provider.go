@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -211,6 +212,59 @@ func authOf(cred gateway.Credential) (*Auth, error) {
 	}
 }
 
+// buildPayload 拼上游要的请求体。
+//
+// # 为什么抽成独立函数（而不是写在 Chat 里）
+//
+// 它必须**逐字段**等于参考客户端（register-machine 的 verdent-client.mjs）——
+// 而我第一版就漏了 temperature 与 env.today_date 两处。
+// 抽出来之后能对着"字段清单"写断言（见 payload_test.go），
+// 否则下次改这里没人发现又少了一个。
+//
+// 它不发请求、不碰凭证 —— 纯函数，所以可以直接测。
+func buildPayload(model, encSystem, encMessages string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"channel":    "deck",
+		"model":      model,
+		"session_id": "session_" + randUUID(),
+		"conv_id":    "conv_" + randUUID(),
+		"react_id":   "model_agent_" + randUUID(),
+		"react_type": reactType, // ⚠ "Main Agent"，带空格
+		"stream":     true,
+		"max_tokens": 64000,
+		// ⚠ temperature 与 env.today_date 是**补齐**的（2026-10-26，对照真实抓包）：
+		//   参考客户端两个都带，我第一版漏了。漏了不影响能不能跑通
+		//   （02:09 那次没带也成功生成了内容），但既然来源就是那个客户端，
+		//   就没有理由偏离 —— 少一个字段就多一个"为什么我和它不一样"的变量。
+		//
+		// ⚠ 参考客户端**也没有** tools / tool_choice（那是桌面端 agent 才需要的
+		//   94KB 加密工具定义），所以这里同样不发 —— 不做无意义的模仿。
+		"temperature": 1,
+		"system":      encSystem,
+		"messages":    encMessages,
+		"thinking":    map[string]any{"type": "enabled", "budget_tokens": 20000},
+		"agent_name":  agentName,
+		"env": map[string]any{
+			"platform":   "win32",
+			"os_version": "Windows_NT 10.0.22631",
+			"shell":      "cmd",
+			"today_date": time.Now().Format("2006-01-02"),
+		},
+		"encrypt":                   true,
+		"custom_trace_tags_tmp":     []any{},
+		"custom_trace_metadata_tmp": map[string]any{"selected_model_id": model, "effective_model_id": model},
+		"model_catalog_version":     modelCatalogVersion,
+		"effort":                    "high",
+		"context_window_tokens":     1000000,
+		"is_eco":                    false,
+		"is_auto":                   false,
+		"is_free":                   false,
+		"is_limit_free":             false,
+		"native_api":                false,
+	})
+
+}
+
 // Chat 发一次对话（流式）。
 //
 // 流程：OpenAI 请求体 → 上游形状（system/messages 加密）→ POST → SSE 转回 OpenAI SSE。
@@ -242,36 +296,7 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		return gateway.ChatStream{}, fmt.Errorf("verdent: 加密 messages 失败: %w", err)
 	}
 
-	payload, err := json.Marshal(map[string]any{
-		"channel":    "deck",
-		"model":      model,
-		"session_id": "session_" + randUUID(),
-		"conv_id":    "conv_" + randUUID(),
-		"react_id":   "model_agent_" + randUUID(),
-		"react_type": reactType, // ⚠ "Main Agent"，带空格
-		"stream":     true,
-		"max_tokens": 64000,
-		"system":     encSystem,
-		"messages":   encMessages,
-		"thinking":   map[string]any{"type": "enabled", "budget_tokens": 20000},
-		"agent_name": agentName,
-		"env": map[string]any{
-			"platform":   "win32",
-			"os_version": "Windows_NT 10.0.22631",
-			"shell":      "cmd",
-		},
-		"encrypt":                   true,
-		"custom_trace_tags_tmp":     []any{},
-		"custom_trace_metadata_tmp": map[string]any{"selected_model_id": model, "effective_model_id": model},
-		"model_catalog_version":     modelCatalogVersion,
-		"effort":                    "high",
-		"context_window_tokens":     1000000,
-		"is_eco":                    false,
-		"is_auto":                   false,
-		"is_free":                   false,
-		"is_limit_free":             false,
-		"native_api":                false,
-	})
+	payload, err := buildPayload(model, encSystem, encMessages)
 	if err != nil {
 		return gateway.ChatStream{}, fmt.Errorf("verdent: 构造请求体失败: %w", err)
 	}
