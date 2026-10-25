@@ -804,6 +804,12 @@ func main() {
 	var vd *verdent.Provider
 	if cfg.VerdentEnabled {
 		vd = verdent.New(cfg.VerdentAuthDir)
+		// 注入活凭证来源：额度刷新、页内添加账号都要拿**池里那一份**，
+		// 而不是自己 LoadDir 造第二个实例（理由见 credSrc 的注释）。
+		vd.SetCredentialSource(verdentCredSource(p))
+		// 诊断/批量额度端点要列出全部账号 —— 没有枚举器时它们返回空数组，
+		// 看起来"没有账号"，而实际账号好好的。
+		vd.SetUIDEnumerator(verdentUIDEnumerator(p))
 		if err := registry.Register(vd); err != nil {
 			log.Fatalf("注册 Verdent 上游失败: %v", err)
 		}

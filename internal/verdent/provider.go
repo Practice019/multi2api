@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -63,6 +64,91 @@ type Provider struct {
 	// ⚠ 字段名是 Dir 而不是 AuthDir —— AuthDirExt 要求一个**同名方法**，
 	// 而 Go 里字段与方法不能重名。叫 AuthDir 会编译不过（这次是断言先发现的）。
 	Dir string
+
+	// mu 保护下面两个注入的访问器（登录/额度探测会在运行时读它们）。
+	mu sync.RWMutex
+	// credSrc 活的凭证来源（由装配层注入）。
+	//
+	// # 为什么需要它（而不是自己 LoadDir）
+	//
+	// 账号池**保管**着活凭证（SyncToDirWithSecrets 装进去的那个 *Auth）。
+	// 刷新额度、页内添加账号这类动作必须拿**池里那一份** ——
+	// 自己 LoadDir 会造出第二个 *Auth 实例，两边一旦分叉
+	//（磁盘被改、池里还是旧的），就会出现"界面上额度是新的、对话用的还是旧 token"
+	// 这种无法解释的现象。上游不得 import pool，所以由装配层适配进来。
+	credSrc func(uid string) (gateway.Credential, bool)
+	// uidEnumerator 列出全部 uid（批量额度刷新用）。
+	uidEnumerator func() []string
+	// logins 未完成的登录会话（state → 创建时刻）。
+	//
+	// 本上游的"登录"就是一次粘贴，state 的作用只是"这次粘贴属于哪次点击添加账号" ——
+	// 它不参与校验（凭证能否用由上游回答，不由 state 回答）。
+	logins map[string]loginSession
+}
+
+// SetCredentialSource 装配活凭证来源（由 cmd/server 注入）。
+func (p *Provider) SetCredentialSource(fn func(uid string) (gateway.Credential, bool)) {
+	p.mu.Lock()
+	p.credSrc = fn
+	p.mu.Unlock()
+}
+
+// SetUIDEnumerator 装配 uid 枚举来源（由 cmd/server 注入）。
+func (p *Provider) SetUIDEnumerator(fn func() []string) {
+	p.mu.Lock()
+	p.uidEnumerator = fn
+	p.mu.Unlock()
+}
+
+// authOfUID 取某 uid 的活凭证。
+//
+// 顺序：先问注入的凭证源（生产路径），再回落 LoadDir（测试 / 未注入时）。
+// 反过来会让生产永远读到磁盘副本（见 credSrc 的注释）。
+func (p *Provider) authOfUID(uid string) *Auth {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return nil
+	}
+	p.mu.RLock()
+	src := p.credSrc
+	p.mu.RUnlock()
+	if src != nil {
+		if c, ok := src(uid); ok {
+			if a, err := authOf(c); err == nil {
+				return a
+			}
+		}
+	}
+	// 回落：扫目录（未注入凭证源时的测试路径）。
+	list, err := LoadDir(p.AuthDir())
+	if err != nil {
+		return nil
+	}
+	for _, a := range list {
+		if a.UID() == uid {
+			return a
+		}
+	}
+	return nil
+}
+
+// UIDs 列出本上游全部账号 uid（批量刷新额度用）。
+func (p *Provider) UIDs() []string {
+	p.mu.RLock()
+	en := p.uidEnumerator
+	p.mu.RUnlock()
+	if en != nil {
+		return en()
+	}
+	list, err := LoadDir(p.AuthDir())
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, a := range list {
+		out = append(out, a.UID())
+	}
+	return out
 }
 
 // New 构造一个上游实例。
@@ -85,7 +171,9 @@ func (p *Provider) ID() string { return ProviderID }
 //   - 没有 CredentialRefresher —— token 无法续期（见文件头），续期能力不该虚报。
 //     ⚠ 虚报的后果不是"多一个按钮"，而是 pool 的「能续期 ⇒ 必须有后台续期任务」
 //     守卫会被触发，要求我们注册一个根本没法实现的续期任务。所以如实不声明。
-func (p *Provider) Caps() gateway.Capability { return gateway.CapChat | gateway.CapModels }
+func (p *Provider) Caps() gateway.Capability {
+	return gateway.CapChat | gateway.CapModels | gateway.CapQuotaProbe | gateway.CapImport
+}
 
 // AuthDir 凭证目录（AuthDirExt）。
 func (p *Provider) AuthDir() string {
