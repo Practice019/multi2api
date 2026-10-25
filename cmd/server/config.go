@@ -403,6 +403,19 @@ type Config struct {
 		// 冷却/熔断中的账号，成功即提前恢复（额度"提前回血"的号不用干等）。
 		// 0 = 关闭主动探测（冷却到期自然恢复）。默认 600。
 		HealthCheckIntervalSeconds int `json:"health_check_interval_seconds"`
+		// ReviveProbeIntervalSeconds 「解封探测」周期：定时给**被自动禁用**的账号
+		// 发一个便宜请求探活，探通了就解除禁用（RecordAutoDisableSuccess）。
+		//
+		// # 为什么必须与上面那条分开、而且慢得多
+		//
+		// 冷却/熔断是"歇一会儿就好"（30 分钟量级），10 分钟探一次划算；
+		// 而自动禁用/被上游封禁的号，恢复往往要**天**级（风控解封、额度刷新周期）。
+		// 用 10 分钟的节奏去探它 = 每 10 分钟白打一次上游，既浪费又会持续
+		// 在对方风控日志里留下"这个号在反复试"的痕迹（可能反而延长封禁）。
+		//
+		// 所以给它一条独立、慢节奏的通道：默认 24 小时。
+		// 0 = 关闭解封探测（被禁的号只能靠人工恢复）。
+		ReviveProbeIntervalSeconds int `json:"revive_probe_interval_seconds"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -1173,6 +1186,8 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.HealthCheckIntervalSeconds = 600
+	// 解封探测默认 24 小时：被禁的号恢复要天级，探太勤是白打上游。
+	c.Pool.ReviveProbeIntervalSeconds = 86400
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"

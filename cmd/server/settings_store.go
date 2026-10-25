@@ -100,6 +100,7 @@ func (s *settingsStore) Snapshot() admin.Settings {
 		BreakerThreshold:      c.Pool.BreakerThreshold,
 		BreakerCooldown:       c.Pool.BreakerCooldown,
 		BreakerCooldownMax:    c.Pool.BreakerCooldownMax,
+		ReviveProbeHours:      reviveProbeHoursOf(c.Pool.ReviveProbeIntervalSeconds),
 		SanitizeFingerprints:  c.Features.SanitizeBlacklistFingerprints,
 		UpstashURL:            c.Upstash.URL,
 		SessionStickyEnabled:  c.SessionSticky.Enabled,
@@ -172,16 +173,39 @@ func (s *settingsStore) Apply(patch json.RawMessage) (applied, needRestart []str
 	// 只写盘、需重启才生效（上游 client 的超时、账号池限流器、Redis 连接
 	// 都是在启动时一次性装配的，运行中改不了；守卫轮间隔同理，
 	// 由上游在 SettingField.RestartRequired 里声明）。
-	needRestart = []string{
-		"cooldown_soft_rate",
-		"upstream_timeout_seconds", "upstream_header_timeout_seconds", "upstream_idle_timeout_seconds",
-		"pool_max_in_flight", "pool_breaker_threshold", "pool_breaker_cooldown", "pool_breaker_cooldown_max",
-		"sanitize_blacklist_fingerprints", "upstash_url",
-		"session_sticky_enabled", "session_sticky_ttl",
-	}
+	// ⚠ 从 admin 取，**不再在这里抄一份**：两边各一份时加字段必然漏一处，
+	//   而漏的那一处表现是"PUT 说要重启、GET 的 restart_fields 里没有"。
+	//   上游专属的"需重启"字段由各 SettingField.RestartRequired 声明，
+	//   与这份通用段清单由 handler 的 restartFields() 合并 —— 那才是唯一出口。
+	needRestart = admin.RestartRequiredFields()
 	// 把新值同步进内存 cfg，让 Snapshot 显示的就是刚保存的值。
 	s.applyToMemory(p)
 	return applied, needRestart, nil
+}
+
+// reviveProbeHoursOf 把 config 里的秒换算成设置页展示用的**小时**。
+//
+// # 为什么对外用小时、对内用秒
+//
+// 这个旋钮的粒度就是"天"级（默认 24 小时），用秒表示会得到 86400 这种
+// 一眼读不出的数；用小时则是 24 —— 用户能直接看懂并改。
+// 而 config 里沿用同族其它 interval 的秒制（health_check_interval_seconds）。
+//
+// # ⚠ 取整方向：**向上**取整，不能是四舍五入
+//
+// 四舍五入有个危险边界：secs=899（不到 1 小时但**开着**）会显示成 0 ——
+// 而 0 在本页的语义是"关闭"。用户会看到"解封探测：关闭"，
+// 但后台其实每 15 分钟探一次。向上取整后 899→1（"1 小时"），
+// **非零值永远显示为非零**，不会把"开着"说成"关着"。
+//
+// 代价：手改 config 成 5400（1.5h）时页面显示 2 小时。但那只影响**显示** ——
+// 调度器用的是启动时读到的 5400，页面不保存就不会改它；
+// 用户一旦保存，他本来就是在把值改成整数小时，不算意外。
+func reviveProbeHoursOf(secs int) int {
+	if secs <= 0 {
+		return 0 // 关闭态必须原样透出，不能被取整成 1
+	}
+	return (secs + 3599) / 3600
 }
 
 // parse 从原始补丁里取出**通用段**。
@@ -245,6 +269,7 @@ func (s *settingsStore) currentSettings() admin.Settings {
 		BreakerThreshold:      c.Pool.BreakerThreshold,
 		BreakerCooldown:       c.Pool.BreakerCooldown,
 		BreakerCooldownMax:    c.Pool.BreakerCooldownMax,
+		ReviveProbeHours:      reviveProbeHoursOf(c.Pool.ReviveProbeIntervalSeconds),
 		SanitizeFingerprints:  c.Features.SanitizeBlacklistFingerprints,
 		UpstashURL:            c.Upstash.URL,
 		SessionStickyEnabled:  c.SessionSticky.Enabled,
@@ -272,6 +297,7 @@ func (s *settingsStore) applyToMemory(p admin.Settings) {
 	c.Pool.BreakerThreshold = p.BreakerThreshold
 	c.Pool.BreakerCooldown = p.BreakerCooldown
 	c.Pool.BreakerCooldownMax = p.BreakerCooldownMax
+	c.Pool.ReviveProbeIntervalSeconds = p.ReviveProbeHours * 3600
 	c.Features.SanitizeBlacklistFingerprints = p.SanitizeFingerprints
 	c.Upstash.URL = p.UpstashURL
 	c.SessionSticky.Enabled = p.SessionStickyEnabled
@@ -327,6 +353,9 @@ func validateSettings(p admin.Settings) error {
 	}
 	if p.PoolMaxInFlight < 0 || p.BreakerThreshold < 0 {
 		return fmt.Errorf("账号池参数不能为负")
+	}
+	if p.ReviveProbeHours < 0 {
+		return fmt.Errorf("解封探测间隔不能为负（0 = 关闭）")
 	}
 	if p.CheckinLogKeepDays < 0 || p.RequestLogKeepDays < 0 {
 		return fmt.Errorf("日志保留天数不能为负")
@@ -397,6 +426,7 @@ func (s *settingsStore) persist(p admin.Settings) error {
 		{"pool", "breaker_threshold", p.BreakerThreshold},
 		{"pool", "breaker_cooldown", p.BreakerCooldown},
 		{"pool", "breaker_cooldown_max", p.BreakerCooldownMax},
+		{"pool", "revive_probe_interval_seconds", p.ReviveProbeHours * 3600},
 		{"features", "sanitize_blacklist_fingerprints", p.SanitizeFingerprints},
 		{"upstash", "url", p.UpstashURL},
 		{"session_sticky", "enabled", p.SessionStickyEnabled},
