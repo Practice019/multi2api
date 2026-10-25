@@ -14563,7 +14563,11 @@ let multCatalogFailed = false;
     //     · dcCursor  悬浮参考垂线
     //   PADL 从 4 放到 50 就是为了给左轴刻度文本腾位置（与 renderDailyTrendSVG 同值）。
     //   X 轴口径不变：24h 写 HH:MM、其余写 MM-DD，只标首/中/末（桶多时全标会糊）。
-    const W = 900, H = 200, PADL = 50, PADR = 14, PADT = 6, PADB = 20;
+    // ⚠⚠ 2026-10-26：PADT 从 6 放到 26 —— 给**柱顶读数**腾一行的高度。
+    //   用户点出来：「每一个柱状图顶部没有显示数值」。
+    //   下方 #dailyTrend 用的就是 26（它一直是带读数的），这里对齐它的值，
+    //   否则两图并排时柱子的可用高度不一样，看起来像"上面被压扁了"。
+    const W = 900, H = 200, PADL = 50, PADR = 14, PADT = 26, PADB = 20;
     const n = buckets.length;
     const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
     const step = plotW / n;
@@ -14646,6 +14650,28 @@ let multCatalogFailed = false;
         }
       }
       dcRects(marks, rects);
+    }
+
+    // ⚠⚠ 2026-10-26：**补上柱顶读数**。用户对比下方 #dailyTrend 点出来的：
+    //   「每一个柱状图顶部没有显示数值」。
+    //
+    // # 为什么每根都标（而不是"放不下就每隔 k 根标一根"）
+    //   与下方那张同一条判据 —— 用户 2026-10-18 的原话：
+    //   「所有的柱状图都需要显示数值」。
+    //   ⚠ 值短（1.2k / 3.4M），24 桶的间距排得下；真挤的时候由字号兜住，
+    //     不退回稀疏模式（那会让"能读到值"这件事时有时无）。
+    //
+    // # 标的是**该桶合计**（b.total），不是单段
+    //   这是堆叠柱：每段是某个模型的量，而"这根柱多高"才是读者要的数。
+    //   分模型明细走悬停浮层（那里带得出每一项）。
+    //
+    // # 峰值那根用强调色
+    //   与下方那张同一个手法 —— 一眼仍能看出最高的那根是哪个桶。
+    const peakIdx = buckets.findIndex((b) => b.total === peak);
+    for (let i = 0; i < n; i++) {
+      const b = buckets[i];
+      if (!b || b.total <= 0) continue;   // 空桶不标（标一个 0 会占位又没信息）
+      marks.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(yAt(b.total) - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(trendFmt(b.total))}</text>`);
     }
 
     // ⚠⚠ 2026-10-26：**补上折线**。用户对比下方 #dailyTrend 点出来的：

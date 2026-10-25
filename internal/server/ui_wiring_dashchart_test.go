@@ -182,6 +182,57 @@ func TestTopTrendChartUsesSharedLayerWithLine(t *testing.T) {
 	}
 }
 
+// TestBothBarChartsLabelEveryBarTop 两张柱状图都必须在**柱顶标数值**。
+//
+// # 为什么单独一条（用户两次点着看同一个缺口）
+//
+// 用户原话：「每一个柱状图顶部没有显示数值 你再对比一下」。
+// 下方 #dailyTrend 一直有柱顶读数，上方 #statsTrend 没有 —— 又是"两处慢慢漂移"。
+//
+// 判据取的是**读数那段代码的形状**（class="ax" + yAt(...) - 5 + 居中锚点），
+// 不是注释：注释里写着"标数值"、代码里没标的假通过是真实可能发生的
+// （本仓在 dcGrid 那条上已经吃过一次同款）。
+//
+// ⚠ 顺带钉住 PADT=26：那是给读数留的那一行高度。两张图必须同值 ——
+//
+//	不然并排看时可用绘图高度不同，看起来像"上面那张被压扁了"。
+func TestBothBarChartsLabelEveryBarTop(t *testing.T) {
+	ui := readWebUI(t)
+
+	// barsReportValues 判断一个绘图函数有没有"柱顶读数"。
+	barsReportValues := func(body string) bool {
+		return strings.Contains(body, "class=\"ax\"") &&
+			strings.Contains(body, "yAt(") &&
+			strings.Contains(body, "- 5).toFixed(1)") &&
+			strings.Contains(body, "text-anchor=\"middle\"")
+	}
+
+	for _, fn := range []string{"function renderTrendSVG(", "function renderDailyTrendSVG("} {
+		body := sliceFuncBody(t, ui, fn)
+		if body == "" {
+			t.Fatalf("webui.html 里找不到 %s", fn)
+		}
+		if !barsReportValues(body) {
+			t.Errorf("★ %s 里找不到柱顶读数 —— 用户点名的「每一个柱状图顶部都要显示数值」，"+
+				"而两张图只做了一张就会看起来像漏了", fn)
+		}
+	}
+
+	// PADT 必须都留出读数那一行的高度（26）。
+	//
+	// ⚠ 两种写法都要认：renderTrendSVG 是"和 W/H/PADL… 挤在一行"的
+	//   「PADT = 26,」，而 renderDailyTrendSVG 是单独一行的「PADT = 26;」。
+	//   第一版只写了带逗号的那种，结果这条断言在**正确的实现**上误报了 ——
+	//   守卫自己也是会错的，所以要按"共同子串"判，不按某一种排版判。
+	for _, fn := range []string{"function renderTrendSVG(", "function renderDailyTrendSVG("} {
+		body := sliceFuncBody(t, ui, fn)
+		if !strings.Contains(body, "PADT = 26") {
+			t.Errorf("★ %s 的 PADT 不是 26 —— 那是给柱顶读数留的一行高度；"+
+				"两张图同值才不会出现「上面那张被压扁」的错觉", fn)
+		}
+	}
+}
+
 // TestDashChartGridLinesAreEvenlyDivided 等分线必须在。
 //
 // 用户点名要的就是这个（「等分线」）。判据取**几何写法**而不是注释：
