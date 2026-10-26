@@ -731,3 +731,60 @@ func TestSetChannelStatusAllowsAutoDisabled(t *testing.T) {
 		t.Fatal("status=99 应当被拒")
 	}
 }
+
+// TestUpdateChannelRebuildsAbilitiesByColumnNotStaleGroups 回归：幽灵能力。
+//
+// 实测来源（wave1-a / B1）：把渠道从 vip 移出后，vip 组**仍能**选到它的模型。
+// 机制是「读出来的 Groups 内存态是旧值，而重建能力行时优先用了它」。
+// 本测试**故意**复现那个坏形态：读到 Groups=[default vip] 之后只改 Group 列、
+// 把内存态 Groups 篡改成旧值，再 UpdateChannel —— 能力行必须按**列**重建。
+func TestUpdateChannelRebuildsAbilitiesByColumnNotStaleGroups(t *testing.T) {
+	openTemp(t)
+	ch := newTestChannel("ghost", "m1", "default, vip")
+	id, err := CreateChannel(ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := AbilityRowsFor(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("建后应有 2 条能力行（m1 × default/vip），得到 %d", len(rows))
+	}
+	if cands, _ := AbilityCandidates("vip", "m1"); len(cands) != 1 {
+		t.Fatalf("前提不成立：vip 组此刻应当选得到: %+v", cands)
+	}
+	// 读出来：Groups 被 fillComputed 填成 [default vip]。
+	got, err := GetChannel(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Groups) != 2 {
+		t.Fatalf("读回时 Groups 应被填成 2 个，得到 %v", got.Groups)
+	}
+	// 只改列，并把内存态**故意**留在旧值（模拟"调用方忘了刷新 Groups"）。
+	got.Group = "default"
+	got.Groups = []string{"default", "vip"}
+	if err := UpdateChannel(got); err != nil {
+		t.Fatalf("UpdateChannel: %v", err)
+	}
+	// 能力行必须只剩 default —— 若这里还剩 2 条，就是幽灵能力复现。
+	rows, err = AbilityRowsFor(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("移出 vip 后能力行应为 1 条（只剩 default），得到 %d：%+v", len(rows), rows)
+	}
+	if cands, err := AbilityCandidates("vip", "m1"); err != nil {
+		t.Fatal(err)
+	} else if len(cands) != 0 {
+		t.Fatalf("幽灵能力：渠道已被移出 vip，vip 组仍能选到它: %+v", cands)
+	}
+	if cands, err := AbilityCandidates(AbilityDefaultGroup, "m1"); err != nil {
+		t.Fatal(err)
+	} else if len(cands) != 1 {
+		t.Fatalf("default 组应仍能选到它: %+v", cands)
+	}
+}

@@ -565,6 +565,13 @@ func New(cfg Config) *Handler {
 		h.registerGroups()
 	}
 
+	// 令牌（API Key）管理（Wave B4）：截图里「创建令牌」抽屉背后的语义。
+	//
+	// 判据比上面三条**更宽**：令牌数据在 SQL 真源里（store.DB），apikey.Store 只是
+	// 同一张表的老视图 —— 只配了 SQL 存储的部署也要能用令牌管理，所以门开在
+	// registerTokens 内部（APIKeys != nil || store.DB != nil），与「未注入就不注册」同一条约定。
+	h.registerTokens()
+
 	// 上游自注册的管理端点。放在最后：它**不得**覆盖上面的通用路由，
 	// 所以冲突时以先注册的为准（见 mountUpstreamRoutes）。
 	h.mountUpstreamRoutes()

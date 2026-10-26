@@ -9,19 +9,21 @@
 //     on top of the configured weight."
 //
 // 也就是：**priority 是耗尽阶梯，weight 是同一档内的分布旋钮**。
-// 本文件只做"随机候选"这一步；new-api 解析顺序里的 pin / session affinity 两步本轮不做
-// （它的顺序是 pin → affinity → random → filter check），留出同名入口便于将来补。
 //
-// ⚠ 失败**不返回 nil 了事**：new-api 返回 `ChannelSelectError`，带 HTTP status、error code、
-// 可本地化的 message id、filter kind，以及一个区分"这个组+模型确实没有渠道"与其它失败
-// （原文：a flag distinguishing "no channel for this group and model" from other failures）的标志。
+// ⚠ B1：候选来自 SQL（store.AbilityCandidates，**只取 enabled 的能力行**且 channel 的
+// priority/weight 由 JOIN 带出、顺序由 SQL 的 ORDER BY 保证）。本文件只做"档内随机"这一步。
+//
+// ⚠ 失败**不返回 nil 了事**：new-api 返回 ChannelSelectError，带 HTTP status、error code、
+// 可本地化的 message id、filter kind，以及区分"这个组+模型确实没有渠道"与其它失败的标志。
 // 我们照抄这个语义：调用方据此决定给客户端 400 还是 503，不用自己猜。
+// （B1 保留了全部四类错误的 Status/Code/MessageID/Filter/NoChannel 组合，语义逐字不变。）
 package channelstore
 
 import (
 	"fmt"
 	"math/rand"
-	"sort"
+
+	"workbuddy2api/internal/store"
 )
 
 // 选路失败的错误码。与 new-api 的固定码同款（它是字符串常量，便于前端/日志辨认）。
@@ -60,7 +62,7 @@ func (e *SelectError) Error() string {
 // Select 为 (group, model) 挑一条渠道。attempt 从 0 起（第 0 次是首次请求，第 n 次是第 n 次重试）。
 //
 // 与 new-api 一致：**第 n 次重试走第 n 档优先级**；档内按 weight 加权随机。
-// 返回的渠道是深拷贝；调用方拿它去连接上游（base_url + PickKey 选出的 key）。
+// 返回的渠道是**带明文 key** 的（转发要拿真 key 去发请求）——见 store.go 文件头的明文边界。
 func (s *Store) Select(group, model string, attempt int) (*Channel, error) {
 	if group == "" {
 		group = DefaultGroup
@@ -68,23 +70,15 @@ func (s *Store) Select(group, model string, attempt int) (*Channel, error) {
 	if attempt < 0 {
 		attempt = 0
 	}
-	s.mu.RLock()
-	cands := make([]*Ability, 0, 8)
-	for _, ab := range s.abilities {
-		if ab.Group == group && ab.Model == model && ab.Enabled {
-			cp := *ab
-			cands = append(cands, &cp)
+	// ① 候选由 SQL 给（enabled 的能力行 + channel 的 priority/weight），已按
+	//    priority DESC, weight DESC, channel_id ASC 排好 —— 排序语义与旧实现逐字一致。
+	cands, err := store.AbilityCandidates(group, model)
+	if err != nil {
+		return nil, &SelectError{
+			Status: 500, Code: CodeNoChannel, MessageID: "ability_query_failed",
+			Filter: FilterUnknown, NoChannel: false, Group: group, Model: model, Attempt: attempt,
 		}
 	}
-	// 取候选渠道（能力记录只有 ID，渠道本体在 channels 里）
-	chans := map[string]*Channel{}
-	for _, ab := range cands {
-		if ch, ok := s.channels[ab.ChannelID]; ok {
-			chans[ab.ChannelID] = ch
-		}
-	}
-	s.mu.RUnlock()
-
 	if len(cands) == 0 {
 		return nil, &SelectError{
 			Status: 400, Code: CodeNoChannel, MessageID: "no_channel_for_model",
@@ -92,19 +86,11 @@ func (s *Store) Select(group, model string, attempt int) (*Channel, error) {
 		}
 	}
 
-	// ① 按 priority 降序、同档按 weight 降序
-	sort.SliceStable(cands, func(i, j int) bool {
-		if cands[i].Priority != cands[j].Priority {
-			return cands[i].Priority > cands[j].Priority
-		}
-		return cands[i].Weight > cands[j].Weight
-	})
-
-	// ② 取出所有优先级档（去重、降序）——"阶梯"
+	// ② 取出所有优先级档（去重、降序）——"阶梯"。
 	tiers := make([]int, 0, 4)
-	for _, ab := range cands {
-		if len(tiers) == 0 || tiers[len(tiers)-1] != ab.Priority {
-			tiers = append(tiers, ab.Priority)
+	for _, c := range cands {
+		if len(tiers) == 0 || tiers[len(tiers)-1] != c.Priority {
+			tiers = append(tiers, c.Priority)
 		}
 	}
 	if attempt >= len(tiers) {
@@ -114,53 +100,60 @@ func (s *Store) Select(group, model string, attempt int) (*Channel, error) {
 		}
 	}
 
-	// ③ 取第 attempt 档（重试 n 次 ⇒ 第 n 档）
+	// ③ 取第 attempt 档（重试 n 次 ⇒ 第 n 档）。
 	want := tiers[attempt]
-	tier := make([]*Ability, 0, 4)
-	for _, ab := range cands {
-		if ab.Priority == want {
-			tier = append(tier, ab)
+	tier := make([]store.AbilityCandidate, 0, 4)
+	for _, c := range cands {
+		if c.Priority == want {
+			tier = append(tier, c)
 		}
 	}
 
 	// ④ 档内加权随机（weight ≤ 0 当 1 处理：权重 0 的渠道不该被饿死，
-	//    与 new-api "weight 是分布旋钮、不是开关"的口径一致；真正的开关是 status）
+	//    与 new-api"weight 是分布旋钮、不是开关"的口径一致；真正的开关是 status）。
 	total := 0
-	for _, ab := range tier {
-		w := ab.Weight
+	for _, c := range tier {
+		w := c.Weight
 		if w <= 0 {
 			w = 1
 		}
 		total += w
 	}
+	s.mu.Lock()
 	pick := s.rand.Intn(total)
+	s.mu.Unlock()
 	chosen := tier[len(tier)-1]
-	for _, ab := range tier {
-		w := ab.Weight
+	for _, c := range tier {
+		w := c.Weight
 		if w <= 0 {
 			w = 1
 		}
 		if pick < w {
-			chosen = ab
+			chosen = c
 			break
 		}
 		pick -= w
 	}
-	ch, ok := chans[chosen.ChannelID]
-	if !ok || ch == nil {
-		// 理论上不会发生（能力索引刻意与渠道同步）；真发生就是索引坏了，如实报。
+
+	// ⑤ 取渠道本体。能力行存在但渠道行不在 = 索引坏了，如实报（不要静默换一条）。
+	row, err := store.GetChannel(chosen.ChannelID)
+	if err != nil || row == nil {
 		return nil, &SelectError{
 			Status: 500, Code: CodeNoChannel, MessageID: "ability_without_channel",
 			Filter: FilterUnknown, NoChannel: false, Group: group, Model: model, Attempt: attempt,
 		}
 	}
-	if ch.Status != StatusEnabled {
+	if row.Status != StatusEnabled {
 		return nil, &SelectError{
 			Status: 503, Code: CodeNoChannel, MessageID: "channel_disabled",
 			Filter: FilterStatus, NoChannel: false, Group: group, Model: model, Attempt: attempt,
 		}
 	}
-	return cloneChannel(ch), nil
+	plain, kerr := store.GetChannelKeys(row.ID)
+	if kerr != nil {
+		plain = nil
+	}
+	return toChannelView(row, keysFromRowWith(row, plain)), nil
 }
 
 // TierCount 返回 (group, model) 的优先级档数 —— 调用方用它决定"最多重试几次"。
@@ -168,13 +161,13 @@ func (s *Store) TierCount(group, model string) int {
 	if group == "" {
 		group = DefaultGroup
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	cands, err := store.AbilityCandidates(group, model)
+	if err != nil {
+		return 0
+	}
 	seen := map[int]bool{}
-	for _, ab := range s.abilities {
-		if ab.Group == group && ab.Model == model && ab.Enabled {
-			seen[ab.Priority] = true
-		}
+	for _, c := range cands {
+		seen[c.Priority] = true
 	}
 	return len(seen)
 }
@@ -192,6 +185,6 @@ func (s *Store) PickKey(ch *Channel) string {
 	return key
 }
 
-// newRand 造一个选路用的随机源。测试用 NewWithRand 注入固定种子，保证分布判据可复现；
-// 生产走 New（种子里混时间，避免同秒起两个进程拿到同一序列）。
+// newRand 造一个选路用的随机源。测试用同包内的 s.rand = newRand(1) 注入固定种子，
+// 保证分布判据可复现；生产走 New（种子里混时间，避免同秒起两个进程拿到同一序列）。
 func newRand(seed int64) *rand.Rand { return rand.New(rand.NewSource(seed)) }

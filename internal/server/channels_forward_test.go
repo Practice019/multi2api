@@ -21,12 +21,21 @@ import (
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/openaicompat"
+	"workbuddy2api/internal/store"
 )
 
 const fwdKey = "sk-fake-upstream-key"
 
 func fwdStore(t *testing.T, mm map[string]string, status int) *channelstore.Store {
 	t.Helper()
+	// B1：SQL 是 channelstore 的后端 ⇒ 先开临时库。
+	if err := store.Open(filepath.Join(t.TempDir(), "gw.db")); err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("store.Migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	s, err := channelstore.New(filepath.Join(t.TempDir(), "channels.json"))
 	if err != nil {
 		t.Fatalf("建 store 失败: %v", err)

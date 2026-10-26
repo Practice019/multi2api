@@ -58,6 +58,7 @@ type PruneResult struct {
 //
 // 返回被清掉的模型名（按字典序，便于日志与界面展示）。
 func (s *Store) PruneModels(models []string) (PruneResult, error) {
+	s.maybeAttachSQL()
 	want := map[string]bool{}
 	for _, m := range models {
 		if m != "" {
@@ -115,6 +116,7 @@ func (s *Store) PruneModels(models []string) (PruneResult, error) {
 		res.ModelsGone = append(res.ModelsGone, m)
 	}
 	sort.Strings(res.ModelsGone)
+	s.markAllDirtyLocked()
 	return res, s.saveLocked()
 }
 
@@ -140,6 +142,7 @@ func (s *Store) PruneModels(models []string) (PruneResult, error) {
 // 另一种可选做法是「把这种 key 直接禁用」，但那更糟 —— 用户删一个分组
 // 把几把 key 停掉，同样是没预期的事故，而且更难恢复（要回管理页逐把启用）。
 func (s *Store) PruneGroups(groupIDs []string) (PruneResult, error) {
+	s.maybeAttachSQL()
 	var res PruneResult
 	want := map[string]bool{}
 	for _, g := range groupIDs {
@@ -189,5 +192,6 @@ func (s *Store) PruneGroups(groupIDs []string) (PruneResult, error) {
 	}
 	sort.Strings(res.GroupsGone)
 	sort.Strings(res.KeysUnrestricted)
+	s.markAllDirtyLocked()
 	return res, s.saveLocked()
 }

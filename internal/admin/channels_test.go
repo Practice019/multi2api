@@ -18,12 +18,21 @@ import (
 	"testing"
 
 	"workbuddy2api/internal/channelstore"
+	"workbuddy2api/internal/store"
 )
 
 const chanTestKey = "sk-channel-secret-plaintext"
 
 func chanStore(t *testing.T) *channelstore.Store {
 	t.Helper()
+	// B1：SQL 是 channelstore 的后端 ⇒ 先开临时库。
+	if err := store.Open(filepath.Join(t.TempDir(), "gw.db")); err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("store.Migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	s, err := channelstore.New(filepath.Join(t.TempDir(), "channels.json"))
 	if err != nil {
 		t.Fatalf("建渠道存储失败: %v", err)
