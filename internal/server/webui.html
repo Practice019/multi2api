@@ -3295,7 +3295,15 @@ function mpEsc(s) {
        反面教材：漏了这个 section，页面本体与路由都在，但控制台里永远点不进去、且没有任何报错
        —— 所以 tests/frontend/verify_tokens_page.js 的第一条断言就是它。 -->
   <section data-key="tokens">
-    <iframe id="tkFrame" class="uiframe" src="/ui/tokens" title="令牌管理" loading="lazy"></iframe>
+    <!-- ⚠⚠ iframe 的尺寸由**本行内联 style** 决定 —— 不要改成「依赖 class」。
+         全仓**没有任何 iframe 类规则**（grep 样式区 iframe|uiframe = 0 命中）：C3 当初自造了
+         class="uiframe"，它零命中 ⇒ 这个框退回**浏览器默认 300×150**，表现为
+         「内容挤在顶部一条窄带、工具栏被裁、下方整片空白、空态落在视口之外」
+         （T77 实测 frame=304×154、innerH=150、header 高 177 > 150）。
+         新增第五、六个页面时，请与上面 stFrame / mdFrame / chFrame / grpFrame **逐字同款**。
+         尺寸断言在 tests/frontend/verify_tokens_page.js 的 [K] 段（两档宽度）。 -->
+    <iframe id="tkFrame" src="/ui/tokens" title="令牌管理" loading="lazy"
+            style="width:100%;height:calc(100vh - 190px);min-height:460px;border:0;display:block"></iframe>
   </section>
   <section data-key="accounts">
     <h2>账号池
