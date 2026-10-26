@@ -85,6 +85,7 @@ type CreateGroupFunc func(name string, models []string) (id string, err error)
 // 第二个必然撞。这里**加后缀重试**而不是整段失败：迁移是启动时跑的一次性动作，
 // 因为"重名"而整段中止意味着后面的 key 全都不迁，而它们本来没有问题。
 func MigrateModelsToGroups(s *Store, createGroup CreateGroupFunc) (MigrateResult, error) {
+	s.maybeAttachSQL()
 	var res MigrateResult
 	if s == nil || createGroup == nil {
 		return res, nil
@@ -177,6 +178,7 @@ func (s *Store) applyMigration(id, groupID string) error {
 	k.Groups = normalizeGroups([]string{groupID})
 	k.Models = nil
 	k.MigratedToGroups = true
+	s.markDirtyLocked(id)
 	if err := s.saveLocked(); err != nil {
 		// 落盘失败 ⇒ 内存回到迁移前，否则会出现"这个进程里已迁移、重启后又回到
 		// 白名单"的幽灵状态（与 CreateOwned 的撤回同一做法）。

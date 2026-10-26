@@ -79,6 +79,8 @@ func (s *Store) CreateOwnedWithGroups(owner, name string, limit int64, rpm int, 
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
 	s.keys[k.ID] = k
+	s.indexBearerLocked(k)
+	s.markDirtyLocked(k.ID)
 	if err := s.saveLocked(); err != nil {
 		// 落盘失败就把内存里的新记录撤回：否则会出现"这个进程里能用、
 		// 重启后 key 不存在"的幽灵 key（与改造前的 Create 同一做法）。
@@ -105,6 +107,7 @@ func (s *Store) CreateOwnedWithGroups(owner, name string, limit int64, rpm int, 
 // 过滤走 List() 的结果，不另抄一份视图构造：View 将来加字段时只需要改一处。
 // 单机规模（几十把 key）多构造几行视图不值一提。
 func (s *Store) ListFor(owner string, isAdmin bool) []View {
+	s.maybeAttachSQL()
 	if s == nil {
 		return []View{}
 	}
@@ -130,6 +133,7 @@ func (s *Store) ListFor(owner string, isAdmin bool) []View {
 // 找不到时回空串 + false —— 调用方必须用第二个返回值区分"归属为空（管理员
 // 所有）"与"根本没这把 key"，只看字符串会把两者混成一个。
 func (s *Store) OwnerOf(id string) (string, bool) {
+	s.maybeAttachSQL()
 	if s == nil {
 		return "", false
 	}
@@ -157,6 +161,7 @@ func (s *Store) OwnerOf(id string) (string, bool) {
 // 与 ListFor 同一套判据的两种形态：能看见才谈得上管（改了别人的 key
 // 额度、删掉别人的 key，都是同一个越权面）。
 func (s *Store) CanManage(owner string, isAdmin bool, id string) bool {
+	s.maybeAttachSQL()
 	if s == nil {
 		return false
 	}

@@ -6,14 +6,16 @@
 package channelstore
 
 import (
-	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
+
+	"workbuddy2api/internal/store"
 )
 
 func newTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
+	// B1：SQL 是存储后端 ⇒ 先开临时库；path 仍传"历史文件"路径（不存在 = 空库，只打一行日志）。
+	openTestDB(t)
 	path := filepath.Join(t.TempDir(), "channels.json")
 	s, err := New(path)
 	if err != nil {
@@ -33,20 +35,23 @@ func ch(id string, models ...string) *Channel {
 	}
 }
 
-// ① 落盘 + 重载：渠道与能力都还在。
+// ① 写入 + 重载：渠道与能力都还在。
+//
+// ⚠ B1：断言从"文件落盘 + 0600 权限"换成"SQL 读回"。旧断言针对 channels.json，
+// 而那个文件已经不是权威了（权威是 data/gw.db，它的权限由 store 侧负责）；
+// 继续断言文件存在会变成"测一个已经废弃的产物"。
 func TestUpsertPersistsAndReloads(t *testing.T) {
 	s, path := newTestStore(t)
 	if err := s.Upsert(ch("c1", "m-a", "m-b")); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("应已落盘: %v", err)
+	// 直接问 SQL：这一行真的在库里（不是躺在某个内存缓存里）。
+	row, ok, err := store.GetChannelByExternalID("c1")
+	if err != nil {
+		t.Fatalf("按外部 id 查 SQL: %v", err)
 	}
-	// 权限必须是 0600（里面有 key）。
-	// ⚠ Windows 不认 POSIX 权限位（Chmod(0600) 之后 Mode().Perm() 报 -rw-rw-rw-），
-	// 所以这条只在非 Windows 上断言 —— 否则是"判据错、不是代码错"（2026-10-20 踩到）。
-	if fi, err := os.Stat(path); err == nil && runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
-		t.Fatalf("渠道文件权限应为 0600，实际 %v", fi.Mode().Perm())
+	if !ok || row == nil {
+		t.Fatalf("SQL 里应有 external_id=c1 的行（ok=%v）", ok)
 	}
 
 	s2, err := New(path)

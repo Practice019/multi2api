@@ -6,7 +6,9 @@
 // 分开发放、限额、看各自用量）。new-api 的令牌体系提供：多把 key、每把可
 // 启用/禁用、额度配额、速率限制、用量统计。本包实现它的单机简化版：
 //
-//	持久化：data/apikeys.json（JSON，原子写，与 config.json 同级安全考虑）
+//	持久化：**SQL（tokens 表，见 sql.go）**。Wave B2 起库是真源：首次接管时把
+//	         data/apikeys.json 一次性导入（幂等），此后 JSON **只读不写**；
+//	         库不可用（store.DB == nil，如单测）时仍退回原来的 JSON 原子写。
 //	额度：  每把 key 一个 token 上限（0 = 不限），请求成功按实际 token 扣减
 //	限速：  每把 key 每分钟请求上限（0 = 不限），进程内滑动窗口
 //	统计：  请求数 / 消耗 token / 失败数
@@ -29,7 +31,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"workbuddy2api/internal/store"
 )
 
 // 错误哨兵：Validate 的返回，供 HTTP 层映射状态码。
@@ -42,6 +47,10 @@ var (
 	ErrQuota = errors.New("apikey: 额度已用完")
 	// ErrRateLimit key 触发每分钟请求上限。
 	ErrRateLimit = errors.New("apikey: 请求过于频繁（触发每分钟上限）")
+	// ErrExpired key 已过期（SQL 后端的 expired_time 已过，或库里 status=3）。
+	//
+	// 与 ErrDisabled 分开是有用的：前端/运维看到"过期"会去续期，看到"禁用"会去查谁关的。
+	ErrExpired = errors.New("apikey: API key 已过期")
 )
 
 // Key 一把 API key 的完整状态（持久化字段）。
@@ -55,6 +64,18 @@ type Key struct {
 	Fails     int64  `json:"fails"`      // 失败请求数
 	RPM       int    `json:"rpm"`        // 每分钟请求上限，0 = 不限
 	CreatedAt string `json:"created_at"` // RFC3339
+
+	// ExpiredTime 到期时刻（Unix 秒）；0 与 -1 都表示"永不"。
+	//
+	// 这是 SQL 化后新增的字段：apikey 原来没有过期概念，而 tokens 表有 expired_time
+	// （hyxapi 对等），B2 的验收要求"过期"能作为一种拒绝理由。omitempty 让老 JSON
+	// 文件写回时不多出这个字段。
+	ExpiredTime int64 `json:"expired_time,omitempty"`
+
+	// sqlStatus 是 SQL 后端的**原始 status**（1启用/2禁用/3过期/4耗尽）；0 = 无
+	// SQL 状态（JSON 模式）⇒ 由 Enabled 推导。不导出：它只服务于本包内 Validate
+	// 的精确报错，不该出现在任何对外形态里。
+	sqlStatus int
 
 	// OwnerID 归属账号 ID（`account.User.ID`，形如 u-xxxx）。**空 = 管理员所有**。
 	//
@@ -211,6 +232,14 @@ type Store struct {
 	mu   sync.Mutex
 	keys map[string]*Key // key(id) → 状态
 
+	// ↓ SQL 模式（Wave B2）新增，详见 sql.go 文件头
+	byBearer   map[string]string   // Bearer 候选 → key ID（Validate 热路径 O(1) 查表）
+	rowIDs     map[string]int      // key ID → tokens.id（计量走单条原子 UPDATE 要用）
+	dirty      map[string]struct{} // 待写回库的 key
+	pendingDel []string            // 待软删的 key
+	sqlMode    atomic.Bool         // 已接管为 SQL 模式（热路径一次原子读）
+	attachMu   sync.Mutex          // 接管互斥：懒接管与显式装配共用
+
 	// rateHits 限速滑动窗口：id → 最近 60s 的请求时刻（进程内，不持久化）。
 	rateHits map[string][]time.Time
 
@@ -234,14 +263,23 @@ func New(path string) (*Store, error) {
 		path:     path,
 		keys:     make(map[string]*Key),
 		rateHits: make(map[string][]time.Time),
+		byBearer: make(map[string]string),
+		rowIDs:   make(map[string]int),
+		dirty:    make(map[string]struct{}),
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 首次运行：空表，落盘一个空文件以便文件位置可发现。
-			if err := s.saveLocked(); err != nil {
-				return nil, err
+			// 首次运行：JSON 模式下落盘一个空文件以便文件位置可发现。
+			//
+			// ⚠ SQL 可用时不落这个文件：真源已经是 tokens 表，还去 data/ 下造一个
+			// 永远不会更新的 apikeys.json，只会让人以为"数据还在文件里"。
+			if store.DB == nil {
+				if err := s.saveLocked(); err != nil {
+					return nil, err
+				}
 			}
+			s.maybeAttachSQL()
 			return s, nil
 		}
 		return nil, fmt.Errorf("读取 apikeys: %w", err)
@@ -253,13 +291,19 @@ func New(path string) (*Store, error) {
 	for _, k := range arr {
 		if k != nil && k.ID != "" {
 			s.keys[k.ID] = k
+			s.indexBearerLocked(k)
 		}
 	}
+	s.maybeAttachSQL()
 	return s, nil
 }
 
 // saveLocked 原子写盘（先写临时文件再 rename）。调用方必须持锁。
 func (s *Store) saveLocked() error {
+	// SQL 模式：真源在库，只把脏行写回去（JSON 那份**只读不写**）。
+	if s.sqlMode.Load() {
+		return s.flushSQLLocked()
+	}
 	arr := make([]*Key, 0, len(s.keys))
 	for _, k := range s.keys {
 		arr = append(arr, k)
@@ -368,6 +412,7 @@ func normalizeModelMap(in map[string]string) map[string]string {
 //
 // 空切片 = 不限制。调用方（出口层）用它做准入判断 —— 见 ModelAllowed。
 func (s *Store) ModelsOf(id string) ([]string, bool) {
+	s.maybeAttachSQL()
 	if s == nil {
 		return nil, false
 	}
@@ -397,6 +442,7 @@ func (s *Store) ModelsOf(id string) ([]string, bool) {
 //
 // ⚠ 返回副本：调用方 append 一下就写到我们的底层数组上了。
 func (s *Store) GroupsOf(id string) ([]string, bool) {
+	s.maybeAttachSQL()
 	if s == nil {
 		return nil, false
 	}
@@ -449,6 +495,7 @@ func normalizeGroups(in []string) []string {
 // 很容易顺手写成 `for k, v := range` 之外还 `delete(m, k)`），那会污染 store 里的
 // 权威数据 —— 而这份数据下一次保存就被写进盘了。
 func (s *Store) ModelMapOf(id string) (map[string]string, bool) {
+	s.maybeAttachSQL()
 	if s == nil {
 		return nil, false
 	}
@@ -488,6 +535,7 @@ func (s *Store) ModelMapOf(id string) (map[string]string, bool) {
 
 // List 返回全部 key 的掩码视图（按创建时间排序）。
 func (s *Store) List() []View {
+	s.maybeAttachSQL()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]View, 0, len(s.keys))
@@ -537,6 +585,7 @@ func (s *Store) List() []View {
 
 // Toggle 启用/禁用一把 key。
 func (s *Store) Toggle(id string, enabled bool) (bool, error) {
+	s.maybeAttachSQL()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k, ok := s.keys[id]
@@ -547,6 +596,7 @@ func (s *Store) Toggle(id string, enabled bool) (bool, error) {
 		return k.Enabled, nil
 	}
 	k.Enabled = enabled
+	s.markDirtyLocked(id)
 	if err := s.saveLocked(); err != nil {
 		return k.Enabled, err
 	}
@@ -555,6 +605,7 @@ func (s *Store) Toggle(id string, enabled bool) (bool, error) {
 
 // Delete 删除一把 key。成功返回 true；不存在返回 ErrUnknown。
 func (s *Store) Delete(id string) error {
+	s.maybeAttachSQL()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.keys[id]; !ok {
@@ -562,6 +613,9 @@ func (s *Store) Delete(id string) error {
 	}
 	delete(s.keys, id)
 	delete(s.rateHits, id)
+	s.unindexBearerLocked(id)
+	// SQL 模式：记下待删（soft delete —— select 行还在，只是所有读路径看不见）。
+	s.pendingDel = append(s.pendingDel, id)
 	return s.saveLocked()
 }
 
@@ -584,6 +638,7 @@ func (s *Store) Delete(id string) error {
 // 两条都是"用户没动过的字段被悄悄改掉"，而界面上看不出任何异常。
 // 与 settings 里"漏带字段 = 重置"同型（本仓在 disabledModels 上踩过）。
 func (s *Store) Update(id string, limit *int64, rpm *int, models []string, modelMap ...map[string]string) error {
+	s.maybeAttachSQL()
 	return s.UpdateWithGroups(id, limit, rpm, models, nil, modelMap...)
 }
 
@@ -643,11 +698,13 @@ func (s *Store) UpdateWithGroups(id string, limit *int64, rpm *int, models, grou
 	if len(modelMap) > 0 && modelMap[0] != nil {
 		k.ModelMap = normalizeModelMap(modelMap[0])
 	}
+	s.markDirtyLocked(id)
 	return s.saveLocked()
 }
 
 // Reset 重置已用额度与失败数（请求数保留）。
 func (s *Store) Reset(id string) error {
+	s.maybeAttachSQL()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k, ok := s.keys[id]
@@ -656,6 +713,7 @@ func (s *Store) Reset(id string) error {
 	}
 	k.Used = 0
 	k.Fails = 0
+	s.markDirtyLocked(id)
 	return s.saveLocked()
 }
 
@@ -667,22 +725,42 @@ func (s *Store) Reset(id string) error {
 //	ErrQuota                → 402
 //	ErrRateLimit            → 429
 func (s *Store) Validate(bearer string) (string, error) {
+	s.maybeAttachSQL()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k, ok := s.keys[bearer]
-	if !ok {
+	// Bearer 先归一化成候选（原样 / 剥 sk- / 丢第一个 - 之后的部分），
+	// 于是 sk- 形态与 48 位裸串两种写法都能命中同一把 key（见 sql.go 文件头）。
+	k, id := s.lookupBearerLocked(bearer)
+	if k == nil {
 		return "", ErrUnknown
 	}
+	// 判定顺序：库侧原始状态 → 手动禁用 → 过期 → 额度 → 限速。
+	//
+	// ① 库侧原始状态（SQL 模式才有；JSON 模式恒为 0）：status=3/4 是库侧
+	//    "已被判过期/耗尽"的落库结果，比按字段重算更权威。
+	switch k.sqlStatus {
+	case store.TokenStatusExpired:
+		return "", ErrExpired
+	case store.TokenStatusExhausted:
+		return "", ErrQuota
+	}
+	// ② 手动禁用：Enabled=false 只表示"被关掉了"，与过期/耗尽区分开报错。
 	if !k.Enabled {
 		return "", ErrDisabled
 	}
+	// ③ 过期：0 与 -1 都表示"永不"（老 JSON 文件里没有这个字段 ⇒ 0）。
+	if k.ExpiredTime > 0 && k.ExpiredTime < time.Now().Unix() {
+		return "", ErrExpired
+	}
+	// ④ 额度：Limit>0 才判（0 = 不限）。
 	if k.Limit > 0 && k.Used >= k.Limit {
 		return "", ErrQuota
 	}
-	if k.RPM > 0 && !s.rateOKLocked(k.ID, k.RPM) {
+	// ⑤ 限速：滑动窗口（rateHits 仍是进程内状态，不进库 —— 重启即清空是限速该有的行为）。
+	if k.RPM > 0 && !s.rateOKLocked(id, k.RPM) {
 		return "", ErrRateLimit
 	}
-	return k.ID, nil
+	return id, nil
 }
 
 // rateOKLocked 记录一次命中并判断是否超速（滑动窗口 60s）。调用方必须持锁。
@@ -708,6 +786,7 @@ func (s *Store) rateOKLocked(id string, rpm int) bool {
 // 幂等由调用方保证（一次请求只调一次）。持久化失败只记日志不返回错误——
 // 用量统计是尽力而为，不能因为写盘失败让请求失败。
 func (s *Store) BumpUsage(id string, tokens int64, ok bool) {
+	s.maybeAttachSQL()
 	s.mu.Lock()
 	k, found := s.keys[id]
 	if !found {
@@ -721,6 +800,13 @@ func (s *Store) BumpUsage(id string, tokens int64, ok bool) {
 		}
 	} else {
 		k.Fails++
+	}
+	if s.sqlMode.Load() {
+		// SQL 模式：热路径走单条原子 UPDATE（requests+1 / used+tokens / 非无限额度扣 remain），
+		// 不是"只加内存" —— 重启后从库里读回来仍在（B2 验收④）。
+		s.persistUsageLocked(id, tokens, ok)
+		s.mu.Unlock()
+		return
 	}
 	err := s.saveLocked()
 	s.mu.Unlock()

@@ -7,10 +7,19 @@ import (
 	"testing"
 
 	"workbuddy2api/internal/channelstore"
+	sqlstore "workbuddy2api/internal/store"
 )
 
 func store(t *testing.T) *channelstore.Store {
 	t.Helper()
+	// B1：SQL 是 channelstore 的后端 ⇒ 先开临时库。
+	if err := sqlstore.Open(filepath.Join(t.TempDir(), "gw.db")); err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := sqlstore.Migrate(); err != nil {
+		t.Fatalf("store.Migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlstore.Close() })
 	s, err := channelstore.New(filepath.Join(t.TempDir(), "channels.json"))
 	if err != nil {
 		t.Fatalf("建 store 失败: %v", err)

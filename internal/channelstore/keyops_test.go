@@ -15,6 +15,7 @@ import (
 
 func newKeyTestStore(t *testing.T) *Store {
 	t.Helper()
+	openTestDB(t) // B1：SQL 是存储后端，先开临时库
 	s, err := New(filepath.Join(t.TempDir(), "channels.json"))
 	if err != nil {
 		t.Fatalf("建存储失败: %v", err)

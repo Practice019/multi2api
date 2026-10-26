@@ -12,6 +12,8 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"workbuddy2api/internal/channelstore"
 )
@@ -161,4 +163,171 @@ func (h *Handler) channelsKeysDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	views, _ := s.KeysView(req.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "keys": views})
+}
+
+// ── B3：多 Key 的批量动作 ──────────────────────────────────────────────────
+
+// channelsKeysSummary GET /admin/channels/keys/summary?id=ch-x
+//
+// 「查状态」的汇总视图：几把启用、几把停用、当前选择模式。
+// 只给计数与掩码，不给明文（明文仍只有 keys?reveal=1 那一个显式入口）。
+func (h *Handler) channelsKeysSummary(w http.ResponseWriter, r *http.Request) {
+	s := h.channelsStore()
+	if s == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道功能未启用"})
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id 必填"})
+		return
+	}
+	views, err := s.KeysView(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	enabled, disabled := 0, 0
+	for _, v := range views {
+		if v.Status == channelstore.StatusEnabled {
+			enabled++
+		} else {
+			disabled++
+		}
+	}
+	mode := ""
+	if ch, ok := s.Get(id); ok && ch != nil {
+		mode = ch.ChannelInfo.KeySelectionMode
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": id, "key_count": len(views), "enabled": enabled, "disabled": disabled,
+		"key_selection_mode": mode, "keys": views,
+	})
+}
+
+// channelsKeysStatusAll POST /admin/channels/keys/status-all  {"id":"ch-x","status":1|2}
+//
+// 全启 / 全禁。逐个下标调 SetKeyStatus（**每次它自己持 per-channel 锁**）——
+// 刻意不在外层再持一把锁：那一层已经持了，外面再持就是自锁（sync.Mutex 不可重入）。
+//
+// 代价写清楚：不是单个事务，中途失败会留下"改了一半"的状态；返回的 changed 就是
+// 已经改掉的条数，调用方据此知道发生了什么（重试是幂等的：再跑一次会把剩下的改完）。
+func (h *Handler) channelsKeysStatusAll(w http.ResponseWriter, r *http.Request) {
+	s := h.channelsStore()
+	if s == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道功能未启用"})
+		return
+	}
+	var req struct {
+		ID     string `json:"id"`
+		Status int    `json:"status"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || strings.TrimSpace(req.ID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id 必填"})
+		return
+	}
+	// 与单把操作同一口径：只允许 1/2（3 是系统写的自动停用）。
+	if req.Status != channelstore.StatusEnabled && req.Status != channelstore.StatusManuallyDisabled {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "status 只能是 1(启用)/2(手动停用)；3(自动停用)由系统写入",
+		})
+		return
+	}
+	views, err := s.KeysView(req.ID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	reason := ""
+	if req.Status == channelstore.StatusManuallyDisabled {
+		reason = channelstore.ReasonManual
+	}
+	changed := 0
+	for i := range views {
+		if views[i].Status == req.Status {
+			continue
+		}
+		if err := s.SetKeyStatus(req.ID, i, req.Status, reason); err != nil {
+			writeJSON(w, http.StatusBadRequest,
+				map[string]any{"error": "已改 " + strconv.Itoa(changed) + " 把后失败: " + err.Error(), "changed": changed})
+			return
+		}
+		changed++
+	}
+	after, _ := s.KeysView(req.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": changed, "key_count": len(views), "keys": after})
+}
+
+// channelsKeysDeleteDisabled POST /admin/channels/keys/delete-disabled  {"id":"ch-x"}
+//
+// 删掉所有**已停用**的 key（保留启用中的）。
+//
+// ⚠ 必须**从大到小**删：RemoveKey 按下标删并把后面的前移，正序删会漏掉一半
+// （删完 0，原本的 1 变成 0，而循环已经走到 1 了）。这个 off-by-one 在
+// "停用的 key 恰好相邻"时才暴露，而那时用户已经点了几十次 —— 如实写在代码里。
+func (h *Handler) channelsKeysDeleteDisabled(w http.ResponseWriter, r *http.Request) {
+	s := h.channelsStore()
+	if s == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道功能未启用"})
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || strings.TrimSpace(req.ID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id 必填"})
+		return
+	}
+	views, err := s.KeysView(req.ID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	var idxs []int
+	for i := range views {
+		if views[i].Status != channelstore.StatusEnabled {
+			idxs = append(idxs, i)
+		}
+	}
+	removed := 0
+	for i := len(idxs) - 1; i >= 0; i-- {
+		if err := s.RemoveKey(req.ID, idxs[i]); err != nil {
+			writeJSON(w, http.StatusBadRequest,
+				map[string]any{"error": "已删 " + strconv.Itoa(removed) + " 把后失败: " + err.Error(), "removed": removed})
+			return
+		}
+		removed++
+	}
+	after, _ := s.KeysView(req.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed, "key_count": len(after), "keys": after})
+}
+
+// channelsKeysMode POST /admin/channels/keys/mode  {"id":"ch-x","mode":"random"|"round_robin"}
+//
+// 多 Key 的选择模式（hyxapi 的 multi_key_mode）。空串 = 保持原值 —— 与
+// POST /admin/channels 里 key_selection_mode 的口径一致（那边也是空 = 不改）。
+func (h *Handler) channelsKeysMode(w http.ResponseWriter, r *http.Request) {
+	s := h.channelsStore()
+	if s == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道功能未启用"})
+		return
+	}
+	var req struct {
+		ID   string `json:"id"`
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || strings.TrimSpace(req.ID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id 必填"})
+		return
+	}
+	mode := strings.TrimSpace(req.Mode)
+	if mode != "random" && mode != "round_robin" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "mode 只能是 random / round_robin"})
+		return
+	}
+	if err := s.SetKeySelectionMode(req.ID, mode); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key_selection_mode": mode})
 }

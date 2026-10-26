@@ -702,18 +702,35 @@ func IsValidChannelStatus(status int) bool {
 		status == ChannelStatusAutoDisabled
 }
 
-// GroupsOf 取这条渠道声明的分组（Group 列，逗号分隔）。
+// GroupsOf 取这条渠道声明的分组，**以 Group 列为唯一事实来源**。
 //
-// 优先用计算字段 Groups（调用方可能已经拆好）；否则现拆 Group 列。
-// 空 ⇒ 由 ability.go 的 normalizeAbilityGroups 落到唯一默认分组 default。
+// # ⚠ 为什么不能让内存态 Groups 优先（wave1-a 在 B1 实测到的"幽灵能力"）
+//
+// Channel.Groups 是 gorm:"-" 的计算字段，由读路径（GetChannel /
+// GetChannelByExternalID / fillComputed）在**读取那一刻**按当时的 Group 列填。
+// 若这里写成"len(c.Groups) > 0 就先用它"，下面这条链会**静默**出错：
+//
+//	读出来（Groups=[default vip]）→ 调用方只改 Group 列（改成 default）
+//	→ UpdateChannel → GroupsOf() 取到**旧的内存态** → 能力行按旧分组重建
+//	⇒ 渠道已被移出 vip，vip 组却仍能选到它的模型：选路照旧命中，且不报任何错。
+//
+// 实测来源：wave1-a（B1）在 internal/channelstore 把渠道从 vip 移出后，vip 组
+// 仍能选到它的模型；它在 applyChannelToRow 里同步写 Groups 规避，但**任何直接
+// 调用 UpdateChannel 的调用方都会踩**。所以护栏必须在本层。
+//
+// 判据：**列优先**；只有列为空时才回落内存态（兼容"调用方只构造了 Groups、
+// 没写 Group 列"的调用点）。UpdateChannel 入口还会再做一次同样的归一（双保险）。
 func (c *Channel) GroupsOf() []string {
 	if c == nil {
 		return nil
 	}
+	if g := splitAbilityCSV(c.Group); len(g) > 0 {
+		return g
+	}
 	if len(c.Groups) > 0 {
 		return c.Groups
 	}
-	return splitAbilityCSV(c.Group)
+	return nil
 }
 
 // OtherInfoMap 解析 OtherInfo（JSON 文本）。
@@ -809,6 +826,10 @@ func UpdateChannel(ch *Channel) error {
 	if ch.Status != 0 && !IsValidChannelStatus(ch.Status) {
 		return fmt.Errorf("%w：status=%d 非法", ErrBadChannel, ch.Status)
 	}
+	// ⚠ 以列为准（幽灵能力的第二道保险，见 GroupsOf 的注释）：内存态 Groups 可能
+	// 是"读取那一刻"的旧值，调用方改了 Group 列却忘了刷新它。这里先归一，
+	// 保证下面重建能力行用的是**列**里的分组。
+	ch.Groups = splitAbilityCSV(ch.Group)
 	// per-channel 锁：channel_info 是整块 JSON 快照，读-改-写要串行（D2 ②）。
 	lock := GetChannelLock(ch.ID)
 	lock.Lock()

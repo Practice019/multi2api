@@ -1280,15 +1280,65 @@ func main() {
 		authsRoot = "auths"
 	}
 
+	// ── 数据层：SQL 成为权威（T63 起提到**所有**存储构造之前）─────────────
+	//
+	// # 为什么必须在最前面（T63 修的 P0：服务器起不来）
+	//
+	// 原先这一块排在 apikey.New(:1289) / channelstore.New(:1324) 之后约 150 行，
+	// 当时的理由是"account.Store / SessionStore 是双模的（store.DB 打开就写 SQL）"。
+	// 但 Wave 1 之后 channelstore 与 apikey 都**要求库已经打开**：
+	//
+	//	· channelstore.New    → 报 "channelstore: 数据库未打开（需要先 store.Open + store.Migrate）"
+	//	· apikey.NewWithStore → 要求 store.DB != nil，否则报错（不静默退化）
+	//
+	// 顺序一反过来进程就**起不来**，而错误信息离现场很远（"数据库未打开"被打在
+	// "load channels" 里）。所以先有库，再构造任何存储。
+	//
+	// # 顺序 Open → Migrate
+	//
+	// Open 只负责连接（+ 建父目录），Migrate 才建表/补列。反过来会让第一次查询撞
+	// no such table，而那条错误离现场很远（见 internal/store/db.go 的注释）。
+	// 打不开 / 建不了表**直接 Fatal**：半切换（SQL 不可用又继续用 JSON）会造出
+	// 第二份真相，比启动失败难查得多 —— 更不能静默降级成空库（那会变成
+	// "服务起来了但渠道全没了"，比起不来更坏）。
+	//
+	// # 路径
+	//
+	// data/gw.db（相对 CWD，与 data/accounts.json、data/sessions.json 同惯例）。
+	// 所以启动必须走 start.bat（它 cd 到仓库根）—— 与既有那条运维纪律同源。
+	dbPath := filepath.Join("data", "gw.db")
+	if err := sqlstore.Open(dbPath); err != nil {
+		log.Fatalf("数据层: 打开 %s 失败: %v", dbPath, err)
+	}
+	if err := sqlstore.Migrate(); err != nil {
+		log.Fatalf("数据层: %s 建表失败: %v", dbPath, err)
+	}
+	// Migrate 覆盖（T63 验收第 4 条要求确认它们真的被执行）：
+	//	· 全量表集合，含 A2 的 tokens（漏登记会在第一次用到时报 no such table）
+	//	· channels.external_id 的**部分**唯一索引（A1，WHERE external_id <> ''）
+	//	· models_csv → models 的一次性回填（A1，幂等）
+	// 启动日志打表数：让"迁移跑到了没有"有一个可复现的第一现场。
+	log.Printf("数据层: 已打开 %s（%d 张表）", dbPath, len(sqlstore.Tables()))
+
 	// API key 管理（对标 new-api 令牌体系）：config.api_key 是管理钥匙，
 	// 普通 key 走 data/apikeys.json（与 state.json 同级，CWD 相对）。
 	// ⚠ 2026-10-20：曾随渠道一起迁进 auths/，用户明确要求**只要上游账号与渠道**
 	//   ⇒ 调用方 API key 留在这里（它是"发给我们调用方"的凭据，不是上游凭据）。
 	// 初始化失败必须显式暴露（数据文件损坏不该静默重建丢 key）。
 
-	apiKeysStore, err := apikey.New(filepath.Join("data", "apikeys.json"))
+	// # 显式装配路线（T63 的选择：NewWithStore，而不是 New 的懒接管）
+	//
+	// apikey 有两条路：
+	//
+	//	apikey.New(path)          —— JSON 起手，之后 maybeAttachSQL() 懒接管（隐式）
+	//	apikey.NewWithStore(path) —— 一开始就是 SQL，库没开就**报错**（显式）
+	//
+	// 这里选显式那条：库已经在上面 Open+Migrate 过了，"没接上"只可能是装配 bug，
+	// 那时**启动即失败**优于"跑起来以后才发现令牌还在 JSON 里"（两份真相）。
+	// New + 懒接管保留为兼容路径（其它调用方/测试用），本文件不再走它。
+	apiKeysStore, err := apikey.NewWithStore(filepath.Join("data", "apikeys.json"))
 	if err != nil {
-		log.Fatalf("load apikeys: %v", err)
+		log.Fatalf("load apikeys（显式 SQL 装配）: %v", err)
 	}
 
 	// 渠道表（中转站方向，对标 new-api 的 channel 表 + ability 索引）。
@@ -1410,33 +1460,15 @@ func main() {
 	// 会被处理（进程还在装配阶段）。
 	var adminTokenOKFn func(string) bool = func(string) bool { return false }
 
-	// ---- 数据层：SQL 成为权威（Wave1-T11 收口）----
+	// ---- 数据层：SQL 已是权威（**这里不再打开库**）----
 	//
-	// # 为什么必须在两个 New 之前
+	// ⚠ T63：Open + Migrate 已被提到本函数更前面（"数据层：SQL 成为权威"那一节，
+	// 在 apikey/channelstore 构造之前）—— 因为那两个存储的 New **要求库先开**，
+	// 顺序反了进程直接起不来。
 	//
-	// account.Store / SessionStore 都是**双模**的：store.DB 打开就写 SQL，没打开就
-	// 退回落 JSON。所以这一行必须早于它们 —— 否则整个进程会静默跑在 JSON 兼容
-	// 后端上，而「数据层已切换」这句话就成了假的。
-	//
-	// # 顺序 Open → Migrate
-	//
-	// Open 只负责连接（+ 建父目录），Migrate 才建表/补列。反过来会让第一次查询撞
-	// no such table，而那条错误离现场很远（见 internal/store/db.go 的注释）。
-	// 打不开 / 建不了表**直接 Fatal**：T11 是切换点，半切换（SQL 不可用又继续用
-	// JSON）会造出第二份真相，比启动失败难查得多。
-	//
-	// # 路径
-	//
-	// data/gw.db（相对 CWD，与 data/accounts.json、data/sessions.json 同惯例）。
-	// 所以启动必须走 start.bat（它 cd 到仓库根）—— 与既有那条运维纪律同源。
-	dbPath := filepath.Join("data", "gw.db")
-	if err := sqlstore.Open(dbPath); err != nil {
-		log.Fatalf("数据层: 打开 %s 失败: %v", dbPath, err)
-	}
-	if err := sqlstore.Migrate(); err != nil {
-		log.Fatalf("数据层: %s 建表失败: %v", dbPath, err)
-	}
-	log.Printf("数据层: 已打开 %s（%d 张表）", dbPath, len(sqlstore.Tables()))
+	// 这一行是留给后来者的路标：**不要**把 Open/Migrate 挪回这里。
+	// 下面的 logRing.SetSQLWriter 与 setups/审计计数依赖的是"库已经开着"，
+	// 与打开动作的位置无关。
 
 	// 请求日志双写：jsonl 照旧（logbuf 的 sink），同时**异步**进 logs 表。
 	// 适配函数 sqlLogWriter 见本文件末尾（映射与 T06 的参考实现逐行同源）。

@@ -26,6 +26,7 @@ import (
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/openaicompat"
+	"workbuddy2api/internal/store"
 )
 
 // retryUpstream 一个可按渠道配置成败的假上游集合。
@@ -83,6 +84,14 @@ func (r *retryUpstream) hitCount(id string) int {
 // 同档 = 同一 priority。这是 P4.5 的核心场景：同一服务水平下有多条渠道。
 func retryStore(t *testing.T, specs []spec) *channelstore.Store {
 	t.Helper()
+	// B1：SQL 是 channelstore 的后端 ⇒ 先开临时库。
+	if err := store.Open(filepath.Join(t.TempDir(), "gw.db")); err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("store.Migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	s, err := channelstore.New(filepath.Join(t.TempDir(), "channels.json"))
 	if err != nil {
 		t.Fatal(err)
