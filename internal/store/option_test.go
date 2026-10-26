@@ -234,7 +234,7 @@ func TestImportKeepsEditedValue(t *testing.T) {
 		t.Fatalf("LoadOptions: %v", err)
 	}
 	if got := opts["pool.max_in_flight"]; got != "8" {
-		t.Fatalf("导入把用户改过的值冲回去了：%q（want "8"）", got)
+		t.Fatalf("导入把用户改过的值冲回去了：%q（want \"8\"）", got)
 	}
 }
 
@@ -281,16 +281,16 @@ func TestStripJSONComments(t *testing.T) {
 		},
 		{
 			name: "行注释被删掉但换行保留",
-			in:   "{ // note
- "a": 1 }",
-			want: "{
- "a": 1 }",
+			in: `{ // note
+ "a": 1 }`,
+			want: `{
+ "a": 1 }`,
 		},
 		{
 			name: "块注释被删掉",
-			in:   "{ /* a
-b */ "a": 1 }",
-			want: "{ "a": 1 }",
+			in: `{ /* a
+b */ "a": 1 }`,
+			want: `{ "a": 1 }`,
 		},
 		{
 			name: "字符串里的转义引号不提前结束字符串",
@@ -306,9 +306,9 @@ b */ "a": 1 }",
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := string(stripJSONComments([]byte(tc.in))); got != tc.want {
-				t.Fatalf("stripJSONComments(%q)
+				t.Fatalf(`stripJSONComments(%q)
   got:  %q
-  want: %q", tc.in, got, tc.want)
+  want: %q`, tc.in, got, tc.want)
 			}
 		})
 	}

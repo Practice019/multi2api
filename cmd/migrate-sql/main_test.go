@@ -50,7 +50,7 @@ const fixtureAccountA = `{
   }`
 
 // 第二条：**没有** last_login_* 两键 —— 用来验证 omitempty 路径
-//（导出时不该凭空多出两个空字符串键，否则字节不等）。
+// （导出时不该凭空多出两个空字符串键，否则字节不等）。
 const fixtureAccountB = `{
     "id": "u-bbbbbbbbbbbbbbbb",
     "username": "bob",
@@ -62,23 +62,23 @@ const fixtureAccountB = `{
     "created_at": "2026-10-20T01:02:03Z"
   }`
 
-const fixtureGoodAccounts = "[
-  " + fixtureAccountA + ",
-  " + fixtureAccountB + "
-]"
+const fixtureGoodAccounts = `[
+  ` + fixtureAccountA + `,
+  ` + fixtureAccountB + `
+]`
 
 // fixtureBadAccounts 一条好、一条**坏**（username 为空 ⇒ 会撞 UNIQUE）、一条好。
 //
 // 坏行落在中间是刻意的：放在末尾的话，"只处理了第一条就停"的错误实现也能通过。
-var fixtureBadAccounts = "[
-  " + fixtureAccountA + ",
-  " + `{
+var fixtureBadAccounts = `[
+  ` + fixtureAccountA + `,
+  ` + `{
     "id": "u-cccccccccccccccc",
     "username": "",
     "created_at": "2026-10-21T00:00:00Z"
-  }` + ",
-  " + fixtureAccountB + "
-]"
+  }` + `,
+  ` + fixtureAccountB + `
+]`
 
 const fixtureSessions = `[
   {

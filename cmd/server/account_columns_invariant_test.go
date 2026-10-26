@@ -257,6 +257,14 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		//   channelroute —— 请求侧规划：公开名 → 该渠道的上游名（R2 请求侧）。它是查表+排序的纯逻辑，
 		//                   也不实现 gateway.Provider（真正连上游的仍是 Provider）。
 		"channelroute": true,
+		//   sysmon     —— 系统资源采样器（CPU/内存/磁盘/goroutine/堆/GC/uptime），给系统状态页供数。
+		//                  纯 stdlib、零第三方依赖、不碰全局可变状态（见 internal/sysmon/sysmon.go 头部三条硬约束），
+		//                  不实现 gateway.Provider。加它时这条守卫**确实红了** —— 正是它的作用：新目录必须显式归类。
+		//   store      —— SQL 数据层（12 张表 struct + Open/Migrate/Close，GORM + glebarez/sqlite）。
+		//                  它只**存**「哪个账号属于哪个上游」（accounts.provider 是一列字符串），
+		//                  自己不实现 gateway.Provider —— 真正连上游的仍是各上游包。
+		//                  加它时这条守卫**确实红了**（与 sysmon 同批）。
+		"sysmon": true, "store": true,
 	}
 
 	entries, err := os.ReadDir("../../internal")
