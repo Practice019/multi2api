@@ -57,6 +57,7 @@ function freePort(from) {
 // 认两种形态（run_e2e 的汇总行 + 失败明细块），两种都出现时取并集去重。
 function parseReds(text) {
   const reds = new Set();
+  const envReds = new Set();
   let pass = null, total = null;
   // 汇总行: "=== 18/25 通过 ==="
   let m = text.match(/===\s*(\d+)\s*\/\s*(\d+)\s*通过\s*===/);
@@ -68,8 +69,35 @@ function parseReds(text) {
     // 失败明细块: "  cp3_f1_null_elements.js（断言失败）"
     const d = line.match(/^\s{2}(\S+\.js)（[^）]*）\s*$/);
     if (d) reds.add(d[1]);
+    // run_e2e 的 "启动/环境失败"子集：这些红**不是产品红**，不参与稳定性判据。
+    const e = line.match(/^\s*REDS_ENV=(.*)$/);
+    if (e && e[1].trim()) e[1].trim().split(',').forEach((x) => x && envReds.add(x.trim()));
   }
-  return { pass, total, reds: [...reds].sort() };
+  return { pass, total, reds: [...reds].sort(), envReds: [...envReds].sort() };
+}
+
+// ── 已知 flake（**不参与**「红集合稳定」判据）────────────────────────────
+//
+// verify_login_local_hint.js：**探针自身的启动/连接类失败**，不是产品缺陷。
+//
+//   · 实测复现率 **1/22 ≈ 4.5%**（批次A 1/10、批次B 0/12；同一隔离实例、同一 HINT_URL、
+//     同一探针二进制，端口为现场探测的空闲端口）——2026-10-26 由 verifier-wave2 测量。
+//   · 失败形态：**exit=1 且没有任何 FAIL 行**（断言根本没跑到）⇒ 归因在探针侧，
+//     与「产品行为错了」是两件事。
+//   · 它出现时会让「连跑两次 REDS 逐字相同」误判；而那条判据要守的是**产品红集合**，
+//     不是探针自身的抖动。
+//
+// 处置：从稳定性判据里**剔除**，但**原文照打**（REDS 原样保留，另加 REDS_FLAKY 一行），
+// 不隐藏、不静默。⚠ 若复现率升高（>20%）或失败形态变成「有 FAIL 行」，必须重新归因，
+// 不许继续挂 flake。
+const KNOWN_FLAKY = {
+  'verify_login_local_hint.js': '探针自身启动类失败（exit=1 且无 FAIL 行），实测 1/22≈4.5%',
+};
+function splitFlaky(reds) {
+  return {
+    stable: reds.filter((f) => !KNOWN_FLAKY[f]),
+    flaky: reds.filter((f) => KNOWN_FLAKY[f]),
+  };
 }
 
 // 跑一轮：起夹具实例 → run_e2e → 收尾（**走 withFamily3，保证 finally 必收**）。
@@ -95,9 +123,17 @@ function runOnce(port, keep, logdir) {
     });
 
     const r = parseReds(out);
+    // 产品稳定集合 = 全部红 − 启动/环境红 − 已测量并挂账的探针 flake。
+    const envSet = new Set(r.envReds);
+    const sp = splitFlaky(r.reds.filter((f) => !envSet.has(f)));
     console.log('');
     console.log('=== 第三族红集合（这一行就是可复现性判据）===');
     console.log('  REDS=' + r.reds.join(','));
+    console.log('  REDS_STABLE=' + sp.stable.join(',') + '   ← 稳定性判据只看这一行');
+    if (sp.flaky.length) {
+      console.log('  REDS_FLAKY=' + sp.flaky.join(',') + '   ← 已知探针 flake，不参与判据');
+      sp.flaky.forEach((f) => console.log('      · ' + f + ' —— ' + KNOWN_FLAKY[f]));
+    }
     console.log('  REDS_COUNT=' + r.reds.length + '  PASS=' + (r.pass === null ? '?' : r.pass) +
       '  TOTAL=' + (r.total === null ? '?' : r.total));
     console.log('  exit=' + code + '　端口=' + port + '　时间=' + new Date().toISOString());
@@ -113,7 +149,7 @@ function runOnce(port, keep, logdir) {
       try { await fx.stop(); } catch (e) { console.error('  ⚠ stop 失败: ' + (e && e.message)); }
       fx.__keptNo = true;
     }
-    return { code, ...r, seedOk: !fx.seedMismatch };
+    return { code, ...r, stableReds: sp.stable, seedOk: !fx.seedMismatch };
   }).finally(() => { /* withFamily3 已收尾（keep 分支在上面已手动 stop） */ });
 }
 
@@ -134,13 +170,22 @@ function runOnce(port, keep, logdir) {
 
   let bad = runs.some((r) => r.code !== 0 || !r.seedOk) ? 1 : 0;
   if (repeat > 1) {
-    const first = runs[0].reds.join(',');
-    const same = runs.every((r) => r.reds.join(',') === first);
+    // ⚠ 判据是「**稳定红集合**逐字相同」（不含 KNOWN_FLAKY）：探针自身的启动抖动
+    //   不该让产品红集合的稳定性判据变红，但原始 REDS 仍然照打（不隐藏）。
+    const first = runs[0].stableReds.join(',');
+    const same = runs.every((r) => r.stableReds.join(',') === first);
     console.log('');
     console.log('=== 可复现性（' + repeat + ' 连跑，同一端口）===');
-    runs.forEach((r, i) => console.log('  run' + (i + 1) + ' REDS=' + r.reds.join(',') +
+    runs.forEach((r, i) => console.log('  run' + (i + 1) + ' REDS_STABLE=' + r.stableReds.join(',') +
+      '  REDS=' + r.reds.join(',') +
       '  (PASS=' + (r.pass === null ? '?' : r.pass) + '/' + (r.total === null ? '?' : r.total) + ')'));
-    console.log('  ⇒ 红集合' + (same ? '**逐字相同** ✓' : '**不一致** ✗ —— 这就是"数字会飘"，必须修夹具'));
+    console.log('  ⇒ 稳定红集合（已剔除已知 flake）' +
+      (same ? '**逐字相同** ✓' : '**不一致** ✗ —— 这是真的"数字会飘"，必须修夹具'));
+    const anyFlaky = runs.some((r) => r.reds.length !== r.stableReds.length);
+    if (anyFlaky) {
+      console.log('  ⚠ 本轮有已知 flake 出现（已从判据剔除，明细见各 run 的 REDS_FLAKY）:');
+      Object.keys(KNOWN_FLAKY).forEach((k) => console.log('      · ' + k + ' —— ' + KNOWN_FLAKY[k]));
+    }
     if (!same) bad = 1;
   }
   process.exit(bad);

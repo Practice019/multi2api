@@ -46,6 +46,9 @@ const TESTS = [
   ['verify_model_provider_filter.js','CHAT_URL'], // T7：对话测试的上游筛选（不去重）
   ['verify_codearts_login.js','LOGIN_URL'], // R1：codearts 页内添加账号端到端（跨请求状态）
   ['verify_credential_hygiene.js','HYGIENE_URL'], // 凭证卫生：日志数字==界面数字、跳过/冲突有日志
+  // ⚠ **已知 flake**（2026-10-26 实测 1/22≈4.5%）：失败形态是 exit=1 且**没有任何 FAIL 行**
+  //   ⇒ 探针自身的启动/连接类失败，不是产品缺陷。红集合稳定性判据里已剔除该条，
+  //   见 run_e2e_family3.js 的 KNOWN_FLAKY（含测量方法与「复现率升高必须重新归因」的约束）。
   ['verify_login_local_hint.js','HINT_URL'], // 添加账号弹窗的本机提示（按 hostname 显隐）
   ['verify_cp2_f1.js',  'F1_TEST_URL'],
   ['verify_cp2_f2.js',  'F2_TEST_URL'],
@@ -164,13 +167,20 @@ function run(file, env) {
       console.log(`  ok    ${file.padEnd(20)} ${last.trim()}`);
     } else {
       const tail = (r.out || '').trim().split('\n').slice(-6).join('\n         ');
-      // 区分"启动失败"与"断言失败"：前者是基础设施问题，后者才是产品问题
-      const isStartup = /EXCEPTION: Chrome 未启动|Cannot find module|EADDRINUSE|端口 \d+ 被占用/.test(r.out || '');
       // ⚠ 明细里**印出全部 FAIL 行**（不再只留 6 行尾部）—— 归因靠的就是它们。
       const failLines = (r.out || '').split(/\r?\n/)
         .filter((l) => /^\s*FAIL\s/.test(l))
         .map((l) => l.trim())
         .slice(0, 12);
+      // 区分"启动/环境失败"与"断言失败"：前者是基础设施问题，后者才是产品问题。
+      //
+      // ⚠ 判据里必须包含「**一条 FAIL 行都没有却非零退出**」（2026-10-26 加）：
+      //   那种情况说明探针根本没跑到断言（崩溃 / CDP 超时 / 实例没起来），它的红
+      //   不是产品红。实测：verify_login_local_hint.js 以这个形态抖动（1/22≈4.5%），
+      //   而原有的四条正则一条都匹配不到 ⇒ 它被算成"断言失败"，于是
+      //   「连跑两次 REDS 逐字相同」这条产品稳定性判据被探针自己的抖动带红。
+      const isStartup = failLines.length === 0 ||
+        /EXCEPTION: Chrome 未启动|Cannot find module|EADDRINUSE|端口 \d+ 被占用/.test(r.out || '');
       failures.push({ file, isStartup, tail, failLines, logPath });
       console.log(`  ${isStartup ? 'ENV   ' : 'FAIL  '}${file}`);
     }

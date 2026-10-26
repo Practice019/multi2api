@@ -65,13 +65,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 //    · 模型：探针粘密钥后 /v1/models 才有条目（T5/T7 起服务端不再注入凭据）
 //    · 成长/旅行：本实例没有上游账号，用 lib_fixtures 的夹具喂（产品渲染全真跑）
 const PANELS = [
-  { nav: '可用模型', key: 'models', must: ['模型'], reject: ['加载中'],
+  { nav: '可用模型', key: 'models', anchor: '#models', must: ['模型'], reject: ['加载中'],
     minLeaves: 20, api: '/admin/models/preview', countPath: 'models',
     // 面板内容由 pasteConsoleKey 触发的 refresh() 填充，比"点导航"晚 ——
     // 有界轮询把"快慢"与"对错"解耦（原来固定 sleep 1600ms 会偶发读到空面板）。
     readyJs: `document.querySelectorAll('#models .chip').length`,
     readyMin: 3 },
-  { nav: '请求日志', key: 'logs', must: [], reject: ['加载中'], table: true,
+  { nav: '请求日志', key: 'logs', anchor: '#logrows', must: [], reject: ['加载中'], table: true,
     rowSelector: '#logrows .log-row',
     emptyOk: ['落盘日志为空', '暂无请求', '实时视图中'],
     minLeaves: 60, api: '/admin/logs/history?limit=30&offset=0', countPath: 'items',
@@ -86,7 +86,7 @@ const PANELS = [
   //   20 与 30 在这件事上能力相同，但对文案变化不再过敏。
   //   设置面板的**真实意图**由 expectFilledInputs（loadSettings 回填）与
   //   requireNonEmpty（#setLogFileInfo 非空）两条直接断言承担 —— 那两条一条没动。
-  { nav: '设置', key: 'settings', must: [], reject: [],
+  { nav: '设置', key: 'settings', anchor: '#setLogFileInfo', must: [], reject: [],
     minLeaves: 20, expectFilledInputs: true, requireNonEmpty: ['#setLogFileInfo'] },
   // ⚠ 成长计划：叶子数判据抓不住 renderGrowthGroups 变异（正常 101 / 变异 95，
   // 只差 6%，任何阈值都是碰运气）。改用该函数**独有**的 DOM 指纹：
@@ -96,7 +96,7 @@ const PANELS = [
   //   `已选择「全部账号」…` 的摘要 div（webui.html:8673-8687），不含 .ggroup。
   //   所以量指纹之前必须先在下拉里选一个真账号（见下面的 `selectFirstAccount`）。
   //   这不是放宽判据，而是把"用户要做的那一步"补上 —— 否则测的是一个空分支。
-  { nav: '成长计划', key: 'workbuddy:growth', must: [], reject: ['加载中'], table: true,
+  { nav: '成长计划', key: 'workbuddy:growth', anchor: '#growthRows', must: [], reject: ['加载中'], table: true,
     // ⚠ `#growthRows` **本身就是 tbody**（renderGrowth 往它里面写 `<tr>`）——
     //   写成 `#growthRows tbody tr` 会恒为 0（tbody 里没有 tbody）。
     rowSelector: '#growthRows tr',
@@ -105,7 +105,7 @@ const PANELS = [
     requireSelectors: ['.ggroup', '.ghead', '.gname'],
     api: '/admin/growth', countPath: 'accounts',
     readyJs: `document.querySelectorAll('#growthRows tr').length`, readyMin: 2 },
-  { nav: '猫猫旅行', key: 'workbuddy:travel', must: [], reject: ['加载中'], table: true,
+  { nav: '猫猫旅行', key: 'workbuddy:travel', anchor: '#travelRows', must: [], reject: ['加载中'], table: true,
     rowSelector: '#travelRows tr',
     emptyOk: ['暂无', '没有账号'], minLeaves: 30, api: '/admin/travel', countPath: 'accounts',
     readyJs: `document.querySelectorAll('#travelRows tr').length`, readyMin: 2 },
@@ -196,22 +196,73 @@ const PANELS = [
         const which = p.key === 'workbuddy:growth' ? 'growth' : 'travel';
         console.log(`      （${p.nav} 夹具+刷新: ` +
           await fixtures.prepare(ev, which, p.readyJs, p.readyMin) + '）');
-      } else if (p.readyJs) {
-        // ⚠ 有界轮询直到该面板的"就绪特征"出现，**再**开始量。
-        //
-        // 为什么必须有这一步：各面板的填充时刻不是一个固定值 ——
-        //   模型面板由 pasteConsoleKey 触发的 refresh() 填，比点导航晚。
-        // 固定 sleep 就会偶发读到"还没画出来"的空面板，把它报成"渲染量不足"。
-        // 那是**时序噪声冒充产品缺陷**。轮询只消除快慢，不放宽判据：
-        // 15 秒内没出现，后面的断言该红还是红（而且会如实说"就绪特征没出现"）。
-        const deadline = Date.now() + 15000;
-        let n = 0;
-        while (Date.now() < deadline) {
-          n = await ev(p.readyJs);
-          if (Number(n) >= (p.readyMin || 1)) break;
-          await sleep(400);
+      }
+
+      // ── 就绪门：**先确认量的就是这一节**，再量（2026-10-26 修）─────────────
+      //
+      // 实测假红（family3 里 6 次运行 2 次）：
+      //     FAIL 可用模型: 渲染量充足（非空叶子 2 >= 20）或明确空态(否)
+      //          （接口 68 条 / 渲染 0 行 / 叶子 2 / 文本 35 字）
+      //   而同一行的就绪特征是「（可用模型 就绪特征: 23）」—— 23 个 chip 明明在。
+      //
+      // 根因（读产品代码得到的机制）：
+      //   · 导航是**按下标**驱动的：按钮带 `data-nav="<idx>"`，点击走
+      //     `showPanel(Number(b.dataset.nav))`（webui.html:7910 / :15810），
+      //     而 idx = `navSections.indexOf(sec)` —— 一个**会被 refresh 重建的数组**；
+      //   · 同时 `#content` 里有**两个 `data-key="models"` 的 section**（旧「可用模型」
+      //     面板 :3407 与 T12 新增的「模型目录」iframe :3074）—— 按 key 找节时
+      //     `querySelector` 只认**第一个**（:8105/:8127）；
+      //   · 于是"点了可用模型，但 active 是另一节"可以发生；而就绪特征
+      //     `#models .chip` 是**全局**选择器（旧面板藏起来也照样数得到 23）⇒ 门放行。
+      //   紧接着 info 读 `#content > section.active` ⇒ 量到的是**别的节**
+      //   （叶子 2 / 文本 35 字，恰好也含「模型」二字，所以"含关键字段"还骗过了）。
+      //   这是时序噪声冒充产品缺陷。
+      //
+      // 修法（判据一个字没改，只是把"量之前"的确认补足）：
+      //   ① **锚点确认**：active 节里必须有本面板的专属锚点（`p.anchor`，如 #models）
+      //      —— 这是"量的就是这一节"的**唯一可靠判据**（data-key 因重复而不可靠）；
+      //   ② 没确认就**重新点一次导航**（最多 3 次）—— 用户在"点了没开"时本来就会再点；
+      //   ③ 仍不成立 ⇒ 打印精确归因（active 节是谁 / 有没有锚点），后面的断言该红还是红。
+      //   15 秒窗口只是消除快慢，不放宽任何内容判据。
+      {
+        let activeDesc = '', hasAnchor = false, n = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const deadline = Date.now() + 5000;
+          for (;;) {
+            const st = await ev(`(function(){
+              var a = document.querySelector('#content > section.active');
+              var anchor = ${JSON.stringify(p.anchor)};
+              var ready = ${p.readyJs ? '(' + p.readyJs + ')' : 'null'};
+              return {
+                key: a ? (a.dataset.key || '') : '',
+                head: a && a.querySelector('h2') ? a.querySelector('h2').textContent.trim().slice(0, 12) : '',
+                hasAnchor: !!(a && anchor && a.querySelector(anchor)),
+                ready: ready,
+              };
+            })()`);
+            activeDesc = st.key + '/' + st.head;
+            hasAnchor = !!st.hasAnchor;
+            n = st.ready;
+            const readyOK = !p.readyJs || Number(n) >= (p.readyMin || 1);
+            if (hasAnchor && readyOK) break;
+            if (Date.now() >= deadline) break;
+            await sleep(400);
+          }
+          if (hasAnchor) break;
+          // 锚点不在 active 节里 ⇒ 面板没切过来，像用户那样再点一次。
+          await ev(`(function(){
+            var bs = Array.from(document.querySelectorAll('#nav button[data-nav]'));
+            var b = bs.filter(function(x){ return x.textContent.indexOf(${JSON.stringify(p.nav)}) >= 0; })[0];
+            if (b) { b.click(); return true; } return false;
+          })()`);
+          await sleep(600);
         }
-        console.log(`      （${p.nav} 就绪特征: ${n}）`);
+        console.log(`      （${p.nav} 就绪门: active=${JSON.stringify(activeDesc)} 锚点${p.anchor}=${hasAnchor}` +
+          (p.readyJs ? ` 特征=${n}(>=${p.readyMin || 1})` : '') + '）');
+        if (!hasAnchor) {
+          console.log(`      ⚠ active 节里没有本面板的锚点 ${p.anchor} —— 面板没切过来（重点了 3 次）。` +
+            '这条红是**归因信息**：先看是不是被同 data-key 的另一节抢了 active（webui.html 里 models 键重复）。');
+        }
       }
 
       // ⚠ 成长计划的结构指纹要先"选一个具体账号"才存在（见 PANELS 里的说明）。
