@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>系统状态 · 网关</title>
+<!--
+  webui-status.html —— 系统状态页（对标 hyxapi 的 /console/system-status）。
+
+  # 为什么是独立文件而不是塞进 webui.html
+  webui.html 已经 16101 行 / 657 KB。往里加第 8 个页面，等于把
+  「新页面有没有写坏主控制台」这个问题交给运气。独立文件的可验证好处是：
+  改坏了只影响这一页（与 webui-channels.html / webui-groups.html 同一约定）。
+
+  # 与后端的关系
+    唯一的取数入口：GET /admin/system-status（契约由主脑定死，见任务书）
+    鉴权：同源 fetch，身份走 HttpOnly 会话 cookie（wb2api_sid）——
+          页面里**不含任何密钥**，与 webui.html 的 T7 安全口径一致。
+
+  # 三条来自 hyxapi 的关键设计（照抄，不是自创）
+  ① **倒计时由数据到达时刻反推**，不是自减计数器：
+         left = max(0, ceil((lastUpdatedAt + 5000 - now) / 1000))
+     自减式计数器有一个说不通的形态：手动点刷新后仍显示「还剩 2 秒」。
+     反推式在刷新后**立刻跳回 5**，因为它是从「下次该刷新的时刻」算的。
+  ② **三档阈值进度条**：>80 红 #e53e3e / >60 黄 #d69e2e / 其余 var(--fg)。
+     正常档刻意用主题前景色而不是某个灰 —— 深浅主题下都要可辨，
+     而红/黄是语义色，在两种主题下含义必须完全一致，所以写字面量。
+     ⚠ 另加「非零至少 1% 宽」：否则 0.3% 的条宽度取整成 0 像素，
+       看起来像「没有条」，用户会怀疑这个指标没在采集。
+  ③ **降级态与陷阱态是两件事**（本仓最容易做混的一处）：
+       降级（degraded）：**这一项**不可用 ⇒ 卡片仍然占位，加灰色小标 + 积极文案。
+                           例：数据库没启用 ⇒ 「内存聚合模式运行中」。
+       陷阱（trap）    ：**这一整块数据**没到 ⇒ 整张卡不渲染。
+                           例：deps 整个缺失 ⇒ 依赖健康那几张卡根本不出现。
+     把它们混成一种，就会得到两种坏结果之一：
+       · 把「未上报」画成 0 —— 读的人以为真的是 0（本仓反复吃过的亏）；
+       · 把「没配」当成「坏了」—— 满屏红字，正常状态也被读成故障。
+
+  # 视觉：照抄 webui.html 的 v2 变量（GitHub Dark/Light）
+  变量名与取值直接对齐 webui.html 的 :root 块（--bg --panel --panel2 --line --fg
+  --dim --acc --ok --warn --err --code-bg --overlay --shadow --mono）。
+  ⚠ 刻意**不**内联 theme-max.css（那套 maximalism 描边是给「吵闹的外壳」用的，
+    而系统状态页整页都是数据 —— 按本仓自己的判据「外壳吵、数据静」，
+    这里应当是安静区）。所以卡片用 1px 描边 + 10px 圆角，不加硬投影。
+
+  # 主题：先读 localStorage，再退回系统偏好
+  本页可能被 iframe 内嵌。同源 iframe **共享 localStorage**，所以这里能直接读到
+  用户在控制台里选的主题（webui.html 存的是 'wb2api.theme'）。
+  这比 webui-channels.html 的「只跟 prefers-color-scheme」更准 —— 那条路的已知代价
+  是「父页手动切浅色而系统是深色时不跟随」。读不到才退回系统偏好。
+
+  # 表格（AGENTS 硬要求）
+  行高固定一行（26px，line-height 同值）、white-space:nowrap、
+  超宽走横向滚动（.tw{overflow-x:auto}）、单元格不留空行。
+-->
+<style>
+  /* ── 1. 调色板（逐个值抄自 webui.html 的 v2 :root）─────────────────────
+     对比度已在 webui.html 里按 WCAG 复算过，这里不重复推导；
+     唯一的义务是**不要**在这里引入新色值 —— 一页新色值就等于全站多一套语言。 */
+  :root, :root[data-theme="dark"] {
+    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
+    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5; --ok:#3FB950; --warn:#D29922; --err:#F85149;
+    --code-bg:#0D1117; --overlay:rgba(1,4,9,.72); --shadow:rgba(1,4,9,.5);
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
+  }
+  :root[data-theme="light"] {
+    --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
+    --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
+    --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
+  }
+  /* 兜底：主题脚本失败（隐私模式禁 localStorage）时仍跟系统偏好，不留一张黑纸。 */
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme]) {
+      --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
+      --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
+      --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
+    }
+  }
+
+  /* ── 2. 基础 ─────────────────────────────────────────────────────────── */
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:0;
+    background:var(--bg); color:var(--fg);
+    font:13px/1.5 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  .dim { color:var(--dim); }
+  .err { color:var(--err); }
+  .ok { color:var(--ok); }
+  .warn { color:var(--warn); }
+
+  /* ── 3. 页头：标题 + 倒计时 + 刷新 ──────────────────────────────────── */
+  header {
+    position:sticky; top:0; z-index:5;
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line);
+  }
+  header h1 { margin:0; font-size:15px; font-weight:600; letter-spacing:-.01em; }
+  /* 倒计时用等宽数字：否则 5→4 时宽度变化会让按钮左右跳动。 */
+  #cd { font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums; min-width:84px; }
+  .spacer { flex:1 1 auto; }
+  button {
+    font:inherit; color:var(--fg); background:var(--bg);
+    border:1px solid var(--line); border-radius:6px; padding:4px 10px;
+    cursor:pointer; transition:border-color .12s, background .12s;
+  }
+  button:hover:not(:disabled) { border-color:var(--dim); background:var(--panel2); }
+  button:focus-visible { outline:2px solid var(--acc); outline-offset:1px; border-color:var(--acc); }
+  /* 刷新中禁用（不是显示 loading 文案）—— hyxapi 的做法，少一处会闪的文字。 */
+  button:disabled { opacity:.55; cursor:default; }
+
+  /* ── 4. 布局 ─────────────────────────────────────────────────────────── */
+  /* 960px 上限：仪表盘式密集布局刻意比渠道页（1400px）窄 —— 一行 5 张卡在
+     1400px 上会拉到 280px/张，读数字要横跳。 */
+  main { max-width:960px; margin:0 auto; padding:16px 16px 36px; display:flex; flex-direction:column; gap:22px; }
+  section { min-width:0; }
+  section > h2 {
+    margin:0 0 8px; font-size:12px; font-weight:600; color:var(--dim);
+    letter-spacing:.06em; display:flex; align-items:center; gap:8px;
+  }
+  .grid { display:grid; gap:10px; align-items:stretch; }
+  .g4 { grid-template-columns:repeat(4,minmax(0,1fr)); }
+  .g5 { grid-template-columns:repeat(5,minmax(0,1fr)); }
+  .g2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+
+  /* ── 5. 卡片 ─────────────────────────────────────────────────────────── */
+  .c {
+    background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+    padding:9px 11px; min-width:0; display:flex; flex-direction:column;
+  }
+  .c .k {
+    font-size:11px; color:var(--dim); letter-spacing:.03em;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    display:flex; align-items:center; gap:6px; min-width:0;
+  }
+  /* 灰色小标（降级/禁用）：**不改整卡颜色**，只加一个弱提示 ——
+     整卡变灰会让「未配置」看起来像「坏了」。 */
+  .tag {
+    font-size:10px; line-height:14px; padding:0 5px; border-radius:4px;
+    background:color-mix(in srgb, var(--dim) 18%, transparent);
+    color:var(--dim); font-weight:500; flex:none;
+  }
+  .tag.err { background:color-mix(in srgb, var(--err) 16%, transparent); color:var(--err); }
+  .tag.ok  { background:color-mix(in srgb, var(--ok) 16%, transparent);  color:var(--ok); }
+  .tag.warn{ background:color-mix(in srgb, var(--warn) 16%, transparent);color:var(--warn); }
+  .c .v {
+    font-family:var(--mono); font-variant-numeric:tabular-nums;
+    font-size:20px; font-weight:700; letter-spacing:-.02em; margin-top:2px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  /* ⚠ 20px 而不是 hyxapi 的 24px：24px 在 5 列窄卡里会把「42.07 GB」截断。
+     截断本身用 ellipsis 兜住（宁可截断也不换行撑高卡片，行高必须稳定）。 */
+  .c .s {
+    font-size:11px; color:var(--dim); margin-top:2px; min-height:16px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  /* 资源卡的数字与可用量同一行基线对齐。 */
+  .rowv { display:flex; align-items:baseline; gap:6px; min-width:0; }
+  .rowv .dl { font-size:11px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  /* ── 6. 三档进度条（hyxapi MiniBar 的逐条搬运）─────────────────────── */
+  .minibar {
+    height:4px; border-radius:2px; margin-top:6px; overflow:hidden;
+    background:color-mix(in srgb, var(--dim) 22%, transparent);
+  }
+  .minibar > i { display:block; height:100%; border-radius:2px; transition:width .3s; }
+
+  /* ── 7. 表格（固定行高 / 横向滚动 / 紧凑）──────────────────────────── */
+  .tw { overflow-x:auto; margin-top:6px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th, td {
+    height:26px; line-height:26px; padding:0 8px; text-align:left;
+    white-space:nowrap; border-bottom:1px solid var(--line);
+  }
+  th { color:var(--dim); font-weight:600; font-size:11px; }
+  /* 数字列右对齐：等宽 + 右对齐才能纵向比大小。 */
+  th.r, td.r { text-align:right; }
+  tbody tr:last-child td { border-bottom:none; }
+  tbody tr:hover { background:color-mix(in srgb, var(--dim) 8%, transparent); }
+  .empty { padding:8px 2px; font-size:12px; color:var(--dim); }
+
+  /* ── 8. KV 网格（号池 / 缓存这类「固定几项」用，不占表格语义）──────── */
+  .kv { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; margin-top:4px; }
+  .kv > div {
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    height:22px; min-width:0; font-size:12px;
+  }
+  .kv .kk { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .kv .vv { font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+  /* ── 9. 骨架屏（按真实布局逐格复刻，不是一块大白）──────────────────── */
+  .sk {
+    background:color-mix(in srgb, var(--dim) 16%, transparent);
+    border-radius:4px; animation:skp 1.1s ease-in-out infinite;
+  }
+  /* 骨架块高度对齐真实元素：k=13px / v=20px / s=13px / 进度条=4px。
+     高度对不上，数据到达时整页会**跳一下**，比没有骨架更刺眼。 */
+  .sk-k { height:13px; width:52%; }
+  .sk-v { height:20px; width:74%; margin-top:5px; }
+  .sk-s { height:13px; width:44%; margin-top:5px; }
+  .sk-bar { height:4px; width:100%; margin-top:6px; border-radius:2px; }
+  .sk-cell { height:26px; width:100%; margin-top:2px; }
+  @keyframes skp { 0%,100%{opacity:.55} 50%{opacity:1} }
+  @media (prefers-reduced-motion: reduce) { .sk { animation:none; } .minibar > i { transition:none; } }
+
+  /* ── 10. 错误条 ──────────────────────────────────────────────────────── */
+  #errbox {
+    display:none; align-items:flex-start; gap:10px; flex-wrap:wrap;
+    padding:9px 12px; border-radius:8px;
+    border:1px solid color-mix(in srgb, var(--err) 45%, transparent);
+    background:color-mix(in srgb, var(--err) 10%, transparent);
+    color:var(--err); font-size:12.5px;
+  }
+  #errbox.on { display:flex; }
+  #errbox .msg { flex:1 1 260px; min-width:0; word-break:break-word; }
+  #errbox button { color:var(--fg); border-color:color-mix(in srgb, var(--err) 45%, transparent); background:transparent; }
+  /* 「显示的是上次成功的数据」—— 这个提示必须**与错误同时出现**，
+     否则读者会拿一份过期数据当实时读数。 */
+  #stalehint { display:none; font-size:11px; color:var(--dim); }
+  #stalehint.on { display:inline; }
+
+  footer {
+    max-width:960px; margin:0 auto; padding:0 16px 18px;
+    display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;
+    font-size:11px; color:var(--dim);
+  }
+
+  /* ── 11. 窄屏：网格降列（不是缩字号 —— 缩字号会让数字读不清）──────── */
+  @media (max-width:840px) {
+    .g5 { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .g4 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  }
+  @media (max-width:560px) {
+    .g5, .g4, .g2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    main { padding:12px 10px 28px; }
+    .c .v { font-size:18px; }
+  }
+</style>
+<script>
+// 主题防闪白：必须在样式表生效前同步跑完（与 webui.html 同一条理由 ——
+// 等 DOM 解析完再设 data-theme，另一主题的用户会先看到一帧错的配色）。
+//
+// 取值顺序：
+//   ① localStorage['wb2api.theme']（控制台里选的，'system' 表示跟随系统）
+//      同源 iframe 共享 localStorage ⇒ 内嵌时也能拿到父页的选择。
+//   ② 系统偏好
+// 读不到（隐私模式抛异常）⇒ 按深色渲染，至少不是白屏。
+(function () {
+  try {
+    var saved = localStorage.getItem('wb2api.theme') || 'system';
+    var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var theme = saved === 'system' ? (dark ? 'dark' : 'light') : saved;
+    if (theme !== 'dark' && theme !== 'light') { theme = dark ? 'dark' : 'light'; }
+    document.documentElement.setAttribute('data-theme', theme);
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+})();
+</script>
+</head>
+<body>
+
+<header>
+  <h1>系统状态</h1>
+  <span id="cd" aria-live="off"></span>
+  <span id="stalehint">显示的是上次成功的数据</span>
+  <span class="spacer"></span>
+  <button id="refresh" type="button" title="立即刷新">刷新</button>
+</header>
+
+<main>
+  <div id="errbox" role="alert">
+    <span class="msg" id="errmsg"></span>
+    <button id="retry" type="button">重试</button>
+  </div>
+  <div id="app"></div>
+</main>
+
+<footer>
+  <span id="src">数据来源 GET /admin/system-status</span>
+  <span id="upd"></span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 0. 常量与小工具
+  // ══════════════════════════════════════════════════════════════════════
+
+  var POLL_MS = 5000;           // 轮询间隔（契约：5s）
+  var ENDPOINT = '/admin/system-status';
+
+  // esc 把服务端给的**字符串**（文件名 / 上游名 / 告警文案）转义后再进 innerHTML。
+  //
+  // ⚠ 数字走不到这里（它们经 fmt* 出来必然是数字形态）；只有名字与文案是
+  //   服务端可控的自由文本。不转义的话，一个叫 <img onerror=...> 的 JSON
+  //   文件名就能在这页上执行脚本 —— 而文件名来自 data/ 目录，是**运维可控**，
+  //   不是攻击者可控，但「凡是文本一律转义」这条不该因为「大概安全」破例。
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  // get 取字段：**不把 undefined/null 当成值**。
+  //
+  // 这是整页「不许显示 undefined」的唯一闸门：所有渲染都先过 get/numOf，
+  // 拿不到就返回 undefined，由调用方走降级分支。
+  // 用 hasOwnProperty 而不是 obj[k] !== undefined：原型链上的同名键
+  // （比如某个对象恰好继承到 'name'）不该被当成数据。
+  function get(o, k) {
+    if (!o || typeof o !== 'object') { return undefined; }
+    if (!Object.prototype.hasOwnProperty.call(o, k)) { return undefined; }
+    var v = o[k];
+    return (v === undefined || v === null) ? undefined : v;
+  }
+
+  // numOf 只要**有限的数字**。字符串 "12" 不算 —— 那是后端契约漂移的信号，
+  // 静默接受它会让前端渲染出一个看起来正常、其实类型已经错了的值。
+  function numOf(v) {
+    return (typeof v === 'number' && isFinite(v)) ? v : undefined;
+  }
+
+  // pickNum 按别名表取第一个可用数字。
+  //
+  // # 为什么需要别名（本页唯一的「契约之外」的宽容）
+  // 任务书给的 health 契约里**没有** rpm / 成功率 / 平均延迟这三个字段，
+  // 而第①组的四张卡里三张要它们。后端切片在并行实现，字段名可能落在几种
+  // 常见写法上（rpm_5m / window_rpm / success_rate …）。
+  // 与其等字段名对不上再改一版，不如这里按别名表取；取不到就走降级态
+  // （显示 "-" + 灰色小标），**绝不显示 undefined、也绝不编一个 0**。
+  function pickNum(obj, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var v = numOf(get(obj, keys[i]));
+      if (v !== undefined) { return v; }
+    }
+    return undefined;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 1. 七个格式化函数（逐条对齐 hyxapi 的实现，含边界）
+  // ══════════════════════════════════════════════════════════════════════
+
+  // fmtUptime：秒 → "2h 23m"。
+  // ⚠ 分钟**恒出现** ⇒ 2 小时整显示 "2h 0m"。
+  //   理由：只显示 "2h" 会让读者怀疑「是 2h0m 还是 2h59m」，而运行时长
+  //   恰恰是在出问题时要拿来对时间线的量。
+  function fmtUptime(sec) {
+    var s = numOf(sec);
+    if (s === undefined || s < 0) { return '0m'; }
+    var d = Math.floor(s / 86400);
+    var h = Math.floor((s % 86400) / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var parts = [];
+    if (d > 0) { parts.push(d + 'd'); }
+    if (h > 0) { parts.push(h + 'h'); }
+    parts.push(m + 'm');
+    return parts.join(' ');
+  }
+
+  // fmtBytes：B 不带小数，其余两位。
+  // ⚠ 「B 不带小数」不是随手定的：字节数是**计数**，0.5 字节没有意义；
+  //   而 KB 以上是**量级**，两位小数才有信息量（4.72 GB 与 5 GB 差很多）。
+  function fmtBytes(b) {
+    var n = numOf(b);
+    if (n === undefined || n <= 0) { return '0 B'; }
+    var u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toFixed(i === 0 ? 0 : 2) + ' ' + u[i];
+  }
+
+  // fmtTokens：1.1k / 2.3M / 1.20B。
+  function fmtTokens(n) {
+    var v = numOf(n);
+    if (v === undefined) { return '-'; }
+    if (v === 0) { return '0'; }
+    if (v >= 1e9) { return (v / 1e9).toFixed(2) + 'B'; }
+    if (v >= 1e6) { return (v / 1e6).toFixed(1) + 'M'; }
+    if (v >= 1e3) { return (v / 1e3).toFixed(1) + 'k'; }
+    return String(v);
+  }
+
+  // fmtPct：一位小数 + %（入参已经是 0..100 的百分数）。
+  function fmtPct(n) {
+    var v = numOf(n);
+    if (v === undefined) { return '-'; }
+    return v.toFixed(1) + '%';
+  }
+
+  // fmtRPM：>=100 不显示小数（5 列窄卡里 "1234.56" 会被截断），>=10 一位，其余两位。
+  function fmtRPM(n) {
+    var v = numOf(n);
+    if (v === undefined) { return '-'; }
+    if (v >= 100) { return v.toFixed(0); }
+    if (v >= 10) { return v.toFixed(1); }
+    return v.toFixed(2);
+  }
+
+  // fmtLatency：入参**毫秒**。<=0 → "-"（0 意味着「没有样本」，不是「0 毫秒」）；
+  // <1000 → Nms；否则 X.Xs（12000ms 要在心里除一次才读得出，所以换算）。
+  function fmtLatency(ms) {
+    var v = numOf(ms);
+    if (v === undefined || v <= 0) { return '-'; }
+    if (v < 1000) { return Math.round(v) + 'ms'; }
+    return (v / 1000).toFixed(1) + 's';
+  }
+
+  // fmtInt：计数用千分位（几十万次请求不千分位根本读不出来）。
+  function fmtInt(n) {
+    var v = numOf(n);
+    if (v === undefined) { return '-'; }
+    return Math.round(v).toLocaleString('en-US');
+  }
+
+  // fmtCost：今日消费，固定两位小数。
+  // ⚠ 不画货币符号：契约里 today_cost 没说单位（额度 / 元 / 美元），
+  //   前端自己加一个符号等于**替后端断言单位** —— 宁可只给数字。
+  function fmtCost(n) {
+    var v = numOf(n);
+    if (v === undefined) { return '-'; }
+    return v.toFixed(2);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 2. 组件（返回 HTML 字符串；值一律先过格式化，拿不到就是 '-'）
+  // ══════════════════════════════════════════════════════════════════════
+
+  // minibar 三档阈值进度条。
+  //
+  // ⚠ 阈值与色值**硬编码**（不从 CSS 变量取）：红/黄是语义色，必须在深浅
+  //   两套主题下完全一致；而「正常」档用 var(--fg) 跟随主题 —— 正常态本来就
+  //   该融入页面，不该是一个固定的灰。
+  // ⚠ 非零至少 1% 宽：0.4% 的条宽 0 像素，看起来像「没在采集」。
+  function minibar(pct) {
+    var p = numOf(pct);
+    if (p === undefined) { p = 0; }
+    p = Math.max(0, Math.min(p, 100));
+    var color = p > 80 ? '#e53e3e' : (p > 60 ? '#d69e2e' : 'var(--fg)');
+    var w = Math.max(p, p > 0 ? 1 : 0);
+    return '<div class="minibar"><i style="width:' + w + '%;background:' + color + '"></i></div>';
+  }
+
+  // tag 小标（降级/禁用/状态）。
+  function tag(text, tone) {
+    return '<span class="tag' + (tone ? ' ' + tone : '') + '">' + esc(text) + '</span>';
+  }
+
+  // statCard 普通统计卡。
+  // valueHtml 已经是**渲染好的 HTML 片段**（可能带状态色/小标），所以不再转义。
+  function statCard(k, valueHtml, sub, kTag) {
+    return '<div class="c">'
+      + '<div class="k">' + esc(k) + (kTag || '') + '</div>'
+      + '<div class="v">' + valueHtml + '</div>'
+      + '<div class="s">' + (sub || '&nbsp;') + '</div>'
+      + '</div>';
+  }
+
+  // resCard 资源卡（百分比 + 进度条 + 可选 detail）。
+  //
+  // ⚠ 百分比本身也参与三档配色（与条同色）：只给条上色的话，84% 这行数字
+  //   仍是普通前景色，扫一眼读不出「这条已经危险了」。
+  function resCard(k, pct, detail) {
+    var p = numOf(pct);
+    var hasVal = p !== undefined;
+    var shown = hasVal ? p : 0;
+    var clamped = Math.max(0, Math.min(shown, 100));
+    var color = clamped > 80 ? '#e53e3e' : (clamped > 60 ? '#d69e2e' : 'var(--fg)');
+    var valueHtml = hasVal
+      ? '<span style="color:' + color + '">' + shown.toFixed(1) + '%</span>'
+      : '<span class="dim">-</span>';
+    var kTag = hasVal ? '' : tag('未上报');
+    var d = detail ? '<span class="dl">' + detail + '</span>' : '';
+    return '<div class="c">'
+      + '<div class="k">' + esc(k) + kTag + '</div>'
+      + '<div class="rowv"><div class="v">' + valueHtml + '</div>' + d + '</div>'
+      + minibar(hasVal ? clamped : 0)
+      + '</div>';
+  }
+
+  // kvGrid：固定几项的键值对（号池、缓存）用这个，不用表格。
+  //
+  // # 为什么不用 table
+  // 表格的语义是「行是同类记录、列是字段」，而这里每个键是**不同指标**
+  // （健康号 / 冷却中 / 熔断中…）。用 table 会让人以为可以排序/筛选。
+  function kvGrid(pairs, oneCol) {
+    var out = '<div class="kv"' + (oneCol ? ' style="grid-template-columns:1fr"' : '') + '>';
+    for (var i = 0; i < pairs.length; i++) {
+      out += '<div><span class="kk">' + esc(pairs[i][0]) + '</span>'
+        + '<span class="vv">' + pairs[i][1] + '</span></div>';
+    }
+    return out + '</div>';
+  }
+
+  // section 分组：标题 + 内容。
+  function section(title, bodyHtml) {
+    return '<section><h2>' + esc(title) + '</h2>' + bodyHtml + '</section>';
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 3. 五组卡片渲染
+  //
+  // 每个 render* 返回 '' 表示「这张卡不渲染」（陷阱态）；
+  // 返回带占位与灰标的卡片表示「降级态」。两者的判据写在各自函数头上。
+  // ══════════════════════════════════════════════════════════════════════
+
+  // ① 服务状态
+  function renderService(d) {
+    var svc = get(d, 'service');
+    var h = get(d, 'health');
+    if (!svc && !h) { return ''; }   // 陷阱：两组数据一起缺失 ⇒ 整组不渲染
+
+    var cards = [];
+
+    // 服务状态：value 是**状态药丸**，sub 是后端 warnings[0]。
+    var st = get(svc, 'status');
+    var pill;
+    if (st === 'ok') { pill = '<span class="ok">健康</span>'; }
+    else if (st === 'warning') { pill = '<span class="warn">警告</span>'; }
+    else if (st === 'critical') { pill = '<span class="err">严重</span>'; }
+    else { pill = '<span class="dim">-</span>'; }
+    var warns = get(svc, 'warnings');
+    var sub = (warns && warns.length) ? esc(String(warns[0])) : '近 5 分钟';
+    var tagSt = (st === 'ok' || st === 'warning' || st === 'critical') ? '' : tag('未上报');
+    // ⚠ 未知状态**不**降级成「健康」：hyxapi 那边 map[status] || map.ok
+    //   会把后端新增的第 4 种状态静默显示成健康 —— 那是最坏的一种错法。
+    //   这里显示 '-' + 「未上报」，让人知道是我们不认识它。
+    cards.push(statCard('服务状态', pill, sub, tagSt));
+
+    // 近 5 分钟 RPM
+    var rpm = pickNum(h, ['rpm_5m', 'window_rpm', 'rpm']);
+    var reqs = pickNum(h, ['window_requests_5m', 'window_requests']);
+    cards.push(statCard('近 5 分钟 RPM',
+      rpm === undefined ? '<span class="dim">-</span>' : esc(fmtRPM(rpm)),
+      reqs === undefined ? '窗口请求数未上报' : (fmtInt(reqs) + ' 次请求'),
+      rpm === undefined ? tag('口径未就绪') : ''));
+
+    // 成功率：**优先用计数算**（最可信），其次读字段。
+    var succeed = pickNum(h, ['success_rate', 'success_rate_5m']);
+    var errs = pickNum(h, ['window_errors_5m']);
+    var rate;
+    if (reqs !== undefined && reqs > 0 && errs !== undefined) {
+      rate = (reqs - errs) / reqs * 100;
+    } else if (succeed !== undefined) {
+      // ⚠ 0..1 与 0..100 两种写法都存在过。判据取「<=1 视为比例」：
+      //   代价是「真的只有 0.7% 成功率」会被显示成 70%。
+      //   这是本页唯一接受的不精确 —— 先让字段缺失变成能显示的近似，
+      //   比整卡空白有用；一旦后端固定口径（见任务书契约），这条可以删掉。
+      rate = succeed <= 1 ? succeed * 100 : succeed;
+    }
+    cards.push(statCard('成功率',
+      rate === undefined ? '<span class="dim">-</span>' : esc(fmtPct(rate)),
+      errs === undefined ? '窗口错误数未上报' : (fmtInt(errs) + ' 个错误'),
+      rate === undefined ? tag('口径未就绪') : ''));
+
+    // 平均延迟：入参可能是 ms 或秒，两种都认。
+    var latMs = pickNum(h, ['avg_latency_ms', 'latency_ms']);
+    if (latMs === undefined) {
+      var latSec = pickNum(h, ['avg_latency_seconds', 'avg_latency']);
+      if (latSec !== undefined) { latMs = latSec * 1000; }
+    }
+    cards.push(statCard('平均延迟',
+      latMs === undefined ? '<span class="dim">-</span>' : esc(fmtLatency(latMs)),
+      '成功请求的平均值',
+      latMs === undefined ? tag('未上报') : ''));
+
+    return section('服务状态', '<div class="grid g4">' + cards.join('') + '</div>');
+  }
+
+  // ② 资源与入口
+  function renderResource(d) {
+    var r = get(d, 'resource');
+    if (!r) { return ''; }   // 陷阱：整块资源数据缺失 ⇒ 整组不渲染
+
+    var cards = [];
+    cards.push(resCard('CPU', get(r, 'cpu_pct'), ''));
+    cards.push(resCard('内存', get(r, 'mem_pct'), ''));
+    // 磁盘的 detail 只在**有可用量**时出现（0 表示后端没给，不是「0 字节可用」）。
+    var free = pickNum(r, ['disk_free_bytes']);
+    cards.push(resCard('磁盘', get(r, 'disk_pct'), free ? (esc(fmtBytes(free)) + ' 可用') : ''));
+
+    var conns = pickNum(r, ['active_conns']);
+    cards.push(statCard('活跃连接',
+      conns === undefined ? '<span class="dim">-</span>' : esc(fmtInt(conns)),
+      '当前在途请求数',
+      conns === undefined ? tag('未上报') : ''));
+
+    var up = pickNum(r, ['uptime_sec']);
+    cards.push(statCard('运行时长',
+      up === undefined ? '<span class="dim">-</span>' : esc(fmtUptime(up)),
+      '进程启动至今',
+      up === undefined ? tag('未上报') : ''));
+
+    return section('资源与入口', '<div class="grid g5">' + cards.join('') + '</div>');
+  }
+
+  // ③ 请求健康
+  function renderHealth(d) {
+    var h = get(d, 'health');
+    if (!h) { return ''; }
+
+    var cards = [];
+    var today = pickNum(h, ['today_requests']);
+    cards.push(statCard('今日请求数',
+      today === undefined ? '<span class="dim">-</span>' : esc(fmtInt(today)),
+      '自本地时间 0 点起',
+      today === undefined ? tag('未上报') : ''));
+
+    var wErr = pickNum(h, ['window_errors_5m']);
+    // 错误数 >0 用警示色：这是唯一一个「越大越坏」的卡，颜色本身就是信息。
+    var errHtml = wErr === undefined ? '<span class="dim">-</span>'
+      : (wErr > 0 ? '<span class="err">' + esc(fmtInt(wErr)) + '</span>' : '0');
+    cards.push(statCard('近 5 分钟错误', errHtml, '近 5 分钟',
+      wErr === undefined ? tag('未上报') : ''));
+
+    var tk = pickNum(h, ['today_tokens']);
+    cards.push(statCard('今日 Token',
+      tk === undefined ? '<span class="dim">-</span>' : esc(fmtTokens(tk)),
+      '输入 + 输出合计',
+      tk === undefined ? tag('未上报') : ''));
+
+    var cost = pickNum(h, ['today_cost']);
+    cards.push(statCard('今日消费',
+      cost === undefined ? '<span class="dim">-</span>' : esc(fmtCost(cost)),
+      'logs 表今日累计',
+      cost === undefined ? tag('未上报') : ''));
+
+    var gor = pickNum(h, ['goroutines']);
+    cards.push(statCard('Goroutines',
+      gor === undefined ? '<span class="dim">-</span>' : esc(fmtInt(gor)),
+      '运行时协程数',
+      gor === undefined ? tag('未上报') : ''));
+
+    return section('请求健康', '<div class="grid g5">' + cards.join('') + '</div>');
+  }
+
+  // ④ 依赖健康 —— 换成**本仓真实依赖**（无数据库集群、无 Redis）
+  //
+  // 四张卡：SQLite / data JSON 文件 / 号池 / 上游。
+  // 陷阱判据逐个写：**对应的那个子对象缺失 ⇒ 那张卡不渲染**。
+  // 这与 hyxapi 的 PoolCard 一致（data.open === undefined 就 return null），
+  // 也和 Redis 卡相反（Redis 禁用是配置事实，必须占位告知）。
+  function renderDeps(d) {
+    var deps = get(d, 'deps');
+    if (!deps) { return ''; }
+
+    var cards = [];
+
+    // ── SQLite
+    var sq = get(deps, 'sqlite');
+    if (sq) {
+      var okFlag = get(sq, 'ok');
+      var inner;
+      if (okFlag === false) {
+        // 降级（不是陷阱）：数据库没启用是**配置事实**，要告知而不是藏起来。
+        // 文案给积极语义：「内存聚合模式运行中」比「不可用」有用得多。
+        inner = '<div class="empty">数据库未启用，指标走内存聚合模式运行中。</div>';
+      } else {
+        var size = pickNum(sq, ['size_bytes']);
+        var tables = pickNum(sq, ['tables']);
+        var rows = pickNum(sq, ['log_rows']);
+        inner = kvGrid([
+          ['库文件大小', size === undefined ? '<span class="dim">-</span>' : esc(fmtBytes(size))],
+          ['表数', tables === undefined ? '<span class="dim">-</span>' : esc(fmtInt(tables))],
+          ['logs 行数', rows === undefined ? '<span class="dim">-</span>' : esc(fmtInt(rows))],
+          ['状态', okFlag === true ? '<span class="ok">正常</span>' : '<span class="dim">-</span>']
+        ]);
+      }
+      cards.push('<div class="c">'
+        + '<div class="k">SQLite 数据库' + (okFlag === false ? tag('Disabled') : '') + '</div>'
+        + inner + '</div>');
+    }
+
+    // ── 号池
+    var pool = get(deps, 'pool');
+    if (pool) {
+      var ph = pickNum(pool, ['healthy']);
+      var pc = pickNum(pool, ['cooling']);
+      var pt = pickNum(pool, ['tripped']);
+      var pa = pickNum(pool, ['autodisabled']);
+      var pf = pickNum(pool, ['inflight']);
+      // 「健康号」是全池唯一的正向量，给绿色；熔断/自动禁用是「已经摘掉了」，
+      // 给警示色（它们 >0 时运维需要知道）。
+      cards.push('<div class="c">'
+        + '<div class="k">号池</div>'
+        + kvGrid([
+          ['健康号', ph === undefined ? '<span class="dim">-</span>' : '<span class="ok">' + esc(fmtInt(ph)) + '</span>'],
+          ['冷却中', pc === undefined ? '<span class="dim">-</span>' : esc(fmtInt(pc))],
+          ['熔断中', pt === undefined ? '<span class="dim">-</span>' : (pt > 0 ? '<span class="warn">' + esc(fmtInt(pt)) + '</span>' : '0')],
+          ['自动禁用', pa === undefined ? '<span class="dim">-</span>' : (pa > 0 ? '<span class="err">' + esc(fmtInt(pa)) + '</span>' : '0')],
+          ['在途 inFlight', pf === undefined ? '<span class="dim">-</span>' : esc(fmtInt(pf))]
+        ], true)
+        + '</div>');
+    }
+
+    // ── data JSON 文件（可变行数 ⇒ 表格）
+    var files = get(deps, 'json_files');
+    if (files && files.length !== undefined) {
+      var rowsHtml = '';
+      var badCount = 0;
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i] || {};
+        var nm = get(f, 'name');
+        var sz = pickNum(f, ['size_bytes']);
+        var mt = pickNum(f, ['mtime_unix']);
+        var fok = get(f, 'ok');
+        if (fok === false) { badCount++; }
+        var mtHtml = '-';
+        if (mt !== undefined && mt > 0) {
+          var dt = new Date(mt * 1000);
+          // 用本地时区显示：运维对着日志看时间时用的是本地钟。
+          mtHtml = esc(dt.toLocaleString('zh-CN', { hour12: false }));
+        }
+        var okHtml = fok === true ? '<span class="ok">OK</span>'
+          : (fok === false ? '<span class="err">解析失败</span>' : '<span class="dim">-</span>');
+        rowsHtml += '<tr>'
+          + '<td>' + (nm === undefined ? '<span class="dim">-</span>' : esc(nm)) + '</td>'
+          + '<td class="r">' + (sz === undefined ? '<span class="dim">-</span>' : esc(fmtBytes(sz))) + '</td>'
+          + '<td class="r">' + mtHtml + '</td>'
+          + '<td class="r">' + okHtml + '</td>'
+          + '</tr>';
+      }
+      var body = rowsHtml
+        ? '<div class="tw"><table><thead><tr>'
+          + '<th>文件</th><th class="r">大小</th><th class="r">最后写入</th><th class="r">解析</th>'
+          + '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>'
+        // 空数组是**事实**（确实没有文件），不是降级 —— 所以给一句中性的说明，
+        // 不加灰标、不画成错误。
+        : '<div class="empty">暂无 JSON 数据文件。</div>';
+      cards.push('<div class="c">'
+        + '<div class="k">数据文件' + (badCount > 0 ? tag(badCount + ' 个解析失败', 'err') : '') + '</div>'
+        + body + '</div>');
+    }
+
+    // ── 上游（可变行数 ⇒ 表格）
+    var ups = get(deps, 'upstreams');
+    if (ups && ups.length !== undefined) {
+      var urows = '';
+      for (var k = 0; k < ups.length; k++) {
+        var u = ups[k] || {};
+        var un = get(u, 'name');
+        var tri = get(u, 'tripped');
+        var ttfb = pickNum(u, ['ttfb_ema_ms']);
+        var triHtml = tri === true ? tag('熔断中', 'warn')
+          : (tri === false ? '<span class="ok">正常</span>' : '<span class="dim">-</span>');
+        urows += '<tr>'
+          + '<td>' + (un === undefined ? '<span class="dim">-</span>' : esc(un)) + '</td>'
+          + '<td class="r">' + triHtml + '</td>'
+          // ttfb 为 0 表示**还没有样本**，fmtLatency 会显示 '-'（不是 0ms）。
+          + '<td class="r">' + esc(fmtLatency(ttfb)) + '</td>'
+          + '</tr>';
+      }
+      var ubody = urows
+        ? '<div class="tw"><table><thead><tr>'
+          + '<th>上游</th><th class="r">状态</th><th class="r">TTFB EMA</th>'
+          + '</tr></thead><tbody>' + urows + '</tbody></table></div>'
+        : '<div class="empty">还没有注册上游。</div>';
+      cards.push('<div class="c">'
+        + '<div class="k">上游</div>' + ubody + '</div>');
+    }
+
+    if (!cards.length) { return ''; }   // 四个子对象全缺 ⇒ 整组不渲染
+    return section('依赖健康', '<div class="grid g2">' + cards.join('') + '</div>');
+  }
+
+  // ⑤ 缓存与容量
+  function renderCache(d) {
+    var cache = get(d, 'cache');
+    if (!cache) { return ''; }
+
+    var cards = [];
+
+    var disk = get(cache, 'disk');
+    if (disk) {
+      var df = pickNum(disk, ['files']);
+      var db = pickNum(disk, ['bytes']);
+      var dh = pickNum(disk, ['hits']);
+      var dm = pickNum(disk, ['misses']);
+      // 契约没给 max_bytes ⇒ 不画进度条（hyxapi 是 max>0 才画）。
+      // 画一条永远满/永远空的条比不画更误导。
+      var hitRate = '-';
+      if (dh !== undefined && dm !== undefined && (dh + dm) > 0) {
+        hitRate = fmtPct(dh / (dh + dm) * 100);
+      }
+      cards.push('<div class="c">'
+        + '<div class="k">磁盘缓存</div>'
+        + kvGrid([
+          ['文件数', df === undefined ? '<span class="dim">-</span>' : esc(fmtInt(df))],
+          ['占用', db === undefined ? '<span class="dim">-</span>' : esc(fmtBytes(db))],
+          ['命中', dh === undefined ? '<span class="dim">-</span>' : esc(fmtInt(dh))],
+          ['未命中', dm === undefined ? '<span class="dim">-</span>' : esc(fmtInt(dm))],
+          ['命中率', esc(hitRate)]
+        ], true)
+        + '</div>');
+    }
+
+    var aff = get(cache, 'affinity');
+    if (aff) {
+      var en = get(aff, 'enabled');
+      var algo = get(aff, 'algo');
+      var entries = pickNum(aff, ['entries']);
+      var inner;
+      if (en === false) {
+        // 降级：禁用是配置事实 ⇒ 占位 + 灰标 + 积极文案（照 hyxapi 的
+        // 「Disabled」+「Running in memory mode」那两条）。
+        inner = '<div class="empty">未启用渠道亲和；选号走无状态轮询。</div>';
+      } else {
+        inner = kvGrid([
+          ['状态', en === true ? '<span class="ok">启用</span>' : '<span class="dim">-</span>'],
+          ['算法', algo === undefined ? '<span class="dim">-</span>' : esc(String(algo))],
+          ['条目数', entries === undefined ? '<span class="dim">-</span>' : esc(fmtInt(entries))]
+        ], true);
+      }
+      cards.push('<div class="c">'
+        + '<div class="k">渠道亲和缓存' + (en === false ? tag('Disabled') : '') + '</div>'
+        + inner + '</div>');
+    }
+
+    if (!cards.length) { return ''; }
+    return section('缓存与容量', '<div class="grid g2">' + cards.join('') + '</div>');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 4. 骨架屏：按真实布局**逐格复刻**
+  //
+  // 为什么要复刻而不是画一块大灰：
+  //   骨架的用途是「占住数据将要占据的位置」，让数据到达时不跳版。
+  //   一块大白会让整页在数据到达的瞬间重排两次（先压缩再展开），
+  //   比没有骨架更刺眼。
+  // 格子数必须与真实渲染一致：① 4 / ② 5 / ③ 5 / ④ 2+2 / ⑤ 2。
+  // ② 的前三张是资源卡，多一条 4px 的细骨架（那张条的位置）。
+  // ══════════════════════════════════════════════════════════════════════
+  function skCell(withBar) {
+    return '<div class="c">'
+      + '<div class="sk sk-k"></div>'
+      + '<div class="sk sk-v"></div>'
+      + (withBar ? '<div class="sk sk-bar"></div>' : '<div class="sk sk-s"></div>')
+      + '</div>';
+  }
+  function skTable(rows) {
+    var out = '<div class="c"><div class="sk sk-k" style="width:38%"></div>';
+    for (var i = 0; i < rows; i++) { out += '<div class="sk sk-cell"></div>'; }
+    return out + '</div>';
+  }
+  function skeleton() {
+    var g1 = '', g2 = '', g3 = '';
+    for (var i = 0; i < 4; i++) { g1 += skCell(false); }
+    for (var j = 0; j < 5; j++) { g2 += skCell(j < 3); }
+    for (var k = 0; k < 5; k++) { g3 += skCell(false); }
+    return section('服务状态', '<div class="grid g4">' + g1 + '</div>')
+      + section('资源与入口', '<div class="grid g5">' + g2 + '</div>')
+      + section('请求健康', '<div class="grid g5">' + g3 + '</div>')
+      + section('依赖健康', '<div class="grid g2">' + skCell(false) + skCell(false)
+        + skTable(3) + skTable(3) + '</div>')
+      + section('缓存与容量', '<div class="grid g2">' + skCell(false) + skCell(false) + '</div>');
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // 5. 状态与网络
+  // ══════════════════════════════════════════════════════════════════════
+
+  var elApp = document.getElementById('app');
+  var elCd = document.getElementById('cd');
+  var elBtn = document.getElementById('refresh');
+  var elErr = document.getElementById('errbox');
+  var elErrMsg = document.getElementById('errmsg');
+  var elRetry = document.getElementById('retry');
+  var elStale = document.getElementById('stalehint');
+  var elUpd = document.getElementById('upd');
+
+  var lastUpdatedAt = 0;   // 最近一次**成功**取数的时刻（倒计时的唯一依据）
+  var hasData = false;     // 是否已经渲染过真实数据
+  var fetching = false;    // 在途标记（同时用于禁用按钮与防止轮询叠加）
+
+  // tick 由**数据到达时刻反推**剩余秒数。
+  //
+  //   left = max(0, ceil((lastUpdatedAt + POLL_MS - now) / 1000))
+  //
+  // 与「left = left - 1」的自减式相比，唯一的但决定性的差别是：
+  // 手动刷新后 lastUpdatedAt 立刻更新 ⇒ 倒计时**立刻回到 5**。
+  // 自减式在这里会显示「还剩 2 秒」，即「刚刷新完却只剩 2 秒」—— 自相矛盾。
+  function tick() {
+    if (!lastUpdatedAt) { elCd.textContent = ''; return; }
+    var left = Math.max(0, Math.ceil((lastUpdatedAt + POLL_MS - Date.now()) / 1000));
+    elCd.textContent = left + ' 秒后刷新';
+  }
+
+  function setErr(msg) {
+    if (!msg) { elErr.classList.remove('on'); elErrMsg.textContent = ''; return; }
+    elErrMsg.textContent = msg;
+    elErr.classList.add('on');
+  }
+
+  // api 取数。**只做一件事**：把非 2xx 变成可读的中文原因。
+  function api(path) {
+    return fetch(path, {
+      // 同源 fetch 默认会带 cookie，但显式写出来是为了让下一个人一眼看到
+      // 「鉴权靠 cookie」这件事（本页没有、也不该有任何密钥）。
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    }).then(function (r) {
+      if (r.status === 401 || r.status === 403) {
+        // ⚠ 这里**不**自动跳登录页：本页可能被 iframe 内嵌，
+        //   location.replace 只会把 iframe 自己换成登录页，
+        //   留下一个「控制台里嵌着一张登录页」的诡异画面。
+        throw new Error('会话已失效或无权限，请回控制台重新登录后刷新本页。');
+      }
+      return r.text().then(function (t) {
+        var j = null;
+        try { j = t ? JSON.parse(t) : null; } catch (e) { j = null; }
+        if (!r.ok) {
+          var m = '';
+          if (j) {
+            if (typeof j.error === 'string') { m = j.error; }
+            else if (j.error && typeof j.error === 'object') { m = j.error.message || j.error.code || ''; }
+            if (!m && typeof j.message === 'string') { m = j.message; }
+          }
+          throw new Error(m || ('HTTP ' + r.status + (t ? '：' + t.slice(0, 160) : '')));
+        }
+        if (j === null) { throw new Error('响应不是 JSON（接口可能还没挂上）。'); }
+        return j;
+      });
+    });
+  }
+
+  // render 把整页重画一遍。
+  //
+  // 为什么整体重画而不是逐字段 diff：这一页每 5s 全量刷新一次，
+  // 逐字段 diff 的复杂度换不来任何可感知的收益（DOM 只有几十个节点），
+  // 而「哪个字段该更新」的分支是 bug 的温床。
+  function render(d) {
+    lastUpdatedAt = Date.now();
+    hasData = true;
+    var html = renderService(d) + renderResource(d) + renderHealth(d)
+      + renderDeps(d) + renderCache(d);
+    // 五组全空 ⇒ 后端返回了一个空对象。这时给一句明确的空态，
+    // 而不是留一张白纸（白纸会被读成「页面坏了」）。
+    if (!html) {
+      html = '<section><div class="c"><div class="k">暂无数据</div>'
+        + '<div class="empty">接口已响应，但五个分组都没有内容 —— '
+        + '可能是后端切片尚未接上，或返回体为空。</div></div></section>';
+    }
+    elApp.innerHTML = html;
+    elUpd.textContent = '更新于 ' + new Date(lastUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false });
+    setErr('');
+    elStale.classList.remove('on');
+    tick();   // 立刻重算 ⇒ 倒计时跳回 5
+  }
+
+  // load 取一次数。
+  //
+  // 三处刻意的行为：
+  //   · 已有数据时失败 ⇒ **保留**上次的画（并挂「显示的是上次成功的数据」）。
+  //     hyxapi 是直接换成错误块，那会让一次网络抖动抹掉整块仪表盘 ——
+  //     对「看一眼现在怎么样」这个用途来说是净损失。
+  //   · 首次失败 ⇒ 清掉骨架，显示错误（骨架意味着「还在等」，那是假信息）。
+  //   · document.hidden 时不发包（由轮询定时器判断）：避免后台标签页
+  //     每 5s 白打一次接口。
+  function load() {
+    if (fetching) { return Promise.resolve(); }
+    fetching = true;
+    elBtn.disabled = true;
+    return api(ENDPOINT).then(function (d) {
+      fetching = false;
+      elBtn.disabled = false;
+      render(d || {});
+    }).catch(function (e) {
+      fetching = false;
+      elBtn.disabled = false;
+      var msg = (e && e.message) ? e.message : String(e);
+      if (hasData) {
+        // 保留旧数据，但必须**明说**它是旧的。
+        elStale.classList.add('on');
+        setErr('刷新失败：' + msg);
+      } else {
+        elApp.innerHTML = '';
+        setErr('加载失败：' + msg);
+      }
+      elCd.textContent = '';
+    });
+  }
+
+  // ── 启动
+  elApp.innerHTML = skeleton();
+  elBtn.addEventListener('click', function () { void load(); });
+  elRetry.addEventListener('click', function () { void load(); });
+
+  // 倒计时每秒重算（与轮询解耦：轮询是 5s，显示是 1s 粒度）。
+  setInterval(tick, 1000);
+  // 轮询：5s 一次；页面不可见时跳过。
+  setInterval(function () {
+    if (document.hidden) { return; }
+    void load();
+  }, POLL_MS);
+  // 从后台切回来时立刻刷一次 —— 否则用户看到的是最多 5s 前的旧读数，
+  // 而那正好是他刚刚切回来想确认的那一眼。
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) { void load(); }
+  });
+
+  void load();
+})();
+</script>
+</body>
+</html>
