@@ -169,7 +169,7 @@ const (
 //
 // # 为什么 DisableForeignKeyConstraintWhenMigrating
 //
-// 本包 12 张表**没有声明任何关系字段**（不嵌入关联），而是用逻辑 ID 关联。
+// 本包的表**没有声明任何关系字段**（不嵌入关联），而是用逻辑 ID 关联。
 // 两个实际原因：
 //
 //	① SQLite 的外键约束默认**关闭**，需要在每条连接上 PRAGMA foreign_keys=ON
@@ -190,7 +190,7 @@ func gormConfig() *gorm.Config {
 	}
 }
 
-// Migrate 建表/补列（AutoMigrate 全部 12 张表）。
+// Migrate 建表/补列（AutoMigrate 全部表，清单见 allModels/Tables）。
 //
 // # 为什么要一个显式函数，而不是在 Open 里自动跑
 //
@@ -214,6 +214,19 @@ func Migrate() error {
 	}
 	if err := migrateAll(); err != nil {
 		return fmt.Errorf("store: 建表失败: %w", err)
+	}
+	// 部分唯一索引（task-60 / B1 前置）：GORM 的 tag 表达不了 WHERE 子句，而 SQLite
+	// 的**普通 UNIQUE 索引会把多个空串当重复**（'' = ''）—— 那样 seed 的第二行就
+	// 会违反约束（13 个 seed 渠道的 external_id 全是空串）。所以这里手动建一条
+	// **只对非空值**生效的唯一索引。IF NOT EXISTS + 每次启动执行 = 幂等。
+	if err := ensureChannelExternalIDIndex(); err != nil {
+		return err
+	}
+	// 一次性回填（D5）：AutoMigrate 只加不删 ⇒ channels.models（新列）会与
+	// channels.models_csv（旧列）并存，而新列是空的。不搬的话老部署的模型声明
+	// 静默丢失（表现为"渠道存在但选不到"）。幂等，见 backfillLegacyChannelColumns。
+	if _, err := backfillLegacyChannelColumns(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -329,6 +342,7 @@ func allModels() []any {
 		&Option{},
 		&Channel{},
 		&Ability{},
+		&Token{}, // A2（recon-arch）落地的 token 表；漏登记 = 生产启动即报 no such table
 		&Model{},
 		&Vendor{},
 		&Log{},
@@ -443,11 +457,14 @@ func ensureParentDir(path string) error {
 //
 // # 为什么不直接返回 struct
 //
-// 调用方是人（启动日志打一行「已建 12 张表」）与测试（断言 12 个名字）。
+// 调用方是人（启动日志打一行「已建 N 张表」）与测试（断言名字集合 + 表数契约）。
 // 返回名字就够了，也不必把 GORM 类型泄漏给调用方。
 func Tables() []string {
 	return []string{
 		"setups", "users", "user_sessions", "options", "channels", "abilities",
 		"models", "vendors", "logs", "accounts", "account_events", "audit_log",
+		// A2（recon-arch）落地的 Token 表。⚠ 新增表必须同时改两处：allModels()（否则
+		// 不建表）与这里（否则 TestMigrateCreatesExpectedTables 报"多出来的表"）。
+		"tokens",
 	}
 }

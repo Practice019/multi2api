@@ -388,10 +388,10 @@ go test ./... -count=1
 
 ## 前端视觉层（v3 · MAXIMALISM）
 
-- **唯一真相是 `internal/server/theme-max.css`**，三个页面里的同款 CSS 是
+- **唯一真相是 `internal/server/theme-max.css`**，六个页面里的同款 CSS 是
   `node tools/theme_sync.js` 内联进去的（幂等；`--check` 只校验）。
   手改页面里的那段 CSS 会在下次同步时被覆盖 —— 改视觉只改那一份。
-- 改完必须重建 `bin\wb2api-server.exe`：三个页面走 `//go:embed`，不重建
+- 改完必须重建 `bin\wb2api-server.exe`：六个页面走 `//go:embed`，不重建
   浏览器拿到的还是旧页面（最容易被误判成"前端 bug"）。
 - 分层口径：**外壳吵、数据静**。表格内容区 / 表单 / 日志行只许墨线与等宽字，
   不铺色块、不叠阴影；颜色与纹理只上在页头、侧栏、分区标题带、统计卡、分组头、弹窗。

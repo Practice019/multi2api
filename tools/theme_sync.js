@@ -1,12 +1,12 @@
-// theme_sync.js —— 把 theme-max.css（唯一真相）内联进三个页面的 <style> 末尾。
+// theme_sync.js —— 把 theme-max.css（唯一真相）内联进六个页面的 <style> 末尾。
 //
 // # 为什么"内联"而不是"外链 CSS"
-// 三个页面都是 //go:embed 的单文件 HTML，本仓的既有约束是
+// 六个页面都是 //go:embed 的单文件 HTML，本仓的既有约束是
 // 「单文件、零外部依赖、零构建步骤」（internal/server/webui.go:2）。外链 CSS 要加
 // 路由 + 处理缓存/版本，等于为了少写 600 行 CSS 引入一个新的部署面。
 //
 // # 为什么还要有唯一真相
-// 三个页面各有自己的变量名（控制台 --acc / 登录页 --accent / 渠道页 --acc+--bd），
+// 六个页面各有自己的变量名（控制台 --acc / 登录页 --accent / 渠道页 --acc+--bd / 状态页与模型页各有自己的 --mono 一族），
 // 各写一份必然漂移。所以真身只有 internal/server/theme-max.css 一份，
 // 本脚本把它原样灌进每个页面的标记之间；改样式只改那一份，然后跑：
 //
@@ -29,6 +29,13 @@ const PAGES = [
   'internal/server/webui-login.html',
   'internal/server/webui-channels.html',
   'internal/server/webui-groups.html',
+  // v3.1（2026-10-26）：状态页与模型页此前**不在名单里** —— 它们是独立 document
+  // （iframe 内嵌与直开都算），于是长期停在 v2 GitHub 蓝，与其余四页视觉分叉；
+  // 更糟的是它们**同时逃过了两份守卫**：主题一致性（本脚本）与对比度巡检
+  // （tests/frontend/audit_contrast_pages.js 原先只扫控制台外壳）都不看它们。
+  // 首次注入由本脚本自己完成：没有标记时插在**最后一个 </style> 之前**（见 apply）。
+  'internal/server/webui-status.html',
+  'internal/server/webui-models.html',
 ];
 
 function eolOf(text) {
@@ -38,8 +45,29 @@ function eolOf(text) {
 }
 
 function block(eol) {
-  const css = fs.readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n').replace(/\s+$/, '');
-  return [START, css, END].join(eol).split('\n').join(eol);
+  // ⚠⚠ 这里必须**只用 \n 组装、最后一次性换 eol**（2026-10-26 修的真缺陷）。
+  //
+  // # 原来错在哪
+  // 旧写法是 [START, css, END].join(eol).split('\n').join(eol)：
+  //   join(eol) 先插入了 \r\n，紧接的 split('\n') 又把每个 \r\n 从中间切开
+  //   （元素尾巴留下一个 \r），join(eol) 再补一个 \r\n ⇒ **\r\r\n（双 CR）**。
+  // 于是：脚本自己刚写完的页面 --check 是 ok 的（写完即自洽），
+  // 但**任何人手同步过、或由别的路径写过一次的 CRLF 页，永远过不了 --check** ——
+  // 哪怕视觉完全一致、只差那两个多出来的 \r。这是最坏的一类缺陷：
+  // 门禁看着是绿的，报的却是「你落后了」，把人往错误方向支。
+  //
+  // # 现在的写法（两步，各自单一职责）
+  //   ① 把 CSS 正文规范化成 \n（\r\n 与**裸 \r** 都归一 —— 裸 CR 是旧 Mac 行尾，
+  //      留着会让下面的 split 判断失准）；
+  //   ② 用 \n 组装整块，最后 split('\n').join(eol) **只做一次** eol 转换。
+  // ⇒ 块内不可能出现 \r\r，也不可能出现裸 \r；对 CRLF / LF 页面都幂等。
+  //
+  // # 为什么不干脆把 CRLF 页面整体转成 LF
+  // 本仓有 .gitattributes 与 tests/frontend/audit_crlf_sensitivity.js 的纪律：
+  // 整文件换行改写会在 git 里制造「全文件都变了」的巨大假 diff，把真改动埋掉。
+  // 所以这里**只规范块内的分隔符**，页面其余部分的既有行尾原样保留。
+  const css = fs.readFileSync(SRC, 'utf8').replace(/\r\n?/g, '\n').replace(/\s+$/, '');
+  return [START, css, END].join('\n').split('\n').join(eol);
 }
 
 function apply(text, eol) {

@@ -50,6 +50,38 @@
                  'PingFang SC','Microsoft YaHei',sans-serif;
   --font-ui:system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
   --font-serif-max:Georgia,'Times New Roman','Songti SC',serif;
+  /* ── 四个字体角色（v3.1 补齐 · 2026-10-26）────────────────────────────
+     ⚠ 本仓铁律：**零外部资源**（tests/frontend/gen_ui_manifest.js 会红）。
+       所以四个角色全部只用**系统自带**字体族 + 逐级降级链，**不引任何字体文件**。
+       即便将来要引字体文件，它也只能是**可选增强**：
+         · 不得成为首屏阻塞 —— 不许有阻塞渲染的 @font-face / <link rel=stylesheet>；
+         · 不得成为离线依赖 —— 裸机 / 内网 / Release 解压即用的场景必须仍然完全可用。
+       降级链的最后一级（sans-serif / monospace / serif）就是这条保证的落点。
+
+       ① --font-display      展示重体：页头 / 分区标题 / 主按钮（已存在，本次不动）
+       ② --font-mono         标签等宽：标签、数字、ID、代码、表头、侧栏项
+       ③ --font-serif-italic 衬线斜体：副标题 / 引文（**斜体由使用点加 font-style:italic**，
+                             变量只负责字族；两者配对出现才有印刷品的味道）
+       ④ --font-hand         手写体：**本任务刻意不实现**，理由见下
+
+     ⚠⚠ 为什么非补 --font-mono 不可（2026-10-26 实测的真缺陷）：
+       此前 CSS 里 **42 处**引用 var(--font-mono)，却**一处也没定义** ——
+       变量区只有 --font-display / --font-ui / --font-serif-max，
+       而页面上另有自己的 --mono（名字对不上，也不在这份真相里）。
+       后果是**静默的**：整条 font-family 声明失效 ⇒ 所有等宽标签实际继承父字体
+       （中文落回系统黑体、数字变成比例字）⇒ 标签列对不齐、数字位数不齐。
+       CSS 不会为此报任何错，对比度门禁也照样全绿（那是**颜色**的判据）。
+       这类「没定义就静默失效」只能靠「定义处与引用处同在一份真相里」来根除。 */
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,'Cascadia Mono',
+              'DejaVu Sans Mono',monospace;
+  --font-serif-italic:var(--font-serif-max);
+  /* ④ 手写体（--font-hand）：**不实现** —— 这是决定，不是遗漏。
+      规范里的 Caveat 手写体是**拉丁文**手写体；本仓界面绝大多数是中文，
+      而 Windows / macOS **都没有可信的中文手写系统字体**（华文行楷 / 楷体在各机器上
+      有无不定、字重与字面差异极大）。给一条「只有拉丁字母生效、中文静默落回黑体」
+      的手写链比不做**更糟**：同一行标题里中英文字体不一致，看起来像渲染坏了，
+      而不是像手写。⇒ 需要手写感时用已有的衬线斜体（--font-serif-italic + italic）
+      或展示重体承担，不单开一个必然半失效的角色。 */
 
   /* 硬投影与描边（maximalism 的签名） */
   --hard:#1A1A1A;
@@ -337,14 +369,16 @@ header h1 small{
 
 /* ── 4. 侧栏（导航）───────────────────────────────────────────────────── */
 .layout{gap:14px}
-.sidebar{
+.sidebar,
+.nav{ /* v3.1 别名 + .nav（与控制台 <nav id=nav> 同语义，换类名即可复用整套侧栏） */
   border:3px solid var(--ink);
   background:var(--panel);
   box-shadow:6px 6px 0 var(--hard);
   padding:9px 7px;
   gap:1px;
 }
-.sidebar button{
+.sidebar button,
+.nav button{ /* v3.1 别名 */
   border:0;
   border-radius:0;
   background:transparent;
@@ -355,18 +389,21 @@ header h1 small{
   letter-spacing:.02em;
   padding:5px 9px 5px 13px;
 }
-.sidebar button:hover{
+.sidebar button:hover,
+.nav button:hover{ /* v3.1 别名 */
   background:var(--panel2);
   color:var(--fg);
   box-shadow:inset 3px 0 0 var(--pink);
 }
 /* 守卫③：active 底色只能是 --acc 本身（徽章复合色的色相靠它） */
-.sidebar button.active{
+.sidebar button.active,
+.nav button.active{ /* v3.1 别名 */
   background:var(--acc);
   color:var(--on-acc);
   box-shadow:3px 3px 0 var(--hard);
 }
-.sidebar button.active::before{
+.sidebar button.active::before,
+.nav button.active::before{ /* v3.1 别名 */
   content:'';
   position:absolute;
   left:0;
@@ -378,7 +415,8 @@ header h1 small{
   background:var(--yellow);
   border-radius:0;
 }
-.sidebar .badge{
+.sidebar .badge,
+.nav .badge{ /* v3.1 别名 */
   margin-left:8px;
   padding:0 5px;
   font-family:var(--font-mono);
@@ -388,7 +426,8 @@ header h1 small{
   border:0;
   border-radius:0;
 }
-.sidebar button.active .badge{
+.sidebar button.active .badge,
+.nav button.active .badge{ /* v3.1 别名 */
   color:#120F0D;
   background:color-mix(in srgb, var(--acc) 22%, transparent);
   border:2px solid var(--ink);
@@ -542,12 +581,14 @@ section > h2{
 
 /* ── 7. 控件 ───────────────────────────────────────────────────────── */
 button,input,select,textarea{border-radius:0}
-input,select,textarea{
+input,select,textarea,
+.input{ /* v3.1 别名 + .input */
   border:2px solid var(--line);
   background:var(--panel2);
   color:var(--fg);
 }
-input:focus,select:focus,textarea:focus{
+input:focus,select:focus,textarea:focus,
+.input:focus{ /* v3.1 别名 */
   border-color:var(--acc);
   outline:3px solid var(--acc);
   outline-offset:1px;
@@ -557,20 +598,26 @@ input[type="checkbox"],input[type="radio"]{
   width:14px;
   height:14px;
 }
-button{
+button,
+.btn,
+.btn--secondary{ /* v3.1 别名：.btn=基按钮；.btn--secondary 显式表意「非主按钮」 */
   border:2px solid var(--line);
   background:var(--panel2);
   color:var(--fg);
   font-family:var(--font-mono);
   font-weight:700;
 }
-button:hover:not(:disabled){
+button:hover:not(:disabled),
+.btn:hover:not(:disabled),
+.btn--secondary:hover:not(:disabled){ /* v3.1 别名 */
   background:var(--invert-bg);
   color:var(--invert-fg);
   border-color:var(--line);
 }
-button:active:not(:disabled){transform:translate(1px,1px)}
-button.primary{
+button:active:not(:disabled),
+.btn:active:not(:disabled){transform:translate(1px,1px)} /* v3.1 别名 */
+button.primary,
+.btn--primary{ /* v3.1 别名：与 .btn--secondary 配对的另一半 */
   background:var(--acc);
   border-color:var(--ink);
   color:var(--on-acc);
@@ -707,6 +754,22 @@ tr.grouprow > td{
 .chip .mult{border-radius:0;background:var(--ink);color:var(--cream)}
 .chip .mult.free{background:var(--acid);color:#120F0D}
 .chip .mult.hi{background:var(--yellow);color:#120F0D}
+/* 模型卡片（.chips 里的模型名）**看起来要可点** —— 点击会复制完整模型名。
+
+   # 为什么必须留这两条（它们曾经只活在 webui.html 的代码块里，被 theme_sync 重建整块时抹掉）
+   复制是**无声**操作：没有手型光标、按下也没有位移时，用户点完不知道到底成没成
+   （toast 会飘走，之后再想确认只能再点一次）。所以「可点」必须由**视觉线索**表达，
+   而不是让用户猜。单击改单选的那条既有路径也依赖同一批 chip，见
+   internal/server/ui_wiring_modelchip_test.go（TestModelChipKeepsDropdownSync）。
+
+   # 为什么写在这里而不是页面自有 CSS
+   控制台与三个 iframe 页都会渲染 .chips/.chip（模型面板、日志状态栏…），
+   「可点」是跨页共用的交互线索 ⇒ 归唯一真相。
+   ⚠ 教训（2026-10-26）：任何「只塞进某个页面块内」的规则，都会在下一次
+     node tools/theme_sync.js 重建整块时**无声消失**（块内内容不是 diff 的对手）。
+   断言：ui_wiring_modelchip_test.go:78 直接查下面这行字面量 —— 它就是交互线索的守卫。 */
+.chips .chip{cursor:pointer}
+.chips .chip:active{transform:translateY(1px)}
 .healthbar{
   border:2px solid var(--ink);
   background:var(--panel);
@@ -1047,3 +1110,59 @@ header h1{letter-spacing:0}
 /* 操作列给足宽度，别让三个按钮被内容挤回去 */
 #pane-ch td:last-child,
 #pane-keys td:last-child{min-width:200px;white-space:nowrap}
+
+/* ══════════════════════════════════════════════════════════════════════
+   12. 安静区 .calm —— 与"吵"同一套语言，只是音量更低（v3.1 · 2026-10-26）
+
+   # 它是什么
+   maximalism 全套铺满时，表单区/操作区会被色块与硬投影淹掉：用户来这里是
+   **填一个字段**或**点一个按钮**，不是来看海报的。.calm 就是规范里那条
+   「必须留一块安静区给真正的操作」的落点：同色系、同字体、同描边，
+   但**不铺色块、不叠硬投影**，只留墨线与奶油底。
+
+   # 三个守卫（都有机器判据，别靠肉眼）
+   ① 亮度（tests/frontend/final_visual.js）：浅色主题下本区域实际亮度必须 >0.5、
+      深色 <0.5 ⇒ 这里只用 --bg / --panel / --fg / --line 这些**成对定义**的语义
+      变量，绝不写死颜色。**尤其不许给 .card 套 --card1(--yellow) / --card2(--acid)**：
+      黄与酸绿在深色主题下会把亮度顶过 0.5，直接踩掉守卫①。
+   ② 对比度（tests/frontend/audit_contrast_pages.js，阈值 4.5:1）：保持 cream 底 +
+      墨字天然满足；把底色换成任意亮色块都会开始掉分。
+   ③ 行高（本仓硬约束）：表格行恒 26px —— 安静区**不放宽**它。
+
+   # 用法
+   <div class="calm"> …表单/操作区… </div>（纯增量：不写这个类，一切照旧） */
+.calm{background:var(--bg);color:var(--fg)}
+/* 色块拍平：卡片/表单/表格一律回到"底" */
+.calm .card,
+.calm form,
+.calm fieldset,
+.calm table,
+.calm thead,
+.calm tbody,
+.calm tr,
+.calm th,
+.calm td{background:transparent}
+/* 硬投影拍平（只在这一层）：投影是"吵"的语法，安静区不用 */
+.calm .card,
+.calm form{box-shadow:none}
+/* 行高守卫：安静区也必须 26px */
+.calm thead th,
+.calm tbody td{height:26px;line-height:26px}
+/* 标签类在安静区不叠影（.badge 的底色保留 —— 它是**语义色**不是装饰色） */
+.calm .badge,
+.calm .badge--hot,
+.calm .badge--cold{box-shadow:none}
+
+/* ── 别名层索引（v3.1）：本文件里被"追加选择器"的既有规则，一一列出 ──
+   做法刻意是**在既有选择器表里加一个选择器**，而不是另写一份声明块 ——
+   另写一份会立刻产生"两份值哪天漂移"的问题（本仓为"两份真相"交过学费）。
+   所以：原件仍是唯一权威，别名只是它的另一个名字。
+     .input                 → 第五条控件规则（input,select,textarea）
+     .btn / .btn--secondary → 基按钮（button）
+     .btn--primary          → 主按钮（button.primary）
+     .nav / .nav button / .nav button:hover / .nav button.active /
+     .nav button.active::before / .nav .badge / .nav button.active .badge
+                            → 侧栏（.sidebar 全家族）
+     .badge                 → **本就有**（684 一带），无需别名；.badge--hot/--cold/--ro 同理
+     .calm                  → 本节的安静区（新概念，非别名）
+   ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
