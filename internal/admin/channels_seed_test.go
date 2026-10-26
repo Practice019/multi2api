@@ -55,6 +55,23 @@ func seedHandler(reg *gateway.Registry) *Handler {
 	return New(Config{AdminToken: testAdminToken, ListensLoopback: true, Registry: reg})
 }
 
+// channelBaseURL 取渠道行的 base_url 值（契约上该列是 *string，A1 按 hyxapi 对等改的）。
+//
+// # 为什么必须走一个 helper 而不是到处写 *ch.BaseURL
+//
+//  1. **nil 解引用会 panic** —— 一次"契约或 seed 出错"会表现成测试崩溃（假红），
+//     而不是一条能读懂原因的断言失败；
+//  2. **断言消息里要打的是值，不是地址**：%q 打 *string 输出的是 0xc000… 这样的指针值，
+//     排障时等于没打（这一条最容易漏，因为它编译得过）。
+//
+// nil 统一映射成空串：与列上 not null default ” 的语义一致，于是比较变成纯粹的内容比较。
+func channelBaseURL(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 // TestChannelSeed 是验收②的正面判据：13 个注册点 ⇒ 13 行，逐行可对照。
 func TestChannelSeed(t *testing.T) {
 	openSeedDB(t)
@@ -119,15 +136,16 @@ func TestChannelSeed(t *testing.T) {
 	fmt.Printf("T08 channels seed 对照表（%d 行）:\n", len(chans))
 	for i, s := range seeds {
 		ch := chans[i]
-		if ch.Name != s.Provider || ch.BaseURL != s.BaseURL {
+		// ⚠ BaseURL 是 *string（hyxapi 对等契约）：比较与打印都必须先解引用，且要 nil 安全。
+		if ch.Name != s.Provider || channelBaseURL(ch.BaseURL) != s.BaseURL {
 			t.Fatalf("第 %d 行对不上：库里 name=%q base_url=%q，清单 provider=%q base_url=%q",
-				i+1, ch.Name, ch.BaseURL, s.Provider, s.BaseURL)
+				i+1, ch.Name, channelBaseURL(ch.BaseURL), s.Provider, s.BaseURL)
 		}
 		if ch.Status != store.ChannelStatusEnabled {
 			t.Fatalf("第 %d 行 status=%d，want %d（启用）", i+1, ch.Status, store.ChannelStatusEnabled)
 		}
 		line := fmt.Sprintf("  [%2d] id=%-2d provider=%-16s base_url=%-36s source=%s",
-			i+1, ch.ID, ch.Name, ch.BaseURL, s.Source)
+			i+1, ch.ID, ch.Name, channelBaseURL(ch.BaseURL), s.Source)
 		fmt.Println(line)
 		t.Log(line)
 	}
@@ -193,8 +211,12 @@ func TestChannelSeedDoesNotDedupByProviderID(t *testing.T) {
 	if len(wb) != 2 {
 		t.Fatalf("名为 workbuddy 的渠道 = %d 行，want 2", len(wb))
 	}
-	if wb[0].BaseURL == wb[1].BaseURL {
-		t.Fatalf("两个 workbuddy 实例的 base_url 不该相同: %q", wb[0].BaseURL)
+	// ⚠ 必须比**值**而不是比指针：两个 *string 字段各自指向不同的字符串对象，
+	// 直接写 wb[0].BaseURL == wb[1].BaseURL 是**指针比较**，恒 false ——
+	// 那条"两个实例不该同名同端点"的断言会被静默弱化（不报错、永远绿）。
+	if channelBaseURL(wb[0].BaseURL) == channelBaseURL(wb[1].BaseURL) {
+		t.Fatalf("两个 workbuddy 实例的 base_url 不该相同: %q",
+			channelBaseURL(wb[0].BaseURL))
 	}
 }
 

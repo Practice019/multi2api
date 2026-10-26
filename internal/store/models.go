@@ -1,4 +1,5 @@
-// models.go 12 张表的 GORM 模型定义。
+// models.go 本包的 GORM 表模型定义（当前 12 张在这个文件里；第 13 张 tokens 在
+// token.go，A2 落地。表清单的唯一事实来源是 db.go 的 allModels()/Tables()）。
 //
 // # 为什么把 struct 定义单独一个文件，而不是散在各业务文件里
 //
@@ -34,6 +35,17 @@
 // 建出一张"看起来能用"的表，直到需要索引的那天才发现全表扫描。
 // 因此下面每个索引都对应一个**真实查询**，注释里写明了是哪一个。
 package store
+
+// 本文件是"本文件的 12 张表 + 列的 JSON 值类型"的定义处（第 13 张 tokens 在
+// token.go）。导入只为 ChannelInfo 的
+// driver.Valuer / sql.Scanner 实现服务（其余 struct 不需要任何导入）。
+import (
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+)
 
 // Setup 初始化单例表（约定恒为 ID=1）。
 //
@@ -112,30 +124,224 @@ type Option struct {
 func (Option) TableName() string { return "options" }
 
 // Channel 渠道（代码内 provider 的**数据化**形态，PLAN §1 G5）。
+//
+// # 字段面：对齐参考项目 new-api 的 model.Channel（hyxapi model/channel.go:22-58）
+//
+// Wave A1（2026-10-26）把本表从"最小可用"扩到**字段对等**：需求是"完全实现 hyxapi
+// 的渠道管理 + API 创建全套逻辑"，而 hyxapi 的渠道行有三十来个字段，其中多 Key 状态、
+// 若干覆盖项（param/header/model_mapping/status_code_mapping）都是**行内**事实。
+// 字段对等是后续把渠道管理 handler 逐个照搬过来的前提 —— 否则每个 handler 都要
+// 临时加列，而加列是**只加不删**的（见下）。
+//
+// 命名策略：Go 字段名照参考项目（Id→ID 是本仓风格），可空语义用指针表达。
+// **列名优先复用本仓既有列**，这样 AutoMigrate 在既有库上只做"加列/加索引"，
+// 不会触发 SQLite 的"改列 = 重建表"：
+//
+//	参考项目字段        本仓列名        为什么复用
+//	base_url           base_url      既有列（Go 类型 string→*string，列不动）
+//	models             models        **新列**（旧列 models_csv 由一次性回填搬过来；
+//	                                 不搬的表现是声明静默丢失，不是报错）
+//	created_time       created_at    既有列，同语义（Unix 秒）
+//	priority / weight  priority / weight  既有列（Go 类型换 *int64 / *uint）
+//	name / status / id name / status / id 既有列
+//	其余新增字段        同名 snake_case  新列（只加不删）
+//
+// # D1：channels 表**存明文 key**（有意推翻本仓原设计）
+//
+// 原来这一列叫 key_masked，注释写着"只存掩码，不存明文"（理由：.db 会被复制/
+// 备份/贴进工单，比 config.json 更容易外流）。Wave A1 **推翻了那条设计**：
+//
+//	· 推翻的理由：需求是"完全实现 hyxapi 的逻辑"，而 hyxapi 把 key 明文存进
+//	  channels.key —— 渠道的增删改查、多 Key 状态、key 轮换、余额查询全都建立在
+//	  "能读回明文"之上。只存掩码会让每个 handler 都得去另一个存储取 key，逻辑
+//	  无法照搬（这正是本仓 channelstore 的 JSON 实现与 SQL 实现长期双轨的根因）。
+//	· 代价（必须记住，不能只写"已改"）：
+//	  ① data/gw.db 从此含明文凭据 ⇒ 文件权限必须 0600（部署侧检查），且 .db
+//	     不能再随手贴进工单/截图/公开位置；
+//	  ② cmd/migrate-sql export **不得导出 channels.key**（那个导出物是给人看的
+//	     JSON）。今天它只导 users / user_sessions，所以这条是"以后不要加"的
+//	     护栏，不是现状修复 —— 加渠道导出的人必须回来看这段。
+//	· 保留的约束（照 hyxapi）：列表与详情查询**一律 Omit("key")**，明文只经
+//	  GetChannelKey(id) / GetChannelKeys(id) 两个显式方法取（hyxapi 的
+//	  GET /api/channel 同样 Omit("key")，明文只走 POST /:id/key）。
+//	· 旧列 key_masked 不删（AutoMigrate 只加不删）：它成为**孤儿列**，本包不再
+//	  读写；历史掩码值留在库里，没有任何读取路径。
+//
+// # Keys：计算字段，永不落库
+//
+// 与 hyxapi 一致：`Keys []string gorm:"-"` 只是**内存态**（多 Key 的解析结果，
+// 由缓存层填）。真值永远在 Key 列 —— 普通渠道换行分隔、Vertex 是 JSON 数组（D2）。
 type Channel struct {
-	ID      int64  `gorm:"primaryKey;autoIncrement"`
-	Name    string `gorm:"type:varchar(64);not null;default:''"`
-	BaseURL string `gorm:"type:varchar(255);not null;default:''"`
-	// KeyMasked **只存掩码**，不存明文 key。
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// Type 渠道类型（参考项目的 constant.ChannelType* 数值）。
+	Type int `gorm:"not null;default:0"`
+	// ExternalID 本仓 **admin 层的外部可寻址 id**（形如 ch-9f3a1b2c），不是 hyxapi
+	// 的对等字段（hyxapi 用数字 id 寻址）。
 	//
-	// # 为什么这条注释值得写
+	// # 为什么需要它（B1 的硬前置）
 	//
-	// 表一旦建立，"顺手把 key 也存进来"几乎没有阻力 —— 而 .db 文件是可以被
-	// 复制/备份/贴进工单的，比 config.json 更容易外流。凭证继续留在凭证文件/
-	// 环境变量里，库里只放"这是哪把 key"的提示。
-	KeyMasked string `gorm:"type:varchar(64);not null;default:''"`
-	// ModelsCSV 逗号分隔的模型名（对齐参考项目的 models 列形态）。
-	ModelsCSV string `gorm:"type:text;not null;default:''"`
+	// internal/admin/channels.go 自己生成 ch-+8 位 hex 的字符串 id 并回给前端，
+	// 前端之后编辑/停用/删除/管 Key 都用它回传。SQL 成为权威之后，主键是数字
+	// 自增 id —— 没有这一列，那些回传的 ch-xxxx 必然 404。
+	//
+	// # 空串语义与唯一性（**这里有个 SQLite 的坑**）
+	//
+	// 空串 = 非外部寻址（seed 出来的渠道、内部创建的渠道都没有外部 id）。
+	// ⚠ SQLite 的 UNIQUE 索引把多个空串视为**重复**（'' = '' 冲突），所以
+	// **不能**在 tag 上写 uniqueIndex：那样 seed 的第二行就会违反唯一约束
+	// （13 个 seed 渠道全是空串）。
+	//
+	// 取舍（任务书给了两条路，这里选第二条）：**非唯一列 + 手动建的部分唯一索引**
+	//	CREATE UNIQUE INDEX ... ON channels(external_id) WHERE external_id <> ''
+	// 理由：① 唯一性仍然由**库**保证（并发下没有应用层判重的竞态）；② 空串可以有
+	// 任意多行（seed/内部渠道）；③ 字段类型保持 string —— B1 的调用点是
+	// `ch.ExternalID = "ch-xxxx"`，用 *string 会逼它到处取地址。
+	// 索引由 db.go 的 Migrate 每次启动幂等创建（GORM 的 tag 表达不了部分索引）。
+	//
+	// ⚠ 上面这段取舍**有可执行证据**，不是口头结论：`TestChannelExternalIDEmptySemantics`
+	// 建一张带**普通** UNIQUE 的 scratch 表，断言「第一行空串插入成功、第二行空串报
+	// UNIQUE 失败」，同时断言本表的多条空串 external_id 共存。改这一列前先读那条测试。
+	ExternalID string `gorm:"type:varchar(64);not null;default:''"`
+	// Key **明文**（D1）。多 Key 渠道存多把：换行分隔，或 Vertex 的 JSON 数组。
+	// ⚠ 列表/详情一律 Omit("key")，只有 GetChannelKey/GetChannelKeys 会读它。
+	Key                string  `gorm:"type:text;not null;default:''"`
+	OpenAIOrganization *string `gorm:"type:varchar(255)"`
+	TestModel          *string `gorm:"type:varchar(128)"`
 	// Status 1=启用 / 2=手动禁用 / 3=自动禁用（语义对齐参考项目）。
 	// 索引：渠道页按状态筛选。
 	Status int `gorm:"not null;default:1;index:idx_channel_status"`
-	// Priority 越小越优先；Weight 同优先级内加权轮询。
-	Priority  int   `gorm:"not null;default:0"`
-	Weight    int   `gorm:"not null;default:0"`
-	CreatedAt int64 `gorm:"not null;default:0"`
+	// Name 渠道名；索引：身份键 (name, base_url) 的查询与渠道页按名搜索。
+	Name string `gorm:"type:varchar(64);not null;default:'';index:idx_channel_name"`
+	// Weight 同优先级内加权随机；0 = 未指定（可空语义，照参考项目用 *uint）。
+	Weight *uint `gorm:"not null;default:0"`
+	// CreatedTime 建行时间（Unix 秒）。列名仍复用既有的 created_at（见上表）。
+	CreatedTime int64 `gorm:"column:created_at;not null;default:0"`
+	// TestTime 最近一次测试时间（Unix 秒）；ResponseTime 该次测试的耗时（毫秒）。
+	TestTime     int64 `gorm:"not null;default:0"`
+	ResponseTime int   `gorm:"not null;default:0"`
+	// BaseURL 上游端点。身份键的另一半是 Name（见 channel.go 文件头）。
+	BaseURL *string `gorm:"column:base_url;type:varchar(255);not null;default:''"`
+	// Other 渠道类型专属信息（Vertex 的部署地区 JSON 等）。
+	Other string `gorm:"type:text;not null;default:''"`
+	// Balance 上游余额（USD）；BalanceUpdatedTime 余额时间（Unix 秒）。
+	Balance            float64 `gorm:"not null;default:0"`
+	BalanceUpdatedTime int64   `gorm:"not null;default:0"`
+	// Models 该渠道声明的模型，**逗号分隔**（本仓冻结契约；取代旧的 ModelsCSV）。
+	//
+	// ⚠ 迁移口径（只加不删，见 D5）：新列 models 与旧列 models_csv **并存**。
+	// 首次启动时由 backfillLegacyChannelColumns 把 models_csv 的值搬进 models
+	// （只在 models 为空时搬，幂等）—— 不搬的话老部署的模型声明会静默丢失，
+	// 而"丢失"的表现是能力行展开不出来（渠道存在但选不到），不是报错。
+	Models string `gorm:"type:text;not null;default:''"`
+	// Group 该渠道服务的分组，逗号分隔。默认 default。
+	// ⚠ group 是 SQLite 关键字，靠 GORM 转义 —— 不要手写裸 SQL（同 Ability.Group）。
+	Group string `gorm:"type:varchar(64);not null;default:'default'"`
+	// Groups 分组列表的**内存态**解析结果（由 Group 逗号分隔拆出，永不落库）。
+	// 与 Keys 同一模式：真值永远是那一列 CSV，本字段只省下每个调用方自己拆一遍。
+	Groups []string `gorm:"-"`
+	// UsedQuota 累计消耗额度。
+	UsedQuota int64 `gorm:"not null;default:0"`
+	// ModelMapping 对外模型名 → 上游模型名的映射（JSON）。
+	ModelMapping *string `gorm:"type:text"`
+	// StatusCodeMapping 上游状态码 → 本地语义的映射（JSON）。
+	StatusCodeMapping *string `gorm:"type:varchar(1024);not null;default:''"`
+	// Priority 越大越先用（参考项目口径）；可空语义用 *int64。
+	Priority *int64 `gorm:"not null;default:0"`
+	// AutoBan 1 = 测试失败自动禁用。
+	AutoBan *int `gorm:"not null;default:1"`
+	// OtherInfo 本层不解释的附加信息（status_reason / status_time 等，JSON）。
+	OtherInfo string `gorm:"type:text;not null;default:''"`
+	// Tag 渠道标签；索引：按标签批量启停/编辑（hyxapi 的 tag/* 接口）。
+	Tag *string `gorm:"type:varchar(64);index:idx_channel_tag"`
+	// Setting 渠道额外设置（代理、Vertex key 类型等，JSON）。
+	Setting *string `gorm:"type:text"`
+	// ParamOverride / HeaderOverride 请求参数与请求头覆盖（JSON）。
+	ParamOverride  *string `gorm:"type:text"`
+	HeaderOverride *string `gorm:"type:text"`
+	// Remark 备注，最长 255（参考项目带 validate:max=255）。
+	Remark *string `gorm:"type:varchar(255)"`
+	// ChannelInfo 多 Key 状态机的 JSON 列（类型定义在本文件下方）。
+	//
+	// ⚠ 它**不是表**：不登记进 allModels()、不建表。db_test.go 的门禁因此按
+	// "有 TableName() 才算表" 判定（见那里的注释）。
+	ChannelInfo ChannelInfo `gorm:"type:json"`
+	// OtherSettings 不需要检索的补充设置（Azure 版本等），列名照参考项目 settings。
+	OtherSettings string `gorm:"column:settings;type:text;not null;default:''"`
+	// Keys 多 Key 的**内存态**解析结果（永不落库）。
+	Keys []string `gorm:"-"`
 }
 
 func (Channel) TableName() string { return "channels" }
+
+// ChannelInfo 多 Key 状态机（channels.channel_info JSON 列）。
+//
+// # 为什么它在 models.go 而不在 channel.go
+//
+// 主脑冻结的 Channel 结构契约要求类型名 `ChannelInfo` 定义在本文件（A1/A3 共用）。
+// 但它**不是一张表**，所以**不登记进 allModels()**；db_test.go 的门禁按
+// 「有 TableName() 才算表」判定，正好把它与表（本文件 12 张 + token.go 的 tokens）分开。
+//
+// 字段与 hyxapi model.ChannelInfo 一一对应。
+type ChannelInfo struct {
+	// IsMultiKey true = 这条渠道的 Key 列里是多把 key。
+	IsMultiKey bool `json:"is_multi_key"`
+	// MultiKeySize Key 列里 key 的**把数**（解析后）。改 key 时必须重算。
+	MultiKeySize int `json:"multi_key_size"`
+	// MultiKeyStatusList key 下标 → 状态（1 启用 / 2 手动禁用 / 3 自动禁用）。
+	MultiKeyStatusList map[int]int `json:"multi_key_status_list"`
+	// MultiKeyDisabledReason key 下标 → 禁用原因（人看的，不参与判定）。
+	MultiKeyDisabledReason map[int]string `json:"multi_key_disabled_reason,omitempty"`
+	// MultiKeyDisabledTime key 下标 → 禁用时刻（Unix 秒）。
+	MultiKeyDisabledTime map[int]int64 `json:"multi_key_disabled_time,omitempty"`
+	// MultiKeyPollingIndex 轮询模式下的游标（MultiKeyMode == polling 时有意义）。
+	MultiKeyPollingIndex int `json:"multi_key_polling_index"`
+	// MultiKeyMode random / polling（见 channel.go 的常量）。空串按 random 处理。
+	MultiKeyMode string `json:"multi_key_mode"`
+}
+
+// Value 实现 driver.Valuer：写库时序列化成 JSON 文本。
+//
+// ⚠ 返回 string 而不是 []byte：SQLite 的 text 列收字符串最省事，也避免某些驱动
+// 把 []byte 当 blob 处理（那会让列里出现 BLOB 值，之后用 text 函数查它静默不匹配）。
+func (c ChannelInfo) Value() (driver.Value, error) {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("store: 序列化 channel_info 失败: %w", err)
+	}
+	return string(b), nil
+}
+
+// Scan 实现 sql.Scanner：读库时反序列化 JSON。
+//
+// 三种输入都收：NULL、[]byte、string —— 不同驱动/不同列类型给出的东西不同，
+// 只认一种就会在某个驱动版本上升级即崩。
+func (c *ChannelInfo) Scan(value any) error {
+	if c == nil {
+		return errors.New("store: ChannelInfo.Scan 收到 nil 接收者")
+	}
+	var raw []byte
+	switch v := value.(type) {
+	case nil:
+		*c = ChannelInfo{}
+		return nil
+	case []byte:
+		raw = v
+	case string:
+		raw = []byte(v)
+	default:
+		return fmt.Errorf("store: channel_info 的库内值类型不支持: %T", value)
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		*c = ChannelInfo{}
+		return nil
+	}
+	var info ChannelInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return fmt.Errorf("store: 解析 channel_info 失败: %w", err)
+	}
+	*c = info
+	return nil
+}
 
 // Ability 模型 ↔ 渠道的绑定（PLAN §1 G7）。
 //

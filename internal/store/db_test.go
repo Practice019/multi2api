@@ -45,16 +45,20 @@ func openTemp(t *testing.T) string {
 	return path
 }
 
-// TestMigrateCreates12Tables 门禁 1：迁移后**恰好**是那 12 张表。
+// TestMigrateCreatesExpectedTables 门禁 1：迁移后**恰好**是契约里的那张表集合。
 //
 // # 为什么用 sqlite_master 而不是相信 Migrate 的返回值
 //
 // Migrate 返回 nil 只说明 GORM 没报错。表到底建出来了没有，要问数据库本身。
-// 这也是验收口径「SQLite 能列出 12 张表名」的实现方式。
+// 这也是验收口径「SQLite 能列出契约里的全部表名」的实现方式。
 //
 // ⚠ 断言是**集合相等**，不是「至少包含」：多出来的表说明有人偷偷建了表而没
 // 登记进 Tables()（那就绕过了「库里有哪些表」这份唯一清单）。
-func TestMigrateCreates12Tables(t *testing.T) {
+//
+// 名字里**刻意不带数字**（原 TestMigrateCreates12Tables）：表集合会长大
+// （A1/A2 起 13 张，见下面的 wantTableCount），把数字写进函数名会让每份报告
+// 都带一个过期的契约值。
+func TestMigrateCreatesExpectedTables(t *testing.T) {
 	openTemp(t)
 
 	got := sqliteTableNames(t)
@@ -66,8 +70,11 @@ func TestMigrateCreates12Tables(t *testing.T) {
 		t.Fatalf("库里的表与 Tables() 不一致\n got: %v\nwant: %v\n"+
 			"（多出来的表 ⇒ 有人建表却没登记；少了的表 ⇒ 迁移漏了一张）", got, want)
 	}
-	if len(got) != 12 {
-		t.Fatalf("表数 = %d，契约要求 12", len(got))
+	// 表数的**显式契约**（不是从 Tables() 推出来的循环断言）：改表集合必须改这里。
+	// Wave A1/A2 起 = 13（A2 的 tokens 表）。
+	const wantTableCount = 13
+	if len(got) != wantTableCount {
+		t.Fatalf("表数 = %d，契约要求 %d（新增表要同时改 allModels()、Tables() 与这里）", len(got), wantTableCount)
 	}
 }
 
@@ -185,6 +192,19 @@ func TestAllModelsAreMigrated(t *testing.T) {
 		t.Fatal("models.go 里一个 type 都没解析到 —— 测试自身失效（路径或解析方式错了）")
 	}
 
+	// valueTypes 是**不是表**的导出类型：它们只作为列的值类型存在（Wave A1 起
+	// ChannelInfo 定义在本文件 —— 主脑冻结的 Channel 契约要求类型随结构体走）。
+	//
+	// 判据用**有没有 TableName() 方法**，而不是维护一份"我保证它不是表"的口头名单：
+	// 一个类型一旦写了 TableName，它就是想被建表 —— 那时必须进 allModels()。
+	// 这条反向断言让白名单不会变成"逃避登记的后门"。
+	valueTypes := map[string]any{"ChannelInfo": ChannelInfo{}}
+	for name, v := range valueTypes {
+		if _, hasTableName := reflect.TypeOf(v).MethodByName("TableName"); hasTableName {
+			t.Errorf("%s 有 TableName() ⇒ 它其实是一张表，必须登记进 allModels()", name)
+		}
+	}
+
 	migrated := map[string]bool{}
 	for _, m := range allModels() {
 		typ := reflect.TypeOf(m)
@@ -196,22 +216,37 @@ func TestAllModelsAreMigrated(t *testing.T) {
 	}
 
 	for _, name := range declared {
+		if _, isValueType := valueTypes[name]; isValueType {
+			continue
+		}
 		if !migrated[name] {
 			t.Errorf("models.go 定义了 %s，但它不在 allModels() 里 —— "+
 				"这张表不会被建出来，而错误要到第一次用到它时才出现", name)
 		}
 	}
-	// 反向：登记了但源码里没有（改名/删除后的残留）。
-	for name := range migrated {
-		found := false
-		for _, d := range declared {
-			if d == name {
-				found = true
-				break
-			}
+	// 反向：登记了但**整个包**里都没有这个 struct（改名/删除后的残留）。
+	//
+	// ⚠ 反向检查扫的是整个包、而不是只有 models.go：Wave A1 起表定义可以落在别的
+	// 文件（A2 的 token.go 定义 Token），但"登记了一个不存在的类型"永远是错的。
+	// 正向检查仍**只**看 models.go —— 那里是文件的定位（"库里有哪些表"的唯一清单），
+	// 而其它文件里的导出 struct 大量是值类型（ChannelQuery/ChannelPage/…），
+	// 不该被要求进 allModels()。
+	declaredInPkg := map[string]bool{}
+	files, globErr := filepath.Glob("*.go")
+	if globErr != nil {
+		t.Fatalf("枚举包内 .go 文件失败: %v", globErr)
+	}
+	for _, fn := range files {
+		if strings.HasSuffix(fn, "_test.go") {
+			continue
 		}
-		if !found {
-			t.Errorf("allModels() 登记了 %s，但 models.go 里没有这个 struct —— 残留登记会让人误解表清单", name)
+		for _, n := range structNamesInFile(t, fn) {
+			declaredInPkg[n] = true
+		}
+	}
+	for name := range migrated {
+		if !declaredInPkg[name] {
+			t.Errorf("allModels() 登记了 %s，但本包 .go 文件里没有这个 struct —— 残留登记会让人误解表清单", name)
 		}
 	}
 }
