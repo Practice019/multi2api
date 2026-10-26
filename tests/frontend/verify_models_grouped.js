@@ -58,6 +58,35 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     }
     const ev = async (x) => { const r = await send('Runtime.evaluate', { expression: x, returnByValue: true, awaitPromise: true }); return r.result && r.result.result ? r.result.result.value : undefined; };
 
+    // ── ⓪ 身份自证：先确认「我进的是控制台」，再谈断言（2026-10-26 加）──────
+    //
+    // T7 起 `/ui` 需要身份（登录会话或 `?token=`）。本探针若没带身份，就会停在
+    // **登录页**上：那时 `#models`/`#nav` 根本不存在，下面每条断言都会红 ——
+    // 而红的原因是**验错了页面**，不是产品缺陷（本仓把这类红叫「假红」，
+    // 已有专门的门禁 verify_probe_console_loaded.js 在静态层面拦它）。
+    //
+    // 所以在做任何业务断言之前先自证；进不去就**明确报错退出**（exit 2 = 环境/前提
+    // 不成立，不是产品红），并给出可直接复制的命令。
+    const identity = JSON.parse(await ev(`JSON.stringify((function(){
+      return {
+        hasNav: !!document.querySelector('#nav'),
+        hasModels: !!document.querySelector('#models'),
+        hasPassword: !!document.querySelector('input[type=password]'),
+        title: document.title || '',
+        href: location.href,
+      };
+    })())`));
+    if (!identity.hasNav || !identity.hasModels) {
+      console.error('  ✗✗ 没进控制台 —— 停在登录页/错误页，后面的断言全是假红。');
+      console.error('     实测现场: ' + JSON.stringify(identity));
+      console.error('     原因: T7 起 /ui 需要身份；本探针不带 ?token= 时到不了模型面板。');
+      console.error('     跑法（把 <port>/<admin_token> 换成你的实例）:');
+      console.error('       MODELS_URL="http://127.0.0.1:<port>/ui?token=<admin_token>" node tests/frontend/verify_models_grouped.js');
+      console.error('     （探针自起的隔离实例：token 就是 startInstance 返回的 key）');
+      console.error('     ⚠ 退出码 2 = 前提不成立，不算产品红。');
+      process.exit(2);
+    }
+
     // 像人一样把密钥粘进顶栏并点「应用」。
     // ⚠ 必须做：T5/T7 起控制台**不再**由服务端注入 api_key（安全改造的目标），
     // 于是「可用模型」这些依赖 /v1 的面板默认是空的 —— 不粘就断"有分组"会假红，
@@ -295,6 +324,31 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     //
     // 判据：拿 manifest 里声明了 models 能力的上游集合，
     // 与界面上出现的分组集合对照 —— 不该有"声明了却没出现"的。
+    // ── 显式前提（2026-10-26 加，读这一节之前必须先读）──────────────────
+    //
+    // 本节判据是「manifest 里声明了 models 能力的上游**都**要出现分组」，
+    // 而**产品**有一条相反的裁定（internal/server/webui.html:13824）：
+    //
+    //     const groups = allGroups.filter(g => !(g.accountCount === 0));
+    //     ⇒ 明确知道 0 个账号的上游，**整组不显示**
+    //
+    // 两条同时成立的唯一条件是：**每个上游都至少有一个可用账号**。所以：
+    //   · 在「上游账号齐全」的真实部署上跑 ⇒ 本节应全绿（这是它的目标场景）；
+    //   · 在半配置的隔离实例上跑 ⇒ 缺账号的上游既不显示分组、也不算空态分组
+    //     ⇒ 本节会红，而那个红是**前提不成立**，不是产品缺陷。
+    // 先把这个前提打印出来，否则这一节的红无法归因。
+    console.log('\n[前提] 本节要求「每个声明 models 的上游都至少有 1 个可用账号」');
+    console.log('       （与 webui.html:13824「0 账号整组不显示」是一对相反的判据）');
+    const acctCounts = JSON.parse(await ev(`JSON.stringify(
+      (window.__wb2api__.manifest().providers || []).map(function(p){ return { id: p.id, accounts: p.account_count }; })
+    )`));
+    console.log('       当前各上游账号数: ' + JSON.stringify(acctCounts));
+    const zeroAcct = acctCounts.filter(p => p.accounts === 0).map(p => p.id);
+    if (zeroAcct.length) {
+      console.log('       ⚠ 这些上游账号数为 0，按产品裁定**整组不显示** ⇒ 下面的「都出现」' +
+        '断言会红，且红的原因是这个前提，不是产品缺陷: ' + JSON.stringify(zeroAcct));
+    }
+
     console.log('\n[5] 声明了 models 能力的上游都要有分组（含空态）');
     const declared = JSON.parse(await ev(`JSON.stringify(
       (window.__wb2api__.manifest().providers || [])

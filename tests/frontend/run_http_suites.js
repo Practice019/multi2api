@@ -51,6 +51,47 @@ const PROBES = [
   { key: 'role_split', file: 'verify_role_split_e2e.js', desc: 'API key 归属 + /admin/* 角色分流' },
 ];
 
+// ── 探针二进制：**必须**在这里定死（2026-10-26 加）─────────────────────────
+//
+// 本脚本自己 spawn 子探针，而子探针走 lib_instance.js —— 那个模块在 WB2API_EXE
+// 缺省时回落到 `bin/wb2api-server.exe`，也就是**用户正在跑的那份**（Windows 上
+// 还被进程锁着）。于是「没显式设 WB2API_EXE 就跑本脚本」会去起用户那个构建：
+// 探针断言失败看起来像产品缺陷，实际是验错了对象（本仓记过这个亏）。
+//
+// 所以与 run_frontend_suites.js / run_e2e_family3.js 保持同一口径：
+// 未指定 ⇒ 默认 `bin/wb2api-server-probe.exe`（当前构建）。
+// ⚠ 显式把 WB2API_EXE 指到 bin/wb2api-server.exe 仍然允许（对照实验要用），
+//   下面会为此打一条显眼警告 —— 但**默认**绝不落到用户的二进制上。
+if (!process.env.WB2API_EXE) {
+  process.env.WB2API_EXE = 'bin/wb2api-server-probe.exe';
+  console.log('前置：未指定 WB2API_EXE，本脚本默认用 ' + process.env.WB2API_EXE +
+    '（当前构建；不默认 bin/wb2api-server.exe —— 那是用户在跑的实例）\n');
+} else if (/wb2api-server\.exe$/i.test(process.env.WB2API_EXE)) {
+  console.log('⚠⚠ WB2API_EXE 指向 bin/wb2api-server.exe —— 那通常是**用户正在跑**的二进制。');
+  console.log('   只在做「新旧构建对照」时才该这样；常规验收请用 bin/wb2api-server-probe.exe。\n');
+}
+
+// 直接类探针（不支持 --self-test/--start，自带实例 + Chrome）：跑法与上面四条不同，
+// 不并入下面的 phases 循环（否则本脚本会变成依赖 Chrome）。但必须在这里**点名**，
+// 否则「本脚本全绿」会被误读成「渠道页保存路径也验过了」。
+const DIRECT_PROBES = [
+  {
+    file: 'verify_channels_save.js',
+    cmd: 'node tests/frontend/verify_channels_save.js',
+    note: '渠道页「新增 → 保存」真点一次的回归判据（v1.9.15 的 ReferenceError: key is not defined）。' +
+      '自带隔离实例（CH_PORT，默认 7899）+ Chrome；已登记在 run_frontend_suites.js 的独立探针清单里（那边会跑它）。',
+  },
+  {
+    file: 'verify_wave2_pages.js',
+    cmd: 'node tests/frontend/verify_wave2_pages.js',
+    note: '**Wave 2 三页面的固定门禁**（状态/渠道/模型：302/401、window_seconds=300、阈值 75/90、' +
+      'page_size 夹到 100、翻页与搜索 0 次请求、双 tab、合成行不可勾选、无定价字样）。' +
+      '自带隔离实例（**空闲端口现场探测**）+ Chrome。',
+    why: '不放进 run_frontend_suites.js：那条 runner 的定位是「静态套件、无需浏览器」（见其文件头），' +
+      '而本探针必须起实例 + Chrome ⇒ 按 direct 类登记在这里，并在 run_frontend_suites.js 尾部给出单跑命令。',
+  },
+];
+
 const argv = process.argv.slice(2);
 const quick = argv.includes('--quick');
 const onlyArg = argv.find((a) => a.startsWith('--only'));
@@ -108,6 +149,17 @@ function main() {
   const total = rows.filter((r) => r.ok !== undefined).length;
   console.log('\n' + (failed === 0 ? '全绿' : failed + ' 条失败') + '（共 ' + total + ' 次运行）');
   if (quick) console.log('（--quick：只跑了 --self-test，未验真实例）');
+
+  // 直接类探针：**不跑**，但要让人看见它们存在与怎么跑（见 DIRECT_PROBES 的注释）。
+  if (!only) {
+    console.log('\n--- 直接类探针（本脚本不跑，需单跑）---');
+    for (const d of DIRECT_PROBES) {
+      console.log('  ' + d.file);
+      console.log('      跑法: ' + d.cmd);
+      console.log('      说明: ' + d.note);
+      if (d.why) console.log('      登记位置理由: ' + d.why);
+    }
+  }
   return failed === 0 ? 0 : 1;
 }
 

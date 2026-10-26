@@ -52,6 +52,8 @@
 
 **关键推论（写进所有验收口径）**：`go build ./...` 过了**不等于**测试能编译 —— `_test.go` 不参与 `go build`。§8 的所有验收命令都必须显式带 `-count=1` 且按包运行，且 Wave 0（T00–T03）是其余一切任务的前置。**前端侧同样是红的**：`tests/frontend/run_frontend_suites.js` 自身被截断（exit=1，见 T00），另三条 runner 的当前真实退出码见 §8.3 —— 任何「套件全绿」的结论都必须先声明这两处基线。
 
+**2026-10-26 更新（Wave 0 之后）**：①（测试文件语法错）与 ②（覆盖守卫）已由 T00–T03 消除，③ 仍是凭证到期的环境红；施工后的完整进度、仍然红着的 3 条断言级红与一条偶发红，见 **§0.6**。
+
 ### 0.5 用户口径「三页面以 hyxapi 为准」如何落实
 
 落实为四列，逐页写死；凡是 hyxapi 有而本仓不采的部分，必须写明理由，不允许默认忽略。
@@ -61,6 +63,25 @@
 | 系统状态页 | 字段集与语义：version/uptime/go_version/goroutines/active_connections/resources/runtime/database/log_database/redis/request_stats/request_health/disk_cache/channel_affinity（`hyxapi/controller/system_status.go:121-183` 为 c.JSON 响应字段字面量段；`:23-120` 是 GC/DB/Redis/today 计算段）；阈值三档 75/90（`:96-102`）；窗口 5min 与 `window_seconds:300`（`:85,:134`）；成功率分档 <95 warning / <90 critical（`:103-110`） | 不复刻 `active_connections` 的口径（hyxapi 是 `middleware/stats.go:14,20,24,37-41` 只统计挂 relay-router 的 `/v1` 在途请求）；不复刻 `channel_affinity`（本仓无 HybridCache 亲和缓存） | `internal/server/webui-status.html`（已存在、未接线）+ `internal/sysmon/`（已存在、无引用）+ `logs` 表聚合 |
 | 渠道管理页 | 列表与筛选行为：分页 `common.GetPageQuery`（`hyxapi/controller/channel.go:85`）/`Count`（`:134`）/`Limit-Offset-Omit(key).Find`（`:140-144`）；状态筛选字典（`:52-65`）；`type_counts` 一条 GROUP BY 塞进同响应（`:156-176`）；内存搜索+内存分页（`:257-387`）；分页上限 100（`hyxapi/common/page_info.go:37-75`）；状态常量（`hyxapi/common/constants.go:211-213`）。前端列与交互以 `hyxapi/web/src/pages/Channel/`（38 文件，含 10 个 `*.test.js`；`index.tsx` 877 行、`ChannelEditor.tsx` 1182 行）为准 | 不搬 `POST /api/channel/:id/key` 的四段式高敏链路（`hyxapi/router/channel-router.go:44-50`：AdminAuth→RootAuth→CriticalRateLimit→DisableCache→SecureVerificationRequired）；不引入 Casbin 逐路由权限表（`channel-router.go:59-108`，49 条） | `internal/server/webui-channels.html`（现为既有页面，需按 §5 串行改造） |
 | 模型管理页 | 两级目录（Model + Vendor）+ 合成行 + 渠道用到但目录没有的模型不可勾选：结构以 `hyxapi/web/src/features/metadata/`（7 文件：`index.tsx` 125、`catalog.ts` 34、`MetadataEditor.tsx` 57、`MetadataSyncDialog.tsx` 63、`ModelDeleteDialog.tsx` 33、`VendorOperationDialog.tsx` 42、`ui.tsx` 4）为准；后端控制器很薄（`hyxapi/controller/model_meta.go` 337 行、`vendor_meta.go` 138 行） | **不做定价**（`model_pricing.go` 61 行与 `/api/model-pricing/*` RootAuth 路由 `api-router.go:262-270` 不移植）—— 见 §10 Q5/Q9 | `internal/server/webui-models.html`（新建） |
+
+---
+
+### 0.6 施工进度锚点（2026-10-26 本轮施工后的回写）
+
+| 波次 | 任务 | 状态 | 锚点（本文件作者在本机 `git log`/`git tag` 逐个确认过） |
+|---|---|---|---|
+| 基线 | 收口 SQL 层在制品 + 本计划 | 已推送 | `41b17d6` / tag `baseline-2026-10-26` |
+| Wave 0 | T00–T03（runner 截断 + 两处测试编译错 + 覆盖守卫） | **完成** | `8ce8b30` / tag `wave0-done-2026-10-26` |
+| Wave 1 | T04–T09（数据层接线） | **完成** | `195c1e1` / tag `wave1-done-2026-10-26` |
+| Wave 1b | T24（`SessionStore` 换 SQL 后端）、T25 | **完成** | 并入 `195c1e1` |
+| Wave 1.1 | T11（`store` 注入 `cmd/server`）、T26、T27 | **完成** | `ecc7f42` / tag `wave1.1-done-2026-10-26` |
+| Wave 2 | T12/T13/T14（三页面对齐） | **完成（仅本地）** | `7ea6444` / tag `wave2-done-2026-10-26`；**⚠ 尚未推上 GitHub** —— 本文件作者只确认了「本地领先 `origin/HEAD` 恰好这一条」（`git log origin/HEAD..HEAD`）；「出网抖动」这一归因来自主脑回报，**未独立复现** |
+| Wave 0b | 前端 7 条基线红（见 §8.3 基线现实） | **未开工** | 已拆成 task-13 ~ task-17（dashboard_gen / models_display_gen / settings_layout_gen / stats_disk_gen / gen_ui_manifest / audit_tracked_content / verify_probe_console_loaded） |
+| T10 | 真实 `data/` 迁移 + 字节等价校验 | **未做** | 等用户给专用窗口（7863 正在用 `data/`，见 §4 T10 的执行纪律 V4） |
+
+**仍然红着的东西（本轮施工实测，别当成已修）**：§0.4 的 ①（`internal/store/option_test.go:237` 编译错）与 ②（`TestAllUpstreamsAreCovered`）已由 Wave 0 消除；③（`internal/codearts` 三个 `*Live` 401）仍是凭证到期的环境红。此外 `internal/store` 另有 3 条**断言级**长期红：`TestBuildDSNRespectsCaller`（`db_test.go:327`，DSN 被 URL 转义成 `%28…%29`）、`TestInitializeSetupValidation`（`setup_test.go:226/229`）、`TestInitializeSetupSelfHealsRoot`（`setup_test.go:252`）；`TestInitializeSetupConcurrentProcesses` 在 6 路并发 `go test` 负载下**偶发**红（子进程 DDL 竞争，单独跑 3/3 绿）—— 已单独立 task-25 处置。
+
+**已知的判据冲突（未解决，本轮未改它）**：`tests/frontend/verify_models_grouped.js` 的「每个声明 models 的上游分组都出现」断言与产品裁定「0 账号的上游整组不显示」（`internal/server/webui.html:13824`）互相拉扯 —— 脚本自己在 `:330-348` 写明了这一点，只有**每个上游都至少有 1 个可用账号的真实部署**才能过，半配置的隔离实例上必然红。处置：不得在半配置实例上把它当门禁。
 
 ---
 
@@ -254,6 +275,7 @@ hyxapi 与 relaykit/tokenkit/web 是 **AGPL-3.0**，本仓是 **MIT**。三类�
 
 #### T05 `options` 表接线 + `settings_store.go` 真事故修复
 - 目标：`config.json` 的可热改键落 `options` 表；修掉「只改 `checkin_enabled` 会把 `upstream.timeout_seconds` / `pool.max_in_flight` / `cooldown.soft_rate` / `session_sticky` 全部清零」的事故，并区分「热生效 / 需重启」。
+- **事实修正（2026-10-26 施工后回写）**：上面那句「真事故」在**基线里已经修好**了 —— `parse` 已改为以 `currentSettings()` 为基底、再用补丁键覆盖（`cmd/server/settings_store.go:252-269`），不再是把 patch 解成一个零值结构体。T05 实际补的是 **`options` 表接线**（写路径 + 首次导入 + 镜像）与**两层新守卫**（文件级 / options 级），本任务块里的事故描述到此仅作历史背景。
 - 产出文件：`workbuddy2api/cmd/server/settings_store.go`（事故点 `:216-248`、热生效分区 `:173-183`）、`internal/store/option.go`（补接线与首次导入）。
 - 前置依赖：T01、T11 的库骨架。
 - 工时：M。
@@ -267,7 +289,9 @@ hyxapi 与 relaykit/tokenkit/web 是 **AGPL-3.0**，本仓是 **MIT**。三类�
 - 产出文件：`workbuddy2api/internal/store/log.go`（已有，补聚合 API）、`workbuddy2api/internal/logbuf/`（加双写钩子）。
 - 前置依赖：T11 的库骨架；与 T04/T05 无文件重叠。
 - 工时：L。
-- 验收命令：`go test ./internal/store/ -run TestLog -count=1`（期望：ok）；集成判据：`node tests/frontend/run_http_suites.js --quick` 起隔离实例打流量后，`go test ./internal/store/ -run TestLogAggregate -v` 输出的三个聚合数与 `data/request-log.jsonl` 的手工计数一致（允许 ±0）。
+- 验收命令（**2026-10-26 施工后修正**）：`go test ./internal/store/ -run TestLog -count=1`（期望：ok）；**真实的 jsonl ↔ SQL 对照**用 `go test ./internal/logbuf/ -run TestJSONLAndSQLAggregatesAgree -count=1`（同一条目分别写 jsonl 与 `logs` 表，三个聚合数 ±0；实现见 `internal/logbuf/sqllog_equivalence_test.go`）。
+  - ⚠ 本文原写的 `node tests/frontend/run_http_suites.js --quick` **是错的**：按源码 `--quick` 只跑 `--self-test`（`tests/frontend/run_http_suites.js:109`、`:142`），**不起实例、不打流量**，因此不可能产出用于对照的日志。
+  - HTTP 层的端到端对照（起实例打流量 → 比 `data/request-log.jsonl` 与 SQL 聚合）需等 T11 注入（已完成）+ T12 状态页接线之后再立命令；本轮**未做**，不得写成已验证。
 - 文件冲突面：`internal/store/log.go`、`internal/logbuf/*`；**不得碰** `internal/server/webui.html`。
 - 可否并行：可与 T04/T05/T07 并行；**必须在 T12 之前完成**。
 - AGPL 动作分类：只借判断（指标口径来自 hyxapi 结论：`model/log.go:486-508`、`:526-554`）。
@@ -321,7 +345,7 @@ hyxapi 与 relaykit/tokenkit/web 是 **AGPL-3.0**，本仓是 **MIT**。三类�
 - 产出文件：`workbuddy2api/cmd/server/main.go`（注入点；这是唯一允许改 `main.go` 的任务）。
 - 前置依赖：T04/T05/T06/T07/T08/T09（这些任务先把包写好，本任务只做注入）。
 - 工时：M。
-- 验收命令：`go build ./... && go test ./internal/store/ -run TestSetup -count=1`（期望：ok）；三元行为判据：① 空 `data/` 首启后 `data/gw.db` 存在且 `setups` 有 1 行；② 二次启动不新增行；③ 两个进程并发初始化只有一个成功（`internal/store/setup_multiprocess_test.go` 已覆盖 DDL 竞争）。
+- 验收命令：`go build ./... && go test ./internal/store/ -run TestSetup -count=1`（期望：ok）；三元行为判据：① 空 `data/` 首启后 `data/gw.db` 存在且 `setups` 有 1 行；② 二次启动不新增行；③ 两个进程并发初始化只有一个成功（`internal/store/setup_multiprocess_test.go` 已覆盖 DDL 竞争）。**2026-10-26 施工后澄清（主脑 D2 裁决）**：① 的语义是「首启**并完成建号**后 `setups` 恰好 1 行」—— 裸启动空库时它是 **0**（实测见 §0.6），而强行在裸启动时写 1 会把 setup 页关死（谁都建不了第一个管理员），所以那条路被否决；`setups` 行现在由建号路径显式写下（`internal/account/store.go` 调 `store.MarkSetupInitialized()`），库里 `role` 仍是 10（不回写成 100）。
 - 文件冲突面：`cmd/server/main.go`（**独占**，T12–T14 不得改它）。
 - 可否并行：**不可**，串行。
 - AGPL 动作分类：只借判断（CheckSetup 三态语义来源 `hyxapi/model/main.go:57-82`）。
@@ -463,6 +487,8 @@ Wave 3  T16（账本与守卫）
 | `state.json` 进 SQL 吗？ | **不进**（高频写运行态）；只把「号」的静态信息进 `accounts` 表 | 承接 `PLAN-sql-unify.md:253` Q3 的建议；`Account` struct 已在 `internal/store/models.go` 定义 |
 | 切换点在哪？ | **T11 完成的那一刻**：服务端开始读写 `data/gw.db`。切换前必须做 `data/` 全量备份；切换后 JSON 只作为导出格式，不得再被应用写回 | 本计划 T10/T11 的验收条款 |
 
+**2026-10-26 施工后更新**：**T11 已完成**（`ecc7f42`）—— 切换点已过。隔离实例实测（临时工作目录 + `TcpListener(0)` 空闲端口）：首启生成 `data/gw.db`（12 张表）；**首启并完成建号后** `setups` 恰好 1 行；`data/` 下**不再生成** `accounts.json` / `sessions.json`（SQL 权威、JSON 不写回）；重启后账号仍能登录（来自 SQL）。反向导出实测：`go run ./cmd/migrate-sql export` 导出的管理员 `role` 仍是 **10**（与改造前一致 ⇒ 字节等价判据未被破坏）。
+
 ### 6.1 Go 接口签名冻结
 
 ```go
@@ -492,7 +518,14 @@ type Provider interface {
 
 ### 6.4 状态页字段契约（以 hyxapi 为准的部分）
 
-以 `hyxapi/controller/system_status.go` 的响应字段名为契约名（`version` / `uptime` / `go_version` / `goroutines` / `active_connections` / `resources` / `runtime` / `database` / `log_database` / `redis` / `request_stats` / `request_health` / `disk_cache` / `channel_affinity`），本仓无法提供者置 `null` 并在 UI 标注「本仓不适用」，**不得改名、不得删字段**。
+**2026-10-26 施工后改定（契约名以本仓代码为准，这是有意的偏离）**：`GET /admin/system-status` 的**实际**顶层字段是
+
+`service` / `resource` / `health` / `deps` / `cache`
+
+（`internal/sysmon/status.go:242-249` 的 `StatusPayload` json tag）。**不是** hyxapi 那套 `version` / `uptime` / `go_version` / `goroutines` / `active_connections` / `resources` / `runtime` / `database` / `log_database` / `redis` / `request_stats` / `request_health` / `disk_cache` / `channel_affinity`。T12 的实现与 T15 的 `tests/frontend/verify_wave2_pages.js` 都以这一套为准。
+
+- hyxapi 侧字段（`hyxapi/controller/system_status.go:121-183` 的 `c.JSON` 字面量）保留为**语义参照**：阈值三档 75/90、窗口 `window_seconds:300`、成功率分档 <95 warning / <90 critical 照抄（见 §0.5 的四列表）。
+- 本仓**没有** HybridCache 亲和缓存，也**没有**磁盘缓存层 ⇒ `channel_affinity` / `disk_cache` 属于「本仓不适用」：按 `internal/sysmon/status.go:251-253` 的约定「传入 nil 的指针 ⇒ 对应分块整块不渲染」，**显式置空并在 UI 标注「本仓不适用」，不得编造 0**（0 与「没有这一层」在页面上是两种事实）。
 
 ### 6.5 新表与 store API 契约
 
@@ -520,6 +553,11 @@ type Provider interface {
 | R8 | **端口与实例互相干扰** | 验收命令未指定端口，撞上正在运行的实例（hyxapi 默认 3000 已被上游 New API 占用；本仓常用 7863/7864/7868/18080/18081） | 探针红但代码无辜 | 一律用带隔离实例的 runner（`run_http_suites.js` 自带 `--start`、`run_e2e.js` 传显式 URL）；hyxapi 侧只读验证时用 `PORT=3001` |
 | R9 | **`*.md` 不入库导致计划失效** | 新写的 `PLAN-hyxapi-alignment.md`、`docs/open-questions.md` 默认被 `.gitignore:76` 的 `*.md` 忽略 | 计划与开放问题不进版本库，协作者看不到 | 二选一：`git add -f <file>`，或在 `.gitignore` 加 `!PLAN-*.md`/`!docs/open-questions.md`（属 T16，需用户裁决，见 §10 Q10） |
 | R10 | **测试口径不可复现** | 验收只写「跑一遍测试全绿」 | 结论无法复现（本仓无一条全量命令，见 §8.3） | 所有验收必须用 §8.3 的具名命令；`-race` 不得作为门禁 |
+| R11 | **改了 `//go:embed` 的 HTML 却拿旧探针断言（假红）** | 改 `internal/server/webui*.html` 后没重建探针就重跑前端套件 | 4 条套件出现与改动无关的失败，把「页面改坏了」与「二进制旧」混成一条（T12 实测 22/33；重建后 26/33） | 改 HTML 后**先** `go build -o bin/wb2api-server-probe.exe ./cmd/server` 再跑套件；`tests/frontend/lib_instance.js:151` 的「构建过期」门禁会直接拒绝旧探针 |
+| R12 | **runner 默认打「用户正在跑的那份二进制」** | `WB2API_EXE` 未设且默认值指向 `bin/wb2api-server.exe` | 探针会去起/锁用户那份二进制，甚至按旧页面断言 | T15 已把 `run_http_suites.js:65-66` 的默认改成 `bin/wb2api-server-probe.exe`（一旦指向 `wb2api-server.exe`，`:69-70` 会打印警告）；仍建议每次显式 `WB2API_EXE=bin/wb2api-server-probe.exe` |
+| R13 | **`internal/store` 是共享包：一个语法错阻塞同包全部任务** | 并行写者里任一文件出现语法错/非法字节 | 同包多路任务一起 `[build failed]`（实测：`internal/store/channel.go` 混入 2 个**真实 NUL 字节**，一次挡住 3 路） | 纪律：**每个文件写完立刻** `gofmt -e <file>` + `go build ./...` 自检再往下做；共享包（`internal/store`、`cmd/server`）不并发改同一文件 |
+| R14 | **文档与 `*_gen.js` 的入库陷阱** | 收口时用 `git add -A`；或以为新写的 `.md` 会自动入库 | ① `.gitignore:76` 是 `*.md` ⇒ 计划/调研文档默认**不进**版本库（本轮是用 `git add -f` 强制加入的）；② 跑过前端 runner 之后 `tests/frontend/*_gen.js` 会出现 **15 个幻影 M**（T15 实测：内容 diff 为空） | 收口时逐文件 `git add <file>`，**不得** `git add -A`；幻影 M 先 `git checkout -- tests/frontend` 清掉再提交 |
+| R15 | **`-race` 在本机 Windows 不可用** | 想把 `-race` 当门禁 | 见 §8.3 基线现实第 8 条（归因来自仓库文档，**未独立联网复核**） | 继续当 advisory；要升级门禁必须先在有 gcc 的非 Windows 环境跑通并确认全绿 |
 
 ---
 
@@ -559,20 +597,24 @@ node tests/frontend/run_http_suites.js
 # ⑤ 第三族 25 条（**条数未复核**：tests/frontend/README.md:13 记为 14 个浏览器 E2E，与本文 25 冲突，实施前须以 runner 源码为准）+ 可复现性比对（当前 exit=1：被「构建过期」门禁拦下）
 node tests/frontend/run_e2e_family3.js --repeat=2
 
+# ⑥ Wave 2 三页面契约（T15 新增；自带隔离实例 + 空闲端口现场探测 + 临时目录 + Chrome；**不需要 --start**，也绝不碰 7863）
+node tests/frontend/verify_wave2_pages.js
+
 # 附加（非只读：会变异源码再回滚，需专门授权窗口；真身在 tests/frontend/，仓根没有该文件）
 node tests/frontend/mutation_sweep.js static
 ```
 
-**基线现实（八条；前端部分是 verifier-06 的独立验收实测输出，必须写进任何验收报告）**：
+**基线现实（九条；前端部分是 verifier-06 的独立验收实测输出，必须写进任何验收报告；第 9 条为 2026-10-26 施工后新增）**：
 
 1. **① `go test ./... -count=1` 当前 exit=1**：四类失败见 §0.4；其中 ① ② 由 Wave 0 修掉，③（`internal/codearts` 三个 `*Live` 401）是凭证到期的环境红，④ 是正常。
 2. **② `run_frontend_suites.js` 当前 exit=1**：文件在第 263 行被截断（末行 `if (odd) {`），node 报 `SyntaxError: Unexpected end of input`；文件干净且已提交（最后提交 `495a2fda`）⇒ 修它本身就是一个任务：**T00**。
 3. **③ `run_e2e.js` 需真实实例**：默认 `http://127.0.0.1:18080/ui`；不传可用实例则整片 FAIL。该 runner 只做编排，不自起实例。
-4. **④ `run_http_suites.js` 当前 exit=1**：8 次运行中 6 条失败（含 `console_auth` self-test FAIL、`login_flow` live FAIL、`role_split` exit=2 已退役），并报告「探针二进制比源码旧」。
+4. **④ `run_http_suites.js` 当前 exit=1**：8 次运行中 6 条失败（含 `console_auth` self-test FAIL、`login_flow` live FAIL、`role_split` exit=2 已退役），并报告「探针二进制比源码旧」。**2026-10-26 更新（T15）**：该 runner 的默认 `WB2API_EXE` 已改成 `bin/wb2api-server-probe.exe`（`tests/frontend/run_http_suites.js:65-66`）；一旦显式指向 `bin/wb2api-server.exe`，脚本会打印「那通常是**用户正在跑**的二进制」的警告（`:69-70`）。
 5. **⑤ `run_e2e_family3.js` 当前 exit=1**：被 `EXCEPTION: 构建过期，拒绝在旧页面上断言` 拦下（`bin/wb2api-server-probe.exe` 2026-10-21 03:05 旧于 `internal/server/webui.html` 2026-10-26 05:16，判据在 `tests/frontend/lib_instance.js:151`）。
 6. **前置动作（④⑤ 的共同解锁条件）**：先 `go build -o bin/wb2api-server-probe.exe ./cmd/server` 再重跑；否则 ④⑤ 的失败与本轮改动无关。
 7. **没有一键全量**：全量 = ①–⑤ 五条命令 + 前置构建；① 与 ② 无外部依赖，③ 需要 Chrome + 实例，④ 自带实例，⑤ 需要实例 + 新鲜探针二进制。
 8. **`-race` 在本机不可用**：归因为「TSan 影子内存基址超出用户态地址上限（`error code: 87`）」，**该归因是本仓文档结论**（`tests/frontend/README.md:60-83` 并列出上游 issue），**未验证（归因来源：仓库文档，本次未独立联网复核）**；CI 中 `-race` 也是 `continue-on-error: true`（`.github/workflows/ci.yml:61-71`）。
+9. **⑥ `verify_wave2_pages.js`（T15 新增，2026-10-26）**：Wave 2 实现提交（`7ea6444`）里 `tests/frontend/` 一个文件都没动 —— T12/T13/T14 任务块里写的 `run_frontend_suites.js` / `run_http_suites.js` **都不覆盖新三页面**，于是「三页面对齐」在实现侧没有可执行判据。本脚本补上：覆盖三入口挂载、未认证 302/401（`/ui/models/data` 未认证必须 401 而不是 200+空数组）、状态页阈值 75/90 与 `window_seconds:300`、渠道页 `page_size` 夹到 100 与「翻页/搜索 0 次 fetch」、模型页合成行不可勾选/全选只勾可选行/无定价字样。它自带隔离实例与空闲端口、临时目录与 Chrome，**不需要 `--start`**；退出码 0 全绿 / 1 有断言红 / 2 环境前提不成立。判据来源：`tests/frontend/verify_wave2_pages.js:11-29`。**接入位置 = 直接单跑（direct probe）**：全仓 `grep verify_wave2` 只命中它自己（2 处，均在本文件内），**没有登记进任何 runner 汇总**，所以必须单跑、不能指望跑 `run_frontend_suites.js` 顺带覆盖。
 
 ### 8.4 门禁升级路径
 
@@ -677,5 +719,10 @@ node tests/frontend/mutation_sweep.js static
 | C12 | 「`go test ./...` 全绿可当门禁」 | **本仓当前基线即红**。`go test ./... -count=1` exit=1 / 152.8s，四类失败（两处测试编译错 + 覆盖守卫 FAIL + codearts 三个 Live 401） | §0.4；`internal/store/option_test.go:237`、`cmd/migrate-sql/main_test.go:65`、`cmd/server/account_columns_invariant_test.go:281`、`internal/codearts/t2_quota_ext_test.go:95` |
 | C13 | 「AGENTS.md §4 说扩展点 28 个」 | **过期**。实测 32 个（多出 `CredentialRefresher`、`QuotaConsumedSink`、`LoginOptionsExt`、`LoginFlowWithOptions`）；且 §7 十步清单漏了跨文件配对硬约束 | `internal/gateway/credential_refresher.go:69`、`quota_consumed.go:36`、`login_options.go:29/149`；`cmd/server/refresh_pairing_test.go`、`jobs_pairing_test.go` |
 | C14 | 「本仓有 `internal/admin/gate.go`；hyxapi 有 `internal/admin/`」 | **两侧均不成立**。hyxapi 根目录**没有** `internal/`，其 admin 门在 `middleware/auth.go` + `service/authz/*` | hyxapi 根目录枚举；`hyxapi/middleware/auth.go:63-66/130-140` |
+| C15 | 「`/admin/system-status` 用 hyxapi 那套 `version`/`resources`/`request_health`/`database`/`disk_cache`/`channel_affinity` 字段名」 | **错（本计划 §6.4 原文也错，已就地改定）**。本仓实际的顶层字段是 `service` / `resource` / `health` / `deps` / `cache`；其中 `channel_affinity` / `disk_cache` 在本仓**没有对应层**（无 HybridCache 亲和缓存、无磁盘缓存层），按「不适用 ⇒ 对应分块整块不渲染」处理并显式标注，**不编造 0** | `internal/sysmon/status.go:242-249`、`:251-253`；hyxapi 侧仅作语义参照 `hyxapi/controller/system_status.go:121-183` |
+| C16 | 「logs 双写的验收可以跑 `node tests/frontend/run_http_suites.js --quick`」 | **错**。`--quick` 按源码只跑 `--self-test`（不起实例、不打流量），拿不到任何可对照的日志 | 改为 `go test ./internal/logbuf/ -run TestJSONLAndSQLAggregatesAgree -count=1`；源码依据 `tests/frontend/run_http_suites.js:109`、`:142` |
+| C17 | 「T05 要修 `settings_store.go` 的『真事故』」 | **半错：基线里已经修好** —— `parse` 已改为以 `currentSettings()` 为基底、再用补丁键覆盖（不再把 patch 解成零值结构体）。T05 实际交付的是 `options` 表接线 + 文件级/options 级两层新守卫 | `cmd/server/settings_store.go:252-269`；§4 T05 的施工后回写行 |
+| C18 | 「本仓剪贴板兜底 / 骨架屏 / 30s digest 守卫」三则旧结论 | **经本轮施工复核仍然成立，C4–C6 无需更正**（这三处代码路径本轮未被改动）。本轮新增的同类实况是「探针必须是**新构建**的二进制，否则 4 条套件假红」 | C4–C6；`internal/server/webui.html:11720-11736`、`:7471-7486`、`:9027`、`:10414`/`:14436`/`:12305`；见 §7 R11 |
+| C19 | 「收口可以直接 `git add -A`」 | **错**。① `.gitignore:76` 是 `*.md` ⇒ 计划/调研文档默认不进版本库（本轮是用 `git add -f` 强制加入的）；② 跑过前端 runner 之后 `tests/frontend/*_gen.js` 会出现 **15 个幻影 M**（T15 实测：内容 diff 为空）⇒ `git add -A` 会把噪声拍进提交 | `.gitignore:76`；见 §7 R14 |
 
-（C1–C14 共 14 条，覆盖任务要求的 12 条并多出 C13/C14 两条。）
+（C1–C19 共 19 条，覆盖任务要求的 12 条并多出 C13–C19 七条；**C15–C19 为 2026-10-26 本轮施工后的回写增补**。）
