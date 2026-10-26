@@ -236,15 +236,33 @@ func validateUsername(name string) error {
 	return nil
 }
 
-// validatePassword 校验口令长度。
+// validatePassword 校验口令长度与控制字符。
 //
 // 长度口径照抄 new-api 的 `validate:"min=8,max=128"`（model/user.go:82）。
 // 不做"必须含大小写数字"的复杂度规则：那类规则在实践里产出的口令
 // （`Password1!`）比长口令弱，而 128 的上界是为了挡住"10MB 口令"这种
 // 拿 CPU 换血的 DoS（bcrypt 对超长输入的处理取决于实现，别赌）。
+//
+// # 控制字符规则（2026-10-26 补，与 internal/store/setup.go **必须同步**）
+//
+// 口令是**单行**凭据：含 \n / \r / \t 的输入在 JSON 与表单里能原样送达，
+// 但一旦经过任何「按行」的通道（CLI 参数、dotenv、日志摘录、人工抄写）就会被
+// 截断或炸行 —— 而 bcrypt 只认完整字节串，于是表现为「口令明明对却登不上」；
+// 控制字符还能把日志行劈成两行（日志注入），让审计看不出真实操作者。
+//
+// ⚠ 同一条规则的第二份在 internal/store/setup.go 的同名函数（首启初始化走那边，
+// T25 已先修，由 TestInitializeSetupValidation 的「口令含换行」钉住）。两处一旦
+// 分叉，就会出现「初始化接受、之后登录拒绝」（或反之）的分裂 —— 改任何一边都要
+// 同时看另一边；本侧的判据是 TestValidatePasswordRejectsControlChars。
 func validatePassword(password string) error {
 	if len(password) < passwordMin || len(password) > passwordMax {
 		return fmt.Errorf("%w：长度需在 %d–%d 之间", ErrBadPassword, passwordMin, passwordMax)
+	}
+	for _, r := range password {
+		// 0x20 以下（含 \n \r \t NUL）与 DEL(0x7f) —— 与 store 侧逐字符一致。
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w：不允许控制字符（含换行/制表）", ErrBadPassword)
+		}
 	}
 	return nil
 }

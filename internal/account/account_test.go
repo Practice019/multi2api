@@ -314,6 +314,54 @@ func TestBootstrapInputValidation(t *testing.T) {
 	}
 }
 
+// TestValidatePasswordRejectsControlChars 口令不得含控制字符（T26 的控制字符缺口）。
+//
+// # 为什么这是缺口而不是"咬文嚼字"
+//
+// 口令是**单行**凭据。含 \n / \r / \t 的输入在 JSON 与表单里能原样送达，但一旦
+// 经过任何「按行」的通道（CLI 参数、dotenv、日志摘录、人工抄写）就会被截断或炸行，
+// 而 bcrypt 只认完整字节串 ⇒ 表现为「口令明明对却登不上」；控制字符还能把日志行
+// 劈成两行（日志注入），让审计看不出真实操作者。
+//
+// # 三层断言，缺一层就测不出对应的错法
+//
+//	① 逐个控制字符（\n \r \t NUL DEL）都要被 validatePassword 拒；
+//	② 等长且只差那个控制字符的干净口令**必须通过** —— 否则"全拒"也能让 ① 变绿，
+//	   那样就分不清"规则生效"与"函数坏了"；
+//	③ 真实建号路径（CreateBootstrap 是唯一建号路径）也必须拦住，且不留账号 ——
+//	   只测纯函数的话，"函数修了但建号路径没接上"这类回归照样漏。
+//
+// ⚠ 规则与 internal/store/setup.go 的同名函数必须同步（那边 T25 先修）。
+// 本用例只管 account 侧；store 侧由 setup_test 的「口令含换行」钉住。
+func TestValidatePasswordRejectsControlChars(t *testing.T) {
+	// ① 控制字符（逐个）。长度都在 8–128 内，所以"被拒"只可能来自控制字符规则。
+	for _, pass := range []string{
+		"password\n123",   // 换行：最常见的截断源
+		"password\r123",   // 回车：在部分终端/日志里会覆盖行首
+		"password\t123",   // 制表
+		"password\x00123", // NUL
+		"password\x7f123", // DEL
+	} {
+		if err := validatePassword(pass); !errors.Is(err, ErrBadPassword) {
+			t.Errorf("含控制字符的口令 %q 应被拒，得到 %v", pass, err)
+		}
+	}
+
+	// ② 反例：同样长度的干净口令必须通过（守卫要能被证伪）。
+	if err := validatePassword("password123"); err != nil {
+		t.Fatalf("不含控制字符的等长口令不该被拒: %v", err)
+	}
+
+	// ③ 真实路径：建号必须也拦住，且不留下账号。
+	s, _ := newTestStore(t)
+	if _, err := s.CreateBootstrap("frank", "password\n123"); !errors.Is(err, ErrBadPassword) {
+		t.Fatalf("含换行的口令不得完成建号（注册/首启路径），得到 %v", err)
+	}
+	if s.Count() != 0 {
+		t.Fatalf("被拒的建号不该留下账号，实际 %d 个", s.Count())
+	}
+}
+
 // TestReopenKeepsAccounts 重开（模拟重启）后账号仍在、仍能登录。
 func TestReopenKeepsAccounts(t *testing.T) {
 	s, path := newTestStore(t)

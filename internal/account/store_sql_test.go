@@ -235,3 +235,120 @@ func TestSQLBackendCriterionOnRealAccountsJSON(t *testing.T) {
 		t.Fatal("导入改写了真实的 accounts.json（只导入不删除被破坏）")
 	}
 }
+
+// TestSQLRootRoleIsMappedToAccountAdmin 钉住**唯一一处**角色映射：
+//
+// store.RoleRoot(100) 是 setups 自愈判据用的超管档（internal/store/role.go:31），
+// 而 account 侧只有 RoleAdmin(10) 构成身份。没有映射的话，store.InitializeSetup
+// 建出来的 root 会被判 ErrMemberRetired —— 刚建好的管理员登不进去。
+func TestSQLRootRoleIsMappedToAccountAdmin(t *testing.T) {
+	openAccountSQLDB(t)
+	root, err := store.InitializeSetup("rootadmin", "root-password-001")
+	if err != nil {
+		t.Fatalf("store.InitializeSetup: %v", err)
+	}
+	if root.Role != store.RoleRoot {
+		t.Fatalf("前提不成立：InitializeSetup 应当写 RoleRoot(%d)，实际 %d", store.RoleRoot, root.Role)
+	}
+
+	// account 侧必须能登录它（映射缺失时这里是 ErrMemberRetired）。
+	s, err := New(filepath.Join(t.TempDir(), "accounts.json"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	u, err := s.Authenticate("rootadmin", "root-password-001")
+	if err != nil {
+		t.Fatalf("SQL 建的 root 必须能登录（映射缺失会报 ErrMemberRetired）: %v", err)
+	}
+	if u.Role != RoleAdmin {
+		t.Fatalf("account 侧应当看到 RoleAdmin(%d)，实际 %d", RoleAdmin, u.Role)
+	}
+	if !IsAdminRole(u.Role) {
+		t.Fatal("IsAdminRole 必须认它（admin 门禁的唯一判据）")
+	}
+	if v, ok := s.Snapshot(u.ID); !ok || v.Role != RoleAdmin || v.RoleName != "管理员" {
+		t.Fatalf("脱敏视图的角色也不该露出 100: (%+v, %v)", v, ok)
+	}
+
+	// 会话链（admin 门禁走的 Lookup）也必须认它。
+	sess, err := NewSessionStore(filepath.Join(t.TempDir(), "sessions.json"))
+	if err != nil {
+		t.Fatalf("NewSessionStore: %v", err)
+	}
+	issued, err := sess.Issue(u, "10.0.0.9", "ua-root")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, _, err := sess.Lookup(issued.SID, s); err != nil {
+		t.Fatalf("root 的会话必须能过 Lookup: %v", err)
+	}
+
+	// setups 行也在（InitializeSetup 写的），CheckSetup 三态里的 true。
+	if ok, err := store.CheckSetup(); err != nil || !ok {
+		t.Fatalf("CheckSetup = (%v, %v)，want (true, nil)", ok, err)
+	}
+}
+
+// TestSQLBootstrapKeepsRoleAdminAndWritesSetupRow 钉住 D3 的两条不变量：
+//
+//	① 首启管理员的**库里 role 必须仍是 10**（migrate-sql export 逐字段搬运，
+//	   所以导出到 accounts.json 的 role 与改造前一致 ⇒ 字节等价不被破坏）；
+//	② setups 行由建号路径**显式**写下（不是靠「先写 100 再自愈」）。
+//
+// 同时验证 SQL 权威期不写回 accounts.json（文件根本不出现）。
+func TestSQLBootstrapKeepsRoleAdminAndWritesSetupRow(t *testing.T) {
+	openAccountSQLDB(t)
+	dir := t.TempDir()
+	accPath := filepath.Join(dir, "accounts.json")
+	s, err := New(accPath)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	u, err := s.CreateBootstrap("boss", "boss-password-001")
+	if err != nil {
+		t.Fatalf("CreateBootstrap: %v", err)
+	}
+
+	row, err := store.GetUserByID(u.ID)
+	if err != nil || row == nil {
+		t.Fatalf("GetUserByID: (%+v, %v)", row, err)
+	}
+	if row.Role != RoleAdmin {
+		t.Fatalf("首号的库里 role 必须是 %d（否则导出的 accounts.json 数值会变）：实际 %d", RoleAdmin, row.Role)
+	}
+	if row.Role == store.RoleRoot {
+		t.Fatal("首号被写成 RoleRoot(100)：JSON 后端认不出它，导出值也会变")
+	}
+
+	var setupRows int64
+	if err := store.DB.Model(&store.Setup{}).Count(&setupRows).Error; err != nil {
+		t.Fatalf("数 setups: %v", err)
+	}
+	if setupRows != 1 {
+		t.Fatalf("首启建号后 setups 应当恰好 1 行，实际 %d", setupRows)
+	}
+	if ok, err := store.CheckSetup(); err != nil || !ok {
+		t.Fatalf("CheckSetup = (%v, %v)，want (true, nil)", ok, err)
+	}
+
+	// 幂等：再调一次不会多出第二行。
+	if err := store.MarkSetupInitialized(); err != nil {
+		t.Fatalf("MarkSetupInitialized(第二次): %v", err)
+	}
+	if err := store.DB.Model(&store.Setup{}).Count(&setupRows).Error; err != nil {
+		t.Fatalf("数 setups(第二次): %v", err)
+	}
+	if setupRows != 1 {
+		t.Fatalf("setups 行数应当仍是 1，实际 %d", setupRows)
+	}
+
+	// SQL 权威期不写回 JSON：accounts.json 根本不该出现。
+	if _, err := os.Stat(accPath); err == nil {
+		t.Fatal("SQL 权威期不该创建/写回 accounts.json")
+	}
+
+	// 二次建号仍被拒（唯一的建号口只得手一次）。
+	if _, err := s.CreateBootstrap("boss2", "boss2-password-001"); err != ErrBootstrapDone {
+		t.Fatalf("第二次建号应当 ErrBootstrapDone，实际 %v", err)
+	}
+}

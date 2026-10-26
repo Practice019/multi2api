@@ -41,6 +41,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -474,4 +475,30 @@ func DeleteHardExpiredUserSessions(createdBefore int64) (int64, error) {
 		return 0, fmt.Errorf("store: 清理超绝对上限的 sessions: %w", res.Error)
 	}
 	return res.RowsAffected, nil
+}
+
+// MarkSetupInitialized 显式写下 setups 行 —— 「初始化已完成」的唯一标记。
+//
+// # 为什么需要它（而不是靠 CheckSetup 的自愈）
+//
+// CheckSetup 的自愈判据是「有 RoleRoot 用户但没有 setups 行」。若为了触发自愈
+// 把首启管理员写成 RoleRoot(100)，migrate-sql export 会把 role 原样导回
+// accounts.json —— 而 JSON 后端的 account.IsAdminRole(100)=false ⇒ 一旦回退到
+// JSON 模式（导出/备份格式），管理员会直接失效。这正是本仓「JSON 降级为导出
+// 格式」目标的反面，所以那条路被否决。
+//
+// 现在的分工：account.CreateBootstrap 仍写 RoleAdmin(10)（导出的 role 数值与改造前
+// 逐字节一致），建号成功后**显式**调本函数补标记。
+//
+// 幂等（ON CONFLICT DO NOTHING）：第二次调用、或另一个进程同时调用都只留一行。
+// 主键写死 setupID=1 是互斥的真正判据（见 setup.go 的 InitializeSetup 注释）。
+func MarkSetupInitialized() error {
+	if DB == nil {
+		return ErrNotOpen
+	}
+	row := Setup{ID: setupID, Version: Version, InitializedAt: time.Now().Unix()}
+	if err := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+		return fmt.Errorf("store: 写 setups 行: %w", err)
+	}
+	return nil
 }

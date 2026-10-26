@@ -58,21 +58,21 @@ type User struct {
 	// 迁移就变成"只能看总量对不对"。
 	ID string `gorm:"type:varchar(64);primaryKey"`
 	// Username 唯一。这条约束放在库里而不是代码里，才能挡住并发注册与手工改库。
-	Username string `gorm:"type:varchar(64);not null;uniqueIndex"`
+	Username    string `gorm:"type:varchar(64);not null;uniqueIndex"`
 	DisplayName string `gorm:"type:varchar(64);not null;default:''"`
 	// PasswordHash 只存哈希；本层不解释算法，只承诺"这里不是明文"。
 	PasswordHash string `gorm:"type:varchar(255);not null;default:''"`
 	// Role 1=member(历史) / 10=admin / 100=root，见 PLAN §0.1。
-	Role int `gorm:"not null;default:1"`
+	Role    int  `gorm:"not null;default:1"`
 	Enabled bool `gorm:"not null;default:true"`
 	// AuthVersion 会话失效版本号：改密/登出全设备时自增，会话行记录签发时的
 	// 版本，两者不等即视为失效。
 	//
 	// ⚠ 语义必须与现有 account 包完全一致（PLAN §3 Wave2 的"AuthVersion 语义保持"）。
 	// 若把它当成普通计数字段，改密就踢不掉旧会话 —— 那是安全问题，不是显示问题。
-	AuthVersion int64 `gorm:"not null;default:0"`
-	CreatedAt   int64 `gorm:"not null;default:0"`
-	LastLoginAt int64 `gorm:"not null;default:0"`
+	AuthVersion int64  `gorm:"not null;default:0"`
+	CreatedAt   int64  `gorm:"not null;default:0"`
+	LastLoginAt int64  `gorm:"not null;default:0"`
 	LastLoginIP string `gorm:"type:varchar(64);not null;default:''"`
 }
 
@@ -249,11 +249,11 @@ type Account struct {
 	// 历史数据，加唯一约束会让 AutoMigrate 阶段直接失败 —— 启动即崩，而且是在
 	// 用户升级时才发生。去重是迁移工具要做的校验（可报告、可人工裁决），
 	// 不是库约束的职责（只会拒绝启动）。
-	UID   string `gorm:"type:varchar(64);not null;default:'';index:idx_account_uid"`
-	Label string `gorm:"type:varchar(64);not null;default:''"`
-	Enabled    bool  `gorm:"not null;default:true"`
-	CreatedAt  int64 `gorm:"not null;default:0"`
-	LastUsedAt int64 `gorm:"not null;default:0"`
+	UID        string `gorm:"type:varchar(64);not null;default:'';index:idx_account_uid"`
+	Label      string `gorm:"type:varchar(64);not null;default:''"`
+	Enabled    bool   `gorm:"not null;default:true"`
+	CreatedAt  int64  `gorm:"not null;default:0"`
+	LastUsedAt int64  `gorm:"not null;default:0"`
 }
 
 func (Account) TableName() string { return "accounts" }
