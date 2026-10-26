@@ -283,6 +283,12 @@
 <footer>
   <span id="src">数据来源 GET /admin/system-status</span>
   <span id="upd"></span>
+  <!-- AGPL-3.0 归属：hyxapi/NOTICE:9-25 的 §7(b) 附加条款要求**修改版**在 UI 醒目位置
+       保留这句归属文案，并保留一个指向原项目的**可见链接**（不是注释、不是纯文本 URL）。
+       所以它是可见文本 + <a href>，且不藏在折叠块里。
+       ⚠ 本仓是 MIT（PLAN §1 许可证行），这里保留的是**上游作品的归属**——
+         状态页的字段集/阈值/骨架口径源自 New API 系项目，归属要求随行为一起过来。 -->
+  <span id="credit">Frontend design and development by <a href="https://github.com/QuantumNous/new-api" target="_blank" rel="noopener noreferrer">New API contributors</a>.</span>
 </footer>
 
 <script>
@@ -295,6 +301,19 @@
 
   var POLL_MS = 5000;           // 轮询间隔（契约：5s）
   var ENDPOINT = '/admin/system-status';
+
+  // ── 阈值与窗口：**契约的一部分**，数值必须与后端 internal/sysmon/status.go 一致
+  //
+  // 75/90 三档（PLAN §0.5 = hyxapi/controller/system_status.go:96-102）。
+  // WINDOW_SECONDS 是 §0.5 的 window_seconds:300；它随响应体下发，页面据此显示文案
+  // —— 窗口一改，同一串数字（RPM 的分母、成功率的样本集）含义就变了。
+  var WARN_PCT = 75;
+  var CRIT_PCT = 90;
+  var WINDOW_SECONDS = 300;
+
+  // winLabel 由窗口秒数推出的文案（'近 5 分钟'）。render() 每次按响应体里的
+  // window_seconds 重算，所以后端改窗口、页面文案跟着走，不会两边各写一份。
+  var winLabel = '近 5 分钟';
 
   // esc 把服务端给的**字符串**（文件名 / 上游名 / 告警文案）转义后再进 innerHTML。
   //
@@ -442,7 +461,10 @@
     var p = numOf(pct);
     if (p === undefined) { p = 0; }
     p = Math.max(0, Math.min(p, 100));
-    var color = p > 80 ? '#e53e3e' : (p > 60 ? '#d69e2e' : 'var(--fg)');
+    // 三档阈值 75/90（PLAN §0.5 = hyxapi/controller/system_status.go:96-102）。
+    // ⚠ 判据是**闭区间下界**，与后端 sysmon.PctVerdict 逐字一致：
+    //   两处一旦用不同的比较符（> vs >=），90.0 这个采样点上颜色会分叉。
+    var color = p >= WARN_PCT ? (p >= CRIT_PCT ? '#e53e3e' : '#d69e2e') : 'var(--fg)';
     var w = Math.max(p, p > 0 ? 1 : 0);
     return '<div class="minibar"><i style="width:' + w + '%;background:' + color + '"></i></div>';
   }
@@ -471,7 +493,7 @@
     var hasVal = p !== undefined;
     var shown = hasVal ? p : 0;
     var clamped = Math.max(0, Math.min(shown, 100));
-    var color = clamped > 80 ? '#e53e3e' : (clamped > 60 ? '#d69e2e' : 'var(--fg)');
+    var color = clamped >= WARN_PCT ? (clamped >= CRIT_PCT ? '#e53e3e' : '#d69e2e') : 'var(--fg)';
     var valueHtml = hasVal
       ? '<span style="color:' + color + '">' + shown.toFixed(1) + '%</span>'
       : '<span class="dim">-</span>';
@@ -526,7 +548,7 @@
     else if (st === 'critical') { pill = '<span class="err">严重</span>'; }
     else { pill = '<span class="dim">-</span>'; }
     var warns = get(svc, 'warnings');
-    var sub = (warns && warns.length) ? esc(String(warns[0])) : '近 5 分钟';
+    var sub = (warns && warns.length) ? esc(String(warns[0])) : winLabel;
     var tagSt = (st === 'ok' || st === 'warning' || st === 'critical') ? '' : tag('未上报');
     // ⚠ 未知状态**不**降级成「健康」：hyxapi 那边 map[status] || map.ok
     //   会把后端新增的第 4 种状态静默显示成健康 —— 那是最坏的一种错法。
@@ -536,7 +558,7 @@
     // 近 5 分钟 RPM
     var rpm = pickNum(h, ['rpm_5m', 'window_rpm', 'rpm']);
     var reqs = pickNum(h, ['window_requests_5m', 'window_requests']);
-    cards.push(statCard('近 5 分钟 RPM',
+    cards.push(statCard(winLabel + ' RPM',
       rpm === undefined ? '<span class="dim">-</span>' : esc(fmtRPM(rpm)),
       reqs === undefined ? '窗口请求数未上报' : (fmtInt(reqs) + ' 次请求'),
       rpm === undefined ? tag('口径未就绪') : ''));
@@ -570,7 +592,22 @@
       '成功请求的平均值',
       latMs === undefined ? tag('未上报') : ''));
 
-    return section('服务状态', '<div class="grid g4">' + cards.join('') + '</div>');
+    // 运行时身份（§0.5 的 version / go_version / runtime 三项）。
+    // ⚠ 三项一起放在一张卡的**副标题**里，而不是拆成三张卡：它们回答的是同一个
+    //   问题（"这是哪个构建、跑在什么平台上"），拆开会让第一屏多出两格噪声。
+    var ver = get(svc, 'version');
+    var gov = get(svc, 'go_version');
+    var rt = get(svc, 'runtime');
+    var parts = [];
+    if (ver !== undefined && ver !== '') { parts.push('v' + esc(String(ver))); }
+    if (gov !== undefined && gov !== '') { parts.push(esc(String(gov))); }
+    if (rt !== undefined && rt !== '') { parts.push(esc(String(rt))); }
+    cards.push(statCard('运行时',
+      parts.length ? '<span style="font-size:13px">' + parts.join(' · ') + '</span>' : '<span class="dim">-</span>',
+      '版本 · Go 版本 · 平台',
+      parts.length ? '' : tag('未上报')));
+
+    return section('服务状态', '<div class="grid g5">' + cards.join('') + '</div>');
   }
 
   // ② 资源与入口
@@ -616,7 +653,7 @@
     // 错误数 >0 用警示色：这是唯一一个「越大越坏」的卡，颜色本身就是信息。
     var errHtml = wErr === undefined ? '<span class="dim">-</span>'
       : (wErr > 0 ? '<span class="err">' + esc(fmtInt(wErr)) + '</span>' : '0');
-    cards.push(statCard('近 5 分钟错误', errHtml, '近 5 分钟',
+    cards.push(statCard(winLabel + '错误', errHtml, winLabel,
       wErr === undefined ? tag('未上报') : ''));
 
     var tk = pickNum(h, ['today_tokens']);
@@ -692,11 +729,36 @@
         + kvGrid([
           ['健康号', ph === undefined ? '<span class="dim">-</span>' : '<span class="ok">' + esc(fmtInt(ph)) + '</span>'],
           ['冷却中', pc === undefined ? '<span class="dim">-</span>' : esc(fmtInt(pc))],
-          ['熔断中', pt === undefined ? '<span class="dim">-</span>' : (pt > 0 ? '<span class="warn">' + esc(fmtInt(pt)) + '</span>' : '0')],
-          ['自动禁用', pa === undefined ? '<span class="dim">-</span>' : (pa > 0 ? '<span class="err">' + esc(fmtInt(pa)) + '</span>' : '0')],
+          // ⚠ 单位不同，标签必须分开：熔断这里数的是**上游**（几个 upstream 在熔断期），
+          //   其余四项数的是**账号**。写成「熔断中」会被读成"有 N 个号在熔断"。
+          ['上游熔断', pt === undefined ? '<span class="dim">-</span>' : (pt > 0 ? '<span class="warn">' + esc(fmtInt(pt)) + '</span>' : '0')],
+          ['已禁用', pa === undefined ? '<span class="dim">-</span>' : (pa > 0 ? '<span class="err">' + esc(fmtInt(pa)) + '</span>' : '0')],
           ['在途 inFlight', pf === undefined ? '<span class="dim">-</span>' : esc(fmtInt(pf))]
         ], true)
         + '</div>');
+    }
+
+    // ── Redis（§0.5：未启用只加 warning 文案，**不改** service.status）
+    //
+    // 「没配 Redis」在本仓是**配置事实**（有 Noop + 本地文件降级，PLAN §1 硬结论 2），
+    // 不是故障 ⇒ 卡片用中性/积极措辞，绝不因此把整页判成警告。
+    var rds = get(deps, 'redis');
+    if (rds) {
+      var rEn = get(rds, 'enabled');
+      var rMode = get(rds, 'mode');
+      var rWarn = get(rds, 'warning');
+      var rInner;
+      if (rEn === false) {
+        rInner = '<div class="empty">' + esc(String(rWarn || '未启用，走内存 + 本地文件降级。')) + '</div>';
+      } else {
+        rInner = kvGrid([
+          ['模式', rMode === undefined ? '<span class="dim">-</span>' : esc(String(rMode))],
+          ['状态', '<span class="ok">启用</span>']
+        ], true);
+      }
+      cards.push('<div class="c">'
+        + '<div class="k">Redis' + (rEn === false ? tag('Disabled') : '') + '</div>'
+        + rInner + '</div>');
     }
 
     // ── data JSON 文件（可变行数 ⇒ 表格）
@@ -806,9 +868,15 @@
       var algo = get(aff, 'algo');
       var entries = pickNum(aff, ['entries']);
       var inner;
-      if (en === false) {
-        // 降级：禁用是配置事实 ⇒ 占位 + 灰标 + 积极文案（照 hyxapi 的
-        // 「Disabled」+「Running in memory mode」那两条）。
+      // ⚠ 本仓**没有** HybridCache 亲和缓存（PLAN §0.5 明确不照搬）⇒ 这是
+      //   「不适用」，不是「未启用」：两者读起来完全不同（前者是设计如此，
+      //   后者会让人去配置里找一个并不存在的开关）。文案由后端 note 下发，
+      //   页面不自造 —— 免得两处各写一句、哪天只有一处改。
+      var applicable = get(aff, 'applicable');
+      var note = get(aff, 'note');
+      if (applicable === false || en === false) {
+        inner = '<div class="empty">' + esc(String(note || '本仓无渠道亲和缓存；选号走无状态轮询 —— 该项不适用。')) + '</div>';
+      } else if (en === false) {
         inner = '<div class="empty">未启用渠道亲和；选号走无状态轮询。</div>';
       } else {
         inner = kvGrid([
@@ -833,7 +901,7 @@
   //   骨架的用途是「占住数据将要占据的位置」，让数据到达时不跳版。
   //   一块大白会让整页在数据到达的瞬间重排两次（先压缩再展开），
   //   比没有骨架更刺眼。
-  // 格子数必须与真实渲染一致：① 4 / ② 5 / ③ 5 / ④ 2+2 / ⑤ 2。
+  // 格子数必须与真实渲染一致：① 5 / ② 5 / ③ 5 / ④ 2+2+1 / ⑤ 2。
   // ② 的前三张是资源卡，多一条 4px 的细骨架（那张条的位置）。
   // ══════════════════════════════════════════════════════════════════════
   function skCell(withBar) {
@@ -850,7 +918,7 @@
   }
   function skeleton() {
     var g1 = '', g2 = '', g3 = '';
-    for (var i = 0; i < 4; i++) { g1 += skCell(false); }
+    for (var i = 0; i < 5; i++) { g1 += skCell(false); }
     for (var j = 0; j < 5; j++) { g2 += skCell(j < 3); }
     for (var k = 0; k < 5; k++) { g3 += skCell(false); }
     return section('服务状态', '<div class="grid g4">' + g1 + '</div>')
@@ -937,6 +1005,13 @@
   function render(d) {
     lastUpdatedAt = Date.now();
     hasData = true;
+    // 窗口文案**跟着响应体走**（§0.5 的 window_seconds）：后端改窗口，页面文案
+    // 与 RPM 的分母同时变，不会出现「写着 5 分钟、其实按 10 分钟算」。
+    var ws = pickNum(d, ['window_seconds']);
+    if (ws !== undefined && ws > 0) {
+      WINDOW_SECONDS = ws;
+      winLabel = '近 ' + Math.round(ws / 60) + ' 分钟';
+    }
     var html = renderService(d) + renderResource(d) + renderHealth(d)
       + renderDeps(d) + renderCache(d);
     // 五组全空 ⇒ 后端返回了一个空对象。这时给一句明确的空态，

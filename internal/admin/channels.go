@@ -18,6 +18,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"workbuddy2api/internal/apikey"
@@ -80,22 +81,227 @@ func viewOf(ch *channelstore.Channel, models []string) channelView {
 	return v
 }
 
+// ---- 分页 / 筛选（T13，对齐 hyxapi 的列表行为）----
+//
+// 口径来源（只借判断，实现自写）：
+//
+//	分页 common/page_info.go:37-77   p（缺省 1）、page_size（依次回落 ps → size）、
+//	                                 **上限 100**、page_size 缺省 ItemsPerPage
+//	状态字典 controller/channel.go:52-65（parseStatusFilter）
+//	type_counts controller/channel.go:156-176（一条 GROUP BY 塞进同响应）
+//	"停用"合并口径 controller/channel.go:301（statusFilter==0 ⇒ 只排掉 status==1）
+//
+// # 为什么"停用"是依次序判断而不是查表
+//
+// hyxapi 的字典是 switch：enabled|1 → 1；disabled|0 → **0**；"2" → 2；"3" → 3；
+// 其余 → -1（不过滤）。其中 0 不是"某一条渠道的状态值"（渠道只有 1/2/3），
+// 而是"所有未启用"的合并口径 —— 见 :295-307 那段：statusFilter==0 时
+// ch.Status == ChannelStatusEnabled 就跳过。所以 0 单独处理，不能与 1/2/3 混在一张表里。
+
+const (
+	// channelsPageDefault 缺省页大小。与 hyxapi SearchChannels 的缺省 20 一致（:334）。
+	channelsPageDefault = 20
+	// channelsPageMax 页大小上限。hyxapi common/page_info.go:73-75 写死 100。
+	// 它同时是"前端一次最多能加载多少条"的硬边界（内存搜索模式依赖它）。
+	channelsPageMax = 100
+)
+
+// channelsPageQuery 是本端点的分页/筛选参数（零值不是合法状态，必须走 parseChannelsPageQuery）。
+type channelsPageQuery struct {
+	Page     int
+	PageSize int
+	// Status -1 = 不过滤；0 = "未启用"（status != 1，即 2/3 合并）；1/2/3 = 精确匹配。
+	Status int
+	// Type -1 = 不过滤；否则精确匹配渠道类型。
+	Type int
+	// Keyword 内存搜索词（大小写不敏感子串，见 channelMatchesKeyword）。
+	Keyword string
+}
+
+// parseChannelsPageQuery 解析 p / page_size（回落 ps、size）/ status / type / keyword。
+//
+// 非法值一律**回落缺省**而不是 400：分页参数是 GET 上的可选参数，把
+// "手抖打了个 p=abc" 变成 400 只会让页面白屏；回落是 hyxapi 的做法（strconv 失败即忽略），
+// 也与本仓 GET 端点的既有口味一致。
+func parseChannelsPageQuery(r *http.Request) channelsPageQuery {
+	q := channelsPageQuery{Page: 1, PageSize: channelsPageDefault, Status: -1, Type: -1}
+	qs := r.URL.Query()
+	if p, err := strconv.Atoi(qs.Get("p")); err == nil && p > 0 {
+		q.Page = p
+	}
+	// 回落顺序照抄 hyxapi：page_size → ps → size（size 是 token 页的历史拼法）。
+	for _, key := range []string{"page_size", "ps", "size"} {
+		if v, err := strconv.Atoi(qs.Get(key)); err == nil && v > 0 {
+			q.PageSize = v
+			break
+		}
+	}
+	if q.PageSize > channelsPageMax {
+		q.PageSize = channelsPageMax
+	}
+	q.Status = parseChannelStatusFilter(qs.Get("status"))
+	if v, err := strconv.Atoi(qs.Get("type")); err == nil {
+		q.Type = v
+	}
+	// keyword 是 hyxapi 的拼法；q 是本仓前端搜索框的短拼法（两者取先给的那个）。
+	q.Keyword = strings.TrimSpace(qs.Get("keyword"))
+	if q.Keyword == "" {
+		q.Keyword = strings.TrimSpace(qs.Get("q"))
+	}
+	return q
+}
+
+// parseChannelStatusFilter 复刻 hyxapi 的状态筛选字典（controller/channel.go:52-65）。
+func parseChannelStatusFilter(v string) int {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "enabled", "1":
+		return channelstore.StatusEnabled
+	case "disabled", "0":
+		// 0 = "未启用"的合并口径（2 手动停用 + 3 自动停用），见文件头。
+		return 0
+	case "2":
+		return channelstore.StatusManuallyDisabled
+	case "3":
+		return channelstore.StatusAutoDisabled
+	default:
+		return -1
+	}
+}
+
+// channelMatchesStatus want = -1 恒真；0 表示"未启用"（!= 启用）；其余精确匹配。
+func channelMatchesStatus(status, want int) bool {
+	if want < 0 {
+		return true
+	}
+	if want == 0 {
+		return status != channelstore.StatusEnabled
+	}
+	return status == want
+}
+
+// channelMatchesKeyword 内存搜索：名称 / Base URL / id / 声明的模型名，大小写不敏感子串
+// （与 hyxapi 的 search 端点同一类判据：它按 name/key/models 搜）。
+func channelMatchesKeyword(ch *channelstore.Channel, keyword string) bool {
+	if keyword == "" {
+		return true
+	}
+	k := strings.ToLower(keyword)
+	if strings.Contains(strings.ToLower(ch.Name), k) ||
+		strings.Contains(strings.ToLower(ch.BaseURL), k) ||
+		strings.Contains(strings.ToLower(ch.ID), k) {
+		return true
+	}
+	for _, m := range ch.Models {
+		if strings.Contains(strings.ToLower(m), k) {
+			return true
+		}
+	}
+	return false
+}
+
+// channelsPageRange 把 (page, pageSize, total) 夹成 [start,end)。
+//
+// 越界页给空区间而不是报错（hyxapi 的 search 路径也是 min(...) 夹一下）：
+// 删完最后一页的最后一条之后，前端还停在旧页码是很常见的，那不是错误。
+func channelsPageRange(page, pageSize, total int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = channelsPageDefault
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return start, end
+}
+
 // channelsList GET /admin/channels
+//
+// 响应同时给两份键名，是刻意的过渡形态：
+//
+//	channels —— 本仓既有键（前端与 verify_channels_save.js 都在读它）
+//	items    —— hyxapi 的键（分页响应的标准形状）
+//
+// 两者是**同一个数组**（本页条目），不是两份数据 —— 所以不存在"哪个是真相"的问题。
+// total / page / page_size / type_counts 是新增的；旧调用方忽略它们即可。
 func (h *Handler) channelsList(w http.ResponseWriter, r *http.Request) {
+	q := parseChannelsPageQuery(r)
 	s := h.channelsStore()
 	if s == nil {
-		// 与 apikeys 同款：未启用就回空集 + enabled=false（前端据此不渲染操作区）
-		writeJSON(w, http.StatusOK, map[string]any{"channels": []channelView{}, "enabled": false})
+		// 与 apikeys 同款：未启用就回空集 + enabled=false（前端据此不渲染操作区）。
+		// 分页元数据照给：前端不必为"未启用"写一条分支去猜页大小。
+		writeJSON(w, http.StatusOK, map[string]any{
+			"channels": []channelView{}, "items": []channelView{},
+			"total": 0, "page": q.Page, "page_size": q.PageSize,
+			"type_counts": map[string]int{}, "status_counts": map[string]int{},
+			"enabled": false,
+		})
 		return
 	}
-	list := s.List()
-	out := make([]channelView, 0, len(list))
-	for _, ch := range list {
+
+	all := s.List()
+	// ① 内存筛选（status + keyword）。channelstore 的数据本来就在内存里
+	//    （一个 JSON 文件两段：channels + abilities），所以"内存搜索+内存分页"
+	//    在这里就是唯一实现 —— 不需要也没有 SQL 可下推。
+	kept := make([]*channelstore.Channel, 0, len(all))
+	for _, ch := range all {
+		if !channelMatchesStatus(ch.Status, q.Status) || !channelMatchesKeyword(ch, q.Keyword) {
+			continue
+		}
+		kept = append(kept, ch)
+	}
+
+	// ② type_counts：与 hyxapi 一致，在 status + keyword 过滤**之后**、type 过滤**之前**
+	//    分组（controller/channel.go:156-165 用 type=-1 的同一条件再查一次）。
+	//    这样"当前筛选下各类型各有多少"是自洽的。
+	typeCounts := make(map[string]int, 4)
+	for _, ch := range kept {
+		typeCounts[strconv.Itoa(ch.Type)]++
+	}
+
+	// ③ status_counts：本仓扩展（给筛选器的徽章用）。口径**刻意不同**：
+	//    只受 keyword 影响、不受 status 过滤影响 —— 否则选中"启用"之后，
+	//    "手动停用 3 / 自动停用 1" 会全塌成 0，用户没法从徽章上看出还有多少停用的。
+	statusCounts := map[string]int{}
+	for _, ch := range all {
+		if !channelMatchesKeyword(ch, q.Keyword) {
+			continue
+		}
+		statusCounts[strconv.Itoa(ch.Status)]++
+	}
+
+	// ④ type 过滤 + 分页（越界给空页，见 channelsPageRange）。
+	if q.Type >= 0 {
+		byType := make([]*channelstore.Channel, 0, len(kept))
+		for _, ch := range kept {
+			if ch.Type == q.Type {
+				byType = append(byType, ch)
+			}
+		}
+		kept = byType
+	}
+	total := len(kept)
+	start, end := channelsPageRange(q.Page, q.PageSize, total)
+	out := make([]channelView, 0, end-start)
+	for _, ch := range kept[start:end] {
 		out = append(out, viewOf(ch, ch.Models))
 	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"channels": out,
-		"enabled":  true,
+		"channels":      out,
+		"items":         out,
+		"total":         total,
+		"page":          q.Page,
+		"page_size":     q.PageSize,
+		"type_counts":   typeCounts,
+		"status_counts": statusCounts,
+		"enabled":       true,
 		// 能力索引的规模（"对外可服务的 (渠道,模型) 对数"）—— 一眼看出渠道是否真被展开成能力
 		"ability_count": len(s.Abilities()),
 	})

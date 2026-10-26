@@ -24,6 +24,12 @@ var channelsUIPage []byte
 //go:embed webui-groups.html
 var groupsUIPage []byte
 
+//go:embed webui-status.html
+var statusUIPage []byte
+
+//go:embed webui-models.html
+var modelsUIPage []byte
+
 //go:embed favicon.svg
 var faviconSVG []byte
 

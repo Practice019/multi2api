@@ -396,6 +396,15 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /ui/channels", h.channelsUI)
 	// 分组管理页：与 /ui/channels 同一套身份判据（同为管理面）。
 	h.mux.HandleFunc("GET /ui/groups", h.groupsUI)
+	// 系统状态页（T12）：与上面三条**同一套**身份判据（h.uiIdentify）。
+	// ⚠ T14 加 /ui/models 时请在这两行之后追加，不要改动上面三条。
+	h.mux.HandleFunc("GET /ui/status", h.statusUI)
+	// 模型管理页（T14）：与上面四条**同一套**身份判据（h.uiIdentify）。
+	// 取数走 /ui/models/data（同判据，见 models_channels.go 的 modelsCatalogJSON）——
+	// 刻意不挂 /admin/*：那是另一套门禁，页面拿它要凭据会稳定 401
+	//（groups_catalog.go:3-6 记着这个坑）。
+	h.mux.HandleFunc("GET /ui/models", h.modelsUI)
+	h.mux.HandleFunc("GET /ui/models/data", h.modelsCatalogJSON)
 	h.mux.HandleFunc("GET /ui", h.ui)
 	// 带尾斜杠的 /ui/ 也接受（用户习惯打 `http://host:port/ui/?token=...`）：
 	// 302 到无斜杠的规范路径，查询参数（如 ?token=）原样保留。

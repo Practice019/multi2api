@@ -21,6 +21,7 @@ package server
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 
 	"workbuddy2api/internal/channelstore"
@@ -364,4 +365,195 @@ func (h *Handler) SeedModelCatalog() (store.CatalogSeedStats, error) {
 // 那需要访问 Handler。现在先做一层薄封装，调用点不必再改。
 func (h *Handler) CatalogRows() ([]store.CatalogRow, error) {
 	return store.ListCatalogRows()
+}
+
+// ── T14：模型管理页（/ui/models）与它的取数端点（/ui/models/data）───────────
+//
+// # 为什么取数端点在 /ui/ 下，而不是 /admin/ 下
+//
+// 页面的身份判据是 h.uiIdentify（会话 cookie / admin token，见 webui.go 的 ui）。
+// /admin/* 子树是**另一套**门禁，且它的注册表在 internal/admin（装配层）。
+// 把数据挂到 /admin/ 下要么多一套判据，要么让页面去用一把它拿不到的钥匙 ——
+// 后者正是 groups_catalog.go 开头记着的那个事故（/v1/models 要求 API key，
+// 管理台拿到的是 admin 身份，于是稳定 401）。
+//
+// 所以页与数据**同一套判据、同一个包**：没有第二种身份，也没有第三个真相源。
+//
+// # 为什么是两条显式路由，而不是一条按 Accept 分叉
+//
+// 一条路由两种表现会让 iframe 的 src 与 fetch 的 URL 长得一样：贴日志/看缓存/
+// 排查时得先问"你打的是哪一种"。显式两条路由代价只有 handler.go 一行。
+//
+// # 数据从哪来（两档，按接线状态自动选）
+//
+//  1. **store（T11 之后）**：models/vendors 两张表是权威目录（T09 seed）。
+//     非空就用它 —— 页面显示的就是 SQL 里那一份，与目录 seed 一一对应。
+//  2. **memory（当前，T11 之前）**：直接复用 /v1/models 的**同一条管线**
+//     （upstreamCatalogEntries + channelSyntheticCatalogEntries，见 T09 段），
+//     按需实时算。它与 /v1/models 的可见集合相等，所以页面上不会出现
+//     "chips 里有、目录里没有"这类不一致。
+//
+// 为什么要这个回落而不是"库没接线就报错"：T14 的验收（隔离实例 + 真浏览器）
+// 跑在 T11 之前也必须能验到东西；而一个只会报"未接线"的页面在 Wave 1 收口前
+// 完全不可测 —— 那不是严谨，是把验证推给下一个任务。
+
+// catalogViewModel 是页面 Model tab 的一行。
+//
+// 字段名就是**前端契约**（webui-models.html 按它们取值），改这里必须同时改页面。
+type catalogViewModel struct {
+	// Name 对外可见 id（多上游下是 "provider/model"，与 /v1/models 同口径）。
+	Name string `json:"name"`
+	// Vendor 一级行（上游 id / 渠道名）。
+	Vendor string `json:"vendor"`
+	// Endpoints 该模型支持的端点（目前恒为 chat）。
+	Endpoints []string `json:"endpoints"`
+	// Synthetic 渠道声明在用、但上游目录里没有 ⇒ 由合成行 API 补出来的。
+	Synthetic bool `json:"synthetic"`
+	// Selectable 能不能被勾选。**恒等于 !Synthetic**，但仍然单独下发：
+	// 页面的"不可勾选"必须来自数据而不是前端自己再推一遍 —— 两处推导
+	// 迟早分叉（一边改了另一边不改，表现是"看起来能勾、点了没反应"）。
+	Selectable bool `json:"selectable"`
+}
+
+// catalogViewVendor 是页面 Vendor tab 的一行（由 Model 行聚合而来）。
+type catalogViewVendor struct {
+	// Name 供应商名（= models 行的 vendor）。
+	Name string `json:"name"`
+	// Models 它下面的模型数。
+	Models int `json:"models"`
+	// Synthetic 其中合成行数（渠道补出来的）。单独一列：一个 vendor
+	// 全是合成行（渠道，没在上游目录里注册）与全是真行，处置完全不同。
+	Synthetic int `json:"synthetic"`
+}
+
+// modelsUI 提供模型管理页（与 channelsUI / statusUI 逐字同构）。
+func (h *Handler) modelsUI(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.uiIdentify(r); !ok {
+		http.Redirect(w, r, "/ui", http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// no-store：页面按身份分叉（未认证会被 302），缓存住会出现「登出后仍能打开」。
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(modelsUIPage)
+}
+
+// modelsCatalogJSON GET /ui/models/data —— 模型管理页的取数端点。
+//
+// 契约（webui-models.html 按它渲染；改动必须两边一起改）：
+//
+//	{ "ready":bool, "source":"store"|"memory",
+//	  "models":[catalogViewModel], "vendors":[catalogViewVendor] }
+//
+// 未认证 ⇒ 401 + JSON，**不是** 200 + 空数组：空数组在页面上是"一个模型都
+// 没有"，会把"没登录"读成"目录是空的" —— 那是两类完全不同的故障。
+func (h *Handler) modelsCatalogJSON(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.uiIdentify(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "未认证"})
+		return
+	}
+	models, vendors, source, ready := h.catalogView()
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ready":   ready,
+		"source":  source,
+		"models":  models,
+		"vendors": vendors,
+	})
+}
+
+// catalogView 组装页面要的两张表（Model / Vendor）。
+//
+// 它是**纯装配**：不写库、不改状态；数据来源二选一见上面的注释。
+// 返回的 vendors 由 models 聚合，两种来源共用同一段聚合 —— 否则两档之间
+// 会出现"模型列表变了、供应商计数没变"的错配。
+func (h *Handler) catalogView() (models []catalogViewModel, vendors []catalogViewVendor, source string, ready bool) {
+	if rows, ok := h.storeCatalogRows(); ok {
+		source = "store"
+		models = make([]catalogViewModel, 0, len(rows))
+		for _, r := range rows {
+			models = append(models, catalogViewModel{
+				Name:       r.Name,
+				Vendor:     r.Vendor,
+				Endpoints:  splitCatalogEndpoints(r.EndpointsCSV),
+				Synthetic:  r.Synthetic,
+				Selectable: !r.Synthetic,
+			})
+		}
+	} else {
+		source = "memory"
+		base := h.upstreamCatalogEntries()
+		entries := append([]store.CatalogEntry(nil), base...)
+		entries = append(entries, h.channelSyntheticCatalogEntries(store.CatalogEntryNames(base))...)
+		models = make([]catalogViewModel, 0, len(entries))
+		for _, e := range entries {
+			models = append(models, catalogViewModel{
+				Name:       e.Name,
+				Vendor:     e.Vendor,
+				Endpoints:  splitCatalogEndpoints(strings.Join(e.Endpoints, ",")),
+				Synthetic:  e.Synthetic,
+				Selectable: !e.Synthetic,
+			})
+		}
+	}
+	vendors = aggregateCatalogVendors(models)
+	return models, vendors, source, len(models) > 0
+}
+
+// storeCatalogRows 读 SQL 目录；未接线 / 未迁移 / 空目录都返回 ok=false。
+//
+// 为什么把"空目录"也当成没接线：一个建好但还没 seed 的 gw.db 与"完全没有库"
+// 在页面上应当表现一样（回落实时聚合），否则 T11 刚接上、T09 seed 还没跑的那
+// 一瞬间，页面会突然从"有 700 条"变成"空"—— 而那看起来就是故障。
+func (h *Handler) storeCatalogRows() ([]store.CatalogRow, bool) {
+	if store.DB == nil {
+		return nil, false
+	}
+	rows, err := store.ListCatalogRows()
+	if err != nil || len(rows) == 0 {
+		return nil, false
+	}
+	return rows, true
+}
+
+// aggregateCatalogVendors 由模型行聚出供应商行（按名字升序）。
+func aggregateCatalogVendors(models []catalogViewModel) []catalogViewVendor {
+	type agg struct{ models, synthetic int }
+	byName := make(map[string]*agg, 8)
+	for _, m := range models {
+		name := m.Vendor
+		if name == "" {
+			name = store.CatalogVendorUnknown
+		}
+		a := byName[name]
+		if a == nil {
+			a = &agg{}
+			byName[name] = a
+		}
+		a.models++
+		if m.Synthetic {
+			a.synthetic++
+		}
+	}
+	out := make([]catalogViewVendor, 0, len(byName))
+	for name, a := range byName {
+		out = append(out, catalogViewVendor{Name: name, Models: a.models, Synthetic: a.synthetic})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// splitCatalogEndpoints 把 CSV 端点列拆成数组（页面按数组渲染）。
+//
+// 空 ⇒ 返回**空数组**而不是 ["chat"]：这里只做投影，不该替数据补一个它没有的
+// 事实（"chat" 的默认值在 seed 侧，见 store.normalizeCatalogEndpoints）。
+func splitCatalogEndpoints(csv string) []string {
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
