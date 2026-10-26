@@ -119,6 +119,31 @@ func CheckSetup() (bool, error) {
 	return true, nil
 }
 
+// hasSetupRow 只读地问「setups 表里有行吗」。
+//
+// # 为什么需要它，而不是直接用 IsSetup()
+//
+// IsSetup/CheckSetup 是**带副作用**的查询：发现「有 root、无标记」时会自愈补行。
+// 初始化路径上恰恰存在这个形态的库（旧库迁移、初始化事务被外部 kill），而那时
+// 我们要的是「走 InitializeSetup 的自愈分支」，不是「被别人抢先补上标记然后报已初始化」。
+// 所以判据分成两份，职责不重叠：
+//
+//	hasSetupRow   纯读，预检用（本函数）—— 只决定「要不要立刻报 ErrSetupAlreadyDone」
+//	CheckSetup    带自愈，启动路径用 —— 负责把半初始化的库修好
+//
+// 真正的**互斥判据**始终是事务里的 Count + 主键 RowsAffected（见 InitializeSetup ①④），
+// 本函数不承担任何正确性责任。
+func hasSetupRow() (bool, error) {
+	if DB == nil {
+		return false, ErrNotOpen
+	}
+	var n int64
+	if err := DB.Model(&Setup{}).Count(&n).Error; err != nil {
+		return false, fmt.Errorf("store: 读 setups 表: %w", err)
+	}
+	return n > 0, nil
+}
+
 // InitializeSetup 建 root 管理员并写下完成标记，全过程**一个事务**。
 //
 // 四步（顺序有讲究，不能换）：
@@ -148,7 +173,14 @@ func InitializeSetup(username, password string) (*User, error) {
 	if DB == nil {
 		return nil, ErrNotOpen
 	}
-	if IsSetup() {
+	// ⚠ 预检**必须只读**（hasSetupRow），不能用 IsSetup()/CheckSetup()：后两者
+	// 带**自愈副作用** —— 「有 root、无标记」的库会在预检那一刻被补上标记，函数
+	// 随即返回 ErrSetupAlreadyDone，于是事务里 ② 那条自愈路径（roots>0 ⇒ 跳过
+	// 建号、只补标记、返回已存在的 root）**永远走不到**。
+	// 实测红：TestInitializeSetupSelfHealsRoot（2026-10-26 修）。
+	if done, err := hasSetupRow(); err != nil {
+		return nil, err
+	} else if done {
 		return nil, ErrSetupAlreadyDone
 	}
 
@@ -317,10 +349,27 @@ func validateUsername(name string) error {
 	return nil
 }
 
-// validatePassword 出处：internal/account/account.go 的 validatePassword。
+// validatePassword 出处：internal/account/account.go 的 validatePassword，
+// **外加一条它还没有的控制字符规则**（见下）。
+//
+// # 为什么必须拒绝控制字符（2026-10-26 补）
+//
+// 口令是**单行**凭据。含 \n / \r / \t 的输入在表单与 JSON 里能被原样送达，
+// 但一旦进入任何「按行」的通道（CLI 参数、dotenv、日志摘录、人工抄写）就会被截断
+// 或炸行 —— 而 bcrypt 只认完整字节串，于是表现为「口令明明对却登不上」。
+//
+// ⚠ 这条规则**必须**同步到 internal/account/account.go 的同名函数（那边的口令
+// 走注册/登录路径，缺口更大）。本文件头写明「改一边必须看另一边」，此处即该约定
+// 的一次真实兑现：store 侧由 TestInitializeSetupValidation 的「口令含换行」钉住。
 func validatePassword(password string) error {
 	if len(password) < setupPasswordMin || len(password) > setupPasswordMax {
 		return fmt.Errorf("%w：长度需在 %d–%d 之间", errBadPassword, setupPasswordMin, setupPasswordMax)
+	}
+	for _, r := range password {
+		// 0x20 以下（含 \n \r \t NUL）与 DEL(0x7f)。
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w：不允许控制字符（含换行/制表）", errBadPassword)
+		}
 	}
 	return nil
 }

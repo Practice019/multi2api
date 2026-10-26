@@ -21,10 +21,12 @@ package server
 
 import (
 	"net/http"
+	"strings"
 
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/modelmap"
 	"workbuddy2api/internal/modelvis"
+	"workbuddy2api/internal/store"
 )
 
 // channelPublicNames 取"对外可见的模型名"，返回 (名字, 是否走渠道口径)。
@@ -231,4 +233,135 @@ func (h *Handler) channelModelMeta() map[string]channelModelMetaInfo {
 type channelModelMetaInfo struct {
 	ContextLength   int64
 	MaxOutputTokens int64
+}
+
+// ── T09：models + vendors 两级目录（seed + 合成行 API）──────────────────────
+//
+// # 为什么 seed 的口径必须与 /v1/models 是**同一条管线**
+//
+// /v1/models 的可见集合是**加**出来的（上游目录 ∪ 渠道公开名，见文件头），
+// 而 SQL 层的 models/vendors 要能回答"这个 chips 归谁"。两者唯一安全的关系
+// 是**相等**：用户在 chips 上看到一条，目录里就得有一行。若 seed 另写一份聚合
+// （哪怕只差一个 map 遍历顺序），立刻出现两套目录 —— 而"chips 里有、目录里
+// 查不到"是最难查的一类不一致（两边都不报错，只有人对不上账时才发现）。
+//
+// 所以这里不重新发明聚合，直接调 models() 用的那三步
+// （modelListWithScrub → appendChannelModels → applyPublicNames），
+// 只把结果投影成 store.CatalogEntry。
+//
+// ⚠ 与 /v1/models 有两处**故意不同**，各自有理由：
+//
+//  1. **不叠 filterModelsForRequest**：那层是按 API Key 的白名单/分组过滤，
+//     是权限视图不是目录。seed 进库的必须是全局目录 —— 否则先来的那把钥匙
+//     会把自己的白名单永久写进 models 表，后加入的模型对所有人都不见了。
+//  2. **传 scrub=false**：目录要记上游真名（owned_by）作为一级行。scrub=true
+//     是"对普通 key 隐藏来源"；把它写进库等于把某个 key 的隐私视图变成全局事实。
+
+// catalogEndpointChat seed 时每行声明的端点。
+//
+// 来源是 /v1/models（对话目录），所以是 chat。将来有 embeddings/images 目录
+// 时按来源补，**不要**在这里猜：猜出来的端点会变成"目录说有、请求却 404"。
+const catalogEndpointChat = "chat"
+
+// upstreamCatalogEntries 取**各上游目录**并投影成两级目录项。
+//
+// 它是 /v1/models 管线的前两步（modelListWithScrub → applyPublicNames），
+// **不含** appendChannelModels 那一步 —— 渠道那半由合成行 API 补，
+// 且只有分开算，"渠道用到但目录没有"才有确定的含义：
+// 缺的是相对于**上游目录**，不是相对于"已经并过渠道的目录"（那恒为空集，
+// 合成行 API 会退化成一个永远返回空的函数 —— 这正是第一版的错）。
+func (h *Handler) upstreamCatalogEntries() []store.CatalogEntry {
+	data := h.modelListWithScrub(false)
+	data = h.applyPublicNames(nil, data)
+	out := make([]store.CatalogEntry, 0, len(data))
+	for _, m := range data {
+		name, _ := m["id"].(string)
+		if name == "" {
+			continue
+		}
+		owner, _ := m["owned_by"].(string)
+		if owner == "" {
+			owner = catalogVendorOfID(name)
+		}
+		out = append(out, store.CatalogEntry{
+			Vendor:    owner,
+			Name:      name,
+			Endpoints: []string{catalogEndpointChat},
+		})
+	}
+	return out
+}
+
+// catalogSeedEntries 是入库的全量目录：上游目录 ∪ 渠道合成行。
+//
+// 它与 /v1/models 的可见集合**相等**（appendChannelModels 做的就是"上游 ∪ 渠道"
+// 的去重并集；这里只是把渠道那半换成带合成标记的版本），这正是 T09 计数判据
+// 「models 行数 = 可见 chips 基数」的成立依据。
+func (h *Handler) catalogSeedEntries() []store.CatalogEntry {
+	base := h.upstreamCatalogEntries()
+	// ⚠ 显式复制再拼：append(base, ...) 会写进 base 的底层数组（若还有余量）。
+	// 这条坑在 appendChannelModels 的注释里已经踩过一次，不再踩第二次。
+	entries := append([]store.CatalogEntry(nil), base...)
+	return append(entries, h.channelSyntheticCatalogEntries(store.CatalogEntryNames(base))...)
+}
+
+// catalogVendorOfID 从 "provider/model" 里切出上游 id，作为没有 owned_by 时的
+// 一级行兜底。
+//
+// 为什么切前缀而不是一律 unknown：多上游目录里的 id 自带上游（收窄之后恒定如此），
+// 丢掉这层信息会让一级行退化成一条"unknown 装了所有东西"—— 目录白建。
+// 单上游（没有 "/"）时同样兜不住，才回落到 unknown（那是真的无从得知）。
+func catalogVendorOfID(id string) string {
+	if i := strings.IndexByte(id, '/'); i > 0 {
+		return id[:i]
+	}
+	return store.CatalogVendorUnknown
+}
+
+// channelSyntheticCatalogEntries 是服务器侧的合成行来源：渠道声明在用、
+// 但**上游目录里没有**的公开名。
+//
+// known 由调用方传入（seed 路径上就是刚算出来的上游目录），这样同一份判据
+// 不会因为"算两遍"而出现两次快照不一致。
+func (h *Handler) channelSyntheticCatalogEntries(known []string) []store.CatalogEntry {
+	names, ok := h.channelPublicNames(nil)
+	if !ok || len(names) == 0 {
+		return nil
+	}
+	owner := h.channelOwnerByModel()
+	return store.SyntheticCatalogEntries(known, names, func(name string) string {
+		return owner[name]
+	})
+}
+
+// ChannelSyntheticCatalogEntries 暴露"渠道用到但目录没有"的合成行。
+//
+// 它是给**展示侧**用的（目录视图要把这些行并进列表，不一定要落库）；
+// seed 路径见 SeedModelCatalog。两者共用 store.SyntheticCatalogEntries
+// 这一份判据 —— 展示与入库的口径必须一致，否则"页面上有、库里没有"。
+func (h *Handler) ChannelSyntheticCatalogEntries() []store.CatalogEntry {
+	return h.channelSyntheticCatalogEntries(store.CatalogEntryNames(h.upstreamCatalogEntries()))
+}
+
+// SeedModelCatalog 把「上游目录 + 渠道合成行」seed 进 models/vendors（幂等）。
+//
+// # 为什么合成行也一起 seed（而不是只 seed 上游）
+//
+// 计数判据是「models 行数 = /v1/models 可见 chips 基数」。渠道声明的名字**确实
+// 出现在** /v1/models 里（appendChannelModels 并进来的），若不入库，
+// 等式立刻不成立 —— 而且用户会在 chips 上看到一个目录里不存在的模型。
+//
+// 入口是 *Handler 而不是包级函数：上游目录只有出口层拿得到（它同时知道
+// "有哪些上游"与"每个上游给什么"），装配层只把 ProviderRouter 注入进来。
+func (h *Handler) SeedModelCatalog() (store.CatalogSeedStats, error) {
+	return store.SeedModelCatalog(h.catalogSeedEntries())
+}
+
+// CatalogRows 读回两级目录（平铺，含合成行标记）。
+//
+// 为什么是 Handler 方法而不是让调用方直接 import store：目录的行数/来源
+// 将来可能还要叠渠道元数据（ctx / max_output，见 channelModelMeta），
+// 那需要访问 Handler。现在先做一层薄封装，调用点不必再改。
+func (h *Handler) CatalogRows() ([]store.CatalogRow, error) {
+	return store.ListCatalogRows()
 }

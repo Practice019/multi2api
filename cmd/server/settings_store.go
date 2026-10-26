@@ -14,11 +14,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/scheduler"
+	"workbuddy2api/internal/store"
 	"workbuddy2api/internal/workbuddy"
 )
 
@@ -47,6 +50,14 @@ type settingsStore struct {
 	log *checkinlog.Log
 	// setLogKeepDays 调整落盘请求日志的保留天数（由 main 注入，避免这里依赖 logbuf）。
 	setLogKeepDays func(int)
+
+	// optionsMu 守住下面那个「只导一次」的开关 —— Apply 会被 HTTP 并发调用。
+	optionsMu sync.Mutex
+	// optionsSeeded 「首次导入是否已成功」的开关。
+	//
+	// 只在**成功**之后置 true：库还没接进来时（PLAN §6.0 的切换点之前）它保持
+	// false，于是宿主一旦把库打开，下一次 Apply 就会补做导入，而不是永远错过。
+	optionsSeeded bool
 }
 
 // UpstreamSettings 上游专属设置在**宿主**这一侧需要的形状。
@@ -180,6 +191,9 @@ func (s *settingsStore) Apply(patch json.RawMessage) (applied, needRestart []str
 	needRestart = admin.RestartRequiredFields()
 	// 把新值同步进内存 cfg，让 Snapshot 显示的就是刚保存的值。
 	s.applyToMemory(p)
+	// 再镜像进 options 表，让 SQL 侧与本文件里的值同源（PLAN §6.0 的迁移方向）。
+	// 失败**不改**本次保存的结论：config.json 已经写成功了。
+	s.mirrorOptions(p)
 	return applied, needRestart, nil
 }
 
@@ -413,27 +427,7 @@ func (s *settingsStore) persist(p admin.Settings) error {
 	// 解析成 map 再 MarshalIndent 写回去会**丢掉注释与字段顺序** ——
 	// 那正是用户上一轮报的「配置太乱」的同一个机制，也是本次事故里
 	// "73 行注释全没了" 的直接原因。见 settings_edit.go 的文件头。
-	sets := []managedSetting{
-		{"schedule", "checkin_enabled", p.CheckinEnabled},
-		{"schedule", "keepalive_enabled", p.KeepaliveEnabled},
-		{"schedule", "checkin_hours", p.CheckinHours},
-		{"schedule", "keepalive_hours", p.KeepaliveHours},
-		{"cooldown", "soft_rate", p.SoftRate},
-		{"upstream", "timeout_seconds", p.UpstreamTimeoutSec},
-		{"upstream", "header_timeout_seconds", p.UpstreamHeaderTimeout},
-		{"upstream", "idle_timeout_seconds", p.UpstreamIdleTimeout},
-		{"pool", "max_in_flight", p.PoolMaxInFlight},
-		{"pool", "breaker_threshold", p.BreakerThreshold},
-		{"pool", "breaker_cooldown", p.BreakerCooldown},
-		{"pool", "breaker_cooldown_max", p.BreakerCooldownMax},
-		{"pool", "revive_probe_interval_seconds", p.ReviveProbeHours * 3600},
-		{"features", "sanitize_blacklist_fingerprints", p.SanitizeFingerprints},
-		{"upstash", "url", p.UpstashURL},
-		{"session_sticky", "enabled", p.SessionStickyEnabled},
-		{"session_sticky", "ttl", p.SessionStickyTTL},
-		{"admin", "checkin_log_keep_days", p.CheckinLogKeepDays},
-		{"", "request_log_keep_days", p.RequestLogKeepDays},
-	}
+	sets := managedSettingsFor(p)
 	// 上游段：由适配器给出它自己的键值（核心不认识这些键名，也不再列它们）。
 	if s.up != nil {
 		for k, v := range s.up.Values() {
@@ -469,12 +463,154 @@ func (s *settingsStore) persist(p admin.Settings) error {
 	return os.Rename(tmp, s.path)
 }
 
+// managedSettingsFor 受管设置清单：persist 与 options 镜像**共用这一份**。
+//
+// # 为什么必须是同一份
+//
+// 两份清单漂移的表现是「写进 config.json 的键」与「写进 options 的键」不再一一对应，
+// 而两边都不报错 —— 于是界面显示的值与库里存的值从此不同源，且没有任何地方会红。
+// 本仓已经被同一个形态咬过一次（admin 的 runtime/restart 清单漂移，见
+// internal/admin/settings.go 里 restartRequiredFields 的注释），所以这里从 persist 里
+// 把它抽出来给两处用，而不是各写一份。
+//
+// section 为空串表示**顶层键**（request_log_keep_days）。
+func managedSettingsFor(p admin.Settings) []managedSetting {
+	return []managedSetting{
+		{"schedule", "checkin_enabled", p.CheckinEnabled},
+		{"schedule", "keepalive_enabled", p.KeepaliveEnabled},
+		{"schedule", "checkin_hours", p.CheckinHours},
+		{"schedule", "keepalive_hours", p.KeepaliveHours},
+		{"cooldown", "soft_rate", p.SoftRate},
+		{"upstream", "timeout_seconds", p.UpstreamTimeoutSec},
+		{"upstream", "header_timeout_seconds", p.UpstreamHeaderTimeout},
+		{"upstream", "idle_timeout_seconds", p.UpstreamIdleTimeout},
+		{"pool", "max_in_flight", p.PoolMaxInFlight},
+		{"pool", "breaker_threshold", p.BreakerThreshold},
+		{"pool", "breaker_cooldown", p.BreakerCooldown},
+		{"pool", "breaker_cooldown_max", p.BreakerCooldownMax},
+		{"pool", "revive_probe_interval_seconds", p.ReviveProbeHours * 3600},
+		{"features", "sanitize_blacklist_fingerprints", p.SanitizeFingerprints},
+		{"upstash", "url", p.UpstashURL},
+		{"session_sticky", "enabled", p.SessionStickyEnabled},
+		{"session_sticky", "ttl", p.SessionStickyTTL},
+		{"admin", "checkin_log_keep_days", p.CheckinLogKeepDays},
+		{"", "request_log_keep_days", p.RequestLogKeepDays},
+	}
+}
+
+// optionKeyOf 把 (section, key) 拼成 options 的键 —— 与 config.json **摊平后**的
+// 点号路径逐字一致（internal/store 的 flattenConfigJSON："a.b.c"，顶层键没有点）。
+//
+// 不一致的表现很隐蔽：导入那一路写的是 "schedule.checkin_enabled"，而镜像写成
+// "checkin_enabled" ⇒ 同一个设置在库里有两行，读侧按其中一个键读就永远读不到新值。
+func optionKeyOf(section, key string) string {
+	if section == "" {
+		return key
+	}
+	return section + "." + key
+}
+
+// optionValueString 把受管值编成 options 里的字符串形态。
+//
+// 口径必须与 internal/store 的 flattenConfigJSON 一致（导入那一路用的就是它）：
+// 字符串原样、布尔 "true"/"false"、整数十进制、数组紧凑 JSON（"[7,19]"）。
+// 不一致的表现是「导入时是 [7,19]，保存一次之后变成 \"[7,19]\"（多一层引号）」，
+// 而读侧两种形态都"看得懂"，于是它不会报错，只会慢慢失真。
+func optionValueString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case int:
+		return strconv.Itoa(t)
+	default:
+		// 受管清单里只可能出现 int / bool / string / []int；[]int 走这里。
+		b, err := json.Marshal(v)
+		if err != nil {
+			// 到这一步说明清单加了新类型而没给它字符串形态。写成空串也不 panic，
+			// 但**必须**在日志里可见 —— 静默的空值是最难查的一种。
+			log.Printf("设置：受管值无法编码成 option 字符串（%T）: %v", v, err)
+			return ""
+		}
+		return string(b)
+	}
+}
+
+// seedOptionsFromConfig 首次把 config.json 的可导入键写进 options（幂等）。
+//
+// # 为什么是「只在键不存在时写」
+//
+// internal/store.ImportFromConfigJSON 用的是 INSERT ... ON CONFLICT DO NOTHING。
+// 反过来（每次启动都覆盖）的后果是：用户在界面上改过的值会在他下次重启时被悄悄
+// 冲回配置文件里的旧值，而他只会以为「界面保存没生效」。
+//
+// # 库还没接进来时是 no-op
+//
+// 返回 ErrNotOpen 就原样返回、**不置 optionsSeeded**：PLAN §6.0 的切换点（T11 把库
+// 接进宿主）之前，config.json 仍是唯一权威；一旦库打开了，下一次 Apply 会自动补做。
+func (s *settingsStore) seedOptionsFromConfig() {
+	s.optionsMu.Lock()
+	defer s.optionsMu.Unlock()
+	if s.optionsSeeded {
+		return
+	}
+	n, err := store.ImportFromConfigJSON(s.path)
+	switch {
+	case errors.Is(err, store.ErrNotOpen):
+		return // 库还没接进来；保持 false，下次再试
+	case err != nil:
+		log.Printf("设置：首次导入 options 失败（config.json 仍是权威）: %v", err)
+		return
+	}
+	s.optionsSeeded = true
+	if n > 0 {
+		log.Printf("设置：已把 config.json 的 %d 个可热改键首次导入 options", n)
+	}
+}
+
+// mirrorOptions 把本次保存的通用段镜像进 options 表。
+//
+// # 与 config.json 的关系
+//
+// config.json 仍是这次保存的**落盘处**（逐字节保留注释与陌生键，见 persist）；
+// options 是同一份值的 SQL 侧镜像，供设置页按名读、供将来的 SQL 聚合读。
+// 两处写的是**同一份清单**（managedSettingsFor），这就是它们不会漂移的保证。
+//
+// # 为什么失败不报错给调用方
+//
+// 走到这一步时 config.json 已经写成功了。此时把 PUT 判失败只会让用户以为「没保存」，
+// 而磁盘上其实已经落了 —— 那是个会诱发重复操作的假信号。所以这里只记日志。
+// 库没接（ErrNotOpen）时**静默**跳过：那是当前设计的正常状态，不是故障。
+//
+// # 上游段的边界
+//
+// 本函数只管**通用段**。上游段的键值形态由上游决定（可能不是标量），宿主不替它
+// 决定字符串形态；它们由 seedOptionsFromConfig 的摊平路径覆盖。
+func (s *settingsStore) mirrorOptions(p admin.Settings) {
+	s.seedOptionsFromConfig()
+	sets := managedSettingsFor(p)
+	pairs := make([]store.OptionPair, 0, len(sets))
+	for _, ms := range sets {
+		pairs = append(pairs, store.OptionPair{
+			Key:   optionKeyOf(ms.section, ms.key),
+			Value: optionValueString(ms.value),
+		})
+	}
+	if err := store.PutOptions(pairs); err != nil {
+		if errors.Is(err, store.ErrNotOpen) {
+			return
+		}
+		log.Printf("设置：写入 options 失败（config.json 已保存，JSON 仍是权威）: %v", err)
+	}
+}
+
 // newSettingsStore 组装宿主实现。
 //
 // up 是上游的设置扩展适配器（可为 nil —— 该上游没有专属设置）。
 func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler, up UpstreamSettings,
 	log *checkinlog.Log, setLogKeepDays func(int)) admin.SettingsStore {
-	return &settingsStore{
+	st := &settingsStore{
 		path:           path,
 		cfg:            cfg,
 		sch:            sch,
@@ -482,4 +618,7 @@ func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler, up Ups
 		log:            log,
 		setLogKeepDays: setLogKeepDays,
 	}
+	// 首次启动把 config.json 的可热改键导入 options（幂等；未接库时是 no-op）。
+	st.seedOptionsFromConfig()
+	return st
 }

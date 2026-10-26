@@ -122,6 +122,11 @@ type Ring struct {
 	// sink 可选的落盘目标（nil = 只留在内存）。写盘刻意放在锁外：
 	// 文件 IO 不能拖着所有请求一起等。
 	sink *Sink
+
+	// sql 可选的落库目标（nil = 不双写）。与 sink 一样在锁外非阻塞入队，
+	// 由后台 goroutine 落 logs 表 —— 见 sqlsink.go（有界队列 / 失败隔离 /
+	// 丢日志不丢请求）。
+	sql *sqlSink
 }
 
 // New 构造容量为 capacity 的环形缓冲；capacity<=0 时取 DefaultCapacity。
@@ -181,10 +186,15 @@ func (r *Ring) Push(e Entry) int64 {
 		r.full = true
 	}
 	sink := r.sink
+	sql := r.sql
 	r.mu.Unlock()
 
 	if sink != nil {
 		sink.Append(e)
+	}
+	if sql != nil {
+		// 非阻塞：队列满即丢弃并计数（sqlsink.go 第 2 条硬约束）。
+		sql.enqueue(e)
 	}
 	return e.Seq
 }

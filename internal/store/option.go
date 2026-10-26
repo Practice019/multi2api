@@ -84,6 +84,49 @@ func PutOption(key, value string) error {
 	return upsertOptionTx(DB, key, value)
 }
 
+// OptionPair 一条 option 的键与值。
+type OptionPair struct {
+	Key   string
+	Value string
+}
+
+// PutOptions 在一个**事务**里写多条（存在则改值）。
+
+// # 为什么不循环调 PutOption
+
+// 设置页一次保存会写十几条（见 cmd/server 的受管清单）。逐条写的话，中途一条失败
+// 会留下「一半新值、一半旧值」的 options —— 读侧看到的是一份自相矛盾的配置，
+// 而且没有任何报错指向它。事务保证要么全上、要么全不上。
+//
+// # 校验放在开事务之前
+
+// 键形态与值长度先**全部**校验完再进事务：非法输入不该先写进去一半再回滚
+// （回滚是最后一道保险，不是第一道）。
+func PutOptions(pairs []OptionPair) error {
+	if DB == nil {
+		return ErrNotOpen
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+	for _, p := range pairs {
+		if err := validateOptionKey(p.Key); err != nil {
+			return err
+		}
+		if len(p.Value) > optionMaxValueLen {
+			return fmt.Errorf("%w：值长度 %d 超过上限 %d", ErrBadOption, len(p.Value), optionMaxValueLen)
+		}
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		for _, p := range pairs {
+			if err := upsertOptionTx(tx, p.Key, p.Value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // OptionExists 报告某个键在库里有没有（导入时用它决定"跳过还是写"）。
 //
 // 单独暴露是因为"存在性"与"值"是两件事：导入要判断的是前者，而读值会得到
@@ -345,7 +388,15 @@ func stripJSONComments(raw []byte) []byte {
 			out = append(out, c)
 			continue
 		}
-		if c == '/' && i+1 < len(raw) {
+		if c == '/' && i+1 < len(raw) && (raw[i+1] == '/' || raw[i+1] == '*') {
+			// 注释**前面**的空白是「给注释留的位置」：注释被删掉之后它就成了
+			// 一段多余的空格（`{ // note` 会留下 `{ `，`{ /* a` 会留下 `{  `）。
+			// 这里把它一并去掉 —— 但**只去空格与制表符，不碰换行**：
+			// 换行是留给报错行号的（见下面「保留换行」那句），去掉它会让
+			// 解析报错的行号与用户文件里的行号对不上。
+			for len(out) > 0 && (out[len(out)-1] == ' ' || out[len(out)-1] == '\t') {
+				out = out[:len(out)-1]
+			}
 			if raw[i+1] == '/' {
 				for i < len(raw) && raw[i] != '\n' {
 					i++
@@ -356,14 +407,12 @@ func stripJSONComments(raw []byte) []byte {
 				}
 				continue
 			}
-			if raw[i+1] == '*' {
-				i += 2
-				for i+1 < len(raw) && !(raw[i] == '*' && raw[i+1] == '/') {
-					i++
-				}
-				i++ // 跳过结尾的 '/'
-				continue
+			i += 2
+			for i+1 < len(raw) && !(raw[i] == '*' && raw[i+1] == '/') {
+				i++
 			}
+			i++ // 跳过结尾的 '/'
+			continue
 		}
 		out = append(out, c)
 	}

@@ -17,11 +17,13 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 
 	"workbuddy2api/internal/apikey"
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/modelmap"
+	"workbuddy2api/internal/store"
 )
 
 // channelsStore 取渠道存储；nil = 未启用该功能。
@@ -326,4 +328,155 @@ func newChannelID() string {
 		return "ch-fallback"
 	}
 	return "ch-" + hex.EncodeToString(b[:])
+}
+
+// ---------------------------------------------------------------------------
+// T08：channels + abilities 的反向 seed（PLAN-hyxapi-alignment §4 T08）
+// ---------------------------------------------------------------------------
+
+// RegistryChannelSeeds 是 cmd/server/main.go **13 处 registry.Register** 的反向清单。
+//
+// # 一个条目 = 一个注册点，不是一个上游
+//
+// ⚠ 这里**绝不能**按 provider ID / 上游实现去重。main.go:275 的 wb 与 :347 的
+// wbIntl 是同一个上游（WorkBuddy）的两个渠道实例（:347 注释原文「海外版
+// WorkBuddy AI（workbuddy-intl 渠道实例）」），两者只有 ID 与授权站点不同：
+//
+//	workbuddy       copilot.tencent.com（国内版）
+//	workbuddy-intl  www.workbuddy.ai   （海外版）
+//
+// 若把清单写成 map[上游]=一条（例如按 internal/workbuddy 的 ProviderID 常量，
+// 两个实例都来自那个包），13 个注册点会塌成 12 条甚至 1 条，而"上游在跑、
+// channels 表里只有一半渠道"是那种**没有任何报错**的故障。
+// 所以这里是**切片**（注册顺序），身份由 store 侧的 (Provider, BaseURL) 判定。
+//
+// # 为什么是 13 条（而不是 12 个上游包 + openaicompat）
+//
+// main.go 里的 registry.Register 调用点共 13 处：
+//
+//	:275 workbuddy  :347 workbuddy-intl  :433 codearts   :523 loomy
+//	:609 trae       :664 cline           :711 raccoon    :781 lobsterai
+//	:861 qoder      :890 qodercn         :979 zcode      :1012 minimax
+//	:1058 monkeycode
+//
+// ⚠ internal/openaicompat 是**第 12 个上游包但不进 registry**：它作为「渠道工厂」
+// 注入 main.go:1535-1537（admin.Config.ChannelProvider）与 :1666-1668
+// （server.Config.ChannelProvider），在用户新建 Key 型渠道时按 (id, base_url)
+// 现造一个 Provider。所以它**没有**注册点、也**不该**在渠道表里占一行 ——
+// 它的行由渠道页的 CRUD 产生（走 channelstore）。本清单因此是 13 而不是 14。
+//
+// # BaseURL 的取值口径
+//
+// 账号型上游的推理基址常常是**按凭证/账号**推导的（workbuddy 的域来自凭证的
+// channel 字段、zcode 按 platform 选 origin），这里填的是该注册点**实例身份**
+// 的那个站点 —— 也就是"两个同上游实例靠什么区分"。取值来源已逐个核对：
+//
+//	copilot.tencent.com          config.go 的 admin.oauth_base_url 默认值（:1196/:1435）
+//	www.workbuddy.ai             config.go 的 workbuddy_intl 默认值（:1568）
+//	codearts.huaweicloud.com     codearts.DefaultPortalBase
+//	loomyad.xunfei.cn/api/v1     loomy.DefaultBaseURL
+//	trae-api-cn.mchost.guru      trae.AgentHost（对话/模型端点）
+//	api.cline.bot                cline.DefaultAPIBase
+//	xiaohuanxiong.com            raccoon.DefaultAPIBase
+//	lobsterai-server.youdao.com  lobsterai.DefaultAPIBase
+//	api2.qoder.sh                qoder 国际版 EncryptedInferBase 默认（config.go:858 注释）
+//	gateway.qoder.com.cn         qoder 中国版 InferBase（qoder.go:147）
+//	zcode.z.ai/api/v1            zcode OAuthBase 官方线上（zcode/client.go:46）
+//	agent.minimax.cn             minimax apiHost
+//	monkeycode-ai.com            monkeycode hostCN（client.go:35）
+//
+// # Models 为什么一律留空
+//
+// 隔一条：模型目录是**运行时事实**（账号型上游要活凭证打上游接口才拿得到），
+// 而启动期没有、也不该发上游请求（W1 硬约束：不探测、不发请求）。
+// 把一张过期的静态模型表写死进 seed，等于制造一个"界面说有、请求却 404"的
+// 第二真相源 —— 那是渠道页历史上修过的一类事故。能力行改由两条路展开：
+//
+//	渠道自己声明了模型（ChannelSeed.Models，非默认清单的调用方）
+//	目录就绪后 store.ExpandAbilitiesFromCatalog（T09 的 models/vendors）
+func RegistryChannelSeeds() []store.ChannelSeed {
+	return []store.ChannelSeed{
+		{Provider: "workbuddy", BaseURL: "https://copilot.tencent.com", Source: "cmd/server/main.go:275"},
+		{Provider: "workbuddy-intl", BaseURL: "https://www.workbuddy.ai", Source: "cmd/server/main.go:347"},
+		{Provider: "codearts", BaseURL: "https://codearts.huaweicloud.com", Source: "cmd/server/main.go:433"},
+		{Provider: "loomy", BaseURL: "https://loomyad.xunfei.cn/api/v1", Source: "cmd/server/main.go:523"},
+		{Provider: "trae", BaseURL: "https://trae-api-cn.mchost.guru", Source: "cmd/server/main.go:609"},
+		{Provider: "cline", BaseURL: "https://api.cline.bot", Source: "cmd/server/main.go:664"},
+		{Provider: "raccoon", BaseURL: "https://xiaohuanxiong.com", Source: "cmd/server/main.go:711"},
+		{Provider: "lobsterai", BaseURL: "https://lobsterai-server.youdao.com", Source: "cmd/server/main.go:781"},
+		{Provider: "qoder", BaseURL: "https://api2.qoder.sh", Source: "cmd/server/main.go:861"},
+		{Provider: "qodercn", BaseURL: "https://gateway.qoder.com.cn", Source: "cmd/server/main.go:890"},
+		{Provider: "zcode", BaseURL: "https://zcode.z.ai/api/v1", Source: "cmd/server/main.go:979"},
+		{Provider: "minimax", BaseURL: "https://agent.minimax.cn", Source: "cmd/server/main.go:1012"},
+		{Provider: "monkeycode", BaseURL: "https://monkeycode-ai.com", Source: "cmd/server/main.go:1058"},
+	}
+}
+
+// SeedSQLChannels 把 13 个注册点反向 seed 进 channels/abilities 两张表。
+//
+// # 调用时机与调用方
+//
+// 由 cmd/server 在 `store.Open` + `store.Migrate` 成功之后调用（T11 的注入点）。
+// 可重复调用：第二次命中已有行（Created=0、Matched=13），不需要另写"是否首启"的判据。
+//
+// # 为什么 seed 的是"注册点"而不是"本次启用的上游"
+//
+// 清单来自代码事实（13 处调用）而不是配置事实（哪些 enabled=true）。于是：
+//
+//	配置关闭某上游 → 该行仍然存在（渠道是"有这条渠道、只是现在没流量"）
+//	代码新增注册点 → 下一次启动多一行（并靠 ChannelSeedGaps 提醒清单是否漏登记）
+//
+// 反过来（只 seed 启用的上游）会让"表里有几行"随配置抖动，计数判据就失去意义。
+//
+// # 能力行
+//
+// 先展开清单里显式声明的模型（默认清单为空，见 RegistryChannelSeeds），
+// 再按 T09 的两级目录（vendor = provider id）做一次「模型↔渠道」展开。
+// 目录为空时这一步是 0，不是错误 —— 账号型上游的目录要活凭证才有。
+func (h *Handler) SeedSQLChannels() (store.ChannelSeedStats, error) {
+	var st store.ChannelSeedStats
+	if store.DB == nil {
+		return st, store.ErrNotOpen
+	}
+	st, err := store.SeedChannels(RegistryChannelSeeds())
+	if err != nil {
+		return st, err
+	}
+	n, aerr := store.ExpandAbilitiesFromCatalog(store.AbilityDefaultGroup)
+	if aerr != nil {
+		// 能力展开失败**不**让渠道 seed 失败：渠道行已经落库且可用，
+		// 而目录/能力是下一层的事（T09）。如实记一行日志即可。
+		log.Printf("admin: 渠道 seed 完成，但按目录展开能力行失败: %v", aerr)
+	} else {
+		st.Abilities += n
+	}
+	if gaps := h.ChannelSeedGaps(); len(gaps) > 0 {
+		log.Printf("admin: 注册表里有渠道 seed 清单没有的 provider: %v —— "+
+			"main.go 加了 registry.Register 但忘了登记 RegistryChannelSeeds？", gaps)
+	}
+	return st, nil
+}
+
+// ChannelSeedGaps 返回「注册表里有、渠道 seed 清单里没有」的 provider ID（升序）。
+//
+// 这是把清单与真实注册表**对起来**的那条守卫：清单是手写的，而
+// registry.Register 是真发生的。两者一旦漂移，症状是"某个上游在跑，
+// 渠道页/渠道表里却没有它" —— 没有任何报错。
+// 它只报告、不阻断启动（注册表为 nil 的测试路径返回空）。
+func (h *Handler) ChannelSeedGaps() []string {
+	if h.cfg.Registry == nil {
+		return nil
+	}
+	known := make(map[string]bool, 13)
+	for _, s := range RegistryChannelSeeds() {
+		known[s.Provider] = true
+	}
+	var gaps []string
+	for _, id := range h.cfg.Registry.IDs() {
+		if !known[id] {
+			gaps = append(gaps, id)
+		}
+	}
+	sort.Strings(gaps)
+	return gaps
 }

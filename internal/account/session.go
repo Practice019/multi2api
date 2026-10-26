@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"workbuddy2api/internal/store"
 )
 
 // CookieName 承载会话 ID 的 Cookie 名。
@@ -87,12 +89,27 @@ type Session struct {
 	//
 	// new-api 用 (user_auth_version, session_version) 两个字段做乐观并发，
 	// 我们单进程，只需要"知道自己的版本已升过"这一件事。
+	//
+	// ⚠ SQL 后端**没有这一列**（store.UserSession 只有 9 列，见
+	// cmd/migrate-sql/main.go:106-120 记录的同一处缺口），所以 SQL 模式下它
+	// 是**读出来重建**的：每次从库里读都从 1 起，AdvanceAuthVersion 自增后
+	// 返回 2。全仓没有任何生产代码读它（只有 JSON 模式的测试断言它的算术），
+	// 真正挡会话的是 AuthVersion —— 那个是持久化的。
 	Version int64 `json:"version"`
 
 	CreatedAt    int64 `json:"created_at"`     // unix 秒
 	LastActiveAt int64 `json:"last_active_at"` // unix 秒
 	ExpiresAt    int64 `json:"expires_at"`     // unix 秒（滑动）
 	// HardExpiresAt 绝对上限，签发时定死、续期不改。
+	//
+	// ⚠ SQL 后端同样没有这一列，但它是**可推导**的：本仓唯一签发点 Issue 写的是
+	// HardExpiresAt = CreatedAt + SessionMaxLifetime（两者同一个 now）。所以 SQL
+	// 模式下按 CreatedAt 重算 —— 对由本仓签发的会话是**无损**的（已用真实
+	// data/sessions.json 逐行核对：hard == created_at + 2592000）。
+	//
+	// 导入时若发现盘上某行的 hard_expires_at **早于**推导值，那一行的"更早的
+	// 绝对上限"在 9 列契约里无法表达，导入会**延长**它的寿命（安全退化）——
+	// 这种行按"跳过 + 记日志"处置，逼用户重新登录，而不是悄悄放宽。
 	HardExpiresAt int64 `json:"hard_expires_at"`
 
 	IP string `json:"ip,omitempty"`
@@ -134,26 +151,47 @@ func stampOf(unix int64) string {
 	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
 }
 
-// SessionStore 会话的进程内权威 + JSON 持久化。
+// SessionStore 会话的进程内权威 + 持久化后端（SQL 优先，JSON 兼容）。
+//
+// # 2026-10-26（T04b）：后端由 JSON 换成 internal/store
+//
+// 与 account.Store 同一套裁定与同一套双模（见 store.go 的长注释）：
+//
+//	store.DB == nil   → JSON 后端：与改造前逐字节同行为（本包测试走这条）
+//	store.DB != nil   → SQL 后端；NewSessionStore 把 sessions.json **只补缺**
+//	                    地导入一次（只导入不删除），之后 JSON 不再被写回
 //
 // # 为什么落盘（用户明确不想重启就掉线）
 //
 // 纯内存的话，进程一重启所有人的浏览器都回到登录页 —— 而"重启"在这台
-// 机器上是很常见的动作（换二进制、改配置）。落盘让会话跨重启存活，
-// 代价是磁盘上多一份会话文件（权限 0600，只含随机 SID，不含口令）。
+// 机器上是很常见的动作（换二进制、改配置）。落盘让会话跨重启存活。
+//
+// # 9 列契约装不下的两样东西（不撒谎，写在这里）
+//
+//	Version        读出来重建（没有读取点，见 Session.Version 注释）
+//	HardExpiresAt  按 CreatedAt + SessionMaxLifetime 推导（无损，见该字段注释）
+//
+// username / role 在 SQL 模式下由 Lookup 从 users 表回填（本仓用户名与角色
+// 不可变）—— 这与 cmd/migrate-sql 导出时的回填口径一致。
 type SessionStore struct {
 	path string
 
 	mu       sync.Mutex
-	sessions map[string]*Session // sid → 会话
+	sessions map[string]*Session // sid → 会话（JSON 后端的权威；SQL 模式只作导入源）
 	// issued 每账号最近的签发时刻（进程内，不持久化）：签发频率限制用。
 	issued map[string][]int64
+	// imported 记录首启导入是否已成功完成（幂等标记）。
+	imported bool
 }
 
 // NewSessionStore 加载（或初始化）会话库。
 //
 // 启动时**顺手清理**已过期会话：不清理的话文件会随历史会话一直长，
 // 而里面每一条都是"曾经有效的登录态"（虽然过期了，仍不该留着）。
+//
+// ⚠ SQL 后端的导入**不筛过期**（与 cmd/migrate-sql 的 importSessions 一致）：
+// 导入的语义是"把盘上的行搬进库"，行数必须与文件元素数对得上；清理是另一个
+// 动作，由既有的 Cleanup（main.go 启动时调用）负责，删掉多少行是它自己报的。
 func NewSessionStore(path string) (*SessionStore, error) {
 	s := &SessionStore{
 		path:     path,
@@ -163,7 +201,13 @@ func NewSessionStore(path string) (*SessionStore, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err := s.saveLocked(); err != nil {
+			// JSON 权威期落一个空文件（用户备份时找得到）；SQL 权威期不写回 JSON。
+			if store.DB == nil {
+				if err := s.saveLocked(); err != nil {
+					return nil, err
+				}
+			}
+			if err := s.activateSQL(); err != nil {
 				return nil, err
 			}
 			return s, nil
@@ -171,6 +215,9 @@ func NewSessionStore(path string) (*SessionStore, error) {
 		return nil, fmt.Errorf("读取会话库: %w", err)
 	}
 	if len(raw) == 0 {
+		if err := s.activateSQL(); err != nil {
+			return nil, err
+		}
 		return s, nil
 	}
 	var arr []*Session
@@ -185,15 +232,143 @@ func NewSessionStore(path string) (*SessionStore, error) {
 		if sess == nil || sess.SID == "" || sess.UserID == "" {
 			continue
 		}
-		if sess.ExpiresAt <= now || (sess.HardExpiresAt > 0 && sess.HardExpiresAt <= now) {
+		if expiredAt(sess, now) {
 			continue // 过期的不加载，等于顺手清理
 		}
 		s.sessions[sess.SID] = sess
 	}
+	if err := s.activateSQL(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
-// saveLocked 原子写盘。调用方必须持锁。
+// activateSQL 在 store.DB 已打开时完成一次性导入（幂等）。DB 没打开时什么都不做。
+func (s *SessionStore) activateSQL() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if store.DB == nil {
+		return nil
+	}
+	return s.importLocked()
+}
+
+// sqlBackend 报告本次调用该走哪个后端（调用方必须持锁）。理由同 account.Store。
+func (s *SessionStore) sqlBackend() bool {
+	if store.DB == nil {
+		return false
+	}
+	if !s.imported {
+		if err := s.importLocked(); err != nil {
+			log.Printf("[account] ⚠ 会话首启导入失败（仍按 SQL 后端工作，下次调用重试）: %v", err)
+		}
+	}
+	return true
+}
+
+// importLocked 把 sessions.json 的行**只补缺**地写进 user_sessions（调用方持锁）。
+//
+// # 为什么读的是文件而不是内存里的 s.sessions
+//
+// 内存那份已经把过期行滤掉了（见 NewSessionStore），而导入的口径是"盘上有几行
+// 就补几行"。两者不一致会让"sessions 行数 == 文件元素数"这条判据在有过期会话
+// 的库上永远不成立。所以这里**重新读一遍文件**。
+func (s *SessionStore) importLocked() error {
+	if s.imported {
+		return nil
+	}
+	raw, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.imported = true
+			return nil
+		}
+		return fmt.Errorf("首启导入会话库（读 %s）: %w", s.path, err)
+	}
+	if len(raw) == 0 {
+		s.imported = true
+		return nil
+	}
+	var arr []*Session
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		// 文件损坏时**不导入**、也不标记完成（下一次调用再试）：
+		// 静默当成"没有会话"会让所有人以为自己的登录态还在。
+		return fmt.Errorf("首启导入会话库（解析 %s）: %w", s.path, err)
+	}
+	rows := make([]store.UserSession, 0, len(arr))
+	skippedHard := 0
+	for _, sess := range arr {
+		if sess == nil || strings.TrimSpace(sess.SID) == "" || strings.TrimSpace(sess.UserID) == "" {
+			continue // 与 migrate-sql 同判据：sid / user_id 为空的行进不了库
+		}
+		derived := hardExpiryOf(sess.CreatedAt)
+		if sess.HardExpiresAt > 0 && sess.HardExpiresAt < derived {
+			// 盘上的绝对上限比推导值更早 ⇒ 9 列契约表达不了它，导入等于放宽寿命。
+			skippedHard++
+			log.Printf("[account] ⚠ 会话 %s… 的 hard_expires_at=%d 早于推导值 %d（created_at+30d）："+
+				"9 列契约表达不了，**不导入**（宁可让该用户重新登录，也不放宽绝对上限）",
+				sess.SID[:min(8, len(sess.SID))], sess.HardExpiresAt, derived)
+			continue
+		}
+		rows = append(rows, storeRowFromSession(sess))
+	}
+	n, err := store.ImportUserSessionsIfAbsent(rows)
+	if err != nil {
+		return fmt.Errorf("首启导入会话库: %w", err)
+	}
+	s.imported = true
+	if n > 0 || skippedHard > 0 {
+		log.Printf("account: 首启导入 %d 条会话 → user_sessions 表（只导入不删除，%s 原样保留；"+
+			"因绝对上限无法表达而跳过 %d 条）", n, s.path, skippedHard)
+	}
+	return nil
+}
+
+// hardExpiryOf 由 CreatedAt 推导绝对上限（SQL 后端没有 hard_expires_at 列）。
+//
+// 无损的前提是本仓唯一签发点 Issue 的写法：HardExpiresAt = CreatedAt + 30d。
+// 真实 data/sessions.json 的 2 行逐行核对过（hard == created_at + 2592000）。
+func hardExpiryOf(created int64) int64 {
+	if created <= 0 {
+		return 0
+	}
+	return created + int64(SessionMaxLifetime/time.Second)
+}
+
+// storeRowFromSession 投影成 user_sessions 的一行（丢掉 Version，不写 Status）。
+func storeRowFromSession(sess *Session) store.UserSession {
+	return store.UserSession{
+		ID:           sess.SID,
+		UserID:       sess.UserID,
+		AuthVersion:  sess.AuthVersion,
+		CreatedAt:    sess.CreatedAt,
+		LastActiveAt: sess.LastActiveAt,
+		ExpiresAt:    sess.ExpiresAt,
+		IP:           sess.IP,
+		UserAgent:    sess.UA,
+		Status:       0, // 0=有效（见 models.go 对该列的契约）
+	}
+}
+
+// sessionFromStoreRow 反向投影。Username/Role 留空，由 Lookup 从 users 表回填。
+func sessionFromStoreRow(row *store.UserSession) *Session {
+	if row == nil {
+		return nil
+	}
+	return &Session{
+		SID:           row.ID,
+		UserID:        row.UserID,
+		AuthVersion:   row.AuthVersion,
+		Version:       1, // 见 Session.Version 注释：无列可存，读出即重建
+		CreatedAt:     row.CreatedAt,
+		LastActiveAt:  row.LastActiveAt,
+		ExpiresAt:     row.ExpiresAt,
+		HardExpiresAt: hardExpiryOf(row.CreatedAt),
+		IP:            row.IP,
+		UA:            row.UserAgent,
+	}
+}
+
 // saveOrLog 落盘并记录失败（2026-10-20，review 抓到）。
 //
 // ⚠ 这里最严重的一处是 Revoke：内存里删了 session、磁盘没写
@@ -202,14 +377,21 @@ func NewSessionStore(path string) (*SessionStore, error) {
 //
 // ⚠ Revoke / RevokeOthers / Cleanup 的签名返回 bool/int/void，改签名会连带改所有
 // 上游调用点；所以这里**至少留下明确的错误日志**，让"落盘失败"可查。
-// 之前的形态是：磁盘满了半个月，用户注销了一次次失效，日志里一个字都没有。
 func (s *SessionStore) saveOrLog(scene string) {
 	if err := s.saveLocked(); err != nil {
 		log.Printf("[account] ⚠ session 落盘失败（%s）: %v —— 内存已生效但磁盘未写入。"+
 			"若这是 Revoke，重启后该 session 会复活，务必排查磁盘/权限", scene, err)
 	}
 }
+
+// saveLocked 原子写盘。调用方必须持锁。
+//
+// ⚠ SQL 权威期不许再调用它（会把内存态写回 JSON，形成第二个真相源），
+// 用一条显式 guard 把误用变成**响亮的错误**。
 func (s *SessionStore) saveLocked() error {
+	if store.DB != nil {
+		return errors.New("account: SQL 权威期不允许写回 sessions.json（PLAN 6.0）")
+	}
 	arr := make([]*Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		arr = append(arr, sess)
@@ -246,6 +428,17 @@ func newSID() string {
 	return hex.EncodeToString(buf[:])
 }
 
+// expiredAt 报告一条会话在 now 是否已过期（滑动窗口或绝对上限）。
+//
+// 抽成函数是因为 JSON 与 SQL 两条后端、以及 Cleanup/Lookup/Advance 三处都要
+// 用同一份判据 —— 复制三遍必然有一遍写漏 HardExpiresAt。
+func expiredAt(sess *Session, now int64) bool {
+	if sess.ExpiresAt <= now {
+		return true
+	}
+	return sess.HardExpiresAt > 0 && sess.HardExpiresAt <= now
+}
+
 // Issue 给账号签发一条新会话。
 //
 // 顺序：先查签发频率与在线数量（超限直接拒），再生成 SID 落盘。
@@ -271,6 +464,10 @@ func (s *SessionStore) Issue(u *User, ip, ua string) (*Session, error) {
 		s.issued[u.ID] = hist
 		return nil, fmt.Errorf("%w：%s 在 %s 内签发次数过多",
 			ErrSessionLimit, u.Username, issuanceWindow)
+	}
+
+	if s.sqlBackend() {
+		return s.issueSQL(u, ip, ua, now, hist)
 	}
 
 	// 同时在线数量：超了先踢最久没活动的
@@ -310,6 +507,48 @@ func (s *SessionStore) Issue(u *User, ip, ua string) (*Session, error) {
 	return copySession(sess), nil
 }
 
+// issueSQL 是 Issue 的 SQL 分支（调用方已持锁并完成签发频率检查）。
+//
+// 与 JSON 分支的唯一语义差别："踢最久没活动的那条"变成按 last_active_at 排序后
+// 逐条 DELETE —— 判定与删除都在库里，不经过内存表。
+func (s *SessionStore) issueSQL(u *User, ip, ua string, now int64, hist []int64) (*Session, error) {
+	mine, err := store.ListUserSessionsByUser(u.ID) // last_active_at DESC
+	if err != nil {
+		return nil, err
+	}
+	if len(mine) >= MaxSessionsPerUser {
+		toKick := len(mine) - MaxSessionsPerUser + 1
+		kicked := 0
+		for i := len(mine) - 1; i >= 0 && kicked < toKick; i-- {
+			if _, err := store.DeleteUserSession(mine[i].ID); err != nil {
+				return nil, err
+			}
+			kicked++
+		}
+	}
+
+	sess := &Session{
+		SID:           newSID(),
+		UserID:        u.ID,
+		Username:      u.Username,
+		Role:          u.Role,
+		AuthVersion:   u.AuthVersion,
+		Version:       1,
+		CreatedAt:     now,
+		LastActiveAt:  now,
+		ExpiresAt:     now + int64(SessionTTL/time.Second),
+		HardExpiresAt: now + int64(SessionMaxLifetime/time.Second),
+		IP:            strings.TrimSpace(ip),
+		UA:            strings.TrimSpace(ua),
+	}
+	row := storeRowFromSession(sess)
+	if err := store.CreateUserSession(&row); err != nil {
+		return nil, err
+	}
+	s.issued[u.ID] = append(hist, now)
+	return copySession(sess), nil
+}
+
 // touchThreshold 滑动续期的落盘阈值。
 //
 // 每个请求都落盘代价太大（一次磁盘写），但完全不落盘会让"最后活动时间"
@@ -336,12 +575,19 @@ func (s *SessionStore) Lookup(sid string, accounts *Store) (*Session, *User, err
 	now := time.Now().Unix()
 
 	s.mu.Lock()
+	useSQL := s.sqlBackend()
+	s.mu.Unlock()
+	if useSQL {
+		return s.lookupSQL(sid, accounts, now)
+	}
+
+	s.mu.Lock()
 	sess := s.sessions[sid]
 	if sess == nil {
 		s.mu.Unlock()
 		return nil, nil, ErrSessionNotFound
 	}
-	if sess.ExpiresAt <= now || (sess.HardExpiresAt > 0 && sess.HardExpiresAt <= now) {
+	if expiredAt(sess, now) {
 		delete(s.sessions, sid)
 		s.saveOrLog("Lookup-expired")
 		s.mu.Unlock()
@@ -361,10 +607,59 @@ func (s *SessionStore) Lookup(sid string, accounts *Store) (*Session, *User, err
 	snapshot := copySession(sess)
 	s.mu.Unlock()
 
+	return finishLookup(s, snapshot, accounts)
+}
+
+// lookupSQL 是 Lookup 的 SQL 分支。
+//
+// 续期的落盘策略与 JSON 分支一致（超过 touchThreshold 才写库）；
+// Username/Role 由 users 表回填（9 列契约里没有它们，见文件头）。
+func (s *SessionStore) lookupSQL(sid string, accounts *Store, now int64) (*Session, *User, error) {
+	s.mu.Lock()
+	row, err := store.GetUserSessionByID(sid)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, nil, err
+	}
+	if row == nil {
+		s.mu.Unlock()
+		return nil, nil, ErrSessionNotFound
+	}
+	sess := sessionFromStoreRow(row)
+	if expiredAt(sess, now) {
+		if _, err := store.DeleteUserSession(sid); err != nil {
+			log.Printf("[account] ⚠ 删除过期会话失败（%s）: %v", sid, err)
+		}
+		s.mu.Unlock()
+		return nil, nil, ErrSessionExpired
+	}
+	next := now + int64(SessionTTL/time.Second)
+	if sess.HardExpiresAt > 0 && next > sess.HardExpiresAt {
+		next = sess.HardExpiresAt
+	}
+	needSave := next-sess.ExpiresAt >= int64(touchThreshold/time.Second)
+	sess.ExpiresAt = next
+	sess.LastActiveAt = now
+	if needSave {
+		if err := store.TouchUserSession(sid, now, next); err != nil {
+			log.Printf("[account] ⚠ 会话续期未落库（Lookup）: %v", err)
+		}
+	}
+	snapshot := copySession(sess)
+	s.mu.Unlock()
+
+	return finishLookup(s, snapshot, accounts)
+}
+
+// finishLookup 是两条后端共用的后半段：账号侧的四条判据（③ 与 ④）。
+//
+// ⚠ 放在这里而不是各写一遍：这段的顺序就是安全语义（见 Lookup 注释），
+// 两份实现迟早会漂移。
+func finishLookup(s *SessionStore, snapshot *Session, accounts *Store) (*Session, *User, error) {
 	u := accounts.ByID(snapshot.UserID)
 	if u == nil {
 		// 账号没了 ⇒ 这条会话作废（顺手删掉）
-		s.Revoke(sid)
+		s.Revoke(snapshot.SID)
 		return nil, nil, ErrSessionRevoked
 	}
 	if !u.Enabled {
@@ -374,17 +669,24 @@ func (s *SessionStore) Lookup(sid string, accounts *Store) (*Session, *User, err
 		// ⚠ 2026-10-19 单账号口径（第 ③ 步的一部分）：
 		//
 		// 成员角色已取消 ⇒ 它的会话**不构成身份**。放在这里而不是只放在
-		// Authenticate：改造前签发的会话可能还躺在 data/sessions.json 里
-		// （或者账号文件回滚、被人为编辑过），只堵登录口的话，那条 cookie
-		// 仍能打开 `/ui`（`Identify` 走的就是 Lookup）—— 那就等于"成员面
-		// 通过一条旧 cookie 又活了"。
+		// Authenticate：改造前签发的会话可能还躺在库/文件里，只堵登录口的话，
+		// 那条 cookie 仍能打开 /ui（Identify 走的就是 Lookup）—— 那就等于
+		// "成员面通过一条旧 cookie 又活了"。
 		//
 		// 顺手把它撤掉：让这条 cookie 下次不再被当成"还在试"，也不必等过期。
-		s.Revoke(sid)
+		s.Revoke(snapshot.SID)
 		return nil, nil, ErrMemberRetired
 	}
 	if u.AuthVersion != snapshot.AuthVersion {
 		return nil, nil, ErrSessionRevoked
+	}
+	// SQL 后端的会话行没有 username/role 两列：用**实时**账号数据回填，
+	// 口径与 cmd/migrate-sql 导出时的回填一致（本仓用户名与角色不可变）。
+	if snapshot.Username == "" {
+		snapshot.Username = u.Username
+	}
+	if snapshot.Role == 0 {
+		snapshot.Role = u.Role
 	}
 	return snapshot, u, nil
 }
@@ -393,27 +695,57 @@ func (s *SessionStore) Lookup(sid string, accounts *Store) (*Session, *User, err
 //
 // # 这是"改口令/轮换之后当前浏览器不掉线"的正解
 //
-// 直接抄 new-api `model/user_session.go` 的 `AdvanceUserSessionAuthVersion`：
+// 直接抄 new-api model/user_session.go 的 AdvanceUserSessionAuthVersion：
 // 账号版本号 +1 会让**所有**旧会话失效，但那把执行改动的会话必须同步升到
 // 新版本，否则用户改完自己的口令就会立刻被自己踢下线（用户报障过：
 // "轮换之后网页加载失败，必须重启"）。
 //
 // 只升自己那一条：别的设备按设计失效（那正是"改口令要把别人踢掉"的意图）。
 func (s *SessionStore) AdvanceAuthVersion(sid string, nextAuthVersion int64) (*Session, error) {
+	now := time.Now().Unix()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.sqlBackend() {
+		row, err := store.GetUserSessionByID(sid)
+		if err != nil {
+			return nil, err
+		}
+		if row == nil {
+			return nil, ErrSessionNotFound
+		}
+		sess := sessionFromStoreRow(row)
+		if expiredAt(sess, now) {
+			if _, err := store.DeleteUserSession(sid); err != nil {
+				log.Printf("[account] ⚠ 删除过期会话失败（%s）: %v", sid, err)
+			}
+			return nil, ErrSessionExpired
+		}
+		if nextAuthVersion < row.AuthVersion {
+			// 版本回退不是我们能处理的场景（说明调用方拿错了值）。
+			return nil, fmt.Errorf("account: 会话版本不能回退（%d → %d）", row.AuthVersion, nextAuthVersion)
+		}
+		row.AuthVersion = nextAuthVersion
+		row.LastActiveAt = now
+		if err := store.SaveUserSession(row); err != nil {
+			return nil, err
+		}
+		sess.AuthVersion = nextAuthVersion
+		sess.LastActiveAt = now
+		sess.Version++ // 见 Session.Version 注释：SQL 模式下不持久化
+		return copySession(sess), nil
+	}
+
 	sess := s.sessions[sid]
 	if sess == nil {
 		return nil, ErrSessionNotFound
 	}
-	now := time.Now().Unix()
-	if sess.ExpiresAt <= now || (sess.HardExpiresAt > 0 && sess.HardExpiresAt <= now) {
+	if expiredAt(sess, now) {
 		delete(s.sessions, sid)
 		s.saveOrLog("AdvanceAuthVersion")
 		return nil, ErrSessionExpired
 	}
 	if nextAuthVersion < sess.AuthVersion {
-		// 版本回退不是我们能处理的场景（说明调用方拿错了值）。
 		return nil, fmt.Errorf("account: 会话版本不能回退（%d → %d）", sess.AuthVersion, nextAuthVersion)
 	}
 	sess.AuthVersion = nextAuthVersion
@@ -432,6 +764,14 @@ func (s *SessionStore) Revoke(sid string) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sqlBackend() {
+		n, err := store.DeleteUserSession(sid)
+		if err != nil {
+			log.Printf("[account] ⚠ 删除会话失败（Revoke %s）: %v", sid, err)
+			return false
+		}
+		return n > 0
+	}
 	if _, ok := s.sessions[sid]; !ok {
 		return false
 	}
@@ -444,6 +784,14 @@ func (s *SessionStore) Revoke(sid string) bool {
 func (s *SessionStore) RevokeOthers(userID, keepSID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sqlBackend() {
+		n, err := store.DeleteUserSessionsExcept(userID, keepSID)
+		if err != nil {
+			log.Printf("[account] ⚠ 批量删除会话失败（RevokeOthers user=%s）: %v", userID, err)
+			return 0
+		}
+		return int(n)
+	}
 	n := 0
 	for sid, sess := range s.sessions {
 		if sess.UserID == userID && sid != keepSID {
@@ -467,6 +815,25 @@ func (s *SessionStore) ListForUser(userID, currentSID string) []SessionView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
+	if s.sqlBackend() {
+		rows, err := store.ListUserSessionsByUser(userID)
+		if err != nil {
+			log.Printf("[account] ⚠ 列会话失败（ListForUser user=%s）: %v", userID, err)
+			return nil
+		}
+		out := make([]SessionView, 0, len(rows))
+		for i := range rows {
+			sess := sessionFromStoreRow(&rows[i])
+			if expiredAt(sess, now) {
+				continue
+			}
+			out = append(out, sessionView(sess, sess.SID == currentSID))
+		}
+		// 库里按 last_active_at DESC 出来；这里再按同一键稳定排一次，保证与
+		// JSON 分支的输出顺序一致（调用方与测试都依赖"最近活动在前"）。
+		sort.SliceStable(out, func(i, j int) bool { return out[i].LastActiveAt > out[j].LastActiveAt })
+		return out
+	}
 	out := make([]SessionView, 0, 4)
 	for _, sess := range s.sessions {
 		if sess.UserID != userID || sess.ExpiresAt <= now {
@@ -479,13 +846,29 @@ func (s *SessionStore) ListForUser(userID, currentSID string) []SessionView {
 }
 
 // Cleanup 删除已过期会话，返回删除条数（启动与定期调用）。
+//
+// SQL 分支要判两个过期来源：滑动窗口（expires_at 列）与绝对上限（没有列，
+// 只能按 created_at + SessionMaxLifetime 反推，见 hardExpiryOf）。
 func (s *SessionStore) Cleanup() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
+	if s.sqlBackend() {
+		n, err := store.DeleteExpiredUserSessions(now)
+		if err != nil {
+			log.Printf("[account] ⚠ 清理过期会话失败（Cleanup 滑动窗口）: %v", err)
+			return 0
+		}
+		hard, err := store.DeleteHardExpiredUserSessions(now - int64(SessionMaxLifetime/time.Second))
+		if err != nil {
+			log.Printf("[account] ⚠ 清理过期会话失败（Cleanup 绝对上限）: %v", err)
+			return int(n)
+		}
+		return int(n + hard)
+	}
 	n := 0
 	for sid, sess := range s.sessions {
-		if sess.ExpiresAt <= now || (sess.HardExpiresAt > 0 && sess.HardExpiresAt <= now) {
+		if expiredAt(sess, now) {
 			delete(s.sessions, sid)
 			n++
 		}
@@ -496,10 +879,26 @@ func (s *SessionStore) Cleanup() int {
 	return n
 }
 
-// Count 当前有效会话数（测试与状态展示用）。
+// Count 当前会话数（测试与状态展示用）。
+//
+// ⚠ 两条后端口径不同，写在这里免得被误用：
+//
+//	JSON 后端：内存里的条数（NewSessionStore 已滤掉过期行）
+//	SQL 后端：**库里的行数**（含尚未清理的过期行）
+//
+// 为什么不在 SQL 分支顺手过滤：那要把整表读进内存，而本方法只服务状态展示与
+// 测试；要"有效条数"请用 ListForUser（它过滤）或先 Cleanup。
 func (s *SessionStore) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sqlBackend() {
+		n, err := store.CountUserSessions()
+		if err != nil {
+			log.Printf("[account] ⚠ 数会话失败（Count）: %v", err)
+			return 0
+		}
+		return int(n)
+	}
 	return len(s.sessions)
 }
 
@@ -507,5 +906,13 @@ func (s *SessionStore) Count() int {
 func (s *SessionStore) BySID(sid string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sqlBackend() {
+		row, err := store.GetUserSessionByID(sid)
+		if err != nil {
+			log.Printf("[account] ⚠ 读会话失败（BySID）: %v", err)
+			return nil
+		}
+		return sessionFromStoreRow(row)
+	}
 	return copySession(s.sessions[sid])
 }

@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -205,14 +206,81 @@ func gormConfig() *gorm.Config {
 // 它只做**加法**：建表、加列、加索引。它**不会**删列、不会改列类型、不会回滚。
 // 所以「改字段类型」在本仓需要手写迁移步骤 —— 不要以为改了 struct 就完事
 // （GORM 会静默跳过）。
+// ⚠ 实现走 migrateAll：DDL 必须**串行**，否则多进程同时首启会撞建表竞态
+// （2026-10-26 修，见 migrateAll 的论证）。
 func Migrate() error {
 	if DB == nil {
 		return ErrNotOpen
 	}
-	if err := DB.AutoMigrate(allModels()...); err != nil {
+	if err := migrateAll(); err != nil {
 		return fmt.Errorf("store: 建表失败: %w", err)
 	}
 	return nil
+}
+
+// migrateAttempts / migrateRetryBackoff：见 migrateAll 的说明。
+const (
+	migrateAttempts     = 5
+	migrateRetryBackoff = 200 * time.Millisecond
+)
+
+// migrateAll 是 AutoMigrate 的**多进程安全**包装。
+//
+// # 为什么必须包一层事务（2026-10-26 修，实测红：TestInitializeSetupConcurrentProcesses）
+//
+// AutoMigrate 的每一步都是「先查在不在 → 不在就建」（TOCTOU）。N 个进程同时首启时，
+// 两个进程可以都判定「表不存在」，然后其中一个的 CREATE 撞上另一个刚建好的表 ——
+// 子进程以 `store: 建表失败` 退出（跨进程测试里表现为退出码 12）。
+//
+// 这**不是** busy_timeout 能覆盖的故障：建表竞态在重试语义上落在
+// SQLITE_BUSY / SNAPSHOT 那一类**不可靠重试**的错误上（与 dsnDefaults 里
+// _txlock 那段论证同源）。正确的修法是**让 DDL 本身串行**：
+//
+//	BEGIN IMMEDIATE（DSN 的 _txlock=immediate）→ 先拿到写锁才继续
+//	  ⇒ 同一时刻只有一个进程在迁移，其余进程在 busy_timeout(30s) 内等待
+//	  ⇒ 等到的进程进入事务后重新检查，看到的已是完整表结构，不再产生任何 DDL
+//
+// 这正是 dsnDefaults 里 _txlock=immediate 存在的原始理由（「先查再写」形态），
+// 只是迁移路径此前没有真的用上它（AutoMigrate 默认**不**开事务）。
+//
+// 外层再叠一层有限重试：万一等待超过 busy_timeout，或驱动给出别的瞬时错误，
+// 重试 AutoMigrate 是安全且幂等的（它只做加法：建表 / 加列 / 加索引）。
+func migrateAll() error {
+	var lastErr error
+	for attempt := 1; attempt <= migrateAttempts; attempt++ {
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			return tx.AutoMigrate(allModels()...)
+		})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == migrateAttempts || !isTransientMigrationErr(err) {
+			break
+		}
+		time.Sleep(migrateRetryBackoff * time.Duration(attempt))
+	}
+	return lastErr
+}
+
+// isTransientMigrationErr 判断迁移错误是否属于「等一下再来」那一类。
+//
+// 只认 SQLite 的锁 / 竞争字样，别的一律不重试 —— 把语法错、磁盘满这类确定性失败
+// 也重试 5 次，只会拖长启动时间，并把真正的错误埋进日志。
+func isTransientMigrationErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{
+		"database is locked",
+		"database table is locked",
+		"sqlite_busy",
+		"snapshot",
+		"already exists",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // Close 关闭连接池并把 DB 置空。可重复调用。

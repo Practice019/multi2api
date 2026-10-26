@@ -199,7 +199,7 @@ func (Vendor) TableName() string { return "vendors" }
 type Log struct {
 	ID int64 `gorm:"primaryKey;autoIncrement"`
 	// CreatedAt Unix 秒，索引（见上）。
-	CreatedAt int64 `gorm:"not null;default:0;index:idx_log_created"`
+	CreatedAt int64 `gorm:"not null;default:0;index:idx_logs_created_at"`
 	// ModelName / ChannelName 存**名字**而不是 id。
 	//
 	// # 为什么不做外键连表
@@ -225,7 +225,7 @@ type Log struct {
 	// ⚠ 它与 idx_log_created 是两个独立索引，**不是**复合索引 (type, created_at)：
 	// 两个使用场景的最左列不同（"全部类型的今日请求数"用不上以 type 打头的复合索引，
 	// "某类型的消费"用不上以 created_at 打头的）。单列索引让优化器自己挑。
-	Type string `gorm:"type:varchar(16);not null;default:'';index:idx_log_type"`
+	Type string `gorm:"type:varchar(16);not null;default:'';index:idx_logs_type"`
 }
 
 func (Log) TableName() string { return "logs" }

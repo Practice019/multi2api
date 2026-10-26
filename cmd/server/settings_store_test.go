@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"workbuddy2api/internal/admin"
+	"workbuddy2api/internal/store"
 )
 
 // 复现并守住阶段 0 评审的 F1：**部分 PUT 不得覆盖未提交的配置**。
@@ -200,4 +202,225 @@ func TestCurrentSettingsCoversAllWritableFields(t *testing.T) {
 	check("KeepaliveEnabled", src.KeepaliveEnabled, got.KeepaliveEnabled)
 	check("CheckinHours", src.CheckinHours, got.CheckinHours)
 	check("KeepaliveHours", src.KeepaliveHours, got.KeepaliveHours)
+}
+
+// TestPatchSingleKeyKeepsOtherKeysInFile F1 的**文件级**复现：补丁只提一个键时，
+// 其余键必须逐个不变（不只是内存里的 admin.Settings 不变，config.json 也不能变）。
+//
+// 与 TestParseKeepsUnmentionedKeys 的分工：那条守 parse（内存），这条守 parse+persist
+// 合起来之后的**盘上结果** —— F1 的破坏力正是在盘上体现的。
+//
+// 用例把 PATCH 前后的 JSON 都打出来（t.Logf），便于人工复核「改了一个键、其它原样」。
+func TestPatchSingleKeyKeepsOtherKeysInFile(t *testing.T) {
+	// 夹具刻意写**全**：只有全了才能证明「其余键逐个不变」，而不是「其余键恰好是 0」。
+	const orig = `{
+  "listen": "127.0.0.1:7863",
+  "api_key": "MUST-SURVIVE",
+  "schedule": { "checkin_enabled": true, "keepalive_enabled": true, "checkin_hours": [7,19], "keepalive_hours": [23] },
+  "cooldown": { "soft_rate": "60s" },
+  "upstream": { "timeout_seconds": 120, "header_timeout_seconds": 30, "idle_timeout_seconds": 90 },
+  "pool": { "max_in_flight": 8, "breaker_threshold": 5, "breaker_cooldown": "5m", "breaker_cooldown_max": "30m", "revive_probe_interval_seconds": 3600 },
+  "features": { "sanitize_blacklist_fingerprints": true },
+  "upstash": { "url": "https://upstash.example" },
+  "session_sticky": { "enabled": true, "ttl": "24h" },
+  "admin": { "checkin_log_keep_days": 0 },
+  "request_log_keep_days": 14
+}
+`
+	cfg := &Config{}
+	cfg.Schedule.CheckinEnabled = true
+	cfg.Schedule.KeepaliveEnabled = true
+	cfg.Schedule.CheckinHours = []int{7, 19}
+	cfg.Schedule.KeepaliveHours = []int{23}
+	cfg.Cooldown.SoftRate = "60s"
+	cfg.Upstream.TimeoutSeconds = 120
+	cfg.Upstream.HeaderTimeoutSeconds = 30
+	cfg.Upstream.IdleTimeoutSeconds = 90
+	cfg.Pool.MaxInFlight = 8
+	cfg.Pool.BreakerThreshold = 5
+	cfg.Pool.BreakerCooldown = "5m"
+	cfg.Pool.BreakerCooldownMax = "30m"
+	cfg.Pool.ReviveProbeIntervalSeconds = 3600
+	cfg.Features.SanitizeBlacklistFingerprints = true
+	cfg.Upstash.URL = "https://upstash.example"
+	cfg.SessionSticky.Enabled = true
+	cfg.SessionSticky.TTL = "24h"
+	cfg.RequestLogKeepDays = 14
+	// 注意：checkin_log_keep_days 的基底来自 s.log（本用例不装配它 ⇒ 0），
+	// 所以夹具里那一项也写 0 —— 见 currentSettings 的 nil 判空注释。
+
+	s, path := persistFixture(t, orig)
+	s.cfg = cfg
+
+	p, err := s.parse(json.RawMessage(`{"checkin_enabled":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.persist(p); err != nil {
+		t.Fatalf("persist 不该失败: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(got)
+	t.Logf("PATCH 前 config.json:\n%s", orig)
+	t.Logf("PATCH 后 config.json:\n%s", out)
+
+	// 用户改的那一项生效
+	if !strings.Contains(out, `"checkin_enabled": false`) {
+		t.Error("被 PATCH 的 checkin_enabled 没有变成 false")
+	}
+	// 其余键逐个不变（F1 事故形态：timeout 120 / max_in_flight 8 / soft_rate 60s / sticky true 会被清零）
+	for _, must := range []string{
+		`"keepalive_enabled": true`,
+		`"checkin_hours": [7,19]`,
+		`"keepalive_hours": [23]`,
+		`"soft_rate": "60s"`,
+		`"timeout_seconds": 120`,
+		`"header_timeout_seconds": 30`,
+		`"idle_timeout_seconds": 90`,
+		`"max_in_flight": 8`,
+		`"breaker_threshold": 5`,
+		`"breaker_cooldown": "5m"`,
+		`"breaker_cooldown_max": "30m"`,
+		`"revive_probe_interval_seconds": 3600`,
+		`"sanitize_blacklist_fingerprints": true`,
+		`"url": "https://upstash.example"`,
+		`"ttl": "24h"`,
+		`"request_log_keep_days": 14`,
+		`"api_key": "MUST-SURVIVE"`,
+	} {
+		if !strings.Contains(out, must) {
+			t.Errorf("★ F1 复发：未提交的键被冲掉了（%s）\nPATCH 后文件:\n%s", must, out)
+		}
+	}
+	if !strings.Contains(out, `"listen": "127.0.0.1:7863"`) {
+		t.Error("陌生键 listen 被冲掉了")
+	}
+}
+
+// TestSettingsMirrorIntoOptionsStore options 表接线的端到端证据：
+// ① 首次把 config.json 的可导入键导入 options（幂等：二次返回 0 条）；
+// ② 保存一次（parse + persist + mirror）后，options 里被改的键变了、其余键一个都没变。
+//
+// 用**临时库**（t.TempDir 下的 gw.db），不碰真实 data/。
+func TestSettingsMirrorIntoOptionsStore(t *testing.T) {
+	const orig = `{
+  "listen": "127.0.0.1:7863",
+  "schedule": { "checkin_enabled": true, "keepalive_enabled": true, "checkin_hours": [7,19], "keepalive_hours": [23] },
+  "cooldown": { "soft_rate": "60s" },
+  "upstream": { "timeout_seconds": 120, "header_timeout_seconds": 30, "idle_timeout_seconds": 90 },
+  "pool": { "max_in_flight": 8, "breaker_threshold": 5, "breaker_cooldown": "5m", "breaker_cooldown_max": "30m", "revive_probe_interval_seconds": 3600 },
+  "features": { "sanitize_blacklist_fingerprints": true },
+  "upstash": { "url": "https://upstash.example" },
+  "session_sticky": { "enabled": true, "ttl": "24h" },
+  "admin": { "checkin_log_keep_days": 0 },
+  "request_log_keep_days": 14
+}
+`
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(orig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// store 的 DB 是**包级句柄**：本用例独占它，并在收尾时关掉。
+	if err := store.Open(filepath.Join(dir, "gw.db")); err != nil {
+		t.Fatalf("打开临时库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+
+	cfg := &Config{}
+	cfg.Schedule.CheckinEnabled = true
+	cfg.Schedule.KeepaliveEnabled = true
+	cfg.Schedule.CheckinHours = []int{7, 19}
+	cfg.Schedule.KeepaliveHours = []int{23}
+	cfg.Cooldown.SoftRate = "60s"
+	cfg.Upstream.TimeoutSeconds = 120
+	cfg.Upstream.HeaderTimeoutSeconds = 30
+	cfg.Upstream.IdleTimeoutSeconds = 90
+	cfg.Pool.MaxInFlight = 8
+	cfg.Pool.BreakerThreshold = 5
+	cfg.Pool.BreakerCooldown = "5m"
+	cfg.Pool.BreakerCooldownMax = "30m"
+	cfg.Pool.ReviveProbeIntervalSeconds = 3600
+	cfg.Features.SanitizeBlacklistFingerprints = true
+	cfg.Upstash.URL = "https://upstash.example"
+	cfg.SessionSticky.Enabled = true
+	cfg.SessionSticky.TTL = "24h"
+	cfg.RequestLogKeepDays = 14
+	s := &settingsStore{path: cfgPath, cfg: cfg}
+
+	// ① 首次导入 + 幂等性
+	s.seedOptionsFromConfig()
+	before, err := store.LoadOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := store.ImportFromConfigJSON(cfgPath); err != nil || n != 0 {
+		t.Fatalf("二次导入应新增 0 条，得到 n=%d err=%v", n, err)
+	}
+
+	// ② 只改一个键
+	p, err := s.parse(json.RawMessage(`{"checkin_enabled":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.persist(p); err != nil {
+		t.Fatal(err)
+	}
+	s.mirrorOptions(p)
+
+	after, err := store.LoadOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("options 首次导入后 = %v", before)
+	t.Logf("options 保存一次后 = %v", after)
+
+	// 被 PATCH 的那个键：导入时是 true，保存后变 false
+	if before["schedule.checkin_enabled"] != "true" {
+		t.Errorf("首次导入时 schedule.checkin_enabled 应为 true，得到 %q", before["schedule.checkin_enabled"])
+	}
+	if after["schedule.checkin_enabled"] != "false" {
+		t.Errorf("保存后 schedule.checkin_enabled 应为 false，得到 %q", after["schedule.checkin_enabled"])
+	}
+
+	// 其余受管键：**导入值与保存后值必须逐键相同**（这就是「PATCH 一个键不冲掉其它键」）
+	// 期望值同时钉住字符串形态：数组 = 紧凑 JSON、布尔 = true/false、整数 = 十进制。
+	unchanged := map[string]string{
+		"schedule.keepalive_enabled":               "true",
+		"schedule.checkin_hours":                   "[7,19]",
+		"schedule.keepalive_hours":                 "[23]",
+		"cooldown.soft_rate":                       "60s",
+		"upstream.timeout_seconds":                 "120",
+		"upstream.header_timeout_seconds":          "30",
+		"upstream.idle_timeout_seconds":            "90",
+		"pool.max_in_flight":                       "8",
+		"pool.breaker_threshold":                   "5",
+		"pool.breaker_cooldown":                    "5m",
+		"pool.breaker_cooldown_max":                "30m",
+		"pool.revive_probe_interval_seconds":       "3600",
+		"features.sanitize_blacklist_fingerprints": "true",
+		"upstash.url":                              "https://upstash.example",
+		"session_sticky.enabled":                   "true",
+		"session_sticky.ttl":                       "24h",
+		"admin.checkin_log_keep_days":              "0", // s.log 未装配 ⇒ 基底 0（见 currentSettings）
+		"request_log_keep_days":                    "14",
+	}
+	for k, v := range unchanged {
+		if before[k] != v {
+			t.Errorf("导入后 options[%q] = %q，期望 %q", k, before[k], v)
+		}
+		if after[k] != v {
+			t.Errorf("★ 保存后 options[%q] = %q，期望 %q（未提交的键被冲掉了）", k, after[k], v)
+		}
+	}
+	// 非受管键（seed 导入进来的）不该被镜像动过
+	if after["listen"] != "127.0.0.1:7863" {
+		t.Errorf("options[listen] 被改动了: %q", after["listen"])
+	}
 }
