@@ -322,6 +322,11 @@ console.log('  node jobs_e2e.js     任务调度面板');
 console.log('  node theme_e2e.js    深色/浅色三态主题 + 对比度实算');
 console.log('  node verify_cp2_f1.js 组头 title 不自相矛盾');
 console.log('  node verify_cp2_f2.js 监听器不泄漏 / 一次点击一个请求');
+// Wave 2 三页面的固定门禁：**故意不放进本脚本的静态套件**（那条定位是「无需浏览器」，
+// 见文件头），但它必须被登记在某个 runner 里、否则「三页面对齐」没有可执行判据。
+// 登记处 = run_http_suites.js 的 DIRECT_PROBES（同为需要实例 + Chrome 的 direct 类）；
+// 这里只给出单跑命令，保证从任一条 runner 都能找到它。
+console.log('  node verify_wave2_pages.js  ★ Wave 2 三页面门禁（状态/渠道/模型；自起隔离实例+Chrome）');
 if (failures.length) {
   console.log('\n失败明细：');
   failures.forEach(f => console.log('  - ' + f));
