@@ -1352,6 +1352,35 @@ header h1{letter-spacing:0}
      .calm                  → 本节的安静区（新概念，非别名）
    ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
 /* ==== WB2API:MAXIMALISM:END ==== */
+
+/* ── T98：高度链（修 iframe 内下方一大片空白）─────────────────────────────
+   实测（真浏览器 + 隔离实例，1500×1100 窗口 ⇒ iframe 内 1262×814）：
+     · 内容底 = 288，iframe 内高 = 814 ⇒ 下方 **527px** 空白，且那一片**没有边框**（白块）；
+     · main 高 153、.tw（表格框）高 111、行数 3 ⇒ **不是空态**，是 body 只有内容高。
+   外壳把 iframe 钉在 calc(100vh - 190px)（webui.html:3220），所以页面必须自己撑满：
+     html/body 撑满 → main 吃剩余 → 当前 tabpanel 吃剩余 → .tw 吃剩余（边框与底跟着下来）。
+   ⚠ 只让**容器**长高，行高不动（th/td 仍是 26px）—— 修空白不是把内容拉伸变形。
+   ⚠ [hidden] 的分区必须继续 display:none：作者样式里的 display:flex 会盖掉 UA 的
+     [hidden]{display:none}，所以下面显式把两条都写出来（这是"写了 flex 就藏不住"的经典坑）。 */
+html { height:100%; }
+body { height:100%; min-height:0; display:flex; flex-direction:column; }
+header, #tabs, #errbox, footer { flex:0 0 auto; }
+main { flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
+main > section[role=tabpanel] { flex:1 1 auto; flex-direction:column; min-height:0; }
+main > section[role=tabpanel]:not([hidden]) { display:flex; }
+main > section[role=tabpanel][hidden] { display:none; }
+main > section[role=tabpanel] > .tw { flex:1 1 auto; min-height:0; }
+main > section[role=tabpanel] > .empty { flex:0 0 auto; }
+
+/* 空态：内容不满屏时也要**把话说清楚**（居中 + 限宽，读起来像一段提示而不是一行残字）。
+   文案本身由脚本给（含"去渠道页/账号池页确认"的下一步动作），这里只管排布。 */
+#panelModels .empty:not([hidden]),
+#panelVendors .empty:not([hidden]) {
+  display:block; max-width:64ch; margin:14px auto; text-align:center; line-height:1.7;
+}
+
+/* 状态行（T98：页内不再有标题与刷新按钮，只剩条数 + 数据来源）。 */
+header.statline { align-items:baseline; }
 </style>
 <script>
 // 主题必须在首次绘制**之前**定下来，否则会闪一下深色再变浅色。
@@ -1365,12 +1394,20 @@ header h1{letter-spacing:0}
 </head>
 <body>
 
-<header>
-  <h1>模型目录</h1>
+<!-- 标题与「刷新」**都归控制台外壳**（webui.html:3214-3218 的 section[data-key=modelcatalog]）：
+     外壳给每个面板渲染 h2 标题 + 一个刷新按钮，而那个按钮会**重载本 iframe**
+     （onclick=…mdFrame.src='/ui/models?t='+Date.now()），比页内按钮更彻底 ——
+     连本页的内存状态（过滤词、勾选、已加载的目录）一起重置。
+     T98 之前本页自己又写了一份 <h1>模型目录</h1> + <button id=refresh>刷新</button>，
+     真浏览器实测到「可见标题 2 个、可见刷新控件 2 个」（与用户报的状态页同因，T92 已修那一页）。
+     现在：
+       · 标题：删掉本页的，只留外壳那一个；
+       · 刷新：删掉本页按钮（手动刷新仍可用 —— 外壳那个就在同一行）；
+       · **反馈保留**：#sum（条数）与 #srcline（数据来源）降级为一条状态行，
+         不再是「标题 + 按钮」的形态。 -->
+<header class="statline">
   <span id="sum" aria-live="polite"></span>
   <span id="srcline" class="dim"></span>
-  <span class="spacer"></span>
-  <button id="refresh" type="button" title="重新取一次目录">刷新</button>
 </header>
 
 <div id="errbox" role="alert">
@@ -1689,7 +1726,16 @@ header h1{letter-spacing:0}
   }
 
   // ── 事件绑定 ──────────────────────────────────────────────────────────
-  document.getElementById('refresh').addEventListener('click', function () { void load(); });
+  //
+  // ⚠ T98：页内「刷新」按钮已按 T92 的口径**删掉**（标题与刷新都归外壳，避免用户看到两份）。
+  //   · 这里**不直接删这行**：脚本其余部分（以及将来可能的复用/测试钩子）不该因为
+  //     一个按钮不存在就整页抛异常 —— 空壳兜住，行为降级为"没有页内刷新入口"。
+  //   · 兜底不是把功能藏起来：手动刷新仍可用，外壳那个按钮就在同一行，而且它重载整个
+  //     iframe（比页内 load() 更彻底）。
+  var refreshBtn = document.getElementById('refresh');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function () { void load(); });
+  }
   document.getElementById('retry').addEventListener('click', function () { void load(); });
 
   document.getElementById('search').addEventListener('input', function (e) {

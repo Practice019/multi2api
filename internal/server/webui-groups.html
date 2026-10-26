@@ -86,7 +86,18 @@
        letter-spacing:.02em; }
   tbody tr:hover { background:var(--panel2); }
   tbody tr:last-child td { border-bottom:none; }
-  .wrap { overflow-x:auto; }
+    /* 列表容器（T96）：原来是裸的 overflow-x:auto —— 无边框、无底，表头/数据行直接铺在奶油底上，
+     与用户报的令牌页「游离」同形（T95 巡检实测 background:rgba(0,0,0,0) / borderTopWidth:0，
+     而令牌页与渠道页是 rgb(255,239,216) + 2px）。这里照 T91 的同款处理。
+     ⚠ 空态是 tbody 里的一个 <tr>（load() 里 colspan=6 那一行），**天然在框内**，
+     不需要像令牌页那样搬 DOM。 */
+  .wrap {
+    overflow-x: auto;
+    border: 2px solid var(--line);   /* 与令牌页/渠道页同款一档：2px */
+    background: var(--panel);        /* 非透明面板底：让列表「落在某个面上」 */
+    /* min-height 依据：表头 26px + 空态行 26px + 说明栏约 40px ≈ 92px，取 100px 留余量。 */
+    min-height: 100px;
+  }
   /* 模型列允许换行显示多行 chips，但仍限制高度 —— 600 个模型不能把一行撑成两屏。 */
   td.models { white-space:normal; line-height:1.35; height:auto; padding:5px 10px; }
   .chips { display:flex; flex-wrap:wrap; gap:4px; max-height:54px; overflow:hidden; }
@@ -1426,11 +1437,16 @@ function mpEsc(s) {
 }
 // ==== WB2API:MODEL-PICKER:END ====
 </script>
+<!-- 标题与刷新**都归控制台外壳**（webui.html:3256-3258）：外壳给每个面板渲染标题 + 专属刷新按钮，
+     且那个按钮**重载本 iframe**（连页面内存状态一起重置），六个面板行为一致。
+     T96 之前本页又写了一份 <h1>分组管理</h1> + <button onclick=load()>刷新</button>
+     ⇒ 两个标题、两个刷新。现在：标题信息**并入描述行**（不再是页面级标题），页内刷新按钮**移除**
+     （手动刷新仍可用 —— 外壳那个就在同一行）。
+     ⚠ 本页没有 JS 引用这个按钮（只有内联 onclick），所以不需要空壳对象兜底；
+       若将来有人给它加 id 并绑定，记得同步处理。 -->
 <header>
-  <h1>分组管理</h1>
-  <span class="maxsticker" aria-hidden="true">分组即模型集合</span>
+  <span class="maxsticker" aria-hidden="true">分组管理 · 分组即模型集合</span>
   <span style="flex:1"></span>
-  <button onclick="load()">刷新</button>
 </header>
 
 <main>

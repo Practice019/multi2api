@@ -1344,13 +1344,22 @@ header h1{letter-spacing:0}
 </style>
 </head>
 <body>
+<!-- 标题与刷新**都归控制台外壳**（webui.html 的渠道面板 section 头）：
+     外壳给每个面板渲染一个标题 + 一个「刷新」按钮，而那个按钮是**整帧重载**
+     （把 chFrame.src 重新指一遍），比页内刷新更彻底 —— 它连本页的内存状态一起重置。
+     T97 之前本页自己又写了一份 <h1>渠道管理</h1> + <button id=btn-refresh>刷新</button>，
+     于是用户看到**两个标题、两个刷新**（T95 全站巡检实测：可见标题 2、可见刷新控件 2）。
+     现在与 T92 的状态页同口径：
+       · 标题：删掉本页的 <h1>，只留外壳那一个；
+       · 刷新：删掉本页按钮（手动刷新仍可用 —— 外壳那个就在同一行）；
+       · 本页的**说明行保留并降级**（它是本页特有的信息：渠道类型与多 Key 语义），
+         不再是"标题 + 按钮"的形态。
+     ⚠ 工具条上那 11 个动作（新建渠道 / 测试全部 / 检测模型更新 / 应用变更 / 查余额 /
+       标签视图 / 筛选器 / 重置 / 拖动排序 / 撤销排序 / 清除禁用）**不是重复项**，全部保留 ——
+       它们与"刷新本页"是完全不同的动作，删掉就是删功能（见回报里的保留清单）。 -->
 <div class="wrap">
   <div class="hd">
-    <h1>渠道管理</h1>
-    <span class="sub">Key 型渠道（OpenAI 兼容上游）· 多 Key 轮询 / 自动禁用 / 模型重定向</span>
-    <span class="live">
-      <button class="tb" id="btn-refresh" type="button">刷新</button>
-    </span>
+    <span class="sub">渠道管理 · Key 型渠道（OpenAI 兼容上游）· 多 Key 轮询 / 自动禁用 / 模型重定向</span>
   </div>
 
   <div id="banner" class="banner" hidden></div>
@@ -1691,7 +1700,14 @@ $('ch-rows').addEventListener('click', function (e) {
   if (!b) { return; }
   rowAction(b.getAttribute('data-act'), b.getAttribute('data-id'), b.getAttribute('data-status'));
 });
-$('btn-refresh').addEventListener('click', function () { load(); });
+/* T97：本页的「刷新」按钮已删除（与外壳那个重复，且外壳是整帧重载、更彻底）。
+   ⚠ 这里**必须用空壳对象兜住**：按钮没了之后 $('btn-refresh') 是 null，
+   直接 .addEventListener 会抛 TypeError，把**这一段脚本**整个弄挂 ——
+   而本页是三段 <script>，第三段的 init()（首次 load）就再也不会执行，
+   表现是"整页空白/没有数据"，比少一个按钮严重得多。
+   照 webui-status.html:2206 的同款写法（T92）。 */
+var elRefresh = $('btn-refresh') || { addEventListener: function () {} };
+elRefresh.addEventListener('click', function () { load(); });
 $('btn-new').addEventListener('click', function () { openDrawer(null); });
 $('btn-reset').addEventListener('click', function () {
   st.f = { status: '', type: '', group: '', sortBy: '', sortOrder: '' };
