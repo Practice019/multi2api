@@ -97,6 +97,8 @@
   .partial { border: 1px solid var(--warn); background: var(--panel2); color: var(--fg); padding: 8px 10px;
              font-size: 12px; margin-bottom: 10px; }
   .partial ul { margin: 6px 0 0; padding-left: 18px; }
+  /* 中性提示（不是错误）：用 --line 边框 + --fg 文字，避免把「还没建分组」渲染成故障。 */
+  .partial.info { border-color: var(--line); color: var(--fg); }
   .pager { display: flex; align-items: center; gap: 8px; padding: 8px 2px; font-size: 12px; color: var(--dim); }
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
@@ -1343,6 +1345,10 @@ header h1{letter-spacing:0}
       </div>
 
       <!-- ⑤ 分组优先级（auto + custom） -->
+      <!-- 分组候选的提示条（T89）：接口失败/形状不认识/一个分组都没有时**显式**告诉用户，
+           不再靠「只剩一个 default」静默降级 —— 那正是这个 bug 藏很久的原因。 -->
+      <div class="partial hidden" id="groupBanner"></div>
+
       <div class="field hidden" id="w-autogroups">
         <label>分组优先级（拖动排序，顺序即优先级）</label>
         <div class="row">
@@ -1572,6 +1578,7 @@ function openDrawer(row) {
   $('drawerTitle').textContent = row ? '编辑令牌' : '新建令牌';
   $('w-count').className = 'field' + (row ? ' hidden' : '');
   $('partial').className = 'partial hidden';
+  var gb = $('groupBanner'); if (gb) gb.className = 'partial hidden';
   $('f-name').value = row ? (row.name || '') : '';
   $('f-count').value = '1';
   var automatic = row ? !!row.group : false;
@@ -1634,17 +1641,84 @@ function syncVisibility() {
   $('nameHint').textContent = '最长 ' + limit + ' 字节' + (limit === 43 ? '（创建多条时为后缀留位置）' : '');
   $('expHint').textContent = $('f-exp').value ? '到期后此令牌不可用。' : '默认永不（提交 expired_time = -1）。';
 }
+// groupNamesOf 从**本仓** GET /admin/groups 的响应里取候选分组名。
+//
+// # 为什么是 /admin/groups 而不是 /api/group/（T89 修的根因）
+// 旧代码打的是 `GET /api/group/` —— 那是 **hyxapi 的路径**，本仓没有（实测 404）。
+// 更糟的是 catch 里「退回手输」把 404 **静默降级**成「只剩一个 default」——
+// 于是「分组接口根本不存在」看起来像「用户还没建分组」，这个 bug 因此藏了很久。
+//
+// # 形状兼容（三种都认）
+//   ① {enabled, groups:[{id,name,…}]}  ← 本仓当前形状
+//   ② {items:[…]}                     ← 将来若改成分页/统一信封
+//   ③ 裸数组 [ … ]                    ← 更早的写法
+// 取值一律取 **name**：令牌的 Group 存的是**分组名**（主脑 2026-10-27 裁决：
+// apikey 存分组 ID、token 与 channels 存分组名，匹配由后端做）。
+// 返回 null 表示**形状不认识** —— 与「确实没有分组」（返回空数组）必须区分开。
+function groupNamesOf(payload) {
+  var arr = null;
+  if (Array.isArray(payload)) arr = payload;
+  else if (payload && Array.isArray(payload.groups)) arr = payload.groups;
+  else if (payload && Array.isArray(payload.items)) arr = payload.items;
+  if (!arr) return null;
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var one = arr[i];
+    var name = (typeof one === 'string') ? one : (one && (one.name || one.group || one.id));
+    if (name) out.push(String(name));
+  }
+  return out;
+}
+
+function showGroupBanner(text, bad) {
+  var el = $('groupBanner');
+  if (!el) return;
+  el.className = 'partial' + (bad ? '' : ' info');
+  el.textContent = text;
+}
+
+// renderGroupOptions 同时铺满两个选择器：
+//   f-group-pick     = 有序分组（manual 模式，顺序即优先级）
+//   f-autogroup-pick = 自定义自动分组（auto + custom）
+// 空列表不再「默默只留一个 default」，而是**明确空态文案**（去『分组』面板创建）。
+function renderGroupOptions(names) {
+  if (!names.length) {
+    var only = '<option value="default">default</option>';
+    $('f-group-pick').innerHTML = only;
+    $('f-autogroup-pick').innerHTML = only;
+    showGroupBanner('还没有分组 —— 请先去左侧「分组」面板创建，再回来分配优先级。当前只能选 default。', false);
+    return;
+  }
+  var opts = names.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('');
+  $('f-group-pick').innerHTML = opts;
+  $('f-autogroup-pick').innerHTML = opts;
+  // ⚠ 取到候选后必须**清掉上一次的提示条**（T89 探针抓到的第二个真缺陷）：
+  //   否则「先空后有人建了分组」时，选项已经正确了、横幅还挂着『还没有分组』——
+  //   一条过期的警告比没有警告更误导。
+  var gb = $('groupBanner');
+  if (gb) { gb.className = 'partial hidden'; gb.textContent = ''; }
+}
+
+// ⚠⚠ **每次都重新取**，不做页面级缓存（T89 探针抓到的真缺陷）：
+//   我原先写了 `if (state.groupsLoaded) return;` —— 于是「在分组面板里新建一个分组、
+//   再回到令牌抽屉」这条**最常见**的路径上，候选列表还是第一次那份（可能为空），
+//   用户看到的就是「只有 default / 选不到分组」，而且**刷新页面才会好**。
+//   `/admin/groups` 是本地只读调用，重取的成本远低于让用户困惑。
 function loadGroups() {
-  if (state.groupsLoaded) return;
-  state.groupsLoaded = true;
-  api('GET', '/api/group/').then(function (list) {
-    var opts = (list || []).map(function (g) { return '<option value="' + esc(g) + '">' + esc(g) + '</option>'; }).join('');
-    $('f-group-pick').innerHTML = opts;
-    $('f-autogroup-pick').innerHTML = opts;
-  }).catch(function () {
-    // 分组接口不可用时也要能用：退回手输（后端仍会校验）。
-    $('f-group-pick').innerHTML = '<option value="default">default</option>';
-    $('f-autogroup-pick').innerHTML = '<option value="default">default</option>';
+  api('GET', '/admin/groups').then(function (data) {
+    var names = groupNamesOf(data);
+    if (names === null) {
+      renderGroupOptions(['default']);
+      showGroupBanner('分组接口返回了无法识别的形状（GET /admin/groups）—— 候选列表可能不全，请报给维护者。', true);
+      return;
+    }
+    renderGroupOptions(names);
+  }).catch(function (e) {
+    // ⚠ 不再静默降级：把**路径与状态码**直接告诉用户。
+    // 保留 default 只是为了让页面仍可用，但必须让人知道候选列表没取到。
+    renderGroupOptions(['default']);
+    showGroupBanner('候选分组没取到：GET /admin/groups ⇒ ' + (e && e.status ? ('HTTP ' + e.status) : '网络/解析错误')
+      + '。下面只剩 default，**这不是「你没有分组」**。', true);
   });
 }
 

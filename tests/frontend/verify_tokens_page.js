@@ -390,6 +390,56 @@ function isMasked(k) {
       ok(partial.exists && String(partial.cls).indexOf('hidden') >= 0, '#partial 容器存在且默认隐藏（只证明展示位存在）');
       sk('「部分成功」的**行为**未覆盖：createTokens 只在单条 CreateToken 失败时产生 failures（tokens.go:708-711），而该分支要么靠 48 位 Key 唯一索引碰撞、要么靠 SetAutoGroups 编码失败 —— 公共 API 无法确定性触发；handler 级用例（internal/admin/tokens_test.go）同样没有构造它。要覆盖得注入故障（改实现或加测试钩子），超出"只新增探针文件"的范围。');
 
+      // ── [L] 分组候选来自真数据 + 端点存在性守卫（T89 新增）────────────────
+      // # 为什么必须加这两组（这个 bug 的形态值得记住）
+      //  ① 页面打的是 **hyxapi 的 /api/group/**（本仓没有 ⇒ 404），catch 里「退回手输」
+      //     又把 404 **静默降级**成「只剩一个 default」⇒ 界面无报错，用户只看到「选不到分组」。
+      //     既有断言全是『元素存在/可点/数值对』，抓不到这种退化。
+      //  ② 抄错路径靠肉眼审代码漏得掉；但「把页面调用的每个端点都打一次、断言没有 404」能一次抓住。
+      console.log('\n[L] 分组候选（真数据）与端点存在性');
+      const uniqGroup = 'probe-pick-' + Date.now();
+      const mkGroup = await fetch(base + '/admin/groups', {
+        method: 'POST', headers: hdr,
+        body: JSON.stringify({ name: uniqGroup, description: 'T89 探针夹具', models: [] }),
+      });
+      ok(mkGroup.status === 200, '[L1] 夹具：建一个名字唯一的分组（实际 ' + mkGroup.status + '）');
+      const allGroups = await (await fetch(base + '/admin/groups', { headers: hdr })).json();
+      const groupCount = (allGroups && allGroups.groups) ? allGroups.groups.length : 0;
+      ok(groupCount > 0, '[L1] GET /admin/groups 至少回一个分组（实际 ' + groupCount + '）');
+      await ev('document.getElementById(\'tkFrame\').contentDocument.getElementById(\'btnNew\').click()');
+      await sleep(1500);
+      const picks = JSON.parse(await ev('JSON.stringify((function(){var d=document.getElementById(\'tkFrame\').contentDocument;function names(id){var s=d.getElementById(id);if(!s)return null;return Array.prototype.map.call(s.options,function(o){return o.value;});}var b=d.getElementById(\'groupBanner\');return {g:names(\'f-group-pick\'),a:names(\'f-autogroup-pick\'),banner:b?b.textContent.trim():\'\'};})())'));
+      console.log('      f-group-pick     = ' + JSON.stringify(picks.g));
+      console.log('      f-autogroup-pick = ' + JSON.stringify(picks.a));
+      ok(Array.isArray(picks.g) && picks.g.indexOf(uniqGroup) >= 0, '[L1] 夹具分组出现在 f-group-pick（有序分组）：' + JSON.stringify(picks.g));
+      ok(Array.isArray(picks.a) && picks.a.indexOf(uniqGroup) >= 0, '[L1] 夹具分组出现在 f-autogroup-pick（自定义自动分组）：' + JSON.stringify(picks.a));
+      ok(Array.isArray(picks.g) && picks.g.length >= groupCount, '[L1] f-group-pick options 数(' + (picks.g ? picks.g.length : 0) + ') ≥ 分组总数(' + groupCount + ') —— 防「只剩一个 default」退化');
+      ok((picks.banner || '').length === 0, '[L1] 候选取到了就不该有提示条（实际 ' + JSON.stringify(picks.banner) + '）');
+      await ev('document.getElementById(\'tkFrame\').contentDocument.getElementById(\'btnCancel\').click()');
+      await sleep(400);
+      // [L2] 端点存在性守卫：页面调用的每个端点各打一次，断言**没有 404**。
+      // 为免误报，先自己造一条令牌给 /{id}/key 用（前面 F 段的令牌可能已被删）。
+      const mkTok = await fetch(base + '/admin/tokens', {
+        method: 'POST', headers: hdr,
+        body: JSON.stringify({ name: 'probe-endpoint-guard-' + Date.now(), automatic: false, groups: ['default'] }),
+      });
+      const mkBody = await mkTok.json();
+      const guardId = (mkBody && mkBody.items && mkBody.items.length) ? mkBody.items[0].id : null;
+      const ENDPOINTS = [
+        ['GET', '/admin/tokens?p=1&page_size=10'],
+        ['GET', '/admin/groups'],
+        ['POST', '/admin/tokens', {}],
+        ['POST', '/admin/tokens/update', {}],
+        ['POST', '/admin/tokens/delete', {}],
+      ];
+      if (guardId) ENDPOINTS.push(['POST', '/admin/tokens/' + guardId + '/key']); else sk('[L2] 没能造出令牌，/{id}/key 这条端点守卫跳过');
+      for (const ep of ENDPOINTS) {
+        const init = { method: ep[0], headers: hdr };
+        if (ep[2] !== undefined) init.body = JSON.stringify(ep[2]);
+        const r = await fetch(base + ep[1], init);
+        ok(r.status !== 404, '[L2] ' + ep[0] + ' ' + ep[1] + ' 不是 404（路由存在；实际 ' + r.status + '）');
+      }
+
       // ── [K] 布局几何门禁（T77 新增）──────────────────────────────────────
       //
       // # 修前红 / 修后绿（留着这段对照，证明这门禁真的抓得住东西）
