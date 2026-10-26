@@ -21,6 +21,43 @@
 // 用法：
 //   node run_frontend_suites.js
 // 退出码 0 = 全绿。
+//
+// ---------------------------------------------------------------------------
+// # 升级版纪律（T94 定；每一条都对应一次真实假红/假绿，不是风格建议）
+//
+//  ① **实例门禁必须"紧接在一次 probe 重建之后"**。
+//     实例探针启动的 exe 把页面 `//go:embed` 进去了 ⇒ **页面比 exe 新**时，它们验的是
+//     上一世代的页面；lib_instance 的 assertBuildFresh 会整批拦下（全红 exit=1），
+//     而现场看起来像"产品坏了"。keeper 在 wave9 实测：幂等守卫跑完（它临时改写 7 页
+//     再按字节还原）⇒ 页面 mtime 前进到 probe 之后 ⇒ 四个实例探针被整批拦下。
+//     ⇒ 本脚本在**实例批次之前**按 mtime 判一次（lib_instance.describeBuild()），
+//       不新鲜就**自动重建**并打印它做了什么；若当前指向的是用户的
+//       `bin/wb2api-server.exe`，则**拒绝自动重建**（覆盖它会毁掉 7863 那个实例），
+//       改为大声说明 + 让构建门禁给出权威红。
+//
+//  ② **实例批次与"会写页面的门禁"之间不得交错**（含幂等守卫自己）。
+//     会写页面的门禁（theme_sync 同步类 / 幂等守卫）必须在**专门的一段**里跑完，
+//     且其后**紧接着**重建 probe。本脚本为此把探针分成三段：
+//       静态 → 写页面（声明式清单 PAGE_WRITING_PROBES；跑完即无条件重建）→ 实例。
+//     清单当前登记 1 条：`verify_theme_sync_idempotent.js`（它临时改写 7 页再按字节还原，
+//     是「页面 mtime 前进 ⇒ 实例探针整批假红」的起因；登记进这一段后副作用被结构吃掉）。
+//
+//  ③ **幂等守卫在"无并发写页面"时才有意义**。
+//     它按"改写 → 按字节还原"工作，期间只要有**任何别的写者**碰那 7 个页面，
+//     它就会**单次失败**（keeper 实测：首次 exit=1、复跑 exit=0）——那是并发假红，
+//     不是产品缺陷。⇒ 它不该与别的写者并发，且 **runner 不允许把它跑两遍**
+//     （跑两遍 = 自己给自己制造一次"页面 mtime 前进"）。
+//     本文件对它**零登记**（它不在这份清单里）；这条纪律写在这里是为了防止以后又加回来。
+//
+//  ④ **实例类探针失败重试一次**，且重试必须显式打印、计入"抖动计数"。
+//     两条分支都带**自证钩子**（默认零影响，只在显式设环境变量时生效）：
+//       WB2API_SUITE_FAULT=<探针>        第一次注入失败 ⇒ 证明"重试绿 + 抖动计数"
+//       WB2API_SUITE_FAULT_ALWAYS=<探针> 每次注入失败 ⇒ 证明"重试仍红、按红处理"
+//     理由：这类探针自己起隔离实例 + Chrome + 现场探测端口，抖动来源在环境
+//     （端口占用 / 启动时序 / 机器负载），不在断言。**不许用重试掩盖稳定失败**：
+//     重试仍红 ⇒ 按红处理，并把两次输出**都**原样列出。
+// ---------------------------------------------------------------------------
+
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -71,6 +108,82 @@ if (!process.env.WB2API_EXE) {
   console.log('');
 })();
 
+// ---------------------------------------------------------------------------
+// T94：实例批次的重试 + 构建新鲜度硬化
+//
+// describeBuild/EXE 取自 lib_instance —— "哪个 exe / 比不比页面新"这条知识只能有**一份**
+//（本脚本不再自己 stat 一遍：两份判据迟早会漂成两套口径）。
+// ⚠ require 必须在上面那个 `if (!process.env.WB2API_EXE)` 之后：lib_instance 在**模块
+//   求值那一刻**就把 EXE 定下来，require 早了会静默回落到别的二进制。
+// ---------------------------------------------------------------------------
+const { describeBuild } = require(path.join(DIR, 'lib_instance.js'));
+
+// 用户的线上二进制：**任何情况下都不许被本脚本覆盖**（7863 正跑着它）。
+const USER_EXE = path.resolve(REPO, 'bin', 'wb2api-server.exe');
+
+// 实例类探针 = 自起隔离实例的那些。**按源码判定，不写死清单**（清单会漂）：
+// 命中 require lib_instance / startInstance( / WB2API_EXE 任一即算。
+const INSTANCE_PROBE_RE = /require\(['"]\.\/lib_instance|startInstance\(|WB2API_EXE/;
+function isInstanceProbe(file) {
+  try { return INSTANCE_PROBE_RE.test(fs.readFileSync(path.join(DIR, file), 'utf8')); }
+  catch (e) { return false; }
+}
+
+// 会**改写页面文件**的门禁（同步类 / 幂等守卫）：跑完必须紧接着重建 probe。
+//
+// ⚠ 归属规则：这类门禁**只放这里**，不要同时塞进 PROBES（塞两处 = 跑两遍 =
+//   自己给自己制造一次「页面 mtime 前进」，正是 T94 纪律 ③ 要堵的）。
+const PAGE_WRITING_PROBES = [
+  // theme_sync 的「幂等 + 分隔符卫生」守卫：它临时改写 7 页再按字节还原 ⇒
+  // **页面 mtime 会前进到 probe 之后**（keeper 在 wave9 实测：四个实例探针因此被
+  // 整批拦下、全红）。登记在这一段 = 跑完**紧接着**重建 probe，副作用被结构吃掉。
+  //
+  // 它现在**是套件的常规一员**（此前全仓零登记 ⇒ 只在有人手动想起时才跑，门禁会烂掉）。
+  // 它自己的输出里也写了并发前提：单次失败 = 并发假红（复跑即判），见其文件头。
+  'verify_theme_sync_idempotent.js',
+];
+
+const fmt = (d) => (d ? new Date(d).toLocaleString('sv-SE') : '（不存在）');
+
+// 按 mtime 判构建新鲜度：不新鲜就自动重建（RN 打印它做了什么）。
+// 返回 true = 新鲜（可继续）；false = 不新鲜且**没能**修好（实例探针会各自报权威红）。
+function ensureProbeFresh(why, quietOk) {
+  const b = describeBuild();
+  const rel = path.relative(REPO, b.exe).replace(/\\/g, '/');
+  if (b.fresh === true) {
+    // quietOk：每个实例探针前都会判一次，全绿时不必刷屏（真做事了才打印）。
+    if (!quietOk) console.log('  ok      构建新鲜：' + rel + '（' + fmt(b.exeMtime) + '）≥ ' +
+      b.newestRel + '（' + fmt(b.newestMtime) + '）');
+    return true;
+  }
+  if (path.resolve(b.exe).toLowerCase() === USER_EXE.toLowerCase()) {
+    console.log('  ✗ 拒绝自动重建：当前指向的是**用户的线上二进制** ' + rel);
+    console.log('    覆盖它会破坏 7863 那个正在跑的实例 —— 这条不是"绕过构建门禁"，是保护。');
+    console.log('    正确做法：不设 WB2API_EXE（缺省即 probe），或设 WB2API_EXE=bin/wb2api-server-probe.exe');
+    return false;
+  }
+  console.log('  REBUILD 构建不新鲜（' + why + '）：exe ' + fmt(b.exeMtime) + ' < ' +
+    b.newestRel + ' ' + fmt(b.newestMtime) + ' ⇒ 自动重建 ' + rel);
+  console.log('          命令：go build -p 1 -o ' + rel + ' ./cmd/server');
+  try {
+    execFileSync('go', ['build', '-p', '1', '-o', rel, './cmd/server'], {
+      cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300000,
+      env: Object.assign({}, process.env, { GOMAXPROCS: '1', GOGC: '20' }),
+    });
+  } catch (e) {
+    console.log('  ✗ 自动重建失败：' + ((e.stdout || '') + (e.stderr || '')).split('\n').slice(0, 3).join(' | '));
+    console.log('    ⇒ 不掩盖：实例探针的构建门禁会给出权威红。');
+    return false;
+  }
+  const b2 = describeBuild();
+  if (b2.fresh === true) {
+    console.log('  ok      重建后新鲜：' + rel + '（' + fmt(b2.exeMtime) + '）');
+    return true;
+  }
+  console.log('  ✗ 重建后仍不新鲜（exe ' + fmt(b2.exeMtime) + ' < ' + b2.newestRel + ' ' +
+    fmt(b2.newestMtime) + '）—— 如实继续，让实例探针报红。');
+  return false;
+}
 // 全部套件：[generator, 产物]。
 // 顺序保持与历史一致（数字稳定便于对照旧输出）。
 const SUITES = [
@@ -246,7 +359,25 @@ const PROBES = [
   'verify_tokens_page.js',
 ];
 
+// T94 自证钩子（**默认零影响**，只在显式设了环境变量时生效）：
+//
+// 重试逻辑如果不带自证，它就只是注释里的承诺 —— 没人知道那条分支到底跑不跑得到。
+// 两个钩子分别钉住两条分支：
+//   WB2API_SUITE_FAULT=<探针文件名>       该探针**第一次**注入失败 ⇒ 走"重试绿 + 抖动计数"
+//   WB2API_SUITE_FAULT_ALWAYS=<探针文件名> 该探针**每次都**失败 ⇒ 走"重试仍红、按红处理"
+//（第二个是防"用重试掩盖稳定失败"的那条判据：注入后必须仍然红，且两次输出都打出来。）
+const FAULT_ONCE = process.env.WB2API_SUITE_FAULT || '';
+const FAULT_ALWAYS = process.env.WB2API_SUITE_FAULT_ALWAYS || '';
+const faultedOnce = new Set();
+
 function run(file) {
+  if (FAULT_ALWAYS && file === FAULT_ALWAYS) {
+    return { ok: false, out: '[自证钩子] WB2API_SUITE_FAULT_ALWAYS 注入的**每次**失败（用来证明重试不掩盖稳定失败）\n' };
+  }
+  if (FAULT_ONCE && file === FAULT_ONCE && !faultedOnce.has(file)) {
+    faultedOnce.add(file);
+    return { ok: false, out: '[自证钩子] WB2API_SUITE_FAULT 注入的第一次失败（用来证明重试路径真的存在）\n' };
+  }
   try {
     const out = execFileSync(process.execPath, [path.join(DIR, file)], {
       cwd: DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180000,
@@ -319,9 +450,46 @@ for (const [gen, artifact] of SUITES) {
   }
 }
 
-console.log('\n=== 独立探针 ===');
-for (const p of PROBES) {
+// ---- T94：探针分三段跑（纪律 ②）----
+//
+// 静态 → 写页面（跑完立即重建）→ 实例。段与段之间不交错，顺序在代码里固定死，
+// 不依赖「记得先跑哪个」（B 那个坑就是把顺序交给了人的记忆）。
+//
+// ⚠ 探针全集 = PROBES + PAGE_WRITING_PROBES（后者**不在** PROBES 里 —— 见那边的归属规则：
+//   同一个门禁登记两处就会跑两遍）。所以总数必须把两段都算上。
+const pageWritingProbes = PAGE_WRITING_PROBES.slice();
+const instanceProbes = PROBES.filter(p => isInstanceProbe(p));
+const staticProbes = PROBES.filter(p => !instanceProbes.includes(p));
+
+// 环境类失败：红的原因**自证**是环境/资源前提（不是断言），例如派生新鲜度探针的
+// 固定副本目录被另一个活着的进程占着（它的文件头明确写了这种形态：报 ENV + exit 2）。
+// ⇒ 这类失败重试一次是**修正测量前提**，不是弱化判据：
+//   · 只对"自己声明是环境问题"的失败重试（真实断言失败**不**重试）；
+//   · 重试转绿 ⇒ 计入"环境抖动"，并把第 1 次的原因打出来；
+//   · 重试仍红 ⇒ 按红处理（两次输出都列）。
+const ENV_FAIL_RE = /ENV|环境前提|被另一个活着的进程|被占用|EADDRINUSE|Chrome 未启动|无法判断构建新鲜度|端口预检/;
+function runWithEnvRetry(p, tailOf) {
   const r = run(p);
+  if (r.ok || !ENV_FAIL_RE.test(r.out || '')) return r;
+  const first = tailOf(r);
+  console.log(`  [retry-env] ${p} 第 1 次红（环境类：自己声明了前提问题）⇒ 重试一次`);
+  const r2 = run(p);
+  if (r2.ok) {
+    envJitter++;
+    console.log(`  ok      ${p}（重试绿 ⇒ 记 1 次**环境**抖动；第 1 次的原因如下）`);
+    console.log('    ' + first);
+  }
+  return r2;
+}
+
+// 两种抖动计数：实例类（环境/时序）与环境类（探针自己声明的前提问题）。
+// 分开计是为了让"抖动来源"可归因，而不是揉成一个数字。
+let jitter = 0;
+let envJitter = 0;
+
+console.log('\n=== 独立探针（静态段：不写页面、不起实例）===');
+for (const p of staticProbes) {
+  const r = runWithEnvRetry(p, (x) => (x.out || '').split('\n').slice(-3).join('\n    '));
   if (r.ok) {
     pass++;
     console.log(`  ok      ${p}`);
@@ -332,9 +500,82 @@ for (const p of PROBES) {
   }
 }
 
-const total = SUITES.length + PROBES.length;
+console.log('\n=== 写页面门禁段（纪律 ②/③：跑完**立即**重建 probe）===');
+if (!pageWritingProbes.length) {
+  console.log('  （本 runner 未登记任何会写页面的门禁）');
+} else {
+  for (const p of pageWritingProbes) {
+    const r = run(p);
+    if (r.ok) {
+      pass++;
+      console.log(`  ok      ${p}`);
+    } else {
+      failures.push(`${p} 失败`);
+      console.log(`  FAIL    ${p}`);
+      console.log('    ' + (r.out || '').split('\n').slice(-3).join('\n    '));
+    }
+  }
+  console.log('  ⇒ 写页面门禁按字节还原页面时 mtime 已前进：**无条件**重建 probe');
+  ensureProbeFresh('写页面门禁之后');
+}
+
+console.log('\n=== 实例探针段（自起隔离实例；失败重试一次，抖动计数见汇总）===');
+ensureProbeFresh('实例批次之前');
+for (const p of instanceProbes) {
+  // ⚠ 每个实例探针之前都重判一次新鲜度（quietOk）：**外部写者**（另一个 agent 的
+  //   theme_sync / 幂等守卫 / 编辑器保存）可能在上一秒刚 touch 过那 7 个页面，
+  //   于是本探针整批假红 —— 那不是它的问题，但会污染结论。判据是 mtime，代价两次
+  //   statSync；**真陈旧才重建**并打印（不静默）。
+  ensureProbeFresh(`实例探针 ${p} 之前`, true);
+  const r = run(p);
+  if (r.ok) {
+    pass++;
+    console.log(`  ok      ${p}`);
+    continue;
+  }
+  const first = (r.out || '').split('\n').slice(-3).join('\n    ');
+  // 重试之前再判一次：第 1 次红若正是"页面被外部写者 touch 过"，这一步会重建，
+  // 于是重试才是**有效**的重试（否则重试必然再红，等于没重试）。
+  ensureProbeFresh(`重试 ${p} 之前`, true);
+  console.log(`  [retry] ${p} 第 1 次红 ⇒ 按「实例探针」重试一次（抖动候选）`);
+  const r2 = run(p);
+  if (r2.ok) {
+    pass++;
+    jitter++;
+    console.log(`  ok      ${p}（重试绿 ⇒ 记 1 次抖动；第 1 次的尾部输出如下）`);
+    console.log('    ' + first);
+  } else {
+    failures.push(`${p} 失败（重试仍红）`);
+    console.log(`  FAIL    ${p} 重试仍红 ⇒ 按红处理（重试**不**掩盖稳定失败）`);
+    console.log('    第1次尾: ' + first);
+    console.log('    第2次尾: ' + (r2.out || '').split('\n').slice(-3).join('\n    '));
+  }
+}
+
+const total = SUITES.length + PROBES.length + PAGE_WRITING_PROBES.length;
 console.log(`\n=== ${pass}/${total} 通过 ===`);
-console.log(`（${SUITES.length} 个 generator 对 + ${PROBES.length} 个独立探针）`);
+console.log(`（${SUITES.length} 个 generator 对 + ${PROBES.length + PAGE_WRITING_PROBES.length} 个独立探针：` +
+  `静态 ${staticProbes.length} / 写页面 ${pageWritingProbes.length} / 实例 ${instanceProbes.length}）`);
+// 既有基线红（长期挂着，**不是**本轮引入的）。期望通过数 = 总数 − 基线红数。
+// ⚠ 登记幂等守卫后：19(PROBES) + 1(PAGE_WRITING) = 20 个独立探针 ⇒ 总数 36 ⇒ 期望 **29/36**（基线红仍是那 7 条）。
+const BASELINE_RED = [
+  'dashboard_gen.js', 'models_display_gen.js', 'settings_layout_gen.js',
+  'stats_disk_gen.js', 'gen_ui_manifest.js', 'audit_tracked_content.js',
+  'verify_probe_console_loaded.js',
+];
+const expectedPass = total - BASELINE_RED.length;
+console.log(`期望：${expectedPass}/${total}（= 总数 − ${BASELINE_RED.length} 条既有基线红）`);
+const unexpected = failures.map(x => String(x).split(' ')[0]).filter(x => !BASELINE_RED.includes(x));
+if (unexpected.length) {
+  console.log(`⚠ 非基线红（需要处理）：${unexpected.join(' / ')}`);
+  console.log('  （若红的是 verify_theme_sync_idempotent.js：先看它自己打的并发前提 —— 单次失败 = 并发假红，复跑即判）');
+} else {
+  console.log('非基线红：0 ✓（本次红全部是既有基线）');
+}
+// 抖动计数：只统计「实例探针第 1 次红、重试转绿」。它不是「通过」的一部分，
+// 而是**环境抖动量**的度量 —— 若它长期非零，该查的是端口/启动时序/机器负载。
+console.log(`抖动计数：${jitter + envJitter}（实例类 ${jitter} + 环境类 ${envJitter}；` +
+  '两者都是第 1 次红、重试绿 —— 重试**不**掩盖稳定失败）');
 console.log('\n浏览器 E2E 不在本脚本内（它们需要真实网关 + Chrome）：');
 console.log('  node panels_e2e.js   上游面板按能力位生成');
 console.log('  node nav_e2e.js      导航分组 + 组头徽章（以 manifest 为对照）');

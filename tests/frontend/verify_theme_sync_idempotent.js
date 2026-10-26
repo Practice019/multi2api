@@ -28,7 +28,16 @@
 // 「收敛 + 块内自洽」，只有方向明确的情形（CRLF 页 → 单 CR；单 CR 永不影响多数票）
 // 才额外断言「回到规范的 CRLF 字节」。
 //
-// # 它会临时改写 6 个页面，但**必定原样还原**
+// # 并发前提（谁单独跑它都必须看到这一条）
+//
+// 本守卫按「临时改写 7 页 → 按字节还原」工作。期间**不得有别的写者**碰这 7 个页面
+// （另一个探针 / 手动跑 theme_sync / 编辑器保存 / 另一个 runner 实例）：
+//   · 有并发写者 ⇒ 它会**单次失败**（keeper 在 wave9 实测：首次 exit=1、复跑 exit=0）；
+//   · 那是**并发假红**，不是产品缺陷 —— 判据是"复跑一次"：全绿即假红，仍红即真问题。
+// ⇒ 跑法：单独跑（无并发写者），或把它登记进 runner 的**写页面段**（跑完立即重建 probe，
+//   把 mtime 前进的副作用结构性地吃掉）。run_frontend_suites.js 已按此登记。
+//
+// # 它会临时改写 7 个页面，但**必定原样还原**
 // 先用内存快照，finally 里恢复并逐页按字节校验恢复成功；恢复失败也要 exit 1
 // （宁可红着报，也不留一个被测试改坏的仓库）。
 'use strict';
@@ -62,7 +71,17 @@ function sync(args) {
     return { code: (e.status === undefined || e.status === null) ? 1 : e.status, out: String(e.stdout || '') + String(e.stderr || '') };
   }
 }
-function eolOf(text) { const crlf = (text.match(/\r\n/g) || []).length; const lf = (text.match(/\n/g) || []).length; return crlf > lf / 2 ? '\r\n' : '\n'; }
+// ⚠ 本函数必须与 tools/theme_sync.js 的 eolOf **同一份契约**（只统计**块外**文本）：
+// 守卫要断言的正是「工具的换行决策是否稳定」；两边不等价，守卫量的就不是工具的行为了。
+// ⚠ 注意：**断言本身一条都没改** —— 改的只是这个 helper 的口径，与工具对齐。
+function eolOf(text) {
+  const s = text.indexOf(START);
+  const e = s < 0 ? -1 : text.indexOf(END, s);
+  const scope = (s >= 0 && e > s) ? (text.slice(0, s) + text.slice(e)) : text;
+  const crlf = (scope.match(/\r\n/g) || []).length;
+  const lf = (scope.match(/\n/g) || []).length;
+  return crlf > lf / 2 ? '\r\n' : '\n';
+}
 function blockOf(text) { const s = text.indexOf(START); if (s < 0) return null; const e = text.indexOf(END, s); if (e < 0) return null; return text.slice(s, e + END.length); }
 // 把块内的行尾统一改成 want（用于人为制造"非规范分隔符"）
 function rewriteBlock(text, want) {
@@ -74,6 +93,13 @@ function rewriteBlock(text, want) {
 
 const snap = new Map(PAGES.map((rel) => [rel, read(rel)]));
 console.log('=== theme_sync 幂等性 / 分隔符卫生守卫 ===');
+// ⚠ 并发前提（2026-10-27 实测加，见文件头「并发前提」一节）：本守卫按
+//   「临时改写 → 按字节还原」工作。期间只要有**别的写者**碰这 7 个页面
+//   （另一个探针 / 手动跑 sync / 编辑器保存 / 另一个 runner 实例），
+//   它就会**单次失败** —— 那是**并发假红**，不是产品缺陷。
+//   判据：**复跑一次**。全绿 ⇒ 并发假红；仍红 ⇒ 真问题。
+console.log('并发前提：本次跑期间不得有别的写者碰这 ' + PAGES.length + ' 个页面' +
+  '（否则本守卫会单次失败 = 并发假红，复跑即可判明）');
 try {
   // ── ① 幂等
   const r1 = sync([]);
@@ -134,4 +160,9 @@ try {
   ok(restored, '测试结束后 ' + PAGES.length + ' 个页面已按字节原样还原');
 }
 console.log(fail === 0 ? '\n=== 守卫通过（' + (PAGES.length) + ' 页）===' : '\n=== ' + fail + ' 项失败 ===');
+if (fail) {
+  console.log('⚠ 先排除并发假红：本守卫按「改写 → 按字节还原」工作 —— 期间若有别的写者碰这 7 个页面，');
+  console.log('   （另一个探针 / 手动 sync / 编辑器保存 / 另一个 runner 实例）它会单次失败，而产品没有问题。');
+  console.log('   判据：复跑一次 —— 全绿 ⇒ 并发假红；仍红 ⇒ 真问题（看上面哪条 FAIL 及它的期望/实际）。');
+}
 process.exit(fail ? 1 : 0);

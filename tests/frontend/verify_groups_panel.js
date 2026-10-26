@@ -74,6 +74,43 @@ function freePort() { return new Promise((res, rej) => { const s = net.createSer
         ok(!!g.row && g.row[1] >= 0, '[' + dim[0] + '] 首行未被裁（top=' + (g.row ? g.row[1] : 'n/a') + ' ≥ 0）');
         ok(!!g.row && (g.row[1] + g.row[3]) <= g.innerH + 1, '[' + dim[0] + '] 首行在 iframe 可视区内（底边 ' + (g.row ? g.row[1] + g.row[3] : 'n/a') + ' ≤ innerH ' + g.innerH + '）');
       }
+      // ── [M] 列表容器门禁（T96）：分组页与令牌页同款（边框 + 面板底 + 内容在框内）
+      const CARD = '(function(){try{var f=document.getElementById("grpFrame");var d=f.contentDocument;function R(el){if(!el)return null;var b=el.getBoundingClientRect();return [Math.round(b.x),Math.round(b.y),Math.round(b.width),Math.round(b.height)];}var t=d.querySelector(".wrap table")||d.querySelector("table");var box=t?t.parentElement:null;if(!box)return JSON.stringify({err:"no container"});var cs=getComputedStyle(box);var th=d.querySelector("thead");var row=d.querySelector("#rows tr");var rows=d.querySelectorAll("#rows tr").length;function inside(i,o){if(!i||!o)return null;return i[1]>=o[1]-1&&(i[1]+i[3])<=(o[1]+o[3])+1;}var boxR=R(box);return JSON.stringify({cls:box.className,bg:cs.backgroundColor,bw:cs.borderTopWidth,box:boxR,thead:R(th),row:R(row),rows:rows,theadInside:inside(R(th),boxR),rowInside:row?inside(R(row),boxR):null});}catch(e){return JSON.stringify({err:String(e)});}})()';
+      for (const dim of [[1920, 1080], [375, 812]]) {
+        await send('Emulation.setDeviceMetricsOverride', { width: dim[0], height: dim[1], deviceScaleFactor: 1, mobile: false });
+        await sleep(700);
+        const c = JSON.parse(await ev(CARD));
+        console.log('    @' + dim[0] + 'x' + dim[1] + ' 容器几何: ' + JSON.stringify(c));
+        if (c.err) { ok(false, '[' + dim[0] + '] 容器采集失败：' + c.err); continue; }
+        ok(typeof c.bg === 'string' && c.bg !== 'rgba(0, 0, 0, 0)' && c.bg !== 'transparent', '[' + dim[0] + '] 容器有**非透明底**（实际 ' + c.bg + '）');
+        ok(parseFloat(c.bw) > 0, '[' + dim[0] + '] 容器有**边框**（borderTopWidth=' + c.bw + '）');
+        ok(c.theadInside === true, '[' + dim[0] + '] 容器覆盖表头（thead=' + JSON.stringify(c.thead) + ' ⊂ box=' + JSON.stringify(c.box) + '）');
+        ok(c.rows === 0 ? true : c.rowInside === true, '[' + dim[0] + '] 容器覆盖数据行（row=' + JSON.stringify(c.row) + '）');
+      }
+      // 空态：分组页的空态就是 tbody 里的一个 <tr colspan=6>（不是独立元素）。为把它量出来，
+      // 这里**注入空态行夹具**（只动探针实例的 DOM，用完即弃）—— 真实空态要求「一个分组都没有」，
+      // 而本探针前面刚建过夹具分组。
+      await ev('(function(){var d=document.getElementById("grpFrame").contentDocument;d.getElementById("rows").innerHTML="<tr><td colspan=6 class=muted>empty-state-fixture</td></tr>";})()');
+      await sleep(400);
+      for (const dim of [[1920, 1080], [375, 812]]) {
+        await send('Emulation.setDeviceMetricsOverride', { width: dim[0], height: dim[1], deviceScaleFactor: 1, mobile: false });
+        await sleep(500);
+        const e = JSON.parse(await ev(CARD));
+        console.log('    @' + dim[0] + 'x' + dim[1] + ' 空态几何: ' + JSON.stringify({ box: e.box, row: e.row, rowInside: e.rowInside }));
+        if (!e.err) ok(e.rowInside === true, '[' + dim[0] + '] 空态行在容器 bounds 内（row=' + JSON.stringify(e.row) + ' ⊂ box=' + JSON.stringify(e.box) + '）');
+      }
+      // ── [N] 唯一性门禁（T96）：可见标题 = 1、可见刷新控件 = 1
+      // 口径照 verify_wave2_pages.js 的 [b2]：只数**页面级**标题（iframe 内 h1 + 外壳 section 的直接子 h2/h3，
+      // **不数**内容分区标题）；可见性三判据；且**必须先把面板切成活动态**再量（否则 rect 全 0）。
+      await ev('window.__wb2api__.showPanelByKey("groups")');
+      await sleep(900);
+      const uniq = JSON.parse(await ev('(function(){function vis(el){if(!el)return false;var cs=getComputedStyle(el);if(cs.display==="none"||cs.visibility==="hidden")return false;var r=el.getBoundingClientRect();return r.width>0&&r.height>0;}function titles(root,direct){var ns=direct?root.querySelectorAll(":scope > h1, :scope > h2, :scope > h3"):root.querySelectorAll("h1");var out=[];for(var i=0;i<ns.length;i++){if(vis(ns[i]))out.push(ns[i].tagName+":"+ns[i].textContent.replace(/\\s+/g," ").trim().slice(0,24));}return out;}function refresh(root){var ns=root.querySelectorAll("button,a,[role=button]");var out=[];for(var i=0;i<ns.length;i++){var t=(ns[i].textContent||"").replace(/\\s+/g,"").trim();if(/刷新|Refresh/i.test(t)&&vis(ns[i]))out.push(t.slice(0,16));}return out;}var sec=document.querySelector("section[data-key=groups]");var d=document.getElementById("grpFrame").contentDocument;return JSON.stringify({shellTitles:titles(sec,true),pageTitles:titles(d,false),shellRefresh:refresh(sec),pageRefresh:refresh(d)});})()'));
+      const allT = (uniq.shellTitles || []).concat(uniq.pageTitles || []);
+      const allR = (uniq.shellRefresh || []).concat(uniq.pageRefresh || []);
+      console.log('        可见标题=' + JSON.stringify(allT) + ' 可见刷新控件=' + JSON.stringify(allR));
+      ok(allT.length === 1, '分组面板内**可见标题恰好 1 个**（实际 ' + allT.length + '：' + JSON.stringify(allT) + '）');
+      ok(allR.length === 1, '分组面板内**可见刷新控件恰好 1 个**（实际 ' + allR.length + '：' + JSON.stringify(allR) + '）');
+
       await send('Emulation.clearDeviceMetricsOverride');
     });
   } catch (e) {

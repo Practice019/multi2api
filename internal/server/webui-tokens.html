@@ -31,7 +31,10 @@
     padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
   }
   header h1 { margin: 0; font-size: 15px; font-weight: 600; }
-  main { max-width: 1100px; margin: 0 auto; padding: 16px 16px 40px; }
+  /* 宽度（T96）：原来是 max-width:1100px ⇒ 1920 下 iframe 内占比仅 **0.696**，左右各留 256px 空带。
+     与状态页 max-width:960px 是同一类问题（T92 按 1800px 修好，占比 0.988）。
+     这一页同样是**列表型**内容，铺满更好读；1800px 在 1580 下**不 binding**，只在超宽屏兜底。 */
+  main { max-width: 1800px; margin: 0 auto; padding: 16px 16px 40px; }
   .spacer { flex: 1 1 auto; }
   .dim { color: var(--dim); }
   .err { color: var(--err); }

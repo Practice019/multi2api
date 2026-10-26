@@ -48,9 +48,26 @@ const PAGES = [
   'internal/server/webui-tokens.html',
 ];
 
+// eolOf 决定「这一页用哪种换行」。
+//
+// ⚠⚠ 2026-10-27 修的真缺陷：**只统计块外文本**。
+//
+// 旧写法统计**整页**（含托管块自身），于是托管块的换行**投票给自己**：
+//   · webui-channels.html / webui-groups.html 的块是 CRLF、块外正文是 LF ——
+//     块自己那 1169 个 CRLF 恰好把票数顶成「CRLF 页」（对 1149/1146 个 LF，只赢 10 票左右）；
+//   · 一旦块内被扰动（手改、编辑器、旧 Mac 行尾、别的工具写入单 CR），那 1169 票消失，
+//     票数立刻翻成 LF ⇒ 再 sync 就把块改写成 LF ⇒ **与上一次的输出不再逐字节相同**
+//     （不动点不成立）。这正是 verify_theme_sync_idempotent.js 抓到的两条红：
+//     「块内分隔符人为改成 \r 后 回到规范的 CRLF 字节」。
+//
+// 契约：托管块不能决定自己的换行 —— 由**块外**文本决定；整页还没有块时（首次插入）
+// 才退回整页统计。
 function eolOf(text) {
-  const crlf = (text.match(/\r\n/g) || []).length;
-  const lf = (text.match(/\n/g) || []).length;
+  const s = text.indexOf(START);
+  const e = s < 0 ? -1 : text.indexOf(END, s);
+  const scope = (s >= 0 && e > s) ? (text.slice(0, s) + text.slice(e)) : text;
+  const crlf = (scope.match(/\r\n/g) || []).length;
+  const lf = (scope.match(/\n/g) || []).length;
   return crlf > lf / 2 ? '\r\n' : '\n';
 }
 

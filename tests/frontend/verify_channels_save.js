@@ -18,13 +18,58 @@
 // 模型重定向是 JSON↔可视化 + 批量生成），因此那两条断言换成对**新契约**的等价断言：
 // 表头 12 列、操作列右对齐、模型重定向文本域能被保存进 model_mapping。
 //
-// 用法：node verify_channels_save.js（自己起隔离实例，端口 7899；绝不碰 7863）
+// 用法：node verify_channels_save.js（自己起隔离实例；端口**现场探测空闲值**；绝不碰 7863）
+//
+// # 端口为什么不能写死（T97 追加）
+// 这里曾经写死 7899。它本身与 7863 无关，但**是典型的假红发生器**：探针是并发跑的
+// （run_frontend_suites / 各自手动起），硬编码端口必然在某个并发组合下撞车，
+// 报出来的是 "Error: 端口 7899 被占用（EADDRINUSE）"，看起来像功能回归，实际只是抢端口。
+// 所以：开跑前用 TCP bind 现场探一个空闲端口（CH_PORT 显式给定时仍以它为准）。
+//
+// ⚠ 与 lib_instance.js:180-186 的纪律**不冲突**，两件事说的是不同时机：
+//   · 那条禁止的是「**撞了之后偷偷换端口**」—— 那会把真实碰撞藏起来，让探针 A/B 串台；
+//   · 这里做的是「**开跑之前**先挑一个当前没人用的端口」，并且仍用 assertPortFree 复核、
+//     拿不到就直接红（复核失败时的提示会点名谁占着，见 lib_instance.js:203）。
+// 同理，CDP 端口与截图目录也改成每次运行唯一（并发跑时不互相覆盖）。
 'use strict';
 const path = require('path');
-const { startInstance, sleep } = require('./lib_instance.js');
+const net = require('net');
+const { startInstance, sleep, assertPortFree, whoOwnsPort } = require('./lib_instance.js');
 const { withChrome } = require('./lib_cdp.js');
 
-const PORT = Number(process.env.CH_PORT || 7899);
+// freePort 现场探一个空闲端口（bind 0 ⇒ 内核分配，随即释放，紧接着交给被测进程）。
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
+// resolvePort 解析实例端口：CH_PORT 给了就用它（显式指定 = 用户知道自己在做什么），
+// 否则现场探一个；两种情况都**复核一次**（被占即红，绝不悄悄换）。
+async function resolvePort(envName) {
+  const explicit = Number(process.env[envName] || 0);
+  if (explicit) {
+    const chk = await assertPortFree(explicit);
+    if (!chk.free) {
+      console.error('端口 ' + explicit + '（来自 ' + envName + '）已被占用：' + chk.reason +
+        '｜占用者：' + whoOwnsPort(explicit));
+      process.exit(1);
+    }
+    return explicit;
+  }
+  for (let i = 0; i < 8; i++) {
+    const p = await freePort();
+    const chk = await assertPortFree(p);
+    if (chk.free) { return p; }   // 极端竞态（刚释放就被别人抢）⇒ 再探一次
+  }
+  console.error('连着 8 次都没探到空闲端口 —— 本机端口资源异常，先查再说。');
+  process.exit(1);
+}
 const USER = 'chprobe';
 const PASS = 'chprobe2026';
 const PROBE_KEY = 'sk-probe-1234567890';
@@ -32,6 +77,10 @@ let fail = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
 
 (async () => {
+  // 每次运行都探一次 ⇒ 并发跑不撞车；打印出来便于事后对日志（端口应每次不同）。
+  const PORT = await resolvePort('CH_PORT');
+  const CDP_PORT = await resolvePort('CH_CDP_PORT');
+  console.log('  实例端口 = ' + PORT + '｜CDP 端口 = ' + CDP_PORT + '（现场探测；CH_PORT/CH_CDP_PORT 可显式覆盖）');
   const inst = await startInstance({ port: PORT, apiKey: 'probe-key-ch' });
   try {
     const reg = await fetch(inst.base + '/admin/auth/register', {
@@ -40,10 +89,11 @@ const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fai
     });
     ok(reg.status === 200, '建管理员账号（bootstrap）status=' + reg.status);
 
-    await withChrome({ port: 9471, url: inst.base + '/ui', token: false, width: 1400, height: 900,
-      outDir: path.resolve(__dirname, '..', '..', '.task', 'maximalism-v3', 'shots'),
+    await withChrome({ port: CDP_PORT, url: inst.base + '/ui', token: false, width: 1400, height: 900,
+      // 截图目录也按 pid 唯一化：并发跑时两条探针不会互相覆盖对方的现场截图。
+      outDir: path.resolve(__dirname, '..', '..', '.task', 'maximalism-v3', 'shots', 'ch-' + process.pid),
       readyExpr: 'document.readyState === "complete"' },
-      async ({ ev, errs, sleep: s2 }) => {
+      async ({ send, ev, errs, sleep: s2 }) => {
         await ev('(async () => { const r = await fetch("/admin/auth/login", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({username:' + JSON.stringify(USER) + ', password:' + JSON.stringify(PASS) + '})}); return r.status; })()');
         await ev('null'); // 让上面的 login 先落地
         await s2(200);
@@ -91,6 +141,57 @@ const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fai
         ok(hasName, '新行里能看到刚填的名字 probe-ch');
         const realErrs = errs.filter(function (e) { return !/favicon|example\.invalid/i.test(e); });
         ok(realErrs.length === 0, '全程没有未捕获异常（实际 ' + JSON.stringify(realErrs.slice(0, 3)) + '）');
+
+        // ── T97：该面板内「可见标题恰好 1 个 / 可见刷新控件恰好 1 个」──
+        // 口径（照 verify_wave2_pages.js 的 [b2]）：只数**页面级**标题 = iframe 内 h1
+        // + 外壳 section 的**直接子** h2/h3（不数内容分区标题）；刷新控件同理只数
+        // 外壳 section 头里那个 + iframe 内的页面级刷新按钮。
+        // 可见性三判据：display / visibility / 零尺寸（rect 全 0）。
+        // ⚠ 必须先切到该面板再量：display:none 下 rect 全是 0，会量出"0 个标题"的假绿。
+        // ⚠ 必须先回到**外壳**并切到该面板：本探针此前一直在 /ui/channels（页面单独一个
+        //   document，没有外壳、没有 chFrame）。外壳的导航项是脚本按 .content > section
+        //   的 DOM 顺序**动态生成**的（webui.html:2901），所以这里按文案"渠道"找它。
+        await ev('location.href = "/ui"');
+        await s2(3000);
+        const switched = await ev('(function(){' +
+          'var btns = Array.prototype.slice.call(document.querySelectorAll("#nav button, .nav button, nav button"));' +
+          'var b = btns.filter(function(x){ return x.textContent.trim().indexOf("渠道") >= 0; })[0];' +
+          'if (b) { b.click(); return "clicked:" + b.textContent.trim(); }' +
+          'var sec = document.querySelector("section[data-key=\\"channels\\"]");' +
+          'if (sec) { sec.hidden = false; sec.style.display = ""; return "forced:nav=" + btns.length; }' +
+          'return "none:nav=" + btns.length; })()');
+        console.log('       切换路径 = ' + switched);
+        await s2(700);
+        const COUNT_EXPR = '(function(){' +
+          'function vis(el){ if(!el) return false; var w=(el.ownerDocument.defaultView||window); var cs=w.getComputedStyle(el);' +
+          '  if(cs.display==="none"||cs.visibility==="hidden"||Number(cs.opacity)===0) return false;' +
+          '  var r=el.getBoundingClientRect(); return r.width>0&&r.height>0; }' +
+          'function desc(el){ var c=(typeof el.className==="string"&&el.className.trim())?("."+el.className.trim().split(/\\s+/).join(".")):""; return el.tagName.toLowerCase()+(el.id?("#"+el.id):"")+c; }' +
+          'var out={iframeTitles:[],shellTitles:[],iframeRefresh:[],shellRefresh:[]};' +
+          'var f=document.getElementById("chFrame"); var d=f&&f.contentDocument;' +
+          'if(d){ Array.prototype.forEach.call(d.querySelectorAll("h1"),function(x){ if(vis(x)) out.iframeTitles.push(desc(x)); });' +
+          '  Array.prototype.forEach.call(d.querySelectorAll("button"),function(x){ if(vis(x)&&x.textContent.trim()==="刷新") out.iframeRefresh.push(desc(x)); }); }' +
+          'var sec=document.querySelector("section[data-key=\\"channels\\"]");' +
+          'if(sec){ Array.prototype.forEach.call(sec.querySelectorAll(":scope > h2, :scope > h3"),function(x){ if(vis(x)) out.shellTitles.push(desc(x)); });' +
+          '  Array.prototype.forEach.call(sec.querySelectorAll(":scope > h2 button, :scope > h3 button"),function(x){ if(vis(x)) out.shellRefresh.push(desc(x)); }); }' +
+          'out.secVisible=vis(sec); return JSON.stringify(out); })()';
+        async function measure(width, height, label) {
+          if (width) {
+            await send('Emulation.setDeviceMetricsOverride', { width: width, height: height, deviceScaleFactor: 1, mobile: width < 500 });
+            await s2(400);
+          }
+          const m = JSON.parse(await ev(COUNT_EXPR));
+          const t = m.iframeTitles.length + m.shellTitles.length;
+          const rf = m.iframeRefresh.length + m.shellRefresh.length;
+          console.log('       [' + label + '] 标题=' + t + '（iframe ' + JSON.stringify(m.iframeTitles) + ' + 外壳 ' + JSON.stringify(m.shellTitles) + '）' +
+            ' 刷新=' + rf + '（iframe ' + JSON.stringify(m.iframeRefresh) + ' + 外壳 ' + JSON.stringify(m.shellRefresh) + '）面板可见=' + m.secVisible);
+          ok(t === 1, '[' + label + '] 该面板内可见**页面级标题**恰好 1 个（实际 ' + t + '：iframe ' + JSON.stringify(m.iframeTitles) + ' + 外壳 ' + JSON.stringify(m.shellTitles) + '）');
+          ok(rf === 1, '[' + label + '] 该面板内可见**刷新控件**恰好 1 个（实际 ' + rf + '：iframe ' + JSON.stringify(m.iframeRefresh) + ' + 外壳 ' + JSON.stringify(m.shellRefresh) + '）');
+        }
+        await measure(1920, 1000, '1920');
+        await measure(375, 812, '375');
+        await send('Emulation.clearDeviceMetricsOverride');
+        await s2(300);
       });
 
     // ── 后端确认（含明文边界）──

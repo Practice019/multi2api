@@ -41,6 +41,23 @@ function freePort() {
   });
 }
 
+// T98：模型面板的测量表达式（一次定义、三处复用：[e] 与 1920/375 两档）。
+// ⚠ 刻意**全用双引号 + 不写正则**：这段会被塞进模板字符串再送到 CDP，
+//   层层转义里最容易丢的就是反斜杠（本仓踩过：`\s` 变成 `s` 让守卫静默变松）。
+const MEASURE_MODELS = '(function(){'
+  + 'function vis(el){ if(!el) return false; var cs=getComputedStyle(el); if(cs.display==="none"||cs.visibility==="hidden") return false; var r=el.getBoundingClientRect(); return r.width>0&&r.height>0; }'
+  + 'function norm(s){ return String(s==null?"":s).split(String.fromCharCode(10)).join(" ").split(String.fromCharCode(9)).join(" ").split(" ").filter(function(x){return x!=="";} ).join(" ").trim(); }'
+  + 'function titlesIn(root,directOnly){ var out=[],ns=directOnly?root.querySelectorAll(":scope > h1, :scope > h2, :scope > h3"):root.querySelectorAll("h1"); for(var i=0;i<ns.length;i++){ if(vis(ns[i])) out.push(ns[i].tagName+":"+norm(ns[i].textContent).slice(0,24)); } return out; }'
+  + 'function refreshIn(root){ var out=[],ns=root.querySelectorAll("button,a,[role=button]"); for(var i=0;i<ns.length;i++){ var t=norm(ns[i].textContent); var hit=t.indexOf("刷新")>=0||t.toLowerCase().indexOf("refresh")>=0; if(hit&&vis(ns[i])) out.push((ns[i].id||ns[i].tagName)+":"+t.slice(0,16)); } return out; }'
+  + 'var sec=document.querySelector("section[data-key=modelcatalog]"), w=document.getElementById("mdFrame").contentWindow, d=w.document;'
+  + 'var main=d.querySelector("main"), footer=d.querySelector("footer"); var bottom=0;'
+  + '[main,footer].forEach(function(el){ if(el){ var r=el.getBoundingClientRect(); if(r.bottom>bottom) bottom=r.bottom; } });'
+  + 'var tw=d.querySelector("#panelModels .tw"), tr=d.querySelector("#modelRows tr");'
+  + 'return JSON.stringify({ shellTitles:titlesIn(sec,true), pageTitles:titlesIn(d), shellRefresh:refreshIn(sec), pageRefresh:refreshIn(d),'
+  + '  innerH:w.innerHeight, contentBottom:Math.round(bottom), blank:Math.round(w.innerHeight-bottom),'
+  + '  twH:tw?Math.round(tw.getBoundingClientRect().height):0, rowH:tr?Math.round(tr.getBoundingClientRect().height):0,'
+  + '  docScrollW:d.documentElement.scrollWidth, docClientW:d.documentElement.clientWidth }); })()';
+
 (async () => {
   let fail = 0, skip = 0;
   const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
@@ -254,7 +271,76 @@ function freePort() {
       })()`));
       if (all.err) { sk('找不到 #checkAll'); }
       else { ok(all.checkedSynth === 0, '全选后没有任何合成行被勾中（勾中 ' + all.checked + ' 行，其中合成 ' + all.checkedSynth + '）'); }
+
+      // ── T98：模型目录面板的**唯一性 / 撑满 / 空态**（防「两个标题/两个刷新」「下方一片空白」回归）
+      // 判据口径逐条照 [b2]（状态页那一版）：
+      //   · 只数**页面级标题** = iframe 内 h1 + 外壳 section 的直接子 h2/h3；
+      //   · 刷新控件 = 面板范围内文本含「刷新/Refresh」的 button/a/[role=button]；
+      //   · 可见性三判据（display / visibility / 零尺寸）—— 把按钮藏起来骗不过门禁；
+      //   · ⚠ 必须先 showPanelByKey 切到该面板：display:none 下 iframe 内 rect 全 0，会量出 0 个。
+      console.log('\n[e] 模型面板：标题与刷新唯一 + 内容撑满 + 空态可见（T98）');
+      await ev('window.__wb2api__.showPanelByKey("modelcatalog")');
+      await sleep(900);
+      const mo = JSON.parse(await ev(MEASURE_MODELS));
+      const moTitles = (mo.shellTitles || []).concat(mo.pageTitles || []);
+      const moRefresh = (mo.shellRefresh || []).concat(mo.pageRefresh || []);
+      console.log('        可见标题=' + JSON.stringify(moTitles) + ' 可见刷新控件=' + JSON.stringify(moRefresh));
+      console.log('        iframe 内高=' + mo.innerH + ' 内容底=' + mo.contentBottom + ' 空白=' + mo.blank
+        + ' .tw 高=' + mo.twH + ' 行高=' + mo.rowH + ' 溢出=' + mo.docScrollW + '/' + mo.docClientW);
+      ok(moTitles.length === 1, '模型面板内**可见标题恰好 1 个**（实际 ' + moTitles.length + '：' + JSON.stringify(moTitles) + '）');
+      ok(moRefresh.length === 1, '模型面板内**可见刷新控件恰好 1 个**（实际 ' + moRefresh.length + '：' + JSON.stringify(moRefresh) + '）');
+      // 撑满：T98 前实测 contentBottom=288 / innerH=814 ⇒ 下方 527px 无内容且无边框。
+      // 判据留 60px 余量（底部内边距 + 未来加一行提示都还在余量内），但不允许半屏空白。
+      ok(mo.blank <= 60, '内容撑满 iframe（空白 ' + mo.blank + 'px ≤ 60；修前 527px）');
+      ok(mo.twH > 200 && mo.twH > mo.rowH, '表格容器（有边框与底）跟着长高（.tw=' + mo.twH + 'px，单行 ' + mo.rowH + 'px）');
+      ok(mo.rowH > 0 && mo.rowH <= 40, '行高没被拉伸变形（单行 ' + mo.rowH + 'px，应在 26 上下）');
+      ok(mo.docScrollW <= mo.docClientW + 1, '模型页无横向溢出（scrollWidth ' + mo.docScrollW + ' ≤ clientWidth ' + mo.docClientW + '）');
+      // 空态：过滤到无匹配 ⇒ 必须**看到文案**（而不是一片空白）
+      const emp = JSON.parse(await ev(`(function(){
+        function vis(el){ if(!el) return false; var cs=getComputedStyle(el); if(cs.display==='none'||cs.visibility==='hidden') return false; var r=el.getBoundingClientRect(); return r.width>0&&r.height>0; }
+        function norm(s){ return String(s==null?'':s).split(String.fromCharCode(10)).join(' ').split(String.fromCharCode(9)).join(' ').split(' ').filter(function(x){return x!=='';}).join(' ').trim(); }
+        var w=document.getElementById('mdFrame').contentWindow, d=w.document;
+        var i=d.getElementById('search'); if(!i) return JSON.stringify({err:'no #search'});
+        i.value='zzz-no-such-model-t98'; i.dispatchEvent(new w.Event('input',{bubbles:true}));
+        var e=d.getElementById('modelsEmpty');
+        return JSON.stringify({ rows:d.querySelectorAll('#modelRows tr').length, visible:e?vis(e):false, text:e?norm(e.textContent).slice(0,70):null });
+      })()`));
+      ok(emp.rows === 0, '无匹配过滤后表格 0 行（实际 ' + emp.rows + '）');
+      ok(emp.visible && String(emp.text).length > 0, '空态可见且有文案（' + JSON.stringify(emp.text) + '）');
+      await ev(`(function(){ var w=document.getElementById('mdFrame').contentWindow, d=w.document; var i=d.getElementById('search'); if(i){ i.value=''; i.dispatchEvent(new w.Event('input',{bubbles:true})); } return true; })()`);
+      await sleep(400);
+      const back = JSON.parse(await ev(`JSON.stringify({rows: document.getElementById('mdFrame').contentDocument.querySelectorAll('#modelRows tr').length})`));
+      ok(back.rows > 0, '清空过滤后行数恢复（' + back.rows + ' 行）');
     });
+
+      // ── T98：同一组唯一性判据在 **1920 与 375** 两档都要过（口径同 [e]）
+      for (const vp of [[1920, 1080], [375, 900]]) {
+        const tag = '[f' + (vp[0] === 375 ? '-narrow' : '') + '] 模型面板 @' + vp[0] + 'x' + vp[1];
+        console.log('');
+        console.log(tag);
+        const m = await withChrome({
+          port: CH_PORT, url: base + '/ui', token: TOKEN, width: vp[0], height: vp[1],
+          outDir: path.join(os.tmpdir(), 'wave2-pages-shots'), readyExpr: 'document.readyState === "complete"',
+        }, async ({ ev, sleep }) => {
+          await sleep(2200);
+          // ⚠ 必须先切到这个面板（display:none 下 iframe 内 rect 全 0 ⇒ 会量出 0 个标题）
+          await ev('window.__wb2api__.showPanelByKey("modelcatalog")');
+          await sleep(1200);
+          return JSON.parse(await ev(MEASURE_MODELS));
+        });
+        const T = (m.shellTitles || []).concat(m.pageTitles || []);
+        const R = (m.shellRefresh || []).concat(m.pageRefresh || []);
+        console.log('        可见标题=' + JSON.stringify(T) + ' 可见刷新控件=' + JSON.stringify(R)
+          + ' iframe 内宽=' + m.docClientW + ' 溢出=' + m.docScrollW + ' 空白=' + m.blank);
+        ok(T.length === 1, tag + ' 可见标题恰好 1 个（实际 ' + T.length + '：' + JSON.stringify(T) + '）');
+        ok(R.length === 1, tag + ' 可见刷新控件恰好 1 个（实际 ' + R.length + '：' + JSON.stringify(R) + '）');
+        ok(m.docScrollW <= m.docClientW + 1, tag + ' 页面内无横向溢出（' + m.docScrollW + ' ≤ ' + m.docClientW + '）');
+        if (vp[0] >= 1000) {
+          ok(m.blank <= 60, tag + ' 内容撑满 iframe（空白 ' + m.blank + 'px ≤ 60）');
+        } else {
+          console.log('        （窄档只判唯一性与无横向溢出：窄屏内容比 iframe 高是正常的，允许纵向滚动）');
+        }
+      }
   } catch (e) {
     console.log('EXCEPTION: ' + (e && e.message));
     fail++;

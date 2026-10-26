@@ -483,6 +483,13 @@ function isMasked(k) {
         ok(!!box && box[3] > 0, '[' + w + '] ' + boxName + ' rect 高度 > 0（实际 ' + JSON.stringify(box) + '）');
         ok(!!box && (box[1] + box[3]) <= g.innerH + 1, '[' + w + '] ' + boxName + ' 在 iframe 可视区内（底边 ' + (box ? box[1] + box[3] : 'n/a') + ' ≤ innerH ' + g.innerH + '）');
         ok(tbH <= g.innerH, '[' + w + '] 工具栏没有超出 iframe 视口（' + tbH + ' ≤ ' + g.innerH + '）');
+        // T96：宽度占比（防「内容只占 0.696、两边大片空带」这类回归 —— 与状态页 max-width:960 同一类问题）
+        const mainW = g.els.main ? g.els.main[2] : 0;
+        if (g.innerW >= 1400) {
+          ok((mainW / g.innerW) >= 0.9, '[' + w + '] 内容列占 iframe 宽 ≥ 90%（实际 ' + mainW + '/' + g.innerW + ' = ' + (mainW / g.innerW).toFixed(3) + '；修前 1068/1580 = 0.676）');
+        } else {
+          console.log('        （窄屏 ' + g.innerW + 'px：跳过 90% 宽度断言）');
+        }
         ok(!!g.hit.kw && g.hit.kw.self === true, '[' + w + '] 搜索框中心 elementFromPoint 命中自身或其后代（实际 ' + JSON.stringify(g.hit.kw) + '）');
         ok(!!g.hit.btnNew && g.hit.btnNew.self === true, '[' + w + '] 新建按钮中心命中自身或其后代（实际 ' + JSON.stringify(g.hit.btnNew) + '）');
       }
