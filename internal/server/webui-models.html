@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>模型目录 · 网关</title>
+<!--
+  webui-models.html —— 模型管理页（PLAN-hyxapi-alignment §4 T14，对标 hyxapi 的
+  web/src/features/metadata/）。
+
+  # 为什么是独立文件而不是塞进 webui.html
+  与 webui-status.html / webui-channels.html / webui-groups.html 同一约定：
+  webui.html 已经一万六千行，往里加第 N 个页面等于把「新页面有没有写坏主控制台」
+  交给运气。独立文件改坏了只影响这一页。
+
+  # 与后端的关系（唯一的取数入口）
+    GET /ui/models/data —— 契约见 internal/server/models_channels.go 的
+    modelsCatalogJSON（同一个文件里还有 modelsUI，即本页的 HTML 出口）。
+    鉴权：同源 fetch，身份走 HttpOnly 会话 cookie（与父页/其它页同一份
+    h.uiIdentify）。页面里**不含任何密钥**，与 T7 的安全口径一致。
+
+  # 两个 tab 的语义（这不是排版偏好，是两个不同粒度的问题）
+    模型（Model）  ：一行 = 一个对外可见的模型 id（多上游下是 provider/xxx）
+    供应商（Vendor）：一行 = 一个提供方（上游 id 或渠道名）+ 它的模型数
+  合成行（synthetic）：渠道声明在用、但**上游目录里没有**这条名字
+    ⇒ 它由后端的合成行 API 补出来（store.SyntheticCatalogEntries），
+      所以目录里查不到它的"出身"。**不可勾选** —— 勾选的语义是"选中一条
+      目录里真实存在的模型"，而合成行恰恰是"目录里没有"，允许勾选就是在
+      鼓励用户对一件不存在的东西做操作。
+      ⚠ 不可勾选这件事由**数据**决定（接口下发 selectable，恒等于 !synthetic），
+      不由前端再推一遍：两处推导迟早分叉，表现是"看起来能勾、点了没反应"。
+
+  # 明确不做定价
+    PLAN §8 Q5 / §10 Q9 的裁定是 **B（不要）**：本仓是免费额度池，
+    hyxapi 的 model_pricing.go 与 /api/model-pricing/* 不移植。
+    所以本页没有价格、没有倍率、没有计量单位列 —— 这不是"还没做"。
+
+  # 视觉：照抄 webui.html 的 v2 变量（GitHub Dark/Light）
+    变量名与取值直接对齐 webui.html 的 :root 块，也与会话页/状态页一致。
+    刻意**不**引入新色值：一页新色值就等于全站多一套语言。
+    「外壳吵、数据静」：本页是数据区，1px 描边 + 圆角，不加硬投影。
+    表格按 AGENTS 硬要求：行高固定一行（26px，line-height 同值）、
+    white-space:nowrap、超宽走横向滚动（.tw{overflow-x:auto}）。
+
+  # 主题：先读 localStorage，再退回系统偏好
+    本页可能被 iframe 内嵌；同源 iframe 共享 localStorage，所以能直接读到
+    用户在控制台里选的主题（webui.html 存 'wb2api.theme'）。读不到才退回
+    prefers-color-scheme —— 那条路的已知代价是"父页手动切浅色而系统深色时不跟随"。
+
+  # AGPL-3.0 归属
+    见页脚 #credit：hyxapi/NOTICE:9-25 的 §7(b) 附加条款要求**修改版**在 UI
+    醒目位置保留那句归属文案，并保留指向原项目的**可见链接**（不是注释、
+    不是纯文本 URL）。本页的结构取自 New API 系的 metadata 特性，归属一并过来。
+-->
+<style>
+  /* ── 1. 调色板（逐个值抄自 webui.html 的 v2 :root，不新增色值）────────── */
+  :root, :root[data-theme="dark"] {
+    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
+    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5; --ok:#3FB950; --warn:#D29922; --err:#F85149;
+    --code-bg:#0D1117; --overlay:rgba(1,4,9,.72); --shadow:rgba(1,4,9,.5);
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
+  }
+  :root[data-theme="light"] {
+    --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
+    --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
+    --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
+  }
+  /* 兜底：主题脚本失败（隐私模式禁 localStorage）时仍跟系统偏好，不留一张黑纸。 */
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme]) {
+      --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
+      --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
+      --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
+    }
+  }
+
+  /* ── 2. 基础 ─────────────────────────────────────────────────────────── */
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:0 14px 14px;
+    background:var(--bg); color:var(--fg);
+    font:13px/1.5 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .dim { color:var(--dim); }
+  .err { color:var(--err); }
+  .spacer { flex:1 1 auto; }
+  code, .mono { font-family:var(--mono); }
+  button {
+    font:inherit; color:var(--fg); background:var(--panel2);
+    border:1px solid var(--line); border-radius:6px; padding:3px 10px; cursor:pointer;
+  }
+  button:hover { border-color:var(--acc); }
+
+  /* ── 3. 头部与 tab ───────────────────────────────────────────────────── */
+  header { display:flex; align-items:center; gap:10px; padding:12px 0 8px; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  #sum { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  #srcline { font-size:12px; }
+
+  #tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin-bottom:10px; }
+  #tabs button {
+    border:1px solid transparent; border-bottom:none; border-radius:6px 6px 0 0;
+    background:transparent; color:var(--dim); padding:6px 14px; margin-bottom:-1px;
+  }
+  #tabs button[aria-selected="true"] {
+    background:var(--panel); color:var(--fg);
+    border-color:var(--line); border-bottom:1px solid var(--panel);
+  }
+  #tabs .tabn { font-family:var(--mono); font-variant-numeric:tabular-nums; opacity:.75; }
+
+  /* ── 4. 工具栏 ───────────────────────────────────────────────────────── */
+  .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:0 0 8px; }
+  .toolbar input[type="search"] {
+    font:inherit; color:var(--fg); background:var(--panel);
+    border:1px solid var(--line); border-radius:6px; padding:3px 8px; min-width:240px;
+  }
+  .toolbar label.chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+  #legend { font-size:12px; }
+
+  /* ── 5. 表格（AGENTS 硬要求：固定行高 / nowrap / 横向滚动）──────────── */
+  .tw { overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+  table { border-collapse:collapse; width:100%; }
+  th, td { padding:0 10px; height:26px; line-height:26px; white-space:nowrap; text-align:left; }
+  thead th {
+    color:var(--dim); font-weight:600; font-size:12px;
+    border-bottom:1px solid var(--line); background:var(--panel2); position:sticky; top:0;
+  }
+  tbody tr + tr td { border-top:1px solid var(--line); }
+  tbody tr:hover td { background:var(--panel2); }
+  td.c-chk, th.c-chk { width:30px; text-align:center; padding:0 6px; }
+  td.num { font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right; width:90px; }
+  .name { font-family:var(--mono); }
+  .badge {
+    display:inline-block; font-size:11px; line-height:16px; padding:0 6px; border-radius:8px;
+    border:1px solid var(--line); color:var(--dim); vertical-align:1px;
+  }
+  .badge.synth { color:var(--warn); border-color:var(--warn); }
+  .badge.real { color:var(--ok); border-color:var(--ok); }
+  tr[data-synthetic="1"] td { background:repeating-linear-gradient(135deg,transparent 0 6px,rgba(210,153,34,.07) 6px 12px); }
+  tr[data-synthetic="1"] .name { color:var(--warn); }
+  .ep { font-size:11px; color:var(--dim); }
+  .empty { padding:18px 12px; color:var(--dim); }
+
+  /* ── 6. 错误框 ───────────────────────────────────────────────────────── */
+  #errbox {
+    display:none; align-items:center; gap:10px; margin:0 0 10px;
+    border:1px solid var(--err); border-radius:8px; padding:8px 10px; color:var(--err);
+  }
+  #errbox.on { display:flex; }
+
+  /* ── 7. 页脚 ─────────────────────────────────────────────────────────── */
+  footer {
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    margin-top:12px; padding-top:8px; border-top:1px solid var(--line);
+    color:var(--dim); font-size:12px;
+  }
+  #credit a { color:var(--acc); }
+</style>
+<script>
+// 主题必须在首次绘制**之前**定下来，否则会闪一下深色再变浅色。
+(function () {
+  try {
+    var t = localStorage.getItem('wb2api.theme');
+    if (t) { document.documentElement.setAttribute('data-theme', t); }
+  } catch (e) { /* 隐私模式 / 禁 localStorage：留给 prefers-color-scheme 兜底 */ }
+})();
+</script>
+</head>
+<body>
+
+<header>
+  <h1>模型目录</h1>
+  <span id="sum" aria-live="polite"></span>
+  <span id="srcline" class="dim"></span>
+  <span class="spacer"></span>
+  <button id="refresh" type="button" title="重新取一次目录">刷新</button>
+</header>
+
+<div id="errbox" role="alert">
+  <span id="errmsg"></span>
+  <button id="retry" type="button">重试</button>
+</div>
+
+<nav id="tabs" role="tablist" aria-label="目录视图">
+  <button id="tabModels" type="button" role="tab" data-tab="models"
+          aria-selected="true" aria-controls="panelModels">模型 <span class="tabn" id="tabnModels"></span></button>
+  <button id="tabVendors" type="button" role="tab" data-tab="vendors"
+          aria-selected="false" aria-controls="panelVendors" tabindex="-1">供应商 <span class="tabn" id="tabnVendors"></span></button>
+</nav>
+
+<main>
+  <section id="panelModels" role="tabpanel" aria-labelledby="tabModels">
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="过滤模型 id / 供应商…" autocomplete="off"
+             aria-label="过滤模型">
+      <label class="chk"><input id="checkAll" type="checkbox"> 全选</label>
+      <span id="selCount" class="dim"></span>
+      <span class="spacer"></span>
+      <span id="legend" class="dim">合成行 = 渠道声明在用、但上游目录里没有 ⇒ 不可勾选</span>
+    </div>
+    <div class="tw">
+      <table id="modelsTable">
+        <thead><tr>
+          <th class="c-chk"></th><th>模型 ID</th><th>供应商</th><th>端点</th><th>来源</th>
+        </tr></thead>
+        <tbody id="modelRows"></tbody>
+      </table>
+    </div>
+    <div id="modelsEmpty" class="empty" hidden></div>
+  </section>
+
+  <section id="panelVendors" role="tabpanel" aria-labelledby="tabVendors" hidden>
+    <div class="tw">
+      <table id="vendorsTable">
+        <thead><tr>
+          <th>供应商</th><th class="num">模型数</th><th class="num">其中合成</th><th>来源</th><th></th>
+        </tr></thead>
+        <tbody id="vendorRows"></tbody>
+      </table>
+    </div>
+    <div id="vendorsEmpty" class="empty" hidden></div>
+  </section>
+</main>
+
+<footer>
+  <span id="src">数据来源 GET /ui/models/data</span>
+  <span id="upd"></span>
+  <!-- AGPL-3.0 归属：hyxapi/NOTICE:9-25 的 §7(b) 附加条款要求**修改版**在 UI 醒目位置
+       保留这句归属文案，并保留一个指向原项目的**可见链接**（不是注释、不是纯文本 URL）。
+       所以它是可见文本 + <a href>，且不藏在折叠块里。
+       ⚠ 本仓是 MIT（PLAN §1 许可证行），这里保留的是**上游作品的归属**——
+         本页的结构/交互口径源自 New API 系的 metadata 特性，归属随行为一起过来。 -->
+  <span id="credit">Frontend design and development by <a href="https://github.com/QuantumNous/new-api" target="_blank" rel="noopener noreferrer">New API contributors</a>.</span>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+
+  var ENDPOINT = '/ui/models/data';
+
+  // 页面状态。**单一来源**：所有渲染都从 state 出发，任何交互只改 state 再 render
+  // —— 直接改 DOM 再读 DOM 是"两处真相"，本仓在别的页面吃过这个亏。
+  var state = {
+    models: [],
+    vendors: [],
+    source: '',
+    ready: false,
+    loaded: false,
+    tab: 'models',
+    filter: '',
+    vendorFilter: '',
+    updated: null
+  };
+
+  // ── 小工具 ────────────────────────────────────────────────────────────
+
+  // esc 把服务端可控的自由文本转义后再进 innerHTML。
+  //
+  // 本页能用 textContent 的地方一律用 textContent（见下面每处 appendChild）；
+  // 这个函数只服务于**静态骨架**里的少量拼接。留一个口子容易忘，所以显式写明：
+  // 凡来自接口的字符串（模型 id / 供应商名）**不得**走 innerHTML。
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text != null) { n.textContent = String(text); }
+    return n;
+  }
+
+  function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+
+  function setErr(msg) {
+    var box = document.getElementById('errbox');
+    document.getElementById('errmsg').textContent = msg || '';
+    box.className = msg ? 'on' : '';
+  }
+
+  function fmtClock(d) {
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+
+  // ── 取数 ──────────────────────────────────────────────────────────────
+  function load() {
+    return fetch(ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 401) { throw new Error('未认证（会话已过期）—— 请回到控制台重新登录'); }
+        if (!r.ok) { throw new Error('取数失败：HTTP ' + r.status); }
+        return r.json();
+      })
+      .then(function (data) {
+        state.models = (data && data.models) || [];
+        state.vendors = (data && data.vendors) || [];
+        state.source = (data && data.source) || '';
+        state.ready = !!(data && data.ready);
+        state.loaded = true;
+        state.updated = new Date();
+        setErr('');
+        render();
+      })
+      .catch(function (e) {
+        // 保留上一份数据（若有）：网络抖动时把表格清空，用户看到的是"模型没了"，
+        // 而那与"网关没接线"在界面上无法区分。只报错，不毁现场。
+        setErr('读取模型目录失败：' + (e && e.message ? e.message : e));
+      });
+  }
+
+  // ── 渲染：总览 ────────────────────────────────────────────────────────
+  function renderSummary() {
+    var synth = 0;
+    for (var i = 0; i < state.models.length; i++) { if (state.models[i].synthetic) { synth++; } }
+    document.getElementById('sum').textContent =
+      state.models.length + ' 个模型 / ' + state.vendors.length + ' 个供应商' +
+      (synth ? '（其中合成 ' + synth + '）' : '');
+    document.getElementById('tabnModels').textContent = '(' + state.models.length + ')';
+    document.getElementById('tabnVendors').textContent = '(' + state.vendors.length + ')';
+    document.getElementById('srcline').textContent =
+      state.source === 'store' ? 'SQL 目录' : (state.source === 'memory' ? '实时聚合（SQL 目录未接线）' : '');
+    document.getElementById('upd').textContent = state.updated ? '更新于 ' + fmtClock(state.updated) : '';
+  }
+
+  // ── 渲染：Model tab ───────────────────────────────────────────────────
+  function visibleModels() {
+    var q = state.filter.trim().toLowerCase();
+    return state.models.filter(function (m) {
+      if (state.vendorFilter && (m.vendor || '') !== state.vendorFilter) { return false; }
+      if (!q) { return true; }
+      return (m.name || '').toLowerCase().indexOf(q) >= 0
+        || (m.vendor || '').toLowerCase().indexOf(q) >= 0;
+    });
+  }
+
+  function modelRow(m) {
+    var tr = document.createElement('tr');
+    tr.className = 'modelrow';
+    tr.setAttribute('data-name', m.name || '');
+    tr.setAttribute('data-vendor', m.vendor || '');
+    // data-synthetic 是给 e2e/排障用的**稳定钩子**：页面上"合成行不可勾选"
+    // 这条判据必须能被不读源码的方式验到（见 tests/frontend 的用法）。
+    tr.setAttribute('data-synthetic', m.synthetic ? '1' : '0');
+
+    var tdChk = el('td', 'c-chk');
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'rowcheck';
+    if (!m.selectable) {
+      // 不可勾选 + 说明原因：只说"disabled"的控件等于一个哑掉的按钮。
+      cb.disabled = true;
+      cb.setAttribute('aria-disabled', 'true');
+      cb.title = '合成行：渠道声明在用，但上游目录里没有这条模型 —— 目录里没有的东西不能被勾选';
+    }
+    tdChk.appendChild(cb);
+    tr.appendChild(tdChk);
+
+    tr.appendChild(el('td', 'name', m.name || ''));
+
+    var tdV = el('td');
+    if (m.vendor) { tdV.appendChild(el('span', null, m.vendor)); }
+    else { tdV.appendChild(el('span', 'dim', '未知')); }
+    tr.appendChild(tdV);
+
+    var eps = (m.endpoints && m.endpoints.length) ? m.endpoints.join(' / ') : '';
+    if (eps) { tr.appendChild(el('td', 'ep', eps)); } else { tr.appendChild(el('td', 'ep', '—')); }
+
+    var tdSrc = el('td');
+    if (m.synthetic) {
+      var b = el('span', 'badge synth', '合成');
+      b.title = '渠道声明在用、但上游目录里没有 ⇒ 目录里查不到它的出身，且不可勾选';
+      tdSrc.appendChild(b);
+    } else {
+      tdSrc.appendChild(el('span', 'badge real', '上游目录'));
+    }
+    tr.appendChild(tdSrc);
+    return tr;
+  }
+
+  function renderModels() {
+    var rows = document.getElementById('modelRows');
+    clear(rows);
+    var list = visibleModels();
+    for (var i = 0; i < list.length; i++) { rows.appendChild(modelRow(list[i])); }
+
+    var empty = document.getElementById('modelsEmpty');
+    if (list.length === 0) {
+      empty.hidden = false;
+      if (!state.loaded) { empty.textContent = '正在读取模型目录…'; }
+      else if (!state.ready) {
+        empty.textContent = '目录未就绪：没有读到任何模型。可能是账号池为空（没有号就拿不到上游目录），'
+          + '或所有上游都暂时给不出目录 —— 请到「渠道」页确认渠道，或到「账号池」页确认账号。';
+      } else if (state.filter || state.vendorFilter) {
+        empty.textContent = '当前过滤条件下没有匹配的模型（共 ' + state.models.length + ' 条）。';
+      } else {
+        empty.textContent = '目录里没有模型。';
+      }
+    } else {
+      empty.hidden = true;
+      empty.textContent = '';
+    }
+  }
+
+  // ── 渲染：Vendor tab ──────────────────────────────────────────────────
+  function renderVendors() {
+    var rows = document.getElementById('vendorRows');
+    clear(rows);
+    for (var i = 0; i < state.vendors.length; i++) {
+      var v = state.vendors[i];
+      var tr = document.createElement('tr');
+      tr.className = 'vendorrow';
+      // 三个属性都是给 e2e/排障用的**稳定钩子**：供应商计数必须能被不读源码的
+      // 方式验到，而 td 上的属性在跨工具取值时容易被忽略（我第一版就放在 td 上）。
+      tr.setAttribute('data-vendor', v.name || '');
+      tr.setAttribute('data-count', String(v.models));
+      tr.setAttribute('data-synthetic-count', String(v.synthetic));
+      tr.appendChild(el('td', 'name', v.name || ''));
+
+      var tdN = el('td', 'num', v.models);
+      tr.appendChild(tdN);
+
+      var tdS = el('td', 'num', v.synthetic);
+      tr.appendChild(tdS);
+
+      var tdK = el('td');
+      if (v.synthetic > 0 && v.synthetic === v.models) {
+        tdK.appendChild(el('span', 'badge synth', '全部为渠道合成'));
+      } else if (v.synthetic > 0) {
+        tdK.appendChild(el('span', 'badge synth', '部分合成'));
+      } else {
+        tdK.appendChild(el('span', 'badge real', '上游目录'));
+      }
+      tr.appendChild(tdK);
+
+      var tdA = el('td');
+      var btn = el('button', null, '只看它');
+      btn.type = 'button';
+      btn.className = 'viewmodels';
+      btn.setAttribute('data-vendor', v.name || '');
+      btn.title = '切到「模型」页并只看这个供应商';
+      tdA.appendChild(btn);
+      tr.appendChild(tdA);
+      rows.appendChild(tr);
+    }
+    var empty = document.getElementById('vendorsEmpty');
+    if (state.vendors.length === 0) {
+      empty.hidden = false;
+      empty.textContent = state.loaded ? '没有供应商（目录未就绪）。' : '正在读取模型目录…';
+    } else {
+      empty.hidden = true;
+      empty.textContent = '';
+    }
+  }
+
+  function render() {
+    renderSummary();
+    renderModels();
+    renderVendors();
+  }
+
+  // ── 勾选 ──────────────────────────────────────────────────────────────
+  //
+  // 只统计**启用**的复选框：合成行是 disabled 的，把它算进去会让"已选 N"
+  // 与用户能看见的勾数量对不上（disabled 的框永远不可能是用户勾的）。
+  function selectedCount() {
+    var all = document.querySelectorAll('#modelRows .rowcheck');
+    var n = 0;
+    for (var i = 0; i < all.length; i++) { if (!all[i].disabled && all[i].checked) { n++; } }
+    return n;
+  }
+
+  function renderSelCount() {
+    document.getElementById('selCount').textContent = '已选 ' + selectedCount() + ' 条';
+  }
+
+  // ── tab 切换 ──────────────────────────────────────────────────────────
+  function switchTab(name, focus) {
+    if (name !== 'models' && name !== 'vendors') { return; }
+    state.tab = name;
+    var tabs = document.querySelectorAll('#tabs button[role="tab"]');
+    for (var i = 0; i < tabs.length; i++) {
+      var on = tabs[i].getAttribute('data-tab') === name;
+      tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
+      tabs[i].tabIndex = on ? 0 : -1;
+      if (on && focus) { tabs[i].focus(); }
+    }
+    document.getElementById('panelModels').hidden = name !== 'models';
+    document.getElementById('panelVendors').hidden = name !== 'vendors';
+  }
+
+  // ── 事件绑定 ──────────────────────────────────────────────────────────
+  document.getElementById('refresh').addEventListener('click', function () { void load(); });
+  document.getElementById('retry').addEventListener('click', function () { void load(); });
+
+  document.getElementById('search').addEventListener('input', function (e) {
+    state.filter = e.target.value || '';
+    renderModels();
+    renderSelCount();
+  });
+
+  document.getElementById('checkAll').addEventListener('change', function (e) {
+    var want = !!e.target.checked;
+    var all = document.querySelectorAll('#modelRows .rowcheck');
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].disabled) { continue; }   // 合成行不参与全选（它本来就不能被勾）
+      all[i].checked = want;
+    }
+    renderSelCount();
+  });
+
+  document.getElementById('modelRows').addEventListener('change', function (e) {
+    if (e.target && e.target.className === 'rowcheck') { renderSelCount(); }
+  });
+
+  document.getElementById('tabs').addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('button[data-tab]') : null;
+    if (b) { switchTab(b.getAttribute('data-tab'), false); }
+  });
+
+  // 键盘：tablist 的标准左右箭头切换（role=tab 的可访问性义务）。
+  document.getElementById('tabs').addEventListener('keydown', function (e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') { return; }
+    var next = state.tab === 'models' ? 'vendors' : 'models';
+    switchTab(next, true);
+  });
+
+  document.getElementById('vendorRows').addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('button.viewmodels') : null;
+    if (!b) { return; }
+    state.vendorFilter = b.getAttribute('data-vendor') || '';
+    document.getElementById('search').value = state.vendorFilter;
+    state.filter = state.vendorFilter;
+    switchTab('models', false);
+    renderModels();
+    renderSelCount();
+  });
+
+  switchTab('models', false);
+  renderSelCount();
+  void load();
+})();
+</script>
+</body>
+</html>

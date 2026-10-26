@@ -313,6 +313,16 @@ type Config struct {
 	// 字段映射就少一处「漏赋值一个字段」的机会，而漏字段的审计是静默错的
 	// （行数对了、内容错了，行数判据看不出来）。
 	Audit func(store.AuditLog) error
+
+	// RedisMode 当前生效的 Redis 模式（"" / "noop" / "redis"），由装配层注入。
+	//
+	// 状态页需要它来给出一句**准确的**话：没配 Redis 是本仓的**配置事实**
+	// （有 Noop + 本地文件降级，见 PLAN §1 硬结论 2），不是故障 —— 所以它只影响
+	// 一句 warning 文案与依赖卡上的一个标，**不参与 service.status 判档**。
+	//
+	// 空串 = 装配层没注入 ⇒ 按 noop 呈现（这正是未配置 Redis 时的真实形态，
+	// 与 internal/server 的 /status 用同一个默认值）。
+	RedisMode string
 }
 
 // SetOnAPIKeyRotated 注入管理钥匙轮换后的通知（装配层在 handler 构造完成后调用，
@@ -497,6 +507,9 @@ func New(cfg Config) *Handler {
 	h.register("GET /admin/logs/history", h.logsHistory)
 	h.register("GET /admin/stats", h.stats)
 	h.register("GET /admin/stats/series", h.statsSeries)
+	// 系统状态页的取数端点（T12）：宿主资源 + 进程运行时长 + 依赖健康 + 请求口径。
+	// 与上面几条同门禁（/admin/* 子树），实现见 system_status.go。
+	h.register("GET /admin/system-status", h.systemStatus)
 
 	h.register("GET /admin/settings", h.settings)
 	h.register("PUT /admin/settings", h.settingsUpdate)

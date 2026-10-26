@@ -379,3 +379,113 @@ func TestStoreModelCatalogSeed(t *testing.T) {
 	t.Logf("T09 实测：/v1/models 可见 chips 基数=%d（workbuddy 16 + codearts 7 + 渠道公开名 3）；"+
 		"models 行数=%d；vendors 行数=%d；其中合成行=%d", len(ids), got, vendors, synRows)
 }
+
+// ── T14：模型管理页的取数契约 ──────────────────────────────────────────────
+
+// TestModelsCatalogViewMarksSyntheticUnselectable 是 T14 的**无浏览器**判据。
+//
+// # 为什么除了 e2e 还要这一条
+//
+// 端到端（真实例 + 真 Chrome）验的是"页面画出来了、框点不动"；它能证明渲染，
+// 却证明不了**后端下发的契约**本身 —— 而"合成行不可勾选"的根在 selectable
+// 这个字段上（页面不许自己再推一遍，见 catalogViewModel 的注释）。前端一旦
+// 改成"自己按 synthetic 算"，e2e 照样绿、契约其实已经破了。这条钉住后端。
+//
+// 同时钉住：Vendor tab 的计数由 Model 行聚合而来（两处数字必须同源）。
+func TestModelsCatalogViewMarksSyntheticUnselectable(t *testing.T) {
+	resetDynamicCache()
+
+	// 与 T09 同一套夹具：两个上游 + 一条声明了 3 个模型的渠道
+	//（其中 kimi-k2.7 映射成公开名 pub-alias）。
+	s := testChannelStore(t)
+	if err := s.Upsert(&channelstore.Channel{
+		ID: "ch-view", Name: "视图渠道", BaseURL: "https://view.example.com/v1",
+		Status: channelstore.StatusEnabled, Priority: 10,
+		Models:   []string{"glm-5.2", "kimi-k2.7", "ch-only-model"},
+		ModelMap: map[string]string{"pub-alias": "kimi-k2.7"},
+	}); err != nil {
+		t.Fatalf("建渠道失败: %v", err)
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, baselineDynamicBody(), false
+	})
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, Provider: newTestRouter(false),
+		DefaultProvider: "workbuddy", OwnedBy: "workbuddy", MaxBodyMB: 1,
+		Channels: s,
+		ChannelProvider: func(id, baseURL string) gateway.Provider {
+			return openaicompat.NewOpenAICompat(id, baseURL)
+		},
+	})
+
+	models, vendors, _, ready := h.catalogView()
+	if !ready || len(models) == 0 {
+		t.Fatalf("目录视图应有数据，实际 ready=%v models=%d", ready, len(models))
+	}
+
+	var synth, real int
+	for _, m := range models {
+		if m.Synthetic {
+			synth++
+			if m.Selectable {
+				t.Errorf("★ 合成行 %q 被标成可选 —— 端点下发的 selectable 必须恒等于 !synthetic", m.Name)
+			}
+			if m.Vendor != "视图渠道" {
+				t.Errorf("合成行 %q 的供应商=%q want 视图渠道（合成行挂在声明它的渠道下）", m.Name, m.Vendor)
+			}
+			continue
+		}
+		real++
+		if !m.Selectable {
+			t.Errorf("真行 %q 不可选 —— 只有合成行才该被禁掉", m.Name)
+		}
+	}
+	if synth != 3 {
+		t.Errorf("合成行=%d want 3（ch-only-model / glm-5.2 / pub-alias）", synth)
+	}
+	if real != 23 {
+		t.Errorf("真行=%d want 23（workbuddy 16 + codearts 7）", real)
+	}
+
+	// Vendor tab 必须由同一批 Model 行聚合而来：三个供应商，模型数相加 = 总行数，
+	// 且只有渠道那个供应商带合成数。
+	byName := make(map[string]catalogViewVendor, len(vendors))
+	total := 0
+	for _, v := range vendors {
+		byName[v.Name] = v
+		total += v.Models
+	}
+	if total != len(models) {
+		t.Errorf("Vendor 行的模型数之和=%d 而 Model 行=%d —— 两张表已不同源", total, len(models))
+	}
+	for name, want := range map[string][2]int{
+		"workbuddy": {16, 0},
+		"codearts":  {7, 0},
+		"视图渠道":      {3, 3},
+	} {
+		got, ok := byName[name]
+		if !ok {
+			t.Errorf("Vendor tab 缺少 %q（实际 %v）", name, byName)
+			continue
+		}
+		if got.Models != want[0] || got.Synthetic != want[1] {
+			t.Errorf("Vendor %q = {models:%d synthetic:%d} want {models:%d synthetic:%d}",
+				name, got.Models, got.Synthetic, want[0], want[1])
+		}
+	}
+
+	// 未认证：页面 302 回 /ui（登录表单在那里），数据端点 401。
+	// ⚠ 数据端点必须是 401 而**不是** 200+空数组 —— 后者会让页面把"没登录"
+	//   显示成"一个模型都没有"。
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ui/models", nil))
+	if rec.Code != http.StatusFound {
+		t.Errorf("未认证 GET /ui/models 应 302，实际 %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ui/models/data", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("未认证 GET /ui/models/data 应 401，实际 %d（body=%s）", rec.Code, rec.Body.String())
+	}
+}

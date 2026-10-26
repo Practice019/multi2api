@@ -1194,6 +1194,39 @@ header h1{letter-spacing:0}
 #pane-ch td:last-child,
 #pane-keys td:last-child{min-width:200px;white-space:nowrap}
 /* ==== WB2API:MAXIMALISM:END ==== */
+/* ── 渠道列表：筛选 / 搜索 / 分页（T13，2026-10-26）────────────────────
+   ⚠ 必须放在 MAXIMALISM:END **之后**：上面那段由 tools/theme_sync.js 生成
+     （"勿手改"），写进去会被下一次同步整段覆盖掉。 */
+.chfilters{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}
+.chfilters select,.chfilters input{
+  padding:4px 7px;
+  border:2px solid var(--line);
+  background:var(--panel2);
+  color:var(--fg);
+  font:12px/1.2 var(--font-ui);
+}
+.chfilters input{width:230px}
+.chfilters .chips{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.chfilters .tchip{
+  padding:2px 8px;
+  border:2px solid var(--line);
+  background:var(--panel2);
+  color:var(--fg);
+  font:700 11px/1.6 var(--font-mono);
+  cursor:pointer;
+}
+.chfilters .tchip.on{background:var(--acc);color:var(--on-acc);border-color:var(--ink)}
+.chpager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--dim)}
+.chpager button{
+  padding:2px 10px;
+  height:24px;
+  border:2px solid var(--line);
+  background:var(--panel2);
+  color:var(--fg);
+  font:700 12px/1 var(--font-ui);
+  box-shadow:2px 2px 0 var(--hard);
+}
+.chpager button:disabled{opacity:.45;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -1211,7 +1244,25 @@ header h1{letter-spacing:0}
   <section id="pane-ch">
     <div class="bar">
       <button class="primary" onclick="openForm(null)">+ 新增渠道（只填 Base URL + API Key）</button>
+      <!-- T13：状态筛选字典（hyxapi controller/channel.go:52-65 的同一张字典）。
+           ⚠ 值是**字典键**（enabled / disabled / 2 / 3），不是"我们自己发明的数字"——
+             后端 parseChannelStatusFilter 认这同一套；空串 = 不过滤。 -->
+      <select id="flt-status" onchange="setStatusFilter(this.value)" title="按状态筛选（字典：enabled|1 / disabled|0 / 2 / 3）">
+        <option value="">全部状态</option>
+        <option value="enabled">启用</option>
+        <option value="disabled">停用（手动 + 自动）</option>
+        <option value="2">手动停用</option>
+        <option value="3">自动停用</option>
+      </select>
+      <!-- 搜索走**内存**（不每敲一个字打一次接口）：先把后端过滤后的全集取回来（最多 100 条），
+           再在本地过滤 + 分页。这是 hyxapi 的 search 路径形态（那边也是内存过滤内存分页）。 -->
+      <input id="flt-q" placeholder="搜索名称 / Base URL / 模型…" oninput="onSearchInput()">
       <span class="muted" id="stat"></span>
+    </div>
+    <div class="chfilters">
+      <span class="muted" style="font-size:12px">类型：</span>
+      <span class="chips" id="ch-types"></span>
+      <span class="muted" style="font-size:12px" id="ch-statusline"></span>
     </div>
     <div class="wrap"><table>
       <!-- ⚠ 2026-10-21 用户要求：**删掉「映射」这一列**（原话「不要这一列！！」）。
@@ -1229,6 +1280,15 @@ header h1{letter-spacing:0}
       </tr></thead>
       <tbody id="rows"></tbody>
     </table></div>
+    <!-- 分页条（内存分页）：页码状态只在这一页里，不改任何后端数据。
+         ⚠ "每页"是**本地**分页大小；对后端我们一次只取 100 条（hyxapi 的 page_size 上限），
+           超过 100 条时下面会明说"只加载了前 100 条"，而不是安静地少显示。 -->
+    <div class="chpager">
+      <span id="ch-pageinfo"></span>
+      <button type="button" id="ch-prev" onclick="gotoPage(chState.page - 1)">上一页</button>
+      <button type="button" id="ch-next" onclick="gotoPage(chState.page + 1)">下一页</button>
+      <span class="muted">每页 20 条 · 最多先加载 100 条（page_size 上限）</span>
+    </div>
     <p class="muted" style="margin-top:8px">
       停用的渠道**不产生对外能力** —— 它声明的模型会立刻从对外目录消失，但配置留着。
       「全部 key 停用」与「渠道停用」是两件事：前者是自动进入的状态，后者是你手动关的。
@@ -1586,17 +1646,95 @@ function collectMap() {
 // 留着它就是死代码，下一个人会以为列表还在用。
 function maskKey(k) { return k ? (k.length > 12 ? k.slice(0, 6) + '…' + k.slice(-4) : '已配置') : '—'; }
 
-// ---- 渠道页签 ----
-async function load() {
+// ---- 渠道页签（T13：状态筛选 + 内存搜索 + 内存分页）----
+//
+// # 数据流（别把它改成"每敲一个字打一次接口"）
+//
+//   load()       → GET /admin/channels?p=1&page_size=100&status=<字典值>[&type=N]
+//                  后端在内存里按 status/type 过滤 + 算 type_counts/status_counts，
+//                  回**当前筛选下的全集**（≤100 条）。
+//   applyView()  → 在 chState.rows 上做**内存搜索**（名称/Base URL/模型）与**内存分页**，
+//                  然后渲染表格 / 页码 / 计数条。
+//
+// 搜索不重新请求：渠道是手工维护的少量数据，敲一个字打一次接口只会让页面抖；
+// 这也是 hyxapi 的 search 路径形态（那边同样是内存过滤 + 内存分页）。
+//
+// ⚠ 100 是 hyxapi 的 page_size 上限（common/page_info.go:73-75），不是我们拍的。
+//   真被截断时**明说**（见 ch-pageinfo）—— 安静地少显示会被读成"渠道丢了"。
+const CH_PAGE_SIZE = 20;    // 本地每页条数（与后端缺省一致）
+const CH_LOAD_SIZE = 100;   // 一次向后端要多少条 = page_size 上限
+const chState = {
+  page: 1, status: '', keyword: '', type: null,
+  rows: [], total: 0, typeCounts: {}, statusCounts: {},
+};
+
+function onSearchInput() {
+  chState.keyword = document.getElementById('flt-q').value.trim();
+  chState.page = 1;
+  applyView();
+}
+function setStatusFilter(v) {
+  chState.status = v;
+  chState.page = 1;
+  load();          // status 是**服务端**过滤（它决定 type_counts/status_counts 的口径），必须重取
+}
+function typeLabel(t) { return t === '0' || t === 0 ? 'OpenAI 兼容' : ('类型 ' + t); }
+function toggleTypeFilter(t) {
+  // 再点同一个 chip = 取消过滤（不然只能靠刷新页面才能回去）
+  chState.type = chState.type === t ? null : t;
+  chState.page = 1;
+  load();
+}
+function gotoPage(n) {
+  const pages = Math.max(1, Math.ceil(visibleRows().length / CH_PAGE_SIZE));
+  chState.page = Math.min(Math.max(1, n), pages);
+  applyView();
+}
+// visibleRows = 后端已过滤的全集 ∩ 本地搜索词。搜索**只在这里**做一次。
+function visibleRows() {
+  const k = chState.keyword.toLowerCase();
+  if (!k) { return chState.rows; }
+  return chState.rows.filter(c => {
+    const hay = ((c.name || '') + ' ' + (c.base_url || '') + ' ' + (c.id || '') + ' ' + (c.models || []).join(' ')).toLowerCase();
+    return hay.indexOf(k) >= 0;
+  });
+}
+function renderChips() {
+  const box = document.getElementById('ch-types');
+  const keys = Object.keys(chState.typeCounts || {}).sort();
+  box.innerHTML = keys.length
+    ? keys.map(t => '<span class="tchip' + (chState.type === t ? ' on' : '') + '" title="按类型筛选（再点一次取消）" onclick="toggleTypeFilter(\'' + t + '\')">'
+        + esc(typeLabel(t)) + ' · ' + chState.typeCounts[t] + '</span>').join('')
+    : '<span class="muted" style="font-size:12px">（无）</span>';
+  // 状态分布：只在**按状态筛选时**显示，且明说它是"全部渠道"的口径
+  //（后端的 status_counts 刻意不受 status 过滤影响，否则选中某个状态后其它状态全塌成 0）。
+  const sc = chState.statusCounts || {};
+  const st = document.getElementById('ch-statusline');
+  st.textContent = chState.status
+    ? '（全部渠道：启用 ' + (sc['1'] || 0) + ' · 手动停用 ' + (sc['2'] || 0) + ' · 自动停用 ' + (sc['3'] || 0) + '）'
+    : '';
+}
+function applyView() {
   const tbody = document.getElementById('rows');
-  tbody.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
-  try {
-    const d = await api('/admin/channels');
-    const list = d.channels || d.data || [];
-    document.getElementById('stat').textContent =
-      '共 ' + list.length + ' 条 · 启用 ' + list.filter(c => c.status === 1).length + ' 条';
-    if (!list.length) { tbody.innerHTML = '<tr><td colspan="6" class="muted">还没有渠道 —— 点左上「新增渠道」，只填 Base URL + API Key 即可</td></tr>'; return; }
-    tbody.innerHTML = list.map(c => {
+  const rows = visibleRows();
+  const pages = Math.max(1, Math.ceil(rows.length / CH_PAGE_SIZE));
+  if (chState.page > pages) { chState.page = pages; }
+  const start = (chState.page - 1) * CH_PAGE_SIZE;
+  const pageRows = rows.slice(start, start + CH_PAGE_SIZE);
+
+  // stat：当前**筛选结果**的口径（共几条 / 搜索筛出几条 / 其中启用几条）。
+  // ⚠ 启用数按 rows 现算，不用后端的 status_counts —— 那是"未按状态筛选"的全量口径，
+  //   拿它在这里显示会得到"共 5 条 · 启用 20 条"这种自相矛盾的一行。
+  const onCount = rows.filter(c => c.status === 1).length;
+  let stat = '共 ' + chState.total + ' 条';
+  if (rows.length !== chState.total) { stat += ' · 筛出 ' + rows.length + ' 条'; }
+  stat += ' · 启用 ' + onCount + ' 条';
+  document.getElementById('stat').textContent = stat;
+
+  if (!pageRows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">还没有渠道 —— 点左上「新增渠道」，只填 Base URL + API Key 即可</td></tr>';
+  } else {
+    tbody.innerHTML = pageRows.map(c => {
       const on = c.status === 1;
       const tag = on ? '<span class="tag on-t">启用</span>'
         : (c.status === 2 ? '<span class="tag warn-t">手动停用</span>' : '<span class="tag off-t">自动停用</span>');
@@ -1620,7 +1758,34 @@ async function load() {
         + '<button class="ch-act danger" onclick="del(\'' + esc(c.id) + '\')">删除</button>'
         + '</td></tr>';
     }).join('');
+  }
+  // 分页信息：加载被上限截断时**明说**（否则"渠道少了"会被当成丢数据）
+  let info = '第 ' + chState.page + ' / ' + pages + ' 页 · 本页 ' + pageRows.length + ' 条';
+  if (chState.total > chState.rows.length) {
+    info += ' · ⚠ 筛选后共 ' + chState.total + ' 条，只加载了前 ' + chState.rows.length + ' 条（page_size 上限 ' + CH_LOAD_SIZE + '）';
+  }
+  document.getElementById('ch-pageinfo').textContent = info;
+  document.getElementById('ch-prev').disabled = chState.page <= 1;
+  document.getElementById('ch-next').disabled = chState.page >= pages;
+  renderChips();
+}
+async function load() {
+  const tbody = document.getElementById('rows');
+  tbody.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
+  try {
+    const qs = ['p=1', 'page_size=' + CH_LOAD_SIZE];
+    if (chState.status) { qs.push('status=' + encodeURIComponent(chState.status)); }
+    if (chState.type !== null) { qs.push('type=' + encodeURIComponent(chState.type)); }
+    const d = await api('/admin/channels?' + qs.join('&'));
+    // channels 是本仓既有键、items 是 hyxapi 的键 —— 后端**同一个数组**给两份，
+    // 这里两个都认（换任何一个后端版本都不会白屏）。
+    const list = d.channels || d.items || d.data || [];
+    chState.rows = list;
+    chState.total = (typeof d.total === 'number') ? d.total : list.length;
+    chState.typeCounts = d.type_counts || {};
+    chState.statusCounts = d.status_counts || {};
     window.__channels = list;   // 供表单读原值（避免为编辑再打一次接口）
+    applyView();
   } catch (e) {
     tbody.innerHTML = '<tr><td colspan="6" class="err">' + esc(e.message) + '</td></tr>';
   }
@@ -1717,7 +1882,14 @@ async function del(id) {
   try { await api('/admin/channels/delete', { method: 'POST', body: JSON.stringify({ id: id }) }); load(); }
   catch (e) { alert(e.message); }
 }
+// reveal 取**明文** key —— 高敏操作，先二次确认（计划 §0.5：不搬 hyxapi 的
+// AdminAuth→RootAuth→CriticalRateLimit→SecureVerification 四段式链路，只加二次确认 UI）。
+//
+// 为什么列表行这一处必须有确认，而"管理 Key"窗口不必：后者是用户主动点开的显式动作
+// （按钮上就写着"管理 Key"），而前者是在浏览列表时**顺手**就能点到的一个按钮 ——
+// 明文一旦画到屏幕上（或被人从背后看到）就收不回来了。
 async function reveal(id) {
+  if (!confirm('显示该渠道的明文 Key？\n\n这是一次高敏操作：明文会直接出现在页面上，请确认周围无人旁观。')) { return; }
   try {
     const d = await api('/admin/channels/reveal', { method: 'POST', body: JSON.stringify({ id: id }) });
     alert('Key:\n' + (d.key || d.keys || JSON.stringify(d)));
