@@ -138,9 +138,25 @@ type ChannelSeedStats struct {
 	Abilities int
 	// Rows 逐行对照（顺序 = seed 列表顺序）。
 	Rows []ChannelSeedRow
+
+	// ── T82：默认上游不再 seed 成渠道行之后，统计里换成这两个数 ──
+	//
+	// Marked  本次给"历史 seed 行"补上 setting 标记的行数（迁移动作，幂等）。
+	// Removed 本次真正删掉的 seed 渠道行数（第二次启动必为 0 —— 幂等判据看它）。
+	Marked  int
+	Removed int
 }
 
 // SeedChannels 按 seeds 建/补渠道行，并展开每条渠道声明的模型为能力行。
+//
+// ⚠⚠ T82 之后**生产启动路径不再调用它**：用户指令「默认上游不要放入渠道里面」。
+// 默认上游（13 个注册点）是**账号池上游**，它们不走渠道路径（渠道只服务
+// base_url + api_key 型上游），把它们写成渠道行会让渠道页出现"看起来能选、
+// 实际不是渠道"的行。保留这个函数有两个明确用途：
+//
+//	① 测试用它构造"历史遗留的 seed 行"，来验清理判据（PurgeRegistrySeedChannels）；
+//	② 将来若有"显式把某份清单写成渠道"的真实需求，这里是唯一实现，
+//	   但调用方必须先想清楚"它到底是不是渠道"。
 //
 // 整批在一个事务里：渠道行与它的能力行必须一起出现或一起不出现，
 // 否则中途失败会留下"渠道在、能力不在"的半截状态 —— 而能力索引正是选路读的那张表。
@@ -183,6 +199,152 @@ func SeedChannels(seeds []ChannelSeed) (ChannelSeedStats, error) {
 		return ChannelSeedStats{}, err
 	}
 	return st, nil
+}
+
+// RegistrySeedSettingKey 是 channels.setting JSON 里「这行是注册点 seed 出来的」标记键。
+//
+// # 为什么标记写在 setting 而不是靠名字猜
+//
+// "名字等于某个 provider id"不是身份判据：用户完全可以建一条真的叫 workbuddy 的
+// Key 型渠道。身份必须来自**显式写入的事实**，所以 seed 出来的行在 setting 里留
+// 一个标记；清理只认标记（以及"从没被标记过、但确实是历史 seed 形态"的那一批，
+// 见 MarkRegistrySeedChannels 的两条判据）。
+const RegistrySeedSettingKey = "registry_seed"
+
+// hasRegistrySeedMark 判断一行 setting 里有没有 seed 标记（解析失败一律当作"没有"）。
+func hasRegistrySeedMark(setting *string) bool {
+	if setting == nil || strings.TrimSpace(*setting) == "" {
+		return false
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(*setting), &m); err != nil {
+		return false
+	}
+	v, ok := m[RegistrySeedSettingKey].(bool)
+	return ok && v
+}
+
+// mergeRegistrySeedMark 把 seed 身份合并进 setting（保留原有键；非 JSON 的旧值不硬覆盖）。
+func mergeRegistrySeedMark(setting *string, s ChannelSeed) string {
+	m := map[string]any{}
+	if setting != nil && strings.TrimSpace(*setting) != "" {
+		// 解析失败就**另起一个对象**，把原值塞进 raw 键保存 —— 不静默丢掉用户/旧版写的内容。
+		if err := json.Unmarshal([]byte(*setting), &m); err != nil {
+			m = map[string]any{"registry_seed_prev_setting": *setting}
+		}
+	}
+	m[RegistrySeedSettingKey] = true
+	m[RegistrySeedSettingKey+"_provider"] = s.Provider
+	m[RegistrySeedSettingKey+"_source"] = s.Source
+	m[RegistrySeedSettingKey+"_at"] = time.Now().Unix()
+	b, err := json.Marshal(m)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// MarkRegistrySeedChannels 给"历史 seed 行"补上显式标记（迁移动作，幂等）。
+//
+// # 两条判据（缺一不可，都不靠名字猜）
+//
+//	① (name, base_url) 与本份 seed 清单**逐字段相等** —— 这正是 SeedChannels 当年
+//	   用来判身份的那对键（见 ensureChannel：WHERE name = provider AND base_url = baseURL），
+//	   所以命中的**就是**当年 seed 写下的那些行；
+//	② external_id 为空 —— 真实渠道由渠道 CRUD/回填产生，**必有** ch-* 形式的外部 id
+//	   （B3/T13 的契约）。这两条一起用，真实渠道不可能被误标。
+//
+// 第二遍调用返回 0（已经标记过的不再重复写）。
+func MarkRegistrySeedChannels(seeds []ChannelSeed) (int, []string, error) {
+	if DB == nil {
+		return 0, nil, ErrNotOpen
+	}
+	type ident struct{ provider, source string }
+	lookup := make(map[string]ident, len(seeds))
+	for _, s := range seeds {
+		lookup[s.Provider+"|"+s.BaseURL] = ident{provider: s.Provider, source: s.Source}
+	}
+	var marked int
+	var names []string
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var rows []Channel
+		if err := tx.Omit("key").Find(&rows).Error; err != nil {
+			return fmt.Errorf("store: 读渠道行失败: %w", err)
+		}
+		for i := range rows {
+			ch := &rows[i]
+			if ch.ExternalID != "" {
+				continue // 真实渠道：绝不碰
+			}
+			if hasRegistrySeedMark(ch.Setting) {
+				continue // 已标记
+			}
+			base := ""
+			if ch.BaseURL != nil {
+				base = *ch.BaseURL
+			}
+			id, ok := lookup[ch.Name+"|"+base]
+			if !ok {
+				continue // 既没标记、也不是清单里那 13 个身份 ⇒ 用户自己的行
+			}
+			next := mergeRegistrySeedMark(ch.Setting, ChannelSeed{
+				Provider: id.provider, BaseURL: base, Source: id.source,
+			})
+			if next == "" {
+				return fmt.Errorf("store: 渠道 %d 的 seed 标记序列化失败", ch.ID)
+			}
+			if err := tx.Model(&Channel{}).Where("id = ?", ch.ID).Update("setting", next).Error; err != nil {
+				return fmt.Errorf("store: 写渠道 %d 的 seed 标记失败: %w", ch.ID, err)
+			}
+			marked++
+			names = append(names, ch.Name)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return marked, names, nil
+}
+
+// DeleteRegistrySeedChannels 删掉所有带 seed 标记的渠道行（**连同能力行**，同一事务）。
+//
+// 幂等：标记行删完后第二遍找不到任何东西，返回 0。
+// 为什么连能力行一起删：能力索引是选路读的那张表 —— 删了渠道却留下能力行，
+// 会让"这条渠道还能被选中"变成真的（悬空 channel_id）。
+func DeleteRegistrySeedChannels() (int, []string, error) {
+	if DB == nil {
+		return 0, nil, ErrNotOpen
+	}
+	var names []string
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var rows []Channel
+		if err := tx.Omit("key").Find(&rows).Error; err != nil {
+			return fmt.Errorf("store: 读渠道行失败: %w", err)
+		}
+		ids := make([]int64, 0, len(rows))
+		for i := range rows {
+			if hasRegistrySeedMark(rows[i].Setting) {
+				ids = append(ids, rows[i].ID)
+				names = append(names, rows[i].Name)
+			}
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if derr := tx.Where("channel_id IN ?", ids).Delete(&Ability{}).Error; derr != nil {
+			return fmt.Errorf("store: 删 seed 渠道的能力行失败: %w", derr)
+		}
+		res := tx.Where("id IN ?", ids).Delete(&Channel{})
+		if res.Error != nil {
+			return fmt.Errorf("store: 删 seed 渠道行失败: %w", res.Error)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return len(names), names, nil
 }
 
 // ExpandAbilities 把 models 展开成 (group, model, channelID) 能力行（缺了才建）。

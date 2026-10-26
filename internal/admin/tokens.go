@@ -29,6 +29,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -172,6 +173,37 @@ type tokenUpdateRequest struct {
 	tokenCreateRequest
 }
 
+// syncAuthIndex 把刚写过的令牌同步进**网关鉴权索引**（T81）。
+//
+// # 为什么每个写路径都必须调它（这是一次真实事故）
+//
+// 本文件的 CRUD **直写 tokens 表**（store.CreateToken / SaveToken /
+// UpdateTokenStatus / DeleteToken），而网关的鉴权只问 apikey.Store.Validate ——
+// 那个索引只在它接管 SQL 时全量重建一次。漏调的后果是：
+//
+//	/admin/tokens 建的令牌在**列表/详情/明文**上都好端端的，
+//	打 /v1/chat/completions 却一律 401 invalid_api_key ——
+//	CRUD 面全绿、只有真打一次才暴露（重启后又会"自己好"，因为重建了索引）。
+//
+// 参数是**行 id**：apikey.Store.SyncTokenByID 自己回读库里的权威行 —— 行在就建/更新，
+// 行不在（含软删）就摘掉。所以新建/改名/改状态/改额度/删除/批量删都只需一句
+// "我动过这些 id"，不必各自维护一份要同步的字段清单。
+//
+// ⚠ 写路径**新增**时必须跟着加一句，否则又会出现"CRUD 能写、网关不认"。
+// 这条不变量有 Go 测试钉住：tokens_authsync_test.go 的 TestAdminCreatedTokenAuthenticatesOnGateway。
+func (h *Handler) syncAuthIndex(ids ...int) {
+	keys := h.apiKeysStore()
+	if keys == nil || len(ids) == 0 {
+		// 未注入 apikey.Store（如 handler 级单测）= 没有网关鉴权这一层，无索引可同步。
+		return
+	}
+	if err := keys.SyncTokensByID(ids); err != nil {
+		// 索引没跟上 ≠ 本次写入失败（数据已落库）。记日志：下一次鉴权会走
+		// "未命中回库"兜底，所以这只是可观测性问题，不是数据问题。
+		log.Printf("admin: 令牌写入后同步鉴权索引失败（下次鉴权会回库兜底）: %v", err)
+	}
+}
+
 // ── 端点实现 ──────────────────────────────────────────────────────────────
 
 // tokensList GET /admin/tokens?p=&page_size=&keyword=
@@ -263,6 +295,14 @@ func (h *Handler) tokensCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "创建令牌失败")
 		return
 	}
+	// 新建的每一条都要进网关鉴权索引（否则 CRUD 能写、/v1/* 401，见 syncAuthIndex 注释）。
+	createdIDs := make([]int, 0, len(result.Items))
+	for _, it := range result.Items {
+		if id, ok := it["id"].(int); ok {
+			createdIDs = append(createdIDs, id)
+		}
+	}
+	h.syncAuthIndex(createdIDs...)
 	// 部分成功也用 200：请求本身没毛病，是其中某几条撞了唯一约束之类的运行期问题。
 	// 用 4xx/5xx 会让前端把**已经建好的那些**当成"全失败"，那才是真的误导；
 	// 前端据 result.partial / result.failed 决定怎么提示。
@@ -293,6 +333,7 @@ func (h *Handler) tokensUpdate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "更新状态失败")
 			return
 		}
+		h.syncAuthIndex(req.ID) // 状态变更必须**立刻**影响鉴权
 		tok.Status = req.Status
 		writeJSON(w, http.StatusOK, tok.Masked())
 		return
@@ -308,6 +349,7 @@ func (h *Handler) tokensUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存令牌失败")
 		return
 	}
+	h.syncAuthIndex(tok.ID)
 	writeJSON(w, http.StatusOK, tok.Masked())
 }
 
@@ -334,6 +376,7 @@ func (h *Handler) tokensDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deleted := 0
+	deletedIDs := make([]int, 0, len(ids))
 	for _, id := range ids {
 		n, err := store.DeleteToken(id)
 		if err != nil {
@@ -341,7 +384,12 @@ func (h *Handler) tokensDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		deleted += int(n)
+		if n > 0 {
+			deletedIDs = append(deletedIDs, id)
+		}
 	}
+	// 软删的行不会自动离开鉴权索引 ⇒ 删除必须同步，否则被删的令牌还能用。
+	h.syncAuthIndex(deletedIDs...)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "requested": len(ids)})
 }
 

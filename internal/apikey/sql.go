@@ -579,6 +579,134 @@ func (s *Store) upsertLocked(k *Key) error {
 	return nil
 }
 
+// ── 外部写入的索引同步（T81）────────────────────────────────────────────
+//
+// # 为什么需要它（一次真实事故）
+//
+// internal/admin/tokens.go 的令牌 CRUD **直写 tokens 表**（store.CreateToken /
+// SaveToken / UpdateTokenStatus / DeleteToken），而网关的鉴权只问本包的 Validate ——
+// 而本索引只在 AttachSQL() 时全量重建一次。于是「/admin/tokens 新建的令牌」在
+// 鉴权面上**不存在**：打 /v1/* 一律 401 invalid_api_key，而 CRUD 面怎么看都是好的
+// （列表里有、详情对、明文能取）—— 重启后又能用（全量重建）。
+//
+// # 为什么不让 admin 走本包的 Create（否掉的那条路）
+//
+// apikey.Create* 生成的是 sk-<16hex> 的 ID，而 tokens 表的契约（A2/C3）是 48 位
+// GenerateTokenKey 且无前缀；Create 的签名也表达不了 ExpiredTime / AllowIps /
+// GroupSwitch*。走那条路要么改 key 形态（对外行为回退），要么把同一套映射抄第二遍。
+// 所以：**保持 store.Token 单一写路径，写完把本索引叫醒**。
+//
+// # 为什么参数是 id 而不是"把行传进来"
+//
+// 传行进来要求调用方保证传对内容与顺序；SyncTokenByID 自己**回读库里的权威行**：
+// 行在 ⇒ 建/更新索引；行不在（含已软删）⇒ 摘掉索引。一个方法覆盖新建/改名/改状态/
+// 改额度/改过期/删除/批量删 —— 调用方只需要说"我动过 id=X"。
+//
+// # 与 Validate 的关系
+//
+// 这两条是**互补**的：本函数保证"本进程的写路径不漏"；Validate 在索引未命中时会
+// 回库找一次（warmFromSQL）保证"任何一条我没想到的写路径也仍然能用"。反过来，
+// 防"陈旧条目"（把已删/已禁用的令牌继续放行）只能靠写路径同步 —— 所以 admin 那边
+// 每一条写路径都必须调用本函数（有 Go 测试钉住，见 admin/tokens_authsync_test.go）。
+
+// SyncTokenByID 把某一行令牌的最新状态同步进鉴权索引（外部写路径写完调它）。
+//
+// 行不存在（或已软删）⇒ 摘掉索引，于是"删除立刻让令牌失效"不需要重启。
+func (s *Store) SyncTokenByID(id int) error {
+	if s == nil || id <= 0 {
+		return nil
+	}
+	if err := s.AttachSQL(); err != nil {
+		return err
+	}
+	if !s.sqlMode.Load() {
+		// 库不可用 ⇒ 这次写入走的是 JSON 模式，tokens 表根本没被碰过。
+		return nil
+	}
+	row, err := store.GetTokenByID(id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if row == nil {
+		return s.dropByRowIDLocked(id)
+	}
+	k := keyFromToken(row)
+	if k.ID == "" {
+		return nil
+	}
+	// Key 理论上不可改，但索引要能自愈：同一个 row id 换了 Key 时先摘旧的。
+	if oldKey, ok := s.keyByRowIDLocked(id); ok && oldKey != k.ID {
+		s.unindexBearerLocked(oldKey)
+		delete(s.keys, oldKey)
+		delete(s.rowIDs, oldKey)
+	}
+	s.keys[k.ID] = k
+	s.rowIDs[k.ID] = row.ID
+	s.indexBearerLocked(k)
+	return nil
+}
+
+// SyncTokensByID 批量版（批量建/批量删用）。任一失败立刻返回，但**已同步的保持已同步**
+// （不做回滚：索引与库最终由下一次同步/重启收敛，回滚反而可能把新状态抹掉）。
+func (s *Store) SyncTokensByID(ids []int) error {
+	for _, id := range ids {
+		if err := s.SyncTokenByID(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// keyByRowIDLocked 反查：tokens.id → 本包索引里的 key（= apikey 的 ID 字符串）。
+// 线性扫 rowIDs：令牌数是"人建的"量级（几十~几千），比再维护一张反查表更少出错。
+func (s *Store) keyByRowIDLocked(rowID int) (string, bool) {
+	for key, rid := range s.rowIDs {
+		if rid == rowID {
+			return key, true
+		}
+	}
+	return "", false
+}
+
+// dropByRowIDLocked 按 tokens.id 摘掉索引条目（删除/软删后调用）。
+func (s *Store) dropByRowIDLocked(rowID int) error {
+	key, ok := s.keyByRowIDLocked(rowID)
+	if !ok {
+		return nil
+	}
+	s.unindexBearerLocked(key)
+	delete(s.keys, key)
+	delete(s.rowIDs, key)
+	delete(s.rateHits, key)
+	return nil
+}
+
+// warmFromSQL 索引未命中时回库找一次并补进索引（返回是否命中）。
+//
+// 只在**未命中**这一条路径上付代价（正常请求命中的是新索引，不进这里），所以
+// 热路径的"内存 O(1)"承诺不变。它的价值是让"新建令牌立刻能用"不依赖调用方
+// 记得调 SyncTokenByID —— 任意外部写路径（含将来新增的）都不会再造成 401。
+func (s *Store) warmFromSQL(bearer string) bool {
+	for _, c := range bearerCandidates(bearer) {
+		row, err := store.GetTokenByKey(c)
+		if err != nil {
+			log.Printf("apikey: 鉴权索引未命中且回库失败: %v", err)
+			return false
+		}
+		if row == nil {
+			continue
+		}
+		if err := s.SyncTokenByID(row.ID); err != nil {
+			log.Printf("apikey: 鉴权索引补齐失败: %v", err)
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 // persistUsageLocked 计量写穿（热路径）：一条原子 UPDATE，不重写整行。
 //
 // 内存先加、库再写（顺序不能反：写库失败时内存还必须是对的，否则同一进程里

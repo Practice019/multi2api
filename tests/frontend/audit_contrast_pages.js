@@ -38,9 +38,9 @@ const LIB = require('./lib_contrast_audit.js');
 const OUTDIR = path.resolve(__dirname, '..', '..', '.task', 'maximalism-v3', 'contrast');
 const ONLY = process.env.AUDIT_THEME || '';
 const MIN = Number(process.env.AUDIT_MIN || 4.5);
-// 默认**五个**文档：控制台外壳 + 四个 iframe 页（status/channels/models/tokens ——
+// 默认**六个**文档：控制台外壳 + 五个 iframe 页（status/channels/models/tokens ——
 // 后四个都是独立 document，此前一个都没被扫过）
-const PAGES = String(process.env.AUDIT_PAGES || '/ui,/ui/status,/ui/channels,/ui/models,/ui/tokens')
+const PAGES = String(process.env.AUDIT_PAGES || '/ui,/ui/status,/ui/channels,/ui/models,/ui/tokens,/ui/groups')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
 // TIER_EXPR 只量「阈值三档样本」那三个 span —— 与 lib_contrast_audit.js **同一套数学**

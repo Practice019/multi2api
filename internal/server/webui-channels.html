@@ -1483,10 +1483,38 @@ function api(method, path, body) {
   return fetch(path, opt).then(function (r) {
     return r.text().then(function (t) {
       var j = null;
-      try { j = t ? JSON.parse(t) : null; } catch (e) { j = null; }
+      try { j = t ? JSON.parse(t) : null; } catch (e) { /* 非 JSON：下面按 text 报错 */ }
       if (!r.ok) {
-        var msg = (j && (j.error || j.message)) || ('HTTP ' + r.status);
+        // 后端的 error 文案是给人看的（重名 / 未登记字段 / 401 都会点名），原样透出。
+        // ⚠ j.error 可能是**对象**（OpenAI 错误格式是 {"error":{"code":..,"message":..}}）。
+        // 直接塞进 new Error() 会渲染成 "[object Object]" —— 用户什么都看不到，
+        // 而真实原因（比如 invalid_api_key）就在那个对象里。
+        // 这段与 webui-groups.html:1555-1567、webui-status.html:2236-2244 **保持同一形状**
+        // （本页 C2 重写时丢了它，独立终验在 groups_ui_test.go:274 抓到）。T80 补回。
+        var msg = '';
+        if (j) {
+          if (typeof j.error === 'string') {
+            msg = j.error;
+          } else if (j.error && typeof j.error === 'object') {
+            msg = j.error.message || j.error.code || '';
+            if (j.error.code && j.error.message) { msg = j.error.code + ': ' + j.error.message; }
+          }
+          if (!msg && typeof j.message === 'string') { msg = j.message; }
+        }
+        if (!msg) { msg = t ? t.slice(0, 200) : ''; }
+        if (!msg) { msg = 'HTTP ' + r.status; }
         throw new Error(msg + '（' + path + '）');
+      }
+      if (j === null) {
+        // 200 但不是 JSON：管理面里这意味着"路由没挂上 / 被挡在别的中间件后面"
+        //（例如某个中间件直接吐了一段 HTML 或空体）。
+        //
+        // ⚠ 这里**必须抛**而不是 `return j`（null）：调用方拿到 null 会走各自的
+        // "空数据"分支 —— 列表显示成"没有渠道"、批量动作显示成"完成"。用户看到的是
+        // **操作成功但没数据**，而真相是"这个请求根本没被处理"。这种"看起来成功"
+        // 的失败比报错难查得多（报错至少会被人贴到 issue 里）。
+        // 与 webui-status.html:2245 同口径，直接把原文前 160 字符报出来。
+        throw new Error('响应不是 JSON（接口可能还没挂上）：' + String(t || '').slice(0, 160));
       }
       return j;
     });
@@ -1730,9 +1758,21 @@ function summarize(j) {
   if (!j) { return '无返回'; }
   if (typeof j === 'string') { return j; }
   var parts = [];
-  ['ok', 'failed', 'total', 'changed', 'updated', 'count', 'message', 'error'].forEach(function (k) {
+  // ⚠ error 可能是对象（上游错误体原样透传）：按字符串拼会得到 "[object Object]"。
+  //
+  // ⚠⚠ 更要紧的是**不能对它一律跳过**（原来的 ['ok','failed',...] 那种"是对象就 continue"
+  // 的写法）：批量动作（批量启停/打标签/删除/测试/应用模型变更）的成功提示里，
+  // 一旦错误对象被跳过，剩下的字段看起来一切正常 ⇒ 界面显示"完成"。那是**假成功**，
+  // 比 "[object Object]" 危险得多 —— 后者至少让人知道出事了，前者让人以为没事。
+  // 所以这里单独把 error 抽出来，message/code 都取不到时退化成 JSON 截断，宁可啰嗦。
+  // 这里单独抽它的 message/code —— 与 api() 的错误渲染同一口径（T80）。
+  if (j.error && typeof j.error === 'object') {
+    parts.push('error=' + (j.error.message || j.error.code || JSON.stringify(j.error).slice(0, 120)));
+  }
+  ['ok', 'failed', 'total', 'changed', 'updated', 'count', 'message'].forEach(function (k) {
     if (j[k] !== undefined && typeof j[k] !== 'object') { parts.push(k + '=' + j[k]); }
   });
+  if (typeof j.error === 'string') { parts.push('error=' + j.error); }
   var items = j.items || j.results || j.channels;
   if (items && items.length !== undefined) { parts.push('条目=' + items.length); }
   return parts.join(' ') || '完成';

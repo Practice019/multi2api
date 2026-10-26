@@ -727,13 +727,24 @@ func (s *Store) Reset(id string) error {
 func (s *Store) Validate(bearer string) (string, error) {
 	s.maybeAttachSQL()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	// Bearer 先归一化成候选（原样 / 剥 sk- / 丢第一个 - 之后的部分），
 	// 于是 sk- 形态与 48 位裸串两种写法都能命中同一把 key（见 sql.go 文件头）。
 	k, id := s.lookupBearerLocked(bearer)
+	if k == nil && s.sqlMode.Load() {
+		// 未命中 ⇒ 可能有**外部写路径**（/admin/tokens 的 CRUD）刚建好、还没进索引的
+		// 令牌（T81）。回库找一次并补进索引。正常请求都命中，走不到这里。
+		s.mu.Unlock()
+		if !s.warmFromSQL(bearer) {
+			return "", ErrUnknown
+		}
+		s.mu.Lock()
+		k, id = s.lookupBearerLocked(bearer)
+	}
 	if k == nil {
+		s.mu.Unlock()
 		return "", ErrUnknown
 	}
+	defer s.mu.Unlock()
 	// 判定顺序：库侧原始状态 → 手动禁用 → 过期 → 额度 → 限速。
 	//
 	// ① 库侧原始状态（SQL 模式才有；JSON 模式恒为 0）：status=3/4 是库侧
