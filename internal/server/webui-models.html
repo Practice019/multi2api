@@ -34,7 +34,13 @@
   # 明确不做定价
     PLAN §8 Q5 / §10 Q9 的裁定是 **B（不要）**：本仓是免费额度池，
     hyxapi 的 model_pricing.go 与 /api/model-pricing/* 不移植。
-    所以本页没有价格、没有倍率、没有计量单位列 —— 这不是"还没做"。
+    所以本页没有价格、没有计量单位列
+
+     ⚠ 2026-10-27 例外（用户裁决）：**成本倍率**已加进本页，形态是模型 ID 的
+       **前缀标记**（用户原话：「这个倍率放到模型ID前面去 可以不用单独成列
+        可以和模型ID 拼在一起 或者用样式卡片一样的显示」）。
+       ⚠ 倍率 ≠ 定价：它用的是本仓既有的「成本倍率」语义（GET /admin/models/preview），
+         不是 hyxapi 的定价体系；门禁里「价格/单价/计费」三个词**仍然禁止**出现。 —— 这不是"还没做"。
 
   # 视觉：照抄 webui.html 的 v2 变量（GitHub Dark/Light）
     变量名与取值直接对齐 webui.html 的 :root 块，也与会话页/状态页一致。
@@ -199,11 +205,18 @@
      语义色文字」；色值一律取语义变量，不写死。实算对比度（WCAG，本页行底 --panel2）：
        light  --ok 5.38:1 / --warn 5.32:1 / --dim 7.12:1
        dark   --ok 12.06:1 / --warn 11.31:1 / --dim 8.07:1   ⇒ 全部 >= 4.5，过。 */
-  /* 倍率标记：等宽、右不多占位；四档语义色（有值 / 无 / 免费 / 高倍率） */
-  .multtag { font-family:var(--mono); font-size:12px; color:var(--fg); }
-  .multtag.none { color:var(--dim); }
-  .multtag.free { color:var(--ok); }
-  .multtag.hi { color:var(--acc); }
+  /* 倍率**前缀标记**（用户 2026-10-27：不单独成列，拼在模型 ID 前面，做成标签/卡片的样子）
+     · 底色透明、只描边 + 语义色文字 ⇒ 与行底色成对，不新引入底/字配对风险；
+     · 零圆角（与 theme-max 的视觉语言一致）；
+     · 等宽 + 右侧 7px 间距，让标记与名称读起来是一件事。 */
+  .multtag {
+    display:inline-block; margin-right:7px; padding:0 5px;
+    font-family:var(--mono); font-size:12px; line-height:18px;
+    color:var(--fg); border:1px solid var(--dim); border-radius:0; white-space:nowrap;
+  }
+  .multtag.none { color:var(--dim); border-style:dashed; }
+  .multtag.free { color:var(--ok); border-color:var(--ok); }
+  .multtag.hi { color:var(--acc); border-color:var(--acc); }
   /* 可调用列的徽章：语义色只上描边 + 文字（底与字成对，见上） */
   .badge.callok { border:2px solid var(--ok); color:var(--ok); font-weight:700; }
   .badge.callno { border:2px solid var(--warn); color:var(--warn); font-weight:700; }
@@ -1517,7 +1530,7 @@ header.statline { align-items:baseline; }
     <div class="tw">
       <table id="modelsTable">
         <thead><tr>
-          <th class="c-chk"></th><th>模型 ID</th><th>供应商</th><th>端点</th><th>来源</th><th title="来自 GET /admin/models/preview 的成本倍率；x无 = 该表没有这个模型，免费是 x0">倍率</th><th title="按控制台 manifest 里该上游的账号数判定；口径见下方说明">可调用</th>
+          <th class="c-chk"></th><th title="名称前的标记 = 成本倍率（来自 GET /admin/models/preview）；x无 = 该表没有这个模型，x0 = 免费">模型 ID</th><th>供应商</th><th>端点</th><th>来源</th><th title="按控制台 manifest 里该上游的账号数判定；口径见下方说明">可调用</th>
         </tr></thead>
         <tbody id="modelRows"></tbody>
       </table>
@@ -1804,7 +1817,7 @@ header.statline { align-items:baseline; }
     });
   }
 
-  // multCell 渲染「倍率」单元格（用户点名的倍率检测）。
+  // multTagEl 渲染「倍率」前缀标记（用户点名的倍率检测）。
   //
   // 四种「没有/有」必须可区分（与旧面板同一口径）：
   //   1. 表里有            → `x0.29`（免费是 x0，也是有效信息）
@@ -1812,32 +1825,29 @@ header.statline { align-items:baseline; }
   //   3. **倍率目录整体没拿到** → 这一格写 `—`，并在面板顶部显式警示（#multwarn）
   //      —— 不逐行写「无」，否则把「界面没拿到」说成「上游没配」
   //   4. 脏数据（NaN/负数） → `—`，不写 xNaN
-  function multCell(m) {
-    var td = el('td', 'multcell');
+  // ⚠ 2026-10-27 用户要求改形态：倍率**不单独成列**，改为模型 ID 的**前缀标记**
+  //   （原话：「这个倍率放到模型ID前面去 可以不用单独成列 可以和模型ID 拼在一起
+  //    或者用样式卡片一样的显示」）。所以这里返回**一个 span**（而不是 td），
+  //   由名称单元格先 append 它再 append 可点复制的按钮。
+  function multTagEl(m) {
     if (state.multFailed) {
-      var dash = el('span', 'dim', '—');
-      dash.title = '倍率目录未加载，这一列整列不可信（见上方警示）';
-      td.appendChild(dash);
-      return td;
+      var dash = el('span', 'multtag dim', '—');
+      dash.title = '倍率目录未加载，倍率整列不可信（见上方警示）';
+      return dash;
     }
     var key = multTableKey(m.name || '');
     if (!Object.prototype.hasOwnProperty.call(state.mult, key)) {
       var none = el('span', 'multtag none', 'x无');
       none.title = '上游未提供该模型的倍率（' + MULT_ENDPOINT + ' 里没有这一条）';
-      td.appendChild(none);
-      return td;
+      return none;
     }
     var v = state.mult[key];
     var txt = multText(v);
-    if (txt === null) {
-      td.appendChild(el('span', 'dim', '—'));
-      return td;
-    }
+    if (txt === null) { return el('span', 'multtag dim', '—'); }
     var cls = v === 0 ? 'multtag free' : (v >= 1 ? 'multtag hi' : 'multtag');
     var tag = el('span', cls, 'x' + txt);
     tag.title = '每次调用消耗 ' + txt + ' 倍基础额度' + (v === 0 ? '（免费）' : '');
-    td.appendChild(tag);
-    return td;
+    return tag;
   }
 
   // callCell 渲染「可调用」单元格。
@@ -1897,6 +1907,9 @@ header.statline { align-items:baseline; }
     // ⚠ 用 button 而不是给 td 挂 onclick：键盘（Tab/Enter）与读屏都要能到，而且
     //   button 天然有焦点样式。文案与 data-id 都是完整模型 ID（不是截断的显示文本）。
     var tdName = el('td', 'name');
+    // 倍率前缀（用户 2026-10-27 要求：不单独成列，拼在模型 ID 前面）
+    var mt = multTagEl(m);
+    if (mt) { tdName.appendChild(mt); }
     var nb = document.createElement('button');
     nb.type = 'button';
     nb.className = 'namecopy';
@@ -1924,7 +1937,6 @@ header.statline { align-items:baseline; }
     }
     tr.appendChild(tdSrc);
     // 2026-10-27 新增两列（用户要求「表格需要再添加一列信息」+ 移植倍率检测）
-    tr.appendChild(multCell(m));
     tr.appendChild(callCell(m));
     return tr;
   }
