@@ -8,9 +8,11 @@
 //
 // # 判据来源（实现即契约）
 //
-//	入口/表格    webui-tokens.html:1274-1300（表头五项 + #empty 文案）
-//	抽屉字段     webui-tokens.html:1313-1426（编号 ①~⑯ 的字段与控件）
-//	提交体       webui-tokens.html:1698-1749（collectForm：字段名即请求体字段名）
+//	入口/表格    webui-tokens.html:1314-1333（表头五项 + #empty 文案）
+//	             ⚠ T99 起本页**不再提供**页面级标题与刷新按钮 —— 它们归控制台外壳
+//	               （webui.html 的 tokens section），见该页 <header> 上方那段注释
+//	抽屉字段     webui-tokens.html:1342-1475（编号 ①~⑯ 的字段与控件）
+//	提交体       webui-tokens.html:1809 起（collectForm：字段名即请求体字段名）
 //	count 语义   internal/admin/tokens.go:20-46（count>1 ⇒ 名称上限 43 字节，第 2 条起加 6 位短码）
 //	部分成功     internal/admin/tokens.go:648-723（requested/created/failed/partial/items/failures）
 //	明文与缓存   internal/admin/tokens.go:434-435（no-store, no-cache, must-revalidate, private）
@@ -55,6 +57,21 @@ function isMasked(k) {
   return s.indexOf('*') >= 0 || s.indexOf('…') >= 0;
 }
 
+// T99：令牌面板外壳件的测量表达式 —— 口径**逐条照** tests/frontend/verify_wave2_pages.js
+// 的 MEASURE_MODELS（同一个缺陷形态、同一套判据），只把 data-key/iframe 换成 tokens/tkFrame，
+// 并多量一个「导航标签」（T99 报的症状就是它退化成「面板 N」）。
+// ⚠ 同样**全用双引号 + 不写正则 + 不写反斜杠**：这段会被塞进字符串再送到 CDP，
+//   层层转义里最容易丢的就是反斜杠（本仓踩过：\s 变成 s 让守卫静默变松）。
+const MEASURE_TOKENS = '(function(){'
+  + 'function vis(el){ if(!el) return false; var cs=getComputedStyle(el); if(cs.display==="none"||cs.visibility==="hidden") return false; var r=el.getBoundingClientRect(); return r.width>0&&r.height>0; }'
+  + 'function norm(s){ return String(s==null?"":s).split(String.fromCharCode(10)).join(" ").split(String.fromCharCode(9)).join(" ").split(" ").filter(function(x){return x!=="";} ).join(" ").trim(); }'
+  + 'function titlesIn(root,directOnly){ var out=[],ns=directOnly?root.querySelectorAll(":scope > h1, :scope > h2, :scope > h3"):root.querySelectorAll("h1"); for(var i=0;i<ns.length;i++){ if(vis(ns[i])) out.push(ns[i].tagName+":"+norm(ns[i].textContent).slice(0,24)); } return out; }'
+  + 'function refreshIn(root){ var out=[],ns=root.querySelectorAll("button,a,[role=button]"); for(var i=0;i<ns.length;i++){ var t=norm(ns[i].textContent); var hit=t.indexOf("\u5237\u65b0")>=0||t.toLowerCase().indexOf("refresh")>=0; if(hit&&vis(ns[i])) out.push((ns[i].id||ns[i].tagName)+":"+t.slice(0,16)); } return out; }'
+  + 'var sec=document.querySelector("section[data-key=tokens]"), w=document.getElementById("tkFrame").contentWindow, d=w.document;'
+  + 'var all=Array.prototype.slice.call(document.querySelectorAll(".content > section")); var idx=all.indexOf(sec);'
+  + 'var bs=document.querySelectorAll("#nav button[data-nav]"); var navLabel=null;'
+  + 'for(var i=0;i<bs.length;i++){ if(Number(bs[i].getAttribute("data-nav"))===idx){ navLabel=norm(bs[i].textContent); break; } }'
+  + 'return JSON.stringify({ shellTitles:titlesIn(sec,true), pageTitles:titlesIn(d), shellRefresh:refreshIn(sec), pageRefresh:refreshIn(d), navLabel:navLabel, navIdx1:idx+1 }); })()';
 (async () => {
   let fail = 0, skip = 0;
   const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
@@ -196,8 +213,37 @@ function isMasked(k) {
       const delAll = await fetch(base + '/admin/tokens/delete', { method: 'POST', headers: hdr, body: JSON.stringify({ ids: createdIds.filter((x) => !!x) }) });
       const jDelAll = await delAll.json().catch(function(){ return {}; });
       console.log('      清空 ' + createdIds.length + ' 条 ⇒ ' + delAll.status + ' ' + JSON.stringify(jDelAll));
-      await ev(`(function(){ document.getElementById('tkFrame').contentDocument.getElementById('btnRefresh').click(); })()`);
-      await sleep(900);
+      // ⚠ T99：本页页面级的「刷新」按钮（#btnRefresh）已删除 —— 标题与刷新都归控制台外壳
+      // （见 webui-tokens.html 头部注释）。这里改点**外壳**那个刷新按钮：它把 tkFrame 整帧重载
+      // （src 带上 ?t= 时间戳），是用户现在真实能点的唯一刷新入口。
+      //
+      // 判据**没有被放宽，反而更强**：旧写法只证明「页内按钮会重取列表」；这一条同时证明
+      // 「外壳那个按钮存在、可点，且真的把 iframe 重新载入了」—— 而它在 T99 之前根本不存在。
+      const shellRefresh = await ev('(function(){'
+        + 'var sec = document.querySelector("section[data-key=tokens]");'
+        + 'if (!sec) return "no-section";'
+        + 'var bs = sec.querySelectorAll("button");'
+        + 'for (var i = 0; i < bs.length; i++) {'
+        + '  var tx = String(bs[i].textContent || "");'
+        + '  if (tx.indexOf("刷新") >= 0 || tx.toLowerCase().indexOf("refresh") >= 0) { bs[i].click(); return "clicked"; }'
+        + '}'
+        + 'return "no-button"; })()');
+      ok(shellRefresh === 'clicked', '外壳 tokens 面板的刷新按钮存在且被点到（实际 ' + shellRefresh + '）');
+      // 整帧重载是异步的：**轮询到「确实换了文档」**再往下量，不用固定 sleep ——
+      // 旧文档同样是 readyState=complete，只等固定时间会量到重载前的行（本仓踩过固定等待的亏）。
+      // 判据 = iframe 自己的 location.search 里有 ?t=（外壳那个 onclick 写的）+ 重载后列表为空。
+      let reloaded = false, reloadState = null;
+      for (let i = 0; i < 50; i++) {
+        await sleep(200);
+        reloadState = JSON.parse(await ev('(function(){ try {'
+          + 'var f = document.getElementById("tkFrame"); var d = f.contentDocument;'
+          + 'var q = String((f.contentWindow && f.contentWindow.location && f.contentWindow.location.search) || "");'
+          + 'return JSON.stringify({ q: q, ready: !!(d && d.body && d.getElementById("rows")), rows: d ? d.querySelectorAll("#rows tr").length : -1 });'
+          + '} catch (e) { return JSON.stringify({ err: String(e) }); } })()'));
+        if (String(reloadState.q).indexOf('t=') >= 0 && reloadState.ready && reloadState.rows === 0) { reloaded = true; break; }
+      }
+      ok(reloaded, '外壳刷新把 tkFrame **整帧重载**了（src 带上 ?t= 且重载后列表为空；实测 ' + JSON.stringify(reloadState) + '）');
+      await sleep(400);
       const empty = JSON.parse(await ev(`JSON.stringify((function(){
         var d = document.getElementById('tkFrame').contentDocument;
         var e = d.getElementById('empty');
@@ -440,6 +486,28 @@ function isMasked(k) {
         ok(r.status !== 404, '[L2] ' + ep[0] + ' ' + ep[1] + ' 不是 404（路由存在；实际 ' + r.status + '）');
       }
 
+      // ── [N] 外壳件唯一性：可见标题恰好 1 个、可见刷新控件恰好 1 个（T99 新增）──────
+      //
+      // # 为什么这一页必须补上这条（T99 修的缺陷形态）
+      // 令牌页此前是 13 个 section 里**唯一没有 h2** 的：导航项走 navLabel() 的兜底分支
+      // 渲染成「面板 7」（7 是序号不是计数），而且它是六个 iframe 页里唯一没有整帧重载刷新的。
+      // 这两个症状在既有断言里是**盲区**：
+      //   · [K]/[M] 量的是几何（尺寸/位置/容器），F 段量的是元素存在性与行为；
+      //   · **没有任何一条在数标题与刷新的个数** ⇒ 「缺一个」与「多一个」都测不出来。
+      // 与 T92（状态页）/ T98（模型页）的教训同形：存在性断言测不出外壳件的重复与缺失，
+      // 所以这里把 verify_wave2_pages.js 的 [b2]/[e] 判据**逐条搬过来**，判据没有被放宽。
+      console.log('\n[N] 外壳件唯一性：可见标题恰好 1 个、可见刷新控件恰好 1 个（T99）');
+      const U = JSON.parse(await ev(MEASURE_TOKENS));
+      const uTitles = (U.shellTitles || []).concat(U.pageTitles || []);
+      const uRefresh = (U.shellRefresh || []).concat(U.pageRefresh || []);
+      console.log('        可见标题=' + JSON.stringify(uTitles) + ' 可见刷新控件=' + JSON.stringify(uRefresh));
+      console.log('        导航标签=' + JSON.stringify(U.navLabel) + '（兜底形态是「面板 ' + U.navIdx1 + '」）');
+      ok(uTitles.length === 1, '[N] 令牌面板内**可见标题恰好 1 个**（实际 ' + uTitles.length + '：' + JSON.stringify(uTitles) + '）');
+      ok(uRefresh.length === 1, '[N] 令牌面板内**可见刷新控件恰好 1 个**（实际 ' + uRefresh.length + '：' + JSON.stringify(uRefresh) + '）');
+      // 导航项**不许**是兜底名「面板 N」—— 那正是 T99 报的症状本身（section 里没有 h2）。
+      ok(!/^面板\s*\d+$/.test(String(U.navLabel)), '[N] 导航标签不是兜底名「面板 N」（实际 ' + JSON.stringify(U.navLabel) + '；兜底 = 该 section 里没有 h2）');
+      ok(String(U.navLabel) === '令牌', '[N] 导航标签 = 「令牌」（navLabel 语义 = h2 首个文本节点；实际 ' + JSON.stringify(U.navLabel) + '）');
+
       // ── [K] 布局几何门禁（T77 新增）──────────────────────────────────────
       //
       // # 修前红 / 修后绿（留着这段对照，证明这门禁真的抓得住东西）
@@ -466,7 +534,7 @@ function isMasked(k) {
         'function R(el){if(!el)return null;var b=el.getBoundingClientRect();return [Math.round(b.x),Math.round(b.y),Math.round(b.width),Math.round(b.height)];}' +
         'function HIT(el){if(!el)return null;var b=el.getBoundingClientRect();if(!b.width||!b.height)return {err:\'zero rect\',rect:R(el)};var t=d.elementFromPoint(b.x+b.width/2,b.y+b.height/2);return {hit:(t?(t.tagName.toLowerCase()+(t.id?\'#\'+t.id:\'\')+\'.\'+String(t.className).split(\' \').join(\'.\')):\'null\'),self:!!(t&&(t===el||el.contains(t))),rect:R(el)};}' +
         'var kw=d.getElementById(\'kw\'),bn=d.getElementById(\'btnNew\'),tw=d.querySelector(\'.tw\'),em=d.getElementById(\'empty\');' +
-        'return JSON.stringify({frame:R(f),innerH:f.contentWindow.innerHeight,innerW:f.contentWindow.innerWidth,bodyScroll:d.body.scrollHeight,els:{header:R(d.querySelector(\'header\')),h1:R(d.querySelector(\'header h1\')),main:R(d.querySelector(\'main\')),tw:R(tw),empty:R(em),rows:d.querySelectorAll(\'#rows tr\').length},hit:{kw:HIT(kw),btnNew:HIT(bn)}});' +
+        'return JSON.stringify({frame:R(f),innerH:f.contentWindow.innerHeight,innerW:f.contentWindow.innerWidth,bodyScroll:d.body.scrollHeight,els:{header:R(d.querySelector(\'header\')),h1:R(d.querySelector(\'header h1\')),shellH2:R(document.querySelector(\'section[data-key=tokens] > h2\')),main:R(d.querySelector(\'main\')),tw:R(tw),empty:R(em),rows:d.querySelectorAll(\'#rows tr\').length},hit:{kw:HIT(kw),btnNew:HIT(bn)}});' +
         '}catch(e){return JSON.stringify({err:String(e)});}})()';
       for (const dim of [[1920, 1080], [375, 812]]) {
         const w = dim[0], h = dim[1];
@@ -479,7 +547,15 @@ function isMasked(k) {
         const box = g.els.rows > 0 ? g.els.tw : g.els.empty;
         const boxName = g.els.rows > 0 ? '表格容器' : '空态';
         ok(g.bodyScroll > tbH + 40, '[' + w + '] 根容器 scrollHeight(' + g.bodyScroll + ') > 工具栏高(' + tbH + ')+40 —— 页面没塌成一条窄带');
-        ok(!!g.els.h1 && g.els.h1[1] >= 0, '[' + w + '] 标题顶部未被裁（h1.top=' + (g.els.h1 ? g.els.h1[1] : 'n/a') + ' ≥ 0）');
+        // ⚠ T99 更新这条断言（判据本身不放宽，只换承载它的元素）：
+        // 本页的页面级 h1 已按房子规矩删除 —— 标题改由控制台外壳那个 h2 提供，
+        // 于是 d.querySelector('header h1') 现在**恒为 null**，原断言会以「h1.top=n/a」红。
+        // 那红得不是产品缺陷，而是**断言还指着已经搬走的那个元素**（同 T92/T98 之后的状态页与模型页）。
+        // 所以改成量**现在承载标题的那个元素**（外壳 section 的直接子 h2）；
+        // 两者都取不到 ⇒ titleBox 为 null ⇒ 照样红，**没有放松**：仍然要求标题存在且顶部未被裁。
+        // 与 [N] 的「可见标题恰好 1 个」合起来 = 标题必须存在、可见、且不被裁。
+        const titleBox = g.els.shellH2 || g.els.h1;
+        ok(!!titleBox && titleBox[1] >= 0, '[' + w + '] 面板标题顶部未被裁（实际 ' + JSON.stringify(titleBox) + '）');
         ok(!!box && box[3] > 0, '[' + w + '] ' + boxName + ' rect 高度 > 0（实际 ' + JSON.stringify(box) + '）');
         ok(!!box && (box[1] + box[3]) <= g.innerH + 1, '[' + w + '] ' + boxName + ' 在 iframe 可视区内（底边 ' + (box ? box[1] + box[3] : 'n/a') + ' ≤ innerH ' + g.innerH + '）');
         ok(tbH <= g.innerH, '[' + w + '] 工具栏没有超出 iframe 视口（' + tbH + ' ≤ ' + g.innerH + '）');
