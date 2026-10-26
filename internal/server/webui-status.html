@@ -114,9 +114,14 @@
   button:disabled { opacity:.55; cursor:default; }
 
   /* ── 4. 布局 ─────────────────────────────────────────────────────────── */
-  /* 960px 上限：仪表盘式密集布局刻意比渠道页（1400px）窄 —— 一行 5 张卡在
-     1400px 上会拉到 280px/张，读数字要横跳。 */
-  main { max-width:960px; margin:0 auto; padding:16px 16px 36px; display:flex; flex-direction:column; gap:22px; }
+  /* 宽度：T92 前是 max-width:960px（iframe 1580 时左右各留约 310px，页面显得又空又散）。
+     这一页是**卡片网格**（不是长文），铺满可读性更好 —— 与渠道页/令牌页一致。
+     保留一个**很宽**的上限 1800px：1920 视口下 iframe 内宽 1580 ⇒ 它不 binding，
+     但超宽屏（>1800）时不会把五列卡片拉成一行巨板。左右内边距保留。 */
+  main { max-width:1800px; margin:0 auto; padding:16px 16px 36px; display:flex; flex-direction:column; gap:22px; }
+  /* 状态行（倒计时所在的那一行）：不再是标题栏，只是一条细提示。 */
+  header.statline { border-bottom:1px solid var(--line); }
+  header.statline .dim { font-size:11px; }
   section { min-width:0; }
   section > h2 {
     margin:0 0 8px; font-size:12px; font-weight:600; color:var(--dim);
@@ -1482,12 +1487,20 @@ header h1{letter-spacing:0}
 </head>
 <body>
 
-<header>
-  <h1>系统状态</h1>
+<!-- 标题与刷新**都归控制台外壳**（webui.html:3183-3186）：
+     外壳给每个面板渲染标题 + 一个「刷新」按钮，且那个按钮会**重载本 iframe**
+     （onclick=…stFrame.src='/ui/status?t='+Date.now()），比页面内的按钮更彻底
+     （连本页的内存状态一起重置）。
+     T92 之前本页自己又写了一份 <h1>系统状态</h1> + <button id=refresh>刷新</button>，
+     于是用户看到**两个标题、两个刷新**。现在：
+       · 标题：删掉本页的，只留外壳那一个；
+       · 刷新：删掉本页按钮（手动刷新仍可用 —— 外壳那个就在同一行）；
+       · **倒计时保留**（它是本页的核心反馈），但降级为一条状态行，不再是标题+按钮的形态。 -->
+<header class="statline">
+  <span class="dim">自动刷新</span>
   <span id="cd" aria-live="off"></span>
   <span id="stalehint">显示的是上次成功的数据</span>
   <span class="spacer"></span>
-  <button id="refresh" type="button" title="立即刷新">刷新</button>
 </header>
 
 <main>
@@ -2186,7 +2199,11 @@ header h1{letter-spacing:0}
 
   var elApp = document.getElementById('app');
   var elCd = document.getElementById('cd');
-  var elBtn = document.getElementById('refresh');
+  // T92：本页自带的「刷新」按钮已删除（改由控制台外壳那一个承担 —— 它会重载整个 iframe，
+  // 比页内按钮更彻底）。下面原有的绑定代码不改：元素不在时用一个**空壳**顶上，
+  // 这样 addEventListener/setAttribute/disabled 之类的调用都变成 no-op，不会让整页脚本抛错。
+  var noop = function () {};
+  var elBtn = document.getElementById('refresh') || { addEventListener: noop, removeEventListener: noop, setAttribute: noop, getAttribute: function () { return null; }, focus: noop, click: noop, disabled: false, textContent: '' };
   var elErr = document.getElementById('errbox');
   var elErrMsg = document.getElementById('errmsg');
   var elRetry = document.getElementById('retry');

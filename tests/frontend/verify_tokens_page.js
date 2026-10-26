@@ -486,6 +486,28 @@ function isMasked(k) {
         ok(!!g.hit.kw && g.hit.kw.self === true, '[' + w + '] 搜索框中心 elementFromPoint 命中自身或其后代（实际 ' + JSON.stringify(g.hit.kw) + '）');
         ok(!!g.hit.btnNew && g.hit.btnNew.self === true, '[' + w + '] 新建按钮中心命中自身或其后代（实际 ' + JSON.stringify(g.hit.btnNew) + '）');
       }
+      // ── [M] 列表容器门禁（T91）：防「表格/空态/分页游离在空白里」────────
+      // 用户反馈「感觉有点游离了」并高亮表头/数据行/分页三块 ⇒ 那是**几何**问题：
+      // 没有容器（边框 + 面板底）包住就漂在奶油底上。所以这里量的是**容器**，不是元素存在性。
+      const CARD = '(function(){try{var f=document.getElementById(\'tkFrame\');var d=f.contentDocument;function R(el){if(!el)return null;var b=el.getBoundingClientRect();return [Math.round(b.x),Math.round(b.y),Math.round(b.width),Math.round(b.height)];}var t=d.querySelector(\'.tw table\')||d.querySelector(\'table\');var box=t?t.parentElement:null;if(!box)return JSON.stringify({err:\'no container\'});var cs=getComputedStyle(box);var th=d.querySelector(\'thead\');var row=d.querySelector(\'#rows tr\');var em=d.getElementById(\'empty\');var rows=d.querySelectorAll(\'#rows tr\').length;function inside(i,o){if(!i||!o)return null;return i[1]>=o[1]-1&&(i[1]+i[3])<=(o[1]+o[3])+1;}var boxR=R(box);return JSON.stringify({cls:box.className,bg:cs.backgroundColor,bw:cs.borderTopWidth,box:boxR,thead:R(th),row:R(row),empty:R(em),rows:rows,theadInside:inside(R(th),boxR),rowInside:row?inside(R(row),boxR):null,emptyInside:inside(R(em),boxR),emClass:em?em.className:null});}catch(e){return JSON.stringify({err:String(e)});}})()';
+      // 先制造**空态**（搜一个不存在的关键字）—— 空态是否落在容器内，只有真空时才量得出来。
+      await ev('(function(){var d=document.getElementById(\'tkFrame\').contentDocument;var k=d.getElementById(\'kw\');k.value=\'no-such-token-zzz\';k.dispatchEvent(new Event(\'input\',{bubbles:true}));})()');
+      await sleep(1600);
+      for (const dim of [[1920, 1080], [375, 812]]) {
+        await send('Emulation.setDeviceMetricsOverride', { width: dim[0], height: dim[1], deviceScaleFactor: 1, mobile: false });
+        await sleep(700);
+        const c = JSON.parse(await ev(CARD));
+        console.log('    @' + dim[0] + 'x' + dim[1] + ' 容器几何: ' + JSON.stringify(c));
+        if (c.err) { ok(false, '[' + dim[0] + '] 容器采集失败：' + c.err); continue; }
+        ok(typeof c.bg === 'string' && c.bg !== 'rgba(0, 0, 0, 0)' && c.bg !== 'transparent', '[' + dim[0] + '] 列表容器有**非透明底**（实际 ' + c.bg + '）');
+        ok(parseFloat(c.bw) > 0, '[' + dim[0] + '] 列表容器有**边框**（borderTopWidth=' + c.bw + '）');
+        ok(c.theadInside === true, '[' + dim[0] + '] 容器覆盖表头（thead=' + JSON.stringify(c.thead) + ' ⊂ box=' + JSON.stringify(c.box) + '）');
+        ok(c.rows > 0 ? c.rowInside === true : c.emptyInside === true, '[' + dim[0] + '] 容器覆盖数据行/空态（rows=' + c.rows + ' row=' + JSON.stringify(c.row) + ' empty=' + JSON.stringify(c.empty) + ' emptyInside=' + c.emptyInside + '）');
+        ok(c.rows > 0 || String(c.emClass || '').indexOf('hidden') < 0, '[' + dim[0] + '] 空态确实显示了（没被 hidden 挡住）');
+      }
+      await ev('(function(){var d=document.getElementById(\'tkFrame\').contentDocument;var k=d.getElementById(\'kw\');k.value=\'\';k.dispatchEvent(new Event(\'input\',{bubbles:true}));})()');
+      await sleep(800);
+
       await send('Emulation.clearDeviceMetricsOverride');
       await sleep(300);
 

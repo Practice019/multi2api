@@ -160,6 +160,43 @@ function freePort() {
       ok(String(st.link).indexOf('github.com/QuantumNous/new-api') >= 0, '归属链接指向上游仓库（' + st.link + '）');
       ok(!!mWarn && mWarn[1] === '75' && !!mCrit && mCrit[1] === '90', '阈值三档 = 75/90（PLAN §0.5；实际 ' + (mWarn && mWarn[1]) + '/' + (mCrit && mCrit[1]) + '）');
       ok(!!mWin && mWin[1] === '300', 'WINDOW_SECONDS = 300（实际 ' + (mWin && mWin[1]) + '）');
+      // ── T92：状态面板的**唯一性**与**宽度**断言（防「两个标题/两个刷新」「内容比 iframe 窄」回归）
+      // 判据只算**可见**元素（display:none / visibility:hidden / 零尺寸都排除）——
+      // 否则把按钮藏起来就能骗过门禁。
+      // 标题与刷新都统计**两处**：控制台外壳的 section 内 + iframe 页面内（用户看到的是两者之和）。
+      // ⚠ 必须先把这个面板切成**活动**面板：前面的 [b1] 逐帧走过 stFrame/chFrame/mdFrame，
+      //   结束时停在 models ⇒ 状态页的 section 是 display:none，其 iframe 内所有 rect 都是 0，
+      //   「可见标题数」会恒为 0（我第一版就是这么误报的）。可见性判据必须建立在真的可见之上。
+      await ev('window.__wb2api__.showPanelByKey("status")');
+      await sleep(900);
+      const uniq = JSON.parse(await ev(`(function(){
+        function vis(el){ if(!el) return false; var cs=getComputedStyle(el); if(cs.display==='none'||cs.visibility==='hidden') return false; var r=el.getBoundingClientRect(); return r.width>0&&r.height>0; }
+        // 只数**页面级标题**：iframe 内的 h1 + 外壳 section 的**直接子** h2/h3。
+        // ⚠ 不数页面内容里的分区标题（服务状态/资源与入口/请求健康/…）：那是内容结构，不是「标题重复」。
+        function titlesIn(root, directOnly){ var out=[]; var ns=directOnly?root.querySelectorAll(':scope > h1, :scope > h2, :scope > h3'):root.querySelectorAll('h1'); for(var i=0;i<ns.length;i++){ if(vis(ns[i])) out.push(ns[i].tagName+':'+ns[i].textContent.replace(/\\s+/g,' ').trim().slice(0,24)); } return out; }
+        function refreshIn(root){ var out=[]; var ns=root.querySelectorAll('button,a,[role=button]'); for(var i=0;i<ns.length;i++){ var t=(ns[i].textContent||'').replace(/\\s+/g,'').trim(); if(/刷新|Refresh/i.test(t)&&vis(ns[i])) out.push(t.slice(0,16)); } return out; }
+        var sec=document.querySelector('section[data-key=status]');
+        var w=document.getElementById('stFrame').contentWindow, d=w.document;
+        var main=d.querySelector('main');
+        return JSON.stringify({ shellTitles:titlesIn(sec,true), pageTitles:titlesIn(d),
+          shellRefresh:refreshIn(sec), pageRefresh:refreshIn(d),
+          mainW: main?Math.round(main.getBoundingClientRect().width):0, innerW:w.innerWidth,
+          docScrollW:d.documentElement.scrollWidth, docClientW:d.documentElement.clientWidth,
+          cd:(d.getElementById('cd')||{}).textContent||'' });
+      })()`));
+      const allTitles = (uniq.shellTitles || []).concat(uniq.pageTitles || []);
+      const allRefresh = (uniq.shellRefresh || []).concat(uniq.pageRefresh || []);
+      console.log('        可见标题=' + JSON.stringify(allTitles) + ' 可见刷新控件=' + JSON.stringify(allRefresh));
+      console.log('        内容列=' + uniq.mainW + ' / iframe 内宽=' + uniq.innerW + ' = ' + (uniq.innerW ? (uniq.mainW / uniq.innerW).toFixed(3) : 'n/a') + '；#cd=' + JSON.stringify(uniq.cd));
+      ok(allTitles.length === 1, '状态面板内**可见标题恰好 1 个**（实际 ' + allTitles.length + '：' + JSON.stringify(allTitles) + '）');
+      ok(allRefresh.length === 1, '状态面板内**可见刷新控件恰好 1 个**（实际 ' + allRefresh.length + '：' + JSON.stringify(allRefresh) + '）');
+      ok(String(uniq.cd).length > 0, '倒计时信息没丢（#cd = ' + JSON.stringify(uniq.cd) + '）');
+      if (uniq.innerW >= 1000) {   // 本探针视口下 iframe 内宽约 1262 ⇒ 让 90% 断言真的跑到
+        ok((uniq.mainW / uniq.innerW) >= 0.9, '内容列占 iframe 宽 ≥ 90%（实际 ' + uniq.mainW + '/' + uniq.innerW + ' = ' + (uniq.mainW / uniq.innerW).toFixed(3) + '；修前 960/1262 = 0.761）');
+      } else {
+        console.log('        （窄屏 ' + uniq.innerW + 'px：跳过 90% 宽度断言，改判无横向溢出）');
+      }
+      ok(uniq.docScrollW <= uniq.docClientW + 1, '状态页无横向溢出（scrollWidth ' + uniq.docScrollW + ' ≤ clientWidth ' + uniq.docClientW + '）');
 
       console.log('\n[c2] 渠道页：翻页与搜索**不发请求**（内存分页）');
       await ev(`(function(){

@@ -38,7 +38,18 @@
   .ok { color: var(--ok); }
 
   /* ── 2. 表格（高密度区：只有墨线，不铺色块、不叠阴影）─────────────── */
-  .tw { overflow-x: auto; }
+  /* 列表容器：与渠道页 .tblwrap 同款（在本页自有 CSS 里实现，保持各页自治 ——
+     提到 theme-max.css 会改共享主题文件，按约束需先报主脑，本轮不做）。
+     ⚠ 表头 / 数据行 / 空态 / 分页**全都在这个框里**：这正是用户说「游离」的根因 ——
+     原来只有 <table> 被 .tw 包着，空态与分页落在框外，三块就像漂在奶油底上。 */
+  .tw {
+    overflow-x: auto;
+    border: 2px solid var(--line);   /* 与渠道页同款的一档：2px */
+    background: var(--panel);        /* 非透明面板底：让列表「落在某个面上」 */
+    /* min-height 的依据：表头 26px + 空态约 40px + 分页约 42px ≈ 108px，取 120px 留余量。
+       两个目的：令牌少时不塌成一条；又不用 100vh 之类把它撑成一块空洞。 */
+    min-height: 120px;
+  }
   table { border-collapse: collapse; width: 100%; font-size: 12px; }
   th, td { height: 26px; line-height: 26px; padding: 0 8px; text-align: left; white-space: nowrap;
            border-bottom: 1px solid var(--line); }
@@ -46,7 +57,7 @@
   td.mono { font-family: var(--font-mono); }
   td.ops { text-align: right; }
   tbody tr:hover { background: var(--panel2); }
-  .empty { padding: 14px 4px; font-size: 12px; color: var(--dim); }
+  .empty { padding: 14px 10px; font-size: 12px; color: var(--dim); }   /* 与容器内边对齐 */
   .empty b { color: var(--fg); }
 
   /* ── 3. 抽屉（.calm 安静区：表单不铺色块、不叠硬投影）────────────── */
@@ -99,7 +110,9 @@
   .partial ul { margin: 6px 0 0; padding-left: 18px; }
   /* 中性提示（不是错误）：用 --line 边框 + --fg 文字，避免把「还没建分组」渲染成故障。 */
   .partial.info { border-color: var(--line); color: var(--fg); }
-  .pager { display: flex; align-items: center; gap: 8px; padding: 8px 2px; font-size: 12px; color: var(--dim); }
+  /* 分页放在容器**底部**（同一只边框盒内）：与表头/数据行共享左右边框，视觉上成组；
+     若放在框外，要么自己再描一圈边（重复框架）、要么就是用户看到的那种「孤零零漂着」。 */
+  .pager { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; color: var(--dim); }
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
@@ -1292,12 +1305,13 @@ header h1{letter-spacing:0}
       </thead>
       <tbody id="rows"></tbody>
     </table>
-  </div>
-  <div class="empty hidden" id="empty"></div>
-  <div class="pager">
+    <!-- 空态与分页都**在容器内**：空态在框里才不会留一块空洞，分页贴底才与列表成组。 -->
+    <div class="empty hidden" id="empty"></div>
+    <div class="pager">
     <button id="btnPrev" type="button">上一页</button>
-    <span id="pageInfo" class="dim">—</span>
-    <button id="btnNext" type="button">下一页</button>
+      <span id="pageInfo" class="dim">—</span>
+      <button id="btnNext" type="button">下一页</button>
+    </div>
   </div>
 </main>
 
