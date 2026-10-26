@@ -405,6 +405,8 @@ func NewHandler(cfg Config) *Handler {
 	//（groups_catalog.go:3-6 记着这个坑）。
 	h.mux.HandleFunc("GET /ui/models", h.modelsUI)
 	h.mux.HandleFunc("GET /ui/models/data", h.modelsCatalogJSON)
+	// 令牌（API Key）管理页（T68）：与上面五条**同一套**身份判据（h.uiIdentify）。
+	h.mux.HandleFunc("GET /ui/tokens", h.tokensUI)
 	h.mux.HandleFunc("GET /ui", h.ui)
 	// 带尾斜杠的 /ui/ 也接受（用户习惯打 `http://host:port/ui/?token=...`）：
 	// 302 到无斜杠的规范路径，查询参数（如 ?token=）原样保留。

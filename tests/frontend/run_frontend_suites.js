@@ -222,6 +222,23 @@ const PROBES = [
   // 好样本绿 / 注入 `function broken( {` 必红且**给出行号**（实测 webui.html:12937）/
   // 覆盖度非零（"全绿"不能是因为"什么都没查"）。
   'verify_inline_script_syntax.js',
+  // 令牌页（/ui/tokens）的端到端门禁（T71 补 C3 缺失的 ⑤）。
+  //
+  // ⚠ 它**自带全部前置**：现场探测空闲端口起隔离实例（仓库外临时目录 + -probe.exe）
+  //   + Chrome + 自己清空/建/改/停/删的夹具 ⇒ **不需要任何人工准备**，跑完释放端口。
+  //   所以它是常驻门禁，而不是"手动跑一次"的对照脚本。
+  //
+  // # 为什么它必须是 e2e（静态断言没有判别力）
+  //
+  // C3 的六条门禁（①②③④⑥⑧）全是服务端/静态判据，而这几件事只有真点一次才知道：
+  //   · 入口 section[data-key=tokens] 真的能切过去、tkFrame 的 contentDocument 可读
+  //   · 创建抽屉的（条件）字段在自己的触发条件下真的可见可交互
+  //   · count=3 真的建出 3 条、第 2 条起带 6 位后缀；50 字节 + count=2 被前端拦下
+  //   · 「复制」走的是 POST /admin/tokens/{id}/key（带 no-store），且列表/详情里搜不到明文
+  //   · 删除的 confirm 弹窗 + 删完列表少一行、详情 404
+  //
+  // 单跑：node tests/frontend/verify_tokens_page.js（0=全绿 / 1=有红 / 2=环境前提不成立）
+  'verify_tokens_page.js',
 ];
 
 function run(file) {
@@ -327,6 +344,7 @@ console.log('  node verify_cp2_f2.js 监听器不泄漏 / 一次点击一个请�
 // 登记处 = run_http_suites.js 的 DIRECT_PROBES（同为需要实例 + Chrome 的 direct 类）；
 // 这里只给出单跑命令，保证从任一条 runner 都能找到它。
 console.log('  node verify_wave2_pages.js  ★ Wave 2 三页面门禁（状态/渠道/模型；自起隔离实例+Chrome）');
+console.log('  node verify_tokens_page.js ★ 令牌页门禁（/ui/tokens；自起隔离实例+Chrome，已登记进上方 PROBES）');
 if (failures.length) {
   console.log('\n失败明细：');
   failures.forEach(f => console.log('  - ' + f));

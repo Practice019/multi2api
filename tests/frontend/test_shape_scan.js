@@ -62,12 +62,34 @@ const segLooksRandom = (v) =>
   !v.includes('-') && v.split('_').some(seg => /[A-Z]/.test(seg) && /[a-z]/.test(seg) && /[0-9]/.test(seg));
 const NOT_SECRET = /__WB2API_KEY__|__COLS_|COLS_/;
 
+// ⚠⚠⚠⚠ 第四轮修：**字符集常量**的误报（2026-10-26 实测，T70）
+//
+//   internal/store/token.go:118
+//     const tokenKeyChars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+//
+//   它是**生成密钥用的 base62 字母表**（字符集），不是密钥。但形状判据全中：
+//   引号内、62 位 ≥ 32、无连字符、单段同时含大写/小写/数字 ⇒ 被报成"命中"。
+//   （这是本文件历史上第 4 次同类误报：测试 UID → 模型 ID → UUID → client_id → 字符表。）
+//
+//   判据（**精确**，不是放宽阈值）：把字面量按字符排序后与 base62 字母表的排序结果相同
+//   ⇒ 它是"那 62 个字符的一个排列"，即字符表常量。真密钥要误命中，必须恰好是这 62 个
+//   字符的排列（概率 ~1/62!）；而字符表常量无论怎么重排都会被认出来。
+//
+//   改后它还能守住什么：**长度与字符类别判据一个字没动**（≥32、无连字符、某一段同时含
+//   大写/小写/数字、哨兵豁免仍按字面量判）。下面自测额外放了两条"近似样本"：
+//   · 字母表后多一个字符（63 位，不是排列）⇒ 必须**命中**；
+//   · 字母表倒序重排 ⇒ 必须**未命中**（证明判据与顺序无关，不是"看着像就放过"）。
+const BASE62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const sortedChars = (s) => [...s].sort().join("");
+const BASE62_SORTED = sortedChars(BASE62_ALPHABET);
+const isCharsetLiteral = (v) => v.length === BASE62_ALPHABET.length && sortedChars(v) === BASE62_SORTED;
+
 // 返回"这篇内容里像密钥的字面量"（按字面量过滤，不是按文件）
 function scanHits(content) {
   const out = [];
   for (const m of content.matchAll(LIT)) {
     const v = m[1];
-    if (segLooksRandom(v) && !NOT_SECRET.test(v)) out.push(v);
+    if (segLooksRandom(v) && !NOT_SECRET.test(v) && !isCharsetLiteral(v)) out.push(v);
   }
   return out;
 }
@@ -110,6 +132,13 @@ const SAMPLES = [
     true, '首匹配盲区：无害字面量在前、真密钥在后（旧 `exec` 只看第一个 ⇒ 漏报）'],
   ['window.__WB2API_KEY__ = "__WB2API_KEY__"; const K = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk1";',
     true, '整篇哨兵豁免：文件提到过 `__WB2API_KEY__` 但另有真密钥（旧按文件豁免 ⇒ 漏报）'],
+  // 第四轮误报与它的两条近似样本（见上方 BASE62 判据的注释）
+  ['const tokenKeyChars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"',
+    false, '字符集常量（base62 字母表本身）'],
+  ['const reversed = "zyxwvutsrqponmlkjihgfedcba9876543210ZYXWVUTSRQPONMLKJIHGFEDCBA"',
+    false, '字符集常量（同一字母表倒序重排 ⇒ 判据与顺序无关）'],
+  ['const OOPS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZz"',
+    true, '近似样本：字母表后多一个字符（63 位，不是排列）⇒ 仍必须命中'],
 ];
 for (const [text, shouldHit, name] of SAMPLES) {
   const hit = looksLikeSecret(text);

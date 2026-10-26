@@ -4,145 +4,173 @@
 <meta charset="utf-8">
 <title>渠道管理 · 中转站</title>
 <!--
-  webui-channels.html —— 渠道管理页（T6）。
+  webui-channels.html —— 渠道管理页（C2 重写，2026-10-26）。
 
-  # 为什么是一个独立文件，而不是塞进 webui.html
-  webui.html 已经 762 KB / 12373 行。往里塞渠道界面，等于把"新功能有没有写坏主控制台"
-  这个问题交给运气。独立文件的好处是可验证的：改坏了只影响这一页。
-  代价是暂时要单独访问（/ui/channels），导航入口随后补。
+  # 与 hyxapi 渠道列表页的对应关系（结构照它，实现自写）
+    列：勾选 / ID / 名称 / 标签名称 / 类型 / 分组 / 状态 / 优先级 / 权重 / 已用 / 渠道余额 / 操作
+    工具栏：拖动排序 / 撤销排序 / 新建渠道 / 测试全部 / 检测模型更新 / 应用待处理变更 /
+            查询余额 / 标签视图 / 筛选器（带生效计数徽标）+ 重置
+    抽屉（SlideOver，五段）：基本信息 / 密钥与连接 / 模型配置 / 高级与运行 / 保存
 
-  # 为什么用原生 JS 而不是引 amis 之类
-  这一页只有一张表 + 一个表单，零依赖单文件可以直接用浏览器打开（也能挂到服务端）。
-  引框架要先解决离线 SDK、构建、CSP 一堆事，收益在这一页的复杂度上体现不出来。
-  ⚠ 表格按 AGENTS #5：固定行高、紧凑少空白、超长内容不撑高行。
+  # 三条硬约束（改这一页前先读）
+  1. **零硬编码颜色**：一律用 theme-max.css 的语义变量（--bg/--panel/--panel2/--line/--fg/
+     --dim/--acc/--on-acc/--ok/--warn/--err/--overlay/--shadow/--input-bg…）。深色主题靠
+     同名变量覆盖，任何写死的 #RRGGBB 都会在深色下变成"浅色块做卡片底"（撞深色守卫）。
+  2. **页面自有 CSS 写在 MAXIMALISM:START 之前**：标记之间的那段由 tools/theme_sync.js
+     生成，写进去会被下次同步整段抹掉（本页已因此丢过一次规则）。
+  3. **内存分页 + 内存搜索**（verify_wave2_pages.js 的 [c2] 判据：翻页与搜索必须**零请求**）。
+     服务端只负责 status / type / group / sort_by / sort_order 这些"整个集合"的筛选与排序；
+     keyword 与分页在**已加载集合**上做。这不是偷懒：服务端分页会把"搜索"变成一次
+     带延迟的往返，而渠道总量是手工维护的两位数（13~25 条），一次拉满是更快的路径。
+     ⚠ 将来渠道上百条时要改成服务端 keyword + 分页（那时 #ch-next 必须允许发请求）。
 
-  # 与后端的关系（全部走已有接口，前端不自己拼规则）
-    GET    /admin/channels                   列表（**不回** keys 明细 ⇒ 每行只给 key_masks[] + key_count）
-    POST   /admin/channels                   新建（无 id）/ 更新（带 id）
-                                             ⚠ keys 是**纯字符串数组** [\"sk-...\"]，不是对象数组
-                                             ⚠ name 与 base_url 必填（服务端 400 文案会点名）
-                                             ⚠ 更新时不传 keys = **不改动**现有 key（不是清空）
-    POST   /admin/channels/delete            删除
-    POST   /admin/channels/status            停用/启用
-    POST   /admin/channels/reveal            显式取明文 key
-   （2026-10-21：「对外模型」页签与 /admin/channels/public-models 已按用户要求删除 ——
-     它回答的问题现在由 API Key 的模型白名单 + 对外名映射回答，两处重复且后者才是对外真相）
+  # 明文 key 的边界（与后端同口径）
+    列表只回 key_masks[]（掩码）；明文只在两处出现：POST /admin/channels/reveal（点"显示"）
+    与 GET /admin/channels/keys?reveal=1。本页**不缓存明文**，用完即弃。
 
-  # 两条与需求直接对应的取舍
-  ① 新增渠道的表单里**只有** Base URL + API Key 是必填 —— R3 的原话就是"只填这两个"。
-     模型、映射、优先级都是"可以之后再补"的可选项，不让它们挡住第一步。
-     因为管理页问的是"我配的渠道让外面看见什么"，不该取决于手里那把 key。
+  # 保存体的 fail-closed（最容易白写代码的地方）
+    后端按 channelFieldRegistry 做 fail-closed：**未登记字段一律 400**。目前登记的是
+    id/name/type/base_url/keys/models/model_mapping/group/groups/priority/weight/status/
+    key_selection_mode/mode/multi_key_mode/batch_add_set_key_prefix_2_name/key_mode。
+    ⇒ 组织 / 测试模型 / 备注 / 参数覆盖 / 请求头覆盖 / 状态码复写 / 是否自动禁用
+      **后端尚未登记**，本页把它们渲染成只读提示而不是可提交字段（提交必 400）。
+      渠道标签走 POST /admin/channels/tag/edit（按 tag 批量改），不走本表单。
 -->
 <style>
-  /* ══════════════════════════════════════════════════════════════════════
-     渠道管理页 · 视觉语言 v2（2026-10-21）
-     
-     原来这一页是**纯浅色硬编码**（--bd/--fg/--dim/--bg/--hover/--accent 六个值，
-     没有深色主题），所以控制台切深色时这一块（iframe）还是一张白纸 ——
-     用户看到的是"页面里嵌了一张不属于这套设计的表"。
-     
-     现在与控制台/登录页同一个色板、同一套深浅规则（GitHub Dark/Light）。
-     ⚠ iframe 里拿不到父页面的 data-theme，所以这里跟 prefers-color-scheme 走。
-       代价：父页面手动切浅色而系统是深色时，这一块不跟随 —— 要彻底解决得
-       用 postMessage 传主题（那要动 JS）；当前取舍是"多数人用系统主题"。
-     
-     ⚠ 对比度复算（深色底 #0D1117 / 浅色底 #FFFFFF）：
-         深 --fg 14.5:1 · --dim 5.6:1 · --acc 6.1:1 · --ok 7.2:1 · --warn 7.6:1 · --err 5.5:1
-         浅 --fg 16.8:1 · --dim 6.4:1 · --acc 5.8:1 · --ok 5.9:1 · --warn 6.3:1 · --err 5.9:1
-     ══════════════════════════════════════════════════════════════════════ */
-  :root {
-    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
-    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5;
-    --ok:#3FB950; --warn:#D29922; --err:#F85149;
-    --overlay:rgba(1,4,9,.72);
-    /* 兼容旧名（本页原来的变量叫 --bd / --accent），免得漏改一处就掉色 */
-    --bd:var(--line); --accent:var(--acc); --hover:var(--panel2);
-  }
-  @media (prefers-color-scheme: light) {
-    :root {
-      --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
-      --fg:#1F2328; --dim:#59636E; --acc:#0969DA;
-      --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
-      --overlay:rgba(31,35,40,.45);
-    }
-  }
-  * { box-sizing:border-box; }
-  body { margin:0; font:13px/1.5 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
-         color:var(--fg); background:var(--bg); -webkit-font-smoothing:antialiased; }
-  header { background:var(--panel); border-bottom:1px solid var(--line); padding:10px 16px;
-           display:flex; gap:8px; align-items:center; position:sticky; top:0; z-index:5; }
-  h1 { font-size:15px; margin:0 12px 0 0; font-weight:600; letter-spacing:-.01em; }
-  main { padding:12px 16px 40px; }
-  .bar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+/* ── C2 渠道页自有样式（必须在 MAXIMALISM:START 之前）────────────────────
+   只用语义变量；零圆角；表格行高 26px（AGENTS #5：紧凑、超长内容不撑高行）。 */
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg);color:var(--fg);
+  font:13px/1.5 var(--font-ui);
+}
+.wrap{padding:10px 14px 28px;max-width:1680px}
+.hd{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin:0 0 8px}
+.hd h1{margin:0;font:800 20px/1.1 var(--font-display);letter-spacing:.02em}
+.hd .sub{color:var(--dim);font-size:12px}
+.hd .live{margin-left:auto;display:flex;gap:8px;align-items:center}
 
-  /* 控件统一 6px（与控制台同档）；输入框用 --bg 而不是 --panel，
-     这样在 --panel 的 header 里也能看出边界。 */
-  input, select, textarea, button {
-    font:inherit; color:var(--fg); background:var(--bg);
-    border:1px solid var(--line); border-radius:6px; padding:5px 8px;
-    transition:border-color .12s, background .12s;
-  }
-  input:hover, select:hover, textarea:hover { border-color:var(--dim); }
-  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
-    outline:2px solid var(--acc); outline-offset:1px; border-color:var(--acc);
-  }
-  button { cursor:pointer; }
-  button:hover { background:var(--panel2); }
-  button.primary { background:var(--acc); border-color:var(--acc); color:#FFFFFF; font-weight:600; }
-  button.primary:hover { filter:brightness(1.08); }
-  button.danger { color:var(--err); }
-  button.danger:hover { background:color-mix(in srgb, var(--err) 12%, transparent); }
+.toolbar{
+  display:flex;gap:6px;align-items:center;flex-wrap:wrap;
+  padding:8px 10px;margin:0 0 8px;
+  background:var(--panel);border:2px solid var(--line);
+}
+.toolbar .sep{width:2px;height:22px;background:var(--line);margin:0 2px}
+.toolbar .grow{margin-left:auto}
+.tb{ /* 工具栏按钮：比 .btn 更紧，行高固定，避免挤成两行 */
+  height:26px;padding:0 9px;
+  background:var(--panel2);color:var(--fg);
+  border:2px solid var(--line);
+  font:700 12px/1 var(--font-ui);cursor:pointer;
+}
+.tb:hover:not(:disabled){background:var(--hover)}
+.tb:disabled{opacity:.45;cursor:not-allowed}
+.tb--go{background:var(--acc);color:var(--on-acc)}
+.tb--danger{background:var(--err-bg);color:var(--err-fg)}
+.tb .cnt{
+  display:inline-block;min-width:16px;margin-left:5px;padding:0 4px;
+  background:var(--band-bg);color:var(--band-fg);
+  font:700 11px/16px var(--font-mono);text-align:center;
+}
 
-  /* 表格：靠 1px 描边分层，不用斑马纹（与控制台同一条纪律）。
-     ⚠ th 用 --panel2 而不是写死的 #fafbfc —— 深色下那个浅灰会把整行染白。 */
-  table { width:100%; border-collapse:separate; border-spacing:0;
-          background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-  th, td { padding:0 10px; height:34px; line-height:34px; text-align:left;
-           border-bottom:1px solid var(--line); white-space:nowrap; }
-  th { background:var(--panel2); font-weight:600; color:var(--fg); font-size:12px;
-       letter-spacing:.02em; }
-  tbody tr:hover { background:var(--panel2); }
-  tbody tr:last-child td { border-bottom:none; }
-  .wrap { overflow-x:auto; }
+.banner{padding:7px 10px;margin:0 0 8px;border:2px solid var(--line);font-size:12px}
+.banner--err{background:var(--err-bg);color:var(--err-fg)}
+.banner--ok{background:var(--panel2);color:var(--fg)}
 
-  /* 状态标签：用 color-mix 从主题色派生底色，**不再写死浅色块**。
-     写死的 #e8f6ee / #fff3e8 在深色主题上是三块刺眼的白斑。 */
-  .tag { display:inline-block; padding:0 6px; height:20px; line-height:20px;
-         border-radius:4px; font-size:12px; font-weight:500; }
-  .on-t   { background:color-mix(in srgb, var(--ok) 16%, transparent);   color:var(--ok); }
-  .off-t  { background:color-mix(in srgb, var(--dim) 16%, transparent);  color:var(--dim); }
-  .warn-t { background:color-mix(in srgb, var(--warn) 16%, transparent); color:var(--warn); }
-  .muted { color:var(--dim); }
-  .err { color:var(--err); }
+.filters{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}
+.filters label{color:var(--dim);font-size:12px}
+.ipt,.sel{
+  height:26px;padding:0 7px;
+  background:var(--input-bg);color:var(--fg);
+  border:2px solid var(--line);font:12px/1 var(--font-ui);
+}
+.ipt{width:230px}
+.ipt--sm{width:120px}
+.chips{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+.tchip{
+  height:22px;padding:0 8px;
+  background:var(--panel2);color:var(--fg);
+  border:2px solid var(--line);cursor:pointer;
+  font:700 11px/18px var(--font-mono);
+}
+.tchip.on{background:var(--acc);color:var(--on-acc)}
 
-  dialog { border:1px solid var(--line); border-radius:8px; padding:0; width:560px; max-width:92vw;
-           background:var(--panel); color:var(--fg); }
-  /* Key 管理独立窗口比主编辑窗宽：要同时容纳 # / 掩码 / 状态 / 两个按钮，560 会挤成一团 */
-  #keysDlg { width:760px; }
-  dialog::backdrop { background:var(--overlay); }
-  .dlg-h { padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
-  /* ⚠ 两列 grid（96px 标签 + 1fr 控件）。**任何宽内容都必须 class="full" 跨列** ——
-     否则会落进那 96px 的一列：模型勾选列表逐字换行、textarea 被压成一条竖缝。
-     这不是"样式微调"，是"内容看不见"级别的 bug（模型列表与 Key 区各踩过一次）。
-     max-height + overflow 也是必须的：自动发现会回填 20+ 个模型，没有内部滚动会把
-     弹窗撑出屏幕，底部「取消/保存」按钮直接够不着。 */
-  .dlg-b { padding:12px 16px; display:grid; grid-template-columns:96px 1fr; gap:10px 12px;
-           align-items:center; align-content:start; max-height:72vh; overflow-y:auto; }
-  .dlg-b .full { grid-column:1 / -1; }
-  .dlg-b .hint { grid-column:1 / -1; }
-  #f-vis { max-height:190px; overflow-y:auto; border:1px solid var(--line); border-radius:6px; padding:6px 8px;
-           background:var(--bg); }
-  /* ⚠ 只收窄"选项 label"，**绝不碰 #f-choices 容器本身** —— 它是 flex-wrap，
-     一旦被改成 display:block + 固定高度，20+ 个模型会被压成一行、整片看不见。
-     （我第一版就写了 `#f-vis div`，正好命中那个容器 —— 收窄选择器是必须的，不是洁癖。） */
-  #f-choices label { display:flex; align-items:center; gap:4px; height:22px; line-height:22px;
-                     max-width:100%; white-space:nowrap; overflow:hidden; }
-  #f-choices label span { overflow:hidden; text-overflow:ellipsis; }
-  .dlg-b label { color:var(--fg); }
-  .dlg-b .hint { grid-column:2; color:var(--dim); font-size:12px; margin-top:-6px; }
-  .dlg-b textarea { min-height:64px; font-family:ui-monospace,Consolas,monospace; }
-  .dlg-f { padding:12px 16px; border-top:1px solid var(--line); display:flex; justify-content:flex-end; gap:8px; }
-  .req::after { content:" *"; color:var(--err); }
+.tblwrap{border:2px solid var(--line);background:var(--panel);overflow:auto}
+table.ch{width:100%;border-collapse:collapse;table-layout:fixed}
+table.ch th,table.ch td{
+  height:26px;line-height:26px;
+  padding:0 6px;text-align:left;
+  border-bottom:1px solid var(--line);
+  font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+table.ch thead th{
+  position:sticky;top:0;z-index:1;
+  background:var(--panel2);color:var(--fg);
+  font:700 11px/26px var(--font-mono);
+  border-bottom:2px solid var(--line);
+}
+table.ch tbody tr:hover{background:var(--hover)}
+table.ch tbody tr.sel{background:var(--panel2)}
+table.ch td.num{font-family:var(--font-mono);text-align:right}
+table.ch td.ops{text-align:right}
+table.ch td.ops button{margin-left:4px}
+.c-id{font-family:var(--font-mono);font-size:11px}
+.c-name{font-weight:700}
+.tagl{
+  color:var(--acc);cursor:pointer;text-decoration:underline;
+  text-underline-offset:2px;background:none;border:0;padding:0;
+  font:700 12px/26px var(--font-ui);
+}
+.dash{color:var(--dim)}
+.st{display:inline-block;padding:0 6px;border:1px solid var(--line);font:700 11px/18px var(--font-mono)}
+.st--on{background:var(--ok);color:var(--bg)}
+.st--off{background:var(--warn);color:var(--bg)}
+.st--auto{background:var(--err);color:var(--bg)}
+.mini{
+  height:20px;padding:0 6px;
+  background:var(--panel2);color:var(--fg);border:2px solid var(--line);
+  font:700 11px/1 var(--font-ui);cursor:pointer;
+}
+.mini:hover:not(:disabled){background:var(--hover)}
+.mini:disabled{opacity:.45;cursor:not-allowed}
+.mini--danger{background:var(--err-bg);color:var(--err-fg)}
+
+.empty{padding:16px;color:var(--dim);text-align:center;border:2px solid var(--line);border-top:0;background:var(--panel)}
+.pager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;color:var(--dim);font-size:12px}
+.pager button{height:24px;padding:0 10px;background:var(--panel2);color:var(--fg);border:2px solid var(--line);font:700 12px/1 var(--font-ui);cursor:pointer}
+.pager button:disabled{opacity:.45;cursor:not-allowed}
+.pager .grow{margin-left:auto}
+
+/* ── 弹窗 / 抽屉（都铺 --overlay，不用圆角，不与深色主题撞底）────────── */
+.mask{position:fixed;inset:0;background:var(--overlay);z-index:50}
+.modal{
+  position:fixed;z-index:51;left:50%;top:8%;transform:translateX(-50%);
+  width:min(560px,94vw);max-height:80vh;overflow:auto;
+  background:var(--bg);color:var(--fg);border:3px solid var(--line);
+  box-shadow:6px 6px 0 var(--shadow);
+}
+.slide{
+  position:fixed;z-index:51;right:0;top:0;bottom:0;
+  width:min(720px,96vw);overflow:auto;
+  background:var(--bg);color:var(--fg);border-left:3px solid var(--line);
+}
+.dh{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--panel);border-bottom:2px solid var(--line);position:sticky;top:0;z-index:2}
+.dh h2{margin:0;font:800 15px/1.2 var(--font-display)}
+.dh .x{margin-left:auto}
+.sec{padding:9px 11px;border-bottom:1px solid var(--line)}
+.sec>h3{margin:0 0 7px;font:800 12px/1.2 var(--font-display);letter-spacing:.03em}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 7px}
+.row>label{min-width:112px;color:var(--dim);font-size:12px}
+.row .hint{color:var(--dim);font-size:11px}
+.calm{background:var(--bg);color:var(--fg)}
+.grow{flex:1 1 auto}
+.ta{width:100%;min-height:74px;padding:6px 7px;background:var(--input-bg);color:var(--fg);border:2px solid var(--line);font:12px/1.5 var(--font-mono)}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:1px 6px;background:var(--panel2);border:1px solid var(--line);font:11px/1.6 var(--font-mono)}
+.mlist{max-height:150px;overflow:auto;border:2px solid var(--line);background:var(--input-bg);padding:4px 6px}
+.mlist label{display:block;font:12px/1.7 var(--font-mono)}
+.foot{display:flex;gap:8px;align-items:center;padding:10px 11px;position:sticky;bottom:0;background:var(--panel);border-top:2px solid var(--line)}
+.ro{color:var(--dim);font-size:11px}
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
@@ -1313,843 +1341,922 @@ header h1{letter-spacing:0}
      .calm                  → 本节的安静区（新概念，非别名）
    ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
 /* ==== WB2API:MAXIMALISM:END ==== */
-/* ── 渠道列表：筛选 / 搜索 / 分页（T13，2026-10-26）────────────────────
-   ⚠ 必须放在 MAXIMALISM:END **之后**：上面那段由 tools/theme_sync.js 生成
-     （"勿手改"），写进去会被下一次同步整段覆盖掉。 */
-.chfilters{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px}
-.chfilters select,.chfilters input{
-  padding:4px 7px;
-  border:2px solid var(--line);
-  background:var(--panel2);
-  color:var(--fg);
-  font:12px/1.2 var(--font-ui);
-}
-.chfilters input{width:230px}
-.chfilters .chips{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.chfilters .tchip{
-  padding:2px 8px;
-  border:2px solid var(--line);
-  background:var(--panel2);
-  color:var(--fg);
-  font:700 11px/1.6 var(--font-mono);
-  cursor:pointer;
-}
-.chfilters .tchip.on{background:var(--acc);color:var(--on-acc);border-color:var(--ink)}
-.chpager{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--dim)}
-.chpager button{
-  padding:2px 10px;
-  height:24px;
-  border:2px solid var(--line);
-  background:var(--panel2);
-  color:var(--fg);
-  font:700 12px/1 var(--font-ui);
-  box-shadow:2px 2px 0 var(--hard);
-}
-.chpager button:disabled{opacity:.45;cursor:not-allowed}
 </style>
 </head>
 <body>
-<header>
-  <h1>渠道管理</h1>
-  <!-- 旋转贴纸：与控制台/登录页同一个装饰元素，让"这一页也属于同一套语言"。
-       纯装饰 ⇒ aria-hidden；弹性流内元素，不盖住右侧「刷新」。 -->
-  <span class="maxsticker" aria-hidden="true">本地优先</span>
-  <span style="flex:1"></span>
-  <button onclick="load()">刷新</button>
-</header>
+<div class="wrap">
+  <div class="hd">
+    <h1>渠道管理</h1>
+    <span class="sub">Key 型渠道（OpenAI 兼容上游）· 多 Key 轮询 / 自动禁用 / 模型重定向</span>
+    <span class="live">
+      <button class="tb" id="btn-refresh" type="button">刷新</button>
+    </span>
+  </div>
 
-<main>
-  <!-- 渠道页签 -->
-  <section id="pane-ch">
-    <div class="bar">
-      <button class="primary" onclick="openForm(null)">+ 新增渠道（只填 Base URL + API Key）</button>
-      <!-- T13：状态筛选字典（hyxapi controller/channel.go:52-65 的同一张字典）。
-           ⚠ 值是**字典键**（enabled / disabled / 2 / 3），不是"我们自己发明的数字"——
-             后端 parseChannelStatusFilter 认这同一套；空串 = 不过滤。 -->
-      <select id="flt-status" onchange="setStatusFilter(this.value)" title="按状态筛选（字典：enabled|1 / disabled|0 / 2 / 3）">
-        <option value="">全部状态</option>
-        <option value="enabled">启用</option>
-        <option value="disabled">停用（手动 + 自动）</option>
-        <option value="2">手动停用</option>
-        <option value="3">自动停用</option>
-      </select>
-      <!-- 搜索走**内存**（不每敲一个字打一次接口）：先把后端过滤后的全集取回来（最多 100 条），
-           再在本地过滤 + 分页。这是 hyxapi 的 search 路径形态（那边也是内存过滤内存分页）。 -->
-      <input id="flt-q" placeholder="搜索名称 / Base URL / 模型…" oninput="onSearchInput()">
-      <span class="muted" id="stat"></span>
-    </div>
-    <div class="chfilters">
-      <span class="muted" style="font-size:12px">类型：</span>
-      <span class="chips" id="ch-types"></span>
-      <span class="muted" style="font-size:12px" id="ch-statusline"></span>
-    </div>
-    <div class="wrap"><table>
-      <!-- ⚠ 2026-10-21 用户要求：**删掉「映射」这一列**（原话「不要这一列！！」）。
-           映射改成表单里**自动生成**（见 refreshMapRows），列表里再摊一长串
-           `a=b, c=d` 既占宽度又要横向滚动，还看不出重点。
-           ⚠ 删列时四处一起改：colgroup / thead / 行模板 / 三处 colspan（7 → 6）。
-           ⚠ 别用 PowerShell 的 -replace 批量改这个文件：它会把整个文件写成一行
-             （本仓已踩过两次，见 docs/progress-log.md）—— 用 edit 逐处改。 -->
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="toolbar">
+    <button class="tb" id="btn-new" type="button">新建渠道</button>
+    <span class="sep"></span>
+    <button class="tb" id="btn-testall" type="button">测试全部渠道</button>
+    <button class="tb" id="btn-mcheck" type="button">检测全部模型更新</button>
+    <button class="tb" id="btn-mapply" type="button" disabled>应用全部待处理变更</button>
+    <button class="tb" id="btn-balance" type="button">查询全部渠道余额</button>
+    <span class="sep"></span>
+    <button class="tb" id="btn-tagview" type="button">标签视图</button>
+    <button class="tb" id="btn-filter" type="button">筛选器</button>
+    <button class="tb" id="btn-reset" type="button">重置</button>
+    <span class="grow"></span>
+    <button class="tb" id="btn-drag" type="button">拖动排序</button>
+    <button class="tb" id="btn-undrag" type="button" disabled>撤销排序</button>
+    <button class="tb tb--danger" id="btn-cleardis" type="button">清除所有禁用渠道</button>
+  </div>
+
+  <div class="filters">
+    <input class="ipt" id="flt-q" placeholder="搜索渠道名称/key/分组" autocomplete="off">
+    <select class="sel" id="flt-status" title="按状态筛选（服务端）">
+      <option value="">状态：全部</option>
+      <option value="1">启用</option>
+      <option value="2">禁用</option>
+      <option value="3">自动禁用</option>
+      <option value="0">未启用（禁用+自动）</option>
+    </select>
+    <span class="chips" id="ch-types"></span>
+    <span id="ch-statusline" class="sub"></span>
+  </div>
+
+  <div class="tblwrap">
+    <table class="ch" id="ch-table">
       <colgroup>
-        <col style="width:150px"><col style="width:250px"><col style="width:170px">
-        <col style="width:90px"><col style="width:80px"><col style="width:160px">
+        <col style="width:34px"><col style="width:104px"><col style="width:170px"><col style="width:110px">
+        <col style="width:96px"><col style="width:104px"><col style="width:88px"><col style="width:66px">
+        <col style="width:60px"><col style="width:92px"><col style="width:96px"><col style="width:236px">
       </colgroup>
-      <thead><tr>
-        <th>名称</th><th>Base URL</th><th>Key</th><th>模型数</th><th>状态</th><th>操作</th>
-      </tr></thead>
-      <tbody id="rows"></tbody>
-    </table></div>
-    <!-- 分页条（内存分页）：页码状态只在这一页里，不改任何后端数据。
-         ⚠ "每页"是**本地**分页大小；对后端我们一次只取 100 条（hyxapi 的 page_size 上限），
-           超过 100 条时下面会明说"只加载了前 100 条"，而不是安静地少显示。 -->
-    <div class="chpager">
-      <span id="ch-pageinfo"></span>
-      <button type="button" id="ch-prev" onclick="gotoPage(chState.page - 1)">上一页</button>
-      <button type="button" id="ch-next" onclick="gotoPage(chState.page + 1)">下一页</button>
-      <span class="muted">每页 20 条 · 最多先加载 100 条（page_size 上限）</span>
-    </div>
-    <p class="muted" style="margin-top:8px">
-      停用的渠道**不产生对外能力** —— 它声明的模型会立刻从对外目录消失，但配置留着。
-      「全部 key 停用」与「渠道停用」是两件事：前者是自动进入的状态，后者是你手动关的。
-    </p>
-  </section>
+      <thead>
+        <tr>
+          <th><input type="checkbox" id="ck-all" title="全选本页"></th>
+          <th>ID</th><th>名称</th><th>标签名称</th><th>类型</th><th>分组</th><th>状态</th>
+          <th>优先级</th><th>权重</th><th>已用</th><th>渠道余额</th><th style="text-align:right">操作</th>
+        </tr>
+      </thead>
+      <tbody id="ch-rows"></tbody>
+    </table>
+    <div class="empty" id="ch-empty" hidden>没有匹配的渠道</div>
+  </div>
 
-</main>
-
-<!-- 表单：R3 的字面要求 —— 只填 Base URL + API Key 就能建 -->
-<dialog id="dlg">
-  <div class="dlg-h" id="dlgTitle">新增渠道</div>
-  <div class="dlg-b">
-    <!-- 名称放最上面：用户第一眼要确认"我在改哪条渠道"，而不是先看到一串 URL -->
-    <label class="req">名称</label>
-    <input id="f-name" placeholder="留空 = 用 Base URL 主机名">
-    <!-- 渠道前缀（2026-10-21 用户要求）：自动生成对外模型名用的命名空间。
-         用户原话：「多一个输入框填写渠道名称 —— 自动映射为 (渠道名称)/上游真实名称」。 -->
-    <label>渠道前缀</label>
-    <!-- ⚠ 前缀变化一律**强制**重算（refreshMapRows(true)）：前缀是命名空间，
-         改它就意味着"整张表的左列都要换"，这里再尊重"手改保护"只会留下半新半旧的表。
-         模型栏的变化则相反 —— 尊重手改（见 f-models 的 oninput）。 -->
-    <input id="f-slug" placeholder="例如 qiniuyun / csg（留空 = 不自动改名，对外用上游原名）" oninput="refreshMapRows(true)">
-    <div class="hint">对外模型名 = <b>前缀/上游真实名</b>。上游真实名取模型栏里每个名字**最后一个 / 之后**的部分；
-      找不到 / 就用原样。下面的映射表会自动生成，不用手填。</div>
-    <label class="req">Base URL</label>
-    <input id="f-base" placeholder="https://api.example.com/v1">
-    <label class="req">API Key</label>
-    <!-- Key 表格搬到**独立窗口**（#keysDlg）：key 一多，塞在编辑弹窗里会把整页占满 ——
-         用户明确要求"避免这种情况"。这里只留三件事：有多少把、进管理窗、新增时直接填。 -->
-    <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 2px">
-      <span id="f-keycount" class="muted" style="font-size:12px">—</span>
-      <button type="button" onclick="openKeys()" style="white-space:nowrap">管理 Key</button>
-      <span class="muted" style="font-size:12px">选择模式</span>
-      <select id="f-mode" style="width:180px">
-        <option value="random">随机（默认）</option>
-        <option value="round_robin">轮询（依次使用）</option>
+  <div class="pager">
+    <label>每页
+      <select class="sel" id="ch-psize">
+        <option>20</option><option>50</option><option>100</option>
       </select>
-    </div>
-    <textarea id="f-key" class="full" rows="2" style="min-height:0" placeholder="新增时必填，一行一个；编辑时留空 = 不改动现有 Key（要加 Key 点「管理 Key」）"></textarea>
-    <label>状态</label>
-    <label>模型</label>
-    <input id="f-models" class="full" placeholder="逗号分隔上游真实名 —— 或点「自动发现」，在候选里勾选后点「应用勾选」" oninput="renderCandidates();refreshMapRows()">
-<div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-  <button type="button" onclick="discover()" title="问上游有哪些模型。拿回来先放**候选池**，不直接写入模型栏 —— 由你勾选后应用" style="white-space:nowrap">自动发现</button>
-  <input id="f-filter" placeholder="搜索候选模型…" style="width:200px" oninput="renderCandidates()">
-  <div id="f-disc" class="dim" style="font-size:12px;flex:1;min-width:0"></div>
+    </label>
+    <span id="ch-pageinfo"></span>
+    <button id="ch-prev" type="button">上一页</button>
+    <button id="ch-next" type="button">下一页</button>
+    <span class="grow"></span>
+    <span id="ch-selinfo"></span>
+    <button class="mini" id="btn-bstatus" type="button" disabled>批量启用</button>
+    <button class="mini" id="btn-boff" type="button" disabled>批量禁用</button>
+    <button class="mini" id="btn-btag" type="button" disabled>批量打标签</button>
+    <button class="mini mini--danger" id="btn-bdel" type="button" disabled>批量删除</button>
+  </div>
 </div>
-<div id="f-vis" class="full" style="margin:6px 0 0"></div>
-    <div class="hint">这里写上游认识的名字；对外名字由上面的「渠道前缀」自动生成。</div>
-    <label>模型映射</label>
-    <!-- 成对输入（对标 new-api 的 model_mapping 编辑器）：
-         用户的原话是「希望用户填写一对数据而不是填写这种文本」——
-         一行文本 "pub=upstream" 要求他会写语法、还要自己数等号，输错只能靠保存后的报错兜。
-         两个输入框各填一半，语法错误从根上不存在。 -->
-    <!-- 自动生成 + 可手改：手改过（oninput → markMapDirty）之后就不再自动覆盖，
-         避免"我改了一行，结果下一次敲模型又被冲掉"。要恢复自动就点「按前缀重算」。 -->
-    <div class="full" id="f-map-rows" style="display:flex;flex-direction:column;gap:4px" oninput="markMapDirty()"></div>
-    <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button type="button" onclick="refreshMapRows(true)" style="white-space:nowrap;padding:0 10px;height:26px;font-size:12px">按前缀重算</button>
-      <button type="button" onclick="addMapRow('','');markMapDirty()" style="white-space:nowrap;padding:0 10px;height:26px;font-size:12px">+ 添加一对</button>
-      <span class="muted" style="font-size:12px">左 = 对外公开名（客户端写它）· 右 = 上游真实名 · 右侧留空即同名</span>
-    </div>
-    <label>优先级</label>
-    <input id="f-prio" type="number" value="10" style="width:110px">
-    <label>权重</label>
-    <input id="f-weight" type="number" value="1" style="width:110px">
-    <div class="hint">优先级高的先用；同一优先级内按权重随机（权重只影响"同档选谁"）。</div>
-    <label>状态</label>
-    <select id="f-status"><option value="1">启用</option><option value="2">手动停用</option></select>
-  </div>
-  <div class="dlg-f">
-    <span class="err" id="dlgErr" style="margin-right:auto"></span>
-    <button onclick="closeForm()">取消</button>
-    <button class="primary" onclick="save()">保存</button>
-  </div>
-</dialog>
 
-<!-- Key 管理独立窗口：key 数量多时主编辑弹窗会被撑爆，所以单独一个窗、自己滚动、自己搜索 -->
-<dialog id="keysDlg">
-  <div class="dlg-h">
-    <span id="keysTitle">Key 管理</span>
-    <span class="muted" id="keysStat" style="font-weight:400;font-size:12px;margin-left:8px"></span>
-  </div>
-  <div class="dlg-b" style="grid-template-columns:1fr;gap:8px">
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <input id="keysFilter" placeholder="搜索（按掩码）" style="width:200px" oninput="renderKeys()">
-      <span class="muted" style="font-size:12px">明文不回显；某把被上游判无效会标红，可一键恢复</span>
-    </div>
-    <div id="keysBody" style="max-height:52vh;overflow:auto"></div>
-    <div style="display:flex;gap:8px;align-items:flex-start">
-      <textarea id="keysAdd" rows="2" placeholder="一行一个 Key，追加到上面列表（重复的会自动跳过）" style="flex:1;min-height:0"></textarea>
-      <button class="primary" onclick="addKeys()" style="white-space:nowrap">追加</button>
-    </div>
-  </div>
-  <div class="dlg-f">
-    <span class="err" id="keysErr" style="margin-right:auto"></span>
-    <button onclick="closeKeys()">关闭</button>
-  </div>
-</dialog>
+<div id="host-dlg"></div>
+<div id="host-flt"></div>
 
 <script>
-// ⚠ 本文件不引任何外部依赖：既能挂到服务端，也能直接用浏览器打开（填服务地址与令牌即可）。
-let editing = null;   // 正在编辑的渠道 id（null = 新增）
+'use strict';
+/* ── C2 渠道页脚本 ─────────────────────────────────────────────────────────
+   分四段：① 状态与工具 ② 列表（加载/筛选/渲染/分页）③ 抽屉（新建/编辑/模型/密钥）
+   ④ 批量与上游动作 + 拖动排序 + 标签视图。
+   约定：**不用模板字符串**（本文件是生成物的一部分，反引号会被外层工具吃掉），一律字符串拼接。 */
 
-// discover() 「模型自动发现」：拿当前表单里的 Base URL + key 去问上游有哪些模型，回填到 #f-models。
-//
-// ⚠ 两个刻意的行为：
-//   1. 它**不保存** —— 只填栏位。抄错上游模型名是这条链路最容易出的错，所以让用户先看到真名、
-//      再自己按保存，比"发现并直接落库"安全（后者会在 Base URL 写错时把错的列表写进渠道）。
-//   2. key 空着就**明确说清**，不静默发一个空 key 的请求（那会拿到 401，然后用户会以为功能坏了）。
-//      编辑已存在的渠道时可以不填 —— 服务端会用该渠道自己**启用中**的那个 key。
-// renderCandidates() 候选池渲染：把上游返回（或手填）的候选逐个渲染成复选框，
-// **勾选后点"应用"才写入模型栏** —— 默认什么都不接受，而不是默认全接受再删。
-//
-// ⚠ 2026-10-20 语义变更后重写：原先这里叫 renderVisible，是「对外可见」开关，靠
-//   "对外 = 渠道声明 ∩ 令牌白名单"那层收紧实现。用户决定撤掉那层（改成直接展示全部）
-//   ⇒ 这个控件不再控制"外部看不看得见"，它只编辑**这条渠道声明并提供哪些模型**
-//   （= #f-models 那一栏的另一种编辑方式，没有独立状态）。
-//   取消勾选 ⇒ 请求不再走这条渠道；不再有"取消勾选后外部立刻看不见"那层含义（那层已撤）。
-//
-// ⚠ 自渲染（输入框 oninput + 本函数）而不是"打开对话框时填一次"：这样它不依赖任何对话框钩子，
-//   手动敲、自动发现回填、勾选切换三条路径的显示始终一致 —— 少一个"状态不同步"的洞。
-// ---- 模型候选池：自动发现的结果先放这里，**勾选后**才写进模型栏 ----
-//
-// # 为什么改成"候选池 + 勾选 + 应用"，而不是"全部填入再取消勾选"
-//
-// 旧实现把上游返回的 25 个一次性写进模型栏，再用勾选去"摘掉不要的"。用户的原话是
-// 「勾选哪些要不要然后填入，不是全部填入」。差别很实际：
-//   全部填入 = 默认接受一切（删除是例外操作，漏了就全开）
-//   候选勾选 = 默认什么都不接受（添加是显式操作，漏了只是少一个模型）
-// 后者才是"我挑哪些提供服务"的正确默认值。
-let discovered = [];          // 上游返回的候选（不动 #f-models）
-const picked = new Set();     // 候选里被勾选的
-function currentModels() {
-  return document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean);
-}
-function filteredCandidates() {
-  const q = (document.getElementById('f-filter').value || '').trim().toLowerCase();
-  return q ? discovered.filter(n => n.toLowerCase().indexOf(q) >= 0) : discovered;
-}
-function renderCandidates() {
-  const box = document.getElementById('f-vis');
-  if (!box) { return; }
-  const cur = currentModels();
-  if (!discovered.length) {
-    box.innerHTML = '<div class="dim" style="font-size:12px">点「自动发现」拉取上游候选模型（拿到后由你勾选）。'
-      + '这条渠道当前声明了 ' + cur.length + ' 个模型'
-      + (cur.length ? '：' + esc(cur.slice(0, 8).join(', ')) + (cur.length > 8 ? ' …' : '') : '')
-      + '。也可以直接在「模型」栏手填。</div>';
-    return;
-  }
-  const shown = filteredCandidates();
-  const q = (document.getElementById('f-filter').value || '').trim();
-  box.innerHTML = '<div class="dim" style="font-size:12px;margin-bottom:3px">'
-    + '候选 ' + discovered.length + ' 个' + (q ? '（筛出 ' + shown.length + '）' : '')
-    + ' · 已勾选 <b>' + picked.size + '</b>'
-    + ' <a href="#" onclick="pickAll(true);return false" style="font-size:12px;margin-left:6px">全选' + (q ? '筛选结果' : '') + '</a>'
-    + ' <a href="#" onclick="pickAll(false);return false" style="font-size:12px">全不选</a>'
-    + ' <button type="button" style="padding:0 8px;height:20px;line-height:18px;font-size:12px;margin-left:6px"'
-    + ' onclick="applyPicked()">应用勾选 → 写入模型栏</button></div>'
-    + '<div id="f-choices" style="display:flex;flex-wrap:wrap;gap:8px;font-size:13px">'
-    + shown.map(n => '<label title="' + esc(n) + '"><input type="checkbox" ' + (picked.has(n) ? 'checked' : '')
-      + ' onchange="pickOne(this)" data-m="' + esc(n) + '"><span>' + esc(n) + '</span></label>').join('')
-    + '</div>';
-}
-function pickOne(cb) {
-  const n = cb.getAttribute('data-m');
-  if (cb.checked) { picked.add(n); } else { picked.delete(n); }
-  renderCandidates();
-}
-// 全选/全不选只作用于**当前筛选出来的**那批（搜索后点全选，不该把看不见的也选中）
-function pickAll(on) {
-  filteredCandidates().forEach(n => { if (on) { picked.add(n); } else { picked.delete(n); } });
-  renderCandidates();
-}
-function applyPicked() {
-  document.getElementById('f-models').value = [...picked].join(',');
-  document.getElementById('f-disc').textContent = '已把 ' + picked.size + ' 个模型写入模型栏（还没保存，记得点「保存」）';
-  renderCandidates();
-}
-
-async function discover() {
-  const box = document.getElementById('f-disc');
-  const base = document.getElementById('f-base').value.trim();
-  const key = document.getElementById('f-key').value.trim();
-  if (!base) { box.textContent = '先填 Base URL（OpenAI 兼容，通常以 /v1 结尾）'; return; }
-  // ⚠ 编辑已保存的渠道时，API Key 栏是空的（那个栏的约定是"留空 = 不改动现有 key"）——
-  //   这时**不该**拒绝，而要带上渠道 id 让服务端用它自己存的那把 key 去问。
-  //   旧版这里直接要求"去列表里点编辑"，而用户**已经在编辑弹窗里** ⇒ 死循环提示，按钮永远点不动。
-  //   （服务端的 /admin/channels/discover 从 T6-① 起就支持 {id} 形态：id 取该渠道的 BaseURL 与
-  //    第一个**启用**状态的 key；请求里显式给的 base_url/key 优先 ⇒ 改了地址或换了 key 也照样准。）
-  if (!key && !editing) {
-    box.textContent = '先填 API Key（新增渠道时必填；已保存的渠道可以不填，服务端会用存着的那把）';
-    return;
-  }
-  box.textContent = '正在问上游…';
-  try {
-    const payload = { base_url: base };
-    if (key) { payload.key = key; }
-    if (editing) { payload.id = editing; }   // 编辑态：让服务端补上它存的 key
-    const d = await api('/admin/channels/discover', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const ms = (d && d.models) || [];
-    if (!ms.length) { box.textContent = '上游返回 0 个模型：确认 Base URL 指向的是 OpenAI 兼容端点（/v1）'; return; }
-    // ★ 只放进候选池，**不**写模型栏 —— 用户要的是"挑完再填"，不是"全塞进去再删"。
-    discovered = ms;
-    picked.clear();
-    // 默认勾上"这条渠道已经声明的"：重新发现时不该把已有配置悄悄丢掉；新发现的默认不勾。
-    const cur = new Set(currentModels());
-    ms.forEach(n => { if (cur.has(n)) { picked.add(n); } });
-    document.getElementById('f-filter').value = '';
-    renderCandidates();
-    box.textContent = '拿到 ' + ms.length + ' 个候选（默认只勾了已声明的 ' + picked.size
-      + ' 个）；挑好后点「应用勾选 → 写入模型栏」';
-  } catch (e) {
-    box.textContent = '自动发现失败：' + (e && e.message ? e.message : e);
-  }
-}
-
-function baseURL() {
-  // 这个页面已经内嵌进控制台（iframe），鉴权走会话 cookie ⇒ 恒用当前 origin。
-  // 原来的"服务地址 / 管理令牌"两个输入框是**独立打开**这个页面时手填用的，
-  // 内嵌之后它们只会让用户困惑（"我还要填令牌吗？"），已删除。
-  return location.origin;
-}
-function headers() {
-  // 令牌输入框已去掉：内嵌使用时靠会话 cookie（管理员登录态）鉴权。
-  return { 'Content-Type': 'application/json' };
-}
-async function api(path, opt) {
-  const r = await fetch(baseURL() + path, Object.assign({ headers: headers() }, opt || {}));
-  const text = await r.text();
-  let j = null; try { j = JSON.parse(text); } catch (e) {}
-  // ⚠ j.error 可能是**对象**（OpenAI 错误格式是 {"error":{"code":..,"message":..}}）。
-  // 直接塞进 new Error() 会渲染成 "[object Object]"，真实原因就丢了。
-  // 与 webui-groups.html 的 api() 同一处理（同一个坑不留两处）。
-  if (!r.ok) {
-    let msg = '';
-    if (j) {
-      if (typeof j.error === 'string') {
-        msg = j.error;
-      } else if (j.error && typeof j.error === 'object') {
-        msg = j.error.message || j.error.code || '';
-        if (j.error.code && j.error.message) { msg = j.error.code + ': ' + j.error.message; }
-      }
-      if (!msg && typeof j.message === 'string') { msg = j.message; }
-    }
-    if (!msg) { msg = text.slice(0, 160); }
-    if (!msg) { msg = 'HTTP ' + r.status; }
-    throw new Error(msg);
-  }
-  return j === null ? {} : j;
-}
-function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
-// ---- 模型映射：成对输入 ----
-// 为什么不用一行文本（pub=upstream）：那要求用户会写这套微语法、还要自己数等号，
-// 输错只有保存后的 400 能兜。两个框各填一半 ⇒ 语法错误从根上不存在。
-function addMapRow(k, v) {
-  const box = document.getElementById('f-map-rows');
-  if (!box) { return; }
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:6px;align-items:center';
-  row.innerHTML = '<input class="m-key" placeholder="对外公开名（客户端写这个）" style="flex:1;min-width:0" value="' + esc(k) + '">'
-    + '<span class="muted" style="flex:0 0 auto">→</span>'
-    + '<input class="m-val" placeholder="上游真实名（右留空 = 同名）" style="flex:1;min-width:0" value="' + esc(v) + '">'
-    + '<button type="button" onclick="this.parentNode.remove()" style="flex:0 0 auto;padding:0 8px;height:26px;font-size:12px">删除</button>';
-  box.appendChild(row);
-}
-function renderMapRows(obj) {
-  const box = document.getElementById('f-map-rows');
-  if (!box) { return; }
-  box.innerHTML = '';
-  const ks = Object.keys(obj || {});
-  if (!ks.length) { addMapRow('', ''); return; }   // 空的时候给一行空框，省得用户先点"添加"
-  ks.forEach(k => addMapRow(k, obj[k]));
-}
-
-// ---- 自动映射（2026-10-21 用户要求）----
-//
-// 用户原话：「自动映射为 (渠道名称)/上游真实名称；例如 deepseek/deepseek-v4.1-flash →
-// (渠道名称)/deepseek-v4.1-flash；真实名称从后往前找第一个 / 往后的内容；没有找到就用
-// 原始的字段，这样就不用用户自己设置映射了」。
-//
-// 规则（全部按这句话实现，别自己加戏）：
-//   real  = 模型名里**最后一个 /** 之后的部分；没有 / 就取整个名字
-//   pub   = 前缀 ? 前缀 + '/' + real : 名字原样
-//   map[pub] = real        （pub 与 real 相同则不写 —— 无意义映射只会把表撑满）
-//
-// 边界：前缀可以带结尾的 /（有人会顺手写 `csg/`），这里统一去掉再拼；
-//      前缀留空 ⇒ 不生成任何映射（对外就用上游原名，这是最不容易出事的默认）。
-let mapDirty = false;   // true = 用户手改过映射行，别再用自动值覆盖
-
-function mapSlugOf(m) {
-  // 从已有映射里反推前缀：第一个键的 / 之前那一段（编辑已有渠道时用它回显输入框）
-  const ks = Object.keys(m || {});
-  if (!ks.length) { return ''; }
-  const i = ks[0].indexOf('/');
-  return i > 0 ? ks[0].slice(0, i) : '';
-}
-
-function autoMapFromForm() {
-  const slugEl = document.getElementById('f-slug');
-  const slug = (slugEl ? slugEl.value : '').trim().replace(/\/+$/, '');
-  const models = (document.getElementById('f-models').value || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
-  const out = {};
-  // ⚠ 前缀为空 ⇒ **一条映射都不生成**。曾经的写法是 pub = id（原样）再比较 pub !== real，
-  // 那会让"带斜杠的上游名"也生成一条"原 id → 裸名"的映射 —— 那等于偷偷改名，
-  // 而上游认的很可能就是完整 id。没前缀就保持原样，这是最不容易出事的默认。
-  if (!slug) { return out; }
-  models.forEach(id => {
-    const i = id.lastIndexOf('/');
-    const real = i >= 0 ? id.slice(i + 1) : id;
-    if (!real) { return; }
-    out[slug + '/' + real] = real;
-  });
-  return out;
-}
-
-// refreshMapRows(force)：force=true 时即使手改过也重算（「按前缀重算」按钮）
-function refreshMapRows(force) {
-  if (!force && mapDirty) { return; }
-  // force 的语义是"重算并**解除**手改保护"：之前手改过、现在按前缀重算，
-  // 说明用户回到了自动口径 —— 之后改模型栏就该继续自动跟。
-  if (force) { mapDirty = false; }
-  const box = document.getElementById('f-map-rows');
-  if (!box) { return; }
-  const auto = autoMapFromForm();
-  const ks = Object.keys(auto);
-  box.innerHTML = '';
-  if (!ks.length) {
-    // 没有可生成的映射时给一行空框（保持"可以手填"的能力），但**不**把它当手改
-    addMapRow('', '');
-    mapDirty = false;
-    return;
-  }
-  ks.forEach(k => addMapRow(k, auto[k]));
-  mapDirty = false;
-}
-
-function markMapDirty() { mapDirty = true; }
-function collectMap() {
-  const out = {};
-  document.querySelectorAll('#f-map-rows > div').forEach(r => {
-    const k = r.querySelector('.m-key').value.trim();
-    const v = r.querySelector('.m-val').value.trim();
-    if (k) { out[k] = v || k; }   // 右侧留空 = 同名（与后端"留空即名字相同"的约定一致）
-  });
-  return out;
-}
-// mapText 已随「映射」列一起删除（2026-10-21 用户要求不要那一列）——
-// 留着它就是死代码，下一个人会以为列表还在用。
-function maskKey(k) { return k ? (k.length > 12 ? k.slice(0, 6) + '…' + k.slice(-4) : '已配置') : '—'; }
-
-// ---- 渠道页签（T13：状态筛选 + 内存搜索 + 内存分页）----
-//
-// # 数据流（别把它改成"每敲一个字打一次接口"）
-//
-//   load()       → GET /admin/channels?p=1&page_size=100&status=<字典值>[&type=N]
-//                  后端在内存里按 status/type 过滤 + 算 type_counts/status_counts，
-//                  回**当前筛选下的全集**（≤100 条）。
-//   applyView()  → 在 chState.rows 上做**内存搜索**（名称/Base URL/模型）与**内存分页**，
-//                  然后渲染表格 / 页码 / 计数条。
-//
-// 搜索不重新请求：渠道是手工维护的少量数据，敲一个字打一次接口只会让页面抖；
-// 这也是 hyxapi 的 search 路径形态（那边同样是内存过滤 + 内存分页）。
-//
-// ⚠ 100 是 hyxapi 的 page_size 上限（common/page_info.go:73-75），不是我们拍的。
-//   真被截断时**明说**（见 ch-pageinfo）—— 安静地少显示会被读成"渠道丢了"。
-const CH_PAGE_SIZE = 20;    // 本地每页条数（与后端缺省一致）
-const CH_LOAD_SIZE = 100;   // 一次向后端要多少条 = page_size 上限
-const chState = {
-  page: 1, status: '', keyword: '', type: null,
-  rows: [], total: 0, typeCounts: {}, statusCounts: {},
+/* ① 状态与工具 ───────────────────────────────────────────────────────── */
+var TYPE_NAMES = { 0: 'OpenAI 兼容', 1: 'Azure', 2: 'Anthropic', 3: 'Gemini', 8: '自定义' };
+var SORTS = [
+  ['priority', '优先级'], ['id', 'ID'], ['name', '名称'],
+  ['balance', '余额'], ['response_time', '响应时间'], ['test_time', '测试时间']
+];
+var st = {
+  rows: [], typeCounts: {}, statusCounts: {}, total: 0, ability: 0,
+  page: 1, psize: 20, keyword: '',
+  sel: {},                       // id -> true（跨页保留：批量动作按 id 下发）
+  f: { status: '', type: '', group: '', sortBy: '', sortOrder: '' },
+  tags: [], tagMode: '', pendingModels: null,
+  drag: false, dragFrom: -1, order0: null
 };
 
-function onSearchInput() {
-  chState.keyword = document.getElementById('flt-q').value.trim();
-  chState.page = 1;
-  applyView();
-}
-function setStatusFilter(v) {
-  chState.status = v;
-  chState.page = 1;
-  load();          // status 是**服务端**过滤（它决定 type_counts/status_counts 的口径），必须重取
-}
-function typeLabel(t) { return t === '0' || t === 0 ? 'OpenAI 兼容' : ('类型 ' + t); }
-function toggleTypeFilter(t) {
-  // 再点同一个 chip = 取消过滤（不然只能靠刷新页面才能回去）
-  chState.type = chState.type === t ? null : t;
-  chState.page = 1;
-  load();
-}
-function gotoPage(n) {
-  const pages = Math.max(1, Math.ceil(visibleRows().length / CH_PAGE_SIZE));
-  chState.page = Math.min(Math.max(1, n), pages);
-  applyView();
-}
-// visibleRows = 后端已过滤的全集 ∩ 本地搜索词。搜索**只在这里**做一次。
-function visibleRows() {
-  const k = chState.keyword.toLowerCase();
-  if (!k) { return chState.rows; }
-  return chState.rows.filter(c => {
-    const hay = ((c.name || '') + ' ' + (c.base_url || '') + ' ' + (c.id || '') + ' ' + (c.models || []).join(' ')).toLowerCase();
-    return hay.indexOf(k) >= 0;
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
   });
 }
-function renderChips() {
-  const box = document.getElementById('ch-types');
-  const keys = Object.keys(chState.typeCounts || {}).sort();
-  box.innerHTML = keys.length
-    ? keys.map(t => '<span class="tchip' + (chState.type === t ? ' on' : '') + '" title="按类型筛选（再点一次取消）" onclick="toggleTypeFilter(\'' + t + '\')">'
-        + esc(typeLabel(t)) + ' · ' + chState.typeCounts[t] + '</span>').join('')
-    : '<span class="muted" style="font-size:12px">（无）</span>';
-  // 状态分布：只在**按状态筛选时**显示，且明说它是"全部渠道"的口径
-  //（后端的 status_counts 刻意不受 status 过滤影响，否则选中某个状态后其它状态全塌成 0）。
-  const sc = chState.statusCounts || {};
-  const st = document.getElementById('ch-statusline');
-  st.textContent = chState.status
-    ? '（全部渠道：启用 ' + (sc['1'] || 0) + ' · 手动停用 ' + (sc['2'] || 0) + ' · 自动停用 ' + (sc['3'] || 0) + '）'
-    : '';
+function num(v) {
+  if (v == null || v === '' || isNaN(Number(v))) { return '—'; }
+  var n = Number(v);
+  if (n >= 1e9) { return (n / 1e9).toFixed(2) + 'B'; }
+  if (n >= 1e6) { return (n / 1e6).toFixed(2) + 'M'; }
+  if (n >= 1e3) { return n.toLocaleString('en-US'); }
+  return String(n);
 }
-function applyView() {
-  const tbody = document.getElementById('rows');
-  const rows = visibleRows();
-  const pages = Math.max(1, Math.ceil(rows.length / CH_PAGE_SIZE));
-  if (chState.page > pages) { chState.page = pages; }
-  const start = (chState.page - 1) * CH_PAGE_SIZE;
-  const pageRows = rows.slice(start, start + CH_PAGE_SIZE);
+function money(v) {
+  if (v == null || v === '' || isNaN(Number(v)) || Number(v) === 0) { return '—'; }
+  return '$' + Number(v).toFixed(4);
+}
+function ts(v) { return (!v || v <= 0) ? '—' : new Date(v * 1000).toLocaleString('zh-CN', { hour12: false }); }
 
-  // stat：当前**筛选结果**的口径（共几条 / 搜索筛出几条 / 其中启用几条）。
-  // ⚠ 启用数按 rows 现算，不用后端的 status_counts —— 那是"未按状态筛选"的全量口径，
-  //   拿它在这里显示会得到"共 5 条 · 启用 20 条"这种自相矛盾的一行。
-  const onCount = rows.filter(c => c.status === 1).length;
-  let stat = '共 ' + chState.total + ' 条';
-  if (rows.length !== chState.total) { stat += ' · 筛出 ' + rows.length + ' 条'; }
-  stat += ' · 启用 ' + onCount + ' 条';
-  document.getElementById('stat').textContent = stat;
+function banner(kind, msg) {
+  var b = $('banner');
+  if (!msg) { b.hidden = true; b.textContent = ''; return; }
+  b.hidden = false;
+  b.className = 'banner banner--' + (kind === 'err' ? 'err' : 'ok');
+  b.textContent = msg;
+}
 
-  if (!pageRows.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="muted">还没有渠道 —— 点左上「新增渠道」，只填 Base URL + API Key 即可</td></tr>';
-  } else {
-    tbody.innerHTML = pageRows.map(c => {
-      const on = c.status === 1;
-      const tag = on ? '<span class="tag on-t">启用</span>'
-        : (c.status === 2 ? '<span class="tag warn-t">手动停用</span>' : '<span class="tag off-t">自动停用</span>');
-      // ⚠ 列表**不回** keys 明细（那会漏明文/掩码全集），只回 key_masks[] + key_count。
-      // 我第一版读 c.keys[0].mask ⇒ 这一列永远是「—」，而接口其实一直是好的。
-      const km = (c.key_masks && c.key_masks.length) ? c.key_masks[0] : '';
-      const key = c.key_count ? (c.key_count + ' 个 · ' + esc(maskKey(km) || '已配置')) : '—';
-      const n = (c.models || []).length;
-      return '<tr>'
-        + '<td title="' + esc(c.name) + '">' + esc(c.name || c.id) + '</td>'
-        + '<td title="' + esc(c.base_url) + '">' + esc(c.base_url) + '</td>'
-        // ⚠ 不再写内联 padding/height：内联样式会**压过**样式表（2026-10-21 用户
-        //   连着两次报「按钮还是挤在一起」，真因就是这里的 style 把主题的描边/间距/高度
-        //   全吃掉了）。按钮尺寸与间距统一由 theme-max.css 第 16 节按 #pane-ch 作用域给。
-        + '<td>' + key + ' <button class="ch-act" onclick="reveal(\'' + esc(c.id) + '\')">显示</button></td>'
-        + '<td>' + n + '</td>'
-        + '<td>' + tag + '</td>'
-        + '<td>'
-        + '<button class="ch-act" onclick="openForm(\'' + esc(c.id) + '\')">编辑</button>'
-        + '<button class="ch-act" onclick="toggle(\'' + esc(c.id) + '\',' + (on ? 2 : 1) + ')">' + (on ? '停用' : '启用') + '</button>'
-        + '<button class="ch-act danger" onclick="del(\'' + esc(c.id) + '\')">删除</button>'
-        + '</td></tr>';
-    }).join('');
-  }
-  // 分页信息：加载被上限截断时**明说**（否则"渠道少了"会被当成丢数据）
-  let info = '第 ' + chState.page + ' / ' + pages + ' 页 · 本页 ' + pageRows.length + ' 条';
-  if (chState.total > chState.rows.length) {
-    info += ' · ⚠ 筛选后共 ' + chState.total + ' 条，只加载了前 ' + chState.rows.length + ' 条（page_size 上限 ' + CH_LOAD_SIZE + '）';
-  }
-  document.getElementById('ch-pageinfo').textContent = info;
-  document.getElementById('ch-prev').disabled = chState.page <= 1;
-  document.getElementById('ch-next').disabled = chState.page >= pages;
+/* 所有写操作都带 X-Admin-Token —— 页面本身在管理面里，token 由服务端注入的 cookie/头处理；
+   这里保持与既有页面一致：同源 fetch，凭据随 cookie 走。 */
+function api(method, path, body) {
+  var opt = { method: method, headers: { 'Content-Type': 'application/json' } };
+  if (body !== undefined && body !== null) { opt.body = JSON.stringify(body); }
+  return fetch(path, opt).then(function (r) {
+    return r.text().then(function (t) {
+      var j = null;
+      try { j = t ? JSON.parse(t) : null; } catch (e) { j = null; }
+      if (!r.ok) {
+        var msg = (j && (j.error || j.message)) || ('HTTP ' + r.status);
+        throw new Error(msg + '（' + path + '）');
+      }
+      return j;
+    });
+  });
+}
+
+/* ② 列表 ───────────────────────────────────────────────────────────────── */
+
+/* load 只负责"服务端维度"的筛选（status/type/group/sort）与整体拉取；
+   keyword 与分页在内存里做（见文件头第 3 条硬约束）。
+   每次 load 都要：页码回 1、清空多选、退出拖动排序 —— 否则会留下"上一屏的选择"。 */
+function load() {
+  var q = ['p=1', 'page_size=100'];
+  if (st.f.status !== '') { q.push('status=' + encodeURIComponent(st.f.status)); }
+  if (st.f.type !== '') { q.push('type=' + encodeURIComponent(st.f.type)); }
+  if (st.f.group) { q.push('group=' + encodeURIComponent(st.f.group)); }
+  if (st.tagMode) { q.push('tag_mode=' + encodeURIComponent(st.tagMode)); }
+  if (st.f.sortBy) { q.push('sort_by=' + encodeURIComponent(st.f.sortBy)); }
+  if (st.f.sortOrder) { q.push('sort_order=' + encodeURIComponent(st.f.sortOrder)); }
+  return api('GET', '/admin/channels?' + q.join('&')).then(function (j) {
+    st.rows = (j && (j.items || j.channels)) || [];
+    st.typeCounts = (j && j.type_counts) || {};
+    st.statusCounts = (j && j.status_counts) || {};
+    st.total = (j && j.total) || st.rows.length;
+    st.ability = (j && j.ability_count) || 0;
+    st.page = 1; st.sel = {}; exitDrag();
+    render();
+  }).catch(function (e) { banner('err', '加载渠道失败：' + e.message); });
+}
+
+function matches(ch) {
+  if (!st.keyword) { return true; }
+  var k = st.keyword.toLowerCase();
+  var hay = [ch.name, ch.id, ch.base_url, ch.group, ch.tag].concat(ch.groups || [], ch.key_masks || []).join(' ');
+  return hay.toLowerCase().indexOf(k) >= 0;
+}
+function viewRows() { return st.rows.filter(matches); }
+function pages() { return Math.max(1, Math.ceil(viewRows().length / st.psize)); }
+function pageRows() {
+  var v = viewRows(), p = Math.min(st.page, pages());
+  return v.slice((p - 1) * st.psize, p * st.psize);
+}
+function selIds() { return Object.keys(st.sel).filter(function (k) { return st.sel[k]; }); }
+
+function statusBadge(s) {
+  var cls = s === 1 ? 'st--on' : (s === 3 ? 'st--auto' : 'st--off');
+  var txt = s === 1 ? '启用' : (s === 3 ? '自动禁用' : '禁用');
+  return '<span class="st ' + cls + '">' + txt + '</span>';
+}
+function typeName(t) { return TYPE_NAMES[t] || ('类型 ' + t); }
+
+function render() {
+  var rows = pageRows(), html = '';
+  rows.forEach(function (ch) {
+    var checked = st.sel[ch.id] ? ' checked' : '';
+    var tag = ch.tag ? '<button type="button" class="tagl" data-tag="' + esc(ch.tag) + '">' + esc(ch.tag) + '</button>' : '<span class="dash">—</span>';
+    html += '<tr data-id="' + esc(ch.id) + '"' + (st.sel[ch.id] ? ' class="sel"' : '') + (st.drag ? ' draggable="true"' : '') + '>' +
+      '<td><input type="checkbox" class="ck" data-id="' + esc(ch.id) + '"' + checked + '></td>' +
+      '<td class="c-id" title="' + esc(ch.id) + '">' + esc(ch.id) + '</td>' +
+      '<td class="c-name" title="' + esc(ch.name) + '">' + esc(ch.name) + '</td>' +
+      '<td>' + tag + '</td>' +
+      '<td>' + esc(typeName(ch.type)) + '</td>' +
+      '<td title="' + esc((ch.groups || []).join(',')) + '">' + esc((ch.groups || []).join(',')) + '</td>' +
+      '<td>' + statusBadge(ch.status) + '</td>' +
+      '<td class="num">' + num(ch.priority) + '</td>' +
+      '<td class="num">' + num(ch.weight) + '</td>' +
+      '<td class="num" title="已用额度">' + num(ch.used_quota) + '</td>' +
+      '<td class="num" title="' + (ch.balance_updated_time ? '更新于 ' + ts(ch.balance_updated_time) : '') + '">' + money(ch.balance) + '</td>' +
+      '<td class="ops">' +
+        '<button class="mini" data-act="edit" data-id="' + esc(ch.id) + '">编辑</button>' +
+        '<button class="mini" data-act="keys" data-id="' + esc(ch.id) + '">密钥</button>' +
+        '<button class="mini" data-act="toggle" data-id="' + esc(ch.id) + '" data-status="' + (ch.status === 1 ? 2 : 1) + '">' + (ch.status === 1 ? '停用' : '启用') + '</button>' +
+        '<button class="mini" data-act="test" data-id="' + esc(ch.id) + '">测试</button>' +
+        '<button class="mini" data-act="balance" data-id="' + esc(ch.id) + '">余额</button>' +
+        '<button class="mini" data-act="copy" data-id="' + esc(ch.id) + '">复制</button>' +
+        '<button class="mini mini--danger" data-act="del" data-id="' + esc(ch.id) + '">删除</button>' +
+      '</td></tr>';
+  });
+  $('ch-rows').innerHTML = html;
+  $('ch-empty').hidden = rows.length > 0;
+
+  var v = viewRows().length, p = Math.min(st.page, pages());
+  $('ch-statusline').textContent = '共 ' + st.rows.length + ' 条（筛选后 ' + v + ' 条）· 能力索引 ' + (st.ability || 0) + ' 条';
+  $('ch-pageinfo').textContent = '第 ' + p + '/' + pages() + ' 页 · 显示 ' +
+    (v === 0 ? 0 : ((p - 1) * st.psize + 1)) + '-' + Math.min(p * st.psize, v) + ' / ' + v;
+  $('ch-prev').disabled = p <= 1;
+  $('ch-next').disabled = p >= pages();
   renderChips();
-}
-async function load() {
-  const tbody = document.getElementById('rows');
-  tbody.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
-  try {
-    const qs = ['p=1', 'page_size=' + CH_LOAD_SIZE];
-    if (chState.status) { qs.push('status=' + encodeURIComponent(chState.status)); }
-    if (chState.type !== null) { qs.push('type=' + encodeURIComponent(chState.type)); }
-    const d = await api('/admin/channels?' + qs.join('&'));
-    // channels 是本仓既有键、items 是 hyxapi 的键 —— 后端**同一个数组**给两份，
-    // 这里两个都认（换任何一个后端版本都不会白屏）。
-    const list = d.channels || d.items || d.data || [];
-    chState.rows = list;
-    chState.total = (typeof d.total === 'number') ? d.total : list.length;
-    chState.typeCounts = d.type_counts || {};
-    chState.statusCounts = d.status_counts || {};
-    window.__channels = list;   // 供表单读原值（避免为编辑再打一次接口）
-    applyView();
-  } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="6" class="err">' + esc(e.message) + '</td></tr>';
-  }
+  renderSel();
 }
 
-// ---- 表单 ----
-function parseMap(text) {
-  const out = {};
-  String(text || '').split(/\n+/).forEach(line => {
-    const s = line.trim();
-    if (!s || s[0] === '#') return;
-    const i = s.indexOf('=');
-    if (i < 0) { out[s] = s; return; }             // 只写一个名字：原样（不改变名字）
-    const k = s.slice(0, i).trim(), v = s.slice(i + 1).trim();
-    if (k) out[k] = v;
-  });
-  return out;
-}
-function openForm(id) {
-  editing = id;
-  const c = id ? (window.__channels || []).find(x => x.id === id) : null;
-  document.getElementById('dlgTitle').textContent = id ? '编辑渠道' : '新增渠道';
-  document.getElementById('dlgErr').textContent = '';
-  document.getElementById('f-base').value = c ? (c.base_url || '') : '';
-  document.getElementById('f-key').value = '';
-  document.getElementById('f-key').placeholder = c
-    ? '留空 = 不改动现有 Key；要加 Key 点上面「管理 Key」'
-    : 'sk-...（一行一个，可多填）';
-  // 候选池与 Key 状态每次打开都重置 —— 上一次的发现结果留到下一次是最典型的脏状态
-  discovered = [];
-  picked.clear();
-  keysData = [];
-  keysFor = c ? id : '';
-  document.getElementById('f-mode').value = 'random';
-  document.getElementById('f-filter').value = '';
-  document.getElementById('f-keycount').textContent = c ? '读取中…' : '新增渠道：Key 填在下面（一行一个）';
-  renderCandidates();
-  if (c) { loadKeys(id); }
-  document.getElementById('f-name').value = c ? (c.name || '') : '';
-  document.getElementById('f-models').value = c ? (c.models || []).join(',') : '';
-  // 前缀从前缀字段或已有映射反推；映射先按原样回显
-  const existMap = (c && c.model_mapping) || {};
-  document.getElementById('f-slug').value = mapSlugOf(existMap);
-  renderMapRows(existMap);
-  // 编辑已有渠道：视为"已手改"（保护他既有的映射，不因改模型栏而自动覆盖）；
-  // 新增：自动生成一版，省掉手填。
-  mapDirty = Object.keys(existMap).length > 0;
-  if (!mapDirty) { refreshMapRows(true); }
-  document.getElementById('f-prio').value = c ? (c.priority != null ? c.priority : 10) : 10;
-  document.getElementById('f-weight').value = c ? (c.weight != null ? c.weight : 1) : 1;
-  document.getElementById('f-status').value = c ? String(c.status === 2 ? 2 : 1) : '1';
-  document.getElementById('dlg').showModal();
-}
-function closeForm() { document.getElementById('dlg').close(); }
-async function save() {
-  const err = document.getElementById('dlgErr');
-  err.textContent = '';
-  const body = {
-    id: editing || undefined,
-    name: document.getElementById('f-name').value.trim(),
-    base_url: document.getElementById('f-base').value.trim(),
-    models: document.getElementById('f-models').value.split(',').map(s => s.trim()).filter(Boolean),
-    model_mapping: collectMap(),
-    priority: Number(document.getElementById('f-prio').value || 0),
-    weight: Number(document.getElementById('f-weight').value || 0),
-    status: Number(document.getElementById('f-status').value)
-  };
-  // ⚠ keys 是**纯字符串数组**（服务端 channelReq.Keys 是 []string）。
-  // 这里支持**一行一个**（多 key 一次填完），服务端按内容去重。
-  const rawKeys = document.getElementById('f-key').value
-    .split('\n').map(s => s.trim()).filter(Boolean);
-  if (rawKeys.length) body.keys = rawKeys;
-  // 选择模式总是显式发送：空值在后端表示"保持原值"，那样就无法把轮询改回随机。
-  const mode = document.getElementById('f-mode').value;
-  if (mode) body.key_selection_mode = mode;
-  // ⚠ 只在**真的填了**的时候才发 keys —— 编辑时留空意味着"不改动"，
-  // 而不是"把 key 清空"（清空会让渠道静默变成不可用）。
-  if (!body.base_url) { err.textContent = 'Base URL 必填'; return; }
-  // ⚠ 必须判 **rawKeys**（上面刚解析出来的数组），不是 `key`。
-  // 这里从 29bb9c4（T6 首次落地）起就写着 `!key` —— 那个标识符**从来没声明过**，
-  // 于是「新增渠道 → 保存」必抛 ReferenceError、请求一个都不发（用户看到的
-  // 就是"点了保存没反应"）。之所以一直没被发现：编辑已有渠道时
-  // `!editing` 短路为 false，那一行根本不会执行。
-  if (!editing && !rawKeys.length) { err.textContent = 'API Key 必填（新增时）'; return; }
-  try { await api('/admin/channels', { method: 'POST', body: JSON.stringify(body) }); closeForm(); load(); }
-  catch (e) { err.textContent = e.message; }
-}
-async function toggle(id, status) {
-  try { await api('/admin/channels/status', { method: 'POST', body: JSON.stringify({ id: id, status: status }) }); load(); }
-  catch (e) { alert(e.message); }
-}
-async function del(id) {
-  if (!confirm('删除渠道 ' + id + ' ？它的 key 与映射会一并删除')) return;
-  try { await api('/admin/channels/delete', { method: 'POST', body: JSON.stringify({ id: id }) }); load(); }
-  catch (e) { alert(e.message); }
-}
-// reveal 取**明文** key —— 高敏操作，先二次确认（计划 §0.5：不搬 hyxapi 的
-// AdminAuth→RootAuth→CriticalRateLimit→SecureVerification 四段式链路，只加二次确认 UI）。
-//
-// 为什么列表行这一处必须有确认，而"管理 Key"窗口不必：后者是用户主动点开的显式动作
-// （按钮上就写着"管理 Key"），而前者是在浏览列表时**顺手**就能点到的一个按钮 ——
-// 明文一旦画到屏幕上（或被人从背后看到）就收不回来了。
-async function reveal(id) {
-  if (!confirm('显示该渠道的明文 Key？\n\n这是一次高敏操作：明文会直接出现在页面上，请确认周围无人旁观。')) { return; }
-  try {
-    const d = await api('/admin/channels/reveal', { method: 'POST', body: JSON.stringify({ id: id }) });
-    alert('Key:\n' + (d.key || d.keys || JSON.stringify(d)));
-  } catch (e) { alert(e.message); }
+function renderChips() {
+  var html = '', keys = Object.keys(st.typeCounts);
+  if (keys.length) {
+    html += '<button class="tchip' + (st.f.type === '' ? ' on' : '') + '" data-type="">全部类型</button>';
+    keys.forEach(function (t) {
+      html += '<button class="tchip' + (String(st.f.type) === String(t) ? ' on' : '') + '" data-type="' + esc(t) + '">' +
+        esc(typeName(Number(t))) + ' ' + st.typeCounts[t] + '</button>';
+    });
+  }
+  $('ch-types').innerHTML = html;
 }
 
-// ---- Key 管理（独立窗口）----
-// 为什么独立成窗：key 会攒到几十把，表格塞在编辑弹窗里会把整页占满 —— 用户的明确要求。
-// 这里只给掩码（明文走列表页的「显示」），每行可单独启停/删除。
-function kEsc(s) {
-  return String(s == null ? '' : s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+function renderSel() {
+  var ids = selIds();
+  $('btn-bstatus').disabled = ids.length === 0;
+  $('btn-boff').disabled = ids.length === 0;
+  $('btn-btag').disabled = ids.length === 0;
+  $('btn-bdel').disabled = ids.length === 0;
+  $('ch-selinfo').textContent = ids.length ? ('已选 ' + ids.length + ' 条') : '';
+  $('ck-all').checked = pageRows().length > 0 && pageRows().every(function (c) { return st.sel[c.id]; });
+  $('btn-mapply').disabled = !(st.pendingModels && st.pendingModels.length);
+  var nf = activeFilterCount();
+  $('btn-filter').innerHTML = '筛选器' + (nf ? '<span class="cnt">' + nf + '</span>' : '');
 }
-let keysData = [];   // 当前窗口的数据（本地缓存，搜索在它上面过滤）
-let keysFor = '';    // 正在管理哪个渠道
-function openKeys() {
-  const err = document.getElementById('keysErr');
-  keysFor = editing || '';
-  err.textContent = keysFor
-    ? ''
-    : '这条渠道还没保存 ⇒ 保存后再点「管理 Key」。新增时要填的 Key 直接写在编辑窗口下面的输入框里。';
-  document.getElementById('keysTitle').textContent = 'Key 管理'
-    + (keysFor ? ' · ' + (document.getElementById('f-name').value || keysFor) : '');
-  document.getElementById('keysStat').textContent = '';
-  document.getElementById('keysFilter').value = '';
-  document.getElementById('keysAdd').value = '';
-  document.getElementById('keysBody').innerHTML = '';
-  document.getElementById('keysDlg').showModal();
-  if (keysFor) { loadKeys(keysFor); }
+function activeFilterCount() {
+  var n = 0;
+  if (st.f.status !== '') { n++; }
+  if (st.f.type !== '') { n++; }
+  if (st.f.group) { n++; }
+  if (st.f.sortBy) { n++; }
+  return n;
 }
-function closeKeys() {
-  document.getElementById('keysDlg').close();
-  load();   // 列表页的"key 数"可能变了
+
+/* 搜索：防抖 250ms；**清空立即生效**（用户按下删除键时期待的是立刻看到全量，
+   再等 250ms 只会让人觉得"卡了"）。 */
+var searchTimer = null;
+function onSearchInput() {
+  var v = $('flt-q').value.trim();
+  st.keyword = v;
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+  if (v === '') { st.page = 1; render(); return; }
+  searchTimer = setTimeout(function () { st.page = 1; render(); searchTimer = null; }, 250);
 }
-function updateKeyCount() {
-  const el = document.getElementById('f-keycount');
-  if (!el) { return; }
-  if (!keysFor) { el.textContent = '新增渠道：Key 填在下面（一行一个）'; return; }
-  const on = keysData.filter(k => k.status === 1).length;
-  el.textContent = '已存 ' + keysData.length + ' 把（启用 ' + on + '）';
+function gotoPage(p) {
+  var max = pages();
+  st.page = Math.min(Math.max(1, p), max);
+  render();
 }
-async function loadKeys(id) {
-  try {
-    // reveal=1：这个窗口不是轮询的（只在打开时请求一次），所以可以拿明文 ——
-    // 掩码 gk_B…4b2e 认不出是哪一把，而本窗口的用途就是"看清并管理这些 key"。
-    const d = await api('/admin/channels/keys?id=' + encodeURIComponent(id) + '&reveal=1');
-    keysData = (d && d.keys) || [];
-    // 选择模式以这个端点为准（列表接口不回 channel_info，从那儿读会是空值 ⇒ 用户以为没设成功）
-    if (d && d.key_selection_mode) { document.getElementById('f-mode').value = d.key_selection_mode; }
-    renderKeys();
-    updateKeyCount();
-  } catch (e) {
-    document.getElementById('keysErr').textContent = e.message;
-    document.getElementById('keysBody').innerHTML = '';
-    keysData = [];
-    updateKeyCount();
-  }
+
+function exitDrag() {
+  if (!st.drag) { return; }
+  st.drag = false; st.dragFrom = -1;
+  $('btn-drag').classList.remove('tb--go');
+  $('btn-undrag').disabled = true;
 }
-function renderKeys() {
-  const body = document.getElementById('keysBody');
-  const stat = document.getElementById('keysStat');
-  const q = (document.getElementById('keysFilter').value || '').trim().toLowerCase();
-  const rows = q ? keysData.filter(k => (k.mask || '').toLowerCase().indexOf(q) >= 0) : keysData;
-  const on = keysData.filter(k => k.status === 1).length;
-  stat.textContent = keysData.length
-    ? '共 ' + keysData.length + ' 把 · 启用 ' + on + (q ? ' · 筛出 ' + rows.length : '')
-    : '';
-  if (!rows.length) {
-    body.innerHTML = '<div class="muted" style="font-size:12px;padding:6px 2px">'
-      + (keysData.length ? '没有匹配的 Key' : '还没有 Key —— 在下面一行一个填进去，点「追加」')
-      + '</div>';
+
+/* ── 事件绑定 ─────────────────────────────────────────────────────────── */
+$('flt-q').addEventListener('input', onSearchInput);
+$('flt-status').addEventListener('change', function () { st.f.status = this.value; load(); });
+$('ch-types').addEventListener('click', function (e) {
+  var b = e.target.closest('[data-type]');
+  if (!b) { return; }
+  st.f.type = b.getAttribute('data-type');
+  load();
+});
+$('ch-psize').addEventListener('change', function () {
+  st.psize = Math.min(100, Math.max(1, parseInt(this.value, 10) || 20));
+  st.page = 1; render();
+});
+$('ch-prev').addEventListener('click', function () { gotoPage(st.page - 1); });
+$('ch-next').addEventListener('click', function () { gotoPage(st.page + 1); });
+$('ck-all').addEventListener('change', function () {
+  var on = this.checked;
+  pageRows().forEach(function (c) { st.sel[c.id] = on; });
+  render();
+});
+$('ch-rows').addEventListener('click', function (e) {
+  var ck = e.target.closest('input.ck');
+  if (ck) { st.sel[ck.getAttribute('data-id')] = ck.checked; render(); return; }
+  var tag = e.target.closest('[data-tag]');
+  if (tag) { openTagActions(tag.getAttribute('data-tag')); return; }
+  var b = e.target.closest('button[data-act]');
+  if (!b) { return; }
+  rowAction(b.getAttribute('data-act'), b.getAttribute('data-id'), b.getAttribute('data-status'));
+});
+$('btn-refresh').addEventListener('click', function () { load(); });
+$('btn-new').addEventListener('click', function () { openDrawer(null); });
+$('btn-reset').addEventListener('click', function () {
+  st.f = { status: '', type: '', group: '', sortBy: '', sortOrder: '' };
+  st.keyword = ''; st.tagMode = ''; st.page = 1; st.sel = {};
+  $('flt-q').value = ''; $('flt-status').value = '';
+  load();
+});
+/* ⚠ 必须包一层匿名函数：本文件有三段 <script>，它们**按顺序各自求值**，
+   第一段求值时 openFilters（在第二段）还没定义 —— 直接传函数引用会抛
+   ReferenceError（实测：探针的"无未捕获异常"判据抓到）。包一层则推迟到点击时解析。 */
+$('btn-filter').addEventListener('click', function () { openFilters(); });
+</script>
+<script>
+'use strict';
+/* ── C2 渠道页脚本（第二段）：抽屉 / 筛选器 / 批量与上游动作 ── */
+
+var DEFAULT_MODELS = ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini'];
+var BASE_PRESETS = ['https://api.openai.com/v1', 'https://api.anthropic.com/v1', 'https://generativelanguage.googleapis.com/v1beta'];
+
+function rowById(id) {
+  for (var i = 0; i < st.rows.length; i++) { if (st.rows[i].id === id) { return st.rows[i]; } }
+  return null;
+}
+function closeHost(host) { host.innerHTML = ''; }
+
+function rowAction(act, id, status) {
+  if (act === 'edit') { openDrawer(id); return; }
+  if (act === 'keys') { openKeys(id); return; }
+  if (act === 'toggle') {
+    api('POST', '/admin/channels/status', { id: id, status: Number(status) })
+      .then(function () { banner('ok', '状态已更新'); return load(); })
+      .catch(function (e) { banner('err', e.message); });
     return;
   }
-  // ⚠ 按钮必须压扁：全局 button 有 5px 上下 padding ⇒ 会把 26px 的行撑到 43px。
-  const bst = 'padding:0 6px;height:20px;line-height:18px;font-size:12px';
-  const td = 'padding:2px 4px;height:26px;line-height:26px;border-bottom:1px solid var(--bd)';
-  // Key 列要能显示**完整明文**（reveal=1 的场景），所以不能 table-layout:fixed 压死：
-  // 用 auto 让它按内容撑开，其余列定宽 + nowrap。
-  body.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;table-layout:auto">'
-    + '<thead><tr style="color:var(--dim);text-align:left">'
-    + '<th style="width:34px;' + td + 'font-weight:500">#</th>'
-    + '<th style="' + td + 'font-weight:500">Key</th>'
-    + '<th style="width:120px;' + td + 'font-weight:500;white-space:nowrap">状态</th>'
-    + '<th style="width:130px;' + td + 'font-weight:500;white-space:nowrap">操作</th>'
-    + '</tr></thead><tbody>'
-    + rows.map(k => {
-        let st;
-        if (k.status === 1) { st = '<span style="color:var(--ok)">启用</span>'; }
-        else if (k.status === 3) { st = '<span style="color:var(--err)">自动禁用</span>'; }
-        else { st = '<span style="color:var(--dim)">手动停用</span>'; }
-        const why = k.reason === 'upstream_auth' ? '<span style="color:var(--dim)"> 上游判无效</span>' : '';
-        const tg = k.status === 1
-          ? '<button type="button" style="' + bst + '" onclick="keyStatus(' + k.index + ',2)">禁用</button>'
-          : '<button type="button" style="' + bst + '" onclick="keyStatus(' + k.index + ',1)">启用</button>';
-        return '<tr>'
-          + '<td style="' + td + 'color:var(--dim)">' + k.index + '</td>'
-          // 完整展示：明文时用 11px 等宽字体也让它在 700px 窗口里放得下
-          + '<td style="' + td + 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0">' + kEsc(k.mask) + '</td>'
-          + '<td style="' + td + '">' + st + why + '</td>'
-          + '<td style="' + td + 'white-space:nowrap">' + tg
-          + ' <button type="button" style="' + bst + '" onclick="keyDelete(' + k.index + ')">删除</button></td>'
-          + '</tr>';
-      }).join('')
-    + '</tbody></table>';
-}
-async function keyStatus(idx, status) {
-  try {
-    await api('/admin/channels/keys/status', { method: 'POST', body: JSON.stringify({ id: keysFor, index: idx, status: status }) });
-    document.getElementById('keysErr').textContent = '';
-    await loadKeys(keysFor); load();
-  } catch (e) { document.getElementById('keysErr').textContent = e.message; }
-}
-async function keyDelete(idx) {
-  if (!confirm('删除第 ' + idx + ' 把 Key？（只删这一把，其余不动）')) { return; }
-  try {
-    await api('/admin/channels/keys/delete', { method: 'POST', body: JSON.stringify({ id: keysFor, index: idx }) });
-    document.getElementById('keysErr').textContent = '';
-    await loadKeys(keysFor); load();
-  } catch (e) { document.getElementById('keysErr').textContent = e.message; }
-}
-async function addKeys() {
-  const ta = document.getElementById('keysAdd');
-  const err = document.getElementById('keysErr');
-  const keys = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
-  if (!keys.length) { err.textContent = '先填 Key（一行一个）'; return; }
-  try {
-    const d = await api('/admin/channels/keys/add', { method: 'POST', body: JSON.stringify({ id: keysFor, keys: keys }) });
-    ta.value = '';
-    err.textContent = '';
-    document.getElementById('keysStat').textContent = '已追加 ' + ((d && d.added) || 0) + ' 把'
-      + (d && d.added === 0 ? '（都与已有重复，跳过了）' : '');
-    await loadKeys(keysFor); load();
-  } catch (e) { err.textContent = e.message; }
+  if (act === 'test') { upstreamOne('test', id); return; }
+  if (act === 'balance') { upstreamOne('balance', id); return; }
+  if (act === 'copy') {
+    api('POST', '/admin/channels/copy', { id: id })
+      .then(function () { banner('ok', '已复制'); return load(); })
+      .catch(function (e) { banner('err', e.message); });
+    return;
+  }
+  if (act === 'del') {
+    if (!confirm('删除这条渠道？该操作不可撤销。')) { return; }
+    api('POST', '/admin/channels/delete', { id: id })
+      .then(function () { banner('ok', '已删除'); return load(); })
+      .catch(function (e) { banner('err', e.message); });
+  }
 }
 
-// ⚠ 2026-10-21：页签切换与「对外模型」页已删除（用户要求）。
-//   原来这里是 `tab(true)` / `tab(false)` 两个页签 —— 删页签后若留下
-//   `document.getElementById('tab-ch').onclick = ...`，那行会因元素不存在抛
-//   TypeError ⇒ **整个 script 停摆** ⇒ 渠道列表一条都不加载。
-//   所以不是"把 tab 藏起来"，而是把切换逻辑整段去掉。
-//   页面现在直接就是渠道列表（原来 tab-ch 的默认视图）。
-load();
+/* 上游动作：单条 {id} / 全部 {all:true}。各端点返回体不同，这里只做摘要展示。 */
+function upstreamOne(kind, id) {
+  api('POST', '/admin/channels/' + kind, { id: id }).then(function (j) {
+    banner('ok', kind + ' 完成：' + summarize(j));
+  }).catch(function (e) { banner('err', e.message); });
+}
+function upstreamAll(kind) {
+  return api('POST', '/admin/channels/' + kind, { all: true }).then(function (j) {
+    banner('ok', kind + ' 完成：' + summarize(j));
+    return j;
+  }).catch(function (e) { banner('err', e.message); return null; });
+}
+function summarize(j) {
+  if (!j) { return '无返回'; }
+  if (typeof j === 'string') { return j; }
+  var parts = [];
+  ['ok', 'failed', 'total', 'changed', 'updated', 'count', 'message', 'error'].forEach(function (k) {
+    if (j[k] !== undefined && typeof j[k] !== 'object') { parts.push(k + '=' + j[k]); }
+  });
+  var items = j.items || j.results || j.channels;
+  if (items && items.length !== undefined) { parts.push('条目=' + items.length); }
+  return parts.join(' ') || '完成';
+}
+$('btn-testall').addEventListener('click', function () { upstreamAll('test'); });
+$('btn-balance').addEventListener('click', function () { upstreamAll('balance'); });
+$('btn-mcheck').addEventListener('click', function () {
+  upstreamAll('models/check').then(function (j) {
+    st.pendingModels = (j && (j.items || j.pending || j.changes)) || [];
+    renderSel();
+  });
+});
+$('btn-mapply').addEventListener('click', function () {
+  if (!confirm('把检测到的模型变更应用到渠道？')) { return; }
+  api('POST', '/admin/channels/models/apply', { all: true }).then(function (j) {
+    banner('ok', '已应用：' + summarize(j)); st.pendingModels = null; renderSel(); return load();
+  }).catch(function (e) { banner('err', e.message); });
+});
+$('btn-cleardis').addEventListener('click', function () {
+  if (!confirm('清除所有已禁用渠道？不可撤销。')) { return; }
+  api('POST', '/admin/channels/clear-disabled', {}).then(function (j) {
+    banner('ok', '已清除：' + summarize(j)); return load();
+  }).catch(function (e) { banner('err', e.message); });
+});
+
+/* ── 批量动作 ─────────────────────────────────────────────────────────── */
+$('btn-bstatus').addEventListener('click', function () { batchStatus(1); });
+$('btn-boff').addEventListener('click', function () { batchStatus(2); });
+function batchStatus(status) {
+  var ids = selIds();
+  if (!ids.length) { return; }
+  api('POST', '/admin/channels/status-batch', { ids: ids, status: status }).then(function (j) {
+    banner('ok', '批量状态已下发：' + summarize(j)); return load();
+  }).catch(function (e) { banner('err', e.message); });
+}
+$('btn-btag').addEventListener('click', function () {
+  var ids = selIds();
+  if (!ids.length) { return; }
+  var tag = prompt('给选中的 ' + ids.length + ' 条渠道打什么标签？（留空 = 清除标签）');
+  if (tag === null) { return; }
+  api('POST', '/admin/channels/tag/batch', { ids: ids, tag: tag.trim() }).then(function (j) {
+    banner('ok', '标签已更新：' + summarize(j)); return load();
+  }).catch(function (e) { banner('err', e.message); });
+});
+$('btn-bdel').addEventListener('click', function () {
+  var ids = selIds();
+  if (!ids.length) { return; }
+  if (!confirm('删除选中的 ' + ids.length + ' 条渠道？不可撤销。')) { return; }
+  api('POST', '/admin/channels/batch-delete', { ids: ids }).then(function (j) {
+    banner('ok', '已删除：' + summarize(j)); return load();
+  }).catch(function (e) { banner('err', e.message); });
+});
+
+/* ── 筛选器弹窗 ───────────────────────────────────────────────────────── */
+function openFilters() {
+  var host = $('host-flt');
+  var opts = SORTS.map(function (s) {
+    return '<option value="' + s[0] + '"' + (st.f.sortBy === s[0] ? ' selected' : '') + '>' + s[1] + '</option>';
+  }).join('');
+  host.innerHTML =
+    '<div class="mask" id="flt-mask"></div>' +
+    '<div class="modal calm" role="dialog" aria-label="筛选器">' +
+      '<div class="dh"><h2>筛选器</h2><button class="mini x" id="flt-x">关闭</button></div>' +
+      '<div class="sec"><h3>筛选</h3>' +
+        '<div class="row"><label>分组</label><input class="ipt" id="f-group" value="' + esc(st.f.group) + '" placeholder="精确匹配 channels.group"></div>' +
+        '<div class="row"><label>状态</label><select class="sel" id="f-status">' +
+          ['', '1', '2', '3', '0'].map(function (v) {
+            var t = v === '' ? '全部' : (v === '1' ? '启用' : (v === '2' ? '禁用' : (v === '3' ? '自动禁用' : '未启用')));
+            return '<option value="' + v + '"' + (st.f.status === v ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select></div>' +
+      '</div>' +
+      '<div class="sec"><h3>排序（服务端）</h3>' +
+        '<div class="row"><label>字段</label><select class="sel" id="f-sort"><option value="">默认（优先级/ID）</option>' + opts + '</select></div>' +
+        '<div class="row"><label>方向</label><select class="sel" id="f-dir">' +
+          ['', 'desc', 'asc'].map(function (v) {
+            var t = v === '' ? '默认' : (v === 'desc' ? '降序' : '升序');
+            return '<option value="' + v + '"' + (st.f.sortOrder === v ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select></div>' +
+      '</div>' +
+      '<div class="foot"><button class="tb tb--go" id="f-apply">应用</button>' +
+        '<button class="tb" id="f-clear">清空条件</button><span class="grow"></span></div>' +
+    '</div>';
+  $('flt-x').addEventListener('click', function () { closeHost(host); });
+  $('flt-mask').addEventListener('click', function () { closeHost(host); });
+  $('f-clear').addEventListener('click', function () {
+    st.f.group = ''; st.f.status = ''; st.f.sortBy = ''; st.f.sortOrder = '';
+    $('flt-status').value = ''; closeHost(host); load();
+  });
+  $('f-apply').addEventListener('click', function () {
+    st.f.group = $('f-group').value.trim();
+    st.f.status = $('f-status').value;
+    st.f.sortBy = $('f-sort').value;
+    st.f.sortOrder = $('f-dir').value;
+    $('flt-status').value = st.f.status;
+    closeHost(host); load();
+  });
+}
+
+/* ── 抽屉：新建 / 编辑 ────────────────────────────────────────────────── */
+var dlgState = { id: null, isNew: true, visualMap: false, save: false };
+
+function openDrawer(id) {
+  var ch = id ? rowById(id) : null;
+  dlgState = { id: id || null, isNew: !id, visualMap: false, save: false };
+  var host = $('host-dlg');
+  var multi = !!(ch && ch.key_count > 1);
+  host.innerHTML =
+    '<div class="mask" id="dlg-mask"></div>' +
+    '<div class="slide calm" role="dialog" aria-label="渠道编辑" id="dlg">' +
+      '<div class="dh"><h2>' + (dlgState.isNew ? '新建渠道' : ('编辑渠道 · ' + esc(ch.name))) + '</h2>' +
+        '<button class="mini x" id="dlg-x">关闭</button></div>' +
+
+      '<div class="sec"><h3>① 基本信息</h3>' +
+        '<div class="row"><label>类型</label><select class="sel" id="f-type">' +
+          Object.keys(TYPE_NAMES).map(function (t) {
+            var sel = String(ch ? ch.type : 0) === String(t) ? ' selected' : '';
+            return '<option value="' + t + '"' + sel + '>' + TYPE_NAMES[t] + '</option>';
+          }).join('') + '</select></div>' +
+        '<div class="row"><label>名称 <span class="hint">必填</span></label><input class="ipt grow" id="f-name" value="' + esc(ch ? ch.name : '') + '"></div>' +
+        (dlgState.isNew ?
+          '<div class="row"><label>创建模式</label><select class="sel" id="f-mode">' +
+            '<option value="single">单个创建（一份密钥 = 一条渠道）</option>' +
+            '<option value="batch">批量创建（每行一个 key 建一条）</option>' +
+            '<option value="multi_to_single">多 Key 合一（所有 key 合成一条渠道）</option>' +
+          '</select><span class="hint">仅新建时出现</span></div>' : '') +
+      '</div>' +
+
+      '<div class="sec"><h3>② 密钥与连接</h3>' +
+        '<div class="row"><label>密钥</label></div>' +
+        '<div class="row"><textarea class="ta" id="f-keys" placeholder="' +
+          (dlgState.isNew ? '一行一个 key（必填）' : '留空 = 不改动现有密钥；要替换请粘贴新 key') + '"></textarea></div>' +
+        '<div class="row"><span class="hint">' + (dlgState.isNew ? '新建时必填。' : '编辑时留空即不改（后端语义：keys 不传 = 不动）。') +
+          '批量创建模式下：每行一个 key 各建一条渠道。</span></div>' +
+        '<div class="row"><label>API 地址</label><input class="ipt grow" id="f-base" value="' + esc(ch ? ch.base_url : '') + '" list="base-presets">' +
+          '<datalist id="base-presets">' + BASE_PRESETS.map(function (b) { return '<option value="' + b + '"></option>'; }).join('') + '</datalist></div>' +
+        '<div class="row"><label>多 Key 模式</label><select class="sel" id="f-kmode">' +
+          ['', 'random', 'round_robin'].map(function (v) {
+            var t = v === '' ? '默认（随机）' : (v === 'random' ? '随机' : '轮询');
+            return '<option value="' + v + '"' + ((ch && ch.key_selection_mode === v) ? ' selected' : '') + '>' + t + '</option>';
+          }).join('') + '</select><span class="hint">' + (multi ? '当前渠道是多 Key' : '仅多 Key 渠道生效') + '</span></div>' +
+        '<div class="row"><span class="ro">高级字段（组织 / 类型专属项）：后端 channelFieldRegistry 尚未登记，本页不提交（提交会 400）。</span></div>' +
+      '</div>' +
+
+      '<div class="sec"><h3>③ 模型配置</h3>' +
+        '<div class="row"><button class="mini" id="f-pull">从上游拉取</button>' +
+          '<button class="mini" id="f-default">填入默认模型</button>' +
+          '<button class="mini" id="f-clear">清除所有</button></div>' +
+        '<div class="row"><textarea class="ta" id="f-models" placeholder="一行一个模型名">' + esc(ch ? (ch.models || []).join('\n') : '') + '</textarea></div>' +
+        '<div class="row"><label>自定义模型名</label><input class="ipt" id="f-custom"><button class="mini" id="f-addc">填入</button></div>' +
+        '<div class="row"><label>分组（逗号分隔）</label><input class="ipt grow" id="f-groups" value="' + esc(ch ? (ch.groups || []).join(',') : 'default') + '"></div>' +
+        '<div class="row"><label>模型重定向</label><button class="mini" id="f-mtoggle">可视化</button>' +
+          '<button class="mini" id="f-mgen">批量生成映射</button>' +
+          '<label class="pill"><input type="checkbox" id="f-msync"> 同步别名到渠道模型列表</label></div>' +
+        '<div class="row"><textarea class="ta" id="f-map" placeholder="{&quot;公开名&quot;:&quot;上游名&quot;}">' + esc(ch ? JSON.stringify(ch.model_mapping || {}, null, 1) : '{}') + '</textarea></div>' +
+        '<div class="row" id="f-mapvis" hidden></div>' +
+        '<div class="row"><span class="ro">是否自动禁用：后端尚未登记为可写字段（由测试路径维护），本页只读。</span></div>' +
+      '</div>' +
+
+      '<div class="sec"><h3>④ 高级与运行</h3>' +
+        '<div class="row"><label>优先级</label><input class="ipt ipt--sm" id="f-pri" value="' + (ch ? ch.priority : 0) + '">' +
+          '<label>权重 ≥0</label><input class="ipt ipt--sm" id="f-wt" value="' + (ch ? ch.weight : 0) + '"></div>' +
+        (dlgState.isNew ? '<div class="row"><label>状态</label><select class="sel" id="f-st"><option value="1">启用</option><option value="2">禁用</option></select></div>' : '') +
+        '<div class="row"><label>渠道标签</label><input class="ipt" id="f-tag" value="' + esc(ch ? (ch.tag || '') : '') + '">' +
+          '<span class="hint">保存后按标签写（tag/batch）</span></div>' +
+        '<div class="row"><span class="ro">测试模型 / 备注 / 参数覆盖 / 请求头覆盖 / 状态码复写：后端尚未登记，本页不提交。</span></div>' +
+      '</div>' +
+
+      '<div class="foot"><button class="tb tb--go" id="f-save">保存</button>' +
+        '<button class="tb" id="f-cancel">取消</button><span class="grow"></span><span class="ro" id="f-status"></span></div>' +
+    '</div>';
+
+  $('dlg-x').addEventListener('click', closeDrawer);
+  $('dlg-mask').addEventListener('click', closeDrawer);
+  $('f-cancel').addEventListener('click', closeDrawer);
+  $('f-save').addEventListener('click', saveDrawer);
+  $('f-pull').addEventListener('click', function () { pullModels(); });
+  $('f-default').addEventListener('click', function () { $('f-models').value = DEFAULT_MODELS.join('\n'); });
+  $('f-clear').addEventListener('click', function () { $('f-models').value = ''; });
+  $('f-addc').addEventListener('click', addCustomModel);
+  $('f-mgen').addEventListener('click', genMapping);
+  $('f-mtoggle').addEventListener('click', toggleMapView);
+}
+function closeDrawer() { closeHost($('host-dlg')); }
+
+/* 「从上游拉取」：把发现到的模型填进文本框，**只在用户确认后**才覆盖现有列表。 */
+function pullModels() {
+  var body = { base_url: $('f-base').value.trim() };
+  var keys = splitLines($('f-keys').value);
+  if (keys.length) { body.keys = [keys[0]]; } else if (dlgState.id) { body.id = dlgState.id; }
+  api('POST', '/admin/channels/discover', body).then(function (j) {
+    var list = (j && (j.models || j.items)) || [];
+    if (!list.length) { banner('err', '上游没有返回模型'); return; }
+    if ($('f-models').value.trim() && !confirm('用上游返回的 ' + list.length + ' 个模型覆盖当前列表？')) { return; }
+    $('f-models').value = list.join('\n');
+  }).catch(function (e) { banner('err', '拉取失败：' + e.message); });
+}
+function splitLines(v) {
+  return String(v || '').split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(function (s) { return s; });
+}
+function addCustomModel() {
+  var v = $('f-custom').value.trim();
+  if (!v) { return; }
+  var cur = splitLines($('f-models').value);
+  if (cur.indexOf(v) < 0) { cur.push(v); }
+  $('f-models').value = cur.join('\n');
+  $('f-custom').value = '';
+}
+function genMapping() {
+  var models = splitLines($('f-models').value);
+  var m = {};
+  try { m = JSON.parse($('f-map').value || '{}') || {}; } catch (e) { m = {}; }
+  models.forEach(function (x) { if (!m[x]) { m[x] = x; } });
+  $('f-map').value = JSON.stringify(m, null, 1);
+  banner('ok', '已生成 ' + Object.keys(m).length + ' 条映射（同名为恒等映射）');
+}
+function toggleMapView() {
+  dlgState.visualMap = !dlgState.visualMap;
+  var vis = $('f-mapvis');
+  if (!dlgState.visualMap) { vis.hidden = true; $('f-map').hidden = false; $('f-mtoggle').textContent = '可视化'; return; }
+  var m = {};
+  try { m = JSON.parse($('f-map').value || '{}') || {}; } catch (e) { m = {}; }
+  var rows = Object.keys(m).map(function (k) {
+    return '<div class="row"><input class="ipt ipt--sm mv-k" value="' + esc(k) + '"><span>=&gt;</span>' +
+      '<input class="ipt ipt--sm mv-v" value="' + esc(m[k]) + '"></div>';
+  }).join('');
+  vis.innerHTML = rows + '<button class="mini" id="f-mapback">回到 JSON</button>';
+  vis.hidden = false;
+  $('f-map').hidden = true;
+  $('f-mtoggle').textContent = '回到 JSON';
+  $('f-mapback').addEventListener('click', function () {
+    var out = {}, ks = vis.querySelectorAll('.mv-k'), vs = vis.querySelectorAll('.mv-v');
+    for (var i = 0; i < ks.length; i++) { if (ks[i].value.trim()) { out[ks[i].value.trim()] = vs[i].value.trim(); } }
+    $('f-map').value = JSON.stringify(out, null, 1);
+    dlgState.visualMap = false; vis.hidden = true; $('f-map').hidden = false; $('f-mtoggle').textContent = '可视化';
+  });
+}
+
+/* 保存：**只提交后端登记过的字段**（fail-closed，未登记字段一律 400）。
+   mode / multi_key_mode 是**外层**字段（与渠道字段平级），不是嵌套对象。 */
+function saveDrawer() {
+  if (dlgState.save) { return; }
+  var body = {
+    type: Number($('f-type').value),
+    name: $('f-name').value.trim(),
+    base_url: $('f-base').value.trim(),
+    models: splitLines($('f-models').value),
+    groups: $('f-groups').value.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s; }),
+    priority: parseInt($('f-pri').value, 10) || 0,
+    weight: Math.max(0, parseInt($('f-wt').value, 10) || 0),
+    model_mapping: parseMap()
+  };
+  if (body.model_mapping === null) { banner('err', '模型重定向不是合法 JSON'); return; }
+  var keys = splitLines($('f-keys').value);
+  if (dlgState.isNew && !keys.length) { banner('err', '新建时密钥必填'); return; }
+  if (!body.name) { banner('err', '名称必填'); return; }
+  if (keys.length) { body.keys = keys; body.key_mode = 'append'; }
+  var ksel = $('f-kmode').value;
+  if (ksel) { body.key_selection_mode = ksel; body.multi_key_mode = ksel; }
+  if (dlgState.isNew) {
+    body.mode = $('f-mode') ? $('f-mode').value : 'single';
+    body.status = Number($('f-st') ? $('f-st').value : 1);
+  } else {
+    body.id = dlgState.id;
+  }
+  var tag = $('f-tag').value.trim();
+  dlgState.save = true;
+  $('f-save').disabled = true; $('f-cancel').disabled = true;
+  $('f-status').textContent = '保存中…';
+  api('POST', '/admin/channels', body).then(function () {
+    if (!tag || dlgState.isNew) { return null; }
+    return api('POST', '/admin/channels/tag/batch', { ids: [dlgState.id], tag: tag });
+  }).then(function () {
+    banner('ok', '已保存');
+    closeDrawer();
+    return load();
+  }).catch(function (e) {
+    banner('err', '保存失败：' + e.message);
+  }).then(function () {
+    dlgState.save = false;
+    if ($('f-save')) { $('f-save').disabled = false; $('f-cancel').disabled = false; $('f-status').textContent = ''; }
+  });
+}
+function parseMap() {
+  var t = $('f-map').value.trim();
+  if (!t) { return {}; }
+  try { return JSON.parse(t) || {}; } catch (e) { return null; }
+}
+</script>
+<script>
+'use strict';
+/* ── C2 渠道页脚本（第三段）：密钥管理 / 标签 / 拖动排序 / 启动 ── */
+
+/* 密钥管理：四条端点都按**下标**动（不动别的 key）。
+   列表只回掩码；明文只在"显示明文"这一下（GET keys?reveal=1）出现，且不写进任何缓存。 */
+function openKeys(id) {
+  var host = $('host-dlg');
+  var ch = rowById(id);
+  api('GET', '/admin/channels/keys?id=' + encodeURIComponent(id)).then(function (j) {
+    var keys = (j && (j.keys || j.items)) || [];
+    var rows = keys.map(function (k, i) {
+      var kv = k || {};
+      var stat = (kv.status === 1 || kv.status === undefined) ? '启用' : (kv.status === 3 ? '自动禁用' : '禁用');
+      return '<tr data-kidx="' + i + '">' +
+        '<td class="num">' + i + '</td>' +
+        '<td class="c-id">' + esc(kv.mask || kv.key || '') + '</td>' +
+        '<td>' + esc(stat) + (kv.reason ? ' <span class="ro">' + esc(kv.reason) + '</span>' : '') + '</td>' +
+        '<td class="ops">' +
+          '<button class="mini" data-kact="on" data-i="' + i + '">启用</button>' +
+          '<button class="mini" data-kact="off" data-i="' + i + '">停用</button>' +
+          '<button class="mini mini--danger" data-kact="del" data-i="' + i + '">删除</button>' +
+        '</td></tr>';
+    }).join('');
+    host.innerHTML =
+      '<div class="mask" id="k-mask"></div>' +
+      '<div class="slide calm" role="dialog" aria-label="密钥管理">' +
+        '<div class="dh"><h2>密钥管理 · ' + esc(ch ? ch.name : id) + '</h2><button class="mini x" id="k-x">关闭</button></div>' +
+        '<div class="sec"><h3>现有密钥（只显示掩码）</h3>' +
+          '<table class="ch" style="table-layout:auto"><thead><tr><th>#</th><th>掩码</th><th>状态</th><th style="text-align:right">操作</th></tr></thead>' +
+          '<tbody>' + (rows || '<tr><td colspan="4" class="dash">没有密钥</td></tr>') + '</tbody></table>' +
+          '<div class="row" style="margin-top:7px"><button class="mini" id="k-reveal">显示明文</button>' +
+            '<button class="mini" id="k-allon">全部启用</button>' +
+            '<button class="mini" id="k-deldb">删除所有已禁用</button>' +
+            '<button class="mini" id="k-sum">状态汇总</button></div>' +
+          '<div class="row" id="k-plain" hidden></div>' +
+        '</div>' +
+        '<div class="sec"><h3>加 Key</h3><textarea class="ta" id="k-add" placeholder="一行一个 key"></textarea>' +
+          '<div class="row" style="margin-top:7px"><button class="tb tb--go" id="k-addbtn">追加</button>' +
+          '<label>选择模式</label><select class="sel" id="k-mode">' +
+            ['', 'random', 'round_robin'].map(function (v) {
+              var t = v === '' ? '默认' : (v === 'random' ? '随机' : '轮询');
+              return '<option value="' + v + '">' + t + '</option>';
+            }).join('') + '</select><button class="mini" id="k-setmode">设为该模式</button></div>' +
+        '</div>' +
+        '<div class="foot"><button class="tb" id="k-close">关闭</button><span class="grow"></span><span class="ro" id="k-msg"></span></div>' +
+      '</div>';
+    $('k-x').addEventListener('click', function () { closeHost(host); });
+    $('k-close').addEventListener('click', function () { closeHost(host); });
+    $('k-mask').addEventListener('click', function () { closeHost(host); });
+    $('k-reveal').addEventListener('click', function () {
+      api('GET', '/admin/channels/keys?id=' + encodeURIComponent(id) + '&reveal=1').then(function (j2) {
+        var ks = (j2 && (j2.keys || j2.items)) || [];
+        /* 明文只在这里出现：渲染后**不写入 st**，下次打开面板重新取。 */
+        $('k-plain').hidden = false;
+        $('k-plain').innerHTML = '<span class="ro">明文（复制后请关闭本面板）：</span><br>' +
+          ks.map(function (k) { return '<code>' + esc(k.key || '') + '</code>'; }).join('<br>');
+      }).catch(function (e) { $('k-msg').textContent = e.message; });
+    });
+    $('k-allon').addEventListener('click', function () {
+      api('POST', '/admin/channels/keys/status-all', { id: id, status: 1 }).then(function () { openKeys(id); })
+        .catch(function (e) { $('k-msg').textContent = e.message; });
+    });
+    $('k-deldb').addEventListener('click', function () {
+      if (!confirm('删除该渠道所有已禁用的 key？')) { return; }
+      api('POST', '/admin/channels/keys/delete-disabled', { id: id }).then(function () { openKeys(id); })
+        .catch(function (e) { $('k-msg').textContent = e.message; });
+    });
+    $('k-sum').addEventListener('click', function () {
+      api('GET', '/admin/channels/keys/summary?id=' + encodeURIComponent(id)).then(function (j2) {
+        $('k-msg').textContent = summarize(j2);
+      }).catch(function (e) { $('k-msg').textContent = e.message; });
+    });
+    $('k-setmode').addEventListener('click', function () {
+      api('POST', '/admin/channels/keys/mode', { id: id, key_selection_mode: $('k-mode').value })
+        .then(function () { $('k-msg').textContent = '选择模式已更新'; })
+        .catch(function (e) { $('k-msg').textContent = e.message; });
+    });
+    $('k-addbtn').addEventListener('click', function () {
+      var add = splitLines($('k-add').value);
+      if (!add.length) { return; }
+      api('POST', '/admin/channels/keys/add', { id: id, keys: add }).then(function () { openKeys(id); })
+        .catch(function (e) { $('k-msg').textContent = e.message; });
+    });
+    var tb = host.querySelector('tbody');
+    tb.addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-kact]');
+      if (!b) { return; }
+      var act = b.getAttribute('data-kact'), idx = Number(b.getAttribute('data-i'));
+      var p;
+      if (act === 'del') {
+        if (!confirm('删除第 ' + idx + ' 把 key？')) { return; }
+        p = api('POST', '/admin/channels/keys/delete', { id: id, index: idx });
+      } else {
+        p = api('POST', '/admin/channels/keys/status', { id: id, index: idx, status: act === 'on' ? 1 : 2, reason: act === 'on' ? '' : '管理端手工停用' });
+      }
+      p.then(function () { openKeys(id); }).catch(function (e2) { $('k-msg').textContent = e2.message; });
+    });
+  }).catch(function (e) { banner('err', '读取密钥失败：' + e.message); });
+}
+
+/* 标签：点列表里的标签名，或走工具栏「标签视图」。 */
+function openTagActions(tag) {
+  var host = $('host-flt');
+  host.innerHTML =
+    '<div class="mask" id="t-mask"></div>' +
+    '<div class="modal calm" role="dialog" aria-label="标签操作">' +
+      '<div class="dh"><h2>标签 · ' + esc(tag) + '</h2><button class="mini x" id="t-x">关闭</button></div>' +
+      '<div class="sec"><h3>批量（作用于该标签下所有渠道）</h3>' +
+        '<div class="row"><button class="mini" id="t-view">只看该标签</button>' +
+          '<button class="mini" id="t-on">全部启用</button><button class="mini" id="t-off">全部禁用</button></div>' +
+        '<div class="row"><label>优先级</label><input class="ipt ipt--sm" id="t-pri" placeholder="不改">' +
+          '<label>权重</label><input class="ipt ipt--sm" id="t-wt" placeholder="不改"></div>' +
+        '<div class="row"><label>分组</label><input class="ipt" id="t-groups" placeholder="逗号分隔，留空不改"></div>' +
+        '<div class="row"><button class="mini tb--go" id="t-edit">应用（tag/edit）</button>' +
+          '<button class="mini" id="t-fix">修复能力索引</button></div>' +
+        '<div class="row"><span class="ro" id="t-msg"></span></div>' +
+      '</div>' +
+    '</div>';
+  $('t-x').addEventListener('click', function () { closeHost(host); });
+  $('t-mask').addEventListener('click', function () { closeHost(host); });
+  $('t-view').addEventListener('click', function () { st.tagMode = tag; st.keyword = ''; $('flt-q').value = ''; closeHost(host); load(); });
+  $('t-on').addEventListener('click', function () { tagStatus(tag, 1); });
+  $('t-off').addEventListener('click', function () { tagStatus(tag, 2); });
+  $('t-fix').addEventListener('click', function () {
+    api('POST', '/admin/channels/fix-abilities', {}).then(function (j) { $('t-msg').textContent = '已修复：' + summarize(j); })
+      .catch(function (e) { $('t-msg').textContent = e.message; });
+  });
+  $('t-edit').addEventListener('click', function () {
+    var body = { tag: tag };
+    var pri = $('t-pri').value.trim(), wt = $('t-wt').value.trim(), gs = $('t-groups').value.trim();
+    if (pri !== '') { body.priority = parseInt(pri, 10) || 0; }
+    if (wt !== '') { body.weight = Math.max(0, parseInt(wt, 10) || 0); }
+    if (gs) { body.groups = gs.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s; }); }
+    api('POST', '/admin/channels/tag/edit', body).then(function (j) { $('t-msg').textContent = '已应用：' + summarize(j); return load(); })
+      .catch(function (e) { $('t-msg').textContent = e.message; });
+  });
+}
+function tagStatus(tag, status) {
+  api('POST', '/admin/channels/tag/status', { tag: tag, status: status }).then(function () { return load(); })
+    .catch(function (e) { banner('err', e.message); });
+}
+
+$('btn-tagview').addEventListener('click', function () {
+  api('GET', '/admin/channels/tags').then(function (j) {
+    var tags = (j && (j.tags || j.items)) || [];
+    var host = $('host-flt');
+    var rows = tags.map(function (t) {
+      var name = (typeof t === 'string') ? t : (t.tag || t.name || '');
+      var cnt = (typeof t === 'string') ? '' : (' (' + (t.count || t.total || 0) + ')');
+      if (!name) { return ''; }
+      return '<div class="row"><button class="mini" data-tagopen="' + esc(name) + '">' + esc(name) + cnt + '</button></div>';
+    }).join('');
+    host.innerHTML =
+      '<div class="mask" id="tv-mask"></div>' +
+      '<div class="modal calm" role="dialog" aria-label="标签视图">' +
+        '<div class="dh"><h2>标签视图</h2><button class="mini x" id="tv-x">关闭</button></div>' +
+        '<div class="sec"><h3>全部标签</h3>' + (rows || '<span class="ro">还没有标签</span>') +
+          '<div class="row" style="margin-top:7px"><button class="mini" id="tv-clear">显示全部渠道</button></div></div>' +
+      '</div>';
+    $('tv-x').addEventListener('click', function () { closeHost(host); });
+    $('tv-mask').addEventListener('click', function () { closeHost(host); });
+    $('tv-clear').addEventListener('click', function () { st.tagMode = ''; closeHost(host); load(); });
+    host.querySelector('.sec').addEventListener('click', function (e) {
+      var b = e.target.closest('[data-tagopen]');
+      if (!b) { return; }
+      closeHost(host);
+      openTagActions(b.getAttribute('data-tagopen'));
+    });
+  }).catch(function (e) { banner('err', '读取标签失败：' + e.message); });
+});
+
+/* ── 拖动排序（先预览，再提交）────────────────────────────────────────
+   位置语义照 hyxapi：before / same / after —— "same" 表示与目标同位置（同级），
+   等价于插到目标之前但不改它的层级。提交前一定先给人看一遍"从哪到哪"。 */
+$('btn-drag').addEventListener('click', function () {
+  if (st.drag) { exitDrag(); render(); return; }
+  st.order0 = st.rows.map(function (c) { return c.id; });
+  st.drag = true;
+  st.page = 1; render();
+  this.classList.add('tb--go');
+  banner('ok', '拖动排序已开启：把行拖到目标行上，松手会先预览再提交');
+});
+$('btn-undrag').addEventListener('click', function () {
+  if (!st.order0) { return; }
+  api('POST', '/admin/channels/reorder', { ids: st.order0 }).then(function () {
+    st.order0 = null; exitDrag(); banner('ok', '已撤销排序'); return load();
+  }).catch(function (e) { banner('err', e.message); });
+});
+$('ch-rows').addEventListener('dragstart', function (e) {
+  var tr = e.target.closest('tr[data-id]');
+  if (!tr || !st.drag) { return; }
+  st.dragFrom = tr.getAttribute('data-id');
+  e.dataTransfer.effectAllowed = 'move';
+});
+$('ch-rows').addEventListener('dragover', function (e) { if (st.drag) { e.preventDefault(); } });
+$('ch-rows').addEventListener('drop', function (e) {
+  if (!st.drag) { return; }
+  e.preventDefault();
+  var tr = e.target.closest('tr[data-id]');
+  if (!tr) { return; }
+  var to = tr.getAttribute('data-id');
+  if (!st.dragFrom || st.dragFrom === to) { return; }
+  var host = $('host-flt');
+  host.innerHTML =
+    '<div class="mask" id="mv-mask"></div>' +
+    '<div class="modal calm" role="dialog" aria-label="确认排序">' +
+      '<div class="dh"><h2>确认排序</h2><button class="mini x" id="mv-x">取消</button></div>' +
+      '<div class="sec"><div class="row">把 <b class="c-id">' + esc(st.dragFrom) + '</b> 放到 <b class="c-id">' + esc(to) + '</b> 的：</div>' +
+        '<div class="row"><select class="sel" id="mv-pos"><option value="before">之前（before）</option>' +
+          '<option value="after">之后（after）</option><option value="same">同位（same）</option></select></div>' +
+        '<div class="row"><span class="ro">提交后按新的顺序持久化优先级/位置。</span></div></div>' +
+      '<div class="foot"><button class="tb tb--go" id="mv-go">提交</button><button class="tb" id="mv-cancel">取消</button></div>' +
+    '</div>';
+  $('mv-x').addEventListener('click', function () { closeHost(host); });
+  $('mv-mask').addEventListener('click', function () { closeHost(host); });
+  $('mv-cancel').addEventListener('click', function () { closeHost(host); });
+  $('mv-go').addEventListener('click', function () {
+    var pos = $('mv-pos').value;
+    api('POST', '/admin/channels/move', { id: st.dragFrom, target_id: to, position: pos }).then(function () {
+      closeHost(host); banner('ok', '顺序已更新'); st.dragFrom = null; return load();
+    }).catch(function (e) { banner('err', e.message); closeHost(host); });
+  });
+});
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Escape') { return; }
+  closeDrawer();
+  closeHost($('host-flt'));
+});
+
+/* ── 启动 ─────────────────────────────────────────────────────────────── */
+function init() {
+  $('ch-psize').value = String(st.psize);
+  load();
+}
+init();
 </script>
 </body>
 </html>

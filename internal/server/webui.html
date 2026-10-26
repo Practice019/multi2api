@@ -3289,6 +3289,14 @@ function mpEsc(s) {
     </div>
   </section>
 
+  <!-- 令牌（API Key）管理页入口（T68 / Wave C3）。
+       ⚠ 与 status / modelcatalog / channels 三条同款：**只放一个 iframe**，页面本体在
+       webui-tokens.html。导航按 section 的 DOM 顺序自动生成 ⇒ 位置即顺序：紧邻 apikeys 之后。
+       反面教材：漏了这个 section，页面本体与路由都在，但控制台里永远点不进去、且没有任何报错
+       —— 所以 tests/frontend/verify_tokens_page.js 的第一条断言就是它。 -->
+  <section data-key="tokens">
+    <iframe id="tkFrame" class="uiframe" src="/ui/tokens" title="令牌管理" loading="lazy"></iframe>
+  </section>
   <section data-key="accounts">
     <h2>账号池
       <span class="spacer"></span>

@@ -125,6 +125,28 @@ var channelFieldRegistry = map[string]string{
 	"multi_key_mode":                  channelFieldEditable,
 	"batch_add_set_key_prefix_2_name": channelFieldEditable,
 	"key_mode":                        channelFieldEditable,
+
+	// ── T69：hyxapi 渠道页的其余可编辑字段（C2 的截图里它们都是表单字段）──────
+	//
+	// 分级判据（照 hyxapi channel_authz.go 的三档思路，落到本仓能执行的三档）：
+	//
+	//	editable        普通可写：写进去只影响这条渠道自己的展示与调度参数。
+	//	sensitive       能**改写请求体 / 响应 / 上游路由**的字段。它们仍接受写入
+	//	                （见文件里"敏感三字段的判据"那段），但：① 值永不回显、不入日志；
+	//	                ② 写前必须能解析成 JSON 对象；③ 单列一条测试钉住分级。
+	//	server-managed  服务端维护，客户端直写 ⇒ 400。
+	//
+	// 组织 / 测试模型 / 备注 / 自动禁用 / 标签 —— 普通可写。
+	"openai_organization": channelFieldEditable,
+	"test_model":          channelFieldEditable,
+	"remark":              channelFieldEditable,
+	"auto_ban":            channelFieldEditable,
+	"tag":                 channelFieldEditable,
+	// 参数覆盖 / 请求头覆盖 / 状态码复写 —— 敏感（它们能改出去与回来的东西）。
+	"param_override":      channelFieldSensitive,
+	"header_override":     channelFieldSensitive,
+	"status_code_mapping": channelFieldSensitive,
+
 	// 服务端维护：渠道行里有这些列，但只能由测试 / 余额 / 迁移路径写，不接受客户端直写。
 	"balance":              channelFieldServerManaged,
 	"used_quota":           channelFieldServerManaged,
@@ -133,6 +155,32 @@ var channelFieldRegistry = map[string]string{
 	"created_time":         channelFieldServerManaged,
 	"external_id":          channelFieldServerManaged,
 	"balance_updated_time": channelFieldServerManaged,
+}
+
+// webuiChannelsSubmitFields 是**前端渠道表单会提交的键**的权威清单（T69 的防漂移锚点）。
+//
+// 来源（改这个切片前先读那两处代码）：
+//
+//	internal/server/webui-channels.html  saveDrawer() 里的 var body = { … }
+//	  —— 无条件字段：type / name / base_url / models / groups / priority / weight / model_mapping
+//	  —— 条件字段：keys + key_mode（有 key 时）、key_selection_mode + multi_key_mode（选了模式时）、
+//	     mode + status（新建时）、id（编辑时）
+//	  —— T69 新增的 8 个可编辑字段：openai_organization / test_model / remark / auto_ban /
+//	     tag / param_override / header_override / status_code_mapping
+//
+// ⚠ 它与 channelFieldRegistry 的关系是**子集**：前端提交的键必须全部已登记，
+//
+//	否则用户一保存就吃 fail-closed 的 400（而界面上看不出为什么）。
+//	这条由 channels_parity_test.go 的 TestWebuiChannelFormFieldsAreRegistered 双向钉住 ——
+//	那条测试**直接解析 webui-channels.html 的 saveDrawer**（不只是比对这个切片），
+//	所以"前端加了字段、忘了登记"会在 CI 就红，而不是等用户来报"保存失败"。
+var webuiChannelsSubmitFields = []string{
+	"id", "name", "type", "base_url", "models", "model_mapping", "groups",
+	"priority", "weight", "status",
+	"keys", "key_mode", "key_selection_mode", "multi_key_mode", "mode",
+	// T69：表单里新增的 8 个字段
+	"openai_organization", "test_model", "remark", "auto_ban", "tag",
+	"param_override", "header_override", "status_code_mapping",
 }
 
 // channelView 是对外的渠道视图：**key 只出掩码**（明文走 reveal）。
@@ -155,12 +203,19 @@ type channelView struct {
 	// ── B3：hyxapi 渠道管理页需要的其余列 ────────────────────────────────
 	// 这些字段由**列表路径**填充（viewOfChannelRow）；旧的 viewOf（写路径的响应）
 	// 留零值 —— 保存的响应里回这几个统计列没有意义，且它们随时会被测/余额改写。
-	Tag                string  `json:"tag,omitempty"`
-	Balance            float64 `json:"balance"`
-	UsedQuota          int64   `json:"used_quota"`
-	TestTime           int64   `json:"test_time"`
-	ResponseTime       int     `json:"response_time"`
-	BalanceUpdatedTime int64   `json:"balance_updated_time"`
+	Tag     string  `json:"tag,omitempty"`
+	Balance float64 `json:"balance"`
+	// T69 的四个普通可写字段要能**读回**（保存后表单要回填；列表也要显示）。
+	// ⚠ 敏感三字段（param_override / header_override / status_code_mapping）**刻意不在这里** ——
+	//   它们的值按分级判据永不回显；要看它们请直接查库（或将来另开显式 reveal 入口）。
+	OpenAIOrganization string `json:"openai_organization,omitempty"`
+	TestModel          string `json:"test_model,omitempty"`
+	Remark             string `json:"remark,omitempty"`
+	AutoBan            int    `json:"auto_ban"`
+	UsedQuota          int64  `json:"used_quota"`
+	TestTime           int64  `json:"test_time"`
+	ResponseTime       int    `json:"response_time"`
+	BalanceUpdatedTime int64  `json:"balance_updated_time"`
 }
 
 func viewOf(ch *channelstore.Channel, models []string) channelView {
@@ -638,7 +693,12 @@ func (h *Handler) viewOfChannelRow(row *store.Channel) channelView {
 		Priority: int(derefInt64(row.Priority)), Weight: int(derefUint(row.Weight)),
 		Status: row.Status, Enabled: row.Status == store.ChannelStatusEnabled,
 		Tag: derefString(row.Tag), Balance: row.Balance, UsedQuota: row.UsedQuota,
-		TestTime: row.TestTime, ResponseTime: row.ResponseTime,
+		// T69 的四个可读字段（敏感三字段刻意不回显，见 channelView 的注释）。
+		OpenAIOrganization: derefString(row.OpenAIOrganization),
+		TestModel:          derefString(row.TestModel),
+		Remark:             derefString(row.Remark),
+		AutoBan:            derefInt(row.AutoBan),
+		TestTime:           row.TestTime, ResponseTime: row.ResponseTime,
 		BalanceUpdatedTime: row.BalanceUpdatedTime,
 		KeyMasks:           []string{},
 	}
@@ -660,6 +720,14 @@ func derefString(s *string) string {
 }
 
 func derefInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// derefInt 处理 *int 列（如 auto_ban）。
+func derefInt(v *int) int {
 	if v == nil {
 		return 0
 	}
@@ -752,6 +820,27 @@ type channelReq struct {
 	//	""/"append"  去重合并（既有行为：表单不回显明文 ⇒ 不传 keys 就表示不改）
 	//	"replace"    用请求里的 keys **完全替换**（同字符串的 key 保留其原状态与原因）
 	KeyMode string `json:"key_mode"`
+
+	// ── T69：hyxapi 渠道页的其余可编辑字段 ─────────────────────────────────
+	//
+	// 这 8 个字段由 channelstore **不**管的列承载（channelstore.Channel 的冻结契约里没有它们），
+	// 所以写入走 store.UpdateChannel（见 validateChannelExtras / applyChannelExtras）。
+	// 两个写路径的分工是**互不重叠**的：channelstore 管 keys/models/groups/优先级/能力行，
+	// 这里只写这 8 列 —— 不存在"两条路径抢同一个字段"。
+	OpenAIOrganization string `json:"openai_organization"`
+	TestModel          string `json:"test_model"`
+	Remark             string `json:"remark"`
+	// AutoBan 指针：nil = 这次没提这个字段（保持原值）；0/1 = 明确要关/要开。
+	// ⚠ 不能用 0 兼任"没传"—— 那会让"取消勾选自动禁用"永远写不进去。
+	AutoBan *int `json:"auto_ban"`
+	// Tag 由**是否出现在请求体里**决定写不写（见 applyChannelExtras）：
+	// 表单没带这个键 ⇒ 保持原标签；带了空串 ⇒ 明确清除。
+	Tag string `json:"tag"`
+	// 三个覆盖项允许两种形态：JSON 对象，或"装着 JSON 文本的字符串"（表单常用 textarea）。
+	// 两种都会被归一化成对象文本落库（见 normalizeJSONObjectField）。
+	ParamOverride     json.RawMessage `json:"param_override"`
+	HeaderOverride    json.RawMessage `json:"header_override"`
+	StatusCodeMapping json.RawMessage `json:"status_code_mapping"`
 }
 
 // channelsUpsert POST /admin/channels —— 新建（无 id）或更新（带 id）。
@@ -768,7 +857,8 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "读请求体失败: " + err.Error()})
 		return
 	}
-	sensitive, rejected := classifyChannelRequestFields(decodeRequestFields(body))
+	fields := decodeRequestFields(body)
+	sensitive, rejected := classifyChannelRequestFields(fields)
 	if len(rejected) > 0 {
 		// fail-closed：未登记 / 服务端维护字段一律拒绝（理由见 channelFieldRegistry 的注释）。
 		writeJSON(w, http.StatusBadRequest, map[string]any{
@@ -794,6 +884,13 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 	// 映射**保存前**校验：环在请求时才炸会让用户看到莫名其妙的上游 400
 	if err := modelmap.Mapping(req.ModelMapping).Validate(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "模型映射非法: " + err.Error()})
+		return
+	}
+	// T69：附加字段**也在保存前**校验（坏 JSON 写进去会静默破坏这条渠道的每一次请求，
+	// 而那要到用户发一次对话请求才会暴露）。校验完后 applyChannelExtras 才写库。
+	extras, extErr := normalizeChannelExtras(&req, fields)
+	if extErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": extErr.Error()})
 		return
 	}
 
@@ -822,7 +919,7 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 
 	// ② batch：每把 key 各建一条渠道（hyxapi 的批量新增）。
 	if mode == "batch" {
-		h.channelsCreateBatch(w, s, &req, incoming, selection, sensitive)
+		h.channelsCreateBatch(w, s, &req, incoming, selection, sensitive, extras)
 		return
 	}
 
@@ -865,7 +962,28 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	out := map[string]any{"ok": true, "created": created, "mode": orDefault(mode, "single"), "channel": viewOf(ch, ch.Models)}
+	// ④ T69：附加字段（组织/测试模型/备注/自动禁用/标签/三个覆盖项）。
+	//
+	// 它们落在 channelstore 契约**没有**的列上 ⇒ 走 store.UpdateChannel 的第二条写路径。
+	// 两条路径字段互不重叠（channelstore 管 keys/models/groups/优先级/能力行），
+	// 所以不存在"两条路径抢同一个字段"；顺序上先建行、再补列，失败时**渠道已经存在**，
+	// 返回里如实说明（不回滚：回滚会让用户看到"保存了又没了"）。
+	applied, aerr := h.applyChannelExtras(ch.ID, extras)
+	resp := map[string]any{"ok": true, "created": created, "mode": orDefault(mode, "single")}
+	if aerr != nil {
+		resp["extras_error"] = aerr.Error()
+	}
+	if len(applied) > 0 {
+		resp["applied_extras"] = applied
+	}
+	// 用**读回**的那一行构造响应（而不是内存里的 ch）：前端拿到的是落库后的真值，
+	// 顺带把 T69 的四个可读字段带回（T69 的字段读回一致性就靠它）。
+	if row, ok := h.channelRowByExternalID(ch.ID); ok && row != nil {
+		resp["channel"] = h.viewOfChannelRow(row)
+	} else {
+		resp["channel"] = viewOf(ch, ch.Models)
+	}
+	out := resp
 	// 敏感字段只报**名字**，不回显值：keys / base_url / model_mapping 不该随每次保存
 	// 出现在响应体与日志里（值本身在库里，要看走 reveal）。
 	if len(sensitive) > 0 {
@@ -976,7 +1094,7 @@ func replaceChannelKeys(old *channelstore.Channel, incoming []string) []channels
 //
 //	而本仓硬口径是"明文 key 不落列表/日志"（与 hyxapi 的刻意差异，已写在 channelReq 上）。
 func (h *Handler) channelsCreateBatch(w http.ResponseWriter, s *channelstore.Store, req *channelReq,
-	keys []string, selection string, sensitive []string) {
+	keys []string, selection string, sensitive []string, extras channelExtras) {
 	if strings.TrimSpace(req.ID) != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "mode=batch 是**新增**语义，不接受 id"})
 		return
@@ -1014,6 +1132,18 @@ func (h *Handler) channelsCreateBatch(w http.ResponseWriter, s *channelstore.Sto
 			})
 			return
 		}
+		// 附加字段对**每一条**新建渠道都生效（validate 已在外层做过一次，这里只写库）。
+		if _, aerr := h.applyChannelExtras(ch.ID, extras); aerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":   "已建 " + strconv.Itoa(len(created)) + " 条，但第 " + strconv.Itoa(len(created)+1) + " 条的附加字段写入失败: " + aerr.Error(),
+				"created": len(created), "mode": "batch", "channels": created,
+			})
+			return
+		}
+		if row, ok := h.channelRowByExternalID(ch.ID); ok && row != nil {
+			created = append(created, h.viewOfChannelRow(row))
+			continue
+		}
 		created = append(created, viewOf(ch, ch.Models))
 	}
 	out := map[string]any{
@@ -1034,6 +1164,211 @@ func decodeRequestFields(body []byte) map[string]json.RawMessage {
 		return nil
 	}
 	return raw
+}
+
+// ── T69：附加字段（channelstore 契约之外的 8 列）───────────────────────────
+//
+// # 为什么必须有 presence（"这个键到底出现没有"）
+//
+// 这 8 个字段里三种语义都真实存在：
+//
+//	openai_organization / test_model / remark —— 空串是**合法值**（"没填"）
+//	auto_ban（指针）                          —— 0 是合法值（"关闭自动禁用"）
+//	tag                                      —— 空串 = **清除标签**，而"没提这个字段" = 保持原值
+//
+// 用零值兼作"没传"会让"取消勾选自动禁用""清空备注""清除标签"永远写不进去，
+// 而那种故障在界面上表现为"保存成功但值没变" —— 最难查的一类。所以一律按
+// **请求体里出现过哪些键**（fields）决定写不写。
+type channelExtras struct {
+	present map[string]bool
+
+	openaiOrganization *string
+	testModel          *string
+	remark             *string
+	autoBan            *int
+	tag                *string
+
+	paramOverride     *string
+	headerOverride    *string
+	statusCodeMapping *string
+}
+
+// has 报告请求体里是否出现过某个键。
+func (e channelExtras) has(name string) bool { return e.present[name] }
+
+// normalizeChannelExtras 校验并归一化附加字段（**保存前**调用；不写库）。
+//
+// 三个覆盖项允许两种形态：JSON 对象，或"装着 JSON 文本的字符串"（表单里常用 textarea）。
+// 两种都归一化成**对象文本**落库 —— 存进去的永远是能被程序直接解析的那一份。
+//
+// 判据（敏感三字段为什么这样处理，见 normalizeJSONObjectField 的说明）：
+// 值必须是 JSON **对象**；数组/标量/坏 JSON 一律 400。
+func normalizeChannelExtras(req *channelReq, fields map[string]json.RawMessage) (channelExtras, error) {
+	e := channelExtras{present: map[string]bool{}}
+	for name := range fields {
+		e.present[name] = true
+	}
+	if e.has("openai_organization") {
+		v := req.OpenAIOrganization
+		e.openaiOrganization = &v
+	}
+	if e.has("test_model") {
+		v := req.TestModel
+		e.testModel = &v
+	}
+	if e.has("remark") {
+		v := req.Remark
+		e.remark = &v
+	}
+	if e.has("auto_ban") {
+		if req.AutoBan == nil {
+			return e, fmt.Errorf("auto_ban 需要一个 0/1 数字（null 不是合法值）")
+		}
+		v := *req.AutoBan
+		if v != 0 && v != 1 {
+			return e, fmt.Errorf("auto_ban 只能是 0（关）或 1（开），实际 %d", v)
+		}
+		e.autoBan = &v
+	}
+	if e.has("tag") {
+		v := strings.TrimSpace(req.Tag)
+		e.tag = &v
+	}
+	for _, f := range []struct {
+		name string
+		raw  json.RawMessage
+		dst  **string
+	}{
+		{"param_override", req.ParamOverride, &e.paramOverride},
+		{"header_override", req.HeaderOverride, &e.headerOverride},
+		{"status_code_mapping", req.StatusCodeMapping, &e.statusCodeMapping},
+	} {
+		if !e.has(f.name) {
+			continue
+		}
+		norm, err := normalizeJSONObjectField(f.name, f.raw)
+		if err != nil {
+			return e, err
+		}
+		*f.dst = norm
+	}
+	return e, nil
+}
+
+// normalizeJSONObjectField 把一个字段归一化成"JSON 对象文本"。
+//
+// 接受两种输入：
+//
+//	{"a":1}          —— 直接就是对象
+//	"{\"a\":1}"      —— 字符串里装着 JSON（表单 textarea 的常见形态）
+//
+// 其余（数组 / 数字 / 坏 JSON / null）⇒ 报错；空对象 `{}` 合法（= 明确清空该覆盖项）。
+//
+// # 为什么这三个字段要卡 JSON 合法性（这就是"敏感"在本仓的可执行判据）
+//
+// 它们会被逐字拼进**上游请求体**与**响应改写**：写进去一份坏 JSON 不会当场报错，
+// 只会让这条渠道之后的每一次请求都变形 —— 而那看起来像"上游坏了"。
+// 所以宁可在这里 400，也不要让它静默落库。
+func normalizeJSONObjectField(name string, raw json.RawMessage) (*string, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, fmt.Errorf("%s 需要一个 JSON 对象（想清空请传 {}）", name)
+	}
+	text := trimmed
+	if trimmed[0] == '"' {
+		// 字符串形态：先解出里面的文本，再当 JSON 解析（两层都要合法）。
+		var inner string
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			return nil, fmt.Errorf("%s 不是合法 JSON 字符串: %v", name, err)
+		}
+		text = strings.TrimSpace(inner)
+		if text == "" {
+			text = "{}"
+		}
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(text), &obj); err != nil {
+		return nil, fmt.Errorf("%s 必须是 JSON 对象（例如 {\"k\":\"v\"}）: %v", name, err)
+	}
+	norm, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("%s 归一化失败: %v", name, err)
+	}
+	s := string(norm)
+	return &s, nil
+}
+
+// applyChannelExtras 把附加字段写进 SQL 行（**Upsert 之后**调用）。
+//
+// 为什么走 store.UpdateChannel 而不是 channelstore.Upsert：这 8 列不在 channelstore 的
+// 冻结契约里（它的 Channel 结构没有它们）。两条写路径字段互不重叠，所以不会互相覆盖：
+//
+//	channelstore.Upsert → name/type/base_url/keys/models/model_map/group(s)/priority/weight/status + 能力行
+//	store.UpdateChannel → 本文件这 8 列
+//
+// ⚠ UpdateChannel 对空 Key / 空 ExternalID / 空 CreatedTime 的语义是"不传就不改"
+//
+//	（见它的注释），而我们读回来的行本来就是 Omit("key") ⇒ 明文 key 不会被这次回写抹掉。
+func (h *Handler) applyChannelExtras(externalID string, e channelExtras) ([]string, error) {
+	if len(e.present) == 0 {
+		return nil, nil
+	}
+	row, ok := h.channelRowByExternalID(externalID)
+	if !ok || row == nil {
+		return nil, fmt.Errorf("渠道不存在: %s", externalID)
+	}
+	applied := make([]string, 0, 8)
+	if e.has("openai_organization") && e.openaiOrganization != nil {
+		row.OpenAIOrganization = strPtrOrNil(*e.openaiOrganization)
+		applied = append(applied, "openai_organization")
+	}
+	if e.has("test_model") && e.testModel != nil {
+		row.TestModel = strPtrOrNil(*e.testModel)
+		applied = append(applied, "test_model")
+	}
+	if e.has("remark") && e.remark != nil {
+		row.Remark = strPtrOrNil(*e.remark)
+		applied = append(applied, "remark")
+	}
+	if e.has("auto_ban") && e.autoBan != nil {
+		v := *e.autoBan
+		row.AutoBan = &v
+		applied = append(applied, "auto_ban")
+	}
+	if e.has("tag") && e.tag != nil {
+		// 空串 ⇒ 显式清除标签（置 nil），而不是留一个空串标签
+		//（空串会让"按标签筛选"多出一个无名字的标签）。
+		row.Tag = strPtrOrNil(*e.tag)
+		applied = append(applied, "tag")
+	}
+	if e.has("param_override") && e.paramOverride != nil {
+		row.ParamOverride = e.paramOverride
+		applied = append(applied, "param_override")
+	}
+	if e.has("header_override") && e.headerOverride != nil {
+		row.HeaderOverride = e.headerOverride
+		applied = append(applied, "header_override")
+	}
+	if e.has("status_code_mapping") && e.statusCodeMapping != nil {
+		row.StatusCodeMapping = e.statusCodeMapping
+		applied = append(applied, "status_code_mapping")
+	}
+	if len(applied) == 0 {
+		return nil, nil
+	}
+	if err := store.UpdateChannel(row); err != nil {
+		return nil, fmt.Errorf("附加字段写入失败: %w", err)
+	}
+	return applied, nil
+}
+
+// strPtrOrNil 空串 ⇒ nil（"没填"在库里就该是 NULL，而不是空串）。
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	v := s
+	return &v
 }
 
 // orDefault 空串取缺省（用于响应里的 mode 回显）。
@@ -2013,10 +2348,48 @@ func (h *Handler) channelsReorder(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": updated, "missing": missing})
 }
 
-// channelsMove POST /admin/channels/move  {"id":"ch-x","direction":"up"|"down"}
+// channelsMove POST /admin/channels/move —— **两种形态都接受**（T72）。
 //
-// 上移/下移一位：先取当前顺序，交换相邻两条，再**整体重排**（同上：只换两个值
-// 会在优先级相等时得到非确定的顺序）。
+// # 形态 A：单条相对移动（拖拽排序用的那个）
+//
+//	{"id":"ch-a","target_id":"ch-b","position":"before"|"same"|"after"}
+//
+// 把 id 落到 target_id 的对应位置，**其余保持相对次序**（只动一条）。
+// position 的三档照前端提示框的字面语义（webui-channels.html:2197-2198）：
+//
+//	before  插到目标**之前**
+//	same    与目标同位置（同级）—— 前端注释原文：「等价于插到目标之前但不改它的层级」。
+//	        本仓的渠道**没有"层级"这一维**（只有一条 priority 序），所以这里 same 与
+//	        before 同效，这是**照前端语义实现**，不是遗漏。
+//	after   插到目标**之后**
+//
+// # 形态 B：上移/下移一位（既有形态，保留兼容）
+//
+//	{"id":"ch-x","direction":"up"|"down"}
+//
+// 与相邻一条交换。形态 B 早于 T72 存在（按钮/脚本在用），所以不能拿掉。
+//
+// # 边界处置（明确择一，不静默）
+//
+//	target_id 不存在        ⇒ 404 + 点名（与"渠道不存在"同一口径）
+//	position 非法/缺省      ⇒ 400 + 三档取值
+//	id == target_id         ⇒ **明确幂等**：200 + noop:true + reason（见下）
+//	direction 与 target_id 同时给 ⇒ 400（两种形态二选一，避免"到底按哪个执行"的歧义）
+//	两种形态都不给          ⇒ 400
+//
+// 为什么 id==target_id 选"幂等"而不是"400"：拖到自己身上在界面上就是"没动"，
+// 报 400 会让前端弹一个用户无法理解的错误框；但**静默 200 也不行**（调用方分不清
+// "成功移动了"与"根本没动"）。所以返回 200 + noop:true + reason，把事实说清楚。
+// （前端自己也会在 drop 时短路 dragFrom === to，这里兜的是直接调接口的场景。）
+//
+// # 与 reorder 的分工（三条端点别打架）
+//
+//	reorder  按**给定的整份 ids 顺序**重排（撤销排序、导入顺序用它；调用方掌握全序）
+//	move A   单条**相对**移动（拖拽落点语义：我要在谁的前/后）
+//	move B   单条**邻位**移动（点一次上移/下移）
+//
+// 三者的持久化口径**统一**：都把整表优先级重写成 N..1（见 renumberChannels 的注释）。
+// 局部改写优先级会产生并列值与空洞，而并列会让"同样的操作两次结果不同"。
 func (h *Handler) channelsMove(w http.ResponseWriter, r *http.Request) {
 	s := h.channelsStore()
 	if s == nil {
@@ -2026,56 +2399,166 @@ func (h *Handler) channelsMove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID        string `json:"id"`
 		Direction string `json:"direction"`
+		TargetID  string `json:"target_id"`
+		Position  string `json:"position"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || strings.TrimSpace(req.ID) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id 必填"})
 		return
 	}
 	dir := strings.ToLower(strings.TrimSpace(req.Direction))
-	if dir != "up" && dir != "down" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "direction 只能是 up / down"})
+	target := strings.TrimSpace(req.TargetID)
+	pos := strings.ToLower(strings.TrimSpace(req.Position))
+
+	// 形态判定：direction 与 target_id/position **二选一**（同时给 ⇒ 400，避免歧义）。
+	relative := target != "" || pos != ""
+	switch {
+	case relative && dir != "":
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "direction 与 target_id/position 是两种形态，只能给一种",
+		})
+		return
+	case !relative && dir == "":
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "要么给 direction（up/down），要么给 target_id + position（before/same/after）",
+		})
 		return
 	}
+
 	rows, err := store.ListChannels()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读渠道失败: " + err.Error()})
 		return
 	}
 	sortChannelRows(rows, "priority", "desc")
-	idx := -1
+	order := make([]string, 0, len(rows))
 	for i := range rows {
-		if rows[i].ExternalID == req.ID {
-			idx = i
-			break
-		}
+		order = append(order, rows[i].ExternalID)
 	}
+	idx := indexOfString(order, req.ID)
 	if idx < 0 {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道不存在: " + req.ID})
 		return
 	}
-	swap := idx - 1
-	if dir == "down" {
-		swap = idx + 1
-	}
-	if swap < 0 || swap >= len(rows) {
-		// 已经在顶端/底端：不是错误（前端会把按钮置灰，但接口被直接调用时也不该 400）。
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": 0, "at_edge": true, "order": channelOrderItems(rows)})
+
+	// ── 形态 B：邻位交换 ───────────────────────────────────────────────────
+	if !relative {
+		if dir != "up" && dir != "down" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "direction 只能是 up / down"})
+			return
+		}
+		swap := idx - 1
+		if dir == "down" {
+			swap = idx + 1
+		}
+		if swap < 0 || swap >= len(order) {
+			// 已经在顶端/底端：不是错误（前端会把按钮置灰，但接口被直接调用时也不该 400）。
+			h.respondChannelMove(w, "step", rows, true)
+			return
+		}
+		order[idx], order[swap] = order[swap], order[idx]
+		after, uerr := h.applyChannelOrder(s, order)
+		if uerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": uerr.Error()})
+			return
+		}
+		h.respondChannelMove(w, "step", after, false)
 		return
 	}
-	rows[idx], rows[swap] = rows[swap], rows[idx]
-	ids := make([]string, 0, len(rows))
-	for i := range rows {
-		ids = append(ids, rows[i].ExternalID)
+
+	// ── 形态 A：相对移动 ───────────────────────────────────────────────────
+	if pos != "before" && pos != "same" && pos != "after" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "position 只能是 before / same / after（收到 " + req.Position + "）",
+		})
+		return
 	}
-	updated, missing, err := h.renumberChannels(s, ids)
+	if target == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "给了 position 就必须给 target_id"})
+		return
+	}
+	if target == req.ID {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "mode": "relative", "updated": 0, "noop": true,
+			"reason": "id 与 target_id 相同 —— 拖到自己身上等于没动，按幂等处理（不是错误，也不是静默成功）",
+			"order":  channelOrderItems(rows),
+		})
+		return
+	}
+	if indexOfString(order, target) < 0 {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "目标渠道不存在: " + target})
+		return
+	}
+	next := moveRelativeInOrder(order, req.ID, target, pos)
+	after, uerr := h.applyChannelOrder(s, next)
+	if uerr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": uerr.Error()})
+		return
+	}
+	h.respondChannelMove(w, "relative", after, false)
+}
+
+// moveRelativeInOrder 把 id 移到 target 的前/后（same 与 before 同效，见调用方注释）。
+//
+// 纯函数：输入当前全序，输出新全序（长度不变、元素不增不减）。
+// 其余元素的**相对次序**保持不变 —— 这正是"只动一条"的含义。
+func moveRelativeInOrder(order []string, id, target, pos string) []string {
+	rest := make([]string, 0, len(order))
+	for _, x := range order {
+		if x != id {
+			rest = append(rest, x)
+		}
+	}
+	at := indexOfString(rest, target)
+	if at < 0 {
+		return order // 调用方已经校验过，兜底：原样返回（绝不丢元素）
+	}
+	if pos == "after" {
+		at++
+	}
+	out := make([]string, 0, len(rest)+1)
+	out = append(out, rest[:at]...)
+	out = append(out, id)
+	out = append(out, rest[at:]...)
+	return out
+}
+
+// indexOfString 找下标（找不到 -1）。
+func indexOfString(list []string, want string) int {
+	for i, x := range list {
+		if x == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// applyChannelOrder 把整份顺序落成优先级 N..1，并**读回**重排后的行（以库为准）。
+//
+// 为什么读回而不是直接用入参顺序：renumberChannels 是逐条 Upsert，读回才能证明
+// 它真的生效了（也顺带给出 name/priority，响应里那条 order 才是可核对的事实）。
+func (h *Handler) applyChannelOrder(s *channelstore.Store, order []string) ([]store.Channel, error) {
+	if _, _, err := h.renumberChannels(s, order); err != nil {
+		return nil, err
+	}
+	rows, err := store.ListChannels()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
+		return nil, fmt.Errorf("重排后读回失败: %w", err)
 	}
 	sortChannelRows(rows, "priority", "desc")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "updated": updated, "missing": missing, "order": channelOrderItems(rows),
-	})
+	return rows, nil
+}
+
+// respondChannelMove 统一 move 的成功响应（三种结局共用同一形状，前端不必分支）。
+func (h *Handler) respondChannelMove(w http.ResponseWriter, mode string, rows []store.Channel, atEdge bool) {
+	resp := map[string]any{
+		"ok": true, "mode": mode, "noop": false, "updated": len(rows), "order": channelOrderItems(rows),
+	}
+	if atEdge {
+		resp["at_edge"] = true
+		resp["updated"] = 0
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // renumberChannels 把 ids 的顺序写成优先级 N..1（第一个最高）。

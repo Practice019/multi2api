@@ -31,9 +31,21 @@ const REPO = path.resolve(__dirname, '..', '..');
 // EXE 可用环境变量覆盖：WB2API_EXE=bin/wb2api-server-probe.exe
 //   ⚠ 存在的理由：**不能覆盖 bin/wb2api-server.exe** —— 那通常是用户正在跑的
 //     实例（Windows 上还被进程锁着）。改了代码要验证时，编一个别的名字再指过来。
+// ⚠ 缺省**必须**是 probe，不能回落到用户那份 bin/wb2api-server.exe（T76 修）：
+//   回落到用户二进制时，「构建过期」判据会把整批实例类探针判红 —— 而那是**假红**
+//   （git-keeper 实测：不设 WB2API_EXE 时 22/34，显式设成 probe 后 27/34，差的 5 条全是被它拦下的）。
+//   与 T15 对 run_http_suites.js 做的同款修法保持一致。
 const EXE = process.env.WB2API_EXE
   ? path.resolve(REPO, process.env.WB2API_EXE)
-  : path.join(REPO, 'bin', 'wb2api-server.exe');
+  : path.join(REPO, 'bin', 'wb2api-server-probe.exe');
+// 显式指到用户那份二进制时**醒目告警**（它是线上进程正在跑的文件：探针起它会撞端口，
+// 而且 assertBuildFresh 大概率直接判红）。只在显式指定时告警，缺省不吵。
+if (process.env.WB2API_EXE && /[\\/]bin[\\/]wb2api-server\.exe$/.test(EXE)) {
+  console.log('⚠⚠ WB2API_EXE 指向了 bin/wb2api-server.exe（用户的线上二进制）——');
+  console.log('   · 它通常正被 7863 那个实例占用，探针起它会撞端口；');
+  console.log('   · 且它比页面源文件旧时会被 assertBuildFresh 判红（假红）。');
+  console.log('   请改用：WB2API_EXE=bin/wb2api-server-probe.exe');
+}
 
 // EXE_AT_LOAD 记下"模块求值那一刻"的取值，用来抓一个**静默**的坑：
 //
@@ -254,7 +266,7 @@ async function startInstance(opts) {
   // ⚠ 只警告**不抛**：探针可能就是故意要打那个旧二进制（对照实验）。
   const nowEXE = process.env.WB2API_EXE
     ? path.resolve(REPO, process.env.WB2API_EXE)
-    : path.join(REPO, 'bin', 'wb2api-server.exe');
+    : path.join(REPO, 'bin', 'wb2api-server-probe.exe');
   if (nowEXE !== EXE_AT_LOAD) {
     console.log('⚠⚠ WB2API_EXE 是在 require(lib_instance) **之后**才设的 —— 本次仍用加载时那份：');
     console.log('     ' + EXE_AT_LOAD);

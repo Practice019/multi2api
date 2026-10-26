@@ -13,6 +13,13 @@
 //   node tools/theme_sync.js            # 同步（幂等）
 //   node tools/theme_sync.js --check    # 只校验：不同步就 exit 1（可进 CI）
 //
+// ⚠⚠ 顺序敏感（2026-10-26 实测）：**任何页面的整页重写之后，必须再跑一次本脚本**。
+//   块是**生成物**：重写页面（改版、换外壳、从别处拷一份）很容易把 START..END 整段丢掉，
+//   而丢掉是**静默的** —— 页面照样渲染，只是退回了 v2 配色，没有任何报错。
+//   实测：C2 重写 webui-channels.html 后块为空，我这次跑 sync 才补回 **+35818 字节**。
+//   ⇒ 改完页面的验收清单里请固定包含：node tools/theme_sync.js && node tools/theme_sync.js --check。
+//   （--check 会以 STALE 点名缺块的页面，所以只要它进了验收就不会漏。）
+//
 // ⚠ 行尾按**文件自身**的行尾风格生成：webui.html 在工作树里是 CRLF
 //   （见 .gitattributes / tests/frontend/audit_crlf_sensitivity.js），
 //   混进 LF 会让那一套审计报出真问题。
@@ -36,6 +43,9 @@ const PAGES = [
   // 首次注入由本脚本自己完成：没有标记时插在**最后一个 </style> 之前**（见 apply）。
   'internal/server/webui-status.html',
   'internal/server/webui-models.html',
+  // T68 / Wave C3：令牌（API Key）管理页。与状态页/模型页同一条理由 ——
+  // 独立 document 若不进名单，会同时逃过主题一致性与对比度两份守卫。
+  'internal/server/webui-tokens.html',
 ];
 
 function eolOf(text) {
