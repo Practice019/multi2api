@@ -3052,7 +3052,8 @@ function mpEsc(s) {
          · 状态页 入口 <section data-key="status"> / iframe id=stFrame / src=/ui/status
                   → 页面文件 internal/server/webui-status.html（本任务 T12 交付）
          · 渠道页 入口 <section data-key="channels"> / iframe id=chFrame / src=/ui/channels（**已存在**，T13 只改页面本体，不动本文件）
-         · 模型页 入口 <section data-key="models"> / iframe id=mdFrame / src=/ui/models
+         · 模型页 入口 <section data-key="modelcatalog"> / iframe id=mdFrame / src=/ui/models
+                  ⚠ key 用 modelcatalog，不用 models：下方旧「可用模型」面板已占用 models
                   → 页面文件 internal/server/webui-models.html（T14 新建；本任务只**预留容器**）
        T14 加自己那一页时只需两处各追加一行：webui.go 的 //go:embed 清单末尾、handler.go
        的 :396/:398 路由之后。**不要**改本 section 的结构。 -->
@@ -3070,8 +3071,24 @@ function mpEsc(s) {
   <!-- 模型目录（T14）：与「渠道」相邻 —— 渠道回答"谁提供模型"，模型目录回答"有哪些模型"，
        两者是同一件事的两面，隔着放会让人以为它们无关。
        ⚠ 本任务（T12）**只预留 iframe 容器**；页面文件 internal/server/webui-models.html 由 T14 新建，
-       路由 /ui/models 由 T14 在 handler.go 的 :396/:398 之后追加一行。 -->
-  <section data-key="models">
+       路由 /ui/models 由 T14 在 handler.go 的 :396/:398 之后追加一行。
+
+       ⚠⚠ key 必须是 modelcatalog，**绝不能**改回 models（2026-10-26 T40 修掉的真缺陷）：
+       下面那块**旧**「可用模型」chips 面板用的 key 就是 models。两节同名时，所有按 key 取节
+       的调用点都只认**第一个**匹配，一共四处（用函数名定位，不写行号 —— 行号会随本文件长大而漂）：
+         · showPanelByKey() / navKey() 的 navSections.find(... === key)（取首个下标）
+         · refresh() 内 'section[data-key=…]' 的 querySelector（切换/恢复时定位到错的节）
+         · refresh() 内的同名存在性检查（第二块会被当成"已存在"而跳过）
+         · 启动时按 localStorage('wb2api.panelkey') 恢复上次面板（同名 ⇒ 恢复到错的那一节）
+       再叠加"导航按下标驱动（data-nav），而 refresh() 每 5s 重建 navSections 数组"，就表现为
+       「点了『可用模型』，active 的却是『模型目录』」的串节。
+       （T39 独立验收实测到它；tests/frontend/panel_content_e2e.js 的注释也记了同一机制，
+         那份注释里"data-key 因重复而不可靠"这句在本修复后**已过期** —— 但它的 anchor 判据本身
+         仍然成立且更强，故保留不动。）
+
+       为什么改**新**节而不是旧节：旧节的 key 已被 localStorage('wb2api.panelkey')、既有探针的
+       anchor 判据与用户书签引用过；改它会把"恢复上次面板"的既有行为改坏，而新节还没有任何依赖方。 -->
+  <section data-key="modelcatalog">
     <h2>模型目录
       <span class="spacer"></span>
       <button onclick="document.getElementById('mdFrame').src='/ui/models?t='+Date.now()" style="padding:3px 10px;font-size:12px">刷新</button>
