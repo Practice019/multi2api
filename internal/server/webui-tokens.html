@@ -1289,12 +1289,32 @@ header h1{letter-spacing:0}
 </style>
 </head>
 <body>
+<!-- 标题与刷新**都归控制台外壳**（webui.html 里 data-key="tokens" 那个 section）：
+     外壳给每个面板渲染标题 + 一个「刷新」按钮，且那个按钮会**重载本 iframe**
+     （onclick 改 tkFrame.src 并带 ?t= 时间戳），比页内按钮更彻底 —— 连本页的
+     内存状态（state.page / state.kw / 抽屉）一起重置。
+
+     # T99 修的两个问题（它们同时存在，且是同一个「谁提供外壳件」的问题）
+
+       · **缺少**外壳标题：tokens 是 13 个 section 里唯一没有 h2 的，于是导航项走
+         navLabel() 的兜底分支渲染成「面板 7」（7 是序号不是计数）。现在标题由外壳
+         那个 h2 提供，导航项显示「令牌」。
+       · **多出**页面级标题与刷新：本页此前写着 <h1>令牌管理</h1> + btnRefresh；
+         而外壳那边补上 h2 之后就会出现**两个标题、两个刷新** —— 用户为这件事
+         报过两次（T92 状态页、T98 模型页）。所以那一份在本轮删掉。
+
+     房子规矩（T92/T97/T98 三轮确立）：**外壳提供标题与刷新，页面不提供页面级标题**。
+     门禁钉着它：tests/frontend/verify_wave2_pages.js 的 [b2]/[e] 段要求
+     「可见页面级标题恰好 1 个、可见刷新控件恰好 1 个」；本页那一份新增在
+     tests/frontend/verify_tokens_page.js 的 [N] 段（口径逐条照抄）。
+
+     ⚠ 页面**不是**没有刷新入口：下面的搜索框（#kw）改关键字会立刻重取列表
+     （refresh()），行内的启用/禁用/删除也各自 refresh()。删掉的只是那个
+     「整页级」的重复按钮。 -->
 <header>
-  <h1>令牌管理</h1>
   <span class="dim" id="hint">每页 10 条 · 明文只在点击「复制」那一刻出现</span>
   <span class="spacer"></span>
   <input type="text" id="kw" placeholder="搜索名称 / Key / 归属" style="width:200px">
-  <button id="btnRefresh" type="button">刷新</button>
   <button id="btnNew" type="button" class="primary">新建令牌</button>
 </header>
 
@@ -1872,7 +1892,13 @@ function save() {
 
 // 列表交互
 $('btnNew').addEventListener('click', function () { openDrawer(null); });
-$('btnRefresh').addEventListener('click', function () { refresh(); });
+// T99：本页自带的「刷新」按钮已删除 —— 标题与刷新都归控制台外壳（见文件头
+// <header> 上方那段注释；外壳那个按钮会重载整个 iframe，比页内这个更彻底）。
+// 元素不在时下面这行会对着 null 调 addEventListener ⇒ 整页脚本从这一句起全部中断
+// （表现是"表格空的、按钮都没反应"，看起来像后端挂了）。所以按 webui-status.html
+// 的 T92 写法保留绑定、只是给一个空壳兜住：元素在就照常绑，不在就是 no-op。
+var refreshBtn = $('btnRefresh');
+if (refreshBtn) refreshBtn.addEventListener('click', function () { refresh(); });
 $('btnPrev').addEventListener('click', function () { if (state.page > 1) { state.page--; refresh(); } });
 $('btnNext').addEventListener('click', function () { state.page++; refresh(); });
 var kwTimer = null;

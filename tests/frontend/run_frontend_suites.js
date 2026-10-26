@@ -145,6 +145,41 @@ const PAGE_WRITING_PROBES = [
 
 const fmt = (d) => (d ? new Date(d).toLocaleString('sv-SE') : '（不存在）');
 
+// goModCacheInfo —— 报「这次重建用的是哪一份模块缓存」（2026-10-27 加，**纯诊断**）。
+//
+// # 为什么要打印它（一次实测的假红，一次红了 6 条）
+//
+// 本机 `go env GOMODCACHE` 指向被写坏的 D:\go-path\pkg\mod（60 个 org 目录只剩空骨架），
+// 日常靠 `$env:GOMODCACHE` 指到另一份健康缓存绕过。而**下面那个重建子进程只继承 process.env**：
+// 调用方（人或脚本）忘了导出 GOMODCACHE 时，重建就会去用那份坏的默认缓存并失败，
+// 紧接着**实例探针整批红**。当时现场只有一句
+//
+//     ✗ 自动重建失败：# golang.org/x/crypto/blowfish | open D:\go-path\...\blowfish\block.go: The system cannot find the file specified
+//
+// —— 看不出这是「缓存位置」问题，于是那 6 条红全被当成产品缺陷（2026-10-27 实测踩到）。
+//
+// 所以把两个值都打出来：**设定值**（process.env.GOMODCACHE）与**实际值**（go env GOMODCACHE）。
+// 两者不一致本身就说明「这次重建没吃到绕过的那个环境变量」。
+//
+// ⚠ 只在**要重建时**调用（不是每个探针前都调）—— 它自己要起一个 go 子进程，不该拖慢全绿路径。
+// ⚠ 只加诊断：**不改判据、不改重建时机、不改传给子进程的 env**。这次的问题不是判据错了，
+//   而是「判据红了之后现场无法自解释」。
+function goModCacheInfo() {
+  let actual;
+  try {
+    actual = String(execFileSync('go', ['env', 'GOMODCACHE'], {
+      cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000,
+    })).trim();
+  } catch (e) {
+    let msg = '';
+    try { msg = String((e && (e.stdout || '')) + (e && (e.stderr || ''))).trim().split('\n')[0]; } catch (e2) { msg = ''; }
+    if (!msg) msg = String((e && e.message) || e);
+    actual = '（取不到：' + msg + '）';
+  }
+  return 'GOMODCACHE 设定=' + (process.env.GOMODCACHE || '（未设置 ⇒ 落到 go env 的默认值）')
+    + ' / go env GOMODCACHE=' + (actual || '（空）');
+}
+
 // 按 mtime 判构建新鲜度：不新鲜就自动重建（RN 打印它做了什么）。
 // 返回 true = 新鲜（可继续）；false = 不新鲜且**没能**修好（实例探针会各自报权威红）。
 function ensureProbeFresh(why, quietOk) {
@@ -165,6 +200,7 @@ function ensureProbeFresh(why, quietOk) {
   console.log('  REBUILD 构建不新鲜（' + why + '）：exe ' + fmt(b.exeMtime) + ' < ' +
     b.newestRel + ' ' + fmt(b.newestMtime) + ' ⇒ 自动重建 ' + rel);
   console.log('          命令：go build -p 1 -o ' + rel + ' ./cmd/server');
+  console.log('          ' + goModCacheInfo());
   try {
     execFileSync('go', ['build', '-p', '1', '-o', rel, './cmd/server'], {
       cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300000,
@@ -172,6 +208,9 @@ function ensureProbeFresh(why, quietOk) {
     });
   } catch (e) {
     console.log('  ✗ 自动重建失败：' + ((e.stdout || '') + (e.stderr || '')).split('\n').slice(0, 3).join(' | '));
+    // 把「用的是哪份缓存」与失败原因打在一起：默认缓存坏掉时，原因只有一句 Windows 的
+    // open ...: The system cannot find the file specified，光看它无法归因（见 goModCacheInfo 注释）。
+    console.log('    ' + goModCacheInfo());
     console.log('    ⇒ 不掩盖：实例探针的构建门禁会给出权威红。');
     return false;
   }

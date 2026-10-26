@@ -3295,6 +3295,26 @@ function mpEsc(s) {
        反面教材：漏了这个 section，页面本体与路由都在，但控制台里永远点不进去、且没有任何报错
        —— 所以 tests/frontend/verify_tokens_page.js 的第一条断言就是它。 -->
   <section data-key="tokens">
+    <!-- T99：补齐**标题**与**整帧重载刷新**（此前这一节是 13 个 section 里唯一没有 h2 的，
+         于是导航项由 navLabel() 的兜底分支渲染成「面板 7」—— 7 是**序号**不是计数；
+         它也是六个 iframe 页里唯一没有刷新按钮的）。
+
+         ⚠ 两个都要放**这里**（外壳），不要放回页面里：
+           导航标签的来源就是「section 内 h2 的首个文本节点」（webui.html 的 navLabel()，
+           下游 tests/frontend/dashboard_gen.js 的 navLabelOf() 是同一套解析）。
+           把标题放回页面 ⇒ 导航项仍然取不到 h2、仍然显示「面板 7」，而用户会看到
+           外壳与页内**两个标题、两个刷新**（T92 在状态页、T98 在模型页各修过一次，
+           用户为此报过两次）。房子规矩：**外壳提供标题与刷新，页面不提供页面级标题**。
+
+         ⚠ 按钮语义与其余五页**逐字同款**：改 iframe 的 src 并带 ?t= 时间戳 ⇒ 整帧重载
+           （比页内那个只重取列表的刷新彻底：连页面的内存状态一起重置）。
+           对应地，webui-tokens.html 里那份页面级 h1 与 btnRefresh 已删除。 -->
+    <h2>令牌
+      <span class="spacer"></span>
+      <button onclick="document.getElementById('tkFrame').src='/ui/tokens?t='+Date.now()" style="padding:3px 10px;font-size:12px">刷新</button>
+    </h2>
+    <p class="dim" style="font-size:12px;margin:2px 0 6px">令牌（Token）是调用 <code>/v1</code> 的凭据：
+      每把可单独设额度、限速、可用模型与分组。</p>
     <!-- ⚠⚠ iframe 的尺寸由**本行内联 style** 决定 —— 不要改成「依赖 class」。
          全仓**没有任何 iframe 类规则**（grep 样式区 iframe|uiframe = 0 命中）：C3 当初自造了
          class="uiframe"，它零命中 ⇒ 这个框退回**浏览器默认 300×150**，表现为
