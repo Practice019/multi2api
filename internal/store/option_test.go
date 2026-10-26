@@ -160,12 +160,12 @@ func TestImportFromConfigJSON(t *testing.T) {
 
 	// 1) 嵌套键以点号路径落库，标量按原字面量存。
 	want := map[string]string{
-		"listen":                              "127.0.0.1:7863",
-		"pool.max_in_flight":                  "3",
-		"pool.breaker_threshold":              "3",
-		"pool.breaker_cooldown":               "30m",
-		"upstream.timeout_seconds":            "120",
-		"schedule.activity_hours":             "[9,21]",
+		"listen":                                   "127.0.0.1:7863",
+		"pool.max_in_flight":                       "3",
+		"pool.breaker_threshold":                   "3",
+		"pool.breaker_cooldown":                    "30m",
+		"upstream.timeout_seconds":                 "120",
+		"schedule.activity_hours":                  "[9,21]",
 		"features.sanitize_blacklist_fingerprints": "true",
 	}
 	for k, v := range want {

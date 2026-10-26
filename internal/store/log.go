@@ -73,8 +73,8 @@ func TodayAggregate(dayStartUnix int64) (reqs, tokens int64, cost int64, err err
 	}
 	var row todayRow
 	err = DB.Model(&Log{}).
-		Select("COUNT(*) AS reqs, " +
-			"COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) AS tokens, " +
+		Select("COUNT(*) AS reqs, "+
+			"COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) AS tokens, "+
 			"COALESCE(SUM(cost_quota), 0) AS cost").
 		Where("created_at >= ?", dayStartUnix).
 		Scan(&row).Error
@@ -104,8 +104,8 @@ func WindowAggregate(fromUnix, toUnix int64) (reqs, succ int64, avgLatencyMs flo
 	}
 	var row windowRow
 	err = DB.Model(&Log{}).
-		Select("COUNT(*) AS reqs, " +
-			"COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS succ, " +
+		Select("COUNT(*) AS reqs, "+
+			"COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS succ, "+
 			"COALESCE(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END), 0) AS avg_latency_ms").
 		Where("created_at >= ? AND created_at <= ?", fromUnix, toUnix).
 		Scan(&row).Error

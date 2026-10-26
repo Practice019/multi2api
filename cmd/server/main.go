@@ -7,6 +7,7 @@ import (
 	"flag"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,6 +45,7 @@ import (
 	"workbuddy2api/internal/scheduler"
 	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/session"
+	sqlstore "workbuddy2api/internal/store"
 	"workbuddy2api/internal/trae"
 	"workbuddy2api/internal/upstream"
 	"workbuddy2api/internal/wire"
@@ -1408,6 +1410,68 @@ func main() {
 	// 会被处理（进程还在装配阶段）。
 	var adminTokenOKFn func(string) bool = func(string) bool { return false }
 
+	// ---- 数据层：SQL 成为权威（Wave1-T11 收口）----
+	//
+	// # 为什么必须在两个 New 之前
+	//
+	// account.Store / SessionStore 都是**双模**的：store.DB 打开就写 SQL，没打开就
+	// 退回落 JSON。所以这一行必须早于它们 —— 否则整个进程会静默跑在 JSON 兼容
+	// 后端上，而「数据层已切换」这句话就成了假的。
+	//
+	// # 顺序 Open → Migrate
+	//
+	// Open 只负责连接（+ 建父目录），Migrate 才建表/补列。反过来会让第一次查询撞
+	// no such table，而那条错误离现场很远（见 internal/store/db.go 的注释）。
+	// 打不开 / 建不了表**直接 Fatal**：T11 是切换点，半切换（SQL 不可用又继续用
+	// JSON）会造出第二份真相，比启动失败难查得多。
+	//
+	// # 路径
+	//
+	// data/gw.db（相对 CWD，与 data/accounts.json、data/sessions.json 同惯例）。
+	// 所以启动必须走 start.bat（它 cd 到仓库根）—— 与既有那条运维纪律同源。
+	dbPath := filepath.Join("data", "gw.db")
+	if err := sqlstore.Open(dbPath); err != nil {
+		log.Fatalf("数据层: 打开 %s 失败: %v", dbPath, err)
+	}
+	if err := sqlstore.Migrate(); err != nil {
+		log.Fatalf("数据层: %s 建表失败: %v", dbPath, err)
+	}
+	log.Printf("数据层: 已打开 %s（%d 张表）", dbPath, len(sqlstore.Tables()))
+
+	// 请求日志双写：jsonl 照旧（logbuf 的 sink），同时**异步**进 logs 表。
+	// 适配函数 sqlLogWriter 见本文件末尾（映射与 T06 的参考实现逐行同源）。
+	// 队列有界（4096）且失败只计数：SQL 慢/挂了都不许传导到请求路径上。
+	logRing.SetSQLWriter(sqlLogWriter{})
+
+	// 首启自愈：setups 行是「初始化完成」的唯一标记（internal/store/setup.go）。
+	// CheckSetup 三态：有行 ⇒ true；无行但有 root 用户 ⇒ 补行并返回 true；
+	// 两者都没有 ⇒ false（等 /ui 完成首次建号）。这里只调用，不改它的语义。
+	if ok, err := sqlstore.CheckSetup(); err != nil {
+		log.Printf("数据层: setups 自检失败（不阻断启动）: %v", err)
+	} else if ok {
+		log.Printf("数据层: 已初始化（setups 行在；二次启动不重复 seed）")
+	} else {
+		log.Printf("数据层: 尚未初始化（库里没有 setups 行）—— 打开 /ui 创建唯一管理员")
+	}
+	// 把 setups 行数打进启动日志：三元判据里的「恰好 1 行」需要一个可复现的第一现场，
+	// 而不是让人拿 sqlite3 去猜（本仓的运维语言是日志 + 脚本实算）。
+	if sqlstore.DB != nil {
+		var setupRows int64
+		if err := sqlstore.DB.Model(&sqlstore.Setup{}).Count(&setupRows).Error; err != nil {
+			log.Printf("数据层: 读 setups 行数失败: %v", err)
+		} else {
+			log.Printf("数据层: setups 行数=%d", setupRows)
+		}
+		// 审计行数同理：T07 的 Config.Audit 是"注入才生效"，而"注入生效了没有"只有
+		// 这个数能回答（一次管理面写操作 +1；行数不涨就说明那一行没接上）。
+		var auditRows int64
+		if err := sqlstore.DB.Model(&sqlstore.AuditLog{}).Count(&auditRows).Error; err != nil {
+			log.Printf("数据层: 读 audit_log 行数失败: %v", err)
+		} else {
+			log.Printf("数据层: audit_log 行数=%d", auditRows)
+		}
+	}
+
 	accountsStore, err := account.New(filepath.Join("data", "accounts.json"))
 	if err != nil {
 		log.Fatalf("load accounts: %v", err)
@@ -1509,7 +1573,11 @@ func main() {
 	var modelNamesFn func() server.ModelNameSnapshot
 
 	adminH = admin.New(admin.Config{
-		Pool:     p,
+		Pool: p,
+		// 审计写入回调（Wave1-T07 的 Config.Audit）。**不接这一行 ⇒ 生产路径一条
+		// 审计都不落**（nil = 不记录），而测试路径是绿的 —— 那正是「假成功」。
+		// 两边同型（store.AuditLog），中间不需要适配层，见 admin.Config.Audit 注释。
+		Audit:    sqlstore.AppendAudit,
 		OAuth:    oauth.New(cfg.OAuthBaseURL),
 		Log:      checkinLog,
 		Ring:     logRing,
@@ -1626,6 +1694,17 @@ func main() {
 	// ⚠⚠ **必须放在 `StartQuotaAutoRefresh` 之前**：那个循环刷的是池子里的账号，
 	//   池子还空的时候起它，第一轮就是空转（实测日志一个字都没有）。
 	// ⚠ 它内部每个上游各自 recover、失败只记日志 ⇒ 不该因为某个上游目录读不到而拒绝启动。
+	// ---- 渠道 / 能力反向 seed（T08 的入口，T11 装配）----
+	//
+	// 幂等：第二次启动命中已有行（Created=0、Matched=13），所以不需要另写
+	// 「是否首启」的判据。失败**不阻断启动**：渠道页与转发都不依赖它，而常见的
+	// 失败是「模型目录为空」（账号型上游要活凭证才有目录，那一步是 0 不是错误）。
+	if st, err := adminH.SeedSQLChannels(); err != nil {
+		log.Printf("数据层: 渠道 seed 失败（渠道页/转发不受影响）: %v", err)
+	} else {
+		log.Printf("数据层: 渠道 seed 完成（新建 %d、命中 %d、能力行 %d）", st.Created, st.Matched, st.Abilities)
+	}
+
 	adminH.SyncPoolFromCredentials()
 
 	// ⚠⚠ **额度自动刷新**（2026-10-18，见 internal/admin/quota_autorefresh.go）。
@@ -1856,6 +1935,13 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
+		// 请求都停了，再把双写队列排空、关库。顺序不能反：关库后入队的日志会全失败。
+		// FlushSQL 是屏障（等此前所有条目处理完），不是「尽力而为」。
+		logRing.FlushSQL()
+		logRing.StopSQL()
+		if err := sqlstore.Close(); err != nil {
+			log.Printf("数据层: 关闭数据库失败: %v", err)
+		}
 	}()
 
 	// 启动横幅：用户最先要找的两个地址。
@@ -2035,4 +2121,57 @@ func isolatedNote(isolated bool) string {
 		return "，独立 profile（需重新输入账号密码，不会串号）"
 	}
 	return "，复用当前 profile（不串号保护较弱）"
+}
+
+// sqlLogWriter 把 logbuf.Entry 映射成 logs 表的一行 —— T06 的 SQL sink 的装配层适配。
+//
+// # 为什么适配层在这里而不是 logbuf 里
+//
+// logbuf 在**请求路径**上（每个 chat 请求都走），它不该 import internal/store：
+// 那会把 SQL 层变成写路径的硬依赖（见 internal/logbuf/sqlsink.go 的文件头）。
+// 装配层（本文件）同时知道两边的类型，所以映射放这里 —— 也就是 T06 注释里写的
+// 「真正的适配由装配层注入」。
+//
+// # 映射（与 internal/logbuf/sqllog_equivalence_test.go 的 entryToLog 逐行同源）
+//
+//	At       → CreatedAt（Unix 秒，聚合的唯一时间轴）
+//	Status   → Success（2xx/3xx 记成功；网关对客户端返回的状态码）
+//	TotalMS  → LatencyMs
+//	Tokens   → PromptTokens + CompletionTokens（Tokens 是 total，OutTokens 是 completion）
+//	Credit   → CostQuota（本仓无计费，credit 就是「消耗了多少额度」，四舍五入到整数）
+//
+// 两处不一致会让「jsonl 与 SQL 的聚合数对不对得上」变成一个没有答案的问题。
+type sqlLogWriter struct{}
+
+func (sqlLogWriter) WriteLog(e logbuf.Entry) error {
+	success := e.Status >= 200 && e.Status < 400
+	typ := "error"
+	if success {
+		typ = "consume"
+	}
+	var prompt, completion, total int
+	if e.Tokens >= 0 {
+		total = e.Tokens
+		completion = e.OutTokens
+		if completion < 0 {
+			completion = 0
+		}
+		if completion > total {
+			completion = total // out > total 的脏数据不能让 prompt 变负
+		}
+		prompt = total - completion
+	}
+	return sqlstore.AppendLog(sqlstore.Log{
+		CreatedAt:        e.At.Unix(),
+		ModelName:        e.Model,
+		ChannelName:      e.Channel,
+		AccountUID:       e.UID,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		TotalTokens:      total,
+		CostQuota:        int64(math.Round(e.Credit)),
+		LatencyMs:        e.TotalMS,
+		Success:          success,
+		Type:             typ,
+	})
 }

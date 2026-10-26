@@ -313,6 +313,30 @@ func storeUserFrom(u *User) (store.User, bool) {
 	}, true
 }
 
+// mapStoreRoleToAccountRole 是 SQL → account 的**唯一**角色映射处。
+//
+// # 为什么需要它
+//
+// store.RoleRoot(100) 是 setups 自愈判据用的超管档（internal/store/role.go:31），
+// 而 account 侧只有 RoleAdmin(10) 能构成身份（IsAdminRole 是唯一判据）。不映射
+// 的话，库里任何 role=100 的行都会被 Authenticate/Lookup 判成 ErrMemberRetired
+// —— 一个真实存在的管理员被锁在门外。
+//
+// # 为什么只映射读方向
+//
+// 写方向**不动**：CreateBootstrap 仍写 RoleAdmin(10)，所以 migrate-sql export
+// 导出的 accounts.json 里 role 数值与改造前一致（导出是逐字段搬运，见
+// cmd/migrate-sql/main.go:738）。反过来（写 100）会让导出值与旧数据不同，且
+// JSON 后端认不出 100 —— 那是把「JSON 仅作导出格式」这条裁定打破。
+//
+// ⚠ 全仓只有这一处做角色映射；新增转换点时必须调它，而不是各写一遍 if。
+func mapStoreRoleToAccountRole(role int) int {
+	if role == store.RoleRoot {
+		return RoleAdmin
+	}
+	return role
+}
+
 // accountFromStoreUser 反向投影。时间戳 0 → 空串（与 omitempty 的语义一致）。
 func accountFromStoreUser(su *store.User) *User {
 	if su == nil {
@@ -323,7 +347,7 @@ func accountFromStoreUser(su *store.User) *User {
 		Username:     su.Username,
 		DisplayName:  su.DisplayName,
 		PasswordHash: su.PasswordHash,
-		Role:         su.Role,
+		Role:         mapStoreRoleToAccountRole(su.Role),
 		Enabled:      su.Enabled,
 		AuthVersion:  su.AuthVersion,
 		CreatedAt:    formatStamp(su.CreatedAt),
@@ -439,6 +463,19 @@ func (s *Store) CreateBootstrap(username, password string) (*User, error) {
 		}
 		if err := store.CreateUser(&su); err != nil {
 			return nil, err
+		}
+		// 首启建号成功 ⇒ **显式**写下 setups 行（「初始化完成」的唯一标记）。
+		//
+		// ⚠ 刻意不把首号写成 store.RoleRoot(100) 再靠 CheckSetup 自愈：
+		// migrate-sql export 会把 role 原样导回 accounts.json，而 JSON 后端的
+		// IsAdminRole(100)=false ⇒ 回退到 JSON 模式时管理员会失效。所以库里仍是
+		// RoleAdmin(10)（导出值不变），标记单独写（store.MarkSetupInitialized）。
+		//
+		// 失败**不**让建号失败：账号已经建成（这是成功的事实），把它报成错误只会
+		// 让用户重试并撞上 ErrBootstrapDone。缺标记的后果有限（控制台的 setup 判定
+		// 用的是「账号数为 0」，不读 setups 行），但仍要留下明确的错误日志。
+		if err := store.MarkSetupInitialized(); err != nil {
+			log.Printf("[account] ⚠ setups 标记未写下（账号已建，控制台不受影响）: %v", err)
 		}
 		return copyUser(u), nil
 	}
