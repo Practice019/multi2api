@@ -29,6 +29,7 @@ import (
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/openaicompat"
+	"workbuddy2api/internal/store"
 )
 
 func testChannelStore(t *testing.T) *channelstore.Store {
@@ -191,4 +192,190 @@ func joined(ids []string) string {
 		out += id
 	}
 	return out
+}
+
+// ── T09：models + vendors 两级目录 seed ────────────────────────────────────
+
+// TestStoreModelCatalogSeed 是 T09 的验收测试（PLAN §4 T09）。
+//
+// # 它断言的是哪几条，各自防的是什么
+//
+//	① 计数判据：seed 之后 models 行数 == **同一个 Handler** 的 /v1/models
+//	   可见 chips 基数。这是判据"目录 == 对外目录"唯一能被自动验证的形式；
+//	   基数从真实端点量（publicModelIDs），不从内部函数取 —— 否则是自己证明自己。
+//	② 两级：每条二级行都能挂到一条一级行上，一级行名就是 owned_by。
+//	   防的是"目录退化成一张平表"（那时 vendor 恒为空/unknown，看起来照样有行）。
+//	③ 合成行：渠道声明、但上游目录里没有的名字 → 合成行（打标记、挂渠道名下）；
+//	   上游已有的名字**不得**被误判成合成（否则"合成"这个标记就没信息量了）。
+//	④ 幂等：二次 seed 不新增行 —— T11 的"二次启动不重复 seed"靠它。
+//
+// # 为什么这里必须自建 Handler 而不是复用 channelAwareHandler
+//
+// 后者用的是 newTestRouter(true)（codearts 拉不到目录），可见集合只有
+// workbuddy + 渠道。而 T09 的 seed 要覆盖"**各**上游目录"，两个上游都在
+// 才验得到"每个上游各建一条一级行"。夹具少了上游，断言会假绿。
+func TestStoreModelCatalogSeed(t *testing.T) {
+	// 两份包级目录缓存都要清：不清就会被前一个用例的内容串味
+	// （这是 resetDynamicCache 的注释里已经记过的教训）。
+	resetDynamicCache()
+
+	// 独立临时库：不碰任何真实 data/。store.DB 是包级单例，用例结束必须关掉，
+	// 否则会污染同包其它用例（本包目前只有这一条用例用 store）。
+	if err := store.Open(filepath.Join(t.TempDir(), "gw.db")); err != nil {
+		t.Fatalf("打开临时库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+
+	// 渠道声明三个名字：
+	//   glm-5.2      —— 上游也有（但上游对外是 workbuddy/glm-5.2），渠道这条是裸名
+	//   kimi-k2.7    —— 同上，并被映射成公开名 pub-alias
+	//   ch-only-model—— 上游目录里**完全没有**，这正是合成行 API 存在的理由
+	s := testChannelStore(t)
+	if err := s.Upsert(&channelstore.Channel{
+		ID: "ch-seed", Name: "seed渠道", BaseURL: "https://seed.example.com/v1",
+		Status: channelstore.StatusEnabled, Priority: 10,
+		Models:   []string{"glm-5.2", "kimi-k2.7", "ch-only-model"},
+		ModelMap: map[string]string{"pub-alias": "kimi-k2.7"},
+	}); err != nil {
+		t.Fatalf("建渠道失败: %v", err)
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, baselineDynamicBody(), false
+	})
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, Provider: newTestRouter(false),
+		DefaultProvider: "workbuddy", OwnedBy: "workbuddy", MaxBodyMB: 1,
+		Channels: s,
+		ChannelProvider: func(id, baseURL string) gateway.Provider {
+			return openaicompat.NewOpenAICompat(id, baseURL)
+		},
+	})
+
+	// ① 先量可见 chips 基数（真实端点）。
+	ids := publicModelIDs(t, h)
+	if len(ids) == 0 {
+		t.Fatal("/v1/models 应有可见模型，否则计数判据无从谈起")
+	}
+
+	stats, err := h.SeedModelCatalog()
+	if err != nil {
+		t.Fatalf("seed 两级目录失败: %v", err)
+	}
+	if stats.Models == 0 {
+		t.Fatal("seed 命中 0 行 —— 这正是 T08 记过的『空过』形态，不算通过")
+	}
+	got, err := store.CountCatalogModels()
+	if err != nil {
+		t.Fatalf("数 models 行失败: %v", err)
+	}
+	if int(got) != len(ids) {
+		t.Fatalf("models 行数=%d want %d（= /v1/models 可见 chips 基数）\n可见 id=%v", got, len(ids), ids)
+	}
+	if stats.Models != len(ids) {
+		t.Errorf("首轮 seed 应全部新增：stats.Models=%d want %d（空库 + 全部新名字）", stats.Models, len(ids))
+	}
+
+	// ② 两级：二级行必须挂在一条真实的一级行上，一级行名 = owned_by。
+	rows, err := h.CatalogRows()
+	if err != nil {
+		t.Fatalf("读回目录失败: %v", err)
+	}
+	if len(rows) != len(ids) {
+		t.Fatalf("CatalogRows=%d want %d", len(rows), len(ids))
+	}
+	byName := make(map[string]store.CatalogRow, len(rows))
+	for _, r := range rows {
+		if r.VendorID == 0 || r.Vendor == "" {
+			t.Errorf("模型 %q 没有一级行（vendor_id=%d vendor=%q）—— 两级目录退化成了平表",
+				r.Name, r.VendorID, r.Vendor)
+		}
+		byName[r.Name] = r
+	}
+	for _, id := range ids {
+		if _, ok := byName[id]; !ok {
+			t.Errorf("chips 上的 %q 在目录里没有对应的行", id)
+		}
+	}
+	vendorSet := make(map[string]bool, 4)
+	for _, r := range rows {
+		vendorSet[r.Vendor] = true
+	}
+	for _, want := range []string{"workbuddy", "codearts", "seed渠道"} {
+		if !vendorSet[want] {
+			t.Errorf("一级行缺少 %q —— 实际只有 %v", want, vendorSet)
+		}
+	}
+	vendors, err := store.CountCatalogVendors()
+	if err != nil {
+		t.Fatalf("数 vendors 行失败: %v", err)
+	}
+	if vendors != int64(len(vendorSet)) {
+		t.Errorf("vendors 行数=%d want %d（每个 owned_by 恰好一条一级行）", vendors, len(vendorSet))
+	}
+
+	// ③ 合成行：渠道声明在用的名字上游目录里没有 ⇒ 合成；上游那批 ⇒ 不是合成。
+	syn := h.ChannelSyntheticCatalogEntries()
+	if len(syn) == 0 {
+		t.Fatal("合成行 API 返回空 —— 渠道声明的模型没被补进目录")
+	}
+	for _, e := range syn {
+		if !e.Synthetic {
+			t.Errorf("合成行 %q 未打标记（入库后无法与真行区分）", e.Name)
+		}
+		if e.Vendor != "seed渠道" {
+			t.Errorf("合成行 %q vendor=%q want 渠道名 seed渠道", e.Name, e.Vendor)
+		}
+	}
+	synRows := 0
+	for _, r := range rows {
+		if !r.Synthetic {
+			continue
+		}
+		synRows++
+		if r.Vendor != "seed渠道" {
+			t.Errorf("合成行 %q 挂到了 %q，应当挂声明它的渠道", r.Name, r.Vendor)
+		}
+	}
+	if synRows != len(syn) {
+		t.Errorf("库里的合成行=%d 而 API 给出 %d —— 展示与入库的口径必须一致", synRows, len(syn))
+	}
+	if stats.Synthetic != len(syn) {
+		t.Errorf("stats.Synthetic=%d want %d", stats.Synthetic, len(syn))
+	}
+	// 具体到名字：上游条目不是合成，渠道裸名是合成。
+	if r, ok := byName["workbuddy/glm-5.2"]; !ok || r.Synthetic {
+		t.Errorf("上游条目 workbuddy/glm-5.2 不该是合成行: %+v", r)
+	}
+	if r, ok := byName["glm-5.2"]; !ok || !r.Synthetic {
+		t.Errorf("渠道声明的裸名 glm-5.2 应是合成行: %+v", r)
+	}
+	// 纯函数边界（直接调 store 那一层）：known 里已有的一律不合成。
+	if direct := store.SyntheticCatalogEntries([]string{"a"}, []string{"a", "b"}, nil); len(direct) != 1 ||
+		direct[0].Name != "b" || !direct[0].Synthetic || direct[0].Vendor != store.CatalogVendorUnknown {
+		t.Errorf("合成行 API 边界错误: %+v", direct)
+	}
+
+	// ④ 幂等：同样的输入再 seed 一次，一行都不该新增。
+	stats2, err := h.SeedModelCatalog()
+	if err != nil {
+		t.Fatalf("二次 seed 失败: %v", err)
+	}
+	if stats2.Vendors != 0 || stats2.Models != 0 {
+		t.Errorf("二次 seed 新增了 vendors=%d models=%d —— T11 的『二次启动不重复 seed』会破",
+			stats2.Vendors, stats2.Models)
+	}
+	again, err := store.CountCatalogModels()
+	if err != nil {
+		t.Fatalf("二次计数失败: %v", err)
+	}
+	if again != got {
+		t.Errorf("二次 seed 后 models 行数从 %d 变成 %d", got, again)
+	}
+
+	t.Logf("T09 实测：/v1/models 可见 chips 基数=%d（workbuddy 16 + codearts 7 + 渠道公开名 3）；"+
+		"models 行数=%d；vendors 行数=%d；其中合成行=%d", len(ids), got, vendors, synRows)
 }

@@ -9,7 +9,7 @@
 //  3. 引入 cgo 驱动   → 本机 CI 全绿，发布时才发现在目标平台编不出来
 //  4. allModels 漏登记 → 同上第 1 条，但成因是「加了 struct 忘了加一行」
 //  5. PRAGMA 没生效   → busy_timeout=0 表现为随机的 database is locked，
-//                        日志里看不出规律（这是最难查的一类）
+//     日志里看不出规律（这是最难查的一类）
 //
 // 每条都写成「坏掉就一定红」的形式，而不是「跑一遍看有没有 panic」。
 package store
@@ -19,6 +19,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -283,12 +284,37 @@ func TestPragmasAreEffective(t *testing.T) {
 // 「补默认值」的实现很容易写成「设默认值」（后写覆盖前写）。后者在正常启动时
 // 看不出任何区别，只在运维真的需要关掉 WAL（网络盘）时才炸 —— 而那时
 // 表现是「配置不生效」，没人会想到是网关把参数覆盖了。
+//
+// # 断言为什么绑「解码后的语义」而不是字面量子串（2026-10-26 修）
+//
+// buildDSN 末尾是 url.Values.Encode()，它会把 pragma 里的括号转义成 %28/%29，
+// 于是 DSN 里出现的是 `_pragma=busy_timeout%2830000%29`。此前这里直接断言字面量
+// `busy_timeout(30000)`，把**正确实现**判成了红。
+//
+// 哪边才是规格？驱动源码给了唯一答案 —— glebarez/go-sqlite@v1.21.2/sqlite.go:873-891：
+//
+//	q, err := url.ParseQuery(query)      // DSN 的查询串**先解码**
+//	...
+//	for _, v := range q["_pragma"] {     // 再逐条当 PRAGMA 执行
+//	        cmd := "pragma " + v
+//
+// 即：URL 编码是**传输形式**，解码后的文本才是 pragma 语句。所以规格是
+// 「解码后必须是 busy_timeout(30000)」，不是「字面量必须原样出现在 DSN 里」。
+//
+// 旁证两条：
+//
+//	· end-to-end：TestPragmasAreEffective 回查数据库，当前 DSN 的 WAL 与
+//	  busy_timeout=30000 都**真的生效**（若编码不能被解码，它不可能绿）；
+//	· 驱动自己的测试也用编码形式：go-sqlite/all_test.go:1209
+//	  `?_pragma=busy_timeout%3d50000`。
+//
+// 结论：改**断言**，不改 buildDSN —— 编码不是缺陷，是 url.Values 的标准输出。
 func TestBuildDSNRespectsCaller(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
-		want []string // 都必须出现在结果里
-		deny []string // 都不许出现
+		want []string // 解码后必须出现
+		deny []string // 解码后不许出现
 	}{
 		{
 			name: "空查询串补全默认值",
@@ -298,13 +324,13 @@ func TestBuildDSNRespectsCaller(t *testing.T) {
 		{
 			name: "调用方指定 journal_mode 时不追加",
 			in:   "/tmp/gw.db?_pragma=journal_mode(DELETE)",
-			want: []string{"journal_mode%28DELETE%29", "busy_timeout(30000)", "_txlock=immediate"},
-			deny: []string{"journal_mode%28WAL%29"},
+			want: []string{"journal_mode(DELETE)", "busy_timeout(30000)", "_txlock=immediate"},
+			deny: []string{"journal_mode(WAL)"},
 		},
 		{
 			name: "等号写法也认（不重复追加）",
 			in:   "/tmp/gw.db?_pragma=journal_mode%3DDELETE",
-			want: []string{"_txlock=immediate"},
+			want: []string{"journal_mode=DELETE", "_txlock=immediate"},
 			deny: []string{"journal_mode(WAL)"},
 		},
 		{
@@ -322,19 +348,50 @@ func TestBuildDSNRespectsCaller(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := buildDSN(c.in)
+			// 断言绑语义：把 DSN 还原成驱动**实际执行**的文本（见 decodedDSN）。
+			decoded := decodedDSN(got)
 			for _, w := range c.want {
-				if !strings.Contains(got, w) {
-					t.Errorf("buildDSN(%q) = %q\n缺少 %q", c.in, got, w)
+				if !strings.Contains(decoded, w) {
+					t.Errorf("buildDSN(%q) = %q\n解码后 = %q\n缺少 %q", c.in, got, decoded, w)
 				}
 			}
 			for _, d := range c.deny {
-				if strings.Contains(got, d) {
-					t.Errorf("buildDSN(%q) = %q\n不该出现 %q（调用方显式给的参数被覆盖了）",
-						c.in, got, d)
+				if strings.Contains(decoded, d) {
+					t.Errorf("buildDSN(%q) = %q\n解码后 = %q\n不该出现 %q（调用方显式给的参数被覆盖了）",
+						c.in, got, decoded, d)
 				}
 			}
 		})
 	}
+}
+
+// decodedDSN 把 buildDSN 的输出还原成**驱动实际执行**的文本：
+//
+//	每个 `_pragma` 的值单独一行（驱动执行的就是 `pragma <值>`）；
+//	其余查询参数列成 k=v。
+//
+// 这样断言就绑在语义上，而不是绑在 URL 编码的字面形式上 —— 后者是
+// url.Values.Encode 的实现细节（见 TestBuildDSNRespectsCaller 的注释）。
+func decodedDSN(dsn string) string {
+	_, rawQuery, _ := strings.Cut(dsn, "?")
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return dsn // 解析不了就把原文给出去，让断言以最直白的方式失败
+	}
+	var b strings.Builder
+	for _, p := range q["_pragma"] {
+		b.WriteString(p)
+		b.WriteString("\n")
+	}
+	for k, vs := range q {
+		if k == "_pragma" {
+			continue
+		}
+		for _, v := range vs {
+			b.WriteString(k + "=" + v + "\n")
+		}
+	}
+	return b.String()
 }
 
 // TestOpenCreatesParentDir 父目录不存在时自动创建。
@@ -388,7 +445,7 @@ func TestMigrateWithoutOpen(t *testing.T) {
 		t.Fatal("未 Open 时 Migrate 应返回错误")
 	}
 	if !errors.Is(err, ErrNotOpen) {
-		t.Fatalf("错误 = %v，want errors.Is(err, ErrNotOpen) —— " +
+		t.Fatalf("错误 = %v，want errors.Is(err, ErrNotOpen) —— "+
 			"上层要能用 errors.Is 判断「数据库没初始化」并给出可操作的提示", err)
 	}
 }

@@ -29,12 +29,14 @@
 package admin
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,6 +57,7 @@ import (
 	"workbuddy2api/internal/oauth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/scheduler"
+	"workbuddy2api/internal/store"
 )
 
 // Config 管理台依赖。
@@ -289,6 +292,27 @@ type Config struct {
 	// nil = 本部署不自动开浏览器（无 GUI 服务器，或配置里关了）——
 	// 此时行为与改造前逐字节一致：只回 auth_url，让用户自己复制。
 	OpenAuthURL func(rawURL string) (browser string, err error)
+
+	// Audit 审计写入回调（Wave1-T07）。**每一次管理面写操作**（POST/PUT/PATCH/
+	// DELETE）落一条 audit_log：谁、什么时候、对哪条路由、做了什么动作、结果如何。
+	//
+	// # 为什么是注入而不是本包直接写库
+	//
+	// 与 ChannelProvider / OpenAuthURL 同一条理由：admin 只该知道「有这么一件事
+	// 要发生」，不该知道它落到哪个库、什么时候写。注入让「不写库」成为默认
+	// （nil），测试因此不需要真库；而 store 未打开（store.ErrNotOpen）时怎么处理
+	// 也由装配层决定 —— 审计写失败**不许**影响主流程（见 store.AppendAudit）。
+	//
+	// nil = 不记录：测试路径与尚未接线的部署，行为与改造前完全一致。
+	//
+	// # 装配（Wave 1 收口，T11）
+	//
+	//	cfg.Audit = store.AppendAudit
+	//
+	// 一行即可：store.AuditLog 与本回调同型，中间**不需要**适配层 —— 少一层
+	// 字段映射就少一处「漏赋值一个字段」的机会，而漏字段的审计是静默错的
+	// （行数对了、内容错了，行数判据看不出来）。
+	Audit func(store.AuditLog) error
 }
 
 // SetOnAPIKeyRotated 注入管理钥匙轮换后的通知（装配层在 handler 构造完成后调用，
@@ -714,7 +738,341 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	h.mux.ServeHTTP(w, r)
+	h.dispatch(w, r, p)
+}
+
+// ---------------------------------------------------------------------------
+// 审计：把管理面的**写操作**落一行 audit_log（Wave1-T07）
+// ---------------------------------------------------------------------------
+//
+// 语义照行为重写自 hyxapi/middleware/audit.go:101-172（beginAdminAudit /
+// finishAdminAudit）：只借判断，不抄代码；本仓的挂钩点是自己的门禁。
+//
+// # 为什么挂在 ServeHTTP 里，而不是每个 handler 自己记
+//
+// 与 hyxapi 把兜底审计内聚进鉴权链路同一个理由：**新增接口自动留痕**。
+// 若让每个 handler 自己调一次，漏掉的那一个不会报错、不会有测试红 —— 它只是
+// 「这条操作不在审计里」，而这正是审计最不能有的失效方式（要等到真出事、去查
+// 的时候才发现那一条根本不存在）。
+//
+// # 挂钩点在门禁**之后**（这一点是判据，不是实现细节）
+//
+// 走到 dispatch 的请求已经过了 principalOf（身份）与 canAccess（角色）两道门，
+// 所以落下来的每一条都带**可信的 actor**。挂在门禁之前会把 401/403 也记成
+// 「某人做了某事」，而那时 principal 是零值 —— 审计里出现空 actor 比没有这一条
+// 更糟（它看起来像一条事实，实际什么都没说明）。
+//
+// # 为什么「是否成功」要看响应体，而不只看状态码
+//
+// 本仓的成功判据在**响应体**里（writeJSON 的 "ok": true），失败同时体现为
+// 非 2xx 与 {"error": ...}。只看状态码会漏掉「200 但 ok:false」这一类；
+// hyxapi 的 auditResponseSuccess 出于同一原因优先解析响应字段（这里换成本仓
+// 的 ok 字段名）。
+//
+// # 只对写方法生效
+//
+// GET/HEAD/OPTIONS 是读操作：记进审计表会让「谁改了什么」淹没在访问记录里。
+// 副作用是好的：只包写方法的 ResponseWriter，静态资源与流式 GET 一概不经过它。
+
+// auditBodyLimit 响应体的**采样**上限（判成功只需看开头）。
+//
+// 对齐 hyxapi 的 auditResponseWriter.maxSize = 64 KiB。超过就不再看体：
+// 审计不允许为了记录而把大响应留在内存里。
+const auditBodyLimit = 64 * 1024
+
+// 审计列宽上限（对齐 models.go 的 AuditLog 标签）。
+//
+// ⚠ 这些数必须与 models.go 一致；不一致在 SQLite 上**看不出来**（SQLite 不强制
+// varchar 长度），换 MySQL 才会在写入时截断/报错 —— 所以这里显式截断，把
+// 「超长」变成可预期的行为，而不是依赖某个驱动的宽容度。
+const (
+	auditActorMax     = 64  // Actor      varchar(64)
+	auditAuthMax      = 24  // AuthMethod varchar(24)
+	auditCategoryMax  = 24  // Category   varchar(24)
+	auditActionMax    = 128 // Action     varchar(128)
+	auditIPMax        = 64  // IP         varchar(64)
+	auditRouteMax     = 255 // Route      varchar(255)
+	auditUserAgentMax = 512 // UserAgent  varchar(512)
+)
+
+// auditWriteMethod 报告方法是否属于「会改状态」的那一类（hyxapi 同款判据）。
+func auditWriteMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+// auditRouteActions 路由模板 → 动作名（对齐 hyxapi 的 auditRouteActions）。
+//
+// # 为什么不能把路径原样当 action
+//
+// 路径里有**参数**（/admin/accounts/{uid}/enable 的 uid）：原样进表，同一类操作
+// 会显示成 N 条互不相干的动作，审计页无法按动作筛选。
+//
+// # 未登记的路由回落 "generic" —— 这是**留痕**，不是漏记
+//
+// 上游经 gateway.AdminExt 自注册的端点（mountUpstreamRoutes 挂）在编译期不可能
+// 被登记进来；回落保证它们照样有一条记录，只是动作名不精细。hyxapi 同样回落
+// generic，并把 method/route 放进参数里（本仓不存参数：method/route 已经在列上）。
+//
+// ⚠ 这张表**只登记写方法**：读端点在 dispatch 里根本不会被审计，登记它们只会让
+// 后来的人以为读操作也会留痕。
+//
+// ⚠ POST /admin/channels/reveal 是个「只读的写方法」（POST 但只回明文 key）：
+// 它**照样留痕**，而且这是刻意的 —— 「谁把明文 key 取走了一次」正是最该有
+// 记录的一类动作。
+var auditRouteActions = map[string]string{
+	// 账号池
+	"POST /admin/accounts/reload":               "account.reload",
+	"POST /admin/accounts/import":               "account.import",
+	"POST /admin/accounts/quota/refresh":        "account.quota.refresh",
+	"POST /admin/accounts/checkin/all":          "account.checkin.all",
+	"POST /admin/accounts/{uid}/enable":         "account.enable",
+	"POST /admin/accounts/{uid}/disable":        "account.disable",
+	"POST /admin/accounts/{uid}/cooldown/clear": "account.cooldown.clear",
+	"DELETE /admin/accounts/{uid}":              "account.delete",
+	// 登录（category 由路由前导判成 login）
+	"POST /admin/login/start": "login.start",
+	"POST /admin/login/poll":  "login.poll",
+	"POST /admin/login/open":  "login.open",
+	// 设置与模型
+	"PUT /admin/settings":        "settings.update",
+	"POST /admin/models/refresh": "model.refresh",
+	// 渠道
+	"POST /admin/channels":             "channel.save",
+	"POST /admin/channels/discover":    "channel.discover",
+	"POST /admin/channels/delete":      "channel.delete",
+	"POST /admin/channels/status":      "channel.status",
+	"POST /admin/channels/reveal":      "channel.reveal",
+	"POST /admin/channels/keys/add":    "channel.key.add",
+	"POST /admin/channels/keys/status": "channel.key.status",
+	"POST /admin/channels/keys/delete": "channel.key.delete",
+	// 分组
+	"POST /admin/groups":        "group.create",
+	"POST /admin/groups/update": "group.update",
+	"POST /admin/groups/delete": "group.delete",
+	"POST /admin/groups/prune":  "group.prune",
+	// 管理钥匙 / 管理令牌
+	"POST /admin/apikeys":                "apikey.create",
+	"POST /admin/apikeys/toggle":         "apikey.toggle",
+	"POST /admin/apikeys/delete":         "apikey.delete",
+	"POST /admin/apikeys/reset":          "apikey.reset",
+	"POST /admin/apikeys/update":         "apikey.update",
+	"POST /admin/apikeys/rotate-admin":   "admin_token.rotate",
+	"POST /admin/apikeys/rotate-api-key": "apikey.rotate",
+}
+
+// auditRouteFor 把请求路径归一到**路由模板**，并给出动作名。
+//
+// # 为什么不用 net/http 的 Request.Pattern
+//
+// 那个字段（ServeMux 的匹配结果）是 **Go 1.23** 才进标准库的，而本模块的 go
+// 指令是 1.22.5 ⇒ go vet 的 stdversion 分析器会报「requires go1.23 or later」，
+// 于是 go test 直接红。改用这张显式的模板表做同一件事：行为可见、可测，且不
+// 依赖工具链版本（本仓的 GOOS/GOARCH 与工具链都要能随便换）。
+//
+// 归一的收益是两条：① 审计页能按动作/路由聚合，而不是每个 uid 一条；
+// ② 表里不出现内部标识符（models.go 要求 Route 存路由模板）。
+func auditRouteFor(method, rawPath string) (route, action string) {
+	if a, ok := auditRouteActions[method+" "+rawPath]; ok {
+		return rawPath, a
+	}
+	want := strings.Split(rawPath, "/")
+	for pattern, a := range auditRouteActions {
+		pm, pp, ok := strings.Cut(pattern, " ")
+		if !ok || pm != method {
+			continue
+		}
+		got := strings.Split(pp, "/")
+		if len(got) != len(want) {
+			continue
+		}
+		match := true
+		for i := range got {
+			if strings.HasPrefix(got[i], "{") && strings.HasSuffix(got[i], "}") {
+				continue
+			}
+			if got[i] != want[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return pp, a
+		}
+	}
+	// 未登记（含上游自注册端点）：路径原样进表 —— 它**不含 query**
+	// （r.URL.Path 里没有 ?a=b），所以不违反「query 不进审计表」。
+	return rawPath, "generic"
+}
+
+// auditRecorder 记录状态码与响应体开头，供事后判定本次写操作是否成功。
+//
+// ⚠ 只在写方法上包一层（见 dispatch）：静态资源、SSE、文件下载都是 GET，
+// 一概不经过它。
+//
+// Unwrap 让 http.ResponseController（Flush / Hijack / SetWriteDeadline）能穿透
+// 到真正的 writer —— 缺了它，被包的 handler 一旦想 Flush 就会拿到
+// "feature not supported"（Go 1.20+ 靠 Unwrap 识别包装层）。
+type auditRecorder struct {
+	http.ResponseWriter
+	status int
+	body   bytes.Buffer
+}
+
+func (a *auditRecorder) WriteHeader(code int) {
+	if a.status == 0 {
+		a.status = code
+	}
+	a.ResponseWriter.WriteHeader(code)
+}
+
+func (a *auditRecorder) Write(b []byte) (int, error) {
+	if a.status == 0 {
+		a.status = http.StatusOK
+	}
+	if room := auditBodyLimit - a.body.Len(); room > 0 {
+		if room > len(b) {
+			room = len(b)
+		}
+		a.body.Write(b[:room])
+	}
+	return a.ResponseWriter.Write(b)
+}
+
+// Unwrap 见上（签名必须逐字如此，http.ResponseController 才认）。
+func (a *auditRecorder) Unwrap() http.ResponseWriter { return a.ResponseWriter }
+
+// auditSucceeded 依据状态码与响应体判定是否成功。
+//
+//	① 状态码 >= 400 ⇒ 失败（本仓所有错误路径都带非 2xx 状态码）
+//	② 响应体是 JSON 对象且**显式**带 ok ⇒ 以它为准（200 也可能是 ok:false）
+//	③ 其余 ⇒ 按状态码（< 400 即成功）
+//
+// ⚠ 只有「字段存在」才采用它：把缺省值当 false 会把 204 / 空响应记成失败，
+// 把缺省值当 true 会让 ok:false 记成成功 —— 两种都让审计说谎。
+func auditSucceeded(status int, body []byte) bool {
+	if status >= 400 {
+		return false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		var resp struct {
+			OK *bool `json:"ok"`
+		}
+		if err := json.Unmarshal(trimmed, &resp); err == nil && resp.OK != nil {
+			return *resp.OK
+		}
+	}
+	return true
+}
+
+// auditClientIP 审计用的客户端地址（**不含端口**）。
+//
+// ⚠ 刻意**不**读 X-Forwarded-For / X-Real-IP：本仓的立场是那些头只说明
+// 「链路上有代理」，不构成可信来源（见 forwarded 的注释）。往审计里写一个
+// 客户端可以任意伪造的 IP，比写「上一跳」更糟 —— 前者会被后续排查当成事实。
+func auditClientIP(r *http.Request) string {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return truncateRunes(host, auditIPMax)
+}
+
+// auditActor 审计里的「谁」。
+//
+// 令牌来源没有账号名（KindToken 不带 User），但 actor **不能为空**：空 actor 让
+// 「谁改的」变成不可回答，而审计页正是靠它定位操作人。所以给机器凭据一个明确的
+// 名字，而不是留空或写 unknown —— 后者会混进「真的没认出身份」那一类。
+func auditActor(principal account.Principal) string {
+	actor := principal.Username
+	if actor == "" {
+		if principal.Kind == account.KindToken {
+			actor = "admin_token"
+		} else {
+			actor = "unknown"
+		}
+	}
+	return truncateRunes(actor, auditActorMax)
+}
+
+// truncateRunes 按**字符**（不是字节）截断到列宽。
+//
+// ⚠ 按字节截会把一个多字节汉字切成两半 ⇒ 存进去是非法 UTF-8，导出与审计页
+// 读它时表现为乱码，而不是「被截短的文本」（后者至少可读）。
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// dispatch 执行路由，并在写操作上落一条审计。
+//
+// 它是 ServeHTTP 唯一的出口，且只在门禁全部通过之后被调用 —— 所以这里的
+// principal 是可信身份（见本节顶部「挂钩点在门禁之后」）。
+func (h *Handler) dispatch(w http.ResponseWriter, r *http.Request, principal account.Principal) {
+	if h.cfg.Audit == nil || !auditWriteMethod(r.Method) {
+		h.mux.ServeHTTP(w, r)
+		return
+	}
+	rec := &auditRecorder{ResponseWriter: w}
+	defer func() {
+		if panicked := recover(); panicked != nil {
+			// handler 崩了：这次写操作**确实可能改了一半状态**，正是最该留痕的
+			// 时候。不记它等于「出事的那一次没有审计」——恰好是审计最该回答的问题。
+			if rec.status == 0 {
+				rec.status = http.StatusInternalServerError
+			}
+			h.recordAudit(r, principal, rec)
+			panic(panicked) // 不吞异常：原样交回 net/http（它负责 500 与日志）。
+		}
+		h.recordAudit(r, principal, rec)
+	}()
+	h.mux.ServeHTTP(rec, r)
+}
+
+// recordAudit 组装并投递一条审计。
+//
+// 写失败**只记日志**（审计不许反过来把主流程弄挂）：与 store.AppendLog 的调用
+// 纪律一致，也与 hyxapi 把审计放在鉴权链路里兜底、失败不改变响应的做法一致。
+func (h *Handler) recordAudit(r *http.Request, principal account.Principal, rec *auditRecorder) {
+	status := rec.status
+	if status == 0 {
+		// handler 什么都没写就返回了：net/http 会补 200。
+		status = http.StatusOK
+	}
+	route, action := auditRouteFor(r.Method, r.URL.Path)
+	category := store.AuditCategoryOperation
+	if strings.HasPrefix(route, "/admin/login/") {
+		category = store.AuditCategoryLogin
+	}
+	err := h.cfg.Audit(store.AuditLog{
+		At:         time.Now().Unix(),
+		Actor:      auditActor(principal),
+		AuthMethod: truncateRunes(principal.Kind, auditAuthMax),
+		Category:   truncateRunes(category, auditCategoryMax),
+		Action:     truncateRunes(action, auditActionMax),
+		Method:     truncateRunes(r.Method, 16),
+		Route:      truncateRunes(route, auditRouteMax),
+		Status:     status,
+		Success:    auditSucceeded(status, rec.body.Bytes()),
+		IP:         auditClientIP(r),
+		UserAgent:  truncateRunes(r.UserAgent(), auditUserAgentMax),
+		// Params 刻意留空：审计不存请求体 / 参数 / query（见 models.go 的
+		// AuditLog 注释）—— 「顺手存一点」会让这张表变成需要同等强度保护的副本。
+	})
+	if err != nil {
+		log.Printf("admin: 审计写入失败（本次请求结果不受影响）: %v", err)
+	}
 }
 
 // canAccess 门禁的角色判据：**只有管理员放行**。
