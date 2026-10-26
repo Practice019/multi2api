@@ -28,7 +28,7 @@
 // 用法：
 //   AUDIT_URL=http://127.0.0.1:7897/ui node audit_contrast_pages.js
 //   可选：AUDIT_THEME=light|dark 只跑一套；AUDIT_MIN=4.5 改阈值
-//         AUDIT_PAGES=/ui,/ui/status,/ui/channels,/ui/models 改扫描清单（默认就是这四个）
+//         AUDIT_PAGES=/ui,/ui/status,/ui/channels,/ui/models,/ui/tokens 改扫描清单（默认就是这五个）
 // 退出码：有任一条低于阈值 ⇒ 1（可直接进 CI / 当交付门禁）。
 'use strict';
 const path = require('path');
@@ -38,9 +38,15 @@ const LIB = require('./lib_contrast_audit.js');
 const OUTDIR = path.resolve(__dirname, '..', '..', '.task', 'maximalism-v3', 'contrast');
 const ONLY = process.env.AUDIT_THEME || '';
 const MIN = Number(process.env.AUDIT_MIN || 4.5);
-// 默认四个文档：控制台外壳 + 三个 iframe 页（后三个此前无人看守）
-const PAGES = String(process.env.AUDIT_PAGES || '/ui,/ui/status,/ui/channels,/ui/models')
+// 默认**五个**文档：控制台外壳 + 四个 iframe 页（status/channels/models/tokens ——
+// 后四个都是独立 document，此前一个都没被扫过）
+const PAGES = String(process.env.AUDIT_PAGES || '/ui,/ui/status,/ui/channels,/ui/models,/ui/tokens')
   .split(',').map((s) => s.trim()).filter(Boolean);
+
+// TIER_EXPR 只量「阈值三档样本」那三个 span —— 与 lib_contrast_audit.js **同一套数学**
+// （alpha 合成 + WCAG 相对亮度），但刻意不复用 __audit：__audit 只回**低于阈值**的元素，
+// 而这里要的是"三档各自被量到"的**正向**证据（每档一条记录），哪怕它是达标的。
+const TIER_EXPR = "(function(){function parse(s){var m=String(s).match(/^rgba?\\(([^)]+)\\)$/);if(!m)return null;var p=m[1].split(/[,\\s\\/]+/).filter(Boolean).map(Number);return {r:p[0],g:p[1],b:p[2],a:p.length>3?p[3]:1};}function over(f,b){return {r:f.r*f.a+b.r*(1-f.a),g:f.g*f.a+b.g*(1-f.a),b:f.b*f.a+b.b*(1-f.a),a:1};}function lum(c){function f(v){v=v/255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);}return 0.2126*f(c.r)+0.7152*f(c.g)+0.0722*f(c.b);}function ratio(a,b){var l1=lum(a),l2=lum(b),hi=Math.max(l1,l2),lo=Math.min(l1,l2);return (hi+0.05)/(lo+0.05);}function eff(el){var st=[],p=el,g=0;while(p&&g++<30){st.push(p);p=p.parentElement;}st.reverse();var base={r:255,g:255,b:255,a:1};for(var i=0;i<st.length;i++){var c=parse(getComputedStyle(st[i]).backgroundColor);if(c&&c.a>0)base=over(c,base);}return base;}var want=['normal','warn','crit'];var cards=document.querySelectorAll('#tierSamples .c');var out=[];for(var i=0;i<cards.length;i++){var sp=cards[i].querySelector('.v span');if(!sp)continue;var cs=getComputedStyle(sp);var bg=eff(sp);var fg=over(parse(cs.color),bg);var size=parseFloat(cs.fontSize)||13;var weight=parseInt(cs.fontWeight,10)||400;var large=size>=24||(size>=18.66&&weight>=700);out.push({label:want[i]||('tier'+i),cr:Math.round(ratio(fg,bg)*100)/100,need:large?3:4.5,fg:'rgb('+Math.round(fg.r)+','+Math.round(fg.g)+','+Math.round(fg.b)+')',bg:'rgb('+Math.round(bg.r)+','+Math.round(bg.g)+','+Math.round(bg.b)+')',text:(sp.textContent||'').trim(),sel:'#tierSamples .c:nth-child('+(i+2)+') .v span',size:size,weight:weight});}return JSON.stringify(out);})()";
 
 // setTheme 把主题写进 localStorage，供页面自己的启动脚本读取。
 // ⚠ 必须在**导航之前**执行：三个 iframe 页在 <head> 里同步读它。
@@ -113,6 +119,31 @@ async function main() {
         await sleep(900);
         // 自证"量的是对的主题"：把实际生效的 data-theme 打出来（防"测错主题"的假绿）
         const applied = await ev('document.documentElement.getAttribute("data-theme")');
+        // ── 阈值三档：**确定性**地各渲染一份再逐档量（T76）──────────────
+        // 为什么不能只靠整页扫描：警戒/严重两档只有在指标真的落进 75-90% / >=90% 时
+        // 才进 DOM，而指标是随机的 ⇒ 「0 处」可能只是运气（2026-10-26 那条 1.93:1
+        // 就是这么连续漏过好几轮的）。所以这里先调页面上的**生产 no-op** 入口
+        // （webui-status.html 的 window.__wb2apiStatusTestRender）把三档都渲染出来。
+        if (page === '/ui/status') {
+          const rendered = await ev('!!(window.__wb2apiStatusTestRender && window.__wb2apiStatusTestRender())');
+          await sleep(500);
+          if (!rendered) {
+            console.log('  ⚠ [' + theme + '] 三档样本没渲染出来（__wb2apiStatusTestRender 不可用）—— 本页结论不可信');
+          } else {
+            const tiers = JSON.parse(await ev(TIER_EXPR));
+            if (tiers.length !== 3) {
+              console.log('  ⚠ [' + theme + '] 只量到 ' + tiers.length + ' 档（应为 3）—— 本页结论不可信');
+            }
+            for (const tk of tiers) {
+              const verdict = tk.cr >= tk.need ? 'PASS' : 'FAIL';
+              console.log('  [tier/' + theme + '] ' + String(tk.label).padEnd(6) + ' ' + tk.cr + ':1 (需 ' + tk.need + ') fg=' + tk.fg + ' bg=' + tk.bg + ' size=' + tk.size + '/' + tk.weight + ' "' + tk.text + '" → ' + verdict);
+              if (tk.cr < tk.need) {
+                report.push({ page: page, theme: theme, panel: 'tier:' + tk.label, sel: tk.sel, text: tk.text, fg: tk.fg, bg: tk.bg, cr: tk.cr, need: tk.need, size: tk.size, weight: tk.weight });
+                bump(page, theme, null, 1);
+              }
+            }
+          }
+        }
         await ev('window.__audit = ' + LIB.source + ';');
         const rows = JSON.parse(await ev('JSON.stringify(window.__audit({min: ' + MIN + '}))'));
         for (const r of rows) report.push(Object.assign({ page: page, theme: theme, panel: '(whole document)' }, r));

@@ -1671,9 +1671,13 @@ header h1{letter-spacing:0}
 
   // minibar 三档阈值进度条。
   //
-  // ⚠ 阈值与色值**硬编码**（不从 CSS 变量取）：红/黄是语义色，必须在深浅
-  //   两套主题下完全一致；而「正常」档用 var(--fg) 跟随主题 —— 正常态本来就
-  //   该融入页面，不该是一个固定的灰。
+  // ⚠ 三档一律走**主题语义变量**（2026-10-26 修：此前警戒/严重两档写死 #d69e2e/#e53e3e）。
+  //   旧注释的理由是「红/黄是语义色，必须在深浅两套主题下完全一致」—— 这条理由是**错的**：
+  //   写死色换来的「一致」是**在同一个错误的底色上一致**。实测浅色下 #d69e2e 压在
+  //   --panel2(#FFE3BE) 上只有 **1.93:1**（大字号门槛 3:1），84.0% 这行数字读不清；
+  //   而 theme-max 的 --warn/--err 是按各自主题的底色挑的（浅 #A83600≈6.1:1 / #C6004B≈5.5:1，
+  //   深 #FFD400 / #FF5470），两套都达标。⇒ 语义色 = 变量，不是常量。
+  //   「正常」档继续用 var(--fg)：正常态本该融入页面，不该是一个固定的灰。
   // ⚠ 非零至少 1% 宽：0.4% 的条宽 0 像素，看起来像「没在采集」。
   function minibar(pct) {
     var p = numOf(pct);
@@ -1682,7 +1686,7 @@ header h1{letter-spacing:0}
     // 三档阈值 75/90（PLAN §0.5 = hyxapi/controller/system_status.go:96-102）。
     // ⚠ 判据是**闭区间下界**，与后端 sysmon.PctVerdict 逐字一致：
     //   两处一旦用不同的比较符（> vs >=），90.0 这个采样点上颜色会分叉。
-    var color = p >= WARN_PCT ? (p >= CRIT_PCT ? '#e53e3e' : '#d69e2e') : 'var(--fg)';
+    var color = p >= WARN_PCT ? (p >= CRIT_PCT ? 'var(--err)' : 'var(--warn)') : 'var(--fg)';
     var w = Math.max(p, p > 0 ? 1 : 0);
     return '<div class="minibar"><i style="width:' + w + '%;background:' + color + '"></i></div>';
   }
@@ -1711,7 +1715,9 @@ header h1{letter-spacing:0}
     var hasVal = p !== undefined;
     var shown = hasVal ? p : 0;
     var clamped = Math.max(0, Math.min(shown, 100));
-    var color = clamped >= WARN_PCT ? (clamped >= CRIT_PCT ? '#e53e3e' : '#d69e2e') : 'var(--fg)';
+    // ⚠ 这个 color 只用于**文字**（百分比那行）⇒ 一律语义变量（见 minibar 上方的长注释）。
+    //   条填充在 minibar 内部另算，两者同源不同用途，所以分开写而不是共用一个常量。
+    var color = clamped >= WARN_PCT ? (clamped >= CRIT_PCT ? 'var(--err)' : 'var(--warn)') : 'var(--fg)';
     var valueHtml = hasVal
       ? '<span style="color:' + color + '">' + shown.toFixed(1) + '%</span>'
       : '<span class="dim">-</span>';
@@ -1723,6 +1729,33 @@ header h1{letter-spacing:0}
       + minibar(hasVal ? clamped : 0)
       + '</div>';
   }
+
+  // ── 测试驱动入口（**生产 no-op**）──────────────────────────────────────
+  //
+  // # 为什么需要它
+  // 三档配色里，警戒/严重两档只有在**指标真的落进 75-90% / >=90%** 时才进 DOM。
+  // 而指标是随机的 ⇒ 「这次扫到 0 处」可能只是**运气**：2026-10-26 那条
+  // 1.93:1 的缺陷就是这么连续漏过好几轮的（门禁全绿、缺陷还在）。
+  // 所以给门禁一个**确定性**入口：三档各渲染一份样本，再逐档量。
+  //
+  // ⚠ 生产路径**永远不会调用它**：没有任何地方自动调它，它只是挂在 window 上；
+  //   只有 tests/frontend/audit_contrast_pages.js 扫 /ui/status 时显式调一次。
+  //   换句话说：不点这个函数，页面行为与加它之前**逐字节一致**。
+  window.__wb2apiStatusTestRender = function () {
+    try {
+      var host = document.getElementById('tierSamples');
+      if (!host) {
+        host = document.createElement('section');
+        host.id = 'tierSamples';
+        (document.querySelector('main') || document.body).appendChild(host);
+      }
+      host.innerHTML = '<h2>阈值三档（测试样本）</h2>'
+        + resCard('tier-normal', 10, '阈值下方')
+        + resCard('tier-warn', 84, '警戒带')
+        + resCard('tier-crit', 95, '严重带');
+      return true;
+    } catch (e) { return false; }
+  };
 
   // kvGrid：固定几项的键值对（号池、缓存）用这个，不用表格。
   //

@@ -47,6 +47,7 @@ const PAGES = [
   'internal/server/webui-groups.html',
   'internal/server/webui-status.html',
   'internal/server/webui-models.html',
+  'internal/server/webui-tokens.html',
 ];
 
 let fail = 0;
@@ -130,7 +131,7 @@ try {
   for (const rel of PAGES) write(rel, snap.get(rel));
   let restored = true;
   for (const rel of PAGES) if (read(rel) !== snap.get(rel)) { restored = false; console.log('  FAIL ' + rel + '：未能原样还原！'); }
-  ok(restored, '测试结束后 6 个页面已按字节原样还原');
+  ok(restored, '测试结束后 ' + PAGES.length + ' 个页面已按字节原样还原');
 }
 console.log(fail === 0 ? '\n=== 守卫通过（' + (PAGES.length) + ' 页）===' : '\n=== ' + fail + ' 项失败 ===');
 process.exit(fail ? 1 : 0);

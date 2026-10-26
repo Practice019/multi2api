@@ -20,12 +20,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/store"
 )
 
 // ── 测试底座 ───────────────────────────────────────────────────────────────
@@ -831,4 +836,426 @@ func parityIDs(t *testing.T, h *Handler, query string) []string {
 		}
 	}
 	return ids
+}
+
+// ── T69：字段登记表与前端提交清单的防漂移守卫 ──────────────────────────────
+
+// webuiChannelFormSubmitFields 从**前端源码**里解析出保存表单会提交的键。
+//
+// # 为什么直接解析 HTML（而不是只比对一个 Go 切片）
+//
+// 只比对 Go 切片的话，"前端加了字段、忘了同步切片、也忘了登记"这条链仍然全绿，
+// 而它正是用户会撞到的那条（保存 400，界面上看不出为什么）。直接读 saveDrawer
+// 的代码，等于把判据钉在**真正会发出的那个请求**上。
+//
+// ⚠ 函数名/形态变了会让它解析出空集 ⇒ 本函数对这些情况**显式报错**（见调用方），
+//
+//	不允许"什么都没查到 = 通过"。
+func webuiChannelFormSubmitFields(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "server", "webui-channels.html"))
+	if err != nil {
+		t.Fatalf("读 webui-channels.html 失败（这条守卫依赖它）: %v", err)
+	}
+	src := string(raw)
+	start := strings.Index(src, "function saveDrawer()")
+	if start < 0 {
+		t.Fatal("★ 前端里找不到 function saveDrawer() —— 提交构造被改名/搬走了。" +
+			"这条防漂移守卫必须跟着更新，否则它会静默变成『什么都没查』（比漏登记更糟）")
+	}
+	rest := src[start:]
+	end := strings.Index(rest, "\n}\n")
+	if end < 0 {
+		t.Fatal("★ 无法确定 saveDrawer 的结束位置")
+	}
+	fn := rest[:end]
+
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(k string) {
+		if k == "" || seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	// ① 对象字面量的键。
+	for _, m := range regexp.MustCompile(`(?m)^\s*([a-z_][a-z0-9_]*)\s*:`).FindAllStringSubmatch(fn, -1) {
+		add(m[1])
+	}
+	// ② 条件赋值（形如 body.keys = keys）。
+	// ⚠ 用 [ 	] 锚定等号后面的空白：这样 body.model_mapping === null 这种**读取**
+	//   不会被算成提交（否则会把没提交的字段也算进来，守卫就松了）。
+	for _, m := range regexp.MustCompile(`body.([a-z_][a-z0-9_]*)[ 	]*=[ 	]`).FindAllStringSubmatch(fn, -1) {
+		add(m[1])
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		t.Fatal("★ 解析出的提交字段集合为空 —— 守卫失效（比漏登记更糟）")
+	}
+	return out
+}
+
+// TestWebuiChannelFormFieldsAreRegistered 双向钉住「前端提交的键 ⊆ 登记表」。
+//
+// 判据三条：
+//
+//	① 前端源码里 saveDrawer 提交的每个键，都必须在 channelFieldRegistry 里登记
+//	   （否则用户一保存就吃 fail-closed 的 400）；
+//	② Go 侧那份权威切片 webuiChannelsSubmitFields 里的每个键也必须已登记；
+//	③ 前端提交的每个键都**真的能写**（参数化用例，逐个提交一遍，断言不是 400）。
+func TestWebuiChannelFormFieldsAreRegistered(t *testing.T) {
+	formFields := webuiChannelFormSubmitFields(t)
+	t.Logf("前端 saveDrawer 提交的字段（%d）: %v", len(formFields), formFields)
+
+	for _, f := range formFields {
+		if channelFieldRegistry[f] == "" {
+			t.Errorf("★ 前端会提交 %q，但它**没登记**在 channelFieldRegistry ⇒ 用户一保存就 400（fail-closed）。"+
+				"请登记它（并补进 webuiChannelsSubmitFields）", f)
+		}
+	}
+	for _, f := range webuiChannelsSubmitFields {
+		if channelFieldRegistry[f] == "" {
+			t.Errorf("★ webuiChannelsSubmitFields 里的 %q 没登记", f)
+		}
+	}
+
+	h, _ := parityHandler(t, nil)
+	id := parityCreate(t, h, map[string]any{
+		"name": "t69-base", "base_url": "https://t69.example.invalid/v1", "keys": []string{"sk-t69-base"},
+	})
+	values := map[string]any{
+		"id": id, "name": "t69-base", "type": 0, "base_url": "https://t69.example.invalid/v1",
+		"models": []string{"m1"}, "model_mapping": map[string]string{}, "groups": []string{"default"},
+		"priority": 1, "weight": 1, "status": 1,
+		"keys": []string{"sk-t69-extra"}, "key_mode": "append", "key_selection_mode": "random",
+		"multi_key_mode": "random", "mode": "single",
+		"openai_organization": "org-t69", "test_model": "m1", "remark": "备注", "auto_ban": 1,
+		"tag": "t69", "param_override": map[string]any{"temperature": 0.5},
+		"header_override":     map[string]string{"X-T69": "1"},
+		"status_code_mapping": map[string]any{"429": 500},
+	}
+	base := map[string]any{"id": id, "name": "t69-base", "base_url": "https://t69.example.invalid/v1"}
+	for _, f := range webuiChannelsSubmitFields {
+		v, ok := values[f]
+		if !ok {
+			t.Errorf("参数化用例缺少字段 %q 的取值 —— 补上它（否则③对它是空过）", f)
+			continue
+		}
+		payload := map[string]any{}
+		for k, val := range base {
+			payload[k] = val
+		}
+		payload[f] = v
+		rawPayload, _ := json.Marshal(payload)
+		code, out := doJSONMap(t, h, http.MethodPost, "/admin/channels", string(rawPayload))
+		if code == http.StatusBadRequest {
+			t.Errorf("★ 提交已登记的字段 %q 被 400 拒了（登记表与实现不一致）: %v", f, out)
+			continue
+		}
+		if code != http.StatusOK {
+			t.Errorf("提交字段 %q 期望 200，实际 %d: %v", f, code, out)
+		}
+	}
+}
+
+// TestChannelsExtraFieldsRoundTrip T69 的 8 个字段：写进去要能读回来。
+//
+// 读回分两路，对应两种分级：
+//
+//	普通五个（openai_organization/test_model/remark/auto_ban/tag）—— 走**响应/列表**读回
+//	敏感三个（param_override/header_override/status_code_mapping）—— 响应里**不回显**，
+//	                                             这里直接查库断言值落对了
+func TestChannelsExtraFieldsRoundTrip(t *testing.T) {
+	h, _ := parityHandler(t, nil)
+	id := parityCreate(t, h, map[string]any{
+		"name": "t69-extra", "base_url": "https://t69e.example.invalid/v1", "keys": []string{"sk-e"},
+	})
+	body := map[string]any{
+		"id": id, "name": "t69-extra", "base_url": "https://t69e.example.invalid/v1",
+		"openai_organization": "org-123", "test_model": "gpt-t69", "remark": "这是一条备注",
+		"auto_ban": 1, "tag": "prod-t69",
+		"param_override":      map[string]any{"temperature": 0.25},
+		"header_override":     map[string]string{"X-Org": "acme"},
+		"status_code_mapping": map[string]any{"429": 503},
+	}
+	rawPayload, _ := json.Marshal(body)
+	code, out := doJSONMap(t, h, http.MethodPost, "/admin/channels", string(rawPayload))
+	if code != http.StatusOK {
+		t.Fatalf("提交 8 个字段应 200，实际 %d: %v", code, out)
+	}
+	ch, _ := out["channel"].(map[string]any)
+	if ch["openai_organization"] != "org-123" || ch["test_model"] != "gpt-t69" ||
+		ch["remark"] != "这是一条备注" || ch["tag"] != "prod-t69" {
+		t.Errorf("响应读回的普通字段不一致: %v", ch)
+	}
+	if ab, _ := ch["auto_ban"].(float64); int(ab) != 1 {
+		t.Errorf("auto_ban 读回应为 1，实际 %v", ch["auto_ban"])
+	}
+	_, list := doJSONMap(t, h, http.MethodGet, "/admin/channels?keyword=t69-extra", "")
+	items, _ := list["channels"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("列表应命中 1 条，实际 %d", len(items))
+	}
+	lm, _ := items[0].(map[string]any)
+	if lm["openai_organization"] != "org-123" || lm["test_model"] != "gpt-t69" || lm["remark"] != "这是一条备注" {
+		t.Errorf("列表读回的普通字段不一致: %v", lm)
+	}
+	// 敏感三字段：响应里**没有**这三个键，它们的值也不该出现
+	if _, exists := ch["param_override"]; exists {
+		t.Errorf("★ 敏感字段不该出现在响应里: %v", ch)
+	}
+	if strings.Contains(mustJSON(t, out), "0.25") || strings.Contains(mustJSON(t, out), "acme") ||
+		strings.Contains(mustJSON(t, out), "503") {
+		t.Errorf("★ 敏感覆盖项的值不该出现在响应体里: %s", mustJSON(t, out))
+	}
+	row, ok, err := store.GetChannelByExternalID(id)
+	if err != nil || !ok || row == nil {
+		t.Fatalf("查库取渠道失败: %v ok=%v", err, ok)
+	}
+	if row.ParamOverride == nil || !strings.Contains(*row.ParamOverride, "0.25") {
+		t.Errorf("param_override 未落库: %v", row.ParamOverride)
+	}
+	if row.HeaderOverride == nil || !strings.Contains(*row.HeaderOverride, "acme") {
+		t.Errorf("header_override 未落库: %v", row.HeaderOverride)
+	}
+	if row.StatusCodeMapping == nil || !strings.Contains(*row.StatusCodeMapping, "503") {
+		t.Errorf("status_code_mapping 未落库: %v", row.StatusCodeMapping)
+	}
+	// presence 语义：不带 tag 的更新**不该**把标签清掉
+	noTag := map[string]any{"id": id, "name": "t69-extra", "base_url": "https://t69e.example.invalid/v1"}
+	raw2, _ := json.Marshal(noTag)
+	if code, out2 := doJSONMap(t, h, http.MethodPost, "/admin/channels", string(raw2)); code != http.StatusOK {
+		t.Fatalf("不带 tag 的更新应 200，实际 %d: %v", code, out2)
+	}
+	row2, _, _ := store.GetChannelByExternalID(id)
+	if row2.Tag == nil || *row2.Tag != "prod-t69" {
+		t.Errorf("★ 请求里没提 tag 时不该改动它，实际 %v", row2.Tag)
+	}
+	// 显式空串 ⇒ 清除标签
+	clearTag := map[string]any{"id": id, "name": "t69-extra", "base_url": "https://t69e.example.invalid/v1", "tag": ""}
+	raw3, _ := json.Marshal(clearTag)
+	doJSONMap(t, h, http.MethodPost, "/admin/channels", string(raw3))
+	row3, _, _ := store.GetChannelByExternalID(id)
+	if row3.Tag != nil {
+		t.Errorf("显式传空 tag 应清除标签，实际 %v", *row3.Tag)
+	}
+}
+
+// mustJSON 把响应体重新序列化（断言"响应里没有某个值"时用）。
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	return string(b)
+}
+
+// TestChannelsSensitiveOverridesValidatedAndClassified 敏感三字段的分级与校验。
+func TestChannelsSensitiveOverridesValidatedAndClassified(t *testing.T) {
+	for _, f := range []string{"param_override", "header_override", "status_code_mapping"} {
+		if got := channelFieldRegistry[f]; got != channelFieldSensitive {
+			t.Errorf("%q 的分级 = %q，want %q", f, got, channelFieldSensitive)
+		}
+	}
+	for _, f := range []string{"openai_organization", "test_model", "remark", "auto_ban", "tag"} {
+		if got := channelFieldRegistry[f]; got != channelFieldEditable {
+			t.Errorf("%q 的分级 = %q，want %q", f, got, channelFieldEditable)
+		}
+	}
+
+	h, _ := parityHandler(t, nil)
+	id := parityCreate(t, h, map[string]any{
+		"name": "t69-val", "base_url": "https://t69v.example.invalid/v1",
+	})
+	post := func(extra map[string]any) (int, map[string]any) {
+		body := map[string]any{"id": id, "name": "t69-val", "base_url": "https://t69v.example.invalid/v1"}
+		for k, v := range extra {
+			body[k] = v
+		}
+		rawP, _ := json.Marshal(body)
+		return doJSONMap(t, h, http.MethodPost, "/admin/channels", string(rawP))
+	}
+	for _, f := range []string{"param_override", "header_override", "status_code_mapping"} {
+		code, out := post(map[string]any{f: "not-json"})
+		if code != http.StatusBadRequest {
+			t.Errorf("%s=坏 JSON 应 400，实际 %d: %v", f, code, out)
+		} else if s, _ := out["error"].(string); !strings.Contains(s, f) {
+			t.Errorf("%s 的报错应点名该字段，实际 %q", f, s)
+		}
+	}
+	if code, _ := post(map[string]any{"param_override": []any{1, 2}}); code != http.StatusBadRequest {
+		t.Errorf("数组形态应 400，实际 %d", code)
+	}
+	// 字符串形态：把 JSON 文本装在字符串里（表单 textarea 的常见形态），应当被接受并归一化。
+	code, out := post(map[string]any{"param_override": `{"temperature": 0.1}`})
+	if code != http.StatusOK {
+		t.Fatalf("字符串形态的 JSON 应被接受，实际 %d: %v", code, out)
+	}
+	// sensitive_fields 是**名字清单**（base_url 也在其中 —— 它同样是敏感字段），
+	// 所以这里只要求它**包含** param_override（顺序无关），且响应里不含该字段的值。
+	names, _ := out["sensitive_fields"].([]any)
+	hasParam := false
+	for _, n := range names {
+		if n == "param_override" {
+			hasParam = true
+		}
+	}
+	if !hasParam {
+		t.Errorf("sensitive_fields 应包含 param_override（只报名字），实际 %v", out["sensitive_fields"])
+	}
+	if strings.Contains(mustJSON(t, out), "0.1") {
+		t.Errorf("★ 敏感字段的值不该出现在响应里: %s", mustJSON(t, out))
+	}
+	row, _, _ := store.GetChannelByExternalID(id)
+	if row.ParamOverride == nil || !strings.Contains(*row.ParamOverride, "0.1") {
+		t.Errorf("字符串形态应归一化后落库，实际 %v", row.ParamOverride)
+	}
+	if code, _ := post(map[string]any{"auto_ban": 7}); code != http.StatusBadRequest {
+		t.Errorf("auto_ban=7 应 400，实际 %d", code)
+	}
+	if code, _ := post(map[string]any{"auto_ban": 0}); code != http.StatusOK {
+		t.Errorf("auto_ban=0 应 200（0 是合法值，不能被当成'没传'），实际 %d", code)
+	}
+	row0, _, _ := store.GetChannelByExternalID(id)
+	if row0.AutoBan == nil || *row0.AutoBan != 0 {
+		t.Errorf("auto_ban=0 应落库为 0，实际 %v", row0.AutoBan)
+	}
+}
+
+// ── T72：move 的两种形态（拖拽 vs 上移下移）与边界 ──────────────────────────
+
+// TestChannelsMoveAcceptsBothShapes 钉住 T72 修的契约不匹配：
+// 前端拖拽发的是 {id,target_id,position}，而 B3 只认 {id,direction} ⇒ 必然 400。
+func TestChannelsMoveAcceptsBothShapes(t *testing.T) {
+	h, _ := parityHandler(t, nil)
+	// 三条渠道，优先级 30/20/10 ⇒ 初始顺序 a,b,c
+	a := parityCreate(t, h, map[string]any{"name": "mv-a", "base_url": "https://ma.example.invalid/v1", "priority": 30})
+	b := parityCreate(t, h, map[string]any{"name": "mv-b", "base_url": "https://mb.example.invalid/v1", "priority": 20})
+	c := parityCreate(t, h, map[string]any{"name": "mv-c", "base_url": "https://mc.example.invalid/v1", "priority": 10})
+
+	order := func() []string {
+		code, out := doJSONMap(t, h, http.MethodGet, "/admin/channels/order", "")
+		if code != http.StatusOK {
+			t.Fatalf("order 应 200，实际 %d", code)
+		}
+		items, _ := out["order"].([]any)
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			m, _ := it.(map[string]any)
+			ids = append(ids, fmt.Sprint(m["id"]))
+		}
+		return ids
+	}
+	move := func(body map[string]any) (int, map[string]any) {
+		raw, _ := json.Marshal(body)
+		return doJSONMap(t, h, http.MethodPost, "/admin/channels/move", string(raw))
+	}
+	if got := order(); len(got) != 3 || got[0] != a || got[2] != c {
+		t.Fatalf("初始顺序应为 a,b,c，实际 %v", got)
+	}
+
+	// ① before：把 c 放到 a 之前 ⇒ c,a,b
+	code, out := move(map[string]any{"id": c, "target_id": a, "position": "before"})
+	if code != http.StatusOK {
+		t.Fatalf("★ {id,target_id,position} 必须被接受（拖拽就是发这个形状），实际 %d: %v", code, out)
+	}
+	if got := order(); got[0] != c || got[1] != a || got[2] != b {
+		t.Errorf("before 后应为 c,a,b，实际 %v", got)
+	}
+
+	// ② after：把 c 放到 b 之后 ⇒ a,b,c
+	if code, out = move(map[string]any{"id": c, "target_id": b, "position": "after"}); code != http.StatusOK {
+		t.Fatalf("after 应 200，实际 %d: %v", code, out)
+	}
+	if got := order(); got[0] != a || got[1] != b || got[2] != c {
+		t.Errorf("after 后应为 a,b,c，实际 %v", got)
+	}
+
+	// ③ same：与 before 同效（前端注释：等价于插到目标之前，本仓没有层级这一维）⇒ b,a,c
+	if code, out = move(map[string]any{"id": b, "target_id": a, "position": "same"}); code != http.StatusOK {
+		t.Fatalf("same 应 200，实际 %d: %v", code, out)
+	}
+	if got := order(); got[0] != b || got[1] != a || got[2] != c {
+		t.Errorf("same 应与 before 同效（b,a,c），实际 %v", got)
+	}
+
+	// ④ 形态 B 兼容：a 下移一位 ⇒ b,c,a 里的 a 与 c 交换 ⇒ b,a,c? （当前 b,a,c）
+	//    a 下移 ⇒ b,c,a
+	if code, out = move(map[string]any{"id": a, "direction": "down"}); code != http.StatusOK {
+		t.Fatalf("direction 形态应仍可用，实际 %d: %v", code, out)
+	}
+	if got := order(); got[0] != b || got[1] != c || got[2] != a {
+		t.Errorf("a 下移后应为 b,c,a，实际 %v", got)
+	}
+	//    再上移回来 ⇒ b,a,c
+	if code, _ = move(map[string]any{"id": a, "direction": "up"}); code != http.StatusOK {
+		t.Fatalf("上移应 200，实际 %d", code)
+	}
+	if got := order(); got[1] != a {
+		t.Errorf("a 上移后应回到第 2 位，实际 %v", got)
+	}
+	//    顶端再上移 ⇒ 幂等 at_edge（不是 400）
+	code, out = move(map[string]any{"id": b, "direction": "up"})
+	if code != http.StatusOK {
+		t.Fatalf("在顶端上移不该报错，实际 %d", code)
+	}
+	if edge, _ := out["at_edge"].(bool); !edge {
+		t.Errorf("在顶端上移应报 at_edge=true，实际 %v", out)
+	}
+	if mode, _ := out["mode"].(string); mode != "step" {
+		t.Errorf("direction 形态的 mode 应为 step，实际 %v", out["mode"])
+	}
+
+	// ── 边界 ───────────────────────────────────────────────────────────────
+	// ⑤ target_id 不存在 ⇒ 404 且点名
+	code, out = move(map[string]any{"id": a, "target_id": "ch-does-not-exist", "position": "before"})
+	if code != http.StatusNotFound {
+		t.Errorf("target 不存在应 404，实际 %d: %v", code, out)
+	} else if s, _ := out["error"].(string); !strings.Contains(s, "ch-does-not-exist") {
+		t.Errorf("404 应点名目标 id，实际 %q", s)
+	}
+	// ⑥ id 本身不存在 ⇒ 404
+	if code, _ = move(map[string]any{"id": "ch-nope", "target_id": a, "position": "before"}); code != http.StatusNotFound {
+		t.Errorf("id 不存在应 404，实际 %d", code)
+	}
+	// ⑦ position 非法 ⇒ 400 且列三档
+	code, out = move(map[string]any{"id": a, "target_id": b, "position": "middle"})
+	if code != http.StatusBadRequest {
+		t.Errorf("非法 position 应 400，实际 %d", code)
+	} else if s, _ := out["error"].(string); !strings.Contains(s, "before") || !strings.Contains(s, "after") {
+		t.Errorf("400 应列出三档取值，实际 %q", s)
+	}
+	// ⑧ id == target_id ⇒ **明确幂等**（200 + noop + reason），不是 400、也不是静默成功
+	code, out = move(map[string]any{"id": a, "target_id": a, "position": "before"})
+	if code != http.StatusOK {
+		t.Errorf("id==target_id 应幂等 200，实际 %d: %v", code, out)
+	}
+	if noop, _ := out["noop"].(bool); !noop {
+		t.Errorf("id==target_id 应带 noop=true（不能静默成功），实际 %v", out)
+	}
+	if reason, _ := out["reason"].(string); reason == "" {
+		t.Errorf("幂等也 must 说明原因，实际 %v", out)
+	}
+	// ⑨ 两种形态都不给 ⇒ 400
+	if code, _ = move(map[string]any{"id": a}); code != http.StatusBadRequest {
+		t.Errorf("两种形态都不给应 400，实际 %d", code)
+	}
+	// ⑩ 两种形态同时给 ⇒ 400（避免"到底按哪个执行"的歧义）
+	if code, _ = move(map[string]any{"id": a, "direction": "up", "target_id": b, "position": "before"}); code != http.StatusBadRequest {
+		t.Errorf("direction 与 target_id 同给应 400，实际 %d", code)
+	}
+	// ⑪ 只给 position 不给 target_id ⇒ 400
+	if code, _ = move(map[string]any{"id": a, "position": "before"}); code != http.StatusBadRequest {
+		t.Errorf("只给 position 应 400，实际 %d", code)
+	}
+	// ⑫ 相对移动**只动一条**：其余两条的相对次序不变
+	//     当前 b,a,c ⇒ 把 c 放到 b 之前 ⇒ c,b,a（b 与 a 的相对次序保持）
+	if code, _ = move(map[string]any{"id": c, "target_id": b, "position": "before"}); code != http.StatusOK {
+		t.Fatalf("相对移动应 200，实际 %d", code)
+	}
+	if got := order(); got[0] != c || got[1] != b || got[2] != a {
+		t.Errorf("相对移动只该动一条（c,b,a），实际 %v", got)
+	}
 }
