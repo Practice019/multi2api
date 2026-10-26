@@ -159,7 +159,7 @@ function isMasked(k) {
       port: CH_PORT, url: base + '/ui', token: TOKEN, width: 1500, height: 1000,
       outDir: path.join(os.tmpdir(), 'tokens-page-shots'),
       readyExpr: 'document.readyState === "complete"',
-    }, async ({ ev, errs, dialogs, sleep }) => {
+    }, async ({ ev, send, errs, dialogs, sleep }) => {
       await sleep(2500);
 
       // F1) 入口可点开：用页面自暴露的 showPanelByKey（按 data-key 切，不靠文字）
@@ -389,6 +389,55 @@ function isMasked(k) {
       })())`));
       ok(partial.exists && String(partial.cls).indexOf('hidden') >= 0, '#partial 容器存在且默认隐藏（只证明展示位存在）');
       sk('「部分成功」的**行为**未覆盖：createTokens 只在单条 CreateToken 失败时产生 failures（tokens.go:708-711），而该分支要么靠 48 位 Key 唯一索引碰撞、要么靠 SetAutoGroups 编码失败 —— 公共 API 无法确定性触发；handler 级用例（internal/admin/tokens_test.go）同样没有构造它。要覆盖得注入故障（改实现或加测试钩子），超出"只新增探针文件"的范围。');
+
+      // ── [K] 布局几何门禁（T77 新增）──────────────────────────────────────
+      //
+      // # 修前红 / 修后绿（留着这段对照，证明这门禁真的抓得住东西）
+      // 修前（tkFrame 缺内联 style ⇒ 浏览器默认 300x150）：
+      //   @1920x1080 几何: frame=[261,88,304,154], innerH=150, innerW=300,
+      //                    header=[0,0,285,177], h1=[16,10,80,22], tw=[16,193,253,154]
+      //   FAIL 表格容器 在 iframe 可视区内（底边 347 <= innerH 150）
+      //   FAIL 工具栏没有超出 iframe 视口（177 <= 150）  ← 375 同样两条红 ⇒ 共 4 条
+      //   ⚠ 而 T71 原有 55 条**修前依然全绿** —— 这就是「存在性断言测不出几何塌陷」的直接证据。
+      // 修后（webui.html:3298 补上同款内联 style）：上面两条转 PASS，tkFrame.innerH ≈ 890。
+      // # 为什么单独立这一段
+      // T71 那 55 条断言测的是「元素存在 / 可点 / 数值对」——**测不出几何**。
+      // 而本轮的缺陷恰恰是几何的：控制台里 tkFrame **没有内联 width/height**
+      // （其余四页的 iframe 都手写了 style=width:100%;height:calc(100vh - 190px);min-height:460px），
+      // 于是它退回浏览器默认的 **300x150** ⇒ 内容被裁、空态落在视口之外。
+      // 页面元素全都在、探针全绿，用户看到的却是「挤在顶部一条窄带 + 下面整片空白」。
+      // 所以这一段断言的是**尺寸与位置**，不是存在性。
+      //
+      // ⚠ 失败时必须打印具体几何（谁多高、谁在视口外），否则下次还得重新量一遍。
+      console.log('\n[K] 布局几何（两档宽度：1920x1080 与 375x812）');
+      const GEO_EXPR = '(function(){try{' +
+        'var f=document.getElementById(\'tkFrame\');if(!f)return JSON.stringify({err:\'no frame\'});' +
+        'var d=f.contentDocument;if(!d)return JSON.stringify({err:\'no contentDocument\'});' +
+        'function R(el){if(!el)return null;var b=el.getBoundingClientRect();return [Math.round(b.x),Math.round(b.y),Math.round(b.width),Math.round(b.height)];}' +
+        'function HIT(el){if(!el)return null;var b=el.getBoundingClientRect();if(!b.width||!b.height)return {err:\'zero rect\',rect:R(el)};var t=d.elementFromPoint(b.x+b.width/2,b.y+b.height/2);return {hit:(t?(t.tagName.toLowerCase()+(t.id?\'#\'+t.id:\'\')+\'.\'+String(t.className).split(\' \').join(\'.\')):\'null\'),self:!!(t&&(t===el||el.contains(t))),rect:R(el)};}' +
+        'var kw=d.getElementById(\'kw\'),bn=d.getElementById(\'btnNew\'),tw=d.querySelector(\'.tw\'),em=d.getElementById(\'empty\');' +
+        'return JSON.stringify({frame:R(f),innerH:f.contentWindow.innerHeight,innerW:f.contentWindow.innerWidth,bodyScroll:d.body.scrollHeight,els:{header:R(d.querySelector(\'header\')),h1:R(d.querySelector(\'header h1\')),main:R(d.querySelector(\'main\')),tw:R(tw),empty:R(em),rows:d.querySelectorAll(\'#rows tr\').length},hit:{kw:HIT(kw),btnNew:HIT(bn)}});' +
+        '}catch(e){return JSON.stringify({err:String(e)});}})()';
+      for (const dim of [[1920, 1080], [375, 812]]) {
+        const w = dim[0], h = dim[1];
+        await send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+        await sleep(800);
+        const g = JSON.parse(await ev(GEO_EXPR));
+        console.log('    @' + w + 'x' + h + ' 几何: ' + JSON.stringify(g));
+        if (g.err) { ok(false, '[' + w + '] 几何采集失败：' + g.err); continue; }
+        const tbH = g.els.header ? g.els.header[3] : 0;
+        const box = g.els.rows > 0 ? g.els.tw : g.els.empty;
+        const boxName = g.els.rows > 0 ? '表格容器' : '空态';
+        ok(g.bodyScroll > tbH + 40, '[' + w + '] 根容器 scrollHeight(' + g.bodyScroll + ') > 工具栏高(' + tbH + ')+40 —— 页面没塌成一条窄带');
+        ok(!!g.els.h1 && g.els.h1[1] >= 0, '[' + w + '] 标题顶部未被裁（h1.top=' + (g.els.h1 ? g.els.h1[1] : 'n/a') + ' ≥ 0）');
+        ok(!!box && box[3] > 0, '[' + w + '] ' + boxName + ' rect 高度 > 0（实际 ' + JSON.stringify(box) + '）');
+        ok(!!box && (box[1] + box[3]) <= g.innerH + 1, '[' + w + '] ' + boxName + ' 在 iframe 可视区内（底边 ' + (box ? box[1] + box[3] : 'n/a') + ' ≤ innerH ' + g.innerH + '）');
+        ok(tbH <= g.innerH, '[' + w + '] 工具栏没有超出 iframe 视口（' + tbH + ' ≤ ' + g.innerH + '）');
+        ok(!!g.hit.kw && g.hit.kw.self === true, '[' + w + '] 搜索框中心 elementFromPoint 命中自身或其后代（实际 ' + JSON.stringify(g.hit.kw) + '）');
+        ok(!!g.hit.btnNew && g.hit.btnNew.self === true, '[' + w + '] 新建按钮中心命中自身或其后代（实际 ' + JSON.stringify(g.hit.btnNew) + '）');
+      }
+      await send('Emulation.clearDeviceMetricsOverride');
+      await sleep(300);
 
       // F10) 控制台卫生：全程无未捕获异常 / console.error
       console.log('\n[J] 控制台卫生');
