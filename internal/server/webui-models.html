@@ -149,7 +149,7 @@
        不再用亮底撞亮字（也符合 theme-max 自己那条「数据区安静」的纪律）。
      ⚠ 一律走语义变量、不写死色值：theme-max 换值后这里自动跟随。
      ⚠ 特异性必须 >= (0,2,0)：theme-max 追加在本页样式**之后**，同特异性它赢。 */
-  .badge.real, .badge.synth {
+  .badge.real, .badge.synth, .badge.callok, .badge.callno, .badge.callunknown {
     /* 中性底：--panel2 在浅/深两套主题下都与 --fg / --warn 有足够反差 */
     background:var(--panel2);
     border-radius:0;              /* 与 theme-max 的零圆角一致（原 8px 已被它覆盖） */
@@ -182,6 +182,66 @@
     color:var(--dim); font-size:12px;
   }
   #credit a { color:var(--acc); }
+
+  /* ── 8. 倍率 / 可调用 两列 + 复制交互（2026-10-27 加）───────────────────
+
+     # 为什么这些规则写在这里，而**不是** theme-max.css
+
+     theme-max.css 是视觉层唯一真相，但它只承载**跨页共用**的东西；本页这几条
+     （倍率标记 / 可调用徽章 / 模型名可点复制）只服务 webui-models.html。
+     而反过来，把页面私有规则塞进下面那块 MAXIMALISM 区是**明确踩过的坑**：
+     tools/theme_sync.js 会整块重建那个区间，塞进去的规则会在下一次同步时无声消失
+     （教训原文见本文件 :942-956 与 theme-max.css 那段注释）。
+     ⇒ 页面私有规则一律放这里（MAXIMALISM:START 之前）。
+
+     # 徽章的底与字仍然成对给出（与上面 5b 段同一条纪律）
+     新徽章走**同一套**中性底（--panel2），差异只交给「描边颜色 + 粗细 + 字重 +
+     语义色文字」；色值一律取语义变量，不写死。实算对比度（WCAG，本页行底 --panel2）：
+       light  --ok 5.38:1 / --warn 5.32:1 / --dim 7.12:1
+       dark   --ok 12.06:1 / --warn 11.31:1 / --dim 8.07:1   ⇒ 全部 >= 4.5，过。 */
+  /* 倍率标记：等宽、右不多占位；四档语义色（有值 / 无 / 免费 / 高倍率） */
+  .multtag { font-family:var(--mono); font-size:12px; color:var(--fg); }
+  .multtag.none { color:var(--dim); }
+  .multtag.free { color:var(--ok); }
+  .multtag.hi { color:var(--acc); }
+  /* 可调用列的徽章：语义色只上描边 + 文字（底与字成对，见上） */
+  .badge.callok { border:2px solid var(--ok); color:var(--ok); font-weight:700; }
+  .badge.callno { border:2px solid var(--warn); color:var(--warn); font-weight:700; }
+  .badge.callunknown { border:1px solid var(--dim); color:var(--dim); font-weight:400; }
+  /* 模型名可点复制：**必须看起来可点**。
+     复制是无声操作 —— 没有手型光标、按下也没有位移时，用户点完不知道成没成
+     （同 .chips .chip 那条交互线索的纪律，见 theme-max.css 里那段注释）。 */
+  button.namecopy {
+    font:inherit; font-family:var(--mono); color:var(--fg); background:transparent;
+    border:0; padding:0; cursor:pointer; text-align:left;
+    border-bottom:1px dashed var(--dim);
+  }
+  button.namecopy:hover { color:var(--acc); border-bottom-color:var(--acc); }
+  /* ⚠ 合成行的名字必须仍然是语义色：上面给 button 定的 color 会**截断**继承链，
+     所以原来那条 `tr[data-synthetic="1"] .name{color:var(--warn)}` 不再够用。 */
+  tr[data-synthetic="1"] button.namecopy { color:var(--warn); }
+  tr[data-synthetic="1"] button.namecopy:hover { color:var(--acc); }
+  button.namecopy:active { transform:translateY(1px); }
+  button.namecopy:focus-visible { outline:2px solid var(--acc); outline-offset:1px; }
+  /* 供应商筛选的可见指示条（是否处于「只看某个供应商」状态 + 一键清除） */
+  #vfilt {
+    display:none; align-items:center; gap:8px; margin:0 0 8px; padding:5px 8px;
+    border:1px solid var(--dim); border-radius:8px; color:var(--dim); font-size:12px;
+  }
+  #vfilt.on { display:flex; }
+  #vfilt b { color:var(--fg); font-family:var(--mono); }
+  /* 倍率目录未加载的显式警示（不许静默空白）。默认隐藏，加载失败才显示 ——
+     ⚠ 与「行内写 x无」互斥：目录整体拿不到时**不逐行**写「无」，
+       否则会把「界面没拿到」说成「上游没配」（旧面板的同一口径）。 */
+  #multwarn {
+    display:none; align-items:center; gap:8px; margin:0 0 8px; padding:6px 9px;
+    border:1px solid var(--warn); border-radius:8px; color:var(--warn); font-size:12px;
+  }
+  #multwarn.on { display:flex; }
+  /* 复制成功的轻提示位（页头状态行里那一格）。不新造浮动 toast：本页既有的
+     「轻提示位」就是这条状态行（#sum / #srcline / #upd 都在它上面）。 */
+  #flash { color:var(--ok); }
+  #flash.bad { color:var(--err); }
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
@@ -1408,6 +1468,10 @@ header.statline { align-items:baseline; }
 <header class="statline">
   <span id="sum" aria-live="polite"></span>
   <span id="srcline" class="dim"></span>
+  <span class="spacer"></span>
+  <!-- 复制成功的轻提示位。刻意**不新造浮动 toast**：本页既有的轻提示位就是这条
+       状态行（#sum / #srcline / #upd 都长在它上面）。aria-live 让读屏也能听到。 -->
+  <span id="flash" aria-live="polite"></span>
 </header>
 
 <div id="errbox" role="alert">
@@ -1424,18 +1488,36 @@ header.statline { align-items:baseline; }
 
 <main>
   <section id="panelModels" role="tabpanel" aria-labelledby="tabModels">
+    <!-- 倍率目录整体拿不到时的**显式**警示（不许静默空白）。
+         ⚠ 只在这里报，不在每行写「无」—— 那会把「界面没拿到」说成「上游没配」。
+         重试入口复用页内已有的 #retry（本页唯一的重试按钮，文案「重试」）。 -->
+    <div id="multwarn" role="status">
+      <span>倍率目录未加载（GET /admin/models/preview 失败）—— 倍率列整列不可信，不是上游没配。</span>
+      <span class="spacer"></span>
+      <button id="btnMultRetry" type="button">重新读取倍率</button>
+    </div>
+    <!-- 供应商筛选的可见指示：筛选一旦生效就必须看得见，且要能一键清除
+         （此前它只把供应商名塞进搜索框 —— 用户改搜索词后筛选仍在生效却毫无提示）。 -->
+    <div id="vfilt" role="status">
+      <span>只看供应商 <b id="vfiltName"></b></span>
+      <span class="spacer"></span>
+      <button id="btnVFiltClear" type="button">显示全部</button>
+    </div>
     <div class="toolbar">
       <input id="search" type="search" placeholder="过滤模型 id / 供应商…" autocomplete="off"
              aria-label="过滤模型">
       <label class="chk"><input id="checkAll" type="checkbox"> 全选</label>
       <span id="selCount" class="dim"></span>
+      <!-- 「复制所选」：让勾选**有动作**（此前勾选只更新「已选 N 条」，是个哑控件）。
+           无选中时 disabled；禁用原因写在 title 与 #selCount 的文案里（可见说明）。 -->
+      <button id="btnCopySel" type="button" disabled title="先勾选模型，再把所选模型 ID 复制到剪贴板">复制所选</button>
       <span class="spacer"></span>
-      <span id="legend" class="dim">合成行 = 渠道声明在用、但上游目录里没有 ⇒ 不可勾选</span>
+      <span id="legend" class="dim">合成行 = 渠道声明在用、但上游目录里没有 ⇒ 不可勾选 · 点模型名可复制</span>
     </div>
     <div class="tw">
       <table id="modelsTable">
         <thead><tr>
-          <th class="c-chk"></th><th>模型 ID</th><th>供应商</th><th>端点</th><th>来源</th>
+          <th class="c-chk"></th><th>模型 ID</th><th>供应商</th><th>端点</th><th>来源</th><th title="来自 GET /admin/models/preview 的成本倍率；x无 = 该表没有这个模型，免费是 x0">倍率</th><th title="按控制台 manifest 里该上游的账号数判定；口径见下方说明">可调用</th>
         </tr></thead>
         <tbody id="modelRows"></tbody>
       </table>
@@ -1484,7 +1566,20 @@ header.statline { align-items:baseline; }
     tab: 'models',
     filter: '',
     vendorFilter: '',
-    updated: null
+    updated: null,
+    // ── 2026-10-27 新增（勾选 / 倍率 / 可调用）────────────────────────
+    // selected 是**勾选的唯一真相**（按模型 id 记）。此前勾选只活在 DOM 的
+    // checkbox 上，而 renderModels() 每次重绘都重建那些节点 ⇒ 勾选会静默丢失，
+    // 而 #checkAll 与「已选 N 条」不会跟着回位（两个陈旧状态，用户看不出真假）。
+    // 现在与上面那句「任何交互只改 state 再 render」一致。
+    selected: {},
+    // mult = 倍率表；键的构造与查表**照抄**旧面板（见 multKeyOf / multTableKey）。
+    mult: {},
+    multFailed: false,
+    multTried: false,
+    // acct = 「上游 id → 账号数」；null/undefined = 未知（manifest 没到，或没报该上游）。
+    acct: {},
+    acctLoaded: false
   };
 
   // ── 小工具 ────────────────────────────────────────────────────────────
@@ -1521,28 +1616,26 @@ header.statline { align-items:baseline; }
   }
 
   // ── 取数 ──────────────────────────────────────────────────────────────
+  // load 取**三份**数据：目录（主表）+ 倍率 + 上游账号数。
+  //
+  // ⚠ 后两份是**附加信息**，各自 catch，任一失败都不让主表渲染不出来
+  //   （旧面板同一纪律：「倍率拿不到不该让模型列表也显示不出来」）。
+  //   三份并发，谁先回来都不影响正确性 —— render() 在最后统一跑一次。
   function load() {
-    return fetch(ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
-      .then(function (r) {
-        if (r.status === 401) { throw new Error('未认证（会话已过期）—— 请回到控制台重新登录'); }
-        if (!r.ok) { throw new Error('取数失败：HTTP ' + r.status); }
-        return r.json();
-      })
-      .then(function (data) {
-        state.models = (data && data.models) || [];
-        state.vendors = (data && data.vendors) || [];
-        state.source = (data && data.source) || '';
-        state.ready = !!(data && data.ready);
-        state.loaded = true;
-        state.updated = new Date();
-        setErr('');
-        render();
-      })
-      .catch(function (e) {
-        // 保留上一份数据（若有）：网络抖动时把表格清空，用户看到的是"模型没了"，
-        // 而那与"网关没接线"在界面上无法区分。只报错，不毁现场。
-        setErr('读取模型目录失败：' + (e && e.message ? e.message : e));
-      });
+    var main = getJSON(ENDPOINT).then(function (data) {
+      state.models = (data && data.models) || [];
+      state.vendors = (data && data.vendors) || [];
+      state.source = (data && data.source) || '';
+      state.ready = !!(data && data.ready);
+      state.loaded = true;
+      state.updated = new Date();
+      setErr('');
+    }).catch(function (e) {
+      // 保留上一份数据（若有）：网络抖动时把表格清空，用户看到的是"模型没了"，
+      // 而那与"网关没接线"在界面上无法区分。只报错，不毁现场。
+      setErr('读取模型目录失败：' + (e && e.message ? e.message : e));
+    });
+    return Promise.all([main, loadMultCatalog(), loadAcctCounts()]).then(function () { render(); });
   }
 
   // ── 渲染：总览 ────────────────────────────────────────────────────────
@@ -1559,6 +1652,147 @@ header.statline { align-items:baseline; }
     document.getElementById('upd').textContent = state.updated ? '更新于 ' + fmtClock(state.updated) : '';
   }
 
+  // ── 2026-10-27：倍率目录 / 可调用判定 / 复制（用户点名要的三件事）────────
+
+  // 两个端点都是**控制台身份**（会话 cookie）可达的：
+  //   · /admin/models/preview —— 全部目录模型的成本倍率（旧「可用模型」面板就是取它）
+  //   · /admin/ui/manifest    —— 上游清单 + 每个上游的 account_count
+  //
+  // ⚠ 为什么**不**用 /v1/models 判「可调用」：那把钥匙是 api_key（对话面），
+  //   本页只有控制台会话 ⇒ 打它必然 401（这两套身份是刻意分离的，见 handler.go 的门禁分工）。
+  //   所以本页的判据取 manifest 的账号数 —— 与旧面板 renderModels 里
+  //   `g.accountCount === 0` 那条过滤**同源**，口径见 callCell 的注释。
+  var MULT_ENDPOINT = '/admin/models/preview';
+  var MANIFEST_ENDPOINT = '/admin/ui/manifest';
+
+  function getJSON(url) {
+    return fetch(url, { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
+      if (r.status === 401) { throw new Error('未认证（会话已过期）—— 请回到控制台重新登录'); }
+      if (!r.ok) { throw new Error('取数失败：HTTP ' + r.status); }
+      return r.json();
+    });
+  }
+
+  // multKeyOf 把**展示 id** 归一成**倍率表的键**：去掉 `provider/` 前缀。
+  //
+  // ⚠ 逐字移植自 internal/server/webui.html（那里的那份是原版，两边必须同形）。
+  //   它是「provider/裸名」与「裸名」两种写法都能命中的那一条判据；自创第三套匹配
+  //   的后果是满屏 `x无`（旧仓库实测过：diag_multiplier_mismatch.js 记的就是这条错位）。
+  function multKeyOf(id) {
+    var s = String(id || '').indexOf('/');
+    // 没有前缀（单上游的裸名，如 `glm-5.2`）→ 原样返回：它本来就是表的键。
+    return s > 0 ? String(id).slice(s + 1) : String(id || '');
+  }
+
+  // multTableKey 解析「这个展示 id 拿哪个键查倍率表」。
+  //
+  // ⚠ 同样移植自 webui.html：带前缀 → `provider/裸名` 组合键（多上游同名模型互不覆盖：
+  //   workbuddy 与 workbuddy-intl 都有 glm-5.2，倍率不同）；无前缀 → 裸名就是键。
+  //   （原版里那条「返回 null = 这张表不覆盖该上游」的分支自多上游改造后已不可达，
+  //     故这里不保留 —— 保留死分支等于把一条永不发生的判断写成契约。）
+  function multTableKey(id) {
+    var slash = String(id || '').indexOf('/');
+    if (!(slash > 0)) { return multKeyOf(id); }
+    return String(id);
+  }
+
+  // multText 把倍率数值格式化成展示文本；非法值返回 null（调用方据此不写标记）。
+  // 与旧面板同一口径：0 → 0；0.51 → 0.51；2 → 2（两位小数够，上游最细 x0.01）。
+  function multText(v) {
+    if (!Number.isFinite(v) || v < 0) { return null; }
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
+  }
+
+  // loadMultCatalog 取倍率表。**失败不抛**：它只是附加信息，不该让主表渲染不出来。
+  function loadMultCatalog() {
+    state.multTried = true;
+    return getJSON(MULT_ENDPOINT).then(function (r) {
+      var next = {};
+      var list = (r && r.models) || [];
+      for (var i = 0; i < list.length; i++) {
+        var m = list[i];
+        if (!m || !m.model) { continue; }
+        // 键 = `provider/裸名`（多上游同名模型互不覆盖）；后端没带 provider 时退回裸名。
+        var key = m.provider ? m.provider + '/' + m.model : m.model;
+        // ⚠ 保留 0：x0.00 是「免费」这个有意义的事实，不能用真值判断把它丢掉。
+        next[key] = Number(m.multiplier) || 0;
+      }
+      state.mult = next;
+      state.multFailed = false;
+    }).catch(function () {
+      // ⚠ 「拿不到目录」与「这个模型没倍率」必须可区分，否则是静默失败：
+      //   清表 + 置失败位，由 #multwarn 显式警示（**不**逐行写 x无）。
+      state.mult = {};
+      state.multFailed = true;
+    });
+  }
+
+  // loadAcctCounts 取「上游 → 账号数」。同样**失败不抛**。
+  function loadAcctCounts() {
+    return getJSON(MANIFEST_ENDPOINT).then(function (m) {
+      var next = {};
+      var list = (m && m.providers) || [];
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i];
+        if (!p || !p.id) { continue; }
+        // 三态：数字 = 真实账号数；null = 未知（manifest 没报这个上游）。
+        next[p.id] = (p.account_count === undefined || p.account_count === null)
+          ? null : Number(p.account_count);
+      }
+      state.acct = next;
+      state.acctLoaded = true;
+    }).catch(function () {
+      state.acct = {};
+      state.acctLoaded = false;   // 未知 ⇒ 列上写「未知」，绝不写「不可调用」
+    });
+  }
+
+  // ── 复制与轻提示 ──────────────────────────────────────────────────────
+
+  var flashTimer = null;
+
+  // flash 把一句话写进页头状态行的那一格，2.6s 后自行消失。
+  // 为什么不新造浮动 toast：本页既有的轻提示位就是这条状态行（#sum/#srcline/#upd 都在它上面），
+  // 再飘一个浮层是第二套提示系统（用户会被两个位置来回拽）。
+  function flash(msg, bad) {
+    var node = document.getElementById('flash');
+    if (!node) { return; }
+    node.textContent = msg || '';
+    node.className = bad ? 'bad' : '';
+    if (flashTimer) { window.clearTimeout(flashTimer); }
+    if (msg) { flashTimer = window.setTimeout(function () { node.textContent = ''; }, 2600); }
+  }
+
+  // fallbackCopy 是 execCommand 兜底路径（剪贴板 API 在某些上下文里不可用）。
+  function fallbackCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return !!ok;
+    } catch (e) { return false; }
+  }
+
+  // copyText 复制文本并把结果说出来（无声操作必须给回执，见 theme-max.css 那段注释）。
+  function copyText(text, okMsg) {
+    var s = String(text == null ? '' : text);
+    if (!s) { flash('没有可复制的内容', true); return; }
+    var done = function (ok) { flash(ok ? (okMsg || '已复制') : '复制失败：剪贴板不可用（可手动选中复制）', !ok); };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(s).then(function () { done(true); }, function () { done(fallbackCopy(s)); });
+        return;
+      }
+    } catch (e) { /* 落到下面的兜底 */ }
+    done(fallbackCopy(s));
+  }
+
   // ── 渲染：Model tab ───────────────────────────────────────────────────
   function visibleModels() {
     var q = state.filter.trim().toLowerCase();
@@ -1568,6 +1802,71 @@ header.statline { align-items:baseline; }
       return (m.name || '').toLowerCase().indexOf(q) >= 0
         || (m.vendor || '').toLowerCase().indexOf(q) >= 0;
     });
+  }
+
+  // multCell 渲染「倍率」单元格（用户点名的倍率检测）。
+  //
+  // 四种「没有/有」必须可区分（与旧面板同一口径）：
+  //   1. 表里有            → `x0.29`（免费是 x0，也是有效信息）
+  //   2. 表里没这个模型     → `x无`（title 说明是上游未提供）
+  //   3. **倍率目录整体没拿到** → 这一格写 `—`，并在面板顶部显式警示（#multwarn）
+  //      —— 不逐行写「无」，否则把「界面没拿到」说成「上游没配」
+  //   4. 脏数据（NaN/负数） → `—`，不写 xNaN
+  function multCell(m) {
+    var td = el('td', 'multcell');
+    if (state.multFailed) {
+      var dash = el('span', 'dim', '—');
+      dash.title = '倍率目录未加载，这一列整列不可信（见上方警示）';
+      td.appendChild(dash);
+      return td;
+    }
+    var key = multTableKey(m.name || '');
+    if (!Object.prototype.hasOwnProperty.call(state.mult, key)) {
+      var none = el('span', 'multtag none', 'x无');
+      none.title = '上游未提供该模型的倍率（' + MULT_ENDPOINT + ' 里没有这一条）';
+      td.appendChild(none);
+      return td;
+    }
+    var v = state.mult[key];
+    var txt = multText(v);
+    if (txt === null) {
+      td.appendChild(el('span', 'dim', '—'));
+      return td;
+    }
+    var cls = v === 0 ? 'multtag free' : (v >= 1 ? 'multtag hi' : 'multtag');
+    var tag = el('span', cls, 'x' + txt);
+    tag.title = '每次调用消耗 ' + txt + ' 倍基础额度' + (v === 0 ? '（免费）' : '');
+    td.appendChild(tag);
+    return td;
+  }
+
+  // callCell 渲染「可调用」单元格。
+  //
+  // # 口径（如实写清，别让用户以为它等于 /v1/models）
+  //   判据 = 控制台 manifest 里**该模型所属上游**的账号数 account_count：
+  //     >= 1 → 可调用      == 0 → 无可用账号（目录里有、现在调不到）      未知 → 未知
+  //   这条与旧「可用模型」面板 `g.accountCount === 0` 的过滤**同源**（同一份 manifest 字段）。
+  //
+  // ⚠ 局限（阶段二建议后端补字段）：它不等于「/v1/models 里真有这一条」——
+  //   那把 api_key 本页拿不到；账号存在但已过期/封禁时，这里仍会显示「可调用」。
+  function callCell(m) {
+    var td = el('td', 'callcol');
+    var v = m.vendor || '';
+    var known = state.acctLoaded && v && Object.prototype.hasOwnProperty.call(state.acct, v);
+    var n = known ? state.acct[v] : null;
+    var span;
+    if (!known || n === null || n === undefined) {
+      span = el('span', 'badge callunknown', '未知');
+      span.title = '账号数未知：控制台 manifest 还没到（或没报这个上游）——**不代表**不可调用';
+    } else if (Number(n) <= 0) {
+      span = el('span', 'badge callno', '无可用账号');
+      span.title = '该上游当前 0 个账号 ⇒ 目录里有、现在调不到（与旧「可用模型」面板的过滤同一条判据）';
+    } else {
+      span = el('span', 'badge callok', '可调用');
+      span.title = '该上游当前 ' + n + ' 个账号（manifest.account_count）';
+    }
+    td.appendChild(span);
+    return td;
   }
 
   function modelRow(m) {
@@ -1583,6 +1882,8 @@ header.statline { align-items:baseline; }
     var cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.className = 'rowcheck';
+    // 勾选状态从 state 回填（渲染是纯函数：DOM 只是 state 的投影）
+    cb.checked = !!state.selected[m.name || ''];
     if (!m.selectable) {
       // 不可勾选 + 说明原因：只说"disabled"的控件等于一个哑掉的按钮。
       cb.disabled = true;
@@ -1592,7 +1893,18 @@ header.statline { align-items:baseline; }
     tdChk.appendChild(cb);
     tr.appendChild(tdChk);
 
-    tr.appendChild(el('td', 'name', m.name || ''));
+    // 模型名 = **可点复制**（用户点名：「需要可以点击模型名称复制到粘贴板」）。
+    // ⚠ 用 button 而不是给 td 挂 onclick：键盘（Tab/Enter）与读屏都要能到，而且
+    //   button 天然有焦点样式。文案与 data-id 都是完整模型 ID（不是截断的显示文本）。
+    var tdName = el('td', 'name');
+    var nb = document.createElement('button');
+    nb.type = 'button';
+    nb.className = 'namecopy';
+    nb.setAttribute('data-id', m.name || '');
+    nb.textContent = m.name || '';
+    nb.title = '点击复制完整模型 ID：' + (m.name || '');
+    tdName.appendChild(nb);
+    tr.appendChild(tdName);
 
     var tdV = el('td');
     if (m.vendor) { tdV.appendChild(el('span', null, m.vendor)); }
@@ -1611,6 +1923,9 @@ header.statline { align-items:baseline; }
       tdSrc.appendChild(el('span', 'badge real', '上游目录'));
     }
     tr.appendChild(tdSrc);
+    // 2026-10-27 新增两列（用户要求「表格需要再添加一列信息」+ 移植倍率检测）
+    tr.appendChild(multCell(m));
+    tr.appendChild(callCell(m));
     return tr;
   }
 
@@ -1693,21 +2008,103 @@ header.statline { align-items:baseline; }
     renderSummary();
     renderModels();
     renderVendors();
+    // ⚠ 下面四条必须跟着重绘走：它们此前**不在** render() 里 ⇒ 表格重建之后
+    //   「全选」还勾着、「已选 N 条」还是旧数字（两个陈旧状态）。
+    syncCheckAll();
+    renderSelCount();
+    renderVfilt();
+    renderMultWarn();
   }
 
   // ── 勾选 ──────────────────────────────────────────────────────────────
   //
   // 只统计**启用**的复选框：合成行是 disabled 的，把它算进去会让"已选 N"
   // 与用户能看见的勾数量对不上（disabled 的框永远不可能是用户勾的）。
-  function selectedCount() {
-    var all = document.querySelectorAll('#modelRows .rowcheck');
-    var n = 0;
-    for (var i = 0; i < all.length; i++) { if (!all[i].disabled && all[i].checked) { n++; } }
+  // ⚠ 2026-10-27 重构：勾选从「只活在 DOM」改成**以 state.selected 为唯一真相**。
+  //   原实现（selectedCount 直接数 DOM 里 checked 的框）有两个可复现的陈旧状态：
+  //     · checkAll 被点过之后数据重载/搜索重绘 ⇒ 行全没了勾，但「全选」还是勾着的
+  //     · render() 不调 renderSelCount ⇒ 表格重建后「已选 N 条」还是旧数字
+  //   而它同时**违背本文件自己的原则**（:1476-1478「任何交互只改 state 再 render」）。
+  //   改成 state 驱动后：勾选跨筛选/重载保持，且全选框能置 indeterminate。
+  function selectedNames() {
+    var out = [];
+    for (var i = 0; i < state.models.length; i++) {
+      var n = state.models[i].name || '';
+      if (state.selected[n]) { out.push(n); }
+    }
+    return out;
+  }
+
+  // selHiddenCount 数有多少选中项被当前筛选挡住 —— 它们**仍会被复制**，必须说出来。
+  function selHiddenCount() {
+    var vis = {};
+    var rows = visibleModels();
+    for (var i = 0; i < rows.length; i++) { vis[rows[i].name || ''] = true; }
+    var names = selectedNames(), n = 0;
+    for (var j = 0; j < names.length; j++) { if (!vis[names[j]]) { n++; } }
     return n;
   }
 
+  // renderSelCount 同时负责「已选 N 条」与「复制所选」按钮的可用性 + 禁用原因（可见说明）。
   function renderSelCount() {
-    document.getElementById('selCount').textContent = '已选 ' + selectedCount() + ' 条';
+    var n = selectedNames().length;
+    var hidden = n ? selHiddenCount() : 0;
+    var txt;
+    if (n === 0) {
+      txt = '未选中 —— 勾选后可「复制所选」';
+    } else {
+      txt = '已选 ' + n + ' 条' + (hidden ? '（其中 ' + hidden + ' 条被当前筛选隐藏，仍会被复制）' : '');
+    }
+    document.getElementById('selCount').textContent = txt;
+    var btn = document.getElementById('btnCopySel');
+    if (btn) { btn.disabled = n === 0; }
+  }
+
+  // syncCheckAll 让「全选」框如实反映当前可见行。
+  // 原实现只被用户点击**单向**驱动 ⇒ 重绘/筛选后既不回位、也不置 indeterminate。
+  function syncCheckAll() {
+    var ca = document.getElementById('checkAll');
+    if (!ca) { return; }
+    var all = document.querySelectorAll('#modelRows .rowcheck');
+    var total = 0, checked = 0;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].disabled) { continue; }   // 合成行不参与全选（它本来就不能被勾）
+      total++;
+      if (all[i].checked) { checked++; }
+    }
+    ca.checked = total > 0 && checked === total;
+    ca.indeterminate = checked > 0 && checked < total;
+  }
+
+  // setVisibleSelected 把「当前可见且可勾选」的行写进 state.selected（全选框用）。
+  function setVisibleSelected(want) {
+    var rows = document.querySelectorAll('#modelRows .modelrow');
+    for (var i = 0; i < rows.length; i++) {
+      var cb = rows[i].querySelector('.rowcheck');
+      if (!cb || cb.disabled) { continue; }
+      var name = rows[i].getAttribute('data-name') || '';
+      if (!name) { continue; }
+      cb.checked = want;
+      if (want) { state.selected[name] = true; } else { delete state.selected[name]; }
+    }
+  }
+
+  // renderVfilt 让「只看某个供应商」**可见、可清除**。
+  // 此前它只把供应商名塞进搜索框：用户之后改搜索词时 vendorFilter 仍在生效，
+  // 结果被一个看不见的条件过滤，而界面上没有任何提示或清除入口。
+  function renderVfilt() {
+    var box = document.getElementById('vfilt');
+    if (!box) { return; }
+    var on = !!state.vendorFilter;
+    box.className = on ? 'on' : '';
+    if (on) { document.getElementById('vfiltName').textContent = state.vendorFilter; }
+  }
+
+  // renderMultWarn 显式警示「倍率目录没拿到」—— 不许静默空白（旧面板同一纪律）。
+  function renderMultWarn() {
+    var box = document.getElementById('multwarn');
+    if (!box) { return; }
+    box.className = state.multFailed ? 'on' : '';
   }
 
   // ── tab 切换 ──────────────────────────────────────────────────────────
@@ -1737,25 +2134,58 @@ header.statline { align-items:baseline; }
     refreshBtn.addEventListener('click', function () { void load(); });
   }
   document.getElementById('retry').addEventListener('click', function () { void load(); });
+  // 倍率目录单独重试：它只是附加信息，重试不必连主表一起重取。
+  document.getElementById('btnMultRetry').addEventListener('click', function () {
+    loadMultCatalog().then(function () { renderModels(); renderMultWarn(); });
+  });
+  document.getElementById('btnVFiltClear').addEventListener('click', function () {
+    state.vendorFilter = '';
+    document.getElementById('search').value = '';
+    state.filter = '';
+    renderModels();
+    renderVfilt();
+    renderSelCount();
+  });
+  // 「复制所选」：勾选**有动作**（此前勾选只更新「已选 N 条」，是个哑控件）。
+  // 逐行复制（\n 连接），顺序取表格显示顺序 ⇒ 复制出来的行序稳定、可复现。
+  document.getElementById('btnCopySel').addEventListener('click', function () {
+    var names = selectedNames();
+    if (!names.length) { flash('没有选中任何模型', true); return; }
+    copyText(names.join('\n'), '已复制 ' + names.length + ' 条模型 ID');
+  });
 
   document.getElementById('search').addEventListener('input', function (e) {
     state.filter = e.target.value || '';
     renderModels();
+    syncCheckAll();   // 可见集合变了 ⇒ 全选框必须重新判定
     renderSelCount();
   });
 
   document.getElementById('checkAll').addEventListener('change', function (e) {
-    var want = !!e.target.checked;
-    var all = document.querySelectorAll('#modelRows .rowcheck');
-    for (var i = 0; i < all.length; i++) {
-      if (all[i].disabled) { continue; }   // 合成行不参与全选（它本来就不能被勾）
-      all[i].checked = want;
-    }
+    setVisibleSelected(!!e.target.checked);
+    syncCheckAll();
     renderSelCount();
   });
 
   document.getElementById('modelRows').addEventListener('change', function (e) {
-    if (e.target && e.target.className === 'rowcheck') { renderSelCount(); }
+    var cb = e.target;
+    if (!cb || cb.className !== 'rowcheck') { return; }
+    var tr = cb.closest ? cb.closest('tr') : null;
+    var name = tr ? (tr.getAttribute('data-name') || '') : '';
+    if (!name) { return; }
+    if (cb.checked) { state.selected[name] = true; } else { delete state.selected[name]; }
+    syncCheckAll();
+    renderSelCount();
+  });
+
+  // 点模型名 → 复制完整模型 ID（用户点名）。
+  // ⚠ 事件委托挂在容器上：行是每次重绘重建的，挂到行上会随重绘一起丢掉
+  //   （表现是「第一次能点、之后没反应」，本仓在别处踩过这个形态）。
+  document.getElementById('modelRows').addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('button.namecopy') : null;
+    if (!b) { return; }
+    var id = b.getAttribute('data-id') || '';
+    copyText(id, '已复制模型 ID：' + id);
   });
 
   document.getElementById('tabs').addEventListener('click', function (e) {
@@ -1773,11 +2203,15 @@ header.statline { align-items:baseline; }
   document.getElementById('vendorRows').addEventListener('click', function (e) {
     var b = e.target && e.target.closest ? e.target.closest('button.viewmodels') : null;
     if (!b) { return; }
+    // ⚠ 2026-10-27：不再把供应商名**塞进搜索框**。原来那样做有两个后果：
+    //   ① 筛选条件伪装成搜索词 —— 用户改搜索词后 vendorFilter 仍在生效，
+    //      结果被一个看不见的条件过滤，界面上没有任何提示；
+    //   ② 没有清除入口（只能靠把搜索框清空，而那时 vendorFilter 依然是设着的）。
+    //   现在筛选状态由 #vfilt 明确显示，并给一个「显示全部」按钮。
     state.vendorFilter = b.getAttribute('data-vendor') || '';
-    document.getElementById('search').value = state.vendorFilter;
-    state.filter = state.vendorFilter;
     switchTab('models', false);
     renderModels();
+    renderVfilt();
     renderSelCount();
   });
 

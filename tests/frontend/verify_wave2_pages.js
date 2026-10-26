@@ -12,7 +12,8 @@
 //
 //   状态页：字段集与阈值（75/90）、window_seconds:300、AGPL 归属（NOTICE §7(b)）
 //   渠道页：page_size 上限 100、type_counts 同响应、翻页/搜索**不发请求**、状态字典
-//   模型页：Model/Vendor 双 tab、合成行不可勾选、全选只勾可选行、**无定价字样**、
+//   模型页：Model/Vendor 双 tab、合成行不可勾选、全选只勾可选行、**无定价/价格/单价/计费字样**
+//           （允许「倍率」——用户 2026-10-27 裁决把倍率列搬到本页）、
 //           /ui/models/data 未认证 ⇒ 401（不是 200+空数组）
 //
 // # 用法
@@ -257,8 +258,12 @@ const MEASURE_MODELS = '(function(){'
       } else {
         sk('本次隔离实例没有合成行（需要"渠道声明在用但目录没有"的模型）—— 该断言未取到样本');
       }
-      const pricing = ['定价', '价格', '倍率', '单价', '计费'].filter(w => md.bodyText.indexOf(w) >= 0);
-      ok(pricing.length === 0, '页面没有定价/价格/倍率字样（命中: ' + JSON.stringify(pricing) + '）');
+      // ⚠ 2026-10-27 用户裁决：把「倍率」搬到模型目录页显示（原话要点：「例如倍率检测
+      //   表格需要再添加一列信息」）。所以这里**允许**倍率出现，但仍然**禁止**价格/单价/计费。
+      //   注意性质：这是**撤销一条前提**（用户改了产品决策），不是放宽判据 ——
+      //   改动只是把「倍率」从禁用词表里移出，其余四个词一个没动。
+      const pricing = ['定价', '价格', '单价', '计费'].filter(w => md.bodyText.indexOf(w) >= 0);
+      ok(pricing.length === 0, '页面没有定价/价格/单价/计费字样（允许「倍率」，见上方用户裁决；命中: ' + JSON.stringify(pricing) + '）');
       const all = JSON.parse(await ev(`(function(){
         var d = document.getElementById('mdFrame').contentDocument, c = d.getElementById('checkAll');
         if (!c) return JSON.stringify({err:'no checkAll'});
