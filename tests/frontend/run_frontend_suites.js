@@ -120,6 +120,11 @@ const PROBES = [
   // "绑了几次"只有运行期数得出来。
   // 实例不在时会明确失败而不是静默跳过 —— 静默跳过等于没有守卫。
   'verify_accts_delegation.js',
+  // 分组面板（/ui/groups）的端到端探针（T86 新增）：列表 / used_by_count /
+  // 行内展开（模型集合 + 对外名映射）/ 「谁在用」三类 / 空引用文案 / 404 当错误 / 两档几何。
+  // ⚠ 它打的是真端点：GET /admin/groups 的 used_by_count 与 GET /admin/groups/usage?id= 由 T85 实现，
+  //   后端未落地时它的引用断言会红 —— 那是如实报告，不是探针坏了。
+  'verify_groups_panel.js',
   // 「全部签到」分级布局的**真前端 e2e**（本轮新增）。
   //
   // ⚠ 它**自己起一个隔离实例**（临时目录 + 空闲端口 7871，可用 E2E_PORT

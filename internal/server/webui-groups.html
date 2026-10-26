@@ -145,6 +145,20 @@
   .card ul { margin:0; padding-left:18px; }
   .card li { margin:2px 0; }
   .kv { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+  /* ── T86：分组行内展开（只读视图）───────────────────────────────────────
+     全部走语义变量，零硬编码颜色（T76 的 1.93:1 就是写死色的代价）；
+     行高纪律：**主表格行仍 26px**，明细行是内容区，允许自适应高度。 */
+  tr.grow { cursor: pointer; }
+  tr.gdetail > td {
+    height: auto; line-height: 1.6; padding: 8px 10px;
+    background: var(--panel2); color: var(--fg); white-space: normal;
+  }
+  .gsec { margin: 0 0 10px; }
+  .gsec h4 { margin: 0 0 4px; font-size: 12px; color: var(--dim); font-weight: 600; }
+  .maprow { font-size: 12px; margin: 2px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .maprow code { font-family: var(--font-mono); color: var(--fg); }
+  .uline { font-size: 12px; margin: 3px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
@@ -1439,7 +1453,7 @@ function mpEsc(s) {
       <col style="width:420px"><col style="width:160px"><col style="width:130px">
     </colgroup>
     <thead><tr>
-      <th>名称</th><th>描述</th><th>模型数</th><th>创建时间</th><th>操作</th>
+      <th>名称</th><th>描述</th><th>模型数</th><th>引用</th><th>创建时间</th><th>操作</th>
     </tr></thead>
     <tbody id="rows"></tbody>
   </table></div>
@@ -1572,7 +1586,7 @@ async function api(path, opt) {
 // ---- 列表 ----
 async function load() {
   const tbody = $('rows');
-  tbody.innerHTML = '<tr><td colspan="5" class="muted">加载中…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="6" class="muted">加载中…</td></tr>';
   try {
     const d = await api('/admin/groups');
     groups = (d && d.groups) || [];
@@ -1581,28 +1595,122 @@ async function load() {
       ? ('共 ' + groups.length + ' 个分组')
       : '分组功能未启用（后端没有注入分组存储）';
     if (!groups.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="muted">还没有分组 —— 点左上「+ 新增分组」。' +
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">还没有分组 —— 点左上「+ 新增分组」。' +
         '建好后到「API 管理」里把分组分配给 key，那把 key 就只看得见这些模型了。</td></tr>';
       return;
     }
     tbody.innerHTML = groups.map(function (g) {
       const models = g.models || [];
-      return '<tr>'
+      // used_by_count 是**只读聚合**（契约 §1）：keys + channels + tokens 的引用总条数。
+      // 0 显示成中性文案而不是「0」—— 0 会让人以为这一格坏了/没加载出来。
+      const ub = (typeof g.used_by_count === 'number') ? g.used_by_count : null;
+      const ubText = ub === null ? '<span class="muted">—</span>'
+        : (ub > 0 ? ('被 ' + ub + ' 处引用') : '<span class="muted">暂无引用</span>');
+      return '<tr class="grow" data-gid="' + esc(g.id) + '" title="点开看模型、对外名映射与谁在用它">'
         + '<td title="' + esc(g.name) + '">' + esc(g.name) + '</td>'
         + '<td title="' + esc(g.description) + '">' + (g.description ? esc(g.description) : '<span class="muted">—</span>') + '</td>'
         + '<td>' + (g.model_count != null ? g.model_count : models.length) + '</td>'
+        + '<td>' + ubText + '</td>'
         + '<td class="muted">' + esc(fmtTime(g.created_at)) + '</td>'
         + '<td>'
         + '<button onclick="openForm(\'' + esc(g.id) + '\')" style="padding:0 8px;height:22px;line-height:20px;font-size:12px">编辑</button> '
         + '<button class="danger" onclick="del(\'' + esc(g.id) + '\')" style="padding:0 8px;height:22px;line-height:20px;font-size:12px">删除</button>'
-        + '</td></tr>';
+        + '</td></tr>'
+        // 明细行：懒渲染（点开才算），避免几十个分组一次性把上百个模型 chip 铺进 DOM。
+        + '<tr class="gdetail" id="gd-' + esc(g.id) + '" hidden><td colspan="6"></td></tr>';
     }).join('');
     window.__groups = groups;
   } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="5" class="err">' + esc(e.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="err">' + esc(e.message) + '</td></tr>';
     $('stat').textContent = '';
   }
 }
+
+// ---- 行内展开（T86：模型集合 / 对外名映射 / 谁在用）----------------------
+//
+// 三条纪律（写在代码旁边，改的人先读）：
+//  ① **一律只读**：这里没有任何写操作入口 —— 点开看一眼不该改状态；
+//  ② **ModelMap 是一对多**（map[string][]string）：别名 → [内部名...]，
+//     **不许压回单值**（groupstore 的 legacy 单值→多值有专门用例）；
+//  ③ 「空集合」与「没查」必须可区分：模型为空时说的是「允许范围为空」，
+//     不是「没加载出来」。
+function groupDetailHtml(g) {
+  const models = g.models || [];
+  const modelBlock = models.length
+    ? '<div class="chips">' + models.map(function (m) { return '<span class="chip">' + esc(m) + '</span>'; }).join('') + '</div>'
+    : '<span class="muted">这个分组的模型集合是空的（= 允许范围为空，不是「没查」）。</span>';
+  const map = g.model_map || null;
+  const aliases = map ? Object.keys(map) : [];
+  const mapBlock = aliases.length
+    ? aliases.map(function (alias) {
+        const inner = map[alias] || [];
+        return '<div class="maprow"><code>' + esc(alias) + '</code> → '
+          + (inner.length ? inner.map(function (n) { return '<span class="chip">' + esc(n) + '</span>'; }).join(' ') : '<span class="muted">（未映射到任何内部名）</span>')
+          + '</div>';
+      }).join('')
+    : '<span class="muted">没有配置对外名映射。alias 跟着分组走，一个 alias 可以映射到多个内部名。</span>';
+  return '<div class="gsec"><h4>模型集合（' + models.length + '）</h4>' + modelBlock + '</div>'
+    + '<div class="gsec"><h4>对外名映射</h4>' + mapBlock + '</div>'
+    + '<div class="gsec"><h4>谁在用这个分组</h4><div id="gu-' + esc(g.id) + '"><span class="muted">读取中…</span></div></div>';
+}
+
+function usageLine(title, arr, label) {
+  if (!arr || !arr.length) return '<div class="uline"><b>' + title + '</b>：<span class="muted">无</span></div>';
+  return '<div class="uline"><b>' + title + '（' + arr.length + '）</b>：'
+    + arr.map(function (x) { return '<span class="chip">' + esc(label(x)) + '</span>'; }).join(' ') + '</div>';
+}
+
+// loadUsage 打的是 GET /admin/groups/usage?id=<分组名>（契约 §2）。
+// ⚠ 404 与「空引用」是**两件事**：404 = 这个分组名在后端不存在（要么被别处删了、要么名字错了），
+//   空引用 = 合法的「暂时没人用」。把 404 渲染成空列表会让用户以为「没人用」 —— 那是错的。
+async function loadUsage(g) {
+  const host = $('gu-' + g.id);
+  if (!host) return;
+  try {
+    const d = await api('/admin/groups/usage?id=' + encodeURIComponent(g.name));
+    const keys = d.keys || [], chans = d.channels || [], toks = d.tokens || [];
+    const total = (typeof d.total === 'number') ? d.total : (keys.length + chans.length + toks.length);
+    if (!total) { host.innerHTML = '<span class="muted">暂无引用 —— 还没有任何 API key / 渠道 / 令牌用到这个分组。</span>'; return; }
+    // ⚠ 标题必须体现「同一张 tokens 表按 user_id 分区」（主脑 2026-10-27 裁决）：
+    //   user_id = 0 → 管理端建的凭据（keys）；user_id > 0 → 账号自有令牌（tokens）。
+    //   写成两个互不相干的类别会让用户觉得数字对不上（其实是同表两分区）。
+    // ⚠ keys[].id 是**掩码**（本仓既定纪律）：照常显示掩码，不要求后端回明文。
+    // ⚠ ?id= 同时接受分组名与分组 ID（超集），这里按**分组名**传（契约 §5）；
+    //   分组命名空间不一致（apikey 存 ID、token/channels 存名字）由后端匹配，**前端不再过滤一遍**。
+    // ⚠ token_scan_truncated：true = 令牌扫描到达上限（4000）⇒ 统计可能不全。
+    //   **必须显式渲染**：少报比多报更容易误导（用户会以为「就这些」）。
+    host.innerHTML = usageLine('管理端 API key（tokens 表 user_id=0）', keys, function (x) { return x.name || x.id; })
+      + usageLine('渠道', chans, function (x) { return (x.name || x.id) + (x.external_id ? '（' + x.external_id + '）' : ''); })
+      + usageLine('账号令牌（tokens 表 user_id>0）', toks, function (x) { return x.name || ('#' + x.id); })
+      + (d.token_scan_truncated
+          ? '<div class="uline err"><b>注意</b>：令牌扫描已达上限（4000 条），上面的「账号令牌」可能<b>少报</b> —— 这个数字是下限，不是全量。</div>'
+          : '');
+  } catch (e) {
+    host.innerHTML = '<span class="err">读取引用失败：' + esc(e.message) + '</span>'
+      + '<div class="muted" style="font-size:11px">404 = 这个分组名在后端不存在（与「暂无引用」不是一回事）；其余为网络/权限错误。</div>';
+  }
+}
+
+// 明细懒渲染：点开才算，避免几十个分组把上百个 chip 一次铺进 DOM。
+$('rows').addEventListener('click', function (e) {
+  if (e.target.closest('button')) return;   // 编辑/删除按钮的点击不触发展开
+  const tr = e.target.closest('tr.grow');
+  if (!tr) return;
+  const id = tr.getAttribute('data-gid');
+  const det = $('gd-' + id);
+  if (!det) return;
+  if (!det.hasAttribute('hidden')) { det.setAttribute('hidden', ''); return; }
+  let g = null;
+  for (let i = 0; i < groups.length; i++) { if (groups[i].id === id) { g = groups[i]; break; } }
+  if (!g) return;
+  det.removeAttribute('hidden');
+  const cell = det.firstElementChild;
+  if (!cell.getAttribute('data-filled')) {
+    cell.innerHTML = groupDetailHtml(g);
+    cell.setAttribute('data-filled', '1');
+    loadUsage(g);
+  }
+});
 
 
 // fmtTime 只做"能读"的格式化，不做时区换算（后端存的是 RFC3339 UTC）。

@@ -139,7 +139,12 @@ function describeBuild() {
 function assertBuildFresh(warn) {
   const say = warn || ((m) => console.log(m));
   const b = describeBuild();
-  const rebuild = 'go build -o ' + path.relative(REPO, b.exe).replace(/\\/g, '/') + ' ./cmd/server';
+  // ⚠ 重建命令**固定指向 probe 构建**，不跟随 b.exe（T87 修）：
+  //
+  // 原先它按 b.exe 生成，于是"故意把 WB2API_EXE 指到 bin/wb2api-server.exe 做对照"
+  // 的场景下，这行提示会建议**覆盖用户正在跑的线上二进制** —— 与本仓硬约束直接冲突，
+  // 而且真照着做会毁掉 7863 那个实例用的文件。提示的职责是"给出安全的那条路"。
+  const rebuild = 'go build -o bin/wb2api-server-probe.exe ./cmd/server';
   say('  本次起的构建: ' + b.exe);
   say('    exe mtime      : ' + (b.exeMtime ? String(b.exeMtime) : '(文件不存在)'));
   say('    ' + b.newestRel.replace(/^/, '').padEnd(15, ' ') + ' mtime: ' +
@@ -158,6 +163,9 @@ function assertBuildFresh(warn) {
     say('       ⇒ 浏览器拿到的是 //go:embed 进去的**旧**页面，' +
       '症状看起来永远像"前端没生效"（本仓吃过这个亏）');
     say('       重建命令: ' + rebuild);
+    say('       跑实例请用: WB2API_EXE=bin/wb2api-server-probe.exe');
+    say('       ⚠ 不要覆盖 bin/wb2api-server.exe —— 那是用户的线上二进制' +
+      '（7863 通常正跑着它）。要对旧构建做对照，就另编一个别的名字再指过来。');
     say('       （口径与 tests/frontend/verify_login_visual_e2e.js:419-431 那段一致；' +
       '那边只报不判，因为要能验旧构建做对照）');
     throw new Error('构建过期，拒绝在旧页面上断言：' + b.exe + ' < ' + b.newestRel);

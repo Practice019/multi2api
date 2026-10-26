@@ -15,24 +15,31 @@
 // `installAllDailyActions` 的"只绑一次"守卫去掉、并改成每次重绘都调它，
 // 刷新 5 次后点一次会发 **7 个**请求 —— 而所有只看 DOM 的断言全绿。
 //
-// # 它是本目录**唯一**自己起网关实例的套件
+// # 实例启动：走共享层 lib_instance（T83 统一）
 //
-// 其余套件要么纯静态、要么需要外部已跑着的实例（ACC_URL）。本套件
-// 自己起一个**隔离实例**（临时目录 + 空闲端口），因为：
+// 本套件要起一个**隔离实例**（临时目录 + 空闲端口），因为：
 //
 //   - 要拦 fetch 记录真实请求，页面**首先得能正常引导**（boot() 会真打
 //     /healthz、/admin/ui/manifest、/admin/settings…）。用假后端复刻这些
 //     形状比起真实例更不真实、也更脆。
 //   - 只把 manifest 换成本文件手造的那份（假上游名 alpha/beta/gamma），
-//     于是"前端不认识任何上游名"这条判据也被真正测到。
+//     于是「前端不认识任何上游名」这条判据也被真正测到。
 //
-// # 前置判据（新增）：要启动的 exe 必须是**当前构建**
+// ⚠ **T83 之前**本探针自己解析 EXE、自己 spawn：EXE 在模块求值那一刻定死，
+//   缺省是 `bin/wb2api-server.exe`（**用户正在跑的旧构建**）⇒ 未设 WB2API_EXE
+//   时它会去起用户的实例，然后被「构建陈旧」判据拦下。T79 实测：3 次里红 1 次，
+//   而**产品没有任何问题**（探针侧 flake）。
 //
-// 本套件验的是**页面行为**，而页面来自 exe 内嵌的 webui.html
-// （`internal/server/webui.go:15` 的 `//go:embed`，编译期内嵌）。
-// exe 比磁盘上的 html 旧 ⇒ 测的是**旧产品**，绿灯也是假绿。
-// 判据与理由见下面 assertBuildFresh 的注释（同一条判据另一个副本在
-// verify_all_buttons_e2e.js）。
+// 现在与其它实例探针同构（范式见 verify_wave2_pages.js）：
+//
+//   ① 缺省 WB2API_EXE = probe 构建（**在 require(lib_instance) 之前**设）
+//   ② startInstance 现起实例：现场探测的空闲端口 + os.tmpdir() 下的临时目录
+//   ③ 构建新鲜度由 lib_instance.assertBuildFresh **硬门禁**（过期直接抛，
+//      没有 bypass 开关）—— 本文件不再持有那份实现的同源副本
+//   ④ 收尾按 PID/句柄收（inst.stop()），端口空出会被确认
+//
+// 断言与语义**一个字没改**：本文件要证的行为（卡片头按钮打自己的 all_url、
+// 顶部打核心端点、刷新后按钮不累积、点一次只发一个请求）逐条照旧。
 //
 // # ⚠ 端口与目录都是临时的
 //
@@ -41,6 +48,10 @@
 // 目录在 os.tmpdir() 下按 pid 唯一。收尾**按 PID 杀**，不用
 // `Get-Process <name> | Stop-Process`（那会误杀用户自己的实例）。
 'use strict';
+// ⚠⚠ 必须在 require(lib_instance) **之前**设：lib_instance 在**模块求值那一刻**
+// 就把 EXE 定下来（lib_instance.js:38-49），设晚了会静默回落到
+// bin/wb2api-server.exe —— 那通常是用户正在跑的旧构建（本仓吃过这个亏）。
+if (!process.env.WB2API_EXE) process.env.WB2API_EXE = 'bin/wb2api-server-probe.exe';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -51,99 +62,44 @@ const CHROME = require('./chrome_path.js').resolveChrome();
 // 控制台身份：withToken 是共享层里"给 /ui 挂令牌"的**唯一**实现
 //（本文件自带 CDP 引导段，不走 withChrome，所以得自己调一次 —— 见 UI_URL 的注释）。
 const { withToken } = require('./lib_cdp.js');
+// 实例启动统一走共享层（T83）：EXE 缺省、端口预检、构建新鲜度、临时目录、
+// 收尾确认端口空出 —— 全都在它里面，探针不再各写一份。
+const { startInstance } = require('./lib_instance.js');
 const REPO = path.resolve(__dirname, '..', '..');
-// EXE 可用环境变量覆盖：WB2API_EXE=bin/wb2api-server-probe.exe
-//   ⚠ 存在的理由：**不能覆盖 bin/wb2api-server.exe** —— 那通常是用户正在跑的
-//     实例（Windows 上还被进程锁着）。改了代码要验证时，编一个别的名字再指过来。
+// ── EXE 与构建新鲜度：**都交给 lib_instance**（T83 统一，不再各写一份）──
 //
-// 这三行是 `lib_instance.js:31-36` 的**照抄**，不是另创一套。本探针是自包含的
-// （自己 spawn + 自己开 CDP），不 require lib_instance.js；但"要启动哪个二进制"
-// 这条规则仓库里只能有**一份**：env 优先、相对仓库根解析。
+// 这里原先有两块本地实现：① 自己解析 EXE（缺省 bin/wb2api-server.exe = 用户二进制）；
+// ② assertBuildFresh 的同源副本。它们的缺省值就是 T79 实测那条 1/3 间歇红的根因：
+// 未设 WB2API_EXE ⇒ 起用户的旧构建 ⇒ 被新鲜度判据拦下 ⇒ 看起来像产品缺陷。
 //
-// 改之前它是写死的 `path.join(REPO, 'bin', 'wb2api-server.exe')`（旧第 44 行），
-// 后果就是下面 assertBuildFresh 注释里那次事故：这条探针从来没有读过 WB2API_EXE。
-const EXE = process.env.WB2API_EXE
-  ? path.resolve(REPO, process.env.WB2API_EXE)
-  : path.join(REPO, 'bin', 'wb2api-server.exe');
-
-// EXE_AT_LOAD 记下"本文件求值那一刻"的取值，用来抓 `lib_instance.js:38-49` 那个**静默**坑：
+// 现在 EXE 只由 lib_instance 决定（缺省 probe 构建；显式指向用户二进制时会打印
+// 醒目告警），新鲜度由 lib_instance.assertBuildFresh **硬门禁**（不新鲜直接抛，
+// 没有 bypass 开关，理由见那函数的长注释）。
 //
-//	process.env.WB2API_EXE = 'bin/xxx-probe.exe';   // ← 写在本文件被 require/import 之后
-//	const mod = require('./verify_checkin_ui_e2e.js');
-//
-// 上面的顺序里，本模块早就求值完了，EXE 恒为缺省的 `bin/wb2api-server.exe`
-// —— 而那常常是**用户正在跑的旧构建**。症状极具误导性：探针会去起那个旧版本，
-// 于是"上一世代"的行为被当成当前代码的 bug 来查（实测有人整轮断言作废）。
-//
-// 判据只能是"求值时的值 vs 用的时候的值"，所以两处都记下来比较（照抄同一对策）。
-const EXE_AT_LOAD = EXE;
+// ⚠ 仍有同源副本的是 `verify_all_buttons_e2e.js`（T83 只允许改本文件，
+//   那条留给后续统一；它同样自解析 EXE + 自建新鲜度判据）。
 
 const fmtTime = (ms) => new Date(ms).toLocaleString('zh-CN', { hour12: false });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// assertBuildFresh 是**硬门禁**：要启动的 exe 必须不比 internal/server/webui.html 旧。
-//
-// # 为什么这条判据存在（2026-10-19 实测）
-//
-// `internal/server/webui.go:15` 用 `//go:embed webui.html` **编译期内嵌**整页前端，
-// 所以 **exe 里嵌的是"构建那一刻"的 HTML**。exe 比 html 旧 ⇒ 它内嵌的是**旧产品**：
-// 浏览器拿到的 /ui 根本不是磁盘上那份，本探针数的那套按钮/委托也不是当前代码的
-// —— 于是它报的绿灯是"**旧产品上的绿灯**"，也就是假绿。
-//
-// 实测时间戳：`bin/wb2api-server.exe` = 04:17:47（旧构建），
-// `bin/wb2api-server-probe.exe` = 15:01:59，`internal/server/webui.html` = 15:01:47。
-// 这两条探针原先**写死** bin/wb2api-server.exe 且完全不读 WB2API_EXE，于是它们
-// 启动的是 11 小时前的旧构建：盘上改了前端、探针验的还是旧前端。
-//
-// 比较对象是**实际要启动的那个 exe**（EXE，可能被 WB2API_EXE 指到探针构建），
-// 不是写死的那条路径 —— 否则换成 probe 二进制就判不出陈旧来。
-// exe 不存在也判红：不存在的 exe 不可能"比 html 新"，那同样是没测到当前产品。
-//
-// # 为什么**不给**"允许旧的"绕过开关
-//
-// 唯一正当的场景是"我就是要拿旧二进制做对照实验"，而那属于**一次性另跑**：
-// 把探针显式指到另一个文件（WB2API_EXE=bin/wb2api-server-old.exe）就够。
-// 一旦有 `WB2API_ALLOW_STALE=1` 这类开关，它迟早会被用来把红灯变绿，
-// 而本仓库的纪律是"不许为了变绿而弱化判据"（`run_frontend_suites.js` 的门禁 1/2 同款理由）。
-// 换句话说这条门禁回答的问题是"你现在验的是哪一份产品"，那个问题没有"其实也可以"的答案。
-//
-// ⚠ 同源副本：`verify_all_buttons_e2e.js` 里有一份逐字相同的实现
-//   （本轮纪律是只改这两个文件、不新建共享层）。改一处必须同步另一处，
-//   否则两条探针的新鲜度判据会悄悄漂成两套。
-function assertBuildFresh(exe) {
-  const html = path.join(REPO, 'internal', 'server', 'webui.html');
-  if (!fs.existsSync(exe)) {
-    console.log('  FAIL 构建新鲜度：要启动的 exe 不存在 ⇒ 不可能是当前构建');
-    console.log('       使用的 exe : ' + exe);
-    console.log('       下一步     : go build -o bin/wb2api-server-probe.exe ./cmd/server');
-    console.log('                    并设 WB2API_EXE=bin/wb2api-server-probe.exe 再跑本探针');
-    return false;
-  }
-  const exeMs = fs.statSync(exe).mtimeMs;
-  const htmlMs = fs.statSync(html).mtimeMs;
-  if (exeMs >= htmlMs) {
-    console.log('  PASS 构建新鲜度：exe（' + fmtTime(exeMs) + '）不比 webui.html（' +
-      fmtTime(htmlMs) + '）旧');
-    return true;
-  }
-  console.log('  FAIL 构建新鲜度：要启动的 exe 比 internal/server/webui.html 旧 ⇒ 验的是**旧产品**' +
-    '（exe 内嵌的是旧 HTML）');
-  console.log('       使用的 exe : ' + exe);
-  console.log('       exe  mtime  : ' + fmtTime(exeMs));
-  console.log('       html mtime  : ' + fmtTime(htmlMs) + '   (' + path.relative(REPO, html) + ')');
-  console.log('       exe 旧了    : ' + Math.round((htmlMs - exeMs) / 1000) + ' 秒');
-  console.log('       下一步     : go build -o bin/wb2api-server-probe.exe ./cmd/server');
-  console.log('                    并设 WB2API_EXE=bin/wb2api-server-probe.exe 再跑本探针');
-  return false;
+// 现场探测一个空闲端口（0 = 让内核分配，拿到就立刻释放）。
+// ⚠ 为什么不用固定端口 7871：固定端口在并发/别的探针残留时会撞（lib_instance 的
+// 端口预检会因此红），而"现场探测的端口"才是本仓其它实例探针的统一口径。
+// E2E_PORT 仍可显式指定（用于复现/对照），指定时按它来。
+function freePort() {
+  return new Promise((res, rej) => {
+    const s = require('net').createServer();
+    s.on('error', rej);
+    s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
+  });
 }
 
-// ⚠ 端口与目录都必须是一次性的：仓库里已有的 config.json（7863）/
-// config-test-port7864.json（7864）可能是用户在用的，绝不碰。
-const PORT = Number(process.env.E2E_PORT || 7871);
-const TMP = path.join(os.tmpdir(), 'wb2api-e2e-' + PORT + '-' + process.pid);
 const PROFILE = path.join(os.tmpdir(), 'chrome-checkinui-e2e-' + Date.now() + '-' + process.pid);
-const CDP = 9361;
-const KEY = 'e2e-only-key-' + PORT;
-const BASE = 'http://127.0.0.1:' + PORT;
+const KEY = 'e2e-only-key-checkin';
+// BASE / PORT / UI_URL 都要等实例起来才知道（端口是现场探测的）⇒ 在 main 里赋值。
+let PORT = Number(process.env.E2E_PORT || 0);
+let BASE = '';
+let UI_URL = '';
 
 // UI_URL —— 开控制台必须**带身份**，不能再裸开 /ui。
 //
@@ -153,32 +109,16 @@ const BASE = 'http://127.0.0.1:' + PORT;
 //   ① `?token=<admin_token>` 校验通过 ⇒ `Set-Cookie`（令牌 cookie，12h）+ **302 回干净的 /ui**
 //   ② 已认证（会话 cookie 或令牌 cookie）⇒ 控制台外壳（页里有 `window.__wb2api__`）
 //   ③ **其余**（含裸 `/ui`）⇒ 直接渲染**登录页**（webui-login.html，没有 `window.__wb2api__`）
-// 这道登录门是 commit `34777b6`（2026-10-19 08:59:27）落地的（T5/T7 拆掉
-// "回环地址即凭据 + 页面明文注入 api_key"）。
 //
 // 本探针自带 CDP 引导段（不 `withChrome`），于是**绕过**了共享层里的
-// `withToken(navURL)`（lib_cdp.js:269）⇒ 裸 /ui ⇒ 登录页 ⇒ `window.__wb2api__` 不存在
-// ⇒ 本文件下面每条页面断言都是级联（实测 6 条：引导 2 条 + 布局 4 条 + 一条 EXCEPTION）。
+// `withToken(navURL)`（lib_cdp.js）⇒ 裸 /ui ⇒ 登录页 ⇒ `window.__wb2api__` 不存在
+// ⇒ 下面每条页面断言都是级联（实测 6 条：引导 2 条 + 布局 4 条 + 一条 EXCEPTION）。
 //
-// # 那为什么以前是"绿"的（这条比结论值钱）
+// ⚠ 用共享层的 `withToken`，不在本文件就地实现：它是「控制台 URL 的唯一入口」。
+// ⚠ 令牌走探针自己的 admin_token（KEY）；登录门只认 `admin_token`，未配时恒 false
+//   且不回落到 api_key（webui.go:114-115）—— lib_instance 起实例时两者同值。
 //
-// 旧构建 `bin/wb2api-server.exe`（2026-10-19 04:17:47）**早于**那道登录门。字节级实测：
-// 它**不含** `__WB2API_LOGIN_BOOTSTRAP__`、**含** `__WB2API_KEY__` —— 即
-// lib_instance.js:43-46 记的"上一世代：裸 /ui 吐控制台外壳 + 页面里明文 key"。
-// 所以裸 /ui 当年真能拿到控制台，本探针的断言**真跑过、也真报过绿**
-//（CHANGELOG:1415 记的这条 e2e 与 42/0 同批）—— 那是**在一个已不复存在的产品世代上的绿**。
-// 也就是说这里的缺陷不是一个 token，而是两个前提同时过期且互相掩盖：
-// ① 探针绑死在 `bin/wb2api-server.exe` 这个旧二进制上（本轮前面的 EXE 解析 + 新鲜度判据修的）；
-// ② 开页不带身份（本次修的）。只有把它们一起摆出来，才会看见"绿灯属于哪个世代"。
-//
-// ⚠ 用共享层的 `withToken`，不在本文件就地实现：它是"控制台 URL 的唯一入口"；
-//   就地再写一份就是"同源副本"，两边一漂就变成两套行为。
-// ⚠ 令牌走的是**探针自己的** admin_token（下面 config 里的 KEY）：
-//   登录门只认 `admin_token`，**未配时恒 false 且不回落到 api_key**
-//   （webui.go:114-115），所以 config 里必须有那一行。
-const UI_URL = withToken(BASE + '/ui', KEY);
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+// ⚠ UI_URL 现在在 main 里赋值：端口是**现场探测**的，模块求值期还不知道 BASE。
 const get = u => new Promise((res, rej) => http.get(u, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(d)); }).on('error', rej));
 
 // 手造 manifest：两个**仓库里不存在**的上游名。
@@ -221,56 +161,29 @@ const ACCOUNTS = {
   ],
 };
 
-// ---- 起隔离实例 ----
-fs.mkdirSync(TMP, { recursive: true });
-fs.mkdirSync(path.join(TMP, 'auths'), { recursive: true });
-fs.mkdirSync(path.join(TMP, 'data'), { recursive: true });
-// config 里必须给 **admin_token**（不只是 api_key）：
-// 登录门只认 admin_token，未配时 `adminTokenOK` 恒 false，**不回落到 api_key**
-//（webui.go:114-115）。这就是"探针起的实例没人给它管理令牌 ⇒ 开 /ui 只能看登录页"
-// 的那个前提缺口；lib_instance.js:148-149 起实例时也是 `api_key` 与 `admin_token` 同值。
-fs.writeFileSync(path.join(TMP, 'config.json'), JSON.stringify({
-  listen: '127.0.0.1:' + PORT,
-  api_key: KEY,
-  admin_token: KEY,
-  auth_dir: './auths',
-  admin: { checkin_log_path: './data/checkin-log.json', client_login_enabled: false },
-  login: { open_browser: false, isolated: true },
-}, null, 2));
+// ---- 起隔离实例：全部交给 lib_instance（T83）----
+//
+// 它写的那份 config 已含本探针需要的前提（api_key 与 admin_token **同值**、auth_dir、
+// admin.checkin_log_path、login.isolated），所以这里不再手写 config —— 手写那份就是
+// 「同一个东西两处定义」，一旦 lib_instance 改了前提，本探针会静默地少一条。
 
-let srv = null, ch = null, fail = 0, ws = null;
+let inst = null, ch = null, fail = 0, ws = null;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fail++; };
 
 (async () => {
   try {
-    // 抓"本文件求值之后才设 WB2API_EXE"那个静默坑（见 EXE_AT_LOAD 的注释）。
-    // ⚠ 只警告**不抛**：探针可能就是故意要打另一个二进制（对照实验）。
-    const nowEXE = process.env.WB2API_EXE
-      ? path.resolve(REPO, process.env.WB2API_EXE)
-      : path.join(REPO, 'bin', 'wb2api-server.exe');
-    if (nowEXE !== EXE_AT_LOAD) {
-      console.log('⚠⚠ WB2API_EXE 是在本文件求值**之后**才设的 —— 本次仍用求值时那份：');
-      console.log('     ' + EXE_AT_LOAD);
-      console.log('     你想要的：' + nowEXE);
-      console.log('     改法：把 WB2API_EXE 设在启动本探针**之前**（命令行 / 包装脚本里设）。');
-      console.log('     （否则验的是另一个二进制，现场表现极具误导性）');
-    }
-    // 硬门禁：先确认要启动的是**当前构建**，再去起它（见 assertBuildFresh 的注释）。
-    // ⚠ 位置在 spawn **之前**：旧 exe 一旦起来，页面里全是上一世代的行为，
-    //   后面几十条断言会以极具误导性的方式红/绿 —— 不如在这里就停，
-    //   而且这时唯一可信的结论正好是"你现在验的是哪一份产品"。
-    if (!assertBuildFresh(EXE)) {
-      throw new Error('构建陈旧：要启动的 exe 比 internal/server/webui.html 旧 —— 拒绝在旧产品上验前端');
-    }
-    srv = spawn(EXE, ['-config', 'config.json'], { cwd: TMP, stdio: 'ignore' });
-    // 等它监听
-    let up = false;
-    for (let i = 0; i < 40; i++) {
-      try { await get(BASE + '/healthz'); up = true; break; } catch { }
-      await sleep(250);
-    }
-    if (!up) throw new Error('实例未在 ' + BASE + ' 起来');
-    console.log('  实例已起: ' + BASE + '（pid=' + srv.pid + '，临时目录 ' + TMP + '）');
+    // 端口：E2E_PORT 显式给了就照它；否则现场探测一个空闲端口（不写死 7871）。
+    if (!PORT) PORT = await freePort();
+    // 实例启动 + 构建新鲜度门禁 + 端口预检全在 startInstance 里（T83 统一）：
+    //   · EXE 缺省 probe 构建（本文件顶部在 require 之前设的）
+    //   · assertBuildFresh 硬门禁（过期直接抛；没有 bypass 开关）
+    //   · 端口被占 ⇒ 大声红并点名 pid（不静默换端口）
+    inst = await startInstance({ port: PORT, apiKey: KEY });
+    BASE = inst.base;
+    UI_URL = withToken(BASE + '/ui', KEY);
+    console.log('  实例已起: ' + BASE + '（pid=' + inst.pid + '，临时目录 ' + inst.tmp + '）');
+    // CDP 端口同样现场探测（原先写死 9361：并发时会撞）。
+    const CDP = await freePort();
 
     ch = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
       '--remote-debugging-port=' + CDP, '--user-data-dir=' + PROFILE, '--window-size=1440,1100', 'about:blank'],
@@ -506,9 +419,9 @@ const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fai
     // ⚠ 按 PID 杀，不用 Get-Process <name>（会误杀用户自己的实例）
     try { if (ws) ws.close(); } catch { }
     try { if (ch) ch.kill(); } catch { }
-    try { if (srv) srv.kill(); } catch { }
-    await sleep(600);
-    try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { }
+    // 实例收尾交给 startInstance 的 stop()：按 pid 收 + **确认端口真空出来**
+    //（它比自己 kill 更强：kill 之后还要等 socket 释放，否则下一条探针会撞端口预检）。
+    try { if (inst) await inst.stop(); } catch (e) { console.log('  stop(): ' + e.message); }
     try { fs.rmSync(PROFILE, { recursive: true, force: true }); } catch { }
   }
   console.log(fail === 0 ? '\n=== 「全部签到」前端 e2e 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');

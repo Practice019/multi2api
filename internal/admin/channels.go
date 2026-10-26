@@ -1481,7 +1481,12 @@ func (h *Handler) channelsStatus(w http.ResponseWriter, r *http.Request) {
 // 为什么单独一个端点：列表接口是轮询的（前端每次刷新都会打），把明文塞进列表等于
 // 每次轮询都把全部渠道的 key 发一遍。而这个端点只在用户主动点「显示/复制」时调用。
 // 它已经不要求额外口令 —— 会话门禁就是门槛（与"登录后凭据可看可复制"的既有口径一致）。
+//
+// ⚠ T82：与 /admin/tokens/{id}/key **同一道缓存闸**（复用同一个 noStore helper）。
+// 理由不是"保持一致好看"，而是同一个风险：明文 key 一旦进了任何一层缓存（浏览器、
+// 中间代理），"只在点击时下发"就失效了 —— 缓存会把它留在盘上。
 func (h *Handler) channelsReveal(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	s := h.channelsStore()
 	if s == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道功能未启用"})
@@ -1518,6 +1523,10 @@ func newChannelID() string {
 
 // ---------------------------------------------------------------------------
 // T08：channels + abilities 的反向 seed（PLAN-hyxapi-alignment §4 T08）
+//
+// ⚠⚠ T82 改了这里的**分工**：清单（RegistryChannelSeeds）保留为覆盖度/校验用途，
+// 而它**不再是数据写入来源** —— 默认上游是账号池上游，不该出现在渠道表里。
+// SeedSQLChannels 的四步职责写在它自己的注释里；统计字段改用 Marked/Removed。
 // ---------------------------------------------------------------------------
 
 // RegistryChannelSeeds 是 cmd/server/main.go **13 处 registry.Register** 的反向清单。
@@ -1598,44 +1607,82 @@ func RegistryChannelSeeds() []store.ChannelSeed {
 	}
 }
 
-// SeedSQLChannels 把 13 个注册点反向 seed 进 channels/abilities 两张表。
+// SeedSQLChannels —— ⚠ **T82 起语义变了：不再把默认上游写进渠道表**。
 //
-// # 调用时机与调用方
+// # 用户指令与它背后的分类事实
 //
-// 由 cmd/server 在 `store.Open` + `store.Migrate` 成功之后调用（T11 的注入点）。
-// 可重复调用：第二次命中已有行（Created=0、Matched=13），不需要另写"是否首启"的判据。
+// 用户原话：「默认上游不要放入渠道里面」。这不是审美问题：13 个注册点
+// （workbuddy / workbuddy-intl / codearts / loomy / trae / cline / raccoon /
+// lobsterai / qoder / qodercn / zcode / minimax / monkeycode）是**账号池上游**
+// —— 它们的流量走凭证池（auths/），不走渠道路径；渠道路径只服务
+// **base_url + api_key 型上游**（七牛云 / senseaudio / csg 那三条）。
+// 把它们写成渠道行会造成两个真后果：
 //
-// # 为什么 seed 的是"注册点"而不是"本次启用的上游"
+//	① 渠道页里混进"看着能选、实际不是渠道"的行（用户报的就是这个）；
+//	② store.ExpandAbilitiesFromCatalog 是**按名字**把目录 vendor 与渠道行 JOIN 的，
+//	   一行叫 workbuddy 的假渠道会被绑上能力行 ⇒ 它可能被选路选中。
 //
-// 清单来自代码事实（13 处调用）而不是配置事实（哪些 enabled=true）。于是：
+// # 为什么函数名没改
 //
-//	配置关闭某上游 → 该行仍然存在（渠道是"有这条渠道、只是现在没流量"）
-//	代码新增注册点 → 下一次启动多一行（并靠 ChannelSeedGaps 提醒清单是否漏登记）
+// 调用点在 `cmd/server/main.go:1734`，那不归本任务改。名字保留，语义按上面这条
+// 更新；如果将来允许改 main.go，建议改名成 SyncChannelRegistryState（更贴切）。
 //
-// 反过来（只 seed 启用的上游）会让"表里有几行"随配置抖动，计数判据就失去意义。
+// # 现在的职责（四步，全部幂等）
 //
-// # 能力行
+//	① 给历史 seed 行补显式标记（store.MarkRegistrySeedChannels）
+//	② 删掉带标记的行 + 它的能力行（store.DeleteRegistrySeedChannels）
+//	③ 按 T09 的两级目录展开能力行（只对**真实渠道**生效）
+//	④ registry 与清单的缺口告警（ChannelSeedGaps）
 //
-// 先展开清单里显式声明的模型（默认清单为空，见 RegistryChannelSeeds），
-// 再按 T09 的两级目录（vendor = provider id）做一次「模型↔渠道」展开。
-// 目录为空时这一步是 0，不是错误 —— 账号型上游的目录要活凭证才有。
+// # RegistryChannelSeeds 保留，但只作清单/校验
+//
+// 它仍是「13 个注册点是否都有对应清单」的**覆盖度清单**，被三处消费：
+//
+//	① ChannelSeedGaps 的缺口比对（main.go 加了 registry.Register 却忘了登记清单）
+//	② 清理历史行时提供身份 (provider, base_url) —— 那是当年 SeedChannels 判身份的键
+//	③ channels_seed_test.go 的判据
+//
+// 它**不再**是 store.SeedChannels 的输入 ⇒「清单完整」与「表里有没有行」彻底解耦：
+// 清单里多一条不会凭空多一行渠道，而漏登记仍然会报警。
 func (h *Handler) SeedSQLChannels() (store.ChannelSeedStats, error) {
 	var st store.ChannelSeedStats
 	if store.DB == nil {
 		return st, store.ErrNotOpen
 	}
-	st, err := store.SeedChannels(RegistryChannelSeeds())
+	seeds := RegistryChannelSeeds()
+
+	// ① 迁移：历史上的 seed 行没有标记（当年是直接 INSERT 的），这里按
+	// (name, base_url) + external_id 为空 两条判据把它们认出来并打上标记。
+	marked, mnames, err := store.MarkRegistrySeedChannels(seeds)
 	if err != nil {
 		return st, err
 	}
+	st.Marked = marked
+	if marked > 0 {
+		log.Printf("admin: 给 %d 条历史注册点 seed 行补了标记（默认上游不是渠道）: %v", marked, mnames)
+	}
+
+	// ② 清理：只认标记，不认名字（名字可以被用户占用 —— 见 store.RegistrySeedSettingKey 的注释）。
+	removed, rnames, err := store.DeleteRegistrySeedChannels()
+	if err != nil {
+		return st, err
+	}
+	st.Removed = removed
+	if removed > 0 {
+		log.Printf("admin: 已清理 %d 条注册点 seed 渠道行（账号池上游不该出现在渠道表）: %v", removed, rnames)
+	}
+
+	// ③ 能力行：按目录展开（T09）。目录为空时是 0，不是错误 —— 账号型上游的
+	//    目录要活凭证才有，而启动期不发上游请求（W1 硬约束）。
 	n, aerr := store.ExpandAbilitiesFromCatalog(store.AbilityDefaultGroup)
 	if aerr != nil {
-		// 能力展开失败**不**让渠道 seed 失败：渠道行已经落库且可用，
-		// 而目录/能力是下一层的事（T09）。如实记一行日志即可。
-		log.Printf("admin: 渠道 seed 完成，但按目录展开能力行失败: %v", aerr)
+		// 能力展开失败**不**让本函数失败：目录/能力是下一层的事（T09）。
+		log.Printf("admin: 渠道注册状态同步完成，但按目录展开能力行失败: %v", aerr)
 	} else {
 		st.Abilities += n
 	}
+
+	// ④ 缺口告警：清单是手写的，registry.Register 是真发生的，漂移了没有任何报错。
 	if gaps := h.ChannelSeedGaps(); len(gaps) > 0 {
 		log.Printf("admin: 注册表里有渠道 seed 清单没有的 provider: %v —— "+
 			"main.go 加了 registry.Register 但忘了登记 RegistryChannelSeeds？", gaps)
