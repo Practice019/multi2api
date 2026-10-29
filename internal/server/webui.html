@@ -3211,15 +3211,9 @@ function mpEsc(s) {
 
        为什么改**新**节而不是旧节：旧节的 key 已被 localStorage('wb2api.panelkey')、既有探针的
        anchor 判据与用户书签引用过；改它会把"恢复上次面板"的既有行为改坏，而新节还没有任何依赖方。 -->
-  <section data-key="modelcatalog">
-    <h2>模型目录
-      <span class="spacer"></span>
-      <button onclick="document.getElementById('mdFrame').src='/ui/models?t='+Date.now()" style="padding:3px 10px;font-size:12px">刷新</button>
-    </h2>
-    <p class="dim" style="font-size:12px;margin:2px 0 6px">上游模型目录与渠道的对应关系（页面由 T14 交付）。</p>
-    <iframe id="mdFrame" src="/ui/models" style="width:100%;height:calc(100vh - 190px);min-height:460px;
-      border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
-  </section>
+  <!-- 模型目录（原在此处）已**下移**到「可用模型」原来的位置 —— 用户 2026-10-30 要求：
+       「模型目录应该替换掉可用模型 两个重复了」。见本文件后面 data-key="models" 那段
+       上方的注释（那里解释了为什么旧面板改成 hidden 而不是删除）。 -->
   <!-- 渠道（中转站）：导航项**自动**生成 —— 本文件 5735 处的约定是"按 .content 下 section 的
        DOM 顺序生成导航项"，所以这个 section 的位置**就是**左侧入口的位置。
 
@@ -3580,7 +3574,28 @@ function mpEsc(s) {
        及其 loadHistory 渲染已一并下线；checkin 能力位本身保留（账号池「今日签到」列
        与调度都依赖它）。 -->
 
-  <section data-key="models">
+  <!-- ── T14 模型目录（2026-10-30 由上面「通用」组下移到此）─────────────────────
+       用户要求：「模型目录应该替换掉可用模型 两个重复了」。所以：
+         · 入口只保留**一个**（本节），它占据原来「可用模型」的位置；
+         · 旧「可用模型」面板改为 hidden（**不删**）—— 见紧随其后的注释。 -->
+  <section data-key="modelcatalog">
+    <h2>模型目录
+      <span class="spacer"></span>
+      <button onclick="refreshModelCatalog()" style="padding:3px 10px;font-size:12px">刷新</button>
+    </h2>
+    <p class="dim" style="font-size:12px;margin:2px 0 6px">上游模型目录与渠道的对应关系（页面由 T14 交付）。</p>
+    <iframe id="mdFrame" src="/ui/models" style="width:100%;height:calc(100vh - 190px);min-height:460px;
+      border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
+  </section>
+
+  <!-- ⚠ 旧「可用模型」面板（data-key="models"）：2026-10-30 起**不显示、不进导航**。
+       为什么 hidden 而不是删除：
+         ① renderModels 同时负责「对话测试」模型下拉的同源同步
+            （syncModelSelect / syncModelProviderOptions）—— 删面板≠删函数，
+            但删掉 DOM 会让 renderModels 写不进去而抛错，把对话测试一起弄哑；
+         ② 它的「强制刷新目录」逻辑仍被本文件复用（refreshModelCatalog）。
+       ⇒ 面板与代码原样保留，只是不再出现在导航里（buildNav 过滤 section.hidden）。 -->
+  <section data-key="models" hidden>
     <h2>可用模型 <span id="mcount" class="dim" style="font-weight:400;text-transform:none"></span>
       <span class="spacer"></span>
       <button id="btnModelRefresh" style="padding:3px 10px;font-size:12px">强制刷新目录</button>
@@ -15960,7 +15975,30 @@ let multCatalogFailed = false;
       if (all) { growthAct(all.dataset.gclaimall, 'claim', '', all); return; }
     });
 
-    $('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
+    // refreshModelCatalog 模型目录面板的「刷新」—— 重载 iframe **并**清掉两张缓存。
+//
+// # 为什么不只是重载 iframe
+//   用户 2026-10-30 要求「模型目录应该替换掉可用模型」，入口合并成一个。但旧面板那个
+//   「强制刷新目录」按钮的能力（POST /admin/models/refresh + 清掉 /v1/models 与
+//   /admin/models/preview 两张 30 秒缓存）**不能跟着消失** —— 只重载不清缓存时，
+//   iframe 里 30 秒内仍会拿到旧目录，表现就是用户抱怨过的「点了刷新没反应」。
+//
+// # 为什么不直接复用下面那个按钮的 handler
+//   下面那个由 busyRun 包装（要有可见按钮、要显示运行中），而本函数从 iframe 面板的
+//   刷新按钮调用、还要负责重载 iframe；两者职责不同，绑在一起会把两条路径锁死。
+window.refreshModelCatalog = function () {
+  // 服务端缓存：失败不阻断刷新（界面照样重取一次，最坏是拿到 30 秒内的旧值）。
+  admin('/admin/models/refresh', { method: 'POST', body: '{}' }).catch(() => {});
+  // 外壳侧的两张缓存：与旧按钮同一口径，少清一张就会出现「刷新没生效」。
+  try {
+    lazyCache.drop('ep:/v1/models');
+    lazyCache.drop('ep:/admin/models/preview');
+  } catch (e) { /* 缓存层未就绪时忽略：只影响下面这次取数的快慢，不影响正确性 */ }
+  const f = document.getElementById('mdFrame');
+  if (f) { f.src = '/ui/models?t=' + Date.now(); }
+};
+
+$('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
       // 刷新按钮同时清掉两张缓存：模型列表（/v1/models）和倍率目录（/v3/config）。
       // 只清前者会让倍率停留在旧值，看起来像"刷新没生效"。
       await admin('/admin/models/refresh', { method: 'POST', body: '{}' });

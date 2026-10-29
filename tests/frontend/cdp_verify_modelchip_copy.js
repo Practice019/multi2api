@@ -153,14 +153,20 @@ function httpGet(url) {
     //   ② 首屏那次 renderModels 可能已经失败过（比如当时 KEY 还没取到），
     //      留下一条错误文本；点「强制刷新目录」才会重跑。
     const switchPanel = async () => {
+      // ⚠ 2026-10-30：入口合并 —— 用户要求「模型目录应该替换掉可用模型」，所以旧
+      //   「可用模型」面板（data-key="models"）现在是 hidden、不进导航，点不到它的
+      //   导航按钮了。本探针要测的仍是**卡片点击复制**这个行为（renderModels 与 chips
+      //   都还在，还给「对话测试」下拉供数据），所以这里自己把面板解锁并激活 ——
+      //   只动本隔离实例的 DOM，不碰产品代码。
       return await ev0(`(() => {
         const secs = Array.from(document.querySelectorAll('section[data-key]'));
-        const idx = secs.findIndex(s => s.dataset.key === 'models');
-        if (idx < 0) return 'no models section; keys=' + secs.map(s => s.dataset.key).join(',');
-        const btn = document.querySelector('button[data-nav="' + idx + '"]');
-        if (!btn) return 'no nav button for idx=' + idx;
-        btn.click();
-        return 'ok idx=' + idx;
+        const me = secs.find(s => s.dataset.key === 'models');
+        if (!me) return 'no models section; keys=' + secs.map(s => s.dataset.key).join(',');
+        me.hidden = false;
+        const okNav = (window.__wb2api__ && window.__wb2api__.showPanelByKey)
+          ? window.__wb2api__.showPanelByKey('models') : false;
+        if (!okNav) { secs.forEach(s => s.classList.toggle('active', s === me)); }
+        return 'ok unlocked active=' + okNav;
       })()`);
     };
     console.log('  切到可用模型面板: ' + await switchPanel());

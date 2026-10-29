@@ -65,12 +65,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 //    · 模型：探针粘密钥后 /v1/models 才有条目（T5/T7 起服务端不再注入凭据）
 //    · 成长/旅行：本实例没有上游账号，用 lib_fixtures 的夹具喂（产品渲染全真跑）
 const PANELS = [
-  { nav: '可用模型', key: 'models', anchor: '#models', must: ['模型'], reject: ['加载中'],
-    minLeaves: 20, api: '/admin/models/preview', countPath: 'models',
-    // 面板内容由 pasteConsoleKey 触发的 refresh() 填充，比"点导航"晚 ——
-    // 有界轮询把"快慢"与"对错"解耦（原来固定 sleep 1600ms 会偶发读到空面板）。
-    readyJs: `document.querySelectorAll('#models .chip').length`,
-    readyMin: 3 },
+  // ⚠ 2026-10-30：**移除**「可用模型」条目 —— 用户要求「模型目录应该替换掉可用模型」，
+  //   该面板现已 hidden、不进导航（本探针按导航文字点击，已无可点目标）。
+  //   覆盖面没有丢，只是分给了更合适的探针：
+  //     · chips 渲染正确性 → gen_models_display.js（91 条断言，在套件内）
+  //     · 卡片点击复制     → cdp_verify_modelchip_copy.js（已改为解锁面板后点击）
+  //     · 目录页本身       → verify_wave2_pages.js 的 [d]/[e]/[f]（唯一性 + 几何 + 字样）
   { nav: '请求日志', key: 'logs', anchor: '#logrows', must: [], reject: ['加载中'], table: true,
     rowSelector: '#logrows .log-row',
     emptyOk: ['落盘日志为空', '暂无请求', '实时视图中'],
