@@ -248,7 +248,19 @@ const MEASURE_MODELS = '(function(){'
           modelsPanel: !!d.getElementById('panelModels'), vendorsPanel: !!d.getElementById('panelVendors'),
           rows: rows.length, synth: synth.length,
           synthDisabled: synth.filter(function(r){ var c=r.querySelector('input[type=checkbox]'); return c && c.disabled; }).length,
-          bodyText: (d.body ? d.body.textContent : '').replace(/\\s+/g,' ')
+          // ⚠ 量**可见文本**：body.textContent 会把 <script>/<style> 的文本一并算进来，
+          //   于是"代码注释里解释定价体系"这种用户根本看不见的内容会被误判成
+          //   "页面出现了定价字样"（2026-10-30 实测踩到：模型页新增的 JS 注释里
+          //   写了一句「那是报错误的价格」，就把它判红了）。
+          //   这条断言的声称是「页面上没有这些字样」（给用户看的），所以先摘掉脚本与
+          //   样式节点再取文本 —— 摘掉的是**不可见**节点，判据本身没有放宽。
+          bodyText: (function(){
+            if (!d.body) { return ''; }
+            var c = d.body.cloneNode(true);
+            var kill = c.querySelectorAll('script,style,noscript,template');
+            for (var i = 0; i < kill.length; i++) { kill[i].parentNode.removeChild(kill[i]); }
+            return c.textContent.replace(/\\s+/g,' ');
+          })()
         });
       })()`));
       console.log('       tabs=' + md.tabs + ' rows=' + md.rows + ' synth=' + md.synth + ' synthDisabled=' + md.synthDisabled);

@@ -1313,6 +1313,16 @@ type ModelCatalogState struct {
 type ModelMultiplier struct {
 	Model      string  `json:"model"`
 	Multiplier float64 `json:"multiplier"`
+	// MultiplierKnown 区分「上游明确给了系数（含 0 = 免费）」与「上游根本没给」。
+	//
+	// ⚠ 为什么必须下发：Multiplier 的 0 是**双关**的（免费 / 未知）。少了这个标志，
+	//   前端只能把 0 一律画成「x0（免费）」—— 而上游确实会不给系数，那等于向用户
+	//   **报错误的价格**（比显示「无」更危险）。语义与 gateway.ModelCatalogEntry
+	//   的同名字段一致（那边注释写明它是把 0 歧义显式化的唯一手段）。
+	MultiplierKnown bool `json:"multiplier_known"`
+	// Credits 上游原样倍率串（例如 "x0.51 credits"）。它本来就是 JSON 字段，
+	// 下发给前端做「有系数但解析不出来」时的排查兜底。
+	Credits string `json:"credits,omitempty"`
 	// Provider 该倍率所属的上游。多上游部署下每个上游的 /v3/config 是各自的事实，
 	// 同名模型（如 workbuddy 与 workbuddy-intl 都有 glm-5.2）倍率互不相同，
 	// 前端按 (provider, model) 组合查表。单上游（裸名）部署时省略。
@@ -2824,9 +2834,11 @@ func (h *Handler) modelsPreview(w http.ResponseWriter, r *http.Request) {
 			// 与 stats 那份不同：这里**保留 0 倍率**。
 			// x0.00 是"免费"这个有意义的事实，不是"没有数据"。
 			out = append(out, ModelMultiplier{
-				Model:      m.ID,
-				Multiplier: m.Multiplier,
-				Provider:   id,
+				Model:           m.ID,
+				Multiplier:      m.Multiplier,
+				MultiplierKnown: m.MultiplierKnown,
+				Credits:         m.CreditsRaw,
+				Provider:        id,
 			})
 		}
 	}

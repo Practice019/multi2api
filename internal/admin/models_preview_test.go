@@ -112,3 +112,58 @@ func TestModelsPreviewFetchFailureIsEmpty(t *testing.T) {
 		t.Errorf("拿不到目录时应为空，得到 %v", list)
 	}
 }
+
+// MultiplierKnown 必须下发 —— 它是唯一能把「免费（x0）」与「未知（上游根本没给）」
+// 区分开的手段。少了它，前端只能把 0 一律画成「x0（免费）」，等于向用户报错误的价格。
+func TestModelsPreviewDistinguishesFreeFromUnknown(t *testing.T) {
+	h, _ := newStatsHandler(t, nil)
+	h.cfg.ModelCatalog = func(string) *gateway.ModelCatalog {
+		return catalogWith(
+			gateway.ModelCatalogEntry{ID: "known-free", Multiplier: 0, MultiplierKnown: true},
+			gateway.ModelCatalogEntry{ID: "unknown", Multiplier: 0, MultiplierKnown: false},
+			gateway.ModelCatalogEntry{ID: "priced", Multiplier: 0.51, MultiplierKnown: true, CreditsRaw: "x0.51 credits"},
+		)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/models/preview", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	h.ServeHTTP(rec, withTestAuth(req))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("解析响应: %v (%s)", err, rec.Body.String())
+	}
+	list, _ := out["models"].([]any)
+	if len(list) != 3 {
+		t.Fatalf("应有 3 条，得到 %d", len(list))
+	}
+
+	type row struct {
+		mult    float64
+		known   bool
+		cred    string
+		hasCred bool
+	}
+	got := map[string]row{}
+	for _, e := range list {
+		m, _ := e.(map[string]any)
+		id, _ := m["model"].(string)
+		mult, _ := m["multiplier"].(float64)
+		known, _ := m["multiplier_known"].(bool)
+		cred, hasCred := m["credits"].(string)
+		got[id] = row{mult: mult, known: known, cred: cred, hasCred: hasCred}
+	}
+	if r, ok := got["known-free"]; !ok || !r.known || r.mult != 0 {
+		t.Errorf("known-free 应为「已知的 0（免费）」：%+v", r)
+	}
+	if r, ok := got["unknown"]; !ok || r.known {
+		t.Errorf("unknown 必须 multiplier_known=false（否则前端会把它画成免费）：%+v", r)
+	}
+	if r, ok := got["priced"]; !ok || !r.known || r.mult != 0.51 || !r.hasCred || r.cred != "x0.51 credits" {
+		t.Errorf("priced 应带系数与原始串：%+v", r)
+	}
+}
