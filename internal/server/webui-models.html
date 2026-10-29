@@ -209,10 +209,17 @@
      · 底色透明、只描边 + 语义色文字 ⇒ 与行底色成对，不新引入底/字配对风险；
      · 零圆角（与 theme-max 的视觉语言一致）；
      · 等宽 + 右侧 7px 间距，让标记与名称读起来是一件事。 */
+  /* ⚠ 2026-10-30 用户反馈「样式没统一」：标记宽度随内容变（`x2` 窄、`未声明` 宽），
+     导致同一列里模型名左端参差。改成**等宽定宽 + 居中**：
+       · 等宽字体下 1ch = 一个数字宽，7ch 容得下 `x0.29`（5 字符）与 `未声明`（3 个
+         全宽字 ≈ 6ch）两种极端，name 列因此对齐成一列；
+       · box-sizing:border-box 让宽度把边框算进去（否则不同 border 档位会差 1~2px）；
+       · text-align:center 让「x2」这类短值不贴左，视觉上仍然是同一个盒子。 */
   .multtag {
-    display:inline-block; margin-right:7px; padding:0 5px;
-    font-family:var(--mono); font-size:12px; line-height:18px;
+    display:inline-block; box-sizing:border-box; width:7ch; margin-right:7px; padding:0 2px;
+    font-family:var(--mono); font-size:12px; line-height:18px; text-align:center;
     color:var(--fg); border:1px solid var(--dim); border-radius:0; white-space:nowrap;
+    vertical-align:middle;
   }
   .multtag.none { color:var(--dim); border-style:dashed; }
   /* 「上游给了模型但没给系数」——与「未声明」视觉上也必须不同：

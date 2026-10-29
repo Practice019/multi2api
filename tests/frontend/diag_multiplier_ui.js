@@ -41,7 +41,10 @@ function get(u) { return new Promise((res, rej) => { http.get(u, r => { let d = 
     // 切到可用模型面板
     await ev(`(function(){
       var b = Array.from(document.querySelectorAll('#nav button[data-nav]'))
-        .filter(function(x){ return x.textContent.indexOf('可用模型') >= 0; })[0];
+        // ⚠ 2026-10-30：入口合并后导航里不再有「可用模型」⇒ 改为点「模型目录」。
+  //   本诊断读的是 #models 里 chips 的渲染结果（由 renderModels 写），与哪个面板
+  //   处于 active 无关，故点新入口不影响诊断结论。
+  .filter(function(x){ return x.textContent.indexOf('模型目录') >= 0; })[0];
       if (b) b.click();
     })()`);
     await sleep(2500);
