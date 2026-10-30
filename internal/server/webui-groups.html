@@ -36,20 +36,8 @@
      ⚠ 下面这一段是**页面基础**，后面的 MAXIMALISM 块由 tools/theme_sync.js 注入 ——
        改配色请改 internal/server/theme-max.css，不要改这里（会与其它页漂移）。
      ⚠ iframe 里拿不到父页面的 data-theme，所以这里跟 prefers-color-scheme 走。 */
-  :root {
-    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
-    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5;
-    --ok:#3FB950; --warn:#D29922; --err:#F85149;
-    --overlay:rgba(1,4,9,.72);
-    --bd:var(--line); --accent:var(--acc); --hover:var(--panel2);
-  }
+  :root {--bd:var(--line)}
   @media (prefers-color-scheme: light) {
-    :root {
-      --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
-      --fg:#1F2328; --dim:#59636E; --acc:#0969DA;
-      --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
-      --overlay:rgba(31,35,40,.45);
-    }
   }
   * { box-sizing:border-box; }
   body { margin:0; font:13px/1.5 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
@@ -62,7 +50,7 @@
 
   input, select, textarea, button {
     font:inherit; color:var(--fg); background:var(--bg);
-    border:1px solid var(--line); border-radius:6px; padding:5px 8px;
+    border:1px solid var(--line); border-radius:0; padding:5px 8px;
     transition:border-color .12s, background .12s;
   }
   input:hover, select:hover, textarea:hover { border-color:var(--dim); }
@@ -71,7 +59,7 @@
   }
   button { cursor:pointer; }
   button:hover { background:var(--panel2); }
-  button.primary { background:var(--acc); border-color:var(--acc); color:#FFFFFF; font-weight:600; }
+  button.primary { background:var(--acc); border-color:var(--acc); color:var(--cream); font-weight:600; }
   button.primary:hover { filter:brightness(1.08); }
   button.danger { color:var(--err); }
   button.danger:hover { background:color-mix(in srgb, var(--err) 12%, transparent); }
@@ -79,7 +67,7 @@
   /* 表格：固定行高、超长内容不撑高行、横向可滚动（AGENTS #5）。
      ⚠ th 用 --panel2 而不是写死的浅灰 —— 深色下那个值会把整行染白。 */
   table { width:100%; border-collapse:separate; border-spacing:0;
-          background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+          background:var(--panel); border:1px solid var(--line); border-radius:0; overflow:hidden; }
   th, td { padding:0 10px; height:34px; line-height:34px; text-align:left;
            border-bottom:1px solid var(--line); white-space:nowrap; }
   th { background:var(--panel2); font-weight:600; color:var(--fg); font-size:12px;
@@ -101,22 +89,22 @@
   /* 模型列允许换行显示多行 chips，但仍限制高度 —— 600 个模型不能把一行撑成两屏。 */
   td.models { white-space:normal; line-height:1.35; height:auto; padding:5px 10px; }
   .chips { display:flex; flex-wrap:wrap; gap:4px; max-height:54px; overflow:hidden; }
-  .chip { display:inline-block; padding:0 6px; height:20px; line-height:20px; border-radius:4px;
-          font-size:11px; font-family:ui-monospace,Consolas,monospace;
+  .chip { display:inline-block; padding:0 6px; height:20px; line-height:20px; border-radius:0;
+          font-size:11px; font-family:var(--font-mono);
           background:color-mix(in srgb, var(--dim) 14%, transparent); color:var(--fg);
           max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .chip.more { background:color-mix(in srgb, var(--acc) 16%, transparent); color:var(--acc);
                cursor:pointer; font-family:inherit; }
 
   .tag { display:inline-block; padding:0 6px; height:20px; line-height:20px;
-         border-radius:4px; font-size:12px; font-weight:500; }
+         border-radius:0; font-size:12px; font-weight:500; }
   .on-t   { background:color-mix(in srgb, var(--ok) 16%, transparent);   color:var(--ok); }
   .warn-t { background:color-mix(in srgb, var(--warn) 16%, transparent); color:var(--warn); }
   .err-t  { background:color-mix(in srgb, var(--err) 16%, transparent);  color:var(--err); }
   .muted { color:var(--dim); }
   .err { color:var(--err); }
 
-  dialog { border:1px solid var(--line); border-radius:8px; padding:0; width:680px; max-width:92vw;
+  dialog { border:1px solid var(--line); border-radius:0; padding:0; width:680px; max-width:92vw;
            background:var(--panel); color:var(--fg); }
   dialog::backdrop { background:var(--overlay); }
   .dlg-h { padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
@@ -139,7 +127,7 @@
   #gPickedChips .chip { height:22px; line-height:22px; max-width:260px; }
   #gPickedChips .chip button { all:unset; cursor:pointer; margin-left:4px; color:var(--dim); }
   #gPickedChips .chip button:hover { color:var(--err); }
-  #gChoices { max-height:230px; overflow-y:auto; border:1px solid var(--line); border-radius:6px;
+  #gChoices { max-height:230px; overflow-y:auto; border:1px solid var(--line); border-radius:0;
               padding:6px 8px; background:var(--bg); display:flex; flex-wrap:wrap; gap:8px; font-size:13px; }
   #gChoices label { display:flex; align-items:center; gap:4px; height:22px; line-height:22px;
                     max-width:100%; white-space:nowrap; overflow:hidden; }
@@ -151,11 +139,11 @@
      常驻一块红字会把正常状态也读成"有问题"。 */
   #report { display:none; margin:0 0 12px; }
   #report.on { display:block; }
-  .card { border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:10px 12px; }
+  .card { border:1px solid var(--line); border-radius:0; background:var(--panel); padding:10px 12px; }
   .card h3 { margin:0 0 8px; font-size:13px; font-weight:600; }
   .card ul { margin:0; padding-left:18px; }
   .card li { margin:2px 0; }
-  .kv { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+  .kv { font-family:var(--font-mono); font-size:12px; }
   /* ── T86：分组行内展开（只读视图）───────────────────────────────────────
      全部走语义变量，零硬编码颜色（T76 的 1.93:1 就是写死色的代价）；
      行高纪律：**主表格行仍 26px**，明细行是内容区，允许自适应高度。 */
@@ -1339,6 +1327,34 @@ header h1{letter-spacing:0}
      .badge                 → **本就有**（684 一带），无需别名；.badge--hot/--cold/--ro 同理
      .calm                  → 本节的安静区（新概念，非别名）
    ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── N. 热力图色阶（共享层）── 2026-10-30
+   ══════════════════════════════════════════════════════════════════════
+
+   # 为什么要有它
+   外壳页原来自带一套热力图色阶 --hm0..--hm4，把 10 个绿色**写死在页面里**
+   （深色 #303033 #0e4429 #006d32 #26a641 #39d353 / 浅色 #ebedf0 #9be9a8
+     #40c463 #30a14e #216e39），而且那两套**不是取反关系**。后果：
+     · 换主题时它不跟着变；· 深浅两套谁对谁错没人能一眼核对。
+   现在页面只保留 --hm0..--hm4 这层**别名**，值全部指向本节的色阶。
+
+   # 为什么用 color-mix 而不是写 5 个绿
+   混合基是 --ok 与 --bg：主题一换，五档全部跟着重算，不会出现"改了主题忘了配色阶"。
+
+   # 顺序语义（单调，不许打乱）
+   --heat-0 空档（当天没有活动） → --heat-5 最热（--ok 本色）。
+   用色阶的地方只许引用变量，不许再写具体绿值 ——
+   tests/frontend/verify_theme_compliance.js 会盯着这一条。
+   ══════════════════════════════════════════════════════════════════════ */
+:root{
+  --heat-0: color-mix(in srgb, var(--ok) 8%, var(--bg));
+  --heat-1: color-mix(in srgb, var(--ok) 25%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--ok) 45%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--ok) 65%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--ok) 85%, var(--bg));
+  --heat-5: var(--ok);
+}
 /* ==== WB2API:MAXIMALISM:END ==== */
 
 </style>

@@ -6,41 +6,10 @@
 <meta name="robots" content="noindex, nofollow">
 <title>登录 · 控制台</title>
 <style>
-  /* ⚠ 2026-10-21 视觉语言 v2：与控制台同色板（GitHub Light）。
-     对比度复算（底色 #FFFFFF）：--fg 16.8:1 · --muted 6.4:1 · --accent 5.8:1 ·
-     --err-fg 7.1:1（铺 --err-bg #FFEBE9 上仍 6.4:1）。
-     --radius 从 10px 收到 8px，与控制台的容器档一致。 */
-  :root {
-    --bg: #FFFFFF;
-    --card: #F6F8FA;
-    --fg: #1F2328;
-    --muted: #59636E;
-    --line: #D0D7DE;
-    --accent: #0969DA;
-    --accent-fg: #FFFFFF;
-    --input-bg: #FFFFFF;
-    --err-bg: #FFEBE9;
-    --err-fg: #A40E26;
-    --err-line: #FFC1BC;
-    --radius: 8px;
-  }
   @media (prefers-color-scheme: dark) {
-    :root {
-      /* 与控制台深色同色板。对比度（底色 #0D1117）：
-         --fg 14.5:1 · --muted 5.6:1 · --accent 6.1:1 ;
-         --err-fg #FFB4AB 铺 --err-bg #2D1213 上 7.4:1 */
-      --bg: #0D1117;
-      --card: #161B22;
-      --fg: #E6EDF3;
-      --muted: #8B949E;
-      --line: #30363D;
-      --accent: #539BF5;
-      --accent-fg: #FFFFFF;
-      --input-bg: #0D1117;
-      --err-bg: #2D1213;
-      --err-fg: #FFB4AB;
-      --err-line: #5C1F1F;
-    }
+    :root {/* 与控制台深色同色板。对比度（底色 #0D1117）：
+         --fg 14.5:1 · --muted 5.6:1 · --accent 6.1:1;--err-fg #FFB4AB 铺 --err-bg #2D1213 上 7.4:1 */
+      --bg:var(--bg)}
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
@@ -63,7 +32,7 @@
     background: var(--card);
     border: 1px solid var(--line);
     border-radius: var(--radius);
-    box-shadow: 0 1px 2px rgba(0,0,0,.05);
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 5%, transparent);
   }
   .head { display: flex; align-items: center; gap: 8px; }
   .logo { flex: none; color: var(--accent); }
@@ -78,10 +47,10 @@
     color: var(--fg);
     background: var(--input-bg);
     border: 1px solid var(--line);
-    border-radius: 7px;
+    border-radius:0;
     outline: none;
   }
-  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.16); }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 16%, transparent); }
   input:disabled { opacity: .6; }
   .hint { margin: 0 0 10px; font-size: 11.5px; color: var(--muted); }
   /* 人机校验（T10）—— 一行高度固定：SVG 只许在这个高度里缩，不许把表单推走。
@@ -91,7 +60,7 @@
   .cap > label { display: block; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
   .cap-line { display: flex; align-items: center; gap: 6px; }
   .cap-svg { flex: none; display: flex; align-items: center; height: 34px; }
-  .cap-svg svg { display: block; height: 34px; width: auto; max-width: 148px; border: 1px solid var(--line); border-radius: 7px; background: var(--input-bg); }
+  .cap-svg svg { display: block; height: 34px; width: auto; max-width: 148px; border: 1px solid var(--line); border-radius:0; background: var(--input-bg); }
   .cap-line input { width: 72px; flex: none; }
   .cap-line button.link { flex: none; white-space: nowrap; }
   .cap .hint { margin: 4px 0 0; }
@@ -102,7 +71,7 @@
     color: var(--err-fg);
     background: var(--err-bg);
     border: 1px solid var(--err-line);
-    border-radius: 7px;
+    border-radius:0;
     white-space: pre-wrap;
   }
   button.primary {
@@ -113,7 +82,7 @@
     color: var(--accent-fg);
     background: var(--accent);
     border: 0;
-    border-radius: 7px;
+    border-radius:0;
     cursor: pointer;
   }
   button.primary:hover:not(:disabled) { filter: brightness(1.06); }
@@ -132,7 +101,7 @@
   details { margin-top: 12px; padding-top: 9px; border-top: 1px dashed var(--line); }
   summary { font-size: 12px; color: var(--muted); cursor: pointer; }
   details p { margin: 7px 0 0; font-size: 11.5px; color: var(--muted); }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+  code { font-family:var(--font-mono); font-size: 11px; }
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
@@ -1302,6 +1271,34 @@ header h1{letter-spacing:0}
      .badge                 → **本就有**（684 一带），无需别名；.badge--hot/--cold/--ro 同理
      .calm                  → 本节的安静区（新概念，非别名）
    ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── N. 热力图色阶（共享层）── 2026-10-30
+   ══════════════════════════════════════════════════════════════════════
+
+   # 为什么要有它
+   外壳页原来自带一套热力图色阶 --hm0..--hm4，把 10 个绿色**写死在页面里**
+   （深色 #303033 #0e4429 #006d32 #26a641 #39d353 / 浅色 #ebedf0 #9be9a8
+     #40c463 #30a14e #216e39），而且那两套**不是取反关系**。后果：
+     · 换主题时它不跟着变；· 深浅两套谁对谁错没人能一眼核对。
+   现在页面只保留 --hm0..--hm4 这层**别名**，值全部指向本节的色阶。
+
+   # 为什么用 color-mix 而不是写 5 个绿
+   混合基是 --ok 与 --bg：主题一换，五档全部跟着重算，不会出现"改了主题忘了配色阶"。
+
+   # 顺序语义（单调，不许打乱）
+   --heat-0 空档（当天没有活动） → --heat-5 最热（--ok 本色）。
+   用色阶的地方只许引用变量，不许再写具体绿值 ——
+   tests/frontend/verify_theme_compliance.js 会盯着这一条。
+   ══════════════════════════════════════════════════════════════════════ */
+:root{
+  --heat-0: color-mix(in srgb, var(--ok) 8%, var(--bg));
+  --heat-1: color-mix(in srgb, var(--ok) 25%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--ok) 45%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--ok) 65%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--ok) 85%, var(--bg));
+  --heat-5: var(--ok);
+}
 /* ==== WB2API:MAXIMALISM:END ==== */
 </style>
 </head>

@@ -64,14 +64,14 @@
      ⚠ 2026-10-30 修复「模型页整体是白的」（用户原话：「为什么还是白色的呢？」）：
      本页原先自带一份 v2（GitHub）调色板，且写成 `:root[data-theme="light"]` ——
      特异性 (0,2,0)，**高于**主题块那条裸 `:root`（0,1,0）⇒ 只要本页设了
-     data-theme，主题块的奶油纸被**整份覆盖**：浅色变 #FFFFFF、深色变 GitHub 深色。
+     data-theme，主题块的奶油纸被**整份覆盖**：浅色变 var(--bg)、深色变 GitHub 深色。
      对照组：webui-tokens.html / status / channels / groups 都**没有**自带调色板，
      所以它们跟着主题走、观感一致。
 
      ⇒ 删掉整份自带调色板（这就是「theme-max 是视觉层唯一真相」那条纪律的落地）。
-        只保留一处映射：本页多处写 `var(--mono)`，而主题块里的名字是 `--font-mono`；
+        只保留一处映射：本页多处写 `var(--font-mono)`，而主题块里的名字是 `--font-mono`；
         少了这层映射，等宽样式会退化成继承字体（`.multtag` 的 7ch 定宽随之失效）。 */
-  :root { --mono: var(--font-mono); }
+  :root {--mono: var(--font-mono)}
 
   /* ── 2. 基础 ─────────────────────────────────────────────────────────── */
   * { box-sizing:border-box; }
@@ -84,41 +84,41 @@
   .dim { color:var(--dim); }
   .err { color:var(--err); }
   .spacer { flex:1 1 auto; }
-  code, .mono { font-family:var(--mono); }
+  code, .mono { font-family:var(--font-ui); }
   button {
     font:inherit; color:var(--fg); background:var(--panel2);
-    border:1px solid var(--line); border-radius:6px; padding:3px 10px; cursor:pointer;
+    border:1px solid var(--line); border-radius:0; padding:3px 10px; cursor:pointer;
   }
   button:hover { border-color:var(--acc); }
 
   /* ── 3. 头部与 tab ───────────────────────────────────────────────────── */
   header { display:flex; align-items:center; gap:10px; padding:12px 0 8px; }
   header h1 { font-size:16px; margin:0; font-weight:600; }
-  #sum { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  #sum { font-family:var(--font-ui); font-variant-numeric:tabular-nums; }
   #srcline { font-size:12px; }
 
   #tabs { display:flex; gap:6px; border-bottom:1px solid var(--line); margin-bottom:10px; }
   #tabs button {
-    border:1px solid transparent; border-bottom:none; border-radius:6px 6px 0 0;
+    border:1px solid transparent; border-bottom:none; border-radius:0;
     background:transparent; color:var(--dim); padding:6px 14px; margin-bottom:-1px;
   }
   #tabs button[aria-selected="true"] {
     background:var(--panel); color:var(--fg);
     border-color:var(--line); border-bottom:1px solid var(--panel);
   }
-  #tabs .tabn { font-family:var(--mono); font-variant-numeric:tabular-nums; opacity:.75; }
+  #tabs .tabn { font-family:var(--font-ui); font-variant-numeric:tabular-nums; opacity:.75; }
 
   /* ── 4. 工具栏 ───────────────────────────────────────────────────────── */
   .toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:0 0 8px; }
   .toolbar input[type="search"] {
     font:inherit; color:var(--fg); background:var(--panel);
-    border:1px solid var(--line); border-radius:6px; padding:3px 8px; min-width:240px;
+    border:1px solid var(--line); border-radius:0; padding:3px 8px; min-width:240px;
   }
   .toolbar label.chk { display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
   #legend { font-size:12px; }
 
   /* ── 5. 表格（AGENTS 硬要求：固定行高 / nowrap / 横向滚动）──────────── */
-  .tw { overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+  .tw { overflow-x:auto; border:1px solid var(--line); border-radius:0; background:var(--panel); }
   table { border-collapse:collapse; width:100%; }
   th, td { padding:0 10px; height:26px; line-height:26px; white-space:nowrap; text-align:left; }
   thead th {
@@ -128,10 +128,10 @@
   tbody tr + tr td { border-top:1px solid var(--line); }
   tbody tr:hover td { background:var(--panel2); }
   td.c-chk, th.c-chk { width:30px; text-align:center; padding:0 6px; }
-  td.num { font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right; width:90px; }
-  .name { font-family:var(--mono); }
+  td.num { font-family:var(--font-ui); font-variant-numeric:tabular-nums; text-align:right; width:90px; }
+  .name { font-family:var(--font-ui); }
   .badge {
-    display:inline-block; font-size:11px; line-height:16px; padding:0 6px; border-radius:8px;
+    display:inline-block; font-size:11px; line-height:16px; padding:0 6px; border-radius:0;
     border:1px solid var(--dim); color:var(--dim); vertical-align:1px;
   }
   /* ── 5b. 徽章的底与字**成对**给出（v3.2 · 2026-10-26 对比度修复）────────────
@@ -156,7 +156,7 @@
   .badge.real { border:1px solid var(--dim); font-weight:400; }
   /* 合成行：中性底 + 2px 语义色描边 + 加粗 + 语义色文字 —— 「这条不是目录里的」 */
   .badge.synth { border:2px solid var(--warn); color:var(--warn); font-weight:700; }
-  tr[data-synthetic="1"] td { background:repeating-linear-gradient(135deg,transparent 0 6px,rgba(210,153,34,.07) 6px 12px); }
+  tr[data-synthetic="1"] td { background:repeating-linear-gradient(135deg,transparent 0 6px,color-mix(in srgb, var(--warn) 7%, transparent) 6px 12px); }
   tr[data-synthetic="1"] .name { color:var(--warn); font-weight:700; }
   /* 合成行的勾选框：把「不可勾选」在视觉上也说出来（disabled 的浏览器默认灰太弱）。
      ⚠ 这不是配色问题而是**语义可见性**问题：只加透明度与光标，不动 disabled 属性，
@@ -168,7 +168,7 @@
   /* ── 6. 错误框 ───────────────────────────────────────────────────────── */
   #errbox {
     display:none; align-items:center; gap:10px; margin:0 0 10px;
-    border:1px solid var(--err); border-radius:8px; padding:8px 10px; color:var(--err);
+    border:1px solid var(--err); border-radius:0; padding:8px 10px; color:var(--err);
   }
   #errbox.on { display:flex; }
 
@@ -211,7 +211,7 @@
        dark ok 12.06 / dim 8.07 / acc 7.9 ⇒ 全部 >= 4.5（有对比度门禁盯着）。 */
   .multtag {
     display:inline-block; box-sizing:border-box; width:7ch; margin-right:7px; padding:0 6px;
-    font-family:var(--mono); font-size:11px; line-height:16px; text-align:center;
+    font-family:var(--font-ui); font-size:11px; line-height:16px; text-align:center;
     background:var(--panel2); color:var(--fg);
     border:1px solid var(--dim); border-radius:0; white-space:nowrap; vertical-align:1px;
   }
@@ -232,7 +232,7 @@
      复制是无声操作 —— 没有手型光标、按下也没有位移时，用户点完不知道成没成
      （同 .chips .chip 那条交互线索的纪律，见 theme-max.css 里那段注释）。 */
   button.namecopy {
-    font:inherit; font-family:var(--mono); color:var(--fg); background:transparent;
+    font:inherit; font-family:var(--font-ui); color:var(--fg); background:transparent;
     border:0; padding:0; cursor:pointer; text-align:left;
     border-bottom:1px dashed var(--dim);
   }
@@ -246,16 +246,16 @@
   /* 供应商筛选的可见指示条（是否处于「只看某个供应商」状态 + 一键清除） */
   #vfilt {
     display:none; align-items:center; gap:8px; margin:0 0 8px; padding:5px 8px;
-    border:1px solid var(--dim); border-radius:8px; color:var(--dim); font-size:12px;
+    border:1px solid var(--dim); border-radius:0; color:var(--dim); font-size:12px;
   }
   #vfilt.on { display:flex; }
-  #vfilt b { color:var(--fg); font-family:var(--mono); }
+  #vfilt b { color:var(--fg); font-family:var(--font-ui); }
   /* 倍率目录未加载的显式警示（不许静默空白）。默认隐藏，加载失败才显示 ——
      ⚠ 与「行内写 x无」互斥：目录整体拿不到时**不逐行**写「无」，
        否则会把「界面没拿到」说成「上游没配」（旧面板的同一口径）。 */
   #multwarn {
     display:none; align-items:center; gap:8px; margin:0 0 8px; padding:6px 9px;
-    border:1px solid var(--warn); border-radius:8px; color:var(--warn); font-size:12px;
+    border:1px solid var(--warn); border-radius:0; color:var(--warn); font-size:12px;
   }
   #multwarn.on { display:flex; }
   /* 复制成功的轻提示位（页头状态行里那一格）。不新造浮动 toast：本页既有的
@@ -1431,6 +1431,34 @@ header h1{letter-spacing:0}
      .badge                 → **本就有**（684 一带），无需别名；.badge--hot/--cold/--ro 同理
      .calm                  → 本节的安静区（新概念，非别名）
    ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── N. 热力图色阶（共享层）── 2026-10-30
+   ══════════════════════════════════════════════════════════════════════
+
+   # 为什么要有它
+   外壳页原来自带一套热力图色阶 --hm0..--hm4，把 10 个绿色**写死在页面里**
+   （深色 #303033 #0e4429 #006d32 #26a641 #39d353 / 浅色 #ebedf0 #9be9a8
+     #40c463 #30a14e #216e39），而且那两套**不是取反关系**。后果：
+     · 换主题时它不跟着变；· 深浅两套谁对谁错没人能一眼核对。
+   现在页面只保留 --hm0..--hm4 这层**别名**，值全部指向本节的色阶。
+
+   # 为什么用 color-mix 而不是写 5 个绿
+   混合基是 --ok 与 --bg：主题一换，五档全部跟着重算，不会出现"改了主题忘了配色阶"。
+
+   # 顺序语义（单调，不许打乱）
+   --heat-0 空档（当天没有活动） → --heat-5 最热（--ok 本色）。
+   用色阶的地方只许引用变量，不许再写具体绿值 ——
+   tests/frontend/verify_theme_compliance.js 会盯着这一条。
+   ══════════════════════════════════════════════════════════════════════ */
+:root{
+  --heat-0: color-mix(in srgb, var(--ok) 8%, var(--bg));
+  --heat-1: color-mix(in srgb, var(--ok) 25%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--ok) 45%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--ok) 65%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--ok) 85%, var(--bg));
+  --heat-5: var(--ok);
+}
 /* ==== WB2API:MAXIMALISM:END ==== */
 
 /* ── T98：高度链（修 iframe 内下方一大片空白）─────────────────────────────

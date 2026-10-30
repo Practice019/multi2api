@@ -58,25 +58,10 @@
   /* ── 1. 调色板（逐个值抄自 webui.html 的 v2 :root）─────────────────────
      对比度已在 webui.html 里按 WCAG 复算过，这里不重复推导；
      唯一的义务是**不要**在这里引入新色值 —— 一页新色值就等于全站多一套语言。 */
-  :root, :root[data-theme="dark"] {
-    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
-    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5; --ok:#3FB950; --warn:#D29922; --err:#F85149;
-    --code-bg:#0D1117; --overlay:rgba(1,4,9,.72); --shadow:rgba(1,4,9,.5);
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
-  }
-  :root[data-theme="light"] {
-    --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
-    --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
-    --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
-  }
+  :root, :root[data-theme="dark"] {--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace}
+  :root[data-theme="light"] {--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace}
   /* 兜底：主题脚本失败（隐私模式禁 localStorage）时仍跟系统偏好，不留一张黑纸。 */
   @media (prefers-color-scheme: light) {
-    :root:not([data-theme]) {
-      --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
-      --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
-      --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
-    }
   }
 
   /* ── 2. 基础 ─────────────────────────────────────────────────────────── */
@@ -87,7 +72,7 @@
     font:13px/1.5 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;
     -webkit-font-smoothing:antialiased;
   }
-  .num { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  .num { font-family:var(--font-ui); font-variant-numeric:tabular-nums; }
   .dim { color:var(--dim); }
   .err { color:var(--err); }
   .ok { color:var(--ok); }
@@ -105,7 +90,7 @@
   .spacer { flex:1 1 auto; }
   button {
     font:inherit; color:var(--fg); background:var(--bg);
-    border:1px solid var(--line); border-radius:6px; padding:4px 10px;
+    border:1px solid var(--line); border-radius:0; padding:4px 10px;
     cursor:pointer; transition:border-color .12s, background .12s;
   }
   button:hover:not(:disabled) { border-color:var(--dim); background:var(--panel2); }
@@ -134,7 +119,7 @@
 
   /* ── 5. 卡片 ─────────────────────────────────────────────────────────── */
   .c {
-    background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+    background:var(--panel2); border:1px solid var(--line); border-radius:0;
     padding:9px 11px; min-width:0; display:flex; flex-direction:column;
   }
   .c .k {
@@ -145,7 +130,7 @@
   /* 灰色小标（降级/禁用）：**不改整卡颜色**，只加一个弱提示 ——
      整卡变灰会让「未配置」看起来像「坏了」。 */
   .tag {
-    font-size:10px; line-height:14px; padding:0 5px; border-radius:4px;
+    font-size:10px; line-height:14px; padding:0 5px; border-radius:0;
     background:color-mix(in srgb, var(--dim) 18%, transparent);
     color:var(--dim); font-weight:500; flex:none;
   }
@@ -153,7 +138,7 @@
   .tag.ok  { background:color-mix(in srgb, var(--ok) 16%, transparent);  color:var(--ok); }
   .tag.warn{ background:color-mix(in srgb, var(--warn) 16%, transparent);color:var(--warn); }
   .c .v {
-    font-family:var(--mono); font-variant-numeric:tabular-nums;
+    font-family:var(--font-ui); font-variant-numeric:tabular-nums;
     font-size:20px; font-weight:700; letter-spacing:-.02em; margin-top:2px;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
@@ -169,10 +154,10 @@
 
   /* ── 6. 三档进度条（hyxapi MiniBar 的逐条搬运）─────────────────────── */
   .minibar {
-    height:4px; border-radius:2px; margin-top:6px; overflow:hidden;
+    height:4px; border-radius:0; margin-top:6px; overflow:hidden;
     background:color-mix(in srgb, var(--dim) 22%, transparent);
   }
-  .minibar > i { display:block; height:100%; border-radius:2px; transition:width .3s; }
+  .minibar > i { display:block; height:100%; border-radius:0; transition:width .3s; }
 
   /* ── 7. 表格（固定行高 / 横向滚动 / 紧凑）──────────────────────────── */
   .tw { overflow-x:auto; margin-top:6px; }
@@ -195,19 +180,19 @@
     height:22px; min-width:0; font-size:12px;
   }
   .kv .kk { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .kv .vv { font-family:var(--mono); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .kv .vv { font-family:var(--font-ui); font-variant-numeric:tabular-nums; white-space:nowrap; }
 
   /* ── 9. 骨架屏（按真实布局逐格复刻，不是一块大白）──────────────────── */
   .sk {
     background:color-mix(in srgb, var(--dim) 16%, transparent);
-    border-radius:4px; animation:skp 1.1s ease-in-out infinite;
+    border-radius:0; animation:skp 1.1s ease-in-out infinite;
   }
   /* 骨架块高度对齐真实元素：k=13px / v=20px / s=13px / 进度条=4px。
      高度对不上，数据到达时整页会**跳一下**，比没有骨架更刺眼。 */
   .sk-k { height:13px; width:52%; }
   .sk-v { height:20px; width:74%; margin-top:5px; }
   .sk-s { height:13px; width:44%; margin-top:5px; }
-  .sk-bar { height:4px; width:100%; margin-top:6px; border-radius:2px; }
+  .sk-bar { height:4px; width:100%; margin-top:6px; border-radius:0; }
   .sk-cell { height:26px; width:100%; margin-top:2px; }
   @keyframes skp { 0%,100%{opacity:.55} 50%{opacity:1} }
   @media (prefers-reduced-motion: reduce) { .sk { animation:none; } .minibar > i { transition:none; } }
@@ -215,7 +200,7 @@
   /* ── 10. 错误条 ──────────────────────────────────────────────────────── */
   #errbox {
     display:none; align-items:flex-start; gap:10px; flex-wrap:wrap;
-    padding:9px 12px; border-radius:8px;
+    padding:9px 12px; border-radius:0;
     border:1px solid color-mix(in srgb, var(--err) 45%, transparent);
     background:color-mix(in srgb, var(--err) 10%, transparent);
     color:var(--err); font-size:12.5px;
@@ -1413,6 +1398,34 @@ header h1{letter-spacing:0}
      .badge                 → **本就有**（684 一带），无需别名；.badge--hot/--cold/--ro 同理
      .calm                  → 本节的安静区（新概念，非别名）
    ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── N. 热力图色阶（共享层）── 2026-10-30
+   ══════════════════════════════════════════════════════════════════════
+
+   # 为什么要有它
+   外壳页原来自带一套热力图色阶 --hm0..--hm4，把 10 个绿色**写死在页面里**
+   （深色 #303033 #0e4429 #006d32 #26a641 #39d353 / 浅色 #ebedf0 #9be9a8
+     #40c463 #30a14e #216e39），而且那两套**不是取反关系**。后果：
+     · 换主题时它不跟着变；· 深浅两套谁对谁错没人能一眼核对。
+   现在页面只保留 --hm0..--hm4 这层**别名**，值全部指向本节的色阶。
+
+   # 为什么用 color-mix 而不是写 5 个绿
+   混合基是 --ok 与 --bg：主题一换，五档全部跟着重算，不会出现"改了主题忘了配色阶"。
+
+   # 顺序语义（单调，不许打乱）
+   --heat-0 空档（当天没有活动） → --heat-5 最热（--ok 本色）。
+   用色阶的地方只许引用变量，不许再写具体绿值 ——
+   tests/frontend/verify_theme_compliance.js 会盯着这一条。
+   ══════════════════════════════════════════════════════════════════════ */
+:root{
+  --heat-0: color-mix(in srgb, var(--ok) 8%, var(--bg));
+  --heat-1: color-mix(in srgb, var(--ok) 25%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--ok) 45%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--ok) 65%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--ok) 85%, var(--bg));
+  --heat-5: var(--ok);
+}
 /* ==== WB2API:MAXIMALISM:END ==== */
 
   /* ══ 12. 页内最后一层覆盖：跨主题安全的标签与链接（T52 · 2026-10-26）══════
@@ -1421,7 +1434,7 @@ header h1{letter-spacing:0}
      theme_sync 把 theme-max.css 追加进本页同一个 <style> 的末尾，而它的
      :root 变量块与 .tag 规则都在本页原有规则**之后** ⇒ 同特异性下层叠顺序
      决定了它赢。于是本页原按 v2 GitHub 调色板配好的对子被打散：
-       · 原 .tag{background:color-mix(--dim 18%); color:var(--dim)} 被
+       · 原 .tag{background:color-mix(--dim 18%);color:var(--dim)} 被
          theme-max 的 .tag{...; color:#120F0D} 覆盖 ⇒ 深色下变成
          「墨字(#120F0D) 压 暗黄底(#443A32)」= 1.72:1，几乎读不出来
          （改造前是 3.98:1 —— 这一处是**被主题覆盖后恶化**的，不是新写坏的）。
