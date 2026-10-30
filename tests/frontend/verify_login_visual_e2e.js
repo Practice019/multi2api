@@ -640,7 +640,10 @@ async function flowAll(o) {
     // sharedGet，所以必须是"这个会话里第一次拉列表"才不会被缓存挡住）。
     // 注入的是页面里的 fetch（同一次导航内有效），不是改产品代码。
     if (defects.panel_api_500) await injectIf(pg, defects, 'panel_api_500', rep);
-    await openPanel(pg, 'apikeys');
+    // ⚠ 2026-10-30：旧「API 管理」面板已 hidden（入口合并到令牌页，见 webui.html 的注释）。
+//   本探针要验的仍是「它打开后非空白屏」，所以先解锁再切。
+await pg.ev('(() => { const s = document.querySelector(\'section[data-key="apikeys"]\'); if (s) { s.hidden = false; } })()');
+await openPanel(pg, 'apikeys');
     let p = await pg.ev(`(${PANEL_JS})('apikeys')`);
     P(panelNonBlank(p), '「API 管理」面板打开且非空白屏（新的成员账号名下 0 把 key）', JSON.stringify(p));
     P(p.keys === 0 && p.emptyText === true,
@@ -821,7 +824,10 @@ async function flowAll(o) {
     // 这一条就是它的判据：把 DOM 里渲染出的东西，和"当场另发一次请求"的真值对比。
     // 方向不重要（这里恰好是令牌身份看到了成员的数据；反过来就是成员看到管理员的
     // 列表 —— 同一个缺陷的两种形态）。
-    await openPanel(pg, 'apikeys');
+    // ⚠ 2026-10-30：旧「API 管理」面板已 hidden（入口合并到令牌页，见 webui.html 的注释）。
+//   本探针要验的仍是「它打开后非空白屏」，所以先解锁再切。
+await pg.ev('(() => { const s = document.querySelector(\'section[data-key="apikeys"]\'); if (s) { s.hidden = false; } })()');
+await openPanel(pg, 'apikeys');
     const domN = await pg.ev(`(() => { const p = (${PANEL_JS})('apikeys'); return p.keys; })()`);
     const akText = String(await pg.ev('(document.getElementById("apiAdminKey")||{}).textContent||""'));
     const fresh = await pg.ev(`(async () => {
@@ -875,7 +881,10 @@ async function flowAll(o) {
     P(S.adminNav.length >= 4, '导航渲染出多个面板（manifest 驱动，不是空导航）', '项数=' + S.adminNav.length);
 
     // 先把管理员自己的一把 key 建出来（供 ⑨ 与成员对比）
-    await openPanel(pg, 'apikeys');
+    // ⚠ 2026-10-30：旧「API 管理」面板已 hidden（入口合并到令牌页，见 webui.html 的注释）。
+//   本探针要验的仍是「它打开后非空白屏」，所以先解锁再切。
+await pg.ev('(() => { const s = document.querySelector(\'section[data-key="apikeys"]\'); if (s) { s.hidden = false; } })()');
+await openPanel(pg, 'apikeys');
     await pg.click('#btnApiKeyNew');
     await pg.setValue('#akName', 'probe-visual-admin-key');
     await pg.click('#akSave');
@@ -1079,7 +1088,10 @@ async function openPanelByIndex(pg, idx) {
 async function waitKeys(pg, ok, ms) {
   const t0 = Date.now();
   for (;;) {
-    await openPanel(pg, 'apikeys');
+    // ⚠ 2026-10-30：旧「API 管理」面板已 hidden（入口合并到令牌页，见 webui.html 的注释）。
+//   本探针要验的仍是「它打开后非空白屏」，所以先解锁再切。
+await pg.ev('(() => { const s = document.querySelector(\'section[data-key="apikeys"]\'); if (s) { s.hidden = false; } })()');
+await openPanel(pg, 'apikeys');
     const v = await pg.ev(`(() => { const p = (${PANEL_JS})('apikeys'); return p.keys; })()`);
     if (ok(v)) return { ok: true, ms: Date.now() - t0, keys: v };
     if (Date.now() - t0 > ms) return { ok: false, ms: Date.now() - t0, keys: v };
