@@ -116,6 +116,16 @@
   /* 分页放在容器**底部**（同一只边框盒内）：与表头/数据行共享左右边框，视觉上成组；
      若放在框外，要么自己再描一圈边（重复框架）、要么就是用户看到的那种「孤零零漂着」。 */
   .pager { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; color: var(--dim); }
+  /* 系统凭据卡片（2026-10-30）：与令牌页其它区块同一套语义变量、零圆角。
+     ⚠ 不写任何硬编码颜色 —— tests/frontend/verify_theme_compliance.js 会红。 */
+  .cred{border:2px solid var(--line);background:var(--panel);border-radius:0;padding:10px 12px;margin:0 0 12px}
+  .credhd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+  .credhd b{font-family:var(--font-display);font-size:14px;letter-spacing:.02em}
+  .credrows{display:flex;flex-direction:column;gap:6px}
+  .credrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px}
+  .credrow code{font-family:var(--font-mono);background:var(--code-bg);padding:1px 6px;border:1px solid var(--line)}
+  .credrow .dim{color:var(--dim);font-size:12px}
+
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
@@ -1941,6 +1951,57 @@ $('f-codes').addEventListener('change', function () {
   state.codes = codes;
 });
 refresh();
+
+// ── 系统凭据（admin_token / api_key）：展示 + 各自独立轮换 ──────────────────
+// 2026-10-30 从旧「API 管理」面板搬来（那里已 hidden），端点与确认文案逐字保留。
+(async function () {
+  var box = document.getElementById('credRows');
+  if (!box) { return; }
+  function row(label, val, id, hint) {
+    if (!val) {
+      return '<div class="credrow"><b>' + label + '</b><span class="dim">未配置' + (hint ? '（' + hint + '）' : '') + '</span></div>';
+    }
+    return '<div class="credrow"><b>' + label + '</b><code>' + esc(val) + '</code>'
+      + '<button type="button" data-rot="' + id + '" style="padding:2px 8px;font-size:12px">轮换</button>'
+      + '<span class="dim">轮换后立即生效，无需重启</span></div>';
+  }
+  async function load() {
+    try {
+      var d = await (await fetch('/admin/apikeys', { credentials: 'same-origin', cache: 'no-store' })).json();
+      box.innerHTML = row('管理令牌 admin_token', d.admin_token, 'admin', '用账号口令登录即可，不填也行')
+        + row('对话密钥 api_key', d.api_key, 'apikey', '客户端调用 /v1 用');
+      box.querySelectorAll('button[data-rot]').forEach(function (b) {
+        b.addEventListener('click', function () { rotate(b, b.getAttribute('data-rot')); });
+      });
+    } catch (e) {
+      box.innerHTML = '<span class="err">读取失败：' + esc(String(e && e.message || e)) + '</span>';
+    }
+  }
+  async function rotate(btn, which) {
+    var isAdmin = which === 'admin';
+    var msg = isAdmin
+      ? '轮换管理令牌（admin_token）？\n\n· 生成新令牌写入 config.json\n· 立即生效：旧令牌作废\n· 不填令牌也能登录（用账号口令）\n· 新令牌仅此一次完整显示'
+      : '轮换对话密钥（api_key）？\n\n· 生成新密钥写入 config.json\n· 立即生效：旧密钥作废，客户端需要换新\n· 不影响控制台登录\n· 新密钥仅此一次完整显示';
+    if (!confirm(msg)) { return; }
+    var old = btn.textContent;
+    btn.disabled = true; btn.textContent = '轮换中…';
+    try {
+      var r = await (await fetch('/admin/apikeys/rotate-' + (isAdmin ? 'admin' : 'api-key'), {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      })).json();
+      if (!r || !r.full) { throw new Error((r && r.error) || '未知原因'); }
+      try { await navigator.clipboard.writeText(r.full); } catch (e2) { /* 剪贴板不可用就只显示 */ }
+      toast('已轮换，新值（仅此一次显示，已尝试复制）：\n' + r.full, false, 15000);
+      await load();
+    } catch (e) {
+      toast('轮换失败：' + (e && e.message ? e.message : e), true);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  }
+  await load();
+})();
+
 </script>
 </body>
 </html>

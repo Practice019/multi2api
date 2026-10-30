@@ -176,7 +176,11 @@ async function waitGone(ev, sel, timeoutMs = 20000, stepMs = 250) {
       // ---------------- ② API 管理 · 删除 ----------------
       console.log('\n=== ② API 管理 · 删除（真点按钮）===');
       await ev('window.__REQ__ = []; window.__TOASTS__ = []; window.__TOAST0__ = Date.now();');
-      await showPanel(ev, 'apikeys', 1200);
+      // ⚠ 2026-10-30：用户报「api管理和令牌功能重叠」⇒ 令牌页成为唯一入口，旧「API 管理」
+//   面板改为 hidden（DOM 与代码都保留）。本探针测的是它那张表上的删除按钮，
+//   所以切之前自己把面板解锁（只动本隔离实例的 DOM，不碰产品代码）。
+await ev('(() => { const s = document.querySelector(\'section[data-key="apikeys"]\'); if (s) { s.hidden = false; } })()');
+await showPanel(ev, 'apikeys', 1200);
       const krows = await until(ev, 'document.querySelectorAll("#apiKeyRows button[data-act=delete]").length', (n) => n > 0, 15000);
       info('Key 行数 = ' + krows);
       ok(krows >= 1, '列表里有一把合成 key');
