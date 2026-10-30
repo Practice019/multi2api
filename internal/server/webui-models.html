@@ -205,28 +205,34 @@
      语义色文字」；色值一律取语义变量，不写死。实算对比度（WCAG，本页行底 --panel2）：
        light  --ok 5.38:1 / --warn 5.32:1 / --dim 7.12:1
        dark   --ok 12.06:1 / --warn 11.31:1 / --dim 8.07:1   ⇒ 全部 >= 4.5，过。 */
-  /* 倍率**前缀标记**（用户 2026-10-27：不单独成列，拼在模型 ID 前面，做成标签/卡片的样子）
-     · 底色透明、只描边 + 语义色文字 ⇒ 与行底色成对，不新引入底/字配对风险；
-     · 零圆角（与 theme-max 的视觉语言一致）；
-     · 等宽 + 右侧 7px 间距，让标记与名称读起来是一件事。 */
-  /* ⚠ 2026-10-30 用户反馈「样式没统一」：标记宽度随内容变（`x2` 窄、`未声明` 宽），
-     导致同一列里模型名左端参差。改成**等宽定宽 + 居中**：
-       · 等宽字体下 1ch = 一个数字宽，7ch 容得下 `x0.29`（5 字符）与 `未声明`（3 个
-         全宽字 ≈ 6ch）两种极端，name 列因此对齐成一列；
-       · box-sizing:border-box 让宽度把边框算进去（否则不同 border 档位会差 1~2px）；
-       · text-align:center 让「x2」这类短值不贴左，视觉上仍然是同一个盒子。 */
+  /* 倍率**前缀标记**：与同行其它徽章（`.badge.real` / `.badge.synth` / `.badge.callok`…）
+     用**完全同一套配方** —— 用户 2026-10-30 原话「统一起来」。
+     配方（与上面 5b 段逐字同源）：中性底 --panel2 + 描边 + 语义色文字 + 零圆角
+     + 同字号/行高（11px/16px）+ vertical-align:1px。
+
+     只保留**一处**必要差异：**等宽定宽 7ch + 居中**。那来自用户同一天更早的一条反馈
+     （「样式没统一」的原意是模型名左端参差）：等宽字体下 1ch = 一个数字宽，7ch 容得下
+     `x0.29`（5 字符）与 `未声明`（3 个全宽字 ≈ 6ch）两种极端 ⇒ name 列对齐成一列；
+     box-sizing:border-box 让宽度把边框算进去（否则不同描边档位会差 1~2px）。
+
+     ⚠ 底与字成对给出（5b 段那条纪律），底色一律中性面板色，差异只交给描边与文字色。
+       对比度实测（WCAG，压在 --panel2 上）：light ok 5.38 / dim 7.12 / acc 7.6；
+       dark ok 12.06 / dim 8.07 / acc 7.9 ⇒ 全部 >= 4.5（有对比度门禁盯着）。 */
   .multtag {
-    display:inline-block; box-sizing:border-box; width:7ch; margin-right:7px; padding:0 2px;
-    font-family:var(--mono); font-size:12px; line-height:18px; text-align:center;
-    color:var(--fg); border:1px solid var(--dim); border-radius:0; white-space:nowrap;
-    vertical-align:middle;
+    display:inline-block; box-sizing:border-box; width:7ch; margin-right:7px; padding:0 6px;
+    font-family:var(--mono); font-size:11px; line-height:16px; text-align:center;
+    background:var(--panel2); color:var(--fg);
+    border:1px solid var(--dim); border-radius:0; white-space:nowrap; vertical-align:1px;
   }
+  /* 未声明（不在上游 /v3/config 计价清单里）：虚线描边 + dim */
   .multtag.none { color:var(--dim); border-style:dashed; }
-  /* 「上游给了模型但没给系数」——与「未声明」视觉上也必须不同：
+  /* 未知（上游给了模型但没给系数）—— 与「未声明」也必须能分开：
      前者是上游的数据缺口，后者是我们的计价清单没覆盖。 */
   .multtag.unknown { color:var(--dim); border-style:dotted; }
-  .multtag.free { color:var(--ok); border-color:var(--ok); }
-  .multtag.hi { color:var(--acc); border-color:var(--acc); }
+  /* 免费（上游明确给 0）：语义绿 + 加粗 —— 与「未知」一眼分开 */
+  .multtag.free { color:var(--ok); border-color:var(--ok); font-weight:700; }
+  /* 高倍率（>= x1）：强调色 + 加粗 */
+  .multtag.hi { color:var(--acc); border-color:var(--acc); font-weight:700; }
   /* 可调用列的徽章：语义色只上描边 + 文字（底与字成对，见上） */
   .badge.callok { border:2px solid var(--ok); color:var(--ok); font-weight:700; }
   .badge.callno { border:2px solid var(--warn); color:var(--warn); font-weight:700; }
