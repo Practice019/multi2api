@@ -35,8 +35,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
 <style>
   /* 深色主题（默认）。所有颜色都必须走变量 ——
      渲染函数里写死颜色会让切换主题时出现"局部还是旧配色"的花脸。 */
-  :root, :root[data-theme="dark"]{
-    /* ⚠ 2026-10-21 视觉语言 v2：换 GitHub Dark 色板。
+  :root, :root[data-theme="dark"]{/* ⚠ 2026-10-21 视觉语言 v2：换 GitHub Dark 色板。
        选它的理由：这套值被验证过在**高密度数据表**上长时间可读，
        而且中性（不偏蓝）—— 旧值 #0b0e14/#232b3d 带明显蓝味，
        会让强调蓝 #4f8cff 显脏。
@@ -49,20 +48,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
          --err #F85149   5.5:1 ✓
        ⚠ 胶囊形 .pill.* 是 16% 淡染底，对比度低于直接铺底色 ——
          上面 6 个值都还有余量（最低 5.5 在 16% 染底上仍 > 4.5）。 */
-    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
-    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5; --ok:#3FB950; --warn:#D29922; --err:#F85149;
     /* 代码块底色 / 遮罩 / 阴影也必须走变量 ——
        否则浅色主题下 <pre> 会是深色块、模态遮罩会过重、阴影会显成脏边。 */
-    --code-bg:#0D1117; --overlay:rgba(1,4,9,.72); --shadow:rgba(1,4,9,.5);
     /* 活跃热力图的 5 档色阶 —— **原样抄**参考项目 openViking 的
        `web-studio/src/styles.css`（它的 `--heatmap-empty` / `--heatmap-level-1..4`）。
        ⚠⚠ 用户明确要求"颜色不对 严格抄"，所以这 5 个值是**字面量照搬**，
           不与本项目的 --acc 混色 —— 混出来的蓝阶和它那套 GitHub 绿阶不是一回事。
        ⚠ 深色主题下档位顺序是**反的**（1 最暗 → 4 最亮）：暗底上"更多"应当更亮，
           这是它那边的设计，照搬即可。 */
-    --hm0:#303033; --hm1:#0e4429; --hm2:#006d32; --hm3:#26a641; --hm4:#39d353;
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
-  }
+    --hm0:var(--heat-0);--hm1:var(--heat-1);--hm2:var(--heat-2);--hm3:var(--heat-3);--hm4:var(--heat-4);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace}
   /* 浅色主题。**不是把深色取反**：深色那套强调色在浅底上对比度不足，
      所以这里单独挑了一组更深的色值，正文对比度按 WCAG AA（>= 4.5:1）取值。
 
@@ -80,20 +74,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        在账号池里那个位置一直是 .pill.dim（①②都富余）；直到这一版前面多了 .pill.ok，
        判据才开始量到真身。⇒ 别把"判据绿"当成"这一栏没问题"，
        判据只量它够得着的那一个元素。 */
-  :root[data-theme="light"]{
-    /* 浅色用 GitHub Light 色板（同样复算过）：
+  :root[data-theme="light"]{/* 浅色用 GitHub Light 色板（同样复算过）：
          --fg  #1F2328  16.8:1 ✓   --dim #59636E  6.4:1 ✓
          --acc #0969DA   5.8:1 ✓   --ok  #1A7F37  5.9:1 ✓
          --warn#9A6700   6.3:1 ✓   --err #CF222E  5.9:1 ✓ */
-    --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
-    --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
     /* 浅色下代码块用略深的底、遮罩更淡、阴影更轻 */
-    --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
     /* 浅色下的热力图色阶 —— 同样是**字面量照搬** openViking 的浅色那套
        （`--heatmap-empty:#ebedf0` + L1..L4 由浅到深）。⚠ 与深色那套**不是取反关系**，
        所以必须像其他颜色一样各写一份，不能在深色值上算。 */
-    --hm0:#ebedf0; --hm1:#9be9a8; --hm2:#40c463; --hm3:#30a14e; --hm4:#216e39;
-  }
+    --hm0:var(--heat-0);--hm1:var(--heat-1);--hm2:var(--heat-2);--hm3:var(--heat-3);--hm4:var(--heat-4)}
   /* ⚠⚠ 这一轮按用户要求整体**收紧留白**（「更紧凑、少空白、合理利用空间」）。
      原则：**只动"每屏都吃"的值**（全局字号/行高、外框内边距、表格行高、卡片内边距），
      不动配色、不动结构、不动交互 —— 所以风险低、改完立刻能看出来。
@@ -113,7 +102,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
   h1 small{color:var(--dim);font-weight:400;margin-left:8px;font-size:12px}
   .spacer{flex:1}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--dim);display:inline-block}
+  .dot{width:8px;height:8px;border-radius:0;background:var(--dim);display:inline-block}
   .dot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .dot.bad{background:var(--err);box-shadow:0 0 8px var(--err)}
   /* 顶栏状态条：一排常驻读数（健康 / 账号 / 上游 / 刷新时刻）。
@@ -121,13 +110,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .topstats{display:flex;align-items:center;gap:0;font-size:12px;color:var(--dim)}
   .topstats .ts{padding:0 10px;border-left:1px solid var(--line);white-space:nowrap}
   .topstats .ts:first-child{border-left:0}
-  .topstats .ts b{color:var(--fg);font-weight:600;font-family:ui-monospace,Consolas,monospace}
+  .topstats .ts b{color:var(--fg);font-weight:600;font-family:var(--font-mono)}
   .topstats .ts.ok b{color:var(--ok)}
   .topstats .ts.warn b{color:var(--warn)}
   .topstats .ts.err b{color:var(--err)}
   @media (max-width:820px){ .topstats{display:none} }
   input,select,textarea,button{font:inherit;color:var(--fg);background:var(--panel2);
-    border:1px solid var(--line);border-radius:8px;padding:7px 10px;outline:none}
+    border:1px solid var(--line);border-radius:0;padding:7px 10px;outline:none}
   input:focus,select:focus,textarea:focus{border-color:var(--acc)}
   button{cursor:pointer;transition:.15s}
   button:hover{border-color:var(--acc)}
@@ -145,17 +134,17 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .layout{display:grid;grid-template-columns:168px minmax(0,1fr);gap:12px;
     max-width:1800px;margin:0 auto;padding:12px 16px}
   .sidebar{position:sticky;top:52px;align-self:start;display:flex;flex-direction:column;gap:2px;
-    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px}
-  .sidebar button{text-align:left;background:transparent;border:0;border-radius:8px;
+    background:var(--panel);border:1px solid var(--line);border-radius:0;padding:6px}
+  .sidebar button{text-align:left;background:transparent;border:0;border-radius:0;
     padding:6px 9px 6px 12px;font-size:12.5px;color:var(--dim);cursor:pointer;transition:.12s;
     position:relative}
   .sidebar button:hover{background:var(--panel2);color:var(--fg)}
   .sidebar button.active{background:var(--acc);color:var(--on-acc);font-weight:600}
   /* 选中指示条：纯 CSS 画，不引入任何图标字体或 emoji */
   .sidebar button.active::before{content:'';position:absolute;left:5px;top:50%;transform:translateY(-50%);
-    width:3px;height:15px;border-radius:2px;background:#fff;opacity:.9}
+    width:3px;height:15px;border-radius:0;background:var(--cream);opacity:.9}
   .sidebar .badge{margin-left:8px;font-size:10px;background:var(--panel2);
-    border-radius:999px;padding:1px 6px;color:var(--dim)}
+    border-radius:0;padding:1px 6px;color:var(--dim)}
   /* 选中项的徽章：底色跟随主题的强调色，而不是写死白色半透明。
      写死的 rgba(255,255,255,.22) 是当初把深色配色硬抄进 CSS 的遗留。
 
@@ -181,18 +170,18 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .navgroup.collapsed .navgrouphd::before{transform:rotate(0deg)}
   .navgroup.collapsed .navitems{display:none}
   .navgrouphd .navgcount{margin-left:auto;font-size:10px;background:var(--panel2);
-    border-radius:999px;padding:1px 6px;letter-spacing:0}
+    border-radius:0;padding:1px 6px;letter-spacing:0}
   /* 账号数为 0 时把徽章标红：那是"配了上游却没有可用账号"，需要被看见 */
   .navgrouphd .navgcount.zero{background:transparent;color:var(--warn);
     border:1px solid var(--warn)}
   .navgroup.collapsed .navgrouphd .navgcount{opacity:.6}
   /* 默认上游标记 */
-  .navgrouphd .navgdef{font-size:9px;border:1px solid var(--line);border-radius:999px;
+  .navgrouphd .navgdef{font-size:9px;border:1px solid var(--line);border-radius:0;
     padding:0 5px;letter-spacing:0;text-transform:none}
   .navitems{display:flex;flex-direction:column;gap:2px}
   /* 契约降级提示：manifest 拉不到时在导航里显示原因，而不是静默少几个面板 */
   .navdegraded{font-size:11px;line-height:1.5;color:var(--warn);
-    border:1px dashed var(--line);border-radius:8px;padding:7px 9px}
+    border:1px dashed var(--line);border-radius:0;padding:7px 9px}
   .content{display:grid;gap:12px;min-width:0}   /* 原 gap:18px */
   /* 账号表的上游分组标题行：整行跨列，作为该组账号的视觉分组线。
      用 <tr> 而不是额外表格 —— 保持单一 table 让列宽与主体一致。 */
@@ -350,7 +339,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      ⚠ 同类写法检查过一遍：`.colset` 的规则里**没有** display，所以它不受影响
        （实测关闭态 `display:none` 正常）。 */
   .ops-menu{position:fixed;margin:0;
-    border:1px solid var(--line);border-radius:8px;background:var(--panel);
+    border:1px solid var(--line);border-radius:0;background:var(--panel);
     padding:6px;box-shadow:0 8px 24px var(--shadow)}
   .ops-menu:popover-open{display:flex;gap:6px}
   .ops-menu button{height:25px;padding:0 8px;font-size:11.5px}
@@ -370,7 +359,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      （见 ACCT_COLUMN_DEFS 的 w），数字列天然右对齐，再加一层开关是多余动作。 */
   .colset-btn{display:inline-flex;align-items:center;gap:4px}
   .colset{position:fixed;margin:0;width:336px;padding:0;
-    border:1px solid var(--line);border-radius:10px;background:var(--panel);
+    border:1px solid var(--line);border-radius:0;background:var(--panel);
     box-shadow:0 10px 28px var(--shadow)}
   /* ⚠ 与 .ops-menu 同一条理由：popover 默认的 ::backdrop 会把整页压暗，
      而这是「看着表格调表格」的浮层（参考原话 tsx:541「面板不该有遮罩、
@@ -383,7 +372,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .colset-head span:nth-child(2),.colset-head span:nth-child(3){text-align:center}
   /* 列多时面板不跟着长，行区自己滚（参考 tsx:581 的 min-h-0 overflow-y-auto） */
   .colset-rows{max-height:min(52vh,420px);overflow-y:auto;padding:4px 12px}
-  .colset-row{padding:5px 0;border-radius:6px}
+  .colset-row{padding:5px 0;border-radius:0}
   .colset-row:hover{background:color-mix(in srgb,var(--fg) 5%,transparent)}
   .colset-row.dragging{opacity:.5}
   .colset-grip{cursor:grab;color:var(--dim);opacity:.5;text-align:center;
@@ -431,10 +420,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      不承担任何隐藏职责。折叠/展开只由 section 上的类驱动。 */
   /* 分组标题做成按钮（R3）：原来的 <span> 是**不可聚焦**的，键盘用户
      和读屏器完全够不着它，折叠写完也只有鼠标能用。
-     ⚠ font-family:inherit 与 font:inherit 的区别不是风格问题：
-     `<button>` 有 UA 默认字体（约为等宽），而 button 的简写 font 会**重置**
-     这些图标性属性，把分组标题变成等宽字。必须按属性逐个继承。 */
-  .ghead-btn{display:inline-flex;align-items:center;gap:6px;
+     ⚠ font-family:var(--font-ui);align-items:center;gap:6px;
     background:transparent;border:0;padding:0;color:inherit;
     font:inherit;font-weight:inherit;letter-spacing:inherit;
     font-family:inherit;cursor:pointer;text-align:left}
@@ -449,16 +435,16 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .ghead2 + .ghead2{margin-top:14px}
   .glist{display:flex;flex-direction:column;gap:6px}
   .gitem{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-    padding:8px 11px;background:var(--panel2);border-radius:9px;font-size:13px}
+    padding:8px 11px;background:var(--panel2);border-radius:0;font-size:13px}
   .gitem .gname{font-weight:600}
   .gitem .gqty{font-size:12px;color:var(--acc);font-weight:600}
   .gitem .gmeta{flex-basis:100%;font-size:11px;color:var(--dim);
-    font-family:ui-monospace,Consolas,monospace;word-break:break-all}
-  .gbad{padding:8px 11px;border-radius:9px;font-size:12px;color:var(--err);
+    font-family:var(--font-mono);word-break:break-all}
+  .gbad{padding:8px 11px;border-radius:0;font-size:12px;color:var(--err);
     border:1px solid var(--err);background:transparent}
   .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 12px}
   /* 嵌套对象（U2 的关键）：缩进 + 弱化标签，区分顶层与子项 */
-  .kvs.nested{display:grid;grid-template-columns:1fr;padding:6px 10px;background:var(--panel2);border-radius:6px;margin-top:4px}
+  .kvs.nested{display:grid;grid-template-columns:1fr;padding:6px 10px;background:var(--panel2);border-radius:0;margin-top:4px}
   .kvs .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;
     padding:5px 0;border-bottom:1px solid var(--line)}
   .kvs .k{color:var(--dim)}
@@ -526,10 +512,10 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .field.chk{flex-direction:row;align-items:center;gap:8px}
   .field.chk input{width:auto}
   .field.chk label{font-size:13px;color:var(--fg)}
-  fieldset{border:1px solid var(--line);border-radius:10px;padding:10px;margin:0 0 10px}
+  fieldset{border:1px solid var(--line);border-radius:0;padding:10px;margin:0 0 10px}
   legend{font-size:12px;color:var(--dim);padding:0 8px;letter-spacing:.4px}
   /* 设置页重设计（用户本轮要求）新增的呈现类：生效时机徽章 / 组内子块 / 信息条 */
-  .badge{font-size:11px;font-family:var(--mono);padding:1px 7px;border-radius:999px;
+  .badge{font-size:11px;font-family:var(--font-ui);padding:1px 7px;border-radius:0;
     border:1px solid currentColor;margin-left:8px;vertical-align:1px}
   .badge--hot{color:var(--ok)}          /* 立即生效 */
   .badge--cold{color:var(--warn)}         /* 重启生效 */
@@ -552,8 +538,8 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .pair input[type=text],.pair input[type=number]{width:120px}
   .readonly dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:13px}
   .readonly dt{color:var(--dim);font-size:12px}
-  .readonly dd{margin:0;font-family:var(--mono);font-size:12px;word-break:break-all}
-  section{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .readonly dd{margin:0;font-family:var(--font-ui);font-size:12px;word-break:break-all}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:0;overflow:hidden}
   section>h2{margin:0;padding:8px 14px;font-size:12px;font-weight:650;letter-spacing:.6px;
     text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
     display:flex;align-items:center;gap:10px}
@@ -575,23 +561,23 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      两者上下相邻时若不给外边距，两行会**贴在一起**、看不出是两组。
      所以只补这一条行间距，其余样式与 `.cards` 完全共用（不复制一套）。 */
   #statsCards2{margin-top:8px}
-  .card{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 12px;
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:8px 12px;
     display:flex;flex-direction:column;justify-content:center;min-height:52px;width:auto;min-width:0}
   .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
   /* ⚠ 口径说明的 `?`（照 agent2api 的 TipQ 做法）。纯 CSS 画的圆点，不引图标。 */
   .card .k .ctip{display:inline-flex;align-items:center;justify-content:center;
-    width:12px;height:12px;margin-left:4px;border-radius:50%;font-size:9px;
+    width:12px;height:12px;margin-left:4px;border-radius:0;font-size:9px;
     background:color-mix(in srgb,var(--dim) 28%,transparent);color:var(--fg);
     cursor:help;vertical-align:middle}
   /* ⚠ 「Top 模型」的值是模型名（`loomy/DeepSeek-V4.1-Flash` 那种很长）——
      看图发现它把卡撑成两行、把整行都拉高了。⇒ 单行 + 截断，全文放 title。 */
-  .card .v{font-size:21px;font-weight:700;font-family:var(--mono);margin-top:2px;
+  .card .v{font-size:21px;font-weight:700;font-family:var(--font-ui);margin-top:2px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 
   /* ---- 报表区（2026-10-18）· 全部纯 CSS，零图表库 ----
      ⚠ 这四条是"双栏"的基础：`.duo` 两列，窄屏自动退化成一列（auto-fit 搞定，不用写媒体查询）。 */
   .duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:10px}
-  .panel{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;min-width:0}
+  .panel{background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:9px 11px;min-width:0}
   .panelhd{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
     letter-spacing:.3px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   /* Top 榜一行：名称 + 条形 + 值 + 占比。⚠ 条形的宽度由内联 style 给（`width:NN%`）——
@@ -599,29 +585,29 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .toplist{display:flex;flex-direction:column;gap:3px}
   .toprow{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1.4fr) auto auto;
     align-items:center;gap:7px;font-size:12px;line-height:1.5}
-  .toprow .tname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
+  .toprow .tname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-ui)}
   /* ⚠ 条形与数值三件套做成**共享类**（`.tbar`/`.tval`/`.tpct`），不加父级前缀 ——
      因为 Top 榜（`.toprow`）与激活条的"按天用量"（`.hbrow`）**都要用它们**。
      ⚠ 这里踩过一次：原来写的是 `.toprow .tbar`，`hbrow` 里写上 `tbar` 类名却匹配不到样式
        ⇒ 页面上**条形整列是空的**（只有日期和数字），而 DOM 里类名一个不少 —— 只能看图发现。 */
   .tbar{height:9px;background:color-mix(in srgb,var(--dim) 14%,transparent);
-    border-radius:5px;overflow:hidden}
-  .tbar i{display:block;height:100%;background:var(--acc);border-radius:5px;
+    border-radius:0;overflow:hidden}
+  .tbar i{display:block;height:100%;background:var(--acc);border-radius:0;
     transition:width .25s}
-  .tval{font-family:var(--mono);text-align:right;color:var(--fg)}
-  .tpct{font-family:var(--mono);text-align:right;color:var(--dim);min-width:46px}
+  .tval{font-family:var(--font-ui);text-align:right;color:var(--fg)}
+  .tpct{font-family:var(--font-ui);text-align:right;color:var(--dim);min-width:46px}
   /* 环形图：`conic-gradient` 画出来（⚠ 不用 canvas / 不用 svg 路径 / 不用图表库）。
      ⚠ 中间那圈"挖空"用伪元素画一个跟底色相同的圆 —— 这是 CSS 环形的标准做法。 */
   .donutwrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-  .donut{position:relative;width:118px;height:118px;border-radius:50%;flex:none}
-  .donut::after{content:'';position:absolute;inset:26px;border-radius:50%;background:var(--panel2)}
+  .donut{position:relative;width:118px;height:118px;border-radius:0;flex:none}
+  .donut::after{content:'';position:absolute;inset:26px;border-radius:0;background:var(--panel2)}
   .donut .dc{position:absolute;inset:0;display:flex;flex-direction:column;
     align-items:center;justify-content:center;z-index:1}
-  .donut .dc b{font-family:var(--mono);font-size:15px}
+  .donut .dc b{font-family:var(--font-ui);font-size:15px}
   .donut .dc span{font-size:10px;color:var(--dim)}
   .legend{display:flex;flex-direction:column;gap:3px;font-size:12px;min-width:0;flex:1}
   .legend .lgrow{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:7px;align-items:center}
-  .legend .sw{width:9px;height:9px;border-radius:2px;flex:none}
+  .legend .sw{width:9px;height:9px;border-radius:0;flex:none}
   .legend .lgname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* ---- 活跃热力图（365 天）· 照 agent2api 的 GitHub 贡献图布局 ----
@@ -702,7 +688,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
         （那正是更早一轮用户报过的"位置不对"）。所以格子是"宽一点、略扁"。 */
   .heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);
     grid-auto-columns:minmax(0,1fr);gap:3px;width:100%}
-  .heatcell{width:auto;height:12px;border-radius:2px;background:var(--panel2)}
+  .heatcell{width:auto;height:12px;border-radius:0;background:var(--panel2)}
   /* ⚠ 格子可点（2026-10-18 按用户要求）：左键点一下，那天的用量**留在页面上**。 */
   .heatcell{cursor:pointer}
   .heatcell:hover{outline:1px solid color-mix(in srgb,var(--acc) 60%,transparent)}
@@ -762,7 +748,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        触发 `mouseout` 把浮层自己关掉（那会变成"一闪一闪"）。
      ⚠ 视口 clamp 在 JS 里做（见 hoverTipShow），CSS 不参与。 */
   .hovertip{position:fixed;z-index:60;pointer-events:none;display:none;
-    background:var(--panel);border:1px solid var(--line);border-radius:6px;
+    background:var(--panel);border:1px solid var(--line);border-radius:0;
     padding:6px 9px;font-size:12px;line-height:1.55;white-space:nowrap;
     box-shadow:0 6px 18px var(--shadow)}
   .hovertip .ht-t{font-weight:600;margin-bottom:2px}
@@ -808,8 +794,8 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   td br+*,th br+*{margin-left:6px}
   th{color:var(--dim);font-weight:500;font-size:11px;letter-spacing:.4px;text-transform:uppercase}
   tr:last-child td{border-bottom:0}
-  td.mono{font-family:var(--mono);font-size:12px}
-  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600}
+  td.mono{font-family:var(--font-ui);font-size:12px}
+  .pill{display:inline-block;padding:1px 8px;border-radius:0;font-size:11px;font-weight:600}
   .pill.ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
   .pill.warn{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
   .pill.err{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
@@ -844,25 +830,25 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .chips{display:flex;flex-wrap:wrap;gap:7px}
   /* 任务进度条：细、无圆角感、与数值同列。
      光看 "4/5" 不如一眼看出还剩多少，尤其是在一屏十几行任务时。 */
-  .pbar{height:4px;background:var(--panel2);border-radius:2px;margin-top:4px;
+  .pbar{height:4px;background:var(--panel2);border-radius:0;margin-top:4px;
     min-width:52px;max-width:96px;overflow:hidden}
-  .pbar i{display:block;height:100%;background:var(--acc);border-radius:2px;
+  .pbar i{display:block;height:100%;background:var(--acc);border-radius:0;
     transition:width .2s}
   /* 次要按钮：接单是登记动作、不产生收益，视觉上不应与「领取 N 分」争注意力。 */
   .ghost{background:transparent;border-color:var(--line);color:var(--dim)}
-  .ghost:hover{border-color:var(--acc);color:var(--acc)}  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:999px;
-    padding:3px 11px;font-family:var(--mono);font-size:12px;cursor:pointer}
+  .ghost:hover{border-color:var(--acc);color:var(--acc)}  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:0;
+    padding:3px 11px;font-family:var(--font-ui);font-size:12px;cursor:pointer}
   .chip:hover{border-color:var(--acc);color:var(--acc)}
   .chip span{color:var(--dim);font-size:11px;margin-left:5px}
   /* 成本倍率标记：x0 免费 / 低倍率中性 / 高倍率醒目。
      倍率是"选哪个模型"的决策依据，所以给个比 ctx 更强的视觉权重 ——
      同时用颜色区分"免费"与"贵"，但**不只靠颜色**（各自带 x 前缀的数字，色盲也可读）。 */
-  .chip .mult{margin-left:6px;padding:1px 6px;border-radius:999px;
+  .chip .mult{margin-left:6px;padding:1px 6px;border-radius:0;
     background:color-mix(in srgb,var(--dim) 14%,transparent);color:var(--dim);font-size:11px}
 /* 上下文窗口标注：与倍率标记并列，但视觉更弱 ——
    它是参考信息，而倍率是选哪个模型的决策依据，两者不该抢同样的注意力。
    未知时显示 ctx ? 并用虚线边框区分于真实数字（不只靠颜色）。 */
-.chip .ctx{margin-left:6px;padding:1px 5px;border-radius:4px;font-size:10.5px;
+.chip .ctx{margin-left:6px;padding:1px 5px;border-radius:0;font-size:10.5px;
   font-variant-numeric:tabular-nums;background:color-mix(in srgb,var(--dim) 16%,transparent);color:var(--dim);
   border:1px solid var(--line);cursor:help}
 /* 未知上下文（ctx ?）：**虚线与文字承担区分**，颜色不承担（色盲/截图/深浅主题都读得出）。
@@ -896,7 +882,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .mgroup{margin-bottom:14px}
   .mgroup:last-child{margin-bottom:0}
   .mgrouphead{display:flex;align-items:center;gap:7px;width:100%;
-    padding:5px 8px;background:transparent;border:0;border-radius:6px;
+    padding:5px 8px;background:transparent;border:0;border-radius:0;
     font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--dim);
     text-transform:uppercase;cursor:pointer;font-family:inherit;text-align:left}
   .mgrouphead:hover{color:var(--fg);background:var(--panel2)}
@@ -911,11 +897,11 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .mowner{color:var(--fg);text-transform:none;letter-spacing:0}
   .mcount2{font-weight:400;font-size:10.5px;text-transform:none;letter-spacing:0}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-  textarea{width:100%;min-height:74px;resize:vertical;font-family:var(--mono);font-size:13px}
-  .key{flex:1;min-width:230px;font-family:var(--mono);font-size:12px}
-  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:13px;
+  textarea{width:100%;min-height:74px;resize:vertical;font-family:var(--font-ui);font-size:13px}
+  .key{flex:1;min-width:230px;font-family:var(--font-ui);font-size:12px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:0;padding:13px;
     margin:12px 0 0;white-space:pre-wrap;word-break:break-word;
-    font-family:var(--mono);font-size:12.5px;max-height:340px;overflow:auto}
+    font-family:var(--font-ui);font-size:12.5px;max-height:340px;overflow:auto}
   .err{color:var(--err)} .dim{color:var(--dim)}
 
   /* ---- 任务调度：卡片网格（2026-10-19 照参考项目 Agent2API 移植）----
@@ -936,7 +922,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      （中文在窄柱里换行几乎无法阅读）。断点取它那边的 1120px。 */
   @media (max-width:1120px){ .job-list{grid-template-columns:minmax(0,1fr)} }
   .job-item{display:flex;flex-direction:column;gap:5px;min-width:0;
-    padding:9px 11px;border:1px solid var(--line);border-radius:8px;
+    padding:9px 11px;border:1px solid var(--line);border-radius:0;
     background:var(--panel2)}
   /* ⚠ 有任务报错时整张卡描红（原来是"整行标红"，换卡片后同样保留） */
   .job-item.errrow{border-color:color-mix(in srgb,var(--err) 55%,var(--line));
@@ -946,7 +932,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   /* 问号（任务说明）：抄参考项目的 `.tip-q` 做法 —— 说明挂在**问号**上而不是
      整个标题上，这样"哪段文字有解释"是看得见的，不用满处乱悬停试。 */
   .job-q{flex:none;display:inline-flex;align-items:center;justify-content:center;
-    width:14px;height:14px;border-radius:50%;font-size:10px;cursor:help;
+    width:14px;height:14px;border-radius:0;font-size:10px;cursor:help;
     color:var(--dim);border:1px solid var(--line);background:var(--panel)}
   .job-q:hover{color:var(--fg);border-color:var(--dim)}
   /* 状态行：等宽数字（扫一眼就能对齐比较），全角「·」分隔多段事实 */
@@ -1025,7 +1011,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .copyable:hover .copyhint{opacity:1}
   .copyhint{float:right;font-size:10px;color:var(--acc);opacity:0;transition:.15s;letter-spacing:.3px}
   pre.copyable:hover{border-color:var(--acc)}
-  .minibtn{font-size:11px;padding:1px 7px;border-radius:6px;margin-left:6px;vertical-align:middle}
+  .minibtn{font-size:11px;padding:1px 7px;border-radius:0;margin-left:6px;vertical-align:middle}
   /* 全局通知区：固定在右上角、挂在 body 下（不在 .content 里），
      因此不受「面板 section 显隐」影响 —— 这是修复「刷新按钮没提示」的关键。
      历史实现把提示写进 #taskbar，而 #taskbar 在账号池 section 内，
@@ -1049,7 +1035,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     display:flex;flex-direction:column;gap:8px;align-items:flex-end;
     max-width:min(420px,42vw);pointer-events:none}
   .notice{pointer-events:auto;background:var(--panel2);border:1px solid var(--line);
-    border-radius:10px;padding:9px 13px;font-size:12.5px;line-height:1.6;
+    border-radius:0;padding:9px 13px;font-size:12.5px;line-height:1.6;
     box-shadow:0 6px 22px var(--shadow);max-height:40vh;overflow:auto;
     word-break:break-word;white-space:normal}
   .notice[hidden]{display:none}
@@ -1065,13 +1051,13 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
     padding:9px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)}
   .pager button{font-size:12px;padding:3px 10px}
   .pager button:disabled{opacity:.45;cursor:not-allowed}
-  .pager .pageno{font-family:var(--mono);color:var(--fg)}
+  .pager .pageno{font-family:var(--font-ui);color:var(--fg)}
   .pager select{font-size:12px;padding:3px 8px}
   /* 每页条数改为可输入的数字框：宽度只够放 3 位数字，避免撑开分页条。
      去掉原生上下箭头，改用键盘上下键 + 直接输入（箭头在小宽度下会挤掉数字位）。 */
-  .pager .pagesize{width:62px;font-size:12px;padding:3px 6px;font-family:var(--mono);
+  .pager .pagesize{width:62px;font-size:12px;padding:3px 6px;font-family:var(--font-ui);
     text-align:center;background:var(--panel2);color:var(--fg);
-    border:1px solid var(--line);border-radius:8px}
+    border:1px solid var(--line);border-radius:0}
   .pager .pagesize:focus{outline:none;border-color:var(--acc)}
   .pager .pagesize::-webkit-outer-spin-button,
   .pager .pagesize::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
@@ -1083,7 +1069,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      它是"页面连不上"那一刻用户唯一能照做的东西。 */
   .keyhint{margin:0 18px 14px;padding:12px 14px;background:var(--panel2);
     border:1px solid var(--line);border-left:3px solid var(--warn);
-    border-radius:10px;font-size:12px;line-height:1.75;color:var(--fg)}
+    border-radius:0;font-size:12px;line-height:1.75;color:var(--fg)}
   .keyhint .khhead{font-weight:600;font-size:13px;margin-bottom:4px}
   .keyhint ul{margin:8px 0 0;padding-left:18px}
   .keyhint li{margin:3px 0}
@@ -1106,15 +1092,15 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      为什么单独一条而不是再塞进指标卡：这四项是**读结论**用的（网关现在健康吗），
      指标卡是**读总量**用的。混在一排数字里，眼睛还得自己找哪几个代表健康。 */
   .healthbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
-    padding:7px 12px;margin:8px 0 0;border:1px solid var(--line);border-radius:8px;
+    padding:7px 12px;margin:8px 0 0;border:1px solid var(--line);border-radius:0;
     background:var(--panel);font-size:12px;min-height:34px}
   .healthbar .hb-title{font-weight:600}
   .healthbar .hb-item{display:inline-flex;align-items:center;gap:5px;color:var(--dim)}
   .healthbar .hb-item b{color:var(--fg);font-weight:600}
   .healthbar .hb-chip{display:inline-flex;align-items:center;gap:4px;padding:0 7px;height:20px;
-    border-radius:10px;background:var(--panel2);border:1px solid var(--line);max-width:250px;
+    border-radius:0;background:var(--panel2);border:1px solid var(--line);max-width:250px;
     overflow:hidden;white-space:nowrap}
-  .healthbar .hb-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+  .healthbar .hb-dot{width:6px;height:6px;border-radius:0;flex:0 0 auto}
   /* ⚠ 2026-10-25 健康条**图形化**（用户原话：「上面的表格看起来很简单」
      「我喜欢下面的表格柱状图 折线图还有等分线等等」）。
      取向是**照下面抄**，不是发明新样式：
@@ -1126,7 +1112,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
        删这里会留下"主题里改一个不存在的选择器"的更坏形态。 */
   .healthbar .hb-k{color:var(--dim)}
   .healthbar .hb-meter{display:inline-block;width:104px;height:10px;flex:0 0 auto;
-    border-radius:3px;overflow:hidden;background:var(--panel2)}
+    border-radius:0;overflow:hidden;background:var(--panel2)}
   .healthbar .hb-meter svg{display:block}
   .healthbar .hb-spark{display:inline-block;width:150px;height:30px;flex:0 0 auto}
   .healthbar .hb-spark svg{display:block}
@@ -1155,8 +1141,8 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
   .rankrow:hover{background:var(--hover)}
   .rankidx{width:18px;text-align:right;color:var(--dim);flex:0 0 auto}
   .rankname{flex:0 0 250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .rankbar{flex:1 1 auto;height:8px;background:var(--panel2);border-radius:4px;overflow:hidden;min-width:40px}
-  .rankbar i{display:block;height:100%;border-radius:4px}
+  .rankbar{flex:1 1 auto;height:8px;background:var(--panel2);border-radius:0;overflow:hidden;min-width:40px}
+  .rankbar i{display:block;height:100%;border-radius:0}
   .rankval{width:62px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto}
   .rankrate{width:56px;text-align:right;flex:0 0 auto}
 
@@ -1184,7 +1170,7 @@ window.__WB2API_ADMIN_TOKEN__ = "__WB2API_ADMIN_TOKEN__";</script>
      选 6 而不是 10：10 是移动端的量级，桌面高密度界面会显得松。 */
   button:not(.pill):not(.badge),
   input:not([type="checkbox"]):not([type="radio"]),
-  select, textarea { border-radius:6px }
+  select, textarea { border-radius:0}
 
   /* ── focus-visible：键盘用户必须看得见焦点 ──
      原来只有 :focus 且部分规则被 outline:none 吃掉（输入框自己另画了描边，
@@ -2373,6 +2359,34 @@ header h1{letter-spacing:0}
      .badge                 → **本就有**（684 一带），无需别名；.badge--hot/--cold/--ro 同理
      .calm                  → 本节的安静区（新概念，非别名）
    ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── N. 热力图色阶（共享层）── 2026-10-30
+   ══════════════════════════════════════════════════════════════════════
+
+   # 为什么要有它
+   外壳页原来自带一套热力图色阶 --hm0..--hm4，把 10 个绿色**写死在页面里**
+   （深色 #303033 #0e4429 #006d32 #26a641 #39d353 / 浅色 #ebedf0 #9be9a8
+     #40c463 #30a14e #216e39），而且那两套**不是取反关系**。后果：
+     · 换主题时它不跟着变；· 深浅两套谁对谁错没人能一眼核对。
+   现在页面只保留 --hm0..--hm4 这层**别名**，值全部指向本节的色阶。
+
+   # 为什么用 color-mix 而不是写 5 个绿
+   混合基是 --ok 与 --bg：主题一换，五档全部跟着重算，不会出现"改了主题忘了配色阶"。
+
+   # 顺序语义（单调，不许打乱）
+   --heat-0 空档（当天没有活动） → --heat-5 最热（--ok 本色）。
+   用色阶的地方只许引用变量，不许再写具体绿值 ——
+   tests/frontend/verify_theme_compliance.js 会盯着这一条。
+   ══════════════════════════════════════════════════════════════════════ */
+:root{
+  --heat-0: color-mix(in srgb, var(--ok) 8%, var(--bg));
+  --heat-1: color-mix(in srgb, var(--ok) 25%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--ok) 45%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--ok) 65%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--ok) 85%, var(--bg));
+  --heat-5: var(--ok);
+}
 /* ==== WB2API:MAXIMALISM:END ==== */
 </style>
 </head>
@@ -3188,7 +3202,7 @@ function mpEsc(s) {
     <p class="dim" style="font-size:12px;margin:2px 0 6px">进程与宿主资源、依赖健康、近 5 分钟请求口径，
       每 5 秒自刷一次。数据源 <code>GET /admin/system-status</code>。</p>
     <iframe id="stFrame" src="/ui/status" style="width:100%;height:calc(100vh - 190px);min-height:460px;
-      border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
+      border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 
   <!-- 模型目录（T14）：与「渠道」相邻 —— 渠道回答"谁提供模型"，模型目录回答"有哪些模型"，
@@ -3233,7 +3247,7 @@ function mpEsc(s) {
     <p class="dim" style="font-size:12px;margin:2px 0 6px">只填 Base URL 与 API Key 就能新增一条 OpenAI 兼容渠道，
       不占账号池、不走选号。</p>
     <iframe id="chFrame" src="/ui/channels" style="width:100%;height:calc(100vh - 190px);min-height:460px;
-      border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
+      border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 
   <!-- 分组（PLAN-groups P6）：分组是「一批模型」的具名集合，API Key 引用它来决定
@@ -3254,7 +3268,7 @@ function mpEsc(s) {
     <p class="dim" style="font-size:12px;margin:2px 0 6px">分组是「一批模型」的集合。给 API Key
       分配分组后，那把 key 只看得见、只调得动分组里的模型。</p>
     <iframe id="grpFrame" src="/ui/groups" style="width:100%;height:calc(100vh - 190px);min-height:460px;
-      border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
+      border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 
   <!-- API 管理（对标 new-api 令牌体系）：放在仪表盘之后 —— 网关的"调用凭据"
@@ -3585,7 +3599,7 @@ function mpEsc(s) {
     </h2>
     <p class="dim" style="font-size:12px;margin:2px 0 6px">上游模型目录与渠道的对应关系（页面由 T14 交付）。</p>
     <iframe id="mdFrame" src="/ui/models" style="width:100%;height:calc(100vh - 190px);min-height:460px;
-      border:1px solid var(--bd);border-radius:8px;background:#fff"></iframe>
+      border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 
   <!-- ⚠ 旧「可用模型」面板（data-key="models"）：2026-10-30 起**不显示、不进导航**。
