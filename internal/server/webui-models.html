@@ -60,27 +60,18 @@
     不是纯文本 URL）。本页的结构取自 New API 系的 metadata 特性，归属一并过来。
 -->
 <style>
-  /* ── 1. 调色板（逐个值抄自 webui.html 的 v2 :root，不新增色值）────────── */
-  :root, :root[data-theme="dark"] {
-    --bg:#0D1117; --panel:#161B22; --panel2:#1C2128; --line:#30363D;
-    --fg:#E6EDF3; --dim:#8B949E; --acc:#539BF5; --ok:#3FB950; --warn:#D29922; --err:#F85149;
-    --code-bg:#0D1117; --overlay:rgba(1,4,9,.72); --shadow:rgba(1,4,9,.5);
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
-  }
-  :root[data-theme="light"] {
-    --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
-    --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
-    --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
-    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;
-  }
-  /* 兜底：主题脚本失败（隐私模式禁 localStorage）时仍跟系统偏好，不留一张黑纸。 */
-  @media (prefers-color-scheme: light) {
-    :root:not([data-theme]) {
-      --bg:#FFFFFF; --panel:#F6F8FA; --panel2:#EAEEF2; --line:#D0D7DE;
-      --fg:#1F2328; --dim:#59636E; --acc:#0969DA; --ok:#1A7F37; --warn:#9A6700; --err:#CF222E;
-      --code-bg:#F6F8FA; --overlay:rgba(31,35,40,.45); --shadow:rgba(31,35,40,.12);
-    }
-  }
+  /* ── 1. 调色板：**由主题块提供**（本页不再自带一套）────────────────────────
+     ⚠ 2026-10-30 修复「模型页整体是白的」（用户原话：「为什么还是白色的呢？」）：
+     本页原先自带一份 v2（GitHub）调色板，且写成 `:root[data-theme="light"]` ——
+     特异性 (0,2,0)，**高于**主题块那条裸 `:root`（0,1,0）⇒ 只要本页设了
+     data-theme，主题块的奶油纸被**整份覆盖**：浅色变 #FFFFFF、深色变 GitHub 深色。
+     对照组：webui-tokens.html / status / channels / groups 都**没有**自带调色板，
+     所以它们跟着主题走、观感一致。
+
+     ⇒ 删掉整份自带调色板（这就是「theme-max 是视觉层唯一真相」那条纪律的落地）。
+        只保留一处映射：本页多处写 `var(--mono)`，而主题块里的名字是 `--font-mono`；
+        少了这层映射，等宽样式会退化成继承字体（`.multtag` 的 7ch 定宽随之失效）。 */
+  :root { --mono: var(--font-mono); }
 
   /* ── 2. 基础 ─────────────────────────────────────────────────────────── */
   * { box-sizing:border-box; }
