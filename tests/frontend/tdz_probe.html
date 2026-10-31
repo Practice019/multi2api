@@ -1647,9 +1647,9 @@ let loginProvider = '';
     // cell 三态渲染。can=有能力吗 has=注册了吗 kind='签到'/'续期'（写进提示语）。
     const cell = (can, has, kind) => {
       if (!can) return '<td class="dim">— 不适用</td>';
-      if (has) return '<td><span class="badge">✓ 已注册</span></td>';
+      if (has) return '<td><span class="badge">已注册</span></td>';
       return '<td><span class="badge badge--hot" title="该上游有' + kind + '能力，但没注册定时任务 —— '
-        + '手动按钮能用，却永远不会自动跑">✗ 未注册</span></td>';
+        + '手动按钮能用，却永远不会自动跑">未注册</span></td>';
     };
     host.innerHTML = sorted.map(c => {
       const id = c.provider || '';
@@ -11578,8 +11578,8 @@ let multCatalogFailed = false;
     '总 Token ' + totalLabel + (hasOut ? '（输入 ' + promptTok + ' + 输出 ' + outTok + '）' : '（输出未上报）'),
     '↑ 输出 ' + outLabel,
   ];
-  if (cachedTok > 0) lines.push('⚡ 缓存命中 ' + cachedTok);
-  if (reasoningTok > 0) lines.push('🧠 推理 ' + reasoningTok + '（已包含在输出中）');
+  if (cachedTok > 0) lines.push('缓存命中 ' + cachedTok);
+  if (reasoningTok > 0) lines.push('推理 ' + reasoningTok + '（已包含在输出中）');
   lines.push('输出速度 ' + tps + ' tok/s');
   // ⚠ 每条独占一行（`\n` 而非 ` · ` 连接）。
   //   这里的结果是塞进 out.textContent（纯文本输出区），`\n` 一定生效；

@@ -222,8 +222,10 @@ for (const s of named) {
 // 开关与时点都成了概念残留（be285f1 / c1cb20f），该组只留 .info-line 信息行。
 // 于是 4 组含字段 → 3 组。这个数字是**防呆下限**，结构变了就必须重新定，
 // 不能因为"改小了看起来像放水"就把它删掉。
-const NAMED_EXPECT = 3;
-ok(sets.length === 6, '设置面板 fieldset 总数 = ' + sets.length + '，期望 6（重设计后按主题切分 6 组）');
+// ⚠ 2026-11-01：3 → 4。新增「账号解封探测」组（含 1 个输入框 setReviveHours）——
+//   对应 pool.revive_probe_interval_seconds，用户之前只能改配置文件。
+const NAMED_EXPECT = 4;
+ok(sets.length === 7, '设置面板 fieldset 总数 = ' + sets.length + '，期望 7（6 组主题切分 + 2026-11-01 新增的「账号解封探测」）');
 ok(named.length === NAMED_EXPECT, '含字段的 fieldset 数量 = ' + named.length + '，期望 ' + NAMED_EXPECT + '（防呆下限，2026-10-19 重定）');
 
 // 「日常调度」：原「调度」组 —— 旧夹具里它是交叉重灾区（CHK CHK IN IN CHK IN）。
@@ -269,14 +271,14 @@ if (rz) {
     '「历史与日志」仍是 0 复选框 + 2 输入框（实际 ' + k.filter(x => x === 'CHK').length + '/' + k.filter(x => x === 'IN').length + '）');
 }
 const allKinds = fieldKinds(sec);
-ok(allKinds.filter(x => x === 'CHK').length === 4 && allKinds.filter(x => x === 'IN').length === 3,
-  '全局 .field = 4 复选框 + 3 输入框 = 7（实际 ' + allKinds.length + '）');
+ok(allKinds.filter(x => x === 'CHK').length === 4 && allKinds.filter(x => x === 'IN').length === 4,
+  '全局 .field = 4 复选框 + 4 输入框 = 8（实际 ' + allKinds.length + '）；第 4 个输入框是 setReviveHours');
 
 // ---------- B. 容器完整性 ----------
 console.log('\n[B] 每个 .field 都落在容器内，且容器内类型单一');
 const g = countContainers(sec);
 ok(g.total > 0, '解析到 .field 总数 = ' + g.total + '（>0 才说明解析有效）');
-ok(g.containers === 3, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 3（1 个 checks + 2 个 formgrid）');
+ok(g.containers === 4, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 4（1 个 checks + 3 个 formgrid）');
 ok(g.ungrouped === 0, '未落在任何容器内的 .field = ' + g.ungrouped + '（期望 0）');
 ok(g.grouped === g.total, '容器内覆盖 ' + g.grouped + '/' + g.total);
 // 容器内类型单一 = 「不交叉」的结构性证据。它比"翻转次数"更本质：
@@ -318,7 +320,7 @@ for (let i = lstart; i < lend; i++) {
   }
 }
 ok(lstart >= 0 && lend > lstart, '行级扫描区间有效（' + lstart + ' → ' + lend + '，锚点 <section data-key="settings"> → <div id="modal">）');
-ok(lmembers.length === 3, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 3');
+ok(lmembers.length === 4, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 4');
 ok(lorphan.length === 0, '行级扫描：不在任何容器内的 .field = ' + lorphan.length + '（期望 0）');
 let mixed = 0;
 for (let i = 0; i < lmembers.length; i++) {
@@ -328,20 +330,22 @@ for (let i = 0; i < lmembers.length; i++) {
 ok(mixed === 0, '每个容器内类型单一（混合的 = ' + mixed + '）');
 // 行级与区间法必须给出同样的字段总数，否则说明有一种解析是错的
 const ltotal = lmembers.reduce((a, m) => a + m.fields.length, 0) + lorphan.length;
-ok(ltotal === 7, '行级扫描字段总数 = ' + ltotal + '，期望 7');
+ok(ltotal === 8, '行级扫描字段总数 = ' + ltotal + '，期望 8（与 [A] 的全局 .field 口径互相对上）');
 ok(ltotal === g.total, '行级与区间法字段总数一致（' + ltotal + ' vs ' + g.total + '）');
 
 // ---------- C. 零漂移 ----------
 console.log('\n[C] 字段 id 零漂移');
 const base = baselineIds();
 const now = allFieldIds(sec);
-// 当前应有的 7 个 id —— 逐字钉住。
+// 当前应有的 8 个 id —— 逐字钉住。
 // 依据：2026-10-19 静态解析 + 真实浏览器（隔离实例 7881 / CDP 9251）DOM 实测，两者逐字一致。
 // 为什么不沿用旧基线那 27 项：其中 20 项已被**有意的界面收敛**移除或转只读/隐藏
 // （c1cb20f 删 11 + 只读 3 + 隐藏 2、e95b814 隐藏 3、be285f1 移除签到开关）。
 // 只比**集合**不比顺序：分组本身就要把同类控件排到一起，顺序变化不构成漂移。
 const NOW_IDS = ['setGrowthMakeup', 'setGrowthRedeem', 'setGrowthOpen', 'setGrowthDraw',
-  'setCheckinLogDays', 'setReqLogDays', 'setUpTimeout'];
+  'setCheckinLogDays', 'setReqLogDays', 'setUpTimeout',
+  // 2026-11-01 新增：账号解封探测的小时数（后端 pool_revive_probe_hours）。
+  'setReviveHours'];
 ok(base.length === 27, '旧基线 id 数 = ' + base.length + '，期望 27（重设计前快照，仍是文件级契约）');
 ok(now.length === NOW_IDS.length, '当前 id 数 = ' + now.length + '，期望 ' + NOW_IDS.length);
 const missing = NOW_IDS.filter(x => !now.includes(x));
@@ -352,8 +356,15 @@ ok(now.slice().sort().join(',') === NOW_IDS.slice().sort().join(','), 'id 集合
 // ★ 这条是旧基线文件在新形态下的用法：现在的 id 必须**全部来自**那 27 项。
 // 收敛只被允许"删"，不允许"改名/凭空造新 id" —— 改名会让它红，纯删除不会。
 // 这也是为什么不能把 settings-baseline-ids.txt 删掉：它是"没有换名字"的证明。
-const notInOld = now.filter(x => !base.includes(x));
-ok(notInOld.length === 0, '当前 id 均由旧基线沿用而非改名/新增（不在旧基线里的: ' + (notInOld.length ? notInOld.join(', ') : '(无)') + '）');
+// ★ 登记表（2026-11-01 引入）：一个 id 若**不在**旧基线里，必须在这里登记理由，否则红。
+//   这样既保住原判据的牙齿（凭空造新 id 仍然红），又让**有意的**新增留下书面理由 ——
+//   而不是把 settings-baseline-ids.txt 悄悄改掉（那会把「没有改名」的证明也一起弄丢）。
+//
+//   本次新增：setReviveHours —— 账号解封探测的小时数，对应后端
+//   pool.revive_probe_interval_seconds。在此之前用户只能改配置文件才能关掉/调整它。
+const ADDED_AFTER_BASELINE = ['setReviveHours'];
+const notInOld = now.filter(x => !base.includes(x) && !ADDED_AFTER_BASELINE.includes(x));
+ok(notInOld.length === 0, '当前 id 均已登记（旧基线沿用 + 已登记新增；未登记的: ' + (notInOld.length ? notInOld.join(', ') : '(无)') + '）');
 //
 // ⚠ 旧版这里还有一条 ok(base.join(',') !== now.join(','), 'id 顺序已因分组而改变')。
 //   它的原意是"反向确认分组真的发生过"，但集合已经从 27 缩到 7 之后，它**恒为真**
@@ -375,12 +386,15 @@ ok(allIdsInSec.length === now.length, '带 id 的 input = ' + allIdsInSec.length
 // ---------- D. 结构保真 ----------
 console.log('\n[D] 文案与属性保真');
 const legends = sets.map(s => s.base).filter(Boolean);
-ok(legends.length === 6, 'legend 数量 = ' + legends.length + '，期望 6（组边界：6 组按主题切分）');
-ok(legends.join('|') === '日常调度|成长中心自动化|历史与日志|网络与容错|会话粘性|运行信息',
+ok(legends.length === 7, 'legend 数量 = ' + legends.length + '，期望 7（6 组主题切分 + 账号解封探测）');
+// ⚠ 2026-11-01：新增「账号解封探测」，插在「网络与容错」之后、「会话粘性」之前 ——
+//   它属于网络/容错这一族（决定要不要定期探活被禁账号）。
+ok(legends.join('|') === '日常调度|成长中心自动化|历史与日志|网络与容错|账号解封探测|会话粘性|运行信息',
   'legend 基础文案逐字一致: ' + legends.join(' / '));
 // 生效时机从"legend 里的括注"（如「需要重启才生效（…）」）改成了**结构化的徽章**，
 // 所以这里把六组徽章逐字钉住 —— 它是新设计里承载语义的那一半，不能只看主题名。
-ok(sets.map(s => s.badge).join('|') === '自动执行|立即生效|立即生效|重启生效|只读|只读',
+// 新组的徽章与「网络与容错」同为「重启生效」：它同样是后端启动时读的配置。
+ok(sets.map(s => s.badge).join('|') === '自动执行|立即生效|立即生效|重启生效|重启生效|只读|只读',
   '生效时机徽章逐字一致: ' + sets.map(s => String(s.badge)).join(' / '));
 // 切片锚点从文案换成了 data-key，所以另外补一条对标题文案本身的断言（它仍然重要）
 ok(sec.includes('<h2>设置'), '面板标题「设置」保留');

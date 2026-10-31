@@ -162,7 +162,11 @@ if (!dash) throw new Error('定位不到「仪表盘」section：看上面那条
 for (const t of ['网关状态', '调用统计', 'API 接入信息']) {
   ok(dash.includes('<h3>' + t), '仪表盘内以 h3 呈现「' + t + '」');
 }
-ok((dash.match(/class="boardsec"/g) || []).length === 7, '仪表盘内恰好 7 个子段落 boardsec');
+// ⚠ 2026-11-01：7 → 6。不是「少了一块」，而是「次数排行」**并进了「调用统计」那一格**
+//   （同一个 boardsec 里两个 h3）—— 所以下面的 h3 仍是 7 个，而 boardsec 只有 6 个。
+//   证据：按 class="boardsec" 切开仪表盘 section，段2 的 h3 是 ["调用统计","次数排行"]、
+//   ids 是 statsWindow/statsRange/trendRange/statsCards。
+ok((dash.match(/class="boardsec"/g) || []).length === 6, '仪表盘内恰好 6 个子段落 boardsec（次数排行并入调用统计）');
 // 子段落**集合与顺序**也钉住：只数个数的话，换掉一个子段落的名字（等于换了一块内容）
 // 依然是绿的 —— 那条判据就没有判别力。
 //
@@ -171,7 +175,9 @@ ok((dash.match(/class="boardsec"/g) || []).length === 7, '仪表盘内恰好 7 �
 //   df3693e、957a846、b7f4fe0、18e9278（融合 agent2api 报表页那批）陆续加到 7 个。
 //   再动这里 = 动了仪表盘的结构，应当复核导航标签与下面的容器断言。
 const titles = (dash.match(/<h3>([^<]*)/g) || []).map(x => x.slice(4).trim());
-ok(titles.join('/') === '网关状态/调用统计/活跃热力图/缓存命中率/近 24 小时缓存命中率趋势/按天 Token 趋势/API 接入信息',
+// ⚠ 2026-11-01：「按天 Token 趋势」→「次数排行」，且次数排行紧随调用统计（同一 boardsec）。
+//   两条一起改，因为它们是同一次结构调整的两面。
+ok(titles.join('/') === '网关状态/调用统计/次数排行/活跃热力图/缓存命中率/近 24 小时缓存命中率趋势/API 接入信息',
   '子段落标题与顺序符合当前契约（实际：' + titles.join('/') + '）');
 
 // 子段落的 h3 不能污染导航标签：h3 必须排在 h2 之后，且 h2 首个文本节点是「仪表盘」
@@ -199,8 +205,12 @@ for (const id of ['auto','statsModels','statsModelsWrap']) {
   ok(n === 0, '#' + id + ' 已整体移除（实际 ' + n + ' 次）');
 }
 
-// 网格容器：仪表盘内 4 处 .cards（状态 / 统计 / 缓存四格 / 接入），且没有残留的旧 id
-ok((dash.match(/class="cards"/g) || []).length === 4, '仪表盘内 4 处 .cards（状态/统计/缓存四格/接入）');
+// 网格容器：仪表盘内 5 处 .cards，且没有残留的旧 id。
+//
+// ⚠ 2026-11-01：4 → 5。「调用统计」那一格现在是**两组卡片**（#statsCards + #statsCards2），
+//   与 statsCardsEntries/statsCardsEntries2 的引入是同一件事（第 2 组 = 模型归属与活跃度）。
+//   实测分布（按 boardsec 切开）= [0,1,2,0,1,0,1]：状态 1 + 统计 2 + 缓存 1 + 接入 1。
+ok((dash.match(/class="cards"/g) || []).length === 5, '仪表盘内 5 处 .cards（状态/统计两组/缓存四格/接入）');
 
 // ---------- C. renderCards 的卡片集合 + gwHint 三态 ----------
 console.log('\n[C] renderCards 输出与网关判读文案');

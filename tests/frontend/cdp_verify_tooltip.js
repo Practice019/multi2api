@@ -22,7 +22,17 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const TARGET = process.argv[2] || 'http://127.0.0.1:17864/ui';
+// ⚠ 身份（2026-11-01 补，被 verify_probe_console_loaded.js 点名）：T5 之后 /ui 是两态 ——
+//   带身份 ⇒ 控制台；不带 ⇒ 登录页（~17-22KB）。裸 /ui 会让本探针**静默跑在登录页上**，
+//   而本探针的断言是「悬浮后 #ctRead 里有读数」这类**正向**断言，会红得莫名其妙。
+//   所以身份从 env 取（WB2API_PROBE_TOKEN），拿不到就**当场失败**，不再默默跑。
+const RAW_TARGET = process.argv[2] || process.env.WB2API_PROBE_URL || 'http://127.0.0.1:17864/ui';
+const PROBE_TOKEN = process.env.WB2API_PROBE_TOKEN || '';
+const TARGET = (() => {
+  if (!/\/ui(\?|$)/.test(RAW_TARGET)) return RAW_TARGET;
+  if (/[?&]token=/.test(RAW_TARGET)) return RAW_TARGET;
+  return RAW_TARGET + '?token=' + encodeURIComponent(PROBE_TOKEN);
+})();
 const PORT = 9333;
 const CHROME = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -104,8 +114,29 @@ function httpGet(url) {
 
     await pcmd('Page.enable');
     await pcmd('Runtime.enable');
+    if (!PROBE_TOKEN && /\/ui(\?|$)/.test(RAW_TARGET)) {
+      fail('没有身份：给 WB2API_PROBE_TOKEN（或 argv[2] 里直接带 ?token=）—— 否则进的是登录页，后面的断言毫无意义');
+      throw new Error('no identity');
+    }
     await pcmd('Page.navigate', { url: TARGET });
     await sleep(3500);   // 等首屏与异步取数
+
+    // ── ⓪ 正向自证：进的是**控制台**（不是登录页、也不是空壳）──
+    //   这条必须先于所有断言：否则「找不到 #cacheTrend」会被读成产品坏了，
+    //   而真相是我们根本没进控制台（T5 之后这是最常见的一种假红/假绿）。
+    const loaded = await ev(`(() => {
+      const body = document.body ? document.body.innerHTML.length : 0;
+      const hasShell = !!document.querySelector('#content');
+      const hasApi = !!window.__wb2api__;
+      const onLogin = !!document.querySelector('#loginForm') || body < 40000;
+      return { body: body, hasShell: hasShell, hasApi: hasApi, onLogin: onLogin };
+    })()`);
+    if (!loaded || loaded.onLogin || !loaded.hasShell) {
+      fail('进的不是控制台（body=' + (loaded && loaded.body) + ' hasShell=' + (loaded && loaded.hasShell)
+        + ' hasApi=' + (loaded && loaded.hasApi) + '）—— 先查身份/实例，再查产品');
+      throw new Error('not console');
+    }
+    pass('进的是控制台（body=' + loaded.body + '，__wb2api__=' + loaded.hasApi + '）');
 
     const ev = async (expr) => {
       const r = await pcmd('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });

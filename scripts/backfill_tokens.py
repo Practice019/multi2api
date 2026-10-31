@@ -28,7 +28,14 @@ import shutil
 import sys
 import time
 
-LOG = r"D:\project_GIT\workbuddy2api\data\request-log.jsonl"
+# 日志路径：优先环境变量，其次**按脚本位置推仓库根**（换机器 / 换用户都不失效）。
+#
+# ⚠ 原来这里写死了本机绝对路径 —— tests/frontend/audit_tracked_content.js 的 abspath
+#   判据会点名它（理由：换机器即失效）。改成推导式之后，脚本在任何克隆里都能直接跑：
+#     脚本在 <repo>/scripts/ 下 ⇒ dirname 两次即仓库根。
+#   要用别处的日志时：WB2API_REQUEST_LOG=<路径> python scripts/backfill_tokens.py
+LOG = os.environ.get("WB2API_REQUEST_LOG") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "request-log.jsonl")
 
 def main():
     if not os.path.exists(LOG):

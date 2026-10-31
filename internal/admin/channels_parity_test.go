@@ -857,7 +857,18 @@ func webuiChannelFormSubmitFields(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("读 webui-channels.html 失败（这条守卫依赖它）: %v", err)
 	}
-	src := string(raw)
+	// ⚠⚠ 先**归一化换行**（2026-11-01）。这是本守卫长期红着的真原因：
+	//
+	//	webui-channels.html 在 Windows 检出下是 **CRLF**（实测 2376 个 CRLF、0 个裸 LF），
+	//	而下面的收尾判据写的是 `"\n}\n"` —— 在 CRLF 文本里那个子串**永远不存在**
+	//	⇒ 这条守卫的结论恒为「无法确定 saveDrawer 的结束位置」，无论产品改得对不对。
+	//
+	// 判据要的是**代码结构**（函数体里提交了哪些键），与行尾字节无关 ⇒ 归一化是正确修法，
+	// 而不是把 `\n}\n` 换成带 CR 的形态（那会把同一颗雷留给下一次换行变化：
+	// git autocrlf、编辑器、跨平台克隆都能翻转它）。
+	//
+	// 同类先例：tools/ 里的几个扫描器也吃过同一个亏（LF/CRLF 让切片落空 ⇒ 静默查不到）。
+	src := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	start := strings.Index(src, "function saveDrawer()")
 	if start < 0 {
 		t.Fatal("★ 前端里找不到 function saveDrawer() —— 提交构造被改名/搬走了。" +

@@ -45,8 +45,15 @@
 //      13900000000` 三个全零假号从清单里漏掉了，`internal/upstream/health_test.go` 立刻
 //      冒出来 —— 而它本来就是被允许的。**改白名单要"加"，不是"重写"**（diff 里那条新命中
 //      就是唯一的报警信号，很容易被当成"修好了"）。
-const ALLOW_ABSPATH_DOC = /^(docs\/|tests\/frontend\/README)/;      // 文档/报告里的路径举例
-const ALLOW_LOCALADDR = /^cmd\/server\/startup_addr/;               // 地址解析功能本体（注释+用例）
+// 文档/报告里的路径举例（换机器换用户都不影响，因为它们不是代码）。
+// 2026-11-01 扩到根目录的 markdown 指南：AGENTS.md 里那句 `cd <本机路径>` 是给人看的例子，
+// 与 docs/ 同一类 —— 原来只放行 docs/，于是根目录的指南文件一直被报。
+const ALLOW_ABSPATH_DOC = /^(docs\/|AGENTS\.md$|[A-Za-z0-9_-]+\.md$|tests\/frontend\/README)/;
+// 白名单里的两个文件都是「这些地址本身就是被判的输入」：
+//   · cmd/server/startup_addr —— 地址解析功能本体（注释 + 用例）
+//   · internal/gateway/urlguard_test.go —— SSRF 防护的判据就是「这些地址必须被拒」，
+//     所以它里面的内网地址是测试**输入**，不是本仓库的出口（2026-11-01 加）。
+const ALLOW_LOCALADDR = /^(cmd\/server\/startup_addr|internal\/gateway\/urlguard_test\.go$)/;
 // 全零/补零假号（原有的三个**必须留着**）+ 公开演示号 13800138000
 const DEMO_PHONE = /^(13000000000|13800000000|13900000000|13800138000|1[3-9]0{9})$/;
 const SYNTH_EMAIL_LOCAL1 = /^[\w.+-]@/;                             // 本地部分仅 1 字符
@@ -111,6 +118,12 @@ const looksLikeSecret = s => {
   if (!m) return false;
   if (/__WB2API_KEY__|__COLS_/.test(s)) return false;
   const v = m[1];
+  // 精度修正（2026-11-01）：**字符表**常量不是密钥。
+  // internal/store/token.go 里有一个用于生成随机串的字符表：连续的 0-9、a-z、A-Z 三段的
+  // 拼接（62 位），它天然满足「有大写+小写+数字」的密钥形态，于是被报成凭证。
+  // 判据落在**字面量自身是不是那三段连续字符**上（比按文件名放行精确：换个文件写字符表也认）。
+  // ⚠ 本注释刻意不写该字面量的全文：这条规则扫的是**含引号的长字面量**，写全文会让审计扫到自己。
+  if (v.indexOf("0123456789") >= 0 && v.indexOf("abcdefghijklmnopqrstuvwxyz") >= 0 && v.indexOf("ABCDEFGHIJKLMNOPQRSTUVWXYZ") >= 0) return false;
   return /[A-Z]/.test(v) && /[a-z]/.test(v) && /[0-9]/.test(v);
 };
 
@@ -174,8 +187,15 @@ const CHECKS = [
       //     第一版没排除它，误报了一个文件。
       //   - **本地部分只有 1 个字符**（`a@b.c` / `e@x.com`）：解析用例的合成样本
       const okDomains = /@(example\.(com|org)|test\.(com|local)|localhost)$/;
+      // 精度修正（2026-11-01）：两类「看着像邮箱」的非邮箱。
+      //   · Go 模块路径带版本：`模块名@v1.21.2`（internal/store/db_test.go 的注释引用驱动源码）；
+      //   · VCS 身份：ssh 适配器用的 `git@主机名`（scripts/github-ssh-tunnel.ps1，三处）。
+      //   两者都不是联系人地址；本注释同样不写全文，避免审计扫到自己。
+      const moduleAtVersion = /^[\w.+-]+@v?\d+(\.\d+)+/;
+      const vcsUserAtHost = /^(git|hg|svn)@/;
       return hits.some(h =>
-        !okDomains.test(h) && !(TEST_FILE.test(f) && SYNTH_EMAIL_LOCAL1.test(h)) && !afterHostPortLike(h, c));
+        !okDomains.test(h) && !moduleAtVersion.test(h) && !vcsUserAtHost.test(h)
+        && !(TEST_FILE.test(f) && SYNTH_EMAIL_LOCAL1.test(h)) && !afterHostPortLike(h, c));
     },
     why: '可能是真实联系人（连接串里的 user:pass@host 不算，单字符本地部分算合成样本）',
   },

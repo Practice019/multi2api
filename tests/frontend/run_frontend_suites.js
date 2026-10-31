@@ -607,18 +607,31 @@ console.log(`（${SUITES.length} 个 generator 对 + ${PROBES.length + PAGE_WRIT
   `静态 ${staticProbes.length} / 写页面 ${pageWritingProbes.length} / 实例 ${instanceProbes.length}）`);
 // 既有基线红（长期挂着，**不是**本轮引入的）。期望通过数 = 总数 − 基线红数。
 //
-// 2026-11-01：清单从 7 条减到 5 条 —— 那条 4 项清理任务已完成两项，**清掉即从此处删名**
-//（删名本身就是「这条红真的修好了」的证据：不删的话修好了也看不出来）。已清掉：
+// ⚠⚠ 2026-11-01：清单**空了**。原来挂着的 7 条基线红逐条查清并修好了 ——
+// 清掉一条就从这里删名（删名本身就是「这条红真的修好了」的证据：不删的话
+// 修好了也看不出来，而且下一条真红会被稀释进噪声里）。七条各自的处置：
 //
 //   · stats_disk_gen.js     —— 抽取清单过期（statsCardsEntries2 / DC_SEGS / fmtBytes …）。
-//                             改为生成期**自动算调用闭包**，这类漂移结构性消失。
-//   · models_display_gen.js —— 同一条缝（mpOwnerOf / ctxTag / fmtCtx / mpFillProviderSelect）
-//                             + 顺带抓到一个**真缺陷**：mpOwners 把「绝对排位函数」
-//                             当 sort 比较器用 ⇒ 上游下拉的顺序与分组区不一致。已修共享层。
+//                             改成**生成期自动算调用闭包**：这类漂移结构性消失。
+//   · models_display_gen.js —— 同一条缝（mpOwnerOf / ctxTag / fmtCtx / mpFillProviderSelect），
+//                             一并改成**运行期自动闭包**。顺带抓到一个**产品真缺陷**：
+//                             mpOwners 把「绝对排位函数」当 sort 比较器用 ⇒ 上游下拉的
+//                             顺序与分组区不一致（已修共享层 + 同步两个页面）。
+//   · dashboard_gen.js      —— 结构断言过期：改回**表格**形态（5c923f8 用户要求还原）、
+//                             次数排行并入调用统计（boardsec 7→6）、统计格变成两组卡片（.cards 4→5）。
+//   · settings_layout_gen.js—— 新增「账号解封探测」组（setReviveHours）后的一组计数过期：
+//                             fieldset 6→7、含字段组 3→4、容器 3→4、字段 7→8、legend 6→7。
+//                             新增 id 走**登记表**（ADDED_AFTER_BASELINE），不偷偷改基线快照。
+//   · gen_ui_manifest.js    —— 两件事：5 处 emoji（违反「无 emoji」硬规则，已清）+ 任务面板
+//                             的卡片形态断言过期（已按 5c923f8 的表格形态重写）。
+//   · verify_probe_console_loaded.js —— 硬红 1 个：cdp_verify_tooltip.js 裸开 /ui 且无正向
+//                             自证。已补身份（WB2API_PROBE_TOKEN）与「进的是控制台」自证。
+//   · audit_tracked_content.js —— 6 处命中逐条定性：3 处扫描器**精度问题**（字符表常量、
+//                             Go 模块@版本号、git@主机名）、1 处真缺陷（脚本硬编码绝对路径，
+//                             已改成 env + 仓库相对推导）、2 处进白名单（根 markdown 指南、
+//                             urlguard 的测试输入），每条都写了理由。
 const BASELINE_RED = [
-  'dashboard_gen.js', 'settings_layout_gen.js',
-  'gen_ui_manifest.js', 'audit_tracked_content.js',
-  'verify_probe_console_loaded.js',
+  // 空 —— 再往这里加名字之前，先看上面那段：这七条都是**修好**的，不是放宽的。
 ];
 const expectedPass = total - BASELINE_RED.length;
 console.log(`期望：${expectedPass}/${total}（= 总数 − ${BASELINE_RED.length} 条既有基线红）`);

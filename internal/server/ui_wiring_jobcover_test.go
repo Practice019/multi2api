@@ -63,8 +63,12 @@ func TestJobCoverageHasThreeStates(t *testing.T) {
 	}
 	for _, want := range []struct{ name, needle string }{
 		{"无能力（灰）", "— 不适用"},
-		{"已注册（绿）", "✓ 已注册"},
-		{"未注册（红）", "✗ 未注册"},
+		// ⚠ 判据里**不带 emoji**（2026-11-01）：仓库硬规则是「无 emoji」（依据见
+		// .task/frontend-decouple/protocol.md 与两份 SOUL.md），gen_ui_manifest 的
+		// emoji 门禁会因此变红。三态的区分本来就不靠图形：灰态走 class="dim"，
+		// 绿态走 class="badge"，红态走 class="badge badge--hot"。
+		{"已注册（绿）", "\"badge\">已注册</span>"},
+		{"未注册（红）", "badge--hot\" title=\"该上游有"},
 	} {
 		if !strings.Contains(body, want.needle) {
 			t.Errorf("缺少 %s 态（找 %q）—— 三态缺一都会让用户误读", want.name, want.needle)
