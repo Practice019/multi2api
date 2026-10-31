@@ -1605,7 +1605,7 @@ let loginProvider = '';
       // 状态：出错 / 正常 / 从未执行。三态要说清，不能都画成"—"。
       const stateCell = j.last_error
         ? '<span class="err">出错</span>'
-        : (j.last_run ? '<span style="color:#0f8a4d">正常</span>' : '<span class="dim">—</span>');
+        : (j.last_run ? '<span style="color:var(--ok)">正常</span>' : '<span class="dim">—</span>');
       // 错误列：单行截断 + title 悬停看全文（表格形态下这是"整段可见"的替代方案）。
       const errCell = j.last_error
         ? `<td class="err" title="${esc(j.last_error)}">${esc(j.last_error)}</td>`
@@ -9373,7 +9373,7 @@ function renderModelRank(s) {
     rows.forEach((r, i) => {
       if (!r.has) return;                        // 补零出来的 0% ⇒ 不标
       if (i % 4 !== 0 && i !== n - 1) return;    // 稀疏标注
-      svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${(yRate(r.rate) - 5).toFixed(1)}" text-anchor="middle" fill="#58a6ff">${(r.rate * 100).toFixed(0)}%</text>`);
+      svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${(yRate(r.rate) - 5).toFixed(1)}" text-anchor="middle" fill="var(--acc)">${(r.rate * 100).toFixed(0)}%</text>`);
     });
     // x 轴时间（首/中/末）
     [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {

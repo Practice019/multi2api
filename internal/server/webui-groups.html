@@ -1183,15 +1183,22 @@ section > h2, section > h2 .dim, section > h2 .dim *,
 .sidebar .navgrouphd .navgcount.zero{background:transparent;color:#120F0D}
 .sidebar .navgrouphd .navgdef{border-color:var(--ink);color:#120F0D}
 
-/* 旧页面里写死的 GitHub 蓝/绿（JS 拼的 SVG 属性与内联 style）——
-   它们是 v2 色板的残留：浅色下 #58a6ff 铺奶油纸只有 2.24:1、#0f8a4d 3.9:1。
-   用**属性选择器**接住这些字面量，换成主题变量，页面 JS 一个字不用改。
-   ⚠ 之所以不改 JS：那几处是 SVG presentation attribute（fill/stroke），
-     属性里不认 var()，改了反而变黑；CSS 规则能稳过属性。 */
-[fill="#58a6ff"]{fill:var(--acc)}
-[stroke="#58a6ff"]{stroke:var(--acc)}
-[style*="color:#58a6ff"]{color:var(--acc) !important}
-[style*="color:#0f8a4d"]{color:var(--ok) !important}
+/* ⚠ 这里曾有一段「属性选择器补丁」：
+     [fill="#58a6ff"]{fill:var(--acc)}  [stroke="#58a6ff"]{...}
+     [style*="color:#58a6ff"]{...}      [style*="color:#0f8a4d"]{...}
+   它的用意是「页面 JS 里写死了 v2 色板的蓝/绿，用属性选择器接住，JS 一个字不用改」。
+   2026-11-01 删除，两条理由（都是查证过的，不是清理癖）：
+
+     ① **前提是错的**：注释里写「SVG presentation attribute 里不认 var()，改了反而变黑」。
+        隔离实测（最小 HTML + getComputedStyle）推翻了它：stroke="var(--x)" 与
+        fill="var(--x)" 在 presentation attribute 里正常解析，且随 data-theme 切换
+        （rgb(43,0,255) → rgb(29,95,208)）。同文件里的图表代码本来也一直在这么用。
+     ② **它纵容硬编码**：补丁在，写死色值就「看起来没事」，于是那 4 处字面量活了很久；
+        现在源头已全部改成语义变量，字面量一个不剩 ⇒ 这段规则已无对象可接。
+
+   防线交给了门禁：tests/frontend/verify_theme_compliance.js 的 R6 会扫
+   「JS 拼出来的 / 内联写的」颜色字面量（用 HEAD 版页面做过变异验证：能命中那 4 处）。
+   ⇒ 不要再往这里加属性选择器补丁；改源头，让 R6 保持全绿。 */
 
 /* ── 15. 字距与字号下限：小字号**不许**用窄展示字 ───────────────────────
    # 为什么改（用户反馈："不是颜色的问题，是字母太近了"）

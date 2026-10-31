@@ -61,7 +61,10 @@ func TestDashChartSharedLayerInjected(t *testing.T) {
 	body := dashChartBody(t)
 	for _, want := range []struct{ what, needle string }{
 		{"网格等分段数", "var DC_SEGS = 4;"},
-		{"配色（与命中率线同色）", "var DC_RATE_COLOR = '#58a6ff';"},
+		// ⚠ 2026-11-01：命中率线改成**主题强调色**（原来是写死的 #58a6ff）。
+		// 这里钉的是「共享层里确实有这两个常量、且都走主题变量」——
+		// 写死色值在浅色主题下会糊进背景（dash-chart.js 自己的注释就这么说的）。
+		{"配色（命中率线 = 主题强调色）", "var DC_RATE_COLOR = 'var(--acc)';"},
 		{"横等分网格线", "function dcGrid("},
 		{"竖等分网格线（横向条形用）", "function dcGridCols("},
 		{"柱子/横条", "function dcRects("},

@@ -120,7 +120,7 @@ global.document = shimWindow.document;
 
 var DC_SEGS = 4;
 
-var DC_RATE_COLOR = '#58a6ff';
+var DC_RATE_COLOR = 'var(--acc)';
 
 var DC_BAR_COLOR = 'var(--acc)';
 
