@@ -123,6 +123,16 @@ const SRC_FUNCS = [
   'function renderModelGroup(',
   'function modelGroupOpen(',
   'function modelOwnerOf(',
+  // 上下文长度标签（ctx 列）。2026-11-01 补：模型行渲染改走它之后，
+  // 产物运行期就是「ReferenceError: ctxTag is not defined」—— 与 mpOwnerOf 同一条缝。
+  'function ctxTag(',
+  // ctxTag 依赖的格式化助手（同一条缝的下一环，实测抓到）。
+  'function fmtCtx(',
+  // 归属解析（带 ownedBy 兜底）。**2026-11-01 补**：renderModelGroup / syncModelProviderOptions
+  // 的分组标题与上游标签现在都经过它（model-picker 抽层时加的），而它一度不在清单里 ——
+  // 表现正是本文件头部记的那条「反向漂移」：产物运行期 ReferenceError: mpOwnerOf is not defined，
+  // 而生成器 exit 0（它只查「清单里的名字在不在源码里」，查不出「源码里的函数多了个依赖」）。
+  'function mpOwnerOf(',
   'function modelProviderFilter(',
   'function setModelProviderFilter(',
   'function syncModelProviderOptions(',
@@ -159,13 +169,51 @@ let esc;
 eval(grabStatement('const esc =').replace(/^\s*const\s+esc\s*=/, 'esc ='));
 if (typeof esc !== 'function') throw new Error('源码实读失败：esc 未生效');
 
-eval(SRC_FUNCS.map(grab).join('\n\n'));
+// ---- 自动闭包（2026-11-01）----------------------------------------------------
+//
+// # 为什么不再逐个人工补清单
+//
+// 这条缝本轮连着咬了三口：mpOwnerOf → ctxTag → fmtCtx →（当时下一个是）
+// mpFillProviderSelect。它们都是**同一个形态**：产品页面里被抽取的函数多调了一个
+// 页面内的顶层助手，而 SRC_FUNCS 没跟着加 ⇒ 产物运行期 ReferenceError，
+// 长得与产品缺陷一模一样。
+//
+// 维护判据本质是**图可达性**，人工维护必然漏。所以这里改成：SRC_FUNCS 只列
+// **探针直接调用的入口**，其余依赖由下面这段闭包自动补全（与 gen_stats_disk.js
+// 生成期的同款改造一致 —— 那边也是这么修的）。
+const DEF = new Map();
+for (const m of html.matchAll(/(?:^|\n)[ \t]*function[ \t]+([A-Za-z_$][\w$]*)[ \t]*\(/g)) {
+  const n = m[1];
+  if (!DEF.has(n)) DEF.set(n, grab('function ' + n + '('));
+}
+const CLOSURE = (() => {
+  const out = [], outNames = [], seen = new Set();
+  const queue = SRC_FUNCS.map(s => s.replace(/^function\s+/, '').replace(/\($/, ''));
+  while (queue.length) {
+    const n = queue.shift();
+    if (seen.has(n)) continue;
+    const body = DEF.get(n);
+    if (!body) continue;   // 非本页定义（宿主 API / 局部）⇒ 跳过
+    seen.add(n); out.push(body); outNames.push(n);
+    for (const hit of body.matchAll(/(?:^|[^.\w$])([A-Za-z_$][\w$]*)/g)) {
+      if (!seen.has(hit[1]) && DEF.has(hit[1])) queue.push(hit[1]);
+    }
+  }
+  return { src: out, names: outNames };
+})();
+if (!CLOSURE.src.length) throw new Error('闭包为空 —— 抽取装置失效');
+// 入口必须都在闭包里：清单写错一个名字（打错、被改名）要**响亮**失败，
+// 而不是让那条断言以 ReferenceError 的形式出现（看起来像产品缺陷）。
+for (const seed of SRC_FUNCS) {
+  const bare = seed.replace(/^function\s+/, '').replace(/\($/, '');
+  if (CLOSURE.names.indexOf(bare) < 0) {
+    throw new Error('入口不在闭包里：' + bare + '（清单名字与源码不一致？）');
+  }
+}
+eval(CLOSURE.src.join('\n\n'));
 // 实读必须响亮：eval 没生效（例如被包进严格模式）时不要静默降级成"没测到"。
 // 用 typeof（对未声明标识符也不抛）而不是 eval(n)，后者会抛 ReferenceError 盖掉原因。
-for (const n of ['multText', 'multKeyOf', 'multTableKey', 'multTag', 'multTagPlain', 'groupModelsByOwner',
-  'renderModelGroup', 'modelGroupOpen', 'modelOwnerOf', 'modelProviderFilter',
-  'setModelProviderFilter', 'syncModelProviderOptions', 'providerInfo', 'providerRegistryIds',
-  'providerRank', 'emptyModelGroups', 'renderModels']) {
+for (const n of CLOSURE.names) {
   if (eval('typeof ' + n) !== 'function') {
     throw new Error('源码实读失败：' + n + ' 未生效（eval 没把声明泄漏出来？被包进严格模式了？）');
   }
@@ -262,17 +310,33 @@ const LIST = [
   { id: 'kimi-k3-1', context_length: 1000000 },
 ];
 
-// ---------- 1. 不再显示 ctx ----------
-console.log('\n[1] 不再显示 ctx 数字');
+// ---------- 1. ctx 标注（2026-11-01 按**当前契约**重写）----------
+//
+// 旧断言是「不再显示 ctx 数字」（v1.5.0 精简那一版的口径）。**那一版已作废**：
+// 现在模型 chip 上有 ctx 标注（ctxTag），而且刻意区分「窗口小」与「不知道」——
+// 拿不到窗口时渲染占位「ctx ?」而不是留白（产品侧判据见
+// internal/server/webui_ctx_tag_test.go）。所以本节改成钉当前契约，
+// 同时**保住原断言里那条真正的边界**：旧字段 context_length 不许再被插值。
+console.log('\n[1] ctx 标注：有值给缩写、缺值给占位，且不再用 context_length');
 modelMultipliers = {};
-renderModels(LIST.map(x => ({ ...x })));
+// ⚠ fixture 用**后端**那份字段名：context_length / max_output_tokens。
+//   groupModelsByOwner 把它们归一成 ctx / maxOut 交给渲染层（见该函数尾部），
+//   在 fixture 里直接写 ctx 会让 ctxTag 拿到 undefined ⇒ 永远渲染「ctx ?」。
+renderModels([{ id: 'auto', context_length: 200000 },
+  { id: 'deepseek-v4-pro', context_length: 1000000, max_output_tokens: 200000 }]);
 const chips = $('models').innerHTML;
 const opts = $('model').innerHTML;
-ok(!/ctx/.test(chips), 'chips 里没有 "ctx" 字样');
-ok(!/ctx/.test(opts), '下拉框里没有 "ctx" 字样');
-ok(!/1000000|200000/.test(chips), 'chips 里没有上下文字数（1000000/200000）');
-ok(!/1000000|200000/.test(opts), '下拉框里没有上下文字数');
-ok(!html.includes("esc(m.context_length"), '源码里已无 context_length 插值');
+ok(/ctx 200K/.test(chips), 'chip 上有 ctx 200K（窗口 200000）');
+ok(/ctx 1M/.test(chips), 'chip 上有 ctx 1M（窗口 1000000）');
+ok(!/ctx \?/.test(chips), '窗口已知时不出现占位「ctx ?」');
+// ⚠ 这里**不**断言「原始数字不出现」：精确值按设计放在 title 里
+//   （一眼看缩写、悬停看精确值），断言它会与产品契约直接冲突。
+ok(/title=/.test(chips), 'chip 上带 title（悬停可看精确值）');
+// 缺 ctx：必须渲染占位，不是留白 —— 留白会让「窗口小」与「不知道」看起来一样。
+renderModels([{ id: 'auto' }]);
+const chipsNoCtx = $('models').innerHTML;
+ok(/ctx \?/.test(chipsNoCtx), '没有窗口信息时渲染占位「ctx ?」（不是留白）');
+ok(!html.includes('esc(m.context_length'), '源码里已无 context_length 插值');
 
 // ---------- 2. 倍率标记 ----------
 console.log('\n[2] 倍率标记');
@@ -706,31 +770,35 @@ if (inlined.length) {
   process.exit(1);
 }
 
-// ---- 守卫 4：typeof 校验循环必须覆盖清单里的每一个函数名（**双向**）----
-// 少一个名字 = 该函数在产物运行期变成裸 ReferenceError（症状难读）；
-// typeof 循环是"响亮失败"的那条路，覆盖不全等于把响亮失败又变回难读的失败。
-// 反向也要查：typeof 循环里出现了清单没有的名字 = 两份名单已经漂了
-//（上一轮就是这个形态：清单漏了 multKeyOf，产物一执行就 ReferenceError）。
-const checkSrc = /for \(const n of \[([\s\S]*?)\]\)/.exec(out);
-const CHECKED = checkSrc ? Array.from(checkSrc[1].matchAll(/'([^']+)'/g)).map(m => m[1]) : [];
-const unguarded = NAMES.filter(nm => CHECKED.indexOf(nm) < 0);
-if (unguarded.length) {
-  console.error('SRC_FUNCS 里的名字没有进 typeof 校验循环：' + unguarded.join('、'));
-  process.exit(1);
-}
-const onlyChecked = CHECKED.filter(nm => NAMES.indexOf(nm) < 0);
-if (onlyChecked.length) {
-  console.error('typeof 校验循环里有 SRC_FUNCS 清单没有的名字：' + onlyChecked.join('、'));
-  console.error('两份名单必须逐字一致 —— 只在其中一处加名字 = 产物运行期 ReferenceError。');
-  process.exit(1);
-}
-
-const NEEDS = ['const SRC_FUNCS = [', "'function multKeyOf(',", 'eval(SRC_FUNCS.map(grab)'];
-for (const need of NEEDS) {
+// ---- 守卫 4（2026-11-01 改）：实读装置必须是**自动闭包**形态 ----
+//
+// # 为什么不再查「两份名单逐字一致」
+//
+// 旧形态是两张人工名单（SRC_FUNCS + typeof 循环），守卫 4 查它们一致。
+// 实测的代价：两张名单**都**一致、**都**完整，产物照样红 —— 因为漏的不是清单里的
+// 名字，而是**被抽取函数新调用的那个助手**（mpOwnerOf / ctxTag / fmtCtx /
+// mpFillProviderSelect 连着咬了四口）。一致性守卫对此**结构性无感**。
+//
+// 现在清单只列入口，依赖由产物运行期算闭包（见产物里的 CLOSURE）。守卫改成：
+// 产物必须**带着闭包装置**，且 typeof 校验必须覆盖**闭包全体**（而不是手写数组）。
+// 这样「源码里的函数多了一个依赖」这类漂移在结构上不可能再让产物带病运行。
+const CLOSURE_MARKS = [
+  'const SRC_FUNCS = [',
+  "'function multKeyOf('",
+  'const CLOSURE = (() =>',
+  'for (const n of CLOSURE.names)',
+  '入口不在闭包里',
+];
+for (const need of CLOSURE_MARKS) {
   if (!out.includes(need)) {
-    console.error('产物缺少实读形态的标志：' + need);
+    console.error('产物缺少实读/闭包形态的标志：' + need);
     process.exit(1);
   }
+}
+// 退回手写数组的话这里会红。
+if (/for \(const n of \[/.test(out)) {
+  console.error('typeof 校验退回手写数组了 —— 必须覆盖 CLOSURE.names（全自动闭包）。');
+  process.exit(1);
 }
 
 console.log('生成: ' + OUT);
@@ -739,5 +807,5 @@ console.log('  行数: ' + out.split('\n').length + '；抽取清单 SRC_FUNCS �
 // 守卫结果必须**被打印出来**：静默通过的守卫与没有守卫在输出上看不出区别，
 // 下次有人把清单改坏时会以为"生成器没报错 = 没问题"。这里把核对过的名字数与源码路径写出来。
 console.log('  守卫: 清单 ' + MARKERS.length + ' 个标记（' + NAMES.length + ' 个函数名）'
-  + '逐个在源码里找到；产物内无函数体副本；typeof 校验覆盖 ' + CHECKED.length + ' 个名字');
+  + '逐个在源码里找到；产物内无函数体副本；入口 ' + NAMES.length + ' 个，依赖由运行期闭包补全');
 console.log('  源码: ' + htmlPath);

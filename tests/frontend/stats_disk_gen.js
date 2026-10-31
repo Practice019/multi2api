@@ -118,6 +118,171 @@ shimWindow.self = shimWindow;
 global.window = shimWindow;
 global.document = shimWindow.document;
 
+var DC_SEGS = 4;
+
+var DC_RATE_COLOR = '#58a6ff';
+
+var DC_BAR_COLOR = 'var(--acc)';
+
+function dcEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function dcNum(v) {
+  var n = Number(v);
+  return isFinite(n) ? n : 0;
+}
+
+function dcGrid(svg, o) {
+  var segs = o.segs || DC_SEGS;
+  var padr = o.PADR == null ? 0 : o.PADR;
+  var max = dcNum(o.max);
+  var every = o.labelEvery || 1;
+  for (var i = 0; i <= segs; i++) {
+    var y = o.PADT + (o.plotH * i) / segs;
+    svg.push('<line x1="' + o.PADL + '" y1="' + y.toFixed(1) + '" x2="' + (o.W - padr) +
+      '" y2="' + y.toFixed(1) + '" stroke="var(--line)" stroke-width="1"/>');
+    if (o.fmt && i % every === 0) {
+      svg.push('<text class="ax" x="' + (o.PADL - 6) + '" y="' + (y + 3).toFixed(1) +
+        '" text-anchor="end"' + (o.fill ? ' fill="' + o.fill + '"' : '') + '>' +
+        dcEsc(o.fmt(max * (1 - i / segs))) + '</text>');
+    }
+    if (o.rightFmt && i % every === 0) {
+      svg.push('<text class="ax" x="' + (o.W - padr + 6) + '" y="' + (y + 3).toFixed(1) +
+        '" fill="var(--warn)">' + dcEsc(o.rightFmt(dcNum(o.rightMax) * (1 - i / segs))) + '</text>');
+    }
+  }
+}
+
+function dcGridCols(svg, o) {
+  var segs = o.segs || DC_SEGS;
+  var padr = o.PADR == null ? 0 : o.PADR;
+  var plotW = o.W - o.PADL - padr;
+  for (var i = 0; i <= segs; i++) {
+    var x = o.PADL + (plotW * i) / segs;
+    svg.push('<line x1="' + x.toFixed(1) + '" y1="' + o.PADT + '" x2="' + x.toFixed(1) +
+      '" y2="' + (o.PADT + o.plotH) + '" stroke="var(--line)" stroke-width="1"/>');
+    if (o.fmt) {
+      svg.push('<text class="ax" x="' + x.toFixed(1) + '" y="' + (o.labelY || (o.PADT + o.plotH + 9)) +
+        '" text-anchor="' + (i === 0 ? 'start' : i === segs ? 'end' : 'middle') + '"' +
+        (o.fill ? ' fill="' + o.fill + '"' : '') + '>' + dcEsc(o.fmt((100 * i) / segs)) + '</text>');
+    }
+  }
+}
+
+function dcRects(svg, rs, o) {
+  var opt = o || {};
+  for (var i = 0; i < (rs || []).length; i++) {
+    var r = rs[i];
+    var w = dcNum(r.w), h = dcNum(r.h);
+    if (w <= 0 || h <= 0) continue;
+    svg.push('<rect x="' + dcNum(r.x).toFixed(1) + '" y="' + dcNum(r.y).toFixed(1) +
+      '" width="' + w.toFixed(1) + '" height="' + h.toFixed(1) +
+      '" fill="' + (r.fill || opt.fill || DC_BAR_COLOR) + '"' +
+      (opt.rx ? ' rx="' + dcNum(opt.rx).toFixed(1) + '"' : '') +
+      (opt.opacity == null ? '' : ' opacity="' + opt.opacity + '"') + '/>');
+  }
+}
+
+function dcLine(svg, pts, o) {
+  var opt = o || {};
+  var list = pts || [];
+  var stroke = opt.stroke || DC_BAR_COLOR;
+  if (list.length >= 2) {
+    var d = [];
+    for (var i = 0; i < list.length; i++) {
+      d.push((i ? 'L' : 'M') + dcNum(list[i][0]).toFixed(1) + ',' + dcNum(list[i][1]).toFixed(1));
+    }
+    svg.push('<path d="' + d.join(' ') + '" fill="none" stroke="' + stroke +
+      '" stroke-width="' + (opt.width || 1.6) + '"' +
+      (opt.opacity == null ? '' : ' opacity="' + opt.opacity + '"') +
+      ' stroke-linejoin="round" stroke-linecap="round"/>');
+  }
+  if (opt.dots) {
+    for (var k = 0; k < list.length; k++) {
+      svg.push('<circle cx="' + dcNum(list[k][0]).toFixed(1) + '" cy="' + dcNum(list[k][1]).toFixed(1) +
+        '" r="' + (opt.dotR || 2.2) + '" fill="' + (opt.dotFill || stroke) + '" opacity="0.9"/>');
+    }
+  }
+}
+
+function dcSvgTag(W, H, parts, o) {
+  var opt = o || {};
+  var style = opt.style || 'width:100%;height:100%';
+  return '<svg viewBox="0 0 ' + dcNum(W) + ' ' + dcNum(H) +
+    '" preserveAspectRatio="none" style="' + style + '">' + (parts || []).join('') + '</svg>';
+}
+
+function dcPct(v, den) {
+  var d = dcNum(den);
+  if (d <= 0) return null;
+  var r = (dcNum(v) / d) * 100;
+  return r < 0 ? 0 : r;
+}
+
+function dcTier(pct) {
+  if (pct == null) return 'var(--dim)';
+  return pct >= 95 ? 'var(--ok)' : pct >= 80 ? 'var(--warn)' : 'var(--err)';
+}
+
+function renderCards(h, s) {
+    // ⚠ 2026-10-19 新口径：这里原来写"当前登录是<b>成员</b>，账号池读数仅管理员可见"。
+    //   成员已取消 ⇒ 走不到 `!s` 这一支了（`refresh()` 在 403/网络失败时**提前 return**，
+    //   根本不会调 renderCards 画这一排）。
+    //   留着这一支只为"真拿到 null 也不炸"，文案改成**不假设角色**的中性说明 ——
+    //   它现在表达的是"读数没拿到"，而不是"你是成员所以看不到"。
+    if (!s) {
+      $('cards').innerHTML = '<div class="card" style="grid-column:1/-1">'
+        + '<div class="k">账号池</div>'
+        + '<div class="v dim" style="font-size:13px">本次没取到账号池读数'
+        + '（服务端未返回或请求失败）。上面的状态点与提示条里有具体原因。</div></div>';
+      return;
+    }
+    // 网关状态卡：核心运营读数（对标 one-api 管理台"渠道健康 + 汇总"）。
+    // 之前精简到 2 张后用户觉得太少 —— 这里加回排障/运营真正有用的维度：
+    // 冷却中/已禁用/在途 来自 /status 的每账号画像；累计请求/成功率来自
+    // /admin/stats（stats 数据在 renderStats 里单独渲染，这里只读缓存值）。
+    const accts = (s && s.accounts) || [];
+    const cooling = accts.filter(a => a.cooling).length;
+    const disabled = accts.filter(a => a.disabled).length;
+    const inflight = accts.reduce((n, a) => n + (a.in_flight || 0), 0);
+    const st = window._statsCache;
+    const reqTotal = st ? st.total : '—';
+    const reqRate = (st && st.total) ? Math.round((st.ok / st.total) * 100) + '%' : '—';
+    const cards = [
+      ['账号总数', s.total, ''],
+      ['健康', s.healthy, s.healthy > 0 ? 'ok' : 'err'],
+      ['冷却中', cooling, cooling > 0 ? 'warn' : ''],
+      ['已禁用', disabled, disabled > 0 ? 'err' : ''],
+      ['在途请求', inflight, inflight > 0 ? 'warn' : ''],
+      ['累计请求', reqTotal, ''],
+      ['成功率', reqRate, (st && st.total) ? (st.ok / st.total >= 0.95 ? 'ok' : 'warn') : ''],
+    ];
+    $('cards').innerHTML = cards.map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+    // 子标题里的判读文案：把「顶栏那个点是绿是红」换算成一句明确的结论，
+    // 免得读者要自己把 healthy>0 与 /healthz 状态码对起来看。
+    $('gwHint').textContent = h.healthy > 0
+      ? '正在服务 · ' + h.healthy + '/' + (h.total || 0) + ' 个账号可用'
+      : (h.total > 0 ? '无可用账号 · 请求会返回 503' : '账号池为空');
+  }
+
+function fmtTps(v) {
+    const c = Math.max(0, v);
+    return c >= 10 ? String(Math.round(c)) : String(Math.round(c * 10) / 10);
+  }
+
+function tokPerSec(outTokens, totalMs, ttfbMs, mode) {
+    if (mode && mode !== 'stream') return '-';
+    if (!outTokens || outTokens <= 0) return '-';
+    if (!totalMs || totalMs <= 0) return '0.0';
+    const genMs = totalMs - (ttfbMs > 0 ? ttfbMs : 0); // 纯生成阶段 = DSH 的 decodeMs
+    if (genMs <= 0) return '-';
+    return fmtTps(outTokens / (genMs / 1000));
+  }
+
 function num(v) {
     if (typeof v === 'number') return Number.isFinite(v) ? v : null;
     if (typeof v === 'string' && v.trim() !== '') {
@@ -137,13 +302,6 @@ function fmtCount(v) {
     return n === null ? null : String(Math.round(n));
   }
 
-function fmtCredit(v) {
-    const n = numNonNeg(v);
-    if (n === null) return null;
-    if (n === 0) return '0';
-    return String(Number(n.toFixed(4)));
-  }
-
 function fmtTokens(n) {
     if (typeof n !== 'number' || !isFinite(n)) return '—';
     const abs = Math.abs(n);
@@ -157,62 +315,6 @@ function fmtTokens(n) {
       }
     }
     return String(n);
-  }
-
-function fmtRate(v) {
-    const n = num(v);
-    if (n === null || n < 0 || n > 1) return null;
-    return (n * 100).toFixed(1) + '%';
-  }
-
-function fmtBytes(n) {
-    if (!n || n < 0) return '0 B';
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / 1024 / 1024).toFixed(1) + ' MiB';
-  }
-
-function renderStatsModels(s) {
-    const wrap = $('statsModelsWrap');
-    if (!wrap) return;
-    // 非数值 / 负数计数一律当 0（不能让 NaN 参与排序，那会让顺序随机；
-    // 负数排序更会让「最多的排最后」，与用户预期相反）。
-    const bm = Object.entries(s.by_model || {})
-      .map(([k, v]) => { const n = numNonNeg(v); return [k, n === null ? 0 : Math.round(n)]; })
-      .sort((a, b) => b[1] - a[1]);
-    if (!bm.length) { wrap.style.display = 'none'; return; }
-    wrap.style.display = '';
-
-    // 系数索引：后端只回「窗口里调用过且有系数」的模型，这里做成 map 方便按名字取。
-    const mult = {};
-    (Array.isArray(s.model_multipliers) ? s.model_multipliers : []).forEach(m => {
-      if (!m) return;
-      const v = num(m.multiplier);
-      if (v !== null && v > 0) mult[m.model] = v;
-    });
-
-    // 目录状态提示：把「有 / 已过期 / 拿不到」讲清楚，
-    // 因为用户看到一排没有系数的 chip 时唯一能做的就是去点「刷新模型」。
-    const cat = (s.model_catalog && typeof s.model_catalog === 'object') ? s.model_catalog : {};
-    const catModels = fmtCount(cat.models);
-    let hint;
-    if (cat.state === 'ok') {
-      hint = '· 成本系数来自 /v3/config' + (catModels === null ? '' : `（缓存 ${catModels} 个模型）`);
-    } else if (cat.state === 'stale') {
-      hint = '· 成本系数为过期缓存，可信度降低（点「刷新模型」重新拉取）';
-    } else {
-      hint = '· 成本系数不可用（上游 /v3/config 未取到），仅显示调用次数';
-    }
-    $('statsCatalogHint').textContent = hint;
-
-    $('statsModels').innerHTML = bm.map(([name, calls]) => {
-      const m = mult[name];
-      // 系数后缀：有才加；没有就只显示次数，不显示「x0 倍」这种会被读成免费的说法。
-      const suffix = m === undefined
-        ? `<span title="未取到该模型的成本系数">${calls} 次</span>`
-        : `<span title="每次调用消耗 ${m} 倍基础额度">${calls} 次 · x${m}</span>`;
-      return `<span class="chip" data-id="${esc(name)}">${esc(name)}${suffix}</span>`;
-    }).join('');
   }
 
 function renderStats(s) {
@@ -301,6 +403,153 @@ function renderStats(s) {
     // renderStatsModels(s);
   }
 
+function renderModelRank(s) {
+    const host = $('modelRank');
+    if (!host) { return; }
+    if (!s) { host.innerHTML = ''; return; }
+    const detail = s.by_model_detail || {};
+    const rows = Object.keys(detail).map(k => {
+      const d = detail[k] || {};
+      // ⚠ 字段名必须是 `req`，不是 `calls`：后端 dimStat 的 JSON tag 是
+      //   `Req int64 \`json:"req"\``（internal/admin/admin.go）。我最初写这个函数时
+      //   凭印象用了 `calls`，结果次数排行永远是"所选范围内没有请求" —— 静默失败：
+      //   页面不报错，只是永远空着。
+      const calls = num(d.req) || 0;
+      const ok = num(d.ok) || 0;
+      return { model: k, calls, ok, rate: calls ? (ok / calls * 100) : null };
+    }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 10);
+    if (!rows.length) {
+      host.innerHTML = '<div class="dim" style="padding:6px 2px;font-size:12px">所选范围内没有请求</div>';
+      return;
+    }
+    const max = rows[0].calls;   // 用第一名的量作 100% 基准，条形才有可比性
+    host.innerHTML = rows.map((r, i) => {
+      const pct = max ? (r.calls / max * 100) : 0;
+      const col = r.rate === null ? 'var(--dim)'
+        : r.rate >= 95 ? 'var(--ok)' : r.rate >= 80 ? 'var(--warn)' : 'var(--err)';
+      const rateTxt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+      return `<div class="rankrow" title="${esc(r.model)} · ${r.calls} 次 · 成功率 ${rateTxt}">`
+        + `<span class="rankidx">${i + 1}</span>`
+        + `<span class="rankname mono">${esc(r.model)}</span>`
+        + `<span class="rankbar"><i style="width:${pct.toFixed(1)}%;background:var(--acc)"></i></span>`
+        + `<span class="rankval">${fmtCount(r.calls)}</span>`
+        + `<span class="rankrate" style="color:${col}">${rateTxt}</span>`
+        + `</div>`;
+    }).join('');
+  }
+
+function renderHealthBar(s) {
+    const el = $('healthBar');
+    if (!el) { return; }
+    if (!s) { el.innerHTML = ''; return; }
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = (total && ok !== null) ? (ok / total * 100) : null;
+    const avgMs = num(s.avg_total_ms);
+    // ⚠ 2026-10-20 改口径：吞吐用**纯输出**（s.out_tokens）。
+    //   用 total 会把输入/缓存读取也算成"生成速度" —— 实测同一份数据
+    //   total 版 10490 t/s、输出版 250 t/s，前者是假的速度。
+    //   ⚠ 上一轮我改过一次但没生效：old_string 匹配到了文件里另一处同名行
+    //   （`const toks = num(s.tokens);` 不止一处）。这次用「紧跟 tps 计算」作锚点。
+    const toks = num(s.out_tokens);
+    const tps = (avgMs && total && toks !== null && avgMs > 0)
+      ? toks / ((avgMs * total) / 1000) : null;
+    const parts = ['<span class="hb-title">性能健康</span>'];
+    // 成功率：**条形**（不是纯文字）。旁边仍保留精确读数 —— 条给"一眼什么水平"，
+    // 数字给"到底多少"，两者不互相替代。
+    parts.push(`<span class="hb-item hb-rate" title="成功 / 总请求 · 条长 = 成功率 · 底色等分线为 0/25/50/75/100%">`
+      + `<span class="hb-k">成功率</span>`
+      + `<span class="hb-meter">${hbMeter(rate)}</span>`
+      + `<b style="color:${dcTier(rate)}">${rate === null ? '—' : rate.toFixed(2) + '%'}</b></span>`);
+    parts.push(`<span class="hb-item">平均延迟 <b>${avgMs === null ? '—' : (avgMs / 1000).toFixed(2) + 's'}</b></span>`);
+    parts.push(`<span class="hb-item">吞吐 <b>${tps === null ? '—' : fmtTokens(Math.round(tps)) + ' t/s'}</b></span>`);
+    // 近 24 小时成功率迷你折线（与下面两张趋势图同一个数据源、同一套绘制函数）
+    const trend = healthTrend();
+    if (trend.length >= 2) {
+      const first = trend[0], last = trend[trend.length - 1];
+      parts.push(`<span class="hb-item hb-sparkitem" title="近 24 小时逐桶成功率（首 ${first.v.toFixed(1)}% → 末 ${last.v.toFixed(1)}%）">`
+        + `<span class="hb-k">24h</span>`
+        + `<span class="hb-spark">${hbSpark(trend)}</span>`
+        + `<b style="color:${dcTier(last.v)}">${last.v.toFixed(1)}%</b></span>`);
+    }
+    const detail = s.by_model_detail || {};
+    const rows = Object.keys(detail).map(k => {
+      const d = detail[k] || {};
+      // ⚠ 同样是 `req` 不是 `calls`（见 renderModelRank 里的同一条注释）
+      const c = num(d.req) || 0;
+      const o = num(d.ok) || 0;
+      return { model: k, calls: c, rate: dcPct(o, c) };
+    }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 5);
+    // 分项成功率：条形组（每条带百分比标签、按高低分档配色），底下垫同一套等分网格。
+    if (rows.length) {
+      parts.push(`<span class="hb-models">` + rows.map(r => {
+        const txt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+        const col = dcTier(r.rate);
+        return `<span class="hb-row" title="${esc(r.model)} · ${r.calls} 次 · 成功率 ${txt}">`
+          + `<span class="hb-mname mono">${esc(r.model)}</span>`
+          + `<span class="hb-meter">${hbMeter(r.rate)}</span>`
+          + `<span class="hb-mval" style="color:${col}">${txt}</span></span>`;
+      }).join('')
+        + `<span class="hb-row hb-axisrow"><span class="hb-mname"></span>`
+        + `<span class="hb-axis">${hbAxis()}</span><span class="hb-mval"></span></span>`
+        + `</span>`);
+    }
+    el.innerHTML = parts.join('');
+  }
+
+function hbAxis() {
+    const out = [];
+    for (let i = 0; i <= DC_SEGS; i++) {
+      out.push(`<i style="left:${(100 * i / DC_SEGS).toFixed(1)}%">${Math.round(100 * i / DC_SEGS)}%</i>`);
+    }
+    return out.join('');
+  }
+
+function hbMeter(rate) {
+    const W = 100, H = 10, PADT = 1, plotH = H - 2;
+    const svg = [];
+    dcGridCols(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, segs: DC_SEGS });
+    if (rate !== null) {
+      const w = Math.max(0, Math.min(100, rate));
+      dcRects(svg, [{ x: 0, y: PADT, w: (W * w) / 100, h: plotH }], { fill: dcTier(rate), rx: 2 });
+    }
+    return dcSvgTag(W, H, svg);
+  }
+
+function hbSpark(rows) {
+    const W = 150, H = 30, PADT = 3, PADB = 3, plotH = H - PADT - PADB;
+    const n = rows.length;
+    const svg = [];
+    dcGrid(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, max: 100, segs: 2 });
+    const xAt = (i) => (n > 1 ? (W * i) / (n - 1) : W / 2);
+    const yAt = (v) => PADT + plotH - (plotH * Math.max(0, Math.min(100, v))) / 100;
+    dcLine(svg, rows.map((r, i) => [xAt(i), yAt(r.v)]), { stroke: DC_RATE_COLOR, width: 1.4, dots: n <= 12 });
+    return dcSvgTag(W, H, svg);
+  }
+
+function healthTrend() {
+    const list = window._healthSeries || [];
+    const out = [];
+    for (const p of list) {
+      const v = dcPct(p && p.ok, p && p.total);
+      if (v === null) continue;
+      out.push({ v: v });
+    }
+    return out;
+  }
+
+function statCardEl(key) {
+    const k = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key;
+    return document.querySelector(
+      STAT_CARD_HOSTS.map(h => `${h} .card[data-stat-key="${k}"]`).join(', ')
+    );
+  }
+
+function statCardValEl(key) {
+    const c = statCardEl(key);
+    return c ? c.querySelector('.v') : null;
+  }
+
 function statsCardsEntries(s) {
     if (!s) return [];
     const total = num(s.total);
@@ -360,6 +609,15 @@ function statsCardsEntries(s) {
       // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）
       ['平均 RPM', rpm === null ? null : (rpm >= 10 ? fmtCount(Math.round(rpm)) : rpm.toFixed(1)), 'dim'],
       ['平均 TPM', tpm === null ? null : fmtTokens(Math.round(tpm)), 'dim'],
+    ];
+  }
+
+function statsCardsEntries2(s) {
+    if (!s) return [];
+    return [
+      ['Top 模型', null, 'dim'],
+      ['活跃天数', null, 'dim'],
+      ['当前连续天数', null, 'dim'],
     ];
   }
 
@@ -447,6 +705,139 @@ function renderStatsReport(s) {
     //   所以它也有同一风险（只是实测里那次入参恰好完整）。⚠ 见 fillDonuts 的注释。
 
     // ⚠ 顶部提示已移到函数开头（见那里注释：原来放这儿会被空数据分支的 return 跳过）。
+  }
+
+function fillDonuts(s) {
+    const rows = (det) => Object.entries(det || {}).map(([k, v]) => {
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
+      return [k, tk];
+    }).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    renderDonutInto($('statsDonut'), $('statsDonutLegend'), rows(s && s.by_provider_detail), '总 Token');
+    renderDonutInto($('statsModelDonut'), $('statsModelLegend'), rows(s && s.by_model_detail), '总 Token');
+  }
+
+function fillTopModel(s) {
+    // ⚠⚠ 「Top 模型」现在住在 `#statsCards2`（第二组）—— 选择器必须跨两个容器，
+    //   否则这一格永远是 `—`，而且**没有任何报错**（这是本次拆容器最容易踩的坑）。
+    const el = statCardValEl('Top 模型');
+    if (!el) return;
+    let bestK = null, bestV = -1;
+    for (const [k, v] of Object.entries((s && s.by_model_detail) || {})) {
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
+      if (tk > bestV) { bestV = tk; bestK = k; }
+    }
+    if (bestK) {
+      el.textContent = bestK;              // ⚠ 不在这里截断 —— 交给 CSS 的 ellipsis
+      el.title = bestK + ' · ' + fmtTokensPlain(bestV) + ' token';
+      el.className = 'v';
+    } else {
+      el.textContent = NODATA;
+      el.className = 'v dim';
+    }
+  }
+
+function renderDonutInto(donutEl, legendEl, rows, unitLabel) {
+    if (!donutEl || !legendEl) return;
+    const list = (rows || []).filter((r) => r && r[1] > 0);
+    let sum = 0;
+    for (const [, n] of list) sum += n;
+    if (!list.length || sum <= 0) {                    // ⚠ 防零除：没有数据就别画环
+      donutEl.style.background = '';
+      donutEl.innerHTML = '';
+      legendEl.innerHTML = '<span class="dim" style="font-size:12px">暂无用量数据</span>';
+      return;
+    }
+    const fmtV = (v) => v >= 1e9 ? (v / 1e9).toFixed(2) + 'B'
+      : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
+    let acc = 0;
+    const stops = [];
+    const legend = [];
+    list.forEach(([name, n], i) => {
+      const pct = (n / sum) * 100;
+      const c = DONUT_COLORS[i % DONUT_COLORS.length];
+      stops.push(`${c} ${acc.toFixed(3)}% ${(acc + pct).toFixed(3)}%`);
+      acc += pct;
+      const label = name.length > 16 ? name.slice(0, 16) + '…' : name;
+      legend.push(`<div class="lgrow" title="${esc(name)}">
+        <span class="sw" style="background:${c}"></span>
+        <span class="lgname">${esc(label)}</span>
+        <span class="tval">${esc(fmtV(n))}</span>
+        <span class="tpct">${pct.toFixed(1)}%</span>
+      </div>`);
+    });
+    donutEl.style.background = `conic-gradient(${stops.join(',')})`;
+    // ⚠ 环心写合计，并把**单位**写清楚（Token / 请求数）—— 不让读者靠猜。
+    donutEl.innerHTML = `<span class="dc"><b>${esc(fmtV(sum))}</b><span>${esc(unitLabel)}</span></span>`;
+    legendEl.innerHTML = legend.join('');
+  }
+
+function fmtTokensPlain(v) {
+    if (!v) return '0';
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+    return String(v);
+  }
+
+function renderStatsModels(s) {
+    const wrap = $('statsModelsWrap');
+    if (!wrap) return;
+    // 非数值 / 负数计数一律当 0（不能让 NaN 参与排序，那会让顺序随机；
+    // 负数排序更会让「最多的排最后」，与用户预期相反）。
+    const bm = Object.entries(s.by_model || {})
+      .map(([k, v]) => { const n = numNonNeg(v); return [k, n === null ? 0 : Math.round(n)]; })
+      .sort((a, b) => b[1] - a[1]);
+    if (!bm.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+
+    // 系数索引：后端只回「窗口里调用过且有系数」的模型，这里做成 map 方便按名字取。
+    const mult = {};
+    (Array.isArray(s.model_multipliers) ? s.model_multipliers : []).forEach(m => {
+      if (!m) return;
+      const v = num(m.multiplier);
+      if (v !== null && v > 0) mult[m.model] = v;
+    });
+
+    // 目录状态提示：把「有 / 已过期 / 拿不到」讲清楚，
+    // 因为用户看到一排没有系数的 chip 时唯一能做的就是去点「刷新模型」。
+    const cat = (s.model_catalog && typeof s.model_catalog === 'object') ? s.model_catalog : {};
+    const catModels = fmtCount(cat.models);
+    let hint;
+    if (cat.state === 'ok') {
+      hint = '· 成本系数来自 /v3/config' + (catModels === null ? '' : `（缓存 ${catModels} 个模型）`);
+    } else if (cat.state === 'stale') {
+      hint = '· 成本系数为过期缓存，可信度降低（点「刷新模型」重新拉取）';
+    } else {
+      hint = '· 成本系数不可用（上游 /v3/config 未取到），仅显示调用次数';
+    }
+    $('statsCatalogHint').textContent = hint;
+
+    $('statsModels').innerHTML = bm.map(([name, calls]) => {
+      const m = mult[name];
+      // 系数后缀：有才加；没有就只显示次数，不显示「x0 倍」这种会被读成免费的说法。
+      const suffix = m === undefined
+        ? `<span title="未取到该模型的成本系数">${calls} 次</span>`
+        : `<span title="每次调用消耗 ${m} 倍基础额度">${calls} 次 · x${m}</span>`;
+      return `<span class="chip" data-id="${esc(name)}">${esc(name)}${suffix}</span>`;
+    }).join('');
+  }
+
+function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MiB';
   }
 
 let fail = 0;

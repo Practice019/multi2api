@@ -606,10 +606,18 @@ console.log(`\n=== ${pass}/${total} 通过 ===`);
 console.log(`（${SUITES.length} 个 generator 对 + ${PROBES.length + PAGE_WRITING_PROBES.length} 个独立探针：` +
   `静态 ${staticProbes.length} / 写页面 ${pageWritingProbes.length} / 实例 ${instanceProbes.length}）`);
 // 既有基线红（长期挂着，**不是**本轮引入的）。期望通过数 = 总数 − 基线红数。
-// ⚠ 登记幂等守卫后：19(PROBES) + 1(PAGE_WRITING) = 20 个独立探针 ⇒ 总数 36 ⇒ 期望 **29/36**（基线红仍是那 7 条）。
+//
+// 2026-11-01：清单从 7 条减到 5 条 —— 那条 4 项清理任务已完成两项，**清掉即从此处删名**
+//（删名本身就是「这条红真的修好了」的证据：不删的话修好了也看不出来）。已清掉：
+//
+//   · stats_disk_gen.js     —— 抽取清单过期（statsCardsEntries2 / DC_SEGS / fmtBytes …）。
+//                             改为生成期**自动算调用闭包**，这类漂移结构性消失。
+//   · models_display_gen.js —— 同一条缝（mpOwnerOf / ctxTag / fmtCtx / mpFillProviderSelect）
+//                             + 顺带抓到一个**真缺陷**：mpOwners 把「绝对排位函数」
+//                             当 sort 比较器用 ⇒ 上游下拉的顺序与分组区不一致。已修共享层。
 const BASELINE_RED = [
-  'dashboard_gen.js', 'models_display_gen.js', 'settings_layout_gen.js',
-  'stats_disk_gen.js', 'gen_ui_manifest.js', 'audit_tracked_content.js',
+  'dashboard_gen.js', 'settings_layout_gen.js',
+  'gen_ui_manifest.js', 'audit_tracked_content.js',
   'verify_probe_console_loaded.js',
 ];
 const expectedPass = total - BASELINE_RED.length;

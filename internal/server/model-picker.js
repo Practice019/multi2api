@@ -29,6 +29,16 @@ function mpOwnerOf(id, ownedBy) {
 //
 // rank 可选：给定排序函数就用它（webui.html 按 manifest 顺序排），
 // 否则按字典序（分组页没有 manifest 上下文）。
+//
+// ⚠⚠ rank 是「**单个** id → 排位」的函数，**不是**比较器。
+//   原来写的是 `out.sort(rank || 字典序)` —— 把绝对排位当比较器用。
+//   那不是「差不多能用」，而是**错**：比较器要的是 a 与 b 的相对关系，
+//   只返回 rank(a) 时 V8 的插入排序会给出一个「看起来像排过、实际按输入顺序」的结果。
+//   实测（tests/frontend 的 [11] 节，manifest=[workbuddy, codearts]、模型表按
+//   codearts,workbuddy,ghost 给）：下拉渲染成 codearts,workbuddy,ghost，
+//   而同一份判据在分组区（groupModelsByOwner，用的是正确比较器）是
+//   workbuddy,codearts,ghost —— **同一个 providerRank 的两个消费点顺序不一致**。
+//   所以这里自己算差值。
 function mpOwners(list, rank) {
   var seen = Object.create(null);
   var out = [];
@@ -38,7 +48,11 @@ function mpOwners(list, rank) {
     var o = mpOwnerOf(m.id, owned);
     if (o && !seen[o]) { seen[o] = 1; out.push(o); }
   }
-  out.sort(rank || function (a, b) { return a < b ? -1 : (a > b ? 1 : 0); });
+  if (rank) {
+    out.sort(function (a, b) { return rank(a) - rank(b); });
+  } else {
+    out.sort(function (a, b) { return a < b ? -1 : (a > b ? 1 : 0); });
+  }
   return out;
 }
 

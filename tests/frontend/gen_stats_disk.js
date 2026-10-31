@@ -56,23 +56,129 @@ function grabBlock(startMarker) {
 // 必须把它们一并抽出来，否则生成物在 renderStats 里查不到符号 —— 这是真实发生过的
 // 失败：新增 num() 后本测试报 `ReferenceError: num is not defined`。
 // 教训：从真实源码抽函数时，要连**它调用的其它函数**一起抽，不能只抽入口。
-const pieces = [
-  grabBlock('function num('),
-  grabBlock('function numNonNeg('),
-  grabBlock('function fmtCount('),
-  grabBlock('function fmtCredit('),
-  grabBlock('function fmtTokens('),
-  grabBlock('function fmtRate('),
-  grabBlock('function fmtBytes('),
-  grabBlock('function renderStatsModels('),
-  grabBlock('function renderStats('),
-  // ⚠ 本轮补的两个（L2）：renderStats 现在会调它们。漏抽的代价是运行期
-  // `ReferenceError: xxx is not defined` —— 与产品缺陷长得**一模一样**，
-  // 只有回到源码看"这个函数是不是同一个 <script> 里的编程错误"才分得清。
-  // grabBlock 找不到标记时会抛错 ⇒ 函数被改名会在**生成期**就 loudly 失败（不是静默全绿）。
-  grabBlock('function statsCardsEntries('),
-  grabBlock('function renderStatsReport('),
-];
+// ---------------------------------------------------------------- 抽取清单（**自动闭包**）
+//
+// # 为什么不再手写清单（2026-11-01 改）
+//
+// 本文件前后**四次**撞上同一类漂移（L2 记了三次，2026-11-01 又撞一次）：
+// 产品里 renderStats 多调了一个函数（statsCardsEntries2 / fmtTokensPlain / renderHealthBar /
+// dcGridCols …），而手写清单没跟着加 ⇒ 产物运行期 `ReferenceError: xxx is not defined`，
+// 长得与产品缺陷**一模一样**（差别只在：回到源码看那个符号是不是同一个 <script> 里的拼写错误）。
+//
+// 手写清单的维护判据是「被抽函数体里出现的每个自由标识符都要在清单里」—— 那本质是一个
+// **图可达性**问题，让人用眼睛维护必然漏（这就是它复发四次的直接原因）。
+// 所以改成生成期算闭包：从 SEED_FUNCS 出发，把 webui.html 里定义过、且被闭包用到的
+// **全部**顶层符号一起抽出来。产物里仍然没有一个字节的函数体副本（与旧形态一致），
+// 只是清单由机器算。
+// SEED_FUNCS = **探针正文自己直接调用**的产品函数（见 [1] 节的 renderStats(...) 与
+// [3] 节量级契约用的 fmtBytes(...)）。闭包从它们出发 —— 只放 renderStats 会漏掉
+// fmtBytes，那正是本轮实测的第二个 ReferenceError。
+const SEED_FUNCS = ['renderStats', 'fmtBytes'];
+// 夹具/头部**已经提供**的符号：不能再抽，否则产物里重复声明（SyntaxError）。
+// 这份名单与 header 里的定义一一对应（改 header 时必须同步改这里）。
+const PROVIDED = new Set(['esc', '$', 'mkEl', 'resetEls', 'cardValue', 'grabBlock', 'NODATA']);
+
+// grabConstStmt 取整条 `const NAME = …;`（引号状态机：字符串里的分号不算结束）。
+// 页面里有一批**顶层 const**（DC_SEGS / DC_RATE_COLOR / NODATA 这类常量，以及 esc 那种
+// 箭头函数），grabBlock 只会配平大括号 ⇒ 取不到它们，漏一个就是运行期 ReferenceError。
+function grabConstStmt(kw, name) {
+  const start = html.indexOf(kw + ' ' + name + ' =');
+  if (start < 0) return null;
+  let depth = 0, q = null;
+  for (let i = start; i < html.length; i++) {
+    const c = html[i];
+    if (q) { if (c === q) q = null; continue; }
+    if (c === "'" || c === '"' || c === '\u0060') { q = c; continue; }
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ';' && depth === 0) return html.slice(start, i + 1);
+    else if (c === '\n' && depth === 0 && q === null) {
+      // 无分号的单行 const（页面里有几处）：行尾不是运算符就当成完整语句。
+      const line = html.slice(start, i).trimEnd();
+      if (!/[=+\-*/&|,<(:]$/.test(line)) return line;
+    }
+  }
+  return null;
+}
+
+// ⚠ 只能收**顶层**定义。函数体内部的局部同名声明（`const top = []` 这种）绝不能被当成
+//   可抽取的顶层符号 —— 第一版没做这一步，闭包把一堆局部片段拽到了产物顶层，
+//   既污染作用域又可能撞名。判据：声明的偏移量落在**别的函数体区间之内** = 嵌套，丢弃。
+const FUNC_RANGES = (() => {
+  const out = [];
+  for (const hit of html.matchAll(/(?:^|\n)[ \t]*function[ \t]+([A-Za-z_$][\w$]*)[ \t]*\(/g)) {
+    const name = hit[1];
+    let src = null;
+    try { src = grabBlock('function ' + name + '('); } catch (e) { src = null; }
+    if (!src) continue;
+    const at = hit.index + (hit[0].charAt(0) === '\n' ? 1 : 0);
+    out.push({ name: name, src: src, at: at, end: html.indexOf(src, at) + src.length });
+  }
+  return out;
+})();
+// nestedIn 报告偏移量是否落在某个函数体**内部**（不含函数自身的起始位置）。
+function nestedIn(at) {
+  for (const r of FUNC_RANGES) {
+    if (at > r.at && at < r.end) return true;
+  }
+  return false;
+}
+
+// SRC_TOP：整页的**顶层**定义表 name → {src, at}
+const SRC_TOP = (() => {
+  const m = new Map();
+  for (const r of FUNC_RANGES) {
+    if (!nestedIn(r.at)) m.set(r.name, { src: r.src, at: r.at });
+  }
+  // ⚠ 只认**顶格**的 const：页面里的顶层常量都写在列 0（DONUT_COLORS / DC_SEGS /
+  //   esc / NODATA …），而函数体里的局部 `const xxx =` 一律有缩进 ⇒ 顶格这一条就
+  //   足以把局部声明挡在外面（nestedIn 是第二道保险）。
+  // const / var / let 都收：页面的共享图表层用的是 **var**（DC_SEGS、DC_RATE_COLOR …，
+  // 见 webui.html 的 WB2API:DASH-CHART 段），只认 const 会漏掉它们 ⇒ 运行期
+  // `ReferenceError: DC_SEGS is not defined`（本轮实测）。
+  for (const hit of html.matchAll(/(?:^|\n)(const|var|let)[ \t]+([A-Za-z_$][\w$]*)[ \t]*=[^=]/g)) {
+    const kw = hit[1];
+    const name = hit[2];
+    const at = hit.index + (hit[0].charAt(0) === '\n' ? 1 : 0);
+    if (m.has(name) || nestedIn(at)) continue;
+    const src = grabConstStmt(kw, name);
+    if (src) m.set(name, { src: src, at: at });
+  }
+  return m;
+})();
+
+// 闭包：从 SEEDS 出发，凡是"本页定义过且被用到"的符号都收进来（用 用/调用 两种形态都算）。
+const { pieces, CLOSURE_NAMES } = (() => {
+  const seen = new Set();
+  const order = [];
+  const queue = SEED_FUNCS.slice();
+  while (queue.length) {
+    const name = queue.shift();
+    if (seen.has(name) || PROVIDED.has(name)) continue;
+    const entry = SRC_TOP.get(name);
+    if (!entry) continue; // 不是本页顶层定义的（浏览器 API / 局部变量）⇒ 跳过
+    seen.add(name);
+    order.push({ name: name, src: entry.src, at: entry.at });
+    for (const hit of entry.src.matchAll(/(?:^|[^.\w$])([A-Za-z_$][\w$]*)/g)) {
+      const used = hit[1];
+      if (!seen.has(used) && !PROVIDED.has(used) && SRC_TOP.has(used)) queue.push(used);
+    }
+  }
+  // 按**源码顺序**排列：const 箭头函数不会被提升，定义必须先于使用。
+  order.sort((a, b) => a.at - b.at);
+  return { pieces: order.map((o) => o.src), CLOSURE_NAMES: order.map((o) => o.name) };
+})();
+
+// ⚠ 生成期的**响亮失败**：抽取装置塌了必须在生成时就炸，
+//   否则产物会带着一个空的/缺件的清单去"全绿"（L2 的教训）。
+if (!pieces.length) throw new Error('抽取闭包为空 —— 抽取装置失效（SEED_FUNCS / grabBlock 坏了）');
+// 必需函数的地板：页面若把它们改名/删掉，这里立刻报，而不是等运行期 ReferenceError。
+const MUST_HAVE = ['num', 'fmtCount', 'fmtTokens', 'statsCardsEntries', 'statsCardsEntries2',
+  'renderStats', 'renderStatsReport', 'renderHealthBar', 'renderModelRank'];
+const missingMust = MUST_HAVE.filter((n) => !CLOSURE_NAMES.includes(n));
+if (missingMust.length) {
+  throw new Error('闭包里缺少必需函数：' + missingMust.join('、') + ' —— 页面结构变了？');
+}
 
 const header = `
 const fs = require('fs');
