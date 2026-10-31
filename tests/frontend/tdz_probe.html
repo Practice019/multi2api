@@ -3818,7 +3818,7 @@ let loginProvider = '';
       $('loginBody').innerHTML = `
         <div class="row" style="margin-bottom:10px">
           <button id="btnReopenAuth" type="button" class="primary"
-             style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:#fff;cursor:pointer;font-weight:600"
+             style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:var(--on-acc);cursor:pointer;font-weight:600"
              title="用无痕窗口重新打开本次授权链接">重新无痕打开</button>
           <button id="btnCopyAuth" type="button"
              style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
@@ -12162,7 +12162,30 @@ let multCatalogFailed = false;
       if (all) { growthAct(all.dataset.gclaimall, 'claim', '', all); return; }
     });
 
-    $('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
+    // refreshModelCatalog 模型目录面板的「刷新」—— 重载 iframe **并**清掉两张缓存。
+//
+// # 为什么不只是重载 iframe
+//   用户 2026-10-30 要求「模型目录应该替换掉可用模型」，入口合并成一个。但旧面板那个
+//   「强制刷新目录」按钮的能力（POST /admin/models/refresh + 清掉 /v1/models 与
+//   /admin/models/preview 两张 30 秒缓存）**不能跟着消失** —— 只重载不清缓存时，
+//   iframe 里 30 秒内仍会拿到旧目录，表现就是用户抱怨过的「点了刷新没反应」。
+//
+// # 为什么不直接复用下面那个按钮的 handler
+//   下面那个由 busyRun 包装（要有可见按钮、要显示运行中），而本函数从 iframe 面板的
+//   刷新按钮调用、还要负责重载 iframe；两者职责不同，绑在一起会把两条路径锁死。
+window.refreshModelCatalog = function () {
+  // 服务端缓存：失败不阻断刷新（界面照样重取一次，最坏是拿到 30 秒内的旧值）。
+  admin('/admin/models/refresh', { method: 'POST', body: '{}' }).catch(() => {});
+  // 外壳侧的两张缓存：与旧按钮同一口径，少清一张就会出现「刷新没生效」。
+  try {
+    lazyCache.drop('ep:/v1/models');
+    lazyCache.drop('ep:/admin/models/preview');
+  } catch (e) { /* 缓存层未就绪时忽略：只影响下面这次取数的快慢，不影响正确性 */ }
+  const f = document.getElementById('mdFrame');
+  if (f) { f.src = '/ui/models?t=' + Date.now(); }
+};
+
+$('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
       // 刷新按钮同时清掉两张缓存：模型列表（/v1/models）和倍率目录（/v3/config）。
       // 只清前者会让倍率停留在旧值，看起来像"刷新没生效"。
       await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
