@@ -148,6 +148,14 @@ func keyToToken(k *Key) (*store.Token, error) {
 		ModelLimitsEnabled: len(k.Models) > 0,
 		Group:              encodeGroups(k.Groups),
 	}
+	// 自动分组快照 → auto_groups 列。
+	//
+	// ⚠ 这里**必须**写：SaveToken 的 Select 清单里有 auto_groups（store/token.go:705），
+	//   本函数产出的 Token 就是那一条 UPDATE 的输入。不写 ⇒ 每次 flush 都把快照
+	//   刷成空串（用户配的「自定义自动分组」被静默擦掉，退回 inherit）。
+	if err := t.SetAutoGroups(k.AutoGroups); err != nil {
+		return nil, err
+	}
 	if t.ExpiredTime == 0 && k.sqlStatus == 0 {
 		t.ExpiredTime = -1 // 0 与 -1 都表示"永不"；库里统一写 -1，避免两种"永不"
 	}
@@ -191,6 +199,10 @@ func keyFromToken(t *store.Token) *Key {
 		k.Models = normalizeModels(strings.Split(t.ModelLimits, ","))
 	}
 	k.Groups = decodeGroups(t.Group)
+	// 自动分组快照（auto_groups 列）。坏 JSON 不当致命：与 TokenView.Masked 同口径 ——
+	// 宁可退回"继承全局配置"，也不要让整个管理台 500。
+	autoGroups, _ := t.GetAutoGroups()
+	k.AutoGroups = normalizeGroups(autoGroups)
 	k.ModelMap = decodeModelMap(t.ModelMap)
 	return k
 }

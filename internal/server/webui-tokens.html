@@ -1539,7 +1539,9 @@ header h1{letter-spacing:0}
 var PAGE_SIZE = 10;
 var ALL_CODES = [401, 403, 408, 429, 500, 502, 503, 504];
 var DEFAULT_CODES = [429, 500, 502, 503, 504];
-var state = { page: 1, total: 0, rows: [], editing: null, codes: DEFAULT_CODES.slice(), autoGroups: [], groups: [], groupsLoaded: false, busy: false };
+// groupsById：分组 ID → 分组名（拖拽块显示名字用；value 一律是 ID）。
+// 为空只影响显示（labelOfGroup 会退回显示原始引用），不影响提交。
+var state = { page: 1, total: 0, rows: [], editing: null, codes: DEFAULT_CODES.slice(), autoGroups: [], groups: [], groupsById: {}, groupsLoaded: false, busy: false };
 
 function $(id) { return document.getElementById(id); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
@@ -1718,8 +1720,10 @@ function renderCodes() {
 }
 function renderDrag(listId, arr) {
   $(listId).innerHTML = arr.map(function (g, i) {
-    return '<div class="dragitem" draggable="true" data-idx="' + i + '">' +
-      '<span class="grip">≡</span><span>' + esc(g) + '</span><span class="spacer"></span>' +
+    // 显示名字（labelOfGroup），title 里留原始引用 —— 悬空引用（分组已删）
+    // 显示出来的是一个 ID，用户需要能看到它、并知道它不是自己认得的那个分组。
+    return '<div class="dragitem" draggable="true" data-idx="' + i + '" title="' + esc(g) + '">' +
+      '<span class="grip">≡</span><span>' + esc(labelOfGroup(g)) + '</span><span class="spacer"></span>' +
       '<button type="button" data-rm="' + i + '">移除</button></div>';
   }).join('');
 }
@@ -1740,7 +1744,8 @@ function syncVisibility() {
   $('nameHint').textContent = '最长 ' + limit + ' 字节' + (limit === 43 ? '（创建多条时为后缀留位置）' : '');
   $('expHint').textContent = $('f-exp').value ? '到期后此令牌不可用。' : '默认永不（提交 expired_time = -1）。';
 }
-// groupNamesOf 从**本仓** GET /admin/groups 的响应里取候选分组名。
+// groupOptionsOf 从**本仓** GET /admin/groups 的响应里取候选分组：
+// **value = 分组 ID，label = 分组名**。
 //
 // # 为什么是 /admin/groups 而不是 /api/group/（T89 修的根因）
 // 旧代码打的是 `GET /api/group/` —— 那是 **hyxapi 的路径**，本仓没有（实测 404）。
@@ -1751,10 +1756,23 @@ function syncVisibility() {
 //   ① {enabled, groups:[{id,name,…}]}  ← 本仓当前形状
 //   ② {items:[…]}                     ← 将来若改成分页/统一信封
 //   ③ 裸数组 [ … ]                    ← 更早的写法
-// 取值一律取 **name**：令牌的 Group 存的是**分组名**（主脑 2026-10-27 裁决：
-// apikey 存分组 ID、token 与 channels 存分组名，匹配由后端做）。
+//
+// # 2026-11-01：取值从**分组名**改成**分组 ID**（本页一处真实的断裂）
+//
+// 本页原来把分组名当 value 提交，而另外两处用的都是 ID：
+//   · webui.html 的 API Key 弹窗：`data-akg="g.id"`，提交的就是 ID
+//   · P3.5 迁移（apikey/migrate.go:178）：写进去的是 createGroup 返回的 ID
+// 两种口径并存，而判定链只按 ID 查 groupstore ⇒ 本页建/存的令牌
+// 「受限且并集为空」。实测（demo 7860，令牌 id=3：「有序分组」选了一个分组）：
+//
+//   GET /v1/models ⇒ {"data":[],"object":"list"}
+//   而那个分组里有 7 个模型（auths/groups.json: g-4d283c8f）。
+//
+// 现在统一成：**存 ID、显示名字**（改名不断链，见 apikey.go:130 的论证）。
+// 两侧都有兜底：后端写路径再归一一道（admin/grouprefs.go），读路径同时认
+// ID 与名字（groupstore.GetRef）—— 所以存量按名字存的行不会因本页升级而失效。
 // 返回 null 表示**形状不认识** —— 与「确实没有分组」（返回空数组）必须区分开。
-function groupNamesOf(payload) {
+function groupOptionsOf(payload) {
   var arr = null;
   if (Array.isArray(payload)) arr = payload;
   else if (payload && Array.isArray(payload.groups)) arr = payload.groups;
@@ -1763,10 +1781,27 @@ function groupNamesOf(payload) {
   var out = [];
   for (var i = 0; i < arr.length; i++) {
     var one = arr[i];
-    var name = (typeof one === 'string') ? one : (one && (one.name || one.group || one.id));
-    if (name) out.push(String(name));
+    if (typeof one === 'string') {
+      // 裸数组形态：字符串只可能是名字，ID 与名字都用它。
+      if (one) out.push({ id: String(one), name: String(one) });
+      continue;
+    }
+    if (!one) continue;
+    var name = one.name || one.group || '';
+    var id = one.id || name;
+    if (id) out.push({ id: String(id), name: String(name || id) });
   }
   return out;
+}
+
+// labelOfGroup 把一条**引用**翻成人看的名字（拖拽块里显示的就是它）。
+//
+// 引用可能是 ID（新写路径）也可能是名字（存量行）：ID 查表，名字原样显示。
+// 查不到（分组已被删的悬空引用）也原样显示 —— 让用户看见那条引用还在，
+// 而不是把它藏起来（藏起来会让人以为自己没配过分组）。
+function labelOfGroup(ref) {
+  var s = String(ref == null ? '' : ref);
+  return state.groupsById[s] || s;
 }
 
 function showGroupBanner(text, bad) {
@@ -1779,18 +1814,36 @@ function showGroupBanner(text, bad) {
 // renderGroupOptions 同时铺满两个选择器：
 //   f-group-pick     = 有序分组（manual 模式，顺序即优先级）
 //   f-autogroup-pick = 自定义自动分组（auto + custom）
-// 空列表不再「默默只留一个 default」，而是**明确空态文案**（去『分组』面板创建）。
-function renderGroupOptions(names) {
-  if (!names.length) {
-    var only = '<option value="default">default</option>';
-    $('f-group-pick').innerHTML = only;
-    $('f-autogroup-pick').innerHTML = only;
-    showGroupBanner('还没有分组 —— 请先去左侧「分组」面板创建，再回来分配优先级。当前只能选 default。', false);
+//
+// ⚠ 2026-11-01：空列表**不再**塞一个假选项 `default`。
+//
+//   那个 default 不是本仓的任何分组（groupstore 里没有它），选它提交上去等于
+//   把令牌指向一个不存在的分组 ⇒ 并集为空 ⇒ 这把令牌一个模型都不许用，
+//   而界面上看起来"我明明选了一个分组"。宁可不给选项 + 说清怎么办。
+//
+//   顺带把「不选 = 不限制」这条也说清楚 —— 它是存量 key 的默认形态，
+//   用户最容易误解成"空 = 一个都不许"。
+function renderGroupOptions(list) {
+  // 名字表给 labelOfGroup 用（拖拽块显示名字、value 用 ID）。
+  state.groupsById = {};
+  list.forEach(function (g) { state.groupsById[g.id] = g.name; });
+  if (!list.length) {
+    $('f-group-pick').innerHTML = '';
+    $('f-autogroup-pick').innerHTML = '';
+    showGroupBanner('还没有分组：请先去左侧「分组」面板创建，再回来分配优先级。不选分组 = 不限制（全部模型）；「有序分组」模式至少要选一个。', false);
     return;
   }
-  var opts = names.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('');
+  // value = 分组 ID（存这个才改名不断链），label = 分组名（人看这个）。
+  var opts = list.map(function (g) {
+    return '<option value="' + esc(g.id) + '">' + esc(g.name) + '</option>';
+  }).join('');
   $('f-group-pick').innerHTML = opts;
   $('f-autogroup-pick').innerHTML = opts;
+  // 重画已选清单：openDrawer 是先画 chips 再异步取 /admin/groups 的，所以
+  // 那一刻还没有"ID → 名字"表 —— 拿到表之后必须回来把显示补正，
+  // 否则用户看到的是一串 g-xxxx（而它其实是刚才选的那个分组）。
+  renderDrag('f-groups', state.groups);
+  renderDrag('f-autogroups', state.autoGroups);
   // ⚠ 取到候选后必须**清掉上一次的提示条**（T89 探针抓到的第二个真缺陷）：
   //   否则「先空后有人建了分组」时，选项已经正确了、横幅还挂着『还没有分组』——
   //   一条过期的警告比没有警告更误导。
@@ -1805,17 +1858,17 @@ function renderGroupOptions(names) {
 //   `/admin/groups` 是本地只读调用，重取的成本远低于让用户困惑。
 function loadGroups() {
   api('GET', '/admin/groups').then(function (data) {
-    var names = groupNamesOf(data);
-    if (names === null) {
-      renderGroupOptions(['default']);
+    var list = groupOptionsOf(data);
+    if (list === null) {
+      renderGroupOptions([{ id: 'default', name: 'default' }]);
       showGroupBanner('分组接口返回了无法识别的形状（GET /admin/groups）—— 候选列表可能不全，请报给维护者。', true);
       return;
     }
-    renderGroupOptions(names);
+    renderGroupOptions(list);
   }).catch(function (e) {
     // ⚠ 不再静默降级：把**路径与状态码**直接告诉用户。
     // 保留 default 只是为了让页面仍可用，但必须让人知道候选列表没取到。
-    renderGroupOptions(['default']);
+    renderGroupOptions([{ id: 'default', name: 'default' }]);
     showGroupBanner('候选分组没取到：GET /admin/groups ⇒ ' + (e && e.status ? ('HTTP ' + e.status) : '网络/解析错误')
       + '。下面只剩 default，**这不是「你没有分组」**。', true);
   });

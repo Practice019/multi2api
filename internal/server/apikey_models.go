@@ -141,7 +141,7 @@ func (h *Handler) allowedModelsForRequest(r *http.Request) ([]string, bool) {
 		return nil, false
 	}
 
-	// ── ① 分组优先（P2）：key.Groups 非空 ⇒ 允许范围 = 这些分组的模型并集 ──
+	// ── ① 分组优先（P2）：分组作用域非空 ⇒ 允许范围 = 这些分组的模型并集 ──
 	//
 	// # 为什么分组排在白名单前面
 	//
@@ -151,6 +151,16 @@ func (h *Handler) allowedModelsForRequest(r *http.Request) ([]string, bool) {
 	//
 	// 顺序定成"分组优先"而不是"交集"，是因为交集要多维护一处配置 ——
 	// 那正是 Q3 否决方案 A 的理由。分组非空时白名单**不参与判定**。
+	//
+	// # 2026-11-01：作用域的定义收敛到 GroupRefsOf（修两处实测的错）
+	//
+	// ① 令牌级「自动分组·自定义」（group="[]" + auto_groups 非空）以前掉进
+	//    "Groups 为空 ⇒ 不限制"，回**全部**模型（实测 346 个）；
+	// ② 反向的那一头的引用可能是**分组名**（界面就是这么存的），而解析只认 ID
+	//    ⇒ 并集为空 ⇒ 一个模型都不许用（实测回空列表）。
+	//
+	// 现在 GroupRefsOf 一处定义"作用域是什么"，groupstore.GetRef 一处定义
+	// "引用怎么解"，本条与别名表、引用计数全部从这两个派生。
 	groups, groupModels, ok := h.cfg.APIKeys.GroupModelsOf(kid)
 	if !ok {
 		// key 在鉴权之后被删掉了（并发窗口）。按"不限制"处理而不是拒绝 ——
@@ -507,16 +517,30 @@ func (h *Handler) aliasTableForRequest(r *http.Request) map[string][]string {
 	if kid == "" {
 		return nil
 	}
-	groups, _ := h.cfg.APIKeys.GroupsOf(kid)
+	// ⚠ 2026-11-01：来源与判定链统一到 GroupRefsOf（Groups 非空用它，否则用自动
+	//   分组快照）。原来这里读 GroupsOf —— "自动分组·自定义"那把令牌永远拿不到
+	//   别名表，表现是"分组里配的对外名不生效"（而模型判定那边已经收窄了）。
+	groups, _ := h.cfg.APIKeys.GroupRefsOf(kid)
 	if len(groups) == 0 {
 		return nil
 	}
-	ids := append([]string(nil), groups...)
+	// 排序的键用**解析后的分组 ID**，不是用户填的引用：引用可能是名字，
+	// 按名字排序会让"同一个分组写成 ID 或名字"得到两种拼接顺序（见下面那段
+	// 「为什么是字典序」）。解析不出来的（分组已删）原样保留 —— 它们不会贡献
+	// 任何别名，但保留能让顺序对所有调用方都稳定。
+	ids := make([]string, 0, len(groups))
+	for _, ref := range groups {
+		if g, ok := h.cfg.Groups.GetRef(ref); ok && g != nil {
+			ids = append(ids, g.ID)
+			continue
+		}
+		ids = append(ids, ref)
+	}
 	sort.Strings(ids)
 	var out map[string][]string
 	seen := map[string]map[string]bool{} // 对外名 → 已收的内部名集合（跨分组去重）
 	for _, gid := range ids {
-		g, ok := h.cfg.Groups.Get(gid)
+		g, ok := h.cfg.Groups.GetRef(gid)
 		if !ok || g == nil || len(g.ModelMap) == 0 {
 			continue
 		}

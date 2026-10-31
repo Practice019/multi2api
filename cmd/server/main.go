@@ -1401,7 +1401,13 @@ func main() {
 	// 的样子（group 字段被忽略），而不是「一把 key 一个模型都不许用」。
 	// 后者是最难排查的失效形态，所以降级方向必须是"更宽松"而不是"更严格"。
 	apiKeysStore.SetGroupModels(func(groupID string) []string {
-		g, ok := groupsStore.Get(groupID)
+		// ⚠ GetRef（ID 或 名字），不是 Get（只认 ID）。
+		//
+		// 2026-11-01 修：令牌抽屉的分组多选器把**分组名**当 value 发上来，而这里
+		// 原来只按 ID 查 ⇒ 未命中 ⇒ 并集为空 ⇒「受限且为空」⇒ 那把令牌一个模型
+		// 都不许用（实测 demo 7860 令牌 id=3：/v1/models 回空列表，而分组里明明
+		// 有 7 个模型）。绑定规则只有一份实现，在 groupstore/ref.go。
+		g, ok := groupsStore.GetRef(groupID)
 		if !ok || g == nil {
 			// 分组被删了：返回 nil（该分组不贡献任何模型）。
 			//

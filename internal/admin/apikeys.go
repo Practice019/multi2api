@@ -146,6 +146,13 @@ func (h *Handler) apiKeysCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
+	// 分组引用归一成 ID（与 /admin/tokens 同一入口，见 grouprefs.go）。
+	if groups, msg := h.canonicalGroupRefs(body.Groups); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	} else {
+		body.Groups = groups
+	}
 	// T8：新 key 的归属 = 当前身份。
 	//   · 成员建的 ⇒ 归他（此后他只能看见/管这一把）
 	//   · 管理员建的 ⇒ owner="" （存量语义：空 = 管理员所有）
@@ -328,6 +335,14 @@ func (h *Handler) apiKeysUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if !h.requireKeyAccess(w, r, body.ID) {
 		return
+	}
+	// 分组引用归一成 ID。⚠ 保留三态：nil（字段缺失）= 不改，[] = 清空，
+	// 非空 = 整体替换 —— 见 canonicalGroupRefs 的三态说明。
+	if groups, msg := h.canonicalGroupRefs(body.Groups); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	} else {
+		body.Groups = groups
 	}
 	if err := s.UpdateWithGroups(body.ID, body.Limit, body.RPM, body.Models, body.Groups, body.ModelMap); err != nil {
 		writeStoreError(w, err)

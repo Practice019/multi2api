@@ -130,17 +130,26 @@ func (s *Store) UnionGroupModels(groups []string) []string {
 	return out
 }
 
-// GroupModelsOf 取一把 key 的分组列表与它们的模型并集。
+// GroupModelsOf 取一把 key **生效的分组引用**与它们的模型并集。
 //
 // 返回：
 //
-//	groups   该 key 的分组 ID（空 = 这把 key 不受分组限制）
+//	groups   该 key 生效的分组引用（空 = 这把 key 不受分组限制）
 //	models   groups 里所有分组的模型并集（groups 为空时也是 nil）
 //	ok       key 是否存在
 //
 // ⚠ 三个返回值都要用：只看 models 无法区分"没分组"与"分组里没模型"。
+//
+// # 2026-11-01：来源从 Key.Groups 改成 GroupRefsOf
+//
+// 原来这里直接读 GroupsOf，于是"自动分组·自定义"（Group="[]" + AutoGroups 非空）
+// 那把令牌掉进"Groups 为空 ⇒ 不限制"分支 —— 实测（demo 7860，令牌 id=4）：
+// /v1/models 回全部 346 个模型，而它只该看见分组里的 7 个。
+//
+// 现在作用域只有一处定义（GroupRefsOf）：Groups 非空用它、否则用自动分组快照、
+// 都空才是不限制。判定链、别名表、引用计数全部从它派生。
 func (s *Store) GroupModelsOf(id string) (groups, models []string, ok bool) {
-	groups, ok = s.GroupsOf(id)
+	groups, ok = s.GroupRefsOf(id)
 	if !ok || len(groups) == 0 {
 		return groups, nil, ok
 	}

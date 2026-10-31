@@ -420,34 +420,23 @@ func (h *Handler) groupRefIndex(groups []*groupstore.Group) groupRefIndex {
 		channels: map[string][]groupRefChannel{},
 		tokens:   map[string][]groupRefToken{},
 	}
-	byID := make(map[string]bool, len(groups))
-	byName := make(map[string]string, len(groups))
-	for _, g := range groups {
-		if g == nil {
-			continue
-		}
-		byID[g.ID] = true
-		if _, dup := byName[g.Name]; !dup {
-			byName[g.Name] = g.ID
-		}
-	}
 	// canonical 把一条记录写下的若干分组标识归一化成去重后的**分组 ID** 列表。
-	// 不认识的标识（组已删的悬空引用）不归属任何分组 —— 那是 P5 一致性端点的事。
+	//
+	// ⚠ 2026-11-01：规则本身搬进了 groupstore.ResolveRef —— 这里原来自己写了一份
+	// "名字也认"，而**判定链那边没写**，于是同一条引用在引用计数里认得、在模型
+	// 判定里认不得（实测：令牌指向"666 的模型"，/v1/models 回空列表）。
+	// 现在只有一份实现，本函数只负责"不认识的标识丢掉"（那是 P5 一致性端点的事）。
+	//
+	// 为什么不逐条调 groupstore.GetRef：那是 N 次加锁 + N 次全表扫（引用计数要处理
+	// 全部凭据 × 全部引用）。groups 已经在这儿了，一次线性扫即可 —— 与 ResolveRef
+	// 用的是同一份规则、同一份顺序（ID 优先，其次名字）。
 	canonical := func(refs []string) []string {
 		out := make([]string, 0, len(refs))
 		seen := map[string]bool{}
 		for _, raw := range refs {
-			s := strings.TrimSpace(raw)
-			if s == "" {
+			id, ok := groupstore.ResolveRef(groups, raw)
+			if !ok {
 				continue
-			}
-			id := s
-			if !byID[id] {
-				mapped, ok := byName[s]
-				if !ok {
-					continue
-				}
-				id = mapped
 			}
 			if seen[id] {
 				continue

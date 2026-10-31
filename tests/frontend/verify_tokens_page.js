@@ -462,12 +462,16 @@ const MEASURE_TOKENS = '(function(){'
       ok(groupCount > 0, '[L1] GET /admin/groups 至少回一个分组（实际 ' + groupCount + '）');
       await ev('document.getElementById(\'tkFrame\').contentDocument.getElementById(\'btnNew\').click()');
       await sleep(1500);
-      const picks = JSON.parse(await ev('JSON.stringify((function(){var d=document.getElementById(\'tkFrame\').contentDocument;function names(id){var s=d.getElementById(id);if(!s)return null;return Array.prototype.map.call(s.options,function(o){return o.value;});}var b=d.getElementById(\'groupBanner\');return {g:names(\'f-group-pick\'),a:names(\'f-autogroup-pick\'),banner:b?b.textContent.trim():\'\'};})())'));
+      // ⚠ 2026-11-01：这里同时看 value 与 label —— 它们是**两件不同的事**。
+      //   value 必须是分组 ID（存名字会让判定链查不到 ⇒ 令牌一个模型都不许用，
+      //   实测 demo 7860 令牌 id=3 回空列表），label 必须是分组名（人看的）。
+      const picks = JSON.parse(await ev('JSON.stringify((function(){var d=document.getElementById(\'tkFrame\').contentDocument;function info(id){var s=d.getElementById(id);if(!s)return null;return {values:Array.prototype.map.call(s.options,function(o){return o.value;}),labels:Array.prototype.map.call(s.options,function(o){return String(o.textContent).trim();})};}var b=d.getElementById(\'groupBanner\');return {g:info(\'f-group-pick\'),a:info(\'f-autogroup-pick\'),banner:b?b.textContent.trim():\'\'};})())'));
       console.log('      f-group-pick     = ' + JSON.stringify(picks.g));
       console.log('      f-autogroup-pick = ' + JSON.stringify(picks.a));
-      ok(Array.isArray(picks.g) && picks.g.indexOf(uniqGroup) >= 0, '[L1] 夹具分组出现在 f-group-pick（有序分组）：' + JSON.stringify(picks.g));
-      ok(Array.isArray(picks.a) && picks.a.indexOf(uniqGroup) >= 0, '[L1] 夹具分组出现在 f-autogroup-pick（自定义自动分组）：' + JSON.stringify(picks.a));
-      ok(Array.isArray(picks.g) && picks.g.length >= groupCount, '[L1] f-group-pick options 数(' + (picks.g ? picks.g.length : 0) + ') ≥ 分组总数(' + groupCount + ') —— 防「只剩一个 default」退化');
+      ok(!!picks.g && Array.isArray(picks.g.labels) && picks.g.labels.indexOf(uniqGroup) >= 0, '[L1] 夹具分组按**名字**出现在 f-group-pick 的选项文字里（有序分组）：' + JSON.stringify(picks.g && picks.g.labels));
+      ok(!!picks.a && Array.isArray(picks.a.labels) && picks.a.labels.indexOf(uniqGroup) >= 0, '[L1] 同上（f-autogroup-pick，自定义自动分组）：' + JSON.stringify(picks.a && picks.a.labels));
+      ok(!!picks.g && picks.g.values.every(function (v) { return /^g-[0-9a-z]+$/.test(v); }), '[L1] f-group-pick 的 value 全部是**分组 ID**：' + JSON.stringify(picks.g && picks.g.values) + ' —— 存分组名会让 groupstore.Get(name) 未命中（受限且并集为空 ⇒ 这把令牌一个模型都不许用）');
+      ok(!!picks.g && picks.g.values.length >= groupCount, '[L1] f-group-pick options 数(' + (picks.g ? picks.g.values.length : 0) + ') ≥ 分组总数(' + groupCount + ') —— 防「只剩一个 default」退化');
       ok((picks.banner || '').length === 0, '[L1] 候选取到了就不该有提示条（实际 ' + JSON.stringify(picks.banner) + '）');
       await ev('document.getElementById(\'tkFrame\').contentDocument.getElementById(\'btnCancel\').click()');
       await sleep(400);

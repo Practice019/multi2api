@@ -285,6 +285,20 @@ func (h *Handler) tokensCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// 分组引用归一成 ID（界面把**分组名**发上来；见 grouprefs.go 的文件注释）。
+	// 放在校验之前：校验看到的就是最终要落库的那份值。
+	if groups, msg := h.canonicalGroupRefs(req.Groups); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	} else {
+		req.Groups = groups
+	}
+	if auto, msg := h.canonicalGroupRefs(req.AutoGroups); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	} else {
+		req.AutoGroups = auto
+	}
 	req.Count = normalizeCount(req.Count)
 	if msg := validateTokenCreate(&req); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
@@ -337,6 +351,20 @@ func (h *Handler) tokensUpdate(w http.ResponseWriter, r *http.Request) {
 		tok.Status = req.Status
 		writeJSON(w, http.StatusOK, tok.Masked())
 		return
+	}
+	// 引用归一（同创建路径）。⚠ 放在 status_only 快车道**之后**：那条路只改状态，
+	// 不该因为一个陈旧的分组引用就把"禁用这把令牌"也拦下来。
+	if groups, msg := h.canonicalGroupRefs(req.Groups); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	} else {
+		req.Groups = groups
+	}
+	if auto, msg := h.canonicalGroupRefs(req.AutoGroups); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	} else {
+		req.AutoGroups = auto
 	}
 	if msg := applyTokenUpdate(tok, &req); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)

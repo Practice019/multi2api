@@ -145,6 +145,29 @@ type Key struct {
 	// 判定入口只有一处：server.allowedModelsForRequest。
 	Groups []string `json:"groups,omitempty"`
 
+	// AutoGroups 令牌级**自动分组快照**（空 = 继承全局配置）—— 2026-11-01 修。
+	//
+	// # 它为什么必须出现在这条判定链上
+	//
+	// 令牌的"自动分组"有两种形态（hyxapi 对等，见 store.UsesAutoGroups）：
+	//
+	//	Group == "[]" 且 AutoGroups 非空 → custom：只用快照里这些分组
+	//	Group == "[]" 且 AutoGroups 为空 → inherit：跟全局配置走（= 不限制）
+	//
+	// 而判定链只读本结构体。快照不在内存态里的时候，"自动分组 + 自定义"这把令牌
+	// 会掉进"Groups 为空 ⇒ 不限制"那条分支 —— 实测（demo 7860，令牌 id=4）：
+	//
+	//	group="[]" auto_groups=["666 的模型"] → /v1/models 回**全部 346 个**模型，
+	//	而它只该看见那个分组里的 7 个。
+	//
+	// # 它同时是防数据丢失的一环
+	//
+	// store.SaveToken 会写 auto_groups 列（token.go:705 的 Select 清单里有它），
+	// 而 apikey 的写回（flushSQLLocked → upsertLocked → SaveToken）走的就是它。
+	// 快照不在内存态里 ⇒ 任何一次 flush（改名、prune、迁移）都会把用户配好的
+	// 自动分组**擦成空串**（= 悄悄退回 inherit，权限被放大，界面上看不出来）。
+	AutoGroups []string `json:"auto_groups,omitempty"`
+
 	// MigratedToGroups 这把 key 的 Models 白名单是否已经迁移到分组（P3.5，幂等标记）。
 	//
 	// # 为什么"Groups 非空就不迁"这个天然条件还不够
@@ -218,6 +241,12 @@ type View struct {
 	//   本文件已经踩过一次（ModelMap 曾漏在这里，用户报"设置了但编辑时是空的"）。
 	//   新加字段时必须同时改 Key / View / List / saveLocked 四处。
 	Groups []string `json:"groups,omitempty"`
+	// AutoGroups 令牌级自动分组快照（空 = 继承全局配置）。
+	//
+	// ⚠ 与 Groups 一样：**List 里漏掉这一行，前端就永远回填不出来**，而
+	//   /admin/tokens 的令牌抽屉正是靠它显示"我上次选的自动分组是哪几个"。
+	//   本文件已经踩过一次同类事故（见上面 Groups 的注释）。
+	AutoGroups []string `json:"auto_groups,omitempty"`
 	// ModelMap 模型对外名映射（对外名 → 内部名，空 = 不做映射）。
 	// 管理界面据此展示"这个内部模型对外叫什么"。
 	ModelMap map[string]string `json:"model_map,omitempty"`
@@ -460,6 +489,74 @@ func (s *Store) GroupsOf(id string) ([]string, bool) {
 	return out, true
 }
 
+// AutoGroupsOf 返回一把 key 的**自动分组快照**，以及这把 key 是否存在。
+//
+// 空切片 = 没有自定义快照（自动分组处于 inherit：跟全局配置走）。
+// 与 GroupsOf 的三个返回值语义完全同构，理由也同一条：调用方必须能区分
+// 「没有快照」与「根本没有这把 key」。
+func (s *Store) AutoGroupsOf(id string) ([]string, bool) {
+	s.maybeAttachSQL()
+	if s == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, false
+	}
+	if len(k.AutoGroups) == 0 {
+		return nil, true
+	}
+	out := make([]string, len(k.AutoGroups))
+	copy(out, k.AutoGroups)
+	return out, true
+}
+
+// GroupRefsOf 取一把 key **生效的分组引用**（判定链与别名表都从这里取）。
+//
+// # 合并规则（精确到顺序）
+//
+//	Groups 非空                → Groups（有序分组模式；顺序 = 优先级）
+//	Groups 空 + AutoGroups 非空 → AutoGroups（自动分组·自定义）
+//	两者都空                    → nil（不限制：inherit 的自动分组 / 老 key）
+//
+// # 为什么"两者都空 = 不限制"是对的，而不是"一个都不许"
+//
+// 「自动分组」的默认语义是"从**全部可用分组**里轮询"（hyxapi :91-94，界面文案
+// 「按可用分组轮询」）。全部可用分组 = 全部模型 ⇒ 不限制。把它读成"受限且为空"
+// 会让每一把默认配置的令牌都无法调用任何模型 —— 那是最糟的失效形态。
+//
+// ⚠ 这里是**唯一**一处决定"这把 key 的分组作用域是什么"的地方。准入
+// （allowedModelsForRequest）、别名表（aliasTableForRequest）、目录收窄
+// （filterModelsForRequest）都从它派生 —— 各写一份必然分叉，而分叉的表现是
+// "列表里看得见、调了却 403"（本仓为此专门踩过一次）。
+//
+// 返回的引用可能是**ID 也可能是分组名**（存量数据两种都有，见 groupstore/ref.go）：
+// 本函数只负责"取出来"，解析归 groupstore.GetRef/ResolveRef。
+func (s *Store) GroupRefsOf(id string) ([]string, bool) {
+	s.maybeAttachSQL()
+	if s == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return nil, false
+	}
+	refs := k.Groups
+	if len(refs) == 0 {
+		refs = k.AutoGroups
+	}
+	if len(refs) == 0 {
+		return nil, true
+	}
+	out := make([]string, len(refs))
+	copy(out, refs)
+	return out, true
+}
+
 // normalizeGroups 规整分组 ID 列表：去空白、丢空项、去重（**保序**）。
 //
 // 与 normalizeModels 的唯一区别是**不排序**：分组的顺序对用户有意义
@@ -564,6 +661,10 @@ func (s *Store) List() []View {
 			OwnerID: k.OwnerID,
 			Models:  append([]string(nil), k.Models...),
 			Groups:  append([]string(nil), k.Groups...),
+			// AutoGroups 同一条纪律（"新加字段必须同时改 Key/View/List/saveLocked 四处"）：
+			// 漏掉它 ⇒ 前端打开令牌抽屉时自动分组那一栏永远是空的，
+			// 保存后把用户配的快照擦掉 —— 正是 2026-11-01 用户报的那件事。
+			AutoGroups: append([]string(nil), k.AutoGroups...),
 			// ⚠ 2026-10-21 修：原来这里**没有** ModelMap —— List 构造 View 时漏了它，
 			//   View.ModelMap 恒为 nil，于是前端拿到 `k.model_map === undefined`，
 			//   编辑弹窗回填成 0 行。
