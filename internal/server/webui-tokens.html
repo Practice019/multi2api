@@ -1662,18 +1662,28 @@ function askDelete(row) {
 function openDrawer(row) {
   state.editing = row || null;
   state.codes = (row && row.group_switch_status_codes && row.group_switch_status_codes.length) ? row.group_switch_status_codes.slice() : DEFAULT_CODES.slice();
-  state.autoGroups = [];
-  state.groups = [];
+  // ⚠ 2026-11-01 真缺陷修复（用户报「保存按钮，它没有真的保存自动分组配置」）：
+  //   原先这两行只是**清空**，下面还把 f-automode 硬写成 'inherit' —— 从不从 row 还原。
+  //   而那时后端也不下发 auto_groups / auto_group_mode（TokenView 缺字段）⇒ 抽屉里
+  //   永远是「继承 + 空列表」，一保存就把已存的自动分组配置**覆盖成空**（存不住）。
+  //   现在后端已回读（store.TokenView 的 AutoGroups/AutoGroupMode），这里跟着还原。
+  state.autoGroups = (row && Array.isArray(row.auto_groups)) ? row.auto_groups.slice() : [];
+  state.groups = (row && Array.isArray(row.groups)) ? row.groups.slice() : [];
   $('drawerTitle').textContent = row ? '编辑令牌' : '新建令牌';
   $('w-count').className = 'field' + (row ? ' hidden' : '');
   $('partial').className = 'partial hidden';
   var gb = $('groupBanner'); if (gb) gb.className = 'partial hidden';
   $('f-name').value = row ? (row.name || '') : '';
   $('f-count').value = '1';
-  var automatic = row ? !!row.group : false;
+  // 自动/有序的判据与后端 UsesAutoGroups 同源：groups 为空、或恰好 ['auto'] ⇒ 自动分组。
+  // ⚠ 原先写的是 !!row.group —— 那是**编码串**（如 '[]'），恒为真 ⇒ 每个令牌在编辑时
+  //   都被当成「自动分组」，与它真实策略无关（同一次缺陷的另一个面）。
+  var automatic = !row || !Array.isArray(row.groups) || row.groups.length === 0
+    || (row.groups.length === 1 && row.groups[0] === 'auto');
   $('f-mode-auto').checked = automatic || !row;
   $('f-mode-manual').checked = !!(row && !automatic);
-  $('f-automode').value = 'inherit';
+  // 后端回读的 auto_group_mode（inherit/custom）；缺失时退回 inherit（= 继承全局配置）
+  $('f-automode').value = (row && row.auto_group_mode) || 'inherit';
   $('f-cross').checked = !!(row && row.cross_group_retry);
   $('f-retry').value = String((row && row.group_switch_retry_count) || 0);
   $('f-unlimited').checked = row ? !!row.unlimited_quota : true;
