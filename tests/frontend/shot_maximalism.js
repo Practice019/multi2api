@@ -32,6 +32,10 @@ const OUT = path.resolve(__dirname, '..', '..', '.task', 'maximalism-v3', 'shots
         await shot('accounts-' + theme + '.png');
         await showPanel(ev, 'logs', 1200);
         await shot('logs-' + theme + '.png');
+        // 2026-11-01：用户报「系统状态标签页样式还是有点难看」⇒ 把状态页也纳入
+        // 这套目视证据（这份脚本的定位就是「改配色/字体/描边之后唯一的验收方式是看图」）。
+        await showPanel(ev, 'status', 1800);
+        await shot('status-' + theme + '.png');
       }
       await ev('window.__wb2api__.setThemePref("system")');
     });
