@@ -377,6 +377,16 @@ type TokenView struct {
 	GroupSwitchRetryCount int      `json:"group_switch_retry_count"`
 	Groups                []string `json:"groups"`
 	GroupSwitchCodes      []int    `json:"group_switch_status_codes"`
+	// AutoGroups / AutoGroupMode：自动分组配置的**回读**（2026-11-01 修真缺陷）。
+	//
+	// 为什么必须下发：这两个字段原先只有**写**路径存在 —— AutoGroups 列在模型上标了
+	// json:"-"（本文件 :61），TokenView 也不含它 ⇒ 前端打开「编辑令牌」时无从还原，
+	// 只能硬写 inherit + 空列表，于是**一保存就把已存的自动分组配置覆盖成空**
+	// （用户报：「保存按钮，它没有真的保存自动分组配置 不会保存啊」）。
+	//
+	// 口径与 SetAutoGroups/UsesAutoGroups 是同一份事实：快照非空 ⇒ custom，否则 inherit。
+	AutoGroups    []string `json:"auto_groups"`
+	AutoGroupMode string   `json:"auto_group_mode"`
 }
 
 // Masked 转成对外视图（Key 掩码；Groups/StatusCodes 给解码值，不给落库串）。
@@ -386,6 +396,13 @@ func (t *Token) Masked() *TokenView {
 	}
 	copyTok := *t
 	copyTok.NormalizeGroupPolicy()
+	// 自动分组快照解码。失败不致命：按「没有自定义、走继承」处理 —— 与写路径里
+	// SetAutoGroups(nil) 的语义一致（宁可退回继承，也不要让整次渲染失败）。
+	autoGroups, _ := copyTok.GetAutoGroups()
+	autoMode := "inherit"
+	if len(autoGroups) > 0 {
+		autoMode = "custom"
+	}
 	return &TokenView{
 		ID: copyTok.ID, UserID: copyTok.UserID, Key: copyTok.MaskedKey(), Status: copyTok.Status,
 		Name: copyTok.Name, CreatedTime: copyTok.CreatedTime, AccessedTime: copyTok.AccessedTime,
@@ -393,6 +410,7 @@ func (t *Token) Masked() *TokenView {
 		ModelLimitsEnabled: copyTok.ModelLimitsEnabled, ModelLimits: copyTok.ModelLimits, AllowIps: copyTok.AllowIps, AllowUserQuotaQuery: copyTok.AllowUserQuotaQuery,
 		UsedQuota: copyTok.UsedQuota, Group: copyTok.Group, CrossGroupRetry: copyTok.CrossGroupRetry,
 		GroupSwitchRetryCount: copyTok.GroupSwitchRetryCount, Groups: copyTok.Groups, GroupSwitchCodes: copyTok.GroupSwitchCodes,
+		AutoGroups: autoGroups, AutoGroupMode: autoMode,
 	}
 }
 

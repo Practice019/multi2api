@@ -433,3 +433,40 @@ func TestTokenAllowUserQuotaQuery(t *testing.T) {
 		t.Fatal("关回去没生效（零值写不进）")
 	}
 }
+
+// TestTokenViewExposesAutoGroups —— 自动分组配置的**回读口子**不许再丢。
+//
+// 2026-11-01 用户报：「保存按钮，它没有真的保存自动分组配置 不会保存啊」。
+// 根因是三处叠加：① store.Token.AutoGroups 标了 json:"-"（模型层不序列化）；
+// ② 对外视图 TokenView 不含 auto_groups/auto_group_mode ⇒ /admin/tokens 永不返回；
+// ③ 前端抽屉无源可还原，只能硬写 inherit + 空列表 ⇒ 一保存就把已存配置覆盖成空。
+// 这是一类很容易复发的缺陷（写路径一直好用、读路径静默缺字段），所以钉在这里：
+//   快照非空 ⇒ custom + 原样返回；快照空 ⇒ inherit + 空。
+func TestTokenViewExposesAutoGroups(t *testing.T) {
+	tok := &Token{ID: 1, Name: "x"}
+	if err := tok.SetAutoGroups([]string{"a", "b"}); err != nil {
+		t.Fatalf("SetAutoGroups: %v", err)
+	}
+	v := tok.Masked()
+	if v == nil {
+		t.Fatal("Masked 返回 nil")
+	}
+	if v.AutoGroupMode != "custom" {
+		t.Errorf("非空快照应为 custom，得到 %q", v.AutoGroupMode)
+	}
+	if len(v.AutoGroups) != 2 || v.AutoGroups[0] != "a" || v.AutoGroups[1] != "b" {
+		t.Errorf("自动分组应原样回读，得到 %v", v.AutoGroups)
+	}
+
+	empty := &Token{ID: 2, Name: "y"}
+	if err := empty.SetAutoGroups(nil); err != nil {
+		t.Fatalf("SetAutoGroups(nil): %v", err)
+	}
+	v2 := empty.Masked()
+	if v2.AutoGroupMode != "inherit" {
+		t.Errorf("空快照应为 inherit，得到 %q", v2.AutoGroupMode)
+	}
+	if len(v2.AutoGroups) != 0 {
+		t.Errorf("空快照不应带回分组，得到 %v", v2.AutoGroups)
+	}
+}
