@@ -175,6 +175,63 @@ console.log('\n[B] 按钮 busy 态');
   await busyRun(btn6, async () => { return true; });   // 立即完成
   ok(!slowRe.test($('busy').textContent || ''), '快请求不出现「较慢」文案（无噪音）');
 
+  // ---------- F. 多条提示互不覆盖（2026-11-01 用户报的缺陷） ----------
+  //
+  // 用户原话：「右上角如果出现多个消息 多交替显示 这也是bug」。
+  // 旧实现是 el.textContent = msg 一句话 —— 后一条**覆盖**前一条，批量动作
+  // （全部签到一次几十条结果）里它们在一个框内快速交替，只读得到最后一条。
+  //
+  // 这里在**假元素**上验：假元素没有 DOM 方法，所以这几条断言同时也钉住了
+  // "toast 不许用 createElement/appendChild"（用了就会在这里炸）。
+  console.log('\n[F] 多条提示并存（不覆盖）');
+  reset();
+  toast('第一条：已签到', false);
+  toast('第二条：失败', true);
+  const boxAfter2 = $('toast').innerHTML;
+  ok(boxAfter2.indexOf('第一条：已签到') >= 0 && boxAfter2.indexOf('第二条：失败') >= 0,
+    '两条提示**同时**在框里（旧实现只会剩最后一条）：' + JSON.stringify($('toast').textContent));
+  ok((boxAfter2.match(/toastline/g) || []).length === 2, '渲染成 2 行（实际 ' + (boxAfter2.match(/toastline/g) || []).length + ' 行）');
+  ok($('toast').className.includes('bad'), '只要有一条是失败 ⇒ 整个框标红（否则错误会被当成成功）');
+  ok($('toast').hidden === false, '有内容时框可见');
+
+  // 连续同文案 ⇒ 合并成「×N」，不堆一屏同样的字
+  reset();
+  toast('同一句失败', true);
+  toast('同一句失败', true);
+  toast('同一句失败', true);
+  ok($('toast').innerHTML.indexOf('×3') >= 0,
+    '连续重复的同文案合并成 ×3（实际 ' + JSON.stringify($('toast').innerHTML) + '）');
+  ok(($('toast').innerHTML.match(/toastline/g) || []).length === 1, '合并后只占 1 行');
+
+  // 超过上限 ⇒ 折叠成「…还有 N 条」，既不假装只有几条、也不糊满半屏
+  reset();
+  for (let i = 0; i < 8; i++) toast('第 ' + (i + 1) + ' 条', false);
+  const capHtml = $('toast').innerHTML;
+  const lines8 = (capHtml.match(/toastline/g) || []).length;
+  ok(lines8 === 5, '最多列 5 行（实际 ' + lines8 + '）');
+  ok(/toastmore/.test(capHtml) && /还有 3 条/.test(capHtml),
+    '被折叠的 3 条给一行汇总（实际 ' + JSON.stringify($('toast').textContent) + '）');
+  ok(capHtml.indexOf('第 8 条') < capHtml.indexOf('第 7 条'),
+    '最新的排在最上面（批量操作时用户最该看到刚发生的那条）');
+
+  // 过期的行自己消失，且最后一个过期后整个框收起
+  reset();
+  const realNow = Date.now;
+  try {
+    toast('会过期的一条', false);
+    ok($('toast').hidden === false, '刚写入时可见');
+    Date.now = () => realNow() + 6000;   // 快进过 5s 的 TTL
+    toast('新的一条', false);
+    const afterExpire = $('toast').innerHTML;
+    ok(afterExpire.indexOf('会过期的一条') < 0, '过期的那条不再渲染（实际 ' + JSON.stringify($('toast').textContent) + '）');
+    Date.now = () => realNow() + 60000;  // 让新的一条也过期
+    toast('再一条', false);
+    toast('再一条', false);              // 触发一次渲染，排掉过期行
+    ok($('toast').innerHTML.indexOf('再一条') >= 0, '新写入的仍然在');
+  } finally {
+    Date.now = realNow;
+  }
+
   console.log(fail === 0 ? '\n=== 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');
   process.exit(fail ? 1 : 0);
 })();

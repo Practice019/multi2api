@@ -22,12 +22,63 @@ function grabBlock(marker) {
 }
 
 function toast(msg, bad) {
+    const TOAST_MAX = 5;   // 一个框里最多列几条（更旧的折叠成「…还有 N 条」）
     const el = $('toast');
-    el.className = 'notice ' + (bad ? 'bad' : 'ok');
-    el.textContent = msg;
-    el.hidden = false;
-    clearTimeout(toast._t);
-    toast._t = setTimeout(() => { el.hidden = true; }, 5000);
+    if (!el) return;
+    // 外部把框清空了（探针的 __CLEAR_TOAST__、别的代码）⇒ 队列也当清空，
+    // 免得下一句提示把上一次的旧行又画回来。
+    if (el.hidden && !el.innerHTML) el._lines = [];
+    const lines = el._lines || (el._lines = []);
+    const text = String(msg == null ? '' : msg);
+    const ttl = bad ? 8000 : 5000;   // 错误留久一点：它更值得看清
+    const last = lines[lines.length - 1];
+    if (last && last.text === text && last.bad === !!bad) {
+      last.n += 1;                   // 连续同文案 ⇒ 只加计数，不堆行
+      last.deadline = Date.now() + ttl;
+    } else {
+      lines.push({ text: text, bad: !!bad, n: 1, deadline: Date.now() + ttl });
+    }
+
+    // renderToast 嵌在 toast **内部**：门禁 tests/frontend/gen_busy_feedback.js
+    // 只抽出 `function toast(` 这一个块去跑（而且跑在**假元素**上），
+    // 独立函数在那里是 undefined、DOM API 也都没有。
+    const renderToast = () => {
+      const now = Date.now();
+      const all = (el._lines || []).filter((l) => l.deadline > now);
+      el._lines = all;
+      const shown = all.slice(-TOAST_MAX);        // 队列尾部是最新的
+      const dropped = all.length - shown.length;  // 被折叠掉的更旧的那些
+      let html = '';
+      let anyBad = false;
+      for (let i = shown.length - 1; i >= 0; i--) {  // 倒序 ⇒ 最新在最上
+        const l = shown[i];
+        anyBad = anyBad || l.bad;
+        html += '<div class="toastline ' + (l.bad ? 'bad' : 'ok') +
+          '" data-i="' + (all.length - shown.length + i) + '" title="点击关闭这一条">' +
+          esc(l.text) + (l.n > 1 ? '<b class="toastn">×' + l.n + '</b>' : '') + '</div>';
+      }
+      if (dropped > 0) html += '<div class="toastmore">…还有 ' + dropped + ' 条</div>';
+      el.innerHTML = html;
+      // 类名与旧实现同一口径（门禁 gen_busy_feedback.js 断言 includes('bad')）
+      el.className = 'notice ' + (anyBad ? 'bad' : 'ok');
+      el.hidden = shown.length === 0;
+      if (!el._bound) {
+        el._bound = true;   // 只绑一次：toast 会被调很多次
+        el.onclick = (ev) => {
+          const box = (ev && ev.target && ev.target.closest) ? ev.target.closest('.toastline') : null;
+          if (!box || !el._lines) return;
+          const i = Number(box.getAttribute('data-i'));
+          if (isFinite(i) && i >= 0 && i < el._lines.length) el._lines.splice(i, 1);
+          renderToast();
+        };
+      }
+      clearTimeout(toast._t);
+      if (shown.length) {
+        const next = Math.min.apply(null, shown.map((l) => l.deadline));
+        toast._t = setTimeout(renderToast, Math.max(100, next - Date.now() + 20));
+      }
+    };
+    renderToast();
   }
 
 function notice(title, body) {
@@ -206,6 +257,63 @@ console.log('\n[B] 按钮 busy 态');
   const btn6 = mkEl('b6'); btn6.textContent = '刷新';
   await busyRun(btn6, async () => { return true; });   // 立即完成
   ok(!slowRe.test($('busy').textContent || ''), '快请求不出现「较慢」文案（无噪音）');
+
+  // ---------- F. 多条提示互不覆盖（2026-11-01 用户报的缺陷） ----------
+  //
+  // 用户原话：「右上角如果出现多个消息 多交替显示 这也是bug」。
+  // 旧实现是 el.textContent = msg 一句话 —— 后一条**覆盖**前一条，批量动作
+  // （全部签到一次几十条结果）里它们在一个框内快速交替，只读得到最后一条。
+  //
+  // 这里在**假元素**上验：假元素没有 DOM 方法，所以这几条断言同时也钉住了
+  // "toast 不许用 createElement/appendChild"（用了就会在这里炸）。
+  console.log('\n[F] 多条提示并存（不覆盖）');
+  reset();
+  toast('第一条：已签到', false);
+  toast('第二条：失败', true);
+  const boxAfter2 = $('toast').innerHTML;
+  ok(boxAfter2.indexOf('第一条：已签到') >= 0 && boxAfter2.indexOf('第二条：失败') >= 0,
+    '两条提示**同时**在框里（旧实现只会剩最后一条）：' + JSON.stringify($('toast').textContent));
+  ok((boxAfter2.match(/toastline/g) || []).length === 2, '渲染成 2 行（实际 ' + (boxAfter2.match(/toastline/g) || []).length + ' 行）');
+  ok($('toast').className.includes('bad'), '只要有一条是失败 ⇒ 整个框标红（否则错误会被当成成功）');
+  ok($('toast').hidden === false, '有内容时框可见');
+
+  // 连续同文案 ⇒ 合并成「×N」，不堆一屏同样的字
+  reset();
+  toast('同一句失败', true);
+  toast('同一句失败', true);
+  toast('同一句失败', true);
+  ok($('toast').innerHTML.indexOf('×3') >= 0,
+    '连续重复的同文案合并成 ×3（实际 ' + JSON.stringify($('toast').innerHTML) + '）');
+  ok(($('toast').innerHTML.match(/toastline/g) || []).length === 1, '合并后只占 1 行');
+
+  // 超过上限 ⇒ 折叠成「…还有 N 条」，既不假装只有几条、也不糊满半屏
+  reset();
+  for (let i = 0; i < 8; i++) toast('第 ' + (i + 1) + ' 条', false);
+  const capHtml = $('toast').innerHTML;
+  const lines8 = (capHtml.match(/toastline/g) || []).length;
+  ok(lines8 === 5, '最多列 5 行（实际 ' + lines8 + '）');
+  ok(/toastmore/.test(capHtml) && /还有 3 条/.test(capHtml),
+    '被折叠的 3 条给一行汇总（实际 ' + JSON.stringify($('toast').textContent) + '）');
+  ok(capHtml.indexOf('第 8 条') < capHtml.indexOf('第 7 条'),
+    '最新的排在最上面（批量操作时用户最该看到刚发生的那条）');
+
+  // 过期的行自己消失，且最后一个过期后整个框收起
+  reset();
+  const realNow = Date.now;
+  try {
+    toast('会过期的一条', false);
+    ok($('toast').hidden === false, '刚写入时可见');
+    Date.now = () => realNow() + 6000;   // 快进过 5s 的 TTL
+    toast('新的一条', false);
+    const afterExpire = $('toast').innerHTML;
+    ok(afterExpire.indexOf('会过期的一条') < 0, '过期的那条不再渲染（实际 ' + JSON.stringify($('toast').textContent) + '）');
+    Date.now = () => realNow() + 60000;  // 让新的一条也过期
+    toast('再一条', false);
+    toast('再一条', false);              // 触发一次渲染，排掉过期行
+    ok($('toast').innerHTML.indexOf('再一条') >= 0, '新写入的仍然在');
+  } finally {
+    Date.now = realNow;
+  }
 
   console.log(fail === 0 ? '\n=== 全部通过 ===' : '\n=== ' + fail + ' 项失败 ===');
   process.exit(fail ? 1 : 0);

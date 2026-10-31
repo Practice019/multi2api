@@ -153,7 +153,58 @@ func sessionHeaders(a *Auth) http.Header {
 //
 // 非 2xx **不**当错误返回 —— 把原文交出去，由调用方按业务语义判。
 // 只有网络层失败才返回 error（与 gateway 的契约一致）。
+// # 2026-11-01：网络失败现在带出口信息 + 对 GET 做一次退避重试
+//
+// 用户实测到的原文是裸的 `net/http: TLS handshake timeout`，而它真正的原因是
+// 「国际站必须走代理，代理出不了国」—— 错误信息指不到那里（见 netretry.go 的文件注释）。
+// 现在：GET 走一次退避重试（幂等，重复提交无副作用），POST 保持一发一次
+// （重复提交在上游是错误码，会污染签到历史）。
 func (c *Client) doJSON(ctx context.Context, a *Auth, method, rawURL string, headers http.Header, body []byte) (int, []byte, error) {
+	if method == http.MethodGet {
+		return c.doJSONWithRetry(ctx, a, method, rawURL, headers, body)
+	}
+	code, raw, err := c.doJSONOnce(ctx, a, method, rawURL, headers, body)
+	if err != nil {
+		return 0, nil, c.wrapNetErr(a, method, rawURL, err)
+	}
+	return code, raw, nil
+}
+
+// doJSONWithRetry 只在**传输层错误**上重试（HTTP 非 2xx 不重试：那是业务语义，
+// 重试同样的请求只会得到同样的状态码 —— 与 qoder 的 getJSON 同一判据）。
+func (c *Client) doJSONWithRetry(ctx context.Context, a *Auth, method, rawURL string, headers http.Header, body []byte) (int, []byte, error) {
+	attempts := 1
+	if method == http.MethodGet {
+		attempts = getAttempts
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return 0, nil, c.wrapNetErr(a, method, rawURL, ctx.Err())
+			case <-time.After(retryDelay(attempt)):
+			}
+		}
+		started := time.Now()
+		code, raw, err := c.doJSONOnce(ctx, a, method, rawURL, headers, body)
+		if err == nil {
+			return code, raw, nil
+		}
+		lastErr = err
+		if !transientNetErr(err) {
+			break // 确定性失败（DNS 不存在 / TLS 证书错）再试也一样
+		}
+		if elapsed := time.Since(started); elapsed >= retryCostCeiling {
+			// 已经付出一次完整超时的代价 ⇒ 这是断掉的路、不是抖动（见常量注释）
+			break
+		}
+	}
+	return 0, nil, c.wrapNetErr(a, method, rawURL, lastErr)
+}
+
+// doJSONOnce 发一次，不做任何重试（上面两个函数共用）。
+func (c *Client) doJSONOnce(ctx context.Context, a *Auth, method, rawURL string, headers http.Header, body []byte) (int, []byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
