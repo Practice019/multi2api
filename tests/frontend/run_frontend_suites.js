@@ -264,6 +264,11 @@ const PROBES = [
   // 那条纪律：模型页整片发白、六页各写一份调色板，都是这条纪律没被守住的结果。
   // 纯静态（只读文件），不写页面、不起实例 ⇒ 归静态段。
   'verify_theme_compliance.js',
+  // 「全量每日动作」回执汇总（2026-11-01 用户报障：monkeycode 全部签到显示「成功 0/26」）。
+  // 判据落在纯函数 dailyAllSummary 上：把**真实回执**（25 already + 1 fail）喂进去，
+  // 断言文案是「已签 25 · 失败 1」，并断言 startAll 的代码里不再有 status === 'ok' 计数。
+  // 纯静态（只读 webui.html）⇒ 归静态段。
+  'verify_dailyall_summary.js',
   // 截图工具（**不是断言套件**：它只拍图，不做判据）。
   //
   // 为什么不放进本脚本：它需要跑着的实例 + Chrome，且产物是 PNG ——

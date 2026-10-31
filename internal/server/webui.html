@@ -7307,6 +7307,50 @@ let loginProvider = '';
     await refresh();
   }
 
+  // dailyAllSummary 把「全量每日动作」的回执汇总成**一句人话**（纯函数，门禁可钉）。
+  //
+  // # 为什么必须按状态分桶（用户 2026-11-01 报障：「monkeycode 全部签到有问题」）
+  //
+  // 旧实现只数 status === 'ok'：
+  //     const ok = r.results.filter(x => x.status === 'ok').length;
+  //     toast('全部' + label + '完成：成功 ' + ok + '/' + r.results.length)
+  // 而 monkeycode 那 26 个号今天**都已经签过** ⇒ 状态全是 already ⇒ 用户看到的是
+  //     「全部签到完成：成功 0/26」
+  // 于是读成「全部签到坏了」（真实现场：25 个 already + 1 个真的 401 失败）。
+  // 同样的形状还出现在 codearts / lobsterai / qoder / trae / minimax —— 六个上游共用。
+  //
+  // 词表来自 checkinlog（唯一真相）：ok / already / fail / skip。
+  //   ok      本次真的签上了
+  //   already 今天已经签过（**成功**的一种，不是失败）
+  //   skip    上游今天没开放（也不是失败）
+  //   fail    真失败（凭证失效 / 网络不通 …）
+  // 判 bad 只按 fail —— 与 driver.HandlerOne 的 ok: res.Status != fail 同源。
+  //
+  // ⚠ 纯函数：不碰 DOM、不碰网络 ⇒ tests/frontend/verify_dailyall_summary.js
+  //   可以直接把它抠出来喂各种回执形状（含真实那一条 25+1）。
+  function dailyAllSummary(label, r) {
+    const list = (r && Array.isArray(r.results)) ? r.results : [];
+    const n = { ok: 0, already: 0, skip: 0, fail: 0, other: 0 };
+    for (const x of list) {
+      const s = (x && x.status) ? String(x.status) : '';
+      if (Object.prototype.hasOwnProperty.call(n, s)) n[s]++; else n.other++;
+    }
+    const bad = (n.fail + n.other) > 0;
+    // 领取类动作（codearts 福利领取）的回执带 claimed，而它**就是 ok 的条数**
+    // （见 driver.HandlerAll：claimed++ 只在 StatusOK 时）。所以这一类不重复报
+    // 「新签」，直接报「领取 N」—— 否则同一件事会出现两个数，用户又开始怀疑。
+    const claimKind = (typeof r.claimed === 'number');
+    const parts = [];
+    if (n.ok && !claimKind) parts.push('新签 ' + n.ok);
+    if (n.already) parts.push('已签 ' + n.already);
+    if (n.skip) parts.push('跳过 ' + n.skip);
+    if (n.fail + n.other) parts.push('失败 ' + (n.fail + n.other));
+    if (claimKind && r.claimed > 0) parts.push('领取 ' + r.claimed);
+    const where = list.length ? ('共 ' + list.length + ' 个账号') : '没有账号';
+    const body = parts.length ? parts.join(' · ') : '无事可做';
+    return { msg: '全部' + label + '完成：' + body + '（' + where + '）', bad: bad };
+  }
+
   // startAll 触发某上游的**全量**每日动作。
   //
   // # 它现在收的是"动作"而不是"动作名"
@@ -7344,9 +7388,15 @@ let loginProvider = '';
         toast(t.msg, t.bad);
         refresh(); loadHistory();
       }
-      else if (r && r.results) {
-        const ok = r.results.filter(x => x.status === 'ok').length;
-        toast(`全部${label}完成：成功 ${ok}/${r.results.length}`);
+      // ④ 逐账号结果类（monkeycode / codearts / lobsterai / qoder / trae / minimax：
+      //    共享驱动与各上游全量端点都回这个形状 {ok, claimed?, results:[{status,detail}]}）。
+      //
+      // ⚠ 汇总走 dailyAllSummary —— **不许**只数 status === 'ok'：
+      //   那会把「今天已签到（already）」数成失败，界面上显示「成功 0/26」，
+      //   而事实是 25 个已签 + 1 个真失败。
+      else if (r && Array.isArray(r.results)) {
+        const t = dailyAllSummary(label, r);
+        toast(t.msg, t.bad);
         refresh(); loadHistory();
       } else {
         toast(`全部${label}已提交`);
