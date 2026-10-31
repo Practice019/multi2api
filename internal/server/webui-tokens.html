@@ -1327,6 +1327,16 @@ header h1{letter-spacing:0}
 </style>
 </head>
 <body>
+<!-- ── 系统凭据（admin_token / api_key）：展示 + 各自独立轮换 ─────────────────
+     2026-10-30 由旧「API 管理」面板折进本页（那里已 hidden）。
+     ⚠ 2026-11-01 补录：上一次这块**只有 JS/CSS 落盘、HTML 丢了** ——
+        而当时的验证只 grep 了「系统凭据」四个字（注释里也有），于是"看起来是好的"。
+        教训写在这里：验这类改动要看**渲染出来的 DOM**，不是源码里的字。 -->
+<section class="cred" id="credCard">
+  <div class="credhd"><b>系统凭据</b><span class="dim" id="credHint">网关自己的两把钥匙（不是下面发给调用方的令牌）</span></div>
+  <div id="credRows" class="credrows"><span class="dim">加载中…</span></div>
+</section>
+
 <!-- 标题与刷新**都归控制台外壳**（webui.html 里 data-key="tokens" 那个 section）：
      外壳给每个面板渲染标题 + 一个「刷新」按钮，且那个按钮会**重载本 iframe**
      （onclick 改 tkFrame.src 并带 ?t= 时间戳），比页内按钮更彻底 —— 连本页的
@@ -1474,10 +1484,14 @@ header h1{letter-spacing:0}
         <div class="hint">单位与后端口径一致（quota）。</div>
       </div>
 
-      <!-- ⑫ 允许查询账户余额 -->
-      <div class="field">
-        <label class="sw"><input type="checkbox" id="f-allowq" checked> 允许此令牌查询账户余额</label>
-      </div>
+      <!-- ⑫ 「允许此令牌查询账户余额」已从界面撤掉（用户 2026-11-01：「好像不需要吧」）。
+           它的语义见 internal/admin/tokens.go:155 —— 决定自查询量响应里带不带 user_quota，
+           后端的默认是 **false**，理由是「这把 key 可能发给第三方」。
+           ⚠ 而界面原先给的是 `checked`（默认开）+ 新建时填 true ⇒ **比后端默认更宽松**，
+             等于把一个隐私开关默认打开。撤掉它同时修掉这个方向不一致：
+             · 新建：按后端默认 false；
+             · 编辑：**保留原值**（见 collectForm 的注释）—— 不能把已开的悄悄改成关。
+           后端字段不动，想要的人仍可直接调 API。 -->
 
       <!-- ⑬ 过期时间 -->
       <div class="field">
@@ -1664,7 +1678,7 @@ function openDrawer(row) {
   $('f-retry').value = String((row && row.group_switch_retry_count) || 0);
   $('f-unlimited').checked = row ? !!row.unlimited_quota : true;
   $('f-amount').value = String(row && row.remain_quota ? row.remain_quota : 500000);
-  $('f-allowq').checked = row ? !!row.allow_user_quota_query : true;
+  // 「允许查询账户余额」的开关已从界面撤掉（见 HTML 里的注释）；这里不再回填。
   $('f-mllimit').checked = !!(row && row.model_limits_enabled);
   $('f-models').value = (row && row.model_limits) || '';
   $('f-ips').value = (row && row.allow_ips) || '';
@@ -1878,7 +1892,9 @@ function collectForm() {
     group_switch_retry_count: Number($('f-retry').value || '0'),
     unlimited_quota: $('f-unlimited').checked,
     remain_quota: $('f-unlimited').checked ? 0 : Number($('f-amount').value || '0'),
-    allow_user_quota_query: $('f-allowq').checked,
+    // 隐私开关已不在界面上：新建走后端默认（false），编辑**保留原值**。
+    // ⚠ 不能一律发 false —— 那会把用户此前已开启的令牌悄悄关掉（静默改配置）。
+    allow_user_quota_query: state.editing ? (state.editing.allow_user_quota_query === true) : false,
     expired_time: expiredTime,
     model_limits_enabled: $('f-mllimit').checked,
     model_limits: $('f-mllimit').checked ? $('f-models').value : '',
