@@ -217,6 +217,41 @@ func TestCandidateRankerUnknownUIDsGoLast(t *testing.T) {
 	}
 }
 
+// 上游只上报了一部分 uid ⇒ 没上报的那些**不能消失**（契约 = 最低优先级）。
+//
+// # 为什么单独立一条（2026-11-01）
+//
+// 契约原文是「未出现在返回 map 里的 uid 视为**最低优先级**」
+//（gateway/candidate_tier.go），而池侧的 kept 原来只收 map 里出现过的 uid ——
+// 等于把「最低优先级」实现成了「不可用」。上游只报部分 uid 时，那些号在**整条
+// 请求**里都选不中，而它们在界面上明明在池里、额度也有。
+//
+// loomy 的实现对每个传入的 uid 都会回一个档位，所以这个偏差在 loomy 上看不到；
+// 它会在「将来某个上游按需返回部分档位」时冒出来 —— 那正是最难查的一类。
+func TestCandidateRankerMissingUIDsAreStillUsable(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetDefaultProvider("loomy")
+	p.SyncToDirFor("loomy", []*auth.Auth{{UID: "known"}, {UID: "unreported"}})
+	p.SetCandidateRanker(rankerStub(map[string]int{"known": 0}, nil))
+
+	// ① 有已知档位时，先用它（既有语义不变）。
+	for i := 0; i < 20; i++ {
+		if a := p.PickFor("loomy", "", nil); a == nil || a.UID != "known" {
+			t.Fatalf("应先用在档位表里的号，实际 %v", a)
+		}
+	}
+
+	// ② 已知档位的号试过之后，没上报档位的号必须**仍然可被选中**。
+	a := p.PickFor("loomy", "", map[string]bool{"known": true})
+	if a == nil {
+		t.Fatal("★ 未上报档位的号被整个排除了 —— 契约要求它们是最低优先级，不是不可用")
+	}
+	if a.UID != "unreported" {
+		t.Errorf("应选中未上报档位的那个号，实际 %q", a.UID)
+	}
+}
+
 // tierOffset 只作为**下限**：更高档还有没试过的号时，不许下沉。
 //
 // # 这条对应用户 2026-11-01 的报障

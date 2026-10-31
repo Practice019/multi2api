@@ -1124,12 +1124,12 @@ func (p *Pool) creditsExhausted(e *entry, model string) bool {
 // tierHasCandidate 本批候选里是否还有属于 tier 的账号（纯内存，调用方持池锁）。
 //
 // 用途见 pickForTier 第 ③ 段：判断「这一档试完了没有」。
-func tierHasCandidate(tier int, cands []*entry, tiers map[string]int) bool {
+func tierHasCandidate(tier int, cands []*entry, tierOf func(string) int) bool {
 	for _, e := range cands {
 		if e.a == nil {
 			continue
 		}
-		if t, ok := tiers[e.a.UID]; ok && t == tier {
+		if tierOf(e.a.UID) == tier {
 			return true
 		}
 	}
@@ -1210,15 +1210,17 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 	// 把余额当权重（soft）不够：权重低只是"更少被选中"，仍会偶尔选中，
 	// 于是永久积分被慢慢烧掉 —— 用户要的是"不许动"。
 	//
-	// # 三条边界
+	// # 四条边界
 	//
 	//	ranker == nil / 返回空 map  → 完全不改变行为（与改造前逐字节相同）
 	//	候选只有 1 个               → 不调用（分档无意义，省一次调用）
 	//	全部 uid 都不在返回 map 里  → 保持原候选集（不改行为）
+	//	部分 uid 不在返回 map 里    → 它们构成一个**额外的**最低档（见下）
 	//
-	// 未出现在返回 map 里的 uid 按**最低优先级**处理（与"未知同档"）：
-	// 只要还有一个账号的档位是已知的，就优先用它 —— 宁可先用能确认
-	// 余额的号，也不拿查不准的号去烧额度。
+	// 未出现在返回 map 里的 uid 按**最低优先级**处理 —— 这是契约原文
+	//（gateway/candidate_tier.go:「未出现在返回 map 里的 uid 视为最低优先级」）。
+	// 只要还有一个账号的档位是已知的，就优先用它：宁可先用能确认余额的号，
+	// 也不拿查不准的号去烧额度。
 	if ranker := p.candidateRanker; ranker != nil && len(cands) > 1 {
 		uids := make([]string, 0, len(cands))
 		for _, e := range cands {
@@ -1227,7 +1229,39 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 			}
 		}
 		if tiers := ranker(want, model, uids); len(tiers) > 0 {
-			// ① 收集候选实际拥有的档位并升序（数字小 = 优先）。
+			// ① 档位归一：map 里没有的 uid → 一个**额外的**最低档（契约原文，见上）。
+			//
+			//   ⚠ 2026-11-01 修：原来这些 uid 被**整个排除**（kept 只收 map 里出现过的），
+			//   与契约写的「最低优先级」相反。上游只报一部分 uid 时后果很重：
+			//   那些号在**整条请求**里都选不中（而它们明明在池里、额度也有）。
+			//   loomy 不漏 uid，所以这条只在别的上游上暴露 —— 但契约就是契约。
+			//
+			//   ⚠ 必须是**额外的**（maxKnown+1）而不是复用已有最大值：复用会让
+			//   "查不准的号"与"确认最差档的号"混进同一档，而档内是等权随机 ——
+			//   等于把查不准的号当成确认最差的号等价使用。
+			known, maxKnown := false, 0
+			for _, e := range cands {
+				if e.a == nil {
+					continue
+				}
+				if t, ok := tiers[e.a.UID]; ok {
+					known = true
+					if t > maxKnown {
+						maxKnown = t
+					}
+				}
+			}
+			missingTier := 0 // 一个档位都拿不到时（known=false）全体同档 = 不改行为
+			if known {
+				missingTier = maxKnown + 1
+			}
+			tierOf := func(uid string) int {
+				if t, ok := tiers[uid]; ok {
+					return t
+				}
+				return missingTier
+			}
+			// ② 收集候选实际拥有的档位并升序（数字小 = 优先）。
 			//
 			//   ⚠ 只对**本批候选里真实存在的档位**排序 —— 不是"0..N 连续枚举"：
 			//   loomy 的档位是 0/1/2 三档，别的上游可能只有两档，按存在值排序
@@ -1237,9 +1271,7 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 				if e.a == nil {
 					continue
 				}
-				if t, ok := tiers[e.a.UID]; ok {
-					seen[t] = true
-				}
+				seen[tierOf(e.a.UID)] = true
 			}
 			levels := make([]int, 0, len(seen))
 			for t := range seen {
@@ -1276,7 +1308,7 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 			//
 			// ⚠ 与 new-api 的 retry→降档不同：那边一档 = 一组同质的渠道，而
 			//   本仓的档位可以表达**代价**（烧永久额度）。代价不能被重试策略跳过。
-			for idx > 0 && tierHasCandidate(levels[idx-1], cands, tiers) {
+			for idx > 0 && tierHasCandidate(levels[idx-1], cands, tierOf) {
 				idx-- // 上一档还有没试过的号 ⇒ 留在那一档，别下沉
 			}
 			if len(levels) > 0 {
@@ -1286,7 +1318,7 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 					if e.a == nil {
 						continue
 					}
-					if t, ok := tiers[e.a.UID]; ok && t == pickTier {
+					if tierOf(e.a.UID) == pickTier {
 						kept = append(kept, e)
 					}
 				}
