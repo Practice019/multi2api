@@ -229,6 +229,58 @@
     main { padding:12px 10px 28px; }
     .c .v { font-size:18px; }
   }
+  /* ── 2026-11-01 用户报「系统状态标签页样式还是有点难看」──────────────────────
+     对着截图逐条诊断：
+       ① 五条分区带**全是同一个黄** —— 规范要的是「五个冲突色并用、不许降到粉彩」，
+          重复一个颜色等于没有背景：黄不再意味着任何东西。
+       ② 所有读数卡同形同色 ⇒ **没有层级**：97.1% 的 CPU 与「Goroutines 21」一个分量。
+       ③ 全页最重要的事实「服务状态 = 严重」没有任何视觉重量。
+       ④ .grid 默认 align-items:stretch ⇒ 依赖健康两侧不等高被拉平，底部一大片死空白
+          （用户说过的那种"游离"感）。
+     处理原则：**只做页面自有 CSS 的层叠覆盖**，不动共享层、不动渲染逻辑 ——
+     改动面最小、可单文件回滚；共享层的 section>h2 没有 !important，特异性够压住它。
+     配色一律走语义变量（规范：不许写死颜色），所以本轮不新增任何色值。 */
+
+  /* ①② 分区带：五个冲突色轮转 + 展示体大写 + 亮底一律墨字 */
+  #app > section > h2 {
+    color:var(--ink);
+    font-family:var(--font-display);
+    font-size:14px; letter-spacing:.04em; text-transform:uppercase;
+  }
+  #app > section:nth-of-type(1) > h2 { background:var(--yellow); }
+  #app > section:nth-of-type(2) > h2 { background:var(--acid); }
+  #app > section:nth-of-type(3) > h2 { background:var(--pink); }
+  #app > section:nth-of-type(4) > h2 { background:var(--orange); }
+  /* 电蓝太暗，墨字在上面读不出来 ⇒ 反色对（亮带用墨字、暗带用奶油字） */
+  #app > section:nth-of-type(5) > h2 { background:var(--blue); color:var(--cream); }
+
+  /* ④ 不等高不再拉平：死空白的根因是 stretch */
+  #app > section > .grid { align-items:start; }
+
+  /* ③ 唯一"喊出来"的地方：服务状态卡。
+        规范说"别忘给真正的动作留一块安静区"，反过来同样成立 ——
+        全页只允许一处高声，其余保持安静，层级才存在。 */
+  #app > section:nth-of-type(1) .grid > .c:first-child {
+    border-color:var(--ink);
+    box-shadow:6px 6px 0 var(--hard);
+  }
+  /* ⚠ 底色**随严重度**变，而不是写死一个 --card1：固定黄色会与上面那条黄带撞色，
+     而且"这张卡为什么是黄的"没有含义。严重度本来就在 DOM 里（.err/.warn/.ok），
+     所以用 :has() 让底色成为**读数的一部分**（全是 color-mix，不新增色值）。
+     三档环形信封：14% 语义色压中性面板 —— 够看出差别，又不至于把数据区弄吵。 */
+  #app > section:nth-of-type(1) .grid > .c:first-child:has(.err) {
+    background:color-mix(in srgb, var(--err) 14%, var(--panel)); }
+  #app > section:nth-of-type(1) .grid > .c:first-child:has(.warn) {
+    background:color-mix(in srgb, var(--warn) 14%, var(--panel)); }
+  #app > section:nth-of-type(1) .grid > .c:first-child:has(.ok) {
+    background:color-mix(in srgb, var(--ok) 14%, var(--panel)); }
+  #app > section:nth-of-type(1) .grid > .c:first-child .v {
+    font-family:var(--font-display); font-size:34px; line-height:1.05; letter-spacing:.01em;
+  }
+  #app > section:nth-of-type(1) .grid > .c:first-child .v .err { color:var(--err); }
+  #app > section:nth-of-type(1) .grid > .c:first-child .v .warn { color:var(--warn); }
+  #app > section:nth-of-type(1) .grid > .c:first-child .v .ok { color:var(--ok); }
+
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
