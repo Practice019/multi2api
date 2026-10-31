@@ -1508,6 +1508,17 @@ header h1{letter-spacing:0}
    容器只有一个类名，而"一条成功、一条失败"在批量动作里是常态。
    行内着色才能同时说清两件事；容器类名保留原口径（边框与整体底色）。
    ══════════════════════════════════════════════════════════════════════ */
+/* 通知区容器与单条通知的定位（2026-11-01 从外壳搬来）
+   · 为什么搬：令牌页也要同一套通知（同样的堆叠语义），而它原先只有一句
+     `.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%)}` ——
+     定位在左下、单行覆盖式，与外壳的右上堆叠**是两个东西**。
+     「同一个产品里两条通知语义」正是这次统一要消灭的。
+   · 位置定在右上（与系统通知栈一致），容器 pointer-events:none、单条 auto：
+     容器不吃点击，只有消息本身可点（点一条关一条，见 toast.js 的 onclick）。 */
+.notices{position:fixed;top:14px;right:16px;z-index:200;
+  display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+  max-width:min(420px,42vw);pointer-events:none}
+.notice[hidden]{display:none}
 #toast .toastline{display:block;cursor:pointer}
 #toast .toastline.ok{color:var(--ok)}
 #toast .toastline.bad{color:var(--err)}

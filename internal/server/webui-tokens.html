@@ -103,11 +103,11 @@
   .dragitem { border: 1px solid var(--line); background: var(--panel2); padding: 3px 6px; font-size: 12px;
               display: flex; align-items: center; gap: 6px; }
   .dragitem .grip { cursor: grab; color: var(--dim); font-family: var(--font-mono); }
-  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px; z-index: 30;
-           border: 1px solid var(--line); background: var(--panel); color: var(--fg);
-           padding: 8px 14px; display: none; max-width: 90vw; }
-  .toast.on { display: block; }
-  .toast.bad { color: var(--err); border-color: var(--err); }
+  /* 地雷提示：这里原来有一份页面自带的通知样式
+     （.toast 固定在下中、单行、类名 on/bad）。2026-11-01 已删除 —— 它和外壳的右上角
+     堆叠通知是**两套语义**（批量动作一次十几条结果时，这一页只读得到最后一条）。
+     现在位置/外观统一由主题层的 .notices/.notice 提供，行为由共享层 toast.js 提供。
+     Guard：internal/server/ui_wiring_toast_test.go 拦「页面又自带 .toast 定位」。 */
   .partial { border: 1px solid var(--warn); background: var(--panel2); color: var(--fg); padding: 8px 10px;
              font-size: 12px; margin-bottom: 10px; }
   .partial ul { margin: 6px 0 0; padding-left: 18px; }
@@ -1353,6 +1353,17 @@ header h1{letter-spacing:0}
    容器只有一个类名，而"一条成功、一条失败"在批量动作里是常态。
    行内着色才能同时说清两件事；容器类名保留原口径（边框与整体底色）。
    ══════════════════════════════════════════════════════════════════════ */
+/* 通知区容器与单条通知的定位（2026-11-01 从外壳搬来）
+   · 为什么搬：令牌页也要同一套通知（同样的堆叠语义），而它原先只有一句
+     `.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%)}` ——
+     定位在左下、单行覆盖式，与外壳的右上堆叠**是两个东西**。
+     「同一个产品里两条通知语义」正是这次统一要消灭的。
+   · 位置定在右上（与系统通知栈一致），容器 pointer-events:none、单条 auto：
+     容器不吃点击，只有消息本身可点（点一条关一条，见 toast.js 的 onclick）。 */
+.notices{position:fixed;top:14px;right:16px;z-index:200;
+  display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+  max-width:min(420px,42vw);pointer-events:none}
+.notice[hidden]{display:none}
 #toast .toastline{display:block;cursor:pointer}
 #toast .toastline.ok{color:var(--ok)}
 #toast .toastline.bad{color:var(--err)}
@@ -1564,7 +1575,14 @@ header h1{letter-spacing:0}
   </form>
 </aside>
 
-<div class="toast" id="toast" role="status"></div>
+<!-- 通知区：与外壳**同一套** markup（.notices 容器 + #toast.notice）——
+     位置/外观来自主题层（theme-max.css 的 .notices / .notice / #toast .toastline），
+     行为来自共享层（tools/toast_sync.js 注入的 toast.js）。
+     ⚠ 别再往这一页写 .toast 的定位：那会让同一个产品里出现两种通知语义
+       （旧的单行覆盖式正是 2026-11-01 被统一掉的那个）。 -->
+<div class="notices">
+  <div id="toast" class="notice" hidden></div>
+</div>
 
 <script>
 // 令牌管理页（T68 / Wave C3）。零依赖、零外部资源、单文件内联。
@@ -1588,12 +1606,93 @@ function tsText(v) {
   var p = function (n) { return (n < 10 ? '0' : '') + n; };
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
+// ==== WB2API:TOAST:START（由 tools/toast_sync.js 生成，勿手改）====
+// toast.js —— 通知框的**唯一实现**（外壳控制台 + 令牌页共用）。
+//
+// # 为什么抽成共享层（2026-11-01）
+//
+// 用户报「右上角如果出现多个消息 多交替显示 这也是 bug」之后，外壳改成了**堆叠式**
+// （逐条列出、各自计时、重复文案合并成 ×N、超过上限折叠成「…还有 N 条」）。
+// 但令牌页还留着旧实现：
+//
+//     el.textContent = msg;  el.className = 'toast on' + (bad ? ' bad' : '');
+//     setTimeout(() => el.className = 'toast', 2000);
+//
+// ⇒ 同一个产品里两种通知语义：令牌页批量轮换一次发十几条结果时，用户仍然只读得到最后一条
+//（与外壳那个 bug 一模一样的症状，只是发生在另一个页面）。
+//
+// # 契约（宿主页面必须提供两样东西）
+//
+//   $('toast')   —— 通知容器（id="toast"），样式在主题块里（#toast .toastline 等，
+//                   由 theme_sync 同步到所有页面，所以视觉本来就是统一的）
+//   esc(s)       —— HTML 转义（各页自带一份，实现略有差异，故不在这里重复定义）
+//
+// # 两条实现约束（照抄外壳那份的踩坑记录，别改）
+//
+//   ① 只用 el.innerHTML 拼字符串，**不用** createElement/appendChild ——
+//      tests/frontend/gen_busy_feedback.js 会把这个函数抽出来跑在**假元素**上
+//      （只有 textContent/className/innerHTML/hidden），DOM API 会直接炸。
+//   ② 只引用**函数体内**的东西：队列挂在元素上（el._lines），上限写成函数内常量。
+//      模块级变量在抽出来的那份里不存在 ⇒ ReferenceError（第一版踩过）。
 function toast(msg, bad) {
-  var el = $('toast');
-  el.textContent = msg;
-  el.className = 'toast on' + (bad ? ' bad' : '');
-  window.setTimeout(function () { el.className = 'toast'; }, bad ? 5000 : 2200);
+  const TOAST_MAX = 5;   // 一个框里最多列几条（更旧的折叠成「…还有 N 条」）
+  const el = $('toast');
+  if (!el) return;
+  // 外部把框清空了（探针的 __CLEAR_TOAST__、别的代码）⇒ 队列也当清空，
+  // 免得下一句提示把上一次的旧行又画回来。
+  if (el.hidden && !el.innerHTML) el._lines = [];
+  const lines = el._lines || (el._lines = []);
+  const text = String(msg == null ? '' : msg);
+  const ttl = bad ? 8000 : 5000;   // 错误留久一点：它更值得看清
+  const last = lines[lines.length - 1];
+  if (last && last.text === text && last.bad === !!bad) {
+    last.n += 1;                   // 连续同文案 ⇒ 只加计数，不堆行
+    last.deadline = Date.now() + ttl;
+  } else {
+    lines.push({ text: text, bad: !!bad, n: 1, deadline: Date.now() + ttl });
+  }
+
+  // renderToast 嵌在 toast **内部**：门禁只抽出 `function toast(` 这一个块去跑，
+  // 独立函数在那里是 undefined、DOM API 也都没有。
+  const renderToast = () => {
+    const now = Date.now();
+    const all = (el._lines || []).filter((l) => l.deadline > now);
+    el._lines = all;
+    const shown = all.slice(-TOAST_MAX);        // 队列尾部是最新的
+    const dropped = all.length - shown.length;  // 被折叠掉的更旧的那些
+    let html = '';
+    let anyBad = false;
+    for (let i = shown.length - 1; i >= 0; i--) {  // 倒序 ⇒ 最新在最上
+      const l = shown[i];
+      anyBad = anyBad || l.bad;
+      html += '<div class="toastline ' + (l.bad ? 'bad' : 'ok') +
+        '" data-i="' + (all.length - shown.length + i) + '" title="点击关闭这一条">' +
+        esc(l.text) + (l.n > 1 ? '<b class="toastn">×' + l.n + '</b>' : '') + '</div>';
+    }
+    if (dropped > 0) html += '<div class="toastmore">…还有 ' + dropped + ' 条</div>';
+    el.innerHTML = html;
+    // 类名与旧实现同一口径（门禁 gen_busy_feedback.js 断言 includes('bad')）
+    el.className = 'notice ' + (anyBad ? 'bad' : 'ok');
+    el.hidden = shown.length === 0;
+    if (!el._bound) {
+      el._bound = true;   // 只绑一次：toast 会被调很多次
+      el.onclick = (ev) => {
+        const box = (ev && ev.target && ev.target.closest) ? ev.target.closest('.toastline') : null;
+        if (!box || !el._lines) return;
+        const i = Number(box.getAttribute('data-i'));
+        if (isFinite(i) && i >= 0 && i < el._lines.length) el._lines.splice(i, 1);
+        renderToast();
+      };
+    }
+    clearTimeout(toast._t);
+    if (shown.length) {
+      const next = Math.min.apply(null, shown.map((l) => l.deadline));
+      toast._t = setTimeout(renderToast, Math.max(100, next - Date.now() + 20));
+    }
+  };
+  renderToast();
 }
+// ==== WB2API:TOAST:END ====
 function api(method, path, body) {
   var init = { method: method, headers: { 'Content-Type': 'application/json' } };
   if (body !== undefined) init.body = JSON.stringify(body);
