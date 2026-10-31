@@ -260,7 +260,7 @@ const MEASURE_TOKENS = '(function(){'
         var d = document.getElementById('tkFrame').contentDocument;
         var ids = ['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-autogroup-pick','btnAutoAdd','f-autogroups',
                    'f-group-pick','btnGroupAdd','f-groups','f-cross','f-codes','f-retry','f-unlimited','f-amount',
-                   'f-allowq','f-exp','btnNever','f-mllimit','f-models','f-ips','btnSave','btnCancel'];
+                   'f-exp','btnNever','f-mllimit','f-models','f-ips','btnSave','btnCancel'];
         return ids.map(function(id){
           var el = d.getElementById(id);
           if (!el) return { id: id, exists: false };
@@ -274,6 +274,14 @@ const MEASURE_TOKENS = '(function(){'
       const disabledF = fields.filter(function(f){ return f.exists && f.disabled; });
       ok(missingF.length === 0, '创建抽屉字段全部存在（检查 ' + fields.length + ' 个控件；缺 ' + JSON.stringify(missingF.map(function(f){return f.id;})) + '）');
       ok(disabledF.length === 0, '没有任何字段处于 disabled（异常 ' + JSON.stringify(disabledF.map(function(f){return f.id;})) + '）');
+      // ⚠ 2026-11-01 反向断言：「允许此令牌查询账户余额」已按用户要求从界面撤掉，
+      //   这条断言把撤掉这件事**钉住**。
+      //   为什么值得一条门禁：它的语义是隐私开关（internal/admin/tokens.go:155 —— 决定
+      //   自查询量响应里带不带 user_quota，后端默认 false，理由是「这把 key 可能发给第三方」），
+      //   而界面原先写的是 `checked`（默认开）+ 新建时填 true ⇒ **比后端默认更宽松**。
+      //   谁要是把它加回来（尤其是又带上宽松默认），这条会红。
+      const allowq = JSON.parse(await ev('JSON.stringify({ present: !!document.getElementById(\'tkFrame\').contentDocument.getElementById(\'f-allowq\') })'));
+      ok(!allowq.present, '「允许此令牌查询账户余额」不在界面上（后端字段保留，新建走后端默认 false、编辑保留原值）');
       // 条件字段（自动/有序分组、额度、模型限制）**默认是隐藏的** —— 所以「可见」必须在各自
       // 触发条件成立之后再判。第一版一次性断言「全都可见」，把设计当成了缺陷（22 项失败里有 1 项是它）。
       const vis = JSON.parse(await ev(`JSON.stringify((function(){
@@ -281,7 +289,7 @@ const MEASURE_TOKENS = '(function(){'
         var seen = {};
         function rec(ids){ ids.forEach(function(id){ var el = d.getElementById(id); if (el && el.offsetParent !== null) { seen[id] = true; } }); }
         function fire(id){ var el = d.getElementById(id); el.dispatchEvent(new Event('change', { bubbles: true })); }
-        rec(['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-unlimited','f-allowq','f-exp','btnNever','f-mllimit','f-ips','btnSave','btnCancel']);
+        rec(['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-unlimited','f-exp','btnNever','f-mllimit','f-ips','btnSave','btnCancel']);
         d.getElementById('f-mode-manual').checked = true; fire('f-mode-manual');
         rec(['f-group-pick','btnGroupAdd','f-groups']);
         d.getElementById('f-mode-auto').checked = true; fire('f-mode-auto');
@@ -294,7 +302,7 @@ const MEASURE_TOKENS = '(function(){'
         return { seen: seen, groupPickOptions: d.getElementById('f-group-pick').options.length };
       })())`));
       const mustSee = ['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-group-pick','btnGroupAdd','f-groups',
-                       'f-autogroup-pick','btnAutoAdd','f-autogroups','f-unlimited','f-amount','f-allowq','f-exp','btnNever',
+                       'f-autogroup-pick','btnAutoAdd','f-autogroups','f-unlimited','f-amount','f-exp','btnNever',
                        'f-mllimit','f-models','f-ips','btnSave','btnCancel'];
       const notSeen = mustSee.filter(function(id){ return !vis.seen[id]; });
       ok(notSeen.length === 0, '每个字段在**自己的触发条件下**可见且可交互（未取到样本：' + JSON.stringify(notSeen) + '）');
