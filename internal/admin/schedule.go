@@ -106,6 +106,16 @@ type providerInfo struct {
 	// 与 AdminExt / JobExt 同一个模式 —— 前端不写死上游名，
 	// 加第三个上游时前端 0 改动。
 	Login *providerLogin `json:"login"`
+	// Egress 该上游的出口（上游自报；未实现 gateway.EgressExt 时为 nil ⇒ 不下发）。
+	//
+	// # 为什么放进 manifest，而不是只在「出口自检」的回执里
+	//
+	// 用户的第一反应是「这个上游的号为什么全失败」，而他打开账号池看到的只有一堆失败行。
+	// 出口是**静态事实**（直连 / 代理地址）—— 随 manifest 下发，卡片头上就写着
+	// 「出口 直连」/「代理 http://…」，不用点任何按钮就能把它和错误文案对上。
+	//
+	// omitempty：没实现扩展点的上游不下发这个键，既有部署的界面逐字节不变。
+	Egress *gateway.EgressInfo `json:"egress,omitempty"`
 
 	// AccountColumns 该上游自报的**账号池列集**（有序的列 id）。
 	//
@@ -307,6 +317,11 @@ func (h *Handler) providers(w http.ResponseWriter, r *http.Request) {
 			// 账号池列集：上游自报（未实现 = nil = 用默认 11 列）。
 			info.AccountColumns = accountColumnsOf(p)
 			info.Notice = noticeOf(p)
+			// 出口（上游自报的静态事实）：没实现 EgressExt 就不填 ⇒ 键不存在。
+			if eg, ok := gateway.ExtOf[gateway.EgressExt](p); ok && eg != nil {
+				v := eg.Egress()
+				info.Egress = &v
+			}
 			infos = append(infos, info)
 		}
 	}

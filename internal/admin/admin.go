@@ -486,6 +486,12 @@ func New(cfg Config) *Handler {
 	// 账号池顶部那个唯一的「全部签到」打它；各上游卡片顶部那个
 	// 「全部签到」打的是上游自己的 AllURL（见 checkin_all.go）。
 	h.register("POST /admin/accounts/checkin/all", h.accountsCheckinAll)
+	// 出口自检（2026-11-01）：逐条实测「上游的请求从哪出去、通不通」。
+	//
+	// 与上面两条同类：作用域是「整池 / 所有上游」，核心才认识全部上游 ⇒ 归核心。
+	// 它解决的是「全部账号一起失败，但错误文案指不到代理上」那类报障：
+	// TLS handshake timeout 既可能是代理没起来，也可能是上游挂了（见 gateway/egress.go）。
+	h.register("POST /admin/accounts/egress-check", h.accountsEgressCheck)
 	h.register("POST /admin/accounts/{uid}/enable", h.accountEnable)
 	h.register("POST /admin/accounts/{uid}/disable", h.accountDisable)
 	h.register("POST /admin/accounts/{uid}/cooldown/clear", h.accountClearCooldown)
@@ -850,6 +856,7 @@ var auditRouteActions = map[string]string{
 	"POST /admin/accounts/import":               "account.import",
 	"POST /admin/accounts/quota/refresh":        "account.quota.refresh",
 	"POST /admin/accounts/checkin/all":          "account.checkin.all",
+	"POST /admin/accounts/egress-check":         "account.egress.check",
 	"POST /admin/accounts/{uid}/enable":         "account.enable",
 	"POST /admin/accounts/{uid}/disable":        "account.disable",
 	"POST /admin/accounts/{uid}/cooldown/clear": "account.cooldown.clear",

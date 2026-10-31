@@ -1038,6 +1038,31 @@ let loginProvider = '';
       + `<span style="opacity:.7">·</span> ${esc(n)}</span>`;
   }
 
+  // egressHTML 渲染某上游的**出口**（上游自报的静态事实）。
+  //
+  // # 为什么放在卡片头上（用户报障的现场）
+  //
+  // 「这个上游的号为什么全失败」—— 打开账号池看到的只有一堆失败行，
+  // 而真正的原因常在出口（代理没起来 → TLS handshake timeout，看起来像上游挂了）。
+  // 出口是静态事实，直接写在卡片头上：用户不用点任何按钮就能把它和错误文案对上。
+  //
+  // 判据与 noticeHTML 完全同形：**manifest 里有这个键就渲染，没有就返回空串**
+  //（于是没实现 EgressExt 的上游，界面渲染结果与改造前逐字节相同）。
+  function egressHTML(providerId) {
+    const p = providerInfo(providerId);
+    const e = p && p.egress && typeof p.egress === 'object' ? p.egress : null;
+    if (!e) return '';
+    const prox = Array.isArray(e.proxies) ? e.proxies.filter(x => typeof x === 'string' && x.trim()) : [];
+    // 词序：有代理就先说代理（那是排障时最要先确认的一条），再补直连。
+    const parts = [];
+    if (prox.length) parts.push('代理 ' + prox.join(' / '));
+    if (e.direct) parts.push('直连');
+    const text = parts.length ? parts.join(' + ') : '未配置';
+    const title = e.note ? esc(String(e.note)) : '该上游自报的出口';
+    return `<span class="dim" style="font-weight:400;font-size:11px;opacity:.85"`
+      + ` title="${title}"><span style="opacity:.7">·</span> 出口 ${esc(text)}</span>`;
+  }
+
   // providerInfo 取某上游的 manifest 描述。
   function providerInfo(id) {
     return (PROVIDERS || []).find(p => p && p.id === id) || null;
@@ -2699,6 +2724,7 @@ let loginProvider = '';
       // 样式刻意用 .dim + 更小字号：它是**提醒**不是警告，
       // 不该在视觉上盖过「N 个账号」这类主信息。
       + noticeHTML(g.provider)
+      + egressHTML(g.provider)
       + `</button>`
       // 折叠时另起一句：组标题里的"0 个账号 · 4 项能力"回答不了
       // "为什么没有" —— 那是用户下一步要的动作。
@@ -12192,6 +12218,14 @@ let multCatalogFailed = false;
     // 回 `{updated, unknown, failed, skipped, providers, accounts}`。
     $('btnAllCredits').onclick = () => startAll({
       id: 'credits', label: '额度', all_url: '/admin/accounts/quota/refresh',
+    });
+    // 出口自检：与上面同形（core 的跨上游动作，202 + 任务槽 → watchTask 显示进度）。
+    //
+    // ⚠ 回执形状是 {started, providers, count} ⇒ 落进 startAll 的 r.started 分支
+    //（「已启动，后台执行中…」+ watchTask）。逐条结果在任务回执里按行显示，
+    //  不需要在这里再拼一遍文案 —— 那会让同一份结果有两个真相。
+    $('btnEgressCheck').onclick = () => startAll({
+      id: 'egress', label: '出口自检', all_url: '/admin/accounts/egress-check',
     });
     // 各上游卡片上的「全部签到」由 manifest.daily_actions（batch=true）驱动，
     // 不在这里生成 —— 见 dailyAllActionsHTML。
