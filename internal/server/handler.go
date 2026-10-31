@@ -3385,8 +3385,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
 	// 自动禁用是「这个号持续不好用」的判决，代价是丢一份产能。所以只统计
 	// **确实是账号问题**的失败：
 	//
-	//	HardCredit / SoftRate / SessionDead / NotFound / Server  → 计
-	//	Auth / Client / None                                     → 不计
+	//	SessionDead / NotFound / Server                → 计
+	//	HardCredit / SoftRate / Auth / Client / None   → 不计
+	//
+	// ⚠ 2026-11-01：HardCredit（额度耗尽）也被移出这条线，判据与 SoftRate 同一条：
+	//   **这个号会不会自己好**。额度耗尽次日（或充值/邀请到账后）必然恢复，
+	//   而凭证死亡、模型不存在不会。前者该「跳过 + 冷却」，后者才该摘号。
 	//
 	// 后三种是"换号就能好，但号本身没毛病"（凭证边界、请求问题、分类未知）——
 	// 把它们计进去会让一次客户端发错参数的行为，在连发 5 次后禁掉一个健康号。
@@ -3409,9 +3413,25 @@ func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
 	//
 	// ⇒ 保留 HardCredit / SessionDead / NotFound / Server 四条：
 	//   那些是"这个号确实不能用了"（额度耗尽 / 会话失效 / 模型不存在 / 上游持续 5xx）。
+	// ⚠ 2026-11-01：**HardCredit 也从这条线里拿掉了**（与 SoftRate 同一条理由）。
+	//
+	// 用户报障：「monkeycode 会自动封禁账号，并且第二天的免费额度恢复之后不会
+	// 重新变成正常的账号」。额度耗尽与限流一样是**自愈**状态：
+	//
+	//	· 每日赠送额度按自然日重置（loomy / monkeycode 都是这个模型）
+	//	· 充值/邀请到账也会让它恢复
+	//
+	// 而它下面（HardCredit 分支）**已经**做了正确的动作：冷却到上游给出的
+	// 下次重置时刻 + 选号阶段跳过（`creditsExhausted`）。再加一条「连续 5 次
+	// 就永久摘号」等于让一个明天就会自己好的号今天被摘掉 —— 而解除它要等
+	// 24 小时的解封探测（配置里常关着），用户看到的就是「第二天额度回来了、
+	// 账号还是禁用」。
+	//
+	// ⇒ 保留 SessionDead / NotFound / Server 三条：那些是「这个号确实坏了」，
+	//   与额度无关，不会自己恢复（凭证要重登、模型名要改）。
+	//   额度类走「跳过 + 冷却」（loomy 那套语义），账号**永不**因此被封。
 	switch kind {
-	case gateway.ErrKindHardCredit,
-		gateway.ErrKindSessionDead, gateway.ErrKindNotFound, gateway.ErrKindServer:
+	case gateway.ErrKindSessionDead, gateway.ErrKindNotFound, gateway.ErrKindServer:
 		if h.cfg.Pool.RecordAutoDisableFailure(uid, "upstream "+kind.String()) {
 			// 刚跨过阈值：记一条明确日志。运维看到"某号自己变灰"时，
 			// 这一行是唯一的线索（否则只能猜）。

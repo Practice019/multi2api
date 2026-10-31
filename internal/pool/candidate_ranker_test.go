@@ -217,6 +217,50 @@ func TestCandidateRankerUnknownUIDsGoLast(t *testing.T) {
 	}
 }
 
+// tierOffset 只作为**下限**：更高档还有没试过的号时，不许下沉。
+//
+// # 这条对应用户 2026-11-01 的报障
+//
+//	「我希望优先使用 loomy 的免费额度，当所有账号的免费额度都用完之后
+//	  才能使用账号内的永久额度」—— 而他实测到的是「永久额度被烧」。
+//
+// 上游 5xx 时调用方会把 tierOffset 加一（handler.go 的 ErrKindServer 分支），
+// 本意是「这一档整体不可用 ⇒ 下沉一层」。而 loomy 的档位是**按账号**分的：
+//
+//	0 = 还有今日赠送额度   2 = 只剩永久额度
+//
+// 于是「下沉一层」就等于「免费额度还没用完就去烧永久额度」。而 loomy 实测
+// 很容易 502（candidate_tier.go 文件头：并发 12 条就出 502），所以这不是
+// 理论边界，是**常态路径** —— 一次 5xx 就足够跳过剩下的全部免费账号。
+//
+// 判据：cands 已按 tried 过滤 ⇒「本档还有候选」就是「本档还没试完」。
+func TestCandidateRankerDoesNotSinkWhileFreeTierHasUntriedAccounts(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetDefaultProvider("loomy")
+	p.SyncToDirFor("loomy", []*auth.Auth{{UID: "free1"}, {UID: "free2"}, {UID: "paid"}})
+	p.SetCandidateRanker(rankerStub(map[string]int{"free1": 0, "free2": 0, "paid": 2}, nil))
+
+	// free1 试过、free2 还有免费额度没试过；调用方因一次 5xx 把档位下沉了一档。
+	tried := map[string]bool{"free1": true}
+	for i := 0; i < 50; i++ {
+		a := p.PickForTier("loomy", "", tried, 1)
+		if a == nil {
+			t.Fatal("还有免费额度的号未试过时不该返回 nil")
+		}
+		if a.UID == "paid" {
+			t.Fatalf("第 %d 次抽到 paid —— free2 的免费额度还没用过就烧永久额度。"+
+				"档位偏移必须只是下限（见 pickForTier 第 ③ 段）", i)
+		}
+	}
+
+	// 免费档**全部试完**之后，才允许下沉到永久档（否则这条规则就变成封死了）。
+	all := map[string]bool{"free1": true, "free2": true}
+	if a := p.PickForTier("loomy", "", all, 1); a == nil || a.UID != "paid" {
+		t.Errorf("免费档试完后应下沉到永久档，实际 %v", a)
+	}
+}
+
 // 分档必须**按上游隔离**：别的上游没有档位信息时不受影响。
 func TestCandidateRankerOnlyAppliesToItsProvider(t *testing.T) {
 	withNoPickGap(t)

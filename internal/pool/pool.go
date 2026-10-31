@@ -1121,8 +1121,26 @@ func (p *Pool) creditsExhausted(e *entry, model string) bool {
 	return q.Remaining <= 0 // credits 及未知形态（后者已被上面的 !HasData 挡住）
 }
 
+// tierHasCandidate 本批候选里是否还有属于 tier 的账号（纯内存，调用方持池锁）。
+//
+// 用途见 pickForTier 第 ③ 段：判断「这一档试完了没有」。
+func tierHasCandidate(tier int, cands []*entry, tiers map[string]int) bool {
+	for _, e := range cands {
+		if e.a == nil {
+			continue
+		}
+		if t, ok := tiers[e.a.UID]; ok && t == tier {
+			return true
+		}
+	}
+	return false
+}
+
 // pickForTier 是 pickFor 的档位感知版本：候选先按上游/健康/在途过滤，
 // 再由 CandidateTierExt 分档，**按 tierOffset 选档**后在该档内加权随机。
+//
+// ⚠ tierOffset 只是**下限**：更高档只要还有没试过的候选就不会被跳过
+//   （见第 ③ 段的理由 —— 档位可以表达代价，代价不能被重试策略跳过）。
 func (p *Pool) pickForTier(provider string, tried map[string]bool, model string, tierOffset int) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1237,6 +1255,29 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 			}
 			if idx >= len(levels) {
 				idx = len(levels) - 1
+			}
+			// ③ ⚠⚠ 档位偏移只作为**下限**：不许跳过「本批还有候选」的更高档。
+			//
+			// # 为什么（用户 2026-11-01 报障：免费额度没用完就开始烧永久额度）
+			//
+			// 上游 5xx 时调用方会把 tierOffset 加一（handler.go:2455），本意是
+			// 「这一档整体不可用 ⇒ 下沉一层」。而 loomy 的档位是**按账号**分的：
+			//
+			//	0 = 还有今日赠送额度   1 = 不知道   2 = 只剩永久额度
+			//
+			// 于是「下沉一层」就等于「免费额度还没用完就去烧永久额度」——
+			// 正是用户明确要求不许发生的那件事。而 loomy 实测很容易 502
+			// （见 loomy/candidate_tier.go 文件头：并发 12 条就出 502），
+			// 所以这不是理论边界，是**常态路径**：一次 5xx 就足够把剩下的
+			// 免费额度全部跳过。
+			//
+			// 判据：cands 进入分档前**已经按 tried 过滤过** ⇒「这一档里还有候选」
+			// 就是「这一档还没试完」。试完了才允许下沉。
+			//
+			// ⚠ 与 new-api 的 retry→降档不同：那边一档 = 一组同质的渠道，而
+			//   本仓的档位可以表达**代价**（烧永久额度）。代价不能被重试策略跳过。
+			for idx > 0 && tierHasCandidate(levels[idx-1], cands, tiers) {
+				idx-- // 上一档还有没试过的号 ⇒ 留在那一档，别下沉
 			}
 			if len(levels) > 0 {
 				pickTier := levels[idx]
@@ -1580,14 +1621,53 @@ const idleWeightFullHours = 2.0
 // SetQuota 更新账号额度视图（真相来源）。
 //
 // 同一条路径同时维护派生标量 credits，保证旧消费者（前端/统计/既有测试）继续工作。
+//
+// # 2026-11-01：额度**回来了**就顺手把自动禁用的号解封
+//
+// 用户报障：「monkeycode 会自动封禁账号，并且第二天的免费额度恢复之后不会
+// 重新变成正常的账号」。原因是自动禁用只有两条恢复通道：一次请求成功
+//（号已被摘出候选集 ⇒ 永远等不到）与定期解封探测（默认 24 小时、且配置里
+// 常被关掉）。于是「额度次日恢复」这件**我们本来就会定期观察到**的事实，
+// 反而没有用来解封。
+//
+// 现在补上这条最短的恢复通道：额度刷新（每 3 分钟一轮、覆盖全部账号）拿到
+// **可用**的额度时，若该号是被本机制禁用的，立刻解除。额度查询本身要带凭证
+// 打上游 ⇒ 一次成功的刷新同时证明了「凭证还能用」与「额度已恢复」，
+// 这正是解封需要的两条证据。
+//
+// ⚠ 只在**确实可用**时解封（见 quotaUsable）：HasData=false（没查到）与
+//   额度为 0 都不算 —— 否则一个真的没额度的号会被反复放回池子、每次白跑一趟。
 func (p *Pool) SetQuota(uid string, q QuotaView) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
+	e, ok := p.byUID[uid]
+	if ok {
 		e.quota = q
 		e.credits = q.Effective()
 		p.dirty.Store(true)
 	}
+	p.mu.Unlock()
+	if !ok || !quotaUsable(q) {
+		return
+	}
+	// ⚠ 必须在**放锁之后**调：RecordAutoDisableSuccess 自己要取 p.mu。
+	if p.RecordAutoDisableSuccess(uid) {
+		log.Printf("pool: 额度已恢复，解除自动禁用 uid=%s（可用 %d）", uid, q.Effective())
+	}
+}
+
+// quotaUsable 额度视图是否显示「这个号现在能用」（自动解封的判据）。
+//
+// ⚠ 必须先看 HasData：Remaining 的 0 在「没查到」时也会出现，
+//   把「没查到」当成「可用」会让一个真的没额度的号反复被放回池子。
+// ⚠ 用 **Effective()** 而不是 Remaining：per_model 形态下 Remaining 无意义。
+func quotaUsable(q QuotaView) bool {
+	if !q.HasData {
+		return false
+	}
+	if q.Kind == QuotaKindUnlimited {
+		return true
+	}
+	return q.Effective() > 0
 }
 
 // ApplyQuotaConsumed 把一个账号的额度**减少** units 个显示单位。
