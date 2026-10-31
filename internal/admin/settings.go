@@ -92,6 +92,19 @@ type SettingsStore interface {
 	// Apply 校验并持久化整份补丁；返回运行时已生效的字段名、需要重启才生效的字段名。
 	// 校验失败必须返回 error，且不得写入磁盘。
 	Apply(patch json.RawMessage) (applied []string, needRestart []string, err error)
+	// PersistNow 按**当前内存值**再落盘一次。
+	//
+	// # 为什么需要它（2026-11-01 实测）
+	//
+	// Apply 的落盘发生在**上游应用之前**（顺序是：宿主校验+落盘 → 各上游 ApplySettings），
+	// 因为落盘要读"上游应用后的当前值"，而那时它还没应用 —— 于是写进 config.json 的
+	// 上游值**永远滞后一次保存**。对布尔开关这种滞后不易察觉，但对出口地址这类
+	// "改完要立刻确认"的值，表现是「我明明改回 10808 了，配置文件里还是 9999」——
+	// 重启后又回到错的端口，用户只看到"改了没用"。
+	//
+	// 所以 handler 在上游全部应用之后调一次本方法。不许把它当"可选优化"省掉：
+	// 省掉就是上面那条滞后。
+	PersistNow() error
 }
 
 // SettingField 上游声明的一个设置项（值 + 分类）。
@@ -169,6 +182,14 @@ func (h *Handler) settingsUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		applied = append(applied, upApplied...)
+	}
+	// 上游全部应用完之后**再落一次盘**：Apply 里那次读到的还是应用前的值（见 PersistNow 注释），
+	// 不补这一次，config.json 里的上游设置就永远滞后一次保存。
+	if perr := h.cfg.Settings.PersistNow(); perr != nil {
+		// 落盘失败要如实报错：用户以为存好了、重启后却发现没变，是最难查的一类。
+		log.Printf("admin: 上游设置应用后落盘失败: %v", perr)
+		writeError(w, http.StatusInternalServerError, "保存后写入配置文件失败："+perr.Error())
+		return
 	}
 	log.Printf("admin: 设置已保存，运行时生效=%v 需重启=%v", applied, needRestart)
 	writeJSON(w, http.StatusOK, map[string]any{

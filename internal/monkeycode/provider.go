@@ -82,8 +82,10 @@ type Config struct {
 	Client *Client
 	// AuthDir 凭证目录（AuthDirExt 用）。
 	AuthDir string
-	// Proxy 出口。空 = 直连。
+	// Proxy 国际站出口。空 = 直连（国际站通常必须设）。
 	Proxy string
+	// DirectProxy 强制国内站也走代理。空 = 直连（正常部署就该是空）。
+	DirectProxy string
 	// CheckinLog 签到历史（nil = 不落盘，界面「今日签到」列会空）。
 	CheckinLog *checkinlog.Log
 	// CheckinInterval 自动签到间隔（<=0 = 只给按钮，不自动跑）。
@@ -95,6 +97,11 @@ func New(cfg Config) *Provider {
 	c := cfg.Client
 	if c == nil {
 		c = NewClientWithProxy(cfg.Proxy)
+		// DirectProxy 也要装上（否则配置里设了它、启动后却不生效 ——
+		// 那种「配了没用」最难查，因为界面上看到的值是对的）。
+		if strings.TrimSpace(cfg.DirectProxy) != "" {
+			c.SetProxy(cfg.Proxy, cfg.DirectProxy)
+		}
 	}
 	p := &Provider{
 		client:          c,

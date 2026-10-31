@@ -6408,6 +6408,11 @@ function toast(msg, bad) {
     // "页面能填、保存静默丢弃"：admin.Settings 的字段、settings_store 的
     // parse/persist 清单、Pool 结构体上的 json tag。
     ['setReviveHours', 'pool_revive_probe_hours', 'int'],
+    // MonkeyCode 出口（代理）：字符串型，热生效。
+    // ⚠ 键名 `monkeycode_proxy` / `monkeycode_direct_proxy` 同时是 config.json 里
+    //   monkeycode 段的 proxy / direct_proxy —— 上游自报的键，前端只转发不解释。
+    ['setMcProxy', 'monkeycode_proxy', 'str'],
+    ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
   ];
   let savedSettings = null;
 

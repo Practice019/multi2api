@@ -229,7 +229,7 @@ func insertKeyValueInSection(raw []byte, section, key string, valueJSON []byte) 
 		if at < 0 {
 			return nil, false
 		}
-		insert := []byte("\n  \"" + key + "\": " + string(valueJSON) + ",")
+		insert := []byte("\n  \"" + key + "\": " + string(valueJSON) + emptySectionComma(raw, at))
 		res := make([]byte, 0, len(raw)+len(insert))
 		res = append(res, raw[:at+1]...)
 		res = append(res, insert...)
@@ -239,7 +239,7 @@ func insertKeyValueInSection(raw []byte, section, key string, valueJSON []byte) 
 	// 段存在：插在该段开括号之后。
 	if lo, _, span := sectionSpanIn(raw, section); span {
 		at = lo - 1
-		insert := []byte("\n    \"" + key + "\": " + string(valueJSON) + ",")
+		insert := []byte("\n    \"" + key + "\": " + string(valueJSON) + emptySectionComma(raw, at))
 		res := make([]byte, 0, len(raw)+len(insert))
 		res = append(res, raw[:at+1]...)
 		res = append(res, insert...)
@@ -251,12 +251,63 @@ func insertKeyValueInSection(raw []byte, section, key string, valueJSON []byte) 
 	if at < 0 {
 		return nil, false
 	}
-	insert := []byte("\n  \"" + section + "\": {\n    \"" + key + "\": " + string(valueJSON) + "\n  },")
+	// ⚠ 这个尾逗号同样要判空：顶层对象为空（`{}` 或只有注释）时，每个段都走"段不存在"
+	//   这条路，最后一个插入的 `,` 会紧贴文件末尾的 `}` ⇒ 非法 JSON。
+	//   与空段那个缺陷是**同一族**，实测一起抓到。
+	insert := []byte("\n  \"" + section + "\": {\n    \"" + key + "\": " + string(valueJSON) + "\n  }" + emptySectionComma(raw, at))
 	res := make([]byte, 0, len(raw)+len(insert))
 	res = append(res, raw[:at+1]...)
 	res = append(res, insert...)
 	res = append(res, raw[at+1:]...)
 	return res, true
+}
+
+// emptySectionComma 决定插入项的**尾逗号**：空段里不能有它。
+//
+// # 这是一个真缺陷（2026-11-01 实测）
+//
+// 插入逻辑原本无条件写 `"key": value,`。若那个段/对象**是空的**（`"admin": {}`），
+// 插进去的结果是：
+//
+//	"admin": {
+//	    "checkin_log_keep_days": 0,}      ← 尾逗号紧跟右括号 ⇒ **非法 JSON**
+//
+// 后果不是"这一项没保存"，而是**整份 config.json 下次启动解析失败** —— 用户点一下
+// 「保存设置」就把自己挡在门外。可达路径：用户手写 `"admin": {}`、或把某一段的键全删了
+// （模板里各段都有内容，所以出厂配置不会中；但手写过配置的人会）。
+//
+// 判据：从开括号往后跳空白与注释，如果**第一个有意义的字符就是 `}`**，这一段是空的。
+// 返回 ""（不加逗号）或 ","。
+//
+// ⚠ 自己扫而不是用 stripJSONComments：那个函数会改变下标，而这里必须按**原字节位置**判断。
+func emptySectionComma(raw []byte, openBraceAt int) string {
+	for i := openBraceAt + 1; i < len(raw); i++ {
+		c := raw[i]
+		if isJSONSpace(c) {
+			continue
+		}
+		// 行注释：跳到行尾
+		if c == '/' && i+1 < len(raw) && raw[i+1] == '/' {
+			for i < len(raw) && raw[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		// 块注释：跳到 */
+		if c == '/' && i+1 < len(raw) && raw[i+1] == '*' {
+			i += 2
+			for i+1 < len(raw) && !(raw[i] == '*' && raw[i+1] == '/') {
+				i++
+			}
+			i++
+			continue
+		}
+		if c == '}' {
+			return "" // 空段：不能带尾逗号
+		}
+		break // 段里已有内容 ⇒ 正常加逗号
+	}
+	return ","
 }
 
 // topLevelOpenBrace 返回顶层对象 `{` 的下标（跳过前导空白与注释）。

@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -78,6 +79,17 @@ const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 //
 // 所以这里**按凭证的 region 选**，而不是全局一个。
 type Client struct {
+	// mu 保护下面两个 client 指针与两个出口字符串。
+	//
+	// # 为什么要可变（2026-11-01 用户报「代理配置是写死的，设置里设不了」）
+	//
+	// 原来这两个 client 是**构造时一次性定死**的：代理写在 config.json 里，
+	// 改一次要重启，而设置页根本没有入口。用户的原话是「每个人都不一样」——
+	// 出口地址天然是每台机器各不相同的，必须能在设置页改、并且**立刻生效**
+	//（否则用户改完还得猜「重启了吗/生效了吗」）。
+	//
+	// 锁的粒度：只在取/换指针时加锁，请求本身不带锁（http.Client 自身并发安全）。
+	mu        sync.RWMutex
 	direct    *http.Client // 国内站
 	proxied   *http.Client // 国际站
 	userAgent string
@@ -91,12 +103,43 @@ type Client struct {
 	DirectProxy string
 }
 
-// httpFor 按凭证区域选 http.Client。
+// httpFor 按凭证区域选 http.Client（读锁：SetProxy 可能正在换）。
 func (c *Client) httpFor(a *Auth) *http.Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if a.RegionOrDefault() == RegionIntl {
 		return c.proxied
 	}
 	return c.direct
+}
+
+// SetProxy 热切换出口（空 = 直连）。
+//
+// # 它同时更新四样东西
+//
+//	两个 client（国内站直连 / 国际站走代理）+ 两个出口字符串（Proxy / DirectProxy）。
+//	字符串必须一起更新：netretry 的错误文案与 egress 自检都读它们，只换 client 会让
+//	「错误里写的出口」与「实际用的出口」不一致 —— 那正是这类自检最怕的谎报。
+//
+// ⚠ 旧 client 的**空闲连接**不会立刻关：Transport 里可能还有 keep-alive 连接，
+//   这里不主动 CloseIdleConnections()，因为切换是低频动作，而关掉连接池会让
+//   一笔在途请求失败。下次请求自然走新 transport。
+func (c *Client) SetProxy(proxy, directProxy string) {
+	proxy = strings.TrimSpace(proxy)
+	directProxy = strings.TrimSpace(directProxy)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.direct = &http.Client{Transport: newTransport(directProxy)}
+	c.proxied = &http.Client{Transport: newTransport(proxy)}
+	c.Proxy = proxy
+	c.DirectProxy = directProxy
+}
+
+// ProxyConfig 当前出口（proxy=国际站，directProxy=国内站强制代理）。
+func (c *Client) ProxyConfig() (proxy, directProxy string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Proxy, c.DirectProxy
 }
 
 // NewClient 构造客户端（国际站直连 —— 仅测试用）。

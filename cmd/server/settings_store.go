@@ -44,9 +44,13 @@ type settingsStore struct {
 	path string
 	cfg  *Config
 	sch  *scheduler.Scheduler
-	// up 上游的设置扩展（workbuddy 的成长/旅行开关）。
-	// 为 nil 时上游段全为空 —— 与"该上游没有专属设置"一致。
-	up  UpstreamSettings
+	// ups 各上游的设置扩展（workbuddy 的成长/旅行、monkeycode 的出口代理…）。
+	//
+	// ⚠ 2026-11-01：从**单个**改成**切片**。原来这里只有一个 `up`，于是第二个要落盘的
+	// 上游（monkeycode 的代理）来了之后，它的值根本进不了 config.json ——
+	// 表现是「设置页能填能保存、重启后回到旧值」这种最难查的半生效。
+	// 空切片 = 没有任何上游有专属设置（与改造前逐字同形）。
+	ups []UpstreamSettings
 	log *checkinlog.Log
 	// setLogKeepDays 调整落盘请求日志的保留天数（由 main 注入，避免这里依赖 logbuf）。
 	setLogKeepDays func(int)
@@ -197,6 +201,14 @@ func (s *settingsStore) Apply(patch json.RawMessage) (applied, needRestart []str
 	return applied, needRestart, nil
 }
 
+// PersistNow 按当前内存值再落盘一次（见 admin.SettingsStore 的接口注释）。
+//
+// 调用时机：**所有上游 ApplySettings 之后**。此刻 up.Values() 才是新值，
+// 于是 config.json 里写的就是刚保存的那个值，不再滞后一次。
+func (s *settingsStore) PersistNow() error {
+	return s.persist(s.currentSettings())
+}
+
 // reviveProbeHoursOf 把 config 里的秒换算成设置页展示用的**小时**。
 //
 // # 为什么对外用小时、对内用秒
@@ -323,9 +335,12 @@ func (s *settingsStore) applyToMemory(p admin.Settings) {
 	c.Admin.CheckinLogKeepDays = p.CheckinLogKeepDays
 	c.RequestLogKeepDays = p.RequestLogKeepDays
 	// 上游段：由适配器按自己的键表同步（见 upstreamSettingsAdapter）。
-	if s.up != nil {
-		if a, ok := s.up.(interface{ applyToMemory(map[string]any) }); ok {
-			a.applyToMemory(s.up.Values())
+	for _, up := range s.ups {
+		if up == nil {
+			continue
+		}
+		if a, ok := up.(interface{ applyToMemory(map[string]any) }); ok {
+			a.applyToMemory(up.Values())
 		}
 	}
 }
@@ -429,8 +444,11 @@ func (s *settingsStore) persist(p admin.Settings) error {
 	// "73 行注释全没了" 的直接原因。见 settings_edit.go 的文件头。
 	sets := managedSettingsFor(p)
 	// 上游段：由适配器给出它自己的键值（核心不认识这些键名，也不再列它们）。
-	if s.up != nil {
-		for k, v := range s.up.Values() {
+	for _, up := range s.ups {
+		if up == nil {
+			continue
+		}
+		for k, v := range up.Values() {
 			sets = append(sets, managedSetting{"admin", k, v})
 		}
 	}
@@ -607,14 +625,14 @@ func (s *settingsStore) mirrorOptions(p admin.Settings) {
 
 // newSettingsStore 组装宿主实现。
 //
-// up 是上游的设置扩展适配器（可为 nil —— 该上游没有专属设置）。
-func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler, up UpstreamSettings,
+// ups 是各上游的设置扩展适配器（可空 —— 没有上游声明专属设置时就是空切片）。
+func newSettingsStore(path string, cfg *Config, sch *scheduler.Scheduler, ups []UpstreamSettings,
 	log *checkinlog.Log, setLogKeepDays func(int)) admin.SettingsStore {
 	st := &settingsStore{
 		path:           path,
 		cfg:            cfg,
 		sch:            sch,
-		up:             up,
+		ups:            ups,
 		log:            log,
 		setLogKeepDays: setLogKeepDays,
 	}

@@ -432,6 +432,22 @@ type Config struct {
 		CheckinLogKeepDays int `json:"checkin_log_keep_days"`
 		// OAuthBaseURL 设备授权上游站点，默认 https://copilot.tencent.com（CN）。
 		OAuthBaseURL string `json:"oauth_base_url"`
+		// ---- MonkeyCode 出口（也是**设置页**可改的项，2026-11-01）----
+		//
+		// # 为什么它们住在 admin 段，而不是顶层 monkeycode 段
+		//
+		// 本仓的约定：**设置页能改的上游项**都由 settingsStore 写进 `admin` 段
+		//（先例：growth_auto_claim / travel_auto_claim）。而 `monkeycode.proxy` 是
+		// **手写配置**的位置。两个位置并存过一段时间，实测的后果是：
+		//   设置页保存 → 写 admin.monkeycode_proxy；重启 → 读 monkeycode.proxy（旧值）
+		//   ⇒ 用户看到「改了，重启又回去了」。
+		//
+		// 现在解析时 **admin 段优先、嵌套键作回退**（见 resolve 处），两边都能用：
+		// 手写的配置照旧生效，设置页改过的值重启后也是它。
+		MonkeyCodeProxy string `json:"monkeycode_proxy"`
+		// MonkeyCodeDirectProxy 国内站强制代理（默认空 = 直连）。
+		MonkeyCodeDirectProxy string `json:"monkeycode_direct_proxy"`
+
 		// TravelAutoClaim 猫到站后自动领奖（默认 true）。关闭后只能手动点「领奖」。
 		TravelAutoClaim *bool `json:"travel_auto_claim"`
 		// TravelWatchIntervalSeconds 旅行守卫轮间隔，默认 60；同时是上游未给
@@ -976,7 +992,16 @@ type Config struct {
 		//
 		// ⚠ 国内站**必须直连**：走海外代理既慢又容易触发风控。
 		// 国际站则必须走代理，否则连不上。
+		//
+		// ⚠ 这两项都能在**设置页**改（monkeycode_proxy / monkeycode_direct_proxy，热生效）。
+		//   放在这里是因为「每个人都不一样」：出口地址是每台机器特有的东西，
+		//   把它锁在 config.json 里等于把日常操作变成运维动作。
 		Proxy string `json:"proxy"`
+		// DirectProxy 强制国内站也走代理（默认空 = 直连）。
+		//
+		// ⚠ 只用于「本机无法直连国内站」这类环境；正常部署**不要**设：
+		//   国内站走海外代理既慢又容易触发风控（见上面 Proxy 的注释）。
+		DirectProxy string `json:"direct_proxy"`
 		// PoolAccounts 是否并入核心账号池（默认 true）。
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"monkeycode"`
@@ -1135,6 +1160,7 @@ type Config struct {
 	MonkeyCodeEnabled      bool   `json:"-"`
 	MonkeyCodeAuthDir      string `json:"-"`
 	MonkeyCodeProxy        string `json:"-"`
+	MonkeyCodeDirectProxy  string `json:"-"`
 	MonkeyCodePoolAccounts bool   `json:"-"`
 	ZCodePoolAccounts      bool   `json:"-"`
 	ZCodeJWTCaptcha        bool   `json:"-"`
@@ -1736,7 +1762,12 @@ func (c *Config) normalize() error {
 	//
 	// ⚠ 缺省语义与其余上游一致：**段缺席 = 启用**（upstreamEnableDefault = true）。
 	c.MonkeyCodeEnabled = true
-	c.MonkeyCodeProxy = strings.TrimSpace(c.MonkeyCode.Proxy)
+	// 出口：**设置页那份（admin 段）优先**，手写的嵌套键作回退。
+	//
+	// ⚠ 顺序不能反：反了就会出现"设置页改了、重启又回去"（实测过，见 Admin 段的注释）。
+	// 用 firstNonEmpty 而不是直接覆盖，是为了兼容"只在 monkeycode 段里手写"的老配置。
+	c.MonkeyCodeProxy = firstNonEmpty(strings.TrimSpace(c.Admin.MonkeyCodeProxy), strings.TrimSpace(c.MonkeyCode.Proxy))
+	c.MonkeyCodeDirectProxy = firstNonEmpty(strings.TrimSpace(c.Admin.MonkeyCodeDirectProxy), strings.TrimSpace(c.MonkeyCode.DirectProxy))
 	// 凭证目录：留空则用 `<auth_dir>/monkeycode`（与其余上游同款回落）。
 	c.MonkeyCodeAuthDir = strings.TrimSpace(c.MonkeyCode.AuthDir)
 	if c.MonkeyCodeAuthDir == "" {

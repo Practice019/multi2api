@@ -198,8 +198,14 @@ ok(!!restart, '「网络与容错」组存在（原「需要重启才生效」�
 if (restart) {
   const k = fieldKinds(restart.body);
   ok(isSeparated(k), '「网络与容错」组内不交叉（顺序 = ' + (k.join(' ') || '(空)') + '）');
-  ok(k.filter(x => x === 'CHK').length === 0 && k.filter(x => x === 'IN').length === 1,
-    '「网络与容错」只留 1 个可编辑输入框（实际 ' + k.filter(x => x === 'CHK').length + ' 复选框 / ' + k.filter(x => x === 'IN').length + ' 输入框）');
+  // ⚠ 2026-11-01：1 → 3 个输入框。新增的两个是 **MonkeyCode 的出口（代理）**：
+//   用户报「这个代理的配置是写死的吧？设置里面都设置不了」—— 出口地址天然每台机不同，
+//   必须能在设置页改。它们与上面那个通用超时不同（一个通用需重启、两个专属热生效），
+//   所以拆成两条判据：通用 1 个 + 出口 2 个，谁少了都会红。
+ok(k.filter(x => x === 'CHK').length === 0 && k.filter(x => x === 'IN').length === 3,
+    '「网络与容错」= 1 个通用输入框 + 2 个出口输入框（实际 ' + k.filter(x => x === 'CHK').length + ' 复选框 / ' + k.filter(x => x === 'IN').length + ' 输入框）');
+ok(/id="setMcProxy"/.test(restart.body) && /id="setMcDirectProxy"/.test(restart.body),
+    '两个出口输入框在场（#setMcProxy / #setMcDirectProxy）—— 代理必须能在设置里改');
   ok(restart.badge === '重启生效', '「网络与容错」的生效时机由徽章承载（实际 ' + JSON.stringify(restart.badge) + '）');
   ok(/id="setSanitizeRO"/.test(restart.body), '指纹脱敏改为只读展示 #setSanitizeRO（c1cb20f：3 项只读之一）');
 }
@@ -218,14 +224,14 @@ if (rz) {
     '「历史与日志」仍是 0 复选框 + 2 输入框（实际 ' + k.filter(x => x === 'CHK').length + '/' + k.filter(x => x === 'IN').length + '）');
 }
 const allKinds = fieldKinds(sec);
-ok(allKinds.filter(x => x === 'CHK').length === 4 && allKinds.filter(x => x === 'IN').length === 4,
-  '全局 .field = 4 复选框 + 4 输入框 = 8（实际 ' + allKinds.length + '）；第 4 个输入框是 setReviveHours');
+ok(allKinds.filter(x => x === 'CHK').length === 4 && allKinds.filter(x => x === 'IN').length === 6,
+  '全局 .field = 4 复选框 + 6 输入框 = 10（实际 ' + allKinds.length + '）；第 4 个是 setReviveHours、第 5/6 个是 MonkeyCode 的两个出口');
 
 // ---------- B. 容器完整性 ----------
 console.log('\n[B] 每个 .field 都落在容器内，且容器内类型单一');
 const g = countContainers(sec);
 ok(g.total > 0, '解析到 .field 总数 = ' + g.total + '（>0 才说明解析有效）');
-ok(g.containers === 4, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 4（1 个 checks + 3 个 formgrid）');
+ok(g.containers === 5, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 5（1 个 checks + 4 个 formgrid：成长 / 历史与日志 / 网络与容错通用 / MonkeyCode 出口）');
 ok(g.ungrouped === 0, '未落在任何容器内的 .field = ' + g.ungrouped + '（期望 0）');
 ok(g.grouped === g.total, '容器内覆盖 ' + g.grouped + '/' + g.total);
 // 容器内类型单一 = 「不交叉」的结构性证据。它比"翻转次数"更本质：
@@ -235,7 +241,11 @@ ok(g.mixed === 0, '类型混合的容器 = ' + g.mixed + '（期望 0）');
 // 字段裸露在 fieldset 下（容器 0 个），或把同类控件又拆成多个容器（>1 个）。
 for (const s of named) {
   const n = (s.body.match(/<div class="(?:fieldgroup[^"]*|formgrid)">/g) || []).length;
-  ok(n === 1, '「' + s.base + '」恰好 1 个容器（实际 ' + n + '）');
+  // ⚠ 2026-11-01：「网络与容错」现在有**两个**容器（通用旋钮 1 个 + MonkeyCode 出口 1 个）。
+  //   其余含字段组仍是 1 个 —— 所以判据按组名给期望：出口那一组是有意拆开的
+  //   （通用旋钮需重启、出口热生效，混在一个容器里会让「要不要重启」变模糊）。
+  const want = (s.base || '').startsWith('网络与容错') ? 2 : 1;
+  ok(n === want, '「' + s.base + '」恰好 ' + want + ' 个容器（实际 ' + n + '）');
 }
 
 // ---------- B2. 行级复核：每个容器内部类型必须单一 ----------
@@ -267,7 +277,7 @@ for (let i = lstart; i < lend; i++) {
   }
 }
 ok(lstart >= 0 && lend > lstart, '行级扫描区间有效（' + lstart + ' → ' + lend + '，锚点 <section data-key="settings"> → <div id="modal">）');
-ok(lmembers.length === 4, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 4');
+ok(lmembers.length === 5, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 5');
 ok(lorphan.length === 0, '行级扫描：不在任何容器内的 .field = ' + lorphan.length + '（期望 0）');
 let mixed = 0;
 for (let i = 0; i < lmembers.length; i++) {
@@ -277,7 +287,7 @@ for (let i = 0; i < lmembers.length; i++) {
 ok(mixed === 0, '每个容器内类型单一（混合的 = ' + mixed + '）');
 // 行级与区间法必须给出同样的字段总数，否则说明有一种解析是错的
 const ltotal = lmembers.reduce((a, m) => a + m.fields.length, 0) + lorphan.length;
-ok(ltotal === 8, '行级扫描字段总数 = ' + ltotal + '，期望 8（与 [A] 的全局 .field 口径互相对上）');
+ok(ltotal === 10, '行级扫描字段总数 = ' + ltotal + '，期望 10（与 [A] 的全局 .field 口径互相对上）');
 ok(ltotal === g.total, '行级与区间法字段总数一致（' + ltotal + ' vs ' + g.total + '）');
 
 // ---------- C. 零漂移 ----------
@@ -292,7 +302,10 @@ const now = allFieldIds(sec);
 const NOW_IDS = ['setGrowthMakeup', 'setGrowthRedeem', 'setGrowthOpen', 'setGrowthDraw',
   'setCheckinLogDays', 'setReqLogDays', 'setUpTimeout',
   // 2026-11-01 新增：账号解封探测的小时数（后端 pool_revive_probe_hours）。
-  'setReviveHours'];
+  'setReviveHours',
+  // 2026-11-01 新增：MonkeyCode 的两个出口（后端 monkeycode_proxy / monkeycode_direct_proxy）。
+  // 用户报「代理配置写死了、设置里设不了」—— 见 webui.html 里那段注释。
+  'setMcProxy', 'setMcDirectProxy'];
 ok(base.length === 27, '旧基线 id 数 = ' + base.length + '，期望 27（重设计前快照，仍是文件级契约）');
 ok(now.length === NOW_IDS.length, '当前 id 数 = ' + now.length + '，期望 ' + NOW_IDS.length);
 const missing = NOW_IDS.filter(x => !now.includes(x));
@@ -309,7 +322,7 @@ ok(now.slice().sort().join(',') === NOW_IDS.slice().sort().join(','), 'id 集合
 //
 //   本次新增：setReviveHours —— 账号解封探测的小时数，对应后端
 //   pool.revive_probe_interval_seconds。在此之前用户只能改配置文件才能关掉/调整它。
-const ADDED_AFTER_BASELINE = ['setReviveHours'];
+const ADDED_AFTER_BASELINE = ['setReviveHours', 'setMcProxy', 'setMcDirectProxy'];
 const notInOld = now.filter(x => !base.includes(x) && !ADDED_AFTER_BASELINE.includes(x));
 ok(notInOld.length === 0, '当前 id 均已登记（旧基线沿用 + 已登记新增；未登记的: ' + (notInOld.length ? notInOld.join(', ') : '(无)') + '）');
 //

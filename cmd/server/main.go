@@ -1042,8 +1042,9 @@ func main() {
 	var mk *monkeycode.Provider
 	if cfg.MonkeyCodeEnabled {
 		mk = monkeycode.New(monkeycode.Config{
-			AuthDir: cfg.MonkeyCodeAuthDir,
-			Proxy:   cfg.MonkeyCodeProxy,
+			AuthDir:     cfg.MonkeyCodeAuthDir,
+			Proxy:       cfg.MonkeyCodeProxy,
+			DirectProxy: cfg.MonkeyCodeDirectProxy,
 			// 签到历史 + 自动签到节奏：与 workbuddy / lobsterai **同一个**
 			// checkinLog 与同一个间隔（用户要求所有上游统一）。
 			//
@@ -1260,6 +1261,9 @@ func main() {
 	// Task 3c 之后它只剩**设置项**一条线：账号级业务（成长/旅行/额度）的
 	// 22 个管理端点已经由 workbuddy 自己通过 AdminExt 注册，不再经核心转发。
 	upSettings := newUpstreamSettingsAdapter(wb, cfg)
+	// monkeycode 的出口（代理）也在设置页里可改 —— 用户报「代理配置写死了、设置里设不了」。
+	// 它与 workbuddy 那个适配器同一形状，只是键不同（见 upstream_settings_monkeycode.go）。
+	mcSettings := newMonkeycodeSettingsAdapter(mk, cfg)
 
 	// ── 凭据根（authsRoot）───────────────────────────────────────────────
 	//
@@ -1691,11 +1695,11 @@ func main() {
 		// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
 		// （各自声明，互不 import），方法集精确匹配会静默失败
 		// —— 表现成设置页少几个键且没有任何报错。
-		SettingsExts:      []admin.SettingsExt{upSettings},
+		SettingsExts:      []admin.SettingsExt{upSettings, mcSettings},
 		ResetModelsCache:  server.ResetModelsCache,
 		ModelCatalog:      server.ModelCatalogFor,
 		ModelCatalogState: modelCatalogState,
-		Settings: newSettingsStore(*cfgPath, cfg, sch, upSettings, checkinLog, func(days int) {
+		Settings: newSettingsStore(*cfgPath, cfg, sch, []UpstreamSettings{upSettings, mcSettings}, checkinLog, func(days int) {
 			if s := logRing.Sink(); s != nil {
 				s.SetKeepDays(days)
 			}

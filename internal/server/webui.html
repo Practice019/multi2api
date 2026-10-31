@@ -3791,6 +3791,23 @@ function mpEsc(s) {
         <div class="formgrid">
           <div class="field"><label>上游请求超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
         </div>
+        <!-- MonkeyCode 的两个出口（2026-11-01 用户要求：这东西不能写死）。
+             # 为什么必须能改
+             出口地址天然是**每台机器各不相同**的（本地代理端口、公司网关、直连…），
+             而它原先只能改 config.json（改完还得重启）—— 等于把日常操作变成运维动作。
+             现在改完**立刻生效**（换 http.Client 的 transport），可用「账号池 → 出口自检」当场验证。
+             # 为什么不与「上游请求超时」挤在一行
+             那一个是通用旋钮（对所有上游生效、需重启），这两个是 MonkeyCode 专属且热生效；
+             并排会让「改完要不要重启」这个最要紧的信息变模糊。 -->
+        <div class="subgroup">MonkeyCode 出口 <span class="badge badge--hot">立即生效</span></div>
+        <div class="formgrid">
+          <div class="field"><label>国际站代理（monkeycode-ai.net）</label>
+            <input type="text" id="setMcProxy" placeholder="http://127.0.0.1:10808，留空=直连">
+            <span class="hint">国际站**必须**走代理才能连上（国内站与该站网络前提相反）。改完可到「账号池 → 出口自检」验证。</span></div>
+          <div class="field"><label>国内站强制代理（monkeycode-ai.com）</label>
+            <input type="text" id="setMcDirectProxy" placeholder="留空 = 直连（正常部署就该留空）">
+            <span class="hint">只有「本机连不上国内站」时才填。走了海外代理的国内站既慢又容易被风控。</span></div>
+        </div>
         <div class="subgroup">出站请求安全</div>
         <div class="info-line" style="margin-bottom:0">指纹脱敏：<span id="setSanitizeRO">…</span></div>
       </fieldset>
@@ -10330,6 +10347,11 @@ function toast(msg, bad) {
     // "页面能填、保存静默丢弃"：admin.Settings 的字段、settings_store 的
     // parse/persist 清单、Pool 结构体上的 json tag。
     ['setReviveHours', 'pool_revive_probe_hours', 'int'],
+    // MonkeyCode 出口（代理）：字符串型，热生效。
+    // ⚠ 键名 `monkeycode_proxy` / `monkeycode_direct_proxy` 同时是 config.json 里
+    //   monkeycode 段的 proxy / direct_proxy —— 上游自报的键，前端只转发不解释。
+    ['setMcProxy', 'monkeycode_proxy', 'str'],
+    ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
   ];
   let savedSettings = null;
 
