@@ -78,6 +78,11 @@ type freePool struct {
 	needRecheck map[string]bool
 	// filling 启动填充是否已经在跑（幂等）。
 	filling bool
+	// refilledDay 本自然日是否已经跑过"跨日重填"（幂等，见 refillOnNewDay）。
+	//
+	// 空串 = 还没跑过。与 day 配对使用：day 变了 ⇒ resetIfNewDay 把它清成空
+	// ⇒ 下一次请求路径上的选号会看到"本日还没重填"并触发一次后台重填。
+	refilledDay string
 	// sweepOnce 定期清扫只启动一次（幂等）。
 	sweepOnce sync.Once
 }
@@ -91,6 +96,9 @@ func newFreePool() *freePool {
 		checkedAt:   map[string]time.Time{},
 		failAt:      map[string]time.Time{},
 		needRecheck: map[string]bool{},
+		// 启动时由 StartFreePoolFill 填充，所以初始化就标记"本日已重填"，
+		// 避免启动瞬间又触发一次跨日重填（那是重复的 44 次上游查询）。
+		refilledDay: naturalDay(time.Now()),
 	}
 }
 
@@ -115,14 +123,30 @@ func (f *freePool) resetIfNewDay(now time.Time) {
 		return
 	}
 	f.day = d
-	f.have = map[string]bool{}
+	// ⚠⚠ have **保留**（2026-11-02 修，用户实测"还是会烧永久额度"的真正根因）。
+	//
+	// 清空 have 的旧行为在跨日那一刻把池子变成空集，而 CandidateTiers 的
+	// empty 判据是 len(have)==0 && len(zero)>0 ⇒ 只要随后任何一次查询把
+	// zero 填上，empty 就成立 ⇒ **全体 tierFree ⇒ 所有号同档 ⇒ 加权随机 ⇒
+	// 烧永久额度**。而真实情况是：今天刚开始，绝大多数号**还有**免费额度，
+	// 我们只是"还没重新确认过"。
+	//
+	// 保留名单的语义是如实的：这些号**昨天**有免费额度，今天大概率也有
+	// （赠送额度按自然日重置而不是清零）。它们会落 tierUnsure —— 不构成
+	// 强偏好，但**不会**被当成"池子空了所以可以烧永久"。
+	// 真正的确认由 refillOnNewDay 在后台补齐（见下）。
+	//
+	// zero 必须清：昨天用完的号今天可能又有（这是 resetIfNewDay 存在的
+	// 本来理由，不能因为上面那条把这个理由弄丢）。
 	f.zero = map[string]bool{}
 	// free 也要清：它是"今日赠送剩余"的绝对值，跨天必须重新取
-	//（昨天的余额今天不成立），不能凭一个过期的基准做减法。
+	//（昨天的余额今天不成立，不能凭一个过期的基准做减法）。
 	f.free = map[string]int64{}
 	f.checkedAt = map[string]time.Time{}
 	f.failAt = map[string]time.Time{}
 	f.needRecheck = map[string]bool{}
+	// 标记"本日需要重填一次"，由 Provider 侧的后台 worker 消费。
+	f.refilledDay = ""
 }
 
 // noteQuota 记录一次**成功的**余额查询结果（daily = 今日赠送剩余）。
@@ -333,6 +357,108 @@ func (p *Provider) StartFreePoolFill() {
 			"（池子里的账号会被优先选用；池子空了才动永久额度）", okN, len(refs))
 		p.drainRecheck()
 	}()
+}
+
+// needRefillToday 本自然日是否还没重填（跨日之后为 true）。
+//
+// 调用方不必持锁。**只读判断**，不产生任何副作用 —— 真正的触发在
+// Provider 侧（refillOnNewDay），这样"读池子"这条纯内存契约不被破坏。
+func (f *freePool) needRefillToday(now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetIfNewDay(now)
+	return f.refilledDay != f.day
+}
+
+// markRefilled 标记"本自然日的重填已经跑过"（幂等）。
+func (f *freePool) markRefilled(now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetIfNewDay(now)
+	f.refilledDay = f.day
+}
+
+// hasRefilledToday 本自然日的重填是否已经完成（只读，供 empty 判据用）。
+//
+// ⚠ 语义是"**今天已经确认过一轮**"，不是"池子非空"：
+//
+//	false ⇒ 我们只是**还不知道**有多少号有免费额度 ⇒ 不许宣布"可以烧永久"
+//	true  ⇒ 今天查过一遍了，此时 have 仍空才是真的"都用完了"
+func (f *freePool) hasRefilledToday(now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetIfNewDay(now)
+	return f.refilledDay == f.day
+}
+
+// readyToRefill 尝试**抢占**本次重填（返回 true = 由调用方负责跑）。
+//
+// 与 markRefilled 的区别：它在同一个锁里"检查 + 占位"，所以并发进来的
+// 多个请求只会有一个拿到 true —— 这就是"不会变成查询洪水"的保证点。
+func (f *freePool) readyToRefill(now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resetIfNewDay(now)
+	if f.refilledDay == f.day {
+		return false // 今天已经填过（或启动填充已覆盖）
+	}
+	f.refilledDay = f.day // 先占位：并发调用者会看到"已填"
+	return true
+}
+
+// refillOnNewDay 跨自然日之后把池子重填一遍（**后台**，绝不在请求路径同步查）。
+//
+// # 为什么需要它（用户实测"还是会烧永久额度"的真正根因，2026-11-02）
+//
+// resetIfNewDay 把池子按自然日清空是对的（昨天额度今天不成立），但
+// StartFreePoolFill **只在启动时跑一次** —— 于是跨日之后池子永远是空的，
+// 直到有人手点「刷新额度」。空池子在 CandidateTiers 里一路走到 empty
+// 分支（"全体放开"）⇒ 所有号同档 ⇒ 加权随机 ⇒ **烧永久额度**。
+//
+// 用户看到的就是这个：早上第一波请求全在动永久积分。
+//
+// # 为什么不会变成查询洪水（三道闸）
+//
+//	① `readyToRefill` 在**同一把锁里**"检查 + 占位"⇒ 并发进来的 N 个请求
+//	   只有一个能跑，且每个自然日最多一次。
+//	② 串行 + 每号 200ms 间隔（照 StartFreePoolFill）⇒ 不打崩上游
+//	   （实测 12 条并发打 /points/records 就开始 502）。
+//	③ 只在**跨日的第一次选号**触发 —— 空闲部署一个请求都不发。
+func (p *Provider) refillOnNewDay() {
+	if p == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("loomy: 跨日重填 panic（已忽略）: %v", r)
+			}
+		}()
+		refs := p.accounts()
+		okN := 0
+		for _, a := range refs {
+			// 复用 RefreshQuota：它查一次余额、写档位缓存、并喂给池子。
+			// 不另写一条查询路径（两条路径迟早会不一致）。
+			if _, ok := p.RefreshQuota(a.UID); ok {
+				okN++
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		log.Printf("loomy: 跨日重填完成 %d/%d 个账号（新的一天重新确认免费额度）", okN, len(refs))
+	}()
+}
+
+// maybeRefillOnNewDay 选号路径上的**只读**触发器：跨日且今天还没填过 → 起一次后台重填。
+//
+// ⚠ 它本身**不发任何上游请求**（只读内存标记 + 起 goroutine），所以
+// 「选号路径纯内存」那条性能契约仍然成立（有测试钉着）。
+func (p *Provider) maybeRefillOnNewDay(now time.Time) {
+	if p == nil {
+		return
+	}
+	if p.pool().readyToRefill(now) {
+		p.refillOnNewDay()
+	}
 }
 
 // drainRecheck 后台把"用过、需要重查"的账号按节流查掉。

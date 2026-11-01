@@ -28,7 +28,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -230,6 +232,14 @@ func (p *Provider) execGenerateImage(ctx context.Context, uid string, args json.
 	if resp.PointsConsumed != nil {
 		points = fmt.Sprintf("（消耗 %v 积分）", resp.PointsConsumed)
 	}
+	// ⚠ 喂免费额度池：生图同样消耗积分（points_consumed 在回执顶层）。
+	//
+	// 以前这里只把数值塞进 Artifact 给客户端看，**没有**告诉池子 —— 于是扣了
+	// 免费额度但池子不知道，那个号仍被当作"还有免费额度"优先选中，继续烧
+	// **永久**额度。这是本次修的漏扣（另一处在 execWebSearch 的返回前）。
+	if n, ok := pointsOf(resp.PointsConsumed); ok && n > 0 {
+		p.pool().noteConsumed(uid, n, time.Now())
+	}
 
 	return gateway.ChatToolResult{
 		OK: true,
@@ -256,6 +266,50 @@ func (p *Provider) execGenerateImage(ctx context.Context, uid string, args json.
 			"points_consumed": resp.PointsConsumed,
 		}},
 	}, nil
+}
+
+// pointsOf 把上游回执里的 points_consumed（JSON 原样，any）转成积分整数。
+//
+// # 为什么需要它
+//
+// 两处工具回执都把这个字段**原样当 any 收下**（见 imagegen 的 resp 与
+// parseSearchPages 的 doc）：JSON 里可能是 1（数字）、1.0（浮点）、"1"（字符串），
+// 三种都实测出现过。直接类型断言会 panic 或漏算。
+//
+// # 为什么返回 (int64, bool) 而不是 int64
+//
+// 拿不到就是"不知道消耗了多少"，调用方必须能区分「0 积分」与「没读到」——
+// 前者是有效信息（这次没扣），后者必须什么都不做（见 noteConsumed 的
+// "不知道绝对值就什么都不做"那条纪律）。
+func pointsOf(v any) (int64, bool) {
+	switch t := v.(type) {
+	case nil:
+		return 0, false
+	case float64:
+		return int64(t), true
+	case int64:
+		return t, true
+	case int:
+		return int64(t), true
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n, true
+		}
+		return 0, false
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, false
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n, true
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return int64(f), true
+		}
+		return 0, false
+	}
+	return 0, false
 }
 
 // imageProbeClient 探测用 HTTP 客户端（与出站共用同一个，便于测试注入）。
@@ -318,7 +372,7 @@ func (p *Provider) execWebSearch(ctx context.Context, uid string, args json.RawM
 	}
 
 	// 把上游的 Pages 摘成模型能读的条目列表。
-	pages, points, perr := parseSearchPages(raw)
+	pages, points, pointsNum, perr := parseSearchPages(raw)
 	if perr != nil {
 		return gateway.ChatToolResult{
 			OK:      false,
@@ -354,6 +408,13 @@ func (p *Provider) execWebSearch(ctx context.Context, uid string, args json.RawM
 		b.WriteString("\n")
 	}
 	b.WriteString("请基于以上结果回答用户，并在合适处引用来源编号。")
+
+	// ⚠ 喂免费额度池：搜索同样消耗积分，以前这里只把数值塞进 Artifact 给客户端看，
+	// **没有**告诉池子 —— 于是扣了额度但池子不知道，那个号仍留在"还有免费额度"里
+	// 被优先选中，继续烧永久额度。这是本次修的漏扣（另一处在 execGenerateImage）。
+	if pointsNum > 0 {
+		p.pool().noteConsumed(uid, pointsNum, time.Now())
+	}
 
 	return gateway.ChatToolResult{
 		OK:      true,
@@ -404,7 +465,7 @@ type searchPage struct {
 // ⚠ 实测**成功响应里根本没有 `code` 字段**（只有 Pages/Query/RequestId/
 // Version/points_consumed）。所以这个判据是"只在有 code 时才检查" ——
 // 写成"code 必须等于 000000 才算成功"会让每一次成功调用都被判失败。
-func parseSearchPages(raw []byte) ([]searchPage, string, error) {
+func parseSearchPages(raw []byte) ([]searchPage, string, int64, error) {
 	var doc struct {
 		Pages []map[string]any `json:"Pages"`
 		// 业务错误信封（实测成功时不存在这两个字段）。
@@ -415,7 +476,7 @@ func parseSearchPages(raw []byte) ([]searchPage, string, error) {
 		PointsConsumed any `json:"points_consumed"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	// 与客户端同一条判据：有 code 且不是 000000 → 业务错误。
 	if doc.Code != "" && doc.Code != searchOKCode {
@@ -426,12 +487,20 @@ func parseSearchPages(raw []byte) ([]searchPage, string, error) {
 		if msg == "" {
 			msg = "未知错误"
 		}
-		return nil, "", fmt.Errorf("腾讯搜索服务错误 %s: %s", doc.Code, msg)
+		return nil, "", 0, fmt.Errorf("腾讯搜索服务错误 %s: %s", doc.Code, msg)
 	}
 
+	// pointsText 给模型看（"消耗 N 积分"），pointsNum 喂免费额度池。
+	//
+	// ⚠ 两者**必须都从同一个字段来**：只取文本、不取数值，就是这次要修的漏扣
+	//（搜索消耗了免费额度，但池子不知道，于是那个号继续被优先选中、继续烧永久额度）。
 	points := ""
+	var pointsNum int64
 	if doc.PointsConsumed != nil {
 		points = fmt.Sprintf("%v", doc.PointsConsumed)
+		if n, ok := pointsOf(doc.PointsConsumed); ok {
+			pointsNum = n
+		}
 	}
 	out := make([]searchPage, 0, len(doc.Pages))
 	for _, m := range doc.Pages {
@@ -446,7 +515,7 @@ func parseSearchPages(raw []byte) ([]searchPage, string, error) {
 			Date:    firstStringField(m, "date"),
 		})
 	}
-	return out, points, nil
+	return out, points, pointsNum, nil
 }
 
 // searchOKCode 是搜索服务的成功码（照抄客户端）。

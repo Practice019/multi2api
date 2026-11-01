@@ -274,3 +274,98 @@ func utf8Len(s string) int {
 	}
 	return n
 }
+
+// TestArmorAppendKeepsClientPromptVerbatim append 模式下客户端 system 必须**逐字**保留在开头。
+//
+// # 为什么要这条（用户实测报告 D:\UserData\Desktop\数据导出\中转站注入问题报告.md）
+//
+// replace 模式把调用方 system 整体覆盖，实测后果：要求「你是麦麦，回复10字以内」被无视
+// （返回 40+ 字）、「只输出 JSON」变成 Markdown、JSON Schema 选择器连续 7 次返回空数组
+// （HTTP 200 + 合法 JSON，**静默失败**）。本测试钉住 append 不会重演这件事：
+// 客户端原文必须原封不动出现在输出**开头**。
+func TestArmorAppendKeepsClientPromptVerbatim(t *testing.T) {
+	// 带前导/尾随空白的原文：实现会 TrimSpace，但**内容**一个字符都不能少。
+	client := "你是麦麦。只回复 10 字以内，且只输出 JSON：{\"ok\":true}"
+	got, changed := ApplyArmor(client, ArmorConfig{Mode: ArmorAppend})
+	if !changed {
+		t.Fatal("append 模式应当报告改动了文本")
+	}
+	if !strings.HasPrefix(got, client) {
+		t.Errorf("客户端 system 必须逐字出现在开头。\n want 前缀=%q\n got=%q",
+			client, got[:min(len(got), len(client)+40)])
+	}
+	if strings.Count(got, client) != 1 {
+		t.Errorf("客户端原文出现 %d 次，want 1（重复注入会叠加）", strings.Count(got, client))
+	}
+	if !strings.Contains(got, armorStart) || !strings.Contains(got, armorEnd) {
+		t.Error("破甲块必须带幂等标记")
+	}
+}
+
+// TestArmorAppendEmptyClientHasNoLeadingBlank append 且客户端 system 为空时，
+// 输出不该以空行开头（既有行为，钉住防止将来"补空行"把提示词弄脏）。
+func TestArmorAppendEmptyClientHasNoLeadingBlank(t *testing.T) {
+	for _, client := range []string{"", "   ", "\n\n\t "} {
+		got, _ := ApplyArmor(client, ArmorConfig{Mode: ArmorAppend})
+		if got != strings.TrimSpace(got) {
+			t.Errorf("client=%q 时输出不该有前后空白，got 开头=%q", client, got[:min(len(got), 20)])
+		}
+		if !strings.HasPrefix(got, armorStart) {
+			t.Errorf("client=%q 时输出应当以破甲块开头，got=%q", client, got[:min(len(got), 40)])
+		}
+	}
+}
+
+// TestArmorReplaceDropsClientPromptExplicitly replace 会**丢掉**客户端原文 ——
+// 这是该模式的破坏性语义，写成测试是为了让它不可被误改成"保留"。
+//
+// ⚠ 用户实测报告里那些静默失败（JSON Schema 返回空数组）就是这个语义造成的。
+// 默认值必须留在 off，设置页把 replace 标为高风险。
+func TestArmorReplaceDropsClientPromptExplicitly(t *testing.T) {
+	client := "你是麦麦。只回复 10 字以内。"
+	got, changed := ApplyArmor(client, ArmorConfig{Mode: ArmorReplace})
+	if !changed {
+		t.Fatal("replace 应当报告改动")
+	}
+	if strings.Contains(got, client) {
+		t.Error("replace 模式**必须**丢弃客户端原文（这是它的语义；若要保留请用 append）")
+	}
+	if strings.Contains(got, "麦麦") {
+		t.Error("replace 输出里不该残留客户端人格字样")
+	}
+	if !strings.HasPrefix(got, armorStart) {
+		t.Error("replace 输出应当就是破甲块")
+	}
+}
+
+// TestStripArmorBlockDoesNotEatUserText 用户文本里出现**半个**标记时，
+// 剥旧块逻辑不许把用户自己的内容整段吃掉。
+//
+// # 为什么值得单独钉
+//
+// stripArmorBlock 的截断分支是「只有开标记没有闭标记 ⇒ 从这里切到结尾」。
+// 那是为**我们自己**被截断的注入块设计的；但如果客户端 system 里恰好有
+// 这个字样（例如用户在讨论这套机制），把用户正文切掉就是数据损坏。
+// 本测试明确记录当前取舍：**只认成对标记**才剥。
+func TestStripArmorBlockDoesNotEatUserText(t *testing.T) {
+	// ① 成对标记（我们自己的块）⇒ 应当被剥掉
+	own := "客户端原文"
+	withBlock := own + "\n\n" + armorStart + "\n破甲正文\n" + armorEnd
+	if got := stripArmorBlock(withBlock); strings.Contains(got, armorStart) || strings.Contains(got, "破甲正文") {
+		t.Errorf("成对标记应当被剥掉，got=%q", got)
+	} else if !strings.Contains(got, own) {
+		t.Errorf("剥块不该动客户端原文，got=%q", got)
+	}
+
+	// ② 只有开标记（用户自己在讨论这套机制）⇒ **必须**保留用户文本
+	userText := "我们讨论一下 " + armorStart + " 这个标记是干什么用的"
+	if got := stripArmorBlock(userText); got != userText {
+		t.Errorf("只有开标记时必须原样保留（否则会吃掉用户正文）\n want=%q\n got=%q", userText, got)
+	}
+
+	// ③ 完全没有标记 ⇒ 原样
+	plain := "普通 system，没有任何标记"
+	if got := stripArmorBlock(plain); got != plain {
+		t.Errorf("无标记时必须原样返回，got=%q", got)
+	}
+}

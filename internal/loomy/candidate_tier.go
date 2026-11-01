@@ -185,6 +185,9 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 		return nil
 	}
 	now := time.Now()
+	// 跨日的第一次选号：起一次**后台**重填（本函数仍然是纯内存的 ——
+	// 这里只读标记 + 起 goroutine，不发上游请求，见 maybeRefillOnNewDay）。
+	p.maybeRefillOnNewDay(now)
 	have, zero := p.pool().snapshot(now)
 
 	out := make(map[string]int, len(uids))
@@ -197,7 +200,19 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 	// 一个账号都还没查过时 have 也是空的，但那时**不能**说"免费额度用完了"
 	// —— 那会正好烧在用户最不想烧的地方（启动后第一波请求）。
 	// 那种情况落 tierUnsure（不确定），不构成偏好，但也不"确认可以烧"。
-	empty := len(have) == 0 && len(zero) > 0
+	//
+	// ⚠⚠ 2026-11-02 追加一条：**跨日之后、重填完成之前不算 empty**。
+	//
+	// 旧判据只有 len(have)==0 && len(zero)>0，而 resetIfNewDay 会把 have 清空
+	// ⇒ 跨日后的第一波请求直接命中 empty ⇒ "全体放开" ⇒ 所有号同档 ⇒
+	// **随机烧永久额度**。用户报的"早上还是烧永久"就是这条。
+	//
+	// 现在 have 跨日保留（见 resetIfNewDay），这条判据是对**第二重**保险：
+	// 万一 have 因为别的原因空了，只要本日还没重填完成，就不能宣布
+	// "池子空了、可以烧永久" —— 我们只是**还不知道**。
+	//
+	// 反过来说：重填跑完之后若 have 仍然空，那才是真的"所有号都没免费额度了"。
+	empty := len(have) == 0 && len(zero) > 0 && p.pool().hasRefilledToday(now)
 
 	for _, uid := range uids {
 		if uid == "" {

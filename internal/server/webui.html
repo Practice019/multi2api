@@ -3795,13 +3795,22 @@ function mpEsc(s) {
              三档模式的语义见 internal/prompt/armor.go：off / append / replace。 -->
         <div class="formgrid">
           <div class="field"><label>破甲注入</label>
+            <!-- 默认仍是 off（config.go 的 normalize 与适配器都以 ArmorOff 兜底）。
+                 这里只把**推荐项**与**风险**写清楚 —— 默认不许擅自改成 append：
+                 注入会改变每一条出站请求，装上就开等于替用户做了决定。 -->
             <select id="setArmorMode">
-              <option value="off">关闭（不注入）</option>
-              <option value="append">追加（保留客户端人格，后附破甲条款）</option>
-              <option value="replace">替换（用破甲人设整个替换客户端 system）</option>
+              <option value="off">关闭（不注入，默认）</option>
+              <option value="append">追加（保留你的 system，破甲条款附在后面）—— 推荐</option>
+              <option value="replace">替换（覆盖你的 system —— 高风险，见下）</option>
             </select>
             <span class="hint">开启后每条出站请求都会带上破甲条款（无限制人设 + 拒绝对抗）。
-              「追加」保住客户端自己的人格；「替换」最彻底但会丢掉它。</span></div>
+              <br><b>推荐「追加」</b>：你的 system 原文完整保留，破甲条款接在后面。下游要精确格式、
+              JSON Schema、固定人格时**必须**用这个。
+              <br><b>「替换」是高风险</b>：它用破甲正文（约 6700 token）<b>整体覆盖</b>你的 system，
+              实测会导致 —— 「只回复 10 字以内」被无视（返回 40+ 字）、「只输出 JSON」变成 Markdown 列表、
+              JSON Schema 选择器连续 7 次返回空数组（HTTP 200 + 合法 JSON，<b>静默失败</b>）、
+              每请求多烧约 6000 token、耗时从 1 秒涨到 10~180 秒。
+              <br>破甲治的是<b>上游内容审查</b>，不该用来改调用方的人格。</span></div>
         </div>
         <!-- 注意：复选框要单独一个容器 —— 本仓表单纪律是"容器内字段类型单一"（探针 [B] 会红）。
              第一版把它塞进上面那个 formgrid（下拉 + 复选框混在一个容器）当场报红。 -->
@@ -3836,7 +3845,7 @@ function mpEsc(s) {
              出口地址天然是**每台机器各不相同**的（本地代理端口、公司网关、直连…），
              而它原先只能改 config.json（改完还得重启）—— 等于把日常操作变成运维动作。
              现在改完**立刻生效**（换 http.Client 的 transport），可用「账号池 → 出口自检」当场验证。
-             ⚠ 2026-11-01 更正：国际站**不是**"必须走代理"——多数环境直连即可（见「国际站代理」那格的说明）。
+             注意 2026-11-01 更正：国际站**不是**"必须走代理"——多数环境直连即可（见「国际站代理」那格的说明）。
              这两个框是"本机这条网络路不通时的出口覆盖"，不是"上国际站的前提条件"。
              # 为什么不与「上游请求超时」挤在一行
              那一个是通用旋钮（对所有上游生效、需重启），这两个是 MonkeyCode 专属且热生效；
