@@ -224,8 +224,10 @@ for (const s of named) {
 // 不能因为"改小了看起来像放水"就把它删掉。
 // ⚠ 2026-11-01：3 → 4。新增「账号解封探测」组（含 1 个输入框 setReviveHours）——
 //   对应 pool.revive_probe_interval_seconds，用户之前只能改配置文件。
-const NAMED_EXPECT = 4;
-ok(sets.length === 7, '设置面板 fieldset 总数 = ' + sets.length + '，期望 7（6 组主题切分 + 2026-11-01 新增的「账号解封探测」）');
+// ⚠ 2026-11-01 再次：4 → 5。新增「出站提示词」组（含 1 个 select: setArmorMode）——
+//   破甲注入的开关，用户要求可从前端控制、且立即生效。
+const NAMED_EXPECT = 5;
+ok(sets.length === 8, '设置面板 fieldset 总数 = ' + sets.length + '，期望 8（6 组主题切分 + 账号解封探测 + 出站提示词/破甲）');
 ok(named.length === NAMED_EXPECT, '含字段的 fieldset 数量 = ' + named.length + '，期望 ' + NAMED_EXPECT + '（防呆下限，2026-10-19 重定）');
 
 // 「日常调度」：原「调度」组 —— 旧夹具里它是交叉重灾区（CHK CHK IN IN CHK IN）。
@@ -277,14 +279,14 @@ if (rz) {
     '「历史与日志」仍是 0 复选框 + 2 输入框（实际 ' + k.filter(x => x === 'CHK').length + '/' + k.filter(x => x === 'IN').length + '）');
 }
 const allKinds = fieldKinds(sec);
-ok(allKinds.filter(x => x === 'CHK').length === 4 && allKinds.filter(x => x === 'IN').length === 6,
-  '全局 .field = 4 复选框 + 6 输入框 = 10（实际 ' + allKinds.length + '）；第 4 个是 setReviveHours、第 5/6 个是 MonkeyCode 的两个出口');
+ok(allKinds.filter(x => x === 'CHK').length === 4 && allKinds.filter(x => x === 'IN').length === 7,
+  '全局 .field = 4 复选框 + 7 输入框 = 11（实际 ' + allKinds.length + '）；第 4 个是 setReviveHours、第 5/6 个是 MonkeyCode 两个出口、第 7 个是破甲开关（select）');
 
 // ---------- B. 容器完整性 ----------
 console.log('\n[B] 每个 .field 都落在容器内，且容器内类型单一');
 const g = countContainers(sec);
 ok(g.total > 0, '解析到 .field 总数 = ' + g.total + '（>0 才说明解析有效）');
-ok(g.containers === 5, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 5（1 个 checks + 4 个 formgrid：成长 / 历史与日志 / 网络与容错通用 / MonkeyCode 出口）');
+ok(g.containers === 6, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 5（1 个 checks + 4 个 formgrid：成长 / 历史与日志 / 网络与容错通用 / MonkeyCode 出口）');
 ok(g.ungrouped === 0, '未落在任何容器内的 .field = ' + g.ungrouped + '（期望 0）');
 ok(g.grouped === g.total, '容器内覆盖 ' + g.grouped + '/' + g.total);
 // 容器内类型单一 = 「不交叉」的结构性证据。它比"翻转次数"更本质：
@@ -330,7 +332,7 @@ for (let i = lstart; i < lend; i++) {
   }
 }
 ok(lstart >= 0 && lend > lstart, '行级扫描区间有效（' + lstart + ' → ' + lend + '，锚点 <section data-key="settings"> → <div id="modal">）');
-ok(lmembers.length === 5, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 5');
+ok(lmembers.length === 6, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 5');
 ok(lorphan.length === 0, '行级扫描：不在任何容器内的 .field = ' + lorphan.length + '（期望 0）');
 let mixed = 0;
 for (let i = 0; i < lmembers.length; i++) {
@@ -340,7 +342,7 @@ for (let i = 0; i < lmembers.length; i++) {
 ok(mixed === 0, '每个容器内类型单一（混合的 = ' + mixed + '）');
 // 行级与区间法必须给出同样的字段总数，否则说明有一种解析是错的
 const ltotal = lmembers.reduce((a, m) => a + m.fields.length, 0) + lorphan.length;
-ok(ltotal === 10, '行级扫描字段总数 = ' + ltotal + '，期望 10（与 [A] 的全局 .field 口径互相对上）');
+ok(ltotal === 11, '行级扫描字段总数 = ' + ltotal + '，期望 10（与 [A] 的全局 .field 口径互相对上）');
 ok(ltotal === g.total, '行级与区间法字段总数一致（' + ltotal + ' vs ' + g.total + '）');
 
 // ---------- C. 零漂移 ----------
@@ -358,7 +360,9 @@ const NOW_IDS = ['setGrowthMakeup', 'setGrowthRedeem', 'setGrowthOpen', 'setGrow
   'setReviveHours',
   // 2026-11-01 新增：MonkeyCode 的两个出口（后端 monkeycode_proxy / monkeycode_direct_proxy）。
   // 用户报「代理配置写死了、设置里设不了」—— 见 webui.html 里那段注释。
-  'setMcProxy', 'setMcDirectProxy'];
+  'setMcProxy', 'setMcDirectProxy',
+  // 2026-11-01 新增：破甲注入开关（后端 prompt_armor_mode，热生效）。
+  'setArmorMode'];
 ok(base.length === 27, '旧基线 id 数 = ' + base.length + '，期望 27（重设计前快照，仍是文件级契约）');
 ok(now.length === NOW_IDS.length, '当前 id 数 = ' + now.length + '，期望 ' + NOW_IDS.length);
 const missing = NOW_IDS.filter(x => !now.includes(x));
@@ -375,7 +379,7 @@ ok(now.slice().sort().join(',') === NOW_IDS.slice().sort().join(','), 'id 集合
 //
 //   本次新增：setReviveHours —— 账号解封探测的小时数，对应后端
 //   pool.revive_probe_interval_seconds。在此之前用户只能改配置文件才能关掉/调整它。
-const ADDED_AFTER_BASELINE = ['setReviveHours', 'setMcProxy', 'setMcDirectProxy'];
+const ADDED_AFTER_BASELINE = ['setReviveHours', 'setMcProxy', 'setMcDirectProxy', 'setArmorMode'];
 const notInOld = now.filter(x => !base.includes(x) && !ADDED_AFTER_BASELINE.includes(x));
 ok(notInOld.length === 0, '当前 id 均已登记（旧基线沿用 + 已登记新增；未登记的: ' + (notInOld.length ? notInOld.join(', ') : '(无)') + '）');
 //
@@ -385,7 +389,10 @@ ok(notInOld.length === 0, '当前 id 均已登记（旧基线沿用 + 已登记�
 //   [B]「每个含字段组恰好 1 个容器」+「容器内类型单一」正面承接（那两条才真的能红）。
 
 // label[for] 指向存在的 id
-const allIdsInSec = [...sec.matchAll(/<input[^>]*id="([^"]+)"/g)].map(m => m[1]);
+// ⚠ 2026-11-01：扫描器补上「select / textarea」——破甲开关是 select，而它同样是带 id 的表单控件。
+//   只认 <input> 会让"两个解析器交叉验证"这条断言在新增 select 时误报（控件明明在，
+//   只是扫描器看不见它）—— 那正是本次实测撞到的形态。
+const allIdsInSec = [...sec.matchAll(/<(?:input|select|textarea)[^>]*id="([^"]+)"/g)].map(m => m[1]);
 const fors = [...sec.matchAll(/<label for="([^"]+)"/g)].map(m => m[1]);
 const badFor = fors.filter(f => !allIdsInSec.includes(f));
 ok(badFor.length === 0, 'label[for] 指向不存在的 id: ' + (badFor.length ? badFor.join(', ') : '(无)'));
@@ -399,15 +406,18 @@ ok(allIdsInSec.length === now.length, '带 id 的 input = ' + allIdsInSec.length
 // ---------- D. 结构保真 ----------
 console.log('\n[D] 文案与属性保真');
 const legends = sets.map(s => s.base).filter(Boolean);
-ok(legends.length === 7, 'legend 数量 = ' + legends.length + '，期望 7（6 组主题切分 + 账号解封探测）');
+ok(legends.length === 8, 'legend 数量 = ' + legends.length + '，期望 8（6 组主题切分 + 账号解封探测 + 出站提示词）');
 // ⚠ 2026-11-01：新增「账号解封探测」，插在「网络与容错」之后、「会话粘性」之前 ——
 //   它属于网络/容错这一族（决定要不要定期探活被禁账号）。
-ok(legends.join('|') === '日常调度|成长中心自动化|历史与日志|网络与容错|账号解封探测|会话粘性|运行信息',
+// ⚠ 2026-11-01：再插一个「出站提示词」——它属于"发给上游的内容"这一族，
+//   放在「历史与日志」之后、「网络与容错」（通用网络旋钮）之前。
+ok(legends.join('|') === '日常调度|成长中心自动化|历史与日志|出站提示词|网络与容错|账号解封探测|会话粘性|运行信息',
   'legend 基础文案逐字一致: ' + legends.join(' / '));
 // 生效时机从"legend 里的括注"（如「需要重启才生效（…）」）改成了**结构化的徽章**，
 // 所以这里把六组徽章逐字钉住 —— 它是新设计里承载语义的那一半，不能只看主题名。
 // 新组的徽章与「网络与容错」同为「重启生效」：它同样是后端启动时读的配置。
-ok(sets.map(s => s.badge).join('|') === '自动执行|立即生效|立即生效|重启生效|重启生效|只读|只读',
+// 新组「出站提示词」是「立即生效」（破甲热切换，见 prompt.ArmorState）。
+ok(sets.map(s => s.badge).join('|') === '自动执行|立即生效|立即生效|立即生效|重启生效|重启生效|只读|只读',
   '生效时机徽章逐字一致: ' + sets.map(s => String(s.badge)).join(' / '));
 // 切片锚点从文案换成了 data-key，所以另外补一条对标题文案本身的断言（它仍然重要）
 ok(sec.includes('<h2>设置'), '面板标题「设置」保留');

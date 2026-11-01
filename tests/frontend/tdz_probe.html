@@ -6415,6 +6415,10 @@ function toast(msg, bad) {
     // MonkeyCode 出口（代理）：字符串型，热生效。
     // ⚠ 键名 `monkeycode_proxy` / `monkeycode_direct_proxy` 同时是 config.json 里
     //   monkeycode 段的 proxy / direct_proxy —— 上游自报的键，前端只转发不解释。
+    // 破甲注入（select，走既有的字符串分支：collectSettings 的 else 分支读 el.value）。
+    // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
+    //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
+    ['setArmorMode', 'prompt_armor_mode', 'str'],
     ['setMcProxy', 'monkeycode_proxy', 'str'],
     ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
   ];

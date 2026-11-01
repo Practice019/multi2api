@@ -175,6 +175,14 @@ func main() {
 	up.PromptText = cfg.PromptText
 	promptGate := prompt.NewGate()
 	up.PromptGate = promptGate
+	// 破甲注入层（移植自 dsh-purge）：与 promptGate 同一条纪律 ——
+	// **同一个实例**给两处：出站客户端读它（每次请求）、设置层写它（设置页保存）。
+	// 各建一个的话，设置页的开关就是假的（写的是一个没人读的对象）。
+	armorState := prompt.NewArmorState(prompt.ArmorConfig{
+		Mode:    cfg.PromptArmorMode,
+		Clauses: cfg.PromptArmorClauses,
+	})
+	up.Armor = armorState
 	logUpstreamIdentity(up, "全局")
 	{
 		src := "内置默认"
@@ -1264,6 +1272,8 @@ func main() {
 	// monkeycode 的出口（代理）也在设置页里可改 —— 用户报「代理配置写死了、设置里设不了」。
 	// 它与 workbuddy 那个适配器同一形状，只是键不同（见 upstream_settings_monkeycode.go）。
 	mcSettings := newMonkeycodeSettingsAdapter(mk, cfg)
+	// 破甲的设置项（开关 + 三档模式），热生效。
+	armorSettings := newArmorSettingsAdapter(armorState, cfg)
 
 	// ── 凭据根（authsRoot）───────────────────────────────────────────────
 	//
@@ -1695,11 +1705,11 @@ func main() {
 		// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
 		// （各自声明，互不 import），方法集精确匹配会静默失败
 		// —— 表现成设置页少几个键且没有任何报错。
-		SettingsExts:      []admin.SettingsExt{upSettings, mcSettings},
+		SettingsExts:      []admin.SettingsExt{upSettings, mcSettings, armorSettings},
 		ResetModelsCache:  server.ResetModelsCache,
 		ModelCatalog:      server.ModelCatalogFor,
 		ModelCatalogState: modelCatalogState,
-		Settings: newSettingsStore(*cfgPath, cfg, sch, []UpstreamSettings{upSettings, mcSettings}, checkinLog, func(days int) {
+		Settings: newSettingsStore(*cfgPath, cfg, sch, []UpstreamSettings{upSettings, mcSettings, armorSettings}, checkinLog, func(days int) {
 			if s := logRing.Sink(); s != nil {
 				s.SetKeepDays(days)
 			}

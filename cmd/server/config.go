@@ -385,6 +385,22 @@ type Config struct {
 		// 不静默回落内置默认：那会让"路径打错一个字符"表现为
 		// "网关一切正常，只是我的人格没了" —— 一个完全无信号的失败。
 		File string `json:"file"`
+		// ArmorMode 破甲注入模式（移植自 dsh-purge，2026-11-01）：
+		//
+		//	off       不注入（默认）
+		//	append    保留客户端 system，追加破甲条款（人设 + 拒绝对抗）
+		//	replace   用破甲人设替换客户端 system
+		//
+		// ⚠ 默认 **off**：这是会改变每一条出站请求内容的功能，
+		//   不许"升级后自动打开"（那会让用户在自己没同意的情况下改变发给上游的东西）。
+		// ⚠ 与上面的 Mode 相互独立：Mode 管"客户端 system 要不要被网关自有提示词替换"，
+		//   ArmorMode 管"要不要再叠一层破甲"。可以 passthrough + armor=append（保留人格再注入）。
+		ArmorMode string `json:"armor_mode"`
+		// ArmorFile 破甲条款覆盖文件（空 = 内置）。
+		//
+		// 只覆盖**条款**部分；人设前缀仍用内置（想全改就直接改配置文件里的这一段是做不到的 ——
+		// 那是刻意的：人设与条款的边界由移植时的结构决定，混成一个文件会让"只改条款"变成"重写一切"）。
+		ArmorFile string `json:"armor_file"`
 	} `json:"prompt"`
 
 	Upstash struct {
@@ -432,6 +448,19 @@ type Config struct {
 		CheckinLogKeepDays int `json:"checkin_log_keep_days"`
 		// OAuthBaseURL 设备授权上游站点，默认 https://copilot.tencent.com（CN）。
 		OAuthBaseURL string `json:"oauth_base_url"`
+		// ---- 破甲注入（设置页可改，2026-11-01）----
+		//
+		// # 为什么住在 admin 段
+		//
+		// 与 MonkeyCode 出口那两个键**完全相同的原因**（那次踩过一次，这次又踩了）：
+		// 本仓约定"设置页能改的项"由 settingsStore 写进 admin 段，而 `prompt.armor_mode`
+		// 是**手写配置**的位置。只在其中一处读写 ⇒ 表现是
+		// 「设置页显示 append、config.json 里也有，重启后却回到 off」。
+		//
+		// 实测就是这么发现的：改完 append → 落盘 admin.prompt_armor_mode=append →
+		// 重启日志 `破甲：mode=off`、设置页读回 off。
+		PromptArmorMode string `json:"prompt_armor_mode"`
+
 		// ---- MonkeyCode 出口（也是**设置页**可改的项，2026-11-01）----
 		//
 		// # 为什么它们住在 admin 段，而不是顶层 monkeycode 段
@@ -1044,6 +1073,12 @@ type Config struct {
 	// custom 模式下它一定是非空串（空文件同样被 normalize 判为错误）。
 	PromptMode string `json:"-"`
 	PromptText string `json:"-"`
+	// PromptArmorMode / PromptArmorClauses 同上（破甲层，见 Prompt.ArmorMode）。
+	//
+	// PromptArmorMode 已收敛成 off / append / replace；PromptArmorClauses 为空时
+	// 由 prompt 包回落到内置条款。
+	PromptArmorMode    string `json:"-"`
+	PromptArmorClauses string `json:"-"`
 
 	// Codearts 解析后（供 main 直接取用）。
 	//
@@ -1432,6 +1467,36 @@ func (c *Config) normalize() error {
 	if c.PromptMode == prompt.ModePassthrough && strings.TrimSpace(c.Prompt.File) != "" {
 		log.Printf("提示词：mode=passthrough 时 prompt.file 不生效（透传客户端原始 system）；" +
 			"文件已校验可读，但内容不会被使用")
+	}
+
+	// 破甲层（移植自 dsh-purge）：模式收敛 + 条款文件（可选）在此加载。
+	//
+	// ⚠ 与上面同样的 fail fast 纪律：条款文件路径写错 → **启动报错**，
+	//   不静默回落内置 —— 那会让"我配了自己的条款"变成一句无从验证的声明。
+	// ⚠ 顺序与 MonkeyCode 出口那条一致：**设置页那份（admin 段）优先**，手写的嵌套键作回退。
+	//   反过来的后果见 Admin.PromptArmorMode 的注释（重启回退，实测过）。
+	c.PromptArmorMode = strings.ToLower(firstNonEmpty(strings.TrimSpace(c.Admin.PromptArmorMode), strings.TrimSpace(c.Prompt.ArmorMode)))
+	switch c.PromptArmorMode {
+	case prompt.ArmorOff, prompt.ArmorAppend, prompt.ArmorReplace:
+	case "":
+		c.PromptArmorMode = prompt.ArmorOff // 缺省关闭（见 Prompt.ArmorMode 的注释）
+	default:
+		return fmt.Errorf("prompt.armor_mode=%q 非法：只接受 %q / %q / %q",
+			c.Prompt.ArmorMode, prompt.ArmorOff, prompt.ArmorAppend, prompt.ArmorReplace)
+	}
+	if af := strings.TrimSpace(c.Prompt.ArmorFile); af != "" {
+		raw, err := os.ReadFile(af)
+		if err != nil {
+			return fmt.Errorf("读 prompt.armor_file %s 失败: %w", af, err)
+		}
+		if strings.TrimSpace(string(raw)) == "" {
+			return fmt.Errorf("prompt.armor_file %s 是空文件 —— 空条款等于开着开关却不注入，"+
+				"是个看不见的失效；要么写内容，要么删掉这一项", af)
+		}
+		c.PromptArmorClauses = string(raw)
+		log.Printf("破甲：mode=%s 条款来源=%s（%d 字节）", c.PromptArmorMode, af, len(raw))
+	} else {
+		log.Printf("破甲：mode=%s 条款来源=内置", c.PromptArmorMode)
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen

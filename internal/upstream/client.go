@@ -277,6 +277,11 @@ type Client struct {
 	// 空串时回落 prompt.Default()，而不是"什么都不做" ——
 	// 后者会让"装配漏了注入"变成一个完全静默的功能失效。
 	PromptText string
+	// Armor 破甲注入状态（nil = 不注入）。
+	//
+	// 与 PromptGate 同一条理由：设置页要能"改完立即生效"，而本结构是启动时构造、
+	// 每条上游一份的，字符串配置会被复制进来 ⇒ 必须是**指针对象**（见 prompt.ArmorState）。
+	Armor *prompt.ArmorState
 	// PromptGate 内容拦截降级状态机（nil = 永不降级，恒用 PromptText）。
 	//
 	// 由 core 在观察到内容拦截时 Trigger()；本客户端在每次出站前读它，
@@ -461,15 +466,34 @@ func (c *Client) applyPrompt(body []byte) []byte {
 	}
 	degraded := c.PromptGate.Active()
 
-	if mode == prompt.ModePassthrough && !degraded {
+	// 破甲：本次请求要不要注入、以什么模式注入（热读，见 Armor 字段的注释）。
+	armor := c.Armor.Config()
+	armorOn := prompt.ArmorEnabled(armor.Mode)
+
+	// 透传 + 未降级 + 未开破甲 = 一个字节都不动（这条早退是 passthrough 的语义本身）。
+	if mode == prompt.ModePassthrough && !degraded && !armorOn {
 		return body
 	}
+
 	text := c.PromptText
 	if text == "" {
 		text = prompt.Default()
 	}
 	if degraded {
 		text = prompt.Degraded
+	}
+	// 透传 + 未降级 + 开了破甲：**基底是客户端自己的 system**，再往上追加破甲块。
+	//
+	// ⚠ 这一步是 append 模式能不能成立的关键：Rewrite 是整体替换，
+	//   不先把客户端原文读出来，append 就会退化成 replace（人格被吃掉）。
+	//   顺序也要对：先取原文、再套破甲，最后才 Rewrite。
+	if mode == prompt.ModePassthrough && !degraded {
+		if orig, ok := prompt.SystemText(body); ok && strings.TrimSpace(orig) != "" {
+			text = orig
+		}
+	}
+	if armorOn {
+		text, _ = prompt.ApplyArmor(text, armor)
 	}
 	return prompt.Rewrite(body, text)
 }

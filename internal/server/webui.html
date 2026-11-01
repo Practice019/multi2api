@@ -3787,6 +3787,25 @@ function mpEsc(s) {
       </fieldset>
 
       <fieldset>
+        <legend>出站提示词 <span class="badge badge--hot">立即生效</span></legend>
+        <!-- 破甲注入（移植自 dsh-purge，2026-11-01）。
+             # 为什么必须有个开关
+             它改变的是**每一条发给上游的请求**的内容 —— 这种功能不许"装上就默认开"，
+             也不许"改了要重启才生效"（那样用户没法当场确认到底有没有注入）。
+             三档模式的语义见 internal/prompt/armor.go：off / append / replace。 -->
+        <div class="formgrid">
+          <div class="field"><label>破甲注入</label>
+            <select id="setArmorMode">
+              <option value="off">关闭（不注入）</option>
+              <option value="append">追加（保留客户端人格，后附破甲条款）</option>
+              <option value="replace">替换（用破甲人设整个替换客户端 system）</option>
+            </select>
+            <span class="hint">开启后每条出站请求都会带上破甲条款（无限制人设 + 拒绝对抗）。
+              「追加」保住客户端自己的人格；「替换」最彻底但会丢掉它。</span></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>网络与容错 <span class="badge badge--cold">重启生效</span></legend>
         <div class="formgrid">
           <div class="field"><label>上游请求超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
@@ -10354,6 +10373,10 @@ function toast(msg, bad) {
     // MonkeyCode 出口（代理）：字符串型，热生效。
     // ⚠ 键名 `monkeycode_proxy` / `monkeycode_direct_proxy` 同时是 config.json 里
     //   monkeycode 段的 proxy / direct_proxy —— 上游自报的键，前端只转发不解释。
+    // 破甲注入（select，走既有的字符串分支：collectSettings 的 else 分支读 el.value）。
+    // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
+    //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
+    ['setArmorMode', 'prompt_armor_mode', 'str'],
     ['setMcProxy', 'monkeycode_proxy', 'str'],
     ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
   ];
