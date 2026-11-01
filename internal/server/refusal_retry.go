@@ -32,11 +32,33 @@ import (
 // refusalHeadBufChars 结算前要缓冲的文本字符数（原实现 bufferChars=400）。
 const refusalHeadBufChars = 400
 
+// RefusalAuditFn 审计回调（导出版本，供 handler 的 Config 字段用）。
+type RefusalAuditFn = refusalAuditFn
+
+// MaybeRefusalRetry 按开关决定要不要包一层重试流。
+//
+// 开关关着（默认）时**原样返回** —— 未启用功能不得改变任何字节，
+// 这是本层唯一能被下游观察到的承诺。
+//
+// refetch：拿"带 nudge 的请求体"重新取一次流（调用方提供 —— 只有它知道怎么再发一次）。
+func (h *Handler) MaybeRefusalRetry(first io.ReadCloser, body []byte, refetch func([]byte) (io.ReadCloser, error)) io.ReadCloser {
+	if h == nil || first == nil {
+		return first
+	}
+	if h.cfg.Armor == nil || !h.cfg.Armor.RetryEnabled() {
+		return first
+	}
+	return newRefusalRetryStream(first, body, refetch, h.cfg.RefusalAudit)
+}
+
 // refusalAuditFn 审计回调（原实现有两条事件，见文件头）。
 //
 // 用回调而不是直接写日志：本文件在核心包里，不该认识具体的审计落盘方式；
 // 装配层把它接到请求日志/审计文件上（与 PromptGate 同一手法）。
-type refusalAuditFn func(event string, data map[string]any)
+//
+// 返回 bool：与原实现的 logAudit 一致（"写进去了没有"）。调用方**不**据此改变行为 ——
+// 审计失败绝不能影响主流程，但把它吐出来便于测试断言。
+type refusalAuditFn func(event string, data map[string]any) bool
 
 // refusalRetryStream 见文件头。零值不可用，用 newRefusalRetryStream 构造。
 type refusalRetryStream struct {
@@ -75,7 +97,7 @@ func (s *refusalRetryStream) auditEvent(event string, data map[string]any) {
 	}
 	// 审计失败不影响主流程（原实现同样如此：try/catch 包住 logAudit）。
 	defer func() { _ = recover() }()
-	s.audit(event, data)
+	_ = s.audit(event, data)
 }
 
 // Read 第一次调用时先走"缓冲—结算"，之后就是纯透传。

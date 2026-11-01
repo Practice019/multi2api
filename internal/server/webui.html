@@ -3803,6 +3803,15 @@ function mpEsc(s) {
             <span class="hint">开启后每条出站请求都会带上破甲条款（无限制人设 + 拒绝对抗）。
               「追加」保住客户端自己的人格；「替换」最彻底但会丢掉它。</span></div>
         </div>
+        <!-- 注意：复选框要单独一个容器 —— 本仓表单纪律是"容器内字段类型单一"（探针 [B] 会红）。
+             第一版把它塞进上面那个 formgrid（下拉 + 复选框混在一个容器）当场报红。 -->
+        <div class="fieldgroup checks">
+          <div class="field chk"><input type="checkbox" id="setArmorRetry">
+            <label for="setArmorRetry">命中拒绝自动重试一次</label>
+            <span class="hint">照原项目 lib/refusal-retry.js：先缓冲前 400 字符判断是不是在推脱，
+              命中就丢弃这次输出、把重试话术追加到系统提示尾部重发一次。默认关（原项目也默认关）——
+              它会让命中时多一次上游请求。</span></div>
+        </div>
       </fieldset>
 
       <fieldset>
@@ -10377,6 +10386,8 @@ function toast(msg, bad) {
     // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
     //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
     ['setArmorMode', 'prompt_armor_mode', 'str'],
+    // 破甲：命中拒绝后是否自动重试一次（bool；后端 prompt_armor_retry，热生效）。
+    ['setArmorRetry', 'prompt_armor_retry', 'bool'],
     ['setMcProxy', 'monkeycode_proxy', 'str'],
     ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
   ];

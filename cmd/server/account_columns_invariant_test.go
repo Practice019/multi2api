@@ -244,6 +244,10 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		//                   哪个模型、优先级/权重多少"，真正连上游的是 Provider。
 		//   modelmap     —— 模型映射（公开名↔上游名 + 环检测），纯函数包，同样不是上游。
 		"channelstore": true, "modelmap": true,
+		// auditlog 事件审计落盘（2026-11-01，移植 dsh-purge 的 lib/audit.js 时新增）。
+		// 它不实现 gateway.Provider：只往 JSONL 里追加事件行，没有任何上游身份。
+		// 加它时这条守卫**确实又红了** —— 与上面几段注释说的完全一样。
+		"auditlog": true,
 		//   modelvis    —— 对外可见模型的计算（能力索引 ∩ 令牌白名单 ∩ 反向映射），纯函数、零依赖。
 		"modelvis": true,
 		//   timeouts    —— 超时配置的集中定义与 http.Client/Transport 应用（对标 new-api 的

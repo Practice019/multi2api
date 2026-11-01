@@ -396,6 +396,16 @@ type Config struct {
 		// ⚠ 与上面的 Mode 相互独立：Mode 管"客户端 system 要不要被网关自有提示词替换"，
 		//   ArmorMode 管"要不要再叠一层破甲"。可以 passthrough + armor=append（保留人格再注入）。
 		ArmorMode string `json:"armor_mode"`
+		// ArmorRetry 命中拒绝后自动带 nudge 重试**一次**（照 lib/refusal-retry.js）。
+		//
+		// 默认 false —— 与原项目一致（那边也是默认关）。它会**多发一次上游请求**，
+		// 所以宁可让用户显式打开。
+		ArmorRetry bool `json:"armor_retry"`
+		// ArmorAuditFile 拒绝重试的审计文件（空 = "./data/audit.jsonl"）。
+		//
+		// 照 lib/audit.js 的落盘语义：一行一条 JSON、1 MiB 轮转、保留 2 份。
+		// 写不进去**不致命**（审计不能变成可用性风险），只会警告一次。
+		ArmorAuditFile string `json:"armor_audit_file"`
 		// ArmorFile 破甲**整份载荷**文件（空 = 用内置的浓缩版）。
 		//
 		// 只覆盖**条款**部分；人设前缀仍用内置（想全改就直接改配置文件里的这一段是做不到的 ——
@@ -460,6 +470,8 @@ type Config struct {
 		// 实测就是这么发现的：改完 append → 落盘 admin.prompt_armor_mode=append →
 		// 重启日志 `破甲：mode=off`、设置页读回 off。
 		PromptArmorMode string `json:"prompt_armor_mode"`
+		// PromptArmorRetry 同上（设置页可改，热生效）。
+		PromptArmorRetry bool `json:"prompt_armor_retry"`
 
 		// ---- MonkeyCode 出口（也是**设置页**可改的项，2026-11-01）----
 		//
@@ -1079,6 +1091,10 @@ type Config struct {
 	// 由 prompt 包回落到内置条款。
 	PromptArmorMode    string `json:"-"`
 	PromptArmorPayload string `json:"-"`
+	// PromptArmorRetry 命中拒绝后是否自动重试一次（热生效）。
+	PromptArmorRetry bool `json:"-"`
+	// PromptArmorAuditFile 审计落点（已填默认值，见 normalize）。
+	PromptArmorAuditFile string `json:"-"`
 
 	// Codearts 解析后（供 main 直接取用）。
 	//
@@ -1495,7 +1511,12 @@ func (c *Config) normalize() error {
 		}
 		c.PromptArmorPayload = string(raw)
 		log.Printf("破甲：mode=%s 载荷来源=%s（%s）", c.PromptArmorMode, af, charCount(c.PromptArmorPayload))
-	} else {
+	}
+	c.PromptArmorAuditFile = strings.TrimSpace(c.Prompt.ArmorAuditFile)
+	if c.PromptArmorAuditFile == "" {
+		c.PromptArmorAuditFile = filepath.Join("data", "audit.jsonl")
+	}
+	{
 		// 内置那份是 dsh-purge 实际注入正文的**逐字副本**（armor-payload.md）。
 		// 打印字符数是为了让"是不是 1:1"这件事在日志里可核对 ——
 		// 第一版这里只有个"内置"字样，而当时内置的是 1230 字符的浓缩版，

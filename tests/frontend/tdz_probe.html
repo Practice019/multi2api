@@ -6419,6 +6419,8 @@ function toast(msg, bad) {
     // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
     //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
     ['setArmorMode', 'prompt_armor_mode', 'str'],
+    // 破甲：命中拒绝后是否自动重试一次（bool；后端 prompt_armor_retry，热生效）。
+    ['setArmorRetry', 'prompt_armor_retry', 'bool'],
     ['setMcProxy', 'monkeycode_proxy', 'str'],
     ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
   ];

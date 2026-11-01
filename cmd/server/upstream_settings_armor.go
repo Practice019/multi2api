@@ -32,6 +32,9 @@ import (
 // 设置页的键名（对外的 JSON 名）。
 const keyArmorMode = "prompt_armor_mode"
 
+// keyArmorRetry 命中拒绝后是否自动重试一次（默认关，与原项目一致）。
+const keyArmorRetry = "prompt_armor_retry"
+
 // armorSettingsAdapter 见文件头。
 type armorSettingsAdapter struct {
 	st  *prompt.ArmorState
@@ -55,7 +58,14 @@ func (a *armorSettingsAdapter) Fields() []admin.SettingField {
 			mode = m
 		}
 	}
-	return []admin.SettingField{{Key: keyArmorMode, Value: mode, RestartRequired: false}}
+	retry := false
+	if a != nil && a.st != nil {
+		retry = a.st.RetryEnabled()
+	}
+	return []admin.SettingField{
+		{Key: keyArmorMode, Value: mode, RestartRequired: false},
+		{Key: keyArmorRetry, Value: retry, RestartRequired: false},
+	}
 }
 
 // ApplySettings 应用补丁里属于破甲的键（不认得的忽略 —— 整份补丁会发给每个上游）。
@@ -67,9 +77,21 @@ func (a *armorSettingsAdapter) ApplySettings(patch json.RawMessage) ([]string, e
 	if err := json.Unmarshal(patch, &m); err != nil {
 		return nil, fmt.Errorf("设置解析失败: %w", err)
 	}
+	applied := make([]string, 0, 2)
+	retryRaw, hasRetry := m[keyArmorRetry]
+	if hasRetry {
+		var b bool
+		if err := json.Unmarshal(retryRaw, &b); err != nil {
+			return nil, fmt.Errorf("%s 需要是布尔值", keyArmorRetry)
+		}
+		cur := a.st.Config()
+		cur.RetryOnRefusal = b
+		a.st.Set(cur)
+		applied = append(applied, keyArmorRetry)
+	}
 	raw, ok := m[keyArmorMode]
 	if !ok {
-		return nil, nil
+		return applied, nil
 	}
 	var v string
 	if err := json.Unmarshal(raw, &v); err != nil {
@@ -89,7 +111,7 @@ func (a *armorSettingsAdapter) ApplySettings(patch json.RawMessage) ([]string, e
 	cur := a.st.Config()
 	cur.Mode = mode
 	a.st.Set(cur) // 热生效：出站客户端下一次请求就读到新值
-	return []string{keyArmorMode}, nil
+	return append(applied, keyArmorMode), nil
 }
 
 // ---- main.UpstreamSettings ----
@@ -107,6 +129,11 @@ func (a *armorSettingsAdapter) Values() map[string]any {
 func (a *armorSettingsAdapter) applyToMemory(values map[string]any) {
 	if a == nil || a.cfg == nil {
 		return
+	}
+	if v, ok := values[keyArmorRetry].(bool); ok {
+		a.cfg.PromptArmorRetry = v
+		a.cfg.Prompt.ArmorRetry = v
+		a.cfg.Admin.PromptArmorRetry = v
 	}
 	if v, ok := values[keyArmorMode].(string); ok {
 		// 三处一起写（与 monkeycode 出口适配器同一纪律）：

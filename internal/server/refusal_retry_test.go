@@ -72,7 +72,7 @@ func TestRefusalRetryDiscardsFirstAndRetriesOnce(t *testing.T) {
 			calls++
 			gotBody = b
 			return newFakeStream(retryBody), nil
-		}, func(event string, data map[string]any) { audits = append(audits, event) })
+		}, func(event string, data map[string]any) bool { audits = append(audits, event); return true })
 	got := readAll(t, st)
 
 	if calls != 1 {
@@ -135,7 +135,7 @@ func TestRefusalRetryKeepsContentWhenRefetchFails(t *testing.T) {
 	audits := []string{}
 	st := newRefusalRetryStream(newFakeStream(body), []byte(`{"messages":[]}`),
 		func(b []byte) (io.ReadCloser, error) { return nil, io.ErrUnexpectedEOF },
-		func(event string, data map[string]any) { audits = append(audits, event) })
+		func(event string, data map[string]any) bool { audits = append(audits, event); return true })
 	got := readAll(t, st)
 	if !strings.Contains(got, "can't help") {
 		t.Errorf("重发失败时应当回放原始头部（有内容总比空响应好），实际=%q", got)
@@ -156,6 +156,27 @@ func TestRefusalRetryMetaDiscussionDoesNotRetry(t *testing.T) {
 	_ = readAll(t, st)
 	if refetched != 0 {
 		t.Error("正常技术讨论被当成拒绝重试了（元拒绝豁免失效）")
+	}
+}
+
+// TestMaybeRefusalRetryGate 开关关着时必须**原样返回同一个流**（功能关 = 零副作用）。
+func TestMaybeRefusalRetryGate(t *testing.T) {
+	h := NewHandler(Config{})
+	pr := io.NopCloser(strings.NewReader("x"))
+	if got := h.MaybeRefusalRetry(pr, nil, nil); got != pr {
+		t.Error("Armor 为 nil 时应当原样返回（未启用功能不得改变任何字节）")
+	}
+	off := prompt.NewArmorState(prompt.ArmorConfig{Mode: prompt.ArmorAppend}) // 只注入、不重试
+	h2 := NewHandler(Config{Armor: off})
+	pr2 := io.NopCloser(strings.NewReader("x"))
+	if got := h2.MaybeRefusalRetry(pr2, nil, nil); got != pr2 {
+		t.Error("RetryOnRefusal=false 时应当原样返回（默认关，与原项目一致）")
+	}
+	on := prompt.NewArmorState(prompt.ArmorConfig{Mode: prompt.ArmorAppend, RetryOnRefusal: true})
+	h3 := NewHandler(Config{Armor: on})
+	wrapped := h3.MaybeRefusalRetry(io.NopCloser(strings.NewReader("x")), nil, nil)
+	if _, isWrapper := wrapped.(*refusalRetryStream); !isWrapper {
+		t.Errorf("开关打开时应当包一层，实际 %T", wrapped)
 	}
 }
 

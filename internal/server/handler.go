@@ -162,6 +162,19 @@ type Config struct {
 	// nil 表示本部署未接提示词体系：内容拦截退化为"只换号不罚号"
 	// （保守但正确 —— 不会误伤账号，只是会多跑几次往返）。
 	PromptGate *prompt.Gate
+	// Armor 破甲状态（移植自 dsh-purge）：
+	//
+	//	Mode 决定出站提示词注入（出站客户端读它）
+	//	RetryOnRefusal 决定命中拒绝后要不要重试一次（**本包**读它）
+	//
+	// 与 PromptGate 同一条纪律：**必须是同一个实例**交给两处（装配层持有一份）。
+	// 各建一个的话，设置页点开关只改到没人读的那份 —— 界面看着打开了、行为没变。
+	Armor *prompt.ArmorState
+	// RefusalAudit 审计落点（照 lib/audit.js 的形状）。nil = 不审计（功能仍工作）。
+	//
+	// 做成回调而不是让本包认识 auditlog：核心不该知道审计落在哪个文件上；
+	// 与 JobExt / SettingsExt 同一手法，由组合根注入。
+	RefusalAudit RefusalAuditFn
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -1775,16 +1788,40 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//   （handler 里那套 fail(acct.UID) 循环），在那里再套一层会重复计失败次数。
 		var fw channelForward
 		var ferr error
+		// chosenTarget 记下"这次成功用的是哪个上游名" —— 拒绝重试要用**同一条**渠道再发一次。
+		// （循环变量 target 出不了循环，第一版直接引用它编译不过。）
+		var chosenTarget string
 		for _, target := range aliasAttempts(aliasOrder, peek.Model) {
 			peek.Model = target
 			fw, ferr = h.forwardViaChannelAs(r.Context(), target, publicModel, body)
 			if ferr == nil {
+				chosenTarget = target
 				break
 			}
 			// 有下一个候选时先记一条，让"切过了"这件事在日志里可见。
 			if len(aliasOrder) > 1 {
 				log.Printf("[apikey] 别名 %q 走 %q 失败（%v），换下一个候选", publicModel, target, ferr)
 			}
+		}
+		if ferr == nil {
+			// 拒绝重试（照 lib/refusal-retry.js）：只在开关打开时包一层。
+			// refetch 用**同一条渠道 + 同一次别名解析结果**再发一次，body 换成带 nudge 的。
+			//
+			// ⚠ 与池路径同一条纪律：重发拿到 >=400 必须当失败（回放原始头部），
+			//   不能把上游的错误体当成"重试后的回答"转发给客户端。
+			fw.Stream.Body = h.MaybeRefusalRetry(fw.Stream.Body, body, func(nudged []byte) (io.ReadCloser, error) {
+				nfw, nerr := h.forwardViaChannelAs(r.Context(), chosenTarget, publicModel, nudged)
+				if nerr != nil {
+					return nil, nerr
+				}
+				if nfw.Stream.Status >= 400 {
+					if nfw.Stream.Body != nil {
+						_ = nfw.Stream.Body.Close()
+					}
+					return nil, fmt.Errorf("拒绝重试：渠道返回 %d", nfw.Stream.Status)
+				}
+				return nfw.Stream.Body, nil
+			})
 		}
 		if ferr != nil {
 			// ★ 渠道失败也写请求日志。改造前渠道分支**一行日志都没有**，后果是实测踩到的：
@@ -2568,6 +2605,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		rc := cr
+		// 拒绝重试（移植自 dsh-purge 的 lib/refusal-retry.js）：
+		// 只在开关打开时包一层；refetch 用**同一个账号**带 nudge 的 body 重发一次。
+		//
+		// ⚠ 重发拿到 >=400 时要返回 error，**不能**把上游的错误体当成回答转发出去：
+		//   那会把"重试也失败了"变成"客户端收到一段错误 JSON"，而原来的拒绝内容被吞掉。
+		rc = h.MaybeRefusalRetry(cr, outBody, func(nudged []byte) (io.ReadCloser, error) {
+			ncr, nstatus, nerr := h.chatVia(ctx, reqProvider, acct, nudged)
+			if nerr != nil {
+				return nil, nerr
+			}
+			if nstatus >= 400 {
+				if ncr != nil {
+					_ = ncr.Close()
+				}
+				return nil, fmt.Errorf("拒绝重试：上游返回 %d", nstatus)
+			}
+			return ncr, nil
+		})
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			//

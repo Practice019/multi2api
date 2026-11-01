@@ -226,14 +226,14 @@ if (rz) {
     '「历史与日志」仍是 0 复选框 + 2 输入框（实际 ' + k.filter(x => x === 'CHK').length + '/' + k.filter(x => x === 'IN').length + '）');
 }
 const allKinds = fieldKinds(sec);
-ok(allKinds.filter(x => x === 'CHK').length === 4 && allKinds.filter(x => x === 'IN').length === 7,
+ok(allKinds.filter(x => x === 'CHK').length === 5 && allKinds.filter(x => x === 'IN').length === 7,
   '全局 .field = 4 复选框 + 7 输入框 = 11（实际 ' + allKinds.length + '）；第 4 个是 setReviveHours、第 5/6 个是 MonkeyCode 两个出口、第 7 个是破甲开关（select）');
 
 // ---------- B. 容器完整性 ----------
 console.log('\n[B] 每个 .field 都落在容器内，且容器内类型单一');
 const g = countContainers(sec);
 ok(g.total > 0, '解析到 .field 总数 = ' + g.total + '（>0 才说明解析有效）');
-ok(g.containers === 6, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 5（1 个 checks + 4 个 formgrid：成长 / 历史与日志 / 网络与容错通用 / MonkeyCode 出口）');
+ok(g.containers === 7, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 5（1 个 checks + 4 个 formgrid：成长 / 历史与日志 / 网络与容错通用 / MonkeyCode 出口）');
 ok(g.ungrouped === 0, '未落在任何容器内的 .field = ' + g.ungrouped + '（期望 0）');
 ok(g.grouped === g.total, '容器内覆盖 ' + g.grouped + '/' + g.total);
 // 容器内类型单一 = 「不交叉」的结构性证据。它比"翻转次数"更本质：
@@ -246,7 +246,9 @@ for (const s of named) {
   // ⚠ 2026-11-01：「网络与容错」现在有**两个**容器（通用旋钮 1 个 + MonkeyCode 出口 1 个）。
   //   其余含字段组仍是 1 个 —— 所以判据按组名给期望：出口那一组是有意拆开的
   //   （通用旋钮需重启、出口热生效，混在一个容器里会让「要不要重启」变模糊）。
-  const want = (s.base || '').startsWith('网络与容错') ? 2 : 1;
+  // ⚠ 2026-11-01：「出站提示词」也拆成两个容器（下拉一容器 + 复选框一容器），
+  //   理由是容器内类型必须单一（本仓表单纪律）。
+  const want = ((s.base || '').startsWith('网络与容错') || (s.base || '').startsWith('出站提示词')) ? 2 : 1;
   ok(n === want, '「' + s.base + '」恰好 ' + want + ' 个容器（实际 ' + n + '）');
 }
 
@@ -279,7 +281,7 @@ for (let i = lstart; i < lend; i++) {
   }
 }
 ok(lstart >= 0 && lend > lstart, '行级扫描区间有效（' + lstart + ' → ' + lend + '，锚点 <section data-key="settings"> → <div id="modal">）');
-ok(lmembers.length === 6, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 5');
+ok(lmembers.length === 7, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 5');
 ok(lorphan.length === 0, '行级扫描：不在任何容器内的 .field = ' + lorphan.length + '（期望 0）');
 let mixed = 0;
 for (let i = 0; i < lmembers.length; i++) {
@@ -289,7 +291,7 @@ for (let i = 0; i < lmembers.length; i++) {
 ok(mixed === 0, '每个容器内类型单一（混合的 = ' + mixed + '）');
 // 行级与区间法必须给出同样的字段总数，否则说明有一种解析是错的
 const ltotal = lmembers.reduce((a, m) => a + m.fields.length, 0) + lorphan.length;
-ok(ltotal === 11, '行级扫描字段总数 = ' + ltotal + '，期望 10（与 [A] 的全局 .field 口径互相对上）');
+ok(ltotal === 12, '行级扫描字段总数 = ' + ltotal + '，期望 10（与 [A] 的全局 .field 口径互相对上）');
 ok(ltotal === g.total, '行级与区间法字段总数一致（' + ltotal + ' vs ' + g.total + '）');
 
 // ---------- C. 零漂移 ----------
@@ -309,7 +311,9 @@ const NOW_IDS = ['setGrowthMakeup', 'setGrowthRedeem', 'setGrowthOpen', 'setGrow
   // 用户报「代理配置写死了、设置里设不了」—— 见 webui.html 里那段注释。
   'setMcProxy', 'setMcDirectProxy',
   // 2026-11-01 新增：破甲注入开关（后端 prompt_armor_mode，热生效）。
-  'setArmorMode'];
+  'setArmorMode',
+  // 2026-11-01：破甲的"命中拒绝自动重试"开关（后端 prompt_armor_retry）。
+  'setArmorRetry'];
 ok(base.length === 27, '旧基线 id 数 = ' + base.length + '，期望 27（重设计前快照，仍是文件级契约）');
 ok(now.length === NOW_IDS.length, '当前 id 数 = ' + now.length + '，期望 ' + NOW_IDS.length);
 const missing = NOW_IDS.filter(x => !now.includes(x));
@@ -326,7 +330,7 @@ ok(now.slice().sort().join(',') === NOW_IDS.slice().sort().join(','), 'id 集合
 //
 //   本次新增：setReviveHours —— 账号解封探测的小时数，对应后端
 //   pool.revive_probe_interval_seconds。在此之前用户只能改配置文件才能关掉/调整它。
-const ADDED_AFTER_BASELINE = ['setReviveHours', 'setMcProxy', 'setMcDirectProxy', 'setArmorMode'];
+const ADDED_AFTER_BASELINE = ['setReviveHours', 'setMcProxy', 'setMcDirectProxy', 'setArmorMode', 'setArmorRetry'];
 const notInOld = now.filter(x => !base.includes(x) && !ADDED_AFTER_BASELINE.includes(x));
 ok(notInOld.length === 0, '当前 id 均已登记（旧基线沿用 + 已登记新增；未登记的: ' + (notInOld.length ? notInOld.join(', ') : '(无)') + '）');
 //
@@ -346,7 +350,7 @@ ok(badFor.length === 0, 'label[for] 指向不存在的 id: ' + (badFor.length ? 
 // 关系式断言（比硬编码数字更耐结构变化）：label[for] 数必须等于复选框数
 const chkCount = allKinds.filter(k => k === 'CHK').length;
 ok(fors.length === chkCount, 'label[for] 数量 = ' + fors.length + '，期望 = 复选框数 ' + chkCount);
-ok(fors.length === 4, 'label[for] 数量 = ' + fors.length + '，期望 4（收敛后的复选框数）');
+ok(fors.length === 5, 'label[for] 数量 = ' + fors.length + '，期望 5（收敛后 4 个 + 破甲自动重试 1 个）');
 // 两个解析器交叉验证：input 扫描 与 .field 扫描 必须给出同样多的带 id 输入控件
 ok(allIdsInSec.length === now.length, '带 id 的 input = ' + allIdsInSec.length + ' 与 .field 解析出的 id = ' + now.length + ' 一致');
 

@@ -22,6 +22,7 @@ import (
 	"workbuddy2api/internal/account"
 	"workbuddy2api/internal/admin"
 	"workbuddy2api/internal/apikey"
+	"workbuddy2api/internal/auditlog"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/authlimit"
 	"workbuddy2api/internal/browseropen"
@@ -193,6 +194,12 @@ func main() {
 	}
 
 	checkinLog := checkinlog.New(cfg.CheckinLogPath, cfg.CheckinLogKeepDays)
+	// 拒绝重试的审计落盘（照 lib/audit.js：JSONL + 1MiB 轮转 + 保留 2 份）。
+	//
+	// ⚠ 与 checkinLog / requestLog 并列而不是复用它们：审计是**事件流**
+	//（事件名 + 任意附字段），请求日志是固定字段的会话表。混进去两边都会变形。
+	armorAudit := auditlog.Open(cfg.PromptArmorAuditFile)
+	log.Printf("破甲审计：%s（1 MiB 轮转，保留 %d 份）", armorAudit.Path(), auditlog.Keep)
 
 	// 请求日志落盘：挂到 server 包的环形缓冲上，实时视图走内存、历史视图走文件。
 	logRing := server.ChatLogRing()
@@ -1829,7 +1836,11 @@ func main() {
 		DisableChatTools: cfg.Server.DisableChatTools,
 		// ⚠ 必须是**同一个** promptGate 实例（与 up.PromptGate 一起给）：
 		// handler 在这里写、出站客户端在那里读。两个实例 = 机制失效。
-		PromptGate:        promptGate,
+		PromptGate: promptGate,
+		// ⚠ 与 up.Armor 必须是**同一个实例**（与 PromptGate 同一条纪律）：
+		//   handler 读它决定要不要重试、出站客户端读它决定注不注入。
+		Armor:             armorState,
+		RefusalAudit:      armorAudit.Log,
 		ModelCatalog:      server.ModelCatalog,
 		ModelCatalogState: server.ModelCatalogState,
 		// 实例身份：配置里给了就用配置的，否则用编译期默认值。

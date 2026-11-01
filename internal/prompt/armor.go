@@ -68,6 +68,11 @@ const (
 type ArmorConfig struct {
 	// Mode off / append / replace。空串按 off 处理（默认不开）。
 	Mode string
+	// RetryOnRefusal 命中拒绝后用 nudge 重试一次（照 lib/refusal-retry.js，默认**关**）。
+	//
+	// ⚠ 原项目也是默认关（文件头：llm/stream 钩子，默认关闭）—— 这一条照抄，
+	//   不因为"开了更有用"就默认打开。
+	RetryOnRefusal bool
 	// Payload 注入正文（空 = 用内置 armor-payload.md，即原项目那份文件的逐字副本）。
 	//
 	// ⚠ 逐字注入意味着**上游会收到你本机那份操作者指令全文**（含称呼、内部约定等）。
@@ -179,6 +184,12 @@ func (s *ArmorState) Config() ArmorConfig {
 
 // Mode 当前模式（空 = 关闭）。
 func (s *ArmorState) Mode() string { return s.Config().Mode }
+
+// RetryEnabled 是否开启"命中拒绝后重试一次"。
+//
+// 与 Mode **独立**：可以只注入不重试（默认），也可以只重试不注入。
+// 拆开是因为两者风险不同 —— 注入改变发出去的提示词，重试会**多发一次上游请求**。
+func (s *ArmorState) RetryEnabled() bool { return s.Config().RetryOnRefusal }
 
 // Set 改配置（设置页保存时调用）。nil 接收者安全（"这条上游没有注入层"是合法状态）。
 func (s *ArmorState) Set(cfg ArmorConfig) {
