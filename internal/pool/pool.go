@@ -431,6 +431,13 @@ type Pool struct {
 	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
 	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
 	persistFails int
+	// stalenessChecker 额度陈旧检查器（见 SetQuotaStalenessChecker）。
+	//
+	// ⚠ **默认 nil = 完全不启用**：nil 时选号行为与加这个功能之前**逐字节相同**
+	//   （先上线、后启用，见 T-029b 的保护 1）。
+	stalenessChecker func(uid string, lastUsed time.Time) bool
+	// staleWarned "全候选都因额度陈旧被排除、已回退"这件事只告警一次。
+	staleWarned bool
 }
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
@@ -997,6 +1004,28 @@ func (p *Pool) SecretOf(uid string) (any, bool) {
 	return e.secret, true
 }
 
+// SetQuotaStalenessChecker 装一个"这个号的额度已经太旧、不该拿它做选号决策"的判据。
+//
+// # 为什么由外部注入（而不是 pool 自己判）
+//
+// "多久算旧"是**刷新策略**的知识（热/温/冷三层、有没有回执），它住在 admin 的
+// 额度刷新器里；pool 只保管账号与额度，不该把刷新策略抄一遍（抄第二份的代价是
+// 将来只改对一处 —— 本仓反复吃过这个亏，见 runRefresh 那几处的注释）。
+//
+// # 三条保护（T-029b 明确要求，缺一不可）
+//
+//  1. **默认 nil**：不设 = 行为逐字节不变（先上线不启用）。
+//  2. **排除后若候选为空 ⇒ 回退到不排除**：宁可给一个额度旧的号，
+//     也不能把"额度都旧"误报成"池子空了"（那会变成 503，见 pickForTier 里
+//     creditsExhausted 那段同样形态的兜底及其理由）。
+//  3. **全过期只告警一次**：不要每个请求打一行（日志的价值在"有无"，不在条数）。
+func (p *Pool) SetQuotaStalenessChecker(fn func(uid string, lastUsed time.Time) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stalenessChecker = fn
+	p.staleWarned = false // 重新装判据 ⇒ 允许再告警一次
+}
+
 // Pick 返回 healthy 中额度最高的账号；无可用返回 nil。
 //
 // 不区分模型 —— 保留给"没有具体模型上下文"的调用点（如探活、刷新额度）。
@@ -1140,7 +1169,8 @@ func tierHasCandidate(tier int, cands []*entry, tierOf func(string) int) bool {
 // 再由 CandidateTierExt 分档，**按 tierOffset 选档**后在该档内加权随机。
 //
 // ⚠ tierOffset 只是**下限**：更高档只要还有没试过的候选就不会被跳过
-//   （见第 ③ 段的理由 —— 档位可以表达代价，代价不能被重试策略跳过）。
+//
+//	（见第 ③ 段的理由 —— 档位可以表达代价，代价不能被重试策略跳过）。
 func (p *Pool) pickForTier(provider string, tried map[string]bool, model string, tierOffset int) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1148,7 +1178,8 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 	want := p.normalizeProvider(provider)
 
 	var cands []*entry
-	var skipped []*entry // ⚠ 因"明确知道没额度"被跳过的号（兜底时要放回来）
+	var skipped []*entry      // ⚠ 因"明确知道没额度"被跳过的号（兜底时要放回来）
+	var staleSkipped []*entry // ⚠ 因"额度陈旧"被跳过的号（**必须**能放回来，见下面兜底）
 	for uid, e := range p.byUID {
 		if p.providerOf(e) != want {
 			continue // 别的上游的账号：本请求用不上
@@ -1180,6 +1211,15 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 			skipped = append(skipped, e)
 			continue
 		}
+		// ⚠ 额度**陈旧**的号也不进候选（2026-11-02，T-029b ④）。
+		//
+		// 与上面那条的区别：上面是"明确知道没额度"（打上去必然失败），
+		// 这条是"额度可能已经变了、但我们还没刷"（打上去**可能**失败）——
+		// 所以它是**更弱的**排除，且必须有回退（见下面的兜底）。
+		if p.stalenessChecker != nil && p.stalenessChecker(e.a.UID, e.lastUsed) {
+			staleSkipped = append(staleSkipped, e)
+			continue
+		}
 		cands = append(cands, e)
 	}
 	// ⚠ **兜底：全都被额度筛掉时，把那些号放回来**。
@@ -1190,6 +1230,20 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 	// ⇒ 宁可退回旧行为（照常选，打上去让上游拒绝），也不要制造一个新的 503。
 	if len(cands) == 0 && len(skipped) > 0 {
 		cands = skipped
+	}
+	// ⚠ **保护 2**：因为"额度陈旧"而被排除到空候选时，必须把那些号放回来。
+	//
+	// 为什么：排除本身是"宁可少一个候选也不用错数决策"，但那句话的前提是
+	// **还有别的候选**。若一个都不剩，排除就变成了"池子空了" ⇒ 503 ——
+	// 那是把"额度旧"误报成"没号"，比用错数决策更糟（请求直接失败）。
+	// ⇒ 最坏情况必须只是"白排除一次然后回退"。
+	if len(cands) == 0 && len(staleSkipped) > 0 {
+		if !p.staleWarned {
+			p.staleWarned = true
+			log.Printf("pool: ⚠ 全部候选的额度都太旧（%d 个）⇒ 已回退为不排除 —— "+
+				"额度刷新可能滞后；本次选号仍会给号（宁可额度旧，也不要 503）", len(staleSkipped))
+		}
+		cands = staleSkipped
 	}
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
@@ -1658,7 +1712,7 @@ const idleWeightFullHours = 2.0
 //
 // 用户报障：「monkeycode 会自动封禁账号，并且第二天的免费额度恢复之后不会
 // 重新变成正常的账号」。原因是自动禁用只有两条恢复通道：一次请求成功
-//（号已被摘出候选集 ⇒ 永远等不到）与定期解封探测（默认 24 小时、且配置里
+// （号已被摘出候选集 ⇒ 永远等不到）与定期解封探测（默认 24 小时、且配置里
 // 常被关掉）。于是「额度次日恢复」这件**我们本来就会定期观察到**的事实，
 // 反而没有用来解封。
 //
@@ -1668,7 +1722,8 @@ const idleWeightFullHours = 2.0
 // 这正是解封需要的两条证据。
 //
 // ⚠ 只在**确实可用**时解封（见 quotaUsable）：HasData=false（没查到）与
-//   额度为 0 都不算 —— 否则一个真的没额度的号会被反复放回池子、每次白跑一趟。
+//
+//	额度为 0 都不算 —— 否则一个真的没额度的号会被反复放回池子、每次白跑一趟。
 func (p *Pool) SetQuota(uid string, q QuotaView) {
 	p.mu.Lock()
 	e, ok := p.byUID[uid]
@@ -1690,7 +1745,9 @@ func (p *Pool) SetQuota(uid string, q QuotaView) {
 // quotaUsable 额度视图是否显示「这个号现在能用」（自动解封的判据）。
 //
 // ⚠ 必须先看 HasData：Remaining 的 0 在「没查到」时也会出现，
-//   把「没查到」当成「可用」会让一个真的没额度的号反复被放回池子。
+//
+//	把「没查到」当成「可用」会让一个真的没额度的号反复被放回池子。
+//
 // ⚠ 用 **Effective()** 而不是 Remaining：per_model 形态下 Remaining 无意义。
 func quotaUsable(q QuotaView) bool {
 	if !q.HasData {

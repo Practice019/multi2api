@@ -77,6 +77,14 @@ func TestStartReturnsEmptyAuthURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start 失败: %v", err)
 	}
+	// ⚠ 兜底清理（2026-11-02）：这条用例会**真起浏览器**（StartBrowserLogin）。
+	// 用户实测的问题正是「跑完测试，浏览器还开着」（当时留下 18 个 msedge、活了 20 分钟）。
+	// 根因是 closure 只杀主进程，已由 killtree_*.go 修掉；这里是**调用侧的第二道保险**：
+	// 无论后续断言 Fatal 还是 panic，t.Cleanup 都会跑到 —— 而 CancelBrowserLogin
+	// 会走会话的 closure（整棵进程树 + profile 目录）。
+	if state != "" {
+		t.Cleanup(func() { p.CancelBrowserLogin(state) })
+	}
 	// state 是轮询句柄，必须有 —— 否则前端无法查登录结果。
 	if state == "" {
 		t.Error("state 为空 —— 前端拿不到轮询句柄，登录结果永远查不到")

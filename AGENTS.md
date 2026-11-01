@@ -469,3 +469,18 @@ Start-Process cmd.exe -ArgumentList '/c','start','start.bat' -WorkingDirectory '
 
 - 凭证、token、cookie、私钥**一律不进任何记忆文件**
 - 读写只在授权根内；路径引用超出范围时记为「未核」，不自动跟随
+
+### 进程/目录清理的坑（2026-11-02 实测，两条都是真机踩出来的）
+
+- **Windows 上 `os.Process.Kill()` 不级联子进程**（走 `TerminateProcess`，只杀那一个），
+  而且**主进程一死父子关系就断** ⇒ 之后连 `taskkill /T /F` 也**枚举不到**那些孤儿
+  （它按 PID 递归）。所以必须**在杀之前**把整棵树挂进 Job Object —— 见
+  `internal/monkeycode/killtree_windows.go`（Unix 侧对应 `Setpgid` + `kill(-pgid)`）。
+  实测：一次浏览器登录留下 **18 个 msedge**、活了 20 分钟；修好后同一场景 10 → 0。
+- **`os.RemoveAll(profileDir)` 在目录被孤儿占用时会静默失败** —— 于是“删了”只是句空话。
+  实测 22 小时攒出 **110 个** `D:\temp\wb2api-login-*`（约 18 GB）**无人发现**。
+  ⇒ **删目录/删文件失败必须打日志**（`removeProfileWhenGone` 的 warn 就是为此），
+  并且清理要**与进程清理解耦**：先等进程真退出（轮询，最多 10 秒），再删。
+- **改完最后一处代码必须重新跑一次全量 `go build ./...`**，不能靠“刚才绿过”推断：
+  2026-11-02 改完一个函数后没重跑，报了“全绿”，而实际 `go build` 有 4 个错误
+  （缺字段 + 缺 import），把下游的重启流程卡住。**“绿”只认当场跑出来的输出**。

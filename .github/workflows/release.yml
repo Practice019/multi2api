@@ -230,10 +230,29 @@ jobs:
             #
             # 也不要附加主题描述（曾出现 `— 上游 4 个 → 10 个 + …` 这种）：
             # 标题该是**可检索的标识**，说明留在 notes 里。
+            # Release 说明的来源：仓库根的 RELEASE_NOTES.md。
+            #
+            # 以前这里是**硬编码的一句话**（"自动构建产物（Windows / Linux / macOS…）"），
+            # 于是每个 Release 的正文都只有 58 个字符 —— 用户原话：「那个说明补一下，
+            # 现在的是空白的」。同仓库的 v1.9.20 有 1724 字符的正式说明，
+            # 从 v1.10.0 起退化成了一句模板话，等于把"这一版改了什么"丢掉了。
+            #
+            # 现在改成读文件：发文前把这一版的说明写进 RELEASE_NOTES.md 提交。
+            # ⚠ 文件缺失时回退到模板，**不是**静默发一个空 Release ——
+            #   发一个 0 字符的正文比发一句模板话更糟（下载的人无从判断这版能不能升）。
+            NOTES_FILE="RELEASE_NOTES.md"
+            if [ -f "$NOTES_FILE" ] && [ -s "$NOTES_FILE" ]; then
+              NOTES_SOURCE="--notes-file $NOTES_FILE"
+              echo "用 $NOTES_FILE 作为 Release 说明（$(wc -c < "$NOTES_FILE") 字节）"
+            else
+              NOTES_SOURCE="--notes 自动构建产物（Windows / Linux / macOS，amd64 + arm64）。详见仓库 README。"
+              echo "⚠ 没有 $NOTES_FILE 或文件为空 ⇒ 回退到模板文案（请补说明后重发）"
+            fi
+            # shellcheck disable=SC2086  # NOTES_SOURCE 需要按空格拆成两个参数
             echo "$ASSETS" | xargs gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "multi2api $TAG" \
-              --notes "自动构建产物（Windows / Linux / macOS，amd64 + arm64）。详见仓库 README。"
+              $NOTES_SOURCE
           fi
 
       - name: Prune stale assets

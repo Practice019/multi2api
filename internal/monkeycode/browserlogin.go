@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -83,6 +84,12 @@ type browserSession struct {
 	mu      sync.Mutex
 	cancel  context.CancelFunc
 	closure func() // 清理（关浏览器 + 删 profile）
+	// browserPID 本次启动的浏览器主进程 pid（0 = 没起过）。
+	//
+	// ⚠ 存在的理由（T-031）：defer 里的兜底清理**不能依赖 closure 是否已赋值** ——
+	// closure 在 Start 成功之后才赋值，而"卡在中间被取消/超时/进程被杀"这些路径
+	// 恰恰是最需要清理的。有了 pid，无论 closure 在不在，都能按 pid 再补一刀。
+	pid int
 }
 
 // setStatus 线程安全地改状态。
@@ -111,6 +118,18 @@ func (p *Provider) StartBrowserLogin(region string, timeout time.Duration) (stri
 		timeout = 10 * time.Minute
 	}
 	id := fmt.Sprintf("mklogin-%d", time.Now().UnixNano())
+	// ★ 陈旧 profile 巡检（T-031，**每进程一次**）。
+	//
+	// 为什么放在这里而不是"服务启动时"：那要改 cmd/server 的启动顺序（本轮不动它），
+	// 而"第一次有人点浏览器登录"正是最需要止血的时刻 —— 用户机器上 22 小时攒了
+	// 111 个 wb2api-login-*，这条巡检会把超过 1 小时的清掉（**正在用的 mtime 是新的，
+	// 绝不会被误删**）。
+	//
+	// ⚠ 它只是**止血**，不是根因修复：真正保证删除的时机是进程自己活着走到 closure。
+	//   进程被杀（测试二进制结束/服务重启/Ctrl-C）时那条路永远走不到。
+	sweepStaleProfilesOnce.Do(func() {
+		SweepStaleLoginProfiles(p.profileRoot(), time.Hour)
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	sess := &browserSession{}
 	sess.status = BrowserLoginStatus{
@@ -189,6 +208,17 @@ func (p *Provider) runBrowserLogin(ctx context.Context, sess *browserSession, re
 	defer func() {
 		if sess.closure != nil {
 			sess.closure()
+			return
+		}
+		// ⚠ 兜底（T-031）：closure 还没赋值（或已被并发路径取走）时，按 pid 再补一刀。
+		//
+		// 为什么需要它：closure 在 `proc.Start()` **成功之后**才赋值 ——
+		// 于是"起好了进程、但还没走到赋值那行就返回"在原理上会漏（虽然当前代码里
+		// 每个 Start 之后的 return 都在 defer 覆盖范围内，但那是**时序上的巧合**，
+		// 不是结构性保证：将来在中间插一个早返回就会破）。
+		// 有了这条，清理**不再依赖 closure 是否被赋值**。
+		if pid := sess.pidOf(); pid > 0 {
+			killPidTreeBestEffort(pid)
 		}
 	}()
 
@@ -227,20 +257,37 @@ func (p *Provider) runBrowserLogin(ctx context.Context, sess *browserSession, re
 	proc := exec.Command(cmd.Path, args...)
 	proc.Stdout = nil
 	proc.Stderr = nil
+	// ⚠ 必须在 Start **之前**：Unix 要在这里设 Setpgid（进程组只能出生时成型，
+	//   事后改不了）；Windows 是空操作 —— 但共用同一调用点，两平台写法不会分叉。
+	prepareProcessForTreeKill(proc)
 	if err := proc.Start(); err != nil {
 		finish(StageError, "启动 "+cmd.Browser+" 失败："+err.Error(), false)
 		return
 	}
+	// 把浏览器挂进"能整体终止"的容器（Windows: Job Object；Unix: 进程组已在 Start 时成型）。
+	// ⚠ 失败**不阻断登录** —— 清理手段降级（Windows 退化成 taskkill）不该让用户登不上。
+	killTree, jerr := attachProcessTree(proc.Process)
+	if jerr != nil {
+		logf("monkeycode: 浏览器未能挂入可级联终止的容器（清理降级，可能留残留）：%v", jerr)
+	}
 	profileDir := cmd.ProfileDir
+	sess.setPID(proc.Process.Pid)
 	sess.closure = func() {
-		if proc.Process != nil {
-			_ = proc.Process.Kill()
+		// ★★ 原来这里只有 `proc.Process.Kill()` —— 它**不级联子进程**（用户实测 18 个
+		//   孤儿 msedge、111 个残留 profile）。整棵树清理见 killtree_*.go。
+		if killTree != nil {
+			if err := killTree(); err != nil {
+				logf("monkeycode: 清理浏览器进程树出错（可能有残留）：%v", err)
+			}
 		}
+		// ★★ profile 清理与进程清理**解耦**（T-031）：
+		//
+		// 老写法是"睡 1.5 秒再 RemoveAll" —— 两个毛病：
+		//   ① 1.5 秒是**拍的**：Chromium 写盘/持有句柄可能更久 ⇒ RemoveAll 静默失败；
+		//   ② RemoveAll 的失败**没人看** ⇒ 111 个残留就是这么攒出来的（22 小时）。
+		// 现在：等**进程真退出**（最多 10 秒）再删，删不掉就**记一行 warn**。
 		if profileDir != "" {
-			go func() {
-				time.Sleep(1500 * time.Millisecond)
-				_ = os.RemoveAll(profileDir)
-			}()
+			go removeProfileWhenGone(profileDir, proc.Process.Pid)
 		}
 	}
 
@@ -404,3 +451,116 @@ func (p *Provider) profileRoot() string {
 
 // 编译期小工具：确认 http 包仍被使用（handler 在别处）。
 var _ = http.MethodGet
+
+// ── T-031：兜底清理与 profile 清理（与进程清理解耦）─────────────────────
+
+// setPID / pidOf 记本次启动的浏览器主进程 pid（兜底清理用，见 browserSession.pid 的注释）。
+func (s *browserSession) setPID(pid int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pid = pid
+	s.mu.Unlock()
+}
+
+func (s *browserSession) pidOf() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pid
+}
+
+// killPidTreeBestEffort 按 pid 尽力杀整棵树（**幂等**：进程没了就是成功）。
+//
+// ⚠ 与 killProcessTree 的关系：那个吃 `*os.Process`（能走 Job Object，最可靠）；
+//
+//	这个是"只有 pid 可用"时的兜底（closure 没赋值那条路径）。两者都不该 panic。
+func killPidTreeBestEffort(pid int) {
+	if pid <= 0 {
+		return
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil || p == nil {
+		return
+	}
+	if err := killProcessTree(p); err != nil {
+		logf("monkeycode: 兜底清理浏览器进程树（pid=%d）出错：%v", pid, err)
+	}
+}
+
+// removeProfileWhenGone 等浏览器进程真的退出，再删 profile 目录。
+//
+// # 为什么不能"睡固定时长再删"
+//
+// 老写法 `sleep 1.5s; RemoveAll` 是**拍的**：Chromium 可能还在写盘/持有句柄，
+// 于是 RemoveAll 静默失败 —— 用户机器上就这样攒了 **111 个** `wb2api-login-*`
+// （22 小时跨度）。两条修正：
+//
+//	① 判据从"等了多久"换成"**进程还在不在**"（轮询，最多 10 秒）
+//	② 删不掉**必须留痕**（warn 日志）—— 静默失败正是它攒到 111 个的原因
+func removeProfileWhenGone(dir string, pid int) {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		logf("monkeycode: ⚠ 临时 profile 未能删除（残留，需人工清理）：%s —— %v", dir, err)
+		return
+	}
+	logf("monkeycode: 临时 profile 已清理：%s", dir)
+}
+
+// processAlive 报告 pid 还活着没（Windows/Unix 各一套，见 process_alive_*.go）。
+
+// SweepStaleLoginProfiles 清掉陈旧的临时 profile（**止血**用，不解决根因）。
+//
+// # 为什么需要它
+//
+// 真正保证"profile 一定被删"的时机是**进程自己活着走到 closure**。而当整个进程
+// 被杀（测试二进制结束、服务重启、Ctrl-C）时，那条路永远不会走到 —— 谁也没机会删。
+// 所以还需要一个"下次启动时把过期的扫掉"的兜底：它不解决根因，但能防止无限累积。
+//
+// 判据用**目录 mtime 超过 `olderThan`**（默认 1 小时，见调用点）—— 正在使用的
+// profile 的 mtime 是新的，绝不会被误删。
+func SweepStaleLoginProfiles(root string, olderThan time.Duration) (removed, failed int) {
+	if strings.TrimSpace(root) == "" {
+		return 0, 0
+	}
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return 0, 0 // 目录不存在/读不动都不算错误（首次运行就是这种状态）
+	}
+	cutoff := time.Now().Add(-olderThan)
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), loginProfilePrefix) {
+			continue
+		}
+		info, ierr := e.Info()
+		if ierr != nil || info.ModTime().After(cutoff) {
+			continue // 新的（可能正在用）⇒ 不碰
+		}
+		full := filepath.Join(root, e.Name())
+		if rerr := os.RemoveAll(full); rerr != nil {
+			failed++
+			logf("monkeycode: ⚠ 陈旧 profile 清理失败：%s —— %v", full, rerr)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 || failed > 0 {
+		logf("monkeycode: 陈旧临时 profile 巡检：已清 %d 个，失败 %d 个（早于 %v 的）",
+			removed, failed, olderThan)
+	}
+	return removed, failed
+}
+
+// sweepStaleProfilesOnce 让陈旧 profile 巡检每进程只跑一次（见 StartBrowserLogin 的调用点）。
+const loginProfilePrefix = "wb2api-login-"
+
+var sweepStaleProfilesOnce sync.Once
