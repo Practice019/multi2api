@@ -83,6 +83,15 @@ type chatStat struct {
 	clientIP string
 	clientUA string
 
+	// attempts / spentMs / lastFail 换号重试的**观测**（2026-11-02 加）。
+	//
+	// 起因：用户直连上游实测"单次尝试 40 秒"（34.2s / 46.2s / 成功也要 38.9s），
+	// 而网关只回一句含糊的 503 —— 看不到"试了几个号、一共等了多久、最后一次为什么失败"，
+	// 只能翻容器日志。这三项在失败收尾时拼进 decision，一眼可判"是上游慢还是池子空"。
+	attempts int
+	spentMs  int64
+	lastFail string
+
 	logged bool
 }
 
@@ -110,7 +119,24 @@ func (s *chatStat) done() {
 		}
 		s.bump(toks, s.status >= 200 && s.status < 300)
 	}
-	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, s.decision, s.preMs.Milliseconds(), s.clientIP, s.clientUA)
+	// 失败请求补上"试了几个号 / 一共等了多久 / 最后一次为什么失败"（2026-11-02 加）。
+	//
+	// 起因：用户直连上游实测**单次尝试 40 秒**（34.2/46.2/成功也要 38.9s），
+	// 而网关只回一句含糊的 503 —— 日志里看不到"试了几个号、一共等了多久、
+	// 最后一次为什么失败"，只能翻容器日志。现在一行就能读到：
+	//	attempts=3 spentMs=118000 last=loomy server 408
+	//
+	// ⚠ 只在**失败**时追加：成功请求的 decision 留空是既有契约（见 chatStat.decision 的注释）。
+	decisionForLog := s.decision
+	if s.status >= 400 && s.attempts > 0 {
+		// ⚠ spentMs 是**池循环内**的耗时（预算的度量对象），不含循环外的选号/转换/收尾。
+		// 真机实测：客户端总耗时 110.6s，而 spentMs=70436ms —— 差额就是循环外开销。
+		// 两个数都写进日志，避免"日志说 70 秒、客户端等 110 秒"这种口径分歧：
+		//   spentMs=…  → 预算用掉多少（决定"还该不该再试"的那个数）
+		//   totalMs=…  → 客户端实际等了多久（已由 entry.TotalMS 记录）
+		decisionForLog = appendAttemptTrace(decisionForLog, s.attempts, s.spentMs, s.lastFail)
+	}
+	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, decisionForLog, s.preMs.Milliseconds(), s.clientIP, s.clientUA)
 
 	// ⚠ 喂上游级"首字节耗时"统计（2026-10-18 加）。
 	//

@@ -116,6 +116,13 @@ type Config struct {
 	Groups    *groupstore.Store
 	MaxRotate int // 单请求最多换号次数，默认 3
 
+	// AttemptBudget 一次请求在**换号重试**上最多愿意花的时间（默认 90s，见
+	// attempt_budget.go 的取值理由）。0 = 用默认值。
+	//
+	// 为什么需要它：用户直连上游实测**单次尝试就 40 秒**（34.2/46.2/成功也要 38.9s）。
+	// 只按次数限流时，默认 3 次 = 最坏 2 分钟；而按时间限流能把总等待压在预算内。
+	AttemptBudget time.Duration
+
 	// AccountAuth 控制台登录端点（注册/登录/登出/读会话），由装配层注入。
 	//
 	// 挂在 `/admin/auth/`，即管理台门禁**之外** —— 理由见 New() 里挂载处的注释。
@@ -2123,8 +2130,23 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			heldUID = ""
 		}
 	}
+	// lastFailBrief 最后一次失败的一句话摘要（写进请求日志，用户实测痛点：
+	// 旧日志只有一句含糊 503，得翻容器日志才知道"是上游慢还是池子空"）。
+	lastFailBrief := ""
+	var attemptStart time.Time
+	var lastAttemptDur time.Duration
 	// fail 在轮转失败分支统一：释放租约 + 若失败号正是粘性号则解绑（下次请求重新分配）。
-	fail := func(uid string) {
+	//
+	// reason 是**给人看的一句话**（如 "loomy 408 超时"），会被记进 lastFailBrief；
+	// 传空串表示这条分支不需要额外留痕（例如纯本地转换失败已另有 decision）。
+	fail := func(uid string, reason string) {
+		if reason != "" {
+			lastFailBrief = reason
+		}
+		// 记下本轮尝试耗时（timeBudget 的预估输入）。
+		if attemptStart != (time.Time{}) {
+			lastAttemptDur = time.Since(attemptStart)
+		}
 		releaseHeld()
 		if stickyUID != "" && uid == stickyUID {
 			h.cfg.Session.Unbind(sessKey)
@@ -2160,7 +2182,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 用它防止两个上游都没号时来回横跳：那是无限循环，不是重试。
 	switchedFrom := map[string]bool{}
 	origModel := peek.Model
+	// 时间预算：单次尝试实测可达 40 秒（用户直连讯飞：34.2s / 46.2s / 38.9s），
+	// 所以"换号重试"必须有墙钟上限，否则总等待会被放大到分钟级。
+	budget := newAttemptBudget(h.cfg.AttemptBudget)
+	attempts := 0
+	// 观测：无论从哪条分支离开池循环，都把"试了几个号 / 一共等了多久 / 最后为什么失败"
+	// 记到日志统计里（用户实测痛点：只有一句含糊 503，得翻容器日志才知道上游慢）。
+	defer func() {
+		st.attempts = attempts
+		st.spentMs = budget.Spent().Milliseconds()
+		st.lastFail = lastFailBrief
+	}()
 	for i := 0; i < maxAttempts; i++ {
+		// ⚠ 预算判据放在循环体最前面：已花掉 90 秒时不该再开一次可能 40 秒的尝试。
+		// i>0 才判 —— 第一次尝试必须允许（否则预算设小会让所有请求直接失败）。
+		if i > 0 && !budget.ShouldTryAgain(maxAttempts-i, lastAttemptDur) {
+			st.decision = "attempt_time_budget:" + fmt.Sprintf("%d", budget.Spent().Milliseconds())
+			break
+		}
+		attempts = i + 1
+		// attemptStart 本轮尝试的起点；失败分支用它算出"上一次花了多久"，
+		// 供 ShouldTryAgain 预估下一次成本（见 attempt_budget.go 的那段注释）。
+		attemptStart = time.Now()
 		// 选号：粘性号优先（已校验 **provider + health + 在途未满**），否则普通轮换。
 		//
 		// ⚠ 必须用 PickByUIDFor(reqProvider, ...) 而不是 PickByUID(...)：
@@ -2337,7 +2380,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
-				fail(acct.UID)
+				fail(acct.UID, failBrief(reqProvider, lastKind, lastErr))
 				continue
 			}
 		}
@@ -2436,7 +2479,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 循环内的硬失败（注入失败/上游连续报错）：
 				// 分类后按换号处理，与普通 chat 路径同一条。
 				lastErr = werr
-				fail(acct.UID)
+				fail(acct.UID, failBrief(reqProvider, gateway.ErrKindServer, werr))
 				continue
 			}
 			if done {
@@ -2458,7 +2501,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// done=false：本轮没跑成（如上游报错），换号重试。
-			fail(acct.UID)
+			fail(acct.UID, failBrief(reqProvider, lastKind, lastErr))
 			continue
 		}
 
@@ -2518,7 +2561,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			fail(acct.UID)
+			fail(acct.UID, "transport "+failBrief(reqProvider, gateway.ErrKindClient, terr))
 			continue
 		}
 		if status >= 400 {
@@ -2628,7 +2671,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if resetAt, ok := h.softRateReset(reqProvider, status, respBody); ok {
 					h.cfg.Pool.CooldownSoftForModel(acct.UID, h.cfg.SoftCooldown,
 						resetAt, reqModel, "429 模型级限流")
-					fail(acct.UID)
+					fail(acct.UID, failBrief(reqProvider, kind, lastErr))
 					continue
 				}
 			}
@@ -2657,7 +2700,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			h.applyErrorPolicy(acct.UID, kind)
-			fail(acct.UID)
+			fail(acct.UID, failBrief(reqProvider, kind, lastErr))
 			continue
 		}
 		rc := cr
@@ -2741,7 +2784,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					Msg:    inband.Message,
 				}
 				h.applyErrorPolicy(acct.UID, kind)
-				fail(acct.UID)
+				fail(acct.UID, failBrief(reqProvider, kind, lastErr))
 				continue
 			}
 
@@ -2777,7 +2820,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				Msg:    inband.Message,
 			}
 			h.applyErrorPolicy(acct.UID, kind)
-			fail(acct.UID)
+			fail(acct.UID, failBrief(reqProvider, kind, lastErr))
 			continue
 		}
 		if err != nil {
