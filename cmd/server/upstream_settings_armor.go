@@ -131,9 +131,17 @@ func (a *armorSettingsAdapter) applyToMemory(values map[string]any) {
 		return
 	}
 	if v, ok := values[keyArmorRetry].(bool); ok {
-		a.cfg.PromptArmorRetry = v
-		a.cfg.Prompt.ArmorRetry = v
-		a.cfg.Admin.PromptArmorRetry = v
+		// 三处一起写（与 mode 那条同一纪律）：
+		//   PromptArmorRetry       —— 解析后的运行时值（启动日志与装配读它）
+		//   Prompt.ArmorRetry      —— 嵌套镜像（兼容手写 prompt.armor_retry 的配置与文档）
+		//   Admin.PromptArmorRetry —— managed 位置（下次落盘写进 config.json 的 admin 段）
+		//
+		// 注意：admin 那份是 *bool，这里取的是**副本**的地址（不能指向接口/临时值）；
+		//   用户关掉开关时落的是一个显式 &false —— 那正是它能压过手写 true 的原因。
+		val := v
+		a.cfg.PromptArmorRetry = val
+		a.cfg.Prompt.ArmorRetry = val
+		a.cfg.Admin.PromptArmorRetry = &val
 	}
 	if v, ok := values[keyArmorMode].(string); ok {
 		// 三处一起写（与 monkeycode 出口适配器同一纪律）：

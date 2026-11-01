@@ -182,6 +182,10 @@ func main() {
 	armorState := prompt.NewArmorState(prompt.ArmorConfig{
 		Mode:    cfg.PromptArmorMode,
 		Payload: cfg.PromptArmorPayload,
+		// RetryOnRefusal 必须在这里传进去：只补 normalize 的解析、忘了这一步的话，
+		// 设置页保存仍然"看起来生效"（值进了内存），但**重启后**状态机是重新构造的、
+		// 拿到的永远是 false —— 实测那次 bug 就是**双重失效**（解析没读 + 构造没传）。
+		RetryOnRefusal: cfg.PromptArmorRetry,
 	})
 	up.Armor = armorState
 	// 严格前缀模式的热状态（设置项 strict_model_prefix，默认关）。

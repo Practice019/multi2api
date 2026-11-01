@@ -498,8 +498,14 @@ type Config struct {
 		// 实测就是这么发现的：改完 append → 落盘 admin.prompt_armor_mode=append →
 		// 重启日志 `破甲：mode=off`、设置页读回 off。
 		PromptArmorMode string `json:"prompt_armor_mode"`
-		// PromptArmorRetry 同上（设置页可改，热生效）。
-		PromptArmorRetry bool `json:"prompt_armor_retry"`
+		// PromptArmorRetry 命中拒绝后是否自动重试一次（设置页写这里，热生效）。
+		//
+		// 注意：**必须是指针**（"两处存储"家族第三次的教训，2026-11-01）：
+		//   设置页写 admin 段、手写配置在 prompt.armor_retry。若这里用普通 bool 加 a || b 合成，
+		//   用户在界面上**关掉**开关（显式 false）之后，手写位置的 true 会把行为重新打开 ——
+		//   界面显示关、行为却是开，而且没有任何日志能看出来。
+		//   指针让"没配"（nil）与"显式关闭"（&false）可分辨：只有 nil 才回退到手写位置。
+		PromptArmorRetry *bool `json:"prompt_armor_retry"`
 
 		// ---- 严格前缀模式（设置页可改，热生效，2026-11-01）----
 		//
@@ -1541,6 +1547,22 @@ func (c *Config) normalize() error {
 	default:
 		return fmt.Errorf("prompt.armor_mode=%q 非法：只接受 %q / %q / %q",
 			c.Prompt.ArmorMode, prompt.ArmorOff, prompt.ArmorAppend, prompt.ArmorReplace)
+	}
+	// retry 必须在这里解析 —— **原来的代码只有声明、没有解析**（实测到的 bug）：
+	//   设置页 PUT 200、config.json 里也确实写进了 prompt_armor_retry: true，
+	//   但 normalize 从不读它 ⇒ **重启后静默复位成 false**（mode 活得好好的，只有 retry 被复位）。
+	//   合成规则与上面 mode 同一纪律：设置页那份（admin 段）**优先**，手写 prompt.armor_retry 作回退；
+	//   用指针区分"没配"与"显式 false"，否则界面上关掉会被手写的 true 顶回来。
+	//
+	//   这一家族本仓已中三次（monkeycode 出口、prompt_armor_mode、prompt_armor_retry），
+	//   所以另有一条源码级守卫 TestEveryArmorSettingKeyIsResolvedInNormalize 钉住：
+	//   凡是适配器能写的 prompt_armor_* 键，这里都必须有一条解析赋值。
+	c.PromptArmorRetry = c.Prompt.ArmorRetry
+	if c.Admin.PromptArmorRetry != nil {
+		c.PromptArmorRetry = *c.Admin.PromptArmorRetry
+	}
+	if c.PromptArmorRetry {
+		log.Printf("破甲：命中拒绝后自动重试**已开启**（设置项 prompt_armor_retry）")
 	}
 	if af := strings.TrimSpace(c.Prompt.ArmorFile); af != "" {
 		raw, err := os.ReadFile(af)
