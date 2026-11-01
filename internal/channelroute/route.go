@@ -102,6 +102,16 @@ func Plan(s *channelstore.Store, group, publicModel string) ([]Candidate, error)
 
 // upstreamName 用该渠道的映射表把公开名解析成上游名。
 func upstreamName(ch *channelstore.Channel, publicModel string) (string, error) {
+	// ① 目录侧合成的命名空间形式（<渠道名>/<上游名>）优先认领。
+	//
+	// 与 internal/server/models_channels.go 的合成规则**对称**（同一份 modelmap.Namespaced/SplitNamespaced）——
+	// 不对称就会出现"目录里看得见 csg/xxx、发请求却 400"，那是这一族问题的老形态
+	//（见 models_channels.go 文件头记的两次用户反馈）。
+	//
+	// ⚠ 只认**自己**的命名空间：按渠道名比前缀，`七牛云/xxx` 不会命中 csg 这条渠道。
+	if rest, ok := modelmap.SplitNamespaced(ch.Name, publicModel); ok {
+		return rest, nil
+	}
 	if len(ch.ModelMap) == 0 {
 		return publicModel, nil
 	}

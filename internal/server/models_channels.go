@@ -64,6 +64,26 @@ func (h *Handler) channelReverseMapping() map[string]string {
 			}
 		}
 	}
+	// ② 没写映射的声明模型：公开名 = <渠道名>/<上游名>（共享规则见 modelmap.Namespaced）。
+	//
+	// 不这么补的话，modelvis 会按"没有反向项就原样输出"把**上游原名**当公开名暴露出去 ——
+	// 用户实测到的 `fake-refusal-test`（无前缀）就是这么进到请求日志里的。
+	//
+	// 显式映射**优先**：上面的循环先跑，这里只在 out 里还没有这个上游名时才补（先到先得，顺序稳定）。
+	for _, ch := range s.List() {
+		if ch == nil {
+			continue
+		}
+		for _, m := range ch.Models {
+			if m == "" {
+				continue
+			}
+			if _, exists := out[m]; exists {
+				continue // 已有显式映射（或前面的渠道已认领这个名字）
+			}
+			out[m] = modelmap.Namespaced(ch.Name, m)
+		}
+	}
 	return out
 }
 
@@ -180,6 +200,16 @@ func (h *Handler) channelOwnerByModel() map[string]string {
 			pub := real
 			if p, ok := rev[real]; ok && p != "" {
 				pub = p
+			} else {
+				// ⚠ 与 channelReverseMapping / channelroute.upstreamName 用**同一份**规则：
+				//   没写映射的声明模型，公开名是 <渠道名>/<上游名>（modelmap.Namespaced）。
+				//
+				// 这里原来就是 `pub := real`（拿裸名当键）—— 它是同一个漏法的第 2、3 个副本：
+				// 目录里名字已经带前缀、这份表还按裸名索引 ⇒ 查不到 ⇒ 目录视图里合成行的
+				// "供应商"列变成 unknown（用户看到的就是那列空掉）。
+				//
+				// 三处同规则是硬要求：否则必然分叉成"目录里看得见、来源标不出"。
+				pub = modelmap.Namespaced(ch.Name, real)
 			}
 			if old, seen := best[pub]; !seen || ch.Priority > old {
 				best[pub] = ch.Priority
@@ -217,6 +247,16 @@ func (h *Handler) channelModelMeta() map[string]channelModelMetaInfo {
 			pub := real
 			if p, ok := rev[real]; ok && p != "" {
 				pub = p
+			} else {
+				// ⚠ 与 channelReverseMapping / channelroute.upstreamName 用**同一份**规则：
+				//   没写映射的声明模型，公开名是 <渠道名>/<上游名>（modelmap.Namespaced）。
+				//
+				// 这里原来就是 `pub := real`（拿裸名当键）—— 它是同一个漏法的第 2、3 个副本：
+				// 目录里名字已经带前缀、这份表还按裸名索引 ⇒ 查不到 ⇒ 目录视图里合成行的
+				// "供应商"列变成 unknown（用户看到的就是那列空掉）。
+				//
+				// 三处同规则是硬要求：否则必然分叉成"目录里看得见、来源标不出"。
+				pub = modelmap.Namespaced(ch.Name, real)
 			}
 			if old, seen := best[pub]; !seen || ch.Priority > old {
 				best[pub] = ch.Priority

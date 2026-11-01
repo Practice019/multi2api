@@ -145,8 +145,20 @@ func TestChannelModelsAreMergedIntoPublicList(t *testing.T) {
 	if !hasID(ids, "pub-y") {
 		t.Fatalf("★ 渠道声明的公开名应并进目录（这是第二次反馈要的），实际 %v", ids)
 	}
-	if !hasID(ids, "plain") {
-		t.Fatalf("★ 未映射的渠道模型应原样并进目录，实际 %v", ids)
+	// ⚠ 2026-11-01 期望值**改了**（用户报的现象换来的）：
+	//
+	//	旧断言：未映射的渠道模型**原样**并进目录（= 把上游原名当公开名暴露）
+	//	新规则：公开名 = <渠道名>/<上游名>（modelmap.Namespaced，目录侧与路由侧共用一份）
+	//
+	// 为什么必须改：用户在实际请求日志里看到了没有上游前缀的模型名（例如我临时建的那条
+	// 测试渠道声明的 fake-refusal-test），他的口径是「模型目录里只能显示带上游前缀的模型」——
+	// 而他真正在用的写法就是 csg/deepseek-v4.1-flash-1017 这种带前缀的。
+	// 上游原名（plain）继续当公开名暴露，就是这个 bug 的本体。
+	if !hasID(ids, "我的Key渠道/plain") {
+		t.Fatalf("★ 未映射的渠道模型应并进目录，但公开名必须是 <渠道名>/<上游名>，实际 %v", ids)
+	}
+	if hasID(ids, "plain") {
+		t.Fatalf("★ 不该再出现**无前缀**的上游原名 plain（这正是用户报的那个 bug），实际 %v", ids)
 	}
 	if hasID(ids, "real-x") {
 		t.Fatalf("★ 不该出现上游名 real-x（映射应反向生效，对外只认公开名），实际 %v", ids)
@@ -170,8 +182,12 @@ func TestChannelStatusOnlyRemovesChannelModels(t *testing.T) {
 	}
 	h := channelAwareHandler(t, s)
 	before := publicModelIDs(t, h)
-	if !hasID(before, "ch-only") {
-		t.Fatalf("启用时渠道模型应在目录里，实际 %v", before)
+	// ⚠ 2026-11-01：期望名从裸 `ch-only` 改成 `临时/ch-only`（渠道名做命名空间）。
+	//
+	// 旧断言护的是"渠道声明什么就原样暴露什么"，而那正是用户报的 bug：
+	// 目录/请求日志里出现没有上游前缀的模型名。新规则见 modelmap.Namespaced。
+	if !hasID(before, "临时/ch-only") {
+		t.Fatalf("启用时渠道模型应在目录里（且带渠道名前缀），实际 %v", before)
 	}
 	if err := s.SetStatus("ch-2", channelstore.StatusManuallyDisabled); err != nil {
 		t.Fatalf("停用失败: %v", err)
@@ -358,8 +374,15 @@ func TestStoreModelCatalogSeed(t *testing.T) {
 	if r, ok := byName["workbuddy/glm-5.2"]; !ok || r.Synthetic {
 		t.Errorf("上游条目 workbuddy/glm-5.2 不该是合成行: %+v", r)
 	}
-	if r, ok := byName["glm-5.2"]; !ok || !r.Synthetic {
-		t.Errorf("渠道声明的裸名 glm-5.2 应是合成行: %+v", r)
+	// ⚠ 2026-11-01：同样的理由 —— 合成行的名字现在是 <渠道名>/<上游名>，
+	//   不再是裸的上游名（否则用户会在目录里看到没前缀的模型，那是他报的 bug）。
+	// ⚠ 名字里的渠道名是**这条测试自己的**夹具渠道名（seed渠道），不是别的用例的。
+	//   我第一版凭记忆写成「视图渠道」—— 断言立刻报红，说明它确实在按名字找行。
+	if r, ok := byName["seed渠道/glm-5.2"]; !ok || !r.Synthetic {
+		t.Errorf("渠道声明模型的合成行应是 seed渠道/glm-5.2: %+v", r)
+	}
+	if _, ok := byName["glm-5.2"]; ok {
+		t.Errorf("不该再有**无前缀**的合成行 glm-5.2（用户报的就是这个）")
 	}
 	// 纯函数边界（直接调 store 那一层）：known 里已有的一律不合成。
 	if direct := store.SyntheticCatalogEntries([]string{"a"}, []string{"a", "b"}, nil); len(direct) != 1 ||
