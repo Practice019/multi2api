@@ -8,6 +8,7 @@
 // 那个错误指向 session，实际原因是 balance 的类型。
 //
 // 用真实导出样本钉住，比读字段对照表可靠。
+// ⚠ 本文件的凭证一律是**假值**（.invalid 域 / 固定串）。绝不要粘真实凭证进来 —— 见 AGENTS.md 的安全条目
 package monkeycode
 
 import (

@@ -19,6 +19,35 @@
 //
 // 第二把是**可无限签发**的（实测：同一账号可签任意多把，旧的不会失效），
 // 所以这里存的是**我们签发的那一把**，不是用户已有的那一把。
+//
+// # 第四个字段：Email + Password（2026-11-01 起，为了自动续期）
+//
+// 上面那把 session 是 **30 天硬过期**的，以前本仓的结论是"无续期接口，
+// 过期只能重登/重导"（expiry.go 的旧注释、Auth.Session 的旧注释都这么写）。
+// 2026-11-01 在注册机侧实测推翻了它：**有续期路径**，而且不需要有效的 session —
+//
+//	POST /api/v1/public/captcha/challenge   （公开端点，不需要登录态）
+//	POST /api/v1/public/captcha/redeem      → captcha_token
+//	POST /api/v1/users/password-login       {email, password, captcha_token}
+//	  → Set-Cookie: monkeycode_ai_session=<新 uuid>; Max-Age=2592000
+//
+// 所以 Email + Password 从"多余的泄露面"变成了**唯一的自救钥匙**：
+// session 完全失效（连 401 都拿不到）时，只要密码还在就能换一个新 session 回来。
+// 实现见 renew.go。
+//
+// # 代价与边界（硬要求，改这两个字段前先读）
+//
+// 明文密码落盘 = 多一份泄露面。因此：
+//
+//	① 绝不进日志：任何 logf/错误信息里都不许拼 Password（连前几个字符都不给）
+//	② 绝不进 admin 响应：admin 的账号表只渲染 gateway 的**投影**（uid/nickname/…），
+//	   而 gateway.Credential.Secret 的标签是 `json:"-"` ⇒ 结构上就序列化不出去
+//	③ 只活在 SaveFile 写出的凭据档里（0600 + 原子写）
+//	④ 它们**不参与**任何判据：能不能用永远看 session 的真实请求结果
+//
+// 历史依据（为什么当初会丢）：这两个字段最早只有"展示/排查"价值，
+// 而注册机导出侧曾把 password 归入「危险」并主动裁掉（见 regmachine.go 文件头）。
+// 现在续期让它们有了用途，所以导入侧改成保留。
 package monkeycode
 
 import (
@@ -30,7 +59,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // filePrefix 文件名前缀（`<dir>/monkeycode-<uid>.json`，与其余上游同款）。
@@ -46,8 +77,56 @@ const (
 
 // Auth 一份 MonkeyCode 凭证。
 type Auth struct {
-	// Session `monkeycode_ai_session` 的 uuid。**必需**，30 天硬过期，无续期接口。
+	// Session `monkeycode_ai_session` 的 uuid。**必需**，30 天硬过期。
+	//
+	// ⚠ 「30 天硬过期」不再等于「过期就没救」：自 2026-11-01 起本仓能**自动续期**
+	// （Email + Password + PoW → password-login 换新 session，见 renew.go），
+	// 且新旧 session **并存**（旧的不会被吊销）⇒ 续期是安全操作。
 	Session string `json:"session"`
+
+	// Email 上游账号邮箱。**只用于自动续期**（与 Password 配对喂 password-login）。
+	//
+	// 缺它时续期会明确报错而**不发**任何网络请求（见 Provider.RenewSession）。
+	Email string `json:"email,omitempty"`
+
+	// Password 明文密码。**只用于自动续期**，绝不外传/不外显。
+	//
+	// # 为什么现在要存明文（安全上必须写清，别人会问）
+	//
+	// 因为密码是**唯一的自救钥匙**：session 一旦失效，只有 password-login 能换回新 session
+	// （那个端点不需要有效 session）。不存它 ⇒ 每 30 天就要人工重新登录一次。
+	//
+	// # 边界（三条硬约束）
+	//
+	//	① 绝不进日志（logf / error 里连前缀都不给）
+	//	② 绝不进 admin 响应（gateway.Credential.Secret 是 `json:"-"`，结构上就出不去）
+	//	③ 只活在凭据档里（SaveFile，0600 + 原子写）
+	Password string `json:"password,omitempty"`
+
+	// SessionRenewedAt 最近一次**自动续期成功**的时刻。
+	//
+	// 它比 AddedAt 更可信：AddedAt 是"入库时刻"，而 session 的 30 天是从**签发时刻**算的。
+	// 续期后真正该拿来推到期的是这个（见 expiry.go 的 SessionAnchor 优先级）。
+	//
+	// ⚠ 类型是 time.Time 而不是 string：admin 的"刚续过就跳过"窗口（24h）
+	// 与 expiry 的锚点都要拿它做**时间运算**（IsZero/Sub/Equal）。
+	// 它在 JSON 里以 RFC3339 输出；而输入侧**容忍四种形态**（见 UnmarshalJSON）——
+	// 注册机写的是**毫秒时间戳数字**，Go 的默认解析会因此**整条 JSON 失败**
+	// （regmachine.go 的 balance 踩过同一个坑：类型不符 = 连 session 都读不到）。
+	SessionRenewedAt time.Time `json:"session_renewed_at,omitempty"`
+
+	// SessionRenewedAtRaw 续期时刻的**原始字符串**形态（只读兼容槽）。
+	//
+	// # 为什么留这个字段（而不是把老写法删干净）
+	//
+	// 本语义的前身就是 string（早期写盘的档里存的是 RFC3339 文本）。
+	// 用户机器上已经有那种档，删掉兼容路径会让他们一升级就"续期时刻失效"
+	// → 到期列退回 AddedAt 估算 → 刚续过的号被误报成"即将过期"。
+	// 所以留一个只读槽：UnmarshalJSON 把文本原样放这儿，
+	// SessionAnchor 在 time.Time 为空时回落到它。
+	//
+	// ⚠ 只读：**新写的档一律只写 session_renewed_at**，不要再往这里写。
+	SessionRenewedAtRaw string `json:"session_renewed_at_raw,omitempty"`
 
 	// APIKey 模型网关的 Bearer（`oma_` 前缀）。
 	APIKey string `json:"api_key,omitempty"`
@@ -90,10 +169,164 @@ type Auth struct {
 	FilePath string `json:"-"`
 }
 
+// UnmarshalJSON 容错解析一份凭证。
+//
+// # 为什么 Auth 需要自定义反序列化
+//
+// 字段里有一个 time.Time（SessionRenewedAt），而**它的来源有两种形态**：
+//
+//	本仓自己写的               RFC3339 字符串
+//	注册机导出的 renewedAt     毫秒时间戳**数字**（1793545574222）
+//
+// Go 对 time.Time 的默认解析只认 RFC3339。若不接管，拿注册机导出的行
+// 会在这个字段上类型不符 ⇒ **整条 Unmarshal 失败** ⇒ 现象是
+// 「凭证文件里没有可用的 session」，而 session 明明在里面。
+// （regmachine.go 文件头的 balance 就是同一类坑。）
+//
+// 做法：先把字段解进一个**影子结构**（时间字段用 string 接），
+// 再用 ParseAuthTime 容错解析。其它字段完全按默认规则走，不受影响。
+func (a *Auth) UnmarshalJSON(raw []byte) error {
+	type shadow struct {
+		Session             string          `json:"session"`
+		Email               string          `json:"email"`
+		Password            string          `json:"password"`
+		APIKey              string          `json:"api_key"`
+		SigningSecret       string          `json:"signing_secret"`
+		Region              string          `json:"region"`
+		Nickname            string          `json:"nickname"`
+		UserID              string          `json:"userid"`
+		Plan                string          `json:"plan"`
+		Balance             string          `json:"balance"`
+		DailyToken          string          `json:"daily_token"`
+		DailyTokenLimit     string          `json:"daily_token_limit"`
+		AddedAt             string          `json:"added_at"`
+		SessionRenewedAt    json.RawMessage `json:"session_renewed_at"`
+		SessionRenewedAtRaw string          `json:"session_renewed_at_raw"`
+	}
+	var s shadow
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return err
+	}
+	a.Session = s.Session
+	a.Email = s.Email
+	a.Password = s.Password
+	a.APIKey = s.APIKey
+	a.SigningSecret = s.SigningSecret
+	a.Region = s.Region
+	a.Nickname = s.Nickname
+	a.UserID = s.UserID
+	a.Plan = s.Plan
+	a.Balance = s.Balance
+	a.DailyToken = s.DailyToken
+	a.DailyTokenLimit = s.DailyTokenLimit
+	a.AddedAt = s.AddedAt
+	if t, ok := ParseAuthTime(string(s.SessionRenewedAt)); ok {
+		a.SessionRenewedAt = t
+	}
+	// 老写法（只有字符串槽）：原文留下，锚点由 SessionAnchor 回落读取。
+	a.SessionRenewedAtRaw = strings.TrimSpace(s.SessionRenewedAtRaw)
+	return nil
+}
+
 // authFile 落盘外层形态 `{"auth":{…},"remark":"…"}`（与其余上游一致）。
 type authFile struct {
 	A      *Auth  `json:"auth"`
 	Remark string `json:"remark,omitempty"`
+}
+
+// MarshalJSON 序列化凭证。
+//
+// # 为什么 Auth 需要自定义序列化（与下面的 UnmarshalJSON 成对）
+//
+// `time.Time` 是 struct，`encoding/json` 的 **omitempty 对它无效** ——
+// 零值时间照样被写成 `"session_renewed_at":"0001-01-01T00:00:00Z"`。
+// 后果不只是难看：那个值**会被解析成一个合法时刻（公元 1 年）**，
+// 于是 SessionAnchor 认为"这号续期于公元 1 年" ⇒ 到期列显示"早就过期了"。
+// 这类"零值被当真值"的错误在界面上极难反推。
+//
+// 做法：先转成影子结构，零值续期章用 nil 指针（omitempty 对指针有效）。
+//
+// ⚠ 必须与 UnmarshalJSON 的字段清单**成对维护**：加字段时两边都要加，
+// 否则会静默丢字段（现象：内存里有、重启后没了）。
+func (a *Auth) MarshalJSON() ([]byte, error) {
+	type shadow struct {
+		Session             string     `json:"session"`
+		Email               string     `json:"email,omitempty"`
+		Password            string     `json:"password,omitempty"`
+		APIKey              string     `json:"api_key,omitempty"`
+		SigningSecret       string     `json:"signing_secret,omitempty"`
+		Region              string     `json:"region,omitempty"`
+		Nickname            string     `json:"nickname,omitempty"`
+		UserID              string     `json:"userid,omitempty"`
+		Plan                string     `json:"plan,omitempty"`
+		Balance             string     `json:"balance,omitempty"`
+		DailyToken          string     `json:"daily_token,omitempty"`
+		DailyTokenLimit     string     `json:"daily_token_limit,omitempty"`
+		AddedAt             string     `json:"added_at,omitempty"`
+		SessionRenewedAt    *time.Time `json:"session_renewed_at,omitempty"`
+		SessionRenewedAtRaw string     `json:"session_renewed_at_raw,omitempty"`
+	}
+	s := shadow{
+		Session:             a.Session,
+		Email:               a.Email,
+		Password:            a.Password,
+		APIKey:              a.APIKey,
+		SigningSecret:       a.SigningSecret,
+		Region:              a.Region,
+		Nickname:            a.Nickname,
+		UserID:              a.UserID,
+		Plan:                a.Plan,
+		Balance:             a.Balance,
+		DailyToken:          a.DailyToken,
+		DailyTokenLimit:     a.DailyTokenLimit,
+		AddedAt:             a.AddedAt,
+		SessionRenewedAtRaw: a.SessionRenewedAtRaw,
+	}
+	// 零值 ⇒ 指针留 nil ⇒ 被 omitempty 省掉（这正是本类型要自定义序列化的原因）。
+	if !a.SessionRenewedAt.IsZero() {
+		t := a.SessionRenewedAt
+		s.SessionRenewedAt = &t
+	}
+	return json.Marshal(s)
+}
+
+// ParseAuthTime 容错解析一个"时刻"字符串/数字（各上游导出格式五花八门）。
+//
+// # 为什么要它（而不是直接用 time.Parse）
+//
+// 同一个语义的时刻在本仓有**两个来源**，形态不一样：
+//
+//	本仓自己写的           RFC3339（time.Time 的 MarshalJSON 产物）
+//	注册机导出的 renewedAt 毫秒时间戳**数字**（如 1793545574222）
+//
+// 而 Go 的 time.Time.**默认**解析只认 RFC3339 —— 拿注册机导出的行导入时
+// 会在那个字段上报类型错，**整条 json.Unmarshal 失败**，现象却是
+// 「凭证文件里没有可用的 session」（regmachine.go 文件头那段 balance 就是同一类坑）。
+//
+// 所以：任何**非必需**的时间字段都该走这个函数，不把类型细节暴露给调用方的
+// struct 标签。容忍四种形态，解析不出来就回零值 + ok=false（不报错）。
+//
+//	空 / null         → (零值, false)
+//	纯数字            → >1e11 按毫秒，否则按秒（两条都实测见过）
+//	RFC3339(Nano)     → 直接 Parse
+//	"2006-01-02 15:04:05" / "2006-01-02"（手写凭证常见）→ 也收
+func ParseAuthTime(raw string) (time.Time, bool) {
+	s := strings.Trim(strings.TrimSpace(raw), `"`)
+	if s == "" || s == "null" {
+		return time.Time{}, false
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
+		if n > 1e11 {
+			return time.UnixMilli(n), true
+		}
+		return time.Unix(n, 0), true
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // Provider 区域标识。
@@ -304,7 +537,83 @@ func SaveFile(dir string, a *Auth) (string, error) {
 		_ = os.Remove(tmp)
 		return "", err
 	}
+	// ★ 2026-11-02：身份升级时把旧残档迁走（见 migrateLegacySessionFile 的注释）。
+	//
+	// ⚠ 放在"写完之后"而不是"写之前"：先写新文件 ⇒ 中间**没有**"旧的已改名、
+	//   新的还没写"那种窗口（那种窗口里账号会从目录里消失，一次 reload 就掉出池子）。
+	migrateLegacySessionFile(dir, a, path)
 	return path, nil
+}
+
+// legacySessionFilePrefix 旧残档的文件名中段：UID 回退成 session 短哈希时产生
+// （`monkeycode-session-<16位hex>.json`，见 UID() 与 FileName()）。
+const legacySessionFilePrefix = filePrefix + "-session-"
+
+// migrateLegacySessionFile 把"同一个 session 的旧残档"改名（**不删**）。
+//
+// # 它治的是什么（真机踩到的 bug，2026-11-02）
+//
+// 一份凭证如果没有 userId，`UID()` 会回退成 `"session-"+shortHash(Session)`，
+// 于是落盘成 `monkeycode-session-<hash>.json`。等这个账号后来以**带 userId** 的形态
+// 再落盘（页内粘贴探到 `user.id`、或再导一行带 userId 的注册机行），`FileName()`
+// 会算出**另一个**文件名 ⇒ 目录里同一个账号**两份文件**：
+//
+//	monkeycode-session-b4cb99d….json   ← 残档（无 nickname/plan/balance/added_at）
+//	monkeycode-002d3463-….json         ← 正主
+//
+// 两份的 UID 不同 ⇒ 上游侧按 UID 去重（dedupeMonkeyCodeByUID）**不会**合并它们
+// ⇒ 账号池里同一账号两行、面板上也是两行（残档那行昵称长成 `session-xxxx…`）。
+//
+// # 判据为什么必须是"session 相等"
+//
+// 只看文件名前缀会误伤：`monkeycode-session-<另一个session的hash>.json` 是**别的**
+// 账号的正当残档（比如只粘过 session、一直在用的号），不能顺手改名。
+// session 是这份凭证的身份材料，相等才说明"这就是同一个账号的那份旧档"。
+//
+// # 为什么改名而不是删除
+//
+// 与 renew.go 处理 token 缓存同一条纪律：**改名留证、可回滚**。
+// 删掉就再也没法回答"当时那份到底是什么、要不要用回来"。
+//
+// # 只对"身份升级"生效
+//
+// 新凭证**必须**有 userid（否则它自己就是残档），否则直接返回 ——
+// 这样"纯 session 粘贴"（永远没有 userid）不会触发任何迁移，它的 UID 稳定不变。
+func migrateLegacySessionFile(dir string, a *Auth, newPath string) {
+	if dir == "" || a == nil {
+		return
+	}
+	sess := strings.TrimSpace(a.Session)
+	if sess == "" || strings.TrimSpace(a.UserID) == "" {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // 读不动目录不该阻断落盘本身（凭证已经写成功了）
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, legacySessionFilePrefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		oldPath := filepath.Join(dir, name)
+		if oldPath == newPath {
+			continue
+		}
+		old, lerr := LoadFile(oldPath)
+		if lerr != nil || old == nil {
+			continue // 坏文件/读不动：不动它（改名不是清理坏文件的地方）
+		}
+		if strings.TrimSpace(old.Session) != sess {
+			continue // 别的 session ⇒ 别的账号，别误伤（见上面"判据"）
+		}
+		dst := name + ".migrated-" + time.Now().Format("20060102-150405")
+		if rerr := os.Rename(oldPath, filepath.Join(dir, dst)); rerr != nil {
+			logf("monkeycode: 旧残档改名失败（保留原名）%s: %v", name, rerr)
+			continue
+		}
+		logf("monkeycode: 身份升级，旧残档已迁移 → %s（账号 %s）", dst, a.DisplayName())
+	}
 }
 
 // sanitizeFilePart 文件名里只保留安全字符。

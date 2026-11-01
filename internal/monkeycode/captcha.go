@@ -167,8 +167,16 @@ func solveOne(salt, target string) (int64, error) {
 }
 
 // solveCaptcha 走完整套 PoW，返回 captcha_token。
+//
+// ⚠ 这是**公开端点**（challenge/redeem 都不要求登录态），所以：
+//   - 不需要 a.Session；传 `&Auth{Region: region}` 即可（续期就是这么用的，见 renew.go）
+//   - a 为空 session 时 sessionHeaders 不再拼 `Cookie: monkeycode_ai_session=`
+//     （那会让上游走"已登录"分支，见 client.go 里 sessionHeaders 的注释）
+//
+// host 走 c.renewHost(a) 而不是 a.Host()：**为了让续期可测**（假上游起在 127.0.0.1，
+// 而 hostCN/hostIntl 是 const）。生产上 c.Host 为空 ⇒ 等价于 a.Host()。
 func (c *Client) solveCaptcha(ctx context.Context, a *Auth) (string, error) {
-	host := a.Host()
+	host := c.renewHost(a)
 	h := sessionHeaders(a)
 	h.Set("Content-Type", "application/json")
 

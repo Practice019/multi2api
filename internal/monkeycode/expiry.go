@@ -20,14 +20,21 @@
 //
 // 锚点按可信度取第一个可得的：
 //
-//	① Auth.AddedAt            我们自己入库时盖的章（RFC3339）—— 最可信
-//	② 凭证文件的 mtime          ≈ 该凭证被写进本仓的时刻（登录/导入时写，探测不写回）
-//	③ 都没有                    → 未知（返回 false，界面显示空/`—`）
+//	① Auth.SessionRenewedAt   最近一次**自动续期成功**的时刻（2026-11-01 新增）
+//	                           最可信 —— 新 session 就是那一刻签发的，30 天从那里算
+//	② Auth.AddedAt            我们自己入库时盖的章（RFC3339）
+//	③ 凭证文件的 mtime          ≈ 该凭证被写进本仓的时刻（登录/导入时写，探测不写回）
+//	④ 都没有                    → 未知（返回 false，界面显示空/`—`）
 //
 // 偏差方向要说清楚：②比①**可能偏晚**（把老会话的文件复制进本仓时，mtime 是复制时刻）。
 // 偏晚的含义是「显示还有几天，其实已经没了」—— 所以这一列**只用于预警**，
 // 不能当判据：能不能用永远由真实请求决定（401 → SessionDead → 自动禁用），
 // 那才是这个仓库里判「号还能不能用」的唯一权威。
+//
+// ★ 2026-11-01：本文件原来那条「无续期接口」的结论是**错的**（见 renew.go）。
+// 上面加了 ① 这个锚点，就是为了让"续过期"的号显示**真续期时刻 + 30 天**，
+// 而不是拿 AddedAt 估出来的假值（那种号会被这一列误报成"即将过期"，
+// 用户于是白跑一次人工重登）。
 //
 // # 为什么不做成"探测一次问上游"
 //
@@ -43,11 +50,18 @@ import (
 	"workbuddy2api/internal/gateway"
 )
 
-// SessionLifetime 会话寿命：30 天硬过期，无续期接口。
+// SessionLifetime 会话寿命：30 天。
 //
-// ⚠ 这是**上游的事实**（Auth.Session 的注释、注册机导出侧也按 30 天算），
-// 不是我们挑的窗口。它意味着：这个上游的凭证到期后**没有自动续期这条路**，
-// 只能重新登录/重新注册换一个新 session。
+// ⚠ 这是**上游的事实**（实测：password-login 的 `Set-Cookie` 带
+// `Max-Age=2592000` = 30 天，服务端亲口给的），不是我们挑的窗口。
+//
+// ★ 2026-11-01 更正：本常量原来的注释写着「**无续期接口**，过期只能重新登录/重新注册」——
+// **那条结论是错的**。真实情况：可以续期，且不需要有效 session：
+//
+//	邮箱 + 密码 + PoW → POST /api/v1/users/password-login → 新 session（实现见 renew.go）
+//
+// 所以"过期"不再等于"这个号废了"：有 Email/Password 的号能自动救回来，
+// 只是**救的时候也要花一次 login**（所以到期预警仍然有意义）。
 const SessionLifetime = 30 * 24 * time.Hour
 
 // 编译期断言：与 AccountColumnsExt / CredentialTokenExt 并列。
@@ -70,17 +84,29 @@ func (p *Provider) TokenExpiry(cred gateway.Credential) (int64, bool) {
 
 // SessionAnchor 取会话登记时刻（推断锚点）。
 //
-// 顺序与理由见文件头：入库章 > 文件 mtime > 未知。
+// 顺序与理由见文件头：续期章 > 入库章 > 文件 mtime > 未知。
 func SessionAnchor(a *Auth) (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
 	}
+	// ① 续期章：最高优先。续期过之后，session 的 30 天是从**那一刻**算的，
+	//    拿 AddedAt 会严重低估剩余时间（老号续期后显示"还剩 2 天"，其实还有 30 天）。
+	//
+	//    解析容错（数字毫秒 / RFC3339 / 手写日期）在 Auth.UnmarshalJSON 里做掉，
+	//    所以这里直接判零值即可 —— 手写形态不会被静默丢掉。
+	if !a.SessionRenewedAt.IsZero() {
+		return a.SessionRenewedAt, true
+	}
+	// 兼容路径：老档里续期时刻存的是字符串（见 Auth.SessionRenewedAtRaw 的说明）。
+	// 少了这一步，老档升级后会静默退回 AddedAt 估算 —— 刚续过的号被误报"即将过期"。
+	if raw := strings.TrimSpace(a.SessionRenewedAtRaw); raw != "" {
+		if t, ok := ParseAuthTime(raw); ok {
+			return t, true
+		}
+	}
 	if raw := strings.TrimSpace(a.AddedAt); raw != "" {
-		// 两种形态都收：RFC3339（本仓自己写的）与纯日期（手写凭证常见）。
-		for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
-			if t, err := time.Parse(layout, raw); err == nil {
-				return t, true
-			}
+		if t, err := parseAnchorTime(raw); err == nil {
+			return t, true
 		}
 	}
 	if path := strings.TrimSpace(a.FilePath); path != "" {
@@ -89,4 +115,21 @@ func SessionAnchor(a *Auth) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// parseAnchorTime 解析锚点时刻。
+//
+// 三种布局都收：RFC3339（本仓自己写的）与两种手写常见形态
+// （`2006-01-02 15:04:05` / 纯日期）—— 手写凭证是真实存在的用法，
+// 为了"格式不认识"就把整个锚点丢掉会让那一列凭空变空。
+func parseAnchorTime(raw string) (time.Time, error) {
+	var lastErr error
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		t, err := time.Parse(layout, raw)
+		if err == nil {
+			return t, nil
+		}
+		lastErr = err
+	}
+	return time.Time{}, lastErr
 }

@@ -32,6 +32,11 @@ const (
 	// 浏览器登录的进度查询与取消（前端轮询用）。
 	adminLoginStatusPath = "/admin/monkeycode/login/status"
 	adminLoginCancelPath = "/admin/monkeycode/login/cancel"
+	// adminRenewPath 批量续期（用凭证里的 email + password 走 password-login 换新 session）。
+	//
+	// 入口是账号池工具条上的「续期」按钮（前端 POST 它），不是导航页 ⇒ Hidden。
+	// 语义与跳过的两条硬规则见 adminrenew.go 文件头。
+	adminRenewPath = "/admin/monkeycode/renew"
 )
 
 // AdminRoutes 本上游的管理端点。
@@ -122,6 +127,26 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Handler:    p.handleCheckinAll,
 			Capability: gateway.CapCheckin,
 			Title:      "全部签到",
+			Hidden:     true,
+		},
+		{
+			// 批量续期：用凭证里存的 email + password 换一份**新 session**
+			//（PoW 登录，见 adminrenew.go），这样账号到期前不用重走 GitHub OAuth。
+			//
+			// ⚠ POST 是写操作、且入口是账号池工具条上的按钮 ⇒ Hidden：
+			// 它不该在左侧导航占一个标签页（与 adminIssuePath 同一条理由）。
+			//
+			// Capability 刻意留 **0（通用端点）**：gateway 现有的能力位里
+			//（CapChat/Models/Checkin/Growth/Travel/Welfare/QuotaProbe/Tasks/Invite/Import）
+			// 没有"续期"这一位，而最近的一个 CapImport 语义是**导入账号**，
+			// 拿它标注续期会让契约测试的判据（声明了 CapImport 就必须实现导入链路）
+			// 与实际行为对不上。新增能力位要动 gateway/capability.go
+			//（capNames / Names() / capimport_guard_test 三处），属于独立决定，不顺手做。
+			Method:     http.MethodPost,
+			Path:       adminRenewPath,
+			Handler:    p.handleRenew,
+			Capability: 0,
+			Title:      "批量续期（换新 session）",
 			Hidden:     true,
 		},
 	}
