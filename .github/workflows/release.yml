@@ -62,7 +62,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.27'
           cache: true
 
       # 与 ci.yml 保持一致（不跑 -race：那一步在 ci.yml 里是 advisory）。
@@ -122,7 +122,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.27'
           cache: true
 
       - name: Build

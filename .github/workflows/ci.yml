@@ -27,7 +27,7 @@ jobs:
         with:
           # 与 go.mod 里声明的 go 1.22.5 对齐；只写次版本号，
           # 让 setup-go 取最新的 1.22.x 补丁版，避免固定补丁号导致缓存失效。
-          go-version: '1.22'
+          go-version: '1.27'
           cache: true
 
       - name: Verify go.mod is tidy
