@@ -197,8 +197,22 @@ const refreshSkew = 10 * time.Minute
 // "账号突然过期"的根因形状原封不动。（评审实锤：报告 §6-1。）
 // 唯一正确的关闭方式就是 (0,true)：显式"报过窗口"，且窗口为 0。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
-	a, ok := cred.Secret.(*Auth)
-	if ok && a != nil {
+	a, _ := cred.Secret.(*Auth)
+	return refreshSkewOf(a)
+}
+
+// refreshSkewOf 本上游统一的续期窗口 —— **请求路径与后台任务（runRefresh）共用这一份**。
+//
+// # 为什么收成一个函数（2026-11-01 用户要求统一续期判据）
+//
+// 统一之前两条路径各有一套：请求路径报窗口，后台任务用 `NeedsRefresh(refreshScanSkew)`
+// 的 30 分钟固定窗口。同一个上游两套数字，改一处漏一处的表现是"请求路径改了、
+// 后台照旧"，而且不报错。现在都从这里取。
+//
+// 返回 (0, true) 是**有意义**的一个答案（"不需要预检续期"），不是"不知道" ——
+// 见下面 RefreshSkew 的长注释：读不到寿命时必须回这个，不能回 ok=false。
+func refreshSkewOf(a *Auth) (time.Duration, bool) {
+	if a != nil {
 		// 能算出寿命 ⇒ 统一按「过半就续」（用户 2026-11-01 的要求）。
 		//
 		// ⚠ 这条与上面那段历史是一次**有条件的**放行，条件必须保留：
@@ -462,16 +476,38 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 			}
 			continue
 		}
-		// 距过期 30 分钟内才刷（NeedsRefresh 判定，含已过期）。
-		if !a.NeedsRefresh(refreshScanSkew) {
-			continue
+		// 判据统一（2026-11-01 用户要求所有上游同一套）：**寿命过半**才刷。
+		//
+		// 旧实现是固定 30 分钟窗口（refreshScanSkew），与请求路径不是一个数字；
+		// 而 trae 的 accessToken 寿命是**天级**，30 分钟 = 已用 99.9% 才续 ——
+		// 几乎没有提前量，一次网络抖动就过期。
+		//
+		// ⚠ 读不到寿命时 refreshSkewOf 回 (0,true)，这里必须**当"不预检"处理**（continue）：
+		//   若把它当成"窗口为 0 ⇒ 恒该刷"，就回到了那个被修掉的形态 ——
+		//   每轮扫描都轮换一次性 refreshToken（"账号突然过期"的头号嫌疑）。
+		// ⚠ 分两种情形，**读不到寿命时不能跳过**（第一版就是这么写的，三条既有测试当场报红）：
+		//   跳过等于让这类凭证**永远不被后台续期** —— 而它们原来会在临近过期时被刷。
+		//   那不是"统一判据"，是把一条既有能力删掉了。
+		if skew, okSkew := refreshSkewOf(a); okSkew && skew > 0 {
+			// ① 算得出寿命 ⇒ 统一判据：过半才刷。
+			if !a.NeedsRefresh(skew) {
+				continue
+			}
+		} else {
+			// ② 算不出（accessToken 不是可解 JWT / 没有到期时刻）⇒ 退回改造前的
+			//    保守窗口："临近过期才刷"。注意这里用的是**活凭证自己的** ExpiresAt
+			//    （本地扫描拿到的就是它），不是账号池那份恒 0 的投影 ——
+			//    所以不会回到"每轮扫描都轮换一次性 refreshToken"那个形态。
+			if !a.NeedsRefresh(refreshScanSkew) {
+				continue
+			}
 		}
 		need = append(need, a)
 	}
 	if len(need) == 0 {
 		return nil
 	}
-	log.Printf("trae: 后台续期开始，%d 个账号临近过期（30 分钟窗口）", len(need))
+	log.Printf("trae: 后台续期开始，%d 个账号已过半寿命（统一判据：剩余 ≤ 寿命×0.5）", len(need))
 	for _, a := range need {
 		if ctx.Err() != nil {
 			return ctx.Err()

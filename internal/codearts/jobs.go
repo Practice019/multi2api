@@ -135,8 +135,25 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		if p.onRefreshHold(a) {
 			continue
 		}
-		// 无条件全量续（去掉 NeedsRefresh 过滤 —— 用户要求所有上游
-		// 统一 30 分钟主动全量刷新，不问剩余寿命）。
+		// 判据统一到「寿命过半」（2026-11-01 用户要求所有上游同一套）。
+		//
+		// # 这里改过一次口径，两次用户要求的关系要写清
+		//
+		//  旧："统一 30 分钟主动**全量**刷新，不问剩余寿命" —— 那是关于**扫描节奏**的要求，
+		//      而当时的实现把节奏当成了判据：每 30 分钟把每个号都续一遍。
+		//      对 2 小时寿命的 STS，一个周期内续 4 次（3 次纯浪费），
+		//      而 refresh_token 是**一次性消费**的 ⇒ 白烧 3 个 token。
+		//  新：节奏不变（仍然 30 分钟扫一次），判据统一成"寿命过半"（剩余 ≤ 约 1 小时）。
+		//      ⇒ 每个 2 小时周期只续一次；扫描频率与判据各归其位。
+		//
+		// 管理台点"续期"走的是单账号入口，不经过这里，仍然是无条件动作。
+		skew, ok := refreshSkewOf(a)
+		if !ok {
+			continue
+		}
+		if time.Until(time.Unix(a.ExpiresAt, 0)) > skew {
+			continue // 还没过半：本轮不刷（与旧"全量续"的唯一区别）
+		}
 		need = append(need, a)
 	}
 	if len(need) == 0 {

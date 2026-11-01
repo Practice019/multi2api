@@ -254,7 +254,22 @@ func (p *Provider) RunKeepaliveAll(trigger string) {
 		if a == nil || a.RefreshToken == "" {
 			continue
 		}
-		// 无条件全量续（不再按 NeedsRefresh 过滤）。
+		// 判据统一成「寿命过半」（2026-11-01 用户要求所有上游同一套）。
+		//
+		// # 这一行改过一次口径，两次要求的区别要写清
+		//
+		//  旧："无条件全量续（不再按 NeedsRefresh 过滤）" —— 那是为了**扫描节奏**统一
+		//      （30 分钟一趟），结果把节奏当成了判据：28~30 天寿命的 token 一天被刷 48 次，
+		//      而它整个周期只需要一次。
+		//  新：调度路径只在"过半"时刷（dueForRefreshByRatio）；
+		//      节奏不变，判据归位。
+		//
+		// ⚠ `trigger != "manual"` 这个条件是**故意的**：管理台点"保活"是用户的显式动作，
+		//   在那种场合跳过账号会让人以为按钮坏了（他要的就是"现在给我刷一遍"）。
+		//   自动跑的那条路径才需要判据。
+		if trigger != "manual" && !dueForRefreshByRatio(a) {
+			continue
+		}
 		p.keepaliveOne(st.UID, trigger)
 	}
 }

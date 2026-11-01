@@ -113,20 +113,7 @@ func TestRefreshSkewHelpersAreUsedEverywhere(t *testing.T) {
 	// ⚠ 路径要能站住：go test 的 cwd 是**包目录**（cmd/server），但被 -C 或别的
 	//   调用方式改动时不保证。所以逐个候选试，并明确报出"一个都没找到"——
 	//   静默跳过会让这条守卫变成装饰品（本仓反复吃过这个形态的亏）。
-	root := ""
-	for _, cand := range []string{
-		filepath.Join("..", "internal"),
-		filepath.Join(".", "internal"),
-		filepath.Join("..", "..", "internal"),
-	} {
-		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
-			root = cand
-			break
-		}
-	}
-	if root == "" {
-		t.Fatal("找不到 internal/ 目录（cwd=" + mustGetwd() + "）—— 守卫无法执行")
-	}
+	root := internalRoot(t)
 	found := map[string]bool{}
 	deviation := map[string]string{}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -177,6 +164,153 @@ func TestRefreshSkewHelpersAreUsedEverywhere(t *testing.T) {
 			t.Errorf("ratioExceptions 里的 %s 已经不再偏离共享判据（理由：%s）—— "+
 				"把它从例外表里删掉：那份表应当是当前例外的清单，不是历史遗留。",
 				pkg, reason)
+		}
+	}
+}
+
+// internalRoot 找到 internal/ 目录（源码级守卫都要扫它）。
+//
+// ⚠ 逐个候选试，一个都找不到就报错：静默跳过会让整组源码守卫退化成装饰品。
+func internalRoot(t *testing.T) string {
+	t.Helper()
+	for _, cand := range []string{
+		filepath.Join("..", "internal"),
+		filepath.Join(".", "internal"),
+		filepath.Join("..", "..", "internal"),
+	} {
+		if fi, err := os.Stat(cand); err == nil && fi.IsDir() {
+			return cand
+		}
+	}
+	t.Fatalf("找不到 internal/ 目录（cwd=%s）", mustGetwd())
+	return ""
+}
+
+// funcBody 用**大括号配对**取函数体。
+//
+// ⚠ 不能用非贪婪正则：它会在正文里第一个右花括号处停下，把后面的函数截断或吞掉
+// （本仓在 tools/toast_sync.js 上真实踩过，那次把 quotaScopeToast 整块删掉了）。
+func funcBody(src, header string) (string, bool) {
+	at := strings.Index(src, header)
+	if at < 0 {
+		return "", false
+	}
+	open := strings.Index(src[at:], "{")
+	if open < 0 {
+		return "", false
+	}
+	depth := 0
+	for i := at + open; i < len(src); i++ {
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[at : i+1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// consultsRatio 报告这段函数体是否**问过统一判据**（允许一层委托）。
+//
+// # 为什么要跟一层委托
+//
+// 第一版只看入口函数体，于是 qoder 被误报：它的 runRefresh 把"该不该刷"交给同包的
+// `p.shouldRefresh(a, now)`，判据在那个函数里。误报的代价不是"漏"而是"假红" ——
+// 假红同样会让守卫被绕过（有人会去把这项从表里删掉）。
+//
+// 所以：入口自己问过 ⇒ 合格；否则看它调用的 `p.<name>(` 里有没有问过。只跟一层，
+// 够覆盖"决策函数独立"这种常见形状，又不至于退化成"整包搜一遍"那种等于没查的判据。
+func consultsRatio(src, body string) bool {
+	if hasRatioMarker(body) {
+		return true
+	}
+	for _, name := range calledProviderFuncs(body) {
+		if inner, ok := funcBody(src, "func (p *Provider) "+name+"("); ok && hasRatioMarker(inner) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRatioMarker 这段代码里是否出现统一判据的入口。
+func hasRatioMarker(code string) bool {
+	for _, m := range append(append([]string{}, ratioHelperNames...), "dueForRefreshByRatio", "refreshSkewOf") {
+		if strings.Contains(code, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// calledProviderFuncs 从函数体里抽出 `p.foo(` 形态的被调用方法名（去重）。
+func calledProviderFuncs(body string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, seg := range strings.Split(body, "p.") {
+		if seg == "" {
+			continue
+		}
+		i := 0
+		for i < len(seg) && (seg[i] == '_' || seg[i] >= 'a' && seg[i] <= 'z' || seg[i] >= 'A' && seg[i] <= 'Z' || seg[i] >= '0' && seg[i] <= '9') {
+			i++
+		}
+		if i == 0 || i >= len(seg) || seg[i] != '(' {
+			continue
+		}
+		name := seg[:i]
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// bulkRefreshEntryPoints 批量续期入口 —— 这些函数必须**问过统一判据**才算合格。
+//
+// # 为什么后台入口也要守
+//
+// 用户要求统一续期判据时实测到的形态：请求路径已经按"寿命过半"报窗口，
+// 而后台任务里还写着"无条件全量续"（codearts / workbuddy）或"固定 30 分钟窗口"（trae）——
+// 同一个上游两套判据，**改一处漏一处不会报错**：改了请求路径、后台照旧把号全量刷一遍。
+//
+// ⚠ 入口改名/移动时必须同步改这张表；文件或函数找不到会**报错**，
+//
+//	不让守卫变成"看起来还在、其实什么都没查"。
+var bulkRefreshEntryPoints = []struct{ file, header, what string }{
+	{"internal/codearts/jobs.go", "func (p *Provider) runRefresh(ctx context.Context) error {", "codearts 后台续期"},
+	{"internal/trae/extensions.go", "func (p *Provider) runRefresh(ctx context.Context) error {", "trae 后台续期"},
+	{"internal/workbuddy/checkin.go", "func (p *Provider) RunKeepaliveAll(trigger string) {", "workbuddy 后台保活"},
+	{"internal/cline/jobs.go", "func (p *Provider) runRefresh(ctx context.Context) error {", "cline 后台续期"},
+	{"internal/raccoon/jobs.go", "func (p *Provider) runRefresh(ctx context.Context) error {", "raccoon 后台续期"},
+	{"internal/qoder/jobs_refresh.go", "func (p *Provider) runRefresh(ctx context.Context) error {", "qoder 后台续期"},
+}
+
+// TestBulkRefreshEntryPointsConsultRatio 后台批量续期也必须走统一判据。
+func TestBulkRefreshEntryPointsConsultRatio(t *testing.T) {
+	root := internalRoot(t)
+	for _, e := range bulkRefreshEntryPoints {
+		rel := strings.TrimPrefix(filepath.ToSlash(e.file), "internal/")
+		raw, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Errorf("%s 读不到（%v）—— 文件改名/移动了？把这行改成新路径，别让它静默失效", e.file, err)
+			continue
+		}
+		src := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		body, ok := funcBody(src, e.header)
+		if !ok {
+			t.Errorf("%s 里找不到入口 `%s` —— 改名了就同步改掉这张表"+
+				"（否则这条守卫看起来还在、其实什么都没查）", e.what, e.header)
+			continue
+		}
+		if !consultsRatio(src, body) {
+			t.Errorf("%s 没有问过统一判据（%v）—— 它会按自己的节奏把账号全量刷一遍。\n"+
+				"用户要求所有上游统一成「寿命过半就续期」：请求路径与后台任务必须共用同一份窗口计算。",
+				e.what, ratioHelperNames)
 		}
 	}
 }

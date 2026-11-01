@@ -41,8 +41,9 @@ import (
 // stsLifetime 华为云 securityToken 的寿命（实测约 2 小时）。
 //
 // ⚠ 它只用于把"不透明 token 的起点"反推出来（见 RefreshSkew），
-//   从而让本上游也能用统一的"寿命过半"判据。它不是判据本身 ——
-//   凭证真的能不能用，永远由真实请求决定（401 → 续期）。
+//
+//	从而让本上游也能用统一的"寿命过半"判据。它不是判据本身 ——
+//	凭证真的能不能用，永远由真实请求决定（401 → 续期）。
 const stsLifetime = 2 * time.Hour
 
 // 编译期断言（与 gateway.Provider / CredentialRefresher / JobExt 并列）。
@@ -58,8 +59,20 @@ var _ gateway.RefreshSkewExt = (*Provider)(nil)
 // 与"这一份凭证能不能用"无关。类型不对会在 Chat / RefreshCredential
 // 里得到明确错误，不该在这里变成一个"不知道窗口"而让核心套用 10m。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
-	a, ok := cred.Secret.(*Auth)
-	if ok && a != nil && a.ExpiresAt > 0 {
+	a, _ := cred.Secret.(*Auth) // 类型不对时 a=nil，refreshSkewOf 会回落固定窗口
+	return refreshSkewOf(a)
+}
+
+// refreshSkewOf 本上游统一的续期窗口 —— **请求路径与后台任务共用这一份**。
+//
+// # 为什么必须共用（2026-11-01 用户要求统一后续期时补的）
+//
+// 统一之前，请求路径（RefreshSkew）与后台任务（runRefresh）是两套判据：
+// 任务那边"无条件全量续"（jobs.go 里的历史注释），与"寿命过半才续"直接冲突。
+// 两处各写一份的表现是：改了请求路径、后台照样每 30 分钟把每个号续一遍，
+// 而且**不会报错**。所以窗口计算收成一个函数，两条路径都只能通过它表达。
+func refreshSkewOf(a *Auth) (time.Duration, bool) {
+	if a != nil && a.ExpiresAt > 0 {
 		// 统一规则：寿命过半 ⇒ 该续期（用户 2026-11-01 要求所有上游同一套）。
 		//
 		// # 为什么本上游也能算比例（虽然 token 是不透明串、没有 iat）

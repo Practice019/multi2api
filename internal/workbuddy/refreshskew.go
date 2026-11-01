@@ -52,6 +52,38 @@ const refreshSkewFallback = 10 * time.Minute
 // 编译期断言（与 CredentialRefresher / CredentialLoader / AuthDirExt 并列）。
 var _ gateway.RefreshSkewExt = (*Provider)(nil)
 
+// dueForRefreshByRatio 报告"这份凭证按**统一判据**该不该续期了"。
+//
+// # 为什么需要它（2026-11-01 用户要求统一续期判据）
+//
+// 请求路径问的是 `RefreshSkew`（窗口多大），而**后台保活**问的是
+// "这一趟要不要刷这个号"。改造前后台是**无条件全量续**（见 checkin.go 的历史注释），
+// 与"寿命过半才续"直接冲突：实测 28~30 天寿命的 token 被每 30 分钟刷一次，
+// 一天 48 次、一个周期约 1440 次 —— 而它整个生命周期只需要一次。
+//
+// 所以两条路径共用这一份判断：窗口由 RefreshSkewFromToken 算（同一判据），
+// 剩下的寿命比它短就说明过半了。
+//
+// 返回 true 的三种情形都要能解释：
+//
+//	① 读得出寿命且剩余 ≤ 窗口（含已过期）      → 该刷
+//	② 读不出寿命（手写/异常 token）           → 该刷（保守：与 RefreshSkew 回落同一立场，
+//	                                             宁可多刷一次也不要放过一个可能要过期的）
+//	③ 凭证里没有过期时刻（ExpiresAt<=0）      → 交给 NeedsRefresh 语义（视为该刷）
+func dueForRefreshByRatio(a *auth.Auth) bool {
+	if a == nil {
+		return false
+	}
+	skew, ok := gateway.RefreshSkewFromToken(a.AccessToken)
+	if !ok {
+		return true // ②
+	}
+	if a.ExpiresAt <= 0 {
+		return true // ③
+	}
+	return time.Until(time.Unix(a.ExpiresAt, 0)) <= skew
+}
+
 // RefreshSkew 报告 workbuddy 的提前续期窗口 —— **寿命过半**（统一判据）。
 //
 // 纯本地判断，不发网络请求（见 gateway.RefreshSkewExt 的实现约束）。
