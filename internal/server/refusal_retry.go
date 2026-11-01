@@ -24,7 +24,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"workbuddy2api/internal/prompt"
 )
@@ -81,7 +83,33 @@ type refusalRetryStream struct {
 	late    bytes.Buffer
 	headBuf bytes.Buffer // 决定之前的原始字节
 	headTxt strings.Builder
+	// scanned headBuf 里**已经解析过**的字节数。
+	//
+	// ⚠ 这个字段是 2026-11-01 真机 bug 的直接产物：scanHead 原来用局部 `consumed := 0`，
+	//   每次从 headBuf **开头**重扫，而 headTxt 是**追加**写 —— 于是每多一次 Read，
+	//   已解析过的帧就被再追加一遍。真机审计行长这样：
+	//     chars=72 head="I can't I can't help with I can't help with that.I can't help with that."
+	//   而上游只发了三段（I can't / help with / that.）。
+	//   一帧一读时必然复现；假流一次给全时只触发一次调用，所以单测要先红后绿。
+	//
+	// 半帧（找不到分帧空行）**不推进**它 —— 留到下一次 Read 收全了再算。
+	scanned int
 	closed  bool
+
+	// ── 重试流的观测（照 lib/stream-observation.js）────────────────────
+	//
+	// **只在发生过重试**（refetch 成功之后）时统计：未命中的普通流量一个字节都不碰，
+	// 也不多写一条审计（约束："未命中的普通流量不得多写审计"）。
+	//
+	// 原件的纪律也照搬：observing 只做**传输诊断**，
+	// 绝不因为计数而改写、缓冲或重试内容（它自己文件头那句 never classify/rewrite/buffer/retry）。
+	obs        bool   // 是否在观测（refetch 成功后置 true）
+	obsChunks  int    // 看到的帧数（对应原件的 chunks）
+	obsChars   int    // text 字符数（对应原件的 chars）
+	obsTool    bool   // 见到 tool_calls
+	obsReason  bool   // 见到 reasoning_content
+	obsPartial []byte // 半帧（SSE 按空行分帧，跨读的残帧要拼起来）
+	obsDone    bool   // 只上报一次（EOF / Close 都只算第一次）
 }
 
 // newRefusalRetryStream 包一层流。
@@ -110,10 +138,23 @@ func (s *refusalRetryStream) Read(p []byte) (int, error) {
 	if s.out.Len() > 0 {
 		return s.out.Read(p)
 	}
-	if s.retried && s.first == nil {
+	if s.first == nil {
+		// 流已经没了：重试流走到这里就是正常收尾（EOF 上报一次观测）。
+		s.reportOutcome("", nil)
 		return 0, io.EOF
 	}
-	return s.first.Read(p)
+	n, err := s.first.Read(p)
+	if n > 0 {
+		s.observe(p[:n])
+	}
+	if err != nil {
+		if err == io.EOF {
+			s.reportOutcome("", nil) // 正常结尾：outcome 由计数器决定
+		} else {
+			s.reportOutcome("error", err) // 出错：outcome=error，且**错误继续向上抛**（原件 throw）
+		}
+	}
+	return n, err
 }
 
 // Close 关掉当前流（含已换成的重试流），并保证只关一次。
@@ -122,6 +163,9 @@ func (s *refusalRetryStream) Close() error {
 		return nil
 	}
 	s.closed = true
+	// 被提前关掉（客户端断开 / 下游不再读）⇒ outcome=cancelled。
+	// 与原件的初始值一致：它把 outcome 初始化成 "cancelled"，只有正常跑完才改写。
+	s.reportOutcome("cancelled", nil)
 	if s.first != nil {
 		return s.first.Close()
 	}
@@ -165,25 +209,31 @@ func (s *refusalRetryStream) decide() error {
 // 未命中时随头部一起回放，命中时随首次输出一起丢弃。
 func (s *refusalRetryStream) scanHead() {
 	raw := s.headBuf.String()
-	consumed := 0
 	for {
-		rest := raw[consumed:]
+		rest := raw[s.scanned:]
 		if s.early {
+			// 信号之后的帧不算头部：整段搬进 late，并把进度推到末尾，
+			// 避免它们在下一次调用里被当成新帧再处理一遍。
 			s.late.WriteString(rest)
+			s.scanned = len(raw)
 			return
 		}
 		idx := strings.Index(rest, "\n\n")
 		if idx < 0 {
-			return // 半帧：留到下一次（头部最多几百字节，代价可忽略）
+			return // 半帧：**不推进 scanned**，留到下一次（头部最多几百字节，代价可忽略）
 		}
 		frame := rest[:idx]
-		consumed += idx + 2
+		s.scanned += idx + 2
 		s.scanFrame(frame)
 	}
 }
 
-// scanFrame 处理一帧（同一帧里可能有多行 data:，按 SSE 规范要拼接）。
-func (s *refusalRetryStream) scanFrame(frame string) {
+// parseFrame 把一帧 SSE 解析成对象：同一帧里可能有多行 data:（按 SSE 规范拼接），
+// `[DONE]` 与空行不算一帧。
+//
+// 抽出来是因为"判定用"和"观测用"必须走**同一套**解析口径 ——
+// 两处各写一份的话，同一个流会出现两种 chunks/chars 计数（原件只有一条路径，不会分叉）。
+func parseFrame(frame string) (map[string]any, bool) {
 	var payload strings.Builder
 	for _, line := range strings.Split(frame, "\n") {
 		line = strings.TrimSpace(line)
@@ -197,13 +247,20 @@ func (s *refusalRetryStream) scanFrame(frame string) {
 		payload.WriteString(part)
 	}
 	if payload.Len() == 0 {
-		return
+		return nil, false
 	}
 	var obj map[string]any
 	if err := json.Unmarshal([]byte(payload.String()), &obj); err != nil {
-		return // 非 JSON 行跳过：不该因为上游偶发的一行非标准报文让重试层出错
+		return nil, false // 非 JSON 行跳过：不该因为上游偶发的一行非标准报文让重试层出错
 	}
-	s.scanChunk(obj)
+	return obj, true
+}
+
+// scanFrame 处理一帧：解析后喂给判定扫描。
+func (s *refusalRetryStream) scanFrame(frame string) {
+	if obj, ok := parseFrame(frame); ok {
+		s.scanChunk(obj)
+	}
 }
 
 // scanChunk 处理一条增量：累计 content 文本；见到 finish / tool_calls / reasoning 就打标。
@@ -277,11 +334,132 @@ func (s *refusalRetryStream) settle() error {
 		return nil
 	}
 	s.retried = true
+	// 从这里开始观测**重试流**（只在重试发生后才统计，未命中流量不受影响）。
+	s.obs = true
 	s.first = next
 	// 命中时不回放旧头（原实现：丢弃这次输出）。缓冲直接丢。
 	s.headBuf.Reset()
 	s.headTxt.Reset()
 	return nil
+}
+
+// ── 重试流的观测（照 lib/stream-observation.js）──────────────────────────
+
+// observe 累计从**重试流**读到的字节：按空行分帧，逐帧计数。
+//
+// 只在 obs（发生过重试）时工作；未命中的普通流量这里一个字节都不看。
+func (s *refusalRetryStream) observe(b []byte) {
+	if !s.obs || s.obsDone || len(b) == 0 {
+		return
+	}
+	s.obsPartial = append(s.obsPartial, b...)
+	for {
+		idx := bytes.Index(s.obsPartial, []byte("\n\n"))
+		if idx < 0 {
+			return // 半帧：留到下一次（SSE 帧可能跨两次 Read）
+		}
+		frame := string(s.obsPartial[:idx])
+		s.obsPartial = s.obsPartial[idx+2:]
+		if obj, ok := parseFrame(frame); ok {
+			s.observeChunk(obj)
+		}
+	}
+}
+
+// observeChunk 一帧的计数：chunks / chars / tool_calls / reasoning_content。
+//
+// 对应原件的：chunks += 1；text-delta → chars；tool-call(-delta) → toolCall；
+// reasoning-delta → reasoning。
+func (s *refusalRetryStream) observeChunk(obj map[string]any) {
+	s.obsChunks++
+	choices, _ := obj["choices"].([]any)
+	for _, c := range choices {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		delta, ok := cm["delta"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if txt, ok := delta["content"].(string); ok {
+			s.obsChars += utf8.RuneCountInString(txt)
+		}
+		if _, ok := delta["tool_calls"]; ok {
+			s.obsTool = true
+		}
+		if _, ok := delta["reasoning_content"]; ok {
+			s.obsReason = true
+		}
+	}
+}
+
+// reportOutcome 上报**一次**观测结果。
+//
+// outcome 为空 ⇒ 由计数器决定（tool_call / text / reasoning_only / empty，与原件的三目链一致：
+// 工具调用优先于文本，文本优先于"只有推理"）。
+// 非空 ⇒ 强制用它（error / cancelled），其中 error 要附**净化过**的错误码。
+//
+// 只上报一次：EOF 与 Close 谁先到就谁报（原件靠 generator 的 finally 天然只跑一次）。
+func (s *refusalRetryStream) reportOutcome(outcome string, err error) {
+	if !s.obs || s.obsDone {
+		return
+	}
+	s.obsDone = true
+	// 残帧结算：EOF 时最后一段可能没有结尾空行（原件按块迭代，不存在这个边界）。
+	if len(s.obsPartial) > 0 {
+		if obj, ok := parseFrame(string(s.obsPartial)); ok {
+			s.observeChunk(obj)
+		}
+		s.obsPartial = nil
+	}
+	if outcome == "" {
+		switch {
+		case s.obsTool:
+			outcome = "tool_call"
+		case s.obsChars > 0:
+			outcome = "text"
+		case s.obsReason:
+			outcome = "reasoning_only"
+		default:
+			outcome = "empty"
+		}
+	}
+	data := map[string]any{
+		"outcome":   outcome,
+		"chunks":    s.obsChunks,
+		"chars":     s.obsChars,
+		"toolCall":  s.obsTool,
+		"reasoning": s.obsReason,
+	}
+	if outcome == "error" {
+		data["error"] = sanitizeErrCode(err)
+	}
+	s.auditEvent("refusal_retry_outcome", data)
+}
+
+// errCodeRe 错误码白名单（原件：/^[A-Z][A-Z0-9_]{0,39}$/）。
+var errCodeRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,39}$`)
+
+// sanitizeErrCode 只放行"长得像错误码"的东西，其余一律 STREAM_ERROR。
+//
+// 原件的注释写得很明确：Do not store arbitrary error messages, URLs, response content or credentials.
+// 所以**绝不**把上游原始错误文本写进审计 —— 那里面常见 URL、凭据片段、响应片段。
+func sanitizeErrCode(err error) string {
+	if err == nil {
+		return "STREAM_ERROR"
+	}
+	// 带类型的错误可以自带码（Go 里对应 error?.code）。
+	if ce, ok := err.(interface{ ErrorCode() string }); ok {
+		if code := ce.ErrorCode(); errCodeRe.MatchString(code) {
+			return code
+		}
+	}
+	// 退一步：整个错误串**恰好**是一个码才用（不是"包含"）。
+	if errCodeRe.MatchString(err.Error()) {
+		return err.Error()
+	}
+	return "STREAM_ERROR"
 }
 
 // head80 取前 80 个字符（原实现审计里 head: text.slice(0, 80)）。
