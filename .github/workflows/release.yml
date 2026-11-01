@@ -240,19 +240,28 @@ jobs:
             # 现在改成读文件：发文前把这一版的说明写进 RELEASE_NOTES.md 提交。
             # ⚠ 文件缺失时回退到模板，**不是**静默发一个空 Release ——
             #   发一个 0 字符的正文比发一句模板话更糟（下载的人无从判断这版能不能升）。
-            NOTES_FILE="RELEASE_NOTES.md"
+            # ⚠⚠ 本步骤前面已经 `cd artifacts`（为了 find 资产），而 RELEASE_NOTES.md 在**仓库根**。
+            #   所以必须回到上一级去找 —— 第一次上线时正是在这里踩的坑：
+            #   在 artifacts/ 里 [ -f RELEASE_NOTES.md ] 恒假 ⇒ 静默回退模板 ⇒
+            #   同时模板文案里的 "Linux" 被 shell 当通配符展开（见下），整个 publish 步骤 exit 123。
+            NOTES_FILE="../RELEASE_NOTES.md"
             if [ -f "$NOTES_FILE" ] && [ -s "$NOTES_FILE" ]; then
-              NOTES_SOURCE="--notes-file $NOTES_FILE"
-              echo "用 $NOTES_FILE 作为 Release 说明（$(wc -c < "$NOTES_FILE") 字节）"
+              # ⚠ 用数组而不是字符串：模板/路径里的空格与通配符不该被 shell 二次解释。
+              #   第一次上线时 `$NOTES_SOURCE` 未加引号，模板文案里的 "Linux" 被当成 glob
+              #   （报 `no matches found for 'Linux'`，zsh 下直接 exit 123）。
+              NOTES_ARGS=(--notes-file "../RELEASE_NOTES.md")
+              echo "用 RELEASE_NOTES.md 作为 Release 说明（$(wc -c < "$NOTES_FILE") 字节）"
             else
-              NOTES_SOURCE="--notes 自动构建产物（Windows / Linux / macOS，amd64 + arm64）。详见仓库 README。"
-              echo "⚠ 没有 $NOTES_FILE 或文件为空 ⇒ 回退到模板文案（请补说明后重发）"
+              NOTES_ARGS=(--notes "自动构建产物（Windows / Linux / macOS，amd64 + arm64）。详见仓库 README。")
+              echo "⚠ 没有 RELEASE_NOTES.md 或文件为空 ⇒ 回退到模板文案（请补说明后重发）"
             fi
-            # shellcheck disable=SC2086  # NOTES_SOURCE 需要按空格拆成两个参数
-            echo "$ASSETS" | xargs gh release create "$TAG" \
+            # ⚠ 不用 xargs：资产名里不会被 xargs 安全传递，且 --notes-file 与资产混在一起时
+            #   xargs 会把"最后一个参数"当命令追加位置搞乱。直接把资产列表展开成参数。
+            # shellcheck disable=SC2086  # ASSETS 需要按空白拆成多个资产名
+            gh release create "$TAG" $ASSETS \
               --repo "$GITHUB_REPOSITORY" \
               --title "multi2api $TAG" \
-              $NOTES_SOURCE
+              "${NOTES_ARGS[@]}"
           fi
 
       - name: Prune stale assets
