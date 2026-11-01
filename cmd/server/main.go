@@ -2063,6 +2063,22 @@ func main() {
 			log.Printf("              要从别的机器管理，请在 %s 里加一行 \"admin_token\": \"<一串足够长的随机值>\" 再重启。", *cfgPath)
 		}
 	}
+	// 目录缓存**后台预热**（见 internal/server/models_prewarm.go）。
+	//
+	// # 为什么必须在这里、而不是请求路径上
+	//
+	// 模型名校验的守卫只读 dynamicModelsCache：缓存冷时裸名/未知名会放行（fail-open），
+	// 于是刚重启后的第一波请求里写错的名字仍会掉进账号池、逐个试号白烧上游，
+	// 最后回一个误导性的 503。实测过：重启后立刻打错名字 → 503；
+	// 先 GET 一次 /v1/models 把缓存灌热，同样请求才变 400。
+	//
+	// 而"在请求路径上顺手拉一次目录"是**禁止**的：fetchDynamicModels 会真发一次上游请求，
+	// 那等于用一次上游调用来判断该不该调上游。所以把灌热放在后台，请求路径只读缓存。
+	//
+	// 传 ctx：随优雅停机一起取消（StartModelsPrewarm 内部 select ctx.Done() 退出）。
+	// 放在 ListenAndServe **之前**：让窗口在第一个请求到达前就关上。
+	h.StartModelsPrewarm(ctx, 0)
+
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

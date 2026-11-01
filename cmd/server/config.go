@@ -365,11 +365,30 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
-		// StrictModelPrefix 严格前缀模式：裸模型名一律 400（默认 nil = 关闭，保持既有行为）。
+		// StrictModelPrefix 严格前缀模式：模型名必须带上游前缀，裸名一律 400。
 		//
-		// 这是**手写配置**的位置；设置页改的那份住在 admin.strict_model_prefix，
-		// 解析时 admin 段优先、这里作回退（与 monkeycode 出口 / 破甲同一纪律，
-		// 理由见 Admin.StrictModelPrefix 的注释）。
+		// # 怎么用（用户向说明）
+		//
+		//	关闭（默认）：`.features.strict_model_prefix = false`
+		//	  带前缀的名字照常；**目录里存在的**裸名（例如 `auto`）也放行 ——
+		//	  这是 legacy 客户端的兼容路径，也是默认不开的原因。
+		//
+		//	打开：`"features": { "strict_model_prefix": true }`
+		//	  任何裸名一律 400 `unknown_model`（错误信息会给出 `<上游前缀>/<模型名>` 用法），
+		//	  唯一例外是**你自己显式配置过的**别名 / model_mapping（那是你建的映射，不是漏网）。
+		//
+		// 两种改法：① 直接写在这份 config.json 的 features 段（本字段）；
+		//          ② 设置页「模型与路由」→「严格前缀模式」复选框（**热生效**，不用重启）。
+		//
+		// # 与另一条路径的关系（它不是开关，是默认行为）
+		//
+		// "未知名 / 不存在的名字" 无论本开关开关都会被拦成 400（见 internal/server/model_check.go）；
+		// 本开关只决定**目录里存在的裸名**是否也拦。
+		//
+		// # 存储与优先级
+		//
+		// 这里（features 段）是**手写位置**；设置页改的那份住在 admin.strict_model_prefix，
+		// 解析时 admin 段优先、这里作回退（与 monkeycode 出口 / 破甲同一纪律）。
 		//
 		// ⚠ 用 *bool 而不是 bool："没配"（保持默认关）与"显式配成 false"必须能区分，
 		//   否则设置页关掉开关后重启会被这里的零值重新覆盖成"未配置"。

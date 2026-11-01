@@ -23,6 +23,7 @@ package workbuddy
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 
@@ -246,12 +247,20 @@ func isAlreadyCheckin(msg string) bool {
 // 死号处理：refresh token 已失效的账号在 RefreshToken 里走
 // holdRefresh 退避（24h），不会每轮都打失败请求。
 func (p *Provider) RunKeepaliveAll(trigger string) {
+	// 计数器：这一趟到底做了什么（收尾一行见 keepaliveSummary 的注释）。
+	//
+	// ⚠ 记"跳过"不是锦上添花：门槛（寿命过半才刷）生效后，被跳过的账号
+	//   原本**一行日志都没有** —— 用户问"门槛到底在不在工作"时只能去读
+	//   JWT 的 iat 反推（我实测过：10:51 那趟扫描一个新鲜号都没刷，日志里却什么都没写）。
+	var refreshed, halfLife, otherSkipped, failed int
 	for _, st := range p.ownAccounts() {
 		if st.Disabled {
+			otherSkipped++
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshToken == "" {
+			otherSkipped++
 			continue
 		}
 		// 判据统一成「寿命过半」（2026-11-01 用户要求所有上游同一套）。
@@ -268,10 +277,42 @@ func (p *Provider) RunKeepaliveAll(trigger string) {
 		//   在那种场合跳过账号会让人以为按钮坏了（他要的就是"现在给我刷一遍"）。
 		//   自动跑的那条路径才需要判据。
 		if trigger != "manual" && !dueForRefreshByRatio(a) {
+			halfLife++ // 门槛跳过的数量 —— 用户最关心的正是这个数
 			continue
 		}
-		p.keepaliveOne(st.UID, trigger)
+		switch p.keepaliveOne(st.UID, trigger).Status {
+		case checkinlog.StatusOK:
+			refreshed++
+		case checkinlog.StatusFail:
+			failed++
+		default:
+			otherSkipped++
+		}
 	}
+	if line := keepaliveSummary(trigger, refreshed, halfLife, otherSkipped, failed); line != "" {
+		log.Printf("%s", line)
+	}
+}
+
+// keepaliveSummary 后台一趟续期的收尾文案（manual 返回空串 = 不打印）。
+//
+// # 为什么要有这一行
+//
+// 门槛（寿命过半才刷）生效后，被跳过的账号**一行日志都没有**：用户问
+// "门槛到底在不在工作"时只能去读 JWT 的 iat 反推。其他上游的收尾都有
+// 「跳过 N」（cline/raccoon/qoder 的 jobs 里就是那句话），workbuddy 这条缺了 ——
+// 属于诊断盲点，补上（口径也与其他上游对齐）。
+//
+// # 为什么 manual 不打印
+//
+// 管理台点"保活"是显式动作：界面本来就逐账号显示结果，再补一行汇总只是噪声；
+// 而且手动路径**故意**不受门槛限制（见 RunKeepaliveAll 里那段注释）。
+func keepaliveSummary(trigger string, refreshed, halfLife, otherSkipped, failed int) string {
+	if trigger == "manual" {
+		return ""
+	}
+	return fmt.Sprintf("workbuddy: 后台续期完成 —— 续期 %d，跳过 %d（其中寿命未过半 %d），失败 %d",
+		refreshed, halfLife+otherSkipped, halfLife, failed)
 }
 
 // RunKeepaliveFor 单账号 token 刷新（管理台入口）。

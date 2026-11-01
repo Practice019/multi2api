@@ -473,3 +473,176 @@ func head80(s string) string {
 
 // 编译期断言：它就是个 io.ReadCloser（下游按流消费）。
 var _ io.ReadCloser = (*refusalRetryStream)(nil)
+
+// ═══════════════════════════════════════════════════════════════════
+// 非流式路径的拒绝重试 —— **我们的扩展**，原件没有这一层
+// ═══════════════════════════════════════════════════════════════════
+//
+// # 为什么原件没有
+//
+// dsh-purge 的 lib/refusal-retry.js 只挂 llm/stream（一个 async generator 包装器）：
+// 它整套机制都建立在"边到边流"上（缓冲前 400 字符 → 结算 → 丢弃已吐出的、换新流）。
+// 非流式根本没有这个形状，所以原件不覆盖它。
+//
+// # 为什么我们补它
+//
+// 我们这边的用户一路用 `stream:false` 测 —— 于是拒绝重试**对他从不触发**，
+// 他得到的结论会是"这个功能没用"。而补它的代价是零：非流式响应**本来就要整段读完**
+// 才能返回客户端，判定与重发都发生在"已读完"之后，不增加任何等待。
+//
+// # 与流式版共用什么
+//
+//	prompt.LooksLikeRefusal  同一份检测表与元拒绝豁免（不另写一份）
+//	prompt.ApplyRetryNudge   同一份话术追加（只看 messages[0]、仅当它是 system）
+//	h.cfg.RefusalAudit       同一批事件名，多带 mode=non_stream 便于区分
+//	只重试一次               与原件一致，没有循环
+//
+// # 不变式
+//
+//   · 开关关着 ⇒ 不判定、不审计、返回**同一个 map / 同一段字节**（行为与改造前逐字节一致）
+//   · 重发失败或上游 >=400 ⇒ **保留第一份回答**（绝不把错误体当回答）
+//   · 第一份回答为空 ⇒ 不判定（空文本不是拒绝）
+
+// refusalAuditEvent 发一条审计事件（nil 安全；审计失败绝不影响主流程）。
+func (h *Handler) refusalAuditEvent(event string, data map[string]any) {
+	if h == nil || h.cfg.RefusalAudit == nil {
+		return
+	}
+	func() {
+		defer func() { _ = recover() }()
+		_ = h.cfg.RefusalAudit(event, data)
+	}()
+}
+
+// nonStreamText 取非流式响应里的回答正文（判定用）。
+//
+// 兼容两种形态：message.content 是字符串，或是由若干 part 组成的数组（只取 text part）。
+func nonStreamText(resp map[string]any) string {
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		return ""
+	}
+	cm, _ := choices[0].(map[string]any)
+	if cm == nil {
+		return ""
+	}
+	msg, _ := cm["message"].(map[string]any)
+	if msg == nil {
+		return ""
+	}
+	switch c := msg["content"].(type) {
+	case string:
+		return c
+	case []any:
+		var b strings.Builder
+		for _, p := range c {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := pm["type"].(string); t != "text" {
+				continue
+			}
+			if s, ok := pm["text"].(string); ok {
+				b.WriteString(s)
+			}
+		}
+		return b.String()
+	}
+	return ""
+}
+
+// nonStreamOutcome 给非流式响应归类（与流式版的 outcome 取值同一套）。
+//
+// 口径出处：lib/stream-observation.js 的 outcome 只描述**传输形态**
+// （text / tool_call / reasoning_only / empty），不代表回答正确或任务成功。
+func nonStreamOutcome(resp map[string]any) string {
+	choices, _ := resp["choices"].([]any)
+	if len(choices) == 0 {
+		return "empty"
+	}
+	cm, _ := choices[0].(map[string]any)
+	if cm == nil {
+		return "empty"
+	}
+	msg, _ := cm["message"].(map[string]any)
+	if msg == nil {
+		return "empty"
+	}
+	if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
+		return "tool_call"
+	}
+	if nonStreamText(resp) != "" {
+		return "text"
+	}
+	if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
+		return "reasoning_only"
+	}
+	return "empty"
+}
+
+// retryRefusalNonStreamMap 非流式拒绝重试的**核心**（两个调用点共用）。
+//
+// 返回最终响应对象与"是否换过"。未命中 / 开关关 / 重发失败都返回入参 first 本身（changed=false）。
+func (h *Handler) retryRefusalNonStreamMap(body []byte, first map[string]any, refetch func(nudged []byte) (map[string]any, error)) (map[string]any, bool) {
+	if h == nil || h.cfg.Armor == nil || !h.cfg.Armor.RetryEnabled() {
+		return first, false
+	}
+	text := nonStreamText(first)
+	if text == "" || !prompt.LooksLikeRefusal(text) {
+		return first, false
+	}
+	h.refusalAuditEvent("refusal_retry", map[string]any{
+		"chars": len([]rune(text)),
+		"head":  head80(text),
+		"match": prompt.RefusalMatchIndex(text),
+		"mode":  "non_stream",
+	})
+	if refetch == nil {
+		return first, false
+	}
+	next, err := refetch(prompt.ApplyRetryNudge(body))
+	if err != nil || next == nil {
+		// 重发失败：**保留第一份回答**。把错误体当回答是这里最坏的错法。
+		h.refusalAuditEvent("refusal_retry_failed", map[string]any{"error": "refetch", "mode": "non_stream"})
+		return first, false
+	}
+	h.refusalAuditEvent("refusal_retry_outcome", map[string]any{
+		"outcome": nonStreamOutcome(next),
+		"chars":   len([]rune(nonStreamText(next))),
+		"mode":    "non_stream",
+	})
+	return next, true
+}
+
+// retryRefusalNonStreamBytes 字节版（渠道路径用：那边拿到的是一整段响应字节）。
+//
+// ⚠ 只在"能解析成 JSON 对象"时才判定；解析不了、或没换过对象 ⇒ **逐字节返回原字节**。
+func (h *Handler) retryRefusalNonStreamBytes(body []byte, raw []byte, refetch func(nudged []byte) ([]byte, error)) []byte {
+	if h == nil || h.cfg.Armor == nil || !h.cfg.Armor.RetryEnabled() {
+		return raw
+	}
+	var first map[string]any
+	if err := json.Unmarshal(raw, &first); err != nil {
+		return raw
+	}
+	out, changed := h.retryRefusalNonStreamMap(body, first, func(nudged []byte) (map[string]any, error) {
+		nraw, err := refetch(nudged)
+		if err != nil {
+			return nil, err
+		}
+		var m map[string]any
+		if err := json.Unmarshal(nraw, &m); err != nil {
+			return nil, err
+		}
+		return m, nil
+	})
+	if !changed {
+		return raw
+	}
+	reencoded, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return reencoded
+}

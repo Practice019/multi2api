@@ -59,7 +59,14 @@ const serverRetryExtra = 2
 type Config struct {
 	Pool     *pool.Pool
 	Upstream DefaultUpstream
-	APIKey   string // 空 = 不鉴权
+	// ModelsRefresh 一次"把目录缓存灌热"的动作（见 models_prewarm.go）。
+	//
+	// nil ⇒ 用默认实现 h.fetchDynamicModels（会真发一次上游请求，自带 1h 正缓存
+	// 与 5min 失败负缓存）。注入点存在的唯一理由是**可测**：
+	// fetchDynamicModels 第一件事就是 Pool.PickForExcluding，而 Pool 是具体类型，
+	// 测试没法轻易造一个能取号的池子；注入后测试可以直接写缓存。
+	ModelsRefresh func()
+	APIKey        string // 空 = 不鉴权
 	// AdminToken 管理台门禁令牌（与 APIKey **完全独立**）。
 	//
 	// # 为什么必须独立（用户要求：门禁 token 不能和 api 一样）
@@ -317,6 +324,14 @@ const ServiceName = "multi2api"
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+	// ── 目录缓存预热（见 models_prewarm.go）──────────────────────────
+	//
+	// 这三项只被 StartModelsPrewarm / prewarmModelsOnce 读写；放在 Handler 上
+	// 而不是包级变量：包级会让"两个 Handler 实例"（测试与真实部署共存）互相干扰，
+	// 也会让"幂等"变成全局的一次性行为、测不了第二次。
+	prewarmMu          sync.Mutex
+	prewarmOn          bool
+	prewarmLastFailLog time.Time
 	// apiKey 当前生效的管理钥匙（config api_key，支持运行时轮换）。
 	// 与 cfg.APIKey 解耦：轮换写回 config 后调用 SetAPIKey 立即生效，无需重启。
 	//
@@ -1825,19 +1840,44 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// ⚠ 与池路径同一条纪律：重发拿到 >=400 必须当失败（回放原始头部），
 			//   不能把上游的错误体当成"重试后的回答"转发给客户端。
 			// ⚠ 同池路径：传已盖章的 body，话术才能落在系统提示真正的尾部。
-			fw.Stream.Body = h.MaybeRefusalRetry(fw.Stream.Body, h.armorBody(body), func(nudged []byte) (io.ReadCloser, error) {
-				nfw, nerr := h.forwardViaChannelAs(r.Context(), chosenTarget, publicModel, nudged)
-				if nerr != nil {
-					return nil, nerr
-				}
-				if nfw.Stream.Status >= 400 {
-					if nfw.Stream.Body != nil {
-						_ = nfw.Stream.Body.Close()
+			if peek.Stream {
+				fw.Stream.Body = h.MaybeRefusalRetry(fw.Stream.Body, h.armorBody(body), func(nudged []byte) (io.ReadCloser, error) {
+					nfw, nerr := h.forwardViaChannelAs(r.Context(), chosenTarget, publicModel, nudged)
+					if nerr != nil {
+						return nil, nerr
 					}
-					return nil, fmt.Errorf("拒绝重试：渠道返回 %d", nfw.Stream.Status)
-				}
-				return nfw.Stream.Body, nil
-			})
+					if nfw.Stream.Status >= 400 {
+						if nfw.Stream.Body != nil {
+							_ = nfw.Stream.Body.Close()
+						}
+						return nil, fmt.Errorf("拒绝重试：渠道返回 %d", nfw.Stream.Status)
+					}
+					return nfw.Stream.Body, nil
+				})
+			} else {
+				// 非流式渠道响应：**先整段读出来**才能判拒绝、判完才能决定要不要重发一次
+				//（非流式本来就整段返回，所以这一步不增加任何等待）。
+				//
+				// 判完把最终字节塞回 fw.Stream.Body，继续交给下面那个 writeChannelStream ——
+				// 脱敏（model 回填 / id 重写）、flush、content-type 全部既有语义一行不动。
+				//
+				// ⚠ 上限 32MB：与 writeChannelStream 的读取上限同一量级，防一个坏响应把内存吃满。
+				raw, _ := io.ReadAll(io.LimitReader(fw.Stream.Body, 32<<20))
+				_ = fw.Stream.Body.Close()
+				final := h.retryRefusalNonStreamBytes(h.armorBody(body), raw, func(nudged []byte) ([]byte, error) {
+					nfw, nerr := h.forwardViaChannelAs(r.Context(), chosenTarget, publicModel, nudged)
+					if nerr != nil {
+						return nil, nerr
+					}
+					defer nfw.Stream.Body.Close()
+					if nfw.Stream.Status >= 400 {
+						_, _ = io.Copy(io.Discard, io.LimitReader(nfw.Stream.Body, 1<<20))
+						return nil, fmt.Errorf("拒绝重试：渠道返回 %d", nfw.Stream.Status)
+					}
+					return io.ReadAll(io.LimitReader(nfw.Stream.Body, 32<<20))
+				})
+				fw.Stream.Body = io.NopCloser(bytes.NewReader(final))
+			}
 		}
 		if ferr != nil {
 			// ★ 渠道失败也写请求日志。改造前渠道分支**一行日志都没有**，后果是实测踩到的：
@@ -2747,6 +2787,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		// 非流式路径的拒绝重试（**我们的扩展**，原件只挂流式 —— 见 refusal_retry.go 的文件头）。
+		//
+		// 位置刻意在"脱敏与写出**之前**"：响应此刻已整段读完，判定与重发不增加任何等待；
+		// 而写出去之后再想换就晚了（状态码与字节都已提交给客户端）。
+		resp, _ = h.retryRefusalNonStreamMap(outBody, resp, func(nudged []byte) (map[string]any, error) {
+			ncr, nstatus, nerr := h.chatVia(ctx, reqProvider, acct, nudged)
+			if nerr != nil {
+				return nil, nerr
+			}
+			defer ncr.Close()
+			if nstatus >= 400 {
+				// 上游的错误体不是回答：读完即弃，交给上层保留第一份回答。
+				_, _ = io.Copy(io.Discard, io.LimitReader(ncr, 1<<20))
+				return nil, fmt.Errorf("拒绝重试：上游返回 %d", nstatus)
+			}
+			nresp, nerr2 := wire.Aggregate(ncr)
+			if nerr2 != nil {
+				return nil, nerr2
+			}
+			return nresp, nil
+		})
 		// 成功即解除自动禁用（与 NoteSuccess 并列，不替代）。
 		//
 		// ⚠ 这条只在"该号还能被选中"时才有机会跑到。被禁用的号不在候选集里，
