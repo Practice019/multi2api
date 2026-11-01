@@ -7,7 +7,17 @@ services:
       - TZ=Asia/Shanghai
     ports:
       - "7863:7863"
+    # ⚠ 必须显式指到目录里的配置文件：镜像的 ENTRYPOINT 硬编码了
+    # `/app/config.json`（见 Dockerfile 第 37 行），而挂载点现在是**目录**。
+    # Go 的 flag 包对重复出现的 -config 取**最后一次**，因此这里追加的
+    # 这一个生效，无需改镜像。
+    command: ["-config", "/app/config/config.json"]
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data
-      - ./config.json:/app/config.json:ro
+      # ⚠ 必须挂**目录**，不能挂单文件：
+      # 设置/密钥轮换的落盘是 `WriteFile(tmp) + Rename(tmp, config.json)`（原子替换）。
+      # 而单文件 bind mount 在容器里是**挂载点**，rename 覆盖挂载点会被内核拒绝
+      # （EBUSY: device or resource busy）；配合 :ro 连 .tmp 都写不了。
+      # 这导致控制台改设置/轮换管理令牌必然保存失败。
+      - ./config:/app/config

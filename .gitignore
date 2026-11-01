@@ -231,3 +231,10 @@ _backup-*.txt
 #   ⇒ CI 与 Release 流水线连续全红（而本机正常，因为本机有这个文件）。
 !RELEASE_NOTES.md
 !internal/prompt/*.md
+
+# compose 改动前的运行时备份（避免一次 git add -A 带进仓库）
+docker-compose.yml.bak-*
+
+# 运行时配置目录（内含真实 admin_token / api_key）
+config/
+config-test/
