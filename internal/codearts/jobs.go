@@ -160,7 +160,10 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		return nil
 	}
 
-	log.Printf("codearts: 后台续期开始，%d 个账号（全量续）", len(need))
+	// ⚠ 文案随判据改（2026-11-01）：这里不再是"全量续"，而是"已过半寿命的那批"。
+	//   留着旧字会让日志与行为相反 —— 本仓在意"日志说实话"（实测：新构建跑出
+	//   这行时，读的人会以为还在无条件全量刷）。
+	log.Printf("codearts: 后台续期开始，%d 个账号（已过半寿命：剩余 ≤ 寿命×0.5）", len(need))
 	for _, a := range need {
 		if err := ctx.Err(); err != nil {
 			return err
