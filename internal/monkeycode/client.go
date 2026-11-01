@@ -139,8 +139,9 @@ func (c *Client) httpFor(a *Auth) *http.Client {
 //	「错误里写的出口」与「实际用的出口」不一致 —— 那正是这类自检最怕的谎报。
 //
 // ⚠ 旧 client 的**空闲连接**不会立刻关：Transport 里可能还有 keep-alive 连接，
-//   这里不主动 CloseIdleConnections()，因为切换是低频动作，而关掉连接池会让
-//   一笔在途请求失败。下次请求自然走新 transport。
+//
+//	这里不主动 CloseIdleConnections()，因为切换是低频动作，而关掉连接池会让
+//	一笔在途请求失败。下次请求自然走新 transport。
 func (c *Client) SetProxy(proxy, directProxy string) {
 	proxy = strings.TrimSpace(proxy)
 	directProxy = strings.TrimSpace(directProxy)

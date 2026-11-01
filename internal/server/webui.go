@@ -34,6 +34,7 @@ var modelsUIPage []byte
 // ⚠ ⚠ 这两行**必须留在这个文件里**（与上面几个 embed 同处）：
 // tests/frontend/verify_inline_script_syntax.js:46-57 的内联脚本扫描清单
 // 是**从本文件的 //go:embed 行现取**的 —— 挪到 tokens_ui.go 会让这一页静默逃过门禁。
+//
 //go:embed webui-tokens.html
 var tokensUIPage []byte
 

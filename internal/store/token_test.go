@@ -441,7 +441,8 @@ func TestTokenAllowUserQuotaQuery(t *testing.T) {
 // ② 对外视图 TokenView 不含 auto_groups/auto_group_mode ⇒ /admin/tokens 永不返回；
 // ③ 前端抽屉无源可还原，只能硬写 inherit + 空列表 ⇒ 一保存就把已存配置覆盖成空。
 // 这是一类很容易复发的缺陷（写路径一直好用、读路径静默缺字段），所以钉在这里：
-//   快照非空 ⇒ custom + 原样返回；快照空 ⇒ inherit + 空。
+//
+//	快照非空 ⇒ custom + 原样返回；快照空 ⇒ inherit + 空。
 func TestTokenViewExposesAutoGroups(t *testing.T) {
 	tok := &Token{ID: 1, Name: "x"}
 	if err := tok.SetAutoGroups([]string{"a", "b"}); err != nil {

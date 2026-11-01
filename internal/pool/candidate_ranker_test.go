@@ -222,7 +222,7 @@ func TestCandidateRankerUnknownUIDsGoLast(t *testing.T) {
 // # 为什么单独立一条（2026-11-01）
 //
 // 契约原文是「未出现在返回 map 里的 uid 视为**最低优先级**」
-//（gateway/candidate_tier.go），而池侧的 kept 原来只收 map 里出现过的 uid ——
+// （gateway/candidate_tier.go），而池侧的 kept 原来只收 map 里出现过的 uid ——
 // 等于把「最低优先级」实现成了「不可用」。上游只报部分 uid 时，那些号在**整条
 // 请求**里都选不中，而它们在界面上明明在池里、额度也有。
 //
