@@ -22,6 +22,7 @@
 package prompt
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -91,6 +92,61 @@ func RefusalMatchIndex(text string) int {
 
 // LooksLikeRefusal 这段回答是不是在推脱。
 func LooksLikeRefusal(text string) bool { return RefusalMatchIndex(text) >= 0 }
+
+// ApplyRetryNudge 在**请求体**层面追加重试话术 —— 逐条照抄原项目的 withNudge。
+//
+// 原实现（lib/refusal-retry.js 的 withNudge）有四条必须保住的行为：
+//
+//	① 只看 messages[0]：原项目只改第一条消息，**不**遍历找 system
+//	② 而且仅当 messages[0].role == "system"：否则**原样返回**（不加 nudge）
+//	   —— 这一条最容易被"优化"掉：直觉上"有 system 就加"才对，但改了就不是原样了
+//	③ content 是字符串 → 直接拼接；是数组 → 只给 type=text 的块拼，其它块原样
+//	④ 其余消息与顶层字段**逐字不动**
+//
+// 返回新体（不修改入参）；任何解析失败都**原样返回**，绝不因为"想加个话术"把请求弄坏。
+func ApplyRetryNudge(body []byte) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body
+	}
+	first, ok := msgs[0].(map[string]any)
+	if !ok {
+		return body
+	}
+	if role, _ := first["role"].(string); role != "system" {
+		return body // ②：第一条不是 system ⇒ 原样返回（不加）
+	}
+	switch c := first["content"].(type) {
+	case string:
+		first["content"] = c + RetryNudge
+	case []any:
+		for _, part := range c {
+			pm, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := pm["type"].(string); t != "text" {
+				continue // ③：只给 text 块拼
+			}
+			if s, ok := pm["text"].(string); ok {
+				pm["text"] = s + RetryNudge
+			}
+		}
+	default:
+		return body // content 既不是字符串也不是数组 ⇒ 不懂就不动
+	}
+	msgs[0] = first
+	obj["messages"] = msgs
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
 
 // WithRetryNudge 把重试话术追加到系统提示尾部（幂等：已含则不重复加）。
 //

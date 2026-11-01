@@ -210,6 +210,63 @@ func TestArmorPayloadOverrideWins(t *testing.T) {
 }
 
 // utf8Len 夹具用的字符数（与实现同口径）。
+// TestApplyRetryNudgePatchesFirstSystemMessage 第一条是 system ⇒ 尾部追加（字符串形态）。
+func TestApplyRetryNudgePatchesFirstSystemMessage(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"system","content":"原始系统提示"},{"role":"user","content":"用户原话"}]}`)
+	out := ApplyRetryNudge(body)
+	if !strings.Contains(string(out), "原始系统提示") {
+		t.Fatal("原文被丢了")
+	}
+	if !strings.Contains(string(out), "要现在执行吗？") {
+		t.Error("nudge 没追加到 system 尾部")
+	}
+	if !strings.Contains(string(out), "用户原话") {
+		t.Error("用户消息被动过")
+	}
+	// 顶层其它字段逐字保留
+	if !strings.Contains(string(out), `"model":"m"`) {
+		t.Error("顶层字段被改写")
+	}
+}
+
+// TestApplyRetryNudgeSkipsWhenFirstIsNotSystem 第一条**不是** system ⇒ 原样返回。
+//
+// 这是原项目 withNudge 的行为，最容易被"顺手优化"掉：直觉上"有 system 就加"更对，
+// 但那就不是 1:1 了（用户明确要求照原样做）。
+func TestApplyRetryNudgeSkipsWhenFirstIsNotSystem(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"u"},{"role":"system","content":"s"}]}`)
+	if out := ApplyRetryNudge(body); string(out) != string(body) {
+		t.Errorf("第一条不是 system 时应当原样返回，实际: %s", out)
+	}
+}
+
+// TestApplyRetryNudgeArrayContentOnlyTextBlocks 数组 content：只给 text 块拼。
+func TestApplyRetryNudgeArrayContentOnlyTextBlocks(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"system","content":[{"type":"text","text":"A"},{"type":"image_url","image_url":{"url":"x"}}]}]}`)
+	out := string(ApplyRetryNudge(body))
+	if !strings.Contains(out, "A") || !strings.Contains(out, "要现在执行吗？") {
+		t.Errorf("text 块没被追加: %s", out)
+	}
+	if !strings.Contains(out, `"type":"image_url"`) || !strings.Contains(out, `"url":"x"`) {
+		t.Errorf("非 text 块被改动了: %s", out)
+	}
+}
+
+// TestApplyRetryNudgeFailuresReturnInputVerbatim 解析失败/畸形一律原样返回。
+func TestApplyRetryNudgeFailuresReturnInputVerbatim(t *testing.T) {
+	for _, body := range []string{
+		`not json`,
+		`{}`,
+		`{"messages":[]}`,
+		`{"messages":"字符串不是数组"}`,
+		`{"messages":[{"role":"system","content":123}]}`,
+	} {
+		if out := ApplyRetryNudge([]byte(body)); string(out) != body {
+			t.Errorf("畸形输入必须原样返回: 入=%s 出=%s", body, out)
+		}
+	}
+}
+
 func utf8Len(s string) int {
 	n := 0
 	for range s {
