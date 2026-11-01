@@ -223,6 +223,10 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 	// 与 gateway.arch_test 的 discoveryExemptPackages 同一精神，
 	// 但这里是独立清单 —— 那个是 unexported，跨包拿不到。
 	notUpstream := map[string]bool{
+		// arch 是**结构守卫**的包（只有测试文件：go:embed 引用必须受 git 追踪、
+		// 架构依赖规则）。它当然不实现 gateway.Provider —— 加它时这条守卫确实红了，
+		// 正如下面那段注释所说：新目录必须显式归类。
+		"arch":  true,
 		"admin": true, "apikey": true, "auth": true, "browseropen": true,
 		"checkinlog": true, "clientlogin": true, "dailycheckin": true,
 		"gateway": true, "logbuf": true, "oauth": true, "pool": true,

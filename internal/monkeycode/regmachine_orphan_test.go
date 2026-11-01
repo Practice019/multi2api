@@ -90,7 +90,7 @@ func TestRegMachineMissingUserIDStillImportsButFallsBackToSessionName(t *testing
 // TestRegMachineImportWithUserIDStillWorks (A 正例) 有 userId 的行照常导入（别把好路堵死）。
 func TestRegMachineImportWithUserIDStillWorks(t *testing.T) {
 	p := &Provider{}
-	const uid = "00000000-0000-4000-8000-000000000000"
+	const uid = "22222222-2222-4222-8222-222222222222"
 
 	creds, err := p.ImportCredentials(regMachineLine(uid, true))
 	if err != nil {
@@ -159,8 +159,8 @@ func legacyFileName(t *testing.T, session string) string {
 // TestSaveFileMigratesLegacySessionFile (B 正例) 同 session 的旧残档被改名、内容未改。
 func TestSaveFileMigratesLegacySessionFile(t *testing.T) {
 	dir := t.TempDir()
-	const sess = "00000000-0000-4000-8000-000000000000"
-	const uid = "00000000-0000-4000-8000-000000000000"
+	const sess = "33333333-3333-4333-8333-333333333333"
+	const uid = "44444444-4444-4444-8444-444444444444"
 
 	// ① 先造出残档：一份没有 UserID 的凭证（UID 只能回退成 session-<hash>）。
 	legacyPath, err := SaveFile(dir, &Auth{Session: sess, Region: RegionIntl})
@@ -208,9 +208,9 @@ func TestSaveFileMigratesLegacySessionFile(t *testing.T) {
 // TestSaveFileKeepsOtherSessionsLegacyFile (B 负例) session **不同**的残档不许被误伤。
 func TestSaveFileKeepsOtherSessionsLegacyFile(t *testing.T) {
 	dir := t.TempDir()
-	const other = "00000000-0000-4000-8000-000000000000" // 另一个账号的 session
-	const sess = "00000000-0000-4000-8000-000000000000"
-	const uid = "00000000-0000-4000-8000-000000000000"
+	const other = "11111111-1111-4111-8111-111111111111" // 另一个账号的 session
+	const sess = "55555555-5555-4555-8555-555555555555"
+	const uid = "66666666-6666-4666-8666-666666666666"
 
 	otherPath, err := SaveFile(dir, &Auth{Session: other, Region: RegionIntl})
 	if err != nil {
@@ -235,7 +235,7 @@ func TestSaveFileKeepsOtherSessionsLegacyFile(t *testing.T) {
 // 顺带钉住"身份升级迁移"不会把**自己**改名成迁移件（U一样时无操作）。
 func TestSaveFileWithoutUserIDDoesNotMigrate(t *testing.T) {
 	dir := t.TempDir()
-	const sess = "00000000-0000-4000-8000-000000000000"
+	const sess = "77777777-7777-4777-8777-777777777777"
 
 	if _, err := SaveFile(dir, &Auth{Session: sess, Region: RegionIntl}); err != nil {
 		t.Fatalf("首次落盘失败：%v", err)

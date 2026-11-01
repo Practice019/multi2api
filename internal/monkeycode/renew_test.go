@@ -64,7 +64,7 @@ import (
 
 const (
 	renewFakeSession = "00000000-0000-4000-8000-000000000000" // 36 位 uuid 形态
-	renewFakeOldSess = "00000000-0000-4000-8000-000000000000"
+	renewFakeOldSess = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	renewFakeCapTok  = "cap-token-0001"     // challenge 下发的 token（PoW 的种）
 	renewFakeCapOK   = "cap-token-redeemed" // redeem 换回的 captcha_token
 	renewFakeMaxAge  = 2592000              // 30 天，实测真值
