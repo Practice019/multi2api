@@ -102,8 +102,19 @@ func TestLogRotatesAndKeepsTwo(t *testing.T) {
 
 // TestLogFailuresAreNotFatal 写不进去只返回 false，不 panic（审计不能变成可用性风险）。
 func TestLogFailuresAreNotFatal(t *testing.T) {
-	// 指向一个不存在的盘符/非法路径。
-	l := Open(filepath.Join("Z:", "不可能", "audit.jsonl"))
+	// 指向"**父路径是一个普通文件**"的路径 —— 这在 Windows 与 Unix 上都必然失败
+	//（ENOTDIR / 不是目录），是可移植的"必然写不进去"。
+	//
+	// ⚠ 老写法是 `filepath.Join("Z:", …)`（不存在的盘符）：它**只在 Windows 上失败** ——
+	//   在 Unix 上那不过是个相对路径，而 `Log` 里有 `os.MkdirAll(filepath.Dir(path))`
+	//（auditlog.go:70）⇒ 目录被建出来、写**成功** ⇒ CI（Linux）一直红：
+	//   `auditlog_test.go:108: 非法路径不该报告成功`
+	//   这条用例本意是"平台无关地证明写不进去不会致命"，所以构造也该平台无关。
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("造障碍文件失败: %v", err)
+	}
+	l := Open(filepath.Join(blocker, "audit.jsonl"))
 	if l.Log("x", nil) {
 		t.Error("非法路径不该报告成功")
 	}
