@@ -30,8 +30,16 @@
 //
 // 混在一起用户看不出"今天的额度还剩多少"，而这恰恰是选号时最关心的。
 //
-// 去掉 token 与 token_expiry：本上游没有可展示的 bearer 到期时刻。
-// （HasToken 仍实现，但那是给别处判"能不能用"，不是给这一列填值。）
+// # 2026-11-01 修正：token_expiry **要留**
+//
+// 原来这里写着"去掉 token 与 token_expiry：本上游没有可展示的 bearer 到期时刻"。
+// 那个判断对了一半：确实没有 bearer token，**但 session 有 30 天硬过期**。
+// 用户的原话是「我估计有一个账号就是 Token 过期了，所以它现在用不了了」——
+// 他需要的正是"哪个号要到期/已经到期"这个事实，而这一列被删掉之后，
+// 界面上连预警都没有（只能等它 401 变禁用才发现）。
+//
+// 所以：token_expiry **加回来**（值由 expiry.go 的 TokenExpiry 提供，是推断值，那里写清了偏差方向）；
+// token 那一列仍然不留 —— 它读 `has_token`，而本上游没有 bearer，留下恒为 `—`。
 package monkeycode
 
 import "workbuddy2api/internal/gateway"
@@ -48,8 +56,10 @@ func (p *Provider) AccountColumns() []string {
 	out := make([]string, 0, len(cols))
 	for _, c := range cols {
 		switch c {
-		case gateway.AccountColToken, gateway.AccountColTokenExpiry:
-			// 没有可展示的 bearer 到期时刻：显示它只会恒为 `—`。
+		case gateway.AccountColToken:
+			// 没有 bearer token（session + oma/omas 三元组）⇒ 这一列留下只会恒为 `—`。
+			// ⚠ 但**不要**顺手把 token_expiry 也删掉：session 有 30 天硬过期，
+			//   那一列是"哪个号快到期了"的唯一预警（见文件头）。
 			continue
 		}
 		out = append(out, c)
@@ -62,6 +72,14 @@ func (p *Provider) AccountColumns() []string {
 		// 实测就是这么漏掉的：后端数据全对，列集里没它，界面上就是少一列。
 		if c == gateway.AccountColQuota {
 			out = append(out, gateway.AccountColFreeQuota)
+		}
+		// ⚠ 与 free_quota 同一个坑：`token_expiry` **不在** DefaultAccountColumns() 里
+		//   （那份默认列集是 workbuddy 的形态），所以必须在"去掉不适用的"之后再**显式加一次**。
+		//   只靠上面那个 switch 是加不回来的 —— 实测：测试报「列集里缺 token_expiry」，
+		//   而代码看起来"已经把 token 排除了、token_expiry 该流过去"。
+		//   位置与 codearts 对齐：状态之后、今日签到之前。
+		if c == gateway.AccountColStatus {
+			out = append(out, gateway.AccountColTokenExpiry)
 		}
 	}
 	return out
