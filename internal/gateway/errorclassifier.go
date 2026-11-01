@@ -288,11 +288,37 @@ type ErrorClassifier interface {
 // 所以兜底**刻意**只映射状态码：
 //
 //	402 → ErrKindHardCredit    （Payment Required，RFC 语义就是"要付钱"）
+//	408 → ErrKindServer        （见下：上游读超时，临时性、上游侧）
 //	429 → ErrKindSoftRate
 //	404 → ErrKindNotFound
 //	5xx → ErrKindServer
 //	其他 4xx → ErrKindClient
 //	< 400 → ErrKindNone
+//
+// # 408 为什么归 ErrKindServer（而不是"其他 4xx → ErrKindClient"）
+//
+// 旧行为把它落进 ErrKindClient，于是出口报 `503 invalid_request ——
+// all accounts unavailable (cooling/disabled)`：文案与事实相反（0 个号在冷却），
+// 客户端会去改请求参数，而真正该做的是等一会儿重试。
+//
+// 用户实测证据（2026-11-01，绕开网关直连讯飞，同一账号 23421 额度）：
+//
+//	第 1 次 → 408 `响应超时，请重试`  34.2s
+//	第 2 次 → 408 `响应超时，请重试`  46.2s
+//	第 3 次 → 200 成功（回复"在线"，points_consumed: 1）  38.9s
+//
+// ⇒ ① 账号没被封（能生成、能扣费）；② 408 是上游自己的**临时**超时（文案就是"请重试"）；
+//   ③ 同一份请求第三次就成功了 ⇒ 这是**服务端拥塞**，不是确定性失败。
+//
+// 归 ErrKindServer 的三个直接好处（都靠既有代码自动生效，不新增分支）：
+//
+//	· 出口按既有规则回 **502 upstream_error**（而非 503 + 自相矛盾的文案）；
+//	· 池循环按既有规则**换号重试**（kind==ErrKindServer 时 maxAttempts += serverRetryExtra）；
+//	· 喂熔断计数 —— 上游真的拥塞时应当降速，这与"把它当成客户端错误"相反。
+//
+// ⚠ 它**不**进"永不重试"表（那表里是 504/524：那两类是"本轮时钟已经用光"，
+// 而 408 在本仓的实测形态是上游迅速给出"我读超时了"，换号立刻有意义）。
+// 重试有界的说明见 internal/server/handler.go 的 timeoutRetryExtra。
 //
 // 正文层面的判据（额度关键词、会话码）**必须由上游自己报**。
 // workbuddy 的实现在它自己的包里（internal/upstream 的适配），
@@ -306,6 +332,8 @@ func DefaultErrorKind(status int, body string) ErrorKind {
 	switch {
 	case status == 402:
 		return ErrKindHardCredit
+	case status == 408: // Request Timeout（本文件不 import net/http；与 524 同样写字面量）
+		return ErrKindServer
 	case status == 429:
 		return ErrKindSoftRate
 	case status == 404:
