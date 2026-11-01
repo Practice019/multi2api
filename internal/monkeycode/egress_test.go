@@ -75,8 +75,25 @@ func TestEgressInfoReportsStaticFacts(t *testing.T) {
 	if len(info.Proxies) != 1 || info.Proxies[0] != "http://127.0.0.1:10808" {
 		t.Errorf("proxies = %v，want [http://127.0.0.1:10808]", info.Proxies)
 	}
-	if !strings.Contains(info.Note, "国际站必须走代理") {
-		t.Errorf("note 应说明两站前提相反，实际 %q", info.Note)
+	// Note 的价值是**说清两站的差异**，所以两个站名都必须在。
+	note := info.Note
+	for _, want := range []string{"国内站", "国际站"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note 应说明两站的差异（缺 %q），实际 %q", want, note)
+		}
+	}
+	// ★ 新口径（2026-11-01 用户实测推翻旧前提）：国际站**可以直连**，代理只是
+	//   "本机直连不通时"的可选项。旧文案「国际站必须走代理（否则连不上）」是错的。
+	//   具体措辞以 T-023 落地为准，这里接受几种等价说法。
+	if !strings.Contains(note, "可直连") && !strings.Contains(note, "也可以直连") &&
+		!strings.Contains(note, "直连或走代理") && !strings.Contains(note, "直连亦可") {
+		t.Errorf("note 应说明国际站**可直连**（代理只是可选），实际 %q", note)
+	}
+	// 反向断言：绝对化措辞必须消失（用户原话：「不一定非要走代理」）。
+	for _, bad := range []string{"必须走代理", "必须配代理", "否则连不上"} {
+		if strings.Contains(note, bad) {
+			t.Errorf("note 仍含旧前提 %q（实测：零代理可直连国际站），实际 %q", bad, note)
+		}
 	}
 
 	// 没配代理：proxies 为空（前端据此只显示「直连」）。
@@ -86,23 +103,30 @@ func TestEgressInfoReportsStaticFacts(t *testing.T) {
 	}
 }
 
-// TestProxylessIntlProbeTellsUserWhatToDo 没配代理时那一条要**直接给出结论**。
+// TestProxylessIntlProbeTellsUserWhatToDo 没配代理时那一条**不再静态判定失败**。
 //
-// 用户的动作只有两个：去设置里配代理，或改用国内站账号 —— 文案必须给到他。
+// ★ 新口径（2026-11-01 用户实测）：国际站零代理也能用（401/201/200 都拿到过），
+// 所以"没配代理 ⇒ 一定连不上"是**错的结论**。现在这条只给一句「未配置代理（直连）」
+// 的待实测说明 + 可操作建议（直连不通再去配代理），由实测决定通不通。
 func TestProxylessIntlProbeTellsUserWhatToDo(t *testing.T) {
 	p := proxylessIntlProbe()
-	if p.OK {
-		t.Fatal("没配代理却报通 —— 这条是静态结论，不该发网络")
-	}
-	if p.Kind != gateway.EgressKindRefused {
-		t.Errorf("类别 = %q，want %q", p.Kind, gateway.EgressKindRefused)
-	}
-	for _, want := range []string{"配", "代理"} {
-		if !strings.Contains(p.Hint, want) {
-			t.Errorf("提示里缺 %q：%q", want, p.Hint)
-		}
-	}
 	if !strings.HasPrefix(p.Target, "https://monkeycode-ai.net") {
 		t.Errorf("target 应指向国际站（排障要能抄进 curl），实际 %q", p.Target)
+	}
+	// Hint 必须给**可操作**建议：既提"直连"这条路，也提"代理"这个备选。
+	for _, want := range []string{"直连", "代理"} {
+		if !strings.Contains(p.Hint, want) {
+			t.Errorf("提示里缺 %q（新口径应同时给「直连」与「配代理」两条路）：%q", want, p.Hint)
+		}
+	}
+	// 不再静态下结论：没配代理不等于"被拒"（那是旧的硬编码判定）。
+	if p.Kind == gateway.EgressKindRefused {
+		t.Errorf("没配代理不该静态判成 refused（可直连，需实测），实际 kind=%q hint=%q", p.Kind, p.Hint)
+	}
+	// 反向断言：不得出现绝对化措辞（用户实测推翻了它）。
+	for _, bad := range []string{"必须走代理", "一定连不上", "必须配代理"} {
+		if strings.Contains(p.Hint, bad) {
+			t.Errorf("提示里仍有绝对化措辞 %q：%q", bad, p.Hint)
+		}
 	}
 }

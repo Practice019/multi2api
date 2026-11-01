@@ -76,6 +76,11 @@ func TestSolveOneOddLength(t *testing.T) {
 }
 
 // TestLiveCaptcha 真机过一遍完整 PoW，拿到 captcha_token。
+//
+// ⚠ 这条**不接**"凭证可用性"闸门（verify_live_test.go 的 liveUsableCreds），
+// 因为 challenge/redeem 是**公开端点**，不要求登录态 —— 凭证失效也不会 401，
+// 所以这条能红的情形只有"真网络/上游故障"，正是我们希望它红的那种。
+// 它只借用 list[0] 的 region 来选站点基址。
 func TestLiveCaptcha(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short 跳过联网测试")

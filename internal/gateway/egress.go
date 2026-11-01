@@ -7,9 +7,12 @@
 //	签到 002d3463: fail · Get https://monkeycode-ai.net/api/v1/users/wallet/checkin：
 //	net/http: TLS handshake timeout
 //
-// 这条消息**指不到真正的原因**：monkeycode 的国际站按设计必须走代理，而代理挂掉时
+// 这条消息**指不到真正的原因**：monkeycode 的国际站一旦配了代理，而代理挂掉时
 // 的表现恰好是「TCP 连得上、TLS 握手没回音」⇒ Go 报 TLS handshake timeout，
 // 与「上游自己慢」长得一模一样。用户于是去查账号、查上游公告，而问题在他自己的代理。
+//
+// ⚠ 2026-11-01 更正：国际站**不是**"必须走代理"—— 它默认直连、多数环境直连即可；
+// Proxy 只是"本机直连不通时的出口覆盖"。实测见 internal/monkeycode/egress.go 头注。
 //
 // monkeycode 那边已经把出口写进错误文案了（internal/monkeycode/netretry.go），
 // 但那是**一个上游**的私有实现。这一层做两件事，让「出口」变成全仓通用的事实：

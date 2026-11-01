@@ -15,7 +15,7 @@ func TestSettingsFieldsReportCurrentEgress(t *testing.T) {
 	p := &Provider{client: NewClientWithProxy("http://127.0.0.1:10808")}
 	fields := p.SettingsFields()
 	if len(fields) != 2 {
-		t.Fatalf("字段数 = %d，want 2（国际站代理 + 国内站强制代理）", len(fields))
+		t.Fatalf("字段数 = %d，want 2（国际站代理（可选）+ 国内站强制代理（极少用））", len(fields))
 	}
 	if fields[0].Key != KeyProxy || fields[0].Value != "http://127.0.0.1:10808" {
 		t.Errorf("第一个字段 = %+v，want key=%s value=http://127.0.0.1:10808", fields[0], KeyProxy)

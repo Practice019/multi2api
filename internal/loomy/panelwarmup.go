@@ -1,6 +1,7 @@
 package loomy
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -23,6 +24,31 @@ import (
 // ⇒ 落盘（见 adminpoints 的 panelRowCache.onChange / savePanelsSnapshot）解决
 //   **"重启后多久能看到数据"**；本文件解决**"盘上多久能填满"** —— 两者缺一不可：
 //   盘上没数据时，前端打开还是会看到「正在读取…」。
+//
+// # Ⅱ 本文件的第二个职责：**别把"幽灵行"算成待办**（2026-11-02 修的真 bug）
+//
+// 用户报的日志：
+//
+//	loomy: 面板预热一轮 —— 待办：未缓存(tasks=0 invite=0) · 过期(tasks=46 invite=46) · 共 44 个号 · 本轮发起 12 个 · 首个错误=""
+//
+// 「过期 46」> 「共 44 个号」—— 多出来的 2 个是**已删账号在缓存里的残留行**（幽灵行）：
+// 缓存是**落盘**的（panels.json），删号不会清缓存，而 `expiredTasks/expiredInvites`
+// 遍历的是缓存 map 的**全部 key**、从不与账号池求交集。
+//
+// ⚠ 这不只是"显示难看"：幽灵行**永远不会被补齐**（账号都没了）⇒ `left` 恒 > 0 ⇒
+// 调用方以为"还有活"，5 秒一轮地空转（用户日志里连着 5 轮、间隔 5~8 秒就是证据）。
+// ⇒ 两件事一起做：**修剪**（prunePanelOrphans，删掉缓存里的残留行）+ **计数过滤**
+//   （planPanelWarmup 里 expT++ 挪进"还在池里"的判断内）。
+//
+// # Ⅲ 第三个职责：日志里**别打空字段**
+//
+// 同一行日志里的 `首个错误=""` 是噪音（firstErr 为空 = 本轮确实没出错，
+// 那就**不该出现这个字段**）。见 panelWarmupLogLine。
+//
+// ⚠ 「怎么刷」与「刷不刷」的分工：本文件管**怎么刷**（挑号/并发/日志），
+// 「谁过期了」在 panelttl.go、**修剪**也在那里（同一类判断）。
+// 而"要补哪些号"这件事被抽成 `planPanelWarmup`（纯判断、不发请求）——
+// 上面那个幽灵 bug 恰好就出在这个判断里，抽出来才能被单测钉住。
 
 const (
 	// panelWarmupIdleInterval **没有待补**时的间隔（稳定态）。
@@ -113,55 +139,20 @@ func (p *Provider) sweepPanels() int {
 	// ⚠⚠ 第二类（过期）就是设计里"on-read / 定时兜底"**共同的落点**：
 	//   前端翻页时 `tasksCachedPage` 只读缓存、把过期行**顺手标出来**，
 	//   真正的刷新动作一律由这里发生 —— 于是请求路径上永远不发上游请求。
-	type job struct {
-		a     accountRef
-		which string // "tasks" | "invite"
-	}
-	byUID := make(map[string]accountRef, len(accts))
-	for _, a := range accts {
-		byUID[a.UID] = a
-	}
-
-	var jobs []job
-	inJobs := make(map[string]bool, panelWarmupBatch)
-	add := func(a accountRef, which string) {
-		key := a.UID + "|" + which
-		if inJobs[key] || len(jobs) >= panelWarmupBatch {
-			return
-		}
-		inJobs[key] = true
-		jobs = append(jobs, job{a, which})
+	//
+	// ⓪ 先修剪"已删账号"的残留行（幽灵行）—— 否则它们既算过期、又永远留在缓存里
+	//   （见文件头 Ⅱ）。⚠ 必须在 planPanelWarmup **之前**：那里的计数依赖
+	//   "缓存里只剩活号"这个前提；顺序反了会先算出一堆幽灵、再删掉它们。
+	pruned := p.prunePanelOrphans(accts)
+	if pruned > 0 {
+		log.Printf("loomy: 面板缓存修剪 %d 个已删账号的行（不在账号池里的残留；不清掉会让'过期数'永远大于账号数，并让预热空转）", pruned)
 	}
 
-	todoT, todoI := 0, 0
-	for _, a := range accts {
-		if _, ok := p.tasksPanel().get(a.UID); !ok {
-			todoT++
-			add(a, "tasks")
-		} else if _, ok := p.invitePanel().get(a.UID); !ok {
-			todoI++
-			add(a, "invite")
-		}
-	}
-
-	// ② 还有余量 ⇒ 把**过期的**补上（这是"刷新"那条路；TTL 见 panelttl.go）。
-	expT, expI := 0, 0
-	now := time.Now()
-	for _, uid := range p.expiredTasks(now, false) {
-		expT++
-		if a, ok := byUID[uid]; ok {
-			add(a, "tasks")
-		}
-	}
-	for _, uid := range p.expiredInvites(now, false) {
-		expI++
-		if a, ok := byUID[uid]; ok {
-			add(a, "invite")
-		}
-	}
-
+	pl := p.planPanelWarmup(accts, time.Now())
+	jobs := pl.jobs
 	// ⚠ 待办总数 = 没缓存的 + 过期的（调用方据此决定下一次扫描等 5 秒还是 5 分钟）。
-	left := todoT + todoI + expT + expI
+	// ⚠⚠ 这个数**不含幽灵行**（见 panelPlan.pending 与 planPanelWarmup 的注释）。
+	left := pl.pending()
 	if len(jobs) == 0 {
 		return left // ⚠ 返回 left 而不是 0：否则"有活但本轮配额已满"会被当成"没活了"
 	}
@@ -174,7 +165,7 @@ func (p *Provider) sweepPanels() int {
 	done := 0
 	for _, j := range jobs {
 		wg.Add(1)
-		go func(j job) {
+		go func(j panelJob) {
 			defer wg.Done()
 			defer func() { _ = recover() }() // ⚠ 一个号 panic 不该带走整轮
 			sem <- struct{}{}
@@ -216,9 +207,9 @@ func (p *Provider) sweepPanels() int {
 	}
 	wg.Wait()
 
-	log.Printf("loomy: 面板预热一轮 —— 待办：未缓存(tasks=%d invite=%d) · 过期(tasks=%d invite=%d) · "+
-		"共 %d 个号 · 本轮发起 %d 个 · 首个错误=%q",
-		todoT, todoI, expT, expI, len(accts), done, firstErr)
+	// ⚠ `首个错误` 由 panelWarmupLogLine 决定**要不要出现**：本轮无错时**不打**这个字段
+	//   （打 `首个错误=""` 是纯噪音，用户已经报过一次）。
+	log.Print(panelWarmupLogLine(pl, len(accts), done, firstErr))
 	// ⚠ 返回**剩余待办数**（不是本轮发起数）—— 调用方据此决定"连着刷"还是"歇一会儿"。
 	// ⚠ 口径：本轮开始时的待办总数（未缓存 + 过期）减掉本轮真正做完的。
 	//   本轮成功的号会进缓存并带上新的 FetchedAt ⇒ 下一次 sweep 的待办自然变小。
@@ -229,4 +220,144 @@ func (p *Provider) sweepPanels() int {
 		left = 0
 	}
 	return left
+}
+
+// panelJob 一轮预热里的一个待办：某个号的某个面板。
+type panelJob struct {
+	a     accountRef
+	which string // "tasks" | "invite"
+}
+
+// panelPlan 一轮预热的"待办画像"（算出来的，不含"跑"）。
+type panelPlan struct {
+	jobs []panelJob
+	// todoT/todoI 从没读到过的（前端显示「正在读取…」）。
+	todoT, todoI int
+	// expT/expI 过了 TTL 的（有旧值可看，只是该刷新）。
+	//
+	// ⚠⚠ 两者都**只数还在账号池里的号**：缓存里可能存在已删账号的残留行（幽灵行），
+	//   把它们数进来就会让"过期数 > 账号数"，并让调用方以为"还有活"永远空转（见文件头 Ⅱ）。
+	expT, expI int
+}
+
+// pending 待办总数：调用方据此决定下一次扫描等 5 秒（追赶态）还是 5 分钟（稳定态）。
+//
+// ⚠⚠ **不含幽灵行**（见 panelPlan.expT/expI 的注释）。
+// ⚠ 抽成方法而不是在调用处写算式：这样"幽灵行算不算待办"这件事只有一个落点，
+//
+//	测试也能断言到**生产用的同一个算式**（否则测试里重写一遍，等于没测）。
+func (pl panelPlan) pending() int { return pl.todoT + pl.todoI + pl.expT + pl.expI }
+
+// planPanelWarmup 算出这一轮"要补哪些号、有多少待办"——**纯判断，不发任何请求**。
+//
+// ⚠ 与"跑"分开是刻意的：这段只在**内存缓存**上做判断，所以能被单测完整覆盖；
+//
+//	而"幽灵 uid 被算成待办"这个真 bug（见文件头 Ⅱ）恰好就出在这里 ——
+//	抽出来之前，它只能靠"起一个真实例跑一轮 + 人肉比对账号数与日志"才看得见。
+func (p *Provider) planPanelWarmup(accts []accountRef, now time.Time) panelPlan {
+	var pl panelPlan
+	byUID := make(map[string]accountRef, len(accts))
+	for _, a := range accts {
+		byUID[a.UID] = a
+	}
+
+	inJobs := make(map[string]bool, panelWarmupBatch)
+	add := func(a accountRef, which string) {
+		key := a.UID + "|" + which
+		if inJobs[key] || len(pl.jobs) >= panelWarmupBatch {
+			return
+		}
+		inJobs[key] = true
+		pl.jobs = append(pl.jobs, panelJob{a, which})
+	}
+
+	// ① 从没读到过的在前、有过期的在后（次序理由见 sweepPanels 的注释）。
+	for _, a := range accts {
+		if _, ok := p.tasksPanel().get(a.UID); !ok {
+			pl.todoT++
+			add(a, "tasks")
+		} else if _, ok := p.invitePanel().get(a.UID); !ok {
+			pl.todoI++
+			add(a, "invite")
+		}
+	}
+
+	// ② 还有余量 ⇒ 把**过期的**补上（这是"刷新"那条路；TTL 见 panelttl.go）。
+	//
+	// ⚠⚠ 计数必须在"这个 uid 还在账号池里"的判断**之内**（2026-11-02 修的真 bug）：
+	//   缓存是**落盘**的，删号不清缓存 ⇒ 里面会留着幽灵行，而幽灵行**永远补不上**
+	//   （账号都没了）⇒ 待办恒 > 0 ⇒ 调度器 5 秒一轮地空转。
+	//   实测：缓存 46 行 / 账号池 44 个 ⇒ 报「过期(tasks=46 invite=46) · 共 44 个号」。
+	//   ⚠ 这里再兜一层 `byUID` 判断（sweepPanels 已在最前面修剪过一次）：
+	//     修剪是"尽量清"，而计数是"绝不能错"—— 后者不能依赖前者成功。
+	for _, uid := range p.expiredTasks(now, false) {
+		a, ok := byUID[uid]
+		if !ok {
+			continue // 幽灵行：不属于任何活账号 ⇒ 不计入待办
+		}
+		pl.expT++
+		add(a, "tasks")
+	}
+	for _, uid := range p.expiredInvites(now, false) {
+		a, ok := byUID[uid]
+		if !ok {
+			continue
+		}
+		pl.expI++
+		add(a, "invite")
+	}
+	return pl
+}
+
+// prunePanelOrphans 把"账号池里已经没有的 uid"从两个面板缓存里删掉，返回删掉的行数。
+//
+// ⚠ 为什么不"只在计数处过滤"就够（两件事必须一起做）：
+//
+//	① 计数过滤只治症状 —— 幽灵行仍然**永远留在 panels.json 里**；
+//	② 缓存是落盘的，每删一个号就再留一行 ⇒ 缓存只增不减（无限膨胀），
+//	   而且每一轮预热都要遍历它们、每次落盘都要序列化它们。
+//
+// ⚠ 唯一的"删数据"动作，所以边界写清楚：**只删 uid 不在当前账号池里的行**，
+//
+//	账号池里有的行（哪怕很久没刷）一行都不动。
+func (p *Provider) prunePanelOrphans(accts []accountRef) int {
+	keep := make(map[string]struct{}, len(accts))
+	for _, a := range accts {
+		if a.UID != "" {
+			keep[a.UID] = struct{}{}
+		}
+	}
+	// ⚠⚠ **先把两个缓存都取到手，再动手修剪**（顺序不是风格问题，是正确性问题）。
+	//
+	// 两个缓存都是**惰性**创建的（第一次访问时从 panels.json 读盘），而 pruneExcept
+	// 删掉行之后会**同步**触发落盘（onChange → throttledSavePanels），落盘写的是
+	// **两个缓存的合并快照**。
+	//
+	// 写成 `p.tasksPanel().pruneExcept(keep) + p.invitePanel().pruneExcept(keep)` 时，
+	// Go 先算左操作数 ⇒ tasks 修剪 → 同步落盘 → 此刻 `p.panelInvite` **还是 nil**
+	// ⇒ 落盘把 invite 段写成空的 ⇒ 随后才惰性创建的 invite 缓存从**这份被截断的文件**
+	// 读回来 ⇒ **invite 缓存整段丢失**（界面上就是 44 个号的邀请码全变「正在读取…」）。
+	//
+	// 实测（2026-11-02，真机跑这一轮）：日志出现「未缓存(tasks=0 invite=44)」——
+	// 44 个号的 invite 行**明明都在盘上**，却全被判成"从没读到过"；
+	// 而 panels.json 的 invite 段被写成 46 → 0 → 回填 37（永远补不齐）。
+	// ⚠ 这与"幽灵行"是同一段代码里的**两个**坑，所以两条回归测试都要有。
+	tasks := p.tasksPanel()
+	invites := p.invitePanel()
+	return tasks.pruneExcept(keep) + invites.pruneExcept(keep)
+}
+
+// panelWarmupLogLine 组装一轮预热的日志行。
+//
+// ⚠ `首个错误` **只在真有错时出现**（2026-11-02）：firstErr == "" 表示本轮确实没出错，
+// 那时打 `首个错误=""` 是纯噪音 —— 用户就是看着这行报"这些打印的东西感觉有问题"的。
+// 反过来，有错时它必须出现（排障靠它）。
+func panelWarmupLogLine(pl panelPlan, accts, done int, firstErr string) string {
+	line := fmt.Sprintf("loomy: 面板预热一轮 —— 待办：未缓存(tasks=%d invite=%d) · 过期(tasks=%d invite=%d) · "+
+		"共 %d 个号 · 本轮发起 %d 个",
+		pl.todoT, pl.todoI, pl.expT, pl.expI, accts, done)
+	if firstErr != "" {
+		line += fmt.Sprintf(" · 首个错误=%q", firstErr)
+	}
+	return line
 }

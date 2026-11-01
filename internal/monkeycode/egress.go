@@ -2,10 +2,15 @@
 //
 // # 为什么这个上游最先需要它
 //
-// monkeycode 是本仓唯一**两站网络前提相反**的上游（见 client.go 的 Client 注释）：
+// monkeycode 是本仓唯一**两站网络前提不同**的上游（见 client.go 的 Client 注释）：
 //
 //	国内站 (monkeycode-ai.com)  必须直连（走海外代理既慢又触发风控）
-//	国际站 (monkeycode-ai.net)  必须走代理（否则连不上）
+//	国际站 (monkeycode-ai.net)  **直连或走代理均可** —— 代理只在本机直连不通时才需要
+//
+// ⚠ 2026-11-01 更正：「国际站必须走代理（否则连不上）」是**错误前提**。
+// 用户实测（零代理直连）三发全通：GET /users/status → 401（业务响应，说明连得上）、
+// POST /public/captcha/challenge → 201、GET / → 200。
+// 多数环境直连即可；把代理写成"设计上必须"，会让没有代理的用户以为功能不可用。
 //
 // 所以它有三种「出口姿势」，而任何一种配错，用户看到的都是同一句话：
 //
@@ -54,7 +59,7 @@ const egressProbePath = "/api/v1/users/wallet"
 func (p *Provider) Egress() gateway.EgressInfo {
 	info := gateway.EgressInfo{
 		Direct: true,
-		Note:   "国内站必须直连；国际站必须走代理（两站的网络前提相反）",
+		Note:   "国内站必须直连；国际站**直连或走代理均可**（代理只在本机直连不通时才需要）",
 	}
 	if p != nil && p.client != nil {
 		if v := strings.TrimSpace(p.client.Proxy); v != "" {
@@ -62,7 +67,7 @@ func (p *Provider) Egress() gateway.EgressInfo {
 		}
 		if v := strings.TrimSpace(p.client.DirectProxy); v != "" {
 			info.Proxies = append(info.Proxies, v)
-			info.Note = "国内站被强制走代理（DirectProxy 只在「本机无法直连国内站」时才该设）；国际站走代理"
+			info.Note = "国内站被强制走代理（DirectProxy 只在「本机无法直连国内站」时才该设）；国际站直连或走代理均可"
 		}
 	}
 	return info
@@ -70,8 +75,8 @@ func (p *Provider) Egress() gateway.EgressInfo {
 
 // EgressCheck 逐条实测出口，返回每一条的结果（含失败类别与人话）。
 //
-// 三条的顺序刻意是「设计上必须通的 → 设计上通常不通的 → 真正在用的那条」：
-// 用户读完前两条就明白「两站前提相反」这件事，第三条才是他这次要修的。
+// 三条的顺序刻意是「设计上必须通的 → 国际站的常态路径（直连）→ 配了代理才有的那条路」：
+// 用户读完前两条就明白「国内站直连、国际站直连也行」，第三条是「本机直连不通时的备选」。
 func (p *Provider) EgressCheck(ctx context.Context) []gateway.EgressProbe {
 	if p == nil || p.client == nil {
 		return nil
@@ -79,13 +84,14 @@ func (p *Provider) EgressCheck(ctx context.Context) []gateway.EgressProbe {
 	out := make([]gateway.EgressProbe, 0, 3)
 	// ① 国内站 · 直连（按设计必须通）
 	out = append(out, probeEgress(ctx, "国内站 · 直连", hostCN, p.client.direct, "直连"))
-	// ② 国际站 · 直连（按设计通常不通 —— 如实报，别替用户藏起来）
+	// ② 国际站 · 直连（**这是常态路径**，实测多数环境直连即可；不通时才需要配代理）
 	out = append(out, probeEgress(ctx, "国际站 · 直连", hostIntl, p.client.direct, "直连"))
-	// ③ 国际站 · 走代理（这才是国际站真正在用的那条路）
+	// ③ 国际站 · 走代理（只在"本机直连不通"时的备选）
 	if proxy := strings.TrimSpace(p.client.Proxy); proxy != "" {
 		out = append(out, probeEgress(ctx, "国际站 · 走代理", hostIntl, p.client.proxied, "代理 "+proxy))
 	} else {
-		// 没配代理是**静态可知**的结论，不必发网络：直接给出那一条失败 + 该做什么。
+		// 没配代理**不等于连不上** —— 这一步不发网络、也不断言失败：
+		// 真正的判据是上面第②条（国际站 · 直连）的实测结果。
 		out = append(out, proxylessIntlProbe())
 	}
 	return out
@@ -95,15 +101,29 @@ func (p *Provider) EgressCheck(ctx context.Context) []gateway.EgressProbe {
 //
 // # 为什么单独抽出来
 //
-// 它是一条**纯判断**（没有代理 ⇒ 国际站一定连不上），抽出来才能被测试钉住，
+// 它是一条**说明性**条目（未配置代理 ⇒ 这一条无从实测），抽出来才能被测试钉住，
 // 而不必为了测它去发真网络请求（那会让单测变成联网测试）。
+//
+// ⚠ 2026-11-01 语义更正：这里以前是**静态判定**「没代理 ⇒ 国际站一定连不上」
+// （直接给 Kind=Refused）。那个前提是错的 —— 国际站直连多数环境可用，
+// 实测：零代理下 GET /users/status 401、POST /public/captcha/challenge 201、GET / 200。
+// 现在只报「未配置代理（直连）」，把"到底通不通"交给上一条「国际站 · 直连」的实测结果。
+//
+// Kind 用字面量 "skipped" 而**不**在 gateway 里新增常量：这是本上游对"未实测"的
+// 局部表达，不该为它扩共享契约（gateway.EgressKind* 那组是**失败类别**，而这条不是失败）。
+//
+// ⚠ OK 必须为 true：渲染层（internal/admin/egress_check.go）只按 pr.OK 决定
+// "ok / fail"，`OK=false` 会在这条上打出一个**假的失败**（正是本次要消掉的误导）。
+// 这条不是"通"，而是"没测" —— 真正的可达性判据是上一条「国际站 · 直连」的实测结果。
 func proxylessIntlProbe() gateway.EgressProbe {
 	return gateway.EgressProbe{
 		Name:   "国际站 · 走代理",
 		Target: hostIntl + egressProbePath,
-		Via:    "代理（未配置）",
-		Kind:   gateway.EgressKindRefused,
-		Hint:   "国际站按设计必须走代理，但没配代理地址 ⇒ 它一定连不上。在「设置」里配 monkeycode 的代理，或改用国内站账号",
+		// Via 会被原样显示在 detail 里，所以把"怎么回事"直接写进它（Hint 在 OK=true 时不被渲染）
+		Via:  "代理（未配置）· 国际站多数环境可直连（未实测；看上一条「国际站 · 直连」）",
+		Kind: "skipped",
+		OK:   true,
+		Hint: "未配置代理 —— 国际站多数环境**可直连**（请看上一条「国际站 · 直连」的实测结果）。若直连不通，再到「设置」里配 monkeycode 的代理",
 	}
 }
 

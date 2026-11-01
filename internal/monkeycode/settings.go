@@ -30,7 +30,10 @@ import (
 //
 //	所以**不许改名**：改了等于让老部署里手写的值失效。
 const (
-	// KeyProxy 国际站出口（monkeycode-ai.net 必须走它）。空 = 直连。
+	// KeyProxy 国际站出口（monkeycode-ai.net）。**空 = 直连（常态）**；填了才走代理。
+	//
+	// ⚠ 2026-11-01 更正：「国际站必须走它」是错误前提 —— 国际站多数环境可直连
+	// （见 egress.go 头注的实测数据）。代理只在本机直连不通时才需要。
 	KeyProxy = "monkeycode_proxy"
 	// KeyDirectProxy 国内站出口（默认空 = 直连；只有「本机无法直连国内站」时才该设）。
 	KeyDirectProxy = "monkeycode_direct_proxy"

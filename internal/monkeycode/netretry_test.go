@@ -3,9 +3,11 @@
 // # 为什么这两条必须有测试
 //
 //	① 错误串是用户唯一的线索。用户实测拿到的原文是裸的
-//	   `net/http: TLS handshake timeout`，而真因是「国际站必须走代理、
-//	   代理出不了国」—— 一条指不到原因的错误会让人去查上游、查账号、查版本，
-//	   就是查不到代理上。本文件把"错误里必须出现出口"钉住。
+//	   `net/http: TLS handshake timeout`，而真因是「走代理那条路不通」
+//	   —— 一条指不到原因的错误会让人去查上游、查账号、查版本，
+//	   就是查不到出口上。本文件把"错误里必须出现出口"钉住。
+//	   ⚠ 2026-11-01 更正：当时的推断是"国际站必须走代理"，用户随后实测推翻了它
+//	   （零代理可直连）；现在文案只报"走的是哪个出口 + 直连/代理两条路"，不再下绝对结论。
 //
 //	② 重试必须**只**覆盖幂等方法。签到是 POST，重复提交在上游是错误码
 //	   （checkin.go:54「已签必须早退」就是为它写的）；给 POST 加重试会制造
@@ -80,6 +82,9 @@ func TestPostDoesNotRetry(t *testing.T) {
 }
 
 // 错误里必须出现**出口**，且官方给的代理要出现在文案里。
+//
+// ★ 新口径（2026-11-01 用户实测）：国际站可直连，所以文案里**不许**再有
+// "必须走代理"这种绝对化结论；但"走的是哪个出口"这条必须保留（排障全靠它）。
 func TestNetErrMentionsEgress(t *testing.T) {
 	c := NewClientWithProxy("http://127.0.0.1:10808")
 	intl := &Auth{Region: RegionIntl, Session: "s"}
@@ -87,15 +92,31 @@ func TestNetErrMentionsEgress(t *testing.T) {
 	wrapped := c.wrapNetErr(intl, http.MethodGet, "https://monkeycode-ai.net/api/v1/users/wallet/checkin",
 		timeoutErr{})
 	msg := wrapped.Error()
-	for _, want := range []string{"国际站出口", "http://127.0.0.1:10808", "代理节点不可用"} {
+	for _, want := range []string{"国际站出口", "http://127.0.0.1:10808"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("错误文案应含 %q，实际 %q", want, msg)
 		}
 	}
+	// 新口径：既要给出可操作的两条路（直连 / 代理），也不许把"走代理"写成必然。
+	for _, want := range []string{"代理", "直连"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("错误文案应提示 %q 这条路（用户实测：国际站可直连），实际 %q", want, msg)
+		}
+	}
+	for _, bad := range []string{"必须走代理", "必须配代理", "一定连不上"} {
+		if strings.Contains(msg, bad) {
+			t.Errorf("★ 错误文案仍有旧前提 %q（实测：零代理可直连国际站），实际 %q", bad, msg)
+		}
+	}
 	// 国内站直连时不该出现代理提示
 	cnMsg := c.wrapNetErr(cnAuth(), http.MethodGet, "https://monkeycode-ai.com/api/v1/users/status", timeoutErr{}).Error()
-	if strings.Contains(cnMsg, "代理节点不可用") || !strings.Contains(cnMsg, "国内站出口（直连）") {
+	if !strings.Contains(cnMsg, "国内站出口（直连）") {
 		t.Errorf("国内站直连的错误文案不对: %q", cnMsg)
+	}
+	for _, bad := range []string{"必须走代理", "必须配代理"} {
+		if strings.Contains(cnMsg, bad) {
+			t.Errorf("国内站文案不该含 %q: %q", bad, cnMsg)
+		}
 	}
 }
 
@@ -174,8 +195,13 @@ func TestCheckinStatusErrorNamesProxy(t *testing.T) {
 	if !strings.Contains(msg, "国际站出口（代理 http://127.0.0.1:1）") {
 		t.Errorf("★ 错误里必须写出走的是哪个代理，实际：%q", msg)
 	}
-	if !strings.Contains(msg, "代理节点不可用") {
-		t.Errorf("★ 错误里必须给一句可操作的话（用户实测拿到的原文只有裸的 TLS 握手超时），实际：%q", msg)
+	// ★ 新口径：不许再说"必须走代理"（用户实测零代理可直连国际站），
+	//   但仍要给可操作建议 —— 代理这条路上失败时，用户应能想到"要么修代理、要么试直连"。
+	if strings.Contains(msg, "必须走代理") {
+		t.Errorf("★ 错误里仍有旧前提「必须走代理」（实测可直连），实际：%q", msg)
+	}
+	if !strings.Contains(msg, "直连") {
+		t.Errorf("错误里应提示「直连」这条备选（国际站可直连），实际：%q", msg)
 	}
 	if !strings.Contains(msg, "monkeycode-ai.net") {
 		t.Errorf("错误里应保留失败的主机名，实际：%q", msg)

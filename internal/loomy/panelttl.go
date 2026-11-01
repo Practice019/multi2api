@@ -91,3 +91,41 @@ func (p *Provider) expiredInvites(now time.Time, force bool) []string {
 		func(v accountInviteView) time.Time { return v.FetchedAt },
 		func(v accountInviteView) bool { return v.OK })
 }
+
+// pruneExcept 删掉 `keep` 之外的缓存行，返回删掉的行数（0 = 没有幽灵行）。
+//
+// # 为什么"修剪"放在这个文件（而不是 adminpoints.go 的缓存本体旁边）
+//
+// 它和上面两个函数是**同一类判断**：都在回答"这些行还该不该存在/该不该刷"。
+// `expiredRows` 回答"该刷吗"，`pruneExcept` 回答"还该留着吗" ——
+// 而"已删账号的残留行"恰好同时是两者的输入（见 panelwarmup.go 文件头 Ⅱ）。
+//
+// # 两条必须守住的纪律
+//
+//  1. **写锁内删**（与 set/get 同一把 `mu`）：否则与并发的 set 竞争。
+//  2. **回调（落盘）在锁外调**：与 panelRowCache.set 同一条理由 ——
+//     落盘那条路（throttledSavePanels → savePanelsSnapshot）会去 RLock 同一把锁，
+//     而 Go 的 RWMutex 不允许同一 goroutine 递归取读锁 ⇒ 锁内调就是死锁。
+//
+// ⚠ **不动 `c.at`**（"最近一次写入的时刻"，前端拿它显示「更新于 …」）：
+//
+//	删几行幽灵数据不是"数据被更新了"，把它一并刷新会让前端误以为拿到了新数据。
+func (c *panelRowCache[T]) pruneExcept(keep map[string]struct{}) int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	removed := 0
+	for k := range c.m {
+		if _, ok := keep[k]; !ok {
+			delete(c.m, k)
+			removed++
+		}
+	}
+	cb := c.onChange
+	c.mu.Unlock()
+	if removed > 0 && cb != nil {
+		cb() // 落盘：让 panels.json 里的幽灵行也真的消失（否则重启后又回来了）
+	}
+	return removed
+}

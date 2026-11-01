@@ -365,6 +365,16 @@ go test ./... -count=1
   （mingw 导入库缺 `WaitOnAddress`）——**跑不了，别假装跑过**。
 - 前端静态套件：`node tests/frontend/run_frontend_suites.js`
 - 真浏览器 e2e：`node tests/frontend/accounts_e2e.js` 等（raw CDP，需本机 Chrome）
+- **⚠ 并行改动未提交时，不要在这份工作区上跑整包测试 —— 结果不可信。**
+  现象（2026-11-01 实测）：同一条测试**单跑 PASS、整包跑 FAIL**
+  （`TestRenewResponseNeverLeaksSession` 报"响应结构不对"）。原因是本仓常有多个 agent
+  并行改同一个包，你那次正好跑到了**改到一半**的中间态 —— 红不代表回归，绿也不代表没事。
+  正确做法：先 `robocopy` 出一份**固化快照**，在快照里跑，**报告里的绿必须来自快照**：
+  ```powershell
+  robocopy . "$env:TEMP\wb2api-snap" /E /XD .git _scratch shots logs artifacts bin auths auths-test data data-test /XF *.exe /NFL /NDL /NJH /NJS /NP
+  ```
+  再 `cd` 到快照目录跑 `go test ./... -count=1`（快照里没 exe / 没 .git，不受占用影响）。
+  单测怀疑被并行改动影响时，用 `-run <测试名>` 拿它单跑对照 —— **两者结论不一致 = 中间态，别下结论。**
 
 ## 铁律（全部由 `internal/gateway/arch_test.go` 可执行断言守住，不是约定）
 

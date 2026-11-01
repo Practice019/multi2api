@@ -7,10 +7,9 @@
 //	签到 002d3463: fail · Get "https://monkeycode-ai.net/api/v1/users/wallet/checkin":
 //	net/http: TLS handshake timeout
 //
-// 这条消息里**没有任何线索指向真正的原因**：国际站（monkeycode-ai.net）按
-// client.go:70-79 的设计**必须走代理**（国内站与国际站网络前提相反，一个直连一个
-// 走代理）。而代理挂掉时的表现恰好是"TCP 连得上、TLS 握手没回音" ⇒ Go 报
-// TLS handshake timeout —— 与"上游自己慢"长得一模一样。
+// 这条消息里**没有任何线索指向真正的原因**：国际站配了代理时（见 client.go 的 Client 注释，
+// 国际站默认直连、只有本机直连不通才配代理），而代理挂掉时的表现恰好是
+// 「TCP 连得上、TLS 握手没回音」 ⇒ Go 报 TLS handshake timeout —— 与「上游自己慢」长得一模一样。
 //
 // client.go 里那段注释早就写过同一件事：
 //
@@ -121,7 +120,7 @@ func (c *Client) egress(a *Auth) string {
 		if p := strings.TrimSpace(c.Proxy); p != "" {
 			return "国际站出口（代理 " + p + "）"
 		}
-		return "国际站出口（直连 —— 国际站通常必须配代理）"
+		return "国际站出口（直连）"
 	}
 	if p := strings.TrimSpace(c.DirectProxy); p != "" {
 		return "国内站出口（代理 " + p + "）"
@@ -142,7 +141,7 @@ func (c *Client) wrapNetErr(a *Auth, method, rawURL string, err error) error {
 		hint = "（瞬时网络故障，已重试仍失败）"
 		if a != nil && a.RegionOrDefault() == RegionIntl && strings.TrimSpace(c.Proxy) != "" {
 			// 这是最常见的一种：代理进程在、CONNECT 也通，但出不了国。
-			hint = "（代理节点不可用？国际站必须走代理 —— 先在「设置」里确认代理端口，或换一个出口）"
+			hint = "（代理节点不可用？先在「设置」里确认代理端口，或换一个出口；国际站多数环境**可直连**，把代理留空也是一条可试的路）"
 		}
 	}
 	host := rawURL

@@ -37,6 +37,16 @@ func TestLiveBothRegions(t *testing.T) {
 		t.Skipf("无真实凭证（%s），跳过", dir)
 	}
 
+	// ⚠ 国际站出口取自环境变量（本机代理），国内站恒直连 ——
+	// 这正是生产配置的形态（config 里 monkeycode.proxy 只影响国际站）。
+	proxy := os.Getenv("MONKEYCODE_TEST_PROXY")
+	p := New(Config{AuthDir: dir, Proxy: proxy})
+
+	// 凭证闸门：缺失/已失效（401/403）→ Skip；网络不通/5xx → 红（见 verify_live_test.go）。
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), 30*time.Second)
+	list = liveUsableCreds(t, p, probeCtx, list, true)
+	cancelProbe()
+
 	byRegion := map[string]*Auth{}
 	for _, a := range list {
 		if !a.ChatUsable() {
@@ -50,11 +60,6 @@ func TestLiveBothRegions(t *testing.T) {
 		t.Skip("没有同时具备 session 与 api_key 的凭证")
 	}
 
-	// ⚠ 国际站出口取自环境变量（本机代理），国内站恒直连 ——
-	// 这正是生产配置的形态（config 里 monkeycode.proxy 只影响国际站）。
-	proxy := os.Getenv("MONKEYCODE_TEST_PROXY")
-	p := New(Config{AuthDir: dir, Proxy: proxy})
-
 	for region, a := range byRegion {
 		a := a
 		t.Run(region, func(t *testing.T) {
@@ -64,6 +69,10 @@ func TestLiveBothRegions(t *testing.T) {
 			// ① 模型目录（走 host，Cookie 认证）
 			models, err := p.client.FetchModels(ctx, a)
 			if err != nil {
+				// 闸门之后又失效（凭证刚过期）→ 仍然 Skip；其它错误 → 红。
+				if credDeadErr(err) {
+					t.Skipf("[%s] 凭证在探测之后失效了，跳过：%v", region, err)
+				}
 				t.Fatalf("[%s] 拉模型目录失败: %v", region, err)
 			}
 			if len(models) == 0 {

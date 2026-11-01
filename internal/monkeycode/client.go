@@ -68,10 +68,14 @@ const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 //
 // # 为什么持有**两个** http.Client
 //
-// 两站的网络前提**相反**：
+// 两站的网络前提不同：
 //
 //	国内站 (cn)    必须**直连** —— 它在国内，走海外代理既慢又触发风控
-//	国际站 (intl)  必须**走代理** —— 否则连不上
+//	国际站 (intl)  **默认直连**；Proxy 配了才走代理（代理只在本机直连不通时才需要）
+//
+// ⚠ 2026-11-01 更正：「国际站必须走代理，否则连不上」是**错误前提**（见 egress.go 头注）。
+// 用户实测零代理直连三发全通（status 401 / captcha 201 / 首页 200）——
+// 把代理写成"设计上必须"，会让没有代理的用户误以为功能不可用。
 //
 // 踩过的坑（真机实测）：全局配了一个 proxy，国内站请求直接
 // `Post "https://proxy.monkeycode-ai.com/v1/messages": EOF`，
@@ -101,6 +105,19 @@ type Client struct {
 	//
 	// ⚠ 只用于「本机无法直连国内站」这类环境；正常部署**不要**设。
 	DirectProxy string
+
+	// Host 覆盖"网页/管理端点"的基址（留空 = 按凭证的 Region 取 hostCN/hostIntl）。
+	//
+	// # 为什么需要它（不是给生产用的旋钮）
+	//
+	// hostCN / hostIntl 是 **const**，而续期（renew.go）是自己拼 URL 的，
+	// 所以没有覆盖点就做不出 hermetic 测试 —— 假上游起在 127.0.0.1，
+	// 却只能往 monkeycode-ai.com 打。egress 自检那条路能把完整 URL 传进
+	// probeEgress，所以它不需要这个；续期需要。
+	//
+	// ⚠ 生产代码**不要**设它：写了它，同进程所有 host 请求都会改道，
+	// 而设置页里显示的还是真实站点 —— 那是最难查的一类"配了没用"。
+	Host string
 }
 
 // httpFor 按凭证区域选 http.Client（读锁：SetProxy 可能正在换）。
@@ -185,10 +202,26 @@ func NewClientWithProxy(proxy string) *Client {
 // ---- 管理端点（Cookie 认证）----
 
 // sessionHeaders 管理端点的请求头。
+//
+// ⚠ 空 session **不拼 Cookie 头**（不是拼一个空值）。
+//
+// # 为什么这条很重要（2026-11-01 修）
+//
+// 续期的三枪（captcha challenge / redeem / password-login）都是**公开端点**，
+// 必须能在"session 已经死透"的情况下工作 —— 那正是它们存在的理由（见 renew.go）。
+// 原先这里无条件 `h.Set("Cookie", "monkeycode_ai_session="+session)`，
+// 于是**没有 session 时会发出 `Cookie: monkeycode_ai_session=`**：
+//
+//	① 语义错：那是"名为 session、值为空"的一条 cookie，不等于"没带 cookie"；
+//	② 实测有害：上游见到这个名字会走进"已登录"分支，而不是匿名分支。
+//
+// 所以：有 session 才拼 Cookie；没有就只给 Accept。
 func sessionHeaders(a *Auth) http.Header {
 	h := http.Header{}
-	h.Set("Cookie", "monkeycode_ai_session="+strings.TrimSpace(a.Session))
 	h.Set("Accept", "application/json")
+	if a != nil && strings.TrimSpace(a.Session) != "" {
+		h.Set("Cookie", "monkeycode_ai_session="+strings.TrimSpace(a.Session))
+	}
 	return h
 }
 
@@ -198,8 +231,9 @@ func sessionHeaders(a *Auth) http.Header {
 // 只有网络层失败才返回 error（与 gateway 的契约一致）。
 // # 2026-11-01：网络失败现在带出口信息 + 对 GET 做一次退避重试
 //
-// 用户实测到的原文是裸的 `net/http: TLS handshake timeout`，而它真正的原因是
-// 「国际站必须走代理，代理出不了国」—— 错误信息指不到那里（见 netretry.go 的文件注释）。
+// 用户实测到的原文是裸的 `net/http: TLS handshake timeout`，而它真正的原因很大概率是
+// 「配了代理但代理出不了国」—— 错误信息指不到那里（见 netretry.go 的文件注释）。
+// ⚠ 注意：这不是说国际站**必须**走代理；国际站默认直连，只有本机直连不通时才该配代理。
 // 现在：GET 走一次退避重试（幂等，重复提交无副作用），POST 保持一发一次
 // （重复提交在上游是错误码，会污染签到历史）。
 func (c *Client) doJSON(ctx context.Context, a *Auth, method, rawURL string, headers http.Header, body []byte) (int, []byte, error) {

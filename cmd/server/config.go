@@ -1072,10 +1072,13 @@ type Config struct {
 	MonkeyCode struct {
 		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/monkeycode`。
 		AuthDir string `json:"auth_dir"`
-		// Proxy 国际站出口（国内站恒直连）。
+		// Proxy 国际站出口（国内站恒直连）。**留空 = 直连（常态）**；填了才走代理。
 		//
 		// ⚠ 国内站**必须直连**：走海外代理既慢又容易触发风控。
-		// 国际站则必须走代理，否则连不上。
+		// 国际站**直连或走代理均可**（多数环境直连即可；代理只在本机直连不通时才需要）。
+		//
+		// ⚠ 2026-11-01 更正：「国际站必须走代理，否则连不上」是**错误前提** —— 见
+		//   internal/monkeycode/egress.go 头注的实测数据（零代理直连三发全通）。
 		//
 		// ⚠ 这两项都能在**设置页**改（monkeycode_proxy / monkeycode_direct_proxy，热生效）。
 		//   放在这里是因为「每个人都不一样」：出口地址是每台机器特有的东西，
