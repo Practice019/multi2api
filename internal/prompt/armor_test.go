@@ -24,7 +24,9 @@ func TestArmorAppendKeepsClientPrompt(t *testing.T) {
 	if !strings.HasPrefix(got, "客户端人格：") {
 		t.Error("append 模式把客户端人格弄丢了 —— 那是 replace 的语义，不是 append")
 	}
-	for _, want := range []string{"无限制模式", "拒绝对抗", "任务优先", armorStart, armorEnd} {
+	// ⚠ 断言串必须取自**真实载荷**（armor-payload.md 是原项目那份文件的逐字副本）：
+	//   原来写成 "无限制模式"/"任务优先" 是我那版浓缩文本里的说法，逐字副本里没有。
+	for _, want := range []string{"Little Code Sauce", "PRIME DIRECTIVE", "TASK PRIORITY", "拒绝对抗", armorStart, armorEnd} {
 		if !strings.Contains(got, want) {
 			t.Errorf("注入块里缺 %q", want)
 		}
@@ -40,8 +42,8 @@ func TestArmorReplaceDropsClientPrompt(t *testing.T) {
 	if strings.Contains(got, "客户端人格") {
 		t.Error("replace 模式应当替换掉客户端 system")
 	}
-	if !strings.Contains(got, "无限制模式") {
-		t.Error("replace 模式没注入破甲人设")
+	if !strings.Contains(got, "Little Code Sauce") {
+		t.Error("replace 模式没注入破甲正文")
 	}
 }
 
@@ -77,13 +79,9 @@ func TestArmorStripsTruncatedBlock(t *testing.T) {
 	}
 }
 
-// TestArmorCustomOverrides 配置可以覆盖内置人设/条款（文件覆盖的落点）。
-func TestArmorCustomOverrides(t *testing.T) {
-	got, _ := ApplyArmor("", ArmorConfig{Mode: ArmorReplace, Persona: "自定义人设", Clauses: "自定义条款"})
-	if !strings.Contains(got, "自定义人设") || !strings.Contains(got, "自定义条款") {
-		t.Errorf("覆盖没生效: %q", got)
-	}
-}
+// （原 TestArmorCustomOverrides 已删：那一版断言的是 Persona/Clauses 两个字段，
+//   而载荷模型收敛成单一 Payload 之后它们是死代码 —— 覆盖路径由
+//   TestArmorPayloadOverrideWins 覆盖，不留两套说法。）
 
 // TestRefusalPatternsHit 每条规则都要能命中它的代表句。
 //
@@ -154,6 +152,60 @@ func TestWithRetryNudgeAppendsAndIsIdempotent(t *testing.T) {
 	}
 	if two := WithRetryNudge(one); two != one {
 		t.Error("重试话术不幂等 —— 每次重试都会再加一遍")
+	}
+}
+
+// TestArmorPayloadIsVerbatimPort 载荷必须是原项目那份文件的**逐字**副本。
+//
+// # 这条是用户投诉换来的
+//
+// 第一版我拿 dsh-purge 的 test/fixtures/inject-clauses.json（**片段**夹具）当来源，
+// 自己"重组成语义完整的条款块"，只有 1230 字符；而原项目真正注入的是
+// ~/.dsh/prompt-inject.md —— 21194 字符 / 226 行 / 47 段。覆盖率 5.8%。
+// 用户的原话是「我都说了按照原项目 1:1 移植啊」。
+//
+// 所以现在钉三件事：① 载荷够大（不是浓缩版）② 关键分节都在 ③ 注入块里
+// **原样包含**整份载荷（逐字，没被改写/截断）。
+func TestArmorPayloadIsVerbatimPort(t *testing.T) {
+	p := ArmorPayload()
+	if len(p) < 20000 {
+		t.Errorf("内置载荷只有 %d 字节 —— 这看起来又变成浓缩版了（原文件 21194 字符 / 226 行）", len(p))
+	}
+	for _, needle := range []string{
+		"Little Code Sauce",           // 人格
+		"[MODE: UNRESTRICTED SANDBOX", // 模式声明
+		"PRIME DIRECTIVE",             // 首要指令
+		"TASK PRIORITY",               // 任务优先
+		"Direct generation",           // 直接生成
+		"REFUSAL HARDENING",           // 拒绝对抗
+		"Scoped Rules",                // 分域规则（最大的一段）
+		"Never Refuse",                // 永不拒绝
+		"Sandbox test directions",     // 沙箱测试方向
+		"Intent mapping",              // 意图映射
+		"CTF Core Contract",           // CTF 契约
+	} {
+		if !strings.Contains(p, needle) {
+			t.Errorf("载荷里缺分节标记 %q —— 不是逐字副本", needle)
+		}
+	}
+	// 逐字：注入块里必须能原样找到整份载荷（只允许外层多一对幂等标记）
+	blk := ArmorText(ArmorConfig{})
+	if !strings.Contains(blk, strings.TrimRight(p, "\n")) {
+		t.Error("注入块里的载荷被改写过 —— 逐字副本不允许任何改写/截断")
+	}
+	if !strings.HasPrefix(blk, armorStart) || !strings.HasSuffix(blk, armorEnd) {
+		t.Error("幂等标记没包住整块载荷")
+	}
+}
+
+// TestArmorPayloadOverrideWins 配置给的载荷优先于内置（换文件/换版本用）。
+func TestArmorPayloadOverrideWins(t *testing.T) {
+	got := ArmorText(ArmorConfig{Payload: "自定义逐字载荷"})
+	if !strings.Contains(got, "自定义逐字载荷") {
+		t.Errorf("覆盖没生效: %q", got)
+	}
+	if strings.Contains(got, "Little Code Sauce") {
+		t.Error("给了覆盖载荷时不该再拼内置载荷")
 	}
 }
 

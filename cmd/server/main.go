@@ -180,7 +180,7 @@ func main() {
 	// 各建一个的话，设置页的开关就是假的（写的是一个没人读的对象）。
 	armorState := prompt.NewArmorState(prompt.ArmorConfig{
 		Mode:    cfg.PromptArmorMode,
-		Clauses: cfg.PromptArmorClauses,
+		Payload: cfg.PromptArmorPayload,
 	})
 	up.Armor = armorState
 	logUpstreamIdentity(up, "全局")

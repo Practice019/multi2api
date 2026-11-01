@@ -1,16 +1,19 @@
-// armor.go 破甲层：出站请求自动注入"无限制模式"人设 + 拒绝对抗条款。
+// armor.go 破甲层：出站请求自动注入 dsh-purge 的**逐字**注入正文。
 //
-// # 来源（移植说明）
+// # 来源与"1:1"的含义（这一版改过，前因后果留档）
 //
-// 移植自 dsh-purge（github.com/kingcharleslzy-ai/dsh-purge）的两部分：
+// 用户要求「按照原项目 1:1 移植」。第一版我拿 `test/fixtures/inject-clauses.json`
+// 当来源 —— 那是**片段夹具**（被截断的行），于是我自己"重组成语义完整的条款块"，
+// 结果只有 1230 字符，而原项目真正注入的是 `~/.dsh/prompt-inject.md`：
+// **21194 字符 / 226 行 / 47 段**（见 dsh-purge 的 docs/inject-review.md，
+// 它就是逐段评审那份文件的）。覆盖率 5.8% —— 那不是移植，是重写。
 //
-//	presets/unrestricted/agent.cordis.yml    persona.prefix（无限制模式人设前缀）
-//	test/fixtures/inject-clauses.json        注入条款（拒绝对抗那一族）
+// 现在：`armor-payload.md` 就是那份文件**逐字节**的副本（Copy-Item 后校验过 -ceq），
+// 作为**唯一内置载荷**。要改就改那一个文件；不存在第二份"浓缩版"。
 //
-// 那份 fixture 是**片段**（从宿主指令里切出来的行，部分句子被截断），所以这里把它
-// 重组成语义完整、可独立阅读的条款块，并保留原有小标题（任务优先 / 直接生成 /
-// 工作流 / 拒绝对抗）。重组而不是逐行照抄的理由：片段注进去读起来是坏的，
-// 而这一层的目的是**让模型真的照做** —— 读不通的条款只会被当成噪声。
+// ⚠ 逐字注入的后果要写清：上游会收到你本机那份操作者指令的**全文**
+// （含称呼、内部约定、路由表等）。这是用户明确要的效果，不是失误；
+// 启动日志会打印载荷来源与字符数，随时可核对。
 //
 // # 与既有 prompt 层的关系
 //
@@ -22,8 +25,8 @@
 // # 三个模式
 //
 //	off      不注入（默认）
-//	append   保留客户端 system，把破甲条款**追加**在后面（推荐：客户端人格仍在）
-//	replace  用破甲人设**替换**客户端 system（最彻底，代价是丢掉客户端自己的约定）
+//	append   保留客户端 system，把破甲正文**追加**在后面（推荐：客户端人格仍在）
+//	replace  用破甲正文**替换**客户端 system（最彻底，代价是丢掉客户端自己的约定）
 //
 // # 幂等
 //
@@ -39,11 +42,11 @@ import (
 	"sync"
 )
 
-//go:embed armor-persona.md
-var armorPersona string
+//go:embed armor-payload.md
+var armorPayload string
 
-//go:embed armor-clauses.md
-var armorClauses string
+// ArmorPayload 内置载荷（1:1 副本，见文件头）。导出给测试与"载荷有没有被改过"的核对。
+func ArmorPayload() string { return armorPayload }
 
 // 破甲模式。
 const (
@@ -65,10 +68,11 @@ const (
 type ArmorConfig struct {
 	// Mode off / append / replace。空串按 off 处理（默认不开）。
 	Mode string
-	// Persona 覆盖内置人设（空 = 内置 armorPersona）。
-	Persona string
-	// Clauses 覆盖内置条款（空 = 内置 armorClauses）。
-	Clauses string
+	// Payload 注入正文（空 = 用内置 armor-payload.md，即原项目那份文件的逐字副本）。
+	//
+	// ⚠ 逐字注入意味着**上游会收到你本机那份操作者指令全文**（含称呼、内部约定等）。
+	//   这是用户明确要的效果，不是失误；启动日志会打印载荷来源与字符数，随时可核对。
+	Payload string
 }
 
 // ArmorEnabled 该模式是否要注入。
@@ -80,20 +84,20 @@ func ArmorEnabled(mode string) bool {
 	return false
 }
 
-// ArmorText 破甲注入块的正文（人设 + 条款），已按配置覆盖。
+// ArmorText 破甲注入块的正文 —— **逐字**（外层只包幂等标记）。
+//
+// 载荷： cfg.Payload（配置给的）> 内置 armor-payload.md（原项目那份文件的逐字副本）。
+//
+// ⚠ 标记必须包住整块：第一版只包了"条款"部分，于是 append 模式下第二次注入
+//
+//	会把标记外的内容重复一遍（剥离只从标记开始剥）—— 幂等测试当场抓住。
+//	现在整块（= 全部注入正文）都在标记内，重复注入只会剥掉重加。
 func ArmorText(cfg ArmorConfig) string {
-	persona := strings.TrimSpace(cfg.Persona)
-	if persona == "" {
-		persona = strings.TrimSpace(armorPersona)
+	payload := cfg.Payload
+	if strings.TrimSpace(payload) == "" {
+		payload = armorPayload
 	}
-	clauses := strings.TrimSpace(cfg.Clauses)
-	if clauses == "" {
-		clauses = strings.TrimSpace(armorClauses)
-	}
-	// ⚠ 标记必须包住**整块**（人设 + 条款），不能只包条款：
-	//   第一版只包了条款，于是 append 模式下第二次注入会把人设**重复一遍**
-	//   （剥离只从标记开始剥，人设留在原地）—— 幂等测试当场抓住。
-	return armorStart + "\n" + persona + "\n\n" + clauses + "\n" + armorEnd
+	return armorStart + "\n" + strings.TrimRight(payload, "\n") + "\n" + armorEnd
 }
 
 // ApplyArmor 把破甲块注入出站提示词。

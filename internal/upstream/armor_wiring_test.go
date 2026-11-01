@@ -59,7 +59,9 @@ func TestApplyPromptArmorAppendKeepsClientSystem(t *testing.T) {
 	if !strings.HasPrefix(sys, "客户端人格：Claude Code") {
 		t.Errorf("append 模式丢了客户端 system：%q", sys[:min(60, len(sys))])
 	}
-	for _, want := range []string{"无限制模式", "拒绝对抗"} {
+	// ⚠ 断言串取自**真实载荷**（internal/prompt/armor-payload.md，原项目那份的逐字副本）。
+	//   旧版写的 "无限制模式" 是浓缩文本里的说法，逐字副本里没有。
+	for _, want := range []string{"Little Code Sauce", "拒绝对抗", "REFUSAL HARDENING"} {
 		if !strings.Contains(sys, want) {
 			t.Errorf("出站 system 里没有破甲内容 %q", want)
 		}
@@ -72,7 +74,7 @@ func TestApplyPromptArmorAppendKeepsClientSystem(t *testing.T) {
 // TestApplyPromptArmorOffKeepsPassthroughByteIdentical 开关关掉时透传必须逐字节不变。
 //
 // 这是"没开就不许有任何副作用"的判据：本仓对"加了功能顺手改了别的模式"很敏感
-//（passthrough 的语义就是"一个字节都不动"）。
+// （passthrough 的语义就是"一个字节都不动"）。
 func TestApplyPromptArmorOffKeepsPassthroughByteIdentical(t *testing.T) {
 	in := bodyWithSystem("客户端人格")
 	for _, armor := range []*prompt.ArmorState{nil, prompt.NewArmorState(prompt.ArmorConfig{Mode: prompt.ArmorOff})} {
@@ -93,8 +95,8 @@ func TestApplyPromptArmorReplaceDropsClientSystem(t *testing.T) {
 	if strings.Contains(sys, "客户端人格") {
 		t.Error("replace 模式应当把客户端 system 换掉")
 	}
-	if !strings.Contains(sys, "无限制模式") {
-		t.Error("replace 模式没注入破甲人设")
+	if !strings.Contains(sys, "Little Code Sauce") {
+		t.Error("replace 模式没注入破甲正文")
 	}
 }
 
@@ -103,11 +105,11 @@ func TestApplyPromptArmorIsHotSwitchable(t *testing.T) {
 	st := prompt.NewArmorState(prompt.ArmorConfig{Mode: prompt.ArmorOff})
 	c := &Client{PromptMode: prompt.ModePassthrough, Armor: st}
 	in := bodyWithSystem("客户端人格")
-	if strings.Contains(systemOf(t, c.applyPrompt(in)), "无限制模式") {
+	if strings.Contains(systemOf(t, c.applyPrompt(in)), "Little Code Sauce") {
 		t.Fatal("关闭状态下不该有注入")
 	}
 	st.Set(prompt.ArmorConfig{Mode: prompt.ArmorAppend}) // 模拟设置页保存
-	if !strings.Contains(systemOf(t, c.applyPrompt(in)), "无限制模式") {
+	if !strings.Contains(systemOf(t, c.applyPrompt(in)), "Little Code Sauce") {
 		t.Error("改了配置却没生效 —— 设置页的开关就变成假的了")
 	}
 }

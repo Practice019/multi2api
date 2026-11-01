@@ -396,7 +396,7 @@ type Config struct {
 		// ⚠ 与上面的 Mode 相互独立：Mode 管"客户端 system 要不要被网关自有提示词替换"，
 		//   ArmorMode 管"要不要再叠一层破甲"。可以 passthrough + armor=append（保留人格再注入）。
 		ArmorMode string `json:"armor_mode"`
-		// ArmorFile 破甲条款覆盖文件（空 = 内置）。
+		// ArmorFile 破甲**整份载荷**文件（空 = 用内置的浓缩版）。
 		//
 		// 只覆盖**条款**部分；人设前缀仍用内置（想全改就直接改配置文件里的这一段是做不到的 ——
 		// 那是刻意的：人设与条款的边界由移植时的结构决定，混成一个文件会让"只改条款"变成"重写一切"）。
@@ -1078,7 +1078,7 @@ type Config struct {
 	// PromptArmorMode 已收敛成 off / append / replace；PromptArmorClauses 为空时
 	// 由 prompt 包回落到内置条款。
 	PromptArmorMode    string `json:"-"`
-	PromptArmorClauses string `json:"-"`
+	PromptArmorPayload string `json:"-"`
 
 	// Codearts 解析后（供 main 直接取用）。
 	//
@@ -1493,10 +1493,14 @@ func (c *Config) normalize() error {
 			return fmt.Errorf("prompt.armor_file %s 是空文件 —— 空条款等于开着开关却不注入，"+
 				"是个看不见的失效；要么写内容，要么删掉这一项", af)
 		}
-		c.PromptArmorClauses = string(raw)
-		log.Printf("破甲：mode=%s 条款来源=%s（%d 字节）", c.PromptArmorMode, af, len(raw))
+		c.PromptArmorPayload = string(raw)
+		log.Printf("破甲：mode=%s 载荷来源=%s（%s）", c.PromptArmorMode, af, charCount(c.PromptArmorPayload))
 	} else {
-		log.Printf("破甲：mode=%s 条款来源=内置", c.PromptArmorMode)
+		// 内置那份是 dsh-purge 实际注入正文的**逐字副本**（armor-payload.md）。
+		// 打印字符数是为了让"是不是 1:1"这件事在日志里可核对 ——
+		// 第一版这里只有个"内置"字样，而当时内置的是 1230 字符的浓缩版，
+		// 没人能从日志看出来（用户问了才发现）。
+		log.Printf("破甲：mode=%s 载荷来源=内置逐字副本（%s）", c.PromptArmorMode, charCount(prompt.ArmorPayload()))
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
@@ -1885,6 +1889,16 @@ func secsOr(p *int, def int) int {
 // 用于"配置可覆盖、缺省回落编译期常量"这类场景 ——
 // 关键是把它写成显式的一次调用，而不是在各处散落 `if x != ""`，
 // 否则迟早有一处忘了判空，表现为界面上出现一个空白的服务名。
+// charCount 数**字符**（不是字节）—— 中文一个字 3 字节，用字节报数会让
+// "21194 字符"看起来像 63KB，与源文件对不上；而核对"是不是 1:1"看的就是这个数。
+func charCount(s string) string {
+	n := 0
+	for range s {
+		n++
+	}
+	return strconv.Itoa(n) + " 字符"
+}
+
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {
