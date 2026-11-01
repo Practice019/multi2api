@@ -216,3 +216,11 @@ auths.tmp
 # 分组升级备份（回滚旧 exe 用，本地保留即可）
 *.pre-onetomany.bak
 *.legacy-for-rollback.bak
+
+# ★ 2026-11-02：一次性备份目录（含真实凭证副本 —— session / oma_ / omas_）。
+#   本仓已有 backups/ 规则，但本工具链产生的是 **下划线开头** 的 _backup-*（两者不同名，前者挡不住）。
+#   ⚠ 实测：_backup-mkimport-* 里是 26 份完整 monkeycode 凭证（补字段前的状态），
+#     一旦 git add -A 就会进版本库，且历史里删不干净（与 L207-213 的 auths.zip 同一教训）。
+#   同理挡掉 _scratch/ 之外的 _backup-*.txt / *.bak 这类过程产物。
+_backup-*/
+_backup-*.txt
