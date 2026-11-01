@@ -3815,6 +3815,18 @@ function mpEsc(s) {
       </fieldset>
 
       <fieldset>
+        <legend>模型与路由 <span class="badge badge--hot">立即生效</span></legend>
+        <!-- 复选框单独一个容器：容器内字段类型必须单一（探针 [B]）。 -->
+        <div class="fieldgroup checks">
+          <div class="field chk"><input type="checkbox" id="setStrictModelPrefix">
+            <label for="setStrictModelPrefix">模型名必须带上游前缀</label>
+            <span class="hint">打开后任何裸模型名一律 400（例如 auto、deepseek-v4.1-flash），
+              报错里会给出可照抄的写法与目录入口。默认关 —— 既有客户端可能就在用裸名。
+              你在分组里显式配过的对外名（别名/映射）不受影响：路由前它们已被解析成带前缀的内部名。</span></div>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <legend>网络与容错 <span class="badge badge--cold">重启生效</span></legend>
         <div class="formgrid">
           <div class="field"><label>上游请求超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
@@ -10386,6 +10398,8 @@ function toast(msg, bad) {
     // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
     //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
     ['setArmorMode', 'prompt_armor_mode', 'str'],
+    // 模型名严格前缀（bool；后端 strict_model_prefix，热生效）。
+    ['setStrictModelPrefix', 'strict_model_prefix', 'bool'],
     // 破甲：命中拒绝后是否自动重试一次（bool；后端 prompt_armor_retry，热生效）。
     ['setArmorRetry', 'prompt_armor_retry', 'bool'],
     ['setMcProxy', 'monkeycode_proxy', 'str'],

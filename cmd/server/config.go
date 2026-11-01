@@ -365,6 +365,15 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// StrictModelPrefix 严格前缀模式：裸模型名一律 400（默认 nil = 关闭，保持既有行为）。
+		//
+		// 这是**手写配置**的位置；设置页改的那份住在 admin.strict_model_prefix，
+		// 解析时 admin 段优先、这里作回退（与 monkeycode 出口 / 破甲同一纪律，
+		// 理由见 Admin.StrictModelPrefix 的注释）。
+		//
+		// ⚠ 用 *bool 而不是 bool："没配"（保持默认关）与"显式配成 false"必须能区分，
+		//   否则设置页关掉开关后重启会被这里的零值重新覆盖成"未配置"。
+		StrictModelPrefix *bool `json:"strict_model_prefix"`
 	} `json:"features"`
 
 	// Prompt 系统提示词体系（借鉴 workbuddy2api-panel）。
@@ -472,6 +481,15 @@ type Config struct {
 		PromptArmorMode string `json:"prompt_armor_mode"`
 		// PromptArmorRetry 同上（设置页可改，热生效）。
 		PromptArmorRetry bool `json:"prompt_armor_retry"`
+
+		// ---- 严格前缀模式（设置页可改，热生效，2026-11-01）----
+		//
+		// 与上面两个破甲键**完全相同的原因**：设置页写的是 admin 段（managed 位置），
+		// 而 `features.strict_model_prefix` 是手写位置。只在其中一处读写 ⇒
+		// 表现就是本仓踩过两次的那个 bug：设置页显示已开启、落盘也对、重启后回到 off。
+		//
+		// 用 *bool 的理由见 Features.StrictModelPrefix 的注释（区分"没配"与"显式 false"）。
+		StrictModelPrefix *bool `json:"strict_model_prefix"`
 
 		// ---- MonkeyCode 出口（也是**设置页**可改的项，2026-11-01）----
 		//
@@ -1095,6 +1113,11 @@ type Config struct {
 	PromptArmorRetry bool `json:"-"`
 	// PromptArmorAuditFile 审计落点（已填默认值，见 normalize）。
 	PromptArmorAuditFile string `json:"-"`
+	// StrictModelPrefix 严格前缀模式的解析值（admin 段优先，features 段回退）。
+	//
+	// 装配层用它构造 server.ModelPrefixPolicy，并把**同一个实例**交给设置适配器 ——
+	// 请求路径读的是那个实例，所以设置页改完立即生效。
+	StrictModelPrefix bool `json:"-"`
 
 	// Codearts 解析后（供 main 直接取用）。
 	//
@@ -1515,6 +1538,23 @@ func (c *Config) normalize() error {
 	c.PromptArmorAuditFile = strings.TrimSpace(c.Prompt.ArmorAuditFile)
 	if c.PromptArmorAuditFile == "" {
 		c.PromptArmorAuditFile = filepath.Join("data", "audit.jsonl")
+	}
+
+	// 严格前缀模式：**设置页那份（admin 段）优先**，手写的 features 段作回退。
+	//
+	// 与上面两条同一纪律（MonkeyCode 出口、破甲模式都因为这个踩过）：
+	// 设置页写 admin 段、手写配置在 features 段，只在其中一处读写就会出现
+	// 「设置页显示已开启、重启后回到 off」。
+	//
+	// 用 *bool：nil = "没配" ⇒ 保持默认关；显式 false 也要能压过手写位置的 true
+	//（否则用户把开关关掉之后，重启会被 features 里的手写 true 重新打开）。
+	c.StrictModelPrefix = boolOr(c.Features.StrictModelPrefix, false)
+	if c.Admin.StrictModelPrefix != nil {
+		c.StrictModelPrefix = *c.Admin.StrictModelPrefix
+	}
+	if c.StrictModelPrefix {
+		log.Printf("模型名：严格前缀模式**已开启** —— 裸模型名一律 400；" +
+			"显式配置过的别名/映射仍放行（设置项 strict_model_prefix）")
 	}
 	{
 		// 内置那份是 dsh-purge 实际注入正文的**逐字副本**（armor-payload.md）。

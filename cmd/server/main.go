@@ -184,6 +184,12 @@ func main() {
 		Payload: cfg.PromptArmorPayload,
 	})
 	up.Armor = armorState
+	// 严格前缀模式的热状态（设置项 strict_model_prefix，默认关）。
+	//
+	// ⚠ 与 armorState 同一条纪律：**同一个实例**给两处 ——
+	//   请求路径（model_check.go 的模型名校验）每次读它、设置层写它。
+	//   各建一份的后果就是本仓踩过的"界面显示已开启、行为没变"。
+	modelPrefixState := server.NewModelPrefixPolicy(cfg.StrictModelPrefix)
 	logUpstreamIdentity(up, "全局")
 	{
 		src := "内置默认"
@@ -1281,6 +1287,8 @@ func main() {
 	mcSettings := newMonkeycodeSettingsAdapter(mk, cfg)
 	// 破甲的设置项（开关 + 三档模式），热生效。
 	armorSettings := newArmorSettingsAdapter(armorState, cfg)
+	// 模型名严格前缀（设置页可改，热生效）。
+	mpSettings := newModelPrefixSettingsAdapter(modelPrefixState, cfg)
 
 	// ── 凭据根（authsRoot）───────────────────────────────────────────────
 	//
@@ -1712,11 +1720,11 @@ func main() {
 		// 断言 SettingsExt：上游的 SettingField 与 admin 的是两个类型
 		// （各自声明，互不 import），方法集精确匹配会静默失败
 		// —— 表现成设置页少几个键且没有任何报错。
-		SettingsExts:      []admin.SettingsExt{upSettings, mcSettings, armorSettings},
+		SettingsExts:      []admin.SettingsExt{upSettings, mcSettings, armorSettings, mpSettings},
 		ResetModelsCache:  server.ResetModelsCache,
 		ModelCatalog:      server.ModelCatalogFor,
 		ModelCatalogState: modelCatalogState,
-		Settings: newSettingsStore(*cfgPath, cfg, sch, []UpstreamSettings{upSettings, mcSettings, armorSettings}, checkinLog, func(days int) {
+		Settings: newSettingsStore(*cfgPath, cfg, sch, []UpstreamSettings{upSettings, mcSettings, armorSettings, mpSettings}, checkinLog, func(days int) {
 			if s := logRing.Sink(); s != nil {
 				s.SetKeepDays(days)
 			}
@@ -1840,6 +1848,7 @@ func main() {
 		// ⚠ 与 up.Armor 必须是**同一个实例**（与 PromptGate 同一条纪律）：
 		//   handler 读它决定要不要重试、出站客户端读它决定注不注入。
 		Armor:             armorState,
+		ModelPrefix:       modelPrefixState,
 		RefusalAudit:      armorAudit.Log,
 		ModelCatalog:      server.ModelCatalog,
 		ModelCatalogState: server.ModelCatalogState,

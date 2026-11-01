@@ -67,7 +67,26 @@ func (h *Handler) modelNameUsable(w http.ResponseWriter, r *http.Request, model 
 				id, h.prefixHint()))
 		return false
 	}
-	// ② 裸名：只有确实在默认上游目录里的才放行。
+	// ⚠ 别名/映射不用在这里单独放行：调用方（handler.go 的 chatCompletions）
+	//   在进本函数**之前**已经跑过别名解析（`h.aliasCandidates` + pickAliasTarget），
+	//   所以用户配过的对外名到这里已经是**带前缀的内部名**了（例如 `006/x` → `workbuddy/x`）——
+	//   严格模式天然放行它。
+	//
+	//   我第一版在这里又调了一次 resolveModelAlias 想"放行别名"，复核调用点后发现是死代码：
+	//   解析早就发生过了，第二次解析拿到的还是同一个值。留着它只会让人以为
+	//   "别名是在这里被保护的"，而真正保护它的是上游那一步。
+	// ② 严格前缀模式：裸名一律 400（用户要求「调用的模型必须有上游的前缀」）。
+	//
+	// ⚠ 放在"目录放行"**之前**：不然目录里的 legacy 裸名（`auto`）会先被放行，
+	//   开关就等于没用 —— 而那正是这个开关存在的唯一理由。
+	if h.cfg.ModelPrefix != nil && h.cfg.ModelPrefix.Strict() {
+		writeOpenAIError(w, http.StatusBadRequest, "unknown_model", fmt.Sprintf(
+			"严格前缀模式已开启：模型名必须带上游前缀（收到裸名 %q）。"+
+				"用法：<上游前缀>/<模型名>，例如 %s/auto；要放行裸名请关闭 strict_model_prefix",
+			m, h.prefixHint()))
+		return false
+	}
+	// ④ 裸名：只有确实在默认上游目录里的才放行（legacy 客户端路径）。
 	if h.bareNameInDefaultCatalog(bare) {
 		return true
 	}

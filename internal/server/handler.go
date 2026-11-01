@@ -170,6 +170,12 @@ type Config struct {
 	// 与 PromptGate 同一条纪律：**必须是同一个实例**交给两处（装配层持有一份）。
 	// 各建一个的话，设置页点开关只改到没人读的那份 —— 界面看着打开了、行为没变。
 	Armor *prompt.ArmorState
+	// ModelPrefix 严格前缀策略（热状态；nil = 不启用，保持既有行为）。
+	//
+	// 与 Armor 同一条纪律：装配层持有**同一份实例**并同时交给设置适配器，
+	// 设置页改完下一次请求就读到新值（把 bool 复制进 Config 做不到这件事 ——
+	// 那会变成"界面显示已开启、行为没变"，本仓已经踩过两次）。
+	ModelPrefix *ModelPrefixPolicy
 	// RefusalAudit 审计落点（照 lib/audit.js 的形状）。nil = 不审计（功能仍工作）。
 	//
 	// 做成回调而不是让本包认识 auditlog：核心不该知道审计落在哪个文件上；
