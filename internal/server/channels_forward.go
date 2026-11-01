@@ -219,7 +219,8 @@ func (h *Handler) tryChannelOnce(ctx context.Context, cand channelroute.Candidat
 		// 用 map 这个最小公共形状 —— 具体上游自己解释（openaicompat 就接受这种形状）。
 		Secret: map[string]any{"api_key": key},
 	}
-	cs, err := p.Chat(ctx, cred, rewritten)
+	// 破甲统一注入点（渠道同样要盖，见 internal/server/armor_body.go）。
+	cs, err := p.Chat(ctx, cred, h.armorBody(rewritten))
 	if err != nil {
 		// ★ 上游说"这把 key 无效/没权限" ⇒ 自动禁用它（只禁这一把，不停整条渠道）。
 		h.autoDisableKeyOnAuthError(cand.Channel.ID, keyIdx, err)

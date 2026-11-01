@@ -98,7 +98,8 @@ func (h *Handler) chatProvider(ctx context.Context, providerID string, cred gate
 	if !ok {
 		return gateway.ChatStream{}, fmt.Errorf("chatProvider: 装配层不支持按上游分派对话")
 	}
-	cs, supported, err := d.Chat(ctx, providerID, cred, body)
+	// 破甲统一注入点（同 chatVia；见 internal/server/armor_body.go）。
+	cs, supported, err := d.Chat(ctx, providerID, cred, h.armorBody(body))
 	if err != nil {
 		return gateway.ChatStream{}, err
 	}

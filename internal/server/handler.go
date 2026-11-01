@@ -1751,6 +1751,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = aliasOrder // 失败切换在 P3 接入（先把轮询跑通）
+	// ★ 模型名前置校验（2026-11-01）：在任何路由/试号**之前**挡掉非法名字。
+	//
+	// 放在这里的理由：① 别名已解析成内部名（上面那段），判据看到的是真正要路由的名字；
+	//   ② 渠道路径还没接管（下一行），带 <渠道名>/前缀的公开名仍由 channelServes 认领；
+	//   ③ 池子还没开始试号 —— 这正是要拦住的：错名字曾被当成默认上游的模型，
+	//      6 个账号各挨一次 400，最后还回一个"账号不可用"的 503 误导用户。
+	if !h.modelNameUsable(w, r, peek.Model) {
+		return
+	}
 	if h.channelServes(peek.Model) {
 		// 白名单按**客户端发来的名字**判，不按解析后的内部名。
 		//
@@ -1809,7 +1818,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			//
 			// ⚠ 与池路径同一条纪律：重发拿到 >=400 必须当失败（回放原始头部），
 			//   不能把上游的错误体当成"重试后的回答"转发给客户端。
-			fw.Stream.Body = h.MaybeRefusalRetry(fw.Stream.Body, body, func(nudged []byte) (io.ReadCloser, error) {
+			// ⚠ 同池路径：传已盖章的 body，话术才能落在系统提示真正的尾部。
+			fw.Stream.Body = h.MaybeRefusalRetry(fw.Stream.Body, h.armorBody(body), func(nudged []byte) (io.ReadCloser, error) {
 				nfw, nerr := h.forwardViaChannelAs(r.Context(), chosenTarget, publicModel, nudged)
 				if nerr != nil {
 					return nil, nerr
@@ -2610,7 +2620,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//
 		// ⚠ 重发拿到 >=400 时要返回 error，**不能**把上游的错误体当成回答转发出去：
 		//   那会把"重试也失败了"变成"客户端收到一段错误 JSON"，而原来的拒绝内容被吞掉。
-		rc = h.MaybeRefusalRetry(cr, outBody, func(nudged []byte) (io.ReadCloser, error) {
+		// ⚠ 传进去的是**已经盖过章**的 body：包装器在它上面追加话术 ⇒ 话术落在真正的尾部；
+		//   重发时再进 chatVia 会因为已含标记而跳过二次注入
+		//   （否则 replace 模式会把刚追加的话术整段冲掉，重试等于没重试）。
+		rc = h.MaybeRefusalRetry(cr, h.armorBody(outBody), func(nudged []byte) (io.ReadCloser, error) {
 			ncr, nstatus, nerr := h.chatVia(ctx, reqProvider, acct, nudged)
 			if nerr != nil {
 				return nil, nerr
@@ -3234,7 +3247,8 @@ func (h *Handler) chatVia(ctx context.Context, providerID string, acct *auth.Aut
 	if !ok {
 		return nil, 0, errNoProviderCredential
 	}
-	cs, registered, err := h.cfg.Provider.Chat(ctx, providerID, cred, body)
+	// 破甲在**这里**统一注入（见 armor_body.go 文件头：为什么不包 Provider）。
+	cs, registered, err := h.cfg.Provider.Chat(ctx, providerID, cred, h.armorBody(body))
 	if !registered {
 		// 该上游没接上（未注册 / 实例缺失）：与"取不到凭证"同类 —— 接线问题，
 		// 走传输错误分支换号，**不惩罚这个账号**。
