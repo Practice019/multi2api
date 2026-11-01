@@ -34,25 +34,41 @@ package workbuddy
 import (
 	"time"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
 )
 
-// refreshSkew workbuddy 的提前续期窗口。
+// refreshSkewFallback workbuddy 的**兜底**续期窗口（读不到 token 时间时才用）。
 //
-// 与 token 寿命（小时级）相比是一个显著小的值，符合
-// gateway.RefreshSkewExt 的约束（窗口必须显著小于凭证寿命）。
-const refreshSkew = 10 * time.Minute
+// ⚠ 2026-11-01 用户要求统一：所有上游都按「生命周期过半就续期」
+// （gateway.DefaultRefreshRatio = 0.5）。workbuddy 的 token 是 JWT、
+// 实测寿命 **28~30 天**（解 demo 里 23 个凭证的 iat/exp 统计得出），
+// 所以主路径读 iat/exp 算比例窗口；这个常量降级为**读不到时间时**的兜底。
+//
+// 保留它（而不是读不到就回 ok=false）的理由：ok=false 会让核心套用**它自己的**
+// 同值兜底窗口，等于把"我不知道"伪装成一个决定。
+const refreshSkewFallback = 10 * time.Minute
 
 // 编译期断言（与 CredentialRefresher / CredentialLoader / AuthDirExt 并列）。
 var _ gateway.RefreshSkewExt = (*Provider)(nil)
 
-// RefreshSkew 报告 workbuddy 的提前续期窗口。
+// RefreshSkew 报告 workbuddy 的提前续期窗口 —— **寿命过半**（统一判据）。
 //
 // 纯本地判断，不发网络请求（见 gateway.RefreshSkewExt 的实现约束）。
-// `cred` 不参与判定：workbuddy 的窗口是常量策略，不随凭证变化。
+// 窗口**随凭证变化**（取决于 token 自己的 iat/exp），不再是常量策略。
 // 类型校验留给 RefreshCredential / Chat —— 窗口是**上游的属性**，
-// 与"这一份凭证能不能用"无关。
+// 与"这一份凭证能不能用"无关；读不出时间就回落到固定兜底值（不是 ok=false）。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
-	_ = cred
-	return refreshSkew, true
+	// 统一规则：寿命过半 ⇒ 该续期（与 cline / raccoon / qoder / lobsterai / minimax 同一判据）。
+	//
+	// 旧实现是固定 10 分钟 —— 对实测 28~30 天寿命的 token 等于"已用 99.99% 才续"，
+	// 提前量小到几乎不存在（共享模块 refreshratio.go 的文件头就是拿它当反例写的）。
+	// 换成比例后**续期频率不变**：跨过阈值刷一次，新 token 重新计时，
+	// 每个周期仍是一次续期，只是从"最后一刻"提前到"过半"。
+	if a, ok := cred.Secret.(*auth.Auth); ok && a != nil {
+		if skew, ok2 := gateway.RefreshSkewFromToken(a.AccessToken); ok2 {
+			return skew, true
+		}
+	}
+	return refreshSkewFallback, true
 }

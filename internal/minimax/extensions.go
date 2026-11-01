@@ -118,8 +118,19 @@ func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
 	//（参照项目实测 expires_in 由服务端下发，不同环境不同）。
 	// 写死 5 分钟对 1 小时的 token 是 8%，对 10 分钟的 token 是 50% ——
 	// 同一个数字在两种寿命下安全性差 6 倍。
+	// 统一走共享判据（`gateway.DefaultRefreshRatio`）：寿命过半就续期。
+	//
+	// 2026-11-01 用户要求所有上游同一套逻辑 —— 这里原来是自己写了一份
+	// "life/2"，数值一样但**判据分散**：改阈值要改多处，而漏改一处不会报错。
+	// 现在阈值只有一个来源；下面那对夹紧是**本上游的调度约束**，与阈值无关。
 	if life := a.LifetimeMillis(); life > 0 {
-		skew := time.Duration(life/2) * time.Millisecond
+		// ⚠ 起点必须是凭证**自己的** issued_at，不能拿 `now - life` 顶替：
+		//   那样 RefreshSkewAtRatio 算出的寿命会变成"寿命 + 剩余"，窗口随之偏大
+		//（实测：1 小时寿命的凭证报出 90 分钟窗口，被 TestRefreshSkewIsHalfLifetime 当场抓住）。
+		skew, _ := gateway.RefreshSkewAtRatio(gateway.JWTTimes{
+			IssuedAt:  parseExpiryMillis(a.IssuedAt) / 1000,
+			ExpiresAt: a.ExpiresAtMS() / 1000,
+		}, gateway.DefaultRefreshRatio)
 		// 上下夹紧：
 		//   下限 2m —— 太小的窗口在「调度间隔 + 一次失败重试」下会被跳过
 		//   上限 30m —— 太早续期只是多打几次续期请求，但没必要

@@ -38,6 +38,13 @@ import (
 	"workbuddy2api/internal/gateway"
 )
 
+// stsLifetime 华为云 securityToken 的寿命（实测约 2 小时）。
+//
+// ⚠ 它只用于把"不透明 token 的起点"反推出来（见 RefreshSkew），
+//   从而让本上游也能用统一的"寿命过半"判据。它不是判据本身 ——
+//   凭证真的能不能用，永远由真实请求决定（401 → 续期）。
+const stsLifetime = 2 * time.Hour
+
 // 编译期断言（与 gateway.Provider / CredentialRefresher / JobExt 并列）。
 var _ gateway.RefreshSkewExt = (*Provider)(nil)
 
@@ -51,6 +58,30 @@ var _ gateway.RefreshSkewExt = (*Provider)(nil)
 // 与"这一份凭证能不能用"无关。类型不对会在 Chat / RefreshCredential
 // 里得到明确错误，不该在这里变成一个"不知道窗口"而让核心套用 10m。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
-	_ = cred
+	a, ok := cred.Secret.(*Auth)
+	if ok && a != nil && a.ExpiresAt > 0 {
+		// 统一规则：寿命过半 ⇒ 该续期（用户 2026-11-01 要求所有上游同一套）。
+		//
+		// # 为什么本上游也能算比例（虽然 token 是不透明串、没有 iat）
+		//
+		// 比例需要两个点：开始与结束。华为云 securityToken **只有结束时刻**，
+		// 但它的寿命是一个**已知常量**（约 2 小时，见 provider.go / oauth.go 的实测），
+		// 所以起点可以反推：issued = expires − stsLifetime。
+		// 这不是猜：寿命写在下面对常量的注释里，改了寿命这里自动跟随。
+		//
+		// ⚠ 代价要写清楚（这是本上游唯一与别家不同的地方）：
+		//   refresh_token 是**一次性消费**的。窗口从 3 分钟放到寿命的一半（约 1 小时），
+		//   意味着同样 2 小时的凭证周期里续期次数**翻倍**（原来一个周期刷一次，
+		//   现在从 t=1h 起就满足条件）。这是"统一 50%"的代价，用户已明确要求统一；
+		//   要退回去只需把下面的 stsLifetime 换回 refreshSkew 常量。
+		issued := a.ExpiresAt - int64(stsLifetime.Seconds())
+		if skew, ok2 := gateway.RefreshSkewAtRatio(gateway.JWTTimes{
+			IssuedAt:  issued,
+			ExpiresAt: a.ExpiresAt,
+		}, gateway.DefaultRefreshRatio); ok2 {
+			return skew, true
+		}
+	}
+	// 读不到到期时刻（手写/异常凭证）⇒ 保持原来的固定窗口。
 	return refreshSkew, true
 }

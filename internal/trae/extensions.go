@@ -197,6 +197,21 @@ const refreshSkew = 10 * time.Minute
 // "账号突然过期"的根因形状原封不动。（评审实锤：报告 §6-1。）
 // 唯一正确的关闭方式就是 (0,true)：显式"报过窗口"，且窗口为 0。
 func (p *Provider) RefreshSkew(cred gateway.Credential) (time.Duration, bool) {
+	a, ok := cred.Secret.(*Auth)
+	if ok && a != nil {
+		// 能算出寿命 ⇒ 统一按「过半就续」（用户 2026-11-01 的要求）。
+		//
+		// ⚠ 这条与上面那段历史是一次**有条件的**放行，条件必须保留：
+		//   旧实现禁掉预检续期，是因为账号池投影 ExpiresAt=0 让"该刷了吗"恒为真 ⇒
+		//   每个对话请求都 ExchangeToken 轮换一次性 refreshToken（"账号突然过期"的头号嫌疑）。
+		//   现在能安全放开，前提是**到期时刻真的报得出来**（TokenExpiry 已实现，
+		//   核心用 cred.ExpiresAt 判"该不该刷"而不是那个恒 0 的投影）。
+		//   所以读不到时间时**不**放开：回 (0,true) 明确声明不需要预检，
+		//   宁可让它 401 后被动续期，也不能回到"每请求轮换一次"。
+		if skew, ok2 := gateway.RefreshSkewFromToken(a.AccessToken); ok2 {
+			return skew, true
+		}
+	}
 	return 0, true
 }
 
