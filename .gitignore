@@ -224,3 +224,10 @@ auths.tmp
 #   同理挡掉 _scratch/ 之外的 _backup-*.txt / *.bak 这类过程产物。
 _backup-*/
 _backup-*.txt
+
+# ⚠ *.md 会把“构建必需的 md”一起吃掉：go:embed 的载荷与发布说明必须是**受跟踪**文件。
+#   2026-11-02 实测：internal/prompt/armor-payload.md 从未进仓库
+#   ⇒ CI 上 go build 报 pattern armor-payload.md: no matching files found
+#   ⇒ CI 与 Release 流水线连续全红（而本机正常，因为本机有这个文件）。
+!RELEASE_NOTES.md
+!internal/prompt/*.md
