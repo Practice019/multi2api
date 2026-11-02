@@ -438,6 +438,53 @@ Start-Process cmd.exe -ArgumentList '/c','start','start.bat' -WorkingDirectory '
 - **go:embed 的页面、出站请求头、模型目录都在二进制里**：不重启就永远看不到改动，
   这一步不能省。
 
+## 发布 Release：说明怎么写（2026-11-02 定的）
+
+**唯一来源是仓库根的 `RELEASE_NOTES.md`** —— `release.yml` 读它当 Release 正文
+（文件缺失才回退模板）。**每次发版前先把它改成本版内容再打 tag**。
+
+**格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)** ——
+这不是外部偏好：本仓 `CHANGELOG.md` 开头早已声明「格式参考 Keep a Changelog」，
+`RELEASE_NOTES.md` 也必须照办。
+
+### 硬规则
+
+1. **标题带 ISO 日期**：`# v1.12.1 — 2026-11-02`（`YYYY-MM-DD`，别用 `10月25日`）
+2. **按类型分组**，用规范的小标题：
+   `## 修复` `## 新增` `## 变更` `## 弃用` `## 移除` `## 安全`
+   —— 没有内容的小节**直接不写**（规范明确说空节制造噪音）
+3. **开头一句摘要**：这一版最值得知道的一件事是什么
+4. **说"用户看到什么变化"，不说"我们怎么修的"**
+   —— 规范原话：*Do **not** describe how the bug was fixed*
+5. **先说此前行为、再说现在行为**；有影响范围就写清（哪些上游 / 哪些部署受影响）
+6. **破坏性变更放最前面**，并给出升级路径
+7. **`## 验证`放当场跑出来的数字**（CI 结果 + 真机实测），不放"我觉得没问题"
+8. **`## 已知问题`**：遗留缺陷、未修的边界，别让用户自己踩
+
+### 反模式（都踩过）
+
+- ❌ 写成**事故复盘报告**（根因分析、调用链、证据表格）——
+  那是 `docs/progress-log.md` 的内容，受众是工程师；
+  Release Notes 的受众是**使用者**，要回答的是"我要不要动作、体验会怎么变"
+- ❌ 堆内部指标（`%st=0`、`1187 行/秒`）当正文 —— 可以进「验证」表，不该当叙事主线
+- ❌ 把 commit log 直接倒进去（规范原话：*Don't let your friends dump git logs into changelogs*）
+- ❌ 无日期的标题、自造章节名（`事故现象`/`根因`/`修复过程`）
+
+### 发布动作
+
+```bash
+# 1) 改 RELEASE_NOTES.md 为本版内容
+# 2) 提交
+git add RELEASE_NOTES.md && git commit -m "docs(发布): vX.Y.Z 说明"
+# 3) 打 tag 并推送 —— CI 自动构建多平台产物并创建 Release
+git tag -a vX.Y.Z -m "vX.Y.Z: <一句话>"
+git push origin master && git push origin vX.Y.Z
+```
+
+- **版本号**：补丁位 +1 用于纯 bug 修复；有新增能力走次版本位。
+- 已发布的 Release **可以**事后改正文（`PATCH /repos/{owner}/{repo}/releases/{id}`），
+  发现说明有误就改，别留错的对外文档。
+
 ## 沉淀规则
 
 较大迭代后（口径/结论变更、新增或重构脚本、重要决策或否决、新的数据坑、
