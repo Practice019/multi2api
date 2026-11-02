@@ -47,10 +47,37 @@ package loomy
 import (
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/gateway"
 )
+
+// quotaFailLogInterval 同一 uid 的失败日志最小间隔（2026-11-02 加）。
+//
+// ⚠ 为什么需要它（真机事故）：Loomy 有 8 个账号 session 失效时，刷新路径会
+// 反复撞同一批账号。没有限流时实测刷到 **1187 行/秒 ≈ 900 MB/小时**，
+// 8 小时写掉 8.9 GB 日志并把系统盘顶到 80%、造成持续 I/O 阻塞。
+//
+// 真正的根治是让退避生效（见 RefreshQuota 失败分支里的 noteFail 调用），
+// 这里限流是**第二道闸** —— 防的是"将来又出现别的高频失败路径"。
+const quotaFailLogInterval = 5 * time.Minute
+
+// quotaFailLogAt 记录每个 uid 上次打失败日志的时刻。
+var quotaFailLogAt sync.Map // uid -> time.Time
+
+// logQuotaFail 打一条失败日志，但同一 uid 在 quotaFailLogInterval 内只打一条。
+func logQuotaFail(uid string, err error) {
+	now := time.Now()
+	if v, ok := quotaFailLogAt.Load(uid); ok {
+		if at, ok := v.(time.Time); ok && now.Sub(at) < quotaFailLogInterval {
+			return
+		}
+	}
+	quotaFailLogAt.Store(uid, now)
+	log.Printf("loomy: 积分网关查额度失败 uid=%s: %v（回落到本机缓存）",
+		shortUID(uid), err)
+}
 
 // RefreshQuota 取该账号的当前额度（gateway.QuotaExt）。
 //
@@ -120,8 +147,16 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 		}
 		// 查失败（网络/上游 5xx/session 失效）→ 回落到本机缓存，
 		// 而不是直接报未知。缓存至少对"本机那一个号"是可信的历史值。
-		log.Printf("loomy: 积分网关查额度失败 uid=%s: %v（回落到本机缓存）",
-			shortUID(uid), err)
+		//
+		// ★★★ 2026-11-02 修复（真机事故根因）★★★
+		// 这里**必须**记一次失败，否则 freePool 的失败退避（freeFailBackoff）
+		// 永远不生效：`noteFail` 此前**定义了却从未被任何代码调用**，
+		// 于是 f.failAt 永远是空的 ⇒ dueForRecheck 的退避判断恒为假 ⇒
+		// 失败账号每拍都被判定"该重查" ⇒ drainRecheck 的无界 for 循环永不退出。
+		// 实测后果：wb2api 烧 90% 单核 CPU、日志 1187 行/秒（约 900 MB/小时）。
+		// 详见 docs/progress-log.md 2026-11-02 条目。
+		p.pool().noteFail(uid, time.Now())
+		logQuotaFail(uid, err)
 	}
 
 	// ── 回落：本机客户端缓存（仅对"本机登录的那个账号"有效）──

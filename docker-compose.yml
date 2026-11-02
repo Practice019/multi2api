@@ -3,6 +3,14 @@ services:
     build: .
     container_name: workbuddy2api
     restart: unless-stopped
+    # ⚠ 日志上限（2026-11-02 加）：此前无任何上限，Loomy 额度刷新死循环
+    # 在 8 小时内写掉了 8.9 GB 日志，把系统盘顶到 80%、并造成持续 I/O 阻塞。
+    # 50m × 3 = 单容器最多 150 MB，超出的自动轮转丢弃。
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       - TZ=Asia/Shanghai
     ports:

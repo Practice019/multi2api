@@ -464,9 +464,20 @@ func (p *Provider) maybeRefillOnNewDay(now time.Time) {
 // drainRecheck 后台把"用过、需要重查"的账号按节流查掉。
 //
 // ⚠ 由 `noteUsed` 挂标记驱动，**没有定时器** —— 空闲部署一个请求都不发。
+//
+// ★ 2026-11-02 加轮次上限（真机事故的护栏）：
+//
+//	原先这里是裸的 `for {}`，退出条件完全依赖 `dueForRecheck` 返回空。
+//	而一旦"失败后不写 failAt"（当时 noteFail 从未被调用），退避就形同虚设，
+//	这个循环会对同一批失败账号**无限重试** —— 实测 1187 行/秒日志、
+//	90% 单核 CPU、8 小时写掉 8.9 GB 磁盘。
+//
+//	根治是让 noteFail 真正被调用（见 quota_ext.go 的失败分支）；
+//	这里的上限是**第二道防线**：无论将来哪个上游又漏了退避，
+//	单次 drain 最多烧有限轮次就会自行中止并留下日志，而不是无声死循环。
 func (p *Provider) drainRecheck() {
 	f := p.pool()
-	for {
+	for round := 0; round < freePoolDrainMaxRounds; round++ {
 		todo := f.dueForRecheck(4, time.Now())
 		if len(todo) == 0 {
 			return
@@ -476,7 +487,17 @@ func (p *Provider) drainRecheck() {
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
+	// 走到这里说明没收敛：留一条日志，否则"循环被中止"是无声的。
+	log.Printf("loomy: ⚠ drainRecheck 达到轮次上限（%d 轮）已中止 —— "+
+		"可能有账号的失败退避没有生效，请检查各上游的 noteFail 调用", freePoolDrainMaxRounds)
 }
+
+// freePoolDrainMaxRounds 单次 drainRecheck 的轮次上限（2026-11-02 加）。
+//
+// 正常情况下一轮 4 个号 × 200ms = 0.8s，50 轮 = 40 秒。
+// 取 50 是因为：即使池子里有几十个"刚被用过"的号，也应该在 40 秒内查完；
+// 超过这个规模还不收敛，就说明是**失败重试没退避**，不是正常吞吐。
+const freePoolDrainMaxRounds = 50
 
 // ── 定期清扫（用户提的第二个设计）────────────────────────────────────
 

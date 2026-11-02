@@ -1,82 +1,112 @@
-# v1.12.0
+# v1.12.1
 
-**修掉用户实测的两个缺陷：loomy 免费额度优先失效、破甲覆盖调用方 system。**
+**修掉一个会让整台机器卡死的真缺陷：loomy 额度查询失败时退避从未生效，
+导致 `drainRecheck` 陷入无界死循环。**
 
 ---
 
-## loomy「免费额度优先」失效 —— 真根因是跨日
+## 事故现象
 
-用户实测：「loomy 不是说优先消耗免费额度、等所有账号都用完才动永久的吗？我发现还是会消耗永久额度。」
+用户报「服务器 CPU 近乎 100%、卡爆」，重启后数小时**复发**（当天重启两次）。
 
-**根因不是最初猜的漏扣减，而是跨自然日清空池子后没有任何重填机制：**
+真机实测：
 
-    resetIfNewDay 跨日清空 have/zero/free
-      -> StartFreePoolFill 只在启动时跑一次
-      -> 跨日后池子永久为空
-      -> candidate_tier 的 empty 分支（len(have)==0）成立
-      -> out[uid] = tierFree（全体放开）
-      -> 所有号同档 -> 加权随机 -> 烧永久额度
+| 指标 | 数值 |
+|---|---|
+| `wb2api` CPU | `%usr=61.96 + %system=28.11 = **90.07%**`（单核），峰值 124% |
+| 全机 CPU | `%Cpu(s): 67.6 us, 14.7 sy, **11.8 id**` |
+| `%st`（steal） | 0.0 → **排除**宿主机争抢，是本机进程真吃 |
+| 日志速率 | **1187 行/秒**、15 MB/分钟、≈**900 MB/小时** |
+| 日志构成 | 取样 3000 行里 **2999 行（99.97%）** 是同一对错误 |
+| 已累积日志 | **8.9 GB**（占 Docker 日志总量 9.0 GB 的 96%）→ 系统盘 80% |
+| 连锁表现 | 持续磁盘写 I/O → 整机卡死（用户体感）
 
-证据链：启动填充 22:17 是 44/44 ✓，但清扫日志显示池子 2->3->4->5->6（极小），
-而实测 **37/44 个号免费额度仍是 ~4990**，日志里**零**额度查询失败（排除了"查询失败"假设）。
+## 根因：`noteFail` 定义了却从未被调用
 
-**三层修复：**
+`internal/loomy/freepool.go` 的退避写入函数**全仓库零调用点**：
 
-- **A** 跨日保留 have 名单（只清 zero/free/checkedAt）=> 这些号落 tierUnsure，
-  不构成强偏好，但不会被当成"池子空了可以烧永久"
-- **B** 跨日后第一次选号触发**后台**串行重填（200ms 间隔、recover、幂等、每日一次）
-  注意：选号路径本身不发上游请求，"读池子纯内存"契约未破
-- **C** empty 判据加 && hasRefilledToday(now) —— 本日还没重填完成时**绝不**宣布"可以烧永久"
+    $ grep -rn 'noteFail' --include='*.go' internal/ cmd/
+    internal/loomy/freepool.go:224:  // noteFail 记一次查询失败（失败退避）。
+    internal/loomy/freepool.go:231:  func (f *freePool) noteFail(uid string, now time.Time) {
 
-**防查询洪水三道闸**：同锁内"检查+占位"（并发 10 次只有 1 次抢到，有测试）／串行 + 每号 200ms
-（上游实测 12 条并发就 502）／每个自然日最多一次，空闲部署零请求。
+`f.failAt[uid]` 的**唯一写入点**就在它内部，于是：
 
-**次因：工具路径消耗免费额度但不记账**
+    失败路径从不写 failAt（也不写 checkedAt）
+      -> dueForRecheck 的两道退避闸门恒不成立
+        -> 失败账号每一拍都被判定「该重查」
+          -> drainRecheck 的裸 for {} 永不退出
+            -> 无限重试 + 每失败打 2 行日志
+              -> 1187 行/秒 + 90% 单核
 
-points_consumed 的扣减原来只挂在 ChatStream 的 usage tap 上，而生图（execGenerateImage）
-与搜索（execWebSearch）也产生该字段，却只塞进 Artifact 给客户端看、**从不告诉池子**。
-已补，并加**源码级守卫** TestEveryPointsConsumedSiteFeedsPool：枚举包内所有解析点，
-断言每处都有配套 noteConsumed => 将来新增计费路径会变红而不是静默漏扣。
+`noteFail` 自己的注释写着「**不删 needRecheck 标记** …… 退避由 `freeFailBackoff`
+控制（`dueForRecheck` 里判），标记要留着」—— 设计意图明确就是失败时要调它，**实现漏了**。
 
-## 破甲不再覆盖调用方 system / 不再吃掉用户文本
+**放大因素**：`drainRecheck` 在 `candidate_tier.go:278`（`go` 起来）与 `freepool.go:358`
+被多处启动 ⇒ 多个死循环并发；失败日志无限流；`.gitignore` 之外，
+`/etc/docker/daemon.json` 也没有 `log-opts` ⇒ 日志无上限。
 
-用户报告：中转站注入问题报告.md（6724 token 固定前缀、覆盖 system、JSON Schema 连续 7 次返回 []、耗时 1s->180s）。
+**触发条件**：8 个 loomy 账号 session 失效（HTTP 200 + `code=100002` `登录已失效`）。
+注意 `shortUID()` 只取前 8 位，日志里它们都显示成 `uid=26092700` ——
+看起来像"同一个号被刷 20 遍"，会误导排查方向。
 
-**真机 A/B/C 实测**（system = "你是麦麦，10 字以内"）：
+## 修复
 
-| 模式 | prompt_tokens | 回答 |
-|---|---:|---|
-| **append**（推荐） | 7165 | **「在的，怎么啦？」** 遵守人格 + 6 字 |
-| replace | 7134 | 「在。Little Code Sauce 在线…代码、逆向、渗透、外挂…」 人格被覆盖、40+ 字 |
-| off | 683 | 「在的」 |
+**1. 根治 —— 失败分支补上退避调用**（`internal/loomy/quota_ext.go`）
 
-- **默认值本来就是 off**（不是 replace）—— 用户看到的 replace 是设置页自选的。
-- 设置页已改：off/append 标注推荐、replace 标为高风险，hint 写进实测后果。
-- 修掉一个真 bug：stripArmorBlock 的截断分支会"从开标记切到结尾"，
-  当客户端 system 里**恰好出现该标记字样**时会把用户正文**整段吃掉**（数据损坏、不可恢复）。
-  判据从"标记后面有多长"改成"**标记是否在行首**"，不确定时**保留**。
+    p.pool().noteFail(uid, time.Now())
+
+**2. 护栏 —— `drainRecheck` 加轮次上限**（`internal/loomy/freepool.go`）
+
+新增 `freePoolDrainMaxRounds = 50`，并在触顶时**留一条日志**。
+理由：这次的教训是"无界循环 + 静默" —— 退避一旦再被漏掉，至少要**有限**且**可见**。
+
+**3. 日志限流 —— 同一 uid 的失败日志 5 分钟最多一条**（`logQuotaFail` + `sync.Map`）
+
+第二道闸，防的是将来又出现别的高频失败路径。
+
+**4. 部署侧加固**
+
+- `docker-compose.yml` 给 `wb2api` 加 `logging` 上限（`max-size: 50m` × `max-file: 3`）
+- 新增 `/etc/cron.d/docker-log-cap`：每 5 分钟截断超 200 MB 的容器日志（兜底，覆盖所有容器）
+- 新增 `/etc/cron.d/wb2api-health` + `wb2api-healthcheck.sh`：
+  每 5 分钟记录 CPU / 日志 / 磁盘，异常打 `WARN` ——
+  此前**没有任何监控**，全靠用户发现"卡爆"才暴露
 
 ## 验证
 
-- go build ./... exit 0
-- go test -short ./... => **48 包 ok / 0 FAIL**
-- 前端结构探针 => 全部通过
-- 新增测试 12 条；两条变异验证先红后绿：
-  - 把「保留 have」改回「清空」=> 报"池子会变空=>empty 分支全体放开=>烧永久额度"
-  - 把两处 noteConsumed 换成 _ = n => 守卫报"解析了 points_consumed 但从不调用 noteConsumed"
+- `go build ./...` exit 0
+- `go vet ./...` exit 0
+- `go test -short ./... -count=1` => **48 包 ok / 0 FAIL**
+- `gofmt -l` 对改动文件无输出
 
-**真机验证**：连发 8 个**内容不同**的请求 => **8 个不同的号**（正常轮询）；
-8 个**内容相同**的请求 => 1 个号（会话粘性，设计意图，为保上游 prompt cache 命中率）。
+**真机部署后当场复测**（巡检日志自证，18:05:14 部署）：
 
-## 已知边界
+    2026-11-02 17:50:29 WARN cpu=171.4% log=205MB   |  修复前
+    2026-11-02 17:55:07 WARN cpu=176.6% log=1MB     |
+    2026-11-02 18:00:07 WARN cpu=103.4% log=72MB    |
+    2026-11-02 18:05:06 WARN cpu=139.8% log=157MB   |  ← 18:05:14 部署
+    2026-11-02 18:08:29 OK   cpu=0.8%  log=0MB      |  修复后
 
-- 真机"跨日"要等次日 00:00 才能直接观察日志「跨日重填完成 N/N」，本次靠单元测试 + 状态一致性。
-- 会话粘性依赖 PrefixKey（model + 前两条消息前 512 字符的 FNV-1a 哈希）。
-  单轮且内容重复的请求会粘同一个号 —— 符合"用完再换"规则，但换得慢。
+| 指标 | 修复前 | 修复后 | 改善 |
+|---|---:|---:|---:|
+| 日志速率 | 1187 行/秒 | **0.63 行/秒** | ↓ 99.95% |
+| `wb2api` CPU | 90 ~ 124% | **3.27%** | ↓ 96% |
+| 全机 `%idle` | 11.8% | **90.6%** | ↑ 7.7 倍 |
+| 日志文件 | 8.9 GB | **48 KB** | ↓ 99.999% |
+| 磁盘 | 80% | 63% | 释放 7 GB |
 
-## 顺带说明
+## 已知遗留
 
-release.yml 现在从仓库根的 RELEASE_NOTES.md 读说明，不再用那句硬编码的
-"自动构建产物（Windows / Linux / macOS…）"模板（v1.10.0 起正文只有 58 字符就是这么来的）。
-文件缺失时回退模板，而不是静默发一个空 Release。
+**8 个 loomy 账号 session 仍失效，本次未重登**（用户明确本次不做）。
+`internal/gateway/errorclassifier.go:120` 写明「会话已死 → 永久禁用（**需人工重登**）」；
+现有登录只有「本机客户端登录态」（`client_data_dir` 为空，不可用）与
+「手机号 + 短信验证码」两条路，需逐个收码。
 
+⇒ 这些号仍会周期性报 `100002`，但**已被退避与限流约束**（每 5 分钟最多一条日志），
+不再形成洪泛。**这不是回归，是已知遗留。**
+
+## 顺带修正
+
+Release 说明的取用路径此前踩过坑（`artifacts/` 里 `[ -f RELEASE_NOTES.md ]` 恒假 →
+静默回退模板）。本次说明按约定写在仓库根 `RELEASE_NOTES.md`，
+流程未改动，仅确认取用正常。
