@@ -2053,7 +2053,17 @@ function closeDrawer() { closeHost($('host-dlg')); }
 function pullModels() {
   var body = { base_url: $('f-base').value.trim() };
   var keys = splitLines($('f-keys').value);
-  if (keys.length) { body.keys = [keys[0]]; } else if (dlgState.id) { body.id = dlgState.id; }
+  // ⚠ 字段名是 `key`（**字符串**），不是 `keys`（数组）。
+  //
+  // `/admin/channels/discover` 的契约是 discoverReq{base_url,key}（见
+  // internal/admin/channels_discover.go）；`keys []string` 只属于**保存渠道**
+  // 那个接口（POST/PUT /admin/channels）。发错名字不会报错 —— JSON 解码
+  // 静默忽略未知字段 —— 后端只看到"请求里没带 key"，于是新建渠道点
+  // 「从上游拉取」必然报「没有可用的 key：该渠道没有启用状态的 key，
+  // 且请求里也没带 key」，而报错里没有任何指向"字段名写错了"的线索。
+  if (keys.length) { body.key = keys[0]; }
+  // 编辑已有渠道时同时带 id：密钥框为空时后端回落到该渠道已启用的 key。
+  if (dlgState.id) { body.id = dlgState.id; }
   api('POST', '/admin/channels/discover', body).then(function (j) {
     var list = (j && (j.models || j.items)) || [];
     if (!list.length) { banner('err', '上游没有返回模型'); return; }
