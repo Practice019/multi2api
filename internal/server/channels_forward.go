@@ -171,7 +171,7 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 		//
 		// 这里采取"+白名单"而不是"黑名单"：只有明确不该换的才不换。
 		// 否则新出现的错误类型会一律不换人，而"不换人"正是本次要修的缺陷。
-		if !worthSwitching(ferr) {
+		if !worthSwitching(ctx, ferr) {
 			return fw, ferr
 		}
 	}
@@ -257,11 +257,22 @@ func (h *Handler) tryChannelOnce(ctx context.Context, cand channelroute.Candidat
 // 其余（没可用 key、上游 4xx/5xx、body 改写失败）**都换**：
 // 没可用 key 是这条渠道自己的问题；上游 4xx 常常是"这条渠道的上游不认这个参数"；
 // 5xx 与 429 更是典型的"换一条就好"。
-func worthSwitching(err error) bool {
+func worthSwitching(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// ⚠ 判据是 **ctx.Err()**，不是 `errors.Is(err, context.DeadlineExceeded)`。
+	//
+	// 旧实现把"整体到期"与"单次尝试超时"当成同一件事，于是**候选渠道卡死时不会
+	// 换人** —— 而它恰恰是最该换人的情形：同一档里其它候选全程健康，却因为这一条
+	// 把整个请求打死（用户在客户端看到的就是"这个模型明明有很多上游，却总失败"）。
+	//
+	// 实测证据（公开名一对多的候选里混着卡死渠道，5 次请求）：3 次失败、2 次成功，
+	// 其中一次干等 **120 秒** 才失败 —— 那 120 秒里同档的其它渠道一直可用。
+	//
+	// 反过来，请求上下文**真的**结束了（客户端断开、或网关的整体预算到期）时
+	// ctx.Err() != nil，换人毫无意义 —— 这条语义与旧实现一致，不是放松。
+	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
 	// 组合根漏接线：换多少条都是同一个错，换人只会让日志出现 N 条同样的话。
