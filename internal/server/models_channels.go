@@ -39,7 +39,100 @@ func (h *Handler) channelPublicNames(r *http.Request) ([]string, bool) {
 	abilities := s.EnabledModels(channelstore.DefaultGroup)
 	reverse := h.channelReverseMapping()
 	allowed, restricted := h.allowedModelsForRequest(r)
-	return modelvis.PublicModels(abilities, allowed, restricted, reverse), true
+	names := modelvis.PublicModels(abilities, allowed, restricted, reverse)
+	// ⚠⚠ 补上"被别的渠道抢走裸名"的那一份 —— 用户实测报障的真实缺陷（见下面的长注释）。
+	names = append(names, h.channelShadowedPublicNames(reverse, allowed, restricted)...)
+	return names, true
+}
+
+// channelShadowedPublicNames 补出"裸名被别的渠道抢走、因而在目录里消失"的渠道模型名。
+//
+// # 判据（为什么不是"给每条渠道的每个模型都补"）
+//
+// 只补**确实被遮蔽**的那些，判据三条同时成立：
+//
+//	① 该渠道没有为这个模型写 ModelMap（写了映射的渠道，它的对外名就是那个别名，
+//	   再暴露 <渠道名>/<模型> 等于凭空多出一个用户没打算公开的名字）；
+//	② 全局反向表里这个名字的得主**不是**本渠道（先到先得 ⇒ 本渠道输了）；
+//	③ 名字本身可用（白名单口径与 modelvis.PublicModels 一致）。
+//
+// 不这么收窄的后果是"无冲突场景下目录也会变大"——实测会打破既有的目录基数守卫
+// （TestStoreModelCatalogSeed 的 chip 基数、TestModelsCatalogViewMarksSyntheticUnselectable
+//
+//	的合成行归属），那不是本次要修的东西。
+//
+// # 为什么必须补（用户实测报障）
+//
+// # 为什么必须补这一份（用户实测报障）
+//
+// 对外目录的名字来自两条**按裸模型名收敛**的链路：
+//
+//	channelstore.EnabledModels  —— 按 ab.Model 去重 ⇒ 丢掉"这个模型属于哪条渠道"
+//	channelReverseMapping       —— map[裸上游名]公开名；多条渠道声明同名时**先到先得**
+//
+// 于是两条渠道声明同一个模型名时，只有一条能出现在目录里，另一条的模型**彻底消失**
+// （路由侧其实两条都能服务，只是名字没被暴露出来）。
+//
+// 实测证据（用户报「渠道有这些模型，但分组里找不到」，渠道声明 8 个、目录只见 3 个）：
+//
+//	deepseek-flash       ← 与 apigoto      重名 ⇒ 缺
+//	deepseek-v4-flash    ← 与 token360     重名 ⇒ 缺
+//	deepseek-v4.1-flash  ← 与 token360     重名 ⇒ 缺
+//	glm-5.2              ← 与 token360     重名 ⇒ 缺
+//	kimi-k3              ← 与 token360     重名 ⇒ 缺
+//	sensenova-6.8-flash  ← 该渠道独有 ⇒ 在目录里（所以只剩 3 个）
+//
+// 命名空间形式 `<渠道名>/<上游名>` 本来就是路由侧认得的形状
+// （channelroute.upstreamName 走 modelmap.SplitNamespaced），非重名模型一直就是这个形态 ——
+// 这里只是把重名的那一半补齐，让"每条渠道的每个模型"都可见、可选。
+func (h *Handler) channelShadowedPublicNames(reverse map[string]string, allowed []string, restricted bool) []string {
+	s := h.cfg.Channels
+	if s == nil {
+		return nil
+	}
+	allow := make(map[string]bool, len(allowed))
+	for _, w := range allowed {
+		if w != "" {
+			allow[w] = true
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, ch := range s.List() {
+		if ch == nil || ch.Status != channelstore.StatusEnabled {
+			continue
+		}
+		rev, _ := modelmap.Mapping(ch.ModelMap).Reverse()
+		for _, m := range ch.Models {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			// ① 有映射的模型不补：它的对外名是用户指定的别名。
+			if p, ok := rev[m]; ok && p != "" {
+				continue
+			}
+			want := modelmap.Namespaced(ch.Name, m)
+			// ② 没被抢走 ⇒ 目录里已经有这个名字，不必补。
+			if got, ok := reverse[m]; ok && got == want {
+				continue
+			}
+			if _, exists := reverse[m]; !exists && want == m {
+				// 反向表里根本没有这个名字（例如能力行缺失）：交给既有链路，别在这里造名字。
+				continue
+			}
+			// 白名单按**公开名**挑，与 modelvis.PublicModels 同一口径。
+			if restricted && !allow[want] {
+				continue
+			}
+			if seen[want] {
+				continue
+			}
+			seen[want] = true
+			out = append(out, want)
+		}
+	}
+	return out
 }
 
 // channelReverseMapping 汇总所有渠道的映射，得到"上游真实名 → 公开名"。
