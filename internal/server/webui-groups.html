@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>分组管理 · 网关</title>
 <!--
   webui-groups.html —— 分组管理页（PLAN-groups.md P6）。
@@ -1564,16 +1565,16 @@ function mpEsc(s) {
 <dialog id="dlg">
   <div class="dlg-h" id="dlgTitle">新增分组</div>
   <div class="dlg-b">
-    <label class="req">名称</label>
+    <label class="req" for="f-name">名称</label>
     <input id="f-name" placeholder="例如 vip / 付费用户 / 内部测试" maxlength="80">
     <div class="hint">名称唯一（重名会被拒绝）。它只是展示名 —— API Key 引用的是分组 ID，改名不会断链。</div>
 
-    <label>描述</label>
+    <label for="f-desc">描述</label>
     <input id="f-desc" placeholder="可选，方便自己分辨" maxlength="200">
 
     <label>模型</label>
     <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <input id="f-search" placeholder="搜索模型名（支持部分匹配，例如 deepseek / glm）" style="flex:1;min-width:180px" oninput="renderChoices()">
+      <input id="f-search" aria-label="搜索模型名" placeholder="搜索模型名（支持部分匹配，例如 deepseek / glm）" style="flex:1;min-width:180px" oninput="renderChoices()">
       <button type="button" onclick="pickAll(true)" style="white-space:nowrap">全选当前</button>
       <button type="button" onclick="pickAll(false)" style="white-space:nowrap">清空</button>
     </div>
@@ -1581,13 +1582,13 @@ function mpEsc(s) {
 <!-- 上游筛选（与 API 管理页的 #akProvider 同一形态：<select> 下拉，不是按钮条）。
      ⚠ 只决定"下面列出什么"，不改已选中的模型。 -->
 <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
-<select id="gProvider" style="min-width:150px" title="先选上游，只列出它的模型（不改已选中的模型）" onchange="renderChoices()">
+<select id="gProvider" aria-label="按上游筛选模型" style="min-width:150px" title="先选上游，只列出它的模型（不改已选中的模型）" onchange="renderChoices()">
 <option value="">全部上游</option>
 </select>
 <span class="muted" style="font-size:11px" id="gProvHint"></span>
 </div>
 
-<input id="f-manual" class="full" placeholder="也可以直接粘：逗号或换行分隔的内部模型名（回车/失焦后并入已选）" onchange="mergeManual()">
+<input id="f-manual" class="full" aria-label="手工输入模型名" placeholder="也可以直接粘：逗号或换行分隔的内部模型名（回车/失焦后并入已选）" onchange="mergeManual()">
 
     <!-- 已选清单置顶：列表有几百个模型，只报数量等于不可核对。 -->
     <div id="gPickedBox" class="full">

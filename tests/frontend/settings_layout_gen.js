@@ -351,10 +351,33 @@ const allIdsInSec = [...sec.matchAll(/<(?:input|select|textarea)[^>]*id="([^"]+)
 const fors = [...sec.matchAll(/<label for="([^"]+)"/g)].map(m => m[1]);
 const badFor = fors.filter(f => !allIdsInSec.includes(f));
 ok(badFor.length === 0, 'label[for] 指向不存在的 id: ' + (badFor.length ? badFor.join(', ') : '(无)'));
-// 关系式断言（比硬编码数字更耐结构变化）：label[for] 数必须等于复选框数
-const chkCount = allKinds.filter(k => k === 'CHK').length;
-ok(fors.length === chkCount, 'label[for] 数量 = ' + fors.length + '，期望 = 复选框数 ' + chkCount);
-ok(fors.length === 6, 'label[for] 数量 = ' + fors.length + '，期望 6（收敛后 4 个 + 破甲自动重试 1 个 + 模型名严格前缀 1 个）');
+// [A2] 可访问性：**每个带 id 的控件都必须有关联 label**（2026-11-05 改）
+//
+// # 为什么换掉旧断言
+//
+// 旧断言是两条启发式：
+//   ① 'label[for] 数 == 复选框数'  —— 假设 for 只用在 checkbox 上
+//   ② 'label[for] 数 == 6'（硬编码）
+// 两条在 2026-11-05 修 form-labels（MCP accessibility critical）时**同时失效**：
+// 14 个 input/select/textarea 补上了 for，而 checkbox 仍是 6 个 —— ① 立刻红；
+// ② 更是每加一个控件就要改数字，属于"钉住实现细节"。
+//
+// 现在的断言**有语义**：凡是在 SET_FIELDS 里登记过（即会被 collectSettings 读取）的控件，
+// 都必须有一个 for=<该 id> 的 label（或 aria-label / label 包裹 —— 后两者由 MCP 审计覆盖）。
+// 好处：加控件不再假红；而"新加控件忘了写 label"会**真红** —— 那正是这条要防的。
+const setFieldIds = [...sec.matchAll(/\['([A-Za-z0-9_]+)',\s*'[a-z0-9_]+',\s*'(?:str|bool|num|int|sel)'\]/g)].map(m => m[1]);
+const labeledIds = new Set(fors);
+const arialabeled = new Set([...sec.matchAll(/<(?:input|select|textarea)[^>]*aria-label="[^"]+"[^>]*id="([^"]+)"/g)].map(m => m[1]));
+// 隐式关联：<label ...> ... <input id=...> ... </label>
+const implicitLabeled = new Set();
+for (const lm of sec.matchAll(/<label\b[^>]*>([\s\S]{0,400}?)<\/label>/g)) {
+  for (const im of lm[1].matchAll(/<(?:input|select|textarea)[^>]*id="([^"]+)"/g)) implicitLabeled.add(im[1]);
+}
+const unlabeled = setFieldIds.filter(id => !labeledIds.has(id) && !arialabeled.has(id) && !implicitLabeled.has(id));
+ok(unlabeled.length === 0, 'SET_FIELDS 登记的控件都有关联 label（缺: ' + (unlabeled.length ? unlabeled.join(', ') : '(无)') + '）');
+// 反向：不该有 label 指向一个不存在的字段（防止 for 写错 id，那会让 a11y 静默失效）
+const orphanFor = [...labeledIds].filter(id => !allIdsInSec.includes(id));
+ok(orphanFor.length === 0, 'label[for] 指向不存在的 id（拼错会让关联静默失效）: ' + (orphanFor.length ? orphanFor.join(', ') : '(无)'));
 // 两个解析器交叉验证：input 扫描 与 .field 扫描 必须给出同样多的带 id 输入控件
 ok(allIdsInSec.length === now.length, '带 id 的 input = ' + allIdsInSec.length + ' 与 .field 解析出的 id = ' + now.length + ' 一致');
 

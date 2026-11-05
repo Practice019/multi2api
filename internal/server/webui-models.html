@@ -1600,6 +1600,9 @@ header.statline { align-items:baseline; }
       <button id="btnVFiltClear" type="button">显示全部</button>
     </div>
     <div class="toolbar">
+      <!-- aria-label 原本就在第二行（MCP form-labels 认可它）；
+           我一度在第一行也加了一个 ⇒ 重复属性、浏览器取第一个、第二个被忽略。
+           已删掉第一行那个，保留原有的。 -->
       <input id="search" type="search" placeholder="过滤模型 id / 供应商…" autocomplete="off"
              aria-label="过滤模型">
       <label class="chk"><input id="checkAll" type="checkbox"> 全选</label>

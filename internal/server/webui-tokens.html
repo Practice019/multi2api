@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- 内网管理页：不外发 referrer，避免把 127.0.0.1 的路径泄露给任何外链资源。 -->
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>令牌管理 · 中转站</title>
 <!-- 主题防闪白：与 status / channels / models 三页同一条理由，必须在样式表生效前同步跑完。 -->
 <script>
@@ -1410,7 +1412,7 @@ header h1{letter-spacing:0}
 <header>
   <span class="dim" id="hint">每页 10 条 · 明文只在点击「复制」那一刻出现</span>
   <span class="spacer"></span>
-  <input type="text" id="kw" placeholder="搜索名称 / Key / 归属" style="width:200px">
+  <input type="text" id="kw" aria-label="搜索令牌" placeholder="搜索名称 / Key / 归属" style="width:200px">
   <button id="btnNew" type="button" class="primary">新建令牌</button>
 </header>
 
@@ -1419,7 +1421,7 @@ header h1{letter-spacing:0}
     <table>
       <thead>
         <tr>
-          <th>名称</th><th>Key（掩码）</th><th>创建日期</th><th>最近使用</th><th style="text-align:right">操作</th>
+          <th scope="col">名称</th><th scope="col">Key（掩码）</th><th scope="col">创建日期</th><th scope="col">最近使用</th><th scope="col" style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -1483,7 +1485,7 @@ header h1{letter-spacing:0}
       <div class="partial hidden" id="groupBanner"></div>
 
       <div class="field hidden" id="w-autogroups">
-        <label>分组优先级（拖动排序，顺序即优先级）</label>
+        <label for="f-autogroup-pick">分组优先级（拖动排序，顺序即优先级）</label>
         <div class="row">
           <select id="f-autogroup-pick"></select>
           <button type="button" id="btnAutoAdd">加入</button>
@@ -1494,7 +1496,7 @@ header h1{letter-spacing:0}
 
       <!-- ⑥ 分组优先级（manual） -->
       <div class="field hidden" id="w-groups">
-        <label>分组优先级（拖动排序，至少 1 个）</label>
+        <label for="f-group-pick">分组优先级（拖动排序，至少 1 个）</label>
         <div class="row">
           <select id="f-group-pick"></select>
           <button type="button" id="btnGroupAdd">加入</button>

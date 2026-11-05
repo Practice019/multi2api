@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>渠道管理 · 中转站</title>
 <!--
   webui-channels.html —— 渠道管理页（C2 重写，2026-10-26）。
@@ -1458,8 +1459,8 @@ header h1{letter-spacing:0}
   </div>
 
   <div class="filters">
-    <input class="ipt" id="flt-q" placeholder="搜索渠道名称/key/分组" autocomplete="off">
-    <select class="sel" id="flt-status" title="按状态筛选（服务端）">
+    <input class="ipt" id="flt-q" aria-label="搜索渠道" placeholder="搜索渠道名称/key/分组" autocomplete="off">
+    <select class="sel" id="flt-status" aria-label="按状态筛选" title="按状态筛选（服务端）">
       <option value="">状态：全部</option>
       <option value="1">启用</option>
       <option value="2">禁用</option>
@@ -1479,7 +1480,7 @@ header h1{letter-spacing:0}
       </colgroup>
       <thead>
         <tr>
-          <th><input type="checkbox" id="ck-all" title="全选本页"></th>
+          <th><input type="checkbox" id="ck-all" aria-label="全选本页" title="全选本页"></th>
           <th>ID</th><th>名称</th><th>标签名称</th><th>类型</th><th>分组</th><th>状态</th>
           <th>优先级</th><th>权重</th><th>已用</th><th>渠道余额</th><th style="text-align:right">操作</th>
         </tr>
@@ -1657,7 +1658,7 @@ function render() {
     var checked = st.sel[ch.id] ? ' checked' : '';
     var tag = ch.tag ? '<button type="button" class="tagl" data-tag="' + esc(ch.tag) + '">' + esc(ch.tag) + '</button>' : '<span class="dash">—</span>';
     html += '<tr data-id="' + esc(ch.id) + '"' + (st.sel[ch.id] ? ' class="sel"' : '') + (st.drag ? ' draggable="true"' : '') + '>' +
-      '<td><input type="checkbox" class="ck" data-id="' + esc(ch.id) + '"' + checked + '></td>' +
+      '<td><input type="checkbox" class="ck" aria-label="选择渠道 ' + esc(ch.name || ch.id) + '" data-id="' + esc(ch.id) + '"' + checked + '></td>' +
       '<td class="c-id" title="' + esc(ch.id) + '">' + esc(ch.id) + '</td>' +
       '<td class="c-name" title="' + esc(ch.name) + '">' + esc(ch.name) + '</td>' +
       '<td>' + tag + '</td>' +
@@ -1929,16 +1930,16 @@ function openFilters() {
     '<div class="modal calm" role="dialog" aria-label="筛选器">' +
       '<div class="dh"><h2>筛选器</h2><button class="mini x" id="flt-x">关闭</button></div>' +
       '<div class="sec"><h3>筛选</h3>' +
-        '<div class="row"><label>分组</label><input class="ipt" id="f-group" value="' + esc(st.f.group) + '" placeholder="精确匹配 channels.group"></div>' +
-        '<div class="row"><label>状态</label><select class="sel" id="f-status">' +
+        '<div class="row"><label for="f-group">分组</label><input class="ipt" id="f-group" value="' + esc(st.f.group) + '" placeholder="精确匹配 channels.group"></div>' +
+        '<div class="row"><label for="f-status">状态</label><select class="sel" id="f-status">' +
           ['', '1', '2', '3', '0'].map(function (v) {
             var t = v === '' ? '全部' : (v === '1' ? '启用' : (v === '2' ? '禁用' : (v === '3' ? '自动禁用' : '未启用')));
             return '<option value="' + v + '"' + (st.f.status === v ? ' selected' : '') + '>' + t + '</option>';
           }).join('') + '</select></div>' +
       '</div>' +
       '<div class="sec"><h3>排序（服务端）</h3>' +
-        '<div class="row"><label>字段</label><select class="sel" id="f-sort"><option value="">默认（优先级/ID）</option>' + opts + '</select></div>' +
-        '<div class="row"><label>方向</label><select class="sel" id="f-dir">' +
+        '<div class="row"><label for="f-sort">字段</label><select class="sel" id="f-sort"><option value="">默认（优先级/ID）</option>' + opts + '</select></div>' +
+        '<div class="row"><label for="f-dir">方向</label><select class="sel" id="f-dir">' +
           ['', 'desc', 'asc'].map(function (v) {
             var t = v === '' ? '默认' : (v === 'desc' ? '降序' : '升序');
             return '<option value="' + v + '"' + (st.f.sortOrder === v ? ' selected' : '') + '>' + t + '</option>';
@@ -1978,14 +1979,14 @@ function openDrawer(id) {
         '<button class="mini x" id="dlg-x">关闭</button></div>' +
 
       '<div class="sec"><h3>① 基本信息</h3>' +
-        '<div class="row"><label>类型</label><select class="sel" id="f-type">' +
+        '<div class="row"><label for="f-type">类型</label><select class="sel" id="f-type">' +
           Object.keys(TYPE_NAMES).map(function (t) {
             var sel = String(ch ? ch.type : 0) === String(t) ? ' selected' : '';
             return '<option value="' + t + '"' + sel + '>' + TYPE_NAMES[t] + '</option>';
           }).join('') + '</select></div>' +
-        '<div class="row"><label>名称 <span class="hint">必填</span></label><input class="ipt grow" id="f-name" value="' + esc(ch ? ch.name : '') + '"></div>' +
+        '<div class="row"><label for="f-name">名称 <span class="hint">必填</span></label><input class="ipt grow" id="f-name" value="' + esc(ch ? ch.name : '') + '"></div>' +
         (dlgState.isNew ?
-          '<div class="row"><label>创建模式</label><select class="sel" id="f-mode">' +
+          '<div class="row"><label for="f-mode">创建模式</label><select class="sel" id="f-mode"' +
             '<option value="single">单个创建（一份密钥 = 一条渠道）</option>' +
             '<option value="batch">批量创建（每行一个 key 建一条）</option>' +
             '<option value="multi_to_single">多 Key 合一（所有 key 合成一条渠道）</option>' +
@@ -1994,13 +1995,13 @@ function openDrawer(id) {
 
       '<div class="sec"><h3>② 密钥与连接</h3>' +
         '<div class="row"><label>密钥</label></div>' +
-        '<div class="row"><textarea class="ta" id="f-keys" placeholder="' +
+        '<div class="row"><textarea class="ta" id="f-keys" aria-label="渠道密钥" placeholder="' +
           (dlgState.isNew ? '一行一个 key（必填）' : '留空 = 不改动现有密钥；要替换请粘贴新 key') + '"></textarea></div>' +
         '<div class="row"><span class="hint">' + (dlgState.isNew ? '新建时必填。' : '编辑时留空即不改（后端语义：keys 不传 = 不动）。') +
           '批量创建模式下：每行一个 key 各建一条渠道。</span></div>' +
-        '<div class="row"><label>API 地址</label><input class="ipt grow" id="f-base" value="' + esc(ch ? ch.base_url : '') + '" list="base-presets">' +
+        '<div class="row"><label for="f-base">API 地址</label><input class="ipt grow" id="f-base" value="' + esc(ch ? ch.base_url : '') + '" list="base-presets">' +
           '<datalist id="base-presets">' + BASE_PRESETS.map(function (b) { return '<option value="' + b + '"></option>'; }).join('') + '</datalist></div>' +
-        '<div class="row"><label>多 Key 模式</label><select class="sel" id="f-kmode">' +
+        '<div class="row"><label for="f-kmode">多 Key 模式</label><select class="sel" id="f-kmode"' +
           ['', 'random', 'round_robin'].map(function (v) {
             var t = v === '' ? '默认（随机）' : (v === 'random' ? '随机' : '轮询');
             return '<option value="' + v + '"' + ((ch && ch.key_selection_mode === v) ? ' selected' : '') + '>' + t + '</option>';
@@ -2011,29 +2012,29 @@ function openDrawer(id) {
       '<div class="sec"><h3>③ 模型配置</h3>' +
         '<div class="row"><button class="mini" id="f-pull">从上游拉取</button>' +
           '<button class="mini" id="f-default">填入默认模型</button>' +
-          '<button class="mini" id="f-clear">清除所有</button></div>' +
-        '<div class="row"><textarea class="ta" id="f-models" placeholder="一行一个模型名">' + esc(ch ? (ch.models || []).join('\n') : '') + '</textarea></div>' +
-        '<div class="row"><label>自定义模型名</label><input class="ipt" id="f-custom"><button class="mini" id="f-addc">填入</button></div>' +
-        '<div class="row"><label>分组（逗号分隔）</label><input class="ipt grow" id="f-groups" value="' + esc(ch ? (ch.groups || []).join(',') : 'default') + '"></div>' +
+          '<button class="mini" id="f-clear-all">清除所有</button></div>' +
+        '<div class="row"><textarea class="ta" id="f-models" aria-label="渠道模型列表" placeholder="一行一个模型名">' + esc(ch ? (ch.models || []).join('\n') : '') + '</textarea></div>' +
+        '<div class="row"><label for="f-custom">自定义模型名</label><input class="ipt" id="f-custom"><button class="mini" id="f-addc">填入</button></div>' +
+        '<div class="row"><label for="f-groups">分组（逗号分隔）</label><input class="ipt grow" id="f-groups" value="' + esc(ch ? (ch.groups || []).join(',') : 'default') + '"></div>' +
         '<div class="row"><label>模型重定向</label><button class="mini" id="f-mtoggle">可视化</button>' +
           '<button class="mini" id="f-mgen">批量生成映射</button>' +
           '<label class="pill"><input type="checkbox" id="f-msync"> 同步别名到渠道模型列表</label></div>' +
-        '<div class="row"><textarea class="ta" id="f-map" placeholder="{&quot;公开名&quot;:&quot;上游名&quot;}">' + esc(ch ? JSON.stringify(ch.model_mapping || {}, null, 1) : '{}') + '</textarea></div>' +
+        '<div class="row"><textarea class="ta" id="f-map" aria-label="模型映射 JSON" placeholder="{&quot;公开名&quot;:&quot;上游名&quot;}">' + esc(ch ? JSON.stringify(ch.model_mapping || {}, null, 1) : '{}') + '</textarea></div>' +
         '<div class="row" id="f-mapvis" hidden></div>' +
         '<div class="row"><span class="ro">是否自动禁用：后端尚未登记为可写字段（由测试路径维护），本页只读。</span></div>' +
       '</div>' +
 
       '<div class="sec"><h3>④ 高级与运行</h3>' +
-        '<div class="row"><label>优先级</label><input class="ipt ipt--sm" id="f-pri" value="' + (ch ? ch.priority : 0) + '">' +
-          '<label>权重 ≥0</label><input class="ipt ipt--sm" id="f-wt" value="' + (ch ? ch.weight : 0) + '"></div>' +
-        (dlgState.isNew ? '<div class="row"><label>状态</label><select class="sel" id="f-st"><option value="1">启用</option><option value="2">禁用</option></select></div>' : '') +
-        '<div class="row"><label>渠道标签</label><input class="ipt" id="f-tag" value="' + esc(ch ? (ch.tag || '') : '') + '">' +
+        '<div class="row"><label for="f-pri">优先级</label><input class="ipt ipt--sm" id="f-pri" value="' + (ch ? ch.priority : 0) + '">' +
+          '<label for="f-wt">权重 ≥0</label><input class="ipt ipt--sm" id="f-wt" value="' + (ch ? ch.weight : 0) + '"></div>' +
+        (dlgState.isNew ? '<div class="row"><label for="f-st">状态</label><select class="sel" id="f-st"><option value="1">启用</option><option value="2">禁用</option></select></div>' : '') +
+        '<div class="row"><label for="f-tag">渠道标签</label><input class="ipt" id="f-tag" value="' + esc(ch ? (ch.tag || '') : '') + '">' +
           '<span class="hint">保存后按标签写（tag/batch）</span></div>' +
         '<div class="row"><span class="ro">测试模型 / 备注 / 参数覆盖 / 请求头覆盖 / 状态码复写：后端尚未登记，本页不提交。</span></div>' +
       '</div>' +
 
       '<div class="foot"><button class="tb tb--go" id="f-save">保存</button>' +
-        '<button class="tb" id="f-cancel">取消</button><span class="grow"></span><span class="ro" id="f-status"></span></div>' +
+        '<button class="tb" id="f-cancel">取消</button><span class="grow"></span><span class="ro" id="f-save-status"></span></div>' +
     '</div>';
 
   $('dlg-x').addEventListener('click', closeDrawer);
@@ -2042,7 +2043,7 @@ function openDrawer(id) {
   $('f-save').addEventListener('click', saveDrawer);
   $('f-pull').addEventListener('click', function () { pullModels(); });
   $('f-default').addEventListener('click', function () { $('f-models').value = DEFAULT_MODELS.join('\n'); });
-  $('f-clear').addEventListener('click', function () { $('f-models').value = ''; });
+  $('f-clear-all').addEventListener('click', function () { $('f-models').value = ''; });
   $('f-addc').addEventListener('click', addCustomModel);
   $('f-mgen').addEventListener('click', genMapping);
   $('f-mtoggle').addEventListener('click', toggleMapView);
@@ -2142,7 +2143,7 @@ function saveDrawer() {
   var tag = $('f-tag').value.trim();
   dlgState.save = true;
   $('f-save').disabled = true; $('f-cancel').disabled = true;
-  $('f-status').textContent = '保存中…';
+  $('f-save-status').textContent = '保存中…';
   api('POST', '/admin/channels', body).then(function () {
     if (!tag || dlgState.isNew) { return null; }
     return api('POST', '/admin/channels/tag/batch', { ids: [dlgState.id], tag: tag });
@@ -2154,7 +2155,7 @@ function saveDrawer() {
     banner('err', '保存失败：' + e.message);
   }).then(function () {
     dlgState.save = false;
-    if ($('f-save')) { $('f-save').disabled = false; $('f-cancel').disabled = false; $('f-status').textContent = ''; }
+    if ($('f-save')) { $('f-save').disabled = false; $('f-cancel').disabled = false; $('f-save-status').textContent = ''; }
   });
 }
 function parseMap() {

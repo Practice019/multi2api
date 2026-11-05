@@ -3885,7 +3885,7 @@ function toast(msg, bad) {
         <div style="margin:10px 0 8px">
           <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
           <div class="row" style="gap:8px">
-            <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
+            <input id="manualCode" type="text" aria-label="粘贴回跳 URL 或授权码" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
             <button id="btnManualComplete" type="button">粘贴完成</button>
           </div>
         </div>` : '';
@@ -6419,6 +6419,8 @@ function toast(msg, bad) {
     // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
     //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
     ['setArmorMode', 'prompt_armor_mode', 'str'],
+    // 模型名严格前缀（bool；后端 strict_model_prefix，热生效）。
+    ['setStrictModelPrefix', 'strict_model_prefix', 'bool'],
     // 破甲：命中拒绝后是否自动重试一次（bool；后端 prompt_armor_retry，热生效）。
     ['setArmorRetry', 'prompt_armor_retry', 'bool'],
     ['setMcProxy', 'monkeycode_proxy', 'str'],

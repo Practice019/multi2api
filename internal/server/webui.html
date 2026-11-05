@@ -2954,7 +2954,7 @@ function mpEsc(s) {
            才生效"。现在只存在内存里，刷新页面要重新粘一次 —— 代价是多粘一次，
            换来的是"磁盘上没有任何长期凭据"。 -->
   <span id="keyFallback" style="display:none;align-items:center;gap:8px">
-    <input id="key" class="key" type="password"
+    <input id="key" class="key" type="password" aria-label="对话密钥 api_key"
            placeholder="对话密钥 api_key（只影响 /v1 测试与模型目录）" autocomplete="off">
     <button id="conn" class="primary">应用</button>
   </span>
@@ -3567,7 +3567,7 @@ function mpEsc(s) {
     <div class="body" style="padding:0;border-top:1px solid var(--line)">
       <div style="padding:9px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);flex-wrap:wrap">
         <span class="dim" style="font-size:12px">任务明细</span>
-        <select id="growthAccount" style="padding:3px 8px;font-size:12px;max-width:280px"></select>
+        <select id="growthAccount" aria-label="成长任务账号" style="padding:3px 8px;font-size:12px;max-width:280px"></select>
         <!-- 合并后的「一键完成」按钮（原「一键完成待办」+「开学季一键完成」合并）：
              作用于下拉框选中的账号，选「全部账号」则作用于所有账号。
              依次执行两条真实端点（POST /admin/growth/auto-all → POST /admin/school/run，
@@ -3725,11 +3725,11 @@ function mpEsc(s) {
              ⚠ 它**只影响下拉里列出什么**，不改发出去的模型 id ——
              选中的那个 id 原样发给网关（`provider/xxx` 就是显式指定上游）。
              选择存 localStorage（与 pagesize / modelgroup 同一个模式）。 -->
-        <select id="modelProvider" style="min-width:130px"
+        <select id="modelProvider" aria-label="按上游筛选模型" style="min-width:130px"
                 title="按上游筛选下面的模型列表（不改发出去的模型 id）">
           <option value="">全部上游</option>
         </select>
-        <select id="model" style="min-width:240px"><option value="">— 先连接 —</option></select>
+        <select id="model" aria-label="选择模型" style="min-width:240px"><option value="">— 先连接 —</option></select>
         <!-- ⚠ 模型下拉为空时**必须给一句话说明为什么**（2026-10-19 用户实测反馈：
              下拉空白 ⇒ "这个好像有bug"，而真相是"没粘对话密钥"或"目录还没拉"）。
              三种空因分别给不同文案，见 syncModelSelect 里的 setModelHint。
@@ -3740,7 +3740,7 @@ function mpEsc(s) {
         <div class="spacer"></div>
         <button id="send" class="primary">发送</button>
       </div>
-      <textarea id="prompt" placeholder="输入内容，Enter 发送 / Shift+Enter 换行">只回复四个字：网关打通</textarea>
+      <textarea id="prompt" aria-label="对话输入" placeholder="输入内容，Enter 发送 / Shift+Enter 换行">只回复四个字：网关打通</textarea>
       <pre id="out" class="dim">等待发送…</pre>
     </div>
   </section>
@@ -3778,9 +3778,9 @@ function mpEsc(s) {
       <fieldset>
         <legend>历史与日志 <span class="badge badge--hot">立即生效</span></legend>
         <div class="formgrid">
-          <div class="field"><label>签到历史保留天数</label>
+          <div class="field"><label for="setCheckinLogDays">签到历史保留天数</label>
             <input type="number" id="setCheckinLogDays" min="1" max="3650"></div>
-          <div class="field"><label>请求日志保留天数</label>
+          <div class="field"><label for="setReqLogDays">请求日志保留天数</label>
             <input type="number" id="setReqLogDays" min="1" max="3650"><span class="hint">超过窗口的旧记录在下次裁剪时清除</span></div>
         </div>
         <p class="info-line" id="setLogFileInfo" style="margin-top:12px"></p>
@@ -3794,7 +3794,7 @@ function mpEsc(s) {
              也不许"改了要重启才生效"（那样用户没法当场确认到底有没有注入）。
              三档模式的语义见 internal/prompt/armor.go：off / append / replace。 -->
         <div class="formgrid">
-          <div class="field"><label>破甲注入</label>
+          <div class="field"><label for="setArmorMode">破甲注入</label>
             <!-- 默认仍是 off（config.go 的 normalize 与适配器都以 ArmorOff 兜底）。
                  这里只把**推荐项**与**风险**写清楚 —— 默认不许擅自改成 append：
                  注入会改变每一条出站请求，装上就开等于替用户做了决定。 -->
@@ -3838,7 +3838,7 @@ function mpEsc(s) {
       <fieldset>
         <legend>网络与容错 <span class="badge badge--cold">重启生效</span></legend>
         <div class="formgrid">
-          <div class="field"><label>上游请求超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
+          <div class="field"><label for="setUpTimeout">上游请求超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
         </div>
         <!-- MonkeyCode 的两个出口（2026-11-01 用户要求：这东西不能写死）。
              # 为什么必须能改
@@ -3852,10 +3852,10 @@ function mpEsc(s) {
              并排会让「改完要不要重启」这个最要紧的信息变模糊。 -->
         <div class="subgroup">MonkeyCode 出口 <span class="badge badge--hot">立即生效</span></div>
         <div class="formgrid">
-          <div class="field"><label>国际站代理（monkeycode-ai.net）</label>
+          <div class="field"><label for="setMcProxy">国际站代理（monkeycode-ai.net）</label>
             <input type="text" id="setMcProxy" placeholder="http://127.0.0.1:10808，留空=直连">
             <span class="hint">国际站**可直连，也可走代理**（多数环境直连即可）。只有本机直连不通时才需要填代理。改完可到「账号池 → 出口自检」验证。</span></div>
-          <div class="field"><label>国内站强制代理（monkeycode-ai.com）</label>
+          <div class="field"><label for="setMcDirectProxy">国内站强制代理（monkeycode-ai.com）</label>
             <input type="text" id="setMcDirectProxy" placeholder="留空 = 直连（正常部署就该留空）">
             <span class="hint">只有「本机连不上国内站」时才填。走了海外代理的国内站既慢又容易被风控。</span></div>
         </div>
@@ -3870,7 +3870,7 @@ function mpEsc(s) {
              的解封探活（被上游风控 / 连败禁用的号）。两者节奏差一个数量级，
              合成一个旋钮必然有一方节奏错 —— 所以是两个独立间隔。 -->
         <div class="formgrid">
-          <div class="field"><label>探测间隔（小时）</label>
+          <div class="field"><label for="setReviveHours">探测间隔（小时）</label>
             <input type="number" id="setReviveHours" min="0" max="8760">
             <span class="hint">每 N 小时给<b>被自动禁用</b>的账号发一个便宜请求（模型目录/额度等，不消耗对话额度）探活，通了即解除禁用。<b>0 = 关闭</b>（被禁的号只能人工恢复）。默认 24。<br>
               由人工禁用、或凭证死亡导致的禁用<b>不会</b>被探测翻案 —— 那是操作员的明确决定。</span></div>
@@ -3964,18 +3964,18 @@ function mpEsc(s) {
     <h3 id="akTitle" style="margin:0 0 14px;font-size:15px">新建 API Key</h3>
 
     <div id="akNameRow" style="margin-bottom:12px">
-      <label class="dim" style="font-size:12px;display:block;margin-bottom:4px">名称（调用方/用途，必填）</label>
+      <label class="dim" for="akName" style="font-size:12px;display:block;margin-bottom:4px">名称（调用方/用途，必填）</label>
       <input id="akName" type="text" placeholder="例如：我的爬虫 / 张三的客户端" style="width:100%;box-sizing:border-box">
     </div>
     <div id="akNameRO" class="dim" style="font-size:12px;margin-bottom:12px;display:none"></div>
 
     <div class="row" style="gap:12px;margin-bottom:12px">
       <div style="flex:1">
-        <label class="dim" style="font-size:12px;display:block;margin-bottom:4px">额度上限（token 数，0 = 不限）</label>
+        <label class="dim" for="akLimit" style="font-size:12px;display:block;margin-bottom:4px">额度上限（token 数，0 = 不限）</label>
         <input id="akLimit" type="number" min="0" step="1" value="0" style="width:100%;box-sizing:border-box">
       </div>
       <div style="flex:1">
-        <label class="dim" style="font-size:12px;display:block;margin-bottom:4px">每分钟请求上限（0 = 不限）</label>
+        <label class="dim" for="akRpm" style="font-size:12px;display:block;margin-bottom:4px">每分钟请求上限（0 = 不限）</label>
         <input id="akRpm" type="number" min="0" step="1" value="0" style="width:100%;box-sizing:border-box">
       </div>
     </div>
@@ -6167,7 +6167,7 @@ let loginProvider = '';
       return `<div class="colset-row" data-colsrow="${esc(it.k)}">
         <span class="colset-grip" data-colsgrip="${esc(it.k)}" title="按住拖动调整列顺序">⋮⋮</span>
         <span class="colset-name" title="${esc(d.title)}">${esc(d.title)}</span>
-        <input type="checkbox" data-colstoggle="${esc(it.k)}"${it.v ? ' checked' : ''}`
+        <input type="checkbox" aria-label="显示 ${esc(d.title)} 列" data-colstoggle="${esc(it.k)}"${it.v ? ' checked' : ''}`
         + `${lock ? ' disabled' : ''} title="${lock ? '至少要留一列' : (it.v ? '这一列正在显示' : '这一列已隐藏')}">`
         + `</div>`;
     }).join('');
@@ -7814,7 +7814,7 @@ function toast(msg, bad) {
         ).join('');
         return `<div class="row" style="gap:8px;align-items:center;margin:8px 0">`
           + `<label class="dim" style="font-size:12px;min-width:56px">${esc(o.label || o.key)}</label>`
-          + `<select data-loginopt="${esc(o.key)}" style="flex:1">${opts}</select></div>`
+          + `<select aria-label="登录方式" data-loginopt="${esc(o.key)}" style="flex:1">${opts}</select></div>`
           + (o.hint ? `<div class="dim" style="font-size:11px;margin:-4px 0 8px 64px">${esc(o.hint)}</div>` : '');
       }).join('') + '<div class="row" style="gap:8px;margin-top:10px"><button id="btnLoginGo" type="button">开始登录</button></div>';
       // 有选项：等用户点「开始登录」。把它接到**同一个** doStart 上。
@@ -7875,7 +7875,7 @@ function toast(msg, bad) {
         <div style="margin:10px 0 8px">
           <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
           <div class="row" style="gap:8px">
-            <input id="manualCode" type="text" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
+            <input id="manualCode" type="text" aria-label="粘贴回跳 URL 或授权码" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
             <button id="btnManualComplete" type="button">粘贴完成</button>
           </div>
         </div>` : '';
