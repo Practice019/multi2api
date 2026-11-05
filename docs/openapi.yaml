@@ -1,0 +1,4058 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://spec.openapis.org/oas/3.1/dialect/base
+info:
+  title: multi2api 网关 HTTP API
+  version: 1.0.0
+  summary: 上游账号池 / 渠道转发网关的对外与管理接口
+  description: 本项目的全部 HTTP 接口契约：对外 OpenAI 兼容接口（/v1/*）与管理端接口（/admin/*）。契约由源码路由表与 Go struct 的 json tag 抽取而成；标着「端点存在性占位」的操作只保证路径存在，字段级契约尚未逐项核对。HTML 控制台页面（/ui、/favicon、/）不属于 API 契约范围。
+  contact:
+    name: multi2api 维护者
+    url: https://github.com/Practice019/multi2api
+    email: maintainer@example.invalid
+  license:
+    name: Private / All rights reserved
+    url: https://github.com/Practice019/multi2api
+  x-api-id: multi2api
+  x-summary: 上游账号池与渠道转发网关：OpenAI 兼容对外接口 + 管理端接口
+externalDocs:
+  description: 项目仓库与运维说明
+  url: https://github.com/Practice019/multi2api
+servers:
+- url: http://127.0.0.1:7860
+  description: 本机默认监听地址（config.json 的 server.listen 可改）
+tags:
+- name: Admin Accounts
+  description: 管理端：账号池
+- name: Admin Apikeys
+  description: 管理端：apikeys
+- name: Admin Channels
+  description: 管理端：渠道（Key 型上游）
+- name: Admin Groups
+  description: 管理端：groups
+- name: Admin Login
+  description: 管理端：login
+- name: Admin Logs
+  description: 管理端：logs
+- name: Admin Models
+  description: 管理端：模型目录
+- name: Admin Providers
+  description: 管理端：providers
+- name: Admin Schedule
+  description: 管理端：schedule
+- name: Admin Settings
+  description: 管理端：设置读写
+- name: Admin Stats
+  description: 管理端：统计
+- name: Admin System Status
+  description: 管理端：系统状态
+- name: Admin Task
+  description: 管理端：task
+- name: Admin Tokens
+  description: 管理端：tokens
+- name: Admin UI
+  description: 管理端：ui
+- name: Console UI
+  description: 控制台 JSON 取数（HTML 页面本身不在本契约范围内）
+- name: Misc
+  description: 探针与状态
+- name: V1
+  description: 对外 OpenAI 兼容接口（Bearer：对话密钥）
+security:
+- adminToken: []
+webhooks: {}
+paths:
+  /v1/chat/completions:
+    post:
+      operationId: postV1ChatCompletions
+      tags:
+      - V1
+      summary: OpenAI 兼容的对话补全（流式 / 非流式）
+      description: '请求体除「破甲注入」与「model 前缀剥离」外整体转发上游，因此下列字段之外还可带任意 OpenAI 参数。stream=true 返回 text/event-stream：每帧一条 choices[].delta 增量，最后一帧 data: [DONE]。'
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAIChatRequest'
+            examples:
+              non_stream:
+                value:
+                  model: workbuddy/auto
+                  messages:
+                  - role: system
+                    content: You are a helpful assistant.
+                  - role: user
+                    content: 用一句话说明什么是网关。
+                  max_tokens: 512
+                  temperature: 0.7
+              stream:
+                value:
+                  model: workbuddy/auto
+                  stream: true
+                  messages:
+                  - role: user
+                    content: 数到三
+      responses:
+        '200':
+          description: 成功：stream=false 为完整 JSON，stream=true 为 SSE。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpenAIChatResponse'
+              examples:
+                completion:
+                  value:
+                    id: chatcmpl-gw-8f3c1a
+                    object: chat.completion
+                    created: 1793504214
+                    model: hy4-preview
+                    choices:
+                    - index: 0
+                      message:
+                        role: assistant
+                        content: 网关是上游账号池前面的一层代理。
+                        reasoning_content: ''
+                      finish_reason: stop
+                    usage:
+                      prompt_tokens: 42
+                      completion_tokens: 18
+                      total_tokens: 60
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                sse:
+                  value: 'data: {"choices":[{"delta":{"content":"网关"}}]}
+
+
+                    data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+
+                    data: [DONE]
+
+
+                    '
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/images/generations:
+    post:
+      operationId: postV1ImagesGenerations
+      tags:
+      - V1
+      summary: OpenAI 兼容的图片生成
+      description: 模型前缀决定走上游（如 loomy/doubao-seedream-5-lite 走 loomy），与对话端点共用同一套前缀解析与令牌白名单判据。prompt 必填，其余生图参数透传上游。
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImageGenerationRequest'
+            examples:
+              generate:
+                value:
+                  model: loomy/doubao-seedream-5-lite
+                  prompt: 一只戴宇航头盔的柯基，扁平插画风
+                  size: 1024x1024
+                  n: 1
+      responses:
+        '200':
+          description: 成功（上游 OpenAI 兼容生图结果透传）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageGenerationResponse'
+              examples:
+                success:
+                  value:
+                    created: 1793504300
+                    data:
+                    - url: https://example.invalid/images/img-8f3c1a.png
+                      revised_prompt: A corgi wearing an astronaut helmet, flat illustration style
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/models:
+    get:
+      operationId: getV1Models
+      tags:
+      - V1
+      summary: 列出可用模型
+      description: OpenAI 风格的模型列表。列表会打上 X-Service 头，用来区分「响应来自网关」还是「来自前面的反向代理」。
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: 可用模型目录：上游实时目录 ∪ 渠道声明的公开名，再按令牌白名单过滤。被限制的令牌只看到自己允许的模型（列表如实反映权限）。
+          headers:
+            X-Service:
+              $ref: '#/components/headers/XService'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelList'
+              examples:
+                list:
+                  value:
+                    object: list
+                    data:
+                    - id: workbuddy/auto
+                      object: model
+                      created: 1793504214
+                      owned_by: default
+                    - id: workbuddy/deepseek-v4-pro
+                      object: model
+                      created: 1793504214
+                      owned_by: default
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+      parameters:
+      - $ref: '#/components/parameters/CacheControl'
+  /v1/model:
+    get:
+      operationId: getV1Model
+      tags:
+      - V1
+      summary: 读取模型视图
+      description: 与 GET /v1/models 是**同一个实现**（源码里两个路由指向同一个 handler），返回同一份目录。
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: 可用模型目录：上游实时目录 ∪ 渠道声明的公开名，再按令牌白名单过滤。被限制的令牌只看到自己允许的模型（列表如实反映权限）。
+          headers:
+            X-Service:
+              $ref: '#/components/headers/XService'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelList'
+              examples:
+                list:
+                  value:
+                    object: list
+                    data:
+                    - id: workbuddy/auto
+                      object: model
+                      created: 1793504214
+                      owned_by: default
+                    - id: workbuddy/deepseek-v4-pro
+                      object: model
+                      created: 1793504214
+                      owned_by: default
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /healthz:
+    get:
+      operationId: getHealthz
+      tags:
+      - Misc
+      summary: 健康探针（无鉴权）
+      description: 给负载均衡 / 编排用的探活端点：可受理 200，否则 503。判定口径与对话受理一致（账号池 ServableNow），避免把流量打进无法受理的实例。
+      security: []
+      responses:
+        '200':
+          description: 可受理请求。
+          headers:
+            X-Service:
+              $ref: '#/components/headers/XService'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthzResponse'
+              examples:
+                healthy:
+                  value:
+                    healthy: 12
+                    total: 14
+                    service: multi2api
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          description: 暂不可受理（没有可立即服务的账号）。
+          headers:
+            X-Service:
+              $ref: '#/components/headers/XService'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthzResponse'
+              examples:
+                degraded:
+                  value:
+                    healthy: 0
+                    total: 14
+                    service: multi2api
+  /status:
+    get:
+      operationId: getStatus
+      tags:
+      - Misc
+      summary: 控制台状态总览
+      description: 账号池计数、粘性会话数、Redis 模式与上游级状态。控制台会话与管理令牌都可访问。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 账号池与上游状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              examples:
+                success:
+                  value:
+                    accounts: []
+                    total: 14
+                    healthy: 12
+                    cooling: 1
+                    disabled: 1
+                    in_flight_full: 0
+                    sticky_sessions: 3
+                    redis_mode: noop
+                    providers: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/settings:
+    get:
+      operationId: getAdminSettings
+      tags:
+      - Admin Settings
+      summary: 读取全部设置
+      description: 返回通用设置 + 各上游设置项，并区分「立即生效字段」与「需重启字段」以及请求日志统计。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 设置视图。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+              examples:
+                success:
+                  value:
+                    settings:
+                      prompt_armor_mode: 'off'
+                      prompt_armor_retry: false
+                      listen: :7860
+                    runtime_fields: []
+                    restart_fields: []
+                    request_log:
+                      count: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    put:
+      operationId: putAdminSettings
+      tags:
+      - Admin Settings
+      summary: 保存设置（补丁式）
+      description: 请求体是键→值的补丁对象，只带要改的键。返回本次真正生效的键与是否需重启；上游专属键由各上游扩展点各自认领。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingsPatchRequest'
+            examples:
+              armor_on:
+                value:
+                  prompt_armor_mode: append
+                  prompt_armor_retry: true
+      responses:
+        '200':
+          description: 保存结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsUpdateResponse'
+              examples:
+                success:
+                  value:
+                    settings:
+                      prompt_armor_mode: append
+                      prompt_armor_retry: true
+                    applied:
+                    - prompt_armor_mode
+                    - prompt_armor_retry
+                    need_restart: []
+                    request_log:
+                      count: 0
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /admin/system-status:
+    get:
+      operationId: getAdminSystemStatus
+      tags:
+      - Admin System Status
+      summary: 系统状态取数
+      description: 状态页的唯一取数入口：宿主资源、进程运行时长、依赖健康、请求口径。端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 系统状态对象。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/channels:
+    get:
+      operationId: getAdminChannels
+      tags:
+      - Admin Channels
+      summary: 列出渠道（分页 + 筛选 + 排序）
+      description: 渠道列表。channels / items 同值（兼容字段）；type_counts 与 status_counts 给筛选器徽章用。
+      security:
+      - adminToken: []
+      parameters:
+      - name: page
+        in: query
+        required: false
+        description: 页码（从 1 开始）
+        schema:
+          type: integer
+        example: 1
+      - name: page_size
+        in: query
+        required: false
+        description: 每页条数
+        schema:
+          type: integer
+        example: 20
+      - name: status
+        in: query
+        required: false
+        description: -1 不过滤 / 0 未启用（2+3 合并）/ 1,2,3 精确
+        schema:
+          type: integer
+          enum:
+          - -1
+          - 0
+          - 1
+          - 2
+          - 3
+        example: 1
+      - name: type
+        in: query
+        required: false
+        description: -1 不过滤 / 否则精确匹配渠道类型
+        schema:
+          type: integer
+        example: -1
+      - name: keyword
+        in: query
+        required: false
+        description: 关键词（tag_mode 非空时按标签全等匹配）
+        schema:
+          type: string
+        example: opencsg
+      - name: group
+        in: query
+        required: false
+        description: 分组精确匹配
+        schema:
+          type: string
+        example: default
+      - name: tag_mode
+        in: query
+        required: false
+        description: 非空 = 把 keyword 当标签全等匹配
+        schema:
+          type: string
+        example: ''
+      - name: sort_by
+        in: query
+        required: false
+        description: 排序维度
+        schema:
+          type: string
+          enum:
+          - priority
+          - id
+          - name
+          - balance
+          - response_time
+          - test_time
+        example: priority
+      - name: sort_order
+        in: query
+        required: false
+        description: 排序方向
+        schema:
+          type: string
+          enum:
+          - asc
+          - desc
+        example: desc
+      responses:
+        '200':
+          description: 渠道列表。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelListResponse'
+              examples:
+                success:
+                  value:
+                    channels:
+                    - id: ch-5d2c2b49
+                      name: opencsg
+                      type: 0
+                      base_url: https://opencsg.com/aigateway/v1
+                      key_masks:
+                      - gk_abc…1234
+                      key_count: 1
+                      models:
+                      - deepseek-v4.1-flash-1017
+                      group: default
+                      groups:
+                      - default
+                      priority: 1
+                      weight: 1
+                      status: 1
+                      enabled: true
+                    total: 3
+                    page: 1
+                    page_size: 20
+                    type_counts:
+                      '0': 3
+                    status_counts:
+                      '1': 3
+                    enabled: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+    post:
+      operationId: postAdminChannels
+      tags:
+      - Admin Channels
+      summary: 新建 / 更新渠道
+      description: 带 id 即更新、不带即新建。keys 在**请求体里是字符串数组**（存储形态才是对象数组）。未登记字段 fail-closed 拒绝（400 且回 rejected_fields）。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelSaveRequest'
+            examples:
+              payload:
+                value:
+                  name: opencsg
+                  type: 0
+                  base_url: https://opencsg.com/aigateway/v1
+                  keys:
+                  - gk_xxxx
+                  models:
+                  - deepseek-v4.1-flash-1017
+                  group: default
+                  groups:
+                  - default
+                  priority: 1
+                  weight: 1
+                  status: 1
+      responses:
+        '200':
+          description: 保存后的渠道（key 已打码）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelSaveResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/delete:
+    post:
+      operationId: postAdminChannelsDelete
+      tags:
+      - Admin Channels
+      summary: 删除渠道
+      description: 按 id 删除；删除前会把它声明过的模型从 API key 的别名/白名单里清掉（避免留下指向不存在渠道的引用）。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelIdRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+      responses:
+        '200':
+          description: 删除结果（ok + 删除数量等）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelAckResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    deleted: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/status:
+    post:
+      operationId: postAdminChannelsStatus
+      tags:
+      - Admin Channels
+      summary: 启用 / 停用渠道
+      description: 按 id 切换状态，响应里带上变更前后状态。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelStatusRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  status: 1
+      responses:
+        '200':
+          description: 变更结果（含前后状态）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelStatusChangeResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    changed: true
+                    status: 1
+                    previous_status: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/reveal:
+    post:
+      operationId: postAdminChannelsReveal
+      tags:
+      - Admin Channels
+      summary: 查看渠道 key 明文
+      description: POST 但语义只读：只在管理令牌下回明文 key（列表与日志里永远是打码形式）。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelIdRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+      responses:
+        '200':
+          description: 渠道 id 与明文 key。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelRevealResponse'
+              examples:
+                success:
+                  value:
+                    id: ch-5d2c2b49
+                    keys:
+                    - gk_BYFV…9a6f4b2e
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/discover:
+    post:
+      operationId: postAdminChannelsDiscover
+      tags:
+      - Admin Channels
+      summary: 探测渠道可用模型
+      description: 打到渠道的 Base URL 拉 /models（id 指已有渠道，或直接给 base_url + key）；可选 save 写回渠道。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiscoverRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  save: true
+      responses:
+        '200':
+          description: 探测到的模型与是否写回。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelDiscoverResponse'
+              examples:
+                success:
+                  value:
+                    models:
+                    - deepseek-v4.1-flash-1017
+                    count: 1
+                    saved: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /admin/channels/keys/add:
+    post:
+      operationId: postAdminChannelsKeysAdd
+      tags:
+      - Admin Channels
+      summary: 给渠道加 key
+      description: 追加一把或多把 key；响应回新增数量与最新 key 视图。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelKeysAddRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  keys:
+                  - sk-a
+                  - sk-b
+      responses:
+        '200':
+          description: 新增结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelKeysAddResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    added: 2
+                    keys:
+                    - key: sk-…a
+                      status: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/keys/status:
+    post:
+      operationId: postAdminChannelsKeysStatus
+      tags:
+      - Admin Channels
+      summary: 切换单把 key 状态
+      description: 按 (id, index) 改状态：只允许 1（启用）/ 2（手动停用）；3（自动停用）由系统写，手动传 3 会 400。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelKeysStatusRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  index: 0
+                  status: 2
+      responses:
+        '200':
+          description: 操作成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelAckResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/keys/delete:
+    post:
+      operationId: postAdminChannelsKeysDelete
+      tags:
+      - Admin Channels
+      summary: 删除单把 key
+      description: 按 (id, index) 移除一把 key。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelKeysDeleteRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  index: 0
+      responses:
+        '200':
+          description: 删除结果（回最新 key 列表）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelAckResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/test:
+    post:
+      operationId: postAdminChannelsTest
+      tags:
+      - Admin Channels
+      summary: 渠道连通性测试
+      description: 测单条渠道（id）或全部（all=true）；响应给出总数/通过/失败与逐条结果。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelTestRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+      responses:
+        '200':
+          description: 测试结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelTestResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    total: 1
+                    passed: 1
+                    failed: 0
+                    mode: single
+                    results:
+                    - id: ch-5d2c2b49
+                      name: opencsg
+                      ms: 812
+                      ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /admin/accounts:
+    get:
+      operationId: getAdminAccounts
+      tags:
+      - Admin Accounts
+      summary: 列出账号
+      description: 账号池视图 + 计数 + 凭据根目录，便于核对磁盘与内存是否一致。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 账号列表与计数。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountsListResponse'
+              examples:
+                success:
+                  value:
+                    accounts: []
+                    total: 14
+                    healthy: 12
+                    cooling: 1
+                    disabled: 1
+                    in_flight_full: 0
+                    auth_dir: auths
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+      parameters:
+      - $ref: '#/components/parameters/CacheControl'
+  /admin/models/preview:
+    get:
+      operationId: getAdminModelsPreview
+      tags:
+      - Admin Models
+      summary: 预览模型目录
+      description: 控制台「可用模型」页的预览口径。端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 模型目录预览。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/stats:
+    get:
+      operationId: getAdminStats
+      tags:
+      - Admin Stats
+      summary: 请求统计
+      description: 请求日志聚合统计。端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 统计对象。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/tokens:
+    post:
+      operationId: postAdminTokens
+      tags:
+      - Admin Tokens
+      summary: POST /admin/tokens
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/tokens/{id}:
+    get:
+      operationId: getAdminTokensId
+      tags:
+      - Admin Tokens
+      summary: GET /admin/tokens/{id}
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: 路径参数 id
+        schema:
+          type: string
+        example: 01a15c1e-acfc-7e40-9d7a-e7eb8a25a565
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/tokens/{id}/usage:
+    get:
+      operationId: getAdminTokensIdUsage
+      tags:
+      - Admin Tokens
+      summary: GET /admin/tokens/{id}/usage
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: 路径参数 id
+        schema:
+          type: string
+        example: 01a15c1e-acfc-7e40-9d7a-e7eb8a25a565
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/tokens/update:
+    post:
+      operationId: postAdminTokensUpdate
+      tags:
+      - Admin Tokens
+      summary: POST /admin/tokens/update
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/tokens/delete:
+    post:
+      operationId: postAdminTokensDelete
+      tags:
+      - Admin Tokens
+      summary: POST /admin/tokens/delete
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/tokens/{id}/key:
+    post:
+      operationId: postAdminTokensIdKey
+      tags:
+      - Admin Tokens
+      summary: POST /admin/tokens/{id}/key
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: 路径参数 id
+        schema:
+          type: string
+        example: 01a15c1e-acfc-7e40-9d7a-e7eb8a25a565
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/tokens/batch/keys:
+    post:
+      operationId: postAdminTokensBatchKeys
+      tags:
+      - Admin Tokens
+      summary: POST /admin/tokens/batch/keys
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/stats/series:
+    get:
+      operationId: getAdminStatsSeries
+      tags:
+      - Admin Stats
+      summary: GET /admin/stats/series
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/groups:
+    post:
+      operationId: postAdminGroups
+      tags:
+      - Admin Groups
+      summary: POST /admin/groups
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/groups/update:
+    post:
+      operationId: postAdminGroupsUpdate
+      tags:
+      - Admin Groups
+      summary: POST /admin/groups/update
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/groups/delete:
+    post:
+      operationId: postAdminGroupsDelete
+      tags:
+      - Admin Groups
+      summary: POST /admin/groups/delete
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/groups/consistency:
+    get:
+      operationId: getAdminGroupsConsistency
+      tags:
+      - Admin Groups
+      summary: GET /admin/groups/consistency
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/groups/usage:
+    get:
+      operationId: getAdminGroupsUsage
+      tags:
+      - Admin Groups
+      summary: GET /admin/groups/usage
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/groups/catalog:
+    get:
+      operationId: getAdminGroupsCatalog
+      tags:
+      - Admin Groups
+      summary: GET /admin/groups/catalog
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/groups/prune:
+    post:
+      operationId: postAdminGroupsPrune
+      tags:
+      - Admin Groups
+      summary: POST /admin/groups/prune
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/reload:
+    post:
+      operationId: postAdminAccountsReload
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/reload
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/import:
+    post:
+      operationId: postAdminAccountsImport
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/import
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/quota/refresh:
+    post:
+      operationId: postAdminAccountsQuotaRefresh
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/quota/refresh
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/checkin/all:
+    post:
+      operationId: postAdminAccountsCheckinAll
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/checkin/all
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/egress-check:
+    post:
+      operationId: postAdminAccountsEgressCheck
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/egress-check
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/{uid}/enable:
+    post:
+      operationId: postAdminAccountsUidEnable
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/{uid}/enable
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      parameters:
+      - name: uid
+        in: path
+        required: true
+        description: 路径参数 uid
+        schema:
+          type: string
+        example: 01a15c1e-acfc-7e40-9d7a-e7eb8a25a565
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/{uid}/disable:
+    post:
+      operationId: postAdminAccountsUidDisable
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/{uid}/disable
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      parameters:
+      - name: uid
+        in: path
+        required: true
+        description: 路径参数 uid
+        schema:
+          type: string
+        example: 01a15c1e-acfc-7e40-9d7a-e7eb8a25a565
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/{uid}/cooldown/clear:
+    post:
+      operationId: postAdminAccountsUidCooldownClear
+      tags:
+      - Admin Accounts
+      summary: POST /admin/accounts/{uid}/cooldown/clear
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      parameters:
+      - name: uid
+        in: path
+        required: true
+        description: 路径参数 uid
+        schema:
+          type: string
+        example: 01a15c1e-acfc-7e40-9d7a-e7eb8a25a565
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/accounts/{uid}:
+    delete:
+      operationId: deleteAdminAccountsUid
+      tags:
+      - Admin Accounts
+      summary: DELETE /admin/accounts/{uid}
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      parameters:
+      - name: uid
+        in: path
+        required: true
+        description: 路径参数 uid
+        schema:
+          type: string
+        example: 01a15c1e-acfc-7e40-9d7a-e7eb8a25a565
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/login/start:
+    post:
+      operationId: postAdminLoginStart
+      tags:
+      - Admin Login
+      summary: POST /admin/login/start
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/login/poll:
+    post:
+      operationId: postAdminLoginPoll
+      tags:
+      - Admin Login
+      summary: POST /admin/login/poll
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/login/open:
+    post:
+      operationId: postAdminLoginOpen
+      tags:
+      - Admin Login
+      summary: POST /admin/login/open
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/models/refresh:
+    post:
+      operationId: postAdminModelsRefresh
+      tags:
+      - Admin Models
+      summary: POST /admin/models/refresh
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/logs:
+    get:
+      operationId: getAdminLogs
+      tags:
+      - Admin Logs
+      summary: GET /admin/logs
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/logs/history:
+    get:
+      operationId: getAdminLogsHistory
+      tags:
+      - Admin Logs
+      summary: GET /admin/logs/history
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/schedule:
+    get:
+      operationId: getAdminSchedule
+      tags:
+      - Admin Schedule
+      summary: GET /admin/schedule
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/task:
+    get:
+      operationId: getAdminTask
+      tags:
+      - Admin Task
+      summary: GET /admin/task
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/providers:
+    get:
+      operationId: getAdminProviders
+      tags:
+      - Admin Providers
+      summary: GET /admin/providers
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/ui/manifest:
+    get:
+      operationId: getAdminUiManifest
+      tags:
+      - Admin UI
+      summary: GET /admin/ui/manifest
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/apikeys:
+    post:
+      operationId: postAdminApikeys
+      tags:
+      - Admin Apikeys
+      summary: POST /admin/apikeys
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/apikeys/toggle:
+    post:
+      operationId: postAdminApikeysToggle
+      tags:
+      - Admin Apikeys
+      summary: POST /admin/apikeys/toggle
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/apikeys/delete:
+    post:
+      operationId: postAdminApikeysDelete
+      tags:
+      - Admin Apikeys
+      summary: POST /admin/apikeys/delete
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/apikeys/reset:
+    post:
+      operationId: postAdminApikeysReset
+      tags:
+      - Admin Apikeys
+      summary: POST /admin/apikeys/reset
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/apikeys/update:
+    post:
+      operationId: postAdminApikeysUpdate
+      tags:
+      - Admin Apikeys
+      summary: POST /admin/apikeys/update
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/apikeys/rotate-admin:
+    post:
+      operationId: postAdminApikeysRotateAdmin
+      tags:
+      - Admin Apikeys
+      summary: POST /admin/apikeys/rotate-admin
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/apikeys/rotate-api-key:
+    post:
+      operationId: postAdminApikeysRotateApiKey
+      tags:
+      - Admin Apikeys
+      summary: POST /admin/apikeys/rotate-api-key
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /admin/channels/keys:
+    get:
+      operationId: getAdminChannelsKeys
+      tags:
+      - Admin Channels
+      summary: 列出渠道的 key
+      description: 按渠道 id 列出各把 key 的视图（含打码值、状态、停用原因）。
+      security:
+      - adminToken: []
+      parameters:
+      - name: id
+        in: query
+        required: false
+        description: 渠道 id
+        schema:
+          type: string
+        example: ch-5d2c2b49
+      responses:
+        '200':
+          description: key 视图列表。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelKeysListResponse'
+              examples:
+                success:
+                  value:
+                    id: ch-5d2c2b49
+                    name: opencsg
+                    keys:
+                    - key: gk_abc…1234
+                      status: 1
+                    key_count: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/search:
+    get:
+      operationId: getAdminChannelsSearch
+      tags:
+      - Admin Channels
+      summary: 搜索渠道
+      description: 与列表同族：tag_mode 非空时 keyword 按标签全等匹配（否则会把同前缀的其它标签也带进来）。
+      security:
+      - adminToken: []
+      parameters:
+      - name: page
+        in: query
+        required: false
+        description: 页码（从 1 开始）
+        schema:
+          type: integer
+        example: 1
+      - name: page_size
+        in: query
+        required: false
+        description: 每页条数
+        schema:
+          type: integer
+        example: 20
+      - name: status
+        in: query
+        required: false
+        description: -1 不过滤 / 0 未启用（2+3 合并）/ 1,2,3 精确
+        schema:
+          type: integer
+          enum:
+          - -1
+          - 0
+          - 1
+          - 2
+          - 3
+        example: 1
+      - name: type
+        in: query
+        required: false
+        description: -1 不过滤 / 否则精确匹配渠道类型
+        schema:
+          type: integer
+        example: -1
+      - name: keyword
+        in: query
+        required: false
+        description: 关键词（tag_mode 非空时按标签全等匹配）
+        schema:
+          type: string
+        example: opencsg
+      - name: group
+        in: query
+        required: false
+        description: 分组精确匹配
+        schema:
+          type: string
+        example: default
+      - name: tag_mode
+        in: query
+        required: false
+        description: 非空 = 把 keyword 当标签全等匹配
+        schema:
+          type: string
+        example: ''
+      - name: sort_by
+        in: query
+        required: false
+        description: 排序维度
+        schema:
+          type: string
+          enum:
+          - priority
+          - id
+          - name
+          - balance
+          - response_time
+          - test_time
+        example: priority
+      - name: sort_order
+        in: query
+        required: false
+        description: 排序方向
+        schema:
+          type: string
+          enum:
+          - asc
+          - desc
+        example: desc
+      responses:
+        '200':
+          description: 搜索结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/tags:
+    get:
+      operationId: getAdminChannelsTags
+      tags:
+      - Admin Channels
+      summary: 列出全部渠道标签
+      description: 返回当前所有标签及数量。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 标签列表。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelTagsResponse'
+              examples:
+                success:
+                  value:
+                    tags:
+                    - batch-a
+                    - batch-b
+                    count: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/tag/models:
+    get:
+      operationId: getAdminChannelsTagModels
+      tags:
+      - Admin Channels
+      summary: 某标签下的渠道与模型
+      description: 把一个标签展开成「涉及哪些渠道、一共声明了哪些模型」。
+      security:
+      - adminToken: []
+      parameters:
+      - name: tag
+        in: query
+        required: false
+        description: 标签名
+        schema:
+          type: string
+        example: batch-a
+      responses:
+        '200':
+          description: 标签展开结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelTagModelsResponse'
+              examples:
+                success:
+                  value:
+                    tag: batch-a
+                    channels:
+                    - ch-5d2c2b49
+                    models:
+                    - deepseek-v4.1-flash-1017
+                    count: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/tag/batch:
+    post:
+      operationId: postAdminChannelsTagBatch
+      tags:
+      - Admin Channels
+      summary: 批量打标签
+      description: 给一组渠道打同一个标签。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelIdsTagRequest'
+            examples:
+              payload:
+                value:
+                  ids:
+                  - ch-5d2c2b49
+                  tag: batch-a
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/tag/status:
+    post:
+      operationId: postAdminChannelsTagStatus
+      tags:
+      - Admin Channels
+      summary: 按标签批量改状态
+      description: 把某个标签下的渠道统一设为给定状态。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelStatusBatchRequest'
+            examples:
+              payload:
+                value:
+                  tag: batch-a
+                  status: 1
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/tag/edit:
+    post:
+      operationId: postAdminChannelsTagEdit
+      tags:
+      - Admin Channels
+      summary: 按标签批量改字段
+      description: 按标签批量更新 priority / weight / models / model_mapping；只改请求里给的字段（指针字段区分"没传"与"传了 0"）。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelTagEditRequest'
+            examples:
+              payload:
+                value:
+                  tag: batch-a
+                  priority: 10
+                  weight: 5
+                  models:
+                  - deepseek-v4.1-flash-1017
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/status-batch:
+    post:
+      operationId: postAdminChannelsStatusBatch
+      tags:
+      - Admin Channels
+      summary: 批量改状态
+      description: 按 ids 或 tag 批量改状态。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelStatusBatchRequest'
+            examples:
+              payload:
+                value:
+                  ids:
+                  - ch-5d2c2b49
+                  status: 2
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/batch-delete:
+    post:
+      operationId: postAdminChannelsBatchDelete
+      tags:
+      - Admin Channels
+      summary: 批量删除渠道
+      description: 按 ids 或 tag 批量删除。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelIdsTagRequest'
+            examples:
+              payload:
+                value:
+                  tag: batch-a
+      responses:
+        '200':
+          description: 批量删除结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelAckResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    deleted: 2
+                    missing: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/clear-disabled:
+    post:
+      operationId: postAdminChannelsClearDisabled
+      tags:
+      - Admin Channels
+      summary: 清空已停用渠道
+      description: 删除全部停用状态的渠道，并把它们声明过的模型从 API key 的别名/白名单里清掉。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 删除数量。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelAckResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    deleted: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/copy:
+    post:
+      operationId: postAdminChannelsCopy
+      tags:
+      - Admin Channels
+      summary: 复制渠道
+      description: 按 id 复制一条渠道，可加后缀、可清零余额。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelCopyRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  suffix: -copy
+                  reset_balance: true
+      responses:
+        '200':
+          description: 新渠道信息。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelCopyResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    id: ch-77aa11bb
+                    source: ch-5d2c2b49
+                    name: opencsg-copy
+                    reset_balance: true
+                    suffix: -copy
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/fix-abilities:
+    post:
+      operationId: postAdminChannelsFixAbilities
+      tags:
+      - Admin Channels
+      summary: 重建能力索引
+      description: 按渠道声明的模型重建 (models × groups) 能力索引，修复索引与渠道表不一致的情况。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 修复结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelFixAbilitiesResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    fixed: 3
+                    failed: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/order:
+    get:
+      operationId: getAdminChannelsOrder
+      tags:
+      - Admin Channels
+      summary: 读取渠道排序清单
+      description: 按 priority 降序返回排序清单（只给排序需要的字段），供拖拽界面用。
+      security:
+      - adminToken: []
+      responses:
+        '200':
+          description: 排序清单（按 priority 降序）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOrderResponse'
+              examples:
+                success:
+                  value:
+                    order:
+                    - id: ch-5d2c2b49
+                      name: opencsg
+                      priority: 100
+                    count: 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/reorder:
+    post:
+      operationId: postAdminChannelsReorder
+      tags:
+      - Admin Channels
+      summary: 按给定顺序重排
+      description: ids 的顺序即目标顺序；响应里返回实际更新数与缺失的 id。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelIdsRequest'
+            examples:
+              payload:
+                value:
+                  ids:
+                  - ch-5d2c2b49
+                  - ch-77aa11bb
+      responses:
+        '200':
+          description: 重排结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelAckResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    updated: 2
+                    missing: []
+                    noop: false
+                    mode: explicit
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/move:
+    post:
+      operationId: postAdminChannelsMove
+      tags:
+      - Admin Channels
+      summary: 上移 / 下移 / 移到指定位置
+      description: direction=up|down 做相邻交换；给 target_id + position=before|after 则移到指定渠道旁。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelMoveRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  direction: up
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /admin/channels/keys/summary:
+    get:
+      operationId: getAdminChannelsKeysSummary
+      tags:
+      - Admin Channels
+      summary: key 状态汇总
+      description: 按渠道 id 汇总启用/停用 key 数量。
+      security:
+      - adminToken: []
+      parameters:
+      - name: id
+        in: query
+        required: false
+        description: 渠道 id
+        schema:
+          type: string
+        example: ch-5d2c2b49
+      responses:
+        '200':
+          description: 启用/停用数量。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelKeysSummaryResponse'
+              examples:
+                success:
+                  value:
+                    id: ch-5d2c2b49
+                    key_count: 2
+                    enabled: 1
+                    disabled: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/keys/status-all:
+    post:
+      operationId: postAdminChannelsKeysStatusAll
+      tags:
+      - Admin Channels
+      summary: 批量改该渠道全部 key
+      description: 把一条渠道的所有 key 统一设为给定状态。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelStatusRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  status: 1
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/keys/delete-disabled:
+    post:
+      operationId: postAdminChannelsKeysDeleteDisabled
+      tags:
+      - Admin Channels
+      summary: 删除该渠道已停用的 key
+      description: 清理一条渠道里所有停用状态的 key。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelIdRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/keys/mode:
+    post:
+      operationId: postAdminChannelsKeysMode
+      tags:
+      - Admin Channels
+      summary: 设置多 key 选取模式
+      description: 设置该渠道多把 key 的选取方式。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelKeysModeRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  mode: round_robin
+      responses:
+        '200':
+          description: 操作成功（响应体只核对到 ok）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelOkAck'
+              examples:
+                success:
+                  value:
+                    ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/channels/balance:
+    post:
+      operationId: postAdminChannelsBalance
+      tags:
+      - Admin Channels
+      summary: 查询渠道余额（本仓固定不支持）
+      description: 本仓渠道抽象（gateway.Provider）没有余额方法 ⇒ 恒为 supported:false，不写任何 balance 列。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelTestRequest'
+            examples:
+              payload:
+                value:
+                  all: true
+      responses:
+        '200':
+          description: 结果（supported 恒 false）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelBalanceResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    supported: false
+                    total: 1
+                    note: 本仓渠道抽象没有余额方法 ⇒ 全部 supported:false
+                    results: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /admin/channels/models/check:
+    post:
+      operationId: postAdminChannelsModelsCheck
+      tags:
+      - Admin Channels
+      summary: 比对上游模型与本地声明
+      description: 打到上游拉模型列表，与本地声明比对，报告差异数量（不写回）。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelTestRequest'
+            examples:
+              payload:
+                value:
+                  all: true
+      responses:
+        '200':
+          description: 比对结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelModelsCheckResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    total: 1
+                    changed: 1
+                    results:
+                    - id: ch-5d2c2b49
+                      added:
+                      - deepseek-v4.1-flash-1017
+                      removed: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /admin/channels/models/apply:
+    post:
+      operationId: postAdminChannelsModelsApply
+      tags:
+      - Admin Channels
+      summary: 把上游模型写回渠道
+      description: 与 check 同一套比对，但把结果写回渠道的 models（mode 决定合并策略）。
+      security:
+      - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChannelModelsApplyRequest'
+            examples:
+              payload:
+                value:
+                  id: ch-5d2c2b49
+                  mode: merge
+      responses:
+        '200':
+          description: 写回结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelModelsApplyResponse'
+              examples:
+                success:
+                  value:
+                    ok: true
+                    mode: merge
+                    applied: 1
+                    total: 1
+                    results: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /ui/channels:
+    get:
+      operationId: getUiChannels
+      tags:
+      - Console UI
+      summary: GET /ui/channels
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /ui/groups:
+    get:
+      operationId: getUiGroups
+      tags:
+      - Console UI
+      summary: GET /ui/groups
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /ui/status:
+    get:
+      operationId: getUiStatus
+      tags:
+      - Console UI
+      summary: GET /ui/status
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /ui/models:
+    get:
+      operationId: getUiModels
+      tags:
+      - Console UI
+      summary: GET /ui/models
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /ui/models/data:
+    get:
+      operationId: getUiModelsData
+      tags:
+      - Console UI
+      summary: GET /ui/models/data
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /ui/tokens:
+    get:
+      operationId: getUiTokens
+      tags:
+      - Console UI
+      summary: GET /ui/tokens
+      description: 端点存在性占位：路径从源码里 h.register / mux.HandleFunc 抽取；字段级契约尚未逐项核对。
+      responses:
+        '200':
+          description: 成功（占位）。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 对话 API Key（/v1/*）。可按令牌配置模型白名单；被限制时列表与调用都只覆盖允许的模型。
+    adminToken:
+      type: http
+      scheme: bearer
+      description: 管理令牌（/admin/*、/status）。控制台登录会话同样可用。
+  headers:
+    XService:
+      description: 实例身份标识。带这个头 = 响应确实由网关生成；缺失 = 请求没到网关（查反向代理 / 监听地址）。
+      schema:
+        type: string
+        example: multi2api
+  parameters:
+    CacheControl:
+      name: Cache-Control
+      in: header
+      required: false
+      description: 可选的缓存指令；网关不缓存响应，声明它是为了显式表达这一语义。
+      schema:
+        type: string
+        example: no-store
+  schemas:
+    ChatMessage:
+      type: object
+      required:
+      - role
+      properties:
+        role:
+          type: string
+          enum:
+          - system
+          - user
+          - assistant
+          - tool
+          - developer
+          example: user
+        content:
+          oneOf:
+          - type: string
+          - type: array
+            items:
+              type: object
+              additionalProperties: true
+        name:
+          type: string
+      additionalProperties: true
+    OpenAIChatRequest:
+      type: object
+      required:
+      - model
+      - messages
+      properties:
+        model:
+          type: string
+          example: workbuddy/auto
+          description: 模型名。可带上游前缀（workbuddy/…、loomy/…）；不带前缀按默认上游解析。
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        stream:
+          type: boolean
+          default: false
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+        max_tokens:
+          type: integer
+          minimum: 1
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+      additionalProperties: true
+    OpenAIChatResponse:
+      type: object
+      required:
+      - id
+      - object
+      - created
+      - model
+      - choices
+      properties:
+        id:
+          type: string
+          example: chatcmpl-gw-8f3c1a
+        object:
+          type: string
+          example: chat.completion
+        created:
+          type: integer
+          example: 1793504214
+        model:
+          type: string
+          example: hy4-preview
+        choices:
+          type: array
+          items:
+            type: object
+            required:
+            - index
+            - message
+            properties:
+              index:
+                type: integer
+                example: 0
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                    example: assistant
+                  content:
+                    type: string
+                  reasoning_content:
+                    type: string
+                    description: 思考型上游的推理内容；无则为空串或省略。
+              finish_reason:
+                type:
+                - string
+                - 'null'
+                enum:
+                - stop
+                - length
+                - tool_calls
+                - content_filter
+                description: 结束原因；上游可能给 null（此时该字段缺省或为 null）。
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+            completion_tokens_details:
+              type: object
+              additionalProperties: true
+            prompt_tokens_details:
+              type: object
+              additionalProperties: true
+          additionalProperties: true
+      additionalProperties: true
+    ImageGenerationRequest:
+      type: object
+      required:
+      - model
+      - prompt
+      properties:
+        model:
+          type: string
+          example: loomy/doubao-seedream-5-lite
+        prompt:
+          type: string
+          minLength: 1
+        size:
+          type: string
+          example: 1024x1024
+        n:
+          type: integer
+          minimum: 1
+          example: 1
+        response_format:
+          type: string
+          enum:
+          - url
+          - b64_json
+      additionalProperties: true
+    ImageGenerationResponse:
+      type: object
+      required:
+      - data
+      properties:
+        created:
+          type: integer
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              url:
+                type: string
+                format: uri
+              b64_json:
+                type: string
+              revised_prompt:
+                type: string
+            additionalProperties: true
+      additionalProperties: true
+    Model:
+      type: object
+      required:
+      - id
+      - object
+      properties:
+        id:
+          type: string
+          example: workbuddy/auto
+        object:
+          type: string
+          example: model
+        created:
+          type: integer
+        owned_by:
+          type: string
+          description: 所属上游标识；按脱敏配置可被抹掉。
+          example: default
+      additionalProperties: true
+    ModelList:
+      type: object
+      required:
+      - object
+      - data
+      properties:
+        object:
+          type: string
+          example: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Model'
+      additionalProperties: true
+    OpenAIErrorDetail:
+      type: object
+      required:
+      - message
+      - type
+      - code
+      properties:
+        message:
+          type: string
+        type:
+          type: string
+          example: api_error
+        code:
+          type: string
+          example: invalid_request
+      additionalProperties: true
+    ErrorEnvelope:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          oneOf:
+          - type: string
+            description: '管理端形态：{"error": "人类可读的一句话"}'
+          - $ref: '#/components/schemas/OpenAIErrorDetail'
+      additionalProperties: true
+    HealthzResponse:
+      type: object
+      required:
+      - healthy
+      - total
+      - service
+      properties:
+        healthy:
+          type: integer
+          example: 12
+        total:
+          type: integer
+          example: 14
+        service:
+          type: string
+          example: multi2api
+      additionalProperties: true
+    StatusResponse:
+      type: object
+      required:
+      - total
+      - healthy
+      properties:
+        accounts:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total:
+          type: integer
+        healthy:
+          type: integer
+        cooling:
+          type: integer
+        disabled:
+          type: integer
+        in_flight_full:
+          type: integer
+        sticky_sessions:
+          type: integer
+        redis_mode:
+          type: string
+          example: noop
+        providers:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    SettingsResponse:
+      type: object
+      required:
+      - settings
+      properties:
+        settings:
+          type: object
+          additionalProperties: true
+          description: 全部设置键（通用 + 各上游专属）
+        runtime_fields:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        restart_fields:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        request_log:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    SettingsPatchRequest:
+      type: object
+      minProperties: 1
+      additionalProperties:
+        oneOf:
+        - type: string
+        - type: boolean
+        - type: number
+      description: 键→值的补丁对象：只需带要改的键，值可为字符串 / 布尔 / 数字。
+    SettingsUpdateResponse:
+      type: object
+      required:
+      - settings
+      - applied
+      properties:
+        settings:
+          type: object
+          additionalProperties: true
+        applied:
+          type: array
+          items:
+            type: string
+          description: 本次真正生效的键
+        need_restart:
+          type: array
+          items:
+            type: string
+          description: 本次改动里需要重启才生效的键
+        request_log:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    Channel:
+      type: object
+      required:
+      - id
+      - name
+      - base_url
+      properties:
+        id:
+          type: string
+          example: ch-5d2c2b49
+        name:
+          type: string
+          example: opencsg
+        type:
+          type: integer
+          description: 渠道类型：0 = OpenAI 兼容（本项目当前唯一遇到过的形态）
+          example: 0
+        base_url:
+          type: string
+          format: uri
+          example: https://opencsg.com/aigateway/v1
+        key_masks:
+          type: array
+          items:
+            type: string
+          description: 打码后的 key（明文只在 reveal 端点回）
+        key_count:
+          type: integer
+        models:
+          type: array
+          items:
+            type: string
+        model_mapping:
+          type: object
+          additionalProperties:
+            type: string
+        group:
+          type: string
+        groups:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+        weight:
+          type: integer
+        status:
+          type: integer
+          enum:
+          - 0
+          - 1
+        enabled:
+          type: boolean
+        balance:
+          type: number
+      additionalProperties: true
+    ChannelSaveRequest:
+      type: object
+      required:
+      - name
+      properties:
+        id:
+          type: string
+          description: 带 id = 更新，不带 = 新建
+        name:
+          type: string
+        type:
+          type: integer
+          example: 0
+        base_url:
+          type: string
+          format: uri
+          example: https://opencsg.com/aigateway/v1
+        keys:
+          type: array
+          items:
+            type: string
+          description: 请求体里是**字符串数组**（存储形态才是对象数组）
+        models:
+          type: array
+          items:
+            type: string
+        model_mapping:
+          type: object
+          additionalProperties:
+            type: string
+        group:
+          type: string
+        groups:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+        weight:
+          type: integer
+        status:
+          type: integer
+          enum:
+          - 0
+          - 1
+        key_selection_mode:
+          type: string
+          enum:
+          - ''
+          - random
+          - round_robin
+        mode:
+          type: string
+          enum:
+          - ''
+          - single
+          - batch
+          - multi_to_single
+      additionalProperties: false
+      description: 未登记的字段会被 fail-closed 拒绝（返回 400 并列出被拒字段名）。
+    ChannelSaveResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        created:
+          type: boolean
+        mode:
+          type: string
+        channel:
+          $ref: '#/components/schemas/Channel'
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Channel'
+      required:
+      - ok
+      additionalProperties: true
+    ChannelListResponse:
+      type: object
+      required:
+      - channels
+      properties:
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/Channel'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Channel'
+          description: 与 channels 同值（兼容字段）
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        type_counts:
+          type: object
+          additionalProperties:
+            type: integer
+        status_counts:
+          type: object
+          additionalProperties:
+            type: integer
+        enabled:
+          type: boolean
+          description: 渠道功能是否已接线
+        keyword_echoed:
+          type: string
+        match:
+          type: string
+      additionalProperties: true
+    ChannelIdRequest:
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+          example: ch-5d2c2b49
+      additionalProperties: true
+    AccountsListResponse:
+      type: object
+      required:
+      - accounts
+      - total
+      properties:
+        accounts:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total:
+          type: integer
+        healthy:
+          type: integer
+        cooling:
+          type: integer
+        disabled:
+          type: integer
+        in_flight_full:
+          type: integer
+        auth_dir:
+          type: string
+          example: auths
+      additionalProperties: true
+    ChannelKeysAddRequest:
+      type: object
+      required:
+      - id
+      - keys
+      properties:
+        id:
+          type: string
+          example: ch-5d2c2b49
+        keys:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          example:
+          - sk-a
+          - sk-b
+      additionalProperties: false
+    ChannelKeysStatusRequest:
+      type: object
+      required:
+      - id
+      - index
+      - status
+      properties:
+        id:
+          type: string
+          example: ch-5d2c2b49
+        index:
+          type: integer
+          minimum: 0
+          description: key 下标（从 0 开始）
+          example: 0
+        status:
+          type: integer
+          enum:
+          - 1
+          - 2
+          description: 1 = 启用、2 = 手动停用。**3（自动停用）由系统写入，手动传 3 会被拒**（400）
+          example: 1
+      additionalProperties: false
+    ChannelKeysDeleteRequest:
+      type: object
+      required:
+      - id
+      - index
+      properties:
+        id:
+          type: string
+        index:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    ChannelKeysModeRequest:
+      type: object
+      required:
+      - id
+      - mode
+      properties:
+        id:
+          type: string
+        mode:
+          type: string
+          enum:
+          - random
+          - round_robin
+      additionalProperties: false
+    ChannelStatusRequest:
+      type: object
+      required:
+      - id
+      - status
+      properties:
+        id:
+          type: string
+        status:
+          type: integer
+          enum:
+          - 1
+          - 2
+          - 3
+          description: 1 = 启用、2 = 手动停用、3 = 自动停用（由系统写）
+          example: 1
+      additionalProperties: false
+    ChannelIdsRequest:
+      type: object
+      required:
+      - ids
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          example:
+          - ch-5d2c2b49
+      additionalProperties: false
+    ChannelIdsTagRequest:
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+        tag:
+          type: string
+          example: batch-a
+      description: ids 与 tag 二选一（至少给一个；都不给则 400）
+      additionalProperties: false
+    ChannelStatusBatchRequest:
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+        tag:
+          type: string
+        status:
+          type: integer
+          enum:
+          - 1
+          - 2
+          - 3
+      required:
+      - status
+      additionalProperties: false
+    ChannelTagEditRequest:
+      type: object
+      required:
+      - tag
+      properties:
+        tag:
+          type: string
+          description: 目标标签（按标签批量改）
+        priority:
+          type: integer
+        weight:
+          type: integer
+        models:
+          type: array
+          items:
+            type: string
+        model_mapping:
+          type: object
+          additionalProperties:
+            type: string
+      additionalProperties: false
+    ChannelCopyRequest:
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+          example: ch-5d2c2b49
+        suffix:
+          type: string
+          description: 新渠道名后缀
+          example: -copy
+        reset_balance:
+          type: boolean
+          description: 是否把新渠道的余额清零
+      additionalProperties: false
+    ChannelMoveRequest:
+      type: object
+      required:
+      - id
+      properties:
+        id:
+          type: string
+        direction:
+          type: string
+          enum:
+          - up
+          - down
+        target_id:
+          type: string
+          description: 与 position 一起用时指定"移到谁旁边"
+        position:
+          type: string
+          enum:
+          - before
+          - after
+      additionalProperties: false
+    DiscoverRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          description: 已有渠道 id（与 base_url 二选一）
+        base_url:
+          type: string
+          format: uri
+          description: 未保存的新渠道地址（与 id 二选一）
+        key:
+          type: string
+          description: 新渠道的 key（id 为空时必填）
+        save:
+          type: boolean
+          description: 是否把查到的模型写回渠道
+      additionalProperties: false
+    ChannelTestRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        all:
+          type: boolean
+      description: id 与 all:true 至少给一个（都不给则 400）
+      additionalProperties: false
+    ChannelOrderItem:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        priority:
+          type: integer
+      additionalProperties: true
+    ChannelModelsApplyRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          description: 渠道 id（与 all 二选一）
+        all:
+          type: boolean
+          description: true = 处理全部渠道
+        mode:
+          type: string
+          description: 写回策略（对应 handler 里的 Mode 字段）
+      additionalProperties: false
+    ChannelOrderResponse:
+      type: object
+      required:
+      - order
+      properties:
+        order:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChannelOrderItem'
+        count:
+          type: integer
+      additionalProperties: true
+    ChannelAckResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        deleted:
+          type: integer
+        missing:
+          type: array
+          items:
+            type: string
+        updated:
+          type: integer
+        noop:
+          type: boolean
+        mode:
+          type: string
+        changed:
+          type: integer
+        added:
+          type: integer
+      additionalProperties: true
+      description: 核对过的键见 properties；additionalProperties=true 表示可能还有未列出的键。
+    ChannelStatusChangeResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        changed:
+          type: boolean
+        status:
+          type: integer
+        previous_status:
+          type: integer
+      required:
+      - ok
+      additionalProperties: true
+    ChannelRevealResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        keys:
+          type: array
+          items:
+            type: string
+      required:
+      - id
+      - keys
+      additionalProperties: true
+    ChannelDiscoverResponse:
+      type: object
+      properties:
+        models:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+        saved:
+          type: boolean
+      required:
+      - models
+      - count
+      additionalProperties: true
+    ChannelKeyView:
+      type: object
+      properties:
+        key:
+          type: string
+        status:
+          type: integer
+        reason:
+          type: string
+        disabled_at:
+          type: integer
+      additionalProperties: true
+    ChannelKeysListResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChannelKeyView'
+        key_count:
+          type: integer
+        mode:
+          type: string
+      required:
+      - id
+      - keys
+      additionalProperties: true
+    ChannelKeysAddResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        added:
+          type: integer
+        keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChannelKeyView'
+      required:
+      - ok
+      - added
+      additionalProperties: true
+    ChannelKeysSummaryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        key_count:
+          type: integer
+        enabled:
+          type: integer
+        disabled:
+          type: integer
+      required:
+      - id
+      - key_count
+      additionalProperties: true
+    ChannelTestResult:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        ms:
+          type: integer
+        ok:
+          type: boolean
+      additionalProperties: true
+    ChannelTestResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        total:
+          type: integer
+        passed:
+          type: integer
+        failed:
+          type: integer
+        mode:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChannelTestResult'
+      required:
+      - ok
+      - total
+      additionalProperties: true
+    ChannelBalanceResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        supported:
+          type: boolean
+        total:
+          type: integer
+        note:
+          type: string
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              supported:
+                type: boolean
+            additionalProperties: true
+      required:
+      - ok
+      - supported
+      additionalProperties: true
+    ChannelModelsCheckResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        total:
+          type: integer
+        changed:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              added:
+                type: array
+                items:
+                  type: string
+              removed:
+                type: array
+                items:
+                  type: string
+            additionalProperties: true
+      required:
+      - ok
+      - total
+      additionalProperties: true
+    ChannelModelsApplyResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        mode:
+          type: string
+        applied:
+          type: integer
+        total:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+            additionalProperties: true
+      required:
+      - ok
+      additionalProperties: true
+    ChannelCopyResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        id:
+          type: string
+        source:
+          type: string
+        name:
+          type: string
+        reset_balance:
+          type: boolean
+        suffix:
+          type: string
+      required:
+      - ok
+      - id
+      additionalProperties: true
+    ChannelTagsResponse:
+      type: object
+      properties:
+        tags:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+      required:
+      - tags
+      - count
+      additionalProperties: true
+    ChannelTagModelsResponse:
+      type: object
+      properties:
+        tag:
+          type: string
+        channels:
+          type: array
+          items:
+            type: string
+        models:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+      required:
+      - tag
+      - count
+      additionalProperties: true
+    ChannelFixAbilitiesResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        fixed:
+          type: integer
+        failed:
+          type: integer
+      required:
+      - ok
+      additionalProperties: true
+    ChannelOkAck:
+      type: object
+      required:
+      - ok
+      properties:
+        ok:
+          type: boolean
+      additionalProperties: true
+      description: 只有 ok 是核对过的；其余键未逐项核对（该 handler 在局部变量里拼响应体，未读到字面量）。
+  responses:
+    BadRequest:
+      description: Bad Request：JSON 语法错误、缺少必填字段（如 model / prompt），或渠道保存时带了未登记字段。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 请求无效：JSON 语法错误、缺少必填字段（如 model / prompt），或渠道保存时带了未登记字段。
+                  type: api_error
+                  code: invalid_request
+    Unauthorized:
+      description: Unauthorized：缺少或无效的凭据（对话密钥 / 管理令牌）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 缺少或无效的凭据（对话密钥 / 管理令牌）。
+                  type: api_error
+                  code: invalid_request
+    Forbidden:
+      description: Forbidden：凭据有效但无权访问该模型或该端点（例如令牌的模型白名单不含该模型）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 凭据有效但无权访问该模型或该端点（例如令牌的模型白名单不含该模型）。
+                  type: api_error
+                  code: invalid_request
+    RequestTooLarge:
+      description: Payload Too Large：请求体超过上限（config.json 的 server.max_body_mb 可调）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 请求体超过上限（config.json 的 server.max_body_mb 可调）。
+                  type: api_error
+                  code: invalid_request
+    TooManyRequests:
+      description: Too Many Requests：上游限流或账号池暂无可用账号。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 上游限流或账号池暂无可用账号。
+                  type: api_error
+                  code: invalid_request
+    ServerError:
+      description: Internal Server Error：网关内部错误（例如保存后写入配置文件失败）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 网关内部错误（例如保存后写入配置文件失败）。
+                  type: api_error
+                  code: invalid_request
+    NotImplemented:
+      description: Not Implemented：该功能未接线（例如设置存储未启用）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 该功能未接线（例如设置存储未启用）。
+                  type: api_error
+                  code: invalid_request
+    ServiceUnavailable:
+      description: Service Unavailable：上游暂不可用 / 无可用账号，可稍后重试。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error:
+                  message: 上游暂不可用 / 无可用账号，可稍后重试。
+                  type: api_error
+                  code: invalid_request
+    NotFound:
+      description: Not Found：渠道不存在，或渠道功能未启用（store 未接线）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error: '渠道不存在: ch-5d2c2b49'
+    BadGateway:
+      description: Bad Gateway：向上游查询失败（Base URL 不是 OpenAI 兼容端点 / key 无效）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            error:
+              value:
+                error: '向上游查询模型失败: dial tcp: connection refused'
+                hint: 检查 Base URL 是否指向 OpenAI 兼容端点（通常以 /v1 结尾）与 key 是否有效
+  examples: {}

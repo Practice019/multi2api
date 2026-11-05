@@ -58,6 +58,9 @@ docs/*
 !docs/channel-token-design.md
 !docs/chat-tools.md
 !docs/cache-refresh-design.md
+# OpenAPI 契约是冻结基线（不是过程草稿）：它是回归依据，必须随代码一起进版本库。
+# ⚠ 放在这里只对 .yaml 生效；.md 那条白名单必须排在下方的 `*.md` 之后（git 是"最后匹配者胜"）。
+!docs/openapi.yaml
 
 # 运行期产物
 # logs/ 是 start.bat 与网关控制台写出的日志（含本机绝对路径、账号昵称、
@@ -108,6 +111,8 @@ tasks/
 !docs/channel-token-design.md
 # ⚠ 已知问题与未解项：那份文档记的是"试过什么、为什么没成" ——
 # 没有它，后人会把同样的三次失败再试一遍（这一步已实际发生过）。
+# OpenAPI 契约的说明文件：与上面几条同因 —— 必须排在 `*.md` 之后才不会被它反超。
+!docs/openapi-notes.md
 !docs/known-issues.md
 !docs/chat-tools.md
 
