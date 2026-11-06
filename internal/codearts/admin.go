@@ -104,6 +104,24 @@ func (p *Provider) AdminRoutes() []gateway.AdminRoute {
 			Method: "POST", Path: "/admin/welfare/claim",
 			Handler: p.handleWelfareClaim, Capability: gateway.CapWelfare, Title: "领取福利",
 		},
+		{
+			// ★ T-231：页内「添加账号」的**粘贴回跳地址完成**端点 ——
+			// 服务器部署下 127.0.0.1 回调打不进本机时的逃生路径。
+			//
+			// 形态与 monkeycode 的同名端点一致（`/admin/<上游>/login/complete`）。
+			// 它不是导航页：入口是分组行上的「添加账号」按钮，而那个按钮由 manifest 的
+			// `login.manual` 驱动 —— 该字段来自 *Provider 的 gateway.ManualLoginExt
+			// 自报（admin/schedule.go 的 fillManualLogin）。
+			//
+			// 逻辑见 manuallogin.go：只把粘贴来的 code 投进**既有会话**，
+			// 换证与落盘全部复用既有轮询链路。
+			Method:     http.MethodPost,
+			Path:       manualCompletePath,
+			Handler:    p.handleManualComplete,
+			Capability: gateway.CapImport,
+			Title:      "粘贴回跳地址完成添加账号",
+			Hidden:     true,
+		},
 		// 全量福利领取（本上游的「全部签到」）。
 		//
 		// # 为什么它在此前**不存在**（不是漏了）

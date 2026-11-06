@@ -430,14 +430,22 @@ func (c *Client) ChatStreamWith(a *Auth, body []byte, extraHeaders map[string]st
 		extra[k] = v
 	}
 
-	// 占用一个会话槽。失败不阻断（上报配额而已）。
-	if herr := c.Heartbeat(a, "busy", sessionID); herr != nil {
-		log.Printf("codearts: heartbeat busy 失败（继续）: %v", herr)
-	}
+	// 占用一个会话槽。失败不阻断（上报配额而已），失败时**尽力注销**该 id
+	//（★ 铁律②：传输层失败可能发生在上游已占槽之后 ⇒ 见 heartbeat.go 的 claimSession）。
+	c.claimSession(a, sessionID)
+
+	// ★ T-232：对话期间每 30s 续一次 busy（铁律①：续期失败只记日志、不释放槽位）。
+	// 启动点必须在"占槽之后、开始读流之前"—— 请求本身（以及流）都可能很长，
+	// 只在开头发一次 busy 的话，长对话中途会被上游按会话超时回收。
+	keepAlive := startSessionKeepAlive(c, a, sessionID)
 
 	// 无论走哪条返回路径，都要把会话槽还回去 ——
 	// 否则连续 3 次请求后账号就会卡在 TM.00001041。
 	release := func() {
+		// ★ 铁律④：先停续期**并等它退出**，再发 idle。
+		// 顺序反了会与"此刻在途的那次 busy"赛跑，落后到达的 busy 会把
+		// 刚释放的槽位又标成占用（槽位泄漏，且取决于网络时序、极难复现）。
+		keepAlive.Stop()
 		if herr := c.Heartbeat(a, "idle", sessionID); herr != nil {
 			log.Printf("codearts: heartbeat idle 失败: %v", herr)
 		}
