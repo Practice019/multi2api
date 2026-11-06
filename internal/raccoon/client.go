@@ -19,6 +19,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // Client Raccoon 的 HTTP 客户端。基址可注入（测试用 httptest）。
@@ -50,14 +52,6 @@ func (c *Client) base() string {
 		return strings.TrimRight(c.APIBase, "/")
 	}
 	return DefaultAPIBase
-}
-
-// truncate 截断响应体用于日志。
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // raccoonHeaders 基础业务头（参照 raccoon.ts:271-293）。
@@ -124,7 +118,7 @@ func (c *Client) doJSON(ctx context.Context, method, url string, body any,
 	if len(raw) > 0 {
 		if uerr := json.Unmarshal(raw, &env); uerr != nil {
 			return envelope{}, resp.StatusCode,
-				fmt.Errorf("raccoon: 响应不是 JSON（HTTP %d）: %s", resp.StatusCode, truncate(string(raw), 160))
+				fmt.Errorf("raccoon: 响应不是 JSON（HTTP %d）: %s", resp.StatusCode, gateway.Truncate(string(raw), 160))
 		}
 	}
 	return env, resp.StatusCode, nil

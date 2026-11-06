@@ -29,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // 站点基址。
@@ -356,7 +358,7 @@ func (c *Client) FetchStatus(ctx context.Context, a *Auth) (*StatusPayload, erro
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("monkeycode: status 返回 %d：%s", code, truncate(raw, 200))
+		return nil, fmt.Errorf("monkeycode: status 返回 %d：%s", code, gateway.Truncate(string(raw), 200))
 	}
 	body, err := unwrap(raw)
 	if err != nil {
@@ -398,7 +400,7 @@ func (c *Client) FetchModels(ctx context.Context, a *Auth) ([]ModelEntry, error)
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("monkeycode: models 返回 %d：%s", code, truncate(raw, 200))
+		return nil, fmt.Errorf("monkeycode: models 返回 %d：%s", code, gateway.Truncate(string(raw), 200))
 	}
 	body, err := unwrap(raw)
 	if err != nil {
@@ -425,7 +427,7 @@ func (c *Client) FetchWallet(ctx context.Context, a *Auth) (*WalletPayload, erro
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("monkeycode: wallet 返回 %d：%s", code, truncate(raw, 200))
+		return nil, fmt.Errorf("monkeycode: wallet 返回 %d：%s", code, gateway.Truncate(string(raw), 200))
 	}
 	body, err := unwrap(raw)
 	if err != nil {
@@ -466,7 +468,7 @@ func (c *Client) CreateAPIKey(ctx context.Context, a *Auth, name string) (*APIKe
 		return nil, err
 	}
 	if code != http.StatusOK && code != http.StatusCreated {
-		return nil, fmt.Errorf("monkeycode: 签发 key 返回 %d：%s", code, truncate(raw, 200))
+		return nil, fmt.Errorf("monkeycode: 签发 key 返回 %d：%s", code, gateway.Truncate(string(raw), 200))
 	}
 	body, err := unwrap(raw)
 	if err != nil {
@@ -524,15 +526,6 @@ func (c *Client) DoChat(ctx context.Context, a *Auth, req ChatRequest) (*http.Re
 }
 
 // ---- 杂项 ----
-
-// truncate 截断错误体，避免把几 MB 塞进错误信息。
-func truncate(b []byte, n int) string {
-	s := string(b)
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
 
 // proxyFunc 把代理 URL 转成 Transport.Proxy。
 //

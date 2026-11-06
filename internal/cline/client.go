@@ -20,6 +20,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // Client Cline 的 HTTP 客户端。两个基址都可注入（测试用 httptest）。
@@ -79,14 +81,6 @@ func (c *Client) workOSBase() string {
 		return strings.TrimRight(c.WorkOSBase, "/")
 	}
 	return DefaultWorkOSBase
-}
-
-// truncate 截断响应体用于日志/错误信息。
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // applyClientHeaders 注入客户端标识头。
@@ -322,7 +316,7 @@ func (c *Client) RegisterTokens(ctx context.Context, accessToken, refreshToken s
 	}
 	if status < 200 || status >= 300 {
 		return nil, fmt.Errorf("登录服务返回异常：token 注册失败（HTTP %d） - %s",
-			status, truncate(string(body), 200))
+			status, gateway.Truncate(string(body), 200))
 	}
 
 	p, err := parseTokenPayload(body)
@@ -372,7 +366,7 @@ func (c *Client) RefreshCredential(ctx context.Context, a *Auth) (*Auth, error) 
 		return nil, fmt.Errorf("%w（HTTP %d）", ErrRefreshExpired, status)
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("cline 续期失败（HTTP %d）：%s", status, truncate(string(body), 200))
+		return nil, fmt.Errorf("cline 续期失败（HTTP %d）：%s", status, gateway.Truncate(string(body), 200))
 	}
 
 	p, perr := parseTokenPayload(body)
@@ -623,7 +617,7 @@ func (c *Client) VerifyToken(ctx context.Context, a *Auth) error {
 		return err
 	}
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("cline: 令牌校验 HTTP %d: %s", status, truncate(string(body), 120))
+		return fmt.Errorf("cline: 令牌校验 HTTP %d: %s", status, gateway.Truncate(string(body), 120))
 	}
 	return nil
 }
@@ -635,5 +629,5 @@ func describeWorkOSError(body []byte) string {
 		Desc  string `json:"error_description"`
 	}
 	_ = json.Unmarshal(body, &raw)
-	return strings.TrimSpace(firstNonEmpty(raw.Desc, raw.Error, truncate(string(body), 120)))
+	return strings.TrimSpace(firstNonEmpty(raw.Desc, raw.Error, gateway.Truncate(string(body), 120)))
 }

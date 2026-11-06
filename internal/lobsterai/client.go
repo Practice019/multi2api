@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // Client LobsterAI 的 HTTP 客户端。三个基址都可注入（测试用 httptest）。
@@ -79,13 +81,6 @@ func (c *Client) versionAPI() string {
 		return c.VersionA
 	}
 	return DefaultClientVersionAPI
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // do 发一次请求，返回 (状态码, 响应体)。
@@ -231,7 +226,7 @@ func (c *Client) ExchangeAuthCode(ctx context.Context, code string, s LoginSessi
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("lobsterai: exchange HTTP %d: %s", status, truncate(string(body), 160))
+		return nil, fmt.Errorf("lobsterai: exchange HTTP %d: %s", status, gateway.Truncate(string(body), 160))
 	}
 	env, err := parseEnvelope(body)
 	if err != nil {
@@ -312,7 +307,7 @@ func (c *Client) RefreshCredential(ctx context.Context, a *Auth) (*Auth, error) 
 		return nil, ErrRefreshExpired
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("lobsterai: 续期 HTTP %d: %s", status, truncate(string(body), 160))
+		return nil, fmt.Errorf("lobsterai: 续期 HTTP %d: %s", status, gateway.Truncate(string(body), 160))
 	}
 	env, err := parseEnvelope(body)
 	if err != nil {
@@ -637,7 +632,7 @@ func (c *Client) ClaimDailyCheckin(ctx context.Context, a *Auth) ClaimOutcome {
 	}
 	if status < 200 || status >= 300 {
 		return ClaimOutcome{Kind: "failed",
-			Message: fmt.Sprintf("领取 HTTP %d: %s", status, truncate(string(body), 160))}
+			Message: fmt.Sprintf("领取 HTTP %d: %s", status, gateway.Truncate(string(body), 160))}
 	}
 	env, err := parseEnvelope(body)
 	if err != nil {

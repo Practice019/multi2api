@@ -44,6 +44,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // pathPasswordLogin 邮箱密码登录（续期的第三步）。
@@ -202,7 +204,7 @@ func (c *Client) renewSession(ctx context.Context, region, email, password strin
 		if code != http.StatusOK {
 			// 业务错：不重试（403 密码错 / 401 / 429 重试也一样）。
 			// 把上游原文带出来 —— 只说"HTTP 403"没法判断是密码错还是 PoW 被拒。
-			return nil, fmt.Errorf("monkeycode: 续期失败（password-login HTTP %d）：%s", code, truncate(raw, 200))
+			return nil, fmt.Errorf("monkeycode: 续期失败（password-login HTTP %d）：%s", code, gateway.Truncate(string(raw), 200))
 		}
 		return parsePasswordLogin(raw, setCookies)
 	}
@@ -254,7 +256,7 @@ func parsePasswordLogin(raw []byte, setCookies []string) (*RenewResult, error) {
 	sess, ttl, source := parseSessionCookie(setCookies)
 	if sess == "" {
 		return nil, fmt.Errorf("monkeycode: 续期返回 200 但没有下发 %s（上游行为变了？）：%s",
-			sessionCookieName, truncate(raw, 160))
+			sessionCookieName, gateway.Truncate(string(raw), 160))
 	}
 	return &RenewResult{Session: sess, ExpiresInSec: ttl, TTLSource: source}, nil
 }

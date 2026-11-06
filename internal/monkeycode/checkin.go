@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // 签到端点。
@@ -32,7 +34,7 @@ func (p *Provider) CheckinStatus(ctx context.Context, a *Auth) (signedIn bool, e
 		return false, true, err
 	}
 	if code != http.StatusOK {
-		return false, true, fmt.Errorf("monkeycode: 查签到状态返回 %d：%s", code, truncate(raw, 160))
+		return false, true, fmt.Errorf("monkeycode: 查签到状态返回 %d：%s", code, gateway.Truncate(string(raw), 160))
 	}
 	body, uerr := unwrap(raw)
 	if uerr != nil {
@@ -77,7 +79,7 @@ func (p *Provider) ClaimCheckin(ctx context.Context, a *Auth) (int64, bool, erro
 		return 0, false, err
 	}
 	if code != http.StatusOK {
-		return 0, false, fmt.Errorf("monkeycode: 签到返回 %d：%s", code, truncate(raw, 160))
+		return 0, false, fmt.Errorf("monkeycode: 签到返回 %d：%s", code, gateway.Truncate(string(raw), 160))
 	}
 	if _, uerr := unwrap(raw); uerr != nil {
 		return 0, false, uerr

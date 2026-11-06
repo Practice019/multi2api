@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // Client Qoder 的 HTTP 客户端。
@@ -113,13 +115,6 @@ func (c *Client) encryptedBase() string {
 		return strings.TrimRight(c.Product.EncryptedInferBase, "/")
 	}
 	return Qoder.EncryptedInferBase
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }
 
 // do 发一次请求。
@@ -307,7 +302,7 @@ func (c *Client) PollDeviceToken(ctx context.Context, s *DeviceSession) (PollRes
 		return PollResult{}, fmt.Errorf("qoder: 轮询被拒绝（HTTP %d）", status)
 	}
 	if status < 200 || status >= 300 {
-		return PollResult{}, fmt.Errorf("qoder: 轮询 HTTP %d: %s", status, truncate(string(body), 160))
+		return PollResult{}, fmt.Errorf("qoder: 轮询 HTTP %d: %s", status, gateway.Truncate(string(body), 160))
 	}
 
 	var rec struct {
@@ -384,7 +379,7 @@ func (c *Client) RefreshCredential(ctx context.Context, a *Auth) (*Auth, error) 
 		return nil, ErrRefreshExpired
 	}
 	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("qoder: 续期 HTTP %d: %s", status, truncate(string(raw), 160))
+		return nil, fmt.Errorf("qoder: 续期 HTTP %d: %s", status, gateway.Truncate(string(raw), 160))
 	}
 
 	// ⚠ 字段名与形状**逐字照抄参照 parseQoderTokenPayload**（本轮修的缺陷）。

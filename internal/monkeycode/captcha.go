@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // 验证码端点。
@@ -185,14 +187,14 @@ func (c *Client) solveCaptcha(ctx context.Context, a *Auth) (string, error) {
 		return "", err
 	}
 	if code != http.StatusOK && code != http.StatusCreated {
-		return "", fmt.Errorf("monkeycode: challenge 返回 %d：%s", code, truncate(raw, 160))
+		return "", fmt.Errorf("monkeycode: challenge 返回 %d：%s", code, gateway.Truncate(string(raw), 160))
 	}
 	var ch captchaChallenge
 	if err := json.Unmarshal(raw, &ch); err != nil {
 		return "", fmt.Errorf("monkeycode: 解析 challenge 失败：%w", err)
 	}
 	if ch.Token == "" || ch.Challenge.C <= 0 {
-		return "", fmt.Errorf("monkeycode: challenge 内容异常：%s", truncate(raw, 160))
+		return "", fmt.Errorf("monkeycode: challenge 内容异常：%s", gateway.Truncate(string(raw), 160))
 	}
 
 	// 解 c 个子挑战。
@@ -223,7 +225,7 @@ func (c *Client) solveCaptcha(ctx context.Context, a *Auth) (string, error) {
 		return "", err
 	}
 	if code != http.StatusOK && code != http.StatusCreated {
-		return "", fmt.Errorf("monkeycode: redeem 返回 %d：%s", code, truncate(raw, 160))
+		return "", fmt.Errorf("monkeycode: redeem 返回 %d：%s", code, gateway.Truncate(string(raw), 160))
 	}
 	var rd struct {
 		Success bool   `json:"success"`
@@ -234,7 +236,7 @@ func (c *Client) solveCaptcha(ctx context.Context, a *Auth) (string, error) {
 		return "", fmt.Errorf("monkeycode: 解析 redeem 失败：%w", err)
 	}
 	if !rd.Success || rd.Token == "" {
-		return "", fmt.Errorf("monkeycode: redeem 失败：%s", truncate(raw, 160))
+		return "", fmt.Errorf("monkeycode: redeem 失败：%s", gateway.Truncate(string(raw), 160))
 	}
 	return rd.Token, nil
 }
