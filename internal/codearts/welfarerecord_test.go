@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"workbuddy2api/internal/checkinlog"
@@ -38,6 +39,17 @@ type welfareStub struct {
 	claimFail   bool   // true = claim 端点回 500
 	listFail    bool   // true = delivery 端点回 500
 	claimReject string // 非空 = claim 端点回业务拒绝（如 "资格不符"）
+
+	// claimedOnce：claim 成功过之后置 1，delivery 改为回"已确认到账"（T-230）。
+	//
+	// 为什么需要它：T-230 之后 ClaimAllWelfare 会**回读 delivery** 确认到账
+	// （官方判据：同 id + 同 kind + `!claimable && status ∈ {CONFIRMED, CONSUMED}`），
+	// 只回 code:0 不算成功。旧夹具的 delivery 永远回 claimable=true，
+	// 于是"领到了"在新协议下变成"已受理未确认"——夹具过期了，不是行为错了。
+	//
+	// 用原子读写：handler 跑在 httptest 的请求 goroutine 里，普通 bool
+	// 在 `-race` 下会被判数据竞争。
+	claimedOnce int32
 }
 
 func newWelfareStub(t *testing.T, claimable bool) *welfareStub {
@@ -52,6 +64,13 @@ func newWelfareStub(t *testing.T, claimable bool) *welfareStub {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
+			// T-230：claim 成功过之后，delivery 要如实回"已确认到账"（claimable=false +
+			// status=CONFIRMED）—— 否则回读确认会判"已受理未确认"，与夹具意图不符。
+			if atomic.LoadInt32(&st.claimedOnce) == 1 {
+				_, _ = w.Write([]byte(`{"code":0,"data":{"items":[` +
+					`{"campaignId":101,"title":"每日签到领1000积分","claimable":false,"status":"CONFIRMED"}]}}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"code":0,"data":{"items":[` +
 				`{"campaignId":101,"title":"每日签到领1000积分","claimable":` +
 				boolJSON(st.claimable) + `}]}}`))
@@ -66,6 +85,8 @@ func newWelfareStub(t *testing.T, claimable bool) *welfareStub {
 				_, _ = w.Write([]byte(`{"code":1,"message":"` + st.claimReject + `"}`))
 				return
 			}
+			// T-230：领取成功 ⇒ 之后 delivery 视为"已确认到账"（见 claimedOnce 注释）
+			atomic.StoreInt32(&st.claimedOnce, 1)
 			_, _ = w.Write([]byte(`{"code":0,"message":""}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)

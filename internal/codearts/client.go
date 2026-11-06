@@ -624,6 +624,14 @@ func (c *Client) refreshAttempt(a *Auth, kp *DPoPKeyPair) (int, []byte, error) {
 	form.Set("client_id", c.clientID(a))
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", a.RefreshToken)
+	// ★ T-229：官方要求 refresh grant **同带** PKCE verifier（oauth.rs:13-16：
+	// "上游把 refresh_token 绑在当初那次授权的 PKCE 上下文上，只带 refresh token 会被拒"）。
+	//
+	// 向后兼容：**老凭证没有 verifier（字段为空）⇒ 一个字都不发**，行为与改动前完全一致；
+	// 只有登录产生的新凭证才带上（见 oauth.go 的 Exchange 与 credential.go 的 CodeVerifier）。
+	if a.CodeVerifier != "" {
+		form.Set("code_verifier", a.CodeVerifier)
+	}
 	body := form.Encode()
 
 	proof, err := kp.DPoPProof(http.MethodPost, tokenURL)

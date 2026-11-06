@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // 福利中心（= 用户口中的"签到"）。
@@ -58,7 +60,14 @@ type WelfareItem struct {
 	BenefitAmount int    `json:"benefitAmount"`
 	BenefitUnit   string `json:"benefitUnit"`
 	Claimable     bool   `json:"claimable"`
-	Extra         struct {
+	// Status 是上游给的活动状态（T-230 新增）。
+	//
+	// 为什么要把它读进来：回读确认"到账"的判据里有一半在这上面 ——
+	// 官方 welfare.rs:88-90 的 `is_confirmed()` = `!claimable &&
+	// status ∈ {CONFIRMED, CONSUMED}`。只读 claimable 的话，"还能领"
+	// 与"已到账"在数据上无法区分（claimable=false 也可能是"资格不符"）。
+	Status string `json:"status"`
+	Extra  struct {
 		StartTime string `json:"startTime"`
 		EndTime   string `json:"endTime"`
 		// ConsumePriority 越大越先消耗（决定额度用尽顺序）
@@ -219,15 +228,115 @@ func (c *Client) confirmWelfare(a *Auth, campaignID int) error {
 	return nil
 }
 
+// ── T-230：回读确认（受理 ≠ 到账）────────────────────────────────────────
+//
+// 官方 `welfare.rs:640-652` 的口径：`claim` 与 `confirm` **都只回 `code:0`**，
+// 那是"请求受理了"，不是"到账了"；唯一能证伪"到账"的是**回读 delivery**，
+// 判据三件同时满足：**同 id + 同 kind + `!claimable && status ∈ {CONFIRMED, CONSUMED}`**。
+// 不通过就如实报"已提交未确认"，**不显示领取成功** —— 否则正是官方点名的那种假成功：
+// "把受理当成功 = 面板显示一个没发生的领取，而用户下一次看到的余额还是旧的"。
+//
+// ⚠ 本仓的确认是**本地判据**（读 delivery 列表），不是把 claim 的 code 当结论。
+//
+// 为什么默认 3 次 / 间隔 2 秒：上游入账是异步的（code:0 之后列表才翻状态），
+// 三次足以覆盖常见延迟，又不至于把一次签到拖到十几秒。
+var (
+	welfareArrivalAttempts   = 3
+	welfareArrivalRetryEvery = 2 * time.Second // 测试会改小它
+)
+
+// welfareTarget 是"本次已受理、待回读确认"的一项（id + kind 是判据的前两件）。
+type welfareTarget struct {
+	CampaignID int
+	Type       string
+}
+
+// arrivedSet 回读一次 delivery，返回其中**已确认到账**的 campaignId 集合。
+//
+// 判据（官方 welfare.rs:640-652，逐条对应）：
+//   - 同 id：  it.CampaignID == tg.CampaignID
+//   - 同 kind：it.Type == tg.Type（换期只改 id 与文案，类不变）
+//   - 且 `!claimable && status ∈ {CONFIRMED, CONSUMED}`
+func (c *Client) arrivedSet(a *Auth, targets []welfareTarget) (map[int]bool, error) {
+	items, err := c.FetchWelfare(a)
+	if err != nil {
+		return nil, err
+	}
+	arrived := make(map[int]bool, len(targets))
+	for _, tg := range targets {
+		for _, it := range items {
+			if it.CampaignID != tg.CampaignID || it.Type != tg.Type {
+				continue
+			}
+			if it.Claimable {
+				break // 还能领 ⇒ 没到账
+			}
+			if it.Status == "CONFIRMED" || it.Status == "CONSUMED" {
+				arrived[tg.CampaignID] = true
+			}
+			break
+		}
+	}
+	return arrived, nil
+}
+
+// markArrived 回读确认（就地改写 out 里对应项的 Claimed / Message）。
+//
+// 回读失败**不**把整批判失败（claim 已受理、积分可能只是还没入账），
+// 但也**绝不显示成功** —— 两者都会误导：前者让人重复点击，后者更糟。
+func (c *Client) markArrived(a *Auth, pending []welfareTarget, out []WelfareResult) {
+	arrived := make(map[int]bool, len(pending))
+	for attempt := 1; attempt <= welfareArrivalAttempts; attempt++ {
+		if attempt > 1 && welfareArrivalRetryEvery > 0 {
+			time.Sleep(welfareArrivalRetryEvery)
+		}
+		got, err := c.arrivedSet(a, pending)
+		if err != nil {
+			log.Printf("codearts: 福利到账回读失败（第 %d/%d 次）: %v", attempt, welfareArrivalAttempts, err)
+			continue
+		}
+		for id := range got {
+			arrived[id] = true
+		}
+		if len(arrived) == len(pending) {
+			break
+		}
+	}
+	for i := range out {
+		z := &out[i]
+		isPending := false
+		for _, tg := range pending {
+			if tg.CampaignID == z.CampaignID {
+				isPending = true
+				break
+			}
+		}
+		if !isPending || !z.Claimed {
+			continue
+		}
+		if arrived[z.CampaignID] {
+			z.Message = strings.TrimSpace(z.Message + " 官方活动列表已回读确认到账")
+			continue
+		}
+		z.Claimed = false
+		z.Message = strings.TrimSpace(z.Message + " 请求已提交，但官方活动列表尚未确认到账（将下次重试）")
+		log.Printf("codearts: 活动 %d 已提交领取，但官方活动列表尚未确认到账（将下次重试）", z.CampaignID)
+	}
+}
+
 // ClaimAllWelfare 领取所有当前可领的活动，返回每个的结果。
 //
 // 串行执行：福利接口没有并发收益，而串行能让日志与返回顺序对应。
+//
+// T-230：claim/confirm 之后**回读 delivery 确认到账**，只有确认到账的才记
+// `Claimed=true`；已受理未确认的如实报（不显示成功，留给下次重试）。
 func (c *Client) ClaimAllWelfare(a *Auth) ([]WelfareResult, error) {
 	items, err := c.FetchWelfare(a)
 	if err != nil {
 		return nil, err
 	}
 	var out []WelfareResult
+	var pending []welfareTarget // 已受理、待回读确认
 	for _, it := range items {
 		if !it.Claimable {
 			out = append(out, WelfareResult{
@@ -247,7 +356,13 @@ func (c *Client) ClaimAllWelfare(a *Auth) ([]WelfareResult, error) {
 			continue
 		}
 		r.Title = it.Title
+		if r.Claimed {
+			pending = append(pending, welfareTarget{CampaignID: it.CampaignID, Type: it.Type})
+		}
 		out = append(out, *r)
+	}
+	if len(pending) > 0 {
+		c.markArrived(a, pending, out)
 	}
 	return out, nil
 }

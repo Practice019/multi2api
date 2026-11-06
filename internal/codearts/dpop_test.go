@@ -196,9 +196,23 @@ func TestNeedsRefresh(t *testing.T) {
 	if !expired.NeedsRefresh(5 * timeMinute) {
 		t.Error("已过期凭证应判定需刷新")
 	}
-	// 无过期时间（视为需刷新，安全侧）
-	if !(&Auth{}).NeedsRefresh(timeMinute) {
-		t.Error("无 expiresAt 应判定需刷新")
+	// 无过期时间要分两种（★ T-229 改的语义，原先是"一律视为需刷新"）：
+	//
+	//	① 有 refresh_token（字段缺失/读取异常）：**仍需刷新** —— 保守方向，
+	//	   宁可多刷一次也不要用一份已经死掉的凭证打上游。
+	//	② 无 refresh_token（永久 AK/SK，或坏凭证）：**不刷新** ——
+	//	   没有 refresh_token + DPoP 私钥就**刷不了**，判"要刷"只是每轮去撞一次
+	//	   必然失败的续期（表现为账号被 refresh_hold 挂起，用户看不懂为什么）。
+	//	   坏凭证由 401 / verify 路径负责暴露，不需要靠这里"刷一下"来兜。
+	//
+	// 为什么不能继续"一律需刷新"：accountimport.go 明确允许导入
+	// "只有 AK/SK、没有 dpop 段"的永久凭据（华为云 IAM 永久密钥不过期、也无续期），
+	// 那种凭证落进旧判据就是"每轮都该刷"。
+	if !(&Auth{RefreshToken: "rt"}).NeedsRefresh(timeMinute) {
+		t.Error("有 refresh_token 但缺 expiresAt 应判定需刷新（保守方向）")
+	}
+	if (&Auth{}).NeedsRefresh(timeMinute) {
+		t.Error("无 refresh_token（永久 AK/SK / 坏凭证）不该判定需刷新 —— 刷也刷不了")
 	}
 	// 还很久（45 分钟后），窗口 5 分钟 -> 不需刷新
 	fresh := &Auth{ExpiresAt: nowUnix() + 45*60}

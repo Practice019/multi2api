@@ -25,5 +25,91 @@
       "date": "20260101T000000Z",
       "wantAuth": "SDK-HMAC-SHA256 Access=HSTASWBBW9K9XP5ZC26X, SignedHeaders=content-type;x-sdk-date;x-security-token, Signature=57c41d2c21c893f2392f55a53c64eec6240b31dbd86782593736122fe9c6c0d5"
     }
+  ],
+  "fixtures": {
+    "note": "★ 全合成夹具（HSTAAAAAAAAAAAAAAAAAAA / sk-secret-0123456789abcdef / sts-token-abc123 / AKID / SECRET / TOK）—— 不是任何真实账号的凭据。由 TestSignMatchesFixtures 逐字节比对：默认 `go test` 就能跑，不依赖环境变量，也不会 Skip。",
+    "source": "T-220 金向量 1/2/3/4（见 register-machine/docs/reports/codearts/deep-dive-01-signer.md §4）+ 本项目新增的 P0 回归向量 5",
+    "verified": "5 组期望值均经「官方字符集（JS encodeURIComponent 语义）独立实现」交叉验证：独立实现与本包 Sign() 逐字节一致。"
+  },
+  "fixtureCases": [
+    {
+      "name": "1 POST chat + 头值前后空格被 trim + 尾斜杠 + SignedHeaders 前的空行",
+      "covers": "①空行 ②尾斜杠 ④单次HMAC 头值 trim query 排序",
+      "method": "POST",
+      "url": "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/chat/completions",
+      "body": "{\"model\":\"glm-5.3-flash\",\"stream\":false}",
+      "accessKey": "HSTAAAAAAAAAAAAAAAAAAA",
+      "secretKey": "sk-secret-0123456789abcdef",
+      "securityToken": "sts-token-abc123",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Sdk-Date": "20260101T000000Z",
+        "maas_type": "benefit",
+        "model-id": "glm-5.3-flash",
+        "X-Ot-Function": "  agent-general  ",
+        "Host": "snap-access.cn-north-4.myhuaweicloud.com"
+      },
+      "wantAuth": "SDK-HMAC-SHA256 Access=HSTAAAAAAAAAAAAAAAAAAA, SignedHeaders=content-type;host;maas_type;model-id;x-ot-function;x-sdk-date;x-security-token, Signature=d74d70f38c5d7e69b73c728740a2c7397a4191737d93f207d1a6f5fce49e99c4"
+    },
+    {
+      "name": "2 GET 带 query（键排序 + 同键值排序）",
+      "covers": "query 排序：b=2&a=1&a=0 → a=0&a=1&b=2；x-security-token 为空时不注入",
+      "method": "GET",
+      "url": "https://opengw.developer.huaweicloud.com/api/v1/user/tokens/balance?b=2&a=1&a=0",
+      "body": "",
+      "accessKey": "AKID",
+      "secretKey": "SECRET",
+      "headers": {
+        "X-Sdk-Date": "20260203T040506Z",
+        "Host": "opengw.developer.huaweicloud.com"
+      },
+      "wantAuth": "SDK-HMAC-SHA256 Access=AKID, SignedHeaders=host;x-sdk-date, Signature=0acd5e903f49fd4e91d71aee6188d446d6f76863c5d8f13a4d428c0af017af45"
+    },
+    {
+      "name": "3 路径/查询需 JS 编码（中文 + 空格 + $ + 与 ~ - . _）",
+      "covers": "UTF-8 逐字节 %XX 且大写；空格 → %20；$ 与 + 必须编码；~ - . _ 不编码",
+      "method": "POST",
+      "url": "https://snap-access.cn-north-4.myhuaweicloud.com/api/v2/models/模型 名称/a$b+c?q=a b&z=~-._",
+      "body": "{}",
+      "accessKey": "AKID",
+      "secretKey": "SECRET",
+      "securityToken": "TOK",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Sdk-Date": "20260304T050607Z",
+        "x-ot-session-id": "ses_deadbeefdeadbeef",
+        "Host": "snap-access.cn-north-4.myhuaweicloud.com"
+      },
+      "wantAuth": "SDK-HMAC-SHA256 Access=AKID, SignedHeaders=content-type;host;x-ot-session-id;x-sdk-date;x-security-token, Signature=9cd58402555dd1c218d15d564ea1d942301ff3bcfee16e0f22fdf3f0b8e17921"
+    },
+    {
+      "name": "4 PUT 空 body（空体摘要 e3b0c442…）",
+      "covers": "PUT 参与签名；sha256(\"\")；securityToken 为空时**不注入** x-security-token",
+      "method": "PUT",
+      "url": "https://snap-access.cn-north-4.myhuaweicloud.com/v1/ops/claim",
+      "body": "",
+      "accessKey": "AKID",
+      "secretKey": "SECRET",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-Sdk-Date": "20260405T060708Z",
+        "Host": "snap-access.cn-north-4.myhuaweicloud.com"
+      },
+      "wantAuth": "SDK-HMAC-SHA256 Access=AKID, SignedHeaders=content-type;host;x-sdk-date, Signature=d3b720a8f133d2d702fec49b60a4a553eed8ea1ae39d7c9150a10780e6902ee7"
+    },
+    {
+      "name": "★ 5 P0 回归：! ' ( ) * 必须原样保留（不转义）",
+      "covers": "★ T-228 修的 P0：未保留集 = A-Za-z0-9-_.!~*'()；这些字符出现在 path/query 时不得转义，否则签出上游不认的签名（修复前该组签名是 c58ed27b…6e474）",
+      "method": "GET",
+      "url": "https://snap-access.cn-north-4.myhuaweicloud.com/v1/x?q=a!b&r=a*b&s=~-._&t=a'b",
+      "body": "",
+      "accessKey": "AKID",
+      "secretKey": "SECRET",
+      "headers": {
+        "X-Sdk-Date": "20260501T010203Z",
+        "Host": "snap-access.cn-north-4.myhuaweicloud.com"
+      },
+      "wantAuth": "SDK-HMAC-SHA256 Access=AKID, SignedHeaders=host;x-sdk-date, Signature=cdd353372d65dfaac073c3de66c689510048653e4d89918d1c4b5851ac608825"
+    }
   ]
 }

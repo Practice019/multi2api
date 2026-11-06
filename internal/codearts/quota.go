@@ -344,15 +344,45 @@ func (b *quotaTrackingBody) Read(p []byte) (int, error) {
 		}
 		body := string(b.buf)
 
-		if reason, ok := DetectQuotaExhausted(body); ok {
-			// 额度耗尽：就地标记（带日切到期），后续 /v1/models 立刻反映。
-			MarkQuotaExhausted(b.model, reason)
-			log.Printf("codearts: 请求路径撞到额度耗尽，标记模型 %s 不可用（%s）", b.model, reason)
-			b.done = true
-		} else if strings.Contains(body, `"choices"`) {
+		// ★ T-230：判序对齐官方规则② —— 【先判有内容，再判额度】。
+		//
+		// 官方 stream_fault.rs:14-17 原文：
+		//   "同一帧里只要带了任何答案，就绝不判故障。delta.content /
+		//    delta.reasoning_content / delta.tool_calls / choices[].text /
+		//    非 [DONE] 的 text 都算答案 —— 带错误码又带内容的那种帧，
+		//    丢内容比漏报一次故障更糟。"
+		//
+		// 旧判序（先判 DetectQuotaExhausted）在"同一帧既带额度文案、又带真实数据"时
+		// 会把**可用模型**误标成额度耗尽（误罚活账号），且后续 /v1/models 会把它隐藏。
+		// 代价不对等：漏报一次额度（最多多打一次上游）≪ 误罚一个健康账号。
+		//
+		// 边界（如实记下）：额度错误若**碰巧**与 "choices" 同帧，新判序会漏判 ——
+		// 这正是官方认可的行为（有内容优先）；而额度错误的标准形态是
+		// "整段响应只有那一个 error 信封"（见 quotaScanLimit 的注释），不含 choices。
+		// ★ T-230：判序对齐官方规则② —— 【先判有内容，再判额度】。
+		//
+		// 官方 stream_fault.rs:14-17 原文：
+		//   "同一帧里只要带了任何答案，就绝不判故障。delta.content /
+		//    delta.reasoning_content / delta.tool_calls / choices[].text /
+		//    非 [DONE] 的 text 都算答案 —— 带错误码又带内容的那种帧，
+		//    丢内容比漏报一次故障更糟。"
+		//
+		// 旧判序（先判 DetectQuotaExhausted）在"同一帧既带额度文案、又带真实数据"时
+		// 会把**可用模型**误标成额度耗尽（误罚活账号），且后续 /v1/models 会把它隐藏。
+		// 代价不对等：漏报一次额度（最多多打一次上游）≪ 误罚一个健康账号。
+		//
+		// 边界（如实记下）：额度错误若**碰巧**与 "choices" 同帧，新判序会漏判 ——
+		// 这正是官方认可的行为（有内容优先）；而额度错误的标准形态是
+		// "整段响应只有那一个 error 信封"（见 quotaScanLimit 的注释），不含 choices。
+		if strings.Contains(body, `"choices"`) {
 			// 已经出现正常数据帧 → 本次调用与额度无关，清除旧标记。
 			// 这就是**自愈点**：额度次日恢复后，第一条成功请求即解除隐藏。
 			ClearQuota(b.model)
+			b.done = true
+		} else if reason, ok := DetectQuotaExhausted(body); ok {
+			// 额度耗尽：就地标记（带日切到期），后续 /v1/models 立刻反映。
+			MarkQuotaExhausted(b.model, reason)
+			log.Printf("codearts: 请求路径撞到额度耗尽，标记模型 %s 不可用（%s）", b.model, reason)
 			b.done = true
 		}
 	}

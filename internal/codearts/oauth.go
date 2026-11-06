@@ -356,7 +356,11 @@ func (m *Manager) Exchange(s *Session, code string) (json.RawMessage, error) {
 			"securityToken":   cr.Credentials.SecurityToken,
 			"expiresAt":       expiresAt,
 			"refresh_token":   cr.RefreshToken,
-			"clientId":        m.ClientID,
+			// ★ T-229：把登录这把 PKCE verifier 一起落盘 —— 续期时要回带它
+			//（官方 oauth.rs:13-16；或见 credential.go 的 CodeVerifier 注释）。
+			// 老凭证没有这个键 ⇒ 解析出来为空 ⇒ 续期不发（向后兼容）。
+			"code_verifier": s.pkce.Verifier,
+			"clientId":      m.ClientID,
 		},
 		// account.uid 用 AK 兜底。
 		//

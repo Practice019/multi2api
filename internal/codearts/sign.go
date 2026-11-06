@@ -34,16 +34,38 @@ const (
 	contentHash = "x-sdk-content-sha256"
 )
 
-// escape 按华为云 SDK 的规则做 URI 编码。
-// Go 的 url.QueryEscape 会把空格编成 '+'，这里必须用 %20，
-// 且需额外转义 !'()* —— 与 JS 的 encodeURIComponent 对齐。
+// escape 复刻 JS `encodeURIComponent` 的语义（= 华为云官方签名器的未保留字符集）。
+//
+// ★ 保留集 = A-Za-z0-9 + `- _ . ! ~ * ' ( )`
+//
+//	—— `! ' ( ) *` 这五个**不转义**。这与 RFC 3986（A-Za-z0-9-._~）**不同**，
+//	也与 Go `url.QueryEscape` 的默认行为**不同**（后者会把它们转义成 %21 %27 %28 %29 %2A）。
+//
+// 为什么必须这样：官方签名器是 JS 写的（encodeURIComponent），我们要签得与它**逐字节一致**；
+// path/query 里一旦出现 `!` `'` `(` `)` `*`，转义与否会导致签名不同 ⇒ 上游回 401。
+// 逐字节依据见 register-machine/docs/reports/codearts/deep-dive-01-signer.md §2.3。
+//
+// 其余规则：空格 → `%20`（不是 `+`）、`/` → `%2F`（逐段编码里 `/` 是分隔符，函数本身也照样转义）、
+// 非 ASCII 按 **UTF-8 字节**逐个 `%XX`、十六进制**大写**。
 func escape(s string) string {
-	e := url.QueryEscape(s)
-	e = strings.ReplaceAll(e, "+", "%20")
-	replacer := strings.NewReplacer(
-		"!", "%21", "'", "%27", "(", "%28", ")", "%29", "*", "%2A",
-	)
-	return replacer.Replace(e)
+	const upperhex = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z',
+			c >= 'a' && c <= 'z',
+			c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.', c == '!', c == '~', c == '*', c == '\'', c == '(', c == ')':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(upperhex[c>>4])
+			b.WriteByte(upperhex[c&0x0f])
+		}
+	}
+	return b.String()
 }
 
 func sha256Hex(s string) string {

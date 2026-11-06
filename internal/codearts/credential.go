@@ -42,6 +42,17 @@ type Auth struct {
 	ExpiresAt     int64  `json:"expiresAt"` // Unix 秒
 
 	RefreshToken string `json:"refresh_token"`
+	// CodeVerifier 是**登录那次**用的 PKCE verifier。
+	//
+	// ★ T-229：官方实现（Agent2Providers `codearts/oauth.rs:13-16`）明确要求
+	// refresh grant 与 code grant **同带**它 —— 上游把 `refresh_token` 绑在
+	// 当初那次授权的 PKCE 上下文上（官方扩展同样把 verifier 与 DPoP 私钥一起落盘）。
+	//
+	// 本仓历史上不带它也能通过（上游似乎不校验，见 refresh_test.go 的 live 测试），
+	// 但**带上不会有副作用**（多一个表单字段上游会忽略），且能对齐官方。
+	// ⚠ 老凭证没有这个字段 ⇒ 值为空 ⇒ 续期**不发**它（保持旧行为，
+	//    见 client.go 的 refreshAttempt）。
+	CodeVerifier string `json:"code_verifier,omitempty"`
 	// DPoPPrivateKeyJWK 是续期必需的 ES256 私钥（JWK JSON）。
 	// 没有它就无法调 refresh_token grant —— 这是与 CodeBuddy 最大的不同：
 	// 续期凭证不是一个 token，而是一对密钥 + refresh_token。
@@ -114,7 +125,16 @@ func DPoPKeysDiffer(a, b json.RawMessage) bool {
 // 「刚判定为新鲜，发出去已过期」的窗口。
 func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	if a.ExpiresAt <= 0 {
-		return true
+		// ★ T-229：`ExpiresAt <= 0` 有两种含义，必须区分 ——
+		//  否则"永久 AK/SK"会被判成"永远要续期"，每轮都去刷一次必然失败的续期。
+		//
+		//	① 永久 AK/SK（无 refresh_token）⇒ 永不续期（刷也刷不了）
+		//	② 有 refresh_token 但缺 expiresAt（读取异常/手写凭证）⇒ 仍要续期（保守方向）
+		//
+		// 依据：官方 `CodeArts2API` 的 session.go:79-81 对"永久 AK/SK 必须短路"的处理
+		//（不短路就会落到"零值 = 不可用"分支，账号在 TTL 用尽后永久失效）；
+		// 以及本仓 accountimport.go 明确允许导入 AK/SK-only 的永久凭据。
+		return a.RefreshToken != ""
 	}
 	return time.Now().Add(within).Unix() >= a.ExpiresAt
 }
@@ -147,6 +167,8 @@ type credBody struct {
 	SecurityToken string `json:"securityToken"`
 	ExpiresAt     int64  `json:"expiresAt"`
 	RefreshToken  string `json:"refresh_token,omitempty"`
+	// CodeVerifier 与 Auth.CodeVerifier 同义（T-229：登录时写入，续期时回带）。
+	CodeVerifier  string `json:"code_verifier,omitempty"`
 	ClientID      string `json:"clientId,omitempty"`
 }
 
@@ -183,6 +205,7 @@ func ParseCredential(raw []byte) (*Auth, error) {
 		a.SecurityToken = n.Auth.SecurityToken
 		a.ExpiresAt = n.Auth.ExpiresAt
 		a.RefreshToken = n.Auth.RefreshToken
+		a.CodeVerifier = n.Auth.CodeVerifier
 		a.ClientID = n.Auth.ClientID
 		a.UID = n.Account.UID
 		a.Nickname = n.Account.Nickname
@@ -343,6 +366,7 @@ func (a *Auth) MarshalNested() ([]byte, error) {
 			SecurityToken: a.SecurityToken,
 			ExpiresAt:     a.ExpiresAt,
 			RefreshToken:  a.RefreshToken,
+			CodeVerifier:  a.CodeVerifier,
 			ClientID:      a.ClientID,
 		},
 		Account:  accountBlock{UID: a.UID, Nickname: a.Nickname},

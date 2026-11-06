@@ -2,11 +2,13 @@ package codearts
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestLoadDirSkipsSubdirectories 钉住"归档目录不被扫描"。
@@ -166,5 +168,85 @@ func TestLoadDirLogsSkippedFile(t *testing.T) {
 	// 否则账号一多就刷屏，日志里再也找不到真正的原因。
 	if strings.Contains(got, "codearts-good.json") {
 		t.Errorf("正常文件也产生了日志（会刷屏）。实际日志=%q", got)
+	}
+}
+
+// ── T-229：永久凭据不该被误判"要续期" + PKCE verifier 必须能落盘 ──────────
+
+// TestNeedsRefreshPermanentCredential 永久 AK/SK（无 refresh_token）**不该**被判要续期。
+//
+// # 这个 bug 的完整链条
+//
+// `NeedsRefresh` 原来对 `ExpiresAt <= 0` 一律 `return true`。而本仓
+// `accountimport.go` **明确允许**导入"只有 AK/SK、没有 dpop 段"的永久凭据
+// （那是华为云 IAM 永久密钥的形态：不过期、也没有续期一说）。
+// 两者一碰，永久账号就会被每轮判"该刷" ⇒ 去撞一次**必然失败**的续期
+// （没有 refresh_token）。有 `refresh_hold` 兜底 ⇒ 症状是账号被挂起 +
+// 界面报"续期连续失败"，而不是刷爆上游；但同样是坏体验，且用户无从理解。
+//
+// 判据为什么是"有没有 refresh_token"而不是别的：能续期的前提就是
+// refresh_token + DPoP 私钥这一对（见 Auth 的注释）。没有它 = 无从续期 = 不该刷。
+func TestNeedsRefreshPermanentCredential(t *testing.T) {
+	a := &Auth{AccessKey: "AK", SecretKey: "SK", ExpiresAt: 0}
+	if a.NeedsRefresh(5 * time.Minute) {
+		t.Fatal("永久 AK/SK（无 refresh_token、无 expiresAt）被误判为需要续期 ⇒ 会每轮重试必然失败的续期")
+	}
+}
+
+// TestNeedsRefreshMissingExpiryWithToken 反例：有 refresh_token 却没 expiresAt
+// （读取异常 / 手写凭证）⇒ 仍要判**要续期**（保守方向，宁可多刷一次也不要用死凭证）。
+func TestNeedsRefreshMissingExpiryWithToken(t *testing.T) {
+	a := &Auth{AccessKey: "AK", SecretKey: "SK", ExpiresAt: 0, RefreshToken: "rt"}
+	if !a.NeedsRefresh(5 * time.Minute) {
+		t.Fatal("有 refresh_token 但缺 expiresAt 应判要续期（保守方向）—— 否则会拿死凭证一直打上游")
+	}
+}
+
+// TestNeedsRefreshNormalSTSUnchanged 防误伤：正常 STS 凭证（ExpiresAt > 0）行为不变。
+func TestNeedsRefreshNormalSTSUnchanged(t *testing.T) {
+	a := &Auth{AccessKey: "AK", SecretKey: "SK", RefreshToken: "rt", ExpiresAt: time.Now().Add(2 * time.Minute).Unix()}
+	if !a.NeedsRefresh(5 * time.Minute) {
+		t.Error("2 分钟后过期的 STS 凭证应判要续期")
+	}
+	a.ExpiresAt = time.Now().Add(time.Hour).Unix()
+	if a.NeedsRefresh(5 * time.Minute) {
+		t.Error("1 小时后过期的 STS 凭证不该判要续期")
+	}
+}
+
+// TestCodeVerifierRoundTrip PKCE verifier 必须能**落盘再读回来** —— 续期要用它；
+// 同时钉住向后兼容：老凭证（没有该键）解析出来必须为空。
+func TestCodeVerifierRoundTrip(t *testing.T) {
+	a := &Auth{AccessKey: "AK", SecretKey: "SK", RefreshToken: "rt", CodeVerifier: "VERIFIER-FOR-TEST"}
+	raw, err := a.MarshalNested()
+	if err != nil {
+		t.Fatalf("MarshalNested: %v", err)
+	}
+	// 落盘形必须**真的**有 code_verifier 键（用 map 断言，不依赖字符串包含的偶然性）
+	var probe struct {
+		Auth map[string]any `json:"auth"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatalf("落盘 JSON 解析失败: %v", err)
+	}
+	if got := probe.Auth["code_verifier"]; got != "VERIFIER-FOR-TEST" {
+		t.Fatalf("落盘形里的 code_verifier = %v，期望 VERIFIER-FOR-TEST（落盘形=%s）", got, raw)
+	}
+	back, err := ParseCredential(raw)
+	if err != nil {
+		t.Fatalf("ParseCredential: %v", err)
+	}
+	if back.CodeVerifier != "VERIFIER-FOR-TEST" {
+		t.Fatalf("读回来的 verifier = %q（丢了 ⇒ 续期没法回带）", back.CodeVerifier)
+	}
+
+	// ★ 向后兼容：老凭证没有这个键 ⇒ 空串 ⇒ 续期**不发**它
+	legacy := []byte(`{"auth":{"accessKeyId":"AK","secretAccessKey":"SK","refresh_token":"rt"}}`)
+	lb, err := ParseCredential(legacy)
+	if err != nil {
+		t.Fatalf("老凭证解析失败: %v", err)
+	}
+	if lb.CodeVerifier != "" {
+		t.Fatalf("老凭证不该凭空有 verifier：%q", lb.CodeVerifier)
 	}
 }
