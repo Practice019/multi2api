@@ -755,6 +755,97 @@ func (c *Client) clientID(a *Auth) string {
 	return "vscode-codebot"
 }
 
+// ModelListPath 上游「内置模型清单」端点。
+//
+// # 实测（T-236，`go test -tags probe` 只读 GET，未做任何推理调用）
+//
+//	GET {engineBase}/v1/model/builtin   头：Agent-Type: PromptCenter
+//	 → 200 {"count":11,"builtinModels":[{"model_id":"GLM-5.2","model_name":"GLM-5.2",
+//	                                      "model_category":"文本生成","enable":true,
+//	                                      "display_enabled":true,"model_desc":"…"}]}
+//	不带 Agent-Type 头 → 400 {"error_code":"TM.00001001","error_msg":"请求头Agent-Type为空"}
+//
+// 这是**账号真实可用**的模型清单来源。它与"IDE 本地缓存的显示清单"不是一回事：
+// 后者会包含账号没开通的模型（客户端选中即报 TM.000010051「无权调用该模型」）。
+//
+// ⚠ 清单里**没有**上下文窗口 / 输出上限 —— 那两个数字本包取内置快照里的实测值
+// （见 provider.go 的 modelsFromUpstream）。
+const ModelListPath = "/v1/model/builtin"
+
+// UpstreamModel 是 /v1/model/builtin 清单里的一项。
+//
+//   - ID：`model_id`，提交给上游时用它（大小写按上游原文，别自作主张改）
+//   - Enable：上游是否对该账号**开通**（false 的一律不列 —— 列了就是"必然失败的一条"）
+//   - DisplayEnabled：上游是否建议展示
+//   - ContextWindow/MaxOutputTokens：上游**不给**，由快照或保守默认补（见 provider.go）
+type UpstreamModel struct {
+	ID             string
+	Name           string
+	Category       string
+	Enable         bool
+	DisplayEnabled bool
+	Desc           string
+}
+
+// ListModels 拉取账号真实可用的模型清单（只读）。
+//
+// 失败一律返回 error，由调用方决定回退（见 Provider.Models 的注释：
+// 目录整体不可用会让该上游在客户端面板里消失，比多列/少列几条严重得多）。
+func (c *Client) ListModels(ctx context.Context, a *Auth) ([]UpstreamModel, error) {
+	body, status, err := SignedCall(c, a, ctx, http.MethodGet,
+		c.engineBase()+ModelListPath, "", map[string]string{"Agent-Type": "PromptCenter"})
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("codearts: 模型清单返回 %d: %s", status, briefBody(body))
+	}
+	var raw struct {
+		Count         int `json:"count"`
+		BuiltinModels []struct {
+			ModelID        string `json:"model_id"`
+			ModelName      string `json:"model_name"`
+			ModelCategory  string `json:"model_category"`
+			Enable         *bool  `json:"enable"`
+			DisplayEnabled *bool  `json:"display_enabled"`
+			ModelDesc      string `json:"model_desc"`
+		} `json:"builtinModels"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		return nil, fmt.Errorf("codearts: 模型清单不是合法 JSON: %w", err)
+	}
+	out := make([]UpstreamModel, 0, len(raw.BuiltinModels))
+	for _, m := range raw.BuiltinModels {
+		if strings.TrimSpace(m.ModelID) == "" {
+			continue
+		}
+		// 字段缺失时按"开通/可显示"处理：上游给了这一条就说明它在这个账号的清单里；
+		// 而把缺省当 false 会在字段改名时把整份目录清空（比多列一条危险得多）。
+		en, de := true, true
+		if m.Enable != nil {
+			en = *m.Enable
+		}
+		if m.DisplayEnabled != nil {
+			de = *m.DisplayEnabled
+		}
+		out = append(out, UpstreamModel{
+			ID: m.ModelID, Name: m.ModelName, Category: m.ModelCategory,
+			Enable: en, DisplayEnabled: de, Desc: m.ModelDesc,
+		})
+	}
+	return out, nil
+}
+
+// briefBody 截断上游响应体，避免把整页 JSON 塞进错误信息与日志。
+func briefBody(s string) string {
+	const max = 200
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…(截断)"
+}
+
 // SignedGet 发一个已签名的 GET，返回响应体与状态码。
 //
 // 供排查工具与未来的额外上游接口使用（与 ChatStream 共用同一套签名逻辑，

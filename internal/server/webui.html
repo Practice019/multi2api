@@ -4054,9 +4054,18 @@ function mpEsc(s) {
   let taskTimer = null;    // 全量任务轮询
   let loginPoll = null;    // 添加账号的轮询句柄
   let loginDeadline = 0;
-// loginProvider 本次登录针对哪个上游（T10）。用于弹窗文案与结果提示 ——
-// 后端目前只认默认上游，回传 provider 时以它为准。
-let loginProvider = '';
+  // loginProvider 本次登录针对哪个上游。用于弹窗文案与结果提示，
+  // **并且直接喂给 `/admin/login/poll` 的 provider 字段**。
+  //
+  // ⚠ T-235：它必须**在 start 成功之后被赋值**（见 addAccount → doStart）。
+  //   曾经它声明了却从没被赋值（恒 `''`）⇒ poll 传出去的 provider 也是空 ⇒
+  //   后端按"不带 provider"走**默认上游**的 OAuth 去认本上游的 state ⇒ 恒定 410
+  //   `oauth: state 不存在或已超期，请重新发起授权`（用户实测报障）。
+  //   症状极具误导性：弹窗标题对、跳转的授权页也对（因为 start 带了 provider），
+  //   **只有轮询走错了上游**。
+  //
+  //   每次打开弹窗会先清空（见 addAccount 开头），避免上一次的值串到这一次。
+  let loginProvider = '';
   let keyRevealed = false; // API 面板里 Key 是否明文显示
 
   const esc = s => String(s == null ? '' : s)
@@ -7791,6 +7800,10 @@ function toast(msg, bad) {
 
   async function addAccount(providerId, btn) {
     openModal();
+    // ★ T-235：每次打开都先复位 —— 上一次登录（可能被取消/关掉）留下的 provider
+    //   绝不能串到这一次的 poll 上。弹窗用的是通用 openModal()，**没有**登录专属的
+    //   关闭钩子；在"打开时复位"比挂关闭钩子更稳（取消 / Esc / 点遮罩关掉都覆盖得到）。
+    loginProvider = '';
     const want = providerId || '';
     $('loginTitle').textContent = want ? ('添加 ' + providerTitle(want) + ' 账号') : '添加账号';
     renderLoginLocalHint();
@@ -7844,6 +7857,11 @@ function toast(msg, bad) {
         $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
         return;
       }
+      // ★ T-235：start **成功之后**才记住 provider（失败路径在 catch 里 return，
+      //   不会留下残留值）。它喂给 /admin/login/poll 的 provider 字段 ——
+      //   漏掉这一步，poll 就会走"不带 provider"的旧路径，用默认上游的 OAuth
+      //   去认本上游的 state，恒定 410。
+      loginProvider = want;
       const state = r.state;
       loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
       // ---- 两种登录形态：**要不要浏览器**由后端回执决定 ----

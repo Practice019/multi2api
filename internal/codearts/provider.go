@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -381,12 +382,94 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 //
 // 所以一个模型不会因为"今天额度用完"而长期从目录里消失。
 func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gateway.ModelInfo, error) {
-	if _, err := authOf(cred); err != nil {
+	a, err := authOf(cred)
+	if err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
+	// ★ T-236：目录改成**从上游拉**，不再返回硬编码快照。
+	//
+	// # 为什么必须改（用户实测）
+	//
+	// 用户点 `codearts/deepseek-v4-flash-0731` → 503
+	// `TM.000010051: 您当前无权调用该模型`。根因就是目录：那一项**不在上游清单里**
+	// —— 上游只返回 11 个，而快照多列了 2 个本账号没有的
+	// （deepseek-v4-flash-0731 / deepseek-v4-pro-0813），
+	// 同时又漏了 6 个本账号真有的
+	// （glm-5.3 / deepseek-v4.1-flash / deepseek-v4.1-flash-1017 /
+	//   kimi-k3 / kimi-k3.1-pro / speed）。
+	//
+	// 目录是客户端**唯一的**选型依据 ⇒ **列出一条必然失败的模型，比少列更糟**。
+	//
+	// # 拉失败为什么回退而不是报错
+	//
+	// 目录整体不可用会让这个上游在客户端面板里直接消失（用户看不到也选不了），
+	// 比"多列/少列几条"严重得多。所以降级到快照 + 打日志。
+	upstream, uerr := p.client.ListModels(ctx, a)
+	if uerr != nil {
+		log.Printf("codearts: 拉取上游模型清单失败，回退内置快照: %v", uerr)
+	}
+	if len(upstream) > 0 {
+		// 上游有、快照没有的模型登记进运行时表 ⇒ 它们也会被 clampMaxTokens 覆盖
+		// （否则客户端送来的超大 max_tokens 会以"上游 400"的形态暴露，很难归因）。
+		if added := LearnUpstreamModels(upstream); len(added) > 0 {
+			log.Printf("codearts: 上游清单里有 %d 个模型不在内置快照里，已登记进裁剪表（保守输出上限 %d）: %s",
+				len(added), defaultLearnedMaxOutput, strings.Join(added, ", "))
+		}
+		if ms := p.modelsFromUpstream(upstream); len(ms) > 0 {
+			return ms, nil
+		}
+	}
+	if uerr == nil {
+		log.Printf("codearts: 上游清单没有可用模型（count=0 或全部未开通），回退内置快照")
+	}
+	return p.modelsFromSnapshot(), nil
+}
+
+// modelsFromUpstream 把上游清单映射成对外目录。
+//
+// # 上下文窗口 / 输出上限从哪来
+//
+// 上游清单**不含**这两个数字 ⇒ 按 id（大小写无关）去内置快照取**实测值**；
+// 快照里没有的（新模型）用保守默认（见 models.go 的 defaultLearned*）。
+// ⚠ 对外暴露的 ID 用**上游原文**（提交给上游时用它），只有查表才做大小写归一。
+func (p *Provider) modelsFromUpstream(list []UpstreamModel) []gateway.ModelInfo {
+	spec := make(map[string]ModelSpec, len(knownModels))
+	for _, m := range AllModels() {
+		spec[strings.ToUpper(m.ID)] = m
+	}
+	out := make([]gateway.ModelInfo, 0, len(list))
+	seen := make(map[string]bool, len(list))
+	for _, um := range list {
+		if !um.Enable || strings.TrimSpace(um.ID) == "" || seen[um.ID] {
+			continue
+		}
+		// 额度暂时耗尽的模型当天不对外暴露（与 modelsFromSnapshot 同一判据）。
+		if IsQuotaExhausted(um.ID) {
+			continue
+		}
+		seen[um.ID] = true
+		info := gateway.ModelInfo{ID: um.ID}
+		if s, ok := spec[strings.ToUpper(um.ID)]; ok {
+			info.ContextWindow = clampInt64(s.ContextWindow)
+			info.MaxOutputTokens = clampInt64(s.MaxTokens)
+		} else {
+			info.ContextWindow = clampInt64(defaultLearnedContextWindow)
+			info.MaxOutputTokens = clampInt64(defaultLearnedMaxOutput)
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+// modelsFromSnapshot 内置快照目录 —— **降级路径**：上游拉不到时用它。
+//
+// 这就是 T-236 之前 Models() 的完整行为，原样保留：快照是某时刻的实测事实，
+// 上游不可用时它比"空目录"有用得多。
+func (p *Provider) modelsFromSnapshot() []gateway.ModelInfo {
 	ms := KnownModels()
 	out := make([]gateway.ModelInfo, 0, len(ms))
 	for _, m := range ms {
@@ -401,7 +484,7 @@ func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gatew
 			MaxOutputTokens: clampInt64(m.MaxTokens),
 		})
 	}
-	return out, nil
+	return out
 }
 
 // clampInt64 把上游给的 int64 收进 int（契约里是 int）。

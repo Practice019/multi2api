@@ -292,8 +292,27 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 
 // Models 返回模型目录（**静态表，不发网络请求**）。
 //
-// ⚠ 为什么用静态表：远端 `GET /algo/api/v2/model/list` 需 **WASM 签名**，
-// 故参照实现也不发这个请求 —— 表就是权威。
+// # 为什么是静态表（T-237 复核过，结论：当前签名能力做不到探测）
+//
+// 上游**有**这个接口：`GET /algo/api/v2/model/list`（常量 `qoder.go:198` `modelListPath`）。
+// 调用不了的原因是可复核的，不是"没人做"：
+//
+//  1. 我们的 WASM 接缝**只注册了一个请求构造入口**：
+//     `qodercontext_prepareInferRequest`（import 表见 `qoderwasm/wasm.go:212-218`）；
+//  2. 这个入口的产物被**硬断言**必须是加密推理端点：
+//     `qoderwasm/signer.go:409-422` —— URL 里不含
+//     `/algo/api/v2/service/pro/sse/agent_chat_generation` 就直接报错；
+//  3. 也就是说：**没有任何入口能构造"对任意 GET 请求签名"的调用**。
+//
+// 所以本文件与其余 9 个上游不同：它们探测上游目录，本家只能用静态表。
+// 静态表 = 当前签名能力的边界产物，不是快照懒得更。
+//
+// ⚠ 若将来要改成"探测 + 回退"，先读 `models_probe_test.go` 的文件头：
+// 那里写了三条前置（受控真机请求确认 ID 形态 / 公开端点只认通用名而我们的
+// 加密端点只认目录 key / 探测结果可能只能用来交叉核对而不能直接替换）。
+//
+// ⚠ 表的维护纪律见 `models.go` 顶部：改表必须逐个实发验证可推理，
+// 且 CN 与国际版**不能互相沿用**（实测踩过）。
 func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gateway.ModelInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

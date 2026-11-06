@@ -287,6 +287,15 @@ func MaxTokensTable() map[string]int {
 			out[m.ID] = int(m.MaxTokens)
 		}
 	}
+	// ★ T-236：上游清单里学到的新模型也要进裁剪表 —— 否则客户端送来超大
+	//   max_tokens 时不会裁剪，上游直接 400（且错误面看起来像"账号故障"）。
+	learnedMu.Lock()
+	for k, v := range learnedMaxOutput {
+		if _, exists := out[k]; !exists {
+			out[k] = v
+		}
+	}
+	learnedMu.Unlock()
 	return out
 }
 
@@ -335,6 +344,87 @@ func SetModelVerified(id string) {
 			return
 		}
 	}
+}
+
+// 上游清单里出现、而内置快照里没有的模型所用的**保守默认**。
+//
+// 依据都来自本包既有的实测记录，不是拍脑袋：
+//   - 输出上限 65536：models.go:123-131 记的 probe 结果「65536 接受，70000 起被拒」；
+//   - 上下文 196608：取快照里**最小**的那个（GLM-5.2 的 input 实测值）。
+//     宁小勿大 —— 报大了会让客户端按更大窗口发请求，上游直接 400。
+const (
+	defaultLearnedContextWindow int64 = 196608
+	defaultLearnedMaxOutput     int64 = 65536
+)
+
+// learnedMaxOutput：上游清单里**快照没有**的模型 → 保守输出上限（只用于出站裁剪）。
+//
+// # key 为什么用**上游逐字形态**（不是大写）
+//
+// 出站裁剪那一步拿模型名**逐字**查表（`limits[model]`），而模型名在改写层已被
+// 规范化成"服务端注册的逐字形态"（见 client.go 的 ChatStreamWith 注释）
+// ⇒ 表 key 必须与上游清单里的 `model_id` 完全一致，大小写不能自作主张。
+// （第一版存了大写，结果查表永远命不中 —— 表里有、但一字不差地查不到。）
+//
+// # 为什么**不**把它们塞进 knownModels
+//
+// `AllModels()` / `KnownModels()` 是**实测快照**的唯一事实来源，多处断言依赖它的
+// 条数与内容（例：multiplier_test.go 断言恰好 7 个；models_test.go 断言只有
+// Verified 的可见）。而"上游说它对这个账号开通了"与"我们实测调通过"是**两件事**
+// —— 混进同一张表会让两者都失真，且让全局状态被 Models() 的调用顺序影响。
+//
+// 所以单开一张表，只服务一件事：**让 clampMaxTokens 覆盖新模型**
+//（否则客户端送来的超大 max_tokens 会以"上游 400"的形态暴露，很难归因）。
+var (
+	learnedMu        sync.Mutex
+	learnedMaxOutput = map[string]int{} // key = 上游逐字 model_id
+)
+
+// LearnUpstreamModels 登记上游清单里快照没有的模型（幂等），返回新增的 id 列表。
+//
+// 与 SetModelVerified 的动机相同（"账号侧开通了新模型时不必改代码"），
+// 但落点不同：SetModelVerified 改的是**已验证事实**，这里只影响**裁剪表**。
+func LearnUpstreamModels(list []UpstreamModel) (added []string) {
+	learnedMu.Lock()
+	defer learnedMu.Unlock()
+	for _, um := range list {
+		id := strings.TrimSpace(um.ID)
+		if !um.Enable || id == "" {
+			continue
+		}
+		// 快照里已有的模型用实测值，不必学。
+		known := false
+		for i := range knownModels {
+			if strings.EqualFold(knownModels[i].ID, id) {
+				known = true
+				break
+			}
+		}
+		if known {
+			continue
+		}
+		if _, ok := learnedMaxOutput[id]; ok {
+			continue
+		}
+		learnedMaxOutput[id] = int(defaultLearnedMaxOutput)
+		added = append(added, id)
+	}
+	return added
+}
+
+// LearnedMaxOutput 查"学习到的输出上限"（大小写无关的兜底扫描）。
+func LearnedMaxOutput(id string) (int, bool) {
+	learnedMu.Lock()
+	defer learnedMu.Unlock()
+	if v, ok := learnedMaxOutput[id]; ok {
+		return v, true
+	}
+	for k, v := range learnedMaxOutput {
+		if strings.EqualFold(k, id) {
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 var modelMu sync.Mutex

@@ -5,6 +5,14 @@
 // 远端 `GET /algo/api/v2/model/list` **需要 WASM 签名**，故 listModels
 // **不发网络请求** —— 表就是权威。参照项目的注释也写明这一点。
 //
+// ⚠ T-237 把这条结论查到了可复核的程度（此前只写着"需要 WASM 签名"）：
+// 我们的 WASM 接缝**只注册了一个请求构造入口** `qodercontext_prepareInferRequest`
+// （import 表 `qoderwasm/wasm.go:212-218`），且它的产物被硬断言必须是加密**推理**
+// 端点（`qoderwasm/signer.go:409-422`，marker = `…/agent_chat_generation`）。
+// ⇒ **没有任何入口能对任意 GET 请求签名**，所以探测这条路当前走不通。
+// 细节与"将来要怎么改"写在 `provider.go` 的 Models() 注释与本目录的
+// `models_probe_test.go` 文件头。
+//
 // 表里是**目录 key**（`qfmodel` / `dmodel` 这类），它们只在**加密端点**可用：
 //
 //	加密端点  认目录 key        ← 我们走这条
