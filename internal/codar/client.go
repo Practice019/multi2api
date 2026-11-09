@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -88,7 +89,27 @@ func (c *Client) Chat(ctx context.Context, a *Auth, body []byte) (gateway.ChatSt
 	if err != nil {
 		return gateway.ChatStream{}, err // 网络层失败才返回 error
 	}
-	// 非 2xx 也照常把 body 交给调用方（调用方按状态码/错误分类处理）。
+	// ⚠⚠ 非 2xx 时把**出站元信息**打进容器日志（2026-11-10 加）。
+	//
+	// # 为什么需要（一次没能定性的排障）
+	//
+	// 用户报「手动调用模型全是 200，但 DSH 调用就不行」。当时日志里已经有
+	// `upstream_req`（body）与 `upstream_err`（上游原文），body 的各种组合
+	// 逐项直连复测都成功 —— 于是差异**只可能在请求头**上，而核心拿不到
+	// 上游私有的头（那是本包的事实，核心不该认识）。
+	//
+	// 所以这条日志只能在这里打：只有本包知道 endpoint / 鉴权头形态 / UA。
+	//
+	// ⚠ 不记 token（只记"用了哪种鉴权头"）：token 是凭证，日志会被导出与分享。
+	// ⚠ 只在非 2xx 打，正常请求零噪音。
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		authKind := "Bearer"
+		if path == "/v1/messages" {
+			authKind = "x-api-key"
+		}
+		log.Printf("codar: 上游 %d（uid=%s endpoint=%s auth=%s ua=%q bodyLen=%d）",
+			resp.StatusCode, a.UID, path, authKind, ua, len(body))
+	}
 	return gateway.ChatStream{Status: resp.StatusCode, Body: resp.Body}, nil
 }
 
