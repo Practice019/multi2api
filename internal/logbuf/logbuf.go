@@ -9,6 +9,7 @@ package logbuf
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -138,7 +139,38 @@ type Entry struct {
 	// JSONL（单条可达数百 KB）。上限见 UpstreamErrMaxLen，超出时保留**头部**
 	// —— 判据关键词（error/restricted/quota/nginx）几乎都在开头。
 	UpstreamErr string `json:"upstream_err,omitempty"`
+
+	// UpstreamReq 网关**实际发给上游**的请求体（脱敏 + 截断），仅失败请求出现（2026-11-10 加）。
+	//
+	// # 为什么必须有（用户原话）
+	//
+	//	「而且很奇怪，手动调用模型全是 200，但是 DSH 调用就不行，为什么啊」
+	//
+	// 这句话把问题钉死在一个我们**看不见**的地方：同一个模型、同一个账号，
+	// 手写 curl 成功、走网关失败 ⇒ 差异只能出在**网关改写后的请求体**上。
+	// 而当时日志里既没有出站 body，也没有上游原文 ⇒ 只能靠猜。
+	//
+	// # 与 UpstreamErr 配对（一个问"上游说了什么"，一个问"我们发了什么"）
+	//
+	//	UpstreamReq —— 我们发了什么（改写后的完整请求体）
+	//	UpstreamErr —— 上游说了什么（错误原文）
+	//
+	// 两者合起来才能回答"为什么"：上游说 `client_not_supported` 时，
+	// 只有对着我们发出的 body/头，才能看出是哪一处与客户端不一致
+	// （协议端点？鉴权头？多出来的字段？被替换的 model 名？）。
+	//
+	// # 为什么不记成功请求
+	//
+	// 成功请求的 body 是正常业务流量（可达数百 KB，含用户全文），
+	// 按天保留会让日志体积翻几十倍，且没有任何排障价值。
+	UpstreamReq string `json:"upstream_req,omitempty"`
 }
+
+// UpstreamReqMaxLen UpstreamReq 的最大字节数。
+//
+// 取 8 KiB：足够看到 system 开头、tools 结构、model 名与采样参数（判据都在前部），
+// 又不会把整段对话写进日志。超长时保留**头部 + 尾部**（见 TruncateHeadTail）。
+const UpstreamReqMaxLen = 8192
 
 // UpstreamErrMaxLen UpstreamErr 的最大字节数（UTF-8 安全截断在 logbuf 侧做）。
 //
@@ -327,4 +359,29 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+// TruncateHeadTail 保留头尾各一半，中间用标记省略（用于请求体）。
+//
+// 为什么请求体要"头+尾"而不是只留头：排障常见判据分布在两端 ——
+// 头部有 model / messages[0].role / tools / stream，尾部有最后一个 user 消息
+// 与 max_tokens。只留头会看不到"客户端最后一句说了什么"，只留尾会看不到模型名。
+func TruncateHeadTail(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	marker := "…[omitted N bytes]"
+	half := (max - len(marker) - 8) / 2
+	if half <= 0 {
+		return TruncateUTF8(s, max)
+	}
+	head := TruncateUTF8(s, half)
+	// 尾部按 UTF-8 边界向左取
+	cut := len(s) - half
+	for cut < len(s) && s[cut]&0xC0 == 0x80 {
+		cut++
+	}
+	tail := s[cut:]
+	omitted := len(s) - len(head) - len(tail)
+	return head + strings.Replace(marker, "N", itoa(omitted), 1) + tail
 }

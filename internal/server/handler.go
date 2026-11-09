@@ -1957,7 +1957,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// upstreamErr 传 detail（= ferr.Error()，含上游原文；状态码非 2xx 时
 			// logChatRowProvider 会脱敏 + 截断后落盘）。
 			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "",
-				st, -1, nil, "channel_error: "+detail, detail, 0,
+				st, -1, nil, "channel_error: "+detail, "", detail, 0,
 				gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 			// ⚠ 2026-10-21：渠道分支在 chatStat 之前就 return，所以 key 用量要在这里记。
 			//   不记的话界面上「请求」「失败」恒为 0（用户报的那个现象）。
@@ -1993,7 +1993,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//   用户问"loomy 那些非流式请求是谁发的"时，日志无法回答。
 		//   账号池路径（L1610 st.clientIP）是取了的，渠道路径漏了 —— 两条路的观测能力不该不同。
 		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, fw.KeyMask, "channel:"+fw.ChannelName,
-			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), "", 0,
+			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), "", "", 0,
 			gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 		// ⚠ 2026-10-21：成功也记（tok 可能是 -1「未知」哨兵，BumpUsage 内部只在 >0 时累加）。
 		h.bumpKeyUsage(r, tok, true)
@@ -2577,6 +2577,13 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 		// `ttfb_ms` 把两段混在一起：我们这边（选号 / 取凭证 / 可能刷凭证 / 转换请求体）
 		// 加上上游首包。这一列把前者单独拿出来 ⇒ 一眼就能判"慢该怪谁"。
 		st.preMs = time.Since(st.start)
+		// 记下**实际发给上游的请求体**（armor / 协议改写 / model 重写之后的那一份）。
+		//
+		// ⚠ 为什么在调用**之前**存：用户那个问题（"手动 200、走网关 403"）的唯一
+		//   可能差异就在这份 body 上；失败时再想拿它，早已随函数返回丢失。
+		// ⚠ 只存引用不拷贝：outBody 在本函数返回前一直有效，而真正的截断 + 脱敏
+		//   发生在 logChatRowProvider（且仅 status>=400 时才写）。
+		st.upstreamReq = string(outBody)
 		cr, status, terr := h.chatVia(ctx, reqProvider, acct, outBody)
 		if terr != nil {
 			// ⚠⚠ **本地转换失败**：换号**完全无效**（转换取决于请求体本身，

@@ -36,7 +36,7 @@ func TestFailedRequestLogsUpstreamErrorBody(t *testing.T) {
 
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "codar/deepseek-v4.1-flash", "stream", uid, "codar",
-			http.StatusBadGateway, -1, nil, "provider_breaker:system", body, 217, "10.0.0.9", "probe/1.0")
+			http.StatusBadGateway, -1, nil, "provider_breaker:system", `{"model":"codar/deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"stream":true}`, body, 217, "10.0.0.9", "probe/1.0")
 	})
 
 	got := findEntryByUID(t, uid)
@@ -60,7 +60,7 @@ func TestSuccessRequestOmitsUpstreamErr(t *testing.T) {
 	captureStdout(t, func() {
 		// 即使调用方误传了 body，200 时也不该落盘。
 		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
-			http.StatusOK, 10, nil, "", `should not be recorded`, 0, "", "")
+			http.StatusOK, 10, nil, "", `{"model":"x"}`, `should not be recorded`, 0, "", "")
 	})
 	if got := findEntryByUID(t, uid); got.UpstreamErr != "" {
 		t.Errorf("成功请求不该带 upstream_err，得到 %q", got.UpstreamErr)
@@ -74,7 +74,7 @@ func TestUpstreamErrIsTruncatedUTF8Safe(t *testing.T) {
 	huge := strings.Repeat("上游返回了一整页错误说明；", 2000) // 远超 4 KiB，含中文
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
-			http.StatusBadGateway, -1, nil, "", huge, 0, "", "")
+			http.StatusBadGateway, -1, nil, "", `{"model":"x"}`, huge, 0, "", "")
 	})
 	got := findEntryByUID(t, uid).UpstreamErr
 	if len(got) == 0 {
@@ -89,5 +89,82 @@ func TestUpstreamErrIsTruncatedUTF8Safe(t *testing.T) {
 	// UTF-8 合法性：截断处不得出现替换字符 U+FFFD。
 	if strings.ContainsRune(got, '\uFFFD') {
 		t.Error("截断切断了多字节字符（出现 U+FFFD）")
+	}
+}
+
+// TestFailedRequestLogsUpstreamRequestBody 失败请求必须落**我们实际发出去的请求体**。
+//
+// # 为什么会需要它（用户原话）
+//
+//	「而且很奇怪，手动调用模型全是 200，但是 DSH 调用就不行，为什么啊」
+//
+// 同一个模型、同一个账号：手写 curl 成功、走网关失败 ⇒ 差异只能出在
+// **网关改写后的请求体/头**上。没有这一列时，排障只能靠猜（本次就猜了
+// 风控 / IP / 账号受限三轮全错）。有了它才能逐字节对比"我们发了什么"。
+func TestFailedRequestLogsUpstreamRequestBody(t *testing.T) {
+	withChatLog(t)
+	const uid = "upstream-req-uid-1"
+	// 模拟网关改写后的出站 body：带 tools（DSH 特征）+ 被强制 stream
+	const sent = `{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"S"},{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"t"}}],"stream":true}`
+
+	captureStdout(t, func() {
+		logChatRowProvider(0, time.Second, "codar/deepseek-v4.1-flash", "stream", uid, "codar",
+			http.StatusBadGateway, -1, nil, "provider_breaker:system", sent,
+			`{"detail":{"code":"client_not_supported"}}`, 100, "", "")
+	})
+
+	got := findEntryByUID(t, uid)
+	if got.UpstreamReq == "" {
+		t.Fatal("★ 失败请求的 upstream_req 为空 —— 无法对比「我们发了什么」")
+	}
+	for _, must := range []string{`"model":"deepseek-v4.1-flash"`, `"tools"`, `"stream":true`} {
+		if !strings.Contains(got.UpstreamReq, must) {
+			t.Errorf("请求体里缺少判据 %s：%q", must, got.UpstreamReq)
+		}
+	}
+}
+
+// TestSuccessRequestOmitsUpstreamReq 成功请求不写请求体（正常业务流量，占空间且无排障价值）。
+func TestSuccessRequestOmitsUpstreamReq(t *testing.T) {
+	withChatLog(t)
+	const uid = "upstream-req-uid-2"
+	captureStdout(t, func() {
+		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
+			http.StatusOK, 10, nil, "", `{"model":"x","messages":[{"role":"user","content":"big"}]}`, "", 0, "", "")
+	})
+	if got := findEntryByUID(t, uid); got.UpstreamReq != "" {
+		t.Errorf("成功请求不该带 upstream_req，得到 %q", got.UpstreamReq)
+	}
+}
+
+// TestUpstreamReqKeepsHeadAndTail 超长请求体必须保留**头尾两端**。
+//
+// 判据分布在两端：头部有 model / tools / stream，尾部有最后一个 user 消息。
+// 只留头会看不到"客户端最后说了什么"，只留尾会看不到模型名。
+func TestUpstreamReqKeepsHeadAndTail(t *testing.T) {
+	withChatLog(t)
+	const uid = "upstream-req-uid-3"
+	head := `{"model":"HEAD_MARKER","messages":[`
+	tail := `{"role":"user","content":"TAIL_MARKER"}]}`
+	mid := strings.Repeat(`{"role":"assistant","content":"`+strings.Repeat("x", 200)+`"},`, 200)
+	sent := head + mid + tail
+
+	captureStdout(t, func() {
+		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
+			http.StatusBadGateway, -1, nil, "", sent, "boom", 0, "", "")
+	})
+
+	got := findEntryByUID(t, uid).UpstreamReq
+	if !strings.Contains(got, "HEAD_MARKER") {
+		t.Error("头部判据（model 名）丢失")
+	}
+	if !strings.Contains(got, "TAIL_MARKER") {
+		t.Error("尾部判据（最后一条 user 消息）丢失 —— 只保留头部会让\"客户端最后说了什么\"不可见")
+	}
+	if !strings.Contains(got, "omitted") {
+		t.Errorf("缺少省略标记（会让人误以为这是全文）")
+	}
+	if len(got) > logbuf.UpstreamReqMaxLen+64 {
+		t.Errorf("未截断：%d 字节（上限 %d）", len(got), logbuf.UpstreamReqMaxLen)
 	}
 }
