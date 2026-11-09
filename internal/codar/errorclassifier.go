@@ -158,21 +158,44 @@ func (p *Provider) LoadCredentials(dir string) ([]gateway.Credential, error) {
 }
 
 // LoadCredentialsWithSecrets 同上，但把 Secret 一起给（池子要它才能发请求）。
-func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.Credential, error) {
+//
+// # ⚠⚠ 返回类型必须是 `[]gateway.CredentialSecret`（本轮修的真实 bug）
+//
+// 本方法此前写成 `([]gateway.Credential, error)` —— 而
+// `gateway.CredentialSecretLoader` 要求的是 `([]gateway.CredentialSecret, error)`。
+// Go 的接口断言（`ExtOf[CredentialSecretLoader]`）按**方法签名全等**匹配，
+// 返回值类型不同 ⇒ 断言失败 ⇒ 装配层以为"这个上游没有 secret 版扫描器" ⇒
+// 退回**裸投影**路径（`SyncToDirFor`）⇒ 池子里只有 uid/nickname、**没有 secret**。
+//
+// 用户可见症状（2026-11-09 实测）：批量导入 codar 两个号 ⇒ 账号列表里能看到、
+// 但 `has_token=false`、额度空、`success_count=0`、请求必失败；
+// 而管理端点 `/admin/codar/quota` 能正常查到余额（证明凭证文件本身是好的，
+// 只是**没进池子的 secret 通道**）。
+//
+// 这类"签名写错但编译通过"的错，只有接口断言在运行期能发现 —— 所以
+// 契约测试之外，`internal/codar/credentialsecret_test.go` 里额外加了一条
+// **静态断言**（`var _ gateway.CredentialSecretLoader = (*Provider)(nil)`），
+// 让它在编译期就红。
+func (p *Provider) LoadCredentialsWithSecrets(dir string) ([]gateway.CredentialSecret, error) {
 	list, err := LoadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]gateway.Credential, 0, len(list))
+	out := make([]gateway.CredentialSecret, 0, len(list))
 	for _, a := range list {
-		exp := a.ExpiresTime()
-		out = append(out, gateway.Credential{
-			Provider:  providerID,
-			UID:       a.UID,
-			Nickname:  a.Nickname,
-			FilePath:  a.FilePath,
-			ExpiresAt: exp,
-			Secret:    a, // 不透明通道：核心只搬不读
+		out = append(out, gateway.CredentialSecret{
+			Credential: gateway.Credential{
+				Provider: providerID,
+				UID:      a.UID,
+				Nickname: a.Nickname,
+				FilePath: a.FilePath,
+			},
+			// 不透明通道：核心只搬不读。
+			//
+			// ⚠ ExpiresAt **不**放投影里：投影是启动快照，活 secret 续期后
+			//   投影不会跟新（与 cmd/server/codarcreds.go 的注释同一条纪律）。
+			//   过期权威只走 CredentialExpiryExt。
+			Secret: a,
 		})
 	}
 	return out, nil

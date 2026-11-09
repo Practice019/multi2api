@@ -7,6 +7,41 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/)，版本号不在本表里维护
 （跟着上游走），日期格式 `YYYY-MM-DD`。
 
+## v2.0.1 — 2026-11-09
+
+> 补丁版：修 **Codar 账号导入后无法使用**。
+
+### 修复：Codar 的 `LoadCredentialsWithSecrets` 返回类型写错
+
+接口 `gateway.CredentialSecretLoader` 要求 `([]gateway.CredentialSecret, error)`，
+而 Codar 实现成了 `([]gateway.Credential, error)`。Go 的接口按**方法签名全等**匹配
+⇒ `ExtOf[CredentialSecretLoader]` 断言失败 ⇒ 装配层退回**裸投影**路径
+（`SyncToDirFor`）⇒ 池子里只有 uid/nickname、**没有 secret**。
+
+用户可见症状：批量导入后账号列表**能看到**，但 `has_token=false`、额度空、
+`success_count=0`、请求必失败；而 `/admin/codar/quota` 正常（凭证文件本身是好的）。
+
+改动：修正返回类型（secret 放进外层 `CredentialSecret.Secret`；`ExpiresAt` 不进投影，
+过期权威只走 `CredentialExpiryExt`）；`extensions.go` 的 `loadAll()` 同步取内嵌
+`Credential` 并带上 `Secret`（否则 `authOf` 断言失败）。
+
+### 测试
+
+新增 `internal/codar/credentialsecret_test.go`：**编译期**静态断言 4 个
+"靠类型断言发现"的扩展点（`CredentialLoader` / `CredentialSecretLoader` /
+`AuthDirExt` / `CredentialTokenExt`），+ 2 条内容断言（Secret 非 nil、两个扫描器同源）。
+变异验证：把签名改回错的 ⇒ `go build` 直接报
+`*Provider does not implement gateway.CredentialSecretLoader (wrong type for method)`。
+
+> 为什么之前的测试没抓到：`RunProviderContract` 只验 4 个核心方法，不验
+> "可选扩展点是否真的被认出来"——这与 AGENTS.md 里记的那类坑同源
+> （扩展点写成访问器方法不会被 `ExtOf` 发现，曾有 4 个上游因此长期没有添加账号按钮）。
+
+### 其它
+
+- 全量 `-short`：50 包全绿。
+- 顺带审计了全部 12 个实现了该扩展点的上游：**只有 Codar 写错**，其余正确。
+
 ## v2.0.0 — 2026-11-09
 
 > 本版主题：**第十四上游 Codar 接入 + 签到统一 + 日级聚合（365 天热力图）+ 前端拆包**。

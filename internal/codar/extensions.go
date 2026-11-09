@@ -116,12 +116,27 @@ func (p *Provider) pickAuth(uid string) (*Auth, error) {
 }
 
 // loadAll 通过凭证源拿"全部凭证"—— 用 authDir 扫目录（与 LoadCredentials 同源）。
+//
+// ⚠ 取的是 `CredentialSecret.Credential`（内嵌的结构体），不是整个 CredentialSecret：
+// 调用方（authOf/AdminRoute）只吃 gateway.Credential，而 Secret 已经在这一份里
+// （`LoadCredentialsWithSecrets` 把上游私有凭证塞进 `Credential.Secret` 之外的
+//
+//	`CredentialSecret.Secret`，这里取内嵌值即"投影 + 同一个 Secret 指针"）。
+//
+// 注：本方法此前直接 `return creds` —— 在 `LoadCredentialsWithSecrets` 的返回类型
+// 被修正成接口要求的 `[]gateway.CredentialSecret` 之后，这里必须同步取内嵌值。
 func (p *Provider) loadAll() []gateway.Credential {
-	creds, err := p.LoadCredentialsWithSecrets(p.authDir)
+	items, err := p.LoadCredentialsWithSecrets(p.authDir)
 	if err != nil {
 		return nil
 	}
-	return creds
+	out := make([]gateway.Credential, 0, len(items))
+	for _, it := range items {
+		c := it.Credential
+		c.Secret = it.Secret // 上游私有凭证要跟着走，否则 authOf 断言失败
+		out = append(out, c)
+	}
+	return out
 }
 
 // callJSON 打一次上游（只读用）。返回原始 body。
