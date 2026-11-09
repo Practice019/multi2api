@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/wire"
 )
@@ -91,6 +92,12 @@ type chatStat struct {
 	attempts int
 	spentMs  int64
 	lastFail string
+	// upstreamErr 上游错误**原文**（未脱敏；脱敏与截断在 logChatRowProvider 里统一做）。
+	//
+	// 与 lastFail 的分工：lastFail 是"一句话摘要"（进 decision 串，便于 grep），
+	// upstreamErr 是"原文"（进独立字段，便于看清为什么）。两者都要 ——
+	// 摘要可读性好，原文信息全（2026-11-09 codar 403 就是缺原文才无法定性）。
+	upstreamErr string
 
 	logged bool
 }
@@ -136,7 +143,7 @@ func (s *chatStat) done() {
 		//   totalMs=…  → 客户端实际等了多久（已由 entry.TotalMS 记录）
 		decisionForLog = appendAttemptTrace(decisionForLog, s.attempts, s.spentMs, s.lastFail)
 	}
-	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, decisionForLog, s.preMs.Milliseconds(), s.clientIP, s.clientUA)
+	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, decisionForLog, s.upstreamErr, s.preMs.Milliseconds(), s.clientIP, s.clientUA)
 
 	// ⚠ 喂上游级"首字节耗时"统计（2026-10-18 加）。
 	//
@@ -354,7 +361,7 @@ func uidPrefix(uid string) string {
 // 保留这个 8 参数签名是为了**向后兼容**：既有测试直接调它，
 // 且单上游部署下确实没有 provider 可标。多上游路径用 logChatRowProvider。
 func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int, usage map[string]any) {
-	logChatRowProvider(ttfb, total, model, mode, uid, "", status, toks, usage, "", 0, "", "")
+	logChatRowProvider(ttfb, total, model, mode, uid, "", status, toks, usage, "", "", 0, "", "")
 }
 
 // logChatRowProvider 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
@@ -368,7 +375,7 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 //
 // ⚠ 为什么用变参而不是加两个正式参数：这个函数有十来个调用点，而渠道是**后加**的维度。
 // 改签名会让每个调用点都来一遍"补两个空串"的机械改动 —— 那种改动最容易顺手改错一个。
-func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any, decision string, preMs int64, clientIP, clientUA string, extra ...string) {
+func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider string, status int, toks int, usage map[string]any, decision, upstreamErr string, preMs int64, clientIP, clientUA string, extra ...string) {
 	if !chatLogEnabled {
 		return
 	}
@@ -388,6 +395,13 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 	}
 	// ⚠ 判决留痕、发上游前的耗时、请求来源（见 logbuf.Entry 三个字段的注释）。
 	entry.Decision = decision
+	// 上游原文：**在这里统一脱敏 + 截断**，调用方只管把原文递进来。
+	//
+	// ⚠ 脱敏理由见 logbuf.Entry.UpstreamErr 的注释（会渲染到网页，不能带 host/IP）。
+	// ⚠ 只在非 2xx 时记：成功请求的上游 body 是正常流量，记它等于把日志当日志+报文双写。
+	if status >= 400 && upstreamErr != "" {
+		entry.UpstreamErr = logbuf.TruncateUTF8(gateway.MaskErrorText(upstreamErr), logbuf.UpstreamErrMaxLen)
+	}
 	entry.PreMs = preMs
 	entry.ClientIP = clientIP
 	entry.ClientUA = clientUA

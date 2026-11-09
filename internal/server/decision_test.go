@@ -32,7 +32,8 @@ func TestLogRowCarriesDecision(t *testing.T) {
 	const uid = "decision-test-uid-1"
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy",
-			http.StatusServiceUnavailable, -1, nil, "pool_unavailable:global", 137, "10.0.0.9", "probe/1.0")
+			http.StatusServiceUnavailable, -1, nil, "pool_unavailable:global",
+			`{"error":{"message":"upstream said no"}}`, 137, "10.0.0.9", "probe/1.0")
 	})
 	got := findEntryByUID(t, uid)
 	if got.Decision != "pool_unavailable:global" {
@@ -63,7 +64,7 @@ func TestLogRowDecisionOmittedWhenEmpty(t *testing.T) {
 	const uid = "decision-test-uid-2"
 	captureStdout(t, func() {
 		// ⚠ 老调用方（不传 decision）：兼容性也在这里被钉住
-		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy", http.StatusOK, 1, nil, "", 0, "", "")
+		logChatRowProvider(0, time.Second, "m", "sync", uid, "loomy", http.StatusOK, 1, nil, "", "", 0, "", "")
 	})
 	got := findEntryByUID(t, uid)
 	if got.Decision != "" {

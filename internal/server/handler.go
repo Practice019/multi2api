@@ -1954,8 +1954,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if fw.ChannelName != "" {
 				detail = fw.ChannelName + ": " + detail
 			}
+			// upstreamErr 传 detail（= ferr.Error()，含上游原文；状态码非 2xx 时
+			// logChatRowProvider 会脱敏 + 截断后落盘）。
 			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "",
-				st, -1, nil, "channel_error: "+detail, 0,
+				st, -1, nil, "channel_error: "+detail, detail, 0,
 				gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 			// ⚠ 2026-10-21：渠道分支在 chatStat 之前就 return，所以 key 用量要在这里记。
 			//   不记的话界面上「请求」「失败」恒为 0（用户报的那个现象）。
@@ -1991,7 +1993,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//   用户问"loomy 那些非流式请求是谁发的"时，日志无法回答。
 		//   账号池路径（L1610 st.clientIP）是取了的，渠道路径漏了 —— 两条路的观测能力不该不同。
 		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, fw.KeyMask, "channel:"+fw.ChannelName,
-			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), 0,
+			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), "", 0,
 			gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 		// ⚠ 2026-10-21：成功也记（tok 可能是 -1「未知」哨兵，BumpUsage 内部只在 >0 时累加）。
 		h.bumpKeyUsage(r, tok, true)
@@ -2237,6 +2239,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.attempts = attempts
 		st.spentMs = budget.Spent().Milliseconds()
 		st.lastFail = lastFailBrief
+		// 上游**原文**（未脱敏；脱敏/截断在 logChatRowProvider 统一做）。
+		//
+		// ⚠ 为什么不复用 lastFailBrief：那是给人看的"一句话摘要"（provider + kind + 状态码），
+		//   刻意不含正文 —— 而正文才是"为什么"（2026-11-09 codar 403 就卡在这里：
+		//   只知道 403，不知道正文是风控/额度/账号受限/边缘封控）。
+		// ⚠ 取 lastErr.Error() 而不是某个上游结构体：chatError / UpstreamHTTPError /
+		//   传输错误都实现了 error，Error() 都带原文或明确原因；核心不必认识它们的类型。
+		if lastErr != nil {
+			st.upstreamErr = lastErr.Error()
+		}
 	}()
 retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算用尽"处会 goto 回来）
 	for i := 0; i < maxAttempts; i++ {

@@ -109,7 +109,43 @@ type Entry struct {
 	//   空 = 本次没走渠道（账号池路径，或渠道未命中而回落）。
 	Channel       string `json:"channel,omitempty"`
 	UpstreamModel string `json:"upstream_model,omitempty"`
+
+	// UpstreamErr 上游错误的**原文**（已脱敏 + 已截断），仅失败请求出现（2026-11-10 加）。
+	//
+	// # 为什么必须有这一列（用户原话）
+	//
+	//   「如果说有什么请求报错了，有问题，不是 200，我觉得需要完整的记录一下具体的原文，
+	//     这样我们找问题的时候就可以清晰的知道为什么。」
+	//
+	// # 与 Decision 的分工（两者互补，缺一不可）
+	//
+	//	Decision    —— 我做了什么：换了几个号、为什么放弃（`attempts=5 last=codar server 403`）
+	//	UpstreamErr —— 上游说了什么：**原文**（含错误码与关键词）
+	//
+	// 只有 Decision 时，排障只能知道"上游回了 403"，**永远猜不出** 403 的正文是
+	// "风控" / "额度不足" / "账号受限" / "边缘 IP 封控" —— 而那四种的处置完全不同
+	// （等 / 换号 / 重登 / 换出口）。2026-11-09 的 codar 403 就卡在这里，至今无法定性。
+	//
+	// # 为什么是脱敏后的
+	//
+	// 这份会渲染到管理台（网页）。上游原文常带 host / IP / base_url（"后端是谁"的信息），
+	// 此前已因泄露被修过一次 ⇒ 与出站同一口径，用 gateway.MaskError。
+	// handler.go 里那句注释（"日志里保持原文"）指的正是本字段。
+	//
+	// # 为什么截断
+	//
+	// 上游偶尔返回整页 HTML（nginx 502/403 页）。不设上限会把一份响应体整个写进
+	// JSONL（单条可达数百 KB）。上限见 UpstreamErrMaxLen，超出时保留**头部**
+	// —— 判据关键词（error/restricted/quota/nginx）几乎都在开头。
+	UpstreamErr string `json:"upstream_err,omitempty"`
 }
+
+// UpstreamErrMaxLen UpstreamErr 的最大字节数（UTF-8 安全截断在 logbuf 侧做）。
+//
+// 取值理由：4 KiB 足够容纳任何正常的上游错误 JSON（实测最大是 lsrouter 的一条 2.1 KiB
+// 校验错误），又能挡住整页 HTML。截断处追加 "…[truncated:N bytes]"，
+// 让人一眼看出"这不是全文"。
+const UpstreamErrMaxLen = 4096
 
 // Ring 定长环形缓冲。零值不可用，必须经 New 构造。
 type Ring struct {
@@ -250,3 +286,45 @@ func (r *Ring) Len() int {
 
 // Cap 返回容量。
 func (r *Ring) Cap() int { return len(r.buf) }
+
+// TruncateUTF8 把 s 截到最多 max 字节，且**不切断多字节字符**。
+//
+// 为什么需要它：上游错误体是任意字节流（中文/emoji/整页 HTML），
+// 直接 s[:max] 会切出一个非法 UTF-8 序列 —— JSON 编码时会被替换成 U+FFFD，
+// 而且日志读回来"看起来像乱码"，排障时会误判成"上游发了乱码"。
+//
+// 截断时追加 "…[truncated:N bytes]"：必须让人一眼看出"这不是全文"，
+// 否则会拿半截正文去搜关键词，得出"上游没给关键词"的错误结论。
+func TruncateUTF8(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	cut := max
+	// 回退到最后一个完整字符的边界：UTF-8 的续字节形如 10xxxxxx。
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	// 再退一步：若该位置是一个多字节字符的起始字节而字符不完整，也退掉它。
+	if cut > 0 && s[cut-1] >= 0xC0 {
+		cut--
+	}
+	if cut <= 0 {
+		cut = max
+	}
+	return s[:cut] + "…[truncated:" + itoa(len(s)-cut) + " bytes]"
+}
+
+// itoa 小工具（避免为一个数字引入 strconv 的格式化开销；与仓内既有写法一致）。
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
