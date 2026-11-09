@@ -417,8 +417,15 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 10 * time.Minute
 	}
-	if cfg.MaxBodyMB <= 0 {
+	if cfg.MaxBodyMB == 0 {
+		// 0 / 未配置 ⇒ 用默认值（64 MiB）。
+		//
+		// ⚠ T-386 把判据从 `<= 0` 改成 `== 0`：负数现在是**显式的"不限制"**。
+		//   旧写法把 -1 也当"未配置"⇒ 回落默认，于是"关掉上限"没有任何表达方式。
 		cfg.MaxBodyMB = defaultMaxBodyMB
+	}
+	if cfg.MaxBodyMB < 0 {
+		cfg.MaxBodyMB = maxBodyUnlimited
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), apiKey: cfg.APIKey, adminToken: cfg.AdminToken}
 	registerCatalogHost(h) // 让包级 ModelCatalog/ModelCatalogState 能找到本实例的缓存
@@ -456,6 +463,11 @@ func NewHandler(cfg Config) *Handler {
 	})
 	h.mux.HandleFunc("GET /favicon.ico", h.favicon)
 	h.mux.HandleFunc("GET /favicon.svg", h.favicon)
+	// 控制台的外置静态资源（T-409：CSS 与主 script 从 webui.html 搬出来，便于并行开发）。
+	// 与 favicon 同一条理由**不需要**控制台身份：静态资源、不含秘密
+	//（页面里的 __WB2API_*__ 占位符不在两个资源里；见 ui_assets.go 的文件头注释）。
+	h.mux.HandleFunc("GET /ui/app.css", h.uiAsset(appCSS, "text/css; charset=utf-8"))
+	h.mux.HandleFunc("GET /ui/app.js", h.uiAsset(appJS, "application/javascript; charset=utf-8"))
 	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui", http.StatusFound)
 	})
@@ -1631,11 +1643,42 @@ func (h *Handler) modelCatalogFor(provider string) *gateway.ModelCatalog {
 
 // defaultMaxBodyMB 请求体上限的兜底值（MiB）。
 //
-// 与改造前那句 `io.LimitReader(r.Body, 8<<20)` 的 8 MiB **数值相同** ——
-// 本改动的意图不是改变"能收多大"，而是改变"收不下时说什么"：
-// 从"无声截断 → 上游 11101 → 客户端以为自己的 JSON 写错了"，
-// 变成"读的时候就报 413 → 客户端知道是大小问题"。
-const defaultMaxBodyMB = 8
+// # 为什么是 64（T-386，用户裁定）
+//
+// 改造前这里是 8，与那句 `io.LimitReader(r.Body, 8<<20)` 的数值相同 ——
+// 当时的意图是"不改变能收多大，只改变收不下时说什么"。
+// 但 8 MiB 在真实使用里太小：一张 4K 截图 base64 后约 5–8 MiB，
+// 多图/长上下文的会话很容易越界，而**用户看不出是自己图太大**，
+// 只会看到一句 413 然后去怀疑服务。
+//
+// 64 MiB 的取舍：
+//
+//	· 够 8–10 张 4K 图 或 一份 200k token 的长上下文（约 40–50 MiB JSON）
+//	· 仍是有限值 —— 服务端要把整个 body 读进内存，无上限等于把内存交给客户端，
+//	  一个恶意的 10 GB 请求就能把进程打死（这不是理论风险，是 DoS 的入门手法）
+//
+// # 想要"完全不限制"怎么办
+//
+// 把 `server.max_body_mb` 显式写成**负数**（如 -1）⇒ 见 maxBodyUnlimited。
+// 那条路是存在的，但**不设为默认**：默认配置要挡住"误伤自己"，
+// 而不是挡住"被人攻击" —— 后者本来就该由反代/防火墙管。
+const defaultMaxBodyMB = 64
+
+// maxBodyUnlimited 表示"不设上限"（`server.max_body_mb` 写负数时的内部值）。
+//
+// ⚠ 它只是让 MaxBytesReader 用一个极大的阈值（1 TiB），
+//
+//	而不是真的去掉限制 —— `http.MaxBytesReader` 要一个具体数字。
+//	1 TiB 在现实中不可能达到（连内存都装不下），等效于不限制。
+const maxBodyUnlimited = 1024 * 1024 // MiB ⇒ 1 TiB
+
+// maxBodyBytes 把配置值（MiB）换算成字节上限。负数（=不限制）映射成 1 TiB。
+func maxBodyBytes(mb int) int64 {
+	if mb < 0 {
+		return int64(maxBodyUnlimited) << 20
+	}
+	return int64(mb) << 20
+}
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// MaxBytesReader 而不是 LimitReader：超限时 Read 返回 *http.MaxBytesError，
@@ -1643,14 +1686,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//
 	// 传 w 是为了让 net/http 在超限时标记连接不可复用（避免残留未读字节
 	// 污染同一 keep-alive 连接上的下一个请求）。
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(h.cfg.MaxBodyMB)<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes(h.cfg.MaxBodyMB)))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			// 报错文案必须给出**可执行的两条出路**：缩小请求 / 调大配置。
 			// 只说"too large"会让用户去猜上限是多少、在哪改。
 			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
-				fmt.Sprintf("请求体超过上限 %d MiB（可在 config.json 的 server.max_body_mb 调整）；"+
+				fmt.Sprintf("请求体超过上限 %d MiB（可在 config.json 的 server.max_body_mb 调整，写负数=不限制）；"+
 					"多图/长上下文会话请缩小 messages 或提高该上限", h.cfg.MaxBodyMB))
 			return
 		}
@@ -1778,7 +1821,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			aliasOrder = cands
 		}
 	}
-	_ = aliasOrder // 失败切换在 P3 接入（先把轮询跑通）
+	// ★ T-468：这行 `_ = aliasOrder` 已删 —— 它上面那句注释「失败切换在 P3 接入」早已过时：
+	//   aliasOrder 现在被三处真实消费（渠道分支的 aliasAttempts 循环、池分支的
+	//   nextAliasUpstream 切换、以及"预算用尽后切下一家"），留着只会误导下一个人。
 	// ★ 模型名前置校验（2026-11-01）：在任何路由/试号**之前**挡掉非法名字。
 	//
 	// 放在这里的理由：① 别名已解析成内部名（上面那段），判据看到的是真正要路由的名字；
@@ -2193,6 +2238,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.spentMs = budget.Spent().Milliseconds()
 		st.lastFail = lastFailBrief
 	}()
+retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算用尽"处会 goto 回来）
 	for i := 0; i < maxAttempts; i++ {
 		// ⚠ 预算判据放在循环体最前面：已花掉 90 秒时不该再开一次可能 40 秒的尝试。
 		// i>0 才判 —— 第一次尝试必须允许（否则预算设小会让所有请求直接失败）。
@@ -2873,6 +2919,37 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = totalTokens(resp) // ⚠ 2026-10-20：原来用 completionTokens（只算输出，prompt 全丢）
 		st.usage = usageOf(resp)
 		return
+	}
+	// ★ T-468：换号预算用完 ⇒ 若"这家上游已经试不动了"，切到别名里的下一家。
+	//
+	// # 为什么必须在这里补（完整因果，每步有行号）
+	//
+	// MaxRotate 默认 3（handler.go:411）⇒ 一轮最多试 3 个号。
+	// 而某家可能有 17 个号**全部**被上游拒绝（实测 workbuddy-intl：17 个号
+	// 0 禁用 0 冷却，但每个都回 403）⇒ 试 3 个就耗尽预算，
+	// 循环**正常走完**（不是 break）⇒ 最后一次 acct 是**非 nil**（选出了号，只是它失败）
+	// ⇒ **从没走到上面那个 `if acct == nil` 的切换点** ⇒ 永远切不到别家。
+	// ⇒ 用户看到 37.5% 的失败率，而另两家上游明明能用。
+	//
+	// # 判据为什么不一律切（分层）
+	//   ErrKindClient   —— 这家上游批量拒绝了（403/400）⇒ 这家的号有问题 ⇒ 可切
+	//   ErrKindServer   —— 这家网关抖 ⇒ 可切
+	//   ErrKindSoftRate —— 这家在限流 ⇒ 可切
+	//   ErrKindFatalClient / ErrKindContentBlocked —— 请求本身的问题 ⇒ 换家也一样 ⇒ **不切**
+	// ⚠ switchedFrom 保证每家只试一次 ⇒ 全挂时不会变成 N² 次无效请求
+	// ⚠ 时间预算 budget **不重置**：它是"用户还要等多久"的上限，与换几家无关。
+	if lastKind != gateway.ErrKindFatalClient && lastKind != gateway.ErrKindContentBlocked {
+		if next, nextModel := h.nextAliasUpstream(aliasOrder, switchedFrom); next != "" {
+			log.Printf("[apikey] 别名 %q：上游 %q 用完换号预算（%d 次）仍失败（kind=%v），切到 %q（模型 %q）",
+				publicModel, reqProvider, maxAttempts, lastKind, next, nextModel)
+			switchedFrom[next] = true
+			reqProvider = next
+			reqModel = nextModel
+			tierOffset = 0
+			tried = map[string]bool{}
+			st.decision = "switched_upstream_after_rotate_exhausted:" + next
+			goto retryUpstream
+		}
 	}
 	// ⚠⚠ **预算用尽留痕**（2026-10-18 加）。
 	//

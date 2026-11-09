@@ -32,7 +32,23 @@ const SRC = path.join(ROOT, 'internal', 'server', 'theme-max.css');
 const START = '/* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */';
 const END = '/* ==== WB2API:MAXIMALISM:END ==== */';
 const PAGES = [
-  'internal/server/webui.html',
+  // ★ T-421：`webui.html` 从这里**移除**，换成 `internal/server/ui/app.css`。
+  //
+  // 拆包（T-409）把 webui.html 的 `<style>` 块整个搬到了 `ui/app.css`，而本脚本的
+  // 目标列表没跟着改 ⇒ 两个后果：
+  //   · webui.html 里已没有 <style> ⇒ 本脚本在**第一个目标**就抛
+  //     `Error: 页面里没有 </style>` ⇒ 后面 6 个页面全都同步不到（实测）；
+  //   · ui/app.css 里的那份 CSS **永远不同步** ⇒ 改了 theme-max.css 也不生效。
+  //
+  // ⇒ 目标改成 app.css。它的结构是「**页面自有样式(63.5KB) + MAXIMALISM 块(40.3KB)**」，
+  //   而 apply() 只替换**块内**内容 ⇒ 块外那 63.5 KB 一个字都不会动。
+  //   实测（备份 app.css.bak-t421 后）：块前 hash b3d70259c844a666、
+  //   块后 hash a9e3767b4619c61d，sync 前后**两者都不变** ✓
+  //
+  // ⚠ 块外那部分是**页面自有 CSS**（.heatwrap/.heatmain/.heatstats/.hdet …），
+  //   不是本脚本生成的 —— 它的原源文件（webui.html 的 <style>）已被 T-409 移除
+  //   ⇒ **app.css 的块外区就是它唯一的手改落点**（只有块内改了才会被覆盖）。
+  'internal/server/ui/app.css',
   'internal/server/webui-login.html',
   'internal/server/webui-channels.html',
   'internal/server/webui-groups.html',

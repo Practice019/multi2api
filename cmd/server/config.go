@@ -148,7 +148,8 @@ type Config struct {
 
 	// Server 出口层（HTTP 入站）行为。
 	Server struct {
-		// MaxBodyMB 单次请求体上限（MiB），缺省 8，<=0 回落 8。
+		// MaxBodyMB 单次请求体上限（MiB）。缺省 64（T-386 从 8 提高）；
+		// 0 或未配置 ⇒ 64；**负数 ⇒ 不限制**。
 		//
 		// # 为什么它必须存在（借鉴 workbuddy2api-panel）
 		//
@@ -935,6 +936,19 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"lobsterai"`
 
+	// Codar（科搭 / SpeedAI，2026-11-08 新增）。
+	//
+	// 协议由 T-311 **真机实测**确认（不是推断）：标准 OpenAI chat/completions + Bearer，
+	// 模型目录 GET /v1/codar/models **免鉴权**；4 个 claude 系模型走 /v1/messages + x-api-key。
+	//
+	// 凭证来源可以是桌面端 %USERPROFILE%\.codar\config.json 的 provider.speedai.token
+	//（codar.ImportFromDesktopConfig 会读它），因此默认目录用 auths/codar。
+	Codar struct {
+		AuthDir      string `json:"auth_dir"`
+		APIBase      string `json:"api_base"`
+		PoolAccounts *bool  `json:"pool_accounts"`
+	} `json:"codar"`
+
 	// Qoder 第九/十个上游（阿里系，国际版 + 中国版）。
 	//
 	// 与其它上游同律：**启用是显式的**（qoder.enabled=true），段缺席=不加载。
@@ -1240,6 +1254,12 @@ type Config struct {
 	LobsteraiPortalBase   string `json:"-"`
 	LobsteraiVersionAPI   string `json:"-"`
 	LobsteraiPoolAccounts bool   `json:"-"`
+
+	// Codar（科搭）解析后。
+	CodarEnabled      bool   `json:"-"`
+	CodarAuthDir      string `json:"-"`
+	CodarAPIBase      string `json:"-"`
+	CodarPoolAccounts bool   `json:"-"`
 	// Qoder（第九/十上游）解析后。
 	QoderEnabled      bool   `json:"-"`
 	QoderCNActive     bool   `json:"-"`
@@ -1493,13 +1513,16 @@ func (c *Config) normalize() error {
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
 	}
-	// 请求体上限：<=0 / 未配置一律回落 8 MiB（与改造前的硬编码常量一致，
-	// 保证既有部署的**实际接受能力**不变，只是超限时从"静默截断"变成 413）。
-	if c.Server.MaxBodyMB <= 0 {
-		c.Server.MaxBodyMB = 8
+	// 请求体上限：0 / 未配置 ⇒ 默认 64 MiB（T-386 从 8 提高）。
+	// 负数 ⇒ **不限制**（见 internal/server/handler.go 的 maxBodyUnlimited）。
+	// 为什么提高：一张 4K 截图 base64 后约 5–8 MiB，8 MiB 在多图/长上下文下
+	// 太容易撞线，而用户看不出是自己图太大，只会怀疑服务。
+	if c.Server.MaxBodyMB == 0 {
+		c.Server.MaxBodyMB = 64
 	}
 	// 上界兜底：配置里写一个荒谬的大值（如 1e6 MiB）会让 MaxBytesReader
 	// 形同不存在，等于把内存交给客户端 —— 夹到 1024 MiB（1 GiB）。
+	// ⚠ 负数走"不限制"分支，不参与这里的夹取（它有自己的一条路）。
 	if c.Server.MaxBodyMB > 1024 {
 		c.Server.MaxBodyMB = 1024
 	}
@@ -1893,6 +1916,19 @@ func (c *Config) normalize() error {
 	c.LobsteraiPortalBase = strings.TrimSpace(c.Lobsterai.PortalBase)
 	c.LobsteraiVersionAPI = strings.TrimSpace(c.Lobsterai.VersionAPI)
 	c.LobsteraiPoolAccounts = c.LobsteraiEnabled && boolOr(c.Lobsterai.PoolAccounts, true)
+
+	// ---- codar（科搭 / SpeedAI）----
+	//
+	// 与其它上游一致：段缺席 = 启用；auth_dir 缺省取 AuthsBase 的**一级**子目录。
+	// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被别的上游段改写过的值
+	//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
+	c.CodarEnabled = true
+	c.CodarAuthDir = strings.TrimSpace(c.Codar.AuthDir)
+	if c.CodarAuthDir == "" {
+		c.CodarAuthDir = filepath.Join(c.AuthsBase, "codar")
+	}
+	c.CodarAPIBase = strings.TrimSpace(c.Codar.APIBase)
+	c.CodarPoolAccounts = c.CodarEnabled && boolOr(c.Codar.PoolAccounts, true)
 
 	// ---- qoder（第九、十上游，国际版 + 中国版）----
 	c.QoderEnabled = true

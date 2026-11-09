@@ -11,6 +11,8 @@ package monkeycode
 import (
 	"context"
 	"errors"
+	"os"
+	"time"
 
 	"workbuddy2api/internal/dailycheckin"
 	"workbuddy2api/internal/gateway"
@@ -236,17 +238,58 @@ var _ gateway.JobExt = (*Provider)(nil)
 // 「没到期」处理，看起来正常但永远不跑，比不注册更难查。
 // 用驱动自己的 AutoEnabled 判，口径只有一处。
 func (p *Provider) Jobs() []gateway.Job {
-	if p == nil || p.checkin == nil || !p.checkin.AutoEnabled() {
+	if p == nil {
 		return nil
 	}
-	return []gateway.Job{{
-		Name:     p.checkin.Descriptor().ID,
-		Interval: p.checkin.Interval(),
-		// RunAll 扫本上游全部账号、逐号签到并写历史。
-		// 定时任务与「全部签到」按钮走**同一个** RunAll，
-		// 所以两条路径的历史口径一致（见 dailycheckin/driver.go）。
-		Run: p.checkin.RunAll,
-	}}
+	out := []gateway.Job{}
+	if p.checkin != nil && p.checkin.AutoEnabled() {
+		out = append(out, gateway.Job{
+			Name:     p.checkin.Descriptor().ID,
+			Interval: p.checkin.Interval(),
+			// RunAll 扫本上游全部账号、逐号签到并写历史。
+			// 定时任务与「全部签到」按钮走**同一个** RunAll，
+			// 所以两条路径的历史口径一致（见 dailycheckin/driver.go）。
+			Run: p.checkin.RunAll,
+		})
+	}
+	// ★ T-446：陈旧临时 profile 巡检（每小时）。
+	//
+	// # 为什么它必须是个 Job，而不是像改造前那样只挂在"有人点浏览器登录"里
+	//
+	// 改造前用 sync.Once 挂在 StartBrowserLogin 中 ⇒ **不点登录的机器永远不清** ✗。
+	// 实测泄漏速率 20~32 GB/天（11-08 113 个 / 11-09 半天 60 个），
+	// 攒到 173 个 = 51.53 GB，把磁盘顶到 97.94%。
+	//
+	// # ⚠⚠ 绝对不要给这条 Job 写 Due
+	//
+	// scheduler 的 jobDue 语义是「**有 Due 就完全交给 Due，Interval 被忽略**」
+	//（见 internal/scheduler/job.go 的注释）。
+	// T-434 就是在有 Due 的 Job 上依赖 Interval，结果失败重试变成每 40 秒一次、
+	// 一天 4300 次请求。本 Job 只用 Interval ⇒ Interval 才真正生效。
+	if root := p.profileRoot(); root != "" {
+		out = append(out, gateway.Job{
+			Name:     "monkeycode-profile-sweep",
+			Interval: time.Hour,
+			Run: func(ctx context.Context) error {
+				// ★ T-456：扫**两个** root。
+				//  ① p.profileRoot() —— 新落点（auths\monkeycode\.browser-profiles）
+				//  ② os.TempDir()   —— **历史残留**：改造前 authDir 为空时 profileRoot()
+				//     返回 ""，makeProfileDir 回落到 %TEMP% ⇒ 用户实测在 D:\temp 攒了
+				//     24 个 ×525MB 的 Edge profile（≈12 GB，1 小时吃掉 8 GB 磁盘）。
+				//  ⚠ 扫临时目录安全：本函数只删**带 loginProfilePrefix 前缀**的目录
+				//    （那是本项目的命名约定）⇒ 不碰别人的东西 ✓
+				//  ⚠ 临时目录用 6 小时阈值（比自己目录的 1 小时长得多）。
+				r1, f1 := SweepStaleLoginProfiles(p.profileRoot(), time.Hour)
+				r2, f2 := SweepStaleLoginProfiles(os.TempDir(), 6*time.Hour)
+				if r1+r2 > 0 || f1+f2 > 0 {
+					logf("monkeycode: 每小时 profile 巡检：本目录清 %d 失败 %d；临时目录清 %d 失败 %d",
+						r1, f1, r2, f2)
+				}
+				return nil
+			},
+		})
+	}
+	return out
 }
 
 // errNoAuth 驱动里取不到凭证时的错误。

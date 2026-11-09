@@ -29,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // providerID 上游标识。
@@ -504,10 +506,10 @@ func (a *Auth) needsRefresh(now time.Time, lead time.Duration) bool {
 	return a.ExpireTime <= now.Add(lead).UnixMilli()
 }
 
-// shortUID 日志用的短 uid（避免把完整 token/邮箱打进日志）。
-func shortUID(uid string) string {
-	if len(uid) <= 8 {
-		return uid
-	}
-	return uid[:8] + "…"
-}
+// shortUID 日志用的短 uid（T-403 起改用**共享实现**）。
+//
+// ⚠ 这是**别名**不是复制：实现只有 `gateway.ShortUID` 一处。
+// 保留本包短名的理由：本包有 10+ 个调用点，改名的 diff 噪音大于收益，
+// 而"实现只有一处"这个真正的要求由别名满足。
+// 旧实现取前 8 位 ⇒ 本包的 ULID（`usr-01M3MJDCG…`）会大面积撞车（实测）。
+var shortUID = gateway.ShortUID

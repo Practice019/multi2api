@@ -24,9 +24,10 @@ import (
 // modelsForTest 用一份合法凭证取目录（Models 会先做 authOf 校验）。
 //
 // ⚠ T-236：`Models()` 现在会**真的去拉上游清单**。所以调用方造的 Provider
-//   必须带一个**离线** client（见 offlineModelsClient）—— 否则单元测试会
-//   打真实网络（慢、依赖外网、还会因账号差异而不稳），而这条路径要测的
-//   只是"快照目录 + 额度过滤"。
+//
+//	必须带一个**离线** client（见 offlineModelsClient）—— 否则单元测试会
+//	打真实网络（慢、依赖外网、还会因账号差异而不稳），而这条路径要测的
+//	只是"快照目录 + 额度过滤"。
 func modelsForTest(t *testing.T, p *Provider) []gateway.ModelInfo {
 	t.Helper()
 	cred := gateway.Credential{

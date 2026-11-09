@@ -68,7 +68,16 @@ func (p *Provider) Jobs() []gateway.Job {
 		jobs = append(jobs, gateway.Job{
 			Name:     JobRefresh,
 			Interval: p.refreshInterval,
-			Run:      p.runRefresh,
+			// ★ T-292：**加到期判据** —— 判据是"寿命过半"，而扫描粒度是 refreshInterval（默认 30m）。
+			//   只靠 Interval 会出现：某个号刚过半点，而下一轮扫描在 29 分钟后 ⇒
+			//   用户看到"已经剩不到一半了却一直没续"，最坏要等满一个 interval（实测用户报的就是这个）。
+			//   给了 Due 之后核心每 jobTickInterval（30s）问一次，过半 30 秒内就能续上；
+			//   Due 内部同时保留"距上次扫描超过 interval 就强制扫一轮"的旧节奏语义（见 refreshDue）。
+			//
+			//   ⚠ 核心的语义是：**有 Due 就不再叠加 Interval 门槛**（见 scheduler/job.go 的 jobDue），
+			//     所以"每 interval 至少扫一次"这件必须在 Due 里自己表达 —— 这就是 refreshDue 的两个分支。
+			Due: p.refreshDue,
+			Run: p.runRefresh,
 		})
 	}
 	if p.welfareEnabled && p.welfareInterval > 0 {
@@ -79,6 +88,75 @@ func (p *Provider) Jobs() []gateway.Job {
 		})
 	}
 	return jobs
+}
+
+// refreshDue 后台续期任务的到期判据（★ T-292）。
+//
+// 两个分支，任一为真即该跑：
+//
+//	① 距上次扫描已达 refreshInterval（旧的"每 30 分钟扫一轮"节奏，保留为兜底）
+//	② **已有账号寿命过半** ⇒ 立刻跑（30s 粒度内），不再干等下一个 interval
+//
+// 为什么需要 ①：核心在"任务有 Due"时**不再叠加 Interval 门槛**，
+// 若只留 ②，"一个号都还没过半"时任务永远不跑 —— 那样一旦某个号的文件在
+// 两轮之间被换成快过期的凭证，就只能等它真的过半才被发现（兜底也丢了）。
+//
+// 为什么 ② 必须与 runRefresh 的挑号条件同源：否则会出现
+// "Due 说该跑、runRefresh 一个都不挑" ⇒ 每 30 秒空转一次（日志被刷、上游被打）。
+// 所以两边都只走 accountsPastSkew 这一个判据函数。
+//
+// `now` 由核心传入（scheduler 用它判到期），本函数不做时间取反等隐式操作。
+func (p *Provider) refreshDue(now time.Time) bool {
+	if p.refreshInterval <= 0 {
+		return false // 未开启后台续期（不该走到这里，Jobs() 已按同一条件注册）
+	}
+	// ① 兜底节奏：从未扫过 ⇒ 立刻跑（保持"启动即首扫"的既有语义）；
+	//    或距上次扫描已满一个 interval。
+	if last := p.lastRefreshScanNS.Load(); last == 0 || !now.Before(time.Unix(0, last).Add(p.refreshInterval)) {
+		return true
+	}
+	// ② 有账号已过半 ⇒ 该续了。
+	need, _ := p.accountsPastSkew(now)
+	return len(need) > 0
+}
+
+// accountsPastSkew 挑出"此刻就该续期"的账号 —— **runRefresh 与 refreshDue 共用的唯一判据**。
+//
+// 三个跳过条件（与改造前 runRefresh 里的三个 continue 逐条对应，不新增不减少）：
+//
+//	· 没有 refresh_token ⇒ 续不了（只能重新登录）
+//	· 正在失败退避中 ⇒ 不重试（凭证永久失效时等用户重新登录，见 holdRefresh）
+//	· 剩余寿命还大于本上游的续期窗口（≈ 寿命的一半）⇒ 还不到时候
+//
+// 返回 (nil, err) 时调用方自行决定：runRefresh 把错误抛给调度器记日志；
+// refreshDue 把它当成"这轮不跑"（判据失败不该让任务每 30 秒报一次错）。
+func (p *Provider) accountsPastSkew(now time.Time) ([]*Auth, error) {
+	list, err := p.localAccounts()
+	if err != nil {
+		return nil, err
+	}
+	var need []*Auth
+	for _, a := range list {
+		if a == nil {
+			continue
+		}
+		if a.RefreshToken == "" {
+			continue
+		}
+		if p.onRefreshHold(a) {
+			continue
+		}
+		skew, ok := refreshSkewOf(a)
+		if !ok {
+			continue
+		}
+		// 剩余 ≤ skew ⟺ now + skew ≥ 到期时刻（与 core/refreshratio.go 的判据同形）。
+		if now.Add(skew).Before(time.Unix(a.ExpiresAt, 0)) {
+			continue // 还没过半：本轮不刷
+		}
+		need = append(need, a)
+	}
+	return need, nil
 }
 
 // runWelfare 一趟福利自动领取（签到语义）：逐账号领取可领福利并记录历史。
@@ -117,44 +195,15 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	list, err := p.localAccounts()
+	// ★ T-292：先记下"这一轮扫描发生了" —— refreshDue 的兜底分支靠它算"距上次扫描多久"。
+	//   记在入口而不是结尾：即使下面中途 return，也说明"这一轮跑过了"，
+	//   否则 refreshDue 会立刻再判一次"该跑"，形成 30 秒级空转。
+	p.lastRefreshScanNS.Store(time.Now().UnixNano())
+
+	// ★ T-292：挑号判据统一到 accountsPastSkew（**同一个函数**也被 refreshDue 用来判到期）
+	need, err := p.accountsPastSkew(time.Now())
 	if err != nil {
 		return err
-	}
-
-	var need []*Auth
-	for _, a := range list {
-		if a == nil {
-			continue
-		}
-		// 没有 refresh_token 的账号没法续（只能重新登录），跳过。
-		if a.RefreshToken == "" {
-			continue
-		}
-		// 失败退避中的账号不尝试（凭证永久失效时等重新登录，见 holdRefresh）。
-		if p.onRefreshHold(a) {
-			continue
-		}
-		// 判据统一到「寿命过半」（2026-11-01 用户要求所有上游同一套）。
-		//
-		// # 这里改过一次口径，两次用户要求的关系要写清
-		//
-		//  旧："统一 30 分钟主动**全量**刷新，不问剩余寿命" —— 那是关于**扫描节奏**的要求，
-		//      而当时的实现把节奏当成了判据：每 30 分钟把每个号都续一遍。
-		//      对 2 小时寿命的 STS，一个周期内续 4 次（3 次纯浪费），
-		//      而 refresh_token 是**一次性消费**的 ⇒ 白烧 3 个 token。
-		//  新：节奏不变（仍然 30 分钟扫一次），判据统一成"寿命过半"（剩余 ≤ 约 1 小时）。
-		//      ⇒ 每个 2 小时周期只续一次；扫描频率与判据各归其位。
-		//
-		// 管理台点"续期"走的是单账号入口，不经过这里，仍然是无条件动作。
-		skew, ok := refreshSkewOf(a)
-		if !ok {
-			continue
-		}
-		if time.Until(time.Unix(a.ExpiresAt, 0)) > skew {
-			continue // 还没过半：本轮不刷（与旧"全量续"的唯一区别）
-		}
-		need = append(need, a)
 	}
 	if len(need) == 0 {
 		return nil

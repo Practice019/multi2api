@@ -52,6 +52,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/loginui"
 )
 
 // clientStorePath 本端点的路径。
@@ -541,108 +542,6 @@ func (p *Provider) handleLoginVerify(w http.ResponseWriter, r *http.Request) {
 // 反过来说：如果要在控制台弹窗里加输入框，就得动 `internal/server/webui.html`
 // 与核心的登录端点契约（"poll 只带 state"要扩成"还能提交手机号/验证码"）——
 // 那是把一个上游的交互形态焊进核心。
-const loginPageHTML = `<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Loomy 手机号登录</title>
-<style>
- body{margin:0;padding:32px;font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;
-      background:#0f1115;color:#e6e8ee;display:flex;justify-content:center}
- .card{width:100%;max-width:420px;background:#171a21;border:1px solid #262b36;border-radius:12px;padding:24px}
- h1{margin:0 0 4px;font-size:17px}
- p.sub{margin:0 0 20px;color:#8b93a7;font-size:12px}
- label{display:block;margin:14px 0 6px;color:#8b93a7;font-size:12px}
- input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #2c323f;
-       background:#0f1115;color:#e6e8ee;font-size:14px}
- .row{display:flex;gap:8px}
- .row input{flex:1}
- button{padding:10px 14px;border-radius:8px;border:1px solid #2c323f;background:#222835;color:#e6e8ee;
-        font-size:13px;cursor:pointer;white-space:nowrap}
- button.primary{background:#3b6cf0;border-color:#3b6cf0;color:#fff;width:100%;margin-top:20px;font-weight:600}
- button:disabled{opacity:.55;cursor:default}
- .msg{margin-top:14px;padding:10px 12px;border-radius:8px;font-size:12px;display:none;white-space:pre-wrap}
- .ok{display:block;background:#12301f;border:1px solid #1e5c37;color:#7ee2a8}
- .bad{display:block;background:#301317;border:1px solid #5c1e26;color:#ff9aa5}
- .hint{margin-top:18px;padding-top:14px;border-top:1px solid #262b36;color:#8b93a7;font-size:11.5px}
- code{background:#0f1115;padding:1px 4px;border-radius:4px}
-</style></head><body>
-<div class="card">
-  <h1>Loomy 手机号登录</h1>
-  <p class="sub">登录成功后本页可以关闭，控制台会在几秒内自动完成添加。</p>
-
-  <label>手机号（11 位，中国大陆）</label>
-  <input id="phone" inputmode="numeric" maxlength="11" placeholder="例如 13800138000" autocomplete="tel">
-
-  <label>短信验证码</label>
-  <div class="row">
-    <input id="code" inputmode="numeric" maxlength="6" placeholder="6 位数字">
-    <button id="send">发送验证码</button>
-  </div>
-
-  <button class="primary" id="login">登录并添加账号</button>
-  <div class="msg" id="msg"></div>
-
-  <div class="hint">
-    验证码由讯飞账号网关下发（<b>会真的发短信</b>，有效期 5 分钟）。<br>
-    登录用的是 Loomy 客户端自己的接口与签名，成功后会取回 <code>session</code> 并写入网关的
-    <code>auths/loomy/</code>。<br>
-    如果本机已经装了 Loomy 客户端并登录过，控制台点「添加账号」时**不会**打开本页
-    —— 那种情况直接复用客户端登录态，不发短信。
-  </div>
-</div>
-<script>
-(function(){
-  var $ = function(id){ return document.getElementById(id); };
-  var state = new URLSearchParams(location.search).get('state') || '';
-  var msgid = '';
-  function show(text, ok){
-    var m = $('msg'); m.textContent = text; m.className = 'msg ' + (ok ? 'ok' : 'bad');
-  }
-  function post(path, body){
-    return fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ state: state }, body))
-    }).then(function(r){ return r.json().then(function(j){
-      if (!r.ok || !j.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
-      return j;
-    }); });
-  }
-  if (!state) show('缺少 state —— 请回到控制台重新点「添加账号」', false);
-
-  $('send').addEventListener('click', function(){
-    var b = this, phone = $('phone').value.trim();
-    b.disabled = true; b.textContent = '发送中…';
-    post('/admin/loomy/login/sms', { phone: phone }).then(function(j){
-      msgid = j.msgid || '';
-      show('验证码已发送，请查收短信（5 分钟内有效）。', true);
-      var n = 60;
-      var t = setInterval(function(){
-        n--; b.textContent = n > 0 ? ('重发 ' + n + 's') : '重新发送';
-        if (n <= 0) { clearInterval(t); b.disabled = false; b.textContent = '重新发送'; }
-      }, 1000);
-    }).catch(function(e){
-      b.disabled = false; b.textContent = '发送验证码';
-      show('发送失败：' + e.message, false);
-    });
-  });
-
-  $('login').addEventListener('click', function(){
-    var b = this;
-    b.disabled = true; b.textContent = '登录中…';
-    post('/admin/loomy/login/verify', {
-      phone: $('phone').value.trim(), code: $('code').value.trim(), msgid: msgid
-    }).then(function(j){
-      b.textContent = '登录成功';
-      show('登录成功：' + (j.nickname || j.uid) + '\n可以关闭本页了，控制台会自动完成添加。', true);
-    }).catch(function(e){
-      b.disabled = false; b.textContent = '登录并添加账号';
-      show('登录失败：' + e.message, false);
-    });
-  });
-})();
-</script>
-</body></html>`
 
 // handleLoginPage 回表单页。
 //
@@ -652,5 +551,17 @@ const loginPageHTML = `<!DOCTYPE html>
 func (p *Provider) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(loginPageHTML))
+	_, _ = w.Write([]byte(loginui.Render(loginui.PageSpec{
+		Title:      "Loomy 手机号登录",
+		Subtitle:   "登录成功后本页可以关闭，控制台会在几秒内自动完成添加。",
+		SMSURL:     loginPagePath + "/sms",
+		VerifyURL:  loginPagePath + "/verify",
+		UseState:   true, // loomy 的会话 state 走 ?state= 并随每次 POST 回传
+		LoginLabel: "登录并添加账号",
+		HintHTML: "验证码由讯飞账号网关下发（<b>会真的发短信</b>，有效期 5 分钟）。<br>" +
+			"登录用的是 Loomy 客户端自己的接口与签名，成功后会取回 <code>session</code> 并写入网关的 " +
+			"<code>auths/loomy/</code>。<br>" +
+			"如果本机已经装了 Loomy 客户端并登录过，控制台点「添加账号」时<b>不会</b>打开本页" +
+			" —— 那种情况直接复用客户端登录态，不发短信。",
+	})))
 }

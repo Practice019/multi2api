@@ -1,8 +1,6 @@
 package qoder
 
 import (
-	"time"
-
 	"workbuddy2api/internal/gateway"
 )
 
@@ -42,12 +40,6 @@ func (p *Provider) TokenExpiry(cred gateway.Credential) (int64, bool) {
 	if err != nil || a == nil {
 		return 0, false
 	}
-	// 落盘字段优先（若将来补了独立过期字段，这里自动用上）。
-	if ms := a.ExpiresAtMS(); ms > 0 {
-		return time.UnixMilli(ms).Unix(), true
-	}
-	if t := gateway.ParseJWTTimes(a.AccessToken); t.ExpiresAt > 0 {
-		return t.ExpiresAt, true
-	}
-	return 0, false
+	// 毫秒字段优先、再兜底 JWT —— 顺序与判据统一在 gateway.ExpiryFromMillisOrJWT（T-334）。
+	return gateway.ExpiryFromMillisOrJWT(a.ExpiresAtMS(), a.AccessToken)
 }

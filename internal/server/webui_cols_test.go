@@ -9,16 +9,34 @@ import (
 	"testing"
 )
 
-// readWebUIHTML 读源码文件（不是内嵌的 webuiHTML）。
+// readWebUIHTML 读**前端全部源码** = webui.html + ui/app.js。
+//
+// # 为什么必须拼上 app.js（T-409 拆包）
+//
+// 拆包把主 script 从 webui.html 搬到了 ui/app.js，而本函数的使用者
+// （endpoint_guard / models_unified / cols / task_auto / unauth / provider_registration）
+// 扫的正是 JS 结构：COLS 常量、hasCap(pid,'quota-probe')、data-dayurl="…"、
+// groupModelsByOwner、multTag、renderModels、DEFAULT_PROVIDER …
+// ⇒ 只读 html 会**误报"结构被删掉了"**（实测 20+ 条 fail-open 型误报：
+//
+//	守卫从"抓住违规"退化成"什么都没抓到也算过"，比没有守卫更危险）。
+//
+// # 为什么不用内嵌的 webuiHTML 变量
 //
 // 解析必须针对**源文件**：占位符要替换、JS 常量要在浏览器求值，
 // 两者都只在源文件里可见。读内嵌变量会让"改文件忘了同步"这类漂移漏网。
+//
+// ⚠ 顺序：html 在前、js 在后 —— 少数守卫看首行（doctype），拼在后面的 JS 不影响它们。
 func readWebUIHTML() (string, error) {
-	b, err := os.ReadFile(filepath.Join("webui.html"))
+	html, err := os.ReadFile(filepath.Join("webui.html"))
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	js, err := os.ReadFile(filepath.Join("ui", "app.js"))
+	if err != nil {
+		return "", err
+	}
+	return string(html) + "\n" + string(js), nil
 }
 
 // TestColPlaceholdersMatchJSCols 守住 Go 侧替换表与 webui.html 的 JS 常量一致。

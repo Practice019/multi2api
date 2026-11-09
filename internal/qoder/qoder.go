@@ -31,6 +31,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // providerID 国际版标识。
@@ -361,12 +363,8 @@ func DerivedUID(token string) string {
 	return "qoder-" + hex.EncodeToString(sum[:8])
 }
 
-// shortUID 日志用的短 uid。
-func shortUID(uid string) string {
-	if len(uid) <= 8 {
-		return uid
-	}
-	return uid[:8] + "…"
-}
+// shortUID 日志用的短 uid（T-403 起改用**共享实现**）。
+// ⚠ 别名不是复制：实现只有 gateway.ShortUID 一处。
+var shortUID = gateway.ShortUID
 
 var _ = fmt.Sprintf

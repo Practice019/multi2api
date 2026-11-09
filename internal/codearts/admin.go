@@ -392,14 +392,35 @@ func (p *Provider) firstUID() string {
 //
 // 每次都重新扫盘：管理端点是低频操作，而"用户刚跑完 cmd/login 就点开面板"
 // 是最常见的用法 —— 缓存会让他看不到新账号。
+// ★ T-297：**出口处按 UID 去重**（保留到期最晚的那份）。
+//
+// # 为什么在出口去重，而不是让每个调用方自己去
+//
+// 本函数有 5 个消费方（admin 两处 / dailycheckin 两处 / jobs 两处），
+// 逐个加 `dedupeAuthByUID` 既容易漏、又会在**将来新增调用方时复发**。
+// 而"同一账号多份凭证"是**重复登录**的必然结果（AK 每次登录都新生成、文件名按 AK 命名），
+// 去重是这里的天性，不是某个调用方的特殊要求。
+//
+// # 走这条路的是谁、不走的是谁（T-297 核实过）
+//
+//	✅ 走这里：账号池视图 / 签到 / 后台任务 —— 全是"遍历账号做事"的语义。
+//	❌ 不走这里（因此**不受本改动影响**）：
+//	   · credentialloader.go 的池投影（`LoadCredentials`）直接调 `LoadDir`；
+//	   · cmd/codearts-doctor 直接调 `LoadDir` —— 它**就是要看全部文件**（含重复），
+//	     好把那句"建议删除 xxx"说出来；若它也去重就永远发现不了重复凭证。
 func (p *Provider) localAccounts() ([]*Auth, error) {
 	if p.accounts != nil {
-		return p.accounts(), nil
+		// 注入分支也去重：装配层若是每位一个 UID，这里就是 no-op（保序 ⇒ 零行为变化）。
+		return dedupeAuthByUID(p.accounts()), nil
 	}
 	if p.authDir == "" {
 		return nil, nil
 	}
-	return LoadDir(p.authDir)
+	list, err := LoadDir(p.authDir)
+	if err != nil {
+		return nil, err
+	}
+	return dedupeAuthByUID(list), nil
 }
 
 // ---------------------------------------------------------------- HTTP 辅助

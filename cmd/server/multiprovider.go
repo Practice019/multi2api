@@ -15,6 +15,8 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -80,6 +82,46 @@ func dedupeCodeartsByUID(list []*codearts.Auth) ([]*auth.Auth, map[string]any) {
 	return auths, secrets
 }
 
+// codeartsConflictLogged 记住"上次报告过的冲突结论"，只在**变化时**打日志（T-451）。
+//
+// # 为什么需要它（实测）
+//
+// codeartsWinners 被**每次目录扫描**调用 —— codeartsCredStore 的 List/UIDs/Resolve
+// 都重新枚举磁盘（那是 SetAccounts 回调的语义要求：用户刚跑完 cmd/login 或刚删一份
+// 凭证，下一次调用就要看到 ⇒ **不能改成缓存**）。
+// 而同一份目录的扫描结论在一次运行里**几乎不变** ⇒ 改造前每 30 秒打一条，
+// 一天 2880 条，把真正重要的日志淹掉（实测：部署后 4 分钟刷了 8 条）。
+//
+// # 判据：结论指纹（不是时间窗）
+//
+// 指纹 = 候选数 + 胜出文件名 + 被丢弃文件名，三者任一变化都说明目录真的动过 ⇒ 该打。
+// ⚠ **不许**用"时间窗去重"（如 5 分钟最多一条）—— 那会在结论没变时打、
+//
+//	又会在持续冲突时周期性刷，两边都不对。
+var codeartsConflictLogged = struct {
+	mu   sync.Mutex
+	last map[string]string // uid → fingerprint
+}{last: map[string]string{}}
+
+// logCodeartsConflict 只在"该 uid 的冲突结论"变化时打一条。
+func logCodeartsConflict(uid string, n int, kept, dropped string) {
+	fp := strconv.Itoa(n) + "|" + kept + "|" + dropped
+	codeartsConflictLogged.mu.Lock()
+	prev, seen := codeartsConflictLogged.last[uid]
+	codeartsConflictLogged.last[uid] = fp
+	codeartsConflictLogged.mu.Unlock()
+	if seen && prev == fp {
+		return // 结论没变 ⇒ 不打（这就是降噪的全部）
+	}
+	if seen {
+		log.Printf("codearts: 账号 %s 的凭证冲突已变化（现有 %d 份），选用 %s，丢弃 %s",
+			shortUID(uid), n, kept, dropped)
+		return
+	}
+	log.Printf("codearts: 账号 %s 有 %d 份凭证，选用 %s（更新/更完整），丢弃 %s",
+		shortUID(uid), n, kept, dropped)
+}
+
 // codeartsWinners 按 uid 聚合**一次目录扫描**的结果，每个 uid 选一份胜出凭证。
 //
 // 返回的 picked 与 uids 一一对应，顺序 = uid 在 list 里**首次出现**的顺序
@@ -114,13 +156,11 @@ func codeartsWinners(list []*codearts.Auth) (picked []*codearts.Auth, uids []str
 		}
 		if betterCodeartsCred(ca, cur) {
 			// 挑战者更好：它成为新的胜出者，旧的被丢弃。
-			log.Printf("codearts: 账号 %s 有 %d 份凭证，选用 %s（更新/更完整），丢弃 %s",
-				shortUID(ca.UID), count[ca.UID], baseOrPath(ca.FilePath), baseOrPath(cur.FilePath))
+			logCodeartsConflict(ca.UID, count[ca.UID], baseOrPath(ca.FilePath), baseOrPath(cur.FilePath))
 			winner[ca.UID] = ca
 		} else {
 			// 挑战者不如当前胜出者：丢弃挑战者。
-			log.Printf("codearts: 账号 %s 有 %d 份凭证，选用 %s（更新/更完整），丢弃 %s",
-				shortUID(ca.UID), count[ca.UID], baseOrPath(cur.FilePath), baseOrPath(ca.FilePath))
+			logCodeartsConflict(ca.UID, count[ca.UID], baseOrPath(cur.FilePath), baseOrPath(ca.FilePath))
 		}
 	}
 
@@ -154,17 +194,12 @@ func betterCodeartsCred(cand, cur *codearts.Auth) bool {
 	return false
 }
 
-// shortUID 把 uid 截成前 8 位用于日志。
+// shortUID 日志用的短 uid（T-403 起改用**共享实现**）。
 //
-// 华为云 account_id 是 32 位十六进制，整串打进日志会挤掉真正可读的信息；
-// 前 8 位在同一台机器上足以区分不同账号。
-func shortUID(uid string) string {
-	const n = 8
-	if len(uid) <= n {
-		return uid
-	}
-	return uid[:n]
-}
+// ⚠ 别名不是复制：实现只有 `gateway.ShortUID` 一处。
+// 旧实现取前 8 位：华为云 account_id（32 位十六进制）一般不撞，但同一规则下
+// codearts/monkeycode/loomy 那类"前缀是品种名"的 uid 会全撞 ⇒ 统一走共享实现。
+var shortUID = gateway.ShortUID
 
 // baseOrPath 取文件名的 Base（日志里不打完整路径）。
 //

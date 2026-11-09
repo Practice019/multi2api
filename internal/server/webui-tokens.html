@@ -129,6 +129,16 @@
   .credrow .dim{color:var(--dim);font-size:12px}
 
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
+/* 时间范围口径提示（T-423）。
+   改造前是 h3 里的内联 11px 文字，档位间长度从 0 字跳到 27 字
+   ⇒ 整行布局跟着变（用户报「一直变动占位置太多了」）。
+   现在：14px 圆圈 + title 悬浮说明，无说明时 hidden 不占任何宽度。 */
+.range-note-icon{display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;margin-left:6px;border:1px solid currentColor;border-radius:50%;
+  font-size:10px;font-weight:700;line-height:1;cursor:help;opacity:.55;vertical-align:middle}
+.range-note-icon::before{content:"i"}
+.range-note-icon[hidden]{display:none}
+
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
    风格来源：https://designforai.dev/style/maximalism
@@ -2174,22 +2184,106 @@ refresh();
 (async function () {
   var box = document.getElementById('credRows');
   if (!box) { return; }
-  function row(label, val, id, hint) {
+  // ★ T-464：掩码 + 「显示/隐藏」+「复制」，且**完整值只在点开那一刻才进 DOM**。
+  //
+  // # 用户诉求（原话）
+  //
+  //   「关于那些令牌的展示，要么是掩码，后面有个复制，然后轮换什么的掩码
+  //     不要什么，让用户都没办法知道。如果说用户都没办法知道那个Token，那还有什么用呢？」
+  //   「反正我觉得只要一个这个就可以了。只要一个管理令牌就可以了。管理令牌需要可以复制。」
+  //
+  // # 不变量：掩码态下，完整值**不在 DOM 里**
+  //
+  //   反面写法（T-458 那版）是把完整值塞进属性：`<code data-mask="…" data-full="完整值">`。
+  //   那样一来掩码态**打开 DevTools 元素面板就能看到完整 token**，
+  //   「显示」按钮退化成**纯视觉效果、没有任何安全含义** ✗
+  //   ⇒ 现在完整值只留在下面的 `credState`（JS 变量）里，
+  //     只有 `revealed` 为真时才写进 `<code>` 的**文本节点**。
+  //   这条不变量由 tests/frontend/verify_cred_dom_leak.js 守（可重复运行）。
+  //
+  // # 只保留「管理令牌」一行（T-464 追加，用户 2026-11-09 明确要求）
+  //
+  //   ① 用户已有令牌页的 `sk-` 体系（额度/限速/可用模型/分组），功能上是 api_key 的超集；
+  //   ② `api_key` 是**管理级**钥匙 —— 不限额、不限速、全模型（handler.go 的 `bearer == ak` 直接放行）
+  //      ⇒ 在页面上展示等于把"全权钥匙"摆在最显眼处，泄露面比 sk- 大得多；
+  //   ③ 两套 key 并存会让"到底哪个在生效"变成需要读代码才知道的事。
+  //   ⚠ **只删展示，不删能力**：`/admin/apikeys` 载荷里的 `admin_key` / `admin_key_full`
+  //     照旧返回（internal/admin/apikeys.go:111/116），config.json 的 `api_key` 照旧生效
+  //     ⇒ 已在用的客户端不会突然 401；将来要恢复显示，后端无需改动。
+  //
+  //   ⚠ 本文件的 `esc()`（L1614）**转义引号**（`& < > " '`）。
+  //     外壳控制台那份 `ui/app.js` 的 `esc()` **不转义引号** —— 两处口径不同，勿互抄。
+  //     （本页现在也不把凭据放进属性了，但"转义口径不同"这条事实仍然成立。）
+  var credState = {};   // slot -> { masked, full, revealed }；**完整值只在这里**，不进 DOM
+  function row(label, val, id, hint, full) {
     if (!val) {
       return '<div class="credrow"><b>' + label + '</b><span class="dim">未配置' + (hint ? '（' + hint + '）' : '') + '</span></div>';
     }
-    return '<div class="credrow"><b>' + label + '</b><code>' + esc(val) + '</code>'
-      + '<button type="button" data-rot="' + id + '" style="padding:2px 8px;font-size:12px">轮换</button>'
+    var canReveal = !!(full && full !== val);   // 拿不到完整值（非管理员会话）就不给这两个按钮
+    var st = credState[id] || { masked: val, full: full, revealed: false };
+    credState[id] = st;
+    return '<div class="credrow"><b>' + label + '</b>'
+      // ★ 只渲染掩码（或"已点开"后的明文）；**没有任何属性承载完整值**
+      + '<code data-cred-slot="' + esc(id) + '">' + esc(st.revealed ? st.full : st.masked) + '</code>'
+      + (canReveal
+          ? '<button type="button" data-rev="' + esc(id) + '" style="padding:2px 8px;font-size:12px">'
+              + (st.revealed ? '隐藏' : '显示') + '</button>'
+            + '<button type="button" data-cp="' + esc(id) + '" style="padding:2px 8px;font-size:12px">复制</button>'
+          : '')
+      + '<button type="button" data-rot="' + esc(id) + '" style="padding:2px 8px;font-size:12px">轮换</button>'
       + '<span class="dim">轮换后立即生效，无需重启</span></div>';
   }
   async function load() {
     try {
       var d = await (await fetch('/admin/apikeys', { credentials: 'same-origin', cache: 'no-store' })).json();
-      box.innerHTML = row('管理令牌 admin_token', d.admin_token, 'admin', '用账号口令登录即可，不填也行')
-        + row('对话密钥 api_key', d.api_key, 'apikey', '客户端调用 /v1 用');
+      // ★ T-464：只渲染「管理令牌」一行（理由见函数头那段注释）。
+      //
+      //   ⚠ 只删展示，**不删能力**：`d.admin_key` / `d.admin_key_full` 仍在载荷里
+      //    （internal/admin/apikeys.go:111/116 未改），config.json 的 `api_key` 也未改
+      //     ⇒ 已在用的客户端不会突然 401。
+      //   ⚠ 不留"未配置时显示"的分支：用户要的是"只要一个"，
+      //     留一个空行只会让人问"这是什么、要配吗" —— 而正确答案是"不用配，用令牌页就行"。
+      //
+      //   （另：原写法 `row(..., d.api_key, ...)` 是个**键名错误** —— 载荷里叫 `admin_key`，
+      //     `api_key` 是 config.json 的字段名 ⇒ 那一行此前恒显示「未配置」。现在那一行没了，
+      //     这个错误也随之消失；若将来要恢复它，**记得用 `d.admin_key`**。）
+      credState = {};   // ★ 每次重载回到掩码态（轮换后新值也不该处于"已显示"）
+      box.innerHTML = row('管理令牌 admin_token', d.admin_token, 'admin', '用账号口令登录即可，不填也行', d.admin_token_full);
       box.querySelectorAll('button[data-rot]').forEach(function (b) {
         b.addEventListener('click', function () { rotate(b, b.getAttribute('data-rot')); });
       });
+      // 显示/隐藏 + 复制：**容器级委托 + onclick 赋值**。
+      //
+      // ⚠ 为什么不是逐按钮 addEventListener：`load()` 每次重载都重写 `box.innerHTML`，
+      //   而它会被轮换收尾、手动刷新各调一次 ⇒ 逐按钮绑会**累积**监听器。
+      //   `onclick =` 赋值是幂等的，天然不累积。
+      // ⚠ 显示/隐藏只改**那一个槽的 textContent**，不重绘整块（重绘会丢焦点/跳滚动位置）。
+      // ⚠ 复制取的是 `credState` 里的值（内存），**不读 DOM 属性** —— 完整值压根不在 DOM 里。
+      box.onclick = function (ev) {
+        var rev = ev.target.closest('[data-rev]');
+        if (rev) {
+          var sid = rev.getAttribute('data-rev');
+          var st = credState[sid];
+          if (!st || !st.full) { return; }
+          st.revealed = !st.revealed;
+          var slot = box.querySelector('[data-cred-slot="' + sid + '"]');
+          if (slot) { slot.textContent = st.revealed ? st.full : st.masked; }
+          rev.textContent = st.revealed ? '隐藏' : '显示';
+          return;
+        }
+        var cp = ev.target.closest('[data-cp]');
+        if (cp) {
+          var st2 = credState[cp.getAttribute('data-cp')];
+          if (!st2 || !st2.full) { return; }
+          // 兜底与上面的 revealAndCopy 逐字同款（http 非 localhost 时 clipboard 不可用）
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(st2.full).then(function () { toast('已复制到剪贴板'); },
+              function () { window.prompt('浏览器不允许自动复制，请手动复制：', st2.full); });
+            return;
+          }
+          window.prompt('浏览器不允许自动复制，请手动复制：', st2.full);
+        }
+      };
     } catch (e) {
       box.innerHTML = '<span class="err">读取失败：' + esc(String(e && e.message || e)) + '</span>';
     }

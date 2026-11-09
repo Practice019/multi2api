@@ -1604,6 +1604,11 @@ func RegistryChannelSeeds() []store.ChannelSeed {
 		{Provider: "zcode", BaseURL: "https://zcode.z.ai/api/v1", Source: "cmd/server/main.go:979"},
 		{Provider: "minimax", BaseURL: "https://agent.minimax.cn", Source: "cmd/server/main.go:1012"},
 		{Provider: "monkeycode", BaseURL: "https://monkeycode-ai.com", Source: "cmd/server/main.go:1058"},
+
+		// Codar（科搭 / SpeedAI）：账号型上游 —— 流量走 auths/codar 的凭证池，不走渠道路径。
+		// BaseURL 用真机实测的 OpenAI 兼容基址（含 /v1，T-311 确认）；
+		// 模型目录 GET /v1/codar/models 免鉴权，故此处不写 Models（同上方「Models 为什么一律留空」）。
+		{Provider: "codar", BaseURL: "https://api.claw.speedai.com/v1", Source: "cmd/server/main.go:1131"},
 	}
 }
 

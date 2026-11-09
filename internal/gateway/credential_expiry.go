@@ -26,6 +26,11 @@
 // 核心全程只搬不读，加第八个扩展点仍不改核心。
 package gateway
 
+import (
+	"strings"
+	"time"
+)
+
 // CredentialExpiryExt 上游自报「这份凭证什么时候过期」。
 //
 // # 为什么返回 (int64, bool) 而不是 time.Time
@@ -113,4 +118,41 @@ type CredentialLifetimeExt interface {
 	// 拿不准时必须返回 false：把"不确定"报成"永久"会让用户以为
 	// 手里的号永远可用，而它下一条请求就可能失效。
 	NeverExpires(cred Credential) bool
+}
+
+// ExpiryFromMillisOrJWT 报告凭证的到期时刻（Unix **秒**）：先看毫秒字段，再看 JWT。
+//
+// # 实测依据（T-334 全盘扫描）
+//
+// cline / lobsterai / qoder / raccoon 四家的 TokenExpiry **代码同构**（各约 19 行），
+// 差异只有一处：从哪个字段读毫秒（cline 是 `a.ExpireTime`，其余是 `a.ExpiresAtMS()`）。
+// 逻辑本身逐句相同 ⇒ 抽成**传值**形式（不是传回调）：各家仍是两行调用，不引入间接层，
+// 同时把最容易写错的两处统一了：
+//
+//	① 毫秒 vs 秒：`ExpiresAt` 常见是 Unix 秒，某些上游落盘写的是毫秒 ——
+//	   按毫秒读会把 2027 年的号全判成"已过期"（本仓实际踩过）
+//	② 兜底顺序：必须先看显式字段、再解 JWT；反过来会让显式值被忽略
+func ExpiryFromMillisOrJWT(msField int64, accessToken string) (int64, bool) {
+	if msField > 0 {
+		return time.UnixMilli(msField).Unix(), true
+	}
+	if t := ParseJWTTimes(accessToken); t.ExpiresAt > 0 {
+		return t.ExpiresAt, true
+	}
+	return 0, false
+}
+
+// ContainsAny 报告 s 是否含 needles 里的任意一个子串（空 needles 恒 false）。
+//
+// # 实测依据（T-334）
+//
+// cline / lobsterai / qoder / raccoon 四家的 errors.go 里各有一份**逐字相同**的
+// containsAny（8 行）。它是纯字符串工具、不含任何上游语义 ⇒ 收到这里。
+func ContainsAny(s string, needles []string) bool {
+	for _, n := range needles {
+		if strings.Contains(s, n) {
+			return true
+		}
+	}
+	return false
 }

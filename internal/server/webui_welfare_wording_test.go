@@ -65,7 +65,7 @@ func jsFunctionBody(t *testing.T, src, head string) string {
 // 红线管的是**渲染给用户看的那个值**，不是说明文字。所以判据只能落在
 // 文本节点上：抽出来，要求每一个都在白名单里。
 func TestWebUIWelfareCellOnlyRendersAllowedValues(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 	if strings.TrimSpace(src) == "" {
 		t.Fatal("webui.html 读到了空内容 —— 守卫失效（fail-open）")
 	}
@@ -113,7 +113,7 @@ func TestWebUIWelfareCellOnlyRendersAllowedValues(t *testing.T) {
 // 它是整个红线的最后一道闸：三态都匹配不上时必须落到 `—`，
 // **不许**退化成某个默认的肯定结论（例如 `已领取`）。
 func TestWebUIWelfareFallbackIsTheDash(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 	body := jsFunctionBody(t, src, "function welfareCellHTML(")
 	code := stripJSCommentsForNames(body)
 

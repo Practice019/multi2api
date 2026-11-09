@@ -42,6 +42,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // filePrefix 凭证文件名前缀。LoadDir 按 `loomy*.json` 通配。
@@ -315,20 +317,14 @@ func sanitizeFilePart(s string) string {
 	return out
 }
 
-// shortUID 取 UID 前 8 位供日志与展示名使用（与仓库其它地方的口径一致）。
+// shortUID 日志用的短 uid（T-403 起改用**共享实现**）。
 //
-// ⚠ 按**字符**截断，不按字节：UID 来自上游的 userid 字段（形态由上游决定），
-// 一旦它不是纯 ASCII，按字节切会把一个多字节字符劈成两半 ——
-// 日志里出现 `\ufffd`（本项目在 handler.go 的 contentBlockMsg 上踩过同一个坑）。
-// 现在它还被用在额度那条日志里（短 uid 对不上时要打印两个 uid），
-// 拼错一个汉字不会影响功能，但会让排错的人以为数据坏了。
-func shortUID(uid string) string {
-	rs := []rune(uid)
-	if len(rs) <= 8 {
-		return uid
-	}
-	return string(rs[:8])
-}
+// ⚠ 这是**别名**不是复制：实现只有 `gateway.ShortUID` 一处。
+// T-402 我在这里改成了"前 4 位 + … + 尾部 8 位"；T-403 把它抽成共享函数并删掉本份实现
+// （同一缺陷在 7 个包里有 7 份复制品 —— 修一处漏七处正是复制品的代价）。
+//
+// 本包 uid 形态：`le260915174611208423` 这类「日期+时分秒+序列号」，区分位在尾部。
+var shortUID = gateway.ShortUID
 
 // firstNonEmpty 返回第一个非空（去空白后）的字符串。
 func firstNonEmpty(vals ...string) string {

@@ -141,7 +141,10 @@
 
   "server": {
     // 请求体上限（MB）。长上下文对话可能很大，太小会 413。
-    "max_body_mb": 8
+    // 默认 64 —— 一张 4K 截图 base64 后约 5–8 MB，多图/长上下文很容易越界，
+    // 而 8 MB 时用户只会看到 413、看不出是自己图太大。
+    // 写**负数**（如 -1）= 不限制：上限交给反代/防火墙。
+    "max_body_mb": 64
   },
 
   "login": {
@@ -248,6 +251,9 @@
   //   "minimax":        { "auth_dir": "./auths/minimax",
   //                       "account_base": "",
   //                       "api_base": "" }
+  //   "codar":          { "auth_dir": "./auths/codar",
+  //                       "api_base": "",   // 留空 = https://api.claw.speedai.com/v1
+  //                       "pool_accounts": true }
 
   //   // MonkeyCode（长亭科技）—— 唯一需要**请求签名**的上游。
   //   //

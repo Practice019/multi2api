@@ -56,9 +56,22 @@ func TestLogStatusClickFilters(t *testing.T) {
 	if body == "" {
 		t.Fatal("切不到 setLogStatus 函数体")
 	}
-	if !strings.Contains(body, "renderLogs(logEntries)") {
-		t.Error("setLogStatus 没有重绘表格（应调 renderLogs(logEntries)）—— " +
-			"卡片会亮着但下面的行没变，比不做筛选更让人困惑")
+	// ★ T-396a 更新：筛选改成**服务端**参数 ⇒ 判据从"重绘表格"变成"重新请求 + 回第 1 页"。
+	// 原意图不变（点了卡片下面的行必须真的变），只是实现路径变了：
+	// 本地缓冲只有当前页 30 条，只重绘会让用户以为"全库只有这几个 200"。
+	// ★ T-400：调用形态变成 loadLogHistory({force:true}) ⇒ 判据允许参数，但必须同时断言 force。
+	if !strings.Contains(body, "force: true") && !strings.Contains(body, "force:true") {
+		t.Error("setLogStatus 的请求没有传 force —— 换筛选是用户意图，必须穿透 30 秒复用窗口")
+	}
+	if !strings.Contains(body, "loadLogHistory(") {
+		t.Error("setLogStatus 没有重新请求（应调 loadLogHistory）—— 筛选是服务端参数，" +
+			"只重绘本地缓冲会把「本页里的 200」当成「全库的 200」")
+	}
+	if !strings.Contains(body, "logPage.offset = 0") {
+		t.Error("setLogStatus 没有把 offset 归零 —— 换筛选后可能落在越界页（空表）")
+	}
+	if strings.Contains(body, "renderLogs(logEntries)") {
+		t.Error("setLogStatus 仍是本地重绘（renderLogs(logEntries)）—— 应改为重新请求")
 	}
 }
 
@@ -67,7 +80,7 @@ func TestLogStatusClickFilters(t *testing.T) {
 // .chip 同时被模型面板用着（`.chips .chip`）。一条全局 `.chip.on` 会在
 // 那边将来加 on 类时莫名变色 —— 一处样式影响两个面板，这种 bug 极难查。
 func TestLogStatusBarIsScopedInCSS(t *testing.T) {
-	src := readWebUI(t)
+	src := readFrontendCSS(t)
 	if !strings.Contains(src, "#logStatusBar .chip.on{") {
 		t.Error("缺少 #logStatusBar .chip.on 的**限定作用域**样式 —— " +
 			"全局 .chip.on 会波及模型面板")
@@ -91,9 +104,11 @@ func TestLogStatusBarStatesItsScope(t *testing.T) {
 	//
 	//   渲染行的形态是：+ `本页 ${pageLen} 条 · 共 ${total} 条 · 卡片只统计当前页</span>`;
 	//   取「反引号 + 本页」作为定位锚点，避免命中注释。
-	if !strings.Contains(src, "`本页 ${pageLen} 条 · 共 ${total} 条 · 卡片只统计当前页") {
-		t.Error("卡片条没有**渲染**「本页 N 条 · 共 M 条 · 卡片只统计当前页」—— " +
-			"用户会把本页的状态码条数当成全局结论")
+	// ★ T-396a 更新：数字来源从"本页统计"改成**服务端全库** ⇒ 渲染文案随之改变。
+	// 原意图不变（数字必须自己说清范围，否则用户会当成全局结论）。
+	if !strings.Contains(src, "`本页 ${pageLen} 条 · 当前筛选 ${serverTotalFiltered} 条 · 全库 ${serverTotalAll} 条") {
+		t.Error("卡片条没有**渲染**「本页 N 条 · 当前筛选 M 条 · 全库 K 条」—— " +
+			"三个数字各表一件事（本页渲染行数 / 筛选后总数 / 全库总数），少了范围说明就会被当成全局结论")
 	}
 }
 
@@ -108,8 +123,10 @@ func TestLogStatusPageLenIsRenderedRows(t *testing.T) {
 		t.Fatal("切不到 renderLogStatusBar 函数体")
 	}
 	// 参数名必须是 pageLen（渲染行数），不能是每页设置值。
-	if !strings.Contains(src, "function renderLogStatusBar(counts, pageLen)") {
-		t.Error("renderLogStatusBar 的第二个参数不是 pageLen —— " +
-			"用每页设置值会让末页的「本页 N 条」与实际行数不符")
+	// ★ T-396a 更新：签名变成 (serverCounts, serverTotalAll, serverTotalFiltered, pageLen)，
+	// pageLen 仍是**最后一个**参数 —— 原意图不变（必须是渲染行数，不能是每页设置值）。
+	if !strings.Contains(src, "function renderLogStatusBar(serverCounts, serverTotalAll, serverTotalFiltered, pageLen)") {
+		t.Error("renderLogStatusBar 的签名不对 —— 应为 (serverCounts, serverTotalAll, serverTotalFiltered, pageLen)，" +
+			"其中末位的 pageLen 必须是渲染行数（用每页设置值会让末页的「本页 N 条」与实际行数不符）")
 	}
 }

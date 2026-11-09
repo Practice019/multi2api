@@ -31,10 +31,31 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"sync"
 
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/pool"
 )
+
+// quotaRefreshConcurrency 额度刷新的并发上限（★ T-436）。
+//
+// # 为什么是 20（用户 2026-11-09 定）
+//
+//	「我希望统一设置并发为20。因为我现在感觉特别慢。」
+//
+// 改造前完全串行：106 个账号 ≈ 106 秒（每个约 1 秒）⇒ 现在 ≈ 6 批 ≈ 6 秒。
+//
+// # 为什么不能再高
+//
+// 并发 20 = 同时打上游 20 个请求。loomy 有 45 个号、codar 面板明确写着
+// 「上游已有风控记录，请低频使用」⇒ 20 是"明显变快"与"不给上游压力"之间的折中。
+//
+// ⚠ 三条路径共用 refreshQuotas（手动单上游 / 手动全部 / 后台自动分层刷新）
+//
+//	⇒ 这个值同时决定了三者的并发上界。
+//
+// ⚠ 它必须住在**产品文件**里：放测试文件里产品就引用不到（T-435/T-436 各栽过一次）。
+const quotaRefreshConcurrency = 20
 
 // quotaRefresher 一次额度刷新的统计（供端点回执与测试断言）。
 type quotaRefresher struct {
@@ -103,6 +124,16 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 	// 不去重就会打 50 行同样的日志 —— 真正的故障（failed 的堆栈）
 	// 会被自己的噪音淹没。日志的价值在"有无"，不在"条数"。
 	loggedSkip := map[string]bool{}
+	// ── 第一阶段（**串行**）：筛出"该真刷"的号 ─────────────────────────────
+	//
+	// 这一段保持原样：跳过计数、按 provider 去重的日志、Providers 的收集
+	// 全都依赖**遍历顺序** ⇒ 放到并发里会让计数与日志顺序变味。
+	// ⚠ 这也保证 `out.Skipped` / `out.Providers` 与改造前**逐字一致**。
+	type quotaJob struct {
+		uid string
+		ext gateway.QuotaExt
+	}
+	var todo []quotaJob
 	for _, uid := range uids {
 		st, ok := h.cfg.Pool.Status(uid)
 		if !ok {
@@ -134,18 +165,58 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 			seen[provider] = true
 			out.Providers = append(out.Providers, provider)
 		}
+		todo = append(todo, quotaJob{uid: uid, ext: ext})
+	}
 
-		qv, ok := h.safeRefreshQuota(ext, uid)
-		if !ok {
+	// ── 第二阶段（**并发**）：只做"问上游"这一件事 ────────────────────────
+	//
+	// # 为什么是 worker 池 + 信号量，而不是给每个 uid 起一个 goroutine
+	//
+	// 106 个号 = 106 个 goroutine 同时打上游 ⇒ 没有上限 ⇒ 那是风控事故。
+	// 信号量把"同时在飞"钉在 quotaRefreshConcurrency（20）。
+	//
+	// # 为什么只并发"取数"，聚合留在串行
+	//
+	// 循环体里除了发请求，还有 out.Failed/Unknown/Updated 计数、SetQuota 写池 ——
+	// 那些都不是并发安全的。把它们留在主 goroutine 里做 ⇒ **无锁、无竞态**，
+	// 而且计数结果与串行版**逐字一致**（顺序都没变）。
+	//
+	// ⚠ panic 隔离仍由 safeRefreshQuota 的 recover 保证：它在 **worker 内**被调用
+	//   ⇒ 某个上游违约只让**那一个**号算 failed，其余照常（这正是它存在的理由）。
+	type quotaRes struct {
+		qv gateway.QuotaView
+		ok bool
+	}
+	results := make([]quotaRes, len(todo)) // 按**下标**写回 ⇒ 每个槽只被一个 goroutine 写
+	sem := make(chan struct{}, quotaRefreshConcurrency)
+	var wg sync.WaitGroup
+	for i := range todo {
+		wg.Add(1)
+		sem <- struct{}{} // ★ 上限：同时在飞 ≤ 20
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			qv, ok := h.safeRefreshQuota(todo[i].ext, todo[i].uid)
+			results[i] = quotaRes{qv: qv, ok: ok}
+		}(i)
+	}
+	wg.Wait()
+
+	// ── 第三阶段（**串行**）：聚合计数 + 写回 ────────────────────────────
+	//
+	// 与改造前的循环体逐字等价（同样的顺序、同样的四路分支）。
+	for i := range todo {
+		r := results[i]
+		if !r.ok {
 			out.Failed++
 			continue
 		}
-		if !qv.HasData {
+		if !r.qv.HasData {
 			// 上游如实回答"我不知道" —— **不写池**（写 0 就是造假）。
 			out.Unknown++
 			continue
 		}
-		h.cfg.Pool.SetQuota(uid, toPoolQuota(qv))
+		h.cfg.Pool.SetQuota(todo[i].uid, toPoolQuota(r.qv))
 		out.Updated++
 	}
 

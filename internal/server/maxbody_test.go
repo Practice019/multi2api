@@ -82,7 +82,7 @@ func TestChatBodyOverLimitReturns413(t *testing.T) {
 	}
 }
 
-// TestChatBodyUnderLimitPasses 未超限的请求不受影响（默认值与改造前同为 8 MiB）。
+// TestChatBodyUnderLimitPasses 未超限的请求不受影响。
 func TestChatBodyUnderLimitPasses(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, sseOK, true
@@ -104,16 +104,46 @@ func TestChatBodyUnderLimitPasses(t *testing.T) {
 	}
 }
 
-// TestMaxBodyMBDefaultsTo8 未配置（<=0）时回落 8 MiB —— 与改造前的硬编码一致。
+// TestMaxBodyMBDefaultsTo64 未配置（=0）时回落 **64 MiB**（T-386 从 8 提高）。
 //
-// 这条保证"改动的意图是改报错方式，不是改接受能力"：
-// 既有部署不配该项时，能收的请求大小逐字节不变。
-func TestMaxBodyMBDefaultsTo8(t *testing.T) {
+// 为什么改：8 MiB 在真实使用里太小 —— 一张 4K 截图 base64 后约 5–8 MiB，
+// 多图/长上下文很容易撞线，而用户看不出是自己图太大，只会怀疑服务。
+func TestMaxBodyMBDefaultsTo64(t *testing.T) {
 	h := NewHandler(Config{Pool: testPoolWith(), Upstream: newFakeUpstream(t, nil)})
-	if h.cfg.MaxBodyMB != 8 {
-		t.Errorf("MaxBodyMB 缺省应为 8，得到 %d", h.cfg.MaxBodyMB)
+	if h.cfg.MaxBodyMB != 64 {
+		t.Errorf("MaxBodyMB 缺省应为 64，得到 %d", h.cfg.MaxBodyMB)
 	}
-	if defaultMaxBodyMB != 8 {
-		t.Errorf("defaultMaxBodyMB=%d，必须与改造前硬编码的 8<<20 一致", defaultMaxBodyMB)
+	if defaultMaxBodyMB != 64 {
+		t.Errorf("defaultMaxBodyMB=%d，应为 64", defaultMaxBodyMB)
+	}
+}
+
+// TestMaxBodyMBNegativeMeansUnlimited 负数 ⇒ **不限制**（T-386）。
+//
+// 为什么需要这条路：用户明确要求"不要有这个限制"，但把 0 当不限制会让
+// "未配置"也变成无上限（默认配置就不该挡不住误伤自己）。
+// ⇒ 用负数作为**显式**的"关掉上限"，0 仍是"用默认值"。
+func TestMaxBodyMBNegativeMeansUnlimited(t *testing.T) {
+	h := NewHandler(Config{Pool: testPoolWith(), Upstream: newFakeUpstream(t, nil), MaxBodyMB: -1})
+	if h.cfg.MaxBodyMB != maxBodyUnlimited {
+		t.Errorf("负数应映射成 maxBodyUnlimited=%d，得到 %d", maxBodyUnlimited, h.cfg.MaxBodyMB)
+	}
+	if got, want := maxBodyBytes(h.cfg.MaxBodyMB), int64(64)<<20; got <= want {
+		t.Errorf("不限制时的字节上限 %d 应远大于默认的 %d", got, want)
+	}
+	// 不限制时，一个 20 MiB 的 body 也必须放行（默认 8 MiB 会直接 413）
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) { return 200, sseOK, true })
+	h2 := NewHandler(Config{
+		Pool:      testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:  up,
+		MaxBodyMB: -1,
+	})
+	pad := strings.Repeat(" ", 20<<20)
+	body := `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}],"pad":"` + pad + `"}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h2.ServeHTTP(rec, req)
+	if rec.Code == 413 {
+		t.Errorf("不限制时 20 MiB 的请求不该被 413 挡下，body=%.200s", rec.Body.String())
 	}
 }

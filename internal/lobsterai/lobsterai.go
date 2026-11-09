@@ -33,6 +33,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // providerID 上游标识。
@@ -414,10 +416,6 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// shortUID 日志用的短 uid。
-func shortUID(uid string) string {
-	if len(uid) <= 8 {
-		return uid
-	}
-	return uid[:8] + "…"
-}
+// shortUID 日志用的短 uid（T-403 起改用**共享实现**）。
+// ⚠ 别名不是复制：实现只有 gateway.ShortUID 一处。
+var shortUID = gateway.ShortUID

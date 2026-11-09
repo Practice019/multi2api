@@ -2884,11 +2884,72 @@ func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	items, total, err := h.cfg.Ring.Sink().Page(offset, limit)
+	// ★ T-393：状态码筛选（服务端）。
+	//
+	// # 为什么必须服务端做
+	// 前端原来只能在内存里过滤**当前页 30 条** —— 用户翻到第 2 页点「200」，
+	// 看到的只是第 2 页里的 200，chip 上的数字也是"本页数量"。日志有 5 万条，
+	// 前端不可能全拉下来筛。
+	//
+	// # 参数语义（与前端冻结的契约）
+	//
+	//	status 缺省 / "" / "all" ⇒ 不筛（**与改动前逐字一致**）
+	//	status=<正整数>         ⇒ 只返回 Status == 该值的条目
+	//	非法值（负数/非数字）     ⇒ 当作不筛（**不报 400**：前端可能传空串或脏值，
+	//	                          一个 400 会把整个面板变成错误条，代价大于收益）
+	statusRaw := strings.TrimSpace(r.URL.Query().Get("status"))
+	wantStatus, filtered := 0, false
+	if statusRaw != "" && statusRaw != "all" {
+		if v, e := strconv.Atoi(statusRaw); e == nil && v > 0 {
+			wantStatus, filtered = v, true
+		}
+	}
+
+	// 取全量后自己切片。
+	//
+	// ⚠ 为什么不用 Page(offset, limit)：它**先切页再交给调用方**，筛掉的条目会白占位置
+	//   —— 「200 共 80 条」会被切成一页 30 条里的 200（可能只有 18 条），total 也成了全库数。
+	// ⚠ 为什么不用 Page(0, 1<<20)：limit 会被静默夹到 MaxPageSize（statsItems 的注释记过这个坑）。
+	// ⇒ LoadAll 是内部聚合旁路，不受分页上界约束：一次读出、一次过滤、一次切片，文件只扫一遍。
+	// ⚠ 顺序：LoadAll 内部已把 append 顺序倒成「最新在前」，与 Page/LoadRecent 的契约一致
+	//   ⇒ 切片后**不要**再反转，否则前端 normalizeDesc 会二次排序、翻页边界错乱。
+	all, err := h.cfg.Ring.Sink().LoadAll()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取日志文件失败: "+err.Error())
 		return
 	}
+	allTotal := len(all)
+	// ★ T-394：全库状态计数（与 total_all 同一次遍历 ⇒ 零额外 IO）。
+	//
+	// ⚠ 必须与 `?status=X` 的 total **逐字对齐**：用户点 chip「429 : 1200」，
+	//   进去必须正好 1200 条；不一致就是必现的信任崩塌。
+	//   （两者都从同一个 all 算出来 ⇒ 对齐是构造保证的，不是巧合 —— 测试仍然钉住它。）
+	// ⚠ 不排成数组 [{status,count}]：map 更简单，前端 Object.entries(counts) 就能遍历；
+	//   JSON 序列化后键是字符串（{"200":80,"429":40}），前端照此解析。
+	counts := map[int]int{}
+	for _, e := range all {
+		counts[e.Status]++
+	}
+	items := all
+	if filtered {
+		kept := make([]logbuf.Entry, 0, len(all))
+		for _, e := range all {
+			if e.Status == wantStatus {
+				kept = append(kept, e)
+			}
+		}
+		items = kept
+	}
+	total := len(items)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	items = items[offset:end]
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":   items,
 		"total":   total,
@@ -2896,6 +2957,10 @@ func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
 		"limit":   limit,
 		"enabled": true,
 		"file":    h.requestLogStats(),
+		// ★ 新增两个字段（不改已有字段名）
+		"total_all": allTotal, // 未筛选的全库总数（前端可显示「筛选 200：1234 条（全库 50779 条）」）
+		"counts":    counts,   // ★ T-394：全库各状态计数 {"200":80,"429":40}（chip 数字的数据源）
+		"filtered":  filtered, // 本次是否应用了筛选
 	})
 }
 

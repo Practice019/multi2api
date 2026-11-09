@@ -14,14 +14,13 @@
 package server
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
 
 func readWebUIForCtx(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile("webui.html")
+	raw, err := readFrontendSource(t)
 	if err != nil {
 		t.Fatalf("读 webui.html 失败: %v", err)
 	}

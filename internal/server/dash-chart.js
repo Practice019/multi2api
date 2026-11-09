@@ -138,8 +138,14 @@ function dcRects(svg, rs, o) {
 
 // dcLine 画折线（可带数据点圆）。
 //
-// pts = [[x, y], …]；o = {stroke, width, opacity, dots, dotR, dotFill}
+// pts = [[x, y], …]；o = {stroke, width, opacity, dots, dotR, dotFill, dash}
 // ⚠ 少于 2 点**不画线**（一个点连不成线），但仍可画圆点 —— 所以 dots 单独判。
+// ★ T-419 新增 `dash`（值形如 '4 3'）⇒ 输出 `stroke-dasharray`。
+//   为什么需要：趋势图里「无请求的整点」改成**虚线插值连线**后，空档那一段必须画虚线
+//   —— 虚线的既有语义就是"这是推测/插值，不是真实值"。
+//   ⚠ 没有这个选项时，调用方传 dash 会被**静默忽略**（传了 dash 画出来还是实线）——
+//     这是 T-419 实测踩过的坑，所以它必须落在**源文件**里（本文件是唯一真相，
+//     webui.html 里那段是 tools/dash_chart_sync.js 生成的，手改会被覆盖）。
 function dcLine(svg, pts, o) {
   var opt = o || {};
   var list = pts || [];
@@ -152,6 +158,7 @@ function dcLine(svg, pts, o) {
     svg.push('<path d="' + d.join(' ') + '" fill="none" stroke="' + stroke +
       '" stroke-width="' + (opt.width || 1.6) + '"' +
       (opt.opacity == null ? '' : ' opacity="' + opt.opacity + '"') +
+      (opt.dash ? ' stroke-dasharray="' + opt.dash + '"' : '') +
       ' stroke-linejoin="round" stroke-linecap="round"/>');
   }
   if (opt.dots) {

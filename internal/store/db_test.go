@@ -56,7 +56,7 @@ func openTemp(t *testing.T) string {
 // 登记进 Tables()（那就绕过了「库里有哪些表」这份唯一清单）。
 //
 // 名字里**刻意不带数字**（原 TestMigrateCreates12Tables）：表集合会长大
-// （A1/A2 起 13 张，见下面的 wantTableCount），把数字写进函数名会让每份报告
+// （A1/A2 起 13 张、T-386 起 14 张，见下面的 wantTableCount），把数字写进函数名会让每份报告
 // 都带一个过期的契约值。
 func TestMigrateCreatesExpectedTables(t *testing.T) {
 	openTemp(t)
@@ -71,8 +71,8 @@ func TestMigrateCreatesExpectedTables(t *testing.T) {
 			"（多出来的表 ⇒ 有人建表却没登记；少了的表 ⇒ 迁移漏了一张）", got, want)
 	}
 	// 表数的**显式契约**（不是从 Tables() 推出来的循环断言）：改表集合必须改这里。
-	// Wave A1/A2 起 = 13（A2 的 tokens 表）。
-	const wantTableCount = 13
+	// Wave A1/A2 起 = 13（A2 的 tokens 表）；T-386 起 = 14（+ log_daily 日聚合）。
+	const wantTableCount = 14
 	if len(got) != wantTableCount {
 		t.Fatalf("表数 = %d，契约要求 %d（新增表要同时改 allModels()、Tables() 与这里）", len(got), wantTableCount)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/logbuf"
 )
 
 // Upstream 一个"有签到类每日动作"的上游需要提供的事实。
@@ -59,6 +60,16 @@ type Account struct {
 	UID string
 	// Secret 上游私有的凭证值（驱动不解释它）。
 	Secret any
+	// Disabled 该账号已被禁用（模型调用失败 / 签到凭据失效 / 人工）。
+	//
+	// # 为什么由上游侧填，而不是驱动去问 Pool（T-431）
+	//
+	// 本包是**共用驱动**，不 import pool（pool → gateway，会成环，见 driver 文件头）。
+	// 而各上游的 `Accounts()` 本来就要列账号 —— 顺手带上"它禁用了吗"是零成本的
+	//（它已经从 Pool 拿到账号了）⇒ 驱动只读这个布尔，不关心是谁禁的、为什么禁。
+	//
+	// ⚠ 语义：`true` = **一次上游请求都不要发给它**（L1 梯级"别做这件事"）。
+	Disabled bool
 }
 
 // Descriptor 本上游签到动作的**展示与路由**信息。
@@ -100,6 +111,8 @@ type Driver struct {
 	interval time.Duration
 	// enabled 是否注册自动签到任务（false 时只保留手动按钮）。
 	enabled bool
+	// onCredFail 凭据类签到失败的回调（nil = 不处理）。见 Options.OnCredentialFail。
+	onCredFail func(uid string, err error)
 }
 
 // Options 构造参数。
@@ -114,6 +127,20 @@ type Options struct {
 	Interval time.Duration
 	// Enabled 是否启用自动签到（与 Interval 分开：可以"有按钮但不自动"）。
 	Enabled bool
+	// OnCredentialFail 签到**凭据类**失败时的回调（可选；nil = 不处理）。
+	//
+	// # 为什么用回调而不是直接调 pool（T-431）
+	//
+	// 依赖方向：本包是共用驱动，**不能** import pool（pool → gateway，会成环）。
+	// 而上游侧同时认识本驱动与 pool ⇒ 把"禁用"这件事交回上游侧：
+	//
+	//	OnCredentialFail: func(uid string, err error) {
+	//	    p.pool.RecordAutoDisableFailure(uid, "签到凭据失效: "+err.Error())
+	//	}
+	//
+	// ⚠ 只在**凭据类**失败时触发（见 CredentialError）。网络抖动/上游维护**不触发** ——
+	//   那会把好号踢下线（user 报障的反面）。
+	OnCredentialFail func(uid string, err error)
 }
 
 // New 构造驱动。
@@ -122,11 +149,12 @@ type Options struct {
 // 传值可以避免调用方事后改动影响已构造的驱动。
 func New(up Upstream, desc Descriptor, opt Options) *Driver {
 	return &Driver{
-		up:       up,
-		desc:     desc,
-		log:      opt.Log,
-		interval: opt.Interval,
-		enabled:  opt.Enabled,
+		up:         up,
+		desc:       desc,
+		log:        opt.Log,
+		interval:   opt.Interval,
+		enabled:    opt.Enabled,
+		onCredFail: opt.OnCredentialFail,
 	}
 }
 
@@ -195,6 +223,8 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 		// 记 fail 让他看得见原因。
 		d.record(acc.UID, checkinlog.StatusFail, shortErr(err), 0, trigger)
 		log.Printf("%s: 签到状态查询失败 uid=%s: %v", d.desc.ID, shortUID(acc.UID), err)
+		// ★ T-431：只有**凭据类**错误才上报禁用（网络抖动不报 —— 那会误杀好号）。
+		d.reportCredentialFail(acc.UID, err)
 		return Result{UID: acc.UID, Status: checkinlog.StatusFail, Detail: shortErr(err)}
 	}
 	if !enabled {
@@ -214,6 +244,8 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 	if cerr != nil {
 		d.record(acc.UID, checkinlog.StatusFail, shortErr(cerr), 0, trigger)
 		log.Printf("%s: 签到失败 uid=%s: %v", d.desc.ID, shortUID(acc.UID), cerr)
+		// ★ T-431：同上 —— 只上报凭据类（lobsterai 实测就是这里的 401「请先登录」）。
+		d.reportCredentialFail(acc.UID, cerr)
 		return Result{
 			UID: acc.UID, Status: checkinlog.StatusFail, Detail: shortErr(cerr),
 			// ⚠ actionRequired 要跟着错误一起出去：qoder 那条
@@ -242,8 +274,21 @@ func (d *Driver) RunAll(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%s: 列账号失败: %w", d.desc.ID, err)
 	}
+	// 被跳过的禁用账号数（只为打一条汇总；不记 checkinlog —— 见循环里的注释）。
+	skippedDisabled := 0
 	for _, acc := range accounts {
 		if acc.UID == "" {
+			continue
+		}
+		// ★ T-431（L1 梯级"别做这件事"）：**已禁用的账号连 Status 都不调**。
+		//
+		// 它已经不可用了（凭据失效 / 模型调用连续失败 / 人工禁用）⇒
+		// 打上游只会白喂风控，而且会让签到日志里每天一堆红把真正要看的失败淹掉。
+		//
+		// ⚠ 不记 checkinlog：日志是"历史事实"的账本，不是"我今天跳过了谁"的流水。
+		//   跳过是**状态**，pool 里查得到（IsAutoDisabled），不在这里记。
+		if acc.Disabled {
+			skippedDisabled++
 			continue
 		}
 		// 每个账号一次 ctx.Err() 检查：全量任务可能扫几十个号，
@@ -252,6 +297,11 @@ func (d *Driver) RunAll(ctx context.Context) error {
 			return ctx.Err()
 		}
 		d.CheckinOne(ctx, acc, "sched")
+	}
+	// 有跳过就打一条汇总 —— 否则用户看不出"为什么这个号今天没签"
+	//（静默跳过是最难查的一类问题：界面上只是"没签到"，看不出原因）。
+	if skippedDisabled > 0 {
+		log.Printf("%s: 本上游跳过 %d 个已禁用账号（不发任何上游请求）", d.desc.ID, skippedDisabled)
 	}
 	return nil
 }
@@ -400,12 +450,12 @@ func (d *Driver) record(uid, status, detail string, credits int64, trigger strin
 // errMissingUID uid 两个来源都缺时的错误（query 与 body 都没给）。
 var errMissingUID = errors.New("缺少 uid（query ?uid= 或 JSON body 任选一个）")
 
-func shortUID(uid string) string {
-	if len(uid) <= 8 {
-		return uid
-	}
-	return uid[:8] + "…"
-}
+// shortUID 日志用的短 uid（T-403 起改用**共享实现**）。
+//
+// ⚠ 别名不是复制：实现只有 `logbuf.ShortUID` 一处。
+// ⚠ 走 logbuf 而**不是** gateway：本包有 `TestNoGatewayImport` —— 本包必须与契约层解耦
+// （只借一个日志格式化函数，不该为此 import gateway；而且架构测试会把 import gateway 的包判成上游）。
+var shortUID = logbuf.ShortUID
 
 func shortErr(err error) string {
 	if err == nil {

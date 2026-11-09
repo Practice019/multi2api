@@ -1,0 +1,13526 @@
+
+(() => {
+  const $ = id => document.getElementById(id);
+  // ---- 身份模型（2026-10-19，T7 重做）------------------------------------
+  //
+  // # 本页面里**没有任何凭据**
+  //
+  // 服务端不再往这个页面注入 api_key / admin_token（见 internal/server/webui.go
+  // 的 renderUI）；而且**未登录时根本不会拿到这个页面** —— 那时服务端给的是登录页。
+  // 于是"页面里有没有钥匙"这个问题不再存在，取而代之的是一个请求：
+  //
+  //	GET /admin/auth/session   →  200 = 知道我是谁 / 401 = 没登录（跳登录页）
+  //
+  // 身份的载体是服务端下发的 **HttpOnly 会话 cookie**（wb2api_sid）：同源 fetch
+  // 自动携带，JS 读不到（XSS 偷不走）、跨站带不上（SameSite 挡 CSRF）。
+  //
+  // ⚠ 本次删掉的两样东西，都不是清理癖：
+  //
+  //  1. `INJECTED` / `ADMIN_INJECTED` 两个哨兵 + `ADMIN_TOKEN` 变量。
+  //     它们配合"服务端注入凭据"的旧模型工作，而现在服务端**不再替换**那两个
+  //     占位符 ⇒ 哨兵永远等于占位符 ⇒ 旧判据 `if (ADMIN_INJECTED || INJECTED)`
+  //     恒为假 ⇒ **已登录的人也会看到「本次访问未获授权」**。
+  //
+  //  2. `localStorage('wb2api.key')`。那是用户报障 ② 的来源：令牌轮换后页面
+  //     还揣着旧值，表现成"必须重启才生效"。现在磁盘上不存任何凭据 —— 代价是
+  //     刷新页面后要重新粘一次对话密钥（只影响 /v1 测试功能）。
+  let KEY = '';   // 仅内存：用户为 /v1 功能（对话测试、模型目录回退）手粘的 api_key
+  // ★ T-375：CONSOLE_KEY 只给 /v1 调用点用（**不写 KEY** —— 全局 KEY 非空会让每个控制台请求都带 Bearer，压掉 cookie 身份 ⇒ 401 → 重载 → 自毁）。
+  let CONSOLE_KEY = '';
+  let models = [];
+  // 管理台状态
+  let share = [];          // 最近一次 /admin/accounts 的账号视图（操作按钮按 uid 回查）
+  let taskTimer = null;    // 全量任务轮询
+  let loginPoll = null;    // 添加账号的轮询句柄
+  let loginDeadline = 0;
+  // loginProvider 本次登录针对哪个上游。用于弹窗文案与结果提示，
+  // **并且直接喂给 `/admin/login/poll` 的 provider 字段**。
+  //
+  // ⚠ T-235：它必须**在 start 成功之后被赋值**（见 addAccount → doStart）。
+  //   曾经它声明了却从没被赋值（恒 `''`）⇒ poll 传出去的 provider 也是空 ⇒
+  //   后端按"不带 provider"走**默认上游**的 OAuth 去认本上游的 state ⇒ 恒定 410
+  //   `oauth: state 不存在或已超期，请重新发起授权`（用户实测报障）。
+  //   症状极具误导性：弹窗标题对、跳转的授权页也对（因为 start 带了 provider），
+  //   **只有轮询走错了上游**。
+  //
+  //   每次打开弹窗会先清空（见 addAccount 开头），避免上一次的值串到这一次。
+  let loginProvider = '';
+  let keyRevealed = false; // API 面板里 Key 是否明文显示
+
+  // ★ T-464：这里原来有 T-458 加的 `credInfo`（系统凭据页「显示/复制」用的内存表）—— **已移除**。
+  // 原因见下面 `loadAPIKeys()` 里的墓碑注释：那个面板（`data-key="apikeys"`）已被 hidden、
+  // 且不在导航里，用户永远看不到 ⇒ 那是死代码。同样的能力在令牌页（`webui-tokens.html`）**唯一实现**。
+
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const fmtTime = t => {
+    if (!t || t.startsWith('0001-')) return '—';
+    const d = new Date(t);
+    if (isNaN(d)) return '—';
+    const s = Math.floor((Date.now() - d) / 1000);
+    if (s < 60) return s + 's 前';
+    if (s < 3600) return Math.floor(s / 60) + 'm 前';
+    if (s < 86400) return Math.floor(s / 3600) + 'h 前';
+    return d.toLocaleString('zh-CN', {hour12:false});
+  };
+
+  // ---------------------------------------------------------------- T5：Token 剩余时间
+  //
+  // # 唯一的 Token 时长渲染器（所有上游共用）
+  //
+  // 用户的要求（原话）：
+  //
+  //   token 有效时间用什么方式显示，**统一剩余多久、剩余时间吧，都统一一下**
+  //   所有的上游都统一一下，统一显示统一的格式
+  //
+  // 改造前 `accountRow` 里那行是：
+  //
+  //   const d = a.token_expire_sec || 0;
+  //   tok = `<span class="pill ${cls}">${d < 0 ? '已过期' : Math.floor(d / 86400) + 'd'}</span>`
+  //
+  // 三个缺陷，每一个都真实发生过：
+  //
+  //  1. `|| 0` 把**未知**（字段不存在）与 **0 秒** 合并成同一个值。
+  //     后端 `omitempty` 曾让"没有过期时间"的账号整个字段消失（T5 根因），
+  //     于是 codearts 那格渲染成 `0d` —— 一个"还剩 0 天、马上过期"的惊悚读数，
+  //     而真相是**根本不知道**。`—` 与 `0d` 是两件事。
+  //
+  //  2. 只按"天"取整。一天以内**全部**落到 `0d`，而 codearts 的 STS
+  //     寿命约 2 小时 —— 它的 token 在有效期内的每一分钟都显示 `0d`，
+  //     看不出"还有 28 分钟"和"还有 3 秒"的区别。
+  //
+  //  3. 分段只在 `< 1 天` 与 `< 0` 处切，中间没有 `< 1 小时` 这一档。
+  //
+  // # 统一格式（本函数的契约，也是断言的对象）
+  //
+  //   >= 1 天    → `3 天`
+  //   >= 1 小时  → `5 小时`
+  //   >= 0 秒    → `28 分钟`
+  //   < 0        → `已过期`
+  //   未知       → `—`
+  //
+  // # 为什么"未知"用 undefined/null 判定而不是 falsy
+  //
+  // `0` 是一个**合法且有意义**的读数（正好此刻过期），
+  // 它必须走 `< 0` 之外的那条路 —— 即 `0 分钟`。用 `!sec` 判未知会把
+  // 合法的 0 吞成"未知"，方向正好反了（把确定的零伪装成不知道）。
+  // 这与 pool.QuotaView.HasData 的注释讲的是同一条原则：
+  // **"没查过"和"查到 0"必须能区分。**
+  //
+  // # 为什么不用 Math.round
+  //
+  // 剩余时间是**倒计时**，向上取整会让"还剩 30 秒"显示成 `1 分钟`
+  // （用户会以为还有整整一分钟）。一律向下取整：宁可少报，不可多报。
+  // 这与 fmtCountdown（旅行倒计时）的口径一致。
+  //   · 2 天零 23 小时 → `2 天`（不是 3 天）
+  //   · 59 分 59 秒    → `59 分钟`
+  function fmtTokenRemain(sec) {
+    // 未知：字段没下发（后端 omitempty 吃掉 = 上游没给过期时间），
+    // 或显式 null。一律 `—`，**绝不**退化成 0d / undefined。
+    if (sec === undefined || sec === null) return '—';
+    const n = Number(sec);
+    // 非数值（后端改了字段类型 / 传了字符串）：同样按未知处理。
+    // 不抛异常 —— 一格渲染失败不该让整张表白屏。
+    if (!Number.isFinite(n)) return '—';
+    if (n < 0) return '已过期';
+    if (n >= 86400) return Math.floor(n / 86400) + ' 天';
+    if (n >= 3600) return Math.floor(n / 3600) + ' 小时';
+    // 包含 n === 0：0 秒是"正好到期"，不是未知 —— 它落在这一档，
+    // 显示 `0 分钟`，与 `已过期`（负值）语义上区分得开。
+    return Math.floor(n / 60) + ' 分钟';
+  }
+
+  // 胶囊配色：颜色表达**紧迫度**，与文字是同一份判据派生出来的。
+  //
+  // 注意此处判据必须与 fmtTokenRemain 的档位**单调一致**：sec 变小时颜色
+  // 只能变严、不能变松，否则会出现"文字写 5 小时、颜色却是安全的绿"这种
+  // 自相矛盾的胶囊（下面的守卫把这个单调性钉住了）。
+  //
+  // # 为什么 err 带是 15 分钟而不是 1 小时
+  //
+  // 这里踩过一次：第一版写的是 `n < 3600 → err`，直接照抄了 workbuddy
+  // 那种"长效 token"的直觉。但 codearts 的 STS 实测寿命约 **2 小时**
+  // （本机观测到剩余 6036s / 4134s，见 accountview.go 与 tasks/plan.md），
+  // 于是每一个 2 小时周期里有 57 分钟常亮红色 —— **红成了常态**。
+  // 红色一旦常态化就失去了信号意义：用户再也分不清"续期正常、只是快到期"
+  // 和"续期坏了、这个凭证真的救不回来"。
+  //
+  // codearts 的续期窗口只有 3 分钟（见 codearts/refreshskew.go），所以
+  // 只要自动续期在工作，剩余时间就**几乎不会**掉到 15 分钟以下。反过来：
+  //
+  //	codearts 行出现红色 ⟺ 自动续期很可能已经在失败
+  //
+  // 这才是这一列对用户真正有用的信息（他就是因为续期失败来问的）。
+  // 15 分钟 = 5 倍续期窗口，足够在"续期卡住"和"真到期"之间留出反应时间。
+  function tokenPillClass(sec) {
+    if (sec === undefined || sec === null || !Number.isFinite(Number(sec))) return 'dim';
+    const n = Number(sec);
+    if (n < 0) return 'err';        // 已过期
+    if (n < 900) return 'err';      // 15 分钟内：已逼近 3 分钟的续期窗口
+    if (n < 3600) return 'warn';    // 一小时内：值得看一眼，但续期本就该在这之前完成
+    return 'ok';                    // 含 codearts 正常态（约 2 小时）与 workbuddy 的长效 token
+  }
+
+  // ---------------------------------------------------------------- 账号池新增两列
+  //
+  // 这两列是用户对 codearts 提的要求：「同样需要显示 token 时间，然后就是
+  // 领取福利是否领取」。它们的列 id（token_expiry / welfare）由 codearts
+  // **自报**（见 internal/codearts/accountview.go），前端不认识上游名。
+
+  // tokenExpiryCellHTML 「Token 到期」单元格。
+  //
+  // # 为什么它必须**不依赖 has_token**
+  //
+  // 这是本次最容易写错的一处。「Token」列（workbuddy 用的那个）判据是
+  // `a.has_token` —— 而后端 `has_token` 来自 `AccessToken != ""`。
+  // codearts 的凭证是 AK/SK/SecurityToken 三元组，**没有 accessToken**，
+  // 所以它的 `has_token` 恒为 false：
+  //
+  //     provider=codearts  has_token=False  token_expire_sec=6036   ← 实测
+  //
+  // 若这一列也去看 has_token，codearts 会永远显示 `—` —— 而它明明有
+  // 1h40m 的 STS 有效期。这正是用户报的那个现象。
+  //
+  // 判据因此是**字段本身有没有**（`token_expire_sec` 是否是数值），
+  // 与 has_token 无关。
+  function tokenExpiryCellHTML(a) {
+    // ---- 第三态：**设计上不过期**（不是"不知道"）----
+    //
+    // 判据是后端的 `token_never_expires`（来自 CredentialLifetimeExt）。
+    // 它与 `token_expire_sec` 在**后端**就是互斥的（见 AccountView 的注释），
+    // 所以这里只需要先看它 —— 不需要在前端再复制一遍"谁优先"的规则。
+    //
+    // ⚠ 这一条必须排在下面"未知 → `—`"之前。反过来的话，loomy 那格
+    //   永远显示 `—`（"我们没读到时刻"），而真相是"它根本不会到期" ——
+    //   用户实测就是把那个 `—` 读成了"这功能没做"。
+    //
+    // 措辞用「永久」而不是「无 TTL」：前者是用户能直接据以决策的话
+    //（"这个号不用管"），后者是内部术语。失效的真正原因写在 title 里。
+    if (a.token_never_expires === true) {
+      return '<span class="pill ok" title="该上游的凭证不绑时间：没有 TTL、也没有 refresh token。'
+        + '它不会『到点自动失效』，只会在主动登出／改密／服务端清理／风控时失效">永久</span>';
+    }
+    const d = a.token_expire_sec;
+    if (d === undefined || d === null || !Number.isFinite(Number(d))) {
+      // 未知：上游没提供过期时间（后端按指针语义把字段整个省掉）。
+      // 与"已过期"必须长得不一样 —— 后者是 `已过期` 的红色胶囊。
+      return '<span class="dim" title="该上游没有提供凭证过期时间">—</span>';
+    }
+    const n = Number(d);
+    // 绝对时刻 + 相对剩余。两者分工不同：
+    //   · 相对时间 → 判断"还够不够用"（扫一眼）
+    //   · 绝对时刻 → 排障时要跟日志对时刻
+    // 与「请求日志」面板的处理一致（那里也是"上次执行 + 距今"两列）。
+    let abs = '';
+    // ⚠ 显式判 undefined/null，不用 `if (a.token_expire_at)` ——
+    // 后者会把**真实的 0**（1970-01-01，即"刚过期"）也当成"没有"吞掉。
+    // 后端是按指针语义下发的（未知 = 字段整个不出现），所以 0 只可能是真值。
+    // 同文件的 fmtTokenRemain / tokenPillClass 都是这个写法，这里对齐。
+    if (a.token_expire_at !== undefined && a.token_expire_at !== null) {
+      const t = new Date(a.token_expire_at * 1000);
+      if (!isNaN(t)) {
+        abs = t.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit' });
+      }
+    }
+    const pill = `<span class="pill ${tokenPillClass(n)}">${esc(fmtTokenRemain(n))}</span>`;
+    return abs
+      ? `${pill}<br><span class="dim mono" style="font-size:11px">${esc(abs)}</span>`
+      : pill;
+  }
+
+  // welfareCellHTML 「福利」单元格 —— **三态，且绝不说"未领取"**。
+  //
+  // # 数据从哪来（这是本列能不能说真话的关键）
+  //
+  // 上游的 `/admin/welfare` 只回 `claimable` 布尔，**没有独立的"已领"标志**；
+  // 而 `claimable=false` 既可能是"今日已领"，也可能是"资格不符"——
+  // 界面**无法区分**（见 internal/codearts/welfare.go 的实测注释）。
+  //
+  // 所以本列的答案来自**我们自己的领取记录**（checkinlog 的 KindWelfare）：
+  // 那是确定的事实（领取动作就是我们发的）。
+  //
+  //	ok     → 已领取   （今天这次真的领到东西了）
+  //	skip   → 未领到   （点过，但一项都没领到）
+  //	fail   → 失败     （带原因）
+  //	缺字段 → —        （今天没点过 —— **不知道**，不是"没有"）
+  //
+  // ⛔ 绝不允许把缺字段渲染成「未领取」/「未领完」，也**不许**把 skip
+  //   说成「无可领」—— "无可领"是在断言上游没东西可给，而我们只知道
+  //   自己没领到（原因可能是"今天已领完"，也可能是"资格不符"，分不清）。
+  //   测试 tests/frontend/accounts_e2e.js 对这几个词有黑名单断言。
+  function welfareCellHTML(a) {
+    const s = a.today_welfare;
+    if (s === 'ok') return '<span class="pill ok">已领取</span>';
+    // ⚠ 措辞是「未领到」，**不是**「无可领」也不是「已领完」。
+    //
+    // `skip` 的事实只有一条：**我们这次点了，没领到东西**。
+    // 至于为什么 —— 上游那侧是"今天已领完了"还是"资格不符"——
+    // 它只回 `claimable` 布尔，前端**分不清**（见 welfare.go 的实测注释）。
+    //
+    // 实测（2026-09-14 07:56）：一次真实领取返回 "3 项均不可领"，
+    // 那条记录被渲染成「无可领」—— 而当时**确实是今天已经领过了**。
+    // 「无可领」把原因说成了"没得领"，与事实相反的方向。
+    // 「未领到」不猜原因，只说结果。
+    if (s === 'skip') return '<span class="pill dim" title="今天点过领取，但没领到东西（上游只给 claimable 布尔，界面无法区分「今天已领完」与「资格不符」）">未领到</span>';
+    if (s === 'fail') return '<span class="pill err" title="上次领取失败">失败</span>';
+    // 未知（含后端没下发该字段、以及将来新增的状态值）
+    return '<span class="dim" title="今天还没领过，或拿不到领取结果 —— 这不等于「没得领」">—</span>';
+  }
+
+  // ---------------------------------------------------------------- T4：额度单元格
+  //
+  // # 为什么不能直接渲染 `a.credits`
+  //
+  // `/admin/accounts` 的 `credits` 是一个**派生标量**
+  //（`pool.QuotaView.Effective()` 的结果），而 `Effective()` 对
+  // "未探测"（`HasData=false`）返回 **0**。于是：
+  //
+  //     没查过  → credits=0  → 界面显示 `0`   ← 用户读成"这个号没额度了"，去删号
+  //     查到 0  → credits=0  → 界面显示 `0`   ← 这才是真的没额度
+  //
+  // 两种**语义完全不同**的状态在前端长得一模一样。这正是 T2 在后端修的那个坑
+  // （pool.quota.go 的 restoreQuota），但**后端修好了、界面还是显示 0** ——
+  // 因为前端压根不看 `has_data`（改造前全文 `has_data` 出现 0 次）。
+  //
+  // # 判据是 `quota.has_data`，不是 `credits` 的真假
+  //
+  // 权威字段是 `a.quota.has_data`：
+  //
+  //     has_data=false → 还没查过 → `—`
+  //     has_data=true  → 查过了   → 渲染 credits（**0 也照渲染**）
+  //
+  // ⚠ 这里刻意**不做** `credits || '—'` —— 那会把合法的 0 当成缺数据，
+  // 是同一个 bug 的镜像版本（把确定的零伪装成不知道）。
+  //
+  // # 为什么用 `=== false` 而不是 `!hasData`
+  //
+  // 老后端（或 `/status` 回落路径）可能**没有** `quota` 字段。
+  // 那时 `a.quota` 是 undefined，取属性会抛错。所以先判 `quota` 是否是个对象：
+  //   · 没有 quota 字段 → **回落到 credits**（保持改造前的行为，不做无根据的断言）
+  //   · 有 quota 但 has_data 明确为 false → `—`
+  // 即"只有在后端**明确说**没查过时才显示 `—`"，不靠缺失推断。
+  function quotaCellHTML(a) {
+    const q = a && a.quota;
+    // quota 缺失 / 形状不对（老后端）：退回派生的 credits 标量。
+    // ⚠ 这条回落**不**能反过来把真实的 has_data=false 也吃掉 ——
+    // 所以判据是"quota 是不是对象"，而不是"has_data 是不是真"。
+    if (!q || typeof q !== 'object') return `<span class="mono">${esc(a && a.credits)}</span>`;
+    if (q.has_data !== true) return '<span class="dim">—</span>';
+    // 真的查过了 —— 有值就渲染值，0 也照渲染。
+    // 后端的 `remaining` 带 omitempty（0 时不出现），所以这里以 `credits`
+    // 为主、`remaining` 为辅：两者在 has_data=true 时应当一致，
+    // 但不一致时以**界面原本就在用的那个字段**为准，避免出现新的第二份事实。
+    const n = typeof a.credits === 'number' ? a.credits : q.remaining;
+    if (typeof n !== 'number') return '<span class="dim">—</span>';
+    return `<span class="mono">${esc(n)}</span>`;
+  }
+
+  // freeQuotaCellHTML 「免费额度」单元格 —— **三态，且绝不说"已用完"**。
+  //
+  // # 语义（Loomy 的每日赠送）
+  //
+  // 上游的额度有两个并行账本，而它们是**包含**关系：
+  //
+  //	availableBalance = balance(永久) + dailyBalance(每日赠送)
+  //
+  // 所以「额度」列是总数，「免费额度」列是其中**会按自然日重置**的那部分 ——
+  // 不用就浪费。两列不是重复：前者说"还能不能跑"，后者说"该不该现在用它"。
+  //
+  // # 判据是"字段在不在"，不是"数是不是 0"
+  //
+  // 后端只在**真的拿到分项**时才下发 `free_quota`
+  //（见 admin.AccountView.FreeQuota 的三态契约），所以：
+  //
+  //	字段缺失   → `—`（这个上游不区分这一项 / 这次没读到）
+  //	0          → `0`（确实用完了）
+  //	N > 0      → `N`
+  //
+  // ⚠ 把缺失渲染成 0 会让用户读成「免费额度已用完、账号正在烧永久额度」——
+  // 一个**看起来完全合理但错误**的结论。这正是本列最容易骗人的形态，
+  // 与 quotaCellHTML 靠 has_data 区分"没查过 / 查到 0"是同一条纪律。
+  function freeQuotaCellHTML(a) {
+    const v = a && a.free_quota;
+    if (typeof v !== 'number') return '<span class="dim">—</span>';
+    const lim = a && a.free_quota_limit;
+    // 没有上限就只报剩余（上游只给余额时）。
+    if (typeof lim !== 'number' || lim <= 0) return `<span class="mono">${esc(fmtTokens(v))}</span>`;
+    // 有上限 → 「剩余 / 上限」+ 按**已用**比例上色。
+    //
+    // 与注册机的「今日 Token」列同一形态：读者要知道"今天还能跑多少"，
+    // 而单独的剩余量看不出这一点。
+    //
+    // ⚠ 配色按 used/limit（已用比例），不是按剩余 —— 快用完时该警示，
+    // 剩得多时反而用"危险色"是不对的。
+    const used = Math.max(0, lim - v);
+    const pct = Math.round(used / lim * 100);
+    const cls = pct >= 95 ? 'err' : pct >= 80 ? 'warn' : 'ok';
+    return `<span class="mono ${cls}" title="已用 ${esc(String(used))} / ${esc(String(lim))}（${pct}%）">`
+      + `${esc(fmtTokens(v))} / ${esc(fmtTokens(lim))}</span>`;
+  }
+
+  // fmtTokens 把大数字压成便于阅读的形态（10000000 → 10M）。
+  //
+  // # 为什么必须压缩
+  //
+  // 每日 token 上限是 1000 万量级，原样写出来是「9944867 / 10000000」——
+  // 11 个字符再加分隔符，88px 的列宽里必然被省略号吃掉（本仓已有
+  // 度量脚本 shot_acct_clip.js 专门查这类溢出）。
+  //
+  // 单位与注册机一致：K / M / B，保留一位小数并去掉多余的 .0。
+  function fmtTokens(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '—';
+    const abs = Math.abs(n);
+    const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+    for (const [div, suf] of units) {
+      if (abs >= div) {
+        const v = n / div;
+        // 保留一位小数，但整数就别写成 "10.0M"。
+        const t = Math.round(v * 10) / 10;
+        return (Number.isInteger(t) ? String(t) : t.toFixed(1)) + suf;
+      }
+    }
+    return String(n);
+  }
+
+  // hdr 对话接口（/v1/*）的鉴权头 —— 用 api_key。
+  //
+  // ⚠ T7 起 KEY 只能来自"用户在顶栏手动粘一次"（内存变量），页面里没有任何
+  // 注入的密钥与 localStorage 副本。没有它时 /v1/* 会 401，但那是**对话面**
+  // 的凭据缺失，与"能不能进控制台"无关。
+  // ★ T-375：优先用户手粘的 KEY，否则回落 CONSOLE_KEY（配置里的 api_key，仅供 /v1）。
+  const hdr = () => (KEY || CONSOLE_KEY) ? { 'Authorization': 'Bearer ' + (KEY || CONSOLE_KEY) } : {};
+  // adminHdr 管理接口（/admin/* 与 /status）的额外请求头 —— **现在是空的**。
+  //
+  // # 为什么改成空（T7，用户报障 ③ 的收尾）
+  //
+  // 管理面的身份由服务端下发的 **HttpOnly 会话 cookie**（wb2api_sid）承担：
+  // 同源 fetch 自动携带，JS 读不到、跨站带不上。旧实现往这里塞
+  // `Authorization: Bearer <admin_token>`，而那把令牌是**明文注入页面**的
+  // —— 于是"打开页面"就等于拿到管理权限。
+  //
+  // 保留这个函数（而不是删掉几十处 `adminHdr()` 调用）：将来若要恢复某种
+  // 自定义头（例如 CSRF 双提交 token），改这一处即可。
+  const adminHdr = () => {};
+
+  // showConsole 显示整个控制台（导航 + 内容）。
+  //
+  // ⚠ 没有登录状态时**必须**让它整块消失（用户要求）：
+  // 原话「我希望只显示红色，绿色全部不要」—— 红色是那句"需要登录"的指路提示，
+  // 绿色是导航 + 所有面板。未授权时留着面板只有坏处：用户会以为"能看见就能改"，
+  // 而每点一下都 403，看不出到底发生了什么。
+  //
+  // ⚠ T7 起服务端不会再把未登录的人送到这个页面（送到登录页）—— 所以这里
+  // 只在**会话中途失效**（登出/改口令/禁用/超时）时生效：那一刻面板还在屏幕上，
+  // 必须收起来并把话说清楚。
+  function showConsole() {
+    const m = $('appMain'); if (m) m.style.display = '';
+    const h = $('keyHint'); if (h) h.style.display = 'none';
+    const kf = $('keyFallback'); if (kf) kf.style.display = 'none';
+  }
+
+  // hideConsole 只留顶栏与那句指路提示（T7 起提示是「去登录页」）。
+  //
+  // ⚠ 不再展开顶栏那个 api_key 输入框（旧实现在这里 `keyFallback` 显出来）：
+  // 走到这里的原因是**没有登录状态**，而 api_key 进不了控制台 —— 把它摆出来
+  // 会引导用户去填一把不管用的钥匙，然后对着 401 反复试。
+  function hideConsole() {
+    const m = $('appMain'); if (m) m.style.display = 'none';
+    const kf = $('keyFallback'); if (kf) kf.style.display = 'none';
+    const w = $('whoami'); if (w) { w.style.display = 'none'; w.innerHTML = ''; }
+    showKeyHint();
+  }
+
+  function setDot(cls, txt) {
+    $('hdot').className = 'dot ' + cls;
+    $('htxt').textContent = txt;
+  }
+
+  // redirecting 去登录页只跳一次：一次会话失效会同时打中多个并发请求。
+  let redirecting = false;
+
+  // toLogin 跳登录页（会话失效 / 凭据缺失时的唯一去处）。
+  //
+  // ⚠ 只对**控制台面**（/admin/* 与 /status）的认证失败调用。`/v1/*` 的 401
+  // 是"没有对话密钥"，那是另一条路（顶栏粘一把即可）：把它也当登录失效处理，
+  // 会把一个只是想试对话的已登录用户踢到登录页 —— 而他的会话好得很。
+  function toLogin(why) {
+    if (redirecting) return;
+    // ★ T-375 熔断：60 秒内已经因 401 重载过一次就不再跳转 ——
+    // 否则"某个接口写错 ⇒ 401 ⇒ 重载 ⇒ 又 401"会把控制台刷成白屏来回闪（实测 10 秒 58 次导航）。
+    try {
+      const last = Number(sessionStorage.getItem('wb2api.lastReloginAt') || 0);
+      if (Date.now() - last < 60000) {
+        console.error('控制台：60 秒内已因 401 重载过一次，本次不再跳转（避免无限自毁）');
+        return;
+      }
+      sessionStorage.setItem('wb2api.lastReloginAt', String(Date.now()));
+    } catch (e) { /* 隐私模式：拿不到就算了，下面照旧只跳一次 */ }
+    redirecting = true;
+    try { sessionStorage.setItem('wb2api.loginWhy', why || 'expired'); } catch { /* 隐私模式 */ }
+    location.replace('/ui');
+  }
+
+  // dedupe：同一 key 的**在飞**请求复用同一个 Promise（T-408②）。
+  //
+  // # 为什么要它（Playwright 实测证据）
+  //   首屏 +274ms 与 +391ms 各发一次 /healthz；+418/438 各一次 /status；
+  //   +447/467 各一次 /admin/stats；+447/468 各一次 /admin/ui/manifest
+  //   ⇒ 8 次里有 4 次是纯重复，白占连接池与上游配额。
+  //
+  // # 为什么只做 in-flight，不做结果缓存
+  //   用户点「立即刷新」的语义是"我要最新的" ⇒ 任何缓存都必须能被 force 穿透。
+  //   in-flight 只在"两个调用者**同时**要同一份数据"时合并，不改变任何时序语义。
+  //
+  // ⚠ **只对 GET 生效**：两个 POST 是两个真实操作，合并它们等于吞掉一次写。
+  const inflight = new Map();
+  function dedupe(key, fn) {
+    if (inflight.has(key)) return inflight.get(key);
+    const p = (async () => fn())().finally(() => inflight.delete(key));
+    inflight.set(key, p);
+    return p;
+  }
+
+  async function api(path, opt = {}) {
+    // ★ T-408②：GET 走 in-flight 去重（force 穿透）。POST/其它一律直达。
+    const _m = String((opt && opt.method) || 'GET').toUpperCase();
+    if (_m === 'GET' && !(opt && opt.force)) return dedupe('GET ' + path, () => apiRaw(path, opt));
+    return apiRaw(path, opt);
+  }
+
+  async function apiRaw(path, opt = {}) {
+    const r = await fetch(path, Object.assign({}, opt, {
+      // ★ T-375：**默认不带** hdr()。控制台面（/admin/*、/status）的身份是 HttpOnly cookie，
+      // 而服务端凭据优先级是 Bearer > ?token= > Cookie（account.TokenFromRequest，且 Identify 在
+      // bearer 校验失败时不会 fall-through 回 cookie）⇒ 塞了 Bearer <api_key> 就把本来有效的
+      // admin_token cookie **压掉** ⇒ 401 ⇒ toLogin() ⇒ location.replace('/ui') ⇒ 重载又带上 ⇒ 无限自毁。
+      // 实测：10 秒 58 次导航、52 次 401 /status。只有显式 opt.v1 === true 的调用（对话面）才带。
+      headers: Object.assign({}, adminHdr(), opt.v1 === true ? hdr() : {}, opt.headers || {}),
+    }));
+    if (!r.ok) {
+      // ★ 控制台面的 401 ⇒ 会话失效，直接去登录页。
+      // 留在这里只有坏处：面板还在、每点一下都失败，用户看不出发生了什么。
+      if (r.status === 401 && (path.startsWith('/admin/') || path === '/status')) {
+        toLogin('expired');
+      }
+      throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+    }
+    return r.json();
+  }
+
+  function renderCards(h, s) {
+    // ⚠ 2026-10-19 新口径：这里原来写"当前登录是<b>成员</b>，账号池读数仅管理员可见"。
+    //   成员已取消 ⇒ 走不到 `!s` 这一支了（`refresh()` 在 403/网络失败时**提前 return**，
+    //   根本不会调 renderCards 画这一排）。
+    //   留着这一支只为"真拿到 null 也不炸"，文案改成**不假设角色**的中性说明 ——
+    //   它现在表达的是"读数没拿到"，而不是"你是成员所以看不到"。
+    if (!s) {
+      $('cards').innerHTML = '<div class="card" style="grid-column:1/-1">'
+        + '<div class="k">账号池</div>'
+        + '<div class="v dim" style="font-size:13px">本次没取到账号池读数'
+        + '（服务端未返回或请求失败）。上面的状态点与提示条里有具体原因。</div></div>';
+      return;
+    }
+    // 网关状态卡：核心运营读数（对标 one-api 管理台"渠道健康 + 汇总"）。
+    // 之前精简到 2 张后用户觉得太少 —— 这里加回排障/运营真正有用的维度：
+    // 冷却中/已禁用/在途 来自 /status 的每账号画像；累计请求/成功率来自
+    // /admin/stats（stats 数据在 renderStats 里单独渲染，这里只读缓存值）。
+    const accts = (s && s.accounts) || [];
+    const cooling = accts.filter(a => a.cooling).length;
+    const disabled = accts.filter(a => a.disabled).length;
+    const inflight = accts.reduce((n, a) => n + (a.in_flight || 0), 0);
+    const st = window._statsCache;
+    const reqTotal = st ? st.total : '—';
+    const reqRate = (st && st.total) ? Math.round((st.ok / st.total) * 100) + '%' : '—';
+    const cards = [
+      ['账号总数', s.total, ''],
+      ['健康', s.healthy, s.healthy > 0 ? 'ok' : 'err'],
+      ['冷却中', cooling, cooling > 0 ? 'warn' : ''],
+      ['已禁用', disabled, disabled > 0 ? 'err' : ''],
+      ['在途请求', inflight, inflight > 0 ? 'warn' : ''],
+      ['累计请求', reqTotal, ''],
+      ['成功率', reqRate, (st && st.total) ? (st.ok / st.total >= 0.95 ? 'ok' : 'warn') : ''],
+    ];
+    $('cards').innerHTML = cards.map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+    // 子标题里的判读文案：把「顶栏那个点是绿是红」换算成一句明确的结论，
+    // 免得读者要自己把 healthy>0 与 /healthz 状态码对起来看。
+    $('gwHint').textContent = h.healthy > 0
+      ? '正在服务 · ' + h.healthy + '/' + (h.total || 0) + ' 个账号可用'
+      : (h.total > 0 ? '无可用账号 · 请求会返回 503' : '账号池为空');
+  }
+
+  // ---------------------------------------------------------------- 多上游契约层
+  //
+  // 所有上游信息都来自后端 `/admin/ui/manifest`（见 internal/admin/uimanifest.go）。
+  // 前端**只认识槽位与契约形状**，不认识任何上游名字 ——
+  // 硬编码的话，加第三个上游还要改前端，那正是"加新上游核心零改动"要避免的事。
+  //
+  // # 这一层存在的原因（历史教训）
+  //
+  // 上一版曾经定义了 providersWithCap / groupByProvider 两个函数，
+  // 但**从未被调用** —— 数据取回来了却没人用，11 个面板依然写死在 HTML 里。
+  // 所以本层的每个函数都必须有真实调用点，由 T11 的回归套件守住。
+  let MANIFEST = {
+    service: 'gateway',
+    providers: [],
+    capabilities: [],
+    admin_routes: [],
+    jobs: [],
+    daily_actions: [],
+    loaded: false,   // 是否成功取到过 manifest
+  };
+  let PROVIDERS = [];         // MANIFEST.providers 的快捷引用（按上游分组用）
+  let DEFAULT_PROVIDER = '';  // 裸模型名走谁
+
+  // CORE_CAP 后端保留的能力名：声明了管理端点但**没有**对应能力位的路由归到它。
+  //
+  // 它必须与 internal/admin 的 CoreCapability 常量保持一致。
+  // 这个字符串是**协议的一部分**（后端 routeCapName 产出、前端按它路由），
+  // 不是"前端硬编码的能力表" —— 后者才是要避免的。有 T11 套件守住两边一致。
+  const CORE_CAP = 'core';
+
+  // manifest 拉取失败的**可读原因**，供页面顶部与降级提示使用。
+  // 空串表示没有错误。不叫 error 是为了避开与 Error 对象的混淆。
+  let manifestError = '';
+
+  // applyManifest 把后端下发的契约存起来并刷新派生状态。
+  //
+  // 这是**唯一**写 MANIFEST 的地方 —— 所有渲染函数都只读它。
+  // 集中写入的理由：manifest 里 providers 与 default 必须同时生效，
+  // 分开写会让中途状态（新 providers + 旧 default）被某次渲染看见。
+  //
+  // # 归一化到**元素层**，不只到数组层（CP3 评审 F1）
+  //
+  // 原先只做 `Array.isArray(x) ? x : []`，于是 `providers:[null]`
+  // 这种形状会一路流到渲染层，让 `!!x.default` / `a.provider` 抛 TypeError。
+  // 后果不是崩溃，而是"页面莫名停止刷新"，且 window.__errs 也抓不到 ——
+  // 极难定位。而同一份代码里 `p && p.default` 是有守卫的，
+  // 防御不一致本身就是缺陷。
+  //
+  // 所以在这里一次性把四个数组都过滤干净：**唯一写入口 = 唯一归一化点**，
+  // 下游任何消费者都不必再各自防一遍（那才是真正的"防御不一致"来源）。
+  function applyManifest(m) {
+    m = m && typeof m === 'object' ? m : {};
+    // 只保留「非 null 的对象」。数字/字符串/true 都当无效元素丢掉 ——
+    // 它们同样会让下游的属性访问出问题，且没有任何合理语义。
+    const objs = (v) => (Array.isArray(v) ? v : []).filter(x => x && typeof x === 'object');
+    MANIFEST = {
+      service: typeof m.service === 'string' && m.service ? m.service : 'gateway',
+      providers: objs(m.providers),
+      capabilities: objs(m.capabilities),
+      admin_routes: objs(m.admin_routes),
+      jobs: objs(m.jobs),
+      daily_actions: objs(m.daily_actions),
+      loaded: true,
+    };
+    PROVIDERS = MANIFEST.providers;
+    // 默认上游从 providers 里找（manifest 顶层没有单独的 default 字段，
+    // 上游的 providerInfo.default 才是权威）。找不到就回落第一个。
+    const def = PROVIDERS.find(p => p && p.default) || PROVIDERS[0];
+    DEFAULT_PROVIDER = def ? def.id : '';
+    manifestError = '';
+    return MANIFEST;
+  }
+
+  // renderTopStats 刷新顶栏状态条。
+  //
+  // # 数据来源
+  //
+  // h/s 是 refresh() 已经拿到的 /healthz 与 /status 结果，
+  // 上游数来自已加载的 MANIFEST —— **全部复用已有数据，不额外发请求**。
+  // 额外请求会让顶栏成为第二份事实来源，两边数字不一致时无法判断谁对。
+  //
+  // 传 null 表示"这一项本次拿不到"，此时显示「—」而不是沿用旧值 ——
+  // 沿用旧值会让用户看到一个已经过期的绿点。
+  function renderTopStats(h, s) {
+    const el = $('topstats');
+    if (!el) return;
+    const parts = [];
+
+    // 1) 健康：/healthz 的口径（有账号且未被在途占满）
+    if (h && typeof h.healthy === 'number') {
+      const cls = h.healthy > 0 ? 'ok' : 'err';
+      parts.push(`<span class="ts ${cls}">账号健康 <b>${h.healthy}/${h.total || 0}</b></span>`);
+    } else {
+      parts.push('<span class="ts">账号健康 <b>—</b></span>');
+    }
+
+    // 2) 账号总数（池视角，与健康数不同：这里含冷却/禁用）
+    if (s && typeof s.total === 'number') {
+      const bad = (s.cooling || 0) + (s.disabled || 0);
+      const cls = bad > 0 ? 'warn' : '';
+      parts.push(`<span class="ts ${cls}">账号 <b>${s.total}</b>${bad ? '（异常 ' + bad + '）' : ''}</span>`);
+    } else {
+      parts.push('<span class="ts">账号 <b>—</b></span>');
+    }
+
+    // 3) 已注册上游数（来自 manifest）
+    if (MANIFEST.loaded) {
+      parts.push(`<span class="ts">上游 <b>${MANIFEST.providers.length}</b></span>`);
+    } else {
+      parts.push('<span class="ts warn" title="' + esc(manifestError || 'manifest 未加载')
+        + '">上游 <b>—</b></span>');
+    }
+
+    // 3.5) ⚠ 上游健康（2026-10-18 加）：熔断中的上游 + 最慢的那家。
+    //
+    // ⚠ 数据全部来自 /status 的 providers（后端已算好 EMA），**不额外发请求** ——
+    //    与本节"全部复用已有数据"的约定一致。
+    //
+    // ⚠ 这一项为什么必须有：
+    //   · 上游级熔断此前只写在**日志**里，控制台上一切正常 ⇒ 用户遇到"整条上游不通"
+    //     时无处可看（本项目反复出现的"实现了但看不见"）。
+    //   · "哪家最慢"是用户第三条要求（保证请求速度）的可视化 ——
+    //     实测 loomy 首字节中位 6.9s 而 workbuddy 3.4s，把最慢那家摆在眼前，
+    //     才谈得上"该换哪家"。
+    //
+    // ⚠ 样本不足 20 次时**不做快慢比较**（与后端 provTTFBMinN 同一约定）：
+    //    否则一次冷启动的 30 秒就会让顶栏报出"最慢上游"，那是噪声当信号。
+    if (s && Array.isArray(s.providers) && s.providers.length) {
+      const tripped = s.providers.filter(p => p.tripped);
+      if (tripped.length) {
+        const names = tripped.map(p => esc(p.provider)).join('、');
+        parts.push('<span class="ts err" title="这些上游当前整体不可用；请求会自动尝试同模型的其它上游">'
+          + '上游熔断 <b>' + names + '</b></span>');
+      } else {
+        const known = s.providers.filter(p => (p.ttfb_samples || 0) >= 20 && p.ttfb_ema_ms > 0);
+        if (known.length) {
+          const slow = known.slice().sort((a, b) => b.ttfb_ema_ms - a.ttfb_ema_ms)[0];
+          parts.push('<span class="ts warn" title="近期首字节耗时的指数移动平均（样本 '
+            + slow.ttfb_samples + ' 次）；只比较样本足够的上游">最慢上游 <b>'
+            + esc(slow.provider) + ' ' + (slow.ttfb_ema_ms / 1000).toFixed(1) + 's</b></span>');
+        } else {
+          parts.push('<span class="ts" title="样本不足 20 次时不比较快慢，避免把冷启动当常态">'
+            + '上游速度 <b>样本中</b></span>');
+        }
+      }
+    }
+
+    // 4) 加载时刻：让"自动刷新到底有没有在跑"肉眼可见。
+    //    用 HH:MM:SS 而不是"x 秒前"——后者需要自己再刷新才能变，
+    //    反而让人怀疑是不是卡住了。
+    //
+    //    ⚠ "刷新"会暗示"这是上次成功刷新的时刻"，但实际值是当前
+    //    `new Date()`，只是这次渲染时的时刻（refresh 失败时也会更新）。
+    //    **字段名要诚实**：改用"加载"——表示这是页面加载/重载的快照。
+    //    真正的"上次成功刷新"需要另外追踪（不在本轮范围）。
+    const now = new Date();
+    const hhmmss = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map(n => String(n).padStart(2, '0')).join(':');
+    parts.push(`<span class="ts">加载 <b>${hhmmss}</b></span>`);
+
+    el.innerHTML = parts.join('');
+  }
+
+  // serviceName 本实例的身份标识。
+  //
+  // # 为什么从 manifest 读（B8）
+  //
+  // 原先前端在 3 处硬编码了 'workbuddy2api'（标题、顶栏 h1、API 面板卡片）。
+  // 后端改名或一个部署里跑两个实例时，界面显示的名字与实际不符 ——
+  // 而"这个页面管的是哪一个实例"恰恰是靠名字区分的。
+  //
+  // 现在只从 manifest.service 读，拿不到时显示 'gateway'（中性词），
+  // 让"没拿到"与"拿到了某个具体名字"在观感上不同。
+  function serviceName() {
+    return MANIFEST.service || 'gateway';
+  }
+
+  // renderIdentity 把服务名写进页面标题与主标题。
+  //
+  // 单独抽出来是因为它有 3 个落点（<title> / h1 / API 卡片），
+  // 散落各写就会漏掉一处 —— B8 当初正是漏掉了全部 3 处。
+  function renderIdentity() {
+    const name = serviceName();
+    document.title = name + ' · 网关控制台';
+    const h1 = $('appTitle');
+    if (h1) {
+      // h1 的第一个文本节点是名字本身（<small> 是副标题），
+      // 所以只替换节点而不是整个 innerHTML，免得把副标题也冲掉。
+      if (h1.childNodes.length && h1.childNodes[0].nodeType === 3) {
+        h1.childNodes[0].textContent = name + ' ';
+      } else {
+        h1.insertBefore(document.createTextNode(name + ' '), h1.firstChild);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- 主题（三态）
+  //
+  // 偏好有**三个**取值，而不是一个布尔：
+  //   'system' 跟随系统（默认）
+  //   'dark' / 'light' 用户显式选择
+  //
+  // # 为什么必须区分 system 与 dark
+  //
+  // 若只存布尔，用户一旦点过任何一次，就**永久失去"跟随系统"**——
+  // 而那是大多数人的期望默认值（白天用浅色、晚上用深色是系统的事）。
+  //
+  // 实际写 data-theme 的时机有两处：
+  //   1. <head> 里的同步脚本（防首屏闪白）
+  //   2. 这里（用户点击切换时）
+  // 两处都必须把 'system' 解析成具体的 dark/light，因为 CSS 只认这两个值。
+  const LS_THEME = 'wb2api.theme';
+
+  function systemPrefersDark() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  }
+
+  // resolveTheme 把偏好解析成真正生效的主题名。
+  function resolveTheme(pref) {
+    if (pref === 'dark' || pref === 'light') return pref;
+    return systemPrefersDark() ? 'dark' : 'light';
+  }
+
+  // 操作列「⋯」收纳菜单的定位（2026-10-19）。
+  //
+  // # 为什么需要这段
+  //
+  // popover 走**顶层图层**，这正是我们要的（`.accttable--aligned` 的 td 带
+  // `overflow:hidden`，普通绝对定位菜单会被裁掉）。但 UA 只给它一个"视口居中"
+  // 的默认位置，而我们要它贴着那一个触发按钮。
+  // 参考项目靠组件库的 anchor 定位（PopoverContent 的 side='bottom' align='end'）；
+  // 本项目零依赖，等价做法就是在这里自己算一次。
+  //
+  // ⚠⚠ 两个必须记住的点：
+  //   ① `toggle` / `beforetoggle` **不冒泡** —— 必须用**捕获阶段**监听，
+  //      否则一条都收不到。表现是"面板永远停在视口正中"，而且不报错。
+  //   ② 用 `toggle`（已显示）而不是 `beforetoggle`（显示前）：显示前元素还是
+  //      `display:none`，`getBoundingClientRect()` 返回全 0，算出来的位置没有意义。
+  //      代价是理论上有一帧在原位 —— 实测看不到（下一帧就搬过去了）。
+  //   ③ 面板是 `position:fixed` 且位置是**算出来的**，所以它**不会跟着页面滚动** ——
+  //      用户一滚，浮层就留在原地、飘在内容外面，看着像"点开了关不掉"（实测过一次：
+  //      滚动前后 top 都是 953、left 都是 1419，纹丝不动）。
+  //      ⇒ 打开期间挂一个 scroll 监听重算位置，关闭时摘掉。
+  //      ⚠ `scroll` 同样**不冒泡** —— 也必须用捕获阶段，否则表格内部滚动容器
+  //        （.logwrap / 各种 overflow:auto）的滚动一条都收不到。
+  // ⚠⚠ 2026-10-19 追加：这段原来只处理 `.ops-menu`，`.colset` 被第一行的
+  //   `classList.contains('ops-menu')` 直接 return 掉了 ⇒ **列设置浮层从来没被算过位置**。
+  //
+  //   而 `.colset` 的 CSS 里写着 `margin:0`（抄参考的 `PopoverContent` 时带过来的），
+  //   它覆盖掉了 UA 用来把 popover 居中的 `margin:auto` ⇒ `inset:0 + margin:0`
+  //   ⇒ 浏览器把它**定位到 (0,0)**。用户看到的就是"账号池左上角有一块黑色东西"，
+  //   而且**只有打开列设置时才出现**（关着时是 display:none）——
+  //   在他的截图里就是顶栏左上角那个深色小方块，我一度误以为是品牌图标而删错了。
+  //
+  //   ⇒ 现在两个类共用同一套定位：贴触发按钮的下方，两侧各留 8px 不越界，
+  //     下方放不下就翻到按钮上方。`.colset` 是 336px 宽的左对齐面板，
+  //     `.ops-menu` 是窄的右对齐菜单 —— 只差 `left` 的算法，见下。
+  document.addEventListener('toggle', (e) => {
+    const p = e.target;
+    if (!p || !p.classList) return;
+    const isOps = p.classList.contains('ops-menu');
+    const isCols = p.classList.contains('colset');
+    if (!isOps && !isCols) return;
+    const btn = document.querySelector('[popovertarget="' + CSS.escape(p.id) + '"]');
+    if (e.newState !== 'open') {
+      // ⚠ 关闭时要摘掉滚动监听（打开期间挂着，见下）
+      if (p._opsReposition) {
+        window.removeEventListener('scroll', p._opsReposition, true);
+        p._opsReposition = null;
+      }
+      return;
+    }
+    if (!btn) return;
+    const place = () => {
+      const r = btn.getBoundingClientRect();
+      const pr = p.getBoundingClientRect();
+      // 默认贴按钮下方；下方放不下就翻到按钮上方。
+      let top = r.bottom + 4;
+      if (top + pr.height > window.innerHeight - 8) {
+        top = Math.max(8, r.top - pr.height - 4);
+      }
+      let left;
+      if (isOps) {
+        // 窄菜单：与按钮**右缘**对齐（它挂在操作列最右边）
+        left = r.right - pr.width;
+      } else {
+        // 列设置面板：与按钮**左缘**对齐（336px 宽，右对齐会左半边出屏）
+        left = r.left;
+      }
+      left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
+      p.style.left = left + 'px';
+      p.style.top = top + 'px';
+    };
+    place();
+    p._opsReposition = place;
+    window.addEventListener('scroll', place, true);
+  }, true);
+
+  // applyTheme 写入 data-theme 并同步按钮选中态。
+  function applyTheme(pref) {
+    const theme = resolveTheme(pref);
+    document.documentElement.setAttribute('data-theme', theme);
+    const box = $('themeSwitch');
+    if (box) {
+      box.querySelectorAll('button[data-theme-mode]').forEach(b =>
+        b.classList.toggle('on', b.dataset.themeMode === pref));
+    }
+    return theme;
+  }
+
+  // setThemePref 用户显式选择。
+  function setThemePref(pref) {
+    try { localStorage.setItem(LS_THEME, pref); } catch { /* 隐私模式 */ }
+    applyTheme(pref);
+  }
+
+  // initTheme 读持久化偏好并绑定按钮 + 跟随系统变化。
+  // showKeyHint 在「服务端没注入管理钥匙」时，把**去哪拿**写清楚。
+  //
+  // # 为什么需要它（用户原话）
+  //
+  //	「前端如果说他没有这个、需要填写那个东西，你需要提醒他去哪里查看」
+  //
+  // 改造前只有一个 placeholder，用户看到的是一个空的密码框 ——
+  // 他知道"要填东西"，但不知道该填什么、去哪找。而这里恰好有个**同名陷阱**：
+  // 本页「API 管理」里的那些 `sk-…` 也叫 API Key，填它**连不上**
+  //（控制台认的是 config 里那把**管理令牌** admin_token）。实测见过这个困惑。
+  //
+  // ⚠ 门禁令牌与对话 api_key 是**两把不同的钥匙**（用户要求分开）：
+  //
+  //	admin_token → 进控制台（本页）
+  //	api_key     → 调 /v1 对话接口（给客户端/机器人用）
+  //
+  // 所以提示必须点名 admin_token，而不是 api_key —— 指错字段会让人反复试错一把
+  // 本来就打不开管理台的钥匙。
+  //
+  // 提示要同时回答三件事：填哪一把、去哪拿、最快的绕过方式。
+  function showKeyHint() {
+    const host = $('keyHint');
+    if (!host) return;
+    const rows = [
+      ['怎么进去', '打开 /ui，用**控制台账号**（用户名 + 口令）登录。'
+        + '首次部署时那一页会引导你创建第一个管理员。'],
+      ['想用令牌', '也可以带 ?token=<管理令牌> 打开 /ui：服务端校验通过后会把它换成'
+        + ' HttpOnly cookie 并跳回干净的 /ui（令牌因此不会留在地址栏与历史里）。'],
+      ['令牌在哪', 'config.json 顶层的 "admin_token" 字段。'],
+      ['注意别填错', '「API 管理」里那些 sk- 开头的是给调用方的 api_key —— '
+        + '它只能调 /v1 对话接口，进不了控制台。'],
+    ];
+    host.innerHTML =
+      '<div class="khhead">需要登录</div>'
+      + '<div>浏览器里没有有效的登录状态（会话可能已过期：登出、口令被改过、'
+      + '账号被禁用，或 cookie 到期）。</div>'
+      + '<ul>' + rows.map(([k, v]) => `<li><b>${esc(k)}</b>：${esc(v)}</li>`).join('') + '</ul>'
+      + '<div style="margin-top:6px"><a href="/ui">→ 去登录页</a></div>';
+    host.style.display = '';
+  }
+
+  function initTheme() {
+    let pref = 'system';
+    try { pref = localStorage.getItem(LS_THEME) || 'system'; } catch { /* 隐私模式 */ }
+    if (['system', 'dark', 'light'].indexOf(pref) < 0) pref = 'system';
+    applyTheme(pref);
+
+    const box = $('themeSwitch');
+    if (box) {
+      box.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-theme-mode]');
+        if (b) setThemePref(b.dataset.themeMode);
+      });
+    }
+
+    // 系统主题变化时，**只有**在"跟随系统"模式下才跟着变。
+    // 用户显式选过 dark/light 之后再跟随系统变化就是擅自改他的选择。
+    if (window.matchMedia) {
+      try {
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+          let cur = 'system';
+          try { cur = localStorage.getItem(LS_THEME) || 'system'; } catch { /* 隐私模式 */ }
+          if (cur === 'system') applyTheme('system');
+        });
+      } catch { /* 老浏览器没有 addEventListener 版本 */ }
+    }
+  }
+
+  // providerOf 一个账号属于哪个上游。
+  //
+  // 无 provider 字段的多为历史账号（该字段是后加的），归到默认上游 ——
+  // 与后端 pool 对"未打标签账号"的解释保持一致，否则前后端会显示成两个地方。
+  function providerOf(a) {
+    if (!a || typeof a !== 'object') return '';
+    return a.provider || DEFAULT_PROVIDER;
+  }
+
+  // providerRegistryIds 返回 manifest 登记的全部上游 id，**按 id 字典序**。
+  //
+  // # 为什么要有这个函数（R2 决策 1）
+  //
+  // "manifest 里有哪些上游"是全前端唯一的一条判据，被两处消费：
+  //   · 账号池 —— 每个上游都要有账号分组（R2）
+  //   · 模型面板 —— 声明了 models 能力的上游要有模型分组（T5）
+  // 各写一遍是漂移的起点（本项目反复的教训）。这里把它收敛成一个枚举点，
+  // 两处都从它出发，只是**再各自套自己的过滤条件**。
+  //
+  // # 为什么排序在这里做（而不是让调用方排）
+  //
+  // PROVIDERS 的顺序来自后端 JSON，是个不该被依赖的实现细节。
+  // 两处消费方都要求"稳定顺序"，在这里排一次，两边就都稳了 ——
+  // 也避免"账号池排了、模型面板没排"这种半截一致。
+  //
+  // 过滤掉畸形元素：applyManifest 对数组做了归一但**只到数组层、不到元素层**
+  // （providers:[null] 会流到这里），与 upstreamGroups 同一条防御。
+  function providerRegistryIds() {
+    const ids = [];
+    for (const p of (PROVIDERS || [])) {
+      if (p && typeof p === 'object' && p.id) ids.push(String(p.id));
+    }
+    // 保持 manifest 下发顺序，**不再字典序重排**。
+    //
+    // 旧实现 `ids.sort()` 把所有上游拉回字典序（codearts < loomy < trae <
+    // workbuddy < workbuddy-intl），把服务端显式排好的展示顺序覆盖掉 ——
+    // 账号池分组、模型分组、导航分组全部失效（海外版永远排不到最前）。
+    // 顺序的单一来源是服务端（admin/uimanifest.go 的 prioritizeProviders），
+    // 这里原样透传；顺序稳定性由服务端的 stable 排序保证。
+    return ids;
+  }
+
+  // providerRank 上游在 manifest 中的位置（providerRegistryIds 的索引）。
+  // 不在 manifest 里的 id（历史号、兜底组、owned_by 值）排到末尾；
+  // 同名 id 用稳定排序保持相对顺序。
+  function providerRank(id) {
+    const i = providerRegistryIds().indexOf(id);
+    return i < 0 ? providerRegistryIds().length : i;
+  }
+
+  // providersWithCap 返回声明了某能力的所有上游 id。
+  //
+  // 用途：决定上游分组里显示哪些面板 —— 有该能力的上游才显示对应入口。
+  function providersWithCap(cap) {
+    const out = [];
+    for (const id of providerRegistryIds()) {
+      const p = providerInfo(id);
+      if (p && Array.isArray(p.capabilities) && p.capabilities.indexOf(cap) >= 0) {
+        out.push(id);
+      }
+    }
+    return out;
+  }
+
+  // hasCap 某上游是否声明了某个能力位。
+  //
+  // 与 providersWithCap 的区别：那个返回**全集**（用于"哪些上游有这个面板"），
+  // 这个问**单个**上游（用于"这一行的这个按钮该不该出现"）。
+  //
+  // 为什么账号行要用它而不是直接读 a.capabilities：账号对象（/admin/accounts
+  // 的条目）**不带**能力位 —— 能力是上游的属性，不是账号的属性。
+  // 所以要经 providerOf(a) 回到上游、再查 manifest。
+  //
+  // 未知上游（manifest 里没有它）返回 false：宁可不显示，也不显示一个
+  // 点了不知道打到哪的按钮。这与 hideOrphanPanels 的判据一致。
+  function hasCap(providerId, cap) {
+    const p = providerInfo(providerId);
+    return !!(p && Array.isArray(p.capabilities) && p.capabilities.indexOf(cap) >= 0);
+  }
+
+  // capTitle 把能力位翻译成中文标题（如 growth → 成长计划）。
+  //
+  // 标题由后端下发而不是前端硬编码：能力是**后端的概念**，
+  // 前端硬编码一份就会与后端漂移（加了新能力位，前端显示英文 id）。
+  function capTitle(cap) {
+    for (const c of (MANIFEST.capabilities || [])) {
+      if (c && c.id === cap) return c.title || c.id;
+    }
+    return cap; // 未登记的退回 id 本身，至少还能看出是什么
+  }
+
+  // providerTitle 取上游的展示名。目前就是 id，留成函数是为了将来
+  // 后端能给上游下发中文名时只改这一处。
+  function providerTitle(id) {
+    return id || '（未标注）';
+  }
+
+  // noticeHTML 上游自报的提醒（渲染在账号池分组标题里，小字）。
+  //
+  // # 数据来源与"谁说了这句话"
+  //
+  // 读 manifest.providers[].notice —— 由**上游自己**下发
+  //（后端 gateway.NoticeExt，见 internal/zcode 的 Notice()）。
+  //
+  // ⚠ 这里**绝不能**写成 `if (id === 'zcode') return '…'`：
+  // 那会让前端知道上游名，加第 12 个上游要改前端 —— 正是本仓
+  // 一直在避免的（判据 1）。现在的形态是"上游报什么就显示什么"，
+  // 前端对上游零知识。
+  //
+  // # 没有 notice 字段时返回空串
+  //
+  // 于是没有该字段的上游，渲染结果与改造前**逐字节相同**
+  //（不会多出空 span / 多余间距）。
+  //
+  // # 为什么按纯文本转义渲染
+  //
+  // 措辞来自上游（在当前部署里是 zcode 的常量，但扩展点允许它由
+  // 运行时配置决定）。**不解析成 HTML** —— 否则一个上游名或配置里的
+  // `<` 就能改本页 DOM（本仓对上游数据一律 esc 的既有纪律）。
+  function noticeHTML(providerId) {
+    const p = providerInfo(providerId);
+    const n = p && typeof p.notice === 'string' ? p.notice.trim() : '';
+    if (!n) return '';
+    return `<span class="dim" style="font-weight:400;font-size:11px;opacity:.85">`
+      + `<span style="opacity:.7">·</span> ${esc(n)}</span>`;
+  }
+
+  // egressHTML 渲染某上游的**出口**（上游自报的静态事实）。
+  //
+  // # 为什么放在卡片头上（用户报障的现场）
+  //
+  // 「这个上游的号为什么全失败」—— 打开账号池看到的只有一堆失败行，
+  // 而真正的原因常在出口（代理没起来 → TLS handshake timeout，看起来像上游挂了）。
+  // 出口是静态事实，直接写在卡片头上：用户不用点任何按钮就能把它和错误文案对上。
+  //
+  // 判据与 noticeHTML 完全同形：**manifest 里有这个键就渲染，没有就返回空串**
+  //（于是没实现 EgressExt 的上游，界面渲染结果与改造前逐字节相同）。
+  function egressHTML(providerId) {
+    const p = providerInfo(providerId);
+    const e = p && p.egress && typeof p.egress === 'object' ? p.egress : null;
+    if (!e) return '';
+    const prox = Array.isArray(e.proxies) ? e.proxies.filter(x => typeof x === 'string' && x.trim()) : [];
+    // 词序：有代理就先说代理（那是排障时最要先确认的一条），再补直连。
+    const parts = [];
+    if (prox.length) parts.push('代理 ' + prox.join(' / '));
+    if (e.direct) parts.push('直连');
+    const text = parts.length ? parts.join(' + ') : '未配置';
+    const title = e.note ? esc(String(e.note)) : '该上游自报的出口';
+    return `<span class="dim" style="font-weight:400;font-size:11px;opacity:.85"`
+      + ` title="${title}"><span style="opacity:.7">·</span> 出口 ${esc(text)}</span>`;
+  }
+
+  // providerInfo 取某上游的 manifest 描述。
+  function providerInfo(id) {
+    return (PROVIDERS || []).find(p => p && p.id === id) || null;
+  }
+
+  // routesFor 取某上游（可选按能力位过滤）声明的管理端点。
+  //
+  // 只返回 **GET** 端点作为"面板入口"的判定依据 —— 写端点（POST/DELETE）
+  // 是动作不是面板，把它们也当成入口会让导航里出现一堆"点一下就生效"的项。
+  function routesFor(providerId, cap) {
+    return (MANIFEST.admin_routes || []).filter(r =>
+      r && r.provider === providerId &&
+      (cap === undefined || r.capability === cap) &&
+      String(r.method || '').toUpperCase() === 'GET');
+  }
+
+  // panelRoutesFor 取某上游某能力位**真正的面板入口**（= routesFor 去掉 hidden）。
+  //
+  // # 为什么要有它，而不是在 panelCapsOf 里写 `provider === 'xxx'`
+  //
+  // 有些端点是纯动作或纯数据，不该在左侧导航里占一个标签页。直接在前端
+  // 按上游名排除是**硬编码**：加第四个上游时又要改前端（判据 1 失效），
+  // 而且前端会知道上游叫什么 —— 本项目明令禁止。
+  //
+  // 正确方向是**上游自己声明**：manifest 里那条路由带 `hidden:true`
+  //（见 gateway.AdminRoute.Hidden / uiAdminRoute.Hidden），语义是
+  // "这条路由存在、但不是面板入口"。前端只读标志位，不认识任何上游名。
+  //
+  // # 它只影响"要不要生成面板"，不影响别的
+  //
+  //   · 路由本身照挂（HTTP 语义不变，curl 仍可用）
+  //   · 能力位照留在 manifest.providers[].capabilities 里
+  //     → 账号行的每日动作（如「领取福利」）不受影响
+  //   · routesFor 的语义**不变**（仍返回该能力位的全部 GET 路由）——
+  //     loadGenericList 要用全量，改它会让已生成的面板少拉一条端点
+  //
+  // # 副作用：某上游一个可见面板都没有时，它的整组从左侧导航消失
+  //
+  // buildNav 对"该上游没有任何可见 section"直接 continue（见 `if (!secs.length)`）。
+  // 这是**预期行为**：一个分组只为它的面板存在，没有面板就不占导航位置 ——
+  // 不是漏渲染分组头。
+  function panelRoutesFor(providerId, cap) {
+    return routesFor(providerId, cap).filter(r => !r.hidden);
+  }
+
+  // dailyActionsOf 取某上游**自报**的每日动作（签到 / 保活 / 领取福利…）。
+  //
+  // # 这个函数替换掉了什么
+  //
+  // 改造前 accountRow 里写死了三行：
+  //
+  //   `<button data-act="checkin"   ...>签到</button>`
+  //   `<button data-act="credits"   ...>积分</button>`
+  //   `<button data-act="keepalive" ...>保活</button>`
+  //
+  // 于是**每个**上游的每个账号行都长着「签到」「保活」，与这个上游
+  // 到底有没有这个动作完全无关。实测：codearts 一个 checkin 能力位都没有，
+  // 界面上照样有「签到」，点下去打的是 workbuddy 挂的 /admin/checkin。
+  //
+  // 现在按钮**全部**来自这里 —— 上游报了什么就渲染什么，没报就不渲染。
+  // 这正是用户要的"有什么显示什么，没有的话就不显示"。
+  //
+  // # 为什么按 provider 过滤而不是拿全量
+  //
+  // 同一张账号表里同时有多个上游的行，动作清单是跨上游合并下发的
+  //（每个条目自带 provider）。不过滤就会出现"codearts 的行里长出
+  // workbuddy 的签到按钮"—— 那正是改造前的缺陷形态。
+  //
+  // 归一化在 applyManifest 做过（只到数组层），这里再按对象过滤一次，
+  // 与 routesFor / providerRegistryIds 同一条防御：畸形元素不该流进渲染。
+  function dailyActionsOf(providerId) {
+    return (MANIFEST.daily_actions || []).filter(a =>
+      a && typeof a === 'object' && a.provider === providerId && a.id && a.label);
+  }
+
+  // upstreamGroups 返回导航用的上游分组。
+  //
+  // # 排序以服务端 manifest 为准（不再本地重排）
+  //
+  // 顺序必须**稳定**，不能依赖对象/数组遍历顺序，否则每次刷新导航都会跳位。
+  // 旧实现在这里"默认上游最前 + 其余字典序"重排 —— 它会把后端 manifest
+  // 显式排好的顺序覆盖掉（海外版 workbuddy-intl 按字典序被丢到 workbuddy
+  // 后面，与后端下发的展示顺序相悖）。现在顺序由后端单一来源决定
+  // （admin/uimanifest.go 的 prioritizeProviders：workbuddy-intl 置顶、
+  // workbuddy 次之、其余保持注册顺序），前端原样透传。
+  function upstreamGroups() {
+    // 过滤掉 null / 非对象元素（CP3 评审 F1）。
+    //
+    // # 为什么值得加（当前后端确实产不出 null）
+    //
+    // applyManifest 对四个数组做了 Array.isArray 归一，但**只到数组层、
+    // 不到元素层**：providers:[null] 会一路流到这里，让下面
+    // `!!x.default` 抛 TypeError。而同一份代码里 applyManifest 的
+    // `p && p.default` 是有守卫的 —— 防御不一致本身就是缺陷：
+    // 一旦触发，表现为"页面莫名停止刷新"，且 window.__errs 也抓不到。
+    //
+    // 2 行的成本换掉一类"不可达但真发生时极难查"的故障，值得。
+    const out = (PROVIDERS || []).filter(p => p && typeof p === 'object');
+    // 没有任何能力面板且账号数为 0 的上游不占导航位置（见计划的"显示门槛"决策）。
+    return out.filter(p => p.account_count > 0 || hasAnyPanel(p.id));
+  }
+
+  // hasAnyPanel 该上游是否有任何可渲染的能力面板。
+  //
+  // # 为什么不再排除 chat/models（评审 F2）
+  //
+  // 上一版排除 chat/models，理由是"每个上游都有那两个能力，列出来等于没差别"。
+  // 那是**把判据建立在前端硬编码的能力名白名单上** —— 一个上游若把它的
+  // 专属面板挂在 chat 上（workbuddy 的 client-login 正是如此），它的面板
+  // 就永远不显示，而"加新上游前端 0 改动"这条判据随之失效。
+  //
+  // 现在改由后端负责语义：声明了端点却没声明能力位的路由，后端归到保留名
+  // "core"（见 admin.CoreCapability）。前端只按数据判断，不认识任何能力名。
+  function hasAnyPanel(providerId) {
+    const p = providerInfo(providerId);
+    if (!p || !Array.isArray(p.capabilities)) return false;
+    return p.capabilities.some(c => routesFor(providerId, c).length > 0);
+  }
+
+  // hasSPECIALPanelExcluded 判断某能力位是否**已经被专属面板承担**。
+  //
+  // # 这张表为什么必要，以及为什么**不是**在 panelCapsOf 里写死 `!== 'checkin'`
+  //
+  // 「签到与保活」原先会由 buildProviderPanels() 生成一个通用列表面板，
+  // 但实测它是「任务历史」的劣化重复品：只有 1 个「刷新」按钮、无输入控件，
+  // 内容是**同一份**只读签到流水（同一个端点 /admin/checkin/history，
+  // 字段与任务历史完全相同，任务历史还多一个 kind 筛选）。
+  // 签到/保活已统一为 30 分钟被动扫描：设置页不再有开关与时点控件
+  //（「启用每日签到」已移除；保活只读展示）。
+  // 结论：它是重复品，用户已确认删掉。
+  //
+  // # 为什么不能直接在 panelCapsOf 里排除 'checkin'
+  //
+  // panelCapsOf 同时被两处用：
+  //   1. buildProviderPanels —— 决定"要不要生成一个通用面板"
+  //   2. navGroupHeaderHTML  —— 决定"组头提示里列哪些能力"
+  // 在它内部写死 `c !== 'checkin'`，会让 **checkin 这个能力位整个消失**。
+  // 而「任务历史」正挂在 checkin 能力位上（data-cap="checkin"）——
+  // 它要的正是"能力位还在、但不生成通用面板"。抹掉能力位会连带把它一起打坏。
+  //
+  // 所以要区分两件事：
+  //   · 能力位**存在**（由 manifest 决定，前端不许说谎）
+  //   · 能力位**不需要通用面板**（由"已由专属面板承担"这张表决定）
+  // 本函数只回答后者，且只影响 buildProviderPanels 一处。
+  //
+  // # 为什么不按"这个能力位有没有静态 section"自动判断
+  //
+  // 那样看似更"数据驱动"，但静态面板是**编译期内嵌**在 HTML 里的，
+  // 前端在生成阶段就已经能看到它 —— 自动判断会在某人把静态面板删掉时
+  // 悄悄让通用面板回来（一个安静的重复品复现），而不是报错。
+  // 显式表 + 理由，是这里更安全的形态。
+  const SPECIAL_PANEL_CAPS = ['checkin', CORE_CAP];
+
+  // hasSPECIALPanelExcluded 判断某能力位是否**已经被专属面板承担**（见 SPECIAL_PANEL_CAPS）。
+  function hasSPECIALPanelExcluded(cap) {
+    return SPECIAL_PANEL_CAPS.indexOf(cap) >= 0;
+  }
+
+  // panelCapsOf 取某上游**需要生成通用面板**的能力位列表（含保留名 core）。
+  //
+  // 与 capNamesOf 的区别：这个只列"真的有 GET 入口、且没有被专属面板承担"的能力，
+  // 用于建面板；capNamesOf 列的是声明了的能力，用于写标题提示。
+  //
+  // 被排除的能力位**仍然存在于 manifest 与 capNamesOf 里** ——
+  // 排除的只是"再生成一个通用列表面板"这一个动作（见上面那张表的注释）。
+  // 面板入口判据统一走 panelRoutesFor：hidden 的 GET 路由**不算入口**
+  //（上游自己声明，见 panelRoutesFor 的注释）。能力位本身不受影响。
+  function panelCapsOf(providerId) {
+    const out = [];
+    const p = providerInfo(providerId);
+    if (p && Array.isArray(p.capabilities)) {
+      for (const c of p.capabilities) {
+        if (panelRoutesFor(providerId, c).length > 0 && out.indexOf(c) < 0) out.push(c);
+      }
+    }
+    // 保留名 core：无能力位但声明了端点的路由归在这里。
+    // 它不在 providers[].capabilities 里（那是"声明了能力位"的列表），
+    // 所以必须单独查一次 —— 漏掉它会让 client-login 这类端点无家可归。
+    //
+    // # 为什么 core 现在也被排除（原 R2：workbuddy:core 孤儿面板）
+    //
+    // 实测：workbuddy 的 core 只有 3 条端点，其中**只有 GET /admin/client-login**
+    // 会走到这里（其余两条是 POST，routesFor 已按方法过滤）。
+    // 而 buildProviderPanels 为它生成的 section 会被 hideOrphanPanels()
+    // 立刻隐藏 —— 判据是 `capNamesOf(pid).indexOf('core') >= 0`，
+    // 而 capNamesOf 走 providers[].capabilities，**core 永远不在里面**
+    //（它是"有端点但没声明能力位"的保留名，不是真实能力位）。
+    //
+    // 所以"生成再隐藏"是一个恒真流程：每次 sync 都插一段 HTML、再把它 hidden。
+    // 界面上看不到，但它是**代码上的死路径**：将来任何人给 core 加能力名，
+    // 这个面板会毫无预兆地冒出来。R2 的要求正是"让它干脆不生成"。
+    //
+    // R2 同时问到"core 有没有真实价值（如 client-login 的 GET）"——
+    // 结论是**价值已经由别的界面承担了**：本机登录的状态与切换/回滚控件
+    // 就在「账号池」的账号行内（见 renderAccounts），core 面板的那一份
+    // 是同样的劣化重复品。GET 端点本身**不受影响**（路由照挂，
+    // 只是不再有一个空壳面板去拉它）。
+    //
+    // 实现上不在这个 if 里单独判断：core 走下面同一条出口，
+    // 由 SPECIAL_PANEL_CAPS 统一排除（见那里的注释）。
+    if (panelRoutesFor(providerId, CORE_CAP).length > 0 && out.indexOf(CORE_CAP) < 0) {
+      out.push(CORE_CAP);
+    }
+    // 统一在出口处排一次"专属面板已承担"的能力位。
+    //
+    // # 为什么放在这里而不是分别在两个 push 处判断
+    //
+    // 上游 capabilities 里可能**同时**声明了 core 之外的能力与 core 通道，
+    // 两个 push 点各写一遍判据，就是同一个不变式存两份 —— 加第三个入口时
+    // 必定漏一个，而漏了的表现是"某个上游多出一个重复面板"，不报错。
+    // 收敛到一处，只需要正确一次。
+    return out.filter(c => !hasSPECIALPanelExcluded(c));
+  }
+
+  // loadManifest 拉取渲染契约。
+  //
+  // # 失败时的行为（评审 F3）
+  //
+  // 拿不到 manifest 不该让整页白屏，只是退化成"没有上游面板"
+  //（通用面板仍然全部可用）。
+  //
+  // 但**"拿不到"的判定不能只看有没有抛异常**：admin() 对
+  // "HTTP 200 + 非 JSON 响应体"（代理返回的 HTML 错误页、空体、被截断的 JSON）
+  // **不抛异常**，而是返回 null。上一版把这个 null 直接喂给 applyManifest，
+  // 于是：
+  //   - 已加载好的 MANIFEST 被**静默清空**（providers 归零、service 退回默认）
+  //   - loadManifest 仍然返回 true，调用方以为成功了
+  //   - manifestError 不记录任何东西
+  // 结果是"一次网络抖动把已经渲染好的上游全抹掉，而且没有任何痕迹"。
+  //
+  // 所以这里必须**校验形状**：只有确认是对象且 providers 是数组才算成功。
+  async function loadManifest() {
+    try {
+      const m = await admin('/admin/ui/manifest');
+      if (!m || typeof m !== 'object' || !Array.isArray(m.providers)) {
+        // 形状不对 = 失败。保留上一份好数据，并记下原因。
+        manifestError = '响应格式异常（缺少 providers 数组）';
+        return false;
+      }
+      applyManifest(m);
+      return true;
+    } catch (e) {
+      manifestError = e && e.message ? e.message : '未知错误';
+      return false;
+    }
+  }
+
+  // ⚠ ACCT_COLS 已**移走**（见下方账号池列注册表那一节）。
+  //
+  // 它原来是"账号表的列数 = 11"，而拆成每上游一张表之后**列数按上游不同**
+  //（workbuddy 11 列、codearts 7 列）。一个全局常量表达不了这件事，
+  // 留着它只会诱使新代码写出"codearts 的占位行跨 11 格"这种错。
+  //
+  // 现在它定义在列注册表旁边，含义收窄为"**默认列集**的长度"，
+  // 凡是"这一组有多少列"一律用 acctColumnsFor(provider).length。
+  //
+  // 想找 bug B1 的那条教训（colspan 必须与表头列数一致）：
+  // 那条仍然成立，只是判据从"等于 ACCT_COLS"变成"等于**本组自己的**列数"。
+
+  // 其余表格的列数。同样必须与各自 <thead> 的 <th> 数量一致。
+  //
+  // # 为什么全部集中在这里
+  //
+  // 上一版每个表格的空态/错误态各自写死数字，散落在十几处。
+  // 加一列时要记得改十几处，漏一处就是"提示行只占一半"的视觉 bug。
+  // 集中定义后，加列只改一行，且有 T11 套件核对它和真实表头是否一致。
+  const COLS = {
+    travel: 8,   // 猫猫旅行
+    growth: 6,   // 成长计划（精简：额度/能量、连登/补签、待完成/可得、可领 合并）
+    // ⚠ jobs / logs 已移除（2026-10-19）：任务调度页换成卡片网格、请求日志页换成
+    //   grid 表格（照抄参考项目 Agent2API），两处都不再有 `<table>` 列数，
+    //   HTML 里的 `__COLS_JOBS__` / `__COLS_LOGS__` 占位符也一并删了 ⇒ 留着就是死字段。
+    //   剩下的三条仍被 rowPlaceholder 使用，别顺手删。
+  };
+
+  // rowPlaceholder 生成占满整行的提示行。
+  //
+  // 所有表格的空态/加载态/错误态都必须走它 —— 这是消灭
+  // "colspan 与真实列数不一致"这类漂移的唯一可靠办法。
+  function rowPlaceholder(cols, text, cls) {
+    return `<tr><td colspan="${cols}" class="${cls || 'dim'}">${esc(text)}</td></tr>`;
+  }
+
+  // 表格三态的统一入口。
+  //
+  // # 为什么要把它做成枚举而不是各自写文案
+  //
+  // 三态的**语义**必须一致：加载态是"正在等"（中性）、空态是"确实没有"
+  //（中性偏淡）、错误态是"出错了"（红，且必须带原因）。
+  // 各自写文案时最容易出的错是**把错误显示成空态** ——
+  // 用户看到"暂无数据"会以为系统正常，实际是接口挂了。
+  //
+  // 所以这里强制区分，并且错误态**必须**带 message。
+  const TableState = {
+    loading: (cols, what) => rowPlaceholder(cols, (what || '') + '加载中…'),
+    empty: (cols, what) => rowPlaceholder(cols, (what || '') + '暂无数据'),
+    error: (cols, msg) => rowPlaceholder(cols, msg || '加载失败', 'err'),
+  };
+
+  // normalizeAccount 把一个账号视图归一成渲染需要的形状。
+  //
+  // # 修正后的描述（评审 CP2 F3）
+  //
+  // 计划里我写的 B5 是「/status 没有 provider 字段 → 账号全被归到默认上游」。
+  // **实测不成立**：/status 与 /admin/accounts **都带** provider
+  //（评审在强制回落路径下实测 inferred=0）。所以那条描述是错的，已改正。
+  //
+  // 那么这段代码的价值是什么？**防御形状契约的漂移**，而不是修一个现存 bug：
+  //
+  //   两个端点的账号形状并不相同 ——
+  //     /admin/accounts  带 today_checkin、token_expire_sec
+  //     /status          带 quota、err_total、last_err
+  //   回落路径**静默依赖**"两边都有 provider"。哪天某个端点少一个字段，
+  //   界面会把号归错上游且**不报任何错**（正是最难查的一类故障）。
+  //
+  // 所以这里做两件事：
+  //   1. 缺 provider 时显式打标记（provider_inferred），界面提示"这是推断值"
+  //   2. 畸形输入返回 null 由调用方滤掉，不让半个对象流进渲染
+  //
+  // 注意：在当前后端下 provider_inferred **不会真的出现**（实测为 0）。
+  // 它是形状契约的守卫，不是"已修复的 bug"。评审 F3 说得对 ——
+  // 把它记作"修好了 B5"是夸大；诚实的说法是"B5 的原始描述有误，
+  // 这里补的是契约守卫"。
+  function normalizeAccount(a) {
+    if (!a || typeof a !== 'object') return null;
+    const out = Object.assign({}, a);
+    // 缺 provider：交给 providerOf 走默认上游，但记下"这是推断来的"，
+    // 供表格显示「上游?」并在分组标题里说明。
+    if (!out.provider) out.provider_inferred = true;
+    return out;
+  }
+
+  function renderAccounts(list) {
+    share = (list || []).map(normalizeAccount).filter(Boolean);
+    updateNavBadges();
+    // 按上游分组：组标题行 + 该组的账号行。
+    //
+    // 分组不是为了好看 —— 它让"这个号属于哪个上游"从一列小标签
+    // 变成一眼可见的结构，号一多时这是最快的定位方式。
+    //
+    // ⚠ 这里**没有** `if (!share.length) return ...` 的提前返回（R2 删掉的）。
+    //
+    // # 为什么原来那条提前返回是个缺陷
+    //
+    // 它把"池子里一个号都没有"直接渲染成一句「账号池为空」，于是
+    // **整池空 = 一个上游都不显示**。用户看到的是"这功能没了"，
+    // 而不是"哪个上游还没加号" —— 而后者才是他下一步要做的动作。
+    //
+    // 判据与模型面板的空态（emptyModelGroups）是同一条：
+    // **manifest 里有的上游，界面上都要有。** 池子空只是"每个上游各 0 个号"，
+    // 是同一件事的一个特例，不该有单独一条出口。所以入口、出口、判据三层
+    // 统一走 registryAccounts() 一份枚举。
+    const groups = groupAccountsByProvider(share);
+    // 一个上游都没登记（manifest 没到）时，上一条说明仍然有用：
+    // 那时连分组块都渲染不出来，界面会是一片空白。
+    if (!groups.length) {
+      $('accts').innerHTML = accountPlaceholder('暂无上游 —— 渲染契约未加载，稍后自动重试');
+      return;
+    }
+    // 每个上游一个 <section class="acctgroup">：可点标题 + **它自己的表**（自己的表头）。
+    //
+    // 开合状态在**每次重绘时重新读一遍** —— 不缓存。
+    // 缓存它就得保证"点一下也更新缓存"，而每次刷新都重建整块
+    //（renderAccounts 直接写 innerHTML），任何缓存都会在下一次刷新时
+    // 与 DOM 不一致。localStorage 才是唯一事实来源。
+    $('accts').innerHTML = groups.map(accountGroupRow).join('');
+    // 每个上游卡片顶部的「全部 X」按钮与账号表**同源**（同一份
+    // manifest.daily_actions），所以它随这一起重绘 —— 分两处渲染会让
+    // "表格里没有了、卡片头上还在"这种不一致在某次刷新的中间态被看见。
+  }
+
+  // dailyAllActionsHTML 渲染**某一个上游**卡片顶部的「全部 X」按钮。
+  //
+  // # 判据（用户要的"有什么显示什么"）
+  //
+  //   manifest.daily_actions 里该上游的 Batch=true 动作 → 出现「全部 <label>」
+  //   没有                                             → 不出现
+  //
+  // 实测：workbuddy 报的「签到」Batch=true → 它那张卡片上有「全部签到」；
+  // codearts 的「签到」本轮补了全量端点（/admin/welfare/claim/all）后
+  // 也报 Batch=true → 同样有。
+  //
+  // # 为什么按钮在**卡片上**而不是账号池顶部（用户本轮要求）
+  //
+  //	"全部签到（lobsterai）全部签到（qoder）全部签到（qodercn）
+  //	 全部签到（trae）这些放到上游的卡片顶部
+  //	 不要放到和账号池水平的位置"
+  //
+  // 顶部那一排是"对整池生效"的动作；按上游生效的按钮放在整池那一排，
+  // 语义上就与旁边「刷新全部额度」混在一起 —— 而"作用域模糊"正是改造前
+  // 那个写死的「全部签到」被诟病的点（它打的是 workbuddy 的私有路由，
+  // 却摆在"整池"的位置上）。
+  //
+  // # 文案为什么**不带**上游名后缀
+  //
+  // 上一版在顶部并排时才带「（workbuddy）」后缀。现在按钮就在它自己的
+  // 卡片上，卡片标题已经写着是哪个上游 —— 再加后缀是重复，不是澄清。
+  // 作用域由**位置**表达（比文字后缀更不容易看错）。
+  //
+  // # 为什么不用 innerHTML 拼 onclick
+  //
+  // 与全站一致走事件委托（见 installAllDailyActions）——
+  // 拼 onclick 属性需要把动作对象序列化进字符串，那是第二份数据形状。
+  function dailyAllActionsHTML(providerId) {
+    const all = (MANIFEST.daily_actions || []).filter(a =>
+      a && typeof a === "object" && a.provider === providerId
+      && a.batch && a.all_url && a.id && a.label);
+    return all.map(a =>
+      `<button class="gact" data-allday="${esc(a.provider)}:${esc(a.id)}"`
+      + ` title="${esc(a.title || a.label)}（只对 ${esc(a.provider)} 的账号，不影响其它上游）">`
+      + `全部${esc(a.label)}</button>`).join("");
+  }
+
+  // installAllDailyActions **上游卡片**上「全部 X」按钮的事件委托（只绑一次）。
+  //
+  // 与 installGenericActions 同一个理由：容器会被反复重建
+  //（renderAccounts 每次刷新都重写 #accts 的 innerHTML），绑在被重建的
+  // 节点上就必然要处理"何时解绑"，而 #content 从加载到关闭都不会被替换。
+  //
+  // ⚠ "只绑一次"这个守卫**不是可选的**：去掉它、或改成每次重绘都调本函数，
+  // 点一次按钮会发 N 个请求（N = 重绘次数）。实测：刷新 5 次后点一次发 7 个。
+  // DOM 长得一模一样，只有"数请求"能发现 —— 见 tests/frontend 里的 e2e 探针。
+  let allDailyInstalled = false;
+
+  function installAllDailyActions() {
+    if (allDailyInstalled) return;
+    allDailyInstalled = true;
+    $('content').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-allday]');
+      if (!b || b.disabled) return;
+      // 从 manifest 反查动作对象（而不是把端点写进 data 属性）——
+      // data 属性是 DOM 上的第二份状态，刷新后可能与 manifest 不一致。
+      const [pid, id] = String(b.dataset.allday || '').split(':');
+      const d = (MANIFEST.daily_actions || []).find(x =>
+        x && x.provider === pid && x.id === id && x.all_url);
+      if (!d) { toast('该动作已不再可用（渲染契约已更新）', true); return; }
+      startAll(d);
+    });
+  }
+
+  // renderJobs 渲染任务调度面板（T9）。
+  //
+  // 数据来自 manifest.jobs。**不额外发请求** —— 与顶栏状态条同一个理由：
+  // 第二份事实来源会让两份数字不一致时无法判断谁对。
+  // relTime 把「某个时刻距今还有多久 / 已经多久」说成人话。
+  //
+  // 抄自参考项目 Agent2API 的 describeNext（`ui-islands/src/islands/tasks-panel.tsx:189-202`），
+  // 它那句注释说得很准：「比只给一个时刻更有用（用户关心的是还有多久）」。
+  //
+  // ⚠ 一边是未到、一边是已过，所以**两个方向分开说**（「3 分钟后」/「已过 3 分钟」）——
+  //   合并成「3 分钟」会看不出任务是在等我、还是早该跑了。
+  function relTime(ms) {
+    const diff = ms - Date.now();
+    const past = diff < 0;
+    const s = Math.round(Math.abs(diff) / 1000);
+    const say = (n, unit) => past ? `已过 ${n} ${unit}` : `${n} ${unit}后`;
+    if (s < 60) return past ? '刚刚' : `${s} 秒后`;
+    const m = Math.round(s / 60);
+    if (m < 60) return say(m, '分');
+    const h = Math.round(m / 60);
+    if (h < 24) return say(h, '小时');
+    return say(Math.round(h / 24), '天');
+  }
+
+  // renderJobs 渲染任务调度面板。
+  //
+  // # 为什么从表格换成卡片（2026-10-19 照参考项目 Agent2API 移植）
+  //
+  // 参考实现的形态在 `agent2api/desktop-tauri/ui/css/page-tasks.css`（186 行）
+  // 与 `ui-islands/src/islands/tasks-panel.tsx`。原来是张 6 列表格，
+  // **「最近错误」那一列必然被长文本撑破** —— 错误原文动辄上百字符，
+  // 表格里只能 `slice(0,50)` 截断 + title 悬停，等于把最重要的排障信息藏在鼠标后面。
+  // 卡片形态下错误独立一行、可以换行整段显示，这是换形态的主要理由。
+  //
+  // # 抄了什么 / 没抄什么
+  //
+  //   抄：2 栏网格（行优先·同行等高·1120px 断点回落单栏）、标题行 + 状态行两段结构、
+  //       问号 .job-q 承载说明（而不是把 title 挂在整块上）、状态行用全角「·」连接多段事实、
+  //       空态居中、错误卡描红。
+  //       ⚠ 参考项目把它的第一条整行铺开（LEAD_CARDS=1），是因为**那条有主次**
+  //         （其余几条是页面自刷新、执行者是页面自己）。我们这里没有主次之分，
+  //         所以**全部进 2 栏**——这是一处刻意不抄。
+  //   没抄：开关 / 间隔输入 / 「立即执行」按钮。本面板**只读**，理由见 HTML 里那段注释
+  //         （手动触发会与调度器并发跑同一任务）。
+  //
+  // 数据来自 manifest.jobs。**不额外发请求** —— 与顶栏状态条同一个理由：
+  // 第二份事实来源会让两份数字不一致时无法判断谁对。
+  function renderJobs() {
+    const host = $('jobrows');
+    if (!host) return;
+    if (!MANIFEST.loaded) {
+      host.innerHTML = `<tr><td colspan="7" class="dim" style="padding:12px 16px">渲染契约未加载：${esc(manifestError || '未知原因')}</td></tr>`;
+      $('jobMeta').textContent = '';
+      return;
+    }
+    const jobs = MANIFEST.jobs || [];
+    $('jobMeta').textContent = jobs.length ? `（${jobs.length} 个已注册任务）` : '';
+    if (!jobs.length) {
+      host.innerHTML = `<tr><td colspan="7" class="dim" style="padding:12px 16px">没有上游注册定时任务</td></tr>`;
+      return;
+    }
+    // 稳定排序：先按上游，再按任务名。不排序会让卡片顺序随后端 map 遍历跳动。
+    // 同样先滤掉 null / 非对象元素（CP3 评审 F1：a.provider 在 null 上会抛）。
+    const sorted = jobs.filter(j => j && typeof j === 'object').sort((a, b) => {
+      const pa = a.provider || '', pb = b.provider || '';
+      if (pa !== pb) return pa < pb ? -1 : 1;
+      const na = a.name || '', nb = b.name || '';
+      return na < nb ? -1 : na > nb ? 1 : 0;
+    });
+    host.innerHTML = sorted.map(j => {
+      // 间隔：毫秒转可读。小于 1 分钟显示秒，否则显示分钟。
+      const ms = j.interval_ms || 0;
+      const itv = ms <= 0 ? '—' : (ms < 60000 ? (ms / 1000) + ' 秒' : (ms / 60000) + ' 分');
+
+      // ⚠⚠ 任务名显示成「中文 (英文)」（2026-10-18 按用户要求）：
+      //   中文给人看、英文（放括号里）是排障时唯一能对照日志的标识 ⇒ 两者都要。
+      //   `label` / `desc` 由后端查表给（见 internal/admin 的 jobLabels/jobDescs）；
+      //   ⚠ **没登记就退回英文名**（不报错、也不显示空白）—— 与 capTitles 的约定一致。
+      const en = j.name || '';
+      const zh = j.label || '';
+      const nameHtml = zh
+        ? `${esc(zh)} <span class="dim mono">(${esc(en)})</span>`
+        : `<span class="mono">${esc(en || '—')}</span>`;
+      // ⚠ 说明挂到**问号**上（抄参考项目的 .tip-q）：这样"哪条有解释"是看得见的，
+      //   不用满处乱悬停去试。没有 desc 就不画问号（不留一个点了没反应的圆）。
+      const qHtml = j.desc
+        ? `<span class="job-q" title="${esc(j.desc)}">?</span>` : '';
+
+      // 上次/下次：绝对时刻（跟日志对时间用）+ 相对说法（判断任务还活着吗）。
+      // ⚠ 后端没下发 next_run，这里由 `last_run + interval` 推算 —— 不为此改协议。
+      //   它和真实排期会在"用 Due 自定义到期"的任务上不一致，所以文案说「约」而不是断言。
+      let lastAbs = '';
+      let nextRel = '';
+      if (j.last_run) {
+        const d = new Date(j.last_run);
+        lastAbs = isNaN(d) ? esc(j.last_run) : d.toLocaleTimeString('zh-CN', { hour12: false });
+        if (ms > 0 && !isNaN(d)) { nextRel = '约 ' + relTime(d.getTime() + ms); }
+      }
+      const lastCell = lastAbs || '<span class="dim">还没有执行记录</span>';
+      // 状态：出错 / 正常 / 从未执行。三态要说清，不能都画成"—"。
+      const stateCell = j.last_error
+        ? '<span class="err">出错</span>'
+        : (j.last_run ? '<span style="color:var(--ok)">正常</span>' : '<span class="dim">—</span>');
+      // 错误列：单行截断 + title 悬停看全文（表格形态下这是"整段可见"的替代方案）。
+      const errCell = j.last_error
+        ? `<td class="err" title="${esc(j.last_error)}">${esc(j.last_error)}</td>`
+        : '<td class="dim">—</td>';
+      const cls = j.last_error ? 'errrow' : '';
+      return `<tr class="${cls}">
+        <td>${nameHtml}${qHtml}</td>
+        <td><span class="pill dim">${esc(j.provider || '—')}</span></td>
+        <td>${ms > 0 ? '每 ' + esc(itv) : '—'}</td>
+        <td>${lastCell}</td>
+        <td class="dim">${nextRel || '—'}</td>
+        <td>${stateCell}</td>
+        ${errCell}
+      </tr>`;
+    }).join('');
+  }
+
+  // renderJobCoverage 渲染任务覆盖检查表。
+  //
+  // 数据来自 manifest.job_coverage（后端 internal/admin/jobcover.go 算好）。
+  // **前端不做判据** —— 「有没有能力」是编译期事实（能力位 / 接口实现），
+  // 前端拿不到；在这里重算一份必然与后端漂移。
+  //
+  // # 三态而不是两态
+  //
+  //   有能力 + 已注册  → ✓ 已注册（绿）
+  //   有能力 + 未注册  → ✗ 未注册（红，这是缺口）
+  //   本来就没能力     → — 不适用（灰）
+  //
+  // 只做两态（注册了 / 没注册）会让绝大多数本来没有签到能力的上游全被标红，
+  // 真正的缺口反而被噪声埋掉 —— 那比不做这个功能更糟。
+  function renderJobCoverage() {
+    const host = $('jobcovrows');
+    if (!host) return;
+    const meta = $('jobCoverMeta');
+    if (!MANIFEST.loaded) {
+      host.innerHTML = '<tr><td colspan="4" class="dim" style="padding:12px 16px">渲染契约未加载：' + esc(manifestError || '未知原因') + '</td></tr>';
+      if (meta) meta.textContent = '';
+      return;
+    }
+    const list = (MANIFEST.job_coverage || []).filter(c => c && typeof c === 'object');
+    if (!list.length) {
+      host.innerHTML = '<tr><td colspan="4" class="dim" style="padding:12px 16px">没有上游自报任务能力</td></tr>';
+      if (meta) meta.textContent = '';
+      return;
+    }
+    // 稳定排序：缺口排最前（用户最需要看的），其余按上游名。
+    // 不排序会让行顺序随后端 map 遍历跳动。
+    const gaps = c => (c.missing_checkin ? 1 : 0) + (c.missing_refresh ? 1 : 0);
+    const sorted = list.slice().sort((a, b) => {
+      const ga = gaps(a), gb = gaps(b);
+      if (ga !== gb) return gb - ga;
+      const pa = a.provider || '', pb = b.provider || '';
+      return pa < pb ? -1 : pa > pb ? 1 : 0;
+    });
+    // 缺口总数进标题 —— 一进这个页就要能看见「有几个要处理」。
+    const totalGaps = sorted.reduce((n, c) => n + gaps(c), 0);
+    if (meta) {
+      meta.textContent = totalGaps
+        ? '（' + totalGaps + ' 处缺口）'
+        : '（无缺口）';
+      meta.style.color = totalGaps ? 'var(--warn)' : '';
+    }
+    // cell 三态渲染。can=有能力吗 has=注册了吗 kind='签到'/'续期'（写进提示语）。
+    const cell = (can, has, kind) => {
+      if (!can) return '<td class="dim">— 不适用</td>';
+      if (has) return '<td><span class="badge">已注册</span></td>';
+      return '<td><span class="badge badge--hot" title="该上游有' + kind + '能力，但没注册定时任务 —— '
+        + '手动按钮能用，却永远不会自动跑">未注册</span></td>';
+    };
+    host.innerHTML = sorted.map(c => {
+      const id = c.provider || '';
+      // 说明列：只对缺口给「怎么办」，正常行留空 —— 每行都写一句会把表撑满噪声。
+      const hints = [];
+      if (c.missing_checkin) hints.push('补实现 <span class="mono">gateway.JobExt.Jobs()</span> 并注册 <span class="mono">' + esc(id) + '-checkin</span>');
+      if (c.missing_refresh) hints.push('补实现 <span class="mono">gateway.JobExt.Jobs()</span> 并注册 <span class="mono">' + esc(id) + '-refresh</span>');
+      const note = hints.length
+        ? '<span class="err">' + hints.join('；') + '</span>'
+        : (c.can_checkin || c.can_refresh ? '<span class="dim">正常</span>' : '<span class="dim">该上游没有这两类能力</span>');
+      return '<tr>'
+        + '<td class="mono">' + esc(id) + '</td>'
+        + cell(c.can_checkin, c.has_checkin, '签到')
+        + cell(c.can_refresh, c.has_refresh, '续期')
+        + '<td>' + note + '</td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  // renderAccounts 渲染账号表。
+  // accountPlaceholder 账号池的整块占位（加载中 / 出错 / 无上游）。
+  //
+  // # 为什么不再是 rowPlaceholder（那是一行 <tr>）
+  //
+  // 拆多表之后 `#accts` 是 <div>，不是 <tbody>：往里塞 <tr> 会被 HTML 解析器
+  // 丢弃或 foster-parent 到别处，页面上就是"占位句不见了"——
+  // 而那正是最需要它出现的时刻（接口挂了的时候）。
+  //
+  // 所以占位改成块级元素。`accountRow` 的列数不再参与它 ——
+  // 它不属于任何一张表。
+  function accountPlaceholder(text, cls) {
+    return `<div class="${cls || 'dim'}" style="padding:12px 16px">${esc(text)}</div>`;
+  }
+
+  // registryAccounts 把账号并进 **manifest.providers 全集**，缺号的建空组。
+  //
+  // # 判据（与模型面板的 emptyModelGroups 是**同一条**）
+  //
+  // > 存在于 manifest 的上游，界面上都必须出现，哪怕它当前一个号都没有。
+  //
+  // 判据的形状是一条，**枚举点也只有一处**（providerRegistryIds）——
+  // 模型面板与账号池都读它。这是本项目的教训："判据分散就会漂移"：
+  // 两处各写一遍"manifest 里有哪些上游"，早晚会有一处开始漏上游。
+  //
+  // # 为什么独立成函数，而不是塞进 groupAccountsByProvider
+  //
+  // 那个函数是**纯函数**（只做分组排序，不读全局），所以能在 Node 里脱开
+  // 浏览器直接跑。把读全局的枚举混进去，测它就得先造一个假 PROVIDERS ——
+  // 那正是"装置抄了被测对象的常量"那类事故的温床（本项目的 PAGE_SIZE 就这么坏过）。
+  //
+  // 分成"读全局的枚举" + "纯分组"两层后：
+  //   · 枚举层可以在真浏览器里和 manifest 逐字对照
+  //   · 分组层可以在 Node 里灌任意数据（含上游带 / 与 . 的名字）
+  // 两层各自可测，也不用为了测试把任何东西挂到 window 上。
+  function registryAccounts(list) {
+    // 先把每个上游建好空壳 —— 顺序就是最终渲染顺序，下面只往壳里塞号。
+    const out = [];
+    const idx = new Map();
+    for (const id of providerRegistryIds()) {
+      if (idx.has(id)) continue;               // 同一个上游登记两次也只出现一组
+      idx.set(id, out.length);
+      out.push({ provider: id, accounts: [] });
+    }
+    // 再把号塞进去。两种"未知上游"必须区分对待（与 accountGroupRow 的
+    // 「（未在 manifest 里注册）」措辞是同一条规则）：
+    //   · providerOf 回落出的 id —— 账号**确实属于**某个上游，只是没登记，
+    //     显式建组让用户看得见"这几个号挂在谁名下"
+    //   · list 里有畸形元素（normalizeAccount 已经滤过一层）—— 归入一个
+    //     明确标注的兜底组，而不是硬塞进某个真实上游冒充它的号
+    for (const a of list) {
+      if (!a || typeof a !== 'object') continue;
+      const id = providerOf(a) || UNLABELED_PROVIDER;
+      if (!idx.has(id)) {
+        idx.set(id, out.length);
+        out.push({ provider: id, accounts: [] });
+      }
+      // ⚠ 用 out[idx.get(id)]，不是 out.get(id) —— out 是**数组**，
+      // `idx` 才是那个 Map（id → 下标）。第一版写成了 out.get(id)，
+      // 报 TypeError: out.get is not a function。
+      // 它被 renderAccounts 的调用方 try/catch 吞掉，表现为"账号表一直停在
+      // 『未连接』"——**界面全空、但没有任何可见报错**，正是本项目最难查的一类。
+      out[idx.get(id)].accounts.push(a);
+    }
+    return out;
+  }
+
+  // 上游未知时的兜底分组名。用一个**不可能与真实上游撞名**的串：
+  // 它若与某个真实上游同名，兜底组会显示成那个上游、并谎报账号数。
+  const UNLABELED_PROVIDER = '（未标注）';
+
+  // groupAccountsByProvider 把账号按上游分组。
+  //
+  // # 排序以服务端 manifest 为准（不再本地重排）
+  //
+  // 分组顺序直接来自 registryAccounts（它按 providerRegistryIds 建组，
+  // 而后者已透传 manifest 顺序）——**这里不再 sort**。
+  //
+  // 旧排序"有账号的在前 + 默认上游优先 + 组内字典序"曾把服务端显式顺序
+  // 覆盖掉：workbuddy-intl（海外版，0 账号）被按字典序/空组规则挤到最后，
+  // 用户要求的展示顺序（workbuddy-intl → workbuddy → codearts → loomy →
+  // trae）永远到不了前端。顺序的单一来源是服务端
+  // （admin/uimanifest.go 的 prioritizeProviders），前端原样透传。
+  function groupAccountsByProvider(list) {
+    const out = registryAccounts(list);
+    for (const g of out) g.isDefault = g.provider === DEFAULT_PROVIDER;
+    return out;
+  }
+
+  // accountEmptyNote 0 账号分组的说明。
+  //
+  // # 为什么必须是一句话而不是留空
+  //
+  // 空组是这次改动的**新面孔** —— 用户以前从没见过"有标题但没有行"的分组，
+  // 空着会被读成"渲染坏了"，而不是"这个上游还没加号"。
+  // 所以它要讲清两件事：**为什么是空的**、**怎么让它不空**。
+  // 与模型面板的空态注释同一条规则：空白必须能自我解释。
+  //
+  // 措辞按"有没有页内添加账号的入口"分两种 —— 判据仍取自 manifest，
+  // 不硬编码上游名：有 login 的上游点了就能加，没有的只能等后端补流程。
+  function accountEmptyNote(providerId) {
+    const info = providerInfo(providerId);
+    if (!info) {
+      // 连 manifest 都没登记（历史号、回落路径）：不能说"去加一个"，
+      // 因为该往哪个上游加根本无法确定。
+      return '该上游未在 manifest 里注册；已录入的账号会在上面按它的 provider 分组';
+    }
+    const login = info.login;
+    if (login && login.kind) {
+      return '该上游暂无账号 —— 点右侧「＋ ' + (login.label || '添加账号') + '」添加';
+    }
+    return '该上游暂无账号 —— 凭证目录里没有它的凭证文件；该上游未声明页内登录流程';
+  }
+
+  // accountGroupRow 一个上游分组的标题行。
+  //
+  // 用 <tr class="grouprow"> 而不是额外的表格：保持单一 table，
+  // 让列宽与主体一致，也不会引入嵌套表格的样式麻烦。
+  //
+  // # 「添加账号」「重载 auths」为什么挂在这里（T10）
+  //
+  // 这两个动作**都是上游专属的**：
+  //   · 添加账号走该上游自己的登录流程（workbuddy 是 OAuth 设备码，
+  //     codearts 是 OAuth + DPoP，步骤数都不同 —— 见 gateway.LoginFlow）
+  //   · 重载 auths 的后端语义是"对齐 ReloadProvider 指定的**那一个**上游"
+  //     （`SyncToDirFor(reloadProvider(), auths)`）
+  //
+  // 原先它们挂在面板标题（h2）上，语义是"对整池生效" —— 那是错的，
+  // 会让人以为添加账号能选上游。放到分组行后，点哪个上游就是往哪个上游加。
+  //
+  // # 按 manifest 决定渲染什么，不写死上游名
+  //
+  // 判据是 `manifest.providers[].login`（该上游有没有页内登录流程）。
+  // 有 → 渲染「＋ 添加账号」；没有 → 渲染一句说明，讲清**为什么**与**怎么做**。
+  // 这样加第三个上游时前端 0 改动。
+  //
+  // 「全部签到 / 刷新全部积分」留在 h2（它们确实是"对整池生效"的语义）。
+  function accountGroupActions(providerId) {
+    const info = providerInfo(providerId);
+    if (!info) {
+      // 未在 manifest 里注册的上游：不渲染任何动作。
+      // 它多半是历史账号或回落路径，往里加账号没有意义（登录流程未知）。
+      return '';
+    }
+    const login = info.login;
+    // 「批量导入」：**不再看该上游有没有自己的 /import 路由**。
+    //
+    // # 本轮改造（用户要求"全部上游都可以制作这个功能"）
+    //
+    // 改造前判据是 `adminRouteBySuffix(providerId,'POST','/import')` ——
+    // 只有自己实现了导入端点的上游（workbuddy / loomy）才有这个按钮。
+    // 于是同一排按钮在不同上游上数量不一，用户看到的正是"这几个也不齐"。
+    //
+    // 现在核心提供一个**通用**端点 `POST /admin/accounts/import`
+    //（请求体带 provider），能不能导入由上游声明 `AccountImportExt` 决定。
+    // 判据换成 manifest 里该上游的能力位 `import`
+    //（仍**是数据**，不是上游名 —— 加新上游时前端零改动）。
+    const importBtn = hasCap(providerId, 'import')
+      ? `<button class="gact" data-gimport="${esc(providerId)}"`
+        + ` title="粘贴 ${esc(providerId)} 的凭证 JSON 批量导入（单个对象 / [ ] 数组 / 多个独立对象依次粘进来会自动合并）；导入后自动重载账号池">批量导入</button>`
+      : '';
+    // 「刷新本上游额度」：该上游**声明了 CapQuotaProbe** 才渲染。
+    //
+    // # 三层作用域里的中间一层（用户要求）
+    //
+    //   行内「额度」            只刷**该账号**
+    //   分组「刷新本上游额度」  ← 本按钮，只刷**该上游**的账号
+    //   顶部「刷新全部额度」     刷**所有**账号
+    //
+    // 判据用能力位（数据驱动，不写死上游名）：声明了 quota-probe 才出现。
+    // 没声明的上游点了也是恒失败 —— 那是"假按钮"，本项目一直避免。
+    //
+    // ⚠ 账号数写进 title：用户点之前该知道会刷几个号
+    //（"1 个"和"13 个"是两件事，尤其刷新会真的打上游）。
+    const gQuotaCount = (MANIFEST.providers.find(x => x.id === providerId) || {}).account_count;
+    const gQuotaBtn = hasCap(providerId, 'quota-probe')
+      ? `<button class="gact" data-gquota="${esc(providerId)}"`
+        + ` title="只重新探测 ${esc(providerId)} 的${gQuotaCount === undefined ? '' : ' ' + gQuotaCount + ' 个'}账号剩余额度`
+        + `（不含其它上游的账号）">刷新本上游额度</button>`
+      : '';
+
+    // 「全部签到」—— 本上游卡片顶部的全量动作（用户本轮要求的位置）。
+    //
+    // # 它与顶部那个「全部签到」是**两级**，不是重复
+    //
+    //   本按钮   打该上游自己的 all_url            → 只签这一个上游的号
+    //   顶部那个 打 /admin/accounts/checkin/all    → 触发**所有**上游
+    //
+    // 两个入口的文案刻意**不同域**（本按钮在卡片上、顶部那个在整池那一排），
+    // 位置本身就说清了作用域；title 里再补一句明示，避免误点。
+    //
+    // 判据仍是**上游自报**（batch && all_url）：没有全量端点的上游不出现，
+    // 与"有什么显示什么"同一条。
+    const gDailyAll = dailyAllActionsHTML(providerId);
+
+    // ---- 按钮顺序（用户第三版要求，**逐字**照做）----
+    //
+    //	全部签到 → 添加账号 → 批量导入 → 刷新本上游额度 → 重载 auths
+    //
+    // 用户原话：
+    //
+    //	「全部签到、添加账号、批量导入、刷新本上游额度、重载 Auths。
+    //	  按照这样排序，你换一下顺序就行。」
+    //
+    // 前两版我理解错了（先按"右端固定三项"排、又改成把重载 auths 放最右），
+    // 这一版是用户直接给出的完整次序，照做即可。
+    //
+    // ⚠ 「添加账号」**不带 `＋`**（用户明确要求"添加账号不需要那个加号"）——
+    // 这条从上一版起就成立，别在重排时把加号加回来。
+    const addBtn = (login && login.kind)
+      ? `<button class="gact" data-gadd="${esc(providerId)}"`
+        + ` title="${esc(login.label || '添加账号')}（走 ${esc(providerId)} 自己的登录流程）">`
+        + `${esc(login.label || '添加账号')}</button>`
+      : '';
+    const reloadBtn = `<button class="gact" data-greload="${esc(providerId)}"`
+      + ` title="扫描凭证目录并把账号池对齐到 ${esc(providerId)}；手工拷入/删除凭证文件后用它。走页内添加的不需要点">`
+      + `重载 auths</button>`;
+
+    // 没有页内登录流程时，用一句说明**替代**「添加账号」按钮的位置。
+    //
+    // ⚠ 措辞**不能一律说"需手工放置凭证"** —— 那对 workbuddy 是**错的**：
+    // 它的页内 OAuth 流程一直是通的（`POST /admin/login/start` 打的就是
+    // copilot.tencent.com），只是后端还没在 manifest 里声明 `login`。
+    // 所以这里只说**能确定的事**：manifest 里没声明这个字段。
+    const noLoginNote = (login && login.kind) ? '' :
+      `<span class="dim" style="font-size:11px"`
+      + ` title="该上游未在 manifest 的 login 字段里声明页内登录流程">`
+      + `未声明页内登录流程</span>`;
+
+    // ⚠ 每项**各自**按数据驱动决定出不出（全部签到要 batch+all_url、
+    // 添加账号要 login、批量导入要 `import` 能力位、额度要 quota-probe）——
+    // 次序固定，但"没有就不渲染"这条不变（那正是假按钮的防线）。
+    //
+    // ⚠ 「列设置」排在最末，与上面那五个**动作**分开看：前五个都对上游发请求
+    //   （会改数据），这一个只改**本机这台浏览器的显示**（不改任何上游状态）。
+    //   参考项目也是把它做成一枚独立的图标按钮、不在动作组里（tsx:505-536）。
+    //   我们零依赖没有图标体系，所以用文字按钮、并在 title 里说清"只影响本机"。
+    const colsBtn = `<button class="gact colset-btn" popovertarget="acctcols-${esc(providerId)}"`
+      + ` title="选择这张表显示哪些列、以及它们的顺序；设置只存在本机这台浏览器，不改上游数据">`
+      + `列设置</button>`;
+    return gDailyAll
+      + addBtn
+      + noLoginNote
+      + importBtn
+      + gQuotaBtn
+      + reloadBtn
+      + colsBtn;
+  }
+
+  // ---------------------------------------------------------------- 账号池列注册表
+  //
+  // # 这是"每个上游一张自己的表头"的落点
+  //
+  // 用户诉求：不该所有上游共用最上面那个表头 —— **有些列不是每个上游都共有的**。
+  // 上游**只报列 id**（`manifest.providers[].accounts_columns`），
+  // 标题、提示、单元格怎么画**全在这张表里**。
+  //
+  // # 为什么列 id 由后端下发，而不是前端写死
+  //
+  // 写死就得写成 `if (provider === 'codearts') {...}` —— 那是把上游名
+  // 搬进渲染层，加第三个上游就要改前端（本项目最硬的判据被破）。
+  // 现在前端读的是**数据**：manifest 给什么列就画什么列，不认识任何上游名。
+  //
+  // # 未知列 id 怎么办
+  //
+  // `console.warn` + 跳过该列，**不炸**。理由与后端 accountColumnsOf 一致：
+  // 一个列名拼错不该让整张账号表打不出来。两侧都留痕，才查得出是谁的锅。
+  //
+  // ⚠ 加一列要同时改三处：gateway 的列 id 常量、DefaultAccountColumns、
+  // 以及这里的 defs。少改一处不会报错（会在上面那条 warn 里出现）。
+  //
+  // # `w` —— 列宽（2026-10-19 照参考项目 Agent2API 移植）
+  //
+  // 每个上游一张自己的 <table>（`.acctgroup` 各自带 thead），而 `table-layout:auto`
+  // 是按**内容**算列宽的 ⇒ 同一列在不同组里宽度不同、**竖向看是错开的**。
+  // 实测（tests/frontend/shot_acct_align.js）：9 列里 8 列跨组错开，最坏的一列
+  // 左右差 717px —— 上下两组摞在一起时列会对不齐，滚动起来像在跳。
+  //
+  // 参考项目的解法是：**把列轨道从"每组自己算"提到"一处说了算"**。
+  // 它的原话（accounts-columns.ts:120-127）说明了为什么**只留一个弹性列** ——
+  //   「只有账号列在这一组里：它是全表唯一内容长度不可控的列（昵称 / uid / 邮箱），
+  //     该跟着窗口伸缩；其余十列装的是长度固定的控件…一起伸缩只会让同一列在不同
+  //     窗口下忽宽忽窄，**纵向对齐就失去意义**」
+  // 它还记了一次错法：曾经给账号列也写了固定 300px，表格宽度被钉成一个常数、
+  // 横向滚动条常驻、最右的操作列永远被切掉一截。
+  //
+  // ⇒ 本项目的对应做法：`w` 给固定像素，**只有 nickname 不给** ——
+  //   `table-layout:fixed` 下没有宽度的列会平分剩余空间，这正好就是"弹性列"。
+  //   昵称是这一行里唯一给人看、长度还不定的东西（`1p***63` 这种脱敏串长度会变）。
+  //
+  // ⚠ 宽度按"这列装的是什么"定，不是凑数：
+  //   uid 是 18 位数字（等宽字体）⇒ 168px；ops 要放「保活 + 删除」两个按钮 ⇒ 136px；
+  //   token 装的是「354 天」这类药丸 ⇒ 96px。改宽度时要连 shot_acct_align 一起看。
+  const ACCT_COLUMN_DEFS = {
+    // ⚠ 宽度是**按实测溢出量**定的，不是拍脑袋（2026-10-19 第一次定宽时拍过一回，
+    //   结果 4 列溢出）。第一次的依据是「loomy 的 UID 是 18 位数字」，那是**片面观察**：
+    //   workbuddy-intl 的 UID 是 36 字符的 UUID（`15b75562-cba5-4a1d-ad39-fc2e0f3119fc`），
+    //   溢出 86px。度量脚本 shot_acct_clip.js 就是为这件事写的 —— 它按列名量每个单元格的
+    //   `scrollWidth > clientWidth`，改动宽度后要重跑。
+    //   ⇒ 教训：定宽的依据必须是"所有上游里最长的那个样本"，不是第一眼看到的那个。
+    provider: { title: '上游', w: 128 },
+    // ⚠ 不给 w：全表唯一的弹性列（见上）
+    nickname: { title: '昵称' },
+    // ⚠ 168 → 220：36 字符的 UUID 要 254px 才完全不截断，那样会把弹性列挤到 300px 以下。
+    //   折中到 220px —— 溢出从 86px 降到约 34px，配合上面的 title 够用：
+    //   UID 是**标识符**，用户偶尔要核对整串，但不需要一直在屏幕上占满。
+    uid: { title: 'UID', w: 220 },
+    quota: { title: '额度', w: 72, tip: '账号剩余额度；「—」表示还没探测过（与额度为 0 是两件事）' },
+    free_quota: {
+      // ⚠ 88 → 120：有上限时这一格装的是「10M / 10M」（9 字符），
+      //   88px 下会被省略号吃掉。宽度依据是"所有上游里最长的那个样本"，
+      //   不是第一眼看到的那个 —— 只报余额时它很短，加了分母就翻倍。
+      title: '今日额度', w: 120,
+      tip: '会按周期重置的那部分额度还剩多少（可用完就清零，不用就浪费）。'
+        + '有上限时显示「剩余 / 上限」，并按已用比例上色。'
+        + '「—」表示这个上游不区分这一项、或这次没读到 —— 那不等于"已经用完"。',
+    },
+    status: { title: '状态', w: 84 },
+    token: { title: 'Token', w: 112 },
+    // ⚠ 88 → 112：这一格装的是「9 天10/28 15:43」（相对 + 绝对两段，13 字符），
+    //   88px 下会溢出被省略号吃掉 —— 实测 74 行里有 1 行如此。加宽后不截断。
+    token_expiry: {
+      title: 'Token 到期', w: 112,
+      // 这一列与「Token」刻意分开：Token 列读的是 `has_token`/`token_expire_sec`
+      //（workbuddy 的 Bearer 形态），而 codearts 的凭证是 AK/SK/STS 三元组、
+      // accessToken 恒为空 → 它落到「Token」列会永远是 `—`。
+      // 这里直接看**上游报的过期时刻**，与 has_token 无关。
+      tip: '凭证剩余有效期。短效凭证（如约 2 小时一轮的 STS）到点前会自动续期；'
+        + '没有续期接口的上游（如 MonkeyCode 的 30 天会话）到点后需要重新登录。'
+        + '显示「—」表示这个上游没有可用的过期时间（不区分"不会过期"与"不知道"）。'
+        // ⚠ 有些上游的这个值是**推断**出来的（例：MonkeyCode 没有报告接口，
+        //   按会话寿命从登记时刻推算）—— 所以它只用于预警，**不是**"能不能用"的判据：
+        //   那个永远由真实请求决定（401 → 自动禁用）。措辞不要写成保证。
+    },
+    checkin: { title: '今日签到', w: 88 },
+    welfare: {
+      title: '福利', w: 72,
+      // ⚠ 语义必须严格按数据（见 welfareCellHTML）。
+      tip: '今天有没有领过福利（依据是我们自己的领取记录，不是猜上游状态）。'
+        + '显示「—」表示今天还没领过、或拿不到结果 —— 那**不等于**"没得领"。',
+    },
+    success: { title: '成功', w: 80 },
+    breaker: { title: '熔断', w: 72 },
+    in_flight: { title: '在途', w: 72 },
+    // 操作列 200px —— 与参考项目同一个落点（accounts-columns.ts:205 原话：
+    // 「已签到(46+16)+余额(23+16)+设置(23+16)+⋯(12+16)+3×4+16≈200」）。
+    // ⚠ 它的 200px 配的是"一行最多 4 个动作，第 4 个是 ⋯ 收纳菜单"。
+    //   而我们**没有收纳菜单**，实测一行最多 5 个按钮（「额度 签到 保活 禁用 移除」，
+    //   6 行）需要 237px ⇒ 200px 下这 6 行仍会溢出约 37px。
+    //   这里选择「对齐参考落点 + 让操作列带 title」而不是拉到 237px：
+    //   237px 会把弹性列（昵称）压掉 37px，而"操作"是低频列。
+    //   ⚠ 真正的解法是参考那个 ⋯ 收纳菜单（把低频动作收进浮层），留待后续。
+    ops: { title: '操作', w: 200 },
+  };
+
+  // acctColgroupHTML 生成与列集对应的 <colgroup>。
+  //
+  // # 为什么要它（这是"跨组对齐"的关键一步）
+  //
+  // 光有 `table-layout:fixed` 不够 —— 固定布局下**宽度仍然按每张表自己算**
+  // （没有宽度的列平分**本表**的剩余空间）。而各组列集不同、表宽也不同，
+  // 于是同一列还是会对不齐。参考项目的原话（accounts-columns.ts:186-215）：
+  //   「原先它是 CSS 里一条写死的 min-width…而账号列同时被钉着 300px ——
+  //     表格真实需要 1493px，1155 永远碰不到：**它没拦住任何东西**」
+  // ⇒ 宽度必须**随列集一起生成**，才有"一处说了算"。
+  //
+  // ⚠ 2026-10-19：宽度现在**只来自用户的拖拽覆盖值**（acctColWidthOf）——
+  //   没被拖过的列不写 width，交给 `table-layout:auto` 按各自内容算，
+  //   即用户要的"自适应"。列定义里的 `w` 不再参与渲染（见 acctColWidthOf 的注释）。
+  function acctColgroupHTML(cols, providerId) {
+    if (!providerId) return '<colgroup>' + cols.map(() => '<col>').join('') + '</colgroup>';
+    return '<colgroup>' + cols.map((id) => {
+      const w = acctColWidthOf(providerId, id);
+      return w ? `<col style="width:${w}px">` : '<col>';
+    }).join('') + '</colgroup>';
+  }
+
+  // DEFAULT_ACCT_COLUMNS 上游**没自报列集**时用的那一套。
+  //
+  // 顺序与内容必须与 `gateway.DefaultAccountColumns()` **逐列一致** ——
+  // 用户要求 workbuddy「直接复用现在的标题」，而 workbuddy 正是走这条回落的。
+  // 两处不一致会让 workbuddy 的表头与后端契约悄悄分叉。
+  const DEFAULT_ACCT_COLUMNS = [
+    'provider', 'nickname', 'uid', 'quota', 'status', 'token',
+    'checkin', 'success', 'ops',
+  ];
+
+  // acctColumnsDeclared 上游**声明**的列集（后端 manifest 下发），不含用户偏好。
+  //
+  // 这段是原来 acctColumnsFor 的全部内容，抽出来是为了：
+  //   · 列设置面板要拿"声明顺序"当合并基准（见 acctColPrefNormalize 的规则②）
+  //   · 内存缓存的键要能随声明变化而自动失效（后端改了 manifest 不必手动清）
+  //
+  // 缺省（该上游没自报）= DEFAULT_ACCT_COLUMNS。
+  // 这与"自报了一个空数组"是两件不同的事：后者是明确说"一列都不要"。
+  //
+  // # ⚠ 未知列 id 必须**在这里一次剔除**（评审发现的洞）
+  //
+  // 原先"跳过未知列"是**两处各自做**的：`acctThHTML` 遇到未知 id 返回 ''、
+  // `accountRow` 的 `cells[id]` 查不到就 filter 掉。两条路径互不知情 ——
+  // 它们**恰好**用同一套规则，所以当时实测 th/td 都是 7、配平侥幸成立。
+  //
+  // 那不是不变量，是巧合：只要有人给 `acctThHTML` 补一个占位分支
+  //（比如返回 `<th></th>`），th 就变 8 而 td 仍是 7，
+  // **整行错位**且没有任何东西保证会被发现。
+  //
+  // 所以"哪些列可见"只在这里判**一次**，thead 与 tbody 共用同一个数组 ——
+  // 结构上不可能出现"表头跳了、单元格没跳"。
+  // ⚠ 加了列设置之后这条**更关键**了：用户拖动/勾选改的是 items，
+  //   而 items 经过 acctColItemsFor → acctColumnsFor 之后是**同一个数组**，
+  //   thead 与 tbody 不可能拿到两份不同的结果。
+  function acctColumnsDeclared(providerId) {
+    const info = providerInfo(providerId);
+    const raw = info && Array.isArray(info.accounts_columns) ? info.accounts_columns : null;
+    if (!raw) return DEFAULT_ACCT_COLUMNS.slice();
+    for (const id of raw) {
+      if (!ACCT_COLUMN_DEFS[id]) {
+        console.warn('账号池：未知的列 id ' + id + ' —— 已跳过该列（检查 manifest 与列注册表）');
+      }
+    }
+    return raw.filter((id) => !!ACCT_COLUMN_DEFS[id]);
+  }
+
+  // _acctColItems 列偏好的**内存缓存**。
+  //
+  // ⚠ 为什么必须有：acctColumnsFor 在渲染时被**每个分组、每次重绘**调用，
+  //   而底层要读 localStorage（同步 IO）+ JSON.parse。账号池 12 个分组、
+  //   76 行，每重绘一次就是几十次同步读 —— 单看不出来，滚动时会明显卡。
+  //   缓存键带上"声明列集"，manifest 改了列之后键就变了、自动失效，
+  //   不需要任何手动的 invalidate 调用（少一个会忘记的地方）。
+  //   ⚠ 用户改列设置时**必须**调 acctColItemsDrop（见 toggleAcctCol 等）。
+  const _acctColItems = new Map();
+
+  function acctColItemsFor(providerId) {
+    const declared = acctColumnsDeclared(providerId);
+    const key = providerId + '|' + declared.join(',');
+    let items = _acctColItems.get(key);
+    if (!items) {
+      items = acctColPrefNormalize(providerId, declared);
+      _acctColItems.set(key, items);
+    }
+    return items;
+  }
+
+  function acctColItemsDrop(providerId) {
+    for (const k of Array.from(_acctColItems.keys())) {
+      if (k.indexOf(providerId + '|') === 0) _acctColItems.delete(k);
+    }
+  }
+
+  // acctColumnsFor 本组**当前要渲染的列 id**（顺序已含用户偏好）。
+  // thead 与 tbody 都用它。
+  function acctColumnsFor(providerId) {
+    return acctColPrefVisible(acctColItemsFor(providerId));
+  }
+
+  // ---------------------------------------------------------------- 列设置浮层
+  //
+  // 照抄参考的 table-col-settings.tsx:538-634，零依赖等价物：
+  //   Popover(modal=false)          → 原生 popover（::backdrop 透明 = 非模态）
+  //   PopoverContent w-[336px]      → .colset{width:336px}
+  //   表头「列 / 显示」+ 行 + 页脚   → 同
+  //   Switch                        → <input type=checkbox>
+  //   手柄 span onPointerDown       → .colset-grip（指针事件，见下）
+  //   「恢复默认」Button            → 同
+  //
+  // ⚠ 面板 HTML 放在**分组行内部**（紧跟那颗按钮），但正是因为它走的是 popover
+  //   顶层图层，放在哪里都不会被表格的 overflow 裁掉 —— 与操作列那个 ⋯ 同一条理由。
+  function acctColsetHTML(providerId) {
+    const items = acctColItemsFor(providerId);
+    const pid = esc(providerId);
+    const id = 'acctcols-' + pid;
+    // ⚠ 只有一个可见列时，那一列的开关**禁用**（参考 tsx:476-479 原话：
+    //   「全隐藏之后表格只剩空壳，用户得先想起「是我自己关的」才能从面板里找回来。
+    //     关不掉比关得掉再懊恼一次好」）。逻辑上也拦一道（见 toggleAcctCol），
+    //   视觉上禁掉是为了让用户**当场**知道原因，而不是点了没反应。
+    const onlyOne = items.filter(it => it.v).length <= 1;
+    const rows = items.map((it) => {
+      const d = ACCT_COLUMN_DEFS[it.k] || { title: it.k };
+      const lock = onlyOne && it.v;
+      return `<div class="colset-row" data-colsrow="${esc(it.k)}">
+        <span class="colset-grip" data-colsgrip="${esc(it.k)}" title="按住拖动调整列顺序">⋮⋮</span>
+        <span class="colset-name" title="${esc(d.title)}">${esc(d.title)}</span>
+        <input type="checkbox" aria-label="显示 ${esc(d.title)} 列" data-colstoggle="${esc(it.k)}"${it.v ? ' checked' : ''}`
+        + `${lock ? ' disabled' : ''} title="${lock ? '至少要留一列' : (it.v ? '这一列正在显示' : '这一列已隐藏')}">`
+        + `</div>`;
+    }).join('');
+    return `<div id="${id}" popover class="colset">
+      <div class="colset-head"><span></span><span>列</span><span>显示</span></div>
+      <div class="colset-rows">${rows || '<div class="colset-empty">该上游没有可配置的列。</div>'}</div>
+      <div class="colset-foot">
+        <span>拖动 ⋮⋮ 调整顺序</span><span class="spacer"></span>
+        <button data-colsreset="${pid}" style="padding:2px 9px;font-size:11px">恢复默认</button>
+      </div>
+    </div>`;
+  }
+
+  // acctColRedraw 换列之后的重绘。
+  //
+  // ⚠⚠ 这里**不要**调 `refresh()`（11075）。那是个**全量**刷新：它内部会打
+  //    `/admin/stats`，而本文件 11164-11168 的注释记着实测数据 ——「单次
+  //    `/admin/stats` 要 **7 秒**（它内部对每个已注册上游调一次 ModelCatalog，
+  //    会同步回源）」。为了"换一列显示"付 7 秒、还顺带刷新一堆无关面板，
+  //    显然不合适。
+  //
+  // ⚠ 用 `sharedGet`（它自带本地缓存，AGENTS 第 9 条）而不是直接 `admin()`：
+  //   换列**不需要新数据** —— 同一份 accounts，只是挑哪几列画出来。
+  //   命中缓存时这次重绘是同步完成的，没有任何等待。
+  //
+  // ⚠⚠ 这段是本轮**实测抓到的 bug**：第一版我写的是 `loadAccounts()`，
+  //    而这个文件里**根本没有**这个函数（全文件唯一的账号表重绘入口是
+  //    `renderAccounts(list)`，它要数据）。后果是 acctColsetToggle 一路走到
+  //    `acctColsetApply` 就抛 `ReferenceError: loadAccounts is not defined`，
+  //    存盘成功、但**界面不动** —— 表现是"点了没反应"。
+  //    ⚠ 同一个坑这个项目**踩过一次**：4572 行的注释写着上一版某个按钮点下去
+  //      「必抛 `refreshAccounts is not defined`，界面只显示"刷新本上游额度失败：
+  //       refreshAccounts is not defined"」。所以这里除了修，还加了一条 console
+  //      兜底，让同类问题下次一眼可见。
+  async function acctColRedraw() {
+    try {
+      const r = await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'));
+      if (r && Array.isArray(r.accounts)) { renderAccounts(r.accounts); return; }
+    } catch (e) {
+      console.warn('列设置：重绘时取账号列表失败（列偏好已存下，下次刷新会生效）：', e);
+    }
+    // 拿不到数据也不该让开关白点：至少把当前这套偏好写进 DOM 一次。
+    // renderAccounts 是唯一的绘制入口，没有数据就跳过 —— 但给一句提示。
+    toast('列设置已保存，但这次没能重绘（拿不到账号列表）；刷新页面即可生效', true);
+  }
+
+  // acctColsetApply 写回偏好并重绘账号池。
+  //
+  // ⚠ 三件事的顺序不能错：
+  //   ① 先写 localStorage（唯一事实来源）
+  //   ② 再清内存缓存（否则下一个读到的还是旧 items）
+  //   ③ 最后才重绘 —— 重绘时 acctColumnsFor 会重算，表头与单元格同时更新
+  function acctColsetApply(providerId, items) {
+    acctColPrefSave(providerId, items);
+    acctColItemsDrop(providerId);
+    acctColRedraw();
+  }
+
+  function acctColsetToggle(providerId, key, next) {
+    const items = acctColItemsFor(providerId).map(it => ({ k: it.k, v: it.v }));
+    const it = items.find(x => x.k === key);
+    if (!it) return;
+    // ⚠ 拦"关掉最后一列"（面板里那颗开关也 disabled 了，这是第二道）
+    if (!next && items.filter(x => x.v).length <= 1) {
+      toast('至少要留一列 —— 全关了表格就只剩空壳', true);
+      return;
+    }
+    it.v = next;
+    acctColsetApply(providerId, items);
+  }
+
+  function acctColsetMove(providerId, fromKey, toKey) {
+    const items = acctColItemsFor(providerId).map(it => ({ k: it.k, v: it.v }));
+    const fi = items.findIndex(x => x.k === fromKey);
+    const ti = items.findIndex(x => x.k === toKey);
+    if (fi < 0 || ti < 0 || fi === ti) return;
+    const [moved] = items.splice(fi, 1);
+    // 移到"目标那一行"的位置：往下拖时插到它后面、往上拖时插到它前面
+    //（这样手感和拖放一致：松手时被拖的那行就落在目标行原本的位置上）
+    items.splice(fi < ti ? ti : ti, 0, moved);
+    acctColsetApply(providerId, items);
+  }
+
+  function acctColsetReset(providerId) {
+    try { localStorage.removeItem(ACCT_COLPREF_PREFIX + providerId); } catch (e) { /* 隐私模式 */ }
+    acctColItemsDrop(providerId);
+    acctColRedraw();
+  }
+
+  // 列设置浮层的**事件委托**（一次性挂，覆盖所有上游的所有面板）。
+  //
+  // ⚠ 全部用委托而不是逐面板绑定：面板是渲染时现拼的字符串，
+  //   每次 loadAccounts 都会换一批新节点，逐面板绑必然漏。
+  document.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const tog = t.closest('input[data-colstoggle]');
+    if (tog) {
+      const sec = tog.closest('[data-colsrow]');
+      const panel = tog.closest('.colset');
+      if (!sec || !panel) return;
+      // ⚠ 面板 id 形如 acctcols-<providerId>；providerId 里可能有冒号
+      //   （如 workbuddy:init），所以只切掉前缀、不做 split。
+      const pid = panel.id.replace(/^acctcols-/, '');
+      acctColsetToggle(pid, sec.dataset.colsrow, tog.checked);
+      return;
+    }
+    const rst = t.closest('button[data-colsreset]');
+    if (rst) { acctColsetReset(rst.dataset.colsreset); return; }
+  });
+
+  // 拖动排序：**不用 HTML5 拖放**，用指针事件。
+  //
+  // ⚠ 参考 tsx:49-53 记的原话：「HTML5 拖放的会话绑在**那个节点**上，一重画就断；
+  //   指针事件的状态只在 JS 变量里，节点换掉不影响会话」。
+  //   不过我们这里更简单 —— 松手即重排即重绘，会话期间不重画，
+  //   所以两边的坑都没踩到。
+  //
+  // ⚠ 只做"落点用 pointerenter 记录、pointerup 一次提交"：
+  //   拖动过程中**不写盘、不重绘**（参考 tsx:500-501 原话：
+  //   「每跨一行都重绘表格会很吵」）。
+  let _colsetDrag = null;
+
+  document.addEventListener('pointerdown', (ev) => {
+    const g = ev.target;
+    if (!g || !g.closest) return;
+    const grip = g.closest('[data-colsgrip]');
+    if (!grip || ev.button !== 0) return;
+    const panel = grip.closest('.colset');
+    if (!panel) return;
+    ev.preventDefault();
+    _colsetDrag = {
+      pid: panel.id.replace(/^acctcols-/, ''),
+      from: grip.dataset.colsgrip,
+      over: grip.dataset.colsgrip,
+      panel: panel,
+    };
+    const row = grip.closest('.colset-row');
+    if (row) row.classList.add('dragging');
+  });
+
+  document.addEventListener('pointermove', (ev) => {
+    if (!_colsetDrag) return;
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const row = el && el.closest ? el.closest('[data-colsrow]') : null;
+    if (row && row.dataset.colsrow) _colsetDrag.over = row.dataset.colsrow;
+  });
+
+  document.addEventListener('pointerup', () => {
+    if (!_colsetDrag) return;
+    const d = _colsetDrag;
+    _colsetDrag = null;
+    const row = d.panel.querySelector('.colset-row.dragging');
+    if (row) row.classList.remove('dragging');
+    if (d.from !== d.over) acctColsetMove(d.pid, d.from, d.over);
+  });
+
+  // ---------------------------------------------------------------- 列宽拖拽
+  //
+  // 2026-10-19，照抄参考项目的 ui/table-columns.js:341-511（"拖动"那一节）。
+  // 它的注释里带了好几处**失败案例的出处**，正是这些让"抄"比"造"划算：
+  //
+  // ① **绝对量模型**（:413-422）—— 这条被引了三遍，是整节的题眼：
+  //      「**只动被拖的那一列**，其余列一律保持各自宽度 …… 曾经把它写成"重排"：
+  //        拖动时按比例压缩其余列、把总宽维持在容器内。那样拖宽一列就得从别处扣，
+  //        拖前面的列后面的变窄、拖后面的列前面的变窄，两边互相牵制，
+  //        结果是**永远拖不宽**。列宽是绝对量，不是一份要按比例分完的预算。」
+  // ② **上限只做防呆**（:404-405）：`max(MIN_WIDTH, total*2, startWidth)`。
+  //      同一个注释里记着两处历史故障 ——「模型管理页「拖不动」就是这一条；
+  //      请求日志的「错误列拖不动」是同一个成因」。凡是把上限算成
+  //      "其余列按预留下限占完还剩多少"，上限就会小于当前宽度、拖动整个失效。
+  // ③ **必须写表级 min-width**（:370-389）：行与表头都拿它当 min-width，
+  //      否则"其余列会被压成 0、表头消失"。
+  //      ⚠ 而且**不能**改用 CSS 的 max-content 顶这件事 —— 原话：
+  //        「那是按内容的固有宽度算的，同一列在表头（「用量」两个字）和数据行
+  //         （两行读数）里会算出两个宽度，表头与数据直接错位；而且列被内容撑开
+  //         就不再触发省略号。」
+  // ④ **指针事件 + setPointerCapture**（:435-447）：「**松手必须收得到**。
+  //      鼠标事件只在窗口内派发 —— 指针拖出窗口再松手，那次 mouseup 会被浏览器
+  //      丢掉，拖动就永远不结束。此后鼠标一动列宽就跟着走，表现为
+  //      「一按住列就自己往后拓宽」，且把手一直亮着。」
+  //      再加两道兜底：`buttons === 0` 立即收尾、`window blur` 收尾。
+  // ⑤ **按列 key 而不是索引**（:446-447）：「列设置能换顺序、能藏列，索引随时会变，
+  //      而 key 是稳定的身份（宽度覆盖值也是按 key 存的，两处口径一致）」。
+  // ⑥ **双击把手还原**（:499-510）：删掉覆盖值 ⇒ 它回到列定义里的默认宽度。
+  //
+  // ⚠ 与列设置是**两套互不相干的机制**（键名、存储、入口都分开）：
+  //   列设置管"哪些列、什么顺序"，这里管"每列多宽"。
+  // ⚠ 宽度**只有一处来源**：覆盖值（存盘）优先，否则用 ACCT_COLUMN_DEFS[id].w。
+  //   绝不在 CSS 里再写一份默认宽度 —— 那会造成漂移，症状是
+  //   「双击把手还原之后列宽跳到了另一个值」。
+  const ACCT_COLW_PREFIX = 'wb2api.acctcolw.';
+  // 与参考的 MIN_WIDTH 同一个语义：再窄就点不准里面的控件了。
+  const ACCT_COL_MIN_W = 36;
+
+  function acctColWidthsLoad(providerId) {
+    try {
+      const raw = localStorage.getItem(ACCT_COLW_PREFIX + providerId);
+      if (!raw) return {};
+      const v = JSON.parse(raw);
+      if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+      // 只认数字项（坏项丢掉比整份作废更好：用户至少还能保住其它列）
+      const out = {};
+      for (const k of Object.keys(v)) {
+        const n = Number(v[k]);
+        if (isFinite(n) && n > 0) out[k] = Math.round(n);
+      }
+      return out;
+    } catch (e) { return {}; }
+  }
+
+  function acctColWidthsSave(providerId, overrides) {
+    try { localStorage.setItem(ACCT_COLW_PREFIX + providerId, JSON.stringify(overrides)); }
+    catch (e) { /* 隐私模式 */ }
+  }
+
+  // 内存缓存：acctColWidths 被每张表每次重绘调用（同列偏好那条理由）。
+  const _acctColW = new Map();
+  function acctColWidthsFor(providerId) {
+    let w = _acctColW.get(providerId);
+    if (!w) { w = acctColWidthsLoad(providerId); _acctColW.set(providerId, w); }
+    return w;
+  }
+  function acctColWidthsDrop(providerId) { _acctColW.delete(providerId); }
+
+  // 某一列的宽度覆盖值（**只认用户拖过的**）。
+  //
+  // ⚠⚠ 2026-10-19 用户要求「所有的表格自适应列宽度」之后，这里**不再回落**到
+  //   `ACCT_COLUMN_DEFS[id].w` —— 那是当初为了让同一列跨分组竖向对齐而按
+  //   "最长样本"估的固定宽，代价是短内容那几列白白空着（截图里 workbuddy-intl
+  //   的 UID 列占 300+px，而 workbuddy 那组同样内容窄得多）。
+  //   现在没被拖过的列一律返回 0 = **不写宽度** ⇒ 交给 `table-layout:auto`
+  //   按各自内容算，这就是"自适应"。用户拖过的那一列才会有固定宽。
+  //
+  //   ⚠ `ACCT_COLUMN_DEFS` 里那些 `w` 字段**保留不删**：一是它们记录了每列的
+  //     设计意图（等宽数字列、双按钮操作列、状态药丸列各该多宽），二是
+  //     万一以后要恢复固定布局还能用。只是现在不参与渲染。
+  function acctColWidthOf(providerId, id) {
+    const ov = acctColWidthsFor(providerId);
+    return ov[id] || 0;
+  }
+
+  // 表格的 min-width（参考的 rowSpanOf:379-389 的简化版）：
+  // 固定列按各自最终宽度累加，每列至少 ACCT_COL_MIN_W（这样弹性列被压到极限时
+  // 也还占得住一点，不会让表头塌掉）。⚠ 现存列定义里没有列间距与内边距要补 ——
+  // 我们是 table 布局（不是参考那种 grid + gap），所以只有两边的 8px 内边距。
+  function acctTableMinWidth(providerId, cols) {
+    let sum = 0;
+    for (const id of cols) sum += Math.max(ACCT_COL_MIN_W, acctColWidthOf(providerId, id));
+    return Math.round(sum + 16);
+  }
+
+  // acctColWidthRepaint 把当前宽度落到**已有的** DOM 上（拖动中每帧都调）。
+  //
+  // ⚠⚠ 拖动中**不重建**表格（不调 renderAccounts）：那样每移动一像素都要重排
+  //   几十行 76 个账号，卡到不能用，而且会丢掉正被拖的那个把手（事件会话还在它
+  //   身上）。参考的 paint 之所以能全量重画，是因为它的表是 grid + 节点很少；
+  //   我们这里只写**两个**地方：
+  //     ① 每个 `<col>` 的 width（fixed 布局的真正依据）
+  //     ② 表格的 min-width（另一半，见 acctTableMinWidth 的注释）
+  //   两者都是幂等的 style 写入，没有 childList 变动。
+  function acctColWidthRepaint(providerId, table) {
+    const colEls = table.querySelectorAll('colgroup > col');
+    const grips = table.querySelectorAll('thead th .colgrip');
+    const ids = [];
+    for (let i = 0; i < grips.length; i++) ids.push(grips[i].dataset.colgrip);
+    for (let i = 0; i < ids.length; i++) {
+      const c = colEls[i];
+      if (!c) continue;
+      const w = acctColWidthOf(providerId, ids[i]);
+      if (w) c.style.width = w + 'px'; else c.style.width = '';
+    }
+    table.style.minWidth = acctTableMinWidth(providerId, ids) + 'px';
+  }
+
+  // 列宽拖拽的委托（一次挂，覆盖所有上游的所有表）。
+  //
+  // ⚠ 挂在 document 而不是某张表上：表是每次 renderAccounts 重建的，
+  //   挂在表上的监听会随节点一起丢。委托 + 从祖先找 table 就没有这个问题。
+  // ⚠ 全程按 `data-acctpid`（上游）与 `data-colgrip`（列 id）定位，
+  //   不用索引 —— 列设置能换顺序、能藏列（参考 :446-447 同一条）。
+  let _colwDrag = null;
+
+  document.addEventListener('pointerdown', (ev) => {
+    if (ev.button !== 0) return;                    // 只接左键（右键要弹菜单）
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const grip = t.closest('.colgrip');
+    if (!grip) return;
+    const table = grip.closest('table[data-acctpid]');
+    if (!table) return;
+    const pid = table.dataset.acctpid;
+    const key = grip.dataset.colgrip;
+    if (!pid || !key) return;
+    ev.preventDefault();
+
+    const startX = ev.clientX;
+    const startWidth = grip.parentElement.getBoundingClientRect().width;
+    // ⚠ 上限只做防呆，取两倍可用宽度（照抄参考 limitOf:404-405）。
+    //   绝不写成"其余列按预留下限占完还剩多少" —— 那个式子会小于当前宽度，
+    //   拖动整个失效（参考注释里记着两处故障：「模型管理页「拖不动」」）。
+    const avail = table.parentElement ? table.parentElement.clientWidth : window.innerWidth;
+    const limit = Math.max(ACCT_COL_MIN_W, Math.round(avail * 2), Math.round(startWidth));
+
+    grip.classList.add('active');
+    document.body.classList.add('colresizing');
+    // ⚠ 捕获让"拖出窗口再松手"也能收到 pointerup（参考 :435-447 那段的主题）。
+    //   捕获失败（合成事件 / 老内核）不影响功能 —— 下面还有全局监听那条路。
+    try { grip.setPointerCapture(ev.pointerId); } catch (e) { /* 退回全局监听 */ }
+    _colwDrag = { pid: pid, key: key };
+
+    const move = (mv) => {
+      // 兜底一：没按住任何键就不是在拖（捕获失效时事件会漏到这里）
+      if (mv.buttons === 0) { up(); return; }
+      const w = Math.min(Math.max(startWidth + mv.clientX - startX, ACCT_COL_MIN_W), limit);
+      // ⚠ **只动被拖的那一列**（绝对量模型）—— 其余列一律保持各自宽度，
+      //   装不下的部分交给整张表横向滚动。
+      acctColWidthsFor(pid)[key] = Math.round(w);
+      acctColWidthRepaint(pid, table);
+    };
+    const up = () => {
+      grip.classList.remove('active');
+      document.body.classList.remove('colresizing');
+      // 指针抬起时浏览器已自动释放捕获，再释放一次会抛 NotFoundError
+      try { grip.releasePointerCapture(ev.pointerId); } catch (e) { /* 已自动释放 */ }
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      window.removeEventListener('blur', up);
+      // ⚠ 只在松手时写盘（拖动中每帧写 localStorage 是同步 IO，会拖慢拖动）
+      acctColWidthsSave(pid, acctColWidthsFor(pid));
+      _colwDrag = null;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    // 兜底二：拖到一半切窗口/切标签，收不到 pointerup 也要收尾
+    window.addEventListener('blur', up);
+  });
+
+  // 双击把手还原这一列（参考 :499-510）：删掉覆盖值 ⇒ 回到列定义里的默认宽度，
+  // 腾出的空间由弹性列按 fixed 布局的规则吃掉。
+  document.addEventListener('dblclick', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const grip = t.closest('.colgrip');
+    if (!grip) return;
+    const table = grip.closest('table[data-acctpid]');
+    if (!table) return;
+    const pid = table.dataset.acctpid;
+    const key = grip.dataset.colgrip;
+    const ov = acctColWidthsFor(pid);
+    if (!ov[key]) return;                       // 本来就没覆盖值，无需还原
+    delete ov[key];
+    acctColWidthsSave(pid, ov);
+    acctColWidthRepaint(pid, table);
+  });
+  //
+  // 2026-10-19，照抄参考项目的 table-col-settings（ui-islands/src/islands/
+  // table-col-settings.tsx + ui/css/table-col-settings.css）。
+  //
+  // # 数据形状与为什么是 {key,visible} 而不是"只存可见的 key 数组"
+  //
+  // 参考用的是 `{key, visible, align}[]`，**数组顺序就是用户拖出来的顺序**；
+  // 列被隐藏时**留在数组里**、只是 visible=false。
+  // 这不是随手定的 —— 它解决的是"藏了再显示，那一列跑到最后去了"：
+  // 只存"可见的 key"的话，重新勾上时它在存盘里没有位置，只能追加到末尾。
+  // 参考的决策 10 记的是同一个坑的另一面（新增列要插到**声明位**而不是追加，
+  // 因为"列的位置有时是语义的"）。
+  //
+  // ⚠ 我们比参考**少一个 align**：我们的列宽是定死的（见 ACCT_COLUMN_DEFS 的 w），
+  //   数字列天然右对齐，再加一层"靠哪边"的开关是多余动作。
+  const ACCT_COLPREF_PREFIX = 'wb2api.acctcols.';
+
+  function acctColPrefLoad(providerId) {
+    try {
+      const raw = localStorage.getItem(ACCT_COLPREF_PREFIX + providerId);
+      if (!raw) return null;
+      const v = JSON.parse(raw);
+      if (!Array.isArray(v)) return null;
+      // 只认形状对的项；形状坏掉的整份当没存过（比半个配置更可预期）。
+      const ok = v.every(it => it && typeof it.k === 'string' && typeof it.v === 'boolean');
+      return ok ? v : null;
+    } catch (e) { return null; /* 隐私模式 / 坏 JSON */ }
+  }
+
+  function acctColPrefSave(providerId, items) {
+    try {
+      localStorage.setItem(ACCT_COLPREF_PREFIX + providerId, JSON.stringify(items));
+    } catch (e) { /* 隐私模式：不持久化，但本次会话内仍然按内存里的用 */ }
+  }
+
+  // acctColPrefNormalize 把「存盘的偏好」与「当前列集」合成一份可用的 items。
+  //
+  // 三条规则（前两条逐条对应参考的 normalize，tsx:170-226）：
+  //   ① 存盘里有、但**当前列集里已不存在**的 key → 丢弃
+  //      （上游改了 manifest、或列注册表删了某列时，存盘里会留下死键）
+  //   ② 当前列集里有、存盘里**没有**的 key（新加的列）→ 插到
+  //      「它在声明顺序里的前驱之后」，而不是一律追加到末尾
+  //      —— 参考 tsx:180-182 原话：「列的位置有时是语义的（账号表的代理列声明在
+  //      「账号」与「连接数」之间），追加到末尾会让已存过配置的老用户看到的
+  //      默认位置与预期不符」
+  //   ③ 顺序**以存盘为准**
+  function acctColPrefNormalize(providerId, declared) {
+    const saved = acctColPrefLoad(providerId);
+    if (!saved) return declared.map(k => ({ k: k, v: true }));
+    // ① 丢死键
+    const items = saved.filter(it => declared.indexOf(it.k) >= 0).map(it => ({ k: it.k, v: it.v }));
+    // ② 补新键（插到声明顺序里的前驱之后）
+    for (let di = 0; di < declared.length; di++) {
+      const k = declared[di];
+      if (items.some(it => it.k === k)) continue;
+      let at = 0;
+      for (let i = di - 1; i >= 0; i--) {
+        const j = items.findIndex(it => it.k === declared[i]);
+        if (j >= 0) { at = j + 1; break; }
+      }
+      items.splice(at, 0, { k: k, v: true });
+    }
+    return items;
+  }
+
+  // acctColPrefVisible 从 items 取"真正要渲染的列 id"（顺序同 items）。
+  // ⚠ 至少保留一列 —— 见下面 toggleAcctCol 的注释（参考 tsx:476-479 同一条理由）。
+  function acctColPrefVisible(items) {
+    const vis = items.filter(it => it.v).map(it => it.k);
+    if (vis.length) return vis;
+    // 兜底：全关时留第一列（正常路径下 toggle 会拦住"关最后一列"，这里是保险）
+    return items.length ? [items[0].k] : [];
+  }
+
+  // ACCT_COLS 保留为**默认列集**的列数。
+  //
+  // 它曾经是"账号表的列数"（会用于所有 colspan）。拆多表之后列数**按上游不同**，
+  // 于是它只剩两个用途：默认列集的长度，以及占位行的跨度。
+  // 凡是要"这一组有多少列"的地方，一律用 acctColumnsFor(...).length ——
+  // 用这个常量会让 codearts（7 列）的占位行跨成 11 格。
+  const ACCT_COLS = DEFAULT_ACCT_COLUMNS.length;
+
+  function accountGroupRow(g) {
+    const info = providerInfo(g.provider);
+    // 「默认」标记：导航组头那边已按用户要求删掉（T2），这里也一并去掉 ——
+    // 同一个控制台里对同一件事应该只有一种口径。评审指出这是**两处渲染点**，
+    // 只改一处会出现"导航没有、账号池有"的不一致。
+    //
+    // ⚠ `g.isDefault` 本身**仍然保留**（它决定账号池的排序与缺省路由提示），
+    // 这里只删**渲染**，不动数据。
+    const def = '';
+    // # 两种"上游未知"必须分开说 —— 本次实测事故（用户报的 bug）
+    //
+    // providerInfo(g.provider) 返回空有**两个完全不同的原因**，混成一句话说
+    // 就会撒谎：
+    //
+    //   ① 这个分组是兜底组（g.provider === UNLABELED_PROVIDER）：账号连
+    //      provider 字段都没有，registryAccounts 只能把 providerOf(a) 落空的号
+    //      归到这里。它确实**没有归属**，"按默认上游推断"是如实的。
+    //   ② 账号有**明确** provider、但本次启动没启用这个上游：manifest.providers
+    //      里没有它，所以查不到 providerInfo。此时说"推断"是**假话** ——
+    //      后端 /admin/accounts 对这类号给的 provider_inferred 是 false
+    //      （只有**没有** provider 字段的号才会是 true），账号行那一列正显示着
+    //      它的真实 provider。
+    //
+    // 实测（127.0.0.1:7863）：config 未启用 codearts，账号池是持久化的、里面还
+    // 留着 2 个 provider="codearts"（provider_inferred=false）的号，而
+    // /admin/ui/manifest 的 providers 只有 workbuddy。于是组标题渲染成
+    // 「codearts — 2 个账号 · 按默认上游推断（未在 manifest 里注册）」，
+    // 而**同一张表**里这两行的「上游」列明明写着 codearts（没有 `?` 角标）——
+    // 组标题说"按默认上游推断"、行内说"codearts"，两处渲染点自相矛盾。
+    // 这正是本文件反复警告的漂移形态：同一件事有两个渲染点，改一处就露馅。
+    //
+    // ∴ 判据**复用账号行那条**，不另造：是不是兜底组，看
+    //   g.provider === UNLABELED_PROVIDER（兜底组名的定义见 UNLABELED_PROVIDER
+    //   与 registryAccounts）。
+    //
+    // ⚠ 同时删掉这里原先拼的 known（「（未在 manifest 里注册）」）：
+    //   · 情形 ② 下它与 meta 说同一件事（"未注册"），一行里重复两遍；
+    //   · 情形 ① 下这句话**没有意义** —— 兜底组本来就不属于任何上游，
+    //     "没在 manifest 里注册"会被读成"它本该注册而漏了"。
+    //   于是关于"这个上游注册了没有"只剩 meta 一处措辞，不会再出现标题与
+    //   行内各说一套的局面。
+    const caps = info && Array.isArray(info.capabilities) ? info.capabilities.length : 0;
+    const meta = info
+      ? `${caps} 项能力`
+      : (g.provider === UNLABELED_PROVIDER
+        ? '按默认上游推断'
+        : '本次启动未注册该上游（config 未启用，账号来自持久化池）');
+    const n = g.accounts.length;
+
+    // ---- R3：折叠 ----
+    //
+    // 复用的是模型面板那套**视觉语言**（三角 + 点标题开合 + localStorage），
+    // 但**不是同一份 DOM 形状** —— 分工要写清楚，否则下次改动会踩：
+    //
+    //   共享的：.mgrouphead / .mcaret 的观感、"点整行标题开合"的行为、
+    //           "未知状态默认展开"的默认值、localStorage 的读写范式
+    //   各自的：**靠什么隐藏内容**。模型面板是 CSS（`.mgroup.collapsed .chips`），
+    //           账号池是内联样式（见 accountRow）
+    //
+    // # 为什么账号池这边不能用 CSS 那把"隐藏的钥匙"
+    //
+    // 那把钥匙是 `.mgroup.collapsed .chips{display:none}` —— 它按**类名**选择器
+    // 隐藏，所以要隐藏的东西必须挂在同一个 `.mgroup` 容器里。而账号表是
+    // **一个** <table>，不能嵌套 div（见下），也没有任何祖先可以充当那个容器。
+    //
+    // # 那 `tr.grouprow.collapsed ~ tr.accountrow`（同级选择器）呢
+    //
+    // **它能用，但过宽 —— 所以这个方向根本走不通。**
+    // 兄弟选择器的语义是"**同一父节点下、位于它之后的所有** acctrow"，
+    // 而扁平表里**没有任何结构能界定分组边界**：折叠第 1 组会连第 2 组的
+    // 账号一起隐藏。
+    //
+    // ⚠ 这里必须区分两种失败（我第一版注释写成"活不到运行期"，是**不实的**）：
+    //   · "**失效**" → 读的人会去加 !important / 换个写法试试，白费功夫
+    //   · "**过宽**" → 说明 CSS 无法表达这个约束，**必须把状态流进渲染管线**
+    // 可复现证据：tests/frontend/foster_parenting_probe.js（真 Chrome 实测两件事）
+    //
+    // ⇒ 结论：把每行的显隐直接写在行上（accountRow 的 groupOpen 参数）。
+    //   代价是折叠状态必须经过渲染管线，新增的断言专门盯住这一点。
+    //
+    // ⚠ 类名刻意**不叫** .mgroup / .mcaret，也不给本行加 .mgroup。
+    //   一旦加上，`.mgroup.collapsed .chips{display:none}` 会跟着命中 ——
+    //   而账号表里根本没有 .chips，于是"折叠"变成一个什么都不隐藏的空动作，
+    //   且**不会报任何错**。这正是变异验证 1 要钉住的形态。
+    const open = accountGroupOpen(g.provider);
+    // ⚠ 类名刻意**不叫** .mgroup / .mcaret，也不给本行加 .mgroup（见上面的注释）。
+    // 这里仍然沿用 .ghead-btn / .acaret —— 折叠的**实现**变了（整表隐藏），
+    // 但"用哪个类名"没变，既有断言与 localStorage 键都不受影响。
+    const cols = acctColumnsFor(g.provider);
+    const thead = '<tr>' + cols.map(id => acctThHTML(id)).join('') + '</tr>';
+    const rows = g.accounts.map(a => accountRow(a, open)).join('');
+    return `<section class="acctgroup${open ? '' : ' collapsed'}" data-acctgroup="${esc(g.provider)}">`
+      + `<div class="ghead">`
+      + `<button class="ghead-btn" data-atoggle="${esc(g.provider)}"`
+      + ` aria-expanded="${open ? 'true' : 'false'}"`
+      + ` title="${esc(g.provider)} · ${n} 个账号（点标题折叠/展开）">`
+      + `<span class="acaret"></span>`
+      + `<span class="gname">${esc(providerTitle(g.provider) || UNLABELED_PROVIDER)}</span>`
+      + `<span class="dim" style="font-weight:400;font-size:11px">${esc(n + ' 个账号 · ' + meta + def)}</span>`
+      // 上游自报的提醒（如「测试中」）。**放在 .ghead-btn 之内** ——
+      // 它属于标题这一行，折叠时跟着标题走；也避免用户按它时
+      // 落进"点了却没反应"的空白（按钮内整行可折叠，这是本仓既有行为）。
+      //
+      // ⚠ 判据是 manifest 里的 `notice` 字段，**不是上游名**。
+      // 前端不认识任何上游 —— 谁要挂提醒、挂什么话，都是上游自己的事实
+      //（见 gateway.NoticeExt 的注释）。没有这个字段的上游，
+      // 渲染结果与改造前**逐字节相同**。
+      //
+      // 样式刻意用 .dim + 更小字号：它是**提醒**不是警告，
+      // 不该在视觉上盖过「N 个账号」这类主信息。
+      + noticeHTML(g.provider)
+      + egressHTML(g.provider)
+      + `</button>`
+      // 折叠时另起一句：组标题里的"0 个账号 · 4 项能力"回答不了
+      // "为什么没有" —— 那是用户下一步要的动作。
+      + `<span class="gfolded-hint dim">${esc(n ? '' : accountEmptyNote(g.provider))}</span>`
+      + `<span class="gacts">${accountGroupActions(g.provider)}</span>`
+      + `</div>`
+      // ⚠ 列设置浮层放在 .ghead **之外**（作为 section 的直接子节点）：
+      //   放在 .gacts 里面会被那个 `display:inline-flex` 的容器当 flex item
+      //   参与布局计算（即使 popover 关着不显现，开与关各算一次也让代码难读）。
+      //   它是 popover，无论 DOM 挂在哪都渲染在**顶层图层**，
+      //   所以既不会被表格的 overflow 裁掉，也不会被 section 的 overflow:hidden 影响
+      //   —— 与操作列那个 ⋯（.ops-menu）同一条理由。
+      + acctColsetHTML(g.provider)
+      // ⚠ `style="min-width:Npx"` 是列宽拖拽**必须有**的一半（照抄参考的
+      //   rowSpanOf:379-389）：行与表头都拿它当 min-width。
+      //   不写它的话，把某一列拖宽之后 fixed 布局会从**别的列**里扣空间 ——
+      //   其余列被压成 0、表头消失。写了它，超出部分交给整张表横向滚动，
+      //   与"列宽是绝对量"这条语义一致。
+      //   `acctTableMinWidth` 是**现算**的（按当前列集与当前覆盖值），
+      //   不写死常数 —— 写死常数正是 3535-3536 那段引文里记的失败模式
+      //   （「原先它是 CSS 里一条写死的 min-width…它没拦住任何东西」）。
+      + `<div class="acctwrap">`
+      + `<table class="accttable accttable--aligned" data-acctpid="${esc(g.provider)}"`
+      + ` style="min-width:${acctTableMinWidth(g.provider, cols)}px">`
+      + `${acctColgroupHTML(cols, g.provider)}<thead>${thead}</thead><tbody>${rows}</tbody></table>`
+      + `</div>`
+      + `</section>`;
+  }
+
+  // acctThHTML 一列表头。
+  //
+  // 标题与 title 提示都取自列注册表 —— 上游只报**列 id**，
+  // "这一列叫什么、鼠标悬停说什么"是前端的事实（见 ACCT_COLUMN_DEFS 的注释）。
+  function acctThHTML(id) {
+    // ⚠ 这里**不再**自己处理未知 id —— 那件事已收在 acctColumnsFor 里做一次。
+    //
+    // 原先这里是"未知就返回 ''"，而 accountRow 那边是"未知就 filter 掉"：
+    // 两处各自跳过、互不知情。它们恰好规则相同，所以实测 th/td 能对上 ——
+    // 但那是**巧合不是不变量**：给这里补一个占位分支就会 th 多一格、
+    // 整行错位，而没有任何断言会必然发现。
+    //
+    // 现在传进来的 id 一定在注册表里（acctColumnsFor 已过滤）。
+    // 仍留一个兜底：真出现未登记 id 时**返回空表头**而不是抛异常 ——
+    // 一格渲染失败不该让整个账号面板白屏。但要打日志，不能静默。
+    const d = ACCT_COLUMN_DEFS[id];
+    if (!d) {
+      console.warn('账号池：acctThHTML 收到未登记的列 id ' + id +
+        ' —— 说明它没经过 acctColumnsFor 的过滤（调用点有漏）');
+      return '<th></th>';
+    }
+    const t = d.tip ? ` title="${esc(d.tip)}"` : '';
+    // ⚠ 列宽拖拽的把手（照抄参考 table-columns.js 的 .col-grip）：
+    //   贴在 th 的右缘、只有 7px 宽，不占列内容的空间。
+    //   `data-colgrip="<列 id>"` 是**稳定的身份** —— 委托处理时按它找列，
+    //   绝不按索引（列设置能换顺序、能藏列，索引随时会变；参考 :446-447 同一条）。
+    return `<th${t}>${esc(d.title)}<span class="colgrip" data-colgrip="${esc(id)}"`
+      + ` title="拖动调整这一列的宽度；双击还原"></span></th>`;
+  }
+
+  // accountGroupOpen 读账号分组的折叠状态。未知时**默认展开** ——
+  // 与 modelGroupOpen 同一个默认值，理由也一样：首次打开就全部收起，
+  // 会让"这个面板有什么"看不见，比展开更糟。
+  function accountGroupOpen(providerId) {
+    try {
+      const v = localStorage.getItem(LS_ACCTGROUP + '.' + providerId);
+      return v === null ? true : v === '1';
+    } catch { return true; }   // 隐私模式：默认展开
+  }
+
+  function setAccountGroupOpen(providerId, open) {
+    try { localStorage.setItem(LS_ACCTGROUP + '.' + providerId, open ? '1' : '0'); } catch { /* 隐私模式 */ }
+  }
+
+  // maskNick 把昵称打码一部分（用户要求"所有的昵称都需要打码"）。
+  //
+  // # 规则（与后端 loomy 的 maskDisplay 同一套口径）
+  //
+  //	已经带 '*' 的（上游给的就是掩码形态，如 150****3411）→ 原样保留
+  //	太短（≤4 字符）→ **原样保留** —— 全打码会变成不可辨认的 ***，
+  //	  比如「妖精七七」→ 无法判断是哪个号（管理台本就可见原文，title 也有）
+  //	否则             → 留首 3 尾 2，中间打 *（掩码形态如 138*****740）
+  //
+  // 打码发生在**渲染层**：数据（/admin/accounts 的 nickname）不被动，
+  // 排障时 title 里放原文（见 accountRow 的 nickname 单元格）。
+  function maskNick(n) {
+    const s = String(n == null ? '' : n);
+    if (!s) return '—';
+    if (s.indexOf('*') >= 0) return s;
+    const rs = Array.from(s);
+    if (rs.length <= 4) return s;   // 太短全打码 = 不可辨认，原样
+    return rs.slice(0, 3).join('') + '*'.repeat(rs.length - 5) + rs.slice(-2).join('');
+  }
+
+  // statusCellHTML 账号状态单元格（供 accountRow 与无感轮询共用）。
+  function statusCellHTML(a) {
+    if (!a) return '<span class="pill dim">—</span>';
+    if (a.disabled) return '<span class="pill err">已禁用</span>';
+    if (a.cooling) return `<span class="pill warn">冷却 ${esc(a.cool_kind || '')} ${a.cool_remaining_sec ? a.cool_remaining_sec + 's' : ''}</span>`;
+    if (a.breaker_fails > 0) return '<span class="pill warn">熔断 ' + a.breaker_fails + '</span>';
+    return '<span class="pill ok">正常</span>';
+  }
+
+  // accountRow 一个账号行。
+  //
+  // 参数 groupOpen：它所属的分组当前是不是展开的。
+  //
+  // # 为什么折叠状态要"流进"每一行，而不是靠 CSS
+  //
+  // 模型面板那边是一条 CSS 规则（`.mgroup.collapsed .chips{display:none}`），
+  // 因为它的 chips 区有独立容器。账号表**做不到**，三条路都堵死：
+  //   · 不能给这些行套 <div> —— 表里放非 <tr> 会被 HTML 解析器做
+  //     foster parenting 搬到表外，DOM 结构与写的不一样（实测见
+  //     tests/frontend/foster_parenting_probe.js）
+  //   · `tr.grouprow.collapsed ~ tr.acctrow` **能用但过宽** —— 它选中
+  //     "同一父节点下位于其后**所有**的 acctrow"，跨过分组边界，
+  //     折叠第 1 组会把第 2 组的号也藏掉。扁平表里没有结构能界定边界
+  //   · 干脆不用 `hidden` 的 UA 规则，用 display:none 显式写死：
+  //     `[hidden]` 的 UA 规则是 display:none，**任何** display 声明都能盖过它，
+  //     于是"折叠失效"会变成一条取决于层叠顺序的隐式行为
+  //
+  // ⇒ 显隐只能写在行上。所以渲染每一行时**必须**知道它所在组的开合状态。
+  //   变异验证 1 就是把这个参数拿掉，看断言会不会红。
+  function accountRow(a, groupOpen) {
+    const st = statusCellHTML(a);
+
+    // Token 列（T5）：**未知**（字段不存在）与 **0 秒** 必须长得不一样。
+    //
+    // 改造前是 `a.token_expire_sec || 0` —— `|| 0` 把未知吞成 0，
+    // 于是"不知道"渲染成 `0d`（假的紧迫读数）。现在：
+    //
+    //   没有 token        → `—`（dim）
+    //   有 token，没 expiry → `—`（未知，与上一行**刻意**同形：都是"没有可读信息"）
+    //   有 token，有 expiry → fmtTokenRemain 的统一格式
+    //
+    // 第三态"有 token 但无 expiry"确实存在：codearts 的 STS 走另一套字段，
+    // `/admin/accounts` 对它不下发 token_expire_sec（实测确认）。
+    let tok = '<span class="dim">—</span>';
+    if (a.has_token) {
+      // ⚠ 传原始值（可能是 undefined），**不要**在这里 `|| 0` ——
+      // fmtTokenRemain 靠"是不是 undefined"区分未知与 0。
+      const d = a.token_expire_sec;
+      if (d !== undefined && d !== null) {
+        tok = `<span class="pill ${tokenPillClass(d)}">${esc(fmtTokenRemain(d))}</span>`;
+      }
+      // else：保持 `—`（未知）。用 title 讲清为什么是 `—` ——
+      // 用户看到"有 token 却没时间"时，第一个疑问就是"是不是坏了"。
+      else {
+        tok = '<span class="dim" title="该凭证没有可读的过期时间（上游未提供 exp）">—</span>';
+      }
+    }
+    let ck = '<span class="dim">—</span>';
+    if (a.today_checkin === 'ok') ck = '<span class="pill ok">已签到</span>';
+    else if (a.today_checkin === 'already') ck = '<span class="pill dim">今日已签</span>';
+    else if (a.today_checkin === 'fail') ck = '<span class="pill err">失败</span>';
+
+    const U = a.uid;
+    const pid = providerOf(a);
+
+    // ---- 每日动作按钮（**上游自报**，不再写死）----
+    //
+    // # 改造前 vs 改造后
+    //
+    //   改造前（写死，每行都一样，两个上游都长这样）：
+    //     `<button data-act="checkin"   title="单账号签到">签到</button>`
+    //     `<button data-act="credits"   title="刷新积分">积分</button>`
+    //     `<button data-act="keepalive" title="刷新 token">保活</button>`
+    //
+    //   改造后：
+    //     workbuddy 行 → 签到、保活（它自报这两个）
+    //     codearts  行 → 领取福利（它自报这一个；**没有**签到、**没有**保活）
+    //
+    // # 为什么文案与端点都由后端给
+    //
+    // 动作的**名字**是上游的事实（workbuddy 叫「签到」，codearts 叫
+    // 「领取福利」，语义上是同一件事但叫法不同）。写在前面就等于把
+    // 上游的文案搬进前端 —— 加第三个上游时又要改这里。
+    //
+    // 端点同理：data-act 存 ID，真正 POST 的路径在 daily_actions 里，
+    // 由 actionPath() 查出来。这样"按钮叫什么"与"打到哪"是同一份事实。
+    //
+    // # 兼容性（很重要）
+    //
+    // 事件分派与 act() 原本就按 data-act 分派，且 act() 里已经有一张
+    // `paths` 表。这里改成用 data-url 直接把自报的端点带到按钮上，
+    // 是**更可靠**的一条路：它不依赖前端再维护一张 ID→路径的表
+    //（那张表必然与后端漂移）。
+    const dailyBtns = dailyActionsOf(pid).map(d => {
+      if (!d.one_url) return '';
+      return `<button data-act="${esc(d.id)}" data-uid="${esc(U)}"`
+        + ` data-dayurl="${esc(d.one_url)}"`
+        + ` title="${esc(d.title || d.label)}">${esc(d.label)}</button>`;
+    }).filter(Boolean).join(' ');
+
+    // ⚠ 「积分」的位置：改造前它在**签到之后、保活之前**。
+    //
+    // 现在签到/保活是自报的（一个整体），积分走能力位路径（另一条），
+    // 于是重建顺序时它会被挤到最后。那是一次**可见的回归** ——
+    // 用户在同一个位置找同一个按钮，位置变了就是变了
+    //（本项目的先例：按钮顺序是设计决策，verify_account_buttons.js 对此有全等断言）。
+    //
+    // 所以把每日动作**按位置切开**：ID 排在 "checkin" 之前的留在积分前面，
+    // 其余跟在积分后面。这样 workbuddy 的观感按用户本轮要求是：
+    //
+    //   额度 | 签到 | 保活 | 禁用 | 移除
+    //
+    // 上一版锚点是 "keepalive"（签到排在额度前面），用户本轮要求
+    // 「签到」与「额度」**换个位置** —— 把锚点改成 "checkin" 后，
+    // workbuddy 的动作（checkin/keepalive）都在锚点之后 → 额度排最前。
+    // 锚点仍是**数据**（动作 id），不是上游名；codearts 的「签到」（welfare）
+    // 同样落在额度之后，两张表观感一致。
+    const QUOTA_ANCHOR = 'checkin';
+    const dailies = dailyActionsOf(pid);
+    const beforeQuota = dailies.filter(d => d.id !== QUOTA_ANCHOR && d.id < QUOTA_ANCHOR);
+    const afterQuota = dailies.filter(d => !(d.id !== QUOTA_ANCHOR && d.id < QUOTA_ANCHOR));
+
+    const dailyBtnOf = (d) => (!d.one_url ? '' :
+      `<button data-act="${esc(d.id)}" data-uid="${esc(U)}"`
+      + ` data-dayurl="${esc(d.one_url)}"`
+      + ` title="${esc(d.title || d.label)}">${esc(d.label)}</button>`);
+
+    // # 为什么这个按钮打的是**核心通用端点**，而不是上游私有端点
+    //
+    // 改造前它写死 `data-dayurl="/admin/credits/refresh"` —— 那是 workbuddy
+    // 挂的私有路由。后果是**本按钮的作用域被一个上游偷偷定义**：
+    //   · 只有 workbuddy 有这个能力位 → 看起来"没问题"
+    //   · 但 codearts 也声明了 quota-probe，而它的额度在 core 的
+    //     /admin/accounts/quota/refresh 上才会被刷到 —— 于是 codearts
+    //     那一整片账号的额度**从来没有被这个按钮碰到过**，而且界面完全沉默。
+    // 现在统一走 core 的 `/admin/accounts/quota/refresh`：它按每个账号**自己**
+    // 的 provider 分派到各自的 gateway.QuotaExt。
+    //
+    // # 三层作用域（用户报「点一行却刷了全部」后改的）
+    //
+    // 那个通用端点以前**不收任何参数**，恒为全池刷新 —— 于是行内按钮
+    // 与顶部「刷新全部额度」行为完全相同，而"行内"只存在于按钮的视觉位置里。
+    //
+    // 现在端点接受可选参数，三层各司其职：
+    //
+    //	行内「额度」（本按钮）   body {uid}      只刷该账号
+    //	分组「刷新本上游额度」    body {provider} 只刷该上游
+    //	顶部「刷新全部额度」      空 body        刷全部
+    //
+    // 前端**本来就带 uid**（见下面 dayUrl 那段），只是后端以前忽略它 ——
+    // 所以这里不需要改请求，改的是后端与文案。
+    const quotaBtn = hasCap(pid, 'quota-probe')
+      ? `<button data-act="credits" data-uid="${esc(U)}" data-dayurl="/admin/accounts/quota/refresh" title="重新探测**本行这一个账号**的剩余额度（只刷它，不动其它账号；要刷整个 ${esc(pid)} 用分组上的「刷新本上游额度」，要刷全部用顶部按钮）">额度</button>`
+      : '';
+
+    // 操作列分两层（2026-10-19 用户决定：「额度 禁用 移除 默认显示 其他收起来」）。
+    //
+    // # 为什么要分
+    //
+    // 实测一行最多 5 个按钮（「额度 签到 保活 禁用 移除」，6 行）需要 237px，
+    // 而操作列宽 200px 是参考项目的落点（accounts-columns.ts:205 原话：
+    // 「已签到(46+16)+余额(23+16)+设置(23+16)+⋯(12+16)+3×4+16≈200」）——
+    // 它的 200px 正是配「高频 3 个直显 + 第 4 个是 ⋯ 收纳菜单」。
+    // 我们照这个形态做：**额度 / 禁用(启用) / 移除** 直显（实测 3 个按钮 147px，放得下），
+    // 其余（签到 / 保活 / 清冷却）收进 ⋯。
+    //
+    // ⚠⚠ 为什么用原生 **popover** 而不是 `<details>` / 绝对定位菜单：
+    //   这个 <td> 上有 `overflow:hidden`（全站 `th,td` 的截断规则，见 598 行附近），
+    //   普通绝对定位的浮层会被它裁掉 —— 菜单张不开或只剩一条。
+    //   popover 走**顶层图层**（top layer），不受任何祖先 overflow 裁剪，
+    //   而且 `popovertarget` 属性本身就是开关管道，**零 JS、零依赖**。
+    //   代价是需要 Chrome 114+，本项目是内部单机控制台，可接受。
+    const opsPrimary = [
+      quotaBtn,
+      a.disabled
+        ? `<button data-act="enable" data-uid="${esc(U)}">启用</button>`
+        : `<button data-act="disable" data-uid="${esc(U)}">禁用</button>`,
+      `<button data-act="remove" data-uid="${esc(U)}" style="color:var(--err)">移除</button>`,
+    ].filter(Boolean).join(' ');
+
+    const opsMore = [
+      beforeQuota.map(dailyBtnOf).filter(Boolean).join(' '),
+      afterQuota.map(dailyBtnOf).filter(Boolean).join(' '),
+      a.cooling || a.breaker_fails > 0
+        ? `<button data-act="cooldown" data-uid="${esc(U)}">清冷却</button>` : '',
+    ].filter(Boolean).join(' ');
+
+    // ⚠ id 必须唯一（popovertarget 是按 id 找的）。uid 是数字或 UUID，
+    //   直接拼进来合法；仍加前缀避免与页面其它 id 撞。
+    const act = opsMore
+      ? opsPrimary
+        + ` <button class="ops-more" popovertarget="opsm-${esc(U)}"`
+        + ` title="更多操作（签到 / 保活 等）">⋯</button>`
+        + `<div id="opsm-${esc(U)}" popover class="ops-menu">${opsMore}</div>`
+      : opsPrimary;
+
+    // 「上游」列在分组后仍然保留：分组标题给的是整体结构，
+    // 这一列让单行在筛选/复制时也能自证归属。
+    const pinfo = a.provider_inferred
+      ? `<span class="pill dim" title="该数据来自 /status 回落路径，没有 provider 字段，按默认上游推断">${esc(providerOf(a) || '—')}?</span>`
+      : `<span class="pill dim">${esc(providerOf(a) || '—')}</span>`;
+
+    // 折叠状态由调用方传入（见函数头注释）。类名与分组行上的 **同一个**，
+    // 这样"这一行属于被折叠的组"是 DOM 里可查询的事实，而不是靠内联样式猜。
+    //
+    // ⚠ 拆多表之后，折叠其实是**整表 display:none**（见 .acctgroup.collapsed > table）。
+    // 这个类仍然保留：它是"这一行属于被收起的组"的 DOM 事实，
+    // 既有断言（与将来可能的逐行样式）都读它。留着不花钱，删了会丢信息。
+    const rowCls = groupOpen === false ? ' class="acctrow collapsed"' : ' class="acctrow"';
+
+    // 单元格按**列 id** 组织，再按本上游自报的列集挑选与排序。
+    //
+    // # 为什么是"先全建再挑"，而不是"按列集分支构建"
+    //
+    // 前者只有一个渲染真值来源：每个 id 对应的 HTML 只写一遍。
+    // 后者会按该上游有哪些列去写 if/else，于是"某个上游的某个单元格"
+    // 会在两个地方各写一次 —— 那正是本项目反复吃过的漂移形态。
+    //
+    // 代价是**用不到的列也白构建了一次**（几个字符串拼接，可忽略）。
+    const cells = {
+      // ⚠ 「上游」「UID」两列带 title：它们的宽度是**定宽**（见 ACCT_COLUMN_DEFS 的 w），
+      //   而内容是变长的 —— 实测上游有 `workbuddy-intl`（16 字符）、
+      //   UID 有 36 字符的 UUID 形态（`15b75562-cba5-4a1d-ad39-fc2e0f3119fc`），
+      //   两者都会溢出被 `text-overflow:ellipsis` 收成省略号。
+      //   收成省略号本身是对的（参考项目的做法），但**截断却不给全值**等于信息丢失 ——
+      //   这正是知识库里那条经验的 NEVER 项。原生 title 是我们的合理降级：
+      //   参考用的是 Portal Tooltip，理由（PN:1249-1251）是「原生 title 的出现时机
+      //   由浏览器决定（悬停约一秒才出，改不了）」，本项目零依赖，title 是能用的那一档。
+      provider: `<td title="${esc(providerOf(a) || '')}">${pinfo}</td>`,
+      nickname: `<td title="${esc(a.nickname || '')}">${esc(maskNick(a.nickname))}</td>`,
+      uid: `<td class="mono dim" title="${esc(U)}">${esc(U)}</td>`,
+      quota: `<td data-quota-uid="${esc(U)}" title="额度「—」表示还没探测过（与额度为 0 是两件事）">${quotaCellHTML(a)}</td>`,
+      free_quota: `<td data-free-quota-uid="${esc(U)}">${freeQuotaCellHTML(a)}</td>`,
+      status: `<td data-status-uid="${esc(U)}">${st}</td>`,
+      token: `<td title="${a.has_token && typeof a.token_expire_sec === 'number'
+        ? esc(fmtTokenRemain(a.token_expire_sec)) : ''}">${tok}</td>`,
+      // ⚠ 与 token 列同样的处理：格内是"相对剩余 + 绝对时刻"两段拼成的 pill，
+      //   定宽下仍可能被吃掉尾巴，title 兜住全值。
+      token_expiry: `<td title="${typeof a.token_expire_sec === 'number'
+        ? esc(fmtTokenRemain(a.token_expire_sec)) : ''}">${tokenExpiryCellHTML(a)}</td>`,
+      checkin: `<td>${ck}</td>`,
+      welfare: `<td>${welfareCellHTML(a)}</td>`,
+      success: `<td class="mono">${esc(a.success_count)}</td>`,
+      breaker: `<td class="mono">${esc(a.breaker_fails)}</td>`,
+      in_flight: `<td class="mono">${esc(a.in_flight)}</td>`,
+      // ⚠ 操作列带 title：一行最多 5 个动作时要 237px，而列宽是 200px（对齐参考落点），
+      //   所以最后那几个按钮会被省略号吃掉。title 用按钮文字拼出来 ——
+      //   从 `act` 的 HTML 里剥标签取文本，这样"这一行到底有哪些动作"永远可查。
+      //   参考项目在这里用的是 ⋯ 收纳菜单（把低频动作收进浮层），那是更好的形态，
+      //   但它要引入浮层；本项目零依赖，先用 title 保证信息不丢。
+      ops: `<td style="white-space:nowrap" title="${esc(act.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim())}">${act}</td>`,
+    };
+    const cols = acctColumnsFor(providerOf(a));
+    const tds = cols.map(id => cells[id]).filter(Boolean).join('');
+    return `<tr${rowCls} data-acctof="${esc(providerOf(a))}">${tds}</tr>`;
+  }
+
+  // ---------------------------------------------------------------- 管理台调用
+  //
+  // # 鉴权（T7 起）：靠 cookie，不靠请求头
+  //
+  // adminHdr() 现在恒为空对象 —— 管理面的身份是服务端下发的 HttpOnly 会话
+  // cookie（wb2api_sid），同源 fetch 自动携带。**不要再往这里加令牌头**：
+  // 页面里任何明文令牌都等于"打开页面就泄一把钥匙"（用户报障 ③）。
+  //
+  // 历史教训留在下面这段（改造前的形态）：本机直连曾免令牌，admin 端点只认
+  // 回环地址；远程放开后忘了带头 ⇒ 每个标签页都 403「仅允许本机直连…」。
+  // 现在回环地址**不是**凭据（见 internal/server/webui.go 的 ui），
+  // 所以那种"本机就能进"的隐含假设不会再回来。
+  async function admin(path, opts = {}) {
+    // ★ T-408②：GET 走 in-flight 去重（force 穿透）。写操作（POST/PATCH/DELETE）直达。
+    const _m = String((opts && opts.method) || 'GET').toUpperCase();
+    if (_m === 'GET' && !(opts && opts.force)) return dedupe('GET ' + path, () => adminRaw(path, opts));
+    return adminRaw(path, opts);
+  }
+
+  async function adminRaw(path, opts = {}) {
+    const m = String(opts.method || 'GET').toUpperCase();
+    let r;
+    try {
+      r = await fetch(path, Object.assign({}, opts, {
+        headers: Object.assign({ 'Content-Type': 'application/json' }, adminHdr(), opts.headers || {}),
+      }));
+    } catch (e) {
+      // ⚠ 网络层失败（服务没起来 / 断连）原来也是**静默 throw**，而调用方普遍 `catch {}` 吞掉
+      //   ⇒ 用户点了按钮，屏幕上什么都不发生。这里统一播一次。
+      if (!opts.silent) toast(`${m} 失败：${(e && e.message) || e}`, true);
+      throw e;
+    }
+    const txt = await r.text();
+    let j = null;
+    try { j = txt ? JSON.parse(txt) : null; } catch { /* 非 JSON */ }
+    if (!r.ok) {
+      const msg = (j && j.error) || txt.slice(0, 200) || ('HTTP ' + r.status);
+      // ⚠⚠ 用户原话：「前端的**按钮点击之后提示、弹出**都重新看看，怎样效果好一点」。
+      //
+      // 实测根因：`admin()` 失败时**只 throw**，而调用方里有大量 `catch {}`（静默吞掉）
+      // ⇒ 点按钮**屏幕上毫无反应** —— 用户只会读成"卡住了 / 这功能坏了"。
+      //（同一个病在 `busyRun` 的注释里已经记过一次："6.9 秒内 DOM 完全没有变化"。）
+      //
+      // 为什么放在这一层统一播报：**一次覆盖全部调用点**。
+      // ⚠ 逐个函数去套 `busyRun` 那种做法**一定会漏** —— 我在删表格 `<br>` 上已经漏过两轮，
+      //   被用户当场指着表说"不符合要求"。放在这里则**之后新写的调用也自动有反馈**。
+      // ⚠ 自己已经有播报的调用点传 `{ silent: true }` 即可（不改变它的现有行为）。
+      if (!opts.silent) toast(`${m} 失败：${msg}`, true);
+      throw new Error(msg);
+    }
+    return j;
+  }
+
+  // ---------------------------------------------------------------- 操作后刷新
+  //
+  // 统一编排「点按钮 → 跑写操作 → 刷新界面」这段时间的**可见反馈**。
+  //
+  // 为什么需要它（实测教训）：以前 growthAct / travelAct / act 末尾是裸调用
+  //     loadGrowth(true); refresh(); loadHistory();
+  // 既不 await、也不禁用按钮、也不给全局提示。用 CDP 实测点「刷新」按钮后
+  // **6.9 秒内 DOM 完全没有变化**（因为 loadGrowth(true) 是全量强制回源，
+  // 3 账号要 7.2s）。用户的结论自然是"点了没反应/不会自动刷新"。
+  //
+  // 正确的做法不是"让它变快"（那是后端的事），而是**让等待可见**：
+  //   1. 按钮立刻禁用 + 文案变成进行中（防连点，且给出即时反馈）
+  //   2. 全局通知区显示在做咩（#gtask，与后台任务的进度条同一位置，风格一致）
+  //   3. 超过 SLOW_HINT_MS 未完成时补一句「上游较慢」+ 递增秒数
+  //   4. 无论成功、返回 false、还是抛异常，都必须在 finally 里收尾
+  //
+  // 返回 true/false 表示成败，undefined 表示「调用方已自行提示」—— 与 busyRun 同义。
+  const SLOW_HINT_MS = 2000;
+
+  async function busyRun(btn, fn, opts) {
+    const o = opts || {};
+    // 连点保护：进行中就忽略。这比 disabled 属性更可靠 ——
+    // 事件委托场景下按钮是重建出来的，disabled 可能还没来得及生效。
+    if (btn && btn._busy) return undefined;
+    if (btn) {
+      btn._busy = true;
+      btn.disabled = true;
+    }
+    const text0 = btn ? btn.textContent : '';
+    // 按钮文案一定要变：只置 disabled 在视觉上几乎看不出来（尤其是深色主题下
+    // 只是稍微变淡），用户仍会觉得"点了没反应"。
+    // 未显式给 busyText 时按原标题推导一个 —— '领取' → '领取中…'。
+    if (btn) btn.textContent = o.busyText || (text0 ? text0 + '中…' : '处理中…');
+
+    // 用专用的 #busy，**不共用 #gtask** —— 后者是后台全量任务的进度，
+    // 两者可能同时存在（点了「全部签到」之后再点任一账号的「签到」）。
+    // 共用一个元素时，busy 的收尾会把全量任务的进度条一起隐藏掉。
+    const g = $('busy');
+    const label = o.label || text0 || '操作';
+    const t0 = Date.now();
+    // 阈值从 SLOW_HINT_MS 推导，不写字面量 2 —— 否则改常量时这里会悄悄漂移。
+    const slowSec = Math.ceil(SLOW_HINT_MS / 1000);
+    // 进度文案：默认"正在刷新界面"，但**等后台任务**的调用方必须能覆盖它。
+    //
+    // 为什么：`growthOneClick`（一键完成）等的是"成长待办后台跑完"，
+    // 单账号实测约 15s（专家链 8 次 × 6s 节流 + 事件上报间隔 1.05s），
+    // 4 个账号串行约 1 分钟。而默认文案写的是"正在刷新界面" ——
+    // 用户看到的是一句与事实无关的话，自然读成"卡住了 / 这功能坏了"。
+    // 传 progress 后显示"正在等待上游执行"，等待性质一目了然。
+    const progress = o.progress || '正在刷新界面';
+    const render = () => {
+      const sec = Math.floor((Date.now() - t0) / 1000);
+      g.textContent = sec >= slowSec
+        ? `${label}：${progress}…（上游较慢，已等 ${sec}s）`
+        : `${label}：${progress}…`;
+    };
+    render();
+    g.hidden = false;
+    // 每 500ms 刷新一次秒数；快请求会在第一次 tick 前就被清掉，因此不会有噪音。
+    const tick = setInterval(render, 500);
+    const slowHint = setTimeout(render, SLOW_HINT_MS);
+
+    try {
+      return await fn();
+    } catch (e) {
+      toast(`${label}失败：${(e && e.message) || e}`, true);
+      return false;
+    } finally {
+      clearInterval(tick);
+      clearTimeout(slowHint);
+      g.hidden = true;
+      g.textContent = '';
+      if (btn) {
+        btn._busy = false;
+        btn.disabled = false;
+        btn.textContent = text0;   // 总是恢复：上面总是改过
+      }
+    }
+  }
+
+  // toast 写全局通知区（右上角）。
+  //
+  // 注意目标元素必须是 body 下的 #toast，不能是某个面板里的节点 ——
+  // 否则在别的面板触发时提示会被 section 显隐规则连隐藏（历史 bug 的成因）。
+  //
+  // # 2026-11-01（用户报「右上角如果出现多个消息 多交替显示 这也是bug」）
+  //
+  // 原来这里是一句 `el.textContent = msg` —— **后一条覆盖前一条**，而批量动作
+  // （全部签到 / 刷新全部额度 / 批量轮换）一次会发几十条结果：它们在一个框里
+  // 快速**交替**，用户只读得到最后一条，前面全部等于没提示过。
+  //
+  // 现在同一个框里**逐条列出来**（各占一行、各自计时、互不覆盖）：
+  //   · 目前留最近 TOAST_MAX 条；更旧的折叠成一行「…还有 N 条」，
+  //     不假装"只有这几条"，也不让一次批量把半屏糊满
+  //   · 连续重复的同文案合并成「×N」（批量里同一种失败往往一模一样，
+  //     26 行同样的字不如一行带计数）
+  //   · 成功 5s / 失败 8s 后各自消失（错误更值得看清，留久一点）
+  //   · 点某一行立刻关掉它（不想等就自己清）
+  //
+  // ⚠ 两条实现约束（都是为了别把已有的门禁弄红）：
+  //   ① 只用 el.innerHTML 拼字符串，**不**用 createElement/appendChild ——
+  //      tests/frontend/gen_busy_feedback.js 会把这个函数抽出来跑在**假元素**上
+  //      （只有 textContent/className/innerHTML/hidden），DOM API 会直接炸。
+  //   ② 只引用**函数体里**的东西：队列挂在元素上（el._lines），上限写成
+  //      函数内的常量。模块级变量在抽出来的那份里不存在 ⇒ ReferenceError
+  //      （第一版就踩了：TOAST_MAX 写在函数外，门禁直接红）。
+  // ==== WB2API:TOAST:START（由 tools/toast_sync.js 生成，勿手改）====
+// toast.js —— 通知框的**唯一实现**（外壳控制台 + 令牌页共用）。
+//
+// # 为什么抽成共享层（2026-11-01）
+//
+// 用户报「右上角如果出现多个消息 多交替显示 这也是 bug」之后，外壳改成了**堆叠式**
+// （逐条列出、各自计时、重复文案合并成 ×N、超过上限折叠成「…还有 N 条」）。
+// 但令牌页还留着旧实现：
+//
+//     el.textContent = msg;  el.className = 'toast on' + (bad ? ' bad' : '');
+//     setTimeout(() => el.className = 'toast', 2000);
+//
+// ⇒ 同一个产品里两种通知语义：令牌页批量轮换一次发十几条结果时，用户仍然只读得到最后一条
+//（与外壳那个 bug 一模一样的症状，只是发生在另一个页面）。
+//
+// # 契约（宿主页面必须提供两样东西）
+//
+//   $('toast')   —— 通知容器（id="toast"），样式在主题块里（#toast .toastline 等，
+//                   由 theme_sync 同步到所有页面，所以视觉本来就是统一的）
+//   esc(s)       —— HTML 转义（各页自带一份，实现略有差异，故不在这里重复定义）
+//
+// # 两条实现约束（照抄外壳那份的踩坑记录，别改）
+//
+//   ① 只用 el.innerHTML 拼字符串，**不用** createElement/appendChild ——
+//      tests/frontend/gen_busy_feedback.js 会把这个函数抽出来跑在**假元素**上
+//      （只有 textContent/className/innerHTML/hidden），DOM API 会直接炸。
+//   ② 只引用**函数体内**的东西：队列挂在元素上（el._lines），上限写成函数内常量。
+//      模块级变量在抽出来的那份里不存在 ⇒ ReferenceError（第一版踩过）。
+function toast(msg, bad) {
+  const TOAST_MAX = 5;   // 一个框里最多列几条（更旧的折叠成「…还有 N 条」）
+  const el = $('toast');
+  if (!el) return;
+  // 外部把框清空了（探针的 __CLEAR_TOAST__、别的代码）⇒ 队列也当清空，
+  // 免得下一句提示把上一次的旧行又画回来。
+  if (el.hidden && !el.innerHTML) el._lines = [];
+  const lines = el._lines || (el._lines = []);
+  const text = String(msg == null ? '' : msg);
+  const ttl = bad ? 8000 : 5000;   // 错误留久一点：它更值得看清
+  const last = lines[lines.length - 1];
+  if (last && last.text === text && last.bad === !!bad) {
+    last.n += 1;                   // 连续同文案 ⇒ 只加计数，不堆行
+    last.deadline = Date.now() + ttl;
+  } else {
+    lines.push({ text: text, bad: !!bad, n: 1, deadline: Date.now() + ttl });
+  }
+
+  // renderToast 嵌在 toast **内部**：门禁只抽出 `function toast(` 这一个块去跑，
+  // 独立函数在那里是 undefined、DOM API 也都没有。
+  const renderToast = () => {
+    const now = Date.now();
+    const all = (el._lines || []).filter((l) => l.deadline > now);
+    el._lines = all;
+    const shown = all.slice(-TOAST_MAX);        // 队列尾部是最新的
+    const dropped = all.length - shown.length;  // 被折叠掉的更旧的那些
+    let html = '';
+    let anyBad = false;
+    for (let i = shown.length - 1; i >= 0; i--) {  // 倒序 ⇒ 最新在最上
+      const l = shown[i];
+      anyBad = anyBad || l.bad;
+      html += '<div class="toastline ' + (l.bad ? 'bad' : 'ok') +
+        '" data-i="' + (all.length - shown.length + i) + '" title="点击关闭这一条">' +
+        esc(l.text) + (l.n > 1 ? '<b class="toastn">×' + l.n + '</b>' : '') + '</div>';
+    }
+    if (dropped > 0) html += '<div class="toastmore">…还有 ' + dropped + ' 条</div>';
+    el.innerHTML = html;
+    // 类名与旧实现同一口径（门禁 gen_busy_feedback.js 断言 includes('bad')）
+    el.className = 'notice ' + (anyBad ? 'bad' : 'ok');
+    el.hidden = shown.length === 0;
+    if (!el._bound) {
+      el._bound = true;   // 只绑一次：toast 会被调很多次
+      el.onclick = (ev) => {
+        const box = (ev && ev.target && ev.target.closest) ? ev.target.closest('.toastline') : null;
+        if (!box || !el._lines) return;
+        const i = Number(box.getAttribute('data-i'));
+        if (isFinite(i) && i >= 0 && i < el._lines.length) el._lines.splice(i, 1);
+        renderToast();
+      };
+    }
+    clearTimeout(toast._t);
+    if (shown.length) {
+      const next = Math.min.apply(null, shown.map((l) => l.deadline));
+      toast._t = setTimeout(renderToast, Math.max(100, next - Date.now() + 20));
+    }
+  };
+  renderToast();
+}
+// ==== WB2API:TOAST:END ====
+
+  // notice 写「需要用户照着做」的持久提示：不自动消失，带标题与关闭按钮。
+  //
+  // 与 toast 的分工：
+  //   toast  一次性结果播报（"签到成功"），5 秒后自己消失，错过就算了
+  //   notice 可操作的指引（"要先完成 XX 才能接单"），必须让用户看清并点掉 ——
+  //          它往往意味着"你现在什么都不用再点，先去客户端做件事"，
+  //          一闪而过的 toast 会让人以为是自己操作错了、反复重试。
+  function notice(title, body) {
+    const el = $('notice');
+    el.innerHTML =
+      '<div style="display:flex;align-items:baseline;gap:8px">' +
+        '<b style="color:var(--warn)">' + esc(title) + '</b>' +
+        '<span class="spacer" style="flex:1"></span>' +
+        '<button id="noticeClose" style="font-size:11px;padding:1px 8px">知道了</button>' +
+      '</div>' +
+      '<div style="margin-top:6px;line-height:1.7;white-space:pre-wrap">' + esc(body) + '</div>';
+    el.hidden = false;
+    const btn = $('noticeClose');
+    if (btn) btn.onclick = () => { el.hidden = true; };
+  }
+
+  // ACT_LABEL 把**本前端自己分派**的动作名翻成中文，用于 busyRun 的进度文案。
+  //
+  // # 为什么它现在只剩这几个（T3 之后）
+  //
+  // 以前这里有 checkin / credits / keepalive 三条 —— 那是把**上游的文案**
+  // 抄进前端（后端改一个字，界面就与事实不符）。
+  // 现在每日动作的文案来自 manifest 的 daily_actions[].label（上游自报），
+  // 按钮自己带着文字，progress 文案直接用**按钮上的那段文字**，
+  // 于是这里不必再维护那张表。
+  //
+  // 留下的四个是**核心通用动作**（账号生命周期，不属于任何上游），
+  // 它们的文案本来就是前端的表达，不是上游的事实。
+  const ACT_LABEL = {
+    enable: '启用', disable: '禁用', cooldown: '清冷却', remove: '移除',
+  };
+
+  async function act(uid, action, btn) {
+    // 移除要弹两次确认，确认过程不该被 busy 态包住（否则按钮在用户还在看弹窗时就禁用了，
+    // 取消后又要恢复，反而闪）。
+    if (action === 'remove') {
+      const a = share.find(x => x.uid === uid) || {};
+      // 一次确认、**默认删净**（出池 + 删凭证文件）。
+      //
+      // 旧交互是"默认只出池、文件保留，再问一次要不要删文件"—— 而凭证文件
+      // 就是账号在本机的实体：文件还在，下次重载/重启必把它装回池子，
+      // 用户实测读成「删除不生效、重启复活」的 bug。"暂时退出服务"的正确
+      // 形态本来就是「禁用」（保留凭证、随时可启用），不需要"出池留文件"
+      // 这种半删除状态 —— 它只制造复活惊喜，不制造任何能力。
+      if (!confirm(`彻底删除账号「${a.nickname || uid.slice(0, 8)}」？\n\n· 移出账号池，并删除 auths 里的凭证文件（不可恢复）\n· 只是暂时停用？请用「禁用」，凭证保留、随时可启用`)) return;
+      await busyRun(btn, async () => {
+        const r = await admin(`/admin/accounts/${encodeURIComponent(uid)}?purge_file=1`, { method: 'DELETE' });
+        // ⚠ 先把这一屏的缓存丢掉再刷新 —— 否则 `refresh()` 里的
+        //   `sharedGet('ep:/admin/accounts')` 会命中 30s 内的旧快照，
+        //   把**刚删掉的这一行原样画回来**（真浏览器实测 20 秒不消失；
+        //   见 writeInvalidate 的长注释）。
+        writeInvalidate([EP_ACCOUNTS]);
+        const who = a.nickname || uid.slice(0, 8);
+        // ⚠ 回执里可能带 `purge_error`（2026-10-19 加）：账号出池了，但**凭证文件没删掉**。
+        //   这时说「已彻底删除」就是骗人 —— 文件还在盘上，重载 auths 或重启就会
+        //   把它装回池子，用户下次看到的就是「删了又复活」（这正是他报的那条）。
+        //   宁可提示得刺眼，也不要成功得可疑。
+        if (r && r.purge_error) {
+          toast(`已移出账号池，但凭证文件没删掉：${r.purge_error}`, true);
+        } else {
+          toast(`已彻底删除 ${who}`);
+        }
+        await Promise.all([refresh(), loadHistory()]);
+        return undefined;
+      }, { label: '移除账号', busyText: '删除中…' });
+      return;
+    }
+
+    // 动作的显示名：优先用**按钮自己的文字**（那是后端下发的 label），
+    // 其次才查本地表。次序不能反过来 —— 本地表对每日动作已经没有条目了，
+    // 反过来会让 progress 显示成英文 ID。
+    const btnLabel = btn ? String(btn.textContent || '').trim() : '';
+    const label = btnLabel || ACT_LABEL[action] || action;
+
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        // ---- 每日动作：路径来自**按钮上的 data-dayurl**（后端自报）----
+        //
+        // # 为什么不再用一张 `paths` 常量表
+        //
+        // 那张表把"动作 ID → 端点"写死在前端，于是后端加/改一个动作
+        // 就要同步改这里，而**漏改不会报错** —— 表现是按钮出现但点了没反应
+        //（或打到旧路径）。把端点放在按钮上，前端就只是"把它转发出去"。
+        //
+        // data-dayurl 由 accountRow 从 manifest 的 daily_actions 填进来。
+        const dayUrl = btn && btn.dataset ? btn.dataset.dayurl : '';
+        if (dayUrl) {
+          const r = await admin(dayUrl, { method: 'POST', body: JSON.stringify({ uid }) });
+          // 回执形状有三类，都要认（否则会显示成"已提交"，看不见真实结果）：
+          //   · {result:{status,detail}}                     —— workbuddy 的签到/保活
+          //   · {updated,unknown,failed,skipped,scope,count} —— core 的额度刷新
+          //   · {claimed:N, results:[…]}                     —— codearts 的福利领取
+          //
+          // ⚠ 分支次序：额度那条必须排在 claimed 之前。新回执里没有 `claimed`，
+          // 今天次序无所谓 —— 但**将来 core 若给额度回执补上 results/claimed**，
+          // 排在后面的新分支就永远走不到，本 bug 会以"分支选错 → 静默走 else"
+          // 的同款形态复发。判据用 `typeof r.updated === 'number'`，
+          // 它是额度回执的**特征字段**，不与其它两种形状重叠。
+          const res = r && r.result;
+          if (res) {
+            toast(`${label} ${uid.slice(0, 8)}: ${res.status}${res.detail ? ' · ' + res.detail : ''}`,
+              res.status === 'fail');
+          } else if (r && typeof r.updated === 'number') {
+            // 额度刷新：**行内按钮现在只刷这一个账号**（body 里带了 uid，
+            // 后端按 uid 分档）。文案由 quotaScopeToast 统一渲染 ——
+            // 三处入口（行内 / 分组 / 顶部）共用同一个函数，
+            // 措辞不会各写一份而漂移。
+            //
+            // ⚠ 它返回的是 {msg, bad} **对象**，不是字符串。
+            // 直接 toast(quotaScopeToast(r)) 会把对象交给 toast，
+            // 界面显示 "[object Object]"（实测踩到）。必须取 .msg / .bad。
+            const t = quotaScopeToast(r);
+            toast(t.msg, t.bad);
+          } else if (r && typeof r.claimed === 'number') {
+            const total = Array.isArray(r.results) ? r.results.length : 0;
+            toast(`${label} ${uid.slice(0, 8)}：本次领到 ${r.claimed}/${total}`);
+          } else {
+            toast(`${label} ${uid.slice(0, 8)} 已提交`);
+          }
+          wrote = true;
+        } else if (action === 'enable' || action === 'disable') {
+          await admin(`/admin/accounts/${encodeURIComponent(uid)}/${action}`, { method: 'POST', body: '{}' });
+          toast(`${label} ${uid.slice(0, 8)} 完成`);
+          wrote = true;
+        } else if (action === 'cooldown') {
+          await admin(`/admin/accounts/${encodeURIComponent(uid)}/cooldown/clear`, { method: 'POST', body: '{}' });
+          toast(`${uid.slice(0, 8)} 冷却/熔断已清`);
+          wrote = true;
+        }
+      } catch (e) {
+        toast(`${label}失败：${e.message}`, true);
+      }
+      // ⚠ 与 remove 分支同理：**先丢缓存再刷新**。这里是所有账号动作的收尾
+      //   （禁用 / 启用 / 清冷却 / 每日动作），写完不清快照的话，
+      //   表格会把刚改过的状态原样画回来 —— 用户看到的是"点了没反应"。
+      if (wrote) writeInvalidate([EP_ACCOUNTS]);
+      await Promise.all([refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
+  }
+
+  // refreshAccounts 用额度刷新回执里的账号视图重绘账号表。
+  //
+  // # 为什么需要它（本函数此前**不存在**，而调用点早就写好了）
+  //
+  // 分组行的「刷新本上游额度」在本函数缺失的情况下直接调用它 ——
+  // 于是那个按钮点下去**必抛** `refreshAccounts is not defined`，
+  // 界面只显示"刷新本上游额度失败：refreshAccounts is not defined"。
+  //
+  // 这是本仓反复出现的同一类缺陷：**调用点与实现分家**。
+  // 分组额度按钮是在"三层作用域"那次改动里加的，而它的收尾刷新
+  // 写成了调用一个从未定义的函数 —— 静态断言看不出来（文本里
+  // 有这个名字），只有真点一次才知道。
+  //
+  // # 为什么用回执里的 accounts 而不是再发一次请求
+  //
+  // `/admin/accounts/quota/refresh` 的**回执里本来就带着刷新后的账号视图**
+  //（见 internal/admin/quota_refresh.go：`"accounts": h.accountViews()`）。
+  // 再调一次 refresh() 会多一轮全量回源（healthz + status + accounts +
+  // 模型 + 统计…），而我们要的只是把新额度画上去。
+  //
+  // ⚠ 回执里没有 accounts（旧后端 / 别的调用方）时**回落整页 refresh()**，
+  // 而不是静默什么都不做 —— 那会让"额度刷了但表格没变"，用户以为没生效。
+  async function refreshAccounts(receipt) {
+    const list = receipt && receipt.accounts;
+    if (Array.isArray(list)) {
+      renderAccounts(list);
+      return;
+    }
+    await refresh();
+  }
+
+  // dailyAllSummary 把「全量每日动作」的回执汇总成**一句人话**（纯函数，门禁可钉）。
+  //
+  // # 为什么必须按状态分桶（用户 2026-11-01 报障：「monkeycode 全部签到有问题」）
+  //
+  // 旧实现只数 status === 'ok'：
+  //     const ok = r.results.filter(x => x.status === 'ok').length;
+  //     toast('全部' + label + '完成：成功 ' + ok + '/' + r.results.length)
+  // 而 monkeycode 那 26 个号今天**都已经签过** ⇒ 状态全是 already ⇒ 用户看到的是
+  //     「全部签到完成：成功 0/26」
+  // 于是读成「全部签到坏了」（真实现场：25 个 already + 1 个真的 401 失败）。
+  // 同样的形状还出现在 codearts / lobsterai / qoder / trae / minimax —— 六个上游共用。
+  //
+  // 词表来自 checkinlog（唯一真相）：ok / already / fail / skip。
+  //   ok      本次真的签上了
+  //   already 今天已经签过（**成功**的一种，不是失败）
+  //   skip    上游今天没开放（也不是失败）
+  //   fail    真失败（凭证失效 / 网络不通 …）
+  // 判 bad 只按 fail —— 与 driver.HandlerOne 的 ok: res.Status != fail 同源。
+  //
+  // ⚠ 纯函数：不碰 DOM、不碰网络 ⇒ tests/frontend/verify_dailyall_summary.js
+  //   可以直接把它抠出来喂各种回执形状（含真实那一条 25+1）。
+  function dailyAllSummary(label, r) {
+    const list = (r && Array.isArray(r.results)) ? r.results : [];
+    const n = { ok: 0, already: 0, skip: 0, fail: 0, other: 0 };
+    for (const x of list) {
+      const s = (x && x.status) ? String(x.status) : '';
+      if (Object.prototype.hasOwnProperty.call(n, s)) n[s]++; else n.other++;
+    }
+    const bad = (n.fail + n.other) > 0;
+    // 领取类动作（codearts 福利领取）的回执带 claimed，而它**就是 ok 的条数**
+    // （见 driver.HandlerAll：claimed++ 只在 StatusOK 时）。所以这一类不重复报
+    // 「新签」，直接报「领取 N」—— 否则同一件事会出现两个数，用户又开始怀疑。
+    const claimKind = (typeof r.claimed === 'number');
+    const parts = [];
+    if (n.ok && !claimKind) parts.push('新签 ' + n.ok);
+    if (n.already) parts.push('已签 ' + n.already);
+    if (n.skip) parts.push('跳过 ' + n.skip);
+    if (n.fail + n.other) parts.push('失败 ' + (n.fail + n.other));
+    if (claimKind && r.claimed > 0) parts.push('领取 ' + r.claimed);
+    const where = list.length ? ('共 ' + list.length + ' 个账号') : '没有账号';
+    const body = parts.length ? parts.join(' · ') : '无事可做';
+    return { msg: '全部' + label + '完成：' + body + '（' + where + '）', bad: bad };
+  }
+
+  // startAll 触发某上游的**全量**每日动作。
+  //
+  // # 它现在收的是"动作"而不是"动作名"
+  //
+  // 改造前是 startAll('checkin')，路径从一张写死的表里取。
+  // 现在收一个 {provider, id, label, all_url} —— 全部来自 manifest 的
+  // daily_actions（上游自报）。所以顶部按钮是**按上游**生成的：
+  //
+  //   workbuddy 报了签到(Batch) → 出现「全部签到」
+  //   codearts  没报 Batch      → 不出现（它没有全量端点，如实）
+  //
+  // # 为什么形参从 kind 改成 act 对象
+  //
+  // kind 是字符串，于是"这个动作打哪个端点"只能靠前端查表 ——
+  // 而表里没有的动作会静默什么都不做。传对象之后端点随对象一起来，
+  // "表里没有"这个失败模式整个消失。
+  async function startAll(dact) {
+    if (!dact || !dact.all_url) return;
+    const label = dact.label || dact.id;
+    try {
+      const r = await admin(dact.all_url, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
+      // ⚠ 这一条**必须排在 `r.results` 之前**（本 bug 的同款形态：分支选错
+      // → 静默走 else → 按钮点了、有 toast、用户却看不到任何真实结果）。
+      //
+      // 背景：顶部「刷新全部额度」改成打 core 的 /admin/accounts/quota/refresh
+      // 之后，回执变成 {updated,unknown,failed,skipped,providers,accounts} ——
+      // **没有 results**。旧代码只有 `r.results` 与兜底 else 两支，于是新回执
+      // 落进 else，toast 说"全部额度已提交"，四个计数一个都没显示。
+      // 判据用 typeof r.updated === 'number'（额度回执的特征字段）；
+      // 放在 results 之前，是为了将来 core 若也给额度回执补上个 results 时，
+      // 这条仍然先命中 —— 顺序反了就等于给未来埋一颗同形的雷。
+      else if (r && typeof r.updated === 'number') {
+        const t = quotaScopeToast(r);
+        toast(t.msg, t.bad);
+        refresh(); loadHistory();
+      }
+      // ④ 逐账号结果类（monkeycode / codearts / lobsterai / qoder / trae / minimax：
+      //    共享驱动与各上游全量端点都回这个形状 {ok, claimed?, results:[{status,detail}]}）。
+      //
+      // ⚠ 汇总走 dailyAllSummary —— **不许**只数 status === 'ok'：
+      //   那会把「今天已签到（already）」数成失败，界面上显示「成功 0/26」，
+      //   而事实是 25 个已签 + 1 个真失败。
+      else if (r && Array.isArray(r.results)) {
+        const t = dailyAllSummary(label, r);
+        toast(t.msg, t.bad);
+        refresh(); loadHistory();
+      } else {
+        toast(`全部${label}已提交`);
+      }
+    } catch (e) { toast(`全部${label}失败：${e.message}`, true); }
+  }
+
+  // quotaScopeToast 把 core 额度刷新回执渲染成一句话（按作用域分档）。
+  //
+  // # 为什么必须分四段（updated / unknown / failed / skipped）
+  //
+  // 回执把结果分成**四类，其中三类都不是错误**：
+  //   updated  拿到数据并写回池            —— 成功
+  //   unknown  问了，上游如实回答"不知道"   —— **正常**，界面显示 `—`，不该标红
+  //   failed   上游返回 nil 或刷新出错      —— 真错误
+  //   skipped  上游压根没实现 QuotaExt      —— **最需要说出来的一类**
+  //
+  // 只报"已更新 N"会让另外三类全部隐形，而 skipped 尤其危险：
+  // 它意味着**某个上游整片账号没被刷到**，旧的 /admin/credits/refresh
+  // 对这种情况是完全沉默的（那正是本 bug 能一直藏着的原因）。
+  // 所以 skipped 非 0 时**必须显式出现在文案里**，不能只当计数。
+  //
+  // bad 只由 failed 决定：把 unknown/skipped 也标红会让"上游不报额度"
+  // 看起来像故障，从而被误修（与后端 refreshQuotas 的分开计数同一条理由）。
+  // quotaScopeToast 额度刷新回执的统一文案（三处入口共用）。
+  //
+  // # 为什么必须统一（用户报的问题的根因之一）
+  //
+  // 三个入口打的是**同一个端点**（`/admin/accounts/quota/refresh`），
+  // 只靠 body 区分作用域：
+  //
+  //	行内「额度」          {uid}       只刷该账号
+  //	分组「刷新本上游额度」 {provider}  只刷该上游
+  //	顶部「刷新全部额度」   空 body     刷全部
+  //
+  // 文案若各写一份，就会出现"点了单账号却说全部额度完成"这种
+  // **界面替后端撒谎**的形态。所以措辞只在这里写一次，按回执的
+  // `scope` 分档 —— scope 由**后端**给出（它才知道实际刷了哪些），
+  // 不是前端按自己传的参数猜的（那个在回落路径上会不等于事实）。
+  //
+  // ⚠ 回执里没有 scope 时（旧后端 / 别的调用方）回落成"全部额度" ——
+  // 与改造前的文案逐字相同，不制造新措辞。
+  function quotaScopeToast(r, providerLabel) {
+    const bad = (r.failed || 0) > 0;
+    const parts = [`已更新 ${r.updated || 0}`];
+    if (r.unknown) parts.push(`未知 ${r.unknown}`);
+    if (r.failed)  parts.push(`失败 ${r.failed}`);
+    if (r.skipped) parts.push(`跳过 ${r.skipped}`);
+    const n = typeof r.count === 'number' ? r.count : null;
+    // 标题按作用域分档。provider 用调用方给的展示名（分组按钮知道是谁），
+    // 没给就用回执里的 providers 字段。
+    let head;
+    switch (r.scope) {
+      case 'account':
+        head = '该账号额度完成：';
+        break;
+      case 'provider': {
+        const who = providerLabel
+          || (Array.isArray(r.providers) && r.providers.length ? r.providers.join('、') : '该上游');
+        head = `${who} 额度完成${n === null ? '' : `（${n} 个账号）`}：`;
+        break;
+      }
+      default:
+        head = `全部额度完成${n === null ? '' : `（${n} 个账号）`}：`;
+    }
+    // providers 明细只在跨上游时有意义（单账号/单上游时上面已说过是谁）。
+    const prov = r.scope === 'all' && Array.isArray(r.providers) && r.providers.length
+      ? `（${r.providers.join('、')}）` : '';
+    const tail = r.skipped ? `；跳过 ${r.skipped} 个账号的上游未接入额度`
+               : (r.unknown ? '；未知表示上游未报额度，不是错误' : '');
+    return { msg: `${head}${parts.join(' · ')}${prov}${tail}`, bad };
+  }
+
+  // ---------------------------------------------------------------- 全量任务进度
+  // 进度写全局 #gtask（不是面板里的节点）：后台任务可能在任意面板被触发，
+  // 写进面板节点就会在别的面板里看不见 —— 与 toast 是同一个坑。
+  function watchTask() {
+    if (taskTimer) clearInterval(taskTimer);
+    clearTimeout(watchTask._hide);
+    const el = $('gtask');
+    const tick = async () => {
+      let t;
+      try { t = await sharedGet('ep:/admin/task', () => admin('/admin/task')); } catch { return; }
+      el.hidden = false;
+      el.className = 'notice progress';
+      if (t.running) {
+        el.textContent = `${t.kind} 执行中… 已用 ${t.elapsed_sec || 0}s`;
+        refresh(); // 过程中也刷新表格，能实时看到额度/状态变化
+        return;
+      }
+      if (t.kind) {
+        el.textContent = `${t.kind} 完成：成功 ${t.ok || 0} · 已签到 ${t.already || 0} · 失败 ${t.fail || 0}`
+          + ` · 耗时 ${t.duration_sec || 0}s` + (t.error ? ' · ' + t.error : '');
+        el.className = 'notice ' + (t.fail || t.error ? 'bad' : 'ok');
+        // 完成摘要留一会儿再收，给用户看完的时间；期间再触发任务会被上面的
+        // clearTimeout 取消，不会把新任务的进度提前关掉。
+        watchTask._hide = setTimeout(() => { el.hidden = true; }, 5000);
+      }
+      clearInterval(taskTimer); taskTimer = null;
+      // refresh() 拉的是账号/模型/统计，**不含成长数据** —— 而"一键完成待办"
+      // 改的正是成长面板要展示的东西。不补这一行的话，后台任务跑完 3 分钟，
+      // 任务明细里还是那一屏旧待办，用户只能自己去点刷新。
+      // loadGrowth(false) 走后端缓存（实测 ~1ms），对签到类任务也没有代价。
+      loadGrowth(false);
+      refresh(); loadHistory();
+    };
+    tick();
+    taskTimer = setInterval(tick, 2000);
+  }
+
+  // ---------------------------------------------------------------- 添加账号
+  function openModal() { $('modal').style.display = 'flex'; }
+  function closeModal() {
+    $('modal').style.display = 'none';
+    if (loginPoll) { clearInterval(loginPoll); loginPoll = null; }
+    refresh();
+  }
+
+  // ---------------------------------------------------------------- 只读信息弹窗
+  //
+  // 替代 alert()：原生弹窗阻塞页面、无法复制、样式不可控，
+  // 且在多行 k:v 文本上可读性差。
+  function showInfo(title, text) {
+    $('infoTitle').textContent = title;
+    $('infoBody').textContent = text;
+    $('infoModal').style.display = 'flex';
+  }
+  function closeInfo() { $('infoModal').style.display = 'none'; }
+
+  // addAccount 走某个上游的登录流程添加账号。
+  //
+  // providerId 来自分组行按钮的 data-gadd（T10）。
+  //
+  // ⚠ 后端目前**只接受默认上游** —— `POST /admin/login/start` 用的是装配时
+  // 注入的那个 OAuth 客户端（`h.cfg.OAuth`，指向 copilot.tencent.com）。
+  // 所以这里如实把 provider 放进请求体，但**不假装它一定生效**：
+  // 响应里若带回 `provider`，用它显示（说明后端认了）；
+  // 没带回就用点进来的那个并标注"（按默认上游）"。
+  //
+  // 这样做的理由：分组行现在每个上游都有「＋ 添加账号」按钮，
+  // 若文案永远写"添加 WorkBuddy 账号"，在 codearts 那行点开就是**骗人**的。
+  // 后端补上按 provider 分派（gateway.LoginFlow 那个接缝）之后，
+  // 这里无需再改。
+  // renderLoginLocalHint 提示"必须在本机浏览器完成授权"。
+  //
+  // # 判据
+  //
+  // 看**地址栏里的 hostname**：`localhost` / `127.0.0.1` / `::1` 视为本机。
+  // 其它（含局域网 IP、域名）视为远程 —— 那时浏览器打不开网关那台的
+  // `127.0.0.1:<回调端口>`。
+  //
+  // # 为什么必须提示
+  //
+  // codearts 用本地回调服务器接授权结果。远程用户点完授权页的确认后，
+  // 浏览器回调到**用户自己的 127.0.0.1**（那里没有回调服务器），
+  // 于是界面永远停在"等待授权"，**没有任何错误**。
+  //
+  // 这类"静默卡住"是本项目反复出现的问题形态：不报错，但也不成功，
+  // 用户只能猜。一句提示就能把"卡住"变成"知道为什么"。
+  //
+  // # 为什么不阻止
+  //
+  // 不隐藏按钮、不改流程 —— 远程用户**仍然可能**成功
+  //（例如把授权页链接复制到网关那台的浏览器里打开）。提示只负责
+  // 说明前提，不替用户做决定。
+  function renderLoginLocalHint() {
+    const el = $('loginLocalHint');
+    if (!el) return;
+    const h = String(location.hostname || '').toLowerCase();
+    const isLocal = h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
+    if (isLocal) {
+      el.style.display = 'none';
+      el.textContent = '';
+      return;
+    }
+    el.style.display = '';
+    el.textContent = '提示：当前从「' + h + '」访问，授权完成后的回调会打到'
+      + '本机 127.0.0.1，浏览器可能无法回连。若一直停在"等待授权"，'
+      + '请把授权链接复制到运行网关那台机器的浏览器里打开。';
+  }
+
+  // renderLoginIntro 按**登录形态**改写弹窗顶部那句引导语。
+  //
+  // # 为什么它会是一句错话（用户报障）
+  //
+  // 它原本是 HTML 里写死的一句「点下面的链接在浏览器完成登录」。
+  // 而 raccoon 的登录是**微信扫码**：它的 auth_url 是要扫的内容，
+  // 在屏幕上手机扫不了同一块屏幕。于是那个弹窗**同时**显示
+  // 「去浏览器登录」与「用手机微信扫码」两句互相矛盾的话 ——
+  // 用户按第一句点了「复制链接」，然后不知道该怎么办。
+  //
+  // # 判据是**数据**，不是上游名
+  //
+  //	mode 'qr'      → 后端下发了 qr_svg，这是扫码流程
+  //	mode 'local'   → 没有 auth_url，登录态在本机客户端里
+  //	mode 'browser' → 有 auth_url，去（无痕）窗口打开
+  //
+  // 与 addAccount 里那条同源：**前端不许认识任何上游名**。
+  function renderLoginIntro(mode) {
+    const el = $('loginIntro');
+    if (!el) return;
+    if (mode === 'qr') {
+      el.textContent = '用手机扫描下面的二维码完成登录，网关会自动轮询并落盘凭证。无需在电脑上打开任何页面。';
+    } else if (mode === 'local') {
+      el.textContent = '登录态就在本机那个桌面客户端里，网关直接读取，无需任何操作。';
+    } else if (mode === 'page') {
+      // ★ T-342：page 型（表单就在下面的 iframe 里）不是 OAuth —— 不能留
+      //   renderLoginIntro('browser') 那句占位文案。判据是数据（manifest 的 page 布尔）。
+      el.textContent = '在下面的表单里完成登录；成功后凭据会自动落盘（也可到「账号池」点一次「重载 auths」）。';
+    } else {
+      el.textContent = '点下面的链接在浏览器完成登录（本机已是登录态的话通常一键确认），网关会自动轮询并落盘凭证。';
+    }
+  }
+
+// renderAfter 拿到 /admin/login/start 的回执之后的**全部**渲染与轮询。
+
+  async function addAccount(providerId, btn) {
+    openModal();
+    // ★ T-235：每次打开都先复位 —— 上一次登录（可能被取消/关掉）留下的 provider
+    //   绝不能串到这一次的 poll 上。弹窗用的是通用 openModal()，**没有**登录专属的
+    //   关闭钩子；在"打开时复位"比挂关闭钩子更稳（取消 / Esc / 点遮罩关掉都覆盖得到）。
+    loginProvider = '';
+    const want = providerId || '';
+    $('loginTitle').textContent = want ? ('添加 ' + providerTitle(want) + ' 账号') : '添加账号';
+    renderLoginLocalHint();
+    renderLoginIntro('browser'); // 申请期间的占位；拿到回执后按形态改写
+
+    // ---- 登录选项（上游自报 → 前端渲染，判据是**数据**不是上游名）----
+    //
+    // 用户要求：「添加账号需要用户选择国内或者国际啊」。
+    //
+    // ⚠ 这里**不写任何上游名**：选项来自 manifest 的 `login.options`，
+    // 由上游自己声明（gateway.LoginOptionsExt）。没有选项的上游走原来的
+    // 路径，一个字节都不变。
+    const optEntry = (MANIFEST.providers || []).find(x => x && x.id === want) || {};
+    const loginOpts = (optEntry.login && optEntry.login.options) || [];
+    const chosen = {};
+    for (const o of loginOpts) chosen[o.key] = o.default || (o.values[0] || {}).value || '';
+    if (loginOpts.length) {
+      $('loginBody').innerHTML = loginOpts.map(o => {
+        const opts = (o.values || []).map(v =>
+          `<option value="${esc(v.value)}"${v.value === chosen[o.key] ? ' selected' : ''}>${esc(v.label || v.value)}</option>`
+        ).join('');
+        return `<div class="row" style="gap:8px;align-items:center;margin:8px 0">`
+          + `<label class="dim" style="font-size:12px;min-width:56px">${esc(o.label || o.key)}</label>`
+          + `<select aria-label="登录方式" data-loginopt="${esc(o.key)}" style="flex:1">${opts}</select></div>`
+          + (o.hint ? `<div class="dim" style="font-size:11px;margin:-4px 0 8px 64px">${esc(o.hint)}</div>` : '');
+      }).join('') + '<div class="row" style="gap:8px;margin-top:10px"><button id="btnLoginGo" type="button">开始登录</button></div>';
+      // 有选项：等用户点「开始登录」。把它接到**同一个** doStart 上。
+      $('btnLoginGo').onclick = () => { doStart(); };
+    }
+    if (!loginOpts.length) {
+      $('loginBody').innerHTML = '<span class="dim">正在向上游申请授权链接…</span>';
+      setTimeout(() => doStart(), 0);
+    }
+
+    // doStart 申请一次登录并渲染结果。
+    //
+    // # 为什么写成函数声明而不是提前 return 两段
+    //
+    // 守卫测试按 `function addAccount(` 截到第一个顶格 `  }`，
+    // 因此渲染逻辑必须留在 addAccount 体内。用"两段 return"会把后半段
+    // 变成**死代码**，守卫就静默失效（它读的是字节，不看控制流）。
+    // ★ T-327：页面型登录（manifest 的 login.manual.page === true）**不进 start/poll**。
+    //
+    // 这类上游的登录全部发生在它**自己的页面**里（例如带人工验证的手机号登录）。
+    // core 的 Start() 只是占位：走进去只会拿到空 auth_url，随后 poll 报错；
+    // 而下面的渲染分支只认 qr_svg / auth_url，两者皆空 ⇒ 对话框里什么都不渲染
+    //（用户实测到的现象：既没有 iframe，也没有粘贴框，只剩一句报错）。
+    //
+    // 判据是**数据**（manifest 里的 page 布尔），不是上游名 —— 守住"加一个上游前端 0 改动"。
+    const pageLogin = (() => {
+      const e = (MANIFEST.providers || []).find(x => x && x.id === want) || {};
+      const m = (e.login || {}).manual;
+      return m && m.path && m.page === true ? m : null;
+    })();
+
+    async function doStart() {
+      for (const o of loginOpts) {
+        const el = $('loginBody').querySelector('select[data-loginopt="' + o.key + '"]');
+        if (el) chosen[o.key] = el.value;
+      }
+      let r;
+      try {
+        r = await admin('/admin/login/start', { method: 'POST', body: JSON.stringify({ provider: want, options: chosen }) });
+      } catch (e) {
+        $('loginBody').innerHTML = `<span class="err">申请失败：${esc(e.message)}</span>`;
+        return;
+      }
+      // ★ T-235：start **成功之后**才记住 provider（失败路径在 catch 里 return，
+      //   不会留下残留值）。它喂给 /admin/login/poll 的 provider 字段 ——
+      //   漏掉这一步，poll 就会走"不带 provider"的旧路径，用默认上游的 OAuth
+      //   去认本上游的 state，恒定 410。
+      loginProvider = want;
+      const state = r.state;
+      // ★ T-332：页面型登录（manifest 的 login.manual.page === true）渲染内嵌 iframe。
+      //
+      // ⚠ 位置必须在 start **之后**：有些上游的页面要带上本次登录的 state，
+      //   而 state 只有 Start() 才知道（loomy 的 Start 直接返回 `/admin/loomy/login?state=…`）。
+      //   codar 的 Start 返回空串 ⇒ 回落到 manifest 里的 manual.path。
+      //
+      // 判据仍是**数据**（page 布尔 + auth_url 是不是站内相对路径），不按上游名分流。
+      if (pageLogin) {
+        renderLoginIntro('page'); // ★ T-342：先改写说明（否则留着 OAuth 那句）
+        window.addEventListener('message', (e) => {
+          const d = e.data;
+          if (!d || d.type !== 'manual-page-login-done') return;
+          const st = $('manualPageState');
+          if (st) st.textContent = '登录成功，凭据已写入' + (d.uid ? '（' + d.uid + '）' : '') + '；正在刷新账号…';
+          try { if (typeof refreshAfterAccountChange === 'function') refreshAfterAccountChange(); } catch (_) {}
+        });
+        const pageSrc = (typeof r.auth_url === 'string' && r.auth_url.charAt(0) === '/') ? r.auth_url : pageLogin.path;
+        $('loginBody').innerHTML = `
+          <div class="dim" style="font-size:12px;margin-bottom:10px">${esc(pageLogin.instructions || '')}</div>
+          <div style="margin:10px 0 8px">
+            <iframe id="manualPage" src="${esc(pageSrc)}" style="width:100%;height:460px;border:1px solid var(--line);border-radius:8px;background:var(--bg2)"></iframe>
+            <div id="manualPageState" class="dim" style="font-size:12px;margin-top:6px">在上方完成登录；成功后账号会自动刷新</div>
+          </div>`;
+        return; // ★ 不轮询（这类流程完全发生在页面里）
+      }
+      loginDeadline = Date.now() + (r.expires_in_sec || 900) * 1000;
+      // ---- 两种登录形态：**要不要浏览器**由后端回执决定 ----
+      //
+      // `auth_url` 非空  → 设备码/授权码流程：要用户去浏览器完成授权
+      // `auth_url` 为空  → **本机凭证拾取**流程（登录态就在本机那个桌面客户端的
+      //                     Local Storage 里，没有可打开的授权页）
+      //
+      // ⚠ 判据必须是**数据**（auth_url 空不空），不能是上游名 ——
+      //   写成 `if (provider === '<某个上游名>')` 就等于把上游名搬进渲染层，
+      //   加第四个上游时又要改前端（本项目最硬的判据）。
+      //
+      //    上面那句刻意**没有写出任何具体上游名**。这样"这段代码里有没有
+      //    上游名"本身就成了一条可以被断言检查的性质（见
+      //    webui_token_lifetime_test.go 的 TestWebUIAddAccountHandlesEmptyAuthURL）。
+      //    连注释里也不写，是因为那条守卫读的是**字节**，分不出注释与代码；
+      //    而让守卫去解析 JS 注释是更糟的复杂度。
+      //
+      // 原来的写法是无条件渲染那个 `<a>`，于是空 auth_url 会渲染成
+      // `<a href="">打开授权页面</a>` —— 点了只是把当前页重新加载一遍，
+      // 用户完全无法判断发生了什么。
+      // 服务器部署逃生路径（数据驱动）：上游在 manifest 里自报
+      // login.manual = {path, instructions} 时，渲染"粘贴回跳 URL 完成"输入框。
+      // 回调口打在浏览器那台机器上（127.0.0.1）永远进不了服务器 —— 用户把
+      // 地址栏里的完整回跳 URL 粘进来，POST 到上游自报的完成端点即可收号。
+      const mEntry = (MANIFEST.providers || []).find(x => x && x.id === (loginProvider || '')) || {};
+      const mLogin = (mEntry.login || {}).manual;
+// ★ T-326：manual 有两种形态，**数据驱动**分流（前端不认上游名）：
+//   · page:true ⇒ path 是**页面**：嵌 iframe，用户在页内完成，页内 postMessage 通知父窗口
+//   · 否则      ⇒ path 是**粘贴端点**：渲染"粘贴回跳 URL"输入框（原有逻辑，codearts/monkeycode）
+const manualIsPage = !!(mLogin && mLogin.path && mLogin.page === true);
+
+      const pasteBox = mLogin && mLogin.path ? `
+        <div style="margin:10px 0 8px">
+          <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '回跳页面打不开？把浏览器地址栏的完整 URL 粘贴到这里：')}</div>
+          <div class="row" style="gap:8px">
+            <input id="manualCode" type="text" aria-label="粘贴回跳 URL 或授权码" placeholder="粘贴回跳 URL（含 u=…）或裸 code" style="flex:1;min-width:220px"/>
+            <button id="btnManualComplete" type="button">粘贴完成</button>
+          </div>
+        </div>` : '';
+const manualPageBox = manualIsPage ? `
+        <div style="margin:10px 0 8px">
+          <div class="dim" style="font-size:12px;margin-bottom:6px">${esc(mLogin.instructions || '在上方完成登录')}</div>
+          <iframe id="manualPage" src="${esc(mLogin.path)}" style="width:100%;height:460px;border:1px solid var(--line);border-radius:8px;background:var(--bg2)"></iframe>
+          <div id="manualPageState" class="dim" style="font-size:12px;margin-top:6px">在上方完成登录；成功后账号会自动刷新</div>
+        </div>` : '';
+// ★ T-326：两条路同源分支（数据驱动）：page:true ⇒ 页面型（iframe）；否则 ⇒ 粘贴型（原逻辑）。
+// 变量名 manualBox 被登录弹窗模板引用，且必须**定义先于使用**（见 webui_manual_login_test.go）。
+const manualBox = manualIsPage ? manualPageBox : pasteBox;
+
+      const hasAuthURL = typeof r.auth_url === 'string' && r.auth_url.trim() !== '';
+
+      // ---- 扫码流程：后端给了二维码就渲染它，**不**渲染"打开链接" ----
+      //
+      // raccoon（微信扫码）那类上游的 auth_url 是**要扫的内容**，不是网页：
+      // 它在屏幕上，手机扫不了同一块屏幕。此前对所有上游都渲染
+      // 「打开授权页 / 复制链接」，于是那种上游的「＋ 添加账号」等于不可用
+      //（用户报的缺陷）。
+      //
+      // ⚠ 判据是**数据**（后端有没有下发 qr_svg），不是上游名，也不是
+      //   "链接长得像不像二维码 URL" —— 后者要求前端认识上游或 URL 形态，
+      //   而"加一个上游时前端一行都不改"是本项目最硬的禁忌。
+      //
+      // ⚠ qr_svg 是**后端生成的** SVG 字符串（上游自报要不要扫码，
+      //   见 gateway.QRLoginExt）。直接 innerHTML 插进来 ——
+      //   它是我们自己后端产出的固定形态（只有 svg/rect/path 与数字），
+      //   不含任何用户输入，不存在注入面。
+      const qrSVG = typeof r.qr_svg === 'string' ? r.qr_svg.trim() : '';
+      if (qrSVG && !hasAuthURL) {
+        // 理论到不了（后端只在有 auth_url 时才给 qr_svg）——
+        // 但两个字段自相矛盾时宁可说清，也不要渲染半截界面。
+        $('loginBody').innerHTML = `<span class="err">后端回执异常：给了二维码但没有授权链接</span>`;
+        return;
+      }
+      if (qrSVG) {
+        renderLoginIntro('qr');
+        // ⚠ 这里**不提供**任何"在浏览器打开"的入口（用户明确要求）。
+        //
+        // 扫码类上游的 auth_url 是**给手机扫的内容**，在电脑浏览器里打开它
+        // 只会看到一个"请在微信中打开"之类的页面 —— 不是登录路径，
+        // 照着点会让人以为流程就是这样。所以这个分支只有：
+        //
+        //	二维码（主路径）+ 「复制链接」（给"想换个设备扫"的人）+ 轮询状态
+        //
+        // 「复制链接」保留但改了说明：它是"把链接复制到别的设备去扫"，
+        // 不是"复制到浏览器打开"。文案里刻意不出现"浏览器"三个字。
+        $('loginBody').innerHTML = `
+          <div class="row" style="margin-bottom:10px">
+            <button id="btnCopyAuth" type="button"
+               style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
+               title="复制二维码里的链接（供在另一台设备上生成二维码再扫）">复制链接</button>
+            <span id="loginState" class="dim" style="font-size:12px">等待扫码…（state ${esc(state.slice(0, 8))}…）</span>
+          </div>
+          <div style="display:flex;justify-content:center;margin:8px 0 4px">${qrSVG}</div>
+          <div class="dim" style="font-size:12px;margin-bottom:8px;text-align:center">
+            用<b>手机微信</b>扫上面的二维码，在手机上完成登录。<br>
+            扫完后本窗口会自动检测并落盘凭证（无需回来点任何按钮）。
+          </div>
+          ${manualBox}
+          <pre id="loginOut" class="dim" style="max-height:120px">扫码完成后，本窗口会自动检测并落盘凭证。</pre>`;
+        const btnCopyQR = $('btnCopyAuth');
+        if (btnCopyQR) {
+          btnCopyQR.onclick = () => {
+            copyText(r.auth_url);
+            btnCopyQR.textContent = '已复制';
+            setTimeout(() => { btnCopyQR.textContent = '复制链接'; }, 1500);
+          };
+        }
+        // ★ T-326：页面型 manual（如带人工验证的手机号登录）完成后，页内 postMessage 通知父窗口。
+// 判据是**消息 type**（数据驱动），不看是哪个上游 —— 守住"前端不认上游"这条硬规矩。
+window.addEventListener('message', (e) => {
+      const d = e.data;
+      if (!d || d.type !== 'manual-page-login-done') return;
+      const st = $('manualPageState');
+      if (st) st.textContent = '登录成功，凭据已写入' + (d.uid ? '（' + d.uid + '）' : '') + '；正在刷新账号…';
+      try { if (typeof refreshAfterAccountChange === 'function') refreshAfterAccountChange(); } catch (_) {}
+    });
+    const btnManualQR = $('btnManualComplete');
+        if (btnManualQR) {
+          btnManualQR.onclick = async () => {
+            const code = ($('manualCode').value || '').trim();
+            if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
+            btnManualQR.disabled = true;
+            $('loginState').textContent = '已提交，正在解密收号…';
+            try {
+              await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
+              $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
+            } catch (e) {
+              $('loginState').textContent = '失败：' + e.message;
+              btnManualQR.disabled = false;
+            }
+          };
+        }
+      } else if (hasAuthURL) {
+      renderLoginIntro('browser');
+      // ---- 主状态是「已经用无痕窗口打开了」，不是「请你自己去打开」----
+      //
+      // 用户要求：默认打开的就是无痕模式。打开动作由**后端**完成
+      // （点「添加账号」时自动开一次，见 admin 的 openAuthBrowser /
+      // internal/browseropen），因为前端 target=_blank 打开的窗口
+      // 属于用户当前的浏览器状态 —— OAuth 会拿那边已登录的账号完成授权，
+      // 于是"加新号"变成"把老号再加一遍"，而且它**成功**了，没有报错。
+      //
+      // 三种回执要区分开，不能糊成一句"请打开授权页"：
+      //   r.browser       后端已开成 → 告诉用户去那个无痕窗口
+      //   r.browser_error 后端没开成 → 明确说"没开成"并突出复制链接
+      //   两者都空        未接线    → 说清是部署没启用，别让用户干等
+      // ⚠ 这段刻意**只用** else-if 收尾，不写最后那个 else 关键字加花括号：
+      // 下面那条「无授权页分支不许出现 <a href=」的守卫是按**第一处**
+      // else 块切分函数体的（它读的是**字节**，分不出注释与代码），
+      // 在这里插一个 else 块会把切分点提前，让守卫去检查错误的区域
+      //（fail-open 地失去判别力 —— 而不是报错，所以特别难发现）。
+      let openNote = `<div id="loginOpenNote" class="dim" style="font-size:12px;margin-bottom:8px">
+          本部署未启用自动打开浏览器：请点「复制链接」，粘贴到
+          <b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+        </div>`;
+      if (r.browser) {
+        openNote = `<div id="loginOpenNote" class="ok" style="font-size:12px;margin-bottom:8px">
+          已用 <b>${esc(r.browser)}</b> 打开授权页，请在该窗口里完成登录。
+        </div>`;
+      } else if (r.browser_error) {
+        openNote = `<div id="loginOpenNote" class="err" style="font-size:12px;margin-bottom:8px">
+          未能自动打开浏览器（${esc(r.browser_error)}）——
+          请点「复制链接」，粘贴到<b>无痕/隐私窗口</b>（Ctrl+Shift+N / Cmd+Shift+N）。
+        </div>`;
+      }
+      $('loginBody').innerHTML = `
+        <div class="row" style="margin-bottom:10px">
+          <button id="btnReopenAuth" type="button" class="primary"
+             style="padding:8px 16px;border-radius:8px;border:0;background:var(--acc);color:var(--on-acc);cursor:pointer;font-weight:600"
+             title="用无痕窗口重新打开本次授权链接">重新无痕打开</button>
+          <button id="btnCopyAuth" type="button"
+             style="padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);color:var(--fg);cursor:pointer;font-weight:600"
+             title="复制授权链接，粘贴到无痕/隐私窗口">复制链接</button>
+          <a href="${esc(r.auth_url)}" target="_blank" rel="noreferrer"
+             style="padding:8px 12px;border-radius:8px;color:var(--dim);font-size:12px"
+             title="在普通窗口打开（不推荐：可能用浏览器里已登录的账号完成授权）">普通窗口打开</a>
+          <span id="loginState" class="dim" style="font-size:12px">等待授权…（state ${esc(state.slice(0, 8))}…）</span>
+        </div>
+        ${openNote}
+        ${manualBox}
+        <div class="dim" style="font-size:12px;margin-bottom:8px">
+          无痕窗口可避免浏览器里已登录的账号把会话串到别的账号上。
+        </div>
+        <pre id="loginOut" class="dim" style="max-height:120px">跳转后完成登录，本窗口会自动检测并落盘凭证。</pre>`;
+      const btnManual = $('btnManualComplete');
+      if (btnManual) {
+        btnManual.onclick = async () => {
+          const code = ($('manualCode').value || '').trim();
+          if (!code) { $('loginState').textContent = '先粘贴回跳 URL，再点完成'; return; }
+          btnManual.disabled = true;
+          $('loginState').textContent = '已提交，正在解密收号…';
+          try {
+            await admin(mLogin.path, { method: 'POST', body: JSON.stringify({ state, code }) });
+            $('loginState').textContent = '完成，稍候账号会自动出现在池子里';
+          } catch (e) {
+            $('loginState').textContent = '失败：' + e.message;
+            btnManual.disabled = false;
+          }
+        };
+      }
+
+      // 重开：后端只认「本进程刚签发过的链接」（见 /admin/login/open），
+      // 所以这里回传的必须是本次 start 拿到的那条 r.auth_url。
+      // 手滑关掉无痕窗口时用它 —— 比重走一遍 start 好：不会作废当前 state。
+      const btnReopen = $('btnReopenAuth');
+      if (btnReopen) {
+        btnReopen.onclick = async () => {
+          btnReopen.disabled = true;
+          btnReopen.textContent = '正在打开…';
+          try {
+            const o = await admin('/admin/login/open',
+              { method: 'POST', body: JSON.stringify({ url: r.auth_url }) });
+            btnReopen.textContent = '已打开';
+            if (o && o.browser) {
+              // 按 **id** 定位提示行，不用 querySelector('.dim') ——
+              // 同一块 DOM 里的 #loginState 也是 .dim 且在文档序更靠前，
+              // 按类查会命中它，把"等待授权…"覆盖成"已打开"（状态就丢了）。
+              const first = $('loginOpenNote');
+              if (first) {
+                first.className = 'ok';
+                first.style.fontSize = '12px';
+                first.style.marginBottom = '8px';
+                first.innerHTML = `已用 <b>${esc(o.browser)}</b> 重新打开授权页。`;
+              }
+            }
+          } catch (e) {
+            // 失败必须说出来：静默失败会显示成"点了没反应"。
+            btnReopen.textContent = '打开失败';
+            const out = $('loginOut');
+            if (out) out.textContent = '重新打开失败：' + (e && e.message ? e.message : e);
+          }
+          setTimeout(() => { btnReopen.textContent = '重新无痕打开'; btnReopen.disabled = false; }, 2000);
+        };
+      }
+      const btnCopy = $('btnCopyAuth');
+      if (btnCopy) {
+        btnCopy.onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(r.auth_url);
+            btnCopy.textContent = '已复制';
+          } catch {
+            // 剪贴板 API 不可用（http 非 https / 权限）时回落选中文本提示。
+            const tmp = document.createElement('textarea');
+            tmp.value = r.auth_url;
+            document.body.appendChild(tmp);
+            tmp.select();
+            document.execCommand('copy');
+            tmp.remove();
+            btnCopy.textContent = '已复制';
+          }
+          setTimeout(() => { btnCopy.textContent = '复制链接'; }, 2000);
+        };
+      }
+      } else {
+        // 没有可打开的授权页 —— 不放假链接，如实说清"在做什么"与"为什么不用点"。
+        renderLoginIntro('local');
+        $('loginBody').innerHTML = `
+        <div class="row" style="margin-bottom:10px">
+          <span id="loginState" class="dim" style="font-size:12px">正在从本机读取登录态…（state ${esc(state.slice(0, 8))}…）</span>
+        </div>
+        <pre id="loginOut" class="dim" style="max-height:120px">该上游的登录态保存在本机客户端里，网关直接读取，无需打开授权页面。</pre>`;
+      }
+
+      if (loginPoll) clearInterval(loginPoll);
+      loginPoll = setInterval(async () => {
+        if (Date.now() > loginDeadline) {
+          clearInterval(loginPoll); loginPoll = null;
+          $('loginState').innerHTML = '<span class="err">授权已超时，请关闭后重试</span>';
+          return;
+        }
+        let p;
+        // ⚠ 必须带上 provider —— 与 start 用**同一条**分派规则。
+        //
+        // 这里曾经只传 `{ state }`，于是后端按"不带 provider"处理，
+        // 走了**默认上游（workbuddy）**的 OAuth 去认 codearts 的 state。
+        //
+        // 表现极具误导性：弹窗标题对（start 带了 provider）、
+        // 跳转的授权页也对（CodeArts 站点），**只有轮询走错了上游** ——
+        // 于是界面报 `oauth: state 不存在或已超期，请重新发起授权`。
+        //
+        // 那句文案是 **workbuddy 的 OAuth** 定义的（internal/oauth/oauth.go），
+        // codearts 根本不会有它 —— 这就是"用 A 的 state 去问 B"的典型症状。
+        // 后端 loginPoll 的注释里正好写了要避免这件事，但**前端漏了**。
+        try { p = await admin('/admin/login/poll', { method: 'POST', body: JSON.stringify({ state, provider: loginProvider }) }); }
+        catch (e) {
+          // 410 = state 失效；其余（网关/上游报错）也停掉轮询，避免刷屏
+          clearInterval(loginPoll); loginPoll = null;
+          $('loginState').innerHTML = `<span class="err">${esc(e.message)}</span>`;
+          return;
+        }
+        if (p && p.status === 'pending') {
+          $('loginOut').textContent = '仍在等待浏览器完成登录…';
+          return;
+        }
+        clearInterval(loginPoll); loginPoll = null;
+        if (p && p.status === 'ok') {
+          $('loginState').innerHTML = '<span style="color:var(--ok)">授权成功</span>';
+          // ⚠ 三处都用**后端回执**，并且**缺失字段显示 `—` 而不是 `undefined`**。
+          //
+          // 这三行曾经是：
+          //   `域: ${p.domain}` / `有效期: ${Math.floor((p.expires_in||0)/86400)} 天`
+          //   / `凭证文件 : auths/${p.file}`
+          //
+          // 三个问题（用户实测报的）：
+          //
+          //  1. **`凭证文件` 路径是错的** —— 硬编码 `auths/`，而 `p.file` 只有 basename。
+          //     按上游分子目录之后实际是 `auths/codearts/codearts-xxx.json`，
+          //     界面显示成 `auths/codearts-xxx.json` —— **少了一整个上游目录**。
+          //     用户会照着这句去找文件、往那儿放，**那是错的地方**。
+          //     现在用回执的 `dir`（后端实际落盘目录）。
+          //
+          //  2. **`域` 显示 `undefined`** —— codearts 走的 flow 回执**根本不返回** domain
+          //    （`gateway.Credential` 没有这个字段：各上游凭证结构不同）。
+          //     显示 `undefined` 会让人以为拿到了数据。
+          //
+          //  3. **`有效期` 显示 `0 天`** —— 同源：flow 回执原来不返回有效期。
+          //     现在回执带 `expires_at`；上游不提供时它是零值 → 显示 `—`。
+          //
+          // **缺失就显示 `—`**：`undefined` / `0 天` 都是"没处理缺失"的信号，
+          // 而且会伪装成有效数据（`0 天` 看起来像一个真实的过期天数）。
+          const dash = '—';
+          const dirTxt = p.dir ? p.dir.replace(/\\/g, '/') : dash;
+          const fileTxt = p.file ? `${dirTxt}/${p.file}` : dash;
+          const expTxt = (() => {
+            // ---- 第三态：设计上不过期（与账号表那一列**同一个**判据）----
+            //
+            // 判据来自回执的 `token_never_expires`（后端走
+            // gateway.CredentialLifetimeExt）。必须排在 `!p.expires_at` 之前：
+            // 后端现在在零值时**不下发** expires_at 了，但万一将来又有人把零值
+            // 发回来，`!p.expires_at` 会为假（那是个非空字符串），
+            // `Date.parse("0001-01-01T00:00:00Z")` 得到约 -6.2e13（truthy，
+            // 连 `!t` 那道也过不去），days 远小于 0 → 渲染成「已过期」。
+            //
+            // 用户实测报的就是这个：loomy 弹窗在「授权成功」下面写着
+            // **`有效期: 已过期`**，而**同一份凭证**在账号表里写着「永久」。
+            // 两处渲染点自相矛盾，且用户第一眼看到的是那句错的。
+            if (p.token_never_expires === true) return '永久（无 TTL）';
+            if (!p.expires_at) return dash;
+            const t = Date.parse(p.expires_at);
+            if (!t) return dash;                       // 零值/坏值一律 `—`
+            const days = (t - Date.now()) / 86400000;
+            if (days <= 0) return '已过期';
+            return days < 1 ? `${Math.floor(days * 24)} 小时` : `${Math.floor(days)} 天`;
+          })();
+          $('loginOut').textContent =
+            `uid      : ${p.uid}\n` +
+            `昵称     : ${p.nickname || dash}\n` +
+            `域       : ${p.domain || dash}\n` +
+            `有效期   : ${expTxt}\n` +
+            `凭证文件 : ${fileTxt}`;
+          // ⚠ 本机拾取这条路上，"加进来的是哪个号"必须**显式说一句**。
+          //
+          // 原因是一个真实的时序陷阱：客户端把登录态**异步**刷进 leveldb，
+          // 用户刚在客户端里登录完、立刻回来点添加，读到的很可能**还是上一个号**。
+          // 实测就是这个：新号在客户端里 00:50:09 登录，00:50:15 点添加时
+          // 磁盘上最新的那条记录仍是旧号（旧号的 loggedInAt 反而更早）。
+          //
+          // 那时弹窗一切"正常"、uid 也照实写在下面 —— 但用户不会去比对那串
+          // 十六进制，于是"添加成功"与"加错了号"在界面上长得一模一样。
+          // 一句提示把这个静默失败变成**可核对的事实**。
+          //
+          // 判据用 hasAuthURL（本机拾取）而不是某个上游名 ——
+          // 任何走本机拾取的上游都适用，加新上游时这里零改动。
+          if (!hasAuthURL) {
+            toast(`已从本机读取账号 ${p.nickname || p.uid.slice(0, 8)}；` +
+              `若这不是你刚登录的那个号，请在客户端里确认登录状态后重试`);
+            await refreshAfterAccountChange();
+            return;
+          }
+          toast(`已添加账号 ${p.nickname || p.uid.slice(0, 8)}，无需重启`);
+          await refreshAfterAccountChange();
+        }
+      }, 2500);
+  
+  
+    }
+  }
+
+
+
+
+
+
+  //
+  // # 为什么单独成函数（而不是留在 addAccount 里）
+  //
+  // 用户要求「添加账号需要用户选择国内或者国际」之后，addAccount 多了一段
+  // 「先渲染选项 → 用户点开始登录 → 才真的申请」。而选项为空的上游要
+  // 跳过这段直接走后半程。
+  //
+  // 拆出来还有一个好处：守卫测试（TestWebUIQRBranchOffersNoBrowserEntry）
+  // 按 `function addAccount(` 截函数体，若把渲染逻辑塞在它里面会被
+  // "选项为空直接申请" 的 return 挡住，守卫就静默失效了。
+  
+
+  // ---------------------------------------------------------------- 批量导入（账号池分组行）
+  //
+  // # 为什么是一个按钮（用户要求"修改为一个按钮就行"）
+  //
+  // 点它 → 浏览器 prompt 里粘贴 JSON（单个对象或数组）→ 确定 →
+  // 导入 + 重载账号池 + toast。没有中间页、没有多一步确认。
+  //
+  // # 本轮改造：走**通用**端点（用户要求"全部上游都可以"）
+  //
+  // 改造前这里先查 `adminRouteBySuffix(pid,'POST','/import')` ——
+  // 只有自己实现过导入端点的上游（workbuddy / loomy）才点得动。
+  // 现在统一打 `POST /admin/accounts/import {provider, data}`：
+  //
+  //	· 前端不再关心"这个上游有没有自己的导入端点"
+  //	· 后端按 provider 分派给上游的 `AccountImportExt`
+  //	· 上游没实现时回 501，这里照实报出来（不静默）
+  function openImportModal(providerId) {
+    const pid = providerId || '';
+    const text = (window.prompt(
+      '粘贴 ' + (providerTitle(pid) || pid) + ' 的凭证 JSON'
+        + '（单个对象、[ ] 包起来的数组，或把多个独立文件的内容依次粘进来——'
+        + '会自动合并）', '')
+      || '').trim();
+    if (!text) return;
+    (async () => {
+      try {
+        const r = await admin('/admin/accounts/import', {
+          method: 'POST',
+          body: JSON.stringify({ provider: pid, data: text }),
+        });
+        const bads = (r && Array.isArray(r.results) ? r.results : [])
+          .filter(x => !x.ok)
+          .map(x => '#' + x.index + ' ' + (x.error || '失败'));
+        toast(`导入 ${(r && r.imported) || 0} 个${r && r.failed ? '，失败 ' + r.failed + ' 个' : ''}`, !!(r && r.failed));
+        if (bads.length) showInfo('部分账号导入失败', bads.join('\n'));
+        // 写盘完成后对齐账号池（核心端点，按 provider 分派）。
+        try { await admin('/admin/accounts/reload', { method: 'POST', body: JSON.stringify({ provider: pid }) }); }
+        catch (e) { toast('凭证已写入，但重载账号池失败：' + e.message, true); }
+        await refreshAfterAccountChange();
+      } catch (e) {
+        toast('导入失败：' + e.message, true);
+      }
+    })();
+  }
+
+  // ---------------------------------------------------------------- 调度（只读）
+  // 本面板刻意不含任何开关控件：签到/保活的启停只能从「设置」改，
+  // 避免出现「这里点一下只改内存、那里保存改 config.json」两条写路径互相覆盖。
+  async function loadSchedule() {
+    let s;
+    try { s = await sharedGet('ep:/admin/schedule', () => admin('/admin/schedule')); } catch { $('schInfo').textContent = '读取失败'; return; }
+    const cd = s.next_in_sec > 0 ? `${Math.floor(s.next_in_sec / 3600)}h${Math.floor((s.next_in_sec % 3600) / 60)}m 后` : '—';
+    const on = v => v ? '<span class="pill ok">已启用</span>' : '<span class="pill dim">已关闭</span>';
+    // 统一 30 分钟扫描后没有整点时点槽位：next_tasks 恒空，时点恒 []。
+    // 若签到/保活是启用的，如实显示"扫描模式"而不是误导性的"无（均已关闭）"。
+    const nxt = (s.next_tasks || []).join(' + ');
+    const scan = !nxt && (s.checkin_enabled || s.keepalive_enabled);
+    $('schInfo').innerHTML =
+      `签到 ${on(s.checkin_enabled)}　保活 ${on(s.keepalive_enabled)}`
+      + `<br>下次任务：<b>${scan ? '每 30 分钟扫描（统一间隔，不再定时点）' : esc(nxt || '无（均已关闭）')}</b> · ${cd}`
+      + (scan ? '' : `（${s.next_at ? new Date(s.next_at).toLocaleString('zh-CN', { hour12: false }) : '—'}）`)
+      + `<br>${scan
+          ? '签到/保活均为固定间隔扫描，无时点配置'
+          : `签到时点 <span class="mono">[${(s.checkin_hours || []).join(', ')}]</span>　保活时点 <span class="mono">[${(s.keepalive_hours || []).join(', ')}]</span>`}`;
+  }
+
+  // ---------------------------------------------------------------- 左侧导航
+  // 导航项不写死在 HTML 里：按 .content 下 section 的 DOM 顺序生成，
+  // 以后加一个 section 就自动多一个导航项，不会出现「加了面板忘了加导航」。
+  // 纯文字 + CSS 选中指示条，不使用任何图标字体或 emoji。
+  let navSections = [];
+
+  // buildNav 渲染导航，分两组：「通用」+ 每个上游一组。
+  //
+  // # 为什么是"每上游一组"而不是"按能力分组"
+  //
+  // 上游之间功能几乎零重叠（实测管理端点零重叠、能力位除 chat/models 外全不同），
+  // 而能力位是**稀疏**的（growth 只有 workbuddy、welfare 只有 codearts）。
+  // 按能力分组会产生一堆"只有一个上游"的单例组 —— 那是伪装的每上游分组，
+  // 还多一层间接。分组轴直接用上游，但**分组内容仍由 manifest 驱动**：
+  // 加第 3 个上游时这里会自动多一组，前端 0 改动。
+  //
+  // # 上游组内的项从哪来
+  //
+  // 来自 manifest.admin_routes 里该上游的 **GET** 端点（routesFor 已过滤方法）。
+  // 每个上游专属面板在 T6 会按 capability 建出对应的 section，
+  // 这里先把入口渲染出来并指向那个 section id。
+  function buildNav() {
+    refreshNavSections();
+    // 先把"归属的上游不存在 / 没有该能力位"的静态面板隐藏掉（B7），
+    // 再做分组 —— 否则导航里会出现指向隐藏面板的入口。
+    const hiddenCount = hideOrphanPanels();
+    // 隐藏的面板也不进导航：过滤掉它们，用户看到的与能点的始终一致。
+    const visible = navSections.filter(sec => !sec.hidden);
+
+    // 通用组：所有非上游 section（仪表盘/账号池/日志/设置…）。
+    // ★ T-373：按用户保存的顺序重排（键用 navKey，不按下标 —— 下标会随面板增删漂移）。
+    const generic = orderedGenericSections(visible.filter(sec => !sec.dataset.provider));
+    const parts = [navGroupHTML('通用', '', generic, false)];
+
+    // 上游组：每个 manifest 里的上游一组。
+    // ★ T-373：导航用可调顺序；⚠ 另两处生成面板的循环必须保持 upstreamGroups()（它们逐位比较，跟着排序变会每次调序全量重生成面板）。
+    for (const p of orderedUpstreamGroups()) {
+      const secs = visible.filter(sec => sec.dataset.provider === p.id);
+      if (!secs.length) continue;   // 该上游当前没有可见面板就不占位置
+      const hd = navGroupHeaderHTML(p);
+      // 第三个参数必须是**上游 id**（用于 data-pid 与折叠持久化）。
+      // 曾经误传 p.id === DEFAULT_PROVIDER（布尔值），于是渲染出
+      // data-pid="true"，折叠状态按 "true" 存 —— 加第二个上游时会串味。
+      parts.push(navGroupHTML('', hd, secs, p.id));
+    }
+
+    // 契约降级提示（评审 F4）。
+    //
+    // # 为什么必须把它渲染出来
+    //
+    // manifestError 与 MANIFEST.loaded 原先只写不读 —— 拉取失败时页面
+    // 看不出任何区别，用户只会觉得"上游面板怎么没了"。而失败原因
+    //（404 / 500 / 响应格式异常）恰恰是排查的唯一线索。
+    //
+    // 这里把两者变成可见状态：失败时在导航里插一条明确的降级说明。
+    if (!MANIFEST.loaded) {
+      parts.push('<div class="navgroup"><div class="navdegraded" title="'
+        + esc(manifestError || '未取得渲染契约')
+        + '">上游面板不可用<br><span style="font-size:10px">' + esc(manifestError || 'manifest 未加载') + '</span></div></div>');
+    }
+
+    $('nav').innerHTML = parts.join('');
+
+    // 恢复上次选中的面板。用 section 的 key（data-key 或 index）而不是纯下标 ——
+    // 分组后下标会随上游数量变化，用下标恢复会跳到别的面板。
+    //
+    // 注意候选只在**可见** section 里选：隐藏的上游面板（其上游没声明该能力位）
+    // 不能被选中，否则用户会落到一个 hidden 的 section 上、看到空白内容区。
+    let start = -1;
+    try {
+      const saved = localStorage.getItem('wb2api.panelkey') || '';
+      start = navSections.findIndex(sec => !sec.hidden && navKey(sec) === saved);
+    } catch { /* 隐私模式 */ }
+    if (start < 0) {
+      // 回落：第一个可见 section（通常就是仪表盘）
+      start = navSections.findIndex(sec => !sec.hidden);
+    }
+    if (start < 0) start = 0;
+    showPanel(start);
+
+    // 恢复折叠状态（按上游 id 记，加/删上游不会串味）
+    try {
+      const cols = JSON.parse(localStorage.getItem('wb2api.navcollapsed') || '[]');
+      for (const id of cols) {
+        const g = $('nav').querySelector(`.navgroup[data-pid="${cssEsc(id)}"]`);
+        if (g) g.classList.add('collapsed');
+      }
+    } catch { /* 隐私模式 */ }
+
+    updateNavBadges(); // 关键：buildNav 在 refresh() 之后才跑，这里补一次，否则徽章会一直空着
+  }
+
+  // navGroupHeaderHTML 上游分组的标题：上游名 + 账号数 + 默认标记。
+  //
+  // title 里列出该上游声明的能力位（中文名来自 manifest.capabilities）——
+  // 这样鼠标悬停就能看出"这个上游到底能做什么"，而不必逐个点开面板。
+  // 这也是 capTitle 与 providersWithCap 的**真实消费点**：
+  // 没有它，那两个函数又会变成"定义了没人用"的死代码。
+  function navGroupHeaderHTML(p) {
+    // 徽章**始终渲染**，包括 0。
+    //
+    // # 为什么 0 也要显示（评审 CP2 F4 的附带发现）
+    //
+    // 上一版是 `p.account_count ? ... : ''` —— 0 时整块消失。
+    // 那会让"这个上游一个号都没有"与"这个上游的徽章坏了/没渲染"
+    // 在界面上长得一模一样，而前者恰恰是需要用户注意的状态
+    //（配了上游却没有可用账号）。显示一个 0 是更诚实的信息。
+    //
+    // 顺带：徽章内容必须与 manifest.account_count 一致，
+    // 有浏览器测试用数据对照（不硬编码数字）。
+    const n = Number(p.account_count) || 0;
+    const cnt = `<span class="navgcount${n ? '' : ' zero'}" title="${n} 个账号">${n}</span>`;
+    // 分组标题里**不再显示「默认」徽章**（用户要求）。
+    //
+    // 为什么去掉：分组头的信息职责是"这个上游有什么"，而"是否默认路由"
+    // 是配置细节，不构成用户的决策依据 —— 它只影响 `provider/model`
+    // 这种不带前缀的模型 id 落到哪个上游，属于"知道就行、不用看"的事。
+    // 摆在那里反而让标题变长（"workbuddy 默认 3"），两个徽章挤在一起。
+    //
+    // ⚠ 注意：`p.default` **仍然参与排序**（默认上游排第一，见下面的
+    // sort 处）。这里只删**渲染**，不动排序 —— 删错了会让分组顺序变。
+    // 有浏览器测试断言"workbuddy 仍在第一组"，删错会红。
+    const def = '';
+    // 列出该上游**有面板入口**的能力位（中文名来自 manifest.capabilities）。
+    //
+    // # "无面板" 的判据必须是 hasAnyPanel，不是"有没有非 chat/models 能力"
+    //（评审 CP2 F1）
+    //
+    // 上一版把 chat/models 从列表里过滤掉，并在过滤后为空时写
+    // 「无专属能力面板」。那句话在**只声明 chat 的上游**上是假的：
+    // 它确实会生成一个「对话」面板（因为它有 chat 的 GET 端点），
+    // 而悬停提示却说它没有面板 —— 界面与说明直接矛盾。
+    //
+    // 过滤 chat/models 的**动机**仍然成立（它们是每个上游都有的基础能力，
+    // 列出来每行都长一样、看不出差异），但那是"列表里显示什么"的问题，
+    // 不是"有没有面板"的问题。两者必须分开判断。
+    const panelCaps = panelCapsOf(p.id);
+    // 过滤三类不写进提示词的能力：
+    //  - chat / models：每个上游都有的基础能力，列出来每行都一样
+    //  - core：后端保留名（"有端点但没声明能力位"），它是**路由分类**，
+    //    不是"能力"，直接显示给用户只会让人困惑「core 是什么」
+    const shown = panelCaps.filter(c => c !== 'chat' && c !== 'models' && c !== CORE_CAP);
+    const capText = shown.map(c => capTitle(c)).join('、');
+    // 有面板但全被过滤掉了（只声明基础能力）→ 说清"有面板"，
+    // 而不是错误地宣称"没有"。
+    const extra = (panelCaps.length && !shown.length) ? '基础端点' : '';
+    const listText = capText || extra;
+    const tip = p.id + (listText ? ' · 能力：' + listText : ' · 无可打开的面板');
+    return `<button class="navgrouphd" data-pid="${esc(p.id)}" title="${esc(tip)}">`
+      + `${esc(providerTitle(p.id))}${def}${cnt}</button>`;
+  }
+
+  // capNamesOf 取某上游声明的能力位名列表（来自 manifest，不硬编码）。
+  //
+  // providersWithCap 是"按能力反查上游"，这里是"按上游取能力" ——
+  // 两者都走 MANIFEST.providers，保证与后端下发的是一份事实。
+  function capNamesOf(providerId) {
+    const p = providerInfo(providerId);
+    if (!p || !Array.isArray(p.capabilities)) return [];
+    // 用 providersWithCap 反查一次，确保两个方向的解读完全一致 ——
+    // 如果各写一套过滤逻辑，迟早会出现"导航说有、面板却没有"的分歧。
+    return p.capabilities.filter(c => providersWithCap(c).indexOf(providerId) >= 0);
+  }
+
+  // navGroupHTML 一个导航分组。
+  //
+  // headerHTML 为空时按 title 生成一个纯文字组头（通用组用）。
+  // 参数 upstreamId 是**上游 id**（不是布尔），
+  // 它同时用于 data-pid 与折叠状态的持久化键。
+  function navGroupHTML(title, headerHTML, secs, upstreamId) {
+    const hd = headerHTML || `<span class="navgrouphd" style="cursor:default">${esc(title)}</span>`;
+    const items = secs.map(sec => {
+      const idx = navSections.indexOf(sec);
+      const label = navLabel(sec, idx);
+      // 账号池带一个计数徽章：初值留空，由 updateNavBadges() 按真实数据填。
+      const badge = label === '账号池' ? '<span class="badge" data-nav-badge></span>' : '';
+      return `<button data-nav="${idx}" title="${esc(label)}">${esc(label)}${badge}</button>`;
+    }).join('');
+    // 只接受字符串形式的上游 id（防住"误传布尔"这类回归）
+    const pid = (typeof upstreamId === 'string' && upstreamId) ? ` data-pid="${esc(upstreamId)}"` : '';
+    return `<div class="navgroup"${pid}>${hd}<div class="navitems">${items}</div></div>`;
+  }
+
+  // navLabel 取 section 的导航标签（h2 的首个文本节点）。
+  function navLabel(sec, idx) {
+    const t = sec.querySelector('h2');
+    return ((t && t.childNodes[0] && t.childNodes[0].textContent) || ('面板 ' + (idx + 1))).trim();
+  }
+
+  // navKey section 的稳定标识，用于恢复上次选中的面板。
+  //
+  // 优先用显式 data-key；上游面板用 "provider:能力位"，通用面板用标签。
+  // 不用下标：分组后下标随上游数量变化，用下标恢复会跳到别的面板。
+  function navKey(sec) {
+    if (sec.dataset.key) return sec.dataset.key;
+    if (sec.dataset.provider) return sec.dataset.provider + ':' + (sec.dataset.cap || '');
+    return 'g:' + navLabel(sec, 0);
+  }
+
+  // cssEsc 把值转义成可安全放进属性选择器的形式。
+  // 上游 id 已被后端约束为 ^[a-z][a-z0-9-]*$，理论上是安全的；
+  // 这里仍做一次转义，因为选择器注入失败会抛异常并中断整个 buildNav。
+  function cssEsc(s) {
+    return String(s).replace(/["\\]/g, '\\$&');
+  }
+
+  // updateNavBadges 把账号总数写进导航徽章。
+  // 由 renderAccounts() 与 buildNav() 双向调用：两者谁先跑都不会漏。
+  function updateNavBadges() {
+    const el = document.querySelector('[data-nav-badge]');
+    if (!el) return;
+    const n = share.length;
+    el.textContent = n ? String(n) : '';
+    el.style.display = n ? '' : 'none';
+  }
+
+  function showPanel(idx) {
+    // ④ 「离开页签即停」：先把**正显示着**的那个上游面板的懒加载令牌失效，
+    // 再切过去。不叫停的话，切走的那个面板会在后台把当页剩下的块全补完 ——
+    // 用户看不到结果，而上游被白打一轮（用户明确要求「离开页签即停」）。
+    const leaving = navSections.find(s => s.classList.contains('active'));
+    if (leaving && leaving !== navSections[idx]) panelStopLazyOf(leaving);
+
+    navSections.forEach((sec, i) => sec.classList.toggle('active', i === idx));
+    $('nav').querySelectorAll('button[data-nav]').forEach(b =>
+      b.classList.toggle('active', Number(b.dataset.nav) === idx));
+    try { localStorage.setItem('wb2api.panelkey', navKey(navSections[idx] || {})); } catch { /* 隐私模式 */ }
+    // 切到某些面板时按需拉一次数据，避免首次进入是空的。
+    //
+    // 用 data-key 判定而不是标签文字：上游面板的标题会随能力位与上游名变化，
+    // 按文字匹配会在显示名一改时就静默失效（面板点开是空的）。
+    const sec = navSections[idx];
+    if (!sec) return;
+    const key = sec.dataset.key || '';
+    if (key === 'logs') loadLogHistory({ force: true });
+    if (key === 'settings') loadSettings();
+    if (key === 'apikeys') loadAPIKeys();
+    // 上游专属面板：按能力位决定拉什么数据。
+    // force=true：切到该标签页时**强制**刷新一次（5 秒轮询不再碰面板，
+    // 所以"用户主动切过来"是拿到新数据的时机）。
+    if (sec.dataset.provider) loadProviderPanel(sec.dataset.provider, sec.dataset.cap, true);
+  }
+
+  // loadProviderPanel 按能力位给上游面板拉数据。
+  //
+  // 分派方式：能力位 → 渲染函数。**没有 if (provider === 'xxx') 这种分支** ——
+  // 一个上游叫什么都不影响这里走哪条路，只影响 manifest 里它的能力位。
+  //
+  // # 没有专属渲染器时走通用列表（U1 的修复）
+  //
+  // 原先这里是 `if (typeof fn !== 'function') return;` —— **静默返回**。
+  // 后果：任何"有 GET 端点但没写专属渲染器"的能力位，面板会被
+  // buildProviderPanels 正常创建出来，却**永远停在「加载中…」**。
+  // 实测 workbuddy 的 checkin 就是这样：`/admin/checkin` 是 GET，
+  // 于是导航里出现「签到与保活」，点进去一片空白。
+  //
+  // 那是最难查的一类缺陷：面板存在、导航可点、没有报错、只是不出内容。
+  // 所以现在**不再静默返回**，而是回落到通用列表渲染 ——
+  // 通用渲染对任意 JSON 形状都能给出可读结果（见 renderGenericBlock），
+  // 于是"忘了写渲染器"最坏也只是排版朴素，不会是一片空白。
+  function loadProviderPanel(providerId, cap, force) {
+    // 已经加载过就跳过（force 用于"切到该标签页"与「刷新」按钮）。
+    // 见 syncProviderPanels 里的说明：这是止住周期性重绘的开关。
+    const body = document.getElementById(`pbody-${providerId}-${cap}`);
+    if (body && !force && body.dataset.lpDone === '1') return;
+    if (body) body.dataset.lpDone = '1';
+    const fn = PROVIDER_PANEL_RENDERERS[cap];
+    // ⚠ 2026-10-19：这两条**必须 return 出去** —— 渲染器（loadGenericList、
+    //   以及各条箭头函数渲染器）都是 async，返回值就是 Promise。
+    //   原来这里是"调一下就走"，调用方（「刷新」按钮）拿不到任何"干完了没"的信号，
+    //   于是按钮点击前后**长得一模一样**：用户点了、请求也确实发了、数据也确实刷新了，
+    //   但界面上没有任何变化 ⇒ 他的结论只能是"这按钮没用"。
+    //   参考项目把这条列为明确要避免的（settings-prompt-editor.tsx:151-153
+    //   「点得动却像没反应」），做法是 async 按钮换进行时措辞 + disabled。
+    if (typeof fn === 'function') return fn(providerId, cap, force);
+    // 回落到通用列表渲染。它按 routesFor(provider, cap) 取该能力位的 GET 端点，
+    // 逐个拉取并渲染 —— 与 welfare 走的是同一条路径。
+    // ⚠ `force` 必须一路透下去：它最终决定 URL 上带不带 `refresh=1`（见 loadGenericList）。
+    return loadGenericList(providerId, cap, force);
+  }
+
+  // PROVIDER_PANEL_RENDERERS 能力位 → 渲染函数。
+  //
+  // 加一个新能力位 = 在这里加一行（或什么都不加，让它走通用列表渲染）。
+  // 注意这里**不认识上游名字**：键是能力位，由后端 manifest 下发的名字。
+  //
+  // # 关于 growth / travel 这两个键
+  //
+  // 它们指向 workbuddy 既有面板的加载函数 —— 那是**历史实现**，
+  // 数据形状与通用列表差异极大（成长有 12 列任务进度、旅行有猫的状态机），
+  // 强行抽象成一个通用渲染会让两边都别扭。
+  //
+  // 关键点：这里绑的是**能力位**，不是上游。任何上游只要声明 growth
+  // 且提供对应 GET 端点，都会走这条渲染；它不会因为"名字不是 workbuddy"
+  // 而被挡在外面。是否显示由 manifest 的能力位决定（见 hideOrphanPanels），
+  // 与上游叫什么无关。
+  const PROVIDER_PANEL_RENDERERS = {
+    growth: () => loadGrowth(false),
+    travel: () => loadTravel(false),
+    // checkin 能力位：**它已经没有面板了**（见本文件上方 1573 处那条删除说明 ——
+    // 「任务历史」标签页按用户要求下线，连 `data-key="workbuddy:history"` 的 section
+    // 一起删了；`loadHistory()` 函数本身仍在，被其它动作的 refresh 链调用）。
+    //
+    // ⚠ 那为什么还留这一条？留的**不是**"静态面板的渲染器"，而是一道**兜底**：
+    // 哪天有上游重新声明 checkin 并因此长出一个面板，不列这一条就会走 loadGenericList，
+    // 被塞进 `#pbody-workbuddy-checkin` —— 而按 R1 的结论 checkin **不再生成通用面板**，
+    // 那个容器根本不存在 ⇒ 面板点开是空的（"面板存在、导航可点、没有报错、只是不出内容"）。
+    // 列这一条至少让它走 loadHistory()（该函数自带 `histrows` 元素守卫，元素不在就安静返回）。
+    //
+    // ⚠ 别照着这段把注释当"面板还在"的证据：面板**不在**，section 已在 1573 那轮删除。
+    checkin: () => loadHistory(),
+    // 其余能力位走**通用列表 + 领取**渲染。
+    // 用户决策：codearts 的福利中心做到"上游给什么就渲染什么"即可，
+    // 不为它写专属字段逻辑。
+    welfare: (pid, _cap, force) => loadGenericList(pid, 'welfare', force),
+    'quota-probe': (pid, _cap, force) => loadGenericList(pid, 'quota-probe', force),
+    // 本轮为 loomy 的两个专属标签页加的（见上面那两个渲染器）。
+    // 键是**能力位名**，不是上游名 —— 任何上游声明它都会走这里。
+    //
+    // ⚠⚠ `force` 必须往下一层传（2026-10-19）。这里原来写成 `(pid) => loadLoomyInvite(pid)`，
+    //   把「刷新」按钮传进来的 force **吃掉了** —— 于是按钮发出的请求和首次加载
+    //   **一字不差**，命中后端「只读缓存、零上游请求」那条分支：
+    //
+    //       /admin/loomy/invite?page=1            170ms    from_cache=true
+    //       /admin/loomy/invite?page=1&refresh=1  17110ms  from_cache=false
+    //
+    //   实测两条路的数据：余额未知 5 行 → **0 行**、有码 23 行 → **25 行**。
+    //   用户的「为什么刷新了这些还没有？」就是这么来的 —— 按钮一直"是活的"，
+    //   但**没有任何办法表达"我要强制重查"**。这条链路一共有三处会吃掉参数，
+    //   这是第二处（第一处是 loadProviderPanel 的 `fn(providerId, cap)`）。
+    //   ⚠ 这类 bug 静默得可怕：不报错、有请求、有回执，只是回执是旧的。
+    //   ⇒ 加新渲染器时**照抄这两行的签名**。
+    tasks: (pid, _cap, force) => loadLoomyTasks(pid, null, force),
+    invite: (pid, _cap, force) => loadLoomyInvite(pid, null, force),
+    // core 保留在这里只作为"若将来有人给 core 放开通用面板"的兜底：
+    // 当前 SPECIAL_PANEL_CAPS 已把 core 排除在生成之外，所以它不会被触发。
+    core: (pid, _cap, force) => loadGenericList(pid, CORE_CAP, force),
+  };
+
+  // buildProviderPanels 按 manifest 为每个上游生成能力面板容器。
+  //
+  // # 它做什么
+  //
+  // 遍历 manifest 的每个上游 × 每个有 GET 入口的能力位，若该组合还没有
+  // section，就生成一个。已有 section（如 workbuddy 的成长/旅行，
+  // 它们带着复杂表格结构写在 HTML 里）不重复生成。
+  //
+  // # 为什么已有面板留在 HTML 里而不是也动态生成
+  //
+  // 成长/旅行面板有十几列复杂表格与大量交互，把它们改写成 JS 拼字符串
+  // 只会让代码更难读，且没有任何解耦收益 —— 它们的**归属与显隐**已经由
+  // data-provider/data-cap 驱动了。真正要动态化的，是"未来第三个上游
+  // 该不该出现、出现在哪"，那由本函数负责。
+  function buildProviderPanels() {
+    const host = $('providerPanels');
+    if (!host) return;
+
+    // ── 先算"这次该有哪些面板"，与现状**一模一样就直接返回** ──
+    //
+    // # 为什么必须这样（用户报的"网页隔三岔五自动刷新"的直接成因之一）
+    //
+    // 本函数原来每次调用都**先删光再重建**所有动态面板。而它每 5 秒被
+    // `refresh()` 调一次 —— 于是即使用户什么都没做，DOM 每 5 秒被整体
+    // 拆一遍再装回去：画面闪、滚动位置跳、输入框里的字被清空。
+    //
+    // 从"删除重建"改成"没变化就不动"之后，正常刷新的代价降到 0，
+    // 只有**能力位真的变了**（启停上游、换配置）才会动 DOM。
+    const want = [];
+    for (const p of upstreamGroups()) {
+      for (const cap of panelCapsOf(p.id)) {
+        const key = p.id + ':' + cap;
+        const el = document.querySelector(`#content > section[data-key="${cssEsc(key)}"]`);
+        // 静态面板（写在 HTML 里的成长/旅行）不归本函数管，也不该进 want。
+        if (el && !el.hasAttribute('data-generated')) continue;
+        want.push(key);
+      }
+    }
+    const have = Array.from(document.querySelectorAll('#content > section[data-generated]'))
+      .map(s => s.dataset.key);
+    if (have.length === want.length && have.every((k, i) => k === want[i])) return;
+
+    // 先清掉上一次生成的面板（宿主之前的那些兄弟 section）。
+    // 只删**本函数生成的**（都带 data-generated），不碰 HTML 里写死的面板。
+    let prev = host.previousElementSibling;
+    while (prev && prev.hasAttribute && prev.hasAttribute('data-generated')) {
+      const older = prev.previousElementSibling;
+      prev.remove();
+      prev = older;
+    }
+    for (const p of upstreamGroups()) {
+      for (const cap of panelCapsOf(p.id)) {
+        const key = p.id + ':' + cap;
+        // 已经有同 key 的静态面板 → 不重复生成
+        if (document.querySelector(`#content > section[data-key="${cssEsc(key)}"]`)) continue;
+        // 插到宿主**之前**：这样它是 #content 的直接子节点，`#content > section` 找得到。
+        host.insertAdjacentHTML('beforebegin', providerPanelHTML(p, cap));
+      }
+    }
+    // 生成后必须重扫 section 列表，否则导航看不到新面板。
+    refreshNavSections();
+  }
+
+  // providerPanelHTML 一个通用上游面板的骨架（列表 + 领取/动作）。
+  //
+  // 内容由 loadGenericList() 填充。骨架只包含：标题、动作按钮、
+  // 一个列表容器、一个提示区 —— 不假设任何上游特有的字段。
+  function providerPanelHTML(p, cap) {
+    const title = capTitle(cap);
+    const safeKey = p.id + ':' + cap;
+    return `<section data-provider="${esc(p.id)}" data-cap="${esc(cap)}" data-key="${esc(safeKey)}" data-generated="1">
+      <h2>${esc(title)}
+        <span class="dim" style="font-weight:400;text-transform:none">${esc(providerTitle(p.id))}</span>
+        <span class="spacer"></span>
+        <button data-plist="${esc(p.id)}" data-pcap="${esc(cap)}" style="padding:3px 10px;font-size:12px">刷新</button>
+      </h2>
+      <div class="body" id="pbody-${esc(p.id)}-${esc(cap)}">
+        <div class="dim" style="font-size:12px">加载中…</div>
+      </div>
+    </section>`;
+  }
+
+  // refreshNavSections 重扫 section 列表（动态生成面板后必须调用）。
+  function refreshNavSections() {
+    navSections = Array.from(document.querySelectorAll('#content > section'));
+  }
+
+  // ⚠⚠ 通用面板「刷新」按钮的委托（2026-10-19 修；用户实测报的
+  //    "刷新按钮需要可以手动更新前端"）。
+  //
+  // # 它原来是个**死按钮**
+  //
+  // providerPanelHTML（上面）给每个通用面板都生成了一个
+  // `<button data-plist=… data-pcap=…>刷新</button>`，
+  // 但**全文件没有一处监听它** —— 点了完全没有反应，也不报错。
+  // 与参考项目记的那条教训同型（components.css:367-377 的注释：
+  // 「用户点了「终止请求」，界面看起来毫无反应，实际确认框在底下等着」）：
+  // 都是"按钮在那儿、看着能点、什么也不发生"。
+  //
+  // # 为什么委托在 #content 上
+  //
+  // 面板是**动态生成**的（见上面 buildProviderPanels 的 insertAdjacentHTML），
+  // 逐面板绑监听会漏掉后生成的那些；#content 是它们的共同祖先，绑一次就够。
+  //
+  // ⚠ 必须传 force=true：loadProviderPanel 正常路径上有一条
+  //   「`body.dataset.lpDone === '1'` 就跳过」的守卫（用来止住周期性重绘），
+  //   而「刷新」按钮的**全部意义**就是绕过它重取一次 —— 不传 force 的话
+  //   这个按钮修完还是"点了没反应"。
+  // ⚠ 2026-10-19 加**可见反馈**（用户第二轮的原话还是「那个刷新按钮还是没用」）。
+  //
+  // 他重启过了、跑的是最新二进制、请求也确实发出去了 —— 我实测过：
+  //   点它 ⇒ `fetch /admin/loomy/invite?page=1`；连点两次 ⇒ 两次都发。
+  // 那"没用"是什么意思？看面板自己的状态文字就明白了：
+  //   「共 44 个账号 · 已读 25 · 已绑定 25」/「合计已得 250000 / 250000 分 · 还有 0 项待完成」
+  // —— 数据**已经是终态**，再刷也是同一份；而按钮点击前后**长得一模一样**，
+  // 用户无从判断它到底干没干活。所以"没用"= **没有可见的反馈**。
+  //
+  // 照参考项目的做法（它把这条列为明确要避免的：「点得动却像没反应」，
+  // settings-prompt-editor.tsx:151-153）：
+  //   · 点击即刻换措辞 + disabled（进行时），让"我收到了"这件事立刻可见
+  //   · 完成后 toast 一句带**时刻**的结果 —— 面板上的「更新于 …」也会跟着变，
+  //     但那个数字小、且只在面板顶部，容易被忽略；toast 是全局的，一定会看到
+  //   · `if (b.disabled) return` 兼作幂等守卫（参考的 `if (busy) return`）
+  //
+  // ⚠ 「刷新中…」可能一闪而过（实测服务端只要 4~24ms），所以不能只靠它 ——
+  //   真正让人确信的是那条 toast。
+  // ⚠⚠ 「刷新中…」必须有一个**最短停留时间**。
+  //
+  // 实测服务端处理一次 `/admin/loomy/invite` 只要 **10~14ms**（面板自己也写着
+  // 「服务端只要 4~24ms」）。也就是说如果只是"await 完就复原"，那个进行时措辞
+  // 会在**下一帧之前**就被换掉 —— 肉眼绝对看不见，等于没加。
+  //
+  // 参考项目对同一种情况的做法是给反馈一个**固定可见时长**
+  // （它的剪贴板按钮是点了变 `✓`、停 1200ms 再变回 `⧉`）。
+  // 这里取 380ms：足够让人看见"我点到了、它在干活"，又不至于让人觉得卡。
+  // 两个 Promise 一起等，所以总耗时 = max(请求, 380ms)，不是相加。
+  const REFRESH_MIN_FEEDBACK_MS = 380;
+
+  // ⚠⚠ 那颗按钮**会被面板重绘换掉**。
+  //
+  // 这是第三轮才抓到的一层：`loadGenericList` / 各渲染器渲染时会把 `<h2>` 整块
+  // 重写（面板骨架是 `panelSkeleton` 吐出来的），于是**触发点击的那个 DOM 节点
+  // 在 await 期间就已经不是文档里的那一个了**。
+  //
+  // 症状极具迷惑性 —— rAF 逐帧记录按钮文案，从头到尾只有「刷新」，
+  // 一次「刷新中…」都没有：
+  //     [[0,"刷新",false],[3,"刷新",false],[19,"刷新",false],…]
+  // 但同时又能量到"从点击到复原 390ms"、并看到 toast。
+  // ⇒ 因为它俩都没错：等待是真的、toast 是真的，只是**改的是孤儿节点**。
+  //
+  // ⇒ 所以进和出都按 `data-plist` / `data-pcap` **重新查一遍**当前那颗，
+  //   而不是抓住点击时拿到的引用不放。
+  const findRefreshBtn = (pid, cap) => document.querySelector(
+    'button[data-plist="' + CSS.escape(pid) + '"][data-pcap="' + CSS.escape(cap) + '"]');
+
+  $('content').addEventListener('click', async (ev) => {
+    const b = ev.target.closest('button[data-plist]');
+    if (!b || b.disabled) return;                 // 兼作幂等守卫（参考的 `if (busy) return`）
+    const { plist: pid, pcap: cap } = b.dataset;
+    const startedAt = new Date();
+
+    // ⚠ 用一帧一次的循环**保持**进行时。
+    //   原因同上：面板重绘会换掉节点，只在开头设一次的话，
+    //   请求 10~14ms 完成后重绘立刻把它盖回「刷新」—— 那个措辞等于没加。
+    //   `holding` 是唯一的停止条件，所以不会泄漏循环。
+    let holding = true;
+    const setBusy = () => {
+      const cur = findRefreshBtn(pid, cap);
+      if (!cur) return;
+      if (cur.textContent !== '刷新中…') cur.textContent = '刷新中…';
+      if (!cur.disabled) cur.disabled = true;
+    };
+    setBusy();
+    (function keepBusy() {
+      if (!holding) return;
+      setBusy();
+      requestAnimationFrame(keepBusy);
+    })();
+
+    try {
+      await Promise.all([
+        loadProviderPanel(pid, cap, true),
+        new Promise(r => setTimeout(r, REFRESH_MIN_FEEDBACK_MS)),
+      ]);
+      const took = Date.now() - startedAt.getTime();
+      toast('已刷新 · ' + startedAt.toLocaleTimeString('zh-CN', { hour12: false })
+        + '（' + took + 'ms）');
+    } catch (e) {
+      toast('刷新失败：' + (e && e.message ? e.message : e), true);
+    } finally {
+      holding = false;                       // 先停循环，再还原，避免被它盖回去
+      const cur = findRefreshBtn(pid, cap) || b;
+      cur.textContent = '刷新';
+      cur.disabled = false;
+    }
+  });
+
+  // sectionActive 报告某个 `data-key` 的面板当前是不是**正在显示**。
+  //
+  // 用途：周期性的只读刷新（请求日志 / 任务历史）只在它可见时才该跑。
+  // 它读的是 `.active` 类 —— 与 showPanel 切换时用**同一个**判据，
+  // 不另造一套（"当前面板是谁"只能有一个答案）。
+  function sectionActive(key) {
+    const sec = navSections.find(s => s.dataset.key === key);
+    return !!sec && sec.classList.contains('active');
+  }
+
+  // syncProviderPanels 生成上游面板并按需触发它们的首次加载。
+  //
+  // # 它同时修掉 bug B7
+  //
+  // 原先 boot() 无条件调用 loadTravel(false) / loadGrowth(false)，
+  // 于是**没有 workbuddy 的部署**里这两个面板照样发请求、照样报错。
+  // 现在数据加载只在这里发生，而这里只对"manifest 里真的有这个能力位"
+  // 的上游说话 —— 没有该能力位的上游根本不会走到加载那一步。
+  //
+  // # 幂等
+  //
+  // 每次 refresh() 都会调用它（因为 manifest 可能变化，比如热重载了账号）。
+  // providerPanelHTML 只对**尚不存在**的 key 生成，所以重复调用不会重复建。
+  function syncProviderPanels() {
+    buildProviderPanels();
+    refreshNavSections();
+    // 先把不该出现的面板隐藏掉，再决定给谁加载数据 ——
+    // 否则会给一个已经隐藏的面板发请求（那正是 B7）。
+    hideOrphanPanels();
+
+    // ★ T-408①：只给**当前正在显示**的那个面板加载数据（收敛首屏请求）。
+    //
+    // # 为什么从"每个可见面板"收紧到"只有当前面板"（用户原话："仪表盘的表加载很慢啊"）
+    //
+    // 原来这一轮会给**所有**可见上游面板各发一遍请求 —— 实测首屏因此多出：
+    //   /admin/loomy/tasks?page=1 · /admin/loomy/invite?page=1 · /admin/codar/invite?page=1
+    //   /admin/travel · /admin/growth … 全是**用户没打开的面板**（49 个请求里占了一大批）。
+    // 判断标准很简单：**用户不点开那个面板，就不该为它发请求**。
+    // 面板级加载本来就有一条正确的入口：`showPanel` 里的 loadProviderPanel(…, force=true)。
+    for (const sec of navSections) {
+      if (sec.hidden) continue;
+      if (!sec.classList.contains('active')) continue;   // ★ T-408① 非当前面板一律不预取
+      const pid = sec.dataset.provider;
+      if (!pid || !sec.dataset.cap) continue;
+      //  已经加载过的面板**不再重复拉**（本轮新增）。
+      //
+      // 这是"网页隔三岔五自动刷新"的另一半成因：本函数每 5 秒被调一次，
+      // 原来会给每个可见面板重新发一遍请求。对 loomy 的两个专属面板
+      // 尤其贵 —— 每个面板要按账号数个请求（3 个号 ≈ 6~8 次），
+      // 于是每 5 秒十几条上游请求 + 整块表格重绘。
+      //
+      // 现在的策略：
+      //	首次（或能力位变化后）→ 加载一次
+      //	切到该标签页           → 强制刷新一次（见 showPanel）
+      //	点面板里的「刷新」      → 强制刷新一次
+      //	其余 5 秒轮询           → 不碰面板
+      const body = document.getElementById(`pbody-${pid}-${sec.dataset.cap}`);
+      if (body && body.dataset.lpDone === '1') continue;
+      loadProviderPanel(pid, sec.dataset.cap);
+    }
+  }
+
+  // hideOrphanPanels 隐藏那些"归属的上游不存在 / 没有该能力位"的静态面板。
+  //
+  // 这是 B7 的另一半：**光不加载数据还不够**，面板本身也必须从界面上消失，
+  // 否则用户会看到一个永远空着的「猫猫旅行」。
+  function hideOrphanPanels() {
+    let hidden = 0;
+    for (const sec of navSections) {
+      const pid = sec.dataset.provider;
+      if (!pid) continue;   // 通用面板不动
+      const cap = sec.dataset.cap;
+      // 上游不存在，或该上游没声明这个能力位 → 隐藏
+      const p = providerInfo(pid);
+      const alive = !!p && capNamesOf(pid).indexOf(cap) >= 0;
+      sec.hidden = !alive;
+      if (!alive) hidden++;
+    }
+    return hidden;
+  }
+
+  // ---------------------------------------------------------------- 上游专属面板（tasks / invite）
+  //
+  // # 为什么这两个渲染器**不认识上游名**
+  //
+  // 端点从 manifest 里取（`admin_routes` 按能力位 + 方法查），
+  // 于是任何上游只要声明 `tasks` / `invite` 并挂上对应路由，就会走到这里。
+  // 这正是"加新上游改前端零行"那条判据在**专属面板**上的形态。
+  //
+  // # 为什么它们不复用 loadGenericList
+  //
+  // 通用列表把回执铺成"一组条目 + 键值对"，而这两块需要的是
+  // **表格 + 行内按钮**（一键完成 / 绑定邀请码）。把按钮塞进通用渲染
+  // 就得让通用渲染去理解"哪些字段是动作"，那会把通用层弄脏。
+  function adminRouteFor(providerId, cap, method) {
+    const want = String(method || '').toUpperCase();
+    const rs = (MANIFEST.admin_routes || []).filter(r =>
+      r && r.provider === providerId && r.capability === cap &&
+      String(r.method || '').toUpperCase() === want);
+    return rs.length ? rs[0].path : '';
+  }
+
+  // adminRouteBySuffix 按「方法 + 路径后缀」在 manifest 里找一条路由。
+  //
+  // 用途：账号池分组行的「批量导入」按钮 —— 它不该为某个上游写死路径，
+  // 而是"这个上游有没有声明 /import 结尾的 hidden POST"来决定显隐。
+  function adminRouteBySuffix(providerId, method, suffix) {
+    const want = String(method || '').toUpperCase();
+    for (const r of (MANIFEST.admin_routes || [])) {
+      if (r && r.provider === providerId &&
+          String(r.method || '').toUpperCase() === want &&
+          String(r.path || '').endsWith(suffix)) {
+        return r.path;
+      }
+    }
+    return '';
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 共享层：**缓存 + 懒加载**（lazyCache / lazyFill）
+  //
+  // # 用户的要求（原话）
+  //
+  //	「现在有关于所有的加载东西，前端显示的，都要有一个缓存，然后再加上
+  //	  懒加载，缓存和懒加载结合在一起实现，并且把这两个抽成共享层，
+  //	  用在这整个项目里去。」
+  //
+  // # 契约（**只这一处**；所有"先出缓存、再按需补"的地方都走它）
+  //
+  //	lazyCache.get(key)            → { val, updatedAt } | null（同步、纯内存）
+  //	lazyCache.set(key, val, at)   → 写入（at 缺省 = 现在）
+  //	lazyCache.merge(key, fn, at)  → 在旧值上跑 fn 得到新值
+  //	lazyCache.updatedAt(key)      → 毫秒时间戳（0 = 从没写过）
+  //	lazyCache.drop(key)           → 删掉一个键
+  //	lazyCache.bump(key)           → **让这个键上正在跑的那一轮 lazyFill 立刻停**
+  //	lazyCache.epochOf(key)        → 当前令牌
+  //
+  //	lazyFill({ key, host, uids|chunks, chunkSize, fetchChunk, onChunk, onIdle })
+  //	  ① 画缓存  —— 由调用点自己先 `lazyCache.get(key)` 画（必须**同步**拿到，
+  //	               所以这一层是纯内存、不做任何 IO）
+  //	  ② 分块补  —— uids 按 chunkSize 切块；前端**全局**在途块数 ≤ LAZY_MAX_INFLIGHT
+  //	  ③ 每块回来即 `onChunk(res, err, chunk)` —— 调用点 merge 进缓存 + 重画那一块
+  //	  ④ 离开即停 —— `lazyCache.bump(key)` 之后，循环在下一次判活时退出
+  //
+  // # ⚠ 三条必须记住的坑（都是踩过的）
+  //
+  //	1. 「还没查」与「查失败」是**两种**显示：前者是占位（后端 `stale=true`，
+  //	   前端画「正在读取…」），后者才是红标「查询失败」+ 后端原文 error。
+  //	   混起来会让用户把一个正在加载的正常号当成坏号。
+  //	2. **判活不许看显示类**。register-machine 那次用 `contains('show')` 判
+  //	   "面板还在不在"，而那个类名在这份 CSS 里恒假 ⇒ 懒加载一启动就中止，
+  //	   一行都不补。这里只看 **isConnected + 令牌**。
+  //	3. **在途请求上限必须是全局的**。上游实测 12 条并发就开始 502；而
+  //	   "每个调用点各带 1 条在途"会在多面板同时加载时叠加（tasks 与 invite
+  //	   在页面初始化时都会被拉一次），所以下面用的是一个**共享队列**。
+  // ──────────────────────────────────────────────────────────────────────
+
+  // LAZY_CHUNK 每块默认几个 uid。
+  //
+  // ⚠ 块**不是**"一次上游请求"：块内扇出在后端做（那边才是实测得出的并发上限）。
+  // 块大一点只是少几次本地 HTTP；真正决定上游压力的是后端那一个上限。
+  // ⚠⚠ 用户要求把并发提到 25（2026-10-18「性能太差了 提高并发数25个」）⇒
+  // 块大小同时提到 25（**一整页一块**）：块太小时后端那个并发上限根本用不上
+  //（一块 6 个 uid ⇒ 最多 6 个账号并行）。
+  // ⚠ 风险：25 个账号并行 × 每账号 2 次上游请求 = **50 条在途**，而实测 12 条就打 502
+  // ⇒ 若面板开始整列「查询失败」，把本常量连同 `panelFillConcurrency` /
+  //    `loomyPanelConcurrency` 一起退回 4/6 那一档（安全区）。
+  const LAZY_CHUNK = 25;
+
+  // LAZY_MAX_INFLIGHT 前端**全局**在途块数上限。
+  //
+  // ⚠ 回归的成因正是"前端自己叠并发"：旧模型每行一条请求、并发 6，而每行要
+  // 2 次上游请求 ⇒ 上游 12 条在途 ⇒ 502 ⇒ 整列「查询失败」（而手动单查同一个
+  // 账号是好的）。现在前端一次只发一块，扇出只发生在后端一处。
+  const LAZY_MAX_INFLIGHT = 1;
+
+  // ⚠⚠ **这一层缓存要落到磁盘（localStorage）** —— 用户的要求是「读缓存毫秒级」，
+  // 而只放内存做不到：内存缓存**刷新/重开页面就空了**，第一眼必然要等一次网络往返
+  //（实测 `?page=` 热 7~10ms、冷 144ms —— 服务端已经够快，问题在"前端每次都得重新要"）。
+  //
+  // ⇒ 落盘之后：**刷新/重开/切回来，第一眼直接画上次的内容（0 次请求）**，
+  //    然后再由后台把新的补上（`lazyFill` 那一步照常跑）。
+  //
+  // ⚠ 为什么只改 `get`/`set`/`drop` 三个点：其余方法（`merge`/`updatedAt`/`epochOf`/
+  //    `bump`/`keys`）都建在它们之上 ⇒ 从这一处落盘，整层就都有了。
+  // ⚠ 落盘失败**一律不抛**（隐私模式、配额满都会抛）：宁可不落盘，也不能让面板崩。
+  const lazyCache = (function () {
+    const mem = new Map();     // key → { val, updatedAt }
+    const epochs = new Map();  // key → 令牌（bump 用来叫停在跑的那一轮）
+    const LS_PREFIX = 'wb2api.pcache.';
+
+    // ⚠⚠ scope = **当前身份的缓存命名空间**（2026-10-19 加）。
+    //
+    // # 为什么必须有它（视觉 E2E 实测抓到的跨身份串数据）
+    //
+    // 原先 key 只有逻辑名（如 `ep:/admin/apikeys`），而它**落 localStorage**、
+    // TTL 30s，且 localStorage **跨导航存活** ⇒ 同一浏览器换身份时会读到上一个
+    // 身份留下的快照。实测两个方向都撞到了：
+    //	· 成员会话 → 同一个浏览器改开 `/ui?token=`（管理员令牌）⇒ 「管理钥匙」区块
+    //	  按**成员**那份快照渲染成"属于管理员：当前账号看不到"，与同屏顶栏的
+    //	  「管理令牌／管理员」自相矛盾；
+    //	· 反方向更糟：管理员先登录、30 秒内成员登录 ⇒ 成员界面上会**画出管理员的
+    //	  key 列表**（服务端拦得住请求，但界面已经在显示别人的数据了 —— 人工几乎
+    //	  撞不到，因为窗口只有 30 秒）。
+    //
+    // 修法：把身份编进**落盘的 key**（`wb2api.pcache.<scope>.<key>`），于是换身份
+    // 时天然读不到对方那份；内存 Map 按裸 key 存，所以换 scope 时要清内存。
+    let scope = 'anon';
+
+    function lsKey(key) { return LS_PREFIX + scope + '.' + key; }
+
+    // persist 失败时清掉本前缀的全部键 —— 只可能发生在"配额满"上，
+    // 而清掉旧的面板缓存是这里唯一正确的选择（它本来就是可再生数据）。
+    function persist(key, e) {
+      try {
+        localStorage.setItem(lsKey(key), JSON.stringify(e));
+      } catch (err) {
+        try {
+          const doomed = [];
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.indexOf(LS_PREFIX) === 0) doomed.push(k);
+          }
+          doomed.forEach(k => localStorage.removeItem(k));
+        } catch (e2) { /* 隐私模式：连清理也做不了，就算了 */ }
+      }
+    }
+
+    // restore 惰性读盘：第一次 get 某个键时才去读 —— 打开页面时**不为没用到的键付代价**。
+    function restore(key) {
+      const hit = mem.get(key);
+      if (hit) return hit;
+      try {
+        const raw = localStorage.getItem(lsKey(key));
+        if (!raw) return null;
+        const e = JSON.parse(raw);
+        if (!e || typeof e !== 'object' || !('val' in e)) return null;
+        mem.set(key, e);
+        return e;
+      } catch (err) { return null; }
+    }
+
+    function get(key) { return restore(key); }
+    function set(key, val, at) {
+      const e = { val: val, updatedAt: Number(at) || Date.now() };
+      mem.set(key, e);
+      persist(key, e);
+      return e;
+    }
+    function merge(key, fn, at) {
+      const cur = restore(key);
+      return set(key, fn(cur ? cur.val : null), at);
+    }
+    function updatedAt(key) { const e = restore(key); return e ? e.updatedAt : 0; }
+    function drop(key) {
+      mem.delete(key);
+      try { localStorage.removeItem(lsKey(key)); } catch (err) { /* 隐私模式 */ }
+    }
+    // setScope 换身份：清内存（按裸 key 存的那份属于上一个身份），并把盘上
+    // **所有**命名空间的旧快照删掉 —— 它们本来就是可再生数据，留着只会占配额。
+    function setScope(s) {
+      const next = String(s || 'anon');
+      if (next === scope) return;
+      scope = next;
+      mem.clear();
+      try {
+        const doomed = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.indexOf(LS_PREFIX) === 0) doomed.push(k);
+        }
+        doomed.forEach(k => localStorage.removeItem(k));
+      } catch (err) { /* 隐私模式 */ }
+    }
+    function epochOf(key) { return epochs.get(key) || 0; }
+    function bump(key) {
+      const n = epochOf(key) + 1;
+      epochs.set(key, n);
+      return n;
+    }
+    function keys() { return Array.from(mem.keys()); }
+
+    return { get, set, merge, updatedAt, drop, setScope, epochOf, bump, keys };
+  })();
+
+  // lazyInFlight / lazyWaiters 共享队列（见 LAZY_MAX_INFLIGHT 的说明）。
+  let lazyInFlight = 0;
+  const lazyWaiters = [];
+
+  function lazyAcquire() {
+    if (lazyInFlight < LAZY_MAX_INFLIGHT) { lazyInFlight++; return Promise.resolve(); }
+    return new Promise(res => lazyWaiters.push(res));
+  }
+
+  // lazyRelease 释放一个额度。**优先把额度直接交给排队的那个**（不递减）——
+  // 否则会出现"队列里有人等着、计数器却已归零"⇒ 后来者同时挤进来。
+  function lazyRelease() {
+    const next = lazyWaiters.shift();
+    if (next) { next(); return; }
+    lazyInFlight = Math.max(0, lazyInFlight - 1);
+  }
+
+  // lazyChunks 把一个列表切成小块。
+  function lazyChunks(list, size) {
+    const n = Math.max(1, Number(size) || LAZY_CHUNK);
+    const out = [];
+    for (let i = 0; i < list.length; i += n) out.push(list.slice(i, i + n));
+    return out;
+  }
+
+  // lazyFill 缓存优先 + 分块懒加载（契约见本段开头）。
+  //
+  //	fetchChunk(chunk) → Promise<任意>（块里的第一个 await 才是真请求）
+  //	onChunk(res, err, chunk)  每块回来调一次；err 是这块**请求本身**失败的原因
+  //	onIdle()                  补完 / 被叫停时各调一次
+  //
+  // ⚠ 它返回的 Promise 会等到所有块跑完或被停，但调用点**不必** await ——
+  // 不 await 才是"懒"：页面先画出来，补数在后台逐块贴上。
+  async function lazyFill(o) {
+    const key = o.key;
+    const host = o.host;
+    const ep = lazyCache.bump(key);   // 新一轮 ⇒ 上一轮自然失效（换页 / 换筛选）
+    const chunks = o.chunks || lazyChunks((o.uids || []).filter(Boolean), o.chunkSize);
+
+    // alive 判活：只看**令牌 + 节点是否还在文档里**。绝不看显示类（见坑 2）。
+    const alive = () => lazyCache.epochOf(key) === ep && (!host || host.isConnected);
+
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        if (!alive()) return;
+        const at = next++;
+        if (at >= chunks.length) return;
+        await lazyAcquire();
+        let res = null, err = '';
+        try {
+          res = await o.fetchChunk(chunks[at]);
+        } catch (e) {
+          err = (e && e.message) || String(e);
+        } finally {
+          lazyRelease();
+        }
+        if (!alive()) return;
+        if (o.onChunk) o.onChunk(res, err, chunks[at]);
+      }
+    };
+    const n = Math.min(LAZY_MAX_INFLIGHT, chunks.length);
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    if (o.onIdle) o.onIdle();
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // panelPolls：**「后端补好了，前端怎么自己显示出来」**的兜底（用户实测反馈）
+  //
+  // # 用户的原话
+  //
+  //	「我发现这些加载完毕了，不会自动同步前端……要不就是你自动更新前端，
+  //	  加载一个更新一个，或者说用一个标记记录你是否正在加载，如果正在加载，
+  //	  然后按照时间计时，1 秒钟或者 2 秒钟就刷新一次前端。」
+  //
+  // # 为什么要它（根因）
+  //
+  // 面板的行替换**只在"某一块回来"时发生**。实测：后端缓存里那 19 行**全有数据**，
+  // 而页面还停在「正在读取…」—— 某一块的请求没回来 / 回来晚了，那一行就**永远**是占位。
+  //
+  // # 契约（两条，别改坏）
+  //
+  //	1. 判据是**"这一页还有几行占位"**，与"哪一块回来"无关 ⇒ 不会漏行；
+  //	2. ⚠ 重读**只调 `?page=`**（服务端只读缓存、零上游、毫秒级），
+  //	   **绝不**回头调整个加载函数 —— 那会每拍 `bump` 一次换代令牌，
+  //	   把正在跑的 `lazyFill` 补数一次次判死，永远补不完。
+  // ──────────────────────────────────────────────────────────────────────
+  // sharedGet：**同一个端点只发一次**的取数器 —— 「统一读缓存 + 懒加载」的唯一入口
+  //
+  // # 用户的要求（2026-10-18）
+  //
+  //	「将前端**所有的类似实现**抽共享层，然后**统一读缓存、懒加载**」
+  //
+  // # 为什么必须有它（实测，不是推测）
+  //
+  // 前端现在有 **67 处**各写各的 `await admin(...)` / `await api(...)`，而**同一个端点被反复取**：
+  //	· `/admin/accounts` —— 一次 `refresh()` 里被调 **2 次**；
+  //	· `/v1/models`     —— 主渲染与「刷新」按钮各调 **1 次**；
+  // ⚠ 这与之前 `/admin/stats` 那个「一次 refresh 调两遍、白等 14 秒」是**同一个病**。
+  //
+  // # 契约（三条，别改坏）
+  //
+  //	1. **单飞**：同一个 key 正在飞 ⇒ 后来者拿到**同一个 Promise**，不重复发请求；
+  //	2. **缓存**：命中且未过期 ⇒ **立刻返回缓存（0 请求）**；⚠ 缓存是落盘的
+  //	   （借 `lazyCache`，它已改写到 localStorage）⇒ 刷新/重开页面第一眼也是 0 请求；
+  //	3. **过期先给旧的、后台再刷**（`sharedGetStale`）：⚠ 绝不"等新数据到了才渲染"——
+  //	   那正是 `/admin/stats` 卡住首屏 7 秒的原因。
+  //
+  // ⚠ 只用于 **GET 语义**的取数。写操作照旧直接调 `admin`/`api`（不能被缓存）。
+  // ⚠ 失败也要**清掉在飞标记**：否则一次失败会把那个 key 永久卡住，后来者永远拿到那个
+  //    已失败的 Promise（表现为"这个面板再也刷不出来"）。
+  const SHARED_TTL_MS = 30 * 1000;
+  const sharedInflight = new Map();
+
+  // setCacheScope(scope) —— 身份变了就切缓存命名空间（见 lazyCache 里 scope 那段）。
+  // 包一层是为了让调用点**不必知道闭包内部结构**，也让"什么时候该切"只有一处说法。
+  function setCacheScope(scope) {
+    try { lazyCache.setScope(scope); } catch (e) { /* 隐私模式/被禁用：内存那份照样清 */ }
+  }
+
+  function sharedGet(key, fetcher, ttlMs) {
+    const ttl = Number(ttlMs) || SHARED_TTL_MS;
+    const hit = lazyCache.get(key);
+    if (hit && (Date.now() - hit.updatedAt) < ttl) return Promise.resolve(hit.val);  // ① 命中：0 请求
+    const flying = sharedInflight.get(key);
+    if (flying) return flying;                                                      // ② 单飞
+    const p = Promise.resolve()
+      .then(fetcher)
+      .then(d => { lazyCache.set(key, d); sharedInflight.delete(key); return d; })
+      .catch(e => { sharedInflight.delete(key); throw e; });                        // ⚠ 失败清标记
+    sharedInflight.set(key, p);
+    return p;
+  }
+
+  // sharedGetStale 给"首屏绝不能等"的地方用：**先返回旧值（stale=true），后台再去刷**。
+  // 没缓存时才退化成一次真取（那时没有旧值可给）。返回 { val, stale }。
+  function sharedGetStale(key, fetcher, ttlMs) {
+    const ttl = Number(ttlMs) || SHARED_TTL_MS;
+    const hit = lazyCache.get(key);
+    if (hit && (Date.now() - hit.updatedAt) < ttl) return Promise.resolve({ val: hit.val, stale: false });
+    if (!hit) return sharedGet(key, fetcher, ttl).then(v => ({ val: v, stale: false }));
+    if (!sharedInflight.has(key)) {                     // 有旧值但过期 ⇒ 后台刷，不 await
+      const p = Promise.resolve().then(fetcher)
+        .then(d => { lazyCache.set(key, d); sharedInflight.delete(key); })
+        .catch(() => { sharedInflight.delete(key); });
+      sharedInflight.set(key, p);
+    }
+    return Promise.resolve({ val: hit.val, stale: true });
+  }
+
+  const panelPolls = {};
+
+  // ── 写操作之后必须丢缓存（2026-10-19 加）────────────────────────────────
+  //
+  // # 为什么（用户实测报的「删除不掉」的**界面侧真因**）
+  //
+  // `sharedGet` 的缓存 TTL 是 30s，而且**落 localStorage**（整个单页共用）。
+  // 写操作本身走 `admin()`（不过缓存，这是对的），可**紧接着的刷新**走的是
+  // `sharedGet('ep:/admin/accounts')` —— 它命中 30 秒内的旧快照 ⇒
+  // `renderAccounts(旧数据)` 把**刚删掉的那一行原样画回来**。
+  //
+  // 真浏览器实测（tests/frontend/verify_delete_buttons_ui_e2e.js）：
+  //
+  //	点「移除」 → DELETE **10ms** 就回了 200，而表格里那一行 **20 秒不消失**
+  //	apiKey 删除 → 后端已空，列表还显示那把 key
+  //
+  // 用户读到的就是「点了移除没反应 / 删不掉」—— 它与后端那条 FilePath 缺陷
+  // **同时存在**，两条各自都能独立造成这个现象（所以两条都修）。
+  //
+  // ⚠ 顺序**不能反**：先丢缓存，再 refresh。反了等于没丢（这一轮刷新刚把
+  //   旧快照写回缓存，下一轮又要等 30s）。
+  // ⚠ 宁可多丢：多丢一次无非多发一次请求；少丢一次的代价是界面上留着已删的号。
+  const EP_ACCOUNTS = 'ep:/admin/accounts';
+  const EP_APIKEYS = 'ep:/admin/apikeys';
+
+  // writeInvalidate 在**写操作之后、刷新之前**调用（见上）。
+  function writeInvalidate(keys) {
+    (Array.isArray(keys) ? keys : [keys]).forEach(k => lazyCache.drop(k));
+  }
+
+  // schedulePanelPoll 只要 pendingCount() 还 > 0，就每 1.5 秒跑一次 reload。
+  // ⚠ 同一个 key 只允许一个表；占位清空 / host 离开文档 ⇒ 立刻停表（不后台空转）。
+  function schedulePanelPoll(key, host, pendingCount, reload) {
+    if (panelPolls[key]) return;
+    // ⚠⚠ **轮次硬上限**（2026-10-18 加，用户报"打开页面一直很慢/一直正在读取"）。
+    //
+    // # 为什么要它（实测的死循环）
+    //
+    // 原来的退出条件只有 `pendingCount() <= 0`。而 `reload()` 会**重建整表** ⇒
+    // 重建时每行先画「正在读取…」占位 ⇒ **那一拍的 pendingCount() 又 > 0** ⇒
+    // 于是每 1.5 秒轮一次、永远轮 —— 用户看到的就是"页面一直在加载"。
+    //
+    // ⚠ 实测证据（playwright 抓包，9 秒内）：`/admin/loomy/tasks?page=1` 与
+    //   `/admin/loomy/invite?page=1` **各请求了 6 次**，而每次服务端只要 **4~24ms**；
+    //   同时页面上仍有 **169 个**单元格停在「正在读取…」。
+    // ⇒ ⚠ **慢不在服务端，在这个永不收敛的轮询**。
+    //
+    // ⚠ 上限取 10（≈15 秒）：足够把 44 个号的首轮补数跑完（实测一轮都在毫秒级），
+    //   又不会无限轮。轮完之后**已加载的行就留住了** —— 那才是用户要的"打开就出数据"。
+    // ⚠ 副作用：真没补到的行会停在占位。⚠ 那由 `panelRowErr` / `hideEmptyCols` 兜底，
+    //   比"整页一直闪占位"好得多（那会让用户以为整个网关坏了）。
+    let rounds = 0;
+    const MAX_ROUNDS = 10;
+    const timer = setInterval(async () => {
+      if (panelPolls[key] !== timer) { clearInterval(timer); return; }
+      if (!host || !host.isConnected) { clearInterval(timer); delete panelPolls[key]; return; }
+      if (pendingCount() <= 0) { clearInterval(timer); delete panelPolls[key]; return; }
+      if (++rounds > MAX_ROUNDS) { clearInterval(timer); delete panelPolls[key]; return; }
+      try { await reload(); } catch (e) { /* 下一拍再试 */ }
+    }, 1500);
+    panelPolls[key] = timer;
+  }
+
+  // stopPanelPoll 换页 / 切面板时叫停（与 lazyCache 的换代同一时机）。
+  function stopPanelPoll(key) {
+    const t = panelPolls[key];
+    if (t) { clearInterval(t); delete panelPolls[key]; }
+  }
+
+  // parseServerTime 后端的 `updated_at`（RFC3339）→ 毫秒时间戳。
+  // 解不出来就当作"现在" —— 宁可说"刚更新过"，也别显示成 1970。
+  // hideEmptyCols **整列都是空/占位 ⇒ 把这一列藏掉**（钉钉 / 飞书表格的同款默认做法）。
+  //
+  // 用户的要求：「宽度可以用滑动条，也可以**显示部分字段**（如果字段太宽）」。
+  // 实测最直接的空间浪费就是它：Loomy 新手任务页的「待完成」列**整列都是 `—`**
+  //（因为那 44 个号都已全部完成，没有待办项）⇒ 白白占掉一整列的宽度。
+  //
+  // ⚠ 三条保险（缺一条就会藏错列）：
+  //	1. 判据是"**所有行**都已空" —— 只要有一行有真值就保留
+  //	   （像「余额」列里有几行是 `—`，那列**不能**藏）；
+  //	2. 「空」= 去掉空白与 `— – - …` 之后什么都不剩 —— 排除"只有占位符"的格子；
+  //	3. **少于 3 行不做判断** —— 一两行的样本不足以说明"这列一直是空的"，
+  //	   而且那种情况下表格本来也没占多少宽度。
+  function hideEmptyCols(table) {
+    if (!table) return;
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    const ths = Array.from(table.querySelectorAll('thead th'));
+    if (rows.length < 3 || !ths.length) return;
+    // ⚠⚠ **前提（必须的，否则会藏错列）**：每一行的单元格数必须与表头列数**完全一致**。
+    //   为什么要这条：本函数按**下标**把 `ths[i]` 与 `r.children[i]` 对齐，
+    //   而表里只要有 **`colspan` 行**（成长计划/猫猫旅行都有"整行跨列"的那种），
+    //   下标就会错位 ⇒ 会把**有数据的列表头**判成"整列都空"而藏掉。
+    //
+    //   ⚠ 这是**实测踩到的回归**：用户发来截图 —— 表头从某列起**一大片空白**，
+    //     而那一列的数据明明还在行里。就是他这一句「列字段没东西呢？？」。
+    //   宁可**整表不处理**，也不能按错位的下标去藏。
+    if (rows.some(r => r.children.length !== ths.length)) return;
+    for (let i = ths.length - 1; i >= 0; i--) {
+      const isEmpty = rows.every(r => {
+        const td = r.children[i];
+        if (!td) return true;
+        return (td.textContent || '').replace(/[\s…—–\-]/g, '') === '';
+      });
+      if (!isEmpty) continue;
+      // ⚠ 用 inline style 而不是加 class：这些单元格是 innerHTML 一次性写进去的，
+      //   加 class 要再扫一遍且和"列设置"之类未来功能容易打架。
+      ths[i].style.display = 'none';
+      rows.forEach(r => { const td = r.children[i]; if (td) td.style.display = 'none'; });
+    }
+  }
+
+  // hideZeroTotals **把"合计类且值为 0"的卡片藏掉**（与 hideEmptyCols 同一个思路）。
+  //
+  // 用户的要求是"少空白、合理利用空间"。实测最典型的浪费：成长计划页的
+  // 「可领合计 **0 项 · +0**」—— 值是 0 时这张卡没有任何信息量，却和白占一格。
+  //
+  // ⚠⚠ 判据必须保守，两条缺一不可：
+  //	1. 卡片**名字里含「合计」** —— 只看这一类。⚠ 绝不能一刀切"值为 0 就藏"：
+  //	   「账号数 **0**」是**最重要**的信息（配了上游却没账号），藏掉就是掩盖故障；
+  //	2. 值里**除了 0、空格、`+`、`项`、`—` 之外什么都不剩** ——
+  //	   于是 `0 项 · +0` 会被藏，而 `0 / 78`、`6 任务 · +600` 不会。
+  function hideZeroTotals(root) {
+    const host = root || document;
+    host.querySelectorAll('.cards .card').forEach(c => {
+      const k = (c.querySelector('.k') || {}).textContent || '';
+      if (k.indexOf('合计') < 0) return;                       // ⚠ 只看合计类（见上面第 1 条）
+      const v = ((c.querySelector('.v') || {}).textContent || '').trim();
+      if (v === '') { c.style.display = 'none'; return; }
+      const stripped = v.replace(/[0\s+项·—–\-]/g, '');
+      c.style.display = stripped === '' ? 'none' : '';
+    });
+  }
+
+  function parseServerTime(s) {
+    if (!s) return Date.now();
+    const t = Date.parse(s);
+    return isNaN(t) ? Date.now() : t;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 面板：**缓存优先 + 分页 25 行 + 懒加载当页**
+  //
+  // # 用户的设计（原话）
+  //
+  //	「列表项这两个地方的列表，分页，每一页固定25行，这是写死的。然后我们就
+  //	  按页进行…我们先懒加载…后台自动有一个缓存…你一打开页面显示是缓存数据，
+  //	  然后有一个提示，就是正在更新什么的，然后懒加载这一页，然后更新完了，
+  //	  然后把这个数据更新掉。」
+  //
+  // # 三步（对应上面那句话）
+  //
+  //	① `?page=N` 取当页 —— 服务端**只读缓存、零上游请求** ⇒ 瞬时返回
+  //	② 立刻渲染：有缓存的直接显示；没缓存的那几行显示「正在读取…」
+  //	③ 再对**当页这 25 行**逐行发 `?uid=` 刷新（并发 6），谁先回来谁先替换
+  //
+  // 「刷新」按钮（用户选定方案 1）= 重读缓存 + 重刷当页 —— 快，且不会把
+  // 没显示出来的页也查一遍。
+  // ──────────────────────────────────────────────────────────────────────
+
+  // ⚠ 这里曾经有一个 `PANEL_ROW_CONCURRENCY = 6`（前端逐行刷新时的并发）。
+  // 它已经**删掉**：前端不再逐行发请求，在途上限只由共享层的
+  // `LAZY_MAX_INFLIGHT` 与后端的分块并发（`panelFillConcurrency`）决定。
+  // 留着它最危险的地方不是死代码，而是**误导**：谁下次想加快补数，
+  // 会顺手把它调大 —— 而"前端 6 并发 × 每行 2 次上游 = 12 条在途"正是
+  // 整列「查询失败」的成因（上游实测 12 条并发就开始 502）。
+
+  // panelPageState 每个面板当前停在第几页。
+  //
+  // ⚠ 必须记住：页面每 5 秒 refresh 一次，不记的话每次重绘都会把用户**翻到
+  // 的第 2 页弹回第 1 页** —— 表现为"翻页翻不住"。
+  const panelPageState = {};
+
+  // warmOtherPages **把其余页也预热一遍**（2026-10-18 加）。
+  //
+  // # 为什么必须做（用户实测报的现象："还是有正在读取！！"）
+  //
+  // 打开面板时前端只请求 `?page=1`（当页），而 `?page=` 只从**服务端缓存**取 ——
+  // ⚠ 不在缓存里的行回 `stale: true`，前端据此画「正在读取…」（webui 的 renderPage 里那条），
+  //   而"让那些行进缓存"的唯一途径是**请求它所在的那一页**（服务端会顺手补那一页）。
+  // ⇒ ⚠ **其余页的号永远不会被补** ⇒ 它们**永远**停在「正在读取…」。
+  //
+  // 实测（7864 冷启动 · loomy 44 个号 · 每页 25）：tasks 表 25 行里 **15 行 stale**，
+  // 而第 2 页的 19 个号**一次都没被请求过**（playwright 抓包里只有 `?page=1`）。
+  //
+  // ⚠ 必须**顺序**请求：补数要打上游（每个号 2 次），而实测 **12 条并发就 502**
+  //   （见 LAZY_MAX_INFLIGHT 的注释）。所以一个一个来，且页与页之间留一口气。
+  // ⚠ 用 warmedPages 防重复：切页/轮询都会调到这里，不防就会反复预热同一批。
+  const warmedPages = new Set();
+  // panelPageURL 拼「某一页」的请求地址；`force` 为真时带上 `refresh=1`。
+  //
+  // ⚠⚠ 为什么单独抽一个函数（2026-10-19）：tasks 与 invite 两个面板**逐字相同**，
+  //   文件里已经有一条注释记着这件事（「改一处要改两处」）。而这次要加的东西
+  //   —— `refresh=1` —— 正是"改一处要改两处"最容易漏的那种：
+  //   漏掉任何一处，那个面板的「刷新」按钮就**静默地**退回"读缓存"，
+  //   不报错、有请求、有回执，只是回执是旧的。
+  //   ⇒ 抽成一处，两边都只能从这里拿 URL。
+  //
+  // # 为什么是 `refresh=1`
+  //
+  // 后端 `?page=` 分支是**只读缓存、零上游请求**（刻意的：先出上次的数据）。
+  // 于是「刷新」按钮如果发同一个 URL，拿到的永远是同一份 JSON，
+  // 点多少次界面都不变 —— 用户的结论必然是"这按钮没用"。
+  // 后端新增了 `?refresh=1` 走真查，前端负责把它带上。
+  function panelPageURL(getPath, page, force) {
+    const sep = getPath.indexOf('?') >= 0 ? '&' : '?';
+    return getPath + sep + 'page=' + encodeURIComponent(String(page))
+      + (force ? '&refresh=1' : '');
+  }
+
+  // warmOtherPages 后台预热相邻页（它们只读缓存，几乎零成本）。
+  //
+  // ★ T-408③：**延迟 3 秒才预热**（原来 renderPage 一跑就预热）。
+  //
+  // # 为什么（实测）
+  // 首屏 49 个请求里有 /admin/loomy/tasks?page=2、/admin/loomy/invite?page=2
+  // —— 用户根本没打开那两个面板，预热纯属浪费（一次预热还要每页间隔 800ms 打后端）。
+  //
+  // # 为什么不是直接删掉
+  // 它的存在理由是对的：分页面板"其余页的号永远进不了缓存 ⇒ 永远停在正在读取"。
+  // **用户停留 ≥3 秒**能达到同样效果，而快速切面板时又不会白打。
+  const WARM_DWELL_MS = 3000;
+  let warmTimer = null;
+  function warmOtherPages(getPath, curPage, pages) {
+    if (!pages || pages <= 1) return;
+    if (warmedPages.has(getPath)) return;
+    // 面板切走时清掉（showPanel 会调 clearWarmTimer），避免"用户已经离开还在预热"
+    if (warmTimer) clearTimeout(warmTimer);
+    warmTimer = setTimeout(() => {
+      warmTimer = null;
+      if (warmedPages.has(getPath)) return;
+      warmedPages.add(getPath);
+      (async () => {
+        for (let n = 1; n <= pages; n++) {
+          if (n === curPage) continue;
+          try { await admin(getPath + '?page=' + encodeURIComponent(String(n))); }
+          catch (e) { /* 某一页失败不该影响其余页 */ }
+          // ⚠ 给后端一点时间把这一页的补数跑完，别把上游打急
+          await new Promise(r => setTimeout(r, 800));
+        }
+      })();
+    }, WARM_DWELL_MS);
+  }
+  // clearWarmTimer 面板切走时调用（停留不足 3 秒 ⇒ 不预热）。
+  function clearWarmTimer() {
+    if (warmTimer) { clearTimeout(warmTimer); warmTimer = null; }
+  }
+
+  function panelPageKey(providerId, cap) { return providerId + '/' + cap; }
+
+  // panelRowId 一行的 DOM id（刷新时按 id 定位替换）。
+  function panelRowId(cap, uid) { return 'lrow-' + cap + '-' + uid; }
+
+  // withRowId 给渲染出来的 `<tr>` 挂 id，好让后来的数据替换掉它。
+  function withRowId(html, cap, uid) {
+    return html.replace('<tr>', '<tr id="' + esc(panelRowId(cap, uid)) + '">');
+  }
+
+  // panelRowLoading 缓存未命中的行：只显示已知的 uid/昵称 + 「正在读取…」。
+  //
+  // ⚠ 与「查询失败」必须是**两种**显示：一个是"还没查"，一个是"查了但失败"。
+  // 混起来会让用户把一个正常的加载中当成坏号。
+  function panelRowLoading(cap, uid, nickname, cols) {
+    const cells = [
+      '<td class="mono dim">' + esc(uid) + '</td>',
+      '<td>' + esc(nickname || '—') + '</td>',
+    ];
+    for (let i = 2; i < cols; i++) cells.push('<td><span class="dim">正在读取…</span></td>');
+    return '<tr id="' + esc(panelRowId(cap, uid)) + '">' + cells.join('') + '</tr>';
+  }
+
+  // panelRowErr 查失败的行（列数用 colspan 吃掉，两个面板通用）。
+  function panelRowErr(cap, uid, nickname, msg) {
+    return '<tr id="' + esc(panelRowId(cap, uid)) + '">' +
+      '<td class="mono dim">' + esc(uid) + '</td>' +
+      '<td>' + esc(nickname || '—') + '</td>' +
+      '<td colspan="99"><span class="pill err" title="' + esc(msg) + '">查询失败</span></td>' +
+      '</tr>';
+  }
+
+  // panelLazyKey 一个面板的**令牌键**（共享层判活用；换页 / 离开页签时 bump）。
+  function panelLazyKey(providerId, cap) { return 'panel/' + providerId + '/' + cap; }
+
+  // panelCacheKey 一个面板**某一页**的缓存键。
+  function panelCacheKey(providerId, cap, page) {
+    return panelLazyKey(providerId, cap) + '/p' + Number(page || 1);
+  }
+
+  // lazyCachePutPage 把一页回执写进共享层缓存，并记下**数据**的时间戳。
+  //
+  // ⚠ 时间戳随值一起存（`__at`）：重画时不该再去解析一次字符串，
+  // 更不该拿"这次请求的时刻"冒充"数据的时间"（那会让「更新于 …」说谎）。
+  function lazyCachePutPage(cacheKey, d) {
+    const at = parseServerTime(d && d.updated_at);
+    const val = Object.assign({}, d || {}, { __at: at });
+    lazyCache.set(cacheKey, val, at);
+    return val;
+  }
+
+  // mergePageRows 把新到的一小撮行按 uid 合并进**这一页的缓存**。
+  //
+  // ⚠ 不整页替换：块只带回它自己那几行，整页替换会把还没补的行打回"还没查"。
+  function mergePageRows(cacheKey, rows, at) {
+    const cur = lazyCache.get(cacheKey);
+    if (!cur || !cur.val) return;
+    const byUID = new Map((rows || []).map(a => [a.uid, a]));
+    const val = Object.assign({}, cur.val);
+    val.accounts = (cur.val.accounts || []).map(a => byUID.get(a.uid) || a);
+    lazyCache.set(cacheKey, val, Math.max(cur.updatedAt, Number(at) || 0));
+  }
+
+  // panelChunkPath 一个块一条请求的路径。
+  //
+  // ⚠ **不再是"一行一条"**（`?uid=`）：前端自己叠并发正是回归的成因
+  // （见 LAZY_MAX_INFLIGHT 与 adminpoints.go 的 panelFillConcurrency）。
+  function panelChunkPath(getPath, chunk) {
+    const sep = getPath.indexOf('?') >= 0 ? '&' : '?';
+    return getPath + sep + 'uids=' + encodeURIComponent(chunk.join(','));
+  }
+
+  // panelPatch 把一块回执补齐成"这一块里每个 uid 都有一行"。
+  //
+  // ⚠ 为什么必须补齐：块里少一个 uid 而前端什么都不画，那一行就会**永远停在
+  // 「正在读取…」**（表现得像卡住）。补成 ok=false 才是实话 —— 而且它与
+  // 「还没查」仍然是**两种**显示（见共享层的坑 1）。
+  function panelPatch(chunk, accts, err) {
+    const byUID = new Map();
+    (accts || []).forEach(a => { if (a && a.uid) byUID.set(a.uid, a); });
+    return (chunk || []).map(uid => byUID.get(uid) ||
+      { uid: uid, ok: false, error: err || '后端没有返回这一行' });
+  }
+
+  // panelStopLazyOf 让某个**正在显示的面板**上跑着的那一轮懒加载停下来。
+  //
+  // 由 showPanel 在切走时调用（用户要求「离开页签即停」）：不叫停的话，
+  // 切走的那个面板会在后台把当页剩下的块全补完 —— 用户看不到，而上游被白打。
+  function panelStopLazyOf(sec) {
+    if (!sec || !sec.dataset || !sec.dataset.provider) return;
+    const pid = sec.dataset.provider;
+    if (sec.dataset.cap) { lazyCache.bump(panelLazyKey(pid, sec.dataset.cap)); return; }
+    for (const c of panelCapsOf(pid)) lazyCache.bump(panelLazyKey(pid, c));
+  }
+
+  // panelPagerHTML 分页条（单页时不显示按钮，只报总数）。
+  function panelPagerHTML(total, page, pages) {
+    if (pages <= 1) return '<span class="dim" style="font-size:12px">共 ' + total + ' 个账号</span>';
+    return '<span style="font-size:12px">共 ' + total + ' 个账号 · 第 ' + page + ' / ' + pages + ' 页</span>'
+      + ' <button data-lpage="prev" style="padding:2px 8px;font-size:12px">上一页</button>'
+      + ' <button data-lpage="next" style="padding:2px 8px;font-size:12px">下一页</button>';
+  }
+
+  // panelBindPager 给刚渲染出来的分页按钮挂事件。
+  //
+  // ⚠ 直接绑、不用委托：面板每次加载都会重建整块 DOM，旧节点连同监听器一起
+  // 被丢掉（不像"逐行绑账号行"那样线性泄漏）。但**必须**在 innerHTML 之后绑。
+  function panelBindPager(host, cap, page, pages, go) {
+    const box = host.querySelector('[data-lpager="' + cap + '"]');
+    if (box) box.innerHTML = panelPagerHTML(Number(box.dataset.ltotal) || 0, page, pages);
+    if (pages <= 1 || !box) return;
+    box.querySelectorAll('button[data-lpage]').forEach(b => {
+      b.addEventListener('click', () => {
+        const want = b.dataset.lpage === 'prev' ? page - 1 : page + 1;
+        const nextPage = Math.min(Math.max(1, want), pages);
+        if (nextPage !== page) go(nextPage);
+      });
+    });
+  }
+
+  // panelUpdatedHint 「更新于 … · 正在更新 n/m」。
+  //
+  // ⚠ 这句话是用户明确提出要的（"有一个提示，就是正在更新什么的"）：
+  // 不说清"这是旧数据"，用户会把缓存数据当成实时的。
+  function panelUpdatedHint(elId, updatedAt, done, total) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    let when = '';
+    if (updatedAt) {
+      const d = new Date(updatedAt);
+      if (!isNaN(d.getTime())) {
+        when = '更新于 ' + d.toLocaleTimeString('zh-CN', { hour12: false });
+      }
+    }
+    const tail = (total > 0 && done < total) ? '正在更新 ' + done + '/' + total + '…' : '';
+    el.textContent = [when, tail].filter(Boolean).join(' · ');
+  }
+
+  // SKELETON 两个面板共用的空态/骨架。
+  function panelSkeleton(providerId, cap) {
+    return document.getElementById(`pbody-${providerId}-${cap}`);
+  }
+
+  async function loadLoomyTasks(providerId, page, force) {
+    const host = panelSkeleton(providerId, 'tasks');
+    if (!host) return;
+    const getPath = adminRouteFor(providerId, 'tasks', 'GET');
+    if (!getPath) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游没有声明任务端点。</div>';
+      return;
+    }
+    const autoOne = adminRouteFor(providerId, 'tasks', 'POST');
+    // 全部账号那条是**另一条** POST 路由（同样能力位）——按路径后缀区分。
+    let autoAll = '';
+    for (const r of (MANIFEST.admin_routes || [])) {
+      if (r && r.provider === providerId && r.capability === 'tasks' &&
+          String(r.method).toUpperCase() === 'POST' && /auto-all$/.test(r.path)) {
+        autoAll = r.path;
+      }
+    }
+    const k = panelPageKey(providerId, 'tasks');
+    if (page == null) page = panelPageState[k] || 1;
+
+    // 共享层的两个键：**令牌键**（判活 / 叫停）与**页缓存键**（数据）。
+    const lazyKey = panelLazyKey(providerId, 'tasks');
+    let cacheKey = panelCacheKey(providerId, 'tasks', page);
+
+    // ── 状态先声明 ─────────────────────────────────────────────────────
+    //
+    // ⚠ 必须排在**缓存那一笔渲染之前**：下面的 ① 是本次调用里最早的渲染，
+    // 那时这些绑定若还在 TDZ 里，整块面板会直接抛异常（一片空白）。
+    let defs = [];
+    const sum = { earned: 0, max: 0, pending: 0 };
+    let totalN = 0, pagesNow = 1, serverAt = 0, stale = [];
+    const labelOf = (kk) => { const t = defs.find(x => x.key === kk); return t ? t.label : kk; };
+
+    const rowHTML = (a) => {
+      const pct = a.total ? Math.round((a.done / a.total) * 100) : 0;
+      const pending = (a.pending || []).map(kk =>
+        `<span class="pill dim" title="${esc(kk)}">${esc(labelOf(kk))}</span>`).join(' ');
+      // ⚠ 进度列**合成一行**（原来是 `8/8` 一行 + `100%` 另起一行 ⇒ 每行白多出约 20px，
+      //   一屏十几行就是半屏空白）。用户要求"高度也要紧凑" ⇒ 百分比改行内小字。
+      const st = `<span class="pill ${a.done >= a.total ? 'ok' : 'warn'}">${a.done}/${a.total}</span>`
+        + `<span class="dim" style="font-size:11px;margin-left:6px">${pct}%</span>`;
+      const btn = (a.pending && a.pending.length)
+        ? `<button data-ltask="${esc(a.uid)}" data-lpath="${esc(autoOne)}">一键完成（${a.pending.length}）</button>`
+        : '<span class="dim" style="font-size:11px">已全部完成</span>';
+      return `<tr>
+        <td class="mono dim">${esc(a.uid)}</td>
+        <td>${esc(a.nickname || '—')}</td>
+        <td>${st}</td>
+        <td class="mono">${esc(String(a.earned || 0))}/${esc(String(a.max || 0))}</td>
+        <td class="mono">${a.balance_known === false ? '<span class="dim">—</span>' : esc(String(a.balance ?? 0))}</td>
+        <td style="max-width:320px">${pending || '<span class="dim">—</span>'}</td>
+        <td style="white-space:nowrap">${btn}</td>
+      </tr>`;
+    };
+
+    const paintSum = (done, total) => {
+      const el = document.getElementById(`ltask-sum-${providerId}`);
+      if (el) {
+        el.textContent = `合计已得 ${sum.earned} / ${sum.max} 分 · 还有 ${sum.pending} 项待完成`;
+      }
+      panelUpdatedHint(`ltask-upd-${providerId}`, serverAt, done, total);
+    };
+
+    // renderPage 画一整页 —— **缓存与新鲜数据走同一条路**（这是"缓存优先"
+    // 能成立的前提：缓存里存的就是同一个回执形状）。
+    const renderPage = (d) => {
+      if (Array.isArray(d.defs) && d.defs.length) defs = d.defs;
+      const accts = Array.isArray(d.accounts) ? d.accounts : [];
+      pagesNow = Number(d.pages) || 1;
+      totalN = Number(d.total) || accts.length;
+      page = Number(d.page) || page;
+      panelPageState[k] = page;
+      serverAt = Number(d.__at) || serverAt;
+      // ⚠ 汇总**每次重画都从零重算**：只有真数据计入（占位行 stale 与失败行
+      // 都不计）。于是"刷新完成后的数字"就是"缓存数字 + 新到的数字"，不需要
+      // 再做一次减法（第一版在这里算错过：重复累加会得到翻倍的分数）。
+      sum.earned = 0; sum.max = 0; sum.pending = 0;
+      const body = accts.map(a => {
+        if (a.stale) return panelRowLoading('tasks', a.uid, a.nickname, 7);
+        if (!a.ok) return panelRowErr('tasks', a.uid, a.nickname, a.error || '查询失败');
+        sum.earned += (a.earned || 0);
+        sum.max += (a.max || 0);
+        sum.pending += (a.pending || []).length;
+        return withRowId(rowHTML(a), 'tasks', a.uid);
+      }).join('');
+      const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
+      <button data-ltask-all="${esc(providerId)}" data-lpath="${esc(autoAll)}">一键完成全部账号</button>
+      <span data-lpager="tasks" data-ltotal="${esc(String(totalN))}"></span>
+      <span class="dim" style="font-size:12px" id="ltask-sum-${esc(providerId)}"></span>
+      <span class="dim" style="font-size:11px" id="ltask-upd-${esc(providerId)}"></span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="dim" style="font-size:11px">任务是一次性的：点一次入账一次，已完成的不再重复发分</span>
+    </div>`;
+      host.innerHTML = head + `<table class="accttable"><thead><tr>
+      <th>UID</th><th>昵称</th><th>进度</th><th>已得积分</th><th>余额</th><th>待完成</th><th>操作</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+      hideEmptyCols(host.querySelector('table'));
+      panelBindPager(host, 'tasks', page, pagesNow, (n) => loadLoomyTasks(providerId, n));
+      stale = accts.filter(a => a.stale).map(a => a.uid).filter(Boolean);
+      paintSum(0, stale.length);
+    };
+
+    // ① 先画缓存（秒出）—— 打开页面 / 翻回上一页时**第一眼**就有数据。
+    const hit = lazyCache.get(cacheKey);
+    if (hit && hit.val) renderPage(hit.val);
+
+    // ② 再要一次"当页骨架"：服务端 `?page=` **只读缓存、零上游请求** ⇒ 瞬时。
+    //    它带回当页哪些行有缓存、哪些是占位（stale）。
+    let fresh = null;
+    try {
+      fresh = await admin(panelPageURL(getPath, page, force));
+    } catch (e) {
+      if (!hit) { host.innerHTML = `<div class="gbad">任务查询失败：${esc(e.message)}</div>`; return; }
+      // 有缓存就继续用缓存：一次"刷新失败"不该把已经显示出来的数据抹掉。
+    }
+    if (fresh) {
+      const p2 = Number(fresh.page) || page;
+      if (p2 !== page) { page = p2; cacheKey = panelCacheKey(providerId, 'tasks', page); }
+      renderPage(lazyCachePutPage(cacheKey, fresh));
+      // ⚠⚠ **预热其余页**（2026-10-18 加）—— 见 warmOtherPages 的注释：
+      // 打开面板只请求当页，而"其余页的号"永远进不了缓存 ⇒ 永远停在「正在读取…」。
+      warmOtherPages(getPath, page, pagesNow);
+    }
+
+    if (!totalN) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    if (!stale.length) return;
+
+    // ③ 懒加载当页缺的行 —— **一个块一条请求**（共享层；块内扇出在后端）。
+    //
+    // ⚠ 只补**占位行**：已经有过缓存的行不再重查，一次打开对上游只打一轮。
+    let doneN = 0;
+    lazyFill({
+      key: lazyKey,
+      host: host,
+      uids: stale,
+      fetchChunk: (chunk) => admin(panelChunkPath(getPath, chunk)),
+      onChunk: (res, err, chunk) => {
+        const accts = (res && Array.isArray(res.accounts)) ? res.accounts : [];
+        if (Array.isArray(res && res.defs) && res.defs.length) defs = res.defs;
+        const patch = panelPatch(chunk, accts, err);
+        // 先合并进缓存，再重画这一块 —— 顺序反了的话"重画那一刻缓存还是旧的"。
+        mergePageRows(cacheKey, patch, parseServerTime(res && res.updated_at));
+        for (const a of patch) {
+          const tr = document.getElementById(panelRowId('tasks', a.uid));
+          const html = a.ok ? withRowId(rowHTML(a), 'tasks', a.uid)
+                            : panelRowErr('tasks', a.uid, a.nickname, a.error || '查询失败');
+          if (tr) tr.outerHTML = html;
+          if (a.ok) {
+            sum.earned += (a.earned || 0);
+            sum.max += (a.max || 0);
+            sum.pending += (a.pending || []).length;
+          }
+        }
+        doneN += patch.length;
+        serverAt = Math.max(serverAt, parseServerTime(res && res.updated_at));
+        paintSum(doneN, stale.length);
+      },
+    });
+
+    // ⚠⚠ **补完之后还要把结果显示出来**（用户实测反馈：后端补好了、前端不自己同步）。
+    //
+    // 行替换只发生在"某一块回来"时；某块没回来，那一行就永远停在「正在读取…」。
+    // ⇒ 挂一个与"哪一块回来"无关的兜底：还有占位行就每 1.5 秒重读一次 `?page=`
+    //    （服务端只读缓存、零上游、毫秒级），把缓存里的新数据画出来。
+    // ⚠ **只读页、不重跑整个加载** —— 否则每拍换代令牌会把上面那个 lazyFill 判死，
+    //    补数就永远补不完了（这条是本文件里 `lazyFill` 的换代语义决定的）。
+    // ⚠ 两个面板（tasks / invite）这段代码逐字相同、变量名也同名，改一处要改两处。
+    schedulePanelPoll(lazyKey, host, () => stale.length, async () => {
+      const d = await admin(panelPageURL(getPath, page, force));
+      renderPage(lazyCachePutPage(cacheKey, d));
+    });
+  }
+  // colSet 决定这张表显示哪些列 —— 判据是**本页条目实际带有的字段**，不是上游名。
+  // 为什么必须字段驱动：同一张表要同时服务两种形状 —— loomy（codes/activated，面板内直接绑）
+  // 与 codar（my_code/invited/bind_page，要过人工验证 ⇒ 点绑定开弹窗）。
+  // 按 providerId 分支会让"加一个上游前端零改动"这条设计失效（有测试守着）。
+  // colSet 决定这张表显示哪些列 —— 判据是**本页条目实际带有的字段**，不是上游名。
+  // 为什么必须字段驱动：同一张表要同时服务两种形状 —— loomy（codes/activated，面板内直接绑）
+  // 与 codar（my_code/invited/bind_page，要过人工验证 ⇒ 点绑定开弹窗）。
+  // 按 providerId 分支会让"加一个上游前端零改动"这条设计失效（有测试守着）。
+  function colSet(accts) {
+    const has = (f) => (accts || []).some(a => a && a[f] !== undefined && a[f] !== null);
+    return { activated: has('activated'), invited: has('invited'), codes: has('codes'), myCode: has('my_code'), wechat: has('wechat_bound') };
+  }
+
+  // openPageModal / closePageModal —— 页内模态（T-358）。
+  // 为什么需要它：有些上游的"绑定邀请码"必须过**浏览器里的人工验证**（captcha 由官方组件产出，
+  // 后端造不出来）⇒ 它只能是一个页面。表格里给一个按钮，把那个页面嵌进模态即可。
+  // 关闭时把 src 置 about:blank：否则 iframe 里的轮询/定时器会继续跑（白烧请求）。
+  function openPageModal(title, src, pid) {
+    const m = $('pageModal');
+    if (!m) return;
+    const t = $('pageModalTitle');
+    if (t) t.textContent = title || '邀请码';
+    const f = $('pageModalFrame');
+    if (f) f.src = src;
+    if (pid) m.dataset.pid = pid;
+    m.style.display = 'flex';
+  }
+  function closePageModal() {
+    const m = $('pageModal');
+    if (!m) return;
+    m.style.display = 'none';
+    const f = $('pageModalFrame');
+    if (f) f.src = 'about:blank';
+    const pid = m.dataset.pid;
+    if (pid) { m.dataset.pid = ''; try { loadLoomyInvite(pid); } catch (e) {} }
+  }
+  // 三条关闭路径都走 closePageModal。用自包含监听、不改既有 #modal 的接线（登录弹窗那段被多个任务动过）。
+  // ⚠ 这两行必须在 colSet **之外**：否则它们会随每次渲染重新挂一遍（监听器泄漏 + closePageModal 重复执行）。
+  document.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t) return;
+    if (t.id === 'pageModalClose') { closePageModal(); return; }
+    if (t.id === 'pageModal') { closePageModal(); }
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    const pm = $('pageModal');
+    if (pm && pm.style.display === 'flex') closePageModal();
+    // ★ T-373：导航顺序弹窗同样能 Esc 关（与上面同款写法）。
+    const nm = $('navOrderModal');
+    if (nm && nm.style.display === 'flex') closeNavOrderModal();
+  });
+
+
+  // ── 导航顺序（T-373）────────────────────────────────────────────────
+  //
+  // 两组各自独立排序、各自独立持久化：
+  //   · 通用组（仪表盘 / 系统状态 / 渠道 / …）—— 主目标
+  //   · 上游分组（workbuddy-intl / …）—— 次目标
+  //
+  // ⚠ 为什么另起 orderedUpstreamGroups() / orderedGenericSections()，而不是改 upstreamGroups() 本身：
+  //   upstreamGroups() 另有两个消费者用于**生成上游面板**，且那边按数组逐位比较
+  //   （have[i] === want[i]）⇒ 顺序一变就会每次调序都全量重生成面板。
+  //   ⇒ 排序只叠加在 buildNav 一处。
+  const LS_NAVORDER_GENERIC = 'wb2api.navorder.generic';
+  // ⚠ T-378 起只有「通用」组可调 ⇒ 键只有一把（上游那份已废弃、由 migrateNavOrder 清掉）。
+  function navOrderKey(kind) { return LS_NAVORDER_GENERIC; }
+  // readNavOrder 读用户保存的顺序：非法 JSON / 非数组 / 元素非字符串 ⇒ 当 []（不抛）。
+  // 隐私模式下 localStorage 会抛 ⇒ 吞掉退回默认顺序（与折叠状态同款写法）。
+  function readNavOrder(kind) {
+    try {
+      const v = JSON.parse(localStorage.getItem(navOrderKey(kind)) || '[]');
+      return Array.isArray(v) ? v.filter(x => typeof x === 'string' && x) : [];
+    } catch (e) { return []; }
+  }
+  function writeNavOrder(kind, ids) {
+    try { localStorage.setItem(navOrderKey(kind), JSON.stringify(ids || [])); } catch (e) {}
+  }
+  function clearNavOrder() {
+    try { localStorage.removeItem(LS_NAVORDER_GENERIC); } catch (e) {}
+  }
+  // migrateNavOrder 清掉历史遗留的 upstream 顺序键（T-378 起上游固定字母序，这个键不再被读）。
+  function migrateNavOrder() { try { localStorage.removeItem('wb2api.navorder.upstream'); } catch (e) {} }
+  // NAV_ORDER_DEFAULT 「通用」组的**出厂默认顺序**（用户指定，T-380）。
+  //
+  // # 为什么要有这一份（而不是"没保存就用 DOM 顺序"）
+  //
+  // HTML 里 section 的 DOM 顺序是**按实现方便**排的（tokens 在 accounts 之前、
+  // channels 在 status 之前…），它从来没有被当作"给用户看的顺序"设计过。
+  // 用户看图指定了这 11 项的实际顺序 ⇒ 把它固化成一张显式清单，
+  // 这样"默认顺序"是一个**可读的事实**，而不是"碰巧取决于 HTML 排版"。
+  //
+  // ⚠ 清单里没有的 key（将来新增的面板）→ 排在最后、彼此保持 DOM 原序 ⇒ 不会消失。
+  // ⚠ 清单里有但页面没有的 key（下游部署裁掉了某个面板）→ 自然被忽略（Map 里有、list 里没有）。
+  const NAV_ORDER_DEFAULT = [
+    'dashboard',   // 仪表盘
+    'accounts',    // 账号池
+    'status',      // 系统状态
+    'channels',    // 渠道
+    'groups',      // 分组
+    'tokens',      // 令牌
+    'jobs',        // 任务调度
+    'logs',        // 请求日志
+    'modelcatalog',// 模型目录
+    'chat',        // 对话测试
+    'settings',    // 设置
+  ];
+  // orderedGenericSections 按「用户保存的顺序」重排「通用」组；没有保存过就用 NAV_ORDER_DEFAULT。
+  // 键用 navKey(sec)（data-key 优先，其次 'g:'+标签）—— 与面板恢复用的是同一套标识。
+  // ⚠ 不能按下标：下标会随面板增删漂移（加一个上游面板就全错位）。
+  // 没排过的项排最后、彼此保持 DOM 原序 ⇒ 顺序稳定。
+  function orderedGenericSections(list) {
+    const saved = readNavOrder('generic');
+    // 没保存过 ⇒ 用出厂默认；保存过 ⇒ 用用户的（默认清单此时**不参与**，
+    // 否则用户把某项挪走后、默认清单里剩下的项会插到它前面，看起来像"顺序乱跳"）。
+    const order = saved.length ? saved : NAV_ORDER_DEFAULT;
+    const rank = new Map();
+    order.forEach((k, i) => { if (!rank.has(k)) rank.set(k, i); });
+    return list.map((s, i) => ({ s: s, i: i }))
+      .sort((a, b) => {
+        const ra = rank.has(navKey(a.s)) ? rank.get(navKey(a.s)) : Infinity;
+        const rb = rank.has(navKey(b.s)) ? rank.get(navKey(b.s)) : Infinity;
+        if (ra !== rb) return ra < rb ? -1 : 1;
+        return a.i - b.i;
+      }).map(x => x.s);
+  }
+  // orderedUpstreamGroups 上游分组的顺序：**固定按 provider id 字母序**（T-378）。
+  //
+  // # 为什么不再让用户调：上游数量随部署变化（加一个上游就要重排一次），
+  // 而用户对上游的先后没有稳定偏好 —— 真正按使用习惯排的是「通用」组。
+  // 字母序可预测：找某个上游按名字扫一遍即可。⚠ 函数名保留（语义已变）。
+  function orderedUpstreamGroups() {
+    return upstreamGroups().slice().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+  // T-378：只服务「通用」组（上游固定字母序，不再进这个弹窗）。
+  function navOrderListFor(kind) {
+    return orderedGenericSections(navSections.filter(sec => sec && !sec.dataset.provider));
+  }
+  function navOrderIds(kind) {
+    return navOrderListFor(kind).map(x => (kind === 'generic' ? navKey(x) : x.id));
+  }
+  function navOrderLabel(kind, item) {
+    if (kind !== 'generic') return providerTitle(item.id) || item.id;
+    const h2 = item.querySelector ? item.querySelector('h2') : null;
+    const txt = h2 && h2.firstChild ? String(h2.firstChild.textContent || '').trim() : '';
+    return txt || navKey(item);
+  }
+  // renderNavOrderList 两段各按**当前生效顺序**画（不是 DOM 原序）——
+  // 否则用户点开看到的和左边不一致，会以为没生效。
+  function renderNavOrderList() {
+    // T-378：上游段已移除 ⇒ 只画「通用」这一段。
+    ['generic'].forEach(kind => {
+      // T-378：上游段已移除 ⇒ 只画「通用」这一段。
+      const box = $('navOrderGeneric');
+      if (!box) return;
+      const list = navOrderListFor(kind);
+      if (!list.length) { box.innerHTML = ''; return; }
+      const ids = navOrderIds(kind);
+      const title = '通用（' + list.length + ' 项，可调）';
+      box.innerHTML = `<div class="dim" style="font-size:12px;margin:6px 0 4px">${esc(title)}</div>` + list.map((it, i) => `<div class="row" style="align-items:center;gap:6px;padding:2px 0">
+        <span class="mono dim" style="width:1.8em;text-align:right">${i + 1}</span>
+        <span style="flex:1">${esc(navOrderLabel(kind, it))}</span>
+        <button data-navorder-up="${esc(ids[i])}" data-navorder-kind="${kind}" ${i === 0 ? 'disabled' : ''} title="上移">▲</button>
+        <button data-navorder-down="${esc(ids[i])}" data-navorder-kind="${kind}" ${i === list.length - 1 ? 'disabled' : ''} title="下移">▼</button>
+      </div>`).join('');
+    });
+  }
+  function openNavOrderModal() {
+    const m = $('navOrderModal');
+    if (!m) return;
+    renderNavOrderList();
+    m.style.display = 'flex';
+  }
+  function closeNavOrderModal() {
+    const m = $('navOrderModal');
+    if (m) m.style.display = 'none';
+    buildNav();   // 收口一次（▲▼ 已实时保存，这里只保证侧栏与数据一致）
+  }
+  // moveNavOrder 交换相邻两项 ⇒ 立刻保存 + 立刻重画侧栏（实时预览）。
+  function moveNavOrder(kind, key, delta) {
+    const ids = navOrderIds(kind);
+    const i = ids.indexOf(key);
+    if (i < 0) return;
+    const j = i + delta;
+    if (j < 0 || j >= ids.length) return;
+    const tmp = ids[i]; ids[i] = ids[j]; ids[j] = tmp;
+    writeNavOrder(kind, ids);
+    buildNav();
+    renderNavOrderList();
+    // ⚠ 必须同时刷新设置页那行提示：用户是在设置页点开的弹窗，
+    //   不改的话关掉弹窗回来看到的还是「当前为默认顺序」（实测漏过一次）。
+    paintNavOrderHint();
+  }
+  // 导航顺序的两个入口都在**设置页**（T-379）。
+  //
+  // 为什么不放侧栏底部：那里只有 168px 宽，再挤一行按钮会让侧栏更窄；
+  // 而且侧栏内容长时按钮会被推到视口外、必须滚动才看得到 ——
+  // 它是**低频设置**（排一次就一直用），不是高频入口，放设置页更合适。
+  // 弹窗本体 #navOrderModal 仍是全局浮层（在 </main> 之外）。
+  if ($('btnNavOrder')) $('btnNavOrder').addEventListener('click', openNavOrderModal);
+  if ($('btnNavOrderReset')) {
+    $('btnNavOrderReset').addEventListener('click', () => { resetNavOrder(); });
+  }
+  // paintNavOrderHint 在设置页那一行右侧显示"当前是否有自定义顺序"。
+  // 为什么要它：用户在设置页看不到左侧导航，不写一句就不知道现在是不是默认顺序。
+  function paintNavOrderHint() {
+    const el = $('navOrderHint');
+    if (!el) return;
+    const n = readNavOrder('generic').length;
+    el.textContent = n ? `已自定义（${n} 项）` : '当前为默认顺序';
+  }
+  // resetNavOrder 清自定义顺序 + 重画侧栏 + 刷新设置页提示。
+  // 弹窗里的「恢复默认」与设置页的「恢复默认顺序」走同一个函数（只有一处逻辑）。
+  function resetNavOrder() {
+    clearNavOrder();
+    buildNav();
+    renderNavOrderList();
+    paintNavOrderHint();
+  }
+  paintNavOrderHint();
+  document.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t) return;
+    if (t.id === 'navOrderClose' || t.id === 'navOrderDone') { closeNavOrderModal(); return; }
+    if (t.id === 'navOrderModal') { closeNavOrderModal(); return; }   // 点遮罩
+    if (t.id === 'navOrderReset') { resetNavOrder(); return; }
+    const up = t.closest ? t.closest('button[data-navorder-up]') : null;
+    if (up && !up.disabled) { moveNavOrder(up.dataset.navorderKind, up.dataset.navorderUp, -1); return; }
+    const dn = t.closest ? t.closest('button[data-navorder-down]') : null;
+    if (dn && !dn.disabled) { moveNavOrder(dn.dataset.navorderKind, dn.dataset.navorderDown, 1); return; }
+  });
+  async function loadLoomyInvite(providerId, page, force) {
+    // ★ 列集与外层持有：onChunk（懒加载补行）是闭包，必须用**与本次渲染同一份** cols ——
+    //   在那里重新 colSet(那一行) 会得到另一份数据（而且那一行可能还没有 accounts）。
+    const host = panelSkeleton(providerId, 'invite');
+    if (!host) return;
+    let inviteCols = null;
+    // colCountOf 由列集算列数：占位行的 colspan 必须跟着列数走（列数是动态的 3~8）。
+    function colCountOf(c) {
+      if (!c) return 6; // 还没渲染过：给个保守值（避免 colspan=undefined）
+      return 4 + (c.activated ? 1 : 0) + (c.invited ? 1 : 0) + (c.codes ? 1 : 0) + (c.myCode ? 1 : 0);
+    }
+    const getPath = adminRouteFor(providerId, 'invite', 'GET');
+    if (!getPath) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游没有声明邀请码端点。</div>';
+      return;
+    }
+    // ⚠ 必须按**后缀**找绑定路由，不能 adminRouteFor(…, 'POST')！
+    // 该上游有两个 CapInvite+POST 路由：/invite/bind 与 /import，而
+    // adminRouteFor 取**第一条匹配** → 返回 /import —— 于是点「绑定」把
+    // {uid,code} 发到了导入接口：2xx + 无 ok/error 字段 → 前端显示
+    // "绑定失败：未知原因"，后端绑定链路根本没被调用（实测抓包定位）。
+    const bindPath = adminRouteBySuffix(providerId, 'POST', '/bind');
+
+    // 重绘前**先存下**用户已经敲进去的邀请码 —— 见下面 rowHTML 里 value= 的用法。
+    const keep = {};
+    host.querySelectorAll('input[data-linvite-code]').forEach(i => {
+      if (i.value) keep[i.dataset.linviteCode] = i.value;
+    });
+
+    const k = panelPageKey(providerId, 'invite');
+    if (page == null) page = panelPageState[k] || 1;
+
+    // 共享层的两个键（见 loadLoomyTasks 里的同一说明）。
+    const lazyKey = panelLazyKey(providerId, 'invite');
+    let cacheKey = panelCacheKey(providerId, 'invite', page);
+
+    // ⚠ 状态先声明：① 的缓存渲染是本次调用里最早的一次渲染（TDZ 会炸整块面板）。
+    const sum = { activated: 0, known: 0 };
+    let totalN = 0, pagesNow = 1, serverAt = 0, stale = [];
+
+    // rowHTML **字段驱动**：同一张表同时画 loomy（codes/activated）与 codar（my_code/invited/bind_page）。
+    // 显隐判据全在 `cols`（由 colSet 按"本页有没有该字段"算出），**不认上游名** ——
+    // 这是"加一个上游前端零改动"的前提（TestWebUIHasNoUpstreamNameBranch 守着这条）。
+    const rowHTML = (a, cols) => {
+      const st = a.activated
+        ? `<span class="pill ok">已绑定${a.applied ? ' ' + esc(a.applied) : ''}</span>`
+        : '<span class="pill warn">未绑定</span>';
+      // ★ T-369：三态 —— `=== false` = "这次没查到"（客户端拿不到就不该猜；ok=true 缺字段是**正常**的）。
+      // ⚠ 必须写 `=== false`：loomy 的老响应没有 invited_known 字段，用 !v 会把它们全变成 —。
+      const invitedPill = a.invited_known === false
+        ? '<span class="dim" title="这次没查到邀请状态">—</span>'
+        : (a.invited === true
+          ? `<span class="pill ok">已绑定${a.invited_message ? ' · ' + esc(a.invited_message) : ''}</span>`
+          : '<span class="pill warn">未绑定</span>');
+      const codes = (a.codes && a.codes.length)
+        ? a.codes.map(c => {
+            // 状态来自后端透传的上游字段：exhausted = 已被别人绑掉（maxUses=1 的常态）。
+            const used = (c.status === 'exhausted') ||
+              (Number(c.maxUses) > 0 && Number(c.usedCount) >= Number(c.maxUses));
+            const tip = `用过 ${c.usedCount}/${c.maxUses}` + (c.status ? ` · ${c.status}` : '');
+            return `<span class="pill ${used ? 'dim' : 'ok'} mono" title="${esc(tip)}">${esc(c.code)}</span>`;
+          }).join(' ')
+        : '<span class="dim">—</span>';
+      const myCode = a.my_code
+        ? `<span class="pill mono">${esc(String(a.my_code))}</span>` +
+          (a.my_link ? ` <a href="${esc(String(a.my_link))}" target="_blank" rel="noreferrer" style="margin-left:6px;font-size:12px">邀请链接</a>` : '')
+        : '<span class="dim">—</span>';
+      // 微信列（T-365②）：三态 + **恒在**的入口 —— 已绑定也给「查看」（用户要核对状态；
+      //   与 T-362 的「查看」同一条理由）。未绑微信的账号，邀请奖励（2000 点）不会入账。
+      let wechatCell = '<span class="dim">—</span>';
+      if (a.wechat_bound_known !== false) {
+        const wbtn = a.wechat_page
+          ? ` <button data-wechat-page="${esc(String(a.wechat_page))}" data-wechat-page-uid="${esc(a.uid)}">${a.wechat_bound === true ? '查看' : '扫码绑定'}</button>`
+          : '';
+        wechatCell = (a.wechat_bound === true ? '<span class="pill ok">已绑定</span>' : '<span class="pill warn">未绑定</span>') + wbtn;
+      }
+      // 绑定位按条目**实际有什么**给入口，而不是按上游：
+      //   · 有 codes 且未绑定 ⇒ 面板内直接绑（loomy 型，无 captcha）
+      //   · 有 bind_page 且未被邀请 ⇒ 按钮开页内模态（codar 型，要过人工验证）
+      //   · 已绑过（activated / invited 为真）⇒ 一条破折号，绝不画点了必然失败的按钮
+      const ownCodes = (a.codes || []).map(c => c.code).join(',');
+      let ops = '<span class="dim" style="font-size:11px">—</span>';
+      if (cols.codes && a.activated !== true && Array.isArray(a.codes)) {
+        ops = `<input data-linvite-code="${esc(a.uid)}" data-own="${esc(ownCodes)}" maxlength="16" placeholder="6 位邀请码"
+             value="${esc(keep[a.uid] || '')}"
+             style="width:110px;padding:2px 6px;font-size:12px;text-transform:uppercase"
+             title="实测 6 位（形如 E3HRN8）">
+           <button data-linvite-bind="${esc(a.uid)}" data-lpath="${esc(bindPath)}">绑定</button>`;
+      } else if (a.bind_page && a.invited !== true) {
+        ops = `<input data-linvite-code="${esc(a.uid)}" maxlength="16" placeholder="6 位邀请码"
+             value="${esc(keep[a.uid] || '')}"
+             style="width:110px;padding:2px 6px;font-size:12px;text-transform:uppercase"
+             title="需要过人工验证：点「绑定」后在弹窗里完成">
+           <button data-linvite-page="${esc(String(a.bind_page))}" data-linvite-page-uid="${esc(a.uid)}">绑定</button>`;
+      } else if (a.bind_page) {
+        // ★ T-362：**已绑定也要给入口** —— "已绑定"是上游状态，会随时间变化（注册时没被邀请、
+        //   事后绑定 ⇒ invited 由 false 变 true）。若按"能不能绑"决定显隐，用户就**再也打不开邀请页**，
+        //   而他正是要核对自己的绑定状态与邀请记录 ⇒ **入口恒在**，只有可提交的输入框按状态显隐。
+        ops = `<span class="dim" style="font-size:11px">已绑定</span>` +
+             ` <button data-linvite-view="${esc(String(a.bind_page))}" data-linvite-view-uid="${esc(a.uid)}" title="查看该账号的邀请页（含绑定状态与邀请记录）">查看</button>`;
+      }
+      return `<tr>
+        <td class="mono dim">${esc(a.uid)}</td>
+        <td>${esc(a.nickname || '—')}</td>
+        ${cols.activated ? `<td>${st}</td>` : ''}
+        ${cols.invited ? `<td>${invitedPill}</td>` : ''}
+        <td class="mono">${a.balance_known === false ? '<span class="dim">—</span>' : esc(String(a.balance ?? 0)) + (a.balance_partial === true ? '<span class="dim" style="font-size:11px;margin-left:4px" title="只取到部分桶（general/rewrite 未取到），实际额度可能更高">部分</span>' : '')}</td>
+        ${cols.codes ? `<td>${codes}</td>` : ''}
+        ${cols.myCode ? `<td>${myCode}</td>` : ''}
+        ${cols.wechat ? `<td>${wechatCell}</td>` : ''}
+        <td style="white-space:nowrap">${ops}${a.warning ? `<span class="dim" style="font-size:11px;display:block;margin-top:2px" title="${esc(String(a.warning))}">部分数据缺失</span>` : ''}</td>
+      </tr>`;
+    };
+
+    const paintSum = (done, total) => {
+      const el = document.getElementById(`linv-sum-${providerId}`);
+      if (el) {
+        el.textContent = `共 ${totalN} 个账号 · 已读 ${sum.known} · 已绑定 ${sum.activated}`;
+      }
+      panelUpdatedHint(`linv-upd-${providerId}`, serverAt, done, total);
+    };
+
+    // renderPage 画一整页（缓存与新鲜数据同一条路，见 loadLoomyTasks 的同一说明）。
+    const renderPage = (d) => {
+      // ⚠ 本行在 T-358 被误删过：少了它 renderPage 一进来就 ReferenceError（整个面板白屏）。
+      const accts = Array.isArray(d.accounts) ? d.accounts : [];
+      const cols = colSet(accts);
+      inviteCols = cols; // 提到外层：懒加载补行（onChunk）要用同一份，不许重算
+      pagesNow = Number(d.pages) || 1;
+      totalN = Number(d.total) || accts.length;
+      page = Number(d.page) || page;
+      panelPageState[k] = page;
+      serverAt = Number(d.__at) || serverAt;
+      // 汇总每次重画从零重算：只有真数据计入（占位行不计 —— 算进"未绑定"
+      // 会让界面在刷新的那几秒里显示一个假的"未绑定 N"，随后又跳变）。
+      sum.known = 0; sum.activated = 0;
+      const body = accts.map(a => {
+        if (a.stale) return panelRowLoading('invite', a.uid, a.nickname, colCountOf(inviteCols));
+        if (!a.ok) return panelRowErr('invite', a.uid, a.nickname, a.error || '查询失败');
+        sum.known++;
+        if (a.activated) sum.activated++;
+        return withRowId(rowHTML(a, cols), 'invite', a.uid);
+      }).join('');
+      // ⚠ 这一行是 head 模板的起始（含反引号）—— 任何"替换那一行"的编辑都必须把它一起带上（我踩过两次 ✗）。
+      const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
+      <span class="dim" style="font-size:11px">表格按字段显示：「我生成的码」是发给**别人**用的（每码一次）；需要人工验证的上游，点「绑定」会在弹窗里完成；已绑定的账号可点「查看」打开邀请页；未绑微信的账号，邀请奖励（2000 点）不会入账 —— 点「扫码绑定」用微信扫；某一行出现「部分数据缺失」表示那次查询有步骤超时，码与可操作项仍然有效；余额后的「部分」表示只取到部分额度桶。</span>
+      <span data-lpager="invite" data-ltotal="${esc(String(totalN))}"></span>
+      <span class="dim" style="font-size:12px" id="linv-sum-${esc(providerId)}"></span>
+      <span class="dim" style="font-size:11px" id="linv-upd-${esc(providerId)}"></span>
+      <span class="spacer" style="flex:1"></span>
+    </div>`;
+      host.innerHTML = head + `<table class="accttable"><thead><tr>
+      <th>UID</th><th>昵称</th>${cols.activated ? '<th>激活状态</th>' : ''}${cols.invited ? '<th>绑定状态</th>' : ''}<th>余额</th>${cols.codes ? '<th>我生成的码</th>' : ''}${cols.myCode ? '<th>我的邀请码</th>' : ''}${cols.wechat ? '<th>微信</th>' : ''}<th>绑定别人的码</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+      hideEmptyCols(host.querySelector('table'));
+      panelBindPager(host, 'invite', page, pagesNow, (n) => loadLoomyInvite(providerId, n));
+      stale = accts.filter(a => a.stale).map(a => a.uid).filter(Boolean);
+      paintSum(0, stale.length);
+    };
+
+    // ① 先画缓存（秒出）。
+    const hit = lazyCache.get(cacheKey);
+    if (hit && hit.val) renderPage(hit.val);
+
+    // ② 再要一次"当页骨架"（服务端只读缓存 ⇒ 零上游、瞬时）。
+    let fresh = null;
+    try {
+      fresh = await admin(panelPageURL(getPath, page, force));
+    } catch (e) {
+      if (!hit) { host.innerHTML = `<div class="gbad">邀请码查询失败：${esc(e.message)}</div>`; return; }
+    }
+    if (fresh) {
+      const p2 = Number(fresh.page) || page;
+      if (p2 !== page) { page = p2; cacheKey = panelCacheKey(providerId, 'invite', page); }
+      renderPage(lazyCachePutPage(cacheKey, fresh));
+      // ⚠⚠ **预热其余页**（2026-10-18 加）—— 见 warmOtherPages 的注释：
+      // 打开面板只请求当页，而"其余页的号"永远进不了缓存 ⇒ 永远停在「正在读取…」。
+      warmOtherPages(getPath, page, pagesNow);
+    }
+
+    if (!totalN) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该上游还没有账号。先在「账号池」里添加。</div>';
+      return;
+    }
+    if (!stale.length) return;
+
+    // ③ 懒加载当页缺的行 —— **一个块一条请求**（共享层）。
+    let doneN = 0;
+    lazyFill({
+      key: lazyKey,
+      host: host,
+      uids: stale,
+      fetchChunk: (chunk) => admin(panelChunkPath(getPath, chunk)),
+      onChunk: (res, err, chunk) => {
+        const accts = (res && Array.isArray(res.accounts)) ? res.accounts : [];
+        const patch = panelPatch(chunk, accts, err);
+        mergePageRows(cacheKey, patch, parseServerTime(res && res.updated_at));
+        for (const a of patch) {
+          const tr = document.getElementById(panelRowId('invite', a.uid));
+          const html = a.ok ? withRowId(rowHTML(a, inviteCols), 'invite', a.uid)
+                            : panelRowErr('invite', a.uid, a.nickname, a.error || '查询失败');
+          if (tr) tr.outerHTML = html;
+          if (a.ok) {
+            sum.known++;
+            if (a.activated) sum.activated++;
+          }
+        }
+        doneN += patch.length;
+        serverAt = Math.max(serverAt, parseServerTime(res && res.updated_at));
+        paintSum(doneN, stale.length);
+      },
+    });
+
+    // ⚠⚠ **补完之后还要把结果显示出来**（用户实测反馈：后端补好了、前端不自己同步）。
+    //
+    // 行替换只发生在"某一块回来"时；某块没回来，那一行就永远停在「正在读取…」。
+    // ⇒ 挂一个与"哪一块回来"无关的兜底：还有占位行就每 1.5 秒重读一次 `?page=`
+    //    （服务端只读缓存、零上游、毫秒级），把缓存里的新数据画出来。
+    // ⚠ **只读页、不重跑整个加载** —— 否则每拍换代令牌会把上面那个 lazyFill 判死，
+    //    补数就永远补不完了（这条是本文件里 `lazyFill` 的换代语义决定的）。
+    // ⚠ 两个面板（tasks / invite）这段代码逐字相同、变量名也同名，改一处要改两处。
+    schedulePanelPoll(lazyKey, host, () => stale.length, async () => {
+      const d = await admin(panelPageURL(getPath, page, force));
+      renderPage(lazyCachePutPage(cacheKey, d));
+    });
+  }
+
+  // loadGenericList 通用的"上游列表"渲染。
+  //
+  // # 设计原则（对应用户决策）
+  //
+  // 「看上游有哪些服务，通用列表 + 领取渲染就行」—— 所以这里**不猜字段名**：
+  // 它把上游返回的 JSON 当成"一组条目"，每条渲染成一行，
+  // 能识别的字段（标题、数量、是否可领）用语义化展示，
+  // 认不出来的原样列出。这样新增上游不需要改前端。
+  async function loadGenericList(providerId, cap, force) {
+    const host = document.getElementById(`pbody-${providerId}-${cap}`);
+    if (!host) return;
+    // 面板入口可能有多条 GET 路由（如 codearts 的 welfare 有
+    // /admin/welfare 与 /admin/subscription）。全部拉取并依序渲染。
+    const routes = routesFor(providerId, cap);
+    if (!routes.length) {
+      host.innerHTML = '<div class="dim" style="font-size:12px">该能力没有可读端点。</div>';
+      return;
+    }
+
+    // ⚠⚠ 2026-10-19：`force` 要一路透到 URL 上，变成 `?refresh=1`。
+    //
+    // 用户的原话是「为什么刷新了这些还没有？」。排查结果：这一层原来是**断的** ——
+    // 「刷新」按钮确实重发了 HTTP，但发的是和首次加载**完全相同**的 URL，
+    // 而这个 URL 命中的是后端"只读缓存、零上游请求"的那条分支：
+    //
+    //     /admin/loomy/invite?page=1           170ms   from_cache=true   ← 刷新走的
+    //     /admin/loomy/invite?page=1&refresh=1  17110ms from_cache=false  ← 真查上游
+    //
+    // ⇒ 两条路拿到的数据天差地别（实测：余额未知 5 行 → **0 行**，有码 23 行 → **25 行**），
+    //   而前者会**原样**还你一份和上次一样的 JSON —— 点多少次都不会变。
+    //   所以按钮"是活的"但**语义上是死的**，用户的感觉完全正确。
+    //
+    // ⚠ 后端对不认识 `refresh` 的端点会直接忽略这个参数，所以对**所有**面板统一加它
+    //   是安全的（不需要前端知道哪个上游认它）。
+    const withRefresh = (p) => force
+      ? p + (p.indexOf('?') >= 0 ? '&' : '?') + 'refresh=1'
+      : p;
+
+    // ── 走共享层：**缓存优先 + 分块懒加载** ─────────────────────────────
+    //
+    // 这里的"块"就是**一条端点**：它不是按行分页的表，而是几条独立回执拼成的
+    // 一块面板。每条回来只重画它自己那一格 —— 与两个 loomy 面板同一套语义：
+    // 先出能出的（有缓存立刻出），剩下的低并发慢慢补。
+    const cacheKey = 'generic/' + providerId + '/' + cap;
+    const cacheVal = lazyCache.get(cacheKey);
+    const parts = routes.map((r, i) => {
+      if (cacheVal && cacheVal.val && cacheVal.val[i]) return cacheVal.val[i];
+      return '<div class="dim" style="font-size:12px">正在读取…</div>';
+    });
+    const paint = () => {
+      host.innerHTML = parts.join('');
+      lazyCache.set(cacheKey, parts.slice());
+    };
+    if (cacheVal) paint();   // ① 先画缓存（秒出）
+
+    // ② 分块补：每块 = 一条端点（共享层负责低并发与「离开页签即停」）。
+    lazyFill({
+      key: cacheKey,
+      host: host,
+      chunks: routes.map((r, i) => [i]),
+      fetchChunk: (chunk) => admin(withRefresh(routes[chunk[0]].path)),
+      onChunk: (res, err, chunk) => {
+        const r = routes[chunk[0]];
+        parts[chunk[0]] = err
+          ? `<div class="gbad">${esc(r.title || r.path)}：${esc(err)}</div>`
+          : renderGenericBlock(r, res, providerId);
+        paint();   // ③ 每块回来即重画
+      },
+    });
+    // 不再在这里绑事件（评审 F2：那会导致监听器随刷新线性增长）。
+    // 通用面板的动作委托在 installGenericActions() 里绑到 #content 上，
+    // 全生命周期只绑一次 —— 见那里的注释。
+  }
+
+  // renderGenericBlock 渲染一条上游端点的响应。
+  //
+  // 识别三种常见形状：
+  //   1. {items:[...]} 或 [...]  → 条目列表
+  //   2. {key: scalar, ...}      → 键值对
+  //   3. 未知                    → 原样 JSON（不隐藏信息）
+  // 中文字段名映射（U2）。
+  //
+  // # 原则：查得到就给中文，查不到**保留原 key**
+  //
+  // 凭空意译比显示英文更糟 —— 用户看到"积分余量"却不知道对应上游哪个字段时，
+  // 排障会变难。所以这是一张**只增不改**的对照表，未命中一律原样显示。
+  //
+  // # ⚠ T4 的判断：「积分」在这里**不改成「额度」**（与界面文案的处理不同）
+  //
+  // 这一组 `CreditTotal / CreditRemain / CreditUsed / CreditExpiring /
+  // is_credit_package` 的左边是 **codearts API 的真实字段名**，右边是它的中文注释。
+  // 它不是界面用语，是一张**字段对照表**。
+  //
+  // 判据（三条，缺一不可）：
+  //   1. **右边对着左边**：`CreditRemain` → 「积分余额」是"这个字段叫什么"的翻译。
+  //      `Credit` 在华为云 CodeArts 的契约里就是积分（Credit），不是我们的额度概念。
+  //   2. **左边是上游契约**：`CreditTotal` 等是 `/admin/subscription` 回执里
+  //      真实存在的 key（实测 2026-09-13：`"CreditRemain": 7474.04`）。
+  //      改了右边而不改左边，这张表就从"字段对照"退化成"半截翻译"——
+  //      用户拿 `CreditRemain` 去对上游文档会对不上。
+  //   3. **它与「额度」不是同一个量**：这一栏显示的是**套餐级**的
+  //      总额/余额/已用/即将过期四个数（一个套餐对象的展开），
+  //      而 T4 统一的「额度」是账号池那一列的**单值**（`quota.remaining`）。
+  //      把它们用同一个词会**制造**混乱：用户会以为"额度 7474"和
+  //      「积分余额 7474.04」是两笔钱（其实同一个数，但口径一个是整数一个是小数）。
+  //
+  // 所以：**界面用语统一成「额度」，字段对照表保持「积分」** ——
+  // 这两件事的读者不同（前者是用户，后者是排障时对着上游文档看的人）。
+  // 加 `（上游字段）` 后缀是为了让用户一眼看出"这不是我们的叫法"。
+  const KV_LABELS = {
+    package_name_cn: '套餐',
+    spec_code: '规格代码',
+    // 后缀「（上游字段）」把"这是上游的措辞"讲在明面上，
+    // 避免用户把它当成界面用语、进而以为"额度"和"积分"是两种东西。
+    is_credit_package: '积分套餐（上游字段）',
+    is_token_package: 'Token 套餐',
+    status: '状态',
+    start_date: '开始日期',
+    end_date: '结束日期',
+    CreditTotal: '积分总额（上游字段）',
+    CreditRemain: '积分余额（上游字段）',
+    CreditUsed: '已用积分（上游字段）',
+    CreditExpiring: '即将过期积分（上游字段）',
+    TokenUsed: '已用 Token',
+    uid: '账号',
+    campaignId: '活动 ID',
+    benefitAmount: '数量',
+    benefitUnit: '单位',
+    claimable: '可领取',
+    type: '类型',
+  };
+
+  // kvLabel 取字段的中文名；查不到返回原 key。
+  function kvLabel(k) {
+    return Object.prototype.hasOwnProperty.call(KV_LABELS, k) ? KV_LABELS[k] : k;
+  }
+
+  // kvValueHTML 渲染一个字段值。
+  //
+  // # 为什么要把「嵌套对象」单独处理（U2 的直接原因）
+  //
+  // `/admin/subscription` 返回 `{subscription: {...}, uid: "..."}`——
+  // 顶层只有两个键，而 `subscription` 的值是一整个套餐对象。
+  // 上一版把这种嵌套值 `JSON.stringify` 成一行 <code>，
+  // 于是用户看到的是一大坨 `{"package_name_cn":"体验版",...}`。
+  // 现在把嵌套对象**递归**成一层缩进的 key-value，人眼可读。
+  function kvValueHTML(k, v, depth) {
+    if (v === null || v === undefined) return '<span class="dim">—</span>';
+    if (typeof v === 'boolean') {
+      return v ? '<span class="pill ok">是</span>' : '<span class="pill dim">否</span>';
+    }
+    if (Array.isArray(v)) {
+      if (!v.length) return '<span class="dim">—</span>';
+      // 数组元素若是标量就顿号连起来；若是对象就交给 items 渲染
+      if (v.every(x => x === null || typeof x !== 'object')) {
+        return esc(v.map(x => String(x)).join('、'));
+      }
+      return v.map(x => genericItemHTML(x, '')).join('');
+    }
+    if (typeof v === 'object') {
+      // 嵌套对象：递归成子级 key-value（最多两层，避免极端数据把界面撑爆）
+      if (depth >= 2) return `<code>${esc(JSON.stringify(v))}</code>`;
+      const inner = Object.entries(v).map(([k2, v2]) =>
+        `<div class="kv"><span class="k">${esc(kvLabel(k2))}</span><span class="v">${kvValueHTML(k2, v2, depth + 1)}</span></div>`
+      ).join('');
+      return `<div class="kvs nested">${inner}</div>`;
+    }
+    return esc(String(v));
+  }
+
+  function renderGenericBlock(route, data, providerId) {
+    const head = `<div class="ghead2">${esc(route.title || route.path)}</div>`;
+    if (data == null) return head + '<div class="dim" style="font-size:12px">无数据</div>';
+
+    const list = Array.isArray(data) ? data
+      : (Array.isArray(data.items) ? data.items
+        : (Array.isArray(data.list) ? data.list : null));
+    if (list) {
+      if (!list.length) return head + '<div class="dim" style="font-size:12px">暂无条目</div>';
+      return head + `<div class="glist">` + list.map(it => genericItemHTML(it, providerId)).join('') + '</div>';
+    }
+
+    // 纯对象 → 键值对。嵌套对象递归展开（见 kvValueHTML），
+    // 不再把整块 JSON 塞成一行代码 —— 那对用户等于没排版。
+    if (typeof data === 'object') {
+      const kv = Object.entries(data).map(([k, v]) =>
+        `<div class="kv"><span class="k">${esc(kvLabel(k))}</span><span class="v">${kvValueHTML(k, v, 0)}</span></div>`
+      ).join('');
+      return head + `<div class="kvs">${kv}</div>`;
+    }
+    return head + `<div class="mono">${esc(String(data))}</div>`;
+  }
+
+  // genericItemHTML 渲染一个列表条目。
+  //
+  // 优先用语义字段（title/name 当标题，benefitAmount+benefitUnit 当数量），
+  // 认不出来的键值对原样附在下面。**不假设上游一定是"福利"** ——
+  // 换个上游返回别的字段名，这里只是显示得朴素一点，不会崩也不会空白。
+  //
+  // # ⚠ T4 的判断：`title` 是**上游数据**，原样显示，不做用词替换
+  //
+  // 页面上仍会出现含「积分」的文字，来源是这一行 —— 它渲染的是上游
+  // `/admin/welfare` 回执里 title 字段的**原文**。实测（2026-09-13）：
+  //
+  //     "title": "每日签到领1000 积分"
+  //     "title": "学生认证领4000 积分"
+  //     "title": "新用户注册送 4000 积分"
+  //
+  // 这些**不是**我们的界面用语，是上游活动的名字。所以：
+  //
+  //   · 改它 = 篡改上游数据。用户拿着界面上的"每日签到领1000 额度"
+  //     去对上游客服/文档时，两边对不上（上游那份写的是"积分"）。
+  //   · 这与 T4 要统一的东西是**两件事**：T4 统一的是**我们自己写的文案**
+  //     （列头、按钮、toast、筛选下拉）。上游发什么就显示什么，
+  //     与"有什么显示什么，没有的话就不显示"是同一条原则。
+  //
+  // 所以 `title` 走 `esc()` 原样输出。静态守卫
+  // （verify_t4_t5_static.js）也因此只检查**源码**里的文案，
+  // 不检查运行期数据 —— 否则会把上游的活动名当成我们的 bug。
+  function genericItemHTML(it, providerId) {
+    if (it === null || typeof it !== 'object') {
+      return `<div class="gitem"><span class="gname">${esc(String(it))}</span></div>`;
+    }
+    const title = it.title || it.name || it.nickname || it.package_name_cn || it.id || '(未命名)';
+    // 数量：识别常见的几种"额度"字段名，找不到就不显示数量。
+    const amount = it.benefitAmount !== undefined ? it.benefitAmount
+      : (it.amount !== undefined ? it.amount
+        : (it.CreditRemain !== undefined ? it.CreditRemain : undefined));
+    const unit = it.benefitUnit || '';
+    const qty = amount !== undefined
+      ? `<span class="gqty">${esc(String(amount))}${unit ? ' ' + esc(String(unit)) : ''}</span>` : '';
+    // claimable === false 时按钮置灰并说明原因，而不是让用户点了再收到拒绝。
+    const claimable = it.claimable;
+    let act = '';
+    if (it.campaignId !== undefined) {
+      act = claimable === false
+        ? `<button disabled title="该活动当前不可领取（可能已领过或未达成条件）">不可领取</button>`
+        : `<button data-gclaim="${esc(providerId)}" data-gcampaign="${esc(it.campaignId)}" data-gpath="/admin/welfare/claim">领取</button>`;
+    }
+    // 其余字段（排除已用于标题/数量的）折叠成一行说明。
+    const used = ['title', 'name', 'nickname', 'package_name_cn', 'id', 'benefitAmount', 'amount', 'CreditRemain', 'benefitUnit', 'claimable', 'campaignId'];
+    const rest = Object.entries(it).filter(([k]) => used.indexOf(k) < 0)
+      .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ');
+    return `<div class="gitem">
+      <span class="gname">${esc(String(title))}</span>${qty}
+      ${act}
+      ${rest ? `<div class="gmeta">${esc(rest)}</div>` : ''}
+    </div>`;
+  }
+
+  // bindGenericActions 已废弃 —— 见 installGenericActions。
+  //
+  // # 为什么删掉它（评审 CP2 F2，HIGH）
+  //
+  // 它往 host（即 #pbody-<上游>-<能力位>，一个**长期存在**的元素）
+  // 上 addEventListener，而 syncProviderPanels() 每 5 秒被 refresh() 调一次。
+  // 于是每轮刷新都多挂一个 click 监听器，且从不移除：
+  //
+  //   5s → 3 个、10s → 4 个、15s → 5 个（实测线性增长，无上限）
+  //   60 次 sync 后，**一次点击产生 13 个 /admin/welfare 请求**
+  //
+  // 危害不只是内存泄漏：handler 里有 confirm() + POST 写操作（领取福利）。
+  // 今天 codearts 返回的条目都是 claimable:false（按钮禁用），所以还没真的
+  // 重复领取；一旦上游返回可领条目，一次点击就是 N 个确认框 + N 次领取 POST。
+  //
+  // 修法见 installGenericActions：改成**在稳定的祖先上只绑一次**的事件委托。
+
+  // installGenericActions 在 #content 上**只绑一次**通用面板的动作委托。
+  //
+  // # 为什么绑 #content 而不是每个面板
+  //
+  // 面板容器会被 buildProviderPanels() 反复重建（manifest 变化时），
+  // 绑在它们身上就必然要处理"何时解绑"。而 #content 从页面加载到关闭
+  // 都不会被替换 —— 绑一次，永远有效，天然幂等。
+  //
+  // 这正是评审 F2 的正解：把"绑定次数"与"刷新次数"彻底解耦。
+  //
+  // 幂等由 installed 标志保证：即使调用方每次 refresh 都调它也无副作用。
+  let genericActionsInstalled = false;
+
+  function installGenericActions() {
+    if (genericActionsInstalled) return;
+    genericActionsInstalled = true;
+    $('content').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gclaim]');
+      if (!b || b.disabled) return;
+      const cid = b.dataset.gcampaign;
+      const pid = b.dataset.gclaim;
+      // 从按钮自身反查它属于哪个面板（而不是从闭包变量拿 ——
+      // 委托模式下没有"当前面板"这个闭包上下文）。
+      const sec = b.closest('section[data-provider]');
+      const cap = sec ? sec.dataset.cap : 'welfare';
+      if (!confirm(`确认为 ${pid} 领取该福利？`)) return;
+      busyRun(b, async () => {
+        const r = await admin(b.dataset.gpath || '/admin/welfare/claim', {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: Number(cid) }),
+        });
+        toast(r && r.credits ? `领取成功，+${r.credits} 额度` : '领取成功');
+        // 只刷新**自己那块**面板，不刷新整页。
+        await loadGenericList(pid, cap);
+      }, { label: '领取福利' });
+    });
+
+    // ---- 本轮新增：两个专属面板的动作（新手任务 / 邀请码）----
+    //
+    // 与上面同一套手法：**委托**（面板内容每次刷新都重建，逐行绑会线性泄漏监听器），
+    // 端点从按钮自己带的 data-lpath 取（它来自 manifest，不是前端写死的路径）。
+    $('content').addEventListener('click', ev => {
+      const all = ev.target.closest('button[data-ltask-all]');
+      if (all && !all.disabled) {
+        const pid = all.dataset.ltaskAll;
+        const path = all.dataset.lpath;
+        if (!path) { toast('该上游没有「全部完成」端点', true); return; }
+        if (!confirm('对全部 ' + pid + ' 账号逐个完成新手任务？\n（会向上游逐个提交，已完成的不再重复发分）')) return;
+        busyRun(all, async () => {
+          const r = await admin(path, { method: 'POST', body: '{}' });
+          const c = (r && r.completed) || 0;
+          const f = (r && r.failed) || 0;
+          toast(f ? `完成 ${c} 项，${f} 项失败` : `完成 ${c} 项`, f > 0);
+          await loadLoomyTasks(pid);
+        }, { label: '一键完成全部' });
+        return;
+      }
+
+      const one = ev.target.closest('button[data-ltask]');
+      if (one && !one.disabled) {
+        const uid = one.dataset.ltask;
+        const path = one.dataset.lpath;
+        const sec = one.closest('section[data-provider]');
+        const pid = sec ? sec.dataset.provider : '';
+        if (!path) { toast('该上游没有「一键完成」端点', true); return; }
+        busyRun(one, async () => {
+          const r = await admin(path, { method: 'POST', body: JSON.stringify({ uid: uid }) });
+          const res = (r && r.result) || {};
+          const c = (res.completed || []).length;
+          const f = (res.failed || []).length;
+          toast(f ? `完成 ${c} 项，${f} 项失败：${(res.failed || []).join('；')}` : `完成 ${c} 项`, f > 0);
+          await loadLoomyTasks(pid);
+        }, { label: '一键完成' });
+        return;
+      }
+
+      // ---- 批量导入（账号池分组行按钮，见 openImportModal）----
+      const imp = ev.target.closest('button[data-gimport]');
+      if (imp) { openImportModal(imp.dataset.gimport); return; }
+      // ---- loomy 型：面板内直接绑（读同行输入框；用自己的码会被拦下）----
+      const bind = ev.target.closest('button[data-linvite-bind]');
+      if (bind && !bind.disabled) {
+        const uid = bind.dataset.linviteBind;
+        const path = bind.dataset.lpath;
+        // ⚠ 端点缺失的明确提示（排查"绑定失败：未知原因"用）：path 为空时
+        // 直接发 fetch('') 会打回页面自身 —— 2xx + 非 JSON → admin() 返回
+        // null → 前端走到"未知原因"分支，且后端看不到任何请求。
+        // 若走到这行说明 manifest 的路由表在面板渲染那一刻还没就绪。
+        if (!path) {
+          toast('绑定端点未就绪：请点顶部「立即刷新」后再试', true);
+          return;
+        }
+        const sec = bind.closest('section[data-provider]');
+        const pid = sec ? sec.dataset.provider : '';
+        const input = sec ? sec.querySelector(`input[data-linvite-code="${uid}"]`) : null;
+        const code = (input ? input.value : '').trim().toUpperCase();
+        if (!code) { toast('请先填邀请码', true); return; }
+        // ★ 最常见失败：拿**本账号自己的码**去绑自己。
+        // 上游会拒（实测 100001 请求参数错误 / 200003 邀请码不可用），
+        // 报错又晦涩，用户根本看不出为什么。这里**提前拦下**并说清楚 ——
+        // 一次请求都不浪费，也不消耗码。
+        if (input && input.dataset.own) {
+          const ownList = ',' + String(input.dataset.own).toUpperCase() + ',';
+          if (ownList.indexOf(',' + code + ',') >= 0) {
+            showInfo('不能用自己的邀请码',
+              '你输入的是「' + code + '」，它属于**本账号自己**。\n\n'
+              + '「绑定别人的码」要用**其他账号**生成的码（例如表格里其它账号「我生成的码」列里 active 的码）。\n\n'
+              + '自己的码是用来**发给别人**用的：对方绑定后，双方各 +5000。');
+            return;
+          }
+        }
+        // ⚠ 必须先确认：邀请码是 maxUses=1 的，绑错一个就废掉一个码，
+        // 而且**没有撤销**。这类不可逆动作一律要用户看一眼再点。
+        if (!confirm('确认给账号 ' + uid.slice(0, 8) + '… 绑定邀请码 ' + code + '？\n（每个码只能用一次，绑定后无法撤销）')) return;
+        busyRun(bind, async () => {
+          let r;
+          try {
+            r = await admin(path, { method: 'POST', body: JSON.stringify({ uid: uid, code: code }) });
+          } catch (e) {
+            // 把"邀请码不可用"这类晦涩上游报错翻成人话：换其他账号的 active 码。
+            toast('绑定失败：' + e.message + '\n（请确认用的是**其他账号**的码、且该码还没被用过）', true);
+            return false;
+          }
+          if (r && r.ok) toast(`绑定成功${r.applied ? '：' + r.applied : ''}`);
+          else toast(`绑定失败：${(r && r.error) || '未知原因'}（请确认码没被用过）`, true);
+          await loadLoomyInvite(pid);
+        }, { label: '绑定邀请码' });
+        return;
+      }
+      // ★ T-362：「查看」—— 已绑定行的入口。只打开邀请页看状态/记录，**不拼 code**（不带提交意图）。
+      const vbtn = ev.target.closest('button[data-linvite-view]');
+      if (vbtn && !vbtn.disabled) {
+        const vsec = vbtn.closest('section[data-provider]');
+        openPageModal('邀请码 · ' + (vbtn.dataset.linviteViewUid || ''), vbtn.dataset.linviteView, vsec ? vsec.dataset.provider : '');
+        return;
+      }
+
+
+      // ★ T-358：需要人工验证的绑定入口 —— 点它开页内模态，把该行的邀请码带过去。
+      // 为什么不做在面板内：captcha 由浏览器里的官方组件产出，后端拿不到（与登录页同理）。
+      // ★ T-365②：「扫码绑定 / 查看微信」—— 复用**同一个** #pageModal（不新建第二个模态）。
+      const wbtn2 = ev.target.closest('button[data-wechat-page]');
+      if (wbtn2 && !wbtn2.disabled) {
+        const wsec2 = wbtn2.closest('section[data-provider]');
+        openPageModal('绑定微信 · ' + (wbtn2.dataset.wechatPageUid || ''), wbtn2.dataset.wechatPage, wsec2 ? wsec2.dataset.provider : '');
+        return;
+      }
+      // uid 从按钮的 data-linvite-page-uid 取：面板里多行同名 input，只按 data 取才不会串行。
+      const pbtn = ev.target.closest('button[data-linvite-page]');
+      if (pbtn && !pbtn.disabled) {
+        const psec = pbtn.closest('section[data-provider]');
+        const ppid = psec ? psec.dataset.provider : '';
+        const puid = pbtn.dataset.linvitePageUid || '';
+        const ppath = pbtn.dataset.linvitePage;
+        const pinput = psec ? psec.querySelector('input[data-linvite-code="' + puid + '"]') : null;
+        const pcode = (pinput ? pinput.value : '').trim().toUpperCase();
+        const purl = ppath + (ppath.indexOf('?') >= 0 ? '&' : '?') + 'code=' + encodeURIComponent(pcode);
+        openPageModal('绑定邀请码 · ' + puid, purl, ppid);
+        return;
+      }
+
+      if (bind && !bind.disabled) {
+        const uid = bind.dataset.linviteBind;
+        const path = bind.dataset.lpath;
+        // ⚠ 端点缺失的明确提示（排查"绑定失败：未知原因"用）：path 为空时
+        // 直接发 fetch('') 会打回页面自身 —— 2xx + 非 JSON → admin() 返回
+        // null → 前端走到"未知原因"分支，且后端看不到任何请求。
+        // 若走到这行说明 manifest 的路由表在面板渲染那一刻还没就绪。
+        if (!path) {
+          toast('绑定端点未就绪：请点顶部「立即刷新」后再试', true);
+          return;
+        }
+        const sec = bind.closest('section[data-provider]');
+        const pid = sec ? sec.dataset.provider : '';
+        const input = sec ? sec.querySelector(`input[data-linvite-code="${uid}"]`) : null;
+        const code = (input ? input.value : '').trim().toUpperCase();
+        if (!code) { toast('请先填邀请码', true); return; }
+        // ★ 最常见失败：拿**本账号自己的码**去绑自己。
+        // 上游会拒（实测 100001 请求参数错误 / 200003 邀请码不可用），
+        // 报错又晦涩，用户根本看不出为什么。这里**提前拦下**并说清楚 ——
+        // 一次请求都不浪费，也不消耗码。
+        if (input && input.dataset.own) {
+          const ownList = ',' + String(input.dataset.own).toUpperCase() + ',';
+          if (ownList.indexOf(',' + code + ',') >= 0) {
+            showInfo('不能用自己的邀请码',
+              '你输入的是「' + code + '」，它属于**本账号自己**。\n\n'
+              + '「绑定别人的码」要用**其他账号**生成的码（例如表格里其它账号「我生成的码」列里 active 的码）。\n\n'
+              + '自己的码是用来**发给别人**用的：对方绑定后，双方各 +5000。');
+            return;
+          }
+        }
+        // ⚠ 必须先确认：邀请码是 maxUses=1 的，绑错一个就废掉一个码，
+        // 而且**没有撤销**。这类不可逆动作一律要用户看一眼再点。
+        if (!confirm('确认给账号 ' + uid.slice(0, 8) + '… 绑定邀请码 ' + code + '？\n（每个码只能用一次，绑定后无法撤销）')) return;
+        busyRun(bind, async () => {
+          let r;
+          try {
+            r = await admin(path, { method: 'POST', body: JSON.stringify({ uid: uid, code: code }) });
+          } catch (e) {
+            // 把"邀请码不可用"这类晦涩上游报错翻成人话：换其他账号的 active 码。
+            toast('绑定失败：' + e.message + '\n（请确认用的是**其他账号**的码、且该码还没被用过）', true);
+            return false;
+          }
+          if (r && r.ok) toast(`绑定成功${r.applied ? '：' + r.applied : ''}`);
+          else toast(`绑定失败：${(r && r.error) || '未知原因'}（请确认码没被用过）`, true);
+          await loadLoomyInvite(pid);
+        }, { label: '绑定邀请码' });
+        return;
+      }
+    });
+  }
+
+  // toggleNavGroup 折叠/展开一个上游分组。
+  //
+  // 折叠状态按上游 id 持久化（不是下标）：加/删上游后下标会整体位移，
+  // 用下标存会让"折叠了 codearts"变成"折叠了别的上游"。
+  function toggleNavGroup(pid) {
+    const g = $('nav').querySelector(`.navgroup[data-pid="${cssEsc(pid)}"]`);
+    if (!g) return;
+    g.classList.toggle('collapsed');
+    const collapsed = [];
+    $('nav').querySelectorAll('.navgroup[data-pid]').forEach(el => {
+      if (el.classList.contains('collapsed')) collapsed.push(el.dataset.pid);
+    });
+    try { localStorage.setItem('wb2api.navcollapsed', JSON.stringify(collapsed)); } catch { /* 隐私模式 */ }
+  }
+
+  // ---------------------------------------------------------------- 设置
+  // SET_FIELDS 设置页**可编辑**控件的注册表（保存/回填循环只遍历它）。
+  //
+  // # 为什么只有 9 项（其余删了 / 只读 / 隐藏，见设置页 HTML）
+  //
+  // 与子代理审计后收敛（用户要求"删掉不必要的；必要但不该改的只读/隐藏"）：
+  //   - 删除：保活时点/旅行间隔/成长扫描间隔/SSE 两个超时/429 软冷却/在途/
+  //     熔断三件套/粘性 TTL/纯收益成长两开关/猫到站自动领奖（默认开启纯收益）
+  //   - 只读（安全网/加固）：保活开关/指纹脱敏/会话粘性
+  //   - 隐藏：凭证目录、Redis 模式
+  const SET_FIELDS = [
+    ['setGrowthMakeup', 'growth_auto_makeup', 'bool'],
+    ['setGrowthRedeem', 'growth_auto_redeem', 'bool'],
+    ['setGrowthOpen', 'growth_auto_open', 'bool'],
+    ['setGrowthDraw', 'growth_auto_draw', 'bool'],
+    ['setCheckinLogDays', 'checkin_log_keep_days', 'int'],
+    ['setReqLogDays', 'request_log_keep_days', 'int'],
+    ['setUpTimeout', 'upstream_timeout_seconds', 'int'],
+    // 账号解封探测（天级）。⚠ 加这一行**同时**要在后端补三处，缺一处就是
+    // "页面能填、保存静默丢弃"：admin.Settings 的字段、settings_store 的
+    // parse/persist 清单、Pool 结构体上的 json tag。
+    ['setReviveHours', 'pool_revive_probe_hours', 'int'],
+    // MonkeyCode 出口（代理）：字符串型，热生效。
+    // ⚠ 键名 `monkeycode_proxy` / `monkeycode_direct_proxy` 同时是 config.json 里
+    //   monkeycode 段的 proxy / direct_proxy —— 上游自报的键，前端只转发不解释。
+    // 破甲注入（select，走既有的字符串分支：collectSettings 的 else 分支读 el.value）。
+    // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
+    //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
+    ['setArmorMode', 'prompt_armor_mode', 'str'],
+    // 模型名严格前缀（bool；后端 strict_model_prefix，热生效）。
+    ['setStrictModelPrefix', 'strict_model_prefix', 'bool'],
+    // 破甲：命中拒绝后是否自动重试一次（bool；后端 prompt_armor_retry，热生效）。
+    ['setArmorRetry', 'prompt_armor_retry', 'bool'],
+    ['setMcProxy', 'monkeycode_proxy', 'str'],
+    ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
+  ];
+  let savedSettings = null;
+
+  const parseHours = s => String(s || '').split(/[,，\s]+/).filter(Boolean)
+    .map(x => parseInt(x, 10)).filter(n => !isNaN(n));
+
+  function fillSettings(s, extra) {
+    savedSettings = s;
+    for (const [id, key, kind] of SET_FIELDS) {
+      const el = $(id);
+      if (!el || s[key] === undefined || s[key] === null) continue;
+      if (kind === 'bool') el.checked = !!s[key];
+      else if (kind === 'hours') el.value = (s[key] || []).join(',');
+      else el.value = s[key];
+    }
+    // 只读行（必要但不该被改的设置，见设置页 HTML 的注释）：
+    // 值只展示，**不进** SET_FIELDS —— 否则 saveSettings 会把它们当可保存字段写回。
+    const setRO = (id, text) => { const el = $(id); if (el) el.textContent = text; };
+    setRO('setKeepaliveRO',
+      (s.keepalive_enabled ? '已启用' : '已禁用') + '（被动后台扫描：每天定时检查临近过期的 token 并自动刷新；' +
+      '如需调整请改 config.json 的 keepalive_enabled / keepalive_hours）');
+    setRO('setSanitizeRO',
+      (s.sanitize_blacklist_fingerprints ? '已启用' : '已禁用') + '（出站请求体指纹脱敏，安全加固项，默认开启；' +
+      '如需关闭请改 config.json 的 sanitize_blacklist_fingerprints）');
+    setRO('setStickyRO',
+      (s.session_sticky_enabled ? '已启用 · TTL ' + (s.session_sticky_ttl || '30m') : '已禁用') +
+      '（当前正在使用，切换会中断在途会话；如需调整请改 config.json 后重启）');
+    // 运行信息：保留连接入口/配置文件/API Key；凭证目录与 Redis 模式已隐藏
+    //（信息价值低，且凭证目录暴露本地路径没有展示收益）。
+    const ro = [
+      ['监听地址', s.listen],
+      ['配置文件', s.config_path],
+      ['API Key', s.api_key_set ? '已配置' : '未配置（不鉴权）'],
+    ];
+    $('setReadonly').innerHTML = ro.map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+    if (extra && extra.request_log) renderLogFileInfo(extra.request_log);
+    markDirty(false);
+  }
+
+  function renderLogFileInfo(f) {
+    const fmt = b => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round((b || 0) / 1024) + ' KB';
+    // 上限也要显示：只写「保留 7 天」会让人以为记录能留满 7 天，
+    // 实际上字节数先到上限就会裁剪旧记录 —— 不说明这点，
+    // 用户看到「记录没了」会分不清是被裁了还是本来没产生。
+    const html = !f || !f.enabled
+      ? '请求日志落盘：<span class="err">未启用</span>（仅内存，重启即丢）'
+      : `请求日志落盘：<code class="mono">${esc(f.path)}</code> · ${f.count} 条 · ${fmt(f.size)}`
+        + (f.max_bytes ? ` / 上限 ${fmt(f.max_bytes)}` : '')
+        + ` · 保留 ${f.keep_days} 天`
+        + (f.from ? ` · 覆盖 ${new Date(f.from).toLocaleString('zh-CN', { hour12: false })} 至 ${new Date(f.to).toLocaleString('zh-CN', { hour12: false })}` : '');
+    $('setLogFileInfo').innerHTML = html;
+    $('logFileInfo').innerHTML = html;
+    $('logFileInfo').style.display = 'block';
+  }
+
+  // 任务历史的保留策略也显式写出来（后端固定保留 30 天，见 checkinlog.New）。
+  function renderHistRetention(total) {
+    const el = $('histRetention');
+    if (!el) return;
+    el.textContent = `共 ${total || 0} 条 · 保留 30 天（超期自动裁剪）`;
+  }
+
+  function collectSettings() {
+    const out = Object.assign({}, savedSettings);
+    for (const [id, key, kind] of SET_FIELDS) {
+      const el = $(id);
+      if (!el) continue;
+      if (kind === 'bool') out[key] = el.checked;
+      else if (kind === 'hours') out[key] = parseHours(el.value);
+      else if (kind === 'int') out[key] = parseInt(el.value, 10) || 0;
+      else out[key] = el.value.trim();
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- API 管理
+  //
+  // 对标 new-api 的令牌管理（单机简化版）：多把 key、每把独立额度/限速/用量。
+  // 端点由核心 admin 提供（/admin/apikeys 系列），仅 loopback 可访问。
+  //
+  // 显示：掩码 key（完整 key 只在创建时返回一次）、状态、额度、用量。
+  // 操作：新建（name/limit/rpm）、启用/禁用、重置额度、改配额、删除。
+  // 无感刷新：30s 轮询只更新数值单元格（同 pollPoolValues 的 diff 手法）。
+
+  async function loadAPIKeys() {
+    let d;
+    try { d = await sharedGet('ep:/admin/apikeys', () => admin('/admin/apikeys')); }
+    catch { $('apiKeyRows').innerHTML = '<tr><td colspan="9" class="err">读取失败</td></tr>'; return; }
+    // 两把钥匙各一行 —— 它们**互相独立**，且各自可轮换。
+    //
+    // ⚠ 为什么不再是一行（用户报障「门禁 token 不能和 api 一样」）
+    //
+    // 改造前这里只有一行「管理钥匙 = config.api_key」，而那一把**同时**是
+    // 对话凭据与门禁凭据。用户明确指出这不对：给客户端配一把对话 key
+    // 不该等于交出管理台。现在分开显示、分开轮换。
+    const ak = $('apiAdminKey');
+    if (ak) {
+      // ⚠ 2026-10-19 新口径（单账号管理员）：原来这里有一支
+      //   `if (d && d.member)` —— 判"当前登录是成员"，于是整块"管理钥匙"换成
+      //   一句"属于管理员，当前账号看不到"。
+      //
+      //   删掉它的理由有两条，第二条更重要：
+      //     ① 新口径下**不存在成员会话** ⇒ 这一支永远为假；
+      //     ② 后端窗口正在删掉载荷里的 `member` 字段（`apikeys.go` 的
+      //        `"member": !p.IsAdmin()`）⇒ 依赖一个正在消失的字段，
+      //        等于把这条判据挂在别人的实现细节上（今天真、明天假）。
+      //   ⇒ 现在的口径是"**有就无所谓、没有也不炸**"：下面只按
+      //     `d.admin_token` / `d.admin_key` 有没有值决定渲染哪一段 ——
+      //     服务端给掩码就显示掩码，不给就显示"未配置 + 怎么配"的指路文案。
+      //     这条对两种后端都成立（字段在不在都走同一条路）。
+      const parts = [];
+        // ★ T-464：这里原来在 T-458 加过「显示/复制」—— **已移除**。
+        //
+        // 原因：本面板（section `data-key="apikeys"`）已被 hidden 且不在导航里
+        //（`webui.html:985` 的 `hidden`；`webui.html:944-952` 的注释写明
+        //  「令牌页占这个位置（导航只留一个入口），旧面板 hidden **不删**」）
+        // ⇒ 用户永远看不到 ⇒ 那是**死代码**。
+        //
+        // 更大的风险是**误导**：留着会让人以为"这里已经是好的"，然后只把 `hidden` 去掉就上线 ——
+        // 而它和令牌页是**两份实现**，迟早分叉（本仓在 `no-store` 上刚踩过一次同型问题）。
+        // ⇒ 同样的能力在令牌页（`webui-tokens.html` 的「系统凭据」块）**唯一实现**。
+        //
+        // ⚠ 若将来要恢复这个面板：**不要把令牌页那套复制过来**，
+        //   而是让它直接复用令牌页的机制（或干脆删掉本 section、只留令牌页一条路）。
+        if (d && d.admin_token) {
+          parts.push(`<div style="margin-bottom:6px">管理令牌（登录控制台用，<b>admin_token</b>）：`
+            + `<code class="mono">${esc(d.admin_token)}</code>`
+            + ` <button id="btnRotateAdminToken" style="padding:2px 8px;font-size:12px">轮换</button>`
+            + ` <span class="dim" style="font-size:12px">轮换后**立即生效**，无需重启</span></div>`);
+        } else {
+          parts.push('<div style="margin-bottom:6px">管理令牌（<b>admin_token</b>）：'
+            + '<span class="dim">未配置 —— 没有它就只剩「账号口令登录」一条路。'
+            + '在 config.json 里加一行 <code>"admin_token": "&lt;随机串&gt;"</code>；'
+            + '它用于脚本/一条链接免口令进控制台（<code>/ui?token=…</code>）。</span></div>');
+        }
+        if (d && d.admin_key) {
+          parts.push(`<div>对话密钥（调 <b>/v1</b> 接口，<code>api_key</code>）：`
+            + `<code class="mono">${esc(d.admin_key)}</code>`
+            + ` <button id="btnRotateAPIKey" style="padding:2px 8px;font-size:12px">轮换</button>`
+            + ` <span class="dim" style="font-size:12px">不限额不限速；完整值见「仪表盘 → API 接入信息」</span></div>`);
+        }
+        if (!parts.length) {
+          parts.push('<span class="dim">既没有 admin_token 也没有 api_key —— '
+            + '请用下方新建的 key 调用 /v1 接口。</span>');
+        }
+        ak.innerHTML = parts.join('');
+        const rbT = $('btnRotateAdminToken');
+        if (rbT) rbT.onclick = () => apiKeyRotateAdminToken(rbT);
+        const rbK = $('btnRotateAPIKey');
+        if (rbK) rbK.onclick = () => apiKeyRotateAPIKey(rbK);
+    }
+    renderAPIKeys(d && d.keys ? d.keys : []);
+  }
+
+  // apiKeyRotateAdminToken 轮换**管理令牌**（admin_token）。
+  //
+  // ⚠ 与下面那个（轮换对话 api_key）是**两个**动作，别合并：
+  // 用户要求两者独立 —— 轮换对话 key 不该把管理台锁掉，反之亦然。
+  async function apiKeyRotateAdminToken(btn) {
+    if (!confirm('轮换管理令牌（admin_token）？\n\n'
+      + '· 生成新令牌写入 config.json（admin_token 字段）\n'
+      + '· **立即生效**：旧令牌作废，其它机器需要换新令牌\n'
+      + '· 不填令牌也能登录：用账号口令（/ui 的登录页）\n'
+      + '· 新令牌仅此一次完整显示')) return;
+    await busyRun(btn, async () => {
+      try {
+        const r = await admin('/admin/apikeys/rotate-admin', { method: 'POST' });
+        if (!r || !r.full) { toast('轮换失败：未知原因', true); return false; }
+        toast(`已轮换（仅此一次显示完整令牌）：\n${r.full}\n请立即复制保存`, false, 15000);
+        copyText(r.full, '管理令牌');
+        await loadAPIKeys();
+        return true;
+      } catch (e) { toast('轮换失败：' + e.message, true); return false; }
+    }, { label: '轮换', busyText: '轮换中…' });
+  }
+
+  // apiKeyRotateAPIKey 轮换**对话接口**的 api_key（与门禁令牌无关）。
+  async function apiKeyRotateAPIKey(btn) {
+    if (!confirm('轮换对话密钥（api_key）？\n\n'
+      + '· 生成新密钥写入 config.json（api_key 字段）\n'
+      + '· 立即生效：旧密钥作废，客户端需要换新\n'
+      + '· 不影响控制台登录（那用 admin_token）\n'
+      + '· 新密钥仅此一次完整显示')) return;
+    await busyRun(btn, async () => {
+      try {
+        const r = await admin('/admin/apikeys/rotate-api-key', { method: 'POST' });
+        if (!r || !r.full) { toast('轮换失败：未知原因', true); return false; }
+        toast(`已轮换（仅此一次显示完整密钥）：\n${r.full}\n请立即复制保存`, false, 15000);
+        copyText(r.full, '对话密钥');
+        await loadAPIKeys();
+        return true;
+      } catch (e) { toast('轮换失败：' + e.message, true); return false; }
+    }, { label: '轮换', busyText: '轮换中…' });
+  }
+
+  function apiKeyRemain(k) {
+    if (k.limit <= 0) return '不限';
+    const r = k.limit - k.used;
+    return r > 0 ? r : 0;
+  }
+
+  // apiKeyModelsCell 「可用模型」单元格。
+  //
+  // 三态与后端同一口径（见 apikey.Key.Models）：
+  //
+  //	字段缺失 / 空数组 → **不限制**，显示「全部」
+  //	非空              → 列出模型名（多了截断，title 里给全量）
+  //
+  // ⚠ 「全部」不能写成一个空白格：用户看到空白会以为是"还没加载"，
+  // 于是去刷新页面；而"没设限制"是个**明确的状态**，得说出来。
+  // apiKeyModelsCell 「可用模型」列的单元格。
+  //
+  // # ⚠ 2026-10 P2 之后的真相来源变了（这一列曾经会骗人）
+  //
+  // 分组（Key.Groups）非空时，判定链用的是**分组里模型的并集**，`k.models`
+  // 完全不参与。而这一列原来只看 `k.models` —— 于是「只配了分组、白名单为空」的
+  // key（P3.5 迁移之后这几乎是全部）会显示成「全部」，**恰好是相反的意思**：
+  // 那把 key 其实被限制在分组内的少数模型上。
+  //
+  // 用户会拿这一列来回答「这把 key 能用什么」，看反了的后果是他以为没限制。
+  // 所以有分组时优先显示分组（分组名由后端随 View 下发不了 —— 这里只有 ID），
+  // 用「N 个分组」+ title 里列 ID 表达：ID 是可点进去核对的（分组页里就有）。
+  function apiKeyModelsCell(k) {
+    const groups = Array.isArray(k.groups) ? k.groups.filter(Boolean) : [];
+    const list = Array.isArray(k.models) ? k.models.filter(Boolean) : [];
+    // ① 分组优先：这是 P2 之后真正生效的判据。
+    if (groups.length) {
+      const title = '按分组限制（' + groups.length + ' 个分组）：' + groups.join('\n')
+        + '\n\n分组里有哪些模型请到「分组」页核对。';
+      return '<span class="mono" style="font-size:11px" title="' + esc(title) + '">'
+        + groups.length + ' 个分组</span>';
+    }
+    // ② 没有分组 ⇒ 存量白名单（P3.5 迁移前的形态，仍然生效）。
+    if (!list.length) return '<span class="dim">全部</span>';
+    const shown = list.slice(0, 3).map(esc).join('、');
+    const more = list.length > 3 ? `<span class="dim"> +${list.length - 3}</span>` : '';
+    return `<span class="mono" style="font-size:11px" title="${esc(list.join('\n'))}">${shown}${more}</span>`;
+  }
+
+  function renderAPIKeys(list) {
+    // 缓存一份：行内「编辑」要从这里取现值打开弹窗（见那个分支的注释）。
+    window._apikeysCache = list || [];
+    const host = $('apiKeyRows');
+    if (!host) return;
+    if (!list.length) {
+      host.innerHTML = '<tr><td colspan="10" class="dim">还没有 API Key —— 点右上角「新建 API Key」创建第一把。</td></tr>';
+      return;
+    }
+    host.innerHTML = list.map(k => {
+      const st = k.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill err">禁用</span>';
+      const quota = `${k.used} / ${k.limit > 0 ? k.limit : '∞'}`;
+      const remain = k.limit > 0 ? `<span class="dim" style="font-size:11px">剩 ${apiKeyRemain(k)}</span>` : '';
+      const created = k.created_at ? k.created_at.slice(0, 10) : '—';
+      // 操作：配额与模型合进一个「编辑」（打开同一个弹窗）。
+      //
+      // 改造前是两个 prompt 按钮（改配额 / 改模型）—— 那是"字段各自一个入口"
+      // 的老界面，用户要改两样就得点两次、走两套流程。弹窗同屏可见，一个入口够。
+      const ops = [
+        `<button data-apikey="${esc(k.id)}" data-act="toggle" ${k.enabled ? '' : 'class="primary"'}>${k.enabled ? '禁用' : '启用'}</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="edit">编辑</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="reset">重置</button>`,
+        `<button data-apikey="${esc(k.id)}" data-act="delete" style="color:var(--err)">删除</button>`,
+      ].join(' ');
+      return `<tr>
+        <td>${esc(k.name)}</td>
+        <td>${apiKeyCellHTML(k)}</td>
+        <td>${st}</td>
+        <td>${quota} ${remain}</td>
+        <td class="mono">${esc(k.requests)}</td>
+        <td class="mono">${esc(k.fails)}</td>
+        <td class="mono">${k.rpm > 0 ? k.rpm + '/min' : '不限'}</td>
+        <td>${apiKeyModelsCell(k)}</td>
+        <td class="dim">${created}</td>
+        <td style="white-space:nowrap">${ops}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // apiKeyCellHTML key 单元格：**默认打码，点一下显示完整值并复制**。
+  //
+  // 用户的要求：
+  //
+  //	「我不要那个 API key 只在第一次创建的时候显示，它永久都可以显示。
+  //	  但是默认的时候应该是把它给…中间部分是要屏蔽一下，就打个码。
+  //	  但是你可以再点击一下那个 API key，点击之后它就显示出来了，
+  //	  并且自动复制到那个剪切板里面去。」
+  //
+  // 为什么"随时可看"不削弱安全性：能打开这个页面的人本来就持有**管理钥匙**
+  // （/admin/* 要鉴权），他本来就能新建 key、也能直接读 data/apikeys.json。
+  // 把它藏起来只防住了"顺手拍屏/截图"，而那正是"默认打码"解决的。
+  function apiKeyCellHTML(k) {
+    const full = k.id || '';
+    if (!full) return '<span class="dim">—</span>';
+    const mask = k.masked || (full.length > 12 ? full.slice(0, 8) + '…' + full.slice(-4) : full);
+    return `<button data-akkey="${esc(full)}" data-akmask="${esc(mask)}" `
+      + `title="点击显示完整 key 并自动复制到剪贴板"`
+      + ` style="background:none;border:0;padding:0;cursor:pointer;text-align:left;`
+      + `font-family:ui-monospace,Consolas,monospace;font-size:12px;color:inherit">${esc(mask)}</button>`;
+  }
+
+  // ── API Key 弹窗（新建 / 编辑）────────────────────────────────────────
+  //
+  // 改造前是一串 window.prompt（名称 → 额度 → 限速 → 模型手打）。三个问题：
+  //
+  //	① **模型要手打**：拼错一个字母就得到"设了限制却一个都调不了"，
+  //	   而保存时**完全看不出来**（保存成功、列表里也显示着那个名字）
+  //	② **没有回显**：填了 4 步看不到自己填过什么，点错只能从头再来
+  //	③ **取消 = 0**：prompt 的 null（取消）与输入 0 分不开，
+  //	   老实现用 `|| '0'` 把两者合成一个 —— 取消一次就把额度设成"不限"
+  //
+  // 现在所有字段同屏可见、模型从 /v1/models 多选且可搜索、取消就是取消。
+
+  let akMode = 'create';    // create | edit
+  let akEditingID = '';     // 编辑模式下的 key id（也是完整 key）
+  let akCatalog = null;     // /v1/models 的缓存（弹窗内复用，避免每次重拉）
+
+  // ensureAKCatalog 拉一次模型目录（同一会话内缓存）。
+  //
+  // ⚠ 用 /v1/models 而不是别的目录端点：那是**调用方真正能发**的模型名集合。
+  // 白名单里的名字必须能对上这个集合里的名字 —— 用另一个来源会造出
+  // "列表里选得到、实际调不通"。
+  // ---- 可用分组（取代原来的模型白名单）-----------------------------------
+  //
+  // # 为什么 key 只选分组、不再选模型（用户要求，2026-10-24）
+  //
+  //   「这里API 不要设置模型了只能设置分组 因为分组已经设置了模型」
+  //
+  // 模型范围在**分组**里定义一次就够了。key 再选一遍模型，等于同一件事有
+  // 两个真相来源 —— 改分组里的模型，key 上那份不会跟着变。那正是我们反复
+  // 踩的悬空问题的根源（见 PLAN-groups.md Q3：两者语义重复，白名单并入分组）。
+  //
+  // ⚠ 空选 = 不限制。这是存量 key 的默认形态，也是改造前「全部允许」的等价物，
+  //   绝不能改成「空 = 一个都不许」（那会把所有没配过分组的 key 打死）。
+  let akGroups = [];        // /admin/groups 的缓存
+  let akPickedGroups = new Set();
+
+  async function ensureAKGroups() {
+    if (akGroups && akGroups.length) return akGroups;
+    const r = await admin('/admin/groups');
+    akGroups = ((r && r.groups) || []);
+    return akGroups;
+  }
+
+  // renderAKGroupList 画可勾选的分组列表。
+  function renderAKGroupList() {
+    const host = $('akGroupList'), empty = $('akGroupEmpty');
+    if (!host) return;
+    if (!akGroups.length) {
+      host.innerHTML = '';
+      empty.style.display = '';
+      empty.textContent = '还没有分组。先到「分组」页建一个，回来就能选。';
+      return;
+    }
+    empty.style.display = 'none';
+    host.innerHTML = akGroups.map(function (g) {
+      const on = akPickedGroups.has(g.id) ? ' checked' : '';
+      const n = (g.models && g.models.length) || g.model_count || 0;
+      return '<label style="display:flex;align-items:center;gap:8px;padding:4px;font-size:12px;cursor:pointer">' +
+        '<input type="checkbox" data-akg="' + esc(g.id) + '"' + on + '>' +
+        '<span>' + esc(g.name) + '</span>' +
+        '<span class="dim" style="font-size:11px;margin-left:auto">' + n + ' 个模型</span>' +
+        '</label>';
+    }).join('');
+    renderAKGroupChips();
+    updateAKCount();
+  }
+
+  // renderAKGroupChips 画「已选分组」置顶清单（点 × 取消）。
+  function renderAKGroupChips() {
+    const box = $('akGroupChips');
+    if (!box) return;
+    const picked = akGroups.filter(function (g) { return akPickedGroups.has(g.id); });
+    if (!picked.length) {
+      box.innerHTML = '<span class="dim" style="font-size:12px">（未选 —— 这把 key 不限制模型）</span>';
+      return;
+    }
+    // ⚠ 用 .pill + 内联 all:unset 的按钮，与原来 API 页那版模型 chip 同一形态。
+    //
+    // 我第一版用 .chip 且没重置按钮样式，结果按钮保留浏览器默认外观
+    // （带边框的方块），把 chip 撑成两块 —— 截图里「已选分组」整行被挤歪。
+    // .chip 那套样式是给「模型名 + 倍率标记」设计的（.chip span 有 margin-left），
+    // 塞一个 <button> 进去不在它的设计范围内。
+    box.innerHTML = picked.map(function (g) {
+      return '<span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px"'
+        + ' title="' + esc(g.name) + '">'
+        + '<span class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+        + esc(g.name) + '</span>'
+        + '<button type="button" data-akgunpick="' + esc(g.id) + '"'
+        + ' style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 2px"'
+        + ' title="取消选择这个分组">×</button>'
+        + '</span>';
+    }).join('');
+  }
+
+  function updateAKCount() {
+    const c = $('akCount');
+    const hint = $('akGroupHint');
+    if (!c) return;
+    const picked = akGroups.filter(function (g) { return akPickedGroups.has(g.id); });
+    if (!picked.length) {
+      c.textContent = '';
+      if (hint) hint.textContent = '（不限制）';
+      return;
+    }
+    // 并集去重后的模型数（两个分组可能有重叠）。
+    const seen = new Set();
+    picked.forEach(function (g) { (g.models || []).forEach(function (m) { seen.add(m); }); });
+    c.textContent = picked.length + ' 个分组 · 共 ' + seen.size + ' 个模型';
+    if (hint) hint.textContent = '';
+  }
+
+  // ---- 模型对外名映射（内部名 ↔ 对外名）---------------------------------
+  //
+  // ⚠ 这三个函数是从 git 历史恢复回来的（2026-10-24）。
+  //
+  // 我上一轮替换整段 JS 时把它们**一起删掉了**，但调用点还在
+  // （akRenderMap 在弹窗打开时、akCollectMap 在保存时、akAddMapRow 在按钮上）。
+  // 后果不是"映射功能坏了"，而是 **ReferenceError 打断整个 IIFE** ——
+  // 之后所有事件绑定都没执行，界面上每个按钮都点不动。
+  //
+  // 教训：替换"一大段"之前先列出这一段里定义了哪些符号，替换后核对
+  // 「还有谁在调它们」。语法门禁只查能不能解析，查不出未定义符号。
+
+
+
+
+
+  function openAPIKeyModal(mode, k) {
+    akMode = mode === 'edit' ? 'edit' : 'create';
+    akEditingID = (k && k.id) || '';
+
+    $('akTitle').textContent = akMode === 'edit' ? '编辑 API Key' : '新建 API Key';
+    if (akMode === 'edit') {
+      $('akNameRow').style.display = 'none';
+      $('akNameRO').style.display = '';
+      $('akNameRO').textContent = '名称：' + ((k && k.name) || '');
+    } else {
+      $('akNameRow').style.display = '';
+      $('akNameRO').style.display = 'none';
+      $('akName').value = '';
+    }
+
+    $('akLimit').value = k ? (k.limit || 0) : 0;
+    $('akRpm').value = k ? (k.rpm || 0) : 0;
+    // 分组：编辑时回填，新建时空（= 不限制）。
+    akPickedGroups = new Set((k && Array.isArray(k.groups)) ? k.groups : []);
+    // 别名（model_map）已移到分组：这里不再处理。
+
+    $('akModal').style.display = 'flex';
+    $('akSave').disabled = false;
+    $('akGroupList').innerHTML = '<div class="dim" style="font-size:12px;padding:6px">正在读取分组…</div>';
+    ensureAKGroups().then(function () {
+      renderAKGroupList();
+    }).catch(function (e) {
+      $('akGroupList').innerHTML =
+        '<div class="dim" style="font-size:12px;padding:6px">读取分组失败：' + esc(e.message) + '</div>';
+    });
+  }
+
+  function closeAPIKeyModal() {
+    $('akModal').style.display = 'none';
+  }
+
+  // saveAPIKeyModal 保存（新建 / 编辑）。
+  async function saveAPIKeyModal(btn) {
+    // 提交的分组 ID（空 = 不限制）。
+    const groups = Array.from(akPickedGroups);
+    // 别名（model_map）已移到分组：这里不再收集，提交体也不带它。
+    //
+    // 为什么不保留"兼容"：key 上的别名永远不可能生效 —— 判定链先过分组，
+    // 不认识不在分组里的名字。留着只会让用户配了却查不出为什么没用。
+    const limit = parseInt($('akLimit').value, 10);
+    const rpm = parseInt($('akRpm').value, 10);
+    if (isNaN(limit) || limit < 0 || isNaN(rpm) || rpm < 0) {
+      toast('额度/限速必须是非负数字', true);
+      return;
+    }
+
+    await busyRun(btn, async () => {
+      try {
+        if (akMode === 'create') {
+          const name = ($('akName').value || '').trim();
+          if (!name) { toast('名称不能为空', true); return false; }
+          const r = await admin('/admin/apikeys', {
+            method: 'POST', body: JSON.stringify({ name, limit, rpm, groups }),
+          });
+          if (!r || !r.full) { toast('创建失败：未知原因', true); return false; }
+          toast(`已创建 ${r.name || name}（完整 key 下面直接复制）\n${r.full}`, false, 15000);
+          copyText(r.full, 'API Key');
+        } else {
+          await admin('/admin/apikeys/update', {
+            method: 'POST', body: JSON.stringify({ id: akEditingID, limit, rpm, groups }),
+          });
+          toast(groups.length ? `已保存：限制为 ${groups.length} 个分组的模型` : '已保存：不限制模型');
+        }
+        closeAPIKeyModal();
+        // ⚠⚠ 必须**先丢缓存**再拉列表 —— 与删除（8279）/轮换（8265）那两处同一个理由：
+        //   `loadAPIKeys()` 走 sharedGet（30s TTL），不丢就会用**旧快照**重画。
+        //   实测（视觉 E2E，2026-10-19）：新建成功、服务端也确实回了完整 key，但界面里
+        //   3.2 秒时 DOM 的 key 数仍是 0；**重开面板** 10ms 内就能看到 ⇒ 不是建不上，
+        //   是界面不刷新。同一张表的删除因为丢了缓存，431ms 内就消失 —— 差异只在这一行。
+        //   这类"点了成功、列表里没有"最容易被读成"功能坏了"。
+        writeInvalidate([EP_APIKEYS]);
+        await loadAPIKeys();
+        return true;
+      } catch (e) { toast('保存失败：' + e.message, true); return false; }
+    }, { label: '保存', busyText: '保存中…' });
+  }
+
+
+  // 行内操作：事件委托（表格行会随刷新重建）。
+  $('apiKeyRows').addEventListener('click', async ev => {
+    const b = ev.target.closest('button[data-apikey]');
+    if (!b || b.disabled) return;
+    const id = b.dataset.apikey, act = b.dataset.act;
+    if (act === 'toggle') {
+      // ⚠⚠ 2026-10-21 修：**不能**用按钮文案判断当前状态。
+      //
+      // 原写法：
+      //     await busyRun(b, async () => {
+      //       const on = b.textContent === '启用';    // ← 此时已经不是「启用」了
+      //       ...
+      //     }, { label: '切换', busyText: '…' });
+      //
+      // `busyRun` 一进入（busyRun 内 L4926）就把按钮文案改成 busyText，
+      // 然后才调 fn()。所以 fn 里读到的 textContent 恒为 `'…'`，
+      // `'…' === '启用'` **永远 false** ⇒ 永远发送 `enabled:false`
+      // ⇒ **只能禁用、永远启用不了**。
+      //
+      // 用户报的现象正是这个：「这个 apikey 启用禁用有 bug」——
+      // 界面上状态显示「禁用」、按钮显示「启用」，点一下后端又收到 false，
+      // 于是什么也没变，看起来像"点了没反应"。
+      //
+      // ⇒ 改成从**列表缓存**读状态。和下面 edit 分支同一数据源（那里也是
+      //   从 _apikeysCache 找 cur），所以"看到的状态"与"据以取反的状态"
+      //   必然是同一个值 —— 不会再出现"界面一套、判断另一套"。
+      const cur = (window._apikeysCache || []).find(x => x.id === id);
+      if (!cur) {
+        // 缓存里找不到就别猜：猜错方向会把用户本来想启用的 key 再禁一次。
+        toast('列表已变化，请刷新后重试', true);
+        return;
+      }
+      const on = !cur.enabled;   // 点击后要落到的状态
+      await busyRun(b, async () => {
+        try {
+          await admin('/admin/apikeys/toggle', { method: 'POST', body: JSON.stringify({ id, enabled: on }) });
+          toast(on ? '已启用' : '已禁用');
+          // ⚠ 2026-10-21 修：**先丢缓存再拉列表**。
+          //
+          // `loadAPIKeys()` 走 sharedGet（30s TTL），不丢就会拿旧快照重画 ——
+          // 用户看到的是「点了按钮，提示说已启用，但那一行状态没变」。
+          //
+          // save（saveAPIKeyModal）/ reset / delete 三处都有这一行，就 toggle 漏了。
+          // 这是「改成功了但界面不刷新」的同一形状，本仓已经踩过两次
+          // （新建 key 后列表里没有，见 saveAPIKeyModal 那段注释）。
+          writeInvalidate([EP_APIKEYS]);
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('操作失败：' + e.message, true); return false; }
+        // 文案跟着**目标状态**走（启用/停用），不是无信息量的"切换" ——
+        // 用户点的是"启用"，进度条上就该写"启用中…"。
+      }, { label: on ? '启用' : '停用', busyText: on ? '启用中…' : '停用中…' });
+      return;
+    }
+    if (act === 'edit') {
+      // 打开弹窗（额度 / 限速 / 可用模型同屏可改）。
+      //
+      // ⚠ 现值取自**表格当前渲染用的那份数据**而不是再查一次后端：
+      // 用户点的就是这一行，值就在手上；再查一次只会引入"点了编辑，
+      // 弹窗里显示的却是别的 key（或刚好被刷新换了值）"这类时序问题。
+      const cur = (window._apikeysCache || []).find(x => x.id === id);
+      if (!cur) { toast('账号列表已变化，请刷新后重试', true); return; }
+      openAPIKeyModal('edit', cur);
+      return;
+    }
+    if (act === 'reset') {
+      if (!confirm('重置这把 key 的已用额度与失败数？')) return;
+      await busyRun(b, async () => {
+        try {
+          await admin('/admin/apikeys/reset', { method: 'POST', body: JSON.stringify({ id }) });
+          toast('已重置');
+          writeInvalidate([EP_APIKEYS]);   // 同上：重置改了额度/失败数，别拿旧快照重画
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('重置失败：' + e.message, true); return false; }
+      }, { label: '重置', busyText: '…' });
+      return;
+    }
+    if (act === 'delete') {
+      if (!confirm('删除这把 API key？删除后使用它的调用方立即失效。')) return;
+      await busyRun(b, async () => {
+        try {
+          await admin('/admin/apikeys/delete', { method: 'POST', body: JSON.stringify({ id }) });
+          toast('已删除');
+          // ⚠ 先丢缓存再拉列表：`loadAPIKeys()` 走 sharedGet（30s TTL），
+          //   不丢的话列表会把刚删掉的那把 key **原样画回来**（实测 20s 不消失）。
+          writeInvalidate([EP_APIKEYS]);
+          await loadAPIKeys(); return true;
+        } catch (e) { toast('删除失败：' + e.message, true); return false; }
+      }, { label: '删除', busyText: '…' });
+      return;
+    }
+  });
+
+  // pollAPIKeys 无感轮询：digest 比对（enabled/used/requests/fails 变化才重绘）。
+  async function pollAPIKeys() {
+    if (document.hidden) return;
+    const sec = $('apiKeyRows');
+    if (!sec || sec.offsetParent === null) return; // 面板不可见不刷
+    let d;
+    try { d = await sharedGet('ep:/admin/apikeys', () => admin('/admin/apikeys')); }
+    catch { return; }
+    const list = (d && d.keys) || [];
+    const digest = JSON.stringify(list.map(k => [k.id, k.enabled, k.used, k.requests, k.fails]));
+    if (digest === sec._last) return;
+    sec._last = digest;
+    renderAPIKeys(list);
+  }
+
+  // settingsSaving 保存请求在途。
+  //
+  // # 为什么需要它（同一条报障的另一半）
+  //
+  // 点「保存设置」时若焦点还在某个数字框里，浏览器会先给那个框派发 `change`
+  // （blur 提交），再派发按钮的 `click`。这条 change 会走 `#content` 的委托
+  // ⇒ `markDirty(true)`。正常时序下它发生在 PUT 之前、随后被 `fillSettings`
+  // 清掉；但只要有任何一次事件落在 PUT 返回**之后**（慢请求、或用户在等待期间
+  // 又碰了一下控件），顶部就会重新挂上「有未保存的修改」—— 而那一刻服务端
+  // 其实已经存好了，用户看到的是一个**说反话**的提示。
+  // ⇒ 保存在途期间一律不标脏；收尾时由 fillSettings 统一清一次。
+  let settingsSaving = false;
+
+  function markDirty(on) {
+    if (on && settingsSaving) return;   // 保存途中不标脏（见 settingsSaving）
+    $('settingsDirty').textContent = on ? '（有未保存的修改）' : '';
+    $('settingsDirty').style.color = on ? 'var(--warn)' : '';
+  }
+
+  async function loadSettings() {
+    try {
+      const r = await sharedGet('ep:/admin/settings', () => admin('/admin/settings'));
+      fillSettings(r.settings, r);
+    } catch (e) {
+      $('setReadonly').innerHTML = `<dt>错误</dt><dd class="err">${esc(e.message)}</dd>`;
+    }
+  }
+
+  async function saveSettings() {
+    const body = collectSettings();
+    // 签到时点/保活时点已弃用（统一 30 分钟扫描，设置页不再展示）——
+    // body 里不再有这两个键，原来的"时点不能为空"校验随之删除。
+    const btn = $('btnSettingsSave');
+    btn.disabled = true;
+    settingsSaving = true;
+    try {
+      const r = await admin('/admin/settings', { method: 'PUT', body: JSON.stringify(body) });
+      // fillSettings 末尾会 markDirty(false) —— 保存成功 = 界面与磁盘一致 = 不脏。
+      fillSettings(r.settings, r);
+      const nr = (r.need_restart || []).length;
+      toast(`设置已保存并写入 config.json：${(r.applied || []).length} 项立即生效`
+        + (nr ? `，另有 ${nr} 项需重启网关才生效` : ''), false);
+    } catch (e) {
+      toast('保存失败：' + e.message, true);
+      // 保存失败**保持脏**：界面上的值确实还没落盘，这时候清掉提示才是骗人。
+    } finally {
+      settingsSaving = false;
+      btn.disabled = false;
+    }
+  }
+
+  // ---------------------------------------------------------------- 成长计划
+  let growthSnaps = [];
+
+  // 按 uid 取账号积分余额（「额度」）。
+  // 数据来自 share（最近一次 /admin/accounts 的结果），不进成长快照 ——
+  // 快照来自上游探测、会因抖动而 stale，而额度来自网关本地状态，
+  // 两者失败语义不同；在前端 join 可让「取不到额度」只影响那一格，
+  // 不会污染已经做好的「快照失败保留上次数据」这条降级路径。
+  // 返回 null 表示该账号不在账号池视图里（与「额度为 0」区分开）。
+  function creditsOf(uid) {
+    const a = share.find(x => x.uid === uid);
+    if (!a || typeof a.credits !== 'number') return null;
+    return a.credits;
+  }
+
+  function renderGrowth(list) {
+    growthSnaps = list || [];
+
+    const sum = growthSnaps.reduce((a, g) => {
+      // 「待完成」用 pending_*（未接单 + 已接单 + 进行中），不是 acceptable_*。
+      // acceptable 只数未接单的，会让已接单/进行中的任务从统计里消失 ——
+      // 那样账号明明还有 5 个任务要做，卡片却显示 0。
+      // 兼容：旧快照没有 pending_* 字段时回落到 acceptable_*，避免显示成 0。
+      a.claim += (g.pending_count != null ? g.pending_count : (g.acceptable_count || 0));
+      a.credit += (g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0));
+      a.streak = Math.max(a.streak, g.streak_days || 0);
+      a.energy += g.energy || 0;
+      // 可领奖：已完成但奖励还没到手的部分，这才是「现在能拿到的分」。
+      a.right_now += g.claimable_credit || 0;
+      a.right_now_n += g.claimable_count || 0;
+      // 额度：账号当前积分余额合计，只累加拿得到的那些账号。
+      const c = creditsOf(g.uid);
+      if (c !== null) { a.credits += c; a.credits_n++; }
+      return a;
+    }, { claim: 0, credit: 0, streak: 0, energy: 0, right_now: 0, right_now_n: 0, credits: 0, credits_n: 0 });
+
+    $('growthCards').innerHTML = [
+      ['账号数', growthSnaps.length, ''],
+      // 额度排在「可领」前面：先看家底，再看还能拿多少。
+      ['额度合计', sum.credits_n ? sum.credits : '—', sum.credits_n ? '' : 'dim'],
+      // 待办合计 = 待完成任务 + 完成后可得（合并：「5 任务 · +600」）。
+      ['待办合计', `${sum.claim} 任务 · +${sum.credit}`, sum.claim ? 'warn' : 'dim'],
+      // 可领合计 = 待领取任务 + 现在可领额度（合并：「2 项 · +300」）。
+      ['可领合计', `${sum.right_now_n} 项 · +${sum.right_now}`, sum.right_now_n ? 'ok' : 'dim'],
+      ['最长连登', sum.streak + ' 天', ''],
+      ['能量合计', sum.energy, ''],
+    ].filter(([k, v]) =>
+      // ⚠ 值为 0 的「合计类」卡**直接不生成**（用户要求"少空白、合理利用空间"）。
+      //   实测最典型的浪费是「可领合计 **0 项 · +0**」—— 值为 0 时它没有任何信息量。
+      // ⚠ 判据保守：**只过滤名字含「合计」的** —— 「账号数 0」是**最重要**的信息
+      //   （配了上游却没账号），一刀切会掩盖故障。
+      // ⚠⚠ 为什么"不生成"而不是"生成后再扫一遍藏掉"：我在 `refresh()` 里扫过一遍、
+      //   又加过 500ms 延时再扫一遍，**两次都没生效** —— 因为这几张卡要等
+      //   `loadGrowth()` 拿到上游数据才画，**扫描的时机永远赶不上**（看截图才发现）。
+      //   在生成处判掉，与时序无关。
+      !(k.indexOf('合计') >= 0 && /^[0\s+项·—–\-]*$/.test(String(v)))
+    ).map(([k, v, c]) =>
+      `<div class="card"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join('');
+    if (!growthSnaps.length) {
+      $('growthRows').innerHTML = rowPlaceholder(COLS.growth, '账号池为空');
+      renderGrowthGroups();
+      return;
+    }
+
+    $('growthRows').innerHTML = growthSnaps.map(g => {
+      // 只有「压根没数据」才整行报错。刷新失败但有上次数据时（stale=true）
+      // 继续正常渲染，只在账号名旁挂一个过期标记 —— 不能让一次上游抖动抹白整张表。
+      const stale = g.stale
+        ? ` <span class="pill warn" title="本次刷新失败，展示的是 ${new Date(g.observed_at).toLocaleTimeString('zh-CN', { hour12: false })} 的数据：${esc(g.error || '')}">可能过期</span>`
+        : '';
+      const name = esc(maskNick(g.nickname)) + stale;
+      const U = esc(g.uid);
+      if (g.error && !g.tasks_total) {
+        // 「昵称」列已占 1 格，余下 COLS.growth - 1 格由错误信息占满。
+        //
+        // # 这是 bug B2
+        //
+        // 原先写死 colspan="11"，而那行只有 1 个前置 <td> + 11 = 12 格，
+        // 表面上"刚好等于 12 列"。但「昵称」那一格已经占掉 1 列，
+        // 所以正确值是 COLS.growth - 1 = 11 —— 数值碰巧对了，
+        // **含义却是错的**：它把"整行跨列"当成了"剩余列"。
+        // 一旦成长表加列，这个 11 不会跟着变，错误行就会少占一格。
+        // 写成减法后，加列自动跟随。
+        return `<tr><td>${name}</td><td colspan="${COLS.growth - 1}" class="err" title="${esc(g.error)}">${esc(g.error.slice(0, 70))}</td></tr>`;
+      }
+      // 额度取不到时显示 —（而不是 0）：账号可能已不在池里，这与「余额为零」是两回事。
+      const cr = creditsOf(g.uid);
+      const quota = cr === null
+        ? '<span class="dim" title="该账号不在账号池视图里，取不到额度">—</span>'
+        : `<span class="mono">${cr}</span>`;
+      // ⚠⚠ 用户要求「**高度保证一行**」—— 这里原来有两处 `<br>`，把「连登」格撑成**三行**
+      //    （17 天 / 距 28d 还差 11 / 补签×2）⇒ 整行高度是别行的三倍。
+      //    ⚠ 注意：光靠全局的 `white-space:nowrap` **拦不住 `<br>`**（那是显式换行），
+      //    必须真的把它去掉 —— 用户当场指着这张表说「这个表格不符合要求」。
+      // 改法照钉钉 / 飞书表格：**一行内用 `·` 串起来 + 全文进 `title`**（悬停可看，
+      // 被截断成 `…` 也不丢信息），补签卡单独留一个小徽章（那是要点的信息）。
+      const streakFull = [
+        g.streak_days ? `${g.streak_days} 天` : '',
+        g.next_tier ? `距 ${g.next_tier} 还差 ${g.next_tier_remaining}` : '',
+        g.makeup_cards ? `补签×${g.makeup_cards}` : '',
+        (g.makeup_cards && g.makeup_dates && g.makeup_dates.length) ? `可补 ${g.makeup_dates.length}` : '',
+      ].filter(Boolean).join(' · ');
+      const streak = g.streak_days
+        ? `<span title="${esc(streakFull)}">${g.streak_days} 天`
+          + (g.makeup_cards
+              ? `<span class="pill warn" style="margin-left:6px">补签×${g.makeup_cards}</span>`
+              : '')
+          + `</span>`
+        : '<span class="dim">—</span>';
+      // ⚠ 补签那格**已经并入上面**（同一行的 span 里），所以这里留空 ——
+      //    保留变量名是为了不动下面拼接那一行的代码（少一处改动少一处风险）。
+      const makeupHtml = '';
+      // 待完成 / 完成后可得：口径是"还没做完"（未接单+已接单+进行中），
+      // 合并成一格：「5 +600」（+600 = 完成后可获得的额度）。
+      const pendN = g.pending_count != null ? g.pending_count : (g.acceptable_count || 0);
+      const pendC = g.pending_credit != null ? g.pending_credit : (g.acceptable_credit || 0);
+      const pendCell = pendN
+        ? `<span class="pill ok">${pendN}</span>${pendC ? `<span class="dim" style="font-size:11px"> +${pendC}</span>` : ''}`
+        : '<span class="dim">—</span>';
+      // 可领：已完成但奖励还没领（合并待领取 + 现在可领）：「2 +300」。
+      const claimCell = g.claimable_count
+        ? `<span class="pill warn">${g.claimable_count}</span>${g.claimable_credit ? `<span class="dim" style="font-size:11px"> +${g.claimable_credit}</span>` : ''}`
+        : '<span class="dim">—</span>';
+
+      const act = [
+        // 领奖放最前：这是唯一真正加分的动作，有可领的就一定是当前最该点的。
+        `<button data-gact="claim"   data-uid="${U}"${g.claimable_count ? '' : ' disabled'} title="领取已完成任务的奖励${g.claimable_credit ? `（共 ${g.claimable_credit} 分）` : ''}">领取</button>`,
+        `<button data-gact="accept"  data-uid="${U}"${g.acceptable_count ? '' : ' disabled'} title="把未接单的任务接进列表开始计进度。接单不发奖励，奖励要走「领取」">接单</button>`,
+        `<button data-gact="redeem" data-uid="${U}">兑换</button>`,
+        `<button data-gact="makeup" data-uid="${U}"${g.makeup_dates && g.makeup_dates.length ? '' : ' disabled'}>补签</button>`,
+        `<button data-gact="open"   data-uid="${U}"${g.blind_box_affordable ? '' : ' disabled'}>开盒</button>`,
+        `<button data-gact="draw"   data-uid="${U}"${g.lottery_chances ? '' : ' disabled'}>抽奖</button>`,
+      ].join(' ');
+
+      // 额度/能量合并成一格：额度 + 「能量N」（能量 >0 才显示，纯文字，不用 ⚡）。
+      const quotaEnergy = `${quota}${g.energy ? ` <span class="dim" style="font-size:11px">能量${g.energy}</span>` : ''}`;
+
+      return `<tr>
+        <td>${name}</td>
+        <td>${quotaEnergy}</td>
+        <td>${streak}${makeupHtml}</td>
+        <td>${pendCell}</td>
+        <td>${claimCell}</td>
+        <td style="white-space:nowrap">${act}</td>
+      </tr>`;
+    }).join('');
+
+    renderGrowthGroups();
+  }
+
+  // 四个视图的判定。状态取值与官方前端枚举一致：
+  // not_accepted | accepted | in_progress | completed | claimed
+  // 语义要点：completed = 任务条件已达成但**奖励还没领**；claimed = 奖励已领取。
+  // 两者都归入「已完成」（从用户视角看这类任务都不需要再做动作了），
+  // 区别在于 completed 那一行会多出一个「领取」按钮。
+  const GROWTH_VIEWS = {
+    acceptable: { label: '待接单', test: t => t.status === 'not_accepted' && !t.locked },
+    running:    { label: '进行中', test: t => t.status === 'accepted' || t.status === 'in_progress' },
+    done:       { label: '已完成', test: t => t.status === 'completed' || t.status === 'claimed' },
+    all:        { label: '全部',   test: () => true },
+  };
+  let growthView = 'acceptable';
+  // 用户是否手动点过视图按钮。没点过时首次加载会自动落到第一个非空视图 ——
+  // 否则「任务都已接单」的账号一进来就是空表，看起来像功能坏了。
+  let growthViewPicked = false;
+  // 任务明细一次只显示一个账号，由 growthAccount 下拉框决定。
+  let growthUID = '';
+  // 可自动化任务码集合，来自 GET /admin/growth/auto/actions。
+  //
+  // # 为什么从后端取而不是写死在前端
+  //
+  // 后端的能力表（internal/workbuddy/autotask.go 的 autoActions）是**唯一的**事实来源。
+  // 前端抄一份的话，后端加第 18 条时按钮不会出现，而且**没有任何信号** ——
+  // 与 webui_endpoint_guard_test.go 要防的"静默漂移"是同一种病。
+  let autoCodes = new Set();
+  let autoCodesLoaded = false;
+
+  const GROWTH_STATUS_TEXT = {
+    // 「未接单」只在「还没领到第一只 Buddy」时出现，且官方前端没有这个状态。
+    // 保留它是因为那种账号确实需要先接单，否则连进度都不显示。
+    not_accepted: ['待接单', 'dim'],
+    // accepted = 已接单但进度还是 0 —— 用户要做的是「去客户端完成」，
+    // 所以文案直接写成「待完成」而不是「进行中」，与卡片的「待完成任务」对齐。
+    accepted: ['待完成', ''],
+    // in_progress = 已经做了一部分（有 current/target），才叫「进行中」。
+    in_progress: ['进行中', ''],
+    // completed 与 claimed 分开显示：前者奖励还没领（行内给「领取」按钮），后者已到账。
+    completed: ['待领取', 'warn'],
+    claimed: ['已领取', 'ok'],
+  };
+
+  // 任务到期时间的展示文本。返回 {text, cls}；没有期限返回 null。
+  //
+  // 为什么用服务端算好的 expires_in_days 而不是自己 parse expires_at：
+  // 时区、跨天舍入、"当天算不算可用"这些口径每处各写一遍必然不一致。
+  // 服务端已按自然日算好（见 scheduler.daysUntil），界面只管显示。
+  //
+  // 三档语义（与服务端的 Expired / ExpiringSoon 对齐）：
+  //   已过期   → 红字「已过期 N 天」，提示这个任务已经作废
+  //   7 天内   → 黄字「剩 N 天」，值得优先做
+  //   其余     → 灰字日期，只是信息
+  function fmtTaskExpiry(t) {
+    if (!t || t.expires_at === undefined || t.expires_in_days === undefined) return null;
+    // 服务端对已领取的任务不带这两个字段，这里再兜一层（旧数据可能没有 expired 标记）
+    const d = t.expires_in_days;
+    if (t.expired || d < 0) {
+      return { text: '已过期 ' + Math.abs(d) + ' 天', cls: 'err' };
+    }
+    if (t.expiring_soon || d <= 7) {
+      return { text: '剩 ' + d + ' 天', cls: 'warn' };
+    }
+    // 日期只显示到「月-日」，年份对 1~2 个月的期限没有信息量
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t.expires_at);
+    return { text: m ? `${Number(m[2])}-${Number(m[3])}（剩 ${d} 天）` : '剩 ' + d + ' 天', cls: '' };
+  }
+
+  // 把当前 growthView 同步到按钮选中态。自动选视图与手动点击都走这里，
+  // 避免两处各自改 class 导致显示与实际视图不一致。
+  function syncGrowthViewButtons() {
+    const box = $('growthViews');
+    if (!box) return;
+    for (const b of box.querySelectorAll('button[data-gview]')) {
+      b.classList.toggle('on', b.dataset.gview === growthView);
+    }
+  }
+
+  // 统计单个账号在四个视图下各有多少条任务。
+  function growthCounts(g) {
+    const c = { acceptable: 0, running: 0, done: 0, all: 0 };
+    for (const t of ((g && g.tasks) || [])) {
+      for (const k of Object.keys(GROWTH_VIEWS)) {
+        if (GROWTH_VIEWS[k].test(t)) c[k]++;
+      }
+    }
+    return c;
+  }
+
+  // 账号下拉框：选项文字带上待接单/进行中条数，
+  // 这样不用逐个点开也能看出哪个账号还有活干。
+  function buildGrowthAccountSelect() {
+    const sel = $('growthAccount');
+    if (!sel) return;
+    const prev = growthUID;
+    // 「全部账号」= 空 uid：下拉按钮（一键完成）与顶部「全部xxx」动作将作用于所有账号。
+    const allOpt = `<option value="">全部账号（下方按钮对所有账号执行）</option>`;
+    const opts = allOpt + growthSnaps.map(g => {
+      const c = growthCounts(g);
+      const name = maskNick(g.nickname);
+      const hint = g.tasks_total
+        ? `（待接单 ${c.acceptable} · 进行中 ${c.running}）`
+        : '（未探测）';
+      return `<option value="${esc(g.uid)}">${esc(name + hint)}</option>`;
+    }).join('');
+    sel.innerHTML = opts;
+
+    // 保持原选择；账号被删掉时回落到「全部账号」。
+    const exists = growthSnaps.some(g => g.uid === prev);
+    growthUID = (exists || prev === '') ? prev : '';
+    sel.value = growthUID;
+  }
+
+  // 渲染所选账号在所选视图下的任务表。一次只画一个账号 ——
+  // 账号多的时候把所有账号铺出来会把页面拉得很长，先选再看更实用。
+  function renderGrowthGroups() {
+    const host = $('growthGroups');
+    if (!host) return;
+    if (!growthSnaps.length) {
+      host.innerHTML = '<div class="dim" style="padding:14px 16px;font-size:12px">账号池为空。</div>';
+      $('growthTaskMeta').textContent = '';
+      return;
+    }
+
+    buildGrowthAccountSelect();
+    // 「全部账号」选中时：任务表按账号铺开太长，显示提示 + 各账号待办摘要，
+    // 让"点一键完成 = 所有账号都执行"这个作用域一眼可见。
+    if (growthUID === '') {
+      const lines = growthSnaps.map(g => {
+        const c = growthCounts(g);
+        const name = esc(maskNick(g.nickname));
+        const left = c.acceptable + c.running;
+        const done = c.done;
+        return `<div style="padding:5px 0;font-size:12px">${name}
+          <span class="pill ${left ? 'warn' : 'dim'}">待完成 ${left}</span>
+          <span class="pill ${done ? 'ok' : 'dim'}">已完成 ${done}</span></div>`;
+      }).join('');
+      host.innerHTML = `<div class="dim" style="padding:12px 16px;font-size:12px">
+        已选择「全部账号」：点上方「一键完成」将对所有账号依次执行（成长待办+领奖 → 开学季）。
+        要查看/操作单个账号请在下拉框选择它。</div><div style="padding:0 16px">${lines}</div>`;
+      $('growthTaskMeta').textContent = '';
+      return;
+    }
+    const g = growthSnaps.find(x => x.uid === growthUID) || growthSnaps[0];
+    const c = growthCounts(g);
+
+    // 首次加载且用户没手动选过视图时，落到第一个非空视图。
+    // 只做一次：之后用户点哪个就是哪个，刷新数据也不会把视图抢回去。
+    // 必须在下面读 test 之前完成，否则这次渲染用的还是旧视图。
+    if (!growthViewPicked) {
+      for (const k of ['acceptable', 'running', 'done', 'all']) {
+        if (c[k] > 0) { growthView = k; break; }
+      }
+      syncGrowthViewButtons();
+    }
+
+    const view = GROWTH_VIEWS[growthView] ? growthView : 'acceptable';
+    const test = GROWTH_VIEWS[view].test;
+
+    $('growthTaskMeta').textContent =
+      `待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done} · 共 ${c.all}`;
+
+    const name = esc(maskNick(g.nickname));
+    if (g.error && !g.tasks_total) {
+      host.innerHTML = `<div class="ggroup">
+        <div class="ghead"><span class="gname">${name}</span>
+          <span class="err" style="font-size:12px">${esc(g.error.slice(0, 120))}</span></div>
+      </div>`;
+      return;
+    }
+
+    const tasks = (g.tasks || []).filter(test);
+    const rows = tasks.map(t => {
+      const [label, cls] = GROWTH_STATUS_TEXT[t.status] || [t.status, 'dim'];
+      // 进度做成「数值 + 细进度条」：光看 4/5 不如一眼看出还剩多少。
+      // target=0 或缺失时（如 black_cat 这类活动任务）不画条，避免 0/0 的假进度。
+      let prog = '<span class="dim">—</span>';
+      if (t.target > 0) {
+        const cur = Math.max(0, Math.min(t.current || 0, t.target));
+        const pct = Math.round((cur / t.target) * 100);
+        prog = `<span class="mono" title="${cur}/${t.target}">${cur}/${t.target}</span>` +
+               `<div class="pbar" title="${pct}%"><i style="width:${pct}%"></i></div>`;
+      }
+      const reward = [
+        t.reward_credit ? `${t.reward_credit} 分` : '',
+        t.reward_energy ? `+${t.reward_energy} 能量` : '',
+      ].filter(Boolean).join(' ') || '<span class="dim">—</span>';
+      const locked = t.locked ? ' <span class="pill warn">未解锁</span>' : '';
+      // 领取优先于接单：completed 的任务已经做完了，唯一可做的就是领奖。
+      //
+      // ⚠ 这一格原来对 accepted / in_progress 一律显示「去客户端做」，
+      // 注释写着"这两类任务**本网页无法代做**"。移植伪造遥测层之后该结论
+      // **不再成立**：autoActions 里那 17 条就是网关能直接做完的。
+      //
+      // 所以现在的判据是「该任务码在不在后端能力表里」：
+      //   在 → 「一键完成」（后端自己会处理"先接单"这一步）
+      //   不在 → 仍然退回说明文字 —— 对**确实**只能去客户端做的任务保留诚实提示
+      //
+      // ⚠ 必须排除**已做完**的任务（claimed）。claimed 的 claimable 为 false，
+      // 于是它会一路落到这个分支上 —— 只看能力表的话，「已领取」的任务行也会
+      // 长出一个「一键完成」按钮，点了只会回一句"已完成（1/1）"。
+      // 这里复用 GROWTH_VIEWS.done.test 而**不另写一遍** status 判断：
+      // "什么算做完"只有一处定义，否则两边必然会漂移（视图把它算已完成、
+      // 按钮却认为还能再做）。
+      const canAuto = autoCodes.has(t.task_code) && !GROWTH_VIEWS.done.test(t);
+      const btn = t.claimable
+        ? `<button data-gclaimreward="${esc(t.task_code)}" data-uid="${esc(g.uid)}">领取 ${t.reward_credit || 0} 分</button>`
+        : (canAuto && !t.locked)
+          ? `<button data-gauto="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost" title="网关直接把该任务做完并领奖（上报伪造的客户端行为遥测）；只做这一个任务">一键完成</button>`
+          : (t.status === 'not_accepted' && !t.locked)
+            ? `<button data-gaccept="${esc(t.task_code)}" data-uid="${esc(g.uid)}" class="ghost">接单</button>`
+            : (t.status === 'accepted' || t.status === 'in_progress')
+              ? '<span class="dim" style="font-size:11px">去客户端做</span>'
+              : '<span class="dim">—</span>';
+      const tag = t.tag ? ` <span class="pill">${esc(t.tag)}</span>` : '';
+      // 到期列：只有部分任务有期限（上游 18 个里 4 个），其余显示占位。
+      // 已过期时即使有「领取」按钮也要同时给出提示 —— 那种情况下按钮点了会失败。
+      const exp = fmtTaskExpiry(t);
+      const expiry = exp
+        ? `<span class="${exp.cls}" title="${esc(t.expires_at)}">${esc(exp.text)}</span>`
+        : '<span class="dim">—</span>';
+
+      return `<tr>
+        <td class="gtask">${esc(t.title || t.task_code)}${tag}<br>
+          <span class="dim mono" style="font-size:11px">${esc(t.task_code)}</span></td>
+        <td class="gdesc">
+          <div title="${esc(t.description || '')}">${t.description ? esc(t.description) : '<span class="dim">—</span>'}</div>
+          ${t.how_to ? `<div class="howto" title="${esc(t.how_to)}">怎么做：${esc(t.how_to)}</div>` : ''}
+        </td>
+        <td><span class="pill ${cls}">${esc(label)}</span>${locked}</td>
+        <td class="mono">${prog}</td>
+        <td class="mono">${reward}</td>
+        <td class="mono exp">${expiry}</td>
+        <td style="white-space:nowrap">${btn}</td>
+      </tr>`;
+    }).join('');
+
+    host.innerHTML = `<div class="ggroup">
+      <div class="ghead">
+        <span class="gname">${name}</span>
+        <span class="dim mono" style="font-size:11px">${esc(g.uid)}</span>
+        <span class="dim" style="font-size:12px">待接单 ${c.acceptable} · 进行中 ${c.running} · 已完成 ${c.done}</span>
+        ${g.claimable_count
+          ? `<span class="pill warn">${g.claimable_count} 个待领取 · ${g.claimable_credit} 分</span>
+             <button data-gclaimall="${esc(g.uid)}">全部领取</button>`
+          : '<span class="pill ok">奖励已领完</span>'}
+        <span class="spacer"></span>
+        <span class="tog">${clientLoginHTML(g.uid)}</span>
+      </div>
+      ${tasks.length ? `<table><thead><tr>
+        <th>任务</th><th>说明</th><th>状态</th><th>进度</th><th>奖励</th><th title="仅部分任务有期限（上游 18 个里 4 个带），已领取的不显示">到期</th><th>操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>`
+      : `<div class="dim" style="padding:10px 16px;font-size:12px">该账号在「${esc(GROWTH_VIEWS[view].label)}」下没有任务。换个视图或换个账号看看。</div>`}
+    </div>`;
+  }
+
+  // 返回 true/false 而不是吞掉异常：调用方（busyRun）靠它决定是否再给提示。
+  async function loadGrowth(refresh) {
+    let r;
+    // ⚠ 与 travel 同一套语义：`?refresh=1` 绕开缓存（用户主动要新数据），
+    //   不带参数那次走共享缓存。
+    try {
+      r = refresh
+        ? await admin('/admin/growth?refresh=1')
+        : await sharedGet('ep:/admin/growth', () => admin('/admin/growth'));
+    }
+    catch (e) { $('growthRows').innerHTML = rowPlaceholder(COLS.growth, e.message, 'err'); return false; }
+    // 可自动化任务码：**首次一定取**（否则页面上永远没有「一键完成」按钮），
+    // 之后只在手动「刷新」时重取 —— 它是静态能力表（17 条写死在
+    // internal/workbuddy/autotask.go 的 autoActions），不随账号变化，
+    // 没必要跟着每次领奖后的局部刷新多跑一趟。
+    //
+    // 取不到就退化为"不显示一键完成"，**不阻塞**成长数据展示：
+    // 按钮少一个远好过整块面板报错（后端没挂这条路由时正是这个分支）。
+    if (!autoCodesLoaded || refresh) {
+      try {
+        const a = await sharedGet('ep:/admin/growth/auto/actions', () => admin('/admin/growth/auto/actions'));
+        autoCodes = new Set((a.actions || []).map(x => x.task_code));
+        autoCodesLoaded = true;
+      } catch { /* 能力表拿不到：保留上一次的集合，行内按钮退化为「去客户端做」 */ }
+    }
+    renderGrowth(r.accounts);
+    // 额度列取自 share（/admin/accounts 的本地缓存积分，只有 RefreshCredits 会更新它）。
+    // 手动「刷新」意味着「我怀疑数据旧了」，所以顺手把账号视图也拉一次；
+    // 否则领完奖再点刷新，额度列还是旧值 —— 实测同一账号刷新前后能差 252 分。
+    // 失败不影响成长数据展示，所以单独 try 且不改变返回值。
+    if (refresh) {
+      // ⚠ 这里刻意**先清缓存**：注释上一行写着"领完奖再点刷新，额度列还是旧值 ——
+      //    实测同一账号刷新前后能差 252 分"。加了共享缓存之后，不清就会**把这个缺陷带回来**。
+      lazyCache.drop('ep:/admin/accounts');
+      try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts); } catch { /* 额度刷新失败不阻塞 */ }
+    }
+    return true;
+  }
+
+  // claim = 领奖（把已达成任务的奖励领回来，唯一让积分到账的动作）
+  // accept = 接单（把任务接进列表开始计进度，不发奖励）
+  const GROWTH_LABEL = { claim: '领取奖励', accept: '接单', redeem: '兑换', makeup: '补签', open: '开盲盒', draw: '抽奖' };
+  // 纯收益、不消耗任何资源的动作，执行前不必再问一遍。
+  const GROWTH_HARMLESS = new Set(['claim', 'accept']);
+
+  // growthAct 执行一个成长动作，然后刷新界面。
+  //
+  // btn 可选：行内按钮传进来就能得到「禁用 + 文案变化」的即时反馈。
+  // 整段包在 busyRun 里，所以「写 → 刷新」期间页面始终有可见的进行中提示 ——
+  // 以前裸调 loadGrowth(true) 会让页面静止 7 秒（实测），用户以为没反应。
+  async function growthAct(uid, act, taskCode, btn) {
+    const body = { uid };
+    if (taskCode) body.task_code = taskCode;
+    const label = GROWTH_LABEL[act] || act;
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        const r = await admin('/admin/growth/' + act, { method: 'POST', body: JSON.stringify(body) });
+        const extra = r.credits ? `，+${r.credits} 额度` : '';
+        toast(`${label}成功：${r.detail || ''}${extra}`);
+        wrote = true;
+      } catch (e) {
+        growthError(e, label);
+      }
+      // 刷新放在同一个 busyRun 内：这样"写完了但界面还在读"也是可见的，
+      // 而不是写完后按钮就恢复、界面却还是旧数据。
+      //
+      // 用 loadGrowth(**false**) 读缓存，不再强制回源 —— 后端在写操作成功后
+      // 已经就地刷新了该账号的快照（scheduler.refreshOwnSnapshot），
+      // 所以缓存就是最新的。实测：强制回源 3 账号 7.2s，读缓存 ~1ms。
+      // 这是"点了要等 7 秒"的根治：把"N 个账号全探一遍"换成"只探被改的那一个"。
+      await Promise.all([loadGrowth(false), refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
+  }
+
+  // growthError 统一处理成长动作的失败提示（单账号与「全部」两条路径共用）。
+  //
+  // 分层：
+  //   预期内（跳过/被前置挡住/无可领）→ 中性 toast，不打红
+  //   被前置任务挡住                  → 额外弹**持久面板**，告诉用户去做什么
+  //   其余                            → 红色 toast（真故障）
+  //
+  // 为什么要弹面板：被前置挡住时用户接下来什么都不用点，而是要去 WorkBuddy 客户端
+  // 把前置任务做掉。只给一闪而过的 toast，用户会以为是自己操作错了并反复重试。
+  function growthError(e, label) {
+    const msg = (e && e.message) || String(e);
+    const benign = /跳过|被前置任务|需要先完成前置任务|不可领取|不可接单|没有可|没有待|不足|已领取/.test(msg);
+    toast(`${label}：${msg}`, !benign);
+    const blocked = /需要先完成前置任务[：:]\s*(.+)$/.exec(msg);
+    if (blocked) {
+      notice('接单被前置任务挡住',
+        blocked[1].trim() + '\n\n若这个前置任务在上方任务表里带「一键完成」按钮，直接点它即可；' +
+        '任务表里没有的（或显示「去客户端做」的）才需要去 WorkBuddy 客户端里做。' +
+        '前置做完后回到这里再点「接单」。');
+    }
+  }
+
+  async function growthAll(act) {
+    const label = GROWTH_LABEL[act] || act;
+    if (!GROWTH_HARMLESS.has(act) && !confirm(`对全部账号${label}？\n（会消耗各自的资源；不满足条件的会自动跳过）`)) return;
+    try {
+      const r = await admin('/admin/growth/' + act, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${label}已启动，后台执行中…`); watchTask(); }
+    } catch (e) { growthError(e, `全部${label}`); }
+  }
+
+  // ------------------------------------------------------------ 一键完成（伪造遥测层）
+  //
+  // 三个入口 ↔ 后端三条端点：
+  //
+  //   行内「一键完成」    POST /admin/growth/auto      {uid, task_code}  **同步**，返回回执
+  //   「一键完成待办」    POST /admin/growth/auto-all  {uid}             202 + 后台
+  //   「开学季一键完成」  POST /admin/school/run       {uid}             202 + 后台
+  //
+  // # 为什么单任务同步、整账号异步
+  //
+  // 单任务实测 10s 量级（含上游异步计分的回读轮询，见 claimPollAttempts/Gap），
+  // 同步等可以接受，而且能直接把「到底动没动、加了多少分」播报出来。
+  // 整账号 17 项实测约 180s —— 同步等会把浏览器/反向代理拖到超时，后端因此返回
+  // 202 并复用本仓库既有的共享任务槽；前端用 watchTask() 轮询 /admin/task 即可，
+  // 与「全部签到」等既有按钮走**同一条**进度通道（不另造一套）。
+  //
+  // # 为什么不加 confirm
+  //
+  // 这三条都是**纯收益**动作：不发真实动作、不消耗账号资源，只把该拿的分领回来，
+  // 与 GROWTH_HARMLESS 的口径一致。它确实是"上报伪造事件"这一层能力的入口，
+  // 所以按钮 title 与本文都写明了口径，但不额外打断。
+  //
+  // # 成功判据不是 HTTP 200
+  //
+  // 上游计分是**异步**的：上报后进度要数秒才刷新，且 200 也可能是"形状不符被静默丢弃"。
+  // 后端因此回读了 progress_before/after 与 claimed，前端以这些字段为判据 ——
+  // 只看 HTTP 状态会把"没计分"误报成成功。
+
+  // autoBenign 判断一条"未完成"回执是不是**预期内**的正常情况（不该打红）。
+  //
+  // 典型两类：任务本来就已完成（幂等）、black_cat 不在 23:00–08:00 计数窗口。
+  // 这些是后端的诚实降级，不是故障 —— 与 growthError 的 benign 判据同一口径。
+  function autoBenign(r) {
+    return /已完成|不在 23:00|不在窗口|不计分|跳过|未解锁/.test((r && r.message) || '');
+  }
+
+  // autoToastText 把回执拼成一句话：后端原文 + 进度变化。
+  //
+  // ⚠ 这里**不再**追加"+N 分 +M 能"：后端已经在 message 里拼过那一段了
+  // （autotask.go 仅在 credit/energy > 0 时追加），再拼一次会渲染成
+  // "…已自动领奖 +100 分 +5 能（0/1 → 1/1），+100 分 +5 能" ——
+  // 实测就是这个样子。奖励口径只由后端一处负责，前端只补它没说的进度。
+  function autoToastText(r) {
+    const prog = (r.progress_after && r.progress_before) ? `（${r.progress_before} → ${r.progress_after}）` : '';
+    return `${r.message || '完成'}${prog}`;
+  }
+
+  async function growthAutoOne(uid, taskCode, btn) {
+    await busyRun(btn, async () => {
+      let r;
+      try {
+        r = await admin('/admin/growth/auto',
+          { method: 'POST', body: JSON.stringify({ uid, task_code: taskCode }) });
+      } catch (e) {
+        // 三条可解释的拒绝（后端的 sentinel error 原文，见 internal/workbuddy/autotask.go）：
+        //   501 errTaskNotAuto   "该任务需要客户端内交互（无对应接口），无法自动完成"
+        //   404 errTaskNotFound  "该账号没有此任务"
+        //   409 errTaskBusy      "该账号有任务动作正在执行中，请等本轮结束后再试"
+        // 文案要**逐字对齐后端**：这里按关键字匹配，改后端措辞会让判据失效。
+        // 打红的只留给真故障（502 上游错误等）。
+        const msg = (e && e.message) || String(e);
+        const benign = /无法自动完成|没有此任务|正在执行中|请等本轮/.test(msg);
+        toast(`一键完成 ${taskCode}：${msg}`, !benign);
+        return;
+      }
+      toast(`${taskCode}：${autoToastText(r)}`, !r.ok && !autoBenign(r));
+      // 刷新与 growthAct 同口径：loadGrowth(false) 读后端缓存（写入时后端已就地
+      // 刷新过该账号快照），不强制回源，避免"点了要等 7 秒"。
+      await Promise.all([loadGrowth(false), refresh(), loadHistory()]);
+      return r.ok ? true : undefined;
+    }, { label: '一键完成', busyText: '执行中…' });
+  }
+
+  // 整账号 + 开学季共用的"启动后台任务"收尾：202 → 播报 + 接上进度通道。
+  async function autoStart(url, uid, okMsg) {
+    const r = await admin(url, { method: 'POST', body: JSON.stringify({ uid }) });
+    if (r && r.started) { toast(okMsg); watchTask(); }
+    return true;
+  }
+
+  // 后台任务的 409（已有任务在跑）是**互斥锁正常工作**，不是故障 ——
+  // 与「全部签到」等按钮一样不该打红，否则用户会以为是自己点坏了。
+  // 匹配后端两处不同措辞：单账号分支回 errTaskBusy 原文，全池分支回"已有任务在执行中，请等它结束"。
+  function autoStartErr(e, label) {
+    const msg = (e && e.message) || String(e);
+    toast(`${label}：${msg}`, !/正在执行中|请等本轮|已有任务/.test(msg));
+  }
+
+  // growthOneClick 合并后的「一键完成」（原「一键完成待办」+「开学季一键完成」）。
+  //
+  // 作用域：下拉框选中的账号；选「全部账号」（growthUID=''）→ 对所有账号执行
+  // （后端两个端点都支持省略 uid = 全池，见 autotask_admin.go）。
+  //
+  // 顺序执行：任务槽全局唯一（taskslot.Start 有 running 互斥），两个后台任务
+  // 不能并发 —— 先启动成长待办（auto-all，实测 ~3 分钟），等它结束后再启动
+  // 开学季（school/run）。
+  async function growthOneClick(btn) {
+    const uid = growthUID || '';   // '' = 全部账号
+    const scope = uid ? '本账号' : '全部账号';
+    // 预计耗时：成长待办里专家链是 8 次 × 6s 节流（expertSummonGap，
+    // 真实使用节奏，为过风控刻意留的），加上事件上报间隔 1.05s（reportGap），
+    // 单账号实测约 15s；全池按账号数串行累加（后端有意串行，避免并发风控画像）。
+    const n = uid ? 1 : (growthSnaps ? growthSnaps.length : 0);
+    const etaSec = Math.max(15, n * 15);
+    await busyRun(btn, async () => {
+      try {
+        // 第一步：成长待办自动完成 + 领奖。
+        await autoStart('/admin/growth/auto-all', uid,
+          `已启动：${scope}一键完成成长待办（后台执行，顶部显示进度）`);
+        // 第二步：等第一个任务结束（全局单槽），再启动开学季。
+        // ⚠ 这一步可能要等很久（见上面 etaSec 的推算），所以进度文案必须
+        //   说清"在等后台任务"而不是"正在刷新界面"—— 后者会让人以为卡死。
+        const done = await waitTaskIdle(15 * 60 * 1000);
+        if (!done) { toast('成长待办执行超时（15 分钟），请到顶部任务进度查看', true); return undefined; }
+        await autoStart('/admin/school/run', uid,
+          `已启动：${scope}开学季闭环（后台执行，顶部显示进度）`);
+        return true;
+      } catch (e) { autoStartErr(e, '一键完成'); return undefined; }
+    }, {
+      label: '一键完成',
+      busyText: '启动中…',
+      progress: `等待上游执行后台任务（约 ${etaSec}s，顶部有进度）`,
+    });
+  }
+
+  // waitTaskIdle 轮询 /admin/task，等后台任务槽空闲（上个任务跑完）。
+  // 返回 true = 在超时前空闲；false = 超时。
+  function waitTaskIdle(timeoutMs) {
+    return new Promise(resolve => {
+      const t0 = Date.now();
+      const iv = setInterval(async () => {
+        let idle = false;
+        try {
+          // ⚠ 同一端点在本文件里还有一处调用（`/admin/task`）⇒ 走共享取数器，
+      //   两处共用同一 key，30 秒内只发一次。
+      const st = await sharedGet('ep:/admin/task', () => admin('/admin/task'));
+          idle = !(st && st.running);
+        } catch { /* 轮询失败继续等 */ }
+        if (idle || Date.now() - t0 > timeoutMs) {
+          clearInterval(iv);
+          resolve(idle);
+        }
+      }, 2000);
+    });
+  }
+
+  // ---------------------------------------------------------------- 请求日志（落盘历史）
+  //
+  // 只有落盘历史一个视图：原先还有个「实时」视图读内存环形缓冲（2000 条、重启即丢），
+  // 但它与历史视图展示同一批请求、只是数据源不同，反而让人以为是两份数据。
+  // 落盘历史已经覆盖「全部保留期内的请求」，实时视图没有独立价值，故移除。
+
+  // 日志区通用的占位块。
+  //
+  // ⚠ 从 `rowPlaceholder`（生成 `<tr><td colspan=…>`）改成 `.log-empty` 块
+  //   （2026-10-19）：日志区不再是 `<table>`，`<tr>` 塞进 div 容器会被 HTML
+  //   解析器丢弃或 foster-parent 到别处 —— 页面上就是"占位句不见了"，
+  //   而那正是最需要它出现的时刻（接口挂了的时候）。
+  //   这与账号池当时的 `rowPlaceholder` → `accountPlaceholder` 是同一条教训。
+  function logPlaceholder(text, cls) {
+    return `<div class="log-empty ${cls || ''}">${esc(text)}</div>`;
+  }
+
+  // ---------------------------------------------------------------- 每页条数（含持久化）
+  //
+  // ⚠ 本段必须声明在 logPage / histPage 之前。
+  // 它们用 `limit: loadPageSize()` 初始化，而 loadPageSize 读 DefaultPageSize；
+  // const 声明有暂时性死区（TDZ）——**不像 function 那样整体提升**。
+  // 曾因此报 "Cannot access 'DefaultPageSize' before initialization"：
+  // 当时这段放在 logPage 之后，logPage 求值时 DefaultPageSize 还在 TDZ 里。
+  // 后续若要挪动这段代码，务必保持它在第一个 loadPageSize() 调用点之前。
+
+  // 上限 300 取自 `/admin/checkin/history` 的服务端上限
+  //（`checkinlog.MaxPageSize = 300`）。下限 1。
+  // 越界只在本函数里夹紧，不改变 state 的语义。
+  //
+  // ⚠ 这里原先写的是"与 /admin/logs/history、/admin/checkin/history
+  // 服务端的单页上限**一致**" —— **那句话不实**（评审实测指出）：
+  //
+  //	/admin/checkin/history?limit=9999 → 服务端夹到 limit=300
+  //	/admin/logs/history?limit=9999    → 服务端**回显 limit=9999**
+  //	                                     （只返回 300 条，但不夹紧回显值）
+  //
+  // 所以两个端点对 limit 的处理**并不一致**：一个夹回显、一个不夹。
+  // 这里取 300 是因为它是**两个端点共同的实际返回上界**，
+  // 而不是因为"两边配置一样"。
+  const PAGE_SIZE_MIN = 1;
+  const PAGE_SIZE_MAX = 300;
+  // DefaultPageSize 是「从未设置过」时的初值；一旦用户改过就以 localStorage 里存的为准。
+  //
+  // ⚠ 与后端 logbuf.DefaultPageSize / checkinlog.DefaultPageSize **不再是同一个数**：
+  // 后端那两个仍是 30。它们不是"界面偏好"，而是**服务端单页上限的默认值** ——
+  // 被 API 直接调用（不带 limit）时应保持稳定，不该跟着界面偏好变。
+  // 这里只决定**前端首次展示**给多少条。
+  //
+  // 改成 15 的理由（用户要求）：请求日志与任务历史一屏能看全，
+  // 不用先滚动才知道下面有什么；想看更多可在面板上自己调（1–300，
+  // 改过之后就按用户的选择走，不受这里影响）。
+  const DefaultPageSize = 15;
+
+  // 每页条数持久化到 localStorage，两个列表**共用同一个键**。
+  //
+  // 为什么共用一个键而不是各存一份：这是同一个用户偏好（「我习惯一次看多少条」），
+  // 不是两个独立设置。分两个键的话，在任务历史调成 100、切到请求日志还是 30，
+  // 用户会以为是 bug。之前这个值写死在 state 定义里，刷新页面就回到 30 —— 即
+  // 「不持久化」的问题，本条修复的就是它。
+  //
+  // 复用 buildNav 已有的读写范式（'wb2api.panel'）：try/catch 包住，
+  // 隐私模式下 localStorage 抛异常时静默回落默认值，不影响功能。
+  const LS_PAGESIZE = 'wb2api.pagesize';
+  // 模型分组折叠状态（T5）。每个上游一个键，值是 '1'/'0'。
+  // 与 pagesize 同一个模式：这是用户偏好，刷新与切面板都该保持。
+  const LS_MODELGROUP = 'wb2api.modelgroup';
+  // 账号池分组折叠状态（R3）。**独立前缀**，绝不复用 LS_MODELGROUP。
+  //
+  // # 为什么必须是两个键
+  //
+  // 两边都按上游名做键（workbuddy / codearts）。若共用 wb2api.modelgroup，
+  // 两个面板会互相覆盖同一个格子：
+  //   用户在模型面板收起 codearts → 账号池的 codearts 也**被动**折叠；
+  //   再在账号池展开它 → 模型面板又被撑开。
+  // 而且**没有任何报错**，只表现为"折叠状态自己会变"。
+  //
+  // 同一个上游在两个面板里是两种不同的视图，偏好就必须是两份。
+  const LS_ACCTGROUP = 'wb2api.acctgroup';
+  // 对话测试的「上游筛选」（T7）。与 pagesize / modelgroup 同一个模式。
+  const LS_MODELPROVIDER = 'wb2api.modelprovider';
+  // modelProviderWanted：用户想要的上游筛选值。
+  // 与 DOM 分开存 —— <select> 会把不在 option 里的值归一成空串，
+  // 而恢复选择时 option 还没建出来（见 modelProviderFilter 的注释）。
+  let modelProviderWanted = '';
+
+  function loadPageSize() {
+    try {
+      const raw = localStorage.getItem(LS_PAGESIZE);
+      if (raw == null) return DefaultPageSize;      // 从未设置过
+      return clampPageSize(raw);
+    } catch { return DefaultPageSize; }             // 隐私模式 / 值损坏
+  }
+
+  function savePageSize(n) {
+    try { localStorage.setItem(LS_PAGESIZE, String(n)); } catch { /* 隐私模式 */ }
+  }
+
+  // clampPageSize 把任意输入（含空、小数、超界、NaN）收敛为合法整数。
+  function clampPageSize(v) {
+    const n = Math.floor(Number(v));
+    if (!isFinite(n) || n < PAGE_SIZE_MIN) return PAGE_SIZE_MIN;
+    return n > PAGE_SIZE_MAX ? PAGE_SIZE_MAX : n;
+  }
+
+  // 请求日志「历史（落盘）」的分页状态。与任务历史共用 renderPager。
+  const logPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'logPager', onGo: () => loadLogHistory({ force: true }) };
+
+  async function loadLogHistory(opt = {}) {
+    // 清屏挂起期间不刷新落盘视图。
+    //
+    // 必须在这里挡，而不是只把 setInterval 停掉：翻页、切面板、恢复显示
+    // 都会直接调用本函数。只挡定时器的话，用户翻一页就把"已清屏"覆盖掉了。
+    // 恢复由「恢复显示」按钮负责（它先把标志置回 false 再调用本函数）。
+    if (logViewSuspended) return;
+
+    // ★ T-400：参数在**这里**就算出来（下面的显示/复用判据都要用它）。
+    const qs = new URLSearchParams({ limit: String(logPage.limit), offset: String(logPage.offset) });
+    if (logStatus !== null && logStatus !== '') qs.set('status', String(logStatus));
+    const argsKey = qs.toString();
+    // 复用判据：同参数 + 30 秒内 + 上次成功 —— **且调用方没有 force**。
+    if (!opt.force && argsKey === lastLogArgs && lastFetchOk && (Date.now() - lastFetchAt) < LOGFETCH_TTL) {
+      return;   // 跳过 fetch（renderLogs 仍按签名短路判断 ⇒ 通常一个 DOM 都不碰）
+    }
+    lastLogArgs = argsKey;
+    lastFetchAt = Date.now();
+
+    // 每次拉取前先给一句「正在读取」，避免翻页时旧内容一直挂着让人以为没反应。
+    // ★ T-396a：**不清屏** —— 只在"首次加载 / 本来就没有行"时给占位。
+    // 为什么：轮询（30s）与翻页都会走到这里，清空再重建 = 白屏闪一下。
+    const logHost0 = $('logrows');
+    if (!(logHost0 && logHost0.querySelector('[data-logseq]'))) {
+      if (logHost0) logHost0.innerHTML = logPlaceholder('正在读取落盘日志…');
+    }
+    // ★ T-396a：**拉取前不再撤卡片**（原来这里调 hideLogStatusBar）。
+    // 为什么改：成功路径上"先撤再画"会让卡片区闪一下；现在改成**失败/未启用/空文件**那几个
+    // 提前 return 的分支里各自撤（见下面的 catch 与 !enabled 分支），成功时旧卡片一直留到新数据画上去。
+    // ⚠ 仍然只清 DOM、不动 logStatus：筛选是用户的意图，翻页/轮询时不该被静默清掉。
+    let r;
+    // ★ T-396a：筛选拼进 URL（服务端参数）；qs 已在函数顶部算好（T-400 起，复用判据要用它）。
+    try { r = await admin('/admin/logs/history?' + qs.toString()); }
+    catch (e) {
+      // ★ T-396a：失败分支才撤卡片（成功时保留旧的直到新数据画上去 ⇒ 不闪）。
+      lastFetchOk = false;   // ★ T-400：失败不写入复用窗口（否则一次失败会被缓存 30 秒）
+      hideLogStatusBar();
+      $('logrows').innerHTML = logPlaceholder(e.message, 'err');
+      return;
+    }
+    lastFetchOk = true;   // ★ T-400：只有成功才允许后续轮询复用
+    renderLogFileInfo(r.file);
+    if (!r.enabled) {
+      hideLogStatusBar();
+      $('logrows').innerHTML = logPlaceholder('未启用落盘（日志只进 stdout，重启后不可回溯）');
+      $('logPager').innerHTML = '';
+      return;
+    }
+    logPage.total = r.total || 0;
+    // ★ T-396a：服务端的**全库**状态计数（键是字符串）+ 全库总数 / 筛选后总数。
+    serverCounts = (r && r.counts && typeof r.counts === 'object') ? r.counts : {};
+    serverTotalAll = Number((r && r.total_all) || 0) || 0;
+    serverTotalFiltered = Number((r && r.total) || 0) || 0;
+    // 越界自愈：总数变少（例如文件被裁剪）导致当前页不存在时，回退到最后一页重取。
+    const maxOffset = Math.max(0, (pageCount(logPage) - 1) * logPage.limit);
+    if (logPage.offset > maxOffset) {
+      logPage.offset = maxOffset;
+      renderPager(logPage);
+      return loadLogHistory({ force: true });
+    }
+    if (!r.items || !r.items.length) {
+      hideLogStatusBar();
+      $('logrows').innerHTML = logPlaceholder('落盘日志为空');
+      $('logMeta').textContent = '';
+      // 真的没有行 ⇒ 没有状态码可统计，筛选也无从谈起
+      logStatus = null;
+      renderPager(logPage);
+      return;
+    }
+    $('logMeta').textContent = `（历史 ${r.total} 条）`;
+    // 历史视图直接用自己的快照渲染：它已覆盖完整落盘范围。
+    logEntries = normalizeDesc(r.items);
+    renderLogs(logEntries);
+    renderPager(logPage);
+  }
+
+  // ---------------------------------------------------------------- 统一分页组件
+  //
+  // 任务历史与请求日志共用这一个组件、同一套语义：
+  //   state = { offset, limit, total, container, onGo }
+  // 这样做是为了消灭「一个写死 limit、一个用下拉选条数」的两套做法。
+  //
+  // 页码只在「总数变化导致当前页越界」时才回退，不主动重置：
+  // 用户翻到第 3 页时，后台轮询刷新数据不应把他踢回第 1 页
+  // （只有切换筛选/每页条数这类**用户主动**改变查询范围的操作才回第 1 页）。
+  //
+  // 每页条数的常量、夹紧函数与 localStorage 持久化统一放在本文件上方
+  // 「每页条数（含持久化）」一节 —— 那里声明得比 logPage / histPage 早，
+  // 避免 const 的暂时性死区问题。此处不再重复定义。
+
+  function pageCount(state) {
+    return Math.max(1, Math.ceil((state.total || 0) / (state.limit || 30)));
+  }
+  function pageIndex(state) {
+    return Math.floor((state.offset || 0) / (state.limit || 30)) + 1;
+  }
+
+  function renderPager(state) {
+    const el = $(state.container);
+    if (!el) return;
+    const pages = pageCount(state);
+    const cur = pageIndex(state);
+    const total = state.total || 0;
+    const from = total === 0 ? 0 : state.offset + 1;
+    const to = Math.min(state.offset + state.limit, total);
+
+    el.innerHTML = `
+      <button data-page="prev"${cur <= 1 ? ' disabled' : ''}>上一页</button>
+      <span class="pageno">第 ${cur} / ${pages} 页</span>
+      <button data-page="next"${cur >= pages ? ' disabled' : ''}>下一页</button>
+      <span>共 ${total} 条${total ? `，本页 ${from}-${to}` : ''}</span>
+      <span class="spacer"></span>
+      <span>每页</span>
+      <input data-page="size" type="number" class="pagesize"
+             value="${state.limit}" min="${PAGE_SIZE_MIN}" max="${PAGE_SIZE_MAX}"
+             step="1" inputmode="numeric"
+             title="可直接输入 ${PAGE_SIZE_MIN}-${PAGE_SIZE_MAX} 之间的任意整数">
+      <span>条</span>`;
+
+    el.querySelectorAll('button[data-page]').forEach(btn => {
+      btn.onclick = () => {
+        if (btn.disabled) return;
+        const next = btn.dataset.page === 'prev' ? cur - 1 : cur + 1;
+        if (next < 1 || next > pages) return;
+        state.offset = (next - 1) * state.limit;
+        state.onGo();
+      };
+    });
+
+    // 每页条数：输入框提交时生效。
+    // 用 change（失焦或回车才触发）而不是 input（每敲一个键触发）——
+    // 否则想输入「120」时，敲到「1」就已经按每页 1 条重查了一次，白白多打两次请求。
+    const box = el.querySelector('input[data-page="size"]');
+    if (box) {
+      const apply = () => {
+        const next = clampPageSize(box.value);
+        // 把夹紧后的值写回输入框，让用户看到自己输的 999 实际按 300 生效
+        box.value = String(next);
+        if (next === state.limit) return;   // 没变就不重查
+        state.limit = next;
+        savePageSize(next);                 // 持久化：刷新页面后仍是这个值
+        state.offset = 0;   // 改变每页条数属于主动改变查询范围 → 回第 1 页
+        state.onGo();
+      };
+      box.onchange = apply;
+      box.onkeydown = ev => {
+        if (ev.key === 'Enter') { ev.preventDefault(); apply(); box.blur(); return; }
+        // 上下方向键增减一页条数：与原生 number 行为一致，但走同一条夹紧路径。
+        // 基准取**输入框当前值**而不是 state.limit —— state.limit 只在提交时更新，
+        // 若以它为基准，连按上键后按下键会从旧值回退（上到 31、再按下变成 29）。
+        if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+          ev.preventDefault();
+          box.value = String(clampPageSize(clampPageSize(box.value) + (ev.key === 'ArrowUp' ? 1 : -1)));
+        }
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------- 日志
+  //
+  // 统一排序契约（本文件所有日志类列表都遵守）：
+  //   **展示顺序 = 时间倒序，最上面是最新**；同一时刻按 seq 倒序稳定排列。
+  //
+  // 为什么要有这条契约：两个数据源的物理顺序本来就不一样 ——
+  //   Ring.Snapshot 是**正序**（它是按 seq 递增的增量游标接口，改成倒序会破坏游标语义）；
+  //   Sink.LoadRecent 是**倒序**（最新在前）。
+  // 历史实现让调用方各自记住该不该 reverse、以及该用 append 还是 prepend，
+  // 于是实时视图的「最新」会沉在自己这批的底部、历史视图整体是旧在上新在下。
+  //
+  // 现在改为：无论从哪个源来，先并入本地缓冲，再由 renderLogs 统一按倒序整体重绘。
+  // 调用方不再需要关心顺序，也不需要知道用 append 还是 prepend。
+  let logEntries = [];   // 本地日志缓冲（按 seq 去重）
+
+  // logViewSuspended：清屏后挂起落盘视图的刷新。
+  //
+  // 声明必须放在这里（与 logEntries 一起、在 loadLogHistory 之前）——
+  // 放到清屏按钮的绑定处（原第 4145 行）会造成 TDZ：
+  // loadLogHistory 在首次调用时就读它，而那时声明还没执行到。
+  // 本包有 TDZ 守卫（gen_tdz_guard.js）专门防这类问题。
+  let logViewSuspended = false;
+
+  // logStatus：请求日志的**状态码筛选**（null = 不筛，全部）。
+  //
+  // # 为什么存在模块变量而不是 DOM 里
+  //
+  // 照 modelProviderWanted 的同一条教训：本文件有过 select 把不存在的值
+  // 归一成空串、于是"选了却等于没选"的缺陷。筛选状态是**用户意图**，
+  // 卡片只是它的投影 —— 重绘卡片时从它读，不从 class 列表反推。
+  //
+  // # ⚠ 它只筛**当前页**
+  //
+  // /admin/logs/history 只接受 limit/offset（internal/admin/admin.go 的
+  // logsHistory → Sink.Page(offset, limit)），**没有 status 入参**。
+  // 要做全局筛选得改后端分页契约（过滤后再分页），不在本次范围。
+  // 所以卡片的数字是「本页」的，条尾那句范围声明是硬要求，不许删。
+  let logStatus = null;
+  // ★ T-396a：服务端 counts / 全库总数 / 筛选后总数（由 loadLogHistory 每次填）。
+  // ★ T-396a：renderLogs 的签名（= 当前渲染出来的 seq 列表）。
+  // 为什么用 seq 而不是下标：下标会随新增条目整体位移 ⇒ 每次轮询都"变了" ⇒ 等于没短路。
+  let lastLogSig = '';
+  // ★ T-400：请求复用（**只给轮询用**）。
+  // ⚠ 陷阱：用户点「刷新」的全部意义就是"我要看最新的"。若"同参数 30 秒内复用"把手动脉冲吞掉，
+  //   表现就是"点了刷新没反应"—— 本仓 exact 同型教训见 loadGenericList 的注释。
+  // ⇒ 轮询可复用；手动刷新 / 换筛选 / 翻页 / 切面板一律 `{ force: true }` 穿透。
+  const LOGFETCH_TTL = 30000;
+  let lastFetchAt = 0;
+  let lastFetchOk = false;
+  let lastLogArgs = '';
+  let serverCounts = {};
+  let serverTotalAll = 0;
+  let serverTotalFiltered = 0;;
+
+  // logStatusOf 把一条日志的状态码收敛成"可比较的值"。
+  //   · 0 / 缺失 / 非数字 ⇒ null（不归入任何卡片；画出来的话会出现一张「null」卡）
+  //   · 其余原样返回，包括 0 以外的怪值 —— 显示原值总比显示猜测好
+  function logStatusOf(e) {
+    const n = Number(e && e.status);
+    return isFinite(n) && n > 0 ? n : null;
+  }
+
+  // renderLogStatusBar 画「本页状态码」卡片条。
+  //
+  // # 为什么数字必须带范围说明
+  //
+  // 用户看到「200 ×13」很自然会读成"全部日志里只有 13 个 200"，
+  // 而落盘日志可能有 13077 条、这一页只是 15 条。数字不带范围就是在骗人 ——
+  // 本项目的既有纪律：空白与数字都必须能自我解释。
+  // 所以条尾常驻「本页 N 条 · 共 M 条 · 卡片只统计当前页」。
+  //
+  // # 排序
+  //
+  // 按状态码数值升序（200 < 401 < 429）；「全部」永远排最前 —— 它是"取消筛选"，
+  // 不属于状态码序列。用数值而不是字符串比较，否则 "1000" 会排在 "200" 前面。
+  // renderLogStatusBar 画状态码卡片条（T-396a：数字来自**服务端全库**统计）。
+  //   serverCounts = r.counts（键是字符串）；serverTotalAll = r.total_all；
+  //   serverTotalFiltered = r.total；pageLen = 本页画出来的行数。
+  // ⚠ 「全部」对应 logStatus === null（不是 ''）—— 与既有语义一致。
+  function renderLogStatusBar(serverCounts, serverTotalAll, serverTotalFiltered, pageLen) {
+    const box = $('logStatusBar');
+    if (!box) return;
+    const cnt = (k) => {
+      const v = (serverCounts || {})[String(k)];
+      const n = Number(v);
+      return isFinite(n) && n > 0 ? n : 0;
+    };
+    const codes = Object.keys(serverCounts || {}).map(Number).filter(n => isFinite(n) && n > 0).sort((a, b) => a - b);
+    if (!codes.length && !serverTotalAll) { hideLogStatusBar(); return; }
+    const chip = (val, label, num, on, hint) =>
+      `<button type="button" class="chip${on ? ' on' : ''}" data-logst="${val}"
+               aria-pressed="${on ? 'true' : 'false'}" title="${esc(hint)}">${label}<span>${num}</span></button>`;
+    const cards = [
+      chip('', '全部', serverTotalAll, logStatus === null, '不筛选，全库 ' + serverTotalAll + ' 条'),
+    ].concat(codes.map(c => chip(String(c), String(c), cnt(c), String(logStatus) === String(c),
+      '只看全库状态码 ' + c + ' 的 ' + cnt(c) + ' 条')));
+    box.innerHTML = cards.join('') +
+      `<span class="dim" style="font-size:11px;margin-left:4px">`
+      + `本页 ${pageLen} 条 · 当前筛选 ${serverTotalFiltered} 条 · 全库 ${serverTotalAll} 条</span>`;
+    box.style.display = 'flex';
+  }
+
+  // hideLogStatusBar 只清卡片（不动 logStatus，理由见 loadLogHistory 里的注释）。
+  function hideLogStatusBar() {
+    const box = $('logStatusBar');
+    if (!box) return;
+    box.innerHTML = '';
+    box.style.display = 'none';
+  }
+
+  // setLogStatus 是筛选状态的唯一写入口（T-396a：筛选**走服务端**）。
+  //   点了当前已选的那张 ⇒ 不重复请求（与 statsRange / trendView 的写法一致）。
+  //   ★ 为什么必须重新请求、而不是 renderLogs(logEntries)：本地缓冲只有当前页（30 条），
+  //     用户翻到第 2 页点「200」看到的只是"第 2 页里的 200"（用户实测报的正是这个）。
+  //     日志 5 万条，前端不可能全拉下来筛 ⇒ 交给后端 status 参数。
+  function setLogStatus(v) {
+    if (v === logStatus) return;
+    logStatus = v;
+    logPage.offset = 0;        // ★ 换筛选必须回第 1 页（否则可能落在越界页 ⇒ 空表）
+    loadLogHistory({ force: true });   // ★ T-400：换筛选是用户意图 ⇒ 必须穿透复用窗口
+  }
+
+  // 归一化：时间倒序；时间相同按 seq 倒序，保证顺序稳定可复现。
+  function normalizeDesc(items) {
+    return (items || []).slice().sort((a, b) => {
+      const ta = new Date(a.at).getTime(), tb = new Date(b.at).getTime();
+      if (ta !== tb) return tb - ta;
+      return (b.seq || 0) - (a.seq || 0);
+    });
+  }
+
+  // 把新条目并入缓冲，按 seq 去重（增量轮询会重复送达同一条）。
+  // 当前只有落盘历史一个视图（每次整页拉取），保留它是为了将来若再加增量数据源时
+  // 仍走同一条合并路径，避免又出现「各自 reverse」的分叉。
+  function mergeLogEntries(incoming, cap) {
+    const bySeq = new Map();
+    for (const e of logEntries) bySeq.set(e.seq, e);
+    for (const e of (incoming || [])) bySeq.set(e.seq, e);
+    logEntries = normalizeDesc(Array.from(bySeq.values())).slice(0, cap);
+  }
+
+  // tokPerSec 输出速率，算法与 stdout 表格（logging.go 的 tokpsField）保持一致 ——
+  // 同一条请求在终端与网页上必须是同一个数，否则排障时会互相矛盾。
+  //   tokens < 0 表示上游 usage 缺失 → 显示 -，绝不能拿 -1 去除时间；
+  //   total_ms <= 0（时钟粒度内完成）→ 返回 0.0，避免除零得到 Inf/NaN。
+  //
+  // ⚠ 2026-10-20 两次校正，第二次才是对的：
+  //   ① 分子：必须是**纯输出**（out_tokens），不是 tokens（total=输入+输出）。
+  //      拿 total 算会得出 15759 t/s 这种物理上不可能的值。
+  //   ② 分母：必须是**纯生成阶段**（total_ms − ttfb_ms），不是 total_ms。
+  //      首字等待期间模型还没开始吐字，把它算进分母会把速度系统性压小。
+  //
+  //   实测对照（同一条 csg 请求）：out=176、total=2256ms、ttfb=1262ms
+  //     · 我原来的算法  176 / 2.256s        = 78.0 t/s
+  //     · 正确算法      176 / (2.256−1.262) = 177.1 t/s
+  //   而客户端（DSH）自己显示的是 176 tok/s（176 / (2.4−1.4) = 176）⇒ 正确算法才对得上。
+  //
+  // ⚠ 非流式不显示：一次性返回没有"生成速度"概念（new-api 也是仅 isStream 才给）。
+  // ⚠ 生成阶段 <= 0（首字几乎等于整轮耗时）也返回 —：那时速度无从计算，
+  //   显示一个 0.0 会让人以为"极慢"，而真相是"全在等首字"。
+  // ⚠ 2026-10-20 第三次校正：**显示精牌照 DSH 官方双分支规则**。
+  //
+  //   出处（本地源码，可复核）：
+  //     D:\project_GIT\test\deepseek-harness-codearts\plugin-src\client\tokens-per-second.js
+  //   它自己引用的是 @deepseek-ai/dsh-client-ui-chat 的 lib/client.js：
+  //
+  //     function formatTokensPerSecond(tps) {
+  //       const clamped = Math.max(0, tps);
+  //       return clamped >= 10 ? String(Math.round(clamped))
+  //                            : String(Math.round(clamped * 10) / 10);
+  //     }
+  //
+  //   ⇒ **≥10 取整、<10 保留一位小数**（两套精度，不是统一 toFixed）。
+  //   官方意图是「大数不需要小数位，小数才需要」。
+  //   ⚠ 别改成统一 toFixed(1)：那会让 177 tok/s 显示成 177.1，与客户端对不上。
+  function fmtTps(v) {
+    const c = Math.max(0, v);
+    return c >= 10 ? String(Math.round(c)) : String(Math.round(c * 10) / 10);
+  }
+
+  function tokPerSec(outTokens, totalMs, ttfbMs, mode) {
+    if (mode && mode !== 'stream') return '-';
+    if (!outTokens || outTokens <= 0) return '-';
+    if (!totalMs || totalMs <= 0) return '0.0';
+    const genMs = totalMs - (ttfbMs > 0 ? ttfbMs : 0); // 纯生成阶段 = DSH 的 decodeMs
+    if (genMs <= 0) return '-';
+    return fmtTps(outTokens / (genMs / 1000));
+  }
+
+  // renderLogs 始终整体重绘（不再 append/prepend），输入可为任意顺序。
+  // renderLogs 渲染落盘日志的表格体。
+  //
+  // # 从 `<tr>` 换成 grid 行（2026-10-19 照参考项目 Agent2API 的 page-requests.css）
+  //
+  // 旧的 20 行实现有四个真实短板，都在换形态时一并修掉：
+  //   ① **表头粘不住** —— 日志几十上百行，一滚就看不见列名了（sticky 见 .log-head）
+  //   ② **数值列左对齐** —— TTFB/tok/tok/s/耗时 四列竖向比对时数字参差不齐
+  //   ③ **空值直接写 `-`** —— 与真实值的字重相同，扫一眼分不清"没这个数"和"是 0"
+  //   ④ **空列表直接 return** —— 表格留着上一次的内容，看起来像加载失败
+  //      ⚠ 第 ④ 条尤其坏：它让"接口返回空"和"渲染没跑"在界面上完全一样。
+  //
+  // ⚠ 300 条上限保留：这是**渲染**上限（分页 limit 可能被用户调到更大），
+  //   超出的部分靠翻页看，不是数据被丢弃。
+  //
+  // # 状态码卡片与它的筛选（2026-10-25 用户要求）
+  //
+  // 卡片统计的是 `list`（**当前页、排序后、300 条上限内**）—— 与表格里
+  // 实际画出来的行一一对应。⚠ 必须先截断再统计：先统计后截断会让卡片说
+  // "本页 320 条"，而屏幕上只有 300 行，数字当场自相矛盾。
+  //
+  // 筛选在**本页内**做，因为后端 /admin/logs/history 没有 status 入参。
+  // 这也意味着筛完可能一行都不剩（比如切页后这一页没有 429）—— 那时
+  // 要把筛选自动放下并说明原因，而不是留一张亮着的卡片配一句"暂无请求"：
+  // 用户会以为日志真的没了，而真相只是这一页没有该状态码。
+  // htmlToRow 把一条日志变成 **一个 DOM 节点**（T-400）。
+  //
+  // # 为什么必须是"唯一"的行生成函数
+  //
+  // 顶部插入（prepend）与全量替换（replaceChildren）都要造行。若两处各写一遍模板，
+  // 改一处漏一处（本仓 exact 同型教训：renderLoginIntro 那次）。所以只有这一个出口。
+  // logScrollEl 找日志表真正的滚动容器（T-400）。
+  // #logrows 自己可能不滚（滚动条在某个祖先面板上），直接读它的 scrollTop 会永远 0 ⇒ 补偿失效。
+  function logScrollEl() {
+    let el = $('logrows');
+    while (el && el !== document.body) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) return el;
+      el = el.parentElement;
+    }
+    return $('logrows') || document.documentElement;
+  }
+
+  function htmlToRow(e) {
+    const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
+    // ② 数值列右对齐（.r）
+    // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
+    //    参考项目的原话"空着会被当成渲染缺失"。破折号用全角「—」与项目其它面板一致。
+    const dash = '<span class="log-none">—</span>';
+    const secs = new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false });
+    const html = `<div class="log-row${e.status >= 400 ? ' failed' : ''}" data-logseq="${esc(String(e.seq == null ? '' : e.seq))}">
+        <span class="mono log-none">${e.seq}</span>
+        <span class="log-none">${esc(secs)}</span>
+        <span class="mono log-tr" title="${esc(e.model || '')}">${esc(e.model || '—')}</span>
+        <span class="log-tr" title="${esc(e.mode || '')}">${esc(e.mode || '—')}</span>
+        <span><span class="pill ${st}">${e.status}</span></span>
+        <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
+        <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
+        <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
+        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.ttfb_ms, e.mode)}</span>
+        <span class="mono r">${e.total_ms}ms</span>
+    </div>`;
+    // 用 template 解析（比 createElement + 逐列 appendChild 短，且与旧模板逐字一致）
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html.trim();
+    return tpl.content.firstElementChild;
+  }
+  // logRowsFragment 造一整块（一次性替换用；不做逐条 append）
+  function logRowsFragment(rows) {
+    const frag = document.createDocumentFragment();
+    for (const e of rows) frag.appendChild(htmlToRow(e));
+    return frag;
+  }
+  function renderLogs(items) {
+    const host = $('logrows');
+    if (!host) return;
+    const list = normalizeDesc(items).slice(0, 300);
+
+    // 统计当前页的状态码分布（未筛选的全集）。
+    const counts = new Map();
+    for (const e of list) {
+      const code = logStatusOf(e);
+      if (code !== null) counts.set(code, (counts.get(code) || 0) + 1);
+    }
+
+    // 筛选值若已不在这一页 ⇒ 自动放开并告知。**先判再画卡片**，
+    // 否则会出现"卡片显示全部、表格却是空的"这种一闪而过的自相矛盾。
+    let autoCleared = null;
+    if (logStatus !== null && !counts.has(logStatus)) {
+      autoCleared = logStatus;
+      logStatus = null;
+    }
+
+    const shown = logStatus === null ? list : list.filter(e => logStatusOf(e) === logStatus);
+
+    // ④ 空态必须显式画出来，不能 return 留着上一屏的内容。
+    // ⚠ 自动放开筛选这条分支下 list 非空、shown 为空 —— 不是"暂无请求"，
+    //   是"这一页没有该状态码"，两者必须用不同的字说，否则等于骗人。
+    if (!list.length) {
+      // ★ T-396a：清屏路径必须重置签名，否则清屏后画不出来。
+      lastLogSig = '';
+      host.innerHTML = logPlaceholder('暂无请求');
+      hideLogStatusBar();
+      return;
+    }
+    // ★ T-396a 签名短路（"不闪"的底线，比完整行 diff 便宜得多）：
+    // 轮询每 30 秒跑一次，而日志往往没变。只要"没变化就一个 DOM 都不碰"，
+    // 90% 的闪动就消失了。完整行 diff 留给 396b。
+    //   ⚠ 签名用 seq 列表（不是下标）：下标会随新增条目整体位移 ⇒ 每次轮询都"变了"。
+    //   ⚠ 换了 logStatus 之后条目集合不同 ⇒ 签名自然变 ⇒ 正常重绘。
+    const sig = shown.map(e => String(e.seq)).join(',');
+    if (sig === lastLogSig) return;   // ★ 一个 DOM 都不碰
+    lastLogSig = sig;
+    renderLogStatusBar(serverCounts, serverTotalAll, serverTotalFiltered, list.length);
+    if (!shown.length) {
+      host.innerHTML = logPlaceholder(
+        '本页 ' + list.length + ' 条里没有状态码 ' + autoCleared + '（已取消该筛选；翻页可看其它页）');
+      lastLogSig = '';
+      return;
+    }
+    // ★ T-400：行生成收敛到**唯一**的 htmlToRow（本仓踩过"两处模板各写一遍、改一处漏一处"）。
+    // ★ T-400：**行级 diff** —— 只增删变化的行，其余 DOM 节点原样保留。
+    // 为什么：T-396a 的签名短路只救了"列表完全没变"。只要有新日志进来，
+    // 旧实现就整块重建 15 行 × 10 列 ⇒ 重排 + 重绘 + 滚动位置跳（用户原话"每次都会把这个页面进行重构，然后就会卡顿"）。
+    // 对齐用 **seq**（单调序号、唯一稳定），不用下标 —— 下标会随"新增一条"整体位移。
+    const cur = Array.from(host.querySelectorAll('[data-logseq]'));
+    const curSeq = cur.map(el => el.dataset.logseq);
+    const wantSeq = shown.map(e => String(e.seq == null ? '' : e.seq));
+    const addN = wantSeq.length - curSeq.length;      // 顶部多出来的条数
+    // ★ T-402b：判据修正 —— 位移量必须用**锚**算，不能用长度差。
+    //
+    // # 为什么"长度差"算不出位移（T-401/T-402 两轮实测抓到的第二层缺陷）
+    //   日志列表是**固定页大小**（limit=15）：新日志进 1 条 ⇒ 尾部同时挤出 1 条
+    //   ⇒ wantSeq.length === curSeq.length ⇒ **addN 恒为 0** ⇒ `addN > 0` 永远为假
+    //   ⇒ 情形 A 从来没进过 ⇒ 行 diff 一次都没用上
+    //   （实测证据两轮一致：新日志确实进来、行数仍是 15，但旧行 __probe 消失 = 被重建）
+    //
+    // # 正确做法：拿"旧的第一条"当锚
+    //   newN = curSeq[0] 在 wantSeq 里的下标 = **顶部新增的条数**
+    //   （旧的第一条在分页窗口里不会消失，除非它被尾部挤出去了 —— 那就走情形 B，见下）
+    //   然后要求整段对齐：curSeq[i] === wantSeq[newN + i] 全部成立；
+    //   **不要求**尾部相同（尾部被挤出的那些本来就不该再画）。
+    let newN = -1;
+    if (curSeq.length > 0) newN = wantSeq.indexOf(curSeq[0]);
+    // ⚠ T-402 实测第三层：对齐比较必须**按较短的那段**比。
+    //   直接 `curSeq.every((s,i) => wantSeq[newN+i] === s)` 时，右端会越界
+    //   （wantSeq[15] === undefined）⇒ 在"顶部进 1 条 + 尾部挤 1 条"这个最常见的情形下
+    //   **永远为假** ⇒ 情形 A 还是不进（实测：15 行全部 __probe 丢失 = 又被全量重建）。
+    //   ⇒ 只比 curSeq 的前 cmpN 项与 wantSeq[newN …] 对齐；被挤出窗口的那几项本来就不该再画。
+    const cmpN = Math.min(curSeq.length, Math.max(0, wantSeq.length - newN));
+    const aligned = cmpN > 0 && curSeq.slice(0, cmpN).every((s, i) => wantSeq[newN + i] === s);
+    if (newN > 0 && aligned) {
+      const sc = logScrollEl();
+      const nearTop = sc.scrollTop <= 2;     // 贴顶就保持贴顶（否则用户会被"推下去"）
+      const rowH = host.firstElementChild ? host.firstElementChild.offsetHeight : 18;
+      const frag = document.createDocumentFragment();
+      for (let i = newN - 1; i >= 0; i--) {  // 倒序 append ⇒ 最终顺序与 shown 一致
+        frag.appendChild(htmlToRow(shown[i]));
+      }
+      host.insertBefore(frag, host.firstChild);
+      // ★ T-402：prepend 之后必须**删掉尾部被挤出窗口的节点**，
+      //   否则表格会变成 15+newN 行（比不做 diff 更糟：行数悄悄膨胀）。
+      const all = Array.from(host.querySelectorAll('[data-logseq]'));
+      for (let i = all.length - 1; i >= wantSeq.length; i--) all[i].remove();
+      if (!nearTop) sc.scrollTop += newN * rowH;   // ★ 补偿：正在读的那条停在原地
+      return;
+    }
+    // 情形 B：其余情况（尾部变了 / 筛选变了 / 翻页）⇒ 一次性替换（仍比逐条 append 快）
+    host.replaceChildren(logRowsFragment(shown));
+  }
+
+  // ---------------------------------------------------------------- 历史
+  // 任务历史分页状态。与请求日志共用 renderPager（同一套语义：offset/limit/total）。
+  const histPage = { offset: 0, limit: loadPageSize(), total: 0, container: 'histPager', onGo: () => loadHistory() };
+
+  async function loadHistory() {
+    // 「任务历史」标签页已删除（用户本轮要求）—— 本函数保留仅为兼容
+    // 既有调用点（boot、动作收尾等会调它），标签页不存在时**直接返回**，
+    // 避免对空 DOM 取 .value 抛错。
+    if (!document.getElementById('histrows')) return;
+    const kind = $('histKind').value;
+    let r;
+    try {
+      r = await admin(`/admin/checkin/history?limit=${histPage.limit}&offset=${histPage.offset}`
+        + (kind ? '&kind=' + kind : ''));
+    } catch { return; }
+    histPage.total = r.total || 0;
+    renderHistRetention(histPage.total);
+    // 越界自愈：切筛选或数据被裁剪后当前页可能已不存在，回退到最后一页。
+    const maxOffset = Math.max(0, (pageCount(histPage) - 1) * histPage.limit);
+    if (histPage.offset > maxOffset) {
+      histPage.offset = maxOffset;
+      renderPager(histPage);
+      return loadHistory();
+    }
+    const items = r.items || [];
+    if (!items.length) {
+      // ⚠ 这里必须走 TableState（反引号模板），**不能**用单引号字符串 ——
+      // 单引号里的 ${COLS.hist} 不会被插值，会在页面上原样显示出
+      // `${COLS.hist}` 这串字面量（真实发生过的缺陷，浏览器实测确认）。
+      // 用 TableState.empty 既拿到正确列数，也统一了空态样式。
+      $('histrows').innerHTML = TableState.empty(COLS.hist, '暂无记录');
+      renderPager(histPage);
+      return;
+    }
+    $('histrows').innerHTML = items.map(x => {
+      const cls = x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'err' : 'dim';
+      const label = { ok: '成功', already: '今日已签', fail: '失败', skip: '跳过' }[x.status] || x.status;
+      // 积分：**没拿到就用「—」占位**，不要留空白单元格。
+      //
+      // 空白单元格的歧义：是"这次没有积分"还是"数据没加载出来"？
+      // 表格里一列全是空白时尤其明显（实测 30 行 skip 记录整列空），
+      // 用户会以为面板坏了。`x.credits || ''` 在 credits=0 时也会落进这个坑
+      // ——0 是**真实值**，不该被当假值吃掉。
+      const hasCredits = typeof x.credits === 'number';
+      const creditsCell = hasCredits
+        ? `<span class="mono${x.credits > 0 ? ' ok' : ''}">${x.credits > 0 ? '+' : ''}${x.credits}</span>`
+        : '<span class="dim">—</span>';
+      return `<tr>
+        <td class="dim">${new Date(x.at).toLocaleString('zh-CN', { hour12: false })}</td>
+        <td>${esc(x.uid || x.nickname)}</td>
+        <td>${esc(x.kind)}</td>
+        <td><span class="pill ${cls}">${esc(label)}</span></td>
+        <td>${creditsCell}</td>
+        <td class="dim">${x.trigger === 'manual' ? '手动' : '定时'}</td>
+        <td class="dim" title="${esc(x.detail || '')}">${esc((x.detail || '').slice(0, 40))}</td>
+      </tr>`;
+    }).join('');
+    renderPager(histPage);
+  }
+
+  // ---------------------------------------------------------------- API 接入信息
+  const BASE_URL = location.origin + '/v1';
+
+  const ENDPOINTS = [
+    ['POST /v1/chat/completions', 'OpenAI 兼容对话（流式/非流式）', 'Bearer'],
+    ['GET  /v1/models', '模型目录（上游实时，缓存 1h）', 'Bearer'],
+    ['GET  /v1/model', '同上，单数别名', 'Bearer'],
+    ['GET  /status', '账号池状态', 'Bearer'],
+    ['GET  /healthz', '探活（无账号时 503）', '无'],
+    ['GET  /ui', '本控制台', '仅本机'],
+    ['*    /admin/*', '本控制台后端', '仅本机'],
+  ];
+
+  function renderApi() {
+    // API Key 卡片：显示脱敏值，卡片点击复制的是完整值（data-copy 里放真值，展示层放掩码）。
+    const masked = (KEY || CONSOLE_KEY) ? (KEY || CONSOLE_KEY).slice(0, 4) + '****' + (KEY || CONSOLE_KEY).slice(-4) : '（未启用鉴权）';
+    const keyShown = keyRevealed ? (KEY || CONSOLE_KEY) : masked;
+
+    const card = (label, copyValue, display, extra) => `
+      <div class="card copyable" data-copy="${esc(copyValue || '')}" data-label="${esc(label)}" title="点击复制">
+        <div class="k">${esc(label)}<span class="copyhint">点击复制</span></div>
+        <div class="v" style="font-size:13px;font-weight:500;word-break:break-all;margin-top:4px">${esc(display)}${extra || ''}</div>
+      </div>`;
+
+    $('apiCards').innerHTML =
+      card('接入地址', BASE_URL, BASE_URL) +
+      card('API Key', (KEY || CONSOLE_KEY) || '', keyShown,
+        (KEY || CONSOLE_KEY) ? '<button class="minibtn" data-reveal="1">' + (keyRevealed ? '隐藏' : '显示') + '</button>' : '') +
+      card('鉴权头', (KEY || CONSOLE_KEY) ? 'Authorization: Bearer ' + (KEY || CONSOLE_KEY) : '',
+        (KEY || CONSOLE_KEY) ? 'Authorization: Bearer ' + (keyRevealed ? (KEY || CONSOLE_KEY) : masked) : '（无需鉴权）') +
+      card('服务名', serviceName(), serviceName());
+
+    $('epRows').innerHTML = ENDPOINTS.map(([ep, use, auth]) =>
+      `<tr><td class="mono">${esc(ep)}</td><td>${esc(use)}</td><td class="dim">${esc(auth)}</td></tr>`
+    ).join('');
+
+    const m = ($('model') && $('model').value) || 'deepseek-v4-flash';
+    $('curlSample').textContent =
+      `curl ${BASE_URL}/chat/completions \\\n` +
+      `  -H "Authorization: Bearer ${(KEY || CONSOLE_KEY) || '<API_KEY>'}" \\\n` +
+      `  -H "Content-Type: application/json" \\\n` +
+      `  -d '{"model":"${m}","messages":[{"role":"user","content":"你好"}]}'`;
+  }
+
+  // ---------------------------------------------------------------- 复制
+  function copyText(value, label) {
+    if (!value) { toast('这里没有可复制的内容', true); return; }
+    const done = () => toast(`${label || '内容'} 已复制到剪贴板`);
+    const fail = () => toast('复制失败：浏览器不允许访问剪贴板，请手动选中文本', true);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, fail);
+      return;
+    }
+    // 兜底：非安全上下文（http + 非 localhost）下 clipboard API 不可用
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy') ? done() : fail(); } catch { fail(); }
+    document.body.removeChild(ta);
+  }
+
+  // ---------------------------------------------------------------- 数值格式化
+  //
+  // 这一组函数存在的唯一理由：后端聚合字段有「缺失」和「真的是 0」两种情况，
+  // 而 JS 里的 `undefined + '%'` 会渲染成 "undefined%"、`NaN` 会渲染成 "NaN%"。
+  // 显示层必须自己兜底 —— 宁可显示「—」，也不要让用户看到 undefined/NaN。
+  //
+  // 注意「缺失」的判定用的是**类型**（typeof number && isFinite），而不是真值判断：
+  // 0 是合法数值（例如今日确实一次缓存都没命中），不能被当成缺数据。
+
+  // num 把任意输入转成有限的 number；不是有限数就返回 null（= 缺数据）。
+  function num(v) {
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+
+  // numNonNeg 同 num，但把负数也归成「缺数据」。
+  //
+  // 计数类字段（token 数、credit、缓存命中）在语义上不可能为负，
+  // 出现负数只可能来自上游异常或被污染的日志。直接渲染负数会让用户
+  // 以为「消耗是负的/系统在退钱」，比显示占位符更糟。
+  // 注意这里是**显示层**的兜底：后端的 `> 0` 过滤已经在源头挡住，
+  // 但前端不假设后端一定正确（历史上就有旧字段 -1 表示缺失的约定）。
+  function numNonNeg(v) {
+    const n = num(v);
+    return n === null || n < 0 ? null : n;
+  }
+
+  // fmtCount 整数计数：缺失 → null（调用方显示占位符），0 → '0'（真实值）。
+  function fmtCount(v) {
+    const n = numNonNeg(v);
+    return n === null ? null : String(Math.round(n));
+  }
+
+  // fmtCredit 额度/消耗：小数最多 4 位，去掉尾随 0；缺失 → null。
+  // 保留 4 位是因为单次请求的 credit 常在 0.0x 量级，取整会全变成 0。
+  function fmtCredit(v) {
+    const n = numNonNeg(v);
+    if (n === null) return null;
+    if (n === 0) return '0';
+    return String(Number(n.toFixed(4)));
+  }
+
+  // fmtTokens 大数缩写：12.3k / 1.2M。缺失 → null。
+  function fmtTokens(v) {
+    const n = numNonNeg(v);
+    if (n === null) return null;
+    if (n < 1000) return String(Math.round(n));
+    if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
+    return (n / 1000000).toFixed(1) + 'M';
+  }
+
+  // fmtRate 比率 → 百分比字符串。入参是 0..1 的小数。
+  // 缺失（含后端因分母为 0 而不输出该字段）→ null，而不是 '0%'。
+  // 越界的比率按缺数据算：>1 或 <0 说明口径已经错了，显示出来只会误导。
+  function fmtRate(v) {
+    const n = num(v);
+    if (n === null || n < 0 || n > 1) return null;
+    return (n * 100).toFixed(1) + '%';
+  }
+
+  // PLACEHOLDER 无数据时统一用「—」，全站一致，也便于用户理解成「没有这个值」。
+  const NODATA = '—';
+
+  function renderStats(s) {
+    // 网关状态卡要读累计请求/成功率：存一份供 renderCards 使用
+    //（renderCards 在 refresh 里先于 renderStats 调用）。
+    window._statsCache = s;
+    if (!s) return;
+    // ⚠⚠ **报表区在这里就画**（不能放在函数末尾 —— 我踩过）。
+    // 函数体里有一处 `return [`（提前返回卡片数组），我最初把调用插在它之后
+    // ⇒ **成了死代码，永远执行不到**：页面上"Top 账号 / 上游占比"两个面板一直空着，
+    // 而 `pageerror` 干干净净，让人误以为没事。放在这里最稳：拿到数据就画得到。
+    renderStatsReport(s);
+    // 窗口文案必须如实说明数据来源：统计改为聚合落盘历史后，
+    // 不再是「进程内窗口」，而落盘不可用时会回落到内存 —— 两种情况不能混为一谈。
+    //
+    // 三个数字都先过 fmtCount 再插值：直接写 `${s.total}` 时，若上游/后端给了
+    // 非数值（对象、数组、垃圾字符串），非空值会被模板原样串成 `[object Object]`
+    // 显示给用户。这里与卡片区用同一套格式化，保证「同一个数在哪都长一样」。
+    //
+    // 判空用 `!totalText || totalText === '0'`：既要挡住 null（无数据），
+    // 也要保留「0 条 = 日志为空」这个既有文案 —— 光判 null 会把
+    // 「（落盘日志为空）」变成「（全部落盘历史，共 0 条）」，是措辞退化。
+    const totalText = fmtCount(s.total);
+    let win;
+    if (s.source === 'file') {
+      // 只报总数，不再回显「从某时刻起」—— 那个起点是文件里最早一条的时间，
+      // 随轮转/清理不断变化，写在这里既不稳定也没人据此判断什么。
+      win = (!totalText || totalText === '0')
+        ? '（落盘日志为空）'
+        : `（全部落盘历史，共 ${totalText} 条）`;
+    } else if (s.source === 'memory') {
+      const capText = fmtCount(s.capacity);
+      win = s.window_from
+        ? `（仅内存缓冲，进程启动至今，上限 ${capText === null ? NODATA : capText} 条）`
+        : '（暂无请求）';
+    } else {
+      win = '（未启用日志）';
+    }
+    if (s.error) win += ' · ' + esc(String(s.error));
+    $('statsWindow').textContent = win;
+
+    // 成功率：total 缺失或为 0 时不给数字（会得到 0/0 → NaN）。
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
+
+    // 精简后的核心统计（用户要求"不用很复杂，就是简单的统计"，参考 new-api 那类
+    // 仪表盘的呈现：请求数 / 成功失败 / 成功率 / token / 耗时）。
+    // 砍掉：缓存命中率 / 缓存 token / 推理 token / 缓冲占用 —— 排障细节，
+    // 堆在这里只会让"一眼看网关用没用起来"这件事变难。
+    //
+    // 「累计消耗」改成 token（用户本轮要求）：不同上游的 credit 单位不同
+    //（积分/额度/点），加起来没有可比性；而 token 是跨上游统一的口径。
+    //
+    // ⚠⚠ **这里原来写的是「消耗 token = 输出 token + 推理 token（usage 里记录的只有这两个）」——
+    //   那个假设是错的，已于 2026-10-18 修掉（F1，由 R1 复核提出、主脑复验）：**
+    //   日志里的 `tokens` 就是 `completion_tokens`，而它**已经包含推理 token** ⇒ 再加一遍
+    //   `think_tokens` 等于把推理算两遍，会把「消耗 token」虚高约 **47%**。
+    //   复验方法（可重跑）：统计 `think_tokens > tokens` 的行数 —— **零反例**；
+    //   量级上 sum(think)/sum(tokens) ≈ 0.474。另有三处代码旁证：wire/usage.go 从
+    //   `completion_tokens_details.reasoning_tokens` 取、usage_test.go 的 fixture、
+    //   cline.go 的「思考 token 计入 completion_tokens」注释。
+    // ⇒ 现在展示为两张**各表一件事**的卡：「输出 token」= tokens（含推理的真值）、
+    //   「推理 token」= think_tokens（其中有多少是推理）。原先那处重复计算已删除。
+    //
+    // 计算抽成 statsCardsEntries（第 1 组）+ statsCardsEntries2（第 2 组）：
+    // renderStats（整页渲染）与无感轮询 pollStatsCards（只改数值）共用同一份判据，
+    // 杜绝两处漂移 —— 卡片清单**只有这两个函数**，别的地方不许再列一遍。
+
+    // card 统一渲染：v 为 null 表示缺数据 → 显示占位符 + dim 色。
+    // data-stat-key 供无感轮询定位（见 pollStatsCards）。
+    const card = (k, v, cls) =>
+      `<div class="card" data-stat-key="${esc(k)}"><div class="k">${esc(k)}</div><div class="v ${v === null ? 'dim' : (cls || '')}">${esc(v === null ? NODATA : v)}</div></div>`;
+
+    // ⚠ 两个容器各自渲染一组（分组理由见 HTML 里 `#statsCards2` 那段注释）：
+    //   第 1 组 = 流量与耗时，第 2 组 = 模型归属与活跃度。
+    //   ⚠ 两组**共用同一个 card()**（同一个 `data-stat-key` 约定），否则回填逻辑要认两种形状。
+    $('statsCards').innerHTML = statsCardsEntries(s).map(([k, v, c]) => card(k, v, c)).join('');
+    $('statsCards2').innerHTML = statsCardsEntries2(s).map(([k, v, c]) => card(k, v, c)).join('');
+    renderHealthBar(s);   // 与卡片同源（同一份 s），不会出现"卡对条错"
+    renderModelRank(s);   // 次数排行同源，同样只读这一份响应
+
+    // ⚠ 「模型明细」chips 已按用户要求删除（2026-10-18）⇒ 这里**不再调** renderStatsModels。
+    // ⚠ 函数本体保留未删：它里面还带着 `statsCatalogHint` 等挂载逻辑，
+    //   删函数的风险大于收益；而只要容器不存在，它本来就是空转（开头有 `if (!wrap) return`）。
+    // renderStatsModels(s);
+  }
+
+  // renderModelRank 次数排行（2026-10-20，对标 new-api 下部 tab 的「调用次数排行」）。
+  //
+  // # 为什么用 by_model_detail 而不是 by_model
+  //   `by_model` 只有请求数（`{model: N}`），算不了成功率；
+  //   `by_model_detail` 带 calls/ok/fail，能同时给出"扛量多少"和"健不健康"。
+  //
+  // # 为什么按绝对名次而不是百分比
+  //   环图回答"占比"，这里回答"谁在扛量、它健康吗"。排障时后者才是要的 ——
+  //   一个占 3% 但成功率 40% 的模型，看占比根本发现不了它坏了。
+  // hideRemovedBlocks 隐藏用户要求删掉的三块（2026-10-20）。
+//
+// # 用户要求
+//   勾选删除：次数排行 / 上游+模型环图 / 缓存命中率四窗
+//   另附 custom：「保留近 24 小时缓存命中率趋势折线图」
+//
+// # ⚠ 为什么用 display:none 而不是删 HTML
+//   环图那块的闭合是三个连续 </div>（panel → duo → 外层），删错一个就会毁掉
+//   整个「调用统计」boardsec 的嵌套；而次数排行的 h3 与 #modelRank 是**兄弟**，
+//   单独删 #modelRank 会留下一个孤零零的标题。
+//   display:none 的代价是多几个死节点，收益是结构不动（不可能破坏嵌套）、
+//   JS 的 $('modelRank') 等调用照旧命中、想恢复只要删掉这里的 id（一行回退）。
+//
+// ⚠ 必须幂等：它在每次 refresh 后都可能被调。
+function hideRemovedBlocks() {
+  if (window.__dashHid) return;
+  const hide = (el) => { if (el) el.style.display = 'none'; };
+  const byId = (id) => document.getElementById(id);
+
+  // ① 次数排行：容器 + 它前面那个 h3（兄弟关系）
+  const rank = byId('modelRank');
+  if (rank) {
+    hide(rank);
+    const title = rank.closest('.body') ? rank.closest('.body').previousElementSibling : null;
+    if (title && title.tagName === 'H3') hide(title);
+  }
+
+  // ② 上游用量 + 模型用量环图（同在一个 .duo 里，整块隐藏）
+  hide(byId('statsReport'));
+
+  // ③ 缓存命中率四窗：容器 + 所在 boardsec 的 h3
+  //    ⚠ 24 小时趋势在**另一个** boardsec 里，不受影响（用户明确要保留）
+  const cc = byId('cacheCards');
+  if (cc) {
+    hide(cc);
+    const sec = cc.closest('.boardsec');
+    if (sec) hide(sec.querySelector('h3'));
+  }
+
+  window.__dashHid = true;
+}
+
+function renderModelRank(s) {
+    const host = $('modelRank');
+    if (!host) { return; }
+    if (!s) { host.innerHTML = ''; return; }
+    const detail = s.by_model_detail || {};
+    const rows = Object.keys(detail).map(k => {
+      const d = detail[k] || {};
+      // ⚠ 字段名必须是 `req`，不是 `calls`：后端 dimStat 的 JSON tag 是
+      //   `Req int64 \`json:"req"\``（internal/admin/admin.go）。我最初写这个函数时
+      //   凭印象用了 `calls`，结果次数排行永远是"所选范围内没有请求" —— 静默失败：
+      //   页面不报错，只是永远空着。
+      const calls = num(d.req) || 0;
+      const ok = num(d.ok) || 0;
+      return { model: k, calls, ok, rate: calls ? (ok / calls * 100) : null };
+    }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 10);
+    if (!rows.length) {
+      host.innerHTML = '<div class="dim" style="padding:6px 2px;font-size:12px">所选范围内没有请求</div>';
+      return;
+    }
+    const max = rows[0].calls;   // 用第一名的量作 100% 基准，条形才有可比性
+    host.innerHTML = rows.map((r, i) => {
+      const pct = max ? (r.calls / max * 100) : 0;
+      const col = r.rate === null ? 'var(--dim)'
+        : r.rate >= 95 ? 'var(--ok)' : r.rate >= 80 ? 'var(--warn)' : 'var(--err)';
+      const rateTxt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+      return `<div class="rankrow" title="${esc(r.model)} · ${r.calls} 次 · 成功率 ${rateTxt}">`
+        + `<span class="rankidx">${i + 1}</span>`
+        + `<span class="rankname mono">${esc(r.model)}</span>`
+        + `<span class="rankbar"><i style="width:${pct.toFixed(1)}%;background:var(--acc)"></i></span>`
+        + `<span class="rankval">${fmtCount(r.calls)}</span>`
+        + `<span class="rankrate" style="color:${col}">${rateTxt}</span>`
+        + `</div>`;
+    }).join('');
+  }
+
+  // renderHealthBar 性能健康条（2026-10-20 对标 new-api「性能健康」那一行）。
+  //
+  // # 三项口径（照用户要求"数据准确"逐条交代）
+  //   · 成功率 = ok / total
+  //   · 平均延迟 = **总耗时**均值（不是首字）—— new-api 那个 17.94s 也是总耗时口径；
+  //     首字另有 TTFB 卡，两个数各表一件事，不要混。
+  //   · 吞吐   = tokens /（全部请求耗时之和）。后端只给 avg_total_ms，
+  //     所以用 avg × 条数近似 —— 这是**近似**，文案写"吞吐"不写"精确"。
+  //   · 每模型成功率 = by_model_detail[m].ok / .req，按请求数取前 5。
+  //
+  // # ⚠⚠ 2026-10-25 图形化（用户原话）
+  //
+  //   「上面的表格看起来很简单」
+  //   「下面的实现可以抽共享一起用」
+  //   「我喜欢下面的表格柱状图 折线图还有等分线等等」
+  //
+  // ⇒ 这一条**照下面抄**，不是发明新样式：
+  //   · 成功率 → 横向条形 + 0/25/50/75/100% 等分网格线（dcGridCols，与 #cacheTrend 同段数同配色）；
+  //   · 每模型成功率 → 同一套条形组，带百分比标签、按高低分档配色（dcTier）；
+  //   · 近 24 小时成功率 → 迷你折线（dcLine，数据来自 series 桶的 ok/total）；
+  //   · 网格线 / 柱子 / 折线 / 外壳全部来自共享层 dash-chart.js —— 与下方两张趋势图
+  //     **同一份实现**，改一处三处一起变（这正是用户要的"抽共享"）。
+  //
+  // ⚠ 没有趋势数据（series 还没回来 / 全 0 请求）时**不画空折线**，只在 title 里说明 ——
+  //   与 cacheTrend 第 5 条同一立场：画一条贴底的线会被读成"成功率就是 0"。
+  function renderHealthBar(s) {
+    const el = $('healthBar');
+    if (!el) { return; }
+    if (!s) { el.innerHTML = ''; return; }
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = (total && ok !== null) ? (ok / total * 100) : null;
+    const avgMs = num(s.avg_total_ms);
+    // ⚠ 2026-10-20 改口径：吞吐用**纯输出**（s.out_tokens）。
+    //   用 total 会把输入/缓存读取也算成"生成速度" —— 实测同一份数据
+    //   total 版 10490 t/s、输出版 250 t/s，前者是假的速度。
+    //   ⚠ 上一轮我改过一次但没生效：old_string 匹配到了文件里另一处同名行
+    //   （`const toks = num(s.tokens);` 不止一处）。这次用「紧跟 tps 计算」作锚点。
+    const toks = num(s.out_tokens);
+    const tps = (avgMs && total && toks !== null && avgMs > 0)
+      ? toks / ((avgMs * total) / 1000) : null;
+    const parts = ['<span class="hb-title">性能健康</span>'];
+    // 成功率：**条形**（不是纯文字）。旁边仍保留精确读数 —— 条给"一眼什么水平"，
+    // 数字给"到底多少"，两者不互相替代。
+    parts.push(`<span class="hb-item hb-rate" title="成功 / 总请求 · 条长 = 成功率 · 底色等分线为 0/25/50/75/100%">`
+      + `<span class="hb-k">成功率</span>`
+      + `<span class="hb-meter">${hbMeter(rate)}</span>`
+      + `<b style="color:${dcTier(rate)}">${rate === null ? '—' : rate.toFixed(2) + '%'}</b></span>`);
+    parts.push(`<span class="hb-item">平均延迟 <b>${avgMs === null ? '—' : (avgMs / 1000).toFixed(2) + 's'}</b></span>`);
+    parts.push(`<span class="hb-item">吞吐 <b>${tps === null ? '—' : fmtTokens(Math.round(tps)) + ' t/s'}</b></span>`);
+    // 近 24 小时成功率迷你折线（与下面两张趋势图同一个数据源、同一套绘制函数）
+    const trend = healthTrend();
+    if (trend.length >= 2) {
+      const first = trend[0], last = trend[trend.length - 1];
+      parts.push(`<span class="hb-item hb-sparkitem" title="近 24 小时逐桶成功率（首 ${first.v.toFixed(1)}% → 末 ${last.v.toFixed(1)}%）">`
+        + `<span class="hb-k">24h</span>`
+        + `<span class="hb-spark">${hbSpark(trend)}</span>`
+        + `<b style="color:${dcTier(last.v)}">${last.v.toFixed(1)}%</b></span>`);
+    }
+    const detail = s.by_model_detail || {};
+    const rows = Object.keys(detail).map(k => {
+      const d = detail[k] || {};
+      // ⚠ 同样是 `req` 不是 `calls`（见 renderModelRank 里的同一条注释）
+      const c = num(d.req) || 0;
+      const o = num(d.ok) || 0;
+      return { model: k, calls: c, rate: dcPct(o, c) };
+    }).filter(r => r.calls > 0).sort((a, b) => b.calls - a.calls).slice(0, 5);
+    // 分项成功率：条形组（每条带百分比标签、按高低分档配色），底下垫同一套等分网格。
+    if (rows.length) {
+      parts.push(`<span class="hb-models">` + rows.map(r => {
+        const txt = r.rate === null ? '—' : r.rate.toFixed(1) + '%';
+        const col = dcTier(r.rate);
+        return `<span class="hb-row" title="${esc(r.model)} · ${r.calls} 次 · 成功率 ${txt}">`
+          + `<span class="hb-mname mono">${esc(r.model)}</span>`
+          + `<span class="hb-meter">${hbMeter(r.rate)}</span>`
+          + `<span class="hb-mval" style="color:${col}">${txt}</span></span>`;
+      }).join('')
+        + `<span class="hb-row hb-axisrow"><span class="hb-mname"></span>`
+        + `<span class="hb-axis">${hbAxis()}</span><span class="hb-mval"></span></span>`
+        + `</span>`);
+    }
+    el.innerHTML = parts.join('');
+  }
+
+  // hbAxis 0/25/50/75/100% 的刻度文字（**横向条形的等分线**）
+  //
+  // ⚠ 为什么刻度用 HTML 而不是 SVG：网格线由 dcGridCols 画在 SVG 里，而那个 SVG
+  //   外壳带 preserveAspectRatio="none"（横向拉伸填满）—— 文字进去会被拉成变形字。
+  //   这里用绝对定位的 left:% 与之对齐（同一套 (100*i/segs) 百分比）。
+  // ⚠ 段数取共享层的 DC_SEGS，不写字面量 4：改共享层时刻度自动跟着变。
+  function hbAxis() {
+    const out = [];
+    for (let i = 0; i <= DC_SEGS; i++) {
+      out.push(`<i style="left:${(100 * i / DC_SEGS).toFixed(1)}%">${Math.round(100 * i / DC_SEGS)}%</i>`);
+    }
+    return out.join('');
+  }
+
+  // hbMeter 一根横向条形（成功率 / 分项成功率共用）。
+  //
+  // ⚠ 网格线 + 柱子都来自共享层：dcGridCols 画 0/25/50/75/100% 五条竖线，
+  //   dcRects 画那根条 —— 与下方 #cacheTrend 的等分线是**同一个函数**。
+  // ⚠ rate 为 null（无请求）⇒ **不画条**（但网格线照画）：那格的读数是 `—`，
+  //   与"成功率 0%"必须能分开 —— 0% 画出来的是一根长度 0 的条 + 红色读数，
+  //   null 连条都没有。
+  // ⚠ 百分比 > 100 时**读数照实显示**（与 cacheTrend 的"不夹取值、如实展示"一致），
+  //   只有**条的几何长度**夹到 100（否则会画到 SVG 视口外，反而看不出"超了"）。
+  function hbMeter(rate) {
+    const W = 100, H = 10, PADT = 1, plotH = H - 2;
+    const svg = [];
+    dcGridCols(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, segs: DC_SEGS });
+    if (rate !== null) {
+      const w = Math.max(0, Math.min(100, rate));
+      dcRects(svg, [{ x: 0, y: PADT, w: (W * w) / 100, h: plotH }], { fill: dcTier(rate), rx: 2 });
+    }
+    return dcSvgTag(W, H, svg);
+  }
+
+  // hbSpark 近 24 小时成功率的迷你折线（**折线图**，与下方两张趋势图同一个 dcLine）。
+  //
+  // ⚠ 纵轴固定 0~100%：这是比率，自带自然上下界；按峰值自适应会让"95% 和 97%"
+  //   的差异被放大成一条剧烈起伏的线，读起来像"成功率在崩"。
+  // ⚠ 网格线只画 0 / 50 / 100 三条（segs:2）—— 30px 高的迷你图里 5 条线会糊成一片。
+  function hbSpark(rows) {
+    const W = 150, H = 30, PADT = 3, PADB = 3, plotH = H - PADT - PADB;
+    const n = rows.length;
+    const svg = [];
+    dcGrid(svg, { W: W, PADL: 0, PADR: 0, PADT: PADT, plotH: plotH, max: 100, segs: 2 });
+    const xAt = (i) => (n > 1 ? (W * i) / (n - 1) : W / 2);
+    const yAt = (v) => PADT + plotH - (plotH * Math.max(0, Math.min(100, v))) / 100;
+    dcLine(svg, rows.map((r, i) => [xAt(i), yAt(r.v)]), { stroke: DC_RATE_COLOR, width: 1.4, dots: n <= 12 });
+    return dcSvgTag(W, H, svg);
+  }
+
+  // healthTrend 近 24 小时的**逐桶成功率**（供健康条画迷你折线）。
+  //
+  // 数据来自 `window._healthSeries`（由 loadHealthSeries 从 /admin/stats/series 填），
+  // ⚠ 与下方两张趋势图**同一个端点**，但**不复用它们的变量** —— 那两张图各自带
+  //   digest 守卫与「只画当前 trendRange」的语义，健康条要的是**固定的近 24 小时**
+  //   （用户看的是"现在健不健康"，不该跟着趋势范围切换而变）。
+  // ⚠ 分母为 0 的桶**跳过**（不是按 0% 计）：那小时没请求，画成 0% 等于说"全失败"。
+  function healthTrend() {
+    const list = window._healthSeries || [];
+    const out = [];
+    for (const p of list) {
+      const v = dcPct(p && p.ok, p && p.total);
+      if (v === null) continue;
+      out.push({ v: v });
+    }
+    return out;
+  }
+
+  // ---- 概览卡的**唯一定位入口**（2026-10-20 抽，防回归）----
+  //
+  // ⚠⚠ 为什么必须有这两个函数、而不许在别处再写 `document.querySelector('#statsCards …')`：
+  //   卡片现在分住在**两个**容器里 —— `#statsCards`（流量与耗时 10 张）
+  //   与 `#statsCards2`（模型归属与活跃度 3 张，2026-10-20 为治"第二行 3 张、右侧空一片"而拆）。
+  //   写死 `#statsCards` 的老选择器会**静默失配**：不抛错、不出 console，
+  //   只是那 3 格永远停在占位符（`—`）—— 页面看起来正常，数字再也更新不了。
+  //   ⇒ 凡是"按 key 找卡片 / 找它的 `.v`"的地方，一律走这里；
+  //     两处容器一起匹配，将来再加第三组也只需改 `STAT_CARD_HOSTS` 一行。
+  const STAT_CARD_HOSTS = ['#statsCards', '#statsCards2'];
+  // statCardEl 按 `data-stat-key` 找卡片元素（跨两个容器）。
+  // ⚠ 用逗号选择器一次查完；key 走 `CSS.escape`（key 里有中文与空格，如「Top 模型」）。
+  function statCardEl(key) {
+    const k = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(key) : key;
+    return document.querySelector(
+      STAT_CARD_HOSTS.map(h => `${h} .card[data-stat-key="${k}"]`).join(', ')
+    );
+  }
+  // statCardValEl 找卡片里那个显示数值的 `.v`。
+  function statCardValEl(key) {
+    const c = statCardEl(key);
+    return c ? c.querySelector('.v') : null;
+  }
+
+  // statsCardsEntries 第 1 组统计卡的内容（流量与耗时 · renderStats 与无感轮询共用）。
+  //
+  // ⚠ 与 `statsCardsEntries2` 的**分工是语义的、不是凑数**：这里全是"本窗口的量"，
+  //   而那 3 张是"这些量落到哪个模型 / 落在哪些天"。两组分别进两个 `.cards` 网格，
+  //   各自 `auto-fit` ⇒ 每行都铺满（拆之前 13 张挤一个网格，第二行只有 3 张）。
+  // ⚠ 两个函数都**直接返回数组**、由 renderStats 一处渲染，避免出现两份"卡片清单"。
+  function statsCardsEntries(s) {
+    if (!s) return [];
+    const total = num(s.total);
+    const ok = num(s.ok);
+    const rate = total && ok !== null ? Math.round((ok / total) * 100) : null;
+    // ⚠⚠ 平均 RPM / TPM 的窗口（2026-10-20 加，对标 new-api 的指标卡）：
+    //   必须用**真实窗口跨度**（后端给的 window_from/window_to）去除，不能用固定的 24h ——
+    //   用户切 1h / 24h / 7d / 30d 档位时窗口差几十倍，写死就把 7 天摊成了 1 天。
+    //   ⚠ 跨度拿不到（老响应 / 只有一个点）⇒ 返回 null，卡片显示占位而不是编个数。
+    let winMin = null;
+    if (s.window_from && s.window_to) {
+      const a = new Date(s.window_from).getTime();
+      const b = new Date(s.window_to).getTime();
+      if (isFinite(a) && isFinite(b) && b > a) { winMin = (b - a) / 60000; }
+    }
+    const perMin = (v) => {
+      const n = num(v);
+      return (winMin && n !== null) ? n / winMin : null;
+    };
+    const rpm = perMin(s.total);
+    const tpm = perMin(s.tokens);
+    return [
+      ['总请求', fmtCount(s.total), ''],
+      ['成功', fmtCount(s.ok), ok ? 'ok' : 'dim'],
+      ['失败', fmtCount(s.fail), num(s.fail) ? 'err' : 'dim'],
+      ['成功率', rate === null ? null : rate + '%', rate === null ? 'dim' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'err'],
+      // ⚠ F1 修复：不再 `tokens + think_tokens`（那会把推理算两遍）。两张卡各表一件事。
+      // ⚠ 2026-10-20 加回「总处理量」（2026-10-20 用户授权推翻"只显示输出"的做法）。
+    //
+    //   出处：DSH 的 token-ledger-panel.js
+    //     total = inputTokens + cacheReadTokens + outputTokens   // 缓存写入不重复计入
+    //     lines.push('总处理量 = 输入 + 输出；缓存写入不重复计入')
+    //
+    //   我们的 s.tokens 就是上游 usage 的 total_tokens，而 total_tokens = prompt + completion
+    //   （prompt 已含 cached tokens）⇒ 与 DSH 那个式子**等价**，直接复用不必新算。
+    //
+    // ⚠ 2026-10-20 用户要求：三张卡合并成**一张「总 Token」**，与 new-api 一致。
+    //
+    //   改前：总处理量 / 输出 token / 推理 token 三张并列
+    //   改后：只有「总 Token」
+    //
+    // # 为什么是总 Token
+    //
+    //   new-api 的「Total Tokens」= Σ token_used = Σ(prompt_tokens + completion_tokens)
+    //   （model/log.go:395），它整个面板只有这一个 token 口径。
+    //   用户原话：「前端展示的全部都是总Token，不要输出Token了」。
+    //
+    // # ⚠ 哪些地方**不能**改成总 Token
+    //
+    //   tok/s（生成速度）必须继续用**输出** token —— 那是物理定义
+    //   （"生成 N 个字用了 T 秒"）。改用总 Token 会得出"每秒 40 万 token"这种荒谬读数，
+    //   因为输入里含几万到几十万的缓存上下文。
+    //   所以 fmtTps / tokPerSec 那一族仍然吃 out_tokens，不在本次改动范围。
+    ['总 Token', num(s.tokens) ? fmtTokens(s.tokens) : null, ''],
+      ['平均 TTFB', fmtCount(s.avg_ttfb_ms) === null ? null : s.avg_ttfb_ms + 'ms', ''],
+      ['平均总耗时', fmtCount(s.avg_total_ms) === null ? null : s.avg_total_ms + 'ms', ''],
+      // 对标 new-api 的两张：每分钟请求数 / 每分钟 token 数（口径见上面的 winMin 注释）
+      ['平均 RPM', rpm === null ? null : (rpm >= 10 ? fmtCount(Math.round(rpm)) : rpm.toFixed(1)), 'dim'],
+      ['平均 TPM', tpm === null ? null : fmtTokens(Math.round(tpm)), 'dim'],
+    ];
+  }
+
+  // statsCardsEntries2 第 2 组统计卡：**模型归属与活跃度**（Top 模型 / 活跃天数 / 当前连续天数）。
+  //
+  // ⚠ 三格的值**先给 null = 占位**：它们的原料都不在这份 `/admin/stats` 的通用量里 ——
+  //     · Top 模型      ⇒ 本响应里的 `by_model_detail`（由 `fillTopModel` 回填）
+  //     · 活跃/连续天数  ⇒ `series?range=365d`（由 `loadHeatmap → fillDayCards` 算出、`applyDayCards` 回填）
+  //   ⚠ 为什么不在这里直接算：本函数只知道窗口总量，**不知道"哪些天有请求"**；
+  //     硬凑只会在没有 series 的时候显示错的数 —— 按本项目的立场，宁可先空着。
+  // ⚠ 参数 `s` 目前不参与计算（值恒为 null），但**保留这个签名**：
+  //   与 `statsCardsEntries` 同形，renderStats / 将来要在这里补字段时不用改调用点。
+  function statsCardsEntries2(s) {
+    if (!s) return [];
+    return [
+      ['Top 模型', null, 'dim'],
+      ['活跃天数', null, 'dim'],
+      ['当前连续天数', null, 'dim'],
+    ];
+  }
+
+  // renderStatsReport 报表区（2026-10-18 新增）：**Top 账号榜** + **上游占比环**。
+  //
+  // # 为什么要写它
+  //
+  // 实测发现：`by_uid` 与 `by_provider` 后端**早就在返回**，但前端此前**一处都没消费**
+  // （全文件 grep 为空）—— 数据一直在，只是没人画。这里把它画出来。
+  //
+  // # 零依赖（照本项目已有的立场）
+  //
+  // ⚠ 不引图表库。榜单的条形用 `div` 的 `width`，环用 `conic-gradient`；
+  // 上面那条趋势图也是**内联 SVG 零依赖**，风格统一。
+  //
+  // # 口径
+  //
+  // ⚠ 这两个字段现在**只有请求数**，所以标题写「按请求数」而不是含糊的"按用量"。
+  // 后端正在补带 tokens 的富化版；届时只换这里的取值，**不动结构与文案位置**。
+  //
+  // ⚠ 名字只用**已确认存在**的：`$` / `esc` / `numNonNeg`。
+  // （这一路栽过"用了不存在的函数名、跑起来才炸"，所以 uid 的截断在这里内联写，不猜 helper。）
+  function renderStatsReport(s) {
+    const topEl = $('statsTopUid'), donutEl = $('statsDonut'), legendEl = $('statsDonutLegend');
+    // ⚠ 守卫**不再要求 `topEl`**（2026-10-18）：「Top 账号」那块已按用户要求删掉，
+    //   `$('statsTopUid')` 恒为 null —— 若还把它算进守卫，本函数会**每次早返回** ⇒
+    //   两个环一个都不画。⚠ 这类"删了容器忘了改守卫"是静默失败，只能靠看图发现。
+    if (!donutEl || !legendEl) return;
+    if (!s) return;
+    // ⚠ 取值要**同时认两种形状**：
+    //   · 老形状：`by_provider = { "loomy": 26012 }`（裸数字）
+    //   · 新形状（A 代理刚补的富化版）：`{ "loomy": { calls, ok, fail, credit } }`
+    // ⚠ 只认一种就会静默出 0 —— 实测：环形图当时整块不画（因为总和为 0 被防零除挡住），
+    //   而 `pageerror` 干干净净，不看图根本发现不了。
+    const calls = (v) => {
+      const raw = (v && typeof v === 'object') ? v.calls : v;
+      const n = numNonNeg(raw);
+      return n === null ? 0 : Math.round(n);
+    };
+    const pad = calls;
+    // ⚠ 每个环比色都走主题变量（切换深浅色时不能有"局部还是旧配色"的花脸）。
+    // ⚠ `COLORS` 已提到**模块级**（见 `DONUT_COLORS`）—— 2026-10-18 的教训：
+    //   它原来定义在本函数内部，而抽出去的 `renderDonutInto` 也要用它
+    //   ⇒ 跨函数作用域直接是 `ReferenceError`，**而异常被空 catch 吞掉、console 干净**
+    //   ⇒ 我在那个盲区里盲改了四次。⚠ 共享函数要用的常量，必须放在共享函数够得着的地方。
+
+    // ⚠⚠ digest 守卫：本函数由 `pollStatsCards` 每 30 秒调一次（让榜/环与卡片同步）。
+    // 不判"值变没变"⇒ 榜与环每 30 秒整块重绘 ⇒ 肉眼可见的**闪**（尤其 `conic-gradient` 的环）。
+    // ⚠ digest 只取本函数真正消费的两个字段：`by_uid` 与 `by_provider`。
+    // ⚠⚠ 2026-10-18 踩坑记录：我一度以为这份守卫被早先的 edit 挤掉了、于是又加了一遍
+    //   ⇒ **变成重复声明**（`Identifier 'dg' has already been declared`）
+    //   ⇒ 整页内联 JS **一段都不执行**（`cards = 0`），而我当时**已经把坏二进制替换进去了**。
+    //   ⇒ 教训：**改完必须先跑门禁、红了就不许替换二进制**（我那次编了就直接换了，顺序反了）。
+
+    // ⚠ 「Top 账号」那块已删（2026-10-18 用户要求"直接删除不需要这个"）⇒ 它那两行一并去掉：
+    //   原来这里设 `#statsTopHint`（"共 N 个账号有请求"），而那个容器已不存在。
+    //   ⚠ 保留这段注释是为了说明：**顶部提示那条约束仍然成立** —— 若将来又加回某个顶部提示，
+    //     仍必须放在**所有 return 之前**（R2 抓到的陈旧文案问题）。
+
+    // ⚠ 「Top 模型」卡**不在这里填**（2026-10-18 实测）：
+    //   本函数会在多处被调，其中有的入参不是 `/admin/stats` 的完整响应
+    //   ⇒ 在这里填完会被后面的调用覆盖掉（实测：数据/选择器/算法全对，卡片仍是 `—`）。
+    //   ⇒ 已挪到 `fillTopModel(s)`，只在 `refresh` 那个确定是 `/admin/stats` 响应的地方调。
+
+    // ⚠⚠ digest 守卫。为什么必须有：`pollStatsCards` 每 30 秒会调一次本函数
+    //（为了让榜/环与卡片同步 —— 否则同一屏出现两个时刻）。若不判"值变没变"，
+    // 榜与环每 30 秒就整块重绘一次 ⇒ ⚠ 肉眼可见的**闪**（尤其是 `conic-gradient` 的环）。
+    // ⚠ digest 只取本函数真正消费的两个字段：`by_uid` 与 `by_provider`。
+    //   别的字段变了但这两个没变 ⇒ **不该**重绘（本函数画的只有这两样）。
+    const dg = JSON.stringify(s.by_uid) + '|' + JSON.stringify(s.by_provider);
+    if (dg === renderStatsReport._last) return;
+    renderStatsReport._last = dg;
+
+    // ---- 左栏：Top 账号（按请求数降序取前 8）----
+    const uids = Object.entries(s.by_uid || {}).map(([k, v]) => [k, pad(v)])
+      .sort((a, b) => b[1] - a[1]).slice(0, 8);
+    const uidMax = uids.length ? uids[0][1] : 0;
+    let uidSum = 0;
+    for (const v of Object.values(s.by_uid || {})) uidSum += pad(v);
+    // ⚠ 这块的容器已删（见上面注释）⇒ 加 `if (topEl)` 保住这段代码不死；
+    //   等哪天又要 Top 榜，把容器加回来它就自动生效（⚠ 而不是留着一段必崩的语句）。
+    if (topEl) topEl.innerHTML = uids.length
+      ? uids.map(([uid, n]) => {
+          const w = uidMax > 0 ? Math.max(2, (n / uidMax) * 100) : 0;         // 最小 2% 才看得见
+          const pct = uidSum > 0 ? ((n / uidSum) * 100).toFixed(1) : '—';      // ⚠ 防零除
+          // uid 形如 UUID 或纯数字，都很长 ⇒ 截断显示，全文放 title（与表格列同一套做法）。
+          const label = uid.length > 12 ? uid.slice(0, 12) + '…' : uid;
+          return `<div class="toprow" title="${esc(uid)}">
+            <span class="tname">${esc(label)}</span>
+            <span class="tbar"><i style="width:${w}%"></i></span>
+            <span class="tval">${n}</span>
+            <span class="tpct">${pct}%</span>
+          </div>`;
+        }).join('')
+      : '<span class="dim" style="font-size:12px">暂无数据</span>';
+
+    // ⚠⚠ 两个环**不在这里画**（2026-10-18 实测踩到）。
+    //   根因与「Top 模型」那一处**同一个**：本函数会在多处被调，其中有的入参
+    //   不是 `/admin/stats` 的完整响应 ⇒ `by_provider_detail` / `by_model_detail` 取不到
+    //   ⇒ 环整块空；⚠ 而抛错被 try/catch 吞掉、`pageerror` 干净，只有看图/量 DOM 才发现。
+    //   ⇒ 已挪到 `fillDonuts(s)`，只在 `refresh` 那个确定是 `/admin/stats` 响应的地方调。
+    //
+    // ⚠ 同理：上面那个 **Top 账号榜**也读 `s.by_uid` —— 它留在本函数里，
+    //   所以它也有同一风险（只是实测里那次入参恰好完整）。⚠ 见 fillDonuts 的注释。
+
+    // ⚠ 顶部提示已移到函数开头（见那里注释：原来放这儿会被空数据分支的 return 跳过）。
+  }
+
+  // fillDonuts 画两个环：**上游用量** 与 **模型用量**（它那边是第 4、5 块）。
+  //
+  // ⚠ 为什么单独一个函数、且只在 `refresh` 的 `.then(d => …)` 里调：
+  //   与 `fillTopModel` 同因 —— 那个 `d` 是**确定**的 `/admin/stats` 响应，
+  //   而 `renderStatsReport` 会被其它入参调用 ⇒ 在那里画会取不到 detail 字段。
+  //
+  // ⚠ 口径照 agent2api 的 `TIP_PROVIDERS` / `TIP_MODELS`：
+  //   · **按 Token 用量**从多到少排（不是请求数）；百分比按本区间**总 Token** 算；
+  //   · 环心 = **这一维的合计**；
+  //   · ⚠ 扇区内百分比它只在 ≥3% 时标 —— `conic-gradient` 画不出文字，
+  //     而它自己的 TIP 也说"**完整读数在右侧列表与悬停气泡里**" ⇒ 我们靠右侧图例给全量读数。
+  //   · ⚠ **全零的组不占号**（它 donutView 的做法）⇒ 颜色不因空组错位。
+  // ⚠ `by_provider_detail` / `by_model_detail` 的每个值形如 `{req,ok,fail,tokens,…}`。
+  function fillDonuts(s) {
+    const rows = (det) => Object.entries(det || {}).map(([k, v]) => {
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
+      return [k, tk];
+    }).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+    renderDonutInto($('statsDonut'), $('statsDonutLegend'), rows(s && s.by_provider_detail), '总 Token');
+    renderDonutInto($('statsModelDonut'), $('statsModelLegend'), rows(s && s.by_model_detail), '总 Token');
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 活跃热力图（365 天）· 照 agent2api 报表页那块做（零依赖）
+  //
+  // # 数据
+  //
+  // `/admin/stats/series?range=365d` —— ⚠ 后端为此顺手修了 F2：
+  // 原来天桶用 `time.Truncate(24h)`（以 UTC 零时为基准）⇒ 桶起点落在本地 **08:00**，
+  // 于是"10-17 那一格"实际是 10-17 08:00 ~ 10-18 08:00 ⇒ **格子与日期错位**。
+  // 现在桶起点是**本地自然日 00:00**，所以下面可以按 `ts` 的前 10 个字符直接分组。
+  //
+  // # 画法
+  //
+  // `grid-auto-flow:column` + 7 行 ⇒ **一列 = 一周**。所以只要起点对齐到周一，
+  // 格子就自然形成日历阵；⚠ 最后一天之后（本周剩余）画成 `blank` 透明格，不是"0 用量"。
+  //
+  // # 分档
+  //
+  // 按**本窗口峰值**分 4 档（照它那句"档位按本窗口峰值自动定"）——
+  // ⚠ 不写死绝对阈值：用量涨十倍时整片会变最深色、失去分辨力。
+  let heatSig = '';
+  // ⚠ heatPickDays 供"点击某格"回查当天的完整数据（2026-10-18 加）。
+  // ⚠ 为什么单独一张表而不是把数值写进格子的属性：格子的 `title` 是**给人看的一句话**，
+  //   而这里是**给代码取的结构**；两者混在一处，将来改文案就会把取值一起改坏。
+  // heatPickDays 供"点击某格"回查当天的完整数据（2026-10-18 加）。
+  //
+  // ⚠ 为什么单独一张表而不是把数值写进格子的属性：格子的 `title` 是**给人看的一句话**，
+  //   而这里是**给代码取的结构**；两者混在一处，将来改文案就会把取值一起改坏。
+  const heatPickDays = new Map();
+
+  // ---- 页面级悬停浮层（2026-10-19 抽共享，参考 openViking 的 self-drawn tooltip）----
+  //
+  // # 为什么抽出来
+  //
+  // 页面里此前已有 `#trendTip`，但它是**内联在趋势图 innerHTML 模板里**的
+  // （见 `renderCacheTrend`），每次重绘都重建一份、且只在那一个函数的作用域里可用。
+  // 热力图要同样的东西时，第二条路就是再抄一份 —— 那会让"浮层长什么样"分裂成两处，
+  // 以后调样式要改两遍（账本里"同类型代码实现可以抽离"那条）。
+  //
+  // # 契约
+  //
+  //   hoverTipShow(title, rows, ev) —— rows = [[label, value], …]；用 ev 定初始位置
+  //   hoverTipMove(ev)              —— 跟随鼠标（调用方在 mousemove 里转调）
+  //   hoverTipHide()                —— 隐藏
+  //
+  // ⚠ 视口 clamp 在这里做（不在 CSS）：鼠标贴近右/下边缘时若不做，
+  //   浮层会被窗口裁掉一半。参考项目那边也是显式 clamp（它用 useLayoutEffect 量完再挪）。
+  function hoverTipEl() { return document.getElementById('hoverTip'); }
+
+  function hoverTipShow(title, rows, ev) {
+    const el = hoverTipEl();
+    if (!el) return;
+    // ⚠ 用 DOM 拼而不是 innerHTML + 模板字符串：这里的 label/value 都来自本地数据，
+    //   但仍走 textContent —— 一旦哪天 value 里带上上游的模型名（含 `<`），
+    //   模板字符串会把它当标签解析。这类"看起来安全"的插值最容易留下来。
+    el.textContent = '';
+    const t = document.createElement('div');
+    t.className = 'ht-t';
+    t.textContent = title;
+    el.appendChild(t);
+    for (const [k, v] of rows) {
+      const r = document.createElement('div');
+      r.className = 'ht-r';
+      const ks = document.createElement('span');
+      ks.textContent = k;
+      const vs = document.createElement('b');
+      vs.textContent = v;
+      r.appendChild(ks);
+      r.appendChild(vs);
+      el.appendChild(r);
+    }
+    el.style.display = 'block';
+    hoverTipMove(ev);
+  }
+
+  function hoverTipMove(ev) {
+    const el = hoverTipEl();
+    if (!el || el.style.display === 'none' || !ev) return;
+    const pad = 12;                                  // 离鼠标的距离
+    const r = el.getBoundingClientRect();
+    let x = ev.clientX + pad;
+    let y = ev.clientY + pad;
+    // ⚠ 超出右/下边缘就翻到另一侧（不是"夹到边缘" —— 夹住会让浮层压在手下面）
+    if (x + r.width > window.innerWidth - 4) x = ev.clientX - pad - r.width;
+    if (y + r.height > window.innerHeight - 4) y = ev.clientY - pad - r.height;
+    if (x < 4) x = 4;
+    if (y < 4) y = 4;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+  }
+
+  function hoverTipHide() {
+    const el = hoverTipEl();
+    if (el) el.style.display = 'none';
+  }
+
+  // weekdayCN 把 'YYYY-MM-DD' 变成 '周六'。
+  //
+  // ⚠ 用 `new Date(y, m-1, d)` 而不是 `new Date('YYYY-MM-DD')`：后者按 **UTC** 解析，
+  //   在 UTC+8 会把它读成前一天 08:00 —— 于是周五显示成周六。这类"差一天"的错
+  //   在日期类展示里最难发现（数字看着都对）。
+  function weekdayCN(day) {
+    const p = String(day || '').split('-').map(Number);
+    if (p.length !== 3 || p.some(isNaN)) return '';
+    return '周' + '日一二三四五六'[new Date(p[0], p[1] - 1, p[2]).getDay()];
+  }
+
+  // heatTipRows 把某一天的数据拼成浮层的行（⚠ 与"点击后的常显读数"同源、同口径）。
+  //
+  // ⚠ 空数据也要给一行明确结论（"无请求"），而不是显示一片 0 ——
+  //   0 在这里是"这天没有记录"，与"这天请求了但都是 0 token"不是一回事。
+  function heatTipRows(p) {
+    if (!p) return [['状态', '无请求']];
+    return [
+      ['请求', String(p.total)],
+      ['成功', String(p.ok)],
+      ['失败', String(p.fail)],
+      ['Token', fmtTokensPlain(p.tokens || 0)],
+    ];
+  }
+
+  async function loadHeatmap() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=365d'); }
+    catch { return; }
+    const list = (d && d.series) || [];
+    // ★ T-388：标题跨度按**真实数据**算，不再硬编码「近 365 天」。
+    // 口径：从"最早有数据的一天"到今天。升级当天只有 1~7 天数据，写「近 365 天」是骗人；
+    // 数据攒满后它自然变成「近 365 天」。
+    const firstActive = list.find(p => (p.total || 0) > 0);
+    const spanDays = firstActive
+      ? Math.round((Date.now() - new Date(firstActive.ts).getTime()) / 86400000) + 1
+      : 0;
+    const spanEl = $('heatSpan');
+    if (spanEl) {
+      const heatSuffix = ' · 按天 Token 用量着色（档位按本窗口峰值自动定）';
+      if (spanDays === 0) {
+        spanEl.textContent = '暂无数据' + heatSuffix;
+      } else if (spanDays < 365) {
+        spanEl.textContent = '近 ' + spanDays + ' 天' + heatSuffix;
+        spanEl.title = '数据从 ' + String(firstActive.ts || '').slice(0, 10) + ' 开始；满 365 天后显示为「近 365 天」';
+      } else {
+        spanEl.textContent = '近 365 天' + heatSuffix;
+      }
+      if (d && d.source === 'logfile' && firstActive) {
+        spanEl.title = (spanEl.title ? spanEl.title + '｜' : '') + '明细回落：日聚合还在回填';
+      }
+      if (d && d.source === 'log_daily') spanEl.setAttribute('data-source', 'log_daily');
+    }
+    if (!list.length) return;
+    // ⚠ 签名只取"会改变画面的东西"：桶数 + 最后一天的量 + 总量。
+    //   否则 30 秒轮询会把 365 个格子整块重绘一遍（肉眼可见的闪）。
+    // ⚠⚠ **填卡片必须在 sig 守卫之前**（2026-10-18 看图发现的回归）。
+    //   症状：概览卡的「活跃天数 / 当前连续天数」变成 `—`。
+    //   根因：卡片是 `renderStats` 每次**重建**的（值重置成 null），而填它们的
+    //   `fillDayCards` 原来放在下面那道 sig 守卫**之内** —— sig 没变就直接 return，
+    //   于是重建后**没人再填**。
+    //   ⇒ 拆开：`renderHeatmap`（重活）该被守卫挡住；**填卡片（轻活）每次都做**。
+    fillDayCards(list);
+
+    const sig = list.length + '|' + (list[list.length - 1].total || 0) + '|'
+      + list.reduce((a, p) => a + (p.total || 0), 0);
+    if (sig === heatSig) return;
+    heatSig = sig;
+    renderHeatmap(list);
+  }
+
+  // fillDayCards 用 series 的按天数据回填三张概览卡（⚠ 本函数是它们**唯一**的数据来源）。
+  //
+  //   · 活跃天数     = **有请求的天数**（⚠ 不是窗口天数 —— 8 天窗口里可能有几天是 0）
+  //   · 当前连续天数 = 从**最后一个桶**往前数，连续有请求的天数（⚠ "含今天在内往前数"）
+  //   · Top 模型     = 本响应 `by_model_detail` 里 **tokens 最多**的那个（⚠ 不是请求数最多）
+  //
+  // ⚠ 为什么连续天数从"最后一个桶"往前数、而不是从 `new Date()`：桶的边界由后端定，
+  //   用浏览器本地今天去比会在跨零点前后差一天（那一版曾经把"今天"算漏）。
+  function fillDayCards(list) {
+    // ⚠ 定位走 `statCardValEl`（跨 `#statsCards` / `#statsCards2`）——
+    //   这两张卡在**第二组**容器里，写死 `#statsCards` 会静默失配、格子永远 `—`。
+    const setCard = (key, val, cls) => {
+      const el = statCardValEl(key);
+      if (!el) return;
+      el.textContent = val === null ? NODATA : String(val);
+      el.className = 'v ' + (val === null ? 'dim' : (cls || ''));
+    };
+
+    // 活跃天数 + 从末尾起算的连续段
+    const days = list.map(p => ({ d: String(p.ts || '').slice(0, 10), n: p.total || 0 }));
+    const activeN = days.filter(x => x.n > 0).length;
+    let streak = 0;
+    for (let i = days.length - 1; i >= 0; i--) {
+      if (days[i].n > 0) streak++;
+      else break;                       // ⚠ 断了就停（不是"最长连续"，是"当前连续"）
+    }
+    // ⚠⚠ 这两格的值**同时存一份到模块变量**（2026-10-18 修）。
+    //   为什么：卡片是 `renderStats` 每次**重建**的（值清成 `null`），而本函数由
+    //   `loadHeatmap` 触发 —— 它读的是**固定 `range=365d`** ⇒ 它的 sig 在切档后不变
+    //   ⇒ **早返回** ⇒ 重建之后没人再填。实测：切一次档，这两格就永久变 `—`
+    //   （⚠ 而那 bug 在上一个 commit 里就存在，我上轮没量到）。
+    //   ⇒ 存下来，让 `applyDayCards()` 在**每次 renderStats 之后**无条件回填。
+    dayCardVals = {
+      active: activeN ? String(activeN) + ' 天' : null,
+      streak: streak ? String(streak) + ' 天' : null,
+    };
+    setCard('活跃天数', dayCardVals.active, activeN ? '' : 'dim');
+    setCard('当前连续天数', dayCardVals.streak, streak ? '' : 'dim');
+    // ⚠ 「Top 模型」**不在这里填** —— 2026-10-18 实测踩到：
+    //   本函数由 `loadHeatmap` 触发，而它可能在 `renderStats` **之前**跑
+    //   ⇒ 那时 `window._statsCache` 还是 null ⇒ Top 模型显示成 `—`；
+    //   ⚠ 更糟的是本函数有 sig 守卫，之后数据到了**也不会再填**。
+    //   ⇒ 那一格改由 `renderStatsReport(s)` 填（它手里就是 `s`，时机必然对）。
+  }
+
+  // fillTopModel 填「Top 模型」卡。
+  //
+  // ⚠⚠ 为什么单独一个函数、而且**只在 `refresh()` 那个 `.then(d => …)` 里调**：
+  //   我试过两处都不行，最后测出来的事实是 ——
+  //     · 数据、选择器、算法**全对**（我在浏览器里手跑同一段逻辑，算出了正确结果）
+  //     · 但卡片一直是 `—` ⇒ 说明**我填完之后又被别的东西覆盖了**（`renderStats` 会在多处被调，
+  //       其中有的入参不是 `/admin/stats` 的完整响应）
+  //   ⇒ 那就绑到**唯一那个确定是 `/admin/stats` 响应**的变量上：`refresh` 里的 `d`。
+  //   ⚠ 这个函数**只认 `s.by_model_detail`**，拿不到就写 NODATA —— 不猜别的字段。
+  function fillTopModel(s) {
+    // ⚠⚠ 「Top 模型」现在住在 `#statsCards2`（第二组）—— 选择器必须跨两个容器，
+    //   否则这一格永远是 `—`，而且**没有任何报错**（这是本次拆容器最容易踩的坑）。
+    const el = statCardValEl('Top 模型');
+    if (!el) return;
+    let bestK = null, bestV = -1;
+    for (const [k, v] of Object.entries((s && s.by_model_detail) || {})) {
+      // ⚠ 2026-10-20 改口径：取 `out_tokens`（纯输出）而不是 `tokens`（total）。
+    //   用户理解的"用量"是 AI 生成了多少 —— 必须用输出量。
+    //   实测 total 与输出差几十倍（37938 vs 176），拿 total 会让"只做长上下文转发"
+    //   的上游被画成用量冠军，而它实际生成的字可能极少。
+    //   ⚠ 本行在文件里有两处（环图与另一处取用量），口径必须一致 —— 所以两处都改。
+    const tk = (v && typeof v === 'object') ? (v.tokens || 0) : 0;   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
+      if (tk > bestV) { bestV = tk; bestK = k; }
+    }
+    if (bestK) {
+      el.textContent = bestK;              // ⚠ 不在这里截断 —— 交给 CSS 的 ellipsis
+      el.title = bestK + ' · ' + fmtTokensPlain(bestV) + ' token';
+      el.className = 'v';
+    } else {
+      el.textContent = NODATA;
+      el.className = 'v dim';
+    }
+  }
+
+  // fillCacheRates 画「缓存命中率」四格（照 agent2api 报表页那块）。
+  //
+  // ⚠ 它那边的格子长这样（我照抄）：大百分比 + 一行「命中 N / 输入 N」。
+  // ⚠ 口径三个要点（与后端 `cacheRates` 一致，也与它 `report-page.tsx:124` 的 TIP 一致）：
+  //   1. 命中率 = 命中 / (命中 + 未命中)，其中「输入」= 命中 + 未命中；
+  //   2. ⚠ **不夹取值** —— 上游把「缓存读取」与「输入」分开上报时这个比值**合法地可能超过 100%**，
+  //      它的 TIP 明确要求"如实展示" ⇒ 这里**不写 Math.min(100, …)**；
+  //   3. ⚠ 后端**不输出分母为 0 的档** ⇒ 这里如实显示 `N/A`（不是 0% —— 那会被读成一个结论）。
+  // ⚠ 实测：我们日志里最近 24 小时这两个字段全是 0 ⇒ 三档显示 N/A、只有 7 天档有数。
+  function fillCacheRates(s) {
+    const host = $('cacheCards');
+    if (!host) return;
+    const LABEL = { last10m: '近 10 分钟', last1h: '近 1 小时', last24h: '近 24 小时', last7d: '近 7 天' };
+    const KEYS = ['last10m', 'last1h', 'last24h', 'last7d'];
+    const cr = (s && s.cache_rates) || {};
+    const fmtN = (v) => {
+      if (!v) return '0';
+      if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+      if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+      if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+      return String(v);
+    };
+    host.innerHTML = KEYS.map((k) => {
+      const v = cr[k];
+      const has = !!(v && typeof v === 'object' && typeof v.rate === 'number');
+      const rateTxt = has ? (v.rate * 100).toFixed(2) + '%' : 'N/A';
+      const hit = has ? v.hit : 0;
+      const den = has ? (v.hit + v.miss) : 0;
+      // ⚠ 副标题带上**样本量**（`n` = 这个窗口里真的带缓存信息的行数）。
+      //   为什么：用户看到「近 10 分钟 82%」而「近 7 天 98%」会问"是不是不统一" ——
+      //   ⚠ 其实两个窗口的**样本完全不同**（几行 vs 几千行）。摆出样本量，
+      //   读者才能自己判断这个百分比有多可信，而不是把两个数当同一件事比。
+      const sub = has
+        ? ('命中 ' + fmtN(hit) + ' / 输入 ' + fmtN(den) + (typeof v.n === 'number' ? ' · ' + v.n + ' 次' : ''))
+        : '该窗口内无缓存数据';
+      // ⚠ 颜色只在"有数"时给；无数用 dim —— 不让 N/A 看起来像一个结论
+      const cls = has ? (v.rate >= 0.9 ? 'ok' : v.rate >= 0.5 ? 'warn' : 'err') : 'dim';
+      return `<div class="card" data-stat-key="cache-${esc(k)}">
+        <div class="k">${esc(LABEL[k])}</div>
+        <div class="v ${cls}" style="font-size:19px">${esc(rateTxt)}</div>
+        <div class="dim" style="font-size:11px;margin-top:2px">${esc(sub)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 近 24 小时成功率（健康条的迷你折线数据源）
+  //
+  // ⚠ 为什么单独拉一次 series，而不是复用上面/下面那两张趋势图的结果：
+  //   它们各自带 digest 守卫、而且 `dailyTrend` 跟着 `trendRange` 变（24h/7d/30d/365d）——
+  //   健康条要的是**固定的近 24 小时**（"此刻健不健康"），不能跟着用户切范围而变。
+  //   代价是多一次 /admin/stats/series?range=24h 请求 —— 与 cacheTrend 完全同参，
+  //   浏览器/HTTP 层会复用连接；换来的是两条曲线语义各自独立、不会互相污染。
+  //
+  // ⚠ 有签名守卫：值没变就不重画（30s 轮询不会把这条折线抖一遍）。
+  let healthSeriesSig = '';
+
+  async function loadHealthSeries() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=24h'); }
+    catch { return; }   // 非关键：拿不到就保持上一份（首次则没有折线）
+    const list = (d && d.series) || [];
+    const sig = list.length + '|' + list.reduce((a, p) => a + (p.ok || 0) + (p.total || 0), 0);
+    if (sig === healthSeriesSig) return;
+    healthSeriesSig = sig;
+    window._healthSeries = list;
+    // ⚠ 用 `window._statsCache` 重画：它由 renderStats 写入，是**同一份 /admin/stats 响应**。
+    //   拿不到（stats 还没回来）就什么都不做 —— 等 renderStats 那一路带着 s 调过来。
+    try { renderHealthBar(window._statsCache); } catch (e) { console.error('renderHealthBar 失败:', e && e.message); }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 近 24 小时缓存命中率趋势（双轴）· 照 agent2api 的 cacheTrendView
+  //
+  // ⚠ 五条口径照抄它（见 report-charts.ts:862-918 的注释与 report-page.tsx 的 TIP）：
+  //   1. **24 个本地整点**；⚠ **无请求的整点不画点**（线在那里断开）—— 否则会连成一排
+  //      毫无信息量的 `0%`（它的原话）；
+  //   2. `rate = cache_hit / (cache_hit + cache_miss)` —— 与四格、与顶层同一口径；
+  //   3. ⚠ **双纵轴**：命中率（左，蓝）· 总 Token（右，琥珀）—— 量纲差几个数量级，
+  //      共用一条轴时要么 Token 线压平在底部、要么命中率线贴着顶边；
+  //   4. ⚠ 命中率轴上限**按真实峰值抬、下限 1、不夹到 100%** ——
+  //      它原话："上游把缓存读取与输入分开上报时命中率会合法地超过 100%，
+  //      **夹到 100% 等于谎报数据**"；
+  //   5. ⚠ 整段 Token 全 0 ⇒ **不画那条线、也不画右侧刻度** ——
+  //      "画一条贴地的直线会让人以为『用量就是 0』，而事实是『这份数据里没有』"。
+  //
+  // ⚠ 全部内联 SVG、零依赖（与上面那张"按模型堆叠的消耗分布"同一立场）。
+  let cacheTrendSig = '';
+
+  async function loadCacheTrend() {
+    let d;
+    try { d = await admin('/admin/stats/series?range=24h'); }
+    catch { return; }
+    const list = (d && d.series) || [];
+    if (!list.length) return;
+    // ⚠ 签名只取会改变画面的量，避免 30 秒轮询整块重绘（会闪）
+    const sig = list.length + '|' + list.reduce((a, p) => a + (p.cache_hit || 0) + (p.cache_miss || 0) + (p.tokens || 0), 0);
+    if (sig === cacheTrendSig) return;
+    cacheTrendSig = sig;
+    renderCacheTrendSVG(list);
+  }
+
+  function renderCacheTrendSVG(list) {
+    const host = $('cacheTrend');
+    if (!host) return;
+    const W = 900, H = 150, PADL = 46, PADR = 52, PADT = 20, PADB = 22;
+    const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
+    const n = list.length;
+
+    // ⚠ 2026-10-20 改（用户要求「统一」）：24h 趋势的命中率改为**当日累计到该整点**。
+    //
+    // # 改之前面板上有两个数并列，看起来自相矛盾
+    //     近 7 天表格  10/20 → 89%   （按**天**累加：Σhit / Σ(hit+miss)）
+    //     近 24h 趋势  18时  → 43%   （按**小时**独立：该小时的 Σhit / Σ(hit+miss)）
+    //   两者算法**完全相同**，差的只是桶粒度；但站在两个数前面的用户不会知道，
+    //   他只会觉得"同一份数据给了两个答案"。用户原话：
+    //     「这个缓存命中率有点低吧？这不对吧？这个能统一起来吗？」
+    //     「因为我们前端有很多缓存命中率的展示啊，那他展示一个，你展示一个，
+    //      都展示的不是同一个东西啊」
+    //
+    // ⇒ 现在每个点 = 从当日 0 点累计到该整点的比例。
+    //   于是 最后一个点 == 表格里今天的值 == 卡片上的值，三处永远是同一个数。
+    //
+    // # ⚠ 代价（写在这里，免得将来有人以为是 bug）
+    //   曲线会变单调平滑（累计量只增不减、分母同时变大），"某一小时质量差"被摊平。
+    //   但那个信息更适合用柱子看（Token 量），不适合用累计比例看。
+    //
+    // # ⚠ has 的语义保持"该整点有没有请求"
+    //   无请求的整点仍不标注读数（与原来一致），但它的 rate 仍是**累计值**（不是 0）
+    //   —— 否则曲线会因为"某小时没请求"掉到 0% 再弹回，被误读成"缓存突然全失效"。
+    const rateOf = (p) => {
+      // 单点比例（非累计）：留给 tooltip 说明"这一小时本身"是多少
+      const h = p.cache_hit || 0, m = p.cache_miss || 0;
+      const den = h + m;
+      return { rate: den > 0 ? h / den : 0, has: den > 0, hit: h, miss: m };
+    };
+    // 累计器：**按天重置**，得到"当日内累计到该整点"的比例。
+    //
+    // ⚠ 必须按天重置：这个 list 是"近 24 小时"的桶，**跨天**
+    //   （截图 x 轴就是 昨天19:00 → 今天07:00 → 今天19:00）。
+    //   若不重置，最后一个点 = 昨天19点到今天19点的累计，
+    //   而 7 天表格里 10/20 是**今天全天** —— 又变成两个不同的数了，
+    //   正是这次要消除的那个问题。
+    //   所以累计器遇到日期变化就清零，每个点只代表**它自己那天**的累计。
+    let cumHit = 0, cumMiss = 0, cumDay = '';
+    const rows = list.map((p) => {
+      const one = rateOf(p);
+      const day = String(p.ts || '').slice(0, 10);   // ts 是 RFC3339，前 10 字符是日期
+      if (day !== cumDay) { cumHit = 0; cumMiss = 0; cumDay = day; }   // ← 跨天重置
+      cumHit += one.hit;
+      cumMiss += one.miss;
+      const cden = cumHit + cumMiss;
+      return {
+        ts: String(p.ts || ''),
+        total: p.total || 0,
+        tokens: p.tokens || 0,
+        rate: cden > 0 ? cumHit / cden : 0,   // 画线：当日累计到该整点
+        // ★ T-388：把累积 hit/miss 也带出来 —— 判断"这个桶有没有缓存数据"必须看它们，
+        //   不能看 rate（rate 在 0/0 时被写成 0，与"命中率真的是 0%"无法区分）。
+        cumHit: cumHit, cumMiss: cumMiss,
+        // ★ T-390：`has` = **该整点有没有请求**（total > 0）。原先是 `one.has`（有没有**缓存**数据），
+        //   与这里的注释/用途正好相反；也不能用 tokens > 0（usage 缺失时 tokens = -1 仍该连线）。
+        has: (p.total || 0) > 0,               // 读数是否标注 / 折线是否连线：该整点有没有请求
+        hourRate: one.rate,                    // tooltip：该小时自身比例
+        hasHour: one.has,                      // tooltip：该小时有没有请求
+      };
+    });
+
+    // ⚠ 命中率轴：上限按真实峰值抬、**下限 1（=100%）**、**不夹到 100%**
+    const ratePeak = Math.max(...rows.map((r) => r.rate));
+    // ⚠⚠ 轴顶（2026-10-18 修，看图发现的）：原来写的是 `Math.max(1, ratePeak * 1.15)`，
+    //   于是**峰值接近 100% 时**轴顶被抬到 115% —— 曲线整条被压在下面 15% 的位置，
+    //   读起来像"命中率只有八成"（实测峰值 99.98% ⇒ 轴顶 115%）。
+    //   ⇒ 分两种情况：
+    //     · 峰值 **≤ 100%** ⇒ 轴顶就是 **100%**（那是这个量的自然上界，不该超）
+    //     · 峰值 **> 100%**（上游把"缓存读取"与"输入"分开上报时**合法**如此）⇒ 才让它超，
+    //       留 15% 余量 —— ⚠ 这与它那句"不夹取值、如实展示"一致：不夹的是**值**，不是**轴**。
+    const rateMax = ratePeak > 1 ? ratePeak * 1.15 : 1;
+    // ⚠ Token 轴：全 0 ⇒ 不画那条线也不画右刻度
+    const tokenPeak = Math.max(...rows.map((r) => r.tokens));
+    const hasTokens = tokenPeak > 0;
+    const tokenMax = hasTokens ? tokenPeak * 1.15 : 1;
+
+    const xAt = (i) => PADL + (n > 1 ? (plotW * i) / (n - 1) : plotW / 2);
+    const yRate = (v) => PADT + plotH - (plotH * v) / rateMax;
+    const yTok = (v) => PADT + plotH - (plotH * v) / tokenMax;
+    const fmtT = (v) => v >= 1e9 ? (v / 1e9).toFixed(1) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
+
+    const svg = [];
+    // 网格 + 双轴刻度（两条轴都等分 4 段 ⇒ 同一根横线两边各有读数 —— 照它那套）
+    // ⚠⚠ 刻度文字**必须染成与所属线同色**（2026-10-18 看图发现的问题）：
+    //   两条线共用同一批横线，若刻度都是灰的，人眼会把"橙色 Token 线爬到 75% 的高度"
+    //   读成"**命中率 75%**" —— 而真实情况可能完全相反（实测命中率全 0、Token 有量）。
+    //   染色后：左边一排蓝 % 归命中率线、右边一排琥珀数值归 Token 线，一眼分得清。
+    //
+    // ⚠⚠ 2026-10-25：这 5 条等分线 + 双轴刻度**已抽到共享层**（dcGrid）。
+    //   抽的理由就是用户那句「下面的实现可以抽共享一起用」—— 顶部成功率条要的
+    //   正是这一模一样的 0/25/50/75/100% 网格。段数/配色/画法一个字没改，
+    //   只是从"在这里内联 for 循环"变成"调一次 dcGrid"。
+    dcGrid(svg, {
+      W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH,
+      max: rateMax,
+      fmt: (v) => (v * 100).toFixed(0) + '%',
+      fill: DC_RATE_COLOR,
+      // 右侧 Token 轴：只在真的有量时给（全 0 时连刻度都不画 —— 见上面第 5 条）
+      rightMax: tokenMax,
+      rightFmt: hasTokens ? fmtT : null,
+    });
+    // ⚠ 命中率折线（蓝）
+    //
+    // ★ T-419：**空桶不再断开，改用虚线插值连线**（用户 2026-11-09 要求：
+    //   「空的我希望也要画，不要断开不然很奇怪」——实测 24 小时里只有 9 个整点有请求，
+    //   中间连续 13 个整点全空，线断成 3 截，观感很差）。
+    //
+    // # ⚠ 但 T-388/T-390 的意图必须保住
+    //   那两次修的是同一个坑：**在空桶上画 0% 会变成一条贴着底部的假线**，
+    //   用户会读成"那段时间有数据但命中率 0"，而真相是"那段时间一次请求都没有"。
+    //   ⇒ 现在连线，但**空档那一段必须是虚线**：虚线的既有语义就是"推测/插值"。
+    //
+    // # 空桶用什么值：**线性插值**（两端有效点之间连直线）
+    //   不用「前值保持」：那会画出一条水平线，看起来像"那几小时也是 62%"，
+    //   而实际上我们对那几小时一无所知。线性插值至少诚实地表达"我们只是把两点连起来"。
+    //
+    // # 实现：点位一律 push（保持连续），逐段决定画实线还是虚线。**不用 0 作为空桶值**。
+    const ratePts = [];   // [{x, y, empty}]  empty=true 表示这个桶无缓存数据
+    let lastValidRate = null;
+    rows.forEach((r, i) => {
+      const empty = (r.cumHit + r.cumMiss) === 0;
+      if (!empty) lastValidRate = r.rate;
+      ratePts.push({ x: xAt(i), y: yRate(empty ? (lastValidRate == null ? 0 : lastValidRate) : r.rate), empty });
+    });
+    // 前向填充后再做一次线性插值：把连续空档的 y 从"前值"改成"前后有效点之间的直线上"
+    for (let a = 0; a < ratePts.length;) {
+      if (!ratePts[a].empty) { a++; continue; }
+      let b = a;
+      while (b < ratePts.length && ratePts[b].empty) b++;
+      const prev = a > 0 ? ratePts[a - 1] : null;
+      const next = b < ratePts.length ? ratePts[b] : null;
+      if (prev && next) {
+        for (let k = a; k < b; k++) {
+          const t = (k - (a - 1)) / (b - (a - 1));
+          ratePts[k].y = prev.y + (next.y - prev.y) * t;
+        }
+      }
+      // 只有一侧有效点（头尾空档）⇒ 保持前值/后值，仍是虚线
+      a = b;
+    }
+    // 逐段画：相邻两点之间，只要**任一端是空桶**就用虚线
+    //
+    // ⚠ 为什么是"任一端"而不是"两端都空"：从有效点跨进空档的那一段，
+    //   已经是"我们不知道"的一半了 ⇒ 该是虚线。
+    for (let i = 1; i < ratePts.length; i++) {
+      const dashed = ratePts[i - 1].empty || ratePts[i].empty;
+      dcLine(svg, [[ratePts[i - 1].x, ratePts[i - 1].y], [ratePts[i].x, ratePts[i].y]],
+        Object.assign({ stroke: DC_RATE_COLOR, width: 1.6 }, dashed ? { dash: '4 3', opacity: 0.55 } : {}));
+    }
+    // ⚠ Token 折线（琥珀）—— 只在真的有量时画
+    if (hasTokens) {
+      // ★ T-390：Token 折线与缓存线同一条纪律 —— **无请求的整点不画点**。
+      // 为什么：`rows.map` 会把每个桶都变成一个点，无请求的桶变成 [x, 0]
+      // ⇒ 画出一条贴着底部的假线（实测：05:00~11:00 全 total=0，线压在 0 上）。
+      // 用户会把它读成"那段时间有数据但是 0"，而真相是"那段时间没有任何请求"。
+      // 判据用 `r.has`（= 该整点有请求），**不要**用 tokens>0 ——
+      // 有请求但 usage 缺失（tokens=-1）是合法状态，它仍该连线。
+      // ★ T-419：与缓存线同构 —— 空桶不再断段，改用**虚线插值连线**
+      //   （两条线在同一张图上，一条断一条不断更奇怪）。
+      // ⚠ T-390 的意图仍保住：**不在空桶画 0**。
+      // ⚠ 例外：`r.has === true && r.tokens === -1`（有请求但 usage 缺失）是**合法**场景，
+      //   它该是**实线** ⇒ 空桶的判据**只认 `r.has`**，不看 tokens 是不是 0 或负。
+      const tokPts = [];   // [{x, y, empty}]  empty = 该整点**没有请求**
+      let lastValidTok = null;
+      rows.forEach((r, i) => {
+        const empty = !r.has;
+        if (!empty) lastValidTok = r.tokens;
+        tokPts.push({ x: xAt(i), y: yTok(empty ? (lastValidTok == null ? 0 : lastValidTok) : r.tokens), empty });
+      });
+      // 前向填充后再线性插值：把连续空档的 y 放到"前后有效点之间的直线上"
+      for (let a = 0; a < tokPts.length;) {
+        if (!tokPts[a].empty) { a++; continue; }
+        let b = a;
+        while (b < tokPts.length && tokPts[b].empty) b++;
+        const prev = a > 0 ? tokPts[a - 1] : null;
+        const next = b < tokPts.length ? tokPts[b] : null;
+        if (prev && next) {
+          for (let k = a; k < b; k++) {
+            const t = (k - (a - 1)) / (b - (a - 1));
+            tokPts[k].y = prev.y + (next.y - prev.y) * t;
+          }
+        }
+        a = b;
+      }
+      // 逐段画：**任一端是空桶**就用虚线（与缓存线同一条纪律）
+      for (let i = 1; i < tokPts.length; i++) {
+        const dashed = tokPts[i - 1].empty || tokPts[i].empty;
+        dcLine(svg, [[tokPts[i - 1].x, tokPts[i - 1].y], [tokPts[i].x, tokPts[i].y]],
+          Object.assign({ stroke: 'var(--warn)', width: 1.4, opacity: 0.9 },
+            dashed ? { dash: '4 3', opacity: 0.55 } : {}));
+      }
+    }
+    // ⚠ **读数只标在有请求的整点**（它那句"无请求的整点不标注"）+ 每 4 个整点标一个
+    //   （24 个全标会糊成一片 —— 照它"标注会互相避让：放不下就整条跳过"的取舍）
+    rows.forEach((r, i) => {
+      if (!r.has) return;                        // 补零出来的 0% ⇒ 不标
+      if (i % 4 !== 0 && i !== n - 1) return;    // 稀疏标注
+      svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${(yRate(r.rate) - 5).toFixed(1)}" text-anchor="middle" fill="var(--acc)">${(r.rate * 100).toFixed(0)}%</text>`);
+    });
+    // x 轴时间（首/中/末）
+    [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
+      if (!rows[i]) return;
+      svg.push(`<text class="ax" x="${xAt(i).toFixed(1)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(rows[i].ts.slice(11, 16))}</text>`);
+    });
+    // ⚠⚠ 鼠标悬浮的**参考垂直线 + 跟随读数**（2026-10-18 按用户要求加）。
+    // ⚠ 机制照本文件既有的趋势图 hover（`trendCursor` 那段：mousemove → 找最近的桶 → 移动标记），
+    //   但那条只有高亮点；用户要的是**竖线可以对齐参考**。
+    // ⚠ 线与读数都**预置**在 SVG 里（默认 `display:none`）—— 本函数每次重写 `innerHTML`，
+    //   若在事件里现场 append，重绘一次就没了。
+    // ⚠⚠ 2026-10-26：悬浮提示改用**共享卡片**（与 #statsTrend 同一份实现）。
+    //   用户原话：「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」
+    //   —— 原先本图只有 dcCursor 那行"监控台风格"的单行读数，与趋势图的卡片并存。
+    dcCursor(svg, 'ct', { PADT: PADT, plotH: plotH });
+    // ⚠ 这里**不能用 dcSvg**：它把 host.innerHTML 整段替换掉，卡片 div 会被冲掉。
+    //   与 #statsTrend 同一处理 —— 用 dcSvgTag 拼"图 + 卡片"两段。
+    host.innerHTML = dcSvgTag(W, H, svg, { style: 'width:100%;height:' + H + 'px;display:block' })
+      + dcTipTag('ctTip');
+
+    // ⚠ 2026-10-20 修（第二个隐患）：监听器用 host._ctBound **只绑一次**，
+    //   所以它闭包捕获的 rows / n / xAt 永远是**第一次渲染**那一份 ——
+    //   数据刷新后 hover 读到的还是旧值（不报错，只是数字不更新）。
+    //   这里每次重绘都把当次数据挂到 host 上，监听器通过 host 读，永远拿到当前值。
+    host._ctData = { rows, n, xAt, W, PADT, plotH };
+    if (!host._ctBound) {                    // ⚠ 只绑一次（容器不被重绘，监听器能留住）
+      host._ctBound = true;
+      host.addEventListener('mousemove', (ev) => {
+        const d = host._ctData;   // ⚠ 当次渲染的数据（不是闭包快照）
+        const el = host.querySelector('svg'), cur = host.querySelector('#ctCursor'), tip = host.querySelector('#ctTip');
+        if (!d || !el || !cur || !tip) return;
+        const rect = el.getBoundingClientRect();
+        if (!rect.width) return;                 // 面板收起时宽度为 0，按 X 估点会全落在 0
+        const xv = (ev.clientX - rect.left) / rect.width * W;
+        let best = -1, bd = 1e9;
+        for (let i = 0; i < d.n; i++) { const dist = Math.abs(d.xAt(i) - xv); if (dist < bd) { bd = dist; best = i; } }   // ⚠ 内层变量不能叫 d（会遮蔽 host._ctData）
+        if (best < 0) return;
+        const r = d.rows[best];
+        cur.setAttribute('x1', d.xAt(best).toFixed(1)); cur.setAttribute('x2', d.xAt(best).toFixed(1));
+        cur.style.display = 'block';
+        // ⚠ 卡片字段：时间 · **累计**命中率（曲线画的就是它）· **本小时**命中率 · 请求 · Token
+        // ⚠ 2026-10-20：曲线画的是**当日累计**（与 7 天表格/卡片同口径），
+        //   但鼠标点上同时给出"这一小时本身"的比例 —— 两个数都给，读者才不会被
+        //   "累计 89% 但这一小时只有 43%"搞糊涂。
+        //   ⇒ 本小时那一行标 dim（次要口径），主次一眼可分。
+        // ⚠ 色点与图上的线同色：命中率两条都是蓝、Token 是琥珀、请求无对应线故用灰 ——
+        //   这样"卡片里的这一行"和"图上那条线"能对上（dcTipRows 的约定）。
+        tip.innerHTML = dcTipHead(r.ts.slice(5, 10) + ' ' + r.ts.slice(11, 16))
+          + dcTipRows([
+              { color: DC_RATE_COLOR, name: '累计命中率', value: r.has ? (r.rate * 100).toFixed(1) + '%' : '—' },
+              { color: DC_RATE_COLOR, name: '本小时命中率', value: r.hasHour ? (r.hourRate * 100).toFixed(1) + '%' : '—', dim: true },
+              { color: 'var(--warn)', name: '总 Token', value: fmtTokensPlain(r.tokens) },
+              { color: 'var(--dim)', name: '请求', value: String(r.total) },
+            ]);
+        dcTipPlace(tip, ev, rect, { fallbackH: 96 });
+      });
+      host.addEventListener('mouseleave', () => {
+        dcTipHide(host, ['ctCursor', 'ctTip']);
+      });
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 「按天 Token 趋势」（loadDailyTrend / renderDailyTrendSVG）**已删除**。
+  //
+  // # 为什么（用户问："这个是不是不需要了重复了功能"）
+  //
+  // 它与 #statsTrend 取的是**同一个接口、同一个范围变量**：
+  //     admin('/admin/stats/series?range=' + trendRange)
+  // 所以两张图永远显示同一份数据、同一个时间范围 —— 而 #statsTrend 还多出
+  // 按模型堆叠配色 / 图例 / 分模型悬停浮层 / 柱状-面积切换 / 峰值行。
+  // ⇒ 它是 #statsTrend 的**严格子集**，删掉不丢任何信息。
+  //
+  // ⚠ 但它有两条**判据**值得留在这里（那两条是拿它当"丰富的那一个"抄过来的，
+  //   现在那些写法已经落在 #statsTrend 自己身上）：
+  //   · 柱顶**每根都标读数**（用户 2026-10-18："所有的柱状图都需要显示数值"）
+  //   · **全为 0 ⇒ 不画网格也不画柱子**，只留一句说明
+  //     （原话："否则整块图空得像渲染失败"）—— #statsTrend 里也守着这一条。
+  //   守卫见 ui_wiring_dashchart_test.go 的 TestBothBarChartsLabelEveryBarTop。
+
+  // outOf(p) 一个 series 桶的**纯输出** token（Σ by_model_out）。
+//
+// ⚠ 2026-10-20 统一口径：热力图与近 7 天表格原来用 `p.tokens`（total，含缓存读取），
+//   而全局「输出 token」卡用的是 out_tokens ⇒ 同一天出现 102.3M vs 1.2M 的 85 倍冲突
+//   （用户报"数据不太准"）。现在所有**展示**都用这个函数取值。
+//
+// ⚠ 已知偏差（不是 bug，是数据边界）：无模型名的行不计入 by_model_out，
+//   所以这个值会略低于真实输出量。实测这类行占比很低。
+//   要彻底消掉偏差得让后端给 series 加顶层 out_tokens —— 那要动协议，留待以后。
+function outOf(p) {
+  // ⚠ 2026-10-20 用户要求「全部都用总 Token 展示，不是输出 Token，就和 NewAPI 一样」
+  //   ⇒ 所有调用点已改成 `p.tokens`（series 桶的顶层总 Token）。
+  //   这个函数**保留但不再被调用**：留着是因为将来若要恢复"纯输出"视角，
+  //   改调用点比重新写函数便宜；直接删掉会让历史注释里的引用断掉。
+  //   ⚠ 不要因为它是死代码就删 —— 它记录了 by_model_out 的求和方式。
+  return Object.values((p && p.by_model_out) || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+}
+// renderDailyTrendSVG（「按天 Token 趋势」那张图）**已于 2026-10-26 删除**。
+//
+// 删它的理由写在 loadDailyTrend 原处那段注释里（它是 #statsTrend 的严格子集：
+// 同一个 /admin/stats/series?range=<trendRange>、同一个范围变量，而 #statsTrend
+// 还多出按模型堆叠 / 图例 / 分模型浮层 / 柱状-面积切换 / 峰值行）。
+//
+// ⚠ 它带走的两个**行为**没有丢，都落在 #statsTrend 里了：
+//   · 柱顶每根都标读数（用户 2026-10-18 的判据）
+//   · 全为 0 ⇒ 不画网格也不画柱子，只留一句说明
+//   守卫：ui_wiring_dashchart_test.go 的 TestBothBarChartsLabelEveryBarTop 与
+//         TestDashChartEmptyDataDoesNotCrash。
+//
+// ⚠ 别再"照它对另一张图"——它对标的那张（agent2api 的 dailyTrendView）已经并完了。
+//   新的图表判据请写进 ui_wiring_dashchart_test.go 的字段表，而不是散落的注释。
+
+  // ──────────────────────────────────────────────────────────────────────
+  // DONUT_COLORS 环的色板（⚠ 模块级：`fillDonuts` 与 `renderDonutInto` 都要用）。
+  // ⚠ 全部走主题变量 —— 切换深浅色时不能有"局部还是旧配色"的花脸。
+  // ⚠ 它原来是写在 `renderStatsReport` 内部的 `COLORS`，抽共享函数时忘了搬出来，
+  //   于是 `renderDonutInto` 一调就 `ReferenceError`（见上面那处注释）。
+  const DONUT_COLORS = ['var(--acc)', 'var(--ok)', 'var(--warn)', 'var(--err)'];
+
+  // renderDonutInto 环形图 + 右侧图例 —— **模型用量 / 上游用量的共用实现**
+  //
+  // ⚠ 为什么是共享函数：照 agent2api —— 它那边的 `donutView` 注释就写着
+  //   "环形图 + 右侧图例列表（**模型用量 / 提供商用量的共用实现**）"。
+  //   ⚠ 我原来把这段写死在 `renderStatsReport` 里、只画上游一个环 —— 加第二个环时
+  //     要么抄一遍、要么抽出来。**抽出来**（AGENTS.md 第 6 条：遇到同类实现就抽共享层）。
+  //
+  // ⚠ 口径（照它 `TIP_MODELS` / `TIP_PROVIDERS`）：
+  //   · 入参 `rows` 已按**用量从多到少**排好（调用方排，本函数不管排序口径）；
+  //   · 百分比按**本区间的合计**算（`unitLabel` 说明这一维是什么 —— 现在两处都是 Token）；
+  //   · 环心 = **这一维的合计**；
+  //   · ⚠ **全零/空的组由调用方过滤掉** —— 它与 `donutView` 的"同一套分配顺序、
+  //     tokens 全零的组不占号"一致（不占号 ⇒ 颜色不因空组而错位）。
+  //   · ⚠ 扇区内的百分比它只在 ≥3% 时标；`conic-gradient` **画不出文字**，
+  //     而它 TIP 里也说"完整读数在**右侧列表**与悬停气泡里" ⇒ 我们靠右侧图例给全量读数，
+  //     扇区只负责"一眼看出谁占大头"。
+  function renderDonutInto(donutEl, legendEl, rows, unitLabel) {
+    if (!donutEl || !legendEl) return;
+    const list = (rows || []).filter((r) => r && r[1] > 0);
+    let sum = 0;
+    for (const [, n] of list) sum += n;
+    if (!list.length || sum <= 0) {                    // ⚠ 防零除：没有数据就别画环
+      donutEl.style.background = '';
+      donutEl.innerHTML = '';
+      legendEl.innerHTML = '<span class="dim" style="font-size:12px">暂无用量数据</span>';
+      return;
+    }
+    const fmtV = (v) => v >= 1e9 ? (v / 1e9).toFixed(2) + 'B'
+      : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M'
+      : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : String(v);
+    let acc = 0;
+    const stops = [];
+    const legend = [];
+    list.forEach(([name, n], i) => {
+      const pct = (n / sum) * 100;
+      const c = DONUT_COLORS[i % DONUT_COLORS.length];
+      stops.push(`${c} ${acc.toFixed(3)}% ${(acc + pct).toFixed(3)}%`);
+      acc += pct;
+      const label = name.length > 16 ? name.slice(0, 16) + '…' : name;
+      legend.push(`<div class="lgrow" title="${esc(name)}">
+        <span class="sw" style="background:${c}"></span>
+        <span class="lgname">${esc(label)}</span>
+        <span class="tval">${esc(fmtV(n))}</span>
+        <span class="tpct">${pct.toFixed(1)}%</span>
+      </div>`);
+    });
+    donutEl.style.background = `conic-gradient(${stops.join(',')})`;
+    // ⚠ 环心写合计，并把**单位**写清楚（Token / 请求数）—— 不让读者靠猜。
+    donutEl.innerHTML = `<span class="dc"><b>${esc(fmtV(sum))}</b><span>${esc(unitLabel)}</span></span>`;
+    legendEl.innerHTML = legend.join('');
+  }
+
+  // fmtTokensPlain 给 title 用的纯文本 token 数（⚠ 不引别的格式化器，避免依赖不确定的名字）。
+  function fmtTokensPlain(v) {
+    if (!v) return '0';
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+    return String(v);
+  }
+
+  function renderHeatmap(list) {
+    const host = $('statsHeat');
+    if (!host) return;
+
+    // ⚠⚠ 这里**按 agent2api 的形态画**：53 列（周）× 7 行（星期），空槽就空着。
+    // 我一度自作主张改成"天数少就用横条表" —— 那是**偏离复用**：它自己 8 天数据时
+    // 也是一整片空槽（见它截图），照它的形态才对。已改回。
+    const byDay = new Map();
+    for (const p of list) byDay.set(String(p.ts || '').slice(0, 10), p);
+    // ⚠⚠ 同步填 `heatPickDays`（点击某格时回查当天数据用）。
+    //   ⚠ 我第一版漏了这一步 —— 只声明、只读、**从不填** ⇒ 点任何格子都显示"无请求"。
+    //     这类"声明了却没赋值"的错，`node --check` 与 `go build` 都抓不到（账本 E065），
+    //     只能靠"grep 定义/赋值/使用三处"或**实点一下**发现。
+    heatPickDays.clear();
+    for (const p of list) {
+      const k = String(p.ts || '').slice(0, 10);
+    // ⚠ 2026-10-20 二次改口径：着色用 `p.tokens`（total），与「总 Token」一致。
+    //   曾经用过 Σ by_model_out（纯输出），理由是"着色该反映生成了多少"；
+    //   但用户要求全部统一到总 Token，且柱状图已改，热力图必须同口径 ——
+    //   否则"柱子高但格子浅"会让人以为数据错位。
+    //   ⚠ 用户原话：「全部都用总 Token 展示，不是输出 Token，就和 NewAPI 一样」。
+    heatPickDays.set(k, { total: p.total || 0, ok: p.ok || 0, fail: p.fail || 0, tokens: p.tokens || 0 });   // ⚠ 2026-10-20 改：总 Token（用户要求与 new-api 一致）
+    }
+
+    const lastKey = String(list[list.length - 1].ts || '').slice(0, 10);
+    const parts = lastKey.split('-').map(Number);
+    if (parts.length !== 3 || parts.some(isNaN)) { host.innerHTML = ''; return; }
+    const lastD = new Date(parts[0], parts[1] - 1, parts[2]);
+
+    // 起点 = 往前 364 天（共 365 格），再**回退到周一**补齐首列（与它 `pad` 那一步同义）
+    const startD = new Date(lastD.getTime());
+    startD.setDate(startD.getDate() - 364);
+    startD.setDate(startD.getDate() - ((startD.getDay() + 6) % 7));
+
+    // ⚠ 分档照抄它的 `HEAT_STEPS`（1 / 1.25 / 1.5 / 2 / 2.5 / 3 / 4 / 5 / 6 / 8 / 10 × 10^n）。
+    //   我原来那版用"峰值的百分比"分档 —— 不如它这套稳：它按数量级取整，
+    //   峰值涨十倍时档位边界也跟着走，不会出现"全落最深一档"。
+    const HEAT_STEPS = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+    const stepFloor = (v) => {
+      if (v <= 0) return 0;
+      const mag = Math.pow(10, Math.floor(Math.log10(v)));
+      const norm = v / mag;
+      let best = HEAT_STEPS[0];
+      for (const s of HEAT_STEPS) if (s <= norm + 1e-9) best = s;
+      return best * mag;
+    };
+    let peak = 0;
+    for (const p of list) if ((p.tokens || 0) > peak) peak = p.tokens || 0;
+    const step = Math.max(1, stepFloor(peak / 4));
+    const TH = [step, step * 2, step * 3, step * 4];      // 4 个阈值 ⇒ 5 档（0 是最浅那档）
+    const lvOf = (tk) => {
+      if (!tk) return 0;
+      if (tk <= TH[0]) return 1;
+      if (tk <= TH[1]) return 2;
+      if (tk <= TH[2]) return 3;
+      return 4;
+    };
+
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const cells = [];
+    const monthMarks = [];                                 // ⚠ 它有的**月份标签**（我原来漏了）
+    const cur = new Date(startD.getTime());
+    let lastMonth = -1, n = 0;
+    while (cur.getTime() <= lastD.getTime() && n < 400) {
+      const key = cur.getFullYear() + '-' + pad2(cur.getMonth() + 1) + '-' + pad2(cur.getDate());
+      const p = byDay.get(key);
+      const tk = p ? (p.tokens || 0) : 0;
+      const tip = key + ' · ' + (p ? (p.total + ' 请求 · ' + tk + ' token') : '无请求');
+      // ⚠ 只在**每月第一天所在的那一列**放月份文字，其余留空（那样月份才会对齐到列上）
+      const colIdx = Math.floor(n / 7);
+      if (cur.getDate() <= 7 && cur.getMonth() !== lastMonth) {
+        lastMonth = cur.getMonth();
+        monthMarks.push([colIdx, (cur.getMonth() + 1) + '月']);
+      }
+      cells.push(`<span class="heatcell lv${lvOf(tk)}" data-day="${esc(key)}" title="${esc(tip)}"></span>`);
+      cur.setDate(cur.getDate() + 1);
+      n++;
+    }
+    // ⚠ 末列不满也留空（与它"末列不满也留空"一致）
+    const tail = 6 - ((lastD.getDay() + 6) % 7);
+    for (let k = 0; k < tail; k++) cells.push('<span class="heatcell blank"></span>');
+    host.innerHTML = cells.join('');
+
+    // ⚠⚠ 点格子读那一天（2026-10-18 按用户要求加：左键点一下，值**留在页面上**）。
+    //
+    // 三个细节：
+    //   1. ⚠ **事件委托**绑在容器上（`host`），**不给每个格子单独绑** ——
+    //      本函数每次重绘会换掉全部 371 个格子，逐个绑等于每次泄漏 371 个监听器；
+    //      委托只需绑一次，且用 `_heatBound` 标记避免重复绑（它会随卡片重建被清）。
+    //   2. ⚠ 选中态用**描边**而不是改填充 —— 填充色是"用量深浅"的语义，改了就没法读用量。
+    //   3. ⚠ 读数从 `data-day` 回查 `byDay`，**不把文本塞进 title** 再解析（那会把展示和取值耦合）。
+    if (!host._heatBound) {
+      host._heatBound = true;
+      // ⚠⚠ 悬停浮层（2026-10-19 按用户要求加，参考 openViking 的 self-drawn tooltip）。
+      //   三个事件都用**委托**、也只绑一次，理由与上面 click 那段完全相同。
+      //   ⚠ 用 `mouseover`/`mouseout` 而不是 `mouseenter`/`mouseleave`：
+      //     后两者**不冒泡**，委托到容器上收不到（这是最容易写错的一处）。
+      //   ⚠ `relatedTarget` 判定：在同一格的子节点间移动时 mouseout 也会触发，
+      //     若直接隐藏会出现"在格子里轻轻一动浮层就闪"。所以只有真正离开**这一格**
+      //     才隐藏（`cell.contains(related)` 为真就当我们还在格内）。
+      const cellOf = (ev) => (ev.target && ev.target.closest ? ev.target.closest('.heatcell[data-day]') : null);
+      host.addEventListener('mouseover', (ev) => {
+        const cell = cellOf(ev);
+        if (!cell) return;
+        const day = cell.getAttribute('data-day');
+        hoverTipShow(day + ' · ' + weekdayCN(day), heatTipRows(heatPickDays.get(day)), ev);
+      });
+      host.addEventListener('mousemove', (ev) => hoverTipMove(ev));
+      host.addEventListener('mouseout', (ev) => {
+        const cell = cellOf(ev);
+        if (!cell) return;
+        const to = ev.relatedTarget;
+        if (to && cell.contains(to)) return;          // 还在同一格内动 ⇒ 不隐藏
+        hoverTipHide();
+      });
+      // ⚠ 滚动时收起浮层：它用 fixed 定位、不随容器滚动而移动，
+      //   不收起来就会**留在原地**（看起来像贴错了地方）。
+      //
+      //   ⚠⚠ 但**程序性滚动不算**（2026-10-19 踩到）：本函数上面那句
+      //   `sc.scrollLeft = …` 即使值没变（0 → 0）也会派发一次 `scroll`，
+      //   于是刚渲染完就把浮层关掉了 —— 实测表现是"浮层文本是对的，但 display:none"。
+      //   用一个标志位跳过自己触发的那次，只有**用户拖动**才收起。
+      const markProgScroll = () => {
+        host._progScroll = true;
+        requestAnimationFrame(() => { host._progScroll = false; });
+      };
+      host._markProgScroll = markProgScroll;
+      host.parentElement && host.parentElement.addEventListener('scroll', () => {
+        if (host._progScroll) return;
+        hoverTipHide();
+      }, { passive: true });
+      host.addEventListener('click', (ev) => {
+        const cell = ev.target && ev.target.closest ? ev.target.closest('.heatcell[data-day]') : null;
+        if (!cell) return;
+        hoverTipHide();                              // ⚠ 点击时收起浮层：常显读数接管
+        const day = cell.getAttribute('data-day');
+        for (const c of host.querySelectorAll('.heatcell.sel')) c.classList.remove('sel');
+        cell.classList.add('sel');
+        const out = $('heatPick');
+        if (!out) return;
+        const p = heatPickDays.get(day);                 // ⚠ 由 renderHeatmap 填的"当天数据"表
+        if (!p) {
+          out.className = 'heatpick';
+          out.textContent = day + ' · 无请求';
+          return;
+        }
+        out.className = 'heatpick';
+        out.textContent = `${day} · ${p.total} 请求 · ${fmtTokensPlain(p.tokens || 0)} token`
+          + `（成功 ${p.ok} · 失败 ${p.fail}）`;
+      });
+    }
+
+    // 月份标签：用一个与格子同列宽的 grid 承载，全列铺满、只有该列的格子里有字
+    //
+    // ⚠⚠ 列宽**必须写死 15px**（= 格子 12 + 间隙 3），**不能用 `1fr`**（2026-10-19 踩到）：
+    //   `.heatmonths` 是 `width:max-content`，此时 `1fr` 会按**内容宽**算 ——
+    //   而"11月"这类文字约 28px，53 列直接撑成 1184px，把 792px 的格阵推偏了
+    //   （实测 scrollWidth 1184 vs 格阵 792，于是"滚到最右"滚到了标签的最右）。
+    //   ⚠ 两边同源才对齐；写死像素虽然要跟 `.heatgrid` 的 `12px`/`gap:3px` 手工保持一致，
+    //     但这是纯 CSS 里唯一能保证逐列对齐的办法（它那边是量像素算的，同一个道理）。
+    const mh = $('statsHeatMonths');
+    if (mh) {
+      const cols = Math.ceil((cells.length) / 7);
+      const marks = new Array(cols).fill('');
+      for (const [ci, txt] of monthMarks) if (ci >= 0 && ci < cols) marks[ci] = txt;
+      mh.style.gridTemplateColumns = `repeat(${cols}, 15px)`;
+      mh.innerHTML = marks.map((t) => `<span>${esc(t)}</span>`).join('');
+    }
+
+    // ⚠⚠ 默认滚到**最右（最新）**（2026-10-19 加，复刻 openViking 那段 useEffect）。
+    //
+    //   为什么必须做：格子固定尺寸后总宽约 53 × 14 = 742px～更多，而"有数据的日子"
+    //   永远是**最近的那几天**（在最右端）。不滚动就等于默认展示最左边那半年 ——
+    //   那半年是我们上线前的空白，于是用户看到的是"整片灰"（这就是那张截图的形态）。
+    //
+    //   ⚠ 用 rAF 而不是同步设：此刻 `host.innerHTML` 刚换完，样式/布局还没算，
+    //     `scrollWidth` 可能仍是旧值（参考项目那里同样是 `requestAnimationFrame`）。
+    requestAnimationFrame(() => {
+      const sc = host.parentElement;                 // = .heatmain（overflow-x:auto 的那个）
+      if (sc) {
+        if (host._markProgScroll) host._markProgScroll();   // ⚠ 标记：这次滚动是我们自己发的
+        sc.scrollLeft = Math.max(0, sc.scrollWidth - sc.clientWidth);
+      }
+
+      // ⚠⚠ 左侧"一 / 三 / 五"必须与格阵的**行**对上（2026-10-19 用户反馈"位置不对"）。
+      //
+      //   为什么必须用 JS 同步、而不是纯 CSS：
+      //     格阵行高不是固定值 —— 它是 `grid-auto-columns:1fr`（宽度随窗口变）+
+      //     格子 `aspect-ratio:1` ⇒ **行高 = 列宽**，是个算出来的数。
+      //     而 `.heatdays` 自己是 `repeat(7,1fr)` 的独立 grid，容器没有确定高度时
+      //     `1fr` 会塌成内容高度（7 行 × line-height ≈ 63px），于是三行标签整体上移、
+      //     与下面的行**错位**。给它一个与格阵相同的总高，两边 gap 又都是 2px，
+      //     逐行就自然对齐了。
+      //   ⚠ `marginTop` 补的是月份行的高度（标签行从月份行**下方**开始）。
+      const days = document.querySelector('.heatdays');
+      const months = $('statsHeatMonths');
+      if (days && months) {
+        days.style.marginTop = (months.offsetHeight + 2) + 'px';
+        days.style.height = host.offsetHeight + 'px';
+      }
+    });
+
+    // 图例四档的数值（⚠ 用它的 heatLevelText 口径：给出每档的上界）
+    const fmtV = (v) => {
+      if (!v) return '0';
+      if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+      if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+      if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+      return String(v);
+    };
+    const set = (id, txt) => { const el = $(id); if (el) el.textContent = txt; };
+    set('h1', '≤' + fmtV(TH[0])); set('h2', '≤' + fmtV(TH[1]));
+    set('h3', '≤' + fmtV(TH[2])); set('h4', '>' + fmtV(TH[2]));
+
+    // 右侧统计卡：三格都是从**同一份** list 现算（活跃天数 / 峰值单日 / 最近提交）。
+    renderHeatStats(list);
+  }
+
+  // renderHeatStats 画热力图右侧那一列三格（2026-10-19 照 openViking 加）。
+  //
+  // ⚠ 口径（三处都必须能一句话解释，否则数字会被误读）：
+  //   · 活跃天数 = **有请求的天数**（不是窗口跨度；365 天窗口里可能只有 8 天有请求）
+  //   · 峰值单日 = 窗口内**单日 Token 用量**的最大值 —— ⚠ 跟整张图的着色口径一致
+  //     （图是按 Token 着色的，若这里改显示"请求数峰值"就会出现"图最深的那天
+  //      和峰值单日不是同一天"的困惑）
+  //   · 最近提交 = **最后一个有请求的日期**（MM/DD）—— 照参考项目那种写法；
+  //     想要当天的明细，悬停或点那一格都能看到
+  function renderHeatStats(list) {
+    const el = $('heatStats');
+    if (!el) return;
+    let activeN = 0, peakTokens = 0, peakDay = '', lastDay = '', lastTotal = 0;
+    for (const p of list) {
+      const d = String(p.ts || '').slice(0, 10);
+      const tk = p.tokens || 0;
+      const n = p.total || 0;
+      if (n > 0) {
+        activeN++;
+        lastDay = d;
+        lastTotal = n;
+      }
+      if (tk > peakTokens) { peakTokens = tk; peakDay = d; }
+    }
+    const md = (s) => (s && s.length >= 10 ? s.slice(5, 7) + '/' + s.slice(8, 10) : NODATA);
+    const rows = [
+      ['活跃天数', activeN ? activeN + ' 天' : NODATA],
+      ['峰值单日', peakTokens ? fmtTokensPlain(peakTokens) : NODATA],
+      ['最近提交', lastDay ? md(lastDay) : NODATA],
+    ];
+    const hsHtml = `<div class="hsrow">` + rows.map(([k, v]) =>
+      `<div class="hs"><div class="k">${esc(k)}</div>`
+      + `<div class="v${v === NODATA ? ' dim' : ''}"${(k === '峰值单日' && peakDay) ? ` title="${esc(peakDay)}"` : ''}`
+      + `${(k === '最近提交' && lastDay) ? ` title="${esc(lastDay + ' · ' + lastTotal + ' 请求')}"` : ''}>${esc(v)}</div></div>`
+    ).join('') + `</div>`;
+
+    // ⚠⚠ 「多的区域随便塞一点数据展示」（2026-10-19 用户要求）——
+    //   格子按参考项目钉成固定宽度后，右边空出约 300px，只放三个数字太空。
+    //   这里接一张**近 7 天明细表**，数据来自**同一份 series**：
+    //   每个桶本来就带 ok / fail / tokens / cache_hit / cache_miss，
+    //   只是之前只用了 total 与 tokens，其余字段被丢掉了。
+    //   ⇒ 不新增任何请求，也不新增数据线。
+    //   ⚠ 命中率口径与「缓存命中率」那张卡一致：hit / (hit + miss)；
+    //     **无请求的整天显示 `—` 而不是 0%** —— 否则会把"那天没有调用"
+    //     误读成"调用了但全部未命中"，这两个结论差得很远。
+    const recent = list.slice(-7).reverse();          // 最新的排最上面
+    const cells = recent.map((p) => {
+      const d = String(p.ts || '').slice(0, 10);
+      const hit = p.cache_hit || 0, miss = p.cache_miss || 0;
+      const tot = hit + miss;
+      const rate = tot > 0 ? (hit / tot * 100).toFixed(0) + '%' : '—';
+      const noReq = !(p.total || 0);
+      return `<tr${noReq ? ' title="这一天没有请求"' : ''}>`
+        + `<td>${esc(md(d))}</td>`
+        + `<td>${esc(noReq ? NODATA : String(p.total || 0))}</td>`
+        + `<td>${esc(noReq ? NODATA : String(p.ok || 0))}</td>`
+        + `<td>${esc(noReq ? NODATA : String(p.fail || 0))}</td>`
+        + `<td>${esc(noReq ? NODATA : fmtTokensPlain(p.tokens || 0))}</td>`
+        + `<td>${esc(rate)}</td></tr>`;
+    }).join('');
+    el.innerHTML = hsHtml
+      + `<table class="hdet"><thead><tr>`
+      + `<th>近 7 天</th><th>请求</th><th>成功</th><th>失败</th><th>Token</th><th>命中</th>`
+      + `</tr></thead><tbody>${cells}</tbody></table>`;
+  }
+
+  // dayCardVals 「活跃天数 / 当前连续天数」两格的**最近一次算好的值**。
+  // ⚠ 必须存一份（理由见 fillDayCards 里那段）：卡片每次被 renderStats 重建，
+  //   而算它们的数据来自另一条异步线 ⇒ 重建之后必须有个东西能把值**无条件**填回去。
+  let dayCardVals = { active: null, streak: null };
+
+  // applyDayCards 把 dayCardVals 无条件填回那两格。
+  //
+  // ⚠ **不要给它加"值没变就跳过"的守卫** —— 它的调用时机正是"卡片刚被重建"，
+  //   那时格子里的显示值一定与要填的不同（被清成了 NODATA），守卫只会带来风险。
+  //   它很轻（只写两个 textContent），每次 refresh / 30 秒轮询都调也无所谓。
+  function applyDayCards() {
+    const put = (key, val) => {
+      // ⚠ 同上：这两格在第二组容器里，定位一律走 statCardValEl。
+      const el = statCardValEl(key);
+      if (!el) return;
+      el.textContent = val === null ? NODATA : String(val);
+      el.className = 'v ' + (val === null ? 'dim' : '');
+    };
+    put('活跃天数', dayCardVals.active);
+    put('当前连续天数', dayCardVals.streak);
+  }
+
+  // CARD_TIPS 每张概览卡的**口径说明**（照 agent2api：它用 `?` 悬停而不是在卡上写小字）。
+  //
+  // ⚠ 为什么这样更好（它那边的选择）：小字要占版面、而且 11 张卡时每张一句会把卡片行撑高；
+  //   而口径这种东西"想知道的人才会问" ⇒ 放进悬停里最省地方。
+  // ⚠ 文案照它那几句的口径（"近 7 天"/"成功率 —"/"输入 + 输出"/"区间共 7 天"/"含今天在内往前数"）。
+  const CARD_TIPS = {
+    '总请求': '当前统计范围内收到的全部请求（含成功与失败）。',
+    '成功': 'HTTP 2xx 的请求数。',
+    '失败': '非 2xx 的请求数（含 4xx/5xx 与上游错误）。',
+    '成功率': '成功 / 总请求。分母为 0 时显示 —。',
+    '总 Token': 'prompt_tokens + completion_tokens = 这次请求总共处理了多少 token（含上下文）。与 new-api 的 Total Tokens 同一口径（它的 token_used 就是这个加法，见 model/log.go:395）。',
+    '平均 TTFB': '首字节平均耗时，只统计上报了该字段的请求（未上报的不计入分母）。',
+    '平均总耗时': '从收到请求到响应结束的平均耗时。',
+    'Top 模型': '本范围内**消耗 Token 最多**的模型（不是请求数最多）。',
+    '活跃天数': '本统计范围内**有请求的自然日**天数（补零的日子不算活跃）。',
+    '当前连续天数': '从今天往前数、连续有请求的天数（含今天在内往前数）。',
+  };
+
+  // attachCardTips 给每张概览卡的标题补一个 `?` 与悬停说明。
+  //
+  // ⚠ 必须是**幂等**的：它会在每次 refresh / 30 秒轮询之后被调（那次会重建卡片），
+  //   但重建后的卡片本来就没有 `?`；⚠ 而同一个标题**不该出现两个 `?`** —— 所以先查 marker。
+  function attachCardTips() {
+    // ⚠ 遍历**两个**容器：第二组那 3 张（Top 模型 / 活跃天数 / 当前连续天数）
+    //   在 `#statsCards2` 里，只查 `#statsCards` 会让它们没有 `?` 悬停说明（同样静默）。
+    for (const card of document.querySelectorAll(STAT_CARD_HOSTS.map(h => `${h} .card`).join(', '))) {
+      const k = card.querySelector('.k');
+      if (!k || k.querySelector('.ctip')) continue;      // ⚠ 已加过就跳过
+      const name = k.textContent.trim();
+      const tip = CARD_TIPS[name];
+      if (!tip) continue;
+      const q = document.createElement('span');
+      q.className = 'ctip';
+      q.textContent = '?';
+      q.title = tip;
+      k.appendChild(q);
+      card.title = tip;                                  // ⚠ 整张卡也能悬停读到，更好点
+    }
+  }
+
+  // renderStatsModels 模型明细：一行一个模型，同时给出调用次数与成本系数。
+  //
+  // 两个数据源各自可能缺失，必须分别降级：
+  //   - by_model 为空 → 整块隐藏（而不是显示一句「暂无调用」占着版面）；
+  //   - 系数表为空（目录没拉到 / 窗口里没有可归因模型）→ 仍然显示调用次数，
+  //     只是不带「x 倍」后缀，并在提示里说明系数不可用。
+  function renderStatsModels(s) {
+    const wrap = $('statsModelsWrap');
+    if (!wrap) return;
+    // 非数值 / 负数计数一律当 0（不能让 NaN 参与排序，那会让顺序随机；
+    // 负数排序更会让「最多的排最后」，与用户预期相反）。
+    const bm = Object.entries(s.by_model || {})
+      .map(([k, v]) => { const n = numNonNeg(v); return [k, n === null ? 0 : Math.round(n)]; })
+      .sort((a, b) => b[1] - a[1]);
+    if (!bm.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+
+    // 系数索引：后端只回「窗口里调用过且有系数」的模型，这里做成 map 方便按名字取。
+    const mult = {};
+    (Array.isArray(s.model_multipliers) ? s.model_multipliers : []).forEach(m => {
+      if (!m) return;
+      const v = num(m.multiplier);
+      if (v !== null && v > 0) mult[m.model] = v;
+    });
+
+    // 目录状态提示：把「有 / 已过期 / 拿不到」讲清楚，
+    // 因为用户看到一排没有系数的 chip 时唯一能做的就是去点「刷新模型」。
+    const cat = (s.model_catalog && typeof s.model_catalog === 'object') ? s.model_catalog : {};
+    const catModels = fmtCount(cat.models);
+    let hint;
+    if (cat.state === 'ok') {
+      hint = '· 成本系数来自 /v3/config' + (catModels === null ? '' : `（缓存 ${catModels} 个模型）`);
+    } else if (cat.state === 'stale') {
+      hint = '· 成本系数为过期缓存，可信度降低（点「刷新模型」重新拉取）';
+    } else {
+      hint = '· 成本系数不可用（上游 /v3/config 未取到），仅显示调用次数';
+    }
+    $('statsCatalogHint').textContent = hint;
+
+    $('statsModels').innerHTML = bm.map(([name, calls]) => {
+      const m = mult[name];
+      // 系数后缀：有才加；没有就只显示次数，不显示「x0 倍」这种会被读成免费的说法。
+      const suffix = m === undefined
+        ? `<span title="未取到该模型的成本系数">${calls} 次</span>`
+        : `<span title="每次调用消耗 ${m} 倍基础额度">${calls} 次 · x${m}</span>`;
+      return `<span class="chip" data-id="${esc(name)}">${esc(name)}${suffix}</span>`;
+    }).join('');
+  }
+
+  // fmtBytes 人类可读字节数（用于日志保留策略展示）。
+  function fmtBytes(n) {
+    if (!n || n < 0) return '0 B';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MiB';
+  }
+
+  // ---------------------------------------------------------------- 猫猫旅行（账号池式列表）
+  const TRAVEL_STATE = {
+    idle: '空闲',
+    traveling: '旅行中',
+    arrived: '已到站',
+  };
+
+  const fmtClock = ts => ts ? new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+
+  // 把一个绝对时刻渲染成「剩余多久」，越近越醒目。
+  function fmtCountdown(sec) {
+    if (sec === undefined || sec === null) return '';
+    if (sec <= 0) return '已到站';
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm';
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    return h + 'h' + (m ? m + 'm' : '');
+  }
+
+  function renderTravel(list, autoClaim, autoDepart, checkinHours) {
+    // 自动派送没有独立开关：它跟着签到任务走，所以提示里必须把绑定关系和真实时点讲清楚，
+    // 否则用户会去找一个不存在的「自动派送」开关（这正是提出该需求的原因）。
+    const hrs = (checkinHours || []).map(h => h + ':00').join(' / ');
+    const dep = autoDepart
+      ? `· 自动派送随签到（${hrs || '未设置时点'}）：空闲且当日未派出的猫会自动派出，每日 1 次`
+      : '· 自动派送已停（每日签到被关闭，派猫随之停摆）';
+    $('travelAutoHint').textContent = dep
+      + (autoClaim ? '· 到站自动领奖已开启' : '· 到站自动领奖已关闭（需手动领奖）');
+
+    if (!list || !list.length) {
+      $('travelRows').innerHTML = rowPlaceholder(COLS.travel, '账号池为空');
+      return;
+    }
+    $('travelRows').innerHTML = list.map(t => {
+      const name = esc(maskNick(t.nickname));
+      const buddy = t.has_buddy
+        ? `${esc(t.buddy_name || '未命名')}${t.buddy_rarity ? ` <span class="dim">${esc(t.buddy_rarity)}</span>` : ''}`
+        : '<span class="dim">还没有猫</span>';
+
+      let st = '<span class="dim">未知</span>';
+      if (t.error) st = `<span class="pill err" title="${esc(t.error)}">查询失败</span>`;
+      else if (!t.has_buddy) st = '<span class="pill dim">待领养</span>';
+      else if (t.state === 'arrived') st = '<span class="pill warn">已到站</span>';
+      else if (t.state === 'traveling') st = '<span class="pill ok">旅行中</span>';
+      else if (t.state === 'idle') st = '<span class="pill dim">空闲</span>';
+
+      // 「今日已派送」是独立于当前状态的一个事实：猫可能还在路上（traveling）、
+      // 也可能已经回来（idle），两种情况今日都不能再派。因此单独一列显示，
+      // 而不是挤进状态列 —— 否则会把「猫现在在哪」和「今天派过没」混成一个概念。
+      const dispatched = t.daily_limit_reached
+        ? '<span class="pill warn" title="今日的派猫次数已用完，明日恢复">已派送</span>'
+        : '<span class="dim">未派送</span>';
+
+      const arrive = t.arrive_at
+        ? `${fmtClock(t.arrive_at)}<br><span class="dim" style="font-size:11px">${esc(fmtCountdown(t.remaining_sec))}</span>`
+        : '<span class="dim">—</span>';
+      const reward = t.state === 'arrived' && t.reward_credit
+        ? `<span class="pill warn">${esc(t.reward_credit)} 分</span>`
+        : '<span class="dim">—</span>';
+
+      const U = t.uid;
+      const canDepart = !t.error && t.has_buddy && t.state === 'idle' && !t.daily_limit_reached;
+      const canClaim = !t.error && t.state === 'arrived';
+      const act = [
+        `<button data-tact="depart" data-uid="${esc(U)}"${canDepart ? '' : ' disabled'} title="${canDepart ? '派猫出门' : '当前不可派出'}">派猫</button>`,
+        `<button data-tact="claim"  data-uid="${esc(U)}"${canClaim ? '' : ' disabled'} title="${canClaim ? '领取到站奖励' : '猫未到站'}">领奖</button>`,
+        `<button data-tact="detail" data-uid="${esc(U)}" title="查看完整状态">详情</button>`,
+      ].join(' ');
+
+      return `<tr>
+        <td>${name}</td>
+        <td>${buddy}</td>
+        <td>${st}</td>
+        <td>${dispatched}</td>
+        <td class="dim">${esc(fmtClock(t.depart_at))}</td>
+        <td>${arrive}</td>
+        <td>${reward}</td>
+        <td style="white-space:nowrap">${act}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function loadTravel(refresh) {
+    let r;
+    try {
+      // ⚠ `?refresh=1` 是**用户主动要新数据**（点「刷新」）⇒ **绕开缓存直连**；
+      //   不带参数的那次才是"打开页面顺手取一次"⇒ 走共享缓存（切回本页时秒出）。
+      r = refresh
+        ? await admin('/admin/travel?refresh=1')
+        : await sharedGet('ep:/admin/travel', () => admin('/admin/travel'));
+    } catch (e) {
+      $('travelRows').innerHTML = rowPlaceholder(COLS.travel, e.message, 'err');
+      return false;
+    }
+    renderTravel(r.accounts, r.auto_claim, r.auto_depart, r.checkin_hours);
+    return true;
+  }
+
+  async function travelAct(uid, act, btn) {
+    // 「详情」是只读的，不刷新页面，也就不需要 busy 编排。
+    if (act === 'detail') {
+      try {
+        const r = await admin(`/admin/travel/status?uid=${encodeURIComponent(uid)}`);
+        const t = r.travel || {};
+        const lines = [
+          `猫名：${r.buddy?.name || '（无猫）'}`,
+          r.buddy?.rarity ? `稀有度：${r.buddy.rarity}` : '',
+          r.buddy?.personality ? `性格：${r.buddy.personality}` : '',
+          `状态：${TRAVEL_STATE[t.state] || t.state || '未知'}`,
+          t.location?.name ? `目的地：${t.location.name}` : '',
+          t.duration_hours ? `行程：${t.duration_hours} 小时` : '',
+          t.depart_at ? `出发：${new Date(t.depart_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : '',
+          t.arrive_at ? `到站：${new Date(t.arrive_at * 1000).toLocaleString('zh-CN', { hour12: false })}` : '',
+          r.remaining_sec !== undefined ? `距离到站：${fmtCountdown(r.remaining_sec)}` : '',
+          r.clock_skew_sec ? `本机与上游时钟偏差：${r.clock_skew_sec}s（已自动校正）` : '',
+          t.reward_credit ? `到站可领：${t.reward_credit} 额度` : '',
+          `今日已派出：${t.daily_limit_reached ? '是' : '否'}`,
+          t.record_id ? `在途记录：${t.record_id}` : '',
+          r.travel_error ? `错误：${r.travel_error}` : '',
+        ].filter(Boolean);
+        // 用只读信息弹窗而不是 alert()：
+        // 这是多行 k:v 文本（猫名/稀有度/状态/目的地/在途记录…），
+        // 用户经常要复制「在途记录」去排查，而 alert 里选不中文字。
+        // 原生弹窗还会阻塞页面、在多主题下风格割裂。
+        showInfo('旅行详情', lines.join('\n'));
+      } catch (e) {
+        toast('查询旅行状态失败：' + e.message, true);
+      }
+      return;
+    }
+
+    const label = act === 'depart' ? '派猫' : '领奖';
+    await busyRun(btn, async () => {
+      let wrote = false;
+      try {
+        const r = await admin('/admin/travel/' + act, { method: 'POST', body: JSON.stringify({ uid }) });
+        toast(act === 'depart' ? `已派猫出门${r.arrive_at ? '，预计 ' + new Date(r.arrive_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) + ' 到站' : ''}` : `已领奖 ${r.credits || 0} 额度`);
+        wrote = true;
+      } catch (e) {
+        toast(label + '：' + e.message, true);
+      }
+      // 旅行仍走强制回源：它的写操作（派猫/领奖）在后端**没有**就地刷新快照，
+      // 读缓存会拿到旧状态。好在它比成长轻得多（实测 1.3s vs 7.2s），
+      // 且 busyRun 已经给了可见进度，用户不会以为没反应。
+      // 若要一并优化，把 scheduler 里 travel 的三个写操作也做成 refreshOwnSnapshot 即可
+      // —— 见 tasks/plan.md 的待决问题 4。
+      await Promise.all([loadTravel(true), refresh(), loadHistory()]);
+      return wrote ? true : undefined;
+    }, { label, busyText: label + '中…' });
+  }
+
+  async function travelAll(act) {
+    try {
+      const r = await admin('/admin/travel/' + act, { method: 'POST', body: '{}' });
+      if (r && r.started) { toast(`全部${act === 'depart' ? '派猫' : '领奖'}已启动，后台执行中…`); watchTask(); }
+    } catch (e) { toast('操作失败：' + e.message, true); }
+  }
+
+  // 模型倍率索引：id → 成本倍率（来自 GET /admin/models/preview）。
+  //
+  // 为什么要单独取一次：/v1/models 是**对外**的 OpenAI 兼容端点，
+  // 往里塞自定义字段会污染公共契约；倍率只对本管理界面有意义，走 admin 面。
+  // 取不到时索引为空 —— 模型列表照常显示，只是没有倍率标记（不能整块失败）。
+  let modelMultipliers = {};
+// multCatalogFailed：倍率目录**整体**没拿到。
+// 必须与「这个模型没倍率」区分 —— 否则用户看到满屏"无"会以为
+// 上游真的没配倍率，而真相是目录接口挂了（静默失败）。
+// 见 multTag 与 renderModelCatalogWarning 的注释。
+let multCatalogFailed = false;
+
+  async function loadModelMultipliers() {
+    try {
+      // ⚠ 走共享取数器：这个函数在一次 `refresh()` 与「强制刷新目录」按钮里**各被调一次**，
+      //   冷启动实测两次合计 **5.4 秒**（2836ms + 2555ms）—— 第二次完全是重复回源。
+      //   走 `sharedGet` 后：同一 key 在飞只发一次，且 30 秒内直接命中缓存。
+      //   ⚠ 要强制取新值的调用点必须先 `lazyCache.drop('ep:/admin/models/preview')`
+      //     （见「强制刷新目录」按钮那一处），否则就是"点了没反应"。
+      const r = await sharedGet('ep:/admin/models/preview', () => admin('/admin/models/preview'));
+      const next = {};
+      for (const m of (r && r.models) || []) {
+        // 保留 0：x0.00 是「免费」这个有意义的事实，不能用真值判断把它丢掉。
+        if (!m || !m.model) continue;
+        // 键 = `provider/裸名`（多上游同名模型互不覆盖；裸名条目兼容单上游）。
+        // 后端 modelsPreview 自多上游改造起给每条带 provider。
+        const key = m.provider ? m.provider + '/' + m.model : m.model;
+        next[key] = Number(m.multiplier) || 0;
+      }
+      modelMultipliers = next;
+      multCatalogFailed = false;
+    } catch {
+      // ⚠ 失败与"这个模型没倍率"必须可区分（否则是静默失败）。
+      // 空表 + 标记 → 面板顶部给提示，chip 上**不**逐个写 x无。
+      modelMultipliers = {};
+      multCatalogFailed = true;
+      renderModelCatalogWarning();
+    }
+  }
+
+  // renderModelCatalogWarning 倍率目录整体拿不到时的面板级提示。
+  //
+  // 为什么要单独提示：`modelMultipliers` 失败后是空表，若不提示，
+  // 界面上"所有模型都没倍率"看起来就像上游真的没配倍率 ——
+  // 用户不会想到是目录接口挂了。这是本项目反复出现的"静默失败"形态。
+  function renderModelCatalogWarning() {
+    const host = $('mcount');
+    if (!host) return;
+    if (!multCatalogFailed) return;
+    host.innerHTML = '<span class="err" title="GET /admin/models/preview 请求失败，'
+      + '所以看不到任何倍率 —— 不是上游没配">倍率目录未加载（点「强制刷新目录」重试）</span>';
+  }
+
+  // 把倍率数值格式化成展示文本；非法值返回 null（调用方据此不加标记）。
+  //
+  // 为什么单独抽出来：HTML 版与 <option> 版要显示同一个数，
+  // 各自实现一遍必然漂移（曾经就是两处各写各的格式化）。
+  //
+  // 拒绝非有限值：NaN/Infinity 经 toFixed 会串成 "NaN"/"Infinity" 直接显示给用户。
+  // 上游理论上不会给，但倍率是外部数据，展示层不该假设它干净。
+  function multText(v) {
+    if (!Number.isFinite(v) || v < 0) return null;
+    // 0 → "0"；0.51 → "0.51"；2 → "2"。两位小数足够（上游最细到 x0.01）。
+    return Number.isInteger(v) ? String(v) : String(Number(v.toFixed(2)));
+  }
+
+  // multKeyOf 把**展示 id** 归一成**倍率表的键**：去掉 `provider/` 前缀。
+  //
+  // 为什么需要它：面板现在统一显示完整 id（`workbuddy/glm-5.2` 这种，
+  // 用户要求"workbuddy/xxx 或 codearts/xxx，统一、不要重复"），
+  // 而 /admin/models/preview 下发的 modelMultipliers **键是上游目录里的裸 id**
+  //（如 `glm-5.2`）—— 那是后端契约，前端不改它。
+  // 拿完整 id 直接查表必然全部落空，界面上就是满屏 `x无`
+  //（tests/frontend/diag_multiplier_mismatch.js 早就实测出这条错位：
+  // "倍率表用的是裸名，而面板显示 provider/model 形态 → id 对不上"）。
+  //
+  // ⚠ 归一逻辑**只此一处**：multTag 与 multTagPlain 都经由 multTableKey 调它取键
+  //（multTableKey 只额外判"这张表到底覆不覆盖这个上游"，不做第二份去前缀）。
+  // 各写一份必然会漂 —— 而漂的表现是"某处又变回 x无"，很难一眼看出。
+  function multKeyOf(id) {
+    const s = String(id || '').indexOf('/');
+    // 没有前缀（单上游的裸名，如 `glm-5.2`）→ 原样返回：它本来就是表的键。
+    return s > 0 ? String(id).slice(s + 1) : String(id || '');
+  }
+
+  // multTableKey 解析**这个展示 id 能不能查倍率表**：能查则给出键，不能查返回 null。
+  //
+  // # 多上游改造后：表按 (provider, 裸名) 组织，任何上游都能查
+  //
+  // 改造前（单上游时代）`modelMultipliers` 只有默认上游一份目录，于是带前缀的
+  // `codearts/glm-5.3-flash` 去掉前缀会**撞上默认上游的同名条目**（一个错的数字
+  // 比 x无 有害得多）。真 Chrome 实测过那种错位，判据是"只有默认上游才查表"。
+  //
+  // 自多上游倍率改造起，后端 /admin/models/preview 遍历**全部已注册上游**、
+  // 每条带 provider，前端表键 = `provider/裸名`（workbuddy 与 workbuddy-intl 的
+  // 同名模型互不覆盖）。因此带前缀的展示 id 直接以 `prefix/裸名` 查表即可，
+  // 不再限制默认上游 —— 限制会把海外版（workbuddy-intl）的倍率整组判成 x无。
+  //
+  // ⚠ 判据只此一处：multTag 与 multTagPlain 都调它，各自不写第二份判断
+  //（与 multKeyOf 同一个风格：一个函数、两个调用点）。
+  //
+  // ⚠ 兼容：裸名（无前缀）仍按裸名查（单上游部署、后端没带 provider 的条目）。
+  // 带前缀但表里没有 `provider/裸名` 键 → 返回 null（不显示别家的数字）。
+  function multTableKey(id) {
+    const slash = String(id || '').indexOf('/');
+    // 无前缀 → 它本来就是倍率表的键（查不到就是"上游没配"，由调用方处理）。
+    if (!(slash > 0)) return multKeyOf(id);
+    // 带前缀 → `provider/裸名` 组合键。查不到说明这张表没有该上游的该模型
+    //（显示 x无，title 区分"上游未提供"与"目录不覆盖"见 multTag）。
+    return String(id);
+  }
+
+  // 倍率标记：有系数才加，且 0 也要显示（免费是有效信息）。
+  // 系数未知（目录里没这个模型）时不加后缀，避免用「x0」把"不知道"说成"免费"。
+  function multTag(id) {
+    // 用户要求：倍率表里没有的模型显示 `x无`。
+    //
+    // ⚠ 但要区分**四种"没有"**，它们不该长一样：
+    //
+    //   1. 倍率表里有            → `x0.29`
+    //   2. 表里没有这个模型       → `x无`      （用户要求；title=上游未提供）
+    //   3. **倍率表整体没加载**   → 不显示 `x无`，改为面板级提示
+    //   4. **别家上游**（表只覆盖默认上游）→ 也 `x无`，但 title 说明"这张表不覆盖它"——
+    //      与第 2 种必须可区分：一个该去问上游，一个只是本界面拿不到别家的目录。
+    //
+    // 第 3 种是"静默失败"的典型场景：`loadModelMultipliers` 失败时把
+    // `modelMultipliers` 清空，若不区分，用户会以为**所有**模型都没有倍率，
+    // 而真相是目录挂了。这种情况由 multCatalogFailed 标记，在面板顶部提示。
+    //
+    // 用"无"而不是留空：留空与"倍率恰好是 0 但没渲染"无法区分；
+    // 显式写"无"是把不确定性**显示出来**，而不是藏起来。
+    // 渲染成 `x无`（小写 x）与其它 15 个同形 —— 视觉一致比照搬输入字符重要。
+    // 经 multTableKey 归一**并判归属**：这里拿到的是展示 id（`provider/xxx`），
+    // 而倍率表的键是**默认上游目录**里的裸名。别家上游的表根本不存在，
+    // 所以它返回 null —— 那时**不查表**，显示 x无（见 multTableKey 的注释）。
+    const key = multTableKey(id);
+    if (key === null) {
+      // ⚠ 这一支不是"上游没配倍率"，而是"这张表压根不覆盖这个上游"，
+      // 两种"没有"的 title 必须不同，否则用户会去怀疑上游配错了。
+      // 目录整体失败时不逐个挂"无"（由面板顶部提示），与下面分支同一口径。
+      if (multCatalogFailed) return '';
+      return '<span class="mult unknown" title="倍率表只覆盖默认上游 '
+        + esc(DEFAULT_PROVIDER || '（未知）') + ' 的目录，该模型属于别家上游，不显示可能属于别人的数字">x无</span>';
+    }
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, key)) {
+      if (multCatalogFailed) return '';   // 目录整体失败 → 不给每个 chip 都挂"无"
+      return '<span class="mult unknown" title="上游未提供该模型的倍率">x无</span>';
+    }
+    const txt = multText(modelMultipliers[key]);
+    if (txt === null) return '';   // 脏数据 → 当作没有系数，而不是显示 xNaN
+    const v = modelMultipliers[key];
+    // 免费（0）与高倍率（>=1）各给一个样式类，便于一眼扫出成本档位。
+    // 注意：不发散到"低/中/高"多档 —— 倍率分布随上游调整，硬编码分档很快会失真。
+    const cls = v === 0 ? ' free' : (v >= 1 ? ' hi' : '');
+    return `<span class="mult${cls}" title="每次调用消耗 ${txt} 倍基础额度">x${esc(txt)}</span>`;
+  }
+
+  // ── 上下文窗口标注（用户要求：能拿到的填，拿不到的不写/占位，且写清楚）──
+  //
+  // # 口径（两句话）
+  //
+  //	能拿到 → 显示「ctx 1M」这样的数字
+  //	拿不到 → 显示「ctx ?」，title 里写明这是上游没报，不是 0
+  //
+  // # 为什么不直接不显示
+  //
+  // 完全不显示时，用户分不清「这个模型窗口很小」和「我们不知道它多大」——
+  // 前者会影响他选哪个模型，后者不影响。两种都留白等于把这两种情况混成一团。
+  //
+  // 但也**不能**编一个数字：ctx 决定客户端要不要提前压缩历史，
+  // 报大了会让它塞太多然后被上游截断，报小了会让它过早 compact。
+  // 所以占位用「?」而不是任何数字。
+  function fmtCtx(n) {
+    // 显示成 1M / 200K / 131072 三档。
+    //
+    // 1M/200K 这类整数近似只用于**一眼可比**；精确值放 title，
+    // 需要精确的客户端会读 /v1/models 的原始字段，不靠这个标注。
+    if (!Number.isFinite(n) || n <= 0) return '';
+    if (n >= 1000000 && n % 100000 === 0) return (n / 1000000) + 'M';
+    if (n >= 1000 && n % 1000 === 0) return (n / 1000) + 'K';
+    return String(n);
+  }
+  
+  // ctxTag 生成 chip 上的窗口标注。
+  //
+  // 拿不到时返回占位「ctx ?」—— 而不是空串。理由见上方注释：
+  // 留白会让「窗口小」与「不知道」看起来一样。
+  function ctxTag(m) {
+    const c = fmtCtx(m && m.ctx);
+    if (!c) return '<span class="ctx unknown" title="上游没有提供这个模型的上下文窗口大小；'
+      + '这不代表它是 0，只代表我们不知道。需要精确值时请查上游文档">ctx ?</span>';
+    const out = fmtCtx(m && m.maxOut);
+    const title = '上下文窗口 ' + (m.ctx) + ' token'
+      + (out ? '；单次最大输出 ' + m.maxOut + ' token' : '；单次最大输出：上游未提供');
+    return '<span class="ctx" title="' + esc(title) + '">ctx ' + esc(c) + '</span>';
+  }
+  
+
+  
+  function renderModels(list) {
+    models = list || [];
+    if (!models.length) {
+      $('mcount').textContent = '';
+      $('models').innerHTML = '<span class="dim">无可用模型</span>';
+      return;
+    }
+
+    // 按上游分组渲染（T5）。三件事一起做：
+    //   1. **去重**：按去掉前缀后的**裸名**去重（见 groupModelsByOwner），
+    //      同一个模型只留一条。对外 API 两种写法都要保留
+    //      （`provider/model` 是显式指定上游用的），但**界面上不该重复展示**。
+    //      ⚠ 主修在**后端**：`/v1/models` 已改成只发 `provider/model` 一种写法，
+    //      正常情况下列表本来就没有重复项。这里与下拉里那处去重都是
+    //      **防御性冗余** —— 后端若再退化回"裸名 + provider/裸名 双发"
+    //      （改造前实测过 32 条 = 16 个模型 × 2 种写法），界面也不会重复。
+    //   2. **分组**：按 `owned_by` 归组（OpenAI 规范字段，后端已下发）。
+    //   3. **可折叠**：状态存 localStorage，刷新后保持。
+    const allGroups = groupModelsByOwner(models, emptyModelGroups());
+    // ⚠ 用户口径（2026-10-21，第二次追问后定案）：**没有可用账号的上游整组不显示**，
+    // 连内置声明也不显示。
+    //
+    // # 为什么要过滤，而不是"标来源"就够了
+    // 上一版给内置声明加了「N 项内置声明 · 无可用账号」的标注，用户仍然追问
+    // 「为什么有这三个」—— 说明在"能调用什么"这个面板里，**不可调用的条目本身就是噪声**：
+    // 读者不会去读小字说明，他只会看到模型名并以为能用。
+    // 数据来源是 `internal/loomy/imagegen_ext.go` 的 `imageModelIDs`（生图模型的内置声明，
+    // 不带账号也在 /v1/models 里），API 那一层不动（客户端仍能据此知道上游支持生图），
+    // 只在**这个面板**按"有没有可用账号"过滤。
+    //
+    // # 空白仍要能自我解释（本项目既有纪律）
+    // 过滤后如果一组都不剩，不是把页面留白，而是给一句能照做的话。
+    // ⚠ 判据必须是"**明确知道** 0 个账号"，不是"不 > 0"：
+    // 未知（manifest 还没到 / 上游没报 account_count）一律照旧显示 ——
+    // 否则页面在 manifest 到达前会先闪一次"没有可用账号"，那是最糟的空态。
+    const groups = allGroups.filter(g => !(g.accountCount === 0));
+    // 被藏起来的上游集合：下拉（对话测试）也要一起隐藏，否则"面板藏了、下拉还在"。
+    const noAcctOwners = new Set(allGroups.filter(g => g.accountCount === 0).map(g => g.owner));
+    const visibleModels = models.filter(m => !noAcctOwners.has(modelOwnerOf(m.id, m.owned_by)));
+    // 顶栏口径：只统计**真正显示出来**的条目，数字必须与 chips 一致。
+    // （默认全是实时目录；仍保留"内置声明"分支 —— 有账号但目录来自内置表的场景将来会出现。）
+    const builtinCount = groups.reduce((n, g) => n + ((g.accountCount === 0) ? g.items.length : 0), 0);
+    $('mcount').textContent = visibleModels.length
+      ? '（' + visibleModels.length + ' 个'
+        + (builtinCount ? ' · ' + builtinCount + ' 项内置声明，无可用账号' : '，上游实时目录')
+        + '）'
+      : '';
+    $('models').innerHTML = groups.length
+      ? groups.map(renderModelGroup).join('')
+      : '<span class="dim">没有可用账号，无法获取模型目录。先在「账号池」添加账号。</span>';
+    const sel = $('model'), keep = sel.value;
+    // T7：模型下拉按上游筛选，并按 id **去重**。
+    //
+    // ⚠ 主修在**后端**：/v1/models 改成只发 `provider/model` 一种写法
+    //（不再发默认上游的裸名副本），正常情况下列表本来就不会重复。
+    // 这里的去重是**防御性冗余** —— 后端若再退化回"裸名 + provider/裸名 双发"，
+    // 界面也不会出现两条一模一样的选项（用户报的正是"可用模型重复了，很多"）。
+    //
+    // 与上面的 chip 区仍是两套渲染，但 id 口径已经统一：
+    //   · chip 区（可用模型面板）：按上游分组 + 可折叠，便于"看有哪些模型"
+    //   · 这里（对话测试下拉）：按上游**筛选**成一条平铺列表，便于"选一个测试"
+    // 两边都显示**完整 id**，两边都去重（chip 区按裸名去重、这里按 id 去重）。
+    //
+    // 先刷新上游下拉的选项（它依赖当前模型列表），再按选中的上游填模型。
+    // 上游下拉与模型下拉都用**过滤后**的列表：面板里藏起来的上游，
+    // 下拉里也不该还能选到（否则"选一个不可调用的模型"是纯粹的坑）。
+    syncModelProviderOptions(visibleModels);
+    const wantP = modelProviderFilter();
+    const filtered = wantP
+      ? visibleModels.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
+      : visibleModels;
+    // 去重：同一个 id 只留第一条（保留上游返回的原始顺序，选择行为可预期）。
+    const seen = new Set();
+    const shown = [];
+    for (const m of filtered) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      shown.push(m);
+    }
+    // ⚠ 空列表**必须给"为什么空"的说明**（2026-10-19 用户实测反馈：下拉空白 ⇒「这个好像有bug」）。
+    // 原来这里无条件 `sel.innerHTML = shown.map(...)` ⇒ 列表为空时下拉被彻底清空，
+    // 连初始的「— 先连接 —」占位项都没了，用户看不到任何线索（静默失败）。
+    // 三种空因给三种不同的话 —— 这才是能直接照做的线索：
+    //   a) 没粘「对话密钥」 ⇒ /v1/models 会 401，目录本来就拉不到（控制台刻意不注入凭据）
+    //   b) 粘了但目录为空   ⇒ 去「可用模型」点右上角「强制刷新目录」
+    //   c) 上游筛选筛没了   ⇒ 把上面的「全部上游」选回来
+    const modelHintEl = $('modelHint');
+    if (shown.length) {
+      sel.innerHTML = shown.map(m =>
+        `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+      if (modelHintEl) { modelHintEl.textContent = ''; modelHintEl.style.display = 'none'; }
+    } else {
+      sel.innerHTML = '<option value="">— 没有可选模型 —</option>';
+      if (modelHintEl) {
+        modelHintEl.textContent = !(KEY || CONSOLE_KEY)
+          ? '暂无模型：正在用会话自动取用配置里的 api_key …（若配置里没写 api_key，就在顶部「对话密钥」里粘一把）'
+          : (models.length === 0
+              ? '暂无模型：密钥已粘，但目录还是空的 —— 去「可用模型」页点右上角「强制刷新目录」'
+              : '当前上游筛选下没有模型 —— 把上面的「全部上游」选回来');
+        modelHintEl.style.display = '';
+      }
+    }
+    // 保持原选择：若它不在筛选后的列表里，回落到 `auto`，再回落到第一个。
+    //
+    // ⚠ 比 `auto` 必须按**去前缀后的裸名**：目录收窄后这里只有 `workbuddy/auto`，
+    // 按完整 id 比会永远匹配不到 —— 于是每次刷新都把用户的选择悄悄换成列表第一项，
+    // 而 `auto` 恰好是"不指定模型"的那个默认项（最该被保持的就是它）。
+    const isAuto = m => multKeyOf(m.id) === 'auto';
+    sel.value = shown.some(m => m.id === keep) ? keep
+      : ((shown.find(isAuto) || shown[0] || {}).id || '');
+  }
+
+  // modelOwnerOf 从模型 id 推断上游归属（T7）。
+  //
+  // ⚠ 实现已抽到**共享层** internal/server/model-picker.js（mpOwnerOf），
+  // 由 tools/model_picker_sync.js 注入到本页顶部。这里保留一层薄委托，
+  // 为的是不动本文件里 7 处既有调用点（改签名/改名会牵一大片）。
+  //
+  // 为什么必须真共享而不是各写一份：分组页第一版就重写了一遍，结果
+  // 形态与规则双双漂移（按钮条 vs 下拉、无 owned_by 兜底），用户当场指出。
+  function modelOwnerOf(id, ownedBy) {
+    return mpOwnerOf(id, ownedBy);
+  }
+
+  // modelProviderFilter 当前选中的上游（空串 = 全部）。
+  //
+  // ⚠ 读的是**模块变量** `modelProviderWanted`，不是 DOM 的 `select.value`。
+  //
+  // 为什么：`<select>` 会把"不在 option 列表里的值"**当场归一成空串**。
+  // 启动顺序是「恢复选择 → 同步选项」，恢复时 option 还没建出来，
+  // 于是 `el.value = 'workbuddy'` 立刻被浏览器归成 '' —— 选择丢失。
+  // （实测：刷新后 select.value 变回 ""，而 localStorage 里还存着 workbuddy。）
+  //
+  // 用变量记住"用户想要哪个上游"，DOM 只作展示；选项建好后再写回 DOM。
+  // 这样与注入顺序无关 —— 不再依赖"必须等 option 就绪才能赋值"。
+  function modelProviderFilter() {
+    return modelProviderWanted;
+  }
+
+  // setModelProviderFilter 同时更新"想要的"与 DOM（DOM 不在场也安全）。
+  function setModelProviderFilter(v) {
+    modelProviderWanted = v || '';
+    const el = $('modelProvider');
+    if (el && el.value !== modelProviderWanted) el.value = modelProviderWanted;
+  }
+
+  // saveModelProviderFilter 记住筛选选择。
+  // 为什么持久化：用户选了某个上游多半是因为"我常测它"，
+  // 每次打开都要重选一遍就变成了噪声。
+  function saveModelProviderFilter(v) {
+    try { localStorage.setItem(LS_MODELPROVIDER, v || ''); } catch { /* 隐私模式 */ }
+  }
+
+  // restoreModelProviderFilter 启动时恢复上次的选择。
+  // 只写进 select 的值，**不在这里填选项** —— 选项依赖模型列表，
+  // 要等 renderModels 拿到数据后再同步（否则会把选项清空）。
+  function restoreModelProviderFilter() {
+    const el = $('modelProvider');
+    if (!el) return;
+    try { setModelProviderFilter(localStorage.getItem(LS_MODELPROVIDER) || ''); }
+    catch { setModelProviderFilter(''); }   // 隐私模式
+  }
+
+  // syncModelProviderOptions 按模型列表刷新上游下拉的选项。
+  //
+  // 为什么要同步而不是写死：上游列表来自 manifest + 目录，
+  // 写死会让新上游不出现在筛选器里。**保留用户已选的那个** ——
+  // 重绘时若清了选择，用户刚切到某个上游就被弹回"全部"。
+  function syncModelProviderOptions(list) {
+    const el = $('modelProvider');
+    if (!el) return;
+    // 排序用 providerRank（manifest 顺序），但**去重/兜底/回填**全走共享层。
+    // 回填必须发生在 innerHTML 之后（select 会把不存在的值归一成空串），
+    // 这一步由 mpFillProviderSelect 内部保证。
+    const got = mpFillProviderSelect(el, list, providerRank, '全部上游');
+    // 模块变量与 DOM 的同步是本页特有的（对话测设要按它选模型），共享层不管。
+    setModelProviderFilter(got);
+  }
+
+  // groupModelsByOwner 把模型列表按上游归组并去重。
+  //
+  // 规则（去重与分组是同一个动作）：
+  //   · `provider/name` 里的 provider 就是归属；**显示时去掉前缀**
+  //   · 裸名用 `owned_by` 作归属
+  //   · 同一组内按**去前缀后的名字**去重
+  //
+  // 这样 `auto` 与 `workbuddy/auto` 合成一条；将来两个上游各有
+  // `xxx/glm-5.2` 时，它们分别在各自组里各留一条（不会互相吃掉）。
+  //
+  // 为什么不用 `owned_by` 直接分组了事：`owned_by` 对带前缀的条目
+  // 也是同一个值，但**id 不同**（`glm-5.2` vs `workbuddy/glm-5.2`），
+  // 不去前缀就还是会显示两条。
+  // emptyModelGroups 列出"应该有模型分组、但当前一个模型都没有"的上游。
+  //
+  // # 为什么需要它（这是评审抓到的漏实现）
+  //
+  // 规格里画了 `codearts (0)` + "没有可用账号，无法获取模型目录"。
+  // 但 `groupModelsByOwner` 只为**出现在模型列表里**的 owner 建组 ——
+  // codearts 一个模型都没有，于是它连分组都不出现，**用户看不到"为什么没有"**。
+  //
+  // 那正是这个项目的教训：**空白必须能自我解释**。
+  // 不显示比显示一个"没有账号"更糟 —— 用户只会以为功能坏了。
+  //
+  // # 判据
+  //
+  // 上游**声明了 `models` 能力**（说明它本该有模型目录），
+  // 却没有出现在 `/v1/models` 里。最常见原因是它没有可用账号 ——
+  // 但那句话由渲染层按 `account_count` 决定，这里只负责"让它出现"。
+  //
+  // ⚠ 注意这一条与账号池的 registryAccounts **不是同一条过滤**，别合并：
+  //   · 这里要的是"能列模型的上游" → 额外要求 models 能力位
+  //   · 账号池要的是"每个上游" → 不做能力过滤
+  // 共用的是上游**全集**（providerRegistryIds），过滤各自加。
+  function emptyModelGroups() {
+    const out = [];
+    for (const id of providerRegistryIds()) {
+      const p = providerInfo(id);
+      if (!p) continue;
+      if (!Array.isArray(p.capabilities) || p.capabilities.indexOf('models') < 0) continue;
+      out.push({
+        owner: id,
+        accountCount: (p.account_count === undefined || p.account_count === null)
+          ? null : (Number(p.account_count) || 0),
+      });
+    }
+    return out;
+  }
+
+  function groupModelsByOwner(list, empties) {
+    const byOwner = new Map();
+    // 先把"声明了 models 能力"的上游都建好空组，
+    // 这样没有模型的上游也会出现在界面上（见 emptyModelGroups 的注释）。
+    for (const e of (empties || [])) {
+      if (!byOwner.has(e.owner)) {
+        byOwner.set(e.owner, { owner: e.owner, items: [], seen: new Set(), accountCount: e.accountCount });
+      }
+    }
+    for (const m of list) {
+      if (!m || !m.id) continue;
+      const slash = m.id.indexOf('/');
+      const prefix = slash > 0 ? m.id.slice(0, slash) : '';
+      // 去前缀的裸名复用 multKeyOf：**归一只有一处**。
+      // 组内去重的键与倍率表的键是同一个变换，各写一份迟早会漂 ——
+      // 漂的表现是"界面看起来不重复，但倍率整列 x无"，很难一眼定位。
+      const bare = multKeyOf(m.id);
+      // 归属：前缀优先（它就是显式指定的上游），否则用 owned_by。
+      const owner = prefix || m.owned_by || '（未标注）';
+      // accountCount 对**所有**组都要有（原来只有空组带它）：
+      // 渲染层要用它区分"实时目录"与"内置声明下但无账号" ——
+      // 缺这个字段时 accountCount 恒为 undefined ⇒ 那三种"没有"又分不开了。
+      if (!byOwner.has(owner)) {
+        const pi = providerInfo(owner);
+        // accountCount 三态：数字 = 真实账号数；**null = 未知**（manifest 未到 / 上游没报）。
+        // 不能把"未知"折成 0 —— 那会让"没账号的上游隐藏"这条规则在 manifest 到达前误伤全部上游。
+        byOwner.set(owner, {
+          owner: owner, items: [], seen: new Set(),
+          accountCount: (pi && pi.account_count !== undefined && pi.account_count !== null)
+            ? (Number(pi.account_count) || 0) : null,
+        });
+      }
+      const g = byOwner.get(owner);
+      if (g.seen.has(bare)) continue;      // 去重：同一组内同名只留一条
+      g.seen.add(bare);
+      // 展示用 id 取**完整 id**（`provider/xxx` 形态）—— 用户要求统一成
+      // `workbuddy/xxx` / `codearts/xxx`，不要让裸名与带前缀名并存造成"重复"。
+      // `data-id` / `title` 也一并取完整 id（见 renderModelGroup），三处口径一致。
+      //
+      // ⚠ 去重仍按**裸名**（上面的 g.seen 用的就是 bare）：`auto` 与
+      // `workbuddy/auto` 指的是同一个模型，只按完整 id 去重会让它们在同一组里
+      // 各占一条 —— 名字看起来一模一样，用户看到的仍然是"重复"。
+        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
+      //
+      // 倍率查表不受影响：multTag 内部经 multTableKey 归一后再查
+      //（倍率表的键是上游目录里的裸名，且只覆盖默认上游，见 multTableKey 的注释）。
+      // 带上窗口元数据：chip 上要显示「ctx 1M」这类标注，
+      // 不给它就没法显示（之前只留 id/fullId/owner，元数据在这一步丢失）。
+      //
+      // ⚠ 上游没报时这两个字段**不存在**（后端按"未知就不写"输出），
+      //   所以这里刻意不写默认值 —— undefined 会在渲染层变成"不显示"，
+      //   而写 0 会变成"窗口大小为 0"这个确切的假事实。
+      g.items.push({
+        id: m.id, fullId: m.id, owner: owner,
+        ctx: m.context_length, maxOut: m.max_output_tokens,
+      });
+    }
+    // 组间按 manifest 上游顺序排序（providerRank）；组内按名字排序（顺序稳定，便于扫读）。
+    const out = Array.from(byOwner.values());
+    out.sort((a, b) => providerRank(a.owner) - providerRank(b.owner));
+    out.forEach(g => g.items.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)));
+    return out;
+  }
+
+  // renderModelGroup 一个上游分组的可折叠块。
+  //
+  // 折叠状态存 localStorage（键含上游名）—— 与 pagesize 同一个模式：
+  // 这是用户偏好，刷新与切面板都该保持。
+  function renderModelGroup(g) {
+    const open = modelGroupOpen(g.owner);
+    // 分组标题带**模型数**（不是账号数）—— 与导航里的 navgcount 区分开：
+    // 那个是账号数。这里写清楚"个模型"，避免两个数字被当成同一件事。
+    //
+    // 空组（该上游声明了 models 能力、但当前一个模型都没有）不渲染 chips 区，
+    // 改为一句能自我解释的说明 —— 见 emptyModelGroups 的注释：
+    // **空白必须能自我解释**，否则用户只会以为功能坏了。
+    let body;
+    // "有模型但是 0 个账号"是最容易骗人的一格：模型来自**内置手册快照**
+    // （不是上游实时目录），当前根本调不动。所以它必须与"实时目录"长得不一样：
+    // 分组标题写"内置 N 项 · 无可用账号"，正文上方再压一行说明。
+    const builtin = g.items.length > 0 && g.accountCount === 0;
+    if (!g.items.length) {
+      const why = (g.accountCount === 0)
+        ? '没有可用账号，无法获取模型目录。先在「账号池」添加账号。'
+        : '上游没有返回模型目录（账号可用但目录为空）。可用「强制刷新目录」重试。';
+      body = `<div class="chips"><span class="dim" style="font-size:12px">${esc(why)}</span></div>`;
+    } else {
+      const note = builtin
+        ? `<div class="dim" style="font-size:11.5px;margin:0 0 6px">无可用账号：以下 ${g.items.length} 项来自<b>内置手册快照</b>，不是上游实时目录，当前不可调用。添加到「账号池」后才会拉取实时目录。</div>`
+        : '';
+      body = note + `<div class="chips">${g.items.map(m =>
+        `<span class="chip" data-id="${esc(m.fullId)}" title="${esc(m.fullId)}">`
+        + `${esc(m.id)}${multTag(m.id)}${ctxTag(m)}</span>`).join('')}</div>`;
+    }
+    return `<div class="mgroup${open ? '' : ' collapsed'}" data-owner="${esc(g.owner)}">
+      <button class="mgrouphead" data-mtoggle="${esc(g.owner)}"
+              aria-expanded="${open ? 'true' : 'false'}"
+              title="${esc(g.owner)} · ${builtin ? ('内置声明 ' + g.items.length + ' 项，无可用账号（不是实时目录）') : (g.items.length + ' 个模型')}（点标题折叠/展开）">
+        <span class="mcaret"></span>
+        <span class="mowner">${esc(g.owner)}</span>
+        <span class="mcount2">${builtin ? (g.items.length + ' 项内置声明 · 无可用账号') : (g.items.length + ' 个模型')}</span>
+      </button>
+      ${body}
+    </div>`;
+  }
+
+  // modelGroupOpen 读折叠状态。未知时**默认展开** ——
+  // 首次打开就全部收起会让"这个面板有什么"看不见，比展开更糟。
+  function modelGroupOpen(owner) {
+    const key = LS_MODELGROUP + '.' + owner;
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? true : v === '1';
+    } catch { return true; }   // 隐私模式：默认展开
+  }
+
+  function setModelGroupOpen(owner, open) {
+    try { localStorage.setItem(LS_MODELGROUP + '.' + owner, open ? '1' : '0'); } catch { /* 隐私模式 */ }
+  }
+
+  // <option> 只能放纯文本，不能放 HTML 标签 —— 倍率用括号包起来。
+  // 与 multTag 共用 multText，保证同一个数在两处长得一样。
+  function multTagPlain(id) {
+    // 与 multTag 同一口径：经 multTableKey 归一**并判归属**后查表。
+    // 下拉里给的是完整 id（与 chip 区一致），不归一会整列都拿不到倍率。
+    // 别家上游返回 null → 这里什么也不加：`<option>` 只能放纯文本，
+    // 挂不下 chips 那条 title 说明，所以与 multTag 的 x无 不同，这里**不写字**。
+    const key = multTableKey(id);
+    if (key === null) return '';
+    if (!Object.prototype.hasOwnProperty.call(modelMultipliers, key)) return '';
+    const txt = multText(modelMultipliers[key]);
+    return txt === null ? '' : ` (x${txt})`;
+  }
+
+  function stopAuto() {
+    // 整页自动轮询已整体移除（无「每 5s 刷新」开关），此函数保留为空壳
+    // 以免 401 等历史路径仍调用它报错。数值刷新靠 30s 无感轮询，不受影响。
+  }
+
+  // ------------------------------------------------------- 本地登录（客户端账号切换）
+  // 本面板是唯一会改写客户端本机状态的入口，所以每个动作都要二次确认；
+  // 后端也会再验一次 confirm=true，前端弹窗不是唯一防线。
+  let clientStatus = null;
+
+  // clientLoginHTML 返回明细节头里的本机登录控制条。
+  // 参数 uid 是当前明细正在展示的账号 —— 切换目标就是它，
+  // 保证「正在看的账号」和「切过去的账号」永远是同一个。
+  function clientLoginHTML(uid) {
+    if (!clientStatus) {
+      return '<span class="dim" style="font-size:11px">本机登录：读取中…</span>';
+    }
+    if (!clientStatus.enabled) {
+      return `<span class="dim" style="font-size:11px" title="${esc(clientStatus.error || '')}">本机登录：不可用</span>`;
+    }
+    const cur = clientStatus.current;
+    const curTxt = cur
+      ? `本机登录：${esc(cur.nickname || cur.uid)}`
+      : '本机登录：未登录';
+    // 客户端在跑时改盘会被它按内存会话原地覆盖，所以按钮置灰并说明原因，
+    // 而不是让用户点了再收到一句拒绝。
+    const running = !!clientStatus.client_running;
+    const runTip = 'WorkBuddy 客户端正在运行，它会把内存里的旧登录态写回磁盘、覆盖本次切换。请先完全退出客户端（含托盘图标）。';
+    const cand = (clientStatus.candidates || []).find(c => c.uid === uid);
+    let act;
+    if (!cand) {
+      act = '<span class="dim" style="font-size:11px">无可用凭证</span>';
+    } else if (!cand.valid) {
+      act = '<span class="pill err">凭证已过期</span>';
+    } else if (cand.current) {
+      act = '<span class="pill ok">已是本机登录</span>';
+    } else {
+      const nm = cand.nickname || cand.uid;
+      act = running
+        ? `<button disabled title="${esc(runTip)}">切换本机登录</button>`
+        : `<button data-clswitch="${esc(uid)}" data-clname="${esc(nm)}" `
+          + `title="把本机 WorkBuddy 客户端切换到 ${esc(nm)}（改写客户端登录态，需重启客户端）">切换本机登录</button>`;
+    }
+    const rb = clientStatus.has_backup
+      ? (running
+        ? `<button disabled title="${esc(runTip)}">回滚</button>`
+        : `<button data-clrestore="1" title="回滚到 ${esc(clientStatus.backup_nick || clientStatus.backup_uid)}`
+          + `（备份于 ${esc(clientStatus.backup_at || '未知时间')}）">回滚</button>`)
+      : '';
+    const runPill = running
+      ? ` <span class="pill warn" title="${esc(runTip)}">客户端运行中</span>`
+      : '';
+    return `<span class="dim" style="font-size:11px">${curTxt}</span>${runPill}${act}${rb}`;
+  }
+
+  // 只取数据不渲染：真正的呈现发生在 renderGrowthGroups 的节头里。
+  async function loadClientLogin() {
+    try {
+      // ⚠ 必须 `silent`（2026-10-19 加）：**本机登录管理是可选功能**，
+      //   未启用时接口回 503「本控制台未启用客户端登录管理」—— 那是**正常状态**，
+      //   不是失败。而 `admin()` 默认会把任何非 2xx 播成**红色 toast**，
+      //   于是每次 refresh 都冒一条「GET 失败：…」。
+      //
+      //   真浏览器实测的时序（tests/frontend/verify_delete_buttons_ui_e2e.js）：
+      //	+20ms   已彻底删除 xxx        ← 删除成功提示（用户该看到的）
+      //	+130ms  GET 失败：本控制台未启用客户端登录管理  ← 把它盖掉了
+      //   用户看到的是后者 ⇒ 读成「点了移除之后报失败 = 删不掉」。
+      clientStatus = await sharedGet('ep:/admin/client-login',
+        () => admin('/admin/client-login', { silent: true }));
+    } catch (e) {
+      // 客户端没装或未启用时接口会失败，不该连带影响成长计划本身，
+      // 只把控制条降级成「不可用」。
+      clientStatus = { enabled: false, error: e.message };
+    }
+    // 本机登录与成长计划是两条独立的加载时序（前者在 refresh 里、后者可能已先渲染过），
+    // 拿不到这里补一次渲染，节头就会一直停在「读取中…」直到下一次 30s 轮询。
+    // 快照还没到时不要抢渲染，免得把「加载中」覆盖成「账号池为空」。
+    if (growthSnaps.length) renderGrowthGroups();
+    return clientStatus;
+  }
+
+  async function clientSwitch(uid, name) {
+    if (!confirm(`把本机 WorkBuddy 客户端切换到「${name}」？\n\n` +
+      `· 会改写客户端凭证文件与账号指针\n` +
+      `· 需要完全退出并重新启动客户端才生效\n` +
+      `· 切换前会自动备份当前登录态，可随时回滚\n\n确认切换到 ${name}？`)) return;
+    try {
+      const r = await admin('/admin/client-login/switch', {
+        method: 'POST', body: JSON.stringify({ uid, confirm: true }),
+      });
+      toast(r.message || '已切换');
+      await loadClientLogin();
+      renderGrowthGroups();
+    } catch (e) { toast('切换失败：' + e.message, true); }
+  }
+
+  async function clientRestore() {
+    const st = clientStatus || {};
+    if (!confirm(`回滚本机客户端登录态到「${st.backup_nick || st.backup_uid || '上一次'}」？\n\n` +
+      `· 会覆盖当前客户端凭证\n· 需要完全退出并重新启动客户端才生效\n\n确认回滚？`)) return;
+    try {
+      const r = await admin('/admin/client-login/restore', {
+        method: 'POST', body: JSON.stringify({ confirm: true }),
+      });
+      toast(r.message || '已回滚');
+      await loadClientLogin();
+      renderGrowthGroups();
+    } catch (e) { toast('回滚失败：' + e.message, true); }
+  }
+
+  // pollPoolValues 账号池**无感**轮询：只更新额度/状态数字，不整页重绘。
+  //
+  // # 为什么是"轮询 + 单元格 diff"而不是整页 refresh（用户本轮要求）
+  //
+  // 整页 refresh() 每 5 秒：重拉 manifest → 重建所有面板与导航 → 整块表格
+  // 重绘。开销大、且会打断正在交互的用户（此前"输入框被清空""绑定按钮
+  // 莫名失效"都源于此）。成熟仪表盘（Grafana / new-api 之类）的做法是：
+  // **只轮询数据源、按 key 定位单元格、数值变了才原地替换**。这里照做：
+  //
+  //   1. 每 30 秒取一次 /admin/accounts —— 本地 JSON，**无上游调用**
+  //     （上游额度由服务端周期性刷新，客户端只读它的缓存视图）
+  //   2. 用 `data-quota-uid` / `data-free-quota-uid` / `data-status-uid` 定位单元格
+  //   3. 文本没变就不碰；变了才替换该单元格 —— 表格行/面板/导航全部原样
+  //
+  // 覆盖的数值（理性判断"哪些需要实时"）：
+  //   - 额度：本号/上游随时变，最该实时
+  //   - 免费额度：与额度同源（同一次刷新一起回来），且它决定"该不该现在用这个号"
+  //   - 状态：冷却/熔断/恢复切换（含主动健康检查的提前恢复），运营最关心
+  //   其余（成功数/Token 到期）变化频率低，手动刷新足够，不纳入。
+  //
+  // 守卫与无感轮询一致：后台标签、弹窗打开、账号表不可见时不刷。
+  async function pollPoolValues() {
+    if (document.hidden) return;
+    const info = $('infoModal'), login = $('modal');
+    if (info && info.style.display !== 'none') return;
+    if (login && login.style.display !== 'none') return;
+    const acctsSec = document.getElementById('accts');
+    if (!acctsSec || acctsSec.offsetParent === null) return; // 账号表不可见
+    let d;
+    try { d = await admin('/admin/accounts'); }
+    catch { return; } // 轮询失败静默，下轮再试
+    const list = (d && d.accounts) || [];
+    // 账号集合变化（新增/删除）→ 整表重建：无感轮询只 diff 单元格，
+    // 新账号行不会自己长出来 —— 这正是"导入/重载后数据不自动更新"的
+    // 一部分（另一部分是重载路径不刷额度，已在 handler 修复）。
+    const current = Array.from(document.querySelectorAll('tr[data-acctof]'))
+      .map(tr => tr.getAttribute('data-acctof')).sort().join(',');
+    const wanted = list.map(a => providerOf(a)).sort().join(',');
+    if (current !== wanted || Array.from(document.querySelectorAll('tr[data-acctof]')).length !== list.length) {
+      renderAccounts(list);
+      return;
+    }
+    for (const a of list) {
+      const key = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(String(a.uid)) : String(a.uid);
+      const cell = document.querySelector(`td[data-quota-uid="${key}"]`);
+      if (cell) diffCell(cell, quotaCellHTML(a));
+      const fqCell = document.querySelector(`td[data-free-quota-uid="${key}"]`);
+      if (fqCell) diffCell(fqCell, freeQuotaCellHTML(a));
+      const stCell = document.querySelector(`td[data-status-uid="${key}"]`);
+      if (stCell) diffCell(stCell, statusCellHTML(a));
+    }
+  }
+
+  // diffCell 单元格 diff：新旧转纯文本比较，变了才替换 innerHTML。
+  function diffCell(cell, freshHTML) {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = freshHTML;
+    if (tmp.textContent === cell.textContent) return;
+    cell.innerHTML = freshHTML;
+  }
+
+  // pollStatsCards 调用统计**无感**轮询：只更新第 1 组 10 张卡的数值，不重绘整块。
+  //
+  // /admin/stats 聚合的是本地请求日志（无上游调用），30 秒一次很便宜。
+  // 按 data-stat-key 定位卡片（`statCardEl`，跨两个容器）、diff 后原地更新数值；
+  // 模型明细（行数会变）仍走整页刷新，不在无感轮询范围。
+  // ⚠ 第 2 组那 3 张的值不在 `statsCardsEntries(d)` 里（原料在 series / by_model_detail），
+  //   所以循环碰不到它们，改由下面 applyDayCards / fillTopModel 单独回填。
+  async function pollStatsCards() {
+    if (document.hidden) return;
+    let d;
+    // ⚠ 给**很短的** TTL（5 秒）而不是默认 30 秒：`/admin/stats` 有一条 **30 秒轮询**
+    //   （见文件里那句 `setInterval(..., 30000)`），若共用 30 秒缓存，
+    //   轮询会大量命中旧值 ⇒ **界面上统计数字会看起来"不刷新"**。
+    //   5 秒既消掉同一轮 refresh 里的重复请求，又不会让轮询读到过期数据。
+    // ⚠⚠ **key 必须带档位**（2026-10-18）：`statsRange` 变了就是另一份数据，
+    //   若共用 `ep:/admin/stats` 这个键，切档后会命中上一个档的缓存
+    //   —— 那正是后端 `statsAggCached` 刚修掉的串位在前端的同形（账本 E071）。
+    //   ⚠ 空档（全部）时 key 是 `ep:/admin/stats?`、URL 不带 `?range=` —— 与既有行为一致。
+    const statsKey = statsKeyOf();
+    try { d = await sharedGet(statsKey, () => admin(statsURL()), 5000); }
+    catch { return; }
+    const entries = statsCardsEntries(d);
+    for (const [k, v, cls] of entries) {
+      // ⚠ 定位走 `statCardEl`（同时匹配 `#statsCards` 与 `#statsCards2`）。
+      //   这里虽然只会命中第 1 组那些键，但**不能**改回写死 `#statsCards`：
+      //   一旦以后把某个键移组，写死容器的写法会静默失配、那格永远停在占位值。
+      const el = statCardEl(k);
+      if (!el) continue;
+      const val = el.querySelector('.v');
+      if (!val) continue;
+      const fresh = v === null ? NODATA : String(v);
+      if (val.textContent === fresh) continue;
+      val.textContent = fresh;
+      val.className = 'v ' + (v === null ? 'dim' : (cls || ''));
+    }
+    // ⚠ 回填「活跃天数 / 当前连续天数 / Top 模型」这三格（现在都在 `#statsCards2`）。
+    //   ⚠ 2026-10-20 拆容器后，上面那个循环**只遍历第 1 组**的键 ⇒ 已经不会擦这三格了；
+    //     但这两行**必须保留**：卡片是 `renderStats` 每次**重建**的（值重置成占位），
+    //     若这轮之前刚发生过重建（切档 / 整页 refresh），重建后的空格只能靠这里补回。
+    //     「轻活每次都做」是本文件一贯的取舍（见 fillDayCards 里那段 sig 守卫的注释）。
+    try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
+    // ⚠ 「Top 模型」同理（2026-10-18 看图才发现）：它的原料是 `d.by_model_detail`
+    //   —— 数据就在本响应里，只是 `statsCardsEntries2` **不读它**（值恒为 null）。
+    //   ⇒ 每轮用 `d` 填一次（fillTopModel 内部的算法：取 tokens 最多的模型）。
+    //   ⚠ 缓存四格在 `#cacheCards`（另一个容器），不受这个循环影响，不用补。
+    try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
+    // ⚠⚠ 报表区（Top 榜 / 上游环）也必须跟着这轮一起更新（R2 抓到的"一页两个时刻"）。
+    // 症状（实测）：卡片每 30 秒无感更新，而榜/环只随**整页 refresh** 才变 ⇒
+    //   28 秒后卡片写"总请求 99"，榜还是旧的 a1 —— **同一屏上两个不同的时刻**。
+    // ⚠ renderStatsReport 内部有 digest 守卫（值没变就不重绘），所以这里放心调，
+    //   不会让榜/环每 30 秒闪一次。
+    renderStatsReport(d);
+  }
+
+  // ---- 消耗分布图（对标 new-api 首页：按模型堆叠的 token 用量）----
+  //
+  // 数据来自 /admin/stats/series（服务端按桶聚合 request-log），每桶还带 `by_model`。
+  // 内联 SVG、零图表库依赖：柱状 = 堆叠 rect，面积 = 堆叠 polygon。
+  // ⚠ 2026-10-20 之前这里是「请求量 + 成功率」双折线 —— 折线回答不了"消耗花在哪个模型上"。
+  let trendSeries = [];
+  // trendRange 当前选的范围。⚠ 只影响**趋势** —— 卡片与 Top 榜/环是全量窗口（见标题注释）。
+  let trendRange = '24h';
+  // 消耗分布图的画法：'bar' = 堆叠柱，'area' = 堆叠面积。
+  // ⚠ 它**不进** loadTrendSeries 的 digest：视图只改画法不改数据，
+  //   把它塞进 digest 会让"同一份数据"被判成变了、白拉一次网络。
+  //   切视图走 renderTrendSVG(trendSeries._list) 直接重画（见下面那段绑定）。
+  let trendView = 'bar';
+  // ★ T-413：**统一时间范围** —— 一套 4 档同时驱动统计与趋势（用户原话：
+  //   「这两个其实是可以融在一起的……统一起来会比较好一点」）。
+  //
+  // STATS_RANGE_MAP 是唯一的"档位 → 两个后端参数"映射表。
+  //
+  // # 为什么必须映射（不能直接把 data-range 传给两个接口）
+  //   两个后端接受的参数名与语义**不一样**：
+  //     /admin/stats?range=        today | 7 | 30 | all    （单位是天，无后缀）
+  //     /admin/stats/series?range= 24h | 7d | 30d | 365d   （带单位后缀）
+  //   直接传会**静默退回"全部"**（实测 /admin/stats?range=24h 与 all 返回同样条数）。
+  //
+  // # 「24小时」这档对 /admin/stats 的真实缺口（显式说明，不编数字）
+  //   /admin/stats **没有**滚动 24 小时，只有 `today`（**本地 0 点起**）。
+  //   上午 9 点时 today ≈ 9 小时的数据，而 series 的 24h 是完整 24 小时 ⇒ 两者口径不同。
+  //   ⇒ 这一档的卡片区显示 today 的数字，并在标题旁用 #statsRangeNote 说清楚；
+  //     不做"假装它是 24 小时"的换算（那是编数字）。
+  const STATS_RANGE_MAP = {
+    // ★ T-414：`series` 是 **24h** 而不是 365d（用户 2026-11-09 明确要求）。
+    //
+    // 用户原话：「我点击全部的按钮的时候，它下面那个表格不要365天，
+    //            它就显示24小时的就可以了。」
+    //
+    // # 为什么这个"名字叫全部、图表却只看 24 小时"的反直觉映射是对的
+    // 「全部」说的是**卡片的统计口径**（累计至今），
+    // 而 365 天窗口里绝大部分天是空的 ⇒ 柱子被摊平成一片，看不出任何东西。
+    // 24 小时是**有形状**的那一段 ⇒ 表格才读得懂。
+    // ⚠ 热力图仍然独立看 365 天（它本来就是这个用途），不受本表影响。
+    // ⚠ 后来者最容易"顺手改成 365d 更合理" —— 那正是用户明确否掉的（见护栏 ⑥）。
+    'all': { stats: 'all', series: '24h', note: '卡片为全部历史统计；图表为最近 24 小时' },
+    '24h': { stats: 'today', series: '24h', note: '卡片按「今日」统计（本地 0 点起）；图表为滚动 24 小时' },
+    '7d': { stats: '7', series: '7d', note: '' },
+    '30d': { stats: '30', series: '30d', note: '' },
+  };
+  // statsRange 是**统一下来的那一档**（键取自 STATS_RANGE_MAP）。
+  let statsRange = 'all';
+  // ⚠⚠ 统计取数的**唯一两个入口**（2026-10-18 抽，AGENTS.md 第 6 条）—— 原语义完整保留：
+  //   `/admin/stats` 全文件有**两处**取数（refresh 的异步补画 + pollStatsCards 的轮询），
+  //   只要有两处就必须共用一个 URL/Key 构造，否则迟早漏一处
+  //（历史症状：切档后数字纹丝不动 —— 漏的那处把结果整块盖掉了）。
+  const statsURL = () => '/admin/stats?range=' + STATS_RANGE_MAP[statsRange].stats;
+  const statsKeyOf = () => 'ep:/admin/stats?' + statsRange;
+  // setStatsRange 统一切档：更新按钮态 + 备注行，然后重取两路数据。
+  //
+  // ⚠ 一次驱动三处（用户要的正是这个）：
+  //   ① 指标卡 / Top 榜 / 环图 / 缓存四格  ← /admin/stats
+  //   ② 消耗分布图 / 趋势图              ← /admin/stats/series
+  //   ③ #statsRangeNote（口径不一致时说明）
+  // ⚠ 热力图**不跟**（始终 365 天，有自己的动态标题「近 N 天」）。
+  // ⚠ 切换时**不清屏**：旧数据留在屏幕上，新数据回来再替换
+  //（与 refresh() 的"先出页面、后台再补"同一套做法）。
+  function setStatsRange(key) {
+    const m = STATS_RANGE_MAP[key];
+    if (!m) return;
+    statsRange = key;
+    trendRange = m.series;
+    for (const x of document.querySelectorAll('#trendRange button')) {
+      x.classList.toggle('on', x.dataset.range === key);
+    }
+    const note = $('statsRangeNote');
+    if (note) {
+      // ★ T-423：从「内联文字」改成「圆圈图标 + title」（理由见 theme-max.css 里
+      // .range-note-icon 的注释）。有说明 ⇒ 显示 ⓘ 并把全文放进 title + aria-label
+      // （读屏软件否则只读到一个字母 i）；没说明 ⇒ hidden（不占宽度，标题行不随档位跳动）。
+      if (m.note) { note.hidden = false; note.title = m.note; note.setAttribute('aria-label', m.note); }
+      else { note.hidden = true; note.title = ''; note.removeAttribute('aria-label'); }
+    }
+    // ① 统计侧：sharedGet 的 key 带了档位（见 statsKeyOf）⇒ 换档天然命中不同键 ⇒ 真的重取
+    try { refresh(); } catch (e) { console.error('切时间范围(统计)失败:', e && e.message); }
+    // ② 趋势侧：切档必须清 digest，否则"新 range 末尾桶恰好相同"会被判成没变而不重绘
+    trendSeries._last = '';
+    try { loadTrendSeries(); } catch { /* 趋势非关键 */ }
+  }
+  // 单一排 4 档的绑定（原来两排各自的绑定已合并到这里）。
+  for (const b of document.querySelectorAll('#trendRange button')) {
+    b.addEventListener('click', () => {
+      if (b.dataset.range === statsRange) return;   // ⚠ 点当前已选的不重取
+      setStatsRange(b.dataset.range);
+    });
+  }
+
+  // 柱状 / 面积切换。
+  // ⚠ 它**不重新取数**：同一份 `trendSeries._list` 直接重画，切一下是毫秒级，
+  //   不像切时间档要等一轮网络。
+  // ⚠ 也**不能**转调 loadTrendSeries：那函数有 digest 守卫（数据没变就不重绘），
+  //   切视图时数据必然没变 ⇒ 会被判成"没变"、画面纹丝不动（切了像没切）。
+  for (const b of document.querySelectorAll('#trendView button')) {
+    b.addEventListener('click', () => {
+      if (b.dataset.view === trendView) return;      // ⚠ 点当前已选的不重画
+      trendView = b.dataset.view;
+      for (const x of document.querySelectorAll('#trendView button')) {
+        x.classList.toggle('on', x.dataset.view === trendView);
+      }
+      try { renderTrendSVG(trendSeries._list || []); }
+      catch (e) { console.error('切消耗分布视图失败:', e && e.message); }
+    });
+  }
+
+  async function loadTrendSeries() {
+    let d;
+    // ⚠⚠ **取请求时的 range 快照**，回来时比对（R2 抓到的竞态）。
+    // 症状（实测）：点 7d ⇒ 它的响应要 2.5 秒才回；中途用户又点回 24h ⇒
+    //   7d 的响应**迟到落地**并照常重绘 ⇒ 于是 **caption/按钮说 24h，画面却是 7d 的日桶数据**。
+    // ⚠ 只靠 caption 读"当前" trendRange 是不够的 —— 那反而让画面与文案更不一致。
+    const reqRange = trendRange;
+    try { d = await admin('/admin/stats/series?range=' + reqRange); }
+    catch { return; }
+    if (reqRange !== trendRange) return;   // ⚠ 迟到且期间用户改过选择 ⇒ 丢弃这次结果
+    const list = (d && d.series) || [];
+    // digest 比对：**画面真正画的东西**变了才重绘（30s 轮询无感）。
+    // ⚠ digest 里必须**带上 range** —— 否则从 24h 切到 7d 时，若末尾几个桶恰好相同，
+    //   就会被判成"没变"而不重绘（切换看起来没反应）。
+    // ⚠ 比对字段也必须是这张图真画的东西：token 总量 + by_model。
+    //   改造前它比的是 total/ok/fail（那时画的是请求量折线）；如今画 token 分布，
+    //   继续比请求数就会出现"请求数没变、token 翻倍却不重绘"—— 画面停在旧值上。
+    const digest = trendRange + '|' + JSON.stringify(list.slice(-6).map(p => [p.tokens || 0, p.by_model_out || null]));
+    if (digest === trendSeries._last) return;
+    trendSeries._last = digest;
+    // 留一份最近数据：柱状 / 面积切换要重画同一份数据，不该再去拉一次网络。
+    trendSeries._list = list;
+    renderTrendSVG(list);
+  }
+
+  // ---- 消耗分布图：按模型堆叠（对标 new-api 首页那张用量柱）----
+  //
+  // 每根柱 = 一个时间桶，柱高 = 该桶 tokens 总量，柱内按模型分段堆叠；
+  // 面积视图是同一份数据的堆叠带。零图表库：全部是内联 SVG + DOM。
+  //
+  // 配色表（段下标 0 在最底 = 量最大的模型）。⚠ 颜色一律从 CSS 变量派生，
+  // **不写死十六进制**：本项目有深/浅两套主题（见 :root[data-theme]），写死的
+  // 色值在浅色底上要么糊进背景、要么对比度不够；color-mix 派生出来的色会跟着
+  // 主题一起走。前四个借四个语义色（页面别处也是这个对应关系），第 5、6 个混合。
+  const TREND_PALETTE = [
+    'var(--acc)', 'var(--ok)', 'var(--warn)', 'var(--err)',
+    'color-mix(in srgb, var(--acc) 55%, var(--err))',
+    'color-mix(in srgb, var(--ok) 55%, var(--acc))',
+  ];
+  // 「其他」用中性灰（--dim 派生）：它代表的不是某个模型，而是"第 7 名以后的一堆"，
+  // 借任何强调色都会让人以为它是某个具体模型。
+  const TREND_OTHER_COLOR = 'color-mix(in srgb, var(--dim) 80%, transparent)';
+  // 只取前 6 个模型，其余合并成「其他」。
+  // ⚠ 为什么是 6：240px 高的图里占比 1% 的一段只有 2.4px，再细就和相邻色带的边界
+  //   分不清了；而 6 段 + 「其他」共 7 个图例项，正好排得进一行（不换行、不挤别的）。
+  // ⚠ 为什么按**全窗口总量**排序、不让每根柱各排各的：逐柱重排会让同一个模型
+  //   在不同柱里换颜色（这根柱里蓝、下一根里绿），图例立刻失去意义 ⇒ 全局只排一次。
+  const TREND_TOP_N = 6;
+
+  // token 的紧凑写法（1.2k / 3.4M）。按天趋势那张图里有同名局部函数，但那是
+  // 函数内的局部常量（本文件既有做法就是各写一份）；这里提成模块级，为的是让
+  // 峰值那行与浮层明细共用同一套口径 —— 两处各写一份迟早出现 2.0M / 2.00M。
+  function trendFmt(v) {
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+    return String(Math.round(v));
+  }
+  // 属性值转义：`esc` 只负责文本节点（不转引号），而模型名来自上游、可能带 `"`，
+  // 直接拼进 title="…" 会把属性截断 ⇒ 图例的 title 走这条更严的。
+  const trendEscAttr = (s) => esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  function renderTrendSVG(list) {
+    const host = $('statsTrend');
+    if (!host) return;
+    const peakEl = $('trendPeak');
+    const rows = Array.isArray(list) ? list : [];
+
+    // ── 1. 逐桶归一 ──
+    // ⚠ 用 `by_model_out`（**纯输出** token），不是 `by_model`（total=输入+输出）。
+    //   用户的判断是对的：按 total 画时"一小时消耗 2.9M"，而其中真正生成的只有约 1.3 万
+    //   （其余是缓存读取的上下文）。那种图会让人以为模型每小时吐 290 万字。
+    // ⚠ 它是 omitempty：没有输出用量的桶**整个键都不存在** ⇒ 一律 `|| {}`。
+    // ⚠ 柱高**只**取 Σby_model_out，不再与 tokens 取 max：
+    //   tokens 是 total，两者数量级差几十倍，取 max 等于把 total 又画回来。
+    //   历史桶没有 out_tokens（字段 2026-10-20 才加）⇒ 柱高 0 ⇒ 那部分不显示，
+    //   这是诚实的：那时确实没记录输出量。
+    const buckets = rows.map((p) => {
+      const m = (p && p.by_model) || {};   // ⚠ 2026-10-20 改：by_model 是 total（输入+输出），与「总 Token」一致
+      let sum = 0;
+      for (const k of Object.keys(m)) { const v = Number(m[k]) || 0; if (v > 0) sum += v; }
+      return {
+        ts: String((p && p.ts) || ''), models: m, sum,
+        total: sum,
+      };
+    });
+    const peak = buckets.reduce((a, b) => Math.max(a, b.total), 0);
+
+    // ⚠ 空数据 / 全为 0 ⇒ **不画坐标系**，只留一句说明。
+    //   理由与按天趋势那张图同源：空网格看起来像"渲染坏了"，而不是"这段时间真没消耗"。
+    //   同时清掉峰值行 —— 否则 240px 高的一块空白上挂着"峰值 0"，两处互相打脸。
+    if (!buckets.length || peak <= 0) {
+      if (peakEl) peakEl.textContent = '';
+      host.innerHTML = '<div class="dim" style="font-size:12px">暂无数据（所选范围内没有 token 用量）</div>';
+      return;
+    }
+
+    // ── 2. 模型排名 → 前 6 + 其他 ──
+    const modelTotal = new Map();
+    for (const b of buckets) {
+      for (const k of Object.keys(b.models)) {
+        const v = Number(b.models[k]) || 0;
+        if (v > 0) modelTotal.set(k, (modelTotal.get(k) || 0) + v);
+      }
+    }
+    // 同量时按名字排（否则两个等量模型每次轮询都可能换位、连带换色）。
+    const ranked = [...modelTotal.entries()]
+      .sort((a, b) => (b[1] - a[1]) || String(a[0]).localeCompare(String(b[0])));
+    const restNames = new Set(ranked.slice(TREND_TOP_N).map((e) => e[0]));
+    // 「其他」里还包括"残量"：tokens 有值但 by_model 缺失/不全（历史桶）时柱高按 tokens
+    // 走，差的这截必须归进去 —— 否则各段之和到不了柱顶，看起来像少画了一段。
+    const residual = buckets.reduce((a, b) => a + Math.max(0, b.total - b.sum), 0);
+    const segs = ranked.slice(0, TREND_TOP_N).map((e, i) => ({
+      name: String(e[0]), color: TREND_PALETTE[i % TREND_PALETTE.length], rest: false,
+    }));
+    if (restNames.size || residual > 0) {
+      segs.push({ name: '其他', color: TREND_OTHER_COLOR, rest: true });
+    }
+    const valOf = (b, s) => {
+      if (!s.rest) return Number(b.models[s.name]) || 0;
+      let v = 0;
+      for (const k of restNames) v += Number(b.models[k]) || 0;
+      return v + Math.max(0, b.total - b.sum);
+    };
+
+    // ── 3. 版面 ──
+    // ⚠⚠ 2026-10-26：**不再是"太简洁"那一版**。原来这里写的是
+    //   「Y 轴不画刻度网格：240px 里再割四条横线就只剩骨架」，于是这张图成了
+    //   全页唯一没有等分网格线、没有左轴刻度的图 —— 用户对照下面两张趋势图
+    //   点出来："上面的太简洁了，我希望统一用下面的实现"。
+    //   ⇒ 现在与下方两张趋势图**同一套视觉语言**：
+    //     · dcGrid    等分网格线 + 左轴刻度（0/25/50/75/100% 五条）
+    //     · dcRects   柱子
+    //     · dcCursor  悬浮参考垂线
+    //   PADL 从 4 放到 50 就是为了给左轴刻度文本腾位置（与 renderDailyTrendSVG 同值）。
+    //   X 轴口径不变：24h 写 HH:MM、其余写 MM-DD，只标首/中/末（桶多时全标会糊）。
+    // ⚠⚠ 2026-10-26：PADT 从 6 放到 26 —— 给**柱顶读数**腾一行的高度。
+    //   用户点出来：「每一个柱状图顶部没有显示数值」。
+    //   下方 #dailyTrend 用的就是 26（它一直是带读数的），这里对齐它的值，
+    //   否则两图并排时柱子的可用高度不一样，看起来像"上面被压扁了"。
+    const W = 900, H = 200, PADL = 50, PADR = 14, PADT = 26, PADB = 20;
+    const n = buckets.length;
+    const plotW = W - PADL - PADR, plotH = H - PADT - PADB;
+    const step = plotW / n;
+    const barW = Math.max(1, Math.min(30, step * 0.66));
+    const yMax = peak * 1.04;                       // 顶部留一点空，最高的柱不顶格
+    const yAt = (v) => PADT + plotH - (plotH * Math.max(0, v)) / yMax;
+    const cx = (i) => PADL + step * i + step / 2;
+    const lblOf = (ts) => (trendRange === '24h' ? ts.slice(11, 16) : ts.slice(5, 10));
+    const sumAll = buckets.reduce((a, b) => a + b.total, 0);
+
+    const marks = [];
+    // 悬停高亮底带：**最先 push**（= 最底层），否则它会盖在色块上把颜色洗淡。
+    // ⚠⚠ 2026-10-26：改走共享层（dcBand）。至此仪表盘里**所有 SVG 元素的构造**
+    //   都在 dash-chart.js：网格线 / 刻度 / 柱子 / 折线 / 参考垂线 / 高亮底带 / 外壳。
+    //   原来这里是共享层之外唯一一处"自己 push <rect>"，留着等于给下次照抄留样本。
+      dcBand(marks, 'trend', { PADT: PADT, plotH: plotH });
+
+    // ⚠⚠ 2026-10-26：等分网格线 + 左轴刻度改走共享层（dcGrid）——
+    //   原来是"干脆不画"，用户点名要与下方两张趋势图统一。
+    //   必须**在柱子之前** push：SVG 后画的盖先画的，网格要在柱之下。
+    //   fmt 用 trendFmt（1.2k / 3.4M），与峰值那行、浮层明细同一套口径。
+    dcGrid(marks, { W: W, PADL: PADL, PADR: PADR, PADT: PADT, plotH: plotH, max: yMax, fmt: trendFmt });
+
+    if (trendView === 'area') {
+      // ── 堆叠面积 ──
+      // ⚠ 每一段是"夹在两条累积线之间"的一条带，**不是**每段各自从 0 画起 ——
+      //   那样后画的段会把先画的整段盖掉，半透明叠加处颜色还会假性地变深。
+      // ⚠ 堆叠顺序与柱状**完全一致**（量最大的贴底）：切视图时同一个模型仍是
+      //   同一个高度位置、同一个颜色，不用重新认图。
+      // ⚠ 但**绘制顺序相反**（先画顶上那段、最后画最底那段）：相邻两段的半透明
+      //   填充在公共边界上总会压出一条更深的细线，让后画的带压住这条缝，边界才干净。
+      const cum = buckets.map(() => 0);
+      const bands = segs.map((s) => {
+        const top = [], bot = [];
+        buckets.forEach((b, i) => {
+          bot.push(yAt(cum[i]));
+          cum[i] += valOf(b, s);
+          top.push(yAt(cum[i]));
+        });
+        // 首尾各补一个贴边的点：否则带子只从第一根柱的中心开始、最后一根中心结束，
+        // 左右各缺半格，看起来像图被裁掉了一截。
+        const topPts = [`${PADL},${top[0].toFixed(1)}`]
+          .concat(top.map((y, i) => `${cx(i).toFixed(1)},${y.toFixed(1)}`))
+          .concat([`${(W - PADR).toFixed(1)},${top[n - 1].toFixed(1)}`]);
+        // 回程：先从右边缘下到该段的**下沿**，再沿各桶中心往回，最后落到左边缘 ——
+        // 少了这两个贴边点，带子的左右两端就是斜的（看起来像图被切了个角）。
+        const botPts = [`${(W - PADR).toFixed(1)},${bot[n - 1].toFixed(1)}`];
+        for (let i = n - 1; i >= 0; i--) botPts.push(`${cx(i).toFixed(1)},${bot[i].toFixed(1)}`);
+        botPts.push(`${PADL},${bot[0].toFixed(1)}`);
+        // ⚠ 填充用 <polygon>（首尾自动闭合）、上边界用 <polyline>：
+        //   这两个元素的语义就是"闭合/不闭合的一串点"，比手拼 path 的 d 串不容易写错；
+        //   顺带它们按元素名就能数出来（柱状是 rect、面积是 polygon），自测与探针都直接。
+        return { s, area: topPts.concat(botPts).join(' '), line: topPts.join(' ') };
+      });
+      for (const band of bands.slice().reverse()) {
+        marks.push(`<polygon points="${band.area}" fill="${band.s.color}" fill-opacity="0.55"/>`);
+        marks.push(`<polyline points="${band.line}" fill="none" stroke="${band.s.color}" stroke-opacity="0.85" stroke-width="0.8"/>`);
+      }
+    } else {
+      // ── 堆叠柱 ──
+      // 从 0 往上累加：下标 0（量最大的模型）贴底 —— 只有它有稳定基线，
+      // 相邻柱之间比它的高度是准的；浮在上面的小模型本来也比不准，贴顶反而更乱。
+      // ⚠⚠ 2026-10-26：柱子改走共享层（dcRects）—— 与下方 #dailyTrend 的柱、
+      //   顶部成功率条是**同一份"给矩形数组"的实现**。逐段颜色通过 r.fill 传入
+      //   （dcRects 的契约就是 r.fill || opt.fill）。
+      const rects = [];
+      for (let i = 0; i < n; i++) {
+        const b = buckets[i];
+        if (b.total <= 0) continue;                 // 空桶不画（与柱顶一致：没有就不占位）
+        let cum = 0;
+        for (const s of segs) {
+          const v = valOf(b, s);
+          if (v <= 0) continue;
+          const y2 = yAt(cum);                      // 这段的下沿
+          cum += v;
+          const y1 = yAt(cum);                      // 这段的上沿
+          // ⚠ 薄段兜底 0.6px：某模型在该桶只占千分之几时真实高度可能只有 0.2px，
+          //   浏览器会画成"看不见"，那就正好抹掉了"它在这个桶里确实有量"这个事实。
+          rects.push({ x: cx(i) - barW / 2, y: y1, w: barW, h: Math.max(0.6, y2 - y1), fill: s.color });
+        }
+      }
+      dcRects(marks, rects);
+    }
+
+    // ⚠⚠ 2026-10-26：**补上柱顶读数**。用户对比下方 #dailyTrend 点出来的：
+    //   「每一个柱状图顶部没有显示数值」。
+    //
+    // # 为什么每根都标（而不是"放不下就每隔 k 根标一根"）
+    //   与下方那张同一条判据 —— 用户 2026-10-18 的原话：
+    //   「所有的柱状图都需要显示数值」。
+    //   ⚠ 值短（1.2k / 3.4M），24 桶的间距排得下；真挤的时候由字号兜住，
+    //     不退回稀疏模式（那会让"能读到值"这件事时有时无）。
+    //
+    // # 标的是**该桶合计**（b.total），不是单段
+    //   这是堆叠柱：每段是某个模型的量，而"这根柱多高"才是读者要的数。
+    //   分模型明细走悬停浮层（那里带得出每一项）。
+    //
+    // # 峰值那根用强调色
+    //   与下方那张同一个手法 —— 一眼仍能看出最高的那根是哪个桶。
+    const peakIdx = buckets.findIndex((b) => b.total === peak);
+    for (let i = 0; i < n; i++) {
+      const b = buckets[i];
+      if (!b || b.total <= 0) continue;   // 空桶不标（标一个 0 会占位又没信息）
+      marks.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${(yAt(b.total) - 5).toFixed(1)}" text-anchor="middle"${i === peakIdx ? ' fill="var(--acc)"' : ''}>${esc(trendFmt(b.total))}</text>`);
+    }
+
+    // ⚠⚠ 2026-10-26：**补上折线**。用户对比下方 #dailyTrend 点出来的：
+    //   「上面的没有折线呢」—— 那张图有柱 + 折线 + 数据点，这张只有柱。
+    //
+    // # 为什么柱与线要同时显示（照 renderDailyTrendSVG 里那段注释的同一理由）
+    //   柱状给"每个桶多少"的绝对量（能比高低），折线给"走势"（能看出涨跌）。
+    //   两者看的是同一件事的不同侧面，**同时显示比让用户切视图更好** ——
+    //   而且不引入额外视图状态，少一处可能出错的地方。
+    //
+    // # 坐标复用已有变量，不自己算
+    //   必须过 cx(i) 与 yAt(b.total)（柱子的中心线与柱顶）——
+    //   否则线与柱对不上，看起来像两个数据源。这与下方那张**逐字相同**。
+    //
+    // # ⚠ 只在有值的桶上连点（total > 0）
+    //   把空桶也连进去会在"没有记录的小时"画出一条贴底的折线，
+    //   让人误以为那小时几乎没生成 —— 而真相是没有记录。
+    //   （dcLine 内部跳过 null，所以这里 filter(Boolean) 之后才交给它。）
+    //
+    // # 为什么放在柱/面积**之后**（而不是之前）
+    //   SVG 后画的盖先画的。折线要在最上层 —— 否则堆叠柱会把线的中段吃掉。
+    //
+    // # 两种视图都加
+    //   面积视图的上沿本来就是这个总和的轮廓，折线叠上去是"给轮廓描一道实线 +
+    //   数据点"，仍然读得清楚；只在柱状加会让两个视图的语言不一致。
+    dcLine(marks,
+      buckets.map((b, i) => (b.total > 0 ? [cx(i), yAt(b.total)] : null)).filter(Boolean),
+      { stroke: 'var(--acc)', width: 1.8, opacity: 0.85, dots: true });
+
+    // 悬停参考线（保留原 id：本文件另两处趋势图也是"竖虚线 + 浮层"这套做法）。
+    // ⚠⚠ 2026-10-26：悬浮参考垂线改走共享层（dcCursor）—— 与 #cacheTrend / #dailyTrend
+    //   同一份实现。id 传 "trend" ⇒ 生成 #trendCursor（沿用原有 id，事件绑定不用改）。
+    //   悬浮提示走共享卡片（dcTipTag/dcTipHead/dcTipRows/dcTipPlace）—— 见下面那段。
+    //   ⚠ 早先这里还提过「共享层预置跟随读数、本图不用」—— 那个单行读数
+    //     已随 dcCursor 一起删掉了（没有调用方了，留着就是旧样式的样本）。
+    dcCursor(marks, "trend", { PADT: PADT, plotH: plotH });
+
+    const xLabels = [];
+    [0, Math.floor((n - 1) / 2), n - 1].forEach((i) => {
+      const b = buckets[i]; if (!b) return;
+      xLabels.push(`<text class="ax" x="${cx(i).toFixed(1)}" y="${H - 5}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${esc(lblOf(b.ts))}</text>`);
+    });
+
+    // 图例：模型名 + 色块，**不显示数值**（7 项挤在一行里，再带数字就装不下；
+    // 数值一律走悬停浮层 —— 那里还带得出"该桶分模型明细"）。
+    const legend = segs.map((s) =>
+      `<span style="display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:170px">`
+      + `<i style="width:8px;height:8px;border-radius:2px;background:${s.color};flex:none"></i>`
+      + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${trendEscAttr(s.name)}">${esc(s.name)}</span>`
+      + `</span>`).join('');
+
+    if (peakEl) peakEl.textContent = `峰值 ${trendFmt(peak)} · 合计 ${trendFmt(sumAll)} tokens`;
+
+    // ⚠⚠ 2026-10-26：<svg> 外壳也走共享层（dcSvgTag）—— 与下方两张趋势图同一份外壳。
+    //   这里用 dcSvgTag 而不用 dcSvg：本图要一次写"图 + 图例 + 浮层"三段 HTML，
+    //   直接把 SVG 塞进 host.innerHTML 会顺带清掉后两段。
+    host.innerHTML =
+      dcSvgTag(W, H, marks.concat(xLabels), { style: 'width:100%;height:' + H + 'px;display:block' }) +
+      `<div class="dim" style="display:flex;flex-wrap:wrap;align-items:center;gap:0 12px;font-size:11px;line-height:16px;margin-top:2px">${legend}</div>
+       ${dcTipTag('trendTip')}`;
+
+    // ── 4. 悬停浮层 ──
+    // ⚠ 监听器只绑**一次**（挂在不被重绘的 #statsTrend 上），当前几何与数据放进
+    //   `host._trendGeo`，每次重绘只换这份快照。否则 30 秒一轮的重绘每次都补一个
+    //   监听器，一分钟后就变成"鼠标一动弹三个浮层"。
+    host._trendGeo = { buckets, segs, valOf, cx, step, n, W, PADT, plotH, lblOf };
+    if (!host._trendBound) {
+      host._trendBound = true;
+      host.addEventListener('mousemove', (ev) => {
+        const g = host._trendGeo;
+        const svgEl = host.querySelector('svg');
+        const tip = host.querySelector('#trendTip');
+        const cur = host.querySelector('#trendCursor');
+        const band = host.querySelector('#trendHoverBand');
+        if (!g || !svgEl || !tip || !cur) return;
+        const rect = svgEl.getBoundingClientRect();
+        if (!rect.width) return;                    // 面板被收起时宽度为 0，按 X 估桶会全落在 0
+        const xv = (ev.clientX - rect.left) / rect.width * g.W;
+        let best = -1, bd = 1e9;
+        for (let i = 0; i < g.n; i++) { const d = Math.abs(g.cx(i) - xv); if (d < bd) { bd = d; best = i; } }
+        if (best < 0) return;
+        const b = g.buckets[best];
+        // 该桶的分模型明细：只看有量的，按量降序 —— 浮层第一行必须是最耗的那个模型。
+        const det = g.segs.map((s) => ({ s, v: g.valOf(b, s) }))
+          .filter((o) => o.v > 0).sort((p, q) => q.v - p.v);
+        // ⚠⚠ 2026-10-26：卡片改走共享层（dcTipHead + dcTipRows + dcTipPlace）——
+        //   与 #cacheTrend 同一份实现（用户：「这个鼠标悬浮 能不能复用这个的鼠标悬浮卡片」）。
+        //   抽的是**外形**，不是内容：本图给分模型明细、缓存图给双轴口径，字段本就不同。
+        tip.innerHTML =
+          dcTipHead(b.ts.slice(5, 10) + ' ' + g.lblOf(b.ts),
+            '合计 <b style="color:var(--fg)">' + trendFmt(b.total) + '</b> tokens')
+          + dcTipRows(det.map((o) => ({ color: o.s.color, name: o.s.name, value: trendFmt(o.v) })));
+        dcTipPlace(tip, ev, rect, { fallbackH: 90 });
+        const x = g.cx(best);
+        cur.setAttribute('x1', x.toFixed(1)); cur.setAttribute('x2', x.toFixed(1));
+        cur.style.display = 'block';
+        if (band) {
+          const bw = Math.max(2, g.step * 0.9);
+          band.setAttribute('x', (x - bw / 2).toFixed(1));
+          band.setAttribute('width', bw.toFixed(1));
+          band.style.display = 'block';
+        }
+      });
+      host.addEventListener('mouseleave', () => {
+        dcTipHide(host, ['trendTip', 'trendCursor', 'trendHoverBand']);
+      });
+    }
+  }
+
+  // ⚠ 2026-10-19 新口径（单账号管理员）：原来的 `memberMode` 整块删除。
+  //
+  // 删除前的形态（保留供对照）：`/status` 拿到 403 时置 `memberMode = true`，
+  // 然后 `applyMemberMode()` 收起账号池/模型/任务/日志/设置五块，并显示一条
+  // "你是成员，只能看自己名下的 API key" 的说明条。
+  // 新口径下**不存在成员会话**，所以 403 不再有"正常的成员场景"这个解释 ——
+  // 它只能是"权限配置坏了"，那就**如实报错**，而不是静默降级成一个小控制台。
+  // （静默降级正是最坏的一种：用户看到的是"少了一半功能"，而真相是鉴权坏了。）
+
+  async function refresh() {
+    if (!KEY && $('key').value.trim()) KEY = $('key').value.trim();
+    let h, s = null;
+    try {
+      h = await (await fetch('/healthz')).json();       // healthz 恒无鉴权
+    } catch (e) {
+      setDot('bad', '请求失败');
+      $('accts').innerHTML = accountPlaceholder(e.message, 'err');
+      refresh._last = null;
+      return false;
+    }
+    try {
+      s = await api('/status');
+    } catch (e) {
+      // ⚠ 403 与 401 必须分开：
+      //   401 是"你没有身份了" —— 要去登录页（api() 里已经跳了，这里只是兜底）。
+      //   403 在新口径下**没有正常场景**（成员已取消）⇒ 按真错误处理并说出来，
+      //   否则用户会以为"控制台只有这几块"，而真相是权限配置坏了。
+      if (e.message.startsWith('HTTP 403')) {
+        setDot('bad', '无权读取账号池（403）· 请确认当前账号是管理员');
+        $('accts').innerHTML = accountPlaceholder(
+          '服务端拒绝了账号池读数（403）。单账号口径下不存在"成员降级"，' +
+          '这条通常是权限配置问题：' + e.message, 'err');
+        refresh._last = null;
+        return false;
+      } else if (e.message.startsWith('HTTP 401')) {
+        stopAuto();
+        hideConsole();
+        setDot('bad', '登录状态已失效 · 请重新登录');
+        refresh._last = null;
+        return false;
+      } else {
+        setDot('bad', '请求失败');
+        $('accts').innerHTML = accountPlaceholder(e.message, 'err');
+        refresh._last = null;
+        return false;
+      }
+    }
+    // 到这里说明**身份有效**（管理员拿全量）⇒ 展开控制台。
+    showConsole();
+    setDot(h.healthy > 0 ? 'ok' : 'bad',
+      (h.healthy > 0 ? '运行中' : '无可服务账号') + ' · service=' + h.service);
+    // 网关卡读累计请求/成功率：拉 stats 填缓存（renderStats 内部写 window._statsCache；
+    // 卡片依赖它显示真值）。
+    //
+    // ⚠⚠ **改掉「先 await 拿 stats、再画卡片」这个顺序** —— 实测单次 `/admin/stats`
+    // 要 **7 秒**（它内部对每个已注册上游调一次 ModelCatalog、会同步回源；
+    // 见 `internal/admin/admin.go` 的 `stats`/`modelMultipliers`），于是**整屏白等 7 秒**。
+    //
+    // ⇒ 改成"先出页面、后台再补"：
+    //   ① 立刻画一遍卡片（统计数字这时是 `—`，但**页面已经出来了**）；
+    //   ② stats 回来后**再画一遍**，数字自动填上。
+    // ⚠ 这与本文件其它面板同一套做法（缓存优先 + 后台补），也是用户一贯的要求：
+    //   "第一眼先出内容，不要为了拿最新数据先等一次网络往返"。
+    admin(statsURL())
+      // ⚠⚠ 顺序很要紧：**`renderStats` 必须排第一**。
+      //   它内部的 `$('statsCards') / $('statsCards2').innerHTML = …` 会**重建卡片** ⇒
+      //   若先填后画，刚填的值会被整块抹掉（实测：把 renderStats 放最后，
+      //   「Top 模型」就变回 `—` —— 而它填的值其实一直是正确的）。
+      // ⚠ 四条各用独立 try 且**把异常打出来**：原先它们串在同一 try 里、catch 是空的，
+      //   一处抛错会把后面全带掉，而 `pageerror`/console 都干净 ——
+      //   我曾在那个盲区里盲改四次（真因是 `COLORS is not defined`，一打出来就看到了）。
+      .then(d => {
+        try { renderStats(d); renderCards(h, s); } catch (e) { console.error('renderStats 失败:', e && e.message); }
+        try { fillDonuts(d); } catch (e) { console.error('fillDonuts 失败:', e && e.message); }
+        try { fillTopModel(d); } catch (e) { console.error('fillTopModel 失败:', e && e.message); }
+        try { fillCacheRates(d); } catch (e) { console.error('fillCacheRates 失败:', e && e.message); }
+    try { hideRemovedBlocks(); } catch (e) { console.error('hideRemovedBlocks 失败:', e && e.message); }
+        // ⚠ 最后无条件回填那两格 —— 它俩的值不在 `d` 里（来自 series），
+        //   而上面的 renderStats 刚重建过卡片把它们清空了（见 dayCardVals 的注释）。
+        try { applyDayCards(); } catch (e) { console.error('applyDayCards 失败:', e && e.message); }
+        try { attachCardTips(); } catch (e) { console.error('attachCardTips 失败:', e && e.message); }
+      })
+      .catch(() => { /* 统计非关键：拿不到就保持占位 */ });
+    renderCards(h, s);
+    // 上游契约要**最先**取：renderAccounts 依赖它把账号归到上游，
+    // 导航分组也依赖它。单独 try —— 拿不到 manifest 不该让账号表显示不出来
+    //（降级为"没有上游面板"，通用面板照常）。
+    //
+    // 取到之后必须重建上游面板与导航：面板是**按能力位动态生成**的，
+    // 而能力位只有 manifest 到了才知道。这一步也是"加新上游前端 0 改动"
+    // 真正生效的地方 —— 新上游的能力位一到，这里自动为它建出面板。
+    const manifestOK = await loadManifest();
+    if (manifestOK) {
+      syncProviderPanels();
+      buildNav();
+    }
+    // 顶栏状态条：复用本次已拿到的 h/s 与 manifest，不额外发请求。
+    // 放在 manifest 加载之后，这样"上游 N"才是本次的真实值。
+    renderTopStats(h, s);
+    // 任务调度面板同样复用 manifest.jobs，不额外发请求。
+    renderJobs();
+    // 服务名同样来自 manifest（B8）：清掉前端硬编码后，
+    // 覆盖检查同样来自 manifest（job_coverage），不额外发请求。
+    // 必须跟 renderJobs 一起调：两者读同一份 manifest，分开调会出现
+    // 「任务表更新了、覆盖检查还是上一轮」的不一致。
+    renderJobCoverage();
+    // 改名只需改后端配置，界面自动跟随。
+    renderIdentity();
+    // 账号表优先用 /admin/accounts（带 token 有效期、今日签到），失败才回落到 /status。
+    //
+    // ⚠⚠ 保留这里的 **try/catch + null 免疫**，但删掉 `memberMode` 那条分支
+    //   （新口径：单账号管理员，不存在成员会话）。
+    //
+    // 为什么"成员那段没了"还要留着 try/catch —— 它防的不是成员，是**任何一次读数失败**：
+    //   ① `/admin/accounts` 因为任何原因抛（403/500/网络）；
+    //   ② 原写法回落那句直接用 `s.accounts`，而那条路径下 `s` 可能就是 **null**
+    //      ⇒ catch 自身再抛 ⇒ **未捕获异常**（没有 try 罩着它）⇒ `refresh()` 整个中断
+    //      ⇒ 30s 轮询死掉 ⇒ **新建的 API key 永远不出现**（实测等 35s 仍是 0 条）。
+    //   这个坑与"谁登录"无关，所以判据照旧；只是不再靠 `memberMode` 决定走哪一支。
+    // ⚠ 上一段（refresh 的 catch）现在把 403 当真错误处理后，`s` 为 null 时**根本走不到这里**
+    //   （403/401 已提前 return）。下面的 `(s && s.accounts) || []` 是纯防御，不是主路径。
+    try { renderAccounts((await sharedGet('ep:/admin/accounts', () => admin('/admin/accounts'))).accounts || []); }
+    catch { renderAccounts((s && s.accounts) || []); }
+    // 倍率要先取：renderModels 依赖它给每个模型加标记。
+    // 单独 await 且自带 try —— 倍率拿不到不该让模型列表也显示不出来。
+    await loadModelMultipliers();
+    // ⚠ 没填「对话密钥」时走**明确空态**，而不是把 401 当故障打红。
+    //
+    // T5/T7 起控制台不再由服务端注入 api_key（安全改造的目标），而 `/v1/models`
+    // 是**对话面**、认的是 api_key ⇒ 没人粘钥匙时它必然回 401 `invalid_api_key`。
+    // 原先把这条预期内的 401 渲染成 `<span class="err">` ⇒ 每个新开的控制台在
+    // 「可用模型」上都挂着一条红字失败，看起来像坏了（视觉 E2E 实测抓到）。
+    // 判定"预期"的判据就是 `KEY` 这个前端态：它是空 ⇒ 401 是设计内的。
+    if (!(KEY || CONSOLE_KEY)) {
+      $('models').innerHTML = accountPlaceholder(
+        '暂无可用模型 —— 先在顶部「对话密钥」里粘一把 API Key。'
+        + '控制台刻意不把凭据注入页面（可以只读、不落盘）；/v1 那一路认的是 api_key，'
+        + '管理控制台自己的登录身份对它是无效的。', 'dim');
+    } else {
+      try { await ensureConsoleKey(); renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models', { v1: true }))).data); }
+      catch (e) { $('models').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+    }
+    loadSchedule();
+    // ⚠⚠ **这里曾经又调了一次 `/admin/stats`** —— 删掉它。
+    //
+    // 那一次是**纯冗余**、代价还极大：实测单次 `/admin/stats` 要 **7 秒**
+    //（它内部对每个已注册上游调一次 `ModelCatalog`，会同步回源 ⇒ 最多 MaxRotate
+    // 次上游请求；见 `internal/admin/admin.go` 的 `stats` 与 `modelMultipliers`），
+    // 而本函数开头（`renderStats(await admin('/admin/stats'))`）**刚刚调过一次**
+    // 并写进了 `window._statsCache` —— 中间没有任何东西清它，
+    // 所以这一次的结果与上一次逐字节相同。
+    //
+    // ⇒ 删掉它，`refresh()` 里对 `/admin/stats` 的等待从 **2 次降到 1 次**
+    //（≈14s → ≈7s）。⚠ 真正的 7 秒还在后端（同步回源），那是下一步要处理的；
+    // 这一处是"不改变任何行为、只是不再重复做同一件慢事"。
+    // ⚠ 若以后需要在列表之后刷新统计，**不要**直接加回这一行 ——
+    // 统计每 30 秒有一次轮询（见 8235 附近），需要即时刷新应当先去掉轮询再加。
+    try { loadTrendSeries(); } catch { /* 趋势图非关键 */ }
+    // ⚠ 热力图（365 天）随**整页刷新**加载。
+    // ⚠ 不是上面那个 `/* 趋势非关键 */`（那行在 24h/7d 的 click 回调里，只在点按钮时才走）
+    //   —— 我第一次就挂错了那边，结果页面加载时它从来不动、365 个格子一直是空的。
+    // 内部有签名守卫：值没变就不重绘，所以刷新不会把 365 个格子重画一遍。
+    try { loadHeatmap(); } catch { /* 热力图非关键 */ }
+    // ⚠ 缓存命中率趋势（双轴）也在这个时机 —— 它读的同样是 series（只是 range=24h）。
+    try { loadCacheTrend(); } catch { /* 缓存趋势非关键 */ }
+    // 健康条的迷你折线（近 24 小时成功率）—— 同一个端点、同样 range=24h，
+    // ⚠ 但它有自己的签名与固定的 24h 口径（不跟 trendRange 走），见 loadHealthSeries。
+    try { loadHealthSeries(); } catch { /* 成功率折线非关键 */ }
+    // ⚠ 「按天 Token 趋势」（原第 9 块）**已删除** —— 它与 #statsTrend 同数据同范围，
+    //   是后者的严格子集。所以这里不再有第二次 /admin/stats/series 请求。
+    // 本地登录面板：失败不阻塞其它面板（客户端没装时该接口整体降级）。
+    try { await loadClientLogin(); } catch { /* 非关键 */ }
+    renderApi();
+    // 记下摘要供调用方（顶部「立即刷新」）提示用；轮询调用方不看这个字段。
+    // ⚠⚠ **统一**把所有表格里"整列全空"的列藏掉（钉钉 / 飞书表格同款做法）。
+    //
+    // 为什么放在这里、而不是逐张表各自挂：逐张挂**一定会漏** —— 我第一版只挂在
+    // Loomy 的两张面板表上，结果用户立刻指着「成长计划」那张表说"这个表格不符合要求"
+    //（那张表的「可领」列整列都是 `—`，白白占着一列宽度）。
+    // 放在 `refresh()` 收尾处扫一遍 `document.querySelectorAll('table')`
+    // ⇒ 之后**任何新加的表格都自动生效**，不需要再记得去挂。
+    document.querySelectorAll('table').forEach(t => hideEmptyCols(t));
+    // ⚠ 同理：**合计为 0 的卡片**也藏掉（判据保守，只看"名字含合计"的卡 —— 见函数注释）
+    //
+    // ⚠⚠ **必须扫两次**，这是实测出来的（第一次做时它没生效，我看截图才发现）：
+    //   成长计划那些卡片是 `loadGrowth()` **异步**画上去的，而本函数在它之前就跑到了这一行 ——
+    //   那一刻 `.cards .card` **还不存在**，于是什么都没藏，图上那张「可领合计 0 项 · +0」照旧。
+    //   ⇒ 立刻扫一次（覆盖同步渲染的），再延时扫一次（覆盖异步画上来的）。
+    //   ⚠⚠ **实测教训**：这个"扫一遍"的写法对**异步渲染**的面板（成长计划）**无效** ——
+    //     我在这里扫过一次、又加过 500ms 延时扫第二次，**两次都没生效**（看截图才发现），
+    //     因为那些卡要等 `loadGrowth()` 拿到上游数据才画，扫描时机永远赶不上。
+    //     ⇒ 成长计划已改成**在生成卡片时就判掉**（见 `growthCards` 的 `.filter`）。
+    //     这里保留：它对**同步渲染**的卡片区（仪表盘 / API 管理）仍然有效。
+    hideZeroTotals(document);
+    setTimeout(() => hideZeroTotals(document), 500);
+
+    // ⚠ 「Top 模型」**不在这里填**（2026-10-18 实测踩到）：
+    //   本函数（`refresh`）作用域里的 `s` 是 **`/status` 的响应**，而 `/admin/stats` 的响应名叫 `d`
+    //   （在下面 `.then(d => …)` 里）。我原来在这里写 `s.by_model_detail`
+    //   ⇒ 读的是 `/status`，那里面根本没这个字段 ⇒ `Object.entries(undefined || {})` 得空
+    //   ⇒ **显示成 `—`，而且不报错**（连 try/catch 都没动静，`pageerror` 干净）——
+    //   ⚠ 比"引用不存在的变量"更隐蔽。
+    //   ⇒ 已挪到 `renderStatsReport(s)`：那里入参名 `s` 就是 `/admin/stats` 的响应。
+    refresh._last = { healthy: h.healthy || 0, total: h.total || 0 };
+    return true;
+  }
+
+  // refreshAfterAccountChange 添加/导入账号成功后：立即刷一次全池额度，再整体重绘。
+  //
+  // # 为什么必须有它（用户报：添加账号后额度/token 不自动刷新）
+  //
+  // 新账号的额度列是「—」（还没探测过），而额度探测要么靠手动点「刷新全部
+  // 额度」、要么等后台周期性额度刷新（分钟级）。用户希望添加后立刻看到
+  // 额度 —— 所以这里在成功路径上补一发 core 的 `/admin/accounts/quota/refresh`。
+  // 额度刷新失败不阻塞列表展示（后端对 unknown/skipped 是正常状态）。
+  async function refreshAfterAccountChange() {
+    const da = (MANIFEST.daily_actions || []).find(d => d.id === 'credits');
+    const url = da ? da.all_url : '';
+    if (url) {
+      try { await admin(url, { method: 'POST', body: '{}' }); }
+      catch (e) { /* 额度刷新失败不阻塞列表 */ }
+    }
+    refresh();
+    loadHistory();
+  }
+
+  // testUsageLine 组装对话测试的 token 用量行：prompt/completion/总计 + tok/s。
+  // 复用 tokPerSec（与请求日志表格同口径：tokens<0 视为缺失显示 -）。
+  function testUsageLine(usage, totalMs) {
+    if (!usage || typeof usage !== 'object') return '';
+  // ⚠ 2026-10-20 照 DSH 的 token-ledger-panel.js 改成分项结构：
+  //     total = inputTokens + cacheReadTokens + outputTokens（缓存写入不重复计入）
+  //   缓存命中按 wire.ParseUsageExtras 的三级取值（顶层显式 → 顶层简写 → 嵌套），
+  //   与后端同一套口径 —— 否则前后端对同一条请求会算出不同的缓存量。
+  const numT = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : 0; };
+  const promptTok = numT(usage.prompt_tokens);
+  const outTok = numT(usage.completion_tokens);
+    // ⚠ 必须区分「输出 0」与「没上报输出」。上游没给 completion_tokens 时，
+    //   numT 会返回 0，直接显示"输出 0"会让人以为这条请求没生成任何内容 ——
+    //   而真相是这个字段缺失。约束里写死了：缺字段显示空，不回退成别的数。
+    const hasOut = ('completion_tokens' in usage)
+      && Number.isFinite(Number(usage.completion_tokens))
+      && Number(usage.completion_tokens) >= 0;
+  const cachedTok = numT(usage.prompt_cache_hit_tokens)
+    || numT(usage.cached_tokens)
+    || numT((usage.prompt_tokens_details || {}).cached_tokens);
+  const reasoningTok = ('completion_thinking_tokens' in usage)
+    ? numT(usage.completion_thinking_tokens)
+    : numT((usage.completion_tokens_details || {}).reasoning_tokens);
+  // 总 Token = 输入 + 输出（缓存写入不重复计入）—— 与指标卡「总 Token」同一口径
+  const totalTok = promptTok + outTok;
+    // ⚠ 上一版的 p / np / total / pt / ct 五个变量已随改写失效，在此清掉。
+    //   留着不报错（JS 允许未使用变量、门禁只查语法），但它们是噪音 ——
+    //   下一个人读到 `total` 会以为它还在参与计算，实际早已无人引用。
+    // ⚠ 原这里是 `tokPerSec(ct, totalMs, e && e.ttfb_ms, e && e.mode)` —— `e` 在本函数里
+  //   **根本不存在**（是别处的作用域变量），调用即 ReferenceError。
+  //   对话测试这条链路没有 ttfb 上报，所以第 3 参传 0（速度会略偏低，但比抛异常好）；
+  //   第 4 参传 'stream'（这是流式对话测试，非流式不适用）。
+  const tps = tokPerSec(outTok, totalMs, 0, 'stream');
+  // 缺输出字段时，总量与输出都显示 —（总量 = 输入 + 输出，输出未知则总量也未知）
+  const outLabel = hasOut ? String(outTok) : '—';
+  const totalLabel = hasOut ? String(totalTok) : '—';
+  const lines = [
+    '总 Token ' + totalLabel + (hasOut ? '（输入 ' + promptTok + ' + 输出 ' + outTok + '）' : '（输出未上报）'),
+    '↑ 输出 ' + outLabel,
+  ];
+  if (cachedTok > 0) lines.push('缓存命中 ' + cachedTok);
+  if (reasoningTok > 0) lines.push('推理 ' + reasoningTok + '（已包含在输出中）');
+  lines.push('输出速度 ' + tps + ' tok/s');
+  // ⚠ 每条独占一行（`\n` 而非 ` · ` 连接）。
+  //   这里的结果是塞进 out.textContent（纯文本输出区），`\n` 一定生效；
+  //   而用 ` · ` 连成一行时，真实数据那条有 94 个字符 —— 在窄容器里会拖成一长条，
+  //   用户得横向扫读才能对上"哪个数是哪个"。DSH 的 token-ledger-panel 也是分行的。
+  return '\n' + lines.join('\n');
+  }
+
+  async function send() {
+    const btn = $('send'), out = $('out');
+    const body = {
+      model: $('model').value,
+      stream: $('stream').checked,
+      messages: [{ role: 'user', content: $('prompt').value }],
+    };
+    btn.disabled = true; out.classList.remove('err');
+    out.textContent = '请求中…';
+    const t0 = performance.now();
+    try {
+      if (!body.stream) {
+        const r = await api('/v1/chat/completions', { v1: true,
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const ms = Math.round(performance.now() - t0);
+        out.textContent = r.choices[0].message.content +
+          `\n\n— ${r.model} · ${ms}ms` + testUsageLine(r.usage, ms);
+      } else {
+        const r = await fetch('/v1/chat/completions', {
+          method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, hdr()),
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()).slice(0, 300));
+        const rd = r.body.getReader(), dec = new TextDecoder();
+        let buf = '', txt = '', usage = null, model = '';
+        out.textContent = '';
+        for (;;) {
+          const { value, done } = await rd.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split('\n'); buf = lines.pop();
+          for (const ln of lines) {
+            if (!ln.startsWith('data:')) continue;
+            const p = ln.slice(5).trim();
+            if (p === '[DONE]') continue;
+            let j; try { j = JSON.parse(p); } catch { continue; }
+            const d = j.choices?.[0]?.delta?.content;
+            if (d) { txt += d; out.textContent = txt; out.scrollTop = out.scrollHeight; }
+            if (j.model) model = j.model;
+            if (j.usage) usage = j.usage;
+          }
+        }
+        const ms = Math.round(performance.now() - t0);
+        const usageLine = testUsageLine(usage, ms);
+        out.textContent = txt + `\n\n— ${model} · ${ms}ms · 流式` +
+          (usageLine || ' · usage 缺失（上游未回传 token 用量）');
+      }
+    } catch (e) {
+      out.classList.add('err');
+      out.textContent = '失败：' + e.message;
+    } finally { btn.disabled = false; }
+  }
+
+  // wireTopBar 顶栏那个「对话密钥」输入框（只影响 /v1 功能）。
+  //
+  // ⚠ 它**不是**登录入口：管理面（/admin/* 与 /status）认的是服务端下发的
+  // HttpOnly 会话 cookie，同源 fetch 自动携带 —— 这里填不填都不影响管理功能。
+  // 它存在的唯一理由：控制台上的「对话测试」与「模型目录回退」打的是 /v1/*
+  // （那一路认 api_key），需要用户手粘一把。
+  //
+  // ⚠ 刻意不写 localStorage：刷新后要重新粘一次，换取"磁盘上没有长期凭据"。
+  function wireTopBar() {
+    const keyEl = $('key'), conn = $('conn');
+    if (!keyEl || !conn) return;
+    conn.onclick = () => {
+      const v = keyEl.value.trim();
+      if (!v) { toast('请先填入对话密钥（API key）', true); return; }
+      KEY = v;
+      // 只影响 /v1 那两处缓存：模型目录与倍率预览。
+      lazyCache.drop('ep:/v1/models');
+      refresh();
+    };
+    keyEl.addEventListener('keydown', e => { if (e.key === 'Enter') conn.click(); });
+  }
+
+  // probeSession 问服务端"我是谁"，据此决定进控制台还是去登录页。
+  //
+  // # 为什么不看页面里有没有注入的钥匙（那是改造前的做法）
+  //
+  // 旧模型的判据是"服务端渲染时有没有把凭据写进 HTML"。T5 起服务端**从不**
+  // 注入凭据，那条判据恒为假 ⇒ 已登录的人被告知"未获授权"。现在改成问一句
+  // `/admin/auth/session`：它的 200/401 是唯一真相来源，也顺带把当前登录的
+  // 账号名显示出来（成员看到的是自己的名字，管理员看到自己的）。
+  //
+  // ⚠ 2026-10-19 新口径（单账号管理员）：`applyMemberMode()` 整块删除。
+  //
+  // 删除前的形态（保留供对照，说明"它为什么曾经存在"）：
+  //   用根类 `.member-mode` + 一段 CSS 收起"成员注定 403"的五个面板
+  //   （账号/模型/任务/日志/设置），并填显 `#memberBanner` 说明条；
+  //   理由是"别让人对着一屏必然失败的面板反复点"（隐藏不是安全边界，
+  //   真正的判据在服务端 memberPaths）。
+  // 新口径下**不存在成员会话** ⇒ 这个函数永远没有"该生效"的时刻，
+  // 留着就是一条永远为假的分支（后来人会以为还有成员面）。
+  // 403 现在在 `refresh()` 的 catch 里被**如实报错**（见那段注释）。
+  // 判据：tests/frontend/verify_single_admin.js 第 5 条 —— 外壳 HTML 里
+  //      不许出现 `applyMemberMode` / `member-mode` / 成员模式提示元素。
+
+  // probeSession 问服务端"我是谁"，据此决定进控制台还是去登录页。
+  //
+  // # 为什么不看页面里有没有注入的钥匙（那是改造前的做法）
+  //
+  // 旧模型的判据是"服务端渲染时有没有把凭据写进 HTML"。T5 起服务端**从不**
+  // 注入凭据，那条判据恒为假 ⇒ 已登录的人被告知"未获授权"。现在改成问一句
+  // `/admin/auth/session`：它的 200/401 是唯一真相来源，也顺带把当前登录的
+  // 账号名显示出来（成员看到的是自己的名字，管理员看到自己的）。
+  //
+  // ⚠ 401 与"网络不通"必须分开处理：后者（服务刚重启/断网）跳到登录页会让人
+  // 以为"登录状态丢了"，而其实只是这一瞬间连不上。
+  async function probeSession() {
+    let r;
+    try {
+      r = await fetch('/admin/auth/session', { headers: { 'Accept': 'application/json' } });
+    } catch (e) {
+      hideConsole();
+      setDot('bad', '连不上服务端');
+      $('keyHint').innerHTML = '<div class="khhead">连不上服务端</div>'
+        + '<div>网关可能正在重启。稍后刷新本页即可；若一直如此，去看它的日志。</div>';
+      $('keyHint').style.display = '';
+      return;
+    }
+    if (r.status === 401) {
+      // 会话被撤销/过期（登出、改口令、管理员禁用、或 cookie 到期）。
+      toLogin('expired');
+      return;
+    }
+    let who = null;
+    let kind = '';
+    try {
+      const d = await r.json();
+      who = d.user || null;
+      kind = d.kind || '';
+    } catch { /* 形状不符时只影响名字显示 */ }
+    showConsole();
+    // ⚠⚠ 身份一确定就切缓存的命名空间，**必须排在 refresh() 之前**。
+    //
+    // 面板数据走 lazyCache（落 localStorage、TTL 30s、跨导航存活），而缓存 key
+    // 原先只有 URL ⇒ 同一浏览器换身份时会拿上一个身份的快照画界面。实测（视觉 E2E）：
+    // 成员会话后改开 `/ui?token=`（管理员令牌），「管理钥匙」按成员那份快照渲染成
+    // "属于管理员：当前账号看不到"，与同屏顶栏的「管理令牌／管理员」自相矛盾；
+    // 反方向（管理员 → 成员，30 秒内）会把**管理员的 key 列表**画给成员看。
+    // 见 lazyCache 里 scope 那段。
+    setCacheScope(kind === 'token' ? 'token'
+      : (who ? ('u:' + (who.id || who.username || '?') + ':' + (who.role || 0)) : 'anon'));
+    // 令牌身份（`?token=` 换来的 12 小时 cookie）没有"账号"这个主体：显示
+    // 「管理令牌」而不是某个用户名，并且不给「改密码」（它没有口令可改，
+    // 点了只会被服务端 401）—— 但「登出」要留（清掉浏览器上这把钥匙）。
+    renderWhoami(kind === 'token' ? { token: true } : who);
+    refresh();
+  }
+
+  // renderWhoami 顶栏显示当前登录者（成员会看到「成员」标记，避免他以为自己
+  // 点不动某些页面是"坏了"），并挂上「改密码」与「登出」。
+  //
+  // ⚠ 这两个按钮是 T9 补的：登录系统上线后，控制台里**没有**任何地方能改口令、
+  // 也没有任何地方能登出 —— 用户只能关标签页（会话还在），或者去翻 config.json
+  // （而那正是他报障"改完必须重启"的那条路）。凭据能改、能主动失效，是这个
+  // 功能算"可用"的最低要求。
+  function renderWhoami(u) {
+    const host = $('whoami');
+    if (!host || !u) return;
+    // 令牌身份：没有用户名、没有角色、没有口令可改。顶栏只留「登出」。
+    if (u.token) {
+      host.innerHTML = `<span class="who-name" title="用 admin_token 换来的浏览器会话">管理令牌</span>`
+        + `<span class="pill ok">管理员</span>`
+        + `<button id="btnLogout" style="padding:2px 8px;font-size:12px">登出</button>`;
+      host.style.display = '';
+      const bl = $('btnLogout');
+      if (bl) bl.onclick = () => doLogout(bl);
+      return;
+    }
+    // ⚠ 2026-10-19 新口径：单账号管理员 ⇒ 这里**不再有"成员"这一支**。
+    //   原来写的是 `${isAdmin ? '管理员' : '成员'}` —— 保留一个"不是管理员就显示成员"
+    //   的兜底，在新口径下只会把"角色值异常"伪装成一个正常的角色名。
+    //   现在：服务端给了 `role_name` 就用它（它是唯一真相来源）；
+    //   没给就只在**确认是管理员**时显示「管理员」，否则显示**真实拿到的角色值**
+    //   —— 让"角色不对"这件事显示出来，而不是被一个好看的词盖住。
+    const isAdmin = u.role === 10;
+    const roleText = u.role_name || (isAdmin ? '管理员' : ('未知角色(' + (u.role === undefined ? '无' : u.role) + ')'));
+    host.innerHTML = `<span class="who-name" title="${esc(u.username)}">${esc(u.display_name || u.username)}</span>`
+      + `<span class="pill ${isAdmin ? 'ok' : ''}">${esc(roleText)}</span>`
+      + `<button id="btnChpass" style="padding:2px 8px;font-size:12px">改密码</button>`
+      + `<button id="btnLogout" style="padding:2px 8px;font-size:12px">登出</button>`;
+    host.style.display = '';
+    const bc = $('btnChpass');
+    if (bc) bc.onclick = () => changeOwnPassword(bc);
+    const bl = $('btnLogout');
+    if (bl) bl.onclick = () => doLogout(bl);
+  }
+
+  // changeOwnPassword 自助改口令（T9：改完**不刷新页面**继续用）。
+  //
+  // # 为什么用 prompt 而不是做个表单
+  //
+  // 这是低频操作，而这个文件里同类"一次性输入"都是 prompt（见 openImportModal）。
+  // 做成表单要连带处理 type=password、自动填充干扰、回车提交、清空时机四件事，
+  // 收益只有观感。
+  //
+  // # 改完之后刻意**不刷新、不跳登录页**
+  //
+  // 服务端会把**当前这条**会话就地升级到新版本号（AdvanceAuthVersion），所以
+  // 改完立刻还能用。这里再打一次 `/admin/auth/session` 确认这件事 —— 不是为了
+  // 好看，而是把"免重启"从承诺变成当场可见的事实（用户报障 ② 就是这一条：
+  // 改完必须重启才能继续用）。
+  async function changeOwnPassword(btn) {
+    const cur = window.prompt('当前口令（确认是你本人）：', '');
+    if (cur === null) return;
+    if (!cur) { toast('当前口令不能为空', true); return; }
+    const next = window.prompt('新口令（8–128 位）：', '');
+    if (next === null) return;
+    if (!next) { toast('新口令不能为空', true); return; }
+    const again = window.prompt('再输一次新口令：', '');
+    if (again === null) return;
+    if (again !== next) { toast('两次输入的新口令不一致', true); return; }
+    await busyRun(btn, async () => {
+      try {
+        const r = await admin('/admin/auth/password', {
+          method: 'POST',
+          body: JSON.stringify({ current_password: cur, new_password: next }),
+        });
+        const n = (r && r.revoked_others) || 0;
+        toast('口令已修改' + (n ? `；其它 ${n} 台设备的登录已失效` : '') + '。当前登录保持有效。');
+        try {
+          await admin('/admin/auth/session');
+          setDot('ok', '口令已更新 · 当前会话有效（无需重启）');
+        } catch (e) {
+          // 不改口令相关的失败原因（真失效时下一次操作会被 401 带走），
+          // 但要说出来 —— 静默会让用户以为"还在线"。
+          toast('改口令成功，但随后校验失败：' + e.message, true);
+        }
+        return true;
+      } catch (e) {
+        toast('改口令失败：' + e.message, true);
+        return false;
+      }
+    }, { label: '改密码', busyText: '提交中…' });
+  }
+
+  // doLogout 登出：撤销**服务端**那条会话（不只是清客户端 cookie）。
+  //
+  // ⚠ 这里必须等服务端回执再走：本地清 cookie 而服务端会话还在的话，那条
+  // cookie 被别人拿到（比如共享机器的备份/剪贴板）仍然能用 —— 这正是登录
+  // 探针里"拿登出前的旧 cookie 再打会话必须 401"那条断言挡住的形态。
+  async function doLogout(btn) {
+    if (!window.confirm('登出控制台？\n\n· 服务端会撤销当前会话（旧 cookie 立即失效）\n· 其它设备的登录不受影响')) return;
+    await busyRun(btn, async () => {
+      try {
+        await admin('/admin/auth/logout', { method: 'POST' });
+      } catch (e) {
+        // 登出失败也要把用户送走：本页不该留在"看起来还登录着"的状态。
+        toast('登出请求失败：' + e.message, true);
+      }
+      stopAuto();
+      // 登出即失去身份 ⇒ 缓存退回匿名命名空间（否则下一个身份在同一浏览器里
+      // 可能读到刚登出那个人留下的快照，见 lazyCache 的 scope 那段）。
+      setCacheScope('anon');
+      toLogin('logout');
+      return true;
+    }, { label: '登出', busyText: '登出中…' });
+  }
+
+  // ⚠ 2026-10-20 用户口径：**登录 = 唯一门槛**。登录之后一切照旧 ——
+  // 模型目录/对话测试**不该**再让用户手粘一次密钥，仪表盘的凭据也该能显示、能复制。
+  //
+  // 做法：用**已有会话**向管理端取一次完整 api_key 填进 `KEY`（内存，不落 localStorage）。
+  // 为什么不是"把凭据注回页面 HTML"：注入的话，页面一旦被截图/另存为/进缓存/被扩展读，
+  // 凭据就跟着走了；而按需取只在"已登录"这一条路上发生，未登录时这个接口直接 401。
+  // 两者对登录后的体验完全一样，差别只在未授权时拿不拿得到 —— 那正是门禁该管的事。
+  //
+  // 兜底：取不到（如配置里没写 api_key）就保持空，顶栏手粘那条退路照旧可用。
+  async function ensureConsoleKey() {
+    if (CONSOLE_KEY) return CONSOLE_KEY;
+    try {
+      const r = await admin('/admin/apikeys');
+      // ★ T-375：只写 CONSOLE_KEY，**不写全局 KEY** —— 后者会让每个控制台请求都带 Bearer <api_key>（自毁链源头）。
+      if (r && r.admin_key_full) CONSOLE_KEY = r.admin_key_full;
+    } catch (e) { /* 未登录 / 未配置 ⇒ 留空，由界面提示引导（不是故障） */ }
+    return CONSOLE_KEY;
+  }
+
+  function boot() {
+    // ★ T-378：一次性清掉历史遗留的 upstream 顺序键。
+    migrateNavOrder();
+    // 主题最先初始化：它决定第一帧的配色。
+    initTheme();
+
+    // 整页自动轮询（旧「每 5s 刷新」开关）已整体移除（用户要求）：
+    // 额度/状态/统计卡/趋势/API key 全部由 30s **无感轮询**覆盖（只 diff
+    // 数值不重绘），整页 refresh 只在初始加载与「立即刷新」/操作收尾时跑。
+    //
+    // ---- 身份判定（T7）：问服务端"我是谁"，而不是看页面里有没有注入的钥匙 ----
+    //
+    // 拿到这个页面的前提已经是"服务端认为你有身份"（没身份的话给的是登录页），
+    // 所以这里只需要把身份读出来显示，并把控制台展开。判据仍然落在**数据**上：
+    // probeSession 里的 401 是唯一的真相来源。
+    //
+    // ⚠ 已删除（T7）：`if (ADMIN_INJECTED || INJECTED) {...} else {...手输令牌 + 记住 + 重载...}`
+    //   · 那条判据读的两个哨兵**永远不再被替换** ⇒ 恒假 ⇒ 已登录的人也会被告知
+    //     "本次访问未获授权"，且控制台被整块藏起来（比不修还糟）。
+    //   · else 分支整体的前提也没了：未登录时根本拿不到这个页面（服务端给登录页）。
+    //   · 其中 `localStorage.setItem(LS, …)` 正是用户报障 ② 的来源（轮换后页面
+    //     还揣着旧令牌，表现成"必须重启"）。
+    wireTopBar();
+      probeSession();
+  // 登录后自动取用配置里的 api_key（**不 await**：它是锦上添花，慢了不该拖住首屏；
+  // 真正依赖它的两处 —— 模型目录、对话测试 —— 各自会 await 一次，见各自调用点）。
+  ensureConsoleKey();
+
+    // 点击任意可复制块即复制；块内的「显示/隐藏」按钮不触发复制。
+    $('apiCards').addEventListener('click', ev => {
+      const rev = ev.target.closest('[data-reveal]');
+      if (rev) {
+        ev.stopPropagation();
+        keyRevealed = !keyRevealed;
+        renderApi();
+        return;
+      }
+      const c = ev.target.closest('[data-copy]');
+      if (c) copyText(c.dataset.copy, c.dataset.label);
+    });
+    $('curlSample').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
+    $('btnCopyCurl').onclick = () => copyText($('curlSample').textContent, 'curl 示例');
+
+    // 「立即刷新」：手动点要有明确回执（自动轮询不提示，否则每 5 秒弹一条）。
+    // busyRun 只看 fn 的返回值，这里把刷新摘要包进 toast 文案里一起给出。
+    $('refresh').onclick = () => busyRun($('refresh'), async () => {
+      const ok = await refresh();
+      const m = refresh._last;
+      if (ok && m) toast(`刷新完成：健康 ${m.healthy}/${m.total} 个账号`);
+      return ok === true ? undefined : false;   // 成功时上面已自行提示，避免又追一条「立即刷新完成」
+    }, { label: '立即刷新' });
+    $('send').onclick = send;
+    $('prompt').addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+    $('models').addEventListener('click', e => {
+      // 分组头（T5）：切换折叠，**不**选中模型。
+      // 必须放在 chip 判断之前 —— 分组头与 chip 是兄弟节点，
+      // 但分组头自身也可能被 closest('.chip') 误命中（若将来嵌套）。
+      const hd = e.target.closest('button[data-mtoggle]');
+      if (hd) {
+        const owner = hd.dataset.mtoggle;
+        const next = !modelGroupOpen(owner);
+        setModelGroupOpen(owner, next);
+        // 只切这一个分组的 class，不整块重绘 ——
+        // 重绘会丢失当前滚动位置与已选中的 chip 高亮。
+        const box = hd.closest('.mgroup');
+        if (box) box.classList.toggle('collapsed', !next);
+        hd.setAttribute('aria-expanded', next ? 'true' : 'false');
+        return;
+      }
+      // 模型卡片（chip）：点一下**复制完整模型名**，同时仍填进对话测试的下拉。
+      //
+      // # 为什么复制是主行为（2026-10-25 用户要求）
+      //
+      // 这一整块是「看有哪些模型」的全景面板。用户点它的目的绝大多数是
+      // 「把这个模型名拿去用」—— 贴到 curl、贴到别的客户端、贴给同事。
+      // 原来只把值塞进下面的下拉，等于逼用户从面板上**手抄**模型名，
+      // 而卡片上的名字是截断显示的（长名字放不下），手抄必然抄错。
+      //
+      // 保留填下拉：那是既有行为，删掉会让「先点模型再点对话测试」这条路径断掉。
+      // 两件事不冲突 —— 复制是副作用，填下拉是状态变更。
+      //
+      // ⚠ 复制用 data-id（完整 id），不用卡片上的可见文字：
+      //   可见文字经过 esc() 且可能被截断，data-id 才是原值。
+      //   这正是「复制完整模型名」的字面要求。
+      const c = e.target.closest('.chip');
+      if (c) {
+        const id = c.dataset.id || '';
+        if (id) {
+          copyText(id, '模型名');
+          // 填下拉只在选项里真的存在时做 —— 面板里的模型未必在当前筛选的
+          // 下拉里（下拉按上游筛过）。直接赋值会得到「选了但看不到」的状态，
+          // 比不填更让人困惑。
+          const sel = $('model');
+          if (sel && Array.from(sel.options || []).some(o => o.value === id)) sel.value = id;
+        }
+      }
+    });
+    // T7：切换上游筛选 → 重填模型下拉 → 记住选择。
+    //
+    // 只重填下拉，**不重绘 chip 区** —— chip 区是"看有哪些模型"的全景，
+    // 它不该跟着测试用的筛选器变（那会让两个区域的状态互相污染）。
+    if ($('modelProvider')) {
+      $('modelProvider').onchange = () => {
+        setModelProviderFilter($('modelProvider').value);
+        saveModelProviderFilter(modelProviderWanted);
+        const wantP = modelProviderFilter();
+        const shown = wantP
+          ? models.filter(m => modelOwnerOf(m.id, m.owned_by) === wantP)
+          : models;
+        const sel = $('model');
+        sel.innerHTML = shown.map(m =>
+          `<option value="${esc(m.id)}">${esc(m.id)}${multTagPlain(m.id)}</option>`).join('');
+        // 切换上游后**重置到第一项**（原选择多半不在新列表里，
+        // 留着会得到一个 value 对不上任何 option 的下拉 —— 界面显示空但
+        // 内层 value 还停在旧值，发出去的模型与看到的不一致）。
+        sel.value = (shown.find(m => m.id === 'auto') || shown[0] || {}).id || '';
+      };
+    }
+    restoreModelProviderFilter();
+    // 整页自动轮询已整体移除（无「每 5s 刷新」开关）：数值刷新全靠
+    // 30s 无感轮询（pollPoolValues/pollStatsCards/loadTrendSeries/pollAPIKeys），
+    // 整页 refresh 只在初始加载与「立即刷新」/操作收尾时跑。
+
+    // 额度/状态/统计**无感**轮询：常驻开启（用户要求数值实时）。它只更新
+    // 单元格与卡片数值，不整页重绘、不重建面板 —— 与已移除的"整页自动刷新"
+    // 的开关相互独立：即使关闭了整页自动刷新，这些数字仍每 30 秒静默对齐。
+    setInterval(() => {
+      pollPoolValues();
+      pollStatsCards();
+      loadTrendSeries();
+      pollAPIKeys();
+    }, 30000);
+
+    // 账号操作：事件委托，避免每行都绑 handler。
+    // 把按钮自身传进去，让它能在「写 + 刷新」期间禁用并显示进行中文案。
+    $('accts').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-act]');
+      if (b) act(b.dataset.uid, b.dataset.act, b);
+    });
+
+    // 分组行内的动作（T10）：一次委托，不随行数增长。
+    //
+    // 为什么用委托而不是每行绑：`renderAccounts` 每次刷新都重建整个表格，
+    // 逐行绑会随刷新次数累积监听器（本项目改过的那个 bug —— 见
+    // loadGenericList 的注释）。委托绑在 #accts 上只做一次。
+    $('accts').addEventListener('click', ev => {
+      // 分组标题 = 折叠开关（R3）。必须排在 gadd / greload 之前判断：
+      // 「＋ 添加账号」「重载 auths」这两个按钮**就在折叠按钮里面**
+      //（.gacts 在 .ghead-btn 内），不先拦下来，点它们会连带把分组收起来。
+      //
+      // 而且这两个动作都是**异步 + 会重绘**的：重绘会把分组按 localStorage
+      // 重新渲染，于是"点添加账号顺手把面板收了"这种副作用很难归因。
+      const hd = ev.target.closest('button[data-atoggle]');
+      if (hd) {
+        const pid = hd.dataset.atoggle;
+        const next = !accountGroupOpen(pid);
+        setAccountGroupOpen(pid, next);
+        // 只改 DOM，不重绘 —— 与模型面板同一处理。
+        // 重绘会丢失当前滚动位置，也会把刚点过的按钮换成一个新节点。
+        //
+        // # 为什么这里能做"纯 DOM 切换"，而渲染时不行
+        //
+        // 渲染时表格整块是新的，section 的类只能由渲染代码写；
+        // 这里是**用户当场点的这一组**，把 collapsed 类切到 section 上即可，
+        // 结果与"重绘一遍"完全一致（localStorage 已同步写好）。
+        //
+        // ⚠ 只需切 **section** 这一个类 —— 不要再往它的行上切一遍。
+        // 行级的 collapsed 没有对应的 CSS（见样式表里那段警告），
+        // 切了也不会改变显示，只会让人以为"行类也参与隐藏"。
+        const box = hd.closest('.acctgroup');
+        if (box) {
+          box.classList.toggle('collapsed', !next);
+          // 折叠 = **整张表** display:none（见 .acctgroup.collapsed > table）。
+          //
+          // # 这里为什么比改造前简单得多
+          //
+          // 改造前是"分组行 + 后续账号行"的扁平表，折叠只能逐行写 display，
+          // 于是这里要往后遍历兄弟节点、遇到下一个分组行就得停 ——
+          // 那段遍历是"分组边界靠 DOM 顺序表达"的补丁。
+          // 拆成每上游一张表之后，边界是**结构**（section > table），
+          // 一条 CSS 规则就够了。
+          //
+          // ⚠ 仍然只改 DOM、不重绘：重绘会丢滚动位置，也会把刚点过的按钮
+          //   换成一个新节点（与模型面板同一处理；localStorage 已同步写好，
+          //   所以下次重绘出来的状态与现在一致）。
+        }
+        hd.setAttribute('aria-expanded', next ? 'true' : 'false');
+        return;
+      }
+      const add = ev.target.closest('button[data-gadd]');
+      if (add) { addAccount(add.dataset.gadd, add); return; }
+      // 「刷新本上游额度」—— 三层作用域里的中间一层。
+      //
+      //   行内「额度」  → body {uid}       只刷该账号
+      //   本按钮        → body {provider}  只刷该上游
+      //   顶部按钮      → 空 body          刷全部
+      //
+      // 三者打**同一个端点** `/admin/accounts/quota/refresh`，只靠 body
+      // 区分作用域 —— 后端读 uid/provider，都没有就是全池
+      //（见 admin/accountsQuotaRefresh 的三档注释）。
+      //
+      // ⚠ 文案用**回执的** scope/count，不用上面那个 pid 猜：
+      // 与 greload 同一条原则（用后端说的，不用前端猜的）。后端可能
+      // 因该上游无账号而 404，那正是要暴露的真相 —— 不 catch、让它抛，
+      // 由 busyRun 统一提示。
+      const gq = ev.target.closest('button[data-gquota]');
+      if (gq) {
+        const pid = gq.dataset.gquota;
+        busyRun(gq, async () => {
+          const r = await admin('/admin/accounts/quota/refresh',
+            { method: 'POST', body: JSON.stringify({ provider: pid }) });
+          // ⚠ quotaScopeToast 返回 {msg, bad} **对象**，不是字符串 ——
+          // 直接 toast(quotaScopeToast(r, pid)) 会渲染成 "[object Object]"
+          //（实测踩到：按钮看起来"成功"了，但用户看不到任何数字）。
+          // 必须取 .msg / .bad，与 startAll 里那条同一写法。
+          const t = quotaScopeToast(r, pid);
+          toast(t.msg, t.bad);
+          await refreshAccounts(r);
+        });
+        return;
+      }
+      const rl = ev.target.closest('button[data-greload]');
+      if (rl) {
+        // 点的是**哪一个上游**的那行按钮，就把那个上游**传进请求体**。
+        //
+        // 这条按钮的用途是"往 `auths/<provider>/` 手工拷入凭证后不用重启网关"，
+        // 所以它必须能指定上游 —— 否则 codearts 那行点了也会去扫 workbuddy 的
+        // 目录（后端过去只认配置里的 ReloadProvider），界面还报成功。
+        //
+        // ⚠ 后端对**显式传了却查不到**的 provider 返回 404，
+        // 这里不预先校验、也不 catch —— 让 admin() 抛出去、
+        // 由 busyRun 的 catch 统一提示（见 busyRun 的 toast(`${label}失败：…`)）。
+        // **宁可失败得刺眼，也不要成功得可疑**：吞掉这个 404 就等于
+        // 把"上游不存在"伪装成"重载成功"，正是上面那个 bug 的形态。
+        const pid = rl.dataset.greload;
+        busyRun(rl, async () => {
+          const r = await admin('/admin/accounts/reload',
+            { method: 'POST', body: JSON.stringify({ provider: pid }) });
+          // ⚠ 文案里的上游用**回执**的 `r.provider`，不用上面那个 `pid`。
+          //
+          // 与 loginPoll 同一条原则：**用后端说的，不用前端猜的**。
+          // 前端猜的值只在"请求确实按它执行了"时才等于事实 ——
+          // 而后端的回落路径（不带 provider 时用配置值）说明它**可以**不等于。
+          // 拿前端变量写文案，一旦某次请求走了别的上游（回落、参数被改写、
+          // 将来再加一层代理），界面就会替后端撒谎，且**没有任何迹象**
+          // —— 用户看到的是"成功"，排障时查日志才发现动的是别人的池子。
+          // 回执的 provider 是后端**实际使用**的那个值，写它才是复述事实。
+          toast(`已重载 ${r.provider} 的 auths：扫描 ${r.scanned} 个文件，`
+            + `池内账号 ${r.before} 个变为 ${r.after} 个`);
+          // ⚠ 必须走 refreshAfterAccountChange 而不是裸 refresh()：
+          // 重载后新账号的额度/token/签到都要**探测/加载**（裸 refresh 只重绘
+          // 已有视图，新号的额度列会一直「—」—— 用户报"导入后不自动更新"）。
+          await refreshAfterAccountChange();
+          return undefined;    // 上面已给出更具体的回执
+        }, { label: '重载 auths', busyText: '重载中…' });
+      }
+    });
+    $('btnLoginClose').onclick = closeModal;
+    $('modal').addEventListener('click', ev => { if (ev.target === $('modal')) closeModal(); });
+    // 只读信息弹窗：关闭 / 点遮罩关闭 / 复制内容 / Esc 关闭。
+    // 「复制」是加这个弹窗的主要动机 —— alert() 里的文字选不中，
+    // 而旅行详情里的「在途记录」正是用户要拿去排查的东西。
+    $('infoClose').onclick = closeInfo;
+    $('infoModal').addEventListener('click', ev => { if (ev.target === $('infoModal')) closeInfo(); });
+    $('infoCopy').onclick = () => copyText($('infoBody').textContent, '详情内容');
+    document.addEventListener('keydown', e => {
+      // Esc 关闭：两个弹窗都支持，符合直觉
+      if (e.key !== 'Escape') return;
+      if ($('infoModal').style.display === 'flex') closeInfo();
+      else if ($('modal').style.display === 'flex') closeModal();
+    });
+    // 各**上游卡片**上的「全部 X」按钮由 manifest.daily_actions 驱动（T3），
+    // 走事件委托（#accts 每次刷新都重写 innerHTML）。
+    installAllDailyActions();
+    // 账号池**顶部**这个「全部签到」触发**所有上游**（用户本轮要求）：
+    //
+    //   POST /admin/accounts/checkin/all —— 核心端点，遍历注册表里所有
+    //   实现了 gateway.DailyCheckinExt 的上游，逐个跑它们自己的全量签到。
+    //
+    // # 为什么不复用 startAll
+    //
+    // startAll 认的是**单个** daily action 的回执（{results} / {updated}）。
+    // 本端点是跨上游的：它回 202 {started, providers, count}，真结果要等
+    // 后台任务跑完去 /admin/task 看。两种回执形状不同，混进一个函数就会
+    // 出现"按错的分支解析" —— 那正是额度那次的形态（新回执落进兜底 else）。
+    //
+    // # providers 必须说出来
+    //
+    // "所有上游"里的"所有"指的是哪些，是这条按钮的全部语义。不回这份清单，
+    // 用户点完只看到三个计数，无从判断有没有哪个上游根本没被跑到。
+    $('btnAllCheckinAll').onclick = () => busyRun($('btnAllCheckinAll'), async () => {
+      const r = await admin('/admin/accounts/checkin/all', { method: 'POST', body: '{}' });
+      const ps = Array.isArray(r.providers) ? r.providers : [];
+      if (r && r.started) {
+        toast('全部签到已启动：' + (ps.length ? ps.join('、') : '（无上游）')
+          + (ps.length > 1 ? ' 共 ' + ps.length + ' 个上游' : '') + '，后台执行中…');
+        watchTask();   // 与 workbuddy 全量签到走**同一条**进度通道
+        return undefined;   // 上面已给出更具体的回执
+      }
+      toast('全部签到未能启动（后端未接受）', true);
+      return false;
+    }, { label: '全部签到', busyText: '启动中…' });
+    // 「刷新全部额度」不进每日动作槽位：额度刷新不是"每天一次"的动作，
+    // 它是核心对 CapQuotaProbe 能力位的统合入口，与上游身份无关。
+    //
+    // ⚠ label 用「额度」，与列头、行内按钮**同一份文案**（T4）：
+    // 这三个地方描述的是同一个动作，措辞不同会让用户以为是三件事。
+    // id 仍是 'credits' —— 那是**协议标识**，不是文案，不随界面用词改名。
+    //
+    // # all_url 为什么是 core 的通用端点（本 bug 的第二形态）
+    //
+    // 原先是 `/admin/credits/refresh` —— workbuddy 的**私有**路由。
+    // 把它当成"全部额度"的入口有两层错：
+    //   1. 作用域错：它只刷 workbuddy 一个上游，codearts 的额度刷不到
+    //      （codearts 声明了 quota-probe，界面上有额度胶囊，但它恒为 `—`）。
+    //   2. 回执形状错：它回 `{mode:"all", results:[…]}`（**没有 updated 字段**），
+    //      而 startAll 当时的判据是 `r.results` —— 改成通用端点后新回执没有
+    //      results，于是落进最后的 else，toast 说"已提交"而**用户看不到任何真实结果**。
+    //      这就是本条改动必须同时改 startAll 的原因（见那里的新分支）。
+    //
+    // Core 的 `/admin/accounts/quota/refresh` 才是"全部额度"的正确入口：
+    // 它遍历全池、按每个账号**自己**的 provider 找 gateway.QuotaExt，
+    // 回 `{updated, unknown, failed, skipped, providers, accounts}`。
+    $('btnAllCredits').onclick = () => startAll({
+      id: 'credits', label: '额度', all_url: '/admin/accounts/quota/refresh',
+    });
+    // 出口自检：与上面同形（core 的跨上游动作，202 + 任务槽 → watchTask 显示进度）。
+    //
+    // ⚠ 回执形状是 {started, providers, count} ⇒ 落进 startAll 的 r.started 分支
+    //（「已启动，后台执行中…」+ watchTask）。逐条结果在任务回执里按行显示，
+    //  不需要在这里再拼一遍文案 —— 那会让同一份结果有两个真相。
+    $('btnEgressCheck').onclick = () => startAll({
+      id: 'egress', label: '出口自检', all_url: '/admin/accounts/egress-check',
+    });
+    // 各上游卡片上的「全部签到」由 manifest.daily_actions（batch=true）驱动，
+    // 不在这里生成 —— 见 dailyAllActionsHTML。
+    // 「全部保活」按钮已删除（用户决定）—— 理由见 HTML 里那段注释：
+    // 它与自动保活槽调用**同一个函数**，提前跑没有收益；
+    // 行内的「保活」保留（那是同步返回结果、可定位问题的排障动作）。
+    // workbuddy 的保活**仍然如实报** AllURL 端点（能力在），
+    // 但 Batch=false —— 那是"界面要不要给它入口"的产品决策，
+    // 把决策伪装成"有没有端点"的推断会把删掉的按钮偷偷加回来。
+
+    // 猫猫旅行：只保留「动作」按钮（派猫/领奖/刷新），开关类一律归「设置」
+    $('travelRows').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-tact]');
+      if (b && !b.disabled) travelAct(b.dataset.uid, b.dataset.tact, b);
+    });
+    $('btnTravelRefresh').onclick = () => busyRun($('btnTravelRefresh'), () => loadTravel(true), { label: '猫猫旅行' });
+    $('btnTravelDepartAll').onclick = () => {
+      if (confirm('对全部可用账号派猫？\n（今日已派出的会自动跳过，不会重复派）')) travelAll('depart');
+    };
+    $('btnTravelClaimAll').onclick = () => travelAll('claim');
+
+    // 成长计划：行内动作走事件委托（明细区里的按钮在下面另有一处委托）
+    $('growthRows').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gact]');
+      if (b && !b.disabled) growthAct(b.dataset.uid, b.dataset.gact, '', b);
+    });
+    // 账号下拉框：只切本地显示，不重新拉数据（快照里已含全部账号的任务）。
+    $('growthAccount').onchange = () => {
+      growthUID = $('growthAccount').value;
+      renderGrowthGroups();
+    };
+    // 成长计划「刷新」走全量强制回源，3 个账号实测 7.2s —— 正是最需要进度提示的那个。
+    $('btnGrowthRefresh').onclick = () => busyRun($('btnGrowthRefresh'), () => loadGrowth(true), { label: '成长计划' });
+
+    // 任务调度「刷新」。
+    //
+    // # 这个按钮此前**完全没有绑定**（点了没反应）
+    //
+    // 由 tests/frontend/audit_buttons.js 逐按钮点击发现：
+    // HTML 里有 `<button id="btnJobRefresh">刷新</button>`，
+    // 但全文件搜 `btnJobRefresh` 只有那一处 —— 没有任何 onclick/addEventListener。
+    // 对比其它刷新按钮（btnTravelRefresh/btnGrowthRefresh/btnModelRefresh）
+    // 都绑了 handler，只有它漏了。
+    //
+    // 本面板的数据来自 `manifest.jobs`（不额外发请求，避免第二份事实来源），
+    // 所以"刷新"的正确语义就是**重新拉一次 manifest** 并重绘。
+    // 这里复用 loadManifest()，与顶栏状态条走同一条路径。
+    $('btnJobRefresh').onclick = () => busyRun($('btnJobRefresh'), async () => {
+      await loadManifest();
+      renderJobs();
+      renderJobCoverage();
+    }, { label: '任务调度' });
+    // 四个视图按钮：只切本地视图，不重新拉数据（数据已含全部任务）。
+    $('growthViews').addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-gview]');
+      if (!b) return;
+      growthView = b.dataset.gview;
+      growthViewPicked = true; // 用户已表态，之后刷新不再自动抢视图
+      syncGrowthViewButtons();
+      renderGrowthGroups();
+    });
+    $('btnGrowthClaimAll').onclick = () => growthAll('claim');
+    $('btnGrowthAcceptAll').onclick = () => growthAll('accept');
+    $('btnGrowthRedeemAll').onclick = () => growthAll('redeem');
+    $('btnGrowthMakeupAll').onclick = () => growthAll('makeup');
+    $('btnGrowthOpenAll').onclick = () => growthAll('open');
+    $('btnGrowthDrawAll').onclick = () => growthAll('draw');
+    // 一键完成：单任务在行内（data-gauto 委托，见 growthGroups），
+    // 合并后的整账号/全部账号「一键完成」在这个按钮上 —— 作用域由
+    // 任务明细分区的下拉框决定（选「全部账号」= 对所有账号执行）。
+    $('btnGrowthAutoAll').onclick = () => growthOneClick($('btnGrowthAutoAll'));
+
+    // 本机登录的按钮长在明细节头里（随 renderGrowthGroups 重建），
+    // 所以走 growthGroups 上的事件委托，而不是给按钮本身挂 onclick。
+    $('growthGroups').addEventListener('click', ev => {
+      const sw = ev.target.closest('button[data-clswitch]');
+      if (sw && !sw.disabled) { clientSwitch(sw.dataset.clswitch, sw.dataset.clname); return; }
+      if (ev.target.closest('button[data-clrestore]')) { clientRestore(); return; }
+      // 行内「领取 N 分」：领这一个任务的奖励
+      const rw = ev.target.closest('button[data-gclaimreward]');
+      if (rw) { growthAct(rw.dataset.uid, 'claim', rw.dataset.gclaimreward, rw); return; }
+      // 行内「一键完成」：网关直接把这个任务做完（上报伪造遥测）并领奖。
+      // 走这条而不是 growthAct —— 它不是 /admin/growth/<act> 那六个动作之一，
+      // 而是独立端点 POST /admin/growth/auto。
+      const au = ev.target.closest('button[data-gauto]');
+      if (au && !au.disabled) { growthAutoOne(au.dataset.uid, au.dataset.gauto, au); return; }
+      // 行内「接单」：把未接单的任务接进列表
+      const ac = ev.target.closest('button[data-gaccept]');
+      if (ac) { growthAct(ac.dataset.uid, 'accept', ac.dataset.gaccept, ac); return; }
+      // 节头「全部领取」：领这个账号所有可领任务（不传 task_code 即全部）
+      const all = ev.target.closest('button[data-gclaimall]');
+      if (all) { growthAct(all.dataset.gclaimall, 'claim', '', all); return; }
+    });
+
+    // refreshModelCatalog 模型目录面板的「刷新」—— 重载 iframe **并**清掉两张缓存。
+//
+// # 为什么不只是重载 iframe
+//   用户 2026-10-30 要求「模型目录应该替换掉可用模型」，入口合并成一个。但旧面板那个
+//   「强制刷新目录」按钮的能力（POST /admin/models/refresh + 清掉 /v1/models 与
+//   /admin/models/preview 两张 30 秒缓存）**不能跟着消失** —— 只重载不清缓存时，
+//   iframe 里 30 秒内仍会拿到旧目录，表现就是用户抱怨过的「点了刷新没反应」。
+//
+// # 为什么不直接复用下面那个按钮的 handler
+//   下面那个由 busyRun 包装（要有可见按钮、要显示运行中），而本函数从 iframe 面板的
+//   刷新按钮调用、还要负责重载 iframe；两者职责不同，绑在一起会把两条路径锁死。
+window.refreshModelCatalog = function () {
+  // 服务端缓存：失败不阻断刷新（界面照样重取一次，最坏是拿到 30 秒内的旧值）。
+  admin('/admin/models/refresh', { method: 'POST', body: '{}' }).catch(() => {});
+  // 外壳侧的两张缓存：与旧按钮同一口径，少清一张就会出现「刷新没生效」。
+  try {
+    lazyCache.drop('ep:/v1/models');
+    lazyCache.drop('ep:/admin/models/preview');
+  } catch (e) { /* 缓存层未就绪时忽略：只影响下面这次取数的快慢，不影响正确性 */ }
+  const f = document.getElementById('mdFrame');
+  if (f) { f.src = '/ui/models?t=' + Date.now(); }
+};
+
+$('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
+      // 刷新按钮同时清掉两张缓存：模型列表（/v1/models）和倍率目录（/v3/config）。
+      // 只清前者会让倍率停留在旧值，看起来像"刷新没生效"。
+      await admin('/admin/models/refresh', { method: 'POST', body: '{}' });
+      // ⚠ 用户点的是「刷新模型目录」⇒ 必须**清缓存**，否则下面那次会拿到 30 秒内的旧目录
+      //    ⇒ 表现就是"点了刷新，列表没变"（那正是用户之前抱怨过的"点了没反应"）。
+      lazyCache.drop('ep:/v1/models');
+      // ⚠ 倍率目录也要清 —— 否则下面那句 `loadModelMultipliers()` 会直接命中 30 秒缓存，
+      //   用户点的是「**强制**刷新目录」，结果什么都没变（"点了没反应"的老毛病）。
+      lazyCache.drop('ep:/admin/models/preview');
+      await loadModelMultipliers();
+      await ensureConsoleKey(); renderModels((await sharedGet('ep:/v1/models', () => api('/v1/models', { v1: true }))).data);
+      return true;
+    }, { label: '模型目录' });
+
+    // 注意：histKind 的 onchange 在下面统一绑定（需要带页码重置），此处不再重复绑定。
+
+    // 导航 + 设置 + 日志视图
+    $('nav').addEventListener('click', ev => {
+      // 组头：折叠/展开（不切面板）
+      const hd = ev.target.closest('button.navgrouphd[data-pid]');
+      if (hd) { toggleNavGroup(hd.dataset.pid); return; }
+      const b = ev.target.closest('button[data-nav]');
+      if (b) showPanel(Number(b.dataset.nav));
+    });
+    $('btnSettingsSave').onclick = saveSettings;
+    $('btnSettingsReload').onclick = () => { loadSettings(); toast('已放弃未保存的修改'); };
+    // 只有**设置页里**的控件改动才算「有未保存的修改」。
+    //
+    // # 为什么必须限定范围（2026-10-25 用户报障「保存后仍显示有未保存的修改」）
+    //
+    // 这两条委托原先挂在 `#content`（**整个**内容区）上，而且回调**不看事件源**：
+    //
+    //     $('content').addEventListener('input',  () => markDirty(true));
+    //     $('content').addEventListener('change', () => markDirty(true));
+    //
+    // 而 `#content` 里装着**所有**面板 —— 对话测试的输入框、成长计划的下拉、
+    // API Key 弹窗、日志筛选…… 于是在任何一个面板动一下控件都会把**设置页**标脏；
+    // 而清脏只有一条路（`fillSettings` 末尾那次 `markDirty(false)`，它只在
+    // 「进入设置页 / 保存成功」时跑）。用户读到的是「设置页顶部一直挂着未保存的修改」，
+    // 可是设置根本没动过 —— 保存一百次也不会消失，因为下一次在别处动控件又把它标回来。
+    //
+    // 判据用 `closest('section[data-key="settings"]')`：设置页就是 HTML 里那块
+    // `<section data-key="settings">`，它的可编辑控件全在它内部。
+    // ⚠ 不能用 `#setPanel` 之类的新 id —— 那要改 HTML 结构；data-key 是既有锚点。
+    const inSettingsPanel = (t) => !!(t && t.closest && t.closest('section[data-key="settings"]'));
+    $('content').addEventListener('input', (ev) => { if (inSettingsPanel(ev.target)) markDirty(true); });
+    $('content').addEventListener('change', (ev) => { if (inSettingsPanel(ev.target)) markDirty(true); });
+    // 通用上游面板的写操作委托：在 #content 上**只绑一次**（评审 F2）。
+    // 放在 boot 里而不是 loadGenericList 里 —— 后者每 5 秒都会跑一次，
+    // 在里面绑就退回了原来那个"监听器随刷新增长"的 bug。
+    installGenericActions();
+    // 切换任务类型筛选属于「主动改变查询范围」→ 必须回第 1 页。
+    // 否则用户在第 3 页切到只有 1 页的类型时，会停在一个不存在的页上。
+    //
+    // ⚠ 必须判空：任务历史标签页已删除（用户本轮要求），`#histKind` 不存在。
+    // 之前这里直接 `$('histKind').onchange = ...` → null.onchange 崩溃，
+    // **boot 整段中断** —— 后面所有初始化（轮询/面板/导航）都没跑，界面半死。
+    // loadHistory() 自身有 histrows 守卫，这里只需同样容忍元素缺失。
+    const histKindEl = $('histKind');
+    if (histKindEl) {
+      histKindEl.onchange = () => { histPage.offset = 0; loadHistory(); };
+    }
+
+    // 清屏。
+    //
+    // # 原实现是无效的（实测确认，非推测）
+    //
+    // 旧代码：
+    //     logEntries = [];                      // 只清内存缓冲
+    //     $('logrows').innerHTML = logPlaceholder('已清屏（正在重新读取落盘日志…）');
+    //     loadLogHistory();                     // 立刻从磁盘读回同一页
+    //
+    // 但本面板展示的是**落盘日志**（`/admin/logs/history`），
+    // 清内存缓冲对它毫无影响；紧接着的 loadLogHistory() 又把同样 30 行读回来。
+    //
+    // 逐帧实测（MutationObserver，见 tests/frontend/diag_clearscreen_ux.js）：
+    //     + 2ms   行数=1   "正在读取落盘日志…"
+    //     +64ms   行数=30  原样回来
+    // 「已清屏」那句**从未渲染到屏幕上**。用户点下去看到的是一次闪烁，
+    // 内容分毫未变 —— 按钮看起来坏了。
+    //
+    // # 现在改成：清屏 = 挂起落盘视图的刷新，直到用户明确要求恢复
+    //
+    // 这是"清屏"在同类工具里的常规语义：把屏幕腾空，便于观察**后续**新日志，
+    // 而不是把磁盘上的历史删掉（我们也不该删 —— 那是审计数据）。
+    // 挂起期间 10s 轮询不动它（拦截在 loadLogHistory 开头）。
+    //
+    // logViewSuspended 的声明在上方（与 logEntries 一起），不在这里 ——
+    // 放这里会造成 TDZ（loadLogHistory 定义在前、首次调用更早）。
+
+    // 状态码卡片：事件委托挂在**容器**上。
+    //
+    // 为什么必须委托：卡片是 renderLogStatusBar 每次整块重绘出来的，
+    // 挂到卡片自己身上会在第一次重绘后全部失效（本文件模型 chip 那处
+    // 踩过同形的坑）。容器本身是静态 HTML，一生只绑一次。
+    //
+    // ⚠ data-logst="" 表示「全部」，与 data-logst="200" 必须能区分开 ——
+    //   用 dataset.logst === '' 判，不能靠真假值（'0' 也是真值，0 状态码
+    //   目前不会出现，但别把判断写成依赖这一点）。
+    const logStBox = $('logStatusBar');
+    if (logStBox) {
+      logStBox.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-logst]');
+        if (!b) return;
+        const raw = b.dataset.logst;
+        setLogStatus(raw === '' ? null : Number(raw));
+      });
+    }
+
+    // 初始绑定：按钮此时是"清屏"形态
+    $('btnLogClear').onclick = () => {
+      logEntries = [];
+      logViewSuspended = true;
+      $('logrows').innerHTML = logPlaceholder(
+        '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
+      $('logPager').innerHTML = '';
+      // 卡片条同样清掉：屏幕已经清空，留着一排统计数字会让人以为下面还有内容。
+      hideLogStatusBar();
+      // 把清屏按钮换成"恢复显示"，让用户有明确的回头路
+      setLogClearButton(true);
+    };
+
+    // setLogClearButton 切换清屏/恢复两种形态。
+    //
+    // 不用两套按钮来回换 DOM，而是改同一个按钮的文字与行为 ——
+    // 位置不变，用户不需要重新找按钮在哪。
+    function setLogClearButton(suspended) {
+      const b = $('btnLogClear');
+      if (!b) return;
+      b.textContent = suspended ? '恢复显示' : '清屏';
+      b.onclick = suspended ? () => { logViewSuspended = false; loadLogHistory({ force: true }); setLogClearButton(false); }
+                            : () => {
+                                logEntries = [];
+                                logViewSuspended = true;
+                                $('logrows').innerHTML = logPlaceholder(
+                                  '已清屏 —— 已暂停自动刷新落盘视图（新日志仍在写入，点「恢复显示」可重新加载）');
+                                $('logPager').innerHTML = '';
+                                hideLogStatusBar();
+                                setLogClearButton(true);
+                              };
+    }
+
+    // 请求日志按 10s 刷新落盘视图（屏幕上始终是最新落盘记录）；
+    // 任务历史 10s。
+    //
+    //  ⚠ 只在**那块面板当前可见**时才拉（本轮新增）。
+    //
+    // 原来是无条件 10 秒拉一次：用户在看账号池，日志与任务历史两块面板
+    // 照样每 10 秒发两个请求并重绘自己 —— 这是"网页一直隔三岔五自动刷新"
+    // 的第三个来源，而且是纯浪费（看不见的东西刷它做什么）。
+    // `showPanel` 已经在切到这两块时各拉一次，所以不会出现"切过去是空的"。
+    setInterval(() => { if (sectionActive('logs')) loadLogHistory(); }, 10000);
+    loadLogHistory();
+    loadSettings();   // 设置页数据先备好，顺便拿到落盘日志概况（顶部日志面板要显示）
+
+    // API 管理：新建按钮 + 初始加载（无感轮询已挂在上面的 30s 间隔里）。
+    $('btnApiKeyNew').onclick = () => openAPIKeyModal('create');
+
+    // key 单元格：点一下 → 显示完整值 + 自动复制。
+    //
+    // 事件委托挂在 **document** 上而不是表格行上：行会随每次刷新重建，
+    // 挂在行上的监听会一起被丢掉（本仓在别处踩过这个形态 ——
+    // "按钮在、点了没反应"，而页面上不报任何错）。
+    document.addEventListener('click', ev => {
+      const kb = ev.target.closest('button[data-akkey]');
+      if (!kb) return;
+      const full = kb.dataset.akkey || '';
+      const mask = kb.dataset.akmask || '';
+      // 第一次点：把打码换成完整值。再点：只复制。
+      //
+      // 刻意**不做**"再点一次藏回去"：那个开关状态没有任何价值，
+      // 而误点一次反而把已经看到的值又藏起来（用户会以为复制失败了）。
+      if (kb.textContent === mask && full) kb.textContent = full;
+      copyText(full, 'API Key');
+    });
+
+    // ── API Key 弹窗的控件接线 ────────────────────────────────────────────
+    $('akCancel').onclick = closeAPIKeyModal;
+    $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
+  $('akCancel').onclick = closeAPIKeyModal;
+  $('akSave').onclick = () => saveAPIKeyModal($('akSave'));
+
+  // 勾选分组 → 更新计数与别名候选。委托在容器上，列表重渲染后依然有效。
+  $('akGroupList').addEventListener('change', ev => {
+    const cb = ev.target.closest('input[data-akg]');
+    if (!cb) return;
+    if (cb.checked) { akPickedGroups.add(cb.dataset.akg); }
+    else { akPickedGroups.delete(cb.dataset.akg); }
+    renderAKGroupChips();
+    updateAKCount();
+  });
+  // 「已选分组」里的 × —— 取消该分组（同时把列表里的勾去掉）。
+  //
+  // ⚠ 用事件委托而不是给每个 chip 绑 onclick：chip 的 innerHTML 每次重画
+  //   都会重建，绑在元素上的处理器会被一起丢掉（表现是"第一次能点、之后没反应"，
+  //   且不报错）。
+  $('akGroupChips').addEventListener('click', ev => {
+    const btn = ev.target.closest('button[data-akgunpick]');
+    if (!btn) return;
+    akPickedGroups.delete(btn.dataset.akgunpick);
+    renderAKGroupList();
+  });
+    // 点遮罩关闭（点面板内部不关）。
+    $('akModal').addEventListener('click', ev => { if (ev.target.id === 'akModal') closeAPIKeyModal(); });
+    // Esc 关闭。
+    document.addEventListener('keydown', ev => {
+      if (ev.key === 'Escape' && $('akModal').style.display !== 'none') closeAPIKeyModal();
+    });
+
+    // 导航最后构建：此时所有 section 都已在 DOM 里。
+    //
+    // 但**上游面板要等 manifest 到达才能生成** —— 所以导航实际由
+    // refresh() → loadManifest() → buildProviderPanels() → buildNav()
+    // 这条链触发。这里先建一次，让通用面板立即可用（不依赖网络）。
+    buildNav();
+
+    // 页面加载时若已有全量任务在跑（比如刚在别处点过），接着显示进度
+    admin('/admin/task').then(t => { if (t && t.running) watchTask(); }).catch(() => {});
+
+    refresh();
+  }
+
+  boot();
+
+  // ---------------------------------------------------------------- 测试钩子
+  //
+  // # 为什么需要它
+  //
+  // 整页包在 IIFE 里，浏览器测试无法触达 MANIFEST / applyManifest 等内部状态。
+  // 而没有它们就没法验证**最关键的那条判据**：
+  // "给一个前端从未见过的上游，导航会不会自动多一组"。
+  //
+  // 只暴露只读快照与两个纯函数（applyManifest / syncProviderPanels），
+  // 不暴露任何写操作或凭据 —— 它们本来就在页面里可达，
+  // 这里的意义是让测试能驱动，不是放权。
+  window.__wb2api__ = {
+    manifest: () => JSON.parse(JSON.stringify(MANIFEST)),
+    applyManifest: applyManifest,
+    syncProviderPanels: syncProviderPanels,
+    buildNav: buildNav,
+    upstreamGroups: upstreamGroups,
+    panelCapsOf: panelCapsOf,
+    routesFor: routesFor,
+    // panelRoutesFor：与 routesFor 的差就是"去掉 hidden"。
+    // 暴露它是为了让浏览器测试能直接验"隐藏由数据驱动"，
+    // 而不是靠"某个上游的面板恰好不在"这种间接推断（那种测法在换个上游后仍会绿）。
+    panelRoutesFor: panelRoutesFor,
+    capTitle: capTitle,
+    providersWithCap: providersWithCap,
+    hasAnyPanel: hasAnyPanel,
+    // T3：每日动作的判据全部读这两个 ——
+    //   · dailyActionsOf(pid) 是"上游报了什么"的前端投影
+    //   · hasCap(pid, cap) 是"账号行为什么要用它"的判据
+    // 不暴露它们的话，"codearts 行里没有签到按钮"这条断言就只能靠
+    // 字符串匹配 DOM，而匹配不到时无法区分"没渲染"与"渲染成了别的"。
+    dailyActionsOf: dailyActionsOf,
+    hasCap: hasCap,
+    // R2/R3：账号池的"manifest 全集"判据与折叠状态。
+    //
+    // 为什么必须暴露：这两条都是**读页面内部状态**才能验的判据 ——
+    //   · "账号池里的上游集合 == manifest 的上游集合"要同时读 DOM 与 manifest
+    //   · "折叠状态存的是哪个 localStorage 键"要能直接读写那个键，
+    //     而不是靠"点一下再刷新看看"这种间接推断（那种测法在改动换实现后
+    //     仍会绿，抓不出"键名漂移"）
+    // 只暴露读函数与一个语义明确的写函数，与上面那块同一性质：
+    // 让测试能驱动，不是放权。
+    providerRegistryIds: providerRegistryIds,
+    accountGroupOpen: accountGroupOpen,
+    setAccountGroupOpen: setAccountGroupOpen,
+    LS_ACCTGROUP: LS_ACCTGROUP,
+    // renderAccounts 暴露**只为了能灌一个空池**进去。
+    //
+    // R2 删掉的那条提前返回只在"池子里一个号都没有"时显形 ——
+    // 而真机上永远至少有 1 个号（测试实例也是），那条路径**没有任何自然入口**。
+    // 不把它变成可驱动的，就等于"修了一条谁也测不到的出口"。
+    // 传空数组是**读**操作（只重绘，不写任何持久状态），与上面那几个同性质。
+    renderAccounts: renderAccounts,
+    // fmtTokenRemain —— T5 的统一 Token 时长渲染器。
+    //
+    // 为什么必须暴露：它是**纯函数**（输入秒数 → 输出字符串），
+    // 而它的五档分界（1 天 / 1 小时 / 1 分钟 / 已过期 / 未知）在真机上
+    // **不可能同时出现** —— 一个账号的 token 只可能落在其中一档里。
+    // 也就是说，"分界对不对"这条判据在没有钩子的情况下**完全测不到**：
+    // 只能看当前活着的那几档，而边界（恰好 86400、恰好 0、恰好 undefined）
+    // 恰恰是最容易写错、也是改造前真的写错了的地方
+    //（`|| 0` 把 undefined 与 0 合并 = 边界错误）。
+    //
+    // 与上面同一性质：暴露的是**纯函数**，不写任何状态、不碰凭据。
+    fmtTokenRemain: fmtTokenRemain,
+    // quotaCellHTML —— T4 的额度单元格渲染器（同上：纯函数）。
+    //
+    // 暴露它是为了让"has_data=false 必须显示 —"这条能在**不构造假实例**的前提下验证：
+    // 测试可以喂一个 has_data 明确为 false 的账号视图进来，看它返回什么。
+    // 这比"改后端数据再重启实例"诚实得多 —— 后者会污染被测对象，
+    // 而且需要把实例置于一个非真实状态。
+    quotaCellHTML: quotaCellHTML,
+    // renderLoginLocalHint —— 本机提示的渲染函数。
+    //
+    // 为什么要暴露：提示的显隐**只取决于地址栏的 hostname**，
+    // 而 `location.hostname` 在浏览器里**无法被覆写**（实测：用
+    // `Object.defineProperty` 改它会静默失败，读回来仍是真实值）。
+    // 所以"从别的 host 访问时会怎样"这条路径**在真机上没法自然触发** ——
+    // 除非真的从另一台机器打开。
+    //
+    // 不暴露就等于"写了一条谁也没验证过的分支"。暴露一个纯渲染函数
+    //（它只读 location，不写任何状态），让测试能覆盖那四种 host 情形。
+    renderLoginLocalHint: renderLoginLocalHint,
+    // showPanel 按 **data-key** 切面板。
+    //
+    // 暴露它是因为浏览器测试必须能切到被测面板：同一时刻只有一个
+    // section 是 .active，其余 display:none —— 在隐藏的面板里量任何
+    // 尺寸（offsetHeight / getBoundingClientRect）**恒为 0**，
+    // 断言会得到"看起来合理但什么都没测到"的结果。
+    //
+    // ⚠ 这是我实际踩到的：R3 的第一版探针在没有切面板的情况下量
+    // offsetHeight，全部拿到 0，差点据此写出一个恒真的断言。
+    // 故这里只暴露"按 key 切"这一种语义 —— 不暴露下标，
+    // 因为下标依赖 navSections 的构建顺序，会随 manifest 变化而漂移。
+    showPanelByKey: function (key) {
+      const i = navSections.findIndex(s => s && s.dataset && s.dataset.key === key);
+      if (i < 0) return false;
+      showPanel(i);
+      return true;
+    },
+    CORE_CAP: CORE_CAP,
+    ACCT_COLS: ACCT_COLS,
+    // 拆多表之后，测试必须能拿到"**每一个上游各自的**列集" ——
+    // 只暴露一个总数会让断言退化成"第一张表有几列"（那是假绿的温床）。
+    acctColumnsFor: acctColumnsFor,
+    DEFAULT_ACCT_COLUMNS: DEFAULT_ACCT_COLUMNS,
+    ACCT_COLUMN_DEFS: ACCT_COLUMN_DEFS,
+    COLS: COLS,
+    rowPlaceholder: rowPlaceholder,
+    TableState: TableState,
+    accountPlaceholder: accountPlaceholder,
+    renderTopStats: renderTopStats,
+    renderJobs: renderJobs,
+    applyTheme: applyTheme,
+    setThemePref: setThemePref,
+    resolveTheme: resolveTheme,
+  };
+})();

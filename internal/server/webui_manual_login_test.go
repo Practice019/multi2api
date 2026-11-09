@@ -15,7 +15,7 @@ import (
 )
 
 func TestWebUIManualLoginBlockPlacement(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 	start := strings.Index(src, "r = await admin('/admin/login/start'")
 	catchFail := strings.Index(src, "申请失败：")
 	define := strings.Index(src, "const mEntry")

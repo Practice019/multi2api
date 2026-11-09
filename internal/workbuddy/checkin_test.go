@@ -11,7 +11,11 @@
 package workbuddy
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -21,6 +25,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -267,7 +272,6 @@ func TestIsAlreadyCheckin(t *testing.T) {
 		`{"code":400,"msg":"今日已签到"}`,
 		`{"code":0,"msg":"already checked in"}`,
 		`upstream error: checkin failed`,
-		"code=400",
 		"ALREADY DONE", // 大小写不敏感
 	}
 	for _, s := range yes {
@@ -284,11 +288,48 @@ func TestIsAlreadyCheckin(t *testing.T) {
 		// （Go 的 error.Error() 对 upstream.Error 拼出来的就是 `code=400` 那种形态）。
 		// 这里把它钉住，避免有人"顺手放宽"而改变既有行为。
 		`{"code":400}`,
+		// ★ T-463：`strings.Contains(s, "code=400")` 已删 —— 它是死条件。
+		//
+		// 为什么不可能是活条件：真实错误串走 upstream/client.go 的
+		// `upstream %s (http %d): %s`（:549 走 Classify，:560 走业务码），
+		// 而 :560 那支要求 `kind == ErrNone`（即 **HTTP 200**）⇒ Status 永不等于 400。
+		// 换句话说 `code=` 后面跟的是**上游业务码**，与 HTTP 状态码无关。
+		//
+		// 这两条把"死"钉住：删掉它**行为零变化**，但下一个人不会再以为它起作用。
+		"code=400",
+		"upstream client (http 400): code=400 msg=xx", // 即使伪造出这个串也不再靠它命中
 	}
 	for _, s := range no {
 		if isAlreadyCheckin(s) {
 			t.Errorf("不该识别为已签到: %q", s)
 		}
+	}
+}
+
+// TestStatusOfExtractsHTTPCode T-463：日志要单列 http 状态码，靠这个函数取。
+//
+// # 为什么值得测
+//
+// 改前日志是 `checkin <uid>: <err>`，看不出 400 还是 401，
+// 而这两种性质**完全相反**（400=业务否定，401=凭据失效要重登）。
+// 取错了会让排障往反方向走。
+func TestStatusOfExtractsHTTPCode(t *testing.T) {
+	// ① 直接构造 upstream.Error（与 doJSON 的产出同一类型）
+	if got := statusOf(&upstream.Error{Status: 400, Msg: `{"code":10001,"msg":"今天已签到，请明天再来"}`}); got != 400 {
+		t.Errorf("statusOf(直接构造) = %d，want 400", got)
+	}
+	// ② 被 %w 包一层也要能取到（errors.As 而非类型断言 —— 这是本函数的要点）
+	wrapped := fmt.Errorf("checkin 外层包装: %w", &upstream.Error{Status: 401, Msg: "Unauthorized"})
+	if got := statusOf(wrapped); got != 401 {
+		t.Errorf("statusOf(%%w 包装) = %d，want 401", got)
+	}
+	// ③ 不是 upstream.Error ⇒ 0（不 panic、不瞎猜）
+	if got := statusOf(errors.New("connection reset")); got != 0 {
+		t.Errorf("statusOf(普通 error) = %d，want 0", got)
+	}
+	// ④ nil ⇒ 0
+	if got := statusOf(nil); got != 0 {
+		t.Errorf("statusOf(nil) = %d，want 0", got)
 	}
 }
 
@@ -323,6 +364,116 @@ func TestCheckinAlreadyReportsAlready(t *testing.T) {
 	if !res.HasQuota || res.Credits != 77 {
 		t.Errorf("credits=%d hasQuota=%v want 77/true", res.Credits, res.HasQuota)
 	}
+}
+
+// TestCheckinAlreadyLogIsNotAlarming T-463：日志是**运维的观察面**，所以它可观察、可断言。
+//
+// # 为什么要这条测试
+//
+// 改前：每次「今天已签到」都打一条 `checkin <uid>: upstream client (http 400): {...}` ——
+// 形状**与真故障一模一样**。实测 server.log 里有 100 条同类行，真故障会被淹。
+// 改后：那条日志明确说「今日已签到…非故障」，并且**不再**把裸 err 原文打出来。
+//
+// # 断言策略（刻意"只查关键子串"）
+//
+// 日志断言天然脆（措辞一改就红）。所以这里**不断言整行**，只断言三件事：
+// 一是出现「今日已签到」（改后的新措辞存在）；
+// 二是不出现 `upstream client (http 400)`（旧告警样已消失）；
+// 三是出现 `http 400`（状态码被单列出来 —— 这是新增的诊断价值）。
+//
+// # 对照断言（异常路径不能被一起改坏）
+//
+// 同一个测试里再造一个 401 的假上游：它**必须**仍打裸 err 原文（排障要完整错误串）。
+func TestCheckinAlreadyLogIsNotAlarming(t *testing.T) {
+	// ——— 场景 A：上游回「今天已签到」（400 + code 10001，与生产实测的原文同形）———
+	t.Run("已签到不打成告警", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+				w.WriteHeader(400)
+				w.Write([]byte(`{"code":10001,"msg":"今天已签到，请明天再来","requestId":"3302b198-"}`))
+			case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+				w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":100,"CycleCapacityRemain":77,"CycleCapacityUsed":0}]}}}}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		p := pool.New("")
+		p.Add(&auth.Auth{UID: "u-already", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+		up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+		s := NewWithConfig(Config{Pool: testPoolAdapter{p: p}, Client: up})
+
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(old)
+
+		res, _ := s.RunCheckinFor("u-already", "manual")
+		logged := buf.String()
+
+		// 行为未被改动（这条最重要：本次只改日志，status 逻辑一个字没动）
+		if res.Status != checkinlog.StatusAlready {
+			t.Fatalf("status=%q want already —— ★ 改日志不该动 status！", res.Status)
+		}
+		if !strings.Contains(logged, "今日已签到") {
+			t.Errorf("日志里没有「今日已签到」：\n%s", logged)
+		}
+		if strings.Contains(logged, "upstream client (http 400)") {
+			t.Errorf("「已签到」仍然打成了故障样的日志（旧的裸 err 原文还在）：\n%s", logged)
+		}
+		if !strings.Contains(logged, "http 400") {
+			t.Errorf("状态码没被单列出来（排障要一眼看出 400 还是 401）：\n%s", logged)
+		}
+	})
+
+	// ——— 场景 B：401 真故障 ⇒ 必须仍打完整错误串 ———
+	t.Run("真故障仍打完整原文", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
+				w.WriteHeader(401)
+				w.Write([]byte(`{"code":12153,"msg":"Offline user session not found"}`))
+			default:
+				w.WriteHeader(401)
+				w.Write([]byte(`{"code":12153,"msg":"Offline user session not found"}`))
+			}
+		}))
+		defer srv.Close()
+
+		p := pool.New("")
+		p.Add(&auth.Auth{UID: "u-fail", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+		up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+		s := NewWithConfig(Config{Pool: testPoolAdapter{p: p}, Client: up})
+
+		var buf bytes.Buffer
+		old := log.Writer()
+		log.SetOutput(&buf)
+		defer log.SetOutput(old)
+
+		res, _ := s.RunCheckinFor("u-fail", "manual")
+		logged := buf.String()
+
+		if res.Status != checkinlog.StatusFail {
+			t.Fatalf("status=%q want fail", res.Status)
+		}
+		// 异常路径**必须**保留完整错误串（改动的边界就在这里）。
+		//
+		// ⚠ 断言用 `(http 401) + 响应体` 而不是 `upstream client (http 401)`：
+		//   kind 由 upstream.Classify 判，401 会被判成 **session_dead** 而不是 client
+		//   （实测日志是 `upstream session_dead (http 401): {...}`）。
+		//   把 kind 写进断言会让测试依赖分类细节 —— 那不是本测试要守的东西。
+		if !strings.Contains(logged, "(http 401)") {
+			t.Errorf("异常路径的日志丢了 HTTP 状态码（排障要它）：\n%s", logged)
+		}
+		if !strings.Contains(logged, "Offline user session not found") {
+			t.Errorf("异常路径的日志丢了上游原文（排障要它）：\n%s", logged)
+		}
+		if strings.Contains(logged, "今日已签到") {
+			t.Errorf("401 被误判成「已签到」：\n%s", logged)
+		}
+	})
 }
 
 // TestCheckinFailureRecordsShortDetail 真正的失败：status=fail，detail 被压行。

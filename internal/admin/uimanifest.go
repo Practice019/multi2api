@@ -204,6 +204,8 @@ func JobDescOf(name string) string { return jobDescs[name] }
 
 var jobLabels = map[string]string{
 	"cline-refresh":                    "Cline 凭证刷新",
+	"core-daily-checkin":               "统一签到（全部上游）",
+	"codar-token-refresh":              "科搭令牌续期",
 	"codearts-refresh":                 "CodeArts 凭证刷新",
 	"codearts-welfare":                 "CodeArts 福利领取",
 	"pool-health-check":                "账号池健康检查",
@@ -228,6 +230,8 @@ var jobLabels = map[string]string{
 
 var jobDescs = map[string]string{
 	"cline-refresh":                    "扫描本地凭证，把临近过期的刷掉（刷的是池里持有的对象，不是磁盘副本）。",
+	"core-daily-checkin":               "跨上游统一签到：遍历所有实现了签到能力的上游，各扫一遍（**今天已成功扫过的跳过**，零额外上游请求）。它是**核心自带**的任务（与账号池健康检查同类，不属于任何单个上游）—— 改造前 8 个上游里只有 2 个注册了签到任务，另外 6 个的自动签到静默失效。",
+	"codar-token-refresh":              "扫描本地凭证，把临近过期的会话令牌续期（默认开启：剩余寿命 ≤25% 或 ≤24h 时自动续期；续期后会用新令牌回验一次才落盘）。",
 	"codearts-refresh":                 "扫描账号，把临近过期的凭证刷新。",
 	"codearts-welfare":                 "一趟福利自动领取（签到语义）：逐账号领取可领福利并记录历史。",
 	"pool-health-check":                "账号池主动健康检查：探测处于冷却/熔断中的账号并提前恢复（核心任务，不属于任何上游）。",

@@ -55,7 +55,7 @@ func jsFuncBody(t *testing.T, src, marker string) string {
 //
 // 用户看到的仍然是一个 `—`，与"这功能没做"完全一样 —— 正是本轮要修的东西。
 func TestWebUITokenExpiryRendersPermanentBeforeUnknown(t *testing.T) {
-	body := jsFuncBody(t, string(webuiHTML), "function tokenExpiryCellHTML(")
+	body := jsFuncBody(t, frontendSourceString(), "function tokenExpiryCellHTML(")
 
 	neverAt := strings.Index(body, "token_never_expires")
 	if neverAt < 0 {
@@ -90,7 +90,7 @@ func TestWebUITokenExpiryRendersPermanentBeforeUnknown(t *testing.T) {
 
 // TestWebUIAddAccountHandlesEmptyAuthURL ★ 本机拾取（无授权页）的分支守卫。
 func TestWebUIAddAccountHandlesEmptyAuthURL(t *testing.T) {
-	body := jsFuncBody(t, string(webuiHTML), "function addAccount(")
+	body := jsFuncBody(t, frontendSourceString(), "function addAccount(")
 
 	// 1) 必须有那个分支判据，且它读的是**数据**（auth_url）而不是上游名。
 	if !strings.Contains(body, "hasAuthURL") {

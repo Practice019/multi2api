@@ -374,7 +374,7 @@ const (
 // —— 混进同一张表会让两者都失真，且让全局状态被 Models() 的调用顺序影响。
 //
 // 所以单开一张表，只服务一件事：**让 clampMaxTokens 覆盖新模型**
-//（否则客户端送来的超大 max_tokens 会以"上游 400"的形态暴露，很难归因）。
+// （否则客户端送来的超大 max_tokens 会以"上游 400"的形态暴露，很难归因）。
 var (
 	learnedMu        sync.Mutex
 	learnedMaxOutput = map[string]int{} // key = 上游逐字 model_id

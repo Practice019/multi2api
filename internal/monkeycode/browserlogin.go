@@ -442,9 +442,22 @@ func freePort() (int, error) {
 }
 
 // profileRoot 浏览器 profile 的父目录（跟凭证目录放一起，便于清理）。
+//
+// ★ T-456：**不再返回空串**。
+//
+// # 为什么（用户实测报障）
+//
+// 原来没配 authDir 时返回 ""，看起来"什么都没做"，实际是**把决定权交给了下游** ——
+// makeProfileDir 会回落到 `os.TempDir()`（用户的 %TEMP% 就是 D:\temp）。
+// 实测后果：`go test ./...` 里那条会真起浏览器的用例，每次都往 D:\temp 扔一个
+// **525 MB** 的 Edge profile，攒了 **24 个 ≈ 12 GB**，1 小时吃掉 8 GB 磁盘。
+//
+// ⇒ 宁可建在**我们自己的地盘**（工作目录下的 .browser-profiles），
+//
+//	也不要往系统临时目录里堆 —— 那是用户不知道谁建的地方。
 func (p *Provider) profileRoot() string {
 	if p.authDir == "" {
-		return ""
+		return ".browser-profiles"
 	}
 	return p.authDir + string(os.PathSeparator) + ".browser-profiles"
 }
@@ -541,11 +554,91 @@ func SweepStaleLoginProfiles(root string, olderThan time.Duration) (removed, fai
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), loginProfilePrefix) {
 			continue
 		}
+		// ★★ T-448：**先杀掉"启动太久"的孤儿进程** —— 必须在 mtime 闸门**之前**。
+		//
+		// # 为什么必须在闸门之前（实测死锁）
+		//
+		// 孤儿进程会持续刷新 profile 的 mtime ⇒ 它永远是"新的" ⇒ 被下面的闸门 continue 掉
+		// ⇒ **永远清不掉**。实测：造场景（mtime 老 + msedge 指向它）后 Sweep 报告 removed=1，
+		// 但那个目录和 8 个孤儿都还在 —— 因为 mtime 被刷成了"现在"。
+		// 而"正在登录"与"孤儿在刷新"在 mtime 上**完全同形** ⇒ mtime 原理上判不了这件事。
+		//
+		// # 判据：进程启动时长（与 mtime 无关 ⇒ 不会被孤儿自己刷新掉）
+		//
+		// 登录窗口 10 分钟（LoginFlow 的 timeout）⇒ 启动 > orphanProcAge 的进程
+		// **不可能是当前这次登录** ⇒ 一定是历史遗留的孤儿。
+		//
+		// ⚠ full 必须在这里就定义（下面 mtime 流程里也要用）—— 它在本次改动前
+		//   定义在闸门之后，所以"闸门之前要用它"的代码编译不过（T-448 实测红过一次）。
+		full := filepath.Join(root, e.Name())
+		const orphanProcAge = 30 * time.Minute
+		if infos, perr := listProcsFn("msedge.exe", loginProfilePrefix, e.Name()); perr == nil {
+			killed := 0
+			for _, pi := range infos {
+				if pi.Age < orphanProcAge {
+					continue // 可能是当前登录 ✓ 不碰
+				}
+				logf("monkeycode: 发现孤儿浏览器 pid=%d（已运行 %s）占用 %s，杀掉",
+					pi.PID, pi.Age.Round(time.Minute), e.Name())
+				if kerr := killPIDFn(pi.PID); kerr != nil {
+					logf("monkeycode: 杀孤儿失败 pid=%d: %v", pi.PID, kerr)
+					continue
+				}
+				killed++
+			}
+			if killed > 0 {
+				// 等句柄释放（实测 200ms 够用；进程刚死时文件句柄可能还没完全释放）
+				time.Sleep(200 * time.Millisecond)
+				// 进程都杀光了 ⇒ 这个 profile 一定是垃圾 ⇒ **直接删，不再看 mtime**。
+				// 理由：已证明"有进程引用它"且"那些进程都是孤儿" ⇒ 不需要 mtime 佐证。
+				if rerr := os.RemoveAll(full); rerr != nil {
+					failed++
+					logf("monkeycode: ⚠ 删孤儿 profile 失败：%s —— %v", full, rerr)
+				} else {
+					removed++
+				}
+				continue // 已处理完，不要再走下面的 mtime 流程（否则可能重复删）
+			}
+		}
+
 		info, ierr := e.Info()
 		if ierr != nil || info.ModTime().After(cutoff) {
 			continue // 新的（可能正在用）⇒ 不碰
 		}
-		full := filepath.Join(root, e.Name())
+		// ★ T-446：删之前**先杀掉引用该 profile 的孤儿浏览器**。
+		//
+		// # 为什么必须这一步（实测因果，2026-11-09）
+		//
+		// 只删目录时 RemoveAll 会因文件被占用而失败 —— 现场 165 个**全失败**；
+		// 先杀进程再删 ⇒ 同 165 个**全成功**（磁盘 97.94% → 83.8%）。
+		// 孤儿来自**异常路径**（用户中途放弃 / 轮询超时 / 服务重启使 Job Object 消失），
+		// 正常路径已有树杀（killtree_windows.go）+ 等退出再删（removeProfileWhenGone）。
+		//
+		// # 安全（误杀防线）
+		//
+		// 只杀命令行**同时**含 loginProfilePrefix 与该目录**全名**的进程
+		//（AND 语义 ⇒ 不会碰到用户自己的浏览器，也不会杀掉正在登录中的那个别的 profile）。
+		// ⚠ 走可注入的 listProcsFn/killPIDFn，以便测试验证这条 AND 判据（见 procsweep.go）。
+		// ★ T-448/T-449：这里**也要按年龄过滤** —— 否则"mtime 老"的目录会把
+		// "只跑了 5 分钟的进程"也杀掉，而那可能正是**当前这次登录**
+		//（登录慢/卡住时 profile 的 mtime 不更新 ⇒ 老的 mtime ≠ 没有活跃登录）。
+		// 实测：TestSweepKeepsRecentProcEvenIfMtimeOld 抓到过这个越界 ✓
+		if infos, perr := listProcsFn("msedge.exe", loginProfilePrefix, e.Name()); perr == nil && len(infos) > 0 {
+			for _, pi := range infos {
+				if pi.Age < orphanProcAge {
+					continue // 可能是当前登录 ✓ 不碰
+				}
+				logf("monkeycode: 巡检发现孤儿 msedge pid=%d（已运行 %s）占用 %s，先杀掉再删",
+					pi.PID, pi.Age.Round(time.Minute), e.Name())
+				if kerr := killPIDFn(pi.PID); kerr != nil {
+					logf("monkeycode: 杀孤儿失败 pid=%d: %v", pi.PID, kerr)
+				}
+			}
+			// 等句柄释放：进程刚被杀时文件句柄可能还没完全释放，
+			// 立刻 RemoveAll 仍会失败。200ms 是现场验证够用的值。
+			time.Sleep(200 * time.Millisecond)
+		}
+
 		if rerr := os.RemoveAll(full); rerr != nil {
 			failed++
 			logf("monkeycode: ⚠ 陈旧 profile 清理失败：%s —— %v", full, rerr)

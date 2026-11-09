@@ -108,7 +108,7 @@ func webuiBlock(t *testing.T, src, startMarker, endMarker string) string {
 // ⚠ 只查一条不够：只加标题不加渲染器，表格里那一格是空的（th 有、td 没有），
 // 整行会**错位**；反过来则是一个没人认领的渲染器。
 func TestEveryCanonicalColumnIsWiredInWebUI(t *testing.T) {
-	raw, err := os.ReadFile("webui.html")
+	raw, err := readFrontendSource(t)
 	if err != nil {
 		t.Fatalf("读 webui.html 失败: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestEveryCanonicalColumnIsWiredInWebUI(t *testing.T) {
 // 这条抓的是拼错/改名 —— 那种列在界面上同样只是"不出现"，
 // 但它连 console.warn 都不会有（前端以为自己认识它）。
 func TestWebUIColumnRegistryHasNoUnknownIDs(t *testing.T) {
-	raw, err := os.ReadFile("webui.html")
+	raw, err := readFrontendSource(t)
 	if err != nil {
 		t.Fatalf("读 webui.html 失败: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestWebUIColumnRegistryHasNoUnknownIDs(t *testing.T) {
 // 免得将来有人"顺手"把它从某个上游的列集里删掉（通用守卫只查
 // gateway↔前端，不查"哪个上游报了它"）。
 func TestFreeQuotaColumnFullyWired(t *testing.T) {
-	raw, err := os.ReadFile("webui.html")
+	raw, err := readFrontendSource(t)
 	if err != nil {
 		t.Fatalf("读 webui.html 失败: %v", err)
 	}

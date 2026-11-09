@@ -96,8 +96,8 @@ func TestChannelSeed(t *testing.T) {
 	h := seedHandler(nil)
 
 	seeds := RegistryChannelSeeds()
-	if len(seeds) != 13 {
-		t.Fatalf("注册点目录 = %d 条，want 13（main.go 的 13 处 registry.Register）", len(seeds))
+	if len(seeds) != 14 {
+		t.Fatalf("注册点目录 = %d 条，want 14（main.go 的 14 处 registry.Register：13 个原有 + codar）", len(seeds))
 	}
 
 	// 反例：渠道工厂不是注册点。
@@ -111,7 +111,7 @@ func TestChannelSeed(t *testing.T) {
 		}
 	}
 
-	// 反例：13 个注册点的身份 (provider, base_url) 必须两两不同 ——
+	// 反例：14 个注册点的身份 (provider, base_url) 必须两两不同 ——
 	// 清理历史行用的就是这一对键，重复会让"该删的行"指向两条不同的东西。
 	seen := make(map[string]string, len(seeds))
 	for _, s := range seeds {
@@ -147,8 +147,8 @@ func TestChannelSeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造历史 seed 行失败: %v", err)
 	}
-	if legacy.Created != 13 {
-		t.Fatalf("历史行应建 13 条，实际 %d", legacy.Created)
+	if legacy.Created != 14 {
+		t.Fatalf("历史行应建 14 条，实际 %d", legacy.Created)
 	}
 	// 再放一条**真实的**渠道：名字与 base_url 故意与清单第 1 条**完全一样**，
 	// 唯一区别是它有 ch-* 外部 id —— 这条必须活下来（误删用户渠道是这条清理最坏的后果）。
@@ -160,8 +160,8 @@ func TestChannelSeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("建真实渠道失败: %v", err)
 	}
-	if n, _ := store.CountChannels(); n != 14 {
-		t.Fatalf("清理前应有 14 行（13 历史 + 1 真实），实际 %d", n)
+	if n, _ := store.CountChannels(); n != 15 {
+		t.Fatalf("清理前应有 15 行（14 历史 + 1 真实），实际 %d", n)
 	}
 
 	// ③ 显式标记的证据：标记落在 setting 的 JSON 里，且只落在历史行上。
@@ -169,8 +169,8 @@ func TestChannelSeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarkRegistrySeedChannels: %v", err)
 	}
-	if marked != 13 {
-		t.Fatalf("应标记 13 条历史行，实际 %d（names=%v）", marked, names)
+	if marked != 14 {
+		t.Fatalf("应标记 14 条历史行，实际 %d（names=%v）", marked, names)
 	}
 	rows, err := store.ListChannels()
 	if err != nil {
@@ -217,8 +217,8 @@ func TestChannelSeed(t *testing.T) {
 	if st2.Marked != 0 {
 		t.Errorf("已标记过的行不该重复标记，实际 Marked=%d", st2.Marked)
 	}
-	if st2.Removed != 13 {
-		t.Fatalf("应清理 13 条历史行，实际 Removed=%d", st2.Removed)
+	if st2.Removed != 14 {
+		t.Fatalf("应清理 14 条历史行，实际 Removed=%d", st2.Removed)
 	}
 	left, err := store.ListChannels()
 	if err != nil {
@@ -257,7 +257,7 @@ func TestChannelSeed(t *testing.T) {
 func TestChannelSeedDoesNotDedupByProviderID(t *testing.T) {
 	openSeedDB(t)
 
-	// 基线：历史 seed 写下的 13 行（生产路径已不再调用 store.SeedChannels，
+	// 基线：历史 seed 写下的 14 行（生产路径已不再调用 store.SeedChannels，
 	// 这里用它来**构造**那个历史状态 —— 这正是它的保留用途之一）。
 	if _, err := store.SeedChannels(RegistryChannelSeeds()); err != nil {
 		t.Fatalf("构造历史 seed 行: %v", err)
@@ -280,8 +280,8 @@ func TestChannelSeedDoesNotDedupByProviderID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountChannels: %v", err)
 	}
-	if n != 14 {
-		t.Fatalf("两个 workbuddy 实例应共存 ⇒ 14 行，实际 %d（按 provider 去重会把这里压回 13）", n)
+	if n != 15 {
+		t.Fatalf("两个 workbuddy 实例应共存 ⇒ 15 行（14 条清单 + 1 条反例），实际 %d（按 provider 去重会把这里压回 14）", n)
 	}
 
 	// 两条 workbuddy 行的 base_url 必须不同（这就是它们没被并成一行的原因）。
@@ -312,15 +312,15 @@ func TestChannelSeedDoesNotDedupByProviderID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarkRegistrySeedChannels: %v", err)
 	}
-	if marked != 13 {
-		t.Fatalf("只应标记清单里的 13 个身份，实际 %d（多标了就是把'同名不同址'也算进去）", marked)
+	if marked != 14 {
+		t.Fatalf("只应标记清单里的 14 个身份，实际 %d（多标了就是把'同名不同址'也算进去）", marked)
 	}
 	removed, names, err := store.DeleteRegistrySeedChannels()
 	if err != nil {
 		t.Fatalf("DeleteRegistrySeedChannels: %v", err)
 	}
-	if removed != 13 {
-		t.Fatalf("只应删 13 行，实际 %d（names=%v）", removed, names)
+	if removed != 14 {
+		t.Fatalf("只应删 14 行，实际 %d（names=%v）", removed, names)
 	}
 	left, err := store.ListChannels()
 	if err != nil {

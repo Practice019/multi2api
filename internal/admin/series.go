@@ -9,8 +9,11 @@
 package admin
 
 import (
+	"encoding/json"
+
 	"net/http"
 	"time"
+	sqlstore "workbuddy2api/internal/store"
 )
 
 // statsSeriesItem 一个时间桶的聚合。
@@ -61,8 +64,44 @@ func (h *Handler) registerStatsSeries() {
 // 桶按本地时区对齐：24h 用小时桶（24 点），7d 用天桶（7 点）。
 // 空桶补 0（前端补缺与 one-api 的 processTimeSeriesData 同一手法，
 // 但后端直接补齐，前端只画图）。
+// seriesBuckets 铺出 [start, start+buckets*bucket] 的**完整空桶序列**，并返回 ts→下标。
+//
+// # 为什么抽成纯函数（T-389）
+// 桶窗口是"图表右端是否等于现在"的唯一决定者，而它原来内联在 handler 里 ——
+// 要测它就得造一个带 Ring 的 Handler（24h 档会走 statsItems ⇒ nil Ring 直接 panic）。
+// 抽出来之后窗口不变式可以在**纯边界**上钉住。
+func seriesBuckets(start time.Time, bucket time.Duration, buckets int) ([]statsSeriesItem, map[int64]int) {
+	out := make([]statsSeriesItem, 0, buckets+1)
+	idx := make(map[int64]int, buckets+1)
+	for i := 0; i <= buckets; i++ {
+		ts := bucketStart(start.Add(bucket*time.Duration(i)), bucket)
+		idx[ts.Unix()] = i
+		out = append(out, statsSeriesItem{TS: ts.Format(time.RFC3339)})
+	}
+	return out, idx
+}
+
 func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 	span, bucket := seriesSpan(r)
+	// ★ T-386：**天桶档**（7d/30d/365d）优先读日聚合表 log_daily。
+	//
+	// 为什么必须这样：jsonl sink 只保留 7 天（logbuf.DefaultKeepDays），
+	// 所以 365d 热力图过去一直是"前面全是空"。而 log_daily 是**永不裁剪**的日聚合
+	// ⇒ 365 天能画满，且不再依赖明细日志的保留期。
+	//
+	// ⚠ 小时桶（24h）仍走原路径：小时级聚合不进 log_daily（一天一行，装不下小时）。
+	// ⚠ log_daily 为空（刚升级、还没回填完）⇒ 回落到原路径，不报错。
+	if bucket >= 24*time.Hour {
+		if out, ok := h.seriesFromDaily(span, bucket); ok {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"range":  span.String(),
+				"bucket": bucket.String(),
+				"source": "log_daily",
+				"series": out,
+			})
+			return
+		}
+	}
 	items, _, err := h.statsItems()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取日志失败: "+err.Error())
@@ -73,14 +112,8 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 用 bucketStart 而不是 Truncate —— 天桶要按**本地自然日**对齐（见 bucketStart 的注释：F2）。
 	start := bucketStart(now.Add(-span), bucket)
 	buckets := int(span / bucket)
-	out := make([]statsSeriesItem, 0, buckets+1)
 	// 先铺满空桶（保证前端不需要补缺）
-	idx := make(map[int64]int, buckets+1)
-	for i := 0; i <= buckets; i++ {
-		ts := bucketStart(start.Add(bucket*time.Duration(i)), bucket)
-		idx[ts.Unix()] = i
-		out = append(out, statsSeriesItem{TS: ts.Format(time.RFC3339)})
-	}
+	out, idx := seriesBuckets(start, bucket, buckets)
 	for _, e := range items {
 		if e.At.Before(start) {
 			continue
@@ -123,17 +156,86 @@ func (h *Handler) statsSeries(w http.ResponseWriter, r *http.Request) {
 			out[i].CacheMiss += int64(e.CacheMissTokens)
 		}
 	}
-	// 去掉尾部全空桶（活跃窗口之外），保留从 start 起的连续段
-	for len(out) > 0 && out[len(out)-1].Total == 0 {
-		out = out[:len(out)-1]
-	}
+	// ★ T-389：这里原来会"去掉尾部全空桶（活跃窗口之外）" —— 已删除。
+	//
+	// 代价是**图表的右端不再是"现在"**：最近几小时没有请求时，右端会退回最后一个有数据的桶
+	//（主脑实测：21:44 打开"近 24 小时"，最后一格是 12:00，17 小时前；桶数 25 → 8，
+	//  x 轴刻度跟着变，看起来像"时间是 05:00~12:00"）。
+	// 一个趋势图如果右端不是当前时刻，它就是在撒谎 —— 右侧留白远比这轻微。
+	// 前端可以用"最后一个有数据的桶"自己算别的（T-388），但**后端必须如实给出完整窗口**。
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"range":  span.String(),
 		"bucket": bucket.String(),
-		"source": "log",
+		"source": "logfile", // T-386：枚举化 —— log_daily（日聚合）/ logfile（明细回落）
 		"series": out,
 	})
+}
+
+// seriesFromDaily 用 log_daily 生成天桶序列（T-386）。
+//
+// 返回 ok=false 表示"没有日聚合数据可用"（表为空/库没开）⇒ 调用方回落到明细路径。
+// 形状与走明细那条**完全一致**：先铺满空桶，再把有数的桶填上，再去掉尾部空桶
+// （前端按这个形状写死，一个字段都不能变）。
+//
+// ⚠ by_model_out（纯输出 token）在日聚合里**没有**：logs 表没有"输出 token"的日级来源，
+//
+//	而 log_daily 也没有存它 ⇒ 该档下 by_model_out 缺省（omitempty，前端本就按可选处理）。
+func (h *Handler) seriesFromDaily(span, bucket time.Duration) ([]statsSeriesItem, bool) {
+	if sqlstore.DB == nil {
+		return nil, false
+	}
+	now := time.Now()
+	start := bucketStart(now.Add(-span), bucket)
+	buckets := int(span / bucket)
+	out := make([]statsSeriesItem, 0, buckets+1)
+	idx := make(map[string]int, buckets+1)
+	for i := 0; i <= buckets; i++ {
+		ts := bucketStart(start.Add(bucket*time.Duration(i)), bucket)
+		idx[sqlstore.DayOf(ts)] = i
+		out = append(out, statsSeriesItem{TS: ts.Format(time.RFC3339)})
+	}
+	rows, err := sqlstore.LoadLogDaily(sqlstore.DayOf(start), sqlstore.DayOf(now))
+	if err != nil || len(rows) == 0 {
+		return nil, false
+	}
+	for _, d := range rows {
+		i, ok := idx[d.Day]
+		if !ok {
+			continue
+		}
+		out[i].Total = d.Total
+		out[i].OK = d.OK
+		out[i].Fail = d.Fail
+		out[i].Tokens = d.Tokens
+		out[i].CacheHit = d.CacheHit
+		out[i].CacheMiss = d.CacheMiss
+		if d.ByModel != "" {
+			m := map[string]int64{}
+			if json.Unmarshal([]byte(d.ByModel), &m) == nil && len(m) > 0 {
+				out[i].ByModel = m
+			}
+		}
+		// T-387：纯输出 token 也要填（与 ByModel 分开语义：total vs 生成量）
+		if d.ByModelOut != "" {
+			mo := map[string]int64{}
+			if json.Unmarshal([]byte(d.ByModelOut), &mo) == nil && len(mo) > 0 {
+				out[i].ByModelOut = mo
+			}
+		}
+		// seam 6（语义护栏）：cache 两量都为 0 ⇒ 保持 0，**不**假装"命中率 0%"。
+		// 老数据（logs 还没有 cache 列的那些行）就是这种情况；前端据 (cache_hit==0 && cache_miss==0)
+		// 判"该桶无缓存数据、不画点"。这里显式写出来是为了防止后来者"顺手补个 0 也算过"。
+	}
+	// ★ T-394：这里原来有"与明细路径同一收尾：去掉尾部全空桶" —— **已删除**。
+	//
+	// 上一轮（T-389）只删了明细路径那一处，漏了这一处 —— 后果是 365d 的尾桶停在**昨天**，
+	// 而前端 renderHeatmap 用 list[len-1].ts 当"最后一天"往前推 364 天
+	// ⇒ **今天那一格永远不显示**（要等明天才补上）。
+	//
+	// 删掉之后：今天还没产生日志时，最后一格是**空的** —— 那才是 Truth（今天确实还没有请求）。
+	// 右侧留白远比"右端不是现在"轻（与 T-389 对 24h 的判断一致）。
+	return out, true
 }
 
 // seriesSpan 解析 range/bucket 参数；非法回落 24h/hour。

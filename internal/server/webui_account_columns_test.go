@@ -83,7 +83,7 @@ func webuiColumnTitle(t *testing.T, src, id string) string {
 // 两边一分叉，workbuddy 的表头就与后端契约悄悄错位：前端会去要一个
 // 后端没有的列，或漏掉一个后端给了数据的列。
 func TestWebUIDefaultAcctColumnsMatchGatewayContract(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 	if strings.TrimSpace(src) == "" {
 		t.Fatal("webui.html 读到了空内容 —— 守卫失效（fail-open）")
 	}
@@ -107,7 +107,7 @@ func TestWebUIDefaultAcctColumnsMatchGatewayContract(t *testing.T) {
 //
 // 本轮用户要求删掉「熔断」「在途」两列 → 从 11 列变成 9 列（期望值同步更新）。
 func TestWebUIWorkbuddyHeadersAreVerbatim(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 
 	// 期望值**硬编码**（不从 webui.html 里抽）—— 见文件头注释。
 	wantTitles := []string{
@@ -132,7 +132,7 @@ func TestWebUIWorkbuddyHeadersAreVerbatim(t *testing.T) {
 //
 // 少一个定义，回落时那一列的表头就是空的（而 e2e 只比列数与顺序，可能看不出来）。
 func TestWebUIEveryContractColumnHasDefinition(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 	for _, id := range gateway.DefaultAccountColumns() {
 		if got := webuiColumnTitle(t, src, id); strings.TrimSpace(got) == "" {
 			t.Errorf("列 %q 在 ACCT_COLUMN_DEFS 里没有非空 title —— 回落时表头会是空白", id)

@@ -1,0 +1,2461 @@
+/* ══════════════════════════════════════════════════════════════════
+   以下到本文件末尾 MAXIMALISM 块之前，是**页面自有样式**（不是生成物）。
+
+   ⚠ 为什么它在这里而不在 theme-max.css（T-422 记录）：
+     T-409 把 webui.html 的 <style> 块整体外置成了本文件，于是这 63.5KB
+     手写样式的**唯一副本就在这里**。而 theme_sync.js 只替换末尾的
+     MAXIMALISM 块（块内），**不碰这一段** ✓
+   ⇒ 改这一段是**正确落点**，不是"手改生成物"（实测：sync 前后
+     块前 hash b3d70259c844a666 / 块后 a9e3767b4619c61d 均不变）。
+   ⇒ 但改完请顺手跑一次 `node tools/theme_sync.js --check` 确认块内没被带坏。
+
+   📌 待办（不在本轮范围）：把这 63.5KB 提成独立源文件（如 app-shell.css），
+     让 theme_sync 拼「app-shell.css + MAXIMALISM 块」⇒ app.css 才成为纯生成物。
+   ══════════════════════════════════════════════════════════════════ */
+
+  /* 深色主题（默认）。所有颜色都必须走变量 ——
+     渲染函数里写死颜色会让切换主题时出现"局部还是旧配色"的花脸。 */
+  :root, :root[data-theme="dark"]{/* ⚠ 2026-10-21 视觉语言 v2：换 GitHub Dark 色板。
+       选它的理由：这套值被验证过在**高密度数据表**上长时间可读，
+       而且中性（不偏蓝）—— 旧值 #0b0e14/#232b3d 带明显蓝味，
+       会让强调蓝 #4f8cff 显脏。
+       对比度已逐个复算（WCAG 公式，底色 #0D1117）：
+         --fg  #E6EDF3  14.5:1 ✓
+         --dim #8B949E   5.6:1 ✓
+         --acc #539BF5   6.1:1 ✓
+         --ok  #3FB950   7.2:1 ✓
+         --warn#D29922   7.6:1 ✓
+         --err #F85149   5.5:1 ✓
+       ⚠ 胶囊形 .pill.* 是 16% 淡染底，对比度低于直接铺底色 ——
+         上面 6 个值都还有余量（最低 5.5 在 16% 染底上仍 > 4.5）。 */
+    /* 代码块底色 / 遮罩 / 阴影也必须走变量 ——
+       否则浅色主题下 <pre> 会是深色块、模态遮罩会过重、阴影会显成脏边。 */
+    /* 活跃热力图的 5 档色阶 —— **原样抄**参考项目 openViking 的
+       `web-studio/src/styles.css`（它的 `--heatmap-empty` / `--heatmap-level-1..4`）。
+       ⚠⚠ 用户明确要求"颜色不对 严格抄"，所以这 5 个值是**字面量照搬**，
+          不与本项目的 --acc 混色 —— 混出来的蓝阶和它那套 GitHub 绿阶不是一回事。
+       ⚠ 深色主题下档位顺序是**反的**（1 最暗 → 4 最亮）：暗底上"更多"应当更亮，
+          这是它那边的设计，照搬即可。 */
+    --hm0:var(--heat-0);--hm1:var(--heat-1);--hm2:var(--heat-2);--hm3:var(--heat-3);--hm4:var(--heat-4);--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace}
+  /* 浅色主题。**不是把深色取反**：深色那套强调色在浅底上对比度不足，
+     所以这里单独挑了一组更深的色值，正文对比度按 WCAG AA（>= 4.5:1）取值。
+
+     ⚠ 每个色值要按**两种**底色分别验，只算一种会漏（这里曾经就漏了第二种）：
+       ① 文字直接铺主题底色（--bg #f6f7fa）：`.v.ok` / `.notice.ok` 这类；
+       ② 文字铺**自己的 16% 淡染**：.pill.ok/.warn/.err 的底色是
+          `color-mix(in srgb, var(--X) 16%, transparent)` —— 底色被自己的色**提亮**了，
+          所以同一个色值在②里的对比度**低于**①。
+     实算值（①/②；2026-10-19 用 WCAG 公式复核，②按 16% 叠在 #fff 上算）：
+       #1c2333 14.0/—；--dim #5a6478 6.0/—；--acc #1d5fd0 5.6/—（--acc 不进胶囊，无②）；
+       --ok #0c6644 7.0/5.5；--warn #8a4b00 6.8/5.3；--err #b32222 6.6/5.1。
+     ⚠ 旧值 --ok #0f7a54（①5.3 / **②4.3 ✗**）、--warn #a35b00（①5.2 / **②4.2 ✗**）、
+       --err #c02626（②4.55，只高出 0.05，tint 比例一调就翻）—— ②这一栏没过 AA。
+       它一直没被发现，是因为 contrast_e2e 量的是「页面上第一个 .pill」，
+       在账号池里那个位置一直是 .pill.dim（①②都富余）；直到这一版前面多了 .pill.ok，
+       判据才开始量到真身。⇒ 别把"判据绿"当成"这一栏没问题"，
+       判据只量它够得着的那一个元素。 */
+  :root[data-theme="light"]{/* 浅色用 GitHub Light 色板（同样复算过）：
+         --fg  #1F2328  16.8:1 ✓   --dim #59636E  6.4:1 ✓
+         --acc #0969DA   5.8:1 ✓   --ok  #1A7F37  5.9:1 ✓
+         --warn#9A6700   6.3:1 ✓   --err #CF222E  5.9:1 ✓ */
+    /* 浅色下代码块用略深的底、遮罩更淡、阴影更轻 */
+    /* 浅色下的热力图色阶 —— 同样是**字面量照搬** openViking 的浅色那套
+       （`--heatmap-empty:#ebedf0` + L1..L4 由浅到深）。⚠ 与深色那套**不是取反关系**，
+       所以必须像其他颜色一样各写一份，不能在深色值上算。 */
+    --hm0:var(--heat-0);--hm1:var(--heat-1);--hm2:var(--heat-2);--hm3:var(--heat-3);--hm4:var(--heat-4)}
+  /* ⚠⚠ 这一轮按用户要求整体**收紧留白**（「更紧凑、少空白、合理利用空间」）。
+     原则：**只动"每屏都吃"的值**（全局字号/行高、外框内边距、表格行高、卡片内边距），
+     不动配色、不动结构、不动交互 —— 所以风险低、改完立刻能看出来。
+     ⚠ 每一处的"原值"都写在行尾注释里，要回退按原值改回即可。 */
+  *{box-sizing:border-box}
+  /* ⚠⚠ 全局禁用滚动锚定（2026-10-19 照参考项目 Agent2API 的 layout.css:527-531 抄）。
+     它的理由原话：「滚动锚定在这种重建下会把锚点算到被移除的节点上，补偿出一个
+     莫名的滚动位移 —— 用户点一个开关，页面自己跳一大截」。
+     这一条对本项目同样成立：任务调度换了卡片形态后是**整体重建**式重绘
+     （renderJobs 一次 innerHTML 替换），请求日志、账号池也都是这个套路。
+     禁用之后重绘不再改变视口，滚动位置严格保持。 */
+  body{margin:0;background:var(--bg);color:var(--fg);overflow-anchor:none;
+    font:13.5px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+    padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel);
+    position:sticky;top:0;z-index:9}
+  h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
+  h1 small{color:var(--dim);font-weight:400;margin-left:8px;font-size:12px}
+  .spacer{flex:1}
+  .dot{width:8px;height:8px;border-radius:0;background:var(--dim);display:inline-block}
+  .dot.ok{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.bad{background:var(--err);box-shadow:0 0 8px var(--err)}
+  /* 顶栏状态条：一排常驻读数（健康 / 账号 / 上游 / 刷新时刻）。
+     用较窄的等宽字体与细分隔线，避免与主标题抢注意力。 */
+  .topstats{display:flex;align-items:center;gap:0;font-size:12px;color:var(--dim)}
+  .topstats .ts{padding:0 10px;border-left:1px solid var(--line);white-space:nowrap}
+  .topstats .ts:first-child{border-left:0}
+  .topstats .ts b{color:var(--fg);font-weight:600;font-family:var(--font-mono)}
+  .topstats .ts.ok b{color:var(--ok)}
+  .topstats .ts.warn b{color:var(--warn)}
+  .topstats .ts.err b{color:var(--err)}
+  @media (max-width:820px){ .topstats{display:none} }
+  input,select,textarea,button{font:inherit;color:var(--fg);background:var(--panel2);
+    border:1px solid var(--line);border-radius:0;padding:7px 10px;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--acc)}
+  button{cursor:pointer;transition:.15s}
+  button:hover{border-color:var(--acc)}
+  button.primary{background:var(--acc);border-color:var(--acc);color:var(--on-acc);font-weight:600}
+  button.primary:hover{filter:brightness(1.1)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  main{padding:0;display:block}
+  /* 左侧导航 + 内容区
+     ⚠ 收紧（原值：186px 列宽 / gap:18px / max-width:1400px / padding:20px）：
+     · 列宽 186→176（导航是固定文案，176 够）
+     · gap 18→12、padding 20→12 16（外框四周的空白是**每屏都吃**的）
+     · max-width 1400→**1600**：⚠ 这条是"合理利用空间"的关键 ——
+       宽屏上原来内容被限在 1400，两侧白白空掉；放宽后内容区真正铺开。
+       （没有直接去掉限宽：完全铺满会让超宽屏上的表格行过长、视线横跨太大。） */
+  .layout{display:grid;grid-template-columns:168px minmax(0,1fr);gap:12px;
+    max-width:1800px;margin:0 auto;padding:12px 16px}
+/* navcol 侧栏列：把「导航顺序」按钮与 nav 一起收进 grid 的第一列（T-378）。
+   为什么需要这层 wrapper：.layout 是 `168px minmax(0,1fr)` 两列 grid，
+   #nav 与 #content 各占一列；按钮若直接挂在 .layout 下会抢占第二列，
+   把 .content 挤到 row2 col1 ⇒ 内容塌成 168px 宽的窄柱（实测已发生）。
+   ⚠ sticky 从 .sidebar 移到 .navcol：wrapper 才是 grid item，
+     子元素的 sticky 在 wrapper 内没有滚动余量。 */
+.navcol{position:sticky;top:52px;align-self:start;display:flex;flex-direction:column;gap:6px;min-width:0}
+.navcol > .sidebar{position:static;top:auto}
+  .sidebar{position:sticky;top:52px;align-self:start;display:flex;flex-direction:column;gap:2px;
+    background:var(--panel);border:1px solid var(--line);border-radius:0;padding:6px}
+  .sidebar button{text-align:left;background:transparent;border:0;border-radius:0;
+    padding:6px 9px 6px 12px;font-size:12.5px;color:var(--dim);cursor:pointer;transition:.12s;
+    position:relative}
+  .sidebar button:hover{background:var(--panel2);color:var(--fg)}
+  .sidebar button.active{background:var(--acc);color:var(--on-acc);font-weight:600}
+  /* 选中指示条：纯 CSS 画，不引入任何图标字体或 emoji */
+  .sidebar button.active::before{content:'';position:absolute;left:5px;top:50%;transform:translateY(-50%);
+    width:3px;height:15px;border-radius:0;background:var(--cream);opacity:.9}
+  .sidebar .badge{margin-left:8px;font-size:10px;background:var(--panel2);
+    border-radius:0;padding:1px 6px;color:var(--dim)}
+  /* 选中项的徽章：底色跟随主题的强调色，而不是写死白色半透明。
+     写死的 rgba(255,255,255,.22) 是当初把深色配色硬抄进 CSS 的遗留。
+
+     ⚠ 必须写 `var(--acc)`，**不能**写 `currentColor`（CP3b 评审 F1）：
+     本条声明自己带 `color:var(--on-acc)`（原为写死的 `#fff`，T56 一并改成语义变量），
+     而 currentColor 取的就是**本元素的 color** —— 所以它在这里解析成 --on-acc，
+     `color-mix(currentColor 22%)`
+     与旧的 rgba(255,255,255,.22) **渲染上完全等价**，等于没改。
+     （我自己先写成 currentColor，评审实测三态底色全等、指出这是空操作。） */
+  .sidebar button.active .badge{background:color-mix(in srgb, var(--acc) 22%, transparent);color:var(--on-acc)}
+  /* 导航分组：通用 + 每个上游一组。
+     组标题是可点击的折叠开关（纯 CSS 三角形，不用图标字体）。 */
+  .navgroup{display:flex;flex-direction:column;gap:2px}
+  .navgroup + .navgroup{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
+  .navgrouphd{display:flex;align-items:center;gap:6px;background:transparent;border:0;
+    padding:5px 8px 5px 10px;font-size:10.5px;letter-spacing:.5px;color:var(--dim);
+    text-transform:uppercase;cursor:pointer;font-weight:600}
+  .navgrouphd:hover{color:var(--fg)}
+  /* 折叠三角：用 border 画，旋转表示展开/收起 */
+  .navgrouphd::before{content:'';width:0;height:0;flex:none;
+    border-left:4px solid currentColor;border-top:3.5px solid transparent;
+    border-bottom:3.5px solid transparent;transform:rotate(90deg);transition:.15s}
+  .navgroup.collapsed .navgrouphd::before{transform:rotate(0deg)}
+  .navgroup.collapsed .navitems{display:none}
+  .navgrouphd .navgcount{margin-left:auto;font-size:10px;background:var(--panel2);
+    border-radius:0;padding:1px 6px;letter-spacing:0}
+  /* 账号数为 0 时把徽章标红：那是"配了上游却没有可用账号"，需要被看见 */
+  .navgrouphd .navgcount.zero{background:transparent;color:var(--warn);
+    border:1px solid var(--warn)}
+  .navgroup.collapsed .navgrouphd .navgcount{opacity:.6}
+  /* 默认上游标记 */
+  .navgrouphd .navgdef{font-size:9px;border:1px solid var(--line);border-radius:0;
+    padding:0 5px;letter-spacing:0;text-transform:none}
+  .navitems{display:flex;flex-direction:column;gap:2px}
+  /* 契约降级提示：manifest 拉不到时在导航里显示原因，而不是静默少几个面板 */
+  .navdegraded{font-size:11px;line-height:1.5;color:var(--warn);
+    border:1px dashed var(--line);border-radius:0;padding:7px 9px}
+  .content{display:grid;gap:12px;min-width:0}   /* 原 gap:18px */
+  /* 账号表的上游分组标题行：整行跨列，作为该组账号的视觉分组线。
+     用 <tr> 而不是额外表格 —— 保持单一 table 让列宽与主体一致。 */
+  tr.grouprow > td{background:var(--panel2);border-top:1px solid var(--line);
+    padding:7px 12px;font-weight:600;font-size:12px;letter-spacing:.2px}
+  tr.grouprow:first-child > td{border-top:0}
+  tr.grouprow .gname{margin-right:8px}
+  /* 分组行右侧的动作区（T10：添加账号 / 重载 auths）。
+     为什么用 float 而不是 flex：这一格是 <td>，里面已有两个 inline 元素
+     （.gname / .dim），改成 flex 会同时改掉它们的排版。
+     float:right 只把动作区推到右边，其余不受影响。 */
+  tr.grouprow .gacts{float:right;display:inline-flex;align-items:center;gap:6px;font-weight:400}
+  /* 分组行内的小按钮：比面板标题上的按钮更小，因为它在表格行里 */
+  tr.grouprow .gact{padding:2px 8px;font-size:11px;font-weight:400}
+  /* 折叠三角（R3）。与模型面板的 .mcaret **同一套画法**（border 画三角），
+     这样"可折叠"在一处学会、处处认得出。
+     ⚠ 这里刻意**不**复用 .mcaret 这个类名 —— 见 accountGroupRow 的注释：
+     那条"隐藏这一组"的规则是按模型面板的 DOM 形状写的，账号表里没有那些
+     节点，套上去会产出一个"看着折叠了、其实什么都没隐藏"的假折叠。 */
+  .acaret{width:0;height:0;flex:none;
+    border-left:4px solid currentColor;border-top:3.5px solid transparent;
+    border-bottom:3.5px solid transparent;transition:transform .15s}
+  tr.grouprow.collapsed .acaret{transform:rotate(-90deg)}
+  /* 折叠后"这一组藏了几个号"必须仍然看得见 ——
+     否则收起就等于把信息删掉，用户只能靠记忆。 */
+  tr.grouprow .gfolded{display:none;margin-right:8px}
+  tr.grouprow.collapsed .gfolded{display:inline}
+
+  /* ---- 账号池：每上游一张独立的表 ---- */
+  /* 一个 .acctgroup = 该上游的标题 + 它自己的表（自己的表头）。
+     折叠 = 把那张表藏起来（与模型面板 .mgroup.collapsed .chips 同一范式：
+     一条 CSS 规则，不需要把状态流进每一行）。
+     这也顺手消掉了旧的 foster-parenting 死路 —— 那时分组标题与账号行
+     必须在同一张扁平表里，只能靠"逐行写 display"来表达折叠。 */
+  .acctgroups{padding:0}
+  .acctgroup{border-top:1px solid var(--line)}
+  .acctgroup:first-child{border-top:0}
+  .acctgroup > .ghead{background:var(--panel2);padding:7px 12px;display:flex;
+    align-items:center;gap:8px;flex-wrap:wrap}
+  .acctgroup > .ghead .ghead-btn{display:inline-flex;align-items:center;gap:6px;
+    background:none;border:0;color:inherit;font:inherit;font-weight:600;
+    padding:2px 4px;cursor:pointer}
+  .acctgroup > .ghead .acaret{display:inline-block;width:0;height:0;
+    border-left:5px solid currentColor;border-top:4px solid transparent;
+    border-bottom:4px solid transparent;transition:transform .12s;
+    margin-right:2px;opacity:.7}
+  .acctgroup.collapsed > .ghead .acaret{transform:rotate(-90deg)}
+  .acctgroup.collapsed > .gfolded-hint{display:inline}
+  .acctgroup > .gfolded-hint{display:none;font-size:11px}
+  /* ⚠ 选择器必须是 `.acctgroup > .ghead > .gacts`（三层）。
+     我第一版写的是 `.acctgroup > .gacts` —— 而 .gacts 是 .ghead 的**子节点**，
+     不是 .acctgroup 的直接子节点，所以那条规则**从来没有匹配过**，
+     `margin-left:auto` 也就从没生效 → 按钮一直靠左（用户报的现象）。
+
+     HTML 结构（见 accountGroupHTML）：
+       <section class="acctgroup">
+         <div class="ghead">                        ← flex 容器
+           <button class="ghead-btn">…</button>     标题（可点击折叠）
+           <span class="gfolded-hint">…</span>
+           <span class="gacts">…</span>             ← margin-left:auto 推到最右
+         </div>
+         <table>…</table>
+       </section>
+
+     用户要求：分组行右侧那组按钮（＋添加账号 / 批量导入 / 刷新本上游额度 /
+     重载 auths）**全部右对齐**。靠的就是 margin-left:auto ——
+     在 flex 容器里把该元素及其后所有兄弟推到行尾。 */
+  .acctgroup > .ghead > .gacts{margin-left:auto;display:inline-flex;align-items:center;gap:6px}
+  .acctgroup > .ghead > .gacts .gact{padding:2px 8px;font-size:11px;font-weight:400}
+  /* ⚠⚠ 2026-10-19 加 `.acctwrap`（列宽拖拽之后必需）：
+     表格现在是 `min-width` 撑着的，把某列拖宽之后它的实际宽度会**超过卡片**。
+     而 `section{overflow:hidden}`（为了圆角）会**把右边裁掉** ——
+     实测截图里拖宽「上游」列之后，右侧「额度/状态/Token/今日签到/成功/操作」
+     整片消失，连「操作」列里的按钮都点不到。
+     参考的做法是"超出容器的部分交给**整张表横向滚动**"（table-columns.js:414-415
+     「超出容器的部分交给整张表横向滚动（与账号表同一条取舍：表格不压缩列宽）」），
+     所以这里补一个横向滚动容器。
+
+     ⚠⚠ 下面那两条原本是 `.acctgroup > table`（直接子选择器），
+       加一层 div 就**再也匹配不上** —— 尤其 235 那条 `.collapsed > table{display:none}`
+       是**折叠功能本身**，断了就是"点了折叠没反应"。
+       所以改成两条并列，旧结构（如果还有别处直挂 table）继续有效。
+       ⚠ 这个项目在 214-216 行吃过一次同类的亏，那里记着：
+         「⚠ 选择器必须是 `.acctgroup > .ghead > .gacts`（三层）…那条规则**从来没有匹配过**」 */
+  .acctwrap{overflow-x:auto}
+  .acctgroup > table,
+  .acctgroup > .acctwrap > table{width:100%;border-collapse:collapse}
+  .acctgroup.collapsed > table,
+  .acctgroup.collapsed > .acctwrap > table{display:none}
+  /* 账号池主表：固定列宽布局（2026-10-19 照参考项目 Agent2API 移植）。
+     配 acctColgroupHTML 生成的 <colgroup> 用 —— 每个上游一张自己的表，
+     而 `table-layout:auto` 按**内容**算列宽 ⇒ 同一列在不同组里宽度不同，
+     上下摞在一起时竖向是错开的（实测 9 列里 8 列错开，最坏差 717px）。
+     固定布局 + 显式列宽让"列宽"从"每组各自算"变成"一处说了算"。
+
+     ⚠ 弹性列：`nickname` 不给宽度，fixed 布局下它平分剩余空间 —— 这是刻意的，
+       参考项目的原话是「其余列装的是长度固定的控件…一起伸缩只会让同一列在不同
+       窗口下忽宽忽窄，**纵向对齐就失去意义**」，所以全表只留这一个弹性列。
+
+     ⚠⚠ **为什么用了一个独立的修饰类而不是直接写在 `.accttable` 上**：
+       `.accttable` 还被 loomy 的「新手任务」表与「邀请码」表用着
+       （见 loadLoomyTasks / loadLoomyInvite 里的 `<table class="accttable">`），
+       而它们**没有 colgroup** —— 对没有列宽的 fixed 表，浏览器会把宽度平分，
+       那样反而比 auto 更糟。修饰类把影响面钉死在这一处。 */
+  /* ⚠⚠ 2026-10-19 用户要求「所有的表格自适应列宽度」⇒ 这里**撤掉** `table-layout:fixed`。
+     上一步（列宽收归一处）当初是为了让同一列跨分组竖向对齐；但固定的代价是
+     每一列都被钉在**按最长样本估的**宽度上，短内容那几列就白白空着
+     （截图里 workbuddy-intl 的 UID 列占了 300+px，而 workbuddy 那组同样内容窄得多）。
+     用户看过之后要的是"按各自内容自适应"，以自适应为准。
+     ⚠ 撤掉 fixed 之后：
+       · 列宽拖拽**仍然有效** —— 它写的是 `<col>` 与表格 min-width，
+         auto 布局同样认这两个（拖过的列会成为固定宽，其余列按内容算）
+       · 列设置（显隐 / 顺序）不受影响，它只改列集
+       · `.accttable--aligned` 这个类**不删** —— 行高、内边距、单元格截断
+         那几条还挂在它上面；去掉的只是布局算法那一句。 */
+  .accttable--aligned{table-layout:auto}
+  /* 账号表行高收到 40px（2026-10-19 照参考项目 Agent2API 移植，AGENTS 第 5 条
+     「表格固定高度一行、尽可能紧凑少空白」）。
+
+     # 45px 是怎么来的，40px 又是怎么算出来的
+
+     实测（行内按钮 34px、文字行高 18.125px）：
+       行高 = td padding 上下(5+5) + max(文字 18.125, **按钮 34**) + border-bottom 1 = 45px
+     ⇒ **按钮才是决定因素**，文字只占不到一半。而 34px 来自全局那条
+       `input,select,textarea,button{padding:7px 10px}`：7+7 + 18.125 + 1+1 = 34.1px。
+
+     参考项目的落点（page-accounts-table.css:157-161 与 1050-1062）正好凑成 40：
+       「让一行落在一个接近 40px 的高度上 —— 这是「能舒服点到里面的按钮」与
+         「一屏多放几行」之间的折中（卡片时代单卡约 96px）」
+       它的原话：「td 用 7px 内边距 + 行动作按钮定高 25px」⇒ 7+7 + 25 + 1 = 40px。
+
+     ⚠ 为什么按钮能压到 25px：25×25 仍在 WCAG 2.2.8「目标尺寸至少 24×24」之上，
+       而参考项目一行里塞了 4 个按钮（已签到 / 余额 / 设置 / ⋯）也是这个高度。
+     ⚠ 只作用于 `.accttable--aligned`：全局 `th,td{padding:5px 8px}` 与全局按钮
+       尺寸是别的表在用的，改它们会波及全站。 */
+  .accttable--aligned th,.accttable--aligned td{padding:7px 8px}
+  .accttable--aligned tbody button{height:25px;padding:0 8px;font-size:11.5px}
+  /* ⚠ 行的**最小高**统一到 40px。上面那条 padding + 按钮只让"有按钮的行"到 40px，
+     而空上游的**占位行**（「该上游暂无账号」那一行）没有按钮 ⇒ 只有 34px，
+     实测 76 行里就有 2 行是 34/35px、其余 74 行 40px —— 一屏里混着两种行高，
+     正是 AGENTS 第 5 条「固定高度一行」要避免的。
+     `tr` 上的 height 在表格里是**最小高**（不是定高），所以这一条只把矮的抬起来，
+     不会把已经 40px 的行撑高 —— 加完实测分布从 {34:1,35:1,40:74} 变成 {40:76}。 */
+  .accttable--aligned tbody tr{height:40px}
+  /* 操作列的「⋯ 更多」与它的 popover 面板（2026-10-19，用户要求把低频动作收起来）。
+     ⚠ popover 是顶层图层，不受 td 的 overflow:hidden 裁剪 —— 这是选它而不是
+       绝对定位菜单的理由（详见 accountRow 里 opsMore 那段注释）。 */
+  .ops-more{min-width:26px;padding:0 6px}
+  /* ⚠⚠ 2026-10-19 实测抓到的 bug：这里原来写的是 `display:flex`，而
+     **`display` 会覆盖 popover 关闭时 UA 给的 `display:none`** ——
+     于是页面上 12 个「⋯」菜单**全部可见**，且都堆在 (0,0)。
+     用户看到的"账号池左上角有一块黑色东西"就是它（只有账号池才有这些菜单，
+     所以只在切到账号池时出现）。
+     ⇒ `display` 只在**打开态**给：用 `:popover-open`。关闭时回到 UA 的 `display:none`。
+     ⚠ 同类写法检查过一遍：`.colset` 的规则里**没有** display，所以它不受影响
+       （实测关闭态 `display:none` 正常）。 */
+  .ops-menu{position:fixed;margin:0;
+    border:1px solid var(--line);border-radius:0;background:var(--panel);
+    padding:6px;box-shadow:0 8px 24px var(--shadow)}
+  .ops-menu:popover-open{display:flex;gap:6px}
+  .ops-menu button{height:25px;padding:0 8px;font-size:11.5px}
+  /* ⚠ popover 默认带一个半透明遮罩（::backdrop），那会把整页压暗 ——
+     它是一个"看着表格点一个动作"的小浮层，不该有模态感（参考项目同一理由：
+     tsx:541「面板不该有遮罩、不该锁滚动」）。 */
+  .ops-menu::backdrop{background:transparent}
+  /* ── 账号池「列设置」浮层（2026-10-19，照抄参考项目的 table-col-settings）────────
+     参考：ui-islands/src/islands/table-col-settings.tsx:538-634 +
+           ui/css/table-col-settings.css。
+     它的形态是：非模态浮层（无遮罩、不锁滚动），表头「列 / 显示」，行 = ⋮⋮手柄 +
+     列名 + 开关，页脚 = 拖动提示 + 恢复默认。我们零依赖，等价物是：
+       Popover      → 原生 `popover`（顶层图层，不被表格的 overflow 裁掉）
+       Switch       → <input type=checkbox>
+       PopoverContent 的 w-[336px] → .colset{width:336px}
+     对齐那一列**没抄**：参考的对齐是给"内容靠哪边"用的，而我们的列宽已经定死
+     （见 ACCT_COLUMN_DEFS 的 w），数字列天然右对齐，再加一层开关是多余动作。 */
+  .colset-btn{display:inline-flex;align-items:center;gap:4px}
+  .colset{position:fixed;margin:0;width:336px;padding:0;
+    border:1px solid var(--line);border-radius:0;background:var(--panel);
+    box-shadow:0 10px 28px var(--shadow)}
+  /* ⚠ 与 .ops-menu 同一条理由：popover 默认的 ::backdrop 会把整页压暗，
+     而这是「看着表格调表格」的浮层（参考原话 tsx:541「面板不该有遮罩、
+     不该锁滚动」），所以遮罩必须透明。 */
+  .colset::backdrop{background:transparent}
+  .colset-head,.colset-row{display:grid;align-items:center;gap:8px;
+    grid-template-columns:16px minmax(84px,1fr) 40px}
+  .colset-head{padding:9px 12px 7px;border-bottom:1px solid var(--line);
+    font-size:10.5px;font-weight:600;letter-spacing:.05em;color:var(--dim)}
+  .colset-head span:nth-child(2),.colset-head span:nth-child(3){text-align:center}
+  /* 列多时面板不跟着长，行区自己滚（参考 tsx:581 的 min-h-0 overflow-y-auto） */
+  .colset-rows{max-height:min(52vh,420px);overflow-y:auto;padding:4px 12px}
+  .colset-row{padding:5px 0;border-radius:0}
+  .colset-row:hover{background:color-mix(in srgb,var(--fg) 5%,transparent)}
+  .colset-row.dragging{opacity:.5}
+  .colset-grip{cursor:grab;color:var(--dim);opacity:.5;text-align:center;
+    user-select:none;line-height:1}
+  .colset-grip:hover{opacity:1}
+  .colset-grip:active{cursor:grabbing}
+  .colset-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:12px}
+  .colset-row input[type=checkbox]{justify-self:center;margin:0;cursor:pointer}
+  /* ⚠ 最后一列关不掉（照抄参考 tsx:476-479 的理由：
+     「全隐藏之后表格只剩空壳，用户得先想起「是我自己关的」才能从面板里找回来。
+       关不掉比关得掉再懊恼一次好」）—— 视觉上也禁掉，不只是拦逻辑。 */
+  .colset-row input[type=checkbox]:disabled{cursor:not-allowed;opacity:.35}
+  .colset-foot{display:flex;align-items:center;gap:8px;
+    padding:8px 12px 9px;border-top:1px solid var(--line);font-size:11px;color:var(--dim)}
+  .colset-foot .spacer{flex:1}
+  /* ── 列宽拖拽的把手（2026-10-19，照抄参考 ui/table-col-settings.css 的 .col-grip）──
+     贴在 th 右缘、7px 宽，**不占列内容的横向空间**。
+     ⚠ th 必须 `position:relative` 才能让它按 th 定位（下面那条）。
+     ⚠ 只改 `.accttable--aligned` 这一处：`.accttable` 还被 loomy 的两张表复用，
+       而它们没有 colgroup / 没有把手，全局改会波及它们（与列宽收归一处那条
+       经验里的红线是同一条）。 */
+  .accttable--aligned thead th{position:relative}
+  .colgrip{position:absolute;top:0;right:-3px;width:7px;height:100%;
+    cursor:col-resize;z-index:1;user-select:none}
+  .colgrip:hover{background:color-mix(in srgb,var(--acc) 55%,transparent)}
+  .colgrip.active{background:var(--acc)}
+  /* 拖动期间整页游标都是 col-resize，并且**禁掉文本选择** ——
+     否则从把手横向拖过去会把表头文字选成一片蓝色。 */
+  body.colresizing{cursor:col-resize}
+  body.colresizing *{user-select:none !important}
+  /* ⚠ 顶部那个「Δ」定位是把 left/top 交给下面那段 JS 算（见 bindOpsPopover），
+     所以这里**不能**写 inset/top/left —— 写了就把 UA 的默认定位覆盖成 0,0，
+     面板会跑到页面左上角（实测过一次：getBoundingClientRect 返回 [0,0,102,39]）。 */
+  /* ⚠ 这里**不能**有 tr.acctrow.collapsed{display:none} —— 加回来就是把回归带回来。
+     折叠真正隐藏东西的地方是上面那条 `.acctgroup.collapsed > table`（整表隐藏）。
+
+     历史上确实有过一条行级规则（"收起该组的账号行"），当时是扁平单表、边界靠
+     DOM 顺序表达，只能逐行写 display。拆成"每上游一张表"之后它就成了缺陷：
+     accountRow 在**渲染时**给行盖上 collapsed 类，而展开只切 section 的类
+     （纯 DOM 切换、不重绘），于是"渲染时处于折叠态 → 点开"会只剩表头，
+     一直到下一次 5 秒轮询重绘才恢复 —— 看起来就是"展开了但表是空的"。
+
+     行上的 `acctrow collapsed` 现在只是**状态标记**（渲染时记录了该组当时的开合），
+     不承担任何隐藏职责。折叠/展开只由 section 上的类驱动。 */
+  /* 分组标题做成按钮（R3）：原来的 <span> 是**不可聚焦**的，键盘用户
+     和读屏器完全够不着它，折叠写完也只有鼠标能用。
+     ⚠ font-family:var(--font-ui);align-items:center;gap:6px;
+    background:transparent;border:0;padding:0;color:inherit;
+    font:inherit;font-weight:inherit;letter-spacing:inherit;
+    font-family:inherit;cursor:pointer;text-align:left}
+  .ghead-btn:hover{color:var(--acc)}
+  /* 有最近错误的任务行整行标红：扫一眼就知道哪个任务出问题了 */
+  tr.errrow > td{background:color-mix(in srgb, var(--err) 10%, transparent)}
+  /* 通用上游面板（列表 + 领取）的样式。
+     刻意朴素：它要能渲染**任意**上游的任意列表形状，
+     所以不做花哨卡片，只保证"看着整齐、信息不丢"。 */
+  .ghead2{font-size:12px;font-weight:600;color:var(--dim);margin:0 0 8px;
+    letter-spacing:.3px}
+  .ghead2 + .ghead2{margin-top:14px}
+  .glist{display:flex;flex-direction:column;gap:6px}
+  .gitem{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:8px 11px;background:var(--panel2);border-radius:0;font-size:13px}
+  .gitem .gname{font-weight:600}
+  .gitem .gqty{font-size:12px;color:var(--acc);font-weight:600}
+  .gitem .gmeta{flex-basis:100%;font-size:11px;color:var(--dim);
+    font-family:var(--font-mono);word-break:break-all}
+  .gbad{padding:8px 11px;border-radius:0;font-size:12px;color:var(--err);
+    border:1px solid var(--err);background:transparent}
+  .kvs{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:4px 12px}
+  /* 嵌套对象（U2 的关键）：缩进 + 弱化标签，区分顶层与子项 */
+  .kvs.nested{display:grid;grid-template-columns:1fr;padding:6px 10px;background:var(--panel2);border-radius:0;margin-top:4px}
+  .kvs .kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;
+    padding:5px 0;border-bottom:1px solid var(--line)}
+  .kvs .k{color:var(--dim)}
+  .kvs .v{font-weight:600;word-break:break-all;text-align:right}
+  .content > section{display:none}
+  .content > section.active{display:block}
+  @media (max-width:820px){
+    .layout{grid-template-columns:1fr;padding:12px}
+    .sidebar{position:static;flex-direction:row;overflow-x:auto;gap:6px}
+.navcol{position:static;top:auto}
+    .sidebar button{white-space:nowrap;padding:7px 10px;font-size:12px}
+    .sidebar button.active::before{display:none}
+    .sidebar .badge{display:none}
+    /* 窄屏导航变成横向滚动条：分组折叠在横排里会把入口藏得找不着，
+       所以窄屏**强制展开**，组标题收成一个小标签。 */
+    .sidebar{flex-direction:row;align-items:center}
+    .navgroup{flex-direction:row;align-items:center;gap:2px}
+    .navgroup + .navgroup{margin-top:0;padding-top:0;border-top:0;margin-left:6px;padding-left:6px;
+      border-left:1px solid var(--line)}
+    .navgroup.collapsed .navitems{display:flex}
+    .navgrouphd{cursor:default;padding:7px 6px}
+    .navgrouphd::before{display:none}
+    .navgrouphd .navgcount{display:none}
+    .navitems{flex-direction:row;gap:2px}
+  }
+  /* 设置表单 */
+  /* .formgrid 是组内**同一类控件**的网格（复选框组 / 输入框组各自一份）。
+     它与 .fieldgroup 的分工：.fieldgroup 表示「这一堆是同类控件」（纵向堆叠的语义），
+     .formgrid 负责内部的 auto-fit 多列排布。两者分开是为了让「不交叉」由结构保证，
+     而不是靠 DOM 书写顺序碰巧排对 —— 列数随视口在 2-4 之间流动，靠顺序排必然错位。 */
+  .formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+  /* 复选框组：文本短，不需要 250px 那么宽，用更小的最小列宽避免大片空白。
+     210px 是「自动领取奖励（把已完成任务的奖励领回来，唯一让积分到账的动作）」这类
+     长标签在 13px 字号下不至于折成三行的经验下界。 */
+  /* 成长中心自动动作的复选框（U5）
+     ─────────────────────────────────────────────────────────────────
+     原本沿用全局的 `.fieldgroup.checks` 网格（minmax 210px 1fr），
+     但有些 label 文案超过 210px（"自动领取奖励（把已完成任务的奖励领回来，
+     唯一让积分到账的动作）"），导致列间挤压、hint 文字溢出到邻列。
+
+     改：1 行 1 个复选框（grid-template-columns: 1fr），把单行 label 限在
+     一列宽度，hint 与正文独立成行。
+     同时给一个 `.field.chk.stack` 修饰类，限定适用范围，不污染其他
+     复选框组（如「签到 / 保活 / 猫到站领奖」这些 label 短的，不需要单行）。 */
+  .field.chk.stack{display:grid;grid-template-columns:auto 1fr;column-gap:8px;row-gap:2px;align-items:start;padding:4px 0}
+  .field.chk.stack .hint{grid-column:2;font-size:11px;color:var(--dim);margin-top:1px;line-height:1.4}
+  .field.chk.stack label{line-height:1.5;align-self:start}
+  .fieldgroup{display:flex;flex-direction:column;gap:7px}
+  .fieldgroup + .fieldgroup{margin-top:4px}
+  .fieldgroup.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 14px}
+  .field{display:flex;flex-direction:column;gap:5px}
+  .field label{font-size:11px;color:var(--dim);letter-spacing:.3px}
+  .field .hint{font-size:11px;color:var(--dim)}
+  /* ⚠ 文本 / 下拉：撑满所在列（它们的内容长度不可预知）。
+     ⚠ **数字输入框单独给窄宽** —— 用户指出「签历史保留天数」「请求日志保留天数」两个框
+     各占半屏，而值只是 `7`，纯属浪费。数字本来就短（1~4 位）。
+     ⚠ 需要宽数字框的地方用**内联** `style="width:100%"`（如 `akLimit`/`akRpm`）⇒ 内联优先，不受这条影响。
+     ⚠ 2026-10-19 照参考项目 Agent2API 的 page-settings.css 再收一档：120px → 88px
+     并**居中**。它的实测结论（照抄）：步进箭头在 Chromium 里是 hover/focus 时才占位的，
+     右对齐时箭头一出现就把数字整体往左推；**居中的基准是内容盒中心，数字的墨迹位置不动**。
+     本页值域固定是几位数（保留天数 1-3650、超时秒数三位），88px 够且不会随内容跳动。
+     `.field` 只在设置页使用（全文件 8 处全落在 settings 里），所以这条不波及其它面板。 */
+  .field input[type=text],.field select{width:100%}
+  .field input[type=number]{width:88px;max-width:88px;text-align:center;
+    font-variant-numeric:tabular-nums}
+  .field.chk{flex-direction:row;align-items:center;gap:8px}
+  .field.chk input{width:auto}
+  .field.chk label{font-size:13px;color:var(--fg)}
+  fieldset{border:1px solid var(--line);border-radius:0;padding:10px;margin:0 0 10px}
+  legend{font-size:12px;color:var(--dim);padding:0 8px;letter-spacing:.4px}
+  /* 设置页重设计（用户本轮要求）新增的呈现类：生效时机徽章 / 组内子块 / 信息条 */
+  .badge{font-size:11px;font-family:var(--font-ui);padding:1px 7px;border-radius:0;
+    border:1px solid currentColor;margin-left:8px;vertical-align:1px}
+  .badge--hot{color:var(--ok)}          /* 立即生效 */
+  .badge--cold{color:var(--warn)}         /* 重启生效 */
+  .badge--ro{color:var(--dim)}           /* 只读 */
+  .subgroup{margin:16px 0 6px;font-size:12px;font-weight:600;color:var(--fg);
+    padding-top:12px;border-top:1px dashed var(--line)}
+  /* ⚠⚠ 紧跟 legend 的那个 subgroup 不该有上边框与上边距（2026-10-19 修）。
+     原来写的是 `.subgroup:first-child` —— **它从来没生效过**：fieldset 的
+     第一个子元素是 <legend>，`.subgroup` 永远排在第二个及以后，`:first-child`
+     匹配不到，于是那条虚线一直画在分组的头顶上、上面还悬着 16px 空白，
+     看着像"这里少了一块内容"。改用相邻兄弟选择器 `legend + .subgroup`，
+     把"它是这一组的开头"这件事表达准确。
+     ⇒ 这是"选择器语法正确但语义不成立"那类**静默失效**：CSS 不报错，只是不生效，
+       只有看图才看得出来（就是看图时发现的）。 */
+  legend + .subgroup{margin-top:0;padding-top:0;border-top:0}
+  .info-line{font-size:12px;color:var(--dim);line-height:1.7;margin:0 0 12px}
+  /* 开关 + 参数并排成一行（如：启用签到 [9,21]） */
+  .pair{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+  .pair .field{margin:0}
+  .pair input[type=text],.pair input[type=number]{width:120px}
+  .readonly dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:13px}
+  .readonly dt{color:var(--dim);font-size:12px}
+  .readonly dd{margin:0;font-family:var(--font-ui);font-size:12px;word-break:break-all}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:0;overflow:hidden}
+  section>h2{margin:0;padding:8px 14px;font-size:12px;font-weight:650;letter-spacing:.6px;
+    text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--line);
+    display:flex;align-items:center;gap:10px}
+  .body{padding:12px}   /* 原 16px */
+  /* ⚠⚠ 从 flex 改成 grid：**等分铺满**（用户要求"合理利用空间、少空白"）。
+     原来 `flex` + `.card{width:max-content}` ⇒ 每张卡只有内容那么宽，右侧留一大片空
+     （在「成长计划」页实测：6 张卡只占了半行宽）。
+     `auto-fit + minmax(140px,1fr)` ⇒ 按容器宽度**自动决定列数**，且**列等宽铺满**；
+     窄屏时自动退化成两列/一列，不需要写媒体查询。
+     ⚠ 卡片自己的宽度必须交出去（`width:auto`）—— grid 里再写 `max-content`
+       会让它不参与等分，等于没改。 */
+  /* ⚠ 卡片最小宽从 140 收到 118（2026-10-18 看图发现的）：
+     概览卡从 8 张加到 11 张后，140px 只能一行排下 8 张 ⇒ 剩下 3 张被挤到第二行、
+     而第二行右边**一大片空**。118px × 11 + gap ≈ 1340，正好一行铺满。
+     ⚠ 宽度上限仍由 `1fr` 均分决定，所以卡片不会被压扁 —— 只是换行点推迟了。 */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px;align-items:stretch}
+  /* ⚠ `#statsCards2` 是**第二个**卡片网格（模型归属 / 活跃度，见渲染处注释）：
+     两个 `.cards` 各自是一个独立的 grid，`gap` 只在网格**内部**生效 ——
+     两者上下相邻时若不给外边距，两行会**贴在一起**、看不出是两组。
+     所以只补这一条行间距，其余样式与 `.cards` 完全共用（不复制一套）。 */
+  #statsCards2{margin-top:8px}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:8px 12px;
+    display:flex;flex-direction:column;justify-content:center;min-height:52px;width:auto;min-width:0}
+  .card .k{font-size:11px;color:var(--dim);letter-spacing:.4px}
+  /* ⚠ 口径说明的 `?`（照 agent2api 的 TipQ 做法）。纯 CSS 画的圆点，不引图标。 */
+  .card .k .ctip{display:inline-flex;align-items:center;justify-content:center;
+    width:12px;height:12px;margin-left:4px;border-radius:0;font-size:9px;
+    background:color-mix(in srgb,var(--dim) 28%,transparent);color:var(--fg);
+    cursor:help;vertical-align:middle}
+  /* ⚠ 「Top 模型」的值是模型名（`loomy/DeepSeek-V4.1-Flash` 那种很长）——
+     看图发现它把卡撑成两行、把整行都拉高了。⇒ 单行 + 截断，全文放 title。 */
+  .card .v{font-size:21px;font-weight:700;font-family:var(--font-ui);margin-top:2px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+
+  /* ---- 报表区（2026-10-18）· 全部纯 CSS，零图表库 ----
+     ⚠ 这四条是"双栏"的基础：`.duo` 两列，窄屏自动退化成一列（auto-fit 搞定，不用写媒体查询）。 */
+  .duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:10px}
+  .panel{background:var(--panel2);border:1px solid var(--line);border-radius:0;padding:9px 11px;min-width:0}
+  .panelhd{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;
+    letter-spacing:.3px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* Top 榜一行：名称 + 条形 + 值 + 占比。⚠ 条形的宽度由内联 style 给（`width:NN%`）——
+     那是**数据**不是样式，所以不进 CSS。 */
+  .toplist{display:flex;flex-direction:column;gap:3px}
+  .toprow{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1.4fr) auto auto;
+    align-items:center;gap:7px;font-size:12px;line-height:1.5}
+  .toprow .tname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-ui)}
+  /* ⚠ 条形与数值三件套做成**共享类**（`.tbar`/`.tval`/`.tpct`），不加父级前缀 ——
+     因为 Top 榜（`.toprow`）与激活条的"按天用量"（`.hbrow`）**都要用它们**。
+     ⚠ 这里踩过一次：原来写的是 `.toprow .tbar`，`hbrow` 里写上 `tbar` 类名却匹配不到样式
+       ⇒ 页面上**条形整列是空的**（只有日期和数字），而 DOM 里类名一个不少 —— 只能看图发现。 */
+  .tbar{height:9px;background:color-mix(in srgb,var(--dim) 14%,transparent);
+    border-radius:0;overflow:hidden}
+  .tbar i{display:block;height:100%;background:var(--acc);border-radius:0;
+    transition:width .25s}
+  .tval{font-family:var(--font-ui);text-align:right;color:var(--fg)}
+  .tpct{font-family:var(--font-ui);text-align:right;color:var(--dim);min-width:46px}
+  /* 环形图：`conic-gradient` 画出来（⚠ 不用 canvas / 不用 svg 路径 / 不用图表库）。
+     ⚠ 中间那圈"挖空"用伪元素画一个跟底色相同的圆 —— 这是 CSS 环形的标准做法。 */
+  .donutwrap{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .donut{position:relative;width:118px;height:118px;border-radius:0;flex:none}
+  .donut::after{content:'';position:absolute;inset:26px;border-radius:0;background:var(--panel2)}
+  .donut .dc{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;z-index:1}
+  .donut .dc b{font-family:var(--font-ui);font-size:15px}
+  .donut .dc span{font-size:10px;color:var(--dim)}
+  .legend{display:flex;flex-direction:column;gap:3px;font-size:12px;min-width:0;flex:1}
+  .legend .lgrow{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:7px;align-items:center}
+  .legend .sw{width:9px;height:9px;border-radius:0;flex:none}
+  .legend .lgname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* ---- 活跃热力图（365 天）· 照 agent2api 的 GitHub 贡献图布局 ----
+     ⚠ 它的形态要点（我从 `report-charts.ts` 的 `heatmapView` 抄的，不是自己发明的）：
+       · **53 列（周）× 7 行（星期）**，首列补齐到周一、末列不满也留空
+       · 格子**恰好填满可用宽度**（它是按量到的像素算；我们用 `1fr` 纯 CSS 达到同一效果）
+       · 左侧 20px 星期标签（只标一/三/五）· **上方月份标签**
+     ⚠ 我一度擅自把它改成"横条表"（因为 8 天数据铺 365 格几乎全空）——
+       但那是**偏离复用**：它自己也是空着就空着（见它截图），照它的形态才对。
+
+     ⚠⚠ 2026-10-19 按用户要求改了三处（参考项目是 `D:\project_GIT\openViking`，
+        组件 `web-studio/src/routes/home/-components/context-commits-heatmap.tsx`）：
+          1. **格子固定尺寸 + 横向滚动 + 默认滚到最新**
+             原来 `grid-auto-columns:1fr` 把 365 格压进容器宽 ⇒ 格子小到看不清、
+             而"有数据的那几天"挤在最右 ⇒ 一眼看过去**整片是灰的**（用户截图就是这个）。
+             现在照它的 `rectSize=11 / space=3`，并复刻它那段 `useEffect`：
+             布局完成后取**最后一格**的右边界，把容器滚到最右。
+          2. **悬停浮层**（原来只有浏览器原生 `title`，延迟约 1 秒且样式不可控）
+             复刻它 self-drawn tooltip 的意图：日期 + 分项读数；⚠ 复用页面级的
+             `#hoverTip`（见 `.hovertip`），不新造第二套浮层。
+          3. **右侧统计卡**（活跃天数 / 峰值单日 / 最近提交）—— 它右边那一列。
+      */
+  /* ⚠⚠ 尺寸**与参考项目对齐**（2026-10-19 用户要求"宽高和对标项目一致"）。
+     它那边的调用参数是：
+         <HeatMap width={820} height={128} rectSize={11} space={3}
+                  rectProps={{rx:2}} legendCellSize={0} />
+     其中 `rectSize=11` / `space=3` ⇒ **列宽 14px**，53 列 ⇒ 742px 画布；
+     `height=128` ⇒ 7 行 × 14 - 3 = 95px 格阵 + 月份行。
+     ⚠ 我上一轮**只把格子钉死、没钉容器**，于是 53 列固定后容器仍按 `flex:1` 伸缩，
+       两者算不到一起（实测 scrollWidth == clientWidth、滚动永不出现）。
+       这一轮**两边都钉**：格阵 792px（略宽于它的 742px，为的是让 12px 的格子
+       在本项目的字号下更清楚）+ 外层容器同宽。
+     ⚠ `overflow-x:auto` 保留：窄窗口时格阵不会被压扁，而是出现横向滚动。
+     用户同时要求"多的区域随便塞一点数据展示" ⇒ 右侧那一列不再只有三张小卡，
+     还接了一张**近 7 天明细表**（见 renderHeatStats）。 */
+  .heatwrap{display:flex;gap:12px;align-items:flex-start}
+  .heatdays{display:grid;grid-template-rows:repeat(7,1fr);gap:3px;font-size:9px;
+    color:var(--dim);line-height:1;flex:none;width:20px;padding-top:0;
+    /* ⚠ 高度必须等于格阵高度（7 格 × 12px + 6 × 3px 间隙 = 102px）——
+       否则"一/三/五"与行错位（这正是上一轮用户报的"位置不对"）。 */
+    height:102px}
+  .heatdays span:nth-child(1){grid-row:1} /* 一 */
+  .heatdays span:nth-child(2){grid-row:3} /* 三 */
+  .heatdays span:nth-child(3){grid-row:5} /* 五 */
+  /* ⚠⚠ 2026-10-19 改（用户："宽度大一点不要出现滑动条" + "空白太多"）。
+     上一轮为什么把格阵钉成 792px、容器也钉成 792px，注释（520-527）写了：
+       「只把格子钉死、没钉容器，于是 53 列固定后容器仍按 flex:1 伸缩，
+         两者算不到一起（实测 scrollWidth == clientWidth、滚动永不出现）」
+     —— 那是**为了避免"算不到一起"而钉死两处**的妥协。代价是容器钉在 792px，
+     而同级的 `.heatstats` 也是 `flex:1`，于是**两边各分一半**（实测各 636px）：
+     热力图右侧空掉一大片、内容又溢出 159px。
+     ⇒ 正解不是继续加宽那个常数，而是**让两边用同一套自适应**：
+       容器按 flex 分，格阵 `width:100%`，格子 `minmax(0,1fr)` 平分。
+       于是"算不到一起"从根上消失 —— 格子宽度**定义上**就是容器宽度除以列数。
+
+     `flex:1 1 795px` 的 basis 是"53 列 × 12px + 52 × 3px 间隙"这个理想格宽：
+     优先按 795px 起分，有富余就一起变宽（格子 >12px，用户要的"大一点"），
+     空间不够时才压缩（有 minmax 的下限兜着），**任何情况都不出现滚动条**。 */
+  .heatmain{flex:1 1 760px;min-width:0;overflow:hidden}
+  /* ★ T-422：795px → 760px（腾 35px 给右侧明细表）；见下面 .heatstats 的 min-width。 */
+  .heatmonths{display:grid;grid-auto-flow:column;font-size:10px;color:var(--dim);
+    margin-bottom:2px;letter-spacing:.2px}
+  /* ⚠ 列宽只有 15px，而"11月"约 28px ⇒ 必然溢出。**故意让它溢出**：
+     相邻列大多是空的（月份之间隔 4-5 列），所以不会真的撞上；
+     而 `overflow:hidden` 会把文字裁成"1…"，更糟。 */
+  .heatmonths span{white-space:nowrap;overflow:visible}
+  /* ⚠ 格宽**自适应**。历史上这里反复来回，两个方向都被用户否过一次，所以写清楚：
+     · **不能** `grid-auto-columns:1fr` + 格宽跟着列宽 ⇒ 365 格被压进容器宽，
+       格子小到看不清、"有数据的那几天"挤在最右，一眼看过去整片是灰的
+       （见上面 504-510 那段，用户当时的截图就是这个）。
+     · **也不能** 格宽钉死 12px + `width:max-content` ⇒ 53 列算出来 795px，
+       容器只要不是恰好 795px 就必然出现横向滚动条（用户本轮报的
+       "宽度大一点不要出现滑动条"）。
+     ⇒ 两条都不走：**列数固定、格宽由容器宽度平分**（`width:100%` + `minmax(0,1fr)`），
+       格子本身不设宽（`.heatcell{width:auto}`）。这样 53 个格子**定义上**就铺满容器，
+       既不会被压扁、也不会有滚动条，窗口越宽容的格子越大。
+     ⚠⚠ 高度**必须保持 12px 不动** —— `.heatdays` 的 `height:102px`
+        （= 7×12 + 6×3）是按格高算死的，改格高就会让「一/三/五」与行错位
+        （那正是更早一轮用户报过的"位置不对"）。所以格子是"宽一点、略扁"。 */
+  .heatgrid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);
+    grid-auto-columns:minmax(0,1fr);gap:3px;width:100%}
+  .heatcell{width:auto;height:12px;border-radius:0;background:var(--panel2)}
+  /* ⚠ 格子可点（2026-10-18 按用户要求）：左键点一下，那天的用量**留在页面上**。 */
+  .heatcell{cursor:pointer}
+  .heatcell:hover{outline:1px solid color-mix(in srgb,var(--acc) 60%,transparent)}
+  /* ⚠ 选中态要**与环境色不同**才看得出来：用对比色描边 + 外圈，而不是改填充
+     （改填充会与"用量深浅"这套语义打架 —— 用户就没法从颜色读用量了）。 */
+  .heatcell.sel{outline:2px solid var(--fg);outline-offset:1px;box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 35%,transparent)}
+  .heatpick{margin-top:6px;font-size:12px;min-height:18px}
+  .heatcell.blank{background:transparent}
+  /* ⚠⚠ 5 档色阶**直接取主题变量**（值来自参考项目 openViking，见 :root 里的 `--hm0..--hm4`）。
+     2026-10-19 改：原来这里用 `color-mix(in srgb, var(--acc) …)` 调出蓝色阶 ——
+     ⚠ 用户要求"颜色不对 严格抄"，而混色**混不出**它那套特定的 GitHub 绿阶
+     （色相、饱和度都不成比例），所以改成 5 个字面量、按主题各给一份。
+
+     ★ T-389：**lv0（当天无活动）必须与页面底色一致**，不再是"最浅一档颜色"。
+       --hm0 = color-mix(--ok 8%, --bg) ⇒ 在奶油纸底上算出来是 #EBEAD7（灰绿），
+       与 --bg #FFF5E6 **明显不同** ⇒ 369 个"无请求"的格子全都染了色，
+       整片热力图看上去像"满的"（实测：371 格里 369 个 lv0 全带灰绿底）。
+       现在：lv0 = 背景色 + 一道 8% 的极淡内描边 ⇒ 阵形仍在，"空就是空"。
+       ⭐ 判据回到它本来的语义：**有颜色 = 有活动**。
+     ⚠ lv1..lv4 保持原样 —— 它们只在 total>0 时出现，深浅就是用量。 */
+  .heatcell.lv0{
+    background:var(--bg);
+    box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--fg) 8%, transparent);
+  }
+  .heatcell.lv1{background:var(--hm1)}
+  .heatcell.lv2{background:var(--hm2)}
+  .heatcell.lv3{background:var(--hm3)}
+  .heatcell.lv4{background:var(--hm4)}
+  /* ---- 热力图右侧统计卡（2026-10-19 照 openViking 那一列加）----
+     三格：活跃天数 / 峰值单日 / 最近提交。⚠ 数值由 renderHeatmap 现算，
+     与顶部概览卡的「活跃天数」同源（都来自 series 的按天总量），口径一致、不会打架。 */
+  /* ⚠⚠ 右侧从"固定 132px 的三小格"改成**吃掉所有剩余宽度**（2026-10-19 用户要求
+     "多的区域随便塞一点数据展示"）。起因：格子按参考项目钉成固定 792px 之后，
+     右边会空出约 300px —— 只放三行字太浪费，而且那块空白在宽屏上很显眼。
+     现在这里放两层：**三格概览（横排）+ 近 7 天明细表**。 */
+  /* ★ T-422：`flex:1` → `flex:1 1 auto` + **min-width:290px**。
+     右侧明细表是 7 列 + 6px 列间距，实测需要 ≈290px，而原来 flex 只分到 263px
+     ⇒ 相邻列的文字黏在一起（用户报「字显示不全」）。 */
+  .heatstats{flex:1 1 auto;min-width:290px;display:flex;flex-direction:column;gap:8px;
+    padding-left:12px;border-left:1px solid var(--line)}
+  .heatstats .hsrow{display:flex;gap:18px;flex-wrap:wrap}
+  .heatstats .hs{min-width:0}
+  .heatstats .hs .k{font-size:11px;color:var(--dim);line-height:1.3}
+  .heatstats .hs .v{font-size:15px;font-weight:600;line-height:1.35;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .heatstats .hs .v.dim{color:var(--dim);font-weight:400}
+  /* 近 7 天明细表。⚠ 行高钉死 22px —— 照本项目表格惯例（紧凑、且不因内容长度跳动），
+     数字用 `tabular-nums` 等宽对齐，否则每行的小数点会左右游移。 */
+  /* ★ T-422：去掉 max-width:420px —— 宽度交给 flex + min-width 决定，
+     否则宽屏下表格停在 420px、右侧空一片。 */
+  .heatstats .hdet{width:100%;border-collapse:collapse;font-size:11px;
+    font-variant-numeric:tabular-nums;line-height:1}
+  /* ★ T-422：列间加 6px 左内距 —— 原来 `padding:0`，10px 的字黏成一团
+     （用户报「字显示不全」；实测各列 scrollWidth == 宽度，**不是** ellipsis 截断，
+      而是相邻列视觉相连）。 */
+  .heatstats .hdet th{text-align:right;font-weight:400;color:var(--dim);
+    padding:0 0 3px 6px;font-size:10px;border-bottom:1px solid var(--line);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .heatstats .hdet th:first-child{text-align:left}
+  .heatstats .hdet td{height:22px;text-align:right;padding:0 0 0 6px;
+    border-bottom:1px solid var(--line);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .heatstats .hdet td:first-child{text-align:left;color:var(--dim)}
+  /* 第一列左对齐、且它自己就在最左边 ⇒ 不需要左内距（否则整表右移 6px） */
+  .heatstats .hdet th:first-child,
+  .heatstats .hdet td:first-child{padding-left:0}
+  .heatstats .hdet tr:last-child td{border-bottom:0}
+  .heatfoot{display:flex;align-items:center;gap:5px;margin-top:6px;font-size:11px;flex-wrap:wrap}
+  /* ⚠⚠ 图例里的色块**必须显式给尺寸**（2026-10-19 用户反馈"需要有示例图标"）。
+     根因：格阵用的是 `grid-auto-columns:1fr`，每个 `.heatcell` 的宽度**由列宽决定**，
+     自身只声明了 `aspect-ratio:1`。而图例里这些色块是 **flex 子项、没有列宽可继承**
+     ⇒ 宽度算成 0 ⇒ 只剩一个 1px 的竖条（甚至完全看不见）。
+     ⚠ 所以这里把尺寸钉住 —— 与格子的 `aspect-ratio` 并不冲突，是两种上下文各给各的宽度。 */
+  .heatfoot .heatcell{width:11px;height:11px;aspect-ratio:auto;flex:none;min-width:11px}
+  /* ---- 页面级悬停浮层（2026-10-19 抽共享）----
+     ⚠ 为什么用 `position:fixed` 而不是 `absolute`：热力图现在在一个
+       `overflow-x:auto` 的容器里，`absolute` 会被容器**裁剪**掉一半
+       （参考项目那边是用 `createPortal` 挂到 body 绕开同一件事，见它 219-241 行）。
+     ⚠ `pointer-events:none` 必须留着 —— 否则浮层会挡住下面的格子，
+       触发 `mouseout` 把浮层自己关掉（那会变成"一闪一闪"）。
+     ⚠ 视口 clamp 在 JS 里做（见 hoverTipShow），CSS 不参与。 */
+  .hovertip{position:fixed;z-index:60;pointer-events:none;display:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:0;
+    padding:6px 9px;font-size:12px;line-height:1.55;white-space:nowrap;
+    box-shadow:0 6px 18px var(--shadow)}
+  .hovertip .ht-t{font-weight:600;margin-bottom:2px}
+  .hovertip .ht-r{display:flex;gap:10px;justify-content:space-between;color:var(--dim)}
+  .hovertip .ht-r b{color:var(--fg);font-weight:500}
+  /* 缓存命中率趋势（双轴）—— 容器给个高度下限，免得数据没回来时整页往下跳一截
+     （它那边也有同样的顾虑：容器高度下限与 SVG 高度对齐）。 */
+  .cachetrend{height:180px;position:relative}
+  .cachetrend .ax{font-size:10px;fill:var(--dim)}
+  .dailytrend{height:200px;position:relative}
+  .dailytrend .ax{font-size:10px;fill:var(--dim)}
+  /* 消耗分布图（按模型堆叠）—— 同样只补刻度字样式。高度**不**在这里写：
+     它是 #statsTrend 的内联 240px，唯一出处一处写死，免得两处打架。 */
+  .trendchart .ax{font-size:10px;fill:var(--dim)}
+  /* 仪表盘内的子段落：一块一个 h3，块间用分隔线切开。
+     每个子段自己的 .body 有内边距，这里不再重复 padding。 */
+  .boardsec + .boardsec{border-top:1px solid var(--line)}
+  .boardsec h3{margin:0;padding:11px 16px 0;font-size:13px;font-weight:600;
+    letter-spacing:.3px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .boardsec h3 .spacer{flex:1}
+  .boardsec h3 button{font-weight:400}
+  .v.ok{color:var(--ok)} .v.warn{color:var(--warn)} .v.err{color:var(--err)} .v.dim{color:var(--dim)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  /* ⚠ 表格行高是"每屏吃得最多"的一处（一屏十几行 ⇒ padding 减 3px 就省半屏空白）。
+     原值：padding:8px 10px · font-size:13px。 */
+  /* ⚠⚠ 表格按**钉钉 / 飞书表格**那套默认做法（用户点名要的）：
+       ① 高度恒一行 —— `white-space:nowrap`，绝不换行；
+       ② 太宽就截断 —— `overflow:hidden` + `text-overflow:ellipsis`（显示 …）；
+       ③ 悬停看全文 —— 靠每个单元格自己的 `title`（现有渲染里大多已带：uid / 昵称 /
+          错误原因 / 任务 key 等）。⚠ 新写的单元格也要带 title，否则截断就成了信息丢失。
+     `max-width` 是"再宽也不超过"：让**长内容去截断**，而不是把这张表撑得把别的列挤扁。
+     ⚠ 为什么用 max-width 而不是给每列写死宽度：这里的列是**按上游能力位动态生成**的
+       （见 acctColumnsFor），写死宽度会在换上游时错位。 */
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}
+  /* ⚠⚠ **表格单元格里的 `<br>` 一律不换行**（用户要求「高度保证一行」）。
+     ⚠ 为什么必须是 CSS 这一刀：`white-space:nowrap` **拦不住 `<br>`**（那是显式换行），
+     而 `<br>` 散在**多处渲染函数**里 —— 实测抓出 4 处（连登列 2 处、任务明细、
+     猫猫旅行到站时间），我逐个删的时候**连续漏掉两轮**（用户两次指着表说"不符合要求"）。
+     放在这里 ⇒ 之后新写的渲染也自动生效，不需要再记得这件事。
+     ⚠ `br` 隐藏后，它后面那个 span 会**紧贴**前一段文字，所以给个左间距当分隔符用。 */
+  td br,th br{display:none}
+  td br+*,th br+*{margin-left:6px}
+  th{color:var(--dim);font-weight:500;font-size:11px;letter-spacing:.4px;text-transform:uppercase}
+  tr:last-child td{border-bottom:0}
+  td.mono{font-family:var(--font-ui);font-size:12px}
+  .pill{display:inline-block;padding:1px 8px;border-radius:0;font-size:11px;font-weight:600}
+  .pill.ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+  .pill.warn{background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn)}
+  .pill.err{background:color-mix(in srgb,var(--err) 16%,transparent);color:var(--err)}
+  /* 中性胶囊（.pill.dim）：底色是 --dim 的淡染，但**文字用 --fg 而不是 --dim**。
+     ─────────────────────────────────────────────────────────────────
+     原先文字也用 --dim，在浅色主题下实测对比只有 **3.52:1**，低于 WCAG AA
+     要求的 4.5:1（深色主题下够用，所以一直没被发现）。
+     这是"逐面板量对比度"才抓得到的缺陷 —— 只看 body 的背景/前景永远看不到。
+
+     改成 --fg 后：浅色 15.70:1、深色 12.36:1，两套主题都远超 AA，
+     且视觉上仍与原设计一致（底色已提供"这是次要信息"的暗示）。 */
+  .pill.dim{background:color-mix(in srgb,var(--dim) 16%,transparent);color:var(--fg)}
+  /* 按账号分组的任务明细：每组一个小节，节头常驻，切视图时不丢账号上下文 */
+  .ggroup{border-bottom:1px solid var(--line)}
+  .ggroup:last-child{border-bottom:0}
+  .ghead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:9px 16px;background:var(--panel2);border-bottom:1px solid var(--line)}
+  .ghead .gname{font-weight:600;font-size:13px}
+  .ggroup table{width:100%}
+  /* 说明列会很长（最长约 50 个汉字），必须解除全局 nowrap 并限宽换行，
+     否则整张表被撑开、右侧的「操作」按钮要横向滚动才看得到。 */
+  /* ⚠ 这一列原来 `white-space:normal`（会折成多行 ⇒ 那一行比别的高一大截）。
+     用户要求"**保证高度一行**" ⇒ 改成与全表一致的截断规则（悬停看全文靠 title）。 */
+  .ggroup td.gtask{max-width:230px}
+  /* 到期列：内容短（"剩 18 天"/"9-30（剩 19 天）"），不换行以免行高被撑开。
+     颜色语义由内层 span 的 warn/err 类负责，这里只管排版。 */
+  .ggroup td.exp{white-space:nowrap;font-size:12px}
+  /* ⚠ 同上：这一列原来是 `white-space:normal` + `line-height:1.6` ⇒ 最长约 50 个汉字的
+     说明会把行撑成三四行。改成单行截断 —— 与用户说的"太宽可以截断"一致。 */
+  .ggroup td.gdesc{max-width:440px;font-size:12px}
+  .ggroup td.gdesc .howto{color:var(--dim);font-size:11px;margin-top:5px}
+  .chips{display:flex;flex-wrap:wrap;gap:7px}
+  /* 任务进度条：细、无圆角感、与数值同列。
+     光看 "4/5" 不如一眼看出还剩多少，尤其是在一屏十几行任务时。 */
+  .pbar{height:4px;background:var(--panel2);border-radius:0;margin-top:4px;
+    min-width:52px;max-width:96px;overflow:hidden}
+  .pbar i{display:block;height:100%;background:var(--acc);border-radius:0;
+    transition:width .2s}
+  /* 次要按钮：接单是登记动作、不产生收益，视觉上不应与「领取 N 分」争注意力。 */
+  .ghost{background:transparent;border-color:var(--line);color:var(--dim)}
+  .ghost:hover{border-color:var(--acc);color:var(--acc)}  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:0;
+    padding:3px 11px;font-family:var(--font-ui);font-size:12px;cursor:pointer}
+  .chip:hover{border-color:var(--acc);color:var(--acc)}
+  .chip span{color:var(--dim);font-size:11px;margin-left:5px}
+  /* 成本倍率标记：x0 免费 / 低倍率中性 / 高倍率醒目。
+     倍率是"选哪个模型"的决策依据，所以给个比 ctx 更强的视觉权重 ——
+     同时用颜色区分"免费"与"贵"，但**不只靠颜色**（各自带 x 前缀的数字，色盲也可读）。 */
+  .chip .mult{margin-left:6px;padding:1px 6px;border-radius:0;
+    background:color-mix(in srgb,var(--dim) 14%,transparent);color:var(--dim);font-size:11px}
+/* 上下文窗口标注：与倍率标记并列，但视觉更弱 ——
+   它是参考信息，而倍率是选哪个模型的决策依据，两者不该抢同样的注意力。
+   未知时显示 ctx ? 并用虚线边框区分于真实数字（不只靠颜色）。 */
+.chip .ctx{margin-left:6px;padding:1px 5px;border-radius:0;font-size:10.5px;
+  font-variant-numeric:tabular-nums;background:color-mix(in srgb,var(--dim) 16%,transparent);color:var(--dim);
+  border:1px solid var(--line);cursor:help}
+/* 未知上下文（ctx ?）：**虚线与文字承担区分**，颜色不承担（色盲/截图/深浅主题都读得出）。
+   ⚠ 这里原来写死的是 v2 的 slate #94a3b8 —— 在 v3 注入后的奶油底色上是 2.07:1
+   （T56 实测：fg rgb(148,163,184) / bg rgb(255,227,190)，而阈值是 4.5:1）。
+   写死色的病根不在"这个灰不好看"，而在**它不知道主题换了底**：v2 的 slate 是按
+   GitHub 深色底挑的，底一旦变成奶油或墨，它就同时失去可读性（浅色）与语义（深色）。
+   所以改走 --dim：它由两套主题各自定义（浅 #5C4636 / 深 #C7B4A0），
+   与 --panel2 底的比值分别约 7.1:1 与 8.0:1 —— 两侧都过，且不需要再看底色脸色。 */
+.chip .ctx.unknown{background:transparent;color:var(--dim);border-style:dashed}
+  .chip .mult.free{color:var(--ok);background:color-mix(in srgb,var(--ok) 15%,transparent)}
+  .chip .mult.hi{color:var(--warn);background:color-mix(in srgb,var(--warn) 17%,transparent)}
+  /* 「上游未提供倍率」（x无）**没有**自己的样式规则（R4）。
+
+     # 原来有一条 .chip .mult.unknown{border:1px dashed…;background:transparent}
+     #
+     # 它当时的理由是"信息缺失不该与「免费」长得一样"。用户要求统一外观后，
+     # 理由本身仍然成立，但**手段换掉了**：区分改由文字承担 ——
+     # 缺失显示 `x无`，免费显示 `x0`。字面量不同，色盲、深浅主题、
+     # 截图、复制粘贴都读得出，比一条虚线边框更可靠。
+     #
+     # 所以这里**故意不留空的 `.chip .mult.unknown{}` 规则**：
+     # 空规则会让"这里是不是本来有个特例"的疑问一直悬着，下次有人
+     # 顺手往里填东西，就等于把用户否掉的方案又装回来。
+     # `unknown` 作为类名仍由 multTag 输出（它是"这个数是未知的"这个
+     # 事实的载体，styled 与否是另一回事），验计算值的断言也依赖它选取元素。 */
+
+  /* ---- 模型面板的上游分组（T5）----
+     视觉语言与导航分组（.navgrouphd）保持一致：同一个控制台里
+     "可折叠的分组头"应该只有一种样子。 */
+  .mgroup{margin-bottom:14px}
+  .mgroup:last-child{margin-bottom:0}
+  .mgrouphead{display:flex;align-items:center;gap:7px;width:100%;
+    padding:5px 8px;background:transparent;border:0;border-radius:0;
+    font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--dim);
+    text-transform:uppercase;cursor:pointer;font-family:inherit;text-align:left}
+  .mgrouphead:hover{color:var(--fg);background:var(--panel2)}
+  /* 折叠三角：与 .navgrouphd::before 同一套画法（border 画三角） */
+  .mcaret{width:0;height:0;flex:none;
+    border-left:4px solid currentColor;border-top:3.5px solid transparent;
+    border-bottom:3.5px solid transparent;transition:transform .15s}
+  .mgroup.collapsed .mcaret{transform:rotate(-90deg)}
+  /* 折叠时隐藏 chip 区。用 display:none 而不是 height:0 —— 
+     不需要动画，且避免 height 过渡在长列表上的重排开销。 */
+  .mgroup.collapsed .chips{display:none}
+  .mowner{color:var(--fg);text-transform:none;letter-spacing:0}
+  .mcount2{font-weight:400;font-size:10.5px;text-transform:none;letter-spacing:0}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  textarea{width:100%;min-height:74px;resize:vertical;font-family:var(--font-ui);font-size:13px}
+  .key{flex:1;min-width:230px;font-family:var(--font-ui);font-size:12px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:0;padding:13px;
+    margin:12px 0 0;white-space:pre-wrap;word-break:break-word;
+    font-family:var(--font-ui);font-size:12.5px;max-height:340px;overflow:auto}
+  .err{color:var(--err)} .dim{color:var(--dim)}
+
+  /* ---- 任务调度：卡片网格（2026-10-19 照参考项目 Agent2API 移植）----
+     形态抄自 `agent2api/desktop-tauri/ui/css/page-tasks.css`（186 行那份），
+     类名换成本项目的 `job-*`（不照搬它的 `.task-*`：本项目另有上游的 tasks
+     面板，同名会串）。**只抄布局形态，控件不动** —— 我们的任务面板是只读的，
+     所以它那套「开关 / 间隔输入 / 立即执行」一概不抄（理由见面板里的注释）。
+
+     ⚠ 它把第一条「凭证自动维护」整行铺开（LEAD_CARDS=1），是因为**那条有主次**：
+        其余几条是页面自刷新、执行者是页面自己。我们这里的任务没有主次之分，
+        所以**全部进 2 栏网格**，排布反而更整齐 —— 这是一处**刻意不抄**。
+
+     行优先（默认 `grid-auto-flow:row`）+ 卡片被拉伸（grid 默认 stretch）⇒
+     同一行两栏等高，卡片高度参差时也还是对齐的。 */
+  .job-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+    grid-auto-flow:row;gap:8px}
+  /* 窄窗口回落单栏：两栏各剩不到 400px 时，标题行与状态行会被挤成窄柱
+     （中文在窄柱里换行几乎无法阅读）。断点取它那边的 1120px。 */
+  @media (max-width:1120px){ .job-list{grid-template-columns:minmax(0,1fr)} }
+  .job-item{display:flex;flex-direction:column;gap:5px;min-width:0;
+    padding:9px 11px;border:1px solid var(--line);border-radius:0;
+    background:var(--panel2)}
+  /* ⚠ 有任务报错时整张卡描红（原来是"整行标红"，换卡片后同样保留） */
+  .job-item.errrow{border-color:color-mix(in srgb,var(--err) 55%,var(--line));
+    background:color-mix(in srgb,var(--err) 7%,var(--panel2))}
+  .job-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+  .job-name{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 问号（任务说明）：抄参考项目的 `.tip-q` 做法 —— 说明挂在**问号**上而不是
+     整个标题上，这样"哪段文字有解释"是看得见的，不用满处乱悬停试。 */
+  .job-q{flex:none;display:inline-flex;align-items:center;justify-content:center;
+    width:14px;height:14px;border-radius:0;font-size:10px;cursor:help;
+    color:var(--dim);border:1px solid var(--line);background:var(--panel)}
+  .job-q:hover{color:var(--fg);border-color:var(--dim)}
+  /* 状态行：等宽数字（扫一眼就能对齐比较），全角「·」分隔多段事实 */
+  .job-state{color:var(--dim);font-size:11.5px;line-height:1.6;
+    font-variant-numeric:tabular-nums;min-width:0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .job-state .cool{color:var(--warn)}
+  /* 空态/加载态：居中。列表成了 flex/grid 容器后，只有一条内容时会被顶在左上角 */
+  .job-empty{grid-column:1 / -1;text-align:center;color:var(--dim);
+    padding:18px 0;font-size:12px}
+
+  /* ---- 请求日志：grid 表格（2026-10-19 照参考项目 Agent2API 的 page-requests.css 移植）----
+     原来是 `<table>`。换成 div + grid 的理由（三条都是那 20 行旧实现的真实短板）：
+
+       ① **表头粘不住**。日志动辄几十上百行，用 `<table>` + 页面滚动时列名一滚就没了；
+          而且本项目的 `section` 带 `overflow:hidden`（为了圆角），
+          `position:sticky` 在它里面**根本不会生效** —— 所以必须先给日志区
+          一个自己的滚动容器（.logwrap），sticky 的参照物就是它。
+       ② **列宽失控**。`table-layout:auto` 会让长模型名把「模式」「状态」挤成窄柱。
+          参考项目用 `grid-template-columns: var(--req-cols, …)` 定轨，
+          并把用户拖过的列宽写在**容器**上靠继承作用到每一行 ——
+          ⚠ "表格是整体重绘的，变量不需要在渲染后再写一遍"。
+       ③ **窄屏会压没列**。参考的做法是横向滚动而不是压列，
+          但 `min-width` 必须由 `--req-row-min` 给（见下）。
+
+     ⚠⚠ **不要用 `max-content`**（参考项目的原话，抄过来当约束）：
+        "那是按内容的固有宽度算的，同一列在表头（「用量」两个字）和数据行
+        （两行读数）里会算出两个宽度，表头与数据直接错位，而且列被内容撑开
+        就不再触发省略号"。 */
+  .logwrap{max-height:calc(100vh - 260px);overflow:auto;
+    border-top:1px solid var(--line);overflow-anchor:none}
+  /* 表头 + 数据行共用同一套列轨道 —— 一处定义两处用，改列宽不会只改一半 */
+  .log-head,.log-row{display:grid;gap:10px;align-items:center;
+    grid-template-columns:
+      46px 92px minmax(0,1.3fr) 76px 76px minmax(0,1fr)
+      86px 72px 86px 86px;
+    padding:5px 14px;flex:none}
+  /* 表头粘在 .logwrap 顶部。sticky 的参照物是它（不是页面），所以 top 写 0。 */
+  .log-head{position:sticky;top:0;z-index:1;padding-top:7px;padding-bottom:7px;
+    background:var(--panel);border-bottom:1px solid var(--line);
+    color:var(--dim);font-size:11px;font-weight:600;letter-spacing:.02em}
+  .log-row{border-bottom:1px solid var(--line);font-size:12px;
+    font-variant-numeric:tabular-nums}
+  .log-row:last-child{border-bottom:0}
+  .log-row:hover{background:var(--panel2)}
+  /* 失败行的淡底（与「失败」药丸同一信息，但整行一眼可见）。
+     ⚠ 进行中的行**不上色** —— 红底是终态的颜色，进行中的信号交给状态药丸那一格。 */
+  .log-row.failed{background:color-mix(in srgb,var(--err) 7%,transparent)}
+  .log-row.failed:hover{background:color-mix(in srgb,var(--err) 12%,transparent)}
+  /* 数值列右对齐：TTFB / tok / tok/s / 耗时 四列竖向比对数时才齐 */
+  .log-head .r,.log-row .r{text-align:right}
+  /* ⚠ 无值占位：比正文淡一档。参考项目的原话 ——
+     "空着会被当成渲染缺失"，所以占位符必须画出来，只是要弱化。 */
+  .log-none{color:var(--dim)}
+  /* 长文本截断（模型名、UID 都可能很长）。⚠ 只给"内容能任意长"的列用 ——
+     截断的代价是看不见全值，所以必须配 title 把全值挂回去。 */
+  .log-tr{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  .log-empty{padding:22px 14px;text-align:center;color:var(--dim);font-size:12px}
+  /* 窄窗口：列装不下就横向滚动（不压列）。⚠ 行与表头的宽度下限必须一致，
+     否则横向滚到右边时表头会缺一块、行底色只铺半截。 */
+  .log-head,.log-row{min-width:1040px}
+  .tog{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:12px;user-select:none}
+  /* 分段按钮的选中态。历史代码用内联 style 切换，这里补一条 class 规则，
+     供新增的视图切换使用，避免再堆内联样式。 */
+  .tog button.on{background:var(--acc);color:var(--on-acc);font-weight:600}
+  /* 请求日志「状态码卡片」的选中态。
+     画法照抄上一行 .tog button.on（选中 = 强调色底 + 强调色前景），不新造视觉。
+     ⚠ 作用域限定在 #logStatusBar：.chip 同时被模型面板用着（.chips .chip），
+       一条全局 .chip.on 会在那边将来加 on 类时莫名变色 —— 一处样式影响两个面板
+       正是本文件反复踩过的形态。 */
+  #logStatusBar .chip.on{background:var(--acc);color:var(--on-acc);border-color:var(--ink)}
+  .tog input{width:auto;padding:0}
+  /* 可点击复制的内容块：整块可点，鼠标悬停给明确反馈 */
+  .copyable{cursor:pointer;position:relative;transition:.15s}
+  .copyable:hover{border-color:var(--acc);background:var(--panel2)}
+  .copyable:hover .copyhint{opacity:1}
+  .copyhint{float:right;font-size:10px;color:var(--acc);opacity:0;transition:.15s;letter-spacing:.3px}
+  pre.copyable:hover{border-color:var(--acc)}
+  .minibtn{font-size:11px;padding:1px 7px;border-radius:0;margin-left:6px;vertical-align:middle}
+  /* 全局通知区：固定在右上角、挂在 body 下（不在 .content 里），
+     因此不受「面板 section 显隐」影响 —— 这是修复「刷新按钮没提示」的关键。
+     历史实现把提示写进 #taskbar，而 #taskbar 在账号池 section 内，
+     一旦切到别的面板它就落在 display:none 的子树里，提示看不见。 */
+  /* ⚠⚠ z-index 必须是**全站最高**（2026-10-19，照抄参考项目的层级阶梯）。
+     参考项目的阶梯（components.css:367-377 的注释原文）：
+        普通弹窗 30 → 浮层 / 气泡 35 → 确认框 38 → **toast 40**
+     它把**提示放在最上**，并记了教训原话：
+        「所有 .modal-mask 同为 30 —— 同档时谁在上面由 DOM 顺序决定，声明在后面的
+          弹窗会把确认框盖住：用户点了「终止请求」，界面看起来毫无反应，
+          实际确认框在底下等着。」
+     —— 这正是"点了按钮没反应"的经典成因。
+     我们原来是反的：`.notices` 是 50，而 #modal / #infoModal / #akModal 是
+     99 / 100 / 110 ⇒ 只要弹窗开着，所有提示（"已复制"/"签到成功"/出错）都被压在底下，
+     用户同样只会看到"点了没反应"。
+     ⇒ 提到 200，让阶梯变成
+        9(sticky) < 60(hovertip) < 99/100/110(各种弹窗) < **200(提示)**
+       即：**提示永远看得见**，而 hovertip 这种纯展示气泡仍然在弹窗之下（它不该浮在弹窗上）。
+     只改这一条：弹窗自身的值不动，避免动了它们的相互顺序（它们之间也可能有依赖）。 */
+  .notices{position:fixed;top:14px;right:16px;z-index:200;
+    display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+    max-width:min(420px,42vw);pointer-events:none}
+  .notice{pointer-events:auto;background:var(--panel2);border:1px solid var(--line);
+    border-radius:0;padding:9px 13px;font-size:12.5px;line-height:1.6;
+    box-shadow:0 6px 22px var(--shadow);max-height:40vh;overflow:auto;
+    word-break:break-word;white-space:normal}
+  .notice[hidden]{display:none}
+  /* 进度用左边框与提示区分开，一眼能看出「还在跑」和「一条消息」 */
+  .notice.progress{border-left:3px solid var(--acc)}
+  .notice.ok{color:var(--ok)}
+  .notice.bad{color:var(--err)}
+  /* 需要用户照做的指引：左侧黄条 + 稍宽，与瞬时 toast 在视觉上区分开 */
+  .notice.warn{border-left:3px solid var(--warn);color:var(--fg);
+    max-width:min(520px,52vw)}
+  /* 统一分页条：任务历史与请求日志共用同一套控件与语义（见 renderPager）。 */
+  .pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    padding:9px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)}
+  .pager button{font-size:12px;padding:3px 10px}
+  .pager button:disabled{opacity:.45;cursor:not-allowed}
+  .pager .pageno{font-family:var(--font-ui);color:var(--fg)}
+  .pager select{font-size:12px;padding:3px 8px}
+  /* 每页条数改为可输入的数字框：宽度只够放 3 位数字，避免撑开分页条。
+     去掉原生上下箭头，改用键盘上下键 + 直接输入（箭头在小宽度下会挤掉数字位）。 */
+  .pager .pagesize{width:62px;font-size:12px;padding:3px 6px;font-family:var(--font-ui);
+    text-align:center;background:var(--panel2);color:var(--fg);
+    border:1px solid var(--line);border-radius:0}
+  .pager .pagesize:focus{outline:none;border-color:var(--acc)}
+  .pager .pagesize::-webkit-outer-spin-button,
+  .pager .pagesize::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  .pager .pagesize{-moz-appearance:textfield;appearance:textfield}
+  .pager .spacer{flex:1}
+
+  /* 管理钥匙提示块（非本机访问时出现，见 showKeyHint）。
+     视觉语言与 .info-line 一致：淡底 + 左侧强调条，不抢眼但要看得见 ——
+     它是"页面连不上"那一刻用户唯一能照做的东西。 */
+  .keyhint{margin:0 18px 14px;padding:12px 14px;background:var(--panel2);
+    border:1px solid var(--line);border-left:3px solid var(--warn);
+    border-radius:0;font-size:12px;line-height:1.75;color:var(--fg)}
+  .keyhint .khhead{font-weight:600;font-size:13px;margin-bottom:4px}
+  .keyhint ul{margin:8px 0 0;padding-left:18px}
+  .keyhint li{margin:3px 0}
+  .keyhint b{color:var(--acc)}
+/* 顶栏的当前登录者（T7）。紧凑一行、不换行 —— 与顶栏其它元素同一行高，
+   名字过长时省略而不是把整行挤成两行（用户偏好：紧凑少空白）。 */
+.who{display:inline-flex;font-size:12px;max-width:260px;overflow:hidden}
+.who .who-name{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ⚠ 2026-10-19 用户新口径：登录系统收成**单账号管理员**（"只要一个管理员就行了，
+   只要一个账号。用户其实可以不用。"）⇒ 成员模式（`.member-mode` / `.member-banner`）
+   整块删除：没有成员会话，就没有"只留下成员真能看的面板"这件事。
+   删除前的形态（保留在此供对照）：按 data-key 隐藏 accounts/models/jobs/logs/settings
+   五块 + 一条 `#memberBanner` 说明条，靠 `applyMemberMode()` 切换。
+   服务端的成员路由白名单（memberPaths/memberRules）同时被删 —— 前端这边不留
+   "永远为假"的分支（那会误导后来人以为还有成员）。
+   判据在 tests/frontend/verify_single_admin.js 第 5 条：外壳 HTML 里不许有
+   `applyMemberMode` / `member-mode` / 成员模式提示元素。 */
+  /* 性能健康条（2026-10-20 对标 new-api 的一行紧凑条）：成功率 · 平均延迟 · 吞吐 · 每模型成功率。
+     为什么单独一条而不是再塞进指标卡：这四项是**读结论**用的（网关现在健康吗），
+     指标卡是**读总量**用的。混在一排数字里，眼睛还得自己找哪几个代表健康。 */
+  .healthbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    padding:7px 12px;margin:8px 0 0;border:1px solid var(--line);border-radius:0;
+    background:var(--panel);font-size:12px;min-height:34px}
+  .healthbar .hb-title{font-weight:600}
+  .healthbar .hb-item{display:inline-flex;align-items:center;gap:5px;color:var(--dim)}
+  .healthbar .hb-item b{color:var(--fg);font-weight:600}
+  .healthbar .hb-chip{display:inline-flex;align-items:center;gap:4px;padding:0 7px;height:20px;
+    border-radius:0;background:var(--panel2);border:1px solid var(--line);max-width:250px;
+    overflow:hidden;white-space:nowrap}
+  .healthbar .hb-dot{width:6px;height:6px;border-radius:0;flex:0 0 auto}
+  /* ⚠ 2026-10-25 健康条**图形化**（用户原话：「上面的表格看起来很简单」
+     「我喜欢下面的表格柱状图 折线图还有等分线等等」）。
+     取向是**照下面抄**，不是发明新样式：
+       · 成功率 / 分项成功率 → 横向条形，底下垫 0/25/50/75/100% 的等分线
+         （与 #cacheTrend 同一套网格，绘制函数来自共享层 dash-chart.js）；
+       · 近 24 小时成功率 → 迷你折线（同共享层）。
+     ⚠ 上面那两条 .hb-chip / .hb-dot 是旧「纯文字 chip」的样式，现在**没有调用方**了；
+       保留是因为 theme-max.css 里对 .hb-chip 还有一条覆盖（四个页面共用那份主题），
+       删这里会留下"主题里改一个不存在的选择器"的更坏形态。 */
+  .healthbar .hb-k{color:var(--dim)}
+  .healthbar .hb-meter{display:inline-block;width:104px;height:10px;flex:0 0 auto;
+    border-radius:0;overflow:hidden;background:var(--panel2)}
+  .healthbar .hb-meter svg{display:block}
+  .healthbar .hb-spark{display:inline-block;width:150px;height:30px;flex:0 0 auto}
+  .healthbar .hb-spark svg{display:block}
+  /* 分项成功率：flex-basis 100% ⇒ 整组独占一行（与上面那排读数分开） */
+  .healthbar .hb-models{flex:1 1 100%;display:flex;flex-direction:column;gap:2px;margin-top:2px}
+  .healthbar .hb-row{display:flex;align-items:center;gap:8px;height:15px;line-height:15px;font-size:11.5px}
+  .healthbar .hb-mname{flex:0 0 220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+  .healthbar .hb-row .hb-meter{flex:1 1 auto;width:auto;min-width:80px}
+  .healthbar .hb-mval{flex:0 0 52px;text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  /* 刻度行：与条形**同一个盒子**（左名字列 / 中条形列 / 右数值列），所以 0/25/50/75/100%
+     正好落在网格线上。⚠ 刻意用 HTML 文本 + 绝对定位而不是 SVG 文本：SVG 外壳带
+     preserveAspectRatio="none"，文字会被横向拉伸成变形字；而绝对定位的 left:%
+     与 dcGridCols 画线的 (plotW*i/segs) 是同一套百分比 ⇒ 刻度必然压在线上。 */
+  .healthbar .hb-axis{position:relative;flex:1 1 auto;height:12px;min-width:80px;font-size:10px;color:var(--dim)}
+  .healthbar .hb-axis i{position:absolute;top:0;font-style:normal;transform:translateX(-50%)}
+  .healthbar .hb-axis i:first-child{transform:none}
+  .healthbar .hb-axis i:last-child{transform:translateX(-100%)}
+  .healthbar .hb-sparkitem{align-items:center}
+  /* 刻度行：与条形同一行高，不额外占位 */
+  .healthbar .hb-axisrow{height:12px;line-height:12px}
+  .healthbar .hb-axisrow .hb-mval{flex:0 0 52px}
+  /* 次数排行（2026-10-20）：名次 · 名字 · 条形 · 次数 · 成功率，一行一个，固定行高。
+     条形用 div 宽度（零依赖，照本项目已有的榜单做法），宽度以**第一名为基准**，
+     这样"第一名满格"能一眼看出量级的落差。 */
+  .rankrow{display:flex;align-items:center;gap:8px;height:24px;line-height:24px;font-size:12px}
+  .rankrow:hover{background:var(--hover)}
+  .rankidx{width:18px;text-align:right;color:var(--dim);flex:0 0 auto}
+  .rankname{flex:0 0 250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rankbar{flex:1 1 auto;height:8px;background:var(--panel2);border-radius:0;overflow:hidden;min-width:40px}
+  .rankbar i{display:block;height:100%;border-radius:0}
+  .rankval{width:62px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto}
+  .rankrate{width:56px;text-align:right;flex:0 0 auto}
+
+  /* ══════════════════════════════════════════════════════════════════════
+     视觉语言 v2（2026-10-21）
+     
+     取向：参考 new-api 的"中性 + 克制"中后台感（它底下是 Semi Design），
+     但**只借取向，不借组件库** —— 本项目是手写 CSS，引一套组件库要重写全部页面。
+     
+     三条纪律：
+       ① 分层靠 1px 描边，不靠阴影。高密度表格里阴影是噪声。
+       ② 圆角收到两档（6px 控件 / 8px 容器）。原来 4/6/8/10/12/14 六档并存，
+          视觉上不齐 —— 圆角不一致比选错圆角更明显。
+       ③ 强调色只用在「当前选中 / 主按钮 / 链接」，不铺大面积背景。
+     
+     ⚠ 热力图 5 档色阶（--hm0..--hm4）**一个字都不改** ——
+       用户明确要求严格抄参考项目 openViking 的那套 GitHub 绿阶。
+     ⚠ 留白**不放宽** —— 上一轮刚按用户要求收紧过（「更紧凑、少空白」）。
+     ⚠ 不改任何类名、不动 JS —— 这一层只调形态，逻辑零影响。
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* ── 圆角：两档收敛 ──
+     6px 给控件（按钮/输入/胶囊状小标签），8px 给容器（卡片/面板/表格外框）。
+     选 6 而不是 4：4 在 12px 字号旁边显得生硬；8 在大表格里又偏软。
+     选 6 而不是 10：10 是移动端的量级，桌面高密度界面会显得松。 */
+  button:not(.pill):not(.badge),
+  input:not([type="checkbox"]):not([type="radio"]),
+  select, textarea { border-radius:0}
+
+  /* ── focus-visible：键盘用户必须看得见焦点 ──
+     原来只有 :focus 且部分规则被 outline:none 吃掉（输入框自己另画了描边，
+     但按钮、链接、侧栏项没有）。这里统一补一条**只对键盘生效**的环，
+     鼠标点击不会亮 —— 避免视觉噪声。 */
+  :focus-visible { outline:2px solid var(--acc); outline-offset:2px }
+
+  /* ── 表格：靠行分隔线分层，去掉斑马纹的可能性 ──
+     （现在没有斑马纹，这条是**立规矩**：以后加表格不要用 nth-child 条纹，
+      在本项目的信息密度下条纹会和状态色（.pill.ok/.err）打架。） */
+  table tbody tr { border-bottom:1px solid var(--line) }
+  table tbody tr:last-child { border-bottom:0 }
+  table tbody tr:hover { background:var(--panel2) }
+
+  /* ── 次级文字的对比度兜底 ──
+     `.dim` 用得最多（192 处）。深色下 #8B949E 对 #0D1117 是 5.6:1，
+     但铺在 --panel2 (#1C2128) 上是 4.9:1 —— 仍过 AA，但没余量了。
+     所以**不允许** .dim 再叠 opacity（叠了就会跌破 4.5）。 */
+  .dim { opacity:1 }
+/* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
+/* 时间范围口径提示（T-423）。
+   改造前是 h3 里的内联 11px 文字，档位间长度从 0 字跳到 27 字
+   ⇒ 整行布局跟着变（用户报「一直变动占位置太多了」）。
+   现在：14px 圆圈 + title 悬浮说明，无说明时 hidden 不占任何宽度。 */
+.range-note-icon{display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;margin-left:6px;border:1px solid currentColor;border-radius:50%;
+  font-size:10px;font-weight:700;line-height:1;cursor:help;opacity:.55;vertical-align:middle}
+.range-note-icon::before{content:"i"}
+.range-note-icon[hidden]{display:none}
+
+/* ══════════════════════════════════════════════════════════════════════
+   视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
+   风格来源：https://designforai.dev/style/maximalism
+     · 冲突色（粉 / 黄 / 电蓝 / 酸绿 / 橙）+ 奶油纸底 + 墨线
+     · 硬投影（6px 6px 0）+ 零圆角 + 3px 描边
+     · 混合字体：重体展示字（标题）/ 等宽（标签与数字）/ 衬线斜体（副标题）
+     · 颗粒纹理压在整页之上，把互相打架的层粘在一起
+     · 但**必须留一块安静区**：数据表内部不放色块、不放阴影，只留墨线
+
+   # 为什么"外壳吵闹、数据安静"
+   这一页是**高密度中后台**（账号池 76 行、请求日志整屏），maximalism 的
+   全套铺满会把状态胶囊和黄底表头混成一片，读不出哪一行出错。所以：
+     · 吵：页头 / 侧栏 / 分区标题带 / 统计卡 / 按钮 / 空态 / 提示 / 弹窗
+     · 静：表格内容区、表单控件、日志行、代码块
+   配色、字体、描边、纹理一律统一 —— 吵与静是同一套语言的两个音量。
+
+   # 守卫（这些不是注释，是判据，改代码前先读）
+   ① 浅色主题下 body / .card / pre / .sidebar 的**实际亮度必须 > 0.5**，
+      深色 < 0.5（tests/frontend/final_visual.js）。⇒ 统计卡在深色主题下
+      **不能**铺亮色底，只能用深底 + 亮描边。
+   ② .pill / thead th / tbody td / pre 的文字对比度按 WCAG AA >= 4.5:1
+      （tests/frontend/contrast_e2e.js，浅深两套主题都量）。
+      ⇒ 亮色块（粉/黄/酸绿）上的文字一律用墨 #120F0D，不用白色。
+   ③ 侧栏 active 按钮的徽章底色必须是 --acc 的 22% 混合，且**同色相**
+      （tests/frontend/p4_badge_check.js）。⇒ active 按钮的底色只能是 --acc
+      本身，换成墨黑会让 composite 的色相跑掉。
+   ④ 所有 .pill 变体的 border-style 必须一致（verify_account_buttons.js）。
+   ⑤ 无 emoji、无外部资源（gen_ui_manifest.js）；圆角统一 0。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. 调色板：五个冲突色 + 奶油纸 + 墨 ─────────────────────────────── */
+:root{
+  /* 字面色（任何主题下都一样，只当**填充**用，文字仍走语义色） */
+  --ink:#1A1A1A;
+  --cream:#FFF5E6;
+  --pink:#FF3CAC;
+  --yellow:#FFE600;
+  --blue:#2B00FF;
+  --acid:#00FF85;
+  --orange:#FF5C00;
+
+  /* 字体：零外部请求（本仓铁律「Release 下载即用」）。
+     展示字优先 Windows / macOS 自带的超重黑体；中文落到系统黑体，
+     靠 font-weight 900 + 负字距撑出海报感。 */
+  /* ⚠ 顺序有意义（2026-10-21 实测返工）：'Impact' 字形极窄，在 12~15px 上
+     字母会互相咬住（用户截图里 "workbuddy-int" 连成一团、读不出来）。
+     Arial Black 同属超重展示字但**字面更宽**，小字号也能分辨。
+     ⇒ 展示字族一律把 Arial Black 放第一，Impact 只在没有它的机器上兜底。 */
+  --font-display:'Arial Black','Archivo Black','Anton','Impact','Haettenschweiler',
+                 'PingFang SC','Microsoft YaHei',sans-serif;
+  --font-ui:system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+  --font-serif-max:Georgia,'Times New Roman','Songti SC',serif;
+  /* ── 四个字体角色（v3.1 补齐 · 2026-10-26）────────────────────────────
+     ⚠ 本仓铁律：**零外部资源**（tests/frontend/gen_ui_manifest.js 会红）。
+       所以四个角色全部只用**系统自带**字体族 + 逐级降级链，**不引任何字体文件**。
+       即便将来要引字体文件，它也只能是**可选增强**：
+         · 不得成为首屏阻塞 —— 不许有阻塞渲染的 @font-face / <link rel=stylesheet>；
+         · 不得成为离线依赖 —— 裸机 / 内网 / Release 解压即用的场景必须仍然完全可用。
+       降级链的最后一级（sans-serif / monospace / serif）就是这条保证的落点。
+
+       ① --font-display      展示重体：页头 / 分区标题 / 主按钮（已存在，本次不动）
+       ② --font-mono         标签等宽：标签、数字、ID、代码、表头、侧栏项
+       ③ --font-serif-italic 衬线斜体：副标题 / 引文（**斜体由使用点加 font-style:italic**，
+                             变量只负责字族；两者配对出现才有印刷品的味道）
+       ④ --font-hand         手写体：**本任务刻意不实现**，理由见下
+
+     ⚠⚠ 为什么非补 --font-mono 不可（2026-10-26 实测的真缺陷）：
+       此前 CSS 里 **42 处**引用 var(--font-mono)，却**一处也没定义** ——
+       变量区只有 --font-display / --font-ui / --font-serif-max，
+       而页面上另有自己的 --mono（名字对不上，也不在这份真相里）。
+       后果是**静默的**：整条 font-family 声明失效 ⇒ 所有等宽标签实际继承父字体
+       （中文落回系统黑体、数字变成比例字）⇒ 标签列对不齐、数字位数不齐。
+       CSS 不会为此报任何错，对比度门禁也照样全绿（那是**颜色**的判据）。
+       这类「没定义就静默失效」只能靠「定义处与引用处同在一份真相里」来根除。 */
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,'Cascadia Mono',
+              'DejaVu Sans Mono',monospace;
+  --font-serif-italic:var(--font-serif-max);
+  /* ④ 手写体（--font-hand）：**不实现** —— 这是决定，不是遗漏。
+      规范里的 Caveat 手写体是**拉丁文**手写体；本仓界面绝大多数是中文，
+      而 Windows / macOS **都没有可信的中文手写系统字体**（华文行楷 / 楷体在各机器上
+      有无不定、字重与字面差异极大）。给一条「只有拉丁字母生效、中文静默落回黑体」
+      的手写链比不做**更糟**：同一行标题里中英文字体不一致，看起来像渲染坏了，
+      而不是像手写。⇒ 需要手写感时用已有的衬线斜体（--font-serif-italic + italic）
+      或展示重体承担，不单开一个必然半失效的角色。 */
+
+  /* 硬投影与描边（maximalism 的签名） */
+  --hard:#1A1A1A;
+  --shadow-hard:6px 6px 0 var(--hard);
+  --shadow-hard-sm:3px 3px 0 var(--hard);
+  --edge:2px solid var(--ink);
+  --edge-3:3px solid var(--ink);
+
+  /* 反色对（hover / active 用）：亮主题反成墨底奶油字，暗主题反成黄底墨字 */
+  --invert-bg:#1A1A1A;
+  --invert-fg:#FFF5E6;
+
+  /* 语义角色 —— 浅色（奶油纸）。对比度均按 #FFF5E6 复算：
+     --fg 16:1 · --dim 8.1:1 · --acc 7.6:1 · --ok 5.6:1 · --warn 6.1:1 · --err 5.5:1 */
+  --bg:#FFF5E6;
+  --panel:#FFEFD8;
+  --panel2:#FFE3BE;
+  --line:#1A1A1A;
+  --fg:#1A1A1A;
+  --dim:#5C4636;
+  --acc:#2B00FF;
+  --on-acc:#FFF5E6;
+  --ok:#0A6B2E;
+  --warn:#A83600;
+  --err:#C6004B;
+  --code-bg:#FFF0CF;
+  --overlay:rgba(26,26,26,.56);
+  --shadow:rgba(26,26,26,.28);
+
+  /* 分区标题带（浅色 = 黄底墨字） */
+  --band-bg:#FFE600;
+  --band-fg:#120F0D;
+  --band-line:#1A1A1A;
+
+  /* 统计卡：浅色下四张卡四种底色（吵），深色下改成深底 + 亮描边（守卫①） */
+  --card1:#FFE600;
+  --card2:#00FF85;
+  --card3:#FFF5E6;
+  --card4:#FF3CAC;
+  --card-border1:#1A1A1A;
+  --card-border2:#1A1A1A;
+  --card-border3:#1A1A1A;
+  --card-border4:#1A1A1A;
+
+  /* 登录页 / 渠道页的旧变量名 —— 两个页面各有一套，在这里收口成别名，
+     免得同一个"面板底色"在三个页面里各说各话。 */
+  --card:var(--panel);
+  --muted:var(--dim);
+  --accent:var(--acc);
+  --accent-fg:#FFF5E6;
+  --input-bg:var(--bg);
+  --err-bg:#FFDDE6;
+  --err-fg:#9E0033;
+  --err-line:#1A1A1A;
+  --radius:0;
+  --hover:var(--panel2);
+}
+
+/* 暗色（系统偏好）—— 只对**没有 data-theme** 的页面生效（登录页 / 渠道页）。
+   控制台由 <head> 里的同步脚本显式写 data-theme，所以永远不会命中这一段。 */
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme]){
+    --bg:#120F0D;
+    --panel:#1C1714;
+    --panel2:#271F1A;
+    --line:#FFE600;
+    --fg:#FFF5E6;
+    --dim:#C7B4A0;      /* 9.5:1 on #120F0D */
+    --acc:#FF3CAC;      /* 5.9:1 */
+    --on-acc:#120F0D;
+    --ok:#00FF85;
+    --warn:#FFD400;
+    --err:#FF5470;      /* 6.1:1 */
+    --code-bg:#0B0908;
+    --overlay:rgba(0,0,0,.74);
+    --shadow:rgba(0,0,0,.62);
+    --hard:#FF3CAC;
+    --invert-bg:#FFE600;
+    --invert-fg:#120F0D;
+    --band-bg:#FF3CAC;
+    --band-fg:#120F0D;
+    --card1:#271F1A; --card2:#1C1714; --card3:#271F1A; --card4:#1C1714;
+    --card-border1:#FFE600; --card-border2:#00FF85;
+    --card-border3:#FF3CAC; --card-border4:#2B00FF;
+    --card:var(--panel);
+    --muted:var(--dim);
+    --accent:var(--acc);
+    --accent-fg:#120F0D;
+    --input-bg:#0B0908;
+    --err-bg:#2A0A12;
+    --err-fg:#FFB4C2;
+    --err-line:#FFE600;
+    --hover:var(--panel2);
+  }
+}
+/* 控制台：显式 data-theme 优先（与上一段同样的值，不改口径） */
+:root[data-theme="dark"]{
+  --bg:#120F0D;
+  --panel:#1C1714;
+  --panel2:#271F1A;
+  --line:#FFE600;
+  --fg:#FFF5E6;
+  --dim:#C7B4A0;
+  --acc:#FF3CAC;
+  --on-acc:#120F0D;
+  --ok:#00FF85;
+  --warn:#FFD400;
+  --err:#FF5470;
+  --code-bg:#0B0908;
+  --overlay:rgba(0,0,0,.74);
+  --shadow:rgba(0,0,0,.62);
+  --hard:#FF3CAC;
+  --invert-bg:#FFE600;
+  --invert-fg:#120F0D;
+  --band-bg:#FF3CAC;
+  --band-fg:#120F0D;
+  --card1:#271F1A; --card2:#1C1714; --card3:#271F1A; --card4:#1C1714;
+  --card-border1:#FFE600; --card-border2:#00FF85;
+  --card-border3:#FF3CAC; --card-border4:#2B00FF;
+  --card:var(--panel);
+  --muted:var(--dim);
+  --accent:var(--acc);
+  --accent-fg:#120F0D;
+  --input-bg:#0B0908;
+  --err-bg:#2A0A12;
+  --err-fg:#FFB4C2;
+  --err-line:#FFE600;
+  --hover:var(--panel2);
+}
+/* 控制台：显式 light（覆盖文件前面那套 GitHub Light 值） */
+:root[data-theme="light"]{
+  --bg:#FFF5E6;
+  --panel:#FFEFD8;
+  --panel2:#FFE3BE;
+  --line:#1A1A1A;
+  --fg:#1A1A1A;
+  --dim:#5C4636;
+  --acc:#2B00FF;
+  --on-acc:#FFF5E6;
+  --ok:#0A6B2E;
+  --warn:#A83600;
+  --err:#C6004B;
+  --code-bg:#FFF0CF;
+  --overlay:rgba(26,26,26,.56);
+  --shadow:rgba(26,26,26,.28);
+  --hard:#1A1A1A;
+  --invert-bg:#1A1A1A;
+  --invert-fg:#FFF5E6;
+  --band-bg:#FFE600;
+  --band-fg:#120F0D;
+  --card1:#FFE600; --card2:#00FF85; --card3:#FFF5E6; --card4:#FF3CAC;
+  --card-border1:#1A1A1A; --card-border2:#1A1A1A;
+  --card-border3:#1A1A1A; --card-border4:#1A1A1A;
+  --card:var(--panel);
+  --muted:var(--dim);
+  --accent:var(--acc);
+  --accent-fg:#FFF5E6;
+  --input-bg:var(--bg);
+  --err-bg:#FFDDE6;
+  --err-fg:#9E0033;
+  --err-line:#1A1A1A;
+  --hover:var(--panel2);
+}
+
+/* ── 2. 字体与标题层级 ───────────────────────────────────────────────── */
+body{
+  font-family:var(--font-ui);
+  background-image:none;
+}
+/* 颗粒纹理：压在整页之上（pointer-events:none），把互相打架的色块粘成一张纸。
+   z-index 取 50 —— 在内容之上、通知区（200）与原生 popover 之下，
+   于是提示仍然清晰可读。mix-blend-mode 让暗底上不糊。 */
+body::after{
+  content:'';
+  position:fixed;
+  inset:0;
+  z-index:50;
+  pointer-events:none;
+  opacity:.14;
+  mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme]) body::after{opacity:.10;mix-blend-mode:screen}
+}
+:root[data-theme="dark"] body::after{opacity:.10;mix-blend-mode:screen}
+
+h1{
+  font-family:var(--font-display);
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:-.02em;
+}
+h2,h3{
+  font-family:var(--font-display);
+  font-weight:900;
+  letter-spacing:-.01em;
+}
+
+/* ── 3. 报头：贴纸 + 跑马灯 ──────────────────────────────────────────── */
+header{
+  border-bottom:3px solid var(--ink);
+  background:var(--panel);
+  box-shadow:0 5px 0 var(--hard);
+}
+header h1{font-size:20px;line-height:1.1}
+header h1 small{
+  display:inline-block;
+  margin-left:8px;
+  padding:1px 6px;
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:#120F0D;
+  background:var(--pink);
+  border:2px solid var(--ink);
+  vertical-align:3px;
+}
+/* 贴纸：maximalism 的签名元素 —— 旋转 -6deg、硬投影、亮底墨字。
+   放在页头的弹性流里（不用绝对定位），所以永远不会盖住读数条。 */
+.maxsticker{
+  display:inline-flex;
+  align-items:center;
+  padding:2px 9px;
+  transform:rotate(-6deg);
+  background:var(--yellow);
+  color:#120F0D;
+  border:2px solid var(--ink);
+  box-shadow:3px 3px 0 var(--hard);
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+/* 跑马灯：整幅黄带 + 墨字 + 3px 墨线，40s 线性循环。
+   两段相同文本 ⇒ translateX(-50%) 正好接上（无缝）。
+   hover 暂停、reduced-motion 停止 —— 动效只给"重复元素"。 */
+.maxmarq{
+  display:flex;
+  align-items:center;
+  overflow:hidden;
+  height:26px;
+  background:var(--yellow);
+  color:#120F0D;
+  border-bottom:3px solid var(--ink);
+  font-family:var(--font-display);
+  font-size:13px;
+  letter-spacing:.18em;
+  text-transform:uppercase;
+  white-space:nowrap;
+}
+.maxmarq-track{
+  display:flex;
+  flex:none;
+  animation:wb-marq 46s linear infinite;
+}
+.maxmarq-track span{
+  flex:none;
+  padding:0 24px;
+}
+@keyframes wb-marq{
+  from{transform:translateX(0)}
+  to{transform:translateX(-50%)}
+}
+.maxmarq:hover .maxmarq-track{animation-play-state:paused}
+@media (prefers-reduced-motion: reduce){
+  .maxmarq-track{animation:none}
+  *{transition:none !important;animation:none !important}
+}
+
+/* 页头读数条：等宽、上排、墨线分隔 */
+.topstats .ts{
+  border-left:2px solid var(--line);
+  font-family:var(--font-mono);
+  font-size:11px;
+  letter-spacing:.02em;
+}
+.topstats .ts b{font-family:var(--font-mono);font-weight:700}
+.dot{border:2px solid var(--ink)}
+.who{font-family:var(--font-mono);font-size:11px}
+
+/* ── 4. 侧栏（导航）───────────────────────────────────────────────────── */
+.layout{gap:14px}
+.sidebar,
+.nav{ /* v3.1 别名 + .nav（与控制台 <nav id=nav> 同语义，换类名即可复用整套侧栏） */
+  border:3px solid var(--ink);
+  background:var(--panel);
+  box-shadow:6px 6px 0 var(--hard);
+  padding:9px 7px;
+  gap:1px;
+}
+.sidebar button,
+.nav button{ /* v3.1 别名 */
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:var(--fg);
+  font-family:var(--font-mono);
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:.02em;
+  padding:5px 9px 5px 13px;
+}
+.sidebar button:hover,
+.nav button:hover{ /* v3.1 别名 */
+  background:var(--panel2);
+  color:var(--fg);
+  box-shadow:inset 3px 0 0 var(--pink);
+}
+/* 守卫③：active 底色只能是 --acc 本身（徽章复合色的色相靠它） */
+.sidebar button.active,
+.nav button.active{ /* v3.1 别名 */
+  background:var(--acc);
+  color:var(--on-acc);
+  box-shadow:3px 3px 0 var(--hard);
+}
+.sidebar button.active::before,
+.nav button.active::before{ /* v3.1 别名 */
+  content:'';
+  position:absolute;
+  left:0;
+  top:0;
+  bottom:0;
+  width:4px;
+  height:auto;
+  transform:none;
+  background:var(--yellow);
+  border-radius:0;
+}
+.sidebar .badge,
+.nav .badge{ /* v3.1 别名 */
+  margin-left:8px;
+  padding:0 5px;
+  font-family:var(--font-mono);
+  font-size:10px;
+  color:var(--invert-fg);
+  background:var(--invert-bg);
+  border:0;
+  border-radius:0;
+}
+.sidebar button.active .badge,
+.nav button.active .badge{ /* v3.1 别名 */
+  color:#120F0D;
+  background:color-mix(in srgb, var(--acc) 22%, transparent);
+  border:2px solid var(--ink);
+  border-radius:0;
+}
+.navgroup + .navgroup{
+  margin-top:9px;
+  padding-top:9px;
+  border-top:3px solid var(--ink);
+}
+.navgrouphd{
+  padding:3px 7px;
+  background:var(--pink);
+  color:#120F0D;
+  border:0;
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+}
+.navgrouphd:hover{color:#120F0D}
+.navgrouphd .navgcount{
+  background:var(--ink);
+  color:var(--cream);
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-weight:700;
+}
+.navgrouphd .navgcount.zero{background:transparent;color:#120F0D}
+.navgrouphd .navgdef{
+  border:2px solid var(--ink);
+  border-radius:0;
+  font-family:var(--font-mono);
+  letter-spacing:.08em;
+}
+.navitems{gap:1px}
+.navitems button{border-bottom:1px solid color-mix(in srgb, var(--fg) 22%, transparent)}
+
+/* ── 5. 页面容器与分区 ──────────────────────────────────────────────── */
+.content{gap:14px}
+section{
+  border:3px solid var(--ink);
+  border-radius:0;
+  background:var(--panel);
+}
+/* 分区标题带：maximalism 里最省力的"吵"——一条实色横带。
+   浅色黄底墨字（13.5:1），暗色粉底墨字（5.4:1）。 */
+section > h2{
+  padding:6px 14px;
+  background:var(--band-bg);
+  color:var(--band-fg);
+  border-bottom:3px solid var(--band-line);
+  font-family:var(--font-display);
+  font-size:14px;
+  font-weight:900;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+.boardsec + .boardsec{border-top:3px solid var(--ink)}
+.boardsec h3{
+  padding:14px 16px 2px;
+  font-size:19px;
+  letter-spacing:-.01em;
+}
+.boardsec h3 button{
+  font-family:var(--font-mono);
+  font-size:11px;
+  box-shadow:var(--shadow-hard-sm);
+}
+.body{padding:12px 14px}
+
+/* ── 6. 统计卡 / 面板 ──────────────────────────────────────────────── */
+/* 统计卡：只有**仪表盘那组**（.cards）铺亮底色。别把 .card 一律染色 ——
+   登录页的那张卡也叫 .card，一律染色会让登录卡变成黄块（实测踩过）。 */
+.card{
+  background:var(--panel2);
+  border:2px solid var(--ink);
+  border-radius:0;
+  box-shadow:4px 4px 0 var(--hard);
+}
+.cards .card{background:var(--card1);border-color:var(--card-border1)}
+.cards .card:nth-child(4n+2){background:var(--card2);border-color:var(--card-border2)}
+.cards .card:nth-child(4n+3){background:var(--card3);border-color:var(--card-border3)}
+.cards .card:nth-child(4n+4){background:var(--card4);border-color:var(--card-border4)}
+.card .k{
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--fg);
+}
+/* 数字用等宽 + 负字距，是这一层的"展示字" */
+.card .v{
+  font-family:var(--font-mono);
+  font-size:21px;
+  font-weight:700;
+  letter-spacing:-.03em;
+}
+.card .k .ctip{
+  background:var(--ink);
+  color:var(--cream);
+  border-radius:0;
+}
+.panel,.gitem,.job-item,.healthbar,.keyhint,.notice,.hovertip,.ops-menu,.colset{
+  border-radius:0;
+}
+.panel,.gitem,.job-item{
+  border:2px solid var(--ink);
+  background:var(--panel2);
+}
+.job-item{box-shadow:4px 4px 0 var(--hard)}
+.panelhd,.ghead2,.mgrouphead,.log-head{
+  font-family:var(--font-mono);
+  font-weight:700;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+/* 分组头：**四种底色轮转**。账号池一屏有 12 个上游 ⇒ 同一个粉色重复 12 遍
+   会糊成一片、反而分不出组；轮转既够吵，又让"换了一组"一眼可见。
+   墨字在所有四种亮底上都 >= 5.4:1。 */
+.ghead{
+  background:var(--pink);
+  color:#120F0D;
+  border-top:3px solid var(--ink);
+  border-bottom:2px solid var(--ink);
+}
+/* 分组头：四种亮底轮转（粉/黄/酸绿/橙）+ 墨字。
+   ⚠ 这是用户明确要的观感（"黑字白底"），别再改成墨底白字 ——
+   2026-10-21 试过一版"墨底白字 + 彩色边条"，被用户否掉并要求还原。 */
+.acctgroup:nth-child(4n+2) > .ghead{background:var(--yellow)}
+.acctgroup:nth-child(4n+3) > .ghead{background:var(--acid)}
+.acctgroup:nth-child(4n+4) > .ghead{background:var(--orange)}
+.ghead .gname{font-family:var(--font-display);font-size:13px;letter-spacing:.02em}
+.ghead .gact{
+  background:var(--cream);
+  color:#120F0D;
+  border:2px solid var(--ink);
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-size:11px;
+  font-weight:700;
+  box-shadow:2px 2px 0 var(--hard);
+}
+.ghead .gact:hover{background:var(--ink);color:var(--cream)}
+.tbar,.pbar,.rankbar{background:color-mix(in srgb, var(--fg) 16%, transparent);border-radius:0}
+.tbar i,.pbar i,.rankbar i{border-radius:0;background:var(--acc)}
+.heatcell{border-radius:0}
+
+/* ── 7. 控件 ───────────────────────────────────────────────────────── */
+button,input,select,textarea{border-radius:0}
+input,select,textarea,
+.input{ /* v3.1 别名 + .input */
+  border:2px solid var(--line);
+  background:var(--panel2);
+  color:var(--fg);
+}
+input:focus,select:focus,textarea:focus,
+.input:focus{ /* v3.1 别名 */
+  border-color:var(--acc);
+  outline:3px solid var(--acc);
+  outline-offset:1px;
+}
+input[type="checkbox"],input[type="radio"]{
+  accent-color:var(--acc);
+  width:14px;
+  height:14px;
+}
+button,
+.btn,
+.btn--secondary{ /* v3.1 别名：.btn=基按钮；.btn--secondary 显式表意「非主按钮」 */
+  border:2px solid var(--line);
+  background:var(--panel2);
+  color:var(--fg);
+  font-family:var(--font-mono);
+  font-weight:700;
+}
+button:hover:not(:disabled),
+.btn:hover:not(:disabled),
+.btn--secondary:hover:not(:disabled){ /* v3.1 别名 */
+  background:var(--invert-bg);
+  color:var(--invert-fg);
+  border-color:var(--line);
+}
+button:active:not(:disabled),
+.btn:active:not(:disabled){transform:translate(1px,1px)} /* v3.1 别名 */
+button.primary,
+.btn--primary{ /* v3.1 别名：与 .btn--secondary 配对的另一半 */
+  background:var(--acc);
+  border-color:var(--ink);
+  color:var(--on-acc);
+  font-family:var(--font-display);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  box-shadow:3px 3px 0 var(--hard);
+}
+button.primary:hover:not(:disabled){
+  background:var(--acc);
+  color:var(--on-acc);
+  filter:contrast(1.15);
+}
+button:disabled{opacity:.45;cursor:not-allowed}
+/* 高密度区（表格行 / 日志 / 分页 / 浮层菜单）里按钮退到 1px 描边、无投影 ——
+   数据区保持安静，这也是本仓既有的"表格内不叠阴影"纪律。 */
+td button, .log-row button, .ops-menu button, .pager button, .minibtn, .colset button,
+.field button, .gact, .heatfoot button, .pager .pagesize{
+  border-width:1px;
+  box-shadow:none;
+  font-family:var(--font-mono);
+}
+.pager .pagesize{background:var(--panel2);color:var(--fg);border:2px solid var(--line)}
+.tog button.on{background:var(--acc);color:var(--on-acc)}
+.field label,.field .hint,.info-line,.heatstats .k,.kvs .k,.card .k,.pager,.log-head{
+  letter-spacing:.04em;
+}
+.field label{
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  font-weight:700;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  color:var(--dim);
+}
+fieldset{border:2px solid var(--ink);border-radius:0}
+legend{
+  font-family:var(--font-mono);
+  font-size:10.5px;
+  font-weight:700;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+}
+.subgroup{
+  border-top:3px solid var(--ink);
+  font-family:var(--font-mono);
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  font-size:11px;
+}
+
+/* ── 8. 表格：外壳有线条，内容只有墨线 ──────────────────────────────── */
+table{font-size:12.5px}
+/* 表头退回"安静"：账号池一屏有 12 张表 ⇒ 12 条黄带会把分组头的轮转盖掉。
+   一条墨线 + 等宽大写就够认；吵的地方留给分区标题带与分组头。 */
+thead th{
+  background:var(--panel2);
+  color:var(--fg);
+  border-bottom:2px solid var(--fg);
+  font-family:var(--font-mono);
+  font-weight:700;
+  font-size:10.5px;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+th,td{border-bottom:1px solid color-mix(in srgb, var(--fg) 30%, transparent)}
+tbody tr:hover{background:var(--panel2)}
+tr.grouprow > td{
+  background:var(--pink);
+  color:#120F0D;
+  border-top:2px solid var(--ink);
+  font-family:var(--font-mono);
+  font-weight:700;
+  letter-spacing:.04em;
+}
+.acctgroup{border-top:3px solid var(--ink)}
+.acctgroup > .ghead{background:var(--pink);color:#120F0D}
+.acctgroup > .ghead .ghead-btn{font-family:var(--font-display);font-size:13px}
+.acctgroup > .ghead > .gacts .gact{
+  background:var(--cream);
+  color:#120F0D;
+  border:2px solid var(--ink);
+  box-shadow:2px 2px 0 var(--hard);
+}
+.acctgroup > .ghead > .gacts .gact:hover{background:var(--ink);color:var(--cream)}
+.accttable--aligned tbody tr:hover{background:var(--panel2)}
+
+/* ── 9. 状态胶囊 / 徽章 / chip：实底墨字（亮底上不出现白字）──────────── */
+/* 守卫④：所有变体的 border-style 必须一致（solid） */
+.pill{
+  padding:1px 7px;
+  border:2px solid var(--ink);
+  border-radius:0;
+  background:var(--panel2);
+  color:var(--fg);
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  line-height:1.4;
+}
+.pill.ok{background:var(--acid);color:#120F0D}
+.pill.warn{background:var(--yellow);color:#120F0D}
+.pill.err{background:var(--pink);color:#120F0D}
+.pill.dim{
+  background:color-mix(in srgb, var(--fg) 10%, transparent);
+  color:var(--fg);
+  border-color:var(--line);
+}
+.badge{
+  border:0;
+  border-radius:0;
+  background:var(--invert-bg);
+  color:var(--invert-fg);
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:1px 6px;
+}
+.badge--hot{background:var(--acid);color:#120F0D}
+.badge--cold{background:var(--yellow);color:#120F0D}
+.badge--ro{background:var(--panel2);color:var(--dim);border:2px solid var(--line)}
+.chip{
+  background:var(--panel2);
+  border:2px solid var(--line);
+  border-radius:0;
+  font-family:var(--font-mono);
+  font-weight:700;
+}
+.chip:hover{background:var(--acc);color:var(--on-acc);border-color:var(--ink)}
+.chip .mult{border-radius:0;background:var(--ink);color:var(--cream)}
+.chip .mult.free{background:var(--acid);color:#120F0D}
+.chip .mult.hi{background:var(--yellow);color:#120F0D}
+/* 模型卡片（.chips 里的模型名）**看起来要可点** —— 点击会复制完整模型名。
+
+   # 为什么必须留这两条（它们曾经只活在 webui.html 的代码块里，被 theme_sync 重建整块时抹掉）
+   复制是**无声**操作：没有手型光标、按下也没有位移时，用户点完不知道到底成没成
+   （toast 会飘走，之后再想确认只能再点一次）。所以「可点」必须由**视觉线索**表达，
+   而不是让用户猜。单击改单选的那条既有路径也依赖同一批 chip，见
+   internal/server/ui_wiring_modelchip_test.go（TestModelChipKeepsDropdownSync）。
+
+   # 为什么写在这里而不是页面自有 CSS
+   控制台与三个 iframe 页都会渲染 .chips/.chip（模型面板、日志状态栏…），
+   「可点」是跨页共用的交互线索 ⇒ 归唯一真相。
+   ⚠ 教训（2026-10-26）：任何「只塞进某个页面块内」的规则，都会在下一次
+     node tools/theme_sync.js 重建整块时**无声消失**（块内内容不是 diff 的对手）。
+   断言：ui_wiring_modelchip_test.go:78 直接查下面这行字面量 —— 它就是交互线索的守卫。 */
+.chips .chip{cursor:pointer}
+.chips .chip:active{transform:translateY(1px)}
+.healthbar{
+  border:2px solid var(--ink);
+  background:var(--panel);
+  box-shadow:var(--shadow-hard-sm);
+}
+.healthbar .hb-chip{
+  border:2px solid var(--line);
+  border-radius:0;
+  background:var(--panel2);
+  font-family:var(--font-mono);
+}
+.heatfoot .heatcell,.legend .sw{border-radius:0}
+
+/* ── 10. 代码块 / 提示 / 浮层 ──────────────────────────────────────── */
+pre{
+  background:var(--code-bg);
+  border:3px solid var(--ink);
+  border-radius:0;
+  box-shadow:5px 5px 0 var(--hard);
+  color:var(--fg);
+  font-family:var(--font-mono);
+}
+pre.copyable:hover{border-color:var(--acc)}
+.copyhint{font-family:var(--font-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--acc)}
+.notice{
+  border:2px solid var(--ink);
+  border-radius:0;
+  background:var(--panel2);
+  box-shadow:5px 5px 0 var(--hard);
+  font-family:var(--font-mono);
+  font-size:12px;
+}
+.notice.progress{border-left:6px solid var(--acc)}
+.notice.warn{border-left:6px solid var(--warn);color:var(--fg)}
+.notice.ok{color:var(--ok)}
+.notice.bad{color:var(--err)}
+.keyhint{
+  border:3px solid var(--ink);
+  border-left:8px solid var(--yellow);
+  background:var(--panel2);
+  box-shadow:5px 5px 0 var(--hard);
+}
+.keyhint .khhead{font-family:var(--font-display);font-size:15px;letter-spacing:.02em}
+.keyhint b{color:var(--acc)}
+.hovertip{
+  border:2px solid var(--ink);
+  background:var(--panel);
+  box-shadow:4px 4px 0 var(--hard);
+  font-family:var(--font-mono);
+  font-size:11.5px;
+}
+.ops-menu,.colset{
+  border:3px solid var(--ink);
+  background:var(--panel);
+  box-shadow:7px 7px 0 var(--hard);
+}
+.colset-head{background:var(--band-bg);color:var(--band-fg);border-bottom:2px solid var(--band-line);
+  font-family:var(--font-mono);font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.colset-row:hover{background:var(--panel2)}
+.colset-grip{color:var(--fg)}
+/* 弹窗：三块 #modal 的内层 div 有内联圆角/描边，只能 !important 压过 */
+#modal > div,#infoModal > div,#akModal > div{
+  border:3px solid var(--ink) !important;
+  border-radius:0 !important;
+  box-shadow:10px 10px 0 var(--hard) !important;
+  background:var(--panel) !important;
+}
+#modal h3,#infoModal h3,#akModal h3{
+  font-family:var(--font-display) !important;
+  font-weight:900 !important;
+  text-transform:uppercase;
+  letter-spacing:-.01em !important;
+}
+
+/* ── 11. 空态 / 分页 / 日志行 ─────────────────────────────────────── */
+.logwrap{border-top:3px solid var(--ink)}
+/* 空态铺半调网点（halftone）：maximalism 的纹理层，也顺手给"这里没有内容"
+   一个可辨认的材质。低透明度墨点，不影响任何文字。 */
+.log-empty,.job-empty{
+  background-image:radial-gradient(rgba(26,26,26,.13) 1px, transparent 1.1px);
+  background-size:6px 6px;
+}
+:root[data-theme="dark"] .log-empty,
+:root[data-theme="dark"] .job-empty{
+  background-image:radial-gradient(rgba(255,245,230,.13) 1px, transparent 1.1px);
+}
+.log-head{
+  background:var(--band-bg);
+  color:var(--band-fg);
+  border-bottom:2px solid var(--band-line);
+  font-size:10.5px;
+}
+.log-row{font-family:var(--font-mono);font-size:11.5px}
+.log-row:hover{background:var(--panel2)}
+.log-empty,.job-empty{
+  font-family:var(--font-mono);
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  font-size:11px;
+}
+.pager{border-top:3px solid var(--ink)}
+.pager .pageno{font-family:var(--font-mono);font-weight:700}
+.rankrow:hover{background:var(--panel2)}
+.kvs .kv{border-bottom:1px dashed color-mix(in srgb, var(--fg) 28%, transparent)}
+.readonly dd{font-family:var(--font-mono)}
+.heatmonths,.heatdays{font-family:var(--font-mono);letter-spacing:.06em}
+.donut::after{background:var(--panel2)}
+.donut .dc b{font-family:var(--font-mono);font-weight:700}
+
+/* ── 12. 登录页 / 渠道页（各自的内联样式在注入点之前）───────────────── */
+/* 登录页：奶油纸 + 硬投影卡片 + 巨型主按钮；贴纸与颗粒由上面的通用规则给。
+   ⚠ 登录页的 .card 是 <body> 的直接子节点，控制台的不是 ⇒ 用 body > .card
+     精确分开，别让"统计卡的染色规则"漏到登录卡上。 */
+body > .card{
+  max-width:404px;
+  padding:22px 22px 18px;
+  border:3px solid var(--line);
+  border-radius:0;
+  background:var(--panel);
+  box-shadow:10px 10px 0 var(--hard);
+}
+body > .card .head{gap:10px}
+body > .card h1{font-size:22px;line-height:1.05}
+body > .card .sub{
+  margin:8px 0 16px;
+  font-size:12px;
+  color:var(--dim);
+}
+body > .card input{padding:9px 11px;border:2px solid var(--line);background:var(--input-bg)}
+body > .card fieldset,body > .card .field > span{color:var(--dim)}
+body > .card button.primary{
+  margin-top:4px;
+  padding:11px 14px;
+  font-family:var(--font-display);
+  font-size:15px;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  background:var(--acc);
+  color:var(--on-acc);
+  border:3px solid var(--ink);
+  box-shadow:6px 6px 0 var(--hard);
+}
+body > .card button.primary:hover:not(:disabled){filter:contrast(1.15)}
+/* 登录页底部的跑马灯：与页面同宽，压在最下（登录页没有滚动容器，fixed 安全） */
+.maxmarq--foot{
+  position:fixed;
+  left:0;
+  right:0;
+  bottom:0;
+  border-top:3px solid var(--ink);
+  border-bottom:0;
+}
+.head h1{
+  font-family:var(--font-display);
+  font-size:20px;
+  font-weight:900;
+  letter-spacing:-.02em;
+  text-transform:uppercase;
+}
+.sub,.hint,.field > span,summary,details p{font-family:var(--font-mono);letter-spacing:.02em}
+button.primary{
+  border:3px solid var(--ink);
+  box-shadow:5px 5px 0 var(--hard);
+  font-weight:700;
+}
+button.link{color:var(--acc);text-decoration:underline wavy var(--pink);text-underline-offset:3px}
+.alert{border:2px solid var(--ink);border-radius:0;background:var(--err-bg);color:var(--err-fg)}
+details{border-top:3px solid var(--ink);border-style:solid solid none}
+code{font-family:var(--font-mono)}
+/* 渠道页（iframe）：跟随系统主题，同一套色板与"吵外壳 + 静表格"分层 */
+body > header{border-bottom:3px solid var(--ink);box-shadow:0 5px 0 var(--hard)}
+.tag{
+  border-radius:0;
+  border:2px solid var(--ink);
+  font-family:var(--font-mono);
+  font-weight:700;
+  font-size:10.5px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:0 6px;
+  height:20px;
+  line-height:16px;
+  color:#120F0D;
+}
+.on-t{background:var(--acid);color:#120F0D}
+.off-t{background:var(--panel2);color:var(--fg)}
+.warn-t{background:var(--yellow);color:#120F0D}
+dialog{
+  border:3px solid var(--ink);
+  border-radius:0;
+  box-shadow:10px 10px 0 var(--hard);
+  background:var(--panel);
+  color:var(--fg);
+}
+.dlg-h{
+  background:var(--band-bg);
+  color:var(--band-fg);
+  border-bottom:2px solid var(--band-line);
+  font-family:var(--font-mono);
+  font-weight:700;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+/* ── 13. 可读性地基：亮色块上的一切文字（含次要说明）一律墨色 ─────────────
+   # 为什么必须单独写这一段（这是全页对比度巡检抓出来的真缺陷）
+   把粉 / 黄 / 酸绿 / 橙铺到分组头、分区标题带、统计卡之后，容器**自己**的颜色
+   确实是墨（10:1 以上），但里面的次要文字仍带着 --dim：
+     粉底 #FF3CAC 上的 --dim(#5C4636) = 2.7:1   ← 看不清
+     酸绿底 #00FF85 上的 --dim(#C7B4A0) = 1.49:1 ← 几乎看不见
+   这两处**不在** contrast_e2e 的 5 个抽样里，所以抽样判据一路绿着交付。
+   ⇒ 规则：亮底容器内的文字只允许墨色；层级改用**字号 / 字重 / 字距**表达，
+     不再用"降低对比度"表达（那在亮底上等于把字擦掉）。
+   判据：tests/frontend/audit_contrast_pages.js（全量逐元素，浅深两套主题）。 */
+.ghead, .ghead .dim, .ghead .gfolded-hint, .ghead .gname, .ghead .dim *,
+section > h2, section > h2 .dim, section > h2 .dim *,
+.navgroup .navgrouphd, .navgroup .navgrouphd .dim,
+#jobMeta, #mcount, #travelAutoHint {
+  color:#120F0D;
+}
+/* 亮底卡片里的"--"占位：同样改墨，别用 --dim（粉底上只有 2.72:1）
+   ⚠ 但深色主题下统计卡是**深底**（守卫①：`.card` 必须仍是深色），墨字在深底上
+     只有 1.07:1 —— 所以这里必须**按主题分开写**，"亮底=墨字"不是无条件成立的。
+     实测：无条件写死墨色时，深色仪表盘一口气冒出 12 处 1.07:1（全页巡检逮到的）。 */
+.cards .card .dim, .cards .card .v.dim, .cards .card .dim *{color:#120F0D}
+:root[data-theme="dark"] .card .dim,
+:root[data-theme="dark"] .card .v.dim,
+:root[data-theme="dark"] .card .dim *{color:var(--dim)}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme]) .card .dim,
+  :root:not([data-theme]) .card .v.dim,
+  :root:not([data-theme]) .card .dim *{color:var(--dim)}
+}
+/* 分组头里的按钮保持自己的"奶油纸 + 墨字"，别被上面那条染成透明 */
+.ghead .gact, .ghead .gact:hover{color:#120F0D}
+.ghead .gact:hover{background:var(--ink);color:var(--cream)}
+
+/* 侧栏分组头：必须压过 .sidebar button{background:transparent}（(0,1,1) > (0,1,0)）——
+   # 为什么原来"看着是粉的、量出来是透明的"
+   首次注入时只写了 .navgrouphd（(0,1,0)），被 .sidebar button 的 transparent 拍平；
+   实测 computed backgroundColor = rgba(0,0,0,0)，于是里面的"0"徽章（墨字）直接落在
+   深色侧栏底色上 = 1.07:1。这里提到 (0,2,1) 把粉色真正落到像素上。 */
+.sidebar button.navgrouphd,
+.sidebar .navgrouphd,
+.sidebar button.navgrouphd:hover,
+.sidebar .navgrouphd:hover{
+  background:var(--pink);
+  color:#120F0D;
+}
+.sidebar .navgrouphd .navgcount{background:var(--ink);color:var(--cream);border-radius:0}
+.sidebar .navgrouphd .navgcount.zero{background:transparent;color:#120F0D}
+.sidebar .navgrouphd .navgdef{border-color:var(--ink);color:#120F0D}
+
+/* ⚠ 这里曾有一段「属性选择器补丁」：
+     [fill="#58a6ff"]{fill:var(--acc)}  [stroke="#58a6ff"]{...}
+     [style*="color:#58a6ff"]{...}      [style*="color:#0f8a4d"]{...}
+   它的用意是「页面 JS 里写死了 v2 色板的蓝/绿，用属性选择器接住，JS 一个字不用改」。
+   2026-11-01 删除，两条理由（都是查证过的，不是清理癖）：
+
+     ① **前提是错的**：注释里写「SVG presentation attribute 里不认 var()，改了反而变黑」。
+        隔离实测（最小 HTML + getComputedStyle）推翻了它：stroke="var(--x)" 与
+        fill="var(--x)" 在 presentation attribute 里正常解析，且随 data-theme 切换
+        （rgb(43,0,255) → rgb(29,95,208)）。同文件里的图表代码本来也一直在这么用。
+     ② **它纵容硬编码**：补丁在，写死色值就「看起来没事」，于是那 4 处字面量活了很久；
+        现在源头已全部改成语义变量，字面量一个不剩 ⇒ 这段规则已无对象可接。
+
+   防线交给了门禁：tests/frontend/verify_theme_compliance.js 的 R6 会扫
+   「JS 拼出来的 / 内联写的」颜色字面量（用 HEAD 版页面做过变异验证：能命中那 4 处）。
+   ⇒ 不要再往这里加属性选择器补丁；改源头，让 R6 保持全绿。 */
+
+/* ── 15. 字距与字号下限：小字号**不许**用窄展示字 ───────────────────────
+   # 为什么改（用户反馈："不是颜色的问题，是字母太近了"）
+   上一轮把页面头和分组头都交给了 --font-display，而那套字体在 Windows 上
+   实际命中 **Impact**：它是为"大字号海报"设计的窄体，每个字母的侧边距很小。
+   12~15px 时相邻字母的笔画几乎相接 —— 放大看是"字"，正常看是一团。
+   这不是对比度问题（白字 16.4:1 达标），是**字形 + 字距**问题，对比度判据
+   天生量不出来。所以：
+     · 展示字只留给 >=19px 的大标题（Arial Black 首选的宽厚超重字）
+     · <=15px 的一律退回系统 UI 字，层级改由 字重 800 + 字距 表达
+     · 分组头、分区标题带再加 1~2px 的 gap（原来 6/10px 挤在一起） */
+section > h2,
+.ghead .gname,
+.acctgroup > .ghead .ghead-btn,
+.ghead .dim,
+#modal h3, #infoModal h3, #akModal h3,
+.keyhint .khhead,
+button.primary,
+body > .card button.primary,
+.maxmarq {
+  font-family: var(--font-ui);
+  font-weight: 800;
+  letter-spacing: .05em;
+}
+/* 分组头：名字与"0 个账号 · N 项能力"之间要留出气口 */
+.ghead{gap:12px;padding:8px 14px}
+.ghead .ghead-btn{gap:9px;letter-spacing:.03em;font-weight:700}
+.ghead .gname{letter-spacing:.03em;font-size:13px;font-weight:700}
+/* 次要说明（"0 个账号 · N 项能力"）不要跟着 800 —— 层级靠字重与字号，
+   不是靠挤在一起。 */
+.ghead .dim{letter-spacing:.03em;font-weight:500}
+/* 分区标题带同样是 13~14px：改 UI 800 后不用再靠字距硬撑 */
+section > h2{letter-spacing:.08em}
+/* 大标题（>=19px）保留展示字，但把 Impact 那套的负字距收掉，避免词内粘连 */
+.boardsec h3{letter-spacing:0;font-family:var(--font-display);font-weight:900}
+header h1{letter-spacing:0}
+/* 跑马灯 13px：等宽更稳（字母间距由字族本身保证，不靠 letter-spacing 硬凑） */
+.maxmarq{font-family:var(--font-mono);font-weight:700;letter-spacing:.14em}
+/* ── 16. 渠道页的操作列：按钮必须"看得出是三个按钮" ──────────────────────
+   # 用户第二次说"还是有问题"，这次终于量到真因（上一版只改到一半）
+   两个原因叠在一起，缺一个都不够：
+     ① **内联样式压过了我的规则**：操作列按钮在 JS 里带
+        `style="padding:0 8px;height:22px"`（见 webui-channels.html 的 renderList），
+        内联优先 ⇒ 我给的 padding/高度全被吃掉，按钮仍然又小又扁。
+     ② **按钮底色与行底色是同一个变量**（都是 --panel #FFEFD8）⇒ 去掉内联影响后，
+        仍然只有 1~2px 边框能区分，远看还是一片。
+   所以这一节必须 `!important`（内联只能用 !important 压），并且把底色换成
+   比行更深的 --panel2，再加 2px 硬投影 —— 三个按钮在缩略图里也能数清。
+   作用域仍限定渠道页（#pane-ch / #pane-keys）：账号池那张高密度表不动。 */
+#pane-ch td button,
+#pane-keys td button{
+  padding:2px 10px !important;
+  height:24px !important;
+  border:2px solid var(--line) !important;
+  border-radius:0 !important;
+  background:var(--panel2) !important;
+  color:var(--fg) !important;
+  font:700 12px/1 var(--font-ui) !important;
+  letter-spacing:.02em;
+  box-shadow:2px 2px 0 var(--hard);
+}
+#pane-ch td button + button,
+#pane-keys td button + button{margin-left:8px !important}
+#pane-ch td button:hover:not(:disabled),
+#pane-keys td button:hover:not(:disabled){
+  background:var(--invert-bg) !important;
+  color:var(--invert-fg) !important;
+  border-color:var(--line) !important;
+}
+#pane-ch td button.danger,
+#pane-keys td button.danger{color:var(--err) !important}
+#pane-ch td button.danger:hover:not(:disabled),
+#pane-keys td button.danger:hover:not(:disabled){
+  background:var(--err) !important;
+  color:var(--cream) !important;
+}
+/* 操作列给足宽度，别让三个按钮被内容挤回去 */
+#pane-ch td:last-child,
+#pane-keys td:last-child{min-width:200px;white-space:nowrap}
+
+/* ══════════════════════════════════════════════════════════════════════
+   12. 安静区 .calm —— 与"吵"同一套语言，只是音量更低（v3.1 · 2026-10-26）
+
+   # 它是什么
+   maximalism 全套铺满时，表单区/操作区会被色块与硬投影淹掉：用户来这里是
+   **填一个字段**或**点一个按钮**，不是来看海报的。.calm 就是规范里那条
+   「必须留一块安静区给真正的操作」的落点：同色系、同字体、同描边，
+   但**不铺色块、不叠硬投影**，只留墨线与奶油底。
+
+   # 三个守卫（都有机器判据，别靠肉眼）
+   ① 亮度（tests/frontend/final_visual.js）：浅色主题下本区域实际亮度必须 >0.5、
+      深色 <0.5 ⇒ 这里只用 --bg / --panel / --fg / --line 这些**成对定义**的语义
+      变量，绝不写死颜色。**尤其不许给 .card 套 --card1(--yellow) / --card2(--acid)**：
+      黄与酸绿在深色主题下会把亮度顶过 0.5，直接踩掉守卫①。
+   ② 对比度（tests/frontend/audit_contrast_pages.js，阈值 4.5:1）：保持 cream 底 +
+      墨字天然满足；把底色换成任意亮色块都会开始掉分。
+   ③ 行高（本仓硬约束）：表格行恒 26px —— 安静区**不放宽**它。
+
+   # 用法
+   <div class="calm"> …表单/操作区… </div>（纯增量：不写这个类，一切照旧） */
+.calm{background:var(--bg);color:var(--fg)}
+/* 色块拍平：卡片/表单/表格一律回到"底" */
+.calm .card,
+.calm form,
+.calm fieldset,
+.calm table,
+.calm thead,
+.calm tbody,
+.calm tr,
+.calm th,
+.calm td{background:transparent}
+/* 硬投影拍平（只在这一层）：投影是"吵"的语法，安静区不用 */
+.calm .card,
+.calm form{box-shadow:none}
+/* 行高守卫：安静区也必须 26px */
+.calm thead th,
+.calm tbody td{height:26px;line-height:26px}
+/* 标签类在安静区不叠影（.badge 的底色保留 —— 它是**语义色**不是装饰色） */
+.calm .badge,
+.calm .badge--hot,
+.calm .badge--cold{box-shadow:none}
+
+/* ── 别名层索引（v3.1）：本文件里被"追加选择器"的既有规则，一一列出 ──
+   做法刻意是**在既有选择器表里加一个选择器**，而不是另写一份声明块 ——
+   另写一份会立刻产生"两份值哪天漂移"的问题（本仓为"两份真相"交过学费）。
+   所以：原件仍是唯一权威，别名只是它的另一个名字。
+     .input                 → 第五条控件规则（input,select,textarea）
+     .btn / .btn--secondary → 基按钮（button）
+     .btn--primary          → 主按钮（button.primary）
+     .nav / .nav button / .nav button:hover / .nav button.active /
+     .nav button.active::before / .nav .badge / .nav button.active .badge
+                            → 侧栏（.sidebar 全家族）
+     .badge                 → **本就有**（684 一带），无需别名；.badge--hot/--cold/--ro 同理
+     .calm                  → 本节的安静区（新概念，非别名）
+   ⚠ 改这些既有规则时，别名**自动跟着改** —— 这正是选择器表方案的目的。 */
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── N. 热力图色阶（共享层）── 2026-10-30
+   ══════════════════════════════════════════════════════════════════════
+
+   # 为什么要有它
+   外壳页原来自带一套热力图色阶 --hm0..--hm4，把 10 个绿色**写死在页面里**
+   （深色 #303033 #0e4429 #006d32 #26a641 #39d353 / 浅色 #ebedf0 #9be9a8
+     #40c463 #30a14e #216e39），而且那两套**不是取反关系**。后果：
+     · 换主题时它不跟着变；· 深浅两套谁对谁错没人能一眼核对。
+   现在页面只保留 --hm0..--hm4 这层**别名**，值全部指向本节的色阶。
+
+   # 为什么用 color-mix 而不是写 5 个绿
+   混合基是 --ok 与 --bg：主题一换，五档全部跟着重算，不会出现"改了主题忘了配色阶"。
+
+   # 顺序语义（单调，不许打乱）
+   --heat-0 空档（当天没有活动） → --heat-5 最热（--ok 本色）。
+   用色阶的地方只许引用变量，不许再写具体绿值 ——
+   tests/frontend/verify_theme_compliance.js 会盯着这一条。
+   ══════════════════════════════════════════════════════════════════════ */
+:root{
+  --heat-0: color-mix(in srgb, var(--ok) 8%, var(--bg));
+  --heat-1: color-mix(in srgb, var(--ok) 25%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--ok) 45%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--ok) 65%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--ok) 85%, var(--bg));
+  --heat-5: var(--ok);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── O. 右上角通知：多行堆叠（共享层）── 2026-11-01
+   ══════════════════════════════════════════════════════════════════════
+
+   # 它解决的问题（用户原话）
+   「右上角如果出现多个消息 多交替显示 这也是bug」—— 批量动作（全部签到 /
+   刷新全部额度 / 批量轮换）一次会发几十条结果，而旧实现是**一条框**：
+   `el.textContent = msg` ⇒ 后一条覆盖前一条，它们在一个框里快速交替，
+   用户只读得到最后一条，前面全部等于没提示过。
+
+   现在 #toast 是**容器**，每条消息占一行（.toastline），各自计时、互不覆盖：
+     · 最新的在最上面（与系统通知栈一致）
+     · 行间虚线分隔 —— 让「这是几条不同消息」一眼可辨，而不是糊成一段
+     · 超过上限的更旧那些折叠成 .toastmore 一行「…还有 N 条」
+     · 连续重复的同文案由 JS 合并成 .toastn 的「×N」
+     · 点任意一行立刻关掉它（onclick 由 JS 挂）
+
+   # 为什么分行着色（ok/bad），而不是只靠容器的 .notice.ok/.bad
+   容器只有一个类名，而"一条成功、一条失败"在批量动作里是常态。
+   行内着色才能同时说清两件事；容器类名保留原口径（边框与整体底色）。
+   ══════════════════════════════════════════════════════════════════════ */
+/* 通知区容器与单条通知的定位（2026-11-01 从外壳搬来）
+   · 为什么搬：令牌页也要同一套通知（同样的堆叠语义），而它原先只有一句
+     `.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%)}` ——
+     定位在左下、单行覆盖式，与外壳的右上堆叠**是两个东西**。
+     「同一个产品里两条通知语义」正是这次统一要消灭的。
+   · 位置定在右上（与系统通知栈一致），容器 pointer-events:none、单条 auto：
+     容器不吃点击，只有消息本身可点（点一条关一条，见 toast.js 的 onclick）。 */
+.notices{position:fixed;top:14px;right:16px;z-index:200;
+  display:flex;flex-direction:column;gap:8px;align-items:flex-end;
+  max-width:min(420px,42vw);pointer-events:none}
+.notice[hidden]{display:none}
+#toast .toastline{display:block;cursor:pointer}
+#toast .toastline.ok{color:var(--ok)}
+#toast .toastline.bad{color:var(--err)}
+#toast .toastline + .toastline,
+#toast .toastmore{margin-top:5px;padding-top:5px;border-top:1px dashed var(--line)}
+#toast .toastn{margin-left:6px;font-size:10px;font-weight:700;color:var(--dim)}
+#toast .toastmore{font-size:10px;color:var(--dim)}
+/* ==== WB2API:MAXIMALISM:END ==== */

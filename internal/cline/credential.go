@@ -26,8 +26,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"workbuddy2api/internal/gateway"
 )
 
 // filePrefix 凭证文件名前缀。LoadDir 按 `cline*.json` 通配。
@@ -160,26 +160,9 @@ func LoadDir(dir string) ([]*Auth, error) {
 // 一份有效时，胜出的可能是过期那份 —— 而界面上一切正常（号在池里、昵称也对），
 // 只有请求全部失败。这是最难查的一类故障。
 func pickWinners(list []*Auth) []*Auth {
-	byUID := map[string]*Auth{}
-	order := make([]string, 0, len(list))
-	for _, a := range list {
-		uid := a.UID()
-		cur, ok := byUID[uid]
-		if !ok {
-			byUID[uid] = a
-			order = append(order, uid)
-			continue
-		}
-		if betterAuth(a, cur) {
-			byUID[uid] = a
-		}
-	}
-	out := make([]*Auth, 0, len(order))
-	for _, uid := range order {
-		out = append(out, byUID[uid])
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].UID() < out[j].UID() })
-	return out
+	// T-339：去重 / 稳定顺序 / 按 uid 升序的骨架在 gateway.PickWinnersByUID；
+	// 本上游只提供"uid 怎么取"与"哪份更好"（betterAuth 是各家私有语义）。
+	return gateway.PickWinnersByUID(list, func(a *Auth) string { return a.UID() }, betterAuth)
 }
 
 // betterAuth 报告 cand 是否比 cur 更值得采用。

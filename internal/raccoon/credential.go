@@ -7,8 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"workbuddy2api/internal/gateway"
 )
 
 // filePrefix 凭证文件名前缀。LoadDir 按 `raccoon*.json` 通配。
@@ -127,26 +127,9 @@ func LoadDir(dir string) ([]*Auth, error) {
 // ⚠ 不按文件名字母序裁决：一份过期一份有效时，字母序可能让过期那份胜出 ——
 // 而界面一切正常（号在池里、昵称也对），只有请求全部失败。
 func pickWinners(list []*Auth) []*Auth {
-	byUID := map[string]*Auth{}
-	order := make([]string, 0, len(list))
-	for _, a := range list {
-		uid := a.UID()
-		cur, ok := byUID[uid]
-		if !ok {
-			byUID[uid] = a
-			order = append(order, uid)
-			continue
-		}
-		if betterAuth(a, cur) {
-			byUID[uid] = a
-		}
-	}
-	out := make([]*Auth, 0, len(order))
-	for _, uid := range order {
-		out = append(out, byUID[uid])
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].UID() < out[j].UID() })
-	return out
+	// T-339：去重 / 稳定顺序 / 按 uid 升序的骨架在 gateway.PickWinnersByUID；
+	// 本上游只提供"uid 怎么取"与"哪份更好"（betterAuth 是各家私有语义）。
+	return gateway.PickWinnersByUID(list, func(a *Auth) string { return a.UID() }, betterAuth)
 }
 
 func betterAuth(cand, cur *Auth) bool {

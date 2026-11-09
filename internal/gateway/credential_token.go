@@ -35,6 +35,10 @@ package gateway
 //
 // 所以按本仓库既有手法（`CredentialExpiryExt` 之于到期时刻）：
 // **另开一个可选接口，问拥有这份凭证的上游**。不实现 = 行为与之前逐字节相同。
+// ⚠ 实现者必须自己判 nil：`(*Auth)(nil)` 断言**会成功**，随后取字段会 panic ——
+//
+//	cline / lobsterai / qoder / raccoon 四家的实现里 `if err != nil || a == nil` 那一半不是多余的。
+//	（T-333 曾把这 3 行抽成共享骨架，实测净 +26 行 ⇒ 已撤回：重复 3 行的代价低于加一层抽象。）
 type CredentialTokenExt interface {
 	// HasToken 报告这份凭证是否带有**可用的** access token。
 	//

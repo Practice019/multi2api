@@ -1,8 +1,6 @@
 package cline
 
 import (
-	"time"
-
 	"workbuddy2api/internal/gateway"
 )
 
@@ -52,13 +50,6 @@ func (p *Provider) TokenExpiry(cred gateway.Credential) (int64, bool) {
 	if err != nil || a == nil {
 		return 0, false
 	}
-	// ① 落盘字段（毫秒）优先 —— 它在续期时会被更新，是"服务端最后一次告诉我们"的值。
-	if a.ExpireTime > 0 {
-		return time.UnixMilli(a.ExpireTime).Unix(), true
-	}
-	// ② 回落 token 自己的 `exp`（也覆盖"手工导入、没有 expire_time"的凭证）。
-	if t := gateway.ParseJWTTimes(a.AccessToken); t.ExpiresAt > 0 {
-		return t.ExpiresAt, true
-	}
-	return 0, false
+	// 毫秒字段优先、再兜底 JWT —— 顺序与判据统一在 gateway.ExpiryFromMillisOrJWT（T-334）。
+	return gateway.ExpiryFromMillisOrJWT(a.ExpireTime, a.AccessToken)
 }

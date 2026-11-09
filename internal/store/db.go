@@ -349,6 +349,9 @@ func allModels() []any {
 		&Account{},
 		&AccountEvent{},
 		&AuditLog{},
+		// ★ T-386：日级汇总（永不裁剪；热力图 365 天的数据源）。
+		// 漏登记 = 生产启动即 no such table —— db_test.go 有一条守卫专盯这个。
+		&LogDaily{},
 	}
 }
 
@@ -463,6 +466,7 @@ func Tables() []string {
 	return []string{
 		"setups", "users", "user_sessions", "options", "channels", "abilities",
 		"models", "vendors", "logs", "accounts", "account_events", "audit_log",
+		"log_daily", // ★ T-386：日级汇总（永不裁剪）
 		// A2（recon-arch）落地的 Token 表。⚠ 新增表必须同时改两处：allModels()（否则
 		// 不建表）与这里（否则 TestMigrateCreatesExpectedTables 报"多出来的表"）。
 		"tokens",

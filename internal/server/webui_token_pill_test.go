@@ -47,7 +47,7 @@ func tokenPillBody(t *testing.T, src string) string {
 // 允许往更严的方向调（把窗口收得更窄），只禁止放宽到"健康态也标红"。
 // 一条只在别人想收紧时变红的守卫是不招人烦的；反之则会。
 func TestWebUITokenPillThresholdsMatchCodeartsLifetime(t *testing.T) {
-	body := tokenPillBody(t, string(webuiHTML))
+	body := tokenPillBody(t, frontendSourceString())
 
 	// 只取 `n < 正数` 形态：`n < 0` 是"已过期"这条**定点**判断，不是分档阈值，
 	// 混进来会让下面的 nums[0]/nums[1] 全部错位。
@@ -95,7 +95,7 @@ func TestWebUITokenPillThresholdsMatchCodeartsLifetime(t *testing.T) {
 // TestWebUITokenPillKeepsUnknownDistinctFromExpired 钉住「未知」与「已过期」
 // 在配色上仍可区分（都在 err 侧的话，用户无法判断是"上游没给"还是"真过期"）。
 func TestWebUITokenPillKeepsUnknownDistinctFromExpired(t *testing.T) {
-	body := tokenPillBody(t, string(webuiHTML))
+	body := tokenPillBody(t, frontendSourceString())
 
 	// 未知（非数值）走 dim，且必须排在任何数值判断**之前** ——
 	// Number(undefined) 是 NaN，NaN 参与比较恒为 false，顺序反了会漏到 'ok'。

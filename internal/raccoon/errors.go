@@ -40,7 +40,7 @@ func Classify(status int, body string) gateway.ErrorKind {
 
 	// 额度耗尽：状态码或正文命中。**放在状态码判据之前** ——
 	// 额度耗尽的形态可能是 200 + 业务错误。
-	if status == 402 || containsAny(lower, hardCreditMarkers) {
+	if status == 402 || gateway.ContainsAny(lower, hardCreditMarkers) {
 		return gateway.ErrKindHardCredit
 	}
 
@@ -75,11 +75,3 @@ var hardCreditMarkers = []string{
 }
 
 // containsAny 报告 s 是否含 needles 中任意一项。
-func containsAny(s string, needles []string) bool {
-	for _, n := range needles {
-		if strings.Contains(s, n) {
-			return true
-		}
-	}
-	return false
-}

@@ -357,6 +357,14 @@ func TestGroupsUIPickAllRespectsProviderFilter(t *testing.T) {
 // 它用的还是同一条上游推断规则 —— 基准换成它。
 func TestGroupsUIMatchesConsoleProviderRule(t *testing.T) {
 	console, err := os.ReadFile(filepath.Join("webui.html"))
+	// ★ T-411：拼上 ui/app.js —— 拆包（T-409）把主 script 搬到了那里，
+	//   而本测试要在这个"控制台源码"里找 `function modelOwnerOf(` / 提交体结构。
+	if err == nil {
+		if js, e2 := os.ReadFile(filepath.Join("ui", "app.js")); e2 == nil {
+			console = append(append([]byte{}, console...), '\n')
+			console = append(console, js...)
+		}
+	}
 	if err != nil {
 		t.Fatalf("读 webui.html: %v", err)
 	}
@@ -400,6 +408,14 @@ func TestGroupsUIMatchesConsoleProviderRule(t *testing.T) {
 // 所以断言它俩，而不是已删除的 syncAKProviders。
 func TestModelPickerIsSharedAcrossPages(t *testing.T) {
 	console, err := os.ReadFile(filepath.Join("webui.html"))
+	// ★ T-411：拼上 ui/app.js —— 拆包（T-409）把主 script 搬到了那里，
+	//   而本测试要在这个"控制台源码"里找 `function modelOwnerOf(` / 提交体结构。
+	if err == nil {
+		if js, e2 := os.ReadFile(filepath.Join("ui", "app.js")); e2 == nil {
+			console = append(append([]byte{}, console...), '\n')
+			console = append(console, js...)
+		}
+	}
 	if err != nil {
 		t.Fatalf("读 webui.html: %v", err)
 	}
@@ -464,16 +480,24 @@ func TestModelPickerIsSharedAcrossPages(t *testing.T) {
 //
 // 判据分两半：**旧控件必须消失** + **新控件必须存在且在提交体里**。
 func TestAPIKeyModalSelectsGroupsNotModels(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("webui.html"))
+	// ★ T-412：这个函数里 `src` 有**两种用途**，拆包后它们要读不同范围 ——
+	//   ① 找弹窗 markup（`<div id="akModal"`）⇒ 在 **webui.html** 里
+	//   ② 找提交体（`limit, rpm, groups }`）⇒ 在 **ui/app.js** 里（拆包后 JS 已外置）
+	// 所以拆成两个变量：`page` 只读页面本体，`src` 读全部前端源码。
+	// ⚠ 不要图省事让 modal 也从 `src`（html+js）里切 —— `<div id="akModal"` 之后的内容
+	//   是 append 拼进去的，把 app.js 也接在后面会让 `modal` 变成"弹窗 + 整个 JS"，
+	//   于是 ①（"旧控件必须都不在弹窗里"）会被后面 JS 里的同名字符串误判。
+	html, err := os.ReadFile(filepath.Join("webui.html"))
 	if err != nil {
 		t.Fatalf("读 webui.html: %v", err)
 	}
-	src := string(raw)
-	start := strings.Index(src, `<div id="akModal"`)
+	page := string(html)
+	src := frontendSourceString() // = webui.html + "\n" + ui/app.js（T-411 已加）
+	start := strings.Index(page, `<div id="akModal"`)
 	if start < 0 {
 		t.Fatal("找不到 API Key 弹窗")
 	}
-	modal := src[start:]
+	modal := page[start:]
 
 	// ① 旧模型选择控件必须都不在弹窗里了。
 	for _, gone := range []string{

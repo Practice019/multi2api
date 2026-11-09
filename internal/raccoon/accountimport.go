@@ -33,32 +33,28 @@ var _ gateway.AccountImportExt = (*Provider)(nil)
 
 // ImportCredentials 把用户粘贴的 JSON 转成可落盘的 raccoon 凭证。
 func (p *Provider) ImportCredentials(pasted string) ([]gateway.ImportedCredential, error) {
-	items, err := gateway.SplitAccountImportItems(pasted)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]gateway.ImportedCredential, 0, len(items))
-	for _, raw := range items {
-		a, perr := ParseCredential([]byte(raw))
+	// T-330：分割 / 汇总 / 逐条失败语义都在 gateway.ImportCredentialsGeneric 里；
+	// 本上游只提供「怎么把一条粘贴内容解析成凭证」这一件事。
+	return gateway.ImportCredentialsGeneric(pasted, func(item string) (gateway.ImportedCredential, error) {
+		a, perr := ParseCredential([]byte(item))
 		if perr != nil {
-			return nil, perr
+			return gateway.ImportedCredential{}, perr
 		}
 		uid := strings.TrimSpace(a.UID())
 		if uid == "" {
-			return nil, errNoImportUID
+			return gateway.ImportedCredential{}, errNoImportUID
 		}
 		b, merr := MarshalAuthFile(a)
 		if merr != nil {
-			return nil, merr
+			return gateway.ImportedCredential{}, merr
 		}
-		out = append(out, gateway.ImportedCredential{
+		return gateway.ImportedCredential{
 			FileName: FileName(a),
 			Raw:      b,
 			UID:      uid,
 			Nickname: a.Nickname,
-		})
-	}
-	return out, nil
+		}, nil
+	})
 }
 
 // errNoImportUID 解析出了凭证，但拿不到账号主键。

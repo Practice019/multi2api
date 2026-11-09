@@ -25,7 +25,14 @@ import (
 func TestToastSharedLayerInjected(t *testing.T) {
 	blocks := map[string]string{}
 	for _, page := range []string{"webui.html", "webui-tokens.html"} {
+		// ★ T-411：`webui.html` 这一路要读**前端全部源码**（html + ui/app.js）——
+		//   TOAST 共享层标记块原先内联在 webui.html 的主 script 里，拆包（T-409）后
+		//   它跟着主 script 搬到了 ui/app.js ⇒ 只读 html 会误报"标记块不见了"。
+		//   `webui-tokens.html` 是**另一页**、没拆，照旧 readPage ✓。
 		body := readPage(t, page)
+		if page == "webui.html" {
+			body = frontendSourceString()
+		}
 		b, ok := sliceMarkerBlock(body, "WB2API:TOAST:START", "WB2API:TOAST:END")
 		if !ok {
 			t.Fatalf("%s 里没有 TOAST 共享层标记块 —— 通知实现又各写一份了", page)

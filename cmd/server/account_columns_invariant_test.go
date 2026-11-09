@@ -40,6 +40,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"workbuddy2api/internal/codar"
 	"workbuddy2api/internal/openaicompat"
 
 	"workbuddy2api/internal/cline"
@@ -95,7 +96,7 @@ func allUpstreams(t *testing.T) []upstreamCase {
 		{"zcode", "zcode", zcode.New(zcode.Config{})},
 		{"minimax", "minimax", minimax.New(minimax.Config{})},
 		{"monkeycode", "monkeycode", monkeycode.NewProvider()},
-		{"openaicompat", "openaicompat", openaicompat.NewOpenAICompat("openaicompat", "http://127.0.0.1:1/v1")},
+		{"openaicompat", "openaicompat", openaicompat.NewOpenAICompat("openaicompat", "http://127.0.0.1:1/v1")}, {"codar", "codar", codar.NewProvider()},
 	}
 }
 
@@ -252,6 +253,7 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		// 它不实现 gateway.Provider：只往 JSONL 里追加事件行，没有任何上游身份。
 		// 加它时这条守卫**确实又红了** —— 与上面几段注释说的完全一样。
 		"auditlog": true,
+		"loginui":  true, // 共享的登录页模板（T-328），不是上游
 		//   modelvis    —— 对外可见模型的计算（能力索引 ∩ 令牌白名单 ∩ 反向映射），纯函数、零依赖。
 		"modelvis": true,
 		//   timeouts    —— 超时配置的集中定义与 http.Client/Transport 应用（对标 new-api 的

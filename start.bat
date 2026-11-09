@@ -60,7 +60,15 @@ echo.
 REM Pass arguments through unchanged. With no arguments this is
 REM equivalent to "-config config.json", which is already the
 REM program's own flag default.
-"%EXE%" %*
+if not exist "logs" mkdir "logs"
+REM T-292: also append to a file - a detached start leaves no console to read.
+REM T-321: allow the codar upstream to renew its session token.
+REM   The upstream only issues a new token when the current one is close to
+REM   expiry; an early call answers HTTP 400 "Token is not close to expiration"
+REM   and does NOT invalidate the existing token (measured twice on 2026-11-08).
+REM   Without this switch the codar renewal job never fires (internal/codar/p1.go).
+set "CODAR_ALLOW_TOKEN_REFRESH=1"
+"%EXE%" %* >> "logs\server.log" 2>&1
 
 REM Reaching here means the gateway exited. Keep the window open so
 REM the reason is readable - a double-clicked window would otherwise

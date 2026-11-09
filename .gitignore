@@ -243,3 +243,15 @@ docker-compose.yml.bak-*
 # 运行时配置目录（内含真实 admin_token / api_key）
 config/
 config-test/
+
+# T-340：前端重复模式实测报告（交付物，必须能被干净签出拿到）
+!docs/reports/frontend-duplication.md
+
+# T-344：codar 官方端点完整报告（交付物）
+!docs/reports/codar-endpoints.md
+
+# T-347：额度口径决定性实验报告（交付物）
+!docs/reports/codar-quota-experiment.md
+
+# T-352：codar 邀请码端点逆向报告（交付物）
+!docs/reports/codar-invite-reverse.md

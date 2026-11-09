@@ -36,6 +36,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/gateway"
@@ -138,8 +139,16 @@ type Provider struct {
 	// 永不停歇。这里对失败账号挂退避：永久性凭证错误停 24h 等重新登录，
 	// 其余错误指数退避（2m→4m→…封顶 30m，带 ±20% 抖动，借鉴 LiteLLM）；
 	// 凭证文件被外部更新（重新登录写盘）时提前解除。
-	refreshHold   map[string]refreshHoldEntry
-	refreshHoldMu sync.Mutex
+	refreshHold map[string]refreshHoldEntry
+	// ★ T-292：上一轮后台扫描的时刻（UnixNano，0=从未扫过）。
+	//
+	// 为什么需要它：加了 Due 之后，核心**不再**用 Interval 判到期（见 scheduler/job.go），
+	// 所以"每 refreshInterval 至少扫一轮"这件事必须由上游自己表达 ——
+	// refreshDue 的兜底分支就是拿这个时间戳算的（见 jobs.go）。
+	// 用原子量而不是加进 refreshHoldMu 的保护范围：它只被"读-比较-写"，
+	// 加锁会让 30 秒一次的判到期路径也去抢那把保护退避表的锁。
+	lastRefreshScanNS atomic.Int64
+	refreshHoldMu     sync.Mutex
 
 	// onRefreshFailure / onRefreshSuccess 装配层注入的续期结果通知
 	//（Config.OnRefreshFailure / OnRefreshSuccess，通常接 pool 的失败计数/成功清零）。

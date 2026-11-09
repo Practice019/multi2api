@@ -617,8 +617,20 @@ func TestSharedInfraIsGenuinelyShared(t *testing.T) {
 	registered := map[string]bool{
 		"auth":       true, // 凭证结构（上游产出 *auth.Auth，核心 pool/server/admin 消费）
 		"checkinlog": true, // 签到/动作历史日志
-		"prompt":     true, // 提示词降级（出站改写 + 核心降级状态机共用）
-		"wire":       true, // 出站线协议改写（workbuddy 与 codearts 共用，见 wire_reexport.go）
+		// logbuf：日志传输层（缓冲/轮转/落盘），13 个上游都用它写日志。
+		//
+		// # 为什么它现在才需要登记（T-403）
+		//
+		// 本次把 8 份重复的 `shortUID`（各包自己写的"取前 8 位"）收敛成一份实现，
+		// 落在 logbuf（见 internal/logbuf/shortuid.go 里的决策记录：放 gateway 会被
+		// TestNoGatewayImport 与"上游依赖上游"两条规则挡住）。
+		// 于是 logbuf 的上游依赖者第一次越过本测试的 ≥2 阈值 ⇒ 要求它显式表态。
+		//
+		// ⚠ 它**不依赖** internal/gateway（本条是硬前提）：依赖 gateway 的包会被
+		// discoverUpstreams 当成上游实现，各上游 import 它就变成"上游依赖上游"。
+		"logbuf": true,
+		"prompt": true, // 提示词降级（出站改写 + 核心降级状态机共用）
+		"wire":   true, // 出站线协议改写（workbuddy 与 codearts 共用，见 wire_reexport.go）
 		// dailycheckin 签到类动作的共享驱动（lobsterai 与 qoder 共用）。
 		//
 		// # 它为什么**必须**是共享基础设施（而不是某个上游的私有物）
@@ -651,6 +663,17 @@ func TestSharedInfraIsGenuinelyShared(t *testing.T) {
 		// ⚠ 它**不依赖** internal/gateway（纯协议转换，不认识任何上游）——
 		// 这是它能被登记在这里的前提（同 dailycheckin 的理由）。
 		"anthroconv": true,
+		// loginui：手机号+短信验证码登录页的共享模板（loomy 与 codar 共用）。
+		//
+		// # 为什么它是共享基础设施而不是某个上游的私有物
+		//
+		// 两个上游的登录页结构逐字相同（标题 + 手机号 + [发送验证码] + 验证码 + [登录]），
+		// 差异只在端点路径、是否带 state、是否需要人工验证组件、文案 —— 全部可参数化。
+		// 此前 loomy 内联 4241 字符、codar 内联 3661 字符，两份 CSS 各自漂移。
+		//
+		// ⚠ 它**不依赖** internal/gateway（纯 HTML 模板，不认识任何上游）——
+		// 这是它能被登记在这里的前提（同 dailycheckin / anthroconv）。
+		"loginui": true,
 	}
 
 	// 已被 workbuddyPrivateSDK 归类为「某个上游的私有 SDK」的包 —— 跳过。

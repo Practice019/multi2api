@@ -5,7 +5,7 @@
 <h1 align="center">multi2api</h1>
 
 <p align="center">
-  <b>把 13 个 AI 上游聚合成 OpenAI 兼容 API 的多账号网关</b><br>
+  <b>把 14 个 AI 上游聚合成 OpenAI 兼容 API 的多账号网关</b><br>
   统一鉴权 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到与续期 · 管理控制台
 </p>
 
@@ -38,7 +38,7 @@
 > - 上游之间不得互相依赖
 > - 新增上游只需在 `cmd/server/main.go` 加一行 `registry.Register(...)`
 >
-> 从 4 个上游扩到 13 个的过程中，核心包**一行没改** —— 这条判据是实践过的，不是口号。
+> 从 4 个上游扩到 14 个的过程中，核心包**一行没改** —— 这条判据是实践过的，不是口号。
 
 ## ✨ 核心能力
 
@@ -81,6 +81,8 @@
 | **Qoder / Qoder 中国版** | PKCE 设备码 | 积分余额 / 每日签到 / WASM 加密推理桥 |
 | **ZCode** | **API Key（OpenAI 协议）或 OAuth JWT（Anthropic 协议）** | 额度查询 / 令牌诊断 / 粘贴导入。**首个非 OpenAI 协议的上游** —— JWT 通道需要协议转换 |
 | **MiniMax Code**（中国版） | OAuth 设备码 + PKCE（不起本地端口） | 积分余额 / 每日签到（幂等）/ 粘贴导入。**第二个 Anthropic 协议族上游** —— 只有 Anthropic 端点，没有 OpenAI 形态 |
+| **MonkeyCode**（长亭科技） | 浏览器登录 → session / api_key / signing_secret（**唯一需要请求签名**的上游） | 额度 + 今日 Token / 每日签到 / 注册机批量导入。国内站恒直连、国际站走代理（两站网络前提相反） |
+| **Codar**（科搭 / SpeedAI） | 手机号 + 短信验证码 / 微信授权 / 桌面端 `config.json` 导入 | 余额（三桶口径）/ 每日签到 / 邀请码 / 免费模型池 / 自动续期。**按 model 自动分流两个协议**：openai 系走 `/chat/completions`，claude 系走 `/messages` |
 
 ## 🚀 快速开始
 

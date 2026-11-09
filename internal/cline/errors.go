@@ -62,7 +62,7 @@ func Classify(status int, body string) gateway.ErrorKind {
 
 	// 额度耗尽：402 或文案命中
 	// 放在状态码判据之前，因为额度耗尽的形态可能是 200 + 业务错误。
-	if status == 402 || containsAny(lower, hardCreditMarkers) {
+	if status == 402 || gateway.ContainsAny(lower, hardCreditMarkers) {
 		return gateway.ErrKindHardCredit
 	}
 
@@ -71,7 +71,7 @@ func Classify(status int, body string) gateway.ErrorKind {
 		return gateway.ErrKindAuth
 	case status == 403:
 		// 地域限制 → 客户端类（只换号不罚）；其余 403 → 凭证失效
-		if containsAny(lower, regionBlockedMarkers) {
+		if gateway.ContainsAny(lower, regionBlockedMarkers) {
 			return gateway.ErrKindClient
 		}
 		return gateway.ErrKindAuth
@@ -123,15 +123,7 @@ var permissionDeniedMarkers = regionBlockedMarkers
 //
 // 用途：续期路径据此**跳过重试**并如实上报（而不是无限重试或换号）。
 func IsPermissionDenied(body string) bool {
-	return containsAny(strings.ToLower(body), permissionDeniedMarkers)
+	return gateway.ContainsAny(strings.ToLower(body), permissionDeniedMarkers)
 }
 
 // containsAny 报告 s 是否含 needles 中任意一项。
-func containsAny(s string, needles []string) bool {
-	for _, n := range needles {
-		if strings.Contains(s, n) {
-			return true
-		}
-	}
-	return false
-}

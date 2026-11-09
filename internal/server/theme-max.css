@@ -1,3 +1,13 @@
+/* 时间范围口径提示（T-423）。
+   改造前是 h3 里的内联 11px 文字，档位间长度从 0 字跳到 27 字
+   ⇒ 整行布局跟着变（用户报「一直变动占位置太多了」）。
+   现在：14px 圆圈 + title 悬浮说明，无说明时 hidden 不占任何宽度。 */
+.range-note-icon{display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;margin-left:6px;border:1px solid currentColor;border-radius:50%;
+  font-size:10px;font-weight:700;line-height:1;cursor:help;opacity:.55;vertical-align:middle}
+.range-note-icon::before{content:"i"}
+.range-note-icon[hidden]{display:none}
+
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
    风格来源：https://designforai.dev/style/maximalism

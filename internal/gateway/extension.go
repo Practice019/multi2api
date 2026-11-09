@@ -75,6 +75,9 @@ type AdminRoute struct {
 //
 // 实测 17 个平台特殊任务走这里（workbuddy 的签到/保活/成长/旅行，
 // codearts 的福利/配额刷新）。
+// ⚠ **T-335 实测后不抽**：cline 与 raccoon 的 jobs.go 里 refreshInterval（27 行）逐字相同、
+// isRefreshExpired 也同名同形；但 runRefresh / refreshCandidates 的分支与退避策略各家不同
+// ⇒ 能抽的只有薄薄一层，抽了反而把两家的退避策略绑死。
 type JobExt interface {
 	// Jobs 返回该上游要注册的定时任务。
 	//
@@ -243,6 +246,31 @@ type DisplayNameExt interface {
 // 返回的凭证只被核心用来取 **uid / nickname**（账号池的主键与展示名），
 // **核心不解释凭证内容**（那是上游的事）。所以返回 `[]Credential` 而不是
 // 各上游自己的结构体：核心要的只是投影后的两个字段。
+// ⚠ **T-340 实测终判：不抽**（LoadDir 是"看似同构"的典型）。
+//
+// cline / lobsterai / raccoon 的 LoadDir 各 **40 行代码**，逐行比过之后差异是：
+//
+//	· 日志/错误前缀 4 处（"cline:" / "lobsterai:" / "raccoon:"）
+//	· UID 取值器名 1 处（a.UID() vs a.UIDValue()）
+//	· 一条日志尾巴 1 处（只有 cline 写了"（放进池子会得到一个无法按 uid 寻址的账号）"）
+//
+// qoder 是 `LoadDir → loadDirFiltered(dir, productID)` 的包装，另有 LoadDirFor 变体（多一个筛选维度）。
+//
+// ⇒ 要**逐字行为不变**，共享函数得收 6~7 个参数（目录 / 文件前缀 / 日志前缀 / parse 回调 /
+//
+//	uidOf 回调 / better 回调 / 长日志开关）—— 调用点会比原实现更难读，这就是"抽出来反而更难懂"的线。
+//
+// ⇒ 另有两条独立理由：这是**凭证加载路径**（爆炸半径大），而 skip 分支（读失败 / 解析失败 / uid 空）
+//
+//	在既有测试里并未逐条覆盖 ⇒ 抽错了不会红。
+//
+// ⚠ 更正：T-335 我把这条写成"归一就得把 4 种凭证结构塞进泛型"——**不准确**。用泛型 + 回调并不会
+//
+//	合并凭证结构（各家类型仍是私有的）。真正拦住它的是**参数个数**与爆炸半径。
+//
+// ⚠ 将来若要抽：前提是先给三个 skip 分支补上能红能绿的用例（读失败 / 解析失败 / uid 空），
+//
+//	让"抽错了会红"成立；否则不要动这几行。
 type CredentialLoader interface {
 	// LoadCredentials 读取 `dir` 下本上游的全部凭证。
 	//
@@ -338,6 +366,24 @@ func (errLoginPending) Error() string { return "登录授权尚未完成" }
 //
 // 与 Configured() 同一判据哲学：**上游自报有没有这条逃生路径**，
 // 前端只按数据渲染，不认识任何上游名字。
+// ManualLoginPageExt 标记「本上游的 ManualLogin().path 是一个**页面**，不是粘贴端点」。
+//
+// # 为什么需要它（T-326，数据驱动而非命名约定）
+//
+// `ManualLoginExt.path` 原本只有一种语义：**POST 端点**，前端渲染"粘贴回跳 URL"输入框
+// （codearts / monkeycode 的逃生路径）。但有些上游的登录必须在**自己的页面里**完成
+// （例如需要人工验证组件的手机号登录）⇒ 那个 path 是一个 HTML 页面。
+//
+// 判据如果写成"path 结尾像不像页面"，会让**前端去猜上游的页面长什么样** ——
+// 本项目的硬规矩是前端不认上游（加一个上游前端 0 改动）。所以由上游自报这个事实，
+// 前端只按 `manifest...login.manual.page` 这个布尔分流。
+//
+// 实现者：`ManualLoginIsPage() bool` 返回 true 时，core 会在 manifest 的
+// `login.manual.page` 置 true，前端据此嵌 iframe（页内完成后 postMessage 通知父窗口）。
+type ManualLoginPageExt interface {
+	ManualLoginIsPage() bool
+}
+
 type ManualLoginExt interface {
 	// ManualLogin 返回 (完成端点路径, 给用户的指引文案)。
 	ManualLogin() (path string, instructions string)

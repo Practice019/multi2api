@@ -61,12 +61,12 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(h.cfg.MaxBodyMB)<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes(h.cfg.MaxBodyMB)))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
-				fmt.Sprintf("请求体超过上限 %d MiB（可在 config.json 的 server.max_body_mb 调整）", h.cfg.MaxBodyMB))
+				fmt.Sprintf("请求体超过上限 %d MiB（可在 config.json 的 server.max_body_mb 调整，写负数=不限制）", h.cfg.MaxBodyMB))
 			return
 		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())

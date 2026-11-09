@@ -31,13 +31,13 @@ import (
 // 所以要求它**同时**有 qr / local / browser 三种输出，且 qr 那句
 // 不出现"浏览器"。
 func TestWebUIQRFlowHasNoBrowserWording(t *testing.T) {
-	if !strings.Contains(string(webuiHTML), `id="loginIntro"`) {
+	if !strings.Contains(frontendSourceString(), `id="loginIntro"`) {
 		t.Fatal("★ 引导语必须带 id（原来是写死的静态文案）—— " +
 			"否则 JS 无法按登录形态改写它，扫码类上游会同时看到" +
 			"『去浏览器登录』与『用手机微信扫码』两句矛盾的话")
 	}
 
-	body := jsFuncBody(t, string(webuiHTML), "function renderLoginIntro(")
+	body := jsFuncBody(t, frontendSourceString(), "function renderLoginIntro(")
 
 	// 三条分支都要存在：qr / local 是显式字面量，browser 是**兜底 else**。
 	//
@@ -95,7 +95,7 @@ func TestWebUIQRFlowHasNoBrowserWording(t *testing.T) {
 // 保留「复制链接」是**有意的**：那是"把链接拿到另一台设备去生成二维码再扫"，
 // 与"在浏览器打开"是两件事，文案也已改成不带"浏览器"字样。
 func TestWebUIQRBranchOffersNoBrowserEntry(t *testing.T) {
-	body := jsFuncBody(t, string(webuiHTML), "function addAccount(")
+	body := jsFuncBody(t, frontendSourceString(), "function addAccount(")
 
 	// 抠出 QR 分支：从 `if (qrSVG) {` 到紧邻的 `} else if (hasAuthURL)`
 	at := strings.Index(body, "if (qrSVG) {")

@@ -182,13 +182,35 @@ func (p *Provider) checkinOne(uid, trigger string) CheckinOutcome {
 
 	status, detail := checkinlog.StatusOK, ""
 	if err := p.client.DailyCheckin(a); err != nil {
-		log.Printf("checkin %s: %v", uid, err)
-		// 已签到等业务错误也继续走余额查询
+		// ★ T-463：**先判定再打日志**，别让「今天已签到」看起来像故障。
+		//
+		// # 为什么改（用户实测报障 + T-462 的调查）
+		//
+		// 改前这里在判定**之前**无条件 `log.Printf("checkin %s: %v", uid, err)` ⇒
+		// 「今天已签到」这种**完全正常**的业务否定信号，会打成：
+		//
+		//	checkin <uid>: upstream client (http 400): {"code":10001,"msg":"今天已签到，请明天再来"}
+		//
+		// 用户看排障日志时会以为签到一直在失败 ✗
+		//（实际 status 记的是 already —— 记录一直是对的，只有日志措辞在误导。）
+		//
+		// # 判据不变、status 不变，只改措辞
+		//
+		// 下面两个分支里的 status 赋值**一个字没动** ⇒ 签到历史与自动禁用策略不受影响 ✓
+		// 反证（T-462 实测 data/checkin-log.json，全库 7782 条）：
+		//   含「已签到」的 2394 条 **全部** 是 already，0 条 fail；
+		//   fail 里 detail 带 `http 400` 的有 0 条。
 		if isAlreadyCheckin(err.Error()) {
-			// detail 是给人在表格里看的一列，不是排障现场：这里放短句，
-			// 上游 400 原文已经由上面的 log.Printf 进了进程日志。
+			// 正常状态：今天已经签过了。**不打成告警** —— 它是幂等重复调用的预期结果。
+			// 单列 http 状态码：400（业务否定）与 401（凭据失效）性质完全相反，
+			// 混在一串 JSON 里排障时要人肉解析。
+			log.Printf("checkin %s: 今日已签到（上游 http %d 属正常业务否定，非故障）",
+				uid, statusOf(err))
+			// detail 是给人在表格里看的一列，不是排障现场：这里放短句。
 			status, detail = checkinlog.StatusAlready, "今天已签到"
 		} else {
+			// 异常路径：原文照打（排障需要完整错误串）。
+			log.Printf("checkin %s: %v", uid, err)
 			status, detail = checkinlog.StatusFail, shortErr(err)
 		}
 	}
@@ -207,6 +229,24 @@ func (p *Provider) checkinOne(uid, trigger string) CheckinOutcome {
 	return res
 }
 
+// statusOf 尽力从上游错误里取出 HTTP 状态码；取不到返回 0。
+//
+// # 为什么值得写这 6 行（T-463）
+//
+// 改前的日志是 `checkin <uid>: <err>`，一眼看不出"这是 400 还是 401"——
+// 而这两种的性质**完全相反**：400 = 业务否定（今天已签到），401 = 凭据失效（要重登）。
+// 把状态码单独提出来，排障时不必再去解析那串 JSON。
+//
+// ⚠ 与 `isAlreadyCheckin` 配合使用：只有已经确定是"已签到"时才调它。
+// 用 errors.As 而不是类型断言：错误可能被 %w 包过一层。
+func statusOf(err error) int {
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue != nil {
+		return ue.Status
+	}
+	return 0
+}
+
 // isAlreadyCheckin 判定「今日已签到」这类业务错误（上游返回 code!=0）。
 //
 // # 为什么这条必须在上游包里
@@ -218,12 +258,26 @@ func (p *Provider) checkinOne(uid, trigger string) CheckinOutcome {
 // 判据刻意宽松（"already"/"checkin" 也认）：上游的措辞在不同版本里变过，
 // 宁可把"确实已签到"认成 already（结果正确），也不要把"已签到"
 // 误判成 fail（用户会看到一条假故障）。
+//
+// ⚠ 已知过宽（T-462 调查登记，**待方案 B 统一判定体系时处理**，本次刻意不动）：
+// `strings.Contains(s, "checkin")` 会把任何含该词的错误都认成"已签到" ——
+// 理论上能吞掉真失败（如"签到接口 500"）。为什么本次不删：
+//
+//	① 现有 2432 条 already 里有多少是靠这一条命中的**未量化** ⇒
+//	   删掉可能让真「已签到」从 already 掉成 fail，反而更糟；
+//	② 正确修法是让上游**直报**"今日是否已签"（driver 系 `Status()` 的做法），
+//	   而不是继续在文案匹配上收紧。
+//
+// ⚠ 已删 `strings.Contains(s, "code=400")`（T-463）：它是**死条件**（T-462 实测）——
+// upstream.Client 的 HTTP 错误串形如 `upstream client (http 400): …`（走 client.go:549/560），
+// 而 `code=%d` 那个格式只在 **HTTP 200 且业务码非 0** 时产生
+// （client.go:557 要求 kind == ErrNone，而 Status 直接取 resp.StatusCode）
+// ⇒ 两者永不同时出现，留着会误导下一个人以为它起作用。
 func isAlreadyCheckin(msg string) bool {
 	s := strings.ToLower(msg)
 	return strings.Contains(s, "已签到") ||
 		strings.Contains(s, "already") ||
-		strings.Contains(s, "checkin") ||
-		strings.Contains(s, "code=400")
+		strings.Contains(s, "checkin")
 }
 
 // ---------------------------------------------------------------------------

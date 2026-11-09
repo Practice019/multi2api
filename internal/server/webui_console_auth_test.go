@@ -32,7 +32,7 @@ import (
 //	wb2api.key                 localStorage 里的旧 api_key ⇒ 轮换后不生效（报障 ②）
 //	本机免令牌                 回环地址不再是凭据（报障 ③ 的根因）
 func TestConsoleJSHasNoCredentialModel(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 
 	// 只看**可执行部分**：先去掉 HTML 注释块，再逐行去掉 // 行注释。
 	//
@@ -97,7 +97,7 @@ func lineOf(s string, pos int) string {
 // 白名单：主题、分页、导航折叠、列宽、面板缓存、模型/账号分组。
 // 任何"看起来像密钥"的键都要拒绝 —— 旧实现在这里写的是 `wb2api.key`。
 func TestConsoleJSWritesNoCredentialsToStorage(t *testing.T) {
-	src := string(webuiHTML)
+	src := frontendSourceString()
 
 	allowed := []string{
 		"wb2api.theme",
@@ -109,6 +109,9 @@ func TestConsoleJSWritesNoCredentialsToStorage(t *testing.T) {
 		"wb2api.modelgroup",
 		"wb2api.acctgroup",
 		"wb2api.modelprovider",
+		// T-373：左侧导航的自定义顺序（纯 UI 偏好，两个键一组）。
+		// 它存的是面板 key / 上游 id 的排列，不含任何凭据；不会随学习或登录变化。
+		"wb2api.navorder.",
 	}
 	setRe := regexp.MustCompile(`localStorage\.setItem\(\s*(?:'([^']*)'|"([^"]*)")`)
 	seen := 0

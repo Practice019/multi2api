@@ -1,9 +1,10 @@
-// payload.go 出站请求体改写。
+package lobsterai
+
+// payload.go —— LobsterAI 的出站请求体规范化（T-335 起向 wire 借实现）。
 //
-// LobsterAI 只做两件与协议无关的规范化：
-//
+// 本上游只做两件与协议无关的规范化：
 //  1. 强制 stream:true —— **本上游仅 SSE，`stream:false` 会让上游回 500**
-//  2. max_tokens 归一
+//  2. max_tokens 归一（非数字/0/负数/NaN 删掉；超上界改成上界）
 //
 // **不做**指纹脱敏、不做提示词替换（那是 workbuddy/codearts 系的问题）。
 //
@@ -15,65 +16,15 @@
 //
 // 本层**原样透传** reasoning_effort，不加白名单：上游对不认识的档位静默忽略，
 // 加白名单反而会把模型专属的有效档位挡掉。
-package lobsterai
-
-import (
-	"encoding/json"
-	"log"
-)
-
-// maxOutputTokensUpperBound max_tokens 上界。
 //
-// 上游对超大 max_tokens 会直接 4xx，而 DSH 可能注入一个来自其它 provider
-// 的大值（例如从 workbuddy 切过来时带着 384000）。
+// ⚠ 上界是**本上游的**事实（200_000），shot 成别的上游的值会被上游 4xx ——
+// 这也正是它必须是参数、不能写进共享实现的原因（T-335 实测：raccoon 用的是 1_000_000）。
+
+import "workbuddy2api/internal/wire"
+
 const maxOutputTokensUpperBound = 200_000
 
-// PrepareBody 改写发往上游的请求体。
+// PrepareBody 强制流式并收敛 max_tokens（实现见 wire.NormalizeBodyForStreaming）。
 func PrepareBody(src []byte) []byte {
-	if len(src) == 0 {
-		return src
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(src, &obj); err != nil {
-		return src
-	}
-	// 仅 SSE：上游对 stream:false 回 500
-	obj["stream"] = true
-	clampMaxTokens(obj)
-
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return src
-	}
-	return out
-}
-
-func clampMaxTokens(obj map[string]any) {
-	for _, key := range []string{"max_tokens", "max_completion_tokens"} {
-		v, ok := obj[key]
-		if !ok {
-			continue
-		}
-		f, ok := toFloat(v)
-		if !ok || f <= 0 || f != f {
-			delete(obj, key)
-			continue
-		}
-		if int64(f) > maxOutputTokensUpperBound {
-			log.Printf("lobsterai: max_tokens %d -> %d（上游上界）", int64(f), maxOutputTokensUpperBound)
-			obj[key] = maxOutputTokensUpperBound
-		}
-	}
-}
-
-func toFloat(v any) (float64, bool) {
-	switch n := v.(type) {
-	case float64:
-		return n, true
-	case int:
-		return float64(n), true
-	case int64:
-		return float64(n), true
-	}
-	return 0, false
+	return wire.NormalizeBodyForStreaming(src, maxOutputTokensUpperBound, "lobsterai")
 }

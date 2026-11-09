@@ -36,7 +36,7 @@ func Classify(status int, body string) gateway.ErrorKind {
 	lower := strings.ToLower(body)
 
 	// 额度耗尽：状态码或正文命中。**放在状态码判据之前**。
-	if status == 402 || containsAny(lower, hardCreditMarkers) {
+	if status == 402 || gateway.ContainsAny(lower, hardCreditMarkers) {
 		return gateway.ErrKindHardCredit
 	}
 
@@ -67,13 +67,4 @@ var hardCreditMarkers = []string{
 	"积分不足",
 	"余额不足",
 	"积分已用完",
-}
-
-func containsAny(s string, needles []string) bool {
-	for _, n := range needles {
-		if strings.Contains(s, n) {
-			return true
-		}
-	}
-	return false
 }

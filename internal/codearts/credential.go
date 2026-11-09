@@ -168,8 +168,8 @@ type credBody struct {
 	ExpiresAt     int64  `json:"expiresAt"`
 	RefreshToken  string `json:"refresh_token,omitempty"`
 	// CodeVerifier 与 Auth.CodeVerifier 同义（T-229：登录时写入，续期时回带）。
-	CodeVerifier  string `json:"code_verifier,omitempty"`
-	ClientID      string `json:"clientId,omitempty"`
+	CodeVerifier string `json:"code_verifier,omitempty"`
+	ClientID     string `json:"clientId,omitempty"`
 }
 
 type accountBlock struct {
@@ -413,4 +413,57 @@ func LoadDir(dir string) ([]*Auth, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// dedupeAuthByUID 同一个 UID 只保留**到期最晚**的那份凭证；**完全保序**。
+//
+// # 为什么按 UID 而不是按 AK
+//
+// AK 是每次登录新生成的 ⇒ 同一账号必有多个 AK；**UID 才是账号身份**。
+// 本仓账号池与界面台账也都按 UID 认人（见 gateway.AccountColUID / Pool.AuthByUID）。
+//
+// # 为什么留"到期最晚"而不是"第一个"
+//
+// 文件名（AK）与时间无关；`ExpiresAt` 才是"这份凭证还能不能用"的判据。
+// 两份都活着时取到期晚的 ⇒ 多活一会儿，无副作用。
+//
+// # 为什么强调"完全保序"（T-297 新增的性质）
+//
+// 本函数会被用在两个地方：**localAccounts() 的出口**（可能已是装配层注入的列表）与
+// 将来若还要"按 uid 取最新一份"的查询。对**已经每位一个 UID** 的列表，它必须是一个
+// **纯 no-op**（连顺序都不变）—— 否则"加一层去重"就悄悄改变了既有行为。
+// 实现方式：一个输出切片，按输入顺序处理；UID 组的优胜者落在该 UID **首次出现**的位置，
+// 无序号的条目留在自己原来的位置（早先版本把空 UID 全部挪到末尾，那不是 no-op）。
+//
+// # 空 UID 怎么办
+//
+// **保留**（无法判断归属就不去重），而不是悄悄丢掉 —— 丢了会让"为什么少了一个号"无从排查。
+func dedupeAuthByUID(list []*Auth) []*Auth {
+	out := make([]*Auth, 0, len(list))
+	winner := make(map[string]*Auth, len(list)) // uid -> 该 uid 到期最晚的那份
+	for _, a := range list {
+		if a == nil {
+			continue
+		}
+		if a.UID == "" {
+			out = append(out, a) // 无 UID：原位置保留
+			continue
+		}
+		if cur, ok := winner[a.UID]; ok {
+			if a.ExpiresAt > cur.ExpiresAt {
+				winner[a.UID] = a
+				// 把已放到 out 里的那份换掉（保持位置不变）
+				for i := range out {
+					if out[i] != nil && out[i].UID == a.UID {
+						out[i] = a
+						break
+					}
+				}
+			}
+			continue
+		}
+		winner[a.UID] = a
+		out = append(out, a)
+	}
+	return out
 }

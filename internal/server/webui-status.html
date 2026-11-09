@@ -32,7 +32,7 @@
        降级（degraded）：**这一项**不可用 ⇒ 卡片仍然占位，加灰色小标 + 积极文案。
                            例：数据库没启用 ⇒ 「内存聚合模式运行中」。
        陷阱（trap）    ：**这一整块数据**没到 ⇒ 整张卡不渲染。
-                           例：deps 整个缺失 ⇒ 依赖健康那几张卡根本不出现。
+                           例：deps 整个缺失 ⇒ 那几张卡根本不出现（该段已按用户要求删除）。
      把它们混成一种，就会得到两种坏结果之一：
        · 把「未上报」画成 0 —— 读的人以为真的是 0（本仓反复吃过的亏）；
        · 把「没配」当成「坏了」—— 满屏红字，正常状态也被读成故障。
@@ -116,14 +116,96 @@
   .g4 { grid-template-columns:repeat(4,minmax(0,1fr)); }
   .g5 { grid-template-columns:repeat(5,minmax(0,1fr)); }
   .g2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  /* gfit：**按实际卡片数**自动铺列（T-381）。
+  
+     # 为什么固定列数不行
+     
+    那一组曾经最多 4 张卡（SQLite / 号池 / Redis / 上游）、**实际数量随部署变化**：
+     没配 Redis、没有上游熔断信息时就只有 2~3 张。
+     写死 `g2` 的后果是实测到的那个样子：3 张卡 ⇒ 第三张独占第二行左侧，
+     右边空一大块，整段看起来"没画完"。
+     
+     `auto-fit` + `minmax(280px,1fr)` 让列数跟着卡片数与视口宽度走：
+     3 张卡在 1550px 内 → 3 列；窄屏 → 2 列 / 1 列。空位自然消失。 */
+  .gfit { grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }
 
-  /* ── 5. 卡片 ─────────────────────────────────────────────────────────── */
+  /* ── 5. 卡片 ───────────────────────────────────────────────────────────
+  
+     # T-383 重新设计（用户：「这里面的小卡片的样式就不对。小卡片的样式就很丑」）
+     
+     改造前每张卡是 260×87px / padding 9px 11px，三行全靠"上→下堆"：
+     
+         .k 标签  11px --dim
+         .v 数值  20px/700
+         .s 说明  11px --dim      ← 与标签**同色同字号**
+     
+     三个具体毛病：
+       ① 标签与说明同色同字号 ⇒ 视觉上像"两组标签夹一个数字"，层级不存在；
+          扫一眼只看到一排数字，分不清哪个 20px 数字对应哪个标签
+       ② 卡片高度靠内容撑（87px 且有 9px padding）⇒ 说明长短不同会把数值推上推下，
+          20 张卡扫读时找不到基线
+       ③ 没有任何"状态载体"：CPU 89% 和 CPU 5% 长得一模一样，
+          危险值只能靠读数字才知道
+     
+     # 新设计的三条准则
+     
+       ① **数值是主视觉**：28px/800 + tabular-nums（滚动刷新不左右抖）
+       ② **说明贴底**：`margin-top:auto` ⇒ 等高卡片里说明永远同一条基线，
+          这是"节奏感"的来源（不同长度的说明不会把数字顶来顶去）
+       ③ **状态交给左侧色条**：3px 竖条用语义色表达 正常/警告/危险，
+          数字只用中性前景色 ⇒ 颜色有含义，而不是装饰
+     
+     ⚠ 用 ::before 画色条而不是 border-left：border 参与 box 尺寸计算，
+       会让 5 列卡的内宽差 3px；::before 可以独立控制高度（只覆盖内容区，不含 padding）。 */
   .c {
     background:var(--panel2); border:1px solid var(--line); border-radius:0;
-    padding:9px 11px; min-width:0; display:flex; flex-direction:column;
+    padding:12px 14px; min-width:0;
+    display:flex; flex-direction:column;
+    /* min-height 统一 ⇒ 不等高会让底边锯齿；96px 容纳 10px标签 + 28px数值 + 11px说明 + 上下 padding */
+    min-height:96px;
   }
+  /* ★ T-381：本页的 .c 卡片**不染色、不加投影**。
+     
+     # 为什么必须在这里显式声明
+     
+     theme-max.css 会把 `.card` 的规则（含 nth-child 轮转的五色底 + 4px 硬投影）
+     注入到本页 <style> 的末尾 ⇒ 对本页任何命中 `.card` 的元素生效。
+     本页的卡片类名是 `.c`，本来不会被选中 —— 但一旦有人给容器加 `.card`
+     （或将来把 `.c` 改成 `.card`），整页数据区会立刻变成五色海报。
+     
+     # 本仓自己的判据
+     
+     「外壳吵、数据静」—— 系统状态页整页都是数据。这一页的视觉职责是
+     让 20 个数字**同时可比**，而不是让人先看颜色。所以：
+       底色只允许 --panel / --panel2（中性），描边只允许 --line，不许投影。 */
+  #app .c, #app .card {
+    background:var(--panel2); border:1px solid var(--line);
+    box-shadow:none; border-radius:0;
+  }
+  /* 指标卡：左侧 3px 语义色条 = 状态载体（T-383）。
+     data-tone 由渲染函数按读数给：ok/warn/err/acc；不设 = 中性灰（无状态）。 */
+  .c.metric { position:relative; padding-left:17px; }
+  .c.metric::before {
+    content:''; position:absolute; left:0; top:12px; bottom:12px; width:3px;
+    background:color-mix(in srgb, var(--fg) 26%, transparent);
+  }
+  .c.metric[data-tone="ok"]::before   { background:var(--ok); }
+  .c.metric[data-tone="warn"]::before { background:var(--warn); }
+  .c.metric[data-tone="err"]::before  { background:var(--err); }
+  .c.metric[data-tone="acc"]::before  { background:var(--acc); }
+  /* textual：本质是文本而非指标的卡（如「运行时 vdev·go1.27.0·windows」）。
+     20px/700 会把 260px 卡撑满、把说明挤到下一行 ⇒ 降到 16px/600。 */
+  .c.metric.textual .v { font-size:16px; font-weight:600; letter-spacing:0; }
+  /* 键值卡：保留 .kv 的两列横向对齐（那是它可读性的来源），只统一节奏。 */
+  .c.kvcard { padding:12px 14px; }
+  .c.kvcard .kv > div {
+    height:24px;
+    border-bottom:1px dashed color-mix(in srgb, var(--fg) 12%, transparent);
+  }
+  .c.kvcard .kv > div:last-child { border-bottom:0; }
   .c .k {
-    font-size:11px; color:var(--dim); letter-spacing:.03em;
+    /* 标签是"单位说明"不是内容 ⇒ 更小 + 更宽字距，退到背景层 */
+    font-size:10px; color:var(--dim); letter-spacing:.08em;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
     display:flex; align-items:center; gap:6px; min-width:0;
   }
@@ -137,15 +219,21 @@
   .tag.err { background:color-mix(in srgb, var(--err) 16%, transparent); color:var(--err); }
   .tag.ok  { background:color-mix(in srgb, var(--ok) 16%, transparent);  color:var(--ok); }
   .tag.warn{ background:color-mix(in srgb, var(--warn) 16%, transparent);color:var(--warn); }
+  /* 数值：主视觉。28px/800 + 负字距 ⇒ 数字串（如 vdev·go1.27.0）更紧凑。 */
   .c .v {
     font-family:var(--font-ui); font-variant-numeric:tabular-nums;
-    font-size:20px; font-weight:700; letter-spacing:-.02em; margin-top:2px;
+    font-size:28px; font-weight:800; line-height:1.1; letter-spacing:-.02em;
+    margin-top:6px;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
-  /* ⚠ 20px 而不是 hyxapi 的 24px：24px 在 5 列窄卡里会把「42.07 GB」截断。
-     截断本身用 ellipsis 兜住（宁可截断也不换行撑高卡片，行高必须稳定）。 */
+  /* ⚠ 28px 的边界：5 列窄卡（~260px）里能放下「100.0%」「35.56 GB」；
+     再长的值（如运行时那串）走 .textual 变体降到 16px。截断用 ellipsis 兜住，
+     宁可截断也不换行撑高卡片（行高必须稳定 —— 否则 20 张卡扫读时基线全乱）。 */
   .c .s {
-    font-size:11px; color:var(--dim); margin-top:2px; min-height:16px;
+    /* 说明贴底：等高卡片里所有说明落在同一条基线上。
+       这是"不丑"的关键 —— 改造前它紧跟数字，说明长短不同会让数字上下错位。 */
+    margin-top:auto; padding-top:6px;
+    font-size:11px; color:var(--dim); min-height:16px;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
   /* 资源卡的数字与可用量同一行基线对齐。 */
@@ -172,6 +260,9 @@
   tbody tr:last-child td { border-bottom:none; }
   tbody tr:hover { background:color-mix(in srgb, var(--dim) 8%, transparent); }
   .empty { padding:8px 2px; font-size:12px; color:var(--dim); }
+
+  /* ★ T-454：说明卡（notes）的样式已删 —— 那张卡按用户要求去掉了。
+     类名/变量名也一并清掉，避免留下死 CSS 与"看起来还有人用"的错觉。 */
 
   /* ── 8. KV 网格（号池 / 缓存这类「固定几项」用，不占表格语义）──────── */
   .kv { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; margin-top:4px; }
@@ -235,31 +326,68 @@
           重复一个颜色等于没有背景：黄不再意味着任何东西。
        ② 所有读数卡同形同色 ⇒ **没有层级**：97.1% 的 CPU 与「Goroutines 21」一个分量。
        ③ 全页最重要的事实「服务状态 = 严重」没有任何视觉重量。
-       ④ .grid 默认 align-items:stretch ⇒ 依赖健康两侧不等高被拉平，底部一大片死空白
+       ④ .grid 默认 align-items:stretch ⇒ 两侧不等高被拉平，底部一大片死空白
           （用户说过的那种"游离"感）。
      处理原则：**只做页面自有 CSS 的层叠覆盖**，不动共享层、不动渲染逻辑 ——
      改动面最小、可单文件回滚；共享层的 section>h2 没有 !important，特异性够压住它。
      配色一律走语义变量（规范：不许写死颜色），所以本轮不新增任何色值。 */
 
-  /* ①② 分区带：五个冲突色轮转 + 展示体大写 + 亮底一律墨字 */
+  /* ①② 分区带：**色标 + 中性底**，不再整条铺饱和色（T-381 重做）
+  
+     # 为什么改（用户原话「这个有点丑啊」）
+     
+     上一版是五条 36px 高、贯穿整屏的**全饱和实色横带**（黄/绿/粉/橙/电蓝）。
+     规范里那条「数据区要安静」被违背了：五条荧光带把视觉焦点全部抢走，
+     而它们的信息量只有一个标题 —— 用户读到的是"五种颜色在喊"，
+     而不是"这里有五组数据"。
+     
+     # 新做法（保留色彩身份，但把音量降到"能分辨分区"这一档）
+     
+       · 横带底：--panel（中性），不再是五个冲突色
+       · 色相保留为**左侧 6px 竖条**（::before）—— 五组仍然一眼可分辨，
+         但它只占 6px × 28px，不会与卡片抢视线
+       · 字重从 900 降到 700、字号 12px、去掉全大写
+         （全大写适合"海报标题"，不适合"每屏五条分区名"） */
   #app > section > h2 {
-    color:var(--ink);
-    font-family:var(--font-display);
-    font-size:14px; letter-spacing:.04em; text-transform:uppercase;
+    color:var(--fg);
+    font-family:var(--font-ui);
+    font-size:12px; font-weight:700; letter-spacing:.03em;
+    padding:6px 12px 6px 16px;
+    background:var(--panel);
+    border-bottom:1px solid var(--line);
+    position:relative;
   }
-  #app > section:nth-of-type(1) > h2 { background:var(--yellow); }
-  #app > section:nth-of-type(2) > h2 { background:var(--acid); }
-  #app > section:nth-of-type(3) > h2 { background:var(--pink); }
-  #app > section:nth-of-type(4) > h2 { background:var(--orange); }
-  /* 电蓝太暗，墨字在上面读不出来 ⇒ 反色对（亮带用墨字、暗带用奶油字） */
-  #app > section:nth-of-type(5) > h2 { background:var(--blue); color:var(--cream); }
+  /* 色标：分区身份的唯一载体。色相与原五色一一对应（与 .cards 的配色同一套语义）。 */
+  #app > section > h2::before {
+    content:''; position:absolute; left:0; top:0; bottom:0; width:6px;
+    background:var(--dim);
+  }
+  #app > section:nth-of-type(1) > h2::before { background:var(--yellow); }
+  #app > section:nth-of-type(2) > h2::before { background:var(--acid); }
+  #app > section:nth-of-type(3) > h2::before { background:var(--pink); }
+  #app > section:nth-of-type(4) > h2::before { background:var(--orange); }
+  #app > section:nth-of-type(5) > h2::before { background:var(--blue); }
 
-  /* ④ 不等高不再拉平：死空白的根因是 stretch */
-  #app > section > .grid { align-items:start; }
+  /* ④ 同排卡片必须等高：底边锯齿会让"网格"这个语义消失（实测 93/87/79px）。
+     ⚠ 上一版写的是 `align-items:start`，理由记的是"死空白的根因是 stretch" ——
+       但真正的死空白在那一段（内容只占上半部；该段已按用户要求删除），靠不等高治不了它，
+       只会让锯齿更明显。等高的代价是卡片底部留白，那是正常的网格留白。 */
+  #app > section > .grid { align-items:stretch; }
 
-  /* ③ 唯一"喊出来"的地方：服务状态卡。
-        规范说"别忘给真正的动作留一块安静区"，反过来同样成立 ——
-        全页只允许一处高声，其余保持安静，层级才存在。 */
+  /* ③ 服务状态卡：全页的**样式基准**（T-385 用户裁定）
+  
+        用户原话：「之前那个卡片的服务状态那个卡片我觉得挺好的，能不能其他卡片也用它的样式？」
+        ⇒ 方向说明：不是把它拉平到其它卡片，而是**其它卡片向它看齐**。
+        
+        它的三个特征（现在推广到全部卡片，见下方 .c 规则）：
+          · 墨色描边（不是 22% 灰）⇒ 边界是"画上去的线"，不是"淡淡的框"
+          · 6px 6px 0 硬投影（--hard，浅色墨黑 / 深色霓虹粉）⇒ maximalism 的签名
+          · 底色随状态变化（:has() 三档环形信封）
+        
+        这三条里能推广的是前两条。第三条（底色随状态）只对它有意义 ——
+        一张 CPU 卡"为什么是黄的"没有含义，但服务状态卡"是黄的"= 警告。
+        ⇒ 其余卡片只在**有 tone 时**用左侧色条表达状态（已有的 .metric::before），
+          不染整卡底色。 */
   #app > section:nth-of-type(1) .grid > .c:first-child {
     border-color:var(--ink);
     box-shadow:6px 6px 0 var(--hard);
@@ -275,13 +403,26 @@
   #app > section:nth-of-type(1) .grid > .c:first-child:has(.ok) {
     background:color-mix(in srgb, var(--ok) 14%, var(--panel)); }
   #app > section:nth-of-type(1) .grid > .c:first-child .v {
-    font-family:var(--font-display); font-size:34px; line-height:1.05; letter-spacing:.01em;
+    /* ⚠ 26px 而不是 34px（T-381）：34px 的「警告」两字在 304px 卡里会把
+       「不影响…」那句说明挤成省略号 —— 最需要读的解释反而被裁掉了。
+       26px 仍明显大于其余卡片的 20px，"高声"这一层没有丢。 */
+    font-family:var(--font-display); font-size:26px; line-height:1.15; letter-spacing:.01em;
   }
   #app > section:nth-of-type(1) .grid > .c:first-child .v .err { color:var(--err); }
   #app > section:nth-of-type(1) .grid > .c:first-child .v .warn { color:var(--warn); }
   #app > section:nth-of-type(1) .grid > .c:first-child .v .ok { color:var(--ok); }
 
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
+/* 时间范围口径提示（T-423）。
+   改造前是 h3 里的内联 11px 文字，档位间长度从 0 字跳到 27 字
+   ⇒ 整行布局跟着变（用户报「一直变动占位置太多了」）。
+   现在：14px 圆圈 + title 悬浮说明，无说明时 hidden 不占任何宽度。 */
+.range-note-icon{display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;margin-left:6px;border:1px solid currentColor;border-radius:50%;
+  font-size:10px;font-weight:700;line-height:1;cursor:help;opacity:.55;vertical-align:middle}
+.range-note-icon::before{content:"i"}
+.range-note-icon[hidden]{display:none}
+
 /* ══════════════════════════════════════════════════════════════════════
    视觉语言 v3 · MAXIMALISM（霓虹油墨 / Neon Ink）
    风格来源：https://designforai.dev/style/maximalism
@@ -1560,14 +1701,83 @@ header h1{letter-spacing:0}
   .tag.ok   { background:var(--panel2); color:var(--ok);   border-color:var(--ok); }
   .tag.warn { background:var(--panel2); color:var(--warn); border-color:var(--warn); }
   .tag.err  { background:var(--panel2); color:var(--err);  border-color:var(--err); }
-  /* AGPL 归属链接：必须醒目 —— 用主题强调色 + 下划线，且 hover 换成正文色
-     以保证 hover 态也达标（hover 配色同样要过门禁，不能只算静态态）。 */
-  #credit a {
-    color:var(--acc);
-    text-decoration:underline;
-    text-underline-offset:3px;
+  /* ★ T-455：归属链接的样式（#credit a / :hover）已删 —— 那句文案按用户要求去掉了，
+     留着这两条是死 CSS。删掉它们也顺带少两条对比度门禁的观察对象。 */
+
+  /* ══ 13. 本页最终静音层（T-381 · 用户「这个有点丑啊」）════════════════════
+
+     # 诊断（每条都有实测，不靠感觉）
+
+     改造前这一页有**三级噪音叠加**，而它们互相不协调：
+
+       ① 五条 36px 全饱和实色横带（黄 #FFE600 / 酸绿 #00FF85 / 粉 #FF3CAC /
+          橙 #FF5C00 / 电蓝 #2B00FF）贯穿 1550px 宽
+          ⇒ 荧光带是"海报"的语言，用在**每屏五条的分区标题**上 = 五个人同时喊
+       ② 每张卡片有 6px 硬投影 + section 3px 纯黑粗框
+          ⇒ 网格感被投影打碎，视线沿着 20 个错位边框游走
+       ③ 卡片底色 --panel2 = #FFE3BE（明显的棕黄）
+          ⇒ 与 ① 的荧光色系撞在一起，读起来像"配色出错"而不是"有冲击力"
+
+     三条叠加的结果：**20 个数字同时可比**这个唯一职责被颜色噪声盖住了。
+
+     # 修法：保留风格身份（奶油纸 + 墨线 + 冲突色），但按本页自己的判据
+       「外壳吵、数据静」把这一页划进**安静区**
+
+       · 分区横带 → 中性底 + 左侧 6px 色标（色相仍在，音量降到"能分辨分区"）
+       · 卡片底 → 纯 --panel（与奶油纸同色系），不再是 --panel2 的棕黄
+       · 投影  → 只保留「服务状态」那一张（全页唯一的高声）；其余一律去掉
+       · 粗框  → section 从 3px 降到 2px（仍是墨线语言，但不再像表格线框）
+
+     # 为什么写在样式块末尾、且用 #app 前缀
+       同特异性下层叠顺序 + 前缀提高特异性 ⇒ 一定赢过 theme-max.css
+       注入的 `.card{box-shadow:4px 4px 0}` 那类规则。 */
+
+  /* ① 分区框：3px → 2px。墨线语言保留，但不再是"表格线框"。 */
+  #app > section { border-width:2px; }
+
+  /* ② 卡片统一到「服务状态卡」那套样式（T-385 · 用户裁定）
+
+    用户原话：
+      「我的意思是所有的卡片都按照这个卡片来做啊。然后你还原回去吧，你这个修改做的不对。
+        之前那个卡片的服务状态那个卡片我觉得挺好的，能不能其他卡片也用它的样式？
+        也不说要一模一样，就是差不多。」
+
+    ⇒ 方向：**其它卡片向服务状态卡看齐**（不是把它拉平）。
+
+    # 服务状态卡的三个特征，以及哪些能推广
+
+      ① 墨色描边 `border-color:var(--ink)`     ⇒ **推广**（边界是画上去的线）
+      ② `6px 6px 0 var(--hard)` 硬投影          ⇒ **推广**（maximalism 的签名）
+      ③ 底色随状态变（:has() 环形信封）          ⇒ **不推广**
+
+    ③ 不推广的理由：一张 CPU 卡"为什么是黄的"没有含义 —— 服务状态卡"是黄的"
+    = 警告，而 CPU 卡"是黄的"只能说"这个数字大"。整卡染色会把颜色变成装饰。
+    其余卡片的状态表达沿用**左侧 3px 色条**（.metric::before，只在有 tone 时出现），
+    那是"差不多"而不是"一模一样"的那部分差异。
+
+    # ⚠ 6px 硬投影与 10px gap 的关系（这是当初砍掉它的理由，必须正视）
+
+    卡片间距 10px、投影伸出 6px ⇒ 右卡的投影会**擦到**下一张卡的左缘。
+    实测结论：**擦到但不重叠**（6 < 10），视觉上是"连成一排的贴纸"，
+    而这正是 maximalism 想要的观感 —— 20 张卡片像一本贴纸册。
+    T-381 当时判它"互相压住、连成一片所以更糊"是**判断错误**：
+    那时的真问题不是投影，是五条荧光横带 + 棕黄底 + 20 张黑框三者叠加。
+    横带已改中性、底色已回奶油纸 ⇒ 投影现在可以回来了。 */
+  #app .c {
+    background:var(--panel);
+    border:1px solid var(--ink);
+    box-shadow:6px 6px 0 var(--hard);
   }
-  #credit a:hover { color:var(--fg); }
+
+  /* ③ 服务状态卡保持"基准 + 一点额外音量"：它的底色随状态变（:has() 三档），
+        那是其它卡片没有的第三维信息，不需要再加别的差异。 */
+
+  /* ④ section 内边距：卡片不要贴边框（改造前贴边，显得挤）。 */
+  #app > section > .grid { padding:10px 12px; }
+
+  /* ⑤ 空态卡片（降级/不适用，如 Redis DISABLED）：文字与标题留 6px 呼吸。 */
+  #app .c > .empty { margin-top:6px; }
+
   /* 同族复核：本页所有"语义色当文字用"的地方都压在 --bg/--panel/--panel2 上，
      换主题变量后仍然成立，这里显式留一条**注释锚**，方便下一个人复核：
        .ok/.warn/.err/.dim（页头下方的状态文字）  → 语义色 on --panel2
@@ -1627,12 +1837,15 @@ header h1{letter-spacing:0}
 <footer>
   <span id="src">数据来源 GET /admin/system-status</span>
   <span id="upd"></span>
-  <!-- AGPL-3.0 归属：hyxapi/NOTICE:9-25 的 §7(b) 附加条款要求**修改版**在 UI 醒目位置
-       保留这句归属文案，并保留一个指向原项目的**可见链接**（不是注释、不是纯文本 URL）。
-       所以它是可见文本 + <a href>，且不藏在折叠块里。
-       ⚠ 本仓是 MIT（PLAN §1 许可证行），这里保留的是**上游作品的归属**——
-         状态页的字段集/阈值/骨架口径源自 New API 系项目，归属要求随行为一起过来。 -->
-  <span id="credit">Frontend design and development by <a href="https://github.com/QuantumNous/new-api" target="_blank" rel="noopener noreferrer">New API contributors</a>.</span>
+  <!-- 2026-11-09：原来这里是一行 AGPL-3.0 §7(b) 要求的**归属文案**（英文原文 + 一个
+       指向上游项目仓库的**可见链接**）。用户明确要求删除（原话：「为什么有外部链接啊」
+       ⇒ 选择「连文字一起删掉」）。
+       ⚠ 若将来有人质疑合规性：这条决定是**用户做的**，不是遗漏。
+       ⚠ 同款文案在模型页（webui-models.html）仍保留 1 处；本页的配套 CSS 规则（#credit a…）
+         也一并删了（否则是死 CSS）。
+       ⚠ 注释里故意**不照抄那句英文原文、也不写上游项目名**：守卫按词级查整页文本，
+         连注释提到都会让它红（见 webui_status_credit_guard_test.go）。
+         —— 这个坑我在 T-442 / T-454 已经踩过两次，这是第三次同型 ✗。 -->
 </footer>
 
 <script>
@@ -1782,14 +1995,10 @@ header h1{letter-spacing:0}
     return Math.round(v).toLocaleString('en-US');
   }
 
-  // fmtCost：今日消费，固定两位小数。
-  // ⚠ 不画货币符号：契约里 today_cost 没说单位（额度 / 元 / 美元），
-  //   前端自己加一个符号等于**替后端断言单位** —— 宁可只给数字。
-  function fmtCost(n) {
-    var v = numOf(n);
-    if (v === undefined) { return '-'; }
-    return v.toFixed(2);
-  }
+  // ★ T-442：本函数（消费数字格式化）已删 —— 它只服务那张「消费卡」，
+  //   而那张卡是无意义的展示：单位不明（契约没说单位：额度/元/美元），且与「今日 Token」重复。
+  //   ⚠ 注释里也**不写**那张卡的名字：守卫按词级查（整页文本不许出现它）⇒
+  //     连注释提到它都会让守卫红（这是守卫**按设计工作** ✓ —— 见 T-442 的教训）。
 
   // ══════════════════════════════════════════════════════════════════════
   // 2. 组件（返回 HTML 字符串；值一律先过格式化，拿不到就是 '-'）
@@ -1824,8 +2033,18 @@ header h1{letter-spacing:0}
 
   // statCard 普通统计卡。
   // valueHtml 已经是**渲染好的 HTML 片段**（可能带状态色/小标），所以不再转义。
-  function statCard(k, valueHtml, sub, kTag) {
-    return '<div class="c">'
+  // statCard 指标卡：标签 + 大数值 + 贴底说明（T-383 重设计）。
+  //
+  // tone 语义：'ok' | 'warn' | 'err' | 'acc' | ''（空 = 中性灰，表示"这个指标没有状态含义"）。
+  // 它只驱动左侧那条 3px 色条，**不改数字颜色** —— 改造前让百分比数字本身变色，
+  // 结果是 5 列里有两三个彩色数字，与语义色条抢注意力（颜色一旦到处都是就没有信号量）。
+  //
+  // textual=true：本质是文本而非指标的卡（「运行时 vdev·go1.27.0·windows/amd64」）。
+  // 用 20px/700 会把 260px 卡撑满、把说明挤到下一行 ⇒ 走 16px/600 变体。
+  function statCard(k, valueHtml, sub, kTag, tone, textual) {
+    var cls = 'c metric' + (textual ? ' textual' : '');
+    var toneAttr = tone ? ' data-tone="' + tone + '"' : '';
+    return '<div class="' + cls + '"' + toneAttr + '>'
       + '<div class="k">' + esc(k) + (kTag || '') + '</div>'
       + '<div class="v">' + valueHtml + '</div>'
       + '<div class="s">' + (sub || '&nbsp;') + '</div>'
@@ -1836,6 +2055,8 @@ header h1{letter-spacing:0}
   //
   // ⚠ 百分比本身也参与三档配色（与条同色）：只给条上色的话，84% 这行数字
   //   仍是普通前景色，扫一眼读不出「这条已经危险了」。
+  // T-383：额外给左侧色条上同一档颜色 ⇒ 颜色有两个载体（条 + 数字），
+  //   扫读时不用停在数字上就能看出哪一项进了警戒带。
   function resCard(k, pct, detail) {
     var p = numOf(pct);
     var hasVal = p !== undefined;
@@ -1844,12 +2065,13 @@ header h1{letter-spacing:0}
     // ⚠ 这个 color 只用于**文字**（百分比那行）⇒ 一律语义变量（见 minibar 上方的长注释）。
     //   条填充在 minibar 内部另算，两者同源不同用途，所以分开写而不是共用一个常量。
     var color = clamped >= WARN_PCT ? (clamped >= CRIT_PCT ? 'var(--err)' : 'var(--warn)') : 'var(--fg)';
+    var tone = hasVal ? (clamped >= CRIT_PCT ? 'err' : (clamped >= WARN_PCT ? 'warn' : 'ok')) : '';
     var valueHtml = hasVal
       ? '<span style="color:' + color + '">' + shown.toFixed(1) + '%</span>'
       : '<span class="dim">-</span>';
     var kTag = hasVal ? '' : tag('未上报');
     var d = detail ? '<span class="dl">' + detail + '</span>' : '';
-    return '<div class="c">'
+    return '<div class="c metric"' + (tone ? ' data-tone="' + tone + '"' : '') + '>'
       + '<div class="k">' + esc(k) + kTag + '</div>'
       + '<div class="rowv"><div class="v">' + valueHtml + '</div>' + d + '</div>'
       + minibar(hasVal ? clamped : 0)
@@ -1927,10 +2149,16 @@ header h1{letter-spacing:0}
     var warns = get(svc, 'warnings');
     var sub = (warns && warns.length) ? esc(String(warns[0])) : winLabel;
     var tagSt = (st === 'ok' || st === 'warning' || st === 'critical') ? '' : tag('未上报');
-    // ⚠ 未知状态**不**降级成「健康」：hyxapi 那边 map[status] || map.ok
+    // 未知状态**不**降级成「健康」：hyxapi 那边 map[status] || map.ok
     //   会把后端新增的第 4 种状态静默显示成健康 —— 那是最坏的一种错法。
     //   这里显示 '-' + 「未上报」，让人知道是我们不认识它。
-    cards.push(statCard('服务状态', pill, sub, tagSt));
+    // T-383：这五张卡里只有「服务状态」有真正的严重度语义 ⇒ 只有它带 tone。
+    var svcTone = st === 'ok' ? 'ok' : (st === 'warning' ? 'warn' : (st === 'critical' ? 'err' : ''));
+    cards.push(statCard('服务状态', pill, sub, tagSt, svcTone));
+
+    // ★ T-454：notes 的那张卡已按用户要求删除（「这些都不要」）。
+    //   ⚠ 后端的 notes 字段**有意保留**（它是 API 契约，且"Redis 不参与 verdict"这个
+    //     性质由 T-440 的 Go 测试守着）—— 删的只是这张前端卡片。
 
     // 近 5 分钟 RPM
     var rpm = pickNum(h, ['rpm_5m', 'window_rpm', 'rpm']);
@@ -1956,7 +2184,9 @@ header h1{letter-spacing:0}
     cards.push(statCard('成功率',
       rate === undefined ? '<span class="dim">-</span>' : esc(fmtPct(rate)),
       errs === undefined ? '窗口错误数未上报' : (fmtInt(errs) + ' 个错误'),
-      rate === undefined ? tag('口径未就绪') : ''));
+      rate === undefined ? tag('口径未就绪') : '',
+      // 成功率落入危险档时给 tone（与错误数的语义一致：低成功率 = 坏）。
+      rate === undefined ? '' : (rate < 90 ? (rate < 70 ? 'err' : 'warn') : 'ok')));
 
     // 平均延迟：入参可能是 ms 或秒，两种都认。
     var latMs = pickNum(h, ['avg_latency_ms', 'latency_ms']);
@@ -1980,9 +2210,12 @@ header h1{letter-spacing:0}
     if (gov !== undefined && gov !== '') { parts.push(esc(String(gov))); }
     if (rt !== undefined && rt !== '') { parts.push(esc(String(rt))); }
     cards.push(statCard('运行时',
-      parts.length ? '<span style="font-size:13px">' + parts.join(' · ') + '</span>' : '<span class="dim">-</span>',
+      parts.length ? '<span style="font-size:16px">' + parts.join(' · ') + '</span>' : '<span class="dim">-</span>',
       '版本 · Go 版本 · 平台',
-      parts.length ? '' : tag('未上报')));
+      parts.length ? '' : tag('未上报'),
+      // T-383：它本质是**文本**不是指标 ⇒ 走 textual 变体（16px/600），
+      // 否则 28px 会把 260px 卡撑满、把说明挤到下一行。tone 用 acc 让它可辨认。
+      'acc', true));
 
     return section('服务状态', '<div class="grid g5">' + cards.join('') + '</div>');
   }
@@ -2031,7 +2264,9 @@ header h1{letter-spacing:0}
     var errHtml = wErr === undefined ? '<span class="dim">-</span>'
       : (wErr > 0 ? '<span class="err">' + esc(fmtInt(wErr)) + '</span>' : '0');
     cards.push(statCard(winLabel + '错误', errHtml, winLabel,
-      wErr === undefined ? tag('未上报') : ''));
+      wErr === undefined ? tag('未上报') : '',
+      // T-383：这是唯一一个「越大越坏」的指标 ⇒ 有值时按 0 / 1~N 给 tone。
+      wErr === undefined ? '' : (wErr > 0 ? (wErr >= 10 ? 'err' : 'warn') : 'ok')));
 
     var tk = pickNum(h, ['today_tokens']);
     cards.push(statCard('今日 Token',
@@ -2039,11 +2274,8 @@ header h1{letter-spacing:0}
       '输入 + 输出合计',
       tk === undefined ? tag('未上报') : ''));
 
-    var cost = pickNum(h, ['today_cost']);
-    cards.push(statCard('今日消费',
-      cost === undefined ? '<span class="dim">-</span>' : esc(fmtCost(cost)),
-      'logs 表今日累计',
-      cost === undefined ? tag('未上报') : ''));
+    // ★ T-442：那张消费卡已删 —— 单位不明，且与「今日 Token」重复表达同一件事。
+    //   （用户原话：「（那个）是什么意思啊？」）⚠ 注释里不写它的名字（守卫按词级查）。
 
     var gor = pickNum(h, ['goroutines']);
     cards.push(statCard('Goroutines',
@@ -2054,222 +2286,20 @@ header h1{letter-spacing:0}
     return section('请求健康', '<div class="grid g5">' + cards.join('') + '</div>');
   }
 
-  // ④ 依赖健康 —— 换成**本仓真实依赖**（无数据库集群、无 Redis）
-  //
-  // 四张卡：SQLite / data JSON 文件 / 号池 / 上游。
-  // 陷阱判据逐个写：**对应的那个子对象缺失 ⇒ 那张卡不渲染**。
-  // 这与 hyxapi 的 PoolCard 一致（data.open === undefined 就 return null），
-  // 也和 Redis 卡相反（Redis 禁用是配置事实，必须占位告知）。
-  function renderDeps(d) {
-    var deps = get(d, 'deps');
-    if (!deps) { return ''; }
+  // ★ T-454：原「④ 依赖」整块（四张卡：SQLite / data JSON 文件 / 号池 / 上游）
+  //   已按用户要求删除（附图把那一整段框住了）—— 界面上要看的是
+  //   「服务活着吗、请求健不健康」，依赖细节属于运维视角，留着只会稀释信号。
+  //   ⚠ 后端的 deps 数据仍在返回（无害）；由 TestStatusPageHasNoDepsSection 把着。
+  //   ⚠ 注释里**不写那段的确切标题**：守卫按词级查整页文本（连注释提到都会红 ✓
+  //     这是守卫**按设计工作** —— 见 T-442 的同型教训）。
 
-    var cards = [];
-
-    // ── SQLite
-    var sq = get(deps, 'sqlite');
-    if (sq) {
-      var okFlag = get(sq, 'ok');
-      var inner;
-      if (okFlag === false) {
-        // 降级（不是陷阱）：数据库没启用是**配置事实**，要告知而不是藏起来。
-        // 文案给积极语义：「内存聚合模式运行中」比「不可用」有用得多。
-        inner = '<div class="empty">数据库未启用，指标走内存聚合模式运行中。</div>';
-      } else {
-        var size = pickNum(sq, ['size_bytes']);
-        var tables = pickNum(sq, ['tables']);
-        var rows = pickNum(sq, ['log_rows']);
-        inner = kvGrid([
-          ['库文件大小', size === undefined ? '<span class="dim">-</span>' : esc(fmtBytes(size))],
-          ['表数', tables === undefined ? '<span class="dim">-</span>' : esc(fmtInt(tables))],
-          ['logs 行数', rows === undefined ? '<span class="dim">-</span>' : esc(fmtInt(rows))],
-          ['状态', okFlag === true ? '<span class="ok">正常</span>' : '<span class="dim">-</span>']
-        ]);
-      }
-      cards.push('<div class="c">'
-        + '<div class="k">SQLite 数据库' + (okFlag === false ? tag('Disabled') : '') + '</div>'
-        + inner + '</div>');
-    }
-
-    // ── 号池
-    var pool = get(deps, 'pool');
-    if (pool) {
-      var ph = pickNum(pool, ['healthy']);
-      var pc = pickNum(pool, ['cooling']);
-      var pt = pickNum(pool, ['tripped']);
-      var pa = pickNum(pool, ['autodisabled']);
-      var pf = pickNum(pool, ['inflight']);
-      // 「健康号」是全池唯一的正向量，给绿色；熔断/自动禁用是「已经摘掉了」，
-      // 给警示色（它们 >0 时运维需要知道）。
-      cards.push('<div class="c">'
-        + '<div class="k">号池</div>'
-        + kvGrid([
-          ['健康号', ph === undefined ? '<span class="dim">-</span>' : '<span class="ok">' + esc(fmtInt(ph)) + '</span>'],
-          ['冷却中', pc === undefined ? '<span class="dim">-</span>' : esc(fmtInt(pc))],
-          // ⚠ 单位不同，标签必须分开：熔断这里数的是**上游**（几个 upstream 在熔断期），
-          //   其余四项数的是**账号**。写成「熔断中」会被读成"有 N 个号在熔断"。
-          ['上游熔断', pt === undefined ? '<span class="dim">-</span>' : (pt > 0 ? '<span class="warn">' + esc(fmtInt(pt)) + '</span>' : '0')],
-          ['已禁用', pa === undefined ? '<span class="dim">-</span>' : (pa > 0 ? '<span class="err">' + esc(fmtInt(pa)) + '</span>' : '0')],
-          ['在途 inFlight', pf === undefined ? '<span class="dim">-</span>' : esc(fmtInt(pf))]
-        ], true)
-        + '</div>');
-    }
-
-    // ── Redis（§0.5：未启用只加 warning 文案，**不改** service.status）
-    //
-    // 「没配 Redis」在本仓是**配置事实**（有 Noop + 本地文件降级，PLAN §1 硬结论 2），
-    // 不是故障 ⇒ 卡片用中性/积极措辞，绝不因此把整页判成警告。
-    var rds = get(deps, 'redis');
-    if (rds) {
-      var rEn = get(rds, 'enabled');
-      var rMode = get(rds, 'mode');
-      var rWarn = get(rds, 'warning');
-      var rInner;
-      if (rEn === false) {
-        rInner = '<div class="empty">' + esc(String(rWarn || '未启用，走内存 + 本地文件降级。')) + '</div>';
-      } else {
-        rInner = kvGrid([
-          ['模式', rMode === undefined ? '<span class="dim">-</span>' : esc(String(rMode))],
-          ['状态', '<span class="ok">启用</span>']
-        ], true);
-      }
-      cards.push('<div class="c">'
-        + '<div class="k">Redis' + (rEn === false ? tag('Disabled') : '') + '</div>'
-        + rInner + '</div>');
-    }
-
-    // ── data JSON 文件（可变行数 ⇒ 表格）
-    var files = get(deps, 'json_files');
-    if (files && files.length !== undefined) {
-      var rowsHtml = '';
-      var badCount = 0;
-      for (var i = 0; i < files.length; i++) {
-        var f = files[i] || {};
-        var nm = get(f, 'name');
-        var sz = pickNum(f, ['size_bytes']);
-        var mt = pickNum(f, ['mtime_unix']);
-        var fok = get(f, 'ok');
-        if (fok === false) { badCount++; }
-        var mtHtml = '-';
-        if (mt !== undefined && mt > 0) {
-          var dt = new Date(mt * 1000);
-          // 用本地时区显示：运维对着日志看时间时用的是本地钟。
-          mtHtml = esc(dt.toLocaleString('zh-CN', { hour12: false }));
-        }
-        var okHtml = fok === true ? '<span class="ok">OK</span>'
-          : (fok === false ? '<span class="err">解析失败</span>' : '<span class="dim">-</span>');
-        rowsHtml += '<tr>'
-          + '<td>' + (nm === undefined ? '<span class="dim">-</span>' : esc(nm)) + '</td>'
-          + '<td class="r">' + (sz === undefined ? '<span class="dim">-</span>' : esc(fmtBytes(sz))) + '</td>'
-          + '<td class="r">' + mtHtml + '</td>'
-          + '<td class="r">' + okHtml + '</td>'
-          + '</tr>';
-      }
-      var body = rowsHtml
-        ? '<div class="tw"><table><thead><tr>'
-          + '<th>文件</th><th class="r">大小</th><th class="r">最后写入</th><th class="r">解析</th>'
-          + '</tr></thead><tbody>' + rowsHtml + '</tbody></table></div>'
-        // 空数组是**事实**（确实没有文件），不是降级 —— 所以给一句中性的说明，
-        // 不加灰标、不画成错误。
-        : '<div class="empty">暂无 JSON 数据文件。</div>';
-      cards.push('<div class="c">'
-        + '<div class="k">数据文件' + (badCount > 0 ? tag(badCount + ' 个解析失败', 'err') : '') + '</div>'
-        + body + '</div>');
-    }
-
-    // ── 上游（可变行数 ⇒ 表格）
-    var ups = get(deps, 'upstreams');
-    if (ups && ups.length !== undefined) {
-      var urows = '';
-      for (var k = 0; k < ups.length; k++) {
-        var u = ups[k] || {};
-        var un = get(u, 'name');
-        var tri = get(u, 'tripped');
-        var ttfb = pickNum(u, ['ttfb_ema_ms']);
-        var triHtml = tri === true ? tag('熔断中', 'warn')
-          : (tri === false ? '<span class="ok">正常</span>' : '<span class="dim">-</span>');
-        urows += '<tr>'
-          + '<td>' + (un === undefined ? '<span class="dim">-</span>' : esc(un)) + '</td>'
-          + '<td class="r">' + triHtml + '</td>'
-          // ttfb 为 0 表示**还没有样本**，fmtLatency 会显示 '-'（不是 0ms）。
-          + '<td class="r">' + esc(fmtLatency(ttfb)) + '</td>'
-          + '</tr>';
-      }
-      var ubody = urows
-        ? '<div class="tw"><table><thead><tr>'
-          + '<th>上游</th><th class="r">状态</th><th class="r">TTFB EMA</th>'
-          + '</tr></thead><tbody>' + urows + '</tbody></table></div>'
-        : '<div class="empty">还没有注册上游。</div>';
-      cards.push('<div class="c">'
-        + '<div class="k">上游</div>' + ubody + '</div>');
-    }
-
-    if (!cards.length) { return ''; }   // 四个子对象全缺 ⇒ 整组不渲染
-    return section('依赖健康', '<div class="grid g2">' + cards.join('') + '</div>');
-  }
-
-  // ⑤ 缓存与容量
-  function renderCache(d) {
-    var cache = get(d, 'cache');
-    if (!cache) { return ''; }
-
-    var cards = [];
-
-    var disk = get(cache, 'disk');
-    if (disk) {
-      var df = pickNum(disk, ['files']);
-      var db = pickNum(disk, ['bytes']);
-      var dh = pickNum(disk, ['hits']);
-      var dm = pickNum(disk, ['misses']);
-      // 契约没给 max_bytes ⇒ 不画进度条（hyxapi 是 max>0 才画）。
-      // 画一条永远满/永远空的条比不画更误导。
-      var hitRate = '-';
-      if (dh !== undefined && dm !== undefined && (dh + dm) > 0) {
-        hitRate = fmtPct(dh / (dh + dm) * 100);
-      }
-      cards.push('<div class="c">'
-        + '<div class="k">磁盘缓存</div>'
-        + kvGrid([
-          ['文件数', df === undefined ? '<span class="dim">-</span>' : esc(fmtInt(df))],
-          ['占用', db === undefined ? '<span class="dim">-</span>' : esc(fmtBytes(db))],
-          ['命中', dh === undefined ? '<span class="dim">-</span>' : esc(fmtInt(dh))],
-          ['未命中', dm === undefined ? '<span class="dim">-</span>' : esc(fmtInt(dm))],
-          ['命中率', esc(hitRate)]
-        ], true)
-        + '</div>');
-    }
-
-    var aff = get(cache, 'affinity');
-    if (aff) {
-      var en = get(aff, 'enabled');
-      var algo = get(aff, 'algo');
-      var entries = pickNum(aff, ['entries']);
-      var inner;
-      // ⚠ 本仓**没有** HybridCache 亲和缓存（PLAN §0.5 明确不照搬）⇒ 这是
-      //   「不适用」，不是「未启用」：两者读起来完全不同（前者是设计如此，
-      //   后者会让人去配置里找一个并不存在的开关）。文案由后端 note 下发，
-      //   页面不自造 —— 免得两处各写一句、哪天只有一处改。
-      var applicable = get(aff, 'applicable');
-      var note = get(aff, 'note');
-      if (applicable === false || en === false) {
-        inner = '<div class="empty">' + esc(String(note || '本仓无渠道亲和缓存；选号走无状态轮询 —— 该项不适用。')) + '</div>';
-      } else if (en === false) {
-        inner = '<div class="empty">未启用渠道亲和；选号走无状态轮询。</div>';
-      } else {
-        inner = kvGrid([
-          ['状态', en === true ? '<span class="ok">启用</span>' : '<span class="dim">-</span>'],
-          ['算法', algo === undefined ? '<span class="dim">-</span>' : esc(String(algo))],
-          ['条目数', entries === undefined ? '<span class="dim">-</span>' : esc(fmtInt(entries))]
-        ], true);
-      }
-      cards.push('<div class="c">'
-        + '<div class="k">渠道亲和缓存' + (en === false ? tag('Disabled') : '') + '</div>'
-        + inner + '</div>');
-    }
-
-    if (!cards.length) { return ''; }
-    return section('缓存与容量', '<div class="grid g2">' + cards.join('') + '</div>');
-  }
+  // ★ T-442：`renderCache`（原「⑤ 缓存与容量」整段）已删。理由（逐条）：
+  //   · 磁盘侧缓存那张卡 —— 全仓搜不到实现，后端压根不返回 cache.disk ⇒ 永远是空卡；
+  //   · 亲和缓存那张卡 —— 本仓**没有** HybridCache：后端返回的是
+  //     {"applicable":false,"enabled":false,"note":"…该项不适用"} ⇒ 整张卡在说"这东西不存在"。
+  //   用户原话：「缓存容量这几个信息，是不是都没有意义呢？」
+  //   ⚠ 后端 cache 字段仍在返回（无害）；前端不渲染它。
+  //   ⚠ 注释里**不写**这两张卡的确切名字：守卫按词级查整页文本（见卡片守卫测试）。
 
   // ══════════════════════════════════════════════════════════════════════
   // 4. 骨架屏：按真实布局**逐格复刻**
@@ -2300,10 +2330,8 @@ header h1{letter-spacing:0}
     for (var k = 0; k < 5; k++) { g3 += skCell(false); }
     return section('服务状态', '<div class="grid g4">' + g1 + '</div>')
       + section('资源与入口', '<div class="grid g5">' + g2 + '</div>')
-      + section('请求健康', '<div class="grid g5">' + g3 + '</div>')
-      + section('依赖健康', '<div class="grid g2">' + skCell(false) + skCell(false)
-        + skTable(3) + skTable(3) + '</div>')
-      + section('缓存与容量', '<div class="grid g2">' + skCell(false) + skCell(false) + '</div>');
+      + section('请求健康', '<div class="grid g5">' + g3 + '</div>');
+      // ★ T-442：骨架屏里那段缓存与容量已删（跟真实渲染保持一致 —— 否则骨架还画着它）
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -2393,8 +2421,7 @@ header h1{letter-spacing:0}
       WINDOW_SECONDS = ws;
       winLabel = '近 ' + Math.round(ws / 60) + ' 分钟';
     }
-    var html = renderService(d) + renderResource(d) + renderHealth(d)
-      + renderDeps(d) + renderCache(d);
+    var html = renderService(d) + renderResource(d) + renderHealth(d);
     // 五组全空 ⇒ 后端返回了一个空对象。这时给一句明确的空态，
     // 而不是留一张白纸（白纸会被读成「页面坏了」）。
     if (!html) {

@@ -42,33 +42,23 @@ var errMissingAccessToken = errors.New("缺少 accessToken（它是唯一鉴权�
 // 但这里**不落盘** —— 只产出"文件名 + 内容"，由核心决定写到哪
 // （上游不认识 AuthDir 的权威值，与其它上游同一条约束）。
 func (p *Provider) ImportCredentials(pasted string) ([]gateway.ImportedCredential, error) {
-	items, err := gateway.SplitAccountImportItems(pasted)
-	if err != nil {
-		return nil, err
-	}
+	// T-331：分割 / 汇总 / 逐条失败语义共用；下面只保留 workbuddy 特有的三步：
+	//   ① 解析成 importItem  ② fillAliases 补别名  ③ buildImportedCredential 组装
 	instanceID := ""
 	if p != nil {
 		instanceID = p.ID()
 	}
-	out := make([]gateway.ImportedCredential, 0, len(items))
-	for _, raw := range items {
+	return gateway.ImportCredentialsGeneric(pasted, func(item string) (gateway.ImportedCredential, error) {
 		var it importItem
-		if err := json.Unmarshal([]byte(raw), &it); err != nil {
-			return nil, err
+		if err := json.Unmarshal([]byte(item), &it); err != nil {
+			return gateway.ImportedCredential{}, err
 		}
-		// 与旧端点同一条：导出工具的键名变体补到主字段上
-		//（中文键优先，别名只填空的槽位）。
 		var m map[string]any
-		if json.Unmarshal([]byte(raw), &m) == nil {
+		if json.Unmarshal([]byte(item), &m) == nil {
 			fillAliases(&it, m)
 		}
-		c, ierr := buildImportedCredential(instanceID, it)
-		if ierr != nil {
-			return nil, ierr
-		}
-		out = append(out, c)
-	}
-	return out, nil
+		return buildImportedCredential(instanceID, it)
+	})
 }
 
 // buildImportedCredential 构造一条可落盘的凭证（**不写盘**）。

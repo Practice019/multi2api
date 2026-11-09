@@ -419,6 +419,17 @@ type Log struct {
 	PromptTokens     int    `gorm:"not null;default:0"`
 	CompletionTokens int    `gorm:"not null;default:0"`
 	TotalTokens      int    `gorm:"not null;default:0"`
+	// CacheHitTokens / CacheMissTokens 命中 / 未命中的 cache prompt token（T-387 加）。
+	//
+	// # 为什么补这两列
+	// log_daily 有 cache_hit/cache_miss，但**回填段恒为 0** —— 因为 logs 表没存它们。
+	// 后果：升级前那 365 天的趋势里缓存命中率永远显示 0，用户会以为"以前完全没命中过"。
+	// 补列后历史行为 0 ⇒ 语义正确地表示"当时没记录"（前端判 cache_hit==0 && cache_miss==0
+	// ⇒ 该桶不画点），而不是假装"命中率为 0"。
+	//
+	// AutoMigrate 只加列不删列 ⇒ 对已有库零风险（有测试专门验这条）。
+	CacheHitTokens  int `gorm:"not null;default:0"`
+	CacheMissTokens int `gorm:"not null;default:0"`
 	// CostQuota 消费额度（本仓无计费，但免费额度"消耗了多少"仍要记账）。
 	CostQuota int64 `gorm:"not null;default:0"`
 	// LatencyMs 单请求耗时，聚合里的 avg_latency 来自它（PLAN §2 D5：AVG 不是 P95）。

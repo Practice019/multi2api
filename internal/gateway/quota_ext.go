@@ -52,6 +52,33 @@ package gateway
 //   - 不得 panic（契约要求，与 Provider 一致）
 //   - 取不到额度时返回 `HasData=false`，**不要**返回一个 0 值充数
 //   - uid 不存在时返回 ok=false（而不是 error）
+//
+// # ⚠ 为什么不把各家的实现抽成共享骨架（T-335 调查 / T-341 复核）
+//
+// 5 个上游的 quotaext.go 产品代码行数（实测）：
+//
+//	cline 33 · lobsterai 33 · monkeycode 27 · qoder 36 · raccoon 33
+//
+// 即便**最相近**的一对（lobsterai vs raccoon），整文件 diff 仍有 26 行 —— 差异不在壳而在协议：
+//
+//	· 请求体字段名（balance / credits / quota / remaining …各家不同）
+//	· 余额字段名与单位（"积分" vs "剩余次数" vs "美元"）
+//	· 有的 POST、有的 GET；有的带分页、有的不带
+//
+// ⇒ 只抽得动"包装成 QuotaView"那 2~3 行，而参数化要收 5+ 个（请求构造 / 解析 / 单位换算），
+//
+//	调用点会比各自实现更难读。
+//
+// ⇒ 结论：每家自己解释自己的额度口径。这与 errorclassifier 同一条判据
+//
+//	（"上游的语义只能由上游自己解释"；判例：workbuddy 的裸数字 12153 曾被拿去判 codearts
+//	的错误体，把健康账号永久禁用）。
+//
+// # 将来若要抽，前提是
+//
+//  1. 先有三家以上**请求体与响应字段完全同构**的实测证据；
+//  2. 单位换算与"取不到时怎么办"有统一口径 —— 本仓现在连"取不到额度该显示 0 还是 —"
+//     都还没统一（各家 QuotaView.HasData / FreeKnown 的语义不同）。
 type QuotaExt interface {
 	// RefreshQuota 取某个账号的当前额度。
 	//

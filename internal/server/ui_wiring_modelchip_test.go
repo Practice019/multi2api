@@ -74,7 +74,7 @@ func TestModelChipKeepsDropdownSync(t *testing.T) {
 // 复制是**无声**操作：没有手型光标、按下也没位移时，用户点完不知道
 // 到底成没成（toast 会飘走，之后再想确认只能再点一次）。
 func TestModelChipHasPointerCursor(t *testing.T) {
-	src := readWebUI(t)
+	src := readFrontendCSS(t)
 	if !strings.Contains(src, ".chips .chip{cursor:pointer}") {
 		t.Error("缺少 .chips .chip{cursor:pointer} —— 卡片看起来不可点")
 	}

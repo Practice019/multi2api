@@ -113,8 +113,23 @@ func verdictRank(v string) int {
 
 // ServiceBlock 服务总体状态 + 进程身份。
 type ServiceBlock struct {
-	Status            string   `json:"status"`
-	Warnings          []string `json:"warnings"`
+	Status string `json:"status"`
+	// Warnings **影响 verdict 的**告警 —— 用户看到它就该去处理
+	//（CPU/内存/磁盘超阈值、成功率低、采样不可用、窗口内有错误请求…）。
+	//
+	// # 为什么与 Notes 分开（T-440，实测误判）
+	//
+	// 改造前两者混在这一个数组里、页面用**同一种样式**渲染 ⇒
+	// 实测后果：看页面的人把"Redis 未启用"当成了整页 critical 的原因，
+	// 于是去查/去改一个**本来没问题**的判据（真凶是磁盘 97%）。
+	// ⇒ 分开之后，"哪条让它变红"一眼可见。
+	Warnings []string `json:"warnings"`
+	// Notes **配置事实 / 降级说明** —— 不改 verdict
+	//（如「Redis 未启用，当前走内存 + 本地文件降级，不影响请求链路」）。
+	//
+	// ⚠ 判据：**它是不是"恒定的"**？恒定的（改配置前永远为真）属于 Notes；
+	//   随负载/时间变化的才属于 Warnings（否则就是永远响的警报 ⇒ 警报疲劳）。
+	Notes             []string `json:"notes,omitempty"`
 	Version           string   `json:"version"`
 	GoVersion         string   `json:"go_version"`
 	Runtime           string   `json:"runtime"`
@@ -277,6 +292,8 @@ func BuildStatus(snap Snapshot, src Sources) StatusPayload {
 		version = "dev"
 	}
 	warnings := make([]string, 0, 4)
+	// notes 配置事实/降级说明（不改 verdict）—— 与 warnings 的差别见 ServiceBlock 的注释。
+	notes := make([]string, 0, 2)
 
 	// ── 资源三档 + 采样失败（采样失败**必须**说出来：0 不是读数）
 	res := ResourceBlock{
@@ -329,14 +346,19 @@ func BuildStatus(snap Snapshot, src Sources) StatusPayload {
 	}
 
 	// ── Redis：**只加文案，不改 status**（§0.5 与任务书的硬口径）
+	//
+	// ★ T-440：这句从 warnings 挪到 **notes** —— 它是**配置事实**（改配置前永远为真），
+	//   不是"随负载变化的告警"。混在 warnings 里已经造成过一次真实误判：
+	//   看页面的人把整页 critical 归因给 Redis，而真凶是磁盘 97%（同页的 resource 块）。
 	if src.RedisMode == "" || src.RedisMode == "noop" {
-		warnings = append(warnings, "Redis 未启用（当前走内存 + 本地文件降级），不影响请求链路")
+		notes = append(notes, "Redis 未启用（当前走内存 + 本地文件降级），不影响请求链路")
 	}
 
 	payload := StatusPayload{
 		Service: ServiceBlock{
 			Status:            verdict,
 			Warnings:          warnings,
+			Notes:             notes,
 			Version:           version,
 			GoVersion:         runtime.Version(),
 			Runtime:           runtime.GOOS + "/" + runtime.GOARCH,

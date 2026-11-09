@@ -46,7 +46,7 @@ const (
 func Classify(status int, body string) gateway.ErrorKind {
 	lower := strings.ToLower(body)
 
-	if containsAny(lower, hardCreditMarkers) {
+	if gateway.ContainsAny(lower, hardCreditMarkers) {
 		return gateway.ErrKindHardCredit
 	}
 
@@ -74,15 +74,6 @@ var hardCreditMarkers = []string{
 	"额度不足",
 	"余额不足",
 	"配额不足",
-}
-
-func containsAny(s string, needles []string) bool {
-	for _, n := range needles {
-		if strings.Contains(s, n) {
-			return true
-		}
-	}
-	return false
 }
 
 // IsInBandError 报告一个 SSE 帧是否是 Qoder 的错误帧。

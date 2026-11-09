@@ -63,6 +63,19 @@ func (h *Handler) apiKeysList(w http.ResponseWriter, r *http.Request) {
 	// 判据住在存储层（apikey.ListFor）：它先判身份再看归属，空 owner + 非管理员
 	// 直接回空表。见那里的长注释 —— 那个"空 owner 也是空串"的坑是本次最危险的
 	// 一处（写反了就把管理员的 key 整列表端给成员）。
+	// ★ T-459：完整凭据**不得进任何缓存**。
+	//
+	// 本响应会带着 `admin_token_full`（完整管理令牌）与 `admin_key_full`（不限额的对话密钥）。
+	// 一旦被缓存 —— 浏览器 bfcache 会把它留到下次前进/后退，中间代理可能落盘 ——
+	// 完整令牌就留在了磁盘上，而它是"接管网关"的那把钥匙。
+	//
+	// ⚠ 下面 L79-83 那段注释一直承诺"浏览器缓存…带不出去"，但**没有这个头那句话就不成立** ✗
+	//   ⇒ 这行头是把那句承诺变成事实的那一步。
+	// 与 tokens.go 的明文端点**同一个常量**（credentialCacheControl）—— 不再各写一份字面量：
+	// T-460 统一之前这里只有 "no-store"，而 tokens.go 用的是更强的四指令串 ⇒
+	// "同一条纪律两个写法"本身就是隐患（下一个人会以为其中一处是笔误，然后统一成错的那个）。
+	w.Header().Set("Cache-Control", credentialCacheControl)
+
 	p := h.principalFrom(r)
 	keys := s.ListFor(p.UserID, p.IsAdmin())
 

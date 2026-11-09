@@ -29,6 +29,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // filePrefix 凭证文件名前缀。LoadDir 按 `trae*.json` 通配。
@@ -348,14 +350,10 @@ func sanitizeFilePart(s string) string {
 	return out
 }
 
-// shortUID 取 UID 前 8 位供日志与展示名使用（按字符，避免劈开多字节）。
-func shortUID(uid string) string {
-	rs := []rune(uid)
-	if len(rs) <= 8 {
-		return uid
-	}
-	return string(rs[:8])
-}
+// shortUID 日志用的短 uid（T-403 起改用**共享实现**）。
+// ⚠ 别名不是复制：实现只有 gateway.ShortUID 一处。
+// 旧实现取前 8 位 ⇒ trae 的纯数字 uid（`3929003642848586`）前 8 位是时间戳，会撞车。
+var shortUID = gateway.ShortUID
 
 // firstNonEmpty 返回第一个非空串（用于多来源字段的兼容读取）。
 func firstNonEmpty(vals ...string) string {

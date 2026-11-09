@@ -45,7 +45,11 @@
 package loomy
 
 import (
+	"context"
+	"errors"
 	"log"
+	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +70,86 @@ const quotaFailLogInterval = 5 * time.Minute
 // quotaFailLogAt 记录每个 uid 上次打失败日志的时刻。
 var quotaFailLogAt sync.Map // uid -> time.Time
 
+// upstreamCodeRe 匹配 pointsCall 抛出的**业务码失败**原文里的 6 位码。
+//
+// 形态固定（见 pointsCall）：`loomy: 积分接口 /points/records?… 返回 100002: 登录已失效，请重新登录`
+var upstreamCodeRe = regexp.MustCompile(`返回 (\d{6}):`)
+
+// quotaFailReason 把一条额度查询 error 归成"给用户看的一档原因"。
+//
+// # 为什么要分档（用户原话："这个查询失败，其实有可能是网络的原因"）
+//
+// 改造前所有失败都打成同一句"积分网关查额度失败"，于是**网络抖动**与
+// **账号被停用**在日志里长得一模一样 —— 用户会去删一个其实只是网络抖了一下的健康号。
+//
+// # 判据只认三类（够用，不多加）
+//
+//	· 网络/超时：net.Error 或 context.DeadlineExceeded
+//	· 上游拒绝：error 里含 "返回 " + 6 位业务码（pointsCall 的固定形态）
+//	· 其余（回执不是 JSON / 缺 balance 字段 / 其它）：归"回执异常"
+func quotaFailReason(err error) (reason string, hint string) {
+	if err == nil {
+		return "未知", ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "超时", "网络慢或上游无响应，稍后会自动重试"
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return "网络失败", "连不上上游，稍后会自动重试"
+	}
+	if m := upstreamCodeRe.FindStringSubmatch(err.Error()); m != nil {
+		return "上游拒绝", "业务码 " + m[1] + "：见同行的上游原文"
+	}
+	return "回执异常", "上游响应不符合预期"
+}
+
+// trimLoomyPrefix 去掉 error 里重复的 `loomy: ` 前缀。
+//
+// ⚠ 为什么需要它：本包的 error 大多由 `fmt.Errorf("loomy: …")` 造出来，
+// 而日志本身又带了 `loomy` 前缀 ⇒ 打出来是 `loomy 额度查询失败 …: loomy: 调用积分接口失败…`
+// —— 前缀重复两遍。这里循环 trim（因为可能被包了多层）。
+func trimLoomyPrefix(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	for strings.HasPrefix(s, "loomy: ") {
+		s = strings.TrimPrefix(s, "loomy: ")
+	}
+	return s
+}
+
+// cacheMiss 统计"本机缓存不覆盖该 uid"的次数（L188 那条日志的替代）。
+//
+// # 为什么不再每个号打一条
+//
+// 「本机缓存只对本机登录的那一个账号有效」是**设计内的正常情况**，不是异常。
+// 116 个号 × 每 5 分钟刷新 = 每天最多 3 万条纯噪音（用户抱怨"可读性不好"的正是这类）。
+// ⇒ 改成每 quotaFailLogInterval 汇总一行，说清"有多少号只能靠积分网关查"。
+var cacheMiss struct {
+	mu   sync.Mutex
+	n    int
+	last time.Time
+}
+
+// noteCacheMiss 记一次缓存不覆盖，每 quotaFailLogInterval 最多汇总打一行。
+func noteCacheMiss() {
+	cacheMiss.mu.Lock()
+	cacheMiss.n++
+	n := 0
+	if cacheMiss.last.IsZero() || time.Since(cacheMiss.last) >= quotaFailLogInterval {
+		n = cacheMiss.n
+		cacheMiss.n = 0
+		cacheMiss.last = time.Now()
+	}
+	cacheMiss.mu.Unlock()
+	if n > 0 {
+		log.Printf("loomy 有 %d 个账号的额度只能靠积分网关查（本机缓存只覆盖 1 个号）—— 这是设计内正常情况；"+
+			"若紧接着还有「额度查询失败」的日志，那才是要看的", n)
+	}
+}
+
 // logQuotaFail 打一条失败日志，但同一 uid 在 quotaFailLogInterval 内只打一条。
 func logQuotaFail(uid string, err error) {
 	now := time.Now()
@@ -75,8 +159,14 @@ func logQuotaFail(uid string, err error) {
 		}
 	}
 	quotaFailLogAt.Store(uid, now)
-	log.Printf("loomy: 积分网关查额度失败 uid=%s: %v（回落到本机缓存）",
-		shortUID(uid), err)
+	// ★ 2026-11-09 文案重写（用户抱怨"可读性不好"）：
+	//   ① 按**失败类型**分档打印（网络/上游拒绝/回执异常）—— 否则网络抖动与账号停用长得一样
+	//   ② 去掉重复的 `loomy: ` 前缀（err 自身带一个、日志前缀又带一个）
+	//   ③ **删掉"（回落到本机缓存）"** —— 那是假的：调用方紧接着就返回"额度未知"，
+	//      并没有回落成功（真正回落成功的那条路径在下面单独打"已改用本机缓存值"）
+	reason, hint := quotaFailReason(err)
+	log.Printf("loomy 额度查询失败 uid=%s（%s）: %s —— %s",
+		shortUID(uid), reason, trimLoomyPrefix(err), hint)
 }
 
 // RefreshQuota 取该账号的当前额度（gateway.QuotaExt）。
@@ -186,8 +276,11 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	//
 	// 所以 uid 不匹配时**明确回答未知**。这不是保守，是唯一正确的答案。
 	if sess.UID != uid {
-		log.Printf("loomy: 额度未知 —— 本机客户端登录的是 %s，而被问的是 %s"+
-			"（缓存只对本机登录的那个账号有效）", shortUID(sess.UID), shortUID(uid))
+		// ★ 2026-11-09 文案重写（原来这里每个号每轮都打一条，且文案用了「被问的」这种
+		//   自造词、也没说清"为什么查不到" —— 用户不知道存在本地客户端）。
+		//   现在：**不在每个号上打**，只计数；由 noteCacheMiss 每 5 分钟汇总一行。
+		//   理由：缓存只覆盖本机登录的那一个号，这是**设计内正常情况**，不是异常。
+		noteCacheMiss()
 		return gateway.UnknownQuota(), true
 	}
 
@@ -208,6 +301,11 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	if pts.DailyKnown {
 		q = q.WithFree(clampNonNegative(pts.DailyBalance))
 	}
+	// ★ 2026-11-09：**真正**回落成功时才说"已改用本机缓存值"。
+	//   旧文案在失败路径上就写"回落到本机缓存"，而那条路径紧接着返回"额度未知" ——
+	//   等于对用户撒谎（用户会以为额度还有效）。这里才是回落真的生效的地方。
+	log.Printf("loomy 积分网关查不到，已改用本机缓存值 uid=%s（缓存更新于客户端上次写入，非此刻）",
+		shortUID(uid))
 	return q, true
 }
 

@@ -276,6 +276,9 @@ func fillLoginOptions(login *providerLogin, p gateway.Provider) {
 
 // manualLogin 手动完成登录的端点与指引文案（上游自报，核心不造）。
 type manualLogin struct {
+	// Page 为 true 表示 Path 是一个**页面**（用户在页内完成登录），
+	// 而不是"粘贴回跳 URL"的 POST 端点。由上游经 gateway.ManualLoginPageExt 自报。
+	Page         bool   `json:"page,omitempty"`
 	Path         string `json:"path"`
 	Instructions string `json:"instructions"`
 }
@@ -346,4 +349,8 @@ func fillManualLogin(login *providerLogin, p gateway.Provider) {
 		return
 	}
 	login.Manual = &manualLogin{Path: path, Instructions: instructions}
+	// ★ T-326：由上游自报"这个 path 是页面还是粘贴端点"（前端据此分流，不按上游名）。
+	if pageExt, ok := gateway.ExtOf[gateway.ManualLoginPageExt](p); ok && pageExt.ManualLoginIsPage() {
+		login.Manual.Page = true
+	}
 }

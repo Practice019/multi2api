@@ -41,32 +41,26 @@ var _ gateway.AccountImportExt = (*Provider)(nil)
 
 // ImportCredentials 把用户粘贴的 JSON 转成可落盘的 codearts 凭证。
 func (p *Provider) ImportCredentials(pasted string) ([]gateway.ImportedCredential, error) {
-	items, err := gateway.SplitAccountImportItems(pasted)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]gateway.ImportedCredential, 0, len(items))
-	for _, raw := range items {
-		a, perr := ParseCredential([]byte(raw))
+	// T-330/T-331：分割 / 汇总 / 逐条失败语义都在 gateway.ImportCredentialsGeneric 里。
+	return gateway.ImportCredentialsGeneric(pasted, func(item string) (gateway.ImportedCredential, error) {
+		a, perr := ParseCredential([]byte(item))
 		if perr != nil {
-			return nil, perr
+			return gateway.ImportedCredential{}, perr
 		}
 		if strings.TrimSpace(a.UID) == "" {
-			return nil, errNoImportUID
+			return gateway.ImportedCredential{}, errNoImportUID
 		}
 		b, merr := a.MarshalNested()
 		if merr != nil {
-			return nil, merr
+			return gateway.ImportedCredential{}, merr
 		}
-		out = append(out, gateway.ImportedCredential{
-			// 文件名与 cmd/login 及 core 的落盘惯例一致：`codearts-<uid>.json`。
+		return gateway.ImportedCredential{
 			FileName: "codearts-" + sanitizeFileName(a.UID) + ".json",
 			Raw:      b,
 			UID:      a.UID,
 			Nickname: a.Nickname,
-		})
-	}
-	return out, nil
+		}, nil
+	})
 }
 
 // sanitizeFileName 把不适合做文件名的字符换掉。

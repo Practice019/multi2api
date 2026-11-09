@@ -1,6 +1,7 @@
 package monkeycode
 
 import (
+	"os"
 	"testing"
 
 	"workbuddy2api/internal/gateway"
@@ -69,10 +70,34 @@ func TestManualLoginDiscoverable(t *testing.T) {
 //
 //	它不是纯逻辑用例，别把它当单元测试用。
 func TestStartReturnsEmptyAuthURL(t *testing.T) {
+	// ★ T-456：**默认跳过**（原来只在 -short 时跳）。
+	//
+	// # 为什么改成"默认不跑"（用户实测报障）
+	//
+	// 用户原话：「Monkey Code 的测试，每次打开那个网页，它不会自动关掉，
+	//            测试结束之后也不会关，就一直堆积在这里。」
+	// 实测：这条用例每次跑都在 **D:\temp** 建一个 **525 MB** 的 Edge profile
+	//（用户的 %TEMP% 就是 D:\temp），攒了 24 个 ≈ 12 GB，1 小时吃掉 8 GB 磁盘。
+	//
+	// 三个原因叠加：
+	//   ① `New(Config{})` 的 authDir 为空 ⇒ 旧 profileRoot() 返回 "" ⇒
+	//      makeProfileDir 回落到 os.TempDir()（已由 profileRoot 的改动修掉 ✓）
+	//   ② 它只在 -short 时跳过 ⇒ `go test ./...` 每次都跑
+	//   ③ 测试超时被杀 / Ctrl-C 时 t.Cleanup 不执行 ⇒ 浏览器留着
+	//
+	// # 现在两道闸
+	//
+	//   · 必须显式开 `WB_BROWSER_LOGIN_TEST=1`（与 killtree_windows_test.go 的
+	//     `WB_KILLTREE_EDGE=1` 同一模式：**会真起浏览器的用例一律如此**）
+	//   · 即使开了，profile 也建在 `t.TempDir()` 下（测试结束 Go 自动清）
+	if os.Getenv("WB_BROWSER_LOGIN_TEST") == "" {
+		t.Skip("默认跳过（会真起浏览器并占用约 500MB 磁盘）：设 WB_BROWSER_LOGIN_TEST=1 开启")
+	}
 	if testing.Short() {
 		t.Skip("-short 跳过：Start 会真起浏览器（StartBrowserLogin）")
 	}
-	p := New(Config{})
+	// ⚠ 目录必须落在**测试临时目录** —— 建到别处就会污染用户的 %TEMP%（这就是报障根因）。
+	p := New(Config{AuthDir: t.TempDir()})
 	state, authURL, err := p.Start()
 	if err != nil {
 		t.Fatalf("Start 失败: %v", err)

@@ -320,6 +320,10 @@ func TestDedupeLogsDiscardedFile(t *testing.T) {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	// ★ T-451：**必须清空指纹表**。codearts 冲突日志改成"只在结论变化时打"之后，
+	// 别的测试留下的指纹会把这条"首次"判成"重复" ⇒ 一条都不打 ⇒ 本测试假红 ✗
+	//（真实原因不是"日志丢了"，而是**包级状态跨测试污染** ⇒ 每个捕获日志的测试都要独立）。
+	resetConflictLog()
 	defer func() {
 		log.SetOutput(oldOut)
 		log.SetFlags(oldFlags)
@@ -331,7 +335,7 @@ func TestDedupeLogsDiscardedFile(t *testing.T) {
 	if got == "" {
 		t.Fatalf("丢弃凭证时没有产生任何日志 —— 用户无法知道丢了哪份、为什么丢")
 	}
-	// uid 只打**前 8 位**（不打整串）。
+	// uid 打**压缩形态**（不是整串，也不是纯前 8 位）。
 	//
 	// ⚠ 这里原来写的是 `strings.Contains(got, uid[:8])` —— 那条**恒真**，
 	// 抓不到任何东西。原因：不截断时日志里是**完整的 32 位 uid**，
@@ -341,14 +345,25 @@ func TestDedupeLogsDiscardedFile(t *testing.T) {
 	// 说明"截断"这条行为**当时没有任何断言覆盖**。
 	//
 	// 正确判据要**双向**：
-	//   · 必须含前 8 位（证明它确实打了 uid）
+	//   · 必须含可区分片段（证明它确实打了 uid）
 	//   · 必须**不含完整 uid**（证明它确实截断了）
 	// 只写前一条 = 假断言；只写后一条 = 打空也能过。
-	if !strings.Contains(got, uid[:8]) {
-		t.Errorf("日志里没有 uid 前 8 位 %q —— 用户无法辨认是哪个账号。实际日志=%q", uid[:8], got)
+	//
+	// ★ T-404 更新：判据从"含前 8 位"改成"含压缩形态的**首尾两段**"。
+	//   原意图不变（日志必须能**唯一确定**是哪个号，且不能打全串挤掉可读信息），
+	//   只是表示法变了：T-403 起 ShortUID 输出 "前4 + … + 后8" ——
+	//   因为纯取前 8 位在 loomy（44 个号同前缀）/ monkeycode（前缀全同一个词）等上游会**全撞车**，
+	//   而本仓历史上正有 **8 份**这样的复制实现（现收敛为 logbuf.ShortUID 一处）。
+	//
+	// ⚠ 期望值**手写**，不用 ShortUID(uid) 算 —— 那是同义反复（实现改错测试跟着错）。
+	//   本测试的 uid 字面量是 32 位十六进制，以 01a0 开头、以 09692b80 结尾。
+	const wantHead, wantTail = "01a0", "09692b80"
+	if !strings.Contains(got, wantHead) || !strings.Contains(got, wantTail) {
+		t.Errorf("日志里没有 uid 的可区分片段（前 4 %q / 后 8 %q）—— 用户无法辨认是哪个账号。实际日志=%q",
+			wantHead, wantTail, got)
 	}
 	if strings.Contains(got, uid) {
-		t.Errorf("日志里出现了**完整 uid**（32 位）—— 应只打前 8 位，"+
+		t.Errorf("日志里出现了**完整 uid**（32 位）—— 应只打压缩形态，"+
 			"整串会把真正可读的信息挤掉。实际日志=%q", got)
 	}
 	// 选中的与被丢弃的文件名都要在
@@ -383,6 +398,10 @@ func TestDedupeNoLogWhenNoConflict(t *testing.T) {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	// ★ T-451：**必须清空指纹表**。codearts 冲突日志改成"只在结论变化时打"之后，
+	// 别的测试留下的指纹会把这条"首次"判成"重复" ⇒ 一条都不打 ⇒ 本测试假红 ✗
+	//（真实原因不是"日志丢了"，而是**包级状态跨测试污染** ⇒ 每个捕获日志的测试都要独立）。
+	resetConflictLog()
 	defer func() {
 		log.SetOutput(oldOut)
 		log.SetFlags(oldFlags)
@@ -510,6 +529,10 @@ func TestSyncEmptyDirReturnsZero(t *testing.T) {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	// ★ T-451：**必须清空指纹表**。codearts 冲突日志改成"只在结论变化时打"之后，
+	// 别的测试留下的指纹会把这条"首次"判成"重复" ⇒ 一条都不打 ⇒ 本测试假红 ✗
+	//（真实原因不是"日志丢了"，而是**包级状态跨测试污染** ⇒ 每个捕获日志的测试都要独立）。
+	resetConflictLog()
 	defer func() {
 		log.SetOutput(oldOut)
 		log.SetFlags(oldFlags)

@@ -505,10 +505,25 @@ func (h *Handler) allowTokenReveal(w http.ResponseWriter, r *http.Request) bool 
 
 // noStore 禁止任何一层缓存明文。
 //
+// credentialCacheControl 含**完整凭据**的响应统一用这个 Cache-Control 值。
+//
+// # 为什么是这一串（不是只写 no-store）
+//
+// no-cache 允许"存下来但每次校验" ⇒ 中间代理仍可能把它落盘；
+// 而完整凭据（管理令牌 / 对话密钥）一旦进了代理缓存，就再也不受我们的 no-store 约束了。
+// 所以四个指令一起给。
+//
+// # 为什么提取成常量
+//
+// 这个值原来在 tokens.go 与 apikeys.go 各写一份 ⇒ 迟早分叉（T-460 统一时已经发现：
+// apikeys.go 那处只有 "no-store"）⇒ 提取后**只可能有一个值**，把"分叉"从制度上消灭。
+// ⚠ 引用方：tokens.go 的明文端点、apikeys.go 的 /admin/apikeys（完整管理令牌）。
+const credentialCacheControl = "no-store, no-cache, must-revalidate, private"
+
 // no-store 而不是 no-cache：no-cache 允许"存下来但每次校验"，中间代理仍可能落盘；
 // 明文 key 一旦进了代理缓存，就再也不受我们的 no-store 约束了。
 func noStore(w http.ResponseWriter) {
-	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+	w.Header().Set("Cache-Control", credentialCacheControl)
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
 }

@@ -29,6 +29,7 @@ import (
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/clientlogin"
 	"workbuddy2api/internal/cline"
+	"workbuddy2api/internal/codar"
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/groupstore"
@@ -1114,6 +1115,50 @@ func main() {
 		}
 	}
 
+	// ---- Codar（科搭 / SpeedAI）：第十七上游 ----
+	//
+	// 它和别家不同的地方（T-310/T-311 实测）：
+	//   · 请求体**字节级透传**即可（上游就是标准 OpenAI，多余字段不报错）；
+	//   · SSE 必须带 Accept-Encoding: identity（压缩流会坏帧）；
+	//   · 模型目录**免鉴权**（GET /v1/codar/models）；
+	//   · 4 个 claude 系模型走 /v1/messages + x-api-key（本包按 model 自动选路）。
+	//
+	// ⚠⚠ 这段**不得**嵌在别的上游的条件块里。T-462 实测：它曾整块被误放进
+	//   `if mk != nil && cfg.MonkeyCodePoolAccounts { ... }` 内部 ⇒
+	//   monkeycode 关着（或 pool_accounts=false）时 codar **完全不注册**：
+	//   注册表里没有它、`/admin/channels` 的候选里却有它、日志里一句 "codar: 已启用" 也不打，
+	//   用户看到的现象是"这版新增的上游根本不存在"。上游之间不共享启用条件。
+	if cfg.CodarEnabled {
+		cd := codar.NewWithConfig(codar.Config{
+			AuthDir: cfg.CodarAuthDir,
+			APIBase: cfg.CodarAPIBase,
+			// ★ T-351：**必须传** —— 漏了它 recordSign/recordClaim 会在 p.log == nil 时静默 return，
+			//   于是「今日签到」列永远是 —（用户截图报的 bug）。契约测试抓不到这种漏配。
+			Log: checkinLog,
+		})
+		// 注入凭证访问器：管理端点（用量/余额/签到状态/免费模型）要按 uid 取活凭证。
+		// 上游不得 import pool，故由装配层适配进来（与 lobsterai 同一模式）。
+		cd.SetCredentialSource(func(uid string) (gateway.Credential, bool) {
+			secret, ok := p.SecretOf(uid)
+			if !ok {
+				return gateway.Credential{}, false
+			}
+			a, ok := secret.(*codar.Auth)
+			if !ok || a == nil {
+				return gateway.Credential{}, false
+			}
+			return gateway.Credential{Provider: codar.ProviderID, UID: uid, Nickname: a.Nickname, Secret: a}, true
+		})
+		if err := registry.Register(cd); err != nil {
+			log.Fatalf("注册 Codar 上游失败: %v", err)
+		}
+		n := 0
+		if cfg.CodarPoolAccounts {
+			n = syncCodarAccounts(p, cfg.CodarAuthDir)
+		}
+		log.Printf("codar: 已启用（凭证目录 %s，并池 %d 个账号）", cfg.CodarAuthDir, n)
+	}
+
 	if mk != nil && cfg.MonkeyCodePoolAccounts {
 		if n := syncMonkeyCodeAccounts(p, cfg.MonkeyCodeAuthDir); n > 0 {
 			log.Printf("monkeycode: 已并入账号池 %d 个账号", n)
@@ -1236,6 +1281,36 @@ func main() {
 		// 注册表交给调度器：它自己发现各上游的 JobExt 任务（签到/保活/成长/旅行守卫轮）。
 		Registry: registry,
 	})
+	// ★ T-427：**统一签到**（核心自带任务，跨上游）。
+	//
+	// 8 个上游都实现了 DailyCheckinExt，但改造前**只有 2 个**（trae / workbuddy）
+	// 注册了签到 Job ⇒ 另外 6 个的自动签到**静默失效**
+	//（用户实测：codar 两个号只能手动签，checkin-log.json 里 trigger=schedule 记录 0 条）。
+	// ⇒ 一处注册 + 运行时用 ExtOf 发现所有实现者 ⇒ 未来新增上游零注册代码。
+	//
+	// ⚠ **走 AddJob 而不是给 Config 加字段**：本仓既有惯例就是它
+	//   （AddJob 的注释写着"注册一条核心自带的任务（如账号池健康检查）"），
+	//   而这条与健康检查同类 —— **跨上游、不属于任何单个上游**；
+	//   顺带不动 Config 的公开结构（加字段会让所有构造 Config 的地方都要看一眼）。
+	// ⚠ 间隔 1 小时（用户明确否掉了 30 分钟）；幂等由 Job 内部的内存闸门保证
+	//   （今天已成功扫过的上游连 CheckinAll 都不调 —— 见 dailycheckin.go 文件头）。
+	// ⚠ 第三个参数是**账号禁用/恢复能力**（T-433）：Job 层拿到签到结果后，
+	//   凭据类失败 ⇒ RecordAutoDisableFailure，成功/已签 ⇒ RecordAutoDisableSuccess。
+	//   传 pool（`p`）而不是包一层适配器：它本来就满足那个 2 方法接口。
+	//   ⚠ 走接口而非具体类型：调度器不该 import pool（见 DisableRecorder 的注释）。
+	//
+	// ⚠⚠ 2026-11-09 12:35 曾**临时停用**（T-434 第一步：止损）：
+	//   实测 12:24:39→12:32:20 共 12 条扫描记录（**约 40 秒一次**）——
+	//   3 个失效号每天约 4300 次请求，而 codar 面板写着「上游已有风控记录，请低频使用」。
+	//   根因：`jobDue` 的既定语义是「**有 Due 就完全交给 Due**」（Interval 被有意忽略，
+	//   见 internal/scheduler/job.go 的注释）⇒ 我们这条 Job 的 Due 对"上一轮失败的上游"
+	//   永远返回 true ⇒ 变成每个调度 tick 都重试。
+	// ✅ 2026-11-09 12:4x **已修复并恢复**（T-435）：needSweep 增加第二道闸门
+	//   「距上次尝试 ≥ retryFloor（30 分钟）」，由 TestDailyCheckinJobRespectsRetryFloor 守着。
+	//   ⚠ 教训：**有 Due 的任务必须自己管时间下限** —— 不要指望 Interval 叠加。
+	if !sch.AddJob("core", scheduler.NewDailyCheckinJob(registry, checkinLog, p)) {
+		log.Printf("统一签到任务注册失败（同名任务已存在？）—— 自动签到将不会运行")
+	}
 	// 历史落库经核心：格式跨上游统一，Nickname 由核心从账号池补。
 	wb.SetCore(schedulerAdapter{sch: sch, checkinOn: cfg.Schedule.CheckinEnabled, keepaliveOn: cfg.Schedule.KeepaliveEnabled})
 	// 管理端点的核心依赖（/admin/schedule 的时点 + 与签到/保活共用的任务槽）。
@@ -1352,6 +1427,42 @@ func main() {
 	//	· models_csv → models 的一次性回填（A1，幂等）
 	// 启动日志打表数：让"迁移跑到了没有"有一个可复现的第一现场。
 	log.Printf("数据层: 已打开 %s（%d 张表）", dbPath, len(sqlstore.Tables()))
+
+	// ★ T-386：日聚合（log_daily）的两件启动期工作。
+	//
+	//   ① 回填：T-386 上线**之前**写进 logs 的历史没有日聚合，不回填的话
+	//      用户的 365 天热力图只有上线以后的日期。幂等（以 logs 为真相，覆盖式 upsert），
+	//      所以每次启动都跑。
+	//   ② 裁剪：logs 明细以前**完全没有裁剪**（会无限长）。按既有配置
+	//      request_log_keep_days（默认 7，这里下限 7 天）删旧行 —— **绝不碰 log_daily**。
+	//
+	// 两者都放在 Migrate 之后、服务开始接请求之前；失败只记日志（不能让数据层小毛病挡住启动）。
+	go func() {
+		t0 := time.Now()
+		days, berr := sqlstore.BackfillLogDaily()
+		if berr != nil {
+			log.Printf("日聚合回填失败（热力图仍可读 logfile 回落）: %v", berr)
+		} else if days > 0 {
+			log.Printf("日聚合回填完成：%d 天，耗时 %s", days, time.Since(t0).Round(time.Millisecond))
+		}
+		keep := cfg.RequestLogKeepDays
+		if keep < 7 {
+			keep = 7 // 排障至少一周
+		}
+		if n, perr := sqlstore.PruneLogs(keep); perr != nil {
+			log.Printf("logs 明细裁剪失败: %v", perr)
+		} else if n > 0 {
+			log.Printf("logs 明细裁剪：删除 %d 行（保留 %d 天；log_daily 不受影响）", n, keep)
+		}
+		// 每 24h 一次（服务通常是长驻进程）
+		for range time.Tick(24 * time.Hour) {
+			if n, perr := sqlstore.PruneLogs(keep); perr != nil {
+				log.Printf("logs 明细裁剪失败: %v", perr)
+			} else if n > 0 {
+				log.Printf("logs 明细裁剪：删除 %d 行（保留 %d 天）", n, keep)
+			}
+		}
+	}()
 
 	// API key 管理（对标 new-api 令牌体系）：config.api_key 是管理钥匙，
 	// 普通 key 走 data/apikeys.json（与 state.json 同级，CWD 相对）。
@@ -2258,8 +2369,30 @@ func (sqlLogWriter) WriteLog(e logbuf.Entry) error {
 		}
 		prompt = total - completion
 	}
+	// ★ T-386：同一条日志两处落库 ——
+	//   ① logs      明细，排障用，**按天裁剪**（见下面的 PruneLogs）
+	//   ② log_daily 日聚合，趋势/热力图用，**永不裁剪**
+	//
+	// 为什么在写日志时就累加、而不是零点跑批：跑批会丢"当天正在累积"的那半天，
+	// 而热力图是实时刷新的 —— 增量累加让当天的格子立刻有数。
+	//
+	// ⚠ 失败**绝不**影响请求路径：这个 writer 本来就跑在异步队列里，
+	// 日聚合写失败只记一条日志（热力图今天少一格），不能让请求失败或重试风暴。
+	day := sqlstore.DayOf(e.At)
+	cacheHit, cacheMiss := int64(0), int64(0)
+	if e.CacheHitTokens > 0 {
+		cacheHit = int64(e.CacheHitTokens)
+	}
+	if e.CacheMissTokens > 0 {
+		cacheMiss = int64(e.CacheMissTokens)
+	}
+	if derr := sqlstore.AppendLogDaily(day, success, int64(total), int64(completion), cacheHit, cacheMiss, float64(math.Round(e.Credit)), e.Model); derr != nil {
+		log.Printf("日聚合累加失败 day=%s（不影响请求；热力图这一格今天可能偏小）: %v", day, derr)
+	}
 	return sqlstore.AppendLog(sqlstore.Log{
 		CreatedAt:        e.At.Unix(),
+		CacheHitTokens:   int(cacheHit),
+		CacheMissTokens:  int(cacheMiss),
 		ModelName:        e.Model,
 		ChannelName:      e.Channel,
 		AccountUID:       e.UID,

@@ -40,61 +40,34 @@ var _ gateway.AccountImportExt = (*Provider)(nil)
 
 // ImportCredentials 把用户粘贴的 JSON 转成可落盘的 qoder 凭证。
 func (p *Provider) ImportCredentials(pasted string) ([]gateway.ImportedCredential, error) {
-	items, err := gateway.SplitAccountImportItems(pasted)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]gateway.ImportedCredential, 0, len(items))
-	for _, raw := range items {
-		// ⚠⚠ 必须在 ParseCredential **之前**读出原文里的 product_id。
-		//
-		// # 为什么不能直接看 ParseCredential 的结果（实测的缺陷）
-		//
-		// `ParseCredential` 内部会调 `normalize()`，而那里有一句
-		//
-		//	if a.ProductID == "" { a.ProductID = providerID }
-		//
-		// `providerID` 是**包级常量 "qoder"**（国际版）—— 它拿不到实例的产品。
-		// 于是"没写 product_id"被解析器**提前填成了国际版**，我下面那条
-		// "空则归本实例"的分支永远走不到：
-		//
-		//	国际版实例：空 → 填 "qoder" → 恰好等于本实例 → 放行（侥幸对）
-		//	中国版实例：空 → 填 "qoder" → ≠ "qodercn" → **被拒**
-		//
-		// 而用户看到的是「该凭证属于 qoder，不能在 qodercn 上导入」——
-		// 他根本没写 qoder、也没有国际版的号。那条错误把所有归因
-		// 都指向了错误的方向（这正是本项目最忌讳的：失败要指向真相）。
-		//
-		// 所以判据取**原文**（用户真正写下的东西），而不是解析器的兜底值。
-		explicit := explicitProductID(raw)
-
-		a, perr := ParseCredential([]byte(raw))
+	// T-331：分割 / 汇总 / 逐条失败语义共用；下面只保留 qoder 特有的两步：
+	//   ① 必须在 ParseCredential **之前**从原文读出 product_id（见 explicitProductID 的注释）
+	//   ② 导入时把 ProductID 归一到本实例的 productID
+	return gateway.ImportCredentialsGeneric(pasted, func(item string) (gateway.ImportedCredential, error) {
+		explicit := explicitProductID(item)
+		a, perr := ParseCredential([]byte(item))
 		if perr != nil {
-			return nil, perr
+			return gateway.ImportedCredential{}, perr
 		}
-		// 显式写了别的产品才拒；没写（或写成本实例）一律归本实例 ——
-		// 用户既然在 qodercn 的卡片上点了导入，意图就是 qodercn。
 		if explicit != "" && explicit != p.productID {
-			return nil, errWrongProduct(p.productID, explicit)
+			return gateway.ImportedCredential{}, errWrongProduct(p.productID, explicit)
 		}
 		a.ProductID = p.productID
-
 		uid := strings.TrimSpace(a.UIDValue())
 		if uid == "" {
-			return nil, errNoImportUID
+			return gateway.ImportedCredential{}, errNoImportUID
 		}
 		b, merr := MarshalAuthFile(a)
 		if merr != nil {
-			return nil, merr
+			return gateway.ImportedCredential{}, merr
 		}
-		out = append(out, gateway.ImportedCredential{
+		return gateway.ImportedCredential{
 			FileName: FileName(a),
 			Raw:      b,
 			UID:      uid,
 			Nickname: a.Nickname,
-		})
-	}
-	return out, nil
+		}, nil
+	})
 }
 
 // explicitProductID 从**用户粘贴的原文**里读出 product_id（没写返回空串）。
