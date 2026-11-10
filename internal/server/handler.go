@@ -165,6 +165,16 @@ type Config struct {
 	// 因此既有部署的行为只在"超限"这一条路径上发生变化。
 	MaxBodyMB int
 
+	// ReqDump 失败请求体的落盘器（可为 nil = 不落盘）。
+	//
+	// # 为什么它独立于请求日志（logbuf.Sink）
+	//
+	// 请求日志按行 JSON 存（高频追加、8 KiB 上限），而排障需要的恰恰是
+	// **被那 8 KiB 截掉的部分**。整份 body 进 JSONL 会让日志翻几十倍，
+	// 也会撑爆 /admin/logs 的内存环形缓冲 ⇒ 单独成文件、按天+配额裁剪。
+	// 见 internal/logbuf/reqdump.go 的文件头（那里记着催生它的那个死结）。
+	ReqDump *logbuf.ReqDump
+
 	// PromptGate 内容拦截降级状态机（可为 nil）。
 	//
 	// # 为什么它必须与出站客户端**共用同一个实例**
@@ -1957,7 +1967,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// upstreamErr 传 detail（= ferr.Error()，含上游原文；状态码非 2xx 时
 			// logChatRowProvider 会脱敏 + 截断后落盘）。
 			logChatRowProvider(0, time.Since(chStart), peek.Model, chMode, "", "",
-				st, -1, nil, "channel_error: "+detail, "", detail, 0,
+				st, -1, nil, "channel_error: "+detail, "", detail, h.cfg.ReqDump, 0,
 				gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 			// ⚠ 2026-10-21：渠道分支在 chatStat 之前就 return，所以 key 用量要在这里记。
 			//   不记的话界面上「请求」「失败」恒为 0（用户报的那个现象）。
@@ -1993,7 +2003,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		//   用户问"loomy 那些非流式请求是谁发的"时，日志无法回答。
 		//   账号池路径（L1610 st.clientIP）是取了的，渠道路径漏了 —— 两条路的观测能力不该不同。
 		logChatRowProvider(ttfbMs, time.Since(chStart), peek.Model, chMode, fw.KeyMask, "channel:"+fw.ChannelName,
-			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), "", "", 0,
+			fw.Stream.Status, tok, usageMap, "usage:"+string(usageSrc), "", "", h.cfg.ReqDump, 0,
 			gateway.ExtractClientIP(r), r.UserAgent(), fw.ChannelID, fw.UpstreamModel)
 		// ⚠ 2026-10-21：成功也记（tok 可能是 -1「未知」哨兵，BumpUsage 内部只在 >0 时累加）。
 		h.bumpKeyUsage(r, tok, true)
@@ -2081,6 +2091,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	// 失败请求体的完整落盘器（nil = 不落盘，见 Config.ReqDump 的注释）。
+	//
+	// ⚠ 必须在这里注入：chatStat 是"请求级"的观测对象，失败时由 done() 统一
+	//   落日志；把落盘器挂在它身上，两个出口（成功/失败）共用同一条赋值路径。
+	st.reqDump = h.cfg.ReqDump
 	// ⚠⚠ 2026-10-21：日志里的 model 必须用**内部名**，不是客户端发来的对外名。
 	//
 	// `newChatStat` 内部用 `parseModelFromBody(body)` —— 而 body 里是**原始请求体**，

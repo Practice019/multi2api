@@ -1906,6 +1906,21 @@ func main() {
 	//   于是**从来没执行过**（见 internal/loomy/panelwarmup.go 的教训记录）。
 	adminH.StartQuotaAutoRefresh()
 
+	// 失败请求体的完整落盘（排障用）。
+	//
+	// ⚠ 为什么不复用请求日志的 sink：JSONL 是**按行**的高频追加（8 KiB 上限），
+	//   而排障需要的恰恰是被那 8 KiB 截掉的部分；整份 body 进 JSONL 会让日志
+	//   体积翻几十倍，也会撑爆 /admin/logs 的内存环形缓冲。
+	// ⚠ 目录与 request-log 同源（都在 data/ 下），运维只需记住一个位置。
+	reqDumpDir := filepath.Join(filepath.Dir(cfg.RequestLogPath), "failed-req")
+	reqDump, derr := logbuf.NewReqDump(reqDumpDir, 0, 0)
+	if derr != nil {
+		log.Printf("失败请求体落盘不可用（不影响服务）: %v", derr)
+		reqDump = nil
+	} else if reqDump != nil {
+		log.Printf("失败请求体落盘: %s（最多 200 个 / 32 MiB，按天清理）", reqDumpDir)
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool: p,
 		// ⚠ 两个注入是**成对**的，都为了同一个目标：让核心不认识
@@ -1955,6 +1970,9 @@ func main() {
 		RedisMode:       redisMode,
 		SoftCooldown:    cfg.SoftRateDur,
 		MaxBodyMB:       cfg.Server.MaxBodyMB,
+		// 失败请求体的完整落盘（排障用；不进请求日志 JSONL）。
+		// dir 为空 ⇒ NewReqDump 返回 nil ⇒ 全链路 no-op（零成本）。
+		ReqDump: reqDump,
 		// 上游工具自动注入（loomy 的生图/搜索）。缺省开启，见 docs/chat-tools.md。
 		DisableChatTools: cfg.Server.DisableChatTools,
 		// ⚠ 必须是**同一个** promptGate 实例（与 up.PromptGate 一起给）：

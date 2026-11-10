@@ -36,7 +36,7 @@ func TestFailedRequestLogsUpstreamErrorBody(t *testing.T) {
 
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "codar/deepseek-v4.1-flash", "stream", uid, "codar",
-			http.StatusBadGateway, -1, nil, "provider_breaker:system", `{"model":"codar/deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"stream":true}`, body, 217, "10.0.0.9", "probe/1.0")
+			http.StatusBadGateway, -1, nil, "provider_breaker:system", `{"model":"codar/deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"stream":true}`, body, nil, 217, "10.0.0.9", "probe/1.0")
 	})
 
 	got := findEntryByUID(t, uid)
@@ -60,7 +60,7 @@ func TestSuccessRequestOmitsUpstreamErr(t *testing.T) {
 	captureStdout(t, func() {
 		// 即使调用方误传了 body，200 时也不该落盘。
 		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
-			http.StatusOK, 10, nil, "", `{"model":"x"}`, `should not be recorded`, 0, "", "")
+			http.StatusOK, -1, nil, "", `{"model":"x"}`, `should not be recorded`, nil, 0, "", "")
 	})
 	if got := findEntryByUID(t, uid); got.UpstreamErr != "" {
 		t.Errorf("成功请求不该带 upstream_err，得到 %q", got.UpstreamErr)
@@ -74,7 +74,7 @@ func TestUpstreamErrIsTruncatedUTF8Safe(t *testing.T) {
 	huge := strings.Repeat("上游返回了一整页错误说明；", 2000) // 远超 4 KiB，含中文
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
-			http.StatusBadGateway, -1, nil, "", `{"model":"x"}`, huge, 0, "", "")
+			http.StatusBadGateway, -1, nil, "", `{"model":"x"}`, huge, nil, 0, "", "")
 	})
 	got := findEntryByUID(t, uid).UpstreamErr
 	if len(got) == 0 {
@@ -110,7 +110,7 @@ func TestFailedRequestLogsUpstreamRequestBody(t *testing.T) {
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "codar/deepseek-v4.1-flash", "stream", uid, "codar",
 			http.StatusBadGateway, -1, nil, "provider_breaker:system", sent,
-			`{"detail":{"code":"client_not_supported"}}`, 100, "", "")
+			`{"detail":{"code":"client_not_supported"}}`, nil, 100, "", "")
 	})
 
 	got := findEntryByUID(t, uid)
@@ -130,7 +130,7 @@ func TestSuccessRequestOmitsUpstreamReq(t *testing.T) {
 	const uid = "upstream-req-uid-2"
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
-			http.StatusOK, 10, nil, "", `{"model":"x","messages":[{"role":"user","content":"big"}]}`, "", 0, "", "")
+			http.StatusOK, 10, nil, "", `{"model":"x","messages":[{"role":"user","content":"big"}]}`, "", nil, 0, "", "")
 	})
 	if got := findEntryByUID(t, uid); got.UpstreamReq != "" {
 		t.Errorf("成功请求不该带 upstream_req，得到 %q", got.UpstreamReq)
@@ -151,7 +151,7 @@ func TestUpstreamReqKeepsHeadAndTail(t *testing.T) {
 
 	captureStdout(t, func() {
 		logChatRowProvider(0, time.Second, "m", "stream", uid, "codar",
-			http.StatusBadGateway, -1, nil, "", sent, "boom", 0, "", "")
+			http.StatusBadGateway, -1, nil, "", sent, "boom", nil, 0, "", "")
 	})
 
 	got := findEntryByUID(t, uid).UpstreamReq
