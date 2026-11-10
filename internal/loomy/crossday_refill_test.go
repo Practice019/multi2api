@@ -5,12 +5,24 @@ import (
 	"time"
 )
 
-// TestResetKeepsHaveClearsZero 跨自然日：have **保留**、zero 清空。
+// TestResetClearsHaveAndZero 跨自然日：have / zero / free **全部清空**。
 //
-// 这是修「跨日后池子空 ⇒ empty 分支全体放开 ⇒ 烧永久额度」的第一半。
-// 用户的规则是"所有号免费额度用完才动永久"，而跨日那一刻我们只是
-// **还不知道**今天的余额，不是"已经用完了"。
-func TestResetKeepsHaveClearsZero(t *testing.T) {
+// # 契约变更（2026-11-10）
+//
+// 此前 have 是**保留**的（2026-11-02 起），那是一条绕开 empty 缺陷的权宜之计：
+// 那时的 empty 判据把"没有任何号被确认有免费额度"当成了"所有号都没有"，
+// 清空 have 正好让它成立 ⇒ 全体放开 ⇒ 烧永久额度。
+//
+// empty 已修（要求本批候选一个未探测的都没有，见 TestPoolEmptyRequiresNoUnknown），
+// 于是保留 have 只剩坏处：它的号**没有今日基准**（free 已清）⇒ noteConsumed 扣不动，
+// 而 noteFail 又不会把它移出 have ⇒ 查询持续失败的号会**长期**停在被声称
+// "有免费额度"那一档，每次都被优先选中、消耗记录却是空的。
+//
+// 新不变式：**have[uid] ⇒ free[uid] 存在（今日基准）** —— 声称有免费额度就必须
+// 能被扣减。
+//
+// 变异验证：把 resetIfNewDay 里的 `f.have = map[string]bool{}` 去掉 ⇒ 本测试红。
+func TestResetClearsHaveAndZero(t *testing.T) {
 	f := newFreePool()
 	now := time.Now()
 	f.noteQuota("HASFREE", 100, true, now)
@@ -26,14 +38,21 @@ func TestResetKeepsHaveClearsZero(t *testing.T) {
 	tomorrow := now.Add(24 * time.Hour)
 	f.resetIfNewDay(tomorrow)
 
-	if !f.have["HASFREE"] {
-		t.Error("跨日把 have 清空了 —— 池子会变空 ⇒ empty 分支全体放开 ⇒ 烧永久额度（这就是用户报的 bug）")
+	if len(f.have) != 0 {
+		t.Errorf("跨日没清 have（剩 %d 个）—— 那些号没有今日基准、扣不动，"+
+			"却仍被声称「有免费额度」并优先选中", len(f.have))
 	}
 	if f.zero["USEDUP"] {
 		t.Error("跨日没清 zero —— 昨天用完的号今天可能又有，会被一直跳过")
 	}
 	if f.free["HASFREE"] != 0 {
 		t.Error("跨日没清 free 绝对值 —— 会拿昨天的基准做减法")
+	}
+	// 不变式：不存在"声称有免费额度但没有基准"的号。
+	for uid := range f.have {
+		if _, ok := f.free[uid]; !ok {
+			t.Errorf("不变式被破坏：%s 在 have 里但没有 free 基准", uid)
+		}
 	}
 }
 
