@@ -347,10 +347,12 @@ func (p *Pool) RecordAutoDisableFailure(uid, reason string) (disabled bool) {
 // 网络抖动、5xx、限流**永远产生不出**那两句原文。
 //
 // ⚠ 因此用它的前提是**判据来自上游原文**（不是状态码、不是超时、不是分类猜测）。
-//   拿状态码或超时去 force，一次上游故障就会摘掉整池号 —— 那正是本机制存在的原因。
+//
+//	拿状态码或超时去 force，一次上游故障就会摘掉整池号 —— 那正是本机制存在的原因。
 //
 // ⚠ 仍然写 owned=true（若禁用不是别人置的）⇒ 后续成功仍能自动解除，
-//   所以"立刻摘"与"能自己回来"不冲突。
+//
+//	所以"立刻摘"与"能自己回来"不冲突。
 func (p *Pool) RecordAutoDisableFailureNow(uid, reason string) (disabled bool) {
 	return p.recordAutoDisableFailure(uid, reason, true)
 }

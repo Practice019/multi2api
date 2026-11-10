@@ -11,7 +11,8 @@ import "log"
 // 会在 5×3 ≈ 15 分钟内把整池号刷成禁用 —— 那正是本仓反复禁止的"用重试策略误杀好号"。
 //
 // ⇒ 结论（`AuthFailedUIDs` / `FreshUIDs`）由 refreshQuotas 回传，
-//   处置只在**用户明确点了按钮**的那条路径上执行。
+//
+//	处置只在**用户明确点了按钮**的那条路径上执行。
 //
 // # 判据
 //
@@ -21,15 +22,15 @@ import "log"
 //
 // ⚠ 三条都刻意"保守"，理由各不相同：
 //
-//  ① 用 RecordAutoDisableFailureNow 而不是 Pool.Disable：**仍然走自动禁用线**
-//     （owned=true）⇒ 之后刷新成功能被自动解除；而直接 Pool.Disable 会变成人工禁用，
-//     永久回不来。
-//     之所以敢跳过阈值：判据是**上游原文**（网络抖动永远产生不出那两句），
-//     而不是"状态码/超时"那种模糊信号。判据模糊就必须用阈值，判据明确就该立刻生效。
-//  ② 只有上游**明确说**是凭据失效才算（gateway.QuotaAuthFailureExt）。
-//     判据留在上游包里（它看得见响应原文），核心不猜。
-//  ③ Unknown **不算成功**：没有证据证明凭据可用，拿它解禁会把"查不到"当成"好了"。
-//     而 RecordAutoDisableSuccess 自身带 `ownsDisableLocked` —— **人工禁用不会被它清掉**。
+//	① 用 RecordAutoDisableFailureNow 而不是 Pool.Disable：**仍然走自动禁用线**
+//	   （owned=true）⇒ 之后刷新成功能被自动解除；而直接 Pool.Disable 会变成人工禁用，
+//	   永久回不来。
+//	   之所以敢跳过阈值：判据是**上游原文**（网络抖动永远产生不出那两句），
+//	   而不是"状态码/超时"那种模糊信号。判据模糊就必须用阈值，判据明确就该立刻生效。
+//	② 只有上游**明确说**是凭据失效才算（gateway.QuotaAuthFailureExt）。
+//	   判据留在上游包里（它看得见响应原文），核心不猜。
+//	③ Unknown **不算成功**：没有证据证明凭据可用，拿它解禁会把"查不到"当成"好了"。
+//	   而 RecordAutoDisableSuccess 自身带 `ownsDisableLocked` —— **人工禁用不会被它清掉**。
 func (h *Handler) applyQuotaRefreshPolicy(res quotaRefresher) (disabled, recovered int) {
 	if h.cfg.Pool == nil {
 		return 0, 0

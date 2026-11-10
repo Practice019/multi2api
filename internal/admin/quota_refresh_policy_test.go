@@ -69,7 +69,8 @@ func TestQuotaRefreshPolicyDisablesThenRecovers(t *testing.T) {
 // 在 refreshQuotas 里根本进不了 AuthFailedUIDs（上游不会为它们报账号层失效）。
 //
 // ⚠ 所以"一次即摘"**不是**放宽了误杀防线，而是把防线前移到判据本身：
-//   闸门是"上游是否明说是账号层失效"，不是"失败了几次"。
+//
+//	闸门是"上游是否明说是账号层失效"，不是"失败了几次"。
 func TestQuotaRefreshPolicyOnlyAccountLevelFailuresReachIt(t *testing.T) {
 	h, p, uid := policyFixture(t, 5)
 	// 装了失败与未知，但**没有**账号层结论 ⇒ 不该摘。

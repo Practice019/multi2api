@@ -49,7 +49,7 @@ func TestToolLoopFailureSetsLastKind(t *testing.T) {
 		window = window[:40*80]
 	}
 	if !strings.Contains(window, "lastKind = gateway.ErrKindServer") {
-		t.Errorf("工具循环的硬失败分支没有设 lastKind（只设 lastErr 会让 502 被报成 503 no_healthy_account）。"+
+		t.Errorf("工具循环的硬失败分支没有设 lastKind（只设 lastErr 会让 502 被报成 503 no_healthy_account）。" +
 			"该分支的 failBrief 用的是 ErrKindServer，lastKind 必须与它一致")
 	}
 

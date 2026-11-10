@@ -27,7 +27,8 @@ type fakeSecret struct{ S string }
 // permanentDeathRouter 在既有假路由之上**只加一个方法**。
 //
 // ⚠ 用内嵌而不是重写整个 ProviderRouter：出口层要的是**可选**能力，
-//   测试也应该只体现"多了一个方法"这一件事。
+//
+//	测试也应该只体现"多了一个方法"这一件事。
 type permanentDeathRouter struct{ scriptedRouter }
 
 func (permanentDeathRouter) SessionDeathPermanent(string) bool { return true }
@@ -44,10 +45,10 @@ func setupSessionDeath(t *testing.T, router ProviderRouter) (*Handler, *pool.Poo
 		map[string]any{uid: &fakeSecret{S: "s"}})
 	p.SetMaxInFlight(50)
 	h := NewHandler(Config{
-		Pool:            p,
-		Provider:        router,
-		DefaultProvider: "loomy",
-		OwnedBy:         "loomy",
+		Pool:              p,
+		Provider:          router,
+		DefaultProvider:   "loomy",
+		OwnedBy:           "loomy",
 		DefaultClassifier: defaultClassifierOf(),
 	})
 	return h, p, uid
@@ -72,7 +73,7 @@ func TestSessionDeathPermanentDisablesImmediately(t *testing.T) {
 	}
 	h.applyErrorPolicy(uid, gateway.ErrKindSessionDead)
 	if !disabledOf(t, p, "loomy", uid) {
-		t.Error("上游声明了「会话失效不可自愈」，一次就该禁用；实际仍在池里"+
+		t.Error("上游声明了「会话失效不可自愈」，一次就该禁用；实际仍在池里" +
 			"（这正是 loomy 死号白挨三次选中那条）")
 	}
 }
@@ -80,7 +81,8 @@ func TestSessionDeathPermanentDisablesImmediately(t *testing.T) {
 // TestSessionDeathWithoutPolicyKeepsGate 没声明 ⇒ 保持既有的连续计数门控。
 //
 // ⚠ 这条守的是**反向误伤**：workbuddy 的 12153 含抖动成分，
-//   一次就永久禁用会把健康号打掉（历史上真发生过）。
+//
+//	一次就永久禁用会把健康号打掉（历史上真发生过）。
 func TestSessionDeathWithoutPolicyKeepsGate(t *testing.T) {
 	// scriptedRouter 没有实现那个可选方法 ⇒ 走门控分支。
 	h, p, uid := setupSessionDeath(t, &scriptedRouter{uid: "loomy"})

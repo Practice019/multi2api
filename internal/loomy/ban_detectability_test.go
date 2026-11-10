@@ -43,7 +43,6 @@ import (
 // 若上游哪天把 402 改成 200，这条就会静默漏判。
 const observedNoCredits = `{"error":{"message":"积分余额不足，请获取积分后再试","type":"insufficient_quota","param":null,"code":402,"metadata":{"provider_name":"loomy"}}}`
 
-
 // TestLoomyDeclaresSessionDeathPermanent loomy 必须**声明**自己的会话失效是终态。
 //
 // # 为什么这是一条独立的门禁
@@ -98,8 +97,9 @@ func TestLoomyModelsEndpointCannotJudgeAccountUsability(t *testing.T) {
 // TestLoomyBanShapeIsCurrentlyNotDetected 钉住当前的**能力缺口**。
 //
 // ⚠ 这个用例故意断言「现状」而不是「期望」，因为本轮不改分类器。
-//   它存在的意义是：谁将来真的补上封禁判据（无论叫 ErrKindAccountRejected 还是复用
-//   ErrKindServer），**这里会红** —— 那时请把断言改成新契约，而不是把用例删掉。
+//
+//	它存在的意义是：谁将来真的补上封禁判据（无论叫 ErrKindAccountRejected 还是复用
+//	ErrKindServer），**这里会红** —— 那时请把断言改成新契约，而不是把用例删掉。
 func TestLoomyBanShapeIsCurrentlyNotDetected(t *testing.T) {
 	p := NewWithConfig(Config{})
 	// 封禁类正文（中/英/上游风格各一）+ 403：本包一个 marker 都不认识。
