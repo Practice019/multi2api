@@ -212,7 +212,34 @@ func (p *Provider) CandidateTiers(model string, uids []string) map[string]int {
 	// "池子空了、可以烧永久" —— 我们只是**还不知道**。
 	//
 	// 反过来说：重填跑完之后若 have 仍然空，那才是真的"所有号都没免费额度了"。
-	empty := len(have) == 0 && len(zero) > 0 && p.pool().hasRefilledToday(now)
+	// ⚠⚠ 2026-11-10 修（用户报障：「有的账号免费额度用完了，别的账号免费额度还有，
+	//    但是会**先烧永久**额度」）。
+	//
+	// 旧判据只有 `len(have) == 0 && len(zero) > 0`，它把
+	//     「没有任何号**被确认**有免费额度」
+	// 当成了
+	//     「所有号**都没有**免费额度」。
+	// 二者在有**未探测**账号时完全不同：
+	//
+	//	A 被确认今天用完（进 zero），B/C/… 只是**还没查过**
+	//	（既不在 have 也不在 zero，其实免费额度还在）
+	//	⇒ len(have)==0 成立 ⇒ empty=true ⇒ 全体放开（**含那个用完的 A**）
+	//	⇒ 同档加权随机 ⇒ 旁边还有免费额度的号没被用，先去烧了永久额度。
+	//
+	// 修法：只有**本批候选一个未探测的都没有**时，才允许宣布"池子空了"。
+	// 未探测的号保持 tierUnsure，而它排在 tierPaid **前面** ⇒ 用完的号不会被优先。
+	//
+	// ⚠ 这与用户当初那条设计并不冲突，而是把它修准：「当所有的这个轮询池都没有
+	//   账号了之后，再把所有账号重新添加回去」——前提是"确实都空了"，
+	//   而不是"我们有几个号没查到"。
+	unknown := 0
+	for _, uid := range uids {
+		if uid == "" || have[uid] || zero[uid] {
+			continue
+		}
+		unknown++
+	}
+	empty := len(have) == 0 && len(zero) > 0 && unknown == 0 && p.pool().hasRefilledToday(now)
 
 	for _, uid := range uids {
 		if uid == "" {

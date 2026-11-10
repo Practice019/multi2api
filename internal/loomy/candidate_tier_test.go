@@ -111,6 +111,48 @@ func TestTierOfMatchesUserRule(t *testing.T) {
 // 单独钉住它是为了让"为什么只凭 (available, daily) 就能分档"这个推理
 // 有据可查 —— 若哪天上游改成 available 不含每日赠送，这条会红，
 // 而分档会立刻变得毫无意义（所有账号都会落到 1 档）。
+
+// TestPoolEmptyRequiresNoUnknown 钉住 2026-11-10 那条修复：**未探测的号不能被当成"池子空了"**。
+//
+// # 用户报障（原话）
+//
+//	「有的账号免费额度用完了，别的账号免费额度还有，但是会先烧永久」
+//
+// # 缺陷链
+//
+//	A 被确认今天用完（进 zero）；B 只是**还没查过**（既不在 have 也不在 zero，
+//	其实免费额度还在）；重填已跑完 ⇒ 旧判据 `len(have)==0 && len(zero)>0` 成立
+//	⇒ empty=true ⇒ **全体放开**（含用完的 A）⇒ 同档加权随机
+//	⇒ 旁边还有免费额度的 B 没被用，先去烧了永久额度。
+//
+// # 变异验证
+//
+// 把 empty 判据里的 `unknown == 0` 去掉 ⇒ 本测试红（A 会被判成 tierFree）。
+func TestPoolEmptyRequiresNoUnknown(t *testing.T) {
+	p := NewWithConfig(Config{Client: NewWithBase(deadBase)})
+	now := time.Now()
+	const a, b = "260101010101010101", "260202020202020202"
+
+	// A：确认今天免费额度用完（noteQuota 的 daily=0 分支把它放进 zero）。
+	p.pool().noteQuota(a, 0, true, now)
+	// 标记本日重填已完成 —— 否则 empty 恒为 false，测不出这条缺陷。
+	p.pool().markRefilled(now)
+	if !p.pool().hasRefilledToday(now) {
+		t.Fatal("前置：本日重填标记没生效")
+	}
+
+	got := p.CandidateTiers("", []string{a, b})
+	if got[a] != tierPaid {
+		t.Errorf("已用完的 A 应落 tierPaid(%d)，实际 %d —— "+
+			"它被放开就会去烧永久额度", tierPaid, got[a])
+	}
+	if got[b] != tierUnsure {
+		t.Errorf("**没查过**的 B 应落 tierUnsure(%d)，实际 %d —— "+
+			"未探测 ≠ 已用完；把它当成可用会让 A 与 B 同档随机，"+
+			"于是「额度还有的号在旁边、却先烧永久」", tierUnsure, got[b])
+	}
+}
+
 func TestTierDependsOnMeasuredIdentity(t *testing.T) {
 	// 实测样本：balance 25000 / dailyBalance 1434 / availableBalance 26434
 	const permanent, daily = 25000, 1434
