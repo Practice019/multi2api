@@ -2421,5 +2421,14 @@ func (sqlLogWriter) WriteLog(e logbuf.Entry) error {
 		LatencyMs:        e.TotalMS,
 		Success:          success,
 		Type:             typ,
+		// ★ 2026-11-10：下面四列让 SQL 具备与 logbuf.Entry **等价**的字段，
+		//   从而 `/admin/stats` 可以改读本表（此前只读会被裁剪的 JSONL ⇒ 实测少报 61%）。
+		//
+		//   ⚠ 与 internal/logbuf/sqllog_equivalence_test.go 的 entryToLog **逐行同源**：
+		//     两处不一致会让"jsonl 与 SQL 的聚合数对不对得上"变成没有答案的问题。
+		Status:      e.Status,
+		TTFBMs:      e.TTFBMS,
+		ThinkTokens: e.ThinkTokens,
+		Provider:    e.Provider,
 	})
 }

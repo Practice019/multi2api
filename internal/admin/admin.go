@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -428,6 +429,23 @@ type Handler struct {
 	statsSource string
 	statsErr    error
 	statsAt     time.Time
+	// 本次聚合的数据源**覆盖范围**与是否被截断（2026-11-10 加）。
+	//
+	// # 为什么必须暴露它
+	//
+	// 此前 `/admin/stats` 只读 JSONL 文件，而那个文件按体积裁剪 ⇒ 实测只剩 2.3 天，
+	// 页面上"总 Token"显示 107.8 亿，而库里同期真相是 274.2 亿（**少报 61%**）。
+	// 数字本身"算对了"，错的是**它覆盖的窗口**没有任何地方写出来 ——
+	// 读者只能把它当成全量。用户原话：「一天都有 40 亿左右，怎么可能全部只有百亿呢？」
+	//
+	// ⇒ 响应里必须带 from/to/count/truncated，让"这个数覆盖了多久"成为可读事实。
+	statsFrom      time.Time
+	statsTo        time.Time
+	statsTruncated bool
+	// statsStatusDerived 本次聚合里有多少行的 status 是**由 success 回推**的
+	//（2026-11-10 加 status 列之前的历史行）。必须报出来，否则读者会以为
+	// by_status 里那个 500 桶是真实的上游错误码。见 statsItemsFromDB 的映射注释。
+	statsStatusDerived int
 
 	// multMu / multTbl / multAt / multBuilding：**全上游合并后的倍率表**的缓存。
 	//
@@ -2965,8 +2983,13 @@ func (h *Handler) logsHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 // statsCacheTTL 统计聚合结果的缓存时长。
-// 聚合要扫整个落盘文件，而前端是轮询调用；缓存让「扫描频率」与「轮询频率」解耦。
-const statsCacheTTL = 5 * time.Second
+// 聚合要扫整个数据源，而前端是轮询调用；缓存让「扫描频率」与「轮询频率」解耦。
+//
+// ⚠ 2026-11-10：**5s → 30s**。数据源从 JSONL 文件改成 SQL 之后，冷查询是一次
+// 13 万行的读库（优化后仍要几百毫秒），而 5s 的 TTL 意味着"前端 5s 轮询一次、
+// 每次都要重新读库"—— 缓存等于没有。30s 让"读库频率"与"轮询频率"真正解耦，
+// 对一张**统计面板**（不是实时流）来说 30s 的新鲜度完全够用。
+const statsCacheTTL = 30 * time.Second
 
 // multCacheTTL 倍率表（全上游合并）的缓存时长。
 //
@@ -3016,6 +3039,15 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	resp["source"] = source
 	resp["capacity"] = h.cfg.Ring.Cap()
 	resp["held"] = h.cfg.Ring.Len()
+	// ★ 数据源覆盖范围（2026-11-10 加）——**这是本接口最容易被误读的一处**。
+	//
+	// 用户报障：「总 Token 10774.1M 这个数值不对吧？」「一天都有 40 亿左右，
+	// 怎么可能全部只有百亿呢？」—— 数字本身没算错，错在**它覆盖的窗口没人写出来**：
+	// 当时读的是按体积裁剪的 JSONL（只剩 2.3 天），而库里同期是 8 天 / 274.2 亿。
+	//
+	// ⇒ 从今往后，"这个数覆盖了多久"必须是响应里的显式字段，
+	//   而不是读者需要去猜/去翻 file 段才能知道的事。
+	resp["coverage"] = h.statsCoverage()
 	// aggregated 显式说明「本次聚合了多少条」，与 total 语义不同：
 	//   total      窗口内命中某种条件的条数（aggregateChatLog 里就是 len(items)）
 	//   aggregated 实际参与聚合的条数
@@ -3239,7 +3271,24 @@ func (h *Handler) registeredProviderIDs() []string {
 }
 
 // statsItems 取出用于聚合的条目及其来源标识。
-// 带 TTL 缓存：聚合是 O(文件行数)，而调用方是轮询。
+// 带 TTL 缓存：聚合是 O(行数)，而调用方是轮询。
+//
+// # 优先级（2026-11-10 改：**数据库优先**）
+//
+//	① DB（logs 表，保留期 ≥7 天，见 store.PruneLogs）
+//	② 回落 JSONL 文件（按**体积**裁剪 ⇒ 实测只剩 2.3 天）
+//	③ 回落内存环形缓冲（2000 条）
+//
+// # 为什么要改（用户报的那个数）
+//
+// 用户：「总 Token 10774.1M 这个数值不对吧？」「一天都有 40 亿左右，
+// 怎么可能全部只有百亿呢？」—— 完全正确：文件里只剩 2.3 天
+// （11-08 12:27 起），而 `logs` 表里有 8 天 / 13.6 万行，同期真相是 **274.2 亿**。
+// 用户原话：「有数据库之后，统一都用数据库的得了。」
+//
+// ⚠ 数据源必须在响应里如实说清（`source` = db/file/memory），
+//
+//	并把覆盖范围（from/to/count/truncated）一起给出 —— 见 statsFrom 的注释。
 func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
 	h.statsMu.Lock()
 	if !h.statsAt.IsZero() && time.Since(h.statsAt) < statsCacheTTL {
@@ -3253,32 +3302,190 @@ func (h *Handler) statsItems() ([]logbuf.Entry, string, error) {
 	h.statsMu.Unlock()
 
 	var (
-		items  []logbuf.Entry
-		source = "memory"
-		err    error
+		items     []logbuf.Entry
+		source    = "memory"
+		err       error
+		from, to  time.Time
+		truncated bool
 	)
-	if sink := h.cfg.Ring.Sink(); sink != nil {
-		// 用 LoadAll 而不是 Page(0, sinkCountAll)：
-		// Page 会按 MaxPageSize 夹紧 limit，而它分页上界是给 HTTP 调用方设的。
-		// 曾经这里传 1<<20 想取全量，被静默夹到 300 —— 一份 1855 行的日志
-		// 只聚合了最近 300 条，界面上的成功率/平均 TTFB 全是那 300 条的。
-		// 内部聚合走旁路，不受分页上界约束（见 logbuf.Sink.LoadAll 的注释）。
-		if all, e := sink.LoadAll(); e != nil {
-			err = e
-		} else if len(all) > 0 {
-			items, source = all, "file"
-		} else {
-			source = "file" // 文件存在但为空：如实说是文件来源，而不是内存
+	// ① 优先读库。失败（未开库 / 查询错）**不报错**，静默回落 ——
+	//    统计读不到不该让整个面板 5xx，而 source 会如实说明它读的是哪个源。
+	if dbItems, f, t, tr, derr := h.statsItemsFromDB(); derr == nil && len(dbItems) > 0 {
+		items, source, from, to, truncated = dbItems, "db", f, t, tr
+	} else if derr != nil && !errors.Is(derr, store.ErrNotOpen) {
+		// ⚠ **"未开库"不是错误** —— 那是合法部署形态（还没迁到 SQL 的实例），
+		//   把它当失败会让面板顶部常驻一条"读取落盘日志失败"的假告警。
+		//   只有"库在、但查询真的失败了"才记 error。
+		//  （这条是 TestStatsFallsBackWhenDBEmpty 抓出来的：我第一版没排除它。）
+		err = derr
+	}
+	if source == "memory" {
+		if sink := h.cfg.Ring.Sink(); sink != nil {
+			// 用 LoadAll 而不是 Page(0, sinkCountAll)：
+			// Page 会按 MaxPageSize 夹紧 limit，而它分页上界是给 HTTP 调用方设的。
+			// 曾经这里传 1<<20 想取全量，被静默夹到 300 —— 一份 1855 行的日志
+			// 只聚合了最近 300 条，界面上的成功率/平均 TTFB 全是那 300 条的。
+			// 内部聚合走旁路，不受分页上界约束（见 logbuf.Sink.LoadAll 的注释）。
+			if all, e := sink.LoadAll(); e != nil {
+				err = e
+			} else if len(all) > 0 {
+				items, source = all, "file"
+			} else {
+				source = "file" // 文件存在但为空：如实说是文件来源，而不是内存
+			}
 		}
 	}
 	if source == "memory" {
 		items, _ = h.cfg.Ring.Snapshot(0)
 	}
+	// 文件/内存两个回落源没有可靠的窗口元信息 ⇒ 从条目里现算，
+	// 保证"覆盖了多久"在任何数据源下都有值（宁可算，也不要空着）。
+	if from.IsZero() && len(items) > 0 {
+		from, to = items[0].At, items[len(items)-1].At
+	}
 
 	h.statsMu.Lock()
 	h.statsCache, h.statsSource, h.statsErr, h.statsAt = items, source, err, time.Now()
+	h.statsFrom, h.statsTo, h.statsTruncated = from, to, truncated
 	h.statsMu.Unlock()
 	return items, source, err
+}
+
+// statsItemsFromDB 从 logs 表加载聚合原料（**统计的首选数据源**）。
+//
+// 返回 (条目, 最早, 最新, 是否被读取上限截断, 错误)。
+//
+// # 字段映射（与 cmd/server 的 sqlLogWriter.WriteLog **反向同源**）
+//
+//	CreatedAt        → At
+//	ModelName        → Model          ChannelName → Channel
+//	AccountUID       → UID            Provider    → Provider
+//	Status           → Status         LatencyMs   → TotalMS      TTFBMs → TTFBMS
+//	TotalTokens      → Tokens         CompletionTokens → OutTokens
+//	ThinkTokens      → ThinkTokens    CacheHit/MissTokens → 同名
+//	CostQuota        → Credit
+//
+// ⚠ `Tokens` 的哨兵差异**无害**：JSONL 里"usage 缺失"是 -1，SQL 里是 0，
+//
+//	而 aggregateChatLog 的累加判据是 `e.Tokens > 0` ⇒ 两者都被跳过，口径一致。
+//	（这一条是动手前专门去读聚合代码确认的，不是推断。）
+func (h *Handler) statsItemsFromDB() ([]logbuf.Entry, time.Time, time.Time, bool, error) {
+	derivedN := 0 // status 由 success 回推的历史行数（见下方映射处的长注释）
+	rows, truncated, err := store.LoadLogsSince(0, 0)
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, false, err
+	}
+	if len(rows) == 0 {
+		return nil, time.Time{}, time.Time{}, false, nil
+	}
+	out := make([]logbuf.Entry, 0, len(rows))
+	for _, r := range rows {
+		// ⚠⚠ **历史行的 status 回推**（2026-11-10 加 status 列时产生的一次性问题）。
+		//
+		// `status` 列是今天才加的 ⇒ 之前 12.8 万行的 status 全是 0。而聚合的 ok/fail
+		// 判据是 `>=200` / `>=400` ⇒ **0 两边都不落**：修复前后实测 `ok=8, fail=0`，
+		// 而 total=128694 —— 成功率直接失去意义。
+		//
+		// 这里用 `success`（那一列**一直**在写）回推：
+		//	success=true  → 200（"成功了"是当时就有的事实）
+		//	success=false → 500（**具体码不可考**）
+		//
+		// ⚠ 为什么失败用 500 而不是 502/503：502 会被读成"上游网关错"、
+		//   503 会被读成"池子没号" —— 那都是**具体归因**，而历史行并没有这个证据。
+		//   500 在这里的语义是"失败，但码不可考"，配合 coverage.status_derived
+		//   计数，读者能知道有多少行是回推来的。
+		status := r.Status
+		if status == 0 {
+			if r.Success {
+				status = 200
+			} else {
+				status = 500
+			}
+			derivedN++
+		}
+		// ⚠⚠ **历史行的 provider 回推**（与上面 status 回推同源的一次性问题）。
+		//
+		// `provider` 列也是今天才加的 ⇒ 之前 12.8 万行全空。实测后果：
+		// `by_provider` 里 `(未标注) = 128,302 / 128,938`（**99.5%**），
+		// 而"按上游看用量"正是这个面板最主要的维度之一 —— 等于整块不可用。
+		//
+		// 回推规则与**网关产出 provider 的规则逐字一致**（见 handler 里
+		// `Provider: "channel:"+ChannelName` 与模型前缀协议 `<provider-id>/<model>`）：
+		//
+		//	ChannelName 非空        → "channel:"+ChannelName（渠道型，核心就是这么标的）
+		//	ModelName 含 "/"        → 取第一个 "/" 之前那段（= provider id）
+		//	都不满足                → 留空 → 归入 "(未标注)" 桶（不编造）
+		//
+		// ⚠ 只用**前缀**、不做模糊匹配：模型名里的后续 "/" 属于模型自身
+		//   （如 `monkeycode/monkeycode-basic/deepseek-flash`），切多了会得到假上游。
+		provider := r.Provider
+		if provider == "" {
+			if r.ChannelName != "" {
+				provider = "channel:" + r.ChannelName
+			} else if i := strings.IndexByte(r.ModelName, '/'); i > 0 {
+				provider = r.ModelName[:i]
+			}
+		}
+		out = append(out, logbuf.Entry{
+			At:              time.Unix(r.CreatedAt, 0),
+			Model:           r.ModelName,
+			Channel:         r.ChannelName,
+			UID:             r.AccountUID,
+			Provider:        provider,
+			Status:          status,
+			Tokens:          r.TotalTokens,
+			OutTokens:       r.CompletionTokens,
+			ThinkTokens:     r.ThinkTokens,
+			CacheHitTokens:  r.CacheHitTokens,
+			CacheMissTokens: r.CacheMissTokens,
+			Credit:          float64(r.CostQuota),
+			TTFBMS:          r.TTFBMs,
+			TotalMS:         r.LatencyMs,
+		})
+	}
+	// rows 已按 created_at 升序（见 LoadLogsSince 的 Order），
+	// 所以首尾就是窗口边界 —— 不必再扫一遍求最值。
+	h.statsStatusDerived = derivedN
+	return out, out[0].At, out[len(out)-1].At, truncated, nil
+}
+
+// statsCoverage 报告本次聚合覆盖的时间范围与是否被截断。
+//
+// 返回 map（直接进 JSON 响应）：
+//
+//	from / to      覆盖起止（RFC3339；无数据时为空串）
+//	days           覆盖天数（保留 2 位小数；无数据为 0）
+//	count          参与聚合的条数
+//	truncated      是否被读取上限截断（true = 还有更早的数据没进来）
+//
+// ⚠ 字段名与 `file` 段区分开：`file.from/to` 说的是**文件**的边界，
+//
+//	而这里说的是**本次聚合真正用了的数据**的边界 —— 两者在"文件读失败、
+//	回落到内存"时完全不同，混用会让读者对不上账。
+func (h *Handler) statsCoverage() map[string]any {
+	h.statsMu.Lock()
+	from, to, truncated, n := h.statsFrom, h.statsTo, h.statsTruncated, len(h.statsCache)
+	derived := h.statsStatusDerived
+	h.statsMu.Unlock()
+	m := map[string]any{
+		"count":     n,
+		"truncated": truncated,
+		"from":      "",
+		"to":        "",
+		"days":      0.0,
+		// status 由 success 回推的行数（>0 说明 by_status 里含历史回推桶）。
+		"status_derived": derived,
+	}
+	if !from.IsZero() {
+		m["from"] = from.Format(time.RFC3339)
+	}
+	if !to.IsZero() {
+		m["to"] = to.Format(time.RFC3339)
+	}
+	if !from.IsZero() && !to.IsZero() && to.After(from) {
+		m["days"] = math.Round(to.Sub(from).Hours()/24*100) / 100
+	}
+	return m
 }
 
 // statsAggCached 返回**聚合产物**的缓存（照 multTableCached 那套写）。
@@ -3566,7 +3773,11 @@ type dimStat struct {
 // add 把一条日志并入本桶。规则必须与顶层标量逐条一致（见类型注释）。
 func (d *dimStat) add(e logbuf.Entry) {
 	d.Req++
-	if e.Status >= 200 && e.Status < 300 {
+	// ⚠ 判据必须与**顶层标量**及**写入侧的 success 定义**三方逐字一致
+	//   （`>=200 && <400`，见 aggregateChatLog 的同一处与 cmd/server 的 sqlLogWriter）。
+	//   2026-11-10 对齐：这里原来写的是 `< 300`，于是同一批请求在
+	//   `by_model_detail[x].ok` 与顶层 `ok` 上会算出不同的数 —— 而前端把两者并排显示。
+	if e.Status >= 200 && e.Status < 400 {
 		d.OK++
 	} else if e.Status >= 400 {
 		d.Fail++
@@ -3684,8 +3895,13 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		// 富化维度：pk 与 ps 同一个键（含 "(未标注)" 桶），不另起口径。
 		detailFor(byProviderDetail, pk).add(e)
 
+		// ⚠ 判据必须与**写入侧的 success 定义**逐字一致
+		//   （cmd/server/main.go 的 sqlLogWriter：`Status >= 200 && Status < 400`）——
+		//   否则同一批请求在 SQL 的 `success` 列与聚合的 `ok` 上会得到不同的数，
+		//   "两个数据源的数字对不对得上"就变成没有答案的问题。
+		//   ⚠ 这里原来写的是 `< 300`（3xx 落在两边都不计），2026-11-10 对齐。
 		switch {
-		case e.Status >= 200 && e.Status < 300:
+		case e.Status >= 200 && e.Status < 400:
 			okN++
 			ps.OK++
 		case e.Status >= 400:
@@ -3806,6 +4022,23 @@ func aggregateChatLog(items []logbuf.Entry) map[string]any {
 		// 留着这个行为（不改成 Round）：截断对"平均耗时"更保守，且改了会让历史对比失真。
 		resp["avg_ttfb_ms"] = ttfbSum / ttfbN
 	}
+	// ★ 把两个平均值的**分母**一并报出来（2026-11-10 加）。
+	//
+	// # 为什么必须报
+	//
+	// 它们是**两个不同样本集上的平均**，而界面上并排显示：
+	//
+	//	avg_total_ms = Σ total / len(items)      ← 所有行
+	//	avg_ttfb_ms  = Σ ttfb  / ttfbN           ← 只有**记过 ttfb** 的行
+	//
+	// `ttfb_ms` 是 2026-11-10 才落库的列 ⇒ 那之前的历史行 ttfb=0 全部不进分母。
+	// 实测那一刻：avg_total_ms 覆盖 12.8 万行，而 avg_ttfb_ms 只覆盖 **几百行** ——
+	// 并列显示会让人以为"首字 3 秒、总共 8 秒"，实际是两组完全不同的样本。
+	//
+	// 这与本仓已有的 `think_tokens` / `think_tokens_with_out` 是**同一条纪律**：
+	// 覆盖范围不同的两个数并列时，必须能让读者看出它们的样本不同。
+	resp["avg_total_samples"] = len(items)
+	resp["avg_ttfb_samples"] = ttfbN
 	if !oldest.IsZero() {
 		resp["window_from"] = oldest
 		resp["window_to"] = newest

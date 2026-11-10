@@ -10,6 +10,7 @@ import (
 
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/store"
 )
 
 // 调用统计必须覆盖**全部历史**，而不是「进程启动至今」。
@@ -20,6 +21,24 @@ import (
 //
 // 这组测试用「落盘文件里有数据 + 内存缓冲为空」来模拟重启后的场景 ——
 // 这正是原实现失效的场景。
+
+// withoutStore 显式模拟「这个部署还没有 SQL 库」（统计的**回落路径**专用）。
+//
+// # 为什么每个文件回落用例都必须调它
+//
+// `store.DB` 是**包级单例**（见 internal/store/db.go 的注释），而统计从 2026-11-10 起
+// **优先读库**。于是：只要同包内任何一个早先的用例 `store.Open(...)` 过，
+// 后面这些"验文件/内存回落"的用例就会被那个库抢走数据源 ——
+// 它们验的东西（回落链）根本没被执行，却可能因为库里有行而"看起来过了"。
+//
+// 这正是本仓已记录过的坑：「并行改动未提交时不要跑整包测试 —— 结果不可信」的同族问题，
+// 只是这里的污染源是**单例**而不是并行编辑。所以回落用例必须自己声明"没有库"。
+func withoutStore(t *testing.T) {
+	t.Helper()
+	prev := store.DB
+	store.DB = nil
+	t.Cleanup(func() { store.DB = prev })
+}
 
 func newStatsHandler(t *testing.T, persisted []logbuf.Entry) (*Handler, *logbuf.Ring) {
 	t.Helper()
@@ -73,6 +92,7 @@ func persistedEntries(n int) []logbuf.Entry {
 
 // 核心场景：内存缓冲为空但落盘有 50 条 → 统计应为 50，而不是 0/「暂无请求」。
 func TestStatsCoversPersistedHistory(t *testing.T) {
+	withoutStore(t)
 	h, _ := newStatsHandler(t, persistedEntries(50))
 
 	out := doStats(t, h)
@@ -92,6 +112,7 @@ func TestStatsCoversPersistedHistory(t *testing.T) {
 
 // 超出内存缓冲上限的历史同样要被统计 —— 这是原实现最明显的缺口。
 func TestStatsNotLimitedByRingCapacity(t *testing.T) {
+	withoutStore(t)
 	h, ring := newStatsHandler(t, persistedEntries(300))
 	if ring.Cap() >= 300 {
 		t.Fatalf("测试前提不成立：期望内存容量(%d)小于数据量(300)", ring.Cap())
@@ -111,6 +132,7 @@ func TestStatsNotLimitedByRingCapacity(t *testing.T) {
 //
 // 教训：边界测试要**跨过**被怀疑的那个边界值，而不是落在它上面。
 func TestStatsCoversHistoryBeyondPageSizeCap(t *testing.T) {
+	withoutStore(t)
 	const n = logbuf.MaxPageSize + 250
 	h, _ := newStatsHandler(t, persistedEntries(n))
 
@@ -136,6 +158,7 @@ func TestStatsCoversHistoryBeyondPageSizeCap(t *testing.T) {
 // 这是防回归的第二道锁：即便将来又有人把取数路径改成有上界的分页，
 // 响应里也会带上 truncated=true 与一句说明，而不是像上次那样静默少统计。
 func TestStatsExposesAggregatedAndFlagsTruncation(t *testing.T) {
+	withoutStore(t)
 	const n = logbuf.MaxPageSize + 100
 	h, _ := newStatsHandler(t, persistedEntries(n))
 
@@ -162,6 +185,7 @@ func TestStatsExposesAggregatedAndFlagsTruncation(t *testing.T) {
 
 // 窗口时间应覆盖落盘首末条，而不是「进程启动至今」。
 func TestStatsWindowFromPersistedRange(t *testing.T) {
+	withoutStore(t)
 	entries := persistedEntries(3)
 	h, _ := newStatsHandler(t, entries)
 	out := doStats(t, h)
@@ -185,6 +209,7 @@ func TestStatsWindowFromPersistedRange(t *testing.T) {
 // 那样文件就不空了，source=file 反而是正确行为（这一点最初写错，测试先报红）。
 // 这里让 Ring 不接 Sink，模拟「落盘未启用/文件为空」但内存有数据的场景。
 func TestStatsFallsBackToMemoryWhenFileEmpty(t *testing.T) {
+	withoutStore(t)
 	ring := logbuf.New(8)
 	ring.Push(logbuf.Entry{At: time.Now(), Model: "m", Mode: "stream", Status: 200, TotalMS: 5})
 	h := New(Config{AdminToken: testAdminToken, ListensLoopback: true, Ring: ring})
@@ -499,6 +524,7 @@ func catalogWith(entries ...gateway.ModelCatalogEntry) *gateway.ModelCatalog {
 
 // 系数只对**窗口里被调用过**的模型输出，且直接给在 /admin/stats 的同一个响应里。
 func TestStatsModelMultipliersFilteredByByModel(t *testing.T) {
+	withoutStore(t)
 	h, _ := newStatsHandler(t, persistedEntries(3))
 	h.cfg.ModelCatalog = func(string) *gateway.ModelCatalog {
 		return catalogWith(
@@ -529,6 +555,7 @@ func TestStatsModelMultipliersFilteredByByModel(t *testing.T) {
 // 目录拿不到时：state=unavailable、系数表为空数组、**统计接口本身仍然 200 且字段齐全**。
 // 这是硬约束 2（失败不得 break 统计接口）的可测形态。
 func TestStatsDegradesWhenCatalogUnavailable(t *testing.T) {
+	withoutStore(t)
 	h, _ := newStatsHandler(t, persistedEntries(5))
 	h.cfg.ModelCatalog = func(string) *gateway.ModelCatalog { return nil }
 	h.cfg.ModelCatalogState = func() ModelCatalogState {
@@ -598,6 +625,7 @@ func TestStatsStillTriesCatalogWhenStateUnavailable(t *testing.T) {
 
 // 窗口内没有任何调用时也不该回源 —— 没有 by_model 就没有可归因的模型。
 func TestStatsDoesNotFetchCatalogWhenNoCalls(t *testing.T) {
+	withoutStore(t)
 	var calls int
 	h, _ := newStatsHandler(t, nil) // 空窗口
 	h.cfg.ModelCatalog = func(string) *gateway.ModelCatalog { calls++; return nil }
@@ -610,6 +638,7 @@ func TestStatsDoesNotFetchCatalogWhenNoCalls(t *testing.T) {
 
 // 输出顺序必须稳定（可按名字 diff），不能受 map 遍历随机顺序影响。
 func TestStatsModelMultipliersOrderIsStable(t *testing.T) {
+	withoutStore(t)
 	items := []logbuf.Entry{
 		{At: time.Now(), Model: "zeta", Status: 200, TotalMS: 1},
 		{At: time.Now(), Model: "alpha", Status: 200, TotalMS: 1},
@@ -639,6 +668,7 @@ func TestStatsModelMultipliersOrderIsStable(t *testing.T) {
 // 目录里的模型在窗口里没调用过时，不输出 0 系数条目 ——
 // 0 在前端会显示成「免费」，而真相是「不知道」。
 func TestStatsOmitsModelsAbsentFromCatalog(t *testing.T) {
+	withoutStore(t)
 	items := []logbuf.Entry{
 		{At: time.Now(), Model: "known", Status: 200, TotalMS: 1},
 		{At: time.Now(), Model: "unknown", Status: 200, TotalMS: 1},

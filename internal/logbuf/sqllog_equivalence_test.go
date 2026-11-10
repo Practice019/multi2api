@@ -98,7 +98,12 @@ func entryToLog(e logbuf.Entry) store.Log {
 		CostQuota:        int64(math.Round(e.Credit)),
 		LatencyMs:        e.TotalMS,
 		Success:          success,
-		Type:             typ,
+		// 与 cmd/server/main.go 的 sqlLogWriter.WriteLog **逐行同源**（2026-11-10 补四列）。
+		Status:      e.Status,
+		TTFBMs:      e.TTFBMS,
+		ThinkTokens: e.ThinkTokens,
+		Provider:    e.Provider,
+		Type:        typ,
 	}
 }
 

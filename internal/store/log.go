@@ -143,3 +143,144 @@ func RPMOf(reqs int64, fromUnix, toUnix int64) float64 {
 	}
 	return float64(reqs) / minutes
 }
+
+// LoadLogsSince 读取 created_at >= fromUnix 的 logs 明细（按时间升序）。
+//
+// # 为什么需要它（统计统一读库，2026-11-10）
+//
+// `/admin/stats` 此前只读 JSONL 文件，而那个文件按体积/天数裁剪 ⇒ 实测只剩 2.3 天，
+// 页面"总 Token"显示 107.8 亿，而本表同期真相是 274.2 亿（**少报 61%**）。
+// 有了这个读取入口，聚合就能改走本表 —— 保留期由 PruneLogs 保证（下限 7 天，
+// 远长于文件的 2.3 天），且与 `log_daily` 的日聚合同源。
+//
+// # 为什么返回 []Log 而不是 []logbuf.Entry
+//
+// store **不得** import logbuf：logbuf 在请求路径上，而本包是数据层，
+// 让数据层依赖"请求日志的内存/落盘形态"会把两个层次绑死
+// （反向依赖同样成立：logbuf 也不 import store，见 internal/logbuf/sqlsink.go 的文件头）。
+// 转换放在装配层/管理端 —— 那里同时知道两边的类型。
+//
+// # 为什么要给上限而不是一次全取
+//
+// 本表是增长最快的表（每请求一行），不设上限时"读全量"会在部署数周后变成
+// 一次几百 MB 的内存峰值。limit<=0 取 DefaultLogLoadLimit。
+// 调用方应在**命中不了上限**时把 `truncated` 如实报出去（见返回值的第二个参数）——
+// 悄悄截断会让"总 Token"再次变成一个看起来像全量的偏小值。
+func LoadLogsSince(fromUnix int64, limit int) (rows []Log, truncated bool, err error) {
+	if DB == nil {
+		return nil, false, ErrNotOpen
+	}
+	if limit <= 0 {
+		limit = DefaultLogLoadLimit
+	}
+	// ⚠⚠ **用原生行扫描，不用 `Find(&rows)`**（2026-11-10）。
+	//
+	// 实测（13.6 万行）：SQLite 侧 `SELECT *` 只要 **376 ms**，而整条
+	// `/admin/stats` 冷查询要 **2.2 s** —— 差值几乎全在 GORM 的**逐行反射映射**上。
+	// 面板是轮询调用的，2.2 s 的冷查询是这条改造引入的退化，必须自己吃掉。
+	//
+	// 手写 Scan 把映射变成直接的字段赋值 ⇒ 同一份数据只需几十毫秒。
+	// 代价是列名与顺序要与下面的 Scan 严格对应 —— 所以两者紧挨着写，
+	// 并且**显式列出列名**（不用 `SELECT *`）：列序变化不该静默错位。
+	// ⚠⚠ **走 database/sql 直连扫描**（2026-11-10，第二次优化）。
+	//
+	// 实测三个版本（13 万行，同一台机）：
+	//	GORM `Find(&rows)`            → 整个 /admin/stats 冷查询 **2.2 s**
+	//	GORM `Raw(...).Rows()` + Scan → `LoadLogsSince` 本身 **1.29 s**
+	//	`sql.DB.Query` + `rows.Scan`  → 见下方实测值
+	//
+	// 差值全在**逐行反射映射**上（SQLite 侧 `SELECT *` 只要 376 ms）。
+	// 面板是轮询调用的，这条改造不该让冷查询变慢 —— 所以这里绕开 GORM 的模型层。
+	//
+	// 代价：列名与 Scan 参数必须严格对应。两者紧挨着写、且**显式列出列名**
+	//（不用 `SELECT *`），列序变化不该静默错位。
+	const q = "SELECT created_at, model_name, channel_name, account_uid, prompt_tokens, " +
+		"completion_tokens, total_tokens, cache_hit_tokens, cache_miss_tokens, cost_quota, " +
+		"latency_ms, success, type, status, ttfb_ms, think_tokens, provider " +
+		"FROM logs WHERE created_at >= ? ORDER BY created_at ASC LIMIT ?"
+	sdb, err := DB.DB()
+	if err != nil {
+		return nil, false, fmt.Errorf("store: 取底层连接: %w", err)
+	}
+	// 多取一条用于判断"是否被截断"：取满 limit+1 条说明还有更多。
+	rs, err := sdb.Query(q, fromUnix, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: 读 logs: %w", err)
+	}
+	defer func() { _ = rs.Close() }()
+	for rs.Next() {
+		var x Log
+		var succ int64
+		if serr := rs.Scan(
+			&x.CreatedAt, &x.ModelName, &x.ChannelName, &x.AccountUID,
+			&x.PromptTokens, &x.CompletionTokens, &x.TotalTokens,
+			&x.CacheHitTokens, &x.CacheMissTokens, &x.CostQuota,
+			&x.LatencyMs, &succ, &x.Type,
+			&x.Status, &x.TTFBMs, &x.ThinkTokens, &x.Provider,
+		); serr != nil {
+			return nil, false, fmt.Errorf("store: 扫描 logs 行: %w", serr)
+		}
+		x.Success = succ != 0
+		rows = append(rows, x)
+	}
+	if rerr := rs.Err(); rerr != nil {
+		return nil, false, fmt.Errorf("store: 遍历 logs: %w", rerr)
+	}
+	if len(rows) > limit {
+		return rows[:limit], true, nil
+	}
+	return rows, false, nil
+}
+
+// DefaultLogLoadLimit 一次读取 logs 的默认上限。
+//
+// 20 万行 ≈ 当前 8 天量级（实测 13.6 万行 / 8 天）留一倍余量；
+// 单行约 200 字节 ⇒ 峰值约 40 MB，对统计这种低频（带 TTL 缓存）调用可接受。
+const DefaultLogLoadLimit = 200000
+
+// LoadLogRange 读取 [fromUnix, toUnix] 的明细条数与 token 合计（**不加载明细**）。
+//
+// 给"只需要数字、不需要分维度"的场景用：一条 SQL 出结果，
+// 不必把几十万行搬进内存再求和。
+func LoadLogRange(fromUnix, toUnix int64) (reqs int64, tokens int64, err error) {
+	if DB == nil {
+		return 0, 0, ErrNotOpen
+	}
+	if toUnix <= fromUnix {
+		return 0, 0, nil
+	}
+	var row struct {
+		Reqs   int64
+		Tokens int64
+	}
+	err = DB.Model(&Log{}).
+		Select("COUNT(*) AS reqs, COALESCE(SUM(total_tokens), 0) AS tokens").
+		Where("created_at >= ? AND created_at <= ?", fromUnix, toUnix).
+		Scan(&row).Error
+	if err != nil {
+		return 0, 0, fmt.Errorf("store: 按范围聚合 logs: %w", err)
+	}
+	return row.Reqs, row.Tokens, nil
+}
+
+// LogCoverage 报告 logs 明细的覆盖范围（最早/最新时刻与总行数）。
+//
+// 用途：界面上"总 Token"必须能说出**它覆盖了多久** ——
+// 此前那个数字看起来是全量、实际只有 2.3 天，正是缺这一句造成的误读。
+func LogCoverage() (count int64, minUnix, maxUnix int64, err error) {
+	if DB == nil {
+		return 0, 0, 0, ErrNotOpen
+	}
+	var row struct {
+		N   int64
+		Min int64
+		Max int64
+	}
+	err = DB.Model(&Log{}).
+		Select("COUNT(*) AS n, COALESCE(MIN(created_at),0) AS min, COALESCE(MAX(created_at),0) AS max").
+		Scan(&row).Error
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("store: 读 logs 覆盖范围: %w", err)
+	}
+	return row.N, row.Min, row.Max, nil
+}

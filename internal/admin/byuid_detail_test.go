@@ -54,10 +54,14 @@ func TestAggregateChatLogDetailArithmetic(t *testing.T) {
 	if out["total"].(int) != 5 {
 		t.Errorf("total=%v，期望 5", out["total"])
 	}
-	if out["ok"].(int64) != 2 { // 两条 200
-		t.Errorf("ok=%v，期望 2", out["ok"])
+	// ⚠ 2026-11-10：`ok` 的判据从 `>=200 && <300` 对齐成 `>=200 && <400`
+	//   （与**写入侧** cmd/server 的 `success := Status >= 200 && Status < 400` 一致，
+	//    也与顶层/`dimStat` 两处一致）。于是这条 302 现在算成功。
+	//   不对齐的代价：同一批请求在 SQL 的 `success` 列与聚合的 `ok` 上会得出不同的数。
+	if out["ok"].(int64) != 3 { // 两条 200 + 一条 302
+		t.Errorf("ok=%v，期望 3", out["ok"])
 	}
-	if out["fail"].(int64) != 2 { // 500 + 401（302 既不算 ok 也不算 fail）
+	if out["fail"].(int64) != 2 { // 500 + 401（302 算成功，不计入 fail）
 		t.Errorf("fail=%v，期望 2", out["fail"])
 	}
 	if out["tokens"].(int64) != 35 { // 10+20+5（两条 -1 跳过）
@@ -80,8 +84,8 @@ func TestAggregateChatLogDetailArithmetic(t *testing.T) {
 		t.Errorf("by_model_detail[loomy/m].avg_ttfb_ms=%v，期望 100", lm.AvgTTFBMS)
 	}
 	wbm := byModel["wb/m"]
-	if wbm.Req != 3 || wbm.OK != 0 || wbm.Fail != 2 || wbm.Tokens != 5 || wbm.ThinkTokens != 1 {
-		t.Errorf("by_model_detail[wb/m]=%+v，期望 req3 ok0 fail2 tokens5 think1", wbm)
+	if wbm.Req != 3 || wbm.OK != 1 || wbm.Fail != 2 || wbm.Tokens != 5 || wbm.ThinkTokens != 1 {
+		t.Errorf("by_model_detail[wb/m]=%+v，期望 req3 ok1 fail2 tokens5 think1", wbm)
 	}
 	// ⚠ 两个 tokens 口径必须都留着且差值可解释：5(剔负) vs 3(原始) 差 = 两条 -1
 	if wbm.TokensRaw != 3 {
@@ -94,8 +98,8 @@ func TestAggregateChatLogDetailArithmetic(t *testing.T) {
 	// ---- by_uid_detail ----
 	byUID := detailMap(t, out, "by_uid_detail")
 	u1 := byUID["u1"]
-	if u1.Req != 3 || u1.OK != 1 || u1.Fail != 1 || u1.Tokens != 10 || u1.ThinkTokens != 4 {
-		t.Errorf("by_uid_detail[u1]=%+v，期望 req3 ok1 fail1 tokens10 think4", u1)
+	if u1.Req != 3 || u1.OK != 2 || u1.Fail != 1 || u1.Tokens != 10 || u1.ThinkTokens != 4 {
+		t.Errorf("by_uid_detail[u1]=%+v，期望 req3 ok2 fail1 tokens10 think4", u1)
 	}
 	if u1.AvgTTFBMS == nil || *u1.AvgTTFBMS != 200 { // (100+300)/2
 		t.Errorf("by_uid_detail[u1].avg_ttfb_ms=%v，期望 200", u1.AvgTTFBMS)
@@ -124,7 +128,7 @@ func TestAggregateChatLogDetailArithmetic(t *testing.T) {
 	}
 	wp := byProv["workbuddy"]
 	if wp.Req != 2 || wp.OK != 0 || wp.Fail != 2 || wp.Tokens != 5 || wp.ThinkTokens != 1 {
-		t.Errorf("by_provider_detail[workbuddy]=%+v，期望 req2 ok0 fail2 tokens5 think1", wp)
+		t.Errorf("by_provider_detail[workbuddy]=%+v，期望 req2 ok0 fail2 tokens5 think1（302 那条 Provider 为空，归「未标注」）", wp)
 	}
 	if wp.AvgTTFBMS == nil || *wp.AvgTTFBMS != 175 {
 		t.Errorf("by_provider_detail[workbuddy].avg_ttfb_ms=%v，期望 175", wp.AvgTTFBMS)
@@ -163,13 +167,13 @@ func TestAggregateChatLogDetailArithmetic(t *testing.T) {
 	//   它的 5 tokens / 1 fail 也一并落在 by_uid_detail 之外 —— 这是与旧 by_uid
 	//   "跳过空 uid"完全一致的刻意口径，不是漏算。
 	r1, ok1, f1, t1, raw1, th1 := sum(byUID)
-	if r1 != 4 || ok1 != 2 || f1 != 1 || t1 != 30 || raw1 != 28 || th1 != 4 {
-		t.Errorf("by_uid_detail 求和=(%d,%d,%d,%d,%d,%d)，期望 (4,2,1,30,28,4)（req 比 total 少 1：空 uid）",
+	if r1 != 4 || ok1 != 3 || f1 != 1 || t1 != 30 || raw1 != 28 || th1 != 4 {
+		t.Errorf("by_uid_detail 求和=(%d,%d,%d,%d,%d,%d)，期望 (4,3,1,30,28,4)（req 比 total 少 1：空 uid）",
 			r1, ok1, f1, t1, raw1, th1)
 	}
 	r2, ok2, f2, t2, raw2, th2 := sum(byProv)
-	if r2 != 5 || ok2 != 2 || f2 != 2 || t2 != 35 || raw2 != 33 || th2 != 5 {
-		t.Errorf("by_provider_detail 求和=(%d,%d,%d,%d,%d,%d)，期望 (5,2,2,35,33,5)",
+	if r2 != 5 || ok2 != 3 || f2 != 2 || t2 != 35 || raw2 != 33 || th2 != 5 {
+		t.Errorf("by_provider_detail 求和=(%d,%d,%d,%d,%d,%d)，期望 (5,3,2,35,33,5)",
 			r2, ok2, f2, t2, raw2, th2)
 	}
 	// 同一个"token 总量"在三个维度上必须同一个数（口径一致的第二道守卫）

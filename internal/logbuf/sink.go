@@ -138,23 +138,56 @@ func (s *Sink) pruneLocked() {
 		}
 	}
 	// 按天裁剪后仍超体积：从最旧的开始丢，保证文件不会无限增长。
-	if approxSize(kept) > s.maxBytes {
-		for len(kept) > 0 && approxSize(kept) > s.maxBytes {
-			kept = kept[len(kept)/10+1:] // 每次丢 10%，避免逐条 O(n²)
+	//
+	// ⚠⚠ **必须用真实字节数**（2026-11-10 修）。旧版用 `approxSize`
+	//   按 `len(Model)+len(UID)+len(Mode)+96` 估算，**完全没算后加的字段**：
+	//
+	//	upstream_err  上限 4 KiB
+	//	upstream_req  上限 8 KiB
+	//	decision / client_ua / channel / …
+	//
+	//   实测后果：上限写的是 8 MiB，而文件长到 **22 MB（2.7 倍）**，
+	//   且 `s.size` 自报 8.28 MB —— 与磁盘上的真实大小差了 14 MB。
+	//   文件因此比设计多留了两天的日志，"按体积裁剪"这条纪律实际上没生效。
+	//
+	//   现在先把每条的真实序列化长度算**一遍**（O(n)），再按累计和从最旧丢，
+	//   避免在循环里反复 Marshal 退化成 O(n²)。
+	sizes := make([]int64, len(kept))
+	var total int64
+	for i, e := range kept {
+		sizes[i] = entrySize(e)
+		total += sizes[i]
+	}
+	if total > s.maxBytes {
+		drop := 0
+		for total > s.maxBytes && drop < len(kept) {
+			step := (len(kept)-drop)/10 + 1 // 每次丢 10%，避免逐条 O(n²)
+			for i := 0; i < step && drop < len(kept); i++ {
+				total -= sizes[drop]
+				drop++
+			}
 		}
+		kept = kept[drop:]
 	}
 	if err := s.rewriteLocked(kept); err != nil {
 		return
 	}
-	s.size = approxSize(kept)
+	s.size = total
 }
 
-func approxSize(es []Entry) int64 {
-	var n int64
-	for _, e := range es {
-		n += int64(len(e.Model) + len(e.UID) + len(e.Mode) + 96)
+// entrySize 一条 Entry 落盘后的**真实字节数**（含行尾换行）。
+//
+// 与 json.Marshal 走同一条序列化路径 ⇒ 算出来的就是写进文件的长度，
+// 不存在"估算公式与结构体脱节"的空间（那正是旧 approxSize 的失效方式）。
+//
+// Marshal 失败时返回 0：宁可低估一条，也不要在裁剪路径上 panic ——
+// 这条路径在 Append 的锁内被调用，panic 会带崩整个写日志的链路。
+func entrySize(e Entry) int64 {
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return 0
 	}
-	return n
+	return int64(len(raw)) + 1 // +1 = '\n'
 }
 
 // rewriteLocked 用 kept 重写文件（tmp + rename，保持原子性）。

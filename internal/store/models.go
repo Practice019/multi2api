@@ -437,6 +437,38 @@ type Log struct {
 	Success   bool  `gorm:"not null;default:false"`
 	// ErrKind 失败时的错误分类（与 gateway.ErrorKind.String() 对齐，便于与日志正文对照）。
 	ErrKind string `gorm:"type:varchar(32);not null;default:''"`
+
+	// ── 下面 4 列是「统计统一读库」补的（2026-11-10）────────────────────────
+	//
+	// # 为什么补它们
+	//
+	// `/admin/stats` 此前**只读 JSONL 文件**（`statsItems → sink.LoadAll`），
+	// 而那个文件按体积/天数裁剪 ⇒ 实测只剩 **2.3 天**：页面上"总 Token"显示
+	// 107.8 亿，而 SQL 里同期真相是 **274.2 亿**（**少报 61%**）。
+	// 用户原话：「有数据库之后，统一都用数据库的得了。」
+	//
+	// 要让聚合（`admin.aggregateChatLog`）改读本表，就必须让它拿得到与
+	// `logbuf.Entry` **等价**的字段 —— 这四个原来没落库。
+	//
+	// # 老行语义（AutoMigrate 只加列不删列 ⇒ 对已有库零风险）
+	//
+	// 历史行这四列是零值：`status=0` / `ttfb_ms=0` / `think_tokens=0` / `provider=''`。
+	// 聚合侧按"无数据"处理（与 cache 两列同一条纪律：**不假装**当时记过）。
+	//
+	// ⚠ Status 与 Success 并存而不是互相替代：Success 是布尔判据（给既有 SQL 聚合用，
+	//   见 `WindowAggregate` 的 `SUM(CASE WHEN success)`），Status 是**原始状态码**
+	//   （给按状态码分桶的维度用，如 `by_status`）。由 Status 能推出 Success，反之不能。
+	Status int `gorm:"not null;default:0"`
+	// TTFBMs 首字节耗时（与 LatencyMs 的区别见 `logbuf.Entry.TTFBMS` 的注释）。
+	TTFBMs int64 `gorm:"not null;default:0"`
+	// ThinkTokens 推理（思维链）token 数。
+	ThinkTokens int `gorm:"not null;default:0"`
+	// Provider 上游 id（workbuddy / loomy / codar…）。空 = 历史行未标注。
+	//
+	// 为什么存字符串而不是外键 id：与 ModelName 同一条理由 ——
+	// 日志是历史事实，上游被移除后那条日志仍该显示"当时是哪一家"。
+	Provider string `gorm:"type:varchar(32);not null;default:''"`
+
 	// Type 索引：今日消费只算 type=consume 的行（PLAN §2 D5）。
 	//
 	// ⚠ 它与 idx_log_created 是两个独立索引，**不是**复合索引 (type, created_at)：
