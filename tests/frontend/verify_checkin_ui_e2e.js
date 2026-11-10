@@ -43,8 +43,9 @@
 //
 // # ⚠ 端口与目录都是临时的
 //
-// 仓库里已有的 config.json（7863）/ config-test-port7864.json（7864）
-// 可能是**用户正在用**的，绝不碰。端口用 E2E_PORT 覆盖（默认 7871），
+// config.json（7863）与 config-test-port7864.json（7864）是**用户正在用**的，绝不碰。
+//（后者 2026-11-10 起不再随仓库走 —— 只摘索引、文件仍在本机，所以"别碰"的理由不变。）
+// 端口用 E2E_PORT 覆盖（默认 7871），
 // 目录在 os.tmpdir() 下按 pid 唯一。收尾**按 PID 杀**，不用
 // `Get-Process <name> | Stop-Process`（那会误杀用户自己的实例）。
 'use strict';

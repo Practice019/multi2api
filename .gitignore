@@ -24,6 +24,18 @@ config-test*.json.bak-*
 config.example.json.bak-*
 config-test.example.json.bak-*
 
+# ⚠ 测试实例的配置文件 —— 与 config.json 同类：**本机使用中的配置**，不是交付物。
+#   2026-11-10 决定不让它们跟仓库走（示例模板有 config.example.json 一份就够）：
+#     · config-test.example.json 与主模板**不是超集关系** —— 它缺 admin_token / console，
+#       却多出 codearts/loomy/trae/workbuddy_intl 四段 ⇒ 两份"示例"并存只会让人
+#       照错的那份配（少 admin_token 的模板在控制台上就是不通的）。零引用（grep 全仓为空）。
+#     · config-test-port7864.json 是 7864 平行实例的具体配置，同样零代码依赖。
+#   ⚠ 两款**都不含真实密钥**（逐字段对比过 config.json：真实 api_key 40 位 / admin_token 36 位
+#     均不在其中）—— 摘掉是"不发布"，不是因为泄漏。
+#   ⚠ 只动索引，磁盘文件保留 ⇒ 本机起 7864 实例的方式完全不变。
+config-test.example.json
+config-test-port7864.json
+
 # Build artifacts
 /bin/
 *.tmp
