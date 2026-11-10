@@ -85,6 +85,26 @@ type quotaRefresher struct {
 	// 无法区分"这个上游只有 0 个账号"和"这个上游整片被跳过"。
 	// 后者只能靠 Skipped + 下面那条按 provider 去重的跳过日志来暴露。
 	Providers []string
+
+	// ── 下面三个字段只被**手动端点**消费（"刷新本上游额度"按钮那三条路径）──
+	//
+	// # 为什么把"结论"回传而不是在 refreshQuotas 里直接处置
+	//
+	// 因为 refreshQuotas 被**三条路径共用**（手动单上游 / 手动全部 / 后台自动分层刷新），
+	// 而后台那条是**定时**跑的：把"失败即摘号"接在它上面，一次上游故障就会在几轮之内
+	// 把整池号刷成禁用（5 次阈值 × 每 3 分钟一轮 ≈ 15 分钟）。
+	// ⇒ 处置只挂在用户明确点了按钮的那条路径上（见 applyQuotaRefreshPolicy）。
+	//
+	// AuthFailedUIDs 上游报告"这次查询因凭据失效而失败"的账号。
+	//
+	// ⚠ 它**不是** Failed 的子集：Failed 是"账号解析不了/上游返回 nil"，
+	// 而 loomy 的凭据失效走的是 `UnknownQuota(), true`。两者来源不同、处置也不同。
+	AuthFailedUIDs []string
+	// FreshUIDs 真正拿到数据（HasData=true）的账号 —— 它们此刻**可证明**是活的。
+	//
+	// ⚠ Unknown（问了但没数据）**不算**：没有证据证明凭据可用，
+	// 拿它去解禁会把"查不到"当成"好了"。
+	FreshUIDs []string
 }
 
 // refreshQuotas 遍历池中所有账号，按各自的上游问额度并写回。
@@ -109,9 +129,15 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 	// provider → 该上游的额度扩展点。**只对实现了 QuotaExt 的上游建映射**，
 	// 没实现的天然不在表里 → 走"跳过"分支。
 	exts := map[string]gateway.QuotaExt{}
+	// authExts：实现了 QuotaAuthFailureExt 的上游 —— 它们能回答"这次失败是不是凭据失效"。
+	// 没实现的上游不在表里 ⇒ 它的失败**不会被**当成凭据问题（保守方向）。
+	authExts := map[string]gateway.QuotaAuthFailureExt{}
 	for _, p := range h.cfg.Registry.All() {
 		if ext, ok := gateway.ExtOf[gateway.QuotaExt](p); ok {
 			exts[p.ID()] = ext
+		}
+		if ae, ok := gateway.ExtOf[gateway.QuotaAuthFailureExt](p); ok {
+			authExts[p.ID()] = ae
 		}
 	}
 
@@ -132,6 +158,9 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 	type quotaJob struct {
 		uid string
 		ext gateway.QuotaExt
+		// authExt 可能为 nil（该上游不报"失败原因"）。
+		// ⚠ 在**筛选阶段**就取好：收尾阶段只该读结论，不该再查注册表。
+		authExt gateway.QuotaAuthFailureExt
 	}
 	var todo []quotaJob
 	for _, uid := range uids {
@@ -165,7 +194,7 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 			seen[provider] = true
 			out.Providers = append(out.Providers, provider)
 		}
-		todo = append(todo, quotaJob{uid: uid, ext: ext})
+		todo = append(todo, quotaJob{uid: uid, ext: ext, authExt: authExts[provider]})
 	}
 
 	// ── 第二阶段（**并发**）：只做"问上游"这一件事 ────────────────────────
@@ -207,6 +236,12 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 	// 与改造前的循环体逐字等价（同样的顺序、同样的四路分支）。
 	for i := range todo {
 		r := results[i]
+		// ⚠ 凭据失效的判定**在下面三个分支之外**先做一次：它可能同时
+		// 满足其它分支（loomy 的失效走 Unknown），而它是唯一驱动"摘号"的结论。
+		// 只读一次（纯函数，不发请求）。
+		if todo[i].authExt != nil && todo[i].authExt.QuotaAuthFailed(todo[i].uid) {
+			out.AuthFailedUIDs = append(out.AuthFailedUIDs, todo[i].uid)
+		}
 		if !r.ok {
 			out.Failed++
 			continue
@@ -218,6 +253,7 @@ func (h *Handler) refreshQuotas(uids []string) quotaRefresher {
 		}
 		h.cfg.Pool.SetQuota(todo[i].uid, toPoolQuota(r.qv))
 		out.Updated++
+		out.FreshUIDs = append(out.FreshUIDs, todo[i].uid)
 	}
 
 	sort.Strings(out.Providers)
@@ -294,10 +330,23 @@ func toPoolQuota(q gateway.QuotaView) pool.QuotaView {
 // 语义与 /admin/credits/refresh（workbuddy 专有）的区别：
 //
 //	/admin/credits/refresh        单上游（workbuddy），且会顺手做"解冻"判断
-//	/admin/accounts/quota/refresh **全上游通用**，只做"取额度 + 写回池"
+//	/admin/accounts/quota/refresh **全上游通用**：取额度 + 写回池 + **刷新结论处置**
 //
-// 两者并存是刻意的：后者不碰解冻（那需要上游回答"能不能用"，是另一件事），
-// 所以它对已有路径**零行为改变**，纯粹是新增的只读+写额度入口。
+// # 处置是什么（2026-11-10 加，用户要求）
+//
+// 用户原话："刷新失败了需要把它禁用掉，因为刷新失败有可能是账号过期了；
+// 但是有可能禁用的账号刷新成功，就要解除禁用。"
+//
+//	上游报告"这次失败是**凭据失效**" ⇒ 记一次自动禁用失败（连续 N 次才摘，见 policy 文件）
+//	真正拿到数据                     ⇒ 记一次自动禁用成功（只解禁本机制禁掉的号）
+//
+// ⚠ 判定依据**只能由上游给**：QuotaExt 只回 (QuotaView, ok)，没有错误原文，
+// 而 loomy 的失败统一返回 UnknownQuota（与"本机没客户端目录"这类正常情况同形）。
+// 所以新增了 gateway.QuotaAuthFailureExt：上游自报"这次失败是不是凭据失效"。
+// 没实现它的上游**行为完全不变**（既不摘号也不恢复）。
+//
+// ⚠ 这条处置**只作用于手动调用**。后台的分层刷新共用 refreshQuotas，但**不**处置 ——
+// 定时路径上"失败即摘号"会在一次上游故障后 15 分钟内把整池号刷成禁用。
 //
 // # 三种作用域（用户报的问题：「行内按钮却刷了全部」）
 //
@@ -375,8 +424,13 @@ func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := h.refreshQuotas(uids)
+	// 用户点按钮 ⇒ 顺手处置：凭据失效的号进禁用线、刷新成功的号解除自动禁用。
+	// ⚠ 只在这条**手动**路径上做（后台分层刷新共用 refreshQuotas 但不处置，见 policy 文件头）。
+	disabled, recovered := h.applyQuotaRefreshPolicy(res)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"updated":   res.Updated,
+		"disabled":  disabled,
+		"recovered": recovered,
 		"unknown":   res.Unknown,
 		"failed":    res.Failed,
 		"skipped":   res.Skipped,

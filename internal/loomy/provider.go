@@ -90,6 +90,10 @@ const ProviderID = providerID
 
 // Provider 实现 gateway.Provider（以及若干可选扩展点，见包注释）。
 type Provider struct {
+	// quotaAuth 最近一次额度查询是否为凭据失效（见 quota_auth.go）。
+	// ⚠ 自己一把锁：它在额度刷新路径上被并发写（并发上限 20）。
+	quotaAuth quotaAuthTracker
+
 	// 免费额度轮询池（见 freepool.go）。
 	//
 	// ⚠ 与 panelMu 分开各一把锁：池子被**选号路径**读（那里在池锁内），

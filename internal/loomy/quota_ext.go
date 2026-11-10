@@ -206,6 +206,8 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 		pts, err := p.PointsSnapshot(ctx, a.Session)
 		cancel()
 		if err == nil {
+			// 查到了 ⇒ 凭据是活的：清掉上一次的失效标记（否则重登后会被一直误判）。
+			p.quotaAuth.mark(uid, false)
 			bal, daily := pts.Available, pts.Daily
 			// 顺手回填候选分档缓存（见 candidate_tier.go）。
 			//
@@ -247,6 +249,10 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 		// 详见 docs/progress-log.md 2026-11-02 条目。
 		p.pool().noteFail(uid, time.Now())
 		logQuotaFail(uid, err)
+		// 把"这次失败是不是凭据失效"记下来，交给 gateway.QuotaAuthFailureExt
+		// 暴露给核心 —— 核心据此决定要不要摘号（判据留在本包，见 quota_auth.go）。
+		// ⚠ 只有**凭据类**才记 true：网络/5xx/限流什么都不做，那会把好号踢下线。
+		p.quotaAuth.mark(uid, quotaErrIsSessionDead(err))
 	}
 
 	// ── 回落：本机客户端缓存（仅对"本机登录的那个账号"有效）──
