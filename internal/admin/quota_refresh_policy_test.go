@@ -38,17 +38,18 @@ func policyFixture(t *testing.T, threshold int) (*Handler, *pool.Pool, string) {
 	return h, p, uid
 }
 
-// TestQuotaRefreshPolicyDisablesThenRecovers 凭据失效达阈值 ⇒ 禁用；刷新成功 ⇒ 恢复。
+// TestQuotaRefreshPolicyDisablesThenRecovers 上游报"账号层失效" ⇒ 一次即摘；刷新成功 ⇒ 恢复。
 func TestQuotaRefreshPolicyDisablesThenRecovers(t *testing.T) {
-	const threshold = 2
-	h, p, uid := policyFixture(t, threshold)
+	// 阈值给个大的，用来证明"一次即摘"**不是**因为阈值小。
+	h, p, uid := policyFixture(t, 99)
 
-	// 连续 threshold 次"上游报告凭据失效" ⇒ 达阈值被摘。
-	for i := 0; i < threshold; i++ {
-		h.applyQuotaRefreshPolicy(quotaRefresher{AuthFailedUIDs: []string{uid}})
+	// 用户点一次按钮 ⇒ 上游明说凭据失效 ⇒ 立刻摘号。
+	disabled, _ := h.applyQuotaRefreshPolicy(quotaRefresher{AuthFailedUIDs: []string{uid}})
+	if disabled != 1 {
+		t.Fatalf("一次账号层失效就该摘号（用户点一次按钮要看到效果），实际摘了 %d 个", disabled)
 	}
 	if st, ok := p.Status(uid); !ok || !st.Disabled {
-		t.Fatalf("连续 %d 次凭据失效后应被自动禁用，实际 disabled=%v", threshold, st.Disabled)
+		t.Fatalf("应被禁用，实际 disabled=%v", st.Disabled)
 	}
 
 	// 刷新成功 ⇒ 解除（这正是"重登之后要能自己回来"）。
@@ -61,15 +62,23 @@ func TestQuotaRefreshPolicyDisablesThenRecovers(t *testing.T) {
 	}
 }
 
-// TestQuotaRefreshPolicyOneFailureDoesNotDisable 一次失败**不**摘号（"可能过期"≠"确定过期"）。
+// TestQuotaRefreshPolicyOnlyAccountLevelFailuresReachIt 「一次即摘」的前提是判据明确。
 //
-// 这条是误杀防线：把"失败即摘"接上手动的按钮很诱人，但按钮后面是网络，
-// 一次上游抖动就会把整池号刷成禁用。所以复用池的阈值门控。
-func TestQuotaRefreshPolicyOneFailureDoesNotDisable(t *testing.T) {
+// 这条守的是另一半：**没有"账号层失效"结论时，策略什么都不做**。
+// 它等价于"模糊失败（网络/超时/5xx/Unknown）不会摘号" —— 因为那些失败
+// 在 refreshQuotas 里根本进不了 AuthFailedUIDs（上游不会为它们报账号层失效）。
+//
+// ⚠ 所以"一次即摘"**不是**放宽了误杀防线，而是把防线前移到判据本身：
+//   闸门是"上游是否明说是账号层失效"，不是"失败了几次"。
+func TestQuotaRefreshPolicyOnlyAccountLevelFailuresReachIt(t *testing.T) {
 	h, p, uid := policyFixture(t, 5)
-	h.applyQuotaRefreshPolicy(quotaRefresher{AuthFailedUIDs: []string{uid}})
+	// 装了失败与未知，但**没有**账号层结论 ⇒ 不该摘。
+	disabled, recovered := h.applyQuotaRefreshPolicy(quotaRefresher{})
+	if disabled != 0 || recovered != 0 {
+		t.Errorf("没有账号层结论时不该有任何处置，实际 disabled=%d recovered=%d", disabled, recovered)
+	}
 	if st, _ := p.Status(uid); st.Disabled {
-		t.Error("一次凭据失效就摘号 —— 阈值门控被绕过了，网络抖动会刷掉整池号")
+		t.Error("没有任何账号层证据就把号摘了")
 	}
 }
 

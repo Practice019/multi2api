@@ -335,6 +335,27 @@ func (p *Pool) AutoDisableWindow() time.Duration {
 // 已经处于禁用中的账号再次失败返回 false —— 它不是"新的禁用事件"，
 // 调用方据此可以只在 true 时打日志/发通知，避免每次失败都刷一条。
 func (p *Pool) RecordAutoDisableFailure(uid, reason string) (disabled bool) {
+	return p.recordAutoDisableFailure(uid, reason, false)
+}
+
+// RecordAutoDisableFailureNow 与 RecordAutoDisableFailure 同一条线，但**一次即摘**（不累计）。
+//
+// # 什么时候才允许用它
+//
+// 只有当**这一次失败本身就证明账号坏了**时 —— 例如上游原文回
+// 「登录已失效」「账号已被停用」。那种判据下"等下一次再确认"没有意义：
+// 网络抖动、5xx、限流**永远产生不出**那两句原文。
+//
+// ⚠ 因此用它的前提是**判据来自上游原文**（不是状态码、不是超时、不是分类猜测）。
+//   拿状态码或超时去 force，一次上游故障就会摘掉整池号 —— 那正是本机制存在的原因。
+//
+// ⚠ 仍然写 owned=true（若禁用不是别人置的）⇒ 后续成功仍能自动解除，
+//   所以"立刻摘"与"能自己回来"不冲突。
+func (p *Pool) RecordAutoDisableFailureNow(uid, reason string) (disabled bool) {
+	return p.recordAutoDisableFailure(uid, reason, true)
+}
+
+func (p *Pool) recordAutoDisableFailure(uid, reason string, force bool) (disabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -368,7 +389,9 @@ func (p *Pool) RecordAutoDisableFailure(uid, reason string) (disabled bool) {
 	st.streak++
 	st.lastFail = now
 
-	if st.streak < b.threshold {
+	// ⚠ force=true 走的是"这一次失败即结论"那条判据（见 RecordAutoDisableFailureNow）：
+	//   判据来自上游原文时不存在"再等等看"的语义，所以跳过阈值。
+	if !force && st.streak < b.threshold {
 		// 未达阈值：只计数，**不碰**任何禁用/冷却状态。
 		// 账号此刻该不该歇一会儿，是熔断器的事，不是我们的。
 		p.dirty.Store(true)

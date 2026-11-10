@@ -24,6 +24,13 @@ func TestQuotaErrIsSessionDeadOnlyMatchesUpstreamDesc(t *testing.T) {
 	if !quotaErrIsSessionDead(dead) {
 		t.Error("实测的失效原文必须被判为凭据失效")
 	}
+	// 第二种已实测的账号级形态（点「刷新本上游额度」时真实出现）：100003 账号已被停用。
+	// 它与 100002 同属「账号层、不自愈」，但成因不同（一个要重登、一个要等解封）。
+	suspended := errors.New("loomy: 积分接口 /points/records 返回 100003: 账号已被停用")
+	if !quotaErrIsSessionDead(suspended) {
+		t.Error("「账号已被停用」也是账号级失效，必须被判为需要摘号")
+	}
+
 	// 网络类 / 5xx / 解析类**都不是**账号的错。
 	for _, msg := range []string{
 		"loomy: 调用积分接口失败（/points/records）: dial tcp 1.2.3.4:443: i/o timeout",

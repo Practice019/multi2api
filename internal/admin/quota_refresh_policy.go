@@ -15,15 +15,17 @@ import "log"
 //
 // # 判据
 //
-//	上游报告"这次失败是**凭据失效**" ⇒ 记一次自动禁用失败（**阈值门控**）
+//	上游报告"这次失败是**账号层失效**" ⇒ **一次即摘**（RecordAutoDisableFailureNow）
 //	真正拿到数据（HasData）        ⇒ 记一次自动禁用成功（**只解禁本机制禁的号**）
 //	其余（Unknown / Failed / 跳过） ⇒ 什么都不做
 //
 // ⚠ 三条都刻意"保守"，理由各不相同：
 //
-//  ① 用 RecordAutoDisableFailure 而不是 Pool.Disable：它内部带**阈值与窗口**
-//     （连续 N 次才摘）⇒ 一次网络抖动不会摘号。用户点一次按钮若失败一次，
-//     本来就不该摘 —— "可能过期"不是"确定过期"。
+//  ① 用 RecordAutoDisableFailureNow 而不是 Pool.Disable：**仍然走自动禁用线**
+//     （owned=true）⇒ 之后刷新成功能被自动解除；而直接 Pool.Disable 会变成人工禁用，
+//     永久回不来。
+//     之所以敢跳过阈值：判据是**上游原文**（网络抖动永远产生不出那两句），
+//     而不是"状态码/超时"那种模糊信号。判据模糊就必须用阈值，判据明确就该立刻生效。
 //  ② 只有上游**明确说**是凭据失效才算（gateway.QuotaAuthFailureExt）。
 //     判据留在上游包里（它看得见响应原文），核心不猜。
 //  ③ Unknown **不算成功**：没有证据证明凭据可用，拿它解禁会把"查不到"当成"好了"。
@@ -37,7 +39,10 @@ func (h *Handler) applyQuotaRefreshPolicy(res quotaRefresher) (disabled, recover
 	authFailed := make(map[string]bool, len(res.AuthFailedUIDs))
 	for _, uid := range res.AuthFailedUIDs {
 		authFailed[uid] = true
-		if h.cfg.Pool.RecordAutoDisableFailure(uid, "额度刷新：凭据失效（可能已过期）") {
+		// ⚠ 用 **Now** 而不是计数版：判据是**上游原文**（"登录已失效" / "账号已被停用"），
+		//   网络抖动永远产生不出它 ⇒ 不需要"连 N 次"这道防线，而用户点一次按钮就该看到效果。
+		//   仍然走自动禁用线（owned=true）⇒ 之后刷新成功仍能自动解除。
+		if h.cfg.Pool.RecordAutoDisableFailureNow(uid, "额度刷新：账号层失效（登录已失效 / 账号已被停用）") {
 			log.Printf("admin: 账号 %s 额度刷新连续失败（凭据失效），已自动禁用", uid)
 			disabled++
 		}

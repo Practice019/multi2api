@@ -60,7 +60,25 @@ func (p *Provider) QuotaAuthFailed(uid string) bool {
 	return p.quotaAuth.isDead(uid)
 }
 
-// quotaErrIsSessionDead 本次额度查询的失败是不是「凭据失效」。
+// markerAccountSuspended 上游明确说**这个账号被停用**（业务码 100003）。
+//
+// ⚠ 实测来源（2026-11-10，点「刷新本上游额度」时的真实日志）：
+//
+//	loomy 额度查询失败 uid=2609…47787497（上游拒绝）: 积分接口
+//	/points/records 返回 **100003: 账号已被停用**
+//
+// 它与 100002（登录已失效）是**两种不同**的失效形态，但同属「账号层、不自愈」：
+// 前者要重登，后者只能等上游解封。对核心的处置是同一条（摘号）。
+const markerAccountSuspended = "账号已被停用"
+
+// quotaErrIsSessionDead 本次额度查询的失败是不是**账号层的、不会自愈的**失效。
+//
+// 覆盖两种已实测的形态：
+//
+//	100002 登录已失效    ⇒ 重登可解
+//	100003 账号已被停用  ⇒ 只能等上游解封
+//
+// ⚠ 判据只有这两条**上游原文**。不许加启发式（网络超时、5xx、限流都不是账号的错）。
 //
 // ⚠ 判据只有一条：错误原文里带上游那句 desc（markerSessionDead）。
 // **不许**在这里加宽判据（网络超时、5xx、限流都不是账号的错）——
@@ -70,5 +88,6 @@ func quotaErrIsSessionDead(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), markerSessionDead)
+	msg := err.Error()
+	return strings.Contains(msg, markerSessionDead) || strings.Contains(msg, markerAccountSuspended)
 }
