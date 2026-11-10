@@ -409,7 +409,12 @@ func (p *Pool) recordAutoDisableFailure(uid, reason string, force bool) (disable
 		return false
 	}
 
-	why := autoDisableReason(st.streak, b.threshold, reason)
+	var why string
+	if force {
+		why = autoDisableReasonForced(reason)
+	} else {
+		why = autoDisableReason(st.streak, b.threshold, reason)
+	}
 	st.disabled = true
 	if st.disabledAt.IsZero() {
 		st.disabledAt = now
@@ -712,6 +717,17 @@ func (p *Pool) ResetAutoDisable(uid string) bool {
 // "已禁用"三个字（改造前 NoteSessionDead 的写法）无法区分
 // "人工禁的 / 凭证死了 / 连败太多"，排查时只能靠翻日志。
 // 本仓在 Status.Reason 上已经有同样的教训。
+// force=true 表示这次摘号**不是**累计到阈值的结果（判据是"这一次失败本身就是结论"，
+// 见 RecordAutoDisableFailureNow）。那时文案**不能**写"连续失败 1 次（阈值 5）" ——
+// 那会让人以为逻辑坏了（1 < 5 却摘了号），而这行字正是排查时唯一能看的东西。
+func autoDisableReasonForced(cause string) string {
+	s := "自动禁用：账号层失效（一次即摘，未走累计阈值）"
+	if cause != "" {
+		s += "，原因：" + truncateRunes(cause, autoDisableCauseMaxRunes)
+	}
+	return s
+}
+
 func autoDisableReason(streak, threshold int, cause string) string {
 	s := "自动禁用：连续失败 " + itoa(streak) + " 次（阈值 " + itoa(threshold) + "）"
 	if cause != "" {
