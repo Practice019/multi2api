@@ -35,6 +35,9 @@ package workbuddy
 // 与 errorclassifier_test.go 的镜像测试）。
 
 import (
+	"net/http"
+	"strings"
+
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/upstream"
 )
@@ -65,6 +68,49 @@ var _ gateway.ErrorClassifier = (*Provider)(nil)
 // 经 toGatewayKind 翻译后与改造前 core 直接调 upstream.Classify 的结果
 // **完全一致**（有测试钉住，见 internal/server 的回归用例）。
 func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
+	// ── 唯一一处**有意偏离** upstream.Classify（2026-11-10）────────────────────
+	//
+	// 403 + **完全空体** ⇒ ErrKindServer，而不是 upstream.Classify 给出的 ErrClient。
+	//
+	// # 为什么这处必须偏离
+	//
+	// upstream.Classify 的**每一条**判据都基于响应体里的 marker（hardMarkers /
+	// sessionDeadMarkers / contentBlockedMarkers / fatalClientMarkers）—— 空体时全部不命中，
+	// 于是一路落到「status >= 400 ⇒ ErrClient」的兜底。而 ErrClient 在 core 的处置是
+	// **只换号、不记错**（applyErrorPolicy 的 default 分支，防的是"客户端一次发错参数").
+	//
+	// 但 403 的语义是 Forbidden —— 在 AI 上游里最常见的原因正是**这个账号被拒绝/被限制**，
+	// 那是账号级、不自愈的状态，与"请求参数写错"（400）完全不同类。空体时
+	// 请求侧的信息量为零，唯一可用的判据就是状态码本身，而 403 指向的是账号。
+	//
+	// # 实测证据（2026-11-10，55300 条请求日志）
+	//
+	// 同一上游、同一天、同为 403，只因响应体不同而落到两类：
+	//
+	//	codar     403 + {"detail":{"code":"account_restricted",...}} → server → 连续 5 次后摘号 ✅
+	//	workbuddy 403 + （空体）                                          → client → **永不摘号** ❌
+	//
+	// 后果：workbuddy 有 2 个号**连续 8 天 0 成功**，却 cooling=false、disabled=false、
+	// breaker_fails=0、last_err 是**零值**（= NoteError 从未被调用过）—— 在管理台上与
+	// 一个刚导入的健康号看不出任何区别，于是每次选号都被选中、每次都以 503 收场：
+	// 3.5 天里 76 次 503（占该上游 1.1%），每次白打 3 轮上游。
+	//
+	// # 为什么归 ErrKindServer（而不是新增一个类别）
+	//
+	// 它同时喂两条线：熔断计数（NoteError）与自动禁用线（RecordAutoDisableFailure），
+	// 正是这里缺的两样。新增类别的收益是语义更准，但会牵动 errcode 映射与
+	// applyErrorPolicy 两处枚举；在"先让死号能被摘掉"这一步不值得。若将来要区分
+	// "账号被拒"与"上游故障"，再单独引入不迟。
+	//
+	// # 误伤边界（诚实记录）
+	//
+	// 边缘/WAF 如果对所有账号统一回 403 空体，每个号都会开始累计失败；
+	// 缓解是既有的两条：① 阈值是**连续 5 次**（零散失败不触发）；
+	// ② 被禁用的号由健康检查循环的 AutoDisabledCandidates() 主动探测，
+	//   一旦成功即自动恢复。所以这是"短暂误禁 + 自动恢复"，不是永久损失。
+	if status == http.StatusForbidden && strings.TrimSpace(body) == "" {
+		return gateway.ErrKindServer
+	}
 	return toGatewayKind(upstream.Classify(status, body))
 }
 

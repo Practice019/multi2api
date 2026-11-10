@@ -109,6 +109,46 @@ func TestWorkbuddyClassifyMatchesUpstreamClassify(t *testing.T) {
 // 它与生产版 toGatewayKind 的差异只有一处：**没有 default 分支的
 // 通用性**，而是直接 panic —— 测试里出现未知 ErrKind 是硬故障，
 // 应当炸掉而不是静默返回 none。
+
+
+// TestWorkbuddyEmptyBody403IsServer 记录**唯一一处有意偏离** upstream.Classify 的行为。
+//
+// 上一条 parity 测试的意义是「除这一处外，行为逐字不变」。它是一张表，不是穷举，
+// 所以偏离必须在这里**显式钉住** —— 否则它会变成一条只写在注释里的口头约定，
+// 而注释不会在有人改回去时报错。
+//
+// # 为什么 403 空体要偏离（完整论证见 Classify 的注释）
+//
+// upstream.Classify 的判据全部基于响应体 marker，空体时全部不命中 ⇒ 落到
+// 「status>=400 ⇒ ErrClient」兜底 ⇒ core 只换号、不记错 ⇒ 账号**永不摘除**。
+// 实测：workbuddy 2 个号连续 8 天 0 成功，却显示为完全健康（last_err 零值）。
+//
+// # 变异验证（必须红）
+// 把 Classify 里那个 if 去掉 → 本测试红（回到 ErrClient）。
+func TestWorkbuddyEmptyBody403IsServer(t *testing.T) {
+	p := NewWithConfig(Config{})
+
+	// 被修正的那一格：403 + 空体 ⇒ server（进熔断 + 禁用两条线）。
+	if got := p.Classify(403, ""); got != gateway.ErrKindServer {
+		t.Errorf("403 + 空体 应判 server（账号被拒，必须能被摘掉），实际 %v", got)
+	}
+	// 只有**空**体才偏离：403 带可识别正文时仍由 upstream 判据说话（真值仍是 server）。
+	if got := p.Classify(403, "insufficient credits"); got != gateway.ErrKindHardCredit {
+		t.Errorf("403 + 额度正文 应仍走 upstream 判据（hard credit），实际 %v", got)
+	}
+	if got := p.Classify(403, "blocked by security policy"); got != gateway.ErrKindContentBlocked {
+		t.Errorf("403 + 内容策略正文 应仍判 content_blocked，实际 %v", got)
+	}
+	// 空白字符不算"有正文"：上游偶尔吐一个换行，不应让它退回 client。
+	if got := p.Classify(403, "  \n"); got != gateway.ErrKindServer {
+		t.Errorf("403 + 仅空白 也应判 server（TrimSpace 后为空），实际 %v", got)
+	}
+	// 相邻状态码不受影响：401 / 429 / 500 的既有语义不许被动到。
+	if got := p.Classify(401, ""); got != gateway.ErrKindClient {
+		t.Errorf("401 + 空体 应保持 client（本次只动 403），实际 %v", got)
+	}
+}
+
 func upstreamToGatewayForTest(k upstream.ErrKind) gateway.ErrorKind {
 	switch k {
 	case upstream.ErrNone:

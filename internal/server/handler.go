@@ -2242,7 +2242,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	switchedUpstream := false
 	// switchedFrom 记录本轮已经试过的上游（跨上游切换用，见 nextAliasUpstream）。
 	// 用它防止两个上游都没号时来回横跳：那是无限循环，不是重试。
-	switchedFrom := map[string]bool{}
+	//
+	// ⚠⚠ **当前上游必须一开始就登记进去。** 否则 nextAliasUpstream 会返回**自己** ——
+	//   而 aliasOrder 正是用户配的「这几个内部模型对外同名」，第一个候选往往就是当前这家：
+	//     用完换号预算仍失败 → 「切到 loomy」→ 而当前就在 loomy → goto 重跑整轮
+	//   ⇒ 同一家上游、同一批号被打了**两遍**（3 次 → 6 次），且 `attempts` 在每轮开头
+	//   重算，日志里**看不出**真实次数。
+	//
+	//   实测（2026-11-10）：124 次切换里 **111 次切到了自己（89.5%）**，
+	//   日志表现是 `kind=none，切到 "loomy"` 而当前上游本来就是 loomy。
+	//   登记当前上游之后，切换必然真的换一家；若没有别家可换就正常报错（不是空转）。
+	switchedFrom := map[string]bool{reqProvider: true}
 	origModel := peek.Model
 	// 时间预算：单次尝试实测可达 40 秒（用户直连讯飞：34.2s / 46.2s / 38.9s），
 	// 所以"换号重试"必须有墙钟上限，否则总等待会被放大到分钟级。
@@ -2551,7 +2561,19 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 				}
 				// 循环内的硬失败（注入失败/上游连续报错）：
 				// 分类后按换号处理，与普通 chat 路径同一条。
+				//
+				// ⚠⚠ **必须同时设 lastKind** —— 这里曾经只设 lastErr，于是 lastKind 停在零值
+				//   `ErrKindNone`，最后那段判决（按 lastKind 选状态码/错误码/文案）三条全落错分支：
+				//     上游 502 → 报 503 + code=no_healthy_account + 「all accounts unavailable」
+				//   —— 正是那句注释（第 2540 行附近）当初想消灭的现象，而这条路绕过了它。
+				//
+				//   实测（2026-11-10，55300 条日志）：loomy 走工具循环 ⇒ 它的**每个请求**都经过这里
+				//   （shouldRunToolLoop 只看上游是否声明了 ChatToolExt，不看客户端带没带工具），
+				//   于是 loomy 的 326 次失败里 **296 次（91%）**是「上游 502 却回 503」，
+				//   而 loomy 这辈子**一次 502 都没回过**。日志里 `kind=none` 与
+				//   `last=loomy server 502` 并存，就是这两条路径不同步的直接证据。
 				lastErr = werr
+				lastKind = gateway.ErrKindServer
 				fail(acct.UID, failBrief(reqProvider, gateway.ErrKindServer, werr))
 				continue
 			}
