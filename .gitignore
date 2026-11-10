@@ -45,6 +45,12 @@ backups/
 LOOP.md
 PLAN.md
 SPEC.md
+# ⚠ PLAN-* 系列（PLAN-groups / PLAN-sql-unify / PLAN-hyxapi-alignment / PLAN-newapi-alignment）
+#   是**过程计划**，不是交付物。它们本来就被下面的 `*.md` 覆盖 —— 之所以曾长期留在
+#   版本库里，是因为**提交发生在 `*.md` 规则之前**，而 gitignore 对已跟踪文件无效。
+#   2026-11-10 已用 `git rm --cached` 摘掉（磁盘文件保留，本地不受影响）。
+#   **这里刻意不写 `PLAN-*.md` 规则**：`*.md` 已经盖住它们，多一条冗余规则只会让人
+#   误以为"删掉那条规则它们就会回来" —— 真正起作用的是 untrack，不是忽略规则。
 # docs/ 整体是过程产物（进度日志、探究草稿），不入库。
 #
 # ⚠ 但**探究报告是交付物** —— 它记录了"上游有什么、我们怎么验证的"，
@@ -113,6 +119,16 @@ tasks/
 # 没有它，后人会把同样的事再查一遍 —— 这一步已实际发生过：
 # 我先后以为"选号没抄""分类更粗"，都是**查了才知道我们其实更细**。
 !docs/newapi-parity.md
+# ⚠ 下面 5 份曾在 `*.md` 规则下被吃掉却仍留在版本库里（已跟踪状态下 gitignore 无效）。
+#   其中 cache-refresh-design.md 更微妙：它的白名单写在**本文件第 60 行**，
+#   早于 `*.md` ⇒ 被反超 ⇒ 白名单形同不存在（本文件自己就写着「后匹配者胜」，
+#   这是同一个坑第二次踩中）。补在这里让它真正生效。
+#   用户 2026-11-10 明确：docs 全部保留，所以只补白名单，不摘文件。
+!docs/cache-refresh-design.md
+!docs/移植-前端.md
+!docs/移植-后端.md
+!docs/待移植对齐.md
+!docs/hyxapi-移植清单.md
 # 渠道/映射/对外模型的设计文档 —— 对标新版 new-api 的证据分级记录（T1 产物）。
 # 按本文件既有约定：docs/* 默认忽略，需要入库的逐条放行（同 newapi-parity.md）。
 !docs/design-channels.md
@@ -196,11 +212,27 @@ data/_snapshot-*.jsonl
 # ⚠ 我自己用的临时提交信息文件（git add -A 会顺手吞掉它 —— 实测已发生一次）。
 _commitmsg.txt
 
+# ⚠ 容器运行的**本机记录**（docker inspect 的快照：容器名 / 镜像 ID / 端口映射 / 宿主路径）。
+#   与 logs/ / tasks/ 同类：机器本地产物，不是交付物。
+.test-container-record.txt
+
 # ⚠ 我自己用 playwright 截的验收图（临时产物，不入库）
 shot_*.png
 
 # 截图/视觉证据产物（2026-10-19）—— 生成物，不进版本库；要看图直接在磁盘上开。
 shots/
+
+# ⚠ 但有两处截图是**交付物**（被已入库的文档引用），必须放行 ——
+#   它们不是"看一眼就删"的临时产物，删了文档就残：
+#
+#     assets/shots/*.png       被 README.md 引用（界面截图，README 缺图即残）
+#     docs/report/shots/*.png  被 docs/report/R2-adversarial.md 引用（视觉证据）
+#
+#   ⚠ 规则必须写在 `shots/` **之后** —— gitignore 后匹配者胜，写前面会被它吃掉。
+!assets/shots/
+!assets/shots/**
+!docs/report/shots/
+!docs/report/shots/**
 
 # ⚠ 临时产物统一归拢目录（2026-10-19 用户要求："临时文件太多，全部放到一个文件夹里"）。
 # 根目录原来散着 67 个 _shots_* 目录 + 76 个 probe_*.py + 18 个 diag_*.py + 8 张 shot_*.png
