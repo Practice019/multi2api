@@ -92,11 +92,14 @@ type chatStat struct {
 	attempts int
 	spentMs  int64
 	lastFail string
-	// upstreamReq 实际发给上游的请求体（未脱敏；仅失败时由 logChatRowProvider 落盘）。
+	// upstreamReqRef 实际发给上游的请求体（**引用，不拷贝**；仅失败时由
+	// logChatRowProvider 转成 string 并落盘）。
 	//
-	// 与 upstreamErr 配对使用：一个回答"我们发了什么"，一个回答"上游说了什么"。
-	// 用户实测场景（手动 200 / 走网关 403）只能靠它定位差异。
-	upstreamReq string
+	// ⚠ 为什么是 []byte 而不是 string：body 实测可达 135 KB，`string(bytes)` 是
+	//   完整拷贝。而 99% 的请求是成功的（成功不写这个字段）—— 为了 1% 的失败
+	//   让 100% 的请求付一次拷贝，是第一版的真实缺陷（当时注释还写着"不拷贝"）。
+	//   引用在本请求生命周期内一直有效（outBody 由 handler 持有到循环结束）。
+	upstreamReqRef []byte
 	// reqDump 落盘器（装配层注入，nil = 不落盘）。
 	reqDump *logbuf.ReqDump
 	// upstreamErr 上游错误**原文**（未脱敏；脱敏与截断在 logChatRowProvider 里统一做）。
@@ -116,6 +119,26 @@ func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 		mode = "stream"
 	}
 	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+}
+
+// upstreamReqForLog 只在**失败**时把请求体转成 string（成功请求零成本）。
+//
+// # 为什么单独抽一个方法
+//
+// 请求体以 []byte 引用形式存着（见 upstreamReqRef 的注释），转 string 是完整拷贝。
+// 若在 done() 里无条件转，就等于"为了 1% 的失败让 100% 的请求付一次拷贝"——
+// 那正是第一版的缺陷。这里把转换关在失败分支里。
+//
+// # 重试时的语义
+//
+// 重试循环里每次尝试都会刷新这个引用（每个账号拿到的是同一份 outBody，
+// 所以实际值相同）。若中途换了上游/改了 model，最后留下的是**最后一次尝试**
+// 发出去的那份 —— 与 upstreamErr（也是记最后一次失败）口径一致。
+func (s *chatStat) upstreamReqForLog() string {
+	if s == nil || len(s.upstreamReqRef) == 0 || s.status < 400 {
+		return ""
+	}
+	return string(s.upstreamReqRef)
 }
 
 // done 幂等落一行表格日志。
@@ -150,7 +173,7 @@ func (s *chatStat) done() {
 		//   totalMs=…  → 客户端实际等了多久（已由 entry.TotalMS 记录）
 		decisionForLog = appendAttemptTrace(decisionForLog, s.attempts, s.spentMs, s.lastFail)
 	}
-	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, decisionForLog, s.upstreamReq, s.upstreamErr, s.reqDump, s.preMs.Milliseconds(), s.clientIP, s.clientUA)
+	logChatRowProvider(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.provider, s.status, s.toks, s.usage, decisionForLog, s.upstreamReqForLog(), s.upstreamErr, s.reqDump, s.preMs.Milliseconds(), s.clientIP, s.clientUA)
 
 	// ⚠ 喂上游级"首字节耗时"统计（2026-10-18 加）。
 	//
@@ -410,22 +433,28 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 		if upstreamErr != "" {
 			entry.UpstreamErr = logbuf.TruncateUTF8(gateway.MaskErrorText(upstreamErr), logbuf.UpstreamErrMaxLen)
 		}
-		// 请求体：头尾各留一半（判据分布在两端：头部有 model/tools，尾部有最后一个 user 消息）。
-		// ⚠ 同样脱敏：body 里可能带 key/host（用户贴的 curl、参数覆盖模板等）。
-		if upstreamReq != "" {
-			entry.UpstreamReq = logbuf.TruncateHeadTail(gateway.MaskErrorText(upstreamReq), logbuf.UpstreamReqMaxLen)
-		}
-		// 完整 body 落到**独立文件**（不进 JSONL：整份 body 可达数百 KB，
-		// 既会翻几十倍日志体积，也会撑爆 /admin/logs 的环形缓冲）。
+		// 请求体：**只脱敏一次**，两个消费方（JSONL 头尾 + 完整落盘文件）共用。
 		//
-		// ⚠ 只在配置了落盘器时执行（装配层注入 nil = 不落盘，零成本）。
-		if reqDump != nil && upstreamReq != "" {
-			reqDump.Write(model, provider, itoaStatus(status), map[string]string{
-				"seq":      itoa64(entry.Seq),
-				"mode":     mode,
-				"uid":      uid,
-				"decision": decision,
-			}, []byte(gateway.MaskErrorText(upstreamReq)))
+		// ⚠ 第一版对同一份 body 调了两次 MaskErrorText（JSONL 一次、落盘一次），
+		//   而那是 8 个正则 + url.Parse 的流水线，body 实测可达 135 KB ⇒ 白付一倍 CPU。
+		//   这里先算一次 masked，再分别截断/落盘。
+		if upstreamReq != "" {
+			masked := gateway.MaskErrorText(upstreamReq)
+			// JSONL：头尾各留一半（判据分布在两端：头部有 model/tools，尾部有最后一条 user 消息）。
+			entry.UpstreamReq = logbuf.TruncateHeadTail(masked, logbuf.UpstreamReqMaxLen)
+			// 完整 body 落到**独立文件**（不进 JSONL：整份 body 可达数百 KB，
+			// 既会翻几十倍日志体积，也会撑爆 /admin/logs 的环形缓冲）。
+			//
+			// ⚠ 只在配置了落盘器时执行（装配层注入 nil = 不落盘，零成本）。
+			// ⚠ 只有**失败**才落（这个分支本身已在 status>=400 里）。
+			if reqDump != nil {
+				reqDump.Write(model, provider, itoaStatus(status), map[string]string{
+					"seq":      itoa64(entry.Seq),
+					"mode":     mode,
+					"uid":      uid,
+					"decision": decision,
+				}, []byte(masked))
+			}
 		}
 	}
 	entry.PreMs = preMs

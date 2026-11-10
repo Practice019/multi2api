@@ -2618,9 +2618,14 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 		//
 		// ⚠ 为什么在调用**之前**存：用户那个问题（"手动 200、走网关 403"）的唯一
 		//   可能差异就在这份 body 上；失败时再想拿它，早已随函数返回丢失。
-		// ⚠ 只存引用不拷贝：outBody 在本函数返回前一直有效，而真正的截断 + 脱敏
-		//   发生在 logChatRowProvider（且仅 status>=400 时才写）。
-		st.upstreamReq = string(outBody)
+		//
+		// ⚠⚠ **存 []byte 而不是 string，也不在这里转换**：
+		//   `string(outBody)` 是一次**完整拷贝**（body 实测可达 135 KB）。第一版就是这么写的，
+		//   而注释却写着"只存引用不拷贝"—— 注释与实现不一致，且每个请求（含**成功**的）
+		//   都白付一次拷贝 + 一份堆分配。
+		//   现在存切片引用（outBody 在本函数返回前一直有效），只在**真的要写日志时**
+		//   才转成 string（见 logChatRowProvider 的失败分支）。
+		st.upstreamReqRef = outBody
 		cr, status, terr := h.chatVia(ctx, reqProvider, acct, outBody)
 		if terr != nil {
 			// ⚠⚠ **本地转换失败**：换号**完全无效**（转换取决于请求体本身，

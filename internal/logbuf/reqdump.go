@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,8 +52,17 @@ type ReqDump struct {
 	maxFiles int
 	// maxBytes 目录总字节上限（超限继续删最旧）。
 	maxBytes int64
+	// maxAge 最长保留时长（超期删）。<=0 = 不限。
+	//
+	// ⚠ 为什么需要它（修正一处注释与实现不一致）：
+	//   本文件的注释一直写着"按天数 + 总配额双重裁剪"，但第一版只实现了
+	//   (文件数, 总字节) 两个维度 —— 低流量部署下 200 个文件可能留几个月，
+	//   而这些文件**含用户对话全文**，留久了没有正当理由。
+	maxAge time.Duration
 	// written 已写文件数（用于低频触发裁剪，避免每次失败都扫目录）。
 	written int
+	// seq 文件名去重用的进程内原子计数（见 Write 里的注释）。
+	seq uint64
 }
 
 // 落盘默认值。
@@ -69,6 +79,11 @@ const (
 	DefaultReqDumpBytes = 32 << 20
 	// ReqDumpMaxBody 单个文件最多写多少字节。
 	ReqDumpMaxBody = 8 << 20
+	// DefaultReqDumpAge 最长保留 7 天。
+	//
+	// 与 request-log 的默认 keep_days 同一量级：排障窗口通常在几小时内，
+	// 7 天足够"周五复现、周一再查"。
+	DefaultReqDumpAge = 7 * 24 * time.Hour
 )
 
 // NewReqDump 构造落盘器。dir 为空 ⇒ 返回 nil（调用方不必判空，nil 是 no-op）。
@@ -89,7 +104,7 @@ func NewReqDump(dir string, maxFiles int, maxBytes int64) (*ReqDump, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	d := &ReqDump{dir: dir, maxFiles: maxFiles, maxBytes: maxBytes}
+	d := &ReqDump{dir: dir, maxFiles: maxFiles, maxBytes: maxBytes, maxAge: DefaultReqDumpAge}
 	d.pruneLocked() // 启动即裁一次：上次运行可能留下超量文件
 	return d, nil
 }
@@ -119,7 +134,14 @@ func (d *ReqDump) Write(model, provider, status string, meta map[string]string, 
 
 	now := time.Now()
 	h := sha1.Sum([]byte(model + "\x00" + provider))
-	name := fmt.Sprintf("%s-%s.txt", now.Format("20060102-150405.000"), hex.EncodeToString(h[:4]))
+	// ⚠⚠ 时间戳（毫秒）**不足以**区分并发失败：
+	//   同一毫秒里两条同模型同 provider 的失败，哈希也相同 ⇒ 后写的会**覆盖**先写的，
+	//   而"两条都失败"在并发场景下很常见（DSH 一次发多个请求）。
+	//   因此在名字末尾加一段原子计数器：它是进程内唯一的，保证不覆盖。
+	//   （不用随机数：计数器在 ls 里仍保持"越大越新"的可读性。）
+	seq := atomic.AddUint64(&d.seq, 1)
+	name := fmt.Sprintf("%s-%s-%04d.txt",
+		now.Format("20060102-150405.000"), hex.EncodeToString(h[:4]), seq%10000)
 	path := filepath.Join(d.dir, name)
 
 	var b []byte
@@ -193,7 +215,12 @@ func (d *ReqDump) pruneLocked() {
 		files = append(files, fi{filepath.Join(d.dir, e.Name()), info.ModTime(), info.Size()})
 		total += info.Size()
 	}
-	if len(files) <= d.maxFiles && total <= d.maxBytes {
+	// 先按**年龄**删（与 (数量, 字节) 是"或"的关系，任一超限都裁）。
+	cutoff := time.Time{}
+	if d.maxAge > 0 {
+		cutoff = time.Now().Add(-d.maxAge)
+	}
+	if len(files) <= d.maxFiles && total <= d.maxBytes && cutoff.IsZero() {
 		return
 	}
 	// 最旧的先删。
@@ -203,7 +230,10 @@ func (d *ReqDump) pruneLocked() {
 	//   range 的推进 —— 那种写法会边删边跳过元素，也可能重复删同一个文件。
 	n := len(files)
 	for i := 0; i < n; i++ {
-		if n-i <= d.maxFiles && total <= d.maxBytes {
+		okByCount := n-i <= d.maxFiles
+		okByBytes := total <= d.maxBytes
+		okByAge := cutoff.IsZero() || files[i].mod.After(cutoff)
+		if okByCount && okByBytes && okByAge {
 			break
 		}
 		if err := os.Remove(files[i].path); err == nil {
