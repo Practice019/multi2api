@@ -110,7 +110,6 @@ func TestWorkbuddyClassifyMatchesUpstreamClassify(t *testing.T) {
 // 通用性**，而是直接 panic —— 测试里出现未知 ErrKind 是硬故障，
 // 应当炸掉而不是静默返回 none。
 
-
 // TestWorkbuddyEmptyBody403IsServer 记录**唯一一处有意偏离** upstream.Classify 的行为。
 //
 // 上一条 parity 测试的意义是「除这一处外，行为逐字不变」。它是一张表，不是穷举，
