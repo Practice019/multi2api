@@ -43,6 +43,28 @@ import (
 // 若上游哪天把 402 改成 200，这条就会静默漏判。
 const observedNoCredits = `{"error":{"message":"积分余额不足，请获取积分后再试","type":"insufficient_quota","param":null,"code":402,"metadata":{"provider_name":"loomy"}}}`
 
+
+// TestLoomyDeclaresSessionDeathPermanent loomy 必须**声明**自己的会话失效是终态。
+//
+// # 为什么这是一条独立的门禁
+//
+// 上游不声明时，核心走「连续 3 次才禁用」的门控（那对 workbuddy 的抖动是对的）。
+// 而 loomy **没有续期手段** ⇒ 它的「登录已失效」不会自愈 ⇒ 门控只会让一个必然
+// 失败的号白挨三次选中。所以这条声明是**能力**，不是可选装饰。
+//
+// 变异验证：把 provider.go 里的 SessionDeathIsPermanent 删掉 ⇒ 本测试红。
+func TestLoomyDeclaresSessionDeathPermanent(t *testing.T) {
+	p := NewWithConfig(Config{})
+	ext, ok := gateway.ExtOf[gateway.SessionDeathPolicyExt](p)
+	if !ok {
+		t.Fatal("loomy 没有实现 gateway.SessionDeathPolicyExt —— " +
+			"核心会回落到「连续 3 次才禁用」，而死号的会话不会自愈")
+	}
+	if !ext.SessionDeathIsPermanent() {
+		t.Error("loomy 的会话失效应声明为**终态**（无 refresh token / 无 TTL / 客户端不刷新）")
+	}
+}
+
 func TestLoomyRealNoCreditsBodyIsHardCredit(t *testing.T) {
 	p := NewWithConfig(Config{})
 	got := p.Classify(402, observedNoCredits)

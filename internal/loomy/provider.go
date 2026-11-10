@@ -496,6 +496,22 @@ func (b *tierInvalidateBody) Close() error {
 // 过滤是安全的：它只是不显示，请求仍然能发（上游的错误会如实返回），
 // 而且上游一旦真的开放，实时目录会把它带回来（filterUnavailable 只按
 // 静态表里的 Unavailable 标记过滤，不按 ID 白名单）。
+// SessionDeathIsPermanent 实现 gateway.SessionDeathPolicyExt：**一次即永久**。
+//
+// # 为什么 loomy 是 true
+//
+// 本上游**没有任何续期手段** —— 凭证只有一个 `session`（见 credential.go 的包注释：
+// 没有 refresh token、没有 TTL 字段、客户端也不刷新）。所以「登录已失效」是**终态**，
+// 不会自愈，只能人工重登。
+//
+// ⚠ 实测依据（2026-11-10，逐个打 45 个真实账号）：5 个号返回 **HTTP 200** +
+// `{"code":"100002","desc":"登录已失效，请重新登录"}`，复测仍是同一句 ——
+// 与 workbuddy 的 12153（含抖动成分，可自愈）**不同类**。
+//
+// 留在池里的代价是实打实的：每次被选中都白跑一次往返，而界面上看不出它已经坏了
+// （这些号的 last_err 长期是零值，看着和健康号一样）。
+func (p *Provider) SessionDeathIsPermanent() bool { return true }
+
 func (p *Provider) ProbeHealth(ctx context.Context, cred gateway.Credential) error {
 	a, err := authOf(cred)
 	if err != nil {

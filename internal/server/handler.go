@@ -3689,6 +3689,42 @@ func refreshDueAt(acct *auth.Auth, cred gateway.Credential, within time.Duration
 	return time.Now().Add(within).Unix() >= at
 }
 
+// sessionDeathPolicySource 出口层**可选**依赖的一个能力：
+// 「这个号所属的上游，它的会话失效能不能自愈」。
+//
+// # 为什么用接口断言，而不是写进 ProviderRouter 接口
+//
+// ProviderRouter 是**必需**能力（Has/Default/Models/Classify…），加一个方法会让所有
+// 实现者（含各测试里的假路由）一起编译失败；而这条判据是**可选**的：
+// 不提供它的实现保持既有行为（连续 N 次才禁用）。
+//
+// ⚠ 与 gateway.ExtOf 同一个理由：可选能力用断言发现，不加宽必需接口。
+// 这正是本仓「上游只实现自己有的」那条约定在出口层的写法。
+type sessionDeathPolicySource interface {
+	// SessionDeathPermanent 报告该上游的会话失效是否不可自愈。
+	SessionDeathPermanent(providerID string) bool
+}
+
+// sessionDeathIsPermanent 问「这个号所属上游」：会话失效能不能自愈。
+//
+// 三条回落都返回 false（= 保持既有的计数门控）：单上游模式（Provider == nil）、
+// 查不到归属、以及实现没有提供这个可选能力。**不猜**是这里的默认方向 ——
+// 猜成 true 会把 workbuddy 那类可自愈的瞬时抖动升级成永久禁用。
+func (h *Handler) sessionDeathIsPermanent(uid string) bool {
+	if h.cfg.Pool == nil || h.cfg.Provider == nil {
+		return false
+	}
+	providerID, ok := h.cfg.Pool.ProviderOf(uid)
+	if !ok || providerID == "" {
+		return false
+	}
+	src, ok := h.cfg.Provider.(sessionDeathPolicySource)
+	if !ok {
+		return false
+	}
+	return src.SessionDeathPermanent(providerID)
+}
+
 func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
 	// 自动禁用计数（internal/pool/autodisable.go）：与下面每种策略**并列**累加。
 	//
@@ -3780,6 +3816,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind gateway.ErrorKind) {
 		// 现在交给 Pool.NoteSessionDead 计数门控：连续 3 次才禁用，
 		// 任何一次成功都清零。真正失效的 session（每次都会 12153）
 		// 仍然会被停掉，行为与改造前一致。
+		//
+		if h.sessionDeathIsPermanent(uid) {
+			h.cfg.Pool.Disable(uid, "上游会话永久失效（该上游无续期手段，需人工重登）")
+			return
+		}
+		// ⚠ 2026-11-10：这条门控**只对「能自愈的上游」成立**。判据由上游自己报
+		//   （gateway.SessionDeathPolicyExt；loomy 的「登录已失效」是终态）：
+		//   对不能自愈的上游，计数门控只会让一个必然失败的号白挨三次选中，
+		//   而界面上看不出它已经坏了。
 		h.cfg.Pool.NoteSessionDead(uid)
 	case gateway.ErrKindNotFound:
 		// 404 短冷却（软冷却），防雪崩。

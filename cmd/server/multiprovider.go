@@ -231,6 +231,23 @@ type registryRouter struct {
 	p *pool.Pool
 }
 
+// SessionDeathPermanent 报告该上游的「会话失效」是否**不可自愈**。
+//
+// 出口层的**可选**能力：它用接口断言发现它（见 server.sessionDeathIsPermanent）。
+// 不提供该方法的实现 ⇒ 回落「连续 N 次才禁用」的既有门控 —— 所以这是纯增量。
+//
+// 判据由**上游自己**给出（gateway.SessionDeathPolicyExt）：能自动续期的（workbuddy）
+// 说 false，没有续期手段的（loomy）说 true。装配层只做"按 id 取上游 → 取扩展点"，
+// 不替上游猜。
+func (r registryRouter) SessionDeathPermanent(id string) bool {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return false
+	}
+	ext, ok := gateway.ExtOf[gateway.SessionDeathPolicyExt](pv)
+	return ok && ext.SessionDeathIsPermanent()
+}
+
 // Has 报告该 ID 是否已注册。
 func (r registryRouter) Has(id string) bool {
 	_, ok := r.reg.Get(id)
