@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // openTokenDB 开一个临时库并**显式**建 tokens 表。
@@ -469,5 +470,46 @@ func TestTokenViewExposesAutoGroups(t *testing.T) {
 	}
 	if len(v2.AutoGroups) != 0 {
 		t.Errorf("空快照不应带回分组，得到 %v", v2.AutoGroups)
+	}
+}
+
+// ── 自用化改造：到期边界与派生字段 ─────────────────────────────────────
+//
+// 唯一口径是 Token.IsExpiredAt：正好等于到期时刻即算过期（与网关一致，
+// 否则"到点那一秒"会出现"界面说有效、网关说过期"）。
+func TestTokenExpiryBoundaryAndView(t *testing.T) {
+	base := int64(1_800_000_000)
+	tok := &Token{ExpiredTime: base, Status: TokenStatusEnabled}
+	if tok.IsExpiredAt(base - 1) {
+		t.Error("到期前一秒不该算过期")
+	}
+	if !tok.IsExpiredAt(base) {
+		t.Error("正好到点必须算过期（边界含等号）")
+	}
+	if !tok.IsExpiredAt(base + 1) {
+		t.Error("到期后必须算过期")
+	}
+	// -1 / 0 都表示永不
+	for _, et := range []int64{-1, 0} {
+		if (&Token{ExpiredTime: et, Status: TokenStatusEnabled}).IsExpiredAt(base) {
+			t.Errorf("ExpiredTime=%d 表示永不，不该算过期", et)
+		}
+	}
+	// 库侧 status=3 即使时间在未来也算过期
+	if !(&Token{ExpiredTime: base + 1000, Status: TokenStatusExpired}).IsExpiredAt(base) {
+		t.Error("status=3 必须算过期")
+	}
+	// 视图透出（列表与详情都走 Masked）。⚠ 这里必须用**相对当前时刻**的时间：
+	// base 是 2027 年，相对 2026 年的 now 属于"未到期"，拿它断言过期会把测试写反。
+	now := time.Now().Unix()
+	pastTok := &Token{ExpiredTime: now - 60, Status: TokenStatusEnabled, Name: "边界"}
+	if !pastTok.Masked().Expired {
+		t.Error("Masked() 的 expired 必须与 IsExpiredAt 同源")
+	}
+	if (&Token{ExpiredTime: now + 3600, Status: TokenStatusEnabled}).Masked().Expired {
+		t.Error("未到期不该标过期")
+	}
+	if (&Token{ExpiredTime: -1, Status: TokenStatusEnabled}).Masked().Expired {
+		t.Error("-1（永不）不该标过期")
 	}
 }

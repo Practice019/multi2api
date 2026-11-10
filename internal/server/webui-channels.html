@@ -172,6 +172,17 @@ table.ch td.ops button{margin-left:4px}
 .mlist label{display:block;font:12px/1.7 var(--font-mono)}
 .foot{display:flex;gap:8px;align-items:center;padding:10px 11px;position:sticky;bottom:0;background:var(--panel);border-top:2px solid var(--line)}
 .ro{color:var(--dim);font-size:11px}
+/* ── 渠道页自有：「更多操作」折叠菜单 ────────────────────────────────────
+   只做布局与显隐，颜色一律走主题变量（外壳吵、数据静：菜单属于外壳层）。
+   放在 MAXIMALISM:START 之前 —— 标记之间是 theme_sync 的生成区，手改会被覆盖。 */
+.toolbar details.more{position:relative}
+.toolbar details.more > summary{list-style:none;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.toolbar details.more > summary::-webkit-details-marker{display:none}
+.toolbar details.more > summary::after{content:"▾";font-size:10px;opacity:.7}
+.toolbar details.more[open] > summary::after{content:"▴"}
+.toolbar details.more .morebox{position:absolute;right:0;top:calc(100% + 6px);z-index:30;display:flex;flex-direction:column;gap:6px;padding:8px;min-width:200px;background:var(--paper);border:1px solid var(--line);box-shadow:4px 4px 0 var(--shadow)}
+.toolbar details.more .morebox .tb{justify-content:flex-start;text-align:left}
+
 /* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */
 /* 时间范围口径提示（T-423）。
    改造前是 h3 里的内联 11px 文字，档位间长度从 0 字跳到 27 字
@@ -1451,21 +1462,27 @@ header h1{letter-spacing:0}
 
   <div id="banner" class="banner" hidden></div>
 
+  <!-- 工具栏分层（2026-11-10）：日常动作平铺，维护/危险动作收进「更多操作」；
+       批量动作只在选中行后出现（在下方分页条上）。按钮 id 全部保留 ——
+       脚本与前端门禁都按 id 找它们，这里只改摆放。 -->
   <div class="toolbar">
-    <button class="tb" id="btn-new" type="button">新建渠道</button>
-    <span class="sep"></span>
-    <button class="tb" id="btn-testall" type="button">测试全部渠道</button>
-    <button class="tb" id="btn-mcheck" type="button">检测全部模型更新</button>
-    <button class="tb" id="btn-mapply" type="button" disabled>应用全部待处理变更</button>
-    <button class="tb" id="btn-balance" type="button">查询全部渠道余额</button>
-    <span class="sep"></span>
-    <button class="tb" id="btn-tagview" type="button">标签视图</button>
+    <button class="tb tb--go" id="btn-new" type="button">＋ 新建渠道</button>
     <button class="tb" id="btn-filter" type="button">筛选器</button>
     <button class="tb" id="btn-reset" type="button">重置</button>
+    <button class="tb" id="btn-tagview" type="button">标签视图</button>
     <span class="grow"></span>
-    <button class="tb" id="btn-drag" type="button">拖动排序</button>
-    <button class="tb" id="btn-undrag" type="button" disabled>撤销排序</button>
-    <button class="tb tb--danger" id="btn-cleardis" type="button">清除所有禁用渠道</button>
+    <details class="more">
+      <summary class="tb">更多操作</summary>
+      <div class="morebox">
+        <button class="tb" id="btn-testall" type="button" title="只验证各渠道的模型目录能否连通，不代表对话推理可用">测试全部渠道（目录连通）</button>
+        <button class="tb" id="btn-mcheck" type="button">检测全部模型更新</button>
+        <button class="tb" id="btn-mapply" type="button" disabled>应用全部待处理变更</button>
+        <button class="tb" id="btn-balance" type="button" title="上游未提供余额接口时会明确返回「未支持」，不会静默显示成 0">查询全部渠道余额</button>
+        <button class="tb" id="btn-drag" type="button">拖动排序</button>
+        <button class="tb" id="btn-undrag" type="button" disabled>撤销排序</button>
+        <button class="tb tb--danger" id="btn-cleardis" type="button">清除所有禁用渠道</button>
+      </div>
+    </details>
   </div>
 
   <div class="filters">
@@ -1490,9 +1507,9 @@ header h1{letter-spacing:0}
       </colgroup>
       <thead>
         <tr>
-          <th><input type="checkbox" id="ck-all" aria-label="全选本页" title="全选本页"></th>
-          <th>ID</th><th>名称</th><th>标签名称</th><th>类型</th><th>分组</th><th>状态</th>
-          <th>优先级</th><th>权重</th><th>已用</th><th>渠道余额</th><th style="text-align:right">操作</th>
+          <th scope="col"><input type="checkbox" id="ck-all" aria-label="全选本页" title="全选本页"></th>
+          <th scope="col">ID</th><th scope="col">名称</th><th scope="col">标签名称</th><th scope="col">类型</th><th scope="col">分组</th><th scope="col">状态</th>
+          <th scope="col">优先级</th><th scope="col">权重</th><th scope="col">已用</th><th scope="col">渠道余额</th><th scope="col" style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="ch-rows"></tbody>
@@ -1509,6 +1526,7 @@ header h1{letter-spacing:0}
     <span id="ch-pageinfo"></span>
     <button id="ch-prev" type="button">上一页</button>
     <button id="ch-next" type="button">下一页</button>
+    <button id="ch-first" type="button" title="回到第一页">首页</button>
     <span class="grow"></span>
     <span id="ch-selinfo"></span>
     <button class="mini" id="btn-bstatus" type="button" disabled>批量启用</button>
@@ -1619,11 +1637,19 @@ function api(method, path, body) {
 
 /* ② 列表 ───────────────────────────────────────────────────────────────── */
 
-/* load 只负责"服务端维度"的筛选（status/type/group/sort）与整体拉取；
-   keyword 与分页在内存里做（见文件头第 3 条硬约束）。
-   每次 load 都要：页码回 1、清空多选、退出拖动排序 —— 否则会留下"上一屏的选择"。 */
-function load() {
-  var q = ['p=1', 'page_size=100'];
+/* load 把 keyword / 页码 / 每页条数 与 status・type・group・sort 一起交给服务端。
+   ⚠ 2026-11-10：此前固定 p=1&page_size=100，再在浏览器里搜索与分页 ——
+   第 101 条起不可达，搜索也只扫已取的那 100 条，而 /admin/channels 早已支持
+   keyword 与 p/page_size（internal/admin/channels.go:295-326）。
+   resetPage=true 用于筛选变更（回到第 1 页）；翻页 / 改每页条数不重置。 */
+var loadSeq = 0;
+function load(resetPage) {
+  if (resetPage) { st.page = 1; }
+  // 并发保护：搜索是防抖的，慢请求可能晚于快请求返回并把新结果覆盖回旧的。
+  // 只接受「最近一次 load」的响应（序号不等就丢弃，不渲染）。
+  var seq = ++loadSeq;
+  var q = ['p=' + st.page, 'page_size=' + st.psize];
+  if (st.keyword) { q.push('keyword=' + encodeURIComponent(st.keyword)); }
   if (st.f.status !== '') { q.push('status=' + encodeURIComponent(st.f.status)); }
   if (st.f.type !== '') { q.push('type=' + encodeURIComponent(st.f.type)); }
   if (st.f.group) { q.push('group=' + encodeURIComponent(st.f.group)); }
@@ -1631,14 +1657,21 @@ function load() {
   if (st.f.sortBy) { q.push('sort_by=' + encodeURIComponent(st.f.sortBy)); }
   if (st.f.sortOrder) { q.push('sort_order=' + encodeURIComponent(st.f.sortOrder)); }
   return api('GET', '/admin/channels?' + q.join('&')).then(function (j) {
+    if (seq !== loadSeq) { return; }
     st.rows = (j && (j.items || j.channels)) || [];
     st.typeCounts = (j && j.type_counts) || {};
     st.statusCounts = (j && j.status_counts) || {};
-    st.total = (j && j.total) || st.rows.length;
+    st.total = (j && typeof j.total === 'number') ? j.total : st.rows.length;
     st.ability = (j && j.ability_count) || 0;
-    st.page = 1; st.sel = {}; exitDrag();
+    // 删掉/筛选后可能停在越界页：回退到最后一个有效页再取一次。
+    var last = Math.max(1, Math.ceil(st.total / st.psize));
+    if (st.page > last) { st.page = last; return load(false); }
+    st.sel = {}; exitDrag();
     render();
-  }).catch(function (e) { banner('err', '加载渠道失败：' + e.message); });
+  }).catch(function (e) {
+    if (seq !== loadSeq) { return; }
+    banner('err', '加载渠道失败：' + e.message);
+  });
 }
 
 function matches(ch) {
@@ -1647,12 +1680,10 @@ function matches(ch) {
   var hay = [ch.name, ch.id, ch.base_url, ch.group, ch.tag].concat(ch.groups || [], ch.key_masks || []).join(' ');
   return hay.toLowerCase().indexOf(k) >= 0;
 }
-function viewRows() { return st.rows.filter(matches); }
-function pages() { return Math.max(1, Math.ceil(viewRows().length / st.psize)); }
-function pageRows() {
-  var v = viewRows(), p = Math.min(st.page, pages());
-  return v.slice((p - 1) * st.psize, p * st.psize);
-}
+/* 服务端已按 keyword / 筛选 / 分页返回当前页 ⇒ 这里不再二次过滤。 */
+function viewRows() { return st.rows; }
+function pages() { return Math.max(1, Math.ceil(st.total / st.psize)); }
+function pageRows() { return viewRows(); }
 function selIds() { return Object.keys(st.sel).filter(function (k) { return st.sel[k]; }); }
 
 function statusBadge(s) {
@@ -1680,24 +1711,31 @@ function render() {
       '<td class="num" title="已用额度">' + num(ch.used_quota) + '</td>' +
       '<td class="num" title="' + (ch.balance_updated_time ? '更新于 ' + ts(ch.balance_updated_time) : '') + '">' + money(ch.balance) + '</td>' +
       '<td class="ops">' +
-        '<button class="mini" data-act="edit" data-id="' + esc(ch.id) + '">编辑</button>' +
-        '<button class="mini" data-act="keys" data-id="' + esc(ch.id) + '">密钥</button>' +
+        '<button class="mini" data-act="edit" data-id="' + esc(ch.id) + '" aria-label="编辑渠道 ' + esc(ch.name || ch.id) + '">编辑</button>' +
+        '<button class="mini" data-act="keys" data-id="' + esc(ch.id) + '" aria-label="管理渠道 ' + esc(ch.name || ch.id) + ' 的密钥">密钥</button>' +
         '<button class="mini" data-act="toggle" data-id="' + esc(ch.id) + '" data-status="' + (ch.status === 1 ? 2 : 1) + '">' + (ch.status === 1 ? '停用' : '启用') + '</button>' +
-        '<button class="mini" data-act="test" data-id="' + esc(ch.id) + '">测试</button>' +
-        '<button class="mini" data-act="balance" data-id="' + esc(ch.id) + '">余额</button>' +
+        '<button class="mini" data-act="test" data-id="' + esc(ch.id) + '" title="只验证模型目录能否连通，不代表对话推理可用">测试</button>' +
+        '<button class="mini" data-act="balance" data-id="' + esc(ch.id) + '" title="上游未提供余额接口时会明确提示未支持">余额</button>' +
         '<button class="mini" data-act="copy" data-id="' + esc(ch.id) + '">复制</button>' +
-        '<button class="mini mini--danger" data-act="del" data-id="' + esc(ch.id) + '">删除</button>' +
+        '<button class="mini mini--danger" data-act="del" data-id="' + esc(ch.id) + '" aria-label="删除渠道 ' + esc(ch.name || ch.id) + '">删除</button>' +
       '</td></tr>';
   });
   $('ch-rows').innerHTML = html;
+  // 空态分三种，不能都写「没有匹配的渠道」：
+  //   有筛选 → 条件没命中（提示怎么退回去）；无筛选且 total=0 → 真的还没有渠道。
+  var hasFilter = !!(st.keyword || activeFilterCount());
   $('ch-empty').hidden = rows.length > 0;
+  $('ch-empty').textContent = hasFilter
+    ? '没有匹配的渠道 —— 换个关键词，或点「重置」清空筛选。'
+    : '还没有渠道。点「＋ 新建渠道」，或在「更多操作」里检测/导入。';
 
-  var v = viewRows().length, p = Math.min(st.page, pages());
-  $('ch-statusline').textContent = '共 ' + st.rows.length + ' 条（筛选后 ' + v + ' 条）· 能力索引 ' + (st.ability || 0) + ' 条';
+  var v = st.total, p = Math.min(st.page, pages());
+  $('ch-statusline').textContent = '共 ' + v + ' 条' + ((st.keyword || activeFilterCount()) ? '（已筛选）' : '') + ' · 能力索引 ' + (st.ability || 0) + ' 条';
   $('ch-pageinfo').textContent = '第 ' + p + '/' + pages() + ' 页 · 显示 ' +
     (v === 0 ? 0 : ((p - 1) * st.psize + 1)) + '-' + Math.min(p * st.psize, v) + ' / ' + v;
   $('ch-prev').disabled = p <= 1;
   $('ch-next').disabled = p >= pages();
+  $('ch-first').disabled = p <= 1;
   renderChips();
   renderSel();
 }
@@ -1742,13 +1780,15 @@ function onSearchInput() {
   var v = $('flt-q').value.trim();
   st.keyword = v;
   if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
-  if (v === '') { st.page = 1; render(); return; }
-  searchTimer = setTimeout(function () { st.page = 1; render(); searchTimer = null; }, 250);
+  if (v === '') { load(true); return; }
+  searchTimer = setTimeout(function () { load(true); searchTimer = null; }, 250);
 }
 function gotoPage(p) {
   var max = pages();
-  st.page = Math.min(Math.max(1, p), max);
-  render();
+  var next = Math.min(Math.max(1, p), max);
+  if (next === st.page) { return; }
+  st.page = next;
+  load(false);
 }
 
 function exitDrag() {
@@ -1760,19 +1800,20 @@ function exitDrag() {
 
 /* ── 事件绑定 ─────────────────────────────────────────────────────────── */
 $('flt-q').addEventListener('input', onSearchInput);
-$('flt-status').addEventListener('change', function () { st.f.status = this.value; load(); });
+$('flt-status').addEventListener('change', function () { st.f.status = this.value; load(true); });
 $('ch-types').addEventListener('click', function (e) {
   var b = e.target.closest('[data-type]');
   if (!b) { return; }
   st.f.type = b.getAttribute('data-type');
-  load();
+  load(true);
 });
 $('ch-psize').addEventListener('change', function () {
   st.psize = Math.min(100, Math.max(1, parseInt(this.value, 10) || 20));
-  st.page = 1; render();
+  load(true);
 });
 $('ch-prev').addEventListener('click', function () { gotoPage(st.page - 1); });
 $('ch-next').addEventListener('click', function () { gotoPage(st.page + 1); });
+$('ch-first').addEventListener('click', function () { gotoPage(1); });
 $('ck-all').addEventListener('change', function () {
   var on = this.checked;
   pageRows().forEach(function (c) { st.sel[c.id] = on; });
@@ -1798,9 +1839,9 @@ elRefresh.addEventListener('click', function () { load(); });
 $('btn-new').addEventListener('click', function () { openDrawer(null); });
 $('btn-reset').addEventListener('click', function () {
   st.f = { status: '', type: '', group: '', sortBy: '', sortOrder: '' };
-  st.keyword = ''; st.tagMode = ''; st.page = 1; st.sel = {};
+  st.keyword = ''; st.tagMode = ''; st.sel = {};
   $('flt-q').value = ''; $('flt-status').value = '';
-  load();
+  load(true);
 });
 /* ⚠ 必须包一层匿名函数：本文件有三段 <script>，它们**按顺序各自求值**，
    第一段求值时 openFilters（在第二段）还没定义 —— 直接传函数引用会抛
@@ -1853,6 +1894,13 @@ function upstreamOne(kind, id) {
 }
 function upstreamAll(kind) {
   return api('POST', '/admin/channels/' + kind, { all: true }).then(function (j) {
+    // 余额是**明确未支持**的能力（gateway.Provider 没有余额方法）：上游返回
+    // supported:false + 原因。必须照实说「未支持」，不能显示成"完成"或"余额 0" ——
+    // 后者会让用户以为额度耗尽了。
+    if (kind === 'balance' && j && j.supported === false) {
+      banner('err', '余额查询未支持：' + (j.note || '该渠道类型没有余额接口') + '（共 ' + (j.total || 0) + ' 条渠道，未写入任何余额）');
+      return j;
+    }
     banner('ok', kind + ' 完成：' + summarize(j));
     return j;
   }).catch(function (e) { banner('err', e.message); return null; });
@@ -1970,16 +2018,16 @@ function openFilters() {
     st.f.sortBy = $('f-sort').value;
     st.f.sortOrder = $('f-dir').value;
     $('flt-status').value = st.f.status;
-    closeHost(host); load();
+    closeHost(host); load(true);
   });
 }
 
 /* ── 抽屉：新建 / 编辑 ────────────────────────────────────────────────── */
-var dlgState = { id: null, isNew: true, visualMap: false, save: false };
+var dlgState = { id: null, isNew: true, visualMap: false, save: false, tag0: '' };
 
 function openDrawer(id) {
   var ch = id ? rowById(id) : null;
-  dlgState = { id: id || null, isNew: !id, visualMap: false, save: false };
+  dlgState = { id: id || null, isNew: !id, visualMap: false, save: false, tag0: (ch && ch.tag) || '' };
   var host = $('host-dlg');
   var multi = !!(ch && ch.key_count > 1);
   host.innerHTML =
@@ -1996,7 +2044,7 @@ function openDrawer(id) {
           }).join('') + '</select></div>' +
         '<div class="row"><label for="f-name">名称 <span class="hint">必填</span></label><input class="ipt grow" id="f-name" value="' + esc(ch ? ch.name : '') + '"></div>' +
         (dlgState.isNew ?
-          '<div class="row"><label for="f-mode">创建模式</label><select class="sel" id="f-mode"' +
+          '<div class="row"><label for="f-mode">创建模式</label><select class="sel" id="f-mode">' +
             '<option value="single">单个创建（一份密钥 = 一条渠道）</option>' +
             '<option value="batch">批量创建（每行一个 key 建一条）</option>' +
             '<option value="multi_to_single">多 Key 合一（所有 key 合成一条渠道）</option>' +
@@ -2011,7 +2059,7 @@ function openDrawer(id) {
           '批量创建模式下：每行一个 key 各建一条渠道。</span></div>' +
         '<div class="row"><label for="f-base">API 地址</label><input class="ipt grow" id="f-base" value="' + esc(ch ? ch.base_url : '') + '" list="base-presets">' +
           '<datalist id="base-presets">' + BASE_PRESETS.map(function (b) { return '<option value="' + b + '"></option>'; }).join('') + '</datalist></div>' +
-        '<div class="row"><label for="f-kmode">多 Key 模式</label><select class="sel" id="f-kmode"' +
+        '<div class="row"><label for="f-kmode">多 Key 模式</label><select class="sel" id="f-kmode">' +
           ['', 'random', 'round_robin'].map(function (v) {
             var t = v === '' ? '默认（随机）' : (v === 'random' ? '随机' : '轮询');
             return '<option value="' + v + '"' + ((ch && ch.key_selection_mode === v) ? ' selected' : '') + '>' + t + '</option>';
@@ -2154,9 +2202,14 @@ function saveDrawer() {
   dlgState.save = true;
   $('f-save').disabled = true; $('f-cancel').disabled = true;
   $('f-save-status').textContent = '保存中…';
-  api('POST', '/admin/channels', body).then(function () {
-    if (!tag || dlgState.isNew) { return null; }
-    return api('POST', '/admin/channels/tag/batch', { ids: [dlgState.id], tag: tag });
+  api('POST', '/admin/channels', body).then(function (j) {
+    // 标签一律按 tag/batch 写：空串 = 清除标签，非空 = 设置。
+    // ⚠ 原来写的是 if (!tag || dlgState.isNew) return null —— 于是「新建时填了标签」
+    //   与「编辑时清空标签」两种输入都被静默丢掉，用户看到"已保存"而标签没变。
+    if (!dlgState.isNew && tag === dlgState.tag0) { return null; }
+    var id = dlgState.id || (j && j.channel && j.channel.id);
+    if (!id) { return null; }
+    return api('POST', '/admin/channels/tag/batch', { ids: [id], tag: tag });
   }).then(function () {
     banner('ok', '已保存');
     closeDrawer();
@@ -2168,7 +2221,22 @@ function saveDrawer() {
     if ($('f-save')) { $('f-save').disabled = false; $('f-cancel').disabled = false; $('f-save-status').textContent = ''; }
   });
 }
+/* 镜像：可视化编辑时真值在 DOM 的 .mv-k/.mv-v 上，textarea 是隐藏的旧副本。
+   保存/切回 JSON 都必须先把可视化行写回 textarea，否则「看得见的新值」被
+   「看不见的旧 JSON」覆盖（原来只有点「回到 JSON」才同步一次）。 */
+function syncMapFromVisual() {
+  var vis = $('f-mapvis');
+  if (!vis || vis.hidden || !dlgState.visualMap) { return; }
+  var out = {}, ks = vis.querySelectorAll('.mv-k'), vs = vis.querySelectorAll('.mv-v');
+  for (var i = 0; i < ks.length; i++) {
+    var k = ks[i].value.trim();
+    if (k) { out[k] = vs[i].value.trim(); }
+  }
+  $('f-map').value = JSON.stringify(out, null, 1);
+}
+
 function parseMap() {
+  syncMapFromVisual();
   var t = $('f-map').value.trim();
   if (!t) { return {}; }
   try { return JSON.parse(t) || {}; } catch (e) { return null; }
@@ -2407,7 +2475,7 @@ document.addEventListener('keydown', function (e) {
 /* ── 启动 ─────────────────────────────────────────────────────────────── */
 function init() {
   $('ch-psize').value = String(st.psize);
-  load();
+  load(true);
 }
 init();
 </script>

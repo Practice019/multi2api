@@ -286,6 +286,16 @@ const PROBES = [
   // 行内展开（模型集合 + 对外名映射）/ 「谁在用」三类 / 空引用文案 / 404 当错误 / 两档几何。
   // ⚠ 它打的是真端点：GET /admin/groups 的 used_by_count 与 GET /admin/groups/usage?id= 由 T85 实现，
   //   后端未落地时它的引用断言会红 —— 那是如实报告，不是探针坏了。
+  // 分组页**列表视图**的行为探针（本轮新增）：搜索/引用筛选/本地分页/空态/aria-expanded。
+  // 纯 VM + DOM 桩，不起实例、不开 Chrome ⇒ 归静态段。
+  'verify_groups_views.js',
+  // 令牌页「个人自用」语义门禁（2026-11-10 新增）：额度/IP/模型限制/跨组重试控件必须不在界面上；
+  // 提交体**一个都不提交**这些字段（由后端按「未提交即保持原值」处理）；state.legacy 只读交代存量值。
+  // 纯源码 + 纯函数（tokenStateOf）检查，不起实例、不开 Chrome ⇒ 静态段。
+  'verify_tokens_personal_mode.js',
+  // 渠道页「个人自用」语义门禁（2026-11-10 新增）：服务端搜索/分页参数、select 标签闭合、
+  // 可视映射与标签的收集口径。纯 vm + DOM 桩 ⇒ 静态段。
+  'verify_channels_personal_mode.js',
   'verify_groups_panel.js',
   // 「全部签到」分级布局的**真前端 e2e**（本轮新增）。
   //
@@ -406,6 +416,12 @@ const PROBES = [
   //
   // 单跑：node tests/frontend/verify_tokens_page.js（0=全绿 / 1=有红 / 2=环境前提不成立）
   'verify_tokens_page.js',
+  // 「到期即失效」的**真请求**门禁（2026-11-10 新增）：自起隔离实例，用令牌自己的 key 打
+  // /v1/models —— 过期 ⇒ 401；到期时间改到未来 ⇒ 200；再改回过去 ⇒ 立刻又 401。
+  // 静态断言在这里没有判别力：这条链路跨「管理端写入 → 鉴权索引同步 → /v1 拒绝」三层，
+  // 任何一层断掉，页面上看起来都完全正常。
+  // 单跑：node tests/frontend/verify_tokens_expiry_e2e.js
+  'verify_tokens_expiry_e2e.js',
 ];
 
 // T94 自证钩子（**默认零影响**，只在显式设了环境变量时生效）：

@@ -339,3 +339,169 @@ func TestTokensUpdateDeleteAndUsage(t *testing.T) {
 		t.Errorf("已删除的令牌取详情应 404，实际 %d", code)
 	}
 }
+
+
+// ── 自用化改造（2026-11-10）：过期语义与"缺省不清空" ─────────────────────────
+//
+// 背景：本项目自用，不配额度，只配到期时间。于是「过期」必须一眼可见，
+// 且编辑表单（不再提交额度字段）不得把旧策略静默清掉或放宽。
+
+// createTokenID 建一条令牌并回它的 id（unlimited 由 extra 决定）。
+func createTokenID(t *testing.T, h *Handler, name string, extra map[string]any) int {
+	t.Helper()
+	code, body := doJSON(t, h, "POST", "/admin/tokens", createBody(t, name, extra))
+	if code != 200 {
+		t.Fatalf("创建失败 code=%d body=%s", code, body)
+	}
+	items, _ := decodeMap(t, body)["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("items 数量 = %d，want 1（body=%s）", len(items), body)
+	}
+	return int(items[0].(map[string]any)["id"].(float64))
+}
+
+// expired 字段必须由 expired_time/status 派生，列表与详情同源。
+func TestTokensExposeDerivedExpired(t *testing.T) {
+	h := tokenTestHandler(t)
+	past := time.Now().Add(-time.Minute).Unix()
+	future := time.Now().Add(24 * time.Hour).Unix()
+
+	expiredID := createTokenID(t, h, "已过期", map[string]any{"unlimited_quota": true, "expired_time": past})
+	liveID := createTokenID(t, h, "未过期", map[string]any{"unlimited_quota": true, "expired_time": future})
+	foreverID := createTokenID(t, h, "永不过期", map[string]any{"unlimited_quota": true, "expired_time": -1})
+
+	for _, tc := range []struct {
+		id   int
+		want bool
+		name string
+	}{{expiredID, true, "已过期"}, {liveID, false, "未过期"}, {foreverID, false, "永不过期"}} {
+		code, body := doJSON(t, h, "GET", fmt.Sprintf("/admin/tokens/%d", tc.id), "")
+		if code != 200 {
+			t.Fatalf("%s 详情 code=%d body=%s", tc.name, code, body)
+		}
+		got, ok := decodeMap(t, body)["expired"].(bool)
+		if !ok {
+			t.Fatalf("%s 详情缺 expired 布尔字段（body=%s）—— 前端无法区分「过期」与「被禁用」", tc.name, body)
+		}
+		if got != tc.want {
+			t.Errorf("%s 的 expired 应为 %v，实际 %v", tc.name, tc.want, got)
+		}
+	}
+
+	// 列表与详情同源：不能只在详情里算。
+	code, body := doJSON(t, h, "GET", "/admin/tokens?p=1&page_size=50", "")
+	if code != 200 {
+		t.Fatalf("列表 code=%d body=%s", code, body)
+	}
+	items, _ := decodeMap(t, body)["items"].([]any)
+	seen := 0
+	for _, it := range items {
+		m := it.(map[string]any)
+		if exp, ok := m["expired"].(bool); !ok {
+			t.Fatalf("列表项缺 expired（body=%s）", body)
+		} else if int(m["id"].(float64)) == expiredID {
+			seen++
+			if !exp {
+				t.Errorf("列表里已过期的令牌 expired 应为 true")
+			}
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("列表里没找到已过期那条（找到 %d 次）", seen)
+	}
+}
+
+// 启用一条已过期的令牌必须 400：否则界面显示"启用"，请求却一律 401，
+// 用户会以为网关坏了。status_only 与全量更新两条路都要拦。
+func TestTokensRefuseEnablingExpired(t *testing.T) {
+	h := tokenTestHandler(t)
+	past := time.Now().Add(-time.Hour).Unix()
+	id := createTokenID(t, h, "过期待启用", map[string]any{"unlimited_quota": true, "expired_time": past})
+
+	if code, body := doJSON(t, h, "POST", "/admin/tokens/update",
+		tokenJSON(t, map[string]any{"id": id, "status_only": true, "status": store.TokenStatusEnabled})); code != 400 {
+		t.Errorf("启用已过期令牌应 400，实际 code=%d body=%s", code, body)
+	}
+	// 全量更新里显式 status=1 + 过去的时间，同样拒绝。
+	if code, body := doJSON(t, h, "POST", "/admin/tokens/update", tokenJSON(t, map[string]any{
+		"id": id, "automatic": false, "groups": []string{"default"},
+		"unlimited_quota": true, "status": store.TokenStatusEnabled, "expired_time": past,
+	})); code != 400 {
+		t.Errorf("全量更新成已过期且启用应 400，实际 code=%d body=%s", code, body)
+	}
+	// 把到期时间改到未来再启用 ⇒ 允许。
+	if code, body := doJSON(t, h, "POST", "/admin/tokens/update", tokenJSON(t, map[string]any{
+		"id": id, "status_only": false, "automatic": false, "groups": []string{"default"},
+		"unlimited_quota": true, "status": store.TokenStatusEnabled,
+		"expired_time": time.Now().Add(time.Hour).Unix(),
+	})); code != 200 {
+		t.Errorf("把到期时间改到未来后启用应 200，实际 code=%d body=%s", code, body)
+	}
+	// 只把到期时间推到过去（不改 status）是允许的：那是"让它自然过期"。
+	if code, body := doJSON(t, h, "POST", "/admin/tokens/update", tokenJSON(t, map[string]any{
+		"id": id, "expired_time": past,
+	})); code != 200 {
+		t.Errorf("把到期时间设为过去应允许（等于让它过期），实际 code=%d body=%s", code, body)
+	}
+}
+
+// 更新不存在的 id 必须 404，不许 500/panic。
+func TestTokensUpdateUnknownIDIs404(t *testing.T) {
+	h := tokenTestHandler(t)
+	for _, body := range []map[string]any{
+		{"id": 999999, "name": "不存在"},
+		{"id": 999999, "status_only": true, "status": 2},
+	} {
+		if code, resp := doJSON(t, h, "POST", "/admin/tokens/update", tokenJSON(t, body)); code != 404 {
+			t.Errorf("更新不存在的 id 应 404，实际 code=%d body=%s", code, resp)
+		}
+	}
+}
+
+// 编辑表单不再提交额度/IP/模型限制 ⇒ 缺省字段必须保持原值。
+// 这条守的是「简化界面不得静默放宽权限」。
+func TestTokensUpdateKeepsOmittedPolicies(t *testing.T) {
+	h := tokenTestHandler(t)
+	past := time.Now().Add(-time.Hour).Unix()
+	id := createTokenID(t, h, "保留策略", map[string]any{
+		"unlimited_quota": false, "remain_quota": 500, "expired_time": past,
+		"model_limits_enabled": true, "model_limits": "m1,m2",
+		"allow_ips": "192.0.2.1", "allow_user_quota_query": true,
+	})
+
+	// 只改名字（模拟简化的编辑抽屉）。
+	if code, body := doJSON(t, h, "POST", "/admin/tokens/update",
+		tokenJSON(t, map[string]any{"id": id, "name": "只改名字"})); code != 200 {
+		t.Fatalf("改名失败 code=%d body=%s", code, body)
+	}
+
+	code, body := doJSON(t, h, "GET", fmt.Sprintf("/admin/tokens/%d", id), "")
+	if code != 200 {
+		t.Fatalf("详情 code=%d body=%s", code, body)
+	}
+	view := decodeMap(t, body)
+	if view["name"] != "只改名字" {
+		t.Errorf("名称应更新，实际 %v", view["name"])
+	}
+	if got, _ := view["unlimited_quota"].(bool); got {
+		t.Errorf("★ 未提交 unlimited_quota 却把它改成了不限额度（静默放宽）")
+	}
+	if got := view["remain_quota"].(float64); got != 500 {
+		t.Errorf("★ 未提交 remain_quota 却把它改成了 %v（want 500）", got)
+	}
+	if got, _ := view["model_limits_enabled"].(bool); !got {
+		t.Errorf("★ 未提交 model_limits_enabled 却被关掉（模型限制静默失效）")
+	}
+	if got := view["model_limits"].(string); got != "m1,m2" {
+		t.Errorf("★ 未提交 model_limits 却变成 %q", got)
+	}
+	if got, _ := view["allow_ips"].(string); got != "192.0.2.1" {
+		t.Errorf("★ 未提交 allow_ips 却被清成 %q", got)
+	}
+	if got, _ := view["allow_user_quota_query"].(bool); !got {
+		t.Errorf("★ 未提交 allow_user_quota_query 却被关掉")
+	}
+	if got := view["expired_time"].(float64); int64(got) != past {
+		t.Errorf("★ 未提交 expired_time 却变成 %v（want %d）", got, past)
+	}
+}

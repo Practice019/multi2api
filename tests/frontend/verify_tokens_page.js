@@ -205,9 +205,12 @@ const MEASURE_TOKENS = '(function(){'
         var d = document.getElementById('tkFrame').contentDocument;
         return Array.prototype.map.call(d.querySelectorAll('table thead th'), function(x){ return x.textContent.trim(); });
       })())`));
-      const needCols = ['名称', 'Key', '创建日期', '最近使用', '操作'];
+      const needCols = ['名称', 'Key', '状态', '到期时间', '创建日期', '最近使用', '操作'];
       const missingCols = needCols.filter(function(c){ return !th.some(function(x){ return x.indexOf(c) >= 0; }); });
-      ok(missingCols.length === 0, '表头含 名称/Key/创建日期/最近使用/操作（实际 ' + JSON.stringify(th) + '；缺 ' + JSON.stringify(missingCols) + '）');
+      // 2026-11-10 起列口径为「名称/Key/状态/到期时间/创建日期/最近使用/操作」：
+      // 个人自用只有到期时间这一个生命周期控制点 ⇒ 状态与到期时间提到操作列之前（一眼看出哪条已失效）；
+      // 创建日期保留，不静默丢信息。
+      ok(missingCols.length === 0, '表头含 名称/Key/状态/到期时间/创建日期/最近使用/操作（实际 ' + JSON.stringify(th) + '；缺 ' + JSON.stringify(missingCols) + '）');
 
       // 清空：把 HTTP 阶段建的都删掉，再点页面刷新 → 空态
       const delAll = await fetch(base + '/admin/tokens/delete', { method: 'POST', headers: hdr, body: JSON.stringify({ ids: createdIds.filter((x) => !!x) }) });
@@ -253,14 +256,16 @@ const MEASURE_TOKENS = '(function(){'
       ok(empty.rows === 0, '清空后表格 0 行（实际 ' + empty.rows + '）');
       ok(empty.cls === 'empty' && /还没有令牌/.test(String(empty.text)), '空态有明确文案（实际 ' + JSON.stringify(empty.text) + '）');
 
-      // F3) 抽屉 17 个字段：逐字段存在 + 可交互
+      // F3) 抽屉字段：逐字段存在 + 可交互
+      // 个人自用（2026-11-10）：额度 / IP 白名单 / 模型限制 / 跨组重试的控件已撤掉，
+      // 它们的存在性由下面第 284 行之后的反向断言钉住（谁加回来会红）。
       await ev(`(function(){ document.getElementById('tkFrame').contentDocument.getElementById('btnNew').click(); })()`);
       await sleep(500);
       const fields = JSON.parse(await ev(`JSON.stringify((function(){
         var d = document.getElementById('tkFrame').contentDocument;
         var ids = ['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-autogroup-pick','btnAutoAdd','f-autogroups',
-                   'f-group-pick','btnGroupAdd','f-groups','f-cross','f-codes','f-retry','f-unlimited','f-amount',
-                   'f-exp','btnNever','f-mllimit','f-models','f-ips','btnSave','btnCancel'];
+                   'f-group-pick','btnGroupAdd','f-groups',
+                   'f-exp','btnNever','btnSave','btnCancel'];
         return ids.map(function(id){
           var el = d.getElementById(id);
           if (!el) return { id: id, exists: false };
@@ -289,42 +294,28 @@ const MEASURE_TOKENS = '(function(){'
         var seen = {};
         function rec(ids){ ids.forEach(function(id){ var el = d.getElementById(id); if (el && el.offsetParent !== null) { seen[id] = true; } }); }
         function fire(id){ var el = d.getElementById(id); el.dispatchEvent(new Event('change', { bubbles: true })); }
-        rec(['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-unlimited','f-exp','btnNever','f-mllimit','f-ips','btnSave','btnCancel']);
+        rec(['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-exp','btnNever','btnSave','btnCancel']);
         d.getElementById('f-mode-manual').checked = true; fire('f-mode-manual');
         rec(['f-group-pick','btnGroupAdd','f-groups']);
         d.getElementById('f-mode-auto').checked = true; fire('f-mode-auto');
         var am = d.getElementById('f-automode'); am.value = 'custom'; fire('f-automode');
         rec(['f-autogroup-pick','btnAutoAdd','f-autogroups']);
-        var u = d.getElementById('f-unlimited'); u.checked = false; fire('f-unlimited');
-        rec(['f-amount']);
-        var ml = d.getElementById('f-mllimit'); ml.checked = true; fire('f-mllimit');
-        rec(['f-models']);
         return { seen: seen, groupPickOptions: d.getElementById('f-group-pick').options.length };
       })())`));
       const mustSee = ['f-name','f-count','f-mode-auto','f-mode-manual','f-automode','f-group-pick','btnGroupAdd','f-groups',
-                       'f-autogroup-pick','btnAutoAdd','f-autogroups','f-unlimited','f-amount','f-exp','btnNever',
-                       'f-mllimit','f-models','f-ips','btnSave','btnCancel'];
+                       'f-autogroup-pick','btnAutoAdd','f-autogroups','f-exp','btnNever','btnSave','btnCancel'];
       const notSeen = mustSee.filter(function(id){ return !vis.seen[id]; });
       ok(notSeen.length === 0, '每个字段在**自己的触发条件下**可见且可交互（未取到样本：' + JSON.stringify(notSeen) + '）');
-      // f-codes / f-retry 要多一个条件：**已选 ≥2 个分组**（webui-tokens.html 的 syncVisibility）。
-      // 候选够就真驱动一次（选两个分组 → 加入），不够就明确 SKIP —— 不假装覆盖。
-      if (vis.groupPickOptions >= 2) {
-        const codesVis = JSON.parse(await ev(`JSON.stringify((function(){
-          var d = document.getElementById('tkFrame').contentDocument;
-          var pick = d.getElementById('f-group-pick');
-          var add = d.getElementById('btnGroupAdd');
-          pick.value = pick.options[0].value; add.click();
-          pick.value = pick.options[1].value; add.click();
-          return {
-            codes: d.getElementById('f-codes').offsetParent !== null,
-            retry: d.getElementById('f-retry').offsetParent !== null,
-            selected: d.querySelectorAll('#f-groups .dragitem').length
-          };
-        })())`));
-        ok(codesVis.selected >= 2 && codesVis.codes && codesVis.retry, '选满 2 个分组后 f-codes/f-retry 可见（已选 ' + codesVis.selected + ' 个）');
-      } else {
-        sk('f-codes / f-retry 的可见性未取到样本：它们要「已选 ≥2 个分组」才显示，而本隔离实例只有 ' + vis.groupPickOptions + ' 个可选分组；两个控件本身存在且未 disabled，已由上一组断言覆盖');
-      }
+      // 个人自用（2026-11-10）：上面这组「控件可见性」的旧断言（f-codes / f-retry 需 ≥2 个分组）
+      // 随控件一起删掉了。改成**反向断言**：撤掉的控件必须不存在，同时旧值提示容器必须在 ——
+      // 后者是「界面不可编辑 ≠ 允许清零」在页面上唯一可见的凭据。
+      const removed = JSON.parse(await ev('JSON.stringify((function(){'+
+        "var d = document.getElementById('tkFrame').contentDocument;"+
+        "return ['f-unlimited','f-amount','f-mllimit','f-models','f-ips','f-cross','f-codes','f-retry'].filter(function(id){ return !!d.getElementById(id); });"+
+      '})())'));
+      ok(removed.length === 0, '额度 / IP 白名单 / 模型限制 / 跨组重试的控件已从抽屉撤掉（残留：' + JSON.stringify(removed) + '）');
+      const legacy = JSON.parse(await ev('JSON.stringify({ note: !!document.getElementById(\'tkFrame\').contentDocument.getElementById(\'legacyNote\'), text: !!document.getElementById(\'tkFrame\').contentDocument.getElementById(\'legacyText\') })'));
+      ok(legacy.note && legacy.text, '旧高级配置的只读提示容器存在（#legacyNote / #legacyText）—— 存量令牌的非默认策略不会被静默抹掉');
 
       // F4) 抽屉建 1 条：成功 + 列表出现 + Key 是掩码
       console.log('\n[G] 抽屉建 1 条 / count=3 / 43 字节前端守卫');

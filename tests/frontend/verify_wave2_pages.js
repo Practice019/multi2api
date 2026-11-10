@@ -216,12 +216,21 @@ const MEASURE_MODELS = '(function(){'
       }
       ok(uniq.docScrollW <= uniq.docClientW + 1, '状态页无横向溢出（scrollWidth ' + uniq.docScrollW + ' ≤ clientWidth ' + uniq.docClientW + '）');
 
-      console.log('\n[c2] 渠道页：翻页与搜索**不发请求**（内存分页）');
+      // ⚠ 2026-11-10 语义反转：渠道页从「取 100 条 + 内存搜索分页」改成
+      //   「keyword / p / page_size 全部下推服务端」。原来的断言「翻页与搜索不发请求」
+      //   正是在钉住那个缺陷（第 101 条起不可达），现在反过来钉：两者都必须发请求，
+      //   且带对参数。翻页用 ch-next（有 >1 页时有效），搜索用 flt-q。
+      console.log('\n[c2] 渠道页：翻页与搜索**都走服务端**（keyword + p + page_size）');
       await ev(`(function(){
         var w = document.getElementById('chFrame').contentWindow;
         w.__probeReq = 0;
         var of = w.fetch, ox = w.XMLHttpRequest.prototype.open;
-        w.fetch = function(){ w.__probeReq++; return of.apply(this, arguments); };
+        w.__probeUrls = w.__probeUrls || [];
+        w.fetch = function(){
+          w.__probeReq++;
+          try { var a = arguments[0]; w.__probeUrls.push(String(typeof a === 'string' ? a : (a && a.url) || '')); } catch (e) {}
+          return of.apply(this, arguments);
+        };
         w.XMLHttpRequest.prototype.open = function(){ w.__probeReq++; return ox.apply(this, arguments); };
         return true;
       })()`);
@@ -231,7 +240,13 @@ const MEASURE_MODELS = '(function(){'
       await ev(`(function(){ var d = document.getElementById('chFrame').contentDocument; var i = d.getElementById('flt-q'); if (i) { i.value='probe'; i.dispatchEvent(new d.defaultView.Event('input',{bubbles:true})); } })()`);
       await sleep(500);
       const afterLocal = await ev(`document.getElementById('chFrame').contentWindow.__probeReq`);
-      ok(Number(afterLocal) === 0, '翻页 + 搜索后新增请求数 = 0（实际 ' + afterLocal + '）');
+      ok(Number(afterLocal) > 0, '翻页 + 搜索触发了服务端请求（实际 ' + afterLocal + '）');
+      // 抓实际 URL：必须带 keyword，不能只在浏览器里过滤已取到的那一页。
+      const chUrls = JSON.parse(await ev(`JSON.stringify((document.getElementById('chFrame').contentWindow.__probeUrls)||[])`));
+      ok(chUrls.some(function (u) { return /[?&]keyword=probe(&|$)/.test(u); }),
+        '搜索词被下推到 /admin/channels?keyword=（实际 ' + JSON.stringify(chUrls.slice(-3)) + '）');
+      ok(chUrls.some(function (u) { return /[?&]p=1(&|$)/.test(u); }),
+        '筛选变更后回到第 1 页（实际 ' + JSON.stringify(chUrls.slice(-3)) + '）');
       // 对照组：状态筛选是**服务端**过滤，必须发请求（证明计数器真的在工作）
       await ev(`(function(){ var d = document.getElementById('chFrame').contentDocument; var s = d.getElementById('flt-status'); if (s) { s.value='1'; s.dispatchEvent(new d.defaultView.Event('change',{bubbles:true})); } })()`);
       await sleep(900);

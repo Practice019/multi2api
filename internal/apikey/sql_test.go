@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"workbuddy2api/internal/store"
 )
@@ -443,5 +444,41 @@ func TestSQLDeletedKeysAreNotResurrectedByRestart(t *testing.T) {
 	}
 	if n, err := store.CountTokens(); err != nil || n != 0 {
 		t.Fatalf("重启后库里仍应为 0 行，实际 (%d, %v)", n, err)
+	}
+}
+
+// 网关鉴权的过期判定必须与 store 同源（边界含等号）。
+// 这里不起实例，直接验 Validate 背后的判据：把到期时间设为"刚刚过去"必须拒。
+func TestSQLValidateExpiredBoundary(t *testing.T) {
+	path := openSQL(t)
+	s, err := NewWithStore(path)
+	if err != nil {
+		t.Fatalf("NewWithStore: %v", err)
+	}
+	k := mustCreate(t, s, "边界过期", 0, nil)
+	row, err := store.GetTokenByKey(k.ID)
+	if err != nil || row == nil {
+		t.Fatalf("GetTokenByKey: (%v, %v)", row, err)
+	}
+	row.ExpiredTime = 1 // 已过期
+	if err := store.SaveToken(row); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+	if err := s.SyncTokenByID(row.ID); err != nil {
+		t.Fatalf("SyncTokenByID: %v", err)
+	}
+	if _, err := s.Validate(k.ID); err != ErrExpired {
+		t.Fatalf("同步后过期必须立刻 ErrExpired，实际 %v", err)
+	}
+	// 改成未来 ⇒ 立刻恢复（不需要重启）
+	row.ExpiredTime = time.Now().Add(time.Hour).Unix()
+	if err := store.SaveToken(row); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+	if err := s.SyncTokenByID(row.ID); err != nil {
+		t.Fatalf("SyncTokenByID: %v", err)
+	}
+	if _, err := s.Validate(k.ID); err != nil {
+		t.Fatalf("改到未来后应恢复可用，实际 %v", err)
 	}
 }

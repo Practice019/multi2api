@@ -75,6 +75,13 @@ tasks/
 # `git add -A` 会把整个团队工作区吞进提交。
 .task/
 
+# .specify/ 是 SDD（规格驱动开发）工具链的**机器本地**脚手架：脚本、模板、工作流注册表。
+# 它自己的 .specify/.gitignore 第一行就写着 "Machine-local Spec Kit state — not meant to be shared"，
+# 与 tasks/ / .task/ 同类：过程产物，不是交付物。
+# ⚠ 其中的 .specify/memory/constitution.md 已被上面的 `*.md` 挡在版本库之外 —— 那是有意的：
+#   本仓的入口协议是 AGENTS.md、设计记录是 design-notes.md，再提交一份就是第三个真相源。
+.specify/
+
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
 
@@ -88,6 +95,9 @@ tasks/
 !README.md
 !SECURITY.md
 !CHANGELOG.md
+# 令牌自用化改造的设计记录（交付物，不是过程草稿）：
+# 「为什么不再配额度、过期怎么派生、缺省字段为何不能改」都只有这一份依据。
+!design-notes.md
 # ⚠ AGENTS.md 是**交付物**，不是过程文档：它是"另一个 AI 接手这个仓"的唯一入口协议
 # （命名规范 / Provider 接缝 / 28 个扩展点 / 加上游的十步清单 / 可编译骨架）。
 # 少了它，下一个 agent 会重新发明一套命名、或者照着已废弃的 upstreamPrefix 去"登记"。

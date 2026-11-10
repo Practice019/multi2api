@@ -26,9 +26,11 @@ package admin
 // 前 6 条已经在库里但前端不知道"的黑箱 —— 部分成功必须如实报告（见 createdTokens）。
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -170,7 +172,33 @@ type tokenUpdateRequest struct {
 	StatusOnly bool `json:"status_only"`
 	Status     int  `json:"status"`
 
+	// Present 记录**请求体里真的出现过**哪些顶层 key。
+	//
+	// # 为什么必须区分"没传"与"传了零值"
+	//
+	// 管理台的令牌抽屉正在精简成"只配名称/分组/到期时间"，它**不再提交**
+	// unlimited_quota / allow_ips / model_limits 这些字段。而原来的 applyTokenUpdate
+	// 按结构体的零值覆盖 ⇒ 一次改名就把"有限额度"改成"不限额度"、把 IP 白名单清空
+	// —— 那是**静默放宽权限**，最坏的一类缺陷。
+	//
+	// 有 Present 之后：没出现的字段一律不动，出现的字段（含显式 false / 0 / 空串）
+	// 按提交值覆盖。这样"清空"仍然是可达的显式操作，而不是缺省的副作用。
+	Present map[string]bool `json:"-"`
+
 	tokenCreateRequest
+}
+
+// presentKeys 把原始 JSON 的顶层 key 收成集合（用于上面那条"没传就别动"）。
+func presentKeys(raw []byte) map[string]bool {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil
+	}
+	out := make(map[string]bool, len(probe))
+	for k := range probe {
+		out[k] = true
+	}
+	return out
 }
 
 // syncAuthIndex 把刚写过的令牌同步进**网关鉴权索引**（T81）。
@@ -326,15 +354,31 @@ func (h *Handler) tokensCreate(w http.ResponseWriter, r *http.Request) {
 // tokensUpdate POST /admin/tokens/update —— 全字段可改；status_only 只切状态。
 func (h *Handler) tokensUpdate(w http.ResponseWriter, r *http.Request) {
 	var req tokenUpdateRequest
-	if !decodeJSON(w, r, &req) {
+	// 先读原文判"哪些字段出现过"，再按结构体解码（见 tokenUpdateRequest.Present 的注释）。
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "读取请求体失败")
 		return
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields() // 与 decodeJSON 同口径：拼错的字段名要报错，不能静默忽略
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON（或含未知字段）: "+err.Error())
+		return
+	}
+	req.Present = presentKeys(raw)
 	if req.ID <= 0 {
 		writeError(w, http.StatusBadRequest, "缺少 id")
 		return
 	}
 	tok, err := store.GetTokenByID(req.ID)
 	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取令牌失败")
+		return
+	}
+	// ⚠ GetTokenByID 对"不存在 / 已软删"返回 (nil, nil)（见 store 的注释），
+	// 只判 err 会让下面的 applyTokenUpdate 拿着 nil 解引用 → panic → 500。
+	if tok == nil {
 		writeError(w, http.StatusNotFound, "令牌不存在")
 		return
 	}
@@ -342,6 +386,12 @@ func (h *Handler) tokensUpdate(w http.ResponseWriter, r *http.Request) {
 		if req.Status != store.TokenStatusEnabled && req.Status != store.TokenStatusDisabled {
 			writeError(w, http.StatusBadRequest, "status 只能是 1（启用）或 2（禁用）")
 			return
+		}
+		if req.Status == store.TokenStatusEnabled {
+			if msg := expiredEnableError(tok); msg != "" {
+				writeError(w, http.StatusBadRequest, msg)
+				return
+			}
 		}
 		if err := store.UpdateTokenStatus(req.ID, req.Status); err != nil {
 			writeError(w, http.StatusInternalServerError, "更新状态失败")
@@ -373,6 +423,13 @@ func (h *Handler) tokensUpdate(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 分组归一化只走 store 的唯一入口（NormalizeGroupPolicy），不在这里自己拼：
 	// 它同时负责 Group 编码串、AutoGroups、状态码集合三者的互相校验与排序。
 	tok.NormalizeGroupPolicy()
+	// 只有请求**显式要求启用**（status=1）时才拦：见 expiredEnableError 的注释。
+	if req.Present != nil && req.Present["status"] && req.Status == store.TokenStatusEnabled {
+		if msg := expiredEnableError(tok); msg != "" {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+	}
 	if err := store.SaveToken(tok); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存令牌失败")
 		return
@@ -656,8 +713,38 @@ func validateIPList(raw string) string {
 	return ""
 }
 
+// expiredEnableError 判断"要不要拦下这次**显式启用**"：空串 = 可以启用。
+//
+// ⚠ 只在请求明确要求 "status=1" 时调用，不能用"保存后恰好是 启用+已过期"来判断：
+// 把一个已启用的令牌的到期时间改到过去，是**合法操作**（= 让它自然过期），
+// 那种状态由网关拒绝、界面显示"已过期"，并不自相矛盾。真正自相矛盾的是
+// "界面点了启用、网关却一律 401"。
+//
+// 为什么在**写路径**拦，而不是只让网关去拒：那样用户会以为是网关坏了。
+// 边界与网关同口径（store.Token.IsExpiredAt）：-1/0 表示永不。
+func expiredEnableError(tok *store.Token) string {
+	if tok == nil || !tok.IsExpiredAt(time.Now().Unix()) {
+		return ""
+	}
+	return "这条令牌已过期，不能启用；请先把到期时间改到将来"
+}
+
 // applyTokenUpdate 把请求里的字段覆盖到令牌上（返回错误文案，空串 = 通过）。
 func applyTokenUpdate(tok *store.Token, req *tokenUpdateRequest) string {
+	// has 判"这个字段出现过吗"。没出现 ⇒ 一律不动（保留旧值）：
+	// 精简后的令牌抽屉只提交 name / groups / expired_time / status，
+	// 绝不能因为没提交额度或 IP 就把它们清掉（那是静默放宽权限）。
+	has := func(keys ...string) bool {
+		if req.Present == nil {
+			return false
+		}
+		for _, k := range keys {
+			if req.Present[k] {
+				return true
+			}
+		}
+		return false
+	}
 	if strings.TrimSpace(req.Name) != "" {
 		name := strings.TrimSpace(req.Name)
 		if len(name) > tokenNameMaxBytes {
@@ -671,62 +758,77 @@ func applyTokenUpdate(tok *store.Token, req *tokenUpdateRequest) string {
 		}
 		tok.Status = req.Status
 	}
-	// 分组：Automatic 决定用 Groups 还是 AutoGroups，两者都写进 Group 编码串交给唯一入口归一。
-	if req.Automatic {
-		groups := normList(req.AutoGroups)
-		if req.AutoGroupMode == "custom" {
-			if len(groups) == 0 {
-				return "自定义自动分组至少要选 1 个分组"
+	// 分组：只有请求真的提到分组时才动。Automatic 决定用 Groups 还是 AutoGroups。
+	if has("automatic", "groups", "auto_groups", "auto_group_mode") {
+		if req.Automatic {
+			groups := normList(req.AutoGroups)
+			if req.AutoGroupMode == "custom" {
+				if len(groups) == 0 {
+					return "自定义自动分组至少要选 1 个分组"
+				}
+				if len(groups) > tokenAutoGroupMaxCount {
+					return fmt.Sprintf("自动分组最多 %d 个（当前 %d）", tokenAutoGroupMaxCount, len(groups))
+				}
+				if err := tok.SetAutoGroups(groups); err != nil {
+					return "自动分组编码失败"
+				}
+				tok.Group = store.EncodeTokenGroups([]string{})
+			} else {
+				// inherit：清掉自定义快照，回到"跟全局配置走"。
+				if err := tok.SetAutoGroups(nil); err != nil {
+					return "自动分组编码失败"
+				}
+				tok.Group = store.EncodeTokenGroups([]string{})
 			}
-			if len(groups) > tokenAutoGroupMaxCount {
-				return fmt.Sprintf("自动分组最多 %d 个（当前 %d）", tokenAutoGroupMaxCount, len(groups))
-			}
-			if err := tok.SetAutoGroups(groups); err != nil {
-				return "自动分组编码失败"
-			}
-			tok.Group = store.EncodeTokenGroups([]string{})
-		} else {
-			// inherit：清掉自定义快照，回到"跟全局配置走"。
-			if err := tok.SetAutoGroups(nil); err != nil {
-				return "自动分组编码失败"
-			}
-			tok.Group = store.EncodeTokenGroups([]string{})
+		} else if g := normList(req.Groups); len(g) > 0 {
+			tok.Group = store.EncodeTokenGroups(g)
 		}
-	} else if g := normList(req.Groups); len(g) > 0 {
-		tok.Group = store.EncodeTokenGroups(g)
 	}
-	if req.GroupSwitchRetryCount > 0 || req.CrossGroupRetry {
-		n := req.GroupSwitchRetryCount
-		if n > 10 {
-			n = 10 // 夹 0..10（与截图里的数字框一致）
+	if has("group_switch_retry_count", "cross_group_retry") {
+		if req.GroupSwitchRetryCount > 0 || req.CrossGroupRetry {
+			n := req.GroupSwitchRetryCount
+			if n > 10 {
+				n = 10 // 夹 0..10（与截图里的数字框一致）
+			}
+			if n < 0 {
+				n = 0
+			}
+			tok.GroupSwitchRetryCount = n
 		}
-		if n < 0 {
-			n = 0
-		}
-		tok.GroupSwitchRetryCount = n
+		tok.CrossGroupRetry = req.CrossGroupRetry
 	}
-	tok.CrossGroupRetry = req.CrossGroupRetry
 	if len(req.GroupSwitchStatusCodes) > 0 {
 		tok.GroupSwitchCodes = store.NormalizeGroupSwitchStatusCodes(req.GroupSwitchStatusCodes)
 	}
-	tok.UnlimitedQuota = req.UnlimitedQuota
-	if req.UnlimitedQuota {
-		tok.RemainQuota = 0 // 不限额度时强制 0（hyxapi 同款）
-	} else if req.RemainQuota > 0 {
-		tok.RemainQuota = req.RemainQuota
+	// 额度：只在请求提到时覆盖。⚠ 仍然保留"旧数据只能是显式改写"这条。
+	if has("unlimited_quota", "remain_quota") {
+		if has("unlimited_quota") {
+			tok.UnlimitedQuota = req.UnlimitedQuota
+		}
+		if tok.UnlimitedQuota {
+			tok.RemainQuota = 0 // 不限额度时强制 0（hyxapi 同款）
+		} else if has("remain_quota") {
+			tok.RemainQuota = req.RemainQuota
+		}
 	}
-	tok.AllowUserQuotaQuery = req.AllowUserQuotaQuery
-	if req.ExpiredTime != 0 {
+	if has("allow_user_quota_query") {
+		tok.AllowUserQuotaQuery = req.AllowUserQuotaQuery
+	}
+	// 到期时间：**只有显式出现才改**。这一条尤其重要 —— 精简抽屉里这一项是主角，
+	// 而"没填"绝不能解读成"永不"（那会把一个限时令牌变成永久令牌）。
+	if has("expired_time") {
 		tok.ExpiredTime = req.ExpiredTime
+		if tok.ExpiredTime == 0 {
+			tok.ExpiredTime = -1 // 0 视为"永不"（与 hyxapi 的 -1 一致），仅限显式提交
+		}
 	}
-	if tok.ExpiredTime == 0 {
-		tok.ExpiredTime = -1 // 0 视为"没填" ⇒ 永不（与 hyxapi 的 -1 一致）
+	if has("model_limits_enabled") {
+		tok.ModelLimitsEnabled = req.ModelLimitsEnabled
 	}
-	tok.ModelLimitsEnabled = req.ModelLimitsEnabled
 	if req.ModelLimits != nil {
 		tok.ModelLimits = strings.Join(normList(req.ModelLimits), ",")
 	}
-	if strings.TrimSpace(req.AllowIps) != "" || req.AllowIps == "" {
+	if has("allow_ips") {
 		if msg := validateIPList(req.AllowIps); msg != "" {
 			return msg
 		}
@@ -801,7 +903,12 @@ func createTokens(req tokenCreateRequest) (*createResult, error) {
 			failures = append(failures, map[string]any{"index": i + 1, "name": name, "error": err.Error()})
 			continue
 		}
-		items = append(items, map[string]any{"id": tok.ID, "name": tok.Name, "key": tok.MaskedKey()})
+		// expired 与列表/详情**同源**（都走 store.Token.IsExpiredAt）。
+		//
+		// # 为什么不省掉这一个字段（创建响应看起来"前端用不到"）
+		// 三个出口里只要有一个算得不一样，就会出现"刚建完显示正常、刷新一下变成已过期"
+		// 这类自相矛盾。口径只留一处，出口都从它取。
+		items = append(items, map[string]any{"id": tok.ID, "name": tok.Name, "key": tok.MaskedKey(), "expired": tok.IsExpiredAt(time.Now().Unix())})
 	}
 	return &createResult{
 		Requested: req.Count,

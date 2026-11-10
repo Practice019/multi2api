@@ -1431,7 +1431,7 @@ header h1{letter-spacing:0}
     <table>
       <thead>
         <tr>
-          <th scope="col">名称</th><th scope="col">Key（掩码）</th><th scope="col">创建日期</th><th scope="col">最近使用</th><th scope="col" style="text-align:right">操作</th>
+          <th scope="col">名称</th><th scope="col">Key（掩码）</th><th scope="col">状态</th><th scope="col">到期时间</th><th scope="col">创建日期</th><th scope="col">最近使用</th><th scope="col" style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -1514,34 +1514,12 @@ header h1{letter-spacing:0}
         <div class="draglist" id="f-groups"></div>
       </div>
 
-      <!-- ⑦ 跨分组重试（仅 auto） -->
-      <div class="field hidden" id="w-cross">
-        <label class="sw"><input type="checkbox" id="f-cross"> 重试耗尽后切换到下一个分组</label>
-      </div>
-
-      <!-- ⑧ 状态码（选中组 > 1 才出现） -->
-      <div class="field hidden" id="w-codes">
-        <label>切换分组的状态码</label>
-        <div class="chips" id="f-codes"></div>
-        <div class="hint">默认 429 / 500 / 502 / 503 / 504。</div>
-      </div>
-
-      <!-- ⑨ 重试次数（同上） -->
-      <div class="field hidden" id="w-retry">
-        <label for="f-retry">切换前重试次数</label>
-        <input type="number" id="f-retry" min="0" max="10" value="0">
-      </div>
-
-      <!-- ⑩ 不限额度 -->
-      <div class="field">
-        <label class="sw"><input type="checkbox" id="f-unlimited" checked> 不限额度</label>
-      </div>
-
-      <!-- ⑪ 金额（仅⑩关闭时） -->
-      <div class="field hidden" id="w-amount">
-        <label for="f-amount">额度（quota）</label>
-        <input type="number" id="f-amount" min="0" value="500000">
-        <div class="hint">单位与后端口径一致（quota）。</div>
+      <!-- ⑦ 旧高级配置：本页不再编辑（个人自用）。
+           额度 / IP 白名单 / 跨组重试 / 模型白名单在后端仍然存在，存量令牌可能
+           带着非默认值。**界面没有控件 ≠ 允许清零**：保存时原样回传
+           （见 state.legacy 与 collectForm），并在有值时给一句只读说明。 -->
+      <div class="field hidden" id="legacyNote">
+        <div class="hint" id="legacyText"></div>
       </div>
 
       <!-- ⑫ 「允许此令牌查询账户余额」已从界面撤掉（用户 2026-11-01：「好像不需要吧」）。
@@ -1558,27 +1536,19 @@ header h1{letter-spacing:0}
         <label for="f-exp">过期时间</label>
         <div class="row">
           <input type="datetime-local" id="f-exp">
-          <button type="button" id="btnNever">永不</button>
+          <button type="button" id="btnNever">永久</button>
         </div>
-        <div class="hint" id="expHint">默认永不（提交 expired_time = -1）。</div>
+        <div class="row" role="group" aria-label="快捷有效期">
+          <button type="button" data-exp="1">1 天</button>
+          <button type="button" data-exp="7">7 天</button>
+          <button type="button" data-exp="30">30 天</button>
+        </div>
+        <div class="hint" id="expHint">默认永久（提交 expired_time = -1）。</div>
       </div>
 
-      <!-- ⑭ 模型限制 -->
-      <div class="field">
-        <label class="sw"><input type="checkbox" id="f-mllimit"> 限制可用模型</label>
-      </div>
-
-      <!-- ⑮ 允许的模型（仅⑭开） -->
-      <div class="field hidden" id="w-models">
-        <label for="f-models">允许的模型（逗号分隔）</label>
-        <input type="text" id="f-models" placeholder="glm-5.2, kimi-k2.7">
-      </div>
-
-      <!-- ⑯ IP 白名单 -->
-      <div class="field">
-        <label for="f-ips">IP 白名单（一行一个，留空 = 不限制）</label>
-        <textarea id="f-ips" rows="3" placeholder="10.0.0.1&#10;192.168.0.0/24"></textarea>
-      </div>
+      <!-- 模型可见范围交给「分组」统一表达：同一批模型只配一处。
+           令牌上再配一遍会出现"两套白名单都像生效"的误解
+           （分组存在时后端按分组并集授权，令牌白名单根本不参与判定）。 -->
     </div>
     <div class="drawer-ft">
       <button id="btnCancel" type="button">取消</button>
@@ -1604,11 +1574,9 @@ header h1{letter-spacing:0}
 //   （generator 的 String.raw 里一个裸反引号 ⇒ 模板提前终止 ⇒ 陈旧产物照旧全绿）。
 //   这里用字符串拼接，代价是多几个 +，换来的是不会再有那类事故。
 var PAGE_SIZE = 10;
-var ALL_CODES = [401, 403, 408, 429, 500, 502, 503, 504];
-var DEFAULT_CODES = [429, 500, 502, 503, 504];
 // groupsById：分组 ID → 分组名（拖拽块显示名字用；value 一律是 ID）。
 // 为空只影响显示（labelOfGroup 会退回显示原始引用），不影响提交。
-var state = { page: 1, total: 0, rows: [], editing: null, codes: DEFAULT_CODES.slice(), autoGroups: [], groups: [], groupsById: {}, groupsLoaded: false, busy: false };
+var state = { page: 1, total: 0, rows: [], editing: null, autoGroups: [], groups: [], groupsById: {}, groupsLoaded: false, busy: false, loading: false, error: '', keyword: '', legacy: null };
 
 function $(id) { return document.getElementById(id); }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]; }); }
@@ -1617,6 +1585,26 @@ function tsText(v) {
   var d = new Date(v * 1000);
   var p = function (n) { return (n < 10 ? '0' : '') + n; };
   return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+// tokenStateOf 把一行令牌归一成三种用户可见状态。
+//
+// # 为什么过期要压过"已禁用"
+// 到期是**客观事实**：即使这行是手动禁用的，用户点「启用」也不会让它能用。
+// 若先报 disabled，用户会照着提示去启用、然后请求继续 401 —— 提示必须指向
+// 唯一真正能解除失效的动作（改到期时间）。
+//
+// # 边界
+// expired_time <= now 即视为过期（与后端 store.ValidateToken 的
+// 't.ExpiredTime < nowUnix()' 同口径，另外把"恰好等于"也算过期：
+// 秒级时间戳下，"还有 0 秒"本来就没有可用的时刻）。
+// expired_time <= 0 一律表示永久（后端 0 会被归一成 -1）。
+function tokenStateOf(row, now) {
+  if (!row) return 'enabled';
+  var t = now || Math.floor(Date.now() / 1000);
+  var exp = Number(row.expired_time || 0);
+  if (exp > 0 && exp <= t) return 'expired';
+  if (row.status !== 1) return 'disabled';
+  return 'enabled';
 }
 // ==== WB2API:TOAST:START（由 tools/toast_sync.js 生成，勿手改）====
 // toast.js —— 通知框的**唯一实现**（外壳控制台 + 令牌页共用）。
@@ -1732,30 +1720,72 @@ function setBusy(on) {
 // ── 列表 ──────────────────────────────────────────────────────────────────
 function refresh() {
   var kw = $('kw').value.trim();
+  state.keyword = kw;
+  state.loading = true;
+  state.error = '';
   var url = '/admin/tokens?p=' + state.page + '&page_size=' + PAGE_SIZE + (kw ? '&keyword=' + encodeURIComponent(kw) : '');
   return api('GET', url).then(function (data) {
     state.rows = data.items || [];
     state.total = data.total || 0;
+    // 越界回退：删掉末页最后一条后 state.page 会大于真实页数，
+    // 那时后端返回空页 —— 停在空页会让用户以为"令牌全没了"。
+    var pages = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
+    if (state.page > pages) { state.page = pages; state.loading = false; return refresh(); }
+    state.loading = false;
     renderRows();
-  }).catch(function (e) { toast('读取列表失败：' + e.message, true); });
+  }).catch(function (e) {
+    state.loading = false;
+    state.error = e && e.message ? e.message : String(e);
+    renderRows();
+    toast('读取列表失败：' + state.error, true);
+  });
 }
+// STATE_BADGE 三种状态的展示口径（文案 + class）。
+// 「已过期」与「已禁用」必须一眼可分：前者去改到期时间才能恢复，
+// 后者点一下就能启用 —— 混成一个"不可用"会让人点错地方。
+var STATE_BADGE = {
+  enabled: { text: '启用', cls: 'st st--on' },
+  disabled: { text: '已禁用', cls: 'st st--off' },
+  expired: { text: '已过期', cls: 'st st--exp' }
+};
 function renderRows() {
   var body = $('rows');
   var empty = $('empty');
+  var now = Math.floor(Date.now() / 1000);
   body.innerHTML = state.rows.map(function (r) {
-    return '<tr>' +
+    var st = tokenStateOf(r, now);
+    var badge = STATE_BADGE[st] || STATE_BADGE.enabled;
+    // 到期行的「启用」按钮直接不给 —— 点了也白点（后端会拒），
+    // 只会让人以为"界面坏了"。改为替换成一句该做什么。
+    var toggle = st === 'expired'
+      ? '<button type="button" data-act="edit" data-id="' + r.id + '" title="先把这个令牌的到期时间改到未来，再启用">改到期时间</button> '
+      : '<button type="button" data-act="toggle" data-id="' + r.id + '">' + (st === 'enabled' ? '禁用' : '启用') + '</button> ';
+    return '<tr' + (st === 'expired' ? ' class="is-expired"' : '') + '>' +
       '<td>' + esc(r.name || '(未命名)') + '</td>' +
       '<td class="mono">' + esc(r.key) + '</td>' +
+      '<td><span class="' + badge.cls + '">' + badge.text + '</span></td>' +
+      '<td class="mono">' + (Number(r.expired_time || 0) > 0 ? tsText(r.expired_time) : '永久') + '</td>' +
       '<td class="mono">' + tsText(r.created_time) + '</td>' +
       '<td class="mono">' + tsText(r.accessed_time) + '</td>' +
       '<td class="ops">' +
         '<button type="button" data-act="copy" data-id="' + r.id + '">复制</button> ' +
-        '<button type="button" data-act="toggle" data-id="' + r.id + '">' + (r.status === 1 ? '禁用' : '启用') + '</button> ' +
+        toggle +
         '<button type="button" data-act="edit" data-id="' + r.id + '">编辑</button> ' +
         '<button type="button" data-act="del" data-id="' + r.id + '">删除</button>' +
       '</td></tr>';
   }).join('');
-  if (state.rows.length === 0) {
+  // 空态必须区分四种：加载中 / 出错 / 搜索无匹配 / 真的还没有。
+  // 混成一句"还没有令牌"会在**搜索无结果**时误导用户去新建一条重复的。
+  if (state.loading && state.rows.length === 0) {
+    empty.className = 'empty';
+    empty.textContent = '加载中…';
+  } else if (state.error) {
+    empty.className = 'empty';
+    empty.textContent = '读取失败：' + state.error + '（可点右上角刷新重试）';
+  } else if (state.rows.length === 0 && state.keyword) {
+    empty.className = 'empty';
+    empty.textContent = '没有匹配「' + state.keyword + '」的令牌。';
+  } else if (state.rows.length === 0) {
     empty.className = 'empty';
     empty.innerHTML = '还没有令牌。<b>点右上角「新建令牌」</b>创建第一条 —— 创建后这里会显示它的掩码 Key。';
   } else {
@@ -1811,7 +1841,6 @@ function askDelete(row) {
 // ── 抽屉 ──────────────────────────────────────────────────────────────────
 function openDrawer(row) {
   state.editing = row || null;
-  state.codes = (row && row.group_switch_status_codes && row.group_switch_status_codes.length) ? row.group_switch_status_codes.slice() : DEFAULT_CODES.slice();
   // ⚠ 2026-11-01 真缺陷修复（用户报「保存按钮，它没有真的保存自动分组配置」）：
   //   原先这两行只是**清空**，下面还把 f-automode 硬写成 'inherit' —— 从不从 row 还原。
   //   而那时后端也不下发 auto_groups / auto_group_mode（TokenView 缺字段）⇒ 抽屉里
@@ -1834,14 +1863,27 @@ function openDrawer(row) {
   $('f-mode-manual').checked = !!(row && !automatic);
   // 后端回读的 auto_group_mode（inherit/custom）；缺失时退回 inherit（= 继承全局配置）
   $('f-automode').value = (row && row.auto_group_mode) || 'inherit';
-  $('f-cross').checked = !!(row && row.cross_group_retry);
-  $('f-retry').value = String((row && row.group_switch_retry_count) || 0);
-  $('f-unlimited').checked = row ? !!row.unlimited_quota : true;
-  $('f-amount').value = String(row && row.remain_quota ? row.remain_quota : 500000);
-  // 「允许查询账户余额」的开关已从界面撤掉（见 HTML 里的注释）；这里不再回填。
-  $('f-mllimit').checked = !!(row && row.model_limits_enabled);
-  $('f-models').value = (row && row.model_limits) || '';
-  $('f-ips').value = (row && row.allow_ips) || '';
+  // ── 旧高级配置：本页不再编辑，但**绝不主动清零** ─────────────────────────
+  //
+  // 个人自用部署不配额度，所以额度 / IP 白名单 / 模型限制 / 跨组重试这些控件
+  // 都从界面上撤掉了。但"界面没有控件"不等于"可以把服务端已有的值抹掉"：
+  //   · 保存时这些字段**一律不提交** ⇒ 后端按「未提交即保持原值」处理
+  //     （internal/admin/tokens.go 的 Present 判定），旧值原样保留；
+  //   · 有非默认值时就地给一句**只读**说明，免得用户以为"配置丢了"。
+  //
+  // ⚠ 这里曾经把 row.remain_quota 回填成 (值 || 500000) —— 余额为 0 的令牌
+  //   一进编辑页就变成 50 万，改名保存就悄悄补了额度。现在连读都不读了。
+  state.legacy = row ? {
+    allow_ips: row.allow_ips || '',
+    cross_group_retry: row.cross_group_retry === true,
+    group_switch_retry_count: Number(row.group_switch_retry_count || 0),
+    group_switch_status_codes: row.group_switch_status_codes || [],
+    model_limits_enabled: row.model_limits_enabled === true,
+    model_limits: row.model_limits || '',
+    unlimited_quota: row.unlimited_quota !== false,
+    remain_quota: Number(row.remain_quota || 0)
+  } : null;
+  renderLegacyNote();
   if (row && row.expired_time && row.expired_time > 0) {
     var d = new Date(row.expired_time * 1000);
     var p = function (n) { return (n < 10 ? '0' : '') + n; };
@@ -1849,7 +1891,6 @@ function openDrawer(row) {
   } else {
     $('f-exp').value = '';
   }
-  renderCodes();
   loadGroups();
   syncVisibility();
   $('mask').className = 'drawer-mask on';
@@ -1859,12 +1900,6 @@ function closeDrawer() {
   $('mask').className = 'drawer-mask';
   $('drawer').className = 'drawer calm';
   state.editing = null;
-}
-function renderCodes() {
-  $('f-codes').innerHTML = ALL_CODES.map(function (c) {
-    var on = state.codes.indexOf(c) >= 0;
-    return '<label class="chip"><input type="checkbox" data-code="' + c + '"' + (on ? ' checked' : '') + '>' + c + '</label>';
-  }).join('');
 }
 function renderDrag(listId, arr) {
   $(listId).innerHTML = arr.map(function (g, i) {
@@ -1882,15 +1917,38 @@ function syncVisibility() {
   $('w-automode').className = 'field' + (auto ? '' : ' hidden');
   $('w-autogroups').className = 'field' + (custom ? '' : ' hidden');
   $('w-groups').className = 'field' + (auto ? ' hidden' : '');
-  $('w-cross').className = 'field' + (auto ? '' : ' hidden');
-  $('w-codes').className = 'field' + (auto && many ? '' : ' hidden');
-  $('w-retry').className = 'field' + (auto && many ? '' : ' hidden');
-  $('w-amount').className = 'field' + ($('f-unlimited').checked ? ' hidden' : '');
-  $('w-models').className = 'field' + ($('f-mllimit').checked ? '' : ' hidden');
   var count = Number($('f-count').value || '1');
   var limit = (!state.editing && count > 1) ? 43 : 50;
   $('nameHint').textContent = '最长 ' + limit + ' 字节' + (limit === 43 ? '（创建多条时为后缀留位置）' : '');
   $('expHint').textContent = $('f-exp').value ? '到期后此令牌不可用。' : '默认永不（提交 expired_time = -1）。';
+}
+
+// renderLegacyNote —— 旧高级配置的**只读**提示（个人自用：本页不再编辑它们）。
+//
+// # 为什么要专门提示一句
+// 额度 / IP 白名单 / 模型限制 / 跨组重试的控件都从这张表单上撤掉了。若一个存量令牌
+// 带着这些非默认值，用户在页面上**看不到**它们 —— 不提示的话，他会合理地把
+// 「看不到」理解成「没有配置」，进而以为配置丢了。这里只做展示，不改任何值。
+//
+// # 为什么不顺手把它们提交回去
+// 提交旧值会在「另一个标签页刚改过」时把陈旧值写回去。保存时这些字段一律不提交，
+// 由后端按「未提交即保持原值」处理（internal/admin/tokens.go 的 Present 判定）——
+// 既不丢配置，也不会拿旧快照覆盖新值。
+function renderLegacyNote() {
+  var note = $('legacyNote'), text = $('legacyText');
+  if (!note || !text) { return; }
+  var L = state.legacy;
+  var bits = [];
+  if (L) {
+    if (L.allow_ips) { bits.push('IP 白名单'); }
+    if (L.model_limits_enabled) { bits.push('模型限制'); }
+    if (L.cross_group_retry) { bits.push('跨组重试'); }
+    if (L.group_switch_retry_count > 0) { bits.push('换组重试次数 ' + L.group_switch_retry_count); }
+    if (L.unlimited_quota === false) { bits.push('有限额度'); }
+  }
+  if (!bits.length) { note.className = 'field hidden'; text.textContent = ''; return; }
+  note.className = 'field';
+  text.textContent = '该令牌带有旧的高级配置（' + bits.join(' / ') + '），本页不再编辑，保存时保持原样。';
 }
 // groupOptionsOf 从**本仓** GET /admin/groups 的响应里取候选分组：
 // **value = 分组 ID，label = 分组名**。
@@ -2030,8 +2088,6 @@ $('mask').addEventListener('click', closeDrawer);
 $('f-mode-auto').addEventListener('change', syncVisibility);
 $('f-mode-manual').addEventListener('change', syncVisibility);
 $('f-automode').addEventListener('change', syncVisibility);
-$('f-unlimited').addEventListener('change', syncVisibility);
-$('f-mllimit').addEventListener('change', syncVisibility);
 $('f-count').addEventListener('input', syncVisibility);
 $('f-exp').addEventListener('change', syncVisibility);
 $('btnNever').addEventListener('click', function () { $('f-exp').value = ''; syncVisibility(); });
@@ -2087,9 +2143,6 @@ function collectForm() {
   if (!auto && state.groups.length === 0) throw new Error('有序分组模式下至少要选 1 个分组');
   if (auto && $('f-automode').value === 'custom' && state.autoGroups.length === 0) throw new Error('自定义自动分组至少要选 1 个分组');
 
-  var codes = [];
-  var boxes = $('f-codes').querySelectorAll('input[data-code]');
-  for (var j = 0; j < boxes.length; j++) if (boxes[j].checked) codes.push(Number(boxes[j].getAttribute('data-code')));
 
   var exp = $('f-exp').value;
   var expiredTime = -1;
@@ -2098,19 +2151,17 @@ function collectForm() {
   var body = {
     name: name,
     automatic: auto,
-    cross_group_retry: $('f-cross').checked,
-    group_switch_status_codes: codes,
-    group_switch_retry_count: Number($('f-retry').value || '0'),
-    unlimited_quota: $('f-unlimited').checked,
-    remain_quota: $('f-unlimited').checked ? 0 : Number($('f-amount').value || '0'),
     // 隐私开关已不在界面上：新建走后端默认（false），编辑**保留原值**。
     // ⚠ 不能一律发 false —— 那会把用户此前已开启的令牌悄悄关掉（静默改配置）。
     allow_user_quota_query: state.editing ? (state.editing.allow_user_quota_query === true) : false,
-    expired_time: expiredTime,
-    model_limits_enabled: $('f-mllimit').checked,
-    model_limits: $('f-mllimit').checked ? $('f-models').value : '',
-    allow_ips: $('f-ips').value
+    expired_time: expiredTime
   };
+  // 额度不再由本页参与（个人自用）。
+  // 新建固定「不限额度」；**编辑时一个额度字段都不提交** —— 后端按「未提交即保持原值」
+  // 处理，所以既不会把有限的改成无限，也不会清掉存量额度。
+  // ⚠ 这正是旧版那个缺陷的成因：回填时用了「剩余额度为假值就取 50 万」的写法，
+  //   于是余额为 0 的令牌一进编辑页就被补成 50 万。
+  if (!state.editing) { body.unlimited_quota = true; }
   if (state.editing) body.id = state.editing.id;
   else body.count = count;
   if (auto) {
@@ -2170,12 +2221,6 @@ var kwTimer = null;
 $('kw').addEventListener('input', function () {
   if (kwTimer) window.clearTimeout(kwTimer);
   kwTimer = window.setTimeout(function () { state.page = 1; refresh(); }, 250);
-});
-$('f-codes').addEventListener('change', function () {
-  var codes = [];
-  var boxes = $('f-codes').querySelectorAll('input[data-code]');
-  for (var i = 0; i < boxes.length; i++) if (boxes[i].checked) codes.push(Number(boxes[i].getAttribute('data-code')));
-  state.codes = codes;
 });
 refresh();
 

@@ -387,6 +387,14 @@ type TokenView struct {
 	// 口径与 SetAutoGroups/UsesAutoGroups 是同一份事实：快照非空 ⇒ custom，否则 inherit。
 	AutoGroups    []string `json:"auto_groups"`
 	AutoGroupMode string   `json:"auto_group_mode"`
+
+	// Expired 是**派生**状态：库里只有 expired_time 与 status，不新增"过期"枚举列。
+	//
+	// 为什么必须派生而不是让前端自己算：列表与详情是两个端点，前端各算一次就会出现
+	// "列表显示过期、详情显示正常"这类自相矛盾；而且客户端时钟不可信。
+	// 口径与网关鉴权（apikey.Validate / store.ValidateToken）**同源**：
+	//   status == 3 或 (expired_time > 0 且 <= now)。
+	Expired bool `json:"expired"`
 }
 
 // Masked 转成对外视图（Key 掩码；Groups/StatusCodes 给解码值，不给落库串）。
@@ -396,6 +404,7 @@ func (t *Token) Masked() *TokenView {
 	}
 	copyTok := *t
 	copyTok.NormalizeGroupPolicy()
+	expired := copyTok.IsExpiredAt(nowUnix())
 	// 自动分组快照解码。失败不致命：按「没有自定义、走继承」处理 —— 与写路径里
 	// SetAutoGroups(nil) 的语义一致（宁可退回继承，也不要让整次渲染失败）。
 	autoGroups, _ := copyTok.GetAutoGroups()
@@ -411,7 +420,22 @@ func (t *Token) Masked() *TokenView {
 		UsedQuota: copyTok.UsedQuota, Group: copyTok.Group, CrossGroupRetry: copyTok.CrossGroupRetry,
 		GroupSwitchRetryCount: copyTok.GroupSwitchRetryCount, Groups: copyTok.Groups, GroupSwitchCodes: copyTok.GroupSwitchCodes,
 		AutoGroups: autoGroups, AutoGroupMode: autoMode,
+		Expired: expired,
 	}
+}
+
+// IsExpiredAt 判断给定时刻是否已过期（**唯一口径**，列表/详情/管理端拦截都调它）。
+//
+// now 作为参数传进来是为了可测：时钟边界（正好等于 expired_time）必须能钉住，
+// 不能在函数内部读 time.Now 导致测试只能"大约对"。
+func (t *Token) IsExpiredAt(now int64) bool {
+	if t == nil {
+		return false
+	}
+	if t.Status == TokenStatusExpired {
+		return true
+	}
+	return t.ExpiredTime > 0 && t.ExpiredTime <= now
 }
 
 // MaskedTokens 批量掩码。
