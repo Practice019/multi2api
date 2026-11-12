@@ -249,7 +249,12 @@ var scopePrefix = regexp.MustCompile("^([A-Za-z][A-Za-z0-9_.-]{1,15}):[ \t]+")
 type pipeWriter struct{ lvl Level }
 
 func (p pipeWriter) Write(b []byte) (int, error) {
-	if !Enabled(p.lvl) {
+	lvl := p.lvl
+	// 启动窗口内的 legacy INFO 细节：默认降为 DEBUG（见 BeginBoot 的注释）。
+	if lvl == LevelInfo && inBoot() && !bootErrish.MatchString(string(b)) {
+		lvl = LevelDebug
+	}
+	if !Enabled(lvl) {
 		return len(b), nil
 	}
 	s := strings.TrimRight(string(b), "\r\n")
@@ -257,7 +262,7 @@ func (p pipeWriter) Write(b []byte) (int, error) {
 	if m := scopePrefix.FindStringSubmatch(s); m != nil {
 		scope, msg = m[1], s[len(m[0]):]
 	}
-	write(Line(p.lvl, scope, msg))
+	write(Line(lvl, scope, msg))
 	return len(b), nil
 }
 
@@ -321,3 +326,34 @@ func FmtTps(v float64) string {
 
 // LF 供调用方拼接（避免各处散落字面量）。
 const LF = "\n"
+
+// ---------------------------------------------------------------------------
+// 启动窗口：启动阶段的 INFO 细节默认不糊屏
+// ---------------------------------------------------------------------------
+
+// ⚠ 为什么需要它（2026-11-12，用户："感觉还是不对"）
+//
+// 实测一次启动会打 **70+ 行**配置倾倒：14 个上游各 2 行、16 行"同步凭证进池 pool 106 -> 106"、
+// 数据层 9 行…… 而人对启动的全部诉求只有三件事：**能不能用、地址是什么、有没有异常**。
+//
+// 机制（一处开关管住一整类，而不是去改 40 个调用点）：
+//
+//	· 启动窗口内，**legacy INFO** 降级为 DEBUG（-log-level debug 照样全看得见）；
+//	· ⚠ 但**含错误类关键词的行一律照常可见** —— 否则"启动失败"会被这条规则吞掉，
+//	  那正是本项目反复吃的亏（降噪把故障一起藏了）。
+//	· WARN/ERROR 不受影响。
+var bootUntil atomic.Int64
+
+// BeginBoot 标记"接下来 d 内属于启动阶段"（d 是兜底：正常路径由 EndBoot 收尾）。
+func BeginBoot(d time.Duration) { bootUntil.Store(now().Add(d).UnixNano()) }
+
+// EndBoot 结束启动阶段（幂等）。
+func EndBoot() { bootUntil.Store(0) }
+
+func inBoot() bool {
+	u := bootUntil.Load()
+	return u != 0 && now().UnixNano() < u
+}
+
+// bootErrish 启动窗口内"必须照常可见"的关键词（只用于**显示过滤**，不改日志内容）。
+var bootErrish = regexp.MustCompile(`失败|错误|异常|无法|不能|注意|警告|超时|拒绝|失效|panic|[Ee]rror|[Ff]ail|[Ww]arn|refus|invalid`)

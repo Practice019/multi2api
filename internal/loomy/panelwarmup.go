@@ -3,6 +3,7 @@ package loomy
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -125,7 +126,14 @@ func (p *Provider) StartPanelWarmup() {
 			pace := &panelWarmupPace{}
 			for {
 				left, line := p.sweepPanels()
-				sleep, shouldLog := pace.next(left, line, time.Now())
+				// ⚠ 2026-11-12：变化判定要用**稳定键**，不能用整行 ——
+				//   "首个错误"这类字段会来回抖（两个错误交替），整行比对就被它绕过了，
+				//   表现是"内容变了"永远成立 ⇒ 每轮照打（实测 20 秒两条）。
+				stable := line
+				if i := strings.Index(stable, " · 首个错误="); i >= 0 {
+					stable = stable[:i]
+				}
+				sleep, shouldLog := pace.next(left, stable, time.Now())
 				if shouldLog {
 					log.Print(line)
 				}

@@ -177,3 +177,29 @@ func Example() {
 	// 12:41:03 WARN  loomy      额度查询失败 uid=2609…7497 · 100003 账号已被停用 · 连续 12 次
 	// 12:41:03 ERROR qoder      refresh_token 失效 uid=…a1f40e · 需重新登录/导入
 }
+
+// TestBootWindowDemotesInfoButKeepsErrors 启动窗口：普通 INFO 细节降级，
+// **含错误关键词的行必须照常可见**（否则"启动失败"会被降噪一起吞掉）。
+func TestBootWindowDemotesInfoButKeepsErrors(t *testing.T) {
+	now = func() time.Time { return time.Date(2026, 11, 12, 13, 33, 11, 0, time.UTC) }
+	defer func() { now = time.Now }()
+	buf := capture(t, LevelInfo)
+	w := Pipe(LevelInfo)
+
+	BeginBoot(time.Minute)
+	_, _ = w.Write([]byte("codearts: 已启用（凭证目录 auths\\codearts）\n"))
+	if strings.Contains(buf.String(), "已启用") {
+		t.Errorf("启动窗口内的普通 INFO 细节应降级（否则启动就是一屏配置倾倒）：%q", buf.String())
+	}
+	buf.Reset()
+	_, _ = w.Write([]byte("codearts: 凭证目录读不到账号，本次启用失败\n"))
+	if !strings.Contains(buf.String(), "失败") {
+		t.Errorf("含错误关键词的行必须照常可见（降噪不能把启动故障一起藏掉）：%q", buf.String())
+	}
+	buf.Reset()
+	EndBoot()
+	_, _ = w.Write([]byte("codearts: 已启用（凭证目录 auths\\codearts）\n"))
+	if !strings.Contains(buf.String(), "已启用") {
+		t.Errorf("启动结束后 INFO 应恢复可见：%q", buf.String())
+	}
+}

@@ -68,6 +68,9 @@ func main() {
 	//   拦截一次就让它们全部获得统一前缀与级别控制（对标见 internal/logx 的包注释）。
 	// ⚠ log.SetFlags(0) 必须一起做：否则 stdlib 会自带 `2026/11/12 12:05:15 ` 前缀，
 	//   与 logx 的 HH:MM:SS 叠成两段时间。
+	// ⚠ 启动窗口：这一段的 INFO 细节默认不糊屏（实测一次启动 70+ 行配置倾倒）。
+	//   含错误关键词的行照常可见；结束时用一条摘要收尾（见下方 EndBoot）。
+	logx.BeginBoot(60 * time.Second)
 	log.SetFlags(0)
 	log.SetOutput(logx.Pipe(logx.LevelInfo))
 	levelStr := *levelFlag
@@ -2202,6 +2205,13 @@ func main() {
 	//	"127.0.0.1:7863"        → 只能本机访问
 	//
 	// 所以本机地址一律用 127.0.0.1 拼（永远可点），绑了非回环时额外给局域网地址。
+	// 启动摘要：把原来那 70+ 行配置倾倒收成一行关键数字（详细配置见 -log-level debug）。
+	{
+		total, healthy, cooling, disabled, _ := p.CountsDetailed()
+		logx.EndBoot()
+		logx.Infof("boot", "账号池 %d（可用 %d / 冷却 %d / 禁用 %d）· 上游与开关详情见 -log-level debug",
+			total, healthy, cooling, disabled)
+	}
 	log.Printf("%s 已启动", server.ServiceName)
 	log.Printf("  控制台   %s/ui", uiOrigin(cfg.Listen))
 	log.Printf("  API 基址 %s/v1", uiOrigin(cfg.Listen))

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/pool"
 )
 
@@ -591,7 +592,7 @@ func (h *Handler) RefreshDueQuotasNow(now time.Time) (res quotaRefresher, due, t
 	changed := h.noteQuotaRound(dueUIDs, provs)
 	// ⚠ 一行里必须同时有"到期/总数"与四个计数：
 	//   只看 `更新 3` 会以为循环坏了；看到 `到期 3/102` 才知道那是**分层生效**。
-	log.Printf("loomy: 额度自动刷新一拍（分层/校正）—— 到期 %d/%d · 更新 %d · 未知 %d · 失败 %d · 跳过 %d · 上游 %v",
+	logx.Debugf("loomy", "额度自动刷新一拍（分层/校正）—— 到期 %d/%d · 更新 %d · 未知 %d · 失败 %d · 跳过 %d · 上游 %v",
 		due, total, res.Updated, res.Unknown, res.Failed, res.Skipped, res.Providers)
 	if changed {
 		h.logQuotaPausedOnce()

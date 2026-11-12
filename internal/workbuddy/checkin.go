@@ -207,7 +207,7 @@ func (p *Provider) checkinOne(uid, trigger string) CheckinOutcome {
 			// 正常状态：今天已经签过了。**不打成告警** —— 它是幂等重复调用的预期结果。
 			// 单列 http 状态码：400（业务否定）与 401（凭据失效）性质完全相反，
 			// 混在一串 JSON 里排障时要人肉解析。
-			log.Printf("checkin %s: 今日已签到（上游 http %d 属正常业务否定，非故障）",
+			logx.Debugf("checkin", "今日已签到 uid=%s（上游 http %d 属正常业务否定，非故障）",
 				uid, statusOf(err))
 			// detail 是给人在表格里看的一列，不是排障现场：这里放短句。
 			status, detail = checkinlog.StatusAlready, "今天已签到"

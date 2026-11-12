@@ -7,6 +7,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // 本文件：**把凭证目录同步进账号池**，并让"启动时"与"用户点重载"走同一条路。
@@ -125,8 +126,14 @@ func (h *Handler) reloadProviderInto(provider string) (scanned, before, after in
 
 	// ⚠ 日志打 `dir=`（真正扫的目录）而不是 `h.cfg.AuthDir` ——
 	// 按上游扫描之后两者不再是同一个值，打配置值等于没打。
-	log.Printf("admin: 同步凭证进池 dir=%s provider=%s scanned=%d pool %d -> %d",
-		dir, provider, scanned, before, after)
+	// ⚠ 只在**池子规模真的变了**时打：`pool 106 -> 106` 是"什么都没发生"，
+	//   而启动时每个上游打一行（实测 16 行/次启动）—— 那正是"启动一屏全是配置倾倒"的来源。
+	if after != before {
+		log.Printf("admin: 同步凭证进池 dir=%s provider=%s scanned=%d pool %d -> %d",
+			dir, provider, scanned, before, after)
+	} else {
+		logx.Debugf("admin", "同步凭证进池 dir=%s provider=%s scanned=%d pool 未变化(%d)", dir, provider, scanned, after)
+	}
 	return scanned, before, after, dir, nil
 }
 
