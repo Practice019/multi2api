@@ -39,9 +39,15 @@ var corePackages = []string{
 
 // upstreamPrefix 上游实现的包路径前缀。
 //
-// ⚠ 新增上游时**必须**在此登记，否则约束测试管不到它。
-// 这本身是被测试强制的：TestUpstreamListIsEnforced 会检查每个
-// internal/<名字>/ 是否在此列。
+// ⚠⚠ **遗留变量，已无人使用 —— 别照它去「登记」新上游。**
+//
+// （实测：`upstreamPrefix` 在整个 internal/gateway 里只有这一处声明，没有任何读取点；
+// 上面旧注释提到的 `TestUpstreamListIsEnforced` 也早已不存在。）
+//
+// 它记录的是一套**已被淘汰的名单式守卫**：「新增上游必须手工登记，否则约束测试看不见它」。
+// 那套机制被绕过过两次（名单外的新包天然不受约束），现在改为**包级依赖图自动发现** ——
+// 见 discoverUpstreams：上游的判据是「它 import 了 internal/gateway」，
+// 因此**新增上游不需要在任何名单里登记**，漏登记这种失效模式从根上不存在。
 var upstreamPrefix = "workbuddy2api/internal/workbuddy"
 
 // gatewayContractMarkers 已废弃 —— 见 discoverUpstreams 的说明。

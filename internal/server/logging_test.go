@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/wire"
 )
 
 // captureStdout 重定向 os.Stdout 并捕获 fn 期间的全部输出。
@@ -303,5 +305,48 @@ func TestHealthzDoesNotLogTableRow(t *testing.T) {
 	})
 	if strings.Contains(out, "| #") {
 		t.Errorf("healthz/models/status must not emit table rows:\n%s", out)
+	}
+}
+
+// anthropicDialectUsageJSON 2026-11-12 隔离实例真机响应的 usage **逐字复制**（未改一字符）。
+//
+// 它的两个要点：
+//
+//	① 顶层是 Anthropic 形态（`input_tokens`/`output_tokens`），**一个 OpenAI 键都没有**；
+//	② 上游把 OpenAI 形态塞在自己的 `billing_usage.openai_usage` 里 —— 那是**它的方言**，
+//	  不是"核心已转换过"的证据（里面 `completion_tokens:32` 与 `output_tokens:0` 同义不同值）。
+const anthropicDialectUsageJSON = `{"billing_usage":{"openai_usage":{"claude_cache_creation_1_h_tokens":0,"claude_cache_creation_5_m_tokens":0,"completion_tokens":32,"completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":32,"text_tokens":0},"input_tokens":0,"input_tokens_details":null,"output_tokens":0,"prompt_tokens":39,"prompt_tokens_details":{"cached_tokens":0,"image_tokens":0,"text_tokens":0},"total_tokens":71},"semantic":"openai","source":"oai_chat"},"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"claude_cache_creation_1_h_tokens":0,"claude_cache_creation_5_m_tokens":0,"input_tokens":39,"output_tokens":32}`
+
+// TestTotalTokensReadsAnthropicDialect 日志行 `tok=` 必须读得懂 Anthropic 形态 + 上游方言。
+//
+// 改前的实际症状（真机）：日志行 `tok=0`，而同一次响应里 `input_tokens:39` / `output_tokens:32` 都在。
+// 判据：`tok` 是"总处理量"（prompt + completion）⇒ 这里必须是 **71 = 39 + 32**，
+// 不只是 completion 那 32（少算输入会让 tok/s 与网页端、与其它上游都不可比）。
+func TestTotalTokensReadsAnthropicDialect(t *testing.T) {
+	var usage map[string]any
+	if err := json.Unmarshal([]byte(anthropicDialectUsageJSON), &usage); err != nil {
+		t.Fatalf("夹具解析失败: %v", err)
+	}
+	resp := map[string]any{"usage": usage}
+	if got := totalTokens(resp); got != 71 {
+		t.Errorf("totalTokens = %d, want 71（39 输入 + 32 输出；为 0 或 32 都会让日志行与 tok/s 失真）", got)
+	}
+	// 纯输出量的那一半（tok/s 的分子）走 wire.ParseUsageExtras，同样必须非 0。
+	if got := wire.ParseUsageExtras(usage).CompletionTokens; got != 32 {
+		t.Errorf("out = %d, want 32", got)
+	}
+}
+
+// TestTotalTokensOpenAIUnchanged 回归锁：OpenAI 形态的取值一个都不许变。
+//
+// （既有上游那批走的就是这条；兜底只允许在**键缺席**时生效。）
+func TestTotalTokensOpenAIUnchanged(t *testing.T) {
+	resp := map[string]any{"usage": map[string]any{
+		"prompt_tokens":     3.0,
+		"completion_tokens": 5.0,
+		"total_tokens":      8.0,
+	}}
+	if got := totalTokens(resp); got != 8 {
+		t.Errorf("totalTokens = %d, want 8", got)
 	}
 }

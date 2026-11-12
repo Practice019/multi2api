@@ -73,6 +73,12 @@ func ParseUsageExtras(usage map[string]any) UsageExtras {
 	// ⚠ 不从 total 反推（total - prompt 在上游字段缺失时会得出负数或 0），
 	// 只认上游显式给的 completion_tokens；缺失就留 0，前端据此显示 "—" 而不是硬算。
 	out.CompletionTokens = usageInt(usage["completion_tokens"])
+	// ⚠ 2026-11-12 加兜底：Anthropic 系上游给的是 output_tokens / input_tokens，
+	//   而它们把 OpenAI 形态塞在自己的 billing_usage.openai_usage 里 ——
+	//   一个键都对不上时，日志行就会是 `tok=0`（tok/s 的分母也用这个值）。
+	if _, present := usage["completion_tokens"]; !present {
+		out.CompletionTokens = completionTokensFallback(usage)
+	}
 
 	// 推理 token：顶层显式键**存在就认它**（哪怕为 0），只在它缺席时才看 details。
 	//
@@ -81,10 +87,42 @@ func ParseUsageExtras(usage map[string]any) UsageExtras {
 	// 且方向不可控 —— 万一某天 details 里的 reasoning_tokens 语义变成
 	// 「含前缀的累计值」，取 max 就会把每一行都高报。宁可忠实采用显式键，
 	// 并在两键都存在且不一致时保持"显式优先"这个可预测的规则。
+	//
+	// 取值链（2026-11-12 从两级扩到三级，**每级判据都是「这一级给出了这个键」**，
+	// 而不是「上一级的值是 0」—— 与缓存那三级同一条纪律）：
+	//
+	//	① completion_thinking_tokens                                        （显式顶层键）
+	//	② completion_tokens_details.reasoning_tokens                       （顶层 details）
+	//	③ billing_usage.openai_usage.completion_tokens_details.reasoning_tokens（**上游方言**）
+	//
+	// ⚠ 绝不从 output_tokens 反推 think：Anthropic 的 output_tokens **含** thinking
+	//   （见 internal/anthroconv 的注释），拆出来就是编数。Anthropic 形态下 think 只能
+	//   靠上游另给的字段（真机上就是第 ③ 级）。
+	//
+	// ⚠⚠ **第 ③ 级只对「未经协议转换的形态」有效** —— 2026-11-12 真机复验的结论，
+	//   写在这里免得第 N 个人重走一遍这轮排查：
+	//
+	//	· 它读的是**上游方言**（`billing_usage` 那一层）；只有「响应原样透传」时它才在。
+	//	· 若该上游的响应**先过了 `internal/anthroconv` 的协议转换**，方言会在那一步被丢掉：
+	//	  转换器用的是 `mapUsage`（anthroconv/anthropic.go:671-687），它返回的是**只有三个键的
+	//	  新 map**（prompt/completion/total_tokens），**不复制**其余键（含 billing_usage）。
+	//	· 而 `anthroconv` 也**不产出** reasoning 键 —— 它无从产出：Anthropic 的 output_tokens
+	//	  **含** thinking，转换层拿不到可区分的量。
+	//
+	//	⇒ 结论：**那类上游（响应经转换）的 `think_tokens` 恒为 0，属「信息缺失，不是漏读」**。
+	//	  不要为此去改 anthroconv（没有可用的量），也不要在这里硬拆（拆就是编数）。
+	//	  下面两级兜底（`completionTokensFallback` 与计数层的 `input_tokens`）同理。
 	out.ThinkTokens = usageInt(usage["completion_thinking_tokens"])
 	if _, present := usage["completion_thinking_tokens"]; !present {
 		if details, ok := usage["completion_tokens_details"].(map[string]any); ok && details != nil {
-			out.ThinkTokens = usageInt(details["reasoning_tokens"])
+			if _, has := details["reasoning_tokens"]; has {
+				out.ThinkTokens = usageInt(details["reasoning_tokens"])
+			}
+		}
+		if _, hasTop := usage["completion_tokens_details"].(map[string]any); !hasTop {
+			if v, ok := nestedInt(usage, "billing_usage", "openai_usage", "completion_tokens_details", "reasoning_tokens"); ok {
+				out.ThinkTokens = v
+			}
 		}
 	}
 
@@ -143,6 +181,61 @@ func ParseUsageExtras(usage map[string]any) UsageExtras {
 		}
 	}
 	return out
+}
+
+// completionTokensFallback 在 OpenAI 的 `completion_tokens` **缺席**时，按上游方言再找两级。
+//
+//	① billing_usage.openai_usage.completion_tokens   —— 上游把 OpenAI 形态塞这里（真机夹具）
+//	② usage.output_tokens                            —— Anthropic 形态的键
+//
+// 判据是**这一级给出了这个键**（沿用本文件的纪律），不是"上一级值为 0 就换一个"。
+// 优先方言那级：它比裸 output_tokens 更细（能把正文与推理分开，见 completion_tokens_details）。
+//
+// ⚠ `billing_usage` 是**上游自己的方言**，不是"核心已经转换过"的证据 ——
+//
+//	真机同一对象顶层还并列着 Anthropic 的 input_tokens/output_tokens，且里面
+//	`completion_tokens:32` 与 `output_tokens:0` 是**同义不同值**。别拿它当转换证据。
+func completionTokensFallback(usage map[string]any) int {
+	if v, ok := nestedInt(usage, "billing_usage", "openai_usage", "completion_tokens"); ok {
+		return v
+	}
+	if _, present := usage["output_tokens"]; present {
+		return usageInt(usage["output_tokens"])
+	}
+	return 0
+}
+
+// nestedInt 逐级下钻取嵌套 map 里的整数字段。
+//
+// 返回 (v, true) 的条件是**路径末端那个键存在**（值为 0 也算存在）——
+// 上层任一环缺失/类型不符就 (0,false)，由调用方决定要不要继续下一级兜底。
+func nestedInt(root map[string]any, path ...string) (int, bool) {
+	cur := root
+	for i, k := range path {
+		v, ok := cur[k]
+		if !ok {
+			return 0, false
+		}
+		if i == len(path)-1 {
+			return usageInt(v), true
+		}
+		m, ok := v.(map[string]any)
+		if !ok || m == nil {
+			return 0, false
+		}
+		cur = m
+	}
+	return 0, false
+}
+
+// UsageIntAt 按路径逐级下钻取整数字段（包外版，供 internal/server 的计数层读上游方言）。
+//
+// 语义与 nestedInt 一致：**路径末端那个键存在**才返回值（值为 0 也算存在，结果同为 0）。
+// 存在的理由：「上游把 OpenAI 形态塞在哪一层」属于 **wire 层的事实**，
+// 不该让 internal/server 另抄一份路径字符串（这类两处漂移本仓修过，见上面缓存三级的注释）。
+func UsageIntAt(root map[string]any, path ...string) int {
+	v, _ := nestedInt(root, path...)
+	return v
 }
 
 // UsageInt 把任意形态的 usage 值归一化成非负 int；缺失/不可解析/负数一律 0。

@@ -40,6 +40,7 @@ import (
 	"workbuddy2api/internal/minimax"
 	"workbuddy2api/internal/monkeycode"
 	"workbuddy2api/internal/oauth"
+	"workbuddy2api/internal/phanthywork"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/qoder"
@@ -1206,6 +1207,70 @@ func main() {
 		}
 	} else if mk != nil {
 		log.Printf("monkeycode: 未并入账号池（monkeycode.pool_accounts=false），只能通过其管理端点使用")
+	}
+
+	// ---- PhanthyWork（PhanthyCode / PhanthyWork 桌面端）----
+	//
+	// 它和别家不同的地方（报告 §2 / §3 逐条实测）：
+	//   · 调模型要**两样东西** —— Bearer accessToken，**加上**每请求一段 ed25519
+	//     proof 签名（12 段 canonical，LF 连接）；
+	//   · `desktop_inference_token` 只活 **180 秒**（accessToken 的十分之一）
+	//     ⇒ 每次调用前都要预检重换，否则 403 request_not_authorized；
+	//   · 三把 ed25519 私钥（identity/device/inference）由**本进程自己**生成并持久化：
+	//     identity 一变 installationId 就变，服务端会当成另一台设备（重新注册 / 409）。
+	//
+	// ⚠ 能力位只声明 CapChat | CapModels（声明即承诺，少报是安全的）：
+	//   签到（daily-login）与额度探测**本轮不做**，包内也没多报一个能力位 ——
+	//   它们是 follow-up，不是"已经能用但没接线"。
+	//
+	// ⚠ 也不做注册：上游手机号注册卡在真实短信验证码，端到端未验证
+	//   （报告 §6.9 明令「别写成注册可协议化」）。本上游只承载"有号之后"的链路。
+	//
+	// ⚠⚠ 这一段**不得**嵌在别的上游的条件块里：T-462 实测过一次这类事故 ——
+	//   codar 的整块被误放进 monkeycode 的并池分支里，于是 monkeycode 关着时
+	//   它根本不注册，而日志里一句提示都没有（用户看到的现象是"这版新增的上游不存在"）。
+	//   上游之间不共享启用条件。
+	if cfg.PhanthyworkEnabled {
+		pw := phanthywork.NewProvider(phanthywork.Config{
+			AuthDir: cfg.PhanthyworkAuthDir,
+			APIBase: cfg.PhanthyworkAPIBase,
+			UA:      cfg.PhanthyworkUA,
+			// ⚠ 0 = 让实现每次启动用 `activities/summary` 的 server_time 自行校准
+			//（本机时钟一直在漂：实测两次偏移差 1 秒多）。配置里写死一个值只用于离线调试。
+			ClockSkewMS: cfg.PhanthyworkClockSkewMS,
+		})
+		// 注入凭证访问器：后台续期任务必须拿到**池里持有的那个 `*Auth`**（不是磁盘副本）——
+		// 刷副本会让界面（读池）仍显示旧状态，而且会**绕过包内的同账号串行闸**：
+		// 本上游的 refreshToken 是轮换的（报告 §3 坑⑤），并发消费同一把不是"慢一点"，
+		// 而是"旧 token 已被换掉 ⇒ 登录莫名失效"。上游不得 import pool，故由装配层适配
+		// 进来（与 minimax / codar / raccoon 同一模式）。
+		pw.SetCredentialSource(phanthyworkCredSource(p))
+		// 枚举器：续期任务要**挨个账号**判断"该不该刷"，只能按名查的访问器看不到全部账号 ——
+		// 缺了它的形态是"任务在跑、却一个账号都没检查到"，且不打任何日志。
+		pw.SetUIDEnumerator(phanthyworkUIDEnumerator(p))
+		// ⚠ **签到历史日志必须接线**（与 workbuddy / codar / monkeycode 同一个坑）：
+		// 不传它的直接后果是界面「今日签到」列恒为 `—`（那一列读 checkinlog 的 KindCheckin 记录）——
+		// 用户看到的现象是「签到按钮点了、列还是空」，而编译与契约测试全绿，谁都查不出来。
+		// 本包自己**不得** import checkinlog（它在 arch_test 的 corePackages 里），故由装配层注入。
+		pw.SetCheckinLog(checkinLog)
+		// 批量动作（签到）打上游之前先问一句「这个号是不是已经被禁用了」——已被禁用的号打上游
+		// 只会白喂风控（设计梯级 L1：别做这件事）。不接线时恒为 false，行为仍正确、只是多打几次请求。
+		pw.SetDisabledChecker(phanthyworkDisabledChecker(p))
+		if err := registry.Register(pw); err != nil {
+			log.Fatalf("注册 PhanthyWork 上游失败: %v", err)
+		}
+		n := 0
+		if cfg.PhanthyworkPoolAccounts {
+			n = syncPhanthyworkAccounts(p, cfg.PhanthyworkAuthDir)
+		}
+		// 启动日志必须**说明它为什么开着**：本仓现在是"段缺席 = 启用"
+		//（upstreamEnableDefault），静默打开一个上游始终是意外行为，
+		// 所以这里把"为什么开"的那句话直接打出来，而不是只打"已启用"。
+		log.Printf("phanthywork: 已启用（config 段缺席即启用，phanthywork.enabled 已移除；"+
+			"凭证目录 %s，并池 %d 个账号，基址 %s，UA %s）",
+			cfg.PhanthyworkAuthDir, n,
+			firstNonEmpty(cfg.PhanthyworkAPIBase, phanthywork.DefaultAPIBase),
+			firstNonEmpty(cfg.PhanthyworkUA, phanthywork.DefaultUA))
 	}
 
 	// "已注册上游"必须打在**所有**上游注册完之后。

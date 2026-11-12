@@ -309,6 +309,12 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		}
 		message["tool_calls"] = calls
 	}
+	// ★ 「有推理、无正文」不许静默（真机实测：模型把输出预算全花在 thinking 上 ⇒
+	//   整条流没有 text 块 ⇒ content = ""，客户端显示成「模型没回答」）。
+	//   判据与三条反例都在 reasoningOnlyNotice 的注释里。
+	if n := reasoningOnlyNotice(content.Len() > 0, reasoning.Len() > 0, len(toolOrder) > 0, finishReason); n != "" {
+		message["gateway_notice"] = n
+	}
 	resp := map[string]any{
 		"id":      id,
 		"object":  "chat.completion",
@@ -326,6 +332,43 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		resp["usage"] = usage
 	}
 	return resp, nil
+}
+
+// reasoningOnlyNotice 判定要不要给「有推理、无正文」补一条人话提示，并给出提示内容。
+//
+// # 症状与判据（真机实测 2026-11-12，证据在 internal/phanthywork/p1_thinking_repro_test.go）
+//
+//	POST /v1/chat/completions ⇒ 200 + choices[0].message.content = ""
+//
+// 用户看到的是「模型没回答」。真因是模型把输出预算全花在 thinking 块上（glm-5.3-flash
+// 输出 220 里 192 是推理），而推理内容**没丢** —— 转换层把它映射进了 reasoning_content。
+// 所以：reasoning_content 非空 && content == "" ⇒ **不是失败**，但**不许静默**。
+//
+// # 为什么是「补一个字段」而不是报错、也不是往 content 里塞字
+//
+//	报错（4xx/5xx）：这是一次**成功**的上游调用（200、SSE 完整、推理完整），
+//	    报错会把它算成失败 —— 熔断、账号健康、客户端重试都会被这一次误判带动。
+//	塞进 content：content 的语义是**模型正文**，而工具循环会把它回灌进下一轮对话
+//	    （见 cmd/server 的 chattool 链路），塞网关自己说的话等于让模型「说过」一句没说过的话。
+//	补字段：不改任何既有语义 —— 不认识它的客户端忽略它，认识它的（人读 JSON、控制台）能把话说清楚。
+//
+// # 什么时候**不**提示（三条反例，都有用例）
+//
+//	hasContent        正文非空 ⇒ 正常回答，与本题无关
+//	!hasReasoning     没有推理 ⇒ 那是「上游确实返回了空文本」，属于上游行为，不是「预算被思考吃掉」
+//	hasToolCalls      工具调用形态 ⇒ content 本就该是空的（finish_reason=tool_calls 同判）
+func reasoningOnlyNotice(hasContent, hasReasoning, hasToolCalls bool, finishReason string) string {
+	if hasContent || !hasReasoning || hasToolCalls {
+		return ""
+	}
+	if finishReason == "tool_calls" || finishReason == "function_call" {
+		return ""
+	}
+	const base = "模型把本次输出预算用在了思考上，没有产出正文；推理过程见 reasoning_content。"
+	if finishReason == "length" {
+		return base + "输出已被 max_tokens 截断 —— 提高 max_tokens 后重试即可拿到正文。"
+	}
+	return base + "可提高 max_tokens 后重试。"
 }
 
 // mergeToolCallDelta 把流式 tool_call 片段合并到累计对象：

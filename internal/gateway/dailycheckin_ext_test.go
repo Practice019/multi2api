@@ -15,6 +15,18 @@
 //
 //  3. **报出来的 AllURL 真的挂着** —— 假按钮守卫的另一面（与
 //     dailyaction_test.go 的 TestWorkbuddyActionURLsReallyExist 同一条）。
+//
+// # ⚠ 本文件**不负责**"覆盖度"（2026-11-12 改正，验证者 P1-b 实测）
+//
+// 下面那份 `checkinProviderFixtures` 是**夹具**（为了给上面三条性质各找到具体的形状），
+// 它**不是**覆盖度清单：验证者实测把某个上游的签到接线注掉，
+// `go test ./internal/gateway/ ./cmd/server/ -run "Checkin|Bulk"` 仍然全绿 ——
+// 因为夹具里恰好没有那个上游，而"所有上游"这件事**这里证明不了**
+// （包级原因：能构造出全部上游实例的地方只有 cmd/server 的 `allUpstreams()`）。
+//
+// ⇒ 覆盖度断言住在 **cmd/server/dailycheckin_coverage_test.go**（从 allUpstreams() 派生，
+//
+//	不点名任何上游，且带"例外不许长草"检查）。本文件只管**形状**。
 package gateway_test
 
 import (
@@ -24,24 +36,29 @@ import (
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/lobsterai"
+	"workbuddy2api/internal/phanthywork"
 	"workbuddy2api/internal/qoder"
 	"workbuddy2api/internal/trae"
 	"workbuddy2api/internal/workbuddy"
 )
 
-// checkinProviders 本轮**必须有**全量签到入口的上游。
+// checkinProviderFixtures 本文件三条**形状**性质所用的夹具上游（**不是覆盖度清单**）。
 //
-// # 为什么是白名单而不是"凡是报了 checkin 动作的都算"
+// # 为什么是显式列举而不是"凡是报了 checkin 动作的都算"
 //
 // 动作 ID 各不相同（checkin / trae-checkin / lobsterai-checkin /
 // qoder-checkin / qodercn-checkin / welfare），靠 ID 匹配 "checkin"
 // 子串去推断"这个上游该有全量签到"，会把 workbuddy 的 keepalive
 // 之类的动作也卷进来 —— 那正是本项目反复出现的"用字符串猜语义"。
-// 白名单贵在**显式**：加新上游时这里红一次，是提醒而不是障碍。
+//
+// ⚠ 但"显式列举"这件事**只适合当夹具**，不适合当覆盖度：这正是 P1-b 的教训。
+//
+//	覆盖度（谁漏了接线）见 cmd/server/dailycheckin_coverage_test.go（派生自 allUpstreams）。
+//	两者分工写死在这里：**本文件管形状，那里管覆盖**。
 //
 // ⚠ qoder 与 qodercn 是**两个 Provider 实例**（不同域名与 clientId），
 // 两者都要在列的理由见 internal/qoder/checkin.go 的文件头注释。
-func checkinProviders(t *testing.T) []gateway.Provider {
+func checkinProviderFixtures(t *testing.T) []gateway.Provider {
 	t.Helper()
 	return []gateway.Provider{
 		workbuddy.NewWithConfig(workbuddy.Config{}),
@@ -50,6 +67,7 @@ func checkinProviders(t *testing.T) []gateway.Provider {
 		lobsterai.NewWithConfig(lobsterai.Config{}),
 		qoder.NewWithConfig(qoder.Config{}),                       // 国际版
 		qoder.NewWithConfig(qoder.Config{Product: qoder.QoderCN}), // 中国版（另一个服务）
+		phanthywork.NewProvider(phanthywork.Config{}),             // 2026-11-12 接入（先在这里过形状检查）
 	}
 }
 
@@ -61,7 +79,7 @@ func checkinProviders(t *testing.T) []gateway.Provider {
 // "成功 N · 已签到 M · 失败 0"，而漏掉的那一整个上游**一个号都没动** ——
 // 没有任何错误，也没有任何计数能暴露它。
 func TestCheckinExtImplemented(t *testing.T) {
-	for _, p := range checkinProviders(t) {
+	for _, p := range checkinProviderFixtures(t) {
 		ext, ok := gateway.ExtOf[gateway.DailyCheckinExt](p)
 		if !ok || ext == nil {
 			t.Errorf("%s 没有实现 gateway.DailyCheckinExt —— "+
@@ -82,7 +100,7 @@ func TestCheckinExtImplemented(t *testing.T) {
 //
 // 两者都是"一半能用"，而界面的两处入口各自都绿 —— 只有这条断言会红。
 func TestBulkActionImpliesCheckinExt(t *testing.T) {
-	for _, p := range checkinProviders(t) {
+	for _, p := range checkinProviderFixtures(t) {
 		_, hasExt := gateway.ExtOf[gateway.DailyCheckinExt](p)
 		hasBulk := false
 		if dae, ok := gateway.ExtOf[gateway.DailyActionExt](p); ok {
@@ -110,7 +128,7 @@ func TestBulkActionImpliesCheckinExt(t *testing.T) {
 // Detail 里若带上游原文就可能泄凭证 —— 而上游错误文案是**不受控**的。
 func TestCheckinExtNoSecrets(t *testing.T) {
 	secretish := []string{"eyJ", "Bearer ", "ak=", "sk="}
-	for _, p := range checkinProviders(t) {
+	for _, p := range checkinProviderFixtures(t) {
 		ext, ok := gateway.ExtOf[gateway.DailyCheckinExt](p)
 		if !ok || ext == nil {
 			continue
@@ -138,7 +156,7 @@ func TestCheckinExtNoSecrets(t *testing.T) {
 // 本条用**零值配置**的上游（不配任何凭证目录）验证这条路径：
 // 那是所有上游在"刚装好还没加号"状态下的真实形态。
 func TestCheckinExtEmptyProviderIsNotError(t *testing.T) {
-	for _, p := range checkinProviders(t) {
+	for _, p := range checkinProviderFixtures(t) {
 		ext, ok := gateway.ExtOf[gateway.DailyCheckinExt](p)
 		if !ok || ext == nil {
 			continue

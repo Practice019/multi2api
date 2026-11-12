@@ -511,6 +511,105 @@ func TestAggregateEmptyStreamError(t *testing.T) {
 	}
 }
 
+// TestAggregateReasoningOnlyIsNotSilentContent 覆盖「有推理、无正文」**不许静默**返回空 content。
+//
+// # 症状（真机实测 2026-11-12）
+//
+//	POST /v1/chat/completions ⇒ **200** + choices[0].message.content = ""
+//
+// 用户看到的是「模型没回答」。真因是模型把输出预算全花在 thinking 块上，整条流**没有 text 块**
+// （glm-5.3-flash：输出 220 里 192 是推理；deepseek-v4.1-flash：25 里 23 是推理）。
+// 推理内容**没丢** —— 转换层把它映射进了 reasoning_content（下面第 3 条断言锁住这一点）。
+//
+// # 判据（照抄取证用例的结论，不自己发明）
+//
+//	reasoning_content 非空 && content == "" ⇒ **不是失败**（200 保留），但必须给出可理解的信号。
+//
+// 于是三条断言，缺一条这个洞就还在：
+//
+//	① content 仍然**是空串** —— 不往模型正文里塞网关的话（工具循环会把 content 回灌进下一轮对话）
+//	② 必须有 `gateway_notice`（人话、可操作）—— 这就是「不静默」的落点
+//	③ 不误伤两种**合法的空**：上游确实返回空文本、以及 tool_calls 形态
+func TestAggregateReasoningOnlyIsNotSilentContent(t *testing.T) {
+	// finish_reason=length = 预算被 max_tokens 截断，提示里应当给出可操作的建议。
+	reasoningOnly := "data: {\"id\":\"r1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"让我想想\"}}]}\n\n" +
+		"data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"total_tokens\":25}}\n\n" +
+		"data: [DONE]\n\n"
+
+	msgOf := func(t *testing.T, raw string) map[string]any {
+		t.Helper()
+		resp, err := Aggregate(strings.NewReader(raw))
+		if err != nil {
+			t.Fatalf("聚合失败: %v", err)
+		}
+		choices, _ := resp["choices"].([]any)
+		if len(choices) == 0 {
+			t.Fatalf("没有 choices: %#v", resp)
+		}
+		first, _ := choices[0].(map[string]any)
+		m, _ := first["message"].(map[string]any)
+		if m == nil {
+			t.Fatalf("没有 message: %#v", first)
+		}
+		return m
+	}
+
+	msg := msgOf(t, reasoningOnly)
+	// ① content 必须仍是空串（不许拿网关自己的话冒充模型正文）。
+	if c, _ := msg["content"].(string); c != "" {
+		t.Errorf("content 应当保持空串（不把提示塞进模型正文），实际 %q", c)
+	}
+	// ② 不静默：必须有一条人话提示。
+	notice, _ := msg["gateway_notice"].(string)
+	if strings.TrimSpace(notice) == "" {
+		t.Fatalf("「有推理、无正文」必须带一条 gateway_notice —— 没有它，用户看到的就是一个空回复"+
+			"（这正是本次要修的静默形态）。message=%#v", msg)
+	}
+	if !strings.Contains(notice, "max_tokens") {
+		t.Errorf("finish_reason=length（预算被截断）时提示应当给出可操作建议（提高 max_tokens），实际 %q", notice)
+	}
+	// ③ 推理内容原样保留（本次改动不许动它）。
+	if rc, _ := msg["reasoning_content"].(string); rc != "让我想想" {
+		t.Errorf("reasoning_content 应原样保留，实际 %q", rc)
+	}
+	t.Logf("聚合结果：content=%q reasoning_content=%v gateway_notice=%q",
+		msg["content"], msg["reasoning_content"] != nil, notice)
+
+	// ── 反例：两种**合法的空**不许被误伤 ──────────────────────────────
+	t.Run("真的空文本（无推理）不加提示", func(t *testing.T) {
+		raw := "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
+			"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n"
+		if n, _ := msgOf(t, raw)["gateway_notice"].(string); n != "" {
+			t.Errorf("上游确实返回空文本（无推理）是合法形态，不该加提示，实际 %q", n)
+		}
+	})
+	t.Run("tool_calls 形态不加提示", func(t *testing.T) {
+		raw := "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"想一下\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+			"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+			"data: [DONE]\n\n"
+		m := msgOf(t, raw)
+		if n, _ := m["gateway_notice"].(string); n != "" {
+			t.Errorf("tool_calls 形态的 content 本就该是空的，不该加提示，实际 %q", n)
+		}
+		if _, ok := m["tool_calls"]; !ok {
+			t.Errorf("tool_calls 必须照旧保留，实际 %#v", m)
+		}
+	})
+	t.Run("正常正文不加提示", func(t *testing.T) {
+		raw := "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"1+1=2\"}}]}\n\n" +
+			"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: [DONE]\n\n"
+		m := msgOf(t, raw)
+		if n, _ := m["gateway_notice"].(string); n != "" {
+			t.Errorf("正常回答不该加提示，实际 %q", n)
+		}
+		if c, _ := m["content"].(string); c != "1+1=2" {
+			t.Errorf("content 被改动: %q", c)
+		}
+	})
+}
+
 // TestStreamEmptyFramesCase 覆盖流式空流检测：0 有效帧时写 error 帧（error 字段存活）,
 // 恰好一个 [DONE]，并返回非 nil error。
 func TestStreamEmptyFramesCase(t *testing.T) {

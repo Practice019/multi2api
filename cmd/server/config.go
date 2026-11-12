@@ -1107,6 +1107,46 @@ type Config struct {
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"monkeycode"`
 
+	// PhanthyWork（范式 PhanthyCode / PhanthyWork 桌面端）上游。
+	//
+	// # 与其它上游最大的不同：调模型要**两样东西**，而且钥匙是本机现造的
+	//
+	//	Bearer accessToken（1800s）      —— 与别家同型（OAuth 授权码 + PKCE + loopback）
+	//	desktop_inference_token（180s）  —— 短命一个数量级，**每次调模型前要预检重换**
+	//	外加每请求一段 ed25519 proof 签名（12 段 canonical，LF 连接）
+	//
+	// 三把 ed25519 私钥（identity / device / inference）**由本进程自己生成并持久化**：
+	// identity 一变 installationId 就变（服务端当成另一台设备 ⇒ 重新注册 / 409），
+	// 所以它们与 accessToken 同等重要，一起落在这条上游的凭证文件里。
+	//
+	// ⚠ 本上游**不做注册**：报告 §6.9 明令「别写成注册可协议化」——手机号注册
+	// 卡在**真实短信验证码**，端到端**未验证**。本段承载的是「有号之后」那条链路
+	// （登录 / 续期 / 换推理令牌 / 调模型，后者已实测 HTTP 200）。
+	Phanthywork struct {
+		// AuthDir 凭证目录。留空则用 `<顶层 auth_dir>/phanthywork`。
+		AuthDir string `json:"auth_dir"`
+		// APIBase 上游基址覆盖（留空 = phanthywork.DefaultAPIBase）。
+		//
+		// 默认值取自包里的那个常量（**同源**，不在配置层抄第二份字面量）。
+		APIBase string `json:"api_base"`
+		// UA 出站 User-Agent 覆盖（留空 = phanthywork.DefaultUA，即 `Bun/1.3.14`）。
+		//
+		// ⚠ 它不是一个随手写的请求头：网关按 UA 认第三方客户端，换掉它命中
+		// `403 TM.00000001「网络繁忙」`（报告 §3 坑②）—— 报错文案完全指不到 UA 上。
+		// 留成可配置只为「上游改了 UA 时不必重新发版」，不是给人日常改着玩。
+		UA string `json:"ua"`
+		// ClockSkewMS 本机时钟相对服务端的偏移（毫秒，正 = 本机快）。
+		//
+		// ⚠ **留空（0）才是对的**：签名时间戳必须用服务端口径，而本机时钟一直在漂
+		// （报告 §3 坑① 两次实测分别是 -68,047ms 与 -66,996ms）⇒ 每次启动都要用
+		// `activities/summary` 响应的 `server_time` 重新校准。在这里钉一个固定值会随
+		// 漂移失效，症状是 `403 request_not_authorized`（文案只说「请更新或重新打开客户端」）。
+		// 仅离线调试 / 自建反代才需要写死。
+		ClockSkewMS *int64 `json:"clock_skew_ms"`
+		// PoolAccounts 是否并入核心账号池（默认 true）。
+		PoolAccounts *bool `json:"pool_accounts"`
+	} `json:"phanthywork"`
+
 	// 解析后
 	SoftRateDur time.Duration `json:"-"`
 	// SoftRateMaxDur 软冷却指数退避封顶；<=0 由 pool 用自己的默认值（2h）。
@@ -1284,8 +1324,24 @@ type Config struct {
 	MonkeyCodeProxy        string `json:"-"`
 	MonkeyCodeDirectProxy  string `json:"-"`
 	MonkeyCodePoolAccounts bool   `json:"-"`
-	ZCodePoolAccounts      bool   `json:"-"`
-	ZCodeJWTCaptcha        bool   `json:"-"`
+
+	// Phanthywork（PhanthyWork 桌面端）解析后。
+	//
+	// PhanthyworkEnabled 为 false 时下面几个字段无意义：不注册上游、不加载凭证。
+	PhanthyworkEnabled bool `json:"-"`
+	// PhanthyworkAuthDir 已填好默认值 `<顶层 auth_dir>/phanthywork`（见 normalize）。
+	PhanthyworkAuthDir string `json:"-"`
+	// PhanthyworkAPIBase 已填好默认值 phanthywork.DefaultAPIBase，main 可直接取用。
+	PhanthyworkAPIBase string `json:"-"`
+	// PhanthyworkUA 已填好默认值 phanthywork.DefaultUA（`Bun/1.3.14`）。
+	PhanthyworkUA string `json:"-"`
+	// PhanthyworkClockSkewMS 时钟偏移覆盖；**0 = 运行时用 server_time 自行校准**（推荐）。
+	PhanthyworkClockSkewMS int64 `json:"-"`
+	// PhanthyworkPoolAccounts 是否把 phanthywork 账号并入核心账号池
+	//（见 Phanthywork.PoolAccounts）。未启用时恒为 false。
+	PhanthyworkPoolAccounts bool `json:"-"`
+	ZCodePoolAccounts       bool `json:"-"`
+	ZCodeJWTCaptcha         bool `json:"-"`
 	// AuthsBase 各上游凭证目录的**父目录**（= 配置里写的 auth_dir 原值）。
 	//
 	// # 为什么保留它
@@ -1404,6 +1460,7 @@ func enableDefaults(c *Config) {
 	c.QoderEnabled = on
 	c.ZCodeEnabled = on
 	c.MiniMaxEnabled = on
+	c.PhanthyworkEnabled = on
 }
 
 // Load 从文件读，再用 WB2A_* env 覆盖。
@@ -1988,6 +2045,33 @@ func (c *Config) normalize() error {
 	// 否则会出现"没启用上游却在后台弹验证码窗口"的鬼影。
 	c.ZCodeJWTCaptcha = c.ZCodeEnabled && c.ZCode.JWTCaptcha
 	c.ZCodePoolAccounts = c.ZCodeEnabled && boolOr(c.ZCode.PoolAccounts, true)
+
+	// ---- phanthywork（PhanthyWork / PhanthyCode 桌面端）----
+	//
+	// 与其余上游同一套三件套（启用 / 目录 / 并池），另有三个**上游特有的旋钮**：
+	// api_base、ua、clock_skew_ms —— 前两个的理由见 Config 里对应字段的注释
+	//（UA 错一个字符就是 403「网络繁忙」；时钟不校准就是 403「请重新打开客户端」），
+	// 它们都留了"留空即回落包内常量"的缺省，所以示例配置里**不必出现这一段**。
+	//
+	// 缺省语义与其余上游一致：**段缺席 = 启用**（upstreamEnableDefault = true）。
+	c.PhanthyworkEnabled = true
+	c.PhanthyworkAuthDir = strings.TrimSpace(c.Phanthywork.AuthDir)
+	if c.PhanthyworkAuthDir == "" {
+		// ⚠ 用 AuthsBase（auth_dir 原值）拼接，不用可能已被上游段改写过的值
+		//（loomy 段踩过的坑：拼错来源 = 两个上游共目录互删账号）。
+		c.PhanthyworkAuthDir = filepath.Join(c.AuthsBase, "phanthywork")
+	}
+	c.PhanthyworkAPIBase = strings.TrimSpace(c.Phanthywork.APIBase)
+	c.PhanthyworkUA = strings.TrimSpace(c.Phanthywork.UA)
+	// 时钟偏移：**缺省 0 = 让实现自己在每次启动时用 server_time 校准**。
+	//
+	// 这里刻意不给"合理的默认偏移值"：本机时钟一直在漂（实测两次差 1 秒多），
+	// 任何写死的数字都只是一个过期快照 —— 而它带来的失败是 403 request_not_authorized，
+	// 报错文案指向"更新客户端"，从时钟查起要绕很远。
+	if c.Phanthywork.ClockSkewMS != nil {
+		c.PhanthyworkClockSkewMS = *c.Phanthywork.ClockSkewMS
+	}
+	c.PhanthyworkPoolAccounts = c.PhanthyworkEnabled && boolOr(c.Phanthywork.PoolAccounts, true)
 	return nil
 }
 

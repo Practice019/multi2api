@@ -6,7 +6,8 @@
   //    程序**只改动 `api_key` 一处**（轮换管理钥匙时），其余内容逐字节保留 ——
   //    所以你在这里写的注释、空行、字段顺序都不会被程序弄乱。
   //
-  // ⚠ 「哪些上游启用」**不在这里配**：上游一律全部启用（12 个）。
+  // ⚠ 「哪些上游启用」**不在这里配**：上游一律全部启用（当前 15 个注册实例 ——
+  //    清单见 README「已接入上游」，实际值以启动日志「已注册上游」为准）。
   //    如果你以前写过 `"enabled": false`，它会被忽略，上游照常启动。
   //    要停用一个上游，把它的凭证从 auths/ 移走即可。
   //
@@ -253,6 +254,22 @@
   //                       "api_base": "" }
   //   "codar":          { "auth_dir": "./auths/codar",
   //                       "api_base": "",   // 留空 = https://api.claw.speedai.com/v1
+  //                       "pool_accounts": true }
+  //   // PhanthyWork（PhanthyCode / PhanthyWork 桌面端）—— 调模型要「Bearer + 每请求
+  //   // 一段 ed25519 proof 签名」，而且推理令牌只活 **180 秒**（accessToken 的十分之一）。
+  //   //
+  //   // ⚠ 三个「默认值不能改错」的项，改错后报错全都指不到根因：
+  //   //   ua            → 403 TM.00000001「网络繁忙」（真因：UA 不是 Bun/1.3.14）
+  //   //   clock_skew_ms → 403 request_not_authorized（真因：本机时钟偏了几十秒）
+  //   //   模型 id        → 403 model_not_allowed（要用**云端目录**的 id，不带 phanthy/ 前缀）
+  //   //
+  //   // ⚠ 它**不做注册**：上游的手机号注册卡在真实短信验证码，端到端未验证。
+  //   //   把桌面端登录后的凭证（~/.phanthy-code/.credentials.json）放进
+  //   //   auths/phanthywork/ 即可；三把 ed25519 私钥由网关自己生成并持久化。
+  //   "phanthywork":    { "auth_dir": "./auths/phanthywork",
+  //                       "api_base": "",       // 留空 = https://code.phanthy.com
+  //                       "ua": "",             // 留空 = Bun/1.3.14
+  //                       "clock_skew_ms": 0,   // 0 = 每次启动用 server_time 自校准（推荐）
   //                       "pool_accounts": true }
 
   //   // MonkeyCode（长亭科技）—— 唯一需要**请求签名**的上游。

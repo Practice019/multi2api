@@ -1609,6 +1609,13 @@ func RegistryChannelSeeds() []store.ChannelSeed {
 		// BaseURL 用真机实测的 OpenAI 兼容基址（含 /v1，T-311 确认）；
 		// 模型目录 GET /v1/codar/models 免鉴权，故此处不写 Models（同上方「Models 为什么一律留空」）。
 		{Provider: "codar", BaseURL: "https://api.claw.speedai.com/v1", Source: "cmd/server/main.go:1131"},
+
+		// PhanthyWork（PhanthyCode / PhanthyWork 桌面端）：与 codar 同类，也是**账号型上游**
+		// —— 流量走 auths/phanthywork 的凭证池，不走渠道路径。
+		// BaseURL 取上游基址（= phanthywork.DefaultAPIBase，实测所有请求都打这里）；
+		// 模型目录 GET /api/phanthy_code/models 要活凭证才拿得到，故此处不写 Models
+		//（同上方「Models 为什么一律留空」）。
+		{Provider: "phanthywork", BaseURL: "https://code.phanthy.com", Source: "cmd/server/main.go:1242"},
 	}
 }
 

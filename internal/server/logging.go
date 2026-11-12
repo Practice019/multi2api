@@ -356,6 +356,21 @@ func totalTokens(resp map[string]any) int {
 
 	// ① 总输入：优先上游给的 prompt_tokens（它已含缓存，不能再加缓存）
 	pt := wire.UsageInt(u["prompt_tokens"])
+	// ⚠ 2026-11-12 兜底：Anthropic 系上游给的是 `input_tokens`（一个 OpenAI 键都没有），
+	//   而它把 OpenAI 形态另塞在 `billing_usage.openai_usage` 里（**上游自己的方言**）。
+	//   判据与全仓一致：**这一级给出了这个键**才采用，不是"上一个值为 0 就换一个"。
+	//   症状出处：日志行 `tok=0`，而同一次响应里 input_tokens:39 / output_tokens:32 都在。
+	if _, has := u["prompt_tokens"]; !has {
+		if _, hasIn := u["input_tokens"]; hasIn {
+			pt = wire.UsageInt(u["input_tokens"])
+		} else {
+			pt = wire.UsageIntAt(u, "billing_usage", "openai_usage", "prompt_tokens")
+		}
+	}
+	// ⚠ 上面（以及 ③′）这两级兜底读的是**上游方言**，只对「未经协议转换的形态」有效：
+	//   响应若先过了 `anthroconv`，方言会被 `mapUsage` 丢掉（anthropic.go:671-687 只返回三个键的新 map）。
+	//   ⇒ 那类上游的 `think_tokens` 恒为 0（**信息缺失，不是漏读**）；完整机制与为什么不去改
+	//   转换层，口径出处只有一处：`internal/wire/usage.go` 推理取值链第 ③ 级上方的注释。
 	// ② 只有缓存两项时才用它们还原（互斥的输入划分）
 	if pt <= 0 && x.CacheHitTokens > 0 && x.CacheMissTokens > 0 {
 		pt = x.CacheHitTokens + x.CacheMissTokens
@@ -365,6 +380,10 @@ func totalTokens(resp map[string]any) int {
 	}
 	// ③ 输入无从得知
 	if t := wire.UsageInt(u["total_tokens"]); t > 0 {
+		return t
+	}
+	// ③′ 同上：上游方言里的 total_tokens（真机夹具里它在 billing_usage.openai_usage）。
+	if t := wire.UsageIntAt(u, "billing_usage", "openai_usage", "total_tokens"); t > 0 {
 		return t
 	}
 	return x.CompletionTokens

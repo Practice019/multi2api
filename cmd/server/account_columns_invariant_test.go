@@ -50,6 +50,7 @@ import (
 	"workbuddy2api/internal/loomy"
 	"workbuddy2api/internal/minimax"
 	"workbuddy2api/internal/monkeycode"
+	"workbuddy2api/internal/phanthywork"
 	"workbuddy2api/internal/qoder"
 	"workbuddy2api/internal/raccoon"
 	"workbuddy2api/internal/trae"
@@ -97,6 +98,10 @@ func allUpstreams(t *testing.T) []upstreamCase {
 		{"minimax", "minimax", minimax.New(minimax.Config{})},
 		{"monkeycode", "monkeycode", monkeycode.NewProvider()},
 		{"openaicompat", "openaicompat", openaicompat.NewOpenAICompat("openaicompat", "http://127.0.0.1:1/v1")}, {"codar", "codar", codar.NewProvider()},
+		// PhanthyWork（2026-11-12 新增）：与 codar 一样是**单实例**（`{"qoder","qodercn"}`
+		// 那种"同包两实例"不适用）。工厂是 `NewProvider(Config{})` —— 本包没有零参工厂，
+		// 零值 Config 就是它自己的契约入口（构造不做网络请求）。
+		{"phanthywork", "phanthywork", phanthywork.NewProvider(phanthywork.Config{})},
 	}
 }
 
