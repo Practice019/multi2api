@@ -24,6 +24,36 @@ let lastLogSig = null;
 const serverCounts = {};
 const serverTotalAll = 0;
 const serverTotalFiltered = 0;
+// ⚠ document：抽进来的 logRowsFragment 会用 document.createElement 建行容器。
+//   给一个**最小但够拼 HTML** 的实现 —— appendChild 把子的 outerHTML 拼进父的 innerHTML，
+//   于是 renderLogs 产出的 innerHTML 与真实结构同形（断言读的就是它）。
+//   ⚠ 够用就行：本套件不测 DOM API 本身，只测渲染出来的 HTML。
+function fakeEl(tag) {
+  const el = {
+    tagName: tag, innerHTML: '', textContent: '', className: '', style: {}, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = v; },
+    getAttribute(k) { return this.attrs[k]; },
+    appendChild(c) { this.innerHTML += (c && c.__html) || ''; return c; },
+    querySelectorAll: () => [], querySelector: () => null,
+  };
+  Object.defineProperty(el, '__html', {
+    get() {
+      const a = Object.keys(el.attrs).map(k => ' ' + k + '="' + el.attrs[k] + '"').join('');
+      return '<' + tag + a + '>' + el.innerHTML + '</' + tag + '>';
+    },
+  });
+  return el;
+}
+function fakeFragment() {
+  const f = { __html: '', innerHTML: '', appendChild(c) { f.__html += (c && c.__html) || ''; f.innerHTML = f.__html; return c; },
+    querySelectorAll: () => [], querySelector: () => null };
+  return f;
+}
+const document = {
+  createElement: fakeEl, createDocumentFragment: fakeFragment,
+  createTextNode: (t) => ({ __html: String(t), textContent: String(t) }),
+  getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+};
 const els = {};
 // ⚠ querySelectorAll 同 tokps：抽进来的 logRowsFragment / logScrollEl 要用它。
 function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', style:{}, querySelector:()=>null, querySelectorAll:()=>[] }; }
@@ -183,6 +213,44 @@ function renderLogs(items) {
     }
     // 情形 B：其余情况（尾部变了 / 筛选变了 / 翻页）⇒ 一次性替换（仍比逐条 append 快）
     host.replaceChildren(logRowsFragment(shown));
+  }
+function logScrollEl() {
+    let el = $('logrows');
+    while (el && el !== document.body) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) return el;
+      el = el.parentElement;
+    }
+    return $('logrows') || document.documentElement;
+  }
+function htmlToRow(e) {
+    const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
+    // ② 数值列右对齐（.r）
+    // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
+    //    参考项目的原话"空着会被当成渲染缺失"。破折号用全角「—」与项目其它面板一致。
+    const dash = '<span class="log-none">—</span>';
+    const secs = new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false });
+    const html = `<div class="log-row${e.status >= 400 ? ' failed' : ''}" data-logseq="${esc(String(e.seq == null ? '' : e.seq))}">
+        <span class="mono log-none">${e.seq}</span>
+        <span class="log-none">${esc(secs)}</span>
+        <span class="mono log-tr" title="${esc(e.model || '')}">${esc(e.model || '—')}</span>
+        <span class="log-tr" title="${esc(e.mode || '')}">${esc(e.mode || '—')}</span>
+        <span><span class="pill ${st}">${e.status}</span></span>
+        <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
+        <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
+        <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
+        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.ttfb_ms, e.mode)}</span>
+        <span class="mono r">${e.total_ms}ms</span>
+    </div>`;
+    // 用 template 解析（比 createElement + 逐列 appendChild 短，且与旧模板逐字一致）
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html.trim();
+    return tpl.content.firstElementChild;
+  }
+function logRowsFragment(rows) {
+    const frag = document.createDocumentFragment();
+    for (const e of rows) frag.appendChild(htmlToRow(e));
+    return frag;
   }
 
 let fail = 0;

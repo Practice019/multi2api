@@ -41,6 +41,12 @@ const statusOfSrc = grabBlock('function logStatusOf(');
 const statusBarSrc = grabBlock('function renderLogStatusBar(');
 const statusHideSrc = grabBlock('function hideLogStatusBar(');
 const renderSrc = grabBlock('function renderLogs(');
+// ⚠ 2026-11-12：renderLogs 引用、抽取清单漏掉的三个依赖。
+//   判据来自 checkExtract 的同源报告（gen_tokps 先接上它，报出这三个名字 + 修法）；
+//   本文件暂未接 checkExtract，先按同一份报告补上。
+const scrollSrc = grabBlock('function logScrollEl(');
+const rowSrc = grabBlock('function htmlToRow(');
+const fragSrc = grabBlock('function logRowsFragment(');
 
 const header = `
 const fs = require('fs');
@@ -68,6 +74,36 @@ let lastLogSig = null;
 const serverCounts = {};
 const serverTotalAll = 0;
 const serverTotalFiltered = 0;
+// ⚠ document：抽进来的 logRowsFragment 会用 document.createElement 建行容器。
+//   给一个**最小但够拼 HTML** 的实现 —— appendChild 把子的 outerHTML 拼进父的 innerHTML，
+//   于是 renderLogs 产出的 innerHTML 与真实结构同形（断言读的就是它）。
+//   ⚠ 够用就行：本套件不测 DOM API 本身，只测渲染出来的 HTML。
+function fakeEl(tag) {
+  const el = {
+    tagName: tag, innerHTML: '', textContent: '', className: '', style: {}, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = v; },
+    getAttribute(k) { return this.attrs[k]; },
+    appendChild(c) { this.innerHTML += (c && c.__html) || ''; return c; },
+    querySelectorAll: () => [], querySelector: () => null,
+  };
+  Object.defineProperty(el, '__html', {
+    get() {
+      const a = Object.keys(el.attrs).map(k => ' ' + k + '="' + el.attrs[k] + '"').join('');
+      return '<' + tag + a + '>' + el.innerHTML + '</' + tag + '>';
+    },
+  });
+  return el;
+}
+function fakeFragment() {
+  const f = { __html: '', innerHTML: '', appendChild(c) { f.__html += (c && c.__html) || ''; f.innerHTML = f.__html; return c; },
+    querySelectorAll: () => [], querySelector: () => null };
+  return f;
+}
+const document = {
+  createElement: fakeEl, createDocumentFragment: fakeFragment,
+  createTextNode: (t) => ({ __html: String(t), textContent: String(t) }),
+  getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+};
 const els = {};
 // ⚠ querySelectorAll 同 tokps：抽进来的 logRowsFragment / logScrollEl 要用它。
 function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', style:{}, querySelector:()=>null, querySelectorAll:()=>[] }; }
@@ -225,6 +261,7 @@ process.exit(fail ? 1 : 0);
 `;
 
 const out = header + '\n' + normalizeSrc + '\n' + mergeSrc + '\n' + tokpsSrc + '\n' + logPhSrc + '\n'
-  + statusOfSrc + '\n' + statusBarSrc + '\n' + statusHideSrc + '\n' + renderSrc + '\n' + tail;
+  + statusOfSrc + '\n' + statusBarSrc + '\n' + statusHideSrc + '\n' + renderSrc + '\n'
+  + scrollSrc + '\n' + rowSrc + '\n' + fragSrc + '\n' + tail;
 fs.writeFileSync('log_order_gen.js', out);
 console.log('生成: log_order_gen.js (' + out.length + ' 字节)');

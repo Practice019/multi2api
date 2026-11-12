@@ -77,6 +77,40 @@ let lastLogSig = null;
 const serverCounts = {};
 const serverTotalAll = 0;
 const serverTotalFiltered = 0;
+// ⚠ document：抽进来的 logRowsFragment 会用 document.createElement 建行容器。
+//   给一个**最小但够拼 HTML** 的实现 —— appendChild 把子的 outerHTML 拼进父的 innerHTML，
+//   于是 renderLogs 产出的 innerHTML 与真实结构同形（断言读的就是它）。
+//   ⚠ 够用就行：本套件不测 DOM API 本身，只测渲染出来的 HTML。
+function fakeEl(tag) {
+  const el = {
+    tagName: tag, innerHTML: '', textContent: '', className: '', style: {}, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = v; },
+    getAttribute(k) { return this.attrs[k]; },
+    appendChild(c) { this.innerHTML += (c && c.__html) || ''; return c; },
+    querySelectorAll: () => [], querySelector: () => null,
+  };
+  Object.defineProperty(el, '__html', {
+    get() {
+      const a = Object.keys(el.attrs).map(k => ' ' + k + '="' + el.attrs[k] + '"').join('');
+      return '<' + tag + a + '>' + el.innerHTML + '</' + tag + '>';
+    },
+  });
+  return el;
+}
+function fakeFragment() {
+  const kids = [];
+  const f = { __html: '', innerHTML: '',
+    // ⚠ firstElementChild：logRowsFragment 取分片的第一个子元素来定行容器。
+    get firstElementChild() { return kids[0] || null; },
+    appendChild(c) { kids.push(c); f.__html += (c && c.__html) || ''; f.innerHTML = f.__html; return c; },
+    querySelectorAll: () => [], querySelector: () => null };
+  return f;
+}
+const document = {
+  createElement: fakeEl, createDocumentFragment: fakeFragment,
+  createTextNode: (t) => ({ __html: String(t), textContent: String(t) }),
+  getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+};
 const els = {};
 const $ = id => els[id] || (els[id] = {
   id, innerHTML: '', textContent: '', style: {},
