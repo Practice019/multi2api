@@ -29,9 +29,29 @@ const APP_JS = path.join(REPO, 'internal/server/ui/app.js');
 //   而那些规则住在 app.css 里（T-409 拆包时与 JS 一起外置的）。
 const APP_CSS = path.join(REPO, 'internal/server/ui/app.css');
 
-const html = fs.readFileSync(PAGE, 'utf8');
-const js = fs.readFileSync(APP_JS, 'utf8');
-const css = fs.readFileSync(APP_CSS, 'utf8');
+// readOr：读文件；**只在 WB2API_REPO 被显式设置时**容忍缺文件。
+//
+// # 为什么要容忍（这不是「掩盖事故」）
+//
+// 变异自检的工作方式是：把**要改的那一个文件**写进一次性副本（例如只写
+// `internal/server/webui.html`），再 `WB2API_REPO=副本` 跑同一个工具，
+// 断言「副本上必须红」。副本里没有 ui/app.js 是**正常的**（不是事故）。
+//
+// ⚠ 但真实仓库里缺文件**必须继续炸**：否则 app.js 被改名/搬走这类事故
+//   会被静默吞成空串，而所有守卫会一起「变绿」。所以这里按 WB2API_REPO 分档 ——
+//   与本目录其它工具「用 WB2API_REPO 指向副本做变异」的约定同源。
+const readOr = (p) => {
+  try {
+    return fs.readFileSync(p, 'utf8');
+  } catch (e) {
+    if (process.env.WB2API_REPO) return '';
+    throw e;
+  }
+};
+
+const html = readOr(PAGE);
+const js = readOr(APP_JS);
+const css = readOr(APP_CSS);
 // FRONTEND = 拆包前的扫描面（JS/CSS 当初就在 html 里，位置不同而已）。
 const FRONTEND = html + '\n' + js + '\n' + css;
 

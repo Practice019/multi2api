@@ -35,7 +35,14 @@ const REPO = (process.env.WB2API_REPO || path.resolve(__dirname, '..', '..'));
 const WEBUI = path.join(REPO, 'internal/server/webui.html');
 const ADMIN = path.join(REPO, 'internal/admin/admin.go');
 
-const rawHtml = fs.readFileSync(WEBUI, 'utf8');
+// ⚠⚠ 输入是**前端全部源码**（webui.html + ui/app.js + ui/app.css），不是只有 webui.html。
+//
+// T-409 拆包把主 script 外置到 ui/app.js ⇒ `quotaCellHTML`、账号行模板、
+// 以及下面 M1/M2/M3 三个变异自测要篡改的那些锚点，**全都在 app.js 里**。
+// 只读 html 会让判据报「找不到 quotaCellHTML」，也会让变异**静默失效**
+//（`String.replace` 找不到锚点会返回原串 ⇒ 「注入了缺陷」这句话是假的，
+//   而自检照样按「期望变红」去比 —— 本文件 300 行附近对此有专门的教训注释）。
+const rawHtml = require('./lib_frontend_source').FRONTEND;
 const adminSrc = fs.readFileSync(ADMIN, 'utf8');
 
 // 归一化 + 剥注释 —— 与 verify_t3_t4_static.js 完全同一套。
