@@ -146,7 +146,7 @@ func noteCacheMiss() {
 	}
 	cacheMiss.mu.Unlock()
 	if n > 0 {
-		logx.Debugf("loomy", "有 %d 个账号的额度只能靠积分网关查（本机缓存只覆盖 1 个号）—— 这是设计内正常情况；"+
+		log.Printf("loomy 有 %d 个账号的额度只能靠积分网关查（本机缓存只覆盖 1 个号）—— 这是设计内正常情况；"+
 			"若紧接着还有「额度查询失败」的日志，那才是要看的", n)
 	}
 }
