@@ -15,6 +15,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +265,146 @@ func TestInviteCodeFailureIsolatedToThatRow(t *testing.T) {
 	// 两个账号都试过（护栏③：失败不回滚、不重试 ⇒ 各打一次）。
 	if got := atomicLoad(&fake.referralCodeCalls); got != 2 {
 		t.Errorf("取码端点打了 %d 次，want 2（失败不回滚、不重试）", got)
+	}
+}
+
+// ── 前端渲染契约（2026-11-12）───────────────────────────────────────────
+//
+// 症状：面板打开了、也一行一账号，但**只有默认列** —— 因为我们的 `slots/invite_code` 是自定义字段，
+// 而列显隐由 `colSet` 按**字段存在与否**算（app.js:5991-5994，不认上游名）。
+// 修法：后端**新增**一组前端认的字段（codes / my_code / my_link / 三个 *_known / bind_supported）。
+
+// TestInvitePanelMatchesFrontendContract 面板行的字段集必须与前端契约逐字对上。
+//
+// 判据（照 colSet：`a[f] !== undefined && a[f] !== null` ⇒ 有该字段才画那一列）：
+//
+//	codes / my_code  ⇒ **必须给**（否则「我生成的码」「我的邀请码」两列不出现）
+//	activated / invited / bind_page / balance / wechat_bound ⇒ **一个都不能给**
+//	  （给了就长出「激活状态」「绑定状态」「微信」列，或让绑定位弹出输入框 ——
+//	    那些对本上游要么是编事实、要么点了必然失败）
+func TestInvitePanelMatchesFrontendContract(t *testing.T) {
+	p, _, _ := inviteFixture(t, 2, nil)
+	_, body := inviteFetch(t, p, "")
+	rowsRaw, _ := body["accounts"].([]any)
+	if len(rowsRaw) != 2 {
+		t.Fatalf("行数 = %d，want 2", len(rowsRaw))
+	}
+	for i, e := range rowsRaw {
+		row, _ := e.(map[string]any)
+		inviteRowContract(t, row, fmt.Sprintf("假上游第 %d 行", i))
+	}
+}
+
+// inviteRowContract 面板行的**前端契约**断言（假上游与真机共用同一份 —— 口径只有一个）。
+//
+// 判据（照 colSet：`a[f] !== undefined && a[f] !== null` ⇒ 有该字段才画那一列）：
+//
+//	codes / my_code ⇒ **必须给**（否则「我生成的码」「我的邀请码」两列不出现）
+//	activated / invited / bind_page / balance / wechat_bound / applied ⇒ **一个都不能给**
+//	  （给了就长出「激活状态」「绑定状态」「微信」列，或让绑定位弹出死控件）
+//	四个布尔必须**显式 false**（三态画 —、绑定框不画）
+//
+// ⚠ 抽成函数是为了**真机自验走同一份断言**：两次各写一遍必然分叉，而分叉的断言 = 没有断言。
+func inviteRowContract(t *testing.T, row map[string]any, label string) {
+	t.Helper()
+	codes, ok := row["codes"].([]any)
+	if !ok || len(codes) == 0 {
+		t.Errorf("%s 缺 codes（「我生成的码」列靠它出现）: %#v", label, row["codes"])
+	} else {
+		for j, ce := range codes {
+			c, _ := ce.(map[string]any)
+			if s, _ := c["code"].(string); s == "" {
+				t.Errorf("%s 第 %d 项缺 code", label, j)
+			}
+			if _, has := c["usedCount"]; has {
+				t.Errorf("%s 第 %d 项编了 usedCount（平台没这个量）", label, j)
+			}
+			if _, has := c["maxUses"]; has {
+				t.Errorf("%s 第 %d 项编了 maxUses（平台没这个量）", label, j)
+			}
+		}
+	}
+	if s, _ := row["my_code"].(string); s == "" {
+		t.Errorf("%s 缺 my_code（「我的邀请码」列靠它出现）", label)
+	}
+	if s, _ := row["my_link"].(string); s == "" {
+		t.Errorf("%s 缺 my_link（「邀请链接」靠它渲染）", label)
+	}
+	for _, f := range []string{"balance_known", "invited_known", "wechat_bound_known", "bind_supported"} {
+		v, has := row[f]
+		if !has {
+			t.Errorf("%s 缺 %q（三态/假按钮门要靠它）", label, f)
+			continue
+		}
+		if b, isBool := v.(bool); !isBool || b {
+			t.Errorf("%s 的 %s = %v，want false", label, f, v)
+		}
+	}
+	for _, f := range []string{"activated", "invited", "bind_page", "balance", "wechat_bound", "applied"} {
+		if v, has := row[f]; has {
+			t.Errorf("%s 不该给 %q（= %v）—— 会让前端长出多余的列，或让绑定位弹出死控件", label, f, v)
+		}
+	}
+}
+
+// TestInvitePanelColumnsAreFieldDriven ★ 把前端**规则本身**读出来套在我们的行上。
+//
+// ⚠ 读文件而不是"我背下这条规则"：字段改名（my_code → myCode）时这条必须红 ——
+//
+//	那正是"后端字段与前端契约漂移"的唯一可判据处。路径相对：测试 cwd = 本包目录。
+func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "server", "ui", "app.js"))
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	js := string(src)
+	m := regexp.MustCompile(`(?s)function colSet\(accts\).*?return \{([^}]*)\}`).FindStringSubmatch(js)
+	if m == nil {
+		t.Fatal("没在 app.js 里找到 colSet 的字段表 —— 前端重构了？这条守卫要跟着改（别删）")
+	}
+	pairs := regexp.MustCompile(`(\w+):\s*has\('([^']+)'\)`).FindAllStringSubmatch(m[1], -1)
+	if len(pairs) == 0 {
+		t.Fatalf("colSet 字段表解析为空: %q", m[1])
+	}
+
+	p, _, _ := inviteFixture(t, 1, nil)
+	_, body := inviteFetch(t, p, "")
+	rowsRaw, _ := body["accounts"].([]any)
+	if len(rowsRaw) != 1 {
+		t.Fatalf("行数 = %d", len(rowsRaw))
+	}
+	row, _ := rowsRaw[0].(map[string]any)
+	hasField := func(f string) bool {
+		v, ok := row[f]
+		return ok && v != nil
+	}
+	cols := map[string]bool{}
+	for _, pr := range pairs {
+		cols[pr[1]] = hasField(pr[2])
+	}
+	t.Logf("colSet 字段表=%v ⇒ 我们的行算出 cols=%v", pairs, cols)
+	if !cols["codes"] {
+		t.Error("「我生成的码」列没出现 —— 后端没给前端认的 codes")
+	}
+	// ⚠ 键是 **JS 侧**的（colSet 的 map 键 `myCode`），不是 JSON 字段名（`my_code`）——
+	//   我第一版就写错了这一处，被这条断言当场抓住（正向断言用错键 = 永远红，反而好；
+	//   反向断言用错键才是危险的「永远绿」）。
+	if !cols["myCode"] {
+		t.Error("「我的邀请码」列没出现 —— 后端没给 my_code")
+	}
+	for _, f := range []string{"activated", "invited", "wechat_bound"} {
+		if cols[f] {
+			t.Errorf("列 %q 不该出现（后端给了它 ⇒ 会画一列编出来的状态）", f)
+		}
+	}
+
+	if !strings.Contains(js, "a.bind_supported !== false") {
+		t.Error("app.js 里没有 `a.bind_supported !== false` 这道门 ⇒ 我们的行会弹出点了必然失败的绑定框")
+	}
+	act, _ := row["activated"].(bool)
+	bs, hasBS := row["bind_supported"].(bool)
+	bindShown := cols["codes"] && !act && (!hasBS || bs)
+	if bindShown {
+		t.Error("按 app.js 的判据，我们的行**会**出现绑定输入框 —— 平台侧事后绑定 409，那是死按钮")
 	}
 }

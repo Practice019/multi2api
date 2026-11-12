@@ -255,6 +255,43 @@ type accountInviteView struct {
 	// FromCache 这一行是当日缓存（护栏②生效的证据：没有再打上游）。
 	FromCache bool   `json:"from_cache,omitempty"`
 	Error     string `json:"error,omitempty"`
+
+	// ── 前端渲染契约字段（2026-11-12 加）────────────────────────────────
+	//
+	// ⚠ 前端（internal/server/ui/app.js）的列表头**完全由字段存在与否驱动**
+	//   （`colSet`：`a[f] !== undefined && a[f] !== null` ⇒ 有该字段才画那一列），
+	//   **不认上游名**（有守卫 TestWebUIHasNoUpstreamNameBranch 禁止分叉）。
+	//   所以"让某几列出现/不出现"的唯一手段就是**给不给这些字段** —— 下面每一个都注明了：
+	//   给了会长出哪一列、为什么给这个值。
+	//
+	// 「我生成的码」列：存在 ⇒ 出现。每项只给 `code`/`status`，
+	// ⚠ **不编** `usedCount`/`maxUses`（平台没给，编了会渲染成"用过 x/y"的假数据）。
+	Codes []inviteCodeView `json:"codes,omitempty"`
+	// 「我的邀请码」列：存在 ⇒ 出现（取第一个槽：给人念的那套 + 分享链接）。
+	MyCode string `json:"my_code,omitempty"`
+	// 「邀请链接」跟在 my_code 后面渲染。
+	MyLink string `json:"my_link,omitempty"`
+	// BalanceKnown 三态：false ⇒ 该格画 `—`（**不是** 0）。
+	// ⚠ 本上游我们**没有**取余额口径（额度在另两块：summary 的 credits / 四窗口），
+	//   所以这里必须诚实地说"没查到"，而不是填 0 让它画一个假的余额。
+	BalanceKnown bool `json:"balance_known"`
+	// InvitedKnown 同上：本账号的"是否被别人邀请"我们读不到（平台不给只读字段）。
+	// ⚠ 只给 `invited_known`、**不给 `invited`** —— 后者会让「绑定状态」列出现。
+	InvitedKnown bool `json:"invited_known"`
+	// WechatBoundKnown 同上（本上游没有微信绑定这一套）。
+	// ⚠ 只给 `*_known`、不给 `wechat_bound` —— 后者会让「微信」列出现。
+	WechatBoundKnown bool `json:"wechat_bound_known"`
+	// BindSupported **必须为 false**：本上游"事后绑定别人的码"实测 409
+	//   `existing_user_ineligible`（不可补绑）。前端据此**不画**绑定输入框 ——
+	//   否则界面上会出现一个点了必然失败的控件（本仓明确的"假按钮"反模式）。
+	//   前端判据是 `a.bind_supported !== false`（老上游没有这个字段 ⇒ 行为不变）。
+	BindSupported bool `json:"bind_supported"`
+}
+
+// inviteCodeView 前端契约里的一个码（只要这两项 —— 见 Codes 的说明）。
+type inviteCodeView struct {
+	Code   string `json:"code"`
+	Status string `json:"status"`
 }
 
 // inviteRow 一个账号的当日行缓存。
@@ -289,7 +326,7 @@ func ReferralCodeIdempotencyKey(installationID, day string) string {
 //	3 eligible_to_invite=false ⇒ **不打写接口**，给可读原因（护栏④）
 //	4 POST /referrals/code（写；幂等键按 UTC+8 当日）—— 失败只标这一行（护栏③，不回滚不重试）
 func (p *Provider) inviteViewFor(ctx context.Context, a *Auth, refresh bool) (accountInviteView, bool) {
-	v := accountInviteView{UID: a.UID(), Nickname: maskInviteDisplay(a.Nickname())}
+	v := newInviteRow(a.UID(), maskInviteDisplay(a.Nickname()))
 	instID, ierr := a.installationID()
 	if ierr != nil || strings.TrimSpace(instID) == "" {
 		v.Error = "这个账号拿不到设备安装 id（installation id）；取邀请码要用它拼幂等键，所以没有调用上游"
@@ -352,6 +389,7 @@ func (p *Provider) inviteViewFor(ctx context.Context, a *Auth, refresh bool) (ac
 	}
 	v.OK = true
 	v.Slots = slots
+	applyInviteCodes(&v)
 	p.storeInviteRow(a.UID(), today, v)
 	return v, true
 }
@@ -370,6 +408,44 @@ func applyReferralMe(v *accountInviteView, me referralsMeResponse) {
 	v.TotalLimit = r.TotalLimit
 	v.RemainingSlots = r.RemainingSlots
 	v.FetchedAt = time.Now()
+}
+
+// newInviteRow 造一行，并把**前端契约里恒定的那四个布尔**一次性写死。
+//
+// ⚠ 四个都放在这里而不是各分支各写一遍：漏写一个的后果是静默的 ——
+//
+//	例如漏 `bind_supported:false` ⇒ 界面上立刻多出一个点了必然失败的「绑定」框。
+func newInviteRow(uid, nickname string) accountInviteView {
+	return accountInviteView{
+		UID: uid, Nickname: nickname,
+		BalanceKnown:     false, // 没取余额口径 ⇒ 画 —
+		InvitedKnown:     false, // 读不到"被别人邀请"的状态 ⇒ 画 —
+		WechatBoundKnown: false, // 本上游没有微信绑定 ⇒ 画 —
+		BindSupported:    false, // 事后绑定 409 ⇒ **不画**绑定框
+	}
+}
+
+// applyInviteCodes 把 5 个槽映射成前端契约字段（codes / my_code / my_link）。
+//
+// ⚠ 只搬我们**真的知道**的：`code`（给人念的 `invite_code`）与 `status`（`active`）。
+//
+//	平台的槽位没有"用过几次/最多几次"这两个量（报告 §1.2 的五槽表就只有 code/invite_code/share_url）——
+//	编一个 `usedCount:0/maxUses:1` 会让前端渲染出"用过 0/1"，那是**我们编的事实**。
+//	⚠ 所以前端那条 tooltip 也改成"字段缺就不显示那半句"（见 app.js 的同日改动）。
+func applyInviteCodes(v *accountInviteView) {
+	if v == nil || len(v.Slots) == 0 {
+		return
+	}
+	v.Codes = make([]inviteCodeView, 0, len(v.Slots))
+	for _, s := range v.Slots {
+		if strings.TrimSpace(s.InviteCode) == "" {
+			continue
+		}
+		v.Codes = append(v.Codes, inviteCodeView{Code: s.InviteCode, Status: "active"})
+	}
+	// 「我的邀请码」取第一个槽（用户在界面上要"我这个账号的码"，第一条就是）。
+	v.MyCode = v.Slots[0].InviteCode
+	v.MyLink = v.Slots[0].ShareURL
 }
 
 // inviteCached 当日缓存命中（refresh=true 时不命中 —— 允许用户手动重读**只读**部分）。

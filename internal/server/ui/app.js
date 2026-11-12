@@ -6270,7 +6270,13 @@ window.addEventListener('message', (e) => {
             // 状态来自后端透传的上游字段：exhausted = 已被别人绑掉（maxUses=1 的常态）。
             const used = (c.status === 'exhausted') ||
               (Number(c.maxUses) > 0 && Number(c.usedCount) >= Number(c.maxUses));
-            const tip = `用过 ${c.usedCount}/${c.maxUses}` + (c.status ? ` · ${c.status}` : '');
+            // ⚠ 字段缺就**不显示那一半**（2026-11-12）：有的上游只给 code/status，
+            //   没有「用过几次/上限几次」这两个量 —— 原写法会印出 `用过 undefined/undefined`，
+            //   那是**界面在编一个用量事实**。
+            const usage = (c.usedCount !== undefined && c.usedCount !== null &&
+              c.maxUses !== undefined && c.maxUses !== null)
+              ? `用过 ${c.usedCount}/${c.maxUses}` : '';
+            const tip = [usage, c.status ? String(c.status) : ''].filter(Boolean).join(' · ');
             return `<span class="pill ${used ? 'dim' : 'ok'} mono" title="${esc(tip)}">${esc(c.code)}</span>`;
           }).join(' ')
         : '<span class="dim">—</span>';
@@ -6293,7 +6299,18 @@ window.addEventListener('message', (e) => {
       //   · 已绑过（activated / invited 为真）⇒ 一条破折号，绝不画点了必然失败的按钮
       const ownCodes = (a.codes || []).map(c => c.code).join(',');
       let ops = '<span class="dim" style="font-size:11px">—</span>';
-      if (cols.codes && a.activated !== true && Array.isArray(a.codes)) {
+      // ⚠ `bind_supported === false` = 这个上游**不支持**面板内绑定（平台侧会被拒），
+      //   那就别画点了必然失败的控件；老上游没有这个字段 ⇒ `!== false` 为真 ⇒ 行为完全不变。
+      //
+      // ⚠⚠ **别顺手把这道门删掉**（2026-11-12 讨论过）：它**不能**用 `activated` 表达 ——
+      //   本分支的条件是 `codes && activated !== true`，而"我们并不知道绑定状态"的上游（只给码那种）
+      //   两条路都是错的：
+      //     · 填 `activated: true` ⇒ colSet 认定本页有该字段 ⇒ **长出「激活状态」列**，每行显示「已绑定」
+      //       —— 那是**编出来的事实**（我们并不知道该账号有没有被邀请过）；
+      //     · 不填             ⇒ 本分支命中 ⇒ 每行一个输入框 + 「绑定」按钮，点了**必然失败**（平台拒）。
+      //   ⇒ 用"上游自己声明不支持"这个**字段门**表达：既不编事实、也不画死按钮。
+      //   判据仍然是**字段**（不是上游名）—— TestWebUIHasNoUpstreamNameBranch 守着这条。
+      if (cols.codes && a.activated !== true && a.bind_supported !== false && Array.isArray(a.codes)) {
         ops = `<input data-linvite-code="${esc(a.uid)}" data-own="${esc(ownCodes)}" maxlength="16" placeholder="6 位邀请码"
              value="${esc(keep[a.uid] || '')}"
              style="width:110px;padding:2px 6px;font-size:12px;text-transform:uppercase"
@@ -6356,7 +6373,20 @@ window.addEventListener('message', (e) => {
       }).join('');
       // ⚠ 这一行是 head 模板的起始（含反引号）—— 任何"替换那一行"的编辑都必须把它一起带上（我踩过两次 ✗）。
       const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
-      <span class="dim" style="font-size:11px">表格按字段显示：「我生成的码」是发给**别人**用的（每码一次）；需要人工验证的上游，点「绑定」会在弹窗里完成；已绑定的账号可点「查看」打开邀请页；未绑微信的账号，邀请奖励（2000 点）不会入账 —— 点「扫码绑定」用微信扫；某一行出现「部分数据缺失」表示那次查询有步骤超时，码与可操作项仍然有效；余额后的「部分」表示只取到部分额度桶。</span>
+      // 说明文字**按字段/列条件拼**（2026-11-12）：原文是写死的一长句，里面好几处只对
+      // loomy/codar 成立 —— 一个"只有码"的上游读到的全是与它无关的话（微信、人工验证、绑定别人的码）。
+      // ⚠ 判据一律"字段/列存在"，**不是上游名**（TestWebUIHasNoUpstreamNameBranch）。
+      const hintHas = (f) => accts.some(a => a && a[f] !== undefined && a[f] !== null);
+      const hints = ['表格按字段显示'];
+      if (cols.codes) hints.push('「我生成的码」是发给**别人**用的（每码一次）');
+      if (cols.myCode) hints.push('「我的邀请码」是这个账号自己的码，旁边的「邀请链接」可直接分享');
+      if (hintHas('bind_page')) hints.push('需要人工验证的上游，点「绑定」会在弹窗里完成；已绑定的账号可点「查看」打开邀请页');
+      if (cols.wechat) hints.push('未绑微信的账号，邀请奖励（2000 点）不会入账 —— 点「扫码绑定」用微信扫');
+      if (hintHas('bind_supported')) hints.push('本上游不支持在面板里绑定别人的码（平台侧事后绑定会被拒）');
+      if (hintHas('warning')) hints.push('某一行出现「部分数据缺失」表示那次查询有步骤超时，码与可操作项仍然有效');
+      if (hintHas('balance_partial')) hints.push('余额后的「部分」表示只取到部分额度桶');
+      const hintText = hints.join('；') + '。';
+      <span class="dim" style="font-size:11px">${hintText}</span>
       <span data-lpager="invite" data-ltotal="${esc(String(totalN))}"></span>
       <span class="dim" style="font-size:12px" id="linv-sum-${esc(providerId)}"></span>
       <span class="dim" style="font-size:11px" id="linv-upd-${esc(providerId)}"></span>
