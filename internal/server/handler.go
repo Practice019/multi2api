@@ -2154,6 +2154,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	ctx := gateway.WithClientIP(r.Context(), gateway.ExtractClientIP(r))
 
 	tried := map[string]bool{}
+	// accountsTried 本次请求**一共真正试过几个账号**（跨「换上游」累计）。
+	//
+	// # 为什么必须单独计数，不能复用 `attempts`
+	//
+	// `attempts` 的语义是「当前这一段循环到第几次」，而 `goto retryUpstream`
+	// （换上游）会**重启 for 循环** ⇒ i 归零 ⇒ attempts 从 1 重新数。
+	// 于是它回答不了出口文案真正要回答的那个问题：「这次一共试了几个号」。
+	//（换上游后 `tried` 会被清空，所以 len(tried) 同样不能累计。）
+	accountsTried := 0
 	var lastErr error
 	// lastKind 最近一次上游错误的分类：出口要按它区分"上游抖"与"池子真空"。
 	var lastKind gateway.ErrorKind = gateway.ErrKindNone
@@ -2430,6 +2439,7 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 		}
 		st.uid = acct.UID
 		tried[acct.UID] = true
+		accountsTried++
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。
 		if !h.cfg.Pool.Acquire(acct.UID) {
@@ -3041,7 +3051,24 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 	//	  重试无用，得去控制台处理。
 	msg := "all accounts unavailable (cooling/disabled)"
 	if lastKind == gateway.ErrKindServer {
-		msg = "上游服务异常（已自动轮换多个账号重试，仍失败）"
+		// ⚠ 文案必须报**真实**次数 —— 原句是写死的固定串，且它只由 `lastKind` 决定，
+		//   与 `attempts` / `accountsTried` 毫无关系。
+		//
+		//   后果：首个号就吃到 5xx、此后**选不出号**（全在熔断/冷却里）时，
+		//   实际只试了 1 个号，文案却声称「已自动轮换多个账号重试」⇒
+		//   用户无法验证「到底换没换」，只能凭印象判断。
+		//   2026-11-12 用户实测报的正是这个（「5 次重试全错，不是换」），
+		//   而日志里没有任何次数可以拿来对照 ⇒ 双方都只能猜。
+		//
+		//   ⇒ 报出累计账号数：**这一个数字就能回答「有没有轮换」**（=1 表示没换）。
+		msg = fmt.Sprintf("上游服务异常（已尝试 %d 个账号，仍失败）", accountsTried)
+		// ⚠ 再把「上游级熔断」单独点出来。它一旦跳闸，池子**不再兜底**
+		//   （见 pool 的 provider_breaker 注释与 TestProviderTrippedMakesPickFailFast），
+		//   后续请求会在选号阶段直接失败 —— 不点明的话，读者会问
+		//   「池子里还有那么多号，怎么一个都试不出来」。
+		if _, tripped := h.cfg.Pool.ProviderTripped(reqProvider); tripped {
+			msg += "；该上游已触发上游级熔断，后续请求不再兜底"
+		}
 	}
 	// 把"为什么一个都不可用"写进错误里（真实困惑：上游 402 触发冷却后，旧文案
 	// 只说 all accounts unavailable —— 用户据此怀疑"登录失败了"，而真相是
@@ -3864,6 +3891,7 @@ func poolUnavailableHintOf(list []pool.Status) string {
 	}
 	if len(list) > 3 {
 		nDis, nCool, nBusy, maxFlight := 0, 0, 0, 0
+		nFails, maxFails := 0, 0
 		for _, st := range list {
 			switch {
 			case st.Disabled:
@@ -3882,6 +3910,27 @@ func poolUnavailableHintOf(list []pool.Status) string {
 			if st.InFlight > maxFlight {
 				maxFlight = st.InFlight
 			}
+			// ⚠⚠ 再补**窗口内失败**这一维（2026-11-12 加，与上面「在途」同一课）。
+			//
+			//   上游 5xx 走的处罚是 `NoteError` ⇒ **熔断线**（连续 N 次，默认 3），
+			//   而不是禁用也不是软冷却。于是"刚被这一轮请求打过 5xx"的号，
+			//   在熔断触发**之前**既不在「禁用」也不在「冷却」里 ——
+			//   提示读起来就像"什么都没发生"。
+			//
+			//   实测语境（2026-11-12 用户报的 502）：一次请求轮换了 5 个账号、
+			//   每个各失败 1 次 ⇒ 提示是「0 冷却」⇒ 用户据此判断
+			//   「它没有惩罚任何账号、也没自动禁用」，而真相是
+			//   「每个号离熔断阈值还差 2 次」。
+			//   ⇒ 把这一维也报出来，"离熔断还差几次"就成了可读的事实。
+			//
+			//   BreakerFails 是 Status **早已暴露**的字段（`breaker_fails`，
+			//   管理台表格里就有这一列），只是这句提示一直没数它。
+			if st.BreakerFails > 0 {
+				nFails++
+			}
+			if st.BreakerFails > maxFails {
+				maxFails = st.BreakerFails
+			}
 		}
 		// ⚠⚠ **为什么必须把"在途"报出来**（2026-10-18 实测踩到）：
 		//   用户看到的 503 原文是 "44 个账号：**0 禁用、0 冷却**" ——
@@ -3890,8 +3939,8 @@ func poolUnavailableHintOf(list []pool.Status) string {
 		//   而工具循环内再按 uid 取号时**不换号**（见 chattool_send.go:42 的注释）
 		//   ⇒ 同一账号并发达到上限时，那条路径**必失败** ⇒ 503。
 		//   ⇒ 报错必须给出**真正的那一维**，否则排障只能从零猜（这次就猜了一轮）。
-		return fmt.Sprintf("%d 个账号：%d 禁用、%d 冷却、%d 个在途未结束（最大 %d）",
-			len(list), nDis, nCool, nBusy, maxFlight)
+		return fmt.Sprintf("%d 个账号：%d 禁用、%d 冷却、%d 个在途未结束（最大 %d）、%d 个已有窗口内失败（最多 %d 次，连续达阈值即熔断）",
+			len(list), nDis, nCool, nBusy, maxFlight, nFails, maxFails)
 	}
 	parts := make([]string, 0, len(list))
 	for _, st := range list {

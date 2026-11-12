@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -159,6 +160,15 @@ func TestUpstream5xxReturns502Not503(t *testing.T) {
 	if got := pv.calls.Load(); got <= 3 {
 		t.Errorf("只换了 %d 次号（want >3，MaxRotate+serverRetryExtra）—— server 类错误的延长重试没生效", got)
 	}
+	// ⚠ 文案里报的次数必须**等于实际换号次数**（2026-11-12 加）。
+	//
+	//   原句是写死的「已自动轮换多个账号重试」：它只由 lastKind 决定，与真实次数无关 ⇒
+	//   只试了 1 个号时也会声称「已轮换多个账号」，用户无法验证「到底换没换」，
+	//   只能凭印象判断（2026-11-12 用户实测报的就是这句）。
+	//   这条断言把**文案**与**事实**钉在一起：只改文案不改计数（或反之）都会红。
+	if want := fmt.Sprintf("已尝试 %d 个账号", pv.calls.Load()); !strings.Contains(body, want) {
+		t.Errorf("文案必须报出真实换号次数（want 含 %q）: %s", want, body)
+	}
 }
 
 // TestUpstream5xxBurstThenRecover 前三次 502、第四次成功 → 请求必须成功
@@ -247,5 +257,9 @@ func TestUpstream5xxAllAccountsTrippedStill502(t *testing.T) {
 	}
 	if got := pv.calls.Load(); got != 2 {
 		t.Errorf("两个号各试一次（第 3 轮无号可选）: calls=%d", got)
+	}
+	// 两个号各试一次 ⇒ 文案必须说「已尝试 2 个账号」（不能用「多个」糊过去）。
+	if !strings.Contains(body, "已尝试 2 个账号") {
+		t.Errorf("两个号各试一次，文案应报 2 个: %s", body)
 	}
 }
