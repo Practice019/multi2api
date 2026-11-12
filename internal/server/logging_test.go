@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
-	"workbuddy2api/internal/logx"
 )
 
 // captureStdout 重定向 os.Stdout 并捕获 fn 期间的全部输出。
@@ -40,11 +39,7 @@ func withChatLog(t *testing.T) {
 	t.Helper()
 	old := chatLogEnabled
 	chatLogEnabled = true
-	oldLvl := logx.SetLevel(logx.LevelDebug)
-	t.Cleanup(func() {
-		chatLogEnabled = old
-		logx.SetLevel(oldLvl)
-	})
+	t.Cleanup(func() { chatLogEnabled = old })
 }
 
 func TestChatStatsReaderTokensFromUsage(t *testing.T) {

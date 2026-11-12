@@ -531,11 +531,8 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 	if len(model) > 11 {
 		model = model[:11]
 	}
-	// ⚠ 逐条流水只在 debug 打：控制台是给人看的，他只需要上面的汇总行。
-	//   要看每一笔（排障）用 -log-level debug。
-	if !logx.Enabled(logx.LevelDebug) {
-		return
-	}
+	// ⚠ 逐条请求行**照旧打**（2026-11-12 用户明确要求）：
+	//   汇总是"另外一条"，不是"替代它" —— 人既要看"什么在发生"，也要看"总体怎么样"。
 	tokField := "-"
 	tokpsField := "-"
 	if toks >= 0 {

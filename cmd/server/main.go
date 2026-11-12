@@ -69,6 +69,7 @@ func main() {
 	// ⚠ log.SetFlags(0) 必须一起做：否则 stdlib 会自带 `2026/11/12 12:05:15 ` 前缀，
 	//   与 logx 的 HH:MM:SS 叠成两段时间。
 	// ⚠ 启动窗口：这一段的 INFO 细节默认不糊屏（实测一次启动 70+ 行配置倾倒）。
+	//   ⚠ 逐条请求行不受影响：它直接写 stdout，不经 logx 的这条过滤。
 	//   含错误关键词的行照常可见；结束时用一条摘要收尾（见下方 EndBoot）。
 	logx.BeginBoot(60 * time.Second)
 	log.SetFlags(0)
@@ -141,7 +142,7 @@ func main() {
 
 	p := pool.New(cfg.StateFile)
 
-	// 控制台汇总行（人看的那一层）：每 3 分钟一条"关键数字"，逐条流水降到 DEBUG。
+	// 控制台汇总行：每 3 分钟一条"关键数字"（逐条请求行照旧打，两者并存）。
 	// 见 internal/logx/stats.go 的注释（为什么控制台不该是流水账）。
 	go logx.StatsLoop(*statsEvery, func() logx.PoolCounts {
 		total, healthy, cooling, disabled, _ := p.CountsDetailed()
