@@ -297,6 +297,14 @@ const PROBES = [
   // 可视映射与标签的收集口径。纯 vm + DOM 桩 ⇒ 静态段。
   'verify_channels_personal_mode.js',
   'verify_groups_panel.js',
+  // 上游分组那一排按钮的**渲染**门禁：能力位有 ≠ 按钮画出来了
+  //（hasCap / providerInfo / 模板串三处，任一处错都出不来）。
+  //
+  // ⚠ 2026-11-12 注册：它此前是**孤儿**（没进这个列表），同时读的是
+  //   `webui.html`（而实现早已搬到 `ui/app.js`）⇒ 一直静默报红没人知道。
+  //   修正读取路径后注册进来，并补了「探测已禁用」新按钮的断言（含位置与 title 语义）。
+  // 纯源码 + new Function 注入 ⇒ 静态段。
+  'quota_group_button_probe.js',
   // 「全部签到」分级布局的**真前端 e2e**（本轮新增）。
   //
   // ⚠ 它**自己起一个隔离实例**（临时目录 + 空闲端口 7871，可用 E2E_PORT

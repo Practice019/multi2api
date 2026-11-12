@@ -1900,6 +1900,25 @@
         + `（不含其它上游的账号）">刷新本上游额度</button>`
       : '';
 
+    // 「探测已禁用」：只把该上游**已禁用**的号问一遍额度，探测证明可用就**解除禁用**。
+    //
+    // # 为什么与「刷新本上游额度」分成两个按钮（用户 2026-11-12 要求）
+    //
+    // 用户原话：「刷新这个上游的全部额度……但是如果说我想把禁用的账号去探测一下，
+    // 那我这个其实会有很多已经正常的账号也探测，那就效率会变低，所以我需要再加一个按钮。」
+    //
+    // 两者的差别不只是**范围**，还有**动作**：
+    //
+    //	刷新本上游额度   取额度 + 写回 +（凭据失效⇒记账 / 成功⇒恢复自动禁用）
+    //	探测已禁用       **只问禁用号**；探测可用 ⇒ **解除禁用**（把号放回候选集）
+    //
+    // 判据仍是上游自报的 quota-probe（没接额度的上游点了恒失败 —— 本项目不做假按钮）。
+    const gDisabledQuotaBtn = hasCap(providerId, 'quota-probe')
+      ? `<button class="gact" data-gdisabledquota="${esc(providerId)}"`
+        + ` title="只探测 ${esc(providerId)} **已禁用**的账号；探测到额度可用就自动解除禁用。`
+        + `不动该上游其它正常账号 —— 与「刷新本上游额度」的区别就在这里">探测已禁用</button>`
+      : '';
+
     // 「全部签到」—— 本上游卡片顶部的全量动作（用户本轮要求的位置）。
     //
     // # 它与顶部那个「全部签到」是**两级**，不是重复
@@ -1964,6 +1983,7 @@
       + noLoginNote
       + importBtn
       + gQuotaBtn
+      + gDisabledQuotaBtn
       + reloadBtn
       + colsBtn;
   }
@@ -3690,6 +3710,30 @@ function toast(msg, bad) {
     const tail = r.skipped ? `；跳过 ${r.skipped} 个账号的上游未接入额度`
                : (r.unknown ? '；未知表示上游未报额度，不是错误' : '');
     return { msg: `${head}${parts.join(' · ')}${prov}${tail}`, bad };
+  }
+
+  // disabledProbeToast 「探测已禁用」的回执文案。
+  //
+  // # 为什么不复用 quotaScopeToast
+  //
+  // 那一句的措辞是「已更新 N」，而这一档用户真正要知道的是**两个数字**：
+  // 探测了几个、放回来几个。「updated」在这里的含义是「探测到有数据的号」，
+  // 直接套用会让用户读成「额度更新了 N 个」—— 而他点这个按钮的目的是「看看有没有号能救回来」。
+  // 措辞错了，动作对了也白做（本项目反复的教训：界面不能替后端撒谎）。
+  function disabledProbeToast(r, providerLabel) {
+    const who = providerLabel || '该上游';
+    const n = typeof r.count === 'number' ? r.count : null;
+    if (n === 0) {
+      // 这一种是**正常结果**（该上游没有禁用的号），不是错误。
+      return { msg: `${who} 没有已禁用的账号，无需探测`, bad: false };
+    }
+    const parts = [`探测 ${n === null ? '?' : n} 个禁用账号`, `解除禁用 ${r.enabled || 0}`];
+    if (r.unknown) parts.push(`未能判定 ${r.unknown}`);
+    if (r.failed)  parts.push(`探测出错 ${r.failed}`);
+    // ⚠ 一个都没解禁**不是错误**：那说明这些号确实还没好。
+    //   用告警色会被读成「按钮坏了」，而真相是「它们还不能用」——
+    //   只有「探测本身出错」（failed）才值得告警。
+    return { msg: `${who}：${parts.join(' · ')}`, bad: (r.failed || 0) > 0 };
   }
 
   // ---------------------------------------------------------------- 全量任务进度
@@ -12947,6 +12991,22 @@ let multCatalogFailed = false;
           //（实测踩到：按钮看起来"成功"了，但用户看不到任何数字）。
           // 必须取 .msg / .bad，与 startAll 里那条同一写法。
           const t = quotaScopeToast(r, pid);
+          toast(t.msg, t.bad);
+          await refreshAccounts(r);
+        });
+        return;
+      }
+      // 「探测已禁用」—— 只问该上游**已禁用**的号；探测可用 ⇒ 后端解除禁用。
+      //
+      // ⚠ 与上面那个 gquota 打**同一个端点**，只靠 body 的 only_disabled 分档
+      //（见 admin/accountsQuotaRefresh 的四档注释）。
+      const gdq = ev.target.closest('button[data-gdisabledquota]');
+      if (gdq) {
+        const pid = gdq.dataset.gdisabledquota;
+        busyRun(gdq, async () => {
+          const r = await admin('/admin/accounts/quota/refresh',
+            { method: 'POST', body: JSON.stringify({ provider: pid, only_disabled: true }) });
+          const t = disabledProbeToast(r, pid);
           toast(t.msg, t.bad);
           await refreshAccounts(r);
         });

@@ -59,3 +59,43 @@ func (h *Handler) applyQuotaRefreshPolicy(res quotaRefresher) (disabled, recover
 	}
 	return disabled, recovered
 }
+
+// applyDisabledProbePolicy 「只探测已禁用账号」这一档的收尾：**探测证明可用 ⇒ 解除禁用**。
+//
+// # 判据（刻意严：只认正面证据）
+//
+//	真拿到数据（FreshUIDs）       ⇒ 解禁 + 清冷却/熔断运行态
+//	上游报账号层失效（AuthFailed）⇒ **保持禁用**（它确实坏了）
+//	Unknown / Failed / 跳过       ⇒ 什么都不做（没有证据）
+//
+// ⚠ 为什么 Unknown 不算「可用」：这一档的动作是**解禁**，而解禁会把号放回候选集。
+//
+//	拿「没证据」去解禁 = 把坏号放回池子 —— 而用户点这个按钮的目的正是「别再放回坏号」。
+//	（loomy 的失效走的正是 Unknown + AuthFailed=true，两者必须分开读。）
+//
+// ⚠ 为什么解禁后还要 ClearCooldown：`Pool.Enable` **刻意不清**冷却与熔断运行态
+//
+//	（见 pool.Enable 的注释：禁用期间累积的冷却语义与「人工放行」是两件事）。
+//	而被摘掉很久的号身上往往还压着 breakerUntil ⇒ 只 Enable 的后果是
+//	「界面显示已启用，选号仍跳过它」（healthy 要求 disabled/until/breakerUntil **三者全无**）
+//	⇒ 用户看到的是「点了启用却没效果」。
+//	清掉它有依据：「探测拿到数据」本身就是「这个号现在能用」的正面证据（不是猜）。
+//
+// ⚠ 与 RecordAutoDisableSuccess 的分工：后者只解禁**本机制**置位的禁用（保护人工禁用），
+//
+//	而本按钮是用户**显式**要求「探测可用就启用」⇒ 用 Enable 连人工禁用一起解除 ——
+//	这正是他点这个按钮的语义（「把能用的号放回来」）。
+func (h *Handler) applyDisabledProbePolicy(res quotaRefresher) (enabled int) {
+	if h.cfg.Pool == nil {
+		return 0
+	}
+	for _, uid := range res.FreshUIDs {
+		if !h.cfg.Pool.Enable(uid) {
+			continue // 号已不在池里（探测期间被删）⇒ 不动
+		}
+		h.cfg.Pool.ClearCooldown(uid)
+		log.Printf("admin: 账号 %s 探测到额度可用，已解除禁用并清掉历史冷却", uid)
+		enabled++
+	}
+	return enabled
+}

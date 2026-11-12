@@ -360,6 +360,12 @@ func toPoolQuota(q gateway.QuotaView) pool.QuotaView {
 //	（无参数）            全部账号        顶部「刷新全部额度」
 //	{"uid":"..."}         只刷这一个账号   行内「额度」按钮
 //	{"provider":"..."}    只刷该上游的账号 上游分组标题上的「刷新本上游额度」
+//	{"provider":"...","only_disabled":true}
+//	                      只探测该上游**已禁用**的账号，且**探测证明可用就解除禁用**
+//	                      上游分组上的「探测已禁用账号」按钮（用户 2026-11-12 要求）
+//
+// 第 4 档与前三档的**动作不同**：前三档只「取额度 + 写回池 + 按证据记账」，
+// 第 4 档会**改变账号的启用状态**（解禁）。判据与理由见 applyDisabledProbePolicy。
 //
 // # 向后兼容
 //
@@ -374,6 +380,8 @@ func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		UID      string `json:"uid"`
 		Provider string `json:"provider"`
+		// OnlyDisabled 只探测**已禁用**的账号（用户 2026-11-12 要求，见下面的作用域说明）。
+		OnlyDisabled bool `json:"only_disabled"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	// query 参数也认（便于 curl 与脚本按作用域调用，不必构造 JSON）。
@@ -382,6 +390,14 @@ func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Provider == "" {
 		body.Provider = r.URL.Query().Get("provider")
+	}
+	// only_disabled 同样认 query（curl 探测用）。刻意不用 strconv.ParseBool：
+	// 它把 "yes" 判成 false，而人写 query 时会写 yes —— 与上面两条的宽松口径一致。
+	if !body.OnlyDisabled {
+		switch r.URL.Query().Get("only_disabled") {
+		case "1", "true", "yes":
+			body.OnlyDisabled = true
+		}
 	}
 
 	all := h.cfg.Pool.List()
@@ -405,14 +421,34 @@ func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	case body.Provider != "":
 		// 按上游：该上游自己在池里的全部账号。
+		//
+		// ⚠ only_disabled=true 时只取**已禁用**的号（用户 2026-11-12 要求）：
+		//   语义是「探测这些被摘掉的号还能不能用，能用就放回池子」。
+		//
+		//   与整片刷新分开的理由是**效率**（用户原话）：某上游 175 个号里可能只有 3 个是禁用的，
+		//   为了探这 3 个去刷 175 个号 = 白打 172 次上游，而且那些正常号本来也不需要证明。
 		scope = "provider"
+		if body.OnlyDisabled {
+			scope = "provider_disabled"
+		}
 		pid := body.Provider
 		for _, st := range all {
-			if h.providerOf(st) == pid {
-				uids = append(uids, st.UID)
+			if h.providerOf(st) != pid {
+				continue
 			}
+			if body.OnlyDisabled && !st.Disabled {
+				continue
+			}
+			uids = append(uids, st.UID)
 		}
 		if len(uids) == 0 {
+			// ⚠ 两种「空」必须分开报：
+			//   上游一个号都没有       ⇒ 404（配置问题，得去导入）
+			//   有号但都不是禁用状态   ⇒ 200 + count=0（正常：没有可探测的号）
+			// 只留一个 404 会把后者也说成「该上游在池里没有账号」—— 那是排错方向上的误导。
+			if body.OnlyDisabled {
+				break // 落到收尾：回 200（前端据此说明「没有已禁用的账号」）
+			}
 			writeError(w, http.StatusNotFound, "该上游在池里没有账号: "+pid)
 			return
 		}
@@ -424,13 +460,28 @@ func (h *Handler) accountsQuotaRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := h.refreshQuotas(uids)
-	// 用户点按钮 ⇒ 顺手处置：凭据失效的号进禁用线、刷新成功的号解除自动禁用。
-	// ⚠ 只在这条**手动**路径上做（后台分层刷新共用 refreshQuotas 但不处置，见 policy 文件头）。
-	disabled, recovered := h.applyQuotaRefreshPolicy(res)
+	// 用户点按钮 ⇒ 顺手处置。⚠ 只在这条**手动**路径上做（后台分层刷新共用 refreshQuotas
+	// 但不处置，见 policy 文件头 —— 定时路径上「失败即摘号」会误杀整池）。
+	//
+	// ⚠ 两档处置**互斥**，按作用域只跑一档：
+	//   provider_disabled（探测禁用号）⇒ 只做「可用则解禁」
+	//   其余三档                      ⇒ 做「凭据失效记账 / 刷新成功恢复」
+	//
+	// 为什么禁用号那档不顺手记失败：这一档的输入集**本来就是禁用号**，
+	// 把「凭据失效」再喂一遍自动禁用线不改变任何状态，却可能把这批号标成
+	// 「本机制置位」⇒ 与人工禁用的归属混在一起（而归属决定谁能自动解禁）。
+	var disabled, recovered, enabled int
+	if scope == "provider_disabled" {
+		enabled = h.applyDisabledProbePolicy(res)
+	} else {
+		disabled, recovered = h.applyQuotaRefreshPolicy(res)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"updated":   res.Updated,
 		"disabled":  disabled,
 		"recovered": recovered,
+		// enabled 只对 provider_disabled 档有意义（其余档恒 0）。
+		"enabled":   enabled,
 		"unknown":   res.Unknown,
 		"failed":    res.Failed,
 		"skipped":   res.Skipped,

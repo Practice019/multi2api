@@ -2,10 +2,23 @@
 //
 // 为什么需要它：后端 manifest 里有能力位 ≠ 前端把按钮画出来了。
 // 这中间隔着 hasCap / providerInfo / 模板串拼接三处，任一处错都会
-// 导致"能力位有、按钮没有"（用户报的 cline 现象就是这一类）。
+// 导致「能力位有、按钮没有」（用户报的 cline 现象就是这一类）。
+//
+// ⚠⚠ 2026-11-12 修正读取路径：这个探针原来读的是 `internal/server/webui.html`
+//   （页面外壳），而 `accountGroupActions` **早就搬到了 `ui/app.js`** ⇒
+//   它每次都在这行下面的 indexOf 直接报「找不到 accountGroupActions」，
+//   而且因为**没在 run_frontend_suites.js 里注册**，没人注意到它一直是红的。
+//   现在读 app.js（按钮的真正实现处），并注册进套件。
+//
+// ⚠⚠ 路径必须走 `__dirname`，**不能**写裸相对路径（`'internal/...'`）：
+//   套件是用 `execFileSync(node, [探针], { cwd: tests/frontend })` 跑的
+//（run_frontend_suites.js:455），裸路径会 ENOENT ⇒ 探针抛异常，
+//   在报告里表现为「这个探针失败」，真正原因却是路径、不是断言。
+//   WB2API_REPO 供变异扫描指向一次性副本（与本目录其它探针同一约定）。
 const fs = require('fs');
+const REPO = process.env.WB2API_REPO || __dirname + '/../..';
 
-const html = fs.readFileSync('internal/server/webui.html', 'utf8');
+const html = fs.readFileSync(REPO + '/internal/server/ui/app.js', 'utf8');
 const marker = 'function accountGroupActions(';
 const i = html.indexOf(marker);
 if (i < 0) {
@@ -112,6 +125,38 @@ check('无 login 分支里也渲染该按钮', out.includes('刷新本上游额�
 // ④ 未注册的上游 → 不渲染任何动作（既有行为不变）
 out = fn('unknown-provider');
 check('未注册上游 → 空串（既有行为不变）', out === '');
+
+// ⑤ 「探测已禁用」—— 2026-11-12 新增的同排按钮（只探禁用号、可用即解禁）。
+//
+// 判据与「刷新本上游额度」**同源**（都要求 quota-probe）⇒ 两者必须同进同出。
+// 这条断言防的是"后端加了作用域、前端忘了按钮"（用户看不到 = 白做）。
+setProviders([{
+  id: 'has-quota', account_count: 5,
+  capabilities: ['chat', 'quota-probe'],
+  login: { kind: 'device', label: '添加账号' },
+}]);
+out = fn('has-quota');
+check('有 quota-probe → 渲染「探测已禁用」', out.includes('探测已禁用'));
+check('带 data-gdisabledquota="has-quota"', out.includes('data-gdisabledquota="has-quota"'));
+check('按钮 class 是 gact（同排同款）', out.includes('class="gact" data-gdisabledquota'));
+// ⚠ 位置：必须在「刷新本上游额度」**之后**（用户指定的位置）。
+check('排在「刷新本上游额度」之后', out.indexOf('data-gdisabledquota') > out.indexOf('data-gquota'));
+// title 必须说清两件事：只探禁用号、探测可用会解禁。
+const di = out.indexOf('data-gdisabledquota="');
+const disTitle = (out.slice(di).match(/title="([^"]*)"/) || [, ''])[1];
+check('title 说明只探已禁用的号', disTitle.includes('已禁用'));
+check('title 说明探测可用会解除禁用', disTitle.includes('解除禁用'));
+// 同上游两个按钮都在（不能因为加了新的把旧的挤掉）。
+check('与「刷新本上游额度」并存', out.includes('刷新本上游额度') && out.includes('探测已禁用'));
+
+    // ②b 没有 quota-probe 的上游：新按钮同样**不得**出现。
+setProviders([{
+  id: 'no-quota-fake2', account_count: 1,
+  capabilities: ['chat', 'models'],
+  login: { kind: 'device', label: '添加账号' },
+}]);
+out = fn('no-quota-fake2');
+check('无 quota-probe → 不渲染「探测已禁用」', !out.includes('探测已禁用'));
 
 console.log(fails === 0 ? 'ALL PASS' : ('FAILED: ' + fails));
 process.exit(fails === 0 ? 0 : 1);
