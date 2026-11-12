@@ -19,8 +19,20 @@ const path = require('path');
 const os = require('os');
 const cp = require('child_process');
 
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
-const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+// ⚠⚠ T-409 拆包后**主 script 已外置**到 internal/server/ui/app.js（页面用
+//   `<script src="/ui/app.js" defer>` 加载）⇒ 只抽内联块会把 `main` 退化成一个壳脚本，
+//   后果一次出现两个、看起来毫不相干：
+//
+//	· 下面 6 个 `const` 全部报「缺失」⇒ 断言假红；
+//	· 生成的探针由 12754 行缩到 **401 行** ⇒ 把 `tests/frontend/tdz_probe.html`
+//	  这个**已跟踪文件**变成半成品，一次 `git add -A` 就提交掉 12670 行删除。
+//
+//   ⇒ 把外置脚本也当成一个候选段，取最长的那段 —— 与拆包**之前**的语义逐字一致
+//   （那时整段主脚本就在 html 的 <script> 里）。只取 HTML 本体的部分仍读 PAGE。
+const { PAGE, js: EXTERNAL_JS } = require('./lib_frontend_source');
+const html = fs.readFileSync(PAGE, 'utf8');
+const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1])
+  .concat([EXTERNAL_JS]);
 const main = scripts.reduce((a, b) => (a.length > b.length ? a : b), '');
 
 // 逐个标识符做静态顺序检查（快速、精确指出问题在哪一行）
@@ -153,7 +165,14 @@ const page = probe.replace('__REAL_SCRIPT__', () => main);
 // 配 `file:///tdz_probe.html` —— 后者是根目录下的文件，永远打不开，
 // 于是"真实脚本执行无异常"这条断言恒失败（而它是本套件的核心断言）。
 const PROBE = path.join(__dirname, 'tdz_probe.html');
-fs.writeFileSync(PROBE, page);
+// ⚠ **原子写**：先写 .tmp 再改名。
+//   探针是**已跟踪文件**，而它的大小直接由上面选的 `main` 决定 ——
+//   选错时它会静默缩水（实测 12754 → 401 行），而不是报错。
+//   非原子写 + 中途异常 = 留下半成品污染工作树；改名是原子的，
+//   要么是完整新内容、要么完全不动旧的。
+const tmpProbe = PROBE + '.tmp';
+fs.writeFileSync(tmpProbe, page);
+fs.renameSync(tmpProbe, PROBE);
 
 // ---------------------------------------------------------------------------
 // 第二层：把整段真实脚本**按文件里的原始顺序**在真实 JS 引擎里跑一遍。

@@ -37,9 +37,32 @@ const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fai
 // 这种 HTML 属性被报成"脚本里有上游名字字面量"。
 //
 // 主脚本是**最后一个** <script>...</script>（它包住整个 IIFE）。
+//
+// ⚠⚠ 但 T-409 拆包后主 script **已外置**到 internal/server/ui/app.js
+//（页面改成 `<script src="/ui/app.js" defer>`），于是这条路退化成：
+// 从「最后一个**裸** <script>」slice 到「最后一个 </script>」——
+// 而这两点之间现在**大半是 HTML 标记** ⇒ 又把 `<section data-provider="workbuddy">`
+// 报成「脚本里有上游名字面量」。这与上方 T6 注释记的那个坑是**同一形态**，
+// 只是这次的成因不是 indexOf 取错段，而是外置。
+//
+// ⇒ 主脚本 = 两者里更长的那个：内联末段、或外置的 ui/app.js。
+//   与拆包前的语义逐字一致（那时整段主脚本就在 html 的 <script> 里）。
+//   ⚠ 只取 HTML 本体的检查（colspan、script 计数等）仍用 `html`，不受影响。
 const scriptStart = html.lastIndexOf('<script>');
 const scriptEnd = html.lastIndexOf('</script>');
-const js = html.slice(scriptStart, scriptEnd);
+const inlineJs = (scriptStart >= 0 && scriptEnd > scriptStart)
+  ? html.slice(scriptStart + '<script>'.length, scriptEnd)
+  : '';
+const { js: EXTERNAL_JS } = require('./lib_frontend_source');
+const js = EXTERNAL_JS.length > inlineJs.length ? EXTERNAL_JS : inlineJs;
+
+// ⚠ 下面那些「源码里在不在」的判据，扫描面必须是**前端全部源码**（html + js + css），
+//   而不是只扫 html：账号池那张表、表头生成器、行哨兵 colspan 都在 **app.js** 里，
+//   折叠隐藏规则在 **app.css** 里 —— 只扫 html 会把它们全判成「找不到」，
+//   于是守卫静默变弱（这正是本文件上方两处注释反复记的那个坑）。
+//   与 Go 侧 readFrontendSource 同一口径。
+const { css: EXTERNAL_CSS } = require('./lib_frontend_source');
+const FE = html + '\n' + js + '\n' + EXTERNAL_CSS;
 
 // ---------------------------------------------------------------- 1. 上游名字字面量
 console.log('\n[1] 脚本里不出现上游名字字面量');
@@ -185,7 +208,8 @@ function tablesWithHeaders(src) {
 }
 // 表格扫描用剥注释后的文本；而 `<th>`/`colspan` 的字面量统计仍用原文
 //（下面那些 matchAll 是在数**真正的字面量**，注释里的不算 —— 见各自的注释）。
-const codeHtml = stripComments(html);
+// ⚠ 基底是 FE（html+js+css），不是 html —— 见上面 FE 那段注释。
+const codeHtml = stripComments(FE);
 const tables = tablesWithHeaders(codeHtml);
 ok(tables.length > 0, '至少解析到一个表格（' + tables.length + ' 个）');
 
@@ -235,10 +259,17 @@ ok(zeroColSeen >= 1,
 // 补一条针对动态表的判据：账号池的表头必须由**列集**生成，
 // 不许写死列数或列名。判据落在源码文本上（这是静态套件，跑不了浏览器）。
 {
-  const dyn = html.match(/<table class="accttable">[\s\S]{0,200}/);
+  // ⚠ 判据不能要求 class 属性**恰好**是 accttable —— 2026-10-19 已为此修过一次假红
+  //（上面 0 列表那段注释记着）：动态表现在是
+  //   class="accttable accttable--aligned" data-acctpid=…
+  // 这里只要求「账号池家族的表模板仍在源码里」。
+  const dyn = /<table class="accttable[ "]/.test(codeHtml);
   ok(!!dyn, '账号池的动态表仍在源码里（找不到说明表结构又变了，本节的判据需要同步）');
   // 表头必须由 cols.map(...) 生成 —— 写死一串 <th> 会让"每上游不同列集"失效
-  ok(/cols\.map\([^)]*acctThHTML/.test(html),
+  // ⚠ 正则不能要求 `cols.map(` 后面**直到 acctThHTML 之前没有右括号**：
+  //   真实写法是箭头函数 `cols.map(id => acctThHTML(id))`，其中 `(id)` 的 `)`
+  //   会让 `[^)]*` 提前停下 ⇒ 假红（本轮命中这一条）。
+  ok(/cols\.map\([\s\S]{0,60}?acctThHTML/.test(codeHtml),
     '账号池表头由列集 `cols.map(acctThHTML)` 生成（写死 <th> 会让每上游不同列集失效）');
   // 且不许出现写死的列数
   ok(!/ACCT_COLS\s*=\s*11\b/.test(html),

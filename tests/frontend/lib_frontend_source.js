@@ -25,10 +25,14 @@ const path = require('path');
 const REPO = process.env.WB2API_REPO || path.join(__dirname, '..', '..');
 const PAGE = path.join(REPO, 'internal/server/webui.html');
 const APP_JS = path.join(REPO, 'internal/server/ui/app.js');
+// ⚠ CSS 也要算进来：有些判据找的是**样式规则**（例如「折叠是否真的 display:none」），
+//   而那些规则住在 app.css 里（T-409 拆包时与 JS 一起外置的）。
+const APP_CSS = path.join(REPO, 'internal/server/ui/app.css');
 
 const html = fs.readFileSync(PAGE, 'utf8');
 const js = fs.readFileSync(APP_JS, 'utf8');
-// FRONTEND = 拆包前的扫描面（JS 当初就在 html 里，位置不同而已）。
-const FRONTEND = html + '\n' + js;
+const css = fs.readFileSync(APP_CSS, 'utf8');
+// FRONTEND = 拆包前的扫描面（JS/CSS 当初就在 html 里，位置不同而已）。
+const FRONTEND = html + '\n' + js + '\n' + css;
 
-module.exports = { REPO, PAGE, APP_JS, html, js, FRONTEND };
+module.exports = { REPO, PAGE, APP_JS, APP_CSS, html, js, css, FRONTEND };
