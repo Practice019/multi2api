@@ -15,7 +15,7 @@ func (d *Driver) reportCredentialFail(uid string, err error) {
 	if !CredentialError(err) {
 		return
 	}
-	logx.Oncef(logx.LevelWarn, d.desc.ID, "cred:"+uid,
+	logx.Coalesce(logx.LevelWarn, d.desc.ID, "cred:"+d.desc.ID, "",
 		"签到凭据失效 uid=%s：%v（按设计上报，由上游侧决定是否自动禁用）",
 		shortUID(uid), err)
 	if d.onCredFail != nil {

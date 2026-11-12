@@ -74,7 +74,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	sub, err := p.client.FetchSubscription(a)
 	if err != nil {
 		// 取不到 → 未知。**不返回 0**，也**不沿用旧值**。
-		logx.Oncef(logx.LevelWarn, "codearts", "quota:"+a.UID, "额度刷新失败 uid=%s: %v（显示为未知，不填 0）", a.UID, err)
+		logx.Coalesce(logx.LevelWarn, "codearts", "quota:codearts", "", "额度刷新失败 uid=%s: %v（显示为未知，不填 0）", a.UID, err)
 		return gateway.UnknownQuota(), true
 	}
 

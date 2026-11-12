@@ -3,9 +3,9 @@ package loomy
 import (
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
+	"workbuddy2api/internal/logx"
 )
 
 // 本文件：**面板预热的调度**（把 tasks/invite 的补数从"前端触发"搬到服务端）。
@@ -120,23 +120,18 @@ func (p *Provider) StartPanelWarmup() {
 			//     · 还有待补（追赶态）⇒ 5 秒一轮 ⇒ 44 个号约 2 分钟补满
 			//     · 都补完了（稳定态）⇒ 5 分钟一轮 ⇒ 几乎不发请求
 			//   ⚠ 固定 60 秒的版本实测会浪费一半时间空等（一轮只要 30 秒）。
-			// ⚠ 节奏与日志都交给 panelWarmupPace：它的两条判据是
-			//   「待办数变了没」和「日志内容变了没」。死号会让两者的答案长期是
-			//   "没变" —— 而那正是刷屏与"每 5 秒打一次上游"的来源（见那里的注释）。
+			// ⚠ 分工（2026-11-12 起）：**节奏**交给 panelWarmupPace（只管等多久），
+			//   **日志**交给 logx.Coalesce（同一件事在窗口内折成一行）。
+			//   早先那版让 pace 同时管日志，于是"首个错误来回抖"把它绕过了 —— 见 140 行起的历史记录。
 			pace := &panelWarmupPace{}
 			for {
 				left, line := p.sweepPanels()
-				// ⚠ 2026-11-12：变化判定要用**稳定键**，不能用整行 ——
-				//   "首个错误"这类字段会来回抖（两个错误交替），整行比对就被它绕过了，
-				//   表现是"内容变了"永远成立 ⇒ 每轮照打（实测 20 秒两条）。
-				stable := line
-				if i := strings.Index(stable, " · 首个错误="); i >= 0 {
-					stable = stable[:i]
-				}
-				sleep, shouldLog := pace.next(left, stable, time.Now())
-				if shouldLog {
-					log.Print(line)
-				}
+				// 节奏（等多久）交给 pace：死号让待办长期不变时退避到上限。
+				sleep, _ := pace.next(left, line, time.Now())
+				// ⚠ 日志交给 logx.Coalesce：同一件事在窗口内折成**一行**（带次数与时间范围）。
+				//   它按 **key** 合并不按内容 ⇒ 之前那个"首个错误来回抖 ⇒ 去重失效"的问题
+				//   从根上消失（不再需要抽稳定键）。
+				logx.Coalesce(logx.LevelInfo, "loomy", "panelwarm:loomy", "", "%s", line)
 				time.Sleep(sleep)
 			}
 		}()

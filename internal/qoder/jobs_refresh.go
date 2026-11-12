@@ -145,7 +145,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		}); err != nil {
 			failed++
 			if errors.Is(err, ErrRefreshExpired) {
-				logx.Oncef(logx.LevelWarn, "qoder", "refresh:"+a.UIDValue(), "uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
+				logx.Coalesce(logx.LevelWarn, "qoder", "refresh:qoder", "", "uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
 					shortUID(a.UIDValue()))
 			} else {
 				log.Printf("%s: uid=%s 后台续期失败（可重试）：%v",

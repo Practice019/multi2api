@@ -59,7 +59,8 @@ import (
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
 	levelFlag := flag.String("log-level", "", "日志级别 debug/info/warn/error/quiet（默认 info，也可用 WB2API_LOG_LEVEL）")
-	statsEvery := flag.Duration("log-stats", 3*time.Minute, "控制台汇总行间隔（0 = 关闭逐条流水之外的汇总）")
+	statsEvery := flag.Duration("log-stats", 3*time.Minute, "控制台汇总行间隔（0 = 关闭统计汇总）")
+	coalesceEvery := flag.Duration("log-coalesce", 20*time.Second, "重复日志的折叠窗口（0 = 关闭折叠，逐条照打）")
 	flag.Parse()
 
 	// 日志出口：统一格式（HH:MM:SS LEVEL scope msg）+ 级别过滤 + 重复消息采样。
@@ -144,6 +145,10 @@ func main() {
 
 	// 控制台汇总行：每 3 分钟一条"关键数字"（逐条请求行照旧打，两者并存）。
 	// 见 internal/logx/stats.go 的注释（为什么控制台不该是流水账）。
+	// 重复折叠：同一件事在 20 秒窗口内只出**一行**（带次数与时间范围）——
+	// 用户明确要求"重复的用一条日志输出 + 统计数量"。
+	go logx.CoalesceLoop(*coalesceEvery)
+
 	go logx.StatsLoop(*statsEvery, func() logx.PoolCounts {
 		total, healthy, cooling, disabled, _ := p.CountsDetailed()
 		return logx.PoolCounts{Total: total, Healthy: healthy, Cooling: cooling, Disabled: disabled}

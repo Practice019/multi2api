@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"workbuddy2api/internal/auth"
@@ -18,7 +19,10 @@ import (
 // 这正是本组用例要断言的：作用域对不对，等价于"问了哪些 uid"。
 type quotaScopeStub struct {
 	id string
-	// asked 记录 RefreshQuota 收到的 uid（按调用顺序）。
+	// asked 记录 RefreshQuota 收到的 uid。
+	// ⚠ 2026-11-12：加锁 —— 处理器是**并发**刷账号的，裸 append 会丢条目，
+	//   表现是"被刷的 uid 只有 1 个"（本组用例因此偶发红：实测 PASS/FAIL/PASS）。
+	mu    *sync.Mutex
 	asked *[]string
 }
 
@@ -31,7 +35,9 @@ func (s quotaScopeStub) Models(context.Context, gateway.Credential) ([]gateway.M
 	return nil, nil
 }
 func (s quotaScopeStub) RefreshQuota(uid string) (gateway.QuotaView, bool) {
+	s.mu.Lock()
 	*s.asked = append(*s.asked, uid)
+	s.mu.Unlock()
 	return gateway.CreditsQuota(123), true
 }
 
@@ -42,10 +48,11 @@ func newScopeFixture(t *testing.T) (*Handler, *[]string) {
 	t.Helper()
 	reg := gateway.NewRegistry()
 	asked := &[]string{}
-	if err := reg.Register(quotaScopeStub{id: "alpha", asked: asked}); err != nil {
+	mu := &sync.Mutex{}
+	if err := reg.Register(quotaScopeStub{id: "alpha", mu: mu, asked: asked}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Register(quotaScopeStub{id: "beta", asked: asked}); err != nil {
+	if err := reg.Register(quotaScopeStub{id: "beta", mu: mu, asked: asked}); err != nil {
 		t.Fatal(err)
 	}
 	p := pool.New("")

@@ -257,7 +257,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	defer cancel()
 	remain, err := p.client.UserEntUsage(ctx, a)
 	if err != nil {
-		logx.Oncef(logx.LevelWarn, "trae", "quota:"+uid, "额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
+		logx.Coalesce(logx.LevelWarn, "trae", "quota:trae", "", "额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
 		return gateway.UnknownQuota(), true
 	}
 	if remain < 0 {
@@ -397,7 +397,7 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 		}
 		checkedIn, credits, extra, enable, serr := p.client.CheckinStatus(ctx, a)
 		if serr != nil {
-			logx.Oncef(logx.LevelWarn, "trae", "state:"+a.UID, "签到状态查询失败 uid=%s: %v", shortUID(a.UID), serr)
+			logx.Coalesce(logx.LevelWarn, "trae", "state:trae", "", "签到状态查询失败 uid=%s: %v", shortUID(a.UID), serr)
 			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(serr), 0, "sched")
 			continue
 		}
@@ -414,7 +414,7 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 		// 于是界面显示"签到成功"而实际没奖励（用户报的「签到不了」）。
 		res, cerr := p.client.CheckinClaim(ctx, a)
 		if cerr != nil {
-			logx.Oncef(logx.LevelWarn, "trae", "failsign:"+a.UID, "签到失败 uid=%s: %v", shortUID(a.UID), cerr)
+			logx.Coalesce(logx.LevelWarn, "trae", "failsign:trae", "", "签到失败 uid=%s: %v", shortUID(a.UID), cerr)
 			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(cerr), 0, "sched")
 			continue
 		}

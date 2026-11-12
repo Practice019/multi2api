@@ -227,7 +227,7 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 		//   原来这里无条件先打一条"签到状态查询失败"，同一个事件在控制台上出现两行。
 		//   一条事只说一次；非凭据类（网络抖动等）仍由这里报。
 		if !CredentialError(err) {
-			logx.Oncef(logx.LevelWarn, d.desc.ID, "state:"+acc.UID, "签到状态查询失败 uid=%s: %v", shortUID(acc.UID), err)
+			logx.Coalesce(logx.LevelWarn, d.desc.ID, "state:"+d.desc.ID, "", "签到状态查询失败 uid=%s: %v", shortUID(acc.UID), err)
 		}
 		// ★ T-431：只有**凭据类**错误才上报禁用（网络抖动不报 —— 那会误杀好号）。
 		d.reportCredentialFail(acc.UID, err)
@@ -249,7 +249,7 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 	credits, actionRequired, cerr := d.up.Claim(ctx, acc)
 	if cerr != nil {
 		d.record(acc.UID, checkinlog.StatusFail, shortErr(cerr), 0, trigger)
-		logx.Oncef(logx.LevelWarn, d.desc.ID, "failsign:"+acc.UID, "签到失败 uid=%s: %v", shortUID(acc.UID), cerr)
+		logx.Coalesce(logx.LevelWarn, d.desc.ID, "failsign:"+d.desc.ID, "", "签到失败 uid=%s: %v", shortUID(acc.UID), cerr)
 		// ★ T-431：同上 —— 只上报凭据类（lobsterai 实测就是这里的 401「请先登录」）。
 		d.reportCredentialFail(acc.UID, cerr)
 		return Result{

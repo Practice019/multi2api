@@ -166,7 +166,7 @@ func logQuotaFail(uid string, err error) {
 	//   ③ **删掉"（回落到本机缓存）"** —— 那是假的：调用方紧接着就返回"额度未知"，
 	//      并没有回落成功（真正回落成功的那条路径在下面单独打"已改用本机缓存值"）
 	reason, hint := quotaFailReason(err)
-	logx.Oncef(logx.LevelWarn, "loomy", "quota:"+uid, "额度查询失败 uid=%s（%s）: %s —— %s",
+	logx.Coalesce(logx.LevelWarn, "loomy", "quota:loomy", "", "额度查询失败 uid=%s（%s）: %s —— %s",
 		shortUID(uid), reason, trimLoomyPrefix(err), hint)
 }
 

@@ -228,7 +228,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	top, err := p.client.creditDetails(ctx, a)
 	if err != nil {
 		// 端点失败**不等于余额为 0** —— 如实报"没查到"。
-		logx.Oncef(logx.LevelWarn, "minimax", "quota:"+uid, "额度查询失败 uid=%s: %v", uid, err)
+		logx.Coalesce(logx.LevelWarn, "minimax", "quota:minimax", "", "额度查询失败 uid=%s: %v", uid, err)
 		return gateway.QuotaView{HasData: false}, false
 	}
 	total, ok := parseCreditBalance(top)

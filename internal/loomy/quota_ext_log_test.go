@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"workbuddy2api/internal/logx"
 )
 
 // captureLog 把 log 输出接到 buffer，跑完恢复（日志文案测试的标准做法）。
@@ -19,6 +21,11 @@ func captureLog(fn func()) string {
 	log.SetOutput(&buf)
 	defer log.SetOutput(old)
 	fn()
+	// ⚠ 2026-11-12：这些行现在走 logx.Coalesce（**窗口折叠**，不是立即输出）⇒
+	//   读之前必须先 flush，否则测试看到的是空串（假红）。
+	for _, line := range logx.FlushCoalesced() {
+		buf.WriteString(line + "\n")
+	}
 	return buf.String()
 }
 
