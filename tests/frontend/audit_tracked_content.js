@@ -186,7 +186,11 @@ const CHECKS = [
       //     例：`rediss://default:tok@foo.upstash.io:6379` → 命中 `tok@foo.upstash.io`
       //     第一版没排除它，误报了一个文件。
       //   - **本地部分只有 1 个字符**（`a@b.c` / `e@x.com`）：解析用例的合成样本
-      const okDomains = /@(example\.(com|org)|test\.(com|local)|localhost)$/;
+      //   - **RFC 2606 / 6761 保留域名**：`example.com|net|org`、`*.invalid`、`*.test`、`localhost`。
+      //     保留域名**不可注册**，所以这种地址不可能是真实联系人 —— 它是占位符。
+      //     第一版只放行了 example.com/org + test.com/local ⇒ 把
+      //     `docs/openapi.yaml` 的 `maintainer@example.invalid` 误报成联系人（2026-11-12 修）。
+      const okDomains = /@(example\.(com|net|org|edu)|[\w.-]+\.(invalid|test|localhost)|localhost)$/;
       // 精度修正（2026-11-01）：两类「看着像邮箱」的非邮箱。
       //   · Go 模块路径带版本：`模块名@v1.21.2`（internal/store/db_test.go 的注释引用驱动源码）；
       //   · VCS 身份：ssh 适配器用的 `git@主机名`（scripts/github-ssh-tunnel.ps1，三处）。

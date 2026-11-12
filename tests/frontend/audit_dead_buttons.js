@@ -50,8 +50,22 @@ const REPO = path.resolve(__dirname, '..', '..');
 // 可用 AUDIT_WEBUI 指向别处的 webui.html —— 变异测试需要它指向一次性副本。
 // （我第一版漏了这行，于是"验证扫描器能抓出缺陷"时一直在扫真实仓库，
 //   得到的"未命中"是假结论。测工具本身时，先确认工具读的是你以为的那个文件。）
-const WEBUI = process.env.AUDIT_WEBUI || path.join(REPO, 'internal/server/webui.html');
-const src = fs.readFileSync(WEBUI, 'utf8');
+// ⚠⚠ 输入是**前端全部源码**（webui.html + ui/app.js + ui/app.css），不是只有 webui.html。
+//
+// 拆包（T-409）后按钮的**绑定**（onclick / addEventListener）大多在 app.js 里，
+// 锚点（`function wireTopBar` 等）也在 app.js ⇒ 只读 html 会报
+// 「判据空转：剥注释后找不到锚点」而直接 exit 2。
+//
+// ⚠ 同时 AUDIT_WEBUI 的语义也随之升级：它现在指向「**拼好的整份前端源码**」
+//   的一次性副本（下面自检写出来的就是那份），不再是单指 webui.html。
+//   理由：自检 B 篡改的是 **JS 里的那行绑定**（`$('btnAllCheckinAll').onclick = …`），
+//   而 `String.replace` 在找不到锚点时会**静默返回原串** ⇒ 只给 html 副本时
+//   「注入了缺陷」这句话是假的，自检的红绿都无意义（本文件下方 336-339 行
+//   记着同一类教训）。
+const { FRONTEND, PAGE } = require('./lib_frontend_source');
+const src = process.env.AUDIT_WEBUI
+  ? fs.readFileSync(process.env.AUDIT_WEBUI, 'utf8')
+  : FRONTEND;
 
 // 排除清单：这些按钮由**事件委托**或页面机制处理，不在按钮自己身上绑
 const DELEGATED = new Set([
