@@ -1,6 +1,6 @@
 
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
 function fmtTaskExpiry(t) {

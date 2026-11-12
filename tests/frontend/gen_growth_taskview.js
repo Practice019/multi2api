@@ -12,7 +12,7 @@ const fs = require('fs');
 
 const path = require('path');
 const WEBUI = (process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html';
-const html = fs.readFileSync(WEBUI, 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 // 抽取列表的静态自检：node lib_extract_check.js（不带参数）就能一键复现它的判别力
 const { checkExtract } = require('./lib_extract_check.js');
 
@@ -51,7 +51,7 @@ const header = `
 //    设的：generator 挂了但上一次的产物还在，直接跑产物照样全绿，
 //    于是"以为产品坏了，其实是测量工具坏了"。要引用代码片段就用「」括起来。
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 const els = {};
 function mkEl(id) { return { id, hidden: true, className: '', textContent: '', innerHTML: '', disabled: false, title: '' }; }
 for (const id of ['growthGroups','growthAccount','growthViews','growthTaskMeta','growthCards','growthRows']) els[id] = mkEl(id);

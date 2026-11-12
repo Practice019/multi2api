@@ -1,6 +1,6 @@
 
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let logEntries = [];
 // logStatus：状态码筛选（null = 全部）。真实产品里它是 webui.html 的模块级 let，
@@ -42,24 +42,26 @@ function logStatusOf(e) {
     const n = Number(e && e.status);
     return isFinite(n) && n > 0 ? n : null;
   }
-function renderLogStatusBar(counts, pageLen) {
+function renderLogStatusBar(serverCounts, serverTotalAll, serverTotalFiltered, pageLen) {
     const box = $('logStatusBar');
     if (!box) return;
-    const codes = Array.from(counts.keys()).sort((a, b) => a - b);
-    if (!codes.length) { hideLogStatusBar(); return; }
-    const total = logPage.total || 0;
+    const cnt = (k) => {
+      const v = (serverCounts || {})[String(k)];
+      const n = Number(v);
+      return isFinite(n) && n > 0 ? n : 0;
+    };
+    const codes = Object.keys(serverCounts || {}).map(Number).filter(n => isFinite(n) && n > 0).sort((a, b) => a - b);
+    if (!codes.length && !serverTotalAll) { hideLogStatusBar(); return; }
     const chip = (val, label, num, on, hint) =>
       `<button type="button" class="chip${on ? ' on' : ''}" data-logst="${val}"
                aria-pressed="${on ? 'true' : 'false'}" title="${esc(hint)}">${label}<span>${num}</span></button>`;
     const cards = [
-      chip('', '全部', pageLen, logStatus === null, '不筛选，显示本页全部 ' + pageLen + ' 条'),
-    ].concat(codes.map(c => chip(String(c), String(c), counts.get(c), logStatus === c,
-      '只看本页状态码 ' + c + ' 的 ' + counts.get(c) + ' 条')));
-    // 「本页 N 条」里的 N 是**渲染出来的行数**，不是每页条数设置 ——
-    // 末页往往不足一页，用设置值会与实际行数对不上。
+      chip('', '全部', serverTotalAll, logStatus === null, '不筛选，全库 ' + serverTotalAll + ' 条'),
+    ].concat(codes.map(c => chip(String(c), String(c), cnt(c), String(logStatus) === String(c),
+      '只看全库状态码 ' + c + ' 的 ' + cnt(c) + ' 条')));
     box.innerHTML = cards.join('') +
       `<span class="dim" style="font-size:11px;margin-left:4px">`
-      + `本页 ${pageLen} 条 · 共 ${total} 条 · 卡片只统计当前页</span>`;
+      + `本页 ${pageLen} 条 · 当前筛选 ${serverTotalFiltered} 条 · 全库 ${serverTotalAll} 条</span>`;
     box.style.display = 'flex';
   }
 function hideLogStatusBar() {
@@ -94,36 +96,76 @@ function renderLogs(items) {
     // ⚠ 自动放开筛选这条分支下 list 非空、shown 为空 —— 不是"暂无请求"，
     //   是"这一页没有该状态码"，两者必须用不同的字说，否则等于骗人。
     if (!list.length) {
+      // ★ T-396a：清屏路径必须重置签名，否则清屏后画不出来。
+      lastLogSig = '';
       host.innerHTML = logPlaceholder('暂无请求');
       hideLogStatusBar();
       return;
     }
-    renderLogStatusBar(counts, list.length);
+    // ★ T-396a 签名短路（"不闪"的底线，比完整行 diff 便宜得多）：
+    // 轮询每 30 秒跑一次，而日志往往没变。只要"没变化就一个 DOM 都不碰"，
+    // 90% 的闪动就消失了。完整行 diff 留给 396b。
+    //   ⚠ 签名用 seq 列表（不是下标）：下标会随新增条目整体位移 ⇒ 每次轮询都"变了"。
+    //   ⚠ 换了 logStatus 之后条目集合不同 ⇒ 签名自然变 ⇒ 正常重绘。
+    const sig = shown.map(e => String(e.seq)).join(',');
+    if (sig === lastLogSig) return;   // ★ 一个 DOM 都不碰
+    lastLogSig = sig;
+    renderLogStatusBar(serverCounts, serverTotalAll, serverTotalFiltered, list.length);
     if (!shown.length) {
       host.innerHTML = logPlaceholder(
         '本页 ' + list.length + ' 条里没有状态码 ' + autoCleared + '（已取消该筛选；翻页可看其它页）');
+      lastLogSig = '';
       return;
     }
-    host.innerHTML = shown.map(e => {
-      const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
-      // ② 数值列右对齐（.r）
-      // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
-      //    参考项目的原话"空着会被当成渲染缺失"。破折号用全角「—」与项目其它面板一致。
-      const dash = '<span class="log-none">—</span>';
-      const secs = new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false });
-      return `<div class="log-row${e.status >= 400 ? ' failed' : ''}">
-        <span class="mono log-none">${e.seq}</span>
-        <span class="log-none">${esc(secs)}</span>
-        <span class="mono log-tr" title="${esc(e.model || '')}">${esc(e.model || '—')}</span>
-        <span class="log-tr" title="${esc(e.mode || '')}">${esc(e.mode || '—')}</span>
-        <span><span class="pill ${st}">${e.status}</span></span>
-        <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
-        <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
-        <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
-        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.ttfb_ms, e.mode)}</span>
-        <span class="mono r">${e.total_ms}ms</span>
-      </div>`;
-    }).join('');
+    // ★ T-400：行生成收敛到**唯一**的 htmlToRow（本仓踩过"两处模板各写一遍、改一处漏一处"）。
+    // ★ T-400：**行级 diff** —— 只增删变化的行，其余 DOM 节点原样保留。
+    // 为什么：T-396a 的签名短路只救了"列表完全没变"。只要有新日志进来，
+    // 旧实现就整块重建 15 行 × 10 列 ⇒ 重排 + 重绘 + 滚动位置跳（用户原话"每次都会把这个页面进行重构，然后就会卡顿"）。
+    // 对齐用 **seq**（单调序号、唯一稳定），不用下标 —— 下标会随"新增一条"整体位移。
+    const cur = Array.from(host.querySelectorAll('[data-logseq]'));
+    const curSeq = cur.map(el => el.dataset.logseq);
+    const wantSeq = shown.map(e => String(e.seq == null ? '' : e.seq));
+    const addN = wantSeq.length - curSeq.length;      // 顶部多出来的条数
+    // ★ T-402b：判据修正 —— 位移量必须用**锚**算，不能用长度差。
+    //
+    // # 为什么"长度差"算不出位移（T-401/T-402 两轮实测抓到的第二层缺陷）
+    //   日志列表是**固定页大小**（limit=15）：新日志进 1 条 ⇒ 尾部同时挤出 1 条
+    //   ⇒ wantSeq.length === curSeq.length ⇒ **addN 恒为 0** ⇒ `addN > 0` 永远为假
+    //   ⇒ 情形 A 从来没进过 ⇒ 行 diff 一次都没用上
+    //   （实测证据两轮一致：新日志确实进来、行数仍是 15，但旧行 __probe 消失 = 被重建）
+    //
+    // # 正确做法：拿"旧的第一条"当锚
+    //   newN = curSeq[0] 在 wantSeq 里的下标 = **顶部新增的条数**
+    //   （旧的第一条在分页窗口里不会消失，除非它被尾部挤出去了 —— 那就走情形 B，见下）
+    //   然后要求整段对齐：curSeq[i] === wantSeq[newN + i] 全部成立；
+    //   **不要求**尾部相同（尾部被挤出的那些本来就不该再画）。
+    let newN = -1;
+    if (curSeq.length > 0) newN = wantSeq.indexOf(curSeq[0]);
+    // ⚠ T-402 实测第三层：对齐比较必须**按较短的那段**比。
+    //   直接 `curSeq.every((s,i) => wantSeq[newN+i] === s)` 时，右端会越界
+    //   （wantSeq[15] === undefined）⇒ 在"顶部进 1 条 + 尾部挤 1 条"这个最常见的情形下
+    //   **永远为假** ⇒ 情形 A 还是不进（实测：15 行全部 __probe 丢失 = 又被全量重建）。
+    //   ⇒ 只比 curSeq 的前 cmpN 项与 wantSeq[newN …] 对齐；被挤出窗口的那几项本来就不该再画。
+    const cmpN = Math.min(curSeq.length, Math.max(0, wantSeq.length - newN));
+    const aligned = cmpN > 0 && curSeq.slice(0, cmpN).every((s, i) => wantSeq[newN + i] === s);
+    if (newN > 0 && aligned) {
+      const sc = logScrollEl();
+      const nearTop = sc.scrollTop <= 2;     // 贴顶就保持贴顶（否则用户会被"推下去"）
+      const rowH = host.firstElementChild ? host.firstElementChild.offsetHeight : 18;
+      const frag = document.createDocumentFragment();
+      for (let i = newN - 1; i >= 0; i--) {  // 倒序 append ⇒ 最终顺序与 shown 一致
+        frag.appendChild(htmlToRow(shown[i]));
+      }
+      host.insertBefore(frag, host.firstChild);
+      // ★ T-402：prepend 之后必须**删掉尾部被挤出窗口的节点**，
+      //   否则表格会变成 15+newN 行（比不做 diff 更糟：行数悄悄膨胀）。
+      const all = Array.from(host.querySelectorAll('[data-logseq]'));
+      for (let i = all.length - 1; i >= wantSeq.length; i--) all[i].remove();
+      if (!nearTop) sc.scrollTop += newN * rowH;   // ★ 补偿：正在读的那条停在原地
+      return;
+    }
+    // 情形 B：其余情况（尾部变了 / 筛选变了 / 翻页）⇒ 一次性替换（仍比逐条 append 快）
+    host.replaceChildren(logRowsFragment(shown));
   }
 
 let fail = 0;

@@ -90,7 +90,7 @@ const BANNER = String.raw`// ===================================================
 
 // [1] 实读装置：grab() 抠函数体 + eval + typeof 校验（旧形态的函数体内联在这里，现在没有）。
 const READER = String.raw`const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 
 // ---- 源码实读装置：按名字抠出函数体（花括号配对），eval 进本模块作用域 ----
 //
@@ -748,17 +748,15 @@ const NAMES = MARKERS
   .map(mk => mk.replace(/^function\s+/, '').replace(/\($/, ''));
 
 // ---- 守卫 2：清单 vs 真源码（生成期就红，不留到产物运行期）----
-const htmlPath = path.join(process.env.WB2API_REPO || path.join(__dirname, '..', '..'),
-  'internal', 'server', 'webui.html');
-if (!fs.existsSync(htmlPath)) {
-  console.error('找不到被测源码：' + htmlPath + '（用 WB2API_REPO 覆盖仓库根）');
-  process.exit(1);
-}
-const webui = fs.readFileSync(htmlPath, 'utf8');
+// ⚠ 被扫的是**前端全部源码**（webui.html + ui/app.js + ui/app.css）：
+//   T-409 拆包把主 script 外置到了 ui/app.js ⇒ 只读 webui.html 会在这里报
+//   「清单里的名字找不到」，而那其实只是「源码换了文件」。
+//   真实仓库里缺文件时 lib 会**抛**（不静默），所以这里不需要自己的 existsSync 预检。
+const webui = require('./lib_frontend_source').FRONTEND;
 const missingMarkers = MARKERS.filter(mk => webui.indexOf(mk) < 0);
 if (missingMarkers.length) {
   console.error('SRC_FUNCS 清单里的名字在 webui.html 里找不到：' + missingMarkers.join('、'));
-  console.error('清单必须与源码同步（源码：' + htmlPath + '）—— 补齐清单后重跑本生成器。');
+  console.error('清单必须与源码同步（源码：前端全部源码 = webui.html + ui/app.js + ui/app.css）—— 补齐清单后重跑本生成器。');
   process.exit(1);
 }
 
@@ -808,4 +806,4 @@ console.log('  行数: ' + out.split('\n').length + '；抽取清单 SRC_FUNCS �
 // 下次有人把清单改坏时会以为"生成器没报错 = 没问题"。这里把核对过的名字数与源码路径写出来。
 console.log('  守卫: 清单 ' + MARKERS.length + ' 个标记（' + NAMES.length + ' 个函数名）'
   + '逐个在源码里找到；产物内无函数体副本；入口 ' + NAMES.length + ' 个，依赖由运行期闭包补全');
-console.log('  源码: ' + htmlPath);
+console.log('  源码: 前端全部源码（internal/server/webui.html + ui/app.js + ui/app.css）');

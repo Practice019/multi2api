@@ -384,7 +384,13 @@ function freeIdentifiers(code) {
 //   pieces       被抽出来的源码块（字符串数组 / 单个字符串 / [{name,code}]）
 //   stub         桩的源码（通常就是 gen 里那个 header 模板）—— 从里面抠出它提供的名字
 //   extra        额外豁免的名字（**每个都要有理由**，写在调用处注释里）
-//   productFile  产品源码路径（只用来生成"加什么"的建议，读不到就退化）
+//   productFile  产品源码路径（只用来生成「加什么」的建议，读不到就退化）
+//   productSrc   产品源码**内容**（与 productFile 二选一，优先用它）
+//
+// ⚠ 为什么需要 productSrc：T-409 拆包后被测源码不再是一个文件
+//   （webui.html + ui/app.js + ui/app.css）⇒ 调用方拿不到单一路径。
+//   传内容最诚实：调用方（generator）本来就已经把那三份拼好了。
+//   productFile 保留给「确实只有一个文件」的调用方。
 //   label        报错前缀（通常传 gen 文件名）
 function analyze(opts) {
   const o = opts || {};
@@ -401,7 +407,11 @@ function analyze(opts) {
   for (const n of (o.extra || [])) provided.add(n);
   for (const n of BUILTINS) provided.add(n);
 
-  const product = o.productFile ? readMaybe(o.productFile) : '';
+  // ⚠ 优先 productSrc（内容）：拆包后被测源码是**多份文件拼起来的**，
+  //   调用方手里只有内容、没有单一路径。
+  const product = o.productSrc != null
+    ? String(o.productSrc)
+    : (o.productFile ? readMaybe(o.productFile) : '');
   const missing = [];
   for (const b of blocks) {
     for (const name of freeIdentifiers(b.code)) {

@@ -9,8 +9,10 @@ const fs = require('fs');
 // 用 __dirname 而不是相对 cwd —— 从任何目录调用都能找对位置。
 // WB2API_REPO 可覆盖（变异扫描用它指向一次性副本）。
 
-const path = (process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html';
-const html = fs.readFileSync(path, 'utf8');
+// ⚠ 扫**前端全部源码**（webui.html + ui/app.js + ui/app.css）：
+//   主 script 已在 T-409 拆包时外置到 ui/app.js ⇒ 只读 webui.html 会报「找不到标记」
+//   （同上，产物里嵌的那处读取也一并换掉了）。
+const html = require('./lib_frontend_source').FRONTEND;
 
 function grabBlock(startMarker) {
   const start = html.indexOf(startMarker);
@@ -42,7 +44,7 @@ const renderSrc = grabBlock('function renderLogs(');
 
 const header = `
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 let logEntries = [];
 // logStatus：状态码筛选（null = 全部）。真实产品里它是 webui.html 的模块级 let，

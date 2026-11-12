@@ -550,7 +550,7 @@ const FIXTURE_ACCOUNTS = [
   }
 
   // 10e) 旧独立面板确实已移除
-  const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+  const html = require('./lib_frontend_source').FRONTEND;
   ok(!html.includes('<h2>本地登录'), '页面里已没有独立的「本地登录」面板');
   ok(!html.includes('clientRows'), '页面里没有旧面板的残留 DOM id');
 

@@ -1,6 +1,6 @@
 
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 // 模块级常量：renderStats 用到 NODATA（"无数据"占位）。从源码取，避免两处漂移。
 const NODATA = /const NODATA = '([^']*)'/.exec(html)[1];
 const els = {};
@@ -198,6 +198,7 @@ function dcLine(svg, pts, o) {
     svg.push('<path d="' + d.join(' ') + '" fill="none" stroke="' + stroke +
       '" stroke-width="' + (opt.width || 1.6) + '"' +
       (opt.opacity == null ? '' : ' opacity="' + opt.opacity + '"') +
+      (opt.dash ? ' stroke-dasharray="' + opt.dash + '"' : '') +
       ' stroke-linejoin="round" stroke-linecap="round"/>');
   }
   if (opt.dots) {

@@ -7,8 +7,10 @@ const fs = require('fs');
 // 用 __dirname 而不是相对 cwd —— 从任何目录调用都能找对位置。
 // WB2API_REPO 可覆盖（变异扫描用它指向一次性副本）。
 
-const path = (process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html';
-const html = fs.readFileSync(path, 'utf8');
+// ⚠ 扫**前端全部源码**（webui.html + ui/app.js + ui/app.css）：
+//   主 script 已在 T-409 拆包时外置到 ui/app.js ⇒ 只读 webui.html 会报「找不到标记」
+//   （同上，产物里嵌的那处读取也一并换掉了）。
+const html = require('./lib_frontend_source').FRONTEND;
 // 抽取列表的静态自检：node lib_extract_check.js（不带参数）就能一键复现它的判别力
 const { checkExtract } = require('./lib_extract_check.js');
 
@@ -328,7 +330,7 @@ const FIXTURE_ACCOUNTS = [
   }
 
   // 10e) 旧独立面板确实已移除
-  const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+  const html = require('./lib_frontend_source').FRONTEND;
   ok(!html.includes('<h2>本地登录'), '页面里已没有独立的「本地登录」面板');
   ok(!html.includes('clientRows'), '页面里没有旧面板的残留 DOM id');
 
@@ -344,7 +346,9 @@ const FIXTURE_ACCOUNTS = [
 checkExtract({
   pieces,
   stub: header,
-  productFile: path,
+  // ⚠ 传**内容**而不是路径：拆包（T-409）后被测源码是 webui.html + ui/app.js + ui/app.css，
+  //   没有单一路径可传（原来这里传的是 webui.html 的路径变量，已随本次改造删除）。
+  productSrc: require('./lib_frontend_source').FRONTEND,
   label: 'gen_growth_select.js',
   extra: [],   // 夹具自有的名字才进这里，且每个都要写理由；不接受整类豁免
 });

@@ -30,7 +30,7 @@ const path = require('path');
 // 所以它读到的是**另一个仓库**，测的东西跟本仓库无关。
 const REPO = (process.env.WB2API_REPO || __dirname + '/../..');
 const WEBUI = path.join(REPO, 'internal/server/webui.html');
-const html = fs.readFileSync(WEBUI, 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 
 function grab(marker) {
   const start = html.indexOf(marker);

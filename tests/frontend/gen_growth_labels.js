@@ -11,8 +11,10 @@ const fs = require('fs');
 // 用 __dirname 而不是相对 cwd —— 从任何目录调用都能找对位置。
 // WB2API_REPO 可覆盖（变异扫描用它指向一次性副本）。
 
-const path = (process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html';
-const html = fs.readFileSync(path, 'utf8');
+// ⚠ 扫**前端全部源码**（webui.html + ui/app.js + ui/app.css）：
+//   主 script 已在 T-409 拆包时外置到 ui/app.js ⇒ 只读 webui.html 会报「找不到标记」
+//   （同上，产物里嵌的那处读取也一并换掉了）。
+const html = require('./lib_frontend_source').FRONTEND;
 
 function grabBlock(startMarker) {
   const start = html.indexOf(startMarker);
@@ -53,7 +55,7 @@ const pieces = [
 
 const header = `
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 const els = {};
 function mkEl(id) { return { id, hidden: true, className: '', textContent: '', innerHTML: '', disabled: false, title: '' }; }
 for (const id of ['growthCards','growthRows','growthGroups','growthAccount','growthViews','growthTaskMeta']) els[id] = mkEl(id);
@@ -231,7 +233,9 @@ const { checkExtract } = require('./lib_extract_check.js');
 checkExtract({
   pieces,
   stub: header,
-  productFile: path,
+  // ⚠ 传**内容**而不是路径：拆包（T-409）后被测源码是 webui.html + ui/app.js + ui/app.css，
+  //   没有单一路径可传（原来这里传的是 webui.html 的路径变量，已随本次改造删除）。
+  productSrc: require('./lib_frontend_source').FRONTEND,
   label: 'gen_growth_labels.js',
   // extra：夹具自己提供的名字（**每个都要有理由**，不接受整类豁免）。
   // 目前为空 —— 报出来的每一个都要么补桩、要么补抽取，没有"算了"这一档。

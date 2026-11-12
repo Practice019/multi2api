@@ -22,7 +22,7 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = (process.env.WB2API_REPO || __dirname + '/../..');
-const html = fs.readFileSync(path.join(REPO, 'internal/server/webui.html'), 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 
 function grab(marker) {
   const s = html.indexOf(marker);

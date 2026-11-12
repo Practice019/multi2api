@@ -19,7 +19,7 @@ const fs = require('fs');
 
 const path = require('path');
 const WEBUI = (process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html';
-const html = fs.readFileSync(WEBUI, 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 
 function grab(marker) {
   const start = html.indexOf(marker);
@@ -36,7 +36,7 @@ const src = grab('function fmtTaskExpiry(');
 
 const header = `
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 `;
 

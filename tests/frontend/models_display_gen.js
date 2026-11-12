@@ -39,7 +39,7 @@
 //   （实测先例：Array#sort 的比较器在 0/1 个元素时根本不调用）。见第 [11] 节。
 // ============================================================================
 const fs = require('fs');
-const html = fs.readFileSync((process.env.WB2API_REPO || __dirname + '/../..') + '/internal/server/webui.html', 'utf8');
+const html = require('./lib_frontend_source').FRONTEND;
 
 // ---- 源码实读装置：按名字抠出函数体（花括号配对），eval 进本模块作用域 ----
 //
