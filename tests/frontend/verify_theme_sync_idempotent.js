@@ -49,15 +49,21 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const TOOL = path.join(ROOT, 'tools', 'theme_sync.js');
 const START = '/* ==== WB2API:MAXIMALISM:START（由 tools/theme_sync.js 生成，勿手改）==== */';
 const END = '/* ==== WB2API:MAXIMALISM:END ==== */';
-const PAGES = [
-  'internal/server/webui.html',
-  'internal/server/webui-login.html',
-  'internal/server/webui-channels.html',
-  'internal/server/webui-groups.html',
-  'internal/server/webui-status.html',
-  'internal/server/webui-models.html',
-  'internal/server/webui-tokens.html',
-];
+// ⚠⚠ 目标清单**从工具本身读**，不再手抄一份。
+//
+// 手抄的那份已经漂移过：T-421 把 `webui.html` 从 tools/theme_sync.js 的清单里**移除**、
+// 换成 `ui/app.css`（拆包 T-409 把 <style> 整个搬走了），而这里没跟 ——
+// 于是本守卫一直断言「webui.html 里找得到 START/END 标记」，
+// 而那个文件里**早就不该有**标记了（theme_sync.js 的注释写着它会在第一个目标就抛）。
+//
+// 单一真相源：解析 tools/theme_sync.js 的 `const PAGES = [...]`。
+// ⚠ 解析失败必须**抛**，不能回落成空数组 —— 空清单会让下面所有循环变成空转，
+//   而套件照样报绿（本目录反复踩的「守卫静默变弱」，这次不能再踩）。
+const TOOL_SRC = fs.readFileSync(TOOL, 'utf8');
+const pagesM = /const PAGES = \[([\s\S]*?)\];/.exec(TOOL_SRC);
+if (!pagesM) throw new Error('解析 tools/theme_sync.js 的 PAGES 失败 —— 守卫的目标清单拿不到，不许静默放过');
+const PAGES = Array.from(pagesM[1].matchAll(/'([^']+)'/g)).map((m) => m[1]);
+if (PAGES.length < 5) throw new Error('theme_sync 的目标清单可疑（只解析到 ' + PAGES.length + ' 个）');
 
 let fail = 0;
 const ok = (cond, msg) => { console.log((cond ? '  PASS ' : '  FAIL ') + msg); if (!cond) fail++; };
