@@ -19,6 +19,7 @@ import (
 
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // shortErr 把错误压缩成一行短句（表格 detail 列用）。
@@ -256,7 +257,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	defer cancel()
 	remain, err := p.client.UserEntUsage(ctx, a)
 	if err != nil {
-		log.Printf("trae: 额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
+		logx.Oncef(logx.LevelWarn, "trae", "quota:"+uid, "额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
 		return gateway.UnknownQuota(), true
 	}
 	if remain < 0 {
@@ -396,7 +397,7 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 		}
 		checkedIn, credits, extra, enable, serr := p.client.CheckinStatus(ctx, a)
 		if serr != nil {
-			log.Printf("trae: 签到状态查询失败 uid=%s: %v", shortUID(a.UID), serr)
+			logx.Oncef(logx.LevelWarn, "trae", "state:"+a.UID, "签到状态查询失败 uid=%s: %v", shortUID(a.UID), serr)
 			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(serr), 0, "sched")
 			continue
 		}

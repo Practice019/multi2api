@@ -4,7 +4,7 @@
 // 而两者的理由各自写在各处（判定在 credential_error.go，回调在 Options 的注释里）。
 package dailycheckin
 
-import "log"
+import "workbuddy2api/internal/logx"
 
 // reportCredentialFail 判定 + 上报。**网络类与模糊措辞一律不上报**（不误杀）。
 //
@@ -15,8 +15,9 @@ func (d *Driver) reportCredentialFail(uid string, err error) {
 	if !CredentialError(err) {
 		return
 	}
-	log.Printf("%s: 签到凭据失效 uid=%s：%v（按设计上报，由上游侧决定是否自动禁用）",
-		d.desc.ID, shortUID(uid), err)
+	logx.Oncef(logx.LevelWarn, d.desc.ID, "cred:"+uid,
+		"签到凭据失效 uid=%s：%v（按设计上报，由上游侧决定是否自动禁用）",
+		shortUID(uid), err)
 	if d.onCredFail != nil {
 		d.onCredFail(uid, err)
 	}

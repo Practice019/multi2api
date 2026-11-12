@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 var _ gateway.JobExt = (*Provider)(nil)
@@ -165,7 +166,12 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	}
 	// 只在真有动作时打日志：每 10 分钟一行"什么都没做"会淹没真正的信号。
 	if refreshed > 0 || failed > 0 {
-		log.Printf("raccoon: 后台续期完成 —— 续期 %d，跳过 %d，失败 %d", refreshed, skipped, failed)
+		// ⚠ 无变化不配 INFO（同上）。
+		if refreshed > 0 || failed > 0 {
+			logx.Infof("raccoon", "后台续期完成 —— 续期 %d，跳过 %d，失败 %d", refreshed, skipped, failed)
+		} else {
+			logx.Debugf("raccoon", "后台续期完成 —— 无变化（跳过 %d）", skipped)
+		}
 	}
 	return nil
 }

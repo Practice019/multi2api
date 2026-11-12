@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // isRefreshExpired 报告一个续期错误是不是**终态**（refresh_token 本身失效）。
@@ -177,7 +178,12 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	}
 	// 只在真有动作时打日志：每 10 分钟一行"什么都没做"会淹没真正的信号。
 	if refreshed > 0 || failed > 0 {
-		log.Printf("cline: 后台续期完成 —— 续期 %d，跳过 %d，失败 %d", refreshed, skipped, failed)
+		// ⚠ 无变化（没续上任何号、也没失败）不配 INFO：那是"什么都没发生"。
+		if refreshed > 0 || failed > 0 {
+			logx.Infof("cline", "后台续期完成 —— 续期 %d，跳过 %d，失败 %d", refreshed, skipped, failed)
+		} else {
+			logx.Debugf("cline", "后台续期完成 —— 无变化（跳过 %d）", skipped)
+		}
 	}
 	return nil
 }

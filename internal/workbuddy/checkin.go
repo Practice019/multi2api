@@ -27,7 +27,10 @@ import (
 	"log"
 	"strings"
 
+	"sync/atomic"
+	"time"
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -344,8 +347,40 @@ func (p *Provider) RunKeepaliveAll(trigger string) {
 		}
 	}
 	if line := keepaliveSummary(trigger, refreshed, halfLife, otherSkipped, failed); line != "" {
-		log.Printf("%s", line)
+		// ⚠ 全零（扫了但什么都没做）不按每轮 INFO 报，改成**每小时一条心跳**：
+		//   理由见 keepaliveIdleEvery —— 既要能区分"扫了 0 个"与"没扫"，又不能刷屏。
+		if refreshed == 0 && failed == 0 {
+			if keepaliveIdleDue(time.Now()) {
+				logx.Infof("workbuddy", "%s · 每小时心跳", line)
+			} else {
+				logx.Debugf("workbuddy", "%s", line)
+			}
+		} else {
+			logx.Infof("workbuddy", "%s", line)
+		}
 	}
+}
+
+// keepaliveIdleEvery 无事可做（全零）时"调度还活着"的心跳间隔。
+//
+// ⚠ 这一条是**取舍的落点**，两边都不能走极端：
+//
+//	· 完全不报 ⇒ 失去"扫了 0 个"与"没扫"的区分（后者说明调度已经挂了，
+//	  见 keepalive_summary_test.go 里那条测试的理由）；
+//	· 每轮都报 ⇒ 实测两天刷出 172 行全零汇总，把请求行都淹了。
+//	⇒ 每小时最多留一行 INFO，其余进 DEBUG。
+const keepaliveIdleEvery = time.Hour
+
+// keepaliveIdleLast 上次"全零心跳"的 unix 秒（0 = 还没报过）。
+var keepaliveIdleLast atomic.Int64
+
+// keepaliveIdleDue 这次全零汇报该不该走 INFO 心跳（并发安全：CAS 保证一小时只放一个）。
+func keepaliveIdleDue(now time.Time) bool {
+	last := keepaliveIdleLast.Load()
+	if last != 0 && now.Unix()-last < int64(keepaliveIdleEvery/time.Second) {
+		return false
+	}
+	return keepaliveIdleLast.CompareAndSwap(last, now.Unix())
 }
 
 // keepaliveSummary 后台一趟续期的收尾文案（manual 返回空串 = 不打印）。
@@ -365,6 +400,7 @@ func keepaliveSummary(trigger string, refreshed, halfLife, otherSkipped, failed 
 	if trigger == "manual" {
 		return ""
 	}
+
 	return fmt.Sprintf("workbuddy: 后台续期完成 —— 续期 %d，跳过 %d（其中寿命未过半 %d），失败 %d",
 		refreshed, halfLife+otherSkipped, halfLife, failed)
 }

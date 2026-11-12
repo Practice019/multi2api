@@ -14,6 +14,7 @@ import (
 
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/logx"
 )
 
 // Upstream 一个"有签到类每日动作"的上游需要提供的事实。
@@ -222,7 +223,7 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 		// 查不到 ≠ 签到失败，但对用户而言都是"今天没签上"，
 		// 记 fail 让他看得见原因。
 		d.record(acc.UID, checkinlog.StatusFail, shortErr(err), 0, trigger)
-		log.Printf("%s: 签到状态查询失败 uid=%s: %v", d.desc.ID, shortUID(acc.UID), err)
+		logx.Oncef(logx.LevelWarn, d.desc.ID, "state:"+acc.UID, "签到状态查询失败 uid=%s: %v", shortUID(acc.UID), err)
 		// ★ T-431：只有**凭据类**错误才上报禁用（网络抖动不报 —— 那会误杀好号）。
 		d.reportCredentialFail(acc.UID, err)
 		return Result{UID: acc.UID, Status: checkinlog.StatusFail, Detail: shortErr(err)}

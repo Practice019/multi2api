@@ -30,6 +30,7 @@ import (
 
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 var (
@@ -222,7 +223,7 @@ func (p *Provider) ModelMultipliers(ctx context.Context, cred gateway.Credential
 		log.Printf("codar: ModelMultipliers 拿不到价格（uid=%q err=%v 条数=%d）—— 界面倍率将显示为未知", cred.UID, err, len(price))
 		return map[string]float64{}, nil // 拿不到不报错：倍率是锦上添花，不该让请求失败
 	}
-	log.Printf("codar: ModelMultipliers 命中 %d 个模型价（uid=%q）", len(price), cred.UID)
+	logx.Debugf("codar", "ModelMultipliers 命中 %d 个模型价（uid=%q）", len(price), cred.UID)
 	baseIn, baseOut := 0.0, 0.0
 	for _, pr := range price {
 		if pr.Input <= 0 || pr.Output <= 0 {

@@ -35,6 +35,7 @@ import (
 	"workbuddy2api/internal/groupstore"
 	"workbuddy2api/internal/lobsterai"
 	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/loomy"
 	"workbuddy2api/internal/minimax"
 	"workbuddy2api/internal/monkeycode"
@@ -57,7 +58,28 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
+	levelFlag := flag.String("log-level", "", "日志级别 debug/info/warn/error/quiet（默认 info，也可用 WB2API_LOG_LEVEL）")
 	flag.Parse()
+
+	// 日志出口：统一格式（HH:MM:SS LEVEL scope msg）+ 级别过滤 + 重复消息采样。
+	//
+	// ⚠ 这里**拦截** stdlib log，而不是逐个改写调用点：本仓有 362 处 log.Printf、跨 28 个包，
+	//   拦截一次就让它们全部获得统一前缀与级别控制（对标见 internal/logx 的包注释）。
+	// ⚠ log.SetFlags(0) 必须一起做：否则 stdlib 会自带 `2026/11/12 12:05:15 ` 前缀，
+	//   与 logx 的 HH:MM:SS 叠成两段时间。
+	log.SetFlags(0)
+	log.SetOutput(logx.Pipe(logx.LevelInfo))
+	levelStr := *levelFlag
+	if levelStr == "" {
+		levelStr = os.Getenv("WB2API_LOG_LEVEL")
+	}
+	lv, lvErr := logx.ParseLevel(levelStr)
+	logx.SetLevel(lv) // 认不出时 ParseLevel 返回 info，不会因为一个笔误挡住启动
+	if lvErr != nil {
+		logx.Warnf("logx", "%v ⇒ 继续用 info", lvErr)
+	} else if lv != logx.LevelInfo {
+		logx.Infof("logx", "日志级别 = %s（quiet 只留 ERROR；debug 会打轮询细节与采样折叠）", lv)
+	}
 
 	cfg, err := Load(*cfgPath)
 	if err != nil {

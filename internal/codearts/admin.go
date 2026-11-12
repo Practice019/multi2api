@@ -40,6 +40,7 @@ import (
 
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // AdminEnv 核心为上游管理端点提供的只读依赖。
@@ -211,7 +212,12 @@ func (p *Provider) claimWelfareFor(a *Auth, trigger string) (int, []WelfareResul
 			allAlready = false
 		}
 	}
-	log.Printf("codearts: 福利领取 uid=%s 本次领到 %d/%d（trigger=%s）", a.UID, claimed, len(results), trigger)
+	// ⚠ 领到 0 是常态（今天领过 / 上游没开放）⇒ 降为 DEBUG，只有真领到才进控制台。
+	if claimed > 0 {
+		logx.Infof("codearts", "福利领取 uid=%s 本次领到 %d/%d（trigger=%s）", a.UID, claimed, len(results), trigger)
+	} else {
+		logx.Debugf("codearts", "福利领取 uid=%s 本次领到 0/%d（trigger=%s）", a.UID, len(results), trigger)
+	}
 
 	// 记一条本地历史 —— 账号池的「福利」列据此回答"今天领过没有"。
 	//

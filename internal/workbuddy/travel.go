@@ -13,6 +13,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -107,7 +108,7 @@ func (p *Provider) travelOne(a *auth.Auth, trigger string) {
 // travelDepart 空闲且未达当日上限时派出（每日 1 次，自然日 00:00 CST 重置）。
 func (p *Provider) travelDepart(a *auth.Auth, ts *upstream.TravelState, trigger string) {
 	if ts.DailyLimitReached {
-		log.Printf("travel %s: skip (daily limit reached)", a.UID)
+		logx.Debugf("travel", "%s: skip (daily limit reached)", a.UID)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusSkip, "今日已派出", 0, trigger)
 		return
 	}

@@ -2,10 +2,10 @@ package qoder
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // quotaext.go —— qoder 通过 `gateway.QuotaExt` 自报「我的额度怎么取」。
@@ -50,7 +50,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	}
 	a, err := authOf(cred)
 	if err != nil || a == nil {
-		log.Printf("qoder: 额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
+		logx.Oncef(logx.LevelWarn, "qoder", "quota:"+uid, "额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
 		return gateway.UnknownQuota(), true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -62,7 +62,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	if !ok || b == nil {
 		// 查不到是**正常情况**（凭据过期、上游限流、活动未开启）——
 		// 记一行日志但不报错，界面显示"未知"。
-		log.Printf("qoder: 额度刷新失败 uid=%s: 上游未给出可用余额（显示为未知）", shortUID(uid))
+		logx.Oncef(logx.LevelWarn, "qoder", "quota:"+uid, "额度刷新失败 uid=%s: 上游未给出可用余额（显示为未知）", shortUID(uid))
 		return gateway.UnknownQuota(), true
 	}
 	// ⚠ 成功查到余额 ⇒ 它是一个**新基准**，把"上次查询之后、还没上报的消耗"

@@ -2,10 +2,10 @@ package lobsterai
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // quotaext.go —— lobsterai 通过 `gateway.QuotaExt` 自报「我的额度怎么取」。
@@ -51,7 +51,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	}
 	a, err := authOf(cred)
 	if err != nil || a == nil {
-		log.Printf("lobsterai: 额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
+		logx.Oncef(logx.LevelWarn, "lobsterai", "quota:"+uid, "额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
 		return gateway.UnknownQuota(), true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -61,7 +61,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	if err != nil {
 		// 查不到是**正常情况**（凭据过期、上游限流、网络）——
 		// 记一行日志但不报错，界面显示"未知"。
-		log.Printf("lobsterai: 额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
+		logx.Oncef(logx.LevelWarn, "lobsterai", "quota:"+uid, "额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
 		return gateway.UnknownQuota(), true
 	}
 	// ⚠ 原始值直接转 int64，**不乘不除**（见文件头）。

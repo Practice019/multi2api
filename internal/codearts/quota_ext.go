@@ -42,6 +42,7 @@ import (
 	"log"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // RefreshQuota 取该账号的当前额度（gateway.QuotaExt）。
@@ -73,7 +74,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	sub, err := p.client.FetchSubscription(a)
 	if err != nil {
 		// 取不到 → 未知。**不返回 0**，也**不沿用旧值**。
-		log.Printf("codearts: 额度刷新失败 uid=%s: %v（显示为未知，不填 0）", a.UID, err)
+		logx.Oncef(logx.LevelWarn, "codearts", "quota:"+a.UID, "额度刷新失败 uid=%s: %v（显示为未知，不填 0）", a.UID, err)
 		return gateway.UnknownQuota(), true
 	}
 
