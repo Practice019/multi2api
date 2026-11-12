@@ -45,6 +45,12 @@ const pieces = [
   grabBlock('function renderLogStatusBar('),
   grabBlock('function hideLogStatusBar('),
   grabBlock('function renderLogs('),
+  // ⚠ 2026-11-12：以下三个是 renderLogs 引用、但抽取清单漏掉的依赖。
+  //   由 checkExtract（生成期静态自检）一次报全 —— 此前没接它，只能靠产物
+  //   运行期一个个撞 ReferenceError（撞一个改一个）。
+  grabBlock('function logScrollEl('),
+  grabBlock('function htmlToRow('),
+  grabBlock('function logRowsFragment('),
 ];
 
 const header = `
@@ -54,8 +60,30 @@ const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'
 // logStatus / logPage.total：状态码卡片条要读的两个绑定（本套件不筛、只渲染）。
 let logStatus = null;
 const logPage = { total: 0 };
+// ⚠ lastLogSig：renderLogs 开头的「内容没变就不重绘」缓存守卫读它（sig === lastLogSig 就 return）。
+//   ⚠ 注释里**不能**带反引号：本段是模板字面量，反引号会让它提前终止（同上那条门禁）。
+//   它是一个**顶层绑定**、不在任何被抽进来的函数体里 ⇒ 不桩就是 ReferenceError
+//   （产物会在第一行渲染就炸，而不是给出判据）。
+//   本套件要的是**每次都真渲染**，所以桩成 null：sig 恒不等于它 ⇒ 必定往下走。
+//   ⚠ 这条是 2026-11-12 才暴露的：此前 gen_tokps 连 renderLogs 都抽不到
+//   （主 script 外置后 webui.html 里没有它）⇒ 一直「生成失败」⇒ 产物从没跑过。
+let lastLogSig = null;
+// ⚠ 服务端注入的三个计数：产品里是**模块级绑定**（/ui 渲染时塞进来的），
+//   而 renderLogs 里调用 renderLogStatusBar 时传的就是它们
+//   ⇒ 不桩就是 ReferenceError（本套件只看 tok/s 列，给 0 即可）。
+//   ⚠ 注释里不要写反引号：本段在模板字面量内，反引号会提前终止模板（已踩两次）。
+//   ⚠ checkExtract 报不出这三个：它把**函数形参**也算作已提供，而
+//      renderLogStatusBar 的形参恰好同名 ⇒ 名字撞车掩盖了缺口（工具的已知局限）。
+const serverCounts = {};
+const serverTotalAll = 0;
+const serverTotalFiltered = 0;
 const els = {};
-const $ = id => els[id] || (els[id] = { id, innerHTML: '', textContent: '', style: {} });
+const $ = id => els[id] || (els[id] = {
+  id, innerHTML: '', textContent: '', style: {},
+  // ⚠ querySelectorAll：新抽进来的 logRowsFragment / logScrollEl 要按选择器找行/滚动容器。
+  //   空数组即可 —— 本套件断言的是 tok/s 列，不依赖它们找到什么。
+  querySelectorAll: () => [], querySelector: () => null,
+});
 `;
 
 const tail = `
@@ -256,6 +284,21 @@ console.log('\\n[7] 静态校验：表头 / grid 轨道 / 实际行 三处列数
 console.log(fail === 0 ? '\\n=== 全部通过 ===' : '\\n=== ' + fail + ' 项失败 ===');
 process.exit(fail ? 1 : 0);
 `;
+
+// ⚠ 生成期静态自检（见 lib_extract_check.js 文件头）：抽出/桩里**没提供**、
+//   也不是 JS 内建的引用名 ⇒ 当场非零退出，并告诉你要补什么。
+//
+//   本生成器此前**没接**它，后果是这类缺口只能等到产物运行期才炸成
+//   `ReferenceError: xxx is not defined`（2026-11-12 修 lastLogSig 时就是这么撞的：
+//   一次只报一个名字，改一个再撞下一个）。接上之后一次报全。
+const { checkExtract } = require('./lib_extract_check.js');
+checkExtract({
+  pieces,
+  stub: header,
+  productSrc: require('./lib_frontend_source').FRONTEND,
+  label: 'gen_tokps.js',
+  extra: [],
+});
 
 const out = header + '\n' + pieces.join('\n\n') + '\n' + tail;
 fs.writeFileSync('tokps_gen.js', out);

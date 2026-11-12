@@ -5,8 +5,30 @@ const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'
 // logStatus / logPage.total：状态码卡片条要读的两个绑定（本套件不筛、只渲染）。
 let logStatus = null;
 const logPage = { total: 0 };
+// ⚠ lastLogSig：renderLogs 开头的「内容没变就不重绘」缓存守卫读它（sig === lastLogSig 就 return）。
+//   ⚠ 注释里**不能**带反引号：本段是模板字面量，反引号会让它提前终止（同上那条门禁）。
+//   它是一个**顶层绑定**、不在任何被抽进来的函数体里 ⇒ 不桩就是 ReferenceError
+//   （产物会在第一行渲染就炸，而不是给出判据）。
+//   本套件要的是**每次都真渲染**，所以桩成 null：sig 恒不等于它 ⇒ 必定往下走。
+//   ⚠ 这条是 2026-11-12 才暴露的：此前 gen_tokps 连 renderLogs 都抽不到
+//   （主 script 外置后 webui.html 里没有它）⇒ 一直「生成失败」⇒ 产物从没跑过。
+let lastLogSig = null;
+// ⚠ 服务端注入的三个计数：产品里是**模块级绑定**（/ui 渲染时塞进来的），
+//   而 renderLogs 里调用 renderLogStatusBar 时传的就是它们
+//   ⇒ 不桩就是 ReferenceError（本套件只看 tok/s 列，给 0 即可）。
+//   ⚠ 注释里不要写反引号：本段在模板字面量内，反引号会提前终止模板（已踩两次）。
+//   ⚠ checkExtract 报不出这三个：它把**函数形参**也算作已提供，而
+//      renderLogStatusBar 的形参恰好同名 ⇒ 名字撞车掩盖了缺口（工具的已知局限）。
+const serverCounts = {};
+const serverTotalAll = 0;
+const serverTotalFiltered = 0;
 const els = {};
-const $ = id => els[id] || (els[id] = { id, innerHTML: '', textContent: '', style: {} });
+const $ = id => els[id] || (els[id] = {
+  id, innerHTML: '', textContent: '', style: {},
+  // ⚠ querySelectorAll：新抽进来的 logRowsFragment / logScrollEl 要按选择器找行/滚动容器。
+  //   空数组即可 —— 本套件断言的是 tok/s 列，不依赖它们找到什么。
+  querySelectorAll: () => [], querySelector: () => null,
+});
 
 function normalizeDesc(items) {
     return (items || []).slice().sort((a, b) => {
@@ -165,6 +187,47 @@ function renderLogs(items) {
     }
     // 情形 B：其余情况（尾部变了 / 筛选变了 / 翻页）⇒ 一次性替换（仍比逐条 append 快）
     host.replaceChildren(logRowsFragment(shown));
+  }
+
+function logScrollEl() {
+    let el = $('logrows');
+    while (el && el !== document.body) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) return el;
+      el = el.parentElement;
+    }
+    return $('logrows') || document.documentElement;
+  }
+
+function htmlToRow(e) {
+    const st = e.status >= 200 && e.status < 300 ? 'ok' : e.status >= 400 ? 'err' : 'warn';
+    // ② 数值列右对齐（.r）
+    // ③ 无值用 `<span class="log-none">—</span>`：占位符画出来但比正文淡一档 ——
+    //    参考项目的原话"空着会被当成渲染缺失"。破折号用全角「—」与项目其它面板一致。
+    const dash = '<span class="log-none">—</span>';
+    const secs = new Date(e.at).toLocaleTimeString('zh-CN', { hour12: false });
+    const html = `<div class="log-row${e.status >= 400 ? ' failed' : ''}" data-logseq="${esc(String(e.seq == null ? '' : e.seq))}">
+        <span class="mono log-none">${e.seq}</span>
+        <span class="log-none">${esc(secs)}</span>
+        <span class="mono log-tr" title="${esc(e.model || '')}">${esc(e.model || '—')}</span>
+        <span class="log-tr" title="${esc(e.mode || '')}">${esc(e.mode || '—')}</span>
+        <span><span class="pill ${st}">${e.status}</span></span>
+        <span class="mono log-none log-tr" title="${esc(e.uid || '')}">${esc(e.uid || '—')}</span>
+        <span class="mono r">${e.ttfb_ms ? e.ttfb_ms + 'ms' : dash}</span>
+        <span class="mono r">${e.tokens >= 0 ? e.tokens : dash}</span>
+        <span class="mono r">${tokPerSec(e.out_tokens, e.total_ms, e.ttfb_ms, e.mode)}</span>
+        <span class="mono r">${e.total_ms}ms</span>
+    </div>`;
+    // 用 template 解析（比 createElement + 逐列 appendChild 短，且与旧模板逐字一致）
+    const tpl = document.createElement('template');
+    tpl.innerHTML = html.trim();
+    return tpl.content.firstElementChild;
+  }
+
+function logRowsFragment(rows) {
+    const frag = document.createDocumentFragment();
+    for (const e of rows) frag.appendChild(htmlToRow(e));
+    return frag;
   }
 
 let fail = 0;

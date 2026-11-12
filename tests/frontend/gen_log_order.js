@@ -52,8 +52,25 @@ let logEntries = [];
 let logStatus = null;
 // logPage.total：卡片条尾的「共 M 条」读它。本套件只关心排序契约，给 0 即可。
 const logPage = { total: 0 };
+// ⚠ lastLogSig：renderLogs 开头的「内容没变就不重绘」缓存守卫读它，
+//   而它是 **app.js 的顶层绑定**、不在任何被抽出来的函数体里 ⇒ 不桩就是
+//   ReferenceError（产物在第 [3] 节一进 renderLogs 就炸，给不出判据）。
+//   桩成 null：首个 sig 必不等于它 ⇒ 必定真渲染。
+//   ⚠ 与 gen_tokps.js 同一个缺陷、同一处补（2026-11-12 暴露：此前这两个
+//     生成器连 renderLogs 都抽不到 ⇒ 一直「生成失败」⇒ 产物从没跑过）。
+let lastLogSig = null;
+// ⚠ 服务端注入的三个计数：产品里是**模块级绑定**（/ui 渲染时塞进来的），
+//   而 renderLogs 里调用 renderLogStatusBar 时传的就是它们
+//   ⇒ 不桩就是 ReferenceError（本套件只看 tok/s 列，给 0 即可）。
+//   ⚠ 注释里不要写反引号：本段在模板字面量内，反引号会提前终止模板（已踩两次）。
+//   ⚠ checkExtract 报不出这三个：它把**函数形参**也算作已提供，而
+//      renderLogStatusBar 的形参恰好同名 ⇒ 名字撞车掩盖了缺口（工具的已知局限）。
+const serverCounts = {};
+const serverTotalAll = 0;
+const serverTotalFiltered = 0;
 const els = {};
-function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', style:{}, querySelector:()=>null }; }
+// ⚠ querySelectorAll 同 tokps：抽进来的 logRowsFragment / logScrollEl 要用它。
+function mkEl(id){ return { id, innerHTML:'', textContent:'', hidden:true, className:'', style:{}, querySelector:()=>null, querySelectorAll:()=>[] }; }
 els.logrows = mkEl('logrows');
 els.logStatusBar = mkEl('logStatusBar');
 const $ = id => els[id] || (els[id] = mkEl(id));
