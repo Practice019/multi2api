@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -394,6 +396,49 @@ func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, 
 	logChatRowProvider(ttfb, total, model, mode, uid, "", status, toks, usage, "", "", "", nil, 0, "", "")
 }
 
+// tokPerSecField 组装终端表格的 tok/s 列。
+//
+// # 口径与网页端 app.js 的 tokPerSec **逐条一致**（2026-11-12 修）
+//
+// 旧实现是 `toks / total`：分子是 totalTokens()（**含 prompt** 的总处理量），
+// 分母是含 TTFB 的总耗时。而网页端用的是 `out_tokens / (total − TTFB)`。
+// ⇒ 同一条请求两个数。实测（用户 2026-11-12 的日志）一条 prompt 约 4.2 万的请求，
+//
+//	终端打 19255 tok/s —— 那其实是"总处理量 ÷ 总耗时"的吞吐，不是生成速度；
+//	而 `tok/s` 这个名字、以及仓库夹具里的判据（"契约必须与 stdout 表格一致，
+//	否则同一条请求在终端与网页上会显示两个不同的速率"）都指向"生成速度"。
+//
+// 精度也照网页的 fmtTps：≥10 取整、<10 一位小数。
+// ⚠ 算式与精度必须**同时**一致：只对齐算式、精度仍两套，同一条请求照样两个数。
+func tokPerSecField(mode string, outTokens int, total, ttfb time.Duration) string {
+	if mode != "" && mode != "stream" {
+		return "-" // 非流式：没有"首字之后的生成阶段"这回事（与前端同一条判据）
+	}
+	if outTokens <= 0 {
+		return "-" // 上游没给 completion_tokens：不能拿总处理量冒充输出
+	}
+	if total <= 0 {
+		return "0.0" // 时钟粒度内完成：显示 0.0 而不是 Inf/NaN
+	}
+	gen := total - ttfb
+	if gen <= 0 {
+		return "-" // 首字即末字：除零会得到 Inf
+	}
+	return fmtTpsGo(float64(outTokens) / gen.Seconds())
+}
+
+// fmtTpsGo 是 app.js `fmtTps` 的 Go 版：≥10 取整、<10 保留一位小数。
+// 来源是 DSH 官方 formatTokensPerSecond 的规则（大数不需要小数位，小数才需要）。
+func fmtTpsGo(v float64) string {
+	if v < 0 {
+		v = 0
+	}
+	if v >= 10 {
+		return strconv.FormatInt(int64(math.Round(v)), 10)
+	}
+	return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64)
+}
+
 // logChatRowProvider 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
 // toks<0 表示 usage 缺失，显示 "-"。provider 为空表示未标注。
 //
@@ -487,11 +532,10 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 	tokpsField := "-"
 	if toks >= 0 {
 		tokField = fmt.Sprintf("%d", toks)
-		if total > 0 {
-			tokpsField = fmt.Sprintf("%.1f", float64(toks)/total.Seconds())
-		} else {
-			tokpsField = "0.0"
-		}
+		// ⚠ 2026-11-12：tok/s 改成**与网页端同一口径**（app.js 的 tokPerSec）——
+		//   分子用 entry.OutTokens（纯输出 token，不是 toks 那份"总处理量"），分母扣掉 TTFB。
+		//   旧实现 `toks/total` 会让同一条请求在终端与网页显示两个不同的速率。
+		tokpsField = tokPerSecField(mode, entry.OutTokens, total, ttfb)
 	}
 	ttfbMS := "-"
 	if ttfb > 0 {
