@@ -85,6 +85,72 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+      # RELEASE_NOTES.md 是发布流水线 `--notes-file` 的**直取目标** ⇒ 它必须**只含本版内容**
+      #（AGENTS.md 原话：「改 RELEASE_NOTES.md 为本版内容」）。
+      #
+      # # 这条门禁对应一次真实事故（v2.0.3 的对外正文）
+      #
+      # 发布时把新版说明**前置拼进**旧文件（而不是替换）⇒ GitHub 上那一版的正文里混进了
+      # 上一版全文（两个顶层标题）。这类错**不会报错**：步骤成功、Release 也建出来了，
+      # 只有下载的人会读到两版混在一起的说明 —— 而"说明"正是他判断能不能升级的依据。
+      #
+      # 两条判据都是"追加"形态的直接指纹：
+      #   ① 顶层「# 」标题恰好 1 个（追加 ⇒ 2 个；清空或标题写成「## 」⇒ 0 个）
+      #   ② 该标题必须含本次 tag（忘改标题、留着上一版 ⇒ 红）
+      #
+      # ⚠ 手动触发（workflow_dispatch）时 ref 是**分支名**而不是 tag ⇒ 只查 ①、不查 ②，
+      #   否则"手动跑一次 workflow"必然红（与下面 release job 的
+      #   `startsWith(github.ref, 'refs/tags/v')` 是同一条口径）。
+      - name: Check RELEASE_NOTES.md is this version only
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -e
+          FILE=RELEASE_NOTES.md
+          if [ ! -s "$FILE" ]; then
+            echo "::error::$FILE 缺失或为空 —— Release 正文会退化成一句模板话"
+            exit 1
+          fi
+          # 顶层标题 = 行首「# 」（「## 」等子标题不算）。
+          mapfile -t TITLES < <(grep -n '^# ' "$FILE" || true)
+          if [ "${#TITLES[@]}" -ne 1 ]; then
+            echo "::error::$FILE 的顶层标题必须恰好 1 个，实际 ${#TITLES[@]} 个："
+            printf '  %s\n' "${TITLES[@]}"
+            echo "正确做法：把这个文件改成**本版内容**（替换，不是追加）——"
+            echo "  · 把上一版内容留在里面 ⇒ 会出现两个顶层标题（v2.0.3 就是这么发出去的）"
+            echo "  · 整篇清空、或标题写成了「## 」⇒ 0 个"
+            exit 1
+          fi
+          TITLE="${TITLES[0]#*:}"
+          # ⚠ tag 判据必须是**等值**，不能是子串包含 —— 子串会误通：
+          #   标题 `# v2.0.3 — 2026-11-12` 配 tag=v2.0 与 tag=v2 都会"通过"，
+          #   而那正是这条门禁要防的那类"看起来对"（验证者实测出来的）。
+          #
+          # 取「tag 段」= `# ` 之后、日期分隔符之前的那一段。本仓现行形态
+          # `# <tag> — <日期>`（全角破折号），另两种写法也认：
+          #   `# v2.0.3 - 2026-11-12`（半角短横 + 两侧空格）/ `# v2.0.3`（没有日期）
+          HEAD="${TITLE#"# "}"
+          TAG_IN_TITLE="${HEAD%%[[:space:]]—*}"            # 全角破折号（含前置空格）
+          TAG_IN_TITLE="${TAG_IN_TITLE%%—*}"               # 无空格的全角破折号
+          TAG_IN_TITLE="${TAG_IN_TITLE%%[[:space:]]-*}"    # 半角短横（含前置空格）
+          # ⚠ 无空格的短横形态（`v2.0.3-2026-11-12`）只在短横后紧跟 4 位年份时才切，
+          #   免得把预发布 tag（`v2.1.0-rc1`）切坏 —— 那会造成一次**假红**。
+          TAG_IN_TITLE="${TAG_IN_TITLE%%-2[0-9][0-9][0-9]-*}"
+          TAG_IN_TITLE="${TAG_IN_TITLE%%[[:space:]]*}"     # 兜底：截到第一个空白
+          if [ "$RELEASE_REF_TYPE" != "tag" ]; then
+            echo "顶层标题：$TITLE（tag 段 = $TAG_IN_TITLE；非 tag 触发，ref=$RELEASE_TAG ⇒ 跳过 tag 一致性检查）"
+            exit 0
+          fi
+          if [ "$TAG_IN_TITLE" != "$RELEASE_TAG" ]; then
+            echo "::error::$FILE 的顶层标题与本次 tag 不一致"
+            echo "  实际标题：$TITLE"
+            echo "  标题里的 tag 段：$TAG_IN_TITLE"
+            echo "  本次 tag：$RELEASE_TAG（要求**相等**，不是「包含」—— 例如「# v2.0.3 — 2026-11-12」）"
+            echo "正确做法：把这个文件改成**本版内容**（替换，不是追加）"
+            exit 1
+          fi
+          echo "顶层标题：$TITLE（tag 段 = $TAG_IN_TITLE，与本次 tag 相等 ✓）"
 
   build:
     name: build ${{ matrix.goos }}-${{ matrix.goarch }}

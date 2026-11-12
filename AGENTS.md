@@ -62,7 +62,11 @@ type Provider interface {
 `AdminExt` 存在且路由非空」。**少报是安全的，多报会被当场抓住**；前端按能力位显隐，
 多报等于画一个点了必然失败的按钮。
 
-### 4. 扩展点（28 个接口，`gateway.ExtOf[T](p)` 类型断言发现）
+### 4. 扩展点（37 个接口，`gateway.ExtOf[T](p)` 类型断言发现）
+
+⚠ 这个数字以**实测**为准（本表随接口增删漂移是常态，别照它去推断）。重扫：
+`internal/gateway/*.go` 里 `^type Xxx interface` 的全部声明，减去两个非扩展点
+（`Provider` 是接缝本身、`contract.go` 的 `TB` 是测试夹具）—— 命令与矩阵见 `docs/上游接入协议.md` §2.3。
 
 **只实现自己有的**，不实现不算错（核心回落默认行为）。加第 N 个扩展点只改 `gateway`，不改核心。
 
@@ -360,6 +364,9 @@ go vet ./...
 go test ./... -count=1
 ```
 
+- ⚠ **16GB 机器上 `go test ./...` 可能编译期 OOM 报假红**：`[build failed]` +
+  `fatal error: out of memory`，且**每次失败的包集合都不同** ⇒ 先 `GOFLAGS=-p=1` 复验，别当成代码回归。
+  事实与判据见 `docs/known-issues.md` 的「环境」一节。
 - `go test -race` 在 CI 里是 **advisory**（`continue-on-error: true`）。
   本机无 gcc，实测 zig 当 C 编译器时能编译但**链接失败**
   （mingw 导入库缺 `WaitOnAddress`）——**跑不了，别假装跑过**。

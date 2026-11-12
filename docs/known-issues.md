@@ -95,6 +95,53 @@ HTTP 503（4.5s）… upstream **fatal_client** …      ← ⚠ 分类确实生
 
 ---
 
+## 环境：`go test ./...` 在 16GB 机器上会**编译期 OOM**（表现为**假红**）
+
+### 症状（2026-11-12 实测）
+
+```
+FAIL	workbuddy2api/internal/phanthywork [build failed]
+FAIL	workbuddy2api/internal/pool [build failed]
+FAIL	workbuddy2api/internal/prompt [build failed]
+fatal error: out of memory
+```
+
+- 并发跑与串行跑**都**可能命中；**每次被点名的包集合都不一样**。
+- 触发条件：Go 1.27 的编译峰值内存 + 页文件已用 10.6GB，16GB 机器在同一时刻还有第二个 `go` 进程时越界
+  （实测那一刻可用内存 2.0–2.6GB / 16GB，且同时有两个 `go` 进程）。
+- 被点名的包**单独跑各自是 ok 的**；同树编译的 `go vet ./...` 可能 exit 0（它的内存曲线不同）。
+
+### 判据（⚠ 别把它当成代码问题 —— 本仓已两次有人误判）
+
+1. `[build failed]` + `fatal error: out of memory`，且**失败包集合每次不同** ⇒ 先按环境问题处理。
+2. 用 `-p=1`（一次只编译一个包）复验，绿 ⇒ 是 OOM、不是回归；仍红 ⇒ 才是代码问题：
+
+   ```bash
+   GOFLAGS=-p=1 go test ./... -count=1
+   ```
+
+3. 同时确认那一刻**没有第二个 `go build` / `go test` 在跑**（并行 agent 与编辑器 LSP 都算）。
+
+---
+
+## 环境：`internal/codearts` 的 live 用例会因上游瞬时 504 而**假红**
+
+### 事实（2026-11-12 实测）
+
+- `internal/codearts/welfare_test.go:53` 的 `TestFetchWelfareLive` **会真打上游**（不是 hermetic 用例）。
+- 上游 504（`APIG.0203 Backend timeout`）时该用例直接红 ⇒ 联网机器上 `go test ./...` 会因此出现 **1 条红**（其余包全绿）。
+- 它只有两条 skip 路径：`-short` 与"没有凭证" ⇒ 有凭证且未加 `-short` 时**必然发出真实请求**。
+- 同一用例**连跑两次**实测：第一次 `FAIL`(504) / 第二次 `PASS`(0.33s) ⇒ 是**上游瞬时抖动**，不是回归。
+
+### 判据
+
+1. 单跑这一条：`go test ./internal/codearts/ -count=1 -run TestFetchWelfareLive`；
+2. 或复跑一次全量：**绿 ⇒ 抖动；连续红 ⇒ 才要查**（两次以上都红再当回归）。
+3. ⚠ **不建议**给它加"5xx 就 skip"的守卫 —— 那会把**真实**的上游故障一起掩盖。
+   这一节是**记录**，不是待办。
+
+---
+
 ## 已修：值得知道为什么的几处
 
 | 位置 | 做了什么 | 为什么（⚠ 别改回去） |

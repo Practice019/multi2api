@@ -5,7 +5,7 @@
 <h1 align="center">multi2api</h1>
 
 <p align="center">
-  <b>把 14 个 AI 上游聚合成 OpenAI 兼容 API 的多账号网关</b><br>
+  <b>把 15 个 AI 上游聚合成 OpenAI 兼容 API 的多账号网关</b><br>
   统一鉴权 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到与续期 · 管理控制台
 </p>
 
@@ -38,7 +38,7 @@
 > - 上游之间不得互相依赖
 > - 新增上游只需在 `cmd/server/main.go` 加一行 `registry.Register(...)`
 >
-> 从 4 个上游扩到 14 个的过程中，核心包**一行没改** —— 这条判据是实践过的，不是口号。
+> 从 4 个上游扩到 15 个的过程中，核心包**一行没改** —— 这条判据是实践过的，不是口号。
 
 ## ✨ 核心能力
 
@@ -83,6 +83,7 @@
 | **MiniMax Code**（中国版） | OAuth 设备码 + PKCE（不起本地端口） | 积分余额 / 每日签到（幂等）/ 粘贴导入。**第二个 Anthropic 协议族上游** —— 只有 Anthropic 端点，没有 OpenAI 形态 |
 | **MonkeyCode**（长亭科技） | 浏览器登录 → session / api_key / signing_secret（**唯一需要请求签名**的上游） | 额度 + 今日 Token / 每日签到 / 注册机批量导入。国内站恒直连、国际站走代理（两站网络前提相反） |
 | **Codar**（科搭 / SpeedAI） | 手机号 + 短信验证码 / 微信授权 / 桌面端 `config.json` 导入 | 余额（三桶口径）/ 每日签到 / 邀请码 / 免费模型池 / 自动续期。**按 model 自动分流两个协议**：openai 系走 `/chat/completions`，claude 系走 `/messages` |
+| **PhanthyWork**（PhanthyCode / PhanthyWork 桌面端） | 导入桌面端 `.credentials.json` / 页内 OAuth / 批量粘贴导入（三把 ed25519 私钥由网关自造并持久化） | 对话 / 模型目录 / **每日签到**（手动，300 分/天）/ **额度四窗口** / **批量导入** / **邀请码面板** —— 能力位 **6 个**：`CapChat` `CapModels` `CapQuotaProbe` `CapCheckin` `CapImport` `CapInvite`。**它和别家不同**：调模型除了 Bearer 还要**每请求一段 ed25519 proof 签名**，且推理令牌只活 **180 秒**（accessToken 的十分之一）⇒ 每次调用前都要预检重换 |
 
 ## 🚀 快速开始
 
@@ -137,6 +138,28 @@ go build -o wb2api-server ./cmd/server    # Go ≥ 1.22（CI 用 1.22.5）
 - **Loomy**：点「＋ 添加账号」可**输手机号 + 验证码登录**；或点「批量导入」直接粘贴
   JSON（`[{"phone":"...","userid":"...","session":"..."}]`，支持多条）；或把凭证放进
   `auths/loomy/loomy-<uid>.json` 后点「重载 auths」。
+
+- **PhanthyWork**：三条路任选 ——
+  1. 点「＋ 添加账号」走**页内 OAuth**（授权码 + PKCE + loopback）；
+  2. 起不了本地端口时（服务器部署）用「**手动粘贴**」：把浏览器成功页里**完整的 `code#state` 一整串**贴回来 ——
+     ⚠ `state` 是这次登录的凭据之一，只贴 `code` 会被拒（不是"多贴了一段"）；
+  3. 直接**批量导入**：粘贴桌面端的 `.credentials.json`（官方 / 网关 / 扁平三种形态都认）。
+  也可以把凭证文件（`%USERPROFILE%\.phanthy-code\.credentials.json`）按本仓约定命名成
+  `auths/phanthywork/phanthywork-*.json` 放进去，再点「重载 auths」。
+  网关会**自己**造三把 ed25519 私钥并随凭证一起落盘 —— `identity` 一变 `installationId` 就变，
+  服务端会当成另一台设备（要重新注册 / 直接 409），所以那三把钥匙**不要手工删或替换**。
+  - **签到**：账号行的「签到」按钮（或分组行的「全部签到」）领当天积分（300 分/天，连续上限 5 天）。
+    **自动签到是通着的** —— 走核心自带的「统一签到」任务（`core-daily-checkin`：运行时按 `DailyCheckinExt` 发现上游，
+    每天扫一遍、今天已成功扫过的连 `CheckinAll` 都不调）。本上游**只刻意不注册自己那份 Job**（`Enabled=false` 只关它，
+    卡点 `CheckinOne` 从不看这个开关）：桌面端启动后约 80 秒会自己领一次，再挂一个 per-upstream Job 只是让同一天多打几轮幂等接口。
+  - **邀请码**：左侧「邀请码」标签页，**一行一个账号**，列平台给的 5 个邀请槽（`invite_code` 是给人念的 `XXXX-XXXX-XXXX`，`code` 用来拼 `/r/` 分享链接）。
+    ⚠ **首次打开会对该账号调一次 `POST /api/oauth/referrals/code`**（平台自己的**取/建**接口，**同日幂等**：重取返回相同的 5 槽、不换码）。
+    护栏：只在面板打开/点刷新时按需调用（不挂定时任务）；每账号每自然日最多一次 POST（当日缓存命中就不再打）；账号间串行且两次写之间 ≥1s；
+    失败不回滚不重试（该行给可读错误）；`eligible_to_invite=false` 或拿不到 installation id ⇒ 一次都不调。
+    ⚠ 平台**没有**「看自己邀请码」的只读接口（`GET /api/oauth/referrals/code` 实测 405）—— 这就是面板必须走那次 POST 的原因。
+  - ⚠ **本上游不做注册**：手机号注册卡在**真实短信验证码**，端到端未验证（见
+    `register-machine/docs/reports/phanthywork/` §6.9）。本仓做的是「有号之后」那条链路：
+    登录 / 续期 / 换推理令牌 / 调模型（实测 HTTP 200）/ 签到 / 额度 / 导入。
 
 > ⚠ **关于无痕窗口**：默认给浏览器一份**独立 profile**（临时目录），
 > 这次授权从零 cookie 开始 —— 避免浏览器里已登录的账号把会话串到别的账号上。
@@ -206,7 +229,8 @@ Claude Code / Cursor 等）不需要在配置里声明任何工具**：
 > 要停用一个上游，把它的凭证从 `auths/` 移走。
 
 `workbuddy` · `workbuddy_intl` · `codearts` · `loomy` · `trae` · `cline` ·
-`raccoon` · `lobsterai` · `qoder` · `zcode` · `minimax`
+`raccoon` · `lobsterai` · `qoder` · `zcode` · `minimax` · `monkeycode` ·
+`codar` · `phanthywork`
 
 **MiniMax Code 特有配置段**：
 
@@ -299,6 +323,32 @@ cp:你的Key.secretKey           标记为 Coding Plan 的 Key
 | `trae.refresh_interval_seconds` | `1800` | 后台 token 自动续期扫描间隔（`<=0` 关闭） |
 | `trae.checkin_enabled` | `true` | 每日自动签到（30 分钟扫一次，幂等） |
 | `trae.agent_base_url` / `ug_base_url` / `oauth_base_url` | 内嵌默认 | 三个 host 覆盖（一般不用改） |
+
+**PhanthyWork 特有配置段**：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `phanthywork.auth_dir` | `<auth_dir>/phanthywork` | 凭证目录（`phanthywork-*.json`） |
+| `phanthywork.api_base` | `""`（官方 `https://code.phanthy.com`） | 上游基址覆盖 |
+| `phanthywork.ua` | `""`（`Bun/1.3.14`） | 出站 UA。⚠ 官方客户端是 **Bun 编译的二进制**，UA 就是运行时默认值；换掉它会命中 `403 TM.00000001「网络繁忙」`——**报错指向网络，真因是 UA** |
+| `phanthywork.clock_skew_ms` | `0`（每次启动自校准） | 本机时钟相对服务端的偏移（毫秒）。⚠ 签名时间戳必须用**服务端**口径；实测本机曾慢 **68 秒** ⇒ `403 request_not_authorized`（文案说「请更新或重新打开客户端」）。本机时钟一直在漂，**建议留 0**，由实现每次启动用 `server_time` 重校准 |
+| `phanthywork.pool_accounts` | `true` | 是否并入核心账号池 |
+
+> ⚠ **能力位 6 个：`CapChat` `CapModels` `CapQuotaProbe` `CapCheckin` `CapImport` `CapInvite`**
+> （本仓规矩：声明即承诺，少报是安全的 —— 声明了就得真能用，契约测试会验）。
+>
+> **签到**：手动（账号行按钮 + 分组行「全部签到」），端点 `/admin/phanthywork/checkin` 与 `…/checkin/all`；
+> 幂等键取**服务端给的** `server_date`，重复点不会领两次。⚠ 自动签到未启用（理由见「添加账号」那一节）。
+> **额度**：`GET /api/oauth/usage` 的四个窗口（签到 300 分/天 · 免费模型扣 0 · 钱包 `campaignPools` 明细）。
+> **导入**：`AccountImportExt`，认官方 / 网关 / 扁平三种凭证形态。
+> **邀请码面板**：左侧「邀请码」标签页，一行一个账号，列出平台给的 **5 个邀请槽**（`invite_code` 是给人念的 `XXXX-XXXX-XXXX`，`code` 是 `/r/` 链接里那把）。
+> ⚠ **首次打开会对该账号调一次 `POST /api/oauth/referrals/code`**（平台自己的**取/建**接口，**同日幂等**：同一天重取返回完全相同的 5 槽，重取不换码）。
+> 它是**读了会写**的面板，护栏因此写死在代码里：只在面板被打开/点刷新时按需调用（**不挂定时任务**）；每账号每自然日最多一次 POST（当日缓存命中就不再打）；
+> 账号间串行且两次写之间 ≥1s；失败不回滚不重试（该行给可读错误）；`eligible_to_invite=false` 或拿不到 installation id ⇒ **一次都不调**。
+> ⚠ 平台**没有**"看自己邀请码"的只读接口（`GET /api/oauth/referrals/code` 实测 405）—— 这是为什么面板必须走那次 POST。
+>
+> ⚠ 模型 id 要用**云端目录**的那份（`GET /api/phanthy_code/models`，**不带 `phanthy/` 前缀**）：
+> 写成桌面端本地网关给的 `phanthy/Phanthy-fast` 会得到 `403 model_not_allowed`。
 
 ## 🖥️ 管理控制台
 
@@ -402,6 +452,10 @@ curl http://127.0.0.1:7863/v1/chat/completions \
 - `POST /v1/images/generations`：OpenAI 兼容生图。
 - `GET /healthz`（**无鉴权**，负载均衡友好）；`GET /status`（需**控制台身份**且必须是管理员）。
 - 管理 API：`/admin/*`（默认只建议本机使用，**需要会话或 `admin_token`**）。
+- **`gateway_notice`（非标准字段，可忽略）**：当上游把输出预算**全花在思考上**时
+  （`reasoning_content` 有值而 `content` 为空），非流式响应会多带这一条**人话提示** ——
+  content 仍是空串（网关不会拿自己的话冒充模型正文），提示里给出可操作建议（提高 `max_tokens`）。
+  不认识的客户端忽略它即可；真正没有正文也没有推理、或 `tool_calls` 形态，都**不会**带它。
 
 ## 🛡️ 安全与合规
 

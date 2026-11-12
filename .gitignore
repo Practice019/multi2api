@@ -309,3 +309,9 @@ config-test/
 
 # T-352：codar 邀请码端点逆向报告（交付物）
 !docs/reports/codar-invite-reverse.md
+
+# 新增上游协议（交付物）：它是"怎么加第 14 个上游"的唯一判据表，
+# 每条规则都带守卫文件:行 —— 没有它，下一个 agent 会重抄一遍 AGENTS.md §7，
+# 并且会把已过期的"28 个扩展点"和"upstreamPrefix 要登记"一起抄进去。
+# ⚠ 规则必须写在 *.md 之后（gitignore 后匹配者胜），否则会被 *.md 吃掉。
+!docs/上游接入协议.md
