@@ -66,6 +66,21 @@ const (
 	// ⚠ 不会因此打急上游：并发仍是 panelWarmupConcurrency，每轮仍是
 	//   panelWarmupBatch 个上限 —— 缩短的只是"两轮之间干等的时间"。
 	panelWarmupBusyInterval = 5 * time.Second
+	// panelWarmupMaxRetryInterval 「这一轮一个都没补上」时的退避上限。
+	//
+	// ⚠⚠ 2026-11-12（用户报"日志在刷屏"）：真因不在日志，在**节奏** ——
+	//   死号（上游回 `100002: 登录已失效`）永远补不上 ⇒ 待办数恒定不变 ⇒
+	//   每 5 秒一轮、每轮 12 个上游请求、每轮一条一模一样的日志，**永不停止**。
+	//   ⚠ 退避**只在待办数没有变化时**才生效（= 本轮一个都没补上）；
+	//     正常追赶时待办每轮都在降 ⇒ 间隔照样回到 5 秒，
+	//     不拖慢 panelWarmupBusyInterval 注释里承诺的"打开就是毫秒"。
+	//   取与稳定态同值：那批号本来就刷不出来了，没必要比稳定态更频繁。
+	panelWarmupMaxRetryInterval = 5 * time.Minute
+	// panelWarmupLogHeartbeat 日志内容不变时的心跳间隔。
+	//
+	// ⚠ 心跳是必须的：退避到 5 分钟后若一个字都不打，排障时看到的是"日志停了"，
+	//   无法区分"在退避"与"那个 goroutine 已经死了"。
+	panelWarmupLogHeartbeat = 5 * time.Minute
 	// panelWarmupBatch 每轮最多补几个号。
 	//
 	// ⚠ 取 12 而不是更小：一轮的耗时 ≈ 批量 / 并发 × 单号耗时，批量太小会让
@@ -104,16 +119,81 @@ func (p *Provider) StartPanelWarmup() {
 			//     · 还有待补（追赶态）⇒ 5 秒一轮 ⇒ 44 个号约 2 分钟补满
 			//     · 都补完了（稳定态）⇒ 5 分钟一轮 ⇒ 几乎不发请求
 			//   ⚠ 固定 60 秒的版本实测会浪费一半时间空等（一轮只要 30 秒）。
+			// ⚠ 节奏与日志都交给 panelWarmupPace：它的两条判据是
+			//   「待办数变了没」和「日志内容变了没」。死号会让两者的答案长期是
+			//   "没变" —— 而那正是刷屏与"每 5 秒打一次上游"的来源（见那里的注释）。
+			pace := &panelWarmupPace{}
 			for {
-				left := p.sweepPanels()
-				if left > 0 {
-					time.Sleep(panelWarmupBusyInterval)
-					continue
+				left, line := p.sweepPanels()
+				sleep, shouldLog := pace.next(left, line, time.Now())
+				if shouldLog {
+					log.Print(line)
 				}
-				time.Sleep(panelWarmupIdleInterval)
+				time.Sleep(sleep)
 			}
 		}()
 	})
+}
+
+// panelWarmupPace 决定「这一轮之后等多久」与「这一轮的日志要不要打」。
+//
+// # 为什么需要它（2026-11-12，用户报"日志在刷屏"）
+//
+// 旧实现两条都缺：
+//
+//	· `sweepPanels` **每轮无条件**打一行日志；
+//	· 间隔只看 `left > 0`，是就固定 5 秒。
+//
+// 而死号（上游回 `100002: 登录已失效`）永远补不上 ⇒ 待办数恒定 >0 ⇒
+// 每 5 秒一条**一模一样**的日志 + 每 5 秒 12 个上游请求，永不停止。
+//
+// 现在的两条判据：
+//
+//	· **间隔**：待办数没变化（= 本轮一个都没补上）⇒ 乘性翻倍到
+//	  panelWarmupMaxRetryInterval；一旦变化（补上了 / 新出现过期的）⇒ 立刻回到追赶间隔。
+//	· **日志**：内容变了立刻打；否则每 panelWarmupLogHeartbeat 打一条心跳。
+//
+// ⚠ 这不是"放弃失败项"：退避只影响**重试频率**。失败项仍留在待办里、仍会被重排
+//
+//	（见 sweepPanels 尾部注释），刷新语义一个字没改。
+//
+// ⚠ 正常追赶不受影响：那时待办每轮都在降 ⇒ 间隔每轮都回到 5 秒。
+type panelWarmupPace struct {
+	interval time.Duration // 当前追赶间隔（从 busy 起；left 不变则逐轮翻倍）
+	lastLeft int
+	seen     bool
+	lastLine string
+	lastLog  time.Time
+}
+
+// next 返回「该等多久」与「这次要不要打日志」。now 由调用方传入 ⇒ 可用假时钟测试。
+func (p *panelWarmupPace) next(left int, line string, now time.Time) (time.Duration, bool) {
+	switch {
+	case !p.seen:
+		// 首轮：不能把"没有上一轮"当成"没变化" ⇒ 从追赶间隔开始。
+		p.seen = true
+		p.lastLeft = left
+		p.interval = panelWarmupBusyInterval
+	case left != p.lastLeft:
+		// 待办变了（补上了 / 新出现）⇒ 回到追赶间隔。
+		p.lastLeft = left
+		p.interval = panelWarmupBusyInterval
+	case p.interval < panelWarmupMaxRetryInterval:
+		// 没变化 ⇒ 退避（上限封顶）。
+		p.interval *= 2
+		if p.interval > panelWarmupMaxRetryInterval {
+			p.interval = panelWarmupMaxRetryInterval
+		}
+	}
+	sleep := p.interval
+	if left == 0 {
+		sleep = panelWarmupIdleInterval // 稳定态：与追赶/退避无关
+	}
+	logNow := p.lastLine != line || p.lastLog.IsZero() || now.Sub(p.lastLog) >= panelWarmupLogHeartbeat
+	if logNow {
+		p.lastLine, p.lastLog = line, now
+	}
+	return sleep, logNow
 }
 
 // sweepPanels 跑一轮：把"还没进缓存"的号补几个（限并发 panelWarmupConcurrency）。
@@ -125,11 +205,10 @@ func (p *Provider) StartPanelWarmup() {
 // ⚠ 返回值与日志都为**排障**而留 —— 没有它们，"预热有没有在动、为什么没补上"
 //
 //	就只能靠猜（今天已经猜了很久）。
-func (p *Provider) sweepPanels() int {
+func (p *Provider) sweepPanels() (int, string) {
 	accts := p.accounts()
 	if len(accts) == 0 {
-		log.Printf("loomy: 面板预热一轮 —— **凭证目录里读不到账号**（authDir=%q）⇒ 什么都没做", p.authDir)
-		return 0
+		return 0, fmt.Sprintf("loomy: 面板预热一轮 —— **凭证目录里读不到账号**（authDir=%q）⇒ 什么都没做", p.authDir)
 	}
 
 	// ① 挑这一轮要处理的：**优先补"从没读到过"的**，有余量再刷**过期的**。
@@ -154,7 +233,9 @@ func (p *Provider) sweepPanels() int {
 	// ⚠⚠ 这个数**不含幽灵行**（见 panelPlan.pending 与 planPanelWarmup 的注释）。
 	left := pl.pending()
 	if len(jobs) == 0 {
-		return left // ⚠ 返回 left 而不是 0：否则"有活但本轮配额已满"会被当成"没活了"
+		// ⚠ 返回 left 而不是 0：否则"有活但本轮配额已满"会被当成"没活了"。
+		// ⚠ 日志行照旧给出（由调用方的门禁去重 + 心跳），不再"这一轮干脆不打"。
+		return left, panelWarmupLogLine(pl, len(accts), 0, "")
 	}
 
 	// ② 限并发跑（⚠ 顺序跑太慢：单号约 10 秒 ⇒ 12 个要 2 分钟，而 4 并发只要 30 秒）。
@@ -209,7 +290,8 @@ func (p *Provider) sweepPanels() int {
 
 	// ⚠ `首个错误` 由 panelWarmupLogLine 决定**要不要出现**：本轮无错时**不打**这个字段
 	//   （打 `首个错误=""` 是纯噪音，用户已经报过一次）。
-	log.Print(panelWarmupLogLine(pl, len(accts), done, firstErr))
+	// ⚠ 这里**不再**直接打日志：行交给调用方，由它按「内容变化 / 心跳」决定
+	//   要不要输出（每轮无条件打就是刷屏的来源，见 panelWarmupPace）。
 	// ⚠ 返回**剩余待办数**（不是本轮发起数）—— 调用方据此决定"连着刷"还是"歇一会儿"。
 	// ⚠ 口径：本轮开始时的待办总数（未缓存 + 过期）减掉本轮真正做完的。
 	//   本轮成功的号会进缓存并带上新的 FetchedAt ⇒ 下一次 sweep 的待办自然变小。
@@ -219,7 +301,7 @@ func (p *Provider) sweepPanels() int {
 	if left < 0 {
 		left = 0
 	}
-	return left
+	return left, panelWarmupLogLine(pl, len(accts), done, firstErr)
 }
 
 // panelJob 一轮预热里的一个待办：某个号的某个面板。

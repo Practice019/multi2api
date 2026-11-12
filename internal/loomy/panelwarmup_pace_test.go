@@ -1,0 +1,79 @@
+package loomy
+
+import (
+	"testing"
+	"time"
+)
+
+// TestPanelWarmupPaceBacksOffWhenNothingChanges 钉住两件事：
+//
+//	① 待办数**没有变化**时，间隔必须乘性拉长到上限；
+//	② 一旦变化，必须立刻回到追赶间隔（不能"退避了就一直在慢车道"）。
+//
+// 背景（2026-11-12，用户报"日志在刷屏"）：死号永远补不上 ⇒ 待办恒定 ⇒
+// 旧实现每 5 秒一轮、每轮 12 个上游请求、每轮一条同样的日志，永不停止。
+func TestPanelWarmupPaceBacksOffWhenNothingChanges(t *testing.T) {
+	const line = "loomy: 面板预热一轮 —— 待办：过期(tasks=6 invite=18)"
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	p := &panelWarmupPace{}
+
+	// 首轮：追赶间隔，必须打日志（内容第一次出现）。
+	if got, logNow := p.next(24, line, now); got != panelWarmupBusyInterval || !logNow {
+		t.Fatalf("首轮：sleep=%v log=%v，want %v true", got, logNow, panelWarmupBusyInterval)
+	}
+	// 待办不变 ⇒ 逐轮翻倍，直到上限；且内容没变、未到心跳 ⇒ **不再打日志**（这就是"不刷屏"）。
+	want := panelWarmupBusyInterval
+	for i := 0; i < 12; i++ {
+		want *= 2
+		if want > panelWarmupMaxRetryInterval {
+			want = panelWarmupMaxRetryInterval
+		}
+		// ⚠ 假时钟**独立于**返回的 sleep 前进（每秒一格）：
+		//   若按 want 前进，累计到 panelWarmupLogHeartbeat 就会**正确地**触发心跳 ——
+		//   那是心跳在起作用，不是「不刷屏」失效（第一版就是这么误判的）。
+		now = now.Add(time.Second)
+		got, logNow := p.next(24, line, now)
+		if got != want {
+			t.Fatalf("第 %d 轮退避：sleep=%v want %v", i+1, got, want)
+		}
+		if logNow {
+			t.Fatalf("第 %d 轮：内容没变、也没到心跳，不该打日志（否则就是刷屏）", i+1)
+		}
+	}
+	if p.interval != panelWarmupMaxRetryInterval {
+		t.Fatalf("退避应封顶在 %v，实际 %v", panelWarmupMaxRetryInterval, p.interval)
+	}
+
+	// 待办降了（补上了）⇒ 立刻回到追赶间隔，并且内容变了要立刻打日志。
+	got, logNow := p.next(23, line+" · 本轮发起 1 个", now)
+	if got != panelWarmupBusyInterval {
+		t.Fatalf("待办变化后应回到追赶间隔 %v，实际 %v", panelWarmupBusyInterval, got)
+	}
+	if !logNow {
+		t.Fatal("待办变化后必须立刻打日志（否则「变化」看不见）")
+	}
+
+	// 待办归零 ⇒ 稳定态间隔（与追赶/退避无关）。
+	if got, _ := p.next(0, line, now); got != panelWarmupIdleInterval {
+		t.Fatalf("待办归零应等稳定态 %v，实际 %v", panelWarmupIdleInterval, got)
+	}
+}
+
+// TestPanelWarmupPaceLogsHeartbeatWhenIdle 钉住心跳：内容长期不变时也必须偶尔出声，
+// 否则排障看到的就是"日志停了"，分不清"在退避"和"goroutine 死了"。
+func TestPanelWarmupPaceLogsHeartbeatWhenIdle(t *testing.T) {
+	const line = "loomy: 面板预热一轮 —— 待办：过期(tasks=6 invite=18)"
+	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	p := &panelWarmupPace{}
+	if _, logNow := p.next(24, line, now); !logNow {
+		t.Fatal("首轮应打日志")
+	}
+	// 心跳前 1 秒：不打。
+	if _, logNow := p.next(24, line, now.Add(panelWarmupLogHeartbeat-time.Second)); logNow {
+		t.Fatal("未到心跳不该打")
+	}
+	// 到了心跳：打。
+	if _, logNow := p.next(24, line, now.Add(panelWarmupLogHeartbeat)); !logNow {
+		t.Fatal("到心跳应打一条（用来区分「在退避」与「goroutine 死了」）")
+	}
+}
