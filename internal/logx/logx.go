@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -299,6 +301,22 @@ func CaptureTo(w io.Writer) func() {
 		outMu.Unlock()
 		SetLevel(prevLvl)
 	}
+}
+
+// FmtTps 把速率写成「≥10 取整、<10 一位小数」（网页端 app.js 的 fmtTps 同一规则）。
+//
+// ⚠ 这是**唯一实现**：internal/server 的 fmtTpsGo 直接转调它。
+//
+//	之前那条规则的"两处实现"正是 tok/s 口径分叉的成因（终端 19255 vs 网页 102），
+//	所以不再允许出现第二份。
+func FmtTps(v float64) string {
+	if v < 0 {
+		v = 0
+	}
+	if v >= 10 {
+		return strconv.FormatInt(int64(math.Round(v)), 10)
+	}
+	return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64)
 }
 
 // LF 供调用方拼接（避免各处散落字面量）。

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/logx"
 )
 
 // captureStdout 重定向 os.Stdout 并捕获 fn 期间的全部输出。
@@ -30,11 +31,20 @@ func captureStdout(t *testing.T, fn func()) string {
 
 // withChatLog 临时开启聊天表格日志（TestMain 默认关闭），测试结束后恢复。
 // 仅供断言表格行输出的用例使用。
+//
+// ⚠ 2026-11-12：**逐条流水现在是 DEBUG 级**（控制台默认只留汇总行，见 logx/stats.go）。
+//
+//	本 helper 的语义就是「我要看那一行」⇒ 它同时把级别降到 DEBUG，测完还原；
+//	否则这些用例会在默认 INFO 下拿到空串（假红）。
 func withChatLog(t *testing.T) {
 	t.Helper()
 	old := chatLogEnabled
 	chatLogEnabled = true
-	t.Cleanup(func() { chatLogEnabled = old })
+	oldLvl := logx.SetLevel(logx.LevelDebug)
+	t.Cleanup(func() {
+		chatLogEnabled = old
+		logx.SetLevel(oldLvl)
+	})
 }
 
 func TestChatStatsReaderTokensFromUsage(t *testing.T) {

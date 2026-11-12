@@ -59,6 +59,7 @@ import (
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config json")
 	levelFlag := flag.String("log-level", "", "日志级别 debug/info/warn/error/quiet（默认 info，也可用 WB2API_LOG_LEVEL）")
+	statsEvery := flag.Duration("log-stats", 3*time.Minute, "控制台汇总行间隔（0 = 关闭逐条流水之外的汇总）")
 	flag.Parse()
 
 	// 日志出口：统一格式（HH:MM:SS LEVEL scope msg）+ 级别过滤 + 重复消息采样。
@@ -136,6 +137,13 @@ func main() {
 	}
 
 	p := pool.New(cfg.StateFile)
+
+	// 控制台汇总行（人看的那一层）：每 3 分钟一条"关键数字"，逐条流水降到 DEBUG。
+	// 见 internal/logx/stats.go 的注释（为什么控制台不该是流水账）。
+	go logx.StatsLoop(*statsEvery, func() logx.PoolCounts {
+		total, healthy, cooling, disabled, _ := p.CountsDetailed()
+		return logx.PoolCounts{Total: total, Healthy: healthy, Cooling: cooling, Disabled: disabled}
+	})
 	defer p.Flush() // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
 	p.SetStore(store)
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先

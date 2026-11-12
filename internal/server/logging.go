@@ -6,15 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"os"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/wire"
 )
 
@@ -430,13 +429,9 @@ func tokPerSecField(mode string, outTokens int, total, ttfb time.Duration) strin
 // fmtTpsGo 是 app.js `fmtTps` 的 Go 版：≥10 取整、<10 保留一位小数。
 // 来源是 DSH 官方 formatTokensPerSecond 的规则（大数不需要小数位，小数才需要）。
 func fmtTpsGo(v float64) string {
-	if v < 0 {
-		v = 0
-	}
-	if v >= 10 {
-		return strconv.FormatInt(int64(math.Round(v)), 10)
-	}
-	return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64)
+	// ⚠ 2026-11-12：实现搬到 logx.FmtTps —— **唯一实现**。这里保留函数名（与它的测试）
+	//   只是转调，避免同一条规则出现第二份拷贝（那正是 tok/s 口径分叉的成因）。
+	return logx.FmtTps(v)
 }
 
 // logChatRowProvider 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
@@ -525,8 +520,21 @@ func logChatRowProvider(ttfb, total time.Duration, model, mode, uid, provider st
 		entry.CacheMissTokens = x.CacheMissTokens
 	}
 	chatLogRing.Push(entry)
+	// 汇总（**人看的那一层**）：控制台只留周期性关键数字，见 internal/logx/stats.go。
+	logx.Observe(logx.Outcome{
+		Provider: provider,
+		Status:   status,
+		OutToks:  entry.OutTokens,
+		TTFB:     ttfb,
+		Total:    total,
+	})
 	if len(model) > 11 {
 		model = model[:11]
+	}
+	// ⚠ 逐条流水只在 debug 打：控制台是给人看的，他只需要上面的汇总行。
+	//   要看每一笔（排障）用 -log-level debug。
+	if !logx.Enabled(logx.LevelDebug) {
+		return
 	}
 	tokField := "-"
 	tokpsField := "-"
