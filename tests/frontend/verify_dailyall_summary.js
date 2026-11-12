@@ -46,7 +46,10 @@ function grabFunc(src, marker) {
   throw new Error('括号不闭合: ' + marker);
 }
 
-const html = fs.readFileSync(PAGE, 'utf8');
+// ⚠ 扫**前端全部源码**（webui.html + ui/app.js），不是只扫 HTML：
+//   T-409 拆包把主 script 外置到了 ui/app.js，只读 html 的检查会报
+//   「找不到 X / 定义 0 次」这类假红（详见 lib_frontend_source.js 的文件头）。
+const html = require('./lib_frontend_source').FRONTEND;
 
 // ── ① 结构守卫（先看源码里还在不在"只数 ok"那条路上）────────────────────
 const startAllBody = grabFunc(html, 'async function startAll(');

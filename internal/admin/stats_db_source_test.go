@@ -28,6 +28,13 @@ func seedStatsStore(t *testing.T, rows []store.Log) {
 	if err := store.Open(filepath.Join(t.TempDir(), "gw.db")); err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	// ⚠ 必须注册关闭（与同包其它用例同款）：`t.TempDir()` 的清理在**用例结束后**跑，
+	//   而它在 Windows 上**删不掉仍被句柄占用的 gw.db** ⇒ 报
+	//   「TempDir RemoveAll cleanup: ... being used by another process」⇒ 用例被判 FAIL。
+	//   这个失败在 Linux 上**看不见**（unlink 打开中的文件会成功）⇒ CI(ubuntu) 全绿，
+	//   只有本机 Windows 会红 —— 这类"只在一边红"的缺口最容易被漏过去。
+	//   t.Cleanup 是 LIFO：本行晚于 TempDir 注册 ⇒ 先关句柄、再删目录 ✓。
+	t.Cleanup(func() { _ = store.Close() })
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("store.Migrate: %v", err)
 	}
