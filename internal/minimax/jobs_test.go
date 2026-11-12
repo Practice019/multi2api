@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // refreshJobFixture 后台续期的测试夹具。
@@ -90,6 +91,8 @@ func newRefreshJobFixture(t *testing.T) *refreshJobFixture {
 	var logs bytes.Buffer
 	prevWriter := log.Writer()
 	log.SetOutput(&logs)
+	restoreLogx := logx.CaptureTo(&logs)
+	defer restoreLogx()
 	t.Cleanup(func() { log.SetOutput(prevWriter) })
 
 	f := &refreshJobFixture{calls: &calls, creds: map[string]*Auth{}, logs: &logs}

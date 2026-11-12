@@ -183,7 +183,7 @@ func (p *Provider) refreshQuotaDetailCtx(ctx context.Context, uid string) (agent
 		log.Printf("codar: gettoken 不可用 uid=%q ⇒ 只报 agent 桶 %d（部分数据，界面会标记）", uid, agent)
 		return agent, 0, 0, true, true
 	}
-	log.Printf("codar: 额度 uid=%q agent=%d general=%d rewrite=%d total=%d", uid, agent, general, rewrite, agent+general+rewrite)
+	logx.Debugf("codar", "额度 uid=%q agent=%d general=%d rewrite=%d total=%d", uid, agent, general, rewrite, agent+general+rewrite)
 	return agent, general, rewrite, false, true
 }
 

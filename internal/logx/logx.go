@@ -21,6 +21,7 @@ package logx
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -118,13 +119,28 @@ func Infof(scope, format string, args ...any)  { Logf(LevelInfo, scope, format, 
 func Warnf(scope, format string, args ...any)  { Logf(LevelWarn, scope, format, args...) }
 func Errorf(scope, format string, args ...any) { Logf(LevelError, scope, format, args...) }
 
-// sink 可被测试替换（默认 stdout）。
-var sink io.Writer = os.Stdout
+// sink 显式输出目标（测试用 SetSink/CaptureTo 设置）。nil = 跟随 stdlib log 的 Writer。
+var sink io.Writer
+
+// piped：main 是否已经把 stdlib log 接到本包（Pipe）。接了就不能再跟随 log.Writer()，
+// 否则 logx 写 → log 写 → logx 写，自环。
+var piped atomic.Bool
 
 func write(line string) {
+	// ⚠ 默认**跟随 stdlib log 的 Writer**：迁移期间有 6 处老测试用
+	//   `log.SetOutput(&buf)` 捕获日志 —— 跟随之后它们自动抓得到 logx 的行，
+	//   不用逐个改（改漏一个就是假红或假绿）。
+	w := sink
+	if w == nil {
+		if piped.Load() {
+			w = os.Stdout
+		} else {
+			w = log.Writer()
+		}
+	}
 	outMu.Lock()
 	defer outMu.Unlock()
-	_, _ = io.WriteString(sink, line+"\n")
+	_, _ = io.WriteString(w, line+"\n")
 }
 
 // SetSink 换输出目标（测试用；生产不调）。
@@ -247,7 +263,43 @@ func (p pipeWriter) Write(b []byte) (int, error) {
 // ⚠ 调用方必须同时 log.SetFlags(0)，否则 stdlib 会自带 `2026/11/12 12:05:15 ` 前缀，
 //
 //	与本包的 HH:MM:SS 叠成两段时间。
-func Pipe(lvl Level) io.Writer { return pipeWriter{lvl: lvl} }
+func Pipe(lvl Level) io.Writer {
+	piped.Store(true) // 见 write：接了 Pipe 就不能再跟随 log.Writer()（自环）
+	return pipeWriter{lvl: lvl}
+}
+
+// PrintfWriter 给"只认 Printf 的第三方日志器"用 ——
+// GORM 的 logger.Writer 就是这个形状（GORM 自己会 new 一个 log.Logger，绕开 SetOutput）。
+type PrintfWriter struct{ lvl Level }
+
+// Printf 实现 GORM 的 logger.Writer 接口。
+func (p PrintfWriter) Printf(format string, args ...any) {
+	Logf(p.lvl, "sql", fmt.Sprintf(format, args...))
+}
+
+// SQLWriter 返回给 gorm logger.New 用的 writer（见 internal/store/db.go 的 gormConfig）。
+func SQLWriter(lvl Level) PrintfWriter { return PrintfWriter{lvl: lvl} }
+
+// CaptureTo 测试专用：把 logx 的输出接到 w、级别临时放到 DEBUG（让测试看到全部），
+// 返回还原函数（调用方 defer 它）。
+//
+// ⚠ 为什么需要它：迁移到 logx 之后，老的"只换 log.SetOutput"捕获器**抓不到**这些行了 ——
+//
+//	表现是测试莫名断言空串（假红），或者反过来抓不到就等于没测（假绿）。
+//	本函数与 log.SetOutput 配对使用，两个 sink 一起捕获。
+func CaptureTo(w io.Writer) func() {
+	outMu.Lock()
+	prevSink := sink
+	outMu.Unlock()
+	prevLvl := SetLevel(LevelDebug)
+	SetSink(w)
+	return func() {
+		outMu.Lock()
+		sink = prevSink
+		outMu.Unlock()
+		SetLevel(prevLvl)
+	}
+}
 
 // LF 供调用方拼接（避免各处散落字面量）。
 const LF = "\n"

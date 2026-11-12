@@ -38,6 +38,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/codearts"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/pool"
 )
 
@@ -320,6 +321,9 @@ func TestDedupeLogsDiscardedFile(t *testing.T) {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	// ⚠ 行已迁到 logx（统一出口）⇒ 必须两个 sink 一起捕获，否则断言会看到空串。
+	restoreLogx := logx.CaptureTo(&buf)
+	defer restoreLogx()
 	// ★ T-451：**必须清空指纹表**。codearts 冲突日志改成"只在结论变化时打"之后，
 	// 别的测试留下的指纹会把这条"首次"判成"重复" ⇒ 一条都不打 ⇒ 本测试假红 ✗
 	//（真实原因不是"日志丢了"，而是**包级状态跨测试污染** ⇒ 每个捕获日志的测试都要独立）。
@@ -398,6 +402,9 @@ func TestDedupeNoLogWhenNoConflict(t *testing.T) {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	// ⚠ 行已迁到 logx（统一出口）⇒ 必须两个 sink 一起捕获，否则断言会看到空串。
+	restoreLogx := logx.CaptureTo(&buf)
+	defer restoreLogx()
 	// ★ T-451：**必须清空指纹表**。codearts 冲突日志改成"只在结论变化时打"之后，
 	// 别的测试留下的指纹会把这条"首次"判成"重复" ⇒ 一条都不打 ⇒ 本测试假红 ✗
 	//（真实原因不是"日志丢了"，而是**包级状态跨测试污染** ⇒ 每个捕获日志的测试都要独立）。
@@ -529,6 +536,9 @@ func TestSyncEmptyDirReturnsZero(t *testing.T) {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	// ⚠ 行已迁到 logx（统一出口）⇒ 必须两个 sink 一起捕获，否则断言会看到空串。
+	restoreLogx := logx.CaptureTo(&buf)
+	defer restoreLogx()
 	// ★ T-451：**必须清空指纹表**。codearts 冲突日志改成"只在结论变化时打"之后，
 	// 别的测试留下的指纹会把这条"首次"判成"重复" ⇒ 一条都不打 ⇒ 本测试假红 ✗
 	//（真实原因不是"日志丢了"，而是**包级状态跨测试污染** ⇒ 每个捕获日志的测试都要独立）。

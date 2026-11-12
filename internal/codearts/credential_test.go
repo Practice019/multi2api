@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"workbuddy2api/internal/logx"
 )
 
 // TestLoadDirSkipsSubdirectories 钉住"归档目录不被扫描"。
@@ -138,6 +139,8 @@ func TestLoadDirLogsSkippedFile(t *testing.T) {
 	oldFlags := log.Flags()
 	log.SetOutput(&buf)
 	log.SetFlags(0)
+	restoreLogx := logx.CaptureTo(&buf)
+	defer restoreLogx()
 	defer func() {
 		log.SetOutput(oldOut)
 		log.SetFlags(oldFlags)

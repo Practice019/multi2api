@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // jobs_refresh.go —— qoder / qodercn 的后台主动续期。
@@ -144,8 +145,8 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		}); err != nil {
 			failed++
 			if errors.Is(err, ErrRefreshExpired) {
-				log.Printf("%s: uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
-					p.productID, shortUID(a.UIDValue()))
+				logx.Oncef(logx.LevelWarn, "qoder", "refresh:"+a.UIDValue(), "uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
+					shortUID(a.UIDValue()))
 			} else {
 				log.Printf("%s: uid=%s 后台续期失败（可重试）：%v",
 					p.productID, shortUID(a.UIDValue()), err)

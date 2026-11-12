@@ -629,6 +629,18 @@ func TestSharedInfraIsGenuinelyShared(t *testing.T) {
 		// ⚠ 它**不依赖** internal/gateway（本条是硬前提）：依赖 gateway 的包会被
 		// discoverUpstreams 当成上游实现，各上游 import 它就变成"上游依赖上游"。
 		"logbuf": true,
+		// logx：**日志出口**（级别 + 去重采样 + 统一格式），2026-11-12 新增，11 个上游都用它。
+		//
+		// # 凭什么共享
+		//
+		// 它是跨切面的输出通道：所有上游的打点都要经过**同一个**级别开关与采样器。
+		// 不共享的后果已经实测过 —— 全仓 362 处裸 log.Printf，两天 10072 行里 97.3% 是重复内容，
+		// 每个上游各写一份自己的去重逻辑是不可能的（而"谁来统一"正是本测试要问的问题）。
+		//
+		// ⚠ 与 logbuf 同一条硬前提：**不依赖 internal/gateway**（只依赖 stdlib）——
+		// 依赖 gateway 的包会被 discoverUpstreams 当成上游实现，各上游 import 它就变成
+		// "上游依赖上游"。
+		"logx":   true,
 		"prompt": true, // 提示词降级（出站改写 + 核心降级状态机共用）
 		"wire":   true, // 出站线协议改写（workbuddy 与 codearts 共用，见 wire_reexport.go）
 		// dailycheckin 签到类动作的共享驱动（lobsterai 与 qoder 共用）。

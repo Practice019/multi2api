@@ -22,6 +22,7 @@ import (
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/codearts"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/pool"
 )
 
@@ -114,11 +115,11 @@ func logCodeartsConflict(uid string, n int, kept, dropped string) {
 		return // 结论没变 ⇒ 不打（这就是降噪的全部）
 	}
 	if seen {
-		log.Printf("codearts: 账号 %s 的凭证冲突已变化（现有 %d 份），选用 %s，丢弃 %s",
+		logx.Debugf("codearts", "账号 %s 的凭证冲突已变化（现有 %d 份），选用 %s，丢弃 %s",
 			shortUID(uid), n, kept, dropped)
 		return
 	}
-	log.Printf("codearts: 账号 %s 有 %d 份凭证，选用 %s（更新/更完整），丢弃 %s",
+	logx.Debugf("codearts", "账号 %s 有 %d 份凭证，选用 %s（更新/更完整），丢弃 %s",
 		shortUID(uid), n, kept, dropped)
 }
 

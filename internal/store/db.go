@@ -37,6 +37,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+	"workbuddy2api/internal/logx"
 )
 
 // DB 进程级数据库句柄。由 Open 设置、Close 置空。
@@ -179,10 +180,27 @@ const (
 //
 // 需要它时再一起加（连同 PRAGMA），不要只加一半。
 func gormConfig() *gorm.Config {
+	// ⚠ 2026-11-12（对标 new-api 的 model/gorm_logger.go）：原来用 logger.Default，
+	//   它**对每条 record not found 都吐一行 SQL + 一行报错**，且带 ANSI 颜色码。
+	//   实测两天刷出 219 行，在控制台上就是一片乱码。四条改动：
+	//
+	//   · IgnoreRecordNotFoundError：**没查到不是错误**（按 key 查一次就触发一次）。
+	//   · ParameterizedQueries：**参数值不要内联进 SQL 日志** ——
+	//     实测泄漏过一次：`WHERE key = "06ejro8fi4dnsz9vu5wkxql2c31pbmghat7y"`
+	//     是一枚真实 API key，明文进了控制台与日志文件。
+	//   · Colorful: false —— 那颜色是给交互式终端看的，重定向到文件就是乱码。
+	//   · 输出接到 logx：GORM 的 WARN/ERROR 与本仓其它行同一格式、同一个级别开关。
+	loggerCfg := logger.New(logx.SQLWriter(logx.LevelWarn), logger.Config{
+		SlowThreshold:             200 * time.Millisecond, // 与 new-api 的默认一致
+		LogLevel:                  logger.Warn,
+		IgnoreRecordNotFoundError: true,
+		ParameterizedQueries:      true,
+		Colorful:                  false,
+	})
 	return &gorm.Config{
 		// Warn 级别：只记慢查询与错误。本仓的日志是给人看的，
 		// Info 会把每条 SQL 都打出来，反而埋掉真正的信号。
-		Logger: logger.Default.LogMode(logger.Warn),
+		Logger: loggerCfg,
 		// 见函数注释：开它会与启动期的 AutoMigrate 冲突。
 		PrepareStmt: false,
 		// 见函数注释：本包不用外键约束。

@@ -244,7 +244,7 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 	credits, actionRequired, cerr := d.up.Claim(ctx, acc)
 	if cerr != nil {
 		d.record(acc.UID, checkinlog.StatusFail, shortErr(cerr), 0, trigger)
-		log.Printf("%s: 签到失败 uid=%s: %v", d.desc.ID, shortUID(acc.UID), cerr)
+		logx.Oncef(logx.LevelWarn, d.desc.ID, "failsign:"+acc.UID, "签到失败 uid=%s: %v", shortUID(acc.UID), cerr)
 		// ★ T-431：同上 —— 只上报凭据类（lobsterai 实测就是这里的 401「请先登录」）。
 		d.reportCredentialFail(acc.UID, cerr)
 		return Result{

@@ -414,7 +414,7 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 		// 于是界面显示"签到成功"而实际没奖励（用户报的「签到不了」）。
 		res, cerr := p.client.CheckinClaim(ctx, a)
 		if cerr != nil {
-			log.Printf("trae: 签到失败 uid=%s: %v", shortUID(a.UID), cerr)
+			logx.Oncef(logx.LevelWarn, "trae", "failsign:"+a.UID, "签到失败 uid=%s: %v", shortUID(a.UID), cerr)
 			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(cerr), 0, "sched")
 			continue
 		}

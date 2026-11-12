@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"workbuddy2api/internal/logx"
 )
 
 // resetConflictLog 清空包级指纹表。
@@ -22,7 +23,8 @@ func captureLog(t *testing.T) (*bytes.Buffer, func()) {
 	var buf bytes.Buffer
 	old := log.Writer()
 	log.SetOutput(&buf)
-	return &buf, func() { log.SetOutput(old) }
+	restoreLogx := logx.CaptureTo(&buf)
+	return &buf, func() { log.SetOutput(old); restoreLogx() }
 }
 
 // TestCodeartsConflictLogOnlyOnChange 结论不变就**不打**（T-451 的降噪本体）。
@@ -62,7 +64,7 @@ func TestCodeartsConflictLogOnChange(t *testing.T) {
 	got := buf.String()
 	// 首次用「有 N 份凭证」措辞；变化用「凭证冲突已变化（现有 N 份）」措辞
 	// ⇒ 两次变化合计 2 条，加上首次共 3 行。
-	if n := strings.Count(got, "codearts: 账号"); n != 3 {
+	if n := strings.Count(got, "账号 u1"); n != 3 {
 		t.Errorf("首次/变化/变化/重复 ⇒ 应打 3 行，实得 %d。实际：\n%s", n, got)
 	}
 	if n := strings.Count(got, "已变化"); n != 2 {

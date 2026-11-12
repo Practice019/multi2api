@@ -55,6 +55,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/logx"
 )
 
 // quotaFailLogInterval 同一 uid 的失败日志最小间隔（2026-11-02 加）。
@@ -165,7 +166,7 @@ func logQuotaFail(uid string, err error) {
 	//   ③ **删掉"（回落到本机缓存）"** —— 那是假的：调用方紧接着就返回"额度未知"，
 	//      并没有回落成功（真正回落成功的那条路径在下面单独打"已改用本机缓存值"）
 	reason, hint := quotaFailReason(err)
-	log.Printf("loomy 额度查询失败 uid=%s（%s）: %s —— %s",
+	logx.Oncef(logx.LevelWarn, "loomy", "quota:"+uid, "额度查询失败 uid=%s（%s）: %s —— %s",
 		shortUID(uid), reason, trimLoomyPrefix(err), hint)
 }
 
@@ -260,17 +261,17 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	if dir == "" {
 		// 本机没有客户端数据目录（网关跑在服务器上、或客户端还没装）。
 		// 这是**正常部署形态**，不是故障 —— 只记一次信息性日志。
-		log.Printf("loomy: 额度未知 —— 积分网关查不到，且本机没有 Loomy 客户端数据目录")
+		logx.Debugf("loomy", "额度未知 —— 积分网关查不到，且本机没有 Loomy 客户端数据目录")
 		return gateway.UnknownQuota(), true
 	}
 
 	sess, _, err := ReadLocalAuth(dir)
 	if err != nil {
-		log.Printf("loomy: 额度未知 —— 读取客户端登录态失败 dir=%s: %v", dir, err)
+		logx.Debugf("loomy", "额度未知 —— 读取客户端登录态失败 dir=%s: %v", dir, err)
 		return gateway.UnknownQuota(), true
 	}
 	if sess == nil {
-		log.Printf("loomy: 额度未知 —— 客户端数据目录 %s 里没有 loomy-auth-session"+
+		logx.Debugf("loomy", "额度未知 —— 客户端数据目录 %s 里没有 loomy-auth-session"+
 			"（客户端未登录？）", dir)
 		return gateway.UnknownQuota(), true
 	}
@@ -292,12 +293,12 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 
 	pts, err := ReadLocalPoints(dir)
 	if err != nil {
-		log.Printf("loomy: 额度未知 —— 读取客户端积分缓存失败 dir=%s: %v", dir, err)
+		logx.Debugf("loomy", "额度未知 —— 读取客户端积分缓存失败 dir=%s: %v", dir, err)
 		return gateway.UnknownQuota(), true
 	}
 	if pts == nil {
 		// 登录态在、但积分摘要在：客户端还没把摘要写下来（刚登录/从未打开设置页）。
-		log.Printf("loomy: 额度未知 —— 客户端未缓存积分摘要（uid=%s）", shortUID(uid))
+		logx.Debugf("loomy", "额度未知 —— 客户端未缓存积分摘要（uid=%s）", shortUID(uid))
 		return gateway.UnknownQuota(), true
 	}
 	q := gateway.CreditsQuota(clampNonNegative(pts.Balance))

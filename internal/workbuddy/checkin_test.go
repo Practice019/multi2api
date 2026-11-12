@@ -26,6 +26,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/upstream"
 )
@@ -408,6 +409,8 @@ func TestCheckinAlreadyLogIsNotAlarming(t *testing.T) {
 		var buf bytes.Buffer
 		old := log.Writer()
 		log.SetOutput(&buf)
+		restoreLogx := logx.CaptureTo(&buf)
+		defer restoreLogx()
 		defer log.SetOutput(old)
 
 		res, _ := s.RunCheckinFor("u-already", "manual")
@@ -450,6 +453,8 @@ func TestCheckinAlreadyLogIsNotAlarming(t *testing.T) {
 		var buf bytes.Buffer
 		old := log.Writer()
 		log.SetOutput(&buf)
+		restoreLogx := logx.CaptureTo(&buf)
+		defer restoreLogx()
 		defer log.SetOutput(old)
 
 		res, _ := s.RunCheckinFor("u-fail", "manual")

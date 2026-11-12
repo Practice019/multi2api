@@ -231,6 +231,9 @@ func TestAllUpstreamsAreCovered(t *testing.T) {
 		"admin": true, "apikey": true, "auth": true, "browseropen": true,
 		"checkinlog": true, "clientlogin": true, "dailycheckin": true,
 		"gateway": true, "logbuf": true, "oauth": true, "pool": true,
+		// logx（2026-11-12 新增）是**日志出口工具包**（级别 + 去重采样 + 统一格式），
+		// 不实现 gateway.Provider —— 加它时这条守卫**确实红了**，正是它的作用。
+		"logx":   true,
 		"prompt": true, "qrcode": true, "qoderwasm": true, "redisstore": true,
 		"scheduler": true, "server": true, "session": true, "upstream": true,
 		"wire": true,

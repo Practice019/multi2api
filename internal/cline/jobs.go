@@ -167,7 +167,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 			// 终态（refresh_token 也失效）与可重试分开报，用户才知道
 			// 该不该去重新登录。
 			if isRefreshExpired(err) {
-				log.Printf("cline: uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
+				logx.Oncef(logx.LevelWarn, "cline", "refresh:"+a.UID(), "uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
 					shortUID(a.UID()))
 			} else {
 				log.Printf("cline: uid=%s 后台续期失败（可重试）：%v", shortUID(a.UID()), err)
