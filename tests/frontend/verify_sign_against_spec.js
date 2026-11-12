@@ -250,12 +250,29 @@ function parsePipeline() {
   P.uriSuffix = must(/strings\.HasSuffix\(uri,\s*"([^"]*)"\)/, 'canonicalURI 的尾缀检查', URI_FN)[1];
   P.uriAppend = must(/uri \+= "([^"]*)"/, 'canonicalURI 追加的尾缀', URI_FN)[1];
 
-  // escape：QueryEscape → '+' 换 %20 → 替换表
-  P.escPlus = [must(/strings\.ReplaceAll\(e,\s*"([^"]*)",\s*"([^"]*)"\)/, 'escape 的 + 替换', ESC_FN)[1],
-    must(/strings\.ReplaceAll\(e,\s*"([^"]*)",\s*"([^"]*)"\)/, 'escape 的 + 替换', ESC_FN)[2]];
-  const replacer = must(/strings\.NewReplacer\(([\s\S]*?)\)/, 'escape 的替换表', ESC_FN)[1];
-  P.escPairs = Array.from(replacer.matchAll(/"([^"]*)",\s*"([^"]*)"/g)).map(m => [m[1], m[2]]);
-  if (P.escPairs.length < 2) throw new Error('escape 替换表可疑（只抽到 ' + P.escPairs.length + ' 对）');
+  // escape：**手写逐字节编码器**（2026-11-12 起）。
+  //
+  // ⚠ 旧实现是 `url.QueryEscape` → 把 '+' 换回 %20 → 再过一张 `NewReplacer` 表，
+  //   所以这里当时抽 `ReplaceAll` 与 `NewReplacer` 两张表。**那个实现已经不存在了** ——
+  //   现在 sign.go 的 escape 是手写循环（switch 判保真字符 + 大写 hex 表）。
+  //   继续抽旧结构只会「找不到」；而若改成随便抽点东西凑合，
+  //   本文件的价值（对照规范核实现）就没了。
+  //
+  // ⇒ 从源码抽三件事，让模型与实现**同构**：保真字符（区间 + 单字符）、
+  //   大写十六进制表、以及「绝不输出 +」。改任一处，抽取当场抛错。
+  const escSwitch = must(/switch \{([\s\S]*?)default:/, 'escape 的保真字符分支', ESC_FN)[1];
+  P.escRanges = Array.from(escSwitch.matchAll(/c >= '([^'])' && c <= '([^'])'/g)).map(m => [m[1], m[2]]);
+  P.escSingles = Array.from(escSwitch.matchAll(/c == '((?:\\'|[^'])*)'/g)).map(m => m[1].replace(/\\'/g, "'"));
+  P.escHex = must(/const upperhex = "([^"]*)"/, 'escape 的大写十六进制表', ESC_FN)[1];
+  if (!P.escRanges.length || !P.escSingles.length) {
+    throw new Error('escape 的保真字符集抽不到（ranges=' + P.escRanges.length + ' singles=' + P.escSingles.length + '）—— 实现改了形状，请同步本文件的抽取');
+  }
+  if (P.escHex !== '0123456789ABCDEF') {
+    throw new Error('escape 的十六进制表必须**大写**（规范要求 %XX 大写）：' + P.escHex);
+  }
+  if (/WriteByte\('\+'\)/.test(ESC_FN)) {
+    throw new Error('escape 里出现 WriteByte(+ 号字面量) —— 空格被编成 + ，违反规范（必须 %20）');
+  }
 
   // CanonicalQueryString：转义 → 排序 → k=v → '&'
   P.qEscape = Array.from(must(/qs = append\(qs, kv\{([\s\S]*?)\}\)/, 'query 的转义表达式', SIGN)[1]
@@ -302,16 +319,23 @@ function parsePipeline() {
     'crJoin', 'stsJoin', 'authFormat']) {
     P[k] = goUnquote(P[k]);
   }
-  P.escPlus = P.escPlus.map(goUnquote);
-  P.escPairs = P.escPairs.map(p => p.map(goUnquote));
+  // ⚠ escRanges / escSingles / escHex 都是**已解码的字面量**（单字符与十六进制表），不需要 goUnquote。
   return P;
 }
 
 // A 的重放：只用**抽出来的**东西执行；每个认不出的表达式当场抛错。
+// ⚠ 与 sign.go 的 escape **逐字节同构**（不再是 encodeURIComponent + 替换表）：
+//   旧的 QueryEscape→换加号→替换表 实现已被手写循环取代，
+//   继续用旧模型会产生「模型 ≠ 实现」的**静默错** —— 而本文件的价值正是核这个。
 function srcEscape(P, s) {
-  let e = encodeURIComponent(String(s));
-  for (const [from, to] of P.escPairs) e = e.split(from).join(to);
-  return e;
+  let out = '';
+  for (const b of Buffer.from(String(s), 'utf8')) {
+    const ch = String.fromCharCode(b);
+    const keep = P.escSingles.includes(ch)
+      || P.escRanges.some(([lo, hi]) => ch >= lo && ch <= hi);
+    out += keep ? ch : '%' + P.escHex[(b >> 4) & 0xf] + P.escHex[b & 0xf];
+  }
+  return out;
 }
 function applyNorm(expr, name, value) {
   if (expr === 'strings.ToLower(k)') return name.toLowerCase();
