@@ -45,6 +45,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing" // ⚠ 只为 testing.Testing()：预热在测试进程里同步跑（见 New 末尾的注释）
 	"time"
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/groupstore"
@@ -401,6 +402,17 @@ type Handler struct {
 	//   ⇒ 这个 Once 保住的是那个"没人点也会查"的循环。
 	quotaAutoRefreshOnce sync.Once
 
+	// warmupDone 启动预热 goroutine（见 New 末尾）的"已完成"信号。
+	//
+	// ⚠⚠ 它的存在是因为一次 CI 抖动（2026-11-13，`TestChannelsKeysUnknownChannel` 连红 3 次）：
+	//   那个 goroutine 调 `h.statsItems()` **读库**，而 `store.DB` 是**包级单例**；
+	//   测试里 `New()` 之后马上结束 ⇒ 预热还在读，而 `t.TempDir()` 的 RemoveAll 正在拆目录
+	//   ⇒ 那一读又把 `gw.db-wal` / `gw.db-shm` 建回来 ⇒
+	//   `TempDir RemoveAll cleanup: unlinkat …: directory not empty`（红在清理，与断言无关）。
+	//   ⇒ 给它一个可等的信号：生产不需要（进程不会因为拆目录而结束），**测试需要**。
+	//   ⚠ 只加"可等待"，不改预热本身（首屏那 4.6s 冷 IO 仍然要挪走）。
+	warmupDone chan struct{}
+
 	// 统计聚合的短缓存：聚合要扫整个落盘文件，而前端按轮询节奏调用，
 	// 缓存让「扫盘频率」与「轮询频率」解耦（见 statsCacheTTL）。
 	statsMu    sync.Mutex
@@ -615,20 +627,61 @@ func New(cfg Config) *Handler {
 	//   2. **失败/panic 绝不影响启动**：读盘失败或边界情况都不该让进程起不来 ——
 	//      出错时就当没预热过，下次请求自己会再试（有 `recover`）。
 	//   3. **不 await**：启动流程不能为它多等哪怕一毫秒。
-	go func() {
-		defer func() { _ = recover() }()
-		_, _, _ = h.statsItems()
-		// ⚠⚠ 这里**刻意不再预热聚合** —— 试过了，实测无效，别再加回来：
-		//   只预热取数：首屏 3078ms · 第二发 163ms
-		//   连聚合也预热：首屏 3156ms · 第二发 231ms   ← 没有改善（差异属噪声）
-		// ⇒ 结论：那 3 秒是**纯计算**（`aggregateChatLog` 逐行遍历 28000 条），
-		//   **不是**首次的内存分配 / map 扩容 / GC —— 所以"先算一遍"救不了它。
-		// ⇒ 真要把它降下来，只能**缓存聚合产物**（⚠ 而那会让
-		//   "调用方就地改那个 map"（`resp["source"]=…`、`resp["model_multipliers"]=…`）
-		//   变成污染问题，必须深拷贝 ⇒ 代价与风险都不小，**需要单独决定**）。
-	}()
+	h.warmupDone = make(chan struct{})
+	// ⚠⚠ 测试进程里**同步**跑（2026-11-13 修 CI 抖动）：
+	//   预热只读库、不改行为 ⇒ 同步对测试没有副作用，却从**根上**消掉
+	//   "后台读库 vs t.TempDir() 的 RemoveAll" 这条竞争（本包任何 `New()` 的用例都会踩）。
+	//   `testing.Testing()` 是标准库给的判据，不需要自造开关。
+	if testing.Testing() {
+		h.runWarmup()
+	} else {
+		go h.runWarmup()
+	}
 
 	return h
+}
+
+// runWarmup 预热的**唯一实现**（同步/异步只差调用方式，见 New 末尾）。
+//
+// ⚠ 抽出来的原因：同步与异步必须是**同一份代码** —— 两份实现迟早会漂移，
+//
+//	而漂移的那一天"测试里跑的不是线上跑的那条路"，测试就失去意义了。
+func (h *Handler) runWarmup() {
+	defer close(h.warmupDone)
+	defer func() { _ = recover() }() // 失败/panic 绝不影响启动（见 New 里的三条约束）
+	// ⚠ 预热体（2026-10-18 起）：只预热"取数"一次，把首屏的冷 IO 挪到空闲时间。
+	_, _, _ = h.statsItems()
+	// ⚠⚠ 这里**刻意不再预热聚合** —— 试过了，实测无效，别再加回来：
+	//   只预热取数：首屏 3078ms · 第二发 163ms
+	//   连聚合也预热：首屏 3156ms · 第二发 231ms   ← 没有改善（差异属噪声）
+	// ⇒ 结论：那 3 秒是**纯计算**（`aggregateChatLog` 逐行遍历 28000 条），
+	//   **不是**首次的内存分配 / map 扩容 / GC —— 所以"先算一遍"救不了它。
+	// ⇒ 真要把它降下来，只能**缓存聚合产物**（⚠ 而那会让
+	//   "调用方就地改那个 map"（`resp["source"]=…`、`resp["model_multipliers"]=…`）
+	//   变成污染问题，必须深拷贝 ⇒ 代价与风险都不小，**需要单独决定**）。
+}
+
+// WaitWarmup 等启动预热 goroutine 结束（最多 d）。返回是否已结束。
+//
+// # 谁需要它
+//
+//	**测试**。预热是"读库 + 解析"的后台活，而 `store.DB` 是包级单例 ⇒
+//	测试里 `New()` 完就结束的话，预热会与 `t.TempDir()` 的 RemoveAll 抢那个库目录，
+//	表现为 `TempDir RemoveAll cleanup: … directory not empty`（与断言无关的红，2026-11-13 修）。
+//
+//	生产调用方不需要它：进程活着期间预热跑完就好，没有"拆目录"这件事。
+//
+// ⚠ 不用 sync.WaitGroup：这里只等"一个一次性事件"，channel 更直白，且可重复等待。
+func (h *Handler) WaitWarmup(d time.Duration) bool {
+	if h == nil || h.warmupDone == nil {
+		return true // 没起过预热 ⇒ 视为已完成，调用方不必区分两种情况
+	}
+	select {
+	case <-h.warmupDone:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // mountUpstreamRoutes 遍历已注册上游，挂载它们声明的管理端点。
@@ -2815,14 +2868,62 @@ var errHandled = errors.New("响应已写")
 // 模型目录 / 日志 / 统计
 // ---------------------------------------------------------------------------
 
+// modelsRefreshMinInterval 「刷新模型目录」被接受的**最小间隔**。
+//
+// # 为什么要有它（不是「为了严谨」）
+//
+// 这条端点是**穿透**缓存的写动作：每被接受一次，下一次 /v1/models 与
+// /ui/models/data 就会真的去问一轮上游目录 —— 实测单上游 0.2~23.7s，
+// 而部署里是十几个上游逐个拉（画像见 internal/server/models_flight.go 的注释）。
+// 触发它的却是一个**按钮**：用户手快连点（双击、手抖、以为没反应再点）是常态。
+//
+// 所以设一个最小间隔：间隔内**不再清第二次缓存**（第二次清缓存 = 再穿透一次上游），
+// 并把「你现在不该再点」如实回给调用方（throttled + retry_after_ms），
+// 而不是静默成功 —— 静默成功会让界面以为刷新生效了，而实际什么都没做。
+const modelsRefreshMinInterval = 3 * time.Second
+
+// modelsRefreshGate 记录最近一次**被接受**的刷新时刻（见 modelsRefreshMinInterval）。
+//
+// 进程内状态而不是每请求状态：防的就是「同一个进程里的连点」。多实例部署下每个实例
+// 各自计时 —— 这层是**保护上游**的粗粒度闸门，不是幂等保证（穿透本身仍然是幂等的）。
+var modelsRefreshGate struct {
+	sync.Mutex
+	last time.Time
+}
+
 func (h *Handler) modelsRefresh(w http.ResponseWriter, r *http.Request) {
+	// ⚠ 未接线先判：那是**装配错误**，任何时候都该如实报 501，
+	//   不能被限速挡成一个看起来正常的 throttled。
 	if h.cfg.ResetModelsCache == nil {
 		writeError(w, http.StatusNotImplemented, "模型缓存刷新未接线")
 		return
 	}
+	// 防连点（口径见 modelsRefreshMinInterval）。
+	now := time.Now()
+	modelsRefreshGate.Lock()
+	wait := time.Duration(0)
+	if !modelsRefreshGate.last.IsZero() {
+		wait = modelsRefreshMinInterval - now.Sub(modelsRefreshGate.last)
+	}
+	if wait > 0 {
+		modelsRefreshGate.Unlock()
+		// Retry-After 用**秒**（HTTP 头规定的单位；向上取整，别给 0）。
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait/time.Second)+1))
+		// 200 + throttled 而不是 429：这不是错误，是「刚刷过、这次不需要」。
+		// 前端据此给出「目录刚刷过」的提示，而不是弹一条红字报错（用户没做错什么）。
+		writeJSON(w, http.StatusOK, map[string]any{
+			"reset":          false,
+			"throttled":      true,
+			"retry_after_ms": wait.Milliseconds(),
+		})
+		return
+	}
+	modelsRefreshGate.last = now
+	modelsRefreshGate.Unlock()
+
 	h.cfg.ResetModelsCache()
 	log.Printf("admin: 模型目录缓存已清空")
-	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
+	writeJSON(w, http.StatusOK, map[string]any{"reset": true, "throttled": false})
 }
 
 // modelsPreview 返回**全部目录模型**的 id 与成本倍率，供前端在模型名称旁标注倍率。

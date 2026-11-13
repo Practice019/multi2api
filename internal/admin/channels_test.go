@@ -44,7 +44,9 @@ func chanHandler(t *testing.T, s *channelstore.Store) *Handler {
 	t.Helper()
 	cfg := Config{AdminToken: testAdminToken, ListensLoopback: true}
 	cfg.Channels = s
-	return New(cfg)
+	h := New(cfg)
+	waitWarmupCleanup(t, h)
+	return h
 }
 
 // doJSON 发一个带测试鉴权的请求并回 (状态码, 响应体原文)。

@@ -6997,9 +6997,6 @@ window.addEventListener('message', (e) => {
     // "页面能填、保存静默丢弃"：admin.Settings 的字段、settings_store 的
     // parse/persist 清单、Pool 结构体上的 json tag。
     ['setReviveHours', 'pool_revive_probe_hours', 'int'],
-    // MonkeyCode 出口（代理）：字符串型，热生效。
-    // ⚠ 键名 `monkeycode_proxy` / `monkeycode_direct_proxy` 同时是 config.json 里
-    //   monkeycode 段的 proxy / direct_proxy —— 上游自报的键，前端只转发不解释。
     // 破甲注入（select，走既有的字符串分支：collectSettings 的 else 分支读 el.value）。
     // ⚠ 键名 prompt_armor_mode 与 config.json 的 prompt.armor_mode 同义 ——
     //   后端适配器负责落盘与热生效（见 cmd/server/upstream_settings_armor.go）。
@@ -7008,8 +7005,13 @@ window.addEventListener('message', (e) => {
     ['setStrictModelPrefix', 'strict_model_prefix', 'bool'],
     // 破甲：命中拒绝后是否自动重试一次（bool；后端 prompt_armor_retry，热生效）。
     ['setArmorRetry', 'prompt_armor_retry', 'bool'],
-    ['setMcProxy', 'monkeycode_proxy', 'str'],
-    ['setMcDirectProxy', 'monkeycode_direct_proxy', 'str'],
+    // ⚠ 2026-11-13：MonkeyCode 出口的两行绑定（`setMcProxy` / `setMcDirectProxy`）**已移除**
+    //   （用户要求：设置页不要这一块）。
+    //   · **配置键照旧生效**：config.json 的 `monkeycode.proxy` / `monkeycode.direct_proxy`
+    //     仍被后端读取、上游行为一行未改 —— 删的是**界面控件与绑定**，不是能力；
+    //   · 卡片头上那条只读的「出口 xxx」（egressHTML）**保持**（它展示上游自报的事实）。
+    //   ⚠ HTML 块也一起删了（webui.html 的 `MonkeyCode 出口` subgroup）——
+    //     只删一边会留下「悬空绑定」或「控件无绑定」，本仓有这两样的历史教训。
   ];
   let savedSettings = null;
 
@@ -13261,27 +13263,50 @@ let multCatalogFailed = false;
       if (all) { growthAct(all.dataset.gclaimall, 'claim', '', all); return; }
     });
 
-    // refreshModelCatalog 模型目录面板的「刷新」—— 重载 iframe **并**清掉两张缓存。
+    // refreshModelCatalog 模型目录面板的「刷新」——清后端缓存 + 丢本地缓存 + 重载 iframe。
 //
-// # 为什么不只是重载 iframe
-//   用户 2026-10-30 要求「模型目录应该替换掉可用模型」，入口合并成一个。但旧面板那个
-//   「强制刷新目录」按钮的能力（POST /admin/models/refresh + 清掉 /v1/models 与
-//   /admin/models/preview 两张 30 秒缓存）**不能跟着消失** —— 只重载不清缓存时，
-//   iframe 里 30 秒内仍会拿到旧目录，表现就是用户抱怨过的「点了刷新没反应」。
+// # 三步的顺序就是这个函数的全部（别重排）
+//
+//   ① **await** POST /admin/models/refresh —— 必须等它回来再往下走。
+//      后端那次清缓存是**异步**动作；不等它就重载 iframe 时，页面的取数请求可能
+//      **先于**缓存清空到达后端 ⇒ 用户看到旧目录，而页面还给这次渲染打上一个新的
+//      「更新于」时刻。本仓在别的面板踩过同款竞态，用户读到的就是「点了刷新没反应」。
+//      （后端另有一层防连点：同一进程 3 秒内第二次点击会被 throttled 挡住。）
+//   ② 丢外壳侧的两张 localStorage 缓存（/v1/models 与 /admin/models/preview）——
+//      少丢一张就是半刷新：模型列表变了、倍率还是旧的。
+//   ③ 带 ?t= 重载 iframe —— 页面自己不缓存（fetch 用 no-store），但浏览器对**文档本身**
+//      的复用要先破坏掉。
+//
+// # 为什么用 busyRun 包起来
+//
+// 这条路径每成功一次就会让下一次取数**真的问一轮上游目录**（单上游实测 0.2~23.7s）。
+// busyRun 自带连点保护（内部的 _busy 标记）与「刷新中…」文案 —— 本仓所有面板按钮同一形态。
 //
 // # 为什么不直接复用下面那个按钮的 handler
-//   下面那个由 busyRun 包装（要有可见按钮、要显示运行中），而本函数从 iframe 面板的
-//   刷新按钮调用、还要负责重载 iframe；两者职责不同，绑在一起会把两条路径锁死。
-window.refreshModelCatalog = function () {
-  // 服务端缓存：失败不阻断刷新（界面照样重取一次，最坏是拿到 30 秒内的旧值）。
-  admin('/admin/models/refresh', { method: 'POST', body: '{}' }).catch(() => {});
-  // 外壳侧的两张缓存：与旧按钮同一口径，少清一张就会出现「刷新没生效」。
-  try {
-    lazyCache.drop('ep:/v1/models');
-    lazyCache.drop('ep:/admin/models/preview');
-  } catch (e) { /* 缓存层未就绪时忽略：只影响下面这次取数的快慢，不影响正确性 */ }
-  const f = document.getElementById('mdFrame');
-  if (f) { f.src = '/ui/models?t=' + Date.now(); }
+//   下面那个（隐藏的旧「可用模型」面板）只重绘 chips 与对话下拉，不重载 iframe；
+//   两者职责不同，绑在一起会把两条路径锁死。
+window.refreshModelCatalog = async function (btn) {
+  const b = btn || document.getElementById('btnCatalogRefresh');
+  return busyRun(b, async () => {
+    // ① 后端：清三份缓存（动态目录 / 按上游目录 / 成本系数目录），失败不阻断刷新 ——
+    //    界面照样重取一次，最坏是拿到旧值（那时页面上的「目录取自上游 N 分钟前」
+    //    会如实把旧值暴露出来，而不是伪装成刚取的）。
+    let r = null;
+    try { r = await admin('/admin/models/refresh', { method: 'POST', body: '{}' }); } catch (e) { r = null; }
+    if (r && r.throttled) {
+      // 后端说「刚刷过」：如实说，不谎报「已刷新」（用户没做错什么，不该弹红字）。
+      toast('目录刚刷新过，' + Math.ceil((Number(r.retry_after_ms) || 0) / 1000) + ' 秒后可再刷');
+    }
+    // ② 外壳侧的两张缓存：与旧按钮同一口径，少清一张就会出现「刷新没生效」。
+    try {
+      lazyCache.drop('ep:/v1/models');
+      lazyCache.drop('ep:/admin/models/preview');
+    } catch (e) { /* 缓存层未就绪时忽略：只影响下面这次取数的快慢，不影响正确性 */ }
+    // ③ 重载 iframe（缓存破坏串）。
+    const f = document.getElementById('mdFrame');
+    if (f) { f.src = '/ui/models?t=' + Date.now(); }
+    return true;
+  }, { label: '刷新模型目录' });
 };
 
 $('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {

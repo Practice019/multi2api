@@ -177,20 +177,22 @@ func TestImportRejectsEmpty(t *testing.T) {
 //	后者会留下一个"声称实现了扩展点、行为却与默认一致"的假声明（本仓"声明即承诺"纪律的反面）。
 //
 // ⚠ **只撤列**：`QuotaExt` 那三维（Remaining / Free / FreeKnown）**原样保留** ——
-//   「刷新本上游额度」面板还在用它，且"今日已领 ⇒ Free=0 且 FreeKnown=true"那条三态纪律不许连带删掉。
+//
+//	「刷新本上游额度」面板还在用它，且"今日已领 ⇒ Free=0 且 FreeKnown=true"那条三态纪律不许连带删掉。
 func TestAccountColumnsUsesDefaults(t *testing.T) {
 	p := NewProvider(Config{})
 	if _, ok := gateway.ExtOf[gateway.AccountColumnsExt](gateway.Provider(p)); ok {
 		t.Error("本上游声明了 AccountColumnsExt —— 用户要求去掉「今日额度」(free_quota) 列 ⇒ 应当**不声明**、走默认列")
 	}
-	// 默认列集本身必须没被动过（顺序也一样）：核心的回落就是它。
-	got := gateway.EffectiveAccountColumns(gateway.Provider(p))
+	// 核心的回落点在 admin.accountColumnsOf（internal/admin/schedule.go:175-179）：
+	//   未实现该扩展点 ⇒ 返回 nil ⇒ 前端用**默认列集**。所以这里断言两件可判的事：
+	//   ① 本上游确实不实现它（上面那条）；② 默认列集里没有「今日额度」那一列。
 	def := gateway.DefaultAccountColumns()
-	if strings.Join(got, ",") != strings.Join(def, ",") {
-		t.Errorf("账号列应当**恰好**是默认列集（顺序也一样）:\n got %v\nwant %v", got, def)
+	if strings.Contains(strings.Join(def, ","), gateway.AccountColFreeQuota) {
+		t.Error("默认列集里出现了 free_quota —— 那是「今日额度」列，用户要求不要它")
 	}
-	if strings.Contains(strings.Join(got, ","), gateway.AccountColFreeQuota) {
-		t.Error("默认列里不该出现 free_quota（「今日额度」是用户要求撤掉的那一列）")
+	if len(def) == 0 {
+		t.Fatal("默认列集为空 —— 账号池会一列都不显示（先检查 gateway 的默认列定义）")
 	}
 	// ⚠ 但额度那三维（QuotaExt）必须还在 —— 只撤列，不撤能力。
 	if _, ok := gateway.ExtOf[gateway.QuotaExt](gateway.Provider(p)); !ok {

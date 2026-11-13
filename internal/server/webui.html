@@ -1291,9 +1291,14 @@ function mpEsc(s) {
   <section data-key="modelcatalog">
     <h2>模型目录
       <span class="spacer"></span>
-      <button onclick="refreshModelCatalog()" style="padding:3px 10px;font-size:12px">刷新</button>
+      <!-- 刷新 = 清后端缓存（POST /admin/models/refresh）+ 丢外壳的本地缓存 + 重载 iframe。
+           三步的顺序与理由见 ui/app.js 的 refreshModelCatalog（那里是**唯一**一份实现）。
+           ⚠ 传 this：busyRun 靠它做连点保护与「刷新中…」文案；函数里另有一条
+             #btnCatalogRefresh 的兜底查找，两条路都留着（按钮被搬走也不会退化成无保护）。 -->
+      <button id="btnCatalogRefresh" onclick="refreshModelCatalog(this)" style="padding:3px 10px;font-size:12px">刷新</button>
     </h2>
-    <p class="dim" style="font-size:12px;margin:2px 0 6px">上游模型目录与渠道的对应关系（页面由 T14 交付）。</p>
+    <p class="dim" style="font-size:12px;margin:2px 0 6px">上游模型目录与渠道的对应关系。
+      页脚会写明这份目录是<b>什么时候</b>从上游取的（后端缓存 1 小时；点「刷新」立刻回源重取）。</p>
     <iframe id="mdFrame" src="/ui/models" style="width:100%;height:calc(100vh - 190px);min-height:460px;
       border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
@@ -1457,24 +1462,13 @@ function mpEsc(s) {
           <div class="field"><label for="setUpTimeout">上游请求超时（秒）</label><input type="number" id="setUpTimeout" min="1"></div>
         </div>
         <!-- MonkeyCode 的两个出口（2026-11-01 用户要求：这东西不能写死）。
-             # 为什么必须能改
-             出口地址天然是**每台机器各不相同**的（本地代理端口、公司网关、直连…），
-             而它原先只能改 config.json（改完还得重启）—— 等于把日常操作变成运维动作。
-             现在改完**立刻生效**（换 http.Client 的 transport），可用「账号池 → 出口自检」当场验证。
-             注意 2026-11-01 更正：国际站**不是**"必须走代理"——多数环境直连即可（见「国际站代理」那格的说明）。
-             这两个框是"本机这条网络路不通时的出口覆盖"，不是"上国际站的前提条件"。
-             # 为什么不与「上游请求超时」挤在一行
-             那一个是通用旋钮（对所有上游生效、需重启），这两个是 MonkeyCode 专属且热生效；
-             并排会让「改完要不要重启」这个最要紧的信息变模糊。 -->
-        <div class="subgroup">MonkeyCode 出口 <span class="badge badge--hot">立即生效</span></div>
-        <div class="formgrid">
-          <div class="field"><label for="setMcProxy">国际站代理（monkeycode-ai.net）</label>
-            <input type="text" id="setMcProxy" placeholder="http://127.0.0.1:10808，留空=直连">
-            <span class="hint">国际站**可直连，也可走代理**（多数环境直连即可）。只有本机直连不通时才需要填代理。改完可到「账号池 → 出口自检」验证。</span></div>
-          <div class="field"><label for="setMcDirectProxy">国内站强制代理（monkeycode-ai.com）</label>
-            <input type="text" id="setMcDirectProxy" placeholder="留空 = 直连（正常部署就该留空）">
-            <span class="hint">只有「本机连不上国内站」时才填。走了海外代理的国内站既慢又容易被风控。</span></div>
-        </div>
+             ⚠ 2026-11-13 用户要求**从设置页移除**：这两个框不再渲染。
+             # 删的是**界面**，不是能力
+             config.json 里 `monkeycode.proxy` / `monkeycode.direct_proxy` **仍然照旧生效**
+             （改完需重启；上游侧行为一行未改）。卡片头上那条只读的「出口 xxx」也保持不动。
+             # 为什么不保留"只读展示"
+             它们是"本机网络路不通时的出口覆盖"，属于一次性配置；留在页面上只会让人
+             反复怀疑"我是不是该填点什么"（用户原话就是"这个也不需要"）。 -->
         <div class="subgroup">出站请求安全</div>
         <div class="info-line" style="margin-bottom:0">指纹脱敏：<span id="setSanitizeRO">…</span></div>
       </fieldset>
