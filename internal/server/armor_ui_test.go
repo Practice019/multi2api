@@ -432,6 +432,169 @@ func TestArmorVisibilityHasStaticFallback(t *testing.T) {
 	}
 }
 
+// TestArmorPickerSeesLateManifestAndSupportsSearch T-907：候选端口的两条硬要求。
+//
+// ① **manifest 后到也要有上游**：设置页可能在 manifest 到达**之前**渲染候选 ——
+//
+//	实测 bug 是旧实现把"上游"和"渠道"一起缓存住 ⇒ 空的上游被永久钉死（用户看到"只有渠道"，
+//	不刷新页面永远好不了）。修法：只缓存要发请求的那半（渠道），上游每次从 manifest 现取；
+//	外加 applyManifest 后补渲染一次（不必刷新页面）。
+//
+// ② **搜索**：分组名 + 值都参与匹配；已选 chips 不受过滤影响；无匹配要有可读提示。
+//
+// 判据是执行式：ARMOR_PICK 到 wireArmorSettings 之间那段**真代码**抠到 node 里跑，
+// DOM 用一个极小的桩（选择器要能解析 options / 记录 disabled / 读 chips 的 HTML）。
+func TestArmorPickerSeesLateManifestAndSupportsSearch(t *testing.T) {
+	src, err := os.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(src)
+	for _, need := range []string{"const ARMOR_PICK = {", "// wireArmorSettings 绑定"} {
+		if !strings.Contains(js, need) {
+			t.Fatalf("app.js 里找不到标记 %q —— 这段被改名/搬走了？守卫要跟着改，别删", need)
+		}
+	}
+	node, lerr := exec.LookPath("node")
+	if lerr != nil {
+		t.Skip("没有 node，跳过执行式判据（静态判据见 TestArmorPickerHasSearchInputs）")
+	}
+	// 先在 Go 侧确认窗口切得对（切错会让 node 里那份"看起来跑到"其实什么都没测）。
+	win := appJSWindow(t, "const ARMOR_PICK = {", "// wireArmorSettings 绑定")
+	for _, need := range []string{"function loadArmorSources", "function renderArmorTargets", "function armorTargetList"} {
+		if !strings.Contains(win, need) {
+			t.Fatalf("抠出来的窗口里缺 %q —— 切错位置了", need)
+		}
+	}
+	harness := strings.Join([]string{
+		`const fs = require('fs');`,
+		`const js = fs.readFileSync('ui/app.js', 'utf8');`,
+		`const win = js.slice(js.indexOf('const ARMOR_PICK = {'), js.indexOf('// wireArmorSettings 绑定'));`,
+		`if (!win.includes('function renderArmorTargets')) { console.error('窗口切错：没有 renderArmorTargets'); process.exit(9); }`,
+		`const bad = [];`,
+		`const ok = (c, m) => { if (!c) bad.push(m); };`,
+		`// ── 桩 ──────────────────────────────────────────────────────────────`,
+		`const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');`,
+		`const markDirty = () => {};`,
+		`const UP = { list: [] };`,
+		`function providerRegistryIds() { return UP.list.slice(); }`,
+		`const CH = { list: null, fail: false, calls: 0 };`,
+		`async function admin() { CH.calls++; if (CH.fail) throw new Error('boom'); return { channels: (CH.list || []).map((n) => ({ name: n })) }; }`,
+		`function $(id) { return ELS[id] || null; }`,
+		`const ELS = {};`,
+		`const SEARCH = {};`,
+		`const document = { querySelector: (sel) => { const m = /data-armorsearch="([a-z]+)"/.exec(sel); return m ? (SEARCH[m[1]] || null) : null; } };`,
+		`function makeDiv() { return { innerHTML: '', textContent: '' }; }`,
+		`function makeSelect() {`,
+		`  const o = { _html: '', options: [], disabled: false };`,
+		`  Object.defineProperty(o, 'innerHTML', {`,
+		`    get() { return this._html; },`,
+		`    set(v) {`,
+		`      this._html = v;`,
+		`      const out = [];`,
+		`      const re = /value="([^"]*)" data-armorgrp="([^"]*)"/g;`,
+		`      let m;`,
+		`      while ((m = re.exec(v))) { const grp = m[2]; out.push({ value: m[1], selected: false, getAttribute: (k) => (k === 'data-armorgrp' ? grp : null) }); }`,
+		`      this.options = out;`,
+		`    }`,
+		`  });`,
+		`  return o;`,
+		`}`,
+		`ELS['setArmorInjectTargets'] = { value: '' };`,
+		`ELS['setArmorInjectTargetsPick'] = makeSelect();`,
+		`ELS['setArmorInjectTargetsChips'] = makeDiv();`,
+		`ELS['setArmorInjectTargetsHint'] = makeDiv();`,
+		`ELS['setArmorBlockTargets'] = { value: '' };`,
+		`ELS['setArmorBlockTargetsPick'] = makeSelect();`,
+		`ELS['setArmorBlockTargetsChips'] = makeDiv();`,
+		`ELS['setArmorBlockTargetsHint'] = makeDiv();`,
+		`SEARCH['inject'] = SEARCH['block'] = { value: '' };`,
+		`eval(win);`,
+		`const vals = (which) => ELS['setArmor' + (which === 'inject' ? 'Inject' : 'Block') + 'TargetsPick'].options.map((o) => o.value);`,
+		`const grpVals = (which, grp) => ELS['setArmor' + (which === 'inject' ? 'Inject' : 'Block') + 'TargetsPick'].options.filter((o) => o.getAttribute('data-armorgrp') === grp).map((o) => o.value);`,
+		`const hintOf = (which) => ELS['setArmor' + (which === 'inject' ? 'Inject' : 'Block') + 'TargetsHint'].textContent;`,
+		`const chipsOf = (which) => ELS['setArmor' + (which === 'inject' ? 'Inject' : 'Block') + 'TargetsChips'].innerHTML;`,
+		`(async () => {`,
+		`  // ⑤ 先测"两份都取不到"：此时渠道缓存还没建立（失败也不缓存 ⇒ 才能走到空集路径）`,
+		`  UP.list = []; CH.list = []; CH.fail = true;`,
+		`  ELS['setArmorInjectTargets'].value = '';`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(hintOf('inject').indexOf('还没有可用的上游或渠道') >= 0, '⑤ 清单为空要有可读提示（实际 ' + JSON.stringify(hintOf('inject')) + '）');`,
+		`  ok(ELS['setArmorInjectTargetsPick'].disabled === true, '⑤ 清单为空时选择器应禁用');`,
+		`  // ① manifest 后到：先空上游渲染一次，再灌入 manifest 重渲染`,
+		`  CH.fail = false; CH.list = ['七牛云', '自建渠道'];`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(grpVals('inject', '上游').length === 0, '前置：上游为空时不该有上游候选');`,
+		`  UP.list = ['phanthywork', 'loomy'];`,
+		`  const callsBefore = CH.calls;`,
+		`  await renderArmorTargets('inject');`,
+		`  const ups = grpVals('inject', '上游');`,
+		`  ok(ups.length === 2 && ups[0] === 'phanthywork', '① manifest 后到 ⇒ 选择器里必须出现上游（实际 ' + JSON.stringify(ups) + '）—— 缓存把空的上游钉死了？');`,
+		`  ok(CH.calls === callsBefore, '① 渠道那半不必重复请求（' + callsBefore + ' → ' + CH.calls + '）—— 只该缓存要发请求的那半');`,
+		`  // ② 搜索：分组名 + 值都参与；清空恢复全部`,
+		`  const all = vals('inject').length;`,
+		`  SEARCH['inject'].value = '上游';`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(vals('inject').length === 2 && grpVals('inject', '上游').length === 2, '② 输「上游」应只剩上游项（实际 ' + JSON.stringify(vals('inject')) + '）');`,
+		`  SEARCH['inject'].value = '七牛';`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(vals('inject').length === 1 && vals('inject')[0] === '七牛云', '② 输渠道名关键字应只剩该渠道（实际 ' + JSON.stringify(vals('inject')) + '）');`,
+		`  SEARCH['inject'].value = '  QI  NIU  ';`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(vals('inject').length === 0, '② 大小写/空白容错：不匹配就是空（实测 ' + JSON.stringify(vals('inject')) + '）');`,
+		`  ok(hintOf('inject').indexOf('没有匹配') >= 0, '② 无匹配要可读提示（实际 ' + JSON.stringify(hintOf('inject')) + '）');`,
+		`  SEARCH['inject'].value = '';`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(vals('inject').length === all, '② 清空搜索应恢复全部候选（' + vals('inject').length + ' vs ' + all + '）');`,
+		`  // ③ 已选 chips 不受过滤影响 + ④ 残留值仍在候选里`,
+		`  ELS['setArmorInjectTargets'].value = 'phanthywork, 七牛云, 已下线的老上游';`,
+		`  SEARCH['inject'].value = 'zzz-不匹配';`,
+		`  await renderArmorTargets('inject');`,
+		`  const pills = (chipsOf('inject').match(/data-armorrm=/g) || []).length;`,
+		`  ok(pills === 3, '③ 过滤期间 chips 仍应是 3 个（实际 ' + pills + '）');`,
+		`  SEARCH['inject'].value = '';`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(vals('inject').indexOf('已下线的老上游') >= 0, '④ 当前名单里的残留值必须仍在候选里（否则删不掉）');`,
+		`  SEARCH['inject'].value = '老上游';`,
+		`  await renderArmorTargets('inject');`,
+		`  ok(vals('inject').indexOf('已下线的老上游') >= 0, '④ 残留值也要能被搜到（不许被搜索丢掉）');`,
+		`  // （⑤ 已挪到最前：渠道成功一次之后它就不该再走到空集路径）`,
+		`  if (bad.length) { console.error(bad.join(' | ')); process.exit(1); }`,
+		`  console.log('OK');`,
+		`})().catch((e) => { console.error('harness 异常: ' + (e && e.stack || e)); process.exit(2); });`,
+	}, "\n")
+	out, runErr := exec.Command(node, "-e", harness).CombinedOutput()
+	if runErr != nil || !strings.Contains(string(out), "OK") {
+		t.Errorf("★ 候选端口不合格（%v）:\n%s", runErr, out)
+	}
+}
+
+// TestArmorPickerHasSearchInputs 静态兜底：两个选择器各有一个搜索框，且 JS 绑定了它。
+//
+// ⚠ 搜索框**故意不带 id**（只用 data-armorsearch）：带 id 会让 tests/frontend 的设置页探针
+//
+//	把"带 id 的控件"数出来（它会与 .field 解析出的 id 集合做等值比较）—— 这里与
+//	data-armoradd / data-armorclear 同款写法，探针零漂移。
+func TestArmorPickerHasSearchInputs(t *testing.T) {
+	html, err := os.ReadFile("webui.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(html)
+	for _, which := range []string{"inject", "block"} {
+		if !strings.Contains(page, "data-armorsearch=\""+which+"\"") {
+			t.Errorf("★ 破甲「%s」名单缺搜索框（data-armorsearch）—— 用户要求支持搜索", which)
+		}
+	}
+	js, err := os.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(js), "data-armorsearch") {
+		t.Error("★ app.js 没去读 data-armorsearch —— 搜索框存不存在都不影响过滤（等于没接线）")
+	}
+}
+
 // TestArmorUIAssetsParse 执行式兜底：脚本语法必须过（node --check）。
 func TestArmorUIAssetsParse(t *testing.T) {
 	js, err := os.ReadFile("ui/app.js")

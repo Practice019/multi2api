@@ -621,6 +621,15 @@
     const def = PROVIDERS.find(p => p && p.default) || PROVIDERS[0];
     DEFAULT_PROVIDER = def ? def.id : '';
     manifestError = '';
+    // ⚠ T-907：manifest 到了就补渲染破甲名单选择器 —— 设置页可能在它**之前**就渲染过（那时上游清单还是空的）。
+    //   try/catch 是必要的：这个函数也可能在 ARMOR_PICK / renderArmorTargets 初始化**之前**被调用
+    //   （const 有 TDZ），那时这次补渲染只是跳过，后面正常的渲染与搜索路径仍会补上。
+    ['inject', 'block'].forEach(function (w) {
+      try {
+        const p = renderArmorTargets(w);
+        if (p && p.catch) p.catch(function () {});
+      } catch (e) {}
+    });
     return MANIFEST;
   }
 
@@ -7183,23 +7192,44 @@ window.addEventListener('message', (e) => {
     host.innerHTML = html;
   }
 
-  let armorSources = null; // {upstreams:[], channels:[]}
+  let armorChannelCache = null; // string[] | null —— **只缓存要发请求的那一半**（渠道）
 
   // loadArmorSources 两份清单：manifest 的上游 + /admin/channels 的渠道。
+  //
+  // # ⚠⚠ 为什么上游**不缓存**（2026-11-13 T-907 实测的 bug）
+  //
+  // 上游那份是 providerRegistryIds() —— 从 manifest **同步派生**的**免费**值；渠道那份要发请求。
+  // 旧实现把两份塞进同一个缓存：设置页若在 manifest 到达**之前**渲染，那份"空上游"就被永久
+  // 钉死（用户截图：拦截名单里**只有渠道、没有上游**，而且不刷新页面永远好不了）。
+  // ⇒ 缓存的判据只该是"要不要发请求"：上游每次现取（下一次渲染自然就有了）；
+  //   渠道**成功才缓存**（失败不缓存 ⇒ 下次渲染自动重试，也不必刷新页面）。
   //
   // 渠道取不到（未启用渠道 / 请求失败）只让候选少一半 —— **不**让整个选择器失效，
   // 也**不**退化成手打输入框（用户明确要求：清单为空就给可读提示）。
   async function loadArmorSources() {
-    if (armorSources) return armorSources;
     const upstreams = providerRegistryIds();
-    let channels = [];
-    try {
-      const r = await admin('/admin/channels?page_size=200');
-      const list = (r && (r.channels || r.items)) || [];
-      channels = list.map(c => (c && (c.name || c.id)) || '').filter(Boolean);
-    } catch (e) { channels = []; }
-    armorSources = { upstreams: upstreams, channels: channels };
-    return armorSources;
+    if (!armorChannelCache) {
+      try {
+        const r = await admin('/admin/channels?page_size=200');
+        const list = (r && (r.channels || r.items)) || [];
+        armorChannelCache = list.map(c => (c && (c.name || c.id)) || '').filter(Boolean);
+      } catch (e) { /* 失败：这半留空且**不缓存**，下一次渲染会再试 */ }
+    }
+    return { upstreams: upstreams, channels: armorChannelCache || [] };
+  }
+
+  // armorSearchQuery 搜索词规范化：去首尾空白、大小写不敏感、**并删掉内部空白**
+  //（"七 牛" 能命中 "七牛云"；与渠道页/令牌页那种"关键词包含"手感一致，只多这一步空白容错）。
+  function armorSearchQuery(q) {
+    return String(q == null ? '' : q).trim().toLowerCase().replace(/\s+/g, '');
+  }
+
+  // armorSearchMatches 候选是否命中：**分组名 + 值**都参与
+  //（输「上游」筛出所有上游、输「七牛」筛出该渠道）。空搜索词 = 全部命中。
+  function armorSearchMatches(q, group, value) {
+    const needle = armorSearchQuery(q);
+    if (!needle) return true;
+    return armorSearchQuery(String(group) + ' ' + String(value)).indexOf(needle) >= 0;
   }
 
   // renderArmorTargets 渲染一个名单选择器（候选 + chips + 提示）。
@@ -7223,22 +7253,37 @@ window.addEventListener('message', (e) => {
     for (let i = 0; i < list.length; i++) add('当前名单', list[i]);
 
     const sel = $(cfg.pick);
-    let html = '';
+    // 搜索框：故意**不带 id**（只用 data-armorsearch），与 data-armoradd / data-armorclear 同款
+    // —— 带 id 会被 tests/frontend 那张"带 id 的控件 vs .field 解析出的 id"等值判据数进去。
+    const searchEl = document.querySelector('[data-armorsearch="' + which + '"]');
+    const q = searchEl ? searchEl.value : '';
+    // ⚠ 搜索是**重建候选列表**（不是把 option 藏起来）：重建之后选中态由下面那段从**隐藏 input**
+    //   重新标记 —— 隐藏 input 是唯一真相（见 armorTargetList），所以过滤不会丢选中态。
+    const shown = [];
     for (let i = 0; i < opts.length; i++) {
-      html += '<option value="' + esc(opts[i].v) + '" data-armorgrp="' + esc(opts[i].group) + '">' +
-        esc(opts[i].group) + ' · ' + esc(opts[i].v) + '</option>';
+      if (armorSearchMatches(q, opts[i].group, opts[i].v)) shown.push(opts[i]);
+    }
+    let html = '';
+    for (let i = 0; i < shown.length; i++) {
+      html += '<option value="' + esc(shown[i].v) + '" data-armorgrp="' + esc(shown[i].group) + '">' +
+        esc(shown[i].group) + ' · ' + esc(shown[i].v) + '</option>';
     }
     sel.innerHTML = html;
     for (let i = 0; i < sel.options.length; i++) {
       sel.options[i].selected = list.indexOf(sel.options[i].value) >= 0;
     }
-    const empty = src.upstreams.length === 0 && src.channels.length === 0;
-    sel.disabled = empty && opts.length === 0;
+    const none = src.upstreams.length === 0 && src.channels.length === 0 && opts.length === 0;
+    const noMatch = !none && shown.length === 0;
+    sel.disabled = none || noMatch;
     const hint = $(cfg.hint);
     if (hint) {
-      hint.textContent = empty
+      // ⚠ 三种状态必须**分开说**：清单为空 / 搜不到 / 正常。
+      //   "搜不到"绝不许长成"清单是空的"的样子 —— 否则用户以为上游和渠道都掉了。
+      hint.textContent = none
         ? '还没有可用的上游或渠道 —— 先接入一个上游、或去「渠道」页建一条，这里才有候选（本栏只从清单里选，不支持手打）。'
-        : '多选候选后点「加入名单」；已选项在下面（点 × 移除）。范围选「全部」时名单不参与判决。';
+        : (noMatch
+          ? '没有匹配的候选 —— 换个关键字，或清空搜索框恢复全部（已选项在下面，不受搜索影响）。'
+          : '多选候选后点「加入名单」；已选项在下面（点 × 移除）。范围选「全部」时名单不参与判决。');
     }
     renderArmorChips(which);
   }
@@ -7250,6 +7295,10 @@ window.addEventListener('message', (e) => {
     for (const which of ['inject', 'block']) {
       const cfg = ARMOR_PICK[which];
       if (!cfg || !$(cfg.pick)) continue;
+      // 搜索：只重绘候选（chips 由隐藏 input 派生，不受影响）。
+      // 用 'input' 事件与渠道页（flt-q）/令牌页（kw）同款；不防抖 —— 候选只有几十条，重绘是同步的。
+      const searchEl = document.querySelector('[data-armorsearch="' + which + '"]');
+      if (searchEl) searchEl.addEventListener('input', function () { void renderArmorTargets(which); });
       const addBtn = document.querySelector('[data-armoradd="' + which + '"]');
       if (addBtn) addBtn.addEventListener('click', function () {
         const sel = $(cfg.pick);

@@ -1453,6 +1453,10 @@ function mpEsc(s) {
               </select>
               <span class="hint">「启用破甲（追加）」这一档对谁注入。范围选「全部」时名单不参与。</span></div>
             <div class="field" data-armorsec="append"><label for="setArmorInjectTargetsPick">注入名单</label>
+              <!-- 搜索框**故意不给 id**（只用 data-armorsearch）：与 data-armoradd / data-armorclear 同款。
+                   给 id 会让 tests/frontend 那张「带 id 的控件 = .field 解析出的 id」的等值判据数出漂移。 -->
+              <input type="text" data-armorsearch="inject" aria-label="搜索上游或渠道"
+                placeholder="搜索上游 / 渠道（可搜分组名，如「上游」）" autocomplete="off" style="margin-bottom:4px">
               <select id="setArmorInjectTargetsPick" multiple size="5" data-armorpick="inject"></select>
               <div class="chips" id="setArmorInjectTargetsChips"></div>
               <div style="margin-top:6px;display:flex;gap:6px">
@@ -1471,6 +1475,8 @@ function mpEsc(s) {
               </select>
               <span class="hint">「禁用破甲（只拦截）」这一档对谁生效。范围外连检测都不做（原样发出）。</span></div>
             <div class="field" data-armorsec="block"><label for="setArmorBlockTargetsPick">拦截名单</label>
+              <input type="text" data-armorsearch="block" aria-label="搜索上游或渠道"
+                placeholder="搜索上游 / 渠道（可搜分组名，如「上游」）" autocomplete="off" style="margin-bottom:4px">
               <select id="setArmorBlockTargetsPick" multiple size="5" data-armorpick="block"></select>
               <div class="chips" id="setArmorBlockTargetsChips"></div>
               <div style="margin-top:6px;display:flex;gap:6px">
