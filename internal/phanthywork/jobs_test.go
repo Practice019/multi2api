@@ -365,6 +365,132 @@ func TestNeedsRefreshFollowsRefreshSkew(t *testing.T) {
 	}
 }
 
+// authWithRemainingLifetime 造"寿命 = lifetimeSec、剩余 = remainingSec"的凭证。
+//
+// ⚠ 为什么需要它（2026-11-13 T-913）：`authWithRemaining` 固定寿命 1800 秒，
+//
+//	于是"提前量 = 寿命一半 = 900 秒"总是**大于**扫描周期 —— 那条路径一直是对的。
+//	而用户报障里 4 个号掉到 1 分钟，说明真机上有**寿命更短**的令牌：
+//	寿命 ≤ 2×扫描周期时，"一半"就短于"扫描一圈"⇒ 漏一轮就过期。
+func authWithRemainingLifetime(uid, refreshToken string, remainingSec, lifetimeSec int64) *Auth {
+	now := nowMS() / 1000
+	exp := now + remainingSec
+	iat := exp - lifetimeSec
+	a := newTestAuth(uid, refreshToken)
+	a.OAuth.AccessToken = jwtWithTimes(uid, iat, exp)
+	a.OAuth.ExpiresAtMS = exp * 1000
+	return a
+}
+
+// outboundWouldRefresh 出站路径的判据（`remaining ≤ RefreshSkew`，**不带**扫描地板）。
+//
+// ⚠ 它是核心那条路的忠实替身：核心拿 RefreshSkewExt 的返回值比剩余寿命。
+func outboundWouldRefresh(t *testing.T, p *Provider, a *Auth, now time.Time) bool {
+	t.Helper()
+	cred := gateway.Credential{Provider: providerID, UID: a.UID(), Secret: a}
+	skew, ok := p.RefreshSkew(cred)
+	if !ok || skew <= 0 {
+		return false
+	}
+	exp, has := a.ExpiresAt()
+	if !has || exp <= 0 {
+		return false
+	}
+	return exp*1000-now.UnixMilli() <= skew.Milliseconds()
+}
+
+// TestNeedsRefreshLeadCoversScanInterval ★ ① 续期提前量必须**大于扫描周期**。
+//
+// 用户报障（截图）：4 个号掉到 1 分钟 / 13 分钟 / 1 分钟 / 22 分钟。
+// 根因：判据是"剩余 ≤ 寿命一半"，而扫描**每 10 分钟才一次** ⇒
+//
+//	寿命短于 2×扫描周期的令牌，一半的提前量**小于**扫描一圈 ⇒ 跨过阈值后要等下一轮，
+//	漏一轮就掉到 1 分钟 ⇒ 在下次扫描前已经过期。
+//
+// 判据：提前量 = max(寿命一半, 扫描周期 + 缓冲)。
+func TestNeedsRefreshLeadCoversScanInterval(t *testing.T) {
+	p := NewProvider(Config{AuthDir: t.TempDir()})
+	now := time.Now()
+
+	// 组①：长寿命（1800 秒 ⇒ 一半 900 秒 > 地板）⇒ 行为**不变**：剩余 900+30 不该刷。
+	if p.needsRefresh(authWithRemaining("u-long", "rt", 930), now) {
+		t.Error("长寿命令牌剩余 930 秒（> 一半 900）不该刷 —— 长寿命那档行为不许变")
+	}
+	// 组②：**寿命较短**（1200 秒 ⇒ 一半只有 600 秒 < 地板 720 秒）⇒ 剩余 700 秒**必须**刷。
+	//    ⚠ 物理约束：剩余**不可能**超过寿命 ⇒ 用例必须取 剩余 ≤ 寿命
+	//      （我第一版取 700/600 是假的，它把"地板"误判成了 bug）。
+	//    （旧判据：700 > 600（一半）⇒ 不刷 ⇒ 跨过阈值后要等下一圈 ⇒ 掉到 1 分钟就是这么来的）
+	if !p.needsRefresh(authWithRemainingLifetime("u-short", "rt", 700, 1200), now) {
+		t.Error("★ 剩余 700 秒已在「扫描一圈 + 缓冲」（720 秒）之内，必须判为需要续期" +
+			"（旧判据按寿命一半 600 秒判 ⇒ 不刷 ⇒ 漏一轮就过期）")
+	}
+	// 组③：寿命虽短但剩余已宽于地板 ⇒ 不刷（不许把提前量放大成"永远刷"）。
+	if p.needsRefresh(authWithRemainingLifetime("u-short2", "rt", 900, 1200), now) {
+		t.Error("剩余 900 秒（> 地板 720 秒）时不该刷")
+	}
+	// 组④：**寿命短于地板**（600 秒 < 720 秒）⇒ 出站与后台**都**会判要刷，这是**结构必然**：
+	//    令牌活不过一圈 ⇒ 每圈都得续。⚠ 这一条是**如实记录**，不是断言它"优雅"。
+	if !p.needsRefresh(authWithRemainingLifetime("u-tiny", "rt", 590, 600), now) {
+		t.Error("寿命 600 秒（< 地板 720 秒）的令牌：剩余 590 秒必然要刷（它活不过下一圈）")
+	}
+}
+
+// TestNeedsRefreshNeverLagsOutbound ★ ② 同源性：后台**绝不比出站更晚**。
+//
+// 两处判据打架的两种后果（见 needsRefresh 的注释）：更严 ⇒ 后台永不刷；更松 ⇒ 白刷。
+// 本轮刻意让后台**可以更早**（要容忍漏轮），但**绝不能更晚** —— 这条把它钉住。
+func TestNeedsRefreshNeverLagsOutbound(t *testing.T) {
+	p := NewProvider(Config{AuthDir: t.TempDir()})
+	now := time.Now()
+	for _, c := range []struct {
+		name      string
+		remaining int64
+		lifetime  int64
+	}{
+		{"长寿命·很近", 100, 1800},
+		{"长寿命·临界内", 800, 1800},
+		{"长寿命·临境外", 1000, 1800},
+		{"长寿命·满", 1700, 1800},
+		{"短寿命·很近", 100, 600},
+		{"短寿命·临界内", 280, 600},
+		{"短寿命·地板内", 700, 600},
+		{"短寿命·地板外", 900, 600},
+	} {
+		a := authWithRemainingLifetime("u-"+c.name, "rt", c.remaining, c.lifetime)
+		out := outboundWouldRefresh(t, p, a, now)
+		scan := p.needsRefresh(a, now)
+		if out && !scan {
+			t.Errorf("%s（剩余 %ds / 寿命 %ds）：出站会刷而后台不刷 ⇒ 后台**落后于**出站（两处判据打架）",
+				c.name, c.remaining, c.lifetime)
+		}
+		if out != scan && !out && scan {
+			// 后台更早是**刻意**的（要容忍漏轮），但只在"短于扫描地板"的那档允许。
+			d := time.Duration(c.remaining) * time.Second
+			if c.lifetime/2 >= int64((defaultRefreshScanInterval+refreshScanBuffer)/time.Second) {
+				t.Errorf("%s：长寿命令牌不该出现「后台更早」（提前量已由一半覆盖）", c.name)
+			}
+			_ = d
+		}
+	}
+}
+
+// TestNeedsRefreshDoesNotFireNearFullLifetime ★ ③ 接近满寿命 ⇒ 不刷（防提前量放大成永远续期）。
+func TestNeedsRefreshDoesNotFireNearFullLifetime(t *testing.T) {
+	p := NewProvider(Config{AuthDir: t.TempDir()})
+	now := time.Now()
+	// ⚠ 只对**寿命 ≥ 地板（720 秒）**的令牌断言"刚发下来不刷" —— 唯一自洽的口径：
+	//   寿命 < 地板 的令牌活不过一圈 ⇒ 它必须每圈刷（见上一条组④）。
+	// ⚠ 取 lt ≥ 900："刚发下来 10 秒"的剩余是 lt−10，必须**严格大于**地板 720 秒
+	//   才算"接近满寿命"（lt=720 时剩余 710 < 720 ⇒ 那时判"要刷"是**对的**，不是 bug）。
+	for _, lt := range []int64{900, 1200, 1800, 3600} {
+		a := authWithRemainingLifetime("u-full", "rt", lt-10, lt) // 刚发下来 10 秒
+		if p.needsRefresh(a, now) {
+			t.Errorf("寿命 %ds 的令牌刚发下来（剩余 %ds）就判要刷 ⇒ 会变成每轮都刷（打爆上游 + 与桌面端互踢）",
+				lt, lt-10)
+		}
+	}
+}
+
 // TestRefreshSkewWindowIsHalfOfLifetime 顺带把 900 秒这个前提钉住。
 //
 // 上面几条用例都建立在「寿命 1800 秒 ⇒ 该刷点 900 秒」之上；
