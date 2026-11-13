@@ -190,6 +190,10 @@ func (u *checkinUpstream) Status(ctx context.Context, acc dailycheckin.Account) 
 	if !ok || a == nil {
 		return false, false, errors.New("phanthywork: 凭证类型不对")
 	}
+	// ★ 统一入口（2026-11-13）：设备未注册时签名请求必被拒 ⇒ 先确保就绪。
+	if err := u.p.ensureReady(ctx, a); err != nil {
+		return false, true, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, quotaTimeout)
 	defer cancel()
 	sum, localMS, err := u.p.client.FetchSummary(ctx, a)
@@ -243,6 +247,10 @@ func (u *checkinUpstream) Claim(ctx context.Context, acc dailycheckin.Account) (
 		return 0, false, errors.New("phanthywork: 凭证类型不对")
 	}
 	serverDate := a.dailyServerDate()
+	// ★ 同上：claim 是**签名写操作**，同样先就绪（含注册）—— 判据只留 ensureReady 一处。
+	if err := u.p.ensureReady(ctx, a); err != nil {
+		return 0, false, err
+	}
 	if serverDate == "" {
 		// 先读一次（只读）拿服务端日键 —— 这是"绝不用本地日期"的代价，值。
 		sum, _, err := u.p.client.FetchSummary(ctx, a)

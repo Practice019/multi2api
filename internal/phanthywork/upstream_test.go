@@ -81,6 +81,13 @@ type fakeUpstream struct {
 
 	// summaryAuthFail 置真时 summary 回 401（额度 AuthFailed 判据用）。
 	summaryAuthFail bool
+	// summaryAuthFailCode 上面那个 401 的 error.code（空 = "invalid_grant"，= 真·凭据失效）。
+	//
+	// ⚠ 2026-11-13 加这个开关的原因：原来这里**写死** `desktop_installation_required` ——
+	//   那是"这台设备还没注册"的标记，而当时分类器把它判成 Auth ⇒ 夹具这条 401 一直被当成
+	//   "凭据废了"用，于是"未注册被误摘号"这个真 bug 在用例里**看不见**。
+	//   现在：默认给真·凭据失效的标记；要模拟未注册就显式把它设成那个串。
+	summaryAuthFailCode string
 
 	// lastClaimBody / lastClaimKey 记下 claim 收到的 body 与幂等键（供断言）。
 	lastClaimBody string
@@ -320,9 +327,13 @@ func startFakeUpstream(t *testing.T) (*httptest.Server, *fakeUpstream) {
 			return
 		}
 		if f.summaryAuthFail {
+			code := f.summaryAuthFailCode
+			if code == "" {
+				code = "invalid_grant" // 默认 = **真·凭据失效**（未注册要显式指定）
+			}
 			writeJSONTest(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{
-				"code":    "desktop_installation_required",
-				"message": "Desktop installation required.",
+				"code":    code,
+				"message": "auth failed for test",
 			}})
 			return
 		}

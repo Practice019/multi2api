@@ -173,8 +173,13 @@ func TestQuotaAuthFailJudgementIsNarrow(t *testing.T) {
 	if isAuthFailure(&UpstreamError{Status: 403, Body: `{"error":{"code":"request_not_authorized"}}`}) {
 		t.Error("403 request_not_authorized 混着签名/时钟问题，保守判**非**凭据失效（只换号不摘号）")
 	}
-	if !isAuthFailure(&UpstreamError{Status: 401, Body: `{"error":{"code":"desktop_installation_required"}}`}) {
-		t.Error("401 desktop_installation_required 是凭据/安装态问题，应当算")
+	// ★ 2026-11-13 改正（用户报障的直接成因）：设备**未注册**不是凭据失效。
+	if isAuthFailure(&UpstreamError{Status: 401, Body: `{"error":{"code":"desktop_installation_required"}}`}) {
+		t.Error("401 desktop_installation_required = **设备未注册**，不是凭据失效 —— 判成 Auth 会让核心一次即摘掉健康的号")
+	}
+	// 反过来：真·凭据失效仍必须算（否则重登的号也救不回来）。
+	if !isAuthFailure(&UpstreamError{Status: 401, Body: `{"error":{"code":"invalid_grant"}}`}) {
+		t.Error("401 invalid_grant 是 refreshToken 废了，**必须**算凭据失效")
 	}
 	if isAuthFailure(&UpstreamError{Status: 500, Body: "boom"}) {
 		t.Error("5xx 是上游抖，**绝不**算凭据失效")

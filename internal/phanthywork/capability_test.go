@@ -166,48 +166,35 @@ func TestImportRejectsEmpty(t *testing.T) {
 	}
 }
 
-// ── 账号列（AccountColumnsExt）──────────────────────────────────────────
+// ── 账号列（**不实现** AccountColumnsExt）────────────────────────────────
 
-// TestAccountColumnsAddsFreeQuota 在默认列集上**只加一列** free_quota。
+// TestAccountColumnsUsesDefaults ★ 本上游**不声明** AccountColumnsExt ⇒ 账号池用默认列。
 //
-// 理由：本轮补的"每日可领签到积分"是一个默认列里没有的数字，不加列就无处显示；
-// 而 welfare 那类本上游没有的概念**绝不能加**（加了一列恒为 `—` 的假列）。
-func TestAccountColumnsAddsFreeQuota(t *testing.T) {
+// # 为什么（2026-11-13 用户原话：「phanthywork 2 个账号 · 6 项能力的**今日额度**列不需要」）
+//
+//	本包原先加了 `free_quota` 这一列（「今日额度」）。用户明确不要它 ⇒
+//	**直接不声明 AccountColumnsExt**，而不是"声明了但返回默认列" ——
+//	后者会留下一个"声称实现了扩展点、行为却与默认一致"的假声明（本仓"声明即承诺"纪律的反面）。
+//
+// ⚠ **只撤列**：`QuotaExt` 那三维（Remaining / Free / FreeKnown）**原样保留** ——
+//   「刷新本上游额度」面板还在用它，且"今日已领 ⇒ Free=0 且 FreeKnown=true"那条三态纪律不许连带删掉。
+func TestAccountColumnsUsesDefaults(t *testing.T) {
 	p := NewProvider(Config{})
-	cols := p.AccountColumns()
+	if _, ok := gateway.ExtOf[gateway.AccountColumnsExt](gateway.Provider(p)); ok {
+		t.Error("本上游声明了 AccountColumnsExt —— 用户要求去掉「今日额度」(free_quota) 列 ⇒ 应当**不声明**、走默认列")
+	}
+	// 默认列集本身必须没被动过（顺序也一样）：核心的回落就是它。
+	got := gateway.EffectiveAccountColumns(gateway.Provider(p))
 	def := gateway.DefaultAccountColumns()
-	if len(cols) != len(def)+1 {
-		t.Fatalf("默认 %d 列 + 1 列 = %d，实际 %d（多加了列？）", len(def), len(def)+1, len(cols))
+	if strings.Join(got, ",") != strings.Join(def, ",") {
+		t.Errorf("账号列应当**恰好**是默认列集（顺序也一样）:\n got %v\nwant %v", got, def)
 	}
-	// 默认列必须**原样保留**（顺序也一样），free_quota 紧跟 quota
-	var want []string
-	for _, c := range def {
-		want = append(want, c)
-		if c == gateway.AccountColQuota {
-			want = append(want, gateway.AccountColFreeQuota)
-		}
+	if strings.Contains(strings.Join(got, ","), gateway.AccountColFreeQuota) {
+		t.Error("默认列里不该出现 free_quota（「今日额度」是用户要求撤掉的那一列）")
 	}
-	if strings.Join(cols, ",") != strings.Join(want, ",") {
-		t.Errorf("列集不符：\n got %v\nwant %v", cols, want)
-	}
-	for _, c := range cols {
-		if !gateway.IsKnownAccountColumn(c) {
-			t.Errorf("列 id %q 不在规范词汇表里（拼错列名是**静默**失效：那一列直接消失）", c)
-		}
-	}
-	for _, need := range []string{gateway.AccountColQuota, gateway.AccountColFreeQuota, gateway.AccountColCheckin, gateway.AccountColToken} {
-		found := false
-		for _, c := range cols {
-			if c == need {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("列集里应当有 %q（本上游这几列都有真实数据）", need)
-		}
-	}
-	if strings.Contains(strings.Join(cols, ","), gateway.AccountColWelfare) {
-		t.Error("本上游没有福利中心概念 ⇒ 不该报 welfare 列（那会是一列恒 `—` 的假列）")
+	// ⚠ 但额度那三维（QuotaExt）必须还在 —— 只撤列，不撤能力。
+	if _, ok := gateway.ExtOf[gateway.QuotaExt](gateway.Provider(p)); !ok {
+		t.Error("QuotaExt 必须保留（「刷新本上游额度」面板靠它）—— 本轮只撤账号列")
 	}
 }
 

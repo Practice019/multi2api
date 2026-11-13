@@ -326,10 +326,18 @@ func ReferralCodeIdempotencyKey(installationID, day string) string {
 //	3 eligible_to_invite=false ⇒ **不打写接口**，给可读原因（护栏④）
 //	4 POST /referrals/code（写；幂等键按 UTC+8 当日）—— 失败只标这一行（护栏③，不回滚不重试）
 func (p *Provider) inviteViewFor(ctx context.Context, a *Auth, refresh bool) (accountInviteView, bool) {
-	v := newInviteRow(a.UID(), maskInviteDisplay(a.Nickname()))
+	// ⚠ 只取**显式昵称字段**（`NicknameValue`），不走 `Auth.Nickname()` 的回落链 ——
+	//   后者会回落到 AccountScope/uuid 甚至 uid，那些都不是"名字"（见 credential.go:262）。
+	v := newInviteRow(a.UID(), inviteDisplayName(a.NicknameValue))
 	instID, ierr := a.installationID()
 	if ierr != nil || strings.TrimSpace(instID) == "" {
 		v.Error = "这个账号拿不到设备安装 id（installation id）；取邀请码要用它拼幂等键，所以没有调用上游"
+		return v, false
+	}
+	// ★ 统一入口（2026-11-13）：取码那条 POST 是**签名请求**，未注册必被拒 ⇒ 先就绪。
+	//   ⚠ 放在缓存判定**之前**："就绪"是这一行的前置条件，与缓存无关（缓存命中时它也只读一次内存）。
+	if err := p.ensureReady(ctx, a); err != nil {
+		v.Error = inviteErrText("设备就绪失败", err)
 		return v, false
 	}
 	today := inviteDay(time.Now())
@@ -510,6 +518,68 @@ func inviteErrText(op string, err error) string {
 		s = s[:160] + "…"
 	}
 	return op + "：" + s
+}
+
+// inviteDisplayName 挑一个**有意义**的展示名；拿不到就返回空串（= 不给这个字段）。
+//
+// # 为什么必须挑（2026-11-13 用户原话：「这个名字为什么也看不到啊？名字看不到，这一列就不要了」）
+//
+// 本上游账号的 `Auth.Nickname()` 会**回落**成手机号（凭据里的昵称值）或 AccountScope/uid ——
+// 把打码后的 `+*************1` 塞进 nickname，用户既认不出是谁，面板还被迫长出一整列废列。
+// ⇒ 只放行"看着像名字"的值：手机号、uuid/uid 这类一律空串 ——
+//
+//	前端 `cols.nickname` 就判不出有值，整列自然不渲染（判据在前端，**不是**按上游名分叉）。
+//
+// ⚠ 返回**空串**而不是"给个占位"：前端那条判据要求 trim 后非空，给 `—` 或空格会把列重新拉出来。
+func inviteDisplayName(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" || looksLikePhone(s) || looksLikeOpaqueID(s) {
+		return ""
+	}
+	return maskInviteDisplay(s)
+}
+
+// looksLikePhone 整串只有数字与 +-()空白 ⇒ 当手机号/座机（不是名字）。
+func looksLikePhone(s string) bool {
+	digit := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			digit = true
+		// ⚠ `*` 也要算进去：平台自己给的昵称就是**脱敏手机号**（`+86 150****3411`，见 credential.go:163）
+		//   —— 不放过它，那一列就会重新长出来（用户报障看到的正是它）。
+		case r == '+' || r == '-' || r == '(' || r == ')' || r == ' ' || r == '\t' || r == '*':
+		default:
+			return false
+		}
+	}
+	return digit
+}
+
+// looksLikeOpaqueID 看着像机器标识（长、无空格无大写、含足量数字，如本仓 uid `cmwc64nj…`）⇒ 不是名字。
+//
+// ⚠ 判据刻意**宽松**：宁可少给一列，也不要把 uid 当"名字"展示 —— 那正是这轮报障的形态。
+func looksLikeOpaqueID(s string) bool {
+	// ⚠ 先去掉分隔符再判：uuid（`1a2b3c4d-…-…`）带横线，不去掉就漏过 ——
+	//   我第一版就漏了它，夹具（AccountScope 是 uuid）当场把「昵称」列又拉了出来（被断言抓住）。
+	c0 := strings.NewReplacer("-", "", "_", "", " ", "").Replace(s)
+	if len(c0) < 16 {
+		return false
+	}
+	digits := 0
+	for _, r := range c0 {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r >= 'a' && r <= 'z':
+		default:
+			return false
+		}
+	}
+	// ⚠ 阈值 4（不是 8）：本仓 uid 形如 cmwc64nj21ejmsw3ilrzs2iq2 —— 26 字符、纯小写+数字，
+	//   但只有 6 位数字 ⇒ 8 的阈值漏过它（我的用例当场抓住）。判定组合为「≥16 字符 + 纯小写/数字 + 含数字」，
+	//   足够不像人名 ⇒ 宁可少给一列。
+	return digits >= 4
 }
 
 // maskInviteDisplay 昵称脱敏（照 loomy 的 maskDisplay 口径）。

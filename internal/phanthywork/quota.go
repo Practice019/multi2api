@@ -65,6 +65,15 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), quotaTimeout)
 	defer cancel()
 
+	// ★ 2026-11-13：**先确保设备已就绪**（注册 + 时间口径），再打签名请求。
+	//   漏这一步的后果是用户报障：新账号从未注册 ⇒ 探测被拒 ⇒ 被判"账号层失效" ⇒ 一次即摘。
+	//   ⚠ 它失败时**照旧**用同一个窄判据（isAuthFailure）记结论 —— 注册路径自己回的 401
+	//   （例如 refreshToken 真的废了）仍然算凭据失效；"未注册/初始化未完成"不算（见 errors.go 的分流）。
+	if err := p.ensureReady(ctx, a); err != nil {
+		p.noteQuotaAuthFailure(uid, isAuthFailure(err))
+		return gateway.UnknownQuota(), true
+	}
+
 	sum, localMS, err := p.client.FetchSummary(ctx, a)
 	if err != nil {
 		// 取不到是**正常情况**（凭据过期 / 上游限流 / 网络）—— 不刷错误日志，

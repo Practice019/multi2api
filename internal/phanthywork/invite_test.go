@@ -362,7 +362,9 @@ func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
 	if m == nil {
 		t.Fatal("没在 app.js 里找到 colSet 的字段表 —— 前端重构了？这条守卫要跟着改（别删）")
 	}
-	pairs := regexp.MustCompile(`(\w+):\s*has\('([^']+)'\)`).FindAllStringSubmatch(m[1], -1)
+	// ⚠ 解析同时认 `has('f')` 与 `hasText('f')`（后者是 nickname 的"非空"判据，2026-11-13 加）：
+	//   只认 has 的话，nickname 这一项会**解析不到** ⇒ 断言变成"永远 false"（假绿）。
+	pairs := regexp.MustCompile(`(\w+):\s*(has|hasText)\('([^']+)'\)`).FindAllStringSubmatch(m[1], -1)
 	if len(pairs) == 0 {
 		t.Fatalf("colSet 字段表解析为空: %q", m[1])
 	}
@@ -374,13 +376,24 @@ func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
 		t.Fatalf("行数 = %d", len(rowsRaw))
 	}
 	row, _ := rowsRaw[0].(map[string]any)
+	// 按 app.js 的**本条规则**求值：`has` = 字段存在；`hasText` = 存在且 trim 后非空。
 	hasField := func(f string) bool {
 		v, ok := row[f]
 		return ok && v != nil
 	}
+	hasText := func(f string) bool {
+		if !hasField(f) {
+			return false
+		}
+		return strings.TrimSpace(fmt.Sprint(row[f])) != ""
+	}
 	cols := map[string]bool{}
 	for _, pr := range pairs {
-		cols[pr[1]] = hasField(pr[2])
+		if pr[2] == "hasText" {
+			cols[pr[1]] = hasText(pr[3])
+			continue
+		}
+		cols[pr[1]] = hasField(pr[3])
 	}
 	t.Logf("colSet 字段表=%v ⇒ 我们的行算出 cols=%v", pairs, cols)
 	if !cols["codes"] {
@@ -397,6 +410,11 @@ func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
 			t.Errorf("列 %q 不该出现（后端给了它 ⇒ 会画一列编出来的状态）", f)
 		}
 	}
+	// ★ 2026-11-13 用户要求：「名字看不到，这一列就不要了」。
+	//   本夹具的账号没有**有意义**的展示名（`Auth.Nickname()` 回落成手机号/uid）⇒ 该列必须不出现。
+	if cols["nickname"] {
+		t.Error("「昵称」列不该出现 —— 这一行没有有意义的展示名（打码手机号/uid 不算名字）")
+	}
 
 	if !strings.Contains(js, "a.bind_supported !== false") {
 		t.Error("app.js 里没有 `a.bind_supported !== false` 这道门 ⇒ 我们的行会弹出点了必然失败的绑定框")
@@ -406,5 +424,49 @@ func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
 	bindShown := cols["codes"] && !act && (!hasBS || bs)
 	if bindShown {
 		t.Error("按 app.js 的判据，我们的行**会**出现绑定输入框 —— 平台侧事后绑定 409，那是死按钮")
+	}
+}
+
+// TestInviteNicknameColumnRegressionLock 反向锁：**有**真名字时这一列必须照旧出现。
+//
+// ⚠ 与上一条成对：只锁"没有就不显示"会把所有上游的昵称列一起弄没（那是把 bug 换成另一个 bug）。
+//
+//	这里给账号一个**真的**展示名，断言：行里有 nickname、且前端算出的该列为 true。
+func TestInviteNicknameColumnRegressionLock(t *testing.T) {
+	p, accts, _ := inviteFixture(t, 1, nil)
+	accts[0].NicknameValue = "Alice Zhang" // 显式昵称字段（平台给的是脱敏手机号，这里换成真名）
+	_, body := inviteFetch(t, p, "")
+	rowsRaw, _ := body["accounts"].([]any)
+	row, _ := rowsRaw[0].(map[string]any)
+	nick, _ := row["nickname"].(string)
+	if strings.TrimSpace(nick) == "" {
+		t.Fatalf("有真名字时该给 nickname 字段，实际 %#v", row["nickname"])
+	}
+	if strings.Contains(nick, "A") && strings.Contains(nick, "Z") {
+		t.Errorf("昵称仍应脱敏（面板是「一行一账号」），实际 %q", nick)
+	}
+	t.Logf("带真名时 nickname=%q", nick)
+}
+
+// TestInviteDisplayNameRules 展示名判据（纯函数，边界逐条钉住）。
+func TestInviteDisplayNameRules(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"", ""},
+		{"   ", ""},
+		{"+8613800138000", ""},  // 手机号
+		{"+86 150****3411", ""}, // **平台自己给的就是这个**（脱敏手机号）
+		{"150-3411-2222", ""},   // 带分隔符的号码
+		{"1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d", ""}, // uuid
+		{"cmwc64nj21ejmsw3ilrzs2iq2", ""},            // 本仓 uid
+	} {
+		if got := inviteDisplayName(c.in); got != c.want {
+			t.Errorf("inviteDisplayName(%q) = %q，want %q（不是名字就不给，否则那一列会重新长出来）", c.in, got, c.want)
+		}
+	}
+	// 真名字：给出脱敏后的值（非空，且不是原样）。
+	for _, in := range []string{"Alice Zhang", "张三丰", "bob"} {
+		if got := inviteDisplayName(in); strings.TrimSpace(got) == "" {
+			t.Errorf("inviteDisplayName(%q) 为空 —— 真名字必须给（否则昵称列对所有上游都消失）", in)
+		}
 	}
 }

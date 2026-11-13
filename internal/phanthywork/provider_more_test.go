@@ -145,7 +145,10 @@ func TestClassifyNeverPenalizesSigningProblems(t *testing.T) {
 		{403, `{"error":{"code":"desktop_binding_invalid"}}`, gateway.ErrKindClient},
 		{400, `{"error":{"code":"desktop_account_scope_invalid"}}`, gateway.ErrKindClient},
 		{403, `{"error":{"code":"model_not_allowed"}}`, gateway.ErrKindClient},
-		{401, `{"error":{"code":"desktop_installation_required"}}`, gateway.ErrKindAuth},
+		// ⚠ 2026-11-13 改正：这台设备**还没注册** ⇒ 属"初始化未完成"，不是凭据废了；
+		//   原先判 auth ⇒ 核心"账号层失效·一次即摘" ⇒ 用户报障（oauth 健康的号被禁）。
+		{401, `{"error":{"code":"desktop_installation_required"}}`, gateway.ErrKindClient},
+		{401, `{"error":{"code":"invalid_grant"}}`, gateway.ErrKindAuth}, // 真·凭据废了仍算
 		{429, `{"error":{"code":"rate_limit_exceeded"}}`, gateway.ErrKindSoftRate},
 		{402, `{"error":{"code":"insufficient_credits"}}`, gateway.ErrKindHardCredit},
 		{404, `{"error":{"code":"model_not_found"}}`, gateway.ErrKindNotFound},

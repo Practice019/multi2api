@@ -748,6 +748,26 @@ func modelOfBody(body []byte) string {
 
 // ── 设备注册（一次性写操作）──────────────────────────────────────────────
 
+// ensureReady **所有需要设备身份的出站调用的统一入口**。
+//
+// # 它修的是什么（2026-11-13 用户报障：手动新加的账号被自动禁用）
+//
+//	本包的设备注册是**懒注册**，而原先只有 Chat 那条路会走到 `ensureInstallation`；
+//	额度探测 / 签到 / 取邀请码都"直接拿本地派生的 installationId 去签名"（`installationID()`
+//	是本地派生的、永远非空）⇒ 新账号这些路径必然打到上游但**从未注册** ⇒ 上游拒 ⇒
+//	而拒的原因被判成"账号层失效" ⇒ 撞上核心的"一次即摘"，一个 oauth 完全健康的号被禁。
+//
+// ⇒ 判据只留这一处：**需要设备身份的路径一律先调它**，别再各写一份（本仓"两处判据打架"的教训）。
+//
+// ⚠ 需要**推理令牌**的路径（Chat / 签到 claim）在这一步之后照旧调 `ensureInferenceToken` ——
+//   那是另一个凭据（180 秒），不属于"设备就绪"。
+func (p *Provider) ensureReady(ctx context.Context, a *Auth) error {
+	if a == nil {
+		return errNilAuth
+	}
+	return p.ensureInstallation(ctx, a)
+}
+
 // ensureInstallation 确保这份凭证已经完成设备注册。
 //
 // 三态：

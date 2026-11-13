@@ -106,6 +106,17 @@ var (
 		"desktop_account_scope_invalid",
 	}
 
+	// notInitializedMarkers 「这台设备还没注册」——**初始化未完成**，不是凭据废了。
+	//
+	// ⚠⚠ 2026-11-13 从 authExpiredMarkers **移出来**（用户报障「新加的账号被自动禁用」的直接成因）：
+	//   上游对"没注册就签名"的回应就是 `401 desktop_installation_required`，而原先它落在
+	//   authExpiredMarkers ⇒ `ErrKindAuth` ⇒ 核心"账号层失效·一次即摘" ⇒ 一个 oauth 完全健康的
+	//   账号（refresh_token 好、access_token 还有 29 分钟）被自动禁用。
+	//   ⇒ 正确归类是"只换号不罚"（本地状态问题：等注册完成 / 换号即可），不是账号问题。
+	notInitializedMarkers = []string{
+		"desktop_installation_required",
+	}
+
 	// authExpiredMarkers 登录态失效（可自动续期 / 需重登）。
 	authExpiredMarkers = []string{
 		"invalid_grant",
@@ -113,7 +124,6 @@ var (
 		"unauthorized_client",
 		"token_expired",
 		"invalid_token",
-		"desktop_installation_required",
 		"登录已过期",
 	}
 
@@ -162,6 +172,10 @@ func Classify(status int, body string) gateway.ErrorKind {
 		return gateway.ErrKindNotFound
 	case gateway.ContainsAny(body, bindingInvalidMarkers):
 		// 签名/绑定算错 = 本地拼装问题 ⇒ 只换号不罚（罚号会掩盖根因）。
+		return gateway.ErrKindClient
+	case gateway.ContainsAny(body, notInitializedMarkers):
+		// 设备未注册 = **初始化未完成** ⇒ 只换号不罚（绝不许落到 Auth/SessionDead：那会一次即摘）。
+		// 修好 ensureReady 之后正常路径不会再出现它；留着这条是为了"万一"不再摘号。
 		return gateway.ErrKindClient
 	case gateway.ContainsAny(body, authExpiredMarkers):
 		return gateway.ErrKindAuth
