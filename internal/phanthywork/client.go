@@ -35,10 +35,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -192,6 +196,93 @@ func (c *Client) applyCommonHeaders(req *http.Request) {
 //
 // 也就是说这个头在**不同端点上是不同的值**，不是一个全局常量。
 const chatClientSource = "cli"
+
+// cliDeviceHeader 官方桌面端的设备指纹头 `x-phanthy-cli-device`。
+//
+// 二进制取证（magpie-PhanthyCode 的 PROTOCOL-INFERENCE.md §二之二，
+// 来源 `claude-sidecar.exe` 静态反编译）：
+//
+//	base64url(JSON.stringify({
+//	  version: 1,
+//	  platform,          // "win32"
+//	  arch,              // "x64"
+//	  osRelease,         // "10.0.26300"
+//	  cliVersion,        // 官方桌面端版本 = OfficialClientVersion
+//	  ipCandidates: [IPv4…],   // 本机网卡候选
+//	}))
+//
+// 服务端「用量」页的 **来源 / OS** 两列由它与 `x-phanthy-client-source` 推出。
+// 缺了它，服务端看到「来源=桌面端、OS 为空」的异常组合，风控会记账。
+//
+// ⚠ 只含平台/架构/系统版本/本机 IPv4，**不含任何对话内容**；
+//
+//	与官方客户端采集的字段一致。
+//
+// 进程内只算一次（网卡枚举不便宜，且运行期不变）。
+var (
+	cliDeviceOnce   sync.Once
+	cliDeviceCached string
+)
+
+// CliDeviceHeader 返回设备指纹头（首次调用后缓存）。
+func CliDeviceHeader() string {
+	cliDeviceOnce.Do(func() {
+		cliDeviceCached = buildCliDeviceHeader()
+	})
+	return cliDeviceCached
+}
+
+// buildCliDeviceHeader 构造设备指纹（可独立测试）。
+func buildCliDeviceHeader() string {
+	ips := make([]string, 0, 8)
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			// 只要 IPv4（官方客户端也只收集 IPv4）
+			if ip == nil || ip.To4() == nil {
+				continue
+			}
+			ips = append(ips, ip.String())
+		}
+	}
+	payload := map[string]any{
+		"version":      1,
+		"platform":     runtime.GOOS,
+		"arch":         runtime.GOARCH,
+		"osRelease":    osReleaseString(),
+		"cliVersion":   OfficialClientVersion,
+		"ipCandidates": ips,
+	}
+	// 键序不参与任何签名（这个头不进 canonical），所以用 map + json.Marshal 即可。
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return b64url(b)
+}
+
+// osReleaseString 尽力取系统版本；取不到就退回空串（不影响请求）。
+func osReleaseString() string {
+	// Windows: os/exec 调 ver 太慢；用 runtime 拿不到版本号。
+	// Linux/macOS 可读 uname。这里做最小实现，失败返回空串 ——
+	// 官方客户端在取不到时同样是空值，服务端不因此拒绝。
+	if out, err := exec.Command("cmd", "/c", "ver").Output(); err == nil {
+		s := strings.TrimSpace(string(out))
+		// 形如 "Microsoft Windows [Version 10.0.22631.4317]" → 抽版本号
+		if i := strings.Index(s, "Version "); i >= 0 {
+			if j := strings.Index(s[i:], "]"); j > 0 {
+				return strings.TrimSpace(s[i+len("Version ") : i+j])
+			}
+		}
+	}
+	return ""
+}
 
 // chatProduct 新版内核推理请求的 x-phanthy-product 取值。
 //
@@ -902,6 +993,21 @@ func (c *Client) ChatStream(ctx context.Context, a *Auth, path string, body []by
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("anthropic-version", anthropicVersion)
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
+	// ★ 2026-11-13：官方桌面端 2.51.0 在**每个**出站请求上都带这三个头，
+	//   缺任何一个都会被服务端风控当成异常客户端（实测 500 空体）。
+	//
+	// 依据（magpie-PhanthyCode 的 PROTOCOL-INFERENCE.md §二之二，二进制取证）：
+	//
+	//	x-app: cli
+	//	x-phanthy-client-source: desktop      ← applyCommonHeaders 已设
+	//	x-phanthy-client-version: 2.51.0
+	//	x-phanthy-cli-device: base64url({version,platform,arch,osRelease,cliVersion,ipCandidates})
+	//
+	//   服务端「用量」页的「来源 / OS」两列就是由后两个推出来的；
+	//   「来源=desktop 但 OS 为空、版本对不上」会被判为异常客户端。
+	req.Header.Set("x-app", "cli")
+	req.Header.Set("x-phanthy-client-version", OfficialClientVersion)
+	req.Header.Set("x-phanthy-cli-device", CliDeviceHeader())
 	if proof.RequestID != "" {
 		req.Header.Set("x-request-id", proof.RequestID)
 		// ⚠ 这 4 段在 canonical 里有位置，但**头只在有值时才发**：

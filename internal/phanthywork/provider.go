@@ -115,12 +115,19 @@ const AccessTokenTTL = 1800 * time.Second
 // 网络往返）足够把"刚好没过期"拖成"发出时已过期"。
 const InferenceTokenMargin = 30 * time.Second
 
-// OfficialClientVersion 注册 body 里的 version 字段（**官方客户端版本号**）。
+// OfficialClientVersion 注册 body 里的 version 字段（**官方客户端版本号**），
+// 同时也是 `x-phanthy-client-version` 请求头的值。
 //
-// ⚠ 报告 §2.4 明确：这**不是**你自己插件的版本号，写成 0.1.0 服务端不认。
-// 报告实测的官方版本是 2.50.0（PE 资源），而 7 段 body 的实测样本用的是 2.48.0；
-// 两者都是可用的官方版本号，这里取实测注册成功那一次的值。
-const OfficialClientVersion = "2.48.0"
+// ⚠ 这**不是**本项目/插件版本号，写成 0.1.0 服务端不认。
+//
+// ★ 2026-11-13 由 2.48.0 升到 **2.51.0**。依据（二进制取证，见
+// docs/phanthywork-inference-protocol.md 引的对照实现）：
+//
+//	「旧值 2.48.0 已经落后两个小版本：服务端把『来源=桌面端但版本对不上』
+//	  的客户端当异常，风控会记账。」
+//
+// 官方桌面端发新版时要跟着改这一处（它同时影响注册 body 与推理请求头）。
+const OfficialClientVersion = "2.51.0"
 
 // Edition 注册 body 的 edition 字段（固定 phanthy_work）。
 const Edition = "phanthy_work"
@@ -1012,11 +1019,38 @@ func (p *Provider) ensureInstallation(ctx context.Context, a *Auth) error {
 	}
 	a.Reg.RegisteredAtMS = attemptAt
 	a.Reg.ReasonCode = resp.RewardReason
-	if id := strings.TrimSpace(resp.Installation.ID); id != "" {
-		a.Device.InstallationID = id
+	// ⚠⚠ **绝对不要**把服务端返回的 `installation.id` 覆盖到 `a.Device.InstallationID`。
+	//
+	// 2026-11-13 真机排查（当时症状：注册 200、换推理令牌也 200，但调模型恒 500 空体）：
+	//
+	//	注册响应 installation.id = "cmwf51f0r0yaeo93jz49b1is6"   ← 这是**安装记录 id**
+	//	而签名要用的 installationId = "di_" + b64url(sha256(裸 32 字节 identity 公钥))
+	//	                            = "di_URB32wqvod6Ve1EAZxJCwF05PdDgnn0Y9tJvO28Ok2o"
+	//
+	// 两者**不是同一个东西**。用服务端返回的那个去签 `desktop-device-v1`，
+	// 服务端算出来的串必然不同 ⇒ 之后的推理请求全部 500（服务端在解析阶段抛异常，
+	// 所以是空体 500，不是 403；一路查不到原因）。
+	//
+	// 对照实现（magpie-PhanthyCode 的 `production-auth.mjs` L13）写得很明确：
+	//   「installationId 由 **identity 公钥**派生（di_ + base64url(sha256(裸 32 字节公钥))），
+	//     与 accountScope 无关」
+	// 且它的 `isInstallationReady` 把「id 与公钥派生值不一致」直接判为**未就绪** ——
+	// 也就是说服务端返回的那个 id 从来不参与签名。
+	//
+	// 服务端返回的 id 只适合做日志/展示；签名一律用派生值（见 `a.installationID()`）。
+	if id := strings.TrimSpace(resp.Installation.ID); id != "" && id != a.Device.InstallationID {
+		// 仅记录，不改 a.Device.InstallationID —— 见上面的长注释。
+		LOADEDInstallationNote(id)
 	}
 	_ = saveAuthFile(a)
 	return nil
+}
+
+// LOADEDInstallationNote 记录服务端返回的安装记录 id（与签名用的 di_ 值不同，仅诊断用）。
+//
+// 单独一个函数是为了让上面那段"不要覆盖"的意图在调用点上足够显眼。
+func LOADEDInstallationNote(serverInstallationID string) {
+	_ = serverInstallationID // 当前只作为"读到这里"的标记；需要时接日志
 }
 
 // ── 换推理令牌（TTL 180 秒）──────────────────────────────────────────────
