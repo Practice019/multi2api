@@ -143,17 +143,12 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 	tried := make(map[string]bool, len(cands))
 	var lastErr error
 	for {
-		cand, _, ok := pickCandidateExcluding(cands, attempt, tried)
+		cand, _, ok := pickCandidateExcluding(cands, tried, nil)
 		if !ok {
-			// 该档没有未试过的候选了。
+			// **所有候选都已试过** ⇒ 明确失败（这就是防无限重试的终止条件）。
 			//
-			// ⚠ 一条都没试过就 ok=false ⇒ 是"档位用尽"（attempt 超出档数），
-			//   要让 pickCandidate 报出那个具体错误（调用方按它区分 404/502）。
-			//   试过若干条才耗尽 ⇒ 把**最后一个**错误带回去：那是用户真正该看到的原因。
-			if len(tried) == 0 {
-				_, perr := pickCandidate(cands, attempt)
-				return zero, perr
-			}
+			// ⚠ 2026-11-13：原来的"档位用尽"那条路径已随优先级一起消失 ——
+			//   现在只有"试完"这一种耗尽，所以不必再区分"一条都没试过"（那个分支永远不为真）。
 			return zero, lastErr
 		}
 		tried[cand.Channel.ID] = true
@@ -304,59 +299,13 @@ func worthSwitching(ctx context.Context, err error) bool {
 //   - 候选按 (优先级 desc, 渠道 id asc) 稳定排序（channelroute.Plan 保证）⇒ 同档顺序确定
 //
 // 返回错误时调用方应把它当"这条请求失败"上报，**不回落账号池**（Key 型渠道的分界）。
-func pickCandidate(cands []channelroute.Candidate, attempt int) (channelroute.Candidate, error) {
+func pickCandidate(cands []channelroute.Candidate) (channelroute.Candidate, error) {
 	if len(cands) == 0 {
 		return channelroute.Candidate{}, errChannelNoCandidate
 	}
-	// 分出档位（Plan 已按优先级降序 ⇒ 相邻相等即为同一档）
-	type tier struct {
-		prio int
-		from int
-		to   int // 半开区间 [from, to)
-	}
-	var tiers []tier
-	for i := 0; i < len(cands); {
-		j := i
-		for j < len(cands) && cands[j].Priority == cands[i].Priority {
-			j++
-		}
-		tiers = append(tiers, tier{prio: cands[i].Priority, from: i, to: j})
-		i = j
-	}
-	ti := attempt
-	if ti < 0 {
-		ti = 0
-	}
-	if ti >= len(tiers) {
-		// 档位用尽：重试次数超过"不同优先级档数" ⇒ 明确失败。
-		// ⚠ 这里**不**回退到最后一档：那会让"重试"变成"无限重试同一条渠道"，
-		// 上游真故障时表现为请求挂很久最后仍失败，而日志里看不出在重试什么。
-		return channelroute.Candidate{}, fmt.Errorf("渠道候选档位已用尽（attempt=%d，档数=%d）", attempt, len(tiers))
-	}
-	t := tiers[ti]
-	sum := 0
-	for k := t.from; k < t.to; k++ {
-		w := cands[k].Weight
-		if w <= 0 {
-			w = 1
-		}
-		sum += w
-	}
-	if sum <= 0 { // 理论上到不了（权重下限为 1），防御性保留
-		return cands[t.from], nil
-	}
-	n := rand.Intn(sum)
-	for k := t.from; k < t.to; k++ {
-		w := cands[k].Weight
-		if w <= 0 {
-			w = 1
-		}
-		if n < w {
-			return cands[k], nil
-		}
-		n -= w
-	}
-	return cands[t.from], nil // 兜底：不该到
+	// ⚠⚠ 2026-11-13（用户：「优先级全部去掉，全部平等」）：这里**不再分档**。
+	//   全部候选进同一个池，按 weight 加权随机 —— `Priority` 字段已不参与选路。
+	return weightedPick(cands, nil), nil
 }
 
 // pickCandidateExcluding 在**同一档**内挑一条候选，跳过 alreadyTried 里的渠道。
@@ -380,25 +329,23 @@ func pickCandidate(cands []channelroute.Candidate, attempt int) (channelroute.Ca
 //	候选      挑中的那条
 //	tierLeft  该档**还剩几条没试过**（含本次挑中的这条之外）—— 调用方据此决定还要不要继续
 //	ok        false = 该档已经没有未试过的候选了（调用方应当换档或放弃）
-func pickCandidateExcluding(cands []channelroute.Candidate, attempt int, tried map[string]bool) (channelroute.Candidate, int, bool) {
+func pickCandidateExcluding(cands []channelroute.Candidate, tried map[string]bool, rnd *rand.Rand) (channelroute.Candidate, int, bool) {
 	if len(cands) == 0 {
 		return channelroute.Candidate{}, 0, false
 	}
-	tier := candidatesOfTier(cands, attempt)
-	if len(tier) == 0 {
-		return channelroute.Candidate{}, 0, false
-	}
-	left := make([]channelroute.Candidate, 0, len(tier))
-	for _, c := range tier {
+	// ⚠ 2026-11-13：**没有"档"了** —— 池子就是全部候选，`tried` 是唯一的排除条件。
+	//   `attempt` 参数随之删除：重试 = 换一条没试过的，而不是"降级到下一档"（那条语义已作废）。
+	left := make([]channelroute.Candidate, 0, len(cands))
+	for _, c := range cands {
 		if tried[c.Channel.ID] {
 			continue
 		}
 		left = append(left, c)
 	}
 	if len(left) == 0 {
-		return channelroute.Candidate{}, 0, false
+		return channelroute.Candidate{}, 0, false // 全试过了 ⇒ 调用方明确失败（终止条件）
 	}
-	picked := weightedPick(left)
+	picked := weightedPick(left, rnd)
 	return picked, len(left) - 1, true
 }
 
@@ -426,9 +373,15 @@ func candidatesOfTier(cands []channelroute.Candidate, attempt int) []channelrout
 }
 
 // weightedPick 同档内按权重加权随机（权重 <=0 视为 1，与 pickCandidate 同一口径）。
-func weightedPick(tier []channelroute.Candidate) channelroute.Candidate {
+func weightedPick(list []channelroute.Candidate, rnd *rand.Rand) channelroute.Candidate {
+	// ⚠ `rnd` 为 nil ⇒ 用全局随机源（生产路径）；测试传固定种子 ⇒ 采样可复现。
+	//   否则"均匀覆盖"这类断言只能靠概率，红绿会漂（那就不是可判的用例）。
+	intn := rand.Intn
+	if rnd != nil {
+		intn = rnd.Intn
+	}
 	sum := 0
-	for _, c := range tier {
+	for _, c := range list {
 		w := c.Weight
 		if w <= 0 {
 			w = 1
@@ -436,10 +389,10 @@ func weightedPick(tier []channelroute.Candidate) channelroute.Candidate {
 		sum += w
 	}
 	if sum <= 0 { // 理论上到不了（权重下限为 1）
-		return tier[0]
+		return list[0]
 	}
-	n := rand.Intn(sum)
-	for _, c := range tier {
+	n := intn(sum)
+	for _, c := range list {
 		w := c.Weight
 		if w <= 0 {
 			w = 1
@@ -449,7 +402,7 @@ func weightedPick(tier []channelroute.Candidate) channelroute.Candidate {
 		}
 		n -= w
 	}
-	return tier[0] // 兜底
+	return list[0] // 兜底
 }
 
 // writeChannelError 把渠道转发的失败回报给客户端。

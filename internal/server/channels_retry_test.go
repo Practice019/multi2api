@@ -196,24 +196,25 @@ func TestSameTierAllFailReportsError(t *testing.T) {
 	}
 }
 
-// ★ ③ 只在同档内换：低优先级档**不会**被用来兜底。
+// ★ ③ ⚠ 2026-11-13 **重写**（旧断言 `TestFailoverDoesNotCrossTiers` 编码的是被用户否掉的语义）：
 //
-// 这是与"降级"的分界线。若实现靠递增 attempt 换人，这条会红 ——
-// 而红的表现正是"一条渠道偶发 502 就把全部流量降到低优先级档"。
-func TestFailoverDoesNotCrossTiers(t *testing.T) {
+//	用户指令：「不要设置上游或者渠道优先级 **全部去掉，全部平等**」
+//	⇒ 原来"高档失败时**不许**打低档（那叫降级）"这条**已作废**：
+//	  现在没有档，priority 100 那条坏了，priority 1 那条就是**并列的候选**，理所应当接着试。
+//
+//	保留下来的是那条真正的分界：**试过的不会再试**（见下一条用例），以及"全部失败才报错"。
+func TestFailoverUsesAllCandidatesEqually(t *testing.T) {
 	s := retryStore(t, []spec{{id: "ch-high", prio: 100, weight: 1}, {id: "ch-low", prio: 1, weight: 1}})
 	up := newRetryUpstream(t)
-	up.add(t, s, "ch-high", true, http.StatusBadGateway)
-	up.add(t, s, "ch-low", false, 0)
+	up.add(t, s, "ch-high", true, http.StatusBadGateway) // 坏的
+	up.add(t, s, "ch-low", false, 0)                     // 好的
 	h := retryHandler(s)
 
-	_, err := h.forwardViaChannel(context.Background(), "m", []byte(`{"model":"m"}`))
-	if err == nil {
-		t.Fatal("★ 高档唯一渠道失败时应当报错 —— 跨档兜底是「降级」，语义不同，" +
-			"不能顺手在同档重试里做掉")
+	if _, err := h.forwardViaChannel(context.Background(), "m", []byte(`{"model":"m"}`)); err != nil {
+		t.Fatalf("priority 100 坏了就该轮到 priority 1（现在两者平等），却报错: %v", err)
 	}
-	if up.hitCount("ch-low") != 0 {
-		t.Errorf("★ 低优先级档不该被打（那是静默降级），实际命中 %d 次", up.hitCount("ch-low"))
+	if up.hitCount("ch-low") == 0 {
+		t.Error("★ 平等之后，低 priority 的那条**必须**被当作并列候选试一次（它此前是「另一档」）")
 	}
 }
 

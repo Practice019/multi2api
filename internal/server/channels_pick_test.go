@@ -30,7 +30,7 @@ func TestPickCandidateWeightSemantics(t *testing.T) {
 	zero := []channelroute.Candidate{cand("a", 10, 0), cand("b", 10, 0)}
 	seen := map[string]int{}
 	for i := 0; i < 200; i++ {
-		c, err := pickCandidate(zero, 0)
+		c, err := pickCandidate(zero)
 		if err != nil {
 			t.Fatalf("同档应能选出候选: %v", err)
 		}
@@ -44,7 +44,7 @@ func TestPickCandidateWeightSemantics(t *testing.T) {
 	skew := []channelroute.Candidate{cand("heavy", 10, 1000), cand("light", 10, 1)}
 	seen = map[string]int{}
 	for i := 0; i < 200; i++ {
-		c, _ := pickCandidate(skew, 0)
+		c, _ := pickCandidate(skew)
 		seen[c.Channel.ID]++
 	}
 	if seen["heavy"] <= seen["light"] {
@@ -52,55 +52,40 @@ func TestPickCandidateWeightSemantics(t *testing.T) {
 	}
 }
 
-// ② 档位：attempt=0 只从最高优先级档选；attempt=1 换到下一档。
-func TestPickCandidateAttemptSwitchesTier(t *testing.T) {
+// ② ⚠ 2026-11-13 **重写**（旧断言 `TestPickCandidateAttemptSwitchesTier` 编码的是被用户否掉的语义）：
+//
+//	用户指令：「不要设置上游或者渠道优先级 **全部去掉，全部平等**」
+//	⇒ 原来是"attempt=0 只从最高优先级档选；attempt=1 换到下一档"；
+//	  现在**没有档**：`Priority` 不再参与任何判据，全部候选在一个池里。
+//
+//	⚠ 旧断言里被保留的**那一半**："空候选要报 errChannelNoCandidate" 见下一条。
+func TestPickCandidateIgnoresPriority(t *testing.T) {
 	cs := []channelroute.Candidate{
 		cand("high", 100, 1),
 		cand("low", 1, 1),
 	}
-	for i := 0; i < 50; i++ {
-		c, err := pickCandidate(cs, 0)
-		if err != nil || c.Channel.ID != "high" {
-			t.Fatalf("attempt=0 应只从最高档选，实际 %v err=%v", c.Channel.ID, err)
+	seen := map[string]int{}
+	for i := 0; i < 200; i++ {
+		c, err := pickCandidate(cs)
+		if err != nil {
+			t.Fatalf("应当能选出候选: %v", err)
 		}
+		seen[c.Channel.ID]++
 	}
-	for i := 0; i < 50; i++ {
-		c, err := pickCandidate(cs, 1)
-		if err != nil || c.Channel.ID != "low" {
-			t.Fatalf("attempt=1 应换到下一档，实际 %v err=%v", c.Channel.ID, err)
-		}
-	}
-	// 同档多条 + attempt=1：仍只在该档内选
-	multi := []channelroute.Candidate{
-		cand("h1", 100, 1), cand("h2", 100, 1), cand("l1", 5, 1),
-	}
-	for i := 0; i < 50; i++ {
-		c, err := pickCandidate(multi, 1)
-		if err != nil || c.Channel.ID != "l1" {
-			t.Fatalf("attempt=1 应整档跳到低档（不是同档第 2 条），实际 %v", c.Channel.ID)
-		}
+	if len(seen) != 2 {
+		t.Fatalf("priority 100 与 1 必须都被选中（全部平等），实际 %v", seen)
 	}
 }
 
-// ③ 档位用尽：明确报错、不回退，且**不得**是 errNoChannelMode（否则入口会悄悄回落账号池）。
-func TestPickCandidateExhaustedTiersFailsClosed(t *testing.T) {
-	cs := []channelroute.Candidate{cand("only", 100, 1)}
-	_, err := pickCandidate(cs, 1)
-	if err == nil {
-		t.Fatal("档位用尽应报错")
-	}
-	if errors.Is(err, errNoChannelMode) {
-		t.Fatalf("★ 这**不该**被当成'渠道模式未开启'（入口会据此回落到账号池），实际 %v", err)
-	}
-	if errors.Is(err, errChannelNoCandidate) {
-		t.Fatalf("档位用尽与'索引里没有这个模型'是两件事，不该混用同一个错误，实际 %v", err)
-	}
-	// 负 attempt 按 0 处理（防御性）
-	if c, err := pickCandidate(cs, -3); err != nil || c.Channel.ID != "only" {
-		t.Fatalf("负 attempt 应按 0 处理，实际 %v err=%v", c.Channel.ID, err)
-	}
-	// 空候选：报"无候选"（与入口的 404 分支对齐）
-	if _, err := pickCandidate(nil, 0); !errors.Is(err, errChannelNoCandidate) {
+// ③ ⚠ 2026-11-13 **重写**（旧的"档位用尽"已随优先级一起消失）：空候选要**明确失败**，
+//
+//	而且**不得**是 errNoChannelMode —— 那条是"渠道模式未开启"，入口会据此悄悄回落账号池
+//	（Key 型渠道与账号上游的分界，见 channels_forward.go 文件头）。这条**必须守住**。
+func TestPickCandidateNoCandidateFailsClosed(t *testing.T) {
+	if _, err := pickCandidate(nil); !errors.Is(err, errChannelNoCandidate) {
 		t.Fatalf("空候选应报 errChannelNoCandidate，实际 %v", err)
+	}
+	if _, err := pickCandidate(nil); errors.Is(err, errNoChannelMode) {
+		t.Fatalf("★ 这条**不该**被当成「渠道模式未开启」（入口会据此回落到账号池），实际 %v", err)
 	}
 }

@@ -29,7 +29,7 @@ import (
 // 选路失败的错误码。与 new-api 的固定码同款（它是字符串常量，便于前端/日志辨认）。
 const (
 	CodeNoChannel = "no_channel"         // 这个组+模型没有任何启用渠道能服务
-	CodeTierDone  = "priority_exhausted" // 优先级阶梯已经走完（重试次数超过档数）
+	CodeTierDone  = "priority_exhausted" // ⚠ 2026-11-13 起不会再产生（档位概念已去掉）；保留仅为兼容
 )
 
 // FilterKind 说明"是哪种过滤器拒掉了候选"。本轮只有渠道状态这一种，
@@ -86,30 +86,18 @@ func (s *Store) Select(group, model string, attempt int) (*Channel, error) {
 		}
 	}
 
-	// ② 取出所有优先级档（去重、降序）——"阶梯"。
-	tiers := make([]int, 0, 4)
-	for _, c := range cands {
-		if len(tiers) == 0 || tiers[len(tiers)-1] != c.Priority {
-			tiers = append(tiers, c.Priority)
-		}
-	}
-	if attempt >= len(tiers) {
-		return nil, &SelectError{
-			Status: 503, Code: CodeTierDone, MessageID: "priority_tiers_exhausted",
-			Filter: FilterNone, NoChannel: true, Group: group, Model: model, Attempt: attempt,
-		}
-	}
+	// ⚠⚠ 2026-11-13 用户指令：「不要设置上游或者渠道优先级 **全部去掉，全部平等**」
+	//   ⇒ **不再分档**：全部候选进同一个池，按 weight 加权随机。
+	//
+	//	这里原先与 `channelroute.Plan` 是**同一件事的两份实现**（new-api 的"重试第 n 次走第 n 档"）。
+	//	两份不一起改就会"两处判据打架" ⇒ 本轮两条路径**同口径**改掉。
+	//
+	// ⚠ `attempt` 参数保留在签名里但**已不参与判据**（调用方兼容）——
+	//   与 store.go 里 Priority 的"保留字段但不读"是同一条口径。
+	tier := make([]store.AbilityCandidate, 0, len(cands))
+	tier = append(tier, cands...)
 
-	// ③ 取第 attempt 档（重试 n 次 ⇒ 第 n 档）。
-	want := tiers[attempt]
-	tier := make([]store.AbilityCandidate, 0, 4)
-	for _, c := range cands {
-		if c.Priority == want {
-			tier = append(tier, c)
-		}
-	}
-
-	// ④ 档内加权随机（weight ≤ 0 当 1 处理：权重 0 的渠道不该被饿死，
+	// ④ 池内加权随机（weight ≤ 0 当 1 处理：权重 0 的渠道不该被饿死，
 	//    与 new-api"weight 是分布旋钮、不是开关"的口径一致；真正的开关是 status）。
 	total := 0
 	for _, c := range tier {
@@ -156,7 +144,13 @@ func (s *Store) Select(group, model string, attempt int) (*Channel, error) {
 	return toChannelView(row, keysFromRowWith(row, plain)), nil
 }
 
-// TierCount 返回 (group, model) 的优先级档数 —— 调用方用它决定"最多重试几次"。
+// TierCount 返回 (group, model) 的优先级**去重个数**。
+//
+// ⚠⚠ 2026-11-13 起**已无语义**（用户：「优先级全部去掉，全部平等」）：
+//
+//	选路不再分档 ⇒"档数"不再决定任何事（重试的上限现在由"候选条数"表达，
+//	见 internal/server 的 `tried` 集合）。保留这个函数只是**不给其它包制造编译中断**，
+//	新代码**不要**再用它判断重试次数。
 func (s *Store) TierCount(group, model string) int {
 	if group == "" {
 		group = DefaultGroup

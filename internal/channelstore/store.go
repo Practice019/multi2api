@@ -79,8 +79,18 @@ type Channel struct {
 	// 能力索引对 (models × groups) 做笛卡尔积 —— 与 new-api 的 AddAbilities 同一做法。
 	//
 	// 空 = 用 Group / DefaultGroup 补齐（存量文件就是这个形态）。
-	Groups      []string    `json:"groups,omitempty"`
-	Priority    int         `json:"priority"` // 越大越先用；重试第 n 次走第 n 档
+	Groups []string `json:"groups,omitempty"`
+	// ⚠⚠ 2026-11-13 用户指令：「不要设置上游或者渠道优先级 **全部去掉，全部平等**」
+	//
+	//	原语义（代码里曾逐字写着）："越大越先用；重试第 n 次走第 n 档" —— **已作废**。
+	//	现在它**保留在字段/落盘/config 里，但选路一律不读**：
+	//
+	//	  · 为什么不删字段：删要迁移（老 config、老 SQL 行、abilities 表都带着它），
+	//	    而"保留但不读"可以**零迁移回退** —— 万一要恢复优先级，改回来就读得到；
+	//	  · 为什么配置里还写着它也不报错：用户升级后旧 config 里的 priority 不该让实例起不来；
+	//	    它**不生效**，但也不该"报错"（那是把一次产品决策变成一次运维事故）。
+	//	  · UI 已不再暴露它（渠道页去掉了输入框与列）—— 少了"教用户设优先级"这个入口。
+	Priority    int         `json:"priority"` // ⚠ 保留字段、**不参与选路**（见上）
 	Weight      int         `json:"weight"`   // 同一档内加权随机的权重
 	Status      int         `json:"status"`
 	Overrides   Overrides   `json:"overrides"`

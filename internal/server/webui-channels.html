@@ -1549,7 +1549,8 @@ header h1{letter-spacing:0}
 /* ① 状态与工具 ───────────────────────────────────────────────────────── */
 var TYPE_NAMES = { 0: 'OpenAI 兼容', 1: 'Azure', 2: 'Anthropic', 3: 'Gemini', 8: '自定义' };
 var SORTS = [
-  ['priority', '优先级'], ['id', 'ID'], ['name', '名称'],
+  // ⚠ 2026-11-13：按"优先级"排序已移除（那个概念不再参与选路，留着排序会误导用户）。
+  ['id', 'ID'], ['name', '名称'],
   ['balance', '余额'], ['response_time', '响应时间'], ['test_time', '测试时间']
 ];
 var st = {
@@ -1706,7 +1707,6 @@ function render() {
       '<td>' + esc(typeName(ch.type)) + '</td>' +
       '<td title="' + esc((ch.groups || []).join(',')) + '">' + esc((ch.groups || []).join(',')) + '</td>' +
       '<td>' + statusBadge(ch.status) + '</td>' +
-      '<td class="num">' + num(ch.priority) + '</td>' +
       '<td class="num">' + num(ch.weight) + '</td>' +
       '<td class="num" title="已用额度">' + num(ch.used_quota) + '</td>' +
       '<td class="num" title="' + (ch.balance_updated_time ? '更新于 ' + ts(ch.balance_updated_time) : '') + '">' + money(ch.balance) + '</td>' +
@@ -2083,8 +2083,9 @@ function openDrawer(id) {
       '</div>' +
 
       '<div class="sec"><h3>④ 高级与运行</h3>' +
-        '<div class="row"><label for="f-pri">优先级</label><input class="ipt ipt--sm" id="f-pri" value="' + (ch ? ch.priority : 0) + '">' +
-          '<label for="f-wt">权重 ≥0</label><input class="ipt ipt--sm" id="f-wt" value="' + (ch ? ch.weight : 0) + '"></div>' +
+        // ⚠ 2026-11-13：**优先级输入已移除**（用户：「优先级全部去掉，全部平等」）。
+        //   保留"权重"——用户说的是优先级；权重默认全 1 ⇒ 事实上就是完全平等。
+        '<div class="row"><label for="f-wt">权重 ≥0</label><input class="ipt ipt--sm" id="f-wt" value="' + (ch ? ch.weight : 0) + '"></div>' +
         (dlgState.isNew ? '<div class="row"><label for="f-st">状态</label><select class="sel" id="f-st"><option value="1">启用</option><option value="2">禁用</option></select></div>' : '') +
         '<div class="row"><label for="f-tag">渠道标签</label><input class="ipt" id="f-tag" value="' + esc(ch ? (ch.tag || '') : '') + '">' +
           '<span class="hint">保存后按标签写（tag/batch）</span></div>' +
@@ -2181,7 +2182,7 @@ function saveDrawer() {
     base_url: $('f-base').value.trim(),
     models: splitLines($('f-models').value),
     groups: $('f-groups').value.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s; }),
-    priority: parseInt($('f-pri').value, 10) || 0,
+    // ⚠ 不再提交 priority（字段仍在契约里：服务端保留它但**不读**，见 channelstore/store.go 的注释）。
     weight: Math.max(0, parseInt($('f-wt').value, 10) || 0),
     model_mapping: parseMap()
   };
@@ -2353,8 +2354,8 @@ function openTagActions(tag) {
       '<div class="sec"><h3>批量（作用于该标签下所有渠道）</h3>' +
         '<div class="row"><button class="mini" id="t-view">只看该标签</button>' +
           '<button class="mini" id="t-on">全部启用</button><button class="mini" id="t-off">全部禁用</button></div>' +
-        '<div class="row"><label>优先级</label><input class="ipt ipt--sm" id="t-pri" placeholder="不改">' +
-          '<label>权重</label><input class="ipt ipt--sm" id="t-wt" placeholder="不改"></div>' +
+        // ⚠ 2026-11-13：批量编辑里的"优先级"也去掉了（同一件事只留一个概念：现在没有优先级）。
+        '<div class="row"><label>权重</label><input class="ipt ipt--sm" id="t-wt" placeholder="不改"></div>' +
         '<div class="row"><label>分组</label><input class="ipt" id="t-groups" placeholder="逗号分隔，留空不改"></div>' +
         '<div class="row"><button class="mini tb--go" id="t-edit">应用（tag/edit）</button>' +
           '<button class="mini" id="t-fix">修复能力索引</button></div>' +
@@ -2372,8 +2373,8 @@ function openTagActions(tag) {
   });
   $('t-edit').addEventListener('click', function () {
     var body = { tag: tag };
-    var pri = $('t-pri').value.trim(), wt = $('t-wt').value.trim(), gs = $('t-groups').value.trim();
-    if (pri !== '') { body.priority = parseInt(pri, 10) || 0; }
+    var wt = $('t-wt').value.trim(), gs = $('t-groups').value.trim();
+    // ⚠ 不再提交 priority（见上面那行的说明）。
     if (wt !== '') { body.weight = Math.max(0, parseInt(wt, 10) || 0); }
     if (gs) { body.groups = gs.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s; }); }
     api('POST', '/admin/channels/tag/edit', body).then(function (j) { $('t-msg').textContent = '已应用：' + summarize(j); return load(); })

@@ -91,11 +91,15 @@ func Plan(s *channelstore.Store, group, publicModel string) ([]Candidate, error)
 	if len(out) == 0 {
 		return nil, fmt.Errorf("%w: %s", ErrNoCandidate, publicModel)
 	}
+	// ⚠⚠ 2026-11-13 用户指令：「不要设置上游或者渠道优先级 **全部去掉，全部平等**」
+	//   ⇒ **不再按 priority 排序**：全部候选进同一个池，只按渠道 id 升序给一个**确定顺序**。
+	//
+	// ⚠ 为什么仍要排序：抽签要可复现（固定种子的测试、以及"同样输入两次计划一致"），
+	//   而**不是**因为"谁更优先"。
+	// ⚠ `Candidate.Priority` 字段**保留但不参与选路** —— 它只供只读诊断（Explain）显示
+	//   "配置里还写着 priority，但已不生效"，以及零迁移回退（见 channelstore/store.go 的注释）。
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Priority != out[j].Priority {
-			return out[i].Priority > out[j].Priority
-		}
-		return out[i].Channel.ID < out[j].Channel.ID // 稳定：避免"同样输入、两次计划顺序不同"
+		return out[i].Channel.ID < out[j].Channel.ID
 	})
 	return out, nil
 }

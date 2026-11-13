@@ -94,7 +94,16 @@ func TestPlanSkipsDisabledChannels(t *testing.T) {
 }
 
 // 优先级 desc 排序、同优先级按渠道 id 稳定（同输入两次计划必须同序，否则重试语义会漂）。
-func TestPlanSortsByPriorityAndIsStable(t *testing.T) {
+// TestPlanIgnoresPriorityAndIsStable ★ 2026-11-13 用户指令：**优先级全部去掉，全部平等**。
+//
+//	原断言（本轮之前）是 `want = [ch-high ch-mid ch-low]` —— 即"按 priority 降序"。
+//	那条断言编码的是**被用户否掉的语义** ⇒ 改成"忽略 priority，只按渠道 id 升序"，
+//	但"两次计划顺序一致"（稳定性）这一半**保留** —— 它是用户看到的"轮询"不抖的前提。
+//
+// ⚠ 为什么仍要一个确定顺序：加权抽签要可复现（测试用固定种子时尤其重要），
+//
+//	而且"同样输入两次计划一致"是既有硬要求（原来那两行不能白留）。
+func TestPlanIgnoresPriorityAndIsStable(t *testing.T) {
 	s := store(t)
 	add(t, s, "ch-low", channelstore.StatusEnabled, 1, []string{"m"}, nil)
 	add(t, s, "ch-high", channelstore.StatusEnabled, 100, []string{"m"}, nil)
@@ -103,7 +112,8 @@ func TestPlanSortsByPriorityAndIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("应有候选: %v", err)
 	}
-	want := []string{"ch-high", "ch-mid", "ch-low"}
+	// ⚠ 期望是 **id 升序**（ch-high / ch-low / ch-mid），优先级 100/1/50 **不参与**排序。
+	want := []string{"ch-high", "ch-low", "ch-mid"}
 	if len(got) != 3 {
 		t.Fatalf("应有 3 条候选，实际 %d", len(got))
 	}

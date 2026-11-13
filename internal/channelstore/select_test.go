@@ -29,14 +29,18 @@ func TestSelectWalksPriorityLadder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, err := s.Select(DefaultGroup, "m", 0); err != nil || got.ID != "hi" {
-		t.Fatalf("第 0 次应选高档渠道 hi，实际 %v err=%v", getID(got), err)
+	// ⚠⚠ 2026-11-13 **重写**（旧断言是"第 0 次选 hi、第 1 次轮到 lo"= 优先级阶梯，
+	//   已被用户指令「优先级全部去掉，全部平等」作废）：现在两条都在**同一个池**里，都得有机会被选中。
+	seen := map[string]int{}
+	for i := 0; i < 200; i++ {
+		got, err := s.Select(DefaultGroup, "m", 0)
+		if err != nil {
+			t.Fatalf("应能选到渠道: %v", err)
+		}
+		seen[got.ID]++
 	}
-	if got, err := s.Select(DefaultGroup, "m", 1); err != nil || got.ID != "lo" {
-		t.Fatalf("第 1 次应轮到低档渠道 lo，实际 %v err=%v", getID(got), err)
-	}
-	if n := s.TierCount(DefaultGroup, "m"); n != 2 {
-		t.Fatalf("应有 2 个优先级档，实际 %d", n)
+	if seen["hi"] == 0 || seen["lo"] == 0 {
+		t.Fatalf("priority 10 与 5 必须都被选中（全部平等），实际 %v", seen)
 	}
 }
 
@@ -92,15 +96,13 @@ func TestSelectErrorsAreStructured(t *testing.T) {
 		t.Fatalf("无渠道时语义应为 400/%s/NoChannel，实际 %d/%s/%v", CodeNoChannel, se.Status, se.Code, se.NoChannel)
 	}
 
-	// 有渠道但重试次数超过档数
+	// ⚠ 2026-11-13："重试次数超过档数"这个错误**不再可能**（档位概念已去掉）——
+	//   旧断言（CodeTierDone）随之作废。改为钉住**新语义**：长重试次数也必须正常选到渠道。
 	if err := s.Upsert(ch("c1", "m")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.Select(DefaultGroup, "m", 5); !errors.As(err, &se) {
-		t.Fatalf("超出档数应返回 *SelectError，实际 %v", err)
-	}
-	if se.Code != CodeTierDone {
-		t.Fatalf("超出档数应为 %s，实际 %s", CodeTierDone, se.Code)
+	if got, err := s.Select(DefaultGroup, "m", 5); err != nil || got == nil {
+		t.Fatalf("attempt=5 也应从同一个池里选到渠道（不许再报档位用尽），实际 %v err=%v", getID(got), err)
 	}
 }
 
