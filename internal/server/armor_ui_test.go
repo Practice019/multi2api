@@ -268,6 +268,170 @@ func TestArmorTargetsStorageFormatUnchanged(t *testing.T) {
 	}
 }
 
+// TestArmorVisibilityIsEffectiveInDOM 执行式：在 node 里真建 DOM，断言**计算后的可见性**。
+//
+// # 为什么必须执行式（用户报障的直接教训）
+//
+// 上一轮的断言只测了"算出来的段名对不对"（armorSectionsFor 的返回值），
+// 而线上坏的是"算对了、DOM 没藏住"：`hidden` 属性只是 display:none 的**弱声明**，
+// 任何显式 display（.field 那一类就有）都能盖掉它 ⇒ 用户截图里提示语变了、区块全在。
+//
+// 所以判据落到**计算后的可见性**：元素 hidden 属性 × 内联 display × app.css 里
+// 是否存在 [hidden]{display:none} 兜底规则，三者合成一个结论（极简版层叠模型，见 harness）。
+//
+// ⚠ 反向控制（⑤）：把"CSS 没有兜底规则"这一条注入进去重跑 —— 那次**必须失败**。
+//
+//	它防的是"有人把实现改回 hidden、又不加 CSS"这种回归：那时这条守卫会红，而不是静默放过。
+func TestArmorVisibilityIsEffectiveInDOM(t *testing.T) {
+	snippet := appJSWindow(t, "const ARMOR_MODE_SECTIONS", "// # ③ 名单选择器")
+	for _, need := range []string{"armorSectionsFor", "armorModeHintText", "applyArmorModeVisibility"} {
+		if !strings.Contains(snippet, need) {
+			t.Fatalf("抠出来的片段缺 %q —— 切错位置了（fail-open）", need)
+		}
+	}
+	node, lerr := exec.LookPath("node")
+	if lerr != nil {
+		t.Skip("没有 node，跳过执行式判据（TestArmorVisibilityHasStaticFallback 仍然生效）")
+	}
+	harness := strings.Join([]string{
+		"const fs = require('fs');",
+		"const html = fs.readFileSync('webui.html', 'utf8');",
+		"const css = fs.readFileSync('ui/app.css', 'utf8');",
+		"// 从 HTML 里**真提取**带 data-armorsec 的元素（不手写清单 —— 那等于把结构抄第二遍）",
+		"const secs = [];",
+		"for (const m of html.matchAll(/<div class=\"[^\"]*\"[^>]*data-armorsec=\"([^\"]+)\"/g)) {",
+		"  const mode = m[1];",
+		"  secs.push({ hidden: false, style: {}, mode: mode, getAttribute: function (k) { return k === 'data-armorsec' ? mode : null; } });",
+		"}",
+		"if (!secs.length) { console.error('没从 webui.html 里提取到 [data-armorsec] 元素 —— 解析失效'); process.exit(9); }",
+		"const hintEl = { textContent: '' };",
+		"const rootEl = { querySelectorAll: function () { return secs; } };",
+		"const $ = function (id) { return id === 'armorCfg' ? rootEl : (id === 'armorModeHint' ? hintEl : null); };",
+		"// ── 极简层叠模型（只建模这一段实现用到的那三条规则） ──",
+		"//   注意：这不是浏览器，但**它正是出问题时的那三条**：",
+		"//     ① 内联 display:none ⇒ 不可见（方案②的修法）",
+		"//     ② 元素没有 hidden ⇒ 可见",
+		"//     ③ 有 hidden + CSS 有 [hidden]{display:none} ⇒ 不可见",
+		"//     ④ 有 hidden + CSS 没兜底（而 .field 有显式 display）⇒ **仍可见 = 那条 bug**",
+		"const forcedNoCss = process.env.WB2API_NO_HIDDEN_CSS === '1';",
+		"// ⚠ 反向控制：把 css 里的 !important 去掉（模拟「有人把兜底写成非 important / 干脆删掉」这种回归）。",
+		"const cssUsed = forcedNoCss ? css.split('!important').join('') : css;",
+		"// 本 harness 一律**不引反斜杠**（正则/转义在两层模板里互相咬过好几次）：",
+		"//   剥注释与折行都用 split/join，下面的规则匹配也用 indexOf。",
+		"const flat = cssUsed.split('/*').map(function (s) { const e = s.indexOf('*/'); return e >= 0 ? s.slice(e + 2) : s; }).join('').split(String.fromCharCode(10)).join(' ');",
+		"// 只在**选择器起始处**找 [hidden]（= 全局兜底规则）；.notice[hidden]{…} 这种局部规则不算：",
+		"// harness 第一版就踩了这个坑（把 .notice[hidden]{display:none} 当成全局兜底 ⇒ 假绿）。",
+		"function globalHiddenRules(needImportant) {",
+		"  const out = [];",
+		"  let i = -1;",
+		"  while ((i = flat.indexOf('[hidden]', i + 1)) >= 0) {",
+		"    const prev = i === 0 ? ' ' : flat[i - 1];",
+		"    if (prev === '.' || prev === ']' || prev === '#' || prev === '-') continue;",
+		"    const end = flat.indexOf('}', i);",
+		"    if (end < 0) break;",
+		"    const decl = flat.slice(i, end);",
+		"    if (decl.indexOf('display:none') < 0 && decl.indexOf('display: none') < 0) continue;",
+		"    if ((decl.indexOf('!important') >= 0) === !!needImportant) out.push({ at: i, decl: decl });",
+		"  }",
+		"  return out;",
+		"}",
+		"// 竞争声明：.field 这类元素上有显式 display（app.css:486 就是 .field{display:flex}）。",
+		"function rulesFor(sel) {",
+		"  const out = [];",
+		"  let i = -1;",
+		"  while ((i = flat.indexOf(sel + '{', i + 1)) >= 0) { const e = flat.indexOf('}', i); if (e < 0) break; out.push({ at: i, decl: flat.slice(i, e) }); i = e; }",
+		"  return out;",
+		"}",
+		"const blocker = rulesFor('.field').filter(function (r) { return r.decl.indexOf('display:') >= 0; })[0] || null;",
+		"// 层叠模型（只建模这段实现会遇到的四条）：",
+		"//   !important 的全局 [hidden] ⇒ 一定藏住（与顺序无关）",
+		"//   没有竞争声明 ⇒ UA 的 display:none 生效 ⇒ 藏住",
+		"//   有竞争声明 + 只有非 important 的兜底 ⇒ 同级比顺序（后写的赢）",
+		"//   有竞争声明 + 根本没有兜底 ⇒ **藏不住 = T-904 那条 bug**",
+		"function hiddenIsEffective() {",
+		"  if (globalHiddenRules(true)[0]) return true;",
+		"  if (!blocker) return true;",
+		"  const plain = globalHiddenRules(false)[0];",
+		"  if (!plain) return false;",
+		"  return plain.at > blocker.at;",
+		"}",
+		"function visible(el) {",
+		"  if (el.style && el.style.display === 'none') return false;",
+		"  if (!el.hidden) return true;",
+		"  // hidden 属性命中了 ⇒ 只有【这条声明真的生效】时才不可见（这正是 T-904 的判据）。",
+		"  return !hiddenIsEffective();",
+		"}", snippet,
+		"const counts = {};",
+		"for (const el of secs) { const m = el.getAttribute('data-armorsec'); counts[m] = (counts[m] || 0) + 1; }",
+		"const bad = [];",
+		"function check(mode, wantModes, label) {",
+		"  applyArmorModeVisibility(mode);",
+		"  const vis = secs.filter(visible).map(function (e) { return e.getAttribute('data-armorsec'); });",
+		"  const visSet = Array.from(new Set(vis)).sort();",
+		"  if (JSON.stringify(visSet) !== JSON.stringify(wantModes.slice().sort())) {",
+		"    bad.push(label + ': 可见段 = [' + visSet + '] want [' + wantModes.slice().sort() + ']');",
+		"    return;",
+		"  }",
+		"  const wantCount = wantModes.reduce(function (a, m) { return a + (counts[m] || 0); }, 0);",
+		"  if (vis.length !== wantCount) {",
+		"    bad.push(label + ': 可见元素数 = ' + vis.length + ' want ' + wantCount + '（部分元素没被藏住）');",
+		"  }",
+		"}",
+		"check('off', [], '① off ⇒ 全部不可见');",
+		"check('append', ['append'], '② append ⇒ 只有 append 可见');",
+		"check('block', ['block'], '③ block ⇒ 只有 block 可见');",
+		"check('off', [], '④ 切回 off ⇒ 再次全隐（幂等）');",
+		"if (bad.length) { console.error(bad.join(' | ')); process.exit(1); }",
+		"console.log('OK visible=' + secs.filter(visible).length + '/' + secs.length);",
+	}, "\n")
+	run := func(env map[string]string) (string, error) {
+		cmd := exec.Command(node, "-e", harness)
+		cmd.Env = append(os.Environ(), "WB2API_NODE=1")
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	out, err := run(nil)
+	if err != nil || !strings.Contains(out, "OK") {
+		t.Errorf("★ 显隐在真实 DOM 桩里没生效（%v）:\n%s\n———— 片段 ————\n%s", err, out, snippet)
+	}
+	// ⑤ 反向控制：假装 CSS 没有兜底规则 ⇒ 上面 ①②③④ 必须失败（回归防线）。
+	negOut, negErr := run(map[string]string{"WB2API_NO_HIDDEN_CSS": "1"})
+	if negErr == nil {
+		t.Errorf("★ 反向控制没失败：CSS 去掉 [hidden] 兜底后，可见性断言仍然全绿 ⇒ 这组判据抓不住那条 bug（等于没用）\n%s", negOut)
+	}
+}
+
+// TestArmorVisibilityHasStaticFallback 静态兜底：node 跑不了时也不全盲。
+//
+// 判据（与执行式判据同一条契约）：app.css 有 [hidden] 规则 **或** app.js 用 style.display。
+func TestArmorVisibilityHasStaticFallback(t *testing.T) {
+	css, err := os.ReadFile("ui/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 静态口径与执行式同一条契约：必须是**选择器起始处**的 [hidden] 规则（.notice[hidden]{…} 不算），
+	// 且它的声明里有 display:none。
+	hasCSS := false
+	for _, line := range strings.Split(string(css), "\n") {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "[hidden]{") && strings.Contains(l, "display:none") {
+			hasCSS = true
+		}
+	}
+	js, err := os.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usesInlineStyle := strings.Contains(string(js), "style.display = ")
+	if !hasCSS && !usesInlineStyle {
+		t.Error("★ 既没有 [hidden]{display:none} 的 CSS 兜底，也没用 style.display —— " +
+			"hidden 属性会被 .field 的显式 display 盖掉（这正是 T-904 那条 bug）")
+	}
+}
+
 // TestArmorUIAssetsParse 执行式兜底：脚本语法必须过（node --check）。
 func TestArmorUIAssetsParse(t *testing.T) {
 	js, err := os.ReadFile("ui/app.js")
