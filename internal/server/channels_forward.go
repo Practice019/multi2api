@@ -143,7 +143,8 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 	tried := make(map[string]bool, len(cands))
 	var lastErr error
 	for {
-		cand, _, ok := pickCandidateExcluding(cands, tried, nil)
+		// ⚠ 随机源：生产为 nil（用全局 rand，与改动前逐字一致）；测试注入固定种子 ⇒ 采样可复现。
+		cand, _, ok := pickCandidateExcluding(cands, tried, h.pickRand)
 		if !ok {
 			// **所有候选都已试过** ⇒ 明确失败（这就是防无限重试的终止条件）。
 			//
@@ -152,6 +153,10 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 			return zero, lastErr
 		}
 		tried[cand.Channel.ID] = true
+		// ⚠ 诊断计数（2026-11-13 T-909 收尾）：记"这个模型这次选中了哪条"。
+		//   只给**只读诊断**用（渠道页那段可折叠面板）：进程内、重启清零、不落盘，
+		//   也**不参与**任何选路判据（改它不会改变请求走哪条）。
+		h.noteChannelPick(matchName, cand.Channel.ID)
 
 		fw, ferr := h.tryChannelOnce(ctx, cand, matchName, displayName, body)
 		if ferr == nil {
@@ -171,6 +176,59 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 			return fw, ferr
 		}
 	}
+}
+
+// ── 只读诊断（2026-11-13 T-909 收尾）──────────────────────────────────────
+//
+// # 它回答什么
+//
+//	用户原话：「一个模型名对应了多个渠道，但是我发现他调用的时候**不会轮询**这些渠道」
+//	⇒ 改完（优先级全去掉、全部平等）之后，用户要能**看见**轮询真的均匀了。
+//
+// # 三条硬约束（断言逐条钉住）
+//
+//  1. **只读**：不改权重/优先级、**不发任何上游请求**（`channelroute.Plan` 只查表）、不写库；
+//  2. **身份判据与 `/ui/channels` 一致**：`h.uiIdentify`（未认证 ⇒ 401 + JSON，
+//     照 `/ui/models/data` 的形态 —— 200 + 空结果会把"没登录"读成"没有候选"，那是两类故障）；
+//  3. **不许按上游名分叉**：键是 (模型名, 渠道 id)。
+//
+// ⚠ 计数是**进程内、重启清零**（主脑裁定）：这是排障视图，不是统计系统 ⇒ 不落盘。
+func (h *Handler) noteChannelPick(model, channelID string) {
+	if h == nil || h.cfg.Channels == nil {
+		return
+	}
+	h.channelTallyOnce.Do(func() { h.channelTally = &channelroute.Tally{} })
+	h.channelTally.Note(model, channelID)
+}
+
+// channelsExplain GET /ui/channels/explain?model=<名字> —— 渠道选路的只读诊断。
+func (h *Handler) channelsExplain(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.uiIdentify(r); !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "未认证"})
+		return
+	}
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 model 参数（要诊断哪个模型名）"})
+		return
+	}
+	if h.cfg.Channels == nil {
+		// 与渠道列表同一条口径：没装配渠道存储 = 渠道模式没开（不是"没有候选"）。
+		writeJSON(w, http.StatusOK, map[string]any{"ready": false, "model": model})
+		return
+	}
+	v, err := channelroute.Explain(h.cfg.Channels, channelstore.DefaultGroup, model)
+	if err != nil {
+		// ⚠ 没有候选**不是** 500：它是"这个模型名没有渠道能服务"这个事实（页面要显示这句话）。
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ready": false, "model": model, "error": err.Error(),
+			"hint": "模型名要写成渠道里能匹配到的那种（公开名或 渠道名/上游名）",
+		})
+		return
+	}
+	v = channelroute.ApplyCounts(v, h.channelTally.Snapshot(model))
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"ready": true, "view": v, "text": channelroute.ExplainText(v)})
 }
 
 // tryChannelOnce 对**一条**候选渠道做一次完整的转发尝试（挑 key / 改写 body / 打上游）。

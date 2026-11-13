@@ -166,31 +166,34 @@ func TestExplainFairnessIsJudgeable(t *testing.T) {
 		t.Errorf("没有采样数据时应当直说，实际 %q", got.Fairness)
 	}
 
-	// 有候选一次都没被选中 ⇒ 必须报"不均匀"并点出条数（这正是用户报障的形态）。
+	// ⚠ 2026-11-13 补：判据改成"按权重折算期望 + 3σ + **小样本不判定**"之后，
+	//   这里的采样次数必须**超过下限**（5 条可用候选 × 10 = 50 次）否则会正确地报"样本不足"。
+	//   两条断言因此各抬到 ≥50 次（同时保留"零命中要报偏斜"这个形态）。
 	lopsided := map[string]int{}
 	for _, c := range v.Candidates {
-		if c.ChannelID != "ch-c1" { // ch-c1 的 key 全停用（本来就选不中）
-			lopsided[c.ChannelID] = 5
+		if c.ChannelID == "ch-c1" { // ch-c1 的 key 全停用（本来就选不中）
+			continue
 		}
+		lopsided[c.ChannelID] = 15
 	}
-	delete(lopsided, "ch-c2") // 让它一次都没被选中
+	lopsided["ch-c2"] = 0 // 可用但一次都没被选中（用户报障的形态）
 	got := ApplyCounts(v, lopsided)
-	if !strings.Contains(got.Fairness, "不均匀") || !strings.Contains(got.Fairness, "1/5") {
-		t.Errorf("有可用候选零命中时必须报「不均匀 1/5」，实际 %q", got.Fairness)
+	if !strings.Contains(got.Fairness, "偏斜") {
+		t.Errorf("有可用候选零命中（60 次采样）必须报偏斜，实际 %q", got.Fairness)
 	}
 	// 计数也要落到每条候选上（用户能逐条看）。
 	for _, c := range got.Candidates {
-		if c.ChannelID == "ch-a1" && c.Picked != 5 {
-			t.Errorf("ch-a1 的 picked 应为 5，实际 %d", c.Picked)
+		if c.ChannelID == "ch-a1" && c.Picked != 15 {
+			t.Errorf("ch-a1 的 picked 应为 15，实际 %d", c.Picked)
 		}
 	}
 
-	// 均匀 ⇒ 说"均匀"。
+	// 均匀 ⇒ 说"均匀"（5 条可用候选 × 12 = 60 次，超过下限）。
 	even := map[string]int{}
 	for _, c := range v.Candidates {
-		even[c.ChannelID] = 4
+		even[c.ChannelID] = 12
 	}
 	if got := ApplyCounts(v, even); !strings.Contains(got.Fairness, "均匀") {
-		t.Errorf("各 4 次应当判为均匀，实际 %q", got.Fairness)
+		t.Errorf("各 12 次（60 次采样）应当判为均匀，实际 %q", got.Fairness)
 	}
 }

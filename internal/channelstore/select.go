@@ -28,8 +28,9 @@ import (
 
 // 选路失败的错误码。与 new-api 的固定码同款（它是字符串常量，便于前端/日志辨认）。
 const (
-	CodeNoChannel = "no_channel"         // 这个组+模型没有任何启用渠道能服务
-	CodeTierDone  = "priority_exhausted" // ⚠ 2026-11-13 起不会再产生（档位概念已去掉）；保留仅为兼容
+	CodeNoChannel = "no_channel" // 这个组+模型没有任何启用渠道能服务
+	// ⚠ 2026-11-13 删除 `CodeTierDone`（"优先级阶梯走完"）：档位概念已随用户指令去掉，
+	//   那条错误不再可能产生 ⇒ 留着就是继续教一个不存在的概念。
 )
 
 // FilterKind 说明"是哪种过滤器拒掉了候选"。本轮只有渠道状态这一种，
@@ -45,7 +46,7 @@ const (
 // SelectError 是选路失败的结构化错误（对标 new-api 的 ChannelSelectError）。
 type SelectError struct {
 	Status    int        // 建议给客户端的 HTTP 状态：无渠道 ⇒ 400（请求里的模型不存在）
-	Code      string     // CodeNoChannel / CodeTierDone
+	Code      string     // 目前只有 CodeNoChannel（CodeTierDone 已随优先级删除）
 	MessageID string     // 可本地化消息 id（前端按它取文案）
 	Filter    FilterKind // 是哪种过滤导致没候选
 	NoChannel bool       // true = 这个组+模型确实没有可用渠道（而非其它故障）
@@ -144,30 +145,6 @@ func (s *Store) Select(group, model string, attempt int) (*Channel, error) {
 	return toChannelView(row, keysFromRowWith(row, plain)), nil
 }
 
-// TierCount 返回 (group, model) 的优先级**去重个数**。
-//
-// ⚠⚠ 2026-11-13 起**已无语义**（用户：「优先级全部去掉，全部平等」）：
-//
-//	选路不再分档 ⇒"档数"不再决定任何事（重试的上限现在由"候选条数"表达，
-//	见 internal/server 的 `tried` 集合）。保留这个函数只是**不给其它包制造编译中断**，
-//	新代码**不要**再用它判断重试次数。
-func (s *Store) TierCount(group, model string) int {
-	if group == "" {
-		group = DefaultGroup
-	}
-	cands, err := store.AbilityCandidates(group, model)
-	if err != nil {
-		return 0
-	}
-	seen := map[int]bool{}
-	for _, c := range cands {
-		seen[c.Priority] = true
-	}
-	return len(seen)
-}
-
-// PickKey 从渠道的多个 key 里挑一个可用的（对标 new-api：channel info 里的 key 选择模式参与选路）。
-//
 // 语义：只挑 Status==Enabled 的 key；全坏了返回 ""（调用方据此把渠道判为不可用）。
 // mode: "" / "random" 走随机；"round_robin" 用游标。
 //

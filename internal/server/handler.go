@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"workbuddy2api/internal/channelroute"
 	"workbuddy2api/internal/channelstore"
 
 	"workbuddy2api/internal/account"
@@ -341,6 +343,19 @@ const ServiceName = "multi2api"
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+	// channelTally / channelTallyOnce 渠道选路的**进程内计数**（只读诊断用，2026-11-13）。
+	//
+	// ⚠ 放在 Handler 上而不是包级：两个 Handler 实例（测试与真实部署）不该互相污染
+	//   （与下面 prewarm* 那几项同一条理由）。惰性建 ⇒ `&Handler{}` 直接构造的测试也能用。
+	// ⚠ 重启清零、不落盘 —— 它是排障视图，不是统计系统。
+	channelTallyOnce sync.Once
+	channelTally     *channelroute.Tally
+	// pickRand 加权抽签的随机源（**仅测试注入**；nil ⇒ 用全局 rand）。
+	//
+	// ⚠ 为什么必须可注入（2026-11-13 T-909 补）：「均匀性」只能靠采样验证，
+	//   而用全局 rand 时同样的代码给出不同分布 ⇒ 用例必然 flaky。
+	//   生产行为一字不变（nil ⇒ 与之前逐字相同）。
+	pickRand *rand.Rand
 	// ── 目录缓存预热（见 models_prewarm.go）──────────────────────────
 	//
 	// 这三项只被 StartModelsPrewarm / prewarmModelsOnce 读写；放在 Handler 上
@@ -452,6 +467,9 @@ func NewHandler(cfg Config) *Handler {
 	// 内嵌本地控制台（同源，无需 CORS）。
 	// 渠道管理页：与 /ui 同一套身份判据（管理面，不是公开页）。
 	h.mux.HandleFunc("GET /ui/channels", h.channelsUI)
+	// 渠道选路的**只读诊断**（2026-11-13 T-909）：身份判据与上面那条**同一套**（`uiIdentify`），
+	// 取数走 `/ui/...` 而不是 `/admin/...`（后者是另一套门禁，页面拿它要凭据会稳定 401）。
+	h.mux.HandleFunc("GET /ui/channels/explain", h.channelsExplain)
 	// 分组管理页：与 /ui/channels 同一套身份判据（同为管理面）。
 	h.mux.HandleFunc("GET /ui/groups", h.groupsUI)
 	// 系统状态页（T12）：与上面三条**同一套**身份判据（h.uiIdentify）。

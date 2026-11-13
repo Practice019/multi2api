@@ -1471,6 +1471,21 @@ header h1{letter-spacing:0}
     <button class="tb" id="btn-reset" type="button">重置</button>
     <button class="tb" id="btn-tagview" type="button">标签视图</button>
     <span class="grow"></span>
+    <!-- 路由诊断（2026-11-13）：**只读** —— 回答"这个模型名会走哪些渠道、各被选中多少次、
+         是否均匀"。⚠ 它不发任何上游请求、不改权重/优先级、不写库（判据见
+         internal/server/channels_explain_test.go 的"假上游命中计数不变"那条）。
+         ⚠ 可折叠：沿用本页 <details class="more"> + <summary> 的既有写法，不新造交互。 -->
+    <details class="more" id="ch-explain">
+      <summary class="tb">路由诊断</summary>
+      <div class="morebox" style="min-width:420px">
+        <div class="row"><label for="ex-model">模型名</label>
+          <input class="ipt ipt--sm" id="ex-model" placeholder="填渠道页里那个上游模型名">
+        </div>
+        <div class="row"><button class="tb tb--go" id="ex-go" type="button">看它走哪些渠道</button></div>
+        <!-- 结果用 <pre>：那段文本本来就是给人读的对齐文本（含结论与均匀性一句话） -->
+        <pre id="ex-out" class="hint" style="white-space:pre-wrap;max-height:240px;overflow:auto"></pre>
+      </div>
+    </details>
     <details class="more">
       <summary class="tb">更多操作</summary>
       <div class="morebox">
@@ -1837,6 +1852,29 @@ $('ch-rows').addEventListener('click', function (e) {
 var elRefresh = $('btn-refresh') || { addEventListener: function () {} };
 elRefresh.addEventListener('click', function () { load(); });
 $('btn-new').addEventListener('click', function () { openDrawer(null); });
+
+/* ── 路由诊断（2026-11-13，只读）─────────────────────────────────────────
+   · 取数走 `GET /ui/channels/explain?model=`（与 /ui/channels 同一套身份判据）
+   · ⚠ 该端点**不发上游请求**、不改任何配置 —— 它只是读一遍路由表 + 进程内计数
+   · 渲染直接用后端给的 `text`（本来就是给人读的对齐文本），页面不自己拼字段：
+     这样"结论"与"均匀性"两句话的出处只有一处（后端），前端不产生第二份判据 */
+function loadExplain() {
+  var model = ($('ex-model').value || '').trim();
+  var out = $('ex-out');
+  if (!model) { out.textContent = '先填一个模型名（渠道页里那个上游模型名）'; return; }
+  out.textContent = '正在读路由…';
+  api('GET', '/ui/channels/explain?model=' + encodeURIComponent(model)).then(function (j) {
+    if (j && j.ready === false) {
+      out.textContent = ((j.hint || '') ? j.hint + '\n' : '') + (j.error || '没有候选');
+      return;
+    }
+    out.textContent = (j && j.text) ? j.text : '（后端没给文本）';
+  }).catch(function (e) {
+    out.textContent = '读诊断失败：' + (e && e.message ? e.message : e);
+  });
+}
+$('ex-go').addEventListener('click', loadExplain);
+$('ex-model').addEventListener('keydown', function (e) { if (e.key === 'Enter') { loadExplain(); } });
 $('btn-reset').addEventListener('click', function () {
   st.f = { status: '', type: '', group: '', sortBy: '', sortOrder: '' };
   st.keyword = ''; st.tagMode = ''; st.sel = {};

@@ -16,6 +16,7 @@ package channelroute
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"workbuddy2api/internal/channelstore"
@@ -98,38 +99,98 @@ func ApplyCounts(v ExplainView, counts map[string]int) ExplainView {
 		v.Candidates[i].Picked = n
 		total += n
 	}
+	v.Fairness = fairnessOf(v, total)
+	return v
+}
+
+// 判据常数（**算式写在下面 fairnessOf 的注释里**，别只留数字）。
+const (
+	// fairnessMinPerChannel 小样本下限：每条候选的**期望**次数至少要这么多才判定。
+	//
+	// ⚠ 它为什么是 10：见 fairnessOf 注释里 σ/μ 的推导（n=k·10 时单条相对波动 ≤30%，
+	//   3σ 带才不至于把正常抖动判成偏斜）。
+	fairnessMinPerChannel = 10
+	// fairnessSigma 判定带宽（3σ ⇒ 单条误报率 ≈0.27%）。
+	fairnessSigma = 3.0
+)
+
+// fairnessOf 给出"均匀 / 偏斜 / 暂不判定"的结论。
+//
+// # 判据的来路（算式，2026-11-13 T-909 补）
+//
+//	每次请求独立地按权重抽一条 ⇒ 第 i 条的命中次数 x_i 服从二项分布：
+//
+//		p_i = w_i / Σw          （w ≤0 按 1 处理，与 weightedPick 同口径）
+//		μ_i = n · p_i           （期望）
+//		σ_i = √(n · p_i · (1−p_i))   （标准差）
+//
+//	判据：任一条 |x_i − μ_i| > 3σ_i ⇒ 报**偏斜**
+//	  · 3σ 的依据：单条误报率 ≈ 0.27%（正态尾概率），k 条一起看仍远低于 5% 显著性门槛
+//	  · **必须按权重折算**：9:1 的权重下 90/10 是**预期**，不是偏斜（第一版就错在这）
+//
+//	小样本（n < k · fairnessMinPerChannel）⇒ **一律报"样本不足，暂不判定"**
+//	  · 依据：p=1/k 时 σ/μ = √((1−p)/(n·p))，取 n=k·10、k≥2 ⇒ σ/μ ≤ 30%
+//	  · 而 n 更小时（例如 6 条各 2 次），一次抽中 0 或 4 就够 3σ ⇒ 判据必然误报
+//	  · ⚠ 第一版的 `max > min×3` 就是在这一档误报的：6 条各 10 次的期望下，
+//	    实测 3~14 次只是 ≈2.4σ 的正常波动，却被判成"偏斜" ⇒ 用户看到假的"轮询坏了"。
+func fairnessOf(v ExplainView, total int) string {
 	// 只统计"发得出去"的候选（key 全停用的那类本来就不该被选中）。
-	eligible, uncovered, minP, maxP := 0, 0, 1<<30, 0
+	type item struct {
+		id     string
+		picked int
+		w      int
+	}
+	items := make([]item, 0, len(v.Candidates))
+	sumW := 0
 	for _, c := range v.Candidates {
 		if c.SkipReason != "" {
 			continue
 		}
-		eligible++
-		if c.Picked == 0 {
-			uncovered++
+		w := c.WeightUsed
+		if w <= 0 {
+			w = c.Weight
 		}
-		if c.Picked < minP {
-			minP = c.Picked
+		if w <= 0 {
+			w = 1
 		}
-		if c.Picked > maxP {
-			maxP = c.Picked
-		}
+		items = append(items, item{id: c.ChannelID, picked: c.Picked, w: w})
+		sumW += w
 	}
+	k := len(items)
 	switch {
 	case total == 0:
-		v.Fairness = "还没有采样数据（这一轮没被请求过）"
-	case eligible == 0:
-		v.Fairness = "没有可用的候选（都缺 key）"
-	case uncovered > 0:
-		v.Fairness = fmt.Sprintf("**不均匀**：%d/%d 条可用候选一次都没被选中（共采样 %d 次）",
-			uncovered, eligible, total)
-	case maxP > minP*3:
-		v.Fairness = fmt.Sprintf("基本覆盖但偏斜：最多 %d 次 / 最少 %d 次（权重不等时这是预期的）", maxP, minP)
-	default:
-		v.Fairness = fmt.Sprintf("均匀：%d 条候选都有份额（最多 %d 次 / 最少 %d 次，共 %d 次）",
-			eligible, maxP, minP, total)
+		return "还没有采样数据（这一轮没被请求过）"
+	case k == 0:
+		return "没有可用的候选（都缺 key）"
+	case total < k*fairnessMinPerChannel:
+		return fmt.Sprintf("样本不足，暂不判定（至少需要 %d 次 = %d 条 × %d；现在是 %d 次）",
+			k*fairnessMinPerChannel, k, fairnessMinPerChannel, total)
 	}
-	return v
+
+	skewed := make([]string, 0, k)
+	for _, it := range items {
+		p := float64(it.w) / float64(sumW)
+		mu := float64(total) * p
+		sd := math.Sqrt(float64(total) * p * (1 - p))
+		if math.Abs(float64(it.picked)-mu) > fairnessSigma*sd {
+			skewed = append(skewed, fmt.Sprintf("%s 期望≈%.0f 实测 %d", it.id, mu, it.picked))
+		}
+	}
+	if len(skewed) > 0 {
+		return fmt.Sprintf("**偏斜**：%d/%d 条超出期望 ±3σ（%s）—— 按权重折算后的期望仍然对不上，值得看一眼",
+			len(skewed), k, strings.Join(skewed, "；"))
+	}
+	minP, maxP := 1<<30, 0
+	for _, it := range items {
+		if it.picked < minP {
+			minP = it.picked
+		}
+		if it.picked > maxP {
+			maxP = it.picked
+		}
+	}
+	return fmt.Sprintf("均匀：%d 条候选都在期望 ±3σ 内（最多 %d 次 / 最少 %d 次，共 %d 次；已按权重折算期望）",
+		k, maxP, minP, total)
 }
 
 // candidateExplain 取一条候选的可见事实（key 计数**只读** Keys[]，不碰 round_robin 游标）。
