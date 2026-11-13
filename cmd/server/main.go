@@ -223,6 +223,15 @@ func main() {
 	armorState := prompt.NewArmorState(prompt.ArmorConfig{
 		Mode:    cfg.PromptArmorMode,
 		Payload: cfg.PromptArmorPayload,
+		// 三态的范围/名单/观察/模式库（2026-11-13）：与 RetryOnRefusal 同一条纪律 ——
+		// normalize 解析了、这里没传，行为就是"设置页看起来生效、实际没生效"。
+		InjectScope:   cfg.PromptArmorInjectScope,
+		InjectTargets: cfg.PromptArmorInjectTargets,
+		BlockScope:    cfg.PromptArmorBlockScope,
+		BlockTargets:  cfg.PromptArmorBlockTargets,
+		Observe:       cfg.PromptArmorObserve,
+		Patterns:      cfg.PromptArmorPatterns,
+		PatternsOnly:  cfg.PromptArmorPatternsOnly,
 		// RetryOnRefusal 必须在这里传进去：只补 normalize 的解析、忘了这一步的话，
 		// 设置页保存仍然"看起来生效"（值进了内存），但**重启后**状态机是重新构造的、
 		// 拿到的永远是 false —— 实测那次 bug 就是**双重失效**（解析没读 + 构造没传）。

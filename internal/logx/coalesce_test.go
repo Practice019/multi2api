@@ -17,18 +17,21 @@ func TestCoalesceMergesIntoOneLine(t *testing.T) {
 	resetCoalesceForTest()
 	_ = capture(t, LevelInfo)
 
-	Coalesce(LevelInfo, "loomy", "warm", "", "面板预热一轮 · 待办 过期 43")
+	// ⚠ 样例文案跟着 2026-11-13 的精简换格式（`loomy 预热 · 未缓存 t0/i0 · …`）。
+	//   折叠**按 key**（第三个参数 "warm"）、不看内容 ⇒ 文案换成什么都会折成一行；
+	//   这里换样例是为了"测试里出现的日志与线上一致"（免得看日志的人对不上）。
+	Coalesce(LevelInfo, "loomy", "warm", "", "loomy: 预热 · 未缓存 t0/i0 · 过期 t43/i43 · 号44 · 发起12")
 	cur = base.Add(5 * time.Second)
-	Coalesce(LevelInfo, "loomy", "warm", "", "面板预热一轮 · 待办 过期 31")
+	Coalesce(LevelInfo, "loomy", "warm", "", "loomy: 预热 · 未缓存 t0/i0 · 过期 t31/i31 · 号44 · 发起12")
 	cur = base.Add(12 * time.Second)
-	Coalesce(LevelWarn, "loomy", "warm", "", "面板预热一轮 · 首个错误 100002")
+	Coalesce(LevelWarn, "loomy", "warm", "", "loomy: 预热 · 未缓存 t0/i0 · 过期 t31/i31 · 号44 · 发起12 · 错 100002 登录已失效")
 
 	lines := FlushCoalesced()
 	if len(lines) != 1 {
 		t.Fatalf("同一 key 三次应折成 **1 行**，实际 %d 行：\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 	got := lines[0]
-	for _, want := range []string{"WARN", "面板预热一轮", "×3", "14:00:00→14:00:12"} {
+	for _, want := range []string{"WARN", "loomy: 预热", "×3", "14:00:00→14:00:12"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("折叠行缺少 %q：%s", want, got)
 		}

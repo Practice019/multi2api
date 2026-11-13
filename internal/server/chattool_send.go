@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/prompt"
 )
 
 // toolExecTimeout 单次工具执行的超时。
@@ -99,7 +100,14 @@ func (h *Handler) chatProvider(ctx context.Context, providerID string, cred gate
 		return gateway.ChatStream{}, fmt.Errorf("chatProvider: 装配层不支持按上游分派对话")
 	}
 	// 破甲统一注入点（同 chatVia；见 internal/server/armor_body.go）。
-	cs, supported, err := d.Chat(ctx, providerID, cred, h.armorBody(body))
+	//
+	// ⚠ 工具循环里 body 是**逐轮变化**的（追加了工具结果），所以判决必须每轮做 ——
+	//   上一轮放行不代表这一轮不会被拦。
+	sealed, rej := h.armorBody(prompt.Target{Upstream: providerID}, body)
+	if rej != nil {
+		return gateway.ChatStream{}, rej
+	}
+	cs, supported, err := d.Chat(ctx, providerID, cred, sealed)
 	if err != nil {
 		return gateway.ChatStream{}, err
 	}

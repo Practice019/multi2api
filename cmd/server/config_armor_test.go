@@ -37,6 +37,12 @@ func TestArmorModeReadBackFromAdminSection(t *testing.T) {
 // TestArmorModeNestedIsFallback 手写的嵌套键仍然生效，且两边都有时 **admin 段优先**。
 //
 // 反了的后果：手写一个旧值会永久压住设置页，用户在界面上怎么改都不生效。
+//
+// ⚠ 本用例 2026-11-13（T-902）改过一次取值：原来用 "replace" 当"嵌套键的值"，
+//
+//	而 replace 已从界面下线、会被 normalize 归一成 append（见
+//	TestArmorReplaceLegacyNormalizedToAppend）—— 它不再是"一个普通档位"，
+//	所以这里换成 "append" 来验同一条语义（fallback 与 admin 优先都没变）。
 func TestArmorModeNestedIsFallback(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "c.json")
@@ -46,16 +52,16 @@ func TestArmorModeNestedIsFallback(t *testing.T) {
 		}
 	}
 
-	write("{\"listen\":\":9999\",\"api_key\":\"k\",\"prompt\":{\"armor_mode\":\"replace\"}}")
+	write("{\"listen\":\":9999\",\"api_key\":\"k\",\"prompt\":{\"armor_mode\":\"append\"}}")
 	c, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.PromptArmorMode != prompt.ArmorReplace {
-		t.Errorf("只有嵌套键时 PromptArmorMode = %q，want %q", c.PromptArmorMode, prompt.ArmorReplace)
+	if c.PromptArmorMode != prompt.ArmorAppend {
+		t.Errorf("只有嵌套键时 PromptArmorMode = %q，want %q", c.PromptArmorMode, prompt.ArmorAppend)
 	}
 
-	write("{\"listen\":\":9999\",\"api_key\":\"k\",\"admin\":{\"prompt_armor_mode\":\"off\"},\"prompt\":{\"armor_mode\":\"replace\"}}")
+	write("{\"listen\":\":9999\",\"api_key\":\"k\",\"admin\":{\"prompt_armor_mode\":\"off\"},\"prompt\":{\"armor_mode\":\"append\"}}")
 	c2, err := Load(fp)
 	if err != nil {
 		t.Fatal(err)

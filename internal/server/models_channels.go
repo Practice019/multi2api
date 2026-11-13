@@ -646,7 +646,8 @@ func (h *Handler) modelsUI(w http.ResponseWriter, r *http.Request) {
 //	  "catalog":catalogFreshnessView }
 //
 // ⚠ catalog 是**必需**字段（不是可选增强）：页面靠它回答"这份目录是不是实时的"。
-//   页面原来只显示"更新于 <本地时刻>"，那与上游缓存无关（见 catalogFreshnessView）。
+//
+//	页面原来只显示"更新于 <本地时刻>"，那与上游缓存无关（见 catalogFreshnessView）。
 //
 // 未认证 ⇒ 401 + JSON，**不是** 200 + 空数组：空数组在页面上是"一个模型都
 // 没有"，会把"没登录"读成"目录是空的" —— 那是两类完全不同的故障。

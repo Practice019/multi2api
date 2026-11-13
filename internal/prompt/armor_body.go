@@ -34,9 +34,22 @@ func ApplyArmorToBody(body []byte, st *ArmorState) []byte {
 	if st == nil {
 		return body
 	}
-	cfg := st.Config()
+	return ApplyArmorToBodyCfg(body, st.Config())
+}
+
+// ApplyArmorToBodyCfg 与 ApplyArmorToBody 同一实现，只是**用调用方已经读到的那份配置**。
+//
+// # 为什么要有它（不是重复代码）
+//
+// 出站边界（internal/server 的 armorBody）已经为了**判决**读过一次配置；
+// 判决为 inject 时再让 ApplyArmorToBody 去读第二次，等于同一个请求里读两遍同一把锁，
+// 且两次读之间配置可能被设置页改掉 —— 那会出现"判决用的是 append、注入用的是 replace"。
+// 传进来那一份保证同一次判决与同一次注入看到的是同一份配置。
+//
+// ⚠ block 态在这里会被 ArmorEnabled 挡掉（**一个字节都不注入**，见 ArmorEnabled 的注释）。
+func ApplyArmorToBodyCfg(body []byte, cfg ArmorConfig) []byte {
 	if !ArmorEnabled(cfg.Mode) {
-		return body // off = 零改动（这条是开关的语义本身，有测试钉住）
+		return body // off / block = 零改动（这条是开关的语义本身，有测试钉住）
 	}
 	// ⚠ 已经盖过章（system 里已有我们的标记）⇒ **原样返回，不再动它**。
 	//

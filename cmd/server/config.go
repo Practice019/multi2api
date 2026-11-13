@@ -440,6 +440,24 @@ type Config struct {
 		// 只覆盖**条款**部分；人设前缀仍用内置（想全改就直接改配置文件里的这一段是做不到的 ——
 		// 那是刻意的：人设与条款的边界由移植时的结构决定，混成一个文件会让"只改条款"变成"重写一切"）。
 		ArmorFile string `json:"armor_file"`
+
+		// ---- 破甲三态的范围/名单/观察/模式库（2026-11-13 用户拍板）----
+		//
+		// 这一组是**手写位置**；设置页写的是 admin 段的同名键（见 Admin 段注释，
+		// 本仓"两处存储"家族已中三次，别只写一处）。
+		//
+		// 名单统一是**一个字符串**（逗号/换行/分号分隔）：JSON 数组与字面量两种形状
+		// 只会让人猜"到底该写哪种"，而这里两种都能拆（见 splitArmorList）。
+		ArmorInjectScope   string `json:"armor_inject_scope"`
+		ArmorInjectTargets string `json:"armor_inject_targets"`
+		ArmorBlockScope    string `json:"armor_block_scope"`
+		ArmorBlockTargets  string `json:"armor_block_targets"`
+		// ArmorObserve 观察模式：禁用态命中时只记日志不拦（**默认开**）。
+		// 指针的理由与 ArmorRetry 同款：nil = 没配，&false = 用户显式关掉。
+		ArmorObserve *bool `json:"armor_observe"`
+		// ArmorPatterns 追加的模式条目；ArmorPatternsOnly=true 时只用它们。
+		ArmorPatterns     string `json:"armor_patterns"`
+		ArmorPatternsOnly bool   `json:"armor_patterns_only"`
 	} `json:"prompt"`
 
 	Upstash struct {
@@ -507,6 +525,20 @@ type Config struct {
 		//   界面显示关、行为却是开，而且没有任何日志能看出来。
 		//   指针让"没配"（nil）与"显式关闭"（&false）可分辨：只有 nil 才回退到手写位置。
 		PromptArmorRetry *bool `json:"prompt_armor_retry"`
+
+		// ---- 破甲三态的范围/名单/观察/模式库（设置页写这里，热生效）----
+		//
+		// 与上面两个键**同一条纪律**（这一族在本仓已中三次）：
+		//   · 设置页改的值必须落在 admin 段 —— 启动只读手写位置会让"改了重启就回退"；
+		//   · 布尔用**指针** —— nil（没配）与 &false（显式关掉）必须可分辨，
+		//     否则用户关掉观察模式后，手写位置的 true 会把它悄悄打开。
+		PromptArmorInjectScope   string `json:"prompt_armor_inject_scope"`
+		PromptArmorInjectTargets string `json:"prompt_armor_inject_targets"`
+		PromptArmorBlockScope    string `json:"prompt_armor_block_scope"`
+		PromptArmorBlockTargets  string `json:"prompt_armor_block_targets"`
+		PromptArmorObserve       *bool  `json:"prompt_armor_observe"`
+		PromptArmorPatterns      string `json:"prompt_armor_patterns"`
+		PromptArmorPatternsOnly  *bool  `json:"prompt_armor_patterns_only"`
 
 		// ---- 严格前缀模式（设置页可改，热生效，2026-11-01）----
 		//
@@ -1193,6 +1225,16 @@ type Config struct {
 	PromptArmorPayload string `json:"-"`
 	// PromptArmorRetry 命中拒绝后是否自动重试一次（热生效）。
 	PromptArmorRetry bool `json:"-"`
+	// 破甲三态的范围/名单/观察/模式库（解析后的运行时值；装配层构造 ArmorState 读它们）。
+	//
+	// Scope 已收敛成 all / include / exclude；Targets 已拆成切片（名字/上游 id 都可能带空格）。
+	PromptArmorInjectScope   string   `json:"-"`
+	PromptArmorInjectTargets []string `json:"-"`
+	PromptArmorBlockScope    string   `json:"-"`
+	PromptArmorBlockTargets  []string `json:"-"`
+	PromptArmorObserve       bool     `json:"-"`
+	PromptArmorPatterns      []string `json:"-"`
+	PromptArmorPatternsOnly  bool     `json:"-"`
 	// PromptArmorAuditFile 审计落点（已填默认值，见 normalize）。
 	PromptArmorAuditFile string `json:"-"`
 	// StrictModelPrefix 严格前缀模式的解析值（admin 段优先，features 段回退）。
@@ -1624,12 +1666,26 @@ func (c *Config) normalize() error {
 	//   反过来的后果见 Admin.PromptArmorMode 的注释（重启回退，实测过）。
 	c.PromptArmorMode = strings.ToLower(firstNonEmpty(strings.TrimSpace(c.Admin.PromptArmorMode), strings.TrimSpace(c.Prompt.ArmorMode)))
 	switch c.PromptArmorMode {
-	case prompt.ArmorOff, prompt.ArmorAppend, prompt.ArmorReplace:
+	case prompt.ArmorOff, prompt.ArmorAppend, prompt.ArmorBlock:
+	case prompt.ArmorReplace:
+		// ⚠ 旧值兼容（T-902，2026-11-13 用户要求界面收窄成三档）：
+		//   「替换」整段覆盖客户端 system —— 实测代价是"只回复 10 字以内"被无视、
+		//   "只输出 JSON"变成 Markdown、JSON Schema 连续返回空数组（200 + 合法 JSON 的
+		//   **静默失败**）、每请求多烧约 6000 token，所以界面不再提供它。
+		//
+		//   但**已有部署不许静默失效**：这里读得到、认得出，归一成 append 并明确提示。
+		//   静默按别的档跑等于替用户换了行为，而且他下次打开界面会问"我配的替换呢"。
+		log.Printf("破甲：配置里是已下线的模式 %q（替换），已按 %q（追加）运行。"+
+			"「替换」会整段覆盖客户端 system（实测会无视格式要求、每请求多烧约 6000 token），"+
+			"界面不再提供该档；若要恢复旧行为，请自行评估上述代价后手改配置",
+			prompt.ArmorReplace, prompt.ArmorAppend)
+		c.PromptArmorMode = prompt.ArmorAppend
 	case "":
 		c.PromptArmorMode = prompt.ArmorOff // 缺省关闭（见 Prompt.ArmorMode 的注释）
 	default:
-		return fmt.Errorf("prompt.armor_mode=%q 非法：只接受 %q / %q / %q",
-			c.Prompt.ArmorMode, prompt.ArmorOff, prompt.ArmorAppend, prompt.ArmorReplace)
+		return fmt.Errorf("prompt.armor_mode=%q 非法：只接受 %q / %q / %q（%q 是已下线的旧值，会被归一成 %q）",
+			c.Prompt.ArmorMode, prompt.ArmorOff, prompt.ArmorAppend, prompt.ArmorBlock,
+			prompt.ArmorReplace, prompt.ArmorAppend)
 	}
 	// retry 必须在这里解析 —— **原来的代码只有声明、没有解析**（实测到的 bug）：
 	//   设置页 PUT 200、config.json 里也确实写进了 prompt_armor_retry: true，
@@ -1646,6 +1702,44 @@ func (c *Config) normalize() error {
 	}
 	if c.PromptArmorRetry {
 		log.Printf("破甲：命中拒绝后自动重试**已开启**（设置项 prompt_armor_retry）")
+	}
+	// ---- 三态的范围/名单/观察/模式库（2026-11-13）----
+	//
+	// 四条都要解析，理由与 retry 完全相同（那一族的教训就在上面那段注释里：
+	// 只声明不解析 ⇒ 设置页显示对了、重启静默回退）。
+	// 合成规则也照抄：**admin 段（设置页写的）优先**，手写的 prompt 段作回退。
+	//
+	// ⚠ 非法值**启动报错**，不静默当默认值：范围写错（例如 "whitelist"）时若悄悄按
+	//   all 处理，用户会以为名单生效了 —— 而实际拦的是所有人。
+	injScope, err := normalizeArmorScope(firstNonEmpty(c.Admin.PromptArmorInjectScope, c.Prompt.ArmorInjectScope), "armor_inject_scope")
+	if err != nil {
+		return err
+	}
+	c.PromptArmorInjectScope = injScope
+	blkScope, err := normalizeArmorScope(firstNonEmpty(c.Admin.PromptArmorBlockScope, c.Prompt.ArmorBlockScope), "armor_block_scope")
+	if err != nil {
+		return err
+	}
+	c.PromptArmorBlockScope = blkScope
+	c.PromptArmorInjectTargets = splitArmorList(firstNonEmpty(c.Admin.PromptArmorInjectTargets, c.Prompt.ArmorInjectTargets))
+	c.PromptArmorBlockTargets = splitArmorList(firstNonEmpty(c.Admin.PromptArmorBlockTargets, c.Prompt.ArmorBlockTargets))
+	// 观察模式**默认开**（用户拍板）：判据（模式库）是猜的，误杀率只有真实流量能量出来。
+	// 默认就拦的代价是"第一次用这个功能，正常请求被拒"。
+	c.PromptArmorObserve = true
+	if c.Prompt.ArmorObserve != nil {
+		c.PromptArmorObserve = *c.Prompt.ArmorObserve
+	}
+	if c.Admin.PromptArmorObserve != nil {
+		c.PromptArmorObserve = *c.Admin.PromptArmorObserve
+	}
+	c.PromptArmorPatterns = splitArmorList(firstNonEmpty(c.Admin.PromptArmorPatterns, c.Prompt.ArmorPatterns))
+	c.PromptArmorPatternsOnly = c.Prompt.ArmorPatternsOnly
+	if c.Admin.PromptArmorPatternsOnly != nil {
+		c.PromptArmorPatternsOnly = *c.Admin.PromptArmorPatternsOnly
+	}
+	if c.PromptArmorMode == prompt.ArmorBlock {
+		log.Printf("破甲：禁用破甲（只拦截）—— 范围=%s 名单=%v 观察=%v 模式条目=%d（内置 %d）",
+			c.PromptArmorBlockScope, c.PromptArmorBlockTargets, c.PromptArmorObserve, len(c.PromptArmorPatterns), len(prompt.ArmorPatterns(prompt.ArmorConfig{})))
 	}
 	if af := strings.TrimSpace(c.Prompt.ArmorFile); af != "" {
 		raw, err := os.ReadFile(af)
@@ -2122,6 +2216,42 @@ func charCount(s string) string {
 		n++
 	}
 	return strconv.Itoa(n) + " 字符"
+}
+
+// normalizeArmorScope 校验并归一化破甲范围。
+//
+// 空 = all（默认：不限制）。认不出的值**报错**而不是当默认 —— 见调用点的注释。
+func normalizeArmorScope(v, key string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(v))
+	switch s {
+	case "":
+		return prompt.ArmorScopeAll, nil
+	case prompt.ArmorScopeAll, prompt.ArmorScopeInclude, prompt.ArmorScopeExclude:
+		return s, nil
+	}
+	return "", fmt.Errorf("prompt.%s=%q 非法：只接受 %q / %q / %q",
+		key, v, prompt.ArmorScopeAll, prompt.ArmorScopeInclude, prompt.ArmorScopeExclude)
+}
+
+// splitArmorList 把"一个字符串里的名单"拆成切片。
+//
+// 分隔符同时接受半角逗号、中文逗号、分号与换行（设置页是一个输入框，用户会拿换行
+// 当分隔；手写配置也会）。去空白、丢空条目 —— 空条目会让 include 名单"恒命中"。
+func splitArmorList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		switch r {
+		case ',', '，', ';', '；', 0x0a, 0x0d, 0x09:
+			return true
+		}
+		return false
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if v := strings.TrimSpace(f); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func firstNonEmpty(vals ...string) string {

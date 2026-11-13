@@ -31,6 +31,7 @@ import (
 	"workbuddy2api/internal/channelroute"
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/gateway"
+	"workbuddy2api/internal/prompt"
 )
 
 // errNoChannelMode：没配渠道存储 ⇒ 调用方按既有路径处理（不是错误，是一种"模式未开启"）。
@@ -220,7 +221,21 @@ func (h *Handler) tryChannelOnce(ctx context.Context, cand channelroute.Candidat
 		Secret: map[string]any{"api_key": key},
 	}
 	// 破甲统一注入点（渠道同样要盖，见 internal/server/armor_body.go）。
-	cs, err := p.Chat(ctx, cred, h.armorBody(rewritten))
+	//
+	// ⚠ 目标是**渠道**这一级（名单里填的就是渠道页显示的那个名字）：
+	//   渠道路径上没有上游 id，所以只填 Channel。名字为空时回落到渠道 id
+	//   （永远给一个能匹配的值 —— 空目标会让 include 名单恒定不命中）。
+	chName := cand.Channel.Name
+	if strings.TrimSpace(chName) == "" {
+		chName = cand.Channel.ID
+	}
+	sealed, rej := h.armorBody(prompt.Target{Channel: chName}, rewritten)
+	if rej != nil {
+		// 渠道转发这一层把拒绝原样往上抛（类型化错误），由调用方写成 4xx 信封 ——
+		// **不**在这里写响应：这一层不知道客户端是不是已经收到过头（流式）。
+		return zero, rej
+	}
+	cs, err := p.Chat(ctx, cred, sealed)
 	if err != nil {
 		// ★ 上游说"这把 key 无效/没权限" ⇒ 自动禁用它（只禁这一把，不停整条渠道）。
 		h.autoDisableKeyOnAuthError(cand.Channel.ID, keyIdx, err)

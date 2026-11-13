@@ -4,7 +4,7 @@
 //
 // 用户贴的日志：
 //
-//	loomy: 面板预热一轮 —— 待办：未缓存(tasks=0 invite=0) · 过期(tasks=46 invite=46) · 共 44 个号 · 本轮发起 12 个 · 首个错误=""
+//	loomy: 预热 · 未缓存 t0/i0 · 过期 t46/i46 · 号44 · 发起12
 //
 // 「过期 46」> 「共 44 个号」：多出来的 2 个是**已删账号在缓存里的残留行**（幽灵行）——
 // 缓存是落盘的，删号不会清缓存，而"过期集合"遍历的是缓存 map 的全部 key。
@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // warmupCacheProvider 造一个"面板缓存已经灌好内容"的 Provider。
@@ -285,21 +286,82 @@ func TestPrunePanelOrphansEmptyPoolPrunesEverything(t *testing.T) {
 	}
 }
 
-// panelWarmupLogLine 的两条硬要求：无错时**不打**空字段；有错时必须带上原文。
+// panelWarmupLogLine 的两条硬要求：无错时**不打**错误段；有错时必须带上（截短后的）错误。
+//
+// ⚠ 2026-11-13 用户报「废话太多了」⇒ 整行重写成**数字优先、文字最少**（见 panelWarmupLogLine 的注释）。
+//
+//	这条断言跟着改成新形态；「无错时不出现」「有错时出现且可读」两条要求**没变**。
 func TestPanelWarmupLogLineOmitsEmptyFirstError(t *testing.T) {
 	pl := panelPlan{todoT: 0, todoI: 0, expT: 44, expI: 44}
 
 	clean := panelWarmupLogLine(pl, 44, 12, "")
-	if strings.Contains(clean, "首个错误") {
-		t.Errorf("本轮无错时不该出现「首个错误」字段（那是噪音，用户报过）：\n%s", clean)
+	if strings.Contains(clean, "错") {
+		t.Errorf("本轮无错时不该出现任何错误段（那是噪音，用户报过两次）：\n%s", clean)
 	}
-	if !strings.Contains(clean, "过期(tasks=44 invite=44)") || !strings.Contains(clean, "共 44 个号") {
-		t.Errorf("日志主体字段仍须齐全：\n%s", clean)
+	// 四个数字都必须在一行里（运维只看这四个）—— 用**字段名+值**成对断言，
+	// 免得将来有人把某段删了而断言仍然绿。
+	for _, want := range []string{"t0/i0", "t44/i44", "号44", "发起12"} {
+		if !strings.Contains(clean, want) {
+			t.Errorf("日志缺少数字段 %q：\n%s", want, clean)
+		}
 	}
 
-	withErr := panelWarmupLogLine(pl, 44, 12, "tasks: 502 bad gateway")
-	if !strings.Contains(withErr, `首个错误="tasks: 502 bad gateway"`) {
-		t.Errorf("真有错时必须带上原文（排障靠它）：\n%s", withErr)
+	// 真机上那条长错误：必须**截短**成「码 + 短语」，而不是原样贴。
+	realErr := "loomy: 积分接口 /onboarding/tasks 返回 100002: 登录已失效，请重新登录"
+	withErr := panelWarmupLogLine(pl, 44, 12, realErr)
+	if !strings.Contains(withErr, "错 100002 登录已失效") {
+		t.Errorf("有错时要给出「码 + 短语」（排障够用且不刷屏）：\n%s", withErr)
+	}
+	if strings.Contains(withErr, "请重新登录") {
+		t.Errorf("错误的说明性尾巴应当被截掉（用户报的就是这类长中文串）：\n%s", withErr)
+	}
+}
+
+// TestPanelWarmupLogLineIsCompact ★ 数字优先、文字最少、有硬长度上限。
+//
+// 用户原话：「这个 loomy 的日志打印 直接统计数字简介一点就行了 废话太多了」⇒
+// 把"说明性文字"当成**要删的东西**来断言（不是靠人眼看着短）。
+func TestPanelWarmupLogLineIsCompact(t *testing.T) {
+	pl := panelPlan{todoT: 0, todoI: 0, expT: 46, expI: 46}
+	clean := panelWarmupLogLine(pl, 44, 12, "")
+	t.Logf("无错时（%d 字）: %s", utf8.RuneCountInString(clean), clean)
+	if n := utf8.RuneCountInString(clean); n > 100 {
+		t.Errorf("日志 %d 字，超过 100 字上限（用户要求精简）：\n%s", n, clean)
+	}
+	// "废话"清单：旧格式里的这些词一个都不许回来。
+	for _, banned := range []string{"待办：", "未缓存(tasks=", "过期(tasks=", "首个错误", "共 ", " 个号", "本轮发起"} {
+		if strings.Contains(clean, banned) {
+			t.Errorf("日志里仍有说明性文字 %q（用户要求砍掉）：\n%s", banned, clean)
+		}
+	}
+
+	// 有错时上限放宽到 140（错误段那点字不能省 —— 它正是排障要看的东西）。
+	withErr := panelWarmupLogLine(pl, 44, 12, "loomy: 积分接口 /onboarding/tasks 返回 100002: 登录已失效，请重新登录")
+	t.Logf("有错时（%d 字）: %s", utf8.RuneCountInString(withErr), withErr)
+	if n := utf8.RuneCountInString(withErr); n > 140 {
+		t.Errorf("带错日志 %d 字，超过 140 字上限：\n%s", n, withErr)
+	}
+}
+
+// TestPanelWarmupErrShort 错误截短（纯函数，逐条钉住边界）。
+func TestPanelWarmupErrShort(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"", ""},
+		// 真机那条（用户截图里的原文）：码在前、短语在后，尾巴的"请重新登录"要丢掉。
+		{"loomy: 积分接口 /onboarding/tasks 返回 100002: 登录已失效，请重新登录", "100002 登录已失效"},
+		// 头一个 token 就是码（别拼成 "502 502 bad gateway"）。
+		{"tasks: 502 bad gateway", "502 bad gateway"},
+		// 没有码：只保留短语。
+		{"invite: 连接超时", "连接超时"},
+	} {
+		if got := panelWarmupErrShort(c.in); got != c.want {
+			t.Errorf("panelWarmupErrShort(%q) = %q，want %q", c.in, got, c.want)
+		}
+	}
+	// 超长无分隔串：必须被硬截到 ≤40 字（否则"截短"是假的）。
+	long := strings.Repeat("甲", 100)
+	if got := panelWarmupErrShort(long); utf8.RuneCountInString(got) > 40 {
+		t.Errorf("超长错误没被截短：%d 字", utf8.RuneCountInString(got))
 	}
 }
 

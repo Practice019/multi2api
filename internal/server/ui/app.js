@@ -7005,6 +7005,16 @@ window.addEventListener('message', (e) => {
     ['setStrictModelPrefix', 'strict_model_prefix', 'bool'],
     // 破甲：命中拒绝后是否自动重试一次（bool；后端 prompt_armor_retry，热生效）。
     ['setArmorRetry', 'prompt_armor_retry', 'bool'],
+    // ---- 破甲三态的范围/名单/观察/模式库（2026-11-13）----
+    // 键名与 cmd/server 的适配器（upstream_settings_armor.go）一一对应；
+    // 漏一个的表现是"界面上改了、保存后回到原样"（守卫 TestArmorSettingsControlsAreBound 会红）。
+    ['setArmorInjectScope', 'prompt_armor_inject_scope', 'select'],
+    ['setArmorInjectTargets', 'prompt_armor_inject_targets', 'str'],
+    ['setArmorBlockScope', 'prompt_armor_block_scope', 'select'],
+    ['setArmorBlockTargets', 'prompt_armor_block_targets', 'str'],
+    ['setArmorObserve', 'prompt_armor_observe', 'bool'],
+    ['setArmorPatterns', 'prompt_armor_patterns', 'str'],
+    ['setArmorPatternsOnly', 'prompt_armor_patterns_only', 'bool'],
     // ⚠ 2026-11-13：MonkeyCode 出口的两行绑定（`setMcProxy` / `setMcDirectProxy`）**已移除**
     //   （用户要求：设置页不要这一块）。
     //   · **配置键照旧生效**：config.json 的 `monkeycode.proxy` / `monkeycode.direct_proxy`
@@ -7013,6 +7023,216 @@ window.addEventListener('message', (e) => {
     //   ⚠ HTML 块也一起删了（webui.html 的 `MonkeyCode 出口` subgroup）——
     //     只删一边会留下「悬空绑定」或「控件无绑定」，本仓有这两样的历史教训。
   ];
+
+  // ── 破甲配置区（T-902）：按模式显隐 + 名单选择器 ──────────────────────────
+  //
+  // # ① 为什么"按模式显示"必须是**同一份配置的显隐**
+  //
+  // 三套表单 = 三份控件、三份绑定；保存时只有当前渲染的那套会进 collectSettings，
+  // 另两套的值要么丢、要么得写"合并三处"的逻辑 —— 那是本仓"两处真相"的老病。
+  // 这里只有一份控件，显隐只改 hidden。
+  //
+  // # ② 判据是**模式字符串**（字段驱动）
+  //
+  // 不涉及任何上游名 —— TestWebUIHasNoUpstreamNameBranch 钉着这一条。
+  const ARMOR_MODE_SECTIONS = {
+    off: [],
+    append: ['append'],
+    block: ['block'],
+  };
+
+  // armorSectionsFor 这个模式下该显示哪些配置段（纯函数；node 执行式断言直接跑它）。
+  //
+  // ⚠ replace 是**历史值**：界面已不再提供这一档（T-902 收窄成三档），但旧配置里可能还写着它。
+  //   后端会把它读进来归一成 append（并在启动/保存时提示），前端显示口径随之按 append ——
+  //   不让旧部署看到"界面少了一块、也不知道自己配到哪去了"。
+  function armorSectionsFor(mode) {
+    const m = String(mode == null ? '' : mode).trim().toLowerCase();
+    if (m === 'replace') return ARMOR_MODE_SECTIONS.append;
+    return ARMOR_MODE_SECTIONS[m] || ARMOR_MODE_SECTIONS.off;
+  }
+
+  // armorModeHintText 模式下面那行说明（off 档时它就是"为什么下面什么都没有"的解释）。
+  function armorModeHintText(mode) {
+    const m = String(mode == null ? '' : mode).trim().toLowerCase();
+    if (m === 'append' || m === 'replace') {
+      return '当前：启用破甲（追加）—— 每条出站请求都会带上破甲条款；范围与名单见下。';
+    }
+    if (m === 'block') {
+      return '当前：禁用破甲（只拦截）—— 命中破甲的请求不会发出、也不会被改写；范围 / 名单 / 观察 / 模式库见下。';
+    }
+    return '当前：关闭 —— 不注入、也不检测，下面没有任何可配置项。';
+  }
+
+  // applyArmorModeVisibility 把显隐落到 DOM（唯一的开关点）。
+  function applyArmorModeVisibility(mode) {
+    const want = armorSectionsFor(mode);
+    const root = $('armorCfg');
+    if (root) {
+      const secs = root.querySelectorAll('[data-armorsec]');
+      for (let i = 0; i < secs.length; i++) {
+        secs[i].hidden = want.indexOf(secs[i].getAttribute('data-armorsec')) < 0;
+      }
+    }
+    const hint = $('armorModeHint');
+    if (hint) hint.textContent = armorModeHintText(mode);
+  }
+
+  // # ③ 名单选择器：可选可加，**不许手打**（T-902）
+  //
+  // 候选来自两份**既有的**清单：manifest 的上游清单 + /admin/channels 的渠道清单。
+  // 存盘格式**不变**：仍是逗号分隔字符串，落在隐藏 input 里 ⇒ 后端键
+  // （prompt_armor_inject_targets / prompt_armor_block_targets）、normalize、
+  // splitArmorList **一行都不用改**。
+  const ARMOR_PICK = {
+    inject: { input: 'setArmorInjectTargets', pick: 'setArmorInjectTargetsPick',
+      chips: 'setArmorInjectTargetsChips', hint: 'setArmorInjectTargetsHint' },
+    block: { input: 'setArmorBlockTargets', pick: 'setArmorBlockTargetsPick',
+      chips: 'setArmorBlockTargetsChips', hint: 'setArmorBlockTargetsHint' },
+  };
+
+  // splitArmorListValue 与后端 splitArmorList **同口径**（半角/中文逗号、分号、空白），
+  // 去空、去重、保序。
+  //
+  // ⚠ 改这里必须同时改 cmd/server/config.go 的 splitArmorList：两边口径一分叉，
+  //   表现就是"界面上选好的名单，保存后多一个/少一个条目"。
+  function splitArmorListValue(v) {
+    const out = [];
+    const parts = String(v == null ? '' : v).split(/[,，;；\s]+/);
+    for (let i = 0; i < parts.length; i++) {
+      const t = parts[i].trim();
+      if (t && out.indexOf(t) < 0) out.push(t);
+    }
+    return out;
+  }
+
+  // armorTargetList 读当前名单。**唯一真相是那个隐藏 input**（服务端要的就是它），
+  // chip 与选择器都从它派生 —— 不做第二份状态（两份状态必然漂）。
+  function armorTargetList(which) {
+    const el = $(ARMOR_PICK[which].input);
+    return splitArmorListValue(el ? el.value : '');
+  }
+
+  // armorTargetsWrite 写回名单（存盘格式：逗号+空格分隔），并重绘 chips。
+  function armorTargetsWrite(which, list) {
+    const el = $(ARMOR_PICK[which].input);
+    if (el) el.value = list.join(', ');
+    renderArmorChips(which);
+    markDirty(true);
+  }
+
+  // renderArmorChips 已选名单（点 × 移除）。
+  //
+  // 形态照抄「API 分组」那套（.pill + 内联重置样式的按钮）：本仓踩过"用 .chip 装按钮把行挤歪"的坑。
+  function renderArmorChips(which) {
+    const host = $(ARMOR_PICK[which].chips);
+    if (!host) return;
+    const list = armorTargetList(which);
+    if (!list.length) {
+      host.innerHTML = '<span class="dim" style="font-size:12px">（未选 —— 这一档不限制上下游/渠道）</span>';
+      return;
+    }
+    let html = '';
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      html += '<span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px">' +
+        '<span class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(v) + '</span>' +
+        '<button type="button" data-armorrm="' + esc(which) + '" data-v="' + esc(v) + '" title="从名单里移除"' +
+        ' style="all:unset;cursor:pointer;opacity:.7">×</button></span> ';
+    }
+    host.innerHTML = html;
+  }
+
+  let armorSources = null; // {upstreams:[], channels:[]}
+
+  // loadArmorSources 两份清单：manifest 的上游 + /admin/channels 的渠道。
+  //
+  // 渠道取不到（未启用渠道 / 请求失败）只让候选少一半 —— **不**让整个选择器失效，
+  // 也**不**退化成手打输入框（用户明确要求：清单为空就给可读提示）。
+  async function loadArmorSources() {
+    if (armorSources) return armorSources;
+    const upstreams = providerRegistryIds();
+    let channels = [];
+    try {
+      const r = await admin('/admin/channels?page_size=200');
+      const list = (r && (r.channels || r.items)) || [];
+      channels = list.map(c => (c && (c.name || c.id)) || '').filter(Boolean);
+    } catch (e) { channels = []; }
+    armorSources = { upstreams: upstreams, channels: channels };
+    return armorSources;
+  }
+
+  // renderArmorTargets 渲染一个名单选择器（候选 + chips + 提示）。
+  async function renderArmorTargets(which) {
+    const cfg = ARMOR_PICK[which];
+    if (!cfg || !$(cfg.pick)) return;
+    const src = await loadArmorSources();
+    const list = armorTargetList(which);
+    // 候选 = 上游 ∪ 渠道 ∪ **当前名单里的值**。
+    //
+    // ⚠ 最后那一项是必须的：配置里可能留着已经不在清单里的上游/渠道（改名 / 删号），
+    //   不给它选项，用户就**删不掉**（只能去手改 config.json）。
+    const opts = [];
+    const add = (group, v) => {
+      if (!v) return;
+      for (let i = 0; i < opts.length; i++) { if (opts[i].v === v) return; }
+      opts.push({ group: group, v: v });
+    };
+    for (let i = 0; i < src.upstreams.length; i++) add('上游', src.upstreams[i]);
+    for (let i = 0; i < src.channels.length; i++) add('渠道', src.channels[i]);
+    for (let i = 0; i < list.length; i++) add('当前名单', list[i]);
+
+    const sel = $(cfg.pick);
+    let html = '';
+    for (let i = 0; i < opts.length; i++) {
+      html += '<option value="' + esc(opts[i].v) + '" data-armorgrp="' + esc(opts[i].group) + '">' +
+        esc(opts[i].group) + ' · ' + esc(opts[i].v) + '</option>';
+    }
+    sel.innerHTML = html;
+    for (let i = 0; i < sel.options.length; i++) {
+      sel.options[i].selected = list.indexOf(sel.options[i].value) >= 0;
+    }
+    const empty = src.upstreams.length === 0 && src.channels.length === 0;
+    sel.disabled = empty && opts.length === 0;
+    const hint = $(cfg.hint);
+    if (hint) {
+      hint.textContent = empty
+        ? '还没有可用的上游或渠道 —— 先接入一个上游、或去「渠道」页建一条，这里才有候选（本栏只从清单里选，不支持手打）。'
+        : '多选候选后点「加入名单」；已选项在下面（点 × 移除）。范围选「全部」时名单不参与判决。';
+    }
+    renderArmorChips(which);
+  }
+
+  // wireArmorSettings 绑定：模式下拉（显隐）+ 两个选择器（加入 / 清空 / × 移除）。
+  function wireArmorSettings() {
+    const mode = $('setArmorMode');
+    if (mode) mode.addEventListener('change', function () { applyArmorModeVisibility(mode.value); });
+    for (const which of ['inject', 'block']) {
+      const cfg = ARMOR_PICK[which];
+      if (!cfg || !$(cfg.pick)) continue;
+      const addBtn = document.querySelector('[data-armoradd="' + which + '"]');
+      if (addBtn) addBtn.addEventListener('click', function () {
+        const sel = $(cfg.pick);
+        const merged = armorTargetList(which);
+        for (let i = 0; i < sel.options.length; i++) {
+          if (sel.options[i].selected && merged.indexOf(sel.options[i].value) < 0) merged.push(sel.options[i].value);
+        }
+        armorTargetsWrite(which, merged);
+      });
+      const clrBtn = document.querySelector('[data-armorclear="' + which + '"]');
+      if (clrBtn) clrBtn.addEventListener('click', function () { armorTargetsWrite(which, []); });
+      // × 走事件委托：chip 每次重绘都重建，挂到节点上会随重绘丢掉（本仓踩过同款）。
+      const chips = $(cfg.chips);
+      if (chips) chips.addEventListener('click', function (ev) {
+        const b = ev.target && ev.target.closest ? ev.target.closest('button[data-armorrm]') : null;
+        if (!b) return;
+        const w = b.getAttribute('data-armorrm');
+        const v = b.getAttribute('data-v');
+        armorTargetsWrite(w, armorTargetList(w).filter(function (x) { return x !== v; }));
+      });
+    }
+  }
+
   let savedSettings = null;
 
   const parseHours = s => String(s || '').split(/[,，\s]+/).filter(Boolean)
@@ -7049,6 +7269,12 @@ window.addEventListener('message', (e) => {
     $('setReadonly').innerHTML = ro.map(([k, v]) =>
       `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
     if (extra && extra.request_log) renderLogFileInfo(extra.request_log);
+    // 破甲（T-902）：按模式显隐 + 用刚填好的名单字符串渲染选择器/chips。
+    // ⚠ 必须放在 SET_FIELDS 循环**之后**：那一步已经把配置里的名单填进隐藏 input 了，
+    //   这里只是"用那份值渲染界面"（顺序反了会渲染出空名单）。
+    applyArmorModeVisibility(s.prompt_armor_mode);
+    void renderArmorTargets('inject');
+    void renderArmorTargets('block');
     markDirty(false);
   }
 
@@ -13335,6 +13561,7 @@ $('btnModelRefresh').onclick = () => busyRun($('btnModelRefresh'), async () => {
       if (b) showPanel(Number(b.dataset.nav));
     });
     $('btnSettingsSave').onclick = saveSettings;
+    wireArmorSettings(); // 破甲：模式显隐 + 名单选择器（T-902）
     $('btnSettingsReload').onclick = () => { loadSettings(); toast('已放弃未保存的修改'); };
     // 只有**设置页里**的控件改动才算「有未保存的修改」。
     //

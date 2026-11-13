@@ -13,7 +13,9 @@ import (
 // 背景（2026-11-12，用户报"日志在刷屏"）：死号永远补不上 ⇒ 待办恒定 ⇒
 // 旧实现每 5 秒一轮、每轮 12 个上游请求、每轮一条同样的日志，永不停止。
 func TestPanelWarmupPaceBacksOffWhenNothingChanges(t *testing.T) {
-	const line = "loomy: 面板预热一轮 —— 待办：过期(tasks=6 invite=18)"
+	// ⚠ 样例改用**新格式**（2026-11-13 精简后）；`next` 把整行当不透明 key，
+	//   所以格式本身不影响判定 —— 这一点由 TestPanelWarmupPaceIgnoresLogFormat 单独锁住。
+	const line = "loomy: 预热 · 未缓存 t0/i0 · 过期 t6/i18 · 号24 · 发起12"
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
 	p := &panelWarmupPace{}
 
@@ -45,7 +47,7 @@ func TestPanelWarmupPaceBacksOffWhenNothingChanges(t *testing.T) {
 	}
 
 	// 待办降了（补上了）⇒ 立刻回到追赶间隔，并且内容变了要立刻打日志。
-	got, logNow := p.next(23, line+" · 本轮发起 1 个", now)
+	got, logNow := p.next(23, line+" · 发起1", now)
 	if got != panelWarmupBusyInterval {
 		t.Fatalf("待办变化后应回到追赶间隔 %v，实际 %v", panelWarmupBusyInterval, got)
 	}
@@ -62,7 +64,7 @@ func TestPanelWarmupPaceBacksOffWhenNothingChanges(t *testing.T) {
 // TestPanelWarmupPaceLogsHeartbeatWhenIdle 钉住心跳：内容长期不变时也必须偶尔出声，
 // 否则排障看到的就是"日志停了"，分不清"在退避"和"goroutine 死了"。
 func TestPanelWarmupPaceLogsHeartbeatWhenIdle(t *testing.T) {
-	const line = "loomy: 面板预热一轮 —— 待办：过期(tasks=6 invite=18)"
+	const line = "loomy: 预热 · 未缓存 t0/i0 · 过期 t6/i18 · 号24 · 发起12"
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
 	p := &panelWarmupPace{}
 	if _, logNow := p.next(24, line, now); !logNow {
@@ -75,5 +77,33 @@ func TestPanelWarmupPaceLogsHeartbeatWhenIdle(t *testing.T) {
 	// 到了心跳：打。
 	if _, logNow := p.next(24, line, now.Add(panelWarmupLogHeartbeat)); !logNow {
 		t.Fatal("到心跳应打一条（用来区分「在退避」与「goroutine 死了」）")
+	}
+}
+
+// TestPanelWarmupPaceIgnoresLogFormat ★ 功能回归锁：日志换格式**不许**改变节奏判定。
+//
+// 为什么要有这条：`next` 把日志行当"内容是否变化"的 key（`p.lastLine != line`）⇒
+// 2026-11-13 那次精简（整行重写）**有可能**悄悄改掉这个行为（例如顺手把 key 抽成某个数字），
+// 而症状是"该打日志时不打"或"每轮都打"—— 两种都不报错。
+//
+// 判据：同一串 left 与时间序列，**旧格式与新格式的 (sleep, logNow) 必须逐项相同**。
+func TestPanelWarmupPaceIgnoresLogFormat(t *testing.T) {
+	const oldLine = "loomy: 面板预热一轮 —— 待办：未缓存(tasks=0 invite=0) · 过期(tasks=6 invite=18) · 共 24 个号 · 本轮发起 12 个"
+	const newLine = "loomy: 预热 · 未缓存 t0/i0 · 过期 t6/i18 · 号24 · 发起12"
+	oldP, newP := &panelWarmupPace{}, &panelWarmupPace{}
+	now := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	// ⚠ 序列里同时含"不变"(24 反复)、"变了"(23)、"归零"(0) 三种情形。
+	for i, left := range []int{24, 24, 24, 23, 23, 0, 0} {
+		sOld, lOld := oldP.next(left, oldLine, now)
+		sNew, lNew := newP.next(left, newLine, now)
+		if sOld != sNew || lOld != lNew {
+			t.Fatalf("第 %d 步（left=%d）：旧格式 (%v,%v) ≠ 新格式 (%v,%v) —— 换格式改变了节奏/打日志判定",
+				i+1, left, sOld, lOld, sNew, lNew)
+		}
+		now = now.Add(time.Second)
+	}
+	// 再单独钉一次语义：新格式下"内容变了"必须立刻打（否则变化看不见）。
+	if _, logNow := newP.next(23, newLine+" · 发起1", now); !logNow {
+		t.Error("新格式：内容变化后必须立刻打日志")
 	}
 }

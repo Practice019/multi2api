@@ -139,10 +139,15 @@ func TestPipeScopeAndLevel(t *testing.T) {
 	defer func() { now = time.Now }()
 	buf := capture(t, LevelInfo)
 	w := Pipe(LevelInfo)
-	_, _ = w.Write([]byte("loomy: 面板预热一轮 —— 待办 0\n"))
+	// ⚠ 样例跟着 2026-11-13 的精简换格式。
+	// ⚠⚠ **`loomy: ` 的冒号不能去掉** —— scope 抽取（logx.go:246 的 scopePrefix `^xxx: `）
+	//   靠它；去掉后这一行会被判成 scope=app（**静默**降级，grep 不到），本用例当场红。
+	_, _ = w.Write([]byte("loomy: 预热 · 未缓存 t0/i0 · 过期 t6/i18 · 号24 · 发起12\n"))
 	_, _ = w.Write([]byte("没有前缀的消息\n"))
 	s := buf.String()
-	if !strings.Contains(s, "INFO  loomy") || !strings.Contains(s, "面板预热一轮") {
+	// ⚠ 断言里**不能**写 `loomy: 预热`：冒号已被 scopePrefix **吃掉**（scope="loomy"，
+	//   message 从"预热"开始）—— 这正是"前缀不能去掉"的另一种体现。
+	if !strings.Contains(s, "INFO  loomy") || !strings.Contains(s, "预热 · 未缓存") {
 		t.Fatalf("scope 抽取失败:\n%s", s)
 	}
 	if !strings.Contains(s, "INFO  app") || !strings.Contains(s, "没有前缀的消息") {

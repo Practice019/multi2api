@@ -1420,9 +1420,9 @@ function mpEsc(s) {
                  这里只把**推荐项**与**风险**写清楚 —— 默认不许擅自改成 append：
                  注入会改变每一条出站请求，装上就开等于替用户做了决定。 -->
             <select id="setArmorMode">
-              <option value="off">关闭（不注入，默认）</option>
-              <option value="append">追加（保留你的 system，破甲条款附在后面）—— 推荐</option>
-              <option value="replace">替换（覆盖你的 system —— 高风险，见下）</option>
+              <option value="off">关闭（不管：不注入、不检测）</option>
+              <option value="append">启用破甲（追加：保留你的 system，条款附在后面）</option>
+              <option value="block">禁用破甲（只拦截：命中就不发出，不注入、不改写）</option>
             </select>
             <span class="hint">开启后每条出站请求都会带上破甲条款（无限制人设 + 拒绝对抗）。
               <br><b>推荐「追加」</b>：你的 system 原文完整保留，破甲条款接在后面。下游要精确格式、
@@ -1433,8 +1433,71 @@ function mpEsc(s) {
               每请求多烧约 6000 token、耗时从 1 秒涨到 10~180 秒。
               <br>破甲治的是<b>上游内容审查</b>，不该用来改调用方的人格。</span></div>
         </div>
-        <!-- 注意：复选框要单独一个容器 —— 本仓表单纪律是"容器内字段类型单一"（探针 [B] 会红）。
-             第一版把它塞进上面那个 formgrid（下拉 + 复选框混在一个容器）当场报红。 -->
+        <!-- 破甲的适用范围（2026-11-13 用户拍板）：三态里「启用」与「禁用」**各一套**
+             范围 + 名单；名单项可以填**上游 id**（如 phanthywork / loomy）或**渠道名**，
+             多个用逗号或换行分隔。粒度就到这两级（用户明确说不到模型）。
+             ⚠ 容器内字段类型单一（本仓表单纪律，探针 [B]）：下拉归 formgrid、复选框归 checks。 -->
+        <!-- ⚠ T-902：下面这一整块是**同一份配置、按当前模式显示对应部分**（不是三套表单）。
+             理由见 ui/app.js 的 ARMOR_MODE_SECTIONS / armorSectionsFor：
+             三套表单 = 三份控件三份绑定，保存时没渲染的那几段会被 collectSettings 丢掉。
+             显隐通过 data-armorsec（段名 → 见 app.js 那张表），由 applyArmorModeVisibility 统一开关。
+             ⚠ 容器内字段类型单一（本仓表单纪律，探针 [B]）：下拉归 formgrid、复选框归 checks。 -->
+        <p class="info-line" id="armorModeHint" style="margin-top:10px"></p>
+        <div id="armorCfg">
+          <div class="formgrid">
+            <div class="field" data-armorsec="append"><label for="setArmorInjectScope">注入范围</label>
+              <select id="setArmorInjectScope">
+                <option value="all">全部上游/渠道</option>
+                <option value="include">只对名单内（白名单）</option>
+                <option value="exclude">除名单外（黑名单）</option>
+              </select>
+              <span class="hint">「启用破甲（追加）」这一档对谁注入。范围选「全部」时名单不参与。</span></div>
+            <div class="field" data-armorsec="append"><label for="setArmorInjectTargetsPick">注入名单</label>
+              <select id="setArmorInjectTargetsPick" multiple size="5" data-armorpick="inject"></select>
+              <div class="chips" id="setArmorInjectTargetsChips"></div>
+              <div style="margin-top:6px;display:flex;gap:6px">
+                <button type="button" data-armoradd="inject" style="padding:2px 10px;font-size:12px">加入名单</button>
+                <button type="button" data-armorclear="inject" style="padding:2px 10px;font-size:12px">清空</button>
+              </div>
+              <span class="hint" id="setArmorInjectTargetsHint"></span>
+              <input type="hidden" id="setArmorInjectTargets" value=""></div>
+          </div>
+          <div class="formgrid">
+            <div class="field" data-armorsec="block"><label for="setArmorBlockScope">拦截范围</label>
+              <select id="setArmorBlockScope">
+                <option value="all">全部上游/渠道</option>
+                <option value="include">只对名单内（白名单）</option>
+                <option value="exclude">除名单外（黑名单）</option>
+              </select>
+              <span class="hint">「禁用破甲（只拦截）」这一档对谁生效。范围外连检测都不做（原样发出）。</span></div>
+            <div class="field" data-armorsec="block"><label for="setArmorBlockTargetsPick">拦截名单</label>
+              <select id="setArmorBlockTargetsPick" multiple size="5" data-armorpick="block"></select>
+              <div class="chips" id="setArmorBlockTargetsChips"></div>
+              <div style="margin-top:6px;display:flex;gap:6px">
+                <button type="button" data-armoradd="block" style="padding:2px 10px;font-size:12px">加入名单</button>
+                <button type="button" data-armorclear="block" style="padding:2px 10px;font-size:12px">清空</button>
+              </div>
+              <span class="hint" id="setArmorBlockTargetsHint"></span>
+              <input type="hidden" id="setArmorBlockTargets" value=""></div>
+          </div>
+          <!-- 模式库：内置只留高特征句，这里填的**追加**条目（要匹配的句式，没有选择器可言 ⇒ 保持手填）。 -->
+          <div class="formgrid">
+            <div class="field" data-armorsec="block"><label for="setArmorPatterns">检测模式（追加）</label>
+              <input type="text" id="setArmorPatterns" placeholder="越狱, 破甲, 自定义咒语">
+              <span class="hint">内置集只留高特征句（破甲模式 / 越狱模式 / wb2api:armor / little code sauce…）。
+                泛化词（单独一个「越狱」「破甲」）故意不在内置集里（会误杀正常提问）—— 需要就在这儿自己加，逗号或换行分隔。</span></div>
+          </div>
+          <!-- 注意：复选框要单独一个容器 —— 本仓表单纪律是"容器内字段类型单一"（探针 [B] 会红）。 -->
+          <div class="fieldgroup checks">
+            <div class="field chk" data-armorsec="block"><input type="checkbox" id="setArmorObserve">
+              <label for="setArmorObserve">先「观察」：命中只记日志、照常发出</label>
+              <span class="hint">默认开。判据（模式库）是猜的，误杀率只有真实流量能量出来 ——
+                先看命中量与误杀率，再取消勾选切成真拦截。命中会在日志里留一行（含模式、目标、是否拦截）。</span></div>
+            <div class="field chk" data-armorsec="block"><input type="checkbox" id="setArmorPatternsOnly">
+              <label for="setArmorPatternsOnly">只用自定义模式（不用内置集）</label>
+              <span class="hint">勾上后内置特征句不再参与检测 —— 只有在你要完全自己定判据时才勾。</span></div>
+          </div>
+        </div>
         <div class="fieldgroup checks">
           <div class="field chk"><input type="checkbox" id="setArmorRetry">
             <label for="setArmorRetry">命中拒绝自动重试一次</label>

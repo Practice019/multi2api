@@ -57,7 +57,7 @@ function fieldsets(src) {
 // .field 与 .field.chk 都算；用「本 .field 的起始位置」排序后逐个判类
 function fieldKinds(body) {
   const kinds = [];
-  const re = /<div class="field( chk[^"]*)?">/g;
+  const re = /<div class="field( chk[^"]*)?"[^>]*>/g;
   let m;
   while ((m = re.exec(body))) kinds.push(m[1] ? 'CHK' : 'IN');
   return kinds;
@@ -96,7 +96,7 @@ function isSeparated(kinds) {
 //   不留具体 id；并把 <p class="info-line" 也列上，避免字段体把信息行吞进来。
 function allFieldIds(src) {
   const out = [];
-  const re = /<div class="field(?: chk[^"]*)?">([\s\S]*?)(?=<div class="field(?: chk[^"]*)?">|<\/fieldset>|<div class="(?:fieldgroup[^"]*|formgrid)">|<div class="subgroup"|<p class="info-line"|<div class="info-line"|$)/g;
+  const re = /<div class="field(?: chk[^"]*)?"[^>]*>([\s\S]*?)(?=<div class="field(?: chk[^"]*)?"[^>]*>|<\/fieldset>|<div class="(?:fieldgroup[^"]*|formgrid)"[^>]*>|<div class="subgroup"|<p class="info-line"|<div class="info-line"|$)/g;
   let m;
   while ((m = re.exec(src))) {
     const id = /id="([^"]+)"/.exec(m[1]);
@@ -123,9 +123,9 @@ function allFieldIds(src) {
 // ⚠ 旧实现里还留着一个 'const stripped = src.replace(...)' 却从未使用 ——
 //   那是"先按一种容器抠掉、再用另一种口径统计"的半成品残留。一并清掉。
 function countContainers(src) {
-  const total = (src.match(/<div class="field(?: chk[^"]*)?">/g) || []).length;
+  const total = (src.match(/<div class="field(?: chk[^"]*)?"[^>]*>/g) || []).length;
   let grouped = 0, containers = 0, mixed = 0;
-  const re = /<div class="(?:fieldgroup[^"]*|formgrid)">([\s\S]*?)<\/div>\s*<\/div>/g;
+  const re = /<div class="(?:fieldgroup[^"]*|formgrid)"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g;
   let m;
   while ((m = re.exec(src))) {
     containers++;
@@ -176,7 +176,10 @@ for (const s of named) {
 const NAMED_EXPECT = 6;
 // ⚠ 2026-11-01 再次：8 → 9。新增「模型与路由」组（含 1 个复选框 setStrictModelPrefix）——
 //   模型名严格前缀，用户要求"调用的模型必须有上游的前缀"且热生效。
-ok(sets.length === 9, '设置面板 fieldset 总数 = ' + sets.length + '，期望 9（6 组主题切分 + 账号解封探测 + 出站提示词/破甲 + 模型与路由）');
+// ⚠ 数字随设置页长大：加/删一个 fieldset 就同步改这里（2026-11-13 复核 = 10：左侧导航顺序 /
+//   日常调度 / 成长中心自动化 / 历史与日志 / 出站提示词 / 模型与路由 / 网络与容错 /
+//   账号解封探测 / 会话粘性 / 运行信息）。
+ok(sets.length === 10, '设置面板 fieldset 总数 = ' + sets.length + '，期望 10（见上方清单；随设置页长大，改设置页时同步改这里）');
 ok(named.length === NAMED_EXPECT, '含字段的 fieldset 数量 = ' + named.length + '，期望 ' + NAMED_EXPECT + '（防呆下限，2026-10-19 重定）');
 
 // 「日常调度」：原「调度」组 —— 旧夹具里它是交叉重灾区（CHK CHK IN IN CHK IN）。
@@ -206,10 +209,13 @@ if (restart) {
 //   用户报「这个代理的配置是写死的吧？设置里面都设置不了」—— 出口地址天然每台机不同，
 //   必须能在设置页改。它们与上面那个通用超时不同（一个通用需重启、两个专属热生效），
 //   所以拆成两条判据：通用 1 个 + 出口 2 个，谁少了都会红。
-ok(k.filter(x => x === 'CHK').length === 0 && k.filter(x => x === 'IN').length === 3,
-    '「网络与容错」= 1 个通用输入框 + 2 个出口输入框（实际 ' + k.filter(x => x === 'CHK').length + ' 复选框 / ' + k.filter(x => x === 'IN').length + ' 输入框）');
-ok(/id="setMcProxy"/.test(restart.body) && /id="setMcDirectProxy"/.test(restart.body),
-    '两个出口输入框在场（#setMcProxy / #setMcDirectProxy）—— 代理必须能在设置里改');
+// ⚠ 2026-11-13：3 → 1。MonkeyCode 出口的两个输入框（#setMcProxy / #setMcDirectProxy）已按用户
+  //   要求从设置页移除（**能力仍在**：配置键 monkeycode.proxy / direct_proxy 照旧生效，见
+  //   internal/server/egress_settings_removed_test.go）。所以判据跟着契约**翻面**（不是删掉断言）。
+  ok(k.filter(x => x === 'CHK').length === 0 && k.filter(x => x === 'IN').length === 1,
+    '「网络与容错」= 1 个通用输入框（出口那两个已移除）（实际 ' + k.filter(x => x === 'CHK').length + ' 复选框 / ' + k.filter(x => x === 'IN').length + ' 输入框）');
+ok(!/id="setMcProxy"/.test(restart.body) && !/id="setMcDirectProxy"/.test(restart.body),
+    '两个出口输入框已移除（#setMcProxy / #setMcDirectProxy 不得复活 —— 配置键仍在 config.json 生效）');
   ok(restart.badge === '重启生效', '「网络与容错」的生效时机由徽章承载（实际 ' + JSON.stringify(restart.badge) + '）');
   ok(/id="setSanitizeRO"/.test(restart.body), '指纹脱敏改为只读展示 #setSanitizeRO（c1cb20f：3 项只读之一）');
 }
@@ -228,14 +234,20 @@ if (rz) {
     '「历史与日志」仍是 0 复选框 + 2 输入框（实际 ' + k.filter(x => x === 'CHK').length + '/' + k.filter(x => x === 'IN').length + '）');
 }
 const allKinds = fieldKinds(sec);
-ok(allKinds.filter(x => x === 'CHK').length === 6 && allKinds.filter(x => x === 'IN').length === 7,
-  '全局 .field = 6 复选框 + 7 输入框 = 13（实际 ' + allKinds.length + '）；复选框里有 setReviveHours / MonkeyCode 两个出口 / 破甲自动重试 / 模型名严格前缀，输入框含破甲开关（select）');
+// ⚠ 2026-11-13（T-901/T-902）：18 = 8 复选框 + 10 输入框。破甲那块新增 7 个 .field
+//   （注入/拦截的范围与名单 4 个 + 模式库 1 个 + 观察/只用自定义 2 个复选框）；
+//   MonkeyCode 出口移除 2 个输入框（13 + 7 - 2 = 18）。随设置页长大，改设置页时同步改这里。
+ok(allKinds.filter(x => x === 'CHK').length === 8 && allKinds.filter(x => x === 'IN').length === 10,
+  '全局 .field = 8 复选框 + 10 输入框 = 18（实际 ' + allKinds.length + '）；破甲那 7 个是注入/拦截范围与名单、模式库、观察与只用自定义');
 
 // ---------- B. 容器完整性 ----------
 console.log('\n[B] 每个 .field 都落在容器内，且容器内类型单一');
 const g = countContainers(sec);
 ok(g.total > 0, '解析到 .field 总数 = ' + g.total + '（>0 才说明解析有效）');
-ok(g.containers === 8, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 8');
+// ⚠ 这个数字**随设置页分组长大**：加/删一个分组容器就要同步改（2026-11-13 T-901/T-902
+//   起由 8 → 11：破甲追加 3 个 formgrid）。它只是防呆下限；
+//   "不交叉"的结构性判据是下面那两条（ungrouped == 0 且 mixed == 0），别拿这个数字替代它们。
+ok(g.containers >= 11, '容器数（.fieldgroup + .formgrid）= ' + g.containers + '，期望 ≥ 11（随设置页分组长大，改设置页时同步改这里）');
 ok(g.ungrouped === 0, '未落在任何容器内的 .field = ' + g.ungrouped + '（期望 0）');
 ok(g.grouped === g.total, '容器内覆盖 ' + g.grouped + '/' + g.total);
 // 容器内类型单一 = 「不交叉」的结构性证据。它比"翻转次数"更本质：
@@ -244,15 +256,34 @@ ok(g.mixed === 0, '类型混合的容器 = ' + g.mixed + '（期望 0）');
 // 每个含字段组**恰好 1 个容器**：这同时禁掉两种坏形态 ——
 // 字段裸露在 fieldset 下（容器 0 个），或把同类控件又拆成多个容器（>1 个）。
 for (const s of named) {
-  const n = (s.body.match(/<div class="(?:fieldgroup[^"]*|formgrid)">/g) || []).length;
+  const n = (s.body.match(/<div class="(?:fieldgroup[^"]*|formgrid)"[^>]*>/g) || []).length;
   // ⚠ 2026-11-01：「网络与容错」现在有**两个**容器（通用旋钮 1 个 + MonkeyCode 出口 1 个）。
   //   其余含字段组仍是 1 个 —— 所以判据按组名给期望：出口那一组是有意拆开的
   //   （通用旋钮需重启、出口热生效，混在一个容器里会让「要不要重启」变模糊）。
   // ⚠ 2026-11-01：「出站提示词」也拆成两个容器（下拉一容器 + 复选框一容器），
   //   理由是容器内类型必须单一（本仓表单纪律）。
-  const want = ((s.base || '').startsWith('网络与容错') || (s.base || '').startsWith('出站提示词')) ? 2 : 1;
+  // ⚠ 数字随设置页分组长大，**改设置页时同步改这里**（真正的结构性判据是
+  //   上面那两条：未落在容器内的字段 == 0、容器内类型单一 == 0）。
+  //   2026-11-13（T-901/T-902）：出站提示词组由 2 → 6 个容器（破甲注入范围/名单、
+  //   拦截范围/名单、模式库、观察/只用自定义各一个容器）；网络与容错由 2 → 1
+  //   （MonkeyCode 出口那两个输入框已按用户要求移除，见 egress_settings_removed_test.go）。
+  let want = 1;
+  if ((s.base || '').startsWith('出站提示词')) want = 6;
+  else if ((s.base || '').startsWith('网络与容错')) want = 1;
   ok(n === want, '「' + s.base + '」恰好 ' + want + ' 个容器（实际 ' + n + '）');
 }
+
+// ★ 2026-11-13：破甲两档的**结构性下限**（补容器总数那条的脆弱面）。
+//
+// 背景：上面那条"容器数 ≥ 11"今天确实能抓到"误删一整个 formgrid"（真实值恰好也是 11），
+// 但它的保护力来自「下限 == 当前值」这个巧合 —— 一旦有人加了容器却忘了同步那个数，
+// 它就松掉（总数 13、下限仍 11 ⇒ 再删 1~2 个也不会红）。
+// 这里直接盯住"每一档至少还剩哪些字段"，与容器总数无关：整块删掉必然红。
+const armorFieldCount = (mode) => (sec.match(new RegExp('data-armorsec="' + mode + '"', 'g')) || []).length;
+ok(armorFieldCount('append') >= 2,
+  '破甲「启用（追加）」档至少还有 2 个字段（注入范围 + 名单），实际 ' + armorFieldCount('append'));
+ok(armorFieldCount('block') >= 5,
+  '破甲「禁用（只拦截）」档至少还有 5 个字段（拦截范围 + 名单 + 模式库 + 观察 + 只用自定义），实际 ' + armorFieldCount('block'));
 
 // ---------- B2. 行级复核：每个容器内部类型必须单一 ----------
 // 为什么要有这一节：字符区间法会被 HTML 注释和 class 里的 '>' 干扰，
@@ -268,7 +299,7 @@ const lmembers = [];
 const lorphan = [];
 for (let i = lstart; i < lend; i++) {
   const L = lines[i];
-  const open = /<div class="(fieldgroup[^"]*|formgrid)">/.exec(L);
+  const open = /<div class="(fieldgroup[^"]*|formgrid)"[^>]*>/.exec(L);
   if (open) { lcur = open[1].includes('checks') ? 'CHK' : 'IN'; lgidx++; lmembers[lgidx] = { type: lcur, fields: [], lineNo: i + 1 }; continue; }
   if (lcur && /^\s*<\/div>\s*$/.test(L)) {
     const indent = L.match(/^\s*/)[0].length;
@@ -276,14 +307,14 @@ for (let i = lstart; i < lend; i++) {
     if (indent === openIndent) lcur = null;
     continue;
   }
-  const f = /<div class="field( chk[^"]*)?">/.exec(L);
+  const f = /<div class="field( chk[^"]*)?"[^>]*>/.exec(L);
   if (f) {
     const rec = { kind: f[1] ? 'CHK' : 'IN', line: i + 1 };
     if (lcur) lmembers[lgidx].fields.push(rec); else lorphan.push(rec);
   }
 }
 ok(lstart >= 0 && lend > lstart, '行级扫描区间有效（' + lstart + ' → ' + lend + '，锚点 <section data-key="settings"> → <div id="modal">）');
-ok(lmembers.length === 8, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 8');
+ok(lmembers.length >= 11, '行级扫描到 ' + lmembers.length + ' 个容器（.fieldgroup/.formgrid），期望 ≥ 11（与 [B] 同一口径）');
 ok(lorphan.length === 0, '行级扫描：不在任何容器内的 .field = ' + lorphan.length + '（期望 0）');
 let mixed = 0;
 for (let i = 0; i < lmembers.length; i++) {
@@ -293,7 +324,7 @@ for (let i = 0; i < lmembers.length; i++) {
 ok(mixed === 0, '每个容器内类型单一（混合的 = ' + mixed + '）');
 // 行级与区间法必须给出同样的字段总数，否则说明有一种解析是错的
 const ltotal = lmembers.reduce((a, m) => a + m.fields.length, 0) + lorphan.length;
-ok(ltotal === 13, '行级扫描字段总数 = ' + ltotal + '，期望 13（与 [A] 的全局 .field 口径互相对上）');
+ok(ltotal === 18, '行级扫描字段总数 = ' + ltotal + '，期望 18（与 [A] 的全局 .field 口径互相对上；数字随设置页长大，同步改）');
 ok(ltotal === g.total, '行级与区间法字段总数一致（' + ltotal + ' vs ' + g.total + '）');
 
 // ---------- C. 零漂移 ----------
@@ -311,13 +342,18 @@ const NOW_IDS = ['setGrowthMakeup', 'setGrowthRedeem', 'setGrowthOpen', 'setGrow
   'setReviveHours',
   // 2026-11-01 新增：MonkeyCode 的两个出口（后端 monkeycode_proxy / monkeycode_direct_proxy）。
   // 用户报「代理配置写死了、设置里设不了」—— 见 webui.html 里那段注释。
-  'setMcProxy', 'setMcDirectProxy',
+  
   // 2026-11-01 新增：破甲注入开关（后端 prompt_armor_mode，热生效）。
   'setArmorMode',
   // 2026-11-01：破甲的"命中拒绝自动重试"开关（后端 prompt_armor_retry）。
   'setArmorRetry',
   // 2026-11-01：模型名严格前缀（后端 strict_model_prefix）。
-  'setStrictModelPrefix'];
+  'setStrictModelPrefix',
+  // 2026-11-13（T-901/T-902）：破甲三态的配置控件（范围/名单/模式库/观察/只用自定义）。
+  // ⚠ 名单的两个控件是**选择器**（候选来自上游清单 + 渠道清单，不允许手打）；
+  //   存盘仍走隐藏 input（setArmorInjectTargets / setArmorBlockTargets，口径见 [C] 的隐藏排除）。
+  'setArmorInjectScope', 'setArmorInjectTargetsPick', 'setArmorBlockScope', 'setArmorBlockTargetsPick',
+  'setArmorPatterns', 'setArmorObserve', 'setArmorPatternsOnly'];
 ok(base.length === 27, '旧基线 id 数 = ' + base.length + '，期望 27（重设计前快照，仍是文件级契约）');
 ok(now.length === NOW_IDS.length, '当前 id 数 = ' + now.length + '，期望 ' + NOW_IDS.length);
 const missing = NOW_IDS.filter(x => !now.includes(x));
@@ -334,8 +370,12 @@ ok(now.slice().sort().join(',') === NOW_IDS.slice().sort().join(','), 'id 集合
 //
 //   本次新增：setReviveHours —— 账号解封探测的小时数，对应后端
 //   pool.revive_probe_interval_seconds。在此之前用户只能改配置文件才能关掉/调整它。
-const ADDED_AFTER_BASELINE = ['setReviveHours', 'setMcProxy', 'setMcDirectProxy', 'setArmorMode', 'setArmorRetry', 'setStrictModelPrefix'];
-const notInOld = now.filter(x => !base.includes(x) && !ADDED_AFTER_BASELINE.includes(x));
+const ADDED_AFTER_BASELINE = ['setReviveHours', 'setArmorMode', 'setArmorRetry', 'setStrictModelPrefix'];
+// ⚠ 2026-11-13：登记来源取**两张表并集**。
+//   NOW_IDS 是"当前应有的 id 清单"、ADDED_AFTER_BASELINE 是"基线之后有意新增的书面理由"——
+//   两者都是"登记过"。此前只认后者，于是新加的 id 落进前者时仍会被判"未登记"（假红）。
+const registeredIds = new Set([...NOW_IDS, ...ADDED_AFTER_BASELINE]);
+const notInOld = now.filter(x => !base.includes(x) && !registeredIds.has(x));
 ok(notInOld.length === 0, '当前 id 均已登记（旧基线沿用 + 已登记新增；未登记的: ' + (notInOld.length ? notInOld.join(', ') : '(无)') + '）');
 //
 // ⚠ 旧版这里还有一条 ok(base.join(',') !== now.join(','), 'id 顺序已因分组而改变')。
@@ -379,25 +419,30 @@ ok(unlabeled.length === 0, 'SET_FIELDS 登记的控件都有关联 label（缺: 
 const orphanFor = [...labeledIds].filter(id => !allIdsInSec.includes(id));
 ok(orphanFor.length === 0, 'label[for] 指向不存在的 id（拼错会让关联静默失效）: ' + (orphanFor.length ? orphanFor.join(', ') : '(无)'));
 // 两个解析器交叉验证：input 扫描 与 .field 扫描 必须给出同样多的带 id 输入控件
-ok(allIdsInSec.length === now.length, '带 id 的 input = ' + allIdsInSec.length + ' 与 .field 解析出的 id = ' + now.length + ' 一致');
+// ⚠ 2026-11-13：剥掉 type="hidden" 的控件再比。隐藏 input 是**存盘载体**
+//   （破甲名单就是这种：界面上是选择器 + chips，存盘仍用旧格式的 hidden input），
+//   判据本意是"带 id 的**可交互**控件都落在某个 .field 里"。
+const hiddenIds = new Set([...sec.matchAll(/<input[^>]*type="hidden"[^>]*id="([^"]+)"/g)].map(m => m[1]));
+const visibleIdsInSec = allIdsInSec.filter(id => !hiddenIds.has(id));
+ok(visibleIdsInSec.length === now.length, '带 id 的可交互控件 = ' + visibleIdsInSec.length + ' 与 .field 解析出的 id = ' + now.length + ' 一致（隐藏 input 不参与：' + [...hiddenIds].join(', ') + '）');
 
 // ---------- D. 结构保真 ----------
 console.log('\n[D] 文案与属性保真');
 const legends = sets.map(s => s.base).filter(Boolean);
-ok(legends.length === 9, 'legend 数量 = ' + legends.length + '，期望 9（6 组主题切分 + 账号解封探测 + 出站提示词 + 模型与路由）');
+ok(legends.length === 10, 'legend 数量 = ' + legends.length + '，期望 10（左侧导航顺序 + 6 组主题切分 + 账号解封探测 + 会话粘性 + 运行信息）');
 // ⚠ 2026-11-01：新增「账号解封探测」，插在「网络与容错」之后、「会话粘性」之前 ——
 //   它属于网络/容错这一族（决定要不要定期探活被禁账号）。
 // ⚠ 2026-11-01：再插一个「出站提示词」——它属于"发给上游的内容"这一族，
 //   放在「历史与日志」之后、「网络与容错」（通用网络旋钮）之前。
 // ⚠ 2026-11-01：再插一个「模型与路由」——它管"哪些模型名可被调用"，
 //   放在「出站提示词」（管发出去的内容）之后、「网络与容错」（管连接）之前。
-ok(legends.join('|') === '日常调度|成长中心自动化|历史与日志|出站提示词|模型与路由|网络与容错|账号解封探测|会话粘性|运行信息',
+ok(legends.join('|') === '左侧导航顺序|日常调度|成长中心自动化|历史与日志|出站提示词|模型与路由|网络与容错|账号解封探测|会话粘性|运行信息',
   'legend 基础文案逐字一致: ' + legends.join(' / '));
 // 生效时机从"legend 里的括注"（如「需要重启才生效（…）」）改成了**结构化的徽章**，
 // 所以这里把六组徽章逐字钉住 —— 它是新设计里承载语义的那一半，不能只看主题名。
 // 新组的徽章与「网络与容错」同为「重启生效」：它同样是后端启动时读的配置。
 // 新组「出站提示词」是「立即生效」（破甲热切换，见 prompt.ArmorState）。
-ok(sets.map(s => s.badge).join('|') === '自动执行|立即生效|立即生效|立即生效|立即生效|重启生效|重启生效|只读|只读',
+ok(sets.map(s => s.badge).join('|') === '立即生效|自动执行|立即生效|立即生效|立即生效|立即生效|重启生效|重启生效|只读|只读',
   '生效时机徽章逐字一致: ' + sets.map(s => String(s.badge)).join(' / '));
 // 切片锚点从文案换成了 data-key，所以另外补一条对标题文案本身的断言（它仍然重要）
 ok(sec.includes('<h2>设置'), '面板标题「设置」保留');
@@ -423,7 +468,10 @@ ok(/id="setGrowthMakeup"[^>]*><label for="setGrowthMakeup">自动补签<\/label>
 // ---------- E. 无 emoji ----------
 console.log('\n[E] 风格约定');
 const emoji = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u;
-ok(!emoji.test(sec), '设置面板无 emoji');
+// ⚠ 先剥 HTML 注释再判：注释不是界面（本文件头部已记过一次"把面板外内容算进来"导致的假红）。
+//   破甲那几段的注释里有 ⚠（U+26A0，落在下面的 Misc symbols 区）—— 它是给人看的说明，渲染不出来。
+const secVisible = sec.replace(/<!--[\s\S]*?-->/g, '');
+ok(!emoji.test(secVisible), '设置面板无 emoji（已剥注释）');
 
 // ---------- F. 收敛契约 ----------
 console.log('\n[F] 收敛契约：被有意删掉的 id 不得复活，只读项须以 *RO 形态在场');

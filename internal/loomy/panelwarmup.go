@@ -3,8 +3,11 @@ package loomy
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
 	"workbuddy2api/internal/logx"
 )
 
@@ -30,7 +33,7 @@ import (
 //
 // 用户报的日志：
 //
-//	loomy: 面板预热一轮 —— 待办：未缓存(tasks=0 invite=0) · 过期(tasks=46 invite=46) · 共 44 个号 · 本轮发起 12 个 · 首个错误=""
+//	loomy: 预热 · 未缓存 t0/i0 · 过期 t46/i46 · 号44 · 发起12
 //
 // 「过期 46」> 「共 44 个号」—— 多出来的 2 个是**已删账号在缓存里的残留行**（幽灵行）：
 // 缓存是**落盘**的（panels.json），删号不会清缓存，而 `expiredTasks/expiredInvites`
@@ -41,10 +44,13 @@ import (
 // ⇒ 两件事一起做：**修剪**（prunePanelOrphans，删掉缓存里的残留行）+ **计数过滤**
 //   （planPanelWarmup 里 expT++ 挪进"还在池里"的判断内）。
 //
-// # Ⅲ 第三个职责：日志里**别打空字段**
+// # Ⅲ 第三个职责：日志**只说数字**（2026-11-13 用户报「废话太多了」后重写）
 //
-// 同一行日志里的 `首个错误=""` 是噪音（firstErr 为空 = 本轮确实没出错，
-// 那就**不该出现这个字段**）。见 panelWarmupLogLine。
+// 两条要求（见 panelWarmupLogLine）：
+//
+//	· **别打空字段**：`firstErr == ""` = 本轮确实没出错，那就**不该出现**错误段
+//	  （2026-11-02 起就是这条）；
+//	· **数字优先、文字最少**：整行压到 ≤100 字（有错 ≤140），错误截短成「码 + 短语」。
 //
 // ⚠ 「怎么刷」与「刷不刷」的分工：本文件管**怎么刷**（挑号/并发/日志），
 // 「谁过期了」在 panelttl.go、**修剪**也在那里（同一类判断）。
@@ -432,17 +438,119 @@ func (p *Provider) prunePanelOrphans(accts []accountRef) int {
 	return tasks.pruneExcept(keep) + invites.pruneExcept(keep)
 }
 
+// panelWarmupErrMax 错误段的字符上限。
+//
+// ⚠ 40 是"够排障"与"不刷屏"之间的落点：够放下「码 + 一句短语」，
+//
+//	又不会让整行突破 140 字（整行上限见 panelWarmupLogLine 的注释）。
+const panelWarmupErrMax = 40
+
+// panelWarmupErrShort 把上游错误串**截短**成「码 + 短语」（排障够用、不刷屏）。
+//
+// 输入（真机原文）：
+//
+//	loomy: 积分接口 /onboarding/tasks 返回 100002: 登录已失效，请重新登录
+//
+// 输出：`100002 登录已失效`
+//
+// 取舍（用户 2026-11-13「直接统计数字简介一点就行了 废话太多了」）：
+//
+//	· **码**是最有信息量的东西（100002 = 登录失效，可直接搜代码/文档）⇒ 保留；
+//	· 分隔符之后的**短语**是给人看的一句话 ⇒ 保留到第一个句读（，,。；;）为止；
+//	· 接口路径、"请重新登录"这类说明 ⇒ 砍掉（同一件事每轮都重复，纯噪音）。
+//
+// ⚠ 若短语本身就以码开头（`502 bad gateway`），不再前置一遍码 —— 否则会拼出
+//
+//	`502 502 bad gateway` 这种反而更长更难读的串。
+//
+// ⚠ 硬上限 40 字：没有分隔符的超长串也必须被截到 40 —— 否则"截短"只是口号。
+func panelWarmupErrShort(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	// 短语 = 最后一个分隔符之后的部分（真机串里就是"登录已失效，请重新登录"）。
+	reason := s
+	if i := strings.LastIndexAny(s, ":："); i >= 0 && i+1 < len(s) {
+		reason = strings.TrimSpace(s[i+1:])
+	}
+	// 到第一个句读为止。
+	if i := strings.IndexAny(reason, "，,。；;"); i > 0 {
+		reason = strings.TrimSpace(reason[:i])
+	}
+	code := panelWarmupErrCode(s)
+	out := reason
+	if code != "" && !strings.HasPrefix(reason, code) {
+		out = code + " " + reason
+	}
+	return truncRunes(out, panelWarmupErrMax)
+}
+
+// panelWarmupErrCode 取错误串里第一个"看着像错误码"的 token（4~6 位数字）。
+//
+// ⚠ 只认 4~6 位：太短会把端口/状态码碎片当码，太长会把 token/时间戳当码。
+func panelWarmupErrCode(s string) string {
+	start := -1
+	for i, r := range s {
+		if r >= '0' && r <= '9' {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			if n := i - start; n >= 4 && n <= 6 {
+				return s[start:i]
+			}
+			start = -1
+		}
+	}
+	if start >= 0 {
+		if n := len(s) - start; n >= 4 && n <= 6 {
+			return s[start:]
+		}
+	}
+	return ""
+}
+
+// truncRunes 按**字符**（不是字节）截断：中文按字节截会切出半个字。
+func truncRunes(s string, max int) string {
+	if max <= 0 || utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	return string(r[:max])
+}
+
 // panelWarmupLogLine 组装一轮预热的日志行。
 //
-// ⚠ `首个错误` **只在真有错时出现**（2026-11-02）：firstErr == "" 表示本轮确实没出错，
-// 那时打 `首个错误=""` 是纯噪音 —— 用户就是看着这行报"这些打印的东西感觉有问题"的。
-// 反过来，有错时它必须出现（排障靠它）。
+// # 形态（2026-11-13 用户报「废话太多了」⇒ 整行重写）
+//
+//	loomy 预热 · 未缓存 t0/i0 · 过期 t6/i18 · 号44 · 发起12 · 错 100002 登录已失效
+//
+// # 为什么这样取舍（四条，都对着"运维真正看什么"）
+//
+//  1. **数字优先**：这一行唯一的作用是回答"还有多少待补、这轮动了几个"——
+//     那四个数就是全部；其余字（"待办：""共 … 个号""本轮发起 … 个"）只是把数字包起来。
+//  2. **字段名压到最短**（`t`/`i` = tasks/invite，`未缓存`/`过期` 留两字词）：
+//     压掉的是**语法**不是信息 —— 段序固定，看一次就记住。
+//  3. **错误只在有失败时出现，且截短**（`错 100002 登录已失效`）：
+//     原样贴整条上游错误（含接口路径、"请重新登录"）会让这行 200+ 字，
+//     而死号**每轮**都重复同一串 ⇒ 那正是刷屏的主因。码留着（能搜），
+//     短语截到第一个句读（能读懂），其余砍掉（重复且无信息）。
+//  4. **硬长度上限**：无错 ≤100 字、有错 ≤140 字（断言里钉住）。
+//     上限是"防回归"用的 —— 以后谁想往这行加东西，先被断言拦一次。
+//
+// ⚠ `firstErr == ""` 时**完全不出现**错误段（2026-11-02 起）：没出错却打一段空字段是纯噪音。
+// ⚠ 合并（`logx.Coalesce`）按 **key** 折叠、不看内容 ⇒ 换格式不影响"重复折成一行"。
 func panelWarmupLogLine(pl panelPlan, accts, done int, firstErr string) string {
-	line := fmt.Sprintf("loomy: 面板预热一轮 —— 待办：未缓存(tasks=%d invite=%d) · 过期(tasks=%d invite=%d) · "+
-		"共 %d 个号 · 本轮发起 %d 个",
+	// ⚠⚠ **保留 `loomy: ` 这个前缀**（2026-11-13 实测）：它不是装饰 —— `logx.scopePrefix`
+	//   （internal/logx/logx.go:246）靠 `^xxx: ` 抽 scope 让人能 grep 日志；去掉冒号后
+	//   这一行会被判成 scope=app，**静默**降级（测试当场抓到：TestPipeScopeAndLevel 红）。
+	line := fmt.Sprintf("loomy: 预热 · 未缓存 t%d/i%d · 过期 t%d/i%d · 号%d · 发起%d",
 		pl.todoT, pl.todoI, pl.expT, pl.expI, accts, done)
-	if firstErr != "" {
-		line += fmt.Sprintf(" · 首个错误=%q", firstErr)
+	if s := panelWarmupErrShort(firstErr); s != "" {
+		line += " · 错 " + s
 	}
 	return line
 }

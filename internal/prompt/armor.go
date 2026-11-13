@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 //go:embed armor-payload.md
@@ -56,6 +57,11 @@ const (
 	ArmorAppend = "append"
 	// ArmorReplace 用破甲人设替换客户端 system。
 	ArmorReplace = "replace"
+	// ArmorBlock 只拦截：**不注入**，检测到破甲痕迹就不把请求发出去（2026-11-13 用户拍板）。
+	//
+	// 与 append/replace 并列而不是塞进另一个开关：三态是**同一个旋钮的三个档位**
+	// （无 / 启用 / 禁用），分成两个开关就会出现"两个开关都开着算哪个"的语义黑洞。
+	ArmorBlock = "block"
 )
 
 // armorStart / armorEnd 注入块的标记（幂等用，见文件头）。
@@ -78,15 +84,54 @@ type ArmorConfig struct {
 	// ⚠ 逐字注入意味着**上游会收到你本机那份操作者指令全文**（含称呼、内部约定等）。
 	//   这是用户明确要的效果，不是失误；启动日志会打印载荷来源与字符数，随时可核对。
 	Payload string
+
+	// ---- 以下为「禁用破甲（只拦截）」与范围/名单（2026-11-13 用户拍板）----
+	//
+	// Patterns 追加的模式条目（内置集见 defaultArmorPatterns）。
+	// PatternsOnly true = **只用** Patterns，不用内置集。
+	Patterns     []string
+	PatternsOnly bool
+
+	// InjectScope / InjectTargets 「启用破甲」这一档的范围与名单。
+	// BlockScope / BlockTargets   「禁用破甲（只拦截）」这一档的范围与名单。
+	//
+	// ⚠ 两套是**分开**的（用户拍板：每个状态各一套）—— 共用一套会让"我只想对
+	//   某几个上游注入、但对所有上游都拦"这种组合表达不出来。
+	InjectScope   string
+	InjectTargets []string
+	BlockScope    string
+	BlockTargets  []string
+
+	// Observe 观察模式：禁用态命中时**只记日志不拦**（默认开）。
+	//
+	// # 为什么默认开（用户拍板）
+	//
+	// 判据（模式库）是猜的，误杀率只有真实流量能量出来。默认就拦的代价是
+	// "用户第一次用这个功能，正常请求被拒"——那比不做这个功能更坏。
+	// 观察模式先把命中量/误杀率摆出来，再由用户手动切到"拦截"。
+	Observe bool
 }
 
-// ArmorEnabled 该模式是否要注入。
+// ArmorEnabled 该模式是否要**注入**。
+//
+// ⚠ ArmorBlock 会返回 false —— 这是刻意的：禁用态**一个字节都不许注入**
+// （用户原话"让他自己去修改"：我们只拒绝，不改写）。判断"这个模式要不要做任何事"
+// 用 ArmorActive。
 func ArmorEnabled(mode string) bool {
 	switch strings.TrimSpace(strings.ToLower(mode)) {
 	case ArmorAppend, ArmorReplace:
 		return true
 	}
 	return false
+}
+
+// ArmorActive 该模式是不是"要做点什么"（注入或拦截）。
+//
+// 与 ArmorEnabled 分开的原因见它上面那条注释：注入与拦截是两件事，
+// 而"是否启用"是第三件事（off = 什么都不做 ⇒ 零开销、零行为变化）。
+func ArmorActive(mode string) bool {
+	m := strings.TrimSpace(strings.ToLower(mode))
+	return m == ArmorAppend || m == ArmorReplace || m == ArmorBlock
 }
 
 // ArmorText 破甲注入块的正文 —— **逐字**（外层只包幂等标记）。
@@ -206,6 +251,10 @@ func stripArmorBlock(s string) string {
 type ArmorState struct {
 	mu  sync.RWMutex
 	cfg ArmorConfig
+	// hits / blocked 命中计数（见 NoteHit）。进程内累计、不落盘 ——
+	// 它是给人校准模式库用的读数，不是审计（审计靠请求日志那一行）。
+	hits    uint64
+	blocked uint64
 }
 
 // NewArmorState 构造（cfg.Mode 为空 = 关闭）。
@@ -238,6 +287,33 @@ func (s *ArmorState) Set(cfg ArmorConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg = cfg
+}
+
+// NoteHit 记一次命中（block 态专用）。
+//
+// # 为什么要计数（用户要求「观察模式下放行，但日志与统计里能查到」）
+//
+// 判据（模式库）是猜的：误杀率只有真实流量能量出来。观察模式先跑一段，
+// 界面/设置页上能看到「命中 N 次」，用户才好判断"该不该切到拦截"、
+// "模式库是不是太宽"。只打日志的话，那个数字要人去翻日志数。
+//
+// atomic 而不是加锁：热路径上的计数不该与配置读写抢同一把锁。
+func (s *ArmorState) NoteHit(blocked bool) {
+	if s == nil {
+		return
+	}
+	atomic.AddUint64(&s.hits, 1)
+	if blocked {
+		atomic.AddUint64(&s.blocked, 1)
+	}
+}
+
+// Stats 命中数（hits = 观察+拦截的总命中，blocked = 其中真正被拦下的）。
+func (s *ArmorState) Stats() (hits, blocked uint64) {
+	if s == nil {
+		return 0, 0
+	}
+	return atomic.LoadUint64(&s.hits), atomic.LoadUint64(&s.blocked)
 }
 
 // SystemText 从请求体里取出**第一条** system/developer 消息的文本。

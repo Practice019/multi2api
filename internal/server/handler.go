@@ -1924,7 +1924,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			//   不能把上游的错误体当成"重试后的回答"转发给客户端。
 			// ⚠ 同池路径：传已盖章的 body，话术才能落在系统提示真正的尾部。
 			if peek.Stream {
-				fw.Stream.Body = h.MaybeRefusalRetry(fw.Stream.Body, h.armorBody(body), func(nudged []byte) (io.ReadCloser, error) {
+				fw.Stream.Body = h.MaybeRefusalRetry(fw.Stream.Body, h.armorSealed(body), func(nudged []byte) (io.ReadCloser, error) {
 					nfw, nerr := h.forwardViaChannelAs(r.Context(), chosenTarget, publicModel, nudged)
 					if nerr != nil {
 						return nil, nerr
@@ -1947,7 +1947,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// ⚠ 上限 32MB：与 writeChannelStream 的读取上限同一量级，防一个坏响应把内存吃满。
 				raw, _ := io.ReadAll(io.LimitReader(fw.Stream.Body, 32<<20))
 				_ = fw.Stream.Body.Close()
-				final := h.retryRefusalNonStreamBytes(h.armorBody(body), raw, func(nudged []byte) ([]byte, error) {
+				final := h.retryRefusalNonStreamBytes(h.armorSealed(body), raw, func(nudged []byte) ([]byte, error) {
 					nfw, nerr := h.forwardViaChannelAs(r.Context(), chosenTarget, publicModel, nudged)
 					if nerr != nil {
 						return nil, nerr
@@ -1963,6 +1963,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if ferr != nil {
+			// ★ 破甲拦截（本地策略拒绝）：**不是**渠道失败 ——
+			//   不换别名、不禁用 key、更不写"渠道错误"那行日志（那会把本地策略
+			//   说成上游故障，用户会去查一个不存在的渠道问题）。
+			if rej := armorRejectionOf(ferr); rej != nil {
+				h.bumpKeyUsage(r, 0, false)
+				writeOpenAIError(w, rej.Status(), armorBlockedCode, rej.Message())
+				return
+			}
 			// ★ 渠道失败也写请求日志。改造前渠道分支**一行日志都没有**，后果是实测踩到的：
 			//   用户发 csg，日志里一条都搜不到，他只能看到另一个 Python 客户端的 loomy 流量，
 			//   于是合理地质问"我用的是 csg 呢不是 LOOMY"。没有日志 = 无法自证。
@@ -2185,6 +2193,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//（换上游后 `tried` 会被清空，所以 len(tried) 同样不能累计。）
 	accountsTried := 0
 	var lastErr error
+	// armorRej 非 nil = 这次请求被本地破甲策略拒绝（一个终态，不再换号/换上游）。
+	var armorRej *armorRejection
 	// lastKind 最近一次上游错误的分类：出口要按它区分"上游抖"与"池子真空"。
 	var lastKind gateway.ErrorKind = gateway.ErrKindNone
 
@@ -2556,6 +2566,12 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 					ctx:        ctx,
 				})
 			}
+			if rej := armorRejectionOf(werr); rej != nil {
+				// ★ 工具循环里被破甲拦下（本轮 body 里出现了破甲痕迹）：
+				//   与前两条路径同一口径 —— 本地策略拒绝 ⇒ 4xx 信封、不换号、不罚号。
+				h.rejectArmorBlock(w, st, rej)
+				return
+			}
 			if werr != nil {
 				// ── 已写出响应 → **绝不能**换号重试 ──
 				//
@@ -2658,6 +2674,19 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 		//   才转成 string（见 logChatRowProvider 的失败分支）。
 		st.upstreamReqRef = outBody
 		cr, status, terr := h.chatVia(ctx, reqProvider, acct, outBody)
+		// ★ 破甲拦截（本地策略拒绝）：**不换号、不罚号**，直接把拒绝回给客户端。
+		//
+		//   放在最前面判（比 convert_failed 还前）：拒绝与"哪个账号"无关 ——
+		//   每个账号收到的是同一份 body，换号只会把一次策略拒绝放大成 N 次无效尝试，
+		//   而且会把本地策略问题记到账号身上（本仓刚因这个摘过健康号）。
+		if rej := armorRejectionOf(terr); rej != nil {
+			armorRej = rej
+			st.status = rej.Status()
+			st.decision = "armor_blocked:client"
+			lastErr = rej
+			lastKind = gateway.ErrKindFatalClient
+			break
+		}
 		if terr != nil {
 			// ⚠⚠ **本地转换失败**：换号**完全无效**（转换取决于请求体本身，
 			//   每个账号背后是同一套转换代码）⇒ 不换号、不惩罚账号，直接回 400。
@@ -2850,7 +2879,7 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 		// ⚠ 传进去的是**已经盖过章**的 body：包装器在它上面追加话术 ⇒ 话术落在真正的尾部；
 		//   重发时再进 chatVia 会因为已含标记而跳过二次注入
 		//   （否则 replace 模式会把刚追加的话术整段冲掉，重试等于没重试）。
-		rc = h.MaybeRefusalRetry(cr, h.armorBody(outBody), func(nudged []byte) (io.ReadCloser, error) {
+		rc = h.MaybeRefusalRetry(cr, h.armorSealed(outBody), func(nudged []byte) (io.ReadCloser, error) {
 			ncr, nstatus, nerr := h.chatVia(ctx, reqProvider, acct, nudged)
 			if nerr != nil {
 				return nil, nerr
@@ -3010,6 +3039,15 @@ retryUpstream: // ★ T-468：换上游后从这里重来一轮（下面"预算�
 		st.status = http.StatusOK
 		st.toks = totalTokens(resp) // ⚠ 2026-10-20：原来用 completionTokens（只算输出，prompt 全丢）
 		st.usage = usageOf(resp)
+		return
+	}
+	// ★ 破甲拦截：本地策略拒绝 ⇒ 直接回 4xx 信封并结束（不再换号/换上游）。
+	//
+	// ⚠ 位置必须在"换上游"那套逻辑**之前**：策略拒绝与"这家上游行不行"无关，
+	//   换一家只会把一次策略拒绝变成 N 次无效尝试 + 一条误导人的"上游失败"结论。
+	//   ⚠ 也不写 budget_exhausted：下面那段只在 st.decision 为空时才写，而这里已写死。
+	if armorRej != nil {
+		h.rejectArmorBlock(w, st, armorRej)
 		return
 	}
 	// ★ T-468：换号预算用完 ⇒ 若"这家上游已经试不动了"，切到别名里的下一家。
@@ -3530,6 +3568,11 @@ func (h *Handler) chatVia(ctx context.Context, providerID string, acct *auth.Aut
 		//
 		// 换句话说：回退路径的"逐字节一致"不是修辞，丢掉一个 []byte 就足以
 		// 让一条既有契约静默失效。测试抓住了它（这正是那些测试存在的理由）。
+		// ⚠ 单上游回落路径：注入由 upstream.Client 内部的 applyPrompt 负责（既有行为，
+		//   一字不改），但**拦截**必须在这里判 —— 否则「禁用破甲」在单上游部署下是空开关。
+		if rej := h.armorCheck(prompt.Target{Upstream: h.ownedBy()}, body); rej != nil {
+			return nil, rej.Status(), rej
+		}
 		rc, status, respBody, err := h.cfg.Upstream.ChatStreamWithIP(acct, body, gateway.ClientIPFrom(ctx))
 		if err == nil && status >= 400 && rc == nil {
 			return io.NopCloser(bytes.NewReader(respBody)), status, nil
@@ -3544,7 +3587,15 @@ func (h *Handler) chatVia(ctx context.Context, providerID string, acct *auth.Aut
 		return nil, 0, errNoProviderCredential
 	}
 	// 破甲在**这里**统一注入（见 armor_body.go 文件头：为什么不包 Provider）。
-	cs, registered, err := h.cfg.Provider.Chat(ctx, providerID, cred, h.armorBody(body))
+	//
+	// ⚠ 判决必须发生在**调用上游之前**：拿到拒绝就直接 return 是"拦截时上游一次都
+	//   没被调用"的实现方式（不是靠事后取消），也是"不换号、不罚号"的前提 ——
+	//   拒绝是个类型化错误，调用方按类型早退（见 armorRejectionOf）。
+	sealed, rej := h.armorBody(prompt.Target{Upstream: providerID}, body)
+	if rej != nil {
+		return nil, rej.Status(), rej
+	}
+	cs, registered, err := h.cfg.Provider.Chat(ctx, providerID, cred, sealed)
 	if !registered {
 		// 该上游没接上（未注册 / 实例缺失）：与"取不到凭证"同类 —— 接线问题，
 		// 走传输错误分支换号，**不惩罚这个账号**。
