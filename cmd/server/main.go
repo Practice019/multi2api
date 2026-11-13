@@ -596,6 +596,11 @@ func main() {
 			SMSAccessKeyID:     cfg.LoomySMSAccessKeyID,
 			SMSAccessKeySecret: cfg.LoomySMSAccessKeySecret,
 			LoginMode:          cfg.LoomyLoginMode,
+			// ⚠ 死号重试间隔：**复用**「账号解封探测」那个既有配置（不新增键）。
+			//   语义同一件事（"号坏了，多久后再看它一眼"）；设置页改它两边一起变。
+			//   ⚠ 配置里 0 = "关闭解封探测"，但**不等于**"死号每轮都试" ⇒
+			//     0 时 loomy 用默认 24h（见 panelWarmupDeadRetryDefault 的注释）。
+			DeadRetryInterval: time.Duration(cfg.Pool.ReviveProbeIntervalSeconds) * time.Second,
 		})
 		if err := registry.Register(lm); err != nil {
 			log.Fatalf("注册 Loomy 上游失败: %v", err)

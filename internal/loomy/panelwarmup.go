@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logx"
 )
 
@@ -83,6 +84,20 @@ const (
 	//     不拖慢 panelWarmupBusyInterval 注释里承诺的"打开就是毫秒"。
 	//   取与稳定态同值：那批号本来就刷不出来了，没必要比稳定态更频繁。
 	panelWarmupMaxRetryInterval = 5 * time.Minute
+	// panelWarmupDeadRetryDefault 「死号」的默认重试间隔（**复用** `pool_revive_probe_hours`）。
+	//
+	// ⚠⚠ 2026-11-13 用户报障：日志里每 20~40 秒一轮、永不停止，且每轮都真打上游。
+	//   两个独立缺陷叠在一起：
+	//     A. `left` 抖动（过期数在 t6/t7/t32 之间跳）把退避反复清零；
+	//     B. **死号永远补不上** ⇒ `left` 恒 > 0 ⇒ 永远在追。
+	//   ⇒ 这条常量治 B：凭据类终态错误的号，一个周期内**不再打上游**，到期放回待办**试一次**。
+	//
+	// ⚠ 为什么复用 `pool_revive_probe_hours`（默认 24h）而不是新加一个键：
+	//   语义本来就是同一件事（"号坏了，多久后再看它一眼"），而"账号解封探测"
+	//   在设置页已经有一个用户可以改的口子 ⇒ 再加一个键就是**两处判据打架**。
+	// ⚠ 配置里 0 表示"关闭解封探测"，但那**不是**"死号每轮都试"的理由 ⇒ 0 时用本默认值。
+	panelWarmupDeadRetryDefault = 24 * time.Hour
+
 	// panelWarmupLogHeartbeat 日志内容不变时的心跳间隔。
 	//
 	// ⚠ 心跳是必须的：退避到 5 分钟后若一个字都不打，排障时看到的是"日志停了"，
@@ -183,10 +198,25 @@ func (p *panelWarmupPace) next(left int, line string, now time.Time) (time.Durat
 		p.seen = true
 		p.lastLeft = left
 		p.interval = panelWarmupBusyInterval
-	case left != p.lastLeft:
-		// 待办变了（补上了 / 新出现）⇒ 回到追赶间隔。
+	// ⚠⚠ 2026-11-13 修（缺陷 A）：判据从「`left` **变了**」收窄成「`left` **降了**」。
+	//
+	//	原来只要 `left` 变了就回到追赶间隔 —— 而"过期数"本来就会来回跳
+	//	（用户日志实测：t6 → t7 → t32 → t6，因为一轮里刷过的号下一轮又到期、
+	//	  或者新号从别处掉了进来）。于是**退避永远清零**，5 秒一轮永不停止。
+	//	⇒ 只有"真的补上了"（`left` 降）才算进展；那才是追赶态该有的样子。
+	//
+	// ⚠ 为什么不用另一个方案（"把 dead 摘掉后 left 自然平稳"就够）：
+	//	那只盖住"死号"这一种来源；**活号**之间互相挤（TTL 到期 + 新号进入）同样会跳。
+	//	两条一起做才是完整的：台账治"恒 > 0"，这条治"抖动清零"。
+	case left < p.lastLeft:
+		// 待办**降了**（补上了）⇒ 回到追赶间隔。
 		p.lastLeft = left
 		p.interval = panelWarmupBusyInterval
+	case left > p.lastLeft:
+		// 待办**涨了**（新出现过期的 / 新号进来）：既不奖励也不惩罚 ——
+		// ⚠ 绝不能回到追赶间隔（那就是上面那个 bug）；也不翻倍（那不是"卡住了"）。
+		// 下一轮大概率会降 ⇒ 自然回到追赶态。
+		p.lastLeft = left
 	case p.interval < panelWarmupMaxRetryInterval:
 		// 没变化 ⇒ 退避（上限封顶）。
 		p.interval *= 2
@@ -287,11 +317,15 @@ func (p *Provider) sweepPanels() (int, string) {
 					errMsg = v.Error
 				}
 			}
+			// ⚠ 台账更新必须在锁内做（`done`/`firstErr` 同一处），但台账自己也有锁 ⇒
+			//   这里用**包外变量 lastA/nowFn 之外**的方式：先算结论，再在锁内写。
+			//   （面板台账的锁粒度很细、不涉及 IO ⇒ 不会把并发拖住。）
 			mu.Lock()
 			done++
 			if errMsg != "" && firstErr == "" {
 				firstErr = errMsg
 			}
+			p.notePanelOutcome(j.a, errMsg, time.Now())
 			mu.Unlock()
 		}(j)
 	}
@@ -313,6 +347,158 @@ func (p *Provider) sweepPanels() (int, string) {
 	return left, panelWarmupLogLine(pl, len(accts), done, firstErr)
 }
 
+// ── 死号台账（2026-11-13）───────────────────────────────────────────────
+//
+// # 它治的是什么
+//
+//	凭据已废的号（`100002 登录已失效`）**重试必然同样失败**，而它每一轮都会
+//	重新进待办 ⇒ `left` 恒 > 0 ⇒ 每 20~40 秒真的打一次上游。用户原话：
+//	「死号根本不要这么频繁测试啊 差不多12h或者6h或者24h测试就行了」。
+//
+// # 口径（复用既有分类器，不自创第三套）
+//
+//	判据只有一条：`Classify(0, errMsg) == ErrKindSessionDead`（本包 errorclassifier.go，
+//	正文判据 `登录已失效` 是手册实录的原文）。⚠ 网络类（超时/连接失败/5xx）**不在此列** ——
+//	它落到 ErrKindNone/Server ⇒ 不算死号 ⇒ 一次抖动不会把号停一个周期。
+//
+// # 为什么是内存 + 随面板快照落盘（而不是只放内存）
+//
+//	本进程经常被重启（换 exe）⇒ 只放内存的话每次重启都会把 44 个坏号重打一遍。
+//	落盘复用 panels.json（见 panelsSnapshot.Dead），不加新文件、不加新配置键。
+func (p *Provider) panelDead() *deadLedger {
+	p.panelDeadOnce.Do(func() {
+		p.panelDeadSet = newDeadLedger()
+	})
+	return p.panelDeadSet
+}
+
+// panelErrIsCredentialTerminal 这条错误是不是"重试必然同样失败"的凭据类终态。
+//
+// ⚠ 纯函数（便于逐条钉边界）：判据复用本包的分类器，**不另写一套字符串匹配**。
+func panelErrIsCredentialTerminal(errMsg string) bool {
+	if strings.TrimSpace(errMsg) == "" {
+		return false
+	}
+	// ⚠ 复用本包**既有的**分类器（`(p *Provider) Classify`，见 errorclassifier.go:110），
+	//   判据就是它那条 `登录已失效` 正文规则 —— 不自创第三套匹配。
+	return (&Provider{}).Classify(0, errMsg) == gateway.ErrKindSessionDead
+}
+
+// notePanelOutcome 记一次 job 的结果：终态错误 ⇒ 记为死号；成功 ⇒ 清掉标记。
+//
+// ⚠ 网络类失败**什么都不做**：它既不算死号，也不该清掉已有的死号标记
+//
+//	（死号标记只由"成功"清除 —— 否则一次侥幸的 200 就会让它回到每轮都试）。
+func (p *Provider) notePanelOutcome(a accountRef, errMsg string, now time.Time) {
+	if p == nil || a.UID == "" {
+		return
+	}
+	switch {
+	case errMsg == "":
+		p.panelDead().clear(a.UID)
+	case panelErrIsCredentialTerminal(errMsg):
+		p.panelDead().mark(a.UID, now, p.deadRetryInterval())
+	}
+}
+
+// panelDeadUntil 该号是否仍在"死号静默期"内（ok=true 表示"现在别打上游"）。
+//
+// ⚠ 到期**不做任何清理动作**：到期即视为可试（`planPanelWarmup` 自然放回待办），
+//
+//	试完再失败 ⇒ `notePanelOutcome` 重新计时 ⇒ "一个周期只试一次"由这两段共同成立。
+func (p *Provider) panelDeadUntil(uid string, now time.Time) (time.Time, bool) {
+	if p == nil || uid == "" {
+		return time.Time{}, false
+	}
+	return p.panelDead().until(uid, now)
+}
+
+// deadRetryInterval 死号重试间隔（配置未注入时用默认 24h）。
+//
+// ⚠ 配 0（"关闭解封探测"）也用默认值 —— "关掉解封探测"不等于"死号每轮都试"。
+func (p *Provider) deadRetryInterval() time.Duration {
+	if p != nil && p.deadRetry > 0 {
+		return p.deadRetry
+	}
+	return panelWarmupDeadRetryDefault
+}
+
+// deadLedger 死号台账（uid → 静默期截止时刻）。
+//
+// ⚠ 单独一个类型而不是在 Provider 上裸放 map：`planPanelWarmup` 是**纯判断**，
+//
+//	它读台账必须走一个明确的窄接口（`until`），这样测试能直接对着它钉边界。
+type deadLedger struct {
+	mu sync.Mutex
+	m  map[string]time.Time
+}
+
+func newDeadLedger() *deadLedger { return &deadLedger{m: map[string]time.Time{}} }
+
+func (d *deadLedger) mark(uid string, now time.Time, iv time.Duration) {
+	if d == nil || uid == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.m[uid] = now.Add(iv)
+}
+
+func (d *deadLedger) clear(uid string) {
+	if d == nil || uid == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.m, uid)
+}
+
+// until now 时刻该号是否仍在静默期（返回截止时刻，便于日志/排障）。
+func (d *deadLedger) until(uid string, now time.Time) (time.Time, bool) {
+	if d == nil || uid == "" {
+		return time.Time{}, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	at, ok := d.m[uid]
+	if !ok {
+		return time.Time{}, false
+	}
+	if !at.After(now) {
+		return at, false // 已到期：放回待办试一次（条目留着，试失败会重新计时）
+	}
+	return at, true
+}
+
+// snapshot 落盘形态（uid → 截止时刻的 unix 毫秒）。
+func (d *deadLedger) snapshot() map[string]int64 {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.m) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(d.m))
+	for k, v := range d.m {
+		out[k] = v.UnixMilli()
+	}
+	return out
+}
+
+// load 从落盘形态恢复（重启后不丢静默期）。
+func (d *deadLedger) load(m map[string]int64) {
+	if d == nil || len(m) == 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for k, v := range m {
+		d.m[k] = time.UnixMilli(v)
+	}
+}
+
 // panelJob 一轮预热里的一个待办：某个号的某个面板。
 type panelJob struct {
 	a     accountRef
@@ -322,6 +508,8 @@ type panelJob struct {
 // panelPlan 一轮预热的"待办画像"（算出来的，不含"跑"）。
 type panelPlan struct {
 	jobs []panelJob
+	// dead 本轮被"死号静默期"摘掉的号数（只用于日志里那句 `停 N`，不进待办）。
+	dead int
 	// todoT/todoI 从没读到过的（前端显示「正在读取…」）。
 	todoT, todoI int
 	// expT/expI 过了 TTL 的（有旧值可看，只是该刷新）。
@@ -347,8 +535,15 @@ func (pl panelPlan) pending() int { return pl.todoT + pl.todoI + pl.expT + pl.ex
 //	抽出来之前，它只能靠"起一个真实例跑一轮 + 人肉比对账号数与日志"才看得见。
 func (p *Provider) planPanelWarmup(accts []accountRef, now time.Time) panelPlan {
 	var pl panelPlan
+	// ⚠⚠ 死号在这里被**摘出待办**（2026-11-13，用户报「死号别这么频繁测试」）：
+	//   不进 `byUID` ⇒ 它的过期行也不会被排进待办；不进 ① 的补数循环 ⇒ 不再打上游。
+	//   ⚠ 这也是缺陷 A 的一半：死号摘走之后 `left` 不再每轮抖（见 panelWarmupPace.next）。
 	byUID := make(map[string]accountRef, len(accts))
 	for _, a := range accts {
+		if _, dead := p.panelDeadUntil(a.UID, now); dead {
+			pl.dead++
+			continue
+		}
 		byUID[a.UID] = a
 	}
 
@@ -364,6 +559,9 @@ func (p *Provider) planPanelWarmup(accts []accountRef, now time.Time) panelPlan 
 
 	// ① 从没读到过的在前、有过期的在后（次序理由见 sweepPanels 的注释）。
 	for _, a := range accts {
+		if _, dead := p.panelDeadUntil(a.UID, now); dead {
+			continue // 死号（见上面那段注释）
+		}
 		if _, ok := p.tasksPanel().get(a.UID); !ok {
 			pl.todoT++
 			add(a, "tasks")
@@ -547,8 +745,14 @@ func panelWarmupLogLine(pl panelPlan, accts, done int, firstErr string) string {
 	// ⚠⚠ **保留 `loomy: ` 这个前缀**（2026-11-13 实测）：它不是装饰 —— `logx.scopePrefix`
 	//   （internal/logx/logx.go:246）靠 `^xxx: ` 抽 scope 让人能 grep 日志；去掉冒号后
 	//   这一行会被判成 scope=app，**静默**降级（测试当场抓到：TestPipeScopeAndLevel 红）。
-	line := fmt.Sprintf("loomy: 预热 · 未缓存 t%d/i%d · 过期 t%d/i%d · 号%d · 发起%d",
-		pl.todoT, pl.todoI, pl.expT, pl.expI, accts, done)
+	line := fmt.Sprintf("loomy: 预热 · 未缓存 t%d/i%d · 过期 t%d/i%d · 号%d",
+		pl.todoT, pl.todoI, pl.expT, pl.expI, accts)
+	// ⚠ `停 N` 只在**真有死号**时出现（2026-11-13）：它是"这批号在静默期里"的唯一可见信号，
+	//   没有它就分不清"号都补完了"与"一半号被静默了"。数字形态，与整行口径一致。
+	if pl.dead > 0 {
+		line += fmt.Sprintf(" · 停%d", pl.dead)
+	}
+	line += fmt.Sprintf(" · 发起%d", done)
 	if s := panelWarmupErrShort(firstErr); s != "" {
 		line += " · 错 " + s
 	}

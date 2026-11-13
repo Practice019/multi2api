@@ -115,6 +115,17 @@ type Provider struct {
 	//   把补数搬到服务端后，无论何时打开、开在第几页，缓存都是满的。
 	warmOnce sync.Once
 
+	// panelDeadOnce / panelDeadSet 死号台账（惰性建，见 panelwarmup.go 的 "死号台账" 段）。
+	//
+	// ⚠ 为什么惰性：`&Provider{}` 在测试里是**直接构造**的（不走 New），
+	//   而在构造器里初始化会让那些测试拿到 nil map ⇒ 只在真正用到时才建。
+	panelDeadOnce sync.Once
+	panelDeadSet  *deadLedger
+	// deadRetry 死号重试间隔（0 ⇒ 默认 24h）。由装配层用**既有配置**
+	// `pool.revive_probe_interval_seconds`（= 设置页的「账号解封探测」）注入 ——
+	// 不新增配置键（同一件事不该有两个口子，见 panelWarmupDeadRetryDefault 的注释）。
+	deadRetry time.Duration
+
 	// saveMu / lastSaveAt 面板缓存**落盘**的节流（见 adminpoints 的 throttledSavePanels）。
 	//
 	// ⚠ 与 panelMu 分开各一把：落盘是 IO，不该把面板读写路径拖住。
@@ -220,6 +231,16 @@ type Config struct {
 	// 这个旋钮是**产品决策**，不放进上游协议：三条路径都是真的，
 	// 只是"默认先走哪条"取决于用户想干什么。
 	LoginMode string
+
+	// DeadRetryInterval 「死号」（凭据类终态）的重试间隔 —— 0 时用默认 24h。
+	//
+	// ⚠⚠ 由装配层用**既有配置** `pool.revive_probe_interval_seconds`（设置页的
+	//   「账号解封探测」，默认 24h）注入 ⇒ **不新增配置键**。
+	//   语义本来就是同一件事："号坏了，多久后再看它一眼"。
+	//
+	// ⚠ 为什么放在这里而不是在 loomy 里自己读 config：依赖方向 ——
+	//   本包不该知道 `cmd/server` 的配置结构。
+	DeadRetryInterval time.Duration
 }
 
 // NewWithConfig 按配置建一个 Loomy Provider。
@@ -236,6 +257,8 @@ func NewWithConfig(cfg Config) *Provider {
 			cfg.SMSAccessKeyID, cfg.SMSAccessKeySecret),
 		loginMode: normalizeLoginMode(cfg.LoginMode),
 		tiers:     newTierCache(),
+		// 死号重试间隔（0 由 deadRetryInterval() 兜底成 24h）。
+		deadRetry: cfg.DeadRetryInterval,
 	}
 }
 

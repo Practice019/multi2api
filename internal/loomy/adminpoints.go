@@ -291,9 +291,15 @@ const panelsFileName = "panels.json"
 //
 //	整份序列化是最简单的正确选择 —— 逐条 append 会让"重启后读到半份"成为可能。
 type panelsSnapshot struct {
-	Tasks   map[string]accountTasksView  `json:"tasks"`
-	Invite  map[string]accountInviteView `json:"invite"`
-	SavedAt time.Time                    `json:"saved_at"`
+	Tasks  map[string]accountTasksView  `json:"tasks"`
+	Invite map[string]accountInviteView `json:"invite"`
+	// Dead 死号台账（uid → 静默期截止的 unix 毫秒），2026-11-13 加。
+	//
+	// ⚠ 为什么跟面板缓存一起落盘：本进程经常因为换 exe 被重启，而"死号别频繁试"
+	//   这件事**跨重启也该成立** —— 只放内存的话每次重启都会把 44 个坏号重打一遍。
+	// ⚠ 老文件里没有这个键 ⇒ 反序列化后为 nil ⇒ 当作"没有死号"（向后兼容，不报错）。
+	Dead    map[string]int64 `json:"dead,omitempty"`
+	SavedAt time.Time        `json:"saved_at"`
 }
 
 // loadPanelsSnapshot 启动时读一次落盘的面板缓存。
@@ -311,6 +317,8 @@ func (p *Provider) loadPanelsSnapshot() panelsSnapshot {
 		return s
 	}
 	_ = json.Unmarshal(raw, &s)
+	// 死号台账跟着缓存一起恢复（老文件没有这个键 ⇒ nil ⇒ 视为没有死号）。
+	p.panelDead().load(s.Dead)
 	return s
 }
 
@@ -324,6 +332,8 @@ func (p *Provider) savePanelsSnapshot() {
 		return
 	}
 	s := panelsSnapshot{Tasks: map[string]accountTasksView{}, Invite: map[string]accountInviteView{}, SavedAt: time.Now()}
+	// 死号台账一起存（它随"面板缓存"这一份文件的节流节奏走，不额外加写盘次数）。
+	s.Dead = p.panelDead().snapshot()
 	if c := p.panelTasks; c != nil {
 		c.mu.RLock()
 		for k, v := range c.m {

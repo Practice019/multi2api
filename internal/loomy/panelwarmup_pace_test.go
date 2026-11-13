@@ -107,3 +107,49 @@ func TestPanelWarmupPaceIgnoresLogFormat(t *testing.T) {
 		t.Error("新格式：内容变化后必须立刻打日志")
 	}
 }
+
+// TestPanelWarmupPaceBackoffIgnoresLeftJitter ★ 缺陷 A：`left` 抖动**不许**把退避清零。
+//
+// 用户日志实测的序列（20~40 秒一轮、永不停止）：
+//
+//	10:16:30 过期 t7/i18 ⇒ 10:16:50 过期 t6/i18 ⇒ 10:21:50 过期 t32/i18 ⇒ 10:22:10 过期 t6/i18
+//
+// 过期数本来就会来回跳（一轮里刷过的号下一轮又到期、或者新号从别处掉进来），
+// 而旧判据是"`left` 变了就回到追赶间隔" ⇒ **退避永远清零** ⇒ 5 秒一轮打上游。
+//
+// 判据：喂一串"降一点又弹回去"的 left ⇒ 间隔必须**继续增长**（不许回到 5s）。
+func TestPanelWarmupPaceBackoffIgnoresLeftJitter(t *testing.T) {
+	const line = "loomy: 预热 · 未缓存 t0/i0 · 过期 t6/i18 · 号44 · 发起12"
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	p := &panelWarmupPace{}
+	// 首轮：追赶间隔。
+	if got, _ := p.next(20, line, now); got != panelWarmupBusyInterval {
+		t.Fatalf("首轮 sleep=%v，want %v", got, panelWarmupBusyInterval)
+	}
+	// ⚠ 上面那圈只是"跑一跑"，真判据在下面：连续"涨"必须**不退避也不清零**。
+	p = &panelWarmupPace{}
+	now = time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	_, _ = p.next(20, line, now)
+	now = now.Add(time.Second)
+	// 先退避两轮（left 不变），拿到一个明显大于 5s 的间隔。
+	_, _ = p.next(20, line, now)
+	now = now.Add(time.Second)
+	big, _ := p.next(20, line, now)
+	if big <= panelWarmupBusyInterval {
+		t.Fatalf("两轮没变化后应当已经退避（>5s），实际 %v", big)
+	}
+	// 现在喂"涨"（新出现过期的）—— 修之前这里会掉回 5s。
+	now = now.Add(time.Second)
+	got, _ := p.next(21, line, now)
+	if got == panelWarmupBusyInterval {
+		t.Fatalf("`left` 只是**涨**了一下，间隔就掉回追赶态 %v —— 这正是用户日志里「永不停止」的成因", got)
+	}
+	if got < big {
+		t.Errorf("`left` 涨了之后间隔不该变小：之前 %v，现在 %v", big, got)
+	}
+	// 而真的"降"（补上了）必须**立刻**回到追赶间隔。
+	now = now.Add(time.Second)
+	if got, _ := p.next(10, line, now); got != panelWarmupBusyInterval {
+		t.Errorf("`left` 降了（补上了）就该回到追赶间隔 %v，实际 %v", panelWarmupBusyInterval, got)
+	}
+}
