@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -129,28 +130,37 @@ func TestGroupsUICoversAllEndpoints(t *testing.T) {
 //
 // 手打的失败形态是"分组看起来有 N 个模型，实际那个永远匹配不上"，
 // 而保存时完全看不出来（与 API Key 白名单同一个坑）。
+//
+// ⚠★ 2026-11-13（T-912）：**这条判据现在没有例外了**。
+//
+//	原来这里还钉着「已选清单置顶」（那块 chips 行），本文件也曾有一条「直接粘模型名」的退路；
+//	用户要求把这两处去掉（「不要这两个：直接粘模型名的输入框 + 已选模型 chips 行」）⇒
+//	判据回到本条的本意：**候选 + 搜索 + 全选当前，且不许有任何手打入口**。
+//	（"已选清单置顶"那条断言连同它的锚点一起删了 —— 置顶的那块本身已不存在，不是放水：
+//	 新增的"残留引用必须为 0"比它更强：连 id 都不许留在文件里。）
+//	取消入口移到了别名行尾的 ❌ 上（见 TestGroupsAliasRowDeleteUnpicksModel）。
 func TestGroupsUIPicksModelsFromCatalog(t *testing.T) {
 	src := readGroupsUI(t)
 	for _, n := range []struct{ what, needle string }{
 		{"候选容器", `id="gChoices"`},
-		{"已选清单置顶", `id="gPickedChips"`},
 		{"搜索框", `id="f-search"`},
 		{"拉目录（管理端，不是 /v1/models）", "/admin/groups/catalog"},
 		{"全选当前", "function pickAll("},
-		{"取消已选（事件委托）", "gPickedChips').addEventListener("},
+		{"取消已选（事件委托）", "gMapRows').addEventListener("},
 	} {
 		if !strings.Contains(src, n.needle) {
 			t.Errorf("分组页缺少%s（%q）", n.what, n.needle)
 		}
 	}
-	// 已选清单必须在候选列表**之前**（置顶，否则仍要滚动才看得见）。
-	boxAt := strings.Index(src, `id="gPickedBox"`)
-	listAt := strings.Index(src, `id="gChoices"`)
-	if boxAt < 0 || listAt < 0 {
-		t.Fatalf("锚点缺失: box=%d list=%d", boxAt, listAt)
-	}
-	if boxAt > listAt {
-		t.Error("已选清单在候选列表之后 —— 用户仍要滚动才能核对，与「置顶」的要求相反")
+	// ★ 不许再有任何"手打模型名/额外清单"的入口：那两处删干净了，引用必须为 0。
+	//
+	// 本仓在"删了控件、留下悬空引用"上踩过坑（注释里提到名字、监听器还挂着、样式还在），
+	// 所以这里按**整份文件**数引用 —— 连注释都不许再提这些名字（改法是把说明写成中文描述）。
+	for _, gone := range []string{"f-manual", "mergeManual", "gPickedBox", "gPickedChips", "gPickedCount", "renderPicked"} {
+		if strings.Contains(src, gone) {
+			t.Errorf("★ 分组弹窗里还有 %q 的引用 —— 那两处（粘贴输入框 / 已选 chips 行）已按要求删除，"+
+				"残留引用会变成悬空控件或悬空样式", gone)
+		}
 	}
 }
 
@@ -195,6 +205,106 @@ func TestAPIKeyModelsColumnShowsGroups(t *testing.T) {
 	if !strings.Contains(fn, "k.models") {
 		t.Error("存量白名单（k.models）那条显示分支不该被删 —— 没配分组的 key 还在用它")
 	}
+}
+
+// TestGroupsAliasRowDeleteUnpicksModel 执行式：❌ 删除一个模型 ⇒ 三处必须同步。
+//
+// 抠的是 **app 里的真代码**（addMapRow / unpickModel / onMapRowsClick），不是抄一份逻辑：
+//
+//	· 产出的行里必须带 ❌（data-unpick-row = 该行的内部模型名）；
+//	· 点它 ⇒ ① 从 picked 删 ② 重渲染上面的选择器（checkbox 的 checked 由 picked 推导 ⇒ 跟着取消）
+//	  ③ 重渲染别名表（少一行）。三处少一个就会出现「表里删了、上面还勾着」。
+//
+// 另附一条：整页内联脚本过一遍 node --check（这次改的就是这段内联 JS；本仓有「模板里写语句」的前车之鉴）。
+func TestGroupsAliasRowDeleteUnpicksModel(t *testing.T) {
+	ui := readGroupsUI(t)
+	parts := map[string]string{
+		"addMapRow":      sliceFuncBody(t, ui, "function addMapRow("),
+		"unpickModel":    sliceFuncBody(t, ui, "function unpickModel("),
+		"onMapRowsClick": sliceFuncBody(t, ui, "function onMapRowsClick("),
+	}
+	for name, src := range parts {
+		if src == "" {
+			t.Fatalf("找不到 %s —— 删除路径的核心，守卫要跟着改（别删）", name)
+		}
+	}
+	node, lerr := exec.LookPath("node")
+	if lerr != nil {
+		t.Skip("没有 node，跳过执行式判据（静态判据见 TestGroupsAliasRowsAreModelDriven）")
+	}
+
+	harness := strings.Join([]string{
+		"const bad = [];",
+		"const ok = (c, m) => { if (!c) bad.push(m); };",
+		"const esc = (s) => String(s);",
+		"let picked = new Set(['a', 'b']);",
+		"let choicesCalls = 0, mapCalls = 0, hintCalls = 0;",
+		"function renderChoices() { choicesCalls++; }",
+		"function renderMapRows(m) { mapCalls++; }",
+		"function currentMapSnapshot() { return {}; }",
+		"function refreshMergeHints() { hintCalls++; }",
+		"function mkInput() { return { value: '', addEventListener: () => {} }; }",
+		"function mkEl(tag) {",
+		"  const el = { tagName: tag, innerHTML: '', className: '', attrs: {}, style: { cssText: '' }, children: [] };",
+		"  el.setAttribute = function (k, v) { this.attrs[k] = v; };",
+		"  el.getAttribute = function (k) { return this.attrs[k] === undefined ? null : this.attrs[k]; };",
+		"  el.appendChild = function (c) { this.children.push(c); };",
+		"  el.querySelector = function (sel) { return sel === '.gmap-r' ? mkInput() : null; };",
+		"  return el;",
+		"}",
+		"const hosts = { gMapRows: mkEl('div') };",
+		"function $(id) { return hosts[id] || null; }",
+		"const document = { createElement: (t) => mkEl(t) };",
+		parts["addMapRow"],
+		parts["unpickModel"],
+		parts["onMapRowsClick"],
+		"addMapRow('a', 'a-pub');",
+		"const row = hosts.gMapRows.children[0];",
+		"ok(!!row && row.className === 'gmap-row', '① addMapRow 没有产出 .gmap-row');",
+		"ok(!!row && row.getAttribute('data-internal') === 'a', '① 行上没有 data-internal（行与模型的对应关系）');",
+		"ok(!!row && row.innerHTML.indexOf('data-unpick-row=\"a\"') >= 0, '① 行尾没有 ❌ 删除按钮 —— 用户要求「对外映射后面有一个 ❌ 删除选中」');",
+		"ok(!!row && row.innerHTML.indexOf('readonly') >= 0, '① 左侧不再是只读（既有契约的另一半被弄丢了）');",
+		"const ev = { target: { closest: (sel) => (sel === 'button[data-unpick-row]' ? { getAttribute: () => 'b' } : null) } };",
+		"onMapRowsClick(ev);",
+		"ok(picked.has('a') && !picked.has('b'), '② 点 ❌ 之后 picked 应为 {a}（实际 ' + Array.from(picked).join(',') + '）');",
+		"ok(choicesCalls === 1, '② 没有重渲染上面的选择器 ⇒ checkbox 不会跟着取消（调用 ' + choicesCalls + ' 次）');",
+		"ok(mapCalls === 1, '② 没有重渲染别名表 ⇒ 删掉的那行还留在表里（调用 ' + mapCalls + ' 次）');",
+		"onMapRowsClick({ target: { closest: () => null } });",
+		"ok(picked.size === 1 && choicesCalls === 1 && mapCalls === 1, '③ 与删除无关的点击不该改任何东西');",
+		"if (bad.length) { console.error(bad.join(' | ')); process.exit(1); }",
+		"console.log('OK');",
+	}, "\n")
+	out, runErr := exec.Command(node, "-e", harness).CombinedOutput()
+	if runErr != nil || !strings.Contains(string(out), "OK") {
+		t.Errorf("★ ❌ 删除没同步三处（%v）:\n%s", runErr, out)
+	}
+
+	// 整页内联脚本语法检查（我改的就是这段 JS）。
+	js := biggestInlineScript(ui)
+	if strings.TrimSpace(js) == "" {
+		t.Fatal("没抠到内联 script —— 守卫会 fail-open（页面结构变了？）")
+	}
+	fp := filepath.Join(t.TempDir(), "groups-page.js")
+	if err := os.WriteFile(fp, []byte(js), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, "--check", fp).CombinedOutput(); err != nil {
+		t.Errorf("★ 分组页内联脚本语法不过（node --check）:\n%s", out)
+	}
+}
+
+// biggestInlineScript 取页面里**最长**的那段内联 script（外链的 src= 那种不算）。
+func biggestInlineScript(html string) string {
+	var best string
+	for _, m := range regexp.MustCompile("(?s)<script([^>]*)>(.*?)</script>").FindAllStringSubmatch(html, -1) {
+		if strings.Contains(m[1], "src=") {
+			continue
+		}
+		if len(m[2]) > len(best) {
+			best = m[2]
+		}
+	}
+	return best
 }
 
 // sliceFuncBody 截出某个函数体（从签名到配平的 `}`）。
@@ -678,9 +788,24 @@ func TestGroupsAliasRowsAreModelDriven(t *testing.T) {
 	if strings.Contains(ui, "addMapRow()") || strings.Contains(ui, "新增一行") {
 		t.Error("★ 别名表还有「新增一行」入口 —— 它应当是模型驱动的，不能手工加行")
 	}
-	// ② 不能有删除按钮。
-	if strings.Contains(ui, "gmap-x") || strings.Contains(ui, "删除这行") {
-		t.Error("★ 别名表还有删除按钮 —— 用户明确要求不可删除")
+	// ② ★★ 契约**翻转**（2026-11-13 T-912）：行尾现在**必须**有删除入口。
+	//
+	//	用户新原话：「分组里面的编辑我希望不要这两个（粘贴输入框 + 已选 chips 行），
+	//	             而是在对外映射后面可以有一个 ❌ 删除选中」。
+	//	⇒ 被推翻的只有"不可删除"这半；"每个已选模型自动一行、左侧只读、右侧可改、行数由模型决定"
+	//	   这几半仍然钉着（见 ① ③ ④ ⑤）。删除的语义是**把该模型从已选里去掉**（等于取消上面的勾选），
+	//	   不是"这行不许存在"。
+	if !strings.Contains(ui, `data-unpick-row="' + esc(left || '') + '"`) {
+		t.Error("★ 别名行没有 ❌ 删除入口 —— 用户要求「在对外映射后面可以有一个 ❌ 删除选中」")
+	}
+	if !strings.Contains(ui, "function unpickModel(") {
+		t.Error("★ 删除没走 unpickModel —— 取消已选必须与上面的勾选共用同一条路径（否则表里删了、checkbox 还勾着）")
+	}
+	unpick := sliceFuncBody(t, ui, "function unpickModel(")
+	for _, need := range []string{"picked.delete(m)", "renderChoices()", "renderMapRows(currentMapSnapshot())"} {
+		if !strings.Contains(unpick, need) {
+			t.Errorf("★ unpickModel 里没有 %q —— 三处同步点少一个就会出现「表里没了、上面还勾着」", need)
+		}
 	}
 
 	// ③ renderMapRows 必须遍历 picked（= 已选模型），而不是遍历已保存的 map。

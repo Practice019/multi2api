@@ -130,13 +130,9 @@
   .dlg-f { padding:12px 16px; border-top:1px solid var(--line); display:flex; justify-content:flex-end; gap:8px; }
   .req::after { content:" *"; color:var(--err); }
 
-  /* 已选模型清单（置顶，不用滚动）：与 API Key 弹窗同一条理由 ——
-     列表有几百个模型，勾过的项散落在不同位置，只报数量等于**配置不可验证**。 */
-  #gPickedBox { margin-bottom:8px; }
-  #gPickedChips { display:flex; flex-wrap:wrap; gap:6px; min-height:22px; }
-  #gPickedChips .chip { height:22px; line-height:22px; max-width:260px; }
-  #gPickedChips .chip button { all:unset; cursor:pointer; margin-left:4px; color:var(--dim); }
-  #gPickedChips .chip button:hover { color:var(--err); }
+  /* ⚠ 2026-11-13（T-912）：这里原有「已选模型（点 × 取消）」那一整块的样式（两个 id 都以 gPicked 开头）。
+     那一块按用户要求删掉了 —— 取消的入口现在在别名行尾的 ❌ 上（.gmap-del），
+     所以这几条规则连同 id 一起删，不留悬空样式（本仓在「删控件留引用」上踩过坑）。 */
   #gChoices { max-height:230px; overflow-y:auto; border:1px solid var(--line); border-radius:0;
               padding:6px 8px; background:var(--bg); display:flex; flex-wrap:wrap; gap:8px; font-size:13px; }
   #gChoices label { display:flex; align-items:center; gap:4px; height:22px; line-height:22px;
@@ -1622,14 +1618,6 @@ function mpEsc(s) {
 <span class="muted" style="font-size:11px" id="gProvHint"></span>
 </div>
 
-<input id="f-manual" class="full" aria-label="手工输入模型名" placeholder="也可以直接粘：逗号或换行分隔的内部模型名（回车/失焦后并入已选）" onchange="mergeManual()">
-
-    <!-- 已选清单置顶：列表有几百个模型，只报数量等于不可核对。 -->
-    <div id="gPickedBox" class="full">
-      <div class="muted" style="font-size:12px;margin-bottom:4px">已选模型（点 × 取消）<span id="gPickedCount"></span></div>
-      <div id="gPickedChips"></div>
-    </div>
-
     <div class="full">
       <div id="gChoices"></div>
       <div class="muted" style="font-size:11px;margin-top:4px" id="gChoicesHint"></div>
@@ -1648,6 +1636,8 @@ function mpEsc(s) {
       <div class="muted" style="font-size:12px;margin-bottom:4px">
         每个已选模型自动一行。左边是内部模型名（固定），右边是对外显示名 ——
         默认与左边相同，改右边就能改对外叫法。<br>
+        行尾的 <b>❌</b> 把这个模型从<b>已选</b>里去掉（等于取消上面的勾选）—— 删除只改弹窗内的
+        临时集合，没点「保存」前不落盘。<br>
         <b>多个模型可以填同一个对外名</b>：那样对外只出现一个名字，
         调用时在这些上游之间<b>轮询</b>，某个失败自动换下一个。
       </div>
@@ -2096,7 +2086,6 @@ function pickOne(cb) {
   if (cb.checked) { picked.add(m); } else { picked.delete(m); }
   // 已选集合变了 ⇒ 别名表跟着重建（行数由模型数决定）。
   renderMapRows(currentMapSnapshot());
-  renderPicked();
 }
 
 // pickAll 只作用于**当前筛选出来的**那批：搜索后点全选，不该把看不见的也选中。
@@ -2114,65 +2103,40 @@ function pickAll(on) {
   renderMapRows(currentMapSnapshot());
   });
   renderChoices();
-  renderPicked();
 }
 
-// mergeManual 把输入框里逗号/换行分隔的名字并进已选。
+// ⚠ 2026-11-13（T-912）：这个函数（把粘贴回来的名字并进「已选」的那个）与上面那行
+//   粘贴输入框一起删掉了 ——
+//   用户原话：「分组里面的编辑我希望不要这两个（直接粘模型名的输入框 + 已选模型 chips 行）」。
+//   ⇒ 模型只能从上面的候选里勾（本文件那句「模型必须从候选里选，不能只靠手打」现在**没有例外**了）；
+//     取消的入口在别名行尾的 ❌ 上（见 unpickModel）。
+
+// unpickModel 把一个模型从**已选**里去掉（只动弹窗内的临时集合 —— 没点保存前不落盘）。
 //
-// 为什么要这条退路：目录可能拉不到（没渠道、上游抖动），而用户手里已经有一份
-// 内部模型名清单（比如从旧的白名单里抄）。没有它，那种情况下这个分组就建不了。
-function mergeManual() {
-  const el = $('f-manual');
-  const raw = el.value || '';
-  if (!raw.trim()) { return; }
-  raw.split(/[,\n\r]+/).forEach(function (s) {
-    const m = s.trim();
-    if (m) { picked.add(m); }
-  // 已选集合变了 ⇒ 别名表跟着重建（行数由模型数决定）。
-  renderMapRows(currentMapSnapshot());
-  });
-  el.value = '';
-  renderChoices();
-  renderPicked();
-}
-
-// renderPicked 渲染置顶的「已选清单」。
-//
-// ⚠ 点击用**事件委托**：chips 每次重渲染都会重建，把 onclick 绑在元素上
-//   会随元素一起丢掉 —— 表现是"第一次能点、之后点了没反应"，且不报错。
-function renderPicked() {
-  const box = $('gPickedChips');
-  const cnt = $('gPickedCount');
-  const list = Array.from(picked).sort();
-  cnt.textContent = list.length ? ('（已选 ' + list.length + ' 个）') : '';
-  if (!list.length) {
-    box.innerHTML = '<span class="muted" style="font-size:12px">还没有选中任何模型 —— 这样的分组会让引用它的 key 一个模型都用不了。</span>';
-    return;
-  }
-  // ⚠ chip 里塞 <button> 必须重置按钮样式，否则它保留浏览器默认外观
-  //（带边框的方块）把 chip 撑成两块。用 .pill + all:unset，与 API 页那版同一形态。
-  box.innerHTML = list.map(function (m) {
-    return '<span class="pill" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 6px"'
-      + ' title="' + esc(m) + '">'
-      + '<span class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
-      + esc(m) + '</span>'
-      + '<button type="button" data-unpick="' + esc(m) + '"'
-      + ' style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 2px"'
-      + ' title="取消">×</button>'
-      + '</span>';
-  }).join('');
-}
-
-$('gPickedChips').addEventListener('click', function (ev) {
-  const btn = ev.target.closest('button[data-unpick]');
-  if (!btn) { return; }
-  const m = btn.getAttribute('data-unpick');
+// ⚠ 这是唯一的取消路径（T-912 起：删除入口在别名行尾的 ❌ 上，而不是原来的 chips 行）。
+//   三步必须一起走，漏一步就会出现"表里没了、上面还勾着"：
+//     ① 从 picked 删；
+//     ② 重渲染上面的选择器 —— checkbox 的勾选状态由 picked 推导（renderChoices 里那句
+//        picked.has(id) ? ' checked' : ''），所以重渲染即同步；
+//     ③ 重渲染别名表 —— 少一行。
+function unpickModel(m) {
+  if (!m) { return; }
   picked.delete(m);
-  // 已选集合变了 ⇒ 别名表跟着重建（行数由模型数决定）。
-  renderMapRows(currentMapSnapshot());
   renderChoices();
-  renderPicked();
-});
+  renderMapRows(currentMapSnapshot());
+}
+
+// onMapRowsClick ❌ 的点击处理。
+//
+// ⚠ 走事件委托：别名表的行每次重建都会重建那个按钮，把 onclick 绑在元素上会随元素一起丢
+//   —— 表现是"第一次能点、之后点了没反应"，且不报错（本仓在 chips 那版踩过同一个坑）。
+function onMapRowsClick(ev) {
+  const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-unpick-row]') : null;
+  if (!btn) { return; }
+  unpickModel(btn.getAttribute('data-unpick-row'));
+}
+
+$('gMapRows').addEventListener('click', onMapRowsClick);
 
 // ---- 表单 ----
 async function openForm(id) {
@@ -2183,13 +2147,11 @@ async function openForm(id) {
   $('f-name').value = g ? (g.name || '') : '';
   $('f-desc').value = g ? (g.description || '') : '';
   $('f-search').value = '';
-  $('f-manual').value = '';
   // 编辑时把已有模型放进已选集合；新增时从空开始。
   picked = new Set(g ? (g.models || []) : []);
   // 别名表按已选模型自动生成（每个模型一行，右侧默认=内部名）。
   // 编辑时用已保存的 model_map 回填右侧 —— 那些是用户改过的对外名。
   renderMapRows(g ? g.model_map : null);
-  renderPicked();
   $('gChoices').innerHTML = '<span class="muted" style="font-size:12px">正在读取模型目录…</span>';
   $('dlg').showModal();
   try {
@@ -2198,7 +2160,6 @@ async function openForm(id) {
   } catch (e) {
     // ensureCatalog 已经把提示写进 #gChoices；这里不再重复报错。
   }
-  renderPicked();
   // 目录加载完再渲染一次：此刻已选的模型集合才最终确定。
   renderMapRows(g ? g.model_map : null);
 }
@@ -2272,7 +2233,12 @@ function addMapRow(left, right) {
     '<input class="gmap-r" spellcheck="false" placeholder="对外显示名（默认同上）"' +
     ' value="' + esc(right || left || '') + '"' +
     ' title="改成你想对外的名字；清空或与左侧相同 = 不修改"' +
-    ' style="flex:1;font-size:12px">';
+    ' style="flex:1;font-size:12px">' +
+    // ❌ 删除这一行的模型（= 从已选里去掉）。样式 all:unset + 内联，与原来那条 chips 的 × 同款：
+    // 不给按钮重置样式，它会保留浏览器默认外观（带边框的方块）把这一行撑歪。
+    '<button type="button" class="gmap-del" data-unpick-row="' + esc(left || '') + '"' +
+    ' title="把这个模型从已选里去掉（等于取消上面的勾选）；没点保存前不落盘"' +
+    ' style="all:unset;cursor:pointer;font-size:13px;line-height:1;padding:0 4px;color:var(--dim)">❌</button>';
   host.appendChild(row);
   // 右侧一改就刷新合并提示（同一个对外名被多行填了 ⇒ 高亮 + 说明）。
   const rightInput = row.querySelector('.gmap-r');
