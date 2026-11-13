@@ -1,15 +1,21 @@
 // import.go 批量粘贴导入（gateway.AccountImportExt + CapImport）。
 //
-// # 用户粘什么（三种形态都认 —— 这正是本上游的特殊之处）
+// # 用户粘什么（**四种形态**都认 —— 这正是本上游的特殊之处）
 //
 //	① 网关自己落的嵌套形 {"auth":{…},"account":{…}}（从别的部署拷过来的文件内容）
 //	② **官方客户端的**凭据文件 {"claudeAiOauth":{accessToken,refreshToken,expiresAt}}
 //	   —— 报告 auth §3.1 实测它落在 %USERPROFILE%/.phanthy-code/.credentials.json，
 //	      用户最可能的动作就是把那个文件整段粘进来/拷进来
 //	③ 本包扁平形 {"oauth":{…},"device":{…}}（手写最省事）
+//	④ **顶层驼峰**形（2026-11-14 T-914，用户实测粘的那种）：
+//	   {"platform":"phanthy","userid":"cmwc…","phone":"150…","account":"+86 150****3411",
+//	    "accessToken":"eyJ…","refreshToken":"ZnGR…","expiresAt":1794545067558}
+//	   —— 与②同一套驼峰字段名，区别是**没有 claudeAiOauth 根键**，且多了 `userid`/`phone`/`account`。
+//	      ⚠ 它的 `userid` 就是 uid 的来源（②的兜底路径读不到它 ⇒ 用户那次"导不进去"）。
 //
-// 三种形态的判定全在 ParseCredential 里（**唯一判据**），本文件只做搬运 ——
+// 四种形态的判定全在 ParseCredential 里（**唯一判据**），本文件只做搬运 ——
 // 手写第二份字段映射是"看起来成功、实际字段错位"的高发区。
+// ⚠ 冲突时**按旧形态解释**（①→②→③→④ 的先后就是优先级；见 parseOfficialShape 里 wrapped 那段）。
 //
 // # 多份怎么分隔
 //

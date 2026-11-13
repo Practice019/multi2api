@@ -649,9 +649,11 @@ func parseOfficialShape(raw []byte) (*Auth, bool) {
 		return nil, false
 	}
 	inner := root
+	wrapped := false
 	for _, key := range []string{"claudeAiOauth", "phanthyCodeOauth"} {
 		if v, ok := root[key].(map[string]any); ok {
 			inner = v
+			wrapped = true
 			break
 		}
 	}
@@ -659,7 +661,7 @@ func parseOfficialShape(raw []byte) (*Auth, bool) {
 	if access == "" {
 		return nil, false
 	}
-	return &Auth{
+	a := &Auth{
 		Provider: providerID,
 		OAuth: OAuthTokens{
 			AccessToken:  access,
@@ -667,7 +669,27 @@ func parseOfficialShape(raw []byte) (*Auth, bool) {
 			ExpiresAtMS:  firstMillis(inner, "expiresAt", "expires_at_ms", "expiresAtMs"),
 			Scopes:       firstStrings(inner, "scopes", "scope"),
 		},
-	}, true
+	}
+	// ⚠⚠ 第四种形态（2026-11-14 T-914）：**顶层驼峰**且带账号线索键
+	//
+	//	{"platform":"phanthy","userid":"cmwc…","phone":"150…","account":"+86 150****3411",
+	//	 "accessToken":"eyJ…","refreshToken":"ZnGR…","expiresAt":1794545067558}
+	//
+	//	它走的就是上面那条"没有根键 ⇒ inner = root"的兜底路径（token/到期本来就读得到），
+	//	**唯一没被读的是 `userid`** ⇒ uid 只能回落到 JWT 的 sub（sub 取不到时整份导入失败，
+	//	用户看到的是"导不进去"）。所以这里补上 uid 与展示名。
+	//
+	// ⚠ 只在**没有根键**（顶层兜底那一档）时读这些键 —— 带 claudeAiOauth/phanthyCodeOauth 的
+	//	旧输入**一字不变**（冲突时按旧形态解释；这条由 TestWrappedShapeWinsOverTopLevelCamel 钉住）。
+	//
+	// ⚠ `phone` / `account` **只作展示线索**（NicknameValue），**绝不**当 uid 的唯一来源 ——
+	//	手机号是可能改的、也可能同一人多个号；uid 的唯一来源是 `userid`（缺失则不填，
+	//	交给 UID() 的既有回落链）。
+	if !wrapped {
+		a.UIDValue = firstString(inner, "userid", "userId", "uid")
+		a.NicknameValue = firstString(inner, "account", "nickname", "phone")
+	}
+	return a, true
 }
 
 // firstString 取第一个非空字符串字段（兼容驼峰与下划线两种拼法）。
