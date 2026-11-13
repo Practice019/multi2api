@@ -5855,7 +5855,13 @@ window.addEventListener('message', (e) => {
     let defs = [];
     const sum = { earned: 0, max: 0, pending: 0 };
     let totalN = 0, pagesNow = 1, serverAt = 0, stale = [];
+    // showBal 由 renderPage 按**本页条目**重算（默认 true：数据还没到时先别藏，避免闪一下又出来）。
+    let showBal = true;
     const labelOf = (kk) => { const t = defs.find(x => x.key === kk); return t ? t.label : kk; };
+    // balanceTd 任务表的余额格：整列无有意义取值（见 hasMeaningfulBalance）时整格不出现。
+    // ⚠ 这里**不**用邀请码面板的 balanceCellHTML：那条还带「部分」标记，属于邀请路径的语义；
+    //   两处共用的是**判据**，不是格子内容。
+    const balanceTd = (a) => (showBal ? '<td class="mono">' + (a.balance_known === false ? '<span class="dim">—</span>' : esc(String(a.balance ?? 0))) + '</td>' : '');
 
     const rowHTML = (a) => {
       const pct = a.total ? Math.round((a.done / a.total) * 100) : 0;
@@ -5873,7 +5879,7 @@ window.addEventListener('message', (e) => {
         <td>${esc(a.nickname || '—')}</td>
         <td>${st}</td>
         <td class="mono">${esc(String(a.earned || 0))}/${esc(String(a.max || 0))}</td>
-        <td class="mono">${a.balance_known === false ? '<span class="dim">—</span>' : esc(String(a.balance ?? 0))}</td>
+        ${balanceTd(a)}
         <td style="max-width:320px">${pending || '<span class="dim">—</span>'}</td>
         <td style="white-space:nowrap">${btn}</td>
       </tr>`;
@@ -5892,6 +5898,10 @@ window.addEventListener('message', (e) => {
     const renderPage = (d) => {
       if (Array.isArray(d.defs) && d.defs.length) defs = d.defs;
       const accts = Array.isArray(d.accounts) ? d.accounts : [];
+      // 余额列的存在性 + 这一页的**真实列数**（占位行的 colspan 必须与表头一致；
+      // 漏这一步就是"表格歪一列"，而静态看不出来）。
+      showBal = hasMeaningfulBalance(accts);
+      const colN = 6 + (showBal ? 1 : 0);
       pagesNow = Number(d.pages) || 1;
       totalN = Number(d.total) || accts.length;
       page = Number(d.page) || page;
@@ -5902,7 +5912,7 @@ window.addEventListener('message', (e) => {
       // 再做一次减法（第一版在这里算错过：重复累加会得到翻倍的分数）。
       sum.earned = 0; sum.max = 0; sum.pending = 0;
       const body = accts.map(a => {
-        if (a.stale) return panelRowLoading('tasks', a.uid, a.nickname, 7);
+        if (a.stale) return panelRowLoading('tasks', a.uid, a.nickname, colN);
         if (!a.ok) return panelRowErr('tasks', a.uid, a.nickname, a.error || '查询失败');
         sum.earned += (a.earned || 0);
         sum.max += (a.max || 0);
@@ -5918,7 +5928,7 @@ window.addEventListener('message', (e) => {
       <span class="dim" style="font-size:11px">任务是一次性的：点一次入账一次，已完成的不再重复发分</span>
     </div>`;
       host.innerHTML = head + `<table class="accttable"><thead><tr>
-      <th>UID</th><th>昵称</th><th>进度</th><th>已得积分</th><th>余额</th><th>待完成</th><th>操作</th>
+      <th>UID</th><th>昵称</th><th>进度</th><th>已得积分</th>${showBal ? '<th>余额</th>' : ''}<th>待完成</th><th>操作</th>
     </tr></thead><tbody>${body}</tbody></table>`;
       hideEmptyCols(host.querySelector('table'));
       panelBindPager(host, 'tasks', page, pagesNow, (n) => loadLoomyTasks(providerId, n));
@@ -6007,6 +6017,24 @@ window.addEventListener('message', (e) => {
   // 为什么必须字段驱动：同一张表要同时服务两种形状 —— loomy（codes/activated，面板内直接绑）
   // 与 codar（my_code/invited/bind_page，要过人工验证 ⇒ 点绑定开弹窗）。
   // 按 providerId 分支会让"加一个上游前端零改动"这条设计失效（有测试守着）。
+  // hasMeaningfulBalance 余额列的**存在性判据** —— 表头与每一行共用这一条，两张表也共用。
+  //
+  // 判据只有这一份：至少一行 balance_known !== false **且** Number(balance) > 0。
+  //   · 0 不算有意义取值（整列皆 0 同样没信息量 —— 用户原话「余额 0 列也不要」）；
+  //   · balance_known === false = 这个上游**没有余额口径**（后端诚实的表达，**不许**改成 0）。
+  //
+  // # 两张表的差别不在字段名，而在**数据路径**（2026-11-13 T-908 核实过）
+  //
+  //   · 邀请码面板（/invite）：codar 那条会真给 balance（internal/codar/extensions.go:640 起）。
+  //   · 任务表（ltask）：phanthywork 的**任务视图**按契约只给 balance_known: false，
+  //     且**不许给** balance —— 见 internal/phanthywork/invite_test.go:333-347：
+  //     「balance_known 必须是 false」＋「不该给 balance（会让前端长出多余的列）」。
+  //   ⇒ 这条判据在任务表上恒为 false ⇒ 余额列**恒不显示**（正是用户要的"没有就不显示"）。
+  //     将来哪个上游的任务回执真带上余额，这一列会自己回来 —— 这里一行都不用改。
+  function hasMeaningfulBalance(accts) {
+    return (accts || []).some(a => a && a.balance_known !== false && Number(a.balance) > 0);
+  }
+
   function colSet(accts) {
     const has = (f) => (accts || []).some(a => a && a[f] !== undefined && a[f] !== null);
     // ⚠ nickname 多一条「**非空**」判据（2026-11-13 用户要求「名字看不到，这一列就不要了」）：
@@ -6027,8 +6055,8 @@ window.addEventListener('message', (e) => {
     //
     // ⚠ 判据一律**字段驱动**（balance_known / balance），不按上游名分叉
     //   —— TestWebUIHasNoUpstreamNameBranch 守着这条。
-    const hasBalance = (accts || []).some(a => a && a.balance_known !== false && Number(a.balance) > 0);
-    return { balance: hasBalance,
+    // ⚠ 余额那条判据在 hasMeaningfulBalance()（与任务表共用同一份）——这里只取它的结果。
+    return { balance: hasMeaningfulBalance(accts),
       activated: has('activated'), invited: has('invited'), codes: has('codes'), myCode: has('my_code'),
       wechat: has('wechat_bound'), nickname: hasText('nickname') };
   }

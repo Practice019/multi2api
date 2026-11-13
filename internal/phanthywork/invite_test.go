@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -369,6 +370,49 @@ func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
 		t.Fatalf("colSet 字段表解析为空: %q", m[1])
 	}
 
+	// ⚠★ 2026-11-13（T-910）：第三条形态 —— 「balance: hasMeaningfulBalance(accts)」。
+	//
+	// 它不是 has('f') 形态（判据是"至少一行 balance_known !== false 且 Number(balance) > 0"），
+	// 旧解析会**跳过**它 ⇒ 这条跨包护栏覆盖不到余额列 —— 而"覆盖不到"就是**假绿**。
+	//
+	// 做法不是"再写一遍余额规则"，而是**从 app.js 里把规则读出来**：
+	//   · 字段名：抠 hasMeaningfulBalance 函数体里所有「a.X」引用 ⇒ 改名必须红（这条护栏的本职）；
+	//   · 条件：要求体内出现「!== false」与「> 0」——「未探测」与「0 不算有意义取值」都是契约的一部分；
+	//   · 禁字面量：体内不许有任何字符串字面量 —— 字段驱动的判据不需要它，出现即是
+	//     "按上游名分叉"或"写死了取值"（T-910 的反向验证就是拿这条验的）。
+	if !regexp.MustCompile(`balance:\s*hasMeaningfulBalance\(accts\)`).MatchString(m[1]) {
+		t.Fatalf("colSet 的字段表里没有「balance: hasMeaningfulBalance(accts)」—— 余额列的判据被挪走/改名了？"+
+			"这条守卫要跟着改（别删）。当前字段表: %q", m[1])
+	}
+	balBody := extractFnBody(t, js, "function hasMeaningfulBalance(accts)")
+	for _, need := range []string{"!== false", "> 0"} {
+		if !strings.Contains(balBody, need) {
+			t.Errorf("hasMeaningfulBalance 里没有 %q —— 「未探测（false）」或「0 不算有意义取值」这条契约丢了:\n%s",
+				need, balBody)
+		}
+	}
+	if regexp.MustCompile(`['"]`).MatchString(balBody) {
+		t.Errorf("hasMeaningfulBalance 里出现了字符串字面量 —— 字段驱动的判据不需要字面量，"+
+			"出现就是「按上游名分叉」或写死取值（T-910 的反向验证就是拿这条验的）:\n%s", balBody)
+	}
+	balFields := fieldRefs(balBody)
+	if len(balFields) == 0 {
+		t.Fatalf("从 hasMeaningfulBalance 里抠不到任何「a.X」字段引用:\n%s", balBody)
+	}
+	// 按**从 app.js 读出来的字段名**求值（把它们改成别的名字 ⇒ 下面查不到值 ⇒ 断言红）。
+	knownField, balValueField := "", ""
+	for _, f := range balFields {
+		if strings.HasSuffix(f, "_known") {
+			knownField = f
+		}
+		if f == "balance" {
+			balValueField = f
+		}
+	}
+	if knownField == "" || balValueField == "" {
+		t.Fatalf("hasMeaningfulBalance 的字段引用 = %v —— 期望既有「*_known」也有余额值字段（改名了？）", balFields)
+	}
+
 	p, _, _ := inviteFixture(t, 1, nil)
 	_, body := inviteFetch(t, p, "")
 	rowsRaw, _ := body["accounts"].([]any)
@@ -395,6 +439,16 @@ func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
 		}
 		cols[pr[1]] = hasField(pr[3])
 	}
+	// ⚠★ T-910：余额列也进 cols —— 判据与字段名都**从 app.js 读**（不是在这里重写一遍规则）。
+	//   「有意义取值」= 该行 balance_known 不为 false，且余额值 > 0（0 不算 —— 用户原话「余额 0 列也不要」）。
+	cols["balance"] = func() bool {
+		if v, ok := row[knownField]; ok {
+			if b, isBool := v.(bool); isBool && !b {
+				return false
+			}
+		}
+		return jsonNumber(row[balValueField]) > 0
+	}()
 	t.Logf("colSet 字段表=%v ⇒ 我们的行算出 cols=%v", pairs, cols)
 	if !cols["codes"] {
 		t.Error("「我生成的码」列没出现 —— 后端没给前端认的 codes")
@@ -425,6 +479,89 @@ func TestInvitePanelColumnsAreFieldDriven(t *testing.T) {
 	if bindShown {
 		t.Error("按 app.js 的判据，我们的行**会**出现绑定输入框 —— 平台侧事后绑定 409，那是死按钮")
 	}
+}
+
+// ★ 反向锁（T-910）：本夹具的账号**没有余额口径**（balance_known=false，见 invite.go 的 BalanceKnown）⇒
+// 这一列不该出现。全列都画「—」的列占了宽度却零信息量（用户要求：没有就不显示）。
+// ⚠ 若哪天后端开始给余额，这条会红 —— 那是**该红**：说明"这一列该出现了"，请连同夹具一起复核。
+func TestInviteBalanceColumnIsFieldDriven(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "server", "ui", "app.js"))
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	js := string(src)
+	balBody := extractFnBody(t, js, "function hasMeaningfulBalance(accts)")
+	if regexp.MustCompile(`['"]`).MatchString(balBody) {
+		t.Errorf("hasMeaningfulBalance 里出现字符串字面量（按上游名分叉/写死取值）:\n%s", balBody)
+	}
+	p, _, _ := inviteFixture(t, 1, nil)
+	_, body := inviteFetch(t, p, "")
+	rowsRaw, _ := body["accounts"].([]any)
+	if len(rowsRaw) != 1 {
+		t.Fatalf("行数 = %d", len(rowsRaw))
+	}
+	row, _ := rowsRaw[0].(map[string]any)
+	k, ok := row["balance_known"].(bool)
+	if !ok {
+		t.Fatalf("夹具行没有 balance_known（守卫要跟着改）: %v", row)
+	}
+	if k {
+		t.Log("本夹具现在**有**余额口径 —— 上面那条反向锁会随之失效，需要一起复核")
+	}
+	if !k && jsonNumber(row["balance"]) > 0 {
+		t.Error("balance_known=false 却带着正余额值 —— 两半自相矛盾")
+	}
+}
+
+// extractFnBody 从 app.js 里抠一个函数体：从 marker 起到下一个两空格缩进的收尾「}」。
+//
+// ⚠ 抠不到就 Fatal（守卫 fail-open 比没有守卫更坏 —— 本仓的老规矩）。
+func extractFnBody(t *testing.T, js, marker string) string {
+	t.Helper()
+	i := strings.Index(js, marker)
+	if i < 0 {
+		t.Fatalf("app.js 里找不到 %q —— 守卫要跟着改（别删）", marker)
+	}
+	rest := js[i:]
+	// ⚠ app.js 是 **CRLF**（本仓那批前端文件都是）⇒ 边界必须容忍 \r\n。
+	//   第一版写死 "\n  }\n"，在 CRLF 上一次都没匹配上（两边都 Fatal 了，还算诚实）。
+	loc := regexp.MustCompile(`\r?\n  \}\r?\n`).FindStringIndex(rest)
+	if loc == nil {
+		t.Fatalf("%q 的函数体切不出边界（守卫会 fail-open）", marker)
+	}
+	return rest[:loc[0]]
+}
+
+// fieldRefs 抠出函数体里所有「a.X」形式的字段引用（去重、保序）。
+//
+// 这是"前端规则读文件、不许背下来"的落地点：字段改名 ⇒ 这里抠出来的名字跟着变 ⇒ 断言红。
+func fieldRefs(body string) []string {
+	var out []string
+	seen := map[string]bool{}
+	// ⚠ 这里的反斜杠必须真到 app.js 的规则上：`a\.` = 字面「a.」，`\w` = 标识符字符。
+	for _, m := range regexp.MustCompile(`a\.([A-Za-z_]\w*)`).FindAllStringSubmatch(body, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// jsonNumber 把 JSON 解出来的数字（float64）或字符串数字统一成 float64（读不到 = 0）。
+func jsonNumber(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int:
+		return float64(x)
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		if err == nil {
+			return f
+		}
+	}
+	return 0
 }
 
 // TestInviteNicknameColumnRegressionLock 反向锁：**有**真名字时这一列必须照旧出现。
