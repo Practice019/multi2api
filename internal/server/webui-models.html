@@ -1676,6 +1676,10 @@ header.statline { align-items:baseline; }
     filter: '',
     vendorFilter: '',
     updated: null,
+    // catalog = 后端下发的「这份目录是什么时候从上游取的」（/ui/models/data 的 catalog 字段）。
+    // null = 应答里没有它（或字段是 -1）：页脚那时只显示页面这次取数的时刻，
+    // 并如实说「上游取数时刻未知」，**不**用本地时间冒充。
+    catalog: null,
     // ── 2026-10-27 新增（勾选 / 倍率 / 可调用）────────────────────────
     // selected 是**勾选的唯一真相**（按模型 id 记）。此前勾选只活在 DOM 的
     // checkbox 上，而 renderModels() 每次重绘都重建那些节点 ⇒ 勾选会静默丢失，
@@ -1727,6 +1731,43 @@ header.statline { align-items:baseline; }
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
+  // fmtAgo 把秒数说成人话（「12 分钟前」）。
+  // 负数/非数字统一按 0 处理：后端已保证 >= 0，这里只防"显示成 -3 秒前"这种不可能的说法。
+  function fmtAgo(sec) {
+    var s = Math.max(0, Math.floor(Number(sec) || 0));
+    if (s < 60) { return s + ' 秒前'; }
+    if (s < 3600) { return Math.floor(s / 60) + ' 分钟前'; }
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    return h + ' 小时' + m + ' 分钟前';
+  }
+
+  // catalogUpdatedText 页脚那句「这份数据是什么时候的」。
+  //
+  // # 为什么必须把两件事分开说（用户报障的直接修法）
+  //
+  // 原先页脚只有「更新于 HH:MM:SS」——那是**这个页面这次请求的时刻**，与上游目录的
+  // 缓存时刻无关。一份 59 分钟前从上游取回的目录，看起来和刚取的完全一样，用户读到
+  // 的就是「列表目录都不是实时的」，而且无从判断「刷新到底有没有生效」。
+  //
+  // 现在两段都说：① 页面这次取数的时刻；② **上游那份目录是什么时候取的**
+  // （来自 /ui/models/data 的 catalog，字段语义见后端 catalogFreshnessView）。
+  // age_seconds < 0 = 后端不知道（冷缓存 / 当前切到了 SQL 目录档）⇒ 如实说不知道，
+  // 不许用本地时间兜一个看起来新鲜的数。
+  function catalogUpdatedText() {
+    var at = state.updated ? '更新于 ' + fmtClock(state.updated) : '';
+    var c = state.catalog;
+    if (!c || typeof c.age_seconds !== 'number' || c.age_seconds < 0) {
+      return at + (state.source === 'store'
+        ? ' · 目录取自 SQL（无上游取数时刻）'
+        : ' · 上游取数时刻未知');
+    }
+    var ttlMin = Math.round((Number(c.ttl_seconds) || 0) / 60);
+    return at + ' · 目录取自上游 ' + fmtAgo(c.age_seconds)
+      + (ttlMin > 0 ? '（缓存 ' + ttlMin + ' 分钟，过期后自动回源）' : '')
+      + (c.stale ? '，已过期' : '');
+  }
+
   // ── 取数 ──────────────────────────────────────────────────────────────
   // load 取**三份**数据：目录（主表）+ 倍率 + 上游账号数。
   //
@@ -1741,6 +1782,9 @@ header.statline { align-items:baseline; }
       state.ready = !!(data && data.ready);
       state.loaded = true;
       state.updated = new Date();
+      // 目录的「取数时刻」来自后端（catalog），不是前端自己算的 —— 页面这次请求
+      // 比上游那份目录新得多，用本地时间会把它显示成「刚刚取的」（见 catalogUpdatedText）。
+      state.catalog = (data && data.catalog) || null;
       setErr('');
     }).catch(function (e) {
       // 保留上一份数据（若有）：网络抖动时把表格清空，用户看到的是"模型没了"，
@@ -1761,7 +1805,7 @@ header.statline { align-items:baseline; }
     document.getElementById('tabnVendors').textContent = '(' + state.vendors.length + ')';
     document.getElementById('srcline').textContent =
       state.source === 'store' ? 'SQL 目录' : (state.source === 'memory' ? '实时聚合（SQL 目录未接线）' : '');
-    document.getElementById('upd').textContent = state.updated ? '更新于 ' + fmtClock(state.updated) : '';
+    document.getElementById('upd').textContent = catalogUpdatedText();
   }
 
   // ── 2026-10-27：倍率目录 / 可调用判定 / 复制（用户点名要的三件事）────────

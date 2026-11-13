@@ -136,6 +136,22 @@ func peekProviderModelsCached(id string) ([]gateway.ModelInfo, bool) {
 	return e.infos, true
 }
 
+// providerModelsCachedTimes 只读地列出"按上游分域的目录"各自的最近取数时刻。
+//
+// 给 /ui/models/data 的 catalog 字段用（见 models_channels.go 的 catalogFreshness）：
+// **展示**语义，绝不回源。空切片 = 冷缓存（还没有任何上游的目录）。
+func providerModelsCachedTimes() []time.Time {
+	providerModelsCache.RLock()
+	defer providerModelsCache.RUnlock()
+	out := make([]time.Time, 0, len(providerModelsCache.entries))
+	for _, e := range providerModelsCache.entries {
+		if e != nil && len(e.infos) > 0 && !e.fetched.IsZero() {
+			out = append(out, e.fetched)
+		}
+	}
+	return out
+}
+
 func storeProviderModels(id string, infos []gateway.ModelInfo) {
 	cp := make([]gateway.ModelInfo, len(infos))
 	copy(cp, infos)

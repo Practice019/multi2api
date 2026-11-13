@@ -852,6 +852,27 @@ const (
 	modelsFetchFailCooldown = 5 * time.Minute
 )
 
+// dynamicModelsFetchedAt 只读地报告动态目录**最近一次成功取数**的时刻；零值 = 冷缓存。
+//
+// # 为什么需要它（用户报障）
+//
+//	「感觉列表目录都不是实时的。前端读取本地缓存，但是本地缓存需要有办法可以更新。」
+//
+// 缓存本身是对的（1h TTL 防的就是"每个客户端连一次就打一轮上游"），缺的是**可见性**：
+// 在此之前页面上唯一的时间戳是"页面这次请求的时刻"，与这份目录何时从上游取回无关
+// ⇒ 一份 59 分钟前的目录看起来和刚取的完全一样，"刷新有没有生效"只能靠感觉。
+//
+// ⚠ 展示语义：**绝不**发起上游请求（一次展示不该触发一次回源）。
+// 消费点见 models_channels.go 的 catalogFreshness（/ui/models/data 的 catalog 字段）。
+func dynamicModelsFetchedAt() time.Time {
+	dynamicModelsCache.RLock()
+	defer dynamicModelsCache.RUnlock()
+	if len(dynamicModelsCache.ids) == 0 {
+		return time.Time{}
+	}
+	return dynamicModelsCache.fetched
+}
+
 // riskReasoningEfforts 本网关对客户端声明的**可选思考档位**。
 //
 // ⚠ 为什么是"统一给四档"而不是按模型区分：

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"workbuddy2api/internal/channelstore"
 	"workbuddy2api/internal/modelmap"
@@ -559,6 +560,71 @@ type catalogViewVendor struct {
 	Synthetic int `json:"synthetic"`
 }
 
+// catalogFreshnessView 是 /ui/models/data 里那份「这份目录是什么时候取的」。
+//
+// # 为什么必须有它（用户报障的直接修法）
+//
+//	「反代模型目录有 bug，感觉列表目录都不是实时的。
+//	  前端读取本地缓存，但是本地缓存需要有办法可以更新。」
+//
+// 缓存（1h TTL）是对的 —— 它挡的是「每个客户端连一次就打一轮上游」。缺的是**可见性**：
+// 在此之前页面上唯一的时刻是 webui-models.html 的「更新于 HH:MM:SS」，那是**这个页面
+// 这次请求的时刻**，与目录何时从上游取回无关 ⇒ 一份 59 分钟前的目录看起来和刚取的
+// 一模一样，「刷新到底有没有生效」无从判断。所以把上游取数时刻如实下发。
+//
+// 字段语义（**前端契约**：改这里必须同时改 webui-models.html）：
+//
+//	fetched_at  RFC3339；空串 = 不知道（冷缓存 / SQL 目录档）
+//	age_seconds 距上次取数的秒数；**-1 = 不知道**（为 -1 时不要读 stale）
+//	ttl_seconds 正缓存时长（与后端 dynamicModelsTTL 同一个常量，不许前端各写一份）
+//	stale       age_seconds >= ttl_seconds（这份目录下次请求会被回源刷新）
+type catalogFreshnessView struct {
+	FetchedAt  string `json:"fetched_at"`
+	AgeSeconds int64  `json:"age_seconds"`
+	TTLSeconds int64  `json:"ttl_seconds"`
+	Stale      bool   `json:"stale"`
+}
+
+// catalogFreshness 汇总「这份目录由哪些快照拼成」，返回其中**最旧**的一份的时刻。
+//
+// # 为什么取最旧而不是最新
+//
+// 页面上的目录是多份快照合并的（默认上游的 dynamicModelsCache + 其余各上游的
+// providerModelsCache）。只要有一份过了 TTL，「这份目录是不是实时的」答案就是「不是」；
+// 取最新的一份会把 90 分钟前的旧目录报成「1 秒前取的」——那比没有这个字段更坏（假新鲜）。
+//
+// # 为什么不知道时返回 -1 而不是 0
+//
+// 0 秒前 = 「刚刚取的」，是一个**断言**；不知道时说不知道才是诚实的。
+// 页面对 -1 的处置见 webui-models.html 的 catalogUpdatedText。
+func catalogFreshness() catalogFreshnessView {
+	out := catalogFreshnessView{AgeSeconds: -1, TTLSeconds: int64(dynamicModelsTTL.Seconds())}
+	oldest := time.Time{}
+	consider := func(ts time.Time) {
+		if ts.IsZero() {
+			return
+		}
+		if oldest.IsZero() || ts.Before(oldest) {
+			oldest = ts
+		}
+	}
+	consider(dynamicModelsFetchedAt())
+	for _, ts := range providerModelsCachedTimes() {
+		consider(ts)
+	}
+	if oldest.IsZero() {
+		return out
+	}
+	out.FetchedAt = oldest.Format(time.RFC3339)
+	age := int64(time.Since(oldest).Seconds())
+	if age < 0 {
+		age = 0 // 时钟回拨：不报负龄（前端会读到「-3 秒前」这种不可能的说法）
+	}
+	out.AgeSeconds = age
+	out.Stale = age >= out.TTLSeconds
+	return out
+}
+
 // modelsUI 提供模型管理页（与 channelsUI / statusUI 逐字同构）。
 func (h *Handler) modelsUI(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.uiIdentify(r); !ok {
@@ -576,7 +642,11 @@ func (h *Handler) modelsUI(w http.ResponseWriter, r *http.Request) {
 // 契约（webui-models.html 按它渲染；改动必须两边一起改）：
 //
 //	{ "ready":bool, "source":"store"|"memory",
-//	  "models":[catalogViewModel], "vendors":[catalogViewVendor] }
+//	  "models":[catalogViewModel], "vendors":[catalogViewVendor],
+//	  "catalog":catalogFreshnessView }
+//
+// ⚠ catalog 是**必需**字段（不是可选增强）：页面靠它回答"这份目录是不是实时的"。
+//   页面原来只显示"更新于 <本地时刻>"，那与上游缓存无关（见 catalogFreshnessView）。
 //
 // 未认证 ⇒ 401 + JSON，**不是** 200 + 空数组：空数组在页面上是"一个模型都
 // 没有"，会把"没登录"读成"目录是空的" —— 那是两类完全不同的故障。
@@ -586,12 +656,20 @@ func (h *Handler) modelsCatalogJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	models, vendors, source, ready := h.catalogView()
+	catalog := catalogFreshness()
+	if source == "store" {
+		// ⚠ SQL 档的目录行里**没有**取数时刻（models 表只存名字/端点）。
+		// 如实报「不知道」，**不许**拿内存里那两份缓存的最新时刻去冒充它 ——
+		// 那会把一张"只增不改"的表显示成"刚刚取的"（假新鲜，比不显示更坏）。
+		catalog = catalogFreshnessView{AgeSeconds: -1, TTLSeconds: catalog.TTLSeconds}
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ready":   ready,
 		"source":  source,
 		"models":  models,
 		"vendors": vendors,
+		"catalog": catalog,
 	})
 }
 
