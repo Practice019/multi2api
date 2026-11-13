@@ -5492,9 +5492,19 @@ window.addEventListener('message', (e) => {
   // 实测最直接的空间浪费就是它：Loomy 新手任务页的「待完成」列**整列都是 `—`**
   //（因为那 44 个号都已全部完成，没有待办项）⇒ 白白占掉一整列的宽度。
   //
+  // # ⚠⚠ 两类列：一类"有 — 也要留"，一类"全 — 就藏"（2026-11-13 用户要求「余额 0 列也不要」）
+  //
+  // 这条通用规则（"有真值就保留"）管的是**第一类**：
+  //	· **状态类列**（绑定状态 / 激活状态 / 我生成的码 / 待完成…）：某一行是空或「—」= 这一行
+  //	  **当下**的真实状态（还没绑定、还没有码）⇒ 一列里有几行「—」很正常，这列照样有信息量
+  //	  ⇒ **不能藏**。这正是下面第 1 条保险守的东西。
+  //	· **余额列**：`balance_known === false` 不是"这个账号余额未知"，而是**这个上游没有余额口径**
+  //	  （后端诚实这么报）⇒ 全列都画「—」时它表达的是"整表没有这个维度"，不是"部分缺值"
+  //	  ⇒ **整列（含表头）不显示**。这条判据在 `colSet` 里（字段驱动：balance_known / balance），
+  //	  不在这里 —— 因为它是**列的存在性**问题，不是"某列是否全空"的通用问题；
+  //	  而 0 也不算有意义取值（整列皆 0 同样没有信息量）。
+  //
   // ⚠ 三条保险（缺一条就会藏错列）：
-  //	1. 判据是"**所有行**都已空" —— 只要有一行有真值就保留
-  //	   （像「余额」列里有几行是 `—`，那列**不能**藏）；
   //	2. 「空」= 去掉空白与 `— – - …` 之后什么都不剩 —— 排除"只有占位符"的格子；
   //	3. **少于 3 行不做判断** —— 一两行的样本不足以说明"这列一直是空的"，
   //	   而且那种情况下表格本来也没占多少宽度。
@@ -5994,8 +6004,36 @@ window.addEventListener('message', (e) => {
     //   拿不到有意义展示名的上游后端就**不给**这个字段；这里再要求 trim 后非空，
     //   防"给了空串也算有字段"把整列拉出来。
     const hasText = (f) => (accts || []).some(a => a && a[f] !== undefined && a[f] !== null && String(a[f]).trim() !== '');
-    return { activated: has('activated'), invited: has('invited'), codes: has('codes'), myCode: has('my_code'),
+    // ⚠ 余额列多一条「**至少有一行有意义取值**」判据（2026-11-13 用户要求「余额 0 列也不要」）。
+    //
+    // # 为什么它和别的列不一样（这条区分必须记住）
+    //
+    // · **状态类列**（绑定状态 / 激活状态 / 我生成的码 / 待完成…）：某一行是空或「—」= 这一行
+    //   **当下**的真实状态（还没绑定、还没有码）⇒ 只要有一行有值这列就有信息量，
+    //   **不能因为几行是「—」就把整列藏掉**。这正是 hideEmptyCols 那三条保险守的东西（那条规则不动）。
+    // · **余额列**：balance_known === false 不是「这个账号当下余额未知」，而是**这个上游根本没有
+    //   余额口径**（后端诚实这么报）⇒ 全列都画「—」时，这一列承载的是「没有这个维度」，
+    //   不是「部分缺值」⇒ 整列（含表头）不显示。
+    //   另外 0 也不算有意义取值：整列皆 0 同样没有信息量（用户原话「余额 0 列也不要」）。
+    //
+    // ⚠ 判据一律**字段驱动**（balance_known / balance），不按上游名分叉
+    //   —— TestWebUIHasNoUpstreamNameBranch 守着这条。
+    const hasBalance = (accts || []).some(a => a && a.balance_known !== false && Number(a.balance) > 0);
+    return { balance: hasBalance,
+      activated: has('activated'), invited: has('invited'), codes: has('codes'), myCode: has('my_code'),
       wechat: has('wechat_bound'), nickname: hasText('nickname') };
+  }
+
+  // balanceCellHTML 余额单元格的**唯一渲染点**（邀请码面板用）。
+  //
+  // 为什么抽成一个函数：这一格以前是直接写在行模板里的，而"整列无有意义取值就藏"这条门控
+  // 要同时管**表头 th** 与**每一行的 td**（两处必须用同一个判据，否则会出现"有表头没格子"）。
+  // 抽出来之后：门控看 cols.balance，格子内容只看这一格自己 —— 两个关注点分开。
+  // ⚠ 未知（balance_known === false）画「—」，**不填 0**：那是后端诚实的"没有余额口径"。
+  function balanceCellHTML(a) {
+    if (a.balance_known === false) return '<span class="dim">—</span>';
+    return esc(String(a.balance ?? 0)) + (a.balance_partial === true
+      ? '<span class="dim" style="font-size:11px;margin-left:4px" title="只取到部分桶（general/rewrite 未取到），实际额度可能更高">部分</span>' : '');
   }
 
   // openPageModal / closePageModal —— 页内模态（T-358）。
@@ -6225,7 +6263,9 @@ window.addEventListener('message', (e) => {
     // colCountOf 由列集算列数：占位行的 colspan 必须跟着列数走（列数是动态的 3~8）。
     function colCountOf(c) {
       if (!c) return 6; // 还没渲染过：给个保守值（避免 colspan=undefined）
-      return 4 + (c.activated ? 1 : 0) + (c.invited ? 1 : 0) + (c.codes ? 1 : 0) + (c.myCode ? 1 : 0);
+      // ⚠ base 从 4 降到 3，余额那一列改按 cols.balance 计（2026-11-13：余额列可被藏）。
+      //   漏掉这一步的后果是占位行 colspan 比真实列数多 1 —— 表格歪一列，静态看不出来。
+      return 3 + (c.balance ? 1 : 0) + (c.activated ? 1 : 0) + (c.invited ? 1 : 0) + (c.codes ? 1 : 0) + (c.myCode ? 1 : 0);
     }
     const getPath = adminRouteFor(providerId, 'invite', 'GET');
     if (!getPath) {
@@ -6339,7 +6379,7 @@ window.addEventListener('message', (e) => {
         ${cols.nickname ? `<td>${esc(a.nickname)}</td>` : ''}
         ${cols.activated ? `<td>${st}</td>` : ''}
         ${cols.invited ? `<td>${invitedPill}</td>` : ''}
-        <td class="mono">${a.balance_known === false ? '<span class="dim">—</span>' : esc(String(a.balance ?? 0)) + (a.balance_partial === true ? '<span class="dim" style="font-size:11px;margin-left:4px" title="只取到部分桶（general/rewrite 未取到），实际额度可能更高">部分</span>' : '')}</td>
+        ${cols.balance ? '<td class="mono">' + balanceCellHTML(a) + '</td>' : ''}
         ${cols.codes ? `<td class="codewrap">${codes}</td>` : ''}
         ${cols.myCode ? `<td>${myCode}</td>` : ''}
         ${cols.wechat ? `<td>${wechatCell}</td>` : ''}
@@ -6406,7 +6446,7 @@ window.addEventListener('message', (e) => {
     </div>`;
       // ⚠ 上一行必须留着（我 2026-11-12 在这里踩过第三次：替换时把它吞掉了 ⇒ node --check 当场红）。
       host.innerHTML = head + `<table class="accttable"><thead><tr>
-      <th>UID</th>${cols.nickname ? '<th>昵称</th>' : ''}${cols.activated ? '<th>激活状态</th>' : ''}${cols.invited ? '<th>绑定状态</th>' : ''}<th>余额</th>${cols.codes ? '<th>我生成的码</th>' : ''}${cols.myCode ? '<th>我的邀请码</th>' : ''}${cols.wechat ? '<th>微信</th>' : ''}<th>绑定别人的码</th>
+      <th>UID</th>${cols.nickname ? '<th>昵称</th>' : ''}${cols.activated ? '<th>激活状态</th>' : ''}${cols.invited ? '<th>绑定状态</th>' : ''}${cols.balance ? '<th>余额</th>' : ''}${cols.codes ? '<th>我生成的码</th>' : ''}${cols.myCode ? '<th>我的邀请码</th>' : ''}${cols.wechat ? '<th>微信</th>' : ''}<th>绑定别人的码</th>
     </tr></thead><tbody>${body}</tbody></table>`;
       hideEmptyCols(host.querySelector('table'));
       panelBindPager(host, 'invite', page, pagesNow, (n) => loadLoomyInvite(providerId, n));

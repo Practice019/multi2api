@@ -486,19 +486,31 @@ func TestWebUIInviteBalancePartialMarker(t *testing.T) {
 	if !strings.Contains(html, `title="只取到部分桶`) {
 		t.Error("「部分」标记应带 title 说明（用户要知道「实际可能更高」）")
 	}
-	// 标记文案与位置：必须在余额格那一行里，且不新增列
-	bi := strings.Index(html, "balance_partial === true")
-	if bi < 0 {
-		t.Fatal("找不到判据")
+	// 标记文案与位置：必须在余额格那一格里的唯一渲染点，且不新增列。
+	//
+	// ⚠ 2026-11-13（T-906）改了这条的**提取方式**，判据强度不变：余额格原来是直接写在行模板里
+	// 的一整段表达式，现抽成 balanceCellHTML(a)（门控 cols.balance 要管表头 + 每一行，两处必须同源）。
+	// 于是「哪一行」的取法从"含 balance_partial 的那一行"改成"那唯一渲染点的函数体"：
+	//   · 函数体里必须同时有 `balance_known === false ⇒ —` 与 `balance_partial === true ⇒ 部分`；
+	//   · 行模板里那一格必须是 `'<td class="mono">' + balanceCellHTML(a) + '</td>'` ——
+	//     标记仍然长在**余额那一格**里，不是新开一格。
+	fnStart := strings.Index(html, "function balanceCellHTML(a) {")
+	if fnStart < 0 {
+		t.Fatal("找不到余额格唯一渲染点 balanceCellHTML(a) —— 它被删了/改名了？这条守卫要跟着改，别删")
 	}
-	lineStart := strings.LastIndex(html[:bi], "\n")
-	lineEnd := strings.Index(html[bi:], "\n")
-	line := html[lineStart : bi+lineEnd]
-	if !strings.Contains(line, "<td") {
-		t.Error("「部分」标记必须挂在**余额那一格**里（不是新开一格）")
+	fnEnd := strings.Index(html[fnStart:], "\n  }")
+	if fnEnd < 0 {
+		t.Fatal("balanceCellHTML 的函数体切不出边界（守卫会 fail-open）")
 	}
-	if !strings.Contains(line, "balance_known === false") {
-		t.Error("余额格应保留 `balance_known === false ⇒ —` 的既有判断")
+	fn := html[fnStart : fnStart+fnEnd]
+	if !strings.Contains(fn, "balance_known === false") {
+		t.Error("余额格应保留 `balance_known === false ⇒ —` 的既有判断（未知不填 0）")
+	}
+	if !strings.Contains(fn, "balance_partial === true") {
+		t.Error("「部分」标记必须在余额格的渲染点里（与未知判据同一处）")
+	}
+	if !strings.Contains(html, `'<td class="mono">' + balanceCellHTML(a) + '</td>'`) {
+		t.Error("「部分」标记必须挂在**余额那一格**里（不是新开一格）—— 行模板里应只有这一个余额 td")
 	}
 	// 不新增列
 	li := strings.Index(html, "host.innerHTML = head + `<table")

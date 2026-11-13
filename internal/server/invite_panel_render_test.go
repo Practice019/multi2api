@@ -48,7 +48,122 @@ func appJSInviteHintWindow(t *testing.T, js string) string {
 	return js[start : absHead+end+2]
 }
 
-// TestInvitePanelHintBlockIsRealCode ① 执行式：那段代码必须能真的跑起来。
+// TestInviteBalanceColumnHidesWhenNoMeaningfulValue 余额列「整列无有意义取值 ⇒ 整列不显示」。
+//
+// # 用户原话与背景（2026-11-13）
+//
+// 截图里两行的「余额」都是 `—`：phanthywork 没有余额口径，后端诚实报 balance_known:false
+// （**不许**把它改成 0 或删字段 —— 本仓纪律「未探测 ≠ 0」）。用户的要求是「余额 0 列也不要」。
+//
+// # 为什么要和别的列分开（这条区分是本轮的语义核心）
+//
+//	· 状态类列（绑定状态 / 激活状态 / 我生成的码…）：某行是空或「—」= 这一行**当下**的真实状态
+//	  ⇒ 一列里有几行「—」很正常，只要有真值就保留（hideEmptyCols 那条通用规则，**不动**）；
+//	· 余额列：balance_known === false = **这个上游没有余额口径** ⇒ 全列「—」时这一列没有信息量
+//	  ⇒ 整列（含表头）不显示；0 也不算有意义取值（整列皆 0 同样没信息量）。
+//
+// # 判据为什么必须执行式
+//
+// map/模板里的东西写对了但"没被执行"过（本仓 2026-11-12 的 hintText 事故）⇒ 这里只跑真代码：
+//
+//	· colSet / balanceCellHTML 从 ui/app.js 里**抠出来执行**（不是抄第二份）；
+//	· 行 td 的门控表达式与表头 th 的门控表达式也从 app.js 里抠出来**真求值**。
+//
+// 改实现（去掉门控、换个判据）必然改变结果 ⇒ 这组断言会红。
+func TestInviteBalanceColumnHidesWhenNoMeaningfulValue(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("ui", "app.js"))
+	if err != nil {
+		t.Fatalf("读 app.js: %v", err)
+	}
+	// 先做一次廉价的存在性检查：门控没了就没必要去 node 里绕一圈（报错也更直白）。
+	if !strings.Contains(string(src), "cols.balance") {
+		t.Fatalf("app.js 里找不到 cols.balance —— 余额列的门控被拿掉了（本轮要求：整列无有意义取值就不出这一列）")
+	}
+	node, lerr := exec.LookPath("node")
+	if lerr != nil {
+		t.Skip("没有 node，跳过执行式判据")
+	}
+	harness := strings.Join([]string{
+		`const fs = require('fs');`,
+		`const js = fs.readFileSync('ui/app.js', 'utf8');`,
+		`function win(from, to) {`,
+		`  const i = js.indexOf(from);`,
+		`  if (i < 0) { console.error('抠不到起点: ' + from); process.exit(9); }`,
+		`  const j = js.indexOf(to, i);`,
+		`  if (j < 0) { console.error('抠不到终点: ' + to); process.exit(9); }`,
+		`  return js.slice(i, j);`,
+		`}`,
+		`const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');`,
+		`eval(win('function colSet(accts) {', 'function balanceCellHTML(a) {'));`,
+		`eval(win('function balanceCellHTML(a) {', '// openPageModal'));`,
+		`if (typeof colSet !== 'function' || typeof balanceCellHTML !== 'function') { console.error('抠出来的代码没定义出函数'); process.exit(9); }`,
+		`// 门控表达式也从 app.js 里抠（不抄）：行 td 与表头 th 必须各有一条 cols.balance 门控。`,
+		`const jsLines = js.split(String.fromCharCode(10));`,
+		`const rowLine = jsLines.find(l => l.includes('cols.balance ?') && l.includes('balanceCellHTML'));`,
+		`const thLine = jsLines.find(l => l.includes('cols.balance ?') && l.includes('余额'));`,
+		`if (!rowLine || !thLine) { console.error('行或表头的余额门控没了（cols.balance ? 找不到）'); process.exit(9); }`,
+		`// 抠出 needle 所在的那个插值表达式，**按花括号配平**取界（表头那一行有 7 个插值，`,
+		`// 用"第一个 ${ 到最后一个 }"会把半行都吞进来 —— 第一版就这么错的）。`,
+		`function gateExpr(line, needle) {`,
+		`  const k = line.indexOf(needle);`,
+		`  if (k < 0) return null;`,
+		`  const start = line.lastIndexOf('${', k);`,
+		`  if (start < 0) return null;`,
+		`  let depth = 0;`,
+		`  for (let i = start + 1; i < line.length; i++) {`,
+		`    const c = line[i];`,
+		`    if (c === '{') depth++;`,
+		`    else if (c === '}') { depth--; if (depth === 0) return line.slice(start + 2, i); }`,
+		`  }`,
+		`  return null;`,
+		`}`,
+		`const rowExpr = gateExpr(rowLine, 'cols.balance ?');`,
+		`const thExpr = gateExpr(thLine, 'cols.balance ?');`,
+		`if (!rowExpr || !thExpr) { console.error('行/表头的余额门控表达式抠不出来'); process.exit(9); }`,
+		`const evalRow = (cols, a) => new Function('cols', 'balanceCellHTML', 'a', 'return (' + rowExpr + ');')(cols, balanceCellHTML, a);`,
+		`const evalTh = (cols) => new Function('cols', 'return (' + thExpr + ');')(cols);`,
+		`const bad = [];`,
+		`function check(label, rows, wantCol, wantCellHas) {`,
+		`  const cols = colSet(rows);`,
+		`  if (cols.balance !== wantCol) bad.push(label + ': colSet.balance = ' + cols.balance + ' want ' + wantCol);`,
+		`  const th = evalTh(cols);`,
+		`  if (wantCol ? th.indexOf('余额') < 0 : th !== '') bad.push(label + ': 表头 = ' + JSON.stringify(th));`,
+		`  const last = rows[rows.length - 1];`,
+		`  const td = evalRow(cols, last);`,
+		`  if (!wantCol && td !== '') bad.push(label + ': 仍然渲染了余额单元格: ' + JSON.stringify(td));`,
+		`  if (wantCellHas && td.indexOf(wantCellHas) < 0) bad.push(label + ': 余额单元格里没有 ' + wantCellHas + '（= ' + JSON.stringify(td) + '）');`,
+		`}`,
+		`// ① 两行都未知 ⇒ 整列不出现（用户截图那条）`,
+		`check('① 两行都未知', [{ uid: 'u1', balance_known: false }, { uid: 'u2', balance_known: false }], false, null);`,
+		`// ② 一行有 5 ⇒ 必须出现且显示 5（防"顺手把这列删了"）`,
+		`check('② 一行有 5', [{ uid: 'u1', balance_known: false }, { uid: 'u2', balance_known: true, balance: 5 }], true, '5');`,
+		`// ③ 一行 0 + 一行未知 ⇒ 0 不算有意义取值 ⇒ 整列不显示`,
+		`check('③ 0 与未知', [{ uid: 'u1', balance_known: true, balance: 0 }, { uid: 'u2', balance_known: false }], false, null);`,
+		`// ②b 一行有 5 时，未知那一行的格子仍画「—」（不是被顺手填 0）`,
+		`{`,
+		`  const cols = colSet([{ uid: 'u1', balance_known: false }, { uid: 'u2', balance_known: true, balance: 5 }]);`,
+		`  const cell = balanceCellHTML({ balance_known: false });`,
+		`  if (cell.indexOf('—') < 0) bad.push('未知行的余额格子必须画「—」，实际 ' + JSON.stringify(cell));`,
+		`  if (evalRow(cols, { uid: 'u2', balance_known: true, balance: 5 }) !== '<td class="mono">5</td>') bad.push('有值时格子应为 <td class="mono">5</td>');`,
+		`}`,
+		`// ④ 回归锁：其余列的判据一个都没变（有「—」/缺值的列仍然按"有真值就留"）`,
+		`{`,
+		`  const cols = colSet([{ uid: 'u1', invited: true, balance_known: false }, { uid: 'u2', balance_known: false }]);`,
+		`  if (cols.invited !== true) bad.push('④ invited 列被误藏（原来有一行 true 就该留）');`,
+		`  if (cols.activated !== false || cols.codes !== false || cols.myCode !== false || cols.wechat !== false || cols.nickname !== false) bad.push('④ 其余列的判据被改动了');`,
+		`  const nOnly = colSet([{ uid: 'u1', nickname: '  ', balance_known: false }]);`,
+		`  if (nOnly.nickname !== false) bad.push('④ nickname 的 hasText 判据被改动了（空白串不算有值）');`,
+		`}`,
+		`if (bad.length) { console.error(bad.join(' | ')); process.exit(1); }`,
+		`console.log('OK');`,
+	}, "\n")
+	out, runErr := exec.Command(node, "-e", harness).CombinedOutput()
+	if runErr != nil || !strings.Contains(string(out), "OK") {
+		t.Errorf("★ 余额列整列的显隐判据不对（%v）:\n%s", runErr, out)
+	}
+}
+
+// TestInvitePanelHintBlockIsRealCode ① 执行式：那段代码必须真的能跑起来。
 func TestInvitePanelHintBlockIsRealCode(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("ui", "app.js"))
 	if err != nil {
