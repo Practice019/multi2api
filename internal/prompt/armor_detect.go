@@ -56,6 +56,7 @@ import (
 //
 // ⚠ 全部小写（匹配时文本也小写，见 DetectArmor）—— 每次请求逐条 ToLower 是纯浪费。
 // ⚠ 断言钉在 armor_detect_test.go 的 TestDefaultArmorPatternsRejectNormalQuestions：
+//
 //	「正常问句『什么是越狱』不得命中内置集」（收窄前它是红的）。
 var defaultArmorPatterns = []string{
 	// ① 本仓破甲正文自己的独有短语（armor-payload.md 逐字副本）

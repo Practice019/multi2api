@@ -760,7 +760,8 @@ func modelOfBody(body []byte) string {
 // ⇒ 判据只留这一处：**需要设备身份的路径一律先调它**，别再各写一份（本仓"两处判据打架"的教训）。
 //
 // ⚠ 需要**推理令牌**的路径（Chat / 签到 claim）在这一步之后照旧调 `ensureInferenceToken` ——
-//   那是另一个凭据（180 秒），不属于"设备就绪"。
+//
+//	那是另一个凭据（180 秒），不属于"设备就绪"。
 func (p *Provider) ensureReady(ctx context.Context, a *Auth) error {
 	if a == nil {
 		return errNilAuth

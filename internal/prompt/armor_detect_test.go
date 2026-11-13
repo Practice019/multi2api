@@ -85,13 +85,13 @@ func TestArmorPatternsBuiltinPlusCustom(t *testing.T) {
 func TestDefaultArmorPatternsRejectNormalQuestions(t *testing.T) {
 	pats := ArmorPatterns(ArmorConfig{})
 	normal := []string{
-		"什么是越狱",                // 验收方点名的那条
-		"越狱这个词是什么意思",         // 单独出现「越狱」
-		"破甲是什么意思",             // 单独出现「破甲」
+		"什么是越狱",      // 验收方点名的那条
+		"越狱这个词是什么意思", // 单独出现「越狱」
+		"破甲是什么意思",    // 单独出现「破甲」
 		"帮我解释一下 jailbreak 这个术语",
 		"developer mode 在 Chrome 里怎么开启", // 工程语境里的同名短语
 		"无限制模式是什么",
-		"我们聊聊提示词注入与越狱检测的防守",   // 讨论这个话题本身
+		"我们聊聊提示词注入与越狱检测的防守", // 讨论这个话题本身
 	}
 	for _, q := range normal {
 		if d, ok := DetectArmor(q, pats); ok {
