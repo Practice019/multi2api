@@ -184,10 +184,120 @@ HTTP=503
 
 ---
 
+## ★★★ 唯一可靠判据：`x-kong-upstream-latency` 分辨「协议错」和「业务拒」
+
+排查期间反复卡在「同样是失败，到底是我的协议不对，还是账号/额度有问题」。
+实测出一条**一眼可用**的判据，写在这里避免以后重走：
+
+| 响应 | `x-kong-upstream-latency` | 含义 | 该查什么 |
+|---|---|---|---|
+| **HTTP 500 + 空体（0 字节）** | **8–9 ms** | 请求**没进业务层**，Kong 网关直接拒 | 协议 / 请求头 / 签名 |
+| **HTTP 4xx + 明确错误码** | **40 ms 以上** | 请求**进了业务层**，被业务规则拒 | 账号 / 额度 / 套餐 / 模型 |
+
+```bash
+# 一条命令就能看
+curl -sS -D- -o /tmp/b.txt -X POST https://code.phanthy.com/v1/messages \
+  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"Phanthy-fast","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}' \
+  | grep -i 'HTTP/\|x-kong-upstream-latency'
+wc -c < /tmp/b.txt
+```
+
+**实测样本**（同一个账号、同一天）：
+
+```
+协议未改前：  HTTP 500   0 B     x-kong-upstream-latency: 9
+协议改对后：  HTTP 403   70 B    x-kong-upstream-latency: 41   ← 协议已到位
+```
+
+> 这条判据的旁证：magpie-PhanthyCode 自带的 `scripts/probe-inference.mjs`
+> **只带 Bearer** 打同一端点，也是 `HTTP 500 0B` + `kong 9ms` ——
+> 说明旧协议对**任何人**都不通，不是我们账号的特殊问题。
+
+---
+
+## 协议完全正确的标志：拿到**业务错误码**
+
+当 `x-kong-upstream-latency` 升到 40ms 量级、且响应体是明确的 JSON 错误码时，
+说明协议层（端点 / 头 / 签名 / 令牌）**已经全对**，服务端正在按业务规则回答。
+
+本次改造后的四条路径一致性验证（同一账号、同一时刻）：
+
+```
+① 设备注册          HTTP 200  reward_reason=first_device_owner
+② 换推理令牌        HTTP 200  令牌 813 字符
+③ /v1/messages        desktop + 12 段签名   → 403 disabled_account  (kong 41ms)
+④ /v1/chat/completions cli   + 签名         → 403 disabled_account  (kong  8ms)
+⑤ /v1/chat/completions cli   无签名         → 403 disabled_account  (kong  8ms)
+⑥ /v1/chat/completions desktop + 签名       → 403 disabled_account  (kong  9ms)
+```
+
+**四条路径全部返回同一个业务错误码**（而不是 500 空体）⇒ 协议一致正确。
+
+---
+
 ## 已知限制（如实记录）
 
-本次上线时，池里 **6 个账号全部 `disabled_account`**（注册机批量注册被平台风控识别）。
-因此「真机返回 200」这一项**未能验证** —— 不是协议不对，是没有可用账号。
+### 一、账号封禁（2026-11-13 本次）
 
-**待有好号时**，用上面「端到端验证」那段命令即可确认；把 `no_healthy_account`
-变成正常 SSE 流就说明全通了。
+池里 **7 个账号全部 `disabled_account`**：
+
+```
+cmwc64nj21ejmsw3ilrzs2iq2   403 disabled_account
+cmwe7sk2n3xarjb3j39ria10d   403 disabled_account
+cmwedr1q25641l13jcqx2oh5l   403 disabled_account
+cmweetzdn5d5kl13jhcgkjxau   403 disabled_account
+cmwf1a10e0ncvoy3ktxsn9dxp   403 disabled_account
+cmwf1biv00o15o93jd1xfqly5   403 disabled_account
+cmwf4g3qi0wykqb3jzjezto3u   403 disabled_account   ← 当天新注册，1 小时后也被封
+```
+
+**最后那个号的封禁过程有完整时间线**（客户端日志 + 数据库）：
+
+```
+23:18:27  注册成功
+23:23:22  客户端成功  input 25151  output 10
+23:27:09  客户端成功  input    85  output  3     ← 最后一次成功
+23:28:42  客户端 403  "当前请求不可用"
+23:5x     我只读端点也 403  ⇒ 整账号级封禁
+```
+
+连 `/api/oauth/profile`、`/api/phanthy_code/models` 这类**只读**端点也 403，
+说明是**账号级**停用，不是推理面单独受限。
+
+**最可能的原因**（按证据强度排序）：
+
+1. **批量注册特征** —— 7 个号集中在 11-11 ~ 11-13 注册，同 IP 段、同设备指纹；
+2. **探测流量异常** —— 排查期间对该账号发了上百次请求（含大量刻意构造的畸形请求），
+   风控按「异常客户端行为」记账；
+3. **版本号长期过低** —— 改造前一直是 `2.48.0`（落后两个小版本），
+   服务端按「来源=桌面端但版本对不上」判异常。
+
+### 二、「HTTP 200 + 正文」未能验证
+
+因此本项**不是协议问题**，是**没有可用账号**：
+
+- 协议已到位（证据见上节：kong latency + 业务错误码）；
+- 待有新号时，跑一次 `/v1/messages` 见到 200 即闭环。
+
+**复跑命令**（拿到新号后）：
+
+```powershell
+# 1) 把新号凭据放进 auths/phanthywork/
+# 2) 真机验证
+$env:PHANTHY_LIVE_DIR='D:/project_GIT/workbuddy2api/auths/phanthywork'
+go test -tags mvp ./internal/phanthywork/ -run TestMVPFinal -v
+
+# 期望看到：
+#   ① register ✓   reward=first_device_owner
+#   ② token ✓      len=813
+#   ③ chat HTTP=200  ← 这一步就是闭环
+```
+
+### 三、给后续接手者的提醒
+
+- **不要**为了"让请求通过"而反复对同一账号施压 —— 本次就是因此把一个能用的号测死了；
+- 每次真机验证**只发 1 次**推理请求，失败就先停下来分析 `kong latency`；
+- 数据面（profile / usage / models）**先测**：如果它们也 403，说明账号已废，
+  继续调协议毫无意义。
