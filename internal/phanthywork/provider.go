@@ -157,9 +157,52 @@ const (
 	pathDailyLoginClaim = "/api/oauth/activities/daily-login/claim"
 	// pathModels 云端模型目录（**只带 Bearer**）。
 	pathModels = "/api/phanthy_code/models"
-	// pathMessages 推理入口（Anthropic Messages，唯一实测 200 的那条）。
+	// pathMessages 推理入口（**旧版 Anthropic Messages**）。
+	//
+	// ⚠ 2026-11-13 起这只是**兼容路径**：新版 Phanthy Codeo 内核（0.2.13）
+	//    已经**完全不碰**它（抓包实证：一次都没出现）。默认走 pathChatCompletions。
+	//    保留它是因为旧版 claude-sidecar 内核可能还在用，且切换成本低。
 	pathMessages = "/v1/messages"
+	// pathChatCompletions 推理入口（**OpenAI 兼容，新版内核唯一在用的那条**）。
+	//
+	// 抓包实证（`BUN_CONFIG_VERBOSE_FETCH=curl` 跑 `phanthy-codeo run`）：
+	//   全程只出现两条 POST：
+	//     POST /api/event_logging/batch
+	//     POST /v1/chat/completions        ← 推理走这条
+	//   `/v1/messages` **一次都没出现**。
+	//
+	// 协议特征（与 /v1/messages 的差异，逐条实测）：
+	//   · body 是 **OpenAI 格式**（messages/stream/stream_options.include_usage），
+	//     **不是** Anthropic 格式（没有 system 顶层字段、没有 anthropic-version）
+	//   · **不签名**（没有 x-desktop-* / x-phanthy-proof-*）
+	//   · 带 4 个会话头：x-phanthy-client / -project / -request / -session
+	pathChatCompletions = "/v1/chat/completions"
 )
+
+// Protocol 推理协议选择（见 Config.Protocol / phanthywork.protocol）。
+type Protocol string
+
+const (
+	// ProtocolChat 走 POST /v1/chat/completions（OpenAI 兼容，**新版内核**，默认）。
+	//
+	// body 与响应都**原样透传**：不再做 OpenAI→Anthropic 转换，也不再做
+	// Anthropic SSE→OpenAI 转换 —— 上游本来就是 OpenAI 形状，转两次纯属自找 bug。
+	ProtocolChat Protocol = "chat"
+	// ProtocolMessages 走 POST /v1/messages（Anthropic + 12 段签名，**旧版内核**）。
+	//
+	// 保留给旧版 claude-sidecar 内核；新版内核用不到。
+	ProtocolMessages Protocol = "messages"
+)
+
+// ParseProtocol 解析协议名（大小写不敏感，空值 = 默认 chat）。
+func ParseProtocol(s string) Protocol {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "messages", "message", "anthropic", "v1messages":
+		return ProtocolMessages
+	default:
+		return ProtocolChat
+	}
+}
 
 // ── 超时（逐个端点，别用一刀切）──────────────────────────────────────────
 
@@ -238,6 +281,10 @@ type Provider struct {
 	// 保留它的理由是测试需要一条"不起池子也能验后台任务"的路；
 	// 生产路径一律走 credSrc（见 cred 的顺序）。
 	creds map[string]*Auth
+
+	// protocol 推理协议（"" / chat = 新版内核的 /v1/chat/completions；
+	// messages = 旧版内核的 /v1/messages + 签名）。见 Protocol / SetProtocol。
+	protocol Protocol
 
 	// checkin 签到能力的共享驱动（internal/dailycheckin）。
 	//
@@ -359,6 +406,11 @@ type Config struct {
 	// 默认 0：偏移由 activities/summary 的 server_time **自动校准**（坑①）。
 	// 这个字段只是给"本机确实有固定偏移、且不想等第一次换令牌"的部署用。
 	ClockSkewMS int64
+	// Protocol 推理协议："" / "chat" = /v1/chat/completions（默认，新版内核）；
+	// "messages" = /v1/messages（旧版内核，Anthropic + 签名）。
+	//
+	// 配置键：`phanthywork.protocol`。
+	Protocol string
 }
 
 // NewProvider 契约测试入口（**冻结签名**）。
@@ -403,8 +455,37 @@ func NewWithClient(c *Client, authDir string, skewMS int64) *Provider {
 	}
 	c.setSkew(skewMS)
 	p := &Provider{client: c, authDir: authDir, creds: map[string]*Auth{}, inferGates: make(map[string]*refreshGate, 2)}
+	p.protocol = ProtocolChat // 默认走新版内核的 OpenAI 兼容路径
 	p.initCheckin()
 	return p
+}
+
+// SetProtocol 设置推理协议（"chat" 默认 / "messages" 旧版）。
+//
+// 为什么做成 setter 而不是改 NewWithClient 签名：后者被一批契约/单元测试直接调用，
+// 改签名会把"协议选择"这个纯编排决策扩散成全仓改动。默认值放在构造函数里，
+// 只有需要旧版 Anthropic 路径的部署才显式设。
+func (p *Provider) SetProtocol(name string) {
+	if p == nil {
+		return
+	}
+	p.protocol = ParseProtocol(name)
+}
+
+// Protocol 当前生效的推理协议。
+func (p *Provider) Protocol() Protocol {
+	if p == nil || p.protocol == "" {
+		return ProtocolChat
+	}
+	return p.protocol
+}
+
+// protocolPath 当前协议对应的推理路径。
+func (p *Provider) protocolPath() string {
+	if p.Protocol() == ProtocolMessages {
+		return pathMessages
+	}
+	return pathChatCompletions
 }
 
 // Client 上游 HTTP 客户端（供装配层与测试使用）。
@@ -565,6 +646,58 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		return gateway.ChatStream{}, errNoAccessToken
 	}
 
+	if p.Protocol() == ProtocolMessages {
+		return p.chatMessages(ctx, a, body)
+	}
+	return p.chatCompletions(ctx, a, body)
+}
+
+// chatCompletions 走 POST /v1/chat/completions（OpenAI 兼容，**新版内核**，默认路径）。
+//
+// # 与 chatMessages 的三点本质差异（全部来自抓包实证）
+//
+//	① **不签名**：客户端全程不发 x-desktop-* / x-phanthy-proof-*，
+//	   也**不调** activities/summary 换推理令牌 —— 直接拿 access_token 当 Bearer。
+//	   ⇒ 本路径**不依赖** ensureInferenceToken / buildProof，少两个失败点。
+//	② 请求体**不做协议转换**（见 PrepareBodyChat）。
+//	③ 响应是 **OpenAI SSE**，原样透传给核心 —— 不像 chatMessages 要 Anthropic→OpenAI 翻译。
+//
+// 会话头（4 个）的含义（抓包原文可见）：
+//
+//	x-phanthy-client   = "cli"            客户端类型
+//	x-phanthy-project  = "global"         项目作用域
+//	x-phanthy-request  = uuid             本次请求 id（服务端日志/去重用）
+//	x-phanthy-session  = "ses_<cuid2>"    会话 id
+func (p *Provider) chatCompletions(ctx context.Context, a *Auth, body []byte) (gateway.ChatStream, error) {
+	outBody, err := PrepareBodyChat(body)
+	if err != nil {
+		// 整形失败是**本地请求体的问题**（各账号一致），不该换号重试。
+		return gateway.ChatStream{}, err
+	}
+
+	// ⚠ 不用 defer cancel()：成功路径要把 cancel 交给流（与 chatMessages 同一条纪律，
+	// 见那里的注释与 TestStreamSurvivesAfterChatReturns）。
+	reqCtx, cancel := context.WithTimeout(ctx, inferenceTimeout)
+	resp, err := p.client.ChatCompletionsStream(reqCtx, a, pathChatCompletions, outBody)
+	if err != nil {
+		cancel()
+		return gateway.ChatStream{}, err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// ✅ 上游回的就是 OpenAI SSE ⇒ **原样透传**，一个字节都不改。
+		return gateway.ChatStream{Status: resp.StatusCode, Body: cancelOnClose(resp.Body, cancel)}, nil
+	}
+	// 非 2xx：读完错误体、关连接，然后**正常返回**（核心要分类它）。
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return gateway.ChatStream{Status: resp.StatusCode, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+}
+
+// chatMessages 走 POST /v1/messages（Anthropic + 12 段签名，**旧版内核**）。
+//
+// 保留给旧版 claude-sidecar 内核；新版内核（0.2.13+）已完全不用这条路径。
+func (p *Provider) chatMessages(ctx context.Context, a *Auth, body []byte) (gateway.ChatStream, error) {
 	outBody, err := PrepareBody(body)
 	if err != nil {
 		// 转换失败是**本地请求体的问题**（各账号一致），不该换号重试。
@@ -660,6 +793,55 @@ func (c *cancelReadCloser) Close() error {
 		}
 	})
 	return err
+}
+
+// PrepareBodyChat 新版内核（/v1/chat/completions）的请求体整形。
+//
+// 与 PrepareBody 的**根本区别：不做协议转换**。
+//
+// 上游 `/v1/chat/completions` 本来就是 OpenAI 格式，出口层也是 OpenAI 格式 ——
+// 中间再 OpenAI→Anthropic 转一次，等于把同一份东西翻译两遍，凭空制造 bug 面。
+//
+// 只做两处**必要**改写（都用 RawMessage，其余字段逐字节保留）：
+//
+//	① model 剥掉 `phanthywork/` 前缀（出口层带前缀分派，上游只认裸名）
+//	② stream 强制 true —— 与 PrepareBody 同一条理由（见那里的长注释）：
+//	   出口层按 SSE 解析，而上游按 body 的 stream 字段决定回 SSE 还是一次性 JSON；
+//	   把 false 透传上去只会得到「upstream stream contained no valid data events」502。
+//
+// ⚠ **不要**在这里改 max_tokens 等字段：新版内核把 max_tokens 原样传给上游
+// （抓包实测 32000 直传），我们照做即可。
+func PrepareBodyChat(openAIBody []byte) ([]byte, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(openAIBody, &m); err != nil {
+		// 非 JSON 属于异常，但**不要**在这里吞掉或臆造：
+		// 原样发出去让上游回它自己的错误，比本地猜一个错误码更有信息量。
+		return openAIBody, nil
+	}
+	changed := false
+	// ① stream 强制 true
+	if v, ok := m["stream"]; !ok || string(v) != "true" {
+		m["stream"] = json.RawMessage("true")
+		changed = true
+	}
+	// ② model 剥前缀
+	if mv, ok := m["model"]; ok {
+		var model string
+		if json.Unmarshal(mv, &model) == nil {
+			if bare := stripProviderPrefix(model); bare != model {
+				m["model"] = json.RawMessage(strconv.Quote(bare))
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return openAIBody, nil
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("%w: phanthywork: chat 请求体整形失败: %v", gateway.ErrConvertFailed, err)
+	}
+	return out, nil
 }
 
 // PrepareBody 把出口层的 OpenAI 请求体编成上游要的形态（**只序列化一次**）。

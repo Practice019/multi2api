@@ -1175,6 +1175,13 @@ type Config struct {
 		// 漂移失效，症状是 `403 request_not_authorized`（文案只说「请更新或重新打开客户端」）。
 		// 仅离线调试 / 自建反代才需要写死。
 		ClockSkewMS *int64 `json:"clock_skew_ms"`
+		// Protocol 推理协议：留空/"chat" = POST /v1/chat/completions（**默认**）；
+		// "messages" = POST /v1/messages（旧版内核，Anthropic + 12 段 ed25519 签名）。
+		//
+		// ⚠ 默认已是 chat，不要"为保险"填 messages —— 新版 Phanthy Codeo（0.2.13）
+		// 抓包实证**从不使用** /v1/messages（全程只发 /v1/chat/completions）。
+		// 这条只在"确实要对接旧版 claude-sidecar 内核"时才写。
+		Protocol string `json:"protocol"`
 		// PoolAccounts 是否并入核心账号池（默认 true）。
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"phanthywork"`
@@ -1379,6 +1386,13 @@ type Config struct {
 	PhanthyworkUA string `json:"-"`
 	// PhanthyworkClockSkewMS 时钟偏移覆盖；**0 = 运行时用 server_time 自行校准**（推荐）。
 	PhanthyworkClockSkewMS int64 `json:"-"`
+	// PhanthyworkProtocol 推理协议：""/"chat" = POST /v1/chat/completions
+	//（新版内核，**默认**）；"messages" = POST /v1/messages（旧版内核，Anthropic + 签名）。
+	//
+	// 依据（2026-11-13 抓包实证）：新版 Phanthy Codeo 0.2.13 全程只发
+	// `/v1/chat/completions`，`/v1/messages` **一次都没出现**。
+	// 配置键：`phanthywork.protocol`。
+	PhanthyworkProtocol string `json:"-"`
 	// PhanthyworkPoolAccounts 是否把 phanthywork 账号并入核心账号池
 	//（见 Phanthywork.PoolAccounts）。未启用时恒为 false。
 	PhanthyworkPoolAccounts bool `json:"-"`
@@ -2164,6 +2178,22 @@ func (c *Config) normalize() error {
 	// 报错文案指向"更新客户端"，从时钟查起要绕很远。
 	if c.Phanthywork.ClockSkewMS != nil {
 		c.PhanthyworkClockSkewMS = *c.Phanthywork.ClockSkewMS
+	}
+	// 推理协议：**缺省留空 = chat**（新版内核的 /v1/chat/completions）。
+	//
+	// 这里刻意不写死 "chat" 字面量：空值在 phanthywork.ParseProtocol 里
+	// 有唯一的权威默认值，两处各写一份就会漂移（本仓踩过同类：
+	// UA / APIBase 都收成了"配置层留空 → 包内常量"的同源做法）。
+	c.PhanthyworkProtocol = strings.TrimSpace(c.Phanthywork.Protocol)
+	switch strings.ToLower(c.PhanthyworkProtocol) {
+	case "", "chat", "completions", "openai":
+		c.PhanthyworkProtocol = "" // 空 = 包内默认（chat）
+	case "messages", "message", "anthropic":
+		c.PhanthyworkProtocol = "messages"
+	default:
+		// 未知值**不静默回落**：配置写错（比如拼成 "message s"）却悄悄走默认，
+		// 现象是"配了没生效"，排查会绕很远。直接报错让用户改。
+		return fmt.Errorf("phanthywork.protocol=%q 无法识别（只接受 chat / messages）", c.Phanthywork.Protocol)
 	}
 	c.PhanthyworkPoolAccounts = c.PhanthyworkEnabled && boolOr(c.Phanthywork.PoolAccounts, true)
 	return nil

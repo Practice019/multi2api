@@ -91,6 +91,27 @@ var (
 	// modelMissingMarkers 上游不认识这个 id（换模型或重新拉目录）。
 	modelMissingMarkers = []string{"model_not_found"}
 
+	// bannedMarkers 账号被**封禁**（终态，换号 + 标记，绝不反复重试）。
+	//
+	// 2026-11-13 真机取证（改造协议之后才拿到这个码）：
+	//
+	//	HTTP 403 {"error":{"code":"disabled_account",
+	//	          "message":"当前账户已被封禁，请加微信群联系客服处理"}}
+	//
+	// ⚠ 为什么必须与 request_not_authorized **分开**：
+	//   request_not_authorized 的处置是"换号但不罚号"（见文件头的长注释：
+	//   它可能是客户端拼装问题或令牌过期，可自愈）；而 disabled_account 是
+	//   **服务端明确说这个账号废了**，重试一万次也不会好 —— 归到"可自愈"档
+	//   会让核心一直把这个死号放回池子里轮。
+	bannedMarkers = []string{
+		"disabled_account",
+		"account_disabled",
+		"account_banned",
+		"账户已被封禁",
+		"账户被封禁",
+		"账号已被封禁",
+	}
+
 	// bindingConflictMarkers 设备绑定冲突（409 终态）。
 	bindingConflictMarkers = []string{
 		"desktop_installation_conflict",
@@ -158,8 +179,19 @@ func (p *Provider) Classify(status int, body string) gateway.ErrorKind {
 func Classify(status int, body string) gateway.ErrorKind {
 	// ① 正文优先。**先看正文**的理由：同一状态码混着两类拒绝（§4.2）。
 	switch {
+	case gateway.ContainsAny(body, bannedMarkers):
+		// 账号被封禁 —— **终态**，与 bindingConflict 同一档（会话面报废）。
+		//
+		// 2026-11-13 真机取证：`403 {"code":"disabled_account",
+		// "message":"当前账户已被封禁…"}`。服务端已经把话说到这个份上，
+		// 重试/换模型都不会好 ⇒ 归 SessionDead（核心会标记并停止使用该账号）。
+		//
+		// ⚠ 必须排在 authExpired / 状态码分支**之前**：它也是 403，
+		//   若让状态码分支先命中就会落到 ErrKindAuth（"刷新一下可能就好"），
+		//   于是一个死号会被反复刷新、反复重试，永远在池子里空转。
+		return gateway.ErrKindSessionDead
 	case gateway.ContainsAny(body, bindingConflictMarkers):
-		// 设备绑定冲突 —— 唯一被本包判成"终态"的一类。
+		// 设备绑定冲突 —— 另一类"终态"。
 		// 报告 §2.4：409 之后该账号的**推理面彻底报废**，但数据面
 		// （模型目录/额度/签到只读）不受影响 ⇒ 只有推理不可用 = 会话死。
 		return gateway.ErrKindSessionDead

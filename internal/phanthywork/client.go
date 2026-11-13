@@ -31,6 +31,7 @@ package phanthywork
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -178,6 +179,89 @@ func (c *Client) applyCommonHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", c.userAgent())
 	req.Header.Set("x-phanthy-client-source", clientSource)
 	req.Header.Set("Accept", "application/json")
+}
+
+// ── /v1/chat/completions（新版内核，OpenAI 兼容，**不签名**）────────────────
+
+// chatClientSource 新版内核推理请求的 x-phanthy-client-source 取值。
+//
+// ⚠ 与 clientSource("desktop") **不同**。抓包实证：
+//
+//	推理 POST /v1/chat/completions   → X-Phanthy-Client-Source: cli
+//	遥测 POST /api/event_logging/... → X-Phanthy-Client-Source: phanthy-codeo
+//
+// 也就是说这个头在**不同端点上是不同的值**，不是一个全局常量。
+const chatClientSource = "cli"
+
+// chatProduct 新版内核推理请求的 x-phanthy-product 取值。
+//
+// 抓包实证：推理用 `phanthy_code`（无 o）；而遥测用 `phanthy_codeo`（带 o）。
+// 两个值混用会让服务端走错校验链，所以这里写死推理那个。
+const chatProduct = "phanthy_code"
+
+// newSessionID 造一个 `ses_<cuid2>` 形态的会话 id。
+//
+// 抓包原文：`ses_e2aa5d923ffe02djYUjBpWTS5I` —— `ses_` + 24 位 cuid2
+// （小写字母 + 数字，首字符为字母）。**不要**用 UUID 或 base64url：
+// 后者会产出 `-`/`_`/大写，形态与真实值不符。
+func newSessionID() string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	const head = "abcdefghijklmnopqrstuvwxyz"
+	buf := make([]byte, 24)
+	// crypto/rand 失败时退化成时间派生（极不可能，但不 panic）。
+	if _, err := rand.Read(buf); err != nil {
+		for i := range buf {
+			buf[i] = byte(uint64(time.Now().UnixNano()>>uint(i%8)) % 36)
+		}
+	} else {
+		for i := range buf {
+			buf[i] = byte(buf[i] % 36)
+		}
+	}
+	var b strings.Builder
+	b.WriteString("ses_")
+	b.WriteByte(head[int(buf[0])%len(head)])
+	for _, x := range buf[1:] {
+		b.WriteByte(alphabet[int(x)%len(alphabet)])
+	}
+	return b.String()
+}
+
+// ChatCompletionsStream 发一次推理请求（新版内核形态：**不签名**）。
+//
+// 与 ChatStream 的差异（逐条来自抓包实证，不是推测）：
+//
+//	· **没有** x-desktop-* / x-phanthy-proof-* 任何签名头
+//	· 带 4 个会话头：x-phanthy-client / -project / -request / -session
+//	· Authorization 仍是 `Bearer <access_token>`（**不是**推理令牌）
+//	· accept: text/event-stream（上游按 body 的 stream 决定，但协商一致更稳）
+//
+// ⚠ 签名相关的东西**一个都不要加**：抓包里客户端全程零签名，
+// 而旧实现带着 12 段 proof 打这条路径 —— 服务端会把"带签名但对不上"的请求
+// 当异常处理（实测 /v1/messages 缺 product 头时回 500 空体就是这一类的表现）。
+func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string, body []byte) (*http.Response, error) {
+	if a == nil || a.OAuth.AccessToken == "" {
+		return nil, errNoAccessToken
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.userAgent())
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
+
+	// 会话四件套（抓包原文里逐字存在）
+	req.Header.Set("x-phanthy-client", "cli")
+	req.Header.Set("x-phanthy-project", "global")
+	req.Header.Set("x-phanthy-request", randomUUID())
+	req.Header.Set("x-phanthy-session", newSessionID())
+	// 产品与来源（两个头在不同端点上取值不同，见上方常量注释）
+	req.Header.Set("x-phanthy-product", chatProduct)
+	req.Header.Set("x-phanthy-client-source", chatClientSource)
+
+	return c.httpClient().Do(req)
 }
 
 // newJSONRequest 造一个带 JSON body 的请求。

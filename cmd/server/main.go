@@ -58,6 +58,12 @@ import (
 )
 
 func main() {
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
 	cfgPath := flag.String("config", "config.json", "path to config json")
 	levelFlag := flag.String("log-level", "", "日志级别 debug/info/warn/error/quiet（默认 info，也可用 WB2API_LOG_LEVEL）")
 	statsEvery := flag.Duration("log-stats", 3*time.Minute, "控制台汇总行间隔（0 = 关闭统计汇总）")
@@ -154,7 +160,7 @@ func main() {
 		total, healthy, cooling, disabled, _ := p.CountsDetailed()
 		return logx.PoolCounts{Total: total, Healthy: healthy, Cooling: cooling, Disabled: disabled}
 	})
-	defer p.Flush() // 进程退出前强制落盘（后台 flush 每 5s 一次，退出时补一次）
+	defer p.Close()
 	p.SetStore(store)
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
 	// 默认上游必须在 SyncToDir 之前注入：对齐时要用它判断"未打标签的账号算谁"。
@@ -1252,6 +1258,10 @@ func main() {
 			// ⚠ 0 = 让实现每次启动用 `activities/summary` 的 server_time 自行校准
 			//（本机时钟一直在漂：实测两次偏移差 1 秒多）。配置里写死一个值只用于离线调试。
 			ClockSkewMS: cfg.PhanthyworkClockSkewMS,
+			// 推理协议："" = chat（新版内核 /v1/chat/completions，默认）；
+			// "messages" = 旧版内核 /v1/messages（Anthropic + 12 段签名）。
+			// 依据：新版 Phanthy Codeo（0.2.13）抓包实证从不使用 /v1/messages。
+			Protocol: cfg.PhanthyworkProtocol,
 		})
 		// 注入凭证访问器：后台续期任务必须拿到**池里持有的那个 `*Auth`**（不是磁盘副本）——
 		// 刷副本会让界面（读池）仍显示旧状态，而且会**绕过包内的同账号串行闸**：
@@ -1555,7 +1565,10 @@ func main() {
 	//      request_log_keep_days（默认 7，这里下限 7 天）删旧行 —— **绝不碰 log_daily**。
 	//
 	// 两者都放在 Migrate 之后、服务开始接请求之前；失败只记日志（不能让数据层小毛病挡住启动）。
+	maintenanceStop := make(chan struct{})
+	maintenanceDone := make(chan struct{})
 	go func() {
+		defer close(maintenanceDone)
 		t0 := time.Now()
 		days, berr := sqlstore.BackfillLogDaily()
 		if berr != nil {
@@ -1573,7 +1586,14 @@ func main() {
 			log.Printf("logs 明细裁剪：删除 %d 行（保留 %d 天；log_daily 不受影响）", n, keep)
 		}
 		// 每 24h 一次（服务通常是长驻进程）
-		for range time.Tick(24 * time.Hour) {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-maintenanceStop:
+				return
+			case <-ticker.C:
+			}
 			if n, perr := sqlstore.PruneLogs(keep); perr != nil {
 				log.Printf("logs 明细裁剪失败: %v", perr)
 			} else if n > 0 {
@@ -2223,7 +2243,11 @@ func main() {
 	}
 	// 核心调度循环：整点签到/保活 + 各上游通过 gateway.JobExt 注册的守卫任务
 	// （workbuddy 的成长/旅行守卫轮就在其中）。核心**不认识**具体任务名。
-	go sch.Run(ctx)
+	schedulerDone := make(chan struct{})
+	go func() {
+		defer close(schedulerDone)
+		sch.Run(ctx)
+	}()
 	if cfg.TravelAutoClaim {
 		log.Printf("猫猫旅行自动领奖已开启（守卫轮 %s；按 arrive_at 错峰，到站即领）", cfg.TravelWatchInterval)
 	} else {
@@ -2257,20 +2281,6 @@ func main() {
 		// MaxHeaderBytes 请求头上限（显式写出来让"考虑过"可见）。
 		MaxHeaderBytes: maxHeaderBytes,
 	}
-	go func() {
-		<-ctx.Done()
-		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-		// 请求都停了，再把双写队列排空、关库。顺序不能反：关库后入队的日志会全失败。
-		// FlushSQL 是屏障（等此前所有条目处理完），不是「尽力而为」。
-		logRing.FlushSQL()
-		logRing.StopSQL()
-		if err := sqlstore.Close(); err != nil {
-			log.Printf("数据层: 关闭数据库失败: %v", err)
-		}
-	}()
 
 	// 启动横幅：用户最先要找的两个地址。
 	//
@@ -2337,8 +2347,23 @@ func main() {
 	// 放在 ListenAndServe **之前**：让窗口在第一个请求到达前就关上。
 	h.StartModelsPrewarm(ctx, 0)
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("http: %v", err)
+	if err := serveWithCleanup(ctx, srv, 5*time.Second, func() {
+		stop()
+		close(maintenanceStop)
+		<-schedulerDone
+		<-maintenanceDone
+		if err := p.Close(); err != nil {
+			exitCode = 1
+			log.Printf("pool: 最终落盘失败: %v", err)
+		}
+		logRing.StopSQL()
+		if err := sqlstore.Close(); err != nil {
+			exitCode = 1
+			log.Printf("数据层: 关闭数据库失败: %v", err)
+		}
+	}); err != nil {
+		exitCode = 1
+		log.Printf("http: 服务退出或关停失败: %v", err)
 	}
 	log.Printf("bye")
 }

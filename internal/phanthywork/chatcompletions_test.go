@@ -1,0 +1,444 @@
+package phanthywork
+
+// chatcompletions_test.go 新版内核协议（POST /v1/chat/completions，不签名）的护栏。
+//
+// # 为什么必须有这个文件
+//
+// 2026-11-13 之前，本包只实现 Anthropic `/v1/messages` + 12 段 ed25519 签名。
+// 而新版 Phanthy Codeo 内核（0.2.13）抓包实证**完全不碰** `/v1/messages`：
+//
+//	POST /api/event_logging/batch      （遥测）
+//	POST /v1/chat/completions          （推理，唯一）
+//
+// 差异三条，每条都有断言守着：
+//
+//	① 端点：chat，不是 messages
+//	② **不签名**：没有 x-desktop-* / x-phanthy-proof-*
+//	③ **不换推理令牌**：直接用 access_token 当 Bearer
+//
+// 这些断言的价值在于：任何人把默认协议改回 messages、或"顺手"把签名头加回来，
+// 都会立刻红 —— 而不是等到真机 403/500 才发现。
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"workbuddy2api/internal/gateway"
+)
+
+// chatFakeUpstream 一个只认 /v1/chat/completions 的假上游。
+//
+// 它会记录收到的请求，供断言检查"我们到底发了什么"。
+type chatFakeUpstream struct {
+	gotPath    string
+	gotHeaders http.Header
+	gotBody    []byte
+	calls      int
+	// streamBody 非空时用它作为 200 的响应体（默认回一段最小 OpenAI SSE）。
+	streamBody string
+	// status 非 0 时直接回这个状态码（用于错误分类断言）。
+	status  int
+	errBody string
+}
+
+func (f *chatFakeUpstream) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f.calls++
+		f.gotPath = r.URL.Path
+		f.gotHeaders = r.Header.Clone()
+		f.gotBody, _ = io.ReadAll(r.Body)
+
+		if f.status != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(f.status)
+			_, _ = io.WriteString(w, f.errBody)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		body := f.streamBody
+		if body == "" {
+			body = "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好的\"}}]}\n\n" +
+				"data: [DONE]\n\n"
+		}
+		_, _ = io.WriteString(w, body)
+	}
+}
+
+// newChatCred 造一份"已注册、未过期"的凭证，指向给定 uid。
+func newChatCred(t *testing.T, uid string) gateway.Credential {
+	t.Helper()
+	a := newTestAuth(uid, "refresh-"+uid)
+	a.OAuth.AccessToken = "access-" + uid
+	return gateway.Credential{UID: uid, Secret: a}
+}
+
+// TestChatUsesChatCompletionsPath 断言默认协议打的是 /v1/chat/completions。
+//
+// 这是本文件的主断言：端点选错，真机上一切都不成立。
+func TestChatUsesChatCompletionsPath(t *testing.T) {
+	up := &chatFakeUpstream{}
+	srv := httptest.NewServer(up.handler())
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-chat")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":    "phanthywork/Phanthy-fast",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	defer st.Body.Close()
+	_, _ = io.Copy(io.Discard, st.Body)
+
+	if st.Status != http.StatusOK {
+		t.Fatalf("状态码 = %d, want 200（body=%s）", st.Status, string(up.errBody))
+	}
+	if up.gotPath != pathChatCompletions {
+		t.Fatalf("端点 = %q, want %q\n"+
+			"修法：Chat 必须在 ProtocolChat 下走 pathChatCompletions",
+			up.gotPath, pathChatCompletions)
+	}
+	if up.gotPath == pathMessages {
+		t.Fatalf("端点退回了旧版 %q —— 新版内核抓包实证从不使用它", pathMessages)
+	}
+}
+
+// TestChatSendsNoSignatureHeaders 断言 chat 路径**不带任何签名头**。
+//
+// 抓包实证：客户端全程零签名。旧实现把 12 段 proof 打到这条路径上，
+// 而"带签名但对不上"会被服务端当异常处理（曾表现为 500 空体）。
+func TestChatSendsNoSignatureHeaders(t *testing.T) {
+	up := &chatFakeUpstream{}
+	srv := httptest.NewServer(up.handler())
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-nosig")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":    "Phanthy-fast",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	defer st.Body.Close()
+	_, _ = io.Copy(io.Discard, st.Body)
+
+	// 这些头一个都不许出现（大小写不敏感由 http.Header 保证）
+	forbidden := []string{
+		"x-desktop-installation-id",
+		"x-desktop-timestamp",
+		"x-desktop-nonce",
+		"x-desktop-signature",
+		"x-phanthy-desktop-session",
+		"x-phanthy-proof-timestamp",
+		"x-phanthy-proof-nonce",
+		"x-phanthy-proof-signature",
+	}
+	for _, h := range forbidden {
+		if v := up.gotHeaders.Get(h); v != "" {
+			t.Fatalf("chat 路径不该发签名头 %q（实际值 %q）\n"+
+				"抓包实证：新版内核（0.2.13）全程零签名。带上它反而会让服务端走"+
+				"「签名校验」分支并因对不上而报错。", h, v)
+		}
+	}
+}
+
+// TestChatSendsSessionHeaders 断言 4 个会话头齐全，且 session 形态正确。
+//
+// 抓包原文：
+//
+//	x-phanthy-client:   cli
+//	x-phanthy-project:  global
+//	x-phanthy-request:  <uuid>
+//	x-phanthy-session:  ses_<24 位 cuid2>
+func TestChatSendsSessionHeaders(t *testing.T) {
+	up := &chatFakeUpstream{}
+	srv := httptest.NewServer(up.handler())
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-hdr")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":    "Phanthy-fast",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	defer st.Body.Close()
+	_, _ = io.Copy(io.Discard, st.Body)
+
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"x-phanthy-client", "cli"},
+		{"x-phanthy-project", "global"},
+	}
+	for _, c := range cases {
+		if got := up.gotHeaders.Get(c.name); got != c.want {
+			t.Errorf("%s = %q, want %q（抓包实证的取值）", c.name, got, c.want)
+		}
+	}
+
+	// request 是 uuid v4 形态（36 字符，含 4 个连字符）
+	reqID := up.gotHeaders.Get("x-phanthy-request")
+	if len(reqID) != 36 || strings.Count(reqID, "-") != 4 {
+		t.Errorf("x-phanthy-request = %q，want uuid 形态（36 字符 / 4 个连字符）", reqID)
+	}
+
+	// session 是 ses_ + 24 位 cuid2（小写字母+数字，首字符字母）
+	sess := up.gotHeaders.Get("x-phanthy-session")
+	if !strings.HasPrefix(sess, "ses_") {
+		t.Fatalf("x-phanthy-session = %q，want 以 ses_ 开头", sess)
+	}
+	body := strings.TrimPrefix(sess, "ses_")
+	if len(body) != 24 {
+		t.Fatalf("session 主体 %q 长度 = %d，want 24（cuid2）", body, len(body))
+	}
+	if c := body[0]; c < 'a' || c > 'z' {
+		t.Fatalf("session 首字符 = %q，want 小写字母（cuid2 形态）", string(c))
+	}
+	for _, c := range body {
+		if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') {
+			t.Fatalf("session 主体含非法字符 %q（只允许小写字母+数字；"+
+				"用 base64url 会产出 '-'/'_'，形态与真实值不符）", string(c))
+		}
+	}
+}
+
+// TestChatDoesNotFetchInferenceToken 断言 chat 路径**不调** activities/summary。
+//
+// 新版内核直接用 access_token 当 Bearer，不需要 180 秒的推理令牌。
+// 这条断言的价值：如果有人"为了统一"把 ensureInferenceToken 加回 chat 路径，
+// 会多出一次网络往返 + 一个会过期的失败点 —— 这里会立刻抓到。
+func TestChatDoesNotFetchInferenceToken(t *testing.T) {
+	var summaryCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == pathActivitiesSummary {
+			summaryCalls++
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-notoken")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":    "Phanthy-fast",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	defer st.Body.Close()
+	_, _ = io.Copy(io.Discard, st.Body)
+
+	if summaryCalls != 0 {
+		t.Fatalf("chat 路径调了 %d 次 %s；新版内核**不换推理令牌**，"+
+			"直接用 access_token 当 Bearer。多这一次往返只会多一个失败点。",
+			summaryCalls, pathActivitiesSummary)
+	}
+}
+
+// TestChatPassesOpenAIBodyThrough 断言请求体**不做 OpenAI→Anthropic 转换**。
+//
+// 原始 body 里必须仍含 `messages[].role`（OpenAI 形状），
+// 而不是被改成 Anthropic 的 `system` 顶层字段。
+func TestChatPassesOpenAIBodyThrough(t *testing.T) {
+	up := &chatFakeUpstream{}
+	srv := httptest.NewServer(up.handler())
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-body")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":       "phanthywork/Phanthy-fast",
+		"temperature": 0.7,
+		"max_tokens":  1234,
+		"messages": []any{
+			map[string]any{"role": "system", "content": "you are a bot"},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	defer st.Body.Close()
+	_, _ = io.Copy(io.Discard, st.Body)
+
+	var sent map[string]any
+	if err := json.Unmarshal(up.gotBody, &sent); err != nil {
+		t.Fatalf("发出去的 body 不是 JSON: %v（原文 %s）", err, string(up.gotBody))
+	}
+	// ① model 前缀必须被剥掉
+	if m, _ := sent["model"].(string); m != "Phanthy-fast" {
+		t.Errorf("model = %q，want %q（出口层带 phanthywork/ 前缀，上游只认裸名）", m, "Phanthy-fast")
+	}
+	// ② stream 必须被强制 true（否则上游回一次性 JSON，出口按 SSE 解析 ⇒ 空流 502）
+	if s, _ := sent["stream"].(bool); !s {
+		t.Errorf("stream = %v，want true（出口层按 SSE 解析，false 会得到空流）", sent["stream"])
+	}
+	// ③ messages 必须**原样保留**（角色/顺序都不动），而不是被压成 Anthropic 的 messages+system
+	msgs, ok := sent["messages"].([]any)
+	if !ok || len(msgs) != 2 {
+		t.Fatalf("messages 被改动了：%v（want 原样 2 条）", sent["messages"])
+	}
+	first, _ := msgs[0].(map[string]any)
+	if first["role"] != "system" {
+		t.Errorf("messages[0].role = %v，want system —— chat 路径不做协议转换，"+
+			"system 必须留在 messages 里（Anthropic 才把它提成顶层字段）", first["role"])
+	}
+	// ④ 其余字段逐字节保留
+	if v, _ := sent["temperature"].(float64); v != 0.7 {
+		t.Errorf("temperature = %v，want 0.7（RawMessage 整形不该动无关字段）", sent["temperature"])
+	}
+	if v, _ := sent["max_tokens"].(float64); v != 1234 {
+		t.Errorf("max_tokens = %v，want 1234（新版内核把 max_tokens 原样透传）", sent["max_tokens"])
+	}
+}
+
+// TestChatRawSSEPassThrough 断言 200 的响应体**原样透传**。
+//
+// 与 messages 路径对比：那条要把 Anthropic 帧翻成 OpenAI 帧（否则核心聚合到
+// 空 content），这条上游本来就是 OpenAI 帧 ⇒ 一个字节都不该动。
+func TestChatRawSSEPassThrough(t *testing.T) {
+	const want = "data: {\"id\":\"a\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"}}]}\n\n" +
+		"data: {\"id\":\"a\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n" +
+		"data: [DONE]\n\n"
+	up := &chatFakeUpstream{streamBody: want}
+	srv := httptest.NewServer(up.handler())
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-raw")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":    "Phanthy-fast",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	defer st.Body.Close()
+	got, _ := io.ReadAll(st.Body)
+
+	if string(got) != want {
+		t.Fatalf("响应体被改动了（chat 路径应原样透传）\n got=%q\nwant=%q", string(got), want)
+	}
+}
+
+// TestChatErrorStatusReachesClassifier 断言非 2xx 原样交给核心分类。
+//
+// 关键：`request_not_authorized` 这类错误必须在**核心**里被判，
+// 本包只负责把状态码与响应体原样交出去。分类策略见 errors.go 的文件头。
+func TestChatErrorStatusReachesClassifier(t *testing.T) {
+	const errBody = `{"error":{"code":"request_not_authorized","message":"当前请求不可用，请更新或重新打开客户端后重试。"}}`
+	up := &chatFakeUpstream{status: 403, errBody: errBody}
+	srv := httptest.NewServer(up.handler())
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-err")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":    "Phanthy-fast",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("403 不该以 error 返回，应作为 ChatStream 交给核心分类: %v", err)
+	}
+	defer st.Body.Close()
+	raw, _ := io.ReadAll(st.Body)
+
+	if st.Status != 403 {
+		t.Fatalf("状态码 = %d, want 403", st.Status)
+	}
+	if string(raw) != errBody {
+		t.Fatalf("响应体必须原样保留（核心靠 code 分类）\n got=%q\nwant=%q", string(raw), errBody)
+	}
+	// 分类口径：request_not_authorized → 换号但不罚号（errors.go 文件头）
+	if k := Classify(st.Status, string(raw)); k == gateway.ErrKindSessionDead || k == gateway.ErrKindAuth {
+		t.Fatalf("request_not_authorized 被归成 %v —— 那会永久禁用账号；"+
+			"errors.go 的文件头明确它只应「换号不罚」（ErrKindClient）", k)
+	}
+}
+
+// TestProtocolParse 协议名解析（含默认值与容错）。
+func TestProtocolParse(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Protocol
+	}{
+		{"", ProtocolChat},     // 默认 chat
+		{"chat", ProtocolChat}, // 显式
+		{"CHAT", ProtocolChat}, // 大小写不敏感
+		{"messages", ProtocolMessages},
+		{" Messages ", ProtocolMessages}, // 空白容错
+		{"anthropic", ProtocolMessages},  // 别名
+		{"v1messages", ProtocolMessages}, // 别名
+		{"garbage", ProtocolChat},        // 未知值 → 安全默认
+	}
+	for _, c := range cases {
+		if got := ParseProtocol(c.in); got != c.want {
+			t.Errorf("ParseProtocol(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestProtocolDefaultsToChat 断言**不配置**就走新版协议。
+//
+// 这是产品级默认值：新版内核已是主流，旧版 claude-sidecar 只是兼容。
+func TestProtocolDefaultsToChat(t *testing.T) {
+	p := NewProvider(Config{})
+	if p.Protocol() != ProtocolChat {
+		t.Fatalf("默认协议 = %q, want %q\n"+
+			"新版内核（0.2.13）抓包实证只走 /v1/chat/completions；"+
+			"默认必须是 chat，否则开箱即 500/403。", p.Protocol(), ProtocolChat)
+	}
+	if got := p.protocolPath(); got != pathChatCompletions {
+		t.Fatalf("默认路径 = %q, want %q", got, pathChatCompletions)
+	}
+	// SetProtocol 能切回旧版（给旧内核部署留的口子）
+	p.SetProtocol("messages")
+	if got := p.protocolPath(); got != pathMessages {
+		t.Fatalf("SetProtocol(messages) 之后路径 = %q, want %q", got, pathMessages)
+	}
+}
+
+// mustJSON 把 map 序列化成测试用 body（失败即 t.Fatal）。
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("序列化测试 body 失败: %v", err)
+	}
+	return b
+}
+
+// digestOf 给日志用的一行摘要（避免在断言失败信息里打印整段 body）。
+func digestOf(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])[:12]
+}
+
+var _ = fmt.Sprintf // 保持 fmt 被引用（部分子测试只在失败分支用到）
+var _ = digestOf

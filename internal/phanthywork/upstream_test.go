@@ -699,9 +699,36 @@ func writeJSONTest(w http.ResponseWriter, status int, v any) {
 // newFakeProvider 建一个指向假上游的 Provider。
 //
 // 时钟基线给 0：校准由 summary 的 server_time 完成（坑① 的正常路径）。
+//
+// ⚠ **默认显式设成 ProtocolMessages**（旧版 Anthropic + 12 段签名）。
+//
+// 本文件与 provider_test.go / preparebody_test.go 里的假上游**全部按
+// `/v1/messages` 的签名语义建**（断言 v1 canonical / 推理令牌 TTL /
+// 设备注册 / 幂等键）。而生产默认已改成 `chat`（/v1/chat/completions，不签名）。
+//
+// 不显式指定的话，这些用例会拿 chat 路径去打一个只认 messages 的假上游
+// ⇒ 一律 404 / 空流，而那**不是**被测逻辑坏了。协议由用例自己声明：
+//
+//	· 测 messages 管线 → newFakeProvider（默认 messages）
+//	· 测 chat 管线     → newFakeProviderChat
 func newFakeProvider(t *testing.T, srv *httptest.Server) *Provider {
 	t.Helper()
 	c := NewWithBase(srv.URL)
 	c.UA = DefaultUA
-	return NewWithClient(c, t.TempDir(), 0)
+	p := NewWithClient(c, t.TempDir(), 0)
+	p.SetProtocol("messages")
+	return p
+}
+
+// newFakeProviderChat 走**新版内核协议**（/v1/chat/completions，不签名）的假上游 Provider。
+//
+// 与 newFakeProvider 的唯一差别是协议；Client 构造完全相同 ⇒
+// "协议"是唯一变量，排查时不会和 UA / 时钟 / 基址混在一起。
+func newFakeProviderChat(t *testing.T, srv *httptest.Server) *Provider {
+	t.Helper()
+	c := NewWithBase(srv.URL)
+	c.UA = DefaultUA
+	p := NewWithClient(c, t.TempDir(), 0)
+	p.SetProtocol("chat")
+	return p
 }
