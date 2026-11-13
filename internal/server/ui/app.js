@@ -5990,7 +5990,12 @@ window.addEventListener('message', (e) => {
   // 按 providerId 分支会让"加一个上游前端零改动"这条设计失效（有测试守着）。
   function colSet(accts) {
     const has = (f) => (accts || []).some(a => a && a[f] !== undefined && a[f] !== null);
-    return { activated: has('activated'), invited: has('invited'), codes: has('codes'), myCode: has('my_code'), wechat: has('wechat_bound') };
+    // ⚠ nickname 多一条「**非空**」判据（2026-11-13 用户要求「名字看不到，这一列就不要了」）：
+    //   拿不到有意义展示名的上游后端就**不给**这个字段；这里再要求 trim 后非空，
+    //   防"给了空串也算有字段"把整列拉出来。
+    const hasText = (f) => (accts || []).some(a => a && a[f] !== undefined && a[f] !== null && String(a[f]).trim() !== '');
+    return { activated: has('activated'), invited: has('invited'), codes: has('codes'), myCode: has('my_code'),
+      wechat: has('wechat_bound'), nickname: hasText('nickname') };
   }
 
   // openPageModal / closePageModal —— 页内模态（T-358）。
@@ -6331,11 +6336,11 @@ window.addEventListener('message', (e) => {
       }
       return `<tr>
         <td class="mono dim">${esc(a.uid)}</td>
-        <td>${esc(a.nickname || '—')}</td>
+        ${cols.nickname ? `<td>${esc(a.nickname)}</td>` : ''}
         ${cols.activated ? `<td>${st}</td>` : ''}
         ${cols.invited ? `<td>${invitedPill}</td>` : ''}
         <td class="mono">${a.balance_known === false ? '<span class="dim">—</span>' : esc(String(a.balance ?? 0)) + (a.balance_partial === true ? '<span class="dim" style="font-size:11px;margin-left:4px" title="只取到部分桶（general/rewrite 未取到），实际额度可能更高">部分</span>' : '')}</td>
-        ${cols.codes ? `<td>${codes}</td>` : ''}
+        ${cols.codes ? `<td class="codewrap">${codes}</td>` : ''}
         ${cols.myCode ? `<td>${myCode}</td>` : ''}
         ${cols.wechat ? `<td>${wechatCell}</td>` : ''}
         <td style="white-space:nowrap">${ops}${a.warning ? `<span class="dim" style="font-size:11px;display:block;margin-top:2px" title="${esc(String(a.warning))}">部分数据缺失</span>` : ''}</td>
@@ -6371,11 +6376,15 @@ window.addEventListener('message', (e) => {
         if (a.activated) sum.activated++;
         return withRowId(rowHTML(a, cols), 'invite', a.uid);
       }).join('');
-      // ⚠ 这一行是 head 模板的起始（含反引号）—— 任何"替换那一行"的编辑都必须把它一起带上（我踩过两次 ✗）。
-      const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
       // 说明文字**按字段/列条件拼**（2026-11-12）：原文是写死的一长句，里面好几处只对
       // loomy/codar 成立 —— 一个"只有码"的上游读到的全是与它无关的话（微信、人工验证、绑定别人的码）。
       // ⚠ 判据一律"字段/列存在"，**不是上游名**（TestWebUIHasNoUpstreamNameBranch）。
+      //
+      // ⚠⚠ 这一段**必须待在模板之外**：2026-11-12 曾把它写进下面 `const head = \`…\`` 的**里面** ⇒
+      //   那些语句只是 HTML 文本、从未被求值，而模板里的 `${hintText}` 在插值时变量不存在 ⇒
+      //   面板刷新直接 `ReferenceError: hintText is not defined`（用户报障）。
+      //   ⚠ `node --check` **抓不到**这类错（模板插值在语法上合法）——
+      //   守卫在 internal/server/invite_panel_render_test.go（执行式：真在 node 里跑一遍这段）。
       const hintHas = (f) => accts.some(a => a && a[f] !== undefined && a[f] !== null);
       const hints = ['表格按字段显示'];
       if (cols.codes) hints.push('「我生成的码」是发给**别人**用的（每码一次）');
@@ -6386,14 +6395,18 @@ window.addEventListener('message', (e) => {
       if (hintHas('warning')) hints.push('某一行出现「部分数据缺失」表示那次查询有步骤超时，码与可操作项仍然有效');
       if (hintHas('balance_partial')) hints.push('余额后的「部分」表示只取到部分额度桶');
       const hintText = hints.join('；') + '。';
+
+      // ⚠ 这一行是 head 模板的起始（含反引号）—— 任何"替换那一行"的编辑都必须把它一起带上（我踩过两次 ✗）。
+      const head = `<div class="row" style="margin-bottom:10px;align-items:center;gap:8px;flex-wrap:wrap">
       <span class="dim" style="font-size:11px">${hintText}</span>
       <span data-lpager="invite" data-ltotal="${esc(String(totalN))}"></span>
       <span class="dim" style="font-size:12px" id="linv-sum-${esc(providerId)}"></span>
       <span class="dim" style="font-size:11px" id="linv-upd-${esc(providerId)}"></span>
       <span class="spacer" style="flex:1"></span>
     </div>`;
+      // ⚠ 上一行必须留着（我 2026-11-12 在这里踩过第三次：替换时把它吞掉了 ⇒ node --check 当场红）。
       host.innerHTML = head + `<table class="accttable"><thead><tr>
-      <th>UID</th><th>昵称</th>${cols.activated ? '<th>激活状态</th>' : ''}${cols.invited ? '<th>绑定状态</th>' : ''}<th>余额</th>${cols.codes ? '<th>我生成的码</th>' : ''}${cols.myCode ? '<th>我的邀请码</th>' : ''}${cols.wechat ? '<th>微信</th>' : ''}<th>绑定别人的码</th>
+      <th>UID</th>${cols.nickname ? '<th>昵称</th>' : ''}${cols.activated ? '<th>激活状态</th>' : ''}${cols.invited ? '<th>绑定状态</th>' : ''}<th>余额</th>${cols.codes ? '<th>我生成的码</th>' : ''}${cols.myCode ? '<th>我的邀请码</th>' : ''}${cols.wechat ? '<th>微信</th>' : ''}<th>绑定别人的码</th>
     </tr></thead><tbody>${body}</tbody></table>`;
       hideEmptyCols(host.querySelector('table'));
       panelBindPager(host, 'invite', page, pagesNow, (n) => loadLoomyInvite(providerId, n));
