@@ -137,6 +137,14 @@ tasks/
 #   这是同一个坑第二次踩中）。补在这里让它真正生效。
 #   用户 2026-11-10 明确：docs 全部保留，所以只补白名单，不摘文件。
 !docs/cache-refresh-design.md
+# PhanthyWork 推理协议对照（2026-11-13 抓包取证）。
+#
+# 这份文档的**唯一目的**是防止以后有人把推理协议改回 /v1/messages ——
+# 那是旧版 claude-sidecar 的形态，新版 Phanthy Codeo（0.2.13）抓包实证从不使用它。
+# 因此它属于「长期契约」，不是过程草稿 ⇒ 必须入库。
+# 按本文件既有约定：白名单必须写在 `*.md` **之后**（放前面会被反超，本文件自己
+# 记着这个坑踩过两次 —— L78 那份 cache-refresh 就是被反超后又补到这里的）。
+!docs/phanthywork-inference-protocol.md
 !docs/移植-前端.md
 !docs/移植-后端.md
 !docs/待移植对齐.md
