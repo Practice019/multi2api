@@ -539,6 +539,23 @@ type v1Params struct {
 
 // signV1 生成 v1 签名头与用了的值（返回给调用方做断言/排查）。
 func signV1(a *Auth, p v1Params, timestamp, nonce string) (sig string, err error) {
+	// ★★ 2026-11-14 加的护栏：canonical 第 3 段必须是**不含 query 的 pathname**。
+	//
+	// 真源（magpie referrals.mjs 的警告，逐字）：
+	//
+	//	⚠ `request()` 的 v1 canonical 用的是 `new URL(url).pathname`。
+	//	  本模块的两个端点都**没有 query**，所以签出来是对的；将来若要加
+	//	  `referrals/relations?limit=…`，必须先修 `upstreamPath`，否则必然 401。
+	//
+	// 也就是说：**URL 可以带 query，签名的 path 不能带**。
+	// 本包当前的调用点都传常量（都不带 query），所以现在是对的 —— 但这是个
+	// "加个 ?limit= 就 401、而错误码指不到根因"的陷阱，值得用断言钉住：
+	// 与其等将来真出 401 再查，不如在拼 canonical 之前当场报错。
+	if strings.Contains(p.Path, "?") {
+		return "", fmt.Errorf(
+			"phanthywork: v1 canonical 的 path 段不能带 query（收到 %q）—— "+
+				"URL 可以带 query，签名一律用 pathname（否则上游必然 401）", p.Path)
+	}
 	canonical := V1Canonical(p.Method, p.Path, timestamp, nonce, RequestBodyForHash(p.Body), p.IdempotencyKey)
 	return a.signV1Canonical(canonical)
 }
