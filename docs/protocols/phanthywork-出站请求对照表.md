@@ -420,15 +420,38 @@ if (u) for (let [x, m] of Object.entries(u)) G.set(x, m);
   （它们同时是 canonical 第 9/10 段，**签名与发头必须同源**）。
 - `chatCompletions` —— 先 `ensureInferenceToken`（180s TTL + 缓存 + 串行闸），
   再 `buildProof`，再发。与 `chatMessages` 同一条链路，差异只剩 body 与响应格式。
-- `chatFakeUpstream` —— 补 `/api/oauth/profile`、`/api/oauth/desktop-installations/register`、
+- ✅ 以上改动已**真机验证**（2026-11-14 17:06，见 §11.6）。chatFakeUpstream —— 补 /api/oauth/profile、/api/oauth/desktop-installations/register、
   `/api/oauth/activities/summary` 三个应答（换令牌的前置是 `ensureInstallation`）。
 
-### 11.6 ⚠ 这条改动**没有**真机验证
+### 11.6 ✅ 真机验证**已通过**（2026-11-14 17:06）
 
-当前 phanthywork 账号已封（403 `disabled_account`），所以本轮只能验证到
-「对官方源码 + 对假上游」这一层。**拿到新号后的第一件事**是看这条路径是否 200 ——
-如果仍然 403 `request_not_authorized`，下一个要查的是 `buildProof` 的第 4 段时钟口径
-（`serverNowMS`）与第 7 段 `Authorization` 是否与实发头逐字节一致。
+改动上线后用一个**全新注册**的账号跑通了端到端：
+
+| 环节 | 结果 |
+|---|---|
+| 设备注册 | ✅ 新凭据 `phanthywork-cmwg6l3pu2dxrr53jyqrpz6uo.json`，`registered_at_ms = 1794647109242`（17:05:09）—— 这是设备绑定成功的**唯一判据** |
+| `activities/summary` → 推理令牌 | ✅ |
+| `buildProof` 12 段 canonical | ✅ |
+| **4 个 `x-phanthy-desktop-session` / `x-phanthy-proof-*`（本节新增）** | ✅ |
+| `POST /v1/chat/completions` | ✅ **200 + 流式** |
+
+真机一次对话（UI 对话测试页，流式）：
+
+```
+model : phanthywork/deepseek-v4.1-flash-1017
+prompt: 只回复四个字：网关打通
+回复  : 网关打通
+用量  : 总 93 tok（输入 37 + 输出 56），推理 53 tok（已含在输出内）
+性能  : 1696 ms  ·  33 tok/s
+```
+
+**这一条 200 同时验证了整条签名链** —— 上面任何一环缺失或算错，上游都会回
+403 `request_not_authorized`（而且那个错误码与时钟/UA/令牌过期的症状完全同形，
+无法从响应本身区分）。所以它证明的不是"某处对了"，而是**整条链一起对了**。
+
+后续要盯的只有一件事：**这个账号能不能长期不被 `disabled_account`**。
+新号注册完就推理是既往复盘里最可疑的风控触发形态（本次已在 17:05 注册、17:06 推理，
+属于"立刻推理"那一类；若后续被封，优先回查 onboarding / `/api/token-factory/activate` 两条链路）。
 
 ### 11.7 出处
 
