@@ -195,7 +195,7 @@ func (q QuotaView) IsUnknown() bool { return !q.HasData }
 // 有回归测试守着（TestReviewerF7_QuotaMapMustBeCopied）。
 func (q QuotaView) Clone() QuotaView {
 	out := q
-	if len(q.ByModel) > 0 {
+	if q.ByModel != nil {
 		m := make(map[string]int64, len(q.ByModel))
 		for k, v := range q.ByModel {
 			m[k] = v
