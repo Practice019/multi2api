@@ -151,6 +151,11 @@ tasks/
 !docs/protocols/**
 !docs/decisions/
 !docs/decisions/**
+# ★ 2026-11-14：外包/交接文档入库。理由与 protocols/ 同类 —— 它是**给下一个人的契约**，
+# 人换了、会话没了之后仍然要能读到（放 _scratch 或本地只会丢）。
+# 同样用「目录 + /**」两条（见上方的形态说明）。
+!docs/handoff/
+!docs/handoff/**
 # 供应商行内动作（重拉 / 探测）的设计审问记录（T-02）；记的是**被否决的方案与理由**，属长期契约 ⇒ 必须入库。
 # 按本文件既有约定：白名单必须写在 `*.md` 之后（放前面会被反超）。
 !docs/design-notes-provider-probe.md
