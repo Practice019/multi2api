@@ -74,6 +74,8 @@ type sqlSink struct {
 	stop chan struct{}
 
 	stopOnce sync.Once
+	mu       sync.Mutex
+	done     chan struct{}
 
 	written atomic.Uint64
 	failed  atomic.Uint64
@@ -88,6 +90,7 @@ func newSQLSink(w SQLWriter, queue int) *sqlSink {
 		w:    w,
 		ch:   make(chan sqlJob, queue),
 		stop: make(chan struct{}),
+		done: make(chan struct{}),
 	}
 	go s.run()
 	return s
@@ -98,6 +101,14 @@ func newSQLSink(w SQLWriter, queue int) *sqlSink {
 // 这里刻意不用 select + default 之外的任何花样（比如"满了就同步写一条"）：
 // 同步兜底会把最坏情况的延迟直接搬回请求路径，正是本文件头第 2 条要避免的。
 func (s *sqlSink) enqueue(e Entry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.stop:
+		s.dropped.Add(1)
+		return
+	default:
+	}
 	select {
 	case s.ch <- sqlJob{e: e}:
 	default:
@@ -107,6 +118,7 @@ func (s *sqlSink) enqueue(e Entry) {
 
 // run 消费者：直到 stop 关闭，再把已入队的排空（尽力而为）后退出。
 func (s *sqlSink) run() {
+	defer close(s.done)
 	for {
 		select {
 		case j := <-s.ch:
@@ -149,18 +161,33 @@ func (s *sqlSink) handle(j sqlJob) {
 // 只给测试与关停用，**不在写路径上**：它会阻塞调用方，而请求路径不允许阻塞。
 // 队列满时这里允许阻塞等待（flush 的调用方本来就接受等待）。
 func (s *sqlSink) flush() {
+	select {
+	case <-s.stop:
+		<-s.done
+		return
+	default:
+	}
 	done := make(chan struct{})
 	select {
 	case s.ch <- sqlJob{done: done}:
 	case <-s.stop:
-		return // 已停：worker 不再消费，屏障永远不会被处理
+		<-s.done
+		return
 	}
-	<-done
+	select {
+	case <-done:
+	case <-s.done:
+	}
 }
 
 // close 停掉消费者（幂等）。先由 run 排空已入队条目，再返回。
 func (s *sqlSink) close() {
-	s.stopOnce.Do(func() { close(s.stop) })
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		close(s.stop)
+		s.mu.Unlock()
+	})
+	<-s.done
 }
 
 func (s *sqlSink) stats() SQLStats {
@@ -181,6 +208,8 @@ func (s *sqlSink) stats() SQLStats {
 //
 // 换绑时旧 worker 会被停止：它会先把已入队的条目排空再退出，**不丢已经收下的日志**。
 func (r *Ring) SetSQLWriter(w SQLWriter) {
+	r.sqlLifecycle.Lock()
+	defer r.sqlLifecycle.Unlock()
 	r.mu.Lock()
 	old := r.sql
 	if w == nil {
@@ -206,6 +235,8 @@ func (r *Ring) SQLWriter() SQLWriter {
 
 // FlushSQL 等双写队列排空后返回（测试与关停用，见 sqlSink.flush 的说明）。
 func (r *Ring) FlushSQL() {
+	r.sqlLifecycle.Lock()
+	defer r.sqlLifecycle.Unlock()
 	r.mu.Lock()
 	s := r.sql
 	r.mu.Unlock()
@@ -216,6 +247,8 @@ func (r *Ring) FlushSQL() {
 
 // StopSQL 停掉后台消费者并摘掉落库目标（幂等）。
 func (r *Ring) StopSQL() {
+	r.sqlLifecycle.Lock()
+	defer r.sqlLifecycle.Unlock()
 	r.mu.Lock()
 	s := r.sql
 	r.sql = nil

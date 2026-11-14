@@ -127,7 +127,27 @@ func TestContract(t *testing.T) {
 // 这条保证"契约对真实上游也成立"（真凭证、按需）。
 // 两条都要有 —— 只有前者会漏掉"假上游与真上游行为不一致"；
 // 只有后者会让 CI 里根本没有契约执行。
+func TestLiveRequiresOptIn(t *testing.T) {
+	for _, value := range []string{"", "0", "true"} {
+		t.Run("disabled="+value, func(t *testing.T) {
+			t.Setenv("WB2API_LIVE_TEST", value)
+			t.Setenv("WORKBUDDY_TEST_TOKEN", "synthetic-not-a-real-token")
+			skipped := false
+			t.Run("contract", func(t *testing.T) {
+				t.Cleanup(func() { skipped = t.Skipped() })
+				TestContractAgainstRealUpstream(t)
+			})
+			if !skipped {
+				t.Fatal("live contract did not skip without explicit opt-in")
+			}
+		})
+	}
+}
+
 func TestContractAgainstRealUpstream(t *testing.T) {
+	if testing.Short() || os.Getenv("WB2API_LIVE_TEST") != "1" {
+		t.Skip("live test requires WB2API_LIVE_TEST=1 and no -short")
+	}
 	tok := os.Getenv("WORKBUDDY_TEST_TOKEN")
 	if tok == "" {
 		t.Skip("无 WORKBUDDY_TEST_TOKEN —— 跳过针对真实上游的契约。" +

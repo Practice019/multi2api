@@ -16,10 +16,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 )
+
+const maxChannelPendingBytes = 1 << 20
 
 // writeChannelStream 把一次渠道转发的流写回客户端。
 //
@@ -34,7 +38,16 @@ import (
 // scrub=true 时按 fw.PublicModel 改写 model、并把 id 换成 chatcmpl-gw-*；
 // scrub=false（管理密钥）时字节原样透传 —— 用户要求「对话密钥按原来的上游即可」。
 func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw channelForward, cap *streamUsage, scrub bool) {
-	defer fw.Stream.Body.Close()
+	var closeOnce sync.Once
+	closeBody := func() { closeOnce.Do(func() { _ = fw.Stream.Body.Close() }) }
+	stop := context.AfterFunc(r.Context(), closeBody)
+	defer func() {
+		stop()
+		closeBody()
+	}()
+	if r.Context().Err() != nil {
+		return
+	}
 
 	if ct := upstreamContentType(fw); ct != "" {
 		w.Header().Set("Content-Type", ct)
@@ -66,8 +79,18 @@ func (h *Handler) writeChannelStream(w http.ResponseWriter, r *http.Request, fw 
 	// 表现是「有时泄露有时不漏」，取决于网络切片。
 	var pending []byte
 	for {
-		n, err := fw.Stream.Body.Read(buf)
+		if r.Context().Err() != nil {
+			return
+		}
+		readSize := min(len(buf), max(1, maxChannelPendingBytes-len(pending)))
+		n, err := fw.Stream.Body.Read(buf[:readSize])
+		if r.Context().Err() != nil {
+			return
+		}
 		if n > 0 {
+			if n > maxChannelPendingBytes-len(pending) {
+				return
+			}
 			if cap != nil {
 				cap.Feed(buf[:n])
 			}
@@ -131,7 +154,12 @@ func (h *Handler) scrubSSELines(pending []byte, publicModel string, scrub bool) 
 	//
 	// 判据：整块里**没有任何** data: 行 ⇒ 它不是 SSE，按整体 JSON 处理。
 	// 这个判据比"首字节是 {"更宽：SSE 的首行是 "data: {"，不会误判。
-	if !bytes.Contains(pending, []byte("data:")) {
+	trimmedStart := bytes.TrimSpace(pending)
+	isSSE := bytes.HasPrefix(trimmedStart, []byte(":")) ||
+		bytes.HasPrefix(trimmedStart, []byte("event:")) ||
+		bytes.HasPrefix(trimmedStart, []byte("id:")) ||
+		bytes.HasPrefix(trimmedStart, []byte("retry:"))
+	if !isSSE && !bytes.Contains(pending, []byte("data:")) {
 		// 非 SSE：整块留给调用方（收尾处用 scrubChatResponse 处理）。
 		//
 		// 但如果它已经是**完整 JSON**（能被解码），就**当场**处理并输出 ——

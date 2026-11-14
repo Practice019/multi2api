@@ -503,7 +503,7 @@ function mpEsc(s) {
   <div id="gtask" class="notice progress" hidden></div>
   <div id="busy" class="notice progress" hidden></div>
   <div id="notice" class="notice warn" hidden></div>
-  <div id="toast" class="notice" hidden></div>
+  <div id="toast" class="notice" role="log" aria-live="polite" aria-relevant="additions text" hidden></div>
 </div>
 <header>
   <!-- ⚠ 顶栏原来这里有一个 <img src="/favicon.svg" width=26 height=26> 品牌图标。
@@ -869,7 +869,7 @@ function mpEsc(s) {
     </h2>
     <p class="dim" style="font-size:12px;margin:2px 0 6px">进程与宿主资源、依赖健康、近 5 分钟请求口径，
       每 5 秒自刷一次。数据源 <code>GET /admin/system-status</code>。</p>
-    <iframe id="stFrame" src="/ui/status" style="width:100%;height:calc(100vh - 190px);min-height:460px;
+    <iframe id="stFrame" title="系统状态" src="/ui/status" style="width:100%;height:calc(100vh - 190px);min-height:460px;
       border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 
@@ -914,7 +914,7 @@ function mpEsc(s) {
     </h2>
     <p class="dim" style="font-size:12px;margin:2px 0 6px">只填 Base URL 与 API Key 就能新增一条 OpenAI 兼容渠道，
       不占账号池、不走选号。</p>
-    <iframe id="chFrame" src="/ui/channels" style="width:100%;height:calc(100vh - 190px);min-height:460px;
+    <iframe id="chFrame" title="渠道管理" src="/ui/channels" style="width:100%;height:calc(100vh - 190px);min-height:460px;
       border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 
@@ -935,7 +935,7 @@ function mpEsc(s) {
     </h2>
     <p class="dim" style="font-size:12px;margin:2px 0 6px">分组是「一批模型」的集合。给 API Key
       分配分组后，那把 key 只看得见、只调得动分组里的模型。</p>
-    <iframe id="grpFrame" src="/ui/groups" style="width:100%;height:calc(100vh - 190px);min-height:460px;
+    <iframe id="grpFrame" title="分组管理" src="/ui/groups" style="width:100%;height:calc(100vh - 190px);min-height:460px;
       border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 
@@ -1299,7 +1299,7 @@ function mpEsc(s) {
     </h2>
     <p class="dim" style="font-size:12px;margin:2px 0 6px">上游模型目录与渠道的对应关系。
       页脚会写明这份目录是<b>什么时候</b>从上游取的（后端缓存 1 小时；点「刷新」立刻回源重取）。</p>
-    <iframe id="mdFrame" src="/ui/models" style="width:100%;height:calc(100vh - 190px);min-height:460px;
+    <iframe id="mdFrame" title="模型目录" src="/ui/models" style="width:100%;height:calc(100vh - 190px);min-height:460px;
       border:1px solid var(--line);border-radius:8px;background:var(--cream)"></iframe>
   </section>
 

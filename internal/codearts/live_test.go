@@ -14,8 +14,44 @@ import (
 // 设 CODEARTS_TEST_CRED=<路径到 json> 或直接给三个环境变量：
 //
 //	CODEARTS_ACCESS_KEY / CODEARTS_SECRET_KEY / CODEARTS_SECURITY_TOKEN
+func TestLiveRequiresOptIn(t *testing.T) {
+	for _, value := range []string{"", "0", "true"} {
+		t.Run("disabled="+value, func(t *testing.T) {
+			t.Setenv("WB2API_LIVE_TEST", value)
+			for name, run := range map[string]func(*testing.T){
+				"verify":       TestVerifyLive,
+				"chat":         TestChatStreamLive,
+				"sse":          TestChatStreamSSELive,
+				"welfare":      TestFetchWelfareLive,
+				"subscription": TestFetchSubscriptionLive,
+				"quota":        TestRefreshQuotaLive,
+				"refresh":      TestRefreshTokenLive,
+				"contract":     TestContractAgainstRealUpstream,
+				"sign":         TestSignMatchesJS,
+			} {
+				skipped := false
+				t.Run(name, func(t *testing.T) {
+					t.Cleanup(func() { skipped = t.Skipped() })
+					run(t)
+				})
+				if !skipped {
+					t.Errorf("%s did not skip without explicit opt-in", name)
+				}
+			}
+		})
+	}
+}
+
+func requireLiveTest(t *testing.T) {
+	t.Helper()
+	if testing.Short() || os.Getenv("WB2API_LIVE_TEST") != "1" {
+		t.Skip("live test requires WB2API_LIVE_TEST=1 and no -short")
+	}
+}
+
 func liveCredential(t *testing.T) *Auth {
 	t.Helper()
+	requireLiveTest(t)
 	if p := os.Getenv("CODEARTS_TEST_CRED"); p != "" {
 		raw, err := os.ReadFile(p)
 		if err != nil {

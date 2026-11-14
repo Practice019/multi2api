@@ -194,7 +194,8 @@ type Ring struct {
 	// sql 可选的落库目标（nil = 不双写）。与 sink 一样在锁外非阻塞入队，
 	// 由后台 goroutine 落 logs 表 —— 见 sqlsink.go（有界队列 / 失败隔离 /
 	// 丢日志不丢请求）。
-	sql *sqlSink
+	sql          *sqlSink
+	sqlLifecycle sync.Mutex
 }
 
 // New 构造容量为 capacity 的环形缓冲；capacity<=0 时取 DefaultCapacity。

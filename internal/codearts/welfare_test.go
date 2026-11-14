@@ -26,6 +26,7 @@ import (
 // 所以把子目录加进候选：不修的话这条 live 覆盖永远是假的。
 func liveAuthForWelfare(t *testing.T) *Auth {
 	t.Helper()
+	requireLiveTest(t)
 	p := os.Getenv("CORARTS_TEST_CRED")
 	candidates := []string{
 		p,

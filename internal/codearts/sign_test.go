@@ -69,6 +69,7 @@ func loadVectors(t *testing.T) vectorFile {
 // 换成合成密钥后这些期望值必然对不上（差在 STS 值上）。
 // ★ 需要"默认就跑"的锚点，请用 TestSignMatchesFixtures（全合成夹具）。
 func TestSignMatchesJS(t *testing.T) {
+	requireLiveTest(t)
 	v := loadVectors(t)
 	if len(v.Cases) == 0 {
 		t.Fatal("向量为空")

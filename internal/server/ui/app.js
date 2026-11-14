@@ -8002,13 +8002,18 @@ window.addEventListener('message', (e) => {
   }
 
   async function saveSettings() {
+    if (settingsSaving) return;
     const body = collectSettings();
     // 签到时点/保活时点已弃用（统一 30 分钟扫描，设置页不再展示）——
     // body 里不再有这两个键，原来的"时点不能为空"校验随之删除。
     const btn = $('btnSettingsSave');
-    btn.disabled = true;
+    const controls = Array.from(document.querySelectorAll('section[data-key="settings"] input, section[data-key="settings"] select, section[data-key="settings"] textarea, section[data-key="settings"] button'));
+    const disabled = controls.map(el => el.disabled);
+    const text = btn.textContent;
     settingsSaving = true;
     try {
+      controls.forEach(el => { el.disabled = true; });
+      btn.textContent = '保存中…';
       const r = await admin('/admin/settings', { method: 'PUT', body: JSON.stringify(body) });
       // fillSettings 末尾会 markDirty(false) —— 保存成功 = 界面与磁盘一致 = 不脏。
       fillSettings(r.settings, r);
@@ -8020,7 +8025,8 @@ window.addEventListener('message', (e) => {
       // 保存失败**保持脏**：界面上的值确实还没落盘，这时候清掉提示才是骗人。
     } finally {
       settingsSaving = false;
-      btn.disabled = false;
+      controls.forEach((el, i) => { el.disabled = disabled[i]; });
+      btn.textContent = text;
     }
   }
 
@@ -12881,17 +12887,22 @@ let multCatalogFailed = false;
   return '\n' + lines.join('\n');
   }
 
+  let sendInFlight = false;
+
   async function send() {
+    if (sendInFlight) return;
     const btn = $('send'), out = $('out');
-    const body = {
-      model: $('model').value,
-      stream: $('stream').checked,
-      messages: [{ role: 'user', content: $('prompt').value }],
-    };
-    btn.disabled = true; out.classList.remove('err');
-    out.textContent = '请求中…';
-    const t0 = performance.now();
+    const disabled = btn.disabled;
+    sendInFlight = true;
     try {
+      const body = {
+        model: $('model').value,
+        stream: $('stream').checked,
+        messages: [{ role: 'user', content: $('prompt').value }],
+      };
+      btn.disabled = true; out.classList.remove('err');
+      out.textContent = '请求中…';
+      const t0 = performance.now();
       if (!body.stream) {
         const r = await api('/v1/chat/completions', { v1: true,
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -12932,7 +12943,10 @@ let multCatalogFailed = false;
     } catch (e) {
       out.classList.add('err');
       out.textContent = '失败：' + e.message;
-    } finally { btn.disabled = false; }
+    } finally {
+      sendInFlight = false;
+      btn.disabled = disabled;
+    }
   }
 
   // wireTopBar 顶栏那个「对话密钥」输入框（只影响 /v1 功能）。
@@ -13214,7 +13228,7 @@ let multCatalogFailed = false;
     }, { label: '立即刷新' });
     $('send').onclick = send;
     $('prompt').addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); send(); }
     });
     $('models').addEventListener('click', e => {
       // 分组头（T5）：切换折叠，**不**选中模型。

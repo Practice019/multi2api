@@ -18,6 +18,7 @@ import (
 // 续期路径从未被真实验证过。而 CodeArts 的 STS 只有约 2 小时寿命，
 // 续期一旦不通，网关跑上两小时就会全线 503。
 func TestRefreshTokenLive(t *testing.T) {
+	requireLiveTest(t)
 	credPath := os.Getenv("CORARTS_TEST_CRED")
 	if credPath == "" {
 		t.Skip("未设置 CORARTS_TEST_CRED，跳过联网续期测试")

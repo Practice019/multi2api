@@ -339,3 +339,20 @@ config-test/
 # ★ 2026-11-14：本文件已移到 docs/protocols/ 下（协议集中），白名单在 L147 一带按目录放行。
 # 这条旧路径保留为注释，是为了让"这里曾放过一个上游接入协议"这件事可被检索到。
 # !docs/上游接入协议.md  →  见 !docs/protocols/**
+
+
+# ── 浏览器运行时目录（2026-11-14 补）───────────────────────────────────────────
+#
+# monkeycode 的扫码登录会用一个临时 Edge profile 起浏览器。这个目录里是
+# **Cookies / Login Data / 会话存储 / Local Storage**，加上 Edge 的组件缓存
+# 与 ONNX 模型 —— 实测 4052 个文件、**400 MB+**。
+#
+# 实测（不能只靠 git check-ignore 判断）：
+#
+#     git add -A --dry-run | grep -c browser-profiles
+#     → 4040          ← 也就是 `git add -A` 一次就会把这 4040 个文件写进历史
+#
+# 账号 cookie 一旦进了 git 就**永久留在历史里**（本仓已公开推到 GitHub），
+# 所以必须显式忽略。放在文件**最后**：gitignore 是后匹配者胜，
+# 前面那些 `!` 白名单（docs/reports/*.md、docs/protocols/**）盖不住它。
+**/.browser-profiles/

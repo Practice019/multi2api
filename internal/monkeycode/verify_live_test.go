@@ -155,7 +155,7 @@ func TestLiveChat(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short 跳过联网测试")
 	}
-	dir := liveAuthDir()
+	dir := liveAuthDir(t)
 	list, err := LoadDir(dir)
 	if err != nil || len(list) == 0 {
 		t.Skipf("无真实凭证（%s），跳过", dir)
@@ -232,7 +232,35 @@ func firstN(b []byte, n int) string {
 // liveAuthDir 真机凭证目录（相对仓库根）。
 //
 // 找不到就是 Skip —— 不能因为"这台机器没放凭证"而让测试红。
-func liveAuthDir() string {
+func TestLiveRequiresOptIn(t *testing.T) {
+	for _, value := range []string{"", "0", "true"} {
+		t.Run("disabled="+value, func(t *testing.T) {
+			t.Setenv("WB2API_LIVE_TEST", value)
+			for name, run := range map[string]func(*testing.T){
+				"chat":           TestLiveChat,
+				"captcha":        TestLiveCaptcha,
+				"regions":        TestLiveBothRegions,
+				"checkin":        TestLiveCheckin,
+				"checkin-status": TestLiveCheckinStatus,
+			} {
+				skipped := false
+				t.Run(name, func(t *testing.T) {
+					t.Cleanup(func() { skipped = t.Skipped() })
+					run(t)
+				})
+				if !skipped {
+					t.Errorf("%s did not skip without explicit opt-in", name)
+				}
+			}
+		})
+	}
+}
+
+func liveAuthDir(t *testing.T) string {
+	t.Helper()
+	if testing.Short() || os.Getenv("WB2API_LIVE_TEST") != "1" {
+		t.Skip("live test requires WB2API_LIVE_TEST=1 and no -short")
+	}
 	candidates := []string{
 		filepath.Join("..", "..", "auths", "monkeycode"),
 		filepath.Join("auths", "monkeycode"),

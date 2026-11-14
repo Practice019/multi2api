@@ -31,7 +31,7 @@ func TestLiveBothRegions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("-short 跳过联网测试")
 	}
-	dir := liveAuthDir()
+	dir := liveAuthDir(t)
 	list, err := LoadDir(dir)
 	if err != nil || len(list) == 0 {
 		t.Skipf("无真实凭证（%s），跳过", dir)

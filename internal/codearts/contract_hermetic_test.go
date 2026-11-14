@@ -134,6 +134,7 @@ func TestContract(t *testing.T) {
 // 凭证来源与 live_test.go 一致（CODEARTS_TEST_CRED 或三个环境变量）。
 // 这条按需执行，**不**承担 enforcement 的职责（那是 TestContract 的事）。
 func TestContractAgainstRealUpstream(t *testing.T) {
+	requireLiveTest(t)
 	if testing.Short() {
 		t.Skip("-short 跳过联网契约")
 	}

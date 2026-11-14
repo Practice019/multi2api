@@ -115,6 +115,9 @@ func (h *Handler) forwardViaChannelAttempt(ctx context.Context, publicModel stri
 // displayName 对外回显名（填进 fw.PublicModel，脱敏时回填响应 model 字段）
 func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, displayName string, body []byte, attempt int) (channelForward, error) {
 	var zero channelForward
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
 	if h.cfg.Channels == nil {
 		return zero, errNoChannelMode
 	}
@@ -143,6 +146,9 @@ func (h *Handler) forwardViaChannelAttemptAs(ctx context.Context, matchName, dis
 	tried := make(map[string]bool, len(cands))
 	var lastErr error
 	for {
+		if err := ctx.Err(); err != nil {
+			return zero, err
+		}
 		// ⚠ 随机源：生产为 nil（用全局 rand，与改动前逐字一致）；测试注入固定种子 ⇒ 采样可复现。
 		cand, _, ok := pickCandidateExcluding(cands, tried, h.pickRand)
 		if !ok {
@@ -288,8 +294,20 @@ func (h *Handler) tryChannelOnce(ctx context.Context, cand channelroute.Candidat
 		// **不**在这里写响应：这一层不知道客户端是不是已经收到过头（流式）。
 		return zero, rej
 	}
+	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
 	cs, err := p.Chat(ctx, cred, sealed)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if cs.Body != nil {
+			_ = cs.Body.Close()
+		}
+		return zero, ctxErr
+	}
 	if err != nil {
+		if cs.Body != nil {
+			_ = cs.Body.Close()
+		}
 		// ★ 上游说"这把 key 无效/没权限" ⇒ 自动禁用它（只禁这一把，不停整条渠道）。
 		h.autoDisableKeyOnAuthError(cand.Channel.ID, keyIdx, err)
 		return zero, err
