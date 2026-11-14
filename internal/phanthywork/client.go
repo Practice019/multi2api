@@ -215,21 +215,80 @@ func (c *Client) doJSON(req *http.Request, timeout time.Duration) (int, []byte, 
 // 自造一个（如 2.51.0）等于发明数据。
 const apiCallUA = "phanthy-code-cli/2.1.0"
 
-// applyCommonHeaders 注入 `/api/*` 一族请求的公共头。
+// applyCommonHeaders 注入公共头 —— **仅供 `/oauth/token` 与 `/v1/*` 在用**。
 //
-// 这三项与官方 `wtK` **逐项一致**（见 apiCallUA 的真源）：
+// # ⚠⚠ 2026-11-14 更正：**它不是 `/api/oauth/*` 的头**
 //
-//	user-agent               phanthy-code-cli/2.1.0
-//	x-phanthy-client-source  desktop    （官方取值函数：PHANTHY_CODE_CLIENT_SOURCE==="desktop" ? "desktop" : "cli"）
-//	accept                   application/json
+// 此前本函数被当成"所有 `/api/*` 的公共头"，套在了注册 / 签到 / 额度 / 模型这些
+// 端点上 —— **那是错的**，而且真机上跑了两天。官方内部有**两个**头构造器：
 //
-// ⚠ 签名头（x-desktop-*）与 idempotency-key 由各调用点自己用 applyV1 挂上，
+//	wtK(q, K) → { Accept, Content-Type, "User-Agent": `phanthy-code-cli/${GK9}`,
+//	              "x-phanthy-client-source": "desktop", ...q.headers, Authorization }
+//	              ▸ 服务 `/api/work/*`（rewards?limit= / challenges/…/activate / feedback）
+//	              ▸ **本仓并不调用这一族**
 //
-//	顺序与官方 `...q.headers` 的位置语义一致（调用方传入的覆盖默认）。
+//	j59(q, K) → { Accept, Content-Type, Authorization }
+//	              + 透传 idempotency-key 与 4 个 x-desktop-*
+//	              ▸ 服务 `Y59` 表那一族（profile / register / summary / claim /
+//	                rewards / referrals / onboarding）与 `/api/phanthy_code/models`
+//	              ▸ ★ **没有 UA、没有 x-phanthy-client-source**
+//	              ▸ 本仓走 `applyOAuthFamilyHeaders`
+//
+// # 现在还有谁用它
+//
+//	ExchangeCode  → POST /oauth/token（换授权码，form-urlencoded）
+//	ChatStream    → POST /v1/{messages,chat/completions}
+//
+// ⚠ 这两条族的官方真实头**尚未核准**（见
+// docs/protocols/phanthywork-official-client-outbound-spec.md 的 U-6 / U-7）：
+// 换码那跳用的是 `p_q`（未读），`/v1/*` 的 UA 是 `OR()` = `claude-cli/…`。
+// 在核准之前**保持原样**，不要拿"看起来像"去改 —— 也**不要**把本函数
+// 用回 `/api/oauth/*`（那正是这次的 bug）。
 func (c *Client) applyCommonHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", apiCallUA)
 	req.Header.Set("x-phanthy-client-source", clientSource)
 	req.Header.Set("Accept", "application/json")
+}
+
+// applyOAuthFamilyHeaders 注入 **`/api/oauth/*` 与 `/api/phanthy_code/models`** 那一族的头。
+//
+// # 真源：官方 `j59`（@110354479，逐字）
+//
+//	function j59(q, K) {
+//	  let _ = { Accept: "application/json", "Content-Type": "application/json",
+//	            Authorization: `Bearer ${K}` };
+//	  for (let z of ["idempotency-key", "x-desktop-installation-id", "x-desktop-timestamp",
+//	                 "x-desktop-nonce", "x-desktop-signature"]) {
+//	    let w = q.headers.get(z); if (w) _[z] = w      // ← 从入站请求透传，不新造
+//	  }
+//	  return _
+//	}
+//
+// 同族的 `/api/phanthy_code/models` 更简（`CB1`）：
+//
+//	fetch(`${R1()}/api/phanthy_code/models`,
+//	      { headers: { Authorization: `Bearer ${O}`, Accept: "application/json" } })
+//
+// # ★ 为什么 UA 是 `Bun/1.3.14` 而不是 `phanthy-code-cli/…`
+//
+// 官方这一族**不设 UA** ⇒ 实际发出去的是 Bun fetch 的运行时默认 `Bun/1.3.14`。
+// `phanthy-code-cli/<ver>` 那个 UA **只属于 `/api/work/*`**（`wtK`）。
+//
+// ⚠ Go 侧必须**显式**设成 `Bun/1.3.14`：不设的话 Go 会补
+// `User-Agent: Go-http-client/1.1` —— 那是第三种、同样不存在的形态。
+//
+// # 这条修的是什么
+//
+// 13:44 的 `5a9cbdd` 把本族 UA 从 `Bun/1.3.14` 改成了 `phanthy-code-cli/2.1.0`
+// （照的是 `/api/work/*` 的规则，**套错了族**），并且一直多带一个
+// `x-phanthy-client-source`。而本族恰好是**频次最高**的那批：注册、签到、额度。
+//
+// 判据：TestOAuthFamilyMatchesOfficialJ59（走真请求，不是直接调本函数）
+func (c *Client) applyOAuthFamilyHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", DefaultUA) // Bun/1.3.14 = 官方"不设 UA"时的实际值
+	req.Header.Set("Accept", "application/json")
+	// ⚠ 刻意**不设** x-phanthy-client-source —— 官方 `j59` 这一族不发它。
+	// 这一条是本函数存在的**全部理由**，删掉它就等于回到 bug。
 }
 
 // ── /v1/chat/completions（新版内核，OpenAI 兼容，**不签名**）────────────────
@@ -567,7 +626,11 @@ func (c *Client) newJSONRequest(ctx context.Context, method, path string, body [
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	c.applyCommonHeaders(req)
+	// ★ 本函数的全部调用点都在 `/api/oauth/*` 那一族（register / activities/summary /
+	// daily-login/claim / referrals/code / onboarding/*）⇒ 用官方 `j59` 那套极简头。
+	// ⚠ 不要改回 applyCommonHeaders —— 那会多带 UA(phanthy-code-cli) 与 x-phanthy-client-source，
+	// 而官方这一族两个都不发（见 applyOAuthFamilyHeaders 的长注释）。
+	c.applyOAuthFamilyHeaders(req)
 	return req, nil
 }
 
@@ -713,7 +776,8 @@ func (c *Client) FetchAccountScope(ctx context.Context, a *Auth) (string, string
 	if err != nil {
 		return "", "", err
 	}
-	c.applyCommonHeaders(req)
+	// `/api/oauth/profile` 属于官方 `j59` 那一族 ⇒ 极简头。
+	c.applyOAuthFamilyHeaders(req)
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 	status, body, err := c.doJSON(req, httpTimeout)
 	if err != nil {
@@ -745,7 +809,8 @@ func (c *Client) FetchModels(ctx context.Context, a *Auth) ([]remoteModel, error
 	if err != nil {
 		return nil, err
 	}
-	c.applyCommonHeaders(req)
+	// `/api/phanthy_code/models` 官方只发 Authorization + Accept（`CB1`）⇒ 极简头。
+	c.applyOAuthFamilyHeaders(req)
 	if a != nil && a.OAuth.AccessToken != "" {
 		req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 	}

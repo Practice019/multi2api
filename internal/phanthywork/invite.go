@@ -111,7 +111,8 @@ func (c *Client) FetchReferrals(ctx context.Context, a *Auth) (referralsMeRespon
 	if err != nil {
 		return out, err
 	}
-	c.applyCommonHeaders(req)
+	// `/api/oauth/referrals/me` 属于官方 `j59` 那一族 ⇒ 极简头。
+	c.applyOAuthFamilyHeaders(req)
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 	status, body, derr := c.doJSON(req, httpTimeout)
 	if derr != nil {

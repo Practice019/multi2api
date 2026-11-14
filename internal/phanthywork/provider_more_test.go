@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -396,34 +397,91 @@ func TestExtractPastedForms(t *testing.T) {
 	}
 }
 
-// TestCommonHeadersOnEveryRequest `/api/*` 一族请求的公共头三项。
+// TestOAuthFamilyMatchesOfficialJ59 ★ `/api/oauth/*` 与 `/api/phanthy_code/models`
+// 这一族的出站头必须与官方 `j59` 一致：**没有 UA 分档的 phanthy-code-cli、没有 client-source**。
 //
-// ★★ 2026-11-14 修正：此前断言 UA == DefaultUA（Bun/1.3.14）。
-// 系统对照官方 sidecar 后发现 **UA 是按路径分档的**：
+// ★★ 2026-11-14 反转：原 `TestCommonHeadersOnEveryRequest` 断言
+// `UA == apiCallUA`（phanthy-code-cli/2.1.0）且 `x-phanthy-client-source == desktop`，
+// 并把它标注成"官方 wtK" —— **那是在守护错误行为**：
 //
-//	/api/oauth/*            → phanthy-code-cli/<APP_VERSION>   ← 本判据（官方 wtK）
-//	/api/phanthy_code/models → 官方不设 UA
-//	/v1/chat/completions     → 官方不设 UA（Bun 下即 Bun/1.3.14）← 推理那条本来就对
-//	/v1/messages             → claude-cli/<ver> (<USER_TYPE>, cli)
+//	wtK 服务的是 `/api/work/*`（rewards?limit= / challenges/…/activate / feedback），
+//	**不是** `/api/oauth/*`。本族真正的构造器是 `j59`（@110354479，逐字）：
 //
-// 所以这里断言的是 `apiCallUA`，而不是全局 DefaultUA。
-// 推理路径的 UA 由 TestInferenceHeadersMatchOfficialClient 那族判据守。
-func TestCommonHeadersOnEveryRequest(t *testing.T) {
-	srv, _ := startFakeUpstream(t)
-	p := newFakeProvider(t, srv)
-	req, err := http.NewRequest(http.MethodGet, srv.URL+pathProfile, nil)
-	if err != nil {
-		t.Fatal(err)
+//	  function j59(q, K) {
+//	    let _ = { Accept: "application/json", "Content-Type": "application/json",
+//	              Authorization: `Bearer ${K}` };
+//	    for (let z of ["idempotency-key","x-desktop-installation-id","x-desktop-timestamp",
+//	                   "x-desktop-nonce","x-desktop-signature"]) { ... }
+//	    return _                     // ★ 没有 UA、没有 x-phanthy-client-source
+//	  }
+//
+// 而本族恰好是**频次最高**的那批：注册、签到、额度、模型。
+// 多带两个官方不发的头 × 48 次/天/账号，正是本次要对齐的东西。
+//
+// # 为什么这条判据必须"走真请求"
+//
+// 旧判据直接调 `applyCommonHeaders(req)` —— 它测的是**函数本身**，
+// 不是"某个端点实际发出的头"。后果：把某个端点从 A 构造器换到 B 构造器时，
+// 判据**不会响**。13:44 那次改错就是从这个缝里漏过去的（规格报告 §7.2.1）。
+//
+// 所以这里起一个 httptest 服务端，**真的调四个端点**，再检查它收到的头。
+func TestOAuthFamilyMatchesOfficialJ59(t *testing.T) {
+	type captured struct {
+		header http.Header
+		method string
 	}
-	p.client.applyCommonHeaders(req)
-	if got := req.Header.Get("User-Agent"); got != apiCallUA {
-		t.Errorf("UA = %q, want %q（官方 /api/* 调用器的 UA，见 apiCallUA 的真源）", got, apiCallUA)
-	}
-	if got := req.Header.Get("x-phanthy-client-source"); got != clientSource {
-		t.Errorf("x-phanthy-client-source = %q, want %q", got, clientSource)
-	}
-	if got := req.Header.Get("Accept"); got != "application/json" {
-		t.Errorf("Accept = %q, want application/json", got)
+	var mu sync.Mutex
+	got := map[string]captured{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got[r.URL.Path] = captured{header: r.Header.Clone(), method: r.Method}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		// 响应体形状不重要：本判据只关心**发出去的头**，解析失败无所谓。
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewWithBase(srv.URL)
+	a := newTestAuth("u-j59", "rt-j59")
+	a.Reg.RegisteredAtMS = nowMS()
+
+	ctx := context.Background()
+	// 四条都走 `/api/oauth/*` 或 `/api/phanthy_code/models` 这一族。
+	// 忽略返回值：即使响应体解析失败，请求也已经发出去了 —— 头的断言仍然有效。
+	_, _, _ = c.FetchAccountScope(ctx, a) // GET  /api/oauth/profile
+	_, _ = c.FetchModels(ctx, a)          // GET  /api/phanthy_code/models
+	_, _ = c.FetchReferrals(ctx, a)       // GET  /api/oauth/referrals/me
+	_, _, _ = c.FetchSummary(ctx, a)      // POST /api/oauth/activities/summary
+
+	want := []string{pathProfile, pathModels, pathReferralsMe, pathActivitiesSummary}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, p := range want {
+		rec, ok := got[p]
+		if !ok {
+			t.Errorf("端点 %s 一次请求都没发（判据无法取证）", p)
+			continue
+		}
+		// ① UA = Bun 默认值（官方这一族"不设 UA"，Bun fetch 补的就是它）
+		if v := rec.header.Get("User-Agent"); v != DefaultUA {
+			t.Errorf("%s 的 UA = %q，want %q ——\n"+
+				"官方 j59 这一族**不设 UA**，实际值就是 Bun 的运行时默认；"+
+				"phanthy-code-cli/<ver> 只属于 /api/work/*（wtK）", p, v, DefaultUA)
+		}
+		// ② ★ 不能有 x-phanthy-client-source（这条是本判据存在的理由）
+		if v := rec.header.Get("x-phanthy-client-source"); v != "" {
+			t.Errorf("%s 带了 x-phanthy-client-source=%q，官方 j59 **不发这个头** ——\n"+
+				"多一个官方没有的头就是「异常客户端」特征（见规格报告 §4.2）", p, v)
+		}
+		// ③ Accept 仍在
+		if v := rec.header.Get("Accept"); v != "application/json" {
+			t.Errorf("%s 的 Accept = %q，want application/json", p, v)
+		}
+		// ④ Authorization 必带
+		if v := rec.header.Get("Authorization"); v == "" {
+			t.Errorf("%s 缺 Authorization（官方 j59 的三个头之一）", p)
+		}
 	}
 }
 

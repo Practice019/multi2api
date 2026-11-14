@@ -177,21 +177,59 @@ func TestRegistrationConflictIsTerminal(t *testing.T) {
 	}
 }
 
-// TestUAIsSentAndRequired 坑②：UA 逐字，且缺了会被拒。
+// TestUAIsSentAndRequired 坑②：`/api/oauth/*` 那一族的 UA **逐字是 Bun/1.3.14**。
+//
+// ★★ 2026-11-14 反转：原版设 `p.client.UA = "node/20.11.0"` 想制造"错 UA"，
+// 但那时 `activities/summary` 走的是 `applyCommonHeaders`，UA 被**硬编码**成
+// `apiCallUA = phanthy-code-cli/2.1.0`（`p.client.UA` 根本不起作用）。
+// 而假上游的规则是 `badUA && UA != DefaultUA → 403 TM.00000001`
+// ⇒ **原判据实际断言的是"我们的 summary UA 不是 Bun/1.3.14"**，
+// 也就是说：**它靠那个 bug 才通过**。
+//
+// 现在该族已改成官方 `j59` 的极简头（官方**不设** UA ⇒ 实际值是 Bun 的运行时默认），
+// 所以正确的断言反过来：
+//
+//	① 正向：`badUA = true`（假上游要求 UA 逐字是 DefaultUA）时整条链路**必须成功**
+//	   —— 这直接证明我们发出去的 UA 就是 Bun/1.3.14
+//	② 咬合力：手造一条 summary 请求把 UA 换掉，**必须**拿到 TM.00000001
+//	   —— 证明假上游那条规则真的会咬（否则 ① 是空断言）
+//
+// 判据配套：TestOAuthFamilyMatchesOfficialJ59（四个端点的头逐个核）
 func TestUAIsSentAndRequired(t *testing.T) {
 	srv, fake := startFakeUpstream(t)
 	fake.badUA = true
 	p := newFakeProvider(t, srv)
-	// ⚠ 必须**真的**把客户端的 UA 换掉：假上游的判据是"收到的 UA 不是官方值就拒"，
-	// 客户端照旧发 Bun/1.3.14 的话这条用例会静默变成"永远绿"。
-	p.client.UA = "node/20.11.0"
 	cred := newChatCredential("u-1")
+
+	// ① 正向：我们的 UA 就是 DefaultUA ⇒ 上游接受，整条链路跑通。
+	//    ⚠ 不要在这里设 p.client.UA —— 该族**刻意**不受它影响（官方不发 UA）。
 	_, body, err := chatOnce(t, p, cred, `{"model":"phanthywork/Phanthy-fast","messages":[]}`)
 	if err != nil {
 		t.Fatalf("应把上游错误按流返回而不是 error: %v", err)
 	}
-	if !strings.Contains(body, "TM.00000001") {
-		t.Errorf("UA 不对时上游应回 TM.00000001，实际 %q", body)
+	if strings.Contains(body, "TM.00000001") {
+		t.Errorf("我们的 UA 被上游判为不合格 —— 说明 /api/oauth/* 那一族的 UA 不再是 %q。\n"+
+			"官方 j59 这一族**不设 UA**，实际值必须是 Bun 的运行时默认。实际响应: %q", DefaultUA, body)
+	}
+
+	// ② 咬合力：同一条 summary 请求、只把 UA 换成别的 ⇒ 必须被拒。
+	//    （假上游的 UA 检查在鉴权**之前**，所以这里不需要有效签名。）
+	if apiCallUA == DefaultUA {
+		t.Fatal("apiCallUA 与 DefaultUA 相同 ⇒ 本条判据无从区分两个端点族，等于空断言")
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+pathActivitiesSummary, strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("User-Agent", apiCallUA) // 故意用一个 ≠ DefaultUA 的 UA
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(raw), "TM.00000001") {
+		t.Errorf("假上游没拒掉一个 UA=%q 的请求 ⇒ 上一条正向断言是空断言。响应: %q", apiCallUA, string(raw))
 	}
 }
 
