@@ -8,7 +8,8 @@
 //
 // ⇒ **平台不提供"看自己的邀请码"的只读字段**；码的唯一来源是 `POST /api/oauth/referrals/code`
 //
-//	（报告 §1.1/§1.2 实测：body 空对象 `{}`、幂等键 `referral-code:<installationId>:<YYYY-MM-DD>`、
+//	（报告 §1.1/§1.2 实测：body 空对象 `{}`、幂等键 `referral-code:<installationId>`（**无日期段**，
+//	2026-11-14 按官方前端 bundle 更正）、
 //	v1 签名；返回**固定 5 槽**，每槽 `{slot, code(32字符,URL用), invite_code(XXXX-XXXX-XXXX,给人念), share_url}`；
 //	**同日重复 POST 返回完全相同的 5 槽** —— 重取不换码）。
 //
@@ -309,9 +310,25 @@ func inviteDay(now time.Time) string {
 	return now.UTC().Add(8 * time.Hour).Format("2006-01-02")
 }
 
-// ReferralCodeIdempotencyKey 拼取码幂等键：`referral-code:<installationId>:<YYYY-MM-DD>`。
-func ReferralCodeIdempotencyKey(installationID, day string) string {
-	return "referral-code:" + installationID + ":" + day
+// ReferralCodeIdempotencyKey 拼取码幂等键：`referral-code:<installationId>`。
+//
+// ★★ 2026-11-14 修正：此前这里是 `referral-code:<installationId>:<YYYY-MM-DD>`（带日期段），
+// **错了** —— 多一个 `:<day>` 段就与官方不是同一个键，上游的幂等语义（"同一天重复调用命中同一条"）
+// 对我们等于失效。
+//
+// 真源：官方桌面端前端 bundle 的 API 定义（`_up_\dist\assets\App-dSHMvpu3.js`，逐字）：
+//
+//	code:e=>No({localPath:`/api/daily-activity/referral-code`,
+//	            upstreamPath:`/api/oauth/referrals/code`,method:`POST`,body:`{}`,
+//	            idempotencyKey:`referral-code:${e.installationId}`,identity:e})
+//
+// ⚠ 这个键**不带日期**，所以它其实是"每个安装一个码"的语义（与签到的
+// `daily:<installId>:<day>` 不同 —— 那条**带**日期）。两条不要互相类推。
+//
+// 也纠正了第三方插件 magpie 的记载（它写 `referral-code:<installationId>:<ms>`）：
+// 毫秒段同样不存在。
+func ReferralCodeIdempotencyKey(installationID string) string {
+	return "referral-code:" + installationID
 }
 
 // ── Provider 侧 ─────────────────────────────────────────────────────────
@@ -324,7 +341,7 @@ func ReferralCodeIdempotencyKey(installationID, day string) string {
 //	1 当日缓存命中且非强制刷新 ⇒ 直接回缓存（护栏② 的兑现点）
 //	2 GET /referrals/me（只读）—— 拿资格与额度
 //	3 eligible_to_invite=false ⇒ **不打写接口**，给可读原因（护栏④）
-//	4 POST /referrals/code（写；幂等键按 UTC+8 当日）—— 失败只标这一行（护栏③，不回滚不重试）
+//	4 POST /referrals/code（写；幂等键 `referral-code:<installationId>`，**不带日期**）—— 失败只标这一行（护栏③，不回滚不重试）
 func (p *Provider) inviteViewFor(ctx context.Context, a *Auth, refresh bool) (accountInviteView, bool) {
 	// ⚠ 只取**显式昵称字段**（`NicknameValue`），不走 `Auth.Nickname()` 的回落链 ——
 	//   后者会回落到 AccountScope/uuid 甚至 uid，那些都不是"名字"（见 credential.go:262）。
@@ -389,7 +406,8 @@ func (p *Provider) inviteViewFor(ctx context.Context, a *Auth, refresh bool) (ac
 	}
 
 	// 4 写：取/建邀请码。
-	slots, cerr := p.client.FetchReferralCodes(ctx, a, ReferralCodeIdempotencyKey(instID, today))
+	//   幂等键 = `referral-code:<installationId>`（**不带日期**，见 ReferralCodeIdempotencyKey 的真源）。
+	slots, cerr := p.client.FetchReferralCodes(ctx, a, ReferralCodeIdempotencyKey(instID))
 	if cerr != nil {
 		v.Error = inviteErrText("取邀请码失败", cerr)
 		p.storeInviteRow(a.UID(), today, v)

@@ -263,19 +263,21 @@ func startFakeUpstream(t *testing.T) (*httptest.Server, *fakeUpstream) {
 		failInst := f.failReferralCodeInstID
 		f.lastReferralKey, f.lastReferralBody = key, string(raw)
 		f.mu.Unlock()
-		if failInst != "" && strings.Contains(key, ":"+failInst+":") {
+		// ⚠ 幂等键现在是 `referral-code:<instID>`（两段，instID 后**没有**冒号）——
+		//   所以这里不能再找 ":"+failInst+":"，否则"指定账号失败"这条开关会静默失效。
+		if failInst != "" && strings.Contains(key, ":"+failInst) {
 			writeJSONTest(w, http.StatusInternalServerError, map[string]any{"error": map[string]any{"code": "internal"}})
 			return
 		}
-		// ★ 体例与签到端点同款：body 必须是**空对象**、幂等键必须是 referral-code:<instID>:<YYYY-MM-DD>。
+		// ★ 体例与签到端点同款：body 必须是**空对象**、幂等键必须是 referral-code:<instID>。
 		if strings.TrimSpace(string(raw)) != "{}" {
 			writeJSONTest(w, http.StatusForbidden, map[string]any{"error": map[string]any{
 				"code": "bad_body", "message": "body must be an empty JSON object, got: " + string(raw)}})
 			return
 		}
-		if !strings.HasPrefix(key, "referral-code:") || strings.Count(key, ":") != 2 {
+		if !strings.HasPrefix(key, "referral-code:") || strings.Count(key, ":") != 1 {
 			writeJSONTest(w, http.StatusForbidden, map[string]any{"error": map[string]any{
-				"code": "bad_idem", "message": "idempotency-key 期望 referral-code:<installationId>:<YYYY-MM-DD>，实际 " + key}})
+				"code": "bad_idem", "message": "idempotency-key 期望 referral-code:<installationId>（不带日期），实际 " + key}})
 			return
 		}
 		if st != 0 {

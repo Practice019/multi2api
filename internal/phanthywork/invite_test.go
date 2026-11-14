@@ -175,12 +175,19 @@ func TestInviteCodesParsedFromFakeUpstream(t *testing.T) {
 	if u, _ := first["share_url"].(string); !strings.HasPrefix(u, "https://code.phanthy.com/r/") {
 		t.Errorf("share_url 没解析对: %q", u)
 	}
-	// 幂等键形态：referral-code:<installationId>:<YYYY-MM-DD>（护栏②的键）。
+	// 幂等键形态：referral-code:<installationId>（护栏②的键）。
+	//
+	// ★ 2026-11-14 修正：此前断言的是 `<installationId>:<YYYY-MM-DD>`（三段）。
+	// 官方前端 bundle 的 API 定义是 `referral-code:${e.installationId}`（**两段，无日期**），
+	// 这条判据原先在守护一个错格式 —— 改回两段，并把"不能有日期段"作为断言写死。
 	fake.mu.Lock()
 	key, rawBody := fake.lastReferralKey, fake.lastReferralBody
 	fake.mu.Unlock()
-	if !strings.HasPrefix(key, "referral-code:") || strings.Count(key, ":") != 2 {
-		t.Errorf("幂等键 = %q，want referral-code:<installationId>:<YYYY-MM-DD>", key)
+	if !strings.HasPrefix(key, "referral-code:") || strings.Count(key, ":") != 1 {
+		t.Errorf("幂等键 = %q，want referral-code:<installationId>（两段，不带日期）", key)
+	}
+	if key != ReferralCodeIdempotencyKey(strings.TrimPrefix(key, "referral-code:")) {
+		t.Errorf("幂等键 = %q，与 ReferralCodeIdempotencyKey 的产出不一致", key)
 	}
 	if rawBody != "{}" {
 		t.Errorf("POST body = %q，want 字面量空对象 {}", rawBody)
@@ -605,5 +612,32 @@ func TestInviteDisplayNameRules(t *testing.T) {
 		if got := inviteDisplayName(in); strings.TrimSpace(got) == "" {
 			t.Errorf("inviteDisplayName(%q) 为空 —— 真名字必须给（否则昵称列对所有上游都消失）", in)
 		}
+	}
+}
+
+// TestReferralCodeIdempotencyKeyIsByteExact 逐字节钉死取码幂等键。
+//
+// 真源：官方桌面端前端 bundle 的 API 定义（`_up_\dist\assets\App-dSHMvpu3.js`，逐字）：
+//
+//	idempotencyKey:`referral-code:${e.installationId}`
+//
+// ★ 这条判据存在的理由：此前实现与两条判据都认定是
+// `referral-code:<installationId>:<YYYY-MM-DD>`（三段）—— 那是**错的**，
+// 多一段就等于"和官方不是同一个幂等键"，上游的去重语义对我们整个失效，
+// 而且不会有任何报错（只会表现为"每次取码都可能建新码"）。
+//
+// 用逐字节相等而不是"前缀 + 数冒号"：这样任何人重新加回日期段都会立刻红。
+func TestReferralCodeIdempotencyKeyIsByteExact(t *testing.T) {
+	const instID = "di_7Fk2mQ9xAbCdEfGh"
+	if got, want := ReferralCodeIdempotencyKey(instID), "referral-code:"+instID; got != want {
+		t.Errorf("ReferralCodeIdempotencyKey(%q) = %q，want %q（**不得**带日期/毫秒段）", instID, got, want)
+	}
+	// 反向：旧的三段形态必须与现实现不同（否则说明键又长回去了）
+	if ReferralCodeIdempotencyKey(instID) == "referral-code:"+instID+":2026-11-14" {
+		t.Error("取码幂等键又长回了日期段 —— 与官方不是同一个键")
+	}
+	// 反向：签到那条**确实**带日期，两条不能互相类推
+	if DailyLoginIdempotencyKey(instID, "2026-11-14") == ReferralCodeIdempotencyKey(instID) {
+		t.Error("签到键与取码键不该相同（签到带日期、取码不带）")
 	}
 }

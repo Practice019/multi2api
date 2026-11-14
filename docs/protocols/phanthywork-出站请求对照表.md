@@ -39,10 +39,10 @@ Y59 = {
 | claim | POST | `/api/oauth/activities/daily-login/claim` | `ClaimDailyLogin` | ✅ |
 | referral-summary | GET | `/api/oauth/referrals/me` | `pathReferralsMe` | ✅ |
 | referral-code | POST | `/api/oauth/referrals/code` | `pathReferralsCode` | ✅ |
-| **rewards** | GET | `/api/oauth/rewards` | — | ❌ **缺** |
-| **referral-relations** | GET | `/api/oauth/referrals/relations` | —（只在注释里） | ❌ **缺** |
-| **onboarding/reconcile** | POST | `/api/oauth/activities/onboarding/reconcile` | — | ❌ **缺** |
-| **onboarding/tasks/{id}/{start\|complete}** | POST | `/api/oauth/activities/onboarding/tasks/...` | — | ❌ **缺** |
+| rewards | GET | `/api/oauth/rewards` | `FetchRewards` | ✅ 2026-11-14 补上 |
+| referral-relations | GET | `/api/oauth/referrals/relations` | `FetchReferralRelations` | ✅ 2026-11-14 补上 |
+| onboarding/reconcile | POST | `/api/oauth/activities/onboarding/reconcile` | `ReconcileOnboarding` | ✅ 2026-11-14 补上 |
+| onboarding/tasks/{id}/{start\|complete} | POST | `/api/oauth/activities/onboarding/tasks/...` | `StartOnboardingTask` / `CompleteOnboardingAction` | ✅ 2026-11-14 补上 |
 | （本网关独有） | GET | `/api/phanthy_code/models` | `FetchModels` | ✅ 官方也有（`CB1`） |
 | （推理） | POST | `/v1/chat/completions` | `ChatCompletionsStream` | ✅ 默认路径 |
 | （推理·旧内核） | POST | `/v1/messages` | `ChatStream` | ✅ 非默认 |
@@ -126,25 +126,54 @@ X = () => ({
 
 ## 四、幂等键对照（写操作最容易错的一处）
 
-真源：magpie-PhanthyCode `src/activity.mjs` 的文件头（从前端 bundle `App-Y9eSJNhB.js`
-的 `Co()` 调用表静态提取）+ `src/referrals.mjs`。
+**★ 真源升级（2026-11-14）**：官方**桌面端前端 bundle 就在本机**，不必再靠第三方插件转述 ——
 
-| 操作 | 官方幂等键 | 本仓 | 判定 |
+```
+D:\software\PhanthyWork-windows-x64\_up_\dist\assets\App-dSHMvpu3.js   (1.9 MB, Vite 产物)
+```
+
+它就是 magpie 当年引用的 `_up_\dist\assets\App-*.js`。整组活动面 API 在里面的一个对象里（下称 `Po`），
+邀请面在另一个对象里（下称 `Id`）。**读它是"直接读源码"，不是抓包、也不用逆向 exe。**
+（另：运行中的 sidecar 在 `127.0.0.1:38011` 上就服务这套前端，`curl` 即可取任意 chunk。）
+
+| 操作 | 官方幂等键（逐字，来自 `Po`/`Id`） | 本仓 | 判定 |
 |---|---|---|---|
-| 每日签到 claim | `daily:<installationId>:<t>` | `daily:<installationId>:<serverDate>` | ✅ 一致（我们用服务端日键，比本地算日期更权威） |
-| 取邀请码 | `referral-code:<installationId>:<ms>` | `referral-code:<installationId>:<YYYY-MM-DD>` | ⚠️ **后缀形态不同**（见下） |
-| 注册设备 | `register:<installationId>` | 同 | ✅ |
+| 每日签到 claim | `daily:${e.installationId}:${t}` | `daily:<installationId>:<serverDate>` | ✅ |
+| 取邀请码 | `referral-code:${e.installationId}`（**两段，无日期/毫秒**） | 同（已修正） | ✅ |
+| 注册设备 | `register:${e.installationId}` | 同 | ✅ |
 | `activities/summary` | **不发**（canonical 第 7 段空串） | 同 | ✅ |
-| onboarding start | `onboarding:start:<id>:<task>` | — | ❌ 未实现 |
-| onboarding complete | `onboarding:complete:<id>:<task>` | — | ❌ 未实现 |
+| onboarding start | `onboarding:start:${e.installationId}:${t}` | 同（已实现） | ✅ |
+| onboarding complete | `onboarding:complete:${e.installationId}:${t}` | 同（已实现） | ✅ |
+| onboarding reconcile | `onboarding:reconcile:${e.installationId}:${t??"latest"}:${Date.now()}` | 同（已实现） | ✅ |
+| rewards（GET） | **不发** | 同 | ✅ |
 
-**⚠ 取邀请码那条的形态冲突（留待新号复验，先不动）**：本仓注释记的是"报告 §1.1/§1.2 实测"
-的日期形态，magpie 记的是毫秒形态并称"官方前端同形"。两者都被真机跑通过其中一条路径，
-但**我们拿不到对照实验**（账号已封）。既然现实现**能用**，就不按推测去改 —— 记在这里等复验。
+**★ 两条键的语义差别（不要互相类推）**：
 
-## 五、★ 一个会让签名必错的陷阱：canonical 的 path 段**不能带 query**
+- `daily:…:<日>` —— **带**日期，表达"这一天"
+- `referral-code:…` —— **不带**任何时间，表达"这个安装一个码"
+- `onboarding:reconcile:…:<ms>` —— **带**毫秒，表达"这一次对账"（不是去重语义）
 
-magpie `src/referrals.mjs` 的原文警告：
+**取邀请码那条曾经错过**（2026-11-14 修正）：本仓原先是 `referral-code:<installationId>:<YYYY-MM-DD>`，
+第三方插件 magpie 记的是 `…:<ms>` —— **两者都多了尾巴**。官方是两段。多一段就与官方不是同一个键，
+上游的去重语义对我们整个失效，且**不会有任何报错**（只表现为"每次取码都可能建新码"）。
+判据 `TestReferralCodeIdempotencyKeyIsByteExact` 已逐字节钉死，并做过反向验证（改回三段即红）。
+
+## 五、★ 三条硬事实（从官方 `No()` 逐字读出，容易踩）
+
+1. **GET 也要 v1 签名。** 官方 `No()` 对所有方法都算 `sign_desktop_activity`；
+   GET 的 body 是 `undefined` → canonical 第 6 段是 `sha256("")` 的 base64url
+   （`47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU`）。所以 `rewards` / `relations`
+   两个 GET **同样带四个 `x-desktop-*` 头**，不是"只读就不用签"。
+2. **签名用 `upstreamPath`，不是 `localPath`。** `rewards` 的 localPath 带 `?type=daily_login`，
+   upstreamPath 是干净的 `/api/oauth/rewards` —— 那个 query 是**本地代理侧**的过滤意图，
+   不发往上游、也不进 canonical。
+3. **body 一律是字面量。** `start`/`complete`/`claim`/`referral-code` 的 body 是 `{}`
+   （不是空串、不是 `null`）；`reconcile` 是 `{}` 或 `{"session_id":"…"}`；
+   `summary` 是 `{"inference_public_key":"…"}`。
+
+## 六、★ 一个会让签名必错的陷阱：canonical 的 path 段**不能带 query**
+
+magpie `src/referrals.mjs` 的原文警告（已被官方前端第 2 条事实正面印证）：
 
 > ⚠ `request()` 的 v1 canonical 用的是 `new URL(url).pathname`。本模块的两个端点都**没有 query**，
 > 所以签出来是对的；将来若要加 `referrals/relations?limit=…`，必须先修 `upstreamPath`，否则必然 401。
@@ -156,37 +185,53 @@ magpie `src/referrals.mjs` 的原文警告：
 判据 `TestSignV1RejectsQueryInPath` + `TestV1CanonicalPathSegmentHasNoQuery`。
 将来加 `rewards?type=daily_login` / `referrals/relations?limit=…` 时，会立刻被拦住而不是等真机 401。
 
-## 六、还没做的端点：实现前必须先取证的部分
+## 七、四个缺口已于 2026-11-14 补齐（实现 + 判据）
 
-### 6.1 四个缺口
+### 7.1 实现位置
+
+`internal/phanthywork/onboarding.go`（判据 `onboarding_test.go`）：
 
 ```
-GET  /api/oauth/rewards                       ← 官方用它读「今日签到状态」：?type=daily_login
-GET  /api/oauth/referrals/relations           ← 带 cursor（响应含 next_cursor）
-POST /api/oauth/activities/onboarding/reconcile
-POST /api/oauth/activities/onboarding/tasks/{id}/{start|complete}
+FetchRewards              GET  /api/oauth/rewards
+FetchReferralRelations    GET  /api/oauth/referrals/relations
+ReconcileOnboarding       POST /api/oauth/activities/onboarding/reconcile
+StartOnboardingTask       POST /api/oauth/activities/onboarding/tasks/<id>/start
+CompleteOnboardingAction  POST /api/oauth/activities/onboarding/tasks/<id>/complete
 ```
 
-另有 `POST /referrals/bind` —— 官方存在，但 magpie **刻意不实现、也不导出路径**，本仓同样不做。
+两个通用发送器 `signedGetJSON` / `signedPostJSON` 对应官方 `No()` 那条**单一代码路径**
+（官方把所有方法都塞进同一个 `No()`，我们照搬这个形状，减少"某条路径忘了签名"的可能）。
 
-### 6.2 已确定的（可以照做的）
+### 7.2 仍未做的（有意为之，不是遗漏）
 
-- **onboarding 幂等键格式**：`onboarding:start:<id>:<task>` / `onboarding:complete:<id>:<task>`
-- **任务 id 形状**：上游路径里的 `<id>` 必须匹配 `/^[a-z0-9_]{1,80}$/`（sidecar 的校验）
-- **rewards 读取方式**：`GET /api/oauth/rewards?type=daily_login`，**v1 签名**（不是只读 Bearer）
-- **钱包字段**：`wallet{availablePoints,totalPoints,balancePoints,reservedPoints}`
+- **`POST /referrals/bind`** —— 官方存在，但 magpie 刻意不实现、也不导出路径；本仓同样不做。
+- **响应结构** —— 四个端点都返回 `json.RawMessage`：官方前端只是把 JSON 往下传，
+  bundle 里没有展开字段。**给未知结构编字段就是重复今天的错误**，所以不臆造。
+  已知的只有钱包字段名 `wallet{availablePoints,totalPoints,balancePoints,reservedPoints}`
+  与邀请关系的 `{schema_version, next_cursor, relations:[]}`（这是本包既有实测记录）。
+- **`CapTasks` 能力声明与面板** —— 能力声明是"承诺"，要有 UI 才能兑现
+  （见 `Caps()` 附近的断言 `TestCapsDoNotPromiseTasksYet`）。本轮只做**地基**：
+  方法能被调用、能被判据守住。UI 单独一轮。
 
-### 6.3 还不知道的（**不许猜，必须抓包**）
+### 7.3 这一轮的取证方式（值得复用）
 
-- `onboarding/reconcile` 的 **body 形状**（sidecar 只透传，body 由客户端定义；客户端代码不在这个二进制里）
-- `onboarding/tasks/{id}/{start|complete}` 的 body
-- `reconcile` 的语义（它靠什么判定"该做哪些任务"）
-- rewards 响应里 `wallet` 与 `credits` 的关系（我们 summary 里读的是 `credits.available`）
+**没有抓包、也没有逆向 exe** —— 官方前端 bundle 在安装目录里就是解压好的：
 
-抓包路径：在官方客户端（桌面端 / Phanthy Code CLI）里走一遍新手任务流程，
-用 `D:\temp\ph-test` 里既有的 CDP 抓包手法（见 `step91-register-capture.mjs` 的做法）。
+```
+D:\software\PhanthyWork-windows-x64\_up_\dist\          ← 解压好的前端（430 个 .js / 17.9 MB）
+  └ assets\App-dSHMvpu3.js                              ← 活动面 + 邀请面全部 API 定义
+```
 
-## 七、纪律（这份协议的核心）
+补充两条更容易的取法（都不需要动官方进程）：
+
+1. 运行中的 sidecar 在 `http://127.0.0.1:38011/` **服务这套前端**，任意 chunk 直接 `curl`。
+2. 想改它的 base URL 做抓包：`PUT /api/settings/phanthy-base-url`（官方接口，返回
+   `requiresRestart: true`；写入 `~/.claude/settings.json` 的 `phanthyBaseUrl`）。
+
+**教训**：这个上游的关键事实几乎都能从**本地明文**拿到。之前绕了远路（抓包脚本、
+WebView2 缓存、exe 解压）都是因为没先 `ls` 安装目录里的 `_up_`。
+
+## 八、纪律（这份协议的核心）
 
 1. **改出站请求之前，先对这张表**；表里没有的，先去官方二进制/源码找真源，**别照名字编**。
 2. **判据必须反向验证**：故意造一个违规，确认它真的会红。没有反向验证过的判据不算数
@@ -196,13 +241,23 @@ POST /api/oauth/activities/onboarding/tasks/{id}/{start|complete}
 4. **拿不准就不改**：两个来源冲突、又无法用真机分辨时，**保持现状并记档**，
    等有账号能复验再动。今天的封号就是"按推测改"的代价。
 
-## 八、判据索引
+## 九、判据索引
 
 | 判据 | 守什么 |
 |---|---|
 | `TestInferenceHeadersMatchOfficialClient` | 推理头**双向** 1:1（官方有的必须在、官方没有的必须不在） |
-| `TestCanonicalSeparatorsArePerString` | 三条 canonical 分隔符逐字节 = LF |
+| `TestCanonicalSeparatorsArePerString` | 三条 canonical 分隔符逐字节 = LF（官方三处都是 `` .join(`<LF>`) ``） |
 | `TestCommonHeadersOnEveryRequest` | `/api/*` 公共头三项（UA = `phanthy-code-cli/2.1.0`） |
+| `TestSignV1RejectsQueryInPath` | canonical 的 path 段带 query ⇒ 当场报错（不含反向即算未验证） |
+| `TestV1CanonicalPathSegmentHasNoQuery` | canonical 第 3 段就是 pathname |
+| `TestReferralCodeIdempotencyKeyIsByteExact` | 取码幂等键逐字节 = `referral-code:<installationId>`（**不许带日期/毫秒**） |
+| `TestFetchRewardsIsSignedGetOnCleanPath` | rewards：GET + 干净路径 + v1 签名 |
+| `TestFetchReferralRelationsIsSignedGet` | relations：GET + v1 签名 |
+| `TestStartAndCompleteOnboardingTask` | 任务动作：路径 / 字面量 `{}` / 稳定幂等键 / v1 签名 |
+| `TestOnboardingTaskIDValidatedLocally` | 非法任务 id ⇒ **零请求**（本地挡掉） |
+| `TestReconcileOnboardingBodyAndKey` | reconcile body 两态 + 键含 `latest`/sessionId |
+| `TestOnboardingReconcileKeyIsUniquePerCall` | reconcile 键含 `Date.now()` ⇒ 每次不同 |
+| `TestSignedGetHashesEmptyBody` | GET 的 canonical 第 6 段 = `sha256("")` base64url |
 | `TestChatSendsNoSignatureHeaders` | chat 路径不带任何证明头 |
 | `TestDefaultUAIsBun` | 默认 UA 仍是 `Bun/1.3.14`（推理路径那条） |
 | `TestChatUsesChatCompletionsPath` | 推理走 `/v1/chat/completions` |
