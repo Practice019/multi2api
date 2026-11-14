@@ -61,6 +61,7 @@
   th { color: var(--dim); font-weight: 600; font-size: 11px; }
   td.mono { font-family: var(--font-mono); }
   td.ops { text-align: right; }
+  td.ops button { min-width:6em; } /* 文案在「轮换」↔「轮换中…」之间切换：不定宽会推挤同行内容 */
   tbody tr:hover { background: var(--panel2); }
   .empty { padding: 14px 10px; font-size: 12px; color: var(--dim); }   /* 与容器内边对齐 */
   .empty b { color: var(--fg); }
@@ -1447,7 +1448,7 @@ header h1{letter-spacing:0}
 </main>
 
 <div class="drawer-mask" id="mask"></div>
-<aside class="drawer calm" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+<aside class="drawer calm" id="drawer" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
   <form id="form" autocomplete="off">
     <div class="drawer-hd">
       <h2 id="drawerTitle">新建令牌</h2>
@@ -1563,7 +1564,7 @@ header h1{letter-spacing:0}
      ⚠ 别再往这一页写 .toast 的定位：那会让同一个产品里出现两种通知语义
        （旧的单行覆盖式正是 2026-11-01 被统一掉的那个）。 -->
 <div class="notices">
-  <div id="toast" class="notice" hidden></div>
+  <div id="toast" class="notice" role="log" aria-live="polite" aria-relevant="additions text" hidden></div>
 </div>
 
 <script>
@@ -1839,7 +1840,10 @@ function askDelete(row) {
 }
 
 // ── 抽屉 ──────────────────────────────────────────────────────────────────
+var drawerReturnFocus = null;
 function openDrawer(row) {
+  if (state.busy) return;
+  drawerReturnFocus = document.activeElement;
   state.editing = row || null;
   // ⚠ 2026-11-01 真缺陷修复（用户报「保存按钮，它没有真的保存自动分组配置」）：
   //   原先这两行只是**清空**，下面还把 f-automode 硬写成 'inherit' —— 从不从 row 还原。
@@ -1895,12 +1899,42 @@ function openDrawer(row) {
   syncVisibility();
   $('mask').className = 'drawer-mask on';
   $('drawer').className = 'drawer calm on';
+  $('f-name').focus();
 }
 function closeDrawer() {
+  if (state.busy) return;
   $('mask').className = 'drawer-mask';
   $('drawer').className = 'drawer calm';
   state.editing = null;
+  var target = drawerReturnFocus;
+  drawerReturnFocus = null;
+  if (target && target.isConnected && !target.disabled) target.focus();
+  else $('btnNew').focus();
 }
+function drawerKeydown(e) {
+  var drawer = $('drawer');
+  if (!drawer.classList.contains('on') || e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeDrawer();
+    return;
+  }
+  if (e.key !== 'Tab') return;
+  var items = Array.from(drawer.querySelectorAll('a[href],button,input,select,textarea,[tabindex]')).filter(function (el) {
+    return !el.disabled && el.tabIndex >= 0 && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+  });
+  var first = items[0], last = items[items.length - 1];
+  if (!first) { e.preventDefault(); drawer.focus(); return; }
+  if (!items.includes(document.activeElement)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+  } else if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault(); first.focus();
+  }
+}
+document.addEventListener('keydown', drawerKeydown);
 function renderDrag(listId, arr) {
   $(listId).innerHTML = arr.map(function (g, i) {
     // 显示名字（labelOfGroup），title 里留原始引用 —— 悬空引用（分组已删）
@@ -2197,8 +2231,8 @@ function save() {
     } else {
       toast('已保存');
     }
-    closeDrawer();
     setBusy(false);
+    closeDrawer();
     return refresh();
   }).catch(function (e) {
     setBusy(false);

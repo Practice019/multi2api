@@ -305,7 +305,9 @@ func TestModelsPageHasProviderActionColumns(t *testing.T) {
 	page := string(modelsUIPage)
 	for _, hook := range []string{
 		`setAttribute('data-act', 'refresh')`,
-		`setAttribute('data-actres', kind)`,
+		`id="toast"`, // 结论走右上角通知框（放行内会把按钮挤得左右移动）
+		`function toast(`,
+		`WB2API:TOAST:START`, // 实现由 tools/toast_sync.js 注入，不许手改
 		"/ui/models/provider/refresh",
 		`<th>操作</th>`, // 行内动作只占一列
 	} {
@@ -326,6 +328,8 @@ func TestModelsPageHasProviderActionColumns(t *testing.T) {
 		`setAttribute('data-act', 'probe-cancel')`,
 		`el('button', null, '只看它')`,
 		`className = 'viewmodels'`,
+		`class="actres`,  // 行内结果：会让按钮被结果文字挤着位移，已搬到 toast
+		`actionResultEl`, // 同上，该函数已删
 	} {
 		if strings.Contains(page, gone) {
 			t.Errorf("模型页不该再出现 %q —— 该控件已于 2026-11-14 按要求去掉", gone)

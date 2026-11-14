@@ -12,9 +12,15 @@
 //   webui.html        外壳控制台（批量动作会一次发几十条结果 ⇒ 必须有堆叠）
 //   webui-tokens.html 令牌页（批量轮换同理）
 //
-// 其余 5 页（状态/分组/模型/渠道/登录）**不用**通知框：它们没有 #toast 元素、也没有
-// 一处 toast() 调用（实测过）。等哪一页真的要用，再把它加进 PAGES ——
-// 而不是先注进去留着当死代码。
+// 其余 4 页（状态/分组/渠道/登录）**不用**通知框：它们没有 #toast 元素、也没有
+// 一处 toast() 调用。等哪一页真的要用，再把它加进 PAGES —— 而不是先注进去留着当死代码。
+
+// ⚠ 2026-11-14 反例（真的发生过）：模型页本来没有通知框，我在给「重拉」做反馈时
+// 自造了一套 .toasts 浮动层 —— 那是重复轮子（共享层有多行堆叠 / 连续同文案合并成
+// ×N / 超上限折叠，我造的那套一条都没有，批量操作会退化成「只读得到最后一条」）。
+// 正确做法就是：加 #toast 容器 + 补 （宿主契约）+ 把页面加进 PAGES + 跑本工具注入。
+//   判据：internal/server/frontend_notify_layer_test.go 的
+//         TestFrontendHasSingleNotificationLayer（扫全部 webui*.html）
 //
 // 用法：
 //   node tools/toast_sync.js           # 写入
@@ -28,7 +34,11 @@ const SRC = path.join(ROOT, 'internal', 'server', 'toast.js');
 const START = '// ==== WB2API:TOAST:START（由 tools/toast_sync.js 生成，勿手改）====';
 const END = '// ==== WB2API:TOAST:END ====';
 
-const PAGES = ['internal/server/webui.html', 'internal/server/webui-tokens.html'];
+const PAGES = [
+  'internal/server/ui/app.js',
+  'internal/server/webui-tokens.html',
+  'internal/server/webui-models.html',
+];
 
 function eolOf(text) {
   return text.indexOf('\r\n') >= 0 ? '\r\n' : '\n';

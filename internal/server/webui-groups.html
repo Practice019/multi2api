@@ -54,6 +54,7 @@
   .pager { display:flex; gap:8px; align-items:center; justify-content:flex-end; margin-top:8px; font-size:12px; }
   .pager button[disabled] { opacity:.5; cursor:default; }
   /* 行首的展开按钮：键盘可达的真实按钮（行点击仍保留，两条路径同一状态）。 */
+  button#btnDelConfirm { min-width:6em; } /* 文案在「确认删除」↔「删除中…」之间切换：不定宽会推挤对话框内容 */
   button.gx { width:20px; height:20px; line-height:18px; padding:0; margin-right:6px;
               display:inline-flex; align-items:center; justify-content:center; vertical-align:middle;
               background:transparent; border:1px solid var(--line); color:var(--fg); font-size:11px; }

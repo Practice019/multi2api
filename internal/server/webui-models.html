@@ -1549,22 +1549,29 @@ main > section[role=tabpanel] > .empty { flex:0 0 auto; }
 header.statline { align-items:baseline; }
 
 /* ── 供应商行的行内动作（重拉）─────────────────────────────────────────────
-   为什么结果落在行内而不是弹窗/整页 toast：这个动作的结论属于**那一行**
-   （"这个上游这次变了没变"），弹窗一关就没了，而用户通常要对着十几行逐个看。
-   aria-live 让读屏也能听到结论。
+   ⚠ 2026-11-14 两次收窄，都是按用户反馈：
 
-   ⚠ 2026-11-14 按用户要求收窄：操作**只占一列**（原来「只看它 / 重拉 / 探测」
-   分了三列，中间大片空白），并且去掉了「探测」与「只看它」两个按钮。
-   `width:1%` + `white-space:nowrap` 让这一列只占内容宽度，把剩余宽度还给
-   「模型数 / 来源」那几列。 */
+   ① 操作**只占一列**（原来「只看它 / 重拉 / 探测」分了三列，中间大片空白）；
+   ② 结论**不再落在行内**，改到右上角的 toast（见下面的 .toasts）。
+
+   ② 的理由：结论文字原来紧跟在按钮后面（那个 actres 行内 span），而这一列是
+   `width:1%` + 右对齐 —— 于是每行拿到结果后按钮都会被挤着左右移动。
+   用户原话："点击按钮后不要位移"。
+
+   按钮另给 min-width：文字在「重拉 / 重拉中…」之间切换时宽度不能变，
+   否则**按钮自己**也会推挤（同样是位移）。 */
 .vendorrow td.act { white-space:nowrap; width:1%; text-align:right; }
-.vendorrow td.act > button { margin-right:6px; }
-.vendorrow td.act > button:last-of-type { margin-right:0; }
-.actres { display:inline-block; margin-left:8px; font-size:12px; max-width:30ch;
-          vertical-align:middle; overflow:hidden; text-overflow:ellipsis; }
-.actres.run  { color:var(--dim); }
-.actres.ok   { color:var(--ok); font-weight:700; }
-.actres.bad  { color:var(--warn); font-weight:700; }
+.vendorrow td.act > button { min-width:5.5em; }
+
+/* ⚠ 本页**不自己写通知层的样式**。
+   通知框（#toast / .toastline / .toastmore / .toastn）的样式由主题层提供并由
+   theme_sync 同步到所有页面，实现由 tools/toast_sync.js 从 internal/server/toast.js
+   注入（见文件里 `WB2API:TOAST` 标记段）。
+
+   2026-11-14 我在这一页自造过一套 .toasts（浮动层 + 自己的样式），
+   结果是同一个产品里出现两套通知语义，而且我造的那套没有多行堆叠 /
+   ×N 合并 / 上限折叠 —— 批量操作会退化成「只读得到最后一条」。
+   判据 TestFrontendHasSingleNotificationLayer 现在会拦住这种写法。 */
 </style>
 <script>
 // 主题必须在首次绘制**之前**定下来，否则会闪一下深色再变浅色。
@@ -2208,17 +2215,111 @@ header.statline { align-items:baseline; }
     return a;
   }
 
-  // actionResultEl 把一条动作结论渲染成 aria-live 的 span。
+  // ── 通知层：共享实现（**不要手改这一段**）────────────────────────────
   //
-  // 空文本也照样建节点：live region 必须先存在、之后内容变化才会被读屏播报
-  // （动态插入整个 live 区域，多数读屏器不会播报）。这是 aria-live 的常见坑。
-  function actionResultEl(act, kind) {
-    var s = el('span', 'actres' + (act.cls ? ' ' + act.cls : ''), act.text || '');
-    s.setAttribute('aria-live', 'polite');
-    s.setAttribute('data-actres', kind);
-    if (act.title) { s.title = act.title; }
-    return s;
+  // 下面 WB2API:TOAST 标记之间的代码由 `node tools/toast_sync.js` 从
+  // `internal/server/toast.js` 生成。改通知行为要改那个源文件再重跑，
+  // 不要在这里手改 —— 手改会被工具覆盖，且 CI 的 `--check` 会红。
+  //
+  // 宿主契约（toast() 内部依赖的两样东西）：
+  //   · `#toast` 容器 —— 在本文件末尾的 HTML 里
+  //   · `esc(s)`      —— 本页自带（见下面的 esc 定义）
+  //   · `$()`         —— 本页原先没有，2026-11-14 按契约补上（见下）
+  //
+  // ⚠ 2026-11-14 背景：这一页原来**没有**通知层（toast_sync 的注释写着
+  // "其余 5 页不用通知框……等哪一页真的要用，再把它加进 PAGES"）。
+  // 我给「重拉」做反馈时自造了一套 .toasts —— 那是重复轮子：
+  // 共享层有多行堆叠 / ×N 合并 / 上限折叠，我造的那套一条都没有。
+  // 正确做法就是现在这样：登记进 PAGES + 跑工具注入。
+  var $ = function (id) { return document.getElementById(id); };
+
+  // ==== WB2API:TOAST:START（由 tools/toast_sync.js 生成，勿手改）====
+// toast.js —— 通知框的**唯一实现**（外壳控制台 + 令牌页共用）。
+//
+// # 为什么抽成共享层（2026-11-01）
+//
+// 用户报「右上角如果出现多个消息 多交替显示 这也是 bug」之后，外壳改成了**堆叠式**
+// （逐条列出、各自计时、重复文案合并成 ×N、超过上限折叠成「…还有 N 条」）。
+// 但令牌页还留着旧实现：
+//
+//     el.textContent = msg;  el.className = 'toast on' + (bad ? ' bad' : '');
+//     setTimeout(() => el.className = 'toast', 2000);
+//
+// ⇒ 同一个产品里两种通知语义：令牌页批量轮换一次发十几条结果时，用户仍然只读得到最后一条
+//（与外壳那个 bug 一模一样的症状，只是发生在另一个页面）。
+//
+// # 契约（宿主页面必须提供两样东西）
+//
+//   $('toast')   —— 通知容器（id="toast"），样式在主题块里（#toast .toastline 等，
+//                   由 theme_sync 同步到所有页面，所以视觉本来就是统一的）
+//   esc(s)       —— HTML 转义（各页自带一份，实现略有差异，故不在这里重复定义）
+//
+// # 两条实现约束（照抄外壳那份的踩坑记录，别改）
+//
+//   ① 只用 el.innerHTML 拼字符串，**不用** createElement/appendChild ——
+//      tests/frontend/gen_busy_feedback.js 会把这个函数抽出来跑在**假元素**上
+//      （只有 textContent/className/innerHTML/hidden），DOM API 会直接炸。
+//   ② 只引用**函数体内**的东西：队列挂在元素上（el._lines），上限写成函数内常量。
+//      模块级变量在抽出来的那份里不存在 ⇒ ReferenceError（第一版踩过）。
+function toast(msg, bad) {
+  const TOAST_MAX = 5;   // 一个框里最多列几条（更旧的折叠成「…还有 N 条」）
+  const el = $('toast');
+  if (!el) return;
+  // 外部把框清空了（探针的 __CLEAR_TOAST__、别的代码）⇒ 队列也当清空，
+  // 免得下一句提示把上一次的旧行又画回来。
+  if (el.hidden && !el.innerHTML) el._lines = [];
+  const lines = el._lines || (el._lines = []);
+  const text = String(msg == null ? '' : msg);
+  const ttl = bad ? 8000 : 5000;   // 错误留久一点：它更值得看清
+  const last = lines[lines.length - 1];
+  if (last && last.text === text && last.bad === !!bad) {
+    last.n += 1;                   // 连续同文案 ⇒ 只加计数，不堆行
+    last.deadline = Date.now() + ttl;
+  } else {
+    lines.push({ text: text, bad: !!bad, n: 1, deadline: Date.now() + ttl });
   }
+
+  // renderToast 嵌在 toast **内部**：门禁只抽出 `function toast(` 这一个块去跑，
+  // 独立函数在那里是 undefined、DOM API 也都没有。
+  const renderToast = () => {
+    const now = Date.now();
+    const all = (el._lines || []).filter((l) => l.deadline > now);
+    el._lines = all;
+    const shown = all.slice(-TOAST_MAX);        // 队列尾部是最新的
+    const dropped = all.length - shown.length;  // 被折叠掉的更旧的那些
+    let html = '';
+    let anyBad = false;
+    for (let i = shown.length - 1; i >= 0; i--) {  // 倒序 ⇒ 最新在最上
+      const l = shown[i];
+      anyBad = anyBad || l.bad;
+      html += '<div class="toastline ' + (l.bad ? 'bad' : 'ok') +
+        '" data-i="' + (all.length - shown.length + i) + '" title="点击关闭这一条">' +
+        esc(l.text) + (l.n > 1 ? '<b class="toastn">×' + l.n + '</b>' : '') + '</div>';
+    }
+    if (dropped > 0) html += '<div class="toastmore">…还有 ' + dropped + ' 条</div>';
+    el.innerHTML = html;
+    // 类名与旧实现同一口径（门禁 gen_busy_feedback.js 断言 includes('bad')）
+    el.className = 'notice ' + (anyBad ? 'bad' : 'ok');
+    el.hidden = shown.length === 0;
+    if (!el._bound) {
+      el._bound = true;   // 只绑一次：toast 会被调很多次
+      el.onclick = (ev) => {
+        const box = (ev && ev.target && ev.target.closest) ? ev.target.closest('.toastline') : null;
+        if (!box || !el._lines) return;
+        const i = Number(box.getAttribute('data-i'));
+        if (isFinite(i) && i >= 0 && i < el._lines.length) el._lines.splice(i, 1);
+        renderToast();
+      };
+    }
+    clearTimeout(toast._t);
+    if (shown.length) {
+      const next = Math.min.apply(null, shown.map((l) => l.deadline));
+      toast._t = setTimeout(renderToast, Math.max(100, next - Date.now() + 20));
+    }
+  };
+  renderToast();
+}
+// ==== WB2API:TOAST:END ====
 
   // postJSON 走**控制台身份**（会话 cookie）打一个写入面端点。
   //
@@ -2240,31 +2341,35 @@ header.statline { align-items:baseline; }
     });
   }
 
-  // doRefresh 只回源**这一行**的供应商，并把结果落回行内。
+  // doRefresh 只回源**这一行**的供应商，结论走右上角 toast。
   //
   // ⚠ 刻意不调 load()：那会重取整包目录并重建整张表（用户点一行要让十几行一起闪，
   //   而且"哪个上游变了"又重新不可知）。这里只就地更新这一行的计数。
-  //   代价是「模型」页的明细要等下次取数才更新 —— 这一点写在结果 tooltip 里，
+  //   代价是「模型」页的明细要等下次取数才更新 —— 这一点写在 toast 的 tooltip 里，
   //   不假装已经更新。
   function doRefresh(vendor) {
     var a = actionOf(vendor);
     if (a.refresh.phase === 'run') { return; }
-    a.refresh = { phase: 'run', text: '重拉中…', cls: 'run', title: '正在只回源这一个上游' };
+    a.refresh = { phase: 'run' };
     renderVendors();
     postJSON('/ui/models/provider/refresh', { provider: vendor }).then(function (res) {
       var d = res.data || {};
       if (!res.ok || d.error) {
         var msg = (d.error && d.error.message) ? d.error.message : ('HTTP ' + res.status);
         var code = (d.error && d.error.code) ? d.error.code : 'refresh_failed';
-        a.refresh = { phase: 'bad', text: code + ' · ' + (d.ms ? d.ms + 'ms' : ''), cls: 'bad',
-                      title: msg };
+        a.refresh = { phase: 'idle' };
+        // 共享 toast 的签名是 (msg, bad)；错误细节（msg）并进文本 —— 不把上游
+        // 的原始 message 丢掉（本项目反复吃过"错误表现指不到根因"的亏）。
+        toast(vendor + '：' + code + (d.ms ? ' · ' + d.ms + 'ms' : '') + ' · ' + msg, true);
       } else {
         var parts = [];
         if (d.added) { parts.push('+' + d.added); }
         if (d.removed) { parts.push('−' + d.removed); }
         var txt = (parts.length ? parts.join(' ') + ' · ' : '无变化 · ') + (d.ms || 0) + 'ms';
-        a.refresh = { phase: 'ok', text: txt, cls: 'ok',
-                      title: '这一行现在有 ' + (d.count || 0) + ' 个模型（模型明细在下次取数时更新）' };
+        a.refresh = { phase: 'idle' };
+        // 「模型明细在下次取数时更新」这个代价直接写在文案里，不靠 tooltip
+        // （共享 toast 的 toastline 只有「点击关闭」一个 title，没有传 tooltip 的口子）。
+        toast(vendor + '：' + txt + ' · 现在 ' + (d.count || 0) + ' 个模型', false);
         // 就地更新**这一行**的模型数：count 是上游刚给的数字，比旧值新。
         for (var i = 0; i < state.vendors.length; i++) {
           if ((state.vendors[i].name || '') === vendor) {
@@ -2278,7 +2383,8 @@ header.statline { align-items:baseline; }
       }
       renderVendors();
     }).catch(function (e) {
-      a.refresh = { phase: 'bad', text: '失败', cls: 'bad', title: String(e && e.message ? e.message : e) };
+      a.refresh = { phase: 'idle' };
+      toast(vendor + '：失败 · ' + String(e && e.message ? e.message : e), true);
       renderVendors();
     });
   }
@@ -2316,11 +2422,12 @@ header.statline { align-items:baseline; }
 
       // ── 操作：**只有一列**，只放「重拉」────────────────────────────
       //
-      // ⚠ 2026-11-14 按用户要求收窄：
+      // ⚠ 2026-11-14 按用户要求两次收窄：
       //   · 原「只看它」去掉（它把供应商名塞进 vendorFilter 并切到「模型」页；
       //     筛选机制本身还在，只是这一页不再提供设置入口）
       //   · 原「探测」去掉（发一次最小真实请求；后端端点保留，可用 curl 调）
       //   · 三列合并成一列，中间不留空白
+      //   · 结论不再落在行内 ⇒ 按钮**位置完全不动**（见 .toasts 的注释）
       var a = actionOf(v.name || '');
       var tdA = el('td', 'act');
       var rbtn = el('button', null, a.refresh.phase === 'run' ? '重拉中…' : '重拉');
@@ -2331,7 +2438,6 @@ header.statline { align-items:baseline; }
       rbtn.title = '只重新拉取这个供应商的上游目录（其他行完全不动）';
       rbtn.disabled = a.refresh.phase === 'run';
       tdA.appendChild(rbtn);
-      tdA.appendChild(actionResultEl(a.refresh, 'refresh'));
       tr.appendChild(tdA);
 
       rows.appendChild(tr);
@@ -2564,5 +2670,9 @@ header.statline { align-items:baseline; }
   void load();
 })();
 </script>
+<!-- 通知容器：共享层契约要求宿主页提供 #toast（样式在主题块里，实现在
+     tools/toast_sync.js 注入的 WB2API:TOAST 段里）。
+     2026-11-14 之前这里是我自造的 #toasts —— 现已改回共享层。 -->
+<div id="toast" class="notice" role="log" aria-live="polite" aria-relevant="additions text" hidden></div>
 </body>
 </html>
