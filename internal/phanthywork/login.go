@@ -646,6 +646,24 @@ func (p *Provider) RefreshCredential(cred gateway.Credential) error {
 	if !p.needsRefresh(a, time.UnixMilli(nowLocal)) {
 		return nil
 	}
+	// ★ 步骤 0（D3）：**发请求之前**先问共享凭证库
+	// "这个账号是不是已经被另一个端刷过了？" —— 有就直接采用，一个请求都不发。
+	//
+	// 对应官方 `tH` 的第一句：`let Y = o44($, q, O()); if (Y) return Y;`
+	//
+	// 这一句是**避免轮换竞态**的关键，也是"power 用户同时用官方客户端"场景下
+	// 我们唯一能自救的入口：对方刷完后新令牌就躺在共享库里，我们照抄即可。
+	//
+	// 采用成功时不走 gate（没发请求，无需串行化），但要走 applyTokenSet 落盘 ——
+	// 否则下次启动又拿着旧的那把去换。
+	if ts, ok := adoptFromOfficialStore(a, nowLocal); ok {
+		if aerr := a.applyTokenSet(ts); aerr != nil {
+			return aerr
+		}
+		log.Printf("phanthywork: uid=%s 续期采用共享凭证库里的新令牌（未发请求）",
+			gateway.ShortUID(a.UID()))
+		return nil
+	}
 	key := a.refreshKey()
 	// ⚠ replayOK=true：续期要回放「刚成功的那一次」。
 	//
@@ -672,6 +690,22 @@ func (p *Provider) RefreshCredential(cred gateway.Credential) error {
 	defer cancel()
 	ts, rerr := p.client.RefreshTokens(ctx, a)
 	if rerr != nil {
+		// ★ 步骤 1（D2）：上游说"这把 refresh_token 不认" ≠ 账号死了。
+		//
+		// 对应官方 `tH` 的第二句：`if (!J) return o44(await _(), q, O());`
+		// —— 拿到 null（= 被拒）之后**再读一次共享凭证库**：
+		// 如果是别的端刚把令牌轮换走了，对方的新令牌此刻就在库里，采用它，
+		// **本次续期按成功处理**（这比"重试"更准：重试还是拿旧的那把去换，必然还是被拒）。
+		if IsRefreshRejected(rerr) {
+			if ts2, ok := adoptFromOfficialStore(a, nowMS()); ok {
+				if aerr := a.applyTokenSet(ts2); aerr == nil {
+					a.gate.finish(key, call, ts2.AccessToken, nil)
+					log.Printf("phanthywork: uid=%s 续期被拒，但已在共享凭证库里拿到别端刷好的新令牌",
+						gateway.ShortUID(a.UID()))
+					return nil
+				}
+			}
+		}
 		a.gate.finish(key, call, "", rerr)
 		return rerr
 	}

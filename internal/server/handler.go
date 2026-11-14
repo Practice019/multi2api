@@ -3787,7 +3787,7 @@ func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct
 	if h.cfg.Provider == nil {
 		// 单上游模式：逐字节回退（含落盘与失败日志，与改造前一致）。
 		if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
-			h.noteRefreshFailure(acct.UID)
+			h.noteRefreshFailureIfAccountFault(acct.UID, err)
 			return err
 		}
 		if err := acct.SaveAtomic(); err != nil {
@@ -3803,7 +3803,7 @@ func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct
 	}
 	refreshed, err := h.cfg.Provider.RefreshCredential(ctx, providerID, cred)
 	if err != nil {
-		h.noteRefreshFailure(acct.UID)
+		h.noteRefreshFailureIfAccountFault(acct.UID, err)
 		return err
 	}
 	if !refreshed {
@@ -3812,6 +3812,36 @@ func (h *Handler) refreshCredential(ctx context.Context, providerID string, acct
 		return nil
 	}
 	return nil
+}
+
+// noteRefreshFailureIfAccountFault 记一次续期失败 —— 但**跳过"上游拒绝了凭据"那一档**。
+//
+// # 为什么这一档必须跳过（2026-11-14，依据官方客户端源码）
+//
+// `invalid_grant` 最常见的成因是 refresh_token 被**另一个端轮换掉了**
+// （网关与官方桌面端共用同一账号时必然发生，见 docs/agent2api-蒸馏报告.md §L2）——
+// 这类账号**下一秒就可能重新可用**。
+//
+// 官方客户端对它的处理（sidecar `tH`/`Pd3`/`Po`）是：
+//
+//	先重读共享凭证库看有没有别端刷好的 → 拿不到才回 503
+//	OAUTH_REFRESH_UNAVAILABLE（「登录服务暂时不可用，请稍后重试；
+//	**当前登录信息已保留**」）
+//
+// 它**从不**把这一档升级成"你该重新登录"。
+//
+// 而按旧口径（计一次失败、连续 3 次即永久禁用）的代价是：
+// **一次轮换竞态就能把一个健康号打成死号**，并且用户看到的现象是
+// "点了启用，过一会儿它自己又变回禁用了" —— 据此完全无法判断
+// 到底是凭据真的废了、还是这个开关坏了。2026-11-14 现场的两个号就是这么死的。
+//
+// 真源：`gateway.ErrCredentialRefreshRejected` 的注释（含官方逐字片段）。
+func (h *Handler) noteRefreshFailureIfAccountFault(uid string, err error) {
+	if errors.Is(err, gateway.ErrCredentialRefreshRejected) {
+		log.Printf("chat refresh uid=%s: 上游拒绝了续期凭据（可重试，不计为账号失效）: %v", uid, err)
+		return
+	}
+	h.noteRefreshFailure(uid)
 }
 
 // noteRefreshFailure 记录一次凭证续期失败；连续失败达上限则禁用（A2 移植）。

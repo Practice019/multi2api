@@ -564,6 +564,52 @@ func (c *Client) newJSONRequest(ctx context.Context, method, path string, body [
 	return req, nil
 }
 
+// newRefreshRequest 造**续期**请求：只带 `Content-Type` 与 `Accept` 两个头。
+//
+// # ★ 2026-11-14 修：续期**不能**走 applyCommonHeaders（D1）
+//
+// 官方客户端 sidecar 的续期传输层（`Pd3`，偏移 @99945774）逐字是：
+//
+//	f = await fetch(O, {
+//	  method: "POST",
+//	  headers: { "Content-Type": "application/json", Accept: "application/json" },  // ← 只有这两个
+//	  body: Y,
+//	  signal: AbortSignal.timeout(8000)
+//	})
+//
+// 而 `applyCommonHeaders` 会额外挂上 `User-Agent: phanthy-code-cli/<ver>` 与
+// `x-phanthy-client-source: desktop` —— 这两个在官方那里属于**推理路径**
+// （`wtK()/Yg3()`，只给 `/api/*` 与 `/v1/*` 用）。
+//
+// 换句话说：我们每次"换令牌"都额外声明了一次"我是桌面端"。
+// 官方在这一跳上**从来不表明身份**，所以这个组合是别人不会产生的形态，
+// 正是风控最容易记账的那类特征。
+//
+// ⚠ 只用于 `/oauth/token`。`/api/*` 那一族**必须继续**走 applyCommonHeaders ——
+// 官方的 `wtK` 确实给它们发那两个头（见 apiCallUA 的真源），改掉会反过来制造异常。
+//
+// 判据：TestRefreshSendsOnlyContentTypeAndAccept。
+func (c *Client) newRefreshRequest(ctx context.Context, body []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+pathOAuthToken,
+		bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	// ★ 必须显式把 UA 置空，**不能只是"不设"**。
+	//
+	// Go 的 http 传输层在 UA 缺失时会自动补 `User-Agent: Go-http-client/1.1`；
+	// 而官方续期这一跳（`Pd3` 的 headers 只有 Content-Type + Accept）
+	// **一个 UA 都不发**。只写"不设置"的话，线上仍会多出一个 Go 默认 UA ——
+	// 那又一次变成"别人不会产生的形态"，等于没修。
+	//
+	// Header 里**存在但值为空**是 Go 认可的抑制写法（见 net/http 的
+	// Request.write：userAgent 取到空串就整行不写）。
+	req.Header.Set("User-Agent", "")
+	return req, nil
+}
+
 // ── v1 签名（x-desktop-* 那 5 个头）───────────────────────────────────────
 
 // applyV1 给请求挂上 v1 签名头（identity 私钥）。
@@ -802,7 +848,7 @@ func (c *Client) RefreshTokens(ctx context.Context, a *Auth) (TokenSet, error) {
 
 	var lastErr error
 	for attempt := 0; attempt < refreshMaxAttempts; attempt++ {
-		req, rerr := c.newJSONRequest(ctx, http.MethodPost, pathOAuthToken, raw)
+		req, rerr := c.newRefreshRequest(ctx, raw)
 		if rerr != nil {
 			return TokenSet{}, rerr
 		}
@@ -818,26 +864,24 @@ func (c *Client) RefreshTokens(ctx context.Context, a *Auth) (TokenSet, error) {
 		case status >= 200 && status < 300:
 			return parseTokenResponse(body, refreshDefaultExpiresIn, nowMS())
 		case status == 400 && gateway.ContainsAny(string(body), authExpiredMarkers):
-			// invalid_grant 的语义（报告 §4.2）：refreshToken 已失效
-			//（过期/被吊销/被轮换）⇒ 终态，不要重试。
+			// ★★ 2026-11-14：这里从 ErrRefreshExpired（终态）改成 ErrRefreshRejected（可重试）。
 			//
-			// ★ 2026-11-14：把**上游原文**包进错误里。
+			// 依据是官方客户端源码。官方 `Pd3` 对同一条响应是：
 			//
-			// 原来这里直接 `return ErrRefreshExpired`（一个裸哨兵）。后果是排查时
-			// 只剩我们自己写的一句「refreshToken 被吊销或已轮换，需重新登录」——
-			// 而这句话把 6 个不同的上游 code 全压成了一种说法：
+			//	if (f.status === 400 && k === "invalid_grant") return null;   // 不抛错
 			//
-			//	invalid_grant       凭据真的废了（需重新登录）      ← 唯一该让用户重登的
-			//	invalid_client      **client_id 配错**，是本地 bug  ← 重登一万次也没用
-			//	unauthorized_client 该 client 未被授权做 refresh     ← 同上
-			//	token_expired / invalid_token / 登录已过期
+			// 然后调用方 `tH` 拿 null 去**重读共享凭证库**
+			// （`if (!J) return o44(await _(), q, O())`）——因为 invalid_grant
+			// 最常见的成因是这把 refresh_token **已经被另一个端轮换掉了**，
+			// 而对方的新 token 就在共享库里。真拿不到才回可重试的 503。
 			//
-			// 实战代价（2026-11-14 实测）：账号被判"需重新登录"，而真实原因只能靠
-			// 手工 curl 打一次 /oauth/token 才看得出来是真 invalid_grant。
-			// 包上原文后，日志与禁用原因里直接就能区分。
+			// 旧行为（判终态 → 计一次失败 → 连续 3 次永久禁用）的代价：
+			// 一次轮换竞态就能把健康号打成死号，而且用户看到的现象是
+			// "点了启用过一会儿又变回禁用"，无法据此判断根因。
 			//
-			// ⚠ errors.Is(err, ErrRefreshExpired) 仍然成立 ⇒ 分类与既有判据一字不变。
-			return TokenSet{}, fmt.Errorf("%w（上游 %d：%s）", ErrRefreshExpired, status, brief(body))
+			// ⚠ 保留上游原文，便于区分给用户看的成因（invalid_grant 该等，
+			// invalid_client 该查代码）。
+			return TokenSet{}, fmt.Errorf("%w（上游 %d：%s）", ErrRefreshRejected, status, brief(body))
 		case status == 429 || status >= 500:
 			wait := backoffFor(attempt, retryAfterMS(body))
 			lastErr = &UpstreamError{Status: status, Body: brief(body), Op: "续期"}

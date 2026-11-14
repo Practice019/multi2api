@@ -238,11 +238,23 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 			Provider: providerID, UID: a.UID(), Secret: a,
 		}); err != nil {
 			failed++
-			// 终态（refresh_token 也失效）与可重试分开报 —— 用户才知道该不该重新登录。
-			// 混成一条会让他反复重试一个不可能成功的动作。
-			if IsRefreshExpired(err) || IsRegistrationConflict(err) {
-				log.Printf("phanthywork: uid=%s 凭据已失效，无法自动续期 —— 请重新登录/导入", gateway.ShortUID(a.UID()))
-			} else {
+			// 三档分开报 —— 用户/运维才知道该不该重新登录。
+			// 混成一条会让人反复重试一个不可能成功的动作，或者反过来
+			// 把一个"等一会儿就好"的状态当成"号废了"去重登。
+			switch {
+			case IsRefreshExpired(err) || IsRegistrationConflict(err):
+				// 真终态：这份凭证连 refresh_token 都没有 / 设备绑定冲突。
+				log.Printf("phanthywork: uid=%s 凭据已失效，无法自动续期 —— 请重新登录/导入",
+					gateway.ShortUID(a.UID()))
+			case IsRefreshRejected(err):
+				// ★ 上游拒绝了这把 refresh_token，**但不是终态**。
+				//
+				// 最常见成因是被另一个端（官方桌面端）轮换走了；下一轮可能就好了，
+				// 而且下一轮进来会先查共享凭证库（见 sharedstore.go）。
+				// 措辞必须与"号废了"明确区分，否则运维会去重登一个其实不用重登的号。
+				log.Printf("phanthywork: uid=%s 上游拒绝了续期凭据（可重试，等下一轮；"+
+					"常见成因是被另一个端轮换掉了）：%v", gateway.ShortUID(a.UID()), err)
+			default:
 				log.Printf("phanthywork: uid=%s 后台续期失败（可重试）：%v", gateway.ShortUID(a.UID()), err)
 			}
 			continue

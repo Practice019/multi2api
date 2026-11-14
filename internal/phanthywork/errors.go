@@ -45,11 +45,40 @@ var (
 	// 服务端设备风控，还可能把该账号的其它调用一起拖下水。
 	ErrRegistrationConflict = errors.New("phanthywork: 设备绑定冲突（409 终态，该 installationId 已绑定另一把公钥）")
 
-	// ErrRefreshExpired refreshToken 已失效（invalid_grant / 无 refresh_token）→ 终态。
+	// ErrRefreshExpired **真正的终态**：这份凭证根本没有 refresh_token 可用。
 	//
-	// 报告 §2.1 的判据原文：只有 invalid_grant / invalid_client /
-	// unauthorized_client 才算"凭据废了"，其余（5xx / 429 / 网络）都是抖动，可重试。
-	ErrRefreshExpired = errors.New("phanthywork: 登录凭据已失效（refreshToken 被吊销或已轮换，需重新登录）")
+	// ★ 2026-11-14 收窄（此前它还被用来表达 invalid_grant，那是错的）：
+	//
+	// 依据官方客户端源码（sidecar `tH` @99948835），上游回 `400 invalid_grant`
+	// 时**不能**升级成"需重新登录"，而要：
+	//
+	//	① 先重读共享凭证库，看同一 sub 有没有更新的 token（被别的端轮换掉了？）
+	//	② 拿不到才回**可重试**的 503 OAUTH_REFRESH_UNAVAILABLE（「登录信息已保留」）
+	//
+	// 所以 invalid_grant 归 ErrRefreshRejected（可重试、不计账）；
+	// 本哨兵只保留给"连 refresh_token 都没有"这一种真终态
+	// （官方 `tH`：`if (!H || typeof H.oauth.refreshToken !== "string") return null`）。
+	ErrRefreshExpired = errors.New("phanthywork: 这份凭证没有可用的 refresh_token（需重新登录/导入）")
+
+	// ErrRefreshRejected 上游明确拒绝了 refresh_token（`400 invalid_grant`）
+	// ——**但这不等于账号失效**，而是一个**可重试**状态。
+	//
+	// # 为什么不能按"凭据已废"处理（2026-11-14 现场教训）
+	//
+	// `invalid_grant` 最常见的成因是 refresh_token **被另一个端轮换掉了**
+	// （网关与官方桌面端共用同一账号时必然发生：谁刷新谁把对方的那把作废，
+	//  见 docs/agent2api-蒸馏报告.md §L2）。这类账号下一秒就可能重新可用。
+	//
+	// 而此前的处理是：判终态 ⇒ `NoteRefreshFailure` 计一次 ⇒ 连续 3 次
+	// **永久禁用**。⇒ **一次轮换竞态就能把一个健康号打成死号**；
+	// 现场那两个号（cmwg6l3… / cmwfxhqz…）就是这么死的，而且
+	// "点了启用过一会儿又变回禁用"，用户完全无法判断到底是号废了还是开关坏了。
+	//
+	// 现在与官方对齐：可重试、**不计入 refreshFails、不因此禁用**。
+	// 出口层认 `gateway.ErrCredentialRefreshRejected`（本哨兵包装了它）。
+	ErrRefreshRejected = fmt.Errorf(
+		"phanthywork: 上游拒绝了 refresh_token（可能已被另一个端轮换）——稍后重试: %w",
+		gateway.ErrCredentialRefreshRejected)
 
 	// ErrNotConfigured 该部署没有可用的登录流程。
 	ErrNotConfigured = errors.New("phanthywork: 本部署未配置登录流程")
@@ -288,5 +317,18 @@ func (e *UpstreamError) Kind() gateway.ErrorKind {
 // IsRegistrationConflict 报告一个错误是否是设备绑定终态。
 func IsRegistrationConflict(err error) bool { return errors.Is(err, ErrRegistrationConflict) }
 
-// IsRefreshExpired 报告一个错误是否是"凭据废了"的终态。
+// IsRefreshExpired 报告一个错误是否是"凭据废了"的**终态**。
+//
+// ⚠ 2026-11-14 起它**不再**包含 invalid_grant（那归 IsRefreshRejected）。
+// 现在的语义只有一种：这份凭证连 refresh_token 都没有，自动续期无从谈起。
 func IsRefreshExpired(err error) bool { return errors.Is(err, ErrRefreshExpired) }
+
+// IsRefreshRejected 报告一次续期是不是"上游拒绝了这把 refresh_token"。
+//
+// 语义是**可重试**，不是"账号废了"：
+//
+//	· 计账侧：**不要**因此调 NoteRefreshFailure、不要禁用账号；
+//	· 动作侧：先重读共享凭证库（可能被别的端轮换过），拿不到就等下一轮。
+//
+// 真源：官方 sidecar 的 `Pd3` / `tH` / `Po`（见 ErrRefreshRejected 的注释）。
+func IsRefreshRejected(err error) bool { return errors.Is(err, ErrRefreshRejected) }
