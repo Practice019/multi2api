@@ -396,7 +396,18 @@ func TestExtractPastedForms(t *testing.T) {
 	}
 }
 
-// TestCommonHeadersOnEveryRequest 每个上游请求都要带 UA 与 client-source（坑②）。
+// TestCommonHeadersOnEveryRequest `/api/*` 一族请求的公共头三项。
+//
+// ★★ 2026-11-14 修正：此前断言 UA == DefaultUA（Bun/1.3.14）。
+// 系统对照官方 sidecar 后发现 **UA 是按路径分档的**：
+//
+//	/api/oauth/*            → phanthy-code-cli/<APP_VERSION>   ← 本判据（官方 wtK）
+//	/api/phanthy_code/models → 官方不设 UA
+//	/v1/chat/completions     → 官方不设 UA（Bun 下即 Bun/1.3.14）← 推理那条本来就对
+//	/v1/messages             → claude-cli/<ver> (<USER_TYPE>, cli)
+//
+// 所以这里断言的是 `apiCallUA`，而不是全局 DefaultUA。
+// 推理路径的 UA 由 TestInferenceHeadersMatchOfficialClient 那族判据守。
 func TestCommonHeadersOnEveryRequest(t *testing.T) {
 	srv, _ := startFakeUpstream(t)
 	p := newFakeProvider(t, srv)
@@ -405,11 +416,14 @@ func TestCommonHeadersOnEveryRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.client.applyCommonHeaders(req)
-	if got := req.Header.Get("User-Agent"); got != DefaultUA {
-		t.Errorf("UA = %q, want %q", got, DefaultUA)
+	if got := req.Header.Get("User-Agent"); got != apiCallUA {
+		t.Errorf("UA = %q, want %q（官方 /api/* 调用器的 UA，见 apiCallUA 的真源）", got, apiCallUA)
 	}
 	if got := req.Header.Get("x-phanthy-client-source"); got != clientSource {
 		t.Errorf("x-phanthy-client-source = %q, want %q", got, clientSource)
+	}
+	if got := req.Header.Get("Accept"); got != "application/json" {
+		t.Errorf("Accept = %q, want application/json", got)
 	}
 }
 

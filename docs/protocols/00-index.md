@@ -26,6 +26,7 @@ whenToUse: 任何一次新的会话 / 新的 Agent 接手本项目时**先读这
 | 接一个**新上游** | [`protocols/上游接入协议.md`](上游接入协议.md) | How-to |
 | 改 phanthywork 的**签名 / 推理**相关代码 | [`protocols/推理面诊断表.md`](推理面诊断表.md) 先读，再读 [`protocols/phanthywork-inference-protocol.md`](phanthywork-inference-protocol.md) | Reference |
 | 排查 phanthywork 的 **500 / 403 / 封号** | [`protocols/推理面诊断表.md`](推理面诊断表.md) | Reference |
+| 改 phanthywork 的**出站请求**（端点 / 头 / UA / body） | [`protocols/phanthywork-出站请求对照表.md`](phanthywork-出站请求对照表.md) | Reference |
 | 给页面加**表格操作按钮** / 给操作做反馈 / 排查「点了按钮界面动了」 | [`protocols/前端操作反馈协议.md`](前端操作反馈协议.md) | How-to |
 | 想知道**为什么**某条 canonical 是那样拼的 | [`decisions/0001-phanthywork-canonical-separators.md`](../decisions/0001-phanthywork-canonical-separators.md) | ADR |
 | 想知道**为什么**二次注册不能重试 | [`decisions/0002-device-binding-is-terminal.md`](../decisions/0002-device-binding-is-terminal.md) | ADR |
@@ -39,6 +40,7 @@ whenToUse: 任何一次新的会话 / 新的 Agent 接手本项目时**先读这
 | `protocols/上游接入协议.md` | How-to | 要接一个新上游，怎么证明做完了、做对了 |
 | `protocols/推理面诊断表.md` | Reference | 出现 500 空体 / 403 / 封号 / `invalid_desktop_signature` / `first_device_owner` 时 |
 | `protocols/phanthywork-inference-protocol.md` | Reference | 新旧内核（`/v1/chat/completions` vs `/v1/messages`）对照与抓包原文 |
+| `protocols/phanthywork-出站请求对照表.md` | Reference | 官方客户端 ↔ 本网关的端点 / 头 / UA 逐项对照（改出站请求前必读） |
 | `protocols/前端操作反馈协议.md` | How-to | 给表格加操作按钮、做操作反馈；排查「点了按钮界面动了」「点了没反应」 |
 | `decisions/0001-phanthywork-canonical-separators.md` | ADR | 三条 canonical 的分隔符与 nonce 长度为什么各不相同 |
 | `decisions/0002-device-binding-is-terminal.md` | ADR | 二次注册为什么是终态冲突（封号机制） |

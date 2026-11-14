@@ -6,9 +6,38 @@ whenToUse: 当你要修改 / 质疑 phanthywork 的 canonical 拼装、分隔符
 
 # ADR-0001: 三条 canonical 各自持有自己的分隔符与 nonce 长度，禁止合并成一个常量
 
+## ⚠⚠ 2026-11-14 更正（真机反证：分隔符那半**错了**，nonce 长度仍成立）
+
+**本文"device / v1 用单个空格"是错的。三条 canonical 全部用 LF（0x0A）。**
+
+真机证据链（同一天、同一条代码路径，只改这一个变量）：
+
+```
+分隔符 = 空格  → POST /api/oauth/desktop-installations/register → 401 invalid_desktop_signature
+分隔符 = LF    → 同一条请求                                     → 200 注册成功
+```
+
+官方 sidecar 2.51.0 二进制里 `const LF = "\n"`，三条串都是 `.join(LF)` ——
+与第三方插件 magpie-PhanthyCode（标注「抓包 → 逐字符复现 → 200 通过」）的 `src/proof.mjs` 完全一致。
+
+**原文引的那条依据（Tauri 前端 bundle 的 `[...].join(\` \`)`）对不上真机**：
+那是前端 UI 侧的另一处拼装，不是上游签名要的两条 canonical。教训是 ——
+**「在两处独立产物里找到同一说法」不等于「这个说法对」**，尤其当它从未被真机跑通时。
+（真机把空格路径跑了一遍，得到的就是 401。）
+
+- **仍然成立**：nonce 长度 device/v1 = 18 字节、inference = 24 字节（真机 + 二进制双重支持）。
+- **不再成立**：分隔符"三条各不相同"。它们**是同一个值**（LF）。
+- **常量仍不合并**：理由不再是"有差异"，而是语义分离（将来若真分化，改一处不连累另一处）。
+
+现行真源：`internal/phanthywork/crypto.go` 的 `deviceV1Separator` / `inferenceSeparator`（都是 `"\n"`），
+判据 `TestCanonicalSeparatorsArePerString` **按字节**断言 0x0A。
+改这个上游的出站请求前请看 [`../protocols/phanthywork-出站请求对照表.md`](../protocols/phanthywork-出站请求对照表.md)。
+
+---
+
 ## Status
 
-Accepted
+Accepted（分隔符部分以上方更正为准）
 
 ## Date
 

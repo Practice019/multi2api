@@ -175,12 +175,51 @@ func (c *Client) doJSON(req *http.Request, timeout time.Duration) (int, []byte, 
 	return resp.StatusCode, body, nil
 }
 
-// applyCommonHeaders 注入每个上游请求都要带的头。
+// apiCallUA 官方 `/api/*` 调用的 User-Agent。
 //
-//	user-agent: Bun/1.3.14          —— 坑②（否则 403 TM.00000001「网络繁忙」）
-//	x-phanthy-client-source: desktop —— 同一条判据的另一半（实测 200 的形态）
+// # 真源：官方 sidecar 的通用 API 调用器（二进制字符串转储，逐字）
+//
+//	function wtK(q, K) {
+//	  return {
+//	    Accept: "application/json",
+//	    "Content-Type": "application/json",
+//	    "User-Agent": `phanthy-code-cli/${GK9}`,   // GK9 = process.env.APP_VERSION || "2.1.0"
+//	    "x-phanthy-client-source": "desktop",
+//	    ...q.headers,                              // 调用方传入的 x-desktop-* 签名头
+//	    Authorization: `Bearer ${K}`,
+//	  }
+//	}
+//
+// # ★★ 2026-11-14 系统对照所得：UA 是**按路径分档**的，不是全局一个值
+//
+//	/api/oauth/*            → phanthy-code-cli/<APP_VERSION>   ← 本常量（wtK）
+//	/api/phanthy_code/models → 官方**不设** UA，走 fetch 默认
+//	/v1/chat/completions     → 官方**不设** UA，走 fetch 默认（Bun 下即 Bun/1.3.14）
+//	/v1/messages             → claude-cli/<ver> (<USER_TYPE>, cli)   ← OR()
+//
+// 此前我们对**所有**路径统一发 `Bun/1.3.14`：
+//
+//	· 推理路径（/v1/chat/completions）**正好是对的** —— 官方也不设，Bun fetch 默认就是它，
+//	  这也解释了"坑② 多次真机验证没报错"；
+//	· 但 `/api/*` 那一族是错的，官方发的是 `phanthy-code-cli/<APP_VERSION>`。
+//
+// ⚠ 版本段取官方默认 `2.1.0`（`process.env.APP_VERSION || "2.1.0"`）。
+// 我们无法得知真实部署的 APP_VERSION，取官方文档化的默认值是**唯一有据可依**的选择；
+// 自造一个（如 2.51.0）等于发明数据。
+const apiCallUA = "phanthy-code-cli/2.1.0"
+
+// applyCommonHeaders 注入 `/api/*` 一族请求的公共头。
+//
+// 这三项与官方 `wtK` **逐项一致**（见 apiCallUA 的真源）：
+//
+//	user-agent               phanthy-code-cli/2.1.0
+//	x-phanthy-client-source  desktop    （官方取值函数：PHANTHY_CODE_CLIENT_SOURCE==="desktop" ? "desktop" : "cli"）
+//	accept                   application/json
+//
+// ⚠ 签名头（x-desktop-*）与 idempotency-key 由各调用点自己用 applyV1 挂上，
+//   顺序与官方 `...q.headers` 的位置语义一致（调用方传入的覆盖默认）。
 func (c *Client) applyCommonHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", c.userAgent())
+	req.Header.Set("User-Agent", apiCallUA)
 	req.Header.Set("x-phanthy-client-source", clientSource)
 	req.Header.Set("Accept", "application/json")
 }
@@ -1117,6 +1156,16 @@ func (c *Client) ChatStream(ctx context.Context, a *Auth, path string, body []by
 	req.Header.Set("Content-Type", "application/json")
 	c.applyCommonHeaders(req)
 	req.Header.Set("Accept", "text/event-stream")
+	// ⚠ 这条是**推理**路径（/v1/messages），UA 与 `/api/*` 那一族**不同**：
+	//
+	//	/api/*        → phanthy-code-cli/<APP_VERSION>（applyCommonHeaders 设的，正确）
+	//	/v1/messages  → 官方是 `claude-cli/<ver> (<USER_TYPE>, cli)`（sidecar 的 OR()）
+	//
+	// 那个 UA 里的 Claude Code 版本段与 USER_TYPE 我们**拿不到可靠值**，
+	// 所以这里不改写它、也不发明一个值：显式钉回本包的默认 UA，
+	// 避免 applyCommonHeaders 的 /api 口径"漏"进推理路径。
+	// （这条路径是旧内核，默认不走 —— 见 Protocol 配置；新版内核走 ChatCompletionsStream。）
+	req.Header.Set("User-Agent", c.userAgent())
 	req.Header.Set("anthropic-version", anthropicVersion)
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 	// ★ 2026-11-13：官方桌面端 2.51.0 在**每个**出站请求上都带这三个头，
