@@ -1547,6 +1547,20 @@ main > section[role=tabpanel] > .empty { flex:0 0 auto; }
 
 /* 状态行（T98：页内不再有标题与刷新按钮，只剩条数 + 数据来源）。 */
 header.statline { align-items:baseline; }
+
+/* ── T-02：供应商行的两个行内动作（重拉 / 探测）────────────────────────────
+   为什么结果落在行内而不是弹窗/整页 toast：这两个动作的结论属于**那一行**
+   （"这个上游这次变了没变" / "这个模型现在是谁在拒绝"），弹窗一关就没了，
+   而用户通常要对着十几行逐个看。aria-live 让读屏也能听到结论。 */
+.vendorrow td.act { white-space:nowrap; }
+.vendorrow td.act > button { margin-right:6px; }
+.vendorrow td.act > button:last-of-type { margin-right:0; }
+.actres { display:inline-block; margin-left:8px; font-size:12px; max-width:30ch;
+          vertical-align:middle; overflow:hidden; text-overflow:ellipsis; }
+.actres.run  { color:var(--dim); }
+.actres.ok   { color:var(--ok); font-weight:700; }
+.actres.bad  { color:var(--warn); font-weight:700; }
+.vendorrow select.probemodel { max-width:24ch; font-size:12px; }
 </style>
 <script>
 // 主题必须在首次绘制**之前**定下来，否则会闪一下深色再变浅色。
@@ -1638,7 +1652,11 @@ header.statline { align-items:baseline; }
     <div class="tw">
       <table id="vendorsTable">
         <thead><tr>
-          <th>供应商</th><th class="num">模型数</th><th class="num">其中合成</th><th>来源</th><th></th>
+          <th>供应商</th><th class="num">模型数</th><th class="num">其中合成</th><th>来源</th>
+          <!-- T-02：三列动作。「只看它」→「重拉」（只回源这一行）→「探测」（发一次最小真实请求）。
+               三列分开而不是塞进一个 td：每一列的结论要落到自己的格子里，混在一起
+               就无法用 data-act 钩子做稳定断言（e2e 不读源码）。 -->
+          <th></th><th>重拉</th><th>探测</th>
         </tr></thead>
         <tbody id="vendorRows"></tbody>
       </table>
@@ -1695,7 +1713,17 @@ header.statline { align-items:baseline; }
     multTried: false,
     // acct = 「上游 id → 账号数」；null/undefined = 未知（manifest 没到，或没报该上游）。
     acct: {},
-    acctLoaded: false
+    acctLoaded: false,
+    // ── T-02：供应商行内动作的**唯一真相**──────────────────────────────
+    // actions[vendor] = { refresh:{phase,text,cls,title}, probe:{phase,text,cls,title} }
+    // phase: 'idle' | 'run' | 'ok' | 'bad'
+    //
+    // 为什么放在 state 而不是直接改 DOM：renderVendors() 每次都重建 <tr>，
+    // 写在节点上的 loading/结果会在下一次重绘时消失（本文件开篇那条原则：
+    // 「任何交互只改 state 再 render」）。此前勾选与计数就因为违背它出现过陈旧状态。
+    actions: {},
+    // probeVendor = 正在选模型的供应商（行内下拉可见）。空串 = 没有在选。
+    probeVendor: ''
   };
 
   // ── 小工具 ────────────────────────────────────────────────────────────
@@ -2165,6 +2193,153 @@ header.statline { align-items:baseline; }
     }
   }
 
+  // ── T-02：供应商行内动作（重拉 / 探测）──────────────────────────────────
+
+  // actionOf 取（必要时建）某个供应商的动作状态。**不**触碰 DOM。
+  function actionOf(vendor) {
+    var a = state.actions[vendor];
+    if (!a) {
+      a = {
+        refresh: { phase: 'idle', text: '', cls: '', title: '' },
+        probe:   { phase: 'idle', text: '', cls: '', title: '' }
+      };
+      state.actions[vendor] = a;
+    }
+    return a;
+  }
+
+  // modelsOfVendor 列出该供应商名下的模型（探测下拉用）。
+  //
+  // 用 state.models 而不是再问后端：目录已经在手上，多打一次取数端点
+  // 只会让"点探测"变慢，而且下拉的内容必须与用户眼前这份目录一致。
+  function modelsOfVendor(vendor) {
+    var out = [];
+    for (var i = 0; i < state.models.length; i++) {
+      var m = state.models[i];
+      if ((m.vendor || '') !== vendor) { continue; }
+      if (m.synthetic) { continue; } // 合成行是"渠道声明在用、上游目录没有"，探测它没有意义
+      out.push(m.name || '');
+    }
+    return out;
+  }
+
+  // actionResultEl 把一条动作结论渲染成 aria-live 的 span。
+  //
+  // 空文本也照样建节点：live region 必须先存在、之后内容变化才会被读屏播报
+  // （动态插入整个 live 区域，多数读屏器不会播报）。这是 aria-live 的常见坑。
+  function actionResultEl(act, kind) {
+    var s = el('span', 'actres' + (act.cls ? ' ' + act.cls : ''), act.text || '');
+    s.setAttribute('aria-live', 'polite');
+    s.setAttribute('data-actres', kind);
+    if (act.title) { s.title = act.title; }
+    return s;
+  }
+
+  // postJSON 走**控制台身份**（会话 cookie）打一个写入面端点。
+  //
+  // 与 getJSON 的差别只有两个：POST + 解析失败也给对象。
+  // 401 单独成句：那两种失败（会话过期 / 上游拒绝）在界面上必须能分开，
+  // 否则用户会去"修上游"，而其实只是要重新登录。
+  function postJSON(url, payload) {
+    return fetch(url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {})
+    }).then(function (r) {
+      if (r.status === 401) { throw new Error('未认证（会话已过期）—— 请回到控制台重新登录'); }
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        return { status: r.status, ok: r.ok, data: d || {} };
+      });
+    });
+  }
+
+  // doRefresh 只回源**这一行**的供应商，并把结果落回行内。
+  //
+  // ⚠ 刻意不调 load()：那会重取整包目录并重建整张表（用户点一行要让十几行一起闪，
+  //   而且"哪个上游变了"又重新不可知）。这里只就地更新这一行的计数。
+  //   代价是「模型」页的明细要等下次取数才更新 —— 这一点写在结果 tooltip 里，
+  //   不假装已经更新。
+  function doRefresh(vendor) {
+    var a = actionOf(vendor);
+    if (a.refresh.phase === 'run') { return; }
+    a.refresh = { phase: 'run', text: '重拉中…', cls: 'run', title: '正在只回源这一个上游' };
+    renderVendors();
+    postJSON('/ui/models/provider/refresh', { provider: vendor }).then(function (res) {
+      var d = res.data || {};
+      if (!res.ok || d.error) {
+        var msg = (d.error && d.error.message) ? d.error.message : ('HTTP ' + res.status);
+        var code = (d.error && d.error.code) ? d.error.code : 'refresh_failed';
+        a.refresh = { phase: 'bad', text: code + ' · ' + (d.ms ? d.ms + 'ms' : ''), cls: 'bad',
+                      title: msg };
+      } else {
+        var parts = [];
+        if (d.added) { parts.push('+' + d.added); }
+        if (d.removed) { parts.push('−' + d.removed); }
+        var txt = (parts.length ? parts.join(' ') + ' · ' : '无变化 · ') + (d.ms || 0) + 'ms';
+        a.refresh = { phase: 'ok', text: txt, cls: 'ok',
+                      title: '这一行现在有 ' + (d.count || 0) + ' 个模型（模型明细在下次取数时更新）' };
+        // 就地更新**这一行**的模型数：count 是上游刚给的数字，比旧值新。
+        for (var i = 0; i < state.vendors.length; i++) {
+          if ((state.vendors[i].name || '') === vendor) {
+            state.vendors[i].models = d.count || 0;
+            if (state.vendors[i].synthetic > state.vendors[i].models) {
+              state.vendors[i].synthetic = state.vendors[i].models;
+            }
+            break;
+          }
+        }
+      }
+      renderVendors();
+    }).catch(function (e) {
+      a.refresh = { phase: 'bad', text: '失败', cls: 'bad', title: String(e && e.message ? e.message : e) };
+      renderVendors();
+    });
+  }
+
+  // startProbe 打开行内下拉（选模型）——真正的请求在 doProbe 里发。
+  function startProbe(vendor) {
+    state.probeVendor = vendor;
+    renderVendors();
+    var sel = document.getElementById('probesel-' + vendor);
+    if (sel && sel.focus) { sel.focus(); }
+  }
+
+  // doProbe 发一次探测。结果永远是"测量值"，所以 ok/bad 只影响配色，不影响呈现。
+  function doProbe(vendor) {
+    var a = actionOf(vendor);
+    if (a.probe.phase === 'run') { return; }
+    var sel = document.getElementById('probesel-' + vendor);
+    var model = sel ? String(sel.value || '') : '';
+    if (!model) {
+      a.probe = { phase: 'bad', text: '没有可选模型', cls: 'bad', title: '该供应商在目录里的模型全是合成行或为空' };
+      renderVendors();
+      return;
+    }
+    state.probeVendor = '';
+    a.probe = { phase: 'run', text: '探测中…', cls: 'run', title: '正在发一次最小真实请求（max_tokens=16）' };
+    renderVendors();
+    postJSON('/ui/models/provider/probe', { provider: vendor, model: model }).then(function (res) {
+      var d = res.data || {};
+      if (d.ok) {
+        a.probe = { phase: 'ok', text: (d.status || 0) + ' · ' + (d.firstTokenMs || 0) + 'ms', cls: 'ok',
+                    title: '模型 ' + model + ' 可用；总耗时 ' + (d.totalMs || 0) + 'ms'
+                           + (d.text ? '；首段文本：' + d.text : '') };
+      } else {
+        // ⚠ 这里显示的是**上游原文**：状态码 + error.code。把它们折成"失败"两个字，
+        //   正是本次调试里让人查了几小时的那种信息丢失。
+        var codeTxt = d.code ? d.code : ('HTTP ' + (d.status || 0));
+        a.probe = { phase: 'bad', text: (d.status ? d.status + ' ' : '') + codeTxt, cls: 'bad',
+                    title: (d.message || '（上游没有给出 message）') + ' · 总耗时 ' + (d.totalMs || 0) + 'ms' };
+      }
+      renderVendors();
+    }).catch(function (e) {
+      a.probe = { phase: 'bad', text: '失败', cls: 'bad', title: String(e && e.message ? e.message : e) };
+      renderVendors();
+    });
+  }
+
   // ── 渲染：Vendor tab ──────────────────────────────────────────────────
   function renderVendors() {
     var rows = document.getElementById('vendorRows');
@@ -2196,7 +2371,7 @@ header.statline { align-items:baseline; }
       }
       tr.appendChild(tdK);
 
-      var tdA = el('td');
+      var tdA = el('td', 'act');
       var btn = el('button', null, '只看它');
       btn.type = 'button';
       btn.className = 'viewmodels';
@@ -2204,6 +2379,59 @@ header.statline { align-items:baseline; }
       btn.title = '切到「模型」页并只看这个供应商';
       tdA.appendChild(btn);
       tr.appendChild(tdA);
+
+      // ── 重拉：只回源这一行 ──────────────────────────────────────────
+      var a = actionOf(v.name || '');
+      var tdR = el('td', 'act');
+      var rbtn = el('button', null, a.refresh.phase === 'run' ? '重拉中…' : '重拉');
+      rbtn.type = 'button';
+      rbtn.className = 'act refresh';
+      rbtn.setAttribute('data-act', 'refresh');
+      rbtn.setAttribute('data-vendor', v.name || '');
+      rbtn.title = '只重新拉取这个供应商的上游目录（其他行完全不动）';
+      rbtn.disabled = a.refresh.phase === 'run';
+      tdR.appendChild(rbtn);
+      tdR.appendChild(actionResultEl(a.refresh, 'refresh'));
+      tr.appendChild(tdR);
+
+      // ── 探测：行内选模型 → 发一次最小真实请求 ────────────────────────
+      var tdP = el('td', 'act');
+      var mine = modelsOfVendor(v.name || '');
+      if (state.probeVendor === (v.name || '')) {
+        var sel = el('select', 'probemodel');
+        sel.id = 'probesel-' + (v.name || '');
+        sel.setAttribute('aria-label', '选择要探测的模型');
+        for (var k = 0; k < mine.length; k++) {
+          var opt = el('option', null, mine[k]);
+          opt.value = mine[k];
+          sel.appendChild(opt);
+        }
+        tdP.appendChild(sel);
+        var go = el('button', null, '开始');
+        go.type = 'button';
+        go.className = 'act probe-go';
+        go.setAttribute('data-act', 'probe-go');
+        go.setAttribute('data-vendor', v.name || '');
+        go.disabled = a.probe.phase === 'run' || mine.length === 0;
+        tdP.appendChild(go);
+        var cancel = el('button', null, '取消');
+        cancel.type = 'button';
+        cancel.className = 'act probe-cancel';
+        cancel.setAttribute('data-act', 'probe-cancel');
+        tdP.appendChild(cancel);
+      } else {
+        var pbtn = el('button', null, a.probe.phase === 'run' ? '探测中…' : '探测');
+        pbtn.type = 'button';
+        pbtn.className = 'act probe';
+        pbtn.setAttribute('data-act', 'probe');
+        pbtn.setAttribute('data-vendor', v.name || '');
+        pbtn.title = '对这个供应商的一个模型发一次最小真实请求，取回上游状态码 / 错误码原文 / 首包延迟';
+        pbtn.disabled = a.probe.phase === 'run';
+        tdP.appendChild(pbtn);
+      }
+      tdP.appendChild(actionResultEl(a.probe, 'probe'));
+      tr.appendChild(tdP);
+
       rows.appendChild(tr);
     }
     var empty = document.getElementById('vendorsEmpty');
@@ -2413,7 +2641,19 @@ header.statline { align-items:baseline; }
   });
 
   document.getElementById('vendorRows').addEventListener('click', function (e) {
-    var b = e.target && e.target.closest ? e.target.closest('button.viewmodels') : null;
+    if (!e.target || !e.target.closest) { return; }
+    // ── T-02：行内两个动作（事件委托，理由同模型名复制：行是每次重绘重建的）──
+    var act = e.target.closest('button.act');
+    if (act) {
+      var vendor = act.getAttribute('data-vendor') || '';
+      var kind = act.getAttribute('data-act') || '';
+      if (kind === 'refresh') { doRefresh(vendor); return; }
+      if (kind === 'probe') { startProbe(vendor); return; }
+      if (kind === 'probe-go') { doProbe(vendor); return; }
+      if (kind === 'probe-cancel') { state.probeVendor = ''; renderVendors(); return; }
+      return;
+    }
+    var b = e.target.closest('button.viewmodels');
     if (!b) { return; }
     // ⚠ 2026-10-27：不再把供应商名**塞进搜索框**。原来那样做有两个后果：
     //   ① 筛选条件伪装成搜索词 —— 用户改搜索词后 vendorFilter 仍在生效，

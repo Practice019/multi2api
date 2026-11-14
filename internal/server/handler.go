@@ -481,6 +481,10 @@ func NewHandler(cfg Config) *Handler {
 	//（groups_catalog.go:3-6 记着这个坑）。
 	h.mux.HandleFunc("GET /ui/models", h.modelsUI)
 	h.mux.HandleFunc("GET /ui/models/data", h.modelsCatalogJSON)
+	// 供应商行内两个**写入面**动作（T-02）：与上面两条同一套身份判据（h.uiIdentify）。
+	// 刻意做成两个 POST（不是 GET）：它们会打上游、会覆盖缓存快照 —— 语义上是写。
+	h.mux.HandleFunc("POST /ui/models/provider/refresh", h.modelsProviderRefresh)
+	h.mux.HandleFunc("POST /ui/models/provider/probe", h.modelsProviderProbe)
 	// 令牌（API Key）管理页（T68）：与上面五条**同一套**身份判据（h.uiIdentify）。
 	h.mux.HandleFunc("GET /ui/tokens", h.tokensUI)
 	h.mux.HandleFunc("GET /ui", h.ui)

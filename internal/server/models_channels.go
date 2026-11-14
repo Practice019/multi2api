@@ -20,12 +20,19 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"workbuddy2api/internal/channelstore"
+	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/modelmap"
 	"workbuddy2api/internal/modelvis"
 	"workbuddy2api/internal/store"
@@ -769,3 +776,593 @@ func splitCatalogEndpoints(csv string) []string {
 	}
 	return out
 }
+
+// ── T-02：供应商行的两个**写入面**动作（单供应商重拉 / 单模型探测）──────────
+//
+// # 为什么必须按「行」拆开（用户报障的直接修法）
+//
+// 在此之前唯一能做的事是"刷新整包目录"（`/ui/models/data` 那条路会逐个打上游，
+// 单上游实测 0.2~23.7 s）。后果有两个，都是可观测性问题：
+//
+//	① 一次刷新会把 14 份快照的时间戳一起推新 ⇒「到底哪个上游变了/坏了」不可知；
+//	② 一个上游失败（403/超时）会被整页的平均表现掩盖 ⇒ 排查只能靠手工脚本。
+//
+// 所以这里把可观测单元从「整包目录」降到「一行」。两条端点都**只**回源一个上游。
+//
+// # 与既有触发点的分工（别把两件事合并）
+//
+//	GET  /ui/models/data               只读取数（含 catalog 新鲜度），**绝不回源**
+//	POST /ui/models/provider/refresh   **只**回源一个上游，覆盖它自己那份快照
+//	POST /ui/models/provider/probe     发一次最小真实请求，回答"这个模型现在能不能用"
+//
+// # 两份缓存的事实（写错就会"页面没反应"）
+//
+// 目录**不是**一份缓存：
+//
+//	默认上游     → dynamicModelsCache（由 h.cfg.Upstream.FetchModels 填）
+//	其余各上游   → providerModelsCache[id]（由 h.cfg.Provider.Models 填）
+//
+// 只在 providerModelsCache 上"刷新"默认上游，页面不会有任何变化 —— 因为默认上游
+// 那份目录根本不读它。refreshProviderCatalog 因此按 id 分派到正确的缓存。
+
+// errUnknownProvider 报告该 id 不是本部署认识的上游（前端传错了）。
+var errUnknownProvider = errors.New("phanthywork: 未知的上游 id")
+
+// errUpstreamNoCatalog 报告上游这次给不出目录（账号没登录 / 上游抖动）。
+//
+// ⚠ 与 errUnknownProvider 分开：前者是前端 bug，后者是上游现状。
+// 混成一条会让"上游一下午 Optional 抖动"看起来像"你传错了 provider"。
+var errUpstreamNoCatalog = errors.New("上游本次没有给出目录")
+
+// providerActionRequest 两条行内动作的请求体（字段名就是前端契约）。
+type providerActionRequest struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
+// providerRefreshResponse POST /ui/models/provider/refresh 的成功体。
+//
+// count 是**刷新后**该上游的模型数；added/removed 是相对刷新前那份快照的差集
+// （按 id 比较）。三个数一起给，用户才能回答"这次刷新是空转还是真的变了"。
+type providerRefreshResponse struct {
+	Provider string `json:"provider"`
+	Count    int    `json:"count"`
+	Added    int    `json:"added"`
+	Removed  int    `json:"removed"`
+	MS       int64  `json:"ms"`
+	Source   string `json:"source"`
+}
+
+// decodeProviderAction 解析两条端点的公共前半段（鉴权 + 请求体 + provider 校验）。
+//
+// 返回 ok=false 表示**已经**写好响应，调用方直接 return。
+func (h *Handler) decodeProviderAction(w http.ResponseWriter, r *http.Request, needModel bool) (providerActionRequest, bool) {
+	if _, ok := h.uiIdentify(r); !ok {
+		// 401 + JSON，不是 200/302：这两条是写入面，空响应会被前端读成"成功了但没变化"。
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "未认证"})
+		return providerActionRequest{}, false
+	}
+	var req providerActionRequest
+	// 64 KiB 上限：请求体只有两个短字符串，放大到 1 MiB 只是给误用留空间。
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return providerActionRequest{}, false
+	}
+	req.Provider = strings.TrimSpace(req.Provider)
+	req.Model = strings.TrimSpace(req.Model)
+	if req.Provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 provider"})
+		return providerActionRequest{}, false
+	}
+	if needModel && req.Model == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "缺少 model"})
+		return providerActionRequest{}, false
+	}
+	return req, true
+}
+
+// modelsProviderRefresh POST /ui/models/provider/refresh —— 只回源一个上游。
+//
+// 失败时**保留旧快照**并把上游原因原样回给前端（非 200 + error.code）：
+// 清空缓存会让页面在下一次取数时变成"这个上游没了"，那是比失败更坏的信息。
+func (h *Handler) modelsProviderRefresh(w http.ResponseWriter, r *http.Request) {
+	req, ok := h.decodeProviderAction(w, r, false)
+	if !ok {
+		return
+	}
+	t0 := time.Now()
+	before := h.providerCatalogIDs(req.Provider)
+	after, err := h.refreshProviderCatalog(r.Context(), req.Provider)
+	ms := time.Since(t0).Milliseconds()
+	if err != nil {
+		code := "upstream_error"
+		status := http.StatusBadGateway
+		if errors.Is(err, errUnknownProvider) {
+			code = "unknown_provider"
+			status = http.StatusBadRequest
+		} else if errors.Is(err, errUpstreamNoCatalog) {
+			code = "upstream_no_catalog"
+		}
+		writeJSON(w, status, map[string]any{
+			"provider": req.Provider,
+			"ms":       ms,
+			"error":    map[string]any{"code": code, "message": err.Error()},
+		})
+		return
+	}
+	added, removed := diffCatalogIDs(before, after)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, providerRefreshResponse{
+		Provider: req.Provider,
+		Count:    len(after),
+		Added:    added,
+		Removed:  removed,
+		MS:       ms,
+		Source:   "upstream",
+	})
+}
+
+// refreshProviderCatalog 强制回源**一个**上游，覆盖它自己那份快照，返回刷新后的 id 列表。
+//
+// ⚠ 绕过 1h TTL 与 stale-while-revalidate（否则"点了没反应"）：这里**直接**调上游，
+// 不走 modelsForProviderCached —— 那条路在缓存未过期时会毫秒返回旧目录。
+// 但**复用**它写下缓存的唯一入口（storeProviderModels / dynamicModelsCache），
+// 保证下一次 /ui/models/data 读到的是同一份数据。
+func (h *Handler) refreshProviderCatalog(ctx context.Context, id string) ([]string, error) {
+	if id == "" {
+		return nil, errUnknownProvider
+	}
+	isDefault := id == h.defaultProvider()
+	// 单上游部署（Provider 未接线）：唯一的上游就是 cfg.Upstream，任何 id 都落到它身上
+	// —— 前端那时只有一行，回 400「未知上游」会让唯一可用的按钮失效。
+	known := h.cfg.Provider == nil || h.cfg.Provider.Has(id) || isDefault
+	if !known {
+		return nil, fmt.Errorf("%w: %s", errUnknownProvider, id)
+	}
+	if h.cfg.Upstream == nil && h.cfg.Provider == nil {
+		return nil, fmt.Errorf("%w: 本部署没有配置任何上游", errUpstreamNoCatalog)
+	}
+	// 默认上游走**它自己**那份缓存，否则页面不会变（见段首"两份缓存的事实"）。
+	if isDefault || h.cfg.Provider == nil {
+		return h.refreshDefaultCatalog(ctx)
+	}
+	infos, ok := h.cfg.Provider.Models(ctx, id)
+	if !ok || len(infos) == 0 {
+		return nil, fmt.Errorf("%w: %s", errUpstreamNoCatalog, id)
+	}
+	storeProviderModels(id, infos)
+	ids := make([]string, 0, len(infos))
+	for _, mi := range infos {
+		if mi.ID != "" {
+			ids = append(ids, mi.ID)
+		}
+	}
+	return ids, nil
+}
+
+// refreshDefaultCatalog 强制回源默认上游（与 fetchDynamicModels 同一判据、同一份缓存）。
+//
+// 刻意**复制** fetchDynamicModels 的关键几步而不抽公共函数：那条路径是 /v1/models
+// 的主干（负缓存/冷却/NoteError 的语义都被测试锁着），为本次新增的按钮去改它，
+// 收益是省 20 行、代价是动主干。代价不对等，所以宁可在这里重复一小段。
+func (h *Handler) refreshDefaultCatalog(ctx context.Context) ([]string, error) {
+	if h.cfg.Upstream == nil {
+		return nil, fmt.Errorf("%w: 本部署没有默认上游客户端", errUpstreamNoCatalog)
+	}
+	// 与 fetchDynamicModels 同一条：选号限定"池子眼里的默认上游"（传 ""）。
+	if h.cfg.Pool == nil {
+		return nil, fmt.Errorf("%w: 没有账号池", errUpstreamNoCatalog)
+	}
+	acct := h.cfg.Pool.PickForExcluding("", nil)
+	if acct == nil {
+		return nil, fmt.Errorf("%w: 默认上游没有可用账号", errUpstreamNoCatalog)
+	}
+	infos, err := h.cfg.Upstream.FetchModels(acct)
+	if err != nil || len(infos) == 0 {
+		// 失败要**惩罚账号**（与 fetchDynamicModels 一致），否则下次选号会再抽到它。
+		h.cfg.Pool.NoteError(acct.UID)
+		msg := "上游没有返回任何模型"
+		if err != nil {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("%w: %s", errUpstreamNoCatalog, msg)
+	}
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = infos
+	dynamicModelsCache.fetched = time.Now()
+	dynamicModelsCache.lastFail = time.Time{} // 成功即清空负缓存
+	dynamicModelsCache.Unlock()
+	ids := make([]string, 0, len(infos))
+	for _, mi := range infos {
+		if mi.ID != "" {
+			ids = append(ids, mi.ID)
+		}
+	}
+	return ids, nil
+}
+
+// providerCatalogIDs 读该上游**当前**快照的 id 列表（只读，绝不回源）。
+//
+// 用它算 added/removed：差集的真源是"刷新前页面看到的那份"，
+// 而不是刷新过程中另存的一份中间态。
+func (h *Handler) providerCatalogIDs(id string) []string {
+	if id == h.defaultProvider() || h.cfg.Provider == nil {
+		dynamicModelsCache.RLock()
+		defer dynamicModelsCache.RUnlock()
+		out := make([]string, 0, len(dynamicModelsCache.ids))
+		for _, mi := range dynamicModelsCache.ids {
+			if mi.ID != "" {
+				out = append(out, mi.ID)
+			}
+		}
+		return out
+	}
+	infos, ok := peekProviderModelsCached(id)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(infos))
+	for _, mi := range infos {
+		if mi.ID != "" {
+			out = append(out, mi.ID)
+		}
+	}
+	return out
+}
+
+// diffCatalogIDs 返回 (added, removed)：按 id 集合比较，顺序无关。
+func diffCatalogIDs(before, after []string) (added, removed int) {
+	oldSet := make(map[string]bool, len(before))
+	for _, id := range before {
+		oldSet[id] = true
+	}
+	newSet := make(map[string]bool, len(after))
+	for _, id := range after {
+		newSet[id] = true
+	}
+	for id := range newSet {
+		if !oldSet[id] {
+			added++
+		}
+	}
+	for id := range oldSet {
+		if !newSet[id] {
+			removed++
+		}
+	}
+	return added, removed
+}
+
+// ── 单模型探测（POST /ui/models/provider/probe）────────────────────────────
+//
+// 探测 = 发一次**最小真实请求**（max_tokens:16、单条 "hi"），把三个事实回报给页面：
+// 上游原始状态码、上游错误码原文、首包延迟。它回答的问题只有一个：
+//
+//	「这个模型**现在**能不能用，如果不能用，是谁在拒绝它。」
+//
+// ⚠ 三条刻意设计（每条都对应一次真实事故）：
+//
+//	① **永远回 HTTP 200**。探测是测量不是操作：上游 403 是"测到了 403"，
+//	   把它变成网关的 502 会让页面显示成"探测失败"，而真正的事实（谁拒绝的）消失。
+//	② **错误码原文透传**（error.code）。本次调试中 `request_not_authorized`
+//	   被中间层折成"502 空消息"，排查方向因此偏了几小时。这条是硬要求。
+//	③ **同目标 5 秒内去重**。上游对密集请求会进入 2–4 分钟的 403 冷却窗（实测），
+//	   而页面按钮很容易被连点。去重后连点只打一次上游，第二次回放上一次结果。
+
+const (
+	// probeMaxTokens 探测请求的输出上限。16 足够让上游走完调度+首 token 路径，
+	// 又不至于真的烧掉一次完整生成。
+	probeMaxTokens = 16
+	// probeTimeout 单次探测上限。慢上游实测 23.7 s ⇒ 30 s 是"比最慢的还长一点"。
+	probeTimeout = 30 * time.Second
+	// probeBodyLimit 读上游响应的上限。错误体是几百字节的 JSON，SSE 首包也在几 KiB 内。
+	probeBodyLimit = 8 << 10
+	// probeMessageLimit 回给页面的上游原文上限（前端 tooltip 不需要更多）。
+	probeMessageLimit = 300
+	// probeDedupWindow 同目标去重窗口。
+	probeDedupWindow = 5 * time.Second
+)
+
+// providerProbeResponse POST /ui/models/provider/probe 的响应体（永远 HTTP 200）。
+type providerProbeResponse struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	OK       bool   `json:"ok"`
+	// Status 上游**原始**状态码（0 = 没走到上游，例如没号/取不到凭证）。
+	Status int `json:"status"`
+	// Code 上游 error.code 原文，或本层自己的失败码（no_healthy_account / no_credential / transport_error）。
+	Code string `json:"code,omitempty"`
+	// Message 上游原文（截断到 probeMessageLimit）。
+	Message string `json:"message,omitempty"`
+	// Text 成功时从 SSE 里抽到的第一段文本（可能为空：思考型模型首帧只有 reasoning）。
+	Text string `json:"text,omitempty"`
+	// FirstTokenMS 首包字节到达耗时（毫秒）。0 = 没收到任何字节。
+	FirstTokenMS int64 `json:"firstTokenMs"`
+	// TotalMS 整次探测耗时（毫秒），由 handler 层填。
+	TotalMS int64 `json:"totalMs"`
+}
+
+// probeCacheEntry 一次探测的结果与它的生成时刻（用于去重窗口内的回放）。
+type probeCacheEntry struct {
+	at   time.Time
+	resp providerProbeResponse
+}
+
+var probeCache struct {
+	sync.Mutex
+	entries map[string]probeCacheEntry
+}
+
+// modelsProviderProbe POST /ui/models/provider/probe。
+func (h *Handler) modelsProviderProbe(w http.ResponseWriter, r *http.Request) {
+	req, ok := h.decodeProviderAction(w, r, true)
+	if !ok {
+		return
+	}
+	key := req.Provider + "\x00" + req.Model
+	now := time.Now()
+
+	// ① 去重窗口内直接回放（不打上游）。
+	probeCache.Lock()
+	if e, hit := probeCache.entries[key]; hit && now.Sub(e.at) < probeDedupWindow {
+		probeCache.Unlock()
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Probe-Replay", "1")
+		writeJSON(w, http.StatusOK, e.resp)
+		return
+	}
+	probeCache.Unlock()
+
+	t0 := now
+	resp := h.probeProviderModel(r.Context(), req.Provider, req.Model)
+	resp.TotalMS = time.Since(t0).Milliseconds()
+
+	// ② 只缓存**真的打到上游**的结果。
+	//
+	// 为什么不是无条件缓存：`no_healthy_account` 是"现在没号"，
+	// 5 秒内用户可能刚在账号池页补了一个号 —— 回放那条旧失败会让他以为浏览器坏了。
+	// 而上游明确回了状态码的（status > 0）是真实测量值，回放它是对的。
+	if resp.Status > 0 {
+		probeCache.Lock()
+		if probeCache.entries == nil {
+			probeCache.entries = map[string]probeCacheEntry{}
+		}
+		// 顺手清掉过期项，避免这个 map 无限增长（没有后台清理器，用写入路径上的机会）。
+		for k, e := range probeCache.entries {
+			if now.Sub(e.at) >= probeDedupWindow {
+				delete(probeCache.entries, k)
+			}
+		}
+		probeCache.entries[key] = probeCacheEntry{at: now, resp: resp}
+		probeCache.Unlock()
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// probeProviderModel 真正发一次最小请求。返回值一定带 Provider/Model，其余按实测填。
+func (h *Handler) probeProviderModel(ctx context.Context, providerID, model string) providerProbeResponse {
+	resp := providerProbeResponse{Provider: providerID, Model: model}
+
+	// 上游不认网关的路由前缀（与 chatCompletions 出站前剥前缀同一条）。
+	bare := model
+	if pid, rest, ok := gateway.SplitModel(model); ok && (pid == providerID || providerID == "") {
+		bare = rest
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":      bare,
+		"messages":   []map[string]any{{"role": "user", "content": "hi"}},
+		"max_tokens": probeMaxTokens,
+		"stream":     true,
+	})
+	if err != nil {
+		resp.Code, resp.Message = "internal_error", err.Error()
+		return resp
+	}
+
+	if h.cfg.Pool == nil {
+		resp.Code, resp.Message = "no_healthy_account", "本部署没有账号池"
+		return resp
+	}
+	acct := h.cfg.Pool.PickFor(providerID, bare, nil)
+	if acct == nil {
+		// 渠道型模型（不是账号池里的上游）也会走到这里 —— 明确说清楚是谁，比"失败"有用。
+		resp.Code = "no_healthy_account"
+		resp.Message = "上游 " + providerID + " 没有可用账号（渠道型模型请到「渠道」页确认 key）"
+		return resp
+	}
+	if !h.cfg.Pool.Acquire(acct.UID) {
+		resp.Code, resp.Message = "account_busy", "账号并发已满，请稍后重试"
+		return resp
+	}
+	defer h.cfg.Pool.Release(acct.UID)
+
+	cred, ok := h.credentialFor(providerID, acct.UID)
+	if !ok {
+		resp.Code, resp.Message = "no_credential", "取不到账号 "+acct.UID+" 的凭证"
+		return resp
+	}
+
+	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	cs, err := h.chatProvider(pctx, providerID, cred, body)
+	if err != nil {
+		resp.Code, resp.Message = "transport_error", truncateRunes(err.Error(), probeMessageLimit)
+		return resp
+	}
+	defer func() { _ = cs.Body.Close() }()
+
+	resp.Status = cs.Status
+	firstMS, raw := readProbeUpstream(cs.Body, probeBodyLimit)
+	resp.FirstTokenMS = firstMS
+	code, msg := upstreamErrorCode(raw)
+	resp.Code, resp.Message = code, truncateRunes(msg, probeMessageLimit)
+	resp.OK = cs.Status >= 200 && cs.Status < 300 && code == ""
+	if resp.OK {
+		resp.Text = truncateRunes(extractProbeText(raw), probeMessageLimit)
+	}
+	return resp
+}
+
+// readProbeUpstream 读上游响应的前 limit 字节，同时测量**首字节**到达耗时。
+//
+// 为什么不用 io.ReadAll：探测关心的是"多久给出第一个字"，
+// 全读完会把首包与后续流的时间混成一个数字（生图/长文模型能差一个数量级）。
+func readProbeUpstream(r io.Reader, limit int) (firstTokenMS int64, raw []byte) {
+	if r == nil {
+		return 0, nil
+	}
+	buf := make([]byte, 512)
+	start := time.Now()
+	n, err := r.Read(buf)
+	if n > 0 {
+		firstTokenMS = time.Since(start).Milliseconds()
+		raw = append(raw, buf[:n]...)
+	}
+	for len(raw) < limit && err == nil {
+		room := limit - len(raw)
+		if room > len(buf) {
+			room = len(buf)
+		}
+		var m int
+		m, err = r.Read(buf[:room])
+		if m > 0 {
+			raw = append(raw, buf[:m]...)
+		}
+	}
+	if firstTokenMS == 0 && len(raw) > 0 {
+		firstTokenMS = time.Since(start).Milliseconds()
+	}
+	return firstTokenMS, raw
+}
+
+// upstreamErrorCode 从上游响应原文里抽 (code, message)。
+//
+// 认三种形状（实测过的都在这儿，不猜第四种）：
+//
+//	{"error":{"code":"...","message":"..."}}   标准 OpenAI/Anthropic 错误体
+//	{"error":"something went wrong"}            只给字符串的老上游
+//	data: {"error":{...}}                       错误被塞进 SSE 帧里（少数上游 200 + 错误帧）
+func upstreamErrorCode(raw []byte) (code, message string) {
+	if len(raw) == 0 {
+		return "", ""
+	}
+	if c, m, ok := parseErrorObject(raw); ok {
+		return c, m
+	}
+	// SSE：逐行找 data: 之后的对象。
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if c, m, ok := parseErrorObject([]byte(payload)); ok {
+			return c, m
+		}
+	}
+	return "", ""
+}
+
+// parseErrorObject 解一个 {"error":...} 形状的 JSON。
+func parseErrorObject(raw []byte) (code, message string, ok bool) {
+	var probe struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.Error) == 0 {
+		return "", "", false
+	}
+	var obj struct {
+		Code    string `json:"code"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(probe.Error, &obj); err == nil {
+		code = strings.TrimSpace(obj.Code)
+		if code == "" {
+			// 有些上游只给 type（Anthropic 的 error.type），它同样是"谁拒绝的"的判据。
+			code = strings.TrimSpace(obj.Type)
+		}
+		if code != "" || obj.Message != "" {
+			return code, obj.Message, true
+		}
+	}
+	var text string
+	if err := json.Unmarshal(probe.Error, &text); err == nil && text != "" {
+		return "", text, true
+	}
+	return "", "", false
+}
+
+// extractProbeText 从成功响应里抽第一段可见文本（SSE 或一次性 JSON 都认）。
+//
+// 抽不到就返回空串 —— 思考型模型的首帧常常只有 reasoning_content，
+// 那时"没有可见文本"是**真实结果**，不该编一个占位串。
+func extractProbeText(raw []byte) string {
+	tryObject := func(b []byte) string {
+		var obj struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(b, &obj); err != nil {
+			return ""
+		}
+		for _, c := range obj.Choices {
+			if c.Delta.Content != "" {
+				return c.Delta.Content
+			}
+			if c.Message.Content != "" {
+				return c.Message.Content
+			}
+		}
+		for _, c := range obj.Content {
+			if c.Text != "" {
+				return c.Text
+			}
+		}
+		return ""
+	}
+	if s := tryObject(raw); s != "" {
+		return s
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if s := tryObject([]byte(payload)); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// truncateRunes 按**字符**截断（不是字节）：上游中文错误文案按字节切会切出半个字。
+func truncateRunes(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit]) + "…"
+}
+
