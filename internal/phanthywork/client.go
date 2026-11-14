@@ -424,7 +424,7 @@ func nodeArchName() string {
 // ⚠ 签名相关的东西**一个都不要加**：抓包里客户端全程零签名，
 // 而旧实现带着 12 段 proof 打这条路径 —— 服务端会把"带签名但对不上"的请求
 // 当异常处理（实测 /v1/messages 缺 product 头时回 500 空体就是这一类的表现）。
-func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string, body []byte) (*http.Response, error) {
+func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string, body []byte, proof proofValues) (*http.Response, error) {
 	if a == nil || a.OAuth.AccessToken == "" {
 		return nil, errNoAccessToken
 	}
@@ -439,21 +439,27 @@ func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string
 
 	// ── 会话头 ──────────────────────────────────────────────────────────────
 	//
-	// 官方 sidecar 的桥把 `x-phanthy-session` **摊成** `x-claude-code-session-id`
-	// 并把它自己从"要发出去的头"里删掉（index.mjs 的 HOST_HEADERS_TO_DROP）。
-	// 本包两个都发：`x-claude-code-session-id` 是必需的（上游按它认会话），
-	// `x-phanthy-session` 留着是因为旧内核（/v1/messages）那条 12 段 canonical
-	// 要求它与第 10 段同值 —— 对 chat 路径无害。
-	sessionID := newSessionID()
-	reqID := randomUUID()
+	// ★★ 2026-11-14（第二次更正）：这两个值**不能**在这里各自随机生成 ——
+	//   它们同时是 12 段 canonical 的**第 9 段与第 10 段**。
+	//   一旦"签名时用 A、发头时用 B"，服务端重算出来的串必然对不上，
+	//   症状就是 403 request_not_authorized（与时钟/UA/令牌过期的症状完全同形）。
+	//   ⇒ 一律取 buildProof 产出的那一组（proof.RequestID / proof.SessionID），
+	//     没有 proof（理论上不该发生）才回落到本地生成。
+	sessionID := proof.SessionID
+	if sessionID == "" {
+		sessionID = newSessionID()
+	}
+	reqID := proof.RequestID
+	if reqID == "" {
+		reqID = randomUUID()
+	}
 	req.Header.Set("x-request-id", reqID)
 	req.Header.Set("x-claude-code-session-id", sessionID)
 	req.Header.Set("x-phanthy-session", sessionID)
 
-	// ── 官方客户端的固定头（★★ 与官方 1:1 的关键）────────────────────────────
+	// ── 客户端身份头（★ 与官方 1:1 的关键之一）──────────────────────────────
 	//
-	// 真源是**官方 sidecar 二进制**（2.51.0，字符串转储 `phanthy-sidecar-ascii.txt`）
-	// 里 `/v1/chat/completions` 那条调用的头构造器，逐字：
+	// 真源：官方 sidecar 里 `/v1/chat/completions` 那条调用的头构造器（逐字）：
 	//
 	//	X = () => ({
 	//	  Authorization: `Bearer ${token}`,
@@ -464,6 +470,11 @@ func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string
 	//	  "x-claude-code-session-id": sessionId,
 	//	})
 	//	// 调用处再补： "x-request-id": <uuid>
+	//
+	// ⚠ 注意 `X()` 是 **Auto 路由器**那条调用的头，它**不是**发往上游的完整形态 ——
+	//   本地桥转发时还会再覆盖一层 4 个 `x-phanthy-desktop-session` / `x-phanthy-proof-*`
+	//   （见函数末尾那段，以及 TestChatPathCarriesDesktopInferenceProof）。
+	//   只看 `X()` 会得出"chat 全程零签名"的错误结论。
 	//
 	// # ★★ 2026-11-14 封号复盘：这段以前是错的，而且真机**封了号**
 	//
@@ -492,6 +503,47 @@ func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string
 	req.Header.Set("x-phanthy-client-version", OfficialClientVersion)
 	if dev := CliDeviceHeader(); dev != "" {
 		req.Header.Set("x-phanthy-cli-device", dev)
+	}
+
+	// ── ★★ 4 个 desktop-inference-v2 证明头（2026-11-14 补上，这是本轮最重要的一处）──
+	//
+	// # 真源：官方 sidecar 的**本地推理桥** `gd3` + proof 构造器 `_O8`（逐字）
+	//
+	//	// 桥的入口集合（注意第三个成员）
+	//	Sd3 = new Set(["/v1/messages", "/v1/responses", "/v1/chat/completions"])
+	//
+	//	// 转发前：先删掉入站的 4 个证明头，再重新算一份覆盖上去
+	//	for (let x of ["x-phanthy-desktop-session","x-phanthy-proof-signature",
+	//	               "x-phanthy-proof-nonce","x-phanthy-proof-timestamp"]) G.delete(x);
+	//	let u = _O8(q.method, K.pathname, $, G);
+	//	if (u) for (let [x, m] of Object.entries(u)) G.set(x, m);
+	//
+	// # ★ 这里曾经有一个**方向性错误**，值得留档
+	//
+	// 早先的实现（含大量注释）断言「chat 路径全程零签名，签名相关的一个都不要加」。
+	// 那个结论来自**只抓到了链路的其中一跳**：
+	//
+	//	官方实际链路：内核（Phanthy Codeo） → **本地桥（sidecar, 127.0.0.1）** → 上游
+	//	抓到的只是  ：内核 → 本地桥            ← 这一跳确实不签名
+	//	真正发往上游的：本地桥 → 上游          ← **桥会补 12 段签名 + 4 个头**
+	//
+	// 而 `Sd3` 里明确包含 `/v1/chat/completions` —— 也就是说 chat 这条路**同样要签**。
+	// 又因为 12 段 canonical 的拼装（`_O8`）与本包 `InferenceCanonical` 逐段一致，
+	// 所以签名算法早就写对了，缺的只是「把它用在 chat 路径上」。
+	//
+	// 旁证（本包既有的假上游里写着）：上游对缺这个头的请求回的正是
+	//	403 {"code":"request_not_authorized","message":"missing desktop session"}
+	//
+	// 判据：TestChatPathCarriesDesktopInferenceProof（必须带齐 4 头）
+	//      + TestChatSendsNoSignatureHeaders 已**反转**（原判据在守护错误行为）。
+	if proof.Signature != "" {
+		req.Header.Set("x-phanthy-desktop-session", proof.InferenceToken)
+		req.Header.Set("x-phanthy-proof-timestamp", proof.Timestamp)
+		req.Header.Set("x-phanthy-proof-nonce", proof.Nonce)
+		req.Header.Set("x-phanthy-proof-signature", proof.Signature)
+	}
+	for k, v := range proof.ExtraHeaders {
+		req.Header.Set(k, v)
 	}
 
 	return c.httpClient().Do(req)
@@ -1264,6 +1316,23 @@ type proofValues struct {
 func (c *Client) buildProof(a *Auth, method, path string, body []byte, token string, localMS int64) (proofValues, error) {
 	if a == nil {
 		return proofValues{}, errNilAuth
+	}
+	// ★★ 2026-11-14 加的护栏：inference canonical 第 3 段必须是**不含 query 的 pathname**。
+	//
+	// 真源：官方 sidecar 的 proof 构造器 `_O8(q, K, _, z)` 里，第 3 段传的是
+	// **`K.pathname`**（逐字，不是 `K.path` 也不是整个 url）。
+	// 而官方的本地推理桥 `gd3` 入口还要求 query 必须为空
+	// （唯一例外 `/v1/messages?beta=true`）—— 两条一起说明：
+	// **这条路径上 query 既不进签名、也不该出现。**
+	//
+	// 本包当前两个调用点都传 `pathMessages` / `pathChatCompletions` 常量（都不带 query），
+	// 所以现在是对的；加断言是为了让将来"顺手加个 ?beta=true"当场报错，
+	// 而不是签出一个服务端重算不出来的串（症状是 403 request_not_authorized，
+	// 与时钟/UA/令牌过期的症状完全一样，指不到根因）。
+	if strings.Contains(path, "?") {
+		return proofValues{}, fmt.Errorf(
+			"phanthywork: inference canonical 的 path 段不能带 query（收到 %q）—— "+
+				"官方 proof 构造器用的是 pathname，URL 的 query 既不进签名也不该出现在这条路径上", path)
 	}
 	ts := msToString(serverNowMS(localMS, a.skew()))
 	nonce := newInferenceNonce()

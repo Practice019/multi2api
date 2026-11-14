@@ -1,6 +1,6 @@
 package phanthywork
 
-// chatcompletions_test.go 新版内核协议（POST /v1/chat/completions，不签名）的护栏。
+// chatcompletions_test.go 新版内核协议（POST /v1/chat/completions）的护栏。
 //
 // # 为什么必须有这个文件
 //
@@ -10,14 +10,32 @@ package phanthywork
 //	POST /api/event_logging/batch      （遥测）
 //	POST /v1/chat/completions          （推理，唯一）
 //
-// 差异三条，每条都有断言守着：
+// # ★★ 2026-11-14 更正：原第 ②③ 条是错的（方向性错误）
 //
-//	① 端点：chat，不是 messages
+// 本文件原先断言：
+//
 //	② **不签名**：没有 x-desktop-* / x-phanthy-proof-*
 //	③ **不换推理令牌**：直接用 access_token 当 Bearer
 //
-// 这些断言的价值在于：任何人把默认协议改回 messages、或"顺手"把签名头加回来，
-// 都会立刻红 —— 而不是等到真机 403/500 才发现。
+// 那两条来自**只抓到链路的一跳**：
+//
+//	官方：内核（Phanthy Codeo）→ **本地桥（sidecar, 127.0.0.1）** → 上游
+//	抓到：内核 → 本地桥             ← 这一跳确实不签名、不换令牌
+//	漏掉：本地桥 → 上游             ← **桥补 12 段签名 + 4 个证明头**
+//
+// 桥的入口集合逐字包含 chat（`Sd3 = new Set(["/v1/messages","/v1/responses",
+// "/v1/chat/completions"])`），且桥的 proof 构造器 `_O8` 与本包 `InferenceCanonical`
+// 逐段一致 ⇒ 签名算法早就对了，缺的只是"用在 chat 上"。
+//
+// ⇒ 现在正确的三条是：
+//
+//	① 端点：chat，不是 messages
+//	② **要签名**：必须带齐 4 个 `x-phanthy-desktop-session` / `x-phanthy-proof-*`
+//	③ **要换推理令牌**：先 activities/summary 拿 desktop_inference_token 才能签
+//
+// 判据 `TestChatSendsNoSignatureHeaders` / `TestChatDoesNotFetchInferenceToken`
+// 已分别**反转**为 `TestChatPathCarriesDesktopInferenceProof` /
+// `TestChatFetchesInferenceToken` —— 原判据在守护错误行为，是"判据锁死 bug"的又一例。
 
 import (
 	"context"
@@ -30,6 +48,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -47,10 +66,56 @@ type chatFakeUpstream struct {
 	// status 非 0 时直接回这个状态码（用于错误分类断言）。
 	status  int
 	errBody string
+
+	// ★ 2026-11-14：chat 路径现在也要换推理令牌（12 段 canonical 第 8 段 + 第 4 个证明头），
+	//   而换令牌前要 ensureInstallation ⇒ 这三个端点都要能被假上游应答。
+	summaryCalls  int
+	gotSummaryHdr http.Header
+	gotSummaryKey string
+	profileCalls  int
+	registerCalls int
+	// gotInferToken 记下发出去的推理令牌 —— 判据用它比对
+	// `x-phanthy-desktop-session`（官方那里放的就是令牌原值，不是 sessionId）。
+	gotInferToken string
 }
 
 func (f *chatFakeUpstream) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// profile：ensureInstallation 每次注册前都会问一次权威 accountScope。
+		if r.URL.Path == pathProfile {
+			f.profileCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"account":{"uuid":"scope-u-chat","display_name":"chat-account"}}`)
+			return
+		}
+		// register：chat 路径现在要先 ensureInstallation（换令牌的前置）。
+		// 成功标志由 provider 自己记（RegisteredAtMS = 本地时刻），所以回一个
+		// **不含 reason_code / error** 的 JSON 即视为成功。
+		if r.URL.Path == pathRegister {
+			f.registerCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"installation":{"id":"inst-u-chat"}}`)
+			return
+		}
+
+		// activities/summary：只发推理令牌，不记进 chat 的 calls/gotPath。
+		//
+		// 真源：官方桥 `_O8` 的 `if(!iy) return null` —— 没有推理令牌就**不发证明头**，
+		// 而 chat 路径要带证明头 ⇒ 必须先换令牌。
+		if r.URL.Path == pathActivitiesSummary {
+			f.summaryCalls++
+			f.gotSummaryHdr = r.Header.Clone()
+			f.gotSummaryKey = r.Header.Get("idempotency-key")
+			_, _ = io.ReadAll(r.Body)
+			tok := fakeJWT("u-1", time.Now().Unix()+180)
+			f.gotInferToken = tok
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"schema_version":1,"server_time":"`+
+				time.Now().UTC().Format(time.RFC3339Nano)+
+				`","desktop_inference_token":"`+tok+`"}`)
+			return
+		}
+
 		f.calls++
 		f.gotPath = r.URL.Path
 		f.gotHeaders = r.Header.Clone()
@@ -115,17 +180,35 @@ func TestChatUsesChatCompletionsPath(t *testing.T) {
 	}
 }
 
-// TestChatSendsNoSignatureHeaders 断言 chat 路径**不带任何签名头**。
+// TestChatPathCarriesDesktopInferenceProof 断言 chat 路径**必须带齐 4 个 proof 头**。
 //
-// 抓包实证：客户端全程零签名。旧实现把 12 段 proof 打到这条路径上，
-// 而"带签名但对不上"会被服务端当异常处理（曾表现为 500 空体）。
-func TestChatSendsNoSignatureHeaders(t *testing.T) {
+// # ★★ 这条判据是**反转**来的，原判据在守护错误行为
+//
+// 原名 `TestChatSendsNoSignatureHeaders`，断言"chat 路径不带任何签名头"，
+// 理由是"抓包实证：客户端全程零签名"。那个实证**只覆盖了链路的一跳**：
+//
+//	官方：内核（Phanthy Codeo）→ **本地桥（sidecar, 127.0.0.1）** → 上游
+//	抓到：内核 → 本地桥        ← 这一跳**确实**零签名（原判据抓到的是这里）
+//	漏掉：本地桥 → 上游        ← **桥补 12 段签名 + 这 4 个头**
+//
+// 真源（官方 sidecar 二进制，逐字）：
+//
+//	Sd3 = new Set(["/v1/messages", "/v1/responses", "/v1/chat/completions"])
+//	for (let x of ["x-phanthy-desktop-session","x-phanthy-proof-signature",
+//	               "x-phanthy-proof-nonce","x-phanthy-proof-timestamp"]) G.delete(x);
+//	let u = _O8(q.method, K.pathname, $, G); if (u) for (...) G.set(x, m);
+//
+// 旁证：上游对缺这个头的请求回的正是
+//	403 {"code":"request_not_authorized","message":"missing desktop session"}
+//
+// ⇒ 原判据让"少 4 个头"这件事一路绿灯。现在反过来钉住它。
+func TestChatPathCarriesDesktopInferenceProof(t *testing.T) {
 	up := &chatFakeUpstream{}
 	srv := httptest.NewServer(up.handler())
 	defer srv.Close()
 
 	p := newFakeProviderChat(t, srv)
-	cred := newChatCred(t, "u-nosig")
+	cred := newChatCred(t, "u-proof")
 
 	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
 		"model":    "Phanthy-fast",
@@ -137,23 +220,38 @@ func TestChatSendsNoSignatureHeaders(t *testing.T) {
 	defer st.Body.Close()
 	_, _ = io.Copy(io.Discard, st.Body)
 
-	// 这些头一个都不许出现（大小写不敏感由 http.Header 保证）
-	forbidden := []string{
-		"x-desktop-installation-id",
-		"x-desktop-timestamp",
-		"x-desktop-nonce",
-		"x-desktop-signature",
+	// ① 4 个证明头**必须**在
+	for _, h := range []string{
 		"x-phanthy-desktop-session",
 		"x-phanthy-proof-timestamp",
 		"x-phanthy-proof-nonce",
 		"x-phanthy-proof-signature",
-	}
-	for _, h := range forbidden {
-		if v := up.gotHeaders.Get(h); v != "" {
-			t.Fatalf("chat 路径不该发签名头 %q（实际值 %q）\n"+
-				"抓包实证：新版内核（0.2.13）全程零签名。带上它反而会让服务端走"+
-				"「签名校验」分支并因对不上而报错。", h, v)
+	} {
+		if v := up.gotHeaders.Get(h); v == "" {
+			t.Errorf("chat 路径缺 proof 头 %q —— 官方本地桥一定会补它，"+
+				"缺了上游回 403 request_not_authorized「missing desktop session」", h)
 		}
+	}
+
+	// ② desktop-session 放的是**推理令牌本身**（不是 sessionId）
+	if got, want := up.gotHeaders.Get("x-phanthy-desktop-session"), up.gotInferToken; want != "" && got != want {
+		t.Errorf("x-phanthy-desktop-session = %q，want 推理令牌 %q", got, want)
+	}
+
+	// ③ 推理路径**不该**带 v1 的 `x-desktop-*`（那 4 个只属于 /api/* 一族）
+	for _, h := range []string{
+		"x-desktop-installation-id", "x-desktop-timestamp",
+		"x-desktop-nonce", "x-desktop-signature",
+	} {
+		if v := up.gotHeaders.Get(h); v != "" {
+			t.Errorf("推理路径不该带 v1 签名头 %q（实际 %q）—— 官方 proof 用的是 "+
+				"x-phanthy-proof-*，两套头不能混", h, v)
+		}
+	}
+
+	// ④ 换过令牌（4 个 proof 头的前置）
+	if up.summaryCalls == 0 {
+		t.Error("chat 路径没调 activities/summary —— 没有推理令牌就签不出这个包")
 	}
 }
 
@@ -305,24 +403,25 @@ func TestInferenceHeadersMatchOfficialClient(t *testing.T) {
 	}
 }
 
-// TestChatDoesNotFetchInferenceToken 断言 chat 路径**不调** activities/summary。
+// TestChatFetchesInferenceToken 断言 chat 路径**必须**调 activities/summary 换令牌。
 //
-// 新版内核直接用 access_token 当 Bearer，不需要 180 秒的推理令牌。
-// 这条断言的价值：如果有人"为了统一"把 ensureInferenceToken 加回 chat 路径，
-// 会多出一次网络往返 + 一个会过期的失败点 —— 这里会立刻抓到。
-func TestChatDoesNotFetchInferenceToken(t *testing.T) {
-	var summaryCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == pathActivitiesSummary {
-			summaryCalls++
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: [DONE]\n\n")
-	}))
+// # ★★ 这条判据是**反转**来的，原判据在守护错误行为
+//
+// 原名 `TestChatDoesNotFetchInferenceToken`，断言"chat 不调 summary、直接用
+// access_token 当 Bearer、少一个失败点"。那个结论来自只抓到链路的一跳
+//（内核 → 本地桥），而**桥 → 上游**那一跳会补 12 段签名，
+// 而 canonical 的第 8 段就是 `sha256(desktop_inference_token)`、
+// 第 4 个证明头 `x-phanthy-desktop-session` 放的就是令牌原值 ——
+// **没有令牌就签不出这个包**（官方桥里是 `if(!iy) return null`，干脆不发）。
+//
+// ⇒ 现在正确的行为是：必须先换令牌，再签，再发。
+func TestChatFetchesInferenceToken(t *testing.T) {
+	up := &chatFakeUpstream{}
+	srv := httptest.NewServer(up.handler())
 	defer srv.Close()
 
 	p := newFakeProviderChat(t, srv)
-	cred := newChatCred(t, "u-notoken")
+	cred := newChatCred(t, "u-token")
 
 	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
 		"model":    "Phanthy-fast",
@@ -334,10 +433,22 @@ func TestChatDoesNotFetchInferenceToken(t *testing.T) {
 	defer st.Body.Close()
 	_, _ = io.Copy(io.Discard, st.Body)
 
-	if summaryCalls != 0 {
-		t.Fatalf("chat 路径调了 %d 次 %s；新版内核**不换推理令牌**，"+
-			"直接用 access_token 当 Bearer。多这一次往返只会多一个失败点。",
-			summaryCalls, pathActivitiesSummary)
+	if up.summaryCalls == 0 {
+		t.Fatalf("chat 路径没调 %s —— 12 段 canonical 第 8 段是令牌的哈希，"+
+			"没有令牌就签不出证明包（官方桥 `_O8` 里 `if(!iy) return null`）",
+			pathActivitiesSummary)
+	}
+	// summary 这条**不发**幂等键（canonical 第 7 段是空串，坑⑪）
+	if k := up.gotSummaryKey; k != "" {
+		t.Errorf("summary 带上了幂等键 %q —— 官方这一步 canonical 第 7 段是空串，"+
+			"带了会签出一个服务端重算不出来的串", k)
+	}
+	// 换到的令牌必须被用上（与 desktop-session 同值）
+	if up.gotInferToken == "" {
+		t.Fatal("假上游没发出推理令牌，用例前提不成立")
+	}
+	if got := up.gotHeaders.Get("x-phanthy-desktop-session"); got != up.gotInferToken {
+		t.Errorf("x-phanthy-desktop-session = %q，want 刚换到的令牌 %q", got, up.gotInferToken)
 	}
 }
 

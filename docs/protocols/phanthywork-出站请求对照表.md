@@ -95,8 +95,13 @@ X = () => ({
 // 调用处再补 "x-request-id": <uuid>；Auto 路由另加 "x-phanthy-auto-mode-router":"1"
 ```
 
-**这条路径不发**：`x-app` / `x-phanthy-client-version` / 任何证明头。
-（证明头是 `/v1/messages` 那条 12 段 canonical 才要的。）
+**这条路径发**：`x-phanthy-client-source: desktop`、`x-phanthy-cli-device`、`x-claude-code-session-id`、
+`x-request-id`，**外加 4 个 `x-phanthy-proof-*` 证明头**（见 §十一）。
+
+> ⚠⚠ **2026-11-14 第二次更正**：这里原先写着「这条路径不发：任何证明头」，
+> **那半是错的**。原因是当时只抓到了链路的一跳（内核 → 本地桥），
+> 而桥转发到上游时会补 12 段签名 + 4 个证明头。详见 §十一。
+> 结论：`X()` 只是 **Auto 路由器**那条调用的头，不是发往上游的完整形态。
 
 官方**不存在**的头（曾经我们都发过，是封号成因）：
 `x-phanthy-client`、`x-phanthy-project`、`x-phanthy-product`。
@@ -258,6 +263,205 @@ WebView2 缓存、exe 解压）都是因为没先 `ls` 安装目录里的 `_up_`
 | `TestReconcileOnboardingBodyAndKey` | reconcile body 两态 + 键含 `latest`/sessionId |
 | `TestOnboardingReconcileKeyIsUniquePerCall` | reconcile 键含 `Date.now()` ⇒ 每次不同 |
 | `TestSignedGetHashesEmptyBody` | GET 的 canonical 第 6 段 = `sha256("")` base64url |
-| `TestChatSendsNoSignatureHeaders` | chat 路径不带任何证明头 |
+| `TestChatPathCarriesDesktopInferenceProof` | chat 路径**必须带齐** 4 个 `x-phanthy-proof-*`；且不许带 v1 的 `x-desktop-*`（**原 `TestChatSendsNoSignatureHeaders` 已在守护错误行为，已反转**） |
+| `TestChatFetchesInferenceToken` | chat 路径**必须**调 `activities/summary` 换令牌（原 `TestChatDoesNotFetchInferenceToken` 已反转） |
 | `TestDefaultUAIsBun` | 默认 UA 仍是 `Bun/1.3.14`（推理路径那条） |
 | `TestChatUsesChatCompletionsPath` | 推理走 `/v1/chat/completions` |
+
+## 十、官方推理桥（sidecar `gd3`）的行为对照
+
+真源：`D:\temp\phanthy-sidecar-ascii.txt`（官方 sidecar 2.51.0 二进制字符串转储）里
+`gd3` / `_O8` / `md3` / `cd3` 四个函数，逐字。**2026-11-14 逐条核对过我们实现。**
+
+### 10.1 桥的入口闸（逐字）
+
+```js
+let K = new URL(q.url),
+    _ = !K.search || (K.pathname === "/v1/messages" && K.search === "?beta=true");
+if (q.method !== "POST" || !Sd3.has(K.pathname) || !_) return new Response(null, {status:404});
+if (!/^Bearer .+$/i.test(q.headers.get("authorization") ?? "")) return new Response(null, {status:401});
+// Sd3 = new Set(["/v1/messages","/v1/responses","/v1/chat/completions"])
+```
+
+| 桥的规则 | 本仓 | 判定 |
+|---|---|---|
+| 只接受 POST | 我们只发 POST | ✅ |
+| pathname ∈ 那三个之一 | 三个路径都是常量 | ✅ |
+| **query 必须为空**（唯一例外 `/v1/messages?beta=true`） | `signV1` 有 query 断言 | ✅ |
+| `Authorization` 必须匹配 `^Bearer .+$` | `AuthorizationHeaderValue` 恒加 `Bearer ` 前缀 | ✅ |
+
+### 10.2 proof 构造器 `_O8`（12 段）逐段核对
+
+```js
+function _O8(q, K, _, z){                       // q=req, K=pathname, _=body, z=headers
+  if (!iy) return null;                          // 无推理令牌 ⇒ 不发任何 proof 头
+  if (!KO8(iy).valid) return null;               // 令牌无效/过期 ⇒ 不发
+  let w = String(Math.round(N44())),             // 服务端口径毫秒
+      O = pp3(24).toString("base64url"),         // nonce 24B → 32 字符
+      $ = (H) => D44("sha256").update(H).digest("base64url");
+  let Y = ["desktop-inference-v2", q.toUpperCase(), K, w, O, $(_),
+           sK6(z.get("authorization") ?? ""), $(iy),
+           z.get("x-request-id") ?? "", z.get("x-claude-code-session-id") ?? "",
+           z.get("x-phanthy-expert-id") ?? "", z.get("x-phanthy-skill-names") ?? ""].join(`<LF>`);
+  return { "x-phanthy-desktop-session": iy, "x-phanthy-proof-timestamp": w,
+           "x-phanthy-proof-nonce": O, "x-phanthy-proof-signature": ed25519(Y) }
+}
+function sK6(q){ return D44("sha256").update(q).digest("base64url") }   // ← 逐字
+```
+
+| 段 | 官方 | 本仓 `InferenceCanonical` | 判定 |
+|---|---|---|---|
+| 1 | `desktop-inference-v2` | `inferenceCanonicalPrefix` | ✅ |
+| 2 | `method.toUpperCase()` | `strings.ToUpper(method)` | ✅ |
+| 3 | **`pathname`** | 传常量路径（无 query） | ✅ |
+| 4 | 服务端口径毫秒 | `serverNowMS(localMS, a.skew())` | ✅ |
+| 5 | nonce **24 字节 base64url**（32 字符） | `newInferenceNonce()` | ✅ |
+| 6 | `sha256(body)` base64url | `sha256B64URL(body)` | ✅ |
+| 7 | `sK6(authorization)` = **sha256 base64url 的整串**（含 `Bearer `） | `sha256B64URL([]byte(authorization))` | ✅ |
+| 8 | `sha256(推理令牌)` | 同 | ✅ |
+| 9 | `x-request-id ?? ""` | `reqID` | ✅ |
+| 10 | `x-claude-code-session-id ?? ""` | `sessionID` | ✅ |
+| 11/12 | expert / skill-names，缺则空串 | 恒空串（本包不发） | ✅ |
+
+**"无推理令牌就不发 proof 头"** 我们结构上已满足：`chatMessages` 先 `ensureInferenceToken`，
+拿不到就提前返回，`buildProof` 永远不会收到空 token。
+
+### 10.3 ★ 403 只在**一个错误码**下重试（这条最能说明"封号不能自愈"）
+
+```js
+async function md3(q){                            // 403 重试门
+  ...
+  return JSON.parse(body)?.error?.code === "request_not_authorized"
+}
+// 桥里：
+for (let G = 0; G < xd3 /* =2 */ && P.status === 403 && ...; G++) {
+  if (!await md3(P)) break;                       // ← 不是这个码就立刻放弃
+  ... 强制刷 token ...
+  P = await j();                                  // 重试
+}
+```
+
+⇒ **`disabled_account` 官方一次都不重试** —— 与我们把它当终态**一致**。
+
+这两个码在本仓早已分开（`internal/phanthywork/errors.go`）：
+`request_not_authorized` → 可自愈档（换号但不罚号）；`disabled_account` → 终态。
+守它们的判据：`TestRequestNotAuthorizedStaysRecoverable`。
+
+### 10.4 仍然存在的**有意差异**（不是缺陷，记档以免将来误判）
+
+| # | 官方桥 | 本仓 | 为什么这样 |
+|---|---|---|---|
+| 1 | 403 `request_not_authorized` **就地重试 2 次 + 强制刷 token**（20s 预算 / 8s 等待 / 60s 冷却） | 交给**网关核心**处理（换账号） | 两边恢复意图相同；核心有账号池，换号比原地重刷更可能成功。且原地重刷对"签名/时钟"类根因无效 |
+| 2 | 入站若带 `x-phanthy-request`，把它写成 `x-request-id`（canonical 第 9 段随之） | 恒生成新 uuid | 我们不发 `x-phanthy-request`，没有可沿用的值；只影响链路追踪关联 |
+| 3 | 转发前删掉入站的 4 个 proof 头再重算 | 恒重算（我们本来就是自己算） | 等价 |
+| 4 | 响应侧删 `content-encoding/content-length/transfer-encoding/connection` | 交给 Go 的 `http.Client` 自动解压/去分块 | 等价 |
+
+### 10.5 这一节的来源与可信度
+
+上述四个函数来自官方 sidecar 二进制，`sK6` 的定义、`md3` 的门判、入口的 `Sd3` 集合都是**逐字**。
+它们最初是从一个本地会话记录里定位到的（该会话在读完这段源码后被上游内容过滤器中断），
+本仓随后逐条与自己的实现核过，**没有发现新的缺陷**。
+## 十一、★★ 两跳链路：`/v1/chat/completions` **也要签名**（2026-11-14 最重要的更正）
+
+### 11.1 错误的来源：只抓到链路的一跳
+
+官方客户端发推理请求是**两跳**，不是一跳：
+
+```
+内核（Phanthy Codeo）  ──①──▶  本地桥（claude-sidecar, 127.0.0.1）  ──②──▶  上游 code.phanthy.com
+                        不签名                                    补 12 段签名 + 4 个证明头
+```
+
+本仓早先的结论（大量注释都这么写）是「chat 路径全程零签名，签名相关的一个都不要加」——
+那是因为**只抓到了 ①**。而真正决定上游怎么判的是 **②**。
+
+### 11.2 真源：桥的路径集合里**明确包含 chat**
+
+官方 sidecar（`claude-sidecar.exe` 字符串转储）里，本地推理桥 `gd3` 逐字：
+
+```js
+Sd3 = new Set(["/v1/messages", "/v1/responses", "/v1/chat/completions"])
+
+// 转发前：先删掉入站的 4 个证明头，再重算一份覆盖上去
+for (let x of ["host","connection","content-length","transfer-encoding",
+               "x-phanthy-desktop-session","x-phanthy-proof-signature",
+               "x-phanthy-proof-nonce","x-phanthy-proof-timestamp"]) G.delete(x);
+let u = _O8(q.method, K.pathname, $, G);
+if (u) for (let [x, m] of Object.entries(u)) G.set(x, m);
+```
+
+而 `_O8` 的拼装（§10.2）与本仓 `InferenceCanonical` **逐段一致** ——
+也就是说 **12 段签名算法早就写对了，缺的只是「把它用在 chat 路径上」**。
+
+### 11.3 旁证：上游就是按"缺这个头"报错的
+
+本仓假上游里早就写着上游的原文：
+
+```
+403 {"code":"request_not_authorized","message":"missing desktop session"}
+```
+
+`x-phanthy-desktop-session` 正是 4 个证明头之一。
+
+### 11.4 两条**在守护错误行为**的判据（已反转）
+
+| 原名 | 原断言 | 现在 |
+|---|---|---|
+| `TestChatSendsNoSignatureHeaders` | chat 不带任何签名头 | → `TestChatPathCarriesDesktopInferenceProof`：**必须带齐 4 个**，且 `x-phanthy-desktop-session` == 推理令牌原值；同时仍**不许**带 v1 的 `x-desktop-*`（那 4 个属于 `/api/*` 一族，两套头不能混） |
+| `TestChatDoesNotFetchInferenceToken` | chat 不调 `activities/summary` | → `TestChatFetchesInferenceToken`：**必须调**（12 段第 8 段是令牌哈希、第 4 个头是令牌原值）；且 summary 那条**不带**幂等键 |
+
+⚠ 这是本项目第三次出现「判据锁死错误行为」：前两次是幽灵头与本仓那条从未写出来的判据，
+这一次是**两条判据联手把"少 4 个头"锁成了"正确"**。
+
+### 11.5 实现改动
+
+- `ChatCompletionsStream(ctx, a, path, body, proof proofValues)` —— 新增 `proof` 参数，
+  在末尾挂 4 个证明头；`x-request-id` / `x-claude-code-session-id` 改取 `proof` 的值
+  （它们同时是 canonical 第 9/10 段，**签名与发头必须同源**）。
+- `chatCompletions` —— 先 `ensureInferenceToken`（180s TTL + 缓存 + 串行闸），
+  再 `buildProof`，再发。与 `chatMessages` 同一条链路，差异只剩 body 与响应格式。
+- `chatFakeUpstream` —— 补 `/api/oauth/profile`、`/api/oauth/desktop-installations/register`、
+  `/api/oauth/activities/summary` 三个应答（换令牌的前置是 `ensureInstallation`）。
+
+### 11.6 ⚠ 这条改动**没有**真机验证
+
+当前 phanthywork 账号已封（403 `disabled_account`），所以本轮只能验证到
+「对官方源码 + 对假上游」这一层。**拿到新号后的第一件事**是看这条路径是否 200 ——
+如果仍然 403 `request_not_authorized`，下一个要查的是 `buildProof` 的第 4 段时钟口径
+（`serverNowMS`）与第 7 段 `Authorization` 是否与实发头逐字节一致。
+
+### 11.7 出处
+
+这一结论最初由一个本地 agent 会话独立得出（它在写完这段后被上游内容过滤器中断，
+改动只落了一半）。本仓随后独立复核了 `gd3` / `_O8` / `Sd3` 三处逐字源码，
+并补齐实现与判据。会话记录可从 WebView2 HTTP 缓存恢复（见 §12）。
+## 十二、附：怎么从本地磁盘恢复官方客户端的会话记录
+
+（这一节与协议正文无关，但它记录了一条**可复用的取证手段**：想看清"官方客户端到底做了什么"，
+不必抓包 —— 它会把自己的会话历史落在本地。）
+
+### 12.1 位置（按信息量排序）
+
+| 位置 | 里面有什么 | 能读出吗 |
+|---|---|---|
+| `%LOCALAPPDATA%\com.phanthy.work.desktop\EBWebView\Default\Cache\Cache_Data\f_*` | **★ 对话全文**：`{"messages":[{id,timestamp,type,content,...}]}`，明文 JSON，未压缩 | ✅ 直接 `ConvertFrom-Json` |
+| `...\EBWebView\Default\IndexedDB\http_tauri.localhost_0.indexeddb.leveldb\000004.log` | V8 序列化的**结构化对象**（字段名与值之间夹二进制标签）：运行时问题记录、消息投递状态键、用户输入文本 | ⚠ 只能按"串段"还原，拿不到完整 JSON |
+| `%USERPROFILE%\.phanthy-code\desktop\diagnostics\*.jsonl` / `runtime-errors.log` | 控制台告警、`client_api_request_failed`（如 `/api/token-factory/activate` 409 `lead_not_linked`）、`CLIENT_ERROR` | ✅ 明文 |
+| `%USERPROFILE%\.phanthy-code\desktop\spaces.json` / `experts\session-agents.json` | 会话分组、sessionId→agentId 绑定 | ✅ 明文，但**没有标题** |
+| `...\desktop\message-delivery-*.sqlite(-wal)` | 只有投递状态，**没有正文** | — |
+
+**会话标题不在本地**（服务端下发）；本地只有正文字段。
+
+### 12.2 关键操作要点
+
+1. **文件被运行中的 app 锁着** → 用 `FileShare.ReadWrite` 共享读，不要 `ReadAllBytes`：
+   ```powershell
+   $fs = [System.IO.File]::Open($p, 'Open', 'Read', 'ReadWrite')
+   ```
+2. **编码是混的**：ASCII 字段按单字节存、含中文的字段按 **UTF-16LE** 存。
+   按 UTF-8 搜中文或按 UTF-16 搜英文都会 0 命中 —— 这是最容易误判成"本地没有"的原因。
+3. **`assistant_text` / `transcriptMessageId` 这些名字在缓存里是 0 命中**：
+   缓存里用的是 `"type":"assistant"` / `"type":"tool_use"` / `"type":"tool_result"`。
+   用 `"id":"codeo:ses_` 或 `tool_result` 当锚点更可靠。
+4. 缓存文件可能是**分页的**（同一次会话被切成多个 `f_*`）→ 按 `messages[].id` 去重、
+   按 `timestamp` 排序，就能拼回完整时间线。

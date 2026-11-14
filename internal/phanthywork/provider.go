@@ -667,20 +667,38 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 
 // chatCompletions 走 POST /v1/chat/completions（OpenAI 兼容，**新版内核**，默认路径）。
 //
-// # 与 chatMessages 的三点本质差异（全部来自抓包实证）
+// # ★★ 2026-11-14 更正：这条路径**要签名**（原文写的"不签名"是方向性错误）
 //
-//	① **不签名**：客户端全程不发 x-desktop-* / x-phanthy-proof-*，
-//	   也**不调** activities/summary 换推理令牌 —— 直接拿 access_token 当 Bearer。
-//	   ⇒ 本路径**不依赖** ensureInferenceToken / buildProof，少两个失败点。
-//	② 请求体**不做协议转换**（见 PrepareBodyChat）。
-//	③ 响应是 **OpenAI SSE**，原样透传给核心 —— 不像 chatMessages 要 Anthropic→OpenAI 翻译。
+// 早先这里写着「① **不签名**：客户端全程不发 x-desktop-* / x-phanthy-proof-*，
+// 也**不调** activities/summary 换推理令牌 —— 直接拿 access_token 当 Bearer」。
+// 那个结论来自**只抓到了链路的一跳**：
 //
-// 会话头（4 个）的含义（抓包原文可见）：
+//	官方真实链路：内核（Phanthy Codeo） → **本地桥（sidecar, 127.0.0.1）** → 上游
+//	当时抓到的  ：内核 → 本地桥             ← 这一跳**确实不签名**
+//	漏掉的那一跳：本地桥 → 上游             ← **桥会补 12 段签名 + 4 个证明头**
 //
-//	x-phanthy-client   = "cli"            客户端类型
-//	x-phanthy-project  = "global"         项目作用域
-//	x-phanthy-request  = uuid             本次请求 id（服务端日志/去重用）
-//	x-phanthy-session  = "ses_<cuid2>"    会话 id
+// 真源（官方 sidecar 二进制，逐字）—— 桥接的路径集合里**明确包含 chat**：
+//
+//	Sd3 = new Set(["/v1/messages", "/v1/responses", "/v1/chat/completions"])
+//	// 转发前先删入站的 4 个证明头，再 _O8(...) 重算覆盖
+//	for (let x of ["x-phanthy-desktop-session","x-phanthy-proof-signature",
+//	               "x-phanthy-proof-nonce","x-phanthy-proof-timestamp"]) G.delete(x);
+//	let u = _O8(q.method, K.pathname, $, G); if (u) for (...) G.set(x, m);
+//
+// 而桥的 proof 构造器 `_O8` 与本包 `InferenceCanonical` **逐段一致** ——
+// 也就是说 12 段签名算法早就写对了，缺的只是「把它用在 chat 路径上」。
+//
+// 旁证：本包假上游里就写着上游对缺这个头的请求怎么回 ——
+//
+//	403 {"code":"request_not_authorized","message":"missing desktop session"}
+//
+// ⇒ 现在与 chatMessages 走同一条链路：先 ensureInferenceToken（180s TTL，带缓存）→
+// buildProof → 由 ChatCompletionsStream 挂 4 个头。两条路径的差异只剩 body 与响应格式。
+//
+// # 另外两点差异（仍然成立）
+//
+//	② 请求体**不做协议转换**（见 PrepareBodyChat）
+//	③ 响应是 **OpenAI SSE**，原样透传给核心 —— 不像 chatMessages 要 Anthropic→OpenAI 翻译
 func (p *Provider) chatCompletions(ctx context.Context, a *Auth, body []byte) (gateway.ChatStream, error) {
 	outBody, err := PrepareBodyChat(body)
 	if err != nil {
@@ -688,10 +706,27 @@ func (p *Provider) chatCompletions(ctx context.Context, a *Auth, body []byte) (g
 		return gateway.ChatStream{}, err
 	}
 
+	// 推理令牌：12 段 canonical 的第 8 段是它的哈希，第 4 个证明头也放它本身，
+	// 所以**没有它就不能发**（官方桥 `_O8` 里是 `if(!iy) return null` —— 直接不发证明头）。
+	token, err := p.ensureInferenceToken(ctx, a)
+	if err != nil {
+		var ue *UpstreamError
+		if errors.As(err, &ue) && ue.Status != 0 {
+			// 上游给了错误体 = 业务错误：仍按流返回（让核心分类器判），与 chatMessages 一致。
+			return gateway.ChatStream{Status: ue.Status, Body: io.NopCloser(bytes.NewReader([]byte(ue.Body)))}, nil
+		}
+		return gateway.ChatStream{}, err
+	}
+
 	// ⚠ 不用 defer cancel()：成功路径要把 cancel 交给流（与 chatMessages 同一条纪律，
 	// 见那里的注释与 TestStreamSurvivesAfterChatReturns）。
 	reqCtx, cancel := context.WithTimeout(ctx, inferenceTimeout)
-	resp, err := p.client.ChatCompletionsStream(reqCtx, a, pathChatCompletions, outBody)
+	proof, err := p.client.buildProof(a, http.MethodPost, pathChatCompletions, outBody, token, nowMS())
+	if err != nil {
+		cancel()
+		return gateway.ChatStream{}, err
+	}
+	resp, err := p.client.ChatCompletionsStream(reqCtx, a, pathChatCompletions, outBody, proof)
 	if err != nil {
 		cancel()
 		return gateway.ChatStream{}, err
