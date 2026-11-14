@@ -944,6 +944,155 @@ func TestHealthz200WithHealthy(t *testing.T) {
 	}
 }
 
+// TestProbesSplitLivenessFromReadiness 钉住探针三兄弟的分工（P0-2）。
+//
+// # 为什么这条判据必须存在
+//
+// 拆分之前只有一个 /healthz：它在**账号池全部冷却**时回 503。这个口径对负载均衡是
+// 对的（别把流量打进无法受理的实例），但若被 k8s 当**存活**探针用，账号一耗尽进程
+// 就会被反复重启 —— 而重启并不能让上游账号恢复额度，只会把在途请求全部打断、
+// 把日志淹没。**"账号耗尽"和"进程病了"必须能被调用方分开。**
+//
+// 三者的语义：
+//
+//	/livez    进程还活着吗 → 恒定 200，**与账号池无关**
+//	/readyz   能接新流量吗 → 账号池不可服务 **或** 正在排空 ⇒ 503
+//	/healthz  历史接口     → 行为不变（只看账号池，不看排空）
+//
+// ⚠ 本用例只覆盖**处理器层**。生产里排空期还会由 cmd/server 的关停包装器把业务端点
+// 统一切 503，并**豁免**这两条探针 —— 见那边的 TestDrainExemptsProbesButCutsBusiness。
+// 两条判据合起来才是完整语义。
+func TestProbesSplitLivenessFromReadiness(t *testing.T) {
+	// draining 是**包级**状态（生产里一个进程只置位一次、从不复位），
+	// 所以用例必须自己收尾：否则后面的用例会看到"排空中"而假红。
+	t.Cleanup(resetDrainingForTest)
+	resetDrainingForTest()
+
+	get := func(t *testing.T, h *Handler, path string) (int, map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+	newHealthy := func(t *testing.T) *Handler {
+		t.Helper()
+		return NewHandler(Config{
+			Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}),
+			Upstream: wrapUpstream(upstream.New()),
+		})
+	}
+	newEmpty := func(t *testing.T) *Handler {
+		t.Helper()
+		return NewHandler(Config{Pool: pool.New(""), Upstream: wrapUpstream(upstream.New())})
+	}
+
+	t.Run("账号池空、未排空：只有存活探针 200", func(t *testing.T) {
+		h := newEmpty(t)
+		if code, _ := get(t, h, "/livez"); code != http.StatusOK {
+			t.Errorf("/livez=%d want 200 —— 账号池空**不该**影响存活探针", code)
+		}
+		code, body := get(t, h, "/readyz")
+		if code != http.StatusServiceUnavailable {
+			t.Errorf("/readyz=%d want 503", code)
+		}
+		if body["reason"] != "no_servable_account" {
+			t.Errorf("/readyz reason=%v want no_servable_account", body["reason"])
+		}
+		if code, _ := get(t, h, "/healthz"); code != http.StatusServiceUnavailable {
+			t.Errorf("/healthz=%d want 503（历史口径不能变）", code)
+		}
+	})
+
+	t.Run("账号池健康、未排空：三条全 200", func(t *testing.T) {
+		h := newHealthy(t)
+		for _, p := range []string{"/livez", "/readyz", "/healthz"} {
+			if code, _ := get(t, h, p); code != http.StatusOK {
+				t.Errorf("%s=%d want 200", p, code)
+			}
+		}
+	})
+
+	t.Run("排空中且账号池健康：readyz 转 503，但 livez 仍 200", func(t *testing.T) {
+		h := newHealthy(t)
+		MarkDraining()
+
+		if code, _ := get(t, h, "/livez"); code != http.StatusOK {
+			t.Errorf("/livez=%d want 200 —— 排空期**必须**保持 200：否则编排系统"+
+				"会在排空途中杀掉容器，正好打断我们想好好收尾的那些请求", code)
+		}
+		code, body := get(t, h, "/readyz")
+		if code != http.StatusServiceUnavailable {
+			t.Errorf("/readyz=%d want 503", code)
+		}
+		// 排空**优先于**账号池判定：两个原因同时成立时报 draining，
+		// 那才是调用方此刻该知道的当务之急。
+		if body["reason"] != "draining" {
+			t.Errorf("/readyz reason=%v want draining（排空应优先于账号池原因）", body["reason"])
+		}
+		if body["draining"] != true {
+			t.Errorf("/readyz draining=%v want true", body["draining"])
+		}
+	})
+
+	t.Run("复位后 readyz 回到 200", func(t *testing.T) {
+		h := newHealthy(t)
+		resetDrainingForTest()
+		if code, _ := get(t, h, "/readyz"); code != http.StatusOK {
+			t.Errorf("/readyz=%d want 200 —— 复位失败会让后续用例假红", code)
+		}
+	})
+}
+
+// TestAllProbesCarryServiceIdentity 三条探针在 200 与 503 两种状态下都必须带身份标识。
+//
+// 与 TestHealthzServiceIdentity 同一条理由：宿主探测打到同端口的旧服务/其他服务时，
+// 对方即使返回 2xx 也不带本标识，宿主据此判"假成功"。新增两条探针必须同样满足 ——
+// 否则它们会比 /healthz 更容易被冒名顶替（因为它们**恒 200**）。
+func TestAllProbesCarryServiceIdentity(t *testing.T) {
+	t.Cleanup(resetDrainingForTest)
+	resetDrainingForTest()
+	cases := []struct {
+		name     string
+		setup    func(*pool.Pool)
+		wantCode int
+	}{
+		{"healthy", func(*pool.Pool) {}, http.StatusOK},
+		{"unhealthy", func(p *pool.Pool) { p.Disable("u1", "session dead") }, http.StatusServiceUnavailable},
+	}
+	for _, probe := range []string{"/livez", "/readyz", "/healthz"} {
+		for _, tc := range cases {
+			t.Run(probe+"/"+tc.name, func(t *testing.T) {
+				p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+				tc.setup(p)
+				h := NewHandler(Config{Pool: p, Upstream: wrapUpstream(upstream.New()), AdminToken: statusTestToken})
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest("GET", probe, nil))
+
+				// /livez 的契约是"恒定 200"，所以它的期望码与账号池无关。
+				want := tc.wantCode
+				if probe == "/livez" {
+					want = http.StatusOK
+				}
+				if rec.Code != want {
+					t.Fatalf("%s code=%d want %d", probe, rec.Code, want)
+				}
+				if got := rec.Header().Get("X-Service"); got != ServiceName {
+					t.Errorf("%s X-Service=%q want %q", probe, got, ServiceName)
+				}
+				var resp map[string]any
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("%s not json: %v body=%s", probe, err, rec.Body)
+				}
+				if resp["service"] != ServiceName {
+					t.Errorf("%s service=%v want %q", probe, resp["service"], ServiceName)
+				}
+			})
+		}
+	}
+}
+
 // TestHealthzServiceIdentity /healthz 无论 200 还是 503 都必须带网关身份标识
 // （响应体 service 字段 + X-Service 头）：宿主探测打到同端口的旧服务/其他服务时，
 // 对方即使返回 2xx 也不带本标识，宿主据此判"假成功"。

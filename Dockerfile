@@ -32,6 +32,14 @@ COPY --from=build /out/wb2api /app/wb2api
 # ⚠ 不 COPY config.json：里面含明文 api_key，且 compose/运行时总是挂载覆盖它；
 # 缺 config 时 main.go 会自动回落纯默认值启动（config 不存在不是致命错误）。
 EXPOSE 7863
+# ⚠ 用 /livez 而**不是** /healthz。
+#
+# Docker 的 HEALTHCHECK 语义与 k8s 的**存活**探针相同：不健康 ⇒ 容器被判死并重启。
+# 而 /healthz（以及 /readyz）在**账号池全部冷却**时回 503 —— 那是"暂时接不了新活"，
+# 不是"进程病了"。拿它当健康检查的后果是：上游账号一耗尽，容器就被反复重启，
+# 而在途请求被全部打断、日志被重启噪音淹没，且重启并不能让账号恢复额度。
+#
+# 分工：HEALTHCHECK → /livez（进程还在就 200）；编排的**就绪**探针 → /readyz。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
-  CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1
+  CMD wget -qO- http://127.0.0.1:7863/livez || exit 1
 ENTRYPOINT ["/app/wb2api", "-config", "/app/config.json"]

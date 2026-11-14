@@ -820,7 +820,24 @@ func (c *Client) RefreshTokens(ctx context.Context, a *Auth) (TokenSet, error) {
 		case status == 400 && gateway.ContainsAny(string(body), authExpiredMarkers):
 			// invalid_grant 的语义（报告 §4.2）：refreshToken 已失效
 			//（过期/被吊销/被轮换）⇒ 终态，不要重试。
-			return TokenSet{}, ErrRefreshExpired
+			//
+			// ★ 2026-11-14：把**上游原文**包进错误里。
+			//
+			// 原来这里直接 `return ErrRefreshExpired`（一个裸哨兵）。后果是排查时
+			// 只剩我们自己写的一句「refreshToken 被吊销或已轮换，需重新登录」——
+			// 而这句话把 6 个不同的上游 code 全压成了一种说法：
+			//
+			//	invalid_grant       凭据真的废了（需重新登录）      ← 唯一该让用户重登的
+			//	invalid_client      **client_id 配错**，是本地 bug  ← 重登一万次也没用
+			//	unauthorized_client 该 client 未被授权做 refresh     ← 同上
+			//	token_expired / invalid_token / 登录已过期
+			//
+			// 实战代价（2026-11-14 实测）：账号被判"需重新登录"，而真实原因只能靠
+			// 手工 curl 打一次 /oauth/token 才看得出来是真 invalid_grant。
+			// 包上原文后，日志与禁用原因里直接就能区分。
+			//
+			// ⚠ errors.Is(err, ErrRefreshExpired) 仍然成立 ⇒ 分类与既有判据一字不变。
+			return TokenSet{}, fmt.Errorf("%w（上游 %d：%s）", ErrRefreshExpired, status, brief(body))
 		case status == 429 || status >= 500:
 			wait := backoffFor(attempt, retryAfterMS(body))
 			lastErr = &UpstreamError{Status: status, Body: brief(body), Op: "续期"}

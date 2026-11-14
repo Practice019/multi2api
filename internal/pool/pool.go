@@ -2971,6 +2971,32 @@ func (p *Pool) stateOverviewLocked() stateFile {
 // Enable 解除 Disable 造成的永久禁用，并清掉禁用原因；返回账号是否存在。
 // 刻意不清冷却/熔断：禁用期间累积的冷却语义与「人工放行」是两件事，
 // 想一并清掉请再调 ClearCooldown。
+//
+// # ★ 2026-11-14 修：必须同时复位"禁用进度"计数器
+//
+// 原来这里只清 disabled + reason。后果是**"启用"这个动作在关键场景下等于白按**：
+//
+//	autodisable 的禁用判据是"连续 N 次"（refreshFails / sessionDeadStreak ≥ 3）。
+//	计数一旦走到 3，账号被禁用；此时人工点"启用" ⇒ disabled=false，但计数**仍是 3**。
+//	于是**下一次**续期/会话失败立刻再次命中 `>= 3`，账号瞬间又被禁用。
+//
+//	用户看到的现象是"我点了启用，它过一会儿自己又变回禁用了"，
+//	据此完全无法判断到底是"凭据真的废了"还是"这个开关坏了"。
+//
+// 所以这里把两类**进度型**计数器一起归零：
+//
+//	refreshFails      凭证续期连续失败（health.go:NoteRefreshFailure）
+//	sessionDeadStreak 会话失效连续次数
+//
+// ⚠ 与 ClearCooldown 的分界（刻意保持）：
+//
+//	冷却 / 熔断（until / coolKind / fails / retryCount / breakerUntil /
+//	softStreak）**不在这里清** —— 它们表达的是"这个号刚才被上游罚过"，
+//	与"人工宣布这个号可用"是两件事，想清请显式调 ClearCooldown。
+//	而 refreshFails / sessionDeadStreak 是**禁用判据本身**，
+//	不清它们，"启用"就没有给账号任何新机会，动作是自相矛盾的。
+//
+// 判据：TestEnableResetsDisableProgressCounters。
 func (p *Pool) Enable(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -2980,6 +3006,9 @@ func (p *Pool) Enable(uid string) bool {
 	}
 	e.disabled = false
 	e.reason = ""
+	// 进度型计数器归零 —— 否则"启用"形同虚设（见上方注释）。
+	e.refreshFails = 0
+	e.sessionDeadStreak = 0
 	p.dirty.Store(true)
 	return true
 }

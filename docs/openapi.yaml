@@ -280,6 +280,108 @@ paths:
           $ref: '#/components/responses/TooManyRequests'
         '500':
           $ref: '#/components/responses/ServerError'
+  /livez:
+    get:
+      operationId: getLivez
+      tags:
+      - Misc
+      summary: 存活探针（无鉴权）
+      description: |
+        给编排系统（k8s livenessProbe / Docker HEALTHCHECK）用的**存活**探针：进程还能响应 HTTP 就 200。
+
+        ## 与 /healthz、/readyz 的分工
+
+        | 端点 | 回答的问题 | 失败意味着 |
+        |---|---|---|
+        | `/livez` | 进程还活着吗 | 该**重启进程** |
+        | `/readyz` | 能接新流量吗 | 只该**摘流量** |
+        | `/healthz` | 能受理对话吗（历史接口） | 只该摘流量（不要当存活探针） |
+
+        ## ⚠ 为什么不能拿 /healthz 当存活探针
+
+        `/healthz` 在**账号池全部冷却**时回 503 —— 这个口径对负载均衡是对的。
+        但若编排系统拿它当**存活**探针，账号一耗尽容器就会被反复重启：
+        而在途请求被全部打断、日志被重启噪音淹没，且**重启并不能让上游账号恢复额度**。
+
+        本端点**刻意什么都不看**：不看账号池、不看上游。唯一能让它非 200 的情形是
+        "这个进程已经不能响应 HTTP 了" —— 那正是该重启它的时刻。
+
+        排空（优雅关停）期间本端点**仍然返回 200**（`draining` 字段只是信息）：
+        否则编排系统会在排空途中杀掉容器，正好打断我们想好好收尾的请求。
+      security: []
+      responses:
+        '200':
+          description: 进程存活（与账号池状态无关）。
+          headers:
+            X-Service:
+              $ref: '#/components/headers/XService'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivezResponse'
+              examples:
+                alive:
+                  value:
+                    service: multi2api
+                    draining: false
+  /readyz:
+    get:
+      operationId: getReadyz
+      tags:
+      - Misc
+      summary: 就绪探针（无鉴权）
+      description: |
+        给编排系统（k8s readinessProbe / 负载均衡健康检查）用的**就绪**探针：能接新流量才 200。
+
+        两个失败维度合并，因为对调用方而言都是"现在别发给我"：
+
+        - `draining`：本实例正在退场（关停已开始，正在把在途请求做完）
+        - `no_servable_account`：没有可立即受理的账号（与 `/v1/chat/completions` 的真实可达性同口径）
+
+        排空期间本端点由**处理器自己**回 503 + JSON（而不是被关停中间件用纯文本抢先拦掉），
+        这样调用方能看到 `draining` 与 `reason`，分得清"排空"还是"账号耗尽"。
+      security: []
+      responses:
+        '200':
+          description: 可以接新流量。
+          headers:
+            X-Service:
+              $ref: '#/components/headers/XService'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyzResponse'
+              examples:
+                ready:
+                  value:
+                    healthy: 12
+                    total: 14
+                    service: multi2api
+                    draining: false
+        '503':
+          description: 暂不可接新流量（排空中，或没有可立即服务的账号）。
+          headers:
+            X-Service:
+              $ref: '#/components/headers/XService'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyzResponse'
+              examples:
+                draining:
+                  value:
+                    healthy: 12
+                    total: 14
+                    service: multi2api
+                    draining: true
+                    reason: draining
+                no_account:
+                  value:
+                    healthy: 0
+                    total: 2
+                    service: multi2api
+                    draining: false
+                    reason: no_servable_account
   /healthz:
     get:
       operationId: getHealthz
@@ -3070,6 +3172,46 @@ components:
             description: '管理端形态：{"error": "人类可读的一句话"}'
           - $ref: '#/components/schemas/OpenAIErrorDetail'
       additionalProperties: true
+    LivezResponse:
+      type: object
+      required:
+      - service
+      properties:
+        service:
+          type: string
+          example: multi2api
+        draining:
+          type: boolean
+          description: 本实例是否已进入排空。**存活探针在排空期仍返回 200**，本字段只作信息。
+          example: false
+    ReadyzResponse:
+      type: object
+      required:
+      - healthy
+      - total
+      - service
+      - draining
+      properties:
+        healthy:
+          type: integer
+          example: 12
+        total:
+          type: integer
+          example: 14
+        service:
+          type: string
+          example: multi2api
+        draining:
+          type: boolean
+          description: 关停已开始（正在把在途请求做完、不再接新流量）。
+          example: false
+        reason:
+          type: string
+          description: 仅在 503 时出现。`draining`（排空）或 `no_servable_account`（没有可立即受理的账号）。排空优先。
+          enum:
+          - draining
+          - no_servable_account
+          example: no_servable_account
     HealthzResponse:
       type: object
       required:

@@ -101,6 +101,68 @@ func TestNoteRefreshFailure(t *testing.T) {
 	}
 }
 
+// TestEnableResetsDisableProgressCounters 人工"启用"必须把**禁用进度**计数器归零。
+//
+// # 为什么这条判据必须存在（2026-11-14 现场踩到）
+//
+// autodisable 的判据是"连续 N 次"（refreshFails / sessionDeadStreak >= 3）。
+// 计数走到 3 ⇒ 账号被禁用。此时人工点"启用"，若只清 disabled 而不清计数，
+// 那么**下一次**续期失败立刻再次命中 `>= 3` ⇒ 账号瞬间又被禁用。
+//
+// 真实现场（就是这条判据要防的形态）：
+//
+//	18:50:46  管理员启用账号（disabled=false，但 refreshFails 仍为 3）
+//	18:56:18  一次续期失败 ⇒ 立刻回到禁用
+//	18:56:32  再启用、再失败 ⇒ 又禁用
+//
+// 用户看到的是"我点了启用，它过一会儿自己又变回禁用了"，据此**无法判断**
+// 到底是凭据真的废了、还是这个开关坏了 —— 而这个区分决定了下一步该
+// "重新登录"还是该"报 bug"。
+func TestEnableResetsDisableProgressCounters(t *testing.T) {
+	p := newHealthPool(t)
+	p.AddFor("phanthywork", &auth.Auth{UID: "e-1"}, nil)
+
+	// ① 把续期失败推到阈值 ⇒ 禁用
+	for i := 1; i <= 3; i++ {
+		got := p.NoteRefreshFailure("e-1")
+		if i < 3 && got {
+			t.Fatalf("第 %d 次续期失败不该禁用", i)
+		}
+		if i == 3 && !got {
+			t.Fatal("连续第 3 次续期失败应禁用")
+		}
+	}
+	if st, ok := p.Status("e-1"); !ok || !st.Disabled {
+		t.Fatalf("前置条件不成立（账号应已被禁用）: %+v", st)
+	}
+
+	// ② 人工启用
+	if !p.Enable("e-1") {
+		t.Fatal("Enable 应返回 true")
+	}
+	if st, _ := p.Status("e-1"); st.Disabled {
+		t.Fatal("启用后不应再是禁用态")
+	}
+
+	// ③ ★ 核心：启用后的**第一次**失败不能立刻重新禁用
+	if p.NoteRefreshFailure("e-1") {
+		t.Fatal("启用后第一次续期失败就再次禁用 ⇒ refreshFails 没归零，" +
+			"「启用」等于白按：用户点完过一会儿它自己又变回禁用，且无法据此判断根因")
+	}
+
+	// ④ 会话失效是同一个坑的另一半：它也参与"连续 N 次即禁用"
+	for i := 1; i <= 3; i++ {
+		p.NoteSessionDead("e-1")
+	}
+	if st, ok := p.Status("e-1"); !ok || !st.Disabled {
+		t.Fatalf("会话失效连续 3 次应禁用: %+v", st)
+	}
+	p.Enable("e-1")
+	if p.NoteSessionDead("e-1") {
+		t.Fatal("启用后第一次会话失效就再次禁用 ⇒ sessionDeadStreak 没归零")
+	}
+}
+
 // TestBreakerWindowDecay 错误计数按时间窗衰减：窗口外的失败先把计数清零。
 func TestBreakerWindowDecay(t *testing.T) {
 	p := newHealthPool(t)

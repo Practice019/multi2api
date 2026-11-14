@@ -515,6 +515,11 @@ func NewHandler(cfg Config) *Handler {
 	// （`Authorization: Bearer <admin_token>`）。记在 CHANGELOG 里。
 	h.mux.HandleFunc("GET /status", h.consoleAdminAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 探针三兄弟的另外两条（分工见 healthz 上方那段注释）。
+	//
+	// ⚠ 这两条**都不鉴权**：调用方是编排系统，它没有凭据、也不该有。
+	h.mux.HandleFunc("GET /livez", h.livez)
+	h.mux.HandleFunc("GET /readyz", h.readyz)
 	// 控制台登录端点（注册/登录/登出/读会话）。
 	//
 	// ⚠ 它必须挂在下面 `/admin/` 那条**之外**：那些端点是**取得凭据**的地方，
@@ -708,6 +713,95 @@ func (h *Handler) consoleAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		h.panicRecovery(next)(w, r)
 	}
+}
+
+// ── 探针三兄弟：/livez、/readyz、/healthz ──────────────────────────────────────
+//
+// 分工（P0-2 要办的就是把这三件事拆开）：
+//
+//	/livez    进程还活着吗   → **恒定 200**。它失败才意味着该重启进程。
+//	/readyz   能接新流量吗   → 账号池可服务 **且** 未在排空。它失败只该**摘流量**。
+//	/healthz  历史接口       → 语义等于 /readyz 的账号池那一半，**保留不动**（兼容已有脚本）。
+//
+// ⚠ 为什么必须分开：`/healthz` 在账号池全部冷却时回 503（见它的注释 —— 判定口径与对话
+// 受理一致，是为了"别把流量打进无法受理的实例"）。这个口径对**负载均衡**是对的，
+// 但若被 k8s 当**存活**探针用，账号一耗尽进程就会被反复重启 ——
+// 而重启并不能让上游账号恢复额度，只会把在途请求全部打断、把日志淹没。
+//
+// **账号耗尽是"暂时接不了新活"，不是"进程病了"。** 这两件事必须能被调用方分开。
+//
+// 判据：TestProbesSplitLivenessFromReadiness。
+
+// draining 排空标志：关停流程开始时由 cmd/server 置位。
+//
+// 用包级 atomic 而不是 Handler 字段，是因为置位方在 cmd/server、读方在 HTTP 处理器，
+// 两者之间没有自然的传参路径；而这个标志本来就是**进程级**事实（本实例正在退场），
+// 一个进程同时只跑一个 http.Server。
+var draining atomic.Bool
+
+// MarkDraining 置位排空标志。由关停流程在开始排空时调用一次；幂等。
+func MarkDraining() { draining.Store(true) }
+
+// Draining 报告本实例是否已进入排空（把在途请求做完、不再接新流量）。
+func Draining() bool { return draining.Load() }
+
+// resetDrainingForTest 复位排空标志，仅供本包测试使用。
+//
+// 为什么需要它：draining 是**包级**状态（生产里一个进程只跑一个 http.Server，
+// 只置位一次、从不复位）。而测试要在同一个进程里既验证"排空期 /readyz=503"、
+// 又验证"正常期 /readyz=200" —— 没有这个复位钩子，后一个用例会被前一个污染，
+// 变成依赖执行顺序的假绿/假红。
+func resetDrainingForTest() { draining.Store(false) }
+
+// livez 存活探针：进程还在就 200。
+//
+// **刻意什么都不看** —— 不看账号池、不看上游、不看磁盘。唯一能让它非 200 的情形是
+// "这个进程已经不能响应 HTTP 了"，而那正是调用方该重启它的时刻。
+func (h *Handler) livez(w http.ResponseWriter, r *http.Request) {
+	svc := h.serviceName()
+	w.Header().Set("X-Service", svc)
+	// 带上 draining 只是**信息**：排空期间存活探针仍然必须 200，
+	// 否则编排系统会在排空途中把容器杀掉（正好打断我们想好好做完的那些请求）。
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service":  svc,
+		"draining": draining.Load(),
+	})
+}
+
+// readyz 就绪探针：能接新流量才 200。
+//
+// 两个失败维度合并，因为对调用方而言它们都是"现在别发给我"：
+//
+//	draining       本实例正在退场 —— 排空期一律 503（对接可靠性计划 B-01 的"撤 readiness"）
+//	no_servable_account  没有可立即受理的账号（与 chat 的真实可达性同口径，见 healthz）
+func (h *Handler) readyz(w http.ResponseWriter, r *http.Request) {
+	total, healthy, _, _, _ := h.cfg.Pool.CountsDetailed()
+	svc := h.serviceName()
+	w.Header().Set("X-Service", svc)
+
+	drainingNow := draining.Load()
+	servable := h.cfg.Pool.ServableNow()
+
+	status := http.StatusOK
+	reason := ""
+	switch {
+	case drainingNow:
+		status = http.StatusServiceUnavailable
+		reason = "draining"
+	case !servable:
+		status = http.StatusServiceUnavailable
+		reason = "no_servable_account"
+	}
+	body := map[string]any{
+		"healthy":  healthy,
+		"total":    total,
+		"service":  svc,
+		"draining": drainingNow,
+	}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	writeJSON(w, status, body)
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
