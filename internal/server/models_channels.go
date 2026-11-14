@@ -926,9 +926,28 @@ func (h *Handler) refreshProviderCatalog(ctx context.Context, id string) ([]stri
 	if isDefault || h.cfg.Provider == nil {
 		return h.refreshDefaultCatalog(ctx)
 	}
-	infos, ok := h.cfg.Provider.Models(ctx, id)
-	if !ok || len(infos) == 0 {
-		return nil, fmt.Errorf("%w: %s", errUpstreamNoCatalog, id)
+	// ── 先试「强制回源」能力 ────────────────────────────────────────────────
+	//
+	// 2026-11-14：loomy 这类上游的目录是「缓存 + 后台刷新」形态 —— 上游按账号
+	// 下发不同模型集，正确目录是多账号并集（要打 5 个账号），所以 Models() 只读
+	// 缓存。若这里直接调 Models()，缓存没过期时按钮就是**点了没反应**。
+	//
+	// 未实现 gateway.ModelCatalogRefresher 的上游会返回 ok=false，
+	// 继续走下面的既有路径 —— 行为完全不变。
+	var infos []gateway.ModelInfo
+	if rr, ok := h.cfg.Provider.(interface {
+		RefreshModels(ctx context.Context, id string) ([]gateway.ModelInfo, bool)
+	}); ok {
+		if fresh, ok2 := rr.RefreshModels(ctx, id); ok2 && len(fresh) > 0 {
+			infos = fresh
+		}
+	}
+	if len(infos) == 0 {
+		var ok bool
+		infos, ok = h.cfg.Provider.Models(ctx, id)
+		if !ok || len(infos) == 0 {
+			return nil, fmt.Errorf("%w: %s", errUpstreamNoCatalog, id)
+		}
 	}
 	storeProviderModels(id, infos)
 	ids := make([]string, 0, len(infos))

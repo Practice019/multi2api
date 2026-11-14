@@ -1093,19 +1093,44 @@ func (h *Handler) modelListWithScrub(scrub bool) []map[string]any {
 	// 用接口断言发现可选能力（与 providerIDs 同一范式）：不实现
 	// ImageModelExt 的上游在这里被静默跳过，行为与改造前一致。
 	imageIDs := append([]string{def}, h.otherProviders(def)...)
+	// ⚠ 2026-11-14：追加前**先去重**。
+	//
+	// 本段的原始前提是「上游 /models 目录不含生图模型，或者含了也被对话语境的
+	// 过滤逻辑剔除」。但 loomy 的目录改成了「多账号并集缓存」并且**不再过滤**
+	// （上游此刻真实给出的就是最权威的可用性信号），于是实时目录里**已经包含**
+	// 那三个生图模型 —— 无条件追加就会一个模型列两行。
+	//
+	// 实测症状（用户截图）：loomy 显示 15 条，其中
+	// doubao-seedream-5-lite / qwen-image-3.0-pro / Hy-Image-3.5-preview 各 ×2。
+	//
+	// 所以：已在目录里的**只补能力标记**（不重复追加）；不在的照旧追加。
+	seenAt := make(map[string]int, len(out))
+	for i, e := range out {
+		if s := asString(e["id"]); s != "" {
+			seenAt[s] = i
+		}
+	}
 	for _, id := range imageIDs {
 		for _, im := range h.imageModelsOf(id) {
+			key := im.ID
+			if id != "" {
+				key = id + "/" + im.ID
+			}
+			if at, ok := seenAt[key]; ok {
+				// 目录里已有它：在原条目上标出能力（调用方据此判断"要用
+				// /v1/images/generations，不是 chat/completions"）。
+				out[at]["capabilities"] = []string{"image_generation"}
+				continue
+			}
 			e := h.entryOf(im.ID, 0, 0, h.ownedByFor(id, scrub))
-			// 标出生图能力：调用方据此判断"这个模型要用
-			// /v1/images/generations，不是 chat/completions"。
-			// 非标准字段（OpenAI 没有这个概念），但**不标就无法区分**
+			// 标出生图能力：非标准字段（OpenAI 没有这个概念），但**不标就无法区分**
 			// —— 目录里两个模型看名字都知道是生图，但程序不该靠名字猜。
 			e["capabilities"] = []string{"image_generation"}
 			if id != "" {
-				out = append(out, h.prefixed(e, id))
-				continue
+				e = h.prefixed(e, id)
 			}
 			out = append(out, e)
+			seenAt[key] = len(out) - 1
 		}
 	}
 	return out

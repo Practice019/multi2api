@@ -321,6 +321,36 @@ func (r registryRouter) Models(ctx context.Context, id string) ([]gateway.ModelI
 	return ms, true
 }
 
+// RefreshModels 强制回源**指定上游**的目录（绕过它自己的缓存）。
+//
+// # 为什么需要它（2026-11-14）
+//
+// loomy 这类上游的 Models() 只读缓存（上游按账号下发不同模型集，正确目录是
+// 多账号并集 —— 那要打 5 个账号，不能放进请求路径）。于是「重拉」按钮若只调
+// Models()，缓存没过期时就是**点了没反应**。
+//
+// 本方法经 gateway.ModelCatalogRefresher 找到"能强制回源"的实现；未实现该扩展
+// 的上游返回 ok=false，调用方回落到 Models()（既有行为完全不变）。
+func (r registryRouter) RefreshModels(ctx context.Context, id string) ([]gateway.ModelInfo, bool) {
+	pv, ok := r.reg.Get(id)
+	if !ok {
+		return nil, false
+	}
+	if id != r.Default() && r.p != nil && len(r.p.AvailableUIDsFor(id)) == 0 {
+		return nil, false
+	}
+	ext, ok := gateway.ExtOf[gateway.ModelCatalogRefresher](pv)
+	if !ok {
+		return nil, false
+	}
+	ms, err := ext.RefreshCatalogModels(ctx)
+	if err != nil || len(ms) == 0 {
+		// 失败不返回部分结果：调用方的旧快照本来就还在（这正是设计）。
+		return nil, false
+	}
+	return ms, true
+}
+
 // ModelMultipliers 经 gateway.ModelMultiplierExt 发现上游自报的官方倍率。
 //
 // workbuddy 系不实现该扩展点（它的倍率走 /v3/config 的 ModelCatalogFor）；

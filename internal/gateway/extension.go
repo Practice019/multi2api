@@ -343,6 +343,28 @@ type ModelMultiplierExt interface {
 	ModelMultipliers(ctx context.Context, cred Credential) (map[string]float64, error)
 }
 
+// ModelCatalogRefresher 可选能力：**强制回源**模型目录（绕过自己的缓存）。
+//
+// # 为什么需要这个扩展点（2026-11-14）
+//
+// 有的上游把目录做成「缓存 + 后台刷新」。以 loomy 为例：上游**按账号权限下发
+// 不同模型集**（实测同一上游两个号给出的集合只有部分交集），所以正确目录是
+// 多账号并集 —— 那要打 5 个账号。把它放进请求路径等于「用 5 次上游调用回答
+// 一次目录请求」（一次白烧变成每次白烧），因此这类上游的 Models() 只读缓存。
+//
+// 于是「重拉」按钮直接调 Models() 会**点了没反应**（缓存没过期就返回旧目录）。
+// 本扩展点给这类上游一个「绕过缓存、立刻回源」的入口，与 ModelMultiplierExt
+// 同一套发现方式（gateway.ExtOf）。
+//
+// 未实现本接口的上游：调用方回落到 Models()（既有行为不变）。
+type ModelCatalogRefresher interface {
+	// RefreshCatalogModels 强制回源目录并返回最新快照。
+	//
+	// 返回 error 表示这次回源失败；**调用方应保留原有缓存**（不要清空）——
+	// 目录静默变空比不全更糟（见 verifyModelsNonEmpty 的注释）。
+	RefreshCatalogModels(ctx context.Context) ([]ModelInfo, error)
+}
+
 // ErrLoginPending 表示登录授权尚未完成（用户在浏览器里还没点确认）。
 var ErrLoginPending = errLoginPending{}
 

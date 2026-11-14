@@ -171,6 +171,19 @@ type Provider struct {
 	// ⚠ 存在的**唯一理由**是"选号路径不能发网络请求"：核心在持有账号池锁时
 	// 调 CandidateTiers，那里只能读内存。缓存由异步刷新与 RefreshQuota 回填。
 	tiers *tierCache
+
+	// catalogMu 保护 catalog（模型目录缓存快照，见 models_cache.go）。
+	//
+	// ⚠ 为什么目录要**自己**有一份缓存，而不是每请求现拉：
+	//   上游按账号权限下发不同模型集（实测同一上游两个号给出不同子集），
+	//   所以正确的目录是"多账号并集" —— 那要打 5 个账号。把它放进请求路径
+	//   等于"用 5 次上游调用回答一次目录请求"（一次白烧变成每次白烧）。
+	//   正确形态：后台刷新 + 请求路径只读缓存。
+	catalogMu sync.Mutex
+	catalog   *CatalogSnapshot
+
+	// catalogOnce 目录预热循环只启动一次（幂等）—— 与 warmOnce 同一形态。
+	catalogOnce sync.Once
 }
 
 // NewProvider 建一个 Loomy Provider（契约测试用的无依赖构造）。
@@ -559,6 +572,24 @@ func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gatew
 		return nil, err
 	}
 
+	// ── ① 缓存快照优先（**只读，绝不回源**）────────────────────────────────
+	//
+	// 这是常态路径。目录的正确形态是"多账号并集"（上游按账号下发不同模型集），
+	// 而并集要打 5 个账号 —— 放进请求路径等于"用 5 次上游调用回答一次目录请求"。
+	// 所以刷新在后台（StartCatalogPrewarm，24h），请求只读这份快照。
+	//
+	// ⚠ 这里**不**做 filterUnavailable：那份标记是 2026-09-14 静态快照里的
+	//   "chat 端点 404"，而缓存是上游**此刻**真实给出的目录 —— 它本身就是
+	//   最权威的可用性信号，再拿一份旧标记去删条目只会让目录缺模型
+	//   （本次排查的起因正是"少了一半模型"）。
+	if snap := p.Catalog(); snap != nil && snap.Len() > 0 {
+		return toModelInfos(snap.Models), nil
+	}
+
+	// ── ② 没有缓存（首次部署且后台还没刷完）：用手里这一个账号现拉一次 ──────
+	//
+	// 这是**冷启动的一次性**代价，不是常态。拉到的结果只是单号视角（可能不全），
+	// 但比"空目录"强；后台预热随后会用并集覆盖它。
 	live, lerr := p.client.ModelList(ctx, cred.Secret.(*Auth))
 	if lerr == nil && len(live) > 0 {
 		return toModelInfos(filterUnavailable(live)), nil
@@ -568,6 +599,8 @@ func (p *Provider) Models(ctx context.Context, cred gateway.Credential) ([]gatew
 		// 不是失败。把它报成 error 会让出口层跳过该上游 → 目录反而空了。
 		log.Printf("loomy: 实时模型目录拉取失败，回落到静态快照: %v", lerr)
 	}
+
+	// ── ③ 静态基线兜底（2026-09-14 的手册快照，名字可能已过期）──────────────
 	return toModelInfos(AvailableModels()), nil
 }
 
