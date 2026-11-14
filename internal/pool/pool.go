@@ -363,8 +363,14 @@ type snapshot struct {
 
 // Pool 账号池。
 type Pool struct {
-	mu    sync.RWMutex
-	byUID map[string]*entry
+	mu          sync.RWMutex
+	persistMu   sync.Mutex
+	stopFlusher chan struct{}
+	flusherDone chan struct{}
+	closeOnce   sync.Once
+	closeErr    error
+	writeState  func(string, []byte) error
+	byUID       map[string]*entry
 	// provState 上游级熔断状态（2026-10-18 加）。⚠ 懒建（nil 表示"还没有失败过"）。
 	//
 	// # 为什么需要它（用户原话与实测数据）
@@ -490,6 +496,8 @@ const (
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
 func New(stateFp string) *Pool {
 	p := &Pool{
+		stopFlusher:        make(chan struct{}),
+		flusherDone:        make(chan struct{}),
 		byUID:              map[string]*entry{},
 		stateFp:            stateFp,
 		breakerThreshold:   defaultBreakerThreshold,
@@ -502,6 +510,8 @@ func New(stateFp string) *Pool {
 	if stateFp != "" {
 		p.load()
 		p.startFlusher()
+	} else {
+		close(p.flusherDone)
 	}
 	return p
 }
@@ -711,23 +721,51 @@ func (p *Pool) startFlusher() {
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		for range t.C {
-			p.mu.Lock()
-			if p.dirty.Swap(false) {
-				p.saveLocked()
+		defer close(p.flusherDone)
+		for {
+			select {
+			case <-p.stopFlusher:
+				return
+			case <-t.C:
+				p.Flush()
 			}
-			p.mu.Unlock()
 		}
 	}()
 }
 
 // Flush 同步把内存状态落盘（幂等：无变更不写盘）。供进程退出前调用。
 func (p *Pool) Flush() {
+	_ = p.FlushErr()
+}
+
+func (p *Pool) FlushErr() error {
+	p.persistMu.Lock()
+	defer p.persistMu.Unlock()
 	p.mu.Lock()
-	if p.dirty.Swap(false) {
-		p.saveLocked()
+	if !p.dirty.Swap(false) {
+		p.mu.Unlock()
+		return nil
 	}
+	sf := p.stateOverviewLocked()
+	fp, store := p.stateFp, p.store
 	p.mu.Unlock()
+	if err := p.saveState(sf, fp, store); err != nil {
+		p.dirty.Store(true)
+		p.notePersistFail(err)
+		return err
+	}
+	return nil
+}
+
+func (p *Pool) Close() error {
+	p.closeOnce.Do(func() {
+		if p.stopFlusher != nil {
+			close(p.stopFlusher)
+			<-p.flusherDone
+		}
+		p.closeErr = p.FlushErr()
+	})
+	return p.closeErr
 }
 
 // Add 加入账号；已存在则保留原状态、更新凭证（upsert 单账号，不影响其他账号）。
@@ -783,6 +821,7 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 // 真正的冲突只在"同一上游内两个文件给出同一个 uid"时发生，
 // 那时后写入者通过 upsert 覆盖前者（与改造前同一语义）。
 func (p *Pool) SyncToDirFor(provider string, auths []*auth.Auth) {
+	defer p.Flush()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	want := p.normalizeProvider(provider)
@@ -805,7 +844,7 @@ func (p *Pool) SyncToDirFor(provider string, auths []*auth.Auth) {
 		}
 	}
 	if changed {
-		p.saveLocked()
+		p.dirty.Store(true)
 	}
 }
 
@@ -957,6 +996,7 @@ func authFromSecret(secret any) *auth.Auth {
 // 剔除范围与 SyncToDirFor 完全一致：只删本次同步的上游。
 // 新增账号同样即时落盘（理由见 upsertLockedFor 的注释）。
 func (p *Pool) SyncToDirWithSecrets(provider string, auths []*auth.Auth, secrets map[string]any) {
+	defer p.Flush()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	want := p.normalizeProvider(provider)
@@ -983,7 +1023,7 @@ func (p *Pool) SyncToDirWithSecrets(provider string, auths []*auth.Auth, secrets
 		}
 	}
 	if changed {
-		p.saveLocked()
+		p.dirty.Store(true)
 	}
 }
 
@@ -2834,27 +2874,20 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.applyAccountsLocked(s.Accounts)
 }
 
-func (p *Pool) saveLocked() {
-	if p.stateFp == "" {
-		return
+func (p *Pool) saveState(sf stateFile, fp string, store StoreSnapshotter) error {
+	if fp == "" {
+		return nil
 	}
-	sf := p.stateOverviewLocked()
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
-		p.notePersistFail(err)
-		return
+		return err
 	}
-	if dir := filepath.Dir(p.stateFp); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
+	write := p.writeState
+	if write == nil {
+		write = writeStateFile
 	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		p.notePersistFail(err)
-		return
-	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
-		p.notePersistFail(err)
-		return
+	if err := write(fp, raw); err != nil {
+		return err
 	}
 	if p.persistFails > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
@@ -2863,12 +2896,25 @@ func (p *Pool) saveLocked() {
 	}
 
 	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
-	if p.store != nil {
+	if store != nil {
 		snapRaw, err := json.Marshal(snapshot{stateFile: sf, SavedAt: time.Now()})
-		if err == nil {
-			p.store.SaveState(snapRaw)
+		if err != nil {
+			return err
 		}
+		store.SaveState(snapRaw)
 	}
+	return nil
+}
+
+func writeStateFile(fp string, raw []byte) error {
+	if err := os.MkdirAll(filepath.Dir(fp), 0o755); err != nil {
+		return err
+	}
+	tmp := fp + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, fp)
 }
 
 // notePersistFail 记录一次本地 state.json 落盘失败，并按节流规则决定是否打日志：
@@ -2894,7 +2940,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			// 早先漏了这一行：每次 flush 都会把按模型额度写成空对象，
 			// 重载后退化成 credits —— 正是 QuotaView 要防止的 int64 坍缩。
 			// 有回归测试守着（TestReviewerF1_PerModelQuotaSurvivesFlush）。
-			Quota:   e.quota,
+			Quota:   e.quota.Clone(),
 			Credits: e.credits,
 			// 归属标签必须落盘（理由见 stateAccount.Provider）。
 			Provider:     e.provider,
@@ -2969,6 +3015,7 @@ func (p *Pool) ClearCooldown(uid string) bool {
 // Remove 把账号移出池并立即落盘（避免 state.json 里的残留让它在重启后复活）。
 // 返回账号是否存在。调用方若要同时删凭证文件，请自行删除后再调用本方法。
 func (p *Pool) Remove(uid string) bool {
+	defer p.Flush()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if _, ok := p.byUID[uid]; !ok {
@@ -2976,6 +3023,5 @@ func (p *Pool) Remove(uid string) bool {
 	}
 	delete(p.byUID, uid)
 	p.dirty.Store(true)
-	p.saveLocked() // 立即落盘：删除是低频人工操作，不能等 5s 定时 flush
 	return true
 }
