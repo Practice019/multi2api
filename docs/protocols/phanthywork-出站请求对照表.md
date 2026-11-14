@@ -267,6 +267,19 @@ WebView2 缓存、exe 解压）都是因为没先 `ls` 安装目录里的 `_up_`
 | `TestChatFetchesInferenceToken` | chat 路径**必须**调 `activities/summary` 换令牌（原 `TestChatDoesNotFetchInferenceToken` 已反转） |
 | `TestDefaultUAIsBun` | 默认 UA 仍是 `Bun/1.3.14`（推理路径那条） |
 | `TestChatUsesChatCompletionsPath` | 推理走 `/v1/chat/completions` |
+| `TestRefreshSendsOnlyContentTypeAndAccept` | 续期请求**只有** `Content-Type` + `Accept`（官方 `Pd3`）；不许带 UA 与 `x-phanthy-client-source` |
+| `TestRefreshRejectedCarriesUpstreamBody` | `400 invalid_grant` 判成「被拒（可重试）」；**不得**判成终态，且保留上游原文 |
+| `TestMissingRefreshTokenIsTheOnlyTerminal` | 真终态只剩"连 refresh_token 都没有"这一种 |
+| `TestAdoptFresherTokenFromOfficialStore` | 共享凭证库里有别端刷好的同账号令牌 ⇒ 采用且**零请求** |
+| `TestAdoptRejectsDifferentSub` | `sub` 不同 ⇒ **绝不采用**（防串号） |
+| `TestAdoptIgnoresExpiredCandidate` / `TestAdoptIgnoresSameToken` | 过期 / 与当前同一个 ⇒ 不采用 |
+| `TestReadOfficialStoreToleratesGarbage` / `…AcceptsPhanthyCodeOauthKey` | 官方库读不到或格式不对 ⇒ 当没有；两种键名都认 |
+| `TestRejectedThenAdoptSucceeds` | 被拒后重读共享库拿到新令牌 ⇒ **本次续期算成功** |
+| `TestRejectedWithoutNewTokenIsRetriable` | 被拒且共享库没有 ⇒ 可重试，且**不出现**"需重新登录" |
+| `TestRefreshBackoffSuppressesRepeatedUpstreamCalls` | 退避窗口内**零新增上游调用**（D2 移除计数熔断的配套安全网） |
+| `TestRefreshBackoffAppliesAfterServerErrors` | 429/5xx 放弃后同样进退避表 |
+| `TestBackoffWindowIsClamped` / `TestParseRetryAfterMS` | 官方那对 `clamp(·, 5s, 300s)` 与 `Retry-After` 两种形态 |
+| `TestRefreshBackoffTableSemantics` / `…KeySeparatesRequests` | 表的挡/放行/自清/容量上限，以及键由 `url+body` 共同决定 |
 
 ## 十、官方推理桥（sidecar `gd3`）的行为对照
 
@@ -488,3 +501,147 @@ prompt: 只回复四个字：网关打通
    用 `"id":"codeo:ses_` 或 `tool_result` 当锚点更可靠。
 4. 缓存文件可能是**分页的**（同一次会话被切成多个 `f_*`）→ 按 `messages[].id` 去重、
    按 `timestamp` 排序，就能拼回完整时间线。
+
+## 十三、★★ 续期链路（官方 sidecar 逐字，2026-11-14 按源码 1:1 复刻）
+
+真源：`D:\temp\phanthy-sidecar-ascii.txt`（官方 sidecar 的 ASCII 转储）。
+**注意：续期不在前端** —— `_up_\dist\assets\*.js` 的 430 个文件里
+`refresh_token` / `grant_type` / `oauth/token` 出现 **0 次**，全在 sidecar 里。
+
+### 13.1 入口 `tH`（@99948835）
+
+```js
+async function tH(q, K = {}) {
+  let _ = K.read    ?? Nd3,   // 读全部凭证（<configDir>/.credentials.json）
+      z = K.refresh ?? l44,   // 发续期请求（= Pd3()）
+      w = K.persist ?? Ad3,   // 落盘
+      O = K.now     ?? Date.now,
+      $ = await _(),
+      Y = o44($, q, O());     // ★① 刷之前先看共享库里有没有别人刷好的
+  if (Y) return Y;            //    → 有就直接用，**一个请求都不发**
+
+  let H = $.find((X) => X.oauth.accessToken === q);
+  if (!H || typeof H.oauth.refreshToken !== "string") return null;
+
+  let J = await z(`${R1()}/oauth/token`, {
+    grant_type: "refresh_token", refresh_token: H.oauth.refreshToken,
+    client_id: YM().oauthClientId,
+    scope: Array.isArray(H.oauth.scopes) ? H.oauth.scopes.join(" ") : void 0
+  });
+  if (!J) return o44(await _(), q, O());   // ★② 被拒 ⇒ **重读共享库**再试一次
+
+  let j = { ...H.oauth,
+    accessToken:  J.access_token,
+    refreshToken: J.refresh_token ?? H.oauth.refreshToken,   // ★③ 没给就沿用旧的
+    expiresAt:    O() + (typeof J.expires_in === "number" ? J.expires_in : 3600) * 1000,
+    ...(typeof J.scope === "string" ? { scopes: J.scope.split(" ").filter(Boolean) } : {}) };
+  if (!(await w(H, j))) throw new Po;      // ★④ 落盘失败才抛错
+  return J.access_token;
+}
+```
+
+### 13.2 传输层 `Pd3`（@99945774）—— 重试 / 退避 / 单飞 / 错误分类
+
+```js
+function Pd3(q = {}) {
+  let K = q.now ?? Date.now, _ = q.sleep ?? ((O) => new Promise(($) => setTimeout($, O))),
+      z = new Map,   // 成功结果缓存（键 = sha256(url+body)）
+      w = new Map;   // ★ 失败退避表（键 → 解禁时刻）
+  return (O, $) => {
+    let Y = JSON.stringify($),                              // ★ body 是 JSON
+        H = Zd3("sha256").update(O).update(Y).digest("hex"), J = z.get(H);
+    if (J) return J;
+    if ((w.get(H) ?? 0) > K()) return Promise.reject(new Po);  // ★ 退避期内不打网络
+    w.delete(H);
+    let j = (async () => {
+      for (let X = 0; X < 3; X++) {                         // 最多 3 次
+        let f;
+        try {
+          f = await (q.fetcher ?? fetch)(O, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },  // ★ 只有这两个
+            body: Y, signal: AbortSignal.timeout(8000)       // 8 秒
+          })
+        } catch {}
+        if (f?.ok) { ... return P; }
+        if (f && f.status !== 429 && f.status < 500) {
+          let k = ...;
+          if (f.status === 400 && k === "invalid_grant") return null;   // ★★ 返回 null，不抛错
+          throw new Po;
+        }
+        let Z = Math.max(500 * 2 ** X, retryAfter);
+        if (X === 2 || Z > 2000) {
+          if (w.size >= 128) w.delete(w.keys().next().value);
+          throw w.set(H, K() + Math.min(Math.max(Z, 5000), 300000)), new Po;   // clamp 5s–300s
+        }
+        await _(Z)
+      }
+```
+
+### 13.3 失败形态 `Po`（@99946968）
+
+```js
+Po = class Po extends p6 {
+  constructor() {
+    super(503, "登录服务暂时不可用，请稍后重试；当前登录信息已保留。", "OAUTH_REFRESH_UNAVAILABLE")
+  }
+}
+```
+
+⇒ **官方从不说"你该重新登录"** —— 它把续期失败表达成**可重试的 503**，
+并明确告诉用户「登录信息已保留」。
+
+### 13.4 逐项对照
+
+| # | 维度 | 官方 | 本仓 | 判定 |
+|---|---|---|---|---|
+| 1 | body 编码 | JSON（`JSON.stringify`） | JSON | ✅ |
+| 2 | 超时 | 8000 ms | `refreshTimeout = 8s` | ✅ |
+| 3 | 重试次数 / 条件 | 3 次，只 429/≥500 | 同 | ✅ |
+| 4 | `refresh_token` 回退 | `J.refresh_token ?? 旧值` | 同 | ✅ |
+| 5 | `expires_in` 兜底 | 3600 | `refreshDefaultExpiresIn = 3600` | ✅ |
+| 6 | `scope` 参数 | `scopes.join(" ")` | 同 | ✅ |
+| 7 | **请求头** | 只有 `Content-Type` + `Accept` | 原为 3 个头（多 UA 与 client-source） | ✅ 已修（见 13.5） |
+| 8 | **`400 invalid_grant`** | 返回 `null`（被拒，不抛错） | 原判**终态** ⇒ 计一次失败 ⇒ 3 次永久禁用 | ✅ 已修 |
+| 9 | **刷前查共享库** | `o44()`：有同 `sub` 的新令牌就直接采用 | 原**完全没有** | ✅ 已补 |
+| 10 | **被拒之后** | 重读共享库再试一次 | 原直接判失败 | ✅ 已修 |
+| 11 | **失败对外形态** | 503 可重试「登录信息已保留」 | 原「需重新登录」终态 | ✅ 已修 |
+| 12 | 失败退避表 | 键 = `sha256(url+body)`，窗口 `clamp(·,5s,300s)` | 原只有 5 秒的闸门失败冷却 | ✅ 已补 |
+| 13 | 落盘 | 只替换 `oauth` 子对象，`0600` | 重写整份（原子 `.tmp`+`rename`） | ⚠ 等价，形态不同 |
+| 14 | 凭证位置 | 文件 **+ OS keyring** | 只读文件 | ⚠ 本机实测 keyring 无 `phanthy code-credentials*` 条目，故只读文件是对的 |
+| 15 | 成功结果缓存 | 同 `url+body` 的结果复用 | 无（`refreshGate` 只合并"进行中"并回放 60s） | ⚠ 等价，形态不同 |
+
+### 13.5 三条已修的偏差（D1/D2/D3）
+
+**D1 请求头**：`newRefreshRequest` 只发那 2 个头。
+⚠ 必须显式 `req.Header.Set("User-Agent", "")` —— Go 传输层在 UA 缺失时会自动补
+`Go-http-client/1.1`，只写"不设置"等于没修。
+`/api/*` 那一族**继续**走 `applyCommonHeaders`（官方确实给它们发 UA）。
+
+**D2 被拒 ≠ 终态**：新增 `gateway.ErrCredentialRefreshRejected`（跨上游标记）与
+`ErrRefreshRejected`；`ErrRefreshExpired` **收窄**为唯一真终态
+（连 `refresh_token` 都没有）。出口层对它**不计** `refreshFails`。
+
+**D3 刷前查共享库**：新增 `sharedstore.go` 读 `<configDir>/.credentials.json`
+（`officialConfigDir()` 对齐官方 `S3()`：env 优先，回落 `~/.phanthy-code`）。
+三条判据缺一不可：token 不同 / **`sub` 相同** / 未过期。
+⚠ `sub` 比的必须是**两个令牌各自的 JWT sub**（官方 `o44` 就是这么比的），
+不能用 `AccountScope` 顶替 —— 那是可能过期的快照，判错方向是"误采用"（串号）。
+
+### 13.6 一处**有意的偏离**（记档以免将来误判）
+
+官方**不**把 `invalid_grant` 放进退避表（它返回 `null` 就结束了）。
+本仓放进去，取 60 秒窗口。理由：场景不同 ——
+
+    官方 `tH` 只在桌面端要用令牌时被调一次；
+    本仓是 N 个对话请求共享一个账号，且 D2 移除了计数熔断。
+
+没有这张表，D2 就只是把"账号被误禁"换成了"上游被打"。
+**退避只挡上游，不挡"重读共享凭证库"** —— 后者在 `login.go` 里更靠前，
+所以退避期里每一轮仍然会查共享库，对方刷好的令牌照样被立刻采用。
+
+### 13.7 出处
+
+字节偏移见上（各节标题后括号内）。取证方式与 §10/§11 相同：
+sidecar 是 Bun 单文件可执行，JS 源码以明文内嵌，按 ASCII 过滤即可读。
+重新生成的命令见 `docs/reports/pw-renewal-parity-plan-2026-11-14.md` §0。
