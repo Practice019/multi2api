@@ -157,14 +157,21 @@ func TestChatSendsNoSignatureHeaders(t *testing.T) {
 	}
 }
 
-// TestChatSendsSessionHeaders 断言 4 个会话头齐全，且 session 形态正确。
+// TestChatSendsSessionHeaders 断言会话头齐全，且 session 形态正确。
 //
-// 抓包原文：
+// ★★ 2026-11-14 修正：此前这条判据**断言了两个官方不存在的头**
+//（`x-phanthy-client: cli` / `x-phanthy-project: global`）——
+// 判据把错的行为锁死了，这正是"改错了却一路绿灯"的原因。
 //
-//	x-phanthy-client:   cli
-//	x-phanthy-project:  global
-//	x-phanthy-request:  <uuid>
-//	x-phanthy-session:  ses_<24 位 cuid2>
+// 官方 sidecar 2.51.0 的 `/v1/chat/completions` 头构造器里**没有**它们：
+//
+//	X = () => ({ Authorization, "Content-Type", Accept,
+//	             "x-phanthy-client-source": "desktop",
+//	             "x-phanthy-cli-device": <指纹>,
+//	             "x-claude-code-session-id": sessionId })
+//
+// 判据改为断言「官方有的必须在、官方没有的必须不在」，见
+// TestInferenceHeadersMatchOfficialClient。
 func TestChatSendsSessionHeaders(t *testing.T) {
 	up := &chatFakeUpstream{}
 	srv := httptest.NewServer(up.handler())
@@ -183,23 +190,13 @@ func TestChatSendsSessionHeaders(t *testing.T) {
 	defer st.Body.Close()
 	_, _ = io.Copy(io.Discard, st.Body)
 
-	cases := []struct {
-		name string
-		want string
-	}{
-		{"x-phanthy-client", "cli"},
-		{"x-phanthy-project", "global"},
+	// 上游按这两个头认会话/去重；缺了服务端不认这次推理。
+	if got := up.gotHeaders.Get("x-claude-code-session-id"); got == "" {
+		t.Error("缺 x-claude-code-session-id（官方 sidecar 每次推理都发它，上游按它认会话）")
 	}
-	for _, c := range cases {
-		if got := up.gotHeaders.Get(c.name); got != c.want {
-			t.Errorf("%s = %q, want %q（抓包实证的取值）", c.name, got, c.want)
-		}
-	}
-
-	// request 是 uuid v4 形态（36 字符，含 4 个连字符）
-	reqID := up.gotHeaders.Get("x-phanthy-request")
+	reqID := up.gotHeaders.Get("x-request-id")
 	if len(reqID) != 36 || strings.Count(reqID, "-") != 4 {
-		t.Errorf("x-phanthy-request = %q，want uuid 形态（36 字符 / 4 个连字符）", reqID)
+		t.Errorf("x-request-id = %q，want uuid 形态（36 字符 / 4 个连字符）", reqID)
 	}
 
 	// session 是 ses_ + 24 位 cuid2（小写字母+数字，首字符字母）
@@ -218,6 +215,92 @@ func TestChatSendsSessionHeaders(t *testing.T) {
 		if !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') {
 			t.Fatalf("session 主体含非法字符 %q（只允许小写字母+数字；"+
 				"用 base64url 会产出 '-'/'_'，形态与真实值不符）", string(c))
+		}
+	}
+}
+
+// TestInferenceHeadersMatchOfficialClient ★ 推理路径的头必须与官方客户端**逐项一致**。
+//
+// # 为什么这条判据存在（2026-11-14 真机封号）
+//
+// 改之前新版内核那条路发的是：
+//
+//	x-phanthy-client: cli            官方 sidecar 里根本不存在这个头
+//	x-phanthy-project: global        不存在
+//	x-phanthy-product: phanthy_code  不存在
+//	x-phanthy-client-source: cli     **应为 desktop**（注册声称 edition=phanthy_work）
+//	（且完全没有 x-app / x-phanthy-client-version / x-phanthy-cli-device）
+//
+// 后果与官方文档记的封号触发点逐条吻合（PROTOCOL-INFERENCE.md §二之二）：
+// 「来源=桌面端、OS 为空、版本对不上」的异常组合 ⇒ 风控记账 ⇒ 封号。
+// 真机结果就是 403 `disabled_account`。
+//
+// 真源：官方 sidecar 2.51.0 二进制里 /v1/chat/completions 的头构造器（逐字见
+// client.go 的 ChatCompletionsStream 注释）。
+//
+// ⚠ 这条判据是**双向**的：官方有的少一个不行，官方没有的多一个也不行 ——
+//   两边都是「异常客户端」特征。
+func TestInferenceHeadersMatchOfficialClient(t *testing.T) {
+	up := &chatFakeUpstream{}
+	srv := httptest.NewServer(up.handler())
+	defer srv.Close()
+
+	p := newFakeProviderChat(t, srv)
+	cred := newChatCred(t, "u-parity")
+
+	st, err := p.Chat(context.Background(), cred, mustJSON(t, map[string]any{
+		"model":    "Phanthy-fast",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}))
+	if err != nil {
+		t.Fatalf("Chat 失败: %v", err)
+	}
+	defer st.Body.Close()
+	_, _ = io.Copy(io.Discard, st.Body)
+
+	// ① 官方**必须有**的头（缺一个 ⇒ 异常客户端）
+	must := map[string]string{
+		// 身份三件套：来源 / 版本 / 设备指纹。
+		// 服务端「用量」页的「来源 / OS」两列就由后两个推导。
+		"x-phanthy-client-source":  "desktop",
+		"x-app":                    "cli",
+		"x-phanthy-client-version": OfficialClientVersion,
+		// 会话与去重
+		"x-claude-code-session-id": "",
+		"x-request-id":             "",
+	}
+	for name, want := range must {
+		got := up.gotHeaders.Get(name)
+		if got == "" {
+			t.Errorf("缺 %s —— 官方客户端每次都发它，缺了就是「异常客户端」特征\n"+
+				"  （2026-11-14 真机封号复盘：PROTOCOL-INFERENCE.md §二之二）", name)
+			continue
+		}
+		if want != "" && got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	// 设备指纹必须是 base64url(JSON)，且含 platform（官方用它填「OS」列）
+	dev := up.gotHeaders.Get("x-phanthy-cli-device")
+	if dev == "" {
+		t.Error("缺 x-phanthy-cli-device（官方设备指纹头；缺了服务端看到的是「来源=桌面端但 OS 为空」）")
+	} else if dec, derr := b64urlDecode(dev); derr != nil {
+		t.Errorf("x-phanthy-cli-device 不是合法 base64url: %v", derr)
+	} else if s := string(dec); !strings.Contains(s, `"platform"`) || !strings.Contains(s, `"osRelease"`) {
+		t.Errorf("设备指纹缺 platform/osRelease 字段: %s", s)
+	}
+
+	// ② 官方**没有**的头（多一个 ⇒ 反常特征）。这三个是实测出来的幽灵头。
+	forbidden := []string{
+		"x-phanthy-client",  // 只有 x-phanthy-client-source，没有这个
+		"x-phanthy-project", // 官方 sidecar 字符串里 0 次
+		"x-phanthy-product", // 同上
+	}
+	for _, h := range forbidden {
+		if v := up.gotHeaders.Get(h); v != "" {
+			t.Errorf("多发了官方不存在的头 %s = %q\n"+
+				"  官方 sidecar 2.51.0 的字符串转储里这个头出现 0 次 ——\n"+
+				"  多一个官方没有的头，就是风控眼里的「异常客户端」。", h, v)
 		}
 	}
 }

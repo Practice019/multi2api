@@ -189,13 +189,21 @@ func (c *Client) applyCommonHeaders(req *http.Request) {
 
 // chatClientSource 新版内核推理请求的 x-phanthy-client-source 取值。
 //
-// ⚠ 与 clientSource("desktop") **不同**。抓包实证：
+// ★★ 2026-11-14 更正：此前写的是 "cli"，**是错的**，而且正是封号的成因之一。
 //
-//	推理 POST /v1/chat/completions   → X-Phanthy-Client-Source: cli
-//	遥测 POST /api/event_logging/... → X-Phanthy-Client-Source: phanthy-codeo
+// 真源：官方 PROTOCOL-INFERENCE.md §二之二（按桌面端 2.51.0 二进制复核）逐字写着：
 //
-// 也就是说这个头在**不同端点上是不同的值**，不是一个全局常量。
-const chatClientSource = "cli"
+//	"x-phanthy-client-source": "desktop",   // Yg3(): 桌面端 = "desktop"，否则 "cli"
+//
+// 这个值的语义是「**我是桌面端还是 CLI**」—— 桌面客户端发 desktop。
+// 而我们注册时声称的正是桌面端（edition = "phanthy_work"），推理却自称 cli，
+// **身份自相矛盾**；再叠加缺失的版本头与设备指纹头，就构成官方文档记的异常组合：
+//
+//	「来源=桌面端、OS 为空、版本还是旧版」的异常组合 ⇒ 风控记账 ⇒ 封号
+//	（PROTOCOL-INFERENCE.md §二之二："2026-11-13 账号被封的最可能触发点"）
+//
+// 判据：TestInferenceHeadersMatchOfficialClient。
+const chatClientSource = "desktop"
 
 // cliDeviceHeader 官方桌面端的设备指纹头 `x-phanthy-cli-device`。
 //
@@ -253,8 +261,8 @@ func buildCliDeviceHeader() string {
 	}
 	payload := map[string]any{
 		"version":      1,
-		"platform":     runtime.GOOS,
-		"arch":         runtime.GOARCH,
+		"platform":     nodePlatformName(),
+		"arch":         nodeArchName(),
 		"osRelease":    osReleaseString(),
 		"cliVersion":   OfficialClientVersion,
 		"ipCandidates": ips,
@@ -284,11 +292,17 @@ func osReleaseString() string {
 	return ""
 }
 
-// chatProduct 新版内核推理请求的 x-phanthy-product 取值。
-//
-// 抓包实证：推理用 `phanthy_code`（无 o）；而遥测用 `phanthy_codeo`（带 o）。
-// 两个值混用会让服务端走错校验链，所以这里写死推理那个。
-const chatProduct = "phanthy_code"
+// ★★ 2026-11-14：这里原本有一个 `chatProduct = "phanthy_code"` 常量，
+// 用于给推理请求设 `x-phanthy-product`。**已删除**，理由：
+
+//	· 官方 sidecar 2.51.0 的字符串转储里 `x-phanthy-product` 出现 **0 次**
+//	  （连 `x-phanthy-project` 也是 0 次）—— 这两个头是当初照"想当然的形态"
+//	  编出来的，不是抓包得来的；
+//	· 多发它们等于给风控送"异常客户端"特征（2026-11-14 真机封号复盘）；
+//	· 判据 TestInferenceHeadersMatchOfficialClient 现在会拦住任何"多发的头"。
+
+// （原注释保留在案，说明当时的取值依据，供将来核对遥测侧是否真的用 `phanthy_codeo`）：
+// 推理 `phanthy_code`（无 o）/ 遥测 `phanthy_codeo`（带 o）。
 
 // newSessionID 造一个 `ses_<cuid2>` 形态的会话 id。
 //
@@ -318,6 +332,47 @@ func newSessionID() string {
 	return b.String()
 }
 
+// nodePlatformName 把 Go 的 GOOS 映射成官方客户端上报的 `process.platform` 形态。
+//
+// ★★ 2026-11-14：这个映射是**封号判定**的一部分，不是美观问题。
+//
+// 官方 sidecar 的 `x-phanthy-cli-device` 里 `platform` 取 `process.platform`，
+// Node 在 Windows 上的值是 **"win32"**，而 Go 的 `runtime.GOOS` 是 **"windows"**。
+// 直接透传会让服务端「用量」页的 OS 列显示成它不认识的平台名 ——
+// 官方文档 PROTOCOL-INFERENCE.md §二之二 明确记着封号触发点：
+//
+//	「来源=桌面端、OS 为空/对不上、版本还是旧版」的异常组合 ⇒ 风控记账 ⇒ 封号
+//
+// 判据：TestCliDeviceHeaderUsesNodeNames。
+func nodePlatformName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "win32"
+	case "darwin":
+		return "darwin"
+	case "linux":
+		return "linux"
+	default:
+		return runtime.GOOS
+	}
+}
+
+// nodeArchName 把 GOARCH 映射成 `process.arch` 的形态（amd64→x64、386→ia32）。
+func nodeArchName() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "386":
+		return "ia32"
+	case "arm64":
+		return "arm64"
+	case "arm":
+		return "arm"
+	default:
+		return runtime.GOARCH
+	}
+}
+
 // ChatCompletionsStream 发一次推理请求（新版内核形态：**不签名**）。
 //
 // 与 ChatStream 的差异（逐条来自抓包实证，不是推测）：
@@ -343,23 +398,62 @@ func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 
-	// 会话四件套（抓包原文里逐字存在）
+	// ── 会话头 ──────────────────────────────────────────────────────────────
 	//
-	// ★ 2026-11-14 真机补充：`x-claude-code-session-id` 与 `x-request-id` 也要发。
-	//   官方 sidecar 的拦截器会把 x-phanthy-session → x-claude-code-session-id、
-	//   x-phanthy-request → x-request-id（原头保留），最终上游两个都在。
-	//   本包直接两个都发，形态与上游实际收到的一致。
+	// 官方 sidecar 的桥把 `x-phanthy-session` **摊成** `x-claude-code-session-id`
+	// 并把它自己从"要发出去的头"里删掉（index.mjs 的 HOST_HEADERS_TO_DROP）。
+	// 本包两个都发：`x-claude-code-session-id` 是必需的（上游按它认会话），
+	// `x-phanthy-session` 留着是因为旧内核（/v1/messages）那条 12 段 canonical
+	// 要求它与第 10 段同值 —— 对 chat 路径无害。
 	sessionID := newSessionID()
 	reqID := randomUUID()
-	req.Header.Set("x-phanthy-client", "cli")
-	req.Header.Set("x-phanthy-project", "global")
-	req.Header.Set("x-phanthy-request", reqID)
 	req.Header.Set("x-request-id", reqID)
-	req.Header.Set("x-phanthy-session", sessionID)
 	req.Header.Set("x-claude-code-session-id", sessionID)
-	// 产品与来源（两个头在不同端点上取值不同，见上方常量注释）
-	req.Header.Set("x-phanthy-product", chatProduct)
-	req.Header.Set("x-phanthy-client-source", chatClientSource)
+	req.Header.Set("x-phanthy-session", sessionID)
+
+	// ── 官方客户端的固定头（★★ 与官方 1:1 的关键）────────────────────────────
+	//
+	// 真源是**官方 sidecar 二进制**（2.51.0，字符串转储 `phanthy-sidecar-ascii.txt`）
+	// 里 `/v1/chat/completions` 那条调用的头构造器，逐字：
+	//
+	//	X = () => ({
+	//	  Authorization: `Bearer ${token}`,
+	//	  "Content-Type": "application/json",
+	//	  Accept: "application/json",
+	//	  "x-phanthy-client-source": "desktop",
+	//	  "x-phanthy-cli-device": <设备指纹>,
+	//	  "x-claude-code-session-id": sessionId,
+	//	})
+	//	// 调用处再补： "x-request-id": <uuid>
+	//
+	// # ★★ 2026-11-14 封号复盘：这段以前是错的，而且真机**封了号**
+	//
+	// 改之前这里发的是：
+	//
+	//	x-phanthy-client: cli            ← 官方 sidecar 里**根本不存在**这个头
+	//	x-phanthy-project: global        ← 不存在
+	//	x-phanthy-product: phanthy_code  ← 不存在
+	//	x-phanthy-client-source: cli     ← **应为 desktop**（注册声称 edition=phanthy_work）
+	//	（且完全没有 x-app / 版本头 / 设备指纹头）
+	//
+	// 后果与官方文档记的封号触发点逐条吻合（PROTOCOL-INFERENCE.md §二之二）：
+	//
+	//	「来源=桌面端、OS 为空、版本对不上」的异常组合 ⇒ 风控记账 ⇒ **封号**
+	//
+	// 我们那次更糟：来源自称 cli（与注册声称的桌面端**自相矛盾**）、没有设备指纹
+	// （OS 为空）、没有版本头，还多了三个官方不存在的头。
+	// 真机结果：`POST /v1/chat/completions` → 403 `disabled_account`
+	//（「当前账户已被封禁，请加微信群联系客服处理」）。
+	//
+	// ⇒ 纪律：**推理路径的头必须与官方客户端逐项一致** ——
+	//   多一个官方没有的头、少一个官方有的头，都是"异常客户端"特征。
+	//   判据：TestInferenceHeadersMatchOfficialClient。
+	req.Header.Set("x-phanthy-client-source", chatClientSource) // "desktop"
+	req.Header.Set("x-app", "cli")
+	req.Header.Set("x-phanthy-client-version", OfficialClientVersion)
+	if dev := CliDeviceHeader(); dev != "" {
+		req.Header.Set("x-phanthy-cli-device", dev)
+	}
 
 	return c.httpClient().Do(req)
 }
