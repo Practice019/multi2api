@@ -20,8 +20,14 @@
 //
 // # 能力位（声明即承诺，少报是安全的）
 //
-//	声明：CapChat | CapModels | CapQuotaProbe | CapCheckin | CapImport
-//	**不声明**：CapInvite / CapTasks / CapWelfare / CapGrowth / CapTravel
+//	声明：CapChat | CapModels | CapQuotaProbe | CapCheckin | CapImport | CapInvite
+//	**不声明**：CapTasks / CapWelfare / CapGrowth / CapTravel
+//
+// ⚠ 2026-11-14 更正：此前这里把 CapInvite 也列在"不声明"里 —— **那是过期的**。
+// 邀请码面板 2026-11-12 就实现了，Caps() 里也确实声明了 CapInvite（见下方实现）。
+// 留下这句错话的代价很具体：接手的人会以为"这个上游没有邀请码能力"而绕开它。
+// CapTasks 仍是"不声明"——它对应 onboarding 任务面板，客户端方法已有
+// （internal/phanthywork/onboarding.go），但界面还没做，所以还不能承诺。
 //	（那几项在**这个平台的协议里没有对应端点**，不是"本轮不做"）
 //
 // 各能力的落点（改动时先读对应文件，那里的注释记着实测口径）：
