@@ -13,12 +13,25 @@ package phanthywork
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"workbuddy2api/internal/gateway"
 )
+
+// withFilePath 给测试凭证一个**真实落盘路径**（生产里由 LoadDir 设置，见 credential.go）。
+//
+// ⚠ 为什么测试必须与生产同形：`saveAuthFile` 在 FilePath 为空时静默跳过。
+// 2026-11-14 之前所有夹具都是"内存凭证"，于是**没有任何判据检查过磁盘** ——
+// 而 applyTokenSet 现在把"上游轮换了却落不了盘"当成错误（数据丢失必须响，
+// 见 refresh_persist_test.go）。夹具跟着变成文件形态，那条路径才真的被测到。
+func withFilePath(t *testing.T, a *Auth) *Auth {
+	t.Helper()
+	a.FilePath = filepath.Join(t.TempDir(), FileName(a))
+	return a
+}
 
 // authWithRemaining 造一份"剩余寿命 = remainingSec"的凭证。
 //
@@ -162,7 +175,7 @@ func TestRunRefreshExactlyOnceWhenSkewMet(t *testing.T) {
 	defer swapSpacing(time.Duration(0))()
 	p, fake := jobsFixture(t)
 	// 剩余 800 秒 ≤ 900 秒 ⇒ 该刷（且还没过期）
-	a := authWithRemaining("u-due", "refresh-old", 800)
+	a := withFilePath(t, authWithRemaining("u-due", "refresh-old", 800))
 	wireAccounts(p, a)
 
 	if err := p.Jobs()[0].Run(context.Background()); err != nil {
@@ -201,7 +214,7 @@ func TestRunRefreshConcurrentSameAccountExactlyOnce(t *testing.T) {
 		// 8 份**同一个 uid** 的凭证对象？不 —— 那样测的不是"同账号并发"。
 		// 这里用同 uid 的**同一个对象**被 8 个 Run 同时看到（生产里就是池子里
 		// 那一个 *Auth），所以只登记一份。
-		accounts = append(accounts, authWithRemaining("u-race", "refresh-old", 800))
+		accounts = append(accounts, withFilePath(t, authWithRemaining("u-race", "refresh-old", 800)))
 		break
 	}
 	wireAccounts(p, accounts...)
@@ -234,9 +247,9 @@ func TestRunRefreshFirstRunDoesNotStampede(t *testing.T) {
 	defer swapSpacing(time.Duration(0))()
 	p, fake := jobsFixture(t)
 	// 三个都该刷（剩 700/600/500 秒），首轮只准刷 1 个
-	a1 := authWithRemaining("u-1", "rt-1", 700)
-	a2 := authWithRemaining("u-2", "rt-2", 600)
-	a3 := authWithRemaining("u-3", "rt-3", 500)
+	a1 := withFilePath(t, authWithRemaining("u-1", "rt-1", 700))
+	a2 := withFilePath(t, authWithRemaining("u-2", "rt-2", 600))
+	a3 := withFilePath(t, authWithRemaining("u-3", "rt-3", 500))
 	wireAccounts(p, a1, a2, a3)
 	run := p.Jobs()[0].Run
 
@@ -316,7 +329,7 @@ func TestRunRefreshNoAccountsIsQuiet(t *testing.T) {
 func TestRunRefreshUsesInjectedPoolObject(t *testing.T) {
 	defer swapSpacing(time.Duration(0))()
 	p, fake := jobsFixture(t)
-	poolObj := authWithRemaining("u-pool", "pool-rt", 700)
+	poolObj := withFilePath(t, authWithRemaining("u-pool", "pool-rt", 700))
 	localObj := authWithRemaining("u-pool", "local-rt", 700)
 	p.SetLocalCredential("u-pool", localObj)
 	p.SetCredentialSource(func(uid string) (gateway.Credential, bool) {

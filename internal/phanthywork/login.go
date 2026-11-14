@@ -719,8 +719,23 @@ func (a *Auth) applyTokenSet(ts TokenSet) error {
 	if strings.TrimSpace(ts.AccessToken) == "" {
 		return fmt.Errorf("phanthywork: token 响应里没有 access_token")
 	}
+	// ★ 先判"轮换了但落不了盘"，**不要先改内存再报错**（那会留下半截状态：
+	// 内存里是新的、磁盘上是旧的，而调用方还拿到了错误 —— 最难排查的一种）。
+	//
+	// 为什么必须报错而不是静默跳过：
+	// 本上游的 refresh_token 是**轮换**的（RFC 6749 §6：拿到新的就必须丢弃旧的）。
+	// 落不了盘 ⇒ 下一次续期会拿**已作废的旧 token** 去换 ⇒ 上游回 invalid_grant
+	// ⇒ 账号被判终态「需重新登录」，而真正的故障点是**上一次**续期静默丢了新令牌。
+	// 数据丢失必须响。判据：refresh_persist_test.go 的 TestRefreshWithoutFilePathIsLoud。
+	rotated := ts.RefreshToken != "" && ts.RefreshToken != a.OAuth.RefreshToken
+	if rotated && a.FilePath == "" {
+		return fmt.Errorf("phanthywork: 上游轮换了 refreshToken，但这份凭证没有落盘路径" +
+			"（FilePath 为空）——静默丢弃会让下一次续期拿已作废的旧 token 去换" +
+			"（上游会回 invalid_grant），所以这里必须报错而不是忽略")
+	}
+
 	a.OAuth.AccessToken = ts.AccessToken
-	if ts.RefreshToken != "" {
+	if rotated {
 		a.OAuth.RefreshToken = ts.RefreshToken
 	}
 	if ts.ExpiresAtMS > 0 {

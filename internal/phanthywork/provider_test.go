@@ -244,7 +244,7 @@ func TestConcurrentRefreshOnlyHitsTokenEndpointOnce(t *testing.T) {
 	srv, fake := startFakeUpstream(t)
 	p := newFakeProvider(t, srv)
 	// 造一份"已过期"的凭证，让 RefreshCredential 真的去打 token 端点
-	a := newTestAuth("u-1", "refresh-old")
+	a := withFilePath(t, newTestAuth("u-1", "refresh-old"))
 	a.OAuth.ExpiresAtMS = nowMS() - 10_000
 	cred := gateway.Credential{Provider: providerID, UID: a.UID(), Secret: a}
 
