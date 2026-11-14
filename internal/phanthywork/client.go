@@ -67,6 +67,13 @@ type Client struct {
 	// ⚠ 只在**登录流程**里用（那时还没有账号对象）；拿到账号之后一律走
 	// Auth.serverNowMS（**按账号隔离**）。两条路径共用同一个口径。
 	skewMS atomic.Int64
+
+	// backoff 续期失败的退避表（键 = sha256(url+body)）。
+	//
+	// 官方把这两个表放在 `Pd3()` 的闭包里 —— `l44 = Pd3()` 只求值一次，
+	// 生命周期与客户端同长。我们的 Client 同样是长生命周期对象，所以
+	// 放在这里与官方同构。详见 refreshbackoff.go。
+	backoff refreshBackoff
 }
 
 // New 生产默认值。
@@ -846,6 +853,20 @@ func (c *Client) RefreshTokens(ctx context.Context, a *Auth) (TokenSet, error) {
 		return TokenSet{}, err
 	}
 
+	// ★ 退避表（官方 `Pd3` 的 `w` map）：窗口内**直接拒、不打网络**。
+	//
+	// 官方原文：`if ((w.get(H) ?? 0) > K()) return Promise.reject(new Po);`
+	// 紧接着 `w.delete(H)` —— 过窗就把自己那条清掉再往下走。
+	//
+	// ⚠ 这一步必须在**任何网络动作之前**：它的全部价值就是省掉那次往返。
+	// ⚠ 它**不**挡 caller 的重读共享库（那一步在 login.go 里，比这里更靠前）——
+	//   这正是我们要的形态：退避期里仍然每轮都查共享库，只是不再打上游。
+	bkey := refreshBackoffKey(c.apiBase()+pathOAuthToken, raw)
+	if until, blocked := c.backoff.blocked(bkey, nowMS()); blocked {
+		return TokenSet{}, fmt.Errorf("%w（退避中，还需 %.0f 秒；本次未打上游）",
+			ErrRefreshDeferred, float64(until-nowMS())/1000)
+	}
+
 	var lastErr error
 	for attempt := 0; attempt < refreshMaxAttempts; attempt++ {
 		req, rerr := c.newRefreshRequest(ctx, raw)
@@ -881,11 +902,25 @@ func (c *Client) RefreshTokens(ctx context.Context, a *Auth) (TokenSet, error) {
 			//
 			// ⚠ 保留上游原文，便于区分给用户看的成因（invalid_grant 该等，
 			// invalid_client 该查代码）。
+			// ★ 同时记进退避表：被拒这一档**没有**熔断（我们不计数、不禁用），
+			// 所以必须由退避表兜住，否则一个真废掉的凭据会被每个进来的
+			// 对话请求各触发一次上游续期 —— 那是把"账号被误禁"换成"上游被打"。
+			//
+			// ⚠ 这是**有意的偏离**：官方 `Pd3` 不把 invalid_grant 放进 `w`
+			// （它返回 null 就结束了）。理由见 refreshbackoff.go 的文件头。
+			c.backoff.set(bkey, nowMS()+rejectBackoffMS)
 			return TokenSet{}, fmt.Errorf("%w（上游 %d：%s）", ErrRefreshRejected, status, brief(body))
 		case status == 429 || status >= 500:
 			wait := backoffFor(attempt, retryAfterMS(body))
 			lastErr = &UpstreamError{Status: status, Body: brief(body), Op: "续期"}
 			if attempt == refreshMaxAttempts-1 || wait > maxBackoff {
+				// 官方在这里做的是：
+				//   if (X === 2 || Z > 2000) {
+				//     if (w.size >= 128) w.delete(w.keys().next().value);
+				//     throw w.set(H, K() + Math.min(Math.max(Z, 5000), 300000)), new Po;
+				//   }
+				// 即"放弃的同时把退避窗口记下来"。窗口取 clamp(本次算出的退避, 5s, 300s)。
+				c.backoff.set(bkey, nowMS()+backoffWindowMS(wait.Milliseconds()))
 				return TokenSet{}, lastErr
 			}
 			select {

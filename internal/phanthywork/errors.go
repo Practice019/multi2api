@@ -80,6 +80,17 @@ var (
 		"phanthywork: 上游拒绝了 refresh_token（可能已被另一个端轮换）——稍后重试: %w",
 		gateway.ErrCredentialRefreshRejected)
 
+	// ErrRefreshDeferred 退避窗口内 —— **本次压根没打上游**。
+	//
+	// 与 ErrRefreshRejected 的区别只在"打没打"：两者对调用方的动作**完全一样**
+	// （可重试、不计账、等下一轮），所以都包装同一个 gateway 标记。
+	// 分开一个哨兵纯粹是为了日志能说清"这次连网络都没出"。
+	//
+	// 真源：官方 `Pd3` 的 `w` map（见 refreshbackoff.go）。
+	ErrRefreshDeferred = fmt.Errorf(
+		"phanthywork: 续期处于退避窗口，本次未打上游 —— 稍后重试: %w",
+		gateway.ErrCredentialRefreshRejected)
+
 	// ErrNotConfigured 该部署没有可用的登录流程。
 	ErrNotConfigured = errors.New("phanthywork: 本部署未配置登录流程")
 
@@ -323,12 +334,17 @@ func IsRegistrationConflict(err error) bool { return errors.Is(err, ErrRegistrat
 // 现在的语义只有一种：这份凭证连 refresh_token 都没有，自动续期无从谈起。
 func IsRefreshExpired(err error) bool { return errors.Is(err, ErrRefreshExpired) }
 
-// IsRefreshRejected 报告一次续期是不是"上游拒绝了这把 refresh_token"。
+// IsRefreshRejected 报告一次续期是不是"可重试、**不该记在账号头上**"。
 //
-// 语义是**可重试**，不是"账号废了"：
+// 判据挂在 `gateway.ErrCredentialRefreshRejected` 上，于是自然覆盖两档：
 //
-//	· 计账侧：**不要**因此调 NoteRefreshFailure、不要禁用账号；
-//	· 动作侧：先重读共享凭证库（可能被别的端轮换过），拿不到就等下一轮。
+//	ErrRefreshRejected  上游明确拒绝了这把 refresh_token（打了网络）
+//	ErrRefreshDeferred  退避窗口内，本次连网络都没打
 //
-// 真源：官方 sidecar 的 `Pd3` / `tH` / `Po`（见 ErrRefreshRejected 的注释）。
-func IsRefreshRejected(err error) bool { return errors.Is(err, ErrRefreshRejected) }
+// 两档对调用方的动作完全相同，所以共用一条判据 —— 多一条判据只会多一个
+// 忘了更新的地方（本轮已经踩过一次："计数字段换了名字但行为照旧"）。
+//
+// ⚠ 真终态（ErrRefreshExpired）**不**落在这里，它的动作是"去重新登录"。
+func IsRefreshRejected(err error) bool {
+	return errors.Is(err, gateway.ErrCredentialRefreshRejected)
+}
