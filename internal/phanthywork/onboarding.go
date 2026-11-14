@@ -147,7 +147,7 @@ func (c *Client) signedGetJSON(ctx context.Context, a *Auth, path, op string) (j
 // signedPostJSON 发一个带 v1 签名的 POST。
 //
 // idempotencyKey 为空串时**不发** `idempotency-key` 头，但 canonical 第 7 段仍是空串
-// （分隔符不能省）—— 与官方 `e.idempotencyKey ?? \`\`` 一致。
+// （分隔符不能省）—— 与官方 `e.idempotencyKey ?? \`\“ 一致。
 func (c *Client) signedPostJSON(ctx context.Context, a *Auth, path string, body []byte, idempotencyKey, op string) (json.RawMessage, error) {
 	if a == nil || a.OAuth.AccessToken == "" {
 		return nil, errNoAccessToken
@@ -213,7 +213,7 @@ func onboardingTaskPath(taskID, action string) (string, error) {
 
 // StartOnboardingTask `POST /api/oauth/activities/onboarding/tasks/<taskId>/start`。
 //
-// body 是**字面量空对象** `{}`（官方逐字 `body:\`{}\``）——不是空串，也不是 null。
+// body 是**字面量空对象** `{}`（官方逐字 `body:\`{}\“）——不是空串，也不是 null。
 // 幂等键 `onboarding:start:<installationId>:<taskId>`（稳定，重复调用命中同一条）。
 func (c *Client) StartOnboardingTask(ctx context.Context, a *Auth, taskID string) (json.RawMessage, error) {
 	if a == nil {

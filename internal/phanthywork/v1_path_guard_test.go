@@ -43,7 +43,7 @@ func TestSignV1RejectsQueryInPath(t *testing.T) {
 }
 
 // TestV1CanonicalPathSegmentHasNoQuery 直接钉住 canonical 第 3 段就是传进来的 path
-//（没有再拼 query 的行为），与官方 `new URL(url).pathname` 同形。
+// （没有再拼 query 的行为），与官方 `new URL(url).pathname` 同形。
 func TestV1CanonicalPathSegmentHasNoQuery(t *testing.T) {
 	canonical := V1Canonical("GET", "/api/oauth/referrals/relations", "1", "n", nil, "")
 	segs := strings.Split(canonical, deviceV1Separator)

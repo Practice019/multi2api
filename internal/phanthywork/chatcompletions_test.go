@@ -199,6 +199,7 @@ func TestChatUsesChatCompletionsPath(t *testing.T) {
 //	let u = _O8(q.method, K.pathname, $, G); if (u) for (...) G.set(x, m);
 //
 // 旁证：上游对缺这个头的请求回的正是
+//
 //	403 {"code":"request_not_authorized","message":"missing desktop session"}
 //
 // ⇒ 原判据让"少 4 个头"这件事一路绿灯。现在反过来钉住它。
@@ -258,7 +259,7 @@ func TestChatPathCarriesDesktopInferenceProof(t *testing.T) {
 // TestChatSendsSessionHeaders 断言会话头齐全，且 session 形态正确。
 //
 // ★★ 2026-11-14 修正：此前这条判据**断言了两个官方不存在的头**
-//（`x-phanthy-client: cli` / `x-phanthy-project: global`）——
+// （`x-phanthy-client: cli` / `x-phanthy-project: global`）——
 // 判据把错的行为锁死了，这正是"改错了却一路绿灯"的原因。
 //
 // 官方 sidecar 2.51.0 的 `/v1/chat/completions` 头构造器里**没有**它们：
@@ -337,7 +338,8 @@ func TestChatSendsSessionHeaders(t *testing.T) {
 // client.go 的 ChatCompletionsStream 注释）。
 //
 // ⚠ 这条判据是**双向**的：官方有的少一个不行，官方没有的多一个也不行 ——
-//   两边都是「异常客户端」特征。
+//
+//	两边都是「异常客户端」特征。
 func TestInferenceHeadersMatchOfficialClient(t *testing.T) {
 	up := &chatFakeUpstream{}
 	srv := httptest.NewServer(up.handler())
@@ -409,7 +411,7 @@ func TestInferenceHeadersMatchOfficialClient(t *testing.T) {
 //
 // 原名 `TestChatDoesNotFetchInferenceToken`，断言"chat 不调 summary、直接用
 // access_token 当 Bearer、少一个失败点"。那个结论来自只抓到链路的一跳
-//（内核 → 本地桥），而**桥 → 上游**那一跳会补 12 段签名，
+// （内核 → 本地桥），而**桥 → 上游**那一跳会补 12 段签名，
 // 而 canonical 的第 8 段就是 `sha256(desktop_inference_token)`、
 // 第 4 个证明头 `x-phanthy-desktop-session` 放的就是令牌原值 ——
 // **没有令牌就签不出这个包**（官方桥里是 `if(!iy) return null`，干脆不发）。
