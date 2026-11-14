@@ -1384,4 +1384,3 @@ func truncateRunes(s string, limit int) string {
 	}
 	return string(r[:limit]) + "…"
 }
-

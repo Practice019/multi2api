@@ -55,9 +55,9 @@ func fakeCatalog(t *testing.T, bySession map[string][]string) (*httptest.Server,
 			return
 		}
 		type item struct {
-			ID      string `json:"id"`
-			MaxOut  int    `json:"max_output_tokens"`
-			MaxTok  int    `json:"max_tokens"`
+			ID     string `json:"id"`
+			MaxOut int    `json:"max_output_tokens"`
+			MaxTok int    `json:"max_tokens"`
 		}
 		var data []item
 		for _, id := range ids {
@@ -162,7 +162,7 @@ func TestRefreshCatalogSingleAccountIsIncomplete(t *testing.T) {
 	dir := t.TempDir()
 	writeAuthFile(t, dir, "a", "sess-a") // 只放一个号
 	ts, _ := fakeCatalog(t, map[string][]string{
-		"sess-a": {"spark-x2.6-low", "spark-x2.6-4b"}, // A 专属的两个
+		"sess-a": {"spark-x2.6-low", "spark-x2.6-4b"},  // A 专属的两个
 		"sess-b": {"DeepSeek-V4.1-Flash", "mimo-v2.5"}, // B 才有的
 	})
 	defer ts.Close()

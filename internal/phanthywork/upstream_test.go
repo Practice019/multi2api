@@ -67,8 +67,8 @@ type fakeUpstream struct {
 	registerReasonCode string
 	// lastSessionID / lastClaudeSessionID 记推理请求上的
 	// x-phanthy-session 与 x-claude-code-session-id（★ 500 空体的判据）。
-	lastSessionID        string
-	lastClaudeSessionID  string
+	lastSessionID       string
+	lastClaudeSessionID string
 	// lastInferenceCanonical 假上游**独立重算**出来的 12 段 canonical（★ 第 10 段的判据）。
 	//
 	// ⚠ 它必须是**重算**的结果，不是从实现里抄的 —— 否则断言就成了同义反复。

@@ -217,7 +217,8 @@ const apiCallUA = "phanthy-code-cli/2.1.0"
 //	accept                   application/json
 //
 // ⚠ 签名头（x-desktop-*）与 idempotency-key 由各调用点自己用 applyV1 挂上，
-//   顺序与官方 `...q.headers` 的位置语义一致（调用方传入的覆盖默认）。
+//
+//	顺序与官方 `...q.headers` 的位置语义一致（调用方传入的覆盖默认）。
 func (c *Client) applyCommonHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", apiCallUA)
 	req.Header.Set("x-phanthy-client-source", clientSource)
