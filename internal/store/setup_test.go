@@ -12,6 +12,7 @@
 package store
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -338,15 +339,29 @@ func TestInitializeSetupConcurrentProcesses(t *testing.T) {
 
 	const procs = 4
 	var cmds []*exec.Cmd
+	// ★ childErr 接住每个子进程的 stderr —— 判据红了必须能看出**为什么**红。
+	//
+	// 子进程用退出码回答：0=我建成；3=别人已经建成；11=Open 失败；12=Migrate 失败；
+	// 13=InitializeSetup 报了个非 ErrSetupAlreadyDone 的错。后三种都会在 stderr 上写明原因。
+	//
+	// ⚠ 不接这个管道时 `os/exec` 会把子进程的 stderr **丢掉**（重定向到 devnull）。
+	//   2026-11-14 CI 上就是这样：只知道"子进程 3 异常退出 11"，
+	//   而 11 是 database is locked、磁盘满、还是别的，全无线索 —— 只能靠猜。
+	var childErr []*bytes.Buffer
 	for i := 0; i < procs; i++ {
 		cmd := exec.Command(exe, "-test.run=^TestHelperSetupProcess$", "-test.v")
 		cmd.Env = append(os.Environ(),
 			"STORE_SETUP_CHILD_DB="+dbPath,
 			"STORE_SETUP_CHILD_USER=root"+strconv.Itoa(i),
 		)
+		buf := &bytes.Buffer{}
+		// Stderr 不是 *os.File ⇒ os/exec 起一个 goroutine 拷贝它，且 Wait() 会等该
+		// goroutine 结束；下面所有读取都在 wg.Wait() 之后，所以没有竞态、不需要加锁。
+		cmd.Stderr = buf
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("启动子进程 %d: %v", i, err)
 		}
+		childErr = append(childErr, buf)
 		cmds = append(cmds, cmd)
 	}
 
@@ -371,7 +386,24 @@ func TestInitializeSetupConcurrentProcesses(t *testing.T) {
 	}
 	wg.Wait()
 
+	// dumpChildErr 把所有子进程的 stderr 与退出码拼成一段，附在失败信息后面。
+	//
+	// 只在 wg.Wait() 之后调用 —— 那时 os/exec 的拷贝 goroutine 已经结束。
+	dumpChildErr := func() string {
+		var b strings.Builder
+		for i, buf := range childErr {
+			s := strings.TrimSpace(buf.String())
+			if s == "" {
+				s = "(该子进程没有输出)"
+			}
+			fmt.Fprintf(&b, "\n    --- 子进程 %d（退出码 %d）---\n    %s",
+				i, codes[i], strings.ReplaceAll(s, "\n", "\n    "))
+		}
+		return b.String()
+	}
+
 	success, done := 0, 0
+	unexpected := false
 	for i, c := range codes {
 		switch c {
 		case 0:
@@ -379,15 +411,21 @@ func TestInitializeSetupConcurrentProcesses(t *testing.T) {
 		case 3:
 			done++
 		default:
+			unexpected = true
 			t.Errorf("子进程 %d 异常退出 %d（期望 0 或 3）", i, c)
 		}
 	}
+	if unexpected {
+		t.Errorf("子进程各自的 stderr（退出码 11=Open 失败 / 12=Migrate 失败 / 13=初始化报错）：%s",
+			dumpChildErr())
+	}
 	if success != 1 {
-		t.Fatalf("%d 个进程同时初始化，成功数 = %d（期望恰好 1）；退出码 %v", procs, success, codes)
+		t.Fatalf("%d 个进程同时初始化，成功数 = %d（期望恰好 1）；退出码 %v%s",
+			procs, success, codes, dumpChildErr())
 	}
 	if done != procs-1 {
-		t.Fatalf("其余 %d 个进程应当拿到 ErrSetupAlreadyDone，实际 %d 个；退出码 %v",
-			procs-1, done, codes)
+		t.Fatalf("其余 %d 个进程应当拿到 ErrSetupAlreadyDone，实际 %d 个；退出码 %v%s",
+			procs-1, done, codes, dumpChildErr())
 	}
 
 	// 库里的最终状态：仍然是**单例**，且只有一个用户。
