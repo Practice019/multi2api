@@ -295,29 +295,65 @@ func (p *Provider) DailyActions() []gateway.DailyAction {
 	}}
 }
 
-// CheckinAll 对本上游全部账号执行一次签到（gateway.DailyCheckinExt）。
+// CheckinAll 本上游**不参与**跨上游统一签到 —— 恒返回空报告，**零上游请求**。
 //
-// ⚠ 不直接用驱动的 RunAll：它丢弃逐账号结果（定时任务不需要），而跨上游入口
-// 需要逐账号结果 —— 否则某个上游整片失败时用户只看到"成功了 N 个"。
-// 所以这里走与 HTTP 全量端点同一条路（对每个号调 CheckinOne）。
+// # 为什么（2026-11-14，用户决定）
+//
+// ## 起因：一个死号让整个上游被永久重扫
+//
+// 统一任务（`core-dailycheckin`）的完成判据是「该上游**没有任一账号** fail」
+// （`scheduler/upstreamHadFailure`），只有通过才置 `donePids[pid]`（"今天已扫过"）。
+// 于是出现这条链：
+//
+//	上游里有一个死号在 fail
+//	⇒ donePids 永远不置位
+//	⇒ 每 retryFloor（30 分钟）重扫**整个上游**
+//	⇒ 而 Status 判据是**实打上游**的 FetchSummary（checkin.go 的 Status）
+//	⇒ **所有账号（含健康、已签到的）每 30 分钟被上游打一次，永久**
+//
+// 真机数据（`data/checkin-log.json`）：
+//
+//	cmwfxhqz  12:59:55 ok → 之后 **21 次**全 fail，每 ~30 分钟一次
+//	cmwg6l3p  17:05:12 ok → 17:35/18:05 already → 18:35 起全 fail，之后再没停
+//
+// ## 与官方的差距
+//
+// 官方客户端的签到是**一天一次**（`/api/oauth/activities/daily-login/claim`，
+// 见 docs/protocols/phanthywork-official-client-outbound-spec.md §3.2）。
+// 我们是 48 次/天/账号 —— 而这条路径又是**签名写操作**，
+// 频率异常 × 请求形状异常（见该文档 §7.2 的 U-1/U-2）叠在一起。
+//
+// ## 用户决定
+//
+// > "这个新的上游不需要注册这个任务，就这个任务它管其他的，不管我们这个就行。
+// >  我们不需要签到，不需要自动签到，我们可以有那个按钮，但是不需要自动的。
+// >  我们只需要完成最基本的自动续期的工作，其他都不需要。"
+//
+// # 手动按钮**不受影响**（这是本节最容易误解的地方）
+//
+// 单账号 / 全量按钮走的是 `checkinDescriptor` 声明的两条 admin 端点：
+//
+//	Driver.HandlerOne  → d.CheckinOne(ctx, acc, "manual")
+//	Driver.HandlerAll  → for acc { d.CheckinOne(ctx, acc, "manual") }
+//
+// 它们**直接调 `CheckinOne`，不经过本函数** ⇒ 按钮照旧可用，
+// 用户想签的时候随时能签。
+//
+// ⇒ 只有两条**自动**入口不再包含本上游：
+//
+//	· 调度器的 `core-daily-checkin`（每 30 分钟那趟）
+//	· 面板上的**跨上游**"全部签到"（它同样走 CheckinAll）
+//
+// 这正是用户要的"这个任务管其他的、不管我们这个"。
+//
+// # 自动续期不受影响
+//
+// 本上游的定时任务只有 `Jobs()` 返回的那一条 `phanthywork-refresh`（续期），
+// 它与签到无关，仍然照常跑。判据：TestPhanthyworkKeepsRefreshJobOnly。
+//
+// 判据（本条）：TestPhanthyworkOptsOutOfUnifiedCheckin
 func (p *Provider) CheckinAll(ctx context.Context) gateway.DailyCheckinReport {
-	if p == nil || p.checkin == nil || !p.checkin.Ready() {
-		return gateway.DailyCheckinReport{}
-	}
-	up := &checkinUpstream{p: p}
-	accounts, err := up.Accounts(ctx)
-	if err != nil {
-		return gateway.DailyCheckinReport{Error: "列账号失败: " + err.Error()}
-	}
-	out := make([]gateway.DailyCheckinResult, 0, len(accounts))
-	for _, acc := range accounts {
-		if ctx.Err() != nil {
-			break
-		}
-		res := p.checkin.CheckinOne(ctx, acc, "manual")
-		out = append(out, gateway.DailyCheckinResult{UID: res.UID, Status: res.Status, Detail: res.Detail})
-	}
-	return gateway.DailyCheckinReport{Results: out}
+	return gateway.DailyCheckinReport{}
 }
 
 // checkinRoutes 驱动提供的两条 HTTP 端点（单账号 / 全量）。

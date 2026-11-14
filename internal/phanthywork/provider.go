@@ -520,7 +520,10 @@ func (p *Provider) Caps() gateway.Capability {
 	//	CapChat         Provider.Chat 打通（真机 200，见 preparebody_test.go 的 502 回归）
 	//	CapModels       Models() 在任何情况下都返回非空（含无凭证）
 	//	CapQuotaProbe   QuotaExt.QueryQuota：activities/summary 读额度（quota.go）
-	//	CapCheckin      每日签到：共享驱动 + 单/全量端点（checkin.go）
+	//	CapCheckin      ★ **仅手动**签到：单/全量两条 admin 端点（checkin.go 的 checkinRoutes）。
+	//	                本上游**不参与**跨上游统一签到（CheckinAll 恒返回空、零上游请求）——
+	//	                2026-11-14 用户决定，理由见 checkin.go 的 CheckinAll 长注释。
+	//	                判据：TestPhanthyworkOptsOutOfUnifiedCheckin
 	//	CapImport       批量导入：粘贴官方/网关/扁平三种形态（import.go）
 	//	CapInvite       邀请码面板：GET /admin/phanthywork/invite（invite.go）
 	//	                ⚠ 它是**读了会写**的面板 —— 取码只能用 POST /referrals/code（平台没有只读字段，

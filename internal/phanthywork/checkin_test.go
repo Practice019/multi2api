@@ -155,28 +155,52 @@ func TestCheckinRefusesLocalDateWhenServerDateMissing(t *testing.T) {
 	}
 }
 
-// TestCheckinAllReportsPerAccount 全量签到：逐账号结果，不是只回一个总数。
-func TestCheckinAllReportsPerAccount(t *testing.T) {
+// TestCheckinAllIsNoOpForUnifiedSweep 统一签到入口对本上游**恒空、零上游请求**。
+//
+// ★ 2026-11-14 反转：原 `TestCheckinAllReportsPerAccount` 断言"逐账号回结果 + 各领一次"，
+// 那是在守护**已被移除的行为**（见 checkin.go 的 CheckinAll 长注释）。
+//
+// # 为什么必须零上游请求（不只是零 claim）
+//
+// 统一任务的 `Status` 判据是**实打上游**的 `FetchSummary`。所以"跳过 claim"
+// 并不够 —— 只要 `CheckinAll` 还遍历账号，每个号仍会被打一次 summary。
+// 真机代价：一个死号让整个上游每 30 分钟被重扫，健康号也跟着被打（48 次/天）。
+//
+// 所以本条同时钉 `claimCalls` 与 `summaryCalls` **两个**计数：
+//
+//	claimCalls   鉴权写操作（官方一天一次，我们曾经 48 次/天）
+//	summaryCalls 只读，但仍是真实上游请求（同一频率）
+//
+// 只钉 claimCalls 会漏掉"不打 claim 但仍打 summary"这半。
+func TestCheckinAllIsNoOpForUnifiedSweep(t *testing.T) {
 	p, a1, fake := checkinFixture(t, nil)
 	a2 := newTestAuth("u-2", "rt-2")
 	a2.Reg.RegisteredAtMS = nowMS()
-	fake.trust(a2) // 第二个账号也要"被上游认识"（真实世界里它各自注册过设备密钥）
+	fake.trust(a2)
 	p.SetLocalCredential(a2.UID(), a2)
 	p.SetUIDEnumerator(func() []string { return []string{a1.UID(), a2.UID()} })
+
+	// 咬合力：夹具里 `dailyStatus = "available"` ⇒ 若实现还是老样子，
+	// 每个号都会被 Status（summary）+ Claim 打一次，下面两个计数必然非零。
+	if fake.dailyStatus != "available" {
+		t.Fatalf("夹具前提变了（dailyStatus=%q）：代码会判『已签过』而跳过，"+
+			"下面对 0 的断言就证明不了任何东西", fake.dailyStatus)
+	}
+
 	rep := p.CheckinAll(context.Background())
 	if rep.Error != "" {
-		t.Fatalf("全量签到报错: %s", rep.Error)
+		t.Errorf("统一签到入口不该报错（它已opt-out，不是失败）: %s", rep.Error)
 	}
-	if len(rep.Results) != 2 {
-		t.Fatalf("应当逐账号回结果（2 个），实际 %d 个: %+v", len(rep.Results), rep.Results)
+	if len(rep.Results) != 0 {
+		t.Errorf("本上游不参与统一签到 ⇒ 结果必须为空，实际 %d 条: %+v", len(rep.Results), rep.Results)
 	}
-	for _, r := range rep.Results {
-		if r.Status != "ok" {
-			t.Errorf("uid=%s 应当签到成功，得到 %q（%s）", r.UID, r.Status, r.Detail)
-		}
+	if n := atomicLoad(&fake.claimCalls); n != 0 {
+		t.Errorf("不该有任何 claim（写操作），实际 %d 次 ——\n"+
+			"官方一天一次，我们曾经 48 次/天/账号", n)
 	}
-	if n := atomicLoad(&fake.claimCalls); n != 2 {
-		t.Errorf("两个账号各领一次，实际 %d 次", n)
+	if n := atomicLoad(&fake.summaryCalls); n != 0 {
+		t.Errorf("不该有任何 summary（只读但仍是真实上游请求），实际 %d 次 ——\n"+
+			"只跳过 claim 不够：Status 判据本身就是打上游", n)
 	}
 }
 

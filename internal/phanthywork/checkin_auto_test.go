@@ -49,43 +49,88 @@ func autoCheckinFixture(t *testing.T) (*Provider, []*Auth, *fakeUpstream) {
 	return p, []*Auth{a1, a2}, fake
 }
 
-// TestAutoCheckinIsLiveThroughUnifiedJob ★ 「自动签到开着」的判据。
+// TestPhanthyworkOptsOutOfUnifiedCheckin ★ 本上游**不参与**跨上游统一签到。
 //
-// 统一签到任务调的就是 `CheckinAll`（dailycheckin.go:211），所以这条用例等价于
-// 「把统一任务跑一轮会发生什么」：
+// ★★ 2026-11-14 反转：原 `TestAutoCheckinIsLiveThroughUnifiedJob` 断言
+// "统一任务跑一轮 ⇒ 每个账号恰好一次 claim"，那是在守护**已被移除的行为**。
 //
-//	· 每个账号**恰好一次** claim（不多不少）
-//	· 全部成功 —— 假上游对 body 不是 `{}`、幂等键不是服务端日键**都回 403**，
-//	  所以「全 ok」本身就证明两条硬要求在**自动路径**上同样成立
-//	· 且这一切发生在 `AutoEnabled() == false` 的前提下 ⇒ Enabled 不控制自动路径
-func TestAutoCheckinIsLiveThroughUnifiedJob(t *testing.T) {
+// # 反转的理由（用户决定 + 真机数据）
+//
+// 统一任务的完成判据是「该上游**没有任一账号** fail」；只要有一个死号在 fail，
+// `donePids[pid]` 就永远不置位 ⇒ 每 30 分钟重扫**整个上游**。而 `Status` 判据
+// 本身是实打上游的 `FetchSummary` ⇒ 所有账号（含健康号）每 30 分钟被打一次。
+//
+// 真机（data/checkin-log.json）：cmwfxhqz 死后仍被打 21 次；cmwg6l3p 从 18:35 起
+// 每 30 分钟一次。而官方客户端是**一天一次**。
+//
+// 用户原话：
+//
+//	"这个新的上游不需要注册这个任务……我们不需要自动签到，我们可以有那个按钮，
+//	 但是不需要自动的。我们只需要完成最基本的自动续期的工作，其他都不需要。"
+//
+// # 为什么**保留** DailyCheckinExt 接口（而不是删掉方法）
+//
+//  1. `Caps()` 声明了 `CapCheckin`，而 `accountcolumns_test` 有一条
+//     "能力位 vs 列集"的一致性护栏；删方法但留能力位会自相矛盾。
+//  2. 面板上的**跨上游**"全部签到"（admin/checkin_all.go）靠这个接口遍历；
+//     保留它、返回空报告，比"让那个端点找不到上游"更好解释。
+//
+// # 手动按钮**仍然可用**（别误读成"签到没了"）
+//
+// 单账号 / 全量签到按钮走 `Driver.HandlerOne` / `HandlerAll`，它们直接调
+// `CheckinOne`，**不经过本函数**。所以按钮照旧。
+//
+// 判据（配套）：TestCheckinAllIsNoOpForUnifiedSweep（零 summary + 零 claim）
+func TestPhanthyworkOptsOutOfUnifiedCheckin(t *testing.T) {
 	p, accounts, fake := autoCheckinFixture(t)
 
-	// ① 核心按这个接口发现上游；不实现它 = 被统一任务跳过（见文件头 + 下一条反例）。
+	if len(accounts) == 0 {
+		t.Fatal("夹具前提：应当有账号，否则下面零请求的断言证明不了任何东西")
+	}
+
+	// ① 接口仍在（刻意的，理由见上）—— 所以统一任务**发现得到**本上游。
 	ext, ok := gateway.ExtOf[gateway.DailyCheckinExt](gateway.Provider(p))
 	if !ok {
-		t.Fatalf("本包没有实现 gateway.DailyCheckinExt ⇒ 统一签到发现不到它 ⇒ 自动签到静默失效")
+		t.Fatalf("本包应当**保留** DailyCheckinExt 接口（Caps 里有 CapCheckin、面板要遍历）；" +
+			"否则连 opt-out 的入口都没有了")
 	}
 
-	// ② 前提断言：本包**刻意**不注册 per-upstream Job（AutoEnabled=false）。
-	//    它若变成 true，说明有人改过那个决定（那会让同一天多打几轮幂等接口）——应当先讨论。
-	if p.checkin.AutoEnabled() {
-		t.Fatalf("夹具前提变了：本包的 driver.Enabled 应当是 false（见 checkin.go 的 initCheckin 注释）")
-	}
-
-	// ③ 跑一轮（统一任务做的事）。
+	// ② 但统一任务跑一轮时：零结果、零上游请求。
 	rep := ext.CheckinAll(context.Background())
-	if len(rep.Results) != len(accounts) {
-		t.Fatalf("应当对 %d 个账号各出一条结果，实际 %d 条: %+v", len(accounts), len(rep.Results), rep)
+	if len(rep.Results) != 0 {
+		t.Errorf("本上游已 opt-out ⇒ 不该有任何逐账号结果，实际 %d 条: %+v", len(rep.Results), rep)
 	}
-	for _, r := range rep.Results {
-		if r.Status != "ok" {
-			t.Errorf("账号 %s 签到未成功: status=%q detail=%q（假上游对 body/幂等键不合规一律 403）",
-				r.UID, r.Status, r.Detail)
+	if n := atomicLoad(&fake.claimCalls); n != 0 {
+		t.Errorf("不该有 claim（写操作），实际 %d 次 —— 官方一天一次，我们曾是 48 次/天", n)
+	}
+	if n := atomicLoad(&fake.summaryCalls); n != 0 {
+		t.Errorf("不该有 summary（只读，但仍是真实上游请求），实际 %d 次 ——\n"+
+			"这正是「跳过 claim 但照样打上游」的那半，必须一起钉", n)
+	}
+}
+
+// TestPhanthyworkKeepsRefreshJobOnly ★ 本上游的定时任务**只剩自动续期**。
+//
+// 用户原话："我们只需要完成最基本的自动续期的工作，其他都不需要。"
+//
+// 这条钉住那个约定的**形状**：`Jobs()` 恰好一条，且是 `phanthywork-refresh`。
+// 将来若有人给本上游加回签到任务（或别的定时任务），这里会红。
+func TestPhanthyworkKeepsRefreshJobOnly(t *testing.T) {
+	p := NewProvider(Config{AuthDir: t.TempDir()})
+	jobs := p.Jobs()
+	if len(jobs) != 1 {
+		names := make([]string, 0, len(jobs))
+		for _, j := range jobs {
+			names = append(names, j.Name)
 		}
+		t.Fatalf("本上游应只有 1 条定时任务（自动续期），实际 %d 条: %v\n"+
+			"用户明确要求「只需要自动续期，其他都不需要」", len(jobs), names)
 	}
-	if n := atomicLoad(&fake.claimCalls); n != int32(len(accounts)) {
-		t.Errorf("每个账号应当**恰好**打一次 claim（共 %d 次），实际 %d 次", len(accounts), n)
+	if jobs[0].Name != JobRefresh {
+		t.Errorf("唯一那条定时任务应当是 %q（自动续期），实际 %q", JobRefresh, jobs[0].Name)
+	}
+	if jobs[0].Interval <= 0 {
+		t.Errorf("续期任务的间隔应当 > 0（否则等于没注册），实际 %v", jobs[0].Interval)
 	}
 }
 
