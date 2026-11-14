@@ -683,17 +683,31 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
 
-	// 连续 3 次请求，上游持续 500 → 只应触发 1 次 fetch（负缓存生效），
+	// 连续 3 次请求，上游持续 500 → 只应触发 1 轮 fetch（负缓存生效），
 	// 其余走静态 fallback（仍返回 200）。
+	//
+	// ⚠ 断言「负缓存期间请求量不再增长」，而不是「恰好 1 个请求」。
+	//   一轮失败可能包含**多个**上游请求：2026-11-14 给 FetchModels 加了
+	//   /v3/config 兜底（上游把 intl 的目录路径改掉之后，主列表 404 会让整个
+	//   上游的模型静默消失），于是 1 轮 = 主列表 + 兜底 = 2 个请求。
+	//   把「一轮几个请求」写死，会让以后任何兜底/重试改动都误伤这条测试；
+	//   它真正要守的语义是「负缓存挡住了重复回源」。
+	var afterFirst int
 	for i := 0; i < 3; i++ {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
 		if rec.Code != 200 {
 			t.Fatalf("req %d: code=%d body=%s", i, rec.Code, rec.Body)
 		}
+		if i == 0 {
+			afterFirst = calls
+			if afterFirst == 0 {
+				t.Fatal("第一次请求应该触发一次回源")
+			}
+		}
 	}
-	if calls != 1 {
-		t.Errorf("want 1 fetch, got %d", calls)
+	if calls != afterFirst {
+		t.Errorf("负缓存期间不该再回源：第一轮 %d 次请求，3 次客户端请求后变成 %d 次", afterFirst, calls)
 	}
 
 	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
@@ -705,8 +719,8 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("after cooldown: code=%d", rec.Code)
 	}
-	if calls != 2 {
-		t.Errorf("want 2 fetch after cooldown, got %d", calls)
+	if calls <= afterFirst {
+		t.Errorf("冷却后应重新回源，实际请求量没增加（仍是 %d）", calls)
 	}
 }
 

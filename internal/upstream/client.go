@@ -702,6 +702,17 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
+		// 主列表不可用时用 /v3/config 的模型目录兜底。
+		//
+		// ⚠ 2026-11-14：这是修「workbuddy-intl 模型全空」的关键之一。
+		//   上游把 intl 的目录路径改掉了（原 /v2/enterprises/personal/models
+		//   现在返回 404 {"error_msg":"404 Route Not Found"}），而主列表一失败
+		//   整个 FetchModels 就 return error ⇒ 该上游的模型**全部消失**，
+		//   页面上连供应商行都不出现（供应商行是从模型反推的）。
+		//   实测同一时间 /v3/config 仍然 200 且给出 23 个模型 —— 用它兜底。
+		if fb, ok := c.catalogFallback(a); ok {
+			return fb, nil
+		}
 		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
 	}
 	var env struct {
@@ -773,6 +784,11 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		})
 	}
 	if len(out) == 0 {
+		// 主列表能连上但一个可用模型都没给（例如 cli agent 集合为空 /
+		// 全部 disabled）—— 同样用 /v3/config 兜底，理由同上。
+		if fb, ok := c.catalogFallback(a); ok {
+			return fb, nil
+		}
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	// 合并 /v3/config 里多出的模型（模型列表全面化）。
@@ -815,6 +831,37 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	c.efforts = cache
 	c.effortsMu.Unlock()
 	return out, nil
+}
+
+// catalogFallback 用 /v3/config 的模型目录给主列表兜底。
+//
+// # 为什么必须有（2026-11-14 用户报障「workbuddy 国际模型全没了」）
+//
+// 上游把 intl 的目录路径改掉了：原来是 `/v2/enterprises/personal/models`
+// （代码注释里记着"实测 200"），今天实测返回 404 `{"error_msg":"404 Route Not Found"}`。
+// 候选路径试遍之后确认：intl 域上**只有** `/v2/enterprises/models` 不是 404
+// （它返回 429，说明路由存在、只是被该端点的限流器接住）。
+//
+// 而 `/v3/config` 一直可用，且给出**比主列表更全**的模型集
+// （实测 intl：data.models 23 个、agents[cli].models 21 个）。
+// 它本来就在本文件里被用作"锦上添花"的追加来源 —— 这里把它提升为
+// **主列表失败时的兜底**，避免上游改路径就让整个上游的模型静默消失。
+//
+// 返回的条目只有 ID/Name（/v3/config 不带上下文字段）：名称正确、可调用，
+// 足够用户选择；这是"有目录"与"完全没目录"的差别，不是锦上添花。
+func (c *Client) catalogFallback(a *auth.Auth) ([]ModelInfo, bool) {
+	cat, err := c.FetchModelCatalog(a)
+	if err != nil || cat == nil || len(cat.Models) == 0 {
+		return nil, false
+	}
+	out := make([]ModelInfo, 0, len(cat.Models))
+	for _, ce := range cat.Models {
+		if ce.ID == "" {
+			continue
+		}
+		out = append(out, ModelInfo{ID: ce.ID, Name: ce.ID})
+	}
+	return out, len(out) > 0
 }
 
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。

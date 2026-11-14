@@ -455,11 +455,35 @@ func freePort() (int, error) {
 // ⇒ 宁可建在**我们自己的地盘**（工作目录下的 .browser-profiles），
 //
 //	也不要往系统临时目录里堆 —— 那是用户不知道谁建的地方。
+//
+// ★ T-457（2026-11-14 用户报障）：返回的路径必须是**绝对路径**。
+//
+// 现象：每次点「添加账号」都弹 Edge 的
+//
+//	无法读取和写入其数据目录：.browser-profiles\wb2api-login-<纳秒>
+//
+// 原因：`--user-data-dir` 给的是相对路径，而浏览器**按它自己的 CWD** 解析它
+// （Edge 装在 `C:\Program Files (x86)\Microsoft\Edge\Application\`，那里不可写），
+// 于是创建 profile 目录失败、授权页打不开、弹窗每次必现。
+//
+// ⇒ 这里统一过一遍 filepath.Abs。测试判据：TestProfileRootIsAbsolute。
 func (p *Provider) profileRoot() string {
-	if p.authDir == "" {
-		return ".browser-profiles"
+	root := p.authDir
+	if root == "" {
+		// 没配凭证目录：落到**工作目录**下的 .browser-profiles（不放 %TEMP%，见上）。
+		if wd, err := os.Getwd(); err == nil && wd != "" {
+			root = wd
+		} else {
+			root = os.TempDir()
+		}
+		return filepath.Join(root, ".browser-profiles")
 	}
-	return p.authDir + string(os.PathSeparator) + ".browser-profiles"
+	// ⚠ 绝对化（T-457）：相对路径会被浏览器按它自己的 CWD 解析 ⇒ 不可写 ⇒ 弹窗。
+	joined := filepath.Join(root, ".browser-profiles")
+	if abs, err := filepath.Abs(joined); err == nil {
+		return abs
+	}
+	return joined
 }
 
 // 编译期小工具：确认 http 包仍被使用（handler 在别处）。
