@@ -252,3 +252,35 @@ func TestSignedGetHashesEmptyBody(t *testing.T) {
 		t.Errorf("sha256B64URL(nil) = %q，want %q", got, want)
 	}
 }
+
+// TestBuildProofRejectsQueryInPath inference canonical 的 path 段不许带 query。
+//
+// 真源：官方 sidecar 的 proof 构造器 `_O8(q, K, _, z)` 第 3 段传的是 `K.pathname`（逐字），
+// 且官方本地推理桥 `gd3` 的入口要求 query 为空（唯一例外 `/v1/messages?beta=true`）。
+// 两条一起说明：这条路径上 query 既不进签名，也不该出现。
+//
+// 这是个"加了 query 就 403 request_not_authorized、而该错误码与时钟/UA/令牌过期完全同形"
+// 的陷阱 —— 用断言把它钉在本地。
+func TestBuildProofRejectsQueryInPath(t *testing.T) {
+	c := NewWithBase("http://127.0.0.1:1")
+	a := newTestAuth("proof-q-1", "refresh-proof-q-1")
+	a.OAuth.AccessToken = "access-proof-q-1"
+
+	// ① 带 query：必须当场报错
+	_, err := c.buildProof(a, http.MethodPost, pathMessages+"?beta=true",
+		[]byte(`{}`), "inference-token", nowMS())
+	if err == nil {
+		t.Fatal("path 带 query 时必须报错 —— 否则会签出一个服务端重算不出来的串")
+	}
+	if !strings.Contains(err.Error(), "query") {
+		t.Errorf("错误信息应点明 query，实得: %v", err)
+	}
+
+	// ② 反向：干净的 path 不该命中这条护栏
+	//（可能因别的理由失败 —— 这里只断言"不是 query 那条"）
+	_, err2 := c.buildProof(a, http.MethodPost, pathChatCompletions,
+		[]byte(`{}`), "inference-token", nowMS())
+	if err2 != nil && strings.Contains(err2.Error(), "query") {
+		t.Errorf("不带 query 的 path 不该命中这条护栏，实得: %v", err2)
+	}
+}
