@@ -352,60 +352,52 @@ func TestRegistrationCooldownBlocksRetry(t *testing.T) {
 	}
 }
 
-// ── 坑⑦ 修正版：**两条串用空格、一条串用 LF** ───────────────────────────
+// ── 坑⑦ 修正版：**三条 canonical 全部用 LF** ───────────────────────────
 
 // TestCanonicalSeparatorsArePerString 三条 canonical 的分隔符**逐字节**断言。
 //
-// ⚠ 2026-11-14 真机 + 官方源码修正：三条串的**分隔符不是同一个**。
+// ★★ 2026-11-14 二次修正（此前写的是"device/v1 空格、inference LF"）：
 //
-//	device     → 单个空格 0x20   （前端 App-*.js: [...].join(` `)）
-//	v1         → 单个空格 0x20   （同上）
-//	inference  → LF 0x0A         （sidecar jO8(): [...].join(`\n`)，字节 0A）
+// 真源是官方实现 `magpie-PhanthyCode/src/proof.mjs`（标注「抓包 → 逐字符复现 → 200 通过」）：
+//
+//	const LF = "\n"
+//	[DEVICE_PREFIX, ...segments].join(LF)                 // device
+//	[V1_PREFIX, ...segments].join(LF)                     // v1
+//	[INFERENCE_PREFIX, ...head, ...tail].join(LF)         // inference
+//
+// ⇒ **三条全是 LF (0x0A)**，不存在"两条空格"的历史形态。
+// 判据按字节断言：任何一条出现 0x20 分隔符都红。
 //
 // 这条是本文件里最"笨"也最重要的一条：渲染工具会把 0x0A 显示成「点」、
 // 把空格显示成看不见 —— 只有按字节断言才拦得住。
-// 早期版本把三条都写成 LF，那会让 device/v1 签名恒失败（invalid_desktop_signature）。
 func TestCanonicalSeparatorsArePerString(t *testing.T) {
 	dev := DeviceCanonical("scope", "di_x", "pubI", "pubR", "1700000000000", "nonce")
 	v1 := V1Canonical("POST", "/p", "1700000000000", "nonce", []byte("{}"), "")
 	inf := InferenceCanonical("POST", "/v1/messages", "1700000000000", "nonce", []byte("{}"),
 		"Bearer at", "tok", "rid", "", "", "")
 
-	// ① device / v1：分隔符必须是 0x20，且整串不许出现 LF
-	for name, s := range map[string]string{"device": dev, "v1": v1} {
-		if strings.Contains(s, "\n") {
-			t.Errorf("%s canonical 里出现了 LF —— 分隔符必须是空格 0x20: %q", name, s)
-		}
-		i := strings.IndexByte(s, ' ')
+	// ① 三条都必须用 0x0A 分隔，整串不许出现空格当分隔符
+	for name, s := range map[string]string{"device": dev, "v1": v1, "inference": inf} {
+		i := strings.IndexByte(s, '\n')
 		if i <= 0 {
-			t.Fatalf("%s canonical 的段结构不对（找不到空格分隔符）: %q", name, s)
+			t.Fatalf("%s canonical 里没有 LF（分隔符必须是 0x0A）: %q", name, s)
 		}
-		if s[i] != 0x20 {
-			t.Errorf("%s canonical 的分隔符字节 = 0x%02X（必须是 0x20）", name, s[i])
+		if s[i] != 0x0A {
+			t.Errorf("%s canonical 的分隔符字节 = 0x%02X（必须是 0x0A）", name, s[i])
+		}
+		if strings.Contains(s, " ") {
+			t.Errorf("%s canonical 里出现了空格 —— 分隔符必须是 LF: %q", name, s)
 		}
 	}
 
-	// ② inference：分隔符必须是 0x0A
-	firstLF := strings.IndexByte(inf, '\n')
-	if firstLF <= 0 {
-		t.Fatalf("inference canonical 里没有 LF（分隔符写错了）: %q", inf)
-	}
-	if inf[firstLF] != 0x0A {
-		t.Errorf("inference canonical 的第一处分隔符不是 0x0A: %q", inf)
-	}
-	// 前两段（前缀 + METHOD + pathname）里没有空格，所以首个空格不应出现在首处 LF 之前
-	if k := strings.IndexByte(inf, ' '); k >= 0 && k < firstLF {
-		t.Errorf("inference canonical 的前段之间出现了空格（应当是 LF）: %q", inf)
-	}
-
-	// ③ 三类串都不得用冒号/竖线当分隔符
+	// ② 三类串都不得用冒号/竖线当分隔符
 	for name, s := range map[string]string{"device": dev, "v1": v1, "inference": inf} {
 		if strings.Contains(s, "|") || strings.Contains(s, ":v1") {
 			t.Errorf("%s canonical 用了冒号或竖线当分隔符: %q", name, s)
 		}
 	}
 
-	// ④ 段数：device 7 / v1 7 / inference 12（少一段就是另一个串）
+	// ③ 段数：device 7 / v1 7 / inference 12（少一段就是另一个串）
 	//    ⚠ 用常量而不是字面量：以后再改分隔符时，断言不会静默失效。
 	if n := len(strings.Split(dev, deviceV1Separator)); n != 7 {
 		t.Errorf("device canonical 段数 = %d, want 7", n)
@@ -574,20 +566,21 @@ func TestSummaryHasNoIdempotencyKey(t *testing.T) {
 
 // ── 坑⑫：method 在两条串里的大小写规则**相反** ──────────────────────────
 
-// TestMethodCaseRulesDiffer 一条 toUpperCase，一条保持原值；
-// 同时钉住两条串的分隔符**不同**（v1 空格 / inference LF）。
+// TestMethodCaseRulesDiffer 一条 toUpperCase、一条保持原值；
+// 同时钉住**两条串用的是同一个 LF 分隔符**（2026-11-14 二次修正：
+// 官方 proof.mjs 的三条 canonical 全部 `.join(LF)`，不存在"v1 空格"的形态）。
 func TestMethodCaseRulesDiffer(t *testing.T) {
 	v1 := V1Canonical("get", "/p", "1", "n", nil, "")
-	if !strings.HasPrefix(v1, "v1 get ") {
-		t.Errorf("v1 串必须**保持原值**（坑⑫）且用空格分隔，得到 %q", v1)
+	if !strings.HasPrefix(v1, "v1\nget\n") {
+		t.Errorf("v1 串必须**保持原值**（坑⑫）且用 LF 分隔，得到 %q", v1)
 	}
 	inf := InferenceCanonical("get", "/p", "1", "n", nil, "a", "t", "r", "", "", "")
 	if !strings.HasPrefix(inf, "desktop-inference-v2\nGET\n") {
 		t.Errorf("inference 串必须**大写**（坑⑫）且用 LF 分隔，得到 %q", inf)
 	}
 	// 大写输入下两条串都不该被改坏
-	if !strings.HasPrefix(V1Canonical("POST", "/p", "1", "n", nil, ""), "v1 POST ") {
-		t.Error("v1 串对 POST 应原样保留（分隔符是空格）")
+	if !strings.HasPrefix(V1Canonical("POST", "/p", "1", "n", nil, ""), "v1\nPOST\n") {
+		t.Error("v1 串对 POST 应原样保留（分隔符是 LF）")
 	}
 }
 

@@ -58,15 +58,34 @@ import (
 // ── 常量（协议事实，全部来自报告）────────────────────────────────────────
 
 const (
-	// deviceV1Separator device / v1 两条 canonical 的段分隔符 = **单个空格**。
+	// deviceV1Separator device / v1 两条 canonical 的段分隔符 = **LF（0x0A）**。
 	//
-	// ⚠ 不是 LF、不是冒号、不是竖线。证据见包注释（前端 bundle 的 .join(` `)）。
-	deviceV1Separator = " "
+	// ★★ 2026-11-14 修正（此前写成"单个空格 0x20"，是错的）：
+	//
+	// 真源是官方实现 `magpie-PhanthyCode/src/proof.mjs`：
+	//
+	//	const LF = "\n"                                              // L61
+	//	return [DEVICE_PREFIX, ...segments].join(LF)                 // L112 device
+	//	return [V1_PREFIX, ...segments].join(LF)                     // L131 v1
+	//	return [INFERENCE_PREFIX, ...head, ...tail].join(LF)         // L164 inference
+	//
+	// 也就是说 **三条 canonical 用的是同一个 LF**，不存在"两条空格、一条 LF"这回事。
+	// 该实现的 NOTE 标注是「抓包 → 逐字符复现 → 200 通过」（见 installation-id.mjs:3
+	// 与 production-auth.mjs:33），可信度高于原先引用的"前端 bundle 的 .join(` `)"。
+	//
+	// 写错的后果正是 `401 invalid_desktop_signature` —— 一个看不出根因的错误码
+	// （2026-11-14 用户报障的正是它，且凭证里从未出现过 registered_at_ms）。
+	deviceV1Separator = "\n"
 
 	// inferenceSeparator inference canonical 的段分隔符 = **LF（0x0A）**。
 	//
-	// ⚠ 与上面那个**不同**。证据见包注释（sidecar 的 .join(`\n`)，
-	//   二进制里是 5D 2E 6A 6F 69 6E 28 60 0A 60 29）。
+	// ⚠ 2026-11-14 修正：它和 deviceV1Separator **是同一个值**（都是 LF）。
+	//   此前这里写着"与上面那个**不同**"—— 那句错话连同 deviceV1Separator 的
+	//   "单个空格"一起，构成了 `invalid_desktop_signature` 的完整根因。
+	//   真源：官方 proof.mjs 的三条 canonical 全部 `.join(LF)`。
+	//
+	//   保留成两个常量而不是合并成一个：它们的**语义**不同（一个是 device/v1 的、
+	//   一个是 inference 的），将来若真出现分化，改一处不会连累另一处。
 	inferenceSeparator = "\n"
 
 	// deviceCanonicalPrefix device canonical 的版本域。
