@@ -295,20 +295,40 @@ func TestProviderActionsRequireUIIdentity(t *testing.T) {
 // TestModelsPageHasProviderActionColumns 页面结构钩子（e2e 不读源码也能验）。
 //
 // 断的是 **data-act / data-actres** 而不是按钮文案：文案会改（中英文/措辞），
-// 钩子是契约。同时断言两个端点路径出现在页面里 —— 前端与后端路由同源，
+// 钩子是契约。同时断言端点路径出现在页面里 —— 前端与后端路由同源，
 // 任何一边改名另一边没跟上，这条会立刻红。
+//
+// ⚠ 2026-11-14：原页面有三列动作（只看它 / 重拉 / 探测），按用户要求收窄成
+// **一列、只剩「重拉」**。所以这里除了正向钩子，还加了**反向断言** ——
+// 见函数末尾。
 func TestModelsPageHasProviderActionColumns(t *testing.T) {
 	page := string(modelsUIPage)
 	for _, hook := range []string{
 		`setAttribute('data-act', 'refresh')`,
-		`setAttribute('data-act', 'probe')`,
-		`setAttribute('data-act', 'probe-go')`,
 		`setAttribute('data-actres', kind)`,
 		"/ui/models/provider/refresh",
-		"/ui/models/provider/probe",
+		`<th>操作</th>`, // 行内动作只占一列
 	} {
 		if !strings.Contains(page, hook) {
 			t.Fatalf("模型页缺少契约钩子 %q —— 前端与后端路由/行为已经分叉", hook)
+		}
+	}
+
+	// ★ 反向断言：去掉的两个按钮**不许再出现**。
+	//
+	// 只断言"该在的还在"不够 —— 它拦不住"删了但没删干净"（留下死代码，
+	// 或一个指向已不存在的 DOM 的事件分支），也拦不住下次有人加回来。
+	// 断言串一律取 **JS 字面量形态**，这样不会误命中解释性注释
+	// （注释里写的是「只看它」中文书名号，不是 '只看它'）。
+	for _, gone := range []string{
+		`setAttribute('data-act', 'probe')`,
+		`setAttribute('data-act', 'probe-go')`,
+		`setAttribute('data-act', 'probe-cancel')`,
+		`el('button', null, '只看它')`,
+		`className = 'viewmodels'`,
+	} {
+		if strings.Contains(page, gone) {
+			t.Errorf("模型页不该再出现 %q —— 该控件已于 2026-11-14 按要求去掉", gone)
 		}
 	}
 }
