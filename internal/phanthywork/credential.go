@@ -377,6 +377,19 @@ func (a *Auth) skew() int64 {
 	return NormalizeClockSkewMS(a.baseSkewMS)
 }
 
+// isClockCalibrated 报告本账号是否**已经拿到过服务端时间**。
+//
+// ⚠ 它区别于 skew()：skew() 在未校准时会回落到配置基线（可能是 0），
+// 于是"看起来有偏移"和"真的校准过"这件事被混在一起。
+// `ensureInferenceToken` 需要的是后者 —— 未校准就必须去换一次令牌
+// （换令牌是唯一能拿 server_time 的常规路径），不能凭缓存跳过。
+func (a *Auth) isClockCalibrated() bool {
+	if a == nil {
+		return false
+	}
+	return a.skewCalibrated.Load()
+}
+
 // serverNowMS 返回**服务端口径**的毫秒时间戳。
 //
 // ⚠ 所有签名（三条 canonical 的 timestamp 段、x-desktop-timestamp、

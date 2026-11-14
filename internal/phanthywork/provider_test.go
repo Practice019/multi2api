@@ -346,14 +346,15 @@ func TestBriefHasNoNewlines(t *testing.T) {
 func TestSummaryTokenRequestOmitsIdempotencyKeyHeader(t *testing.T) {
 	body := []byte(`{"inference_public_key":"pk"}`)
 	canonical := V1Canonical(http.MethodPost, pathActivitiesSummary, "1700000000000", "nonce", body, "")
-	segs := strings.Split(canonical, "\n")
+	// ⚠ v1 的分隔符是**空格**（2026-11-14 修正），不是 LF —— 用常量而非字面量。
+	segs := strings.Split(canonical, deviceV1Separator)
 	if len(segs) != 7 {
 		t.Fatalf("v1 canonical 段数 = %d, want 7", len(segs))
 	}
 	if segs[6] != "" {
 		t.Errorf("activities/summary 的第 7 段必须是空串（坑⑪），得到 %q", segs[6])
 	}
-	if !strings.HasSuffix(canonical, "\n") {
+	if !strings.HasSuffix(canonical, deviceV1Separator) {
 		t.Error("空段的分隔符不能省（坑⑪ / §2.6 规则 3）")
 	}
 	// 反面：注册那条**要**有幂等键，且第 7 段非空

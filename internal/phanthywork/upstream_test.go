@@ -13,6 +13,7 @@
 package phanthywork
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"workbuddy2api/internal/gateway"
 )
 
 // fakeUpstream 一个假上游 + 请求记录。
@@ -48,6 +51,28 @@ type fakeUpstream struct {
 	lastInferTokenValue string
 	// lastChatStreamTrue 线上收到的 chat body 里 stream 是否为 true（★ 真机 502 回归）。
 	lastChatStreamTrue bool
+
+	// ── 2026-11-14 真机封号/500 三条对照实验所需的夹具开关 ──
+
+	// serverTime 非空时 summary 用它当 server_time（默认 = 夹具此刻的 UTC 时间）。
+	//
+	// 为什么要它可控：坑① 的判据是"timestamp 必须用**服务端口径**的时间"，
+	// 而断言必须落在**独立的真源**上 —— 也就是夹具自己写死的这个字面量，
+	// 而不是从实现里再算一遍。
+	serverTime string
+	// registerReasonCode 非空时注册回 **HTTP 200** + {"reason_code": ...}（★ 封号铁证）。
+	//
+	// ⚠ 这条**不是** 409：真机上服务端对"该账号已有第一台设备"的二次注册回的是
+	// 200 + reason_code=first_device_owner（凭证文件里留着的那一行就是它）。
+	registerReasonCode string
+	// lastSessionID / lastClaudeSessionID 记推理请求上的
+	// x-phanthy-session 与 x-claude-code-session-id（★ 500 空体的判据）。
+	lastSessionID        string
+	lastClaudeSessionID  string
+	// lastInferenceCanonical 假上游**独立重算**出来的 12 段 canonical（★ 第 10 段的判据）。
+	//
+	// ⚠ 它必须是**重算**的结果，不是从实现里抄的 —— 否则断言就成了同义反复。
+	lastInferenceCanonical string
 
 	// conflict 置真时注册回 409（坑⑥ 的终态断言）。
 	conflict bool
@@ -294,6 +319,17 @@ func startFakeUpstream(t *testing.T) (*httptest.Server, *fakeUpstream) {
 			}})
 			return
 		}
+		if reason := f.registerReasonCode; reason != "" {
+			// ★ 2026-11-14 真机封号铁证：二次注册回的是 **200 + reason_code**，
+			//   不是 409 —— 所以"只看状态码"的判据会把它当成注册成功。
+			//
+			// 夹具在这里**短路**（不验签）：这条用例要钉的是状态机，不是签名。
+			writeJSONTest(w, 200, map[string]any{
+				"reason_code":   reason,
+				"reward_status": "denied",
+			})
+			return
+		}
 		if err := f.verifyRegister(r); err != nil {
 			writeJSONTest(w, http.StatusForbidden, map[string]any{"error": map[string]any{
 				"code":    "desktop_binding_invalid",
@@ -352,14 +388,18 @@ func startFakeUpstream(t *testing.T) (*httptest.Server, *fakeUpstream) {
 		tok := fakeJWT("u-1", time.Now().Unix()+180)
 		f.mu.Lock()
 		f.lastInferTokenValue = tok
+		serverTime := f.serverTime
 		f.mu.Unlock()
+		if serverTime == "" {
+			serverTime = time.Now().UTC().Format(time.RFC3339Nano)
+		}
 		day := f.serverDate
 		if day == "" {
 			day = time.Now().UTC().Add(8 * time.Hour).Format("2006-01-02") // UTC+8 的日键（服务端口径）
 		}
 		body := map[string]any{
 			"schema_version":               1,
-			"server_time":                  time.Now().UTC().Format(time.RFC3339Nano),
+			"server_time":                  serverTime,
 			"desktop_inference_token":      tok,
 			"desktop_inference_expires_at": time.Now().Add(180 * time.Second).UTC().Format(time.RFC3339Nano),
 			"credits":                      map[string]any{"available": f.creditsAvailable},
@@ -419,6 +459,9 @@ func startFakeUpstream(t *testing.T) (*httptest.Server, *fakeUpstream) {
 		// ⚠ 坑⑨：这个头放的是**令牌本身**（不是 sessionId）。
 		f.mu.Lock()
 		f.lastSessionHeader = r.Header.Get("x-phanthy-desktop-session")
+		// ★ 500 空体的判据：这两个头必须存在、且**同一个值**。
+		f.lastSessionID = r.Header.Get("x-phanthy-session")
+		f.lastClaudeSessionID = r.Header.Get("x-claude-code-session-id")
 		f.mu.Unlock()
 		if r.Header.Get("x-phanthy-desktop-session") == "" {
 			writeJSONTest(w, http.StatusForbidden, map[string]any{"error": map[string]any{
@@ -594,7 +637,9 @@ func (f *fakeUpstream) verifyV1WithRaw(r *http.Request, raw []byte, wantIdem, id
 	}
 	// ⚠ 坑⑫：v1 串里 method **保持原值**（这里用请求原文的 r.Method）。
 	canonical := V1Canonical(r.Method, r.URL.Path, timestamp, nonce, raw, wantIdem)
-	if len(strings.Split(canonical, "\n")) != 7 {
+	// ⚠ 用常量而不是 "\n" 字面量：v1 的分隔符是**空格**（2026-11-14 修正）。
+	//   写死字面量的话，下次改分隔符这条断言会静默变成"永远失败"或"永远通过"。
+	if len(strings.Split(canonical, deviceV1Separator)) != 7 {
 		return errFake("v1 canonical 不是 7 段")
 	}
 	sig := r.Header.Get("x-desktop-signature")
@@ -643,7 +688,13 @@ func (f *fakeUpstream) verifyInference(r *http.Request) error {
 		r.Header.Get("x-phanthy-expert-id"),
 		r.Header.Get("x-phanthy-skill-names"),
 	)
-	if len(strings.Split(canonical, "\n")) != 12 {
+	// ★ 存下**独立重算**的 canonical：用例要拿它断言"第 10 段（1-based）
+	//   等于收到的 session 头"，而不是从实现里再算一遍（那会是同义反复）。
+	f.mu.Lock()
+	f.lastInferenceCanonical = canonical
+	f.mu.Unlock()
+	// ⚠ 用常量而不是 "\n" 字面量（inference 的分隔符确实是 LF，但常量更耐改）。
+	if len(strings.Split(canonical, inferenceSeparator)) != 12 {
 		return errFake("inference canonical 不是 12 段")
 	}
 	if !verifyEd25519(inferPub, []byte(canonical), r.Header.Get("x-phanthy-proof-signature")) {
@@ -731,4 +782,174 @@ func newFakeProviderChat(t *testing.T, srv *httptest.Server) *Provider {
 	p := NewWithClient(c, t.TempDir(), 0)
 	p.SetProtocol("chat")
 	return p
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 2026-11-14 真机三条的回归（每条都对应一次单变量对照实验）
+// ══════════════════════════════════════════════════════════════════════════
+
+// TestInferenceRequestCarriesSessionHeaders 推理请求必须同时带
+// `x-phanthy-session` 与 `x-claude-code-session-id`，且 canonical **第 10 段**
+// 与它们**同一个值**。
+//
+// 真机判据（同账号、同 key、同 body，唯一变量就是 session 头）：
+//
+//	两个头都缺 + 第 10 段空 → **500 Internal Error，0 字节**，kong upstream-latency 9~10ms
+//	两个头齐全 + 第 10 段同值 → **200**
+//
+// 官方 sidecar 的拦截器做的是把内核的 `x-phanthy-session` **改写成**
+// `x-claude-code-session-id`（原头保留），再用改写后的值去算 canonical。
+// 本包在 buildProof 里生成一次、三处共用，所以三者必须逐字相同。
+func TestInferenceRequestCarriesSessionHeaders(t *testing.T) {
+	srv, f := startFakeUpstream(t)
+	defer srv.Close()
+	p := newFakeProvider(t, srv)
+	a := newTestAuth("u-1", "rt")
+	// ⚠ 前置：先真注册一次。
+	//
+	// 假上游是在 register 里**学到**设备公钥与推理公钥的（verifyRegister 末尾），
+	// 没这一步就发推理，它连验签用的公钥都没有 —— 失败原因会变成
+	// "服务端还不知道推理公钥（没注册过）"，与"session 头写错了"混在一起。
+	if err := p.ensureInstallation(context.Background(), a); err != nil {
+		t.Fatalf("前置注册失败: %v", err)
+	}
+	// 推理令牌必须是 JWT 形态（假上游按 `eyJ` 前缀判"这个头放的是令牌本身"）。
+	now := nowMS()
+	a.storeInferenceToken(fakeJWT("u-1", time.Now().Unix()+180), now+120_000, now)
+	cred := gateway.Credential{Provider: providerID, UID: a.UID(), Secret: a}
+
+	cs, err := p.Chat(context.Background(), cred, []byte(
+		`{"model":"phanthywork/glm-5.3-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`))
+	if err != nil {
+		t.Fatalf("Chat 报错: %v", err)
+	}
+	defer cs.Body.Close()
+	_, _ = io.Copy(io.Discard, cs.Body)
+
+	f.mu.Lock()
+	gotSession := f.lastSessionID
+	gotClaude := f.lastClaudeSessionID
+	canonical := f.lastInferenceCanonical
+	f.mu.Unlock()
+
+	if gotSession == "" || gotClaude == "" {
+		t.Fatalf("两个 session 头都必须发（缺任意一个上游回 500 空体）: x-phanthy-session=%q x-claude-code-session-id=%q",
+			gotSession, gotClaude)
+	}
+	if gotSession != gotClaude {
+		t.Errorf("两个 session 头必须同值: x-phanthy-session=%q x-claude-code-session-id=%q", gotSession, gotClaude)
+	}
+	// 形态：ses_ + 24 位 cuid2（小写字母/数字），与抓包原文一致
+	if !strings.HasPrefix(gotSession, "ses_") || len(gotSession) != 4+24 {
+		t.Errorf("session id 形态应为 ses_<24 位 cuid2>，得到 %q（len=%d）", gotSession, len(gotSession))
+	}
+
+	segs := strings.Split(canonical, inferenceSeparator)
+	if len(segs) != 12 {
+		t.Fatalf("inference canonical 段数 = %d, want 12", len(segs))
+	}
+	if segs[9] != gotSession {
+		t.Errorf("canonical 第 10 段必须等于 session 头: 段=%q 头=%q", segs[9], gotSession)
+	}
+	if segs[9] == "" {
+		t.Error("第 10 段在线上路径上不许为空（空 → 上游 500 空体）")
+	}
+}
+
+// TestUncalibratedAuthForcesTokenRenewal **时钟没校准过时，即使缓存令牌还有效，
+// 也必须去换一次令牌**。
+//
+// 为什么：换令牌（activities/summary）是唯一能拿到 `server_time` 的常规路径，
+// 而 proof 的 `x-phanthy-proof-timestamp` 必须用服务端口径的时间。
+// 本机时钟实测慢 52 秒（另一次 15 秒，一直在漂）—— 未校准就发推理，
+// 上游回 403 `request_not_authorized`，而那句文案完全指不到时钟上。
+//
+// 这条守的是旧实现的漏洞：`if a.inferenceTokenValid(now) { return 缓存 }`
+// 会在"进程刚起来、还没换过令牌"这条路径上**跳过唯一一次校准** ⇒ 必然 403。
+func TestUncalibratedAuthForcesTokenRenewal(t *testing.T) {
+	srv, f := startFakeUpstream(t)
+	defer srv.Close()
+	p := newFakeProvider(t, srv)
+	a := newTestAuth("u-1", "rt")
+	// 前置：先注册一次，让假上游学到设备公钥（否则 summary 的 v1 验签必失败，
+	// 而那条失败看起来像"签名写错了"，其实只是夹具没前置）。
+	if err := p.ensureInstallation(context.Background(), a); err != nil {
+		t.Fatalf("前置注册失败: %v", err)
+	}
+	now := nowMS()
+	a.storeInferenceToken(fakeJWT("u-1", time.Now().Unix()+180), now+120_000, now)
+
+	// 刻意清掉校准标记（夹具默认是已校准的，这里要的正是"没校准"这条路径）。
+	a.skewCalibrated.Store(false)
+	if a.isClockCalibrated() {
+		t.Fatal("前置条件：本项目的前置状态必须是未校准")
+	}
+	before := atomic.LoadInt32(&f.summaryCalls)
+
+	tok, err := p.ensureInferenceToken(context.Background(), a)
+	if err != nil {
+		t.Fatalf("未校准时应能通过换令牌完成校准，却报错: %v", err)
+	}
+	if tok == "" {
+		t.Fatal("换令牌后必须拿到非空令牌")
+	}
+	if n := atomic.LoadInt32(&f.summaryCalls); n != before+1 {
+		t.Errorf("未校准时必须打一次 activities/summary（用于取 server_time），实际 %d 次（基线 %d）", n, before)
+	}
+	if !a.isClockCalibrated() {
+		t.Error("换令牌成功后必须已经把时钟标成已校准")
+	}
+
+	// 反面：校准过之后再取，**不该**再打一次 summary（省一次往返）
+	before2 := atomic.LoadInt32(&f.summaryCalls)
+	if _, err := p.ensureInferenceToken(context.Background(), a); err != nil {
+		t.Fatalf("已校准后取令牌不该报错: %v", err)
+	}
+	if after := atomic.LoadInt32(&f.summaryCalls); after != before2 {
+		t.Errorf("已校准且令牌有效时不该再换令牌（summary 调用 %d → %d）", before2, after)
+	}
+}
+
+// TestRegisterReasonCodeIsTerminalConflict **二次注册**是终态冲突，不是成功。
+//
+// 真机铁证（2026-11-14，凭证文件里留下的原文）：
+//
+//	{"registered_at_ms":…, "reason_code":"first_device_owner"}
+//	09:08:5x 同一账号 /v1/messages → 200
+//	09:19:33 用全新 identity seed 注册第二台设备 → 服务端回 **HTTP 200** + reason_code
+//	09:20:08 同一账号 /models、/profile → 403 disabled_account（账号被封）
+//
+// ⇒ 服务端对"该账号已有第一台设备"回的是 **200 + reason_code**，**不是 409**。
+// 只看状态码会把它当成功 ⇒ 拿一把服务端不认的 key 去换票/推理（一路 403），
+// 并把账号打进 disabled_account。
+func TestRegisterReasonCodeIsTerminalConflict(t *testing.T) {
+	srv, f := startFakeUpstream(t)
+	defer srv.Close()
+	f.registerReasonCode = "first_device_owner"
+	p := newFakeProvider(t, srv)
+	a := newTestAuth("u-rc", "rt")
+
+	err := p.ensureInstallation(context.Background(), a)
+	if err == nil {
+		t.Fatal("reason_code 非空必须是**终态冲突**，不能当注册成功")
+	}
+	if !IsRegistrationConflict(err) {
+		t.Errorf("必须能被 IsRegistrationConflict 认出来，得到 %v", err)
+	}
+	if a.Reg.RegisteredAtMS != 0 {
+		t.Errorf("冲突时**绝不能**写 RegisteredAtMS（那是「已注册」的信号），实际 %d", a.Reg.RegisteredAtMS)
+	}
+	if a.Reg.ConflictAtMS == 0 {
+		t.Error("冲突时必须写 ConflictAtMS（熔断起点）")
+	}
+	if a.Reg.ReasonCode != "first_device_owner" {
+		t.Errorf("必须记下服务端的 reason_code，得到 %q", a.Reg.ReasonCode)
+	}
+
+	// 熔断：再调一次不许再发注册请求（否则持续触发设备风控 → 封号）
+	before := atomic.LoadInt32(&f.registerCalls)
+	_ = p.ensureInstallation(context.Background(), a)
+	if after := atomic.LoadInt32(&f.registerCalls); after != before {
+		t.Errorf("终态冲突后不许再发注册请求（register 调用 %d → %d）", before, after)
+	}
 }

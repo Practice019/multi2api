@@ -344,10 +344,19 @@ func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 
 	// 会话四件套（抓包原文里逐字存在）
+	//
+	// ★ 2026-11-14 真机补充：`x-claude-code-session-id` 与 `x-request-id` 也要发。
+	//   官方 sidecar 的拦截器会把 x-phanthy-session → x-claude-code-session-id、
+	//   x-phanthy-request → x-request-id（原头保留），最终上游两个都在。
+	//   本包直接两个都发，形态与上游实际收到的一致。
+	sessionID := newSessionID()
+	reqID := randomUUID()
 	req.Header.Set("x-phanthy-client", "cli")
 	req.Header.Set("x-phanthy-project", "global")
-	req.Header.Set("x-phanthy-request", randomUUID())
-	req.Header.Set("x-phanthy-session", newSessionID())
+	req.Header.Set("x-phanthy-request", reqID)
+	req.Header.Set("x-request-id", reqID)
+	req.Header.Set("x-phanthy-session", sessionID)
+	req.Header.Set("x-claude-code-session-id", sessionID)
 	// 产品与来源（两个头在不同端点上取值不同，见上方常量注释）
 	req.Header.Set("x-phanthy-product", chatProduct)
 	req.Header.Set("x-phanthy-client-source", chatClientSource)
@@ -670,6 +679,12 @@ type registerResponse struct {
 	Installation struct {
 		ID string `json:"id"`
 	} `json:"installation"`
+	// ReasonCode 服务端的**拒绝原因**（★ 2026-11-14 真机封号铁证）。
+	//
+	// 实测：对"该账号已有第一台设备"的二次注册，服务端**不是**回 409，
+	// 而是回 **HTTP 200** + `{"reason_code":"first_device_owner","reward_status":"denied"}`。
+	// 只看状态码会把它当成注册成功 —— 后果见 RegisterDevice 的注释。
+	ReasonCode   string `json:"reason_code"`
 	RewardStatus string `json:"reward_status"`
 	RewardReason string `json:"reward_reason"`
 	Error        struct {
@@ -731,7 +746,7 @@ func (c *Client) RegisterDevice(ctx context.Context, a *Auth) (registerResponse,
 	}
 
 	timestamp := msToString(a.serverNowMS())
-	nonce := newNonce()
+	nonce := newDeviceNonce()
 	deviceSig, err := a.signDeviceCanonical(
 		DeviceCanonical(scope, instID, identityPub, a.Infer.PublicKey, timestamp, nonce))
 	if err != nil {
@@ -771,6 +786,23 @@ func (c *Client) RegisterDevice(ctx context.Context, a *Auth) (registerResponse,
 	}
 	if out.Error.Code != "" {
 		return out, &UpstreamError{Status: status, Body: string(respBody), Op: "设备注册"}
+	}
+
+	// ★ 2026-11-14 真机封号铁证：二次注册回的是 **HTTP 200 + reason_code**，不是 409。
+	//
+	// 凭证文件里留下的原文：{"registered_at_ms":…,"reason_code":"first_device_owner"}
+	// —— 也就是说旧实现把它当成功写进了 RegisteredAtMS，然后拿一把服务端
+	// **根本不认**的 key 去换推理令牌 / 发推理，一路 403，最后账号被
+	// `disabled_account` 封掉（同一账号 11 分钟前还在 200）。
+	//
+	// 判据：**reason_code 非空即终态冲突**，与 409 同一条出口
+	// （调用方用 errors.Is(err, ErrRegistrationConflict) 判，随后熔断，不再注册）。
+	if rc := strings.TrimSpace(out.ReasonCode); rc != "" {
+		ue := &UpstreamError{Status: status, Body: string(respBody), Op: "设备注册"}
+		return out, fmt.Errorf(
+			"%w: 服务端拒绝这台设备（reason_code=%s）—— 该账号已有第一台设备，"+
+				"同一账号不可能再绑第二台（继续重试只会把账号打进 disabled_account）: %s",
+			ErrRegistrationConflict, rc, ue.Error())
 	}
 	return out, nil
 }
@@ -839,7 +871,7 @@ func (c *Client) FetchSummary(ctx context.Context, a *Auth) (summaryResponse, in
 	}
 	body := fmt.Sprintf(`{"inference_public_key":%q}`, a.Infer.PublicKey)
 	timestamp := msToString(a.serverNowMS())
-	nonce := newNonce()
+	nonce := newDeviceNonce()
 	req, err := c.newJSONRequest(ctx, http.MethodPost, pathActivitiesSummary, []byte(body))
 	if err != nil {
 		return out, localMS, err
@@ -910,7 +942,7 @@ func (c *Client) ClaimDailyLogin(ctx context.Context, a *Auth, serverDate string
 	// ① body = 空对象（字面量 {}）
 	const body = `{}`
 	timestamp := msToString(a.serverNowMS())
-	nonce := newNonce()
+	nonce := newDeviceNonce()
 	req, err := c.newJSONRequest(ctx, http.MethodPost, pathDailyLoginClaim, []byte(body))
 	if err != nil {
 		return out, err
@@ -1013,6 +1045,13 @@ func (c *Client) ChatStream(ctx context.Context, a *Auth, path string, body []by
 		// ⚠ 这 4 段在 canonical 里有位置，但**头只在有值时才发**：
 		// 报告列的 4 个 proof 头里没有它们（它们是别处的可选上下文头）。
 	}
+	// ★ 2026-11-14 真机：这两个头是**必需**的（缺 → 上游 500 空体，0 字节）。
+	//
+	// 官方 sidecar 的拦截器把内核的 `x-phanthy-session` 改写成
+	// `x-claude-code-session-id`（原头保留），再用改写后的值算 canonical 第 10 段。
+	// 本包在 buildProof 里生成一次，三处共用 —— 保证同源。
+	req.Header.Set("x-phanthy-session", proof.SessionID)
+	req.Header.Set("x-claude-code-session-id", proof.SessionID)
 	req.Header.Set("x-phanthy-desktop-session", proof.InferenceToken)
 	req.Header.Set("x-phanthy-proof-timestamp", proof.Timestamp)
 	req.Header.Set("x-phanthy-proof-nonce", proof.Nonce)
@@ -1032,33 +1071,52 @@ type proofValues struct {
 	Signature      string
 	// RequestID uuid v4（canonical 第 9 段、也作为 x-request-id 头发出去）。
 	RequestID string
+	// SessionID 本请求的会话 id（canonical **第 10 段**）。
+	//
+	// ★ 2026-11-14 真机：它必须同时作为 x-phanthy-session 与
+	// x-claude-code-session-id 发出去，且与第 10 段同一个值。
+	// 缺这两头任意一个 → 上游 500 空体（kong upstream-latency 9~10ms）。
+	SessionID string
 	// ExtraHeaders 可选上下文头（canonical 第 10~12 段对应的那三个）。
 	ExtraHeaders map[string]string
 }
 
 // buildProof 构造一次推理请求的 12 段签名与 4 个 proof 头。
 //
-// ⚠ 4 个规则（报告 §2.6），每一条都有对应的测试：
+// ⚠ 5 个规则（报告 §2.6 + 2026-11-14 真机），每一条都有对应的测试：
 //
-//	① 段间 LF
+//	① 段间 **LF**（⚠ 与 device/v1 的空格不同，见 crypto.go 包注释）
 //	② 第 6 段是**最终发出的 body 原始字节**的 sha256
-//	③ 后 4 段缺项写**空串**但分隔符不能省
+//	③ 后 4 段缺项写**空串**但分隔符不能省；
+//	   但第 10 段（session）在**线上**由本函数填真实 ses_ id（见下）
 //	④ method 在这条串里大写（与 v1 串相反 —— 坑⑫）
+//	⑤ nonce 是 **24 字节**（与 device/v1 的 18 不同）
+//
+// ★ 2026-11-14 真机对照（同一个账号、同一把 key、同一份 body，单变量）：
+//
+//	第 10 段为空 + 不发 session 头 → **500 Internal Error，0 字节**，kong upstream-latency 9~10ms
+//	第 10 段 = 真实 ses_ id + 两个 session 头同值 → **200**
+//
+// 所以线上路径上第 10 段**不许为空**。官方 sidecar 的拦截器（claude-sidecar.exe @99956884）
+// 做的是：把内核发来的 `x-phanthy-session` **写成** `x-claude-code-session-id`
+// （原头保留不删），再用**改写后**的头去算 canonical。
+// 本包等价地在同一处生成 sessionID，canonical 与两个头共用它 —— 三者必然同源。
 func (c *Client) buildProof(a *Auth, method, path string, body []byte, token string, localMS int64) (proofValues, error) {
 	if a == nil {
 		return proofValues{}, errNilAuth
 	}
 	ts := msToString(serverNowMS(localMS, a.skew()))
-	nonce := newNonce()
+	nonce := newInferenceNonce()
 	reqID := randomUUID()
+	// ★ session id 在这里生成一次，canonical 第 10 段与两个请求头共用它。
+	sessionID := newSessionID()
 	authHeader := AuthorizationHeaderValue(a.OAuth.AccessToken)
 
-	// 后 4 段的可选头：本包**不发**它们（头也没有对应值），
-	// 但 canonical 里必须留**空串**占位。
+	// 第 11/12 段（expert / skills）本包不发对应头，留空串占位。
 	canonical := InferenceCanonical(
 		method, path, ts, nonce, RequestBodyForHash(body),
 		authHeader, token,
-		reqID, "", "", "")
+		reqID, sessionID, "", "")
 
 	sig, err := a.signInferenceCanonical(canonical)
 	if err != nil {
@@ -1070,6 +1128,7 @@ func (c *Client) buildProof(a *Auth, method, path string, body []byte, token str
 		Nonce:          nonce,
 		Signature:      sig,
 		RequestID:      reqID,
+		SessionID:      sessionID,
 	}, nil
 }
 

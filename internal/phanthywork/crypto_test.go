@@ -352,48 +352,93 @@ func TestRegistrationCooldownBlocksRetry(t *testing.T) {
 	}
 }
 
-// ── 坑⑦：canonical 分隔符是 LF ───────────────────────────────────────────
+// ── 坑⑦ 修正版：**两条串用空格、一条串用 LF** ───────────────────────────
 
-// TestCanonicalUsesLFNotSpace 三条 canonical 的分隔符**逐字节**是 0x0A。
+// TestCanonicalSeparatorsArePerString 三条 canonical 的分隔符**逐字节**断言。
 //
-// ⚠ 这条是本文件里最"笨"也最重要的一条：渲染工具会把 0x0A 显示成「点」，
-// 肉眼读会读成点号 —— 只有按字节断言才拦得住。
-func TestCanonicalUsesLFNotSpace(t *testing.T) {
+// ⚠ 2026-11-14 真机 + 官方源码修正：三条串的**分隔符不是同一个**。
+//
+//	device     → 单个空格 0x20   （前端 App-*.js: [...].join(` `)）
+//	v1         → 单个空格 0x20   （同上）
+//	inference  → LF 0x0A         （sidecar jO8(): [...].join(`\n`)，字节 0A）
+//
+// 这条是本文件里最"笨"也最重要的一条：渲染工具会把 0x0A 显示成「点」、
+// 把空格显示成看不见 —— 只有按字节断言才拦得住。
+// 早期版本把三条都写成 LF，那会让 device/v1 签名恒失败（invalid_desktop_signature）。
+func TestCanonicalSeparatorsArePerString(t *testing.T) {
 	dev := DeviceCanonical("scope", "di_x", "pubI", "pubR", "1700000000000", "nonce")
 	v1 := V1Canonical("POST", "/p", "1700000000000", "nonce", []byte("{}"), "")
 	inf := InferenceCanonical("POST", "/v1/messages", "1700000000000", "nonce", []byte("{}"),
 		"Bearer at", "tok", "rid", "", "", "")
 
-	for name, s := range map[string]string{"device": dev, "v1": v1, "inference": inf} {
-		if !strings.Contains(s, "\n") {
-			t.Errorf("%s canonical 里没有 LF（分隔符写错了）", name)
+	// ① device / v1：分隔符必须是 0x20，且整串不许出现 LF
+	for name, s := range map[string]string{"device": dev, "v1": v1} {
+		if strings.Contains(s, "\n") {
+			t.Errorf("%s canonical 里出现了 LF —— 分隔符必须是空格 0x20: %q", name, s)
 		}
-		if strings.Contains(s, " ") && name != "inference" {
-			// device/v1 的段里没有空格；出现空格说明用了空格当分隔符
-			t.Errorf("%s canonical 里出现了空格（坑⑦：分隔符必须是 LF）: %q", name, s)
-		}
-		if strings.Contains(s, "|") || strings.Contains(s, ":v1") {
-			t.Errorf("%s canonical 用了冒号或竖线当分隔符: %q", name, s)
-		}
-		// 逐字节确认第一处分隔符是 0x0A
-		i := strings.IndexByte(s, '\n')
+		i := strings.IndexByte(s, ' ')
 		if i <= 0 {
-			t.Fatalf("%s canonical 的段结构不对: %q", name, s)
+			t.Fatalf("%s canonical 的段结构不对（找不到空格分隔符）: %q", name, s)
 		}
-		if s[i] != 0x0A {
-			t.Errorf("%s canonical 的分隔符字节 = 0x%02X（必须是 0x0A）", name, s[i])
+		if s[i] != 0x20 {
+			t.Errorf("%s canonical 的分隔符字节 = 0x%02X（必须是 0x20）", name, s[i])
 		}
 	}
 
-	// 段数：device 7 / v1 7 / inference 12（少一段就是另一个串）
-	if n := len(strings.Split(dev, "\n")); n != 7 {
+	// ② inference：分隔符必须是 0x0A
+	firstLF := strings.IndexByte(inf, '\n')
+	if firstLF <= 0 {
+		t.Fatalf("inference canonical 里没有 LF（分隔符写错了）: %q", inf)
+	}
+	if inf[firstLF] != 0x0A {
+		t.Errorf("inference canonical 的第一处分隔符不是 0x0A: %q", inf)
+	}
+	// 前两段（前缀 + METHOD + pathname）里没有空格，所以首个空格不应出现在首处 LF 之前
+	if k := strings.IndexByte(inf, ' '); k >= 0 && k < firstLF {
+		t.Errorf("inference canonical 的前段之间出现了空格（应当是 LF）: %q", inf)
+	}
+
+	// ③ 三类串都不得用冒号/竖线当分隔符
+	for name, s := range map[string]string{"device": dev, "v1": v1, "inference": inf} {
+		if strings.Contains(s, "|") || strings.Contains(s, ":v1") {
+			t.Errorf("%s canonical 用了冒号或竖线当分隔符: %q", name, s)
+		}
+	}
+
+	// ④ 段数：device 7 / v1 7 / inference 12（少一段就是另一个串）
+	//    ⚠ 用常量而不是字面量：以后再改分隔符时，断言不会静默失效。
+	if n := len(strings.Split(dev, deviceV1Separator)); n != 7 {
 		t.Errorf("device canonical 段数 = %d, want 7", n)
 	}
-	if n := len(strings.Split(v1, "\n")); n != 7 {
+	if n := len(strings.Split(v1, deviceV1Separator)); n != 7 {
 		t.Errorf("v1 canonical 段数 = %d, want 7", n)
 	}
-	if n := len(strings.Split(inf, "\n")); n != 12 {
+	if n := len(strings.Split(inf, inferenceSeparator)); n != 12 {
 		t.Errorf("inference canonical 段数 = %d, want 12", n)
+	}
+}
+
+// TestNonceLengthsDifferPerString inference 与 device/v1 的 nonce 长度**不同**。
+//
+// 官方两处来源（互相独立）：
+//
+//	device / v1  → `getRandomValues(new Uint8Array(18))` → base64url 24 字符
+//	inference    → sidecar `Vd3(24).toString("base64url")` → base64url 32 字符
+//
+// 长度写错会让 canonical 与服务端重算的串不一致 —— 而报错只有一句
+// "signature is invalid" / "request_not_authorized"，指不到长度上。
+func TestNonceLengthsDifferPerString(t *testing.T) {
+	if got := len(newDeviceNonce()); got != 24 {
+		t.Errorf("device/v1 nonce 长度 = %d 字符, want 24（= 18 字节）", got)
+	}
+	if got := len(newInferenceNonce()); got != 32 {
+		t.Errorf("inference nonce 长度 = %d 字符, want 32（= 24 字节）", got)
+	}
+	if deviceV1NonceLen != 18 {
+		t.Errorf("deviceV1NonceLen = %d, want 18", deviceV1NonceLen)
+	}
+	if inferenceNonceLen != 24 {
+		t.Errorf("inferenceNonceLen = %d, want 24", inferenceNonceLen)
 	}
 }
 
@@ -404,10 +449,10 @@ func TestCanonicalEmptyTrailingSegmentsV1(t *testing.T) {
 	if withKey == without {
 		t.Fatal("带幂等键与不带幂等键必须是两个不同的串")
 	}
-	if !strings.HasSuffix(without, "\n") {
+	if !strings.HasSuffix(without, deviceV1Separator) {
 		t.Errorf("没有幂等键时第 7 段是**空串**，分隔符不能省（坑⑪）: %q", without)
 	}
-	if !strings.HasSuffix(withKey, "\nregister:di_x") {
+	if !strings.HasSuffix(withKey, deviceV1Separator+"register:di_x") {
 		t.Errorf("幂等键应作为第 7 段出现: %q", withKey)
 	}
 }
@@ -488,7 +533,7 @@ func TestDeviceCanonicalFifthSegmentIsInferenceKey(t *testing.T) {
 	identity := "AAA_identity_pub"
 	inference := "BBB_inference_pub"
 	s := DeviceCanonical("scope", "di_x", identity, inference, "1700000000000", "nonce")
-	segs := strings.Split(s, "\n")
+	segs := strings.Split(s, deviceV1Separator)
 	if len(segs) != 7 {
 		t.Fatalf("段数 = %d, want 7", len(segs))
 	}
@@ -529,19 +574,20 @@ func TestSummaryHasNoIdempotencyKey(t *testing.T) {
 
 // ── 坑⑫：method 在两条串里的大小写规则**相反** ──────────────────────────
 
-// TestMethodCaseRulesDiffer 一条 toUpperCase，一条保持原值。
+// TestMethodCaseRulesDiffer 一条 toUpperCase，一条保持原值；
+// 同时钉住两条串的分隔符**不同**（v1 空格 / inference LF）。
 func TestMethodCaseRulesDiffer(t *testing.T) {
 	v1 := V1Canonical("get", "/p", "1", "n", nil, "")
-	if !strings.HasPrefix(v1, "v1\nget\n") {
-		t.Errorf("v1 串必须**保持原值**（坑⑫），得到 %q", v1)
+	if !strings.HasPrefix(v1, "v1 get ") {
+		t.Errorf("v1 串必须**保持原值**（坑⑫）且用空格分隔，得到 %q", v1)
 	}
 	inf := InferenceCanonical("get", "/p", "1", "n", nil, "a", "t", "r", "", "", "")
 	if !strings.HasPrefix(inf, "desktop-inference-v2\nGET\n") {
-		t.Errorf("inference 串必须**大写**（坑⑫），得到 %q", inf)
+		t.Errorf("inference 串必须**大写**（坑⑫）且用 LF 分隔，得到 %q", inf)
 	}
 	// 大写输入下两条串都不该被改坏
-	if !strings.HasPrefix(V1Canonical("POST", "/p", "1", "n", nil, ""), "v1\nPOST\n") {
-		t.Error("v1 串对 POST 应原样保留")
+	if !strings.HasPrefix(V1Canonical("POST", "/p", "1", "n", nil, ""), "v1 POST ") {
+		t.Error("v1 串对 POST 应原样保留（分隔符是空格）")
 	}
 }
 
@@ -815,10 +861,20 @@ func importPaths(src string) []string {
 var errTestBoom = cryptoErr("boom")
 
 // newTestAuth 造一份可用于签名的测试凭证（uid + refreshToken 可控）。
+//
+// ★ 夹具默认把时钟标记为**已校准**（见函数体末）。
+//
+// 为什么必须标记：本包从 2026-11-14 起有一条硬规则 —— **没校准过就不许凭缓存
+// 复用推理令牌**（未校准 = 没拿到过 server_time = proof 时间戳只能用本机时间
+// = 上游 403 request_not_authorized）。若不标记，所有走 Chat 的用例都会先去
+// 换一次令牌，而它们的假上游大多没有 activities/summary 端点 ——
+// 失败原因会和"协议写错了"完全混在一起。
+//
+// "未校准"这条真实路径由 TestUncalibratedAuthForcesTokenRenewal 单独覆盖。
 func newTestAuth(uid, refreshToken string) *Auth {
 	identitySeed, _, _ := generateEd25519()
 	inferSeed, inferPub, _ := generateEd25519()
-	return &Auth{
+	a := &Auth{
 		Provider:     providerID,
 		UIDValue:     uid,
 		AccountScope: "scope-" + uid,
@@ -830,6 +886,9 @@ func newTestAuth(uid, refreshToken string) *Auth {
 		Device: DeviceKey{IdentitySeed: identitySeed},
 		Infer:  InferenceKey{Seed: inferSeed, PublicKey: inferPub},
 	}
+	// ★ 默认标记"时钟已校准"（理由见函数头注释）。
+	a.applyServerTime(time.UnixMilli(nowMS()).UTC().Format(time.RFC3339Nano), nowMS())
+	return a
 }
 
 // fakeJWT 造一个 payload 里带 sub/iat/exp 的假 JWT（**不签名**，只用于本地解析）。

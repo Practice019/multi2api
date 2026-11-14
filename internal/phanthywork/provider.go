@@ -121,7 +121,7 @@ const InferenceTokenMargin = 30 * time.Second
 // ⚠ 这**不是**本项目/插件版本号，写成 0.1.0 服务端不认。
 //
 // ★ 2026-11-13 由 2.48.0 升到 **2.51.0**。依据（二进制取证，见
-// docs/phanthywork-inference-protocol.md 引的对照实现）：
+// docs/protocols/phanthywork-inference-protocol.md 引的对照实现）：
 //
 //	「旧值 2.48.0 已经落后两个小版本：服务端把『来源=桌面端但版本对不上』
 //	  的客户端当异常，风控会记账。」
@@ -1012,13 +1012,25 @@ func (p *Provider) ensureInstallation(ctx context.Context, a *Auth) error {
 	if err != nil {
 		if errors.Is(err, ErrRegistrationConflict) {
 			a.Reg.ConflictAtMS = attemptAt
+			// ★ 把服务端的 reason_code 记下来（`first_device_owner` 等）。
+			//
+			// 它在冲突响应体里（HTTP 200 + reason_code），而 RegisterDevice 在
+			// 冲突出口会把已解析的 out 一并返回 —— 所以这里能直接读到。
+			// 记下来是为了让日志/界面能说清"是同一账号已被别的设备占用"，
+			// 而不是一句笼统的 device_binding_conflict。
+			if rc := strings.TrimSpace(resp.ReasonCode); rc != "" {
+				a.Reg.ReasonCode = rc
+			}
 		}
 		// 落盘失败不掩盖真实错误（状态记在内存里也已生效）。
 		_ = saveAuthFile(a)
 		return err
 	}
 	a.Reg.RegisteredAtMS = attemptAt
-	a.Reg.ReasonCode = resp.RewardReason
+	// ⚠ 用 reason_code（不是 reward_reason）：前者是**注册本身**的结论，
+	// 后者是奖励发放的原因，两者语义不同。reason_code 非空的情况已经在
+	// client.RegisterDevice 里走 conflict 出口，走到这里的一定是空串。
+	a.Reg.ReasonCode = resp.ReasonCode
 	// ⚠⚠ **绝对不要**把服务端返回的 `installation.id` 覆盖到 `a.Device.InstallationID`。
 	//
 	// 2026-11-13 真机排查（当时症状：注册 200、换推理令牌也 200，但调模型恒 500 空体）：
@@ -1089,7 +1101,18 @@ func (p *Provider) inferGate(uid string) *refreshGate {
 // 于是紧随其后的 /v1/messages 一定用的是校准后的时间。
 func (p *Provider) ensureInferenceToken(ctx context.Context, a *Auth) (string, error) {
 	nowLocal := nowMS()
-	if a.inferenceTokenValid(nowLocal) {
+	// ★ 2026-11-14 真机：**时钟没校准过就不能凭缓存跳过换令牌**。
+	//
+	// 为什么：换令牌（activities/summary）是唯一能拿到 `server_time` 的常规路径，
+	// 而 proof 的 `x-phanthy-proof-timestamp` 必须用**服务端口径**的时间。
+	// 本机时钟实测慢 52 秒（另一次 15 秒，一直在漂）——
+	// 未校准就直接发推理，服务端回 403 request_not_authorized，
+	// 而那句文案完全指不到时钟上（真机对照：同一 key、同一 body，只改 ts，
+	// 本机时间 → 403，校准后 → 200）。
+	//
+	// 旧行为：缓存令牌还有 30 秒以上余量就直接返回 ⇒ 跳过了唯一一次校准，
+	// 于是"进程刚起来、第一次换过令牌之前"这条路径必然 403。
+	if a.inferenceTokenValid(nowLocal) && a.isClockCalibrated() {
 		return a.cachedInferenceToken().Token, nil
 	}
 	if err := p.ensureInstallation(ctx, a); err != nil {

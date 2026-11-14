@@ -25,9 +25,23 @@
 //	                  sha256(body) / sha256(Authorization) / sha256(推理令牌) /
 //	                  requestId / sessionId / expertId / skillNames
 //
-// ⚠ 三条都用 **LF（0x0A）** 连接，不是空格、不是冒号、不是竖线（坑⑦）。
-// 渲染工具会把 0x0A 显示成「点」，肉眼读极易读成点号 —— 所以这里写成
-// 具名常量 canonicalSeparator，并有 TestCanonicalUsesLFNotSpace 逐字节断言。
+// ⚠ 三条 canonical 的**分隔符不是同一个**（2026-11-14 读官方源码才发现）：
+//
+//	device      → 单个空格 0x20
+//	v1          → 单个空格 0x20
+//	inference   → LF 0x0A
+//
+// 证据（两处来源不同，互相独立）：
+//   - Tauri 前端 bundle：`_up_/dist/assets/App-dSHMvpu3.js` @111223 附近
+//     [`desktop-device-v1`, scope, instId, pub, inferPub, t, n].join(` `)
+//     [`v1`, method, upstreamPath, t, n, sha256(body), idem].join(` `)
+//     两处都是 `.join(\` \`)`。
+//   - claude-sidecar.exe @99904757 的 jO8()：[...].join(`\n`)
+//     （ASCII 字节 5D 2E 6A 6F 69 6E 28 60 0A 60 29）。
+//
+// 早期文档把三条写成同一个分隔符，据此实现必失败：device/v1 用 LF 会
+// `invalid_desktop_signature`，inference 用空格会 500 空体。
+// 这里保留两个具名常量 + 逐字节断言测试，禁止再合并成一个。
 package phanthywork
 
 import (
@@ -44,12 +58,16 @@ import (
 // ── 常量（协议事实，全部来自报告）────────────────────────────────────────
 
 const (
-	// canonicalSeparator 三条 canonical 的段分隔符 = **LF**（坑⑦）。
+	// deviceV1Separator device / v1 两条 canonical 的段分隔符 = **单个空格**。
 	//
-	// ⚠ 不是 " "（空格 0x20）、不是 ":"（0x3A）、不是 "|"（0x7C）。
-	// 报告 §3⑦：源码三条串全部 ].join(\n 字面量)，二进制里是
-	// 5D 2E 6A 6F 69 6E 28 60 0A 60 29。只能看 hex 才读得对。
-	canonicalSeparator = "\n"
+	// ⚠ 不是 LF、不是冒号、不是竖线。证据见包注释（前端 bundle 的 .join(` `)）。
+	deviceV1Separator = " "
+
+	// inferenceSeparator inference canonical 的段分隔符 = **LF（0x0A）**。
+	//
+	// ⚠ 与上面那个**不同**。证据见包注释（sidecar 的 .join(`\n`)，
+	//   二进制里是 5D 2E 6A 6F 69 6E 28 60 0A 60 29）。
+	inferenceSeparator = "\n"
 
 	// deviceCanonicalPrefix device canonical 的版本域。
 	deviceCanonicalPrefix = "desktop-device-v1"
@@ -74,8 +92,17 @@ const (
 	// installationIDPrefix installationId 的前缀（**不是** di:、不是空串）。
 	installationIDPrefix = "di_"
 
-	// nonceLen 随机 nonce 的字节数（报告 §2.4 原文：24 字节 → base64url）。
-	nonceLen = 24
+	// deviceV1NonceLen device / v1 的 nonce 字节数 = **18**。
+	//
+	// 证据：前端 `Ao()` = `Oo(crypto.getRandomValues(new Uint8Array(18)))`
+	//   → base64url 24 字符。device 绑定与 v1 请求头用的是同一个 `n`。
+	deviceV1NonceLen = 18
+
+	// inferenceNonceLen inference 的 nonce 字节数 = **24**。
+	//
+	// 证据：sidecar 的 jO8() 里 `Vd3(24).toString("base64url")` → 32 字符。
+	//   ⚠ 与 device/v1 的 18 **不同**，别混。
+	inferenceNonceLen = 24
 )
 
 // ed25519SPKIHeader 12 字节头（解析一次，避免每处都 hex 解码）。
@@ -113,17 +140,32 @@ func sha256B64URL(b []byte) string {
 	return b64url(sum[:])
 }
 
-// newNonce 生成一个 nonce（24 字节随机 → base64url）。
+// newNonceN 生成 n 字节随机 nonce 的 base64url。
 //
 // 随机源出错（不可恢复）时返回空串而不是 panic：nonce 为空会让服务端
 // 拒绝这次请求（可观测），而 panic 会带崩整个出站循环（不可观测）。
-func newNonce() string {
-	buf := make([]byte, nonceLen)
+func newNonceN(n int) string {
+	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {
 		return ""
 	}
 	return b64url(buf)
 }
+
+// newDeviceNonce 生成 device / v1 用的 nonce（**18 字节** → 24 字符）。
+//
+// 两条串共用同一个 nonce（前端也是同一个 `n` 同时喂给 device 与 v1）。
+func newDeviceNonce() string { return newNonceN(deviceV1NonceLen) }
+
+// newInferenceNonce 生成 inference 用的 nonce（**24 字节** → 32 字符）。
+func newInferenceNonce() string { return newNonceN(inferenceNonceLen) }
+
+// newNonce 24 字节的通用随机串。
+//
+// ⚠ 它**只**给与协议 nonce 无关的本地用途（PKCE verifier / OAuth state）。
+// 出站请求的 nonce 一律用 newDeviceNonce / newInferenceNonce —— 那两处
+// 的长度是协议事实（18 / 24），不是随便挑的。
+func newNonce() string { return newNonceN(inferenceNonceLen) }
 
 // ── ed25519 ──────────────────────────────────────────────────────────────
 
@@ -281,7 +323,7 @@ func DeriveInstallationID(identityPublicKeyB64 string) (string, error) {
 
 // ── 三条 canonical 的拼装 ────────────────────────────────────────────────
 
-// DeviceCanonical 拼 device canonical（7 段，LF 连接）。
+// DeviceCanonical 拼 device canonical（7 段，**单空格**连接）。
 //
 //	desktop-device-v1
 //	<accountScope>        账号 uuid（GET /api/oauth/profile 的 account.uuid 原字符串）
@@ -289,7 +331,7 @@ func DeriveInstallationID(identityPublicKeyB64 string) (string, error) {
 //	<identityPublicKey>   identity 公钥
 //	<sessionPublicKey>    ⚠ 第 5 段是**推理公钥**（坑⑩），不是 identity 再写一遍
 //	<timestamp>           毫秒数字的字符串
-//	<nonce>
+//	<nonce>               18 字节 → 24 字符
 func DeviceCanonical(accountScope, installationID, identityPublicKey, inferencePublicKey, timestamp, nonce string) string {
 	return strings.Join([]string{
 		deviceCanonicalPrefix,
@@ -299,16 +341,16 @@ func DeviceCanonical(accountScope, installationID, identityPublicKey, inferenceP
 		inferencePublicKey,
 		timestamp,
 		nonce,
-	}, canonicalSeparator)
+	}, deviceV1Separator)
 }
 
-// V1Canonical 拼 v1 canonical（7 段，LF 连接）—— 请求头 x-desktop-signature 用它。
+// V1Canonical 拼 v1 canonical（7 段，**单空格**连接）—— 请求头 x-desktop-signature 用它。
 //
 //	v1
 //	<method>            ⚠ **保持原值**，不做 toUpperCase（坑⑫）
 //	<upstreamPath>
 //	<timestamp>
-//	<nonce>
+//	<nonce>             ⚠ 18 字节 → 24 字符（与 device 串共用同一个 nonce）
 //	<sha256(body) base64url>
 //	<idempotencyKey>    ⚠ 没有幂等键时是**空串**，但**分隔符不能省**（坑⑪）
 func V1Canonical(method, upstreamPath, timestamp, nonce string, body []byte, idempotencyKey string) string {
@@ -320,16 +362,16 @@ func V1Canonical(method, upstreamPath, timestamp, nonce string, body []byte, ide
 		nonce,
 		sha256B64URL(body),
 		idempotencyKey,
-	}, canonicalSeparator)
+	}, deviceV1Separator)
 }
 
-// InferenceCanonical 拼 inference canonical（12 段，LF 连接）。
+// InferenceCanonical 拼 inference canonical（12 段，**LF** 连接）。
 //
 //	desktop-inference-v2
 //	<METHOD 大写>            ⚠ 这条串里**要** toUpperCase（坑⑫）
 //	<pathname>
 //	<timestamp>
-//	<nonce>
+//	<nonce>                  ⚠ 24 字节 → 32 字符（**不是** device/v1 那个 18）
 //	<sha256(body)>
 //	<sha256(Authorization)>  ⚠ 含 "Bearer " 前缀的**完整值**
 //	<sha256(推理令牌原值)>
@@ -340,10 +382,14 @@ func V1Canonical(method, upstreamPath, timestamp, nonce string, body []byte, ide
 //
 // 四条规则（缺一条签名就废，报告 §2.6）：
 //
-//	1 分隔符 LF
+//	1 分隔符 **LF**（与 device/v1 的空格不同，见包注释）
 //	2 第 6 段哈希的是**最终发出的 body 原始字节**
 //	3 后 4 段缺项写**空串**，但分隔符不能省 —— 少一段就是另一个串
 //	4 method 在这条串里**大写**（与 v1 串相反）
+//
+// ⚠ 第 10 段（x-claude-code-session-id）在**线上路径上不许为空**：
+// 缺它上游回 500 空体（kong upstream-latency 9~10ms）。本函数的空串能力
+// 只用于单测构造，线上由 buildProof 传入真实 session id。
 func InferenceCanonical(method, pathname, timestamp, nonce string, body []byte, authorization, inferenceToken, requestID, sessionID, expertID, skillNames string) string {
 	return strings.Join([]string{
 		inferenceCanonicalPrefix,
@@ -358,7 +404,7 @@ func InferenceCanonical(method, pathname, timestamp, nonce string, body []byte, 
 		sessionID,
 		expertID,
 		skillNames,
-	}, canonicalSeparator)
+	}, inferenceSeparator)
 }
 
 // AuthorizationHeaderValue 拼 Authorization 头的**完整值**（含 "Bearer " 前缀）。

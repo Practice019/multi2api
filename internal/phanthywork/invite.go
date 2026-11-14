@@ -136,7 +136,7 @@ func (c *Client) FetchReferralCodes(ctx context.Context, a *Auth, idempotencyKey
 	}
 	const body = `{}` // ① body = 字面量空对象（报告 §1.1 实测）
 	timestamp := msToString(a.serverNowMS())
-	nonce := newNonce()
+	nonce := newDeviceNonce()
 	req, err := c.newJSONRequest(ctx, http.MethodPost, pathReferralsCode, []byte(body))
 	if err != nil {
 		return nil, err
