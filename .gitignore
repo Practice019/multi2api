@@ -144,7 +144,16 @@ tasks/
 # 因此它属于「长期契约」，不是过程草稿 ⇒ 必须入库。
 # 按本文件既有约定：白名单必须写在 `*.md` **之后**（放前面会被反超，本文件自己
 # 记着这个坑踩过两次 —— L78 那份 cache-refresh 就是被反超后又补到这里的）。
-!docs/phanthywork-inference-protocol.md
+# ★ 2026-11-14：协议与 ADR 已集中到两个子目录（见 docs/protocols/00-index.md）。
+# 目录级白名单要用「目录 + /**」两条：只写 `!docs/protocols/` 放行的是目录本身，
+# 目录内的 *.md 仍会被上面的 `*.md` 吃掉 —— 这个形态与本文件的 `!docs/reports/` 一致。
+!docs/protocols/
+!docs/protocols/**
+!docs/decisions/
+!docs/decisions/**
+# 供应商行内动作（重拉 / 探测）的设计审问记录（T-02）；记的是**被否决的方案与理由**，属长期契约 ⇒ 必须入库。
+# 按本文件既有约定：白名单必须写在 `*.md` 之后（放前面会被反超）。
+!docs/design-notes-provider-probe.md
 !docs/移植-前端.md
 !docs/移植-后端.md
 !docs/待移植对齐.md
@@ -322,4 +331,6 @@ config-test/
 # 每条规则都带守卫文件:行 —— 没有它，下一个 agent 会重抄一遍 AGENTS.md §7，
 # 并且会把已过期的"28 个扩展点"和"upstreamPrefix 要登记"一起抄进去。
 # ⚠ 规则必须写在 *.md 之后（gitignore 后匹配者胜），否则会被 *.md 吃掉。
-!docs/上游接入协议.md
+# ★ 2026-11-14：本文件已移到 docs/protocols/ 下（协议集中），白名单在 L147 一带按目录放行。
+# 这条旧路径保留为注释，是为了让"这里曾放过一个上游接入协议"这件事可被检索到。
+# !docs/上游接入协议.md  →  见 !docs/protocols/**

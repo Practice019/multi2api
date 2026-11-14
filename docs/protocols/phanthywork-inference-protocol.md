@@ -1,3 +1,9 @@
+---
+name: PhanthyWork 推理协议：新旧内核对照（Reference）
+whenToUse: 要判断某个 phanthywork 请求该走 `/v1/chat/completions` 还是 `/v1/messages`、要核对推理请求的实际头集合、或要复跑抓包取证时读这一份。排查具体错误码（500 空体 / 403 / 封号）请先读同目录的 `推理面诊断表.md`。
+真源: internal/phanthywork/provider.go（协议分发与端点路径）、internal/phanthywork/client.go（推理请求头集合）、docs/protocols/推理面诊断表.md（错误码 → 真因）
+---
+
 # PhanthyWork 推理协议：新旧内核对照（2026-11-13 抓包取证）
 
 > 这份文档的唯一目的：**防止以后有人把协议改回 `/v1/messages`**。
@@ -235,6 +241,41 @@ wc -c < /tmp/b.txt
 
 **四条路径全部返回同一个业务错误码**（而不是 500 空体）⇒ 协议一致正确。
 
+> ⚠ **2026-11-14 事后更正两处（这两行当时被读错了）**：
+>
+> - **① 的 `reward_reason=first_device_owner` 不是"注册成功"的标志，而是服务端对"该账号已有第一台设备"
+>   的拒绝**。当时把它当成功写进了 `RegisteredAtMS`，随后拿一把服务端不认的 key 去换票/推理，
+>   最终把账号打进 `disabled_account`。真因与后果见
+>   [`../decisions/0002-device-binding-is-terminal.md`](../decisions/0002-device-binding-is-terminal.md)。
+> - **③~⑥ 的 `disabled_account` 说明当时账号已封**，因此那四条**只证明了"请求能到达业务层"**，
+>   **不等于**"协议能拿到 200"。真正的 200 实证见下一节。
+
+### ★ 2026-11-14 补齐：拿到 HTTP 200 + 正文
+
+同一个账号、同一把 key、同一份 body，**只改单变量**，把三个失败模式与成功模式都钉了下来：
+
+| 变量 | 结果 | 结论 |
+|---|---|---|
+| 缺 `x-phanthy-session` / `x-claude-code-session-id` | **500 + 0 字节**（kong 9~10ms） | 请求头集合不完整 |
+| 时间戳用裸本机时间（本机慢 52 秒） | 403 `request_not_authorized` | 必须用 `server_time` 折算 |
+| 时间戳用 `server_time` 折算 + 两个 session 头齐全 | **200 + 正文** | 协议完全正确 |
+
+两条端点都验过 200：
+
+```
+POST /v1/messages           → 200  {"type":"message","role":"assistant",
+                                   "content":[{"type":"thinking",...}],
+                                   "usage":{"input_tokens":31,"output_tokens":16,...}}
+POST /v1/chat/completions   → 200  {"choices":[{"finish_reason":"length",
+                                   "message":{"content":"","reasoning_content":...}}],...}
+```
+
+> ⚠ 附带一条**取证纪律**（2026-11-14 实测）：上游把「请求过密」与「签名/时钟不对」
+> 回成**同一个** 403 `request_not_authorized`。短时间内连续 6~8 次推理请求会进入约
+> **2~4 分钟**的 403 冷却窗，窗口内**连已知能成功的配方也是 403**。
+> 所以任何单变量对照实验必须**间隔 ≥30 秒**，否则你验证的是限流而不是协议。
+> 完整的「现象 → 真因 → 证伪命令」对照见 [`推理面诊断表.md`](推理面诊断表.md)。
+
 ---
 
 ## 已知限制（如实记录）
@@ -274,30 +315,45 @@ cmwf4g3qi0wykqb3jzjezto3u   403 disabled_account   ← 当天新注册，1 小�
 3. **版本号长期过低** —— 改造前一直是 `2.48.0`（落后两个小版本），
    服务端按「来源=桌面端但版本对不上」判异常。
 
-### 二、「HTTP 200 + 正文」未能验证
+### 二、「HTTP 200 + 正文」—— 2026-11-14 已闭环（本节原为"未能验证"）
 
-因此本项**不是协议问题**，是**没有可用账号**：
+原写法（2026-11-13）是"协议已到位但没有可用账号，见到 200 即闭环"。
+**2026-11-14 已经见到 200 了**，证据与三条判据见上文「★ 2026-11-14 补齐：拿到 HTTP 200 + 正文」一节。
 
-- 协议已到位（证据见上节：kong latency + 业务错误码）；
-- 待有新号时，跑一次 `/v1/messages` 见到 200 即闭环。
-
-**复跑命令**（拿到新号后）：
+⚠ 但**复跑时不要照抄下面这段旧命令里的"期望输出"** —— 它把 `reward=first_device_owner`
+当成成功标志，那是错的（见上文事后更正）：
 
 ```powershell
-# 1) 把新号凭据放进 auths/phanthywork/
-# 2) 真机验证
+# ⚠ 已过期，仅留作对照：新号验证流程
 $env:PHANTHY_LIVE_DIR='D:/project_GIT/workbuddy2api/auths/phanthywork'
 go test -tags mvp ./internal/phanthywork/ -run TestMVPFinal -v
 
-# 期望看到：
-#   ① register ✓   reward=first_device_owner
-#   ② token ✓      len=813
-#   ③ chat HTTP=200  ← 这一步就是闭环
+# 正确的期望：
+#   ① register  → 若是 200 + reason_code 非空 ⇒ 这是**拒绝**，该账号已有第一台设备，
+#                  换号重来（继续重试会封号，见 ADR-0002）
+#   ② token     → len=813
+#   ③ chat      → HTTP=200  ← 这一步才是闭环
 ```
 
-### 三、给后续接手者的提醒
+**当前可离线复跑的判据**（不依赖账号，2026-11-14 起可用）：
+
+```powershell
+go test ./internal/phanthywork/ -run 'TestCanonicalSeparatorsArePerString|TestNonceLengthsDifferPerString|TestInferenceRequestCarriesSessionHeaders|TestUncalibratedAuthForcesTokenRenewal|TestRegisterReasonCodeIsTerminalConflict' -count=1 -v
+```
+
+### 三、一个账号只能有一台设备（反代与客户端不可共用账号）
+
+2026-11-14 定论：设备 identity 私钥由桌面客户端 Rust 侧持有且**不可导出**
+（`sign_desktop_device_binding` / `sign_desktop_activity` / `desktop_installation_identity`），
+而反代自己注册第二台设备会得到 `reason_code=first_device_owner` ⇒ 封号。
+
+⇒ **反代必须使用专属账号，且该账号不要用桌面客户端登录。** 详见
+[`../decisions/0002-device-binding-is-terminal.md`](../decisions/0002-device-binding-is-terminal.md)。
+
+### 四、给后续接手者的提醒
 
 - **不要**为了"让请求通过"而反复对同一账号施压 —— 本次就是因此把一个能用的号测死了；
 - 每次真机验证**只发 1 次**推理请求，失败就先停下来分析 `kong latency`；
 - 数据面（profile / usage / models）**先测**：如果它们也 403，说明账号已废，
-  继续调协议毫无意义。
+  继续调协议毫无意义；
+- **两次真机请求之间间隔 ≥30 秒**（上游的 403 冷却窗与签名错误回同一个码，见上）；

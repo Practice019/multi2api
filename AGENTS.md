@@ -66,7 +66,7 @@ type Provider interface {
 
 ⚠ 这个数字以**实测**为准（本表随接口增删漂移是常态，别照它去推断）。重扫：
 `internal/gateway/*.go` 里 `^type Xxx interface` 的全部声明，减去两个非扩展点
-（`Provider` 是接缝本身、`contract.go` 的 `TB` 是测试夹具）—— 命令与矩阵见 `docs/上游接入协议.md` §2.3。
+（`Provider` 是接缝本身、`contract.go` 的 `TB` 是测试夹具）—— 命令与矩阵见 `docs/protocols/上游接入协议.md` §2.3。
 
 **只实现自己有的**，不实现不算错（核心回落默认行为）。加第 N 个扩展点只改 `gateway`，不改核心。
 
