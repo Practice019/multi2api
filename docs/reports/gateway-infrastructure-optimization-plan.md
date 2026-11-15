@@ -258,6 +258,7 @@ U-05/U-06 共用转发文件串行；U-07/U-08 共用权限和管理文件串行
 - **U-04 剩余段**：版本化快照已经存在并接到管理端点，但**对外服务路径 `/v1/models`
   仍走旧的 `channelPublicNames` 链路**，没有读这份快照 —— 也就是说
   「客户端看到的目录」与「快照里的目录」暂时还是两份。
+  **澄清（2026-11-16 核实）**：v2 令牌的 `/v1/models` **不在** `channelPublicNames` 那条路上 ——`handler.go` 的 `models()` 第 1021 行有个独立分支，直接返回 `ResolvePolicy(...).Models`。所以"分组作用域"这件事在 v2 侧**本来就是对的**。`channelPublicNames` 里写死 `DefaultGroup` 那句只影响 v1/管理路径，目前没有可见缺陷。判据 3 条（`TestModelsV2TokenSeesItsOwnGroup` / `...DoesNotSeeOtherGroups` / `TestModelsWithoutTokenIsUnauthorized`），反向验证 2 次命中。
   ~~`image_generation` 端点名的对外映射~~ —— **已修（2026-11-15 晚）**：内部仍用 `images`（`SupportsEndpoint` / 路由依它判断），对外统一映射成 `image_generation`，与现有 `/v1/models` 的 `capabilities` 对齐。判据 2 条，反向验证 1 次命中。
   旧名兼容表的**歧义检测**已落地（2026-11-15 晚）：`BuildCatalog` 新增判据 4`alias_ambiguous` —— 同一个名字既是对外别名（ModelMap 键）又是另一个对外名背后的真实模型（ModelMap 值）时，它有两个解，而现有解析链静默选了"是键"那一解。自映射（`{"pub":"pub"}`）不算歧义。判据 4 条，反向验证 2 次命中。
   **仍未做**：把歧义接进 dry-run / 迁移计划的阻塞面（现在只出现在渠道目录里）；以及"旧组别名按 token/来源保留显式兼容解析"。
