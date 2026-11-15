@@ -1566,6 +1566,34 @@ func main() {
 	// 启动日志打表数：让"迁移跑到了没有"有一个可复现的第一现场。
 	log.Printf("数据层: 已打开 %s（%d 张表）", dbPath, len(sqlstore.Tables()))
 
+	// ★ U-10：本地数据结构版本门禁。
+	//
+	// # 为什么必须在**任何写入之前**
+	//
+	// 盘上的数据比本二进制新时，旧代码会把不认识的新字段静默当成"未设置"
+	// （表现是"额度没变但就是不走那条"，日志里毫无异常）。
+	// 这种错没有运行期信号，只能在启动时**拒绝**。
+	//
+	// # 打标的时机
+	//
+	// StartupGuard 是"先判定再打标"：反过来的话会把"盘上是 v3"覆盖成 v1，
+	// 于是"数据比二进制新"这个事实被自己抹掉了（有判据钉着）。
+	//
+	// 状态文件与迁移日志在**同一个文件**（state.json）：一次原子写 = 要么全旧要么全新。
+	stateCompat, _, stateErr := channelstore.StartupGuard(filepath.Join("data", "state.json"))
+	if stateErr != nil {
+		// 读不出来**不当首次启动**：静默覆盖会把迁移日志一起丢掉。
+		log.Fatalf("数据层: 本地状态文件不可用: %v", stateErr)
+	}
+	if err := stateCompat.Error(); err != nil {
+		log.Fatalf("数据层: %v", err)
+	}
+	if stateCompat.Verdict == channelstore.CompatNeedMigration {
+		log.Printf("数据层: 本地数据是 v%d，本二进制支持到 v%d —— "+
+			"可以读，但新语义尚未落地；迁移完成前不要写入新版字段",
+			stateCompat.OnDiskVersion, stateCompat.BinaryVersion)
+	}
+
 	// ★ T-386：日聚合（log_daily）的两件启动期工作。
 	//
 	//   ① 回填：T-386 上线**之前**写进 logs 的历史没有日聚合，不回填的话
