@@ -1,9 +1,21 @@
 # 第三方 CLI `phanthy-code-launcher`（pcl）源码分析
 
-> 日期：2026-11-15
-> 目的：回答「通过这个 CLI 做反代是不是更容易」
-> 真源：npm 包 `phanthy-code-launcher@0.4.3`（`dist/cli.js` 42.4 KB，全部实现）
-> 校验：tarball shasum = `db868d2795874555cad5056b173a16bc430fc724`，**与 registry 声明一致**
+> ⚠⚠ **本文已被取代，保留作早期分析留档。完整规格请看
+> [`pcl-phanthy-code-launcher-spec.md`](pcl-phanthy-code-launcher-spec.md)。**
+>
+> **并且：请勿把本文与 Windows 客户端混为一谈。** 之前确实混过一次，是错的：
+>
+> | | Windows 客户端 | CLI |
+> |---|---|---|
+> | 名称 | `PhanthyWork.exe`（Tauri + `claude-sidecar.exe`） | `phanthy-code-launcher`（命令 `pcl`） |
+> | 来源 | **官方** | **第三方社区**（`spalxyz13`，MIT） |
+> | 凭据 | `<configDir>/.credentials.json` | `~/.phanthy-code-launcher/credentials.json` |
+> | 签名 / 设备注册 / 推理令牌 | **都有** | **全都没有** |
+> | 文档 | `phanthywork-official-client-outbound-spec.md` | `pcl-phanthy-code-launcher-spec.md` |
+>
+> 两者只共享同一个上游 `code.phanthy.com`。
+>
+> 本文的三处已知错误已在新文档 §9 里留档（探测误报 200 / 把已知写成未知 / 头集合说错）。
 
 ---
 
