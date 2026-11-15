@@ -207,6 +207,26 @@ func ComputeDryRun(gs *groupstore.Store, channels []*Channel, catalog []string, 
 		catalogSet[m] = true
 	}
 
+	// 别名歧义（判据 4）让**整个模型名空间**变歧义：
+	// 一个名字有两个解时，"这把令牌能用哪些模型"就没有确定答案。
+	// ⇒ 整份报告阻塞，而不是逐项阻塞（它是目录级问题，不是某个令牌的问题）。
+	//
+	// ⚠ 与 CatalogKnown 用「||」累积而不是覆盖：两个原因可能同时成立，
+	// 只报一个会让人以为修完那个就好了。
+	if ambiguous := aliasAmbiguities(channels); len(ambiguous) > 0 {
+		names := make([]string, 0, len(ambiguous))
+		for _, c := range ambiguous {
+			names = append(names, c.Public)
+		}
+		sort.Strings(names)
+		reason := "模型名有歧义（一语两解，无法确定它指谁）：" + joinComma(names)
+		if report.BlockReason == "" {
+			report.BlockReason = reason
+		} else {
+			report.BlockReason += "；" + reason
+		}
+	}
+
 	for _, in := range inputs {
 		item := DryRunItem{Name: in.Name, Owner: in.Owner}
 
@@ -299,7 +319,7 @@ func ComputeDryRun(gs *groupstore.Store, channels []*Channel, catalog []string, 
 		report.Items = append(report.Items, item)
 	}
 
-	report.Ready = report.CatalogKnown && report.Blocked == 0
+	report.Ready = report.CatalogKnown && report.BlockReason == "" && report.Blocked == 0
 	return report
 }
 

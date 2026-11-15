@@ -22,6 +22,7 @@ package channelstore
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"workbuddy2api/internal/groupstore"
@@ -330,5 +331,76 @@ func TestDryRunReportNeverCarriesSecret(t *testing.T) {
 	}
 	if _, ok := reflect.TypeOf(item).FieldByName("KeyID"); ok {
 		t.Fatal("DryRunItem 不该有 KeyID 字段（它是 Bearer 值本身）")
+	}
+}
+
+// ── 别名歧义让整份报告阻塞 ──────────────────────────────────────────────────
+
+// TestDryRunBlockedByAliasAmbiguity 模型名一语两解时，dry-run 不能给出结论。
+//
+// # 为什么这是**整份**阻塞而不是逐项阻塞
+//
+// 别名歧义是**目录级**问题：一个名字有两个解时，"这把令牌能用哪些模型"对
+// **所有**令牌都不再有确定答案。逐项阻塞会让人以为"其他令牌还能迁" ——
+// 但它们的模型名同样可能是那个有歧义的名字。
+func TestDryRunBlockedByAliasAmbiguity(t *testing.T) {
+	gs, err := groupstore.New(filepath.Join(t.TempDir(), "groups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gs.Upsert(&groupstore.Group{
+		ID: "g-a", Name: "route", PolicyVersion: 2, ChannelIDs: []string{"ch-a", "ch-b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// a: pub → real；b: real → real2 ⇒ `real` 一语两解。
+	channels := []*Channel{
+		{ID: "ch-a", Name: "a", Kind: "standard", Status: StatusEnabled,
+			Models: []string{"real"}, ModelMap: map[string]string{"pub": "real"}},
+		{ID: "ch-b", Name: "b", Kind: "standard", Status: StatusEnabled,
+			Models: []string{"real2"}, ModelMap: map[string]string{"real": "real2"}},
+	}
+	catalog := []string{"pub", "real"}
+
+	report := ComputeDryRun(gs, channels, catalog, []DryRunInput{{
+		Name:              "app",
+		OldGroupsResolved: true,
+		Policy:            RoutingPolicy{PolicyVersion: 2, Groups: []string{"g-a"}},
+	}})
+
+	if report.BlockReason == "" {
+		t.Fatalf("★ 模型名有歧义时整份报告必须阻塞，实际 block_reason 为空（ready=%v）", report.Ready)
+	}
+	if !strings.Contains(report.BlockReason, "歧义") {
+		t.Fatalf("阻塞原因应说清是歧义，实际 %q", report.BlockReason)
+	}
+	if report.Ready {
+		t.Fatal("★ 有别名歧义时报告不能 Ready —— 它会让运维以为可以开始迁移")
+	}
+}
+
+// TestDryRunTwoBlockReasonsAccumulate 两个阻塞原因同时成立时都要报出来。
+//
+// ⚠ 只报一个会让人以为"修完那个就好了"，而实际还有另一个。
+func TestDryRunTwoBlockReasonsAccumulate(t *testing.T) {
+	gs, err := groupstore.New(filepath.Join(t.TempDir(), "groups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	channels := []*Channel{
+		{ID: "ch-a", Name: "a", Kind: "standard", Status: StatusEnabled,
+			Models: []string{"real"}, ModelMap: map[string]string{"pub": "real"}},
+		{ID: "ch-b", Name: "b", Kind: "standard", Status: StatusEnabled,
+			Models: []string{"real2"}, ModelMap: map[string]string{"real": "real2"}},
+	}
+
+	// 目录为空（原因 1）+ 有别名歧义（原因 2）。
+	report := ComputeDryRun(gs, channels, nil, nil)
+
+	if !strings.Contains(report.BlockReason, "无法验证旧权限") {
+		t.Fatalf("应报出「目录为空」这个原因，实际 %q", report.BlockReason)
+	}
+	if !strings.Contains(report.BlockReason, "歧义") {
+		t.Fatalf("应同时报出「歧义」这个原因，实际 %q", report.BlockReason)
 	}
 }
