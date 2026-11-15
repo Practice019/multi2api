@@ -56,6 +56,7 @@ func (h *Handler) registerChannels() {
 	h.register("GET /admin/channels/catalog", h.unifiedChannelCatalog)
 	h.register("POST /admin/channels/catalog/refresh", h.refreshUnifiedChannelCatalog)
 	h.register("GET /admin/channels/providers", h.channelProviders)
+	h.register("GET /admin/migration/dry-run", h.migrationDryRun)
 	h.register("GET /admin/channels/search", h.channelsSearch)
 	h.register("GET /admin/channels/tags", h.channelsTags)
 	h.register("GET /admin/channels/tag/models", h.channelsTagModels)
