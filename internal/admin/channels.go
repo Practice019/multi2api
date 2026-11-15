@@ -54,6 +54,7 @@ func (h *Handler) registerChannels() {
 	// 功能面，加一条渠道端点不该去动装配层的表（B3 的任务约束也是这么定的）。
 	// 未注入 Channels 存储时 registerChannels 整个不会被调用 ⇒ 未注册 = 前端不渲染。
 	h.register("GET /admin/channels/catalog", h.unifiedChannelCatalog)
+	h.register("GET /admin/channels/catalog/impact", h.catalogImpactHandler)
 	h.register("POST /admin/channels/catalog/refresh", h.refreshUnifiedChannelCatalog)
 	h.register("GET /admin/channels/providers", h.channelProviders)
 	h.register("GET /admin/migration/dry-run", h.migrationDryRun)
