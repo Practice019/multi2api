@@ -300,6 +300,10 @@ type Provider struct {
 	// messages = 旧版内核的 /v1/messages + 签名）。见 Protocol / SetProtocol。
 	protocol Protocol
 
+	// requestProfile 发往上游的请求形态（见 requestprofile.go）。
+	// 空 = 未设 ⇒ RequestProfile() 回落 ProfileRelay。
+	requestProfile RequestProfile
+
 	// checkin 签到能力的共享驱动（internal/dailycheckin）。
 	//
 	// nil = 还没构造（构造器里调 initCheckin；SetCheckinLog 也会重建）。
@@ -425,6 +429,18 @@ type Config struct {
 	//
 	// 配置键：`phanthywork.protocol`。
 	Protocol string
+	// RequestProfile 发往上游的推理请求形态（见 requestprofile.go）。
+	//
+	//	""（空）/ "relay"  → 最小可用：Bearer + 设备指纹（**默认**）
+	//	"bare"              → 只 Bearer
+	//	"pcl"               → 第三方 CLI 的形状（自称 phanthy-code-launcher）
+	//	"signature"         → 官方 sidecar 的形态（设备注册 + 推理令牌 + 签名）
+	//
+	// 配置键：`phanthywork.request_profile`。
+	//
+	// ⚠ 默认是 relay 而不是 signature —— 用户 2026-11-15 的决定：
+	//   「不要用官方 sidecar，而是根据 CLI 去反代」。
+	RequestProfile string
 }
 
 // NewProvider 契约测试入口（**冻结签名**）。
@@ -469,7 +485,8 @@ func NewWithClient(c *Client, authDir string, skewMS int64) *Provider {
 	}
 	c.setSkew(skewMS)
 	p := &Provider{client: c, authDir: authDir, creds: map[string]*Auth{}, inferGates: make(map[string]*refreshGate, 2)}
-	p.protocol = ProtocolChat // 默认走新版内核的 OpenAI 兼容路径
+	p.protocol = ProtocolChat       // 默认走新版内核的 OpenAI 兼容路径
+	p.requestProfile = ProfileRelay // 默认不签名（见 requestprofile.go 的长注释）
 	p.initCheckin()
 	return p
 }
@@ -484,6 +501,24 @@ func (p *Provider) SetProtocol(name string) {
 		return
 	}
 	p.protocol = ParseProtocol(name)
+}
+
+// SetRequestProfile 设置发往上游的推理请求形态（见 requestprofile.go）。
+//
+// 配置键：`phanthywork.request_profile`。空 / 未知值回落 ProfileRelay。
+func (p *Provider) SetRequestProfile(name string) {
+	if p == nil {
+		return
+	}
+	p.requestProfile = ParseRequestProfile(name)
+}
+
+// RequestProfile 当前生效的请求形态（零值回落 ProfileRelay）。
+func (p *Provider) RequestProfile() RequestProfile {
+	if p == nil || p.requestProfile == "" {
+		return ProfileRelay
+	}
+	return p.requestProfile
 }
 
 // Protocol 当前生效的推理协议。
@@ -663,10 +698,60 @@ func (p *Provider) Chat(ctx context.Context, cred gateway.Credential, body []byt
 		return gateway.ChatStream{}, errNoAccessToken
 	}
 
+	// ★★ 形态分流（2026-11-15）：非 signature 形态走 chatRelay ——
+	// 不注册设备、不换推理令牌、不签名。理由见 requestprofile.go 的长注释。
+	if !p.RequestProfile().NeedsSignature() {
+		return p.chatRelay(ctx, a, body)
+	}
+
 	if p.Protocol() == ProtocolMessages {
 		return p.chatMessages(ctx, a, body)
 	}
 	return p.chatCompletions(ctx, a, body)
+}
+
+// chatRelay 非签名形态的推理发送（`relay` / `bare` / `pcl`）。
+//
+// # 它刻意**不**做的事
+//
+//	✗ 不调 ensureInstallation（设备注册：自造 ed25519 密钥去绑定桌面安装）
+//	✗ 不调 ensureInferenceToken（换 180 秒推理令牌 —— 它只从 activities/summary 来）
+//	✗ 不调 buildProof（12 段 canonical + 4 个 x-phanthy-proof-*）
+//	✗ 不调 activities/summary（连时钟校准都省了：没有时间戳要签）
+//
+// # 为什么只支持 chat 协议
+//
+// messages 协议的响应是 Anthropic SSE，核心不认识 —— 要走那条必须做
+// Anthropic→OpenAI 翻译，而那个翻译目前挂在 chatMessages 的签名链路上。
+// 在 relay 形态下强行支持它只会产出"能通但核心解析不了"的流。
+// ⇒ 明确报错，而不是给出一个看起来成功、实际下游全错的流。
+func (p *Provider) chatRelay(ctx context.Context, a *Auth, body []byte) (gateway.ChatStream, error) {
+	if p.Protocol() == ProtocolMessages {
+		return gateway.ChatStream{}, fmt.Errorf(
+			"phanthywork: request_profile=%q 不支持 messages 协议（它需要 Anthropic→OpenAI 翻译，"+
+				"而那条链路带签名）。要么把 phanthywork.request_profile 设成 signature，"+
+				"要么把 phanthywork.protocol 设成 chat", p.RequestProfile().String())
+	}
+	outBody, err := PrepareBodyChat(body)
+	if err != nil {
+		// 整形失败是**本地请求体的问题**（各账号一致），不该换号重试。
+		return gateway.ChatStream{}, err
+	}
+	// ⚠ 不用 defer cancel()：成功路径要把 cancel 交给流（同 chatCompletions）。
+	reqCtx, cancel := context.WithTimeout(ctx, inferenceTimeout)
+	resp, err := p.client.ChatRelayStream(reqCtx, a, p.protocolPath(), outBody, p.RequestProfile())
+	if err != nil {
+		cancel()
+		return gateway.ChatStream{}, err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// 上游回的就是 OpenAI SSE ⇒ **原样透传**，一个字节都不改。
+		return gateway.ChatStream{Status: resp.StatusCode, Body: cancelOnClose(resp.Body, cancel)}, nil
+	}
+	defer cancel()
+	defer func() { _ = resp.Body.Close() }()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return gateway.ChatStream{Status: resp.StatusCode, Body: io.NopCloser(bytes.NewReader(raw))}, nil
 }
 
 // chatCompletions 走 POST /v1/chat/completions（OpenAI 兼容，**新版内核**，默认路径）。
@@ -999,6 +1084,26 @@ func modelOfBody(body []byte) string {
 func (p *Provider) ensureReady(ctx context.Context, a *Auth) error {
 	if a == nil {
 		return errNilAuth
+	}
+	// ★★ 2026-11-15：非 signature 形态**绝不注册设备**。
+	//
+	// 这是 RequestProfile 的核心闸门之一。register 把**我们自造的 ed25519 密钥**
+	// 绑定成一个"桌面安装"，而账号是走非桌面 OAuth 流程创建的 —— 形态上就是设备伪造。
+	// 真机观察（docs/reports/pw-new-account-observation-20261115.md）：
+	// 一个号只做了 register + summary + 两次 refresh、**零推理**，一小时后照样被封。
+	//
+	// ⇒ 在 relay/bare/pcl 形态下，签到 / 邀请 / 额度摘要这些"需要签名"的功能
+	//   **明确不可用**，而不是偷偷注册一下再继续。
+	//
+	// ⚠⚠ 这里曾经漏掉 `if`，变成**无条件报错** —— 于是签名形态也被一起掐死，
+	// 39 条判据集体变红。而当时那条判据（TestEnsureReadyRefusesRegistrationInRelay）
+	// **只测了"relay 下必须报错"这半边**，没有正向对照，所以它全绿。
+	// ⇒ 现在两侧都有判据：本条 + TestEnsureReadyRegistersInSignatureProfile。
+	if !p.RequestProfile().NeedsSignature() {
+		return fmt.Errorf(
+			"phanthywork: request_profile=%q 不注册设备（需要签名的功能不可用：签到 / 邀请 / 额度摘要）。"+
+				"要恢复它们请把 phanthywork.request_profile 设成 signature",
+			p.RequestProfile().String())
 	}
 	return p.ensureInstallation(ctx, a)
 }

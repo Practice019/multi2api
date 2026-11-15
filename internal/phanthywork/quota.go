@@ -62,6 +62,16 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 		// 未接线 / 找不到这个 uid：不是"额度未知"，而是"我不知道这个号"。
 		return gateway.UnknownQuota(), false
 	}
+	// ★★ 2026-11-15：非 signature 形态**不查 activities/summary**。
+	//
+	// 这条链路会先 ensureReady（设备注册）再 FetchSummary —— 两个都是
+	// 真机上"零推理也被封"那次的嫌疑动作。所以在 relay/bare/pcl 形态下
+	// 额度列为空（界面显示 `—`），这是刻意的取舍，不是 bug。
+	//
+	// 判据：TestRelayProfileSkipsQuotaSummary
+	if !p.RequestProfile().NeedsSignature() {
+		return gateway.UnknownQuota(), false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), quotaTimeout)
 	defer cancel()
 

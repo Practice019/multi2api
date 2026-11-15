@@ -616,6 +616,77 @@ func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string
 	return c.httpClient().Do(req)
 }
 
+// ChatRelayStream 发一条**极简形态**的推理请求（不签名、不带证明头）。
+//
+// # 与 ChatCompletionsStream 的关系
+//
+// 后者是 `RequestProfile.signature` 专用 —— 它必须带齐 4 个证明头与官方那套身份头，
+// 而且**一个字节都不要动**（那是唯一在真机上确认拿到过 200 的形态）。
+//
+// 本函数是另外三种形态（`pcl` / `relay` / `bare`）的发送口。
+// 它**只发该形态声明的东西**，其余一概不发。
+//
+// # 真源（第三方 CLI `phanthy-code-launcher@0.4.3`）
+//
+//	// dist/cli.js 的转发逻辑（逐字）
+//	let E = new Headers;
+//	for (let [O,J] of Object.entries(req.headers))
+//	  J && !["host","authorization","x-api-key","connection","content-length"].includes(O)
+//	    && E.set(O, J);                                  // agent 的头原样透传
+//	for (let [O,J] of Object.entries({ ...M(), ...await i(), ...t?.headers(b) }))
+//	  E.set(O, J);
+//	E.set("authorization", `Bearer ${k}`);               // 只替换 Authorization
+//	fetch((e.baseURL || BASE) + req.url, { method, headers: E, body, duplex:"half" })
+//
+//	// M() 是它的基础头：
+//	{ "User-Agent": `phanthy-code-launcher/${L}`,
+//	  "X-Phanthy-Client-Source": "phanthy-code-launcher",
+//	  "X-Phanthy-Product": "phanthy_code" }
+//
+// ⚠ 我们与它的**唯一实质差别**：它把 agent 的原生头（含 `anthropic-version`、
+// `x-claude-code-session-id`）原样带上去，而我们是网关、客户端是 OpenAI 兼容的，
+// 没有那套头。所以本函数不试图伪造它们 —— 没证据说它们是必需的。
+//
+// 判据：TestRelayProfileSendsNoSignatureHeaders / TestRelayProfileHeaderMatrix。
+func (c *Client) ChatRelayStream(ctx context.Context, a *Auth, path string, body []byte, profile RequestProfile) (*http.Response, error) {
+	if a == nil || a.OAuth.AccessToken == "" {
+		return nil, errNoAccessToken
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase()+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+
+	// ── 三个必需的头 ───────────────────────────────────────────────────────
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
+
+	// ── User-Agent ────────────────────────────────────────────────────────
+	//
+	// `pcl` 形态照它自己的值；其余形态用 `c.userAgent()`（默认 Bun/1.3.14）。
+	//
+	// ⚠ 为什么不是"干脆不发"：Go 的 http.Client 在缺 UA 时会补
+	// `Go-http-client/1.1` —— 那是第三种、同样不存在的形态。
+	// 官方与 PCL 都**不显式设** UA，实际发出去的是运行时默认（Bun）⇒ 我们也照它。
+	if profile.SendsPCLIdentity() {
+		req.Header.Set("User-Agent", LauncherUA)
+		req.Header.Set("x-phanthy-client-source", "phanthy-code-launcher")
+		req.Header.Set("x-phanthy-product", "phanthy_code")
+	} else {
+		req.Header.Set("User-Agent", c.userAgent())
+	}
+
+	// ── 设备指纹（`relay` / `pcl` 带，`bare` 不带）────────────────────────
+	if profile.SendsDeviceHeader() {
+		if dev := CliDeviceHeader(); dev != "" {
+			req.Header.Set("x-phanthy-cli-device", dev)
+		}
+	}
+
+	return c.httpClient().Do(req)
+}
+
 // newJSONRequest 造一个带 JSON body 的请求。
 //
 // body 必须是**已经序列化好的字节**（见 crypto.go 的 RequestBodyForHash）——

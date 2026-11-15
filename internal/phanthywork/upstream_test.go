@@ -769,6 +769,13 @@ func newFakeProvider(t *testing.T, srv *httptest.Server) *Provider {
 	c := NewWithBase(srv.URL)
 	c.UA = DefaultUA
 	p := NewWithClient(c, t.TempDir(), 0)
+	// ★ 2026-11-15：**显式**声明签名形态。
+	//
+	// 包内默认已改成 relay（用户决定不再用官方 sidecar 的签名链路，见 requestprofile.go），
+	// 而本夹具服务的全部是"官方形态"那批判据（proof 头 / 推理令牌 / 身份头）。
+	// 不显式声明的话，它们会在默认值变化时集体变成"断言一个不存在的形态"。
+	// relay 形态的判据自己会 SetRequestProfile("relay") 覆盖，见 requestprofile_test.go。
+	p.SetRequestProfile("signature")
 	p.SetProtocol("messages")
 	return p
 }
@@ -782,6 +789,8 @@ func newFakeProviderChat(t *testing.T, srv *httptest.Server) *Provider {
 	c := NewWithBase(srv.URL)
 	c.UA = DefaultUA
 	p := NewWithClient(c, t.TempDir(), 0)
+	// ★ 2026-11-15：同上 —— 本夹具服务"官方形态"的 chat 判据（proof 头 / x-app / 身份头）。
+	p.SetRequestProfile("signature")
 	p.SetProtocol("chat")
 	return p
 }
