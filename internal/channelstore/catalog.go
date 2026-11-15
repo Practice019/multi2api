@@ -33,6 +33,32 @@ import (
 	"time"
 )
 
+// internalEndpoints 目录计算时遍历的**内部**端点类别。
+//
+// ⚠ 这三个值只在包内与 `SupportsEndpoint` / 路由共用，**不出现在任何对外响应里**。
+// 对外一律走 PublicEndpoint 映射（计划 U-04 验收要求 `image_generation` 保留）。
+func internalEndpoints() []string { return []string{"chat", "images"} }
+
+// PublicEndpoint 把内部端点类别映射成**对外名字**。
+//
+// # 为什么必须分开
+//
+//	内部（SupportsEndpoint / 路由 / 渠道能力表）  "images"
+//	对外（/v1/models 的 capabilities、本目录）    "image_generation"
+//
+// 现有 `/v1/models` 就是这么发的（见 handler.go 的
+// `out[at]["capabilities"] = []string{"image_generation"}`）。
+// 统一目录如果照抄内部名发 "images"，同一个网关会对同一个能力给出两个名字 ——
+// 客户端按名字匹配能力，两边不一致就会出现"列表里有、调不了"。
+//
+// ⚠ 改内部名会动路由；改对外只是措辞。所以只映射这一侧。
+func PublicEndpoint(kind string) string {
+	if kind == "images" {
+		return "image_generation"
+	}
+	return kind
+}
+
 // CatalogProvider 一个公开模型背后的一条供给。
 type CatalogProvider struct {
 	ChannelID  string   `json:"channel_id"`
@@ -204,8 +230,9 @@ func BuildCatalog(channels []*Channel) UnifiedCatalog {
 				byModel[n.public] = model
 			}
 			endpoints := []string{}
-			for _, endpoint := range []string{"chat", "images"} {
+			for _, endpoint := range internalEndpoints() {
 				if ch.SupportsEndpoint(n.real, endpoint) {
+					// 存内部名用于聚合去重，输出前再映射 —— 见下面的 publicEndpoints。
 					endpoints = append(endpoints, endpoint)
 				}
 			}
@@ -254,6 +281,11 @@ func BuildCatalog(channels []*Channel) UnifiedCatalog {
 
 	for _, public := range sortedKeys(byModel) {
 		model := byModel[public]
+		// 每条供给与整个模型的端点都换成对外名（"images" → "image_generation"）。
+		for i := range model.Providers {
+			model.Providers[i].Endpoints = publicEndpoints(model.Providers[i].Endpoints)
+		}
+		model.Endpoints = publicEndpoints(model.Endpoints)
 		sort.Strings(model.Endpoints)
 		sort.Slice(model.Providers, func(i, j int) bool {
 			if model.Providers[i].ChannelID != model.Providers[j].ChannelID {
@@ -279,6 +311,22 @@ func BuildCatalog(channels []*Channel) UnifiedCatalog {
 	digest := sha256.Sum256(raw)
 	result.Version = hex.EncodeToString(digest[:])
 	return result
+}
+
+// publicEndpoints 去重 + 映射成对外名，保持排序。
+func publicEndpoints(internal []string) []string {
+	seen := make(map[string]bool, len(internal))
+	out := make([]string, 0, len(internal))
+	for _, kind := range internal {
+		name := PublicEndpoint(kind)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func containsString(list []string, want string) bool {

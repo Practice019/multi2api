@@ -341,3 +341,75 @@ func TestSnapshotStaleAge(t *testing.T) {
 		t.Fatalf("未发布过时 Stale 应为 0，实际 %v", got)
 	}
 }
+
+// ── 端点名的对外映射（计划 U-04 验收「image_generation 保留」）──────────────
+
+// TestCatalogEmitsPublicEndpointNames 目录对外只发 `image_generation`，绝不发内部名 `images`。
+//
+// # 为什么这条必须单独钉
+//
+//	内部（SupportsEndpoint / 路由 / 渠道能力表）  "images"
+//	对外（/v1/models 的 capabilities）            "image_generation"
+//
+// 现有 `/v1/models` 发的是后者（handler.go 的 capabilities）。统一目录若照抄
+// 内部名发 "images"，同一个网关就对同一个能力给出两个名字 —— 客户端按名字
+// 匹配能力，两边不一致就会出现"列表里有、调不了"。
+func TestCatalogEmitsPublicEndpointNames(t *testing.T) {
+	// ch-a 只支持 images（ModelEndpoints 显式声明）。
+	a := &Channel{
+		ID: "a", Name: "a", Kind: "standard", Status: StatusEnabled,
+		Models:         []string{"paint"},
+		ModelEndpoints: map[string][]string{"paint": {"images"}},
+	}
+	got := BuildCatalog([]*Channel{a})
+
+	if len(got.Models) != 1 {
+		t.Fatalf("应有 1 个公开模型，实际 %d", len(got.Models))
+	}
+	m := got.Models[0]
+	if !containsString(m.Endpoints, "image_generation") {
+		t.Fatalf("★ 模型端点应含 image_generation（对外名），实际 %v", m.Endpoints)
+	}
+	for _, ep := range m.Endpoints {
+		if ep == "images" {
+			t.Fatalf("★ 目录对外不能出现内部名 \"images\"，实际 %v", m.Endpoints)
+		}
+	}
+	// 每条供给也要映射过。
+	for _, p := range m.Providers {
+		for _, ep := range p.Endpoints {
+			if ep == "images" {
+				t.Fatalf("供给 %s 的端点里出现了内部名：%v", p.ChannelID, p.Endpoints)
+			}
+		}
+	}
+
+	// 反向：只支持 chat 的模型只发 chat，不多发 image_generation。
+	b := &Channel{ID: "b", Name: "b", Kind: "standard", Status: StatusEnabled,
+		Models: []string{"talk"}}
+	got = BuildCatalog([]*Channel{b})
+	for _, ep := range got.Models[0].Endpoints {
+		if ep == "image_generation" {
+			t.Fatalf("只支持 chat 的模型不该有 image_generation，实际 %v", got.Models[0].Endpoints)
+		}
+	}
+}
+
+// TestPublicEndpointMapping 映射函数本身：只映射 images，其余原样。
+func TestPublicEndpointMapping(t *testing.T) {
+	cases := map[string]string{
+		"images": "image_generation",
+		"chat":   "chat",
+		"":       "",
+		"other":  "other",
+	}
+	for in, want := range cases {
+		if got := PublicEndpoint(in); got != want {
+			t.Fatalf("PublicEndpoint(%q) = %q，want %q", in, got, want)
+		}
+	}
+	// 幂等：映射过的不再变。
+	if got := PublicEndpoint(PublicEndpoint("images")); got != "image_generation" {
+		t.Fatalf("映射应幂等，二次得到 %q", got)
+	}
+}
