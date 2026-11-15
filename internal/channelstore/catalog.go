@@ -94,6 +94,10 @@ const (
 	ConflictImplicitCollision = "implicit_collision"
 	// ConflictMappingUndeclared 判据 3：ModelMap 指向未声明的真实模型。
 	ConflictMappingUndeclared = "mapping_target_undeclared"
+	// ConflictAliasAmbiguous 判据 4（U-09 别名兼容）：同一个名字**一语两解** ——
+	// 它既是对外别名（某个 ModelMap 的键），又是另一个对外名背后的真实模型（某个
+	// ModelMap 的值）。于是"它到底指谁"有两个答案，而现有解析链静默选了其中一种。
+	ConflictAliasAmbiguous = "alias_ambiguous"
 )
 
 // UnifiedCatalog 一次目录快照。
@@ -181,6 +185,84 @@ func PublicNames(ch *Channel) map[string]string {
 		result[n.public] = n.real
 	}
 	return result
+}
+
+// aliasAmbiguities 找出**一语两解**的名字（U-09 别名兼容段）。
+//
+// # 什么是一语两解
+//
+//	渠道 A：ModelMap{"pub": "real"}      ⇒ real 是 pub 背后的真实模型
+//	渠道 B：ModelMap{"real": "real2"}    ⇒ real 自己又是一个对外别名
+//
+// 这时客户端请求 `real` 有两个可能的答案：
+//
+//	① 当别名解 ⇒ real2（现有解析链选这个：名字是键就原样用）
+//	② 当真实模型解 ⇒ 渠道 A 的 real
+//
+// 而 `/v1/models` 会把 `pub` 与 `real` 都列出来，用户复制哪个就照着用哪个 ——
+// 于是"列表里看到的名字"与"它实际打到的模型"对不上。
+//
+// # 为什么必须报出来而不是选一个
+//
+// 计划 U-09 的验收补充写着「冲突**不得任选**」。选一种解会让另一半配置静默失效，
+// 而失效的那一半正是运维以为生效的那一半。
+func aliasAmbiguities(channels []*Channel) []CatalogConflict {
+	type where struct {
+		asAlias  []string // 它作为对外别名的渠道
+		asTarget []string // 它作为真实模型（被别名指向）的渠道
+	}
+	seen := map[string]*where{}
+	get := func(name string) *where {
+		if seen[name] == nil {
+			seen[name] = &where{}
+		}
+		return seen[name]
+	}
+	for _, ch := range channels {
+		if ch == nil {
+			continue
+		}
+		for public, real := range ch.ModelMap {
+			if public == "" || real == "" {
+				continue
+			}
+			// ⚠ 映射到**自己**不算歧义：两种解指向同一个目标。
+			// 不带这一条的话，`{"pub":"pub"}` 会被误报成"一语两解" ——
+			// 而那是运维显式声明"这个名字就是它自己"的正常写法。
+			if public == real {
+				continue
+			}
+			get(public).asAlias = append(get(public).asAlias, ch.ID)
+			get(real).asTarget = append(get(real).asTarget, ch.ID)
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := []CatalogConflict{}
+	for _, name := range names {
+		w := seen[name]
+		if len(w.asAlias) == 0 || len(w.asTarget) == 0 {
+			continue // 只有一种解，不是歧义
+		}
+		channelsInvolved := map[string]bool{}
+		for _, id := range w.asAlias {
+			channelsInvolved[id] = true
+		}
+		for _, id := range w.asTarget {
+			channelsInvolved[id] = true
+		}
+		out = append(out, CatalogConflict{
+			Public:   name,
+			Reason:   ConflictAliasAmbiguous,
+			Reals:    []string{name}, // 作为别名它指向别的名字；具体目标已在注释里说明
+			Channels: sortedKeys(channelsInvolved),
+		})
+	}
+	return out
 }
 
 // BuildCatalog 把渠道配置算成一份带版本号的目录快照。
@@ -295,6 +377,10 @@ func BuildCatalog(channels []*Channel) UnifiedCatalog {
 		})
 		result.Models = append(result.Models, *model)
 	}
+
+	// 判据 4：别名歧义。它不影响 Models 的聚合（那些名字仍在），
+	// 但必须出现在 Conflicts 里 —— 否则运营看不到"有两个解"这件事。
+	result.Conflicts = append(result.Conflicts, aliasAmbiguities(channels)...)
 
 	// 冲突也排序：Version 必须只由内容决定。
 	sort.Slice(result.Conflicts, func(i, j int) bool {

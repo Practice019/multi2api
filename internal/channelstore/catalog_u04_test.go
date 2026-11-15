@@ -413,3 +413,69 @@ func TestPublicEndpointMapping(t *testing.T) {
 		t.Fatalf("映射应幂等，二次得到 %q", got)
 	}
 }
+
+// ── 判据 4：别名歧义（U-09 别名兼容段）────────────────────────────────────
+
+// TestCatalogReportsAliasAmbiguity ★ 一语两解必须报出来，不能默默选一个。
+//
+//	渠道 A：pub → real   （real 是 pub 背后的真实模型）
+//	渠道 B：real → real2 （real 自己又是一个对外别名）
+//
+// 请求 `real` 有两个答案；现有解析链会让"是键"那一解胜出（静默）。
+// 而 `/v1/models` 会把 pub 与 real 都列出来 —— 用户复制 real 得到的是 real2。
+func TestCatalogReportsAliasAmbiguity(t *testing.T) {
+	a := catCh("a", []string{"real"}, map[string]string{"pub": "real"})
+	b := catCh("b", []string{"real2"}, map[string]string{"real": "real2"})
+
+	got := BuildCatalog([]*Channel{a, b})
+
+	var found *CatalogConflict
+	for i := range got.Conflicts {
+		if got.Conflicts[i].Public == "real" && got.Conflicts[i].Reason == ConflictAliasAmbiguous {
+			found = &got.Conflicts[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("★ `real` 既是对外别名又是真实模型 ⇒ 必须报 alias_ambiguous，实际 %+v", got.Conflicts)
+	}
+	if len(found.Channels) != 2 {
+		t.Fatalf("应报出涉及的两条渠道，实际 %v", found.Channels)
+	}
+}
+
+// TestCatalogSelfMappingIsNotAmbiguous 映射到自己不算歧义（两种解同一目标）。
+func TestCatalogSelfMappingIsNotAmbiguous(t *testing.T) {
+	a := catCh("a", []string{"pub"}, map[string]string{"pub": "pub"})
+	got := BuildCatalog([]*Channel{a})
+	for _, c := range got.Conflicts {
+		if c.Reason == ConflictAliasAmbiguous {
+			t.Fatalf("自映射不该报歧义，实际 %+v", c)
+		}
+	}
+}
+
+// TestCatalogPureAliasIsNotAmbiguous 只有一种解时不算歧义。
+func TestCatalogPureAliasIsNotAmbiguous(t *testing.T) {
+	// pub 是别名，real 只作为目标出现（没有任何渠道把它当别名键）。
+	a := catCh("a", []string{"real"}, map[string]string{"pub": "real"})
+	got := BuildCatalog([]*Channel{a})
+	for _, c := range got.Conflicts {
+		if c.Reason == ConflictAliasAmbiguous {
+			t.Fatalf("单一解不该报歧义，实际 %+v", c)
+		}
+	}
+}
+
+// TestCatalogAliasAmbiguityChangesVersion 歧义变化必须改变版本（否则快照比较失效）。
+func TestCatalogAliasAmbiguityChangesVersion(t *testing.T) {
+	a := catCh("a", []string{"real"}, map[string]string{"pub": "real"})
+	clean := BuildCatalog([]*Channel{a})
+
+	// 再加一条把 real 变成别名的渠道 ⇒ 出现歧义 ⇒ 版本必变。
+	b := catCh("b", []string{"real2"}, map[string]string{"real": "real2"})
+	dirty := BuildCatalog([]*Channel{a, b})
+
+	if clean.Version == dirty.Version {
+		t.Fatal("出现别名歧义后 Version 未变 —— 版本没有覆盖 Conflicts")
+	}
+}
