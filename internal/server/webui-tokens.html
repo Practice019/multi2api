@@ -2318,15 +2318,103 @@ $('btnNew').addEventListener('click', function () { openDrawer(null); });
 // 元素不在时下面这行会对着 null 调 addEventListener ⇒ 整页脚本从这一句起全部中断
 // （表现是"表格空的、按钮都没反应"，看起来像后端挂了）。所以按 webui-status.html
 // 的 T92 写法保留绑定、只是给一个空壳兜住：元素在就照常绑，不在就是 no-op。
+// ── URL 深链：搜索筛选的持久化与恢复（U-11「URL 深链与筛选恢复」）──────────
+//
+// # 要解决什么
+//
+// 用户在令牌页输入关键字筛出一批，点进某条去做事；按返回键回来，搜索框**空了**。
+// 同理，把"筛出某批令牌"的链接发给同事，对方打开只看到空搜索框。
+//
+// # 为什么用 replaceState 而不是 pushState
+//
+// 搜索框每输一个字都在变。pushState 会把每个击键都塞进历史栈，
+// 用户按一次返回键只退一个字符 —— 那是**比不实现更糟**的体验。
+//
+// # 白名单
+//
+// 只接受 DL_KEYS 里列出的键。URL 是**外部输入**（可被手工拼、被别的页面跳过来），
+// 把任意键读进页面状态等于开了一个不受控的入口。
+//
+// # 与凭据无关
+//
+// 只处理**搜索关键字**这一种非敏感筛选。任何凭据、令牌值、Key 一律不进 URL ——
+// URL 会进浏览器历史、进 Referer、进同事的聊天记录。
+
+var DL_KEYS = ['q'];   // 允许出现在 URL 上的筛选键（当前只有搜索关键字）
+
+// dlEncode 把筛选状态编码成查询串（只含白名单键、值非空的）。
+function dlEncode(state) {
+  var parts = [];
+  for (var i = 0; i < DL_KEYS.length; i++) {
+    var k = DL_KEYS[i];
+    var v = state && state[k] != null ? String(state[k]).trim() : '';
+    if (v === '') continue;
+    parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
+  }
+  return parts.join('&');
+}
+
+// dlDecode 从查询串解析筛选状态（只认白名单键）。
+function dlDecode(search) {
+  var out = {};
+  var raw = String(search || '');
+  if (raw.charAt(0) === '?') raw = raw.slice(1);
+  if (raw === '') return out;
+  var pairs = raw.split('&');
+  for (var i = 0; i < pairs.length; i++) {
+    var eq = pairs[i].indexOf('=');
+    if (eq < 0) continue;
+    var k = decodeURIComponent(pairs[i].slice(0, eq));
+    // ⚠ 白名单：URL 是外部输入，未知键一律丢弃。
+    if (DL_KEYS.indexOf(k) < 0) continue;
+    out[k] = decodeURIComponent(pairs[i].slice(eq + 1));
+  }
+  return out;
+}
+
+// dlSync 把当前筛选写回地址栏（不产生新历史条目）。
+function dlSync(state) {
+  var qs = dlEncode(state);
+  var url = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+  try {
+    window.history.replaceState(null, '', url);
+  } catch (e) { /* file:// 等无法改地址栏的场景忽略 */ }
+}
+
+// dlRestore 启动时把地址栏里的筛选恢复到搜索框。
+function dlRestore() {
+  var st = dlDecode(window.location.search);
+  var box = $('kw');
+  if (!box) return;
+  if (st.q) { box.value = st.q; }
+}
+
+// 浏览器前进/后退时同步（replaceState 不产生条目，但用户仍可能从别处回来）。
+window.addEventListener('popstate', function () {
+  var st = dlDecode(window.location.search);
+  var box = $('kw');
+  if (!box) return;
+  if ((box.value || '') !== (st.q || '')) {
+    box.value = st.q || '';
+    state.page = 1;
+    refresh();
+  }
+});
+
 var refreshBtn = $('btnRefresh');
 if (refreshBtn) refreshBtn.addEventListener('click', function () { refresh(); });
 $('btnPrev').addEventListener('click', function () { if (state.page > 1) { state.page--; refresh(); } });
 $('btnNext').addEventListener('click', function () { state.page++; refresh(); });
 var kwTimer = null;
 $('kw').addEventListener('input', function () {
+  // 立刻写回地址栏（不走 250ms 防抖）：用户随时可能复制地址或按返回，
+  // 延迟写会让"刚输完就复制"拿到旧值。写 URL 很便宜，重取列表才需要防抖。
+  dlSync({ q: $('kw').value });
   if (kwTimer) window.clearTimeout(kwTimer);
   kwTimer = window.setTimeout(function () { state.page = 1; refresh(); }, 250);
 });
+// 启动顺序：先恢复筛选，再取列表 —— 反过来会先拉一遍全量、再拉一遍筛选后的。
+dlRestore();
 refresh();
 
 // ── 系统凭据（admin_token / api_key）：展示 + 各自独立轮换 ──────────────────
