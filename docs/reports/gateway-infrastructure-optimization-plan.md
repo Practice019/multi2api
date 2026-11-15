@@ -253,7 +253,8 @@ U-05/U-06 共用转发文件串行；U-07/U-08 共用权限和管理文件串行
 - **U-10 版本兼容判据已落地（2026-11-15 晚）**：`channelstore.DataCompatibility` ——盘上版本 vs 二进制版本四态判定（ok / need_migration / **binary_too_old** / unmarked）。**只有"数据比二进制新"阻塞启动**，理由：旧代码不认识新字段，会静默当成未设置。判据 6 条，反向验证 3 次全部命中。
 - **U-10 持久化已落地（2026-11-16）**：`channelstore.PersistedState` + `StartupGuard` ——版本标记与迁移日志写在**同一个** `data/state.json`（一次原子写 = 要么全旧要么全新），已接进 `cmd/server/main.go` 的启动路径（在任何写入之前）。三条不变量：先判定再打标、损坏不当首次启动、`binary_too_old` 时连写都不写。判据 7 条，反向验证 3 次全部命中；实机验证：启动后 `state.json` = `{"schema_version":1,...}`。
 - **U-10 仍未做**：`Apply → 写 → Commit/Fail` 三段式接到真实存储（现在日志能存，但还没有真实的迁移写入在用它）、迁移完成时把版本升到 `LocalSchemaVersion`、切换规则（要 U-12）。
-- **U-09 仍未做**：计划的**执行**（写库、备份含秘密须受限保存）、「provider/channel/account 来源映射」那一半、别名兼容解析。旧配置不会自动改成新版。
+- **U-09 来源映射已补齐（2026-11-16）**：`CatalogProvider` 新增 `groups` ——provider（`ProviderID`）/ channel（`ChannelID`）/ group（`Groups`）三格齐了，真实模型名（`RealModel`）本就有。**缺的恰好是 group**，而它正是 v2 的可见性边界（`ResolvePolicy` 用令牌分组取候选）。`sortedCopy` 保证乱序声明不影响快照版本。判据 3 条（来源三格 + 分组进版本 + 分组顺序无关），反向验证 3 次全部命中。
+- **U-09 仍未做**：计划的**执行**（写库、备份含秘密须受限保存）、按 token/来源的旧组别名兼容解析。旧配置不会自动改成新版。
 - ~~新版运行链仅支持聊天与模型列表；生图等端点明确 501~~ —— **已过期（2026-11-15 晚核实）**：生图已接入 v2（`routing_images.go`），允许清单是**聊天 / 模型列表 / 生图**三个；其余**已注册**的端点明确 501（`routing_endpoint_unsupported`），不复用旧路径绕过授权。注意 `GET /v1/model`（`/v1/models` 的旧别名）**不在**清单里 ⇒ v2 令牌用它会被 501，这是刻意的（旧别名不能成为绕过 v2 组与白名单的旁路）。判据 2 条（`TestRoutingEndpointAllowlist` / `TestRoutingUnsupportedMessageMatchesAllowlist`），反向验证 2 次命中。已有旧版生图行为保持兼容。
 - 完整多端点能力资格、旧前缀／分组别名迁移兼容、内置工具注入与既有工具循环的完整对齐仍需实施和验证。
 - **U-04 剩余段**：版本化快照已经存在并接到管理端点，但**对外服务路径 `/v1/models`

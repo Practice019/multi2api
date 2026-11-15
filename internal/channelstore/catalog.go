@@ -68,6 +68,21 @@ type CatalogProvider struct {
 	RealModel  string   `json:"real_model"`
 	Endpoints  []string `json:"endpoints"`
 	Enabled    bool     `json:"enabled"`
+	// Groups 这条渠道所属的分组（排序后）。
+	//
+	// # 为什么它是"来源映射"缺的那一格
+	//
+	// U-09 的验收要求「provider / channel / account 来源映射」。前三者里
+	// provider 与 channel 已经在了（ProviderID / ChannelID），**group 缺**。
+	//
+	// 而 group 恰恰是 v2 的**可见性边界**：`ResolvePolicy` 用令牌的分组取渠道候选，
+	// `EnabledModels(group)` 按分组过滤能力。所以运维问"这个公开模型谁能用"
+	// 时，答案是「ch-a 能服务它，而 ch-a 属于 g-route 与 g-beta」——
+	// 没有 Groups 这一格，那句话就说不完整。
+	//
+	// ⚠ 它**不是**"谁能用这个模型"的结论，只是渠道的归属。真正的可见性
+	// 还要看令牌的分组（`ResolvePolicy`）—— 两件事不能混。
+	Groups []string `json:"groups,omitempty"`
 }
 
 // PublicCatalogModel 一个公开模型及其全部供给。
@@ -326,6 +341,8 @@ func BuildCatalog(channels []*Channel) UnifiedCatalog {
 				RealModel:  n.real,
 				Endpoints:  endpoints,
 				Enabled:    ch.Status == StatusEnabled,
+				// 分组归属：v2 的可见性边界。排序保证 Version 稳定。
+				Groups: sortedCopy(ch.Groups),
 			})
 			for _, endpoint := range endpoints {
 				if !containsString(model.Endpoints, endpoint) {
@@ -411,6 +428,16 @@ func publicEndpoints(internal []string) []string {
 		seen[name] = true
 		out = append(out, name)
 	}
+	sort.Strings(out)
+	return out
+}
+
+// sortedCopy 复制并排序（nil 安全，返回空切片而不是 nil —— JSON 里是 [] 不是 null）。
+//
+// ⚠ 必须排序：map/切片顺序不稳定会让 Version 哈希随每次调用变化，
+// 于是"内容没变但版本变了"，快照比较立刻失效（本文件头就有这条纪律）。
+func sortedCopy(in []string) []string {
+	out := append([]string{}, in...)
 	sort.Strings(out)
 	return out
 }

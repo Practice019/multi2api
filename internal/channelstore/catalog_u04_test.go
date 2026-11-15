@@ -16,6 +16,7 @@ package channelstore
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -477,5 +478,76 @@ func TestCatalogAliasAmbiguityChangesVersion(t *testing.T) {
 
 	if clean.Version == dirty.Version {
 		t.Fatal("出现别名歧义后 Version 未变 —— 版本没有覆盖 Conflicts")
+	}
+}
+
+// ── 来源映射：provider / channel / group（U-09 验收那一半）─────────────────
+
+// TestCatalogProviderCarriesGroupProvenance 每条供给必须带**分组归属**。
+//
+// # 为什么缺的恰好是 group
+//
+// U-09 验收要求「provider / channel / account 来源映射」。provider 与 channel
+// 一直在（ProviderID / ChannelID），**group 没有**。
+//
+// 而 group 恰恰是 v2 的**可见性边界**：`ResolvePolicy` 用令牌的分组取渠道候选。
+// 运维问"这个公开模型谁能用"时，完整答案是
+// 「ch-a 能服务它，而 ch-a 属于 g-route」—— 没有 Groups 这格就说不完整。
+func TestCatalogProviderCarriesGroupProvenance(t *testing.T) {
+	a := &Channel{
+		ID: "ch-a", Name: "a", Kind: "builtin", ProviderID: "phanthywork",
+		Status: StatusEnabled,
+		Models: []string{"real"}, ModelMap: map[string]string{"pub": "real"},
+		Groups: []string{"g-beta", "g-route"}, // 故意乱序
+	}
+	got := BuildCatalog([]*Channel{a})
+
+	if len(got.Models) != 1 || len(got.Models[0].Providers) != 1 {
+		t.Fatalf("应 1 个模型 1 条供给，实际 %+v", got.Models)
+	}
+	p := got.Models[0].Providers[0]
+
+	// 来源映射的三格必须都在。缺任何一格，"这个模型是谁供给的"就说不完整。
+	if p.ChannelID != "ch-a" {
+		t.Fatalf("★ channel 来源丢了：ChannelID=%q", p.ChannelID)
+	}
+	if p.ProviderID != "phanthywork" {
+		t.Fatalf("★ provider 来源丢了：ProviderID=%q（内置渠道必须带 provider）", p.ProviderID)
+	}
+	if p.RealModel != "real" {
+		t.Fatalf("★ 真实模型名丢了：RealModel=%q", p.RealModel)
+	}
+
+	want := []string{"g-beta", "g-route"}
+	if !reflect.DeepEqual(p.Groups, want) {
+		t.Fatalf("★ 供给的分组归属 = %v，want %v（且必须排序 —— 乱序会让 Version 抖动）", p.Groups, want)
+	}
+}
+
+// 分组变化必须改变版本（来源映射也是快照内容的一部分）。
+func TestCatalogVersionCoversGroupProvenance(t *testing.T) {
+	a := &Channel{ID: "ch-a", Name: "a", Kind: "standard", Status: StatusEnabled,
+		Models: []string{"real"}, ModelMap: map[string]string{"pub": "real"},
+		Groups: []string{"g-a"}}
+	before := BuildCatalog([]*Channel{a}).Version
+
+	a.Groups = []string{"g-b"}
+	after := BuildCatalog([]*Channel{a}).Version
+
+	if before == after {
+		t.Fatal("★ 改了分组归属但 Version 没变 —— 来源映射没进快照内容")
+	}
+}
+
+// 分组顺序不影响版本（sortedCopy 的意义）。
+func TestCatalogVersionStableAcrossGroupOrder(t *testing.T) {
+	mk := func(groups []string) string {
+		return BuildCatalog([]*Channel{{
+			ID: "ch-a", Name: "a", Kind: "standard", Status: StatusEnabled,
+			Models: []string{"real"}, Groups: groups,
+		}}).Version
+	}
+	if mk([]string{"g-a", "g-b"}) != mk([]string{"g-b", "g-a"}) {
+		t.Fatal("★ 分组声明顺序不同却得到不同版本 —— 排序没生效")
 	}
 }
