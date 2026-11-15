@@ -32,13 +32,99 @@ func (h *Handler) credentialReveal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"full": h.currentAdminToken()})
 }
 
+// catalogSnapshots 返回本实例的目录快照持有者（惰性建）。
+//
+// ⚠ 惰性建而不是构造函数里建：`&Handler{}` 直接构造的测试也要能调
+// （与 adminToken / patterns 同一模式）。
+func (h *Handler) catalogSnapshots() *channelstore.CatalogSnapshotStore {
+	if s := h.catalogSnap.Load(); s != nil {
+		return s
+	}
+	s := channelstore.NewCatalogSnapshotStore()
+	if h.catalogSnap.CompareAndSwap(nil, s) {
+		return s
+	}
+	return h.catalogSnap.Load()
+}
+
+// publishCatalog 从**当前渠道配置**算一份目录并发布为快照。
+//
+// 这是「获取」这一侧：只有它读渠道库。失败时用 Fail() 记一笔，
+// 当前快照原样保留（catalog_snapshot.go 的硬不变量）。
+func (h *Handler) publishCatalog() (channelstore.CatalogSnapshot, error) {
+	store := h.catalogSnapshots()
+	if h.cfg.Channels == nil {
+		err := fmt.Errorf("channel store unavailable")
+		return store.Fail(err), err
+	}
+	return store.Publish(channelstore.BuildCatalog(h.cfg.Channels.List())), nil
+}
+
+// unifiedChannelCatalog 读取**已发布的**目录快照。
+//
+// # U-04：为什么这里不再现算
+//
+// 改造前这里 `BuildCatalog(h.cfg.Channels.List())` —— 每次请求现算，
+// 于是"你看到的这份目录"与"上次刷新成功的那份"没有任何绑定关系，
+// 运维无法回答「这份是第几次刷的、有没有失败过」。
+//
+// 现在：
+//
+//	读      永远返回上一份成功的快照，顺带给出 Sequence / Attempts / LastError
+//	首次    库里一份都没有时**惰性发布一次**（否则这个端点永远 503）
+//	刷新    显式 POST /admin/channels/catalog/refresh 才重新发布
+//
+// ⇒ 渠道改了但没刷新时，这里仍然显示旧快照 —— 这是**特性**：
+// 它会明确告诉你 sequence/attempts 是多少，而不是悄悄替你把两个时间点混一起。
 func (h *Handler) unifiedChannelCatalog(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
 	if h.cfg.Channels == nil {
 		writeError(w, http.StatusServiceUnavailable, "channel store unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, channelstore.BuildCatalog(h.cfg.Channels.List()))
+	snap := h.catalogSnapshots().Read()
+	if !snap.Ready() {
+		// 首次访问：惰性发布。失败也照样回 200 —— 把失败原因放进 last_error，
+		// 让面板能显示"取目录失败"，而不是一个光秃秃的 5xx。
+		snap, _ = h.publishCatalog()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"catalog":      snap.Catalog,
+		"sequence":     snap.Sequence,
+		"attempts":     snap.Attempts,
+		"failed":       snap.FailedAttempts(),
+		"published_at": snap.PublishedAt,
+		"last_error":   snap.LastError,
+	})
+}
+
+// refreshUnifiedChannelCatalog 显式重新发布目录快照（POST）。
+//
+// 与读端点分开的唯一理由：**刷新是会失败的，读不会**。
+// 混在一起就会出现"读一次请求顺带改一次状态"的隐式写。
+func (h *Handler) refreshUnifiedChannelCatalog(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	if !h.principalFrom(r).IsAdmin() {
+		writeError(w, http.StatusForbidden, "admin required")
+		return
+	}
+	snap, err := h.publishCatalog()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error":      err.Error(),
+			"catalog":    snap.Catalog,
+			"sequence":   snap.Sequence,
+			"attempts":   snap.Attempts,
+			"last_error": snap.LastError,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"catalog":      snap.Catalog,
+		"sequence":     snap.Sequence,
+		"attempts":     snap.Attempts,
+		"published_at": snap.PublishedAt,
+	})
 }
 
 func (h *Handler) channelProviders(w http.ResponseWriter, r *http.Request) {

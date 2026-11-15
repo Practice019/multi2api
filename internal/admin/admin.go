@@ -45,6 +45,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing" // ⚠ 只为 testing.Testing()：预热在测试进程里同步跑（见 New 末尾的注释）
 	"time"
 	"workbuddy2api/internal/channelstore"
@@ -385,6 +386,14 @@ type Handler struct {
 	// 空串 = 还没人轮换过 ⇒ 回落 cfg.AdminToken（普通部署行为不变）。
 	adminTokenMu sync.RWMutex
 	adminToken   string
+
+	// catalogSnap 统一能力目录的**已发布快照**（U-04：获取与读取分开）。
+	//
+	// ⚠ 为什么放在 Handler 上而不是包级：与 adminToken 同一条理由 ——
+	// 两个 Handler 实例（测试与真实部署）不该共享快照状态。
+	//
+	// 惰性建：`&Handler{}` 直接构造的测试也能用，不需要额外的构造函数参数。
+	catalogSnap atomic.Pointer[channelstore.CatalogSnapshotStore]
 
 	// patterns 已注册的通用端点 pattern（"METHOD /path" 形式）。
 	//

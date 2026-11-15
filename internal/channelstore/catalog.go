@@ -1,3 +1,28 @@
+// catalog.go 统一能力目录 —— 公开名 → 真实模型 的**可校验版本化视图**。
+//
+// # 这个文件为什么存在（U-04）
+//
+// 改造前 `/v1/models` 直接读渠道配置的库存，把"渠道声明了什么"当成
+// "当前能提供什么"。两者在三种情况下会分叉：
+//
+//	· 刷新失败 —— 库存还是旧值，用户看到的是过期能力
+//	· 映射有歧义 —— 同一个公开名指向两个不同真实模型，合并后**静默**路由到错的
+//	· 映射写到不存在的真实模型 —— 运维以为发布成功，实际什么都没发出去
+//
+// 本文件把目录算成一份**带版本号的快照**（Version = 内容哈希），并**显式报告**
+// 拒绝发布的原因。获取与读取的分离在 catalog_snapshot.go。
+//
+// # 三条判据（对应计划 §5 U-04 的验收）
+//
+//	判据 1  同名多渠道**显式**聚合：多个渠道把同一公开名映射到同一/多个真实模型，
+//	         只要都是显式映射（ModelMap 里写了），就聚合 —— 那是运维的意图表达。
+//	判据 2  隐式撞名**拒绝发布**：某个公开名既是 A 渠道的映射目标，又在 B 渠道里
+//	         作为**真实模型名**被声明 —— 那两个是不同模型，合并会把请求路由错。
+//	         该公开名从 Models 里剔除，原因记进 Conflicts。
+//	判据 3  无效映射**记录不静默**：ModelMap 指向未声明的真实模型时，既不发布也不
+//	         假装成功 —— 记进 Conflicts，让运维看得见。
+//
+// 判据 1 与 2 的区别只在一件事：**这个公开名有没有"以自己为真实模型"的供给**。
 package channelstore
 
 import (
@@ -8,93 +33,270 @@ import (
 	"time"
 )
 
+// CatalogProvider 一个公开模型背后的一条供给。
 type CatalogProvider struct {
 	ChannelID  string   `json:"channel_id"`
 	Name       string   `json:"name"`
 	Kind       string   `json:"kind"`
 	ProviderID string   `json:"provider_id,omitempty"`
+	RealModel  string   `json:"real_model"`
 	Endpoints  []string `json:"endpoints"`
 	Enabled    bool     `json:"enabled"`
 }
 
+// PublicCatalogModel 一个公开模型及其全部供给。
 type PublicCatalogModel struct {
 	ID        string            `json:"id"`
 	Endpoints []string          `json:"endpoints"`
 	Providers []CatalogProvider `json:"providers"`
 }
 
+// CatalogConflict 拒绝发布的原因（判据 2 / 判据 3）。
+//
+// ⚠ 它**不是**警告：出现在这里的公开名一律不进 Models —— 宁可少一个模型，
+// 也不把请求路由到一个不确定的真实模型上。
+type CatalogConflict struct {
+	Public   string   `json:"public"`
+	Reason   string   `json:"reason"`
+	Reals    []string `json:"reals,omitempty"`
+	Channels []string `json:"channels,omitempty"`
+}
+
+// CatalogConflict 的 reason 取值。
+const (
+	// ConflictImplicitCollision 判据 2：公开名既被显式映射，又作为真实模型被声明。
+	ConflictImplicitCollision = "implicit_collision"
+	// ConflictMappingUndeclared 判据 3：ModelMap 指向未声明的真实模型。
+	ConflictMappingUndeclared = "mapping_target_undeclared"
+)
+
+// UnifiedCatalog 一次目录快照。
 type UnifiedCatalog struct {
 	Version string               `json:"snapshot_version"`
 	ReadAt  string               `json:"read_at"`
 	Source  string               `json:"source"`
 	Models  []PublicCatalogModel `json:"models"`
+	// Conflicts 本轮被拒绝发布的公开名（判据 2 / 3）。
+	// 空数组而非 nil —— 前端与判据都要能直接判空而不怕 null。
+	Conflicts []CatalogConflict `json:"conflicts"`
 }
 
-func PublicNames(ch *Channel) map[string]string {
-	names := map[string]string{}
+// publicName 一条渠道内解析出的一项供给。
+type publicName struct {
+	public   string
+	real     string
+	explicit bool // true = 来自 ModelMap（运维显式写的）；false = 该模型以自己为公开名
+}
+
+// resolvePublicNames 解析**单条渠道**的 公开名 → 真实名。
+//
+// 返回的 conflicts 只覆盖**渠道内**的无效映射（判据 3）—— 跨渠道撞名（判据 2）
+// 必须由 BuildCatalog 在全局视角下判定，单条渠道看不到别的渠道。
+func resolvePublicNames(ch *Channel) ([]publicName, []CatalogConflict) {
 	if ch == nil {
-		return names
+		return nil, nil
 	}
-	declared := map[string]bool{}
+	declared := make(map[string]bool, len(ch.Models))
 	for _, model := range ch.Models {
-		declared[model] = true
-	}
-	mapped := map[string]bool{}
-	for public, real := range ch.ModelMap {
-		if public != "" && real != "" && declared[real] {
-			names[public] = real
-			mapped[real] = true
+		if model != "" {
+			declared[model] = true
 		}
 	}
-	for _, model := range ch.Models {
-		if model != "" && !mapped[model] {
-			names[model] = model
+
+	out := make([]publicName, 0, len(ch.Models)+len(ch.ModelMap))
+	var conflicts []CatalogConflict
+	mapped := make(map[string]bool, len(ch.ModelMap))
+
+	// ① 显式映射优先：ModelMap[公开名] = 真实名
+	//
+	// ⚠ 必须排序遍历：map 迭代顺序随机，不排序 Version 哈希会随每次调用变化，
+	// 于是"内容没变但版本变了"，快照比较立刻失效。
+	for _, public := range sortedKeys(ch.ModelMap) {
+		real := ch.ModelMap[public]
+		switch {
+		case public == "" || real == "":
+			// 空串是脏数据，没有语义 —— 既不算映射也不必报。
+			continue
+		case !declared[real]:
+			// 判据 3：指向未声明的真实模型。
+			conflicts = append(conflicts, CatalogConflict{
+				Public:   public,
+				Reason:   ConflictMappingUndeclared,
+				Reals:    []string{real},
+				Channels: []string{ch.ID},
+			})
+			continue
 		}
+		out = append(out, publicName{public: public, real: real, explicit: true})
+		mapped[real] = true
 	}
-	return names
+
+	// ② 未被映射覆盖的声明模型：公开名 = 真实名（恒等）。
+	//
+	// 这是"没配映射"的正常形态。它对判据 2 极其关键 ——
+	// 有没有这一条，决定了这个公开名是否"以自己为真实模型"被供给。
+	for _, model := range ch.Models {
+		if model == "" || mapped[model] {
+			continue
+		}
+		out = append(out, publicName{public: model, real: model, explicit: false})
+	}
+	return out, conflicts
 }
 
+// PublicNames 返回**单条渠道**的 公开名 → 真实名。
+//
+// 无效映射（判据 3）在这里被略过 —— 需要原因的一方用 resolvePublicNames。
+// 这个签名被 routing_policy.go 与既有判据使用，保持不变。
+func PublicNames(ch *Channel) map[string]string {
+	names, _ := resolvePublicNames(ch)
+	result := make(map[string]string, len(names))
+	for _, n := range names {
+		result[n.public] = n.real
+	}
+	return result
+}
+
+// BuildCatalog 把渠道配置算成一份带版本号的目录快照。
+//
+// 纯函数：同样的输入必得同样的 Version；不做 IO；渠道的 Keys **一个字节都不进结果**
+// （有判据守着 —— 目录泄漏凭据是这条链路上最严重的错）。
 func BuildCatalog(channels []*Channel) UnifiedCatalog {
-	result := UnifiedCatalog{Models: []PublicCatalogModel{}, Source: "channel_configuration", ReadAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	result := UnifiedCatalog{
+		Models:    []PublicCatalogModel{},
+		Conflicts: []CatalogConflict{},
+		Source:    "channel_configuration",
+		ReadAt:    time.Now().UTC().Format(time.RFC3339Nano),
+	}
+
 	byModel := map[string]*PublicCatalogModel{}
+	// 判据 2 需要全局视角：分别记录"显式映射到哪些真实模型"与"以自己为真实模型"。
+	explicitReals := map[string]map[string]bool{}
+	identityReals := map[string]map[string]bool{}
+	channelsOf := map[string]map[string]bool{}
+	mark := func(m map[string]map[string]bool, public, real string) {
+		if m[public] == nil {
+			m[public] = map[string]bool{}
+		}
+		m[public][real] = true
+	}
+
 	for _, ch := range channels {
 		if ch == nil {
 			continue
 		}
-		for public, real := range PublicNames(ch) {
-			model := byModel[public]
+		names, conflicts := resolvePublicNames(ch)
+		result.Conflicts = append(result.Conflicts, conflicts...)
+		for _, n := range names {
+			if n.explicit {
+				mark(explicitReals, n.public, n.real)
+			} else {
+				mark(identityReals, n.public, n.real)
+			}
+			if channelsOf[n.public] == nil {
+				channelsOf[n.public] = map[string]bool{}
+			}
+			channelsOf[n.public][ch.ID] = true
+
+			model := byModel[n.public]
 			if model == nil {
-				model = &PublicCatalogModel{ID: public, Endpoints: []string{}, Providers: []CatalogProvider{}}
-				byModel[public] = model
+				model = &PublicCatalogModel{ID: n.public, Endpoints: []string{}, Providers: []CatalogProvider{}}
+				byModel[n.public] = model
 			}
 			endpoints := []string{}
 			for _, endpoint := range []string{"chat", "images"} {
-				if ch.SupportsEndpoint(real, endpoint) {
+				if ch.SupportsEndpoint(n.real, endpoint) {
 					endpoints = append(endpoints, endpoint)
 				}
 			}
-			model.Providers = append(model.Providers, CatalogProvider{ChannelID: ch.ID, Name: ch.Name, Kind: ch.EffectiveKind(), ProviderID: ch.ProviderID, Endpoints: endpoints, Enabled: ch.Status == StatusEnabled})
+			model.Providers = append(model.Providers, CatalogProvider{
+				ChannelID:  ch.ID,
+				Name:       ch.Name,
+				Kind:       ch.EffectiveKind(),
+				ProviderID: ch.ProviderID,
+				RealModel:  n.real,
+				Endpoints:  endpoints,
+				Enabled:    ch.Status == StatusEnabled,
+			})
 			for _, endpoint := range endpoints {
-				found := false
-				for _, existing := range model.Endpoints {
-					if existing == endpoint {
-						found = true
-					}
-				}
-				if !found {
+				if !containsString(model.Endpoints, endpoint) {
 					model.Endpoints = append(model.Endpoints, endpoint)
 				}
 			}
 		}
 	}
-	for _, model := range byModel {
+
+	// 判据 2：同一公开名既有"显式映射"又有"恒等声明"，且真实模型不止一个 ⇒ 歧义。
+	for _, public := range sortedKeys(byModel) {
+		exp := explicitReals[public]
+		ident := identityReals[public]
+		if len(exp) == 0 || len(ident) == 0 {
+			continue // 判据 1：全是显式、或全是恒等 ⇒ 运维意图明确，不算歧义
+		}
+		reals := map[string]bool{}
+		for r := range exp {
+			reals[r] = true
+		}
+		for r := range ident {
+			reals[r] = true
+		}
+		if len(reals) < 2 {
+			continue // 显式映射到的正是它自己的名字 ⇒ 指向同一个模型，无害
+		}
+		result.Conflicts = append(result.Conflicts, CatalogConflict{
+			Public:   public,
+			Reason:   ConflictImplicitCollision,
+			Reals:    sortedKeys(reals),
+			Channels: sortedKeys(channelsOf[public]),
+		})
+		delete(byModel, public) // 拒绝发布
+	}
+
+	for _, public := range sortedKeys(byModel) {
+		model := byModel[public]
 		sort.Strings(model.Endpoints)
-		sort.Slice(model.Providers, func(i, j int) bool { return model.Providers[i].ChannelID < model.Providers[j].ChannelID })
+		sort.Slice(model.Providers, func(i, j int) bool {
+			if model.Providers[i].ChannelID != model.Providers[j].ChannelID {
+				return model.Providers[i].ChannelID < model.Providers[j].ChannelID
+			}
+			return model.Providers[i].RealModel < model.Providers[j].RealModel
+		})
 		result.Models = append(result.Models, *model)
 	}
-	sort.Slice(result.Models, func(i, j int) bool { return result.Models[i].ID < result.Models[j].ID })
-	raw, _ := json.Marshal(result.Models)
+
+	// 冲突也排序：Version 必须只由内容决定。
+	sort.Slice(result.Conflicts, func(i, j int) bool {
+		if result.Conflicts[i].Public != result.Conflicts[j].Public {
+			return result.Conflicts[i].Public < result.Conflicts[j].Public
+		}
+		return result.Conflicts[i].Reason < result.Conflicts[j].Reason
+	})
+
+	raw, _ := json.Marshal(struct {
+		Models    []PublicCatalogModel `json:"models"`
+		Conflicts []CatalogConflict    `json:"conflicts"`
+	}{result.Models, result.Conflicts})
 	digest := sha256.Sum256(raw)
 	result.Version = hex.EncodeToString(digest[:])
 	return result
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// sortedKeys 排序后的键。泛型是为了让 map[string]bool / map[string]string /
+// map[string][]string 共用一份实现，不必写三个同名函数。
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
