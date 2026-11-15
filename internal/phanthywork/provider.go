@@ -485,8 +485,8 @@ func NewWithClient(c *Client, authDir string, skewMS int64) *Provider {
 	}
 	c.setSkew(skewMS)
 	p := &Provider{client: c, authDir: authDir, creds: map[string]*Auth{}, inferGates: make(map[string]*refreshGate, 2)}
-	p.protocol = ProtocolChat       // 默认走新版内核的 OpenAI 兼容路径
-	p.requestProfile = ProfileRelay // 默认不签名（见 requestprofile.go 的长注释）
+	p.protocol = ProtocolChat        // 默认走新版内核的 OpenAI 兼容路径
+	p.requestProfile = ProfileKernel // 默认不签名 + 照官方终端 CLI 的身份头（见 requestprofile.go）
 	p.initCheckin()
 	return p
 }
@@ -516,7 +516,7 @@ func (p *Provider) SetRequestProfile(name string) {
 // RequestProfile 当前生效的请求形态（零值回落 ProfileRelay）。
 func (p *Provider) RequestProfile() RequestProfile {
 	if p == nil || p.requestProfile == "" {
-		return ProfileRelay
+		return ProfileKernel
 	}
 	return p.requestProfile
 }

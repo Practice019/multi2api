@@ -1184,12 +1184,13 @@ type Config struct {
 		Protocol string `json:"protocol"`
 		// RequestProfile 发往上游的推理请求形态（见 internal/phanthywork/requestprofile.go）。
 		//
-		//	"" / "relay"  → 最小可用：Bearer + 设备指纹（**默认**）
-		//	"bare"        → 只 Bearer
-		//	"pcl"         → 第三方 CLI 的形状（自称 phanthy-code-launcher）
-		//	"signature"   → 官方 sidecar 的形态（设备注册 + 推理令牌 + 12 段签名）
+		//	"" / "kernel"  → 官方**终端 CLI** 的形态（**默认**）：Bearer + product +
+		//	                  client-source=cli + 设备指纹，不注册不签名
+		//	"relay"        → 最小可用：Bearer + 设备指纹
+		//	"pcl"          → 第三方 launcher 的形状（自称 phanthy-code-launcher）
+		//	"signature"    → 官方 Windows sidecar 的形态（设备注册 + 推理令牌 + 12 段签名）
 		//
-		// ⚠ 默认是 relay：2026-11-15 的决定 ——「不要用官方 sidecar，而是根据 CLI 去反代」。
+		// ⚠ 默认是 kernel：2026-11-15 的决定 ——「不要用官方 sidecar，而是根据 CLI 去反代」。
 		// 理由：一个号只做 register + summary + 两次 refresh、**零推理**，
 		// 一小时后照样被封（docs/reports/pw-new-account-observation-20261115.md）
 		// ⇒ "复刻官方签名"没有解决问题，而第三方 CLI 走的是"不注册不签名"那条路。
@@ -2204,10 +2205,10 @@ func (c *Config) normalize() error {
 	// RequestProfile 归一化：空 / 未知值 ⇒ ""（包内回落 relay）。
 	c.PhanthyworkRequestProfile = strings.ToLower(strings.TrimSpace(c.Phanthywork.RequestProfile))
 	switch c.PhanthyworkRequestProfile {
-	case "signature", "pcl", "relay", "bare":
+	case "signature", "pcl", "relay", "kernel", "bare":
 		// 合法值，原样保留
 	default:
-		c.PhanthyworkRequestProfile = "" // 空 = 包内默认（relay）
+		c.PhanthyworkRequestProfile = "" // 空 = 包内默认（kernel）
 	}
 	switch strings.ToLower(c.PhanthyworkProtocol) {
 	case "", "chat", "completions", "openai":

@@ -39,17 +39,18 @@ func TestParseRequestProfile(t *testing.T) {
 		want RequestProfile
 		why  string
 	}{
-		{"", ProfileRelay, "空 = 默认 relay"},
+		{"", ProfileKernel, "空 = 默认 kernel"},
 		{"  RELAY  ", ProfileRelay, "大小写与空白无关"},
 		{"relay", ProfileRelay, ""},
+		{"kernel", ProfileKernel, ""},
 		{"bare", ProfileBare, ""},
 		{"pcl", ProfilePCL, ""},
 		{"signature", ProfileSignature, ""},
 		{"Signature", ProfileSignature, "大小写无关"},
 		// ★ 未知值**必须**回落 relay，不能回落 signature。
 		// 回落 signature 会意外打开设备注册与签名 —— 那正是我们想关掉的东西。
-		{"garbage", ProfileRelay, "未知值回落 relay（不是 signature）"},
-		{"sig", ProfileRelay, "不做前缀匹配"},
+		{"garbage", ProfileKernel, "未知值回落 kernel（不是 signature）"},
+		{"sig", ProfileKernel, "不做前缀匹配"},
 	}
 	for _, c := range cases {
 		if got := ParseRequestProfile(c.in); got != c.want {
@@ -58,16 +59,17 @@ func TestParseRequestProfile(t *testing.T) {
 	}
 }
 
-func TestRequestProfileDefaultsToRelay(t *testing.T) {
+func TestRequestProfileDefaultsToKernel(t *testing.T) {
 	p := NewProvider(Config{})
-	if got := p.RequestProfile(); got != ProfileRelay {
+	if got := p.RequestProfile(); got != ProfileKernel {
 		t.Fatalf("RequestProfile() 默认 = %q，want %q ——\n"+
-			"默认必须是 relay：用户 2026-11-15 决定不再用官方 sidecar 的签名形态", got, ProfileRelay)
+			"默认必须是 kernel：它是**官方终端 CLI 的精确形态**（证据最强的那一档，"+
+			"见 requestprofile.go 的真源）；signature 那套（设备注册+签名）已被证明解决不了封禁", got, ProfileKernel)
 	}
 	// 零值也要回落 relay，不能回落 signature。
 	var zero RequestProfile
-	if got := zero.String(); got != string(ProfileRelay) {
-		t.Errorf("零值 String() = %q，want %q", got, ProfileRelay)
+	if got := zero.String(); got != string(ProfileKernel) {
+		t.Errorf("零值 String() = %q，want %q", got, ProfileKernel)
 	}
 }
 
@@ -77,8 +79,10 @@ func TestRequestProfileMatrix(t *testing.T) {
 		sig      bool
 		device   bool
 		pclIdent bool
+		// kernel 的身份头由 SendsKernelIdentity 单独判，不在这张表里
 	}{
 		{ProfileSignature, true, true, false},
+		{ProfileKernel, false, true, false},
 		{ProfilePCL, false, true, true},
 		{ProfileRelay, false, true, false},
 		{ProfileBare, false, false, false},
@@ -121,7 +125,7 @@ func TestRelayProfileHeaderMatrix(t *testing.T) {
 	c := NewWithBase(srv.URL)
 	a := newTestAuth("u-relay", "rt-relay")
 
-	for _, prof := range []RequestProfile{ProfileRelay, ProfileBare, ProfilePCL} {
+	for _, prof := range []RequestProfile{ProfileKernel, ProfileRelay, ProfileBare, ProfilePCL} {
 		mu.Lock()
 		got = nil
 		mu.Unlock()
@@ -176,10 +180,20 @@ func TestRelayProfileHeaderMatrix(t *testing.T) {
 			t.Errorf("%s: 不该带 x-phanthy-cli-device（实际 %q）", prof, dev)
 		}
 
-		// PCL 身份头：只有 pcl 带
+		// 身份头：kernel 与 pcl 各带自己的一套，relay/bare 一个都不带
 		src := h.Get("x-phanthy-client-source")
 		prod := h.Get("x-phanthy-product")
-		if prof.SendsPCLIdentity() {
+		if prof.SendsKernelIdentity() {
+			if src != "cli" || prod != "phanthy_code" {
+				t.Errorf("%s: kernel 身份头不对: client-source=%q product=%q（真源：官方 CLI 的 `ok.clientSource`=cli、`ok.product`=phanthy_code）", prof, src, prod)
+			}
+			if h.Get("User-Agent") != KernelUA {
+				t.Errorf("%s: UA = %q，want %q", prof, h.Get("User-Agent"), KernelUA)
+			}
+			if h.Get("x-phanthy-session") == "" || h.Get("x-phanthy-request") == "" {
+				t.Errorf("%s: 缺 x-phanthy-session / x-phanthy-request（官方 CLI 每次都发）", prof)
+			}
+		} else if prof.SendsPCLIdentity() {
 			if src != "phanthy-code-launcher" || prod != "phanthy_code" {
 				t.Errorf("%s: PCL 身份头不对: client-source=%q product=%q", prof, src, prod)
 			}

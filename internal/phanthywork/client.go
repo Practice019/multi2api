@@ -662,22 +662,30 @@ func (c *Client) ChatRelayStream(ctx context.Context, a *Auth, path string, body
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 
-	// ── User-Agent ────────────────────────────────────────────────────────
+	// ── User-Agent 与身份头 ────────────────────────────────────────────────
 	//
-	// `pcl` 形态照它自己的值；其余形态用 `c.userAgent()`（默认 Bun/1.3.14）。
-	//
-	// ⚠ 为什么不是"干脆不发"：Go 的 http.Client 在缺 UA 时会补
-	// `Go-http-client/1.1` —— 那是第三种、同样不存在的形态。
-	// 官方与 PCL 都**不显式设** UA，实际发出去的是运行时默认（Bun）⇒ 我们也照它。
-	if profile.SendsPCLIdentity() {
+	// ⚠ 为什么不是"干脆不发 UA"：Go 的 http.Client 在缺 UA 时会补
+	// `Go-http-client/1.1` —— 那是第三种、上游从未见过的形态。
+	// 官方内核与 PCL 都**不显式设**客户端库默认值，而是各自设成自家名字。
+	switch {
+	case profile.SendsKernelIdentity():
+		// 照 `@phanthy/phanthy-codeo@0.2.13` 的 `dist/cli.js`（逐字见 requestprofile.go）：
+		//   UA = `${AG.name}/${fB}`，并挂 product / client-source=cli / session / request / client。
+		req.Header.Set("User-Agent", KernelUA)
+		req.Header.Set("x-phanthy-product", "phanthy_code")
+		req.Header.Set("x-phanthy-client-source", "cli")
+		req.Header.Set("x-phanthy-session", newSessionID())
+		req.Header.Set("x-phanthy-request", randomUUID())
+		req.Header.Set("x-phanthy-client", "phanthy-codeo")
+	case profile.SendsPCLIdentity():
 		req.Header.Set("User-Agent", LauncherUA)
 		req.Header.Set("x-phanthy-client-source", "phanthy-code-launcher")
 		req.Header.Set("x-phanthy-product", "phanthy_code")
-	} else {
+	default:
 		req.Header.Set("User-Agent", c.userAgent())
 	}
 
-	// ── 设备指纹（`relay` / `pcl` 带，`bare` 不带）────────────────────────
+	// ── 设备指纹（`kernel` / `relay` / `pcl` 带，`bare` 不带）──────────────
 	if profile.SendsDeviceHeader() {
 		if dev := CliDeviceHeader(); dev != "" {
 			req.Header.Set("x-phanthy-cli-device", dev)
