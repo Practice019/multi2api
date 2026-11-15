@@ -60,10 +60,12 @@ var (
 // Models 存的是**内部模型名**（如 csg/deepseek-v4.1-flash-1017），不是渠道 ID、
 // 也不是对外别名 —— 分组回答的是「允许哪些模型」，改名是 key 侧 ModelMap 的事。
 type Group struct {
-	ID          string   `json:"id"`          // g-xxxx（随机生成，创建后不变）
-	Name        string   `json:"name"`        // 展示名，全局唯一
-	Description string   `json:"description"` // 备注
-	Models      []string `json:"models"`      // 该分组包含的内部模型名
+	PolicyVersion int      `json:"policy_version"`
+	ChannelIDs    []string `json:"channel_ids"`
+	ID            string   `json:"id"`          // g-xxxx（随机生成，创建后不变）
+	Name          string   `json:"name"`        // 展示名，全局唯一
+	Description   string   `json:"description"` // 备注
+	Models        []string `json:"models"`      // 该分组包含的内部模型名
 	// ModelMap 模型对外名映射：对外名 → **一组**内部名（2026-10-24 改为一对多）。
 	//
 	// # 为什么别名该跟着分组走，而不是跟着 key 走
@@ -234,6 +236,41 @@ func (s *Store) GetByName(name string) (*Group, bool) {
 //
 // 失败时**不留半改状态**：落盘失败会把刚放进内存的那条撤掉，否则内存里
 // 有一个「盘上没有」的分组，重启后凭空消失。
+func (s *Store) SaveRouting(id, name, desc string, channels []string) (*Group, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrNameEmpty
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.groups[id]
+	if id != "" && old == nil {
+		return nil, ErrNotFound
+	}
+	if old != nil && old.PolicyVersion != 2 {
+		return nil, fmt.Errorf("legacy group requires explicit migration")
+	}
+	if s.nameTakenLocked(name, id) {
+		return nil, ErrNameExists
+	}
+	g := &Group{ID: id, Name: name, Description: strings.TrimSpace(desc), PolicyVersion: 2, ChannelIDs: normalizeModels(channels), Models: []string{}, CreatedAt: s.now().UTC().Format(time.RFC3339)}
+	if old != nil {
+		g.CreatedAt = old.CreatedAt
+	} else {
+		g.ID = s.newIDLocked()
+	}
+	s.groups[g.ID] = g
+	if err := s.saveLocked(); err != nil {
+		if old == nil {
+			delete(s.groups, g.ID)
+		} else {
+			s.groups[g.ID] = old
+		}
+		return nil, err
+	}
+	return cloneGroup(g), nil
+}
+
 func (s *Store) Create(name, desc string, models []string, modelMap ...map[string][]string) (*Group, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -652,6 +689,7 @@ func cloneGroup(g *Group) *Group {
 		return nil
 	}
 	cp := *g
+	cp.ChannelIDs = append([]string{}, g.ChannelIDs...)
 	cp.Models = append([]string(nil), g.Models...)
 	if cp.Models == nil {
 		cp.Models = []string{}

@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -55,15 +56,19 @@ var (
 
 // Key 一把 API key 的完整状态（持久化字段）。
 type Key struct {
-	ID        string `json:"id"`         // sk- 开头的随机标识，也是 Bearer 值
-	Name      string `json:"name"`       // 显示名（调用方名字/用途）
-	Enabled   bool   `json:"enabled"`    // 是否可用
-	Limit     int64  `json:"limit"`      // 额度上限（token 数），0 = 不限
-	Used      int64  `json:"used"`       // 已消耗 token
-	Requests  int64  `json:"requests"`   // 总请求数
-	Fails     int64  `json:"fails"`      // 失败请求数
-	RPM       int    `json:"rpm"`        // 每分钟请求上限，0 = 不限
-	CreatedAt string `json:"created_at"` // RFC3339
+	PolicyVersion      int    `json:"policy_version,omitempty"`
+	ModelLimitsEnabled bool   `json:"model_limits_enabled,omitempty"`
+	FiniteQuota        bool   `json:"finite_quota,omitempty"`
+	AllowIPs           string `json:"allow_ips,omitempty"`
+	ID                 string `json:"id"`         // sk- 开头的随机标识，也是 Bearer 值
+	Name               string `json:"name"`       // 显示名（调用方名字/用途）
+	Enabled            bool   `json:"enabled"`    // 是否可用
+	Limit              int64  `json:"limit"`      // 额度上限（token 数），0 = 不限
+	Used               int64  `json:"used"`       // 已消耗 token
+	Requests           int64  `json:"requests"`   // 总请求数
+	Fails              int64  `json:"fails"`      // 失败请求数
+	RPM                int    `json:"rpm"`        // 每分钟请求上限，0 = 不限
+	CreatedAt          string `json:"created_at"` // RFC3339
 
 	// ExpiredTime 到期时刻（Unix 秒）；0 与 -1 都表示"永不"。
 	//
@@ -470,6 +475,52 @@ func (s *Store) ModelsOf(id string) ([]string, bool) {
 // 这种最难复现的故障。
 //
 // ⚠ 返回副本：调用方 append 一下就写到我们的底层数组上了。
+func (s *Store) RoutingPolicyOf(id string) (int, []string, bool, []string, bool) {
+	if s == nil {
+		return 0, nil, false, nil, false
+	}
+	s.maybeAttachSQL()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[id]
+	if !ok {
+		return 0, nil, false, nil, false
+	}
+	return k.PolicyVersion, append([]string{}, k.Groups...), k.ModelLimitsEnabled, append([]string{}, k.Models...), true
+}
+
+func (s *Store) AllowsIP(id, addr string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := s.keys[id]
+	if k == nil {
+		return false
+	}
+	if strings.TrimSpace(k.AllowIPs) == "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, allowed := range strings.Fields(k.AllowIPs) {
+		if candidate := net.ParseIP(allowed); candidate != nil && candidate.Equal(ip) {
+			return true
+		}
+		if _, block, err := net.ParseCIDR(allowed); err == nil && block.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) GroupsOf(id string) ([]string, bool) {
 	s.maybeAttachSQL()
 	if s == nil {
@@ -865,7 +916,7 @@ func (s *Store) Validate(bearer string) (string, error) {
 		return "", ErrExpired
 	}
 	// ④ 额度：Limit>0 才判（0 = 不限）。
-	if k.Limit > 0 && k.Used >= k.Limit {
+	if (k.FiniteQuota || k.Limit > 0) && k.Used >= k.Limit {
 		return "", ErrQuota
 	}
 	// ⑤ 限速：滑动窗口（rateHits 仍是进程内状态，不进库 —— 重启即清空是限速该有的行为）。

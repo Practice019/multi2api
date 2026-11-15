@@ -62,9 +62,6 @@ func MaskKey(k string) string {
 //
 // 语义（与 new-api 一致）：
 //   - 只挑 Status == StatusEnabled 且非空的 key —— 手动停用与自动停用的都不参与；
-//   - KeySelectionMode == "round_robin" ⇒ 按游标轮转（游标按**可用 key 的序号**推进，
-//     不是绝对下标：中间有 key 被禁用时不会跳错）；
-//   - 其它（""/"random"）⇒ 等概率随机。
 //
 // 全坏了返回 (-1, "")，调用方据此把渠道判为不可用（而不是拿空串当 key 去发请求）。
 //
@@ -98,19 +95,18 @@ func (s *Store) PickKeyIdx(ch *Channel) (int, string) {
 	if len(usable) == 0 {
 		return -1, ""
 	}
-	if len(usable) == 1 {
-		return usable[0], keys[usable[0]].Key
-	}
-	// 游标与随机源都要在锁里动：它们都是 Store 的共享状态（s.mu 只保护这两样）。
 	s.mu.Lock()
-	var pick int
-	if ch.ChannelInfo.KeySelectionMode == "round_robin" {
-		cursor := s.rr[ch.ID] % len(usable)
-		s.rr[ch.ID] = (cursor + 1) % len(usable)
-		pick = usable[cursor]
-	} else {
-		pick = usable[s.rand.Intn(len(usable))]
+	if s.rr == nil {
+		s.rr = make(map[string]int)
 	}
+	pick := usable[0]
+	for _, index := range usable {
+		if index >= s.rr[ch.ID] {
+			pick = index
+			break
+		}
+	}
+	s.rr[ch.ID] = pick + 1
 	s.mu.Unlock()
 	return pick, keys[pick].Key
 }

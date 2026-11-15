@@ -33,6 +33,8 @@ func (h *Handler) apiKeysStore() *apikey.Store {
 // 与 Settings/Log 同一条判据：没注入依赖就不该出现会失败的按钮。
 // 前端按 manifest 的 admin_routes 渲染操作入口 —— 未注册 = 面板不渲染操作区。
 func (h *Handler) registerAPIKeys() {
+	h.register("GET /admin/apikeys/credentials", h.credentialMetadata)
+	h.register("POST /admin/apikeys/credentials/reveal", h.credentialReveal)
 	h.register("GET /admin/apikeys", h.apiKeysList)
 	h.register("POST /admin/apikeys", h.apiKeysCreate)
 	h.register("POST /admin/apikeys/toggle", h.apiKeysToggle)

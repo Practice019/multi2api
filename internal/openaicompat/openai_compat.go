@@ -162,6 +162,29 @@ func (p *OpenAICompat) Chat(ctx context.Context, cred gw.Credential, body []byte
 //
 // 把上游的 data[].id 投影成 gateway.ModelInfo：ID 必填，其余字段有就填。
 // **空目录是显式错误**，不是空切片 —— 见函数末尾的说明。
+func (p *OpenAICompat) Images(ctx context.Context, cred gw.Credential, body []byte) (gw.ChatStream, error) {
+	key, err := compatKey(cred)
+	if err != nil {
+		return gw.ChatStream{}, p.wrap("images", err)
+	}
+	url, err := p.compatURL("/images/generations")
+	if err != nil {
+		return gw.ChatStream{}, p.wrap("images", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return gw.ChatStream{}, p.wrap("images", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	response, err := p.httpClient().Do(req)
+	if err != nil {
+		return gw.ChatStream{}, p.wrap("images", err)
+	}
+	return gw.ChatStream{Status: response.StatusCode, Body: response.Body}, nil
+}
+
 func (p *OpenAICompat) Models(ctx context.Context, cred gw.Credential) ([]gw.ModelInfo, error) {
 	const op = "models"
 	key, err := compatKey(cred)

@@ -1473,7 +1473,7 @@ header h1{letter-spacing:0}
       </div>
 
       <!-- ③ 分组模式 -->
-      <div class="field">
+      <div class="field" id="w-group-mode">
         <label>分组模式</label>
         <div class="row">
           <label class="sw"><input type="radio" name="mode" id="f-mode-auto" value="auto" checked> 自动分组</label>
@@ -1515,6 +1515,14 @@ header h1{letter-spacing:0}
         <div class="draglist" id="f-groups"></div>
       </div>
 
+      <div class="field" id="w-model-policy">
+        <label class="sw"><input type="checkbox" id="f-model-limits-enabled">额外收窄模型范围</label>
+        <label for="f-model-limits">公开模型白名单（一行一个或逗号分隔）</label>
+        <textarea id="f-model-limits" rows="4"></textarea>
+        <div class="hint">有效权限 = 所选路由组模型并集 ∩ 启用的白名单。启用且列表为空将拒绝全部模型；关闭只取消额外收窄，不会绕过组权限。新版首版支持 /v1/chat/completions 与 /v1/models；生图等端点明确拒绝，不回落旧路由。</div>
+        <button type="button" id="btnPolicyPreview">预览有效模型</button>
+        <div id="policyPreview" role="status" aria-live="polite"></div>
+      </div>
       <!-- ⑦ 旧高级配置：本页不再编辑（个人自用）。
            额度 / IP 白名单 / 跨组重试 / 模型白名单在后端仍然存在，存量令牌可能
            带着非默认值。**界面没有控件 ≠ 允许清零**：保存时原样回传
@@ -1749,6 +1757,39 @@ var STATE_BADGE = {
   disabled: { text: '已禁用', cls: 'st st--off' },
   expired: { text: '已过期', cls: 'st st--exp' }
 };
+function maskTokenKey(value) {
+  var key = String(value || '');
+  if (!key) return '—';
+  return key.length > 8 ? key.slice(0, 3) + '…' + key.slice(-3) : '••••';
+}
+function tokenPolicyVersion() {
+  return state.editing ? Number(state.editing.policy_version || 0) : 2;
+}
+var policyPreviewSequence = 0;
+function invalidatePolicyPreview() {
+  policyPreviewSequence++;
+  $('policyPreview').textContent = '策略已变更，请重新预览。';
+}
+function previewTokenPolicy() {
+  var sequence = ++policyPreviewSequence;
+  var payload = {
+    policy_version: 2,
+    groups: state.groups.slice(),
+    model_limits_enabled: $('f-model-limits-enabled').checked,
+    model_limits: $('f-model-limits').value.split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean)
+  };
+  $('policyPreview').textContent = '正在计算权限…';
+  return api('POST', '/admin/tokens/preview', payload).then(function (data) {
+    if (sequence !== policyPreviewSequence) return;
+    if (!data || data.error || typeof data.ready !== 'boolean' || !Array.isArray(data.models) || !Array.isArray(data.excluded_models) || !Array.isArray(data.unresolved_groups)) throw new Error('权限预览格式不正确或后端返回错误');
+    $('policyPreview').textContent = (data.ready ? '有效模型：' : '目录未就绪，不能确认有效权限：') + data.models.join('、') + '\n被排除：' + data.excluded_models.join('、') + '\n未解析分组：' + data.unresolved_groups.join('、');
+  }).catch(function (e) {
+    if (sequence === policyPreviewSequence) $('policyPreview').textContent = '权限预览失败：' + e.message + '；未使用旧授权规则替代。';
+  });
+}
+$('btnPolicyPreview').addEventListener('click', previewTokenPolicy);
+$('f-model-limits').addEventListener('input', invalidatePolicyPreview);
+$('f-model-limits-enabled').addEventListener('change', invalidatePolicyPreview);
 function renderRows() {
   var body = $('rows');
   var empty = $('empty');
@@ -1763,7 +1804,7 @@ function renderRows() {
       : '<button type="button" data-act="toggle" data-id="' + r.id + '">' + (st === 'enabled' ? '禁用' : '启用') + '</button> ';
     return '<tr' + (st === 'expired' ? ' class="is-expired"' : '') + '>' +
       '<td>' + esc(r.name || '(未命名)') + '</td>' +
-      '<td class="mono">' + esc(r.key) + '</td>' +
+      '<td class="mono">' + esc(maskTokenKey(r.key)) + '</td>' +
       '<td><span class="' + badge.cls + '">' + badge.text + '</span></td>' +
       '<td class="mono">' + (Number(r.expired_time || 0) > 0 ? tsText(r.expired_time) : '永久') + '</td>' +
       '<td class="mono">' + tsText(r.created_time) + '</td>' +
@@ -1895,6 +1936,18 @@ function openDrawer(row) {
   } else {
     $('f-exp').value = '';
   }
+  policyPreviewSequence++;
+  $('policyPreview').textContent = '预览不会发送真实推理请求。';
+  $('f-model-limits-enabled').checked = !!(row && row.model_limits_enabled);
+  $('f-model-limits').value = row && Array.isArray(row.model_limits) ? row.model_limits.join('\n') : ((row && row.model_limits) || '');
+  var v2 = tokenPolicyVersion() === 2;
+  if (v2) {
+    $('f-mode-auto').checked = false;
+    $('f-mode-manual').checked = true;
+  }
+  $('w-group-mode').style.display = v2 ? 'none' : '';
+  $('w-model-policy').style.display = v2 ? '' : 'none';
+  $('w-groups').querySelector('label').textContent = v2 ? '路由组（候选并集，不按顺序设置优先级）' : '旧有序分组（兼容策略）';
   loadGroups();
   syncVisibility();
   $('mask').className = 'drawer-mask on';
@@ -1939,13 +1992,16 @@ function renderDrag(listId, arr) {
   $(listId).innerHTML = arr.map(function (g, i) {
     // 显示名字（labelOfGroup），title 里留原始引用 —— 悬空引用（分组已删）
     // 显示出来的是一个 ID，用户需要能看到它、并知道它不是自己认得的那个分组。
-    return '<div class="dragitem" draggable="true" data-idx="' + i + '" title="' + esc(g) + '">' +
+    return '<div class="dragitem" draggable="' + (tokenPolicyVersion() === 2 ? 'false' : 'true') + '" data-idx="' + i + '" title="' + esc(g) + '">' +
       '<span class="grip">≡</span><span>' + esc(labelOfGroup(g)) + '</span><span class="spacer"></span>' +
       '<button type="button" data-rm="' + i + '">移除</button></div>';
   }).join('');
 }
 function syncVisibility() {
-  var auto = $('f-mode-auto').checked;
+  var v2 = tokenPolicyVersion() === 2;
+  if (v2) { $('f-mode-auto').checked = false; $('f-mode-manual').checked = true; }
+  var auto = !v2 && $('f-mode-auto').checked;
+  invalidatePolicyPreview();
   var custom = auto && $('f-automode').value === 'custom';
   var many = (auto ? state.autoGroups.length : state.groups.length) > 1;
   $('w-automode').className = 'field' + (auto ? '' : ' hidden');
@@ -2029,7 +2085,7 @@ function groupOptionsOf(payload) {
     if (!one) continue;
     var name = one.name || one.group || '';
     var id = one.id || name;
-    if (id) out.push({ id: String(id), name: String(name || id) });
+    if (id) out.push({ id: String(id), name: String(name || id), policy_version: Number(one.policy_version || 0) });
   }
   return out;
 }
@@ -2070,7 +2126,7 @@ function renderGroupOptions(list) {
   if (!list.length) {
     $('f-group-pick').innerHTML = '';
     $('f-autogroup-pick').innerHTML = '';
-    showGroupBanner('还没有分组：请先去左侧「分组」面板创建，再回来分配优先级。不选分组 = 不限制（全部模型）；「有序分组」模式至少要选一个。', false);
+    showGroupBanner(tokenPolicyVersion() === 2 ? '还没有路由组：请先创建路由组并添加渠道。v2 令牌不选有效路由组会拒绝调用，不会默认放行。' : '还没有旧版模型分组；旧版令牌的空分组语义保持兼容。', false);
     return;
   }
   // value = 分组 ID（存这个才改名不断链），label = 分组名（人看这个）。
@@ -2096,19 +2152,23 @@ function renderGroupOptions(list) {
 //   再回到令牌抽屉」这条**最常见**的路径上，候选列表还是第一次那份（可能为空），
 //   用户看到的就是「只有 default / 选不到分组」，而且**刷新页面才会好**。
 //   `/admin/groups` 是本地只读调用，重取的成本远低于让用户困惑。
+var tokenGroupsReady = false;
 function loadGroups() {
+  tokenGroupsReady = false;
   api('GET', '/admin/groups').then(function (data) {
     var list = groupOptionsOf(data);
     if (list === null) {
-      renderGroupOptions([{ id: 'default', name: 'default' }]);
+      renderGroupOptions(tokenPolicyVersion() === 2 ? [] : [{ id: 'default', name: 'default' }]);
       showGroupBanner('分组接口返回了无法识别的形状（GET /admin/groups）—— 候选列表可能不全，请报给维护者。', true);
       return;
     }
+    tokenGroupsReady = true;
+    if (tokenPolicyVersion() === 2) list = list.filter(function (g) { return g.policy_version === 2; });
     renderGroupOptions(list);
   }).catch(function (e) {
     // ⚠ 不再静默降级：把**路径与状态码**直接告诉用户。
     // 保留 default 只是为了让页面仍可用，但必须让人知道候选列表没取到。
-    renderGroupOptions([{ id: 'default', name: 'default' }]);
+    renderGroupOptions(tokenPolicyVersion() === 2 ? [] : [{ id: 'default', name: 'default' }]);
     showGroupBanner('候选分组没取到：GET /admin/groups ⇒ ' + (e && e.status ? ('HTTP ' + e.status) : '网络/解析错误')
       + '。下面只剩 default，**这不是「你没有分组」**。', true);
   });
@@ -2174,7 +2234,7 @@ function collectForm() {
   }
   if (bytes > limit) throw new Error('名称最长 ' + limit + ' 字节（当前 ' + bytes + '）');
   if (!state.editing && (count < 1 || count > 1000)) throw new Error('创建数量必须在 1..1000 之间');
-  if (!auto && state.groups.length === 0) throw new Error('有序分组模式下至少要选 1 个分组');
+  if (!auto && state.groups.length === 0) throw new Error('至少要选择 1 个分组');
   if (auto && $('f-automode').value === 'custom' && state.autoGroups.length === 0) throw new Error('自定义自动分组至少要选 1 个分组');
 
 
@@ -2205,6 +2265,17 @@ function collectForm() {
   } else {
     body.groups = state.groups;
     body.auto_groups = [];
+  }
+  body.policy_version = tokenPolicyVersion();
+  if (body.policy_version === 2) {
+    if (!tokenGroupsReady) throw new Error('路由组清单未就绪，禁止保存 v2 令牌');
+    if (!state.groups.length) throw new Error('v2 令牌至少选择一个路由组');
+    body.groups = state.groups.slice();
+    delete body.automatic;
+    delete body.auto_groups;
+    delete body.auto_group_mode;
+    body.model_limits_enabled = $('f-model-limits-enabled').checked;
+    body.model_limits = $('f-model-limits').value.split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean);
   }
   return body;
 }
@@ -2298,7 +2369,7 @@ refresh();
     if (!val) {
       return '<div class="credrow"><b>' + label + '</b><span class="dim">未配置' + (hint ? '（' + hint + '）' : '') + '</span></div>';
     }
-    var canReveal = !!(full && full !== val);   // 拿不到完整值（非管理员会话）就不给这两个按钮
+    var canReveal = !!val;   // 拿不到完整值（非管理员会话）就不给这两个按钮
     var st = credState[id] || { masked: val, full: full, revealed: false };
     credState[id] = st;
     return '<div class="credrow"><b>' + label + '</b>'
@@ -2314,7 +2385,7 @@ refresh();
   }
   async function load() {
     try {
-      var d = await (await fetch('/admin/apikeys', { credentials: 'same-origin', cache: 'no-store' })).json();
+      var d = await api('GET', '/admin/apikeys/credentials');
       // ★ T-464：只渲染「管理令牌」一行（理由见函数头那段注释）。
       //
       //   ⚠ 只删展示，**不删能力**：`d.admin_key` / `d.admin_key_full` 仍在载荷里
@@ -2338,13 +2409,20 @@ refresh();
       //   `onclick =` 赋值是幂等的，天然不累积。
       // ⚠ 显示/隐藏只改**那一个槽的 textContent**，不重绘整块（重绘会丢焦点/跳滚动位置）。
       // ⚠ 复制取的是 `credState` 里的值（内存），**不读 DOM 属性** —— 完整值压根不在 DOM 里。
-      box.onclick = function (ev) {
+      box.onclick = async function (ev) {
         var rev = ev.target.closest('[data-rev]');
         if (rev) {
           var sid = rev.getAttribute('data-rev');
           var st = credState[sid];
-          if (!st || !st.full) { return; }
+          if (!st) { return; }
+          if (!st.revealed) {
+            rev.disabled = true;
+            try { var result = await api('POST', '/admin/apikeys/credentials/reveal', {}); if (!result.full) throw new Error('管理令牌未配置'); st.full = result.full; }
+            catch (e) { toast('显示失败：' + e.message, true); return; }
+            finally { rev.disabled = false; }
+          }
           st.revealed = !st.revealed;
+          if (!st.revealed) st.full = '';
           var slot = box.querySelector('[data-cred-slot="' + sid + '"]');
           if (slot) { slot.textContent = st.revealed ? st.full : st.masked; }
           rev.textContent = st.revealed ? '隐藏' : '显示';
@@ -2353,14 +2431,18 @@ refresh();
         var cp = ev.target.closest('[data-cp]');
         if (cp) {
           var st2 = credState[cp.getAttribute('data-cp')];
-          if (!st2 || !st2.full) { return; }
+          if (!st2) { return; }
+          cp.disabled = true;
+          try { var copied = await api('POST', '/admin/apikeys/credentials/reveal', {}); if (!copied.full) throw new Error('管理令牌未配置'); st2.full = copied.full; }
+          catch (e) { toast('复制失败：' + e.message, true); return; }
+          finally { cp.disabled = false; }
           // 兜底与上面的 revealAndCopy 逐字同款（http 非 localhost 时 clipboard 不可用）
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(st2.full).then(function () { toast('已复制到剪贴板'); },
-              function () { window.prompt('浏览器不允许自动复制，请手动复制：', st2.full); });
-            return;
-          }
-          window.prompt('浏览器不允许自动复制，请手动复制：', st2.full);
+          var copyValue = st2.full;
+          if (!st2.revealed) st2.full = '';
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(copyValue); toast('已复制到剪贴板'); }
+            else window.prompt('浏览器不允许自动复制，请手动复制：', copyValue);
+          } catch (e) { window.prompt('浏览器不允许自动复制，请手动复制：', copyValue); }
         }
       };
     } catch (e) {

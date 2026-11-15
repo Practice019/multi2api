@@ -108,8 +108,8 @@ func TestDeleteGroupWarnsAboutUnrestrictedKeys(t *testing.T) {
 	if !ok || len(raw) != 1 {
 		t.Fatalf("★ 必须报告变空的 key（否则用户在不知情的情况下放开了权限），实际 %v", out)
 	}
-	if raw[0] != k.ID {
-		t.Errorf("报告里应是 key %s，实际 %v", k.ID, raw[0])
+	if raw[0] == k.ID || strings.Contains(out["warning"].(string), k.ID) {
+		t.Error("删除反馈不得披露完整凭据")
 	}
 	// warning 是给人看的那句话
 	if w, _ := out["warning"].(string); !strings.Contains(w, "不受模型限制") {

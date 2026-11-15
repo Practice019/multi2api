@@ -371,6 +371,7 @@ type Pool struct {
 	closeErr    error
 	writeState  func(string, []byte) error
 	byUID       map[string]*entry
+	rrLast      map[[2]string]string
 	// provState 上游级熔断状态（2026-10-18 加）。⚠ 懒建（nil 表示"还没有失败过"）。
 	//
 	// # 为什么需要它（用户原话与实测数据）

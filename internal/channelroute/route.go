@@ -65,7 +65,7 @@ func Plan(s *channelstore.Store, group, publicModel string) ([]Candidate, error)
 
 	var out []Candidate
 	for _, ch := range s.List() {
-		if ch == nil || ch.Status != channelstore.StatusEnabled {
+		if ch == nil || ch.EffectiveKind() == "builtin" || ch.Status != channelstore.StatusEnabled {
 			continue // 停用 ⇒ 不参与（默认收紧）
 		}
 		// 多分组（P4）：渠道属于哪些组由 EffectiveGroups 决定。

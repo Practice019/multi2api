@@ -53,6 +53,8 @@ func (h *Handler) registerChannels() {
 	// 路由全部注册在**本文件**（而不是 admin.go 的中央表）：渠道系列是一个内聚的
 	// 功能面，加一条渠道端点不该去动装配层的表（B3 的任务约束也是这么定的）。
 	// 未注入 Channels 存储时 registerChannels 整个不会被调用 ⇒ 未注册 = 前端不渲染。
+	h.register("GET /admin/channels/catalog", h.unifiedChannelCatalog)
+	h.register("GET /admin/channels/providers", h.channelProviders)
 	h.register("GET /admin/channels/search", h.channelsSearch)
 	h.register("GET /admin/channels/tags", h.channelsTags)
 	h.register("GET /admin/channels/tag/models", h.channelsTagModels)
@@ -108,6 +110,9 @@ const (
 
 // channelFieldRegistry 见上面的分类表说明。
 var channelFieldRegistry = map[string]string{
+	"model_endpoints":                 channelFieldEditable,
+	"kind":                            channelFieldEditable,
+	"provider_id":                     channelFieldEditable,
 	"id":                              channelFieldEditable,
 	"name":                            channelFieldEditable,
 	"type":                            channelFieldEditable,
@@ -175,7 +180,7 @@ var channelFieldRegistry = map[string]string{
 //	那条测试**直接解析 webui-channels.html 的 saveDrawer**（不只是比对这个切片），
 //	所以"前端加了字段、忘了登记"会在 CI 就红，而不是等用户来报"保存失败"。
 var webuiChannelsSubmitFields = []string{
-	"id", "name", "type", "base_url", "models", "model_mapping", "groups",
+	"kind", "provider_id", "id", "name", "type", "base_url", "models", "model_mapping", "groups",
 	"priority", "weight", "status",
 	"keys", "key_mode", "key_selection_mode", "multi_key_mode", "mode",
 	// T69：表单里新增的 8 个字段
@@ -185,20 +190,23 @@ var webuiChannelsSubmitFields = []string{
 
 // channelView 是对外的渠道视图：**key 只出掩码**（明文走 reveal）。
 type channelView struct {
-	ID           string            `json:"id"`
-	Name         string            `json:"name"`
-	Type         int               `json:"type"`
-	BaseURL      string            `json:"base_url"`
-	KeyMasks     []string          `json:"key_masks"`
-	KeyCount     int               `json:"key_count"`
-	Models       []string          `json:"models"`
-	ModelMapping map[string]string `json:"model_mapping"`
-	Group        string            `json:"group"`
-	Groups       []string          `json:"groups"`
-	Priority     int               `json:"priority"`
-	Weight       int               `json:"weight"`
-	Status       int               `json:"status"`
-	Enabled      bool              `json:"enabled"`
+	ModelEndpoints map[string][]string `json:"model_endpoints,omitempty"`
+	Kind           string              `json:"kind"`
+	ProviderID     string              `json:"provider_id"`
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	Type           int                 `json:"type"`
+	BaseURL        string              `json:"base_url"`
+	KeyMasks       []string            `json:"key_masks"`
+	KeyCount       int                 `json:"key_count"`
+	Models         []string            `json:"models"`
+	ModelMapping   map[string]string   `json:"model_mapping"`
+	Group          string              `json:"group"`
+	Groups         []string            `json:"groups"`
+	Priority       int                 `json:"priority"`
+	Weight         int                 `json:"weight"`
+	Status         int                 `json:"status"`
+	Enabled        bool                `json:"enabled"`
 
 	// ── B3：hyxapi 渠道管理页需要的其余列 ────────────────────────────────
 	// 这些字段由**列表路径**填充（viewOfChannelRow）；旧的 viewOf（写路径的响应）
@@ -220,6 +228,7 @@ type channelView struct {
 
 func viewOf(ch *channelstore.Channel, models []string) channelView {
 	v := channelView{
+		Kind: ch.EffectiveKind(), ProviderID: ch.ProviderID, ModelEndpoints: ch.ModelEndpoints,
 		ID: ch.ID, Name: ch.Name, Type: ch.Type, BaseURL: ch.BaseURL,
 		Models: models, ModelMapping: ch.ModelMap, Group: ch.Group,
 		// Groups 用 EffectiveGroups()：一条只写了 Group 的存量渠道也要回 ["default"]，
@@ -708,6 +717,12 @@ func (h *Handler) viewOfChannelRow(row *store.Channel) channelView {
 		}
 	}
 	v.KeyCount = len(v.KeyMasks)
+	v.Kind = "standard"
+	if h.cfg.Channels != nil {
+		if ch, ok := h.cfg.Channels.Get(row.ExternalID); ok {
+			v.Kind, v.ProviderID, v.ModelEndpoints = ch.EffectiveKind(), ch.ProviderID, ch.ModelEndpoints
+		}
+	}
 	return v
 }
 
@@ -781,14 +796,17 @@ func strMapFromJSONPtr(raw *string) map[string]string {
 // 前端表单填的就是"一行一个 key"，每 key 状态由后端补成 Enabled（要停某个 key 走 status 接口，
 // 那是运维动作、不是新建表单的事 —— 表单里塞每 key 状态只会让人填错）。
 type channelReq struct {
-	ID           string            `json:"id"`
-	Name         string            `json:"name"`
-	Type         int               `json:"type"`
-	BaseURL      string            `json:"base_url"`
-	Keys         []string          `json:"keys"`
-	Models       []string          `json:"models"`
-	ModelMapping map[string]string `json:"model_mapping"`
-	Group        string            `json:"group"`
+	ModelEndpoints map[string][]string `json:"model_endpoints"`
+	Kind           string              `json:"kind"`
+	ProviderID     string              `json:"provider_id"`
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	Type           int                 `json:"type"`
+	BaseURL        string              `json:"base_url"`
+	Keys           []string            `json:"keys"`
+	Models         []string            `json:"models"`
+	ModelMapping   map[string]string   `json:"model_mapping"`
+	Group          string              `json:"group"`
 	// Groups 多分组（P4）。空 = 沿用 Group（再空则 default）。
 	// 与 Group 同时给时**以 Groups 为准**（Group 由存储层同步成 Groups[0]）。
 	Groups   []string `json:"groups"`
@@ -877,7 +895,16 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name 必填"})
 		return
 	}
-	if req.BaseURL == "" && strings.TrimSpace(req.ID) == "" {
+	if req.Kind == "" && req.ID != "" {
+		if old, ok := s.Get(req.ID); ok {
+			req.Kind, req.ProviderID = old.EffectiveKind(), old.ProviderID
+		}
+	}
+	if err := h.validateChannelBinding(req.Kind, req.ProviderID, req.ID, req.Keys); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if req.Kind != "builtin" && req.BaseURL == "" && strings.TrimSpace(req.ID) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "base_url 必填（Key 型渠道只填 Base URL + Key）"})
 		return
 	}
@@ -924,6 +951,7 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ch := &channelstore.Channel{
+		Kind: req.Kind, ProviderID: req.ProviderID, ModelEndpoints: req.ModelEndpoints,
 		ID: req.ID, Name: req.Name, Type: req.Type, BaseURL: strings.TrimRight(req.BaseURL, "/"),
 		Models: req.Models, ModelMap: req.ModelMapping, Group: req.Group, Groups: req.Groups,
 		Priority: req.Priority, Weight: req.Weight, Status: req.Status,
@@ -940,6 +968,9 @@ func (h *Handler) channelsUpsert(w http.ResponseWriter, r *http.Request) {
 		old = got
 		// 更新：保留原 ChannelInfo（key 选择模式是既有设置，不能因为这次没传就被清掉）。
 		ch.ChannelInfo = got.ChannelInfo
+		if _, supplied := fields["model_endpoints"]; !supplied {
+			ch.ModelEndpoints = got.ModelEndpoints
+		}
 	}
 
 	// ③ key 的处置（key_mode）：
@@ -1487,6 +1518,9 @@ func (h *Handler) channelsStatus(w http.ResponseWriter, r *http.Request) {
 // 中间代理），"只在点击时下发"就失效了 —— 缓存会把它留在盘上。
 func (h *Handler) channelsReveal(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
+	if !h.allowTokenReveal(w, r) {
+		return
+	}
 	s := h.channelsStore()
 	if s == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道功能未启用"})

@@ -46,7 +46,7 @@ func (h *Handler) channelsDiscover(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "渠道功能未启用"})
 		return
 	}
-	if h.cfg.ChannelProvider == nil {
+	if h.cfg.ChannelProvider == nil && h.cfg.Registry == nil {
 		// 接线问题，不是用户输入问题 ⇒ 说清楚，别让用户去猜"是不是我的 BaseURL 写错了"
 		writeJSON(w, http.StatusServiceUnavailable,
 			map[string]any{"error": "服务端未注入 ChannelProvider（组合根漏接线），无法向上游查询模型"})
@@ -66,6 +66,67 @@ func (h *Handler) channelsDiscover(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ch = got
+	}
+	if ch != nil && ch.EffectiveKind() == "builtin" {
+		if h.cfg.Registry == nil {
+			writeError(w, http.StatusServiceUnavailable, "provider registry unavailable")
+			return
+		}
+		provider, ok := h.cfg.Registry.Get(ch.ProviderID)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "unknown provider")
+			return
+		}
+		cred := gateway.Credential{Provider: ch.ProviderID}
+		if h.cfg.Pool != nil {
+			accounts := h.cfg.Pool.AvailableUIDsFor(ch.ProviderID)
+			if len(accounts) > 0 {
+				cred.UID = accounts[0]
+				cred.Secret, _ = h.cfg.Pool.SecretOf(cred.UID)
+			}
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		defer cancel()
+		models, err := provider.Models(ctx, cred)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "内置上游模型获取失败")
+			return
+		}
+		endpoints := map[string][]string{}
+		if images, ok := provider.(gateway.ImageModelExt); ok {
+			for _, image := range images.ImageModels() {
+				models = append(models, gateway.ModelInfo{ID: image.ID})
+				endpoints[image.ID] = []string{"images"}
+			}
+		}
+		ids := []string{}
+		seen := map[string]bool{}
+		for _, model := range models {
+			if model.ID != "" && !seen[model.ID] {
+				seen[model.ID] = true
+				ids = append(ids, model.ID)
+				if _, ok := endpoints[model.ID]; !ok {
+					endpoints[model.ID] = []string{"chat"}
+				}
+			}
+		}
+		sort.Strings(ids)
+		saved := false
+		if req.Save {
+			ch.Models = ids
+			ch.ModelEndpoints = endpoints
+			if err := s.Upsert(ch); err != nil {
+				writeError(w, http.StatusInternalServerError, "模型已获取但保存失败")
+				return
+			}
+			saved = true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"models": ids, "model_endpoints": endpoints, "count": len(ids), "saved": saved})
+		return
+	}
+	if h.cfg.ChannelProvider == nil {
+		writeError(w, http.StatusServiceUnavailable, "channel provider unavailable")
+		return
 	}
 	baseURL, key := req.BaseURL, req.Key
 	if ch != nil {

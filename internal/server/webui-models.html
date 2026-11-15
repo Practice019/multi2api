@@ -1578,7 +1578,8 @@ header.statline { align-items:baseline; }
 (function () {
   try {
     var t = localStorage.getItem('wb2api.theme');
-    if (t) { document.documentElement.setAttribute('data-theme', t); }
+    var resolved = t === 'dark' || t === 'light' ? t : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', resolved);
   } catch (e) { /* 隐私模式 / 禁 localStorage：留给 prefers-color-scheme 兜底 */ }
 })();
 </script>
@@ -1610,6 +1611,14 @@ header.statline { align-items:baseline; }
   <button id="retry" type="button">重试</button>
 </div>
 
+<section aria-labelledby="unifiedTitle">
+  <h2 id="unifiedTitle">统一模型广场</h2>
+  <p>公开模型由标准渠道与内置渠道共同提供。此表来自当前渠道配置，不读取旧 SQL 模型库存，不代表已验证推理成功。</p>
+  <div class="toolbar"><input id="unifiedSearch" type="search" aria-label="筛选统一模型" placeholder="模型名 / 渠道名"><button id="unifiedRefresh" type="button">读取最新配置</button><span id="unifiedVersion" class="dim"></span></div>
+  <div id="unifiedError" role="alert"></div>
+  <div class="tw"><table><thead><tr><th>公开模型</th><th>端点</th><th>提供渠道</th><th>接入</th></tr></thead><tbody id="unifiedRows"></tbody></table></div>
+</section>
+<h2>旧版目录（兼容视图）</h2>
 <nav id="tabs" role="tablist" aria-label="目录视图">
   <button id="tabModels" type="button" role="tab" data-tab="models"
           aria-selected="true" aria-controls="panelModels">模型 <span class="tabn" id="tabnModels"></span></button>
@@ -1651,7 +1660,7 @@ header.statline { align-items:baseline; }
     <div class="tw">
       <table id="modelsTable">
         <thead><tr>
-          <th class="c-chk"></th><th title="名称前的标记 = 成本倍率（来自 GET /admin/models/preview）；x无 = 该表没有这个模型，x0 = 免费">模型 ID</th><th>供应商</th><th>端点</th><th>来源</th><th title="按控制台 manifest 里该上游的账号数判定；口径见下方说明">可调用</th>
+          <th class="c-chk"></th><th title="名称前的标记 = 成本倍率（来自 GET /admin/models/preview）；x无 = 该表没有这个模型，x0 = 免费">模型 ID</th><th>供应商</th><th>端点</th><th>来源</th><th title="账号记录数不是健康资源数，也不代表已验证推理成功">账号资源</th>
         </tr></thead>
         <tbody id="modelRows"></tbody>
       </table>
@@ -1724,6 +1733,7 @@ header.statline { align-items:baseline; }
     // acct = 「上游 id → 账号数」；null/undefined = 未知（manifest 没到，或没报该上游）。
     acct: {},
     acctLoaded: false,
+    registry: {},
     // ── 供应商行内动作的**唯一真相**（2026-11-14 起只剩「重拉」）──────────
     // actions[vendor] = { refresh:{phase,text,cls,title} }
     // phase: 'idle' | 'run' | 'ok' | 'bad'
@@ -1822,12 +1832,14 @@ header.statline { align-items:baseline; }
       // 比上游那份目录新得多，用本地时间会把它显示成「刚刚取的」（见 catalogUpdatedText）。
       state.catalog = (data && data.catalog) || null;
       setErr('');
+      return true;
     }).catch(function (e) {
       // 保留上一份数据（若有）：网络抖动时把表格清空，用户看到的是"模型没了"，
       // 而那与"网关没接线"在界面上无法区分。只报错，不毁现场。
       setErr('读取模型目录失败：' + (e && e.message ? e.message : e));
+      return false;
     });
-    return Promise.all([main, loadMultCatalog(), loadAcctCounts()]).then(function () { render(); });
+    return Promise.all([main, loadMultCatalog(), loadAcctCounts()]).then(function (results) { render(); return results[0]; });
   }
 
   // ── 渲染：总览 ────────────────────────────────────────────────────────
@@ -1946,18 +1958,22 @@ header.statline { align-items:baseline; }
   function loadAcctCounts() {
     return getJSON(MANIFEST_ENDPOINT).then(function (m) {
       var next = {};
+      var registry = {};
       var list = (m && m.providers) || [];
       for (var i = 0; i < list.length; i++) {
         var p = list[i];
         if (!p || !p.id) { continue; }
+        registry[p.id] = Array.isArray(p.capabilities) && p.capabilities.indexOf('models') >= 0;
         // 三态：数字 = 真实账号数；null = 未知（manifest 没报这个上游）。
         next[p.id] = (p.account_count === undefined || p.account_count === null)
           ? null : Number(p.account_count);
       }
       state.acct = next;
+      state.registry = registry;
       state.acctLoaded = true;
     }).catch(function () {
       state.acct = {};
+      state.registry = {};
       state.acctLoaded = false;   // 未知 ⇒ 列上写「未知」，绝不写「不可调用」
     });
   }
@@ -2105,11 +2121,11 @@ header.statline { align-items:baseline; }
       span = el('span', 'badge callunknown', '未知');
       span.title = '账号数未知：控制台 manifest 还没到（或没报这个上游）——**不代表**不可调用';
     } else if (Number(n) <= 0) {
-      span = el('span', 'badge callno', '无可用账号');
+      span = el('span', 'badge callno', '0 个账号');
       span.title = '该上游当前 0 个账号 ⇒ 目录里有、现在调不到（与旧「可用模型」面板的过滤同一条判据）';
     } else {
-      span = el('span', 'badge callok', '可调用');
-      span.title = '该上游当前 ' + n + ' 个账号（manifest.account_count）';
+      span = el('span', 'badge callunknown', Number(n) + ' 个账号');
+      span.title = '账号记录数为 ' + n + '，不代表健康、可选或已验证推理成功';
     }
     td.appendChild(span);
     return td;
@@ -2369,17 +2385,10 @@ function toast(msg, bad) {
         a.refresh = { phase: 'idle' };
         // 「模型明细在下次取数时更新」这个代价直接写在文案里，不靠 tooltip
         // （共享 toast 的 toastline 只有「点击关闭」一个 title，没有传 tooltip 的口子）。
-        toast(vendor + '：' + txt + ' · 现在 ' + (d.count || 0) + ' 个模型', false);
-        // 就地更新**这一行**的模型数：count 是上游刚给的数字，比旧值新。
-        for (var i = 0; i < state.vendors.length; i++) {
-          if ((state.vendors[i].name || '') === vendor) {
-            state.vendors[i].models = d.count || 0;
-            if (state.vendors[i].synthetic > state.vendors[i].models) {
-              state.vendors[i].synthetic = state.vendors[i].models;
-            }
-            break;
-          }
-        }
+        return load().then(function (loaded) {
+          if (!loaded) { toast(vendor + '：上游刷新完成，但完整目录重载失败，保留旧明细', true); return; }
+          toast(vendor + '：' + txt + ' · 已重新读取完整目录', false);
+        });
       }
       renderVendors();
     }).catch(function (e) {
@@ -2437,7 +2446,8 @@ function toast(msg, bad) {
       rbtn.setAttribute('data-vendor', v.name || '');
       rbtn.title = '只重新拉取这个供应商的上游目录（其他行完全不动）';
       rbtn.disabled = a.refresh.phase === 'run';
-      tdA.appendChild(rbtn);
+      if (state.registry[v.name] === true && v.synthetic !== v.models) tdA.appendChild(rbtn);
+      else tdA.appendChild(el('span', 'dim', '无可重拉上游目录'));
       tr.appendChild(tdA);
 
       rows.appendChild(tr);

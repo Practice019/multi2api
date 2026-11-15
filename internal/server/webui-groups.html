@@ -1582,11 +1582,9 @@ function mpEsc(s) {
   </table></div>
   <div class="pager" id="pager"></div>
   <p class="muted" style="margin-top:8px">
-    分组只回答「允许哪些模型」。同一批模型由哪条渠道提供、按什么优先级/权重选路，是渠道页与能力索引的事。
-    <br><b>「没有分配分组」= 不限制</b>（令牌可用全部模型）；<b>「分组存在但模型数为 0」= 0 个可用模型</b>
-    （引用它的令牌一个都调不通）。两者不是一回事。
-    <br>删除分组会<b>级联清理</b>所有令牌里对它的引用；若某条令牌因此没有分组了，
-    它会变成<b>不限制</b>（可用全部模型）—— 删除前会先把受影响的令牌/渠道列给你看。
+    路由组 v2 关联渠道，模型集合由渠道派生；多个组的候选取并集，渠道纯轮询。
+    <br>v2 令牌没有有效组或组内没有模型时拒绝访问，不自动变为不限范围。
+    <br>旧模型集合组保留原模型与别名兼容语义，不按名称转换。删除前请检查引用影响，后端可能拒绝破坏有效授权的删除。
   </p>
 </main>
 
@@ -1603,6 +1601,8 @@ function mpEsc(s) {
     <label for="f-desc">描述</label>
     <input id="f-desc" placeholder="可选，方便自己分辨" maxlength="200">
 
+    <div class="full" id="groupPolicyNote" role="status"></div>
+    <div class="full" id="groupChannels"></div>
     <label>模型</label>
     <div class="full" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <input id="f-search" aria-label="搜索模型名" placeholder="搜索模型名（支持部分匹配，例如 deepseek / glm）" style="flex:1;min-width:180px" oninput="renderChoices()">
@@ -2140,6 +2140,40 @@ function onMapRowsClick(ev) {
 $('gMapRows').addEventListener('click', onMapRowsClick);
 
 // ---- 表单 ----
+let groupPolicyVersion = 2;
+let groupChannelIDs = new Set();
+let groupChannelsReady = false;
+let groupFormGeneration = 0;
+async function loadGroupChannels(g, generation) {
+  groupChannelsReady = false;
+  $('groupChannels').textContent = '正在读取渠道成员…';
+  try {
+    let page = 1, channels = [], total = Infinity;
+    while (channels.length < total) {
+      const data = await api('/admin/channels?p=' + page + '&page_size=100');
+      if (generation !== groupFormGeneration) return;
+      const items = data && (data.items || data.channels);
+      if (!Array.isArray(items)) throw new Error('渠道清单格式不正确');
+      channels = channels.concat(items);
+      total = typeof data.total === 'number' ? data.total : channels.length;
+      if (!items.length && channels.length < total) throw new Error('渠道清单不完整');
+      page++;
+    }
+    const known = new Set(channels.map(function (ch) { return ch.id; }));
+    groupChannelIDs.forEach(function (id) { if (!known.has(id)) channels.push({ id: id, name: '未解析渠道 ' + id }); });
+    $('groupChannels').innerHTML = '<label>渠道成员</label>' + channels.map(function (ch) {
+      return '<label><input type="checkbox" data-group-channel="' + esc(ch.id) + '"' + (groupChannelIDs.has(ch.id) ? ' checked' : '') + '> ' + esc(ch.name || ch.id) + ' · ' + esc(ch.kind || 'standard') + '</label>';
+    }).join('') + (channels.length ? '' : '<span>尚无渠道，请先创建渠道。</span>');
+    groupChannelsReady = true;
+  } catch (e) {
+    if (generation === groupFormGeneration) $('groupChannels').textContent = '渠道加载失败，禁止保存：' + e.message;
+  }
+}
+$('groupChannels').addEventListener('change', function (e) {
+  const id = e.target.getAttribute('data-group-channel');
+  if (!id) return;
+  if (e.target.checked) groupChannelIDs.add(id); else groupChannelIDs.delete(id);
+});
 async function openForm(id) {
   editing = id || null;
   const g = id ? (window.__groups || []).find(function (x) { return x.id === id; }) : null;
@@ -2155,6 +2189,21 @@ async function openForm(id) {
   renderMapRows(g ? g.model_map : null);
   $('gChoices').innerHTML = '<span class="muted" style="font-size:12px">正在读取模型目录…</span>';
   $('dlg').showModal();
+  const generation = ++groupFormGeneration;
+  groupPolicyVersion = g ? Number(g.policy_version || 0) : 2;
+  groupChannelIDs = new Set(g && Array.isArray(g.channel_ids) ? g.channel_ids : []);
+  $('groupPolicyNote').textContent = groupPolicyVersion === 2 ? '路由组 v2：选择渠道成员；模型由渠道派生，映射在渠道中维护。' : '旧模型集合组：保留原模型与别名，不自动转换为路由组。';
+  const modelNodes = [$('f-search').parentElement, $('gProvider').parentElement, $('gChoices').parentElement, $('gMapRows').parentElement];
+  modelNodes.forEach(function (node) {
+    node.hidden = groupPolicyVersion === 2;
+    node.style.display = groupPolicyVersion === 2 ? 'none' : '';
+  });
+  if (groupPolicyVersion === 2) {
+    $('groupPolicyNote').textContent += ' 已保存的派生模型：' + (g ? (g.models || []).join('、') : '保存后由后端计算');
+    await loadGroupChannels(g, generation);
+    return;
+  }
+  $('groupChannels').textContent = '';
   try {
     await ensureCatalog();
     renderChoices();
@@ -2379,7 +2428,8 @@ async function save() {
   if (!name) { err.textContent = '名称必填'; return; }
   const models = Array.from(picked).sort();
   // 别名一并提交（跟着分组走，见 Group.ModelMap 的注释）。
-  const mm = collectMap();
+  const mm = groupPolicyVersion === 2 ? { map: {}, invalid: [] } : collectMap();
+  if (groupPolicyVersion === 2 && !groupChannelsReady) { err.textContent = '渠道清单未就绪，不能保存'; return; }
   if (mm.invalid.length) {
     err.textContent = '模型对外名有问题：' + mm.invalid[0];
     return;
@@ -2390,6 +2440,12 @@ async function save() {
     models: models,
     model_map: mm.map
   };
+  body.policy_version = groupPolicyVersion;
+  if (groupPolicyVersion === 2) {
+    body.channel_ids = Array.from(groupChannelIDs).sort();
+    delete body.models;
+    delete body.model_map;
+  }
   saving = true;
   setSaving(true);
   try {

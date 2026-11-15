@@ -38,6 +38,7 @@ const (
 
 // Token 对话令牌（控制台"创建令牌"抽屉里的那一行）。
 type Token struct {
+	PolicyVersion      int     `json:"policy_version" gorm:"not null;default:0"`
 	ID                 int     `json:"id" gorm:"primaryKey;autoIncrement"`
 	UserID             int     `json:"user_id" gorm:"index"`
 	Key                string  `json:"key" gorm:"type:char(48);uniqueIndex"`
@@ -357,6 +358,7 @@ func (t *Token) NormalizeGroupPolicy() {
 // 字段 json 名与 Token 一致（前端不用改），只有 key 换成掩码值；
 // AutoGroups / GroupSwitchStatusCodes 依旧不下发（与 hyxapi 的 json:"-" 同口径）。
 type TokenView struct {
+	PolicyVersion         int      `json:"policy_version"`
 	ID                    int      `json:"id"`
 	UserID                int      `json:"user_id"`
 	Key                   string   `json:"key"`
@@ -413,7 +415,8 @@ func (t *Token) Masked() *TokenView {
 		autoMode = "custom"
 	}
 	return &TokenView{
-		ID: copyTok.ID, UserID: copyTok.UserID, Key: copyTok.MaskedKey(), Status: copyTok.Status,
+		PolicyVersion: copyTok.PolicyVersion,
+		ID:            copyTok.ID, UserID: copyTok.UserID, Key: copyTok.MaskedKey(), Status: copyTok.Status,
 		Name: copyTok.Name, CreatedTime: copyTok.CreatedTime, AccessedTime: copyTok.AccessedTime,
 		ExpiredTime: copyTok.ExpiredTime, RemainQuota: copyTok.RemainQuota, UnlimitedQuota: copyTok.UnlimitedQuota,
 		ModelLimitsEnabled: copyTok.ModelLimitsEnabled, ModelLimits: copyTok.ModelLimits, AllowIps: copyTok.AllowIps, AllowUserQuotaQuery: copyTok.AllowUserQuotaQuery,
@@ -724,7 +727,7 @@ func SaveToken(t *Token) error {
 	}
 	t.NormalizeGroupPolicy()
 	res := DB.Model(&Token{}).Where("id = ?", t.ID).Select(
-		"name", "status", "expired_time", "remain_quota", "unlimited_quota",
+		"policy_version", "name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_user_quota_query", "allow_ips", "group", "cross_group_retry",
 		"auto_groups", "group_switch_status_codes", "group_switch_retry_count",
 		"requests", "fails", "rpm", "owner_id", "model_map", "migrated_to_groups",

@@ -192,8 +192,11 @@ func modeToStore(m string) string {
 const channelExtrasKey = "wb2api_channelstore"
 
 type channelExtras struct {
-	ContextLength   int64 `json:"context_length,omitempty"`
-	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
+	ModelEndpoints  map[string][]string `json:"model_endpoints,omitempty"`
+	Kind            string              `json:"kind,omitempty"`
+	ProviderID      string              `json:"provider_id,omitempty"`
+	ContextLength   int64               `json:"context_length,omitempty"`
+	MaxOutputTokens int64               `json:"max_output_tokens,omitempty"`
 }
 
 func extrasFromRow(row *store.Channel) channelExtras {
@@ -225,7 +228,7 @@ func extrasToRow(row *store.Channel, ex channelExtras) {
 			return
 		}
 	}
-	if ex.ContextLength == 0 && ex.MaxOutputTokens == 0 {
+	if ex.ContextLength == 0 && ex.MaxOutputTokens == 0 && ex.Kind == "" && ex.ProviderID == "" && len(ex.ModelEndpoints) == 0 {
 		delete(all, channelExtrasKey)
 	} else {
 		b, err := json.Marshal(ex)
@@ -256,7 +259,11 @@ func toChannelView(row *store.Channel, keys []ChannelKey) *Channel {
 		return nil
 	}
 	ex := extrasFromRow(row)
+	if ex.Kind == "" {
+		ex.Kind = "standard"
+	}
 	ch := &Channel{
+		Kind: ex.Kind, ProviderID: ex.ProviderID, ModelEndpoints: ex.ModelEndpoints,
 		ID:       row.ExternalID,
 		Name:     row.Name,
 		Type:     row.Type,
@@ -327,6 +334,7 @@ func applyChannelToRow(row *store.Channel, ch *Channel) {
 	applyKeysToRow(row, ch.Keys)
 	row.ChannelInfo.MultiKeyMode = modeToStore(ch.ChannelInfo.KeySelectionMode)
 	extrasToRow(row, channelExtras{
+		Kind: ch.Kind, ProviderID: ch.ProviderID, ModelEndpoints: ch.ModelEndpoints,
 		ContextLength:   ch.ChannelInfo.ContextLength,
 		MaxOutputTokens: ch.ChannelInfo.MaxOutputTokens,
 	})

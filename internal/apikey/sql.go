@@ -136,7 +136,9 @@ func keyToToken(k *Key) (*store.Token, error) {
 		CreatedTime:        parseCreatedAt(k.CreatedAt),
 		ExpiredTime:        k.ExpiredTime,
 		RemainQuota:        remainQuotaOf(k),
-		UnlimitedQuota:     k.Limit <= 0,
+		PolicyVersion:      k.PolicyVersion,
+		UnlimitedQuota:     !k.FiniteQuota && k.Limit <= 0,
+		AllowIps:           &k.AllowIPs,
 		UsedQuota:          int(k.Used),
 		Requests:           k.Requests,
 		Fails:              k.Fails,
@@ -145,7 +147,7 @@ func keyToToken(k *Key) (*store.Token, error) {
 		MigratedToGroups:   k.MigratedToGroups,
 		ModelMap:           modelMap,
 		ModelLimits:        strings.Join(k.Models, ","),
-		ModelLimitsEnabled: len(k.Models) > 0,
+		ModelLimitsEnabled: k.ModelLimitsEnabled || len(k.Models) > 0,
 		Group:              encodeGroups(k.Groups),
 	}
 	// 自动分组快照 → auto_groups 列。
@@ -176,24 +178,30 @@ func statusOf(k *Key) int {
 // keyFromToken 把一行 tokens 还原成内存态 Key（往返无损，见测试）。
 func keyFromToken(t *store.Token) *Key {
 	k := &Key{
-		ID:               t.Key,
-		Name:             t.Name,
-		Enabled:          t.Status == store.TokenStatusEnabled,
-		Used:             int64(t.UsedQuota),
-		Requests:         t.Requests,
-		Fails:            t.Fails,
-		RPM:              t.RPM,
-		OwnerID:          t.OwnerID,
-		MigratedToGroups: t.MigratedToGroups,
-		CreatedAt:        formatCreatedAt(t.CreatedTime),
-		ExpiredTime:      t.ExpiredTime,
-		sqlStatus:        t.Status,
+		PolicyVersion:      t.PolicyVersion,
+		ModelLimitsEnabled: t.ModelLimitsEnabled,
+		FiniteQuota:        !t.UnlimitedQuota,
+		ID:                 t.Key,
+		Name:               t.Name,
+		Enabled:            t.Status == store.TokenStatusEnabled,
+		Used:               int64(t.UsedQuota),
+		Requests:           t.Requests,
+		Fails:              t.Fails,
+		RPM:                t.RPM,
+		OwnerID:            t.OwnerID,
+		MigratedToGroups:   t.MigratedToGroups,
+		CreatedAt:          formatCreatedAt(t.CreatedTime),
+		ExpiredTime:        t.ExpiredTime,
+		sqlStatus:          t.Status,
 	}
 	if t.UnlimitedQuota {
 		k.Limit = 0
 	} else {
 		// Limit = Remain + Used：这是 keyToToken 的反运算，两者必须成对改。
 		k.Limit = int64(t.RemainQuota) + int64(t.UsedQuota)
+	}
+	if t.AllowIps != nil {
+		k.AllowIPs = *t.AllowIps
 	}
 	if t.ModelLimitsEnabled && t.ModelLimits != "" {
 		k.Models = normalizeModels(strings.Split(t.ModelLimits, ","))

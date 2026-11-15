@@ -89,11 +89,13 @@ func (h *Handler) registerGroups() {
 // ModelCount 单独给：前端表格要显示"这个分组里有几个模型"，让它在不展开
 // models 数组时也能直接渲染（列表接口一次可能回几十条，前端不该为了计数再算一遍）。
 type groupView struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Models      []string `json:"models"`
-	ModelCount  int      `json:"model_count"`
+	PolicyVersion int      `json:"policy_version"`
+	ChannelIDs    []string `json:"channel_ids"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description"`
+	Models        []string `json:"models"`
+	ModelCount    int      `json:"model_count"`
 	// ModelMap 对外名 → 内部名（别名跟着分组走，见 groupstore.Group.ModelMap）。
 	ModelMap  map[string][]string `json:"model_map,omitempty"`
 	CreatedAt string              `json:"created_at"`
@@ -113,6 +115,7 @@ func groupViewOf(g *groupstore.Group) groupView {
 		models = []string{}
 	}
 	return groupView{
+		PolicyVersion: g.PolicyVersion, ChannelIDs: g.ChannelIDs,
 		ID: g.ID, Name: g.Name, Description: g.Description,
 		Models: models, ModelCount: len(models), ModelMap: g.ModelMap, CreatedAt: g.CreatedAt,
 	}
@@ -134,7 +137,7 @@ func (h *Handler) groupsList(w http.ResponseWriter, r *http.Request) {
 	idx := h.groupRefIndex(list)
 	out := make([]groupView, 0, len(list))
 	for _, g := range list {
-		v := groupViewOf(g)
+		v := h.routingGroupView(g)
 		v.UsedByCount = idx.countOf(g.ID)
 		out = append(out, v)
 	}
@@ -142,9 +145,11 @@ func (h *Handler) groupsList(w http.ResponseWriter, r *http.Request) {
 }
 
 type groupCreateReq struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Models      []string `json:"models"`
+	PolicyVersion int      `json:"policy_version"`
+	ChannelIDs    []string `json:"channel_ids"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description"`
+	Models        []string `json:"models"`
 	// ModelMap 对外名 → 内部名。**别名跟着分组走**（用户要求：模型在分组里定义，
 	// 那"它对外叫什么"也该在这里定义）。
 	ModelMap map[string][]string `json:"model_map"`
@@ -168,12 +173,24 @@ func (h *Handler) groupsCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name 必填"})
 		return
 	}
-	g, err := s.Create(req.Name, req.Description, req.Models, req.ModelMap)
+	if req.PolicyVersion != 0 && req.PolicyVersion != 2 {
+		writeError(w, http.StatusBadRequest, "unsupported policy_version")
+		return
+	}
+	var g *groupstore.Group
+	var err error
+	if req.PolicyVersion == 2 {
+		if err = h.validateRoutingGroup(req.ChannelIDs); err == nil {
+			g, err = s.SaveRouting("", req.Name, req.Description, req.ChannelIDs)
+		}
+	} else {
+		g, err = s.Create(req.Name, req.Description, req.Models, req.ModelMap)
+	}
 	if err != nil {
 		writeGroupErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": true, "group": groupViewOf(g)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "created": true, "group": h.routingGroupView(g)})
 }
 
 // groupUpdateReq 改分组的入参。三个可选字段都是**指针**：
@@ -185,10 +202,12 @@ func (h *Handler) groupsCreate(w http.ResponseWriter, r *http.Request) {
 // 用指针而不是"空值代表不改"：models 的空切片是**合法输入**（用户就是要清空），
 // 若把它当成"没传"，前端就永远没法把分组里的模型清掉。
 type groupUpdateReq struct {
-	ID          string    `json:"id"`
-	Name        *string   `json:"name"`
-	Description *string   `json:"description"`
-	Models      *[]string `json:"models"`
+	PolicyVersion *int      `json:"policy_version"`
+	ChannelIDs    *[]string `json:"channel_ids"`
+	ID            string    `json:"id"`
+	Name          *string   `json:"name"`
+	Description   *string   `json:"description"`
+	Models        *[]string `json:"models"`
 	// ModelMap 三态：不传/null = 不改；{} = 清空；非空 = 整体替换。
 	ModelMap *map[string][]string `json:"model_map"`
 }
@@ -215,6 +234,42 @@ func (h *Handler) groupsUpdate(w http.ResponseWriter, r *http.Request) {
 	// ⚠ JSON 里写 "models": null 与**不写**等价（encoding/json 把 null 解到指针
 	// 就是置 nil），所以"清空"必须写 []。这条不写清楚，前端会以为 null 能清空，
 	// 提交后界面提示成功、模型却还在。
+	current, found := s.Get(req.ID)
+	if !found {
+		writeGroupErr(w, groupstore.ErrNotFound)
+		return
+	}
+	if req.PolicyVersion != nil && *req.PolicyVersion != current.PolicyVersion {
+		writeError(w, http.StatusConflict, "policy version changes require migration")
+		return
+	}
+	if current.PolicyVersion == 2 {
+		name, desc, ids := current.Name, current.Description, current.ChannelIDs
+		if req.Name != nil {
+			name = *req.Name
+		}
+		if req.Description != nil {
+			desc = *req.Description
+		}
+		if req.ChannelIDs != nil {
+			ids = *req.ChannelIDs
+		}
+		if err := h.validateRoutingGroup(ids); err != nil {
+			writeGroupErr(w, err)
+			return
+		}
+		g, err := s.SaveRouting(req.ID, name, desc, ids)
+		if err != nil {
+			writeGroupErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": h.routingGroupView(g)})
+		return
+	}
+	if req.ChannelIDs != nil {
+		writeError(w, http.StatusBadRequest, "legacy group cannot accept routing channels")
+		return
+	}
 	var models []string
 	if req.Models != nil {
 		models = *req.Models
@@ -238,11 +293,12 @@ func (h *Handler) groupsUpdate(w http.ResponseWriter, r *http.Request) {
 		writeGroupErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": groupViewOf(g)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": h.routingGroupView(g)})
 }
 
 // groupsDelete POST /admin/groups/delete  {"id": "..."}
 func (h *Handler) groupsDelete(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
 	s := h.groupsStore()
 	if s == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "分组功能未启用"})
@@ -261,6 +317,34 @@ func (h *Handler) groupsDelete(w http.ResponseWriter, r *http.Request) {
 		name = g.Name
 	}
 
+	if store.DB != nil {
+		var policies []store.Token
+		if err := store.DB.Select("group", "policy_version").Where("policy_version = ?", 2).Find(&policies).Error; err != nil {
+			writeError(w, http.StatusServiceUnavailable, "无法核验路由组引用")
+			return
+		}
+		for _, policy := range policies {
+			for _, id := range store.NormalizeTokenGroups(policy.Group) {
+				if id == req.ID {
+					writeError(w, http.StatusConflict, "路由组仍被令牌引用，请先重新分配令牌")
+					return
+				}
+			}
+		}
+	}
+	if h.cfg.APIKeys != nil {
+		for _, key := range h.cfg.APIKeys.List() {
+			version, refs, _, _, _ := h.cfg.APIKeys.RoutingPolicyOf(key.ID)
+			if version == 2 {
+				for _, ref := range refs {
+					if ref == req.ID {
+						writeError(w, http.StatusConflict, "路由组仍被令牌引用，请先重新分配令牌")
+						return
+					}
+				}
+			}
+		}
+	}
 	if err := s.Delete(req.ID); err != nil {
 		writeGroupErr(w, err)
 		return
@@ -286,9 +370,13 @@ func (h *Handler) groupsDelete(w http.ResponseWriter, r *http.Request) {
 			out["pruned_keys"] = res.KeysTouched
 			// ⚠ 权限放大必须显式告诉调用方 —— 这是这次操作最需要用户知晓的后果。
 			if len(res.KeysUnrestricted) > 0 {
-				out["keys_unrestricted"] = res.KeysUnrestricted
+				masked := make([]string, 0, len(res.KeysUnrestricted))
+				for _, id := range res.KeysUnrestricted {
+					masked = append(masked, store.MaskTokenKey(id))
+				}
+				out["keys_unrestricted"] = masked
 				out["warning"] = "下列 key 的分组引用被清空，它们现在**不受模型限制**了（可用全部模型）：" +
-					joinLimited(res.KeysUnrestricted, 5)
+					joinLimited(masked, 5)
 			}
 		}
 	}

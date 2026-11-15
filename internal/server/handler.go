@@ -348,6 +348,8 @@ type Handler struct {
 	// ⚠ 放在 Handler 上而不是包级：两个 Handler 实例（测试与真实部署）不该互相污染
 	//   （与下面 prewarm* 那几项同一条理由）。惰性建 ⇒ `&Handler{}` 直接构造的测试也能用。
 	// ⚠ 重启清零、不落盘 —— 它是排障视图，不是统计系统。
+	routingOnce      sync.Once
+	routingRR        *channelroute.RoundRobin
 	channelTallyOnce sync.Once
 	channelTally     *channelroute.Tally
 	// pickRand 加权抽签的随机源（**仅测试注入**；nil ⇒ 用全局 rand）。
@@ -639,6 +641,9 @@ func (h *Handler) authorize(r *http.Request) authResult {
 	if h.cfg.APIKeys != nil && bearer != "" {
 		id, err := h.cfg.APIKeys.Validate(bearer)
 		if err == nil {
+			if !h.cfg.APIKeys.AllowsIP(id, r.RemoteAddr) {
+				return authResult{err: apikey.ErrUnknown}
+			}
 			return authResult{apikeyID: id}
 		}
 		return authResult{err: err}
@@ -662,6 +667,11 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if ar.apikeyID != "" {
 			r = r.WithContext(context.WithValue(r.Context(), apikeyCtxKey, ar.apikeyID))
+			version, _, _, _, _ := h.cfg.APIKeys.RoutingPolicyOf(ar.apikeyID)
+			if version != 0 && r.URL.Path != "/v1/chat/completions" && r.URL.Path != "/v1/models" && r.URL.Path != "/v1/images/generations" {
+				writeOpenAIError(w, http.StatusNotImplemented, "routing_endpoint_unsupported", "统一渠道仅支持聊天、模型列表与生图，该端点不会回落旧路由")
+				return
+			}
 		}
 		// panic → 可诊断的 500（而不是静默断连）。见 harden.go 的文件头。
 		// 放在 withAuth 里而不是各个注册点：加新端点时不会漏。
@@ -1008,6 +1018,29 @@ var riskReasoningEfforts = []string{"off", "low", "high", "max"}
 
 // models 返回模型列表：优先动态（缓存 1h），失败回退静态表。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	if result, version := h.routingPolicyFor(r); version != 0 {
+		data := []map[string]any{}
+		for _, model := range result.Models {
+			endpoints := map[string]bool{}
+			for _, candidate := range result.Candidates[model] {
+				for _, endpoint := range []string{"chat", "images"} {
+					if candidate.Channel.SupportsEndpoint(candidate.UpstreamModel, endpoint) {
+						endpoints[endpoint] = true
+					}
+				}
+			}
+			capabilities := []string{}
+			for _, endpoint := range []string{"chat", "images"} {
+				if endpoints[endpoint] {
+					capabilities = append(capabilities, endpoint)
+				}
+			}
+			data = append(data, map[string]any{"id": model, "object": "model", "owned_by": "gateway", "endpoints": capabilities})
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+		return
+	}
 	// 被限制的 key **只看到自己允许的模型**。
 	//
 	// 不这么做的话：列表里看得见几十个模型，调哪个都 403 ——
@@ -1924,6 +1957,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 必须在 resolveModelAlias **之前**取：那一步会把它换成内部名。
 	// 管理密钥不配别名 ⇒ scrub 恒 false ⇒ 响应保持上游原名（用户明确要求）。
 	publicModel := strings.TrimSpace(peek.Model)
+	if result, version := h.routingPolicyFor(r); version != 0 {
+		h.routingChat(w, r, body, publicModel, result)
+		return
+	}
 	scrubResp := h.scrubEnabledForRequest(r)
 
 	// 选号要按**请求的模型**取额度（见 pool.PickForModel），

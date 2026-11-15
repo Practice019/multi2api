@@ -56,13 +56,16 @@ const DefaultGroup = "default"
 //	（overrides）                     Overrides
 //	（channel info）                  ChannelInfo
 type Channel struct {
-	ID       string            `json:"id"`
-	Name     string            `json:"name"`
-	Type     int               `json:"type"`          // 渠道类型（OpenAI 兼容 = TypeOpenAICompat）
-	BaseURL  string            `json:"base_url"`      // R3：手填
-	Keys     []ChannelKey      `json:"keys"`          // R3：手填（支持多 key）
-	Models   []string          `json:"models"`        // 该渠道**声明**能服务的模型（上游原名）
-	ModelMap map[string]string `json:"model_mapping"` // R2：公开名 → 上游名
+	ModelEndpoints map[string][]string `json:"model_endpoints,omitempty"`
+	Kind           string              `json:"kind"`
+	ProviderID     string              `json:"provider_id"`
+	ID             string              `json:"id"`
+	Name           string              `json:"name"`
+	Type           int                 `json:"type"`          // 渠道类型（OpenAI 兼容 = TypeOpenAICompat）
+	BaseURL        string              `json:"base_url"`      // R3：手填
+	Keys           []ChannelKey        `json:"keys"`          // R3：手填（支持多 key）
+	Models         []string            `json:"models"`        // 该渠道**声明**能服务的模型（上游原名）
+	ModelMap       map[string]string   `json:"model_mapping"` // R2：公开名 → 上游名
 	// Group 主分组（**兼容字段**，多分组下等于 Groups[0]）。
 	//
 	// 存量 channels.json 里只有这个字段，而且旧版 exe 回退时要能读懂新文件形态。
@@ -250,6 +253,25 @@ func (s *Store) backfillLegacyOnce() error {
 }
 
 // normalizeChannel 补齐缺省值（Group 空 ⇒ default；Status 0 ⇒ Enabled）。
+func (ch *Channel) SupportsEndpoint(model, endpoint string) bool {
+	if endpoints, specified := ch.ModelEndpoints[model]; specified {
+		for _, value := range endpoints {
+			if value == endpoint {
+				return true
+			}
+		}
+		return false
+	}
+	return endpoint == "chat"
+}
+
+func (ch *Channel) EffectiveKind() string {
+	if ch.Kind == "" {
+		return "standard"
+	}
+	return ch.Kind
+}
+
 func normalizeChannel(ch *Channel) {
 	// Groups 与 Group 双向补齐（见 Channel.Groups 的注释）：
 	//
@@ -368,6 +390,33 @@ func (s *Store) Upsert(ch *Channel) error {
 		return fmt.Errorf("渠道 ID 不能为空")
 	}
 	cp := cloneChannel(ch)
+	for _, endpoints := range cp.ModelEndpoints {
+		for _, endpoint := range endpoints {
+			if endpoint != "chat" && endpoint != "images" {
+				return fmt.Errorf("unsupported model endpoint: %s", endpoint)
+			}
+		}
+	}
+	if cp.Kind == "" {
+		cp.Kind = "standard"
+	}
+	if cp.Kind != "standard" && cp.Kind != "builtin" {
+		return fmt.Errorf("invalid channel kind")
+	}
+	if cp.Kind == "builtin" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if strings.TrimSpace(cp.ProviderID) == "" || len(cp.Keys) > 0 {
+			return fmt.Errorf("builtin requires provider_id and forbids keys")
+		}
+		for _, other := range s.List() {
+			if other.ID != cp.ID && other.Kind == "builtin" && other.ProviderID == cp.ProviderID {
+				return fmt.Errorf("provider already bound")
+			}
+		}
+	} else if cp.ProviderID != "" {
+		return fmt.Errorf("standard forbids provider_id")
+	}
 	normalizeChannel(cp)
 	row, exists, err := rowByExternalID(cp.ID)
 	if err != nil {
@@ -503,6 +552,12 @@ func cloneChannel(ch *Channel) *Channel {
 		return nil
 	}
 	cp := *ch
+	if ch.ModelEndpoints != nil {
+		cp.ModelEndpoints = make(map[string][]string, len(ch.ModelEndpoints))
+		for model, endpoints := range ch.ModelEndpoints {
+			cp.ModelEndpoints[model] = append([]string{}, endpoints...)
+		}
+	}
 	cp.Keys = append([]ChannelKey(nil), ch.Keys...)
 	cp.Models = append([]string(nil), ch.Models...)
 	// Groups 是切片：不复制的话调用方改一下返回值就改到了缓存。

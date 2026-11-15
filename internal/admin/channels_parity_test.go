@@ -936,6 +936,7 @@ func TestWebuiChannelFormFieldsAreRegistered(t *testing.T) {
 		"name": "t69-base", "base_url": "https://t69.example.invalid/v1", "keys": []string{"sk-t69-base"},
 	})
 	values := map[string]any{
+		"kind": "standard", "provider_id": "",
 		"id": id, "name": "t69-base", "type": 0, "base_url": "https://t69.example.invalid/v1",
 		"models": []string{"m1"}, "model_mapping": map[string]string{}, "groups": []string{"default"},
 		"priority": 1, "weight": 1, "status": 1,

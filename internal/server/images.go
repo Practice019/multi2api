@@ -57,7 +57,8 @@ const imageGenTimeout = 5 * time.Minute
 //   - **不解析响应**。重排字段就会丢掉上游新加的字段（points_consumed
 //     就是这种：它不是 OpenAI 标准字段，但调用方很需要）。
 func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
-	if !h.requireReady(w, "生图") {
+	_, routingVersion := h.routingPolicyFor(r)
+	if routingVersion == 0 && !h.requireReady(w, "生图") {
 		return
 	}
 
@@ -86,6 +87,11 @@ func (h *Handler) imagesGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if routingVersion != 0 {
+		policy, _ := h.routingPolicyFor(r)
+		h.routingImages(w, r, body, strings.TrimSpace(peek.Model), policy)
+		return
+	}
 	// 模型前缀决定上游（"loomy/doubao-seedream-5-lite" → loomy）。
 	// 与 chat 出口同一套解析：不带前缀时按默认上游。
 	reqProvider, reqModel, perr := h.providerFor(peek.Model)

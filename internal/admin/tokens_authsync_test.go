@@ -131,6 +131,7 @@ func TestAdminCreatedTokenAuthenticatesOnGateway(t *testing.T) {
 func TestAdminTokenMutationRoutesAreAllIndexSynced(t *testing.T) {
 	h := tokenTestHandler(t) // patterns 由生产那一行 registerTokens() 产生
 	want := []string{
+		"POST /admin/tokens/preview",
 		"POST /admin/tokens",            // 建（写）
 		"POST /admin/tokens/update",     // 改名/改状态/改额度/改过期（写）
 		"POST /admin/tokens/delete",     // 删（写）

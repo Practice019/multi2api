@@ -97,6 +97,7 @@ func (h *Handler) registerTokens() {
 	h.register("GET /admin/tokens/{id}", h.tokensDetail)
 	h.register("GET /admin/tokens/{id}/usage", h.tokensUsage)
 	h.register("POST /admin/tokens", h.tokensCreate)
+	h.register("POST /admin/tokens/preview", h.tokenPolicyPreview)
 	h.register("POST /admin/tokens/update", h.tokensUpdate)
 	h.register("POST /admin/tokens/delete", h.tokensDelete)
 	// ── 敏感：只有这两条回明文 ──
@@ -137,7 +138,8 @@ func (f *flexStrings) UnmarshalJSON(raw []byte) error {
 
 // tokenCreateRequest 创建令牌的请求体（字段名与前端截图一致，下划线风格）。
 type tokenCreateRequest struct {
-	Name string `json:"name"`
+	PolicyVersion int    `json:"policy_version"`
+	Name          string `json:"name"`
 	// Count 创建数量（1..1000）。缺省 1；hyxapi 后端没有这个字段，语义见包注释。
 	Count int `json:"count"`
 	// Automatic true = 自动分组（按可用分组轮询），false = 有序分组（Groups 顺序即优先级）。
@@ -327,6 +329,10 @@ func (h *Handler) tokensCreate(w http.ResponseWriter, r *http.Request) {
 	} else {
 		req.AutoGroups = auto
 	}
+	if msg := h.validateTokenPolicy(&req); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
 	req.Count = normalizeCount(req.Count)
 	if msg := validateTokenCreate(&req); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
@@ -419,6 +425,13 @@ func (h *Handler) tokensUpdate(w http.ResponseWriter, r *http.Request) {
 	if msg := applyTokenUpdate(tok, &req); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
 		return
+	}
+	if tok.PolicyVersion == 2 {
+		policy := tokenCreateRequest{PolicyVersion: 2, Groups: store.NormalizeTokenGroups(tok.Group)}
+		if msg := h.validateTokenPolicy(&policy); msg != "" {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
 	}
 	// ⚠ 分组归一化只走 store 的唯一入口（NormalizeGroupPolicy），不在这里自己拼：
 	// 它同时负责 Group 编码串、AutoGroups、状态码集合三者的互相校验与排序。
@@ -547,7 +560,7 @@ func (h *Handler) allowTokenReveal(w http.ResponseWriter, r *http.Request) bool 
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	ok, retryAfter := tokenRevealLimiter.Allow(host+"|"+r.URL.Path, time.Now())
+	ok, retryAfter := tokenRevealLimiter.Allow(host+"|credential-reveal", time.Now())
 	if ok {
 		return true
 	}
@@ -731,6 +744,15 @@ func expiredEnableError(tok *store.Token) string {
 
 // applyTokenUpdate 把请求里的字段覆盖到令牌上（返回错误文案，空串 = 通过）。
 func applyTokenUpdate(tok *store.Token, req *tokenUpdateRequest) string {
+	if req.Present["policy_version"] && req.PolicyVersion != tok.PolicyVersion {
+		return "policy version changes require explicit migration"
+	}
+	if tok.PolicyVersion == 2 && req.Present["groups"] {
+		if len(normList(req.Groups)) == 0 {
+			return "select at least one routing group"
+		}
+		tok.Group = store.EncodeTokenGroups(normList(req.Groups))
+	}
 	// has 判"这个字段出现过吗"。没出现 ⇒ 一律不动（保留旧值）：
 	// 精简后的令牌抽屉只提交 name / groups / expired_time / status，
 	// 绝不能因为没提交额度或 IP 就把它们清掉（那是静默放宽权限）。
@@ -865,6 +887,7 @@ func createTokens(req tokenCreateRequest) (*createResult, error) {
 			name = base + "-" + suffix
 		}
 		tok := &store.Token{
+			PolicyVersion:         req.PolicyVersion,
 			Name:                  name,
 			UserID:                req.UserID,
 			Status:                store.TokenStatusEnabled,

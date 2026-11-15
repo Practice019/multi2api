@@ -244,12 +244,16 @@ func (h *Handler) channelsExplain(w http.ResponseWriter, r *http.Request) {
 // 它们**各自都该触发换人**。把它抽成一个函数，外层循环就只需关心"换谁"，
 // 而不必在 9 个 return 上各挂一次重试逻辑（那样必然漏掉一两个）。
 func (h *Handler) tryChannelOnce(ctx context.Context, cand channelroute.Candidate, matchName, displayName string, body []byte) (channelForward, error) {
-	var zero channelForward
 
 	// ⚠ 挑 key 必须走存储层（PickKeyIdx）：那里才有 round_robin 游标与"只挑启用"的判定。
 	// 这里曾经自己实现了一个"取第一个启用的"（pickEnabledKey），结果是：界面上写着轮询，
 	// 实际永远打同一把 key。挑 key 的规则只允许有一份。
 	keyIdx, key := h.pickKeyFor(cand.Channel)
+	return h.tryChannelKeyOnce(ctx, cand, matchName, displayName, body, keyIdx, key)
+}
+
+func (h *Handler) tryChannelKeyOnce(ctx context.Context, cand channelroute.Candidate, matchName, displayName string, body []byte, keyIdx int, key string) (channelForward, error) {
+	var zero channelForward
 	if key == "" {
 		return zero, fmt.Errorf("渠道 %s 没有可用 key（全部停用或为空）", cand.Channel.Name)
 	}

@@ -858,10 +858,38 @@
     window.addEventListener('scroll', place, true);
   }, true);
 
+  function syncFrameThemes(theme) {
+    document.querySelectorAll('iframe').forEach(frame => {
+      const apply = () => {
+        try {
+          if (frame.contentWindow.location.origin === window.location.origin && frame.contentDocument) {
+            frame.contentDocument.documentElement.setAttribute('data-theme', document.documentElement.getAttribute('data-theme') || theme);
+          }
+        } catch {}
+      };
+      if (!frame._gatewayThemeBound) {
+        frame.addEventListener('load', apply);
+        frame._gatewayThemeBound = true;
+      }
+      apply();
+    });
+  }
+  window.addEventListener('message', event => {
+    if (event.origin !== window.location.origin || !event.data || event.data.type !== 'gateway:navigate') return;
+    if (!Array.from(document.querySelectorAll('iframe')).some(frame => frame.contentWindow === event.source)) return;
+    if (event.data.key !== 'accounts') return;
+    refreshNavSections();
+    const idx = navSections.findIndex(sec => !sec.hidden && sec.dataset.key === 'accounts');
+    if (idx >= 0) showPanel(idx);
+  });
+  window.addEventListener('storage', event => {
+    if (event.key === LS_THEME) applyTheme(event.newValue || 'system');
+  });
   // applyTheme 写入 data-theme 并同步按钮选中态。
   function applyTheme(pref) {
     const theme = resolveTheme(pref);
     document.documentElement.setAttribute('data-theme', theme);
+    syncFrameThemes(theme);
     const box = $('themeSwitch');
     if (box) {
       box.querySelectorAll('button[data-theme-mode]').forEach(b =>
@@ -4523,7 +4551,7 @@ window.addEventListener('message', (e) => {
     // 不能被选中，否则用户会落到一个 hidden 的 section 上、看到空白内容区。
     let start = -1;
     try {
-      const saved = localStorage.getItem('wb2api.panelkey') || '';
+      const saved = window.location.hash === '#accounts' ? 'accounts' : (localStorage.getItem('wb2api.panelkey') || '');
       start = navSections.findIndex(sec => !sec.hidden && navKey(sec) === saved);
     } catch { /* 隐私模式 */ }
     if (start < 0) {
