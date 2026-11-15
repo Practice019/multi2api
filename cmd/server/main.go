@@ -1271,8 +1271,7 @@ func main() {
 			// 推理协议："" = chat（新版内核 /v1/chat/completions，默认）；
 			// "messages" = 旧版内核 /v1/messages（Anthropic + 12 段签名）。
 			// 依据：新版 Phanthy Codeo（0.2.13）抓包实证从不使用 /v1/messages。
-			Protocol:       cfg.PhanthyworkProtocol,
-			RequestProfile: cfg.PhanthyworkRequestProfile,
+			Protocol: cfg.PhanthyworkProtocol,
 		})
 		// 注入凭证访问器：后台续期任务必须拿到**池里持有的那个 `*Auth`**（不是磁盘副本）——
 		// 刷副本会让界面（读池）仍显示旧状态，而且会**绕过包内的同账号串行闸**：

@@ -1182,21 +1182,6 @@ type Config struct {
 		// 抓包实证**从不使用** /v1/messages（全程只发 /v1/chat/completions）。
 		// 这条只在"确实要对接旧版 claude-sidecar 内核"时才写。
 		Protocol string `json:"protocol"`
-		// RequestProfile 发往上游的推理请求形态（见 internal/phanthywork/requestprofile.go）。
-		//
-		//	"" / "kernel"  → 官方**终端 CLI** 的形态（**默认**）：Bearer + product +
-		//	                  client-source=cli + 设备指纹，不注册不签名
-		//	"relay"        → 最小可用：Bearer + 设备指纹
-		//	"pcl"          → 第三方 launcher 的形状（自称 phanthy-code-launcher）
-		//	"signature"    → 官方 Windows sidecar 的形态（设备注册 + 推理令牌 + 12 段签名）
-		//
-		// ⚠ 默认是 kernel：2026-11-15 的决定 ——「不要用官方 sidecar，而是根据 CLI 去反代」。
-		// 理由：一个号只做 register + summary + 两次 refresh、**零推理**，
-		// 一小时后照样被封（docs/reports/pw-new-account-observation-20261115.md）
-		// ⇒ "复刻官方签名"没有解决问题，而第三方 CLI 走的是"不注册不签名"那条路。
-		//
-		// 回退到签名形态只需把它设成 "signature"。
-		RequestProfile string `json:"request_profile"`
 		// PoolAccounts 是否并入核心账号池（默认 true）。
 		PoolAccounts *bool `json:"pool_accounts"`
 	} `json:"phanthywork"`
@@ -1408,8 +1393,6 @@ type Config struct {
 	// `/v1/chat/completions`，`/v1/messages` **一次都没出现**。
 	// 配置键：`phanthywork.protocol`。
 	PhanthyworkProtocol string `json:"-"`
-	// PhanthyworkRequestProfile 发往上游的推理请求形态："" = relay（默认）/ bare / pcl / signature。
-	PhanthyworkRequestProfile string `json:" -"`
 	// PhanthyworkPoolAccounts 是否把 phanthywork 账号并入核心账号池
 	//（见 Phanthywork.PoolAccounts）。未启用时恒为 false。
 	PhanthyworkPoolAccounts bool `json:"-"`
@@ -2202,14 +2185,6 @@ func (c *Config) normalize() error {
 	// 有唯一的权威默认值，两处各写一份就会漂移（本仓踩过同类：
 	// UA / APIBase 都收成了"配置层留空 → 包内常量"的同源做法）。
 	c.PhanthyworkProtocol = strings.TrimSpace(c.Phanthywork.Protocol)
-	// RequestProfile 归一化：空 / 未知值 ⇒ ""（包内回落 relay）。
-	c.PhanthyworkRequestProfile = strings.ToLower(strings.TrimSpace(c.Phanthywork.RequestProfile))
-	switch c.PhanthyworkRequestProfile {
-	case "signature", "pcl", "relay", "kernel", "bare":
-		// 合法值，原样保留
-	default:
-		c.PhanthyworkRequestProfile = "" // 空 = 包内默认（kernel）
-	}
 	switch strings.ToLower(c.PhanthyworkProtocol) {
 	case "", "chat", "completions", "openai":
 		c.PhanthyworkProtocol = "" // 空 = 包内默认（chat）
