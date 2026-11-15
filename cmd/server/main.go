@@ -1580,7 +1580,16 @@ func main() {
 	// 于是"数据比二进制新"这个事实被自己抹掉了（有判据钉着）。
 	//
 	// 状态文件与迁移日志在**同一个文件**（state.json）：一次原子写 = 要么全旧要么全新。
-	stateCompat, _, stateErr := channelstore.StartupGuard(filepath.Join("data", "state.json"))
+	// ⚠⚠ 文件名必须与账号池的 `data/state.json` **分开**。
+	//
+	// 2026-11-16 的一次真实事故：我最初把它也写成 `data/state.json` ——
+	// 而那正是账号池（internal/pool）每 5 秒落盘的运行态文件。
+	// 门禁读它时 JSON 能解出来（未知字段被忽略）⇒ SchemaVersion=0 ⇒ 判成
+	// unmarked ⇒ **覆写成 {schema_version:1}**，把 49 KB 账号状态冲掉。
+	// 那次没丢数据纯粹因为 pool 5 秒后又把内存里的状态写了回来。
+	//
+	// 所以这里用一个不会被别人用的名字。判据钉着这条不可碰撞。
+	stateCompat, _, stateErr := channelstore.StartupGuard(filepath.Join("data", "schema-state.json"))
 	if stateErr != nil {
 		// 读不出来**不当首次启动**：静默覆盖会把迁移日志一起丢掉。
 		log.Fatalf("数据层: 本地状态文件不可用: %v", stateErr)

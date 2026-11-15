@@ -104,7 +104,7 @@ type backupChannel struct {
 // migrationBackup 一份备份（结构 + 校验和）。
 type migrationBackup struct {
 	GeneratedAt string `json:"generated_at"`
-	// StateVersion 本地数据结构版本（与 data/state.json 同一口径）。
+	// StateVersion 本地数据结构版本（与 data/schema-state.json 同一口径）。
 	StateVersion int             `json:"state_version"`
 	Tokens       []backupToken   `json:"tokens"`
 	Groups       []backupGroup   `json:"groups"`
