@@ -177,22 +177,29 @@ func TestRegistrationConflictIsTerminal(t *testing.T) {
 	}
 }
 
-// TestUAIsSentAndRequired 坑②：`/api/oauth/*` 那一族的 UA **逐字是 Bun/1.3.14**。
+// TestUAIsSentAndRequired 坑②：**两个面各有一个 UA，都必须逐字对**。
 //
-// ★★ 2026-11-14 反转：原版设 `p.client.UA = "node/20.11.0"` 想制造"错 UA"，
-// 但那时 `activities/summary` 走的是 `applyCommonHeaders`，UA 被**硬编码**成
-// `apiCallUA = phanthy-code-cli/2.1.0`（`p.client.UA` 根本不起作用）。
-// 而假上游的规则是 `badUA && UA != DefaultUA → 403 TM.00000001`
-// ⇒ **原判据实际断言的是"我们的 summary UA 不是 Bun/1.3.14"**，
-// 也就是说：**它靠那个 bug 才通过**。
+//	数据面（/api/*）  → apiCallUA   = phanthy-code-cli/2.51.0
+//	推理面（/v1/*）   → InferenceUA = claude-cli/2.1.92 (external, cli)
 //
-// 现在该族已改成官方 `j59` 的极简头（官方**不设** UA ⇒ 实际值是 Bun 的运行时默认），
-// 所以正确的断言反过来：
+// # 这条判据被重写两次，两次都因为同一个病：断言跟实现一起错
 //
-//	① 正向：`badUA = true`（假上游要求 UA 逐字是 DefaultUA）时整条链路**必须成功**
-//	   —— 这直接证明我们发出去的 UA 就是 Bun/1.3.14
-//	② 咬合力：手造一条 summary 请求把 UA 换掉，**必须**拿到 TM.00000001
-//	   —— 证明假上游那条规则真的会咬（否则 ① 是空断言）
+//	第一次（2026-11-14 之前）：`p.client.UA = "node/20.11.0"` 制造错 UA，但 summary
+//	  走 `applyCommonHeaders`、UA 被硬编码，`p.client.UA` 根本不起作用
+//	  ⇒ 判据实际断言的是"我们的 UA 不是 Bun/1.3.14"，**靠那个 bug 才通过**。
+//	第二次（2026-11-14）：把该族改成 Bun/1.3.14，于是断言反过来。**方向对，但值错了**
+//	  —— Bun/1.3.14 是 2.48.0 时代的实测值，2.51.0 起两个面各一个 UA。
+//	  而且 ① 其实**一直是空断言**：`badUA` 只挂在 summary 处理器上，
+//	  而 ① 走的是 chat 路径，压根碰不到那条规则。
+//
+// # 现在同时验证两个面，各有正向与咬合力
+//
+//	① 推理面正向：`badUA = true` 时整条 chat 链路**必须成功**
+//	   ⇒ 证明推理请求带的就是 `InferenceUA`
+//	② 推理面咬合力：手造一条 /v1/messages 请求把 UA 换成 `DefaultUA` ⇒ 必须 TM.00000001
+//	   ⇒ 证明 ① 不是空断言（假上游真的会咬）
+//	③ 数据面咬合力：手造一条 summary 请求把 UA 换成 `DefaultUA` ⇒ 必须 TM.00000001
+//	   ⇒ 证明数据面要的是 `apiCallUA`，不是推理面那个
 //
 // 判据配套：TestOAuthFamilyMatchesOfficialJ59（四个端点的头逐个核）
 func TestUAIsSentAndRequired(t *testing.T) {
@@ -201,35 +208,52 @@ func TestUAIsSentAndRequired(t *testing.T) {
 	p := newFakeProvider(t, srv)
 	cred := newChatCredential("u-1")
 
-	// ① 正向：我们的 UA 就是 DefaultUA ⇒ 上游接受，整条链路跑通。
-	//    ⚠ 不要在这里设 p.client.UA —— 该族**刻意**不受它影响（官方不发 UA）。
+	if apiCallUA == DefaultUA || InferenceUA == DefaultUA || apiCallUA == InferenceUA {
+		t.Fatalf("三个 UA 常量必须互不相同 —— 否则本条判据无从区分端点族，等于空断言：\n"+
+			"  DefaultUA=%q apiCallUA=%q InferenceUA=%q", DefaultUA, apiCallUA, InferenceUA)
+	}
+
+	// ① 推理面正向：我们的推理 UA 就是 InferenceUA ⇒ 上游接受，整条链路跑通。
 	_, body, err := chatOnce(t, p, cred, `{"model":"phanthywork/Phanthy-fast","messages":[]}`)
 	if err != nil {
 		t.Fatalf("应把上游错误按流返回而不是 error: %v", err)
 	}
 	if strings.Contains(body, "TM.00000001") {
-		t.Errorf("我们的 UA 被上游判为不合格 —— 说明 /api/oauth/* 那一族的 UA 不再是 %q。\n"+
-			"官方 j59 这一族**不设 UA**，实际值必须是 Bun 的运行时默认。实际响应: %q", DefaultUA, body)
+		t.Errorf("推理请求的 UA 被上游判为不合格 —— 说明 /v1/* 那一族的 UA 不再是 %q。\n"+
+			"2.51.0 起官方推理面显式发 claude-cli/2.1.92 (external, cli)。实际响应: %q", InferenceUA, body)
 	}
 
-	// ② 咬合力：同一条 summary 请求、只把 UA 换成别的 ⇒ 必须被拒。
-	//    （假上游的 UA 检查在鉴权**之前**，所以这里不需要有效签名。）
-	if apiCallUA == DefaultUA {
-		t.Fatal("apiCallUA 与 DefaultUA 相同 ⇒ 本条判据无从区分两个端点族，等于空断言")
-	}
-	req, err := http.NewRequest(http.MethodPost, srv.URL+pathActivitiesSummary, strings.NewReader(`{}`))
+	// ② 推理面咬合力：同一条 /v1/messages 请求、只把 UA 换掉 ⇒ 必须被拒。
+	//    （假上游的 UA 检查在 desktop-session 检查**之前**，所以这里不需要会话头/签名。）
+	reqMsg, err := http.NewRequest(http.MethodPost, srv.URL+pathMessages, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("User-Agent", apiCallUA) // 故意用一个 ≠ DefaultUA 的 UA
-	resp, err := http.DefaultClient.Do(req)
+	reqMsg.Header.Set("User-Agent", DefaultUA) // 故意用旧值
+	respMsg, err := http.DefaultClient.Do(reqMsg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(raw), "TM.00000001") {
-		t.Errorf("假上游没拒掉一个 UA=%q 的请求 ⇒ 上一条正向断言是空断言。响应: %q", apiCallUA, string(raw))
+	rawMsg, _ := io.ReadAll(respMsg.Body)
+	_ = respMsg.Body.Close()
+	if !strings.Contains(string(rawMsg), "TM.00000001") {
+		t.Errorf("假上游没拒掉推理面上 UA=%q 的请求 ⇒ ① 是空断言。响应: %q", DefaultUA, string(rawMsg))
+	}
+
+	// ③ 数据面咬合力：summary 用推理面那个 UA 也必须被拒 ⇒ 两个面确实是两个值。
+	reqSum, err := http.NewRequest(http.MethodPost, srv.URL+pathActivitiesSummary, strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqSum.Header.Set("User-Agent", InferenceUA) // 推理面的值，不该被数据面接受
+	respSum, err := http.DefaultClient.Do(reqSum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawSum, _ := io.ReadAll(respSum.Body)
+	_ = respSum.Body.Close()
+	if !strings.Contains(string(rawSum), "TM.00000001") {
+		t.Errorf("假上游接受了数据面上 UA=%q 的请求 ⇒ 数据面与推理面无法区分。响应: %q", InferenceUA, string(rawSum))
 	}
 }
 

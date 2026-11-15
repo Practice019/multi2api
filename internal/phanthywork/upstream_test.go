@@ -356,8 +356,13 @@ func startFakeUpstream(t *testing.T) (*httptest.Server, *fakeUpstream) {
 			}})
 			return
 		}
-		// ⚠ 坑②：UA 必须逐字是 Bun/1.3.14。
-		if f.badUA && r.Header.Get("User-Agent") != DefaultUA {
+		// ⚠ 坑②（2026-11-15 更正）：**数据面**的 UA 必须逐字是 `apiCallUA`（2.51.0）。
+		//
+		// 这里曾经判 `!= DefaultUA`（Bun/1.3.14）。那个观察本身没错 —— 官方 `j59`
+		// 那个 builder 确实不设 UA —— 但我们要模仿的是桌面端自己发的那条（`FtK` 一族），
+		// 它发 `phanthy-code-cli/${APP_VERSION}` = 2.51.0。
+		// 见 docs/reports/phanthycode-multi-impl-alignment-20261115.md §3。
+		if f.badUA && r.Header.Get("User-Agent") != apiCallUA {
 			writeJSONTest(w, http.StatusForbidden, map[string]any{
 				"error_code": "TM.00000001",
 				"error_msg":  "网络繁忙，请稍后重试",
@@ -458,6 +463,21 @@ func startFakeUpstream(t *testing.T) (*httptest.Server, *fakeUpstream) {
 	mux.HandleFunc(pathMessages, func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&f.chatCalls, 1)
 		f.record(r)
+		// ⚠ 坑②（2026-11-15 更正）：**推理面**的 UA 必须是 `InferenceUA`。
+		//
+		// 这里曾经判 `!= DefaultUA`（Bun/1.3.14）—— 那是 2.48.0 时代的实测值。
+		// 2.51.0 起官方推理面显式发 `claude-cli/2.1.92 (external, cli)`。
+		// 见 docs/reports/phanthycode-multi-impl-alignment-20261115.md §3。
+		//
+		// ⚠ 必须**排在** desktop-session 检查之前：否则没有会话头的裸请求会先撞上
+		// `request_not_authorized`，判据就看不到 TM.00000001（咬合力失效）。
+		if f.badUA && r.Header.Get("User-Agent") != InferenceUA {
+			writeJSONTest(w, http.StatusForbidden, map[string]any{
+				"error_code": "TM.00000001",
+				"error_msg":  "网络繁忙，请稍后重试",
+			})
+			return
+		}
 		// ⚠ 坑⑨：这个头放的是**令牌本身**（不是 sessionId）。
 		f.mu.Lock()
 		f.lastSessionHeader = r.Header.Get("x-phanthy-desktop-session")

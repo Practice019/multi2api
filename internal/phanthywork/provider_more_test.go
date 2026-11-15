@@ -463,11 +463,18 @@ func TestOAuthFamilyMatchesOfficialJ59(t *testing.T) {
 			t.Errorf("端点 %s 一次请求都没发（判据无法取证）", p)
 			continue
 		}
-		// ① UA = Bun 默认值（官方这一族"不设 UA"，Bun fetch 补的就是它）
-		if v := rec.header.Get("User-Agent"); v != DefaultUA {
+		// ① UA = `apiCallUA`（phanthy-code-cli/2.51.0）
+		//
+		// ★ 2026-11-15 更正：原断言是 `DefaultUA`（Bun/1.3.14），依据是"官方 j59 不设 UA"。
+		// 那个观察没错，但我们该模仿的是**桌面端自己发的那条**（`FtK` 一族）：
+		// `User-Agent: phanthy-code-cli/${APP_VERSION}`，APP_VERSION = 2.51.0。
+		// 独立实现 magpie（桌面端 2.51.0 反编译 + 真机）明确记录
+		// 「旧版 phanthy-code-cli/2.1.0 曾命中 403 TM.00000001」。
+		// 见 docs/reports/phanthycode-multi-impl-alignment-20261115.md §3。
+		if v := rec.header.Get("User-Agent"); v != apiCallUA {
 			t.Errorf("%s 的 UA = %q，want %q ——\n"+
-				"官方 j59 这一族**不设 UA**，实际值就是 Bun 的运行时默认；"+
-				"phanthy-code-cli/<ver> 只属于 /api/work/*（wtK）", p, v, DefaultUA)
+				"数据面（注册/额度/签到）必须逐字是 phanthy-code-cli/~APP_VERSION~；"+
+				"2.51.0 是 PhanthyWork.exe 的 FileVersion，也是 magpie 实测值", p, v, apiCallUA)
 		}
 		// ② ★ 不能有 x-phanthy-client-source（这条是本判据存在的理由）
 		if v := rec.header.Get("x-phanthy-client-source"); v != "" {
@@ -560,5 +567,88 @@ func TestRefreshSkewPercentOfLifetime(t *testing.T) {
 	b := newTestAuth("u-2", "")
 	if _, ok := p.RefreshSkew(gateway.Credential{Provider: providerID, UID: b.UID(), Secret: b}); ok {
 		t.Error("没有 refreshToken 时应回 ok=false（不可续期）")
+	}
+}
+
+// ── UA 常量（2026-11-15：两个面各一个值，逐字冻结）───────────────────────────
+
+// TestApiFamilyUserAgentIsOfficialVersion 数据面 UA 的**版本段**必须是桌面端实际版本。
+//
+// # 为什么要把字面量钉住
+//
+// 这个常量被改错过一次：`2.1.0`（`process.env.APP_VERSION || "2.1.0"` 的**兜底默认值**），
+// 被当成了"真实部署值"。而桌面端运行时会把它设成自己的版本号。
+//
+// 证据（三条互证，见 docs/reports/phanthycode-multi-impl-alignment-20261115.md §3）：
+//
+//	① sidecar 源码：GK9 = process.env.APP_VERSION || "2.1.0"
+//	② 本机 PhanthyWork.exe FileVersion = 2.51.0
+//	③ magpie（桌面端 2.51.0 反编译 + 真机）：旧版 2.1.0 曾命中 403 TM.00000001
+//
+// ⚠ 这条判据**故意**钉字面量而不是引用常量：它要防的正是"有人又把常量改回 2.1.0"。
+// 换官方版本时，改这里 + 改 apiCallUA，两处一起改，看得见。
+func TestApiFamilyUserAgentIsOfficialVersion(t *testing.T) {
+	if got, want := apiCallUA, "phanthy-code-cli/2.51.0"; got != want {
+		t.Fatalf("数据面 UA = %q，want %q ——\n"+
+			"版本段必须是 PhanthyWork.exe 的 FileVersion（本机 = 2.51.0）。\n"+
+			"`2.1.0` 只是 `process.env.APP_VERSION || \"2.1.0\"` 的**兜底默认值**，"+
+			"不是桌面端实际值；magpie 实测旧值会命中 403 TM.00000001。", got, want)
+	}
+}
+
+// TestInferenceUserAgentIsClaudeCli 推理面 UA 必须是 Claude Code 的形态。
+//
+// 证据（三个独立来源，见 docs/reports/phanthycode-multi-impl-alignment-20261115.md §3）：
+//
+//	① PhanthyWork 2.51.0 sidecar：var al = "2.1.92"
+//	② PhanthyCode 2.35.0 sidecar：var hl = "2.1.92"      ← 两个版本一致
+//	③ magpie：OFFICIAL_INFERENCE_UA = "claude-cli/2.1.92 (external, cli)"
+func TestInferenceUserAgentIsClaudeCli(t *testing.T) {
+	if got, want := InferenceUA, "claude-cli/2.1.92 (external, cli)"; got != want {
+		t.Fatalf("推理面 UA = %q，want %q ——\n"+
+			"2.48.0 时代官方不设 UA（实际走 Bun 默认 Bun/1.3.14）；"+
+			"2.51.0 起显式发 claude-cli/<ver> (<USER_TYPE>, <ENTRYPOINT>)。", got, want)
+	}
+	// 结构自检：少了括号那一段，就不再是官方的那个形状。
+	if !strings.HasPrefix(InferenceUA, "claude-cli/") || !strings.HasSuffix(InferenceUA, ")") {
+		t.Errorf("InferenceUA = %q，形状应为 `claude-cli/<ver> (<USER_TYPE>, <ENTRYPOINT>)`", InferenceUA)
+	}
+}
+
+// TestInferenceUserAgentHonoursExplicitOverride 配置里显式配了 `ua` 时，推理面要用它。
+//
+// ⚠ 为什么"配成 DefaultUA 不算显式"：`New()` 会把 `UA` 填成 `DefaultUA`，
+// 所以"没配过"和"配成 DefaultUA"在结构上不可区分。把默认值当未配置处理，
+// 才能让 2.51.0 的正确 UA 生效；否则这个改动对所有现有部署都是空操作。
+func TestInferenceUserAgentHonoursExplicitOverride(t *testing.T) {
+	c := NewWithBase("http://127.0.0.1:1")
+
+	// ① 默认（UA == DefaultUA == "没配过"）⇒ 用 InferenceUA
+	if got := c.inferenceUserAgent(); got != InferenceUA {
+		t.Errorf("未配置时推理面 UA = %q，want %q", got, InferenceUA)
+	}
+
+	// ② 显式配成别的 ⇒ 用它
+	c.UA = "custom/9"
+	if got := c.inferenceUserAgent(); got != "custom/9" {
+		t.Errorf("显式配置后推理面 UA = %q，want custom/9", got)
+	}
+
+	// ③ 显式配成 DefaultUA ⇒ 视为未配置，回落到 InferenceUA
+	c.UA = DefaultUA
+	if got := c.inferenceUserAgent(); got != InferenceUA {
+		t.Errorf("配成 DefaultUA 时推理面 UA = %q，want %q（DefaultUA 视同未配置）", got, InferenceUA)
+	}
+
+	// ④ 空白也算未配置
+	c.UA = "   "
+	if got := c.inferenceUserAgent(); got != InferenceUA {
+		t.Errorf("空白配置时推理面 UA = %q，want %q", got, InferenceUA)
+	}
+
+	// ⑤ 数据面不吃这个覆盖（它是 applyOAuthFamilyHeaders 的常量，与本函数无关）
+	c.UA = "custom/9"
+	if apiCallUA != "phanthy-code-cli/2.51.0" {
+		t.Errorf("apiCallUA 被污染了：%q", apiCallUA)
 	}
 }

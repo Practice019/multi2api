@@ -89,6 +89,34 @@ const DefaultAPIBase = "https://code.phanthy.com"
 // ⚠ 这条值是**具体版本**，不是 `bun/*` 通配。
 const DefaultUA = "Bun/1.3.14"
 
+// InferenceUA **推理路径**（`/v1/*`）的 User-Agent（冻结常量）。
+//
+// # ★★ 2026-11-15 新增：推理面的 UA 不是 Bun/1.3.14
+//
+// 上面那条「官方是 Bun 编译的二进制，UA 就是运行时默认值」是 **2.48.0 时代**的实测
+// （那时注册请求回 200 的就是 `Bun/1.3.14`）。**2.51.0 起官方显式设了两个 UA**，
+// 推理面换成了 Claude Code 的形态。
+//
+// 三个独立来源互证（详见 docs/reports/phanthycode-multi-impl-alignment-20261115.md §3）：
+//
+//	① 本机 sidecar（PhanthyWork 2.51.0）源码，字面量：
+//	     var al = "2.1.92"
+//	     function OR(){ return `claude-cli/${al} (${process.env.USER_TYPE},
+//	                                   ${process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli"}...)` }
+//	② 本机 sidecar（PhanthyCode 2.35.0）源码，同一处字面量：
+//	     var hl = "2.1.92"          ← **两个版本完全一致**
+//	③ 社区实现 magpie（桌面端 2.51.0 反编译 + 真机实测）：
+//	     OFFICIAL_INFERENCE_UA = "claude-cli/2.1.92 (external, cli)"
+//	   ⇒ `USER_TYPE=external`、`CLAUDE_CODE_ENTRYPOINT=cli`
+//
+// ⚠ 为什么这条重要（magpie 的原话，2026-11-12 桌面端更新后的实证）：
+//
+//	「UA 必须显式写死：不写 → 宿主把 magpie/<version> 原样透传，
+//	  上游网关按 <product>/<version> 判成第三方客户端，回 403 TM.00000001」
+//
+// 判据：TestInferenceUserAgentIsClaudeCli
+const InferenceUA = "claude-cli/2.1.92 (external, cli)"
+
 // InferenceTokenTTL 推理令牌的 TTL（冻结常量，180 秒）。
 //
 // 报告 §2.5 实测：`exp - iat = 1794444404 − 1794444224 = 180`。

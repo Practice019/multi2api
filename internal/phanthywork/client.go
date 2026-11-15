@@ -120,6 +120,37 @@ func (c *Client) userAgent() string {
 	return DefaultUA
 }
 
+// inferenceUserAgent **推理路径**（`/v1/*`）该用的 User-Agent。
+//
+// # 为什么和 userAgent() 分开
+//
+// `userAgent()` 是"数据面"的口径（`DefaultUA` = `Bun/1.3.14`，2.48.0 时代的实测值）。
+// 而 2.51.0 起官方把两个面拆成了两个 UA：
+//
+//	数据面（/api/*）    → phanthy-code-cli/2.51.0        （见 apiCallUA）
+//	推理面（/v1/*）     → claude-cli/2.1.92 (external, cli)   （见 InferenceUA）
+//
+// # 覆盖规则
+//
+// `c.UA` 是配置里的显式覆盖（`phanthywork.ua`）。为了不破坏"配了就生效"的既有语义：
+//
+//	· `c.UA` 非空**且不等于 DefaultUA** ⇒ 用 `c.UA`（用户显式配过）
+//	· 否则                            ⇒ 用 `InferenceUA`
+//
+// ⚠ 为什么"等于 DefaultUA 就不算显式"：`New()` 会把 `c.UA` 填成 `DefaultUA`，
+// 所以"没配过"和"配成 DefaultUA"在结构上不可区分。把默认值当"未配置"处理，
+// 才能让 2.51.0 的正确 UA 生效 —— 否则这个改动对所有现有部署都是空操作。
+//
+// 判据：TestInferenceUserAgentIsClaudeCli / TestInferenceUserAgentHonoursExplicitOverride
+func (c *Client) inferenceUserAgent() string {
+	if c != nil {
+		if ua := strings.TrimSpace(c.UA); ua != "" && ua != DefaultUA {
+			return ua
+		}
+	}
+	return InferenceUA
+}
+
 // skew 当前客户端口径的偏移（登录流程用）。
 func (c *Client) skew() int64 {
 	if c == nil {
@@ -213,7 +244,26 @@ func (c *Client) doJSON(req *http.Request, timeout time.Duration) (int, []byte, 
 // ⚠ 版本段取官方默认 `2.1.0`（`process.env.APP_VERSION || "2.1.0"`）。
 // 我们无法得知真实部署的 APP_VERSION，取官方文档化的默认值是**唯一有据可依**的选择；
 // 自造一个（如 2.51.0）等于发明数据。
-const apiCallUA = "phanthy-code-cli/2.1.0"
+//
+// # ★★ 2026-11-15 更正：**上面的推理错了 —— 版本段是 2.51.0，不是 2.1.0**
+//
+// 「无法得知 APP_VERSION」这个前提不成立：`2.1.0` 是**代码兜底默认值**，
+// 而桌面端运行时会把它设成**自己的版本号**。三个独立来源互证：
+//
+//	① 本机 sidecar（2.51.0）源码：`GK9 = process.env.APP_VERSION || "2.1.0"`
+//	② 本机 `PhanthyWork.exe` FileVersion = **2.51.0** ⇒ APP_VERSION = 2.51.0
+//	③ 社区实现 magpie（桌面端 2.51.0 静态反编译 + 真机实测）：
+//	     OFFICIAL_DATA_UA = "phanthy-code-cli/2.51.0"
+//	   并明确记录：**「旧版 `phanthy-code-cli/2.1.0` 曾命中 `403 TM.00000001`」**
+//
+// 详见 docs/reports/phanthycode-multi-impl-alignment-20261115.md §3。
+//
+// ⚠ 版本差异留档：`PhanthyCode.exe`（code 版）是 **2.35.0**，它那份 sidecar 同样是
+// `L69 = APP_VERSION || "2.1.0"` ⇒ 那边会是 `phanthy-code-cli/2.35.0`。
+// 本仓以 **PhanthyWork 2.51.0**（`PhanthyWork.exe` 的 FileVersion）为准。
+//
+// 判据：TestApiFamilyUserAgentIsOfficialVersion
+const apiCallUA = "phanthy-code-cli/2.51.0"
 
 // applyCommonHeaders 注入公共头 —— **仅供 `/oauth/token` 与 `/v1/*` 在用**。
 //
@@ -269,10 +319,30 @@ func (c *Client) applyCommonHeaders(req *http.Request) {
 //	fetch(`${R1()}/api/phanthy_code/models`,
 //	      { headers: { Authorization: `Bearer ${O}`, Accept: "application/json" } })
 //
-// # ★ 为什么 UA 是 `Bun/1.3.14` 而不是 `phanthy-code-cli/…`
+// # ★★ 为什么 UA 又是 `phanthy-code-cli/2.51.0`（2026-11-15 第二次更正）
 //
-// 官方这一族**不设 UA** ⇒ 实际发出去的是 Bun fetch 的运行时默认 `Bun/1.3.14`。
-// `phanthy-code-cli/<ver>` 那个 UA **只属于 `/api/work/*`**（`wtK`）。
+// 2026-11-14 我把本族 UA 改成了 `Bun/1.3.14`，理由是「官方 `j59` 这一族不设 UA，
+// Bun fetch 会补运行时默认」。**那个观察本身没错，但结论错了** ——
+//
+//	  同一个官方产品里**有两条数据面路径**：
+//
+//		① sidecar 的本地路由（`KeK` → `X59` → `j59`）：确实**不设 UA** ⇒ 实际发 `Bun/1.3.14`
+//		② 桌面端自己发的那条（sidecar `FtK` 一族）：`User-Agent: phanthy-code-cli/${APP_VERSION}`
+//
+// 我只读到 ①，就把整族定成了 Bun/1.3.14。而**我们要模仿的是 ②** ——
+// 我们做的是注册 / 额度 / 签到这套**桌面端流程**，不是 sidecar 的本地代理。
+//
+// # ② 的证据（独立实现 magpie，桌面端 2.51.0 静态反编译 + 真机实测）
+//
+//	export function baseHeaders(extra = {}) {
+//	  return { ..., "user-agent": OFFICIAL_UA, ... }        // OFFICIAL_UA = phanthy-code-cli/2.51.0
+//	}
+//	// 注释原文：「数据面 / 注册 / 换票（sidecar `FtK`）：
+//	//            `User-Agent: phanthy-code-cli/${APP_VERSION}`，APP_VERSION = 2.51.0」
+//	//           「旧版 `phanthy-code-cli/2.1.0` 曾命中 403 TM.00000001」
+//
+// ⚠ 唯一**仍然**不带头的是续期：官方 `Pd3` 只发 `Content-Type` + `Accept`
+// （那是 D1 的结论，`newRefreshRequest` 照它做，**不要**跟着改）。
 //
 // ⚠ Go 侧必须**显式**设成 `Bun/1.3.14`：不设的话 Go 会补
 // `User-Agent: Go-http-client/1.1` —— 那是第三种、同样不存在的形态。
@@ -285,7 +355,9 @@ func (c *Client) applyCommonHeaders(req *http.Request) {
 //
 // 判据：TestOAuthFamilyMatchesOfficialJ59（走真请求，不是直接调本函数）
 func (c *Client) applyOAuthFamilyHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", DefaultUA) // Bun/1.3.14 = 官方"不设 UA"时的实际值
+	// ★ 2026-11-15 更正：本族 UA 是 `phanthy-code-cli/2.51.0`（apiCallUA），不是 Bun/1.3.14。
+	// 理由见下面「为什么 UA 又是 phanthy-code-cli」那段。
+	req.Header.Set("User-Agent", apiCallUA)
 	req.Header.Set("Accept", "application/json")
 	// ⚠ 刻意**不设** x-phanthy-client-source —— 官方 `j59` 这一族不发它。
 	// 这一条是本函数存在的**全部理由**，删掉它就等于回到 bug。
@@ -500,7 +572,7 @@ func (c *Client) ChatCompletionsStream(ctx context.Context, a *Auth, path string
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", c.userAgent())
+	req.Header.Set("User-Agent", c.inferenceUserAgent())
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 
@@ -1396,7 +1468,7 @@ func (c *Client) ChatStream(ctx context.Context, a *Auth, path string, body []by
 	// 所以这里不改写它、也不发明一个值：显式钉回本包的默认 UA，
 	// 避免 applyCommonHeaders 的 /api 口径"漏"进推理路径。
 	// （这条路径是旧内核，默认不走 —— 见 Protocol 配置；新版内核走 ChatCompletionsStream。）
-	req.Header.Set("User-Agent", c.userAgent())
+	req.Header.Set("User-Agent", c.inferenceUserAgent())
 	req.Header.Set("anthropic-version", anthropicVersion)
 	req.Header.Set("Authorization", AuthorizationHeaderValue(a.OAuth.AccessToken))
 	// ★ 2026-11-13：官方桌面端 2.51.0 在**每个**出站请求上都带这三个头，
