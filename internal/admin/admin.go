@@ -557,6 +557,7 @@ func New(cfg Config) *Handler {
 	h.register("GET /admin/system-status", h.systemStatus)
 
 	h.register("GET /admin/settings", h.settings)
+	h.register("GET /admin/access-template", h.accessTemplateHandler)
 	h.register("PUT /admin/settings", h.settingsUpdate)
 
 	// 核心调度相关的两条只读端点。
