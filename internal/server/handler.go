@@ -1017,6 +1017,39 @@ func dynamicModelsFetchedAt() time.Time {
 var riskReasoningEfforts = []string{"off", "low", "high", "max"}
 
 // models 返回模型列表：优先动态（缓存 1h），失败回退静态表。
+// catalogVersionHeader 当前渠道目录**内容版本**的响应头。
+//
+// # 它解决什么（U-04 的对外价值）
+//
+// 计划 U-04 的目标是"目录成为可校验的版本化快照"。快照对**管理面**的价值是
+// 一致性（谁在什么时候看到哪一版）；对**客户端**的价值是这一条：
+// 「目录变了没有」能一眼看出来，不必把整个列表拉下来自己 diff。
+//
+// # 为什么只加响应头，不动列表内容
+//
+// 把 `/v1/models` 的清单换成快照口径是**语义变更**：v2 令牌现在走
+// `ResolvePolicy`（按它自己的分组），而快照覆盖全部渠道 —— 直接切会让客户端
+// 看到它无权调用的模型。目录版本头是纯增量的那部分价值，不碰语义。
+//
+// # 成本
+//
+// `BuildCatalog` 每次调用都会重算（排序 + 哈希）。`/v1/models` 是低频路径
+// （客户端建索引时才拉），所以不做缓存 —— 缓存就要处理失效，
+// 而"缓存没失效"会表现为"版本不变但目录变了"，比慢更坏。
+const catalogVersionHeader = "X-Catalog-Version"
+
+// catalogVersion 当前渠道目录的内容版本；没有渠道 store 时返回空串（不设头）。
+func (h *Handler) catalogVersion() string {
+	if h.cfg.Channels == nil {
+		return ""
+	}
+	channels := h.cfg.Channels.List()
+	if len(channels) == 0 {
+		return ""
+	}
+	return channelstore.BuildCatalog(channels).Version
+}
+
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	if result, version := h.routingPolicyFor(r); version != 0 {
 		data := []map[string]any{}
@@ -1038,6 +1071,10 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 			data = append(data, map[string]any{"id": model, "object": "model", "owned_by": "gateway", "endpoints": capabilities})
 		}
 		w.Header().Set("Cache-Control", "no-store")
+		// 目录版本（U-04）：客户端据此发现"目录变了"，不必轮询整个列表再自己 diff。
+		if v := h.catalogVersion(); v != "" {
+			w.Header().Set(catalogVersionHeader, v)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 		return
 	}
@@ -1083,6 +1120,11 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	//
 	// 与 /healthz 的同一个头同名同义（那边注释写着「身份靠 service 字段 + X-Service 头双保险」）。
 	w.Header().Set("X-Service", h.serviceName())
+	// 目录版本（U-04）：两条路径都给同一个头 —— 客户端不该因为令牌是 v1 还是 v2
+	// 就失去"发现目录变化"的能力。
+	if v := h.catalogVersion(); v != "" {
+		w.Header().Set(catalogVersionHeader, v)
+	}
 	// ⚠⚠ 给每条**补上档位声明**（2026-10-18 加，用户要求："我们的项目也需要可以支持选择思考深度"）。
 	//
 	// 动机：我们**一直有** `reasoning_effort` 的透传与降级（internal/cline/payload.go 的
