@@ -2675,6 +2675,176 @@ function toast(msg, bad) {
     }
   });
 
+  // ── 模型广场：分组里的对外模型（GET /admin/channels/plaza）──────────────
+  //
+  // ⚠ 这张表此前**只有标记、没有任何渲染代码**：`#unifiedRows` 在脚本区一次都
+  //   没出现过，所以它恒空 —— 用户看到的就是一片空白表头。
+  //
+  // # 数据源刻意是**分组**，不是渠道目录
+  //
+  //   渠道目录（/admin/channels/catalog）回答"这条渠道能服务什么"
+  //   广场                            回答"我们**对外承诺**了哪些模型"
+  //
+  // 后者才是客户端真正能发出来的名字 —— 判定链走分组（ResolvePolicy）。
+  // 两个集合的差集恰好是最该看见的东西：分组里配了、渠道没供给 ⇒
+  // **承诺了一个没人能服务的模型**，客户端发它会失败。所以每行带 in_catalog。
+  var PLAZA_ENDPOINT = '/admin/channels/plaza';
+  var plaza = { rows: [], q: '', loaded: false, orphaned: 0 };
+
+  // plazaSnippet 一行的「接入」片段。
+  //
+  // ⚠ **不含任何密钥**：只有 base_url 与模型名。那把钥匙在「系统凭据」区里
+  //   单独复制（那里有掩码 + 显示/复制），两件事不能混 —— 复制模型名的人
+  //   往往是要贴给同事，带上密钥就成了一次泄漏。
+  function plazaSnippet(m) {
+    return JSON.stringify({ base_url: location.origin + '/v1', model: m.public }, null, 2);
+  }
+
+  // plazaMatches 一行是否命中当前搜索词（模型名 / 分组名 / 渠道 ID 任一）。
+  function plazaMatches(m, q) {
+    if (!q) { return true; }
+    var hay = [m.public || '', (m.groups || []).join(' '), (m.group_names || []).join(' '),
+               (m.channels || []).join(' '), (m.reals || []).join(' ')].join(' ').toLowerCase();
+    return hay.indexOf(q) >= 0;
+  }
+
+  function renderPlaza() {
+    var tb = document.getElementById('unifiedRows');
+    if (!tb) { return; }
+    var q = (plaza.q || '').trim().toLowerCase();
+    var rows = (plaza.rows || []).filter(function (m) { return plazaMatches(m, q); });
+
+    tb.textContent = '';
+    if (!plaza.loaded) {
+      var tr0 = document.createElement('tr');
+      var td0 = document.createElement('td');
+      td0.colSpan = 4;
+      td0.className = 'dim';
+      td0.textContent = '正在读取分组配置…';
+      tr0.appendChild(td0);
+      tb.appendChild(tr0);
+      return;
+    }
+    if (plaza.rows.length === 0) {
+      var tr1 = document.createElement('tr');
+      var td1 = document.createElement('td');
+      td1.colSpan = 4;
+      td1.className = 'dim';
+      // 空态必须说清是"没配"还是"筛掉了" —— 混成一句会让人去建重复的东西。
+      td1.textContent = '还没有任何分组配置对外模型。先在「分组」里勾选模型或设置对外名。';
+      tr1.appendChild(td1);
+      tb.appendChild(tr1);
+      return;
+    }
+    if (rows.length === 0) {
+      var tr2 = document.createElement('tr');
+      var td2 = document.createElement('td');
+      td2.colSpan = 4;
+      td2.className = 'dim';
+      td2.textContent = '没有匹配「' + plaza.q + '」的对外模型（共 ' + plaza.rows.length + ' 个）。';
+      tr2.appendChild(td2);
+      tb.appendChild(tr2);
+      return;
+    }
+
+    rows.forEach(function (m) {
+      var tr = document.createElement('tr');
+      if (!m.in_catalog) { tr.className = 'orphan'; tr.title = '分组里配了，但没有启用的渠道能服务它 —— 客户端发这个模型会失败'; }
+
+      // ① 公开模型
+      var tdName = document.createElement('td');
+      var code = document.createElement('code');
+      code.textContent = m.public;
+      tdName.appendChild(code);
+      if ((m.group_names || []).length) {
+        var gs = el('span', 'dim', ' · ' + m.group_names.join('/'));
+        tdName.appendChild(gs);
+      }
+      if (!m.in_catalog) {
+        var warn = el('span', 'bad', ' · 无渠道供给');
+        tdName.appendChild(warn);
+      }
+      tr.appendChild(tdName);
+
+      // ② 端点（后端已把内部名 images 映射成 image_generation）
+      tr.appendChild(el('td', '', (m.endpoints || []).length ? m.endpoints.join(' / ') : '—'));
+
+      // ③ 提供渠道
+      tr.appendChild(el('td', '', (m.channels || []).length ? m.channels.join(', ') : '—'));
+
+      // ④ 接入：只复制 base_url + 模型名，**不含密钥**
+      var tdAct = document.createElement('td');
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'act';
+      btn.textContent = '复制接入';
+      btn.title = '复制 {"base_url","model"} —— 不含任何密钥';
+      btn.addEventListener('click', function () {
+        var text = plazaSnippet(m);
+        var done = function () { toast('已复制接入片段（不含密钥）'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { window.prompt('手动复制：', text); });
+        } else {
+          window.prompt('手动复制：', text);
+        }
+      });
+      tdAct.appendChild(btn);
+      tr.appendChild(tdAct);
+
+      tb.appendChild(tr);
+    });
+  }
+
+  function renderPlazaSummary() {
+    var box = document.getElementById('unifiedVersion');
+    if (!box) { return; }
+    if (!plaza.loaded) { box.textContent = ''; return; }
+    var text = '共 ' + plaza.rows.length + ' 个对外模型';
+    if (plaza.orphaned > 0) {
+      text += ' · ⚠ ' + plaza.orphaned + ' 个没有渠道能服务';
+    }
+    box.textContent = text;
+    box.className = plaza.orphaned > 0 ? 'bad' : 'dim';
+  }
+
+  function loadPlaza() {
+    plaza.loaded = false;
+    renderPlaza();
+    var errBox = document.getElementById('unifiedError');
+    if (errBox) { errBox.textContent = ''; }
+    return getJSON(PLAZA_ENDPOINT).then(function (data) {
+      plaza.rows = (data && data.models) || [];
+      plaza.orphaned = (data && data.orphaned) || 0;
+      plaza.loaded = true;
+      renderPlaza();
+      renderPlazaSummary();
+      if (plaza.orphaned > 0 && errBox && data && data.note) {
+        // 孤儿是**必须看见**的：它代表客户端会失败的模型名。
+        errBox.textContent = data.note;
+        errBox.className = 'bad';
+      }
+    }, function (e) {
+      plaza.loaded = true;
+      plaza.rows = [];
+      renderPlaza();
+      renderPlazaSummary();
+      if (errBox) {
+        errBox.textContent = '读取模型广场失败：' + (e && e.message ? e.message : e);
+        errBox.className = 'bad';
+      }
+    });
+  }
+
+  (function wirePlaza() {
+    var refresh = document.getElementById('unifiedRefresh');
+    if (refresh) { refresh.addEventListener('click', function () { void loadPlaza(); }); }
+    var search = document.getElementById('unifiedSearch');
+    if (search) {
+      search.addEventListener('input', function () { plaza.q = search.value || ''; renderPlaza(); });
+    }
+    void loadPlaza();
+  })();
+
   switchTab('models', false);
   renderSelCount();
   void load();

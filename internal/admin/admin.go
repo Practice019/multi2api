@@ -559,6 +559,10 @@ func New(cfg Config) *Handler {
 	h.register("GET /admin/settings", h.settings)
 	h.register("GET /admin/access-template", h.accessTemplateHandler)
 	h.register("GET /admin/migration/backup", h.migrationBackupHandler)
+	// 模型广场常注册：它首先是**分组视图**（对外承诺了哪些模型），
+	// 没有渠道时也应该能打开并看到"还没有任何分组配置对外模型"这句说明 ——
+	// 挂在 registerChannels() 下会让空配置直接 404，界面白屏。
+	h.register("GET /admin/channels/plaza", h.channelsPlaza)
 	h.register("PUT /admin/settings", h.settingsUpdate)
 
 	// 核心调度相关的两条只读端点。

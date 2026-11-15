@@ -249,6 +249,22 @@ type Status struct {
 	IntervalMs int64  `json:"interval_ms,omitempty"`
 	LastRun    string `json:"last_run,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
+	// Due 当前是否已到执行条件（由 Job.Due 现算）。
+	//
+	// # 为什么必须暴露它
+	//
+	// 本仓有一批**按需触发**的任务（workbuddy 的旅行/成长守卫按每个账号自己的
+	// 到期时刻错峰；活跃上报按时刻窗口 + 当日是否已跑）。它们的"下次"会一直
+	// 往后漂，而界面只能显示"已过 N 分"—— 那看起来像卡住，实际是"还没到时候"。
+	//
+	// 更糟的是**从未执行过**的任务：活跃上报默认关闭（未配时点就不跑），
+	// 界面显示"还没有执行记录"，运维会以为坏了。
+	Due bool `json:"due"`
+	// Note 一句话解释当前状态（"为什么没跑"）。
+	//
+	// 刻意在**后端**算：前端拿不到 Job.Due，也拿不到"有没有跑过"与
+	// "任务是否按需"的组合语义。让前端猜等于两处真相。
+	Note string `json:"note,omitempty"`
 }
 
 // Statuses 返回全部任务的状态（稳定排序）。
@@ -256,6 +272,7 @@ func (j *Jobs) Statuses() []Status {
 	if j == nil {
 		return nil
 	}
+	now := time.Now()
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	out := make([]Status, 0, len(j.list))
@@ -267,10 +284,55 @@ func (j *Jobs) Statuses() []Status {
 		if !r.lastRun.IsZero() {
 			s.LastRun = r.lastRun.Format(time.RFC3339)
 		}
+		// Due 现算。⚠ 单独 recover：某个上游的 Due 打了 nil 不该让整页状态 500。
+		s.Due = safeDue(r.job, now)
+		s.Note = statusNote(s, r.job)
 		out = append(out, s)
 	}
 	sort.Slice(out, func(i, k int) bool { return out[i].Name < out[k].Name })
 	return out
+}
+
+// safeDue 调 Job.Due 并吞掉 panic（状态展示不该因为一个上游的 bug 整体失败）。
+func safeDue(j gateway.Job, now time.Time) (due bool) {
+	if j.Due == nil {
+		// 没有 Due = 固定间隔任务 ⇒ 核心按 Interval 叫它，不存在"到不到条件"。
+		return true
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			due = false
+		}
+	}()
+	return j.Due(now)
+}
+
+// statusNote 一句话解释"为什么没跑 / 现在该不该跑"。
+//
+// # 它存在的理由
+//
+// 「还没有执行记录」和「已过 11 分」这两种展示都**不含原因**：
+//
+//	活跃上报默认关闭（未配时点就不跑）        ⇒ 显示"还没有执行记录"，像坏了
+//	旅行守卫按账号到期错峰（可能几小时没账号到期）⇒ 显示"已过 11 分"，像卡住
+//
+// 两句都会让运维去做一次没有必要的排查。这里把原因说出来。
+func statusNote(s Status, j gateway.Job) string {
+	onDemand := j.Due != nil
+	switch {
+	case s.LastRun == "" && s.Due:
+		return "还没有执行过；当前已到执行条件"
+	case s.LastRun == "" && onDemand:
+		return "还没有执行过；本任务按需触发，当前条件未满足（未启用或未到窗口）"
+	case s.LastRun == "":
+		return "还没有执行过"
+	case s.Due:
+		return "当前已到执行条件"
+	case onDemand:
+		return "按需触发，当前条件未满足（等待账号到期或时刻窗口）"
+	default:
+		return "间隔任务，等待下一轮"
+	}
 }
 
 // ---------------------------------------------------------------------------

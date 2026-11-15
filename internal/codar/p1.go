@@ -528,27 +528,34 @@ func (p *Provider) renewOne(ctx context.Context, a *Auth) error {
 	//   POST /v1/token/refresh → 400 {"code":400,"message":"Token is not close to expiration"}
 	// 这不是错误，是上游的护栏（也正说明早调不会轮换、不会踢掉桌面端会话）。
 	// ⇒ 静默跳过，避免每 6 小时刷一条假错误。
-	if status == http.StatusBadRequest && strings.Contains(string(raw), "not close to expiration") {
+	// ⚠ 2026-11-16：**不锁状态码**。上游早期是 400 + 这句话；若它改成 200（或 403）
+	// 携带同样的语义，锁 400 会让这条"不必续期"的护栏失效 ⇒ 每 6 小时刷一条假错误。
+	// 判据只看语义。
+	if strings.Contains(strings.ToLower(string(raw)), "not close to expiration") {
 		return nil
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("codar: 续期返回 HTTP %d（%s）", status, truncateStr(string(raw), 200))
 	}
-	var parsed struct {
-		Data struct {
-			Token string `json:"token"`
-		} `json:"data"`
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return err
-	}
-	tok := parsed.Data.Token
+	// ★ 2026-11-16：**宽容解析**。
+	//
+	// 直接锁死一个字段名在本仓已经出过一次事故（qoder 那次：「续期响应的
+	// 字段名全错」—— 旧实现读 access_token + expires_in，而真实响应里两个都不存在
+	// ⇒ 续期永远报"缺少 access_token"，即使服务端回 200。见 docs/progress-log.md）。
+	//
+	// 所以这里在**常见位置**都找一遍：顶层与 data 下、token / access_token /
+	// new_token 等命名。多认几个名字的代价是零（它们互斥），
+	// 而认错一个名的代价是"功能静默失效"。
+	var generic map[string]any
+	_ = json.Unmarshal(raw, &generic) // 失败也无所谓：pickToken 会返回空
+	tok := pickToken(generic)
 	if tok == "" {
-		tok = parsed.Token
-	}
-	if tok == "" {
-		return fmt.Errorf("codar: 续期响应缺少新令牌")
+		// ★ 错误信息带**响应里有哪些键名**（不含值）。
+		//
+		// 为什么只给键名：值里可能就有令牌，把它写进日志/状态页等于泄漏；
+		// 而"字段叫什么"恰好是排查所需的全部信息 —— 看到 refresh_token
+		// 就知道该改成哪个名字，一次就能定。
+		return fmt.Errorf("codar: 续期响应里找不到令牌字段（响应键：%s）", jsonKeyNames(raw))
 	}
 	if u, ok := jwtClaims(tok); ok {
 		if name, _ := u["username"].(string); name != "" && a.Username != "" && name != a.Username {
@@ -707,4 +714,67 @@ func isAlreadySignedMsg(msg string) bool {
 		}
 	}
 	return false
+}
+
+// tokenFields 上游可能用哪些字段名放新令牌。
+//
+// ⚠ 这几个名字互斥，多认一个不会误判；少认一个就是"功能静默失效"。
+// 顺序即优先级：token 最直白；refresh_token 只在"续期返回的是下一轮凭证"
+// 这种语义下才对，所以排在后面。
+var tokenFields = []string{"token", "access_token", "new_token", "refresh_token", "device_token"}
+
+// pickToken 在顶层与 data 下按 tokenFields 顺序找令牌。
+//
+// 只认字符串且非空；数字/对象一律跳过（那多半是 expires_in 之类）。
+func pickToken(m map[string]any) string {
+	if m == nil {
+		return ""
+	}
+	look := func(container map[string]any) string {
+		for _, k := range tokenFields {
+			if v, ok := container[k].(string); ok {
+				if s := strings.TrimSpace(v); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	if s := look(m); s != "" {
+		return s
+	}
+	if d, ok := m["data"].(map[string]any); ok {
+		return look(d)
+	}
+	return ""
+}
+
+// jsonKeyNames 列出响应里出现过的键名（**只要名字，不要值**）。
+//
+// 用途：续期失败时告诉运维"上游这次给的是什么形状"。
+// 值里可能含令牌，所以值一个都不落 —— 而键名足以定位字段名变更。
+func jsonKeyNames(raw []byte) string {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		// 不是 JSON：只报长度，**不落原文**（原文可能就是令牌）。
+		return fmt.Sprintf("非 JSON（%d 字节）", len(raw))
+	}
+	var top []string
+	for k := range m {
+		top = append(top, k)
+	}
+	sort.Strings(top)
+	out := strings.Join(top, ",")
+	if d, ok := m["data"].(map[string]any); ok {
+		var sub []string
+		for k := range d {
+			sub = append(sub, k)
+		}
+		sort.Strings(sub)
+		out += " ; data: " + strings.Join(sub, ",")
+	}
+	if out == "" {
+		out = "（空对象）"
+	}
+	return out
 }
