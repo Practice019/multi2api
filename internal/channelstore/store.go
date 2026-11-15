@@ -104,6 +104,12 @@ type Channel struct {
 type ChannelKey struct {
 	Key    string `json:"key"`
 	Status int    `json:"status"`
+	// ID 这把 key 的**稳定资源 ID**（轮询游标按它推进，不按下标）。
+	//
+	// ⚠ `json:"-"` 是有意的：ID 由 Key 的值派生（见 keyid.go），
+	// 落盘等于把密钥指纹写进配置文件 —— 渠道列表本来就要掩码，
+	// 没必要顺手泄漏一个可比对的短哈希。空值 = 用派生值。
+	ID string `json:"-"`
 	// Reason / DisabledAt 记"为什么、什么时候"被停用（对标 new-api 的 multi_key_info）。
 	//
 	// ⚠ 自动禁用必须留下原因：否则用户看到某个 key 自己变灰，只会以为程序坏了，
@@ -178,6 +184,9 @@ type Store struct {
 	mu   sync.Mutex
 	rand *rand.Rand
 	rr   map[string]int
+	// rrID round_robin 的**稳定 ID 游标**（替代 rr 的下标语义，见 keyid.go）。
+	// 键是渠道 ID，值是上一次选中的 Key 的稳定 ID。
+	rrID map[string]string
 }
 
 // New 打开渠道存储。

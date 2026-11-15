@@ -95,18 +95,25 @@ func (s *Store) PickKeyIdx(ch *Channel) (int, string) {
 	if len(usable) == 0 {
 		return -1, ""
 	}
+	// 游标按**稳定 ID** 推进，不按下标（见 keyid.go 的长注释）。
+	//
+	// 顺序仍然是 usable 的**声明顺序** —— 运维在界面上排的顺序就是轮转顺序，
+	// 这条不变；变的是"上一次选了谁"用 ID 记住，于是删掉别的 key 不会让
+	// 游标指到别人身上。
+	ids := keyIDsOf(keys)
 	s.mu.Lock()
-	if s.rr == nil {
-		s.rr = make(map[string]int)
+	if s.rrID == nil {
+		s.rrID = make(map[string]string)
 	}
 	pick := usable[0]
-	for _, index := range usable {
-		if index >= s.rr[ch.ID] {
-			pick = index
-			break
+	if cursor := s.rrID[ch.ID]; cursor != "" {
+		if at := indexOfID(ids, usable, cursor); at >= 0 {
+			// 后继：cursor 在 usable 序列里的下一个，越界绕回第一个。
+			pick = usable[(at+1)%len(usable)]
 		}
+		// cursor 已不在可用集合里（被删/被停用）⇒ 保持 usable[0]。
 	}
-	s.rr[ch.ID] = pick + 1
+	s.rrID[ch.ID] = ids[pick]
 	s.mu.Unlock()
 	return pick, keys[pick].Key
 }
