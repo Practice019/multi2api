@@ -29,11 +29,20 @@ import (
 	"strings"
 
 	"workbuddy2api/internal/groupstore"
+	"workbuddy2api/internal/store"
 )
 
 // groupDanglingRef 一把 key 指向了不存在的分组。
 type groupDanglingRef struct {
-	KeyID   string `json:"key_id"`
+	// KeyID 内部使用的 key 标识。
+	//
+	// ⚠ `json:"-"` 是**必须**的：apikey.ID 就是 "sk- 开头的随机标识，
+	// **也是 Bearer 值**"（见 apikey/apikey.go 的字段注释）—— 序列化它
+	// 等于把完整凭据放进一致性报告，而那份报告的用途正是"贴到工单里给人看"。
+	//
+	// 前端只用它做显示兜底（`r.key_name || r.masked || r.key_id`），
+	// 从不拿它寻址（操作端点走的是分组的 group_id），所以不序列化没有副作用。
+	KeyID   string `json:"-"`
 	KeyName string `json:"key_name"`
 	// Masked 掩码后的 key（完整 key 不出现在一致性报告里 —— 它会被前端缓存/截图/贴到工单）。
 	Masked  string `json:"masked"`
@@ -237,6 +246,10 @@ func (h *Handler) groupsConsistency(w http.ResponseWriter, r *http.Request) {
 //
 // 所以本端点只做前者；后者要人看过报告再手工改（界面上逐条删）。
 func (h *Handler) groupsPrune(w http.ResponseWriter, r *http.Request) {
+	// ⚠ 禁缓存：本响应会带着"哪些 key 的分组引用被清空"的清单。
+	// 清单只回**掩码**（见下面的 masked），但掩码仍带可辨认前缀 ——
+	// 让它留在浏览器 bfcache / 中间代理里没有任何好处。
+	noStore(w)
 	gs := h.groupsStore()
 	if gs == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "分组功能未启用"})
@@ -271,9 +284,20 @@ func (h *Handler) groupsPrune(w http.ResponseWriter, r *http.Request) {
 	// ⚠ 权限放大必须显式告诉调用方（见 apikey.PruneResult.KeysUnrestricted 的注释）。
 	//   这不是"顺便带一个统计"，而是这次操作最需要用户知晓的后果。
 	if len(res.KeysUnrestricted) > 0 {
-		out["keys_unrestricted"] = res.KeysUnrestricted
+		// ★ 只回**掩码**。`res.KeysUnrestricted` 里装的是 apikey.ID ——
+		// 那个字段就是**明文密钥本身**（见 apikey/prune.go 的 KeysUnrestricted 注释）。
+		//
+		// ⚠ 这条曾漏了：`/admin/groups/delete` 早就掩码了（groups.go 的 masked），
+		// 而本端点直接把原文塞进响应与 warning 文案里。
+		// 两条路径走的是同一个 KeysUnrestricted，只改一条等于没改 ——
+		// 判据 TestGroupPruneNeverLeaksPlaintextKey 现在同时盯住两条。
+		masked := make([]string, 0, len(res.KeysUnrestricted))
+		for _, id := range res.KeysUnrestricted {
+			masked = append(masked, store.MaskTokenKey(id))
+		}
+		out["keys_unrestricted"] = masked
 		out["warning"] = "下列 key 的分组引用被清空，它们现在**不受模型限制**了（可用全部模型）：" +
-			joinLimited(res.KeysUnrestricted, 5)
+			joinLimited(masked, 5)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -176,9 +176,16 @@ func TestConsistencyReportsDanglingRefs(t *testing.T) {
 	if out["ok"] != false {
 		t.Errorf("有悬空引用时 ok 应为 false，实际 %v", out["ok"])
 	}
-	// 报告里不该出现完整 key（会被缓存/截图/贴工单）
-	if s, _ := first["key_id"].(string); s == "" {
-		t.Error("应带 key_id")
+	// 报告里不该出现完整 key（会被缓存/截图/贴工单）。
+	//
+	// ⚠ 这行注释与它下面的断言**曾经互相矛盾**：
+	//   注释说"不该出现完整 key"，断言却要求 `key_id` 非空 ——
+	//   而 `key_id` 装的就是 apikey.ID，也就是 sk- 开头的 Bearer 值本身。
+	//   于是"注释在防、断言在保"，泄漏一直活到 2026-11-15。
+	//
+	// 现在改成两条都指向同一件事：字段**不存在**，且响应里搜不到原文。
+	if _, present := first["key_id"]; present {
+		t.Error("★ 报告不该有 key_id 字段 —— 它就等于完整凭据（见 groupDanglingRef.KeyID 的注释）")
 	}
 	if m, _ := first["masked"].(string); !strings.Contains(m, "…") {
 		t.Errorf("masked 应是掩码形态，实际 %q", m)
