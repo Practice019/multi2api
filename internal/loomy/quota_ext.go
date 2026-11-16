@@ -172,8 +172,21 @@ func logQuotaFail(uid string, err error) {
 	//   ③ **删掉"（回落到本机缓存）"** —— 那是假的：调用方紧接着就返回"额度未知"，
 	//      并没有回落成功（真正回落成功的那条路径在下面单独打"已改用本机缓存值"）
 	reason, hint := quotaFailReason(err)
-	logx.Coalesce(logx.LevelWarn, "loomy", "quota:loomy", "", "额度查询失败 uid=%s（%s）: %s —— %s",
-		shortUID(uid), reason, trimLoomyPrefix(err), hint)
+	// ★ 2026-11-16：形态改成 事件名 + 蛇形字段（与全仓其它日志统一）。
+	//
+	// 档位词（上游拒绝/网络失败/超时/回执异常）与 hint **进 msg=** ——
+	// 它们是给用户判断"要不要管、会不会自愈"的人话，判据也钉着它们；
+	// 其余全部字段化：uid / reason（ASCII 短码）/ biz_code / err。
+	//
+	// 改造前是整句中文，实测一行 150+ 字符：
+	//   额度查询失败 uid=2610…（上游拒绝）: 积分接口 /points/records?pageNo=1&pageSize=1
+	//   返回 100002: 登录已失效，请重新登录 —— 业务码 100002：见同行的上游原文
+	kv := []any{"uid", shortUID(uid), "reason", quotaReasonCode(reason)}
+	if m := upstreamCodeRe.FindStringSubmatch(err.Error()); m != nil {
+		kv = append(kv, "biz_code", m[1])
+	}
+	kv = append(kv, "err", logx.ShortString(trimLoomyPrefix(err), 100))
+	logx.Eventf(logx.LevelWarn, "loomy", "quota.fail", reason+"："+hint, kv...)
 }
 
 // RefreshQuota 取该账号的当前额度（gateway.QuotaExt）。
@@ -362,3 +375,22 @@ func (p *Provider) authByUID(uid string) *Auth {
 //
 // 不实现会在这里编译失败，而不是等到运行时"界面上额度一直空着"。
 var _ gateway.QuotaExt = (*Provider)(nil)
+
+// quotaReasonCode 把中文档位翻成**ASCII 短码**（日志的 reason= 字段）。
+//
+// ⚠ `quotaFailReason` 的返回值**不动**：判据 TestQuotaFailReasonTiers 钉着
+// 那四个中文档位词，而且它们是给用户看的人话（进 msg=）。
+// 这里只是另给一个机器可聚合的码 —— 两者各司其职。
+func quotaReasonCode(reason string) string {
+	switch reason {
+	case "超时":
+		return "timeout"
+	case "网络失败":
+		return "network"
+	case "上游拒绝":
+		return "upstream_rejected"
+	case "回执异常":
+		return "bad_response"
+	}
+	return "unknown"
+}
