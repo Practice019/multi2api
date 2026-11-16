@@ -143,3 +143,18 @@ func RefreshSummaryLine(scope string, refreshed, skipped, failed int, extra ...a
 	kv = append(kv, extra...)
 	return eventLine("refresh.summary", kv)
 }
+
+// RefreshExpired 终态：refresh_token 已失效，必须重登。
+//
+// ★ 走 Coalesce 而不是直接 Event：多账号同时失效时**折成一行**。
+//
+//	实测 raccoon 2 个号、qoder 1 个号都打到这一档 —— 每个号一行就是刷屏。
+//
+// ⚠ 与 `RefreshFail` 分开成两个入口：这一档是**终态**（要人动手重登），
+//
+//	`RefreshFail` 是可重试的。合成一条会让运维分不清"要不要管"。
+func RefreshExpired(scope, uid string) {
+	Coalesce(LevelWarn, scope, "refresh.expired:"+scope, "",
+		"%s", eventLine("refresh.expired",
+			[]any{"uid", logbuf.ShortUID(uid), "reason", RefreshReasonInvalid}))
+}

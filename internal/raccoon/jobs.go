@@ -45,7 +45,6 @@ import (
 	"context"
 	"errors"
 	"time"
-	"workbuddy2api/internal/logbuf"
 
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logx"
@@ -156,8 +155,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 			// 用户才知道该不该去重新登录。
 			if isRefreshExpired(err) {
 				// 终态：必须重登。INFO 打这个会让人以为是流水（实测就是这样）。
-				logx.Event(logx.LevelWarn, "raccoon", "refresh.expired",
-					"uid", logbuf.ShortUID(a.UID()), "reason", "refresh_token_invalid")
+				logx.RefreshExpired("raccoon", a.UID())
 			} else {
 				logx.RefreshFail("raccoon", "refresh.failed", a.UID(), err)
 			}

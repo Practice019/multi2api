@@ -189,7 +189,11 @@ func logQuotaFail(uid string, err error) {
 		kv = append(kv, "biz_code", m[1])
 	}
 	kv = append(kv, "err", logx.ShortString(trimLoomyPrefix(err), 100))
-	logx.Eventf(logx.LevelWarn, "loomy", "quota.fail", reason+"："+hint, kv...)
+	// ★ 走 Coalesce 而不是 Eventf：多账号同时失败要**折成一行**（用户要求）。
+	//   上一版我用了 Eventf（立即输出）⇒ 实测 6 个号打了 6 行，等于没折叠。
+	//   key 里带 reason：不同原因各自折叠，原因不会丢。
+	logx.Coalesce(logx.LevelWarn, "loomy", "quota.fail:loomy:"+reason, "",
+		"%s", logx.EventLineFor("quota.fail", append([]any{"msg", reason + "：" + hint}, kv...)...))
 }
 
 // RefreshQuota 取该账号的当前额度（gateway.QuotaExt）。

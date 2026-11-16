@@ -145,8 +145,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 			failed++
 			if errors.Is(err, ErrRefreshExpired) {
 				// 终态：refresh_token 真的失效了，必须重登（与"可重试"必须分开）
-				logx.Event(logx.LevelWarn, p.productID, "refresh.expired",
-					"uid", shortUID(a.UIDValue()), "reason", "refresh_token_invalid")
+				logx.RefreshExpired(p.productID, a.UIDValue())
 			} else {
 				logx.RefreshFail(p.productID, "refresh.failed", a.UIDValue(), err)
 			}

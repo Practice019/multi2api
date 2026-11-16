@@ -152,3 +152,51 @@ func TestNoPerUIDCacheMismatchLog(t *testing.T) {
 		t.Error("那条逐号日志还在")
 	}
 }
+
+// ★ 2026-11-16 用户要求「多账号 log 不要刷屏，一行总结即可」。
+//
+// # 这条判据的来历（我自己踩的坑）
+//
+// 我把逐账号行从「整句中文」改成「结构化事件」时用了 `logx.Eventf` ——
+// 那是**立即输出**，绕过了折叠 ⇒ 实测 6 个号打了 6 行，等于没折叠。
+// 形态改对了，但用户真正要求的"一行"没做到。
+//
+// ⇒ 判据钉住：`logQuotaFail` 必须走 `logx.Coalesce`（或其它折叠入口），
+//
+//	不许直接用 `Eventf` / `Event`。
+func TestLogQuotaFailMustBeCoalesced(t *testing.T) {
+	raw, err := os.ReadFile("quota_ext.go")
+	if err != nil {
+		t.Fatalf("读 quota_ext.go: %v", err)
+	}
+	src := stripLineComments(string(raw))
+
+	at := strings.Index(src, "func logQuotaFail(")
+	if at < 0 {
+		t.Fatal("找不到 logQuotaFail")
+	}
+	// 取函数体（到下一个顶层 func 之前）。
+	body := src[at:]
+	if next := strings.Index(body[1:], "\nfunc "); next > 0 {
+		body = body[:next+1]
+	}
+	if !strings.Contains(body, "logx.Coalesce") {
+		t.Fatalf("★ logQuotaFail 没有走 Coalesce —— 多账号会各打一行（用户明确要求一行总结）：\n%s", body)
+	}
+	for _, banned := range []string{"logx.Eventf(", "logx.Event("} {
+		if strings.Contains(body, banned) {
+			t.Fatalf("★ logQuotaFail 里仍有立即输出的 %s —— 它绕过折叠，N 个号就是 N 行", banned)
+		}
+	}
+}
+
+// stripLineComments 去掉 `//` 行注释（判据前必须剥 —— 本仓踩过没剥的坑）。
+func stripLineComments(src string) string {
+	lines := strings.Split(src, "\n")
+	for i, ln := range lines {
+		if at := strings.Index(ln, "//"); at >= 0 {
+			lines[i] = ln[:at]
+		}
+	}
+	return strings.Join(lines, "\n")
+}

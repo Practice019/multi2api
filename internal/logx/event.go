@@ -194,3 +194,9 @@ func ShortString(s string, n int) string {
 	}
 	return string(r[:n]) + "…"
 }
+
+// EventLineFor 生成 `事件名 + k=v` 的正文（eventLine 的公开版），供 Coalesce 使用。
+//
+// 为什么需要：Coalesce 的 format 是普通格式串，调用方想在里面放**结构化正文**
+// 就得先把正文拼好。公开出来避免每个包各拼一遍（那必然漂移）。
+func EventLineFor(event string, kv ...any) string { return eventLine(event, kv) }
