@@ -158,6 +158,18 @@ type uiJob struct {
 	Label string `json:"label,omitempty"`
 	// Desc 这个任务**做什么**的一句话说明（前端挂在悬停上）。
 	Desc string `json:"desc,omitempty"`
+	// Due 当前是否已到执行条件（来自 scheduler.Status）。
+	//
+	// ⚠ 不加 omitempty：`false` 是**有意义的**（"现在不需要跑"），
+	// 而缺字段与 false 在前端读起来一样 —— 那会让"没这个能力"与
+	// "现在不该跑"混淆。这里必须显式发出去。
+	Due bool `json:"due"`
+	// Note 一句话解释当前状态（"为什么没跑"）。
+	//
+	// 用户报的两个现象都缺它：
+	//   workbuddy-activity    「还没有执行记录」 ← 其实默认关闭（未配时点）
+	//   workbuddy-travel-watch「约已过 11 分」    ← 其实在等账号到期
+	Note string `json:"note,omitempty"`
 }
 
 // jobLabels / jobDescs 任务名的中文说法与说明。
@@ -505,6 +517,8 @@ func (h *Handler) uiManifest(w http.ResponseWriter, r *http.Request) {
 			IntervalMs: s.IntervalMs,
 			LastRun:    s.LastRun,
 			LastError:  s.LastError,
+			Due:        s.Due,
+			Note:       s.Note,
 			// ⚠ 中文名与说明在这里查表（不是从 Job 结构一路带下来）—— 见 jobLabels 的注释：
 			//   它们是**展示层的词**，只该在序列化这一步出现。
 			Label: jobLabels[s.Name],
