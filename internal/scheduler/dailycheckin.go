@@ -41,9 +41,9 @@ package scheduler
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
@@ -243,8 +243,20 @@ func NewDailyCheckinJob(reg *gateway.Registry, lg *checkinlog.Log, rec DisableRe
 						itoa(failed) + " 个",
 				})
 			}
-			log.Printf("统一签到：本轮扫 %d 个上游（跳过今天已扫过的 %d 个，覆盖 %d 个可签到上游）；失败 %d 个",
-				len(called), len(skipped), seen, failed)
+			// 工程化：事件名 + 蛇形字段。级别按有没有失败定 ——
+			// "扫了 11 个上游、失败 4 个"不是一条 INFO 该有的信息量。
+			//
+			// ⚠ 那两句中文（"跳过今天已扫过的" / "可签到上游"）必须留：
+			//   既有判据 TestDailyCheckinJobLogLineIsMachineReadable 钉着它们，
+			//   真机验收靠这行日志读"覆盖了几个上游"。所以它们进 msg=，
+			//   数字同时进字段 —— 人读得懂，机器也能聚合。
+			lvl := logx.LevelInfo
+			if failed > 0 {
+				lvl = logx.LevelWarn
+			}
+			logx.Eventf(lvl, "checkin", "checkin.round",
+				"跳过今天已扫过的 "+itoa(len(skipped))+" 个，覆盖 "+itoa(seen)+" 个可签到上游",
+				"scanned", len(called), "skipped", len(skipped), "eligible", seen, "failed", failed)
 			return nil
 		},
 	}

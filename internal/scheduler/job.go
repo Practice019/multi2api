@@ -28,6 +28,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -214,7 +215,18 @@ func (j *Jobs) runOne(job gateway.Job) {
 	}
 	j.mu.Unlock()
 	if err != nil {
-		log.Printf("scheduler: 任务 %s 出错: %v", job.Name, err)
+		// ★ 折叠 + 结构化 + WARN。
+		//
+		// 用户实测：`codar-token-refresh` 每 30 秒失败一次，于是同一条错误
+		// 一天打 **2880 行 INFO**。三处都错：
+		//
+		//   ① 同一件事重复打 ⇒ 用 Coalesce 折成一条带计数的行
+		//   ② 级别是 INFO ⇒ 它是**失败**，至少 WARN
+		//   ③ 文本是整句中文 ⇒ 改成事件名 + 字段
+		//
+		// key 取"任务名 + 错误指纹"：不同错误各自折叠，不会被合并成一条。
+		logx.Coalesce(logx.LevelWarn, "scheduler", "job:"+job.Name+":"+fingerprintErr(err), "",
+			"job.failed job=%s err=%s", job.Name, logx.ShortErr(err))
 	}
 }
 
@@ -391,3 +403,16 @@ func (s *Scheduler) runSlotHooks(slot string) {
 
 // Jobs 返回任务集合（供管理台展示调度状态）。可能为 nil（直接构造的调度器）。
 func (s *Scheduler) Jobs() *Jobs { return s.jobs }
+
+// fingerprintErr 错误文本的短指纹（用于 Coalesce 的 key）。
+//
+// 为什么需要它：Coalesce 按 key 分桶。若只按任务名分桶，
+// 同一任务在窗口内换了一种错误就会被折进同一条，**原因就丢了**；
+// 若不分桶，每种错误各打一条，窗口内十种错误又是十条。
+// 按"任务 + 错误指纹"分桶：同一种错误折叠，不同错误各自可见。
+func fingerprintErr(err error) string {
+	if err == nil {
+		return "none"
+	}
+	return logx.ShortString(err.Error(), 24)
+}

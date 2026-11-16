@@ -154,3 +154,55 @@ func TestNotCloseToExpirationIsStatusAgnostic(t *testing.T) {
 		t.Fatal("★ 找不到语义化的「未临期」判定（大小写不敏感的那种）")
 	}
 }
+
+// ★ ⑩ 上游错误信封的 code/message 必须能被读出来（它们是排查的全部信息）。
+//
+// 用户实测的现场：日志只有「响应键：code,message」—— 知道了形状，
+// 仍然不知道上游说了什么，等于半个诊断。
+func TestJSONEnvelopeExtractsCodeAndMessage(t *testing.T) {
+	raw := []byte(`{"code":100003,"message":"账号已被停用"}`)
+	got := jsonEnvelope(raw)
+	if !strings.Contains(got, "code=100003") {
+		t.Fatalf("应带出 code，实际 %q", got)
+	}
+	if !strings.Contains(got, "账号已被停用") {
+		t.Fatalf("应带出 message，实际 %q", got)
+	}
+}
+
+// Anthropic 风格的 {"error":{...}} 也要认。
+func TestJSONEnvelopeHandlesNestedError(t *testing.T) {
+	raw := []byte(`{"error":{"code":"invalid_grant","message":"Refresh token is invalid or expired."}}`)
+	got := jsonEnvelope(raw)
+	if !strings.Contains(got, "invalid_grant") || !strings.Contains(got, "invalid or expired") {
+		t.Fatalf("嵌套 error 应被展开，实际 %q", got)
+	}
+}
+
+// ★ ⑪ **绝不**带出令牌字段（诊断不能变成泄漏）。
+func TestJSONEnvelopeNeverLeaksToken(t *testing.T) {
+	raw := []byte(`{"code":1,"message":"x","token":"SECRET-T","refresh_token":"SECRET-RT"}`)
+	got := jsonEnvelope(raw)
+	if strings.Contains(got, "SECRET-T") || strings.Contains(got, "SECRET-RT") {
+		t.Fatalf("★★ 诊断泄漏了令牌：%q", got)
+	}
+}
+
+// message 限长且按 rune 截（中文不能断字）。
+func TestJSONEnvelopeTruncatesLongMessage(t *testing.T) {
+	long := strings.Repeat("错", 300)
+	got := jsonEnvelope([]byte(`{"code":1,"message":"` + long + `"}`))
+	if len([]rune(got)) > 200 {
+		t.Fatalf("message 应限长，实际 %d 字符", len([]rune(got)))
+	}
+	if strings.Contains(got, "\ufffd") {
+		t.Fatal("★ 出现了替换字符（按字节截断了多字节汉字）")
+	}
+}
+
+// 没有 code/message 时明确说，而不是给一个空串。
+func TestJSONEnvelopeSaysWhenAbsent(t *testing.T) {
+	if got := jsonEnvelope([]byte(`{"data":{"x":1}}`)); !strings.Contains(got, "无 code/message") {
+		t.Fatalf("应明确说没有，实际 %q", got)
+	}
+}

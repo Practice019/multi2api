@@ -555,7 +555,14 @@ func (p *Provider) renewOne(ctx context.Context, a *Auth) error {
 		// 为什么只给键名：值里可能就有令牌，把它写进日志/状态页等于泄漏；
 		// 而"字段叫什么"恰好是排查所需的全部信息 —— 看到 refresh_token
 		// 就知道该改成哪个名字，一次就能定。
-		return fmt.Errorf("codar: 续期响应里找不到令牌字段（响应键：%s）", jsonKeyNames(raw))
+		// ★ 带出 `code` / `message` 的**值**（不只是键名）。
+		//
+		// 为什么这两个可以打：它们是上游的**错误信封**（`{"code":100003,"message":"账号已被停用"}`），
+		// 不含令牌 —— 而它们恰好是排查所需的全部信息。
+		// 我第一版只打键名，于是日志里只有「响应键：code,message」，
+		// 知道了形状却仍然不知道上游说了什么，等于半个诊断。
+		return fmt.Errorf("codar: 续期响应里找不到令牌字段（%s；响应键：%s）",
+			jsonEnvelope(raw), jsonKeyNames(raw))
 	}
 	if u, ok := jwtClaims(tok); ok {
 		if name, _ := u["username"].(string); name != "" && a.Username != "" && name != a.Username {
@@ -777,4 +784,61 @@ func jsonKeyNames(raw []byte) string {
 		out = "（空对象）"
 	}
 	return out
+}
+
+// jsonEnvelope 提取上游错误信封里的 `code` 与 `message`（**这两个值可以进日志**）。
+//
+// 判据：它们是**错误元数据**，不是凭据 —— 上游回 `{"code":100003,"message":"账号已被停用"}`
+// 时，`message` 正是排查要的那句话。而令牌字段（token / refresh_token）绝不在这里。
+//
+// 返回 `code=100003 message="账号已被停用"`；没有这两个字段时返回 `无 code/message`。
+func jsonEnvelope(raw []byte) string {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "响应非 JSON"
+	}
+	// code 可能在顶层，也可能在 data 下。
+	get := func(k string) (any, bool) {
+		if v, ok := m[k]; ok {
+			return v, true
+		}
+		if d, ok := m["data"].(map[string]any); ok {
+			if v, ok := d[k]; ok {
+				return v, true
+			}
+		}
+		return nil, false
+	}
+	var parts []string
+	if code, ok := get("code"); ok {
+		parts = append(parts, fmt.Sprintf("code=%v", code))
+	}
+	if msg, ok := get("message"); ok {
+		// ⚠ message 是上游给的人话，限长（有的上游会塞整页 HTML）。
+		parts = append(parts, fmt.Sprintf("message=%q", shortEnvelopeMsg(fmt.Sprint(msg))))
+	}
+	// error 字段（Anthropic 风格 `{"error":{"code":..,"message":..}}`）也认。
+	if e, ok := m["error"].(map[string]any); ok {
+		if code, ok := e["code"]; ok {
+			parts = append(parts, fmt.Sprintf("error.code=%v", code))
+		}
+		if msg, ok := e["message"]; ok {
+			parts = append(parts, fmt.Sprintf("error.message=%q", shortEnvelopeMsg(fmt.Sprint(msg))))
+		}
+	}
+	if len(parts) == 0 {
+		return "无 code/message"
+	}
+	return strings.Join(parts, " ")
+}
+
+// shortEnvelopeMsg 限长到 120 个 rune（按字符，不按字节 —— 中文按字节截会断字）。
+func shortEnvelopeMsg(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= 120 {
+		return s
+	}
+	return string(r[:120]) + "…"
 }
