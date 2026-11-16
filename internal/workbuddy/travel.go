@@ -8,11 +8,11 @@
 package workbuddy
 
 import (
-	"log"
 	"time"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/upstream"
 )
@@ -81,7 +81,7 @@ func (p *Provider) runTravel(trigger string) {
 func (p *Provider) travelOne(a *auth.Auth, trigger string) {
 	buddy, err := p.client.BuddyInfo(a)
 	if err != nil {
-		log.Printf("travel %s: buddy-info: %v", a.UID, err)
+		logx.Event(logx.LevelWarn, "travel", "travel.buddy_info.fail", "uid", logbuf.ShortUID(a.UID), "err", err)
 		return
 	}
 	if buddy == nil {
@@ -90,7 +90,7 @@ func (p *Provider) travelOne(a *auth.Auth, trigger string) {
 	}
 	ts, err := p.client.TravelStatus(a)
 	if err != nil {
-		log.Printf("travel %s: status: %v", a.UID, err)
+		logx.Event(logx.LevelWarn, "travel", "travel.status.fail", "uid", logbuf.ShortUID(a.UID), "err", err)
 		return
 	}
 	switch ts.State {
@@ -99,9 +99,9 @@ func (p *Provider) travelOne(a *auth.Auth, trigger string) {
 	case travelStateIdle:
 		p.travelDepart(a, ts, trigger)
 	case travelStateTraveling:
-		log.Printf("travel %s: skip (traveling record=%d)", a.UID, ts.RecordID)
+		logx.Event(logx.LevelDebug, "travel", "travel.skip", "uid", logbuf.ShortUID(a.UID), "reason", "traveling", "record_id", ts.RecordID)
 	default:
-		log.Printf("travel %s: skip (unknown state %q)", a.UID, ts.State)
+		logx.Event(logx.LevelDebug, "travel", "travel.skip", "uid", logbuf.ShortUID(a.UID), "reason", "unknown_state", "state", ts.State)
 	}
 }
 
@@ -113,28 +113,28 @@ func (p *Provider) travelDepart(a *auth.Auth, ts *upstream.TravelState, trigger 
 		return
 	}
 	if err := p.client.TravelDepart(a, TravelLocationID); err != nil {
-		log.Printf("travel %s: depart: %v", a.UID, err)
+		logx.Event(logx.LevelWarn, "travel", "travel.depart.fail", "uid", logbuf.ShortUID(a.UID), "err", err)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusFail, "派出: "+shortErr(err), 0, trigger)
 		return
 	}
-	log.Printf("travel %s: depart ok location=%d", a.UID, TravelLocationID)
+	logx.Event(logx.LevelDebug, "travel", "travel.depart.ok", "uid", logbuf.ShortUID(a.UID), "location", TravelLocationID)
 	p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusOK, "已派出", 0, trigger)
 }
 
 // travelClaim 到站领奖（必须带 record_id）。
 func (p *Provider) travelClaim(a *auth.Auth, ts *upstream.TravelState, trigger string) {
 	if ts.RecordID == 0 {
-		log.Printf("travel %s: claim skipped (arrived but no record_id)", a.UID)
+		logx.Event(logx.LevelDebug, "travel", "travel.claim.skip", "uid", logbuf.ShortUID(a.UID), "reason", "no_record_id")
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusSkip, "到站但无 record_id", 0, trigger)
 		return
 	}
 	reward, err := p.client.TravelClaim(a, ts.RecordID)
 	if err != nil {
-		log.Printf("travel %s: claim record=%d: %v", a.UID, ts.RecordID, err)
+		logx.Event(logx.LevelWarn, "travel", "travel.claim.fail", "uid", logbuf.ShortUID(a.UID), "record_id", ts.RecordID, "err", err)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusFail, "领奖: "+shortErr(err), 0, trigger)
 		return
 	}
-	log.Printf("travel %s: claim ok record=%d reward=%d", a.UID, ts.RecordID, reward)
+	logx.Event(logx.LevelDebug, "travel", "travel.claim.ok", "uid", logbuf.ShortUID(a.UID), "record_id", ts.RecordID, "reward", reward)
 	p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusOK, "已领奖", reward, trigger)
 }
 
@@ -163,14 +163,14 @@ func (p *Provider) travelAdopt(a *auth.Auth, trigger string) {
 	p.ensureAdoptPrereq(a)
 
 	if err := p.client.BuddyAgreement(a); err != nil {
-		log.Printf("travel %s: agreement: %v", a.UID, err)
+		logx.Event(logx.LevelWarn, "travel", "travel.agreement.fail", "uid", logbuf.ShortUID(a.UID), "err", err)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusFail, "协议: "+shortErr(err), 0, trigger)
 		return
 	}
 	err := p.client.BuddyFirst(a)
 	switch {
 	case err == nil:
-		log.Printf("travel %s: adopt ok (+300 credits)", a.UID)
+		logx.Event(logx.LevelDebug, "travel", "travel.adopt.ok", "uid", logbuf.ShortUID(a.UID), "reward", 300)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusOK, "已领养 (+300)", 300, trigger)
 	case upstream.IsBuddyTaskIncomplete(err):
 		// 补过上报仍不过门槛 → 这次是**真的**门槛未达
@@ -180,11 +180,11 @@ func (p *Provider) travelAdopt(a *auth.Auth, trigger string) {
 		// 改造前它意味着"我们什么都没做"，现在它意味着"前置做了，量还不够"。
 		// 历史记录的措辞据此改得更准确，便于用户判断该不该去多聊几句。
 		p.markAdoptTried(a.UID)
-		log.Printf("travel %s: adopt skipped (已补活跃上报，但仍未达 conversation 门槛，明日再试)", a.UID)
+		logx.Event(logx.LevelDebug, "travel", "travel.adopt.skip", "uid", logbuf.ShortUID(a.UID), "reason", "conversation_gate")
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusSkip,
 			"已补上报，对话门槛仍未达，明日再试", 0, trigger)
 	default:
-		log.Printf("travel %s: adopt: %v", a.UID, err)
+		logx.Event(logx.LevelWarn, "travel", "travel.adopt.fail", "uid", logbuf.ShortUID(a.UID), "err", err)
 		p.record(a.UID, checkinlog.KindTravel, checkinlog.StatusFail, "领养: "+shortErr(err), 0, trigger)
 	}
 }

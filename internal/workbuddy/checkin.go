@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 	"workbuddy2api/internal/checkinlog"
+	"workbuddy2api/internal/logbuf"
 	"workbuddy2api/internal/logx"
 	"workbuddy2api/internal/upstream"
 )
@@ -207,13 +208,21 @@ func (p *Provider) checkinOne(uid, trigger string) CheckinOutcome {
 			// 正常状态：今天已经签过了。**不打成告警** —— 它是幂等重复调用的预期结果。
 			// 单列 http 状态码：400（业务否定）与 401（凭据失效）性质完全相反，
 			// 混在一串 JSON 里排障时要人肉解析。
-			logx.Debugf("checkin", "今日已签到 uid=%s（上游 http %d 属正常业务否定，非故障）",
-				uid, statusOf(err))
+			// ⚠ 人话放进 msg=，且**必须带 `http NNN` 字样**：
+			//   既有门禁 TestCheckinAlreadyLogIsNotAlarming 要求它能一眼看出
+			//   400（业务否定）还是 401（凭据失效）—— 这两者性质完全相反。
+			logx.Eventf(logx.LevelDebug, "checkin", "checkin.already",
+				fmt.Sprintf("今日已签到（上游 http %d 属正常业务否定，非故障）", statusOf(err)),
+				"uid", logbuf.ShortUID(uid))
 			// detail 是给人在表格里看的一列，不是排障现场：这里放短句。
 			status, detail = checkinlog.StatusAlready, "今天已签到"
 		} else {
 			// 异常路径：原文照打（排障需要完整错误串）。
-			log.Printf("checkin %s: %v", uid, err)
+			// ⚠ 真故障**保留完整错误原文**（不截断）：既有门禁
+			// TestCheckinAlreadyLogIsNotAlarming 要求日志里有 `(http 401)` 与上游响应体 ——
+			// 排障要的正是那两个。我第一版用 ShortErr 截到 80 字符，被它当场抓住。
+			// 换行由 fmt 之外的行组装负责（logx 会把 \n 转义，不会把一行拆成多行）。
+			logx.Event(logx.LevelWarn, "checkin", "checkin.status.fail", "uid", logbuf.ShortUID(uid), "err", err)
 			status, detail = checkinlog.StatusFail, shortErr(err)
 		}
 	}
@@ -221,7 +230,7 @@ func (p *Provider) checkinOne(uid, trigger string) CheckinOutcome {
 
 	remain, err := p.client.UserResource(a)
 	if err != nil {
-		log.Printf("user-resource %s: %v", uid, err)
+		logx.Event(logx.LevelWarn, "checkin", "checkin.user_resource.fail", "uid", logbuf.ShortUID(uid), "err", err)
 		p.recordViaCore(uid, checkinlog.KindCheckin, res.Status, res.Detail, 0, trigger)
 		return res
 	}
@@ -428,7 +437,7 @@ func (p *Provider) keepaliveOne(uid, trigger string) CheckinOutcome {
 		return res
 	}
 	if err := p.client.RefreshToken(a); err != nil {
-		log.Printf("keepalive %s: %v", uid, err)
+		logx.Event(logx.LevelWarn, "keepalive", "keepalive.ping.fail", "uid", logbuf.ShortUID(uid), "err", err)
 		res.Status, res.Detail = checkinlog.StatusFail, shortErr(err)
 		var ue *upstream.Error
 		if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
@@ -444,7 +453,7 @@ func (p *Provider) keepaliveOne(uid, trigger string) CheckinOutcome {
 		return res
 	}
 	if err := a.SaveAtomic(); err != nil {
-		log.Printf("keepalive %s save: %v", uid, err)
+		logx.Event(logx.LevelError, "keepalive", "keepalive.persist.fail", "uid", logbuf.ShortUID(uid), "err", err)
 		res.Detail = "刷新成功但落盘失败: " + shortErr(err)
 	}
 	if p.cfg.OnRefreshSuccess != nil {

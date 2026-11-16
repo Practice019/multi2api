@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/checkinlog"
@@ -261,7 +261,10 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 		}
 	}
 	d.record(acc.UID, checkinlog.StatusOK, "", credits, trigger)
-	log.Printf("%s: 签到成功 uid=%s credits=%d", d.desc.ID, shortUID(acc.UID), credits)
+	// ⚠ 逐账号成功日志已降级为 Debug：
+	// 成功只该进 RunAll 的汇总计数。几十个账号各打一行「签到成功」就是刷屏的根源 ——
+	// 用户要的是结束之后一行「成功 42 · 失败 3」。
+	logx.Debugf(d.desc.ID, "签到成功 uid=%s credits=%d", shortUID(acc.UID), credits)
 	return Result{UID: acc.UID, Status: checkinlog.StatusOK, Credits: credits}
 }
 
@@ -280,7 +283,9 @@ func (d *Driver) RunAll(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%s: 列账号失败: %w", d.desc.ID, err)
 	}
-	// 被跳过的禁用账号数（只为打一条汇总；不记 checkinlog —— 见循环里的注释）。
+	// 本趟的聚合器：逐账号只计数，**结束时打一行**（用户 2026-11-16 的要求）。
+	batch := logx.NewBatch(d.desc.ID, "checkin.summary")
+	defer batch.Done()
 	skippedDisabled := 0
 	for _, acc := range accounts {
 		if acc.UID == "" {
@@ -295,6 +300,7 @@ func (d *Driver) RunAll(ctx context.Context) error {
 		//   跳过是**状态**，pool 里查得到（IsAutoDisabled），不在这里记。
 		if acc.Disabled {
 			skippedDisabled++
+			batch.Skip("disabled")
 			continue
 		}
 		// 每个账号一次 ctx.Err() 检查：全量任务可能扫几十个号，
@@ -302,13 +308,24 @@ func (d *Driver) RunAll(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		d.CheckinOne(ctx, acc, "sched")
+		// ★ 逐账号结果只进聚合器，**不打日志**（用户 2026-11-16：
+		// 「一个账号干什么事情之后就打印一遍 ⇒ 刷屏；要的是结束后一行统计」）。
+		res := d.CheckinOne(ctx, acc, "sched")
+		switch res.Status {
+		case checkinlog.StatusOK:
+			batch.OK()
+		case checkinlog.StatusAlready:
+			batch.Skip("already")
+		case checkinlog.StatusSkip:
+			// 跳过原因用**短码**（工程化：可聚合）。上游给的中文说明原样保留、
+			// 但限长 —— 它进 skip_reasons 的值位，太长会把一行撑开。
+			batch.Skip(skipCode(res.Detail))
+		default:
+			batch.Fail(logbuf.ShortUID(acc.UID) + " " + logx.ShortString(res.Detail, 40))
+		}
 	}
-	// 有跳过就打一条汇总 —— 否则用户看不出"为什么这个号今天没签"
-	//（静默跳过是最难查的一类问题：界面上只是"没签到"，看不出原因）。
-	if skippedDisabled > 0 {
-		log.Printf("%s: 本上游跳过 %d 个已禁用账号（不发任何上游请求）", d.desc.ID, skippedDisabled)
-	}
+	// ⚠ 原来这里另打一条「跳过 N 个已禁用」—— 现在由 batch 的汇总行
+	// 「跳过 5（已禁用×5）」一并表达，不再单独占一行。
 	return nil
 }
 
@@ -478,4 +495,23 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// skipCode 把"跳过原因"归一成**短码**（工程化日志：值要能被聚合统计）。
+//
+// 已知的几类给稳定英文码；未知的原样限长保留 —— 与其把不认识的
+// 原因塞进 "other"（那就再也查不出是什么了），不如让它以原文出现。
+func skipCode(detail string) string {
+	d := strings.TrimSpace(detail)
+	switch {
+	case d == "":
+		return "other"
+	case strings.Contains(d, "未开放"):
+		return "not_open"
+	case strings.Contains(d, "已签到"):
+		return "already"
+	case strings.Contains(d, "禁用"):
+		return "disabled"
+	}
+	return logx.ShortString(d, 24)
 }

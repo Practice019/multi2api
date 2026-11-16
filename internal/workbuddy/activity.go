@@ -18,9 +18,10 @@
 package workbuddy
 
 import (
-	"log"
 	"sync"
 	"time"
+	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/checkinlog"
@@ -76,10 +77,10 @@ func (p *Provider) ReportActivityReportedToday(uid string) bool {
 func (p *Provider) ReportActivityFor(a *auth.Auth) error {
 	err := p.client.ReportChatActivity(a, upstream.NewReportConversationID(), "")
 	if err != nil {
-		log.Printf("activity %s: report failed: %v", a.UID, err)
+		logx.Event(logx.LevelWarn, "activity", "activity.report.fail", "uid", logbuf.ShortUID(a.UID), "err", err)
 		return err
 	}
-	log.Printf("activity %s: report ok", a.UID)
+	logx.Event(logx.LevelDebug, "activity", "activity.report.ok", "uid", logbuf.ShortUID(a.UID))
 	return nil
 }
 
@@ -154,7 +155,7 @@ func (p *Provider) activityOne(a *auth.Auth, trigger string) {
 // 反过来"上报失败就不领养"会白白浪费一次机会。
 func (p *Provider) ensureAdoptPrereq(a *auth.Auth) {
 	if err := p.ReportActivityFor(a); err != nil {
-		log.Printf("travel %s: 领养前置上报失败（仍继续尝试领养）: %v", a.UID, err)
+		logx.Event(logx.LevelWarn, "travel", "travel.adopt_prereq.fail", "uid", logbuf.ShortUID(a.UID), "err", err)
 		return
 	}
 	if p.activity != nil {
