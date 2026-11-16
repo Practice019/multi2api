@@ -176,7 +176,11 @@ func ShortErr(err error) string {
 	return ShortString(err.Error(), 80)
 }
 
-// ShortString 去换行 + 截断到 n 个字符（n<=0 用 80）。
+// ShortString 去换行 + 截断到 n 个**字符**（rune，不是字节；n<=0 用 80）。
+//
+// ⚠ 必须按 rune 截：按字节截会把多字节汉字劈成半个 ——
+// 实测输出了 `掉�…` 这种东西（UTF-8 断字），比不截更难看，
+// 而且某些终端/采集器会把它当成非法字节丢掉半行。
 func ShortString(s string, n int) string {
 	if n <= 0 {
 		n = 80
@@ -184,8 +188,9 @@ func ShortString(s string, n int) string {
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.TrimSpace(s)
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n]) + "…"
 }

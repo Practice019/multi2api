@@ -508,13 +508,13 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	if len(need) == 0 {
 		return nil
 	}
-	log.Printf("trae: 后台续期开始，%d 个账号已过半寿命（统一判据：剩余 ≤ 寿命×0.5）", len(need))
+	logx.Event(logx.LevelDebug, "trae", "refresh.start", "due", len(need))
 	for _, a := range need {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err := p.client.RefreshToken(a); err != nil {
-			log.Printf("trae: 后台续期失败 uid=%s: %v", shortUID(a.UID), err)
+			logx.RefreshFail("trae", "refresh.failed", a.UID, err)
 			// 通知装配层（pool.NoteRefreshFailure）：连续失败自动禁用，
 			// 死 token 账号在账号池里可见「需重新登录」。
 			if p.onRefreshFailure != nil {

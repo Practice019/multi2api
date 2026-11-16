@@ -30,6 +30,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -212,13 +214,13 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	// ⚠ 文案随判据改（2026-11-01）：这里不再是"全量续"，而是"已过半寿命的那批"。
 	//   留着旧字会让日志与行为相反 —— 本仓在意"日志说实话"（实测：新构建跑出
 	//   这行时，读的人会以为还在无条件全量刷）。
-	log.Printf("codearts: 后台续期开始，%d 个账号（已过半寿命：剩余 ≤ 寿命×0.5）", len(need))
+	logx.Event(logx.LevelDebug, "codearts", "refresh.start", "due", len(need))
 	for _, a := range need {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if err := p.client.RefreshToken(a); err != nil {
-			log.Printf("codearts: 后台续期失败 (uid=%s): %v", a.UID, err)
+			logx.RefreshFail("codearts", "refresh.failed", a.UID, err)
 			p.holdRefresh(a, err)
 			// 通知装配层（pool.NoteRefreshFailure）：连续失败达上限自动禁用，
 			// 死 token 账号在账号池里可见「需重新登录」。
@@ -231,8 +233,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		if p.onRefreshSuccess != nil {
 			p.onRefreshSuccess(a.UID)
 		}
-		log.Printf("codearts: 后台续期成功 (uid=%s)，新过期 %s",
-			a.UID, time.Unix(a.ExpiresAt, 0).Format(time.RFC3339))
+		logx.Event(logx.LevelDebug, "codearts", "refresh.ok", "uid", logbuf.ShortUID(a.UID), "expires_at", time.Unix(a.ExpiresAt, 0).Format(time.RFC3339))
 	}
 	return nil
 }

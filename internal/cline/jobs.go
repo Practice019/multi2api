@@ -3,7 +3,6 @@ package cline
 import (
 	"context"
 	"errors"
-	"log"
 	"time"
 
 	"workbuddy2api/internal/gateway"
@@ -170,7 +169,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 				logx.Coalesce(logx.LevelWarn, "cline", "refresh:cline", "", "uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
 					shortUID(a.UID()))
 			} else {
-				log.Printf("cline: uid=%s 后台续期失败（可重试）：%v", shortUID(a.UID()), err)
+				logx.RefreshFail("cline", "refresh.failed", a.UID(), err)
 			}
 			continue
 		}
@@ -180,9 +179,9 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	if refreshed > 0 || failed > 0 {
 		// ⚠ 无变化（没续上任何号、也没失败）不配 INFO：那是"什么都没发生"。
 		if refreshed > 0 || failed > 0 {
-			logx.Coalesce(logx.LevelInfo, "cline", "renew:cline", "", "后台续期完成 —— 续期 %d，跳过 %d，失败 %d", refreshed, skipped, failed)
+			logx.RefreshSummary("cline", refreshed, skipped, failed)
 		} else {
-			logx.Debugf("cline", "后台续期完成 —— 无变化（跳过 %d）", skipped)
+			logx.Event(logx.LevelDebug, "cline", "refresh.idle", "skipped", skipped)
 		}
 	}
 	return nil

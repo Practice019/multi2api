@@ -5,6 +5,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"workbuddy2api/internal/logx"
 )
 
 // freepool.go 免费额度轮询池 —— 用户设计的实现。
@@ -371,8 +372,7 @@ func (p *Provider) StartFreePoolFill() {
 			}
 			time.Sleep(200 * time.Millisecond) // 串行 + 间隔：不冲上游
 		}
-		log.Printf("loomy: 免费额度池已填充 %d/%d 个账号"+
-			"（池子里的账号会被优先选用；池子空了才动永久额度）", okN, len(refs))
+		logx.Event(logx.LevelInfo, "loomy", "freepool.filled", "filled", okN, "total", len(refs))
 		p.drainRecheck()
 	}()
 }

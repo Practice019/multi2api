@@ -158,7 +158,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 				log.Printf("raccoon: uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
 					shortUID(a.UID()))
 			} else {
-				log.Printf("raccoon: uid=%s 后台续期失败（可重试）：%v", shortUID(a.UID()), err)
+				logx.RefreshFail("raccoon", "refresh.failed", a.UID(), err)
 			}
 			continue
 		}
@@ -168,9 +168,9 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	if refreshed > 0 || failed > 0 {
 		// ⚠ 无变化不配 INFO（同上）。
 		if refreshed > 0 || failed > 0 {
-			logx.Infof("raccoon", "后台续期完成 —— 续期 %d，跳过 %d，失败 %d", refreshed, skipped, failed)
+			logx.RefreshSummary("raccoon", refreshed, skipped, failed)
 		} else {
-			logx.Debugf("raccoon", "后台续期完成 —— 无变化（跳过 %d）", skipped)
+			logx.Event(logx.LevelDebug, "raccoon", "refresh.idle", "skipped", skipped)
 		}
 	}
 	return nil

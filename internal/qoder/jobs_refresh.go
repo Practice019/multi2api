@@ -3,7 +3,6 @@ package qoder
 import (
 	"context"
 	"errors"
-	"log"
 	"time"
 
 	"workbuddy2api/internal/gateway"
@@ -145,11 +144,11 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		}); err != nil {
 			failed++
 			if errors.Is(err, ErrRefreshExpired) {
-				logx.Coalesce(logx.LevelWarn, "qoder", "refresh:qoder", "", "uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
-					shortUID(a.UIDValue()))
+				// 终态：refresh_token 真的失效了，必须重登（与"可重试"必须分开）
+				logx.Event(logx.LevelWarn, p.productID, "refresh.expired",
+					"uid", shortUID(a.UIDValue()), "reason", "refresh_token_invalid")
 			} else {
-				log.Printf("%s: uid=%s 后台续期失败（可重试）：%v",
-					p.productID, shortUID(a.UIDValue()), err)
+				logx.RefreshFail(p.productID, "refresh.failed", a.UIDValue(), err)
 			}
 			// ⚠ 续期失败**不**影响额度（额度端点只需要 access_token），
 			// 所以那条写回在循环开头就已经做过了。
@@ -158,8 +157,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 		refreshed++
 	}
 	if refreshed > 0 || failed > 0 {
-		log.Printf("%s: 后台续期完成 —— 续期 %d，跳过 %d，失败 %d",
-			p.productID, refreshed, skipped, failed)
+		logx.RefreshSummary(p.productID, refreshed, skipped, failed)
 	}
 	return nil
 }

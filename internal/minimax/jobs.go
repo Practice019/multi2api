@@ -45,6 +45,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -181,7 +182,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 				log.Printf("minimax: uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
 					a.DisplayUID())
 			} else {
-				log.Printf("minimax: uid=%s 后台续期失败（可重试）：%v", a.DisplayUID(), err)
+				logx.RefreshFail("minimax", "refresh.failed", a.DisplayUID(), err)
 			}
 			continue
 		}
@@ -190,7 +191,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	// 只在真有动作时打一行汇总：空闲部署（全都还新鲜）不该每 10 分钟刷屏。
 	// `skipped` 不打进日志 —— 它每轮都等于账号数，是纯粹的噪音。
 	if refreshed > 0 || failed > 0 {
-		log.Printf("minimax: 后台续期 成功 %d / 失败 %d（跳过 %d）", refreshed, failed, skipped)
+		logx.RefreshSummary("minimax", refreshed, skipped, failed)
 	}
 	return nil
 }

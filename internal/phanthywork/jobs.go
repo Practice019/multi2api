@@ -35,6 +35,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -252,10 +253,9 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 				// 最常见成因是被另一个端（官方桌面端）轮换走了；下一轮可能就好了，
 				// 而且下一轮进来会先查共享凭证库（见 sharedstore.go）。
 				// 措辞必须与"号废了"明确区分，否则运维会去重登一个其实不用重登的号。
-				log.Printf("phanthywork: uid=%s 上游拒绝了续期凭据（可重试，等下一轮；"+
-					"常见成因是被另一个端轮换掉了）：%v", gateway.ShortUID(a.UID()), err)
+				logx.RefreshFail("phanthywork", "refresh.rejected", a.UID(), err)
 			default:
-				log.Printf("phanthywork: uid=%s 后台续期失败（可重试）：%v", gateway.ShortUID(a.UID()), err)
+				logx.RefreshFail("phanthywork", "refresh.failed", a.UID(), err)
 			}
 			continue
 		}
@@ -268,7 +268,7 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 	}
 	// 只在真有动作时打一行汇总：空闲部署（全都还新鲜）不该每 10 分钟刷屏。
 	if refreshed > 0 || failed > 0 {
-		log.Printf("phanthywork: 后台续期 成功 %d / 失败 %d（跳过 %d）", refreshed, failed, skipped)
+		logx.RefreshSummary("phanthywork", refreshed, skipped, failed)
 	}
 	return nil
 }
