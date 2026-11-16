@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/store"
 )
@@ -260,7 +261,7 @@ func (s *SessionStore) sqlBackend() bool {
 	}
 	if !s.imported {
 		if err := s.importLocked(); err != nil {
-			log.Printf("[account] ⚠ 会话首启导入失败（仍按 SQL 后端工作，下次调用重试）: %v", err)
+			logx.Event(logx.LevelError, "account", "sessions.import.fail", "err", err)
 		}
 	}
 	return true
@@ -318,8 +319,11 @@ func (s *SessionStore) importLocked() error {
 	}
 	s.imported = true
 	if n > 0 || skippedHard > 0 {
-		log.Printf("account: 首启导入 %d 条会话 → user_sessions 表（只导入不删除，%s 原样保留；"+
-			"因绝对上限无法表达而跳过 %d 条）", n, s.path, skippedHard)
+		// ⚠ 说明挪进 msg=（工程化日志里唯一允许中文的位置）：
+		//   「只导入不删除、原文件保留」是**安全承诺**，用户看到这条时要能立刻确认它。
+		logx.Eventf(logx.LevelInfo, "account", "sessions.imported",
+			"只导入不删除，原文件原样保留；因绝对上限无法表达而跳过的条目已计入 skipped",
+			"imported", n, "skipped", skippedHard, "source", s.path)
 	}
 	return nil
 }

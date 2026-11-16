@@ -410,8 +410,7 @@ func keepaliveSummary(trigger string, refreshed, halfLife, otherSkipped, failed 
 		return ""
 	}
 
-	return fmt.Sprintf("workbuddy: 后台续期完成 —— 续期 %d，跳过 %d（其中寿命未过半 %d），失败 %d",
-		refreshed, halfLife+otherSkipped, halfLife, failed)
+	return logx.RefreshSummaryLine("workbuddy", refreshed, halfLife+otherSkipped, failed, "half_life_skipped", halfLife)
 }
 
 // RunKeepaliveFor 单账号 token 刷新（管理台入口）。

@@ -123,8 +123,21 @@ func RefreshSummary(scope string, refreshed, skipped, failed int, extra ...any) 
 	if failed > 0 {
 		lvl = LevelWarn
 	}
+	// ⚠ 与 RefreshSummaryLine 共用同一份正文生成 —— 两条路径的形态不会漂移。
+	write(Line(lvl, scope, RefreshSummaryLine(scope, refreshed, skipped, failed, extra...)))
+}
+
+// RefreshSummaryLine 与 RefreshSummary 内容相同，但**不写日志**，只返回正文。
+//
+// 用途：有些调用方持有一个 `summary() string` 的函数（如 workbuddy 的
+// keepaliveSummary），由上层决定打不打（manual 触发时不打）。
+// 那种地方需要"生成文本"而不是"直接打"，但又必须与其它包的形态完全一致。
+//
+// ⚠ 形态必须与 RefreshSummary 一模一样 —— 两者共用这个函数生成正文，
+// 所以不可能漂移。
+func RefreshSummaryLine(scope string, refreshed, skipped, failed int, extra ...any) string {
 	kv := make([]any, 0, 8+len(extra))
 	kv = append(kv, "refreshed", refreshed, "skipped", skipped, "failed", failed)
 	kv = append(kv, extra...)
-	Event(lvl, scope, "refresh.summary", kv...)
+	return eventLine("refresh.summary", kv)
 }

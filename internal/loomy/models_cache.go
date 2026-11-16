@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/gateway"
 )
@@ -376,11 +377,10 @@ func (p *Provider) StartCatalogPrewarm() {
 				defer cancel()
 				snap, err := p.RefreshCatalog(ctx)
 				if err != nil {
-					log.Printf("loomy: 目录预热失败（沿用旧快照 %d 个模型）: %v", snap.Len(), err)
+					logx.Event(logx.LevelWarn, "loomy", "catalog.warmup.fail", "kept_models", snap.Len(), "err", err)
 					return
 				}
-				log.Printf("loomy: 目录预热完成 %d 个模型（来源 %d 个账号，失败 %d）",
-					snap.Len(), len(snap.Sources), len(snap.FailedUIDs))
+				logx.Event(logx.LevelInfo, "loomy", "catalog.warmup.done", "models", snap.Len(), "sources", len(snap.Sources), "failed", len(snap.FailedUIDs))
 			}
 
 			refresh() // 启动即刷

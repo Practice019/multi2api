@@ -16,6 +16,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"workbuddy2api/internal/logbuf"
 
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
@@ -257,7 +258,7 @@ func (p *Provider) RefreshQuota(uid string) (gateway.QuotaView, bool) {
 	defer cancel()
 	remain, err := p.client.UserEntUsage(ctx, a)
 	if err != nil {
-		logx.Coalesce(logx.LevelWarn, "trae", "quota:trae", "", "额度刷新失败 uid=%s: %v（显示为未知）", shortUID(uid), err)
+		logx.QuotaFail("trae", uid, err)
 		return gateway.UnknownQuota(), true
 	}
 	if remain < 0 {
@@ -397,7 +398,7 @@ func (p *Provider) runCheckin(ctx context.Context) error {
 		}
 		checkedIn, credits, extra, enable, serr := p.client.CheckinStatus(ctx, a)
 		if serr != nil {
-			logx.Coalesce(logx.LevelWarn, "trae", "state:trae", "", "签到状态查询失败 uid=%s: %v", shortUID(a.UID), serr)
+			logx.Event(logx.LevelWarn, "trae", "checkin.state.fail", "uid", logbuf.ShortUID(a.UID), "err", serr)
 			p.recordCheckin(a.UID, checkinlog.StatusFail, shortErr(serr), 0, "sched")
 			continue
 		}

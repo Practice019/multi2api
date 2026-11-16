@@ -1,7 +1,7 @@
 {
   "./cmd/codearts-doctor": 2,
-  "./cmd/server": 210,
-  "./internal/account": 23,
+  "./cmd/server": 202,
+  "./internal/account": 21,
   "./internal/admin": 62,
   "./internal/apikey": 10,
   "./internal/auditlog": 1,
@@ -14,7 +14,7 @@
   "./internal/groupstore": 2,
   "./internal/lobsterai": 4,
   "./internal/logbuf": 1,
-  "./internal/loomy": 38,
+  "./internal/loomy": 36,
   "./internal/minimax": 1,
   "./internal/monkeycode": 2,
   "./internal/phanthywork": 10,

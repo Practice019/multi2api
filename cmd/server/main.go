@@ -1619,9 +1619,9 @@ func main() {
 		t0 := time.Now()
 		days, berr := sqlstore.BackfillLogDaily()
 		if berr != nil {
-			log.Printf("日聚合回填失败（热力图仍可读 logfile 回落）: %v", berr)
+			logx.Event(logx.LevelWarn, "boot", "sql.backfill.fail", "err", berr)
 		} else if days > 0 {
-			log.Printf("日聚合回填完成：%d 天，耗时 %s", days, time.Since(t0).Round(time.Millisecond))
+			logx.Event(logx.LevelInfo, "boot", "sql.backfill.done", "days", days, "elapsed_ms", time.Since(t0))
 		}
 		keep := cfg.RequestLogKeepDays
 		if keep < 7 {
@@ -2100,10 +2100,10 @@ func main() {
 	reqDumpDir := filepath.Join(filepath.Dir(cfg.RequestLogPath), "failed-req")
 	reqDump, derr := logbuf.NewReqDump(reqDumpDir, 0, 0)
 	if derr != nil {
-		log.Printf("失败请求体落盘不可用（不影响服务）: %v", derr)
+		logx.Event(logx.LevelWarn, "boot", "reqdump.unavailable", "err", derr)
 		reqDump = nil
 	} else if reqDump != nil {
-		log.Printf("失败请求体落盘: %s（最多 200 个 / 32 MiB，按天清理）", reqDumpDir)
+		logx.Event(logx.LevelInfo, "boot", "reqdump.ready", "dir", reqDumpDir, "max_files", 200, "max_bytes", 32*1024*1024)
 	}
 
 	h := server.NewHandler(server.Config{
@@ -2351,12 +2351,11 @@ func main() {
 	{
 		total, healthy, cooling, disabled, _ := p.CountsDetailed()
 		logx.EndBoot()
-		logx.Infof("boot", "账号池 %d（可用 %d / 冷却 %d / 禁用 %d）· 上游与开关详情见 -log-level debug",
-			total, healthy, cooling, disabled)
+		logx.Event(logx.LevelInfo, "boot", "pool.ready",
+			"accounts", total, "available", healthy, "cooling", cooling, "disabled", disabled)
 	}
-	log.Printf("%s 已启动", server.ServiceName)
-	log.Printf("  控制台   %s/ui", uiOrigin(cfg.Listen))
-	log.Printf("  API 基址 %s/v1", uiOrigin(cfg.Listen))
+	logx.Event(logx.LevelInfo, "boot", "app.started", "service", server.ServiceName)
+	logx.Event(logx.LevelInfo, "boot", "app.endpoints", "console", uiOrigin(cfg.Listen)+"/ui", "api_base", uiOrigin(cfg.Listen)+"/v1")
 	for _, extra := range extraOrigins(cfg.Listen) {
 		log.Printf("  局域网   %s/ui   ← 从别的机器打开时要在地址后加 ?token=<管理令牌>", extra)
 	}

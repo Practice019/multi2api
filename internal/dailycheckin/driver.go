@@ -227,7 +227,7 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 		//   原来这里无条件先打一条"签到状态查询失败"，同一个事件在控制台上出现两行。
 		//   一条事只说一次；非凭据类（网络抖动等）仍由这里报。
 		if !CredentialError(err) {
-			logx.Coalesce(logx.LevelWarn, d.desc.ID, "state:"+d.desc.ID, "", "签到状态查询失败 uid=%s: %v", shortUID(acc.UID), err)
+			logx.Event(logx.LevelWarn, d.desc.ID, "checkin.state.fail", "uid", logbuf.ShortUID(acc.UID), "err", err)
 		}
 		// ★ T-431：只有**凭据类**错误才上报禁用（网络抖动不报 —— 那会误杀好号）。
 		d.reportCredentialFail(acc.UID, err)

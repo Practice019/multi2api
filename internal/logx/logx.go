@@ -280,8 +280,14 @@ func Pipe(lvl Level) io.Writer {
 type PrintfWriter struct{ lvl Level }
 
 // Printf 实现 GORM 的 logger.Writer 接口。
+//
+// ⚠ GORM 的消息**是多行的**（实测一次 12 行：种类标记 + 耗时/行数 + 换行排版的 SQL）。
+// 原样透传就是那 12 行。这里统一压成一行结构化事件（见 sqlcollapse.go）。
 func (p PrintfWriter) Printf(format string, args ...any) {
-	Logf(p.lvl, "sql", fmt.Sprintf(format, args...))
+	if !Enabled(p.lvl) {
+		return
+	}
+	write(Line(p.lvl, "sql", collapseSQL(fmt.Sprintf(format, args...))))
 }
 
 // SQLWriter 返回给 gorm logger.New 用的 writer（见 internal/store/db.go 的 gormConfig）。
