@@ -21,6 +21,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"workbuddy2api/internal/logbuf"
+	"workbuddy2api/internal/logx"
 
 	"workbuddy2api/internal/auth"
 )
@@ -618,14 +620,14 @@ func (p *Pool) RestoreFromSnapshot() {
 	raw, ok := store.LoadState()
 	if !ok {
 		if localErr == nil {
-			log.Printf("pool: 恢复来源=本地 state.json（无 Redis 快照）")
+			logx.Event(logx.LevelInfo, "pool", "pool.restore", "source", "local_state", "reason", "no_redis_snapshot")
 		}
 		return
 	}
 	var snap snapshot
 	if json.Unmarshal(raw, &snap) != nil || snap.SavedAt.IsZero() {
 		// 快照无 savedAt：无法比较新旧，本地优先。
-		log.Printf("pool: 恢复来源=本地 state.json（Redis 快照无 saved_at）")
+		logx.Event(logx.LevelInfo, "pool", "pool.restore", "source", "local_state", "reason", "snapshot_missing_saved_at")
 		return
 	}
 	if localErr == nil && !localInfo.ModTime().After(snap.SavedAt) {
@@ -634,10 +636,10 @@ func (p *Pool) RestoreFromSnapshot() {
 		p.applySnapshotLocked(snap)
 		p.mu.Unlock()
 		p.dirty.Store(true)
-		log.Printf("pool: 恢复来源=Redis 快照 (saved_at=%s)", snap.SavedAt.Format(time.RFC3339))
+		logx.Event(logx.LevelInfo, "pool", "pool.restore", "source", "redis_snapshot", "saved_at", snap.SavedAt.Format(time.RFC3339))
 		return
 	}
-	log.Printf("pool: 恢复来源=本地 state.json（较新于 Redis 快照 %s）", snap.SavedAt.Format(time.RFC3339))
+	logx.Event(logx.LevelInfo, "pool", "pool.restore", "source", "local_state", "reason", "newer_than_snapshot", "snapshot_saved_at", snap.SavedAt.Format(time.RFC3339))
 }
 
 // Acquire 为账号占一个在途名额；false 表示该账号已达上限（或不存在）。
@@ -1281,8 +1283,11 @@ func (p *Pool) pickForTier(provider string, tried map[string]bool, model string,
 	if len(cands) == 0 && len(staleSkipped) > 0 {
 		if !p.staleWarned {
 			p.staleWarned = true
-			log.Printf("pool: ⚠ 全部候选的额度都太旧（%d 个）⇒ 已回退为不排除 —— "+
-				"额度刷新可能滞后；本次选号仍会给号（宁可额度旧，也不要 503）", len(staleSkipped))
+			// ⚠ 只告警一次（staleWarned 门闩在这个 if 外面），所以用 Event 而不是 Coalesce：
+			// 这里天然不会刷屏，而 Event 保证它**立刻**可见（Coalesce 要等窗口 flush）。
+			logx.Eventf(logx.LevelWarn, "pool", "pool.quota.stale_fallback",
+				"全部候选额度都太旧，已回退为不排除（宁可额度旧，也不要 503）",
+				"stale_accounts", len(staleSkipped))
 		}
 		cands = staleSkipped
 	}
@@ -1779,7 +1784,7 @@ func (p *Pool) SetQuota(uid string, q QuotaView) {
 	}
 	// ⚠ 必须在**放锁之后**调：RecordAutoDisableSuccess 自己要取 p.mu。
 	if p.RecordAutoDisableSuccess(uid) {
-		log.Printf("pool: 额度已恢复，解除自动禁用 uid=%s（可用 %d）", uid, q.Effective())
+		logx.Event(logx.LevelInfo, "pool", "pool.autodisable.cleared", "uid", logbuf.ShortUID(uid), "available", q.Effective())
 	}
 }
 
@@ -2892,7 +2897,7 @@ func (p *Pool) saveState(sf stateFile, fp string, store StoreSnapshotter) error 
 	}
 	if p.persistFails > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
-		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
+		logx.Event(logx.LevelInfo, "pool", "pool.persist.recovered", "prior_failures", p.persistFails)
 		p.persistFails = 0
 	}
 
@@ -2925,9 +2930,9 @@ func writeStateFile(fp string, raw []byte) error {
 // "失败仅打日志、不向上抛"范式对齐，但落盘失败对运维是盲区，故多一层节流（notification）。
 func (p *Pool) notePersistFail(err error) {
 	if p.persistFails == 0 {
-		log.Printf("pool: state.json 落盘失败: %v", err)
+		logx.Event(logx.LevelError, "pool", "pool.persist.fail", "err", err)
 	} else if p.persistFails%persistLogEvery == 0 {
-		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", p.persistFails, err)
+		logx.Event(logx.LevelError, "pool", "pool.persist.fail", "consecutive", p.persistFails, "err", err)
 	}
 	p.persistFails++
 }

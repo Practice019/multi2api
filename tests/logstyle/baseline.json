@@ -18,7 +18,6 @@
   "./internal/minimax": 1,
   "./internal/monkeycode": 2,
   "./internal/phanthywork": 10,
-  "./internal/pool": 9,
   "./internal/qoder": 4,
   "./internal/raccoon": 4,
   "./internal/redisstore": 4,
