@@ -295,12 +295,16 @@ func TestPanelWarmupLogLineOmitsEmptyFirstError(t *testing.T) {
 	pl := panelPlan{todoT: 0, todoI: 0, expT: 44, expI: 44}
 
 	clean := panelWarmupLogLine(pl, 44, 12, "")
-	if strings.Contains(clean, "错") {
+	if strings.Contains(clean, "err=") {
 		t.Errorf("本轮无错时不该出现任何错误段（那是噪音，用户报过两次）：\n%s", clean)
 	}
 	// 四个数字都必须在一行里（运维只看这四个）—— 用**字段名+值**成对断言，
 	// 免得将来有人把某段删了而断言仍然绿。
-	for _, want := range []string{"t0/i0", "t44/i44", "号44", "发起12"} {
+	//
+	// ⚠ 2026-11-16 形态改了（`t0/i0` → `todo=0/0`，`号44` → `accounts=44`），
+	//   但这四条**意图**没变：每一项都得在，且必须带字段名。
+	//   带字段名正是新规范要的（机器可聚合），比旧的 `号44` 更强。
+	for _, want := range []string{"todo=0/0", "expired=44/44", "accounts=44", "started=12"} {
 		if !strings.Contains(clean, want) {
 			t.Errorf("日志缺少数字段 %q：\n%s", want, clean)
 		}
@@ -309,7 +313,7 @@ func TestPanelWarmupLogLineOmitsEmptyFirstError(t *testing.T) {
 	// 真机上那条长错误：必须**截短**成「码 + 短语」，而不是原样贴。
 	realErr := "loomy: 积分接口 /onboarding/tasks 返回 100002: 登录已失效，请重新登录"
 	withErr := panelWarmupLogLine(pl, 44, 12, realErr)
-	if !strings.Contains(withErr, "错 100002 登录已失效") {
+	if !strings.Contains(withErr, `err="100002 登录已失效"`) {
 		t.Errorf("有错时要给出「码 + 短语」（排障够用且不刷屏）：\n%s", withErr)
 	}
 	if strings.Contains(withErr, "请重新登录") {

@@ -44,8 +44,8 @@ package raccoon
 import (
 	"context"
 	"errors"
-	"log"
 	"time"
+	"workbuddy2api/internal/logbuf"
 
 	"workbuddy2api/internal/gateway"
 	"workbuddy2api/internal/logx"
@@ -155,8 +155,9 @@ func (p *Provider) runRefresh(ctx context.Context) error {
 			// 终态（refresh_token 也失效）与可重试分开报，
 			// 用户才知道该不该去重新登录。
 			if isRefreshExpired(err) {
-				log.Printf("raccoon: uid=%s refresh_token 已失效，无法自动续期 —— 请重新登录/导入",
-					shortUID(a.UID()))
+				// 终态：必须重登。INFO 打这个会让人以为是流水（实测就是这样）。
+				logx.Event(logx.LevelWarn, "raccoon", "refresh.expired",
+					"uid", logbuf.ShortUID(a.UID()), "reason", "refresh_token_invalid")
 			} else {
 				logx.RefreshFail("raccoon", "refresh.failed", a.UID(), err)
 			}

@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"workbuddy2api/internal/logbuf"
 
 	"workbuddy2api/internal/checkinlog"
 	"workbuddy2api/internal/gateway"
@@ -163,7 +164,11 @@ func (p *Provider) refreshQuotaDetailCtx(ctx context.Context, uid string) (agent
 	raw, status, cerr := p.callJSON(ctx, http.MethodPost, p.payBase+"/v1/agent/balance", a,
 		map[string]any{"username": a.UID})
 	if cerr != nil || status != http.StatusOK {
-		log.Printf("codar: 余额查询失败 uid=%q status=%d err=%v body=%s", uid, status, cerr, truncateStr(string(raw), 200))
+		// ⚠ 级别 WARN（它是失败）、uid 缩写（完整 uid 一行占掉三分之一宽度）、
+		//   结构化（用户实测这两条并列打 INFO，看着像正常流水）。
+		logx.Event(logx.LevelWarn, "codar", "quota.balance.fail",
+			"uid", logbuf.ShortUID(uid), "status", status, "err", cerr,
+			"body", truncateStr(string(raw), 120))
 		return 0, 0, 0, false, false
 	}
 	var bal struct {

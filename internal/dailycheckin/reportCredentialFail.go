@@ -16,8 +16,7 @@ func (d *Driver) reportCredentialFail(uid string, err error) {
 		return
 	}
 	logx.Coalesce(logx.LevelWarn, d.desc.ID, "cred:"+d.desc.ID, "",
-		"签到凭据失效 uid=%s：%v（按设计上报，由上游侧决定是否自动禁用）",
-		shortUID(uid), err)
+		"checkin.credential_invalid uid=%s err=%s", shortUID(uid), logx.ShortErr(err))
 	if d.onCredFail != nil {
 		d.onCredFail(uid, err)
 	}

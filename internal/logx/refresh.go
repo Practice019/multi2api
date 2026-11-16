@@ -78,7 +78,11 @@ func ClassifyRefreshReason(errText string) string {
 		return RefreshReasonExpired
 	case strings.Contains(s, "timeout") || strings.Contains(s, "deadline") ||
 		strings.Contains(s, "connection refused") || strings.Contains(s, "no such host") ||
-		strings.Contains(s, "network"):
+		strings.Contains(s, "network") || strings.Contains(s, " eof") ||
+		strings.HasSuffix(s, "eof") || strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") || strings.Contains(s, "tls handshake"):
+		// ⚠ `EOF` 必须算网络类：实测 `Post "https://…": EOF` 被归成 other，
+		//   于是日志写 reason=other，运维完全看不出是网络断了还是凭据坏了。
 		return RefreshReasonNetwork
 	case strings.Contains(s, "http 5") || strings.Contains(s, " 502") ||
 		strings.Contains(s, " 503") || strings.Contains(s, " 504"):

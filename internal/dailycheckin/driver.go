@@ -249,7 +249,16 @@ func (d *Driver) CheckinOne(ctx context.Context, acc Account, trigger string) Re
 	credits, actionRequired, cerr := d.up.Claim(ctx, acc)
 	if cerr != nil {
 		d.record(acc.UID, checkinlog.StatusFail, shortErr(cerr), 0, trigger)
-		logx.Coalesce(logx.LevelWarn, d.desc.ID, "failsign:"+d.desc.ID, "", "签到失败 uid=%s: %v", shortUID(acc.UID), cerr)
+		// ★ 凭据类错误**只由 reportCredentialFail 说一句**（见它上面的注释）。
+		//
+		// 实测 bug（2026-11-16 的启动日志）：lobsterai 一个 401 打了两条 ——
+		//   签到失败 uid=103668: 领取 HTTP 401: {...}
+		//   签到凭据失效 uid=103668：领取 HTTP 401: {...}（按设计上报…）
+		// 同一件事两行，且第二行才是可行动的那条。所以这里对凭据类闭嘴。
+		if !CredentialError(cerr) {
+			logx.Coalesce(logx.LevelWarn, d.desc.ID, "failsign:"+d.desc.ID, "",
+				"checkin.fail uid=%s err=%s", shortUID(acc.UID), logx.ShortErr(cerr))
+		}
 		// ★ T-431：同上 —— 只上报凭据类（lobsterai 实测就是这里的 401「请先登录」）。
 		d.reportCredentialFail(acc.UID, cerr)
 		return Result{

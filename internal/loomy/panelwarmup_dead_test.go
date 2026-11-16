@@ -147,18 +147,23 @@ func TestPanelWarmupNetworkFailureIsNotDead(t *testing.T) {
 	}
 }
 
-// TestPanelWarmupLogShowsDeadCount `停 N` 只在真有死号时出现（与"错误段"同一条纪律）。
+// TestPanelWarmupLogShowsDeadCount `stopped=` 只在真有死号时出现（与"错误段"同一条纪律）。
+//
+// ⚠ 2026-11-16 形态改了（`停 N` → `stopped=N`），但两条意图没变：
+//
+//	① 没有死号时**完全不出现**（否则是噪音）② 有死号时**必须**出现
+//	   （否则分不清"号都补完了"与"一半号被静默了"）。
 func TestPanelWarmupLogShowsDeadCount(t *testing.T) {
 	clean := panelWarmupLogLine(panelPlan{todoT: 0, todoI: 0, expT: 6, expI: 18}, 44, 12, "")
-	if strings.Contains(clean, "停") {
-		t.Errorf("没有死号时不该出现 `停 N`（噪音）：\n%s", clean)
+	if strings.Contains(clean, "stopped=") {
+		t.Errorf("没有死号时不该出现 `stopped=`（噪音）：\n%s", clean)
 	}
 	withDead := panelWarmupLogLine(panelPlan{expT: 6, expI: 18, dead: 2}, 44, 12, "")
-	if !strings.Contains(withDead, "停2") {
+	if !strings.Contains(withDead, "stopped=2") {
 		t.Errorf("有死号时必须报出来（否则分不清\"补完了\"与\"被静默了\"）：\n%s", withDead)
 	}
 	if n := utf8.RuneCountInString(withDead); n > 100 {
-		t.Errorf("带 `停 N` 仍须 ≤100 字，实际 %d", n)
+		t.Errorf("带 `stopped=` 仍须 ≤100 字，实际 %d", n)
 	}
 }
 

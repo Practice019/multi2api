@@ -66,9 +66,14 @@ func TestClassifyRefreshReason(t *testing.T) {
 		"token expired":                        RefreshReasonExpired,
 		"dial tcp: i/o timeout":                RefreshReasonNetwork,
 		"no such host":                         RefreshReasonNetwork,
-		"upstream HTTP 502":                    RefreshReasonUpstream,
-		"":                                     RefreshReasonOther,
-		"某种谁也没见过的新错误":                          RefreshReasonOther,
+		// ⚠ 实测漏网：`Post "https://…": EOF` 被归成 other，
+		//   于是日志写 reason=other，运维看不出是网络断了还是凭据坏了。
+		`Post "https://api.kuaipaper.com/v1/token/refresh": EOF`: RefreshReasonNetwork,
+		"read tcp: connection reset by peer":                     RefreshReasonNetwork,
+		"tls handshake failure":                                  RefreshReasonNetwork,
+		"upstream HTTP 502":                                      RefreshReasonUpstream,
+		"":                                                       RefreshReasonOther,
+		"某种谁也没见过的新错误":                                            RefreshReasonOther,
 	}
 	for in, want := range cases {
 		if got := ClassifyRefreshReason(in); got != want {

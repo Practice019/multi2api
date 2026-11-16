@@ -745,16 +745,21 @@ func panelWarmupLogLine(pl panelPlan, accts, done int, firstErr string) string {
 	// ⚠⚠ **保留 `loomy: ` 这个前缀**（2026-11-13 实测）：它不是装饰 —— `logx.scopePrefix`
 	//   （internal/logx/logx.go:246）靠 `^xxx: ` 抽 scope 让人能 grep 日志；去掉冒号后
 	//   这一行会被判成 scope=app，**静默**降级（测试当场抓到：TestPipeScopeAndLevel 红）。
-	line := fmt.Sprintf("loomy: 预热 · 未缓存 t%d/i%d · 过期 t%d/i%d · 号%d",
+	//
+	// ⚠ 2026-11-16 用户要求「所有日志都写成 事件名 + 蛇形字段」⇒ 正文从
+	//   `预热 · 未缓存 t0/i0 · 过期 t1/i1 · 号44 · 停7 · 发起2 · 错 …`
+	//   改成 `panel_warmup todo=0/0 expired=1/1 accounts=44 stopped=7 started=2 err="…"`。
+	//   口语化的 `号` / `发起` / `错` 三个字被砍掉 —— 它们是句子成分，不是数据。
+	line := fmt.Sprintf("loomy: panel_warmup todo=%d/%d expired=%d/%d accounts=%d",
 		pl.todoT, pl.todoI, pl.expT, pl.expI, accts)
-	// ⚠ `停 N` 只在**真有死号**时出现（2026-11-13）：它是"这批号在静默期里"的唯一可见信号，
-	//   没有它就分不清"号都补完了"与"一半号被静默了"。数字形态，与整行口径一致。
+	// ⚠ `stopped=` 只在**真有死号**时出现（2026-11-13）：它是"这批号在静默期里"的唯一可见信号，
+	//   没有它就分不清"号都补完了"与"一半号被静默了"。
 	if pl.dead > 0 {
-		line += fmt.Sprintf(" · 停%d", pl.dead)
+		line += fmt.Sprintf(" stopped=%d", pl.dead)
 	}
-	line += fmt.Sprintf(" · 发起%d", done)
+	line += fmt.Sprintf(" started=%d", done)
 	if s := panelWarmupErrShort(firstErr); s != "" {
-		line += " · 错 " + s
+		line += fmt.Sprintf(" err=%q", s)
 	}
 	return line
 }
