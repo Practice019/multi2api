@@ -21,6 +21,7 @@ package codar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -539,6 +540,24 @@ func (p *Provider) renewOne(ctx context.Context, a *Auth) error {
 	if strings.Contains(strings.ToLower(string(raw)), "not close to expiration") {
 		return nil
 	}
+	// ★ 上游的**错误信封**：`{"code":<非0>,"message":"…"}`。
+	//
+	// 实测：HTTP **200** + `{"code":401,"message":"Token has expired"}` ——
+	// 状态码是 200，但内容是一次**拒绝**。
+	//
+	// 不先认它，就会一路走到下面"找不到令牌字段"，于是日志报：
+	//   codar: 续期响应里找不到令牌字段（code=401 message="Token has expired"；响应键：code,message）
+	// —— 把「上游明确说令牌过期了」报成「我们的解析出错」，**指向完全错误的方向**。
+	//
+	// 判据只用语义（code / message），不锁 HTTP 状态码：上游若改成 400/403 携带
+	// 同样的信封，这里照样认得出。
+	if code, msg, isErr := codarErrEnvelope(raw); isErr {
+		if isExpiredEnvelope(code, msg) {
+			// 终态：这枚 refresh_token 已死，必须重新登录。措辞要让人**立刻知道该做什么**。
+			return fmt.Errorf("%w（上游 %d：%s）", ErrRefreshTokenExpired, code, msg)
+		}
+		return fmt.Errorf("codar: 续期被上游拒绝（上游 %d：%s）", code, msg)
+	}
 	if status != http.StatusOK {
 		return fmt.Errorf("codar: 续期返回 HTTP %d（%s）", status, truncateStr(string(raw), 200))
 	}
@@ -846,4 +865,84 @@ func shortEnvelopeMsg(s string) string {
 		return s
 	}
 	return string(r[:120]) + "…"
+}
+
+// ErrRefreshTokenExpired codar 的 refresh_token 已失效（终态，需重新登录）。
+//
+// 为什么要有这个哨兵：调用方（Jobs 的 Run / 状态页）要能区分
+//
+//	· 「需要人去重登」—— 终态，重试无用
+//	· 「网络抖/上游 5xx」—— 可重试
+//
+// 混成一条字符串会让人对着一枚死令牌反复等下一轮。
+var ErrRefreshTokenExpired = errors.New("codar: refresh_token 已失效，需在官方端重新登录")
+
+// codarErrEnvelope 识别上游的**错误信封** `{"code":<非0>,"message":"…"}`。
+//
+// 返回 (code, message, 是否为错误信封)。`code == 0` 或缺失视为**不是**错误信封
+// —— 正常的成功响应里没有 `code` 字段。
+//
+// ⚠ message 只取**短形态**：它进错误串（进而进状态页与日志），
+// 上游有时会塞整页 HTML 进来。
+func codarErrEnvelope(raw []byte) (int, string, bool) {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return 0, "", false
+	}
+	get := func(k string) (any, bool) {
+		if v, ok := m[k]; ok {
+			return v, true
+		}
+		if d, ok := m["data"].(map[string]any); ok {
+			if v, ok := d[k]; ok {
+				return v, true
+			}
+		}
+		return nil, false
+	}
+	// code 可能是数字也可能是字符串。
+	var code int
+	if v, ok := get("code"); ok {
+		switch x := v.(type) {
+		case float64:
+			code = int(x)
+		case string:
+			_, _ = fmt.Sscanf(x, "%d", &code)
+		}
+	}
+	msg := ""
+	if v, ok := get("message"); ok {
+		msg = shortEnvelopeMsg(fmt.Sprint(v))
+	}
+	// ⚠ 上游把 `code` **当 HTTP 状态码用**：`code=200` 是成功，`code=401` 是拒绝。
+	//
+	// 我第一版写成「code != 0 就算错误信封」，于是 `{"code":200,"message":"ok"}` 这种
+	// **成功**响应被判成拒绝 —— 两条既有判据当场红了（续期永远失败）。
+	// 「有个 code 字段」不等于「被拒绝」：判据必须是**区间的语义**，不是字段的存在性。
+	switch {
+	case code == 0:
+		return 0, msg, false // 没有信封
+	case code >= 200 && code < 300:
+		return code, msg, false // 成功信封
+	}
+	return code, msg, true
+}
+
+// isExpiredEnvelope 这个错误信封是否表示「令牌已失效」（终态）。
+//
+// 判据三条并列（任一成立）：
+//   - code 是 401 / 403（鉴权类）
+//   - message 含 expired / 过期 / 失效
+//   - message 含 re-login / 重新登录 / unauthorized
+func isExpiredEnvelope(code int, msg string) bool {
+	if code == 401 || code == 403 {
+		return true
+	}
+	s := strings.ToLower(msg)
+	for _, kw := range []string{"expired", "过期", "失效", "re-login", "relogin", "重新登录", "unauthorized", "unauthenticated"} {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	return false
 }
