@@ -322,7 +322,7 @@ func (s *SessionStore) importLocked() error {
 		// ⚠ 说明挪进 msg=（工程化日志里唯一允许中文的位置）：
 		//   「只导入不删除、原文件保留」是**安全承诺**，用户看到这条时要能立刻确认它。
 		logx.Eventf(logx.LevelInfo, "account", "sessions.imported",
-			"只导入不删除，原文件原样保留；因绝对上限无法表达而跳过的条目已计入 skipped",
+			"只导入不删除，原文件原样保留",
 			"imported", n, "skipped", skippedHard, "source", s.path)
 	}
 	return nil

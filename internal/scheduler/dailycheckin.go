@@ -255,7 +255,8 @@ func NewDailyCheckinJob(reg *gateway.Registry, lg *checkinlog.Log, rec DisableRe
 				lvl = logx.LevelWarn
 			}
 			logx.Eventf(lvl, "checkin", "checkin.round",
-				"跳过今天已扫过的 "+itoa(len(skipped))+" 个，覆盖 "+itoa(seen)+" 个可签到上游",
+				// 数字已在 skipped= / eligible= 字段里 ⇒ msg 不再重复一遍。
+				"覆盖可签到上游（跳过今天已扫过的）",
 				"scanned", len(called), "skipped", len(skipped), "eligible", seen, "failed", failed)
 			return nil
 		},

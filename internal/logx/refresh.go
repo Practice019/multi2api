@@ -109,7 +109,9 @@ func RefreshFail(scope, event, uid string, err error) {
 	if reason == RefreshReasonOther || reason == RefreshReasonUpstream {
 		kv = append(kv, "err", ShortErr(err))
 	}
-	Event(LevelWarn, scope, event, kv...)
+	// ★ 用户要求「多账号 log 不要刷屏，一行总结即可」⇒ 按 (scope,event,reason) 折叠。
+	//   实测 phanthywork 5 个号全 rotated_elsewhere：改造前 5 行，现在 1 行 `（×5）`。
+	Coalesce(LevelWarn, scope, event+":"+scope+":"+reason, "", "%s", eventLine(event, kv))
 }
 
 // RefreshSummary 一轮续期的**汇总行**。

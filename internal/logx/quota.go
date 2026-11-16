@@ -82,7 +82,15 @@ func QuotaFail(scope, uid string, err error) {
 	if reason == QuotaReasonOther {
 		kv = append(kv, "err", ShortErr(err))
 	}
-	Event(LevelWarn, scope, "quota.fail", kv...)
+	// ★ 2026-11-16 用户要求「多账号 log 不要刷屏，一行总结即可」。
+	//
+	// 走 Coalesce 而不是直接 Event：同一 provider 的同一原因在窗口内**折成一行**
+	// 并带计数。实测 loomy 一次 6 个号全 upstream_rejected ⇒ 改造前 6 行，
+	// 现在是 1 行 `（×6 · 时间跨度）`。
+	//
+	// key = scope + event + reason ⇒ 不同原因各自折叠（原因不会丢），
+	// 同原因无论多少号都只占一行。
+	Coalesce(LevelWarn, scope, "quota.fail:"+scope+":"+reason, "", "%s", eventLine("quota.fail", kv))
 }
 
 // QuotaNoBalance 上游成功应答但**没有可用余额**（形状异常，不算上游故障）。
@@ -90,7 +98,9 @@ func QuotaFail(scope, uid string, err error) {
 // 单独一个入口：它与"查询失败"不同 —— 上游没报错，只是我们没读到数。
 // 混成一条会让运维去查一个不存在的故障。
 func QuotaNoBalance(scope, uid string) {
-	Event(LevelWarn, scope, "quota.fail", "uid", uidShort(uid), "reason", QuotaReasonNoBalance)
+	// 同 QuotaFail：多账号按原因折叠成一行。
+	Coalesce(LevelWarn, scope, "quota.fail:"+scope+":"+QuotaReasonNoBalance, "",
+		"%s", eventLine("quota.fail", []any{"uid", uidShort(uid), "reason", QuotaReasonNoBalance}))
 }
 
 // uidShort 本包内转发 logbuf.ShortUID。

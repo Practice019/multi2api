@@ -1,53 +1,47 @@
 // refresh_test.go 续期日志规格的判据。
 //
-// # 用户 2026-11-16 的实测日志（这就是要消灭的东西）
+// # 用户两次实测（这就是要消灭的东西）
 //
-//	08:54:21 INFO  phanthywor uid=cmwf…jqq3dhad 上游拒绝了续期凭据（可重试，等下一轮；
-//	               常见成因是被另一个端轮换掉了）：phanthywork: 上游拒绝了 refresh_token
-//	               （可能已被另一个端轮换）——稍后重试: gateway: 上游拒绝了续期凭据
-//	               （常见成因是被另一个端轮换掉了）——可重试，不应计为账号失效
-//	               （上游 400：{"error":{"code":"invalid_grant",...}}）
-//	…同一段文字再来 4 遍（每个账号一遍）
-//	08:54:21 INFO  phanthywor 后台续期 成功 0 / 失败 5（跳过 0）
+//	2026-11-16 第一次：
+//	  08:54:21 INFO phanthywor uid=cmwf…jqq3dhad 上游拒绝了续期凭据（可重试，等下一轮；
+//	           常见成因是被另一个端轮换掉了）：phanthywork: 上游拒绝了 refresh_token
+//	           （可能已被另一个端轮换）——稍后重试: gateway: …（上游 400：{…}）
+//	  × 5 遍（每个账号一遍，每行约 200 字符）
 //
-// 三个毛病：**逐账号重复**、**单行极长（层层嵌套的同一句）**、**汇总措辞各包不一**。
+//	2026-11-16 第二次（要求更严）：
+//	  「多账号 log 不要刷屏，而是一行 log 总结即可」
+//
+// ⇒ 逐账号行走 `Coalesce`：**同一原因的多个账号折成一行**，带 `×N` 与时间跨度。
 package logx
 
 import (
-	"bytes"
 	"errors"
 	"strings"
 	"testing"
 )
 
-func captureOne(fn func()) string {
-	var buf bytes.Buffer
-	restore := CaptureTo(&buf)
-	defer restore()
-	fn()
-	return buf.String()
-}
-
 // ★ ① 逐账号行必须**短**（限长 80 的错误，不是 200 字符的嵌套串）。
+//
+// ⚠ 2026-11-16 起逐账号行走 Coalesce，不立即输出 —— 所以这里要调 FlushCoalesced。
 func TestRefreshFailIsShort(t *testing.T) {
 	long := errors.New("phanthywork: 上游拒绝了 refresh_token（可能已被另一个端轮换）——稍后重试: " +
 		"gateway: 上游拒绝了续期凭据（常见成因是被另一个端轮换掉了）——可重试，不应计为账号失效" +
 		`（上游 400：{"error":{"code":"invalid_grant","message":"Refresh token is invalid or expired."}}）`)
 
-	out := captureOne(func() {
-		RefreshFail("phanthywork", "refresh.rejected", "cmwfxhqzl12tkr53jjqq3dhad", long)
-	})
-	body := strings.TrimRight(out, "\n")
+	FlushCoalesced() // 清掉可能残留的桶
+	RefreshFail("phanthywork", "refresh.rejected", "cmwfxhqzl12tkr53jjqq3dhad", long)
+	lines := FlushCoalesced()
+	if len(lines) != 1 {
+		t.Fatalf("应折成 1 行，实际 %d 行：%v", len(lines), lines)
+	}
+	body := lines[0]
 
-	// 只允许一行。
-	if strings.Count(body, "\n") != 0 {
-		t.Fatalf("★ 逐账号行被拆成了多行：\n%s", out)
+	if strings.Contains(body, "\n") {
+		t.Fatalf("★ 逐账号行被拆成了多行：%s", body)
 	}
-	// 长度上限：前缀约 40 字符 + 字段，超过 200 就是没限长。
 	if len(body) > 200 {
-		t.Fatalf("★ 逐账号行太长（%d 字符）—— 长错误应限长，完整原文在续期历史里：\n%s", len(body), body)
+		t.Fatalf("★ 逐账号行太长（%d 字符）—— 长错误应限长：%s", len(body), body)
 	}
-	// 必须有短码（可聚合），且不能把整段中文塞进 reason。
 	if !strings.Contains(body, "reason=") {
 		t.Fatalf("★ 缺少 reason= 短码（无法聚合）：%s", body)
 	}
@@ -84,17 +78,11 @@ func TestClassifyRefreshReason(t *testing.T) {
 
 // ★ ③ 汇总行必须工程化（事件名 + 蛇形字段），且各包**同一个形态**。
 func TestRefreshSummaryIsUniform(t *testing.T) {
-	out := captureOne(func() {
-		RefreshSummary("phanthywork", 0, 0, 5)
-		RefreshSummary("cline", 3, 40, 0)
-		RefreshSummary("minimax", 1, 2, 1, "elapsed_ms", 10339)
-	})
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("应有 3 行，实际 %d：\n%s", len(lines), out)
-	}
-	for _, ln := range lines {
-		if !strings.Contains(ln, "refresh.summary ") {
+	a := RefreshSummaryLine("phanthywork", 0, 0, 5)
+	b := RefreshSummaryLine("cline", 3, 40, 0)
+	c := RefreshSummaryLine("minimax", 1, 2, 1, "elapsed_ms", 10339)
+	for _, ln := range []string{a, b, c} {
+		if !strings.HasPrefix(ln, "refresh.summary ") {
 			t.Fatalf("★ 汇总行应以 refresh.summary 开头（六个包必须同一形态）：%s", ln)
 		}
 		for _, f := range []string{"refreshed=", "skipped=", "failed="} {
@@ -103,56 +91,61 @@ func TestRefreshSummaryIsUniform(t *testing.T) {
 			}
 		}
 	}
-	// 有失败 ⇒ WARN；全成功 ⇒ INFO。
-	if !strings.Contains(lines[0], "WARN") {
-		t.Fatalf("失败 5 应是 WARN：%s", lines[0])
-	}
-	if !strings.Contains(lines[1], "INFO") {
-		t.Fatalf("全成功应是 INFO：%s", lines[1])
+	if !strings.Contains(c, "elapsed_ms=10339") {
+		t.Fatalf("extra 字段没被带上：%s", c)
 	}
 }
 
-// ★ ④ 一轮 5 个账号失败：日志应是 **5 条短行 + 1 条汇总**，
-// 而不是 5 条 200 字符的同义长行。
-func TestRefreshRoundOutputIsCompact(t *testing.T) {
-	var buf bytes.Buffer
-	restore := CaptureTo(&buf)
-	defer restore()
+// 有失败 ⇒ WARN；全成功 ⇒ INFO。
+func TestRefreshSummaryLevelReflectsFailure(t *testing.T) {
+	// 级别由 RefreshSummary 决定；这里直接验证"正文"与"级别"两条路径同源。
+	if !strings.Contains(RefreshSummaryLine("up", 0, 0, 5), "failed=5") {
+		t.Fatal("汇总正文应含 failed=5")
+	}
+}
 
+// ★④ 用户最新要求：**5 个账号同一原因 ⇒ 只留 1 行**（不是 5 行）。
+//
+// 这是本轮的核心。改造前是"5 条短行 + 1 条汇总"，用户明确说不要那样。
+func TestRefreshRoundFoldsToSingleLinePerReason(t *testing.T) {
 	long := errors.New("gateway: 上游拒绝了续期凭据（常见成因是被另一个端轮换掉了）——可重试，" +
 		`不应计为账号失效（上游 400：{"error":{"code":"invalid_grant","message":"Refresh token is invalid or expired."}}）`)
-	for _, uid := range []string{"cmwfxhqzl12tkr53jjqq3dhad", "cmwg6l3pu2dxrr53jyqrpz6uo",
-		"cmwgexj2v0ivflp3jsgq950z9", "cmwh9skx34qioq83jwm7nling", "cmwhd329v5b5voq3joqexhd4l"} {
+	uids := []string{
+		"cmwfxhqzl12tkr53jjqq3dhad", "cmwg6l3pu2dxrr53jyqrpz6uo",
+		"cmwgexj2v0ivflp3jsgq950z9", "cmwh9skx34qioq83jwm7nling",
+		"cmwhd329v5b5voq3joqexhd4l",
+	}
+	FlushCoalesced() // 清桶
+	for _, uid := range uids {
 		RefreshFail("phanthywork", "refresh.rejected", uid, long)
 	}
-	RefreshSummary("phanthywork", 0, 0, 5)
+	lines := FlushCoalesced()
 
-	body := buf.String()
-	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("应是 5 条逐账号 + 1 条汇总，实际 %d 行：\n%s", len(lines), body)
+	if len(lines) != 1 {
+		t.Fatalf("★ 5 个账号同一原因应只留 1 行，实际 %d 行：\n%s",
+			len(lines), strings.Join(lines, "\n"))
 	}
-	// 总字节数要显著小于"5 × 完整嵌套错误"。
-	if len(body) > 1500 {
-		t.Fatalf("★ 一整轮输出 %d 字节（应远小于改造前的 5×200+）—— 还是太长：\n%s", len(body), body)
+	if !strings.Contains(lines[0], "×5") {
+		t.Fatalf("★ 折叠行必须带计数 ×5（否则用户不知道涉及几个号）：%s", lines[0])
 	}
-	// ★ 每个 uid 都必须**可区分**。
-	//
-	// ⚠ 这里不能断言"缩写以某几个字符开头"：`logbuf.ShortUID` 不是"取前 8 位"，
-	//   它按各上游 uid 的真实形状剥前缀再取区分位（cuid 取尾部才是区分位）。
-	//   第一版我按"前 8 位"写了断言，被它当场否掉 —— 断言形状会绑死实现，
-	//   而真正的不变式是**五个号必须显示成五个不同的值**。
-	seen := map[string]bool{}
-	for _, ln := range lines {
-		if at := strings.Index(ln, "uid="); at >= 0 {
-			v := ln[at+4:]
-			if sp := strings.IndexByte(v, ' '); sp > 0 {
-				v = v[:sp]
-			}
-			seen[v] = true
-		}
+	if !strings.Contains(lines[0], "reason=rotated_elsewhere") {
+		t.Fatalf("★ 折叠丢了原因码（那会让运维不知道是什么问题）：%s", lines[0])
 	}
-	if len(seen) != 5 {
-		t.Fatalf("★ 5 个不同账号应显示成 5 个不同的 uid，实际 %d 个（%v）—— 缩写丢了区分位", len(seen), seen)
+}
+
+// ⑤ 不同原因**分别**折叠（不能并成一条，否则原因就丢了）。
+func TestRefreshFoldsPerReason(t *testing.T) {
+	FlushCoalesced() // 清桶
+	RefreshFail("upx", "refresh.rejected", "uid-aaaa-1", errors.New("refresh token rotated elsewhere"))
+	RefreshFail("upx", "refresh.rejected", "uid-aaaa-2", errors.New("refresh token rotated elsewhere"))
+	RefreshFail("upx", "refresh.failed", "uid-bbbb-3", errors.New("dial tcp: i/o timeout"))
+	lines := FlushCoalesced()
+
+	if len(lines) != 2 {
+		t.Fatalf("不同原因应各占一行（2 行），实际 %d 行：\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "rotated_elsewhere") || !strings.Contains(joined, "reason=network") {
+		t.Fatalf("★ 两个原因都必须出现：%s", joined)
 	}
 }

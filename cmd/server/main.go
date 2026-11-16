@@ -2355,6 +2355,24 @@ func main() {
 			"accounts", total, "available", healthy, "cooling", cooling, "disabled", disabled)
 	}
 	logx.Event(logx.LevelInfo, "boot", "app.started", "service", server.ServiceName)
+	// ★ 代理环境变量检测（2026-11-16 真实事故）。
+	//
+	// Go 的 http.Transport **只读这些环境变量**，不读 Windows 的 WinINET 注册表代理。
+	// 一旦它们被设置，**所有出站 HTTPS 都会走那个代理** —— 而代理对某些上游的 TLS
+	// 握手会直接失败，表现是 `Post "https://…": EOF`（不是超时、不是 4xx，
+	// 是一个看起来像"上游挂了"的 EOF）。
+	//
+	// 实测：一次部署时 shell 里有 HTTPS_PROXY（只为 git push 设的），
+	// Start-Process 起的服务继承了它 ⇒ codar 全部请求 EOF，而上游完全正常。
+	// 这种问题能吃掉半天 —— 所以启动时必须把它喊出来。
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+		if v := os.Getenv(k); v != "" {
+			logx.Eventf(logx.LevelWarn, "boot", "boot.proxy_env",
+				"检测到代理环境变量，所有出站 HTTPS 都会走它；若某上游报 EOF 而直连正常，先查这里",
+				"key", k, "value", v)
+			break
+		}
+	}
 	logx.Event(logx.LevelInfo, "boot", "app.endpoints", "console", uiOrigin(cfg.Listen)+"/ui", "api_base", uiOrigin(cfg.Listen)+"/v1")
 	for _, extra := range extraOrigins(cfg.Listen) {
 		log.Printf("  局域网   %s/ui   ← 从别的机器打开时要在地址后加 ?token=<管理令牌>", extra)
@@ -2374,7 +2392,7 @@ func main() {
 		//   ② 没配时必须说清「没有远程管理面」（否则"远程进不去"会被当成故障）
 		//   ③ 中文说明只允许出现在 msg=（工程化日志的唯一 CJK 位置）
 		logx.Eventf(logx.LevelInfo, "boot", "admin.token.not_printed",
-			"未打印，避免留在终端历史/日志里；它就在这个配置文件的顶层 admin_token 字段",
+			"未打印（避免留在终端历史）；在本文件顶层 admin_token 字段",
 			"config", *cfgPath)
 		logx.Event(logx.LevelDebug, "boot", "admin.token.hint",
 			"where", "本机打开控制台 → 「API 管理」→ 那一行显示它的掩码（可轮换）")

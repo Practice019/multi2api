@@ -100,7 +100,9 @@ func quotaFailReason(err error) (reason string, hint string) {
 		return "网络失败", "连不上上游，稍后会自动重试"
 	}
 	if m := upstreamCodeRe.FindStringSubmatch(err.Error()); m != nil {
-		return "上游拒绝", "业务码 " + m[1] + "：见同行的上游原文"
+		// ⚠ 不再写「见同行的上游原文」—— 原文就在同一个事件的 err= 字段里，
+		//   在 hint 里再指一次是纯冗余（用户要求 msg 精简）。
+		return "上游拒绝", "业务码 " + m[1]
 	}
 	return "回执异常", "上游响应不符合预期"
 }
@@ -151,8 +153,9 @@ func noteCacheMiss() {
 		logx.Eventf(logx.LevelInfo, "loomy", "quota.credit_gateway_only",
 			// ⚠ 这两句是**必需**的（既有判据钉着）：用户看到这条时要能立刻判断
 			//   「这是设计内正常情况」而不是「坏了」。删掉它们 = 把提示变成困惑。
-			"有账号的额度只能靠积分网关查（本机缓存只覆盖 1 个号）—— 这是设计内正常情况；"+
-				"若紧接着还有 quota 失败，那才是要看的",
+			// ⚠ 两句必须保留（既有判据钉着）：见 TestNoteCacheMissAggregates 的解释。
+			//   其余说明砍掉 —— 它们能从不带 msg 的字段与行为里读出来。
+			"有账号的额度只能靠积分网关查；这是设计内正常情况",
 			"accounts", n)
 	}
 }
