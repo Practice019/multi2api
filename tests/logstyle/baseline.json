@@ -1,6 +1,6 @@
 {
   "./cmd/codearts-doctor": 2,
-  "./cmd/server": 202,
+  "./cmd/server": 198,
   "./internal/account": 21,
   "./internal/admin": 62,
   "./internal/apikey": 10,

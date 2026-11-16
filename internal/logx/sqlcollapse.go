@@ -60,8 +60,16 @@ func collapseSQL(msg string) string {
 	kv := make([]any, 0, 8)
 
 	switch {
-	case strings.HasPrefix(first, "SLOW SQL"):
+	// ⚠ 用 Contains 而不是 HasPrefix：GORM 会在种类前加调用点路径 ——
+	//   实测首行是 `workbuddy2api/internal/store/log_daily.go:168 SLOW SQL >= 200ms`。
+	//   用 HasPrefix 会让它落进 default 分支，事件名变成毫无信息量的 `sql.log`，
+	//   而且 `SLOW SQL >= 200ms` 会漏进 sql= 字段里（我自己就是这么错了一版）。
+	case strings.Contains(first, "SLOW SQL"):
 		event = "sql.slow"
+		// 剥掉 `path/file.go:168 ` 前缀 —— 它已经进不了 scope，留着只是噪音。
+		if at := strings.Index(first, "SLOW SQL"); at > 0 {
+			first = first[at:]
+		}
 		if m := sqlThreshold.FindStringSubmatch(first); m != nil {
 			kv = append(kv, "threshold_ms", m[1])
 		}
